@@ -20,9 +20,7 @@ def carma_rms(alpha: JAXArray | NDArray, beta: JAXArray | NDArray) -> JAXArray:
 
 
 @jax.jit
-def carma_psd(
-    f: JAXArray | NDArray, arparams: JAXArray | NDArray, maparams: JAXArray | NDArray
-) -> JAXArray:
+def carma_psd(f, arparams, maparams):
     """
     Return a function that computes CARMA Power Spectral Density (PSD).
 
@@ -55,9 +53,7 @@ def carma_psd(
 
 
 @jax.jit
-def carma_acf(
-    t: JAXArray | NDArray, arparams: JAXArray | NDArray, maparams: JAXArray | NDArray
-) -> JAXArray:
+def carma_acf(f, arparams, maparams):
     """
     Return a function that computes the model autocorrelation function (ACF) of CARMA.
 
@@ -81,9 +77,7 @@ def carma_acf(
 
 
 @jax.jit
-def carma_sf(
-    t: JAXArray | NDArray, arparams: JAXArray | NDArray, maparams: JAXArray | NDArray
-) -> JAXArray:
+def carma_sf(t, arparams, maparams):
     """
     Return a function that computes the CARMA structure function (SF).
 
@@ -99,9 +93,7 @@ def carma_sf(
 
 
 @jax.jit
-def drw_psd(
-    f: JAXArray | NDArray, tau: JAXArray | float, amp: JAXArray | float
-) -> JAXArray:
+def drw_psd(f, tau, amp):
     """
     Return a function that computes DRW Power Spectral Density (PSD).
 
@@ -121,7 +113,7 @@ def drw_psd(
 
 
 @jax.jit
-def drw_acf(t: JAXArray | NDArray, tau: JAXArray | float) -> JAXArray:
+def drw_acf(t, tau):
     """
     Return a function that computes the DRW autocorrelation function (ACF).
 
@@ -137,9 +129,7 @@ def drw_acf(t: JAXArray | NDArray, tau: JAXArray | float) -> JAXArray:
 
 
 @jax.jit
-def drw_sf(
-    t: JAXArray | NDArray, tau: JAXArray | float, amp: JAXArray | float
-) -> JAXArray:
+def drw_sf(t, tau, amp):
     """
     Return a function that computes the structure function (SF) of DRW.
 
