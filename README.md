@@ -1,17 +1,10 @@
 # EzTaoX
 
-## How to run tests
-1. Install `pyenv` for managing multiple python versions
-2. Install `poetry` managing depencies
-3. Use `pyenv` to install multiple python versions with:
+## Installation
+- git clone
+- check out `preview` branch
+- install with:
 ```
-pyenv install 3.10 3.11 3.12 3.13
+python -m pip install -e .
 ```
-1. Activate multiple python versions
-```
-pyenv shell 3.10 3.11 3.12 3.13
-```
-1. Run tests
-```
-nox -s tests
-```
+- play with notebooks in the tutorial folder
