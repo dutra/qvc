@@ -26,7 +26,6 @@ from tinygp import kernels, solvers
 
 #print("Total device count:", jax.local_device_count())
 numpyro.set_host_device_count(30)
-
 jax.config.update("jax_enable_x64", True)
 
 import warnings
@@ -211,6 +210,7 @@ def fit_multiband(data):
     log_sigma_err = np.array([log_sigma_err, *(np.sqrt(log_amp_delta_err**2+log_sigma_err**2))])
 
     log_jitter = np.percentile(np.log10(np.exp(2*samples['log_jitter'])), 50, axis=0)
+    print(log_jitter)
 
     return dict(log_tau_rest=log_tau_rest,
                 log_tau_rest_err=log_tau_rest_err,
@@ -234,7 +234,7 @@ def process_quasar(i_data, n=0):
     print(f"Quasar {i}/{n} ({data['object_id']}): log_tau_rest={data['log_tau_rest']:.3f}±{data['log_tau_rest_err']:.3f}, log_sigma={data['log_sigma']}±{data['log_sigma_err']}", flush=True)
     return data
 
-def load_s82():
+def save_s82():
 
     s82_objs = []
 
@@ -304,6 +304,8 @@ def load_s82():
         data['mags'] = mags
         data['magerrs'] = magerrs
 
+        data['magerrs_mean'] = [np.mean(x) for x in magerrs.values() if len(x) > 0]
+
         s82_objs.append(data)
         
 
@@ -319,6 +321,7 @@ def load_s82():
             group.attrs['sdss_name'] = obj['sdss_name']
             group.attrs['log_lbol'] = obj['log_lbol']
             group.attrs['log_lbol_err'] = obj['log_lbol_err']
+            group.attrs['magerrs_mean'] = obj['magerrs_mean']
 
             for key in ['times', 'mags', 'magerrs']:
                 sub_group = group.create_group(key)
@@ -340,6 +343,7 @@ def load_s82_from_hdf5(file_path="s82_objs.h5"):
                 "sdss_name": group.attrs["sdss_name"],
                 "log_lbol": group.attrs["log_lbol"],
                 "log_lbol_err": group.attrs["log_lbol_err"],
+                "magerrs_mean": group.attrs["magerrs_mean"],
                 "times": {},
                 "mags": {},
                 "magerrs": {},
@@ -356,12 +360,14 @@ def load_s82_from_hdf5(file_path="s82_objs.h5"):
 
 if __name__ == '__main__':
 
-    #objs = load_s82()
-    objs = load_s82_from_hdf5()
+    #objs = save_s82()
+    objs = load_s82_from_hdf5(file_path="s82_objs_small.h5")
     print(f"Loaded {len(objs)} quasars from the dataset.")
-    # r = process_quasar(objs[0])
-    chunk_size = 1000
+    #r = process_quasar(objs[0])
+    chunk_size = 100
     for start_idx in range(0, len(objs), chunk_size):
+        print("========================================================================")
+        print(f"Processing chunk {start_idx // chunk_size + 1}/{(len(objs) + chunk_size - 1) // chunk_size}...")
         chunk = objs[start_idx:start_idx + chunk_size]
         ctx = get_context("spawn")  # Safer for JAX when using multiprocessing
         results = []
@@ -370,7 +376,9 @@ if __name__ == '__main__':
 
         quasar_list = [q for q in results if q is not None]
 
-        fields_to_save = ['i', 'object_id', 'sdss_name', 'z', 'log_lbol', 'log_lbol_err', 'log_tau_rest', 'log_tau_rest_err', 'log_sigma', 'log_sigma_err', 'log_jitter']
+        fields_to_save = ['i', 'object_id', 'sdss_name', 'z', 'log_lbol', 'log_lbol_err', 
+                          'log_tau_rest', 'log_tau_rest_err', 'log_sigma', 'log_sigma_err', 'log_jitter',
+                          'magerrs_mean']
         filtered_quasar_list = [{field: q[field] for field in fields_to_save} for q in quasar_list]
 
         df = pd.DataFrame.from_records(filtered_quasar_list)
@@ -385,7 +393,7 @@ if __name__ == '__main__':
     # ctx = get_context("spawn")  # Safer for JAX when using multiprocessing
     # results = []
     # with ctx.Pool(processes=15) as pool:
-    #     results = pool.map(partial(process_quasar, n=len(objs[500:1000])), enumerate(objs[500:1000]))
+    #     results = pool.map(partial(process_quasar, n=len(objs[0:10])), enumerate(objs[0:10]))
 
 
     # quasar_list = [q for q in results if q is not None]
@@ -394,4 +402,4 @@ if __name__ == '__main__':
     # filtered_quasar_list = [{field: q[field] for field in fields_to_save} for q in quasar_list]
 
     # df = pd.DataFrame.from_records(filtered_quasar_list)
-    # df.to_csv('s82_multiband_fitted_0_1000.csv', index=False)
+    # df.to_csv('s82_multiband_fitted_0_10.csv', index=False)
