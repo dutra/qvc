@@ -6,6 +6,7 @@ os.environ["NUMEXPR_NUM_THREADS"] = "32"
 os.environ["OPENBLAS_NUM_THREADS"] = "32"
 os.environ["VECLIB_MAXIMUM_THREADS"] = "32"
 os.environ["NUMBA_NUM_THREADS"] = "32"
+os.environ["JAX_TRACEBACK_FILTERING"] = "off"
 
 from functools import partial
 import numpy as np
@@ -119,6 +120,14 @@ def fit_multiband(data):
     all_magerrs = np.concatenate([magerrs[b] for b in bands])
     band_idx = np.concatenate([np.full(len(times[b]), i) for i, b in enumerate(bands)])
 
+    if len(all_times) == 0 or len(all_mags) == 0 or len(all_magerrs) == 0:
+        print(f"No magnitudes or errors for quasar {data['object_id']}, skipping.", flush=True)
+        return None
+    # Check for NaNs
+    if np.all(~np.isfinite(all_times)) or np.all(~np.isfinite(all_mags)) or np.all(~np.isfinite(all_magerrs)):
+        print(f"NaN values ({len(~np.isfinite(all_mags))}/{len(all_mags)}) found in data for quasar {data['object_id']}, skipping.", flush=True)
+        return None
+
     # Sort in time
     sort_idx = np.argsort(all_times)
     all_times = all_times[sort_idx]
@@ -201,10 +210,13 @@ def fit_multiband(data):
     log_sigma = np.array([log_sigma, *(log_amp_delta+log_sigma)])
     log_sigma_err = np.array([log_sigma_err, *(np.sqrt(log_amp_delta_err**2+log_sigma_err**2))])
 
+    log_jitter = np.percentile(np.log10(np.exp(2*samples['log_jitter'])), 50, axis=0)
+
     return dict(log_tau_rest=log_tau_rest,
                 log_tau_rest_err=log_tau_rest_err,
                 log_sigma=log_sigma,
-                log_sigma_err=log_sigma_err)
+                log_sigma_err=log_sigma_err,
+                log_jitter=log_jitter)
 
 
 def process_quasar(i_data, n=0):
@@ -254,17 +266,20 @@ def load_s82():
         data['sdss_name'] = fits_data['SDSS_NAME'][j]  # Extract SDSS_NAME
         data['log_lbol'] = fits_data['LOGLBOL'][j]  # Extract log Lbol values
         data["log_lbol_err"] = fits_data['LOGLBOL_ERR'][j]  # Extract log Lbol error values
-        
+        data['log_mbh'] = fits_data['LOGMBH'][j]  # Extract log MBH values
+        data['log_mbh_err'] = fits_data['LOGMBH_ERR'][j]  # Extract log MBH error values
+        data['log_ledd_ratio'] = fits_data['LOGLEDD_RATIO'][j]  # Extract log L/edd values
+        data['log_ledd_ratio_err'] = fits_data['LOGLEDD_RATIO_ERR'][j]  # Extract log L/edd error values
+        data['z_sys_lines'] = fits_data['ZSYS_LINES'][j]  # Extract redshift (Z_SYS)
+        data['z_sys_lines_err'] = fits_data['ZSYS_LINES_ERR'][j]  # Extract error in redshift (Z_SYS)
         try:
-            sdss_lc = sdss[sdss.objectId == obj.objectId].copy()
+            sdss_lc = sdss[sdss.objectId == int(obj.objectId)].copy()
             ps1_lc = ps1[ps1.ps1objID == int(obj.ps1objID)].copy()
             ztf_lc = ztf[ztf.ps1objID == int(obj.ps1objID)].copy()
         except:
-            print(i, flush=True)
-
+            continue
 
         data['z'] = obj['Z_SYS']  # Redshift
-
 
         times = {}
         mags = {}
@@ -290,6 +305,7 @@ def load_s82():
         data['magerrs'] = magerrs
 
         s82_objs.append(data)
+        
 
     hdul.close()
     
@@ -344,17 +360,38 @@ if __name__ == '__main__':
     objs = load_s82_from_hdf5()
     print(f"Loaded {len(objs)} quasars from the dataset.")
     # r = process_quasar(objs[0])
+    chunk_size = 1000
+    for start_idx in range(0, len(objs), chunk_size):
+        chunk = objs[start_idx:start_idx + chunk_size]
+        ctx = get_context("spawn")  # Safer for JAX when using multiprocessing
+        results = []
+        with ctx.Pool(processes=15) as pool:
+            results = pool.map(partial(process_quasar, n=len(chunk)), enumerate(chunk))
 
-    ctx = get_context("spawn")  # Safer for JAX when using multiprocessing
-    results = []
-    with ctx.Pool(processes=15) as pool:
-        results = pool.map(partial(process_quasar, n=len(objs[:200])), enumerate(objs[:200]))
+        quasar_list = [q for q in results if q is not None]
+
+        fields_to_save = ['i', 'object_id', 'sdss_name', 'z', 'log_lbol', 'log_lbol_err', 'log_tau_rest', 'log_tau_rest_err', 'log_sigma', 'log_sigma_err', 'log_jitter']
+        filtered_quasar_list = [{field: q[field] for field in fields_to_save} for q in quasar_list]
+
+        df = pd.DataFrame.from_records(filtered_quasar_list)
+        output_file = 's82_multiband_fitted.csv'
+        if os.path.exists(output_file):
+            existing_df = pd.read_csv(output_file)
+            merged_df = pd.concat([existing_df, df], ignore_index=True)
+            merged_df.to_csv(output_file, index=False)
+        else:
+            df.to_csv(output_file, index=False)
+
+    # ctx = get_context("spawn")  # Safer for JAX when using multiprocessing
+    # results = []
+    # with ctx.Pool(processes=15) as pool:
+    #     results = pool.map(partial(process_quasar, n=len(objs[500:1000])), enumerate(objs[500:1000]))
 
 
-    quasar_list = [q for q in results if q is not None]
+    # quasar_list = [q for q in results if q is not None]
 
-    fields_to_save = ['i', 'object_id', 'sdss_name', 'z', 'log_lbol', 'log_lbol_err', 'log_tau_rest', 'log_tau_rest_err', 'log_sigma', 'log_sigma_err']
-    filtered_quasar_list = [{field: q[field] for field in fields_to_save} for q in quasar_list]
+    # fields_to_save = ['i', 'object_id', 'sdss_name', 'z', 'log_lbol', 'log_lbol_err', 'log_tau_rest', 'log_tau_rest_err', 'log_sigma', 'log_sigma_err', 'log_jitter']
+    # filtered_quasar_list = [{field: q[field] for field in fields_to_save} for q in quasar_list]
 
-    df = pd.DataFrame.from_records(filtered_quasar_list)
-    df.to_csv('s82_multiband_fitted_0_200.csv', index=False)
+    # df = pd.DataFrame.from_records(filtered_quasar_list)
+    # df.to_csv('s82_multiband_fitted_0_1000.csv', index=False)
