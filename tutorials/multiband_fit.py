@@ -173,10 +173,10 @@ def fit_multiband(data):
         if i < window_size or i >= len(y) - window_size:
             continue
         window = y[i - window_size:i + window_size + 1]
-        if np.abs(y[i] - np.nanmean(window)) > 3 * st.median_abs_deviation(window):
+        if jnp.abs(y[i] - jnp.nanmean(window)) > 3 * st.median_abs_deviation(window):
             mask_outlier[i] = False
 
-    X = (all_times[mask_outlier], band_idx[mask_outlier])
+    X = (jnp.array(all_times[mask_outlier]) - jnp.min(all_times[mask_outlier]), jnp.array(band_idx[mask_outlier]))
     y = jnp.array(y[mask_outlier])
     yerr = jnp.array(yerr[mask_outlier])
     t = jnp.array(t[mask_outlier])
@@ -214,9 +214,9 @@ def fit_multiband(data):
 
     mcmc = MCMC(
         nuts_kernel,
-        num_warmup=250,
-        num_samples=250,
-        num_chains=1,
+        num_warmup=500,
+        num_samples=500,
+        num_chains=2,
         progress_bar=False,
     )
 
@@ -224,35 +224,54 @@ def fit_multiband(data):
     samples = mcmc.get_samples(group_by_chain=False)
     diagnostics = mcmc.get_extra_fields()
     if np.all(diagnostics['diverging']):
+        print(f"Diverging MCMC for quasar {data['object_id']}, skipping.", flush=True)
         return None
     
     save_combined_plot(samples, m1, X, y, yerr, band_idx[mask_outlier], {0: 'g', 1: 'r', 2: 'i'}, data['object_id'])
 
     log_tau_rest = np.log10(np.exp(samples['log_kernel_param'][:, 0])/(1+data['z']))
-    lower, median, upper = np.percentile(log_tau_rest, [16, 50, 84], axis=0)
+    lower, median, upper = np.percentile(log_tau_rest, [16, 50, 84])
     log_tau_rest_err = 0.5 * (upper - lower) # symmetric uncertainties
     log_tau_rest = median
 
     log_sigma = np.log10(np.exp(samples['log_kernel_param'][:, 1]))
-    lower, median, upper = np.percentile(log_sigma, [16, 50, 84], axis=0)
+    lamdba_RF = np.array([4770, 6231, 7625])/(1 + data['z'])    
+    beta = samples['beta']
+    log_sigma_band = np.array([log_sigma + beta*np.log10(lamdba_RF[b]/4000) for b in range(3)])
+    log_sigma_band = log_sigma_band.T
+
+    lower, median, upper = np.percentile(beta, [16, 50, 84])
+    beta_err = 0.5 * (upper - lower) # symmetric uncertainties
+    beta = median
+
+    lower, median, upper = np.percentile(log_sigma_band, [16, 50, 84], axis=0)
+    log_sigma_band_err = 0.5 * (upper - lower) # symmetric uncertainties
+    log_sigma_band = median
+
+    lower, median, upper = np.percentile(log_sigma, [16, 50, 84])
     log_sigma_err = 0.5 * (upper - lower) # symmetric uncertainties
     log_sigma = median
     
-    log_amp_delta = np.log10(np.exp(samples['log_amp_delta']))
-    lower, median, upper = np.percentile(log_amp_delta, [16, 50, 84], axis=0)
-    log_amp_delta_err = 0.5 * (upper - lower) # symmetric uncertainties
-    log_amp_delta = median
+    # log_amp_delta = np.log10(np.exp(samples['log_amp_delta']))
+    # lower, median, upper = np.percentile(log_amp_delta, [16, 50, 84], axis=0)
+    # log_amp_delta_err = 0.5 * (upper - lower) # symmetric uncertainties
+    # log_amp_delta = median
 
-    log_sigma = np.array([log_sigma, *(log_amp_delta+log_sigma)])
-    log_sigma_err = np.array([log_sigma_err, *(np.sqrt(log_amp_delta_err**2+log_sigma_err**2))])
+    # log_sigma = np.array([log_sigma, *(log_amp_delta+log_sigma)])
+    # log_sigma_err = np.array([log_sigma_err, *(np.sqrt(log_amp_delta_err**2+log_sigma_err**2))])
 
     log_jitter = np.percentile(np.log10(np.exp(2*samples['log_jitter'])), 50, axis=0)
 
-    return dict(log_tau_rest=log_tau_rest,
-                log_tau_rest_err=log_tau_rest_err,
-                log_sigma=log_sigma,
-                log_sigma_err=log_sigma_err,
-                log_jitter=log_jitter)
+    d = dict(log_tau_rest=log_tau_rest,
+            log_tau_rest_err=log_tau_rest_err,
+            beta=beta,
+            beta_err=beta_err,
+            log_sigma=log_sigma,
+            log_sigma_err=log_sigma_err,
+            log_sigma_band=log_sigma_band,
+            log_sigma_band_err=log_sigma_band_err,
+            log_jitter=log_jitter)
+    return d
 
 
 def process_quasar(i_data, n=0):
@@ -341,15 +360,15 @@ def save_s82(file_path):
 
     # Find elements in cat where objectId exists in the list of objectId of sdss
     sdss_object_ids = set(sdss.objectId)
-    sdss_object_ids = [
+    #sdss_object_ids = [
     # log10_sigma > 1    
-    1384141, 1384142, 1384145, 1384146, 1384147, 1384148, 1384151, 1384153, 1384156, 1384157, 1384160, 1384165, 1384166, 1384171, 1384172,
+    #1384141, 1384142, 1384145, 1384146, 1384147, 1384148, 1384151, 1384153, 1384156, 1384157, 1384160, 1384165, 1384166, 1384171, 1384172,
     # random sample
-    1385090, 1385694, 1384550, 1384780, 1385083, 1384786, 1385298, 1384985, 1384894, 1385218, 1384922, 1384773, 1385567, 1385607, 1384291]
-    sdss_object_ids = [str(obj_id) for obj_id in sdss_object_ids]
+    #1385090, 1385694, 1384550, 1384780, 1385083, 1384786, 1385298, 1384985, 1384894, 1385218, 1384922, 1384773, 1385567, 1385607, 1384291]
+    #sdss_object_ids = [str(obj_id) for obj_id in sdss_object_ids]
     matching_indices = cat[cat.objectId.isin(sdss_object_ids)].index
     cat = cat.loc[matching_indices]
-    #cat = cat[:1000]
+    #cat = cat[:2000]
 
     print("Len cat: ", len(cat))
 
@@ -389,7 +408,7 @@ def save_s82(file_path):
                 ps1_lc[ps1_lc.filterID == filters[band]].psfMag.values + offset if not ps1_lc.empty else [],
                 ztf_lc[ztf_lc.filterID == filters[band]].mag.values + offset if not ztf_lc.empty else []
             ])
-            mags[band] = mags[band] - np.mean(mags[band])  # Center the magnitudes
+            mags[band] = mags[band] - np.nanmean(mags[band])  # Center the magnitudes
 
             magerrs[band] = np.concatenate([
                 sdss_lc[sdss_lc.filterID == filters[band]].psMagErr_p3.values if not sdss_lc.empty else [],
@@ -503,22 +522,23 @@ def populate_sdss_fields(s82_objs):
 
 if __name__ == '__main__':
 
-    #objs = save_s82(file_path="s82_objs_sdss_selected.h5")
+    objs = save_s82(file_path="data/s82_objs_sdss.h5")
     #sys.exit("Exiting the program as requested.")
 
-    objs = load_s82_from_hdf5(file_path="s82_objs_sdss_selected.h5")
-    filtered_objs = [obj for obj in objs if int(obj['object_id']) in [
+    objs = load_s82_from_hdf5(file_path="data/s82_objs_sdss.h5")
+    #filtered_objs = [obj for obj in objs if int(obj['object_id']) in [
     # log10_sigma > 1    
-    1384141, 1384142, 1384145, 1384146, 1384147, 1384148, 1384151, 1384153, 1384156, 1384157, 1384160, 1384165, 1384166, 1384171, 1384172,
+    #1384141, 1384142, 1384145, 1384146, 1384147, 1384148, 1384151, 1384153, 1384156, 1384157, 1384160, 1384165, 1384166, 1384171, 1384172,
     # random sample
-    1385090, 1385694, 1384550, 1384780, 1385083, 1384786, 1385298, 1384985, 1384894, 1385218, 1384922, 1384773, 1385567, 1385607, 1384291
-    ]]
-    #objs = objs[:1000]
+    #1385090, 1385694, 1384550, 1384780, 1385083, 1384786, 1385298, 1384985, 1384894, 1385218, 1384922, 1384773, 1385567, 1385607, 1384291
+    #1385607, 1384894, 1385298
+    #]]
+    #objs = objs[:1]
     print(f"Loaded {len(objs)} quasars from the dataset.")
     objs = populate_sdss_fields(objs)
     print(f"Populated {len(objs)} quasars with SDSS data.")
 
-    #r = process_quasar(objs[0])
+    #r = process_quasar((0, objs[0]), n=1)
     #sys.exit("Exiting the program as requested.")
 
     chunk_size = 500
@@ -530,36 +550,19 @@ if __name__ == '__main__':
         ctx = get_context("spawn")  # Safer for JAX when using multiprocessing
         results = []
 
-        with ctx.Pool(processes=30) as pool:
+        with ctx.Pool(processes=15) as pool:
             results = pool.map(partial(process_quasar, n=len(chunk)), enumerate(chunk))
-
-        sys.exit("LC and fits were saved into folder light_curves_fits.")
 
         quasar_list = [q for q in results if q is not None]
 
         fields_to_filter = ['times', 'mags', 'magerrs']
         filtered_quasar_list = [{k: v for k, v in q.items() if k not in fields_to_filter} for q in quasar_list]
-        #filtered_quasar_list = [{field: q[field] for !(field in fields_to_filter)} for q in quasar_list]
 
         df = pd.DataFrame.from_records(filtered_quasar_list)
-        output_file = 's82_multiband_fitted_sdss.csv'
+        output_file = 'data/s82_multiband_fitted_sdss.csv'
         if os.path.exists(output_file):
             existing_df = pd.read_csv(output_file)
             merged_df = pd.concat([existing_df, df], ignore_index=True)
             merged_df.to_csv(output_file, index=False)
         else:
             df.to_csv(output_file, index=False)
-
-    # ctx = get_context("spawn")  # Safer for JAX when using multiprocessing
-    # results = []
-    # with ctx.Pool(processes=15) as pool:
-    #     results = pool.map(partial(process_quasar, n=len(objs[0:10])), enumerate(objs[0:10]))
-
-
-    # quasar_list = [q for q in results if q is not None]
-
-    # fields_to_save = ['i', 'object_id', 'sdss_name', 'z', 'log_lbol', 'log_lbol_err', 'log_tau_rest', 'log_tau_rest_err', 'log_sigma', 'log_sigma_err', 'log_jitter']
-    # filtered_quasar_list = [{field: q[field] for field in fields_to_save} for q in quasar_list]
-
-    # df = pd.DataFrame.from_records(filtered_quasar_list)
-    # df.to_csv('s82_multiband_fitted_0_10.csv', index=False)
