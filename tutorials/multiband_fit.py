@@ -14,6 +14,8 @@ import matplotlib.pyplot as plt
 import pandas as pd
 from tqdm import tqdm, trange
 
+import scipy.stats as st
+
 import jax
 import jax.numpy as jnp
 
@@ -54,7 +56,7 @@ import h5py
 import sys
 
 # define params
-zero_mean = True
+zero_mean = False
 has_jitter = True
 has_lag = True
 
@@ -151,9 +153,24 @@ def fit_multiband(data):
     # Define X, y, yerr, t
     # X = (all_times, band_idx)
     X = (jnp.array(all_times)-jnp.min(all_times), jnp.array(band_idx))
-    y = jnp.array(all_mags)
-    yerr = jnp.array(all_magerrs)
-    t = jnp.array(all_times)
+    y = np.array(all_mags)
+    yerr = np.array(all_magerrs)
+    t = np.array(all_times)
+
+    # Reject outliers in moving window
+    window_size = 20
+    mask_outlier = np.ones(len(y), dtype=bool)
+    for i in range(len(y)):
+        if i < window_size or i >= len(y) - window_size:
+            continue
+        window = y[i - window_size:i + window_size + 1]
+        if np.abs(y[i] - np.nanmean(window)) > 3 * st.median_abs_deviation(window):
+            mask_outlier[i] = False
+
+    X = (all_times[mask_outlier], band_idx[mask_outlier])
+    y = jnp.array(y[mask_outlier])
+    yerr = jnp.array(yerr[mask_outlier])
+    t = jnp.array(t[mask_outlier])
 
     # define kernel
     initial_drw_params = {"log_kernel_param": jnp.log(np.array([100.0, 0.35]))}
@@ -193,7 +210,7 @@ def fit_multiband(data):
     if np.all(diagnostics['diverging']):
         return None
     
-    save_combined_plot(samples, m1, X, y, yerr, band_idx, {0: 'g', 1: 'r', 2: 'i'}, data['object_id'])
+    save_combined_plot(samples, m1, X, y, yerr, band_idx[mask_outlier], {0: 'g', 1: 'r', 2: 'i'}, data['object_id'])
 
     log_tau_rest = np.log10(np.exp(samples['log_kernel_param'][:, 0])/(1+data['z']))
     lower, median, upper = np.percentile(log_tau_rest, [16, 50, 84], axis=0)
@@ -259,32 +276,27 @@ def save_lc_plot(bands, times, mags, magerrs, object_id):
 
 
 def save_combined_plot(samples, model, X, y, yerr, band_idx, band_idx_map, object_id):
-    fig, ax = plt.subplots(2, 1, figsize=(12, 10), sharex=True)
+    fig, ax = plt.subplots(1, 1, figsize=(12, 10), sharex=True)
 
     t = X[0]
+    colors = ['b', 'g', 'r']
     for n in np.unique(band_idx):
         m = band_idx == n
         # Plot the observed data
-        ax[0].errorbar(t[m], y[m], yerr=yerr[m], fmt='o', label=f'{band_idx_map[n]}-band', alpha=0.7)
+        ax.errorbar(t[m], y[m], yerr=yerr[m], fmt='o', label=f'{band_idx_map[n]}-band', alpha=0.7, color=colors[n])
         # Generate test times for predictions
         t_test = np.linspace(t.min(), t.max(), 1000)
         # Compute predictions using the model
         posterior_median = {k: jnp.median(v, axis=0) for k, v in samples.items()}
         mu, std = model.pred(posterior_median, (t_test, np.full_like(t_test, n, dtype=int)))
         # Plot the predictions
-        ax[1].plot(t_test, mu, label=f'{band_idx_map[n]}-band', alpha=0.7)
-        ax[1].fill_between(t_test, mu - std, mu + std, alpha=0.3, label=f'{band_idx_map[n]}-band')
+        ax.plot(t_test, mu, label=f'{band_idx_map[n]}-band', alpha=0.7, color=colors[n])
+        ax.fill_between(t_test, mu - std, mu + std, alpha=0.3, label=f'{band_idx_map[n]}-band', color=colors[n])
 
-    ax[0].set_ylabel('Magnitude (Observed)', fontsize=14)
-    ax[0].invert_yaxis()  # Magnitudes are brighter when lower
-    ax[0].legend(loc='upper right')
-    ax[0].set_title(f'Light Curve for Object {object_id}', fontsize=16)
-
-    ax[1].set_xlabel('Time (MJD)', fontsize=14)
-    ax[1].set_ylabel('Magnitude (Fitted)', fontsize=14)
-    ax[1].invert_yaxis()  # Magnitudes are brighter when lower
-    ax[1].legend(loc='upper right')
-    ax[1].set_title(f'Fitted Light Curve for Object {object_id}', fontsize=16)
+    ax.set_ylabel('Magnitude (Observed)', fontsize=14)
+    ax.invert_yaxis()  # Magnitudes are brighter when lower
+    ax.legend(loc='upper right')
+    ax.set_title(f'Light Curve for Object {object_id}', fontsize=16)
 
     plt.tight_layout()
 
