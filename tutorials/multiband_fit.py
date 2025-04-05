@@ -19,6 +19,7 @@ import scipy.stats as st
 import jax
 import jax.numpy as jnp
 
+
 import numpyro
 from numpyro import infer
 from numpyro.infer import MCMC, NUTS, Predictive
@@ -55,6 +56,9 @@ from multiprocessing import Pool, get_context
 import h5py
 import sys
 
+from tinygp.helpers import JAXArray
+
+
 # define params
 zero_mean = False
 has_jitter = True
@@ -69,6 +73,7 @@ def initSampler(key, nSample, nBand=3):
     meanSampler = UniformInit(nBand, [-1, 1])
     logAmpDeltaSampler = UniformInit(nBand-1, [-2, 0.0])
     logJitterSampler = UniformInit(nBand, [-20, -5])
+    betaSampler = UniformInit(1, [0, 1])
 
     # kernel init
     #kernelSampler = DRWInit([jnp.log(1 / 1000), jnp.log(1)], [jnp.log(0.05), 0.0])
@@ -80,6 +85,7 @@ def initSampler(key, nSample, nBand=3):
         "mean": meanSampler(subkeys[2], nSample),
         "lag": lagSampler(subkeys[3], nSample),
         "log_jitter": logJitterSampler(subkeys[4], nSample),
+        "beta": betaSampler(subkeys[5], nSample),
     }
 def numpyro_model(X, yerr, y=None, bestP=None):
     # kernel param
@@ -101,6 +107,8 @@ def numpyro_model(X, yerr, y=None, bestP=None):
     
     mean = numpyro.sample("mean", dist.Normal(bestP['mean'], 0.1))
 
+    beta = numpyro.sample("beta", dist.Normal(0.0, 1.0))
+
     # kernel
     k = kernels.quasisep.Exp(*jnp.exp(log_kernel_param))
     m1 = MultiVarModel(X, y, yerr, k, zero_mean=zero_mean, has_jitter=has_jitter, has_lag=has_lag)
@@ -111,6 +119,7 @@ def numpyro_model(X, yerr, y=None, bestP=None):
         "lag": lag,
         "mean": mean,
         "log_jitter": log_jitter,
+        "beta": beta
     }
     m1.sample(sample_params)
 
@@ -176,8 +185,15 @@ def fit_multiband(data):
     initial_drw_params = {"log_kernel_param": jnp.log(np.array([100.0, 0.35]))}
     k = kernels.quasisep.Exp(*jnp.exp(initial_drw_params["log_kernel_param"]))
 
+    # Override MultiVarModel
+    class MyMultiVarModel(MultiVarModel):
+        def amp_transform(self, params: dict[str, JAXArray]) -> JAXArray:
+            # gri central wavelengths
+            lamdba_RF = np.array([4770, 6231, 7625])/(1 + data['z'])
+            return jnp.array([params["log_kernel_param"][1] - params["beta"]*np.log10(lamdba_RF[b]/4000) for b in range(3)])
+
     # define model
-    m1 = MultiVarModel(
+    m1 = MyMultiVarModel(
         X, y, yerr, k, zero_mean=zero_mean, has_jitter=has_jitter, has_lag=has_lag
     )
     bestP, logProb = fit(model=m1, 
