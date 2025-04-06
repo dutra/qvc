@@ -64,6 +64,14 @@ zero_mean = False
 has_jitter = True
 has_lag = True
 
+# Override MultiVarModel
+class MyMultiVarModel(MultiVarModel):
+    def amp_transform(self, params: dict[str, JAXArray]) -> JAXArray:
+        lamdba_RF = np.array([4770, 6231, 7625])
+        b = params["beta"] # 
+        params["log_amp_delta"] = jnp.array([b*np.log(lamdba_RF[1]/4770), b*np.log(lamdba_RF[2]/4770)])
+        return jnp.insert(jnp.atleast_1d(params["log_amp_delta"]), 0, 0.0)
+
 def initSampler(key, nSample, nBand=3):
     # split keys
     subkeys = jax.random.split(key, 10)
@@ -73,7 +81,7 @@ def initSampler(key, nSample, nBand=3):
     meanSampler = UniformInit(nBand, [-1, 1])
     logAmpDeltaSampler = UniformInit(nBand-1, [-2, 0.0])
     logJitterSampler = UniformInit(nBand, [-20, -5])
-    betaSampler = UniformInit(1, [0, 1])
+    betaSampler = UniformInit(1, [-2.0, 0.0])
 
     # kernel init
     #kernelSampler = DRWInit([jnp.log(1 / 1000), jnp.log(1)], [jnp.log(0.05), 0.0])
@@ -107,11 +115,11 @@ def numpyro_model(X, yerr, y=None, bestP=None):
     
     mean = numpyro.sample("mean", dist.Normal(bestP['mean'], 0.1))
 
-    beta = numpyro.sample("beta", dist.Normal(0.0, 1.0))
+    beta = numpyro.sample("beta", dist.Normal(bestP['beta'], 10.0))
 
     # kernel
     k = kernels.quasisep.Exp(*jnp.exp(log_kernel_param))
-    m1 = MultiVarModel(X, y, yerr, k, zero_mean=zero_mean, has_jitter=has_jitter, has_lag=has_lag)
+    m1 = MyMultiVarModel(X, y, yerr, k, zero_mean=zero_mean, has_jitter=has_jitter, has_lag=has_lag)
 
     sample_params = {
         "log_kernel_param": log_kernel_param,
@@ -119,7 +127,7 @@ def numpyro_model(X, yerr, y=None, bestP=None):
         "lag": lag,
         "mean": mean,
         "log_jitter": log_jitter,
-        "beta": beta
+        "beta": beta,
     }
     m1.sample(sample_params)
 
@@ -185,12 +193,6 @@ def fit_multiband(data):
     initial_drw_params = {"log_kernel_param": jnp.log(np.array([100.0, 0.35]))}
     k = kernels.quasisep.Exp(*jnp.exp(initial_drw_params["log_kernel_param"]))
 
-    # Override MultiVarModel
-    class MyMultiVarModel(MultiVarModel):
-        def amp_transform(self, params: dict[str, JAXArray]) -> JAXArray:
-            # gri central wavelengths
-            lamdba_RF = np.array([4770, 6231, 7625])/(1 + data['z'])
-            return jnp.array([params["log_kernel_param"][1] - params["beta"]*np.log10(lamdba_RF[b]/4000) for b in range(3)])
 
     # define model
     m1 = MyMultiVarModel(
@@ -234,31 +236,25 @@ def fit_multiband(data):
     log_tau_rest_err = 0.5 * (upper - lower) # symmetric uncertainties
     log_tau_rest = median
 
-    log_sigma = np.log10(np.exp(samples['log_kernel_param'][:, 1]))
-    lamdba_RF = np.array([4770, 6231, 7625])/(1 + data['z'])    
     beta = samples['beta']
-    log_sigma_band = np.array([log_sigma + beta*np.log10(lamdba_RF[b]/4000) for b in range(3)])
-    log_sigma_band = log_sigma_band.T
+
+    log_sigma = np.log10(np.exp(samples['log_kernel_param'][:, 1]))
+    lambda_RF = 4000/(1 + data['z'])
+    log_sigma_RF = log_sigma + beta*np.log(lambda_RF/4770)
+
+    lower, median, upper = np.percentile(log_sigma_RF, [16, 50, 84])
+    log_sigma_RF_err = 0.5 * (upper - lower) # symmetric uncertainties
+    log_sigma_RF = median
 
     lower, median, upper = np.percentile(beta, [16, 50, 84])
     beta_err = 0.5 * (upper - lower) # symmetric uncertainties
     beta = median
 
-    lower, median, upper = np.percentile(log_sigma_band, [16, 50, 84], axis=0)
-    log_sigma_band_err = 0.5 * (upper - lower) # symmetric uncertainties
-    log_sigma_band = median
+    log_amp_delta = np.log10(np.exp(samples['log_amp_delta']))
+    lower, median, upper = np.percentile(log_amp_delta, [16, 50, 84], axis=0)
 
-    lower, median, upper = np.percentile(log_sigma, [16, 50, 84])
-    log_sigma_err = 0.5 * (upper - lower) # symmetric uncertainties
-    log_sigma = median
-    
-    # log_amp_delta = np.log10(np.exp(samples['log_amp_delta']))
-    # lower, median, upper = np.percentile(log_amp_delta, [16, 50, 84], axis=0)
-    # log_amp_delta_err = 0.5 * (upper - lower) # symmetric uncertainties
-    # log_amp_delta = median
-
-    # log_sigma = np.array([log_sigma, *(log_amp_delta+log_sigma)])
-    # log_sigma_err = np.array([log_sigma_err, *(np.sqrt(log_amp_delta_err**2+log_sigma_err**2))])
+    log_sigma_band = np.array([log_sigma, *(log_amp_delta+log_sigma)])
+    log_sigma_band_err = np.array([log_sigma_err, *(np.sqrt(log_amp_delta_err**2+log_sigma_err**2))])
 
     log_jitter = np.percentile(np.log10(np.exp(2*samples['log_jitter'])), 50, axis=0)
 
@@ -266,8 +262,8 @@ def fit_multiband(data):
             log_tau_rest_err=log_tau_rest_err,
             beta=beta,
             beta_err=beta_err,
-            log_sigma=log_sigma,
-            log_sigma_err=log_sigma_err,
+            log_sigma=log_sigma_RF,
+            log_sigma_err=log_sigma_RF_err,
             log_sigma_band=log_sigma_band,
             log_sigma_band_err=log_sigma_band_err,
             log_jitter=log_jitter)
