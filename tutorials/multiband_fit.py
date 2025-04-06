@@ -57,6 +57,7 @@ import h5py
 import sys
 
 from tinygp.helpers import JAXArray
+import corner
 
 
 # define params
@@ -216,8 +217,8 @@ def fit_multiband(data):
 
     mcmc = MCMC(
         nuts_kernel,
-        num_warmup=500,
-        num_samples=500,
+        num_warmup=1000,
+        num_samples=1000,
         num_chains=2,
         progress_bar=False,
     )
@@ -230,7 +231,8 @@ def fit_multiband(data):
         return None
     
     save_combined_plot(samples, m1, X, y, yerr, band_idx[mask_outlier], {0: 'g', 1: 'r', 2: 'i'}, data['object_id'])
-
+    plot_posterior(samples, data['object_id'])
+    
     log_tau_rest = np.log10(np.exp(samples['log_kernel_param'][:, 0])/(1+data['z']))
     lower, median, upper = np.percentile(log_tau_rest, [16, 50, 84])
     log_tau_rest_err = 0.5 * (upper - lower) # symmetric uncertainties
@@ -241,17 +243,23 @@ def fit_multiband(data):
     log_sigma = np.log10(np.exp(samples['log_kernel_param'][:, 1]))
     lambda_RF = 7625/(1 + data['z'])
     log_sigma_RF = log_sigma + beta*np.log(lambda_RF/4770)
-
     lower, median, upper = np.percentile(log_sigma_RF, [16, 50, 84])
     log_sigma_RF_err = 0.5 * (upper - lower) # symmetric uncertainties
     log_sigma_RF = median
+
+    lower, median, upper = np.percentile(log_sigma, [16, 50, 84])
+    log_sigma_err = 0.5 * (upper - lower) # symmetric uncertainties
+    log_sigma = median
 
     lower, median, upper = np.percentile(beta, [16, 50, 84])
     beta_err = 0.5 * (upper - lower) # symmetric uncertainties
     beta = median
 
     log_amp_delta = np.log10(np.exp(samples['log_amp_delta']))
+    log_amp_delta = log_amp_delta.T
     lower, median, upper = np.percentile(log_amp_delta, [16, 50, 84], axis=0)
+    log_amp_delta_err = 0.5 * (upper - lower) # symmetric uncertainties
+    log_amp_delta = median
 
     log_sigma_band = np.array([log_sigma, *(log_amp_delta+log_sigma)])
     log_sigma_band_err = np.array([log_sigma_err, *(np.sqrt(log_amp_delta_err**2+log_sigma_err**2))])
@@ -262,8 +270,8 @@ def fit_multiband(data):
             log_tau_rest_err=log_tau_rest_err,
             beta=beta,
             beta_err=beta_err,
-            log_sigma=log_sigma_RF,
-            log_sigma_err=log_sigma_RF_err,
+            log_sigma_RF=log_sigma_RF,
+            log_sigma_RF_err=log_sigma_RF_err,
             log_sigma_band=log_sigma_band,
             log_sigma_band_err=log_sigma_band_err,
             log_jitter=log_jitter)
@@ -282,7 +290,7 @@ def process_quasar(i_data, n=0):
     data['i'] = i
     data |= result
 
-    print(f"Quasar {i}/{n} ({data['object_id']}): log_tau_rest={data['log_tau_rest']:.3f}±{data['log_tau_rest_err']:.3f}, log_sigma={data['log_sigma']}±{data['log_sigma_err']}", flush=True)
+    print(f"Quasar {i}/{n} ({data['object_id']}): log_tau_rest={data['log_tau_rest']:.3f}±{data['log_tau_rest_err']:.3f}, log_sigma_RF={data['log_sigma_RF']}±{data['log_sigma_RF_err']}", flush=True)
     return data
 
 def save_lc_plot(bands, times, mags, magerrs, object_id):
@@ -305,6 +313,30 @@ def save_lc_plot(bands, times, mags, magerrs, object_id):
     plt.savefig(os.path.join("light_curves", f'{object_id}_light_curve.png'))
     plt.close(fig)
 
+def plot_posterior(samples, object_id):
+
+    # Convert samples to a dictionary of numpy arrays
+    samples_dict = {k: np.array(v) for k, v in samples.items()}
+
+    # Flatten the samples for corner plot
+    flat_samples = np.column_stack([samples_dict[k].flatten() for k in samples_dict.keys()])
+    labels = list(samples_dict.keys())
+
+    # Create the corner plot
+    fig = corner.corner(
+        flat_samples,
+        labels=labels,
+        show_titles=True,
+        title_fmt=".2f",
+        quantiles=[0.16, 0.5, 0.84],
+        title_kwargs={"fontsize": 12},
+    )
+
+    # Save the plot
+    output_dir = "posterior_plots"
+    os.makedirs(output_dir, exist_ok=True)
+    plt.savefig(os.path.join(output_dir, f"{object_id}_posterior.png"))
+    plt.close(fig)
 
 def save_combined_plot(samples, model, X, y, yerr, band_idx, band_idx_map, object_id):
     fig, ax = plt.subplots(1, 1, figsize=(12, 10), sharex=True)
@@ -364,7 +396,7 @@ def save_s82(file_path):
     #sdss_object_ids = [str(obj_id) for obj_id in sdss_object_ids]
     matching_indices = cat[cat.objectId.isin(sdss_object_ids)].index
     cat = cat.loc[matching_indices]
-    #cat = cat[:2000]
+    cat = cat[:1000]
 
     print("Len cat: ", len(cat))
 
@@ -518,10 +550,10 @@ def populate_sdss_fields(s82_objs):
 
 if __name__ == '__main__':
 
-    objs = save_s82(file_path="data/s82_objs_sdss.h5")
+    #objs = save_s82(file_path="data/s82_objs_sdss_small.h5")
     #sys.exit("Exiting the program as requested.")
 
-    objs = load_s82_from_hdf5(file_path="data/s82_objs_sdss.h5")
+    objs = load_s82_from_hdf5(file_path="data/s82_objs_sdss_small.h5")
     #filtered_objs = [obj for obj in objs if int(obj['object_id']) in [
     # log10_sigma > 1    
     #1384141, 1384142, 1384145, 1384146, 1384147, 1384148, 1384151, 1384153, 1384156, 1384157, 1384160, 1384165, 1384166, 1384171, 1384172,
@@ -537,7 +569,7 @@ if __name__ == '__main__':
     #r = process_quasar((0, objs[0]), n=1)
     #sys.exit("Exiting the program as requested.")
 
-    chunk_size = 500
+    chunk_size = 100
     for start_idx in range(0, len(objs), chunk_size):
         print("========================================================================")
         print(f"Processing chunk {start_idx // chunk_size + 1}/{(len(objs) + chunk_size - 1) // chunk_size}...")
@@ -555,7 +587,7 @@ if __name__ == '__main__':
         filtered_quasar_list = [{k: v for k, v in q.items() if k not in fields_to_filter} for q in quasar_list]
 
         df = pd.DataFrame.from_records(filtered_quasar_list)
-        output_file = 'data/s82_multiband_fitted_sdss.csv'
+        output_file = 'data/s82_multiband_fitted_sdss_small.csv'
         if os.path.exists(output_file):
             existing_df = pd.read_csv(output_file)
             merged_df = pd.concat([existing_df, df], ignore_index=True)
