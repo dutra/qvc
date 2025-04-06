@@ -239,7 +239,7 @@ def fit_multiband(data):
     beta = samples['beta']
 
     log_sigma = np.log10(np.exp(samples['log_kernel_param'][:, 1]))
-    lambda_RF = 4000/(1 + data['z'])
+    lambda_RF = 7625/(1 + data['z'])
     log_sigma_RF = log_sigma + beta*np.log(lambda_RF/4770)
 
     lower, median, upper = np.percentile(log_sigma_RF, [16, 50, 84])
