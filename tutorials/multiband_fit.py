@@ -237,7 +237,7 @@ def fit_multiband(data):
         num_warmup=500,
         num_samples=500,
         num_chains=2,
-        progress_bar=True,
+        progress_bar=False,
     )
 
     mcmc.run(jax.random.PRNGKey(1), X, yerr, y=y)
@@ -250,10 +250,10 @@ def fit_multiband(data):
     save_combined_plot(samples, m1, X, y, yerr, band_idx[mask_outlier], data['object_id'])
     plot_posterior(samples, data['object_id'])
     
-    log_tau_rest = np.log10(np.exp(samples['log_kernel_param'][:, 0])/(1+data['z']))
-    lower, median, upper = np.percentile(log_tau_rest, [16, 50, 84])
-    log_tau_rest_err = 0.5 * (upper - lower) # symmetric uncertainties
-    log_tau_rest = median
+    log_tau_RF = np.log10(np.exp(samples['log_kernel_param'][:, 0])/(1+data['z']))
+    lower, median, upper = np.percentile(log_tau_RF, [16, 50, 84])
+    log_tau_RF_err = 0.5 * (upper - lower) # symmetric uncertainties
+    log_tau_RF = median
 
     beta = samples['beta']
 
@@ -263,12 +263,10 @@ def fit_multiband(data):
     lower, median, upper = np.percentile(log_sigma_RF, [16, 50, 84])
     log_sigma_RF_err = 0.5 * (upper - lower) # symmetric uncertainties
     log_sigma_RF = median
-    print(f"{log_sigma_RF.shape=}")
 
     lower, median, upper = np.percentile(log_sigma, [16, 50, 84])
     log_sigma_err = 0.5 * (upper - lower) # symmetric uncertainties
     log_sigma = median
-    print(f"{log_sigma.shape=}")
 
     lower, median, upper = np.percentile(beta, [16, 50, 84])
     beta_err = 0.5 * (upper - lower) # symmetric uncertainties
@@ -281,12 +279,11 @@ def fit_multiband(data):
 
     log_sigma_band = np.array([log_sigma, *(log_amp_delta+log_sigma)])
     log_sigma_band_err = np.array([np.sqrt(a**2+b**2) for a,b in zip([log_sigma_err]*len(bands), log_amp_delta_err)])
-    #[log_sigma_err, *(np.sqrt(log_amp_delta_err**2+log_sigma_err**2))])
 
     log_jitter = np.percentile(np.log10(np.exp(2*samples['log_jitter'])), 50, axis=0)
 
-    d = dict(log_tau_rest=log_tau_rest,
-            log_tau_rest_err=log_tau_rest_err,
+    d = dict(log_tau_RF=log_tau_RF,
+            log_tau_RF_err=log_tau_RF_err,
             beta=beta,
             beta_err=beta_err,
             log_sigma_RF=log_sigma_RF,
@@ -310,7 +307,8 @@ def process_quasar(i_data, n=0):
     data |= result
 
 
-    print(f"Quasar {i}/{n} ({data['object_id']}): log_tau_rest={data['log_tau_rest']:.3f}±{data['log_tau_rest_err']:.3f}, log_sigma_RF={data['log_sigma_RF']}±{data['log_sigma_RF_err']}", flush=True)
+    print(f"Quasar {i}/{n} ({data['object_id']}): log_tau_RF={data['log_tau_RF']:.3f}±{data['log_tau_RF_err']:.3f}, log_sigma_RF={data['log_sigma_RF']}±{data['log_sigma_RF_err']}", 
+          flush=True)
     return data
 
 def save_lc_plot(bands, times, mags, magerrs, object_id):
@@ -337,7 +335,7 @@ def plot_posterior(samples, object_id):
     # Extract the posterior samples
     posterior_samples = {
         'beta': samples['beta'],
-        'log_tau_rest': np.log10(np.exp(samples['log_kernel_param'][:, 0])),
+        'log_tau_RF': np.log10(np.exp(samples['log_kernel_param'][:, 0])),
         'log_sigma': np.log10(np.exp(samples['log_kernel_param'][:, 1]))
     }
     # Convert the samples to a 2D array for corner
@@ -573,17 +571,17 @@ if __name__ == '__main__':
     #objs = save_s82(file_path="data/s82_objs_sdss_tiny_allbands.h5")
     #sys.exit("Exiting the program as requested.")
 
-    objs = load_s82_from_hdf5(file_path="data/s82_objs_sdss_tiny_allbands.h5")
+    objs = load_s82_from_hdf5(file_path="data/s82_objs_sdss_small_allbands.h5")
     #objs = objs[:15]
     print(f"Loaded {len(objs)} quasars from the dataset.")
     objs = populate_sdss_fields(objs)
     print(f"Populated {len(objs)} quasars with SDSS data.")
 
     # process single quasar for testing    
-    r = process_quasar((0, next((obj for obj in objs if obj['object_id'] == '1384153'), None)), n=1)
-    sys.exit("Exiting the program as requested.")
+    #r = process_quasar((0, next((obj for obj in objs if obj['object_id'] == '1384153'), None)), n=1)
+    #sys.exit("Exiting the program as requested.")
 
-    chunk_size = 50
+    chunk_size = 100
     for start_idx in range(0, len(objs), chunk_size):
         print("========================================================================")
         print(f"Processing chunk {start_idx // chunk_size + 1}/{(len(objs) + chunk_size - 1) // chunk_size}...")
