@@ -66,17 +66,24 @@ has_jitter = True
 has_lag = True
 
 lambda_pivot = {
+    'u': 3543,  # SDSS u-band
     'g': 4770,  # SDSS g-band
     'r': 6231,  # SDSS r-band
     'i': 7625,  # SDSS i-band
-    'u': 3543,  # SDSS u-band
     'z': 9134,  # SDSS z-band
     'y': 9633,  # PS1 y-band
 }
 
 
 filters = {"u": 0, "g": 1, "r": 2, "i": 3, "z": 4, "y": 5} # harcoded filter order for SDSS
-bands = ['g','r','i', 'u', 'z', 'y']
+bands = ['u', 'g', 'r', 'i', 'z', 'y']
+
+colors = {'u': 'tab:blue',
+          'g': 'tab:green', 
+          'r': 'tab:orange', 
+          'i': 'tab:red', 
+          'z': 'tab:brown', 
+          'y': 'tab:gray'}
 
 # Override MultiVarModel
 class MyMultiVarModel(MultiVarModel):
@@ -227,8 +234,8 @@ def fit_multiband(data):
 
     mcmc = MCMC(
         nuts_kernel,
-        num_warmup=250,
-        num_samples=250,
+        num_warmup=500,
+        num_samples=500,
         num_chains=2,
         progress_bar=True,
     )
@@ -347,25 +354,31 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, object_id):
     fig, ax = plt.subplots(1, 1, figsize=(12, 10), sharex=True)
     offsets = np.arange(len(bands)) * 0.25
 
-    t = X[0]
-    # bands = ['g','r','i', 'u', 'z', 'y']
-    colors = ['tab:green', 'tab:red', 'tab:blue', 'tab:purple', 'tab:orange', 'tab:brown']
+    t = X[0]    
     for n in np.unique(band_idx):
         m = band_idx == n
         # Plot the observed data
-        ax.errorbar(t[m], y[m]+offsets[n], yerr=yerr[m], fmt='o', label=f'{band_idx_map[n]}-band', alpha=0.7, color=colors[n])
+        ax.errorbar(t[m], y[m]+offsets[n], yerr=yerr[m], fmt='o', 
+                    label=f'{band_idx_map[n]}-band', alpha=0.7, color=colors[band_idx_map[n]])
         # Generate test times for predictions
         t_test = np.linspace(t.min(), t.max(), 1000)
         # Compute predictions using the model
         posterior_median = {k: jnp.median(v, axis=0) for k, v in samples.items()}
         mu, std = model.pred(posterior_median, (t_test, np.full_like(t_test, n, dtype=int)))
         # Plot the predictions
-        ax.plot(t_test, mu+offsets[n], label=f'{band_idx_map[n]}-band', alpha=0.7, color=colors[n])
-        ax.fill_between(t_test, mu+offsets[n]-std, mu+offsets[n]+std, alpha=0.3, label=f'{band_idx_map[n]}-band', color=colors[n])
-
+        ax.plot(t_test, mu+offsets[n], label=f'{band_idx_map[n]}-band', alpha=0.7, color=colors[band_idx_map[n]])
+        ax.fill_between(t_test, mu+offsets[n]-std, mu+offsets[n]+std, alpha=0.3, 
+                        label=f'{band_idx_map[n]}-band', color=colors[band_idx_map[n]])
+        
+        ax.annotate(band_idx_map[n], 
+                    xy=(t.max(), offsets[n] + 0.5),
+                    xycoords='data', 
+                    color=colors[band_idx_map[n]],
+                    fontsize=12, 
+                    fontweight='bold')
     ax.set_ylabel('Magnitude + arbitrary offset', fontsize=14)
     ax.invert_yaxis()  # Magnitudes are brighter when lower
-    ax.legend(loc='upper right')
+    #ax.legend(loc='upper right')
     ax.set_title(f'Light Curve for Object {object_id}', fontsize=16)
 
     plt.tight_layout()
@@ -557,18 +570,18 @@ def populate_sdss_fields(s82_objs):
 
 if __name__ == '__main__':
 
-    objs = save_s82(file_path="data/s82_objs_sdss_small_allbands.h5")
+    #objs = save_s82(file_path="data/s82_objs_sdss_tiny_allbands.h5")
     #sys.exit("Exiting the program as requested.")
 
-    objs = load_s82_from_hdf5(file_path="data/s82_objs_sdss_small_allbands.h5")
+    objs = load_s82_from_hdf5(file_path="data/s82_objs_sdss_tiny_allbands.h5")
     #objs = objs[:15]
     print(f"Loaded {len(objs)} quasars from the dataset.")
     objs = populate_sdss_fields(objs)
     print(f"Populated {len(objs)} quasars with SDSS data.")
 
     # process single quasar for testing    
-    #r = process_quasar((0, next((obj for obj in objs if obj['object_id'] == '1384153'), None)), n=1)
-    #sys.exit("Exiting the program as requested.")
+    r = process_quasar((0, next((obj for obj in objs if obj['object_id'] == '1384153'), None)), n=1)
+    sys.exit("Exiting the program as requested.")
 
     chunk_size = 50
     for start_idx in range(0, len(objs), chunk_size):
