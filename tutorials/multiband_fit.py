@@ -65,15 +65,26 @@ zero_mean = False
 has_jitter = True
 has_lag = True
 
+lambda_pivot = {
+    'g': 4770,  # SDSS g-band
+    'r': 6231,  # SDSS r-band
+    'i': 7625,  # SDSS i-band
+    'u': 3543,  # SDSS u-band
+    'z': 9134,  # SDSS z-band
+    'y': 9633,  # PS1 y-band
+}
+
+
+filters = {"u": 0, "g": 1, "r": 2, "i": 3, "z": 4, "y": 5} # harcoded filter order for SDSS
+bands = ['g','r','i', 'u', 'z', 'y']
+
 # Override MultiVarModel
 class MyMultiVarModel(MultiVarModel):
     def amp_transform(self, params: dict[str, JAXArray]) -> JAXArray:
-        lamdba_RF = np.array([4770, 6231, 7625])
-        b = params["beta"] # 
-        params["log_amp_delta"] = jnp.array([b*np.log(lamdba_RF[1]/4770), b*np.log(lamdba_RF[2]/4770)])
-        return jnp.insert(jnp.atleast_1d(params["log_amp_delta"]), 0, 0.0)
-
-def initSampler(key, nSample, nBand=3):
+        b = params["beta"]
+        params["log_amp_delta"] = jnp.array([b*np.log(lambda_pivot[band]/lambda_pivot[bands[0]]) for band in bands])
+        return jnp.atleast_1d(params["log_amp_delta"])
+def initSampler(key, nSample, nBand=len(bands)):
     # split keys
     subkeys = jax.random.split(key, 10)
 
@@ -134,7 +145,6 @@ def numpyro_model(X, yerr, y=None, bestP=None):
 
 
 def fit_multiband(data):
-    bands = ['g', 'r', 'i']
     times = data['times']
     mags = data['mags']
     magerrs = data['magerrs']
@@ -217,10 +227,10 @@ def fit_multiband(data):
 
     mcmc = MCMC(
         nuts_kernel,
-        num_warmup=1000,
-        num_samples=1000,
+        num_warmup=250,
+        num_samples=250,
         num_chains=2,
-        progress_bar=False,
+        progress_bar=True,
     )
 
     mcmc.run(jax.random.PRNGKey(1), X, yerr, y=y)
@@ -230,7 +240,7 @@ def fit_multiband(data):
         print(f"Diverging MCMC for quasar {data['object_id']}, skipping.", flush=True)
         return None
     
-    save_combined_plot(samples, m1, X, y, yerr, band_idx[mask_outlier], {0: 'g', 1: 'r', 2: 'i'}, data['object_id'])
+    save_combined_plot(samples, m1, X, y, yerr, band_idx[mask_outlier], data['object_id'])
     plot_posterior(samples, data['object_id'])
     
     log_tau_rest = np.log10(np.exp(samples['log_kernel_param'][:, 0])/(1+data['z']))
@@ -241,28 +251,30 @@ def fit_multiband(data):
     beta = samples['beta']
 
     log_sigma = np.log10(np.exp(samples['log_kernel_param'][:, 1]))
-    lambda_RF = 7625/(1 + data['z'])
-    log_sigma_RF = log_sigma + beta*np.log(lambda_RF/4770)
+    lambda_RF = lambda_pivot['i']/(1 + data['z'])
+    log_sigma_RF = log_sigma + beta*np.log(lambda_RF/lambda_pivot[bands[0]])
     lower, median, upper = np.percentile(log_sigma_RF, [16, 50, 84])
     log_sigma_RF_err = 0.5 * (upper - lower) # symmetric uncertainties
     log_sigma_RF = median
+    print(f"{log_sigma_RF.shape=}")
 
     lower, median, upper = np.percentile(log_sigma, [16, 50, 84])
     log_sigma_err = 0.5 * (upper - lower) # symmetric uncertainties
     log_sigma = median
+    print(f"{log_sigma.shape=}")
 
     lower, median, upper = np.percentile(beta, [16, 50, 84])
     beta_err = 0.5 * (upper - lower) # symmetric uncertainties
     beta = median
 
     log_amp_delta = np.log10(np.exp(samples['log_amp_delta']))
-    log_amp_delta = log_amp_delta.T
     lower, median, upper = np.percentile(log_amp_delta, [16, 50, 84], axis=0)
     log_amp_delta_err = 0.5 * (upper - lower) # symmetric uncertainties
     log_amp_delta = median
 
     log_sigma_band = np.array([log_sigma, *(log_amp_delta+log_sigma)])
-    log_sigma_band_err = np.array([log_sigma_err, *(np.sqrt(log_amp_delta_err**2+log_sigma_err**2))])
+    log_sigma_band_err = np.array([np.sqrt(a**2+b**2) for a,b in zip([log_sigma_err]*len(bands), log_amp_delta_err)])
+    #[log_sigma_err, *(np.sqrt(log_amp_delta_err**2+log_sigma_err**2))])
 
     log_jitter = np.percentile(np.log10(np.exp(2*samples['log_jitter'])), 50, axis=0)
 
@@ -290,6 +302,7 @@ def process_quasar(i_data, n=0):
     data['i'] = i
     data |= result
 
+
     print(f"Quasar {i}/{n} ({data['object_id']}): log_tau_rest={data['log_tau_rest']:.3f}±{data['log_tau_rest_err']:.3f}, log_sigma_RF={data['log_sigma_RF']}±{data['log_sigma_RF_err']}", flush=True)
     return data
 
@@ -314,49 +327,43 @@ def save_lc_plot(bands, times, mags, magerrs, object_id):
     plt.close(fig)
 
 def plot_posterior(samples, object_id):
-
-    # Convert samples to a dictionary of numpy arrays
-    samples_dict = {k: np.array(v) for k, v in samples.items()}
-
-    # Flatten the samples for corner plot
-    flat_samples = np.column_stack([samples_dict[k].flatten() for k in samples_dict.keys()])
-    labels = list(samples_dict.keys())
-
-    # Create the corner plot
-    fig = corner.corner(
-        flat_samples,
-        labels=labels,
-        show_titles=True,
-        title_fmt=".2f",
-        quantiles=[0.16, 0.5, 0.84],
-        title_kwargs={"fontsize": 12},
-    )
-
-    # Save the plot
+    # Extract the posterior samples
+    posterior_samples = {
+        'beta': samples['beta'],
+        'log_tau_rest': np.log10(np.exp(samples['log_kernel_param'][:, 0])),
+        'log_sigma': np.log10(np.exp(samples['log_kernel_param'][:, 1]))
+    }
+    # Convert the samples to a 2D array for corner
+    data = np.vstack([posterior_samples[key] for key in posterior_samples.keys()]).T
+    fig = corner.corner(data, labels=list(posterior_samples.keys()), show_titles=True)
     output_dir = "posterior_plots"
     os.makedirs(output_dir, exist_ok=True)
     plt.savefig(os.path.join(output_dir, f"{object_id}_posterior.png"))
     plt.close(fig)
 
-def save_combined_plot(samples, model, X, y, yerr, band_idx, band_idx_map, object_id):
+def save_combined_plot(samples, model, X, y, yerr, band_idx, object_id):
+    band_idx_map = {i: b for i, b in enumerate(bands)}
+
     fig, ax = plt.subplots(1, 1, figsize=(12, 10), sharex=True)
+    offsets = np.arange(len(bands)) * 0.25
 
     t = X[0]
-    colors = ['b', 'g', 'r']
+    # bands = ['g','r','i', 'u', 'z', 'y']
+    colors = ['tab:green', 'tab:red', 'tab:blue', 'tab:purple', 'tab:orange', 'tab:brown']
     for n in np.unique(band_idx):
         m = band_idx == n
         # Plot the observed data
-        ax.errorbar(t[m], y[m], yerr=yerr[m], fmt='o', label=f'{band_idx_map[n]}-band', alpha=0.7, color=colors[n])
+        ax.errorbar(t[m], y[m]+offsets[n], yerr=yerr[m], fmt='o', label=f'{band_idx_map[n]}-band', alpha=0.7, color=colors[n])
         # Generate test times for predictions
         t_test = np.linspace(t.min(), t.max(), 1000)
         # Compute predictions using the model
         posterior_median = {k: jnp.median(v, axis=0) for k, v in samples.items()}
         mu, std = model.pred(posterior_median, (t_test, np.full_like(t_test, n, dtype=int)))
         # Plot the predictions
-        ax.plot(t_test, mu, label=f'{band_idx_map[n]}-band', alpha=0.7, color=colors[n])
-        ax.fill_between(t_test, mu - std, mu + std, alpha=0.3, label=f'{band_idx_map[n]}-band', color=colors[n])
+        ax.plot(t_test, mu+offsets[n], label=f'{band_idx_map[n]}-band', alpha=0.7, color=colors[n])
+        ax.fill_between(t_test, mu+offsets[n]-std, mu+offsets[n]+std, alpha=0.3, label=f'{band_idx_map[n]}-band', color=colors[n])
 
-    ax.set_ylabel('Magnitude (Observed)', fontsize=14)
+    ax.set_ylabel('Magnitude + arbitrary offset', fontsize=14)
     ax.invert_yaxis()  # Magnitudes are brighter when lower
     ax.legend(loc='upper right')
     ax.set_title(f'Light Curve for Object {object_id}', fontsize=16)
@@ -374,8 +381,6 @@ def save_s82(file_path):
 
     s82_objs = []
 
-    filters = {"u": 0, "g": 1, "r": 2, "i": 3, "z": 4, "y": 5} # harcoded filter order for SDSS
-    bands = ['g','r','i']
     # Load the S82 data from the FITS file
     hdul = fits.open('data/dr16q_prop_May01_2024.fits')
     fits_data = hdul[1].data  # Assuming the data is in the first extension    
@@ -388,15 +393,14 @@ def save_s82(file_path):
 
     # Find elements in cat where objectId exists in the list of objectId of sdss
     sdss_object_ids = set(sdss.objectId)
-    #sdss_object_ids = [
-    # log10_sigma > 1    
-    #1384141, 1384142, 1384145, 1384146, 1384147, 1384148, 1384151, 1384153, 1384156, 1384157, 1384160, 1384165, 1384166, 1384171, 1384172,
-    # random sample
-    #1385090, 1385694, 1384550, 1384780, 1385083, 1384786, 1385298, 1384985, 1384894, 1385218, 1384922, 1384773, 1385567, 1385607, 1384291]
-    #sdss_object_ids = [str(obj_id) for obj_id in sdss_object_ids]
+    # sdss_object_ids = [str(i) for i in [
+    # 1384141, 1384142, 1384145, 1384146, 1384147, 1384148, 1384151, 1384153, 1384156, 1384157, 1384160, 1384165, 1384166, 1384171, 1384172,
+    # 1385090, 1385694, 1384550, 1384780, 1385083, 1384786, 1385298, 1384985, 1384894, 1385218, 1384922, 1384773, 1385567, 1385607, 1384291,
+    # 1385607, 1384894, 1385298
+    # ]]
     matching_indices = cat[cat.objectId.isin(sdss_object_ids)].index
     cat = cat.loc[matching_indices]
-    cat = cat[:1000]
+    cat = cat[:2000]
 
     print("Len cat: ", len(cat))
 
@@ -418,11 +422,14 @@ def save_s82(file_path):
         magerrs_mean = []
 
         for band in bands:
+            
             sdss_ps1_offset = {
-                'g': row.sdss_g_qg - row.ps1_g_qg ,
+                'g': row.sdss_g_qg - row.ps1_g_qg,
                 'r': row.sdss_r_qg - row.ps1_r_qg,
-                'i': row.sdss_i_qg - row.ps1_i_qg
+                'i': row.sdss_i_qg - row.ps1_i_qg,
+                'z': row.sdss_z_qg - row.ps1_z_qg,
             }
+
             offset = sdss_ps1_offset[band] if band in sdss_ps1_offset else 0.0
 
             times[band] = np.concatenate([
@@ -550,26 +557,20 @@ def populate_sdss_fields(s82_objs):
 
 if __name__ == '__main__':
 
-    #objs = save_s82(file_path="data/s82_objs_sdss_small.h5")
+    objs = save_s82(file_path="data/s82_objs_sdss_small_allbands.h5")
     #sys.exit("Exiting the program as requested.")
 
-    objs = load_s82_from_hdf5(file_path="data/s82_objs_sdss_small.h5")
-    #filtered_objs = [obj for obj in objs if int(obj['object_id']) in [
-    # log10_sigma > 1    
-    #1384141, 1384142, 1384145, 1384146, 1384147, 1384148, 1384151, 1384153, 1384156, 1384157, 1384160, 1384165, 1384166, 1384171, 1384172,
-    # random sample
-    #1385090, 1385694, 1384550, 1384780, 1385083, 1384786, 1385298, 1384985, 1384894, 1385218, 1384922, 1384773, 1385567, 1385607, 1384291
-    #1385607, 1384894, 1385298
-    #]]
-    #objs = objs[:1]
+    objs = load_s82_from_hdf5(file_path="data/s82_objs_sdss_small_allbands.h5")
+    #objs = objs[:15]
     print(f"Loaded {len(objs)} quasars from the dataset.")
     objs = populate_sdss_fields(objs)
     print(f"Populated {len(objs)} quasars with SDSS data.")
 
-    #r = process_quasar((0, objs[0]), n=1)
+    # process single quasar for testing    
+    #r = process_quasar((0, next((obj for obj in objs if obj['object_id'] == '1384153'), None)), n=1)
     #sys.exit("Exiting the program as requested.")
 
-    chunk_size = 100
+    chunk_size = 50
     for start_idx in range(0, len(objs), chunk_size):
         print("========================================================================")
         print(f"Processing chunk {start_idx // chunk_size + 1}/{(len(objs) + chunk_size - 1) // chunk_size}...")
@@ -578,7 +579,7 @@ if __name__ == '__main__':
         ctx = get_context("spawn")  # Safer for JAX when using multiprocessing
         results = []
 
-        with ctx.Pool(processes=15) as pool:
+        with ctx.Pool(processes=10) as pool:
             results = pool.map(partial(process_quasar, n=len(chunk)), enumerate(chunk))
 
         quasar_list = [q for q in results if q is not None]
@@ -587,7 +588,7 @@ if __name__ == '__main__':
         filtered_quasar_list = [{k: v for k, v in q.items() if k not in fields_to_filter} for q in quasar_list]
 
         df = pd.DataFrame.from_records(filtered_quasar_list)
-        output_file = 'data/s82_multiband_fitted_sdss_small.csv'
+        output_file = 'data/s82_multiband_fitted_sdss_small_allbands.csv'
         if os.path.exists(output_file):
             existing_df = pd.read_csv(output_file)
             merged_df = pd.concat([existing_df, df], ignore_index=True)
