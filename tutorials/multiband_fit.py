@@ -90,10 +90,16 @@ colors = {'u': 'tab:blue',
 class MyMultiVarModel(MultiVarModel):
     def amp_transform(self, params: dict[str, JAXArray]) -> JAXArray:
         b = params["beta"]
-        params["log_amp_delta"] = jnp.array([b*np.log(lambda_pivot[band]/lambda_pivot[bands[0]]) for band in bands])
-        return jnp.atleast_1d(params["log_amp_delta"])
+        params["log_amp_delta"] = jnp.array([b*np.log(lambda_pivot[band]/lambda_pivot[bands[0]]) for band in bands[1:]])
+        #jax.debug.print("{x}", x=params["log_amp_delta"])
+        #jax.debug.print("{x}", x=np.log(lambda_pivot[bands[1]]/lambda_pivot[bands[0]]))
+        return jnp.insert(jnp.atleast_1d(params["log_amp_delta"]), 0, 0.0)
+    pass
     
 def initSampler(key, nSample, nBand=len(bands)):
+
+    print('nband: ', nBand)
+
     # split keys
     subkeys = jax.random.split(key, 10)
 
@@ -123,9 +129,9 @@ def numpyro_model(X, yerr, y=None, bestP=None):
     log_kernel_param = numpyro.sample("log_kernel_param", diag_normal)
 
     # log amp delta
-    log_amp_delta = numpyro.sample(
-        "log_amp_delta", dist.Normal(bestP["log_amp_delta"], 2.0)
-    )
+    #log_amp_delta = numpyro.sample(
+    #    "log_amp_delta", dist.Normal(bestP["log_amp_delta"], 2.0)
+    #)
 
     # lag
     lag = numpyro.sample("lag", dist.Normal(bestP['lag'], 10.0))
@@ -144,7 +150,7 @@ def numpyro_model(X, yerr, y=None, bestP=None):
 
     sample_params = {
         "log_kernel_param": log_kernel_param,
-        "log_amp_delta": log_amp_delta,
+        #"log_amp_delta": log_amp_delta,
         "lag": lag,
         "mean": mean,
         "log_jitter": log_jitter,
@@ -268,8 +274,17 @@ def fit_multiband(data):
     log_sigma_RF_err = 0.5 * (upper - lower) # symmetric uncertainties
     log_sigma_RF = median
 
+    print('log amp delta')
+    print(samples['log_amp_delta'])
 
-    # log_amp_delta = np.log10(np.exp(samples['log_amp_delta']))
+    print('log sigma')
+    print(np.median(samples['log_kernel_param'][:, 1]))
+    print('log sigma RF')
+    print(log_sigma_RF)
+
+
+    # log_amp_delta = jnp.insert(jnp.atleast_1d(model_param["log_amp_delta"]), 0, 0.0)
+
     # lower, median, upper = np.percentile(log_amp_delta, [16, 50, 84], axis=0)
     # log_amp_delta_err = 0.5 * (upper - lower) # symmetric uncertainties
     # log_amp_delta = median
@@ -414,11 +429,11 @@ def save_s82(file_path):
 
     # Find elements in cat where objectId exists in the list of objectId of sdss
     sdss_object_ids = set(sdss.objectId)
-    # sdss_object_ids = [str(i) for i in [
-    # 1384141, 1384142, 1384145, 1384146, 1384147, 1384148, 1384151, 1384153, 1384156, 1384157, 1384160, 1384165, 1384166, 1384171, 1384172,
+    sdss_object_ids = [str(i) for i in [
+    1384141, 1384142, 1384145, 1384146, 1384147, 1384148, 1384151, 1384153, 1384156, 1384157, 1384160, 1384165, 1384166, 1384171, 1384172,
     # 1385090, 1385694, 1384550, 1384780, 1385083, 1384786, 1385298, 1384985, 1384894, 1385218, 1384922, 1384773, 1385567, 1385607, 1384291,
     # 1385607, 1384894, 1385298
-    # ]]
+    ]]
     matching_indices = cat[cat.objectId.isin(sdss_object_ids)].index
     cat = cat.loc[matching_indices]
     #cat = cat[:2000]
@@ -579,11 +594,13 @@ def populate_sdss_fields(s82_objs):
 
 if __name__ == '__main__':
 
-    objs = save_s82(file_path="data/s82_objs_sdss_allbands.h5")
+    #objs = save_s82(file_path="data/s82_objs_sdss_allbands.h5")
+    objs = save_s82(file_path="data/s82_objs_sdss.h5")
     #sys.exit("Exiting the program as requested.")
 
-    objs = load_s82_from_hdf5(file_path="data/s82_objs_sdss_allbands.h5")
-    #objs = objs[:15]
+    #objs = load_s82_from_hdf5(file_path="data/s82_objs_sdss_allbands.h5")
+    objs = load_s82_from_hdf5(file_path="data/s82_objs_sdss.h5")
+    objs = objs[:15]
     print(f"Loaded {len(objs)} quasars from the dataset.")
     objs = populate_sdss_fields(objs)
     print(f"Populated {len(objs)} quasars with SDSS data.")
