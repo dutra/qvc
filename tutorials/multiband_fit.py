@@ -34,6 +34,7 @@ jax.config.update("jax_enable_x64", True)
 import warnings
 
 import matplotlib.pyplot as plt
+plt.style.use("style.mplstyle")
 import numpy as np
 import optax
 from eztaox.fitter import fit
@@ -91,6 +92,7 @@ class MyMultiVarModel(MultiVarModel):
         b = params["beta"]
         params["log_amp_delta"] = jnp.array([b*np.log(lambda_pivot[band]/lambda_pivot[bands[0]]) for band in bands])
         return jnp.atleast_1d(params["log_amp_delta"])
+    
 def initSampler(key, nSample, nBand=len(bands)):
     # split keys
     subkeys = jax.random.split(key, 10)
@@ -256,29 +258,37 @@ def fit_multiband(data):
     log_tau_RF = median
 
     beta = samples['beta']
-
-    log_sigma = np.log10(np.exp(samples['log_kernel_param'][:, 1]))
-    lambda_RF = lambda_pivot['i']/(1 + data['z'])
-    log_sigma_RF = log_sigma + beta*np.log(lambda_RF/lambda_pivot[bands[0]])
-    lower, median, upper = np.percentile(log_sigma_RF, [16, 50, 84])
-    log_sigma_RF_err = 0.5 * (upper - lower) # symmetric uncertainties
-    log_sigma_RF = median
-
-    lower, median, upper = np.percentile(log_sigma, [16, 50, 84])
-    log_sigma_err = 0.5 * (upper - lower) # symmetric uncertainties
-    log_sigma = median
-
     lower, median, upper = np.percentile(beta, [16, 50, 84])
     beta_err = 0.5 * (upper - lower) # symmetric uncertainties
     beta = median
 
-    log_amp_delta = np.log10(np.exp(samples['log_amp_delta']))
-    lower, median, upper = np.percentile(log_amp_delta, [16, 50, 84], axis=0)
-    log_amp_delta_err = 0.5 * (upper - lower) # symmetric uncertainties
-    log_amp_delta = median
+    lambda_RF = lambda_pivot['i']/(1 + data['z'])
+    log_sigma_RF = np.log10(np.exp(samples['log_kernel_param'][:, 1] + beta*np.log(lambda_RF/lambda_pivot[bands[0]])))
+    lower, median, upper = np.percentile(log_sigma_RF, [16, 50, 84])
+    log_sigma_RF_err = 0.5 * (upper - lower) # symmetric uncertainties
+    log_sigma_RF = median
 
-    log_sigma_band = np.array([log_sigma, *(log_amp_delta+log_sigma)])
-    log_sigma_band_err = np.array([np.sqrt(a**2+b**2) for a,b in zip([log_sigma_err]*len(bands), log_amp_delta_err)])
+
+    # log_amp_delta = np.log10(np.exp(samples['log_amp_delta']))
+    # lower, median, upper = np.percentile(log_amp_delta, [16, 50, 84], axis=0)
+    # log_amp_delta_err = 0.5 * (upper - lower) # symmetric uncertainties
+    # log_amp_delta = median
+    # print("Log Amp Delta: ", log_amp_delta)
+
+
+
+    # sigma = np.exp(samples['log_kernel_param'][:, 1])
+    # amp_delta = np.exp(samples['log_amp_delta'])
+
+    # lower, median, upper = np.percentile(amp_delta, [16, 50, 84], axis=0)
+    # print("Median amp delta: ", median)
+ 
+    # print("Number of bands:", len(bands))
+    # print("sigma shape: ", sigma.shape)
+    # print("amp_delta shape: ", amp_delta.shape)
+
+    # log_sigma_band = np.array([log_sigma, *(log_amp_delta+log_sigma)])
+    # log_sigma_band_err = np.array([np.sqrt(a**2+b**2) for a,b in zip([log_sigma_err]*len(bands), log_amp_delta_err)])
 
     log_jitter = np.percentile(np.log10(np.exp(2*samples['log_jitter'])), 50, axis=0)
 
@@ -288,8 +298,8 @@ def fit_multiband(data):
             beta_err=beta_err,
             log_sigma_RF=log_sigma_RF,
             log_sigma_RF_err=log_sigma_RF_err,
-            log_sigma_band=log_sigma_band,
-            log_sigma_band_err=log_sigma_band_err,
+            #log_sigma_band=log_sigma_band,
+            #log_sigma_band_err=log_sigma_band_err,
             log_jitter=log_jitter)
     return d
 
@@ -349,7 +359,7 @@ def plot_posterior(samples, object_id):
 def save_combined_plot(samples, model, X, y, yerr, band_idx, object_id):
     band_idx_map = {i: b for i, b in enumerate(bands)}
 
-    fig, ax = plt.subplots(1, 1, figsize=(12, 10), sharex=True)
+    fig, ax = plt.subplots(1, 1, figsize=(8, 6), sharex=True)
     offsets = np.arange(len(bands)) * 0.25
 
     t = X[0]    
@@ -364,20 +374,20 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, object_id):
         posterior_median = {k: jnp.median(v, axis=0) for k, v in samples.items()}
         mu, std = model.pred(posterior_median, (t_test, np.full_like(t_test, n, dtype=int)))
         # Plot the predictions
-        ax.plot(t_test, mu+offsets[n], label=f'{band_idx_map[n]}-band', alpha=0.7, color=colors[band_idx_map[n]])
+        ax.plot(t_test, mu+offsets[n], alpha=0.7, color=colors[band_idx_map[n]])
         ax.fill_between(t_test, mu+offsets[n]-std, mu+offsets[n]+std, alpha=0.3, 
-                        label=f'{band_idx_map[n]}-band', color=colors[band_idx_map[n]])
+                        color=colors[band_idx_map[n]])
         
-        ax.annotate(band_idx_map[n], 
-                    xy=(t.max(), offsets[n] + 0.5),
-                    xycoords='data', 
-                    color=colors[band_idx_map[n]],
-                    fontsize=12, 
-                    fontweight='bold')
-    ax.set_ylabel('Magnitude + arbitrary offset', fontsize=14)
+        # ax.annotate(band_idx_map[n], 
+        #             xy=(t.max(), offsets[n] + 0.5),
+        #             xycoords='data', 
+        #             color=colors[band_idx_map[n]],
+        #             fontsize=12, 
+        #             fontweight='bold')
+    ax.set_ylabel('Magnitude + arbitrary offset')
     ax.invert_yaxis()  # Magnitudes are brighter when lower
-    #ax.legend(loc='upper right')
-    ax.set_title(f'Light Curve for Object {object_id}', fontsize=16)
+    ax.legend(loc='upper right')
+    ax.set_title(f'Light Curve for AGN {object_id}')
 
     plt.tight_layout()
 
@@ -411,7 +421,7 @@ def save_s82(file_path):
     # ]]
     matching_indices = cat[cat.objectId.isin(sdss_object_ids)].index
     cat = cat.loc[matching_indices]
-    cat = cat[:2000]
+    #cat = cat[:2000]
 
     print("Len cat: ", len(cat))
 
@@ -536,6 +546,7 @@ def load_s82_from_hdf5(file_path="s82_objs.h5"):
     return s82_objs
 
 def populate_sdss_fields(s82_objs):
+    print(f"Populating SDSS fields: {len(s82_objs)}", flush=True)
     cat = pd.read_parquet(f"data/S82/Catalog.parquet").set_index('idx')
     hdul = fits.open('data/dr16q_prop_May01_2024.fits')
     fits_data = hdul[1].data  # Assuming the data is in the first extension    
@@ -568,20 +579,21 @@ def populate_sdss_fields(s82_objs):
 
 if __name__ == '__main__':
 
-    #objs = save_s82(file_path="data/s82_objs_sdss_tiny_allbands.h5")
+    objs = save_s82(file_path="data/s82_objs_sdss_allbands.h5")
     #sys.exit("Exiting the program as requested.")
 
-    objs = load_s82_from_hdf5(file_path="data/s82_objs_sdss_small_allbands.h5")
+    objs = load_s82_from_hdf5(file_path="data/s82_objs_sdss_allbands.h5")
     #objs = objs[:15]
     print(f"Loaded {len(objs)} quasars from the dataset.")
     objs = populate_sdss_fields(objs)
     print(f"Populated {len(objs)} quasars with SDSS data.")
 
     # process single quasar for testing    
-    #r = process_quasar((0, next((obj for obj in objs if obj['object_id'] == '1384153'), None)), n=1)
-    #sys.exit("Exiting the program as requested.")
+    r = process_quasar((0, next((obj for obj in objs if obj['object_id'] == '1384153'), None)), n=1)
+    print(r)
+    sys.exit("Exiting the program as requested.")
 
-    chunk_size = 100
+    chunk_size = 500
     for start_idx in range(0, len(objs), chunk_size):
         print("========================================================================")
         print(f"Processing chunk {start_idx // chunk_size + 1}/{(len(objs) + chunk_size - 1) // chunk_size}...")
