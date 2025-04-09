@@ -59,8 +59,9 @@ import sys
 
 from tinygp.helpers import JAXArray
 import corner
+import argparse
 
-num_samples = 500
+num_samples = 250
 
 # define params
 zero_mean = False
@@ -155,7 +156,7 @@ def numpyro_model(X, yerr, y=None, bestP=None):
     m1.sample(sample_params)
 
 
-def fit_multiband(data):
+def fit_multiband(data, progress_bar=False):
     times = data['times']
     mags = data['mags']
     magerrs = data['magerrs']
@@ -241,7 +242,7 @@ def fit_multiband(data):
         num_warmup=num_samples,
         num_samples=num_samples,
         num_chains=2,
-        progress_bar=False,
+        progress_bar=progress_bar,
     )
 
     mcmc.run(jax.random.PRNGKey(1), X, yerr, y=y)
@@ -315,12 +316,12 @@ def fit_multiband(data):
     return d
 
 
-def process_quasar(i_data, n=0):
+def process_quasar(i_data, n=0, progress_bar=False):
     i, data = i_data
     print(f"Processing quasar {i}/{n} ({data['object_id']})", flush=True)
 
     # Load the quasar data
-    result = fit_multiband(data)
+    result = fit_multiband(data, progress_bar=progress_bar)
     if result is None:
         print(f"Skipping quasar {data['object_id']} due to diverging MCMC.")
         return None
@@ -388,13 +389,6 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, object_id):
         ax.plot(t_test, mu+offsets[n], alpha=0.7, color=colors[band_idx_map[n]])
         ax.fill_between(t_test, mu+offsets[n]-std, mu+offsets[n]+std, alpha=0.3, 
                         color=colors[band_idx_map[n]])
-        
-        # ax.annotate(band_idx_map[n], 
-        #             xy=(t.max(), offsets[n] + 0.5),
-        #             xycoords='data', 
-        #             color=colors[band_idx_map[n]],
-        #             fontsize=12, 
-        #             fontweight='bold')
     ax.set_ylabel('Magnitude + arbitrary offset')
     ax.invert_yaxis()  # Magnitudes are brighter when lower
     ax.legend(loc='upper right')
@@ -409,8 +403,7 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, object_id):
     plt.close(fig)
 
 
-def save_s82(file_path):
-
+def concat_light_curves(filter_object_ids=None, save_file_path=None):
     s82_objs = []
 
     # Load the S82 data from the FITS file
@@ -424,17 +417,12 @@ def save_s82(file_path):
     ztf = pd.read_parquet(f"data/S82/dr16s82_ZuberLCRaw.parquet")
 
     # Find elements in cat where objectId exists in the list of objectId of sdss
-    sdss_object_ids = set(sdss.objectId)
-    # sdss_object_ids = [str(i) for i in [
-    # 1384141, 1384142, 1384145, 1384146, 1384147, 1384148, 1384151, 1384153, 1384156, 1384157, 1384160, 1384165, 1384166, 1384171, 1384172,
-    # # 1385090, 1385694, 1384550, 1384780, 1385083, 1384786, 1385298, 1384985, 1384894, 1385218, 1384922, 1384773, 1385567, 1385607, 1384291,
-    # # 1385607, 1384894, 1385298
-    # ]]
-    matching_indices = cat[cat.objectId.isin(sdss_object_ids)].index
+    match_object_ids = set(sdss.objectId) if filter_object_ids is None else filter_object_ids
+    matching_indices = cat[cat.objectId.isin(match_object_ids)].index
     cat = cat.loc[matching_indices]
-    cat = cat[:5000]
+    #cat = cat[:5000]
 
-    print("Len cat: ", len(cat))
+    print(f"Found {len(cat)} matching objects", len(cat))
 
     # Loop through the data and extract the relevant information        
     for idx, row in tqdm(cat.iterrows(), total=len(cat), desc="Processing quasars"):
@@ -515,20 +503,21 @@ def save_s82(file_path):
     
     s82_objs = populate_sdss_fields(s82_objs)
     
-    # Write s82_objs to an HDF5 file
-    with h5py.File(file_path, "w") as hdf:
-        for idx, obj in enumerate(s82_objs):
-            group = hdf.create_group(obj['object_id'])  # Use object_id as the group name
-            group.attrs['object_id'] = obj['object_id']  # Store the objectId for reference
-            group.attrs['magerrs_mean'] = obj['magerrs_mean']
-            for field in ['z', 'ra', 'dec', 'sdss_name', 'log_lbol', 'log_lbol_err',
-                          'log_mbh', 'log_mbh_err', 'log_ledd_ratio', 'log_ledd_ratio_err']:
-                group.attrs[field] = obj[field]
+    if save_file_path is not None:
+        # Write s82_objs to an HDF5 file
+        with h5py.File(save_file_path, "w") as hdf:
+            for idx, obj in enumerate(s82_objs):
+                group = hdf.create_group(obj['object_id'])  # Use object_id as the group name
+                group.attrs['object_id'] = obj['object_id']  # Store the objectId for reference
+                group.attrs['magerrs_mean'] = obj['magerrs_mean']
+                for field in ['z', 'ra', 'dec', 'sdss_name', 'log_lbol', 'log_lbol_err',
+                            'log_mbh', 'log_mbh_err', 'log_ledd_ratio', 'log_ledd_ratio_err']:
+                    group.attrs[field] = obj[field]
 
-            for key in ['times', 'mags', 'magerrs']:
-                sub_group = group.create_group(key)
-                for band, values in obj[key].items():
-                    sub_group.create_dataset(band, data=values)
+                for key in ['times', 'mags', 'magerrs']:
+                    sub_group = group.create_group(key)
+                    for band, values in obj[key].items():
+                        sub_group.create_dataset(band, data=values)
 
 
     return s82_objs
@@ -590,25 +579,21 @@ def populate_sdss_fields(s82_objs):
 
 if __name__ == '__main__':
 
-    #objs = save_s82(file_path="data/s82_objs_sdss_small_allbands.h5")
-    #objs = save_s82(file_path="data/s82_objs_sdss.h5")
-    #sys.exit("Exiting the program as requested.")
+    parser = argparse.ArgumentParser(description="Process quasars with optional filtering.")
+    parser.add_argument("--filter_object_id", nargs="+", help="List of object IDs to filter.")
+    args = parser.parse_args()
 
-    objs = load_s82_from_hdf5(file_path="data/s82_objs_sdss_small_allbands.h5")
-    #objs = load_s82_from_hdf5(file_path="data/s82_objs_sdss.h5")
-    objs = objs[:2000]
-    print(f"Loaded {len(objs)} quasars from the dataset.")
-    objs = populate_sdss_fields(objs)
-    print(f"Populated {len(objs)} quasars with SDSS data.")
-
-    # process single quasar for testing    
-    #obj = objs[0]
-    #obj = next((obj for obj in objs if obj['object_id'] == '1384153'), None)
-    #q = process_quasar((0, obj), n=1)
-    #fields_to_filter = ['times', 'mags', 'magerrs']
-    #q = {k: v for k, v in q.items() if k not in fields_to_filter}
-    #print(q)
-    #sys.exit("Exiting the program as requested.")
+    filter_object_ids = set(args.filter_object_id) if args.filter_object_id else None
+    if filter_object_ids is not None:
+        print(f"Filtering object IDs: {filter_object_ids}")
+        s82_objs = concat_light_curves(filter_object_ids=filter_object_ids)
+        for i, obj in enumerate(s82_objs):
+            q = process_quasar((i, obj), n=len(s82_objs), progress_bar=True)
+            fields_to_filter = ['times', 'mags', 'magerrs']
+            q = {k: v for k, v in q.items() if k not in fields_to_filter}
+            print(q)
+    
+    sys.exit("Exiting the program as requested.")
 
     chunk_size = 200
     for start_idx in range(0, len(objs), chunk_size):
