@@ -19,12 +19,12 @@ ytick.labelsize: 18
 figure.titlesize: 22
 figure.figsize: 12,10
 
-lines.linewidth: 1.0
-lines.markersize: 4
+lines.linewidth: 4.0
+lines.markersize: 6
 #image.cmap: RdBu_r
 
 savefig.facecolor: 'white'
-savefig.dpi: 400
+savefig.dpi: 300
 savefig.bbox: tight
 savefig.pad_inches: 0.2
 text.usetex: False
