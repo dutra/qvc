@@ -90,11 +90,11 @@ colors = {'u': 'tab:blue',
 
 # Override MultiVarModel
 class MyMultiVarModel(MultiVarModel):
-    # def amp_transform(self, params: dict[str, JAXArray]) -> JAXArray:
-    #     b = params["beta"]
-    #     params["log_amp_delta"] = jnp.array([b*np.log(lambda_pivot[band]/lambda_pivot[bands[0]]) for band in bands[1:]]) # comment this out for old version
-    #     r = jnp.insert(jnp.atleast_1d(params["log_amp_delta"]), 0, 0.0)
-    #     return r
+    def amp_transform(self, params: dict[str, JAXArray]) -> JAXArray:
+        b = params["beta"]
+        params["log_amp_delta"] = jnp.array([b*np.log(lambda_pivot[band]/lambda_pivot[bands[0]]) for band in bands[1:]]) # comment this out for old version
+        r = jnp.insert(jnp.atleast_1d(params["log_amp_delta"]), 0, 0.0)
+        return r
     pass
     
 def initSampler(key, nSample, nBand=len(bands)):
@@ -126,9 +126,9 @@ def numpyro_model(X, yerr, y=None, bestP=None):
     log_kernel_param = numpyro.sample("log_kernel_param", diag_normal)
 
     # log amp delta
-    log_amp_delta = numpyro.sample(
-       "log_amp_delta", dist.Normal(bestP["log_amp_delta"], 2.0)
-    ) # comment this out when using beta
+    #log_amp_delta = numpyro.sample(
+    #   "log_amp_delta", dist.Normal(bestP["log_amp_delta"], 2.0)
+    #) # comment this out when using beta
 
     # lag
     lag = numpyro.sample("lag", dist.Normal(bestP['lag'], 10.0))
@@ -147,7 +147,7 @@ def numpyro_model(X, yerr, y=None, bestP=None):
 
     sample_params = {
         "log_kernel_param": log_kernel_param,
-        "log_amp_delta": log_amp_delta, # comment this out when using beta
+        #"log_amp_delta": log_amp_delta, # comment this out when using beta
         "lag": lag,
         "mean": mean,
         "log_jitter": log_jitter,
@@ -160,6 +160,11 @@ def fit_multiband(data, progress_bar=False):
     times = data['times']
     mags = data['mags']
     magerrs = data['magerrs']
+
+    # Drop bands that cross the Lyman break
+    lyman_break_wavelength = 912  # in Angstroms
+    rest_frame_wavelengths = {band: lambda_pivot[band] / (1 + data['z']) for band in bands}
+    bands = [band for band in bands if rest_frame_wavelengths[band] > lyman_break_wavelength]
 
     # Combine
     all_times = np.concatenate([times[b] for b in bands])
@@ -271,9 +276,9 @@ def fit_multiband(data, progress_bar=False):
 
     log_sigma = np.log10(np.exp(samples['log_kernel_param'][:, 1]))
     beta = samples['beta']
-    #log_amp_delta = np.array([beta*np.log(lambda_pivot[band]/lambda_pivot[bands[0]]) for band in bands])
-    log_amp_delta = samples["log_amp_delta"].T
-    log_amp_delta = jnp.insert(log_amp_delta, 0, np.zeros(log_amp_delta.shape[1]), axis=0) # comment out this line when using beta
+    log_amp_delta = np.array([beta*np.log(lambda_pivot[band]/lambda_pivot[bands[0]]) for band in bands])
+    #log_amp_delta = samples["log_amp_delta"].T # comment out this line when using beta
+    #log_amp_delta = jnp.insert(log_amp_delta, 0, np.zeros(log_amp_delta.shape[1]), axis=0) # comment out this line when using beta
 
     log_sigma_band = log_sigma+log_amp_delta
 
@@ -391,7 +396,7 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, object_id):
                         color=colors[band_idx_map[n]])
     ax.set_ylabel('Magnitude + arbitrary offset')
     ax.invert_yaxis()  # Magnitudes are brighter when lower
-    ax.legend(loc='upper right')
+    #ax.legend(loc='upper right')
     ax.set_title(f'Light Curve for AGN {object_id}')
 
     plt.tight_layout()
