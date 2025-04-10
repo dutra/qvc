@@ -157,7 +157,7 @@ def numpyro_model(X, yerr, y=None, bestP=None, filtered_bands=None):
     
     mean = numpyro.sample("mean", dist.Normal(bestP['mean'], 0.1))
 
-    beta = numpyro.sample("beta", dist.Normal(bestP['beta'], 10.0))
+    beta = numpyro.sample("beta", dist.Normal(-0.5, 0.25))
 
     # kernel
     k = kernels.quasisep.Exp(*jnp.exp(log_kernel_param))
