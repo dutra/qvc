@@ -8,6 +8,11 @@ os.environ["VECLIB_MAXIMUM_THREADS"] = "32"
 os.environ["NUMBA_NUM_THREADS"] = "32"
 os.environ["JAX_TRACEBACK_FILTERING"] = "off"
 
+from collections.abc import Callable
+import equinox as eqx
+from tinygp.helpers import JAXArray
+from numpy.typing import NDArray
+import tinygp
 from functools import partial
 import numpy as np
 import matplotlib.pyplot as plt
@@ -61,7 +66,7 @@ from tinygp.helpers import JAXArray
 import corner
 import argparse
 
-num_samples = 250
+num_samples = 500
 
 # define params
 zero_mean = False
@@ -79,7 +84,7 @@ lambda_pivot = {
 
 
 filters = {"u": 0, "g": 1, "r": 2, "i": 3, "z": 4, "y": 5} # harcoded filter order for SDSS
-bands = ['u', 'g', 'r', 'i', 'z', 'y']
+bands = ['u', 'g', 'r', 'i', 'z']#, 'y']
 
 colors = {'u': 'tab:blue',
           'g': 'tab:green', 
@@ -90,9 +95,22 @@ colors = {'u': 'tab:blue',
 
 # Override MultiVarModel
 class MyMultiVarModel(MultiVarModel):
+    filtered_bands: JAXArray
+
+    def __init__(
+        self,
+        X: JAXArray,
+        y: JAXArray | NDArray,
+        yerr: JAXArray | NDArray,
+        kernel: tinygp.kernels.quasisep.Quasisep,
+        **kwargs,
+    ) -> None:
+        super().__init__(X, y, yerr, kernel, **kwargs)
+        self.filtered_bands = kwargs.get("filtered_bands", None)
+
     def amp_transform(self, params: dict[str, JAXArray]) -> JAXArray:
         b = params["beta"]
-        params["log_amp_delta"] = jnp.array([b*np.log(lambda_pivot[band]/lambda_pivot[bands[0]]) for band in bands[1:]]) # comment this out for old version
+        params["log_amp_delta"] = jnp.array([b*np.log(lambda_pivot[band]/lambda_pivot[self.filtered_bands[0]]) for band in self.filtered_bands[1:]]) # comment this out for old version
         r = jnp.insert(jnp.atleast_1d(params["log_amp_delta"]), 0, 0.0)
         return r
     pass
@@ -119,7 +137,7 @@ def initSampler(key, nSample, nBand=len(bands)):
         "log_jitter": logJitterSampler(subkeys[4], nSample),
         "beta": betaSampler(subkeys[5], nSample),
     }
-def numpyro_model(X, yerr, y=None, bestP=None):
+def numpyro_model(X, yerr, y=None, bestP=None, filtered_bands=None):
     # kernel param
     flat_normal = dist.Normal(bestP["log_kernel_param"], jnp.array([5.0, 5.0]))
     diag_normal = dist.Independent(flat_normal, 1)
@@ -143,7 +161,7 @@ def numpyro_model(X, yerr, y=None, bestP=None):
 
     # kernel
     k = kernels.quasisep.Exp(*jnp.exp(log_kernel_param))
-    m1 = MyMultiVarModel(X, y, yerr, k, zero_mean=zero_mean, has_jitter=has_jitter, has_lag=has_lag)
+    m1 = MyMultiVarModel(X, y, yerr, k, zero_mean=zero_mean, has_jitter=has_jitter, has_lag=has_lag, filtered_bands=filtered_bands)
 
     sample_params = {
         "log_kernel_param": log_kernel_param,
@@ -164,13 +182,13 @@ def fit_multiband(data, progress_bar=False):
     # Drop bands that cross the Lyman break
     lyman_break_wavelength = 912  # in Angstroms
     rest_frame_wavelengths = {band: lambda_pivot[band] / (1 + data['z']) for band in bands}
-    bands = [band for band in bands if rest_frame_wavelengths[band] > lyman_break_wavelength]
+    filtered_bands = [band for band in bands if rest_frame_wavelengths[band] > lyman_break_wavelength]
 
     # Combine
-    all_times = np.concatenate([times[b] for b in bands])
-    all_mags = np.concatenate([mags[b] for b in bands]) 
-    all_magerrs = np.concatenate([magerrs[b] for b in bands])
-    band_idx = np.concatenate([np.full(len(times[b]), i) for i, b in enumerate(bands)])
+    all_times = np.concatenate([times[b] for b in filtered_bands])
+    all_mags = np.concatenate([mags[b] for b in filtered_bands]) 
+    all_magerrs = np.concatenate([magerrs[b] for b in filtered_bands])
+    band_idx = np.concatenate([np.full(len(times[b]), i) for i, b in enumerate(filtered_bands)])
 
     if len(all_times) == 0 or len(all_mags) == 0 or len(all_magerrs) == 0:
         print(f"No magnitudes or errors for quasar {data['object_id']}, skipping.", flush=True)
@@ -224,7 +242,7 @@ def fit_multiband(data, progress_bar=False):
 
     # define model
     m1 = MyMultiVarModel(
-        X, y, yerr, k, zero_mean=zero_mean, has_jitter=has_jitter, has_lag=has_lag
+        X, y, yerr, k, zero_mean=zero_mean, has_jitter=has_jitter, has_lag=has_lag, filtered_bands=filtered_bands
     )
     bestP, logProb = fit(model=m1, 
                         optimizer=optax.adam(learning_rate=0.1),
@@ -236,7 +254,7 @@ def fit_multiband(data, progress_bar=False):
         bestP[k] += 1e-4 * np.random.randn(*bestP[k].shape) 
 
     nuts_kernel = NUTS(
-        partial(numpyro_model, bestP=bestP),
+        partial(numpyro_model, bestP=bestP, filtered_bands=filtered_bands),
         dense_mass=True,
         target_accept_prob=0.9,
         # adapt_step_size=True,
@@ -257,7 +275,8 @@ def fit_multiband(data, progress_bar=False):
         print(f"Diverging MCMC for quasar {data['object_id']}, skipping.", flush=True)
         return None
     
-    save_combined_plot(samples, m1, X, y, yerr, band_idx[mask_outlier], data['object_id'])
+    save_combined_plot(samples, m1, X, y, yerr, band_idx[mask_outlier], 
+                       data['object_id'], filtered_bands=filtered_bands)
     plot_posterior(samples, data['object_id'])
     
     log_tau_RF = np.log10(np.exp(samples['log_kernel_param'][:, 0])/(1+data['z']))
@@ -266,17 +285,18 @@ def fit_multiband(data, progress_bar=False):
     log_tau_RF = median
 
 
-    lambda_ref = lambda_pivot['i'] # Any reference wavelength
-    lambda_pivot_RF = lambda_pivot[bands[0]]/(1 + data['z'])
+    lambda_ref = 2500 # Any reference wavelength
+    lambda_pivot_RF = lambda_pivot[filtered_bands[0]]/(1 + data['z'])
     
     log_sigma_RF = np.log10(np.exp(samples['log_kernel_param'][:, 1] + samples['beta']*np.log(lambda_ref/lambda_pivot_RF)))
     lower, median, upper = np.percentile(log_sigma_RF, [16, 50, 84])
     log_sigma_RF_err = 0.5 * (upper - lower) # symmetric uncertainties
     log_sigma_RF = median
 
+
     log_sigma = np.log10(np.exp(samples['log_kernel_param'][:, 1]))
     beta = samples['beta']
-    log_amp_delta = np.array([beta*np.log(lambda_pivot[band]/lambda_pivot[bands[0]]) for band in bands])
+    log_amp_delta = np.array([beta*np.log(lambda_pivot[band]/lambda_pivot[filtered_bands[0]]) for band in filtered_bands])
     #log_amp_delta = samples["log_amp_delta"].T # comment out this line when using beta
     #log_amp_delta = jnp.insert(log_amp_delta, 0, np.zeros(log_amp_delta.shape[1]), axis=0) # comment out this line when using beta
 
@@ -373,8 +393,8 @@ def plot_posterior(samples, object_id):
     plt.savefig(os.path.join(output_dir, f"{object_id}_posterior.png"))
     plt.close(fig)
 
-def save_combined_plot(samples, model, X, y, yerr, band_idx, object_id):
-    band_idx_map = {i: b for i, b in enumerate(bands)}
+def save_combined_plot(samples, model, X, y, yerr, band_idx, object_id, filtered_bands):
+    band_idx_map = {i: b for i, b in enumerate(filtered_bands)}
 
     fig, ax = plt.subplots(1, 1, figsize=(8, 6), sharex=True)
     offsets = np.arange(len(bands)) * 0.25
@@ -397,6 +417,18 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, object_id):
     ax.set_ylabel('Magnitude + arbitrary offset')
     ax.invert_yaxis()  # Magnitudes are brighter when lower
     #ax.legend(loc='upper right')
+    # Annotate the legend with each letter in the same color
+    for i, band in enumerate(np.flip(filtered_bands)):
+        ax.annotate(
+            band.upper(),
+            xy=(0.95 - i * 0.05, 0.95),  # Adjust horizontal spacing
+            xycoords="axes fraction",
+            color=colors[band],
+            fontsize=18,
+            fontweight="bold",
+            ha="right",
+            va="top",
+        )
     ax.set_title(f'Light Curve for AGN {object_id}')
 
     plt.tight_layout()
@@ -577,8 +609,6 @@ def populate_sdss_fields(s82_objs):
         d['log_mbh_err'] = fits_data['LOGMBH_ERR'][j]  # Extract log MBH error values
         d['log_ledd_ratio'] = fits_data['LOGLEDD_RATIO'][j]  # Extract log L/edd values
         d['log_ledd_ratio_err'] = fits_data['LOGLEDD_RATIO_ERR'][j]  # Extract log L/edd error values
-        #d['z_sys_lines'] = fits_data['ZSYS_LINES'][j]  # Extract redshift (Z_SYS)
-        #d['z_sys_lines_err'] = fits_data['ZSYS_LINES_ERR'][j]  # Extract error in redshift (Z_SYS)
 
     return s82_objs
 
@@ -598,9 +628,14 @@ if __name__ == '__main__':
             q = {k: v for k, v in q.items() if k not in fields_to_filter}
             print(q)
     
-    sys.exit("Exiting the program as requested.")
+        sys.exit("Exiting the program as requested.")
 
-    chunk_size = 200
+    filter_df = pd.read_csv("data/object_ids_test.csv", dtype={"object_id": str})
+    filter_object_ids = set(filter_df["object_id"])
+    print(f"Loaded {len(filter_object_ids)} object IDs from filter_object_ids.csv")
+    objs = concat_light_curves(filter_object_ids=filter_object_ids)
+
+    chunk_size = 50
     for start_idx in range(0, len(objs), chunk_size):
         print("========================================================================")
         print(f"Processing chunk {start_idx // chunk_size + 1}/{(len(objs) + chunk_size - 1) // chunk_size}...")
@@ -618,7 +653,7 @@ if __name__ == '__main__':
         filtered_quasar_list = [{k: v for k, v in q.items() if k not in fields_to_filter} for q in quasar_list]
 
         df = pd.DataFrame.from_records(filtered_quasar_list)
-        output_file = 'data/s82_multiband_fitted_sdss_small_allbands_eztaox.csv'
+        output_file = 'data/s82_objects_ids_test.csv'
         if os.path.exists(output_file):
             existing_df = pd.read_csv(output_file)
             merged_df = pd.concat([existing_df, df], ignore_index=True)
