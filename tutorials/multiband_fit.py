@@ -383,7 +383,9 @@ def plot_posterior(samples, object_id):
     posterior_samples = {
         r'$\beta$': samples['beta'],
         r'$\log(\tau_\mathrm{RF})$': np.log10(np.exp(samples['log_kernel_param'][:, 0])),
-        r'$\log(\sigma)$': np.log10(np.exp(samples['log_kernel_param'][:, 1]))
+        r'$\log(\sigma)$': np.log10(np.exp(samples['log_kernel_param'][:, 1])),
+        r'poly1': samples['poly1'],
+        r'mean': samples['mean'][:,0],
     }
     # Convert the samples to a 2D array for corner
     data = np.vstack([posterior_samples[key] for key in posterior_samples.keys()]).T
@@ -421,7 +423,7 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, object_id, filtered
     # Annotate the legend with each letter in the same color
     for i, band in enumerate(np.flip(filtered_bands)):
         ax.annotate(
-            band.upper(),
+            band,
             xy=(0.95 - i * 0.05, 0.95),  # Adjust horizontal spacing
             xycoords="axes fraction",
             color=colors[band],
