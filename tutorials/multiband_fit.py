@@ -44,7 +44,7 @@ import numpy as np
 import optax
 from eztaox.fitter import fit
 from eztaox.initializers import DRWInit, UniformInit
-from eztaox.models import MultiVarModel
+from eztaox.models import MultiVarModel, MultiVarModelFFT
 from eztaox.utils import formatlc
 from tinygp import kernels
 
@@ -93,8 +93,22 @@ colors = {'u': 'tab:blue',
           'z': 'tab:brown', 
           'y': 'tab:gray'}
 
+class ExpPolyKernel(tinygp.kernels.Kernel):
+    exp_amplitude: float
+    exp_kernel: tinygp.kernels.Kernel
+    poly_kernel: tinygp.kernels.Kernel
+
+    def __init__(self, exp_scale, exp_amplitude, poly_scale, poly_amplitude):
+        self.exp_amplitude = exp_amplitude
+        self.exp_kernel = kernels.stationary.Exp(exp_scale)
+        self.poly_kernel = kernels.Polynomial(1, poly_scale, poly_amplitude)
+
+    def evaluate(self, X1, X2):
+        return self.exp_amplitude * self.exp_kernel.evaluate(X1, X2) + self.poly_kernel.evaluate(X1, X2)
+        
+
 # Override MultiVarModel
-class MyMultiVarModel(MultiVarModel):
+class MyMultiVarModel(MultiVarModelFFT):
     filtered_bands: JAXArray
 
     def __init__(
@@ -113,8 +127,8 @@ class MyMultiVarModel(MultiVarModel):
         params["log_amp_delta"] = jnp.array([b*np.log(lambda_pivot[band]/lambda_pivot[self.filtered_bands[0]]) for band in self.filtered_bands[1:]]) # comment this out for old version
         r = jnp.insert(jnp.atleast_1d(params["log_amp_delta"]), 0, 0.0)
         return r
-    pass
-    
+
+
 def initSampler(key, nSample, nBand=len(bands)):
     # split keys
     subkeys = jax.random.split(key, 10)
@@ -137,9 +151,10 @@ def initSampler(key, nSample, nBand=len(bands)):
         "log_jitter": logJitterSampler(subkeys[4], nSample),
         "beta": betaSampler(subkeys[5], nSample),
     }
+
 def numpyro_model(X, yerr, y=None, bestP=None, filtered_bands=None):
     # kernel param
-    flat_normal = dist.Normal(bestP["log_kernel_param"], jnp.array([5.0, 5.0]))
+    flat_normal = dist.Normal(bestP["log_kernel_param"], jnp.array([5.0, 5.0, 5.0, 5.0]))
     diag_normal = dist.Independent(flat_normal, 1)
     log_kernel_param = numpyro.sample("log_kernel_param", diag_normal)
 
@@ -160,7 +175,10 @@ def numpyro_model(X, yerr, y=None, bestP=None, filtered_bands=None):
     beta = numpyro.sample("beta", dist.Normal(-0.5, 0.25))
 
     # kernel
-    k = kernels.quasisep.Exp(*jnp.exp(log_kernel_param))
+    k = ExpPolyKernel(*jnp.exp(log_kernel_param))
+
+    # non-stationary kernel
+
     m1 = MyMultiVarModel(X, y, yerr, k, zero_mean=zero_mean, has_jitter=has_jitter, has_lag=has_lag, filtered_bands=filtered_bands)
 
     sample_params = {
@@ -236,9 +254,11 @@ def fit_multiband(data, progress_bar=False):
     t = jnp.array(t[mask_outlier])
 
     # define kernel
-    initial_drw_params = {"log_kernel_param": jnp.log(np.array([100.0, 0.35]))}
-    k = kernels.quasisep.Exp(*jnp.exp(initial_drw_params["log_kernel_param"]))
+    initial_drw_params = {"log_kernel_param": jnp.log(np.array([100.0, 0.35, 1000.0, 0.15]))}
 
+    #k = kernels.quasisep.Exp(*jnp.exp(initial_drw_params["log_kernel_param"]))
+
+    k = ExpPolyKernel(*jnp.exp(initial_drw_params["log_kernel_param"]))
 
     # define model
     m1 = MyMultiVarModel(
@@ -252,6 +272,8 @@ def fit_multiband(data, progress_bar=False):
 
     for k in bestP.keys():
         bestP[k] += 1e-4 * np.random.randn(*bestP[k].shape) 
+
+    print('Best parameters:', bestP)
 
     nuts_kernel = NUTS(
         partial(numpyro_model, bestP=bestP, filtered_bands=filtered_bands),
