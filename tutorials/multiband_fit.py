@@ -43,10 +43,9 @@ plt.style.use("style.mplstyle")
 import numpy as np
 import optax
 from eztaox.fitter import fit
-from eztaox.initializers import DRWInit, UniformInit, InitializerBase
+from eztaox.initializers import DRWInit, UniformInit
 from eztaox.models import MultiVarModel, MultiVarModelFFT
 from eztaox.utils import formatlc
-from collections.abc import Sequence
 from tinygp import kernels
 
 from astropy.coordinates import SkyCoord
@@ -94,60 +93,8 @@ colors = {'u': 'tab:blue',
           'z': 'tab:brown', 
           'y': 'tab:gray'}
 
-class ExpPolyInit(InitializerBase):
-    logScaleRange: Sequence[JAXArray | float]
-    logSigmaRange: Sequence[JAXArray | float]
-    logPolyScaleRange: Sequence[JAXArray | float]
-    logPolySigmaRange: Sequence[JAXArray | float]
-
-    def __init__(
-        self,
-        logScaleRange: Sequence[JAXArray | float],
-        logSigmaRange: Sequence[JAXArray | float],
-        logPolyScaleRange: Sequence[JAXArray | float],
-        logPolySigmaRange: Sequence[JAXArray | float],
-    ) -> None:
-        self.logScaleRange = logScaleRange
-        self.logSigmaRange = logSigmaRange
-        self.logPolyScaleRange = logPolyScaleRange
-        self.logPolySigmaRange = logPolySigmaRange
-
-    def __call__(
-        self,
-        key: jax.random.PRNGKey,
-        nSample: int,
-    ) -> JAXArray:
-        key1, key2, key3, key4 = jax.random.split(key, num=4)
-        logScale = dist.Uniform(*self.logScaleRange).sample(key1, (nSample,))
-        logSigma = dist.Uniform(*self.logSigmaRange).sample(key2, (nSample,))
-        logPolyScale = dist.Uniform(*self.logPolyScaleRange).sample(key3, (nSample,))
-        logPolySigma = dist.Uniform(*self.logPolySigmaRange).sample(key4, (nSample,))
-
-        if nSample == 1:
-            return jnp.stack([logScale, logSigma, logPolyScale, logPolySigma], axis=1)[0]
-        else:
-            return jnp.stack([logScale, logSigma, logPolyScale, logPolySigma], axis=-1)
-
-class ExpPolyKernel(tinygp.kernels.Kernel):
-    exp_amplitude: float
-    exp_kernel: tinygp.kernels.Kernel
-    poly_kernel: tinygp.kernels.Kernel
-
-    def __init__(self, exp_scale, exp_amplitude, poly_scale, poly_amplitude):
-        jax.debug.print("exp_scale {x}", x=exp_scale)
-        jax.debug.print("exp_amplitude {x}", x=exp_amplitude)
-        jax.debug.print("poly_scale {x}", x=poly_scale)
-        jax.debug.print("poly_amplitude {x}", x=poly_amplitude)
-        self.exp_amplitude = exp_amplitude
-        self.exp_kernel = kernels.stationary.Exp(exp_scale)
-        self.poly_kernel = kernels.Polynomial(1, poly_scale, poly_amplitude)
-
-    def evaluate(self, X1, X2):
-        return self.exp_amplitude * self.exp_kernel.evaluate(X1, X2) + self.poly_kernel.evaluate(X1, X2)
-        
-
 # Override MultiVarModel
-class MyMultiVarModel(MultiVarModelFFT):
+class MyMultiVarModel(MultiVarModel):
     filtered_bands: JAXArray
 
     def __init__(
@@ -166,8 +113,8 @@ class MyMultiVarModel(MultiVarModelFFT):
         params["log_amp_delta"] = jnp.array([b*np.log(lambda_pivot[band]/lambda_pivot[self.filtered_bands[0]]) for band in self.filtered_bands[1:]]) # comment this out for old version
         r = jnp.insert(jnp.atleast_1d(params["log_amp_delta"]), 0, 0.0)
         return r
-
-
+    pass
+    
 def initSampler(key, nSample, nBand=len(bands)):
     # split keys
     subkeys = jax.random.split(key, 10)
@@ -180,11 +127,7 @@ def initSampler(key, nSample, nBand=len(bands)):
     betaSampler = UniformInit(1, [-2.0, 0.0])
 
     # kernel init
-    #kernelSampler = DRWInit([jnp.log(100), jnp.log(0.1)], [jnp.log(0.01), 0.0])
-    kernelSampler = ExpPolyInit([jnp.log(100), jnp.log(0.1)], [jnp.log(0.01), 0.0],
-                                [jnp.log(1000), jnp.log(0.1)], [jnp.log(0.01), 0.0])
-
-    jax.debug.print('!!!')
+    kernelSampler = DRWInit([jnp.log(100), jnp.log(0.1)], [jnp.log(0.01), 0.0])
 
     return {
         "log_kernel_param": kernelSampler(subkeys[0], nSample),
@@ -194,12 +137,9 @@ def initSampler(key, nSample, nBand=len(bands)):
         "log_jitter": logJitterSampler(subkeys[4], nSample),
         "beta": betaSampler(subkeys[5], nSample),
     }
-
 def numpyro_model(X, yerr, y=None, bestP=None, filtered_bands=None):
     # kernel param
-    jax.debug.print('{x}', x=bestP["log_kernel_param"])
-    flat_normal = dist.Normal(bestP["log_kernel_param"], jnp.array([5.0, 5.0, 5.0, 5.0]))
-    jax.debug.print('???')
+    flat_normal = dist.Normal(bestP["log_kernel_param"], jnp.array([5.0, 5.0]))
     diag_normal = dist.Independent(flat_normal, 1)
     log_kernel_param = numpyro.sample("log_kernel_param", diag_normal)
 
@@ -220,10 +160,7 @@ def numpyro_model(X, yerr, y=None, bestP=None, filtered_bands=None):
     beta = numpyro.sample("beta", dist.Normal(-0.5, 0.25))
 
     # kernel
-    k = ExpPolyKernel(*jnp.exp(log_kernel_param))
-
-    # non-stationary kernel
-
+    k = kernels.quasisep.Exp(*jnp.exp(log_kernel_param))
     m1 = MyMultiVarModel(X, y, yerr, k, zero_mean=zero_mean, has_jitter=has_jitter, has_lag=has_lag, filtered_bands=filtered_bands)
 
     sample_params = {
@@ -298,12 +235,10 @@ def fit_multiband(data, progress_bar=False):
     yerr = jnp.array(yerr[mask_outlier])
     t = jnp.array(t[mask_outlier])
 
-    # define kernel    
-    #initial_drw_params = {"log_kernel_param": jnp.log(np.array([100.0, 0.35]))}
-    #k = kernels.quasisep.Exp(*jnp.exp(initial_drw_params["log_kernel_param"]))
+    # define kernel
+    initial_drw_params = {"log_kernel_param": jnp.log(np.array([100.0, 0.35]))}
+    k = kernels.quasisep.Exp(*jnp.exp(initial_drw_params["log_kernel_param"]))
 
-    initial_drw_params = {"log_kernel_param": jnp.log(np.array([100.0, 0.35, 1000.0, 0.15]))}
-    k = ExpPolyKernel(*jnp.exp(initial_drw_params["log_kernel_param"]))
 
     # define model
     m1 = MyMultiVarModel(
@@ -313,12 +248,10 @@ def fit_multiband(data, progress_bar=False):
                         optimizer=optax.adam(learning_rate=0.1),
                         initSampler=initSampler,
                         prng_key=jax.random.PRNGKey(0),
-                        nSample=1, nIter=2, nBest=5)
+                        nSample=10_000, nIter=2, nBest=5)
 
     for k in bestP.keys():
         bestP[k] += 1e-4 * np.random.randn(*bestP[k].shape) 
-
-    print('Best parameters:', bestP)
 
     nuts_kernel = NUTS(
         partial(numpyro_model, bestP=bestP, filtered_bands=filtered_bands),
@@ -448,9 +381,9 @@ def save_lc_plot(bands, times, mags, magerrs, object_id):
 def plot_posterior(samples, object_id):
     # Extract the posterior samples
     posterior_samples = {
-        'beta': samples['beta'],
-        'log_tau_RF': np.log10(np.exp(samples['log_kernel_param'][:, 0])),
-        'log_sigma': np.log10(np.exp(samples['log_kernel_param'][:, 1]))
+        r'$\beta$': samples['beta'],
+        r'$\log(\tau_\mathrm{RF})$': np.log10(np.exp(samples['log_kernel_param'][:, 0])),
+        r'$\log(\sigma)$': np.log10(np.exp(samples['log_kernel_param'][:, 1]))
     }
     # Convert the samples to a 2D array for corner
     data = np.vstack([posterior_samples[key] for key in posterior_samples.keys()]).T
@@ -458,6 +391,7 @@ def plot_posterior(samples, object_id):
     output_dir = "posterior_plots"
     os.makedirs(output_dir, exist_ok=True)
     plt.savefig(os.path.join(output_dir, f"{object_id}_posterior.png"))
+    return fig
     plt.close(fig)
 
 def save_combined_plot(samples, model, X, y, yerr, band_idx, object_id, filtered_bands):
@@ -504,6 +438,8 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, object_id, filtered
     output_dir = "light_curves_fits"
     os.makedirs(output_dir, exist_ok=True)
     plt.savefig(os.path.join(output_dir, f'{object_id}_combined_plot.png'))
+    plt.show()
+    return fig
     plt.close(fig)
 
 
