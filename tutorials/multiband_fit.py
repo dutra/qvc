@@ -43,9 +43,10 @@ plt.style.use("style.mplstyle")
 import numpy as np
 import optax
 from eztaox.fitter import fit
-from eztaox.initializers import DRWInit, UniformInit
+from eztaox.initializers import DRWInit, UniformInit, InitializerBase
 from eztaox.models import MultiVarModel, MultiVarModelFFT
 from eztaox.utils import formatlc
+from collections.abc import Sequence
 from tinygp import kernels
 
 from astropy.coordinates import SkyCoord
@@ -93,12 +94,50 @@ colors = {'u': 'tab:blue',
           'z': 'tab:brown', 
           'y': 'tab:gray'}
 
+class ExpPolyInit(InitializerBase):
+    logScaleRange: Sequence[JAXArray | float]
+    logSigmaRange: Sequence[JAXArray | float]
+    logPolyScaleRange: Sequence[JAXArray | float]
+    logPolySigmaRange: Sequence[JAXArray | float]
+
+    def __init__(
+        self,
+        logScaleRange: Sequence[JAXArray | float],
+        logSigmaRange: Sequence[JAXArray | float],
+        logPolyScaleRange: Sequence[JAXArray | float],
+        logPolySigmaRange: Sequence[JAXArray | float],
+    ) -> None:
+        self.logScaleRange = logScaleRange
+        self.logSigmaRange = logSigmaRange
+        self.logPolyScaleRange = logPolyScaleRange
+        self.logPolySigmaRange = logPolySigmaRange
+
+    def __call__(
+        self,
+        key: jax.random.PRNGKey,
+        nSample: int,
+    ) -> JAXArray:
+        key1, key2, key3, key4 = jax.random.split(key, num=4)
+        logScale = dist.Uniform(*self.logScaleRange).sample(key1, (nSample,))
+        logSigma = dist.Uniform(*self.logSigmaRange).sample(key2, (nSample,))
+        logPolyScale = dist.Uniform(*self.logPolyScaleRange).sample(key3, (nSample,))
+        logPolySigma = dist.Uniform(*self.logPolySigmaRange).sample(key4, (nSample,))
+
+        if nSample == 1:
+            return jnp.stack([logScale, logSigma, logPolyScale, logPolySigma], axis=1)[0]
+        else:
+            return jnp.stack([logScale, logSigma, logPolyScale, logPolySigma], axis=-1)
+
 class ExpPolyKernel(tinygp.kernels.Kernel):
     exp_amplitude: float
     exp_kernel: tinygp.kernels.Kernel
     poly_kernel: tinygp.kernels.Kernel
 
     def __init__(self, exp_scale, exp_amplitude, poly_scale, poly_amplitude):
+        jax.debug.print("exp_scale {x}", x=exp_scale)
+        jax.debug.print("exp_amplitude {x}", x=exp_amplitude)
+        jax.debug.print("poly_scale {x}", x=poly_scale)
+        jax.debug.print("poly_amplitude {x}", x=poly_amplitude)
         self.exp_amplitude = exp_amplitude
         self.exp_kernel = kernels.stationary.Exp(exp_scale)
         self.poly_kernel = kernels.Polynomial(1, poly_scale, poly_amplitude)
@@ -141,7 +180,11 @@ def initSampler(key, nSample, nBand=len(bands)):
     betaSampler = UniformInit(1, [-2.0, 0.0])
 
     # kernel init
-    kernelSampler = DRWInit([jnp.log(100), jnp.log(0.1)], [jnp.log(0.01), 0.0])
+    #kernelSampler = DRWInit([jnp.log(100), jnp.log(0.1)], [jnp.log(0.01), 0.0])
+    kernelSampler = ExpPolyInit([jnp.log(100), jnp.log(0.1)], [jnp.log(0.01), 0.0],
+                                [jnp.log(1000), jnp.log(0.1)], [jnp.log(0.01), 0.0])
+
+    jax.debug.print('!!!')
 
     return {
         "log_kernel_param": kernelSampler(subkeys[0], nSample),
@@ -154,7 +197,9 @@ def initSampler(key, nSample, nBand=len(bands)):
 
 def numpyro_model(X, yerr, y=None, bestP=None, filtered_bands=None):
     # kernel param
+    jax.debug.print('{x}', x=bestP["log_kernel_param"])
     flat_normal = dist.Normal(bestP["log_kernel_param"], jnp.array([5.0, 5.0, 5.0, 5.0]))
+    jax.debug.print('???')
     diag_normal = dist.Independent(flat_normal, 1)
     log_kernel_param = numpyro.sample("log_kernel_param", diag_normal)
 
@@ -253,11 +298,11 @@ def fit_multiband(data, progress_bar=False):
     yerr = jnp.array(yerr[mask_outlier])
     t = jnp.array(t[mask_outlier])
 
-    # define kernel
-    initial_drw_params = {"log_kernel_param": jnp.log(np.array([100.0, 0.35, 1000.0, 0.15]))}
-
+    # define kernel    
+    #initial_drw_params = {"log_kernel_param": jnp.log(np.array([100.0, 0.35]))}
     #k = kernels.quasisep.Exp(*jnp.exp(initial_drw_params["log_kernel_param"]))
 
+    initial_drw_params = {"log_kernel_param": jnp.log(np.array([100.0, 0.35, 1000.0, 0.15]))}
     k = ExpPolyKernel(*jnp.exp(initial_drw_params["log_kernel_param"]))
 
     # define model
@@ -268,7 +313,7 @@ def fit_multiband(data, progress_bar=False):
                         optimizer=optax.adam(learning_rate=0.1),
                         initSampler=initSampler,
                         prng_key=jax.random.PRNGKey(0),
-                        nSample=10_000, nIter=2, nBest=5)
+                        nSample=1, nIter=2, nBest=5)
 
     for k in bestP.keys():
         bestP[k] += 1e-4 * np.random.randn(*bestP[k].shape) 
