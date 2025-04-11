@@ -1,18 +1,27 @@
-"Kernels module"
+"""Quasisep Kernels"""
 from __future__ import annotations
-
-from typing import Any
 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
-import tinygp
 from numpy.typing import NDArray
 from tinygp.helpers import JAXArray
-from tinygp.kernels.quasisep import Quasisep
+from tinygp.kernels.quasisep import (
+    SHO,
+    Celerite,
+    Cosine,
+    Exp,
+    Matern32,
+    Matern52,
+    Product,
+    Quasisep,
+    Scale,
+    Sum,
+    Wrapper,
+)
 
 
-class mb_kernel(tinygp.kernels.quasisep.Wrapper):
+class MultibandLowRank(Wrapper):
     amplitudes: jnp.ndarray
 
     def coord_to_sortable(self, X) -> JAXArray:
