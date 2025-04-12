@@ -47,6 +47,8 @@ from eztaox.initializers import DRWInit, UniformInit
 from eztaox.models import MultiVarModel, MultiVarModelFFT
 from eztaox.utils import formatlc
 from tinygp import kernels
+from tinygp import GaussianProcess
+from eztaox.kernels import direct, quasisep
 
 from astropy.coordinates import SkyCoord
 from astropy import units as u
@@ -108,12 +110,59 @@ class MyMultiVarModel(MultiVarModel):
         super().__init__(X, y, yerr, kernel, **kwargs)
         self.filtered_bands = kwargs.get("filtered_bands", None)
 
+    @staticmethod
+    def mean_func(
+        zero_mean: bool, nBand: int, params: dict[str, JAXArray], X: JAXArray
+    ) -> JAXArray:
+        if zero_mean is True:
+            means = jnp.zeros(nBand)
+        else:
+            means = jnp.atleast_1d(params["mean"]) + params["poly1"] * (X[0] / (365.25*10))
+        return means[X[1]]
+
+    def _build_gp(
+        self, params: dict[str, JAXArray]
+    ) -> tuple[GaussianProcess, JAXArray]:
+        # log amp + mean
+        log_amps = self.amp_transform(params)
+        means = partial(
+            MyMultiVarModel.mean_func, self.zero_mean, log_amps.shape[0], params
+        )
+
+        # time axis transform: t and band are not sorted,
+        # inds gives the sorted indices for the new_t
+        X, inds = self.lag_transform(self.X, self.has_lag, params)
+        t = X[0]
+        band = X[1]
+
+        # add jitter to the diagonal
+        if self.has_jitter is True:
+            diags = self.diag[inds] + (jnp.exp(params["log_jitter"]) ** 2)[band[inds]]
+        else:
+            diags = self.diag[inds]
+
+        # def kernel
+        kernel = quasisep.MultibandLowRank(
+            amplitudes=jnp.exp(log_amps),
+            kernel=self.kernel_def(jnp.exp(params["log_kernel_param"])),
+        )
+
+        return (
+            GaussianProcess(
+                kernel,
+                (t[inds], band[inds]),
+                diag=diags,
+                mean=means,
+                assume_sorted=True,
+            ),
+            inds,
+        )
+
     def amp_transform(self, params: dict[str, JAXArray]) -> JAXArray:
         b = params["beta"]
         params["log_amp_delta"] = jnp.array([b*np.log(lambda_pivot[band]/lambda_pivot[self.filtered_bands[0]]) for band in self.filtered_bands[1:]]) # comment this out for old version
         r = jnp.insert(jnp.atleast_1d(params["log_amp_delta"]), 0, 0.0)
         return r
-    pass
     
 def initSampler(key, nSample, nBand=len(bands)):
     # split keys
@@ -122,6 +171,7 @@ def initSampler(key, nSample, nBand=len(bands)):
     # uniform sampler
     lagSampler = UniformInit(nBand-1, [-10, 10])
     meanSampler = UniformInit(nBand, [-1, 1])
+    poly1Sampler = UniformInit(1, [-0.1, 0.1])
     logAmpDeltaSampler = UniformInit(nBand-1, [-2, 0.0])
     logJitterSampler = UniformInit(nBand, [-20, -5])
     betaSampler = UniformInit(1, [-2.0, 0.0])
@@ -133,10 +183,12 @@ def initSampler(key, nSample, nBand=len(bands)):
         "log_kernel_param": kernelSampler(subkeys[0], nSample),
         "log_amp_delta": logAmpDeltaSampler(subkeys[1], nSample),
         "mean": meanSampler(subkeys[2], nSample),
+        "poly1": poly1Sampler(subkeys[6], nSample),
         "lag": lagSampler(subkeys[3], nSample),
         "log_jitter": logJitterSampler(subkeys[4], nSample),
         "beta": betaSampler(subkeys[5], nSample),
     }
+
 def numpyro_model(X, yerr, y=None, bestP=None, filtered_bands=None):
     # kernel param
     flat_normal = dist.Normal(bestP["log_kernel_param"], jnp.array([5.0, 5.0]))
@@ -156,8 +208,10 @@ def numpyro_model(X, yerr, y=None, bestP=None, filtered_bands=None):
     log_jitter = numpyro.sample("log_jitter", dist.Normal(bestP["log_jitter"], 0.1))
     
     mean = numpyro.sample("mean", dist.Normal(bestP['mean'], 0.1))
+    poly1 = numpyro.sample("poly1", dist.Normal(bestP['poly1'], 0.1))
 
     beta = numpyro.sample("beta", dist.Normal(-0.5, 0.25))
+
 
     # kernel
     k = kernels.quasisep.Exp(*jnp.exp(log_kernel_param))
@@ -168,6 +222,7 @@ def numpyro_model(X, yerr, y=None, bestP=None, filtered_bands=None):
         #"log_amp_delta": log_amp_delta, # comment this out when using beta
         "lag": lag,
         "mean": mean,
+        "poly1": poly1,
         "log_jitter": log_jitter,
         "beta": beta,
     }
@@ -277,7 +332,7 @@ def fit_multiband(data, progress_bar=False):
     
     save_combined_plot(samples, m1, X, y, yerr, band_idx[mask_outlier], 
                        data['object_id'], filtered_bands=filtered_bands)
-    plot_posterior(samples, data['object_id'])
+    plot_posterior(samples, data, filtered_bands=filtered_bands)
     
     log_tau_RF = np.log10(np.exp(samples['log_kernel_param'][:, 0])/(1+data['z']))
     lower, median, upper = np.percentile(log_tau_RF, [16, 50, 84])
@@ -324,6 +379,13 @@ def fit_multiband(data, progress_bar=False):
 
     log_jitter = np.percentile(np.log10(np.exp(2*samples['log_jitter'])), 50, axis=0)
 
+    lower, median, upper = np.percentile(samples['poly1'], [16, 50, 84], axis=0)
+    poly1_err = 0.5 * (upper - lower) # symmetric uncertainties
+    poly1 = median
+
+    lower, median, upper = np.percentile(samples['mean'], [16, 50, 84], axis=0)
+    mean_err = 0.5 * (upper - lower) # symmetric uncertainties
+    mean = median
 
     d = dict(log_tau_RF=log_tau_RF,
             log_tau_RF_err=log_tau_RF_err,
@@ -337,7 +399,12 @@ def fit_multiband(data, progress_bar=False):
             log_amp_delta_err=log_amp_delta_err,
             log_sigma=log_sigma,
             log_sigma_err=log_sigma_err,
-            log_jitter=log_jitter)
+            log_jitter=log_jitter,
+            poly1=poly1,
+            poly1_err=poly1_err,
+            mean=mean,
+            mean_err=mean_err,
+            filtered_bands=filtered_bands,)
     return d
 
 
@@ -378,23 +445,29 @@ def save_lc_plot(bands, times, mags, magerrs, object_id):
     plt.savefig(os.path.join("light_curves", f'{object_id}_light_curve.png'))
     plt.close(fig)
 
-def plot_posterior(samples, object_id):
+def plot_posterior(samples, data, filtered_bands=None):
     # Extract the posterior samples
+    object_id = data['object_id']
+    lambda_ref = 2500 # Any reference wavelength
+    lambda_pivot_RF = lambda_pivot[filtered_bands[0]]/(1 + data['z'])
+    log_sigma_RF = np.log10(np.exp(samples['log_kernel_param'][:, 1] + samples['beta']*np.log(lambda_ref/lambda_pivot_RF)))
+    log_tau_RF = np.log10(np.exp(samples['log_kernel_param'][:, 0])/(1+data['z']))
+
     posterior_samples = {
         r'$\beta$': samples['beta'],
-        r'$\log(\tau_\mathrm{RF})$': np.log10(np.exp(samples['log_kernel_param'][:, 0])),
-        r'$\log(\sigma)$': np.log10(np.exp(samples['log_kernel_param'][:, 1])),
+        r'$\log(\tau_\mathrm{RF})$': log_tau_RF,
+        r'$\log(\sigma_RF)$': log_sigma_RF,
         r'poly1': samples['poly1'],
         r'mean': samples['mean'][:,0],
     }
     # Convert the samples to a 2D array for corner
-    data = np.vstack([posterior_samples[key] for key in posterior_samples.keys()]).T
-    fig = corner.corner(data, labels=list(posterior_samples.keys()), show_titles=True)
+    corner_data = np.vstack([posterior_samples[key] for key in posterior_samples.keys()]).T
+    fig = corner.corner(corner_data, labels=list(posterior_samples.keys()), show_titles=True)
     output_dir = "posterior_plots"
     os.makedirs(output_dir, exist_ok=True)
     plt.savefig(os.path.join(output_dir, f"{object_id}_posterior.png"))
-    return fig
     plt.close(fig)
+    return fig
 
 def save_combined_plot(samples, model, X, y, yerr, band_idx, object_id, filtered_bands):
     band_idx_map = {i: b for i, b in enumerate(filtered_bands)}
@@ -440,9 +513,8 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, object_id, filtered
     output_dir = "light_curves_fits"
     os.makedirs(output_dir, exist_ok=True)
     plt.savefig(os.path.join(output_dir, f'{object_id}_combined_plot.png'))
-    plt.show()
-    return fig
     plt.close(fig)
+    return fig
 
 
 def concat_light_curves(filter_object_ids=None, save_file_path=None):
@@ -462,7 +534,6 @@ def concat_light_curves(filter_object_ids=None, save_file_path=None):
     match_object_ids = set(sdss.objectId) if filter_object_ids is None else filter_object_ids
     matching_indices = cat[cat.objectId.isin(match_object_ids)].index
     cat = cat.loc[matching_indices]
-    #cat = cat[:5000]
 
     print(f"Found {len(cat)} matching objects", len(cat))
 
@@ -635,12 +706,13 @@ if __name__ == '__main__':
     
         sys.exit("Exiting the program as requested.")
 
-    filter_df = pd.read_csv("data/object_ids_test.csv", dtype={"object_id": str})
+    filter_df = pd.read_csv("data/object_ids_test_2.csv", dtype={"object_id": str})
     filter_object_ids = set(filter_df["object_id"])
     print(f"Loaded {len(filter_object_ids)} object IDs from filter_object_ids.csv")
     objs = concat_light_curves(filter_object_ids=filter_object_ids)
+    #objs = objs[:10]
 
-    chunk_size = 50
+    chunk_size = 100
     for start_idx in range(0, len(objs), chunk_size):
         print("========================================================================")
         print(f"Processing chunk {start_idx // chunk_size + 1}/{(len(objs) + chunk_size - 1) // chunk_size}...")
@@ -653,15 +725,20 @@ if __name__ == '__main__':
             results = pool.map(partial(process_quasar, n=len(chunk)), enumerate(chunk))
 
         quasar_list = [q for q in results if q is not None]
+        output_file = "data/quasars_fit_test.h5"
 
-        fields_to_filter = ['times', 'mags', 'magerrs']
-        filtered_quasar_list = [{k: v for k, v in q.items() if k not in fields_to_filter} for q in quasar_list]
+        # Append to HDF5 file if it exists, otherwise create a new one
+        with h5py.File(output_file, "a") as hdf:
+            for quasar in quasar_list:
+                object_id = quasar["object_id"]
+                if object_id in hdf:
+                    continue
 
-        df = pd.DataFrame.from_records(filtered_quasar_list)
-        output_file = 'data/s82_objects_ids_test.csv'
-        if os.path.exists(output_file):
-            existing_df = pd.read_csv(output_file)
-            merged_df = pd.concat([existing_df, df], ignore_index=True)
-            merged_df.to_csv(output_file, index=False)
-        else:
-            df.to_csv(output_file, index=False)
+                group = hdf.create_group(object_id)
+                for key, value in quasar.items():
+                    if isinstance(value, dict):
+                        sub_group = group.create_group(key)
+                        for sub_key, sub_value in value.items():
+                            sub_group.create_dataset(sub_key, data=sub_value)
+                    else:
+                        group.attrs[key] = value
