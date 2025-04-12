@@ -83,7 +83,14 @@ lambda_pivot = {
     'z': 9134,  # SDSS z-band
     'y': 9633,  # PS1 y-band
 }
-
+lambda_fwhm = {
+    'u': 558,   # SDSS u-band FWHM
+    'g': 1158,  # SDSS g-band FWHM
+    'r': 1113,  # SDSS r-band FWHM
+    'i': 1044,  # SDSS i-band FWHM
+    'z': 1122,  # SDSS z-band FWHM
+    'y': 1200,  # PS1 y-band FWHM (approximate)
+}
 
 filters = {"u": 0, "g": 1, "r": 2, "i": 3, "z": 4, "y": 5} # harcoded filter order for SDSS
 bands = ['u', 'g', 'r', 'i', 'z']#, 'y']
@@ -234,8 +241,14 @@ def fit_multiband(data, progress_bar=False):
     mags = data['mags']
     magerrs = data['magerrs']
 
+    # Drop bands that fall in the H-alpha line
+    h_alpha_wavelength = 6563.0  # in Angstroms
+    rest_frame_wavelength_lo = {band: (lambda_pivot[band] - lambda_fwhm[band]) / (1 + data['z']) for band in bands}
+    rest_frame_wavelength_hi = {band: (lambda_pivot[band] + lambda_fwhm[band]) / (1 + data['z']) for band in bands}
+    filtered_bands = [band for band in bands if rest_frame_wavelength_lo[band] < h_alpha_wavelength and rest_frame_wavelength_hi[band] > h_alpha_wavelength]
+
     # Drop bands that cross the Lyman break
-    lyman_break_wavelength = 912  # in Angstroms
+    lyman_break_wavelength = 912.0  # in Angstroms
     rest_frame_wavelengths = {band: lambda_pivot[band] / (1 + data['z']) for band in bands}
     filtered_bands = [band for band in bands if rest_frame_wavelengths[band] > lyman_break_wavelength]
 
