@@ -250,7 +250,7 @@ def fit_multiband(data, progress_bar=False):
     # Drop bands that cross the Lyman break
     lyman_break_wavelength = 912.0  # in Angstroms
     rest_frame_wavelengths = {band: lambda_pivot[band] / (1 + data['z']) for band in bands}
-    filtered_bands = [band for band in bands if rest_frame_wavelengths[band] > lyman_break_wavelength]
+    filtered_bands = [band for band in bands if rest_frame_wavelengths[band] + lambda_fwhm[band] > lyman_break_wavelength]
 
     # Combine
     all_times = np.concatenate([times[b] for b in filtered_bands])
