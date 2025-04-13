@@ -1,3 +1,4 @@
+
 import os
 os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=32"
 os.environ["OMP_NUM_THREADS"] = "32"
@@ -33,8 +34,9 @@ import numpyro.distributions as dist
 from tinygp import kernels, solvers
 
 #print("Total device count:", jax.local_device_count())
-numpyro.set_host_device_count(30)
+numpyro.set_host_device_count(32)
 jax.config.update("jax_enable_x64", True)
+jax.config.update("jax_platform_name", "cpu")
 
 import warnings
 
@@ -94,7 +96,6 @@ lambda_fwhm = {
 
 filters = {"u": 0, "g": 1, "r": 2, "i": 3, "z": 4, "y": 5} # harcoded filter order for SDSS
 bands = ['u', 'g', 'r', 'i', 'z']#, 'y']
-
 colors = {'u': 'tab:blue',
           'g': 'tab:green', 
           'r': 'tab:orange', 
@@ -240,17 +241,29 @@ def fit_multiband(data, progress_bar=False):
     times = data['times']
     mags = data['mags']
     magerrs = data['magerrs']
+    
+    h_alpha_wavelength = 6563.0  # Angstroms
+    lyman_break_wavelength = 912.0  # Angstroms
 
-    # Drop bands that fall in the H-alpha line
-    h_alpha_wavelength = 6563.0  # in Angstroms
+    # Convert band edges to rest-frame wavelengths
     rest_frame_wavelength_lo = {band: (lambda_pivot[band] - lambda_fwhm[band]/2) / (1 + data['z']) for band in bands}
     rest_frame_wavelength_hi = {band: (lambda_pivot[band] + lambda_fwhm[band]/2) / (1 + data['z']) for band in bands}
-    filtered_bands = [band for band in bands if (rest_frame_wavelength_lo[band] < h_alpha_wavelength) and (rest_frame_wavelength_hi[band] > h_alpha_wavelength)]
 
-    # Drop bands that cross the Lyman break
-    lyman_break_wavelength = 912.0  # in Angstroms
-    rest_frame_wavelengths = {band: lambda_pivot[band] / (1 + data['z']) for band in bands}
-    filtered_bands = [band for band in bands if rest_frame_wavelengths[band] + lambda_fwhm[band]/2 > lyman_break_wavelength]
+    # Drop bands overlapping H-alpha line
+    filtered_bands = [
+        band for band in bands 
+        if not (
+            (rest_frame_wavelength_lo[band] <= h_alpha_wavelength) and 
+            (rest_frame_wavelength_hi[band] >= h_alpha_wavelength)
+        )
+    ]
+
+    # Drop bands overlapping the Lyman break (fully or partially)
+    filtered_bands = [
+        band for band in filtered_bands 
+        if rest_frame_wavelength_hi[band] > lyman_break_wavelength
+        and rest_frame_wavelength_lo[band] > lyman_break_wavelength
+    ]
 
     # Combine
     all_times = np.concatenate([times[b] for b in filtered_bands])
@@ -279,7 +292,6 @@ def fit_multiband(data, progress_bar=False):
     all_mags = all_mags[mask]
     all_magerrs = all_magerrs[mask]
     band_idx = band_idx[mask]
-
 
     # Define X, y, yerr, t
     # X = (all_times, band_idx)
@@ -438,7 +450,7 @@ def process_quasar(i_data, n=0, progress_bar=False):
           flush=True)
     return data
 
-def save_lc_plot(bands, times, mags, magerrs, object_id):
+def save_lc_plot(times, mags, magerrs, object_id):
     # Plot and save the light curves
     fig, ax = plt.subplots(figsize=(10, 6))
     for band in bands:
@@ -486,7 +498,7 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, object_id, filtered
     band_idx_map = {i: b for i, b in enumerate(filtered_bands)}
 
     fig, ax = plt.subplots(1, 1, figsize=(8, 6), sharex=True)
-    offsets = np.arange(len(bands)) * 0.25
+    offsets = np.arange(len(filtered_bands)) * 0.25
 
     t = X[0]    
     for n in np.unique(band_idx):
@@ -530,7 +542,7 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, object_id, filtered
     return fig
 
 
-def concat_light_curves(filter_object_ids=None, save_file_path=None):
+def concat_light_curves(N=-1, filter_object_ids=None, save_file_path=None):
     s82_objs = []
 
     # Load the S82 data from the FITS file
@@ -547,6 +559,7 @@ def concat_light_curves(filter_object_ids=None, save_file_path=None):
     match_object_ids = set(sdss.objectId) if filter_object_ids is None else filter_object_ids
     matching_indices = cat[cat.objectId.isin(match_object_ids)].index
     cat = cat.loc[matching_indices]
+    cat = cat[:N]
 
     print(f"Found {len(cat)} matching objects", len(cat))
 
@@ -567,8 +580,7 @@ def concat_light_curves(filter_object_ids=None, save_file_path=None):
         magerrs = {}
         magerrs_mean = []
 
-        for band in bands:
-            
+        for band in bands:  
             sdss_ps1_offset = {
                 'g': row.sdss_g_qg - row.ps1_g_qg,
                 'r': row.sdss_r_qg - row.ps1_r_qg,
@@ -611,7 +623,7 @@ def concat_light_curves(filter_object_ids=None, save_file_path=None):
                 magerrs_mean.append(np.mean(magerrs[band]))
 
         # Skip if no data is available for the object
-        if any(len(times[band]) == 0 or len(mags[band]) == 0 or len(magerrs[band]) == 0 for band in bands):
+        if all((len(times[band]) == 0 or len(mags[band]) == 0 or len(magerrs[band]) == 0) for band in bands):
             continue
 
         s82_objs.append({
@@ -622,30 +634,9 @@ def concat_light_curves(filter_object_ids=None, save_file_path=None):
             'magerrs_mean': magerrs_mean
         })
 
-        save_lc_plot(bands, times, mags, magerrs, object_id)
+        #save_lc_plot(times, mags, magerrs, object_id)
 
     hdul.close()
-
-    
-    s82_objs = populate_sdss_fields(s82_objs)
-    
-    if save_file_path is not None:
-        # Write s82_objs to an HDF5 file
-        with h5py.File(save_file_path, "w") as hdf:
-            for idx, obj in enumerate(s82_objs):
-                group = hdf.create_group(obj['object_id'])  # Use object_id as the group name
-                group.attrs['object_id'] = obj['object_id']  # Store the objectId for reference
-                group.attrs['magerrs_mean'] = obj['magerrs_mean']
-                for field in ['z', 'ra', 'dec', 'sdss_name', 'log_lbol', 'log_lbol_err',
-                            'log_mbh', 'log_mbh_err', 'log_ledd_ratio', 'log_ledd_ratio_err']:
-                    group.attrs[field] = obj[field]
-
-                for key in ['times', 'mags', 'magerrs']:
-                    sub_group = group.create_group(key)
-                    for band, values in obj[key].items():
-                        sub_group.create_dataset(band, data=values)
-
-
     return s82_objs
 
 def load_s82_from_hdf5(file_path="s82_objs.h5"):
@@ -701,8 +692,7 @@ def populate_sdss_fields(s82_objs):
 
     return s82_objs
 
-if __name__ == '__main__':
-
+if __name__ == '__main__': 
     parser = argparse.ArgumentParser(description="Process quasars with optional filtering.")
     parser.add_argument("--filter_object_id", nargs="+", help="List of object IDs to filter.")
     args = parser.parse_args()
@@ -710,22 +700,40 @@ if __name__ == '__main__':
     filter_object_ids = set(args.filter_object_id) if args.filter_object_id else None
     if filter_object_ids is not None:
         print(f"Filtering object IDs: {filter_object_ids}")
-        s82_objs = concat_light_curves(filter_object_ids=filter_object_ids)
-        for i, obj in enumerate(s82_objs):
-            q = process_quasar((i, obj), n=len(s82_objs), progress_bar=True)
+        objs = concat_light_curves(filter_object_ids=filter_object_ids)
+        objs = populate_sdss_fields(objs)
+        for i, obj in enumerate(objs):
+            q = process_quasar((i, obj), n=len(objs), progress_bar=True)
             fields_to_filter = ['times', 'mags', 'magerrs']
             q = {k: v for k, v in q.items() if k not in fields_to_filter}
-            print(q)
+            print(q['z'], q['filtered_bands'])
     
         sys.exit("Exiting the program as requested.")
 
-    filter_df = pd.read_csv("data/object_ids_test_2.csv", dtype={"object_id": str})
-    filter_object_ids = set(filter_df["object_id"])
-    print(f"Loaded {len(filter_object_ids)} object IDs from filter_object_ids.csv")
-    objs = concat_light_curves(filter_object_ids=filter_object_ids)
-    #objs = objs[:10]
+    #filter_df = pd.read_csv("data/object_ids_test.csv", dtype={"object_id": str})
+    #filter_object_ids = set(filter_df["object_id"])
+    #print(f"Loaded {len(filter_object_ids)} object IDs from filter_object_ids.csv")
+    # objs = concat_light_curves(filter_object_ids=filter_object_ids)
+    # print(f"Loaded {len(objs)} objects from the light curves")
+    # objs = populate_sdss_fields(objs)
+    #objs = [obj for obj in objs if 0.32 <= obj['z'] <= 0.46]
+    #objs = objs[:16*4]
 
-    chunk_size = 100
+    # Filter objects by object_id that exist in the HDF5 file
+    existing_object_ids = set()
+    output_file = "data/quasars_fit_all.h5"
+
+    if os.path.exists(output_file):
+        with h5py.File(output_file, "r") as hdf:
+            existing_object_ids = set(hdf.keys())
+
+    objs = concat_light_curves()
+    objs = [obj for obj in objs if obj['object_id'] not in existing_object_ids]
+    print(f"Loaded {len(objs)} objects from the light curves")
+    objs = populate_sdss_fields(objs)
+
+
+    chunk_size = 250
     for start_idx in range(0, len(objs), chunk_size):
         print("========================================================================")
         print(f"Processing chunk {start_idx // chunk_size + 1}/{(len(objs) + chunk_size - 1) // chunk_size}...")
@@ -734,15 +742,16 @@ if __name__ == '__main__':
         ctx = get_context("spawn")  # Safer for JAX when using multiprocessing
         results = []
 
-        with ctx.Pool(processes=14) as pool:
+        with ctx.Pool(processes=16) as pool:
             results = pool.map(partial(process_quasar, n=len(chunk)), enumerate(chunk))
 
         quasar_list = [q for q in results if q is not None]
-        output_file = "data/quasars_fit_test.h5"
+        output_file = "data/quasars_fit_all.h5"
 
         # Append to HDF5 file if it exists, otherwise create a new one
         with h5py.File(output_file, "a") as hdf:
             for quasar in quasar_list:
+                #sprint(quasar['object_id'], quasar['z'], quasar['filtered_bands'])
                 object_id = quasar["object_id"]
                 if object_id in hdf:
                     continue
