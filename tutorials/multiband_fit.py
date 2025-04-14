@@ -461,7 +461,7 @@ def save_lc_plot(times, mags, magerrs, object_id):
     ax.set_ylabel('Magnitude', fontsize=14)
     ax.invert_yaxis()  # Magnitudes are brighter when lower
     ax.legend()
-    ax.set_title(f'Light Curve for Object {object_id}', fontsize=16)
+    #ax.set_title(f'Light Curve for Object {object_id}', fontsize=16)
     plt.tight_layout()
 
     # Save the plot as a PNG file
@@ -505,16 +505,17 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, object_id, filtered
         m = band_idx == n
         # Plot the observed data
         ax.errorbar(t[m], y[m]+offsets[n], yerr=yerr[m], fmt='o', 
-                    label=f'{band_idx_map[n]}-band', alpha=0.7, color=colors[band_idx_map[n]])
+                label=f'{band_idx_map[n]}-band', alpha=0.7, color=colors[band_idx_map[n]], lw=2.0, capsize=3)
         # Generate test times for predictions
         t_test = np.linspace(t.min(), t.max(), 1000)
         # Compute predictions using the model
         posterior_median = {k: jnp.median(v, axis=0) for k, v in samples.items()}
         mu, std = model.pred(posterior_median, (t_test, np.full_like(t_test, n, dtype=int)))
         # Plot the predictions
-        ax.plot(t_test, mu+offsets[n], alpha=0.7, color=colors[band_idx_map[n]])
+        ax.plot(t_test, mu+offsets[n], alpha=0.8, color=colors[band_idx_map[n]], lw=2.5)
         ax.fill_between(t_test, mu+offsets[n]-std, mu+offsets[n]+std, alpha=0.3, 
-                        color=colors[band_idx_map[n]])
+                lw=0.5, color=colors[band_idx_map[n]])
+    ax.set_xlabel('Days')
     ax.set_ylabel('Magnitude + arbitrary offset')
     ax.invert_yaxis()  # Magnitudes are brighter when lower
     #ax.legend(loc='upper right')
@@ -530,7 +531,7 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, object_id, filtered
             ha="right",
             va="top",
         )
-    ax.set_title(f'Light Curve for AGN {object_id}')
+    #ax.set_title(f'Light Curve for AGN {object_id}')
 
     plt.tight_layout()
 
@@ -542,7 +543,7 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, object_id, filtered
     return fig
 
 
-def concat_light_curves(N=-1, filter_object_ids=None, save_file_path=None):
+def concat_light_curves(N=None, filter_object_ids=None, save_file_path=None):
     s82_objs = []
 
     # Load the S82 data from the FITS file
@@ -559,7 +560,7 @@ def concat_light_curves(N=-1, filter_object_ids=None, save_file_path=None):
     match_object_ids = set(sdss.objectId) if filter_object_ids is None else filter_object_ids
     matching_indices = cat[cat.objectId.isin(match_object_ids)].index
     cat = cat.loc[matching_indices]
-    cat = cat[:N]
+    cat = cat[:N] if N else cat
 
     print(f"Found {len(cat)} matching objects", len(cat))
 

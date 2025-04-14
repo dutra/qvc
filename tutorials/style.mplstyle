@@ -8,19 +8,31 @@ axes.labelsize: 18
 
 xtick.major.width: 2.5
 xtick.major.size: 8
-xtick.minor.size: 5
+xtick.minor.size: 4
 xtick.labelsize: 18
+xtick.minor.visible: True
+xtick.direction: in
+xtick.top: True
+xtick.minor.width: 2
+xtick.major.top: True
 
 ytick.major.width: 2.5
 ytick.major.size: 8
 ytick.minor.size: 4
 ytick.labelsize: 18
+ytick.minor.visible: True
+ytick.direction: in
+ytick.right: True
+ytick.minor.width: 2
+ytick.major.right: True
 
 figure.titlesize: 22
-figure.figsize: 12,10
+figure.figsize: 10,8
 
-lines.linewidth: 4.0
-lines.markersize: 6
+
+lines.linewidth: 4
+errorbar.capsize: 4
+lines.markersize: 4
 #image.cmap: RdBu_r
 
 savefig.facecolor: 'white'
