@@ -727,8 +727,20 @@ if __name__ == '__main__':
         with h5py.File(output_file, "r") as hdf:
             existing_object_ids = set(hdf.keys())
 
-    objs = concat_light_curves()
-    objs = [obj for obj in objs if obj['object_id'] not in existing_object_ids]
+
+    cat = pd.read_parquet(f"data/S82/Catalog.parquet").set_index('idx')
+    sdss = pd.read_parquet(f"data/S82/dr16s82_sdssLCRaw.parquet")
+    sdss = sdss[sdss.mjd.notna() & (len(sdss.mjd) > 0)]
+
+    # Find elements in cat where objectId exists in the list of objectId of sdss
+    match_object_ids = set(sdss.objectId) if filter_object_ids is None else filter_object_ids
+    matching_indices = cat[cat.objectId.isin(match_object_ids)].index
+
+    cat = cat.loc[matching_indices]
+    cat = cat[~cat['objectId'].isin(existing_object_ids)]
+    filter_object_ids = set(cat['objectId'].values)
+    #objs = [obj for obj in objs if obj['object_id'] not in existing_object_ids]
+    objs = concat_light_curves(filter_object_ids=filter_object_ids)
     print(f"Loaded {len(objs)} objects from the light curves")
     objs = populate_sdss_fields(objs)
 
