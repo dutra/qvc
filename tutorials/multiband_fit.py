@@ -34,7 +34,7 @@ import numpyro.distributions as dist
 from tinygp import kernels, solvers
 
 #print("Total device count:", jax.local_device_count())
-numpyro.set_host_device_count(32)
+numpyro.set_host_device_count(30)
 jax.config.update("jax_enable_x64", True)
 jax.config.update("jax_platform_name", "cpu")
 
@@ -355,9 +355,9 @@ def fit_multiband(data, progress_bar=False):
         print(f"Diverging MCMC for quasar {data['object_id']}, skipping.", flush=True)
         return None
     
-    save_combined_plot(samples, m1, X, y, yerr, band_idx[mask_outlier], 
-                       data['object_id'], filtered_bands=filtered_bands)
-    plot_posterior(samples, data, filtered_bands=filtered_bands)
+    #save_combined_plot(samples, m1, X, y, yerr, band_idx[mask_outlier], 
+    #                   data['object_id'], filtered_bands=filtered_bands)
+    #plot_posterior(samples, data, filtered_bands=filtered_bands)
     
     log_tau_RF = np.log10(np.exp(samples['log_kernel_param'][:, 0])/(1+data['z']))
     lower, median, upper = np.percentile(log_tau_RF, [16, 50, 84])
@@ -746,7 +746,7 @@ if __name__ == '__main__':
     objs = populate_sdss_fields(objs)
 
 
-    chunk_size = 250
+    chunk_size = 500
     for start_idx in range(0, len(objs), chunk_size):
         print("========================================================================")
         print(f"Processing chunk {start_idx // chunk_size + 1}/{(len(objs) + chunk_size - 1) // chunk_size}...")
@@ -755,7 +755,7 @@ if __name__ == '__main__':
         ctx = get_context("spawn")  # Safer for JAX when using multiprocessing
         results = []
 
-        with ctx.Pool(processes=16) as pool:
+        with ctx.Pool(processes=15) as pool:
             results = pool.map(partial(process_quasar, n=len(chunk)), enumerate(chunk))
 
         quasar_list = [q for q in results if q is not None]
