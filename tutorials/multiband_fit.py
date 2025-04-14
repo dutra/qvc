@@ -40,8 +40,6 @@ jax.config.update("jax_platform_name", "cpu")
 
 import warnings
 
-import matplotlib.pyplot as plt
-plt.style.use("style.mplstyle")
 import numpy as np
 import optax
 from eztaox.fitter import fit
@@ -67,8 +65,10 @@ import h5py
 import sys
 
 from tinygp.helpers import JAXArray
-import corner
 import argparse
+
+from multiband_fit_utils import *
+from multiband_fit_plotting import *
 
 num_samples = 500
 
@@ -85,14 +85,6 @@ lambda_pivot = {
     'z': 9134,  # SDSS z-band
     'y': 9633,  # PS1 y-band
 }
-lambda_fwhm = {
-    'u': 558,   # SDSS u-band FWHM
-    'g': 1158,  # SDSS g-band FWHM
-    'r': 1113,  # SDSS r-band FWHM
-    'i': 1044,  # SDSS i-band FWHM
-    'z': 1122,  # SDSS z-band FWHM
-    'y': 1200,  # PS1 y-band FWHM (approximate)
-}
 
 filters = {"u": 0, "g": 1, "r": 2, "i": 3, "z": 4, "y": 5} # harcoded filter order for SDSS
 bands = ['u', 'g', 'r', 'i', 'z']#, 'y']
@@ -105,7 +97,7 @@ colors = {'u': 'tab:blue',
 
 # Override MultiVarModel
 class MyMultiVarModel(MultiVarModel):
-    filtered_bands: JAXArray
+    clean_bands: JAXArray
 
     def __init__(
         self,
@@ -116,7 +108,7 @@ class MyMultiVarModel(MultiVarModel):
         **kwargs,
     ) -> None:
         super().__init__(X, y, yerr, kernel, **kwargs)
-        self.filtered_bands = kwargs.get("filtered_bands", None)
+        self.clean_bands = kwargs.get("clean_bands", None)
 
     @staticmethod
     def mean_func(
@@ -168,7 +160,7 @@ class MyMultiVarModel(MultiVarModel):
 
     def amp_transform(self, params: dict[str, JAXArray]) -> JAXArray:
         b = params["beta"]
-        params["log_amp_delta"] = jnp.array([b*np.log(lambda_pivot[band]/lambda_pivot[self.filtered_bands[0]]) for band in self.filtered_bands[1:]]) # comment this out for old version
+        params["log_amp_delta"] = jnp.array([b*np.log(lambda_pivot[band]/lambda_pivot[self.clean_bands[0]]) for band in self.clean_bands[1:]]) # comment this out for old version
         r = jnp.insert(jnp.atleast_1d(params["log_amp_delta"]), 0, 0.0)
         return r
     
@@ -197,7 +189,7 @@ def initSampler(key, nSample, nBand=len(bands)):
         "beta": betaSampler(subkeys[5], nSample),
     }
 
-def numpyro_model(X, yerr, y=None, bestP=None, filtered_bands=None):
+def numpyro_model(X, yerr, y=None, bestP=None, clean_bands=None):
     # kernel param
     flat_normal = dist.Normal(bestP["log_kernel_param"], jnp.array([5.0, 5.0]))
     diag_normal = dist.Independent(flat_normal, 1)
@@ -223,7 +215,7 @@ def numpyro_model(X, yerr, y=None, bestP=None, filtered_bands=None):
 
     # kernel
     k = kernels.quasisep.Exp(*jnp.exp(log_kernel_param))
-    m1 = MyMultiVarModel(X, y, yerr, k, zero_mean=zero_mean, has_jitter=has_jitter, has_lag=has_lag, filtered_bands=filtered_bands)
+    m1 = MyMultiVarModel(X, y, yerr, k, zero_mean=zero_mean, has_jitter=has_jitter, has_lag=has_lag, clean_bands=clean_bands)
 
     sample_params = {
         "log_kernel_param": log_kernel_param,
@@ -242,34 +234,19 @@ def fit_multiband(data, progress_bar=False):
     mags = data['mags']
     magerrs = data['magerrs']
     
-    h_alpha_wavelength = 6563.0  # Angstroms
-    lyman_break_wavelength = 912.0  # Angstroms
-
-    # Convert band edges to rest-frame wavelengths
-    rest_frame_wavelength_lo = {band: (lambda_pivot[band] - lambda_fwhm[band]/2) / (1 + data['z']) for band in bands}
-    rest_frame_wavelength_hi = {band: (lambda_pivot[band] + lambda_fwhm[band]/2) / (1 + data['z']) for band in bands}
-
-    # Drop bands overlapping H-alpha line
-    filtered_bands = [
-        band for band in bands 
-        if not (
-            (rest_frame_wavelength_lo[band] <= h_alpha_wavelength) and 
-            (rest_frame_wavelength_hi[band] >= h_alpha_wavelength)
-        )
-    ]
-
-    # Drop bands overlapping the Lyman break (fully or partially)
-    filtered_bands = [
-        band for band in filtered_bands 
-        if rest_frame_wavelength_hi[band] > lyman_break_wavelength
-        and rest_frame_wavelength_lo[band] > lyman_break_wavelength
-    ]
+    contamined_bands = bands_with_any_contamination_annotated(data['z'])
+    print("Contamined bands: ", contamined_bands)
+    moderate_contamined_bands = [band for band, severity in contamined_bands.items() if severity == 'moderate']
+    severe_contamined_bands = [band for band, severity in contamined_bands.items() if severity == 'severe']
+    print("Moderate contamined bands: ", moderate_contamined_bands)
+    print("Severe contamined bands: ", severe_contamined_bands)
+    clean_bands = list(set(bands) - set(moderate_contamined_bands))
 
     # Combine
-    all_times = np.concatenate([times[b] for b in filtered_bands])
-    all_mags = np.concatenate([mags[b] for b in filtered_bands]) 
-    all_magerrs = np.concatenate([magerrs[b] for b in filtered_bands])
-    band_idx = np.concatenate([np.full(len(times[b]), i) for i, b in enumerate(filtered_bands)])
+    all_times = np.concatenate([times[b] for b in clean_bands])
+    all_mags = np.concatenate([mags[b] for b in clean_bands]) 
+    all_magerrs = np.concatenate([magerrs[b] for b in clean_bands])
+    band_idx = np.concatenate([np.full(len(times[b]), i) for i, b in enumerate(clean_bands)])
 
     if len(all_times) == 0 or len(all_mags) == 0 or len(all_magerrs) == 0:
         print(f"No magnitudes or errors for quasar {data['object_id']}, skipping.", flush=True)
@@ -322,7 +299,7 @@ def fit_multiband(data, progress_bar=False):
 
     # define model
     m1 = MyMultiVarModel(
-        X, y, yerr, k, zero_mean=zero_mean, has_jitter=has_jitter, has_lag=has_lag, filtered_bands=filtered_bands
+        X, y, yerr, k, zero_mean=zero_mean, has_jitter=has_jitter, has_lag=has_lag, clean_bands=clean_bands
     )
     bestP, logProb = fit(model=m1, 
                         optimizer=optax.adam(learning_rate=0.1),
@@ -334,7 +311,7 @@ def fit_multiband(data, progress_bar=False):
         bestP[k] += 1e-4 * np.random.randn(*bestP[k].shape) 
 
     nuts_kernel = NUTS(
-        partial(numpyro_model, bestP=bestP, filtered_bands=filtered_bands),
+        partial(numpyro_model, bestP=bestP, clean_bands=clean_bands),
         dense_mass=True,
         target_accept_prob=0.9,
         # adapt_step_size=True,
@@ -356,8 +333,8 @@ def fit_multiband(data, progress_bar=False):
         return None
     
     #save_combined_plot(samples, m1, X, y, yerr, band_idx[mask_outlier], 
-    #                   data['object_id'], filtered_bands=filtered_bands)
-    #plot_posterior(samples, data, filtered_bands=filtered_bands)
+    #                   data['object_id'], clean_bands=clean_bands)
+    #plot_posterior(samples, data, clean_bands=clean_bands)
     
     log_tau_RF = np.log10(np.exp(samples['log_kernel_param'][:, 0])/(1+data['z']))
     lower, median, upper = np.percentile(log_tau_RF, [16, 50, 84])
@@ -366,7 +343,7 @@ def fit_multiband(data, progress_bar=False):
 
 
     lambda_ref = 2500 # Any reference wavelength
-    lambda_pivot_RF = lambda_pivot[filtered_bands[0]]/(1 + data['z'])
+    lambda_pivot_RF = lambda_pivot[clean_bands[0]]/(1 + data['z'])
     
     log_sigma_RF = np.log10(np.exp(samples['log_kernel_param'][:, 1] + samples['beta']*np.log(lambda_ref/lambda_pivot_RF)))
     lower, median, upper = np.percentile(log_sigma_RF, [16, 50, 84])
@@ -376,7 +353,7 @@ def fit_multiband(data, progress_bar=False):
 
     log_sigma = np.log10(np.exp(samples['log_kernel_param'][:, 1]))
     beta = samples['beta']
-    log_amp_delta = np.array([beta*np.log(lambda_pivot[band]/lambda_pivot[filtered_bands[0]]) for band in filtered_bands])
+    log_amp_delta = np.array([beta*np.log(lambda_pivot[band]/lambda_pivot[clean_bands[0]]) for band in clean_bands])
     #log_amp_delta = samples["log_amp_delta"].T # comment out this line when using beta
     #log_amp_delta = jnp.insert(log_amp_delta, 0, np.zeros(log_amp_delta.shape[1]), axis=0) # comment out this line when using beta
 
@@ -429,7 +406,7 @@ def fit_multiband(data, progress_bar=False):
             poly1_err=poly1_err,
             mean=mean,
             mean_err=mean_err,
-            filtered_bands=filtered_bands,)
+            clean_bands=clean_bands,)
     return d
 
 
@@ -449,99 +426,6 @@ def process_quasar(i_data, n=0, progress_bar=False):
     print(f"Quasar {i}/{n} ({data['object_id']}): log_tau_RF={data['log_tau_RF']:.3f}±{data['log_tau_RF_err']:.3f}, log_sigma_RF={data['log_sigma_RF']}±{data['log_sigma_RF_err']}", 
           flush=True)
     return data
-
-def save_lc_plot(times, mags, magerrs, object_id):
-    # Plot and save the light curves
-    fig, ax = plt.subplots(figsize=(10, 6))
-    for band in bands:
-        if len(times[band]) > 0:
-            ax.errorbar(times[band], mags[band], yerr=magerrs[band], fmt='o', label=f'{band}-band', alpha=0.7)
-
-    ax.set_xlabel('Time (MJD)', fontsize=14)
-    ax.set_ylabel('Magnitude', fontsize=14)
-    ax.invert_yaxis()  # Magnitudes are brighter when lower
-    ax.legend()
-    #ax.set_title(f'Light Curve for Object {object_id}', fontsize=16)
-    plt.tight_layout()
-
-    # Save the plot as a PNG file
-    output_dir = "light_curves"
-    os.makedirs(output_dir, exist_ok=True)
-    plt.savefig(os.path.join("light_curves", f'{object_id}_light_curve.png'))
-    plt.close(fig)
-
-def plot_posterior(samples, data, filtered_bands=None):
-    # Extract the posterior samples
-    object_id = data['object_id']
-    lambda_ref = 2500 # Any reference wavelength
-    lambda_pivot_RF = lambda_pivot[filtered_bands[0]]/(1 + data['z'])
-    log_sigma_RF = np.log10(np.exp(samples['log_kernel_param'][:, 1] + samples['beta']*np.log(lambda_ref/lambda_pivot_RF)))
-    log_tau_RF = np.log10(np.exp(samples['log_kernel_param'][:, 0])/(1+data['z']))
-
-    posterior_samples = {
-        r'$\beta$': samples['beta'],
-        r'$\log(\tau_\mathrm{RF})$': log_tau_RF,
-        r'$\log(\sigma_RF)$': log_sigma_RF,
-        r'poly1': samples['poly1'],
-        r'mean': samples['mean'][:,0],
-    }
-    # Convert the samples to a 2D array for corner
-    corner_data = np.vstack([posterior_samples[key] for key in posterior_samples.keys()]).T
-    fig = corner.corner(corner_data, labels=list(posterior_samples.keys()), show_titles=True)
-    output_dir = "posterior_plots"
-    os.makedirs(output_dir, exist_ok=True)
-    plt.savefig(os.path.join(output_dir, f"{object_id}_posterior.png"))
-    plt.close(fig)
-    return fig
-
-def save_combined_plot(samples, model, X, y, yerr, band_idx, object_id, filtered_bands):
-    band_idx_map = {i: b for i, b in enumerate(filtered_bands)}
-
-    fig, ax = plt.subplots(1, 1, figsize=(8, 6), sharex=True)
-    offsets = np.arange(len(filtered_bands)) * 0.25
-
-    t = X[0]    
-    for n in np.unique(band_idx):
-        m = band_idx == n
-        # Plot the observed data
-        ax.errorbar(t[m], y[m]+offsets[n], yerr=yerr[m], fmt='o', 
-                label=f'{band_idx_map[n]}-band', alpha=0.7, color=colors[band_idx_map[n]], lw=2.0, capsize=3)
-        # Generate test times for predictions
-        t_test = np.linspace(t.min(), t.max(), 1000)
-        # Compute predictions using the model
-        posterior_median = {k: jnp.median(v, axis=0) for k, v in samples.items()}
-        mu, std = model.pred(posterior_median, (t_test, np.full_like(t_test, n, dtype=int)))
-        # Plot the predictions
-        ax.plot(t_test, mu+offsets[n], alpha=0.8, color=colors[band_idx_map[n]], lw=2.5)
-        ax.fill_between(t_test, mu+offsets[n]-std, mu+offsets[n]+std, alpha=0.3, 
-                lw=0.5, color=colors[band_idx_map[n]])
-    ax.set_xlabel('Days')
-    ax.set_ylabel('Magnitude + arbitrary offset')
-    ax.invert_yaxis()  # Magnitudes are brighter when lower
-    #ax.legend(loc='upper right')
-    # Annotate the legend with each letter in the same color
-    for i, band in enumerate(np.flip(filtered_bands)):
-        ax.annotate(
-            band,
-            xy=(0.95 - i * 0.05, 0.95),  # Adjust horizontal spacing
-            xycoords="axes fraction",
-            color=colors[band],
-            fontsize=18,
-            fontweight="bold",
-            ha="right",
-            va="top",
-        )
-    #ax.set_title(f'Light Curve for AGN {object_id}')
-
-    plt.tight_layout()
-
-    # Save the plot as a PNG file
-    output_dir = "light_curves_fits"
-    os.makedirs(output_dir, exist_ok=True)
-    plt.savefig(os.path.join(output_dir, f'{object_id}_combined_plot.png'))
-    plt.close(fig)
-    return fig
-
 
 def concat_light_curves(N=None, filter_object_ids=None, save_file_path=None):
     s82_objs = []
@@ -696,8 +580,10 @@ def populate_sdss_fields(s82_objs):
 if __name__ == '__main__': 
     parser = argparse.ArgumentParser(description="Process quasars with optional filtering.")
     parser.add_argument("--filter_object_id", nargs="+", help="List of object IDs to filter.")
+    parser.add_argument("--N", type=int, help="Number of objects to process.")
+    parser.add_argument("--chunk_size", type=int, default=500, help="Chunk size for processing objects.")
+    parser.add_argument("-f", "--file", type=str, help="Path to the file to append (read and write) objects.") 
     args = parser.parse_args()
-
     filter_object_ids = set(args.filter_object_id) if args.filter_object_id else None
     if filter_object_ids is not None:
         print(f"Filtering object IDs: {filter_object_ids}")
@@ -707,27 +593,19 @@ if __name__ == '__main__':
             q = process_quasar((i, obj), n=len(objs), progress_bar=True)
             fields_to_filter = ['times', 'mags', 'magerrs']
             q = {k: v for k, v in q.items() if k not in fields_to_filter}
-            print(q['z'], q['filtered_bands'])
+            print(q['z'], q['clean_bands'])
     
         sys.exit("Exiting the program as requested.")
 
-    #filter_df = pd.read_csv("data/object_ids_test.csv", dtype={"object_id": str})
-    #filter_object_ids = set(filter_df["object_id"])
-    #print(f"Loaded {len(filter_object_ids)} object IDs from filter_object_ids.csv")
-    # objs = concat_light_curves(filter_object_ids=filter_object_ids)
-    # print(f"Loaded {len(objs)} objects from the light curves")
-    # objs = populate_sdss_fields(objs)
-    #objs = [obj for obj in objs if 0.32 <= obj['z'] <= 0.46]
-    #objs = objs[:16*4]
 
     # Filter objects by object_id that exist in the HDF5 file
     existing_object_ids = set()
-    output_file = "data/quasars_fit_all.h5"
 
-    if os.path.exists(output_file):
-        with h5py.File(output_file, "r") as hdf:
+    if os.path.exists(args.file):
+        with h5py.File(args.file, "r") as hdf:
             existing_object_ids = set(hdf.keys())
-
+    else:
+        existing_object_ids = []
 
     cat = pd.read_parquet(f"data/S82/Catalog.parquet").set_index('idx')
     sdss = pd.read_parquet(f"data/S82/dr16s82_sdssLCRaw.parquet")
@@ -741,16 +619,14 @@ if __name__ == '__main__':
     cat = cat[~cat['objectId'].isin(existing_object_ids)]
     filter_object_ids = set(cat['objectId'].values)
     #objs = [obj for obj in objs if obj['object_id'] not in existing_object_ids]
-    objs = concat_light_curves(filter_object_ids=filter_object_ids)
+    objs = concat_light_curves(filter_object_ids=filter_object_ids, N=args.N)
     print(f"Loaded {len(objs)} objects from the light curves")
     objs = populate_sdss_fields(objs)
 
-
-    chunk_size = 500
-    for start_idx in range(0, len(objs), chunk_size):
+    for start_idx in range(0, len(objs), args.chunk_size):
         print("========================================================================")
-        print(f"Processing chunk {start_idx // chunk_size + 1}/{(len(objs) + chunk_size - 1) // chunk_size}...")
-        chunk = objs[start_idx:start_idx + chunk_size]
+        print(f"Processing chunk {start_idx // args.chunk_size + 1}/{(len(objs) + args.chunk_size - 1) // args.chunk_size}...")
+        chunk = objs[start_idx:start_idx + args.chunk_size]
         
         ctx = get_context("spawn")  # Safer for JAX when using multiprocessing
         results = []
@@ -759,12 +635,11 @@ if __name__ == '__main__':
             results = pool.map(partial(process_quasar, n=len(chunk)), enumerate(chunk))
 
         quasar_list = [q for q in results if q is not None]
-        output_file = "data/quasars_fit_all.h5"
 
         # Append to HDF5 file if it exists, otherwise create a new one
-        with h5py.File(output_file, "a") as hdf:
+        with h5py.File(args.file, "a") as hdf:
             for quasar in quasar_list:
-                #sprint(quasar['object_id'], quasar['z'], quasar['filtered_bands'])
+                #sprint(quasar['object_id'], quasar['z'], quasar['clean_bands'])
                 object_id = quasar["object_id"]
                 if object_id in hdf:
                     continue

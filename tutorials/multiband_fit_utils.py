@@ -1,0 +1,67 @@
+def bands_with_any_contamination_annotated(z):
+    """
+    Returns ugrizy bands contaminated by Hα, Lyα, or the Lyman break at redshift z,
+    annotated by severity: 'severe', 'moderate', or not included.
+
+    Uses λ_eff and Gaussian-derived 90% throughput ranges.
+
+    Sources:
+    - SDSS: Fukugita et al. 1996, Doi et al. 2010
+    - LSST y-band: LSST Science Book
+    - Severity classification: based on proximity of line to filter center
+
+    Returns:
+        dict with structure:
+        {
+            'Hα': {band: severity, ...},
+            'Lyα': {band: severity, ...},
+            'Lyman break': {band: severity, ...},
+            'combined': {band: max severity across contaminants}
+        }
+    """
+    lines = {
+        'Hα': 6563,
+        'Lyα': 1216,
+        'Lyman break': 912
+    }
+
+    bands = {
+        'u': {'lambda_eff': 3551, 'lambda_lo_90': 3152.4, 'lambda_hi_90': 3949.6},
+        'g': {'lambda_eff': 4686, 'lambda_lo_90': 3715.4, 'lambda_hi_90': 5656.6},
+        'r': {'lambda_eff': 6165, 'lambda_lo_90': 5207.0, 'lambda_hi_90': 7123.0},
+        'i': {'lambda_eff': 7481, 'lambda_lo_90': 6407.6, 'lambda_hi_90': 8554.4},
+        'z': {'lambda_eff': 8931, 'lambda_lo_90': 8266.7, 'lambda_hi_90': 9595.3},
+        'y': {'lambda_eff': 9700, 'lambda_lo_90': 8900.0, 'lambda_hi_90': 10500.0}
+    }
+
+    def severity(lambda_obs, band_props):
+        lo, hi = band_props['lambda_lo_90'], band_props['lambda_hi_90']
+        center = band_props['lambda_eff']
+        mid_25_lo = center - (hi - lo) * 0.25
+        mid_25_hi = center + (hi - lo) * 0.25
+        if mid_25_lo <= lambda_obs <= mid_25_hi:
+            return 'severe'
+        elif lo <= lambda_obs <= hi:
+            return 'moderate'
+        else:
+            return None
+
+    results = {line: {} for line in lines}
+
+    for line, rest_wavelength in lines.items():
+        lambda_obs = rest_wavelength * (1 + z)
+        for band, props in bands.items():
+            level = severity(lambda_obs, props)
+            if level:
+                results[line][band] = level
+
+    # Combined: keep max severity for each band across all contaminants
+    severity_order = {'moderate': 1, 'severe': 2}
+    combined = {}
+    for band in bands:
+        levels = [results[line].get(band) for line in lines if band in results[line]]
+        if levels:
+            combined[band] = max(levels, key=lambda x: severity_order[x])
+    results['combined'] = combined
+    
+    return results['combined']
