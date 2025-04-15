@@ -88,12 +88,6 @@ lambda_pivot = {
 
 filters = {"u": 0, "g": 1, "r": 2, "i": 3, "z": 4, "y": 5} # harcoded filter order for SDSS
 bands = ['u', 'g', 'r', 'i', 'z']#, 'y']
-colors = {'u': 'tab:blue',
-          'g': 'tab:green', 
-          'r': 'tab:orange', 
-          'i': 'tab:red', 
-          'z': 'tab:brown', 
-          'y': 'tab:gray'}
 
 # Override MultiVarModel
 class MyMultiVarModel(MultiVarModel):
@@ -117,9 +111,13 @@ class MyMultiVarModel(MultiVarModel):
         if zero_mean is True:
             means = jnp.zeros(nBand)
         else:
-            means = jnp.atleast_1d(params["mean"]) + params["poly1"] * (X[0] / (365.25*10))
+            time_center = (jnp.max(X[0]) + jnp.min(X[0])) / 2
+            means = jnp.atleast_1d(params["mean"]) + params["poly1"] * (X[0] / (365.25*1000))
+            #means = jnp.atleast_1d(params["mean"]) + params["poly1"] * X[0]# / (365.25*100)
+            #means = jnp.atleast_1d(params["mean"])# + jnp.expm1(jnp.log1p(params["poly1"]) + (jnp.log1p(X[0]/365.25*10000)))
+            #means = jnp.atleast_1d(params["mean"]) + params["poly1"] * (X[0] / (365.25*100)) + params["poly2"] * (X[0] / (365.25*100))**2 
         return means[X[1]]
-
+    
     def _build_gp(
         self, params: dict[str, JAXArray]
     ) -> tuple[GaussianProcess, JAXArray]:
@@ -171,19 +169,21 @@ def initSampler(key, nSample, nBand=len(bands)):
     # uniform sampler
     lagSampler = UniformInit(nBand-1, [-10, 10])
     meanSampler = UniformInit(nBand, [-1, 1])
-    poly1Sampler = UniformInit(1, [-0.1, 0.1])
+    poly1Sampler = UniformInit(1, [-1000, 1000])
+    #poly2Sampler = UniformInit(1, [-10, 10])
     logAmpDeltaSampler = UniformInit(nBand-1, [-2, 0.0])
-    logJitterSampler = UniformInit(nBand, [-20, -5])
+    logJitterSampler = UniformInit(nBand, [jnp.log(1e-10), jnp.log(0.1)])
     betaSampler = UniformInit(1, [-2.0, 0.0])
 
     # kernel init
-    kernelSampler = DRWInit([jnp.log(100), jnp.log(0.1)], [jnp.log(0.01), 0.0])
+    kernelSampler = DRWInit([jnp.log(10**2.5), jnp.log(10**4.5)], [jnp.log(0.01), jnp.log(1.0)])
 
     return {
         "log_kernel_param": kernelSampler(subkeys[0], nSample),
         "log_amp_delta": logAmpDeltaSampler(subkeys[1], nSample),
         "mean": meanSampler(subkeys[2], nSample),
         "poly1": poly1Sampler(subkeys[6], nSample),
+        #"poly2": poly2Sampler(subkeys[7], nSample),
         "lag": lagSampler(subkeys[3], nSample),
         "log_jitter": logJitterSampler(subkeys[4], nSample),
         "beta": betaSampler(subkeys[5], nSample),
@@ -201,15 +201,15 @@ def numpyro_model(X, yerr, y=None, bestP=None, clean_bands=None):
     #) # comment this out when using beta
 
     # lag
-    lag = numpyro.sample("lag", dist.Normal(bestP['lag'], 10.0))
+    lag = numpyro.sample("lag", dist.Normal(bestP['lag'], 10))
     
     # log jitter, mean => the prior for these two should be set small, otherwise
     # it is hard to converge
     log_jitter = numpyro.sample("log_jitter", dist.Normal(bestP["log_jitter"], 0.1))
     
-    mean = numpyro.sample("mean", dist.Normal(bestP['mean'], 0.1))
-    poly1 = numpyro.sample("poly1", dist.Normal(bestP['poly1'], 0.1))
-
+    mean = numpyro.sample("mean", dist.Normal(bestP['mean'], .1))
+    poly1 = numpyro.sample("poly1", dist.Normal(bestP['poly1'], 1))
+    #poly2 = numpyro.sample("poly2", dist.Normal(bestP['poly2'], 2)) 
     beta = numpyro.sample("beta", dist.Normal(-0.5, 0.25))
 
 
@@ -223,25 +223,32 @@ def numpyro_model(X, yerr, y=None, bestP=None, clean_bands=None):
         "lag": lag,
         "mean": mean,
         "poly1": poly1,
+        #"poly2": poly2,
         "log_jitter": log_jitter,
         "beta": beta,
     }
     m1.sample(sample_params)
 
 
-def fit_multiband(data, progress_bar=False):
+def fit_multiband(data, progress_bar=False, plot=False):
     times = data['times']
     mags = data['mags']
     magerrs = data['magerrs']
     
     contamined_bands = bands_with_any_contamination_annotated(data['z'])
-    print("Contamined bands: ", contamined_bands)
+    # print("Contamined bands: ", contamined_bands)
     moderate_contamined_bands = [band for band, severity in contamined_bands.items() if severity == 'moderate']
     severe_contamined_bands = [band for band, severity in contamined_bands.items() if severity == 'severe']
-    print("Moderate contamined bands: ", moderate_contamined_bands)
-    print("Severe contamined bands: ", severe_contamined_bands)
-    clean_bands = list(set(bands) - set(moderate_contamined_bands))
-
+    # print("Moderate contamined bands: ", moderate_contamined_bands)
+    # print("Severe contamined bands: ", severe_contamined_bands)
+    host_contaminated_bands = bands_with_host_contamination(data['z'])
+    red_bands = bands_redder_than_5000(data['z'])
+    clean_bands = list(set(bands) - set(moderate_contamined_bands) - set(host_contaminated_bands) - set(red_bands))
+    # Reorder clean_bands to match the desired order
+    clean_bands = list(sorted(clean_bands, key=lambda band: ['u', 'g', 'r', 'i', 'z', 'y'].index(band)))
+    if len(clean_bands) == 0:
+        print(f"No clean bands for quasar {data['object_id']}, skipping.", flush=True)
+        return None
     # Combine
     all_times = np.concatenate([times[b] for b in clean_bands])
     all_mags = np.concatenate([mags[b] for b in clean_bands]) 
@@ -284,8 +291,13 @@ def fit_multiband(data, progress_bar=False):
         if i < window_size or i >= len(y) - window_size:
             continue
         window = y[i - window_size:i + window_size + 1]
-        if jnp.abs(y[i] - jnp.nanmean(window)) > 3 * st.median_abs_deviation(window):
+        if jnp.abs(y[i] - jnp.nanmean(window)) > 2.5 * st.median_abs_deviation(window):
             mask_outlier[i] = False
+
+    # Reject outliers using a percentile-based approach
+    # lower_percentile = 2
+    # upper_percentile = 98
+    # mask_outlier = (y >= np.percentile(y, lower_percentile)) & (y <= np.percentile(y, upper_percentile))
 
     X = (jnp.array(all_times[mask_outlier]) - jnp.min(all_times[mask_outlier]), jnp.array(band_idx[mask_outlier]))
     y = jnp.array(y[mask_outlier])
@@ -331,10 +343,6 @@ def fit_multiband(data, progress_bar=False):
     if np.all(diagnostics['diverging']):
         print(f"Diverging MCMC for quasar {data['object_id']}, skipping.", flush=True)
         return None
-    
-    #save_combined_plot(samples, m1, X, y, yerr, band_idx[mask_outlier], 
-    #                   data['object_id'], clean_bands=clean_bands)
-    #plot_posterior(samples, data, clean_bands=clean_bands)
     
     log_tau_RF = np.log10(np.exp(samples['log_kernel_param'][:, 0])/(1+data['z']))
     lower, median, upper = np.percentile(log_tau_RF, [16, 50, 84])
@@ -385,11 +393,16 @@ def fit_multiband(data, progress_bar=False):
     poly1_err = 0.5 * (upper - lower) # symmetric uncertainties
     poly1 = median
 
+    # lower, median, upper = np.percentile(samples['poly2'], [16, 50, 84], axis=0)
+    # poly2_err = 0.5 * (upper - lower) # symmetric uncertainties
+    # poly2 = median
+
     lower, median, upper = np.percentile(samples['mean'], [16, 50, 84], axis=0)
     mean_err = 0.5 * (upper - lower) # symmetric uncertainties
     mean = median
 
-    d = dict(log_tau_RF=log_tau_RF,
+    d = dict(object_id=data['object_id'],
+            log_tau_RF=log_tau_RF,
             log_tau_RF_err=log_tau_RF_err,
             beta=beta,
             beta_err=beta_err,
@@ -404,18 +417,26 @@ def fit_multiband(data, progress_bar=False):
             log_jitter=log_jitter,
             poly1=poly1,
             poly1_err=poly1_err,
+            # poly2=poly2,
+            # poly2_err=poly2_err,
             mean=mean,
             mean_err=mean_err,
             clean_bands=clean_bands,)
+    
+    if plot:
+        save_combined_plot(samples, m1, X, y, yerr, band_idx[mask_outlier], d)
+        plot_mcmc_traces(samples, d)
+        #plot_posterior(samples, data, clean_bands=clean_bands)
+    
     return d
 
 
-def process_quasar(i_data, n=0, progress_bar=False):
+def process_quasar(i_data, n=0, progress_bar=False, plot=False):
     i, data = i_data
-    print(f"Processing quasar {i}/{n} ({data['object_id']})", flush=True)
+    #print(f"Processing quasar {i}/{n} ({data['object_id']})", flush=True)
 
     # Load the quasar data
-    result = fit_multiband(data, progress_bar=progress_bar)
+    result = fit_multiband(data, progress_bar=progress_bar, plot=plot)
     if result is None:
         print(f"Skipping quasar {data['object_id']} due to diverging MCMC.")
         return None
@@ -423,11 +444,15 @@ def process_quasar(i_data, n=0, progress_bar=False):
     data |= result
 
 
-    print(f"Quasar {i}/{n} ({data['object_id']}): log_tau_RF={data['log_tau_RF']:.3f}±{data['log_tau_RF_err']:.3f}, log_sigma_RF={data['log_sigma_RF']}±{data['log_sigma_RF_err']}", 
-          flush=True)
+    #print(f"Quasar {i}/{n} ({data['object_id']}): log_tau_RF={data['log_tau_RF']:.3f}±{data['log_tau_RF_err']:.3f}, log_sigma_RF={data['log_sigma_RF']}±{data['log_sigma_RF_err']}", flush=True)
     return data
 
-def concat_light_curves(N=None, filter_object_ids=None, save_file_path=None):
+def concat_light_curves(N=None, skip=None, filter_object_ids=None, save_file_path=None):
+    if save_file_path and os.path.exists(save_file_path):
+        print(f"Loading data from {save_file_path}")
+        return load_s82_from_hdf5(save_file_path)
+
+
     s82_objs = []
 
     # Load the S82 data from the FITS file
@@ -444,6 +469,7 @@ def concat_light_curves(N=None, filter_object_ids=None, save_file_path=None):
     match_object_ids = set(sdss.objectId) if filter_object_ids is None else filter_object_ids
     matching_indices = cat[cat.objectId.isin(match_object_ids)].index
     cat = cat.loc[matching_indices]
+    cat = cat[skip:] if skip else cat
     cat = cat[:N] if N else cat
 
     print(f"Found {len(cat)} matching objects", len(cat))
@@ -522,6 +548,24 @@ def concat_light_curves(N=None, filter_object_ids=None, save_file_path=None):
         #save_lc_plot(times, mags, magerrs, object_id)
 
     hdul.close()
+    s82_objs = populate_sdss_fields(s82_objs)
+
+    if save_file_path:
+        with h5py.File(save_file_path, "w") as hdf:
+            for obj in s82_objs:
+                object_id = obj["object_id"]
+                group = hdf.create_group(object_id)
+
+                # Save all attributes
+                for key, value in obj.items():
+                    if isinstance(value, dict):
+                        sub_group = group.create_group(key)
+                        for sub_key, sub_value in value.items():
+                            sub_group.create_dataset(sub_key, data=sub_value)
+                    else:
+                        group.attrs[key] = value
+
+
     return s82_objs
 
 def load_s82_from_hdf5(file_path="s82_objs.h5"):
@@ -530,18 +574,20 @@ def load_s82_from_hdf5(file_path="s82_objs.h5"):
     with h5py.File(file_path, "r") as hdf:
         for object_id in hdf.keys():
             group = hdf[object_id]
-            data = {
-                "object_id": object_id,
-                "magerrs_mean": group.attrs["magerrs_mean"],
-                "times": {},
-                "mags": {},
-                "magerrs": {},
-            }
+            data = {"object_id": object_id}
 
-            for key in ["times", "mags", "magerrs"]:
-                sub_group = group[key]
-                for band in sub_group.keys():
-                    data[key][band] = sub_group[band][...]
+            # Load attributes
+            for attr_key in group.attrs.keys():
+                data[attr_key] = group.attrs[attr_key]
+
+            # Load datasets
+            for key in group.keys():
+                if isinstance(group[key], h5py.Group):
+                    data[key] = {}
+                    for sub_key in group[key].keys():
+                        data[key][sub_key] = group[key][sub_key][...]
+                else:
+                    data[key] = group[key][...]
 
             s82_objs.append(data)
 
@@ -581,16 +627,21 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Process quasars with optional filtering.")
     parser.add_argument("--filter_object_id", nargs="+", help="List of object IDs to filter.")
     parser.add_argument("--N", type=int, help="Number of objects to process.")
+    parser.add_argument("--skip", type=int, help="Number of objects to skip.")
     parser.add_argument("--chunk_size", type=int, default=500, help="Chunk size for processing objects.")
     parser.add_argument("-f", "--file", type=str, help="Path to the file to append (read and write) objects.") 
+    parser.add_argument("--lc_file", type=str, help="Path to the light curve file.")
+    parser.add_argument("--plot", action="store_true", help="Enable plotting of results.")
     args = parser.parse_args()
+
+
     filter_object_ids = set(args.filter_object_id) if args.filter_object_id else None
     if filter_object_ids is not None:
         print(f"Filtering object IDs: {filter_object_ids}")
         objs = concat_light_curves(filter_object_ids=filter_object_ids)
         objs = populate_sdss_fields(objs)
         for i, obj in enumerate(objs):
-            q = process_quasar((i, obj), n=len(objs), progress_bar=True)
+            q = process_quasar((i, obj), n=len(objs), progress_bar=True, plot=True)
             fields_to_filter = ['times', 'mags', 'magerrs']
             q = {k: v for k, v in q.items() if k not in fields_to_filter}
             print(q['z'], q['clean_bands'])
@@ -600,7 +651,6 @@ if __name__ == '__main__':
 
     # Filter objects by object_id that exist in the HDF5 file
     existing_object_ids = set()
-
     if os.path.exists(args.file):
         with h5py.File(args.file, "r") as hdf:
             existing_object_ids = set(hdf.keys())
@@ -619,27 +669,27 @@ if __name__ == '__main__':
     cat = cat[~cat['objectId'].isin(existing_object_ids)]
     filter_object_ids = set(cat['objectId'].values)
     #objs = [obj for obj in objs if obj['object_id'] not in existing_object_ids]
-    objs = concat_light_curves(filter_object_ids=filter_object_ids, N=args.N)
+    objs = concat_light_curves(filter_object_ids=filter_object_ids, N=args.N, skip=args.skip, save_file_path=args.lc_file)
     print(f"Loaded {len(objs)} objects from the light curves")
+    sys.exit("Exiting the program as requested.")
+
     objs = populate_sdss_fields(objs)
 
     for start_idx in range(0, len(objs), args.chunk_size):
-        print("========================================================================")
-        print(f"Processing chunk {start_idx // args.chunk_size + 1}/{(len(objs) + args.chunk_size - 1) // args.chunk_size}...")
         chunk = objs[start_idx:start_idx + args.chunk_size]
+        print(f"({100*start_idx/len(objs):.1}%) Processing chunk {start_idx // args.chunk_size + 1}/{(len(objs) + args.chunk_size - 1) // args.chunk_size}...")
         
         ctx = get_context("spawn")  # Safer for JAX when using multiprocessing
         results = []
 
         with ctx.Pool(processes=15) as pool:
-            results = pool.map(partial(process_quasar, n=len(chunk)), enumerate(chunk))
+            results = pool.map(partial(process_quasar, n=len(chunk), plot=args.plot), enumerate(chunk))
 
         quasar_list = [q for q in results if q is not None]
 
         # Append to HDF5 file if it exists, otherwise create a new one
         with h5py.File(args.file, "a") as hdf:
             for quasar in quasar_list:
-                #sprint(quasar['object_id'], quasar['z'], quasar['clean_bands'])
                 object_id = quasar["object_id"]
                 if object_id in hdf:
                     continue

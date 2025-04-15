@@ -1,6 +1,15 @@
 import matplotlib.pyplot as plt
 plt.style.use("style.mplstyle")
 import corner
+import numpy as np
+import os
+
+colors = {'u': 'tab:blue',
+          'g': 'tab:green', 
+          'r': 'tab:orange', 
+          'i': 'tab:red', 
+          'z': 'tab:brown', 
+          'y': 'tab:gray'}
 
 def save_lc_plot(times, mags, magerrs, object_id):
     # Plot and save the light curves
@@ -46,7 +55,9 @@ def plot_posterior(samples, data, clean_bands=None):
     plt.close(fig)
     return fig
 
-def save_combined_plot(samples, model, X, y, yerr, band_idx, object_id, clean_bands):
+def save_combined_plot(samples, model, X, y, yerr, band_idx, data):
+    clean_bands = data['clean_bands']
+    object_id = data['object_id']
     band_idx_map = {i: b for i, b in enumerate(clean_bands)}
 
     fig, ax = plt.subplots(1, 1, figsize=(8, 6), sharex=True)
@@ -61,7 +72,7 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, object_id, clean_ba
         # Generate test times for predictions
         t_test = np.linspace(t.min(), t.max(), 1000)
         # Compute predictions using the model
-        posterior_median = {k: jnp.median(v, axis=0) for k, v in samples.items()}
+        posterior_median = {k: np.median(v, axis=0) for k, v in samples.items()}
         mu, std = model.pred(posterior_median, (t_test, np.full_like(t_test, n, dtype=int)))
         # Plot the predictions
         ax.plot(t_test, mu+offsets[n], alpha=0.8, color=colors[band_idx_map[n]], lw=2.5)
@@ -70,7 +81,22 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, object_id, clean_ba
     ax.set_xlabel('Days')
     ax.set_ylabel('Magnitude + arbitrary offset')
     ax.invert_yaxis()  # Magnitudes are brighter when lower
-    #ax.legend(loc='upper right')
+    ax.legend(loc='lower right')
+
+    # Annotate tau_RF and sigma_RF with their values and errors
+    ax.annotate(
+        f"$\\log_{{10}}(\\tau_{{RF}})$: {data['log_tau_RF']:.2f} ± {data['log_tau_RF_err']:.2f}\n"
+        f"$\\log_{{10}}(\\sigma_{{RF}})$: {data['log_sigma_RF']:.2f} ± {data['log_sigma_RF_err']:.2f}\n"
+        f"$\\beta$: {data['beta']:.2f} ± {data['beta_err']:.2f}\n"
+        f"$\\mathrm{{poly1}}$: {data['poly1']:.2f} ± {data['poly1_err']:.2f}\n",
+        #f"$\\mathrm{{poly2}}$: {data['poly2']:.2f} ± {data['poly2_err']:.2f}\n"
+        #f"$\\mathrm{{mean}}$: {data['mean']:.2f} ± {data['mean_err']:.2f}",
+        xy=(0.05, 0.95),
+        xycoords="axes fraction",
+        fontsize=12,
+        verticalalignment="top",
+        bbox=dict(boxstyle="round,pad=0.3", edgecolor="black", facecolor="white", alpha=0.8),
+    )
     # Annotate the legend with each letter in the same color
     for i, band in enumerate(np.flip(clean_bands)):
         ax.annotate(
@@ -91,6 +117,39 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, object_id, clean_ba
     output_dir = "light_curves_fits"
     os.makedirs(output_dir, exist_ok=True)
     plt.savefig(os.path.join(output_dir, f'{object_id}_combined_plot.png'))
+    plt.close(fig)
+    return fig
+
+def plot_mcmc_traces(samples, data):
+    """
+    Plot the MCMC traces for all parameters in the samples.
+
+    Parameters:
+    - samples: dict of arrays, where each key corresponds to a parameter name and the value is an array of MCMC samples.
+    - object_id: identifier for the object being analyzed.
+    """
+    param_names = list(set(samples.keys()) - set(['log_kernel_param']))
+    n_params = len(param_names)
+    fig, axes = plt.subplots(n_params+2, 1, figsize=(10, 2 * n_params), sharex=True)
+    object_id = data['object_id']
+    for i, param in enumerate(param_names):
+        ax = axes[i] if n_params > 1 else axes
+        ax.plot(samples[param], alpha=0.7, lw=0.5)
+        ax.set_ylabel(param, fontsize=12)
+        ax.grid(True)
+
+    axes[-1].plot(np.log10(np.exp(samples['log_kernel_param'][:, 0])), alpha=0.7, lw=0.5)
+    axes[-1].set_ylabel("log10_tau", fontsize=12)
+    axes[-2].plot(np.log10(np.exp(samples['log_kernel_param'][:, 1])), alpha=0.7, lw=0.5)
+    axes[-2].set_ylabel("log10_sigma", fontsize=12)
+
+    axes[-1].set_xlabel("Step", fontsize=12)
+    plt.tight_layout()
+
+    # Save the plot as a PNG file
+    output_dir = "mcmc_traces"
+    os.makedirs(output_dir, exist_ok=True)
+    plt.savefig(os.path.join(output_dir, f"{object_id}_mcmc_traces.png"))
     plt.close(fig)
     return fig
 

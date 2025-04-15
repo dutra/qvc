@@ -1,6 +1,62 @@
+
+
+def bands_redder_than_5000(z):
+    """
+    Returns a list of bands with rest-frame effective wavelength > 5000 Å.
+
+    Args:
+        z (float): Redshift.
+
+    Returns:
+        list: Bands redder than 5000 Å at rest frame.
+    """
+    threshold = 5000
+    bands = {
+        'u': {'lambda_eff': 3551},
+        'g': {'lambda_eff': 4686},
+        'r': {'lambda_eff': 6165},
+        'i': {'lambda_eff': 7481},
+        'z': {'lambda_eff': 8931},
+        'y': {'lambda_eff': 9700}
+    }
+
+    redder_bands = []
+    for band, props in bands.items():
+        rest_lambda_eff = props['lambda_eff'] / (1 + z)
+        if rest_lambda_eff > threshold:
+            redder_bands.append(band)
+
+    return redder_bands
+
+def bands_with_host_contamination(z):
+    """
+    Returns a list of bands contaminated by the host galaxy, defined as rest-frame wavelength > 6000 Å.
+
+    Returns:
+        list of contaminated bands
+    """
+    host_contamination_threshold = 6000
+    bands = {
+        'u': {'lambda_eff': 3551, 'lambda_lo_90': 3152.4, 'lambda_hi_90': 3949.6},
+        'g': {'lambda_eff': 4686, 'lambda_lo_90': 3715.4, 'lambda_hi_90': 5656.6},
+        'r': {'lambda_eff': 6165, 'lambda_lo_90': 5207.0, 'lambda_hi_90': 7123.0},
+        'i': {'lambda_eff': 7481, 'lambda_lo_90': 6407.6, 'lambda_hi_90': 8554.4},
+        'z': {'lambda_eff': 8931, 'lambda_lo_90': 8266.7, 'lambda_hi_90': 9595.3},
+        'y': {'lambda_eff': 9700, 'lambda_lo_90': 8900.0, 'lambda_hi_90': 10500.0}
+    }
+
+    contaminated_bands = []
+    for band, props in bands.items():
+        rest_lo = props['lambda_lo_90'] / (1 + z)
+        rest_hi = props['lambda_hi_90'] / (1 + z)
+        if rest_lo > host_contamination_threshold or rest_hi > host_contamination_threshold:
+            contaminated_bands.append(band)
+
+    return contaminated_bands
+
 def bands_with_any_contamination_annotated(z):
     """
-    Returns ugrizy bands contaminated by Hα, Lyα, or the Lyman break at redshift z,
+    Returns ugrizy bands contaminated by Hα, Lyα, Lyman break, C IV, Mg II, or Hβ at redshift z,
     annotated by severity: 'severe', 'moderate', or not included.
 
     Uses λ_eff and Gaussian-derived 90% throughput ranges.
@@ -16,13 +72,19 @@ def bands_with_any_contamination_annotated(z):
             'Hα': {band: severity, ...},
             'Lyα': {band: severity, ...},
             'Lyman break': {band: severity, ...},
+            'C IV': {band: severity, ...},
+            'Mg II': {band: severity, ...},
+            'Hβ': {band: severity, ...},
             'combined': {band: max severity across contaminants}
         }
     """
     lines = {
         'Hα': 6563,
         'Lyα': 1216,
-        'Lyman break': 912
+        'Lyman break': 912,
+        'C IV': 1549,
+        'Mg II': 2798,
+        'Hβ': 4861
     }
 
     bands = {
@@ -63,5 +125,5 @@ def bands_with_any_contamination_annotated(z):
         if levels:
             combined[band] = max(levels, key=lambda x: severity_order[x])
     results['combined'] = combined
-    
+
     return results['combined']
