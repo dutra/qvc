@@ -671,9 +671,15 @@ if __name__ == '__main__':
     #objs = [obj for obj in objs if obj['object_id'] not in existing_object_ids]
     objs = concat_light_curves(filter_object_ids=filter_object_ids, N=args.N, skip=args.skip, save_file_path=args.lc_file)
     print(f"Loaded {len(objs)} objects from the light curves")
-    sys.exit("Exiting the program as requested.")
+    #sys.exit("Exiting the program as requested.")
+    #objs = populate_sdss_fields(objs)
 
-    objs = populate_sdss_fields(objs)
+    # Exclude objects in filter_object_ids from objs
+    if filter_object_ids:
+        objs = [obj for obj in objs if obj['object_id'] not in filter_object_ids]
+    
+    print(f"Processing {len(objs)} objects after filtering")
+    
 
     for start_idx in range(0, len(objs), args.chunk_size):
         chunk = objs[start_idx:start_idx + args.chunk_size]
