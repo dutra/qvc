@@ -4,6 +4,16 @@ import corner
 import numpy as np
 import os
 
+
+lambda_pivot = {
+    'u': 3543,  # SDSS u-band
+    'g': 4770,  # SDSS g-band
+    'r': 6231,  # SDSS r-band
+    'i': 7625,  # SDSS i-band
+    'z': 9134,  # SDSS z-band
+    'y': 9633,  # PS1 y-band
+}
+
 colors = {'u': 'tab:blue',
           'g': 'tab:green', 
           'r': 'tab:orange', 
@@ -46,6 +56,10 @@ def plot_posterior(samples, data, clean_bands=None):
         r'poly1': samples['poly1'],
         r'mean': samples['mean'][:,0],
     }
+    for i, band in enumerate(clean_bands):
+        posterior_samples[f'lag_blr_{band}'] = samples['lag_blr'][:, i]
+        posterior_samples[f'log_amp_delta_blr_{band}'] = samples['log_amp_delta_blr'][:, i]
+
     # Convert the samples to a 2D array for corner
     corner_data = np.vstack([posterior_samples[key] for key in posterior_samples.keys()]).T
     fig = corner.corner(corner_data, labels=list(posterior_samples.keys()), show_titles=True)

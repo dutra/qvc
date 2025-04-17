@@ -46,6 +46,8 @@ from eztaox.fitter import fit
 from eztaox.initializers import DRWInit, UniformInit
 from eztaox.models import MultiVarModel, MultiVarModelFFT
 from eztaox.utils import formatlc
+
+from eztaox.kernels.quasisep import MultibandLowRank
 from tinygp import kernels
 from tinygp import GaussianProcess
 from eztaox.kernels import direct, quasisep
@@ -70,7 +72,7 @@ import argparse
 from multiband_fit_utils import *
 from multiband_fit_plotting import *
 
-num_samples = 500
+num_samples = 250
 
 # define params
 zero_mean = False
@@ -88,6 +90,15 @@ lambda_pivot = {
 
 filters = {"u": 0, "g": 1, "r": 2, "i": 3, "z": 4, "y": 5} # harcoded filter order for SDSS
 bands = ['u', 'g', 'r', 'i', 'z']#, 'y']
+
+class MyMultibandLowRank(MultibandLowRank):
+    amplitudes: jnp.ndarray
+    amplitudes_blr: jnp.ndarray
+    lag_blr: jnp.ndarray
+
+    def observation_model(self, X) -> JAXArray:
+        return (self.amplitudes[X[1]] * self.kernel.observation_model(X[0]) + 
+                self.amplitudes_blr[X[1]] * self.kernel.observation_model(X[0] - self.lag_blr[X[1]]))
 
 # Override MultiVarModel
 class MyMultiVarModel(MultiVarModel):
@@ -122,7 +133,8 @@ class MyMultiVarModel(MultiVarModel):
         self, params: dict[str, JAXArray]
     ) -> tuple[GaussianProcess, JAXArray]:
         # log amp + mean
-        log_amps = self.amp_transform(params)
+        log_amps = self.my_amp_transform(params)
+        log_amps_blr = self.my_amp_transform_blr(params)
         means = partial(
             MyMultiVarModel.mean_func, self.zero_mean, log_amps.shape[0], params
         )
@@ -140,11 +152,16 @@ class MyMultiVarModel(MultiVarModel):
             diags = self.diag[inds]
 
         # def kernel
-        kernel = quasisep.MultibandLowRank(
+        # kernel = quasisep.MultibandLowRank(
+        #     amplitudes=jnp.exp(log_amps),
+        #     kernel=self.kernel_def(jnp.exp(params["log_kernel_param"])),
+        # )
+        kernel = MyMultibandLowRank(
             amplitudes=jnp.exp(log_amps),
+            amplitudes_blr=jnp.exp(log_amps_blr),
+            lag_blr=jnp.exp(params["lag"])[band[inds]],
             kernel=self.kernel_def(jnp.exp(params["log_kernel_param"])),
         )
-
         return (
             GaussianProcess(
                 kernel,
@@ -155,8 +172,10 @@ class MyMultiVarModel(MultiVarModel):
             ),
             inds,
         )
+    def my_amp_transform_blr(self, params: dict[str, JAXArray]) -> JAXArray:
+        return jnp.atleast_1d(params["log_amp_delta_blr"])
 
-    def amp_transform(self, params: dict[str, JAXArray]) -> JAXArray:
+    def my_amp_transform(self, params: dict[str, JAXArray]) -> JAXArray:
         b = params["beta"]
         params["log_amp_delta"] = jnp.array([b*np.log(lambda_pivot[band]/lambda_pivot[self.clean_bands[0]]) for band in self.clean_bands[1:]]) # comment this out for old version
         r = jnp.insert(jnp.atleast_1d(params["log_amp_delta"]), 0, 0.0)
@@ -172,6 +191,7 @@ def initSampler(key, nSample, nBand=len(bands)):
     poly1Sampler = UniformInit(1, [-1000, 1000])
     #poly2Sampler = UniformInit(1, [-10, 10])
     logAmpDeltaSampler = UniformInit(nBand-1, [-2, 0.0])
+    logAmpDeltaBLRSampler = UniformInit(nBand, [-2, 0.0])
     logJitterSampler = UniformInit(nBand, [jnp.log(1e-10), jnp.log(0.1)])
     betaSampler = UniformInit(1, [-2.0, 0.0])
 
@@ -181,10 +201,12 @@ def initSampler(key, nSample, nBand=len(bands)):
     return {
         "log_kernel_param": kernelSampler(subkeys[0], nSample),
         "log_amp_delta": logAmpDeltaSampler(subkeys[1], nSample),
+        "log_amp_delta_blr": logAmpDeltaBLRSampler(subkeys[7], nSample),
         "mean": meanSampler(subkeys[2], nSample),
         "poly1": poly1Sampler(subkeys[6], nSample),
         #"poly2": poly2Sampler(subkeys[7], nSample),
         "lag": lagSampler(subkeys[3], nSample),
+        "lag_blr": lagSampler(subkeys[8], nSample),
         "log_jitter": logJitterSampler(subkeys[4], nSample),
         "beta": betaSampler(subkeys[5], nSample),
     }
@@ -199,9 +221,13 @@ def numpyro_model(X, yerr, y=None, bestP=None, clean_bands=None):
     #log_amp_delta = numpyro.sample(
     #   "log_amp_delta", dist.Normal(bestP["log_amp_delta"], 2.0)
     #) # comment this out when using beta
+    log_amp_delta_blr = numpyro.sample(
+      "log_amp_delta_blr", dist.Normal(bestP["log_amp_delta_blr"], 2.0)
+    )
 
     # lag
     lag = numpyro.sample("lag", dist.Normal(bestP['lag'], 10))
+    lag_blr = numpyro.sample("lag_blr", dist.Normal(bestP['lag_blr'], 10))
     
     # log jitter, mean => the prior for these two should be set small, otherwise
     # it is hard to converge
@@ -220,7 +246,9 @@ def numpyro_model(X, yerr, y=None, bestP=None, clean_bands=None):
     sample_params = {
         "log_kernel_param": log_kernel_param,
         #"log_amp_delta": log_amp_delta, # comment this out when using beta
+        "log_amp_delta_blr": log_amp_delta_blr, 
         "lag": lag,
+        "lag_blr": lag_blr,
         "mean": mean,
         "poly1": poly1,
         #"poly2": poly2,
@@ -235,15 +263,17 @@ def fit_multiband(data, progress_bar=False, plot=False):
     mags = data['mags']
     magerrs = data['magerrs']
     
-    contamined_bands = bands_with_any_contamination_annotated(data['z'])
+    #contamined_bands = bands_with_any_contamination_annotated(data['z'])
     # print("Contamined bands: ", contamined_bands)
-    moderate_contamined_bands = [band for band, severity in contamined_bands.items() if severity == 'moderate']
-    severe_contamined_bands = [band for band, severity in contamined_bands.items() if severity == 'severe']
+    #moderate_contamined_bands = [band for band, severity in contamined_bands.items() if severity == 'moderate']
+    #severe_contamined_bands = [band for band, severity in contamined_bands.items() if severity == 'severe']
     # print("Moderate contamined bands: ", moderate_contamined_bands)
     # print("Severe contamined bands: ", severe_contamined_bands)
     host_contaminated_bands = bands_with_host_contamination(data['z'])
     red_bands = bands_redder_than_5000(data['z'])
-    clean_bands = list(set(bands) - set(moderate_contamined_bands) - set(host_contaminated_bands) - set(red_bands))
+    blue_bands = bands_bluer_than_lyman_alpha(data['z'])
+
+    clean_bands = list(set(bands) - set(host_contaminated_bands) - set(red_bands) - set(blue_bands))
     # Reorder clean_bands to match the desired order
     clean_bands = list(sorted(clean_bands, key=lambda band: ['u', 'g', 'r', 'i', 'z', 'y'].index(band)))
     if len(clean_bands) == 0:
@@ -358,7 +388,6 @@ def fit_multiband(data, progress_bar=False, plot=False):
     log_sigma_RF_err = 0.5 * (upper - lower) # symmetric uncertainties
     log_sigma_RF = median
 
-
     log_sigma = np.log10(np.exp(samples['log_kernel_param'][:, 1]))
     beta = samples['beta']
     log_amp_delta = np.array([beta*np.log(lambda_pivot[band]/lambda_pivot[clean_bands[0]]) for band in clean_bands])
@@ -401,6 +430,20 @@ def fit_multiband(data, progress_bar=False, plot=False):
     mean_err = 0.5 * (upper - lower) # symmetric uncertainties
     mean = median
 
+    lower, median, upper = np.percentile(samples['log_amp_delta_blr'], [16, 50, 84], axis=0)
+    log_amp_delta_blr_err = 0.5 * (upper - lower) # symmetric uncertainties
+    log_amp_delta_blr = median
+
+    lower, median, upper = np.percentile(samples['lag_blr'], [16, 50, 84], axis=0)
+    lag_blr_err = 0.5 * (upper - lower) # symmetric uncertainties
+    lag_blr = median
+
+    lower, median, upper = np.percentile(samples['lag'], [16, 50, 84], axis=0)
+    lag_err = 0.5 * (upper - lower) # symmetric uncertainties
+    lag = median
+
+
+
     d = dict(object_id=data['object_id'],
             log_tau_RF=log_tau_RF,
             log_tau_RF_err=log_tau_RF_err,
@@ -421,12 +464,18 @@ def fit_multiband(data, progress_bar=False, plot=False):
             # poly2_err=poly2_err,
             mean=mean,
             mean_err=mean_err,
-            clean_bands=clean_bands,)
+            clean_bands=clean_bands,
+            log_amp_delta_blr=log_amp_delta_blr,
+            log_amp_delta_blr_err=log_amp_delta_blr_err,
+            lag_blr=lag_blr,
+            lag_blr_err=lag_blr_err,
+            lag=lag,
+            lag_err=lag_err,)
     
     if plot:
         save_combined_plot(samples, m1, X, y, yerr, band_idx[mask_outlier], d)
         plot_mcmc_traces(samples, d)
-        #plot_posterior(samples, data, clean_bands=clean_bands)
+        plot_posterior(samples, data, clean_bands=clean_bands)
     
     return d
 
@@ -665,10 +714,11 @@ if __name__ == '__main__':
     sdss = sdss[sdss.mjd.notna() & (len(sdss.mjd) > 0)]
 
     # Find elements in cat where objectId exists in the list of objectId of sdss
+    #filter_object_ids = set(pd.read_csv("data/object_ids_test.csv")["object_id"].values)
     match_object_ids = set(sdss.objectId) if filter_object_ids is None else filter_object_ids
     matching_indices = cat[cat.objectId.isin(match_object_ids)].index
-
-    cat = cat.loc[matching_indices]
+    cat = cat[cat.objectId.isin(match_object_ids)]
+    #cat = cat.loc[matching_indices]
     print(f"Total objects in catalog: {len(cat)}")
     print(f"Number of objects already processed in HDF5 file: {len(existing_object_ids)}")
     print(f"Number of objects that should be processed: {len(cat)-len(existing_object_ids)}")

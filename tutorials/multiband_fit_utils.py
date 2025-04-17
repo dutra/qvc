@@ -1,3 +1,14 @@
+import h5py
+
+def modify_h5_file(save_file_path, s82_objs):
+    with h5py.File(save_file_path, "a") as hdf:  # Open in append mode to modify
+        for object_id in hdf.keys():  # Iterate through every object in the HDF5 file
+            group = hdf[object_id]
+
+            # Delete specified keys if they exist
+            for key in ["mags", "times", "magerrs"]:
+                if key in group:
+                    del group[key]
 
 
 def bands_redder_than_5000(z):
@@ -27,6 +38,34 @@ def bands_redder_than_5000(z):
             redder_bands.append(band)
 
     return redder_bands
+
+def bands_bluer_than_lyman_alpha(z):
+    """
+    Returns a list of bands with rest-frame effective wavelength < Lyman-alpha (1216 Å).
+
+    Args:
+        z (float): Redshift.
+
+    Returns:
+        list: Bands bluer than Lyman-alpha at rest frame.
+    """
+    lyman_alpha = 1216
+    bands = {
+        'u': {'lambda_eff': 3551},
+        'g': {'lambda_eff': 4686},
+        'r': {'lambda_eff': 6165},
+        'i': {'lambda_eff': 7481},
+        'z': {'lambda_eff': 8931},
+        'y': {'lambda_eff': 9700}
+    }
+
+    bluer_bands = []
+    for band, props in bands.items():
+        rest_lambda_eff = props['lambda_eff'] / (1 + z)
+        if rest_lambda_eff < lyman_alpha:
+            bluer_bands.append(band)
+
+    return bluer_bands
 
 def bands_with_host_contamination(z):
     """
@@ -79,12 +118,13 @@ def bands_with_any_contamination_annotated(z):
         }
     """
     lines = {
-        'Hα': 6563,
-        'Lyα': 1216,
-        'Lyman break': 912,
-        'C IV': 1549,
-        'Mg II': 2798,
-        'Hβ': 4861
+        #'Hα': 6563,
+        #'Lyα': 1216,
+        #'Lyman break': 912,  # Lyman break is not a line but a continuum drop
+        'Lyman break': 1216,  # This is the Lyα line, not the break
+        #'C IV': 1549,
+        #'Mg II': 2798,
+        #'Hβ': 4861
     }
 
     bands = {
