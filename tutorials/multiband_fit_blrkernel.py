@@ -159,7 +159,7 @@ class MyMultiVarModel(MultiVarModel):
         kernel = MyMultibandLowRank(
             amplitudes=jnp.exp(log_amps),
             amplitudes_blr=jnp.exp(log_amps_blr),
-            lag_blr=jnp.exp(params["lag"])[band[inds]],
+            lag_blr=jnp.exp(params["log_lag_blr"])[band[inds]],
             kernel=self.kernel_def(jnp.exp(params["log_kernel_param"])),
         )
         return (
@@ -177,7 +177,7 @@ class MyMultiVarModel(MultiVarModel):
 
     def my_amp_transform(self, params: dict[str, JAXArray]) -> JAXArray:
         b = params["beta"]
-        params["log_amp_delta"] = jnp.array([b*np.log(lambda_pivot[band]/lambda_pivot[self.clean_bands[0]]) for band in self.clean_bands[1:]]) # comment this out for old version
+        params["log_amp_delta"] = jnp.array([b*np.log(lambda_pivot[band]/lambda_pivot['u']) for band in self.clean_bands[1:]]) # comment this out for old version
         r = jnp.insert(jnp.atleast_1d(params["log_amp_delta"]), 0, 0.0)
         return r
     
@@ -187,6 +187,7 @@ def initSampler(key, nSample, nBand=len(bands)):
 
     # uniform sampler
     lagSampler = UniformInit(nBand-1, [-10, 10])
+    lagBLRSampler = UniformInit(nBand, [-2, np.log(20)])
     meanSampler = UniformInit(nBand, [-1, 1])
     poly1Sampler = UniformInit(1, [-1000, 1000])
     #poly2Sampler = UniformInit(1, [-10, 10])
@@ -206,7 +207,7 @@ def initSampler(key, nSample, nBand=len(bands)):
         "poly1": poly1Sampler(subkeys[6], nSample),
         #"poly2": poly2Sampler(subkeys[7], nSample),
         "lag": lagSampler(subkeys[3], nSample),
-        "lag_blr": lagSampler(subkeys[8], nSample),
+        "log_lag_blr": lagBLRSampler(subkeys[8], nSample),
         "log_jitter": logJitterSampler(subkeys[4], nSample),
         "beta": betaSampler(subkeys[5], nSample),
     }
@@ -227,7 +228,7 @@ def numpyro_model(X, yerr, y=None, bestP=None, clean_bands=None):
 
     # lag
     lag = numpyro.sample("lag", dist.Normal(bestP['lag'], 10))
-    lag_blr = numpyro.sample("lag_blr", dist.Normal(bestP['lag_blr'], 10))
+    log_lag_blr = numpyro.sample("log_lag_blr", dist.Normal(bestP['log_lag_blr'], 2))
     
     # log jitter, mean => the prior for these two should be set small, otherwise
     # it is hard to converge
@@ -236,7 +237,7 @@ def numpyro_model(X, yerr, y=None, bestP=None, clean_bands=None):
     mean = numpyro.sample("mean", dist.Normal(bestP['mean'], .1))
     poly1 = numpyro.sample("poly1", dist.Normal(bestP['poly1'], 1))
     #poly2 = numpyro.sample("poly2", dist.Normal(bestP['poly2'], 2)) 
-    beta = numpyro.sample("beta", dist.Normal(-0.5, 0.25))
+    beta = numpyro.sample("beta", dist.Normal(bestP['beta'], 0.5))
 
 
     # kernel
@@ -248,9 +249,9 @@ def numpyro_model(X, yerr, y=None, bestP=None, clean_bands=None):
         #"log_amp_delta": log_amp_delta, # comment this out when using beta
         "log_amp_delta_blr": log_amp_delta_blr, 
         "lag": lag,
-        "lag_blr": lag_blr,
+        "log_lag_blr": log_lag_blr,
         "mean": mean,
-        "poly1": poly1,
+        "poly1": poly1, 
         #"poly2": poly2,
         "log_jitter": log_jitter,
         "beta": beta,
@@ -263,17 +264,10 @@ def fit_multiband(data, progress_bar=False, plot=False):
     mags = data['mags']
     magerrs = data['magerrs']
     
-    #contamined_bands = bands_with_any_contamination_annotated(data['z'])
-    # print("Contamined bands: ", contamined_bands)
-    #moderate_contamined_bands = [band for band, severity in contamined_bands.items() if severity == 'moderate']
-    #severe_contamined_bands = [band for band, severity in contamined_bands.items() if severity == 'severe']
-    # print("Moderate contamined bands: ", moderate_contamined_bands)
-    # print("Severe contamined bands: ", severe_contamined_bands)
-    host_contaminated_bands = bands_with_host_contamination(data['z'])
     red_bands = bands_redder_than_5000(data['z'])
     blue_bands = bands_bluer_than_lyman_alpha(data['z'])
 
-    clean_bands = list(set(bands) - set(host_contaminated_bands) - set(red_bands) - set(blue_bands))
+    clean_bands = list(set(bands) - set(blue_bands))
     # Reorder clean_bands to match the desired order
     clean_bands = list(sorted(clean_bands, key=lambda band: ['u', 'g', 'r', 'i', 'z', 'y'].index(band)))
     if len(clean_bands) == 0:
@@ -381,7 +375,7 @@ def fit_multiband(data, progress_bar=False, plot=False):
 
 
     lambda_ref = 2500 # Any reference wavelength
-    lambda_pivot_RF = lambda_pivot[clean_bands[0]]/(1 + data['z'])
+    lambda_pivot_RF = lambda_pivot['u']/(1 + data['z'])
     
     log_sigma_RF = np.log10(np.exp(samples['log_kernel_param'][:, 1] + samples['beta']*np.log(lambda_ref/lambda_pivot_RF)))
     lower, median, upper = np.percentile(log_sigma_RF, [16, 50, 84])
@@ -390,7 +384,7 @@ def fit_multiband(data, progress_bar=False, plot=False):
 
     log_sigma = np.log10(np.exp(samples['log_kernel_param'][:, 1]))
     beta = samples['beta']
-    log_amp_delta = np.array([beta*np.log(lambda_pivot[band]/lambda_pivot[clean_bands[0]]) for band in clean_bands])
+    log_amp_delta = np.array([beta*np.log(lambda_pivot[band]/lambda_pivot['u']) for band in clean_bands])
     #log_amp_delta = samples["log_amp_delta"].T # comment out this line when using beta
     #log_amp_delta = jnp.insert(log_amp_delta, 0, np.zeros(log_amp_delta.shape[1]), axis=0) # comment out this line when using beta
 
@@ -434,9 +428,9 @@ def fit_multiband(data, progress_bar=False, plot=False):
     log_amp_delta_blr_err = 0.5 * (upper - lower) # symmetric uncertainties
     log_amp_delta_blr = median
 
-    lower, median, upper = np.percentile(samples['lag_blr'], [16, 50, 84], axis=0)
-    lag_blr_err = 0.5 * (upper - lower) # symmetric uncertainties
-    lag_blr = median
+    lower, median, upper = np.percentile(samples['log_lag_blr'], [16, 50, 84], axis=0)
+    log_lag_blr_err = 0.5 * (upper - lower) # symmetric uncertainties
+    log_lag_blr = median
 
     lower, median, upper = np.percentile(samples['lag'], [16, 50, 84], axis=0)
     lag_err = 0.5 * (upper - lower) # symmetric uncertainties
@@ -445,6 +439,7 @@ def fit_multiband(data, progress_bar=False, plot=False):
 
 
     d = dict(object_id=data['object_id'],
+            z=data['z'],
             log_tau_RF=log_tau_RF,
             log_tau_RF_err=log_tau_RF_err,
             beta=beta,
@@ -467,8 +462,8 @@ def fit_multiband(data, progress_bar=False, plot=False):
             clean_bands=clean_bands,
             log_amp_delta_blr=log_amp_delta_blr,
             log_amp_delta_blr_err=log_amp_delta_blr_err,
-            lag_blr=lag_blr,
-            lag_blr_err=lag_blr_err,
+            log_lag_blr=log_lag_blr,
+            log_lag_blr_err=log_lag_blr_err,
             lag=lag,
             lag_err=lag_err,)
     
@@ -503,10 +498,9 @@ def concat_light_curves(N=None, skip=None, filter_object_ids=None, save_file_pat
         if filter_object_ids is not None:
             # Filter the loaded objects based on the provided object IDs
             s82_objs = [obj for obj in s82_objs if obj['object_id'] in filter_object_ids]
-        return s82_objs
- 
- 
-    s82_objs = []
+        #return s82_objs
+    else: 
+        s82_objs = []
     # Load the S82 data from the FITS file
     hdul = fits.open('data/dr16q_prop_May01_2024.fits')
     fits_data = hdul[1].data  # Assuming the data is in the first extension    
@@ -529,6 +523,8 @@ def concat_light_curves(N=None, skip=None, filter_object_ids=None, save_file_pat
     # Loop through the data and extract the relevant information        
     for idx, row in tqdm(cat.iterrows(), total=len(cat), desc="Processing quasars"):
         object_id = row['objectId']
+        if object_id in [obj['object_id'] for obj in s82_objs]:
+            continue
 
         # Filter light curves for the current object_id
         sdss_lc = sdss[sdss.objectId == row['objectId']].copy()
@@ -579,6 +575,22 @@ def concat_light_curves(N=None, skip=None, filter_object_ids=None, save_file_pat
             mags[band] = mags[band][~nan_mask]
             magerrs[band] = magerrs[band][~nan_mask]
 
+            if len(times[band]) == 0 or len(mags[band]) == 0 or len(magerrs[band]) == 0:
+                continue
+
+            # Sort times, mags, magerrs by time
+            sort_idx = np.argsort(times[band])
+            times[band] = times[band][sort_idx]
+            mags[band] = mags[band][sort_idx]
+            magerrs[band] = magerrs[band][sort_idx]
+
+            # Keep only the last X days of light curve in the rest frame
+            # rest_frame_times = (times[band]-times[band].min()) / (1 + row['Z_SYS'])
+            # mask_days = (rest_frame_times >= (rest_frame_times.max() - 2600)) 
+            # times[band] = times[band][mask_days]
+            # mags[band] = mags[band][mask_days]
+            # magerrs[band] = magerrs[band][mask_days]
+
             # Ensure magerrs_mean calculation handles empty arrays
             if len(magerrs[band]) == 0:
                 magerrs_mean.append(np.nan)  # Default to 0.0 if no data is available
@@ -587,7 +599,20 @@ def concat_light_curves(N=None, skip=None, filter_object_ids=None, save_file_pat
 
         # Skip if no data is available for the object
         if all((len(times[band]) == 0 or len(mags[band]) == 0 or len(magerrs[band]) == 0) for band in bands):
+            print(f"No data available for object {object_id}, skipping.", flush=True)
             continue
+        
+        #rest_frame_times = (times['g']-times['g'].min()) / (1 + row['Z_SYS'])
+        #print(f"Object {object_id} - Band g: {rest_frame_times.min()=} {rest_frame_times.max()=} diff: {rest_frame_times.max()-rest_frame_times.min()=}", flush=True)
+        # Check if any band has rest frame time of 2800
+        # has_valid_rest_frame_time = any(
+        #     (((times[band] - times[band].min()) / (1 + row['Z_SYS'])).max() >= 2500)
+        #     if len(times[band]) > 0 else False
+        #     for band in bands
+        # ) 
+        # if not has_valid_rest_frame_time:
+        #     #print(f"No bands with rest frame time of 2800 for object {object_id}, skipping.", flush=True)
+        #     continue
 
         s82_objs.append({
             'object_id': object_id,
@@ -597,9 +622,12 @@ def concat_light_curves(N=None, skip=None, filter_object_ids=None, save_file_pat
             'magerrs_mean': magerrs_mean
         })
 
-        #save_lc_plot(times, mags, magerrs, object_id)
+        #save_lc_plot(times, mags, magerrs, object_id, bands=bands)
 
     hdul.close()
+
+    print(f"Found {len(s82_objs)} objects in concat_light_curves after time cut", len(s82_objs))
+
     s82_objs = populate_sdss_fields(s82_objs)
 
     if save_file_path:
@@ -616,7 +644,7 @@ def concat_light_curves(N=None, skip=None, filter_object_ids=None, save_file_pat
                             sub_group.create_dataset(sub_key, data=sub_value)
                     else:
                         group.attrs[key] = value
-
+        print(f"Saved {len(s82_objs)} LCs to {save_file_path}")
 
     return s82_objs
 
@@ -728,7 +756,7 @@ if __name__ == '__main__':
     print(f"Number of objects to process: {len(filter_object_ids)}")
     #objs = [obj for obj in objs if obj['object_id'] not in existing_object_ids]
     objs = concat_light_curves(filter_object_ids=filter_object_ids, N=args.N, skip=args.skip, save_file_path=args.lc_file)
-    print(f"Loaded {len(objs)} objects from the light curves")
+    print(f"Loaded {len(objs)} objects from concat_light_curves")
     #sys.exit("Exiting the program as requested.")
     #objs = populate_sdss_fields(objs)
 
