@@ -33,7 +33,7 @@ import numpyro.distributions as dist
 
 from tinygp import kernels, solvers
 
-#print("Total device count:", jax.local_device_count())
+print("Total device count:", jax.local_device_count())
 numpyro.set_host_device_count(30)
 jax.config.update("jax_enable_x64", True)
 jax.config.update("jax_platform_name", "cpu")
@@ -91,15 +91,38 @@ lambda_pivot = {
 filters = {"u": 0, "g": 1, "r": 2, "i": 3, "z": 4, "y": 5} # harcoded filter order for SDSS
 bands = ['u', 'g', 'r', 'i', 'z']#, 'y']
 
-class MyMultibandLowRank(MultibandLowRank):
+# class MyMultibandLowRank(MultibandLowRank):
+#     amplitudes: jnp.ndarray
+#     amplitudes_blr: jnp.ndarray
+#     lag_blr: jnp.ndarray
+
+#     def observation_model(self, X) -> JAXArray:
+#         return (self.amplitudes[X[1]] * self.kernel.observation_model(X[0]) + 
+#                 self.amplitudes_blr[X[1]] * self.kernel.observation_model(X[0] - self.lag_blr[X[1]]))
+    
+class MyMultibandLowRank(tinygp.kernels.Kernel):
+    kernel: tinygp.kernels.Kernel
     amplitudes: jnp.ndarray
     amplitudes_blr: jnp.ndarray
     lag_blr: jnp.ndarray
 
-    def observation_model(self, X) -> JAXArray:
-        return (self.amplitudes[X[1]] * self.kernel.observation_model(X[0]) + 
-                self.amplitudes_blr[X[1]] * self.kernel.observation_model(X[0] - self.lag_blr[X[1]]))
+    def __init__(self, kernel, amplitudes, amplitudes_blr, lag_blr) -> None:
+        self.kernel = kernel
+        self.amplitudes = amplitudes
+        self.amplitudes_blr = amplitudes_blr
+        self.lag_blr = lag_blr
 
+    def evaluate(self, X1, X2) -> JAXArray:
+        t1, b1 = X1
+        t2, b2 = X2
+
+        # This does a cross-band average of the lag
+        lag_band = (self.lag_blr[b1] + self.lag_blr[b2])/2
+
+        k_conti = self.amplitudes[b1] * self.amplitudes[b2] * self.kernel.evaluate(t1, t2)
+        k_blr = self.amplitudes_blr[b1] * self.amplitudes_blr[b2] * self.kernel.evaluate(t1, t2 - lag_band)
+
+        return k_conti + k_blr
 # Override MultiVarModel
 class MyMultiVarModel(MultiVarModel):
     clean_bands: JAXArray
@@ -168,7 +191,6 @@ class MyMultiVarModel(MultiVarModel):
                 (t[inds], band[inds]),
                 diag=diags,
                 mean=means,
-                assume_sorted=True,
             ),
             inds,
         )
@@ -180,6 +202,55 @@ class MyMultiVarModel(MultiVarModel):
         params["log_amp_delta"] = jnp.array([b*np.log(lambda_pivot[band]/lambda_pivot['u']) for band in self.clean_bands[1:]]) # comment this out for old version
         r = jnp.insert(jnp.atleast_1d(params["log_amp_delta"]), 0, 0.0)
         return r
+    
+    @eqx.filter_jit
+    def log_prob(self, params: dict[str, JAXArray]) -> JAXArray:
+        """Calculate the log probability of the input parameters.
+
+        Args:
+            params (dict[str, JAXArray]): Model parameters.
+
+        Returns:
+            JAXArray: Log probability of the input parameters.
+        """
+        gp, inds = self._build_gp(params)
+        log_prob = gp.log_probability(y=self.y[inds])
+        jax.debug.print("Log probability: {log_prob}", log_prob=log_prob)
+        return log_prob
+
+    def sample(self, params: dict[str, JAXArray]) -> None:
+        """A convience function for intergrating with numpyro for MCMC sampling.
+
+        Args:
+            params (dict[str, JAXArray]): Model parameters.
+        """
+        gp, inds = self._build_gp(params)
+        numpyro.sample("gp", gp.numpyro_dist(), obs=self.y[inds])
+
+    @eqx.filter_jit
+    def pred(
+        self, params: dict[str, JAXArray], X: JAXArray
+    ) -> tuple[JAXArray, JAXArray]:
+        """Make conditional GP prediction.
+
+        Args:
+            params (dict[str, JAXArray]): A dictionary containing model
+                parameters.
+            X (JAXArray): The time and band information for creating the
+                conditional GP prediction.
+
+        Returns:
+            tuple[JAXArray, JAXArray]: A tuple of the mean GP prediction and
+        """
+        # transform time axis
+        new_X, inds = self.lag_transform(X, self.has_lag, params)
+
+        # build gp, cond
+        gp, inds = self._build_gp(params)
+        _, cond = gp.condition(self.y[inds], new_X)
+
+        return cond.loc, jnp.sqrt(cond.variance)
+
     
 def initSampler(key, nSample, nBand=len(bands)):
     # split keys
@@ -341,7 +412,10 @@ def fit_multiband(data, progress_bar=False, plot=False):
                         optimizer=optax.adam(learning_rate=0.1),
                         initSampler=initSampler,
                         prng_key=jax.random.PRNGKey(0),
-                        nSample=10_000, nIter=2, nBest=5)
+                        nSample=1, nIter=2, nBest=5)
+    print(bestP)
+    data['clean_bands'] = clean_bands
+    save_combined_plot_bestp(bestP, m1, X, y, yerr, band_idx[mask_outlier], data)
 
     for k in bestP.keys():
         bestP[k] += 1e-4 * np.random.randn(*bestP[k].shape) 
@@ -592,10 +666,10 @@ def concat_light_curves(N=None, skip=None, filter_object_ids=None, save_file_pat
             # magerrs[band] = magerrs[band][mask_days]
 
             # Ensure magerrs_mean calculation handles empty arrays
-            if len(magerrs[band]) == 0:
-                magerrs_mean.append(np.nan)  # Default to 0.0 if no data is available
-            else:
-                magerrs_mean.append(np.mean(magerrs[band]))
+            #if len(magerrs[band]) == 0:
+            #    magerrs_mean.append(np.nan)  # Default to 0.0 if no data is available
+            #else:
+            #    magerrs_mean.append(np.mean(magerrs[band]))
 
         # Skip if no data is available for the object
         if all((len(times[band]) == 0 or len(mags[band]) == 0 or len(magerrs[band]) == 0) for band in bands):
