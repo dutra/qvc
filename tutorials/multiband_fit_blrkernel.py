@@ -40,6 +40,7 @@ jax.config.update("jax_platform_name", "cpu")
 
 import warnings
 
+from jax import lax
 import numpy as np
 import optax
 from eztaox.fitter import fit
@@ -301,19 +302,19 @@ def numpyro_model(X, yerr, y=None, bestP=None, clean_bands=None):
     #   "log_amp_delta", dist.Normal(bestP["log_amp_delta"], 2.0)
     #) # comment this out when using beta
     log_amp_delta_blr = numpyro.sample(
-      "log_amp_delta_blr", dist.Normal(bestP["log_amp_delta_blr"], 2.0)
+      "log_amp_delta_blr", dist.Normal(bestP["log_amp_delta_blr"], 1.0)
     )
 
     # lag
     lag = numpyro.sample("lag", dist.Normal(bestP['lag'], 10))
-    log_lag_blr = numpyro.sample("log_lag_blr", dist.Normal(bestP['log_lag_blr'], 2))
+    log_lag_blr = numpyro.sample("log_lag_blr", dist.Normal(bestP['log_lag_blr'], 1.0))
     
     # log jitter, mean => the prior for these two should be set small, otherwise
     # it is hard to converge
     log_jitter = numpyro.sample("log_jitter", dist.Normal(bestP["log_jitter"], 0.1))
     
     mean = numpyro.sample("mean", dist.Normal(bestP['mean'], .1))
-    poly1 = numpyro.sample("poly1", dist.Normal(bestP['poly1'], 10))
+    poly1 = numpyro.sample("poly1", dist.Normal(bestP['poly1'], 1.0))
     #poly2 = numpyro.sample("poly2", dist.Normal(bestP['poly2'], 10)) 
     beta = numpyro.sample("beta", dist.Normal(bestP['beta'], 0.5))
 
@@ -430,7 +431,9 @@ def fit_multiband(data, progress_bar=False, plot=False, svi=False):
         print('Starting SVI')
 
         # SVI
-        guide = numpyro.infer.autoguide.AutoDiagonalNormal(numpyro_model)
+        #guide = numpyro.infer.autoguide.AutoDiagonalNormal(numpyro_model)
+        #guide = numpyro.infer.autoguide.AutoLowRankMultivariateNormal(numpyro_model)
+        guide = numpyro.infer.autoguide.AutoMultivariateNormal(numpyro_model)
 
         svi = numpyro.infer.SVI(
             model=numpyro_model,
@@ -443,10 +446,24 @@ def fit_multiband(data, progress_bar=False, plot=False, svi=False):
         svi_state = svi.init(jax.random.PRNGKey(0), X, yerr, y=y, bestP=bestP, clean_bands=clean_bands)
 
         # Training loop
-        losses = []
-        for i in range(1000):
-            svi_state, loss = svi.update(svi_state, X, yerr, y=y, bestP=bestP, clean_bands=clean_bands)
-            losses.append(loss)
+        #losses = []
+        #for i in range(1000):
+        #    svi_state, loss = svi.update(svi_state, X, yerr, y=y, bestP=bestP, clean_bands=clean_bands)
+        #    print('step')
+        #    losses.append(loss)
+
+        # Fast SVI
+        def run_svi_training(svi_state):
+            def svi_step(carry, _):
+                svi_state = carry
+                svi_state, loss = svi.update(svi_state, X, yerr, y=y, bestP=bestP, clean_bands=clean_bands)
+                return svi_state, loss
+
+            return lax.scan(svi_step, svi_state, None, length=1000)
+
+        # JIT the wrapper function
+        run_svi_training_jit = jax.jit(run_svi_training)
+        svi_state, losses = run_svi_training_jit(svi_state)
 
         print(losses)
 
@@ -465,6 +482,9 @@ def fit_multiband(data, progress_bar=False, plot=False, svi=False):
             target_accept_prob=0.9,
             #step_size=0.01,
             #adapt_step_size=True,
+            init_strategy=numpyro.infer.init_to_value(
+                values={"log_kernel_param": bestP["log_kernel_param"]}
+                ),
         )
 
         mcmc = MCMC(
