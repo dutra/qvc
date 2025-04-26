@@ -261,17 +261,17 @@ def initSampler(key, nSample, nBand=len(bands)):
 
     # uniform sampler
     lagSampler = UniformInit(nBand-1, [-10, 10])
-    lagBLRSampler = UniformInit(nBand, [-2, np.log(20)])
+    loglagBLRSampler = UniformInit(nBand, [0, 6])
     meanSampler = UniformInit(nBand, [-1, 1])
     poly1Sampler = UniformInit(1, [-1000, 1000])
     #poly2Sampler = UniformInit(1, [-10, 10])
     logAmpDeltaSampler = UniformInit(nBand-1, [-2.0, 0.0])
-    logAmpDeltaBLRSampler = UniformInit(nBand, [-4.0, -2.0])
+    logAmpDeltaBLRSampler = UniformInit(nBand, [-6.0, -2.0])
     logJitterSampler = UniformInit(nBand, [jnp.log(1e-10), jnp.log(0.1)])
     betaSampler = UniformInit(1, [-2.0, 0.0])
 
     # kernel init
-    kernelSampler = DRWInit([jnp.log(10**2.5), jnp.log(10**4.5)], [jnp.log(0.1), jnp.log(1.0)])
+    kernelSampler = DRWInit([jnp.log(10**2.5), jnp.log(10**4.5)], [jnp.log(1.2), jnp.log(3.0)])
 
     return {
         "log_kernel_param": kernelSampler(subkeys[0], nSample),
@@ -281,7 +281,7 @@ def initSampler(key, nSample, nBand=len(bands)):
         "poly1": poly1Sampler(subkeys[6], nSample),
         #"poly2": poly2Sampler(subkeys[7], nSample),
         "lag": lagSampler(subkeys[3], nSample),
-        "log_lag_blr": lagBLRSampler(subkeys[8], nSample),
+        "log_lag_blr": loglagBLRSampler(subkeys[8], nSample),
         "log_jitter": logJitterSampler(subkeys[4], nSample),
         "beta": betaSampler(subkeys[5], nSample),
     }
@@ -435,7 +435,7 @@ def fit_multiband(data, progress_bar=False, plot=False, svi=False):
         svi = numpyro.infer.SVI(
             model=numpyro_model,
             guide=guide,
-            optim=numpyro.optim.Adam(1e-3),
+            optim=numpyro.optim.Adam(1e-2),
             #num_samples=num_samples,
             loss=numpyro.infer.Trace_ELBO(),
         )
@@ -444,7 +444,7 @@ def fit_multiband(data, progress_bar=False, plot=False, svi=False):
 
         # Training loop
         losses = []
-        for i in range(100):
+        for i in range(200):
             svi_state, loss = svi.update(svi_state, X, yerr, y=y, bestP=bestP, clean_bands=clean_bands)
             losses.append(loss)
 
