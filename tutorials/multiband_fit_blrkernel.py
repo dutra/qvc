@@ -37,6 +37,11 @@ print("Total device count:", jax.local_device_count())
 numpyro.set_host_device_count(30)
 jax.config.update("jax_enable_x64", True)
 jax.config.update("jax_platform_name", "cpu")
+learning_rate=0.001
+
+#jax.config.update("jax_enable_x64", False)
+#jax.config.update("jax_platform_name", "gpu")
+#learning_rate=0.0001
 
 import warnings
 
@@ -292,7 +297,7 @@ def numpyro_model(X, yerr, y=None, bestP=None, clean_bands=None):
     # kernel param
     #flat_normal = dist.Normal(bestP["log_kernel_param"], jnp.array([0.1, 0.1]))
     # This works better with the direct GP solver
-    flat_normal = dist.Uniform(jnp.array([2.0, -3.0]), jnp.array([10.0, 0.1]))
+    flat_normal = dist.Uniform(jnp.array([2.0, -3.0]), jnp.array([10.0, 0.5]))
     diag_normal = dist.Independent(flat_normal, 1)
     log_kernel_param = numpyro.sample("log_kernel_param", diag_normal)
     #jax.debug.print("{x} log_kernel_param_numpro", x=log_kernel_param)
