@@ -72,6 +72,7 @@ import argparse
 
 from multiband_fit_utils import *
 from multiband_fit_plotting import *
+import blackjax
 
 num_samples = 250
 
@@ -302,7 +303,7 @@ def numpyro_model(X, yerr, y=None, bestP=None, clean_bands=None):
     #   "log_amp_delta", dist.Normal(bestP["log_amp_delta"], 2.0)
     #) # comment this out when using beta
     log_amp_delta_blr = numpyro.sample(
-      "log_amp_delta_blr", dist.Normal(bestP["log_amp_delta_blr"], 1.0)
+      "log_amp_delta_blr", dist.Normal(bestP["log_amp_delta_blr"], 0.1)
     )
 
     # lag
@@ -426,6 +427,8 @@ def fit_multiband(data, progress_bar=False, plot=False, svi=False):
     #for k in bestP.keys():
     #    bestP[k] += 1e-4 * np.random.randn(*bestP[k].shape)
 
+    sampler = 'RWMH' # or 'NUTS'
+
     if svi == True:
 
         print('Starting SVI')
@@ -472,7 +475,7 @@ def fit_multiband(data, progress_bar=False, plot=False, svi=False):
         samples = guide.sample_posterior(jax.random.PRNGKey(1), params, sample_shape=(num_samples,))
         print(samples)
 
-    else:
+    elif sampler == 'NUTS':
 
         print('Starting NUTS MCMC')
 
@@ -502,6 +505,44 @@ def fit_multiband(data, progress_bar=False, plot=False, svi=False):
         if np.all(diagnostics['diverging']):
             print(f"Diverging MCMC for quasar {data['object_id']}, skipping.", flush=True)
             #return None
+
+    elif sampler == 'RWMH':
+
+        print('Starting BlackJAX RWMH')
+
+        @jax.jit
+        def logprob_fn(params):
+            # Use the model's log_prob method to compute the log probability
+            m1 = MyMultiVarModel(
+                X, y, yerr, kernels.quasisep.Exp(*jnp.exp(params["log_kernel_param"])),
+                zero_mean=zero_mean, has_jitter=has_jitter, has_lag=has_lag, clean_bands=clean_bands
+            )
+            return m1.log_prob(params)
+
+        initial_position = bestP
+        rng_key = jax.random.PRNGKey(1)  # Initialize the PRNG key
+
+        # Define the proposal generator (e.g., Gaussian proposal)
+        def proposal_generator(rng_key, position):
+            return {k: v + jax.random.normal(rng_key, shape=v.shape) * 0.005 for k, v in position.items()}
+
+        # Define the RWMH kernel
+        rwmh = blackjax.rmh(logprob_fn, proposal_generator)
+
+        # Initialize the state
+        state = rwmh.init(initial_position)
+
+        # Sampling loop
+        samples = []
+        for _ in range(20*num_samples):
+            rng_key, subkey = jax.random.split(rng_key)  # Split the key for each step
+            state, _ = rwmh.step(subkey, state)  # Extract the updated state
+            samples.append(state.position)  # Append the position (parameters) to the samples list
+
+        # Convert samples to a dictionary of arrays
+        samples = {k: jnp.array([s[k] for s in samples]) for k in samples[0].keys()}
+
+        print(samples)
     
     log_tau_RF = np.log10(np.exp(samples['log_kernel_param'][:, 0])/(1+data['z']))
     lower, median, upper = np.percentile(log_tau_RF, [16, 50, 84])
