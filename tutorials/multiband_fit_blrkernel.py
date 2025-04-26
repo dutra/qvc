@@ -413,10 +413,10 @@ def fit_multiband(data, progress_bar=False, plot=False, svi=False):
         X, y, yerr, k, zero_mean=zero_mean, has_jitter=has_jitter, has_lag=has_lag, clean_bands=clean_bands
     )
     bestP, logProb = fit(model=m1, 
-                        optimizer=optax.adam(learning_rate=0.1),
+                        optimizer=optax.adam(learning_rate=0.001),
                         initSampler=initSampler,
                         prng_key=jax.random.PRNGKey(0),
-                        nSample=5, nIter=2, nBest=5)
+                        nSample=2, nIter=2, nBest=1)
     print(bestP)
     data['clean_bands'] = clean_bands
     if plot:
@@ -444,7 +444,7 @@ def fit_multiband(data, progress_bar=False, plot=False, svi=False):
 
         # Training loop
         losses = []
-        for i in range(200):
+        for i in range(1000):
             svi_state, loss = svi.update(svi_state, X, yerr, y=y, bestP=bestP, clean_bands=clean_bands)
             losses.append(loss)
 
