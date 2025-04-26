@@ -57,7 +57,7 @@ def plot_posterior(samples, data, clean_bands=None):
         r'mean': samples['mean'][:,0],
     }
     for i, band in enumerate(clean_bands):
-        posterior_samples[f'lag_blr_{band}'] = samples['lag_blr'][:, i]
+        posterior_samples[f'log_lag_blr_{band}'] = samples['log_lag_blr'][:, i]
         posterior_samples[f'log_amp_delta_blr_{band}'] = samples['log_amp_delta_blr'][:, i]
 
     # Convert the samples to a 2D array for corner
@@ -133,6 +133,44 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, data):
     plt.savefig(os.path.join(output_dir, f'{object_id}_combined_plot.png'))
     plt.close(fig)
     return fig
+
+def save_combined_plot_bestp(bestP, model, X, y, yerr, band_idx, data):
+    clean_bands = data['clean_bands']
+    object_id = data['object_id']
+    band_idx_map = {i: b for i, b in enumerate(clean_bands)}
+
+    fig, ax = plt.subplots(1, 1, figsize=(8, 6), sharex=True)
+    offsets = np.arange(len(clean_bands)) * 0.25
+
+    t = X[0]    
+    for n in np.unique(band_idx):
+        m = band_idx == n
+        # Plot the observed data
+        ax.errorbar(t[m], y[m]+offsets[n], yerr=yerr[m], fmt='o', 
+                label=f'{band_idx_map[n]}-band', alpha=0.7, color=colors[band_idx_map[n]], lw=2.0, capsize=3)
+        # Generate test times for predictions
+        t_test = np.linspace(t.min(), t.max(), 1000)
+        # Compute predictions using the model
+        posterior_median = bestP #{k: np.median(v, axis=0) for k, v in samples.items()}
+        mu, std = model.pred(posterior_median, (t_test, np.full_like(t_test, n, dtype=int)))
+        # Plot the predictions
+        ax.plot(t_test, mu+offsets[n], alpha=0.8, color=colors[band_idx_map[n]], lw=2.5)
+        ax.fill_between(t_test, mu+offsets[n]-std, mu+offsets[n]+std, alpha=0.3, 
+                lw=0.5, color=colors[band_idx_map[n]])
+    ax.set_xlabel('Days')
+    ax.set_ylabel('Magnitude + arbitrary offset')
+    ax.invert_yaxis()  # Magnitudes are brighter when lower
+    ax.legend(loc='lower right')
+
+    plt.tight_layout()
+
+    # Save the plot as a PNG file
+    output_dir = "light_curves_fits"
+    os.makedirs(output_dir, exist_ok=True)
+    plt.savefig(os.path.join(output_dir, f'{object_id}_combined_plot_bestp.png'))
+    plt.close(fig)
+    return fig
+
 
 def plot_mcmc_traces(samples, data):
     """

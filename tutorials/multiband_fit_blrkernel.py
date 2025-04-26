@@ -91,14 +91,14 @@ lambda_pivot = {
 filters = {"u": 0, "g": 1, "r": 2, "i": 3, "z": 4, "y": 5} # harcoded filter order for SDSS
 bands = ['u', 'g', 'r', 'i', 'z']#, 'y']
 
-# class MyMultibandLowRank(MultibandLowRank):
-#     amplitudes: jnp.ndarray
-#     amplitudes_blr: jnp.ndarray
-#     lag_blr: jnp.ndarray
+class MyMultibandLowRankOld(MultibandLowRank):
+     amplitudes: jnp.ndarray
+     amplitudes_blr: jnp.ndarray
+     lag_blr: jnp.ndarray
 
-#     def observation_model(self, X) -> JAXArray:
-#         return (self.amplitudes[X[1]] * self.kernel.observation_model(X[0]) + 
-#                 self.amplitudes_blr[X[1]] * self.kernel.observation_model(X[0] - self.lag_blr[X[1]]))
+     def observation_model(self, X) -> JAXArray:
+         return (self.amplitudes[X[1]] * self.kernel.observation_model(X[0]) +
+                self.amplitudes_blr[X[1]] * self.kernel.observation_model(X[0] - self.lag_blr[X[1]]))
     
 class MyMultibandLowRank(tinygp.kernels.Kernel):
     kernel: tinygp.kernels.Kernel
@@ -112,17 +112,21 @@ class MyMultibandLowRank(tinygp.kernels.Kernel):
         self.amplitudes_blr = amplitudes_blr
         self.lag_blr = lag_blr
 
+    def coord_to_sortable(self, X) -> JAXArray:
+        return X[0]
+
     def evaluate(self, X1, X2) -> JAXArray:
         t1, b1 = X1
         t2, b2 = X2
 
-        # This does a cross-band average of the lag
-        lag_band = (self.lag_blr[b1] + self.lag_blr[b2])/2
-
         k_conti = self.amplitudes[b1] * self.amplitudes[b2] * self.kernel.evaluate(t1, t2)
-        k_blr = self.amplitudes_blr[b1] * self.amplitudes_blr[b2] * self.kernel.evaluate(t1, t2 - lag_band)
+
+        # BLR is not correlated across bands, use delta function
+        k_blr = self.amplitudes_blr[b1] * self.amplitudes_blr[b2] * self.kernel.evaluate(t1, t2 - self.lag_blr[b2])
+        k_blr = jnp.where(b1 == b2, k_blr, 0.0)
 
         return k_conti + k_blr
+
 # Override MultiVarModel
 class MyMultiVarModel(MultiVarModel):
     clean_bands: JAXArray
@@ -146,7 +150,7 @@ class MyMultiVarModel(MultiVarModel):
             means = jnp.zeros(nBand)
         else:
             time_center = (jnp.max(X[0]) + jnp.min(X[0])) / 2
-            means = jnp.atleast_1d(params["mean"]) + params["poly1"] * (X[0] / (365.25*1000))
+            means = jnp.atleast_1d(params["mean"]) + params["poly1"] * ((X[0] - time_center) / (365.25*1000))
             #means = jnp.atleast_1d(params["mean"]) + params["poly1"] * X[0]# / (365.25*100)
             #means = jnp.atleast_1d(params["mean"])# + jnp.expm1(jnp.log1p(params["poly1"]) + (jnp.log1p(X[0]/365.25*10000)))
             #means = jnp.atleast_1d(params["mean"]) + params["poly1"] * (X[0] / (365.25*100)) + params["poly2"] * (X[0] / (365.25*100))**2 
@@ -189,14 +193,14 @@ class MyMultiVarModel(MultiVarModel):
             GaussianProcess(
                 kernel,
                 (t[inds], band[inds]),
-                diag=diags,
+                diag=diags + 1e-6,
                 mean=means,
             ),
             inds,
         )
     def my_amp_transform_blr(self, params: dict[str, JAXArray]) -> JAXArray:
         return jnp.atleast_1d(params["log_amp_delta_blr"])
-
+        
     def my_amp_transform(self, params: dict[str, JAXArray]) -> JAXArray:
         b = params["beta"]
         params["log_amp_delta"] = jnp.array([b*np.log(lambda_pivot[band]/lambda_pivot['u']) for band in self.clean_bands[1:]]) # comment this out for old version
@@ -248,7 +252,6 @@ class MyMultiVarModel(MultiVarModel):
         # build gp, cond
         gp, inds = self._build_gp(params)
         _, cond = gp.condition(self.y[inds], new_X)
-
         return cond.loc, jnp.sqrt(cond.variance)
 
     
@@ -262,13 +265,13 @@ def initSampler(key, nSample, nBand=len(bands)):
     meanSampler = UniformInit(nBand, [-1, 1])
     poly1Sampler = UniformInit(1, [-1000, 1000])
     #poly2Sampler = UniformInit(1, [-10, 10])
-    logAmpDeltaSampler = UniformInit(nBand-1, [-2, 0.0])
-    logAmpDeltaBLRSampler = UniformInit(nBand, [-2, 0.0])
+    logAmpDeltaSampler = UniformInit(nBand-1, [-2.0, 0.0])
+    logAmpDeltaBLRSampler = UniformInit(nBand, [-4.0, -2.0])
     logJitterSampler = UniformInit(nBand, [jnp.log(1e-10), jnp.log(0.1)])
     betaSampler = UniformInit(1, [-2.0, 0.0])
 
     # kernel init
-    kernelSampler = DRWInit([jnp.log(10**2.5), jnp.log(10**4.5)], [jnp.log(0.01), jnp.log(1.0)])
+    kernelSampler = DRWInit([jnp.log(10**2.5), jnp.log(10**4.5)], [jnp.log(0.1), jnp.log(1.0)])
 
     return {
         "log_kernel_param": kernelSampler(subkeys[0], nSample),
@@ -285,9 +288,13 @@ def initSampler(key, nSample, nBand=len(bands)):
 
 def numpyro_model(X, yerr, y=None, bestP=None, clean_bands=None):
     # kernel param
-    flat_normal = dist.Normal(bestP["log_kernel_param"], jnp.array([5.0, 5.0]))
+    #flat_normal = dist.Normal(bestP["log_kernel_param"], jnp.array([0.1, 0.1]))
+    # This works better with the direct GP solver
+    flat_normal = dist.Uniform(jnp.array([2.0, -3.0]), jnp.array([10.0, 0.1]))
     diag_normal = dist.Independent(flat_normal, 1)
     log_kernel_param = numpyro.sample("log_kernel_param", diag_normal)
+    #jax.debug.print("{x} log_kernel_param_numpro", x=log_kernel_param)
+    #jax.debug.print("{x} log_kernel_param_numpro_bestp", x=bestP["log_kernel_param"])
 
     # log amp delta
     #log_amp_delta = numpyro.sample(
@@ -306,9 +313,11 @@ def numpyro_model(X, yerr, y=None, bestP=None, clean_bands=None):
     log_jitter = numpyro.sample("log_jitter", dist.Normal(bestP["log_jitter"], 0.1))
     
     mean = numpyro.sample("mean", dist.Normal(bestP['mean'], .1))
-    poly1 = numpyro.sample("poly1", dist.Normal(bestP['poly1'], 1))
-    #poly2 = numpyro.sample("poly2", dist.Normal(bestP['poly2'], 2)) 
+    poly1 = numpyro.sample("poly1", dist.Normal(bestP['poly1'], 10))
+    #poly2 = numpyro.sample("poly2", dist.Normal(bestP['poly2'], 10)) 
     beta = numpyro.sample("beta", dist.Normal(bestP['beta'], 0.5))
+
+    #return
 
 
     # kernel
@@ -330,7 +339,7 @@ def numpyro_model(X, yerr, y=None, bestP=None, clean_bands=None):
     m1.sample(sample_params)
 
 
-def fit_multiband(data, progress_bar=False, plot=False):
+def fit_multiband(data, progress_bar=False, plot=False, svi=False):
     times = data['times']
     mags = data['mags']
     magerrs = data['magerrs']
@@ -389,11 +398,6 @@ def fit_multiband(data, progress_bar=False, plot=False):
         if jnp.abs(y[i] - jnp.nanmean(window)) > 2.5 * st.median_abs_deviation(window):
             mask_outlier[i] = False
 
-    # Reject outliers using a percentile-based approach
-    # lower_percentile = 2
-    # upper_percentile = 98
-    # mask_outlier = (y >= np.percentile(y, lower_percentile)) & (y <= np.percentile(y, upper_percentile))
-
     X = (jnp.array(all_times[mask_outlier]) - jnp.min(all_times[mask_outlier]), jnp.array(band_idx[mask_outlier]))
     y = jnp.array(y[mask_outlier])
     yerr = jnp.array(yerr[mask_outlier])
@@ -412,35 +416,72 @@ def fit_multiband(data, progress_bar=False, plot=False):
                         optimizer=optax.adam(learning_rate=0.1),
                         initSampler=initSampler,
                         prng_key=jax.random.PRNGKey(0),
-                        nSample=1, nIter=2, nBest=5)
+                        nSample=5, nIter=2, nBest=5)
     print(bestP)
     data['clean_bands'] = clean_bands
-    save_combined_plot_bestp(bestP, m1, X, y, yerr, band_idx[mask_outlier], data)
+    if plot:
+        save_combined_plot_bestp(bestP, m1, X, y, yerr, band_idx[mask_outlier], data)
 
-    for k in bestP.keys():
-        bestP[k] += 1e-4 * np.random.randn(*bestP[k].shape) 
+    #for k in bestP.keys():
+    #    bestP[k] += 1e-4 * np.random.randn(*bestP[k].shape)
 
-    nuts_kernel = NUTS(
-        partial(numpyro_model, bestP=bestP, clean_bands=clean_bands),
-        dense_mass=True,
-        target_accept_prob=0.9,
-        # adapt_step_size=True,
-    )
+    if svi == True:
 
-    mcmc = MCMC(
-        nuts_kernel,
-        num_warmup=num_samples,
-        num_samples=num_samples,
-        num_chains=2,
-        progress_bar=progress_bar,
-    )
+        print('Starting SVI')
 
-    mcmc.run(jax.random.PRNGKey(1), X, yerr, y=y)
-    samples = mcmc.get_samples(group_by_chain=False)
-    diagnostics = mcmc.get_extra_fields()
-    if np.all(diagnostics['diverging']):
-        print(f"Diverging MCMC for quasar {data['object_id']}, skipping.", flush=True)
-        return None
+        # SVI
+        guide = numpyro.infer.autoguide.AutoDiagonalNormal(numpyro_model)
+
+        svi = numpyro.infer.SVI(
+            model=numpyro_model,
+            guide=guide,
+            optim=numpyro.optim.Adam(1e-3),
+            #num_samples=num_samples,
+            loss=numpyro.infer.Trace_ELBO(),
+        )
+
+        svi_state = svi.init(jax.random.PRNGKey(0), X, yerr, y=y, bestP=bestP, clean_bands=clean_bands)
+
+        # Training loop
+        losses = []
+        for i in range(100):
+            svi_state, loss = svi.update(svi_state, X, yerr, y=y, bestP=bestP, clean_bands=clean_bands)
+            losses.append(loss)
+
+        print(losses)
+
+        params = svi.get_params(svi_state)
+        print(guide.get_posterior(params))
+        samples = guide.sample_posterior(jax.random.PRNGKey(1), params, sample_shape=(num_samples,))
+        print(samples)
+
+    else:
+
+        print('Starting NUTS MCMC')
+
+        nuts_kernel = NUTS(
+            partial(numpyro_model, bestP=bestP, clean_bands=clean_bands),
+            dense_mass=True,
+            target_accept_prob=0.9,
+            #step_size=0.01,
+            #adapt_step_size=True,
+        )
+
+        mcmc = MCMC(
+            nuts_kernel,
+            num_warmup=num_samples, # This could be less than num_samples
+            num_samples=num_samples,
+            num_chains=2,
+            progress_bar=progress_bar,
+        )
+
+        mcmc.run(jax.random.PRNGKey(1), X, yerr, y=y)
+        samples = mcmc.get_samples(group_by_chain=False)
+        diagnostics = mcmc.get_extra_fields()
+
+        if np.all(diagnostics['diverging']):
+            print(f"Diverging MCMC for quasar {data['object_id']}, skipping.", flush=True)
+            #return None
     
     log_tau_RF = np.log10(np.exp(samples['log_kernel_param'][:, 0])/(1+data['z']))
     lower, median, upper = np.percentile(log_tau_RF, [16, 50, 84])
@@ -549,12 +590,12 @@ def fit_multiband(data, progress_bar=False, plot=False):
     return d
 
 
-def process_quasar(i_data, n=0, progress_bar=False, plot=False):
+def process_quasar(i_data, n=0, progress_bar=False, plot=False, svi=False):
     i, data = i_data
     #print(f"Processing quasar {i}/{n} ({data['object_id']})", flush=True)
 
     # Load the quasar data
-    result = fit_multiband(data, progress_bar=progress_bar, plot=plot)
+    result = fit_multiband(data, progress_bar=progress_bar, plot=plot, svi=svi)
     if result is None:
         print(f"Skipping quasar {data['object_id']} due to diverging MCMC.")
         return None
@@ -786,6 +827,7 @@ if __name__ == '__main__':
     parser.add_argument("-f", "--file", type=str, help="Path to the file to append (read and write) objects.") 
     parser.add_argument("--lc_file", type=str, help="Path to the light curve file.")
     parser.add_argument("--plot", action="store_true", help="Enable plotting of results.")
+    parser.add_argument("--svi", action="store_true", help="Use stochastic variation inference (SVI).")
     args = parser.parse_args()
 
 
@@ -795,7 +837,7 @@ if __name__ == '__main__':
         objs = concat_light_curves(filter_object_ids=filter_object_ids)
         objs = populate_sdss_fields(objs)
         for i, obj in enumerate(objs):
-            q = process_quasar((i, obj), n=len(objs), progress_bar=True, plot=True)
+            q = process_quasar((i, obj), n=len(objs), progress_bar=True, plot=args.plot, svi=args.svi)
             fields_to_filter = ['times', 'mags', 'magerrs']
             q = {k: v for k, v in q.items() if k not in fields_to_filter}
             print(q['z'], q['clean_bands'])
@@ -842,7 +884,7 @@ if __name__ == '__main__':
         results = []
 
         with ctx.Pool(processes=15) as pool:
-            results = pool.map(partial(process_quasar, n=len(chunk), plot=args.plot), enumerate(chunk))
+            results = pool.map(partial(process_quasar, n=len(chunk), plot=args.plot, svi=args.svi), enumerate(chunk))
 
         quasar_list = [q for q in results if q is not None]
 
