@@ -28,7 +28,7 @@ import jax.numpy as jnp
 
 import numpyro
 from numpyro import infer
-from numpyro.infer import MCMC, NUTS, Predictive
+from numpyro.infer import MCMC, NUTS, AIES, Predictive
 import numpyro.distributions as dist
 
 from tinygp import kernels, solvers
@@ -156,11 +156,9 @@ class MyMultiVarModel(MultiVarModel):
         if zero_mean is True:
             means = jnp.zeros(nBand)
         else:
-            time_center = (jnp.max(X[0]) + jnp.min(X[0])) / 2
-            means = jnp.atleast_1d(params["mean"]) + params["poly1"] * ((X[0] - time_center) / (365.25*1000))
-            #means = jnp.atleast_1d(params["mean"]) + params["poly1"] * X[0]# / (365.25*100)
-            #means = jnp.atleast_1d(params["mean"])# + jnp.expm1(jnp.log1p(params["poly1"]) + (jnp.log1p(X[0]/365.25*10000)))
-            #means = jnp.atleast_1d(params["mean"]) + params["poly1"] * (X[0] / (365.25*100)) + params["poly2"] * (X[0] / (365.25*100))**2 
+            time_centered = (X[0] - jnp.mean(X[0]))
+            time_scaled = time_centered #/ (jnp.max(X[0]) - jnp.min(X[0]))
+            means = jnp.atleast_1d(params["mean"]) + params["poly1"] * time_scaled
         return means[X[1]]
     
     def _build_gp(
@@ -270,7 +268,7 @@ def initSampler(key, nSample, nBand=len(bands)):
     lagSampler = UniformInit(nBand-1, [-10, 10])
     loglagBLRSampler = UniformInit(nBand, [0, 6])
     meanSampler = UniformInit(nBand, [-1, 1])
-    poly1Sampler = UniformInit(1, [-1000, 1000])
+    poly1Sampler = UniformInit(1, [-10, 10])
     #poly2Sampler = UniformInit(1, [-10, 10])
     logAmpDeltaSampler = UniformInit(nBand-1, [-2.0, 0.0])
     logAmpDeltaBLRSampler = UniformInit(nBand, [-6.0, -2.0])
@@ -429,10 +427,8 @@ def fit_multiband(data, progress_bar=False, plot=False, svi=False):
     if plot:
         save_combined_plot_bestp(bestP, m1, X, y, yerr, band_idx[mask_outlier], data)
 
-    #for k in bestP.keys():
-    #    bestP[k] += 1e-4 * np.random.randn(*bestP[k].shape)
-
-    sampler = 'RWMH' # or 'NUTS'
+    for k in bestP.keys():
+        bestP[k] += 1e-4 * np.random.randn(*bestP[k].shape)
 
     if svi == True:
 
@@ -447,20 +443,12 @@ def fit_multiband(data, progress_bar=False, plot=False, svi=False):
             model=numpyro_model,
             guide=guide,
             optim=numpyro.optim.Adam(1e-2),
-            #num_samples=num_samples,
             loss=numpyro.infer.Trace_ELBO(),
         )
 
         svi_state = svi.init(jax.random.PRNGKey(0), X, yerr, y=y, bestP=bestP, clean_bands=clean_bands)
 
         # Training loop
-        #losses = []
-        #for i in range(1000):
-        #    svi_state, loss = svi.update(svi_state, X, yerr, y=y, bestP=bestP, clean_bands=clean_bands)
-        #    print('step')
-        #    losses.append(loss)
-
-        # Fast SVI
         def run_svi_training(svi_state):
             def svi_step(carry, _):
                 svi_state = carry
@@ -480,74 +468,38 @@ def fit_multiband(data, progress_bar=False, plot=False, svi=False):
         samples = guide.sample_posterior(jax.random.PRNGKey(1), params, sample_shape=(num_samples,))
         print(samples)
 
-    elif sampler == 'NUTS':
+    else:
 
-        print('Starting NUTS MCMC')
+        print('Starting EMCEE MCMC')
 
-        nuts_kernel = NUTS(
+        #init_strategy = numpyro.infer.init_to_value(values=bestP)
+        init_strategy = numpyro.infer.init_to_sample()
+
+        # emcee works better than NUTS for multimodal posteriors
+        nuts_kernel = AIES(
             partial(numpyro_model, bestP=bestP, clean_bands=clean_bands),
-            dense_mass=True,
-            target_accept_prob=0.9,
-            #step_size=0.01,
-            #adapt_step_size=True,
-            init_strategy=numpyro.infer.init_to_value(
-                values={"log_kernel_param": bestP["log_kernel_param"]}
-                ),
-        )
+            moves={AIES.DEMove() : 0.5, AIES.StretchMove() : 0.5},
+            init_strategy=init_strategy,
+            )
 
         mcmc = MCMC(
             nuts_kernel,
-            num_warmup=num_samples, # This could be less than num_samples
-            num_samples=num_samples,
-            num_chains=2,
+            num_warmup=20, # This could be less than num_samples
+            num_samples=20,
+            num_chains=2*28,
             progress_bar=progress_bar,
+            chain_method="vectorized",
         )
 
         mcmc.run(jax.random.PRNGKey(1), X, yerr, y=y)
         samples = mcmc.get_samples(group_by_chain=False)
         diagnostics = mcmc.get_extra_fields()
 
-        if np.all(diagnostics['diverging']):
-            print(f"Diverging MCMC for quasar {data['object_id']}, skipping.", flush=True)
-            #return None
-
-    elif sampler == 'RWMH':
-
-        print('Starting BlackJAX RWMH')
-
-        @jax.jit
-        def logprob_fn(params):
-            # Use the model's log_prob method to compute the log probability
-            m1 = MyMultiVarModel(
-                X, y, yerr, kernels.quasisep.Exp(*jnp.exp(params["log_kernel_param"])),
-                zero_mean=zero_mean, has_jitter=has_jitter, has_lag=has_lag, clean_bands=clean_bands
-            )
-            return m1.log_prob(params)
-
-        initial_position = bestP
-        rng_key = jax.random.PRNGKey(1)  # Initialize the PRNG key
-
-        # Define the proposal generator (e.g., Gaussian proposal)
-        def proposal_generator(rng_key, position):
-            return {k: v + jax.random.normal(rng_key, shape=v.shape) * 0.005 for k, v in position.items()}
-
-        # Define the RWMH kernel
-        rwmh = blackjax.rmh(logprob_fn, proposal_generator)
-
-        # Initialize the state
-        state = rwmh.init(initial_position)
-
-        # Sampling loop
-        samples = []
-        for _ in range(20*num_samples):
-            rng_key, subkey = jax.random.split(rng_key)  # Split the key for each step
-            state, _ = rwmh.step(subkey, state)  # Extract the updated state
-            samples.append(state.position)  # Append the position (parameters) to the samples list
-
-        # Convert samples to a dictionary of arrays
-        samples = {k: jnp.array([s[k] for s in samples]) for k in samples[0].keys()}
-
         print(samples)
+
+        #if np.all(diagnostics['diverging']):
+        #    print(f"Diverging MCMC for quasar {data['object_id']}, skipping.", flush=True)
+        #    #return None
     
     log_tau_RF = np.log10(np.exp(samples['log_kernel_param'][:, 0])/(1+data['z']))
     lower, median, upper = np.percentile(log_tau_RF, [16, 50, 84])
