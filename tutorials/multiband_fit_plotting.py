@@ -57,6 +57,7 @@ def plot_posterior(samples, data, clean_bands=None):
         r'mean': samples['mean'][:,0],
     }
     for i, band in enumerate(clean_bands):
+        posterior_samples[f'lag_{band}'] = samples['lag'][:, i]
         posterior_samples[f'log_lag_blr_{band}'] = samples['log_lag_blr'][:, i]
         posterior_samples[f'log_amp_delta_blr_{band}'] = samples['log_amp_delta_blr'][:, i]
 
@@ -77,7 +78,7 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, data):
     fig, ax = plt.subplots(1, 1, figsize=(8, 6), sharex=True)
     offsets = np.arange(len(clean_bands)) * 0.25
 
-    t = X[0]    
+    t = X[0]   
     for n in np.unique(band_idx):
         m = band_idx == n
         # Plot the observed data
@@ -95,7 +96,7 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, data):
     ax.set_xlabel('Days')
     ax.set_ylabel('Magnitude + arbitrary offset')
     ax.invert_yaxis()  # Magnitudes are brighter when lower
-    ax.legend(loc='lower right')
+    #ax.legend(loc='lower right')
 
     # Annotate tau_RF and sigma_RF with their values and errors
     ax.annotate(

@@ -1,12 +1,12 @@
-
+ndevices = 30
 import os
-os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=32"
-os.environ["OMP_NUM_THREADS"] = "32"
-os.environ["MKL_NUM_THREADS"] = "32"
-os.environ["NUMEXPR_NUM_THREADS"] = "32"
-os.environ["OPENBLAS_NUM_THREADS"] = "32"
-os.environ["VECLIB_MAXIMUM_THREADS"] = "32"
-os.environ["NUMBA_NUM_THREADS"] = "32"
+os.environ["XLA_FLAGS"] = f"--xla_force_host_platform_device_count={ndevices}"
+os.environ["OMP_NUM_THREADS"] = f"{ndevices}"
+os.environ["MKL_NUM_THREADS"] = f"{ndevices}"
+os.environ["NUMEXPR_NUM_THREADS"] = f"{ndevices}"
+os.environ["OPENBLAS_NUM_THREADS"] = f"{ndevices}"
+os.environ["VECLIB_MAXIMUM_THREADS"] = f"{ndevices}"
+os.environ["NUMBA_NUM_THREADS"] = f"{ndevices}"
 os.environ["JAX_TRACEBACK_FILTERING"] = "off"
 
 from collections.abc import Callable
@@ -33,16 +33,18 @@ import numpyro.distributions as dist
 
 from tinygp import kernels, solvers
 
-print("Total device count:", jax.local_device_count())
-numpyro.set_host_device_count(30)
-jax.config.update("jax_enable_x64", True)
-jax.config.update("jax_platform_name", "cpu")
-learning_rate=0.001
+learning_rate=0.1
 
-#jax.config.update("jax_enable_x64", False)
-#jax.config.update("jax_platform_name", "gpu")
-#learning_rate=0.0001
+# jax.config.update("jax_platform_name", "cpu")
+# jax.config.update("jax_enable_x64", True)
+# numpyro.set_host_device_count(ndevices)
 
+# jax.config.update("jax_enable_x64", False)
+# jax.config.update("jax_platform_name", "gpu")
+# learning_rate=1e-4
+
+print("Jax Devices: ", jax.devices())
+print("Jax total device count:", jax.local_device_count())
 import warnings
 
 from jax import lax
@@ -152,6 +154,7 @@ class MyMultibandLowRank(tinygp.kernels.Kernel):
 # Override MultiVarModel
 class MyMultiVarModel(MultiVarModel):
     clean_bands: JAXArray
+    #has_blr_lag: bool = True
 
     def __init__(
         self,
@@ -163,6 +166,7 @@ class MyMultiVarModel(MultiVarModel):
     ) -> None:
         super().__init__(X, y, yerr, kernel, **kwargs)
         self.clean_bands = kwargs.get("clean_bands", None)
+        #self.has_blr_lag = kwargs.get("has_blr_lag", True)
 
     @staticmethod
     def mean_func(
@@ -239,7 +243,7 @@ class MyMultiVarModel(MultiVarModel):
         """
         gp, inds = self._build_gp(params)
         log_prob = gp.log_probability(y=self.y[inds])
-        jax.debug.print("Log probability: {log_prob}", log_prob=log_prob)
+        #jax.debug.print("Log probability: {log_prob}", log_prob=log_prob)
         return log_prob
 
     def sample(self, params: dict[str, JAXArray]) -> None:
@@ -360,8 +364,12 @@ def numpyro_model(X, yerr, y=None, bestP=None, clean_bands=None):
 
 
 def fit_multiband(data, progress_bar=False, plot=False, svi=False):
+    print(f"Fitting quasar {data['object_id']}", flush=True)
+
     times = data['times']
     mags = data['mags']
+    for band in mags.keys():
+        mags[band] = mags[band] - np.nanmean(mags[band])  # Center the magnitudes
     magerrs = data['magerrs']
     
     red_bands = bands_redder_than_5000(data['z'])
@@ -432,12 +440,13 @@ def fit_multiband(data, progress_bar=False, plot=False, svi=False):
     m1 = MyMultiVarModel(
         X, y, yerr, k, zero_mean=zero_mean, has_jitter=has_jitter, has_lag=has_lag, clean_bands=clean_bands
     )
+    print("Starting bestP search", flush=True)
     bestP, logProb = fit(model=m1, 
                         optimizer=optax.adam(learning_rate=0.001),
                         initSampler=initSampler,
                         prng_key=jax.random.PRNGKey(0),
                         nSample=2, nIter=2, nBest=1)
-    print(bestP)
+    #print(bestP)
     data['clean_bands'] = clean_bands
     if plot:
         save_combined_plot_bestp(bestP, m1, X, y, yerr, band_idx[mask_outlier], data)
@@ -460,28 +469,37 @@ def fit_multiband(data, progress_bar=False, plot=False, svi=False):
             optim=numpyro.optim.Adam(1e-2),
             loss=numpyro.infer.Trace_ELBO(),
         )
+        try:
+            svi_state = svi.init(jax.random.PRNGKey(0), X, yerr, y=y, bestP=bestP, clean_bands=clean_bands)
+            # Training loop
+            #losses = []
+            #for i in range(1000):
+            #    svi_state, loss = svi.update(svi_state, X, yerr, y=y, bestP=bestP, clean_bands=clean_bands)
+            #    print('step')
+            #    losses.append(loss)
 
-        svi_state = svi.init(jax.random.PRNGKey(0), X, yerr, y=y, bestP=bestP, clean_bands=clean_bands)
+            # Fast SVI
+            def run_svi_training(svi_state):
+                def svi_step(carry, _):
+                    svi_state = carry
+                    svi_state, loss = svi.update(svi_state, X, yerr, y=y, bestP=bestP, clean_bands=clean_bands)
+                    return svi_state, loss
 
-        # Training loop
-        def run_svi_training(svi_state):
-            def svi_step(carry, _):
-                svi_state = carry
-                svi_state, loss = svi.update(svi_state, X, yerr, y=y, bestP=bestP, clean_bands=clean_bands)
-                return svi_state, loss
+                return lax.scan(svi_step, svi_state, None, length=1000)
 
-            return lax.scan(svi_step, svi_state, None, length=1000)
+            # JIT the wrapper function
+            run_svi_training_jit = jax.jit(run_svi_training)
+            svi_state, losses = run_svi_training_jit(svi_state)
+        except Exception as e:
+            print(f"Error during SVI for quasar {data['object_id']}: {e}", flush=True)
+            return None
 
-        # JIT the wrapper function
-        run_svi_training_jit = jax.jit(run_svi_training)
-        svi_state, losses = run_svi_training_jit(svi_state)
-
-        print(losses)
+        #print(losses)
 
         params = svi.get_params(svi_state)
-        print(guide.get_posterior(params))
+        #print(guide.get_posterior(params))
         samples = guide.sample_posterior(jax.random.PRNGKey(1), params, sample_shape=(num_samples,))
-        print(samples)
+        #print(samples)
 
     else:
 
@@ -505,8 +523,11 @@ def fit_multiband(data, progress_bar=False, plot=False, svi=False):
             progress_bar=progress_bar,
             chain_method="vectorized",
         )
-
-        mcmc.run(jax.random.PRNGKey(1), X, yerr, y=y)
+        try:
+            mcmc.run(jax.random.PRNGKey(1), X, yerr, y=y)
+        except Exception as e:
+            print(f"Error during MCMC run for quasar {data['object_id']}: {e}", flush=True)
+            return None
         samples = mcmc.get_samples(group_by_chain=False)
         diagnostics = mcmc.get_extra_fields()
 
@@ -616,6 +637,7 @@ def fit_multiband(data, progress_bar=False, plot=False, svi=False):
             lag_err=lag_err,)
     
     if plot:
+        print(f"Plotting quasar {data['object_id']}", flush=True)
         save_combined_plot(samples, m1, X, y, yerr, band_idx[mask_outlier], d)
         plot_mcmc_traces(samples, d)
         plot_posterior(samples, data, clean_bands=clean_bands)
@@ -630,7 +652,7 @@ def process_quasar(i_data, n=0, progress_bar=False, plot=False, svi=False):
     # Load the quasar data
     result = fit_multiband(data, progress_bar=progress_bar, plot=plot, svi=svi)
     if result is None:
-        print(f"Skipping quasar {data['object_id']} due to diverging MCMC.")
+        print(f"Skipping quasar {data['object_id']}, no data", flush=True)
         return None
     data['i'] = i
     data |= result
@@ -685,7 +707,6 @@ def concat_light_curves(N=None, skip=None, filter_object_ids=None, save_file_pat
         times = {}
         mags = {}
         magerrs = {}
-        magerrs_mean = []
 
         for band in bands:  
             sdss_ps1_offset = {
@@ -708,7 +729,6 @@ def concat_light_curves(N=None, skip=None, filter_object_ids=None, save_file_pat
                 ps1_lc[ps1_lc.filterID == filters[band]].psfMag.values + offset if not ps1_lc.empty else [],
                 ztf_lc[ztf_lc.filterID == filters[band]].mag.values + offset if not ztf_lc.empty else []
             ])
-            mags[band] = mags[band] - np.nanmean(mags[band])  # Center the magnitudes
 
             magerrs[band] = np.concatenate([
                 sdss_lc[sdss_lc.filterID == filters[band]].psMagErr_p3.values if not sdss_lc.empty else [],
@@ -747,7 +767,7 @@ def concat_light_curves(N=None, skip=None, filter_object_ids=None, save_file_pat
 
         # Skip if no data is available for the object
         if all((len(times[band]) == 0 or len(mags[band]) == 0 or len(magerrs[band]) == 0) for band in bands):
-            print(f"No data available for object {object_id}, skipping.", flush=True)
+            print(f"No data available for object {object_id}.", flush=True)
             continue
         
         #rest_frame_times = (times['g']-times['g'].min()) / (1 + row['Z_SYS'])
@@ -767,7 +787,6 @@ def concat_light_curves(N=None, skip=None, filter_object_ids=None, save_file_pat
             'times': times,
             'mags': mags,
             'magerrs': magerrs,
-            'magerrs_mean': magerrs_mean
         })
 
         #save_lc_plot(times, mags, magerrs, object_id, bands=bands)
@@ -851,6 +870,24 @@ def populate_sdss_fields(s82_objs):
 
     return s82_objs
 
+def append_hdf5_file(quasar_list, file_path):
+    # Append to HDF5 file if it exists, otherwise create a new one
+    print(f"Appending {len(quasar_list)} quasars to {file_path}", flush=True)
+    with h5py.File(file_path, "a") as hdf:
+        for quasar in quasar_list:
+            object_id = quasar["object_id"]
+            if object_id in hdf:
+                continue
+
+            group = hdf.create_group(object_id)
+            for key, value in quasar.items():
+                if isinstance(value, dict):
+                    sub_group = group.create_group(key)
+                    for sub_key, sub_value in value.items():
+                        sub_group.create_dataset(sub_key, data=sub_value)
+                else:
+                    group.attrs[key] = value
+
 if __name__ == '__main__': 
     parser = argparse.ArgumentParser(description="Process quasars with optional filtering.")
     parser.add_argument("--filter_object_id", nargs="+", help="List of object IDs to filter.")
@@ -861,50 +898,62 @@ if __name__ == '__main__':
     parser.add_argument("--lc_file", type=str, help="Path to the light curve file.")
     parser.add_argument("--plot", action="store_true", help="Enable plotting of results.")
     parser.add_argument("--svi", action="store_true", help="Use stochastic variation inference (SVI).")
+    parser.add_argument("--filter_file", type=str, help="Path to the file containing object IDs to filter.")
     args = parser.parse_args()
 
 
     filter_object_ids = set(args.filter_object_id) if args.filter_object_id else None
+    filter_object_ids = set(pd.read_csv(args.filter_file, dtype={"object_id": str})["object_id"].values) if args.filter_file else filter_object_ids
     if filter_object_ids is not None:
         print(f"Filtering object IDs: {filter_object_ids}")
         objs = concat_light_curves(filter_object_ids=filter_object_ids)
-        objs = populate_sdss_fields(objs)
+        #objs = populate_sdss_fields(objs)
         for i, obj in enumerate(objs):
-            q = process_quasar((i, obj), n=len(objs), progress_bar=True, plot=args.plot, svi=args.svi)
-            fields_to_filter = ['times', 'mags', 'magerrs']
-            q = {k: v for k, v in q.items() if k not in fields_to_filter}
-            print(q['z'], q['clean_bands'])
+            print(f"Processing quasar {i}/{len(objs)} ({obj['object_id']})", flush=True)
+            q = process_quasar((i, obj), n=len(objs), progress_bar=True, plot=False, svi=args.svi)
+            if q is None:
+                #print(f"Skipping quasar {obj['object_id']}, no data", flush=True)
+                continue
+            #fields_to_filter = ['times', 'mags', 'magerrs']
+            #q = {k: v for k, v in q.items() if k not in fields_to_filter}
+            print(q['object_id'], q['z'], q['clean_bands'])
+            append_hdf5_file([q], args.file)
     
         sys.exit("Exiting the program as requested.")
 
+    filter_object_ids = set(pd.read_csv(args.filter_file, dtype={"object_id": str})["object_id"].values) if args.filter_file else None
 
-    # Filter objects by object_id that exist in the HDF5 file
-    existing_object_ids = set()
-    if os.path.exists(args.file):
-        with h5py.File(args.file, "r") as hdf:
-            existing_object_ids = set(hdf.keys())
+    if filter_object_ids is not None:
+        objs = concat_light_curves(filter_object_ids=filter_object_ids, N=args.N, skip=args.skip)
     else:
-        existing_object_ids = []
+        # Filter objects by object_id that exist in the HDF5 file
+        existing_object_ids = set()
+        if os.path.exists(args.file):
+            with h5py.File(args.file, "r") as hdf:
+                existing_object_ids = set(hdf.keys())
+        else:
+            existing_object_ids = []
 
-    cat = pd.read_parquet(f"data/S82/Catalog.parquet").set_index('idx')
-    sdss = pd.read_parquet(f"data/S82/dr16s82_sdssLCRaw.parquet")
-    sdss = sdss[sdss.mjd.notna() & (len(sdss.mjd) > 0)]
+        cat = pd.read_parquet(f"data/S82/Catalog.parquet").set_index('idx')
+        sdss = pd.read_parquet(f"data/S82/dr16s82_sdssLCRaw.parquet")
+        sdss = sdss[sdss.mjd.notna() & (len(sdss.mjd) > 0)]
 
-    # Find elements in cat where objectId exists in the list of objectId of sdss
-    #filter_object_ids = set(pd.read_csv("data/object_ids_test.csv")["object_id"].values)
-    match_object_ids = set(sdss.objectId) if filter_object_ids is None else filter_object_ids
-    matching_indices = cat[cat.objectId.isin(match_object_ids)].index
-    cat = cat[cat.objectId.isin(match_object_ids)]
-    #cat = cat.loc[matching_indices]
-    print(f"Total objects in catalog: {len(cat)}")
-    print(f"Number of objects already processed in HDF5 file: {len(existing_object_ids)}")
-    print(f"Number of objects that should be processed: {len(cat)-len(existing_object_ids)}")
+        # Find elements in cat where objectId exists in the list of objectId of sdss
+        #filter_object_ids = set(pd.read_csv("data/object_ids_test.csv")["object_id"].values)
+        match_object_ids = set(sdss.objectId) if filter_object_ids is None else filter_object_ids
+        matching_indices = cat[cat.objectId.isin(match_object_ids)].index
+        cat = cat[cat.objectId.isin(match_object_ids)]
+        #cat = cat.loc[matching_indices]
+        print(f"Total objects in catalog: {len(cat)}")
+        print(f"Number of objects already processed in HDF5 file: {len(existing_object_ids)}")
+        print(f"Number of objects that should be processed: {len(cat)-len(existing_object_ids)}")
 
-    cat = cat[~cat['objectId'].isin(existing_object_ids)]
-    filter_object_ids = set(cat['objectId'].values)
-    print(f"Number of objects to process: {len(filter_object_ids)}")
-    #objs = [obj for obj in objs if obj['object_id'] not in existing_object_ids]
-    objs = concat_light_curves(filter_object_ids=filter_object_ids, N=args.N, skip=args.skip, save_file_path=args.lc_file)
+        cat = cat[~cat['objectId'].isin(existing_object_ids)]
+        filter_object_ids = set(cat['objectId'].values)
+        print(f"Number of objects to process: {len(filter_object_ids)}")
+        #objs = [obj for obj in objs if obj['object_id'] not in existing_object_ids]
+        objs = concat_light_curves(filter_object_ids=filter_object_ids, N=args.N, skip=args.skip, save_file_path=args.lc_file)
+    
     print(f"Loaded {len(objs)} objects from concat_light_curves")
     #sys.exit("Exiting the program as requested.")
     #objs = populate_sdss_fields(objs)
@@ -916,23 +965,9 @@ if __name__ == '__main__':
         ctx = get_context("spawn")  # Safer for JAX when using multiprocessing
         results = []
 
-        with ctx.Pool(processes=15) as pool:
+        with ctx.Pool(processes=6) as pool:
             results = pool.map(partial(process_quasar, n=len(chunk), plot=args.plot, svi=args.svi), enumerate(chunk))
 
         quasar_list = [q for q in results if q is not None]
-
-        # Append to HDF5 file if it exists, otherwise create a new one
-        with h5py.File(args.file, "a") as hdf:
-            for quasar in quasar_list:
-                object_id = quasar["object_id"]
-                if object_id in hdf:
-                    continue
-
-                group = hdf.create_group(object_id)
-                for key, value in quasar.items():
-                    if isinstance(value, dict):
-                        sub_group = group.create_group(key)
-                        for sub_key, sub_value in value.items():
-                            sub_group.create_dataset(sub_key, data=sub_value)
-                    else:
-                        group.attrs[key] = value
+        append_hdf5_file(quasar_list, args.file)
+        print(f"Processed {len(quasar_list)} quasars in chunk {start_idx // args.chunk_size + 1}/{(len(objs) + args.chunk_size - 1) // args.chunk_size}.")
