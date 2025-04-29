@@ -126,13 +126,28 @@ class MyMultibandLowRank(tinygp.kernels.Kernel):
         t1, b1 = X1
         t2, b2 = X2
 
-        k_conti = self.amplitudes[b1] * self.amplitudes[b2] * self.kernel.evaluate(t1, t2)
+        # a is cont at t1
+        # b is blr at t1
+        # c is cont at t2
+        # d is blr at t2
+        cov_ac = self.amplitudes[b1] * self.amplitudes[b2] * self.kernel.evaluate(t1, t2)
+        cov_ad = (
+            self.amplitudes[b1]
+            * self.amplitudes_blr[b2]
+            * self.kernel.evaluate(t1, t2 - self.lag_blr[b2])
+        )
+        cov_bc = (
+            self.amplitudes_blr[b1]
+            * self.amplitudes[b2]
+            * self.kernel.evaluate(t1 - self.lag_blr[b1], t2)
+        )
+        cov_bd = (
+            self.amplitudes_blr[b1]
+            * self.amplitudes_blr[b2]
+            * self.kernel.evaluate(t1 - self.lag_blr[b1], t2 - self.lag_blr[b2])
+        )
 
-        # BLR is not correlated across bands, use delta function
-        k_blr = self.amplitudes_blr[b1] * self.amplitudes_blr[b2] * self.kernel.evaluate(t1, t2 - self.lag_blr[b2])
-        k_blr = jnp.where(b1 == b2, k_blr, 0.0)
-
-        return k_conti + k_blr
+        return cov_ac + cov_ad + cov_bc + cov_bd
 
 # Override MultiVarModel
 class MyMultiVarModel(MultiVarModel):
@@ -306,21 +321,21 @@ def numpyro_model(X, yerr, y=None, bestP=None, clean_bands=None):
     #   "log_amp_delta", dist.Normal(bestP["log_amp_delta"], 2.0)
     #) # comment this out when using beta
     log_amp_delta_blr = numpyro.sample(
-      "log_amp_delta_blr", dist.Normal(bestP["log_amp_delta_blr"], 0.1)
+      "log_amp_delta_blr", dist.Normal(bestP["log_amp_delta_blr"], 10)
     )
 
     # lag
     lag = numpyro.sample("lag", dist.Normal(bestP['lag'], 10))
-    log_lag_blr = numpyro.sample("log_lag_blr", dist.Normal(bestP['log_lag_blr'], 1.0))
+    log_lag_blr = numpyro.sample("log_lag_blr", dist.Normal(bestP['log_lag_blr'], 10))
     
     # log jitter, mean => the prior for these two should be set small, otherwise
     # it is hard to converge
     log_jitter = numpyro.sample("log_jitter", dist.Normal(bestP["log_jitter"], 0.1))
     
     mean = numpyro.sample("mean", dist.Normal(bestP['mean'], .1))
-    poly1 = numpyro.sample("poly1", dist.Normal(bestP['poly1'], 1.0))
+    poly1 = numpyro.sample("poly1", dist.Normal(bestP['poly1'], 10.0))
     #poly2 = numpyro.sample("poly2", dist.Normal(bestP['poly2'], 10)) 
-    beta = numpyro.sample("beta", dist.Normal(bestP['beta'], 0.5))
+    beta = numpyro.sample("beta", dist.Normal(bestP['beta'], 1.0))
 
     #return
 
@@ -485,7 +500,7 @@ def fit_multiband(data, progress_bar=False, plot=False, svi=False):
         mcmc = MCMC(
             nuts_kernel,
             num_warmup=20, # This could be less than num_samples
-            num_samples=20,
+            num_samples=100,
             num_chains=2*28,
             progress_bar=progress_bar,
             chain_method="vectorized",
