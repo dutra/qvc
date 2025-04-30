@@ -517,8 +517,8 @@ def fit_multiband(data, progress_bar=False, plot=False, svi=False):
 
         mcmc = MCMC(
             nuts_kernel,
-            num_warmup=20, # This could be less than num_samples
-            num_samples=100,
+            num_warmup=250, # This could be less than num_samples
+            num_samples=250,
             num_chains=2*28,
             progress_bar=progress_bar,
             chain_method="vectorized",
@@ -531,7 +531,7 @@ def fit_multiband(data, progress_bar=False, plot=False, svi=False):
         samples = mcmc.get_samples(group_by_chain=False)
         diagnostics = mcmc.get_extra_fields()
 
-        print(samples)
+        #print(samples)
 
         #if np.all(diagnostics['diverging']):
         #    print(f"Diverging MCMC for quasar {data['object_id']}, skipping.", flush=True)
