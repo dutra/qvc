@@ -332,10 +332,10 @@ def numpyro_model(X, yerr, y=None, bestP=None, clean_bands=None):
     # it is hard to converge
     log_jitter = numpyro.sample("log_jitter", dist.Normal(bestP["log_jitter"], 0.1))
     
-    mean = numpyro.sample("mean", dist.Normal(bestP['mean'], .1))
+    mean = numpyro.sample("mean", dist.Normal(bestP['mean'], 0.1))
     poly1 = numpyro.sample("poly1", dist.Normal(bestP['poly1'], 10.0))
     #poly2 = numpyro.sample("poly2", dist.Normal(bestP['poly2'], 10)) 
-    beta = numpyro.sample("beta", dist.Normal(bestP['beta'], 1.0))
+    beta = numpyro.sample("beta", dist.Normal(-0.5, 1.5))
 
     #return
 
