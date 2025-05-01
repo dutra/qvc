@@ -72,7 +72,7 @@ catalog_coords = SkyCoord(ra=catalog.iloc[:, 1].to_numpy() * u.degree, dec=catal
 
 print(len(catalog_coords))
 
-table_std = query_ssa_service(catalog_coords[:10])
+table_std = query_ssa_service(catalog_coords)
 
 # Concatenate all tables in table_lc
 concatenated_table = vstack(table_std)
