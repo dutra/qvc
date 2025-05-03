@@ -107,16 +107,18 @@ class MyMultibandLowRankOld(MultibandLowRank):
                 self.amplitudes_blr[X[1]] * self.kernel.observation_model(X[0] - self.lag_blr[X[1]]))
     
 class MyMultibandLowRank(tinygp.kernels.Kernel):
-    kernel: tinygp.kernels.Kernel
+    sigma: float
     amplitudes: jnp.ndarray
     amplitudes_blr: jnp.ndarray
     lag_blr: jnp.ndarray
+    tau_drw: jnp.ndarray
 
-    def __init__(self, kernel, amplitudes, amplitudes_blr, lag_blr) -> None:
-        self.kernel = kernel
+    def __init__(self, sigma, scale, amplitudes, amplitudes_blr, lag_blr, taus) -> None:
+        self.sigma = sigma
         self.amplitudes = amplitudes
         self.amplitudes_blr = amplitudes_blr
         self.lag_blr = lag_blr
+        self.tau_drw = scale * taus
 
     def coord_to_sortable(self, X) -> JAXArray:
         return X[0]
@@ -125,25 +127,48 @@ class MyMultibandLowRank(tinygp.kernels.Kernel):
         t1, b1 = X1
         t2, b2 = X2
 
+        #  Intrinsic Coregionalization Model (ICM)
+        #TODO: amplitudes
+
         # a is cont at t1
         # b is blr at t1
         # c is cont at t2
         # d is blr at t2
-        cov_ac = self.amplitudes[b1] * self.amplitudes[b2] * self.kernel.evaluate(t1, t2)
+        cov_ac = (
+            self.amplitudes[b1]
+            * self.amplitudes[b2]
+            * self.sigma**2
+            * jnp.sqrt(
+                jnp.exp(-jnp.abs(t2 - t1) / self.tau_drw[b1])
+                * jnp.exp(-jnp.abs(t2 - t1) / self.tau_drw[b2])
+            )
+        )
         cov_ad = (
             self.amplitudes[b1]
             * self.amplitudes_blr[b2]
-            * self.kernel.evaluate(t1, t2 - self.lag_blr[b2])
+            * self.sigma**2
+            * jnp.sqrt(
+                jnp.exp(-jnp.abs(t2 - t1) / self.tau_drw[b1])
+                * jnp.exp(-jnp.abs(t2 - t1 - self.lag_blr[b2]) / self.tau_drw[b2])
+            )
         )
         cov_bc = (
             self.amplitudes_blr[b1]
             * self.amplitudes[b2]
-            * self.kernel.evaluate(t1 - self.lag_blr[b1], t2)
+            * self.sigma**2
+            * jnp.sqrt(
+                jnp.exp(-jnp.abs(t2 - t1 - self.lag_blr[b1]) / self.tau_drw[b1])
+                * jnp.exp(-jnp.abs(t2 - t1) / self.tau_drw[b2])
+            )
         )
         cov_bd = (
             self.amplitudes_blr[b1]
             * self.amplitudes_blr[b2]
-            * self.kernel.evaluate(t1 - self.lag_blr[b1], t2 - self.lag_blr[b2])
+            * self.sigma**2
+            * jnp.sqrt(
+                jnp.exp(-jnp.abs(t2 - t1 - self.lag_blr[b1]) / self.tau_drw[b1])
+                * jnp.exp(-jnp.abs(t2 - t1 - self.lag_blr[b2]) / self.tau_drw[b2])
+            )
         )
 
         return cov_ac + cov_ad + cov_bc + cov_bd
@@ -181,6 +206,8 @@ class MyMultiVarModel(MultiVarModel):
         # log amp + mean
         log_amps = self.my_amp_transform(params)
         log_amps_blr = self.my_amp_transform_blr(params)
+        log_taus = self.my_tau_drw_transform(params)
+
         means = partial(
             MyMultiVarModel.mean_func, self.zero_mean, log_amps.shape[0], params
         )
@@ -206,7 +233,9 @@ class MyMultiVarModel(MultiVarModel):
             amplitudes=jnp.exp(log_amps),
             amplitudes_blr=jnp.exp(log_amps_blr),
             lag_blr=jnp.exp(params["log_lag_blr"])[band[inds]],
-            kernel=self.kernel_def(jnp.exp(params["log_kernel_param"])),
+            sigma=jnp.exp(params["log_kernel_param"][1]),
+            scale=jnp.exp(params["log_kernel_param"][0]),
+            taus=jnp.exp(log_taus)[band[inds]],
         )
         return (
             GaussianProcess(
@@ -219,12 +248,16 @@ class MyMultiVarModel(MultiVarModel):
         )
     def my_amp_transform_blr(self, params: dict[str, JAXArray]) -> JAXArray:
         return jnp.atleast_1d(params["log_amp_delta_blr"])
-        
+
+    def my_tau_drw_transform(self, params: dict[str, JAXArray]) -> JAXArray:
+        b = params["delta"]
+        params["log_tau_delta"] = jnp.array([b*np.log(lambda_pivot[band]/lambda_pivot['u']) for band in self.clean_bands])
+        return params["log_tau_delta"]
 
     def my_amp_transform(self, params: dict[str, JAXArray]) -> JAXArray:
-            b = params["beta"]
-            params["log_amp_delta"] = jnp.array([b*np.log(lambda_pivot[band]/lambda_pivot['u']) for band in self.clean_bands])
-            return params["log_amp_delta"]
+        b = params["beta"]
+        params["log_amp_delta"] = jnp.array([b*np.log(lambda_pivot[band]/lambda_pivot['u']) for band in self.clean_bands])
+        return params["log_amp_delta"]
     
     @eqx.filter_jit
     def log_prob(self, params: dict[str, JAXArray]) -> JAXArray:
@@ -290,6 +323,7 @@ def initSampler(key, nSample, nBand=None):
 #    logJitterSampler = UniformInit(nBand, [jnp.log(1e-7), jnp.log(0.1)])
     logJitterSampler = UniformInit(nBand, [jnp.log(1e-6), jnp.log(0.1)])
     betaSampler = UniformInit(1, [-0.5, -0.1])
+    deltaSampler = UniformInit(1, [1.5, 2.0])
 
     # kernel init
     kernelSampler = DRWInit([jnp.log(10**2.5), jnp.log(10**4.5)], [jnp.log(0.1), jnp.log(1.0)])
@@ -305,6 +339,7 @@ def initSampler(key, nSample, nBand=None):
         "log_lag_blr": loglagBLRSampler(subkeys[8], nSample),
         "log_jitter": logJitterSampler(subkeys[4], nSample),
         "beta": betaSampler(subkeys[5], nSample),
+        "delta": deltaSampler(subkeys[9], nSample),
     }
 
 def numpyro_model(X, yerr, y=None, bestP=None, clean_bands=None):
@@ -317,10 +352,6 @@ def numpyro_model(X, yerr, y=None, bestP=None, clean_bands=None):
     #jax.debug.print("{x} log_kernel_param_numpro", x=log_kernel_param)
     #jax.debug.print("{x} log_kernel_param_numpro_bestp", x=bestP["log_kernel_param"])
 
-    # log amp delta
-    #log_amp_delta = numpyro.sample(
-    #   "log_amp_delta", dist.Normal(bestP["log_amp_delta"], 2.0)
-    #) # comment this out when using beta
     log_amp_delta_blr = numpyro.sample(
       "log_amp_delta_blr", dist.Normal(jnp.full_like(bestP["log_amp_delta_blr"], -2.0), 2.0)
     )
@@ -335,11 +366,8 @@ def numpyro_model(X, yerr, y=None, bestP=None, clean_bands=None):
     
     mean = numpyro.sample("mean", dist.Normal(jnp.full_like(bestP["mean"], 0.0), 0.1))
     poly1 = numpyro.sample("poly1", dist.Normal(0.0, 10.0))
-    #poly2 = numpyro.sample("poly2", dist.Normal(bestP['poly2'], 10)) 
     beta = numpyro.sample("beta", dist.Normal(-0.3, 0.1))
-
-    #return
-
+    delta = numpyro.sample("delta", dist.Normal(0.5, 0.1))
 
     # kernel
     k = kernels.quasisep.Exp(*jnp.exp(log_kernel_param))
@@ -347,15 +375,14 @@ def numpyro_model(X, yerr, y=None, bestP=None, clean_bands=None):
 
     sample_params = {
         "log_kernel_param": log_kernel_param,
-        #"log_amp_delta": log_amp_delta, # comment this out when using beta
         "log_amp_delta_blr": log_amp_delta_blr, 
         "lag": lag,
         "log_lag_blr": log_lag_blr,
         "mean": mean,
         "poly1": poly1, 
-        #"poly2": poly2,
         "log_jitter": log_jitter,
         "beta": beta,
+        "delta": delta,
     }
     m1.sample(sample_params)
 
@@ -501,6 +528,9 @@ def fit_multiband(data, progress_bar=False, plot=False, svi=False):
                 moves={AIES.DEMove() : 0.5, AIES.StretchMove() : 0.5},
                 init_strategy=init_strategy,
                 )
+
+            num_params = sum(p.size for p in bestP.values())
+            print(f"Number of parameters: {num_params}")
 
             mcmc = MCMC(
                 nuts_kernel,
