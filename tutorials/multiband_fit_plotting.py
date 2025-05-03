@@ -52,14 +52,15 @@ def plot_posterior(samples, data, clean_bands=None):
     posterior_samples = {
         r'$\beta$': samples['beta'],
         r'$\log(\tau_\mathrm{RF})$': log_tau_RF,
-        r'$\log(\sigma_RF)$': log_sigma_RF,
+        r'$\log(\sigma_\mathrm{RF})$': log_sigma_RF,
         r'poly1': samples['poly1'],
-        r'mean': samples['mean'][:,0],
     }
     for i, band in enumerate(clean_bands):
+        posterior_samples[f'mean_{band}'] = samples['mean'][:, i]
         posterior_samples[f'lag_{band}'] = samples['lag'][:, i]
         posterior_samples[f'log_lag_blr_{band}'] = samples['log_lag_blr'][:, i]
         posterior_samples[f'log_amp_delta_blr_{band}'] = samples['log_amp_delta_blr'][:, i]
+        posterior_samples[f'log_jitter_{band}'] = samples['log_jitter'][:, i]
 
     # Convert the samples to a 2D array for corner
     corner_data = np.vstack([posterior_samples[key] for key in posterior_samples.keys()]).T
@@ -78,7 +79,7 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, data):
     fig, ax = plt.subplots(1, 1, figsize=(8, 6), sharex=True)
     offsets = np.arange(len(clean_bands)) * 0.25
 
-    t = X[0]   
+    t = X[0]# + data['times'][0]
     for n in np.unique(band_idx):
         m = band_idx == n
         # Plot the observed data
@@ -93,7 +94,7 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, data):
         ax.plot(t_test, mu+offsets[n], alpha=0.8, color=colors[band_idx_map[n]], lw=2.5)
         ax.fill_between(t_test, mu+offsets[n]-std, mu+offsets[n]+std, alpha=0.3, 
                 lw=0.5, color=colors[band_idx_map[n]])
-    ax.set_xlabel('Days')
+    ax.set_xlabel('MJD')
     ax.set_ylabel('Magnitude + arbitrary offset')
     ax.invert_yaxis()  # Magnitudes are brighter when lower
     #ax.legend(loc='lower right')
