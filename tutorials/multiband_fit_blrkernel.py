@@ -323,21 +323,21 @@ def numpyro_model(X, yerr, y=None, bestP=None, clean_bands=None):
     #   "log_amp_delta", dist.Normal(bestP["log_amp_delta"], 2.0)
     #) # comment this out when using beta
     log_amp_delta_blr = numpyro.sample(
-      "log_amp_delta_blr", dist.Normal(bestP["log_amp_delta_blr"], 10)
+      "log_amp_delta_blr", dist.Normal(jnp.full_like(bestP["log_amp_delta_blr"], -1.0), 2.0)
     )
 
     # lag
     lag = numpyro.sample("lag", dist.Normal(bestP['lag'], 10))
-    log_lag_blr = numpyro.sample("log_lag_blr", dist.Normal(bestP['log_lag_blr'], 10))
+    log_lag_blr = numpyro.sample("log_lag_blr", dist.Normal(jnp.full_like(bestP['log_lag_blr'], 2.0), 2.0))
     
     # log jitter, mean => the prior for these two should be set small, otherwise
     # it is hard to converge
     log_jitter = numpyro.sample("log_jitter", dist.Normal(bestP["log_jitter"], 0.1))
     
     mean = numpyro.sample("mean", dist.Normal(bestP['mean'], 0.1))
-    poly1 = numpyro.sample("poly1", dist.Normal(bestP['poly1'], 10.0))
+    poly1 = numpyro.sample("poly1", dist.Normal(0.0, 10.0))
     #poly2 = numpyro.sample("poly2", dist.Normal(bestP['poly2'], 10)) 
-    beta = numpyro.sample("beta", dist.Normal(-0.5, 1.5))
+    beta = numpyro.sample("beta", dist.Normal(-0.3, 0.1))
 
     #return
 
@@ -415,7 +415,7 @@ def fit_multiband(data, progress_bar=False, plot=False, svi=False):
     t = np.array(all_times)
 
     # Reject outliers in moving window per band
-    window_size = 20
+    window_size = 6
     mask_outlier = np.ones(len(y), dtype=bool)
 
     for band in np.unique(band_idx):
@@ -524,8 +524,8 @@ def fit_multiband(data, progress_bar=False, plot=False, svi=False):
 
             mcmc = MCMC(
                 nuts_kernel,
-                num_warmup=250, # This could be less than num_samples
-                num_samples=50,
+                num_warmup=50, # This could be less than num_samples
+                num_samples=25,
                 num_chains=2*28,
                 progress_bar=progress_bar,
                 chain_method="vectorized",
