@@ -77,7 +77,6 @@ import argparse
 
 from multiband_fit_utils import *
 from multiband_fit_plotting import *
-import blackjax
 
 num_samples = 250
 
@@ -323,18 +322,18 @@ def numpyro_model(X, yerr, y=None, bestP=None, clean_bands=None):
     #   "log_amp_delta", dist.Normal(bestP["log_amp_delta"], 2.0)
     #) # comment this out when using beta
     log_amp_delta_blr = numpyro.sample(
-      "log_amp_delta_blr", dist.Normal(jnp.full_like(bestP["log_amp_delta_blr"], -1.0), 2.0)
+      "log_amp_delta_blr", dist.Normal(jnp.full_like(bestP["log_amp_delta_blr"], -2.0), 2.0)
     )
 
     # lag
-    lag = numpyro.sample("lag", dist.Normal(bestP['lag'], 10))
-    log_lag_blr = numpyro.sample("log_lag_blr", dist.Normal(jnp.full_like(bestP['log_lag_blr'], 2.0), 2.0))
+    lag = numpyro.sample("lag", dist.Normal(jnp.full_like(bestP["lag"], 0.0), 10))
+    log_lag_blr = numpyro.sample("log_lag_blr", dist.Normal(jnp.full_like(bestP["log_lag_blr"], 5.0), 2.0))
     
     # log jitter, mean => the prior for these two should be set small, otherwise
     # it is hard to converge
-    log_jitter = numpyro.sample("log_jitter", dist.Normal(bestP["log_jitter"], 0.1))
+    log_jitter = numpyro.sample("log_jitter", dist.Normal(np.full_like(bestP["log_jitter"], -4.0), 2.0))
     
-    mean = numpyro.sample("mean", dist.Normal(bestP['mean'], 0.1))
+    mean = numpyro.sample("mean", dist.Normal(jnp.full_like(bestP["mean"], 0.0), 0.1))
     poly1 = numpyro.sample("poly1", dist.Normal(0.0, 10.0))
     #poly2 = numpyro.sample("poly2", dist.Normal(bestP['poly2'], 10)) 
     beta = numpyro.sample("beta", dist.Normal(-0.3, 0.1))
@@ -439,33 +438,14 @@ def fit_multiband(data, progress_bar=False, plot=False, svi=False):
     initial_drw_params = {"log_kernel_param": jnp.log(np.array([100.0, 0.35]))}
     k = kernels.quasisep.Exp(*jnp.exp(initial_drw_params["log_kernel_param"]))
 
-
     # define model
     m1 = MyMultiVarModel(
         X, y, yerr, k, zero_mean=zero_mean, has_jitter=has_jitter, has_lag=has_lag, clean_bands=clean_bands
     )
-    bestP, logProb = fit(model=m1, 
-                        optimizer=optax.adam(learning_rate=0.001),
-                        initSampler=partial(initSampler, nBand=len(clean_bands)),
-                        prng_key=jax.random.PRNGKey(int(data['object_id'])),
-                        nSample=3, nIter=2, nBest=1)
+
+    print("Initializing bestP.")
+    bestP = initSampler(jax.random.PRNGKey(0), 1, len(clean_bands))
     print(bestP)
-        # Check for NaN values in bestP and initialize the entire dictionary if any NaN is found
-    if any(np.any(np.isnan(value)) for value in bestP.values()):
-        print("Initializing bestP due to NaN values.")
-        bestP = {
-            "log_kernel_param": jnp.log(np.array([100.0, 0.35])),  # Default kernel parameters
-            "log_amp_delta": jnp.zeros_like(bestP["log_amp_delta"]),  # Default amplitude deltas
-            "log_amp_delta_blr": jnp.full_like(bestP["log_amp_delta_blr"], -3.0),  # Default BLR amplitude deltas
-            "lag": jnp.zeros_like(bestP["lag"]),  # Default lag values
-            "log_lag_blr": jnp.full_like(bestP["log_lag_blr"], 1.0),  # Default BLR lag values
-            "log_jitter": jnp.full_like(bestP["log_jitter"], jnp.log(1e-3)),  # Default jitter
-            "mean": jnp.zeros_like(bestP["mean"]),  # Default mean values
-            "poly1": jnp.zeros_like(bestP["poly1"]),  # Default polynomial coefficients
-            "beta": jnp.full_like(bestP["beta"], -0.5),  # Default beta value
-        } 
-    if plot:
-        save_combined_plot_bestp(bestP, m1, X, y, yerr, band_idx[mask_outlier], data)
 
     for k in bestP.keys():
         bestP[k] += 1e-4 * np.random.randn(*bestP[k].shape)
