@@ -67,7 +67,7 @@ def plot_posterior(samples, data, clean_bands=None):
     fig = corner.corner(corner_data, labels=list(posterior_samples.keys()), show_titles=True)
     output_dir = "posterior_plots"
     os.makedirs(output_dir, exist_ok=True)
-    plt.savefig(os.path.join(output_dir, f"{object_id}_posterior.png"))
+    plt.savefig(os.path.join(output_dir, f"{object_id}_posterior.png"), dpi=200)
     plt.close(fig)
     return fig
 
