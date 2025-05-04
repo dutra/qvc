@@ -682,7 +682,11 @@ def concat_light_curves(N=None, skip=None, filter_object_ids=None, save_file_pat
         if filter_object_ids is not None:
             # Filter the loaded objects based on the provided object IDs
             s82_objs = [obj for obj in s82_objs if obj['object_id'] in filter_object_ids]
-        #return s82_objs
+        if skip is not None:
+            s82_objs = s82_objs[skip:]
+        if N is not None:
+            s82_objs = s82_objs[:N]
+        return s82_objs
     else: 
         s82_objs = []
     # Load the S82 data from the FITS file
@@ -913,7 +917,8 @@ if __name__ == '__main__':
     filter_object_ids = set(filter_object_ids) - set(existing_object_ids)
     if filter_object_ids is not None:
         print(f"Filtering object IDs: {len(filter_object_ids)}")
-    objs = concat_light_curves(filter_object_ids=filter_object_ids)
+    objs = concat_light_curves(filter_object_ids=filter_object_ids, N=args.N, skip=args.skip, save_file_path=args.lc_file)
+    print(f"Loaded {len(objs)} objects from concat_light_curves")
     #objs = populate_sdss_fields(objs)
     for i, obj in enumerate(objs):
         print(f"Processing quasar {i}/{len(objs)} ({obj['object_id']})", flush=True)
@@ -923,7 +928,7 @@ if __name__ == '__main__':
             continue
         #fields_to_filter = ['times', 'mags', 'magerrs']
         #q = {k: v for k, v in q.items() if k not in fields_to_filter}
-        print(q['object_id'], q['z'], q['clean_bands'])
+        print(f"Quasar {i}/{len(objs)} ({q['object_id']}): log_tau_RF={q['log_tau_RF']:.3f}±{q['log_tau_RF_err']:.3f}, log_sigma_RF={q['log_sigma_RF']}±{q['log_sigma_RF_err']}", flush=True)
         if args.file:
             append_hdf5_file([q], args.file)
 
