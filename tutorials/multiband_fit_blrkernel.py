@@ -34,9 +34,9 @@ import numpyro.distributions as dist
 from tinygp import kernels, solvers
 
 print("Total device count:", jax.local_device_count())
-numpyro.set_host_device_count(30)
+#numpyro.set_host_device_count(30)
 jax.config.update("jax_enable_x64", True)
-jax.config.update("jax_platform_name", "cpu")
+#jax.config.update("jax_platform_name", "cpu")
 learning_rate=0.001
 
 # jax.config.update("jax_enable_x64", True)
@@ -77,8 +77,6 @@ import argparse
 
 from multiband_fit_utils import *
 from multiband_fit_plotting import *
-
-num_samples = 250
 
 # define params
 zero_mean = False
@@ -512,7 +510,7 @@ def fit_multiband(data, progress_bar=False, plot=False, svi=False):
 
         params = svi.get_params(svi_state)
         print(guide.get_posterior(params))
-        samples = guide.sample_posterior(jax.random.PRNGKey(1), params, sample_shape=(num_samples,))
+        samples = guide.sample_posterior(jax.random.PRNGKey(1), params, sample_shape=(250,))
         print(samples)
 
     else:
@@ -534,9 +532,9 @@ def fit_multiband(data, progress_bar=False, plot=False, svi=False):
 
             mcmc = MCMC(
                 nuts_kernel,
-                num_warmup=50, # This could be less than num_samples
-                num_samples=25,
-                num_chains=2*28,
+                num_warmup=500, # This could be less than num_samples
+                num_samples=250,
+                num_chains=2*33,
                 progress_bar=progress_bar,
                 chain_method="vectorized",
             )
@@ -555,10 +553,23 @@ def fit_multiband(data, progress_bar=False, plot=False, svi=False):
         #    #return None
     
     log_tau_RF = np.log10(np.exp(samples['log_kernel_param'][:, 0])/(1+data['z']))
+    delta = samples['delta']
+    log_tau_delta = np.array([delta*np.log(lambda_pivot[band]/lambda_pivot['u']) for band in clean_bands])
+    log_tau_band = log_tau_RF+log_tau_delta
+
+    # delta
+    lower, median, upper = np.percentile(delta, [16, 50, 84])
+    delta_err = 0.5 * (upper - lower) # symmetric uncertainties
+    delta = median
+
+    # log_tau_band
+    lower, median, upper = np.percentile(log_tau_band, [16, 50, 84], axis=1)
+    log_tau_band_err = 0.5 * (upper - lower) # symmetric uncertainties
+    log_tau_band = median
+
     lower, median, upper = np.percentile(log_tau_RF, [16, 50, 84])
     log_tau_RF_err = 0.5 * (upper - lower) # symmetric uncertainties
     log_tau_RF = median
-
 
     lambda_ref = 2500 # Any reference wavelength
     lambda_pivot_RF = lambda_pivot['u']/(1 + data['z'])
@@ -621,11 +632,16 @@ def fit_multiband(data, progress_bar=False, plot=False, svi=False):
     lag = median
 
 
-
     d = dict(object_id=data['object_id'],
             z=data['z'],
             log_tau_RF=log_tau_RF,
             log_tau_RF_err=log_tau_RF_err,
+            delta=delta,
+            delta_err=delta_err,
+            log_tau_band=log_tau_band,
+            log_tau_band_err=log_tau_band_err,
+            log_tau_delta=log_tau_delta,
+            log_tau_delta_err=log_tau_band_err,
             beta=beta,
             beta_err=beta_err,
             log_sigma_RF=log_sigma_RF,
