@@ -249,12 +249,12 @@ class MyMultiVarModel(MultiVarModel):
 
     def my_tau_drw_transform(self, params: dict[str, JAXArray]) -> JAXArray:
         b = params["delta"]
-        params["log_tau_delta"] = jnp.array([b*np.log(lambda_pivot[band]/lambda_pivot['u']) for band in self.clean_bands])
+        params["log_tau_delta"] = jnp.log(10) * jnp.array([b*np.log10(lambda_pivot[band]/lambda_pivot['u']) for band in self.clean_bands])
         return params["log_tau_delta"]
 
     def my_amp_transform(self, params: dict[str, JAXArray]) -> JAXArray:
         b = params["beta"]
-        params["log_amp_delta"] = jnp.array([b*np.log(lambda_pivot[band]/lambda_pivot['u']) for band in self.clean_bands])
+        params["log_amp_delta"] = jnp.log(10) * jnp.array([b*np.log10(lambda_pivot[band]/lambda_pivot['u']) for band in self.clean_bands])
         return params["log_amp_delta"]
     
     @eqx.filter_jit
@@ -318,7 +318,6 @@ def initSampler(key, nSample, nBand=None):
     #poly2Sampler = UniformInit(1, [-10, 10])
     logAmpDeltaSampler = UniformInit(nBand-1, [-2.0, 0.0])
     logAmpDeltaBLRSampler = UniformInit(nBand, [-5.0, -2.0])
-#    logJitterSampler = UniformInit(nBand, [jnp.log(1e-7), jnp.log(0.1)])
     logJitterSampler = UniformInit(nBand, [jnp.log(1e-6), jnp.log(0.1)])
     betaSampler = UniformInit(1, [-0.5, -0.1])
     deltaSampler = UniformInit(1, [1.5, 2.0])
@@ -364,7 +363,7 @@ def numpyro_model(X, yerr, y=None, bestP=None, clean_bands=None):
     
     mean = numpyro.sample("mean", dist.Normal(jnp.full_like(bestP["mean"], 0.0), 0.1))
     poly1 = numpyro.sample("poly1", dist.Normal(0.0, 10.0))
-    beta = numpyro.sample("beta", dist.Normal(-0.3, 0.1))
+    beta = numpyro.sample("beta", dist.Normal(-0.15, 0.1))
     delta = numpyro.sample("delta", dist.Normal(0.5, 0.1))
 
     # kernel
@@ -555,11 +554,11 @@ def fit_multiband(data, progress_bar=False, plot=False, svi=False):
     lambda_ref = 2500 # Any reference wavelength
     lambda_pivot_RF = lambda_pivot['u']/(1 + data['z'])
     
-    log_tau_UV = np.log10(np.exp(samples['log_kernel_param'][:, 0] + samples['delta']*np.log(lambda_ref/lambda_pivot_RF)))
+    log_tau_UV = np.log10(np.exp(samples['log_kernel_param'][:, 0] + np.log(10) * samples['delta']*np.log10(lambda_ref/lambda_pivot_RF)))
     log_tau_RF = log_tau_UV - np.log10(1 + data['z'])
 
     delta = samples['delta']
-    log_tau_delta = np.array([delta*np.log10(lambda_pivot[band]/lambda_pivot['u']) for band in clean_bands])
+    log_tau_delta = np.log(10) * np.array([delta*np.log10(lambda_pivot[band]/lambda_pivot['u']) for band in clean_bands])
     log_tau_band = log_tau_RF+log_tau_delta
 
     # delta
@@ -576,14 +575,14 @@ def fit_multiband(data, progress_bar=False, plot=False, svi=False):
     log_tau_RF_err = 0.5 * (upper - lower) # symmetric uncertainties
     log_tau_RF = median
 
-    log_sigma_RF = np.log10(np.exp(samples['log_kernel_param'][:, 1] + samples['beta']*np.log(lambda_ref/lambda_pivot_RF)))
+    log_sigma_RF = np.log10(np.exp(samples['log_kernel_param'][:, 1] + np.log(10) * samples['beta']*np.log10(lambda_ref/lambda_pivot_RF)))
     lower, median, upper = np.percentile(log_sigma_RF, [16, 50, 84])
     log_sigma_RF_err = 0.5 * (upper - lower) # symmetric uncertainties
     log_sigma_RF = median
 
     log_sigma = np.log10(np.exp(samples['log_kernel_param'][:, 1]))
     beta = samples['beta']
-    log_amp_delta = np.array([beta*np.log10(lambda_pivot[band]/lambda_pivot['u']) for band in clean_bands])
+    log_amp_delta = np.log(10) * np.array([beta*np.log10(lambda_pivot[band]/lambda_pivot['u']) for band in clean_bands])
 
     log_sigma_band = log_sigma+log_amp_delta
 
