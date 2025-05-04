@@ -566,6 +566,11 @@ def fit_multiband(data, progress_bar=False, plot=False, svi=False):
     delta_err = 0.5 * (upper - lower) # symmetric uncertainties
     delta = median
 
+    # log_tau_delta
+    lower, median, upper = np.percentile(log_tau_delta, [16, 50, 84], axis=1)
+    log_tau_delta_err = 0.5 * (upper - lower) # symmetric uncertainties
+    log_tau_delta = median
+
     # log_tau_band
     lower, median, upper = np.percentile(log_tau_band, [16, 50, 84], axis=1)
     log_tau_band_err = 0.5 * (upper - lower) # symmetric uncertainties
@@ -887,7 +892,6 @@ def populate_sdss_fields(s82_objs):
     return s82_objs
 
 def append_hdf5_file(quasar_list, file_path):
-    # Append to HDF5 file if it exists, otherwise create a new one
     print(f"Appending {len(quasar_list)} quasars to {file_path}", flush=True)
     with h5py.File(file_path, "a") as hdf:
         for quasar in quasar_list:
@@ -901,8 +905,16 @@ def append_hdf5_file(quasar_list, file_path):
                     sub_group = group.create_group(key)
                     for sub_key, sub_value in value.items():
                         sub_group.create_dataset(sub_key, data=sub_value)
+                elif isinstance(value, (int, float, str, bytes)) or (
+                    hasattr(value, 'shape') and hasattr(value, 'dtype')
+                ):
+                    group.create_dataset(key, data=value)
                 else:
-                    group.attrs[key] = value
+                    try:
+                        group.create_dataset(key, data=value)
+                    except TypeError:
+                        # fallback to attribute only for very small scalar values
+                        group.attrs[key] = str(value)
 if __name__ == '__main__': 
     parser = argparse.ArgumentParser(description="Process quasars with optional filtering.")
     parser.add_argument("--filter_object_id", nargs="+", help="List of object IDs to filter.")
@@ -943,8 +955,9 @@ if __name__ == '__main__':
         if q is None:
             #print(f"Skipping quasar {obj['object_id']}, no data", flush=True)
             continue
-        #fields_to_filter = ['times', 'mags', 'magerrs']
-        #q = {k: v for k, v in q.items() if k not in fields_to_filter}
+        fields_to_filter = ['times', 'mags', 'magerrs']
+        q = {k: v for k, v in q.items() if k not in fields_to_filter}
+        print(q)
         print(f"Quasar {i}/{len(objs)} ({q['object_id']}): log_tau_RF={q['log_tau_RF']:.3f}±{q['log_tau_RF_err']:.3f}, log_sigma_RF={q['log_sigma_RF']}±{q['log_sigma_RF_err']}", flush=True)
         if args.file:
             append_hdf5_file([q], args.file)
