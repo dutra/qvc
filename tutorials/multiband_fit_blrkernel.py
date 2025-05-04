@@ -552,9 +552,14 @@ def fit_multiband(data, progress_bar=False, plot=False, svi=False):
         #    print(f"Diverging MCMC for quasar {data['object_id']}, skipping.", flush=True)
         #    #return None
     
-    log_tau_RF = np.log10(np.exp(samples['log_kernel_param'][:, 0])/(1+data['z']))
+    lambda_ref = 2500 # Any reference wavelength
+    lambda_pivot_RF = lambda_pivot['u']/(1 + data['z'])
+    
+    log_tau_UV = np.log10(np.exp(samples['log_kernel_param'][:, 0] + samples['delta']*np.log(lambda_ref/lambda_pivot_RF)))
+    log_tau_RF = log_tau_UV - np.log10(1 + data['z'])
+
     delta = samples['delta']
-    log_tau_delta = np.array([delta*np.log(lambda_pivot[band]/lambda_pivot['u']) for band in clean_bands])
+    log_tau_delta = np.array([delta*np.log10(lambda_pivot[band]/lambda_pivot['u']) for band in clean_bands])
     log_tau_band = log_tau_RF+log_tau_delta
 
     # delta
@@ -571,9 +576,6 @@ def fit_multiband(data, progress_bar=False, plot=False, svi=False):
     log_tau_RF_err = 0.5 * (upper - lower) # symmetric uncertainties
     log_tau_RF = median
 
-    lambda_ref = 2500 # Any reference wavelength
-    lambda_pivot_RF = lambda_pivot['u']/(1 + data['z'])
-    
     log_sigma_RF = np.log10(np.exp(samples['log_kernel_param'][:, 1] + samples['beta']*np.log(lambda_ref/lambda_pivot_RF)))
     lower, median, upper = np.percentile(log_sigma_RF, [16, 50, 84])
     log_sigma_RF_err = 0.5 * (upper - lower) # symmetric uncertainties
@@ -581,7 +583,7 @@ def fit_multiband(data, progress_bar=False, plot=False, svi=False):
 
     log_sigma = np.log10(np.exp(samples['log_kernel_param'][:, 1]))
     beta = samples['beta']
-    log_amp_delta = np.array([beta*np.log(lambda_pivot[band]/lambda_pivot['u']) for band in clean_bands])
+    log_amp_delta = np.array([beta*np.log10(lambda_pivot[band]/lambda_pivot['u']) for band in clean_bands])
 
     log_sigma_band = log_sigma+log_amp_delta
 
