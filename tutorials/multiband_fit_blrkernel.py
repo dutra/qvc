@@ -532,7 +532,7 @@ def fit_multiband(data, progress_bar=False, plot=False, svi=False):
             mcmc = MCMC(
                 nuts_kernel,
                 num_warmup=500, # This could be less than num_samples
-                num_samples=250,
+                num_samples=200,
                 num_chains=2*33,
                 progress_bar=progress_bar,
                 chain_method="vectorized",
@@ -698,14 +698,18 @@ def process_quasar(i_data, n=0, progress_bar=False, plot=False, svi=False):
     return data
 
 def concat_light_curves(N=None, skip=None, filter_object_ids=None, save_file_path=None):
+    print(f"concat_light_curves args: {N=}, {skip=}, {len(filter_object_ids)=}, {save_file_path=}")
     if save_file_path and os.path.exists(save_file_path):
-        print(f"Loading data from {save_file_path}")
+        print(f"concat_light_curves Loading LC data from {save_file_path}")
         s82_objs = load_s82_from_hdf5(save_file_path)
+        print(f"Loaded {len(s82_objs)} objs from {save_file_path}")
         if filter_object_ids is not None:
             # Filter the loaded objects based on the provided object IDs
             s82_objs = [obj for obj in s82_objs if obj['object_id'] in filter_object_ids]
+            print(f"After filtering {len(filter_object_ids)}, loaded {len(s82_objs)}")
         if skip is not None:
             s82_objs = s82_objs[skip:]
+            print(f"After skipping {skip}, loaded {len(s82_objs)} objs")
         if N is not None:
             s82_objs = s82_objs[:N]
         return s82_objs
@@ -916,6 +920,8 @@ def append_hdf5_file(quasar_list, file_path):
                         # fallback to attribute only for very small scalar values
                         group.attrs[key] = str(value)
 if __name__ == '__main__': 
+    print("Starting multiband fit", flush=True)
+
     parser = argparse.ArgumentParser(description="Process quasars with optional filtering.")
     parser.add_argument("--filter_object_id", nargs="+", help="List of object IDs to filter.")
     parser.add_argument("--N", type=int, help="Number of objects to process.")
@@ -927,7 +933,8 @@ if __name__ == '__main__':
     parser.add_argument("--plot", action="store_true", help="Enable plotting of results.")
     parser.add_argument("--svi", action="store_true", help="Use stochastic variation inference (SVI).")
     parser.add_argument("--ignore_existing", action="store_true", help="Ignore sources already in the HDF5 file.")
-    
+    parser.add_argument("--create_lc", action="store_true", help="Only create LC file and exit.")
+
     args = parser.parse_args()
 
 
@@ -947,6 +954,8 @@ if __name__ == '__main__':
     if filter_object_ids is not None:
         print(f"Filtering object IDs: {len(filter_object_ids)}")
     objs = concat_light_curves(filter_object_ids=filter_object_ids, N=args.N, skip=args.skip, save_file_path=args.lc_file)
+    if args.create_lc:
+        sys.exit("Created LC file. Exiting the program as requested.")
     print(f"Loaded {len(objs)} objects from concat_light_curves")
     #objs = populate_sdss_fields(objs)
     for i, obj in enumerate(objs):
@@ -956,8 +965,8 @@ if __name__ == '__main__':
             #print(f"Skipping quasar {obj['object_id']}, no data", flush=True)
             continue
         fields_to_filter = ['times', 'mags', 'magerrs']
-        q = {k: v for k, v in q.items() if k not in fields_to_filter}
-        print(q)
+        filtered_q = {k: v for k, v in q.items() if k not in fields_to_filter}
+        #print(filtered_q)
         print(f"Quasar {i}/{len(objs)} ({q['object_id']}): log_tau_RF={q['log_tau_RF']:.3f}±{q['log_tau_RF_err']:.3f}, log_sigma_RF={q['log_sigma_RF']}±{q['log_sigma_RF_err']}", flush=True)
         if args.file:
             append_hdf5_file([q], args.file)
