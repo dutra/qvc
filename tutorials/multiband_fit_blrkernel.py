@@ -896,6 +896,7 @@ def populate_sdss_fields(s82_objs):
     return s82_objs
 
 def append_hdf5_file(quasar_list, file_path):
+    # Append to HDF5 file if it exists, otherwise create a new one
     print(f"Appending {len(quasar_list)} quasars to {file_path}", flush=True)
     with h5py.File(file_path, "a") as hdf:
         for quasar in quasar_list:
@@ -909,16 +910,10 @@ def append_hdf5_file(quasar_list, file_path):
                     sub_group = group.create_group(key)
                     for sub_key, sub_value in value.items():
                         sub_group.create_dataset(sub_key, data=sub_value)
-                elif isinstance(value, (int, float, str, bytes)) or (
-                    hasattr(value, 'shape') and hasattr(value, 'dtype')
-                ):
-                    group.create_dataset(key, data=value)
                 else:
-                    try:
-                        group.create_dataset(key, data=value)
-                    except TypeError:
-                        # fallback to attribute only for very small scalar values
-                        group.attrs[key] = str(value)
+                    group.attrs[key] = value
+
+                    
 if __name__ == '__main__': 
     print("Starting multiband fit", flush=True)
 
