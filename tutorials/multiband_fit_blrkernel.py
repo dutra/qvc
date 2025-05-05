@@ -531,8 +531,8 @@ def fit_multiband(data, progress_bar=False, plot=False, svi=False):
 
             mcmc = MCMC(
                 nuts_kernel,
-                num_warmup=500, # This could be less than num_samples
-                num_samples=200,
+                num_warmup=250, # This could be less than num_samples
+                num_samples=100,
                 num_chains=2*33,
                 progress_bar=progress_bar,
                 chain_method="vectorized",
@@ -554,6 +554,12 @@ def fit_multiband(data, progress_bar=False, plot=False, svi=False):
     lambda_ref = 2500 # Any reference wavelength
     lambda_pivot_RF = lambda_pivot['u']/(1 + data['z'])
     
+    log_tau = np.log10(np.exp(samples['log_kernel_param'][:, 0]))
+    # log_tau_delta
+    lower, median, upper = np.percentile(log_tau, [16, 50, 84])
+    log_tau_err = 0.5 * (upper - lower) # symmetric uncertainties
+    log_tau = median
+
     log_tau_UV = np.log10(np.exp(samples['log_kernel_param'][:, 0] + np.log(10) * samples['delta']*np.log10(lambda_ref/lambda_pivot_RF)))
     log_tau_RF = log_tau_UV - np.log10(1 + data['z'])
 
@@ -640,6 +646,8 @@ def fit_multiband(data, progress_bar=False, plot=False, svi=False):
 
     d = dict(object_id=data['object_id'],
             z=data['z'],
+            log_tau=log_tau,
+            log_tau_err=log_tau_err,
             log_tau_RF=log_tau_RF,
             log_tau_RF_err=log_tau_RF_err,
             delta=delta,
@@ -675,8 +683,8 @@ def fit_multiband(data, progress_bar=False, plot=False, svi=False):
     
     if plot:
         save_combined_plot(samples, m1, X, y, yerr, band_idx[mask_outlier], d)
-        plot_mcmc_traces(samples, d)
-        plot_posterior(samples, data, clean_bands=clean_bands)
+        #plot_mcmc_traces(samples, d)
+        #plot_posterior(samples, data, clean_bands=clean_bands)
     
     return d
 
