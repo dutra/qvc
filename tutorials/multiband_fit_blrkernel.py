@@ -294,6 +294,8 @@ class MyMultiVarModel(MultiVarModel):
             params (dict[str, JAXArray]): Model parameters.
         """
         gp, inds = self._build_gp(params)
+        #log_prob = gp.log_probability(y=self.y[inds])
+        #jax.debug.print("Log probability: {log_prob}", log_prob=log_prob)
         numpyro.sample("gp", gp.numpyro_dist(), obs=self.y[inds])
 
     @eqx.filter_jit
