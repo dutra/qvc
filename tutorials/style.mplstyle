@@ -30,7 +30,7 @@ figure.titlesize: 22
 figure.figsize: 10,8
 
 
-lines.linewidth: 4
+lines.linewidth: 2
 errorbar.capsize: 4
 lines.markersize: 4
 #image.cmap: RdBu_r
