@@ -105,9 +105,8 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, data):
         f"$\\log_{{10}}(\\tau_{{RF}})$: {data['log_tau_RF']:.2f} ± {data['log_tau_RF_err']:.2f}\n"
         f"$\\log_{{10}}(\\sigma_{{RF}})$: {data['log_sigma_RF']:.2f} ± {data['log_sigma_RF_err']:.2f}\n"
         f"$\\beta$: {data['beta']:.2f} ± {data['beta_err']:.2f}\n"
-        f"$\\mathrm{{poly1}}$: {data['poly1']:.2f} ± {data['poly1_err']:.2f}\n",
-        #f"$\\mathrm{{poly2}}$: {data['poly2']:.2f} ± {data['poly2_err']:.2f}\n"
-        #f"$\\mathrm{{mean}}$: {data['mean']:.2f} ± {data['mean_err']:.2f}",
+        f"$\\delta$: {data['delta']:.2f} ± {data['delta_err']:.2f}\n"
+        f"$\\mathrm{{poly1}}$: {data['poly1']:.2f} ± {data['poly1_err']:.2f}",
         xy=(0.05, 0.95),
         xycoords="axes fraction",
         fontsize=12,
