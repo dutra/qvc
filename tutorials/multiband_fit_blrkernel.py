@@ -674,7 +674,7 @@ def fit_multiband(data, progress_bar=False, plot=False, svi=False):
     eta_tau2 = eta_tau1 + samples["ep_tau"]
     
     lambda_ref = 2500 # Any reference wavelength
-    lambda_s_RF = params["lam_s"]/(1 + data['z'])
+    lambda_s_RF = samples["lam_s"]/(1 + data['z'])
     
     samples_log_sigma_UV = np.log10(np.exp(samples['log_kernel_param'][:, 1] + np.log(10) * log_broken_pl(lambda_ref, lambda_s_RF, eta_A1, eta_A2)))
     samples_log_tau_UV = np.log10(np.exp(samples['log_kernel_param'][:, 0] + np.log(10) * log_broken_pl(lambda_ref, lambda_s_RF, eta_tau1, eta_tau2)))
@@ -702,6 +702,8 @@ def fit_multiband(data, progress_bar=False, plot=False, svi=False):
     log_tau_blr, log_tau_blr_err = sym_perecentile(np.log10(np.exp(samples['log_tau_drw_blr'])))
     log_sigma_blr, log_sigma_blr_err = sym_perecentile(np.log10(np.exp(samples['log_kernel_param'][:, 1])*np.exp(samples['log_amp_delta_blr'])))
 
+    lambda_s_RF, lambda_s_RF_err = sym_perecentile(lambda_s_RF)
+
     # Construct the result dictionary
     d = dict(object_id=data['object_id'],
             z=data['z'],
@@ -714,6 +716,8 @@ def fit_multiband(data, progress_bar=False, plot=False, svi=False):
             eta_A2=eta_A2,
             eta_tau1=eta_tau1,
             eta_tau2=eta_tau2,
+            lam_s=lambda_s_RF,
+            lam_s_err=lambda_s_RF_err,
             # kernel params band
             log_sigma_band=log_sigma_band,
             log_sigma_band_err=log_sigma_band_err,
