@@ -191,6 +191,7 @@ def log_broken_pl(lam, lam_s, d1, ep):
 # Override MultiVarModel
 class MyMultiVarModel(MultiVarModel):
     clean_bands: JAXArray
+    z: float
 
     def __init__(
         self,
@@ -202,6 +203,7 @@ class MyMultiVarModel(MultiVarModel):
     ) -> None:
         super().__init__(X, y, yerr, kernel, **kwargs)
         self.clean_bands = kwargs.get("clean_bands", None)
+        self.z = kwargs.get("z", 0.0)
 
     @staticmethod
     def mean_func(
@@ -268,13 +270,15 @@ class MyMultiVarModel(MultiVarModel):
     def my_tau_drw_transform(self, params: dict[str, JAXArray]) -> JAXArray:
         eta_tau1 = params["eta_tau1"]
         eta_tau2 = eta_tau1 + params["ep_tau"]
-        params["log_tau_delta"] = jnp.log(10) * jnp.array([log_broken_pl(lambda_pivot[band], params["lam_s"], eta_tau1, eta_tau2) for band in self.clean_bands])
+        lam_s = params["lam_s"]/(1 + self.z)
+        params["log_tau_delta"] = jnp.log(10) * jnp.array([log_broken_pl(lambda_pivot[band], lam_s, eta_tau1, eta_tau2) for band in self.clean_bands])
         return params["log_tau_delta"]
 
     def my_amp_transform(self, params: dict[str, JAXArray]) -> JAXArray:
         eta_A1 = params["eta_A1"]
         eta_A2 = eta_A1 + params["ep_A"]
-        params["log_amp_delta"] = jnp.log(10) * jnp.array([log_broken_pl(lambda_pivot[band], params["lam_s"], eta_A1, eta_A2) for band in self.clean_bands])
+        lam_s = params["lam_s"]/(1 + self.z)
+        params["log_amp_delta"] = jnp.log(10) * jnp.array([log_broken_pl(lambda_pivot[band], lam_s, eta_A1, eta_A2) for band in self.clean_bands])
         return params["log_amp_delta"]
     
     @eqx.filter_jit
@@ -475,7 +479,7 @@ def numpyro_model(X, yerr, y=None, bestP=None, clean_bands=None):
 
     # kernel
     k = kernels.quasisep.Exp(*jnp.exp(log_kernel_param))
-    m1 = MyMultiVarModel(X, y, yerr, k, zero_mean=zero_mean, has_jitter=has_jitter, has_lag=has_lag, clean_bands=clean_bands)
+    m1 = MyMultiVarModel(X, y, yerr, k, zero_mean=zero_mean, has_jitter=has_jitter, has_lag=has_lag, clean_bands=clean_bands, z=data['z'])
 
     sample_params = {
         "log_kernel_param": log_kernel_param,
@@ -576,7 +580,7 @@ def fit_multiband(data, progress_bar=False, plot=False, svi=False):
 
     # define model
     m1 = MyMultiVarModel(
-        X, y, yerr, k, zero_mean=zero_mean, has_jitter=has_jitter, has_lag=has_lag, clean_bands=clean_bands
+        X, y, yerr, k, zero_mean=zero_mean, has_jitter=has_jitter, has_lag=has_lag, clean_bands=clean_bands, z=data['z']
     )
 
     print("Initializing bestP.")
