@@ -491,7 +491,7 @@ def numpyro_model(X, yerr, y=None, bestP=None, clean_bands=None):
         "ep_tau": ep_tau,
         "eta_A1": eta_A1,
         "eta_tau1": eta_tau1,
-        "lams": lams,
+        "lam_s": lams,
     }
     m1.sample(sample_params)
 
