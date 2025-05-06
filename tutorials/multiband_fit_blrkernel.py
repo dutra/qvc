@@ -126,13 +126,14 @@ class MyMultibandLowRank(tinygp.kernels.Kernel):
         return X[0]
 
     def k(self, tau, tau_drw) -> JAXArray:
-         tau = jnp.abs(tau)
-         drw = jnp.exp(-tau / tau_drw)
-         return drw
+        tau = jnp.abs(tau)
+        drw = jnp.exp(-tau / tau_drw)
+        return drw
 
-    #def k(self, tau, tau_drw, w=50) -> JAXArray:
+    #def k(self, tau, tau_drw, w=5) -> JAXArray:
     #    # Compute the analytic convolution of DRW and Gaussian kernels
     #    prefactor = 1 / (jnp.sqrt(2 * jnp.pi) * w)
+    #    # IDEA: take w out of the prefactor multiply it back after
     #    exp_term = jnp.exp((w**2) / (2 * tau_drw**2) - jnp.abs(tau) / tau_drw)
     #    erfc_term = erfc((w / jnp.sqrt(2) / tau_drw) - (jnp.abs(tau) / jnp.sqrt(2) / w))
     #    return prefactor * exp_term * erfc_term
@@ -183,6 +184,9 @@ class MyMultibandLowRank(tinygp.kernels.Kernel):
         )
 
         return cov_ac + cov_ad + cov_bc + cov_bd
+
+def log_broken_pl(lam, lam_s, d1, ep):
+    return np.log10( ((lam/lam_s)**d1 + (lam/lam_s)**(d1+ep))**-1 )
 
 # Override MultiVarModel
 class MyMultiVarModel(MultiVarModel):
@@ -262,13 +266,15 @@ class MyMultiVarModel(MultiVarModel):
         return jnp.atleast_1d(params["log_amp_delta_blr"])
 
     def my_tau_drw_transform(self, params: dict[str, JAXArray]) -> JAXArray:
-        b = params["delta"]
-        params["log_tau_delta"] = jnp.log(10) * jnp.array([b*np.log10(lambda_pivot[band]/lambda_pivot['u']) for band in self.clean_bands])
+        eta_tau1 = params["eta_tau1"]
+        eta_tau2 = eta_tau1 + params["ep_tau"]
+        params["log_tau_delta"] = jnp.log(10) * jnp.array([log_broken_pl(lambda_pivot[band], params["lam_s"], eta_tau1, eta_tau2) for band in self.clean_bands])
         return params["log_tau_delta"]
 
     def my_amp_transform(self, params: dict[str, JAXArray]) -> JAXArray:
-        b = params["beta"]
-        params["log_amp_delta"] = jnp.log(10) * jnp.array([b*np.log10(lambda_pivot[band]/lambda_pivot['u']) for band in self.clean_bands])
+        eta_A1 = params["eta_A1"]
+        eta_A2 = eta_A1 + params["ep_A"]
+        params["log_amp_delta"] = jnp.log(10) * jnp.array([log_broken_pl(lambda_pivot[band], params["lam_s"], eta_A1, eta_A2) for band in self.clean_bands])
         return params["log_amp_delta"]
     
     @eqx.filter_jit
@@ -294,8 +300,8 @@ class MyMultiVarModel(MultiVarModel):
             params (dict[str, JAXArray]): Model parameters.
         """
         gp, inds = self._build_gp(params)
-        #log_prob = gp.log_probability(y=self.y[inds])
-        #jax.debug.print("Log probability: {log_prob}", log_prob=log_prob)
+        log_prob = gp.log_probability(y=self.y[inds])
+        jax.debug.print("Log probability: {log_prob}", log_prob=log_prob)
         numpyro.sample("gp", gp.numpyro_dist(), obs=self.y[inds])
 
     @eqx.filter_jit
@@ -338,8 +344,10 @@ def compute_psd_from_samples(samples, clean_bands, num_points=1000, time_range=(
     log_kernel_param = samples["log_kernel_param"]
     log_amp_delta_blr = samples["log_amp_delta_blr"]
     log_lag_blr = samples["log_lag_blr"]
-    beta = samples["beta"]
-    delta = samples["delta"]
+    eta_A1 = samples["eta_A1"]
+    eta_A2 = eta_A1 + samples["ep_A"]
+    eta_tau1 = samples["eta_tau1"]
+    eta_tau2 = eta_tau1 + samples["ep_tau"]
 
     # Compute the median values of the parameters
     kernel_param = jnp.exp(jnp.median(log_kernel_param, axis=0))
@@ -349,8 +357,8 @@ def compute_psd_from_samples(samples, clean_bands, num_points=1000, time_range=(
     delta = jnp.median(delta)
 
     # Compute amplitudes and taus for each band
-    amplitudes = jnp.exp(beta * jnp.log(jnp.array([lambda_pivot[band] / lambda_pivot["u"] for band in clean_bands])))
-    taus = jnp.exp(delta * jnp.log(jnp.array([lambda_pivot[band] / lambda_pivot["u"] for band in clean_bands])))
+    amplitudes = jnp.exp(log_kernel_param[1] + jnp.log(10) * jnp.array([log_broken_pl(lambda_pivot[band], params["lam_s"], eta_A1, eta_A2) for band in clean_bands]))
+    taus = jnp.exp(log_kernel_param[0] + jnp.log(10) * jnp.array([log_broken_pl(lambda_pivot[band], params["lam_s"], eta_tau1, eta_tau2) for band in self.clean_bands]))
 
     # Instantiate the MyMultibandLowRank kernel
     kernel = MyMultibandLowRank(
@@ -389,7 +397,7 @@ def compute_psd_from_samples(samples, clean_bands, num_points=1000, time_range=(
 
 def initSampler(key, nSample, nBand=None):
     # split keys
-    subkeys = jax.random.split(key, 11)
+    subkeys = jax.random.split(key, 14)
 
     # uniform sampler
     lagSampler = UniformInit(nBand-1, [-10, 10])
@@ -397,12 +405,16 @@ def initSampler(key, nSample, nBand=None):
     logtauBLRSampler = UniformInit(1, [jnp.log(10**2.5), jnp.log(10**4.5)])
     meanSampler = UniformInit(nBand, [-1, 1])
     poly1Sampler = UniformInit(1, [-10, 10])
-    #poly2Sampler = UniformInit(1, [-10, 10])
     logAmpDeltaSampler = UniformInit(nBand-1, [-2.0, 0.0])
     logAmpDeltaBLRSampler = UniformInit(nBand, [-5.0, -2.0])
     logJitterSampler = UniformInit(nBand, [jnp.log(1e-6), jnp.log(0.1)])
-    betaSampler = UniformInit(1, [-0.5, -0.1])
-    deltaSampler = UniformInit(1, [1.5, 2.0])
+
+    # power laws
+    etaA1Sampler = UniformInit(1, [0.5, 0.1])
+    etaTau1Sampler = UniformInit(1, [-1.5, -2.0])
+    epTauSampler = UniformInit(1, [-0.1, 0.1])
+    epASampler = UniformInit(1, [-0.1, 0.1])
+    lamsSampler = UniformInit(1, [2000.0, 2500.0])
 
     # kernel init
     kernelSampler = DRWInit([jnp.log(10**2.5), jnp.log(10**4.5)], [jnp.log(0.1), jnp.log(1.0)])
@@ -410,16 +422,19 @@ def initSampler(key, nSample, nBand=None):
     return {
         "log_kernel_param": kernelSampler(subkeys[0], nSample),
         "log_amp_delta": logAmpDeltaSampler(subkeys[1], nSample),
-        "log_amp_delta_blr": logAmpDeltaBLRSampler(subkeys[7], nSample),
-        "mean": meanSampler(subkeys[2], nSample),
-        "poly1": poly1Sampler(subkeys[6], nSample),
-        #"poly2": poly2Sampler(subkeys[7], nSample),
-        "lag": lagSampler(subkeys[3], nSample),
-        "log_lag_blr": loglagBLRSampler(subkeys[8], nSample),
-        "log_tau_drw_blr": logtauBLRSampler(subkeys[10], nSample),
-        "log_jitter": logJitterSampler(subkeys[4], nSample),
-        "beta": betaSampler(subkeys[5], nSample),
-        "delta": deltaSampler(subkeys[9], nSample),
+        "log_amp_delta_blr": logAmpDeltaBLRSampler(subkeys[2], nSample),
+        "mean": meanSampler(subkeys[3], nSample),
+        "poly1": poly1Sampler(subkeys[4], nSample),
+        "lag": lagSampler(subkeys[5], nSample),
+        "log_lag_blr": loglagBLRSampler(subkeys[6], nSample),
+        "log_tau_drw_blr": logtauBLRSampler(subkeys[7], nSample),
+        "log_jitter": logJitterSampler(subkeys[8], nSample),
+        # power laws
+        "eta_A1": etaA1Sampler(subkeys[9], nSample),
+        "eta_tau1": etaTau1Sampler(subkeys[10], nSample),
+        "ep_A": epASampler(subkeys[11], nSample),
+        "ep_tau": epTauSampler(subkeys[12], nSample),
+        "lam_s": lamsSampler(subkeys[13], nSample),
     }
 
 def numpyro_model(X, yerr, y=None, bestP=None, clean_bands=None):
@@ -449,8 +464,14 @@ def numpyro_model(X, yerr, y=None, bestP=None, clean_bands=None):
     
     mean = numpyro.sample("mean", dist.Normal(jnp.full_like(bestP["mean"], 0.0), 0.1))
     poly1 = numpyro.sample("poly1", dist.Normal(0.0, 10.0))
-    beta = numpyro.sample("beta", dist.Normal(-0.15, 0.1))
-    delta = numpyro.sample("delta", dist.Normal(0.5, 0.1))
+
+    # power laws
+    ep_A = numpyro.sample("beta", dist.Normal(0.2, 0.1))
+    ep_tau = numpyro.sample("delta", dist.Normal(-0.5, 0.1))
+
+    eta_A1 = numpyro.sample("eta_A1", dist.Normal(0.0, 0.1))
+    eta_tau1 = numpyro.sample("eta_tau1", dist.Normal(0.0, 0.1))
+    lams = numpyro.sample("lam_s", dist.Normal(2300.0, 100.0))
 
     # kernel
     k = kernels.quasisep.Exp(*jnp.exp(log_kernel_param))
@@ -465,8 +486,12 @@ def numpyro_model(X, yerr, y=None, bestP=None, clean_bands=None):
         "mean": mean,
         "poly1": poly1, 
         "log_jitter": log_jitter,
-        "beta": beta,
-        "delta": delta,
+        # power laws
+        "ep_A": ep_A,
+        "ep_tau": ep_tau,
+        "eta_A1": eta_A1,
+        "eta_tau1": eta_tau1,
+        "lams": lams,
     }
     m1.sample(sample_params)
 
@@ -637,136 +662,79 @@ def fit_multiband(data, progress_bar=False, plot=False, svi=False):
         #if np.all(diagnostics['diverging']):
         #    print(f"Diverging MCMC for quasar {data['object_id']}, skipping.", flush=True)
         #    #return None
+
+    # power laws
+    eta_A1 = samples["eta_A1"]
+    eta_A2 = eta_A1 + samples["ep_A"]
+    eta_tau1 = samples["eta_tau1"]
+    eta_tau2 = eta_tau1 + samples["ep_tau"]
     
     lambda_ref = 2500 # Any reference wavelength
-    lambda_pivot_RF = lambda_pivot['u']/(1 + data['z'])
+    lambda_s_RF = params["lam_s"]/(1 + data['z'])
     
-    log_tau = np.log10(np.exp(samples['log_kernel_param'][:, 0]))
-    # log_tau_delta
-    lower, median, upper = np.percentile(log_tau, [16, 50, 84])
-    log_tau_err = 0.5 * (upper - lower) # symmetric uncertainties
-    log_tau = median
+    samples_log_sigma_UV = np.log10(np.exp(samples['log_kernel_param'][:, 1] + np.log(10) * log_broken_pl(lambda_ref, lambda_s_RF, eta_A1, eta_A2)))
+    samples_log_tau_UV = np.log10(np.exp(samples['log_kernel_param'][:, 0] + np.log(10) * log_broken_pl(lambda_ref, lambda_s_RF, eta_tau1, eta_tau2)))
+    samples_log_tau_UV_RF = log_tau_UV - np.log10(1 + data['z']) # time dilation correction
 
-    log_tau_UV = np.log10(np.exp(samples['log_kernel_param'][:, 0] + np.log(10) * samples['delta']*np.log10(lambda_ref/lambda_pivot_RF)))
-    log_tau_RF = log_tau_UV - np.log10(1 + data['z'])
+    def sym_perecentile(x, p=[16, 50, 84], axis=0):
+        lower, median, upper = np.percentile(x, p, axis=axis)
+        return median, 0.5 * (upper - lower)
 
-    delta = samples['delta']
-    log_tau_delta = np.log(10) * np.array([delta*np.log10(lambda_pivot[band]/lambda_pivot['u']) for band in clean_bands])
-    log_tau_band = log_tau_RF+log_tau_delta
+    # parameter estimates
+    log_jitter, log_jitter_err = sym_perecentile(np.log10(np.exp(2*samples['log_jitter'])))
+    poly1, poly1_err = sym_perecentile(samples['poly1'])
+    mean, mean_err = sym_perecentile(samples['mean'])
+    log_amp_delta_blr, log_amp_delta_blr_err = sym_perecentile(np.log10(np.exp(samples['log_amp_delta_blr'])))
+    log_lag_blr, log_lag_blr_err = sym_perecentile(np.log10(np.exp(samples['log_lag_blr'])))
+    lag, lag_err = sym_perecentile(samples['lag'])
 
-    # delta
-    lower, median, upper = np.percentile(delta, [16, 50, 84])
-    delta_err = 0.5 * (upper - lower) # symmetric uncertainties
-    delta = median
+    log_tau, log_tau_err = sym_perecentile(np.log10(np.exp(samples['log_kernel_param'][:, 0])))
+    log_sigma, log_sigma_err = sym_perecentile(np.log10(np.exp(samples['log_kernel_param'][:, 1])))
 
-    # log_tau_delta
-    lower, median, upper = np.percentile(log_tau_delta, [16, 50, 84], axis=1)
-    log_tau_delta_err = 0.5 * (upper - lower) # symmetric uncertainties
-    log_tau_delta = median
+    log_tau_UV_RF, log_tau_UV_RF_err = sym_perecentile(samples_log_tau_UV_RF)
+    log_sigma_UV, log_sigma_UV_err = sym_perecentile(log_sigma_UV)
 
-    # log_tau_band
-    lower, median, upper = np.percentile(log_tau_band, [16, 50, 84], axis=1)
-    log_tau_band_err = 0.5 * (upper - lower) # symmetric uncertainties
-    log_tau_band = median
+    # BLR
+    log_tau_blr, log_tau_blr_err = sym_perecentile(np.log10(np.exp(samples['log_tau_drw_blr'])))
+    log_sigma_blr, log_sigma_blr_err = sym_perecentile(np.log10(np.exp(samples['log_kernel_param'][:, 1])*np.exp(samples['log_amp_delta_blr'])))
 
-    lower, median, upper = np.percentile(log_tau_RF, [16, 50, 84])
-    log_tau_RF_err = 0.5 * (upper - lower) # symmetric uncertainties
-    log_tau_RF = median
-
-    log_sigma_RF = np.log10(np.exp(samples['log_kernel_param'][:, 1] + np.log(10) * samples['beta']*np.log10(lambda_ref/lambda_pivot_RF)))
-    lower, median, upper = np.percentile(log_sigma_RF, [16, 50, 84])
-    log_sigma_RF_err = 0.5 * (upper - lower) # symmetric uncertainties
-    log_sigma_RF = median
-
-    log_sigma = np.log10(np.exp(samples['log_kernel_param'][:, 1]))
-    beta = samples['beta']
-    log_amp_delta = np.log(10) * np.array([beta*np.log10(lambda_pivot[band]/lambda_pivot['u']) for band in clean_bands])
-
-    log_sigma_band = log_sigma+log_amp_delta
-
-    # beta
-    lower, median, upper = np.percentile(beta, [16, 50, 84])
-    beta_err = 0.5 * (upper - lower) # symmetric uncertainties
-    beta = median
-
-    # log_amp_delta
-    lower, median, upper = np.percentile(log_amp_delta, [16, 50, 84], axis=1)
-    log_amp_delta_err = 0.5 * (upper - lower) # symmetric uncertainties
-    log_amp_delta = median
-
-    # log_sigma_band
-    lower, median, upper = np.percentile(log_sigma_band, [16, 50, 84], axis=1)    
-    log_sigma_band_err = 0.5 * (upper - lower) # symmetric uncertainties
-    log_sigma_band = median
-
-    # log_sigma
-    lower, median, upper = np.percentile(log_sigma, [16, 50, 84], axis=0)
-    log_sigma_err = 0.5 * (upper - lower) # symmetric uncertainties
-    log_sigma = median
-
-    log_jitter = np.percentile(np.log10(np.exp(2*samples['log_jitter'])), 50, axis=0)
-
-    lower, median, upper = np.percentile(samples['poly1'], [16, 50, 84], axis=0)
-    poly1_err = 0.5 * (upper - lower) # symmetric uncertainties
-    poly1 = median
-
-    # lower, median, upper = np.percentile(samples['poly2'], [16, 50, 84], axis=0)
-    # poly2_err = 0.5 * (upper - lower) # symmetric uncertainties
-    # poly2 = median
-
-    lower, median, upper = np.percentile(samples['mean'], [16, 50, 84], axis=0)
-    mean_err = 0.5 * (upper - lower) # symmetric uncertainties
-    mean = median
-
-    lower, median, upper = np.percentile(samples['log_amp_delta_blr'], [16, 50, 84], axis=0)
-    log_amp_delta_blr_err = 0.5 * (upper - lower) # symmetric uncertainties
-    log_amp_delta_blr = median
-
-    lower, median, upper = np.percentile(samples['log_lag_blr'], [16, 50, 84], axis=0)
-    log_lag_blr_err = 0.5 * (upper - lower) # symmetric uncertainties
-    log_lag_blr = median
-
-    lower, median, upper = np.percentile(samples['lag'], [16, 50, 84], axis=0)
-    lag_err = 0.5 * (upper - lower) # symmetric uncertainties
-    lag = median
-
-
+    # Construct the result dictionary
     d = dict(object_id=data['object_id'],
             z=data['z'],
-            log_tau=log_tau,
-            log_tau_err=log_tau_err,
-            log_tau_RF=log_tau_RF,
-            log_tau_RF_err=log_tau_RF_err,
-            delta=delta,
-            delta_err=delta_err,
-            log_tau_band=log_tau_band,
-            log_tau_band_err=log_tau_band_err,
-            log_tau_delta=log_tau_delta,
-            log_tau_delta_err=log_tau_band_err,
-            beta=beta,
-            beta_err=beta_err,
-            log_sigma_RF=log_sigma_RF,
-            log_sigma_RF_err=log_sigma_RF_err,
+            # kernel params latent
+            log_tau_UV_RF=log_tau_UV_RF,
+            log_tau_UV_RF_err=log_tau_UV_RF_err,
+            log_sigma_UV=log_sigma_UV,
+            log_sigma_UV_err=log_sigma_UV_err,
+            eta_A1=eta_A1,
+            eta_A2=eta_A2,
+            eta_tau1=eta_tau1,
+            eta_tau2=eta_tau2,
+            # kernel params band
             log_sigma_band=log_sigma_band,
             log_sigma_band_err=log_sigma_band_err,
-            log_amp_delta=log_amp_delta,
-            log_amp_delta_err=log_amp_delta_err,
+            # kernel params
             log_sigma=log_sigma,
             log_sigma_err=log_sigma_err,
+            log_tau=log_tau,
+            log_tau_err=log_tau_err,
+            #BLR
+            log_sigma_blr=log_sigma_blr,
+            log_sigma_blr_err=log_sigma_blr_err,
+            log_tau_blr=log_tau_blr,
+            log_tau_blr_err=log_tau_blr_err,
+            # other
             log_jitter=log_jitter,
             poly1=poly1,
             poly1_err=poly1_err,
-            # poly2=poly2,
-            # poly2_err=poly2_err,
             mean=mean,
             mean_err=mean_err,
             clean_bands=clean_bands,
-            log_amp_delta_blr=log_amp_delta_blr,
-            log_amp_delta_blr_err=log_amp_delta_blr_err,
             log_lag_blr=log_lag_blr,
             log_lag_blr_err=log_lag_blr_err,
             lag=lag,
-            lag_err=lag_err,)
+            lag_err=lag_err,
+            )
     
     if plot:
         save_combined_plot(samples, m1, X, y, yerr, band_idx[mask_outlier], d)
