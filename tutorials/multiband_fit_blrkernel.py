@@ -44,6 +44,8 @@ learning_rate=0.001
 #learning_rate=0.0001
 
 import warnings
+import jax.scipy as jsp
+from jax.scipy.special import erfc
 
 from jax import lax
 import numpy as np
@@ -121,12 +123,21 @@ class MyMultibandLowRank(tinygp.kernels.Kernel):
     def coord_to_sortable(self, X) -> JAXArray:
         return X[0]
 
+    # def k(self, tau, tau_drw) -> JAXArray:
+    #     tau = jnp.abs(tau)
+    #     drw = jnp.exp(-tau / tau_drw)
+    #     return drw
+
+    def k(self, tau, tau_drw, w=50) -> JAXArray:
+        # Compute the analytic convolution of DRW and Gaussian kernels
+        prefactor = 1 / (jnp.sqrt(2 * jnp.pi) * w)
+        exp_term = jnp.exp((w**2) / (2 * tau_drw**2) - jnp.abs(tau) / tau_drw)
+        erfc_term = erfc((w / jnp.sqrt(2) / tau_drw) - (jnp.abs(tau) / jnp.sqrt(2) / w))
+        return prefactor * exp_term * erfc_term
+
     def evaluate(self, X1, X2) -> JAXArray:
         t1, b1 = X1
         t2, b2 = X2
-
-        #  Intrinsic Coregionalization Model (ICM)
-        #TODO: amplitudes
 
         # a is cont at t1
         # b is blr at t1
@@ -137,8 +148,8 @@ class MyMultibandLowRank(tinygp.kernels.Kernel):
             * self.amplitudes[b2]
             * self.sigma**2
             * jnp.sqrt(
-                jnp.exp(-jnp.abs(t2 - t1) / self.tau_drw[b1])
-                * jnp.exp(-jnp.abs(t2 - t1) / self.tau_drw[b2])
+                self.k(t2 - t1, self.tau_drw[b1])
+                * self.k(t2 - t1, self.tau_drw[b2])
             )
         )
         cov_ad = (
@@ -146,8 +157,8 @@ class MyMultibandLowRank(tinygp.kernels.Kernel):
             * self.amplitudes_blr[b2]
             * self.sigma**2
             * jnp.sqrt(
-                jnp.exp(-jnp.abs(t2 - t1) / self.tau_drw[b1])
-                * jnp.exp(-jnp.abs(t2 - t1 - self.lag_blr[b2]) / self.tau_drw[b2])
+                self.k(t2 - t1, self.tau_drw[b1])
+                * self.k(t2 - t1 - self.lag_blr[b2], self.tau_drw[b2])
             )
         )
         cov_bc = (
@@ -155,8 +166,8 @@ class MyMultibandLowRank(tinygp.kernels.Kernel):
             * self.amplitudes[b2]
             * self.sigma**2
             * jnp.sqrt(
-                jnp.exp(-jnp.abs(t2 - t1 - self.lag_blr[b1]) / self.tau_drw[b1])
-                * jnp.exp(-jnp.abs(t2 - t1) / self.tau_drw[b2])
+                self.k(t2 - t1 - self.lag_blr[b1], self.tau_drw[b1])
+                * self.k(t2 - t1, self.tau_drw[b2])
             )
         )
         cov_bd = (
@@ -164,8 +175,8 @@ class MyMultibandLowRank(tinygp.kernels.Kernel):
             * self.amplitudes_blr[b2]
             * self.sigma**2
             * jnp.sqrt(
-                jnp.exp(-jnp.abs(t2 - t1 - self.lag_blr[b1]) / self.tau_drw[b1])
-                * jnp.exp(-jnp.abs(t2 - t1 - self.lag_blr[b2]) / self.tau_drw[b2])
+                self.k(t2 - t1 - self.lag_blr[b1], self.tau_drw[b1])
+                * self.k(t2 - t1 - self.lag_blr[b2], self.tau_drw[b2])
             )
         )
 
@@ -305,7 +316,72 @@ class MyMultiVarModel(MultiVarModel):
         _, cond = gp.condition(self.y[inds], new_X)
         return cond.loc, jnp.sqrt(cond.variance)
 
-# TODO: Fix nBand = cleanbands
+def compute_psd_from_samples(samples, clean_bands, num_points=1000, time_range=(0, 365*20)):
+    """
+    Compute the Power Spectral Density (PSD) using the kernel parameters from MCMC samples.
+
+    Args:
+        samples (dict): MCMC samples containing kernel parameters.
+        clean_bands (list): List of clean bands used in the model.
+        num_points (int): Number of points to sample in the time range.
+        time_range (tuple): A tuple specifying the range of time lags (min_time, max_time).
+
+    Returns:
+        dict: A dictionary containing frequencies and PSD for each band.
+    """
+    # Extract kernel parameters from samples
+    log_kernel_param = samples["log_kernel_param"]
+    log_amp_delta_blr = samples["log_amp_delta_blr"]
+    log_lag_blr = samples["log_lag_blr"]
+    beta = samples["beta"]
+    delta = samples["delta"]
+
+    # Compute the median values of the parameters
+    kernel_param = jnp.exp(jnp.median(log_kernel_param, axis=0))
+    amp_delta_blr = jnp.exp(jnp.median(log_amp_delta_blr, axis=0))
+    lag_blr = jnp.exp(jnp.median(log_lag_blr, axis=0))
+    beta = jnp.median(beta)
+    delta = jnp.median(delta)
+
+    # Compute amplitudes and taus for each band
+    amplitudes = jnp.exp(beta * jnp.log(jnp.array([lambda_pivot[band] / lambda_pivot["u"] for band in clean_bands])))
+    taus = jnp.exp(delta * jnp.log(jnp.array([lambda_pivot[band] / lambda_pivot["u"] for band in clean_bands])))
+
+    # Instantiate the MyMultibandLowRank kernel
+    kernel = MyMultibandLowRank(
+        sigma=kernel_param[1],
+        scale=kernel_param[0],
+        amplitudes=amplitudes,
+        amplitudes_blr=amp_delta_blr,
+        lag_blr=lag_blr,
+        taus=taus,
+    )
+
+    # Generate time lags
+    min_time, max_time = time_range
+    time_lags = jnp.linspace(min_time, max_time, num_points)
+
+    # Compute PSD for each band
+    psd_results = {}
+    for band_idx, band in enumerate(clean_bands):
+        # Compute the covariance for the given band
+        covariances = jnp.array([kernel.evaluate((0, band_idx), (lag, band_idx)) for lag in time_lags])
+
+        # Apply the Fourier Transform to compute the PSD
+        fft_result = jnp.fft.fft(covariances)
+        freqs = jnp.fft.fftfreq(num_points, d=(max_time - min_time) / num_points)
+
+        # Compute the PSD (magnitude squared of the FFT)
+        psd = jnp.abs(fft_result) ** 2
+
+        # Store only the positive frequencies and corresponding PSD values
+        positive_freqs = freqs[:num_points // 2]
+        positive_psd = psd[:num_points // 2]
+
+        psd_results[band] = {"freqs": np.array(positive_freqs), "psd": np.array(positive_psd)}
+
+    return psd_results
+
 def initSampler(key, nSample, nBand=None):
     # split keys
     subkeys = jax.random.split(key, 10)
@@ -685,7 +761,9 @@ def fit_multiband(data, progress_bar=False, plot=False, svi=False):
         save_combined_plot(samples, m1, X, y, yerr, band_idx[mask_outlier], d)
         #plot_mcmc_traces(samples, d)
         #plot_posterior(samples, data, clean_bands=clean_bands)
-    
+    # psd_results = compute_psd_from_samples(samples, clean_bands)
+    # d['psd'] = psd_results
+    # plot_psd(psd_results, data['object_id'])    
     return d
 
 

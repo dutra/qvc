@@ -172,3 +172,53 @@ def plot_mcmc_traces(samples, data):
     return fig
 
 
+
+def plot_psd(psd_results, object_id):
+    """
+    Plot the Power Spectral Density (PSD) for each band.
+
+    Args:
+        psd_results (dict): A dictionary containing frequencies and PSD for each band.
+                            Format: {band: {"freqs": np.ndarray, "psd": np.ndarray}}
+        object_id (int): Identifier for the object being analyzed.
+
+    Returns:
+        None
+    """
+    # Create a figure for the PSD plot
+    fig, ax = plt.subplots(figsize=(8, 6))
+
+    # Plot the PSD for each band
+    for band, result in psd_results.items():
+        freqs = result["freqs"]
+        psd = result["psd"]
+        ax.plot(freqs, psd, label=f"{band}-band", color=colors.get(band, "black"), lw=2)
+
+    # DRW
+    # Plot a line with slope -2 for reference, normalized to match the PSD
+    ref_freqs = np.linspace(np.nanmin(freqs), np.nanmax(freqs), 100)
+    ref_psd2 = ref_freqs**-2
+    ref_psd4 = ref_freqs**-4
+    # Normalize the reference line to match the PSD at the median frequency
+    median_freq = 1e-2
+    median_psd = np.interp(median_freq, freqs, psd)
+    ref_psd2 *= median_psd / np.interp(median_freq, ref_freqs, ref_psd2)
+    ref_psd4 *= median_psd / np.interp(median_freq, ref_freqs, ref_psd4)
+    ax.plot(ref_freqs, 10*ref_psd2, 'k--', label="-2")
+    ax.plot(ref_freqs, 10*ref_psd4, 'k:', label="-4")
+
+    # Set plot labels and title
+    ax.set_xlabel("Frequency (Hz)", fontsize=14)
+    ax.set_ylabel("Power Spectral Density", fontsize=14)
+    ax.set_xscale("log")
+    ax.set_yscale("log")
+    ax.legend()
+
+    ax.set_ylim(1e-5, np.max(psd)*5)
+
+    # Save the plot as a PNG file
+    output_dir = "psd_plots"
+    os.makedirs(output_dir, exist_ok=True)
+    plt.savefig(os.path.join(output_dir, f"{object_id}_psd.png"), dpi=200)
+    plt.close(fig)
+    return fig
