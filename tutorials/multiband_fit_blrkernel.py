@@ -76,6 +76,7 @@ import sys
 
 from tinygp.helpers import JAXArray
 import argparse
+import traceback
 
 from multiband_fit_utils import *
 from multiband_fit_plotting import *
@@ -441,7 +442,7 @@ def initSampler(key, nSample, nBand=None):
         "lam_s": lamsSampler(subkeys[13], nSample),
     }
 
-def numpyro_model(X, yerr, y=None, bestP=None, clean_bands=None):
+def numpyro_model(X, yerr, y=None, bestP=None, clean_bands=None, z=None):
     # kernel param
     #flat_normal = dist.Normal(bestP["log_kernel_param"], jnp.array([0.1, 0.1]))
     # This works better with the direct GP solver
@@ -481,7 +482,7 @@ def numpyro_model(X, yerr, y=None, bestP=None, clean_bands=None):
 
     # kernel
     k = kernels.quasisep.Exp(*jnp.exp(log_kernel_param))
-    m1 = MyMultiVarModel(X, y, yerr, k, zero_mean=zero_mean, has_jitter=has_jitter, has_lag=has_lag, clean_bands=clean_bands, z=data['z'])
+    m1 = MyMultiVarModel(X, y, yerr, k, zero_mean=zero_mean, has_jitter=has_jitter, has_lag=has_lag, clean_bands=clean_bands, z=z)
 
     sample_params = {
         "log_kernel_param": log_kernel_param,
@@ -639,7 +640,7 @@ def fit_multiband(data, progress_bar=False, plot=False, svi=False):
 
             # emcee works better than NUTS for multimodal posteriors
             nuts_kernel = AIES(
-                partial(numpyro_model, bestP=bestP, clean_bands=clean_bands),
+                partial(numpyro_model, bestP=bestP, clean_bands=clean_bands, z=data['z']),
                 moves={AIES.DEMove() : 0.5, AIES.StretchMove() : 0.5},
                 init_strategy=init_strategy,
                 )
@@ -661,6 +662,8 @@ def fit_multiband(data, progress_bar=False, plot=False, svi=False):
             diagnostics = mcmc.get_extra_fields()
         except Exception as e:
             print(f"Error during MCMC for quasar {data['object_id']}: {e}", flush=True)
+            print("Traceback details:")
+            traceback.print_exc()            
             return None
 
         #print(samples)
