@@ -112,28 +112,30 @@ class MyMultibandLowRank(tinygp.kernels.Kernel):
     amplitudes_blr: jnp.ndarray
     lag_blr: jnp.ndarray
     tau_drw: jnp.ndarray
+    tau_drw_blr: float
 
-    def __init__(self, sigma, scale, amplitudes, amplitudes_blr, lag_blr, taus) -> None:
+    def __init__(self, sigma, scale, amplitudes, amplitudes_blr, lag_blr, taus, tau_drw_blr) -> None:
         self.sigma = sigma
         self.amplitudes = amplitudes
         self.amplitudes_blr = amplitudes_blr
         self.lag_blr = lag_blr
         self.tau_drw = scale * taus
+        self.tau_drw_blr = tau_drw_blr
 
     def coord_to_sortable(self, X) -> JAXArray:
         return X[0]
 
-    # def k(self, tau, tau_drw) -> JAXArray:
-    #     tau = jnp.abs(tau)
-    #     drw = jnp.exp(-tau / tau_drw)
-    #     return drw
+    def k(self, tau, tau_drw) -> JAXArray:
+         tau = jnp.abs(tau)
+         drw = jnp.exp(-tau / tau_drw)
+         return drw
 
-    def k(self, tau, tau_drw, w=50) -> JAXArray:
-        # Compute the analytic convolution of DRW and Gaussian kernels
-        prefactor = 1 / (jnp.sqrt(2 * jnp.pi) * w)
-        exp_term = jnp.exp((w**2) / (2 * tau_drw**2) - jnp.abs(tau) / tau_drw)
-        erfc_term = erfc((w / jnp.sqrt(2) / tau_drw) - (jnp.abs(tau) / jnp.sqrt(2) / w))
-        return prefactor * exp_term * erfc_term
+    #def k(self, tau, tau_drw, w=50) -> JAXArray:
+    #    # Compute the analytic convolution of DRW and Gaussian kernels
+    #    prefactor = 1 / (jnp.sqrt(2 * jnp.pi) * w)
+    #    exp_term = jnp.exp((w**2) / (2 * tau_drw**2) - jnp.abs(tau) / tau_drw)
+    #    erfc_term = erfc((w / jnp.sqrt(2) / tau_drw) - (jnp.abs(tau) / jnp.sqrt(2) / w))
+    #    return prefactor * exp_term * erfc_term
 
     def evaluate(self, X1, X2) -> JAXArray:
         t1, b1 = X1
@@ -158,7 +160,7 @@ class MyMultibandLowRank(tinygp.kernels.Kernel):
             * self.sigma**2
             * jnp.sqrt(
                 self.k(t2 - t1, self.tau_drw[b1])
-                * self.k(t2 - t1 - self.lag_blr[b2], self.tau_drw[b2])
+                * self.k(t2 - t1 - self.lag_blr[b2], self.tau_drw_blr)
             )
         )
         cov_bc = (
@@ -166,7 +168,7 @@ class MyMultibandLowRank(tinygp.kernels.Kernel):
             * self.amplitudes[b2]
             * self.sigma**2
             * jnp.sqrt(
-                self.k(t2 - t1 - self.lag_blr[b1], self.tau_drw[b1])
+                self.k(t2 - t1 - self.lag_blr[b1], self.tau_drw_blr)
                 * self.k(t2 - t1, self.tau_drw[b2])
             )
         )
@@ -175,8 +177,8 @@ class MyMultibandLowRank(tinygp.kernels.Kernel):
             * self.amplitudes_blr[b2]
             * self.sigma**2
             * jnp.sqrt(
-                self.k(t2 - t1 - self.lag_blr[b1], self.tau_drw[b1])
-                * self.k(t2 - t1 - self.lag_blr[b2], self.tau_drw[b2])
+                self.k(t2 - t1 - self.lag_blr[b1], self.tau_drw_blr)
+                * self.k(t2 - t1 - self.lag_blr[b2], self.tau_drw_blr)
             )
         )
 
@@ -245,6 +247,7 @@ class MyMultiVarModel(MultiVarModel):
             sigma=jnp.exp(params["log_kernel_param"][1]),
             scale=jnp.exp(params["log_kernel_param"][0]),
             taus=jnp.exp(log_taus)[band[inds]],
+            tau_drw_blr=jnp.exp(params["log_tau_drw_blr"]),
         )
         return (
             GaussianProcess(
@@ -384,11 +387,12 @@ def compute_psd_from_samples(samples, clean_bands, num_points=1000, time_range=(
 
 def initSampler(key, nSample, nBand=None):
     # split keys
-    subkeys = jax.random.split(key, 10)
+    subkeys = jax.random.split(key, 11)
 
     # uniform sampler
     lagSampler = UniformInit(nBand-1, [-10, 10])
     loglagBLRSampler = UniformInit(nBand, [0, 5])
+    logtauBLRSampler = UniformInit(1, [jnp.log(10**2.5), jnp.log(10**4.5)])
     meanSampler = UniformInit(nBand, [-1, 1])
     poly1Sampler = UniformInit(1, [-10, 10])
     #poly2Sampler = UniformInit(1, [-10, 10])
@@ -410,6 +414,7 @@ def initSampler(key, nSample, nBand=None):
         #"poly2": poly2Sampler(subkeys[7], nSample),
         "lag": lagSampler(subkeys[3], nSample),
         "log_lag_blr": loglagBLRSampler(subkeys[8], nSample),
+        "log_tau_drw_blr": logtauBLRSampler(subkeys[10], nSample),
         "log_jitter": logJitterSampler(subkeys[4], nSample),
         "beta": betaSampler(subkeys[5], nSample),
         "delta": deltaSampler(subkeys[9], nSample),
@@ -432,6 +437,9 @@ def numpyro_model(X, yerr, y=None, bestP=None, clean_bands=None):
     # lag
     lag = numpyro.sample("lag", dist.Normal(jnp.full_like(bestP["lag"], 0.0), 10))
     log_lag_blr = numpyro.sample("log_lag_blr", dist.Normal(jnp.full_like(bestP["log_lag_blr"], 5.0), 2.0))
+
+    # log tau drw blr
+    log_tau_drw_blr = numpyro.sample("log_tau_drw_blr", dist.Normal(2.8, 2.0))
     
     # log jitter, mean => the prior for these two should be set small, otherwise
     # it is hard to converge
@@ -451,6 +459,7 @@ def numpyro_model(X, yerr, y=None, bestP=None, clean_bands=None):
         "log_amp_delta_blr": log_amp_delta_blr, 
         "lag": lag,
         "log_lag_blr": log_lag_blr,
+        "log_tau_drw_blr": log_tau_drw_blr,
         "mean": mean,
         "poly1": poly1, 
         "log_jitter": log_jitter,
