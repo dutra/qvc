@@ -470,11 +470,11 @@ def numpyro_model(X, yerr, y=None, bestP=None, clean_bands=None):
     poly1 = numpyro.sample("poly1", dist.Normal(0.0, 10.0))
 
     # power laws
-    ep_A = numpyro.sample("beta", dist.Normal(0.2, 0.1))
-    ep_tau = numpyro.sample("delta", dist.Normal(-0.5, 0.1))
+    ep_A = numpyro.sample("ep_A", dist.Normal(0.2, 0.1))
+    ep_tau = numpyro.sample("ep_tau", dist.Normal(0.1, 0.1))
 
     eta_A1 = numpyro.sample("eta_A1", dist.Normal(0.0, 0.1))
-    eta_tau1 = numpyro.sample("eta_tau1", dist.Normal(0.0, 0.1))
+    eta_tau1 = numpyro.sample("eta_tau1", dist.Normal(-0.5, 0.1))
     lams = numpyro.sample("lam_s", dist.Normal(2500.0, 50.0))
 
     # kernel
