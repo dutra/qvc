@@ -187,7 +187,7 @@ class MyMultibandLowRank(tinygp.kernels.Kernel):
         return cov_ac + cov_ad + cov_bc + cov_bd
 
 def log_broken_pl(lam, lam_s, d1, ep):
-    return np.log10( ((lam/lam_s)**d1 + (lam/lam_s)**(d1+ep))**-1 )
+    return jnp.log10( ( jnp.power(lam/lam_s, d1) + jnp.power(lam/lam_s, d1+ep))**-1 )
 
 # Override MultiVarModel
 class MyMultiVarModel(MultiVarModel):
