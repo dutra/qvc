@@ -475,7 +475,7 @@ def numpyro_model(X, yerr, y=None, bestP=None, clean_bands=None):
 
     eta_A1 = numpyro.sample("eta_A1", dist.Normal(0.0, 0.1))
     eta_tau1 = numpyro.sample("eta_tau1", dist.Normal(0.0, 0.1))
-    lams = numpyro.sample("lam_s", dist.Normal(2300.0, 100.0))
+    lams = numpyro.sample("lam_s", dist.Normal(2500.0, 50.0))
 
     # kernel
     k = kernels.quasisep.Exp(*jnp.exp(log_kernel_param))
