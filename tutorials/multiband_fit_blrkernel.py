@@ -693,7 +693,6 @@ def fit_multiband(data, progress_bar=False, plot=False, svi=False):
     log_jitter, log_jitter_err = sym_perecentile(np.log10(np.exp(2*samples['log_jitter'])))
     poly1, poly1_err = sym_perecentile(samples['poly1'])
     mean, mean_err = sym_perecentile(samples['mean'])
-    log_amp_delta_blr, log_amp_delta_blr_err = sym_perecentile(np.log10(np.exp(samples['log_amp_delta_blr'])))
     log_lag_blr, log_lag_blr_err = sym_perecentile(np.log10(np.exp(samples['log_lag_blr'])))
     lag, lag_err = sym_perecentile(samples['lag'])
 
@@ -706,6 +705,7 @@ def fit_multiband(data, progress_bar=False, plot=False, svi=False):
     # BLR
     log_tau_blr, log_tau_blr_err = sym_perecentile(np.log10(np.exp(samples['log_tau_drw_blr'])))
     log_sigma_blr, log_sigma_blr_err = sym_perecentile(np.log10(np.exp(samples['log_kernel_param'][:, 1])[:, None]*np.exp(samples['log_amp_delta_blr'])))
+    log_sigma_band, log_sigma_band_err = sym_perecentile(np.log10(np.exp(samples['log_kernel_param'][:, 1])[:, None]*np.exp(samples['log_amp_delta'])))
 
     lambda_s_RF, lambda_s_RF_err = sym_perecentile(lambda_s_RF)
 
