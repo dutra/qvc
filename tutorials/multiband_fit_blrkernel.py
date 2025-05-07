@@ -131,13 +131,13 @@ class MyMultibandLowRank(tinygp.kernels.Kernel):
         drw = jnp.exp(-tau / tau_drw)
         return drw
 
-    #def k(self, tau, tau_drw, w=5) -> JAXArray:
-    #    # Compute the analytic convolution of DRW and Gaussian kernels
-    #    prefactor = 1 / (jnp.sqrt(2 * jnp.pi) * w)
-    #    # IDEA: take w out of the prefactor multiply it back after
-    #    exp_term = jnp.exp((w**2) / (2 * tau_drw**2) - jnp.abs(tau) / tau_drw)
-    #    erfc_term = erfc((w / jnp.sqrt(2) / tau_drw) - (jnp.abs(tau) / jnp.sqrt(2) / w))
-    #    return prefactor * exp_term * erfc_term
+    def k(self, tau, tau_drw, w=5) -> JAXArray:
+        # Compute the analytic convolution of DRW and Gaussian kernels
+        prefactor = 1 #1 / (jnp.sqrt(2 * jnp.pi) * w)
+        # IDEA: take w out of the prefactor multiply it back after
+        exp_term = jnp.exp((w**2) / (2 * tau_drw**2) - jnp.abs(tau) / tau_drw)
+        erfc_term = erfc((w / jnp.sqrt(2) / tau_drw) - (jnp.abs(tau) / jnp.sqrt(2) / w))
+        return prefactor * exp_term * erfc_term
 
     def evaluate(self, X1, X2) -> JAXArray:
         t1, b1 = X1
@@ -683,7 +683,7 @@ def fit_multiband(data, progress_bar=False, plot=False, svi=False):
     
     samples_log_sigma_UV = np.log10(np.exp(samples['log_kernel_param'][:, 1] + np.log(10) * log_broken_pl(lambda_ref, lambda_s_RF, eta_A1, eta_A2)))
     samples_log_tau_UV = np.log10(np.exp(samples['log_kernel_param'][:, 0] + np.log(10) * log_broken_pl(lambda_ref, lambda_s_RF, eta_tau1, eta_tau2)))
-    samples_log_tau_UV_RF = log_tau_UV - np.log10(1 + data['z']) # time dilation correction
+    samples_log_tau_UV_RF = samples_log_tau_UV - np.log10(1 + data['z']) # time dilation correction
 
     def sym_perecentile(x, p=[16, 50, 84], axis=0):
         lower, median, upper = np.percentile(x, p, axis=axis)
@@ -701,7 +701,7 @@ def fit_multiband(data, progress_bar=False, plot=False, svi=False):
     log_sigma, log_sigma_err = sym_perecentile(np.log10(np.exp(samples['log_kernel_param'][:, 1])))
 
     log_tau_UV_RF, log_tau_UV_RF_err = sym_perecentile(samples_log_tau_UV_RF)
-    log_sigma_UV, log_sigma_UV_err = sym_perecentile(log_sigma_UV)
+    log_sigma_UV, log_sigma_UV_err = sym_perecentile(samples_log_sigma_UV)
 
     # BLR
     log_tau_blr, log_tau_blr_err = sym_perecentile(np.log10(np.exp(samples['log_tau_drw_blr'])))
@@ -731,7 +731,7 @@ def fit_multiband(data, progress_bar=False, plot=False, svi=False):
             log_sigma_err=log_sigma_err,
             log_tau=log_tau,
             log_tau_err=log_tau_err,
-            #BLR
+            # BLR
             log_sigma_blr=log_sigma_blr,
             log_sigma_blr_err=log_sigma_blr_err,
             log_tau_blr=log_tau_blr,
