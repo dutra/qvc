@@ -186,8 +186,8 @@ class MyMultibandLowRank(tinygp.kernels.Kernel):
 
         return cov_ac + cov_ad + cov_bc + cov_bd
 
-def log_broken_pl(lam, lam_s, d1, ep):
-    return -jnp.log10(jnp.power(lam/lam_s, d1) + jnp.power(lam/lam_s, d1+ep))
+def log_broken_pl(lam, lam_s, d1, d2):
+    return -jnp.log10(jnp.power(lam/lam_s, d1) + jnp.power(lam/lam_s, d2))
 
 # Override MultiVarModel
 class MyMultiVarModel(MultiVarModel):
@@ -503,7 +503,7 @@ def numpyro_model(X, yerr, y=None, bestP=None, clean_bands=None, z=None):
     m1.sample(sample_params)
 
 
-def fit_multiband(data, progress_bar=False, plot=False, svi=False):
+def fit_multiband(data, progress_bar=True, plot=False, svi=False):
     times = data['times']
     mags = data['mags']
     data['mags_means'] = np.array([np.nanmean(mags[band]) for band in mags.keys()])
