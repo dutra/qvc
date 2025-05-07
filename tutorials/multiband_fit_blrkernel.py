@@ -133,7 +133,7 @@ class MyMultibandLowRank(tinygp.kernels.Kernel):
 
     # def k(self, tau, tau_drw, w=5) -> JAXArray:
     #     # Compute the analytic convolution of DRW and Gaussian kernels
-    #     prefactor = 1 #1 / (jnp.sqrt(2 * jnp.pi) * w)
+    #     prefactor = 1 / (jnp.sqrt(2 * jnp.pi) * w)
     #     # IDEA: take w out of the prefactor multiply it back after
     #     exp_term = jnp.exp((w**2) / (2 * tau_drw**2) - jnp.abs(tau) / tau_drw)
     #     erfc_term = erfc((w / jnp.sqrt(2) / tau_drw) - (jnp.abs(tau) / jnp.sqrt(2) / w))
@@ -186,8 +186,8 @@ class MyMultibandLowRank(tinygp.kernels.Kernel):
 
         return cov_ac + cov_ad + cov_bc + cov_bd
 
-def log_broken_pl(lam, lam_s, d1, ep):
-    return -jnp.log10(jnp.power(lam/lam_s, d1) + jnp.power(lam/lam_s, d1+ep))
+def log_broken_pl(lam, lam_s, d1, d2):
+    return -jnp.log10(jnp.power(lam/lam_s, d1) + jnp.power(lam/lam_s, d2))
 
 # Override MultiVarModel
 class MyMultiVarModel(MultiVarModel):
