@@ -271,14 +271,14 @@ class MyMultiVarModel(MultiVarModel):
     def my_tau_drw_transform(self, params: dict[str, JAXArray]) -> JAXArray:
         eta_tau1 = params["eta_tau1"]
         eta_tau2 = eta_tau1 + params["ep_tau"]
-        lam_s = params["lam_s"]/(1 + self.z)
+        lam_s = params["lam_s"]
         params["log_tau_delta"] = jnp.log(10) * jnp.array([log_broken_pl(lambda_pivot[band]/(1 + self.z), lam_s, eta_tau1, eta_tau2) for band in self.clean_bands])
         return params["log_tau_delta"]
 
     def my_amp_transform(self, params: dict[str, JAXArray]) -> JAXArray:
         eta_A1 = params["eta_A1"]
         eta_A2 = eta_A1 + params["ep_A"]
-        lam_s = params["lam_s"]/(1 + self.z)
+        lam_s = params["lam_s"]
         params["log_amp_delta"] = jnp.log(10) * jnp.array([log_broken_pl(lambda_pivot[band]/(1 + self.z), lam_s, eta_A1, eta_A2) for band in self.clean_bands])
         return params["log_amp_delta"]
     
