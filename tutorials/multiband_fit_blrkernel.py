@@ -705,7 +705,7 @@ def fit_multiband(data, progress_bar=False, plot=False, svi=False):
 
     # BLR
     log_tau_blr, log_tau_blr_err = sym_perecentile(np.log10(np.exp(samples['log_tau_drw_blr'])))
-    log_sigma_blr, log_sigma_blr_err = sym_perecentile(np.log10(np.exp(samples['log_kernel_param'][:, 1])*np.exp(samples['log_amp_delta_blr'])))
+    log_sigma_blr, log_sigma_blr_err = sym_perecentile(np.log10(np.exp(samples['log_kernel_param'][:, 1])[:, None]*np.exp(samples['log_amp_delta_blr'])))
 
     lambda_s_RF, lambda_s_RF_err = sym_perecentile(lambda_s_RF)
 
