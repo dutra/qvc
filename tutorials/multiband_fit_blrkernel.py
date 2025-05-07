@@ -133,7 +133,7 @@ class MyMultibandLowRank(tinygp.kernels.Kernel):
 
     # def k(self, tau, tau_drw, w=5) -> JAXArray:
     #     # Compute the analytic convolution of DRW and Gaussian kernels
-    #     prefactor = 1 #1 / (jnp.sqrt(2 * jnp.pi) * w)
+    #     prefactor = 1 / (jnp.sqrt(2 * jnp.pi) * w)
     #     # IDEA: take w out of the prefactor multiply it back after
     #     exp_term = jnp.exp((w**2) / (2 * tau_drw**2) - jnp.abs(tau) / tau_drw)
     #     erfc_term = erfc((w / jnp.sqrt(2) / tau_drw) - (jnp.abs(tau) / jnp.sqrt(2) / w))
