@@ -131,13 +131,13 @@ class MyMultibandLowRank(tinygp.kernels.Kernel):
         drw = jnp.exp(-tau / tau_drw)
         return drw
 
-    def k(self, tau, tau_drw, w=5) -> JAXArray:
-        # Compute the analytic convolution of DRW and Gaussian kernels
-        prefactor = 1 #1 / (jnp.sqrt(2 * jnp.pi) * w)
-        # IDEA: take w out of the prefactor multiply it back after
-        exp_term = jnp.exp((w**2) / (2 * tau_drw**2) - jnp.abs(tau) / tau_drw)
-        erfc_term = erfc((w / jnp.sqrt(2) / tau_drw) - (jnp.abs(tau) / jnp.sqrt(2) / w))
-        return prefactor * exp_term * erfc_term
+    # def k(self, tau, tau_drw, w=5) -> JAXArray:
+    #     # Compute the analytic convolution of DRW and Gaussian kernels
+    #     prefactor = 1 #1 / (jnp.sqrt(2 * jnp.pi) * w)
+    #     # IDEA: take w out of the prefactor multiply it back after
+    #     exp_term = jnp.exp((w**2) / (2 * tau_drw**2) - jnp.abs(tau) / tau_drw)
+    #     erfc_term = erfc((w / jnp.sqrt(2) / tau_drw) - (jnp.abs(tau) / jnp.sqrt(2) / w))
+    #     return prefactor * exp_term * erfc_term
 
     def evaluate(self, X1, X2) -> JAXArray:
         t1, b1 = X1
@@ -267,19 +267,19 @@ class MyMultiVarModel(MultiVarModel):
         )
     def my_amp_transform_blr(self, params: dict[str, JAXArray]) -> JAXArray:
         return jnp.atleast_1d(params["log_amp_delta_blr"])
-
+    
     def my_tau_drw_transform(self, params: dict[str, JAXArray]) -> JAXArray:
         eta_tau1 = params["eta_tau1"]
         eta_tau2 = eta_tau1 + params["ep_tau"]
         lam_s = params["lam_s"]/(1 + self.z)
-        params["log_tau_delta"] = jnp.log(10) * jnp.array([log_broken_pl(lambda_pivot[band], lam_s, eta_tau1, eta_tau2) for band in self.clean_bands])
+        params["log_tau_delta"] = jnp.log(10) * jnp.array([log_broken_pl(lambda_pivot[band]/(1 + self.z), lam_s, eta_tau1, eta_tau2) for band in self.clean_bands])
         return params["log_tau_delta"]
 
     def my_amp_transform(self, params: dict[str, JAXArray]) -> JAXArray:
         eta_A1 = params["eta_A1"]
         eta_A2 = eta_A1 + params["ep_A"]
         lam_s = params["lam_s"]/(1 + self.z)
-        params["log_amp_delta"] = jnp.log(10) * jnp.array([log_broken_pl(lambda_pivot[band], lam_s, eta_A1, eta_A2) for band in self.clean_bands])
+        params["log_amp_delta"] = jnp.log(10) * jnp.array([log_broken_pl(lambda_pivot[band]/(1 + self.z), lam_s, eta_A1, eta_A2) for band in self.clean_bands])
         return params["log_amp_delta"]
     
     @eqx.filter_jit
@@ -650,8 +650,8 @@ def fit_multiband(data, progress_bar=False, plot=False, svi=False):
 
             mcmc = MCMC(
                 nuts_kernel,
-                num_warmup=500, # This could be less than num_samples
-                num_samples=250,
+                num_warmup=100, # This could be less than num_samples
+                num_samples=50,
                 num_chains=2*num_params,
                 progress_bar=progress_bar,
                 chain_method="vectorized",
@@ -679,12 +679,15 @@ def fit_multiband(data, progress_bar=False, plot=False, svi=False):
     eta_tau2 = eta_tau1 + samples["ep_tau"]
     
     lambda_ref = 2500 # Any reference wavelength
-    lambda_s_RF = samples["lam_s"]/(1 + data['z'])
+    lambda_s_RF = samples["lam_s"]
     
     samples_log_sigma_UV = samples['log_kernel_param'][:, 1] / np.log(10) + log_broken_pl(lambda_ref, lambda_s_RF, eta_A1, eta_A2)
+    samples_log_amp_delta = np.array([log_broken_pl(lambda_pivot[band], samples["lam_s"], eta_A1, eta_A2) for band in clean_bands])
+    samples_log_sigma_band = samples_log_sigma_UV[:, None] + samples_log_amp_delta.T
+
     samples_log_tau_UV   = samples['log_kernel_param'][:, 0] / np.log(10) + log_broken_pl(lambda_ref, lambda_s_RF, eta_tau1, eta_tau2)
     samples_log_tau_UV_RF = samples_log_tau_UV - np.log10(1 + data['z']) # time dilation correction
-
+    
     def sym_percentile(x, p=[16, 50, 84], axis=0):
         lower, median, upper = np.percentile(x, p, axis=axis)
         return median, 0.5 * (upper - lower)
@@ -693,7 +696,6 @@ def fit_multiband(data, progress_bar=False, plot=False, svi=False):
     log_jitter, log_jitter_err = sym_percentile(np.log10(np.exp(2*samples['log_jitter'])))
     poly1, poly1_err = sym_percentile(samples['poly1'])
     mean, mean_err = sym_percentile(samples['mean'])
-    log_amp_delta_blr, log_amp_delta_blr_err = sym_percentile(samples['log_amp_delta_blr']/ np.log(10))
     log_lag_blr, log_lag_blr_err = sym_percentile(np.log10(np.exp(samples['log_lag_blr'])))
     lag, lag_err = sym_percentile(samples['lag'])
     eta_A1, eta_A1_err = sym_percentile(eta_A1)
@@ -706,6 +708,7 @@ def fit_multiband(data, progress_bar=False, plot=False, svi=False):
 
     log_tau_UV_RF, log_tau_UV_RF_err = sym_percentile(samples_log_tau_UV_RF)
     log_sigma_UV, log_sigma_UV_err = sym_percentile(samples_log_sigma_UV)
+    log_sigma_band, log_sigma_band_err = sym_percentile(samples_log_sigma_band, axis=0)
 
     # BLR
     log_tau_blr, log_tau_blr_err = sym_percentile(np.log10(np.exp(samples['log_tau_drw_blr'])))
@@ -734,13 +737,15 @@ def fit_multiband(data, progress_bar=False, plot=False, svi=False):
             # kernel params
             log_sigma=log_sigma,
             log_sigma_err=log_sigma_err,
+            log_sigma_band=log_sigma_band,
+            log_sigma_band_err=log_sigma_band_err,
             log_tau=log_tau,
             log_tau_err=log_tau_err,
             # BLR
-            log_sigma_blr=log_sigma_blr,
-            log_sigma_blr_err=log_sigma_blr_err,
             log_tau_blr=log_tau_blr,
             log_tau_blr_err=log_tau_blr_err,
+            log_sigma_blr=log_sigma_blr,
+            log_sigma_blr_err=log_sigma_blr_err,
             # other
             log_jitter=log_jitter,
             poly1=poly1,
@@ -1043,7 +1048,7 @@ if __name__ == '__main__':
             continue
         fields_to_filter = ['times', 'mags', 'magerrs']
         filtered_q = {k: v for k, v in q.items() if k not in fields_to_filter}
-        #print(filtered_q)
+        print(filtered_q)
         print(f"Quasar {i}/{len(objs)} Object ID: {q['object_id']}", flush=True)
         if args.file:
             append_hdf5_file([q], args.file)

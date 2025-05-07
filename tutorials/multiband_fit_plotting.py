@@ -100,20 +100,22 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, data):
     ax.invert_yaxis()  # Magnitudes are brighter when lower
     #ax.legend(loc='lower right')
     
-    log_sigma_blr = [f"{a:.2f}" for a in data['log_sigma_blr']]
-    log_sigma_blr = ",".join(log_sigma_blr)
-    log_sigma_blr_err = [f"{a:.2f}" for a in data['log_sigma_blr_err']]
-    log_sigma_blr_err = ",".join(log_sigma_blr_err)
+    log_sigma_band = [f"{a:.2f}" for a in data['log_sigma_band']]
+    log_sigma_band = ",".join(log_sigma_band)
+    log_sigma_band_err = [f"{a:.2f}" for a in data['log_sigma_band_err']]
+    log_sigma_band_err = ",".join(log_sigma_band_err)
     # Annotate tau_RF and sigma_RF with their values and errors
     ax.annotate(
+        f"z: {data['z']:.2f}\n"
         f"$\\log_{{10}}(\\tau_{{UV RF}})$: {data['log_tau_UV_RF']:.2f} ± {data['log_tau_UV_RF_err']:.2f}\n"
         f"$\\log_{{10}}(\\tau_{{blr}})$: {data['log_tau_blr']:.2f} ± {data['log_tau_blr_err']:.2f}\n"
-        f"$\\log_{{10}}(\\sigma_{{blr}})$: {log_sigma_blr}\n                 ± {log_sigma_blr_err}\n"
         f"$\\log_{{10}}(\\sigma_{{UV}})$: {data['log_sigma_UV']:.2f} ± {data['log_sigma_UV_err']:.2f}\n"
+        f"$\\log_{{10}}(\\sigma_{{blr}})$: {log_sigma_band}\n                 ± {log_sigma_band_err}\n"
         f"$\\eta_{{A_1}}$: {data['eta_A1']:.2f} ± {data['eta_A1_err']:.2f}\n"
         f"$\\eta_{{A_2}}$: {data['eta_A2']:.2f} ± {data['eta_A2_err']:.2f}\n"
         f"$\\eta_{{\\tau_1}}$: {data['eta_tau1']:.2f} ± {data['eta_tau1_err']:.2f}\n"
         f"$\\eta_{{\\tau_2}}$: {data['eta_tau2']:.2f} ± {data['eta_tau2_err']:.2f}\n"
+        f"$\\eta_{{\\lambda_s}}$: {data['lam_s']:.2f} ± {data['lam_s_err']:.2f}\n"
         f"$\\mathrm{{poly_1}}$: {data['poly1']:.2f} ± {data['poly1_err']:.2f}",
         xy=(0.05, 0.95),
         xycoords="axes fraction",
