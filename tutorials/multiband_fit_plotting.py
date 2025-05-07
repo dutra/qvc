@@ -99,14 +99,22 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, data):
     ax.set_ylabel('Magnitude + arbitrary offset')
     ax.invert_yaxis()  # Magnitudes are brighter when lower
     #ax.legend(loc='lower right')
-
+    
+    log_sigma_blr = [f"{a:.2f}" for a in data['log_sigma_blr']]
+    log_sigma_blr = ",".join(log_sigma_blr)
+    log_sigma_blr_err = [f"{a:.2f}" for a in data['log_sigma_blr_err']]
+    log_sigma_blr_err = ",".join(log_sigma_blr_err)
     # Annotate tau_RF and sigma_RF with their values and errors
     ax.annotate(
-        f"$\\log_{{10}}(\\tau_{{RF}})$: {data['log_tau_RF']:.2f} ± {data['log_tau_RF_err']:.2f}\n"
-        f"$\\log_{{10}}(\\sigma_{{RF}})$: {data['log_sigma_RF']:.2f} ± {data['log_sigma_RF_err']:.2f}\n"
-        f"$\\beta$: {data['beta']:.2f} ± {data['beta_err']:.2f}\n"
-        f"$\\delta$: {data['delta']:.2f} ± {data['delta_err']:.2f}\n"
-        f"$\\mathrm{{poly1}}$: {data['poly1']:.2f} ± {data['poly1_err']:.2f}",
+        f"$\\log_{{10}}(\\tau_{{UV RF}})$: {data['log_tau_UV_RF']:.2f} ± {data['log_tau_UV_RF_err']:.2f}\n"
+        f"$\\log_{{10}}(\\tau_{{blr}})$: {data['log_tau_blr']:.2f} ± {data['log_tau_blr_err']:.2f}\n"
+        f"$\\log_{{10}}(\\sigma_{{blr}})$: {log_sigma_blr}\n                 ± {log_sigma_blr_err}\n"
+        f"$\\log_{{10}}(\\sigma_{{UV}})$: {data['log_sigma_UV']:.2f} ± {data['log_sigma_UV_err']:.2f}\n"
+        f"$\\eta_{{A_1}}$: {data['eta_A1']:.2f} ± {data['eta_A1_err']:.2f}\n"
+        f"$\\eta_{{A_2}}$: {data['eta_A2']:.2f} ± {data['eta_A2_err']:.2f}\n"
+        f"$\\eta_{{\\tau_1}}$: {data['eta_tau1']:.2f} ± {data['eta_tau1_err']:.2f}\n"
+        f"$\\eta_{{\\tau_2}}$: {data['eta_tau2']:.2f} ± {data['eta_tau2_err']:.2f}\n"
+        f"$\\mathrm{{poly_1}}$: {data['poly1']:.2f} ± {data['poly1_err']:.2f}",
         xy=(0.05, 0.95),
         xycoords="axes fraction",
         fontsize=12,
@@ -132,7 +140,7 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, data):
     # Save the plot as a PNG file
     output_dir = "light_curves_fits"
     os.makedirs(output_dir, exist_ok=True)
-    plt.savefig(os.path.join(output_dir, f'{object_id}_combined_plot.png'))
+    plt.savefig(os.path.join(output_dir, f'{object_id}_combined_plot.png'), dpi=120)
     plt.close(fig)
     return fig
 
@@ -166,7 +174,7 @@ def plot_mcmc_traces(samples, data):
     # Save the plot as a PNG file
     output_dir = "mcmc_traces"
     os.makedirs(output_dir, exist_ok=True)
-    plt.savefig(os.path.join(output_dir, f"{object_id}_mcmc_traces.png"))
+    plt.savefig(os.path.join(output_dir, f"{object_id}_mcmc_traces.png"), dpi=120)
     plt.close(fig)
     return fig
 

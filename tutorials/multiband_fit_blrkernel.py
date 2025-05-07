@@ -45,7 +45,7 @@ learning_rate=0.001
 
 import warnings
 import jax.scipy as jsp
-from jax.scipy.special import erfc
+from jax.scipy.special import erfc, logsumexp
 
 from jax import lax
 import numpy as np
@@ -187,7 +187,7 @@ class MyMultibandLowRank(tinygp.kernels.Kernel):
         return cov_ac + cov_ad + cov_bc + cov_bd
 
 def log_broken_pl(lam, lam_s, d1, ep):
-    return jnp.log10( ( jnp.power(lam/lam_s, d1) + jnp.power(lam/lam_s, d1+ep))**-1 )
+    return -jnp.log10(jnp.power(lam/lam_s, d1) + jnp.power(lam/lam_s, d1+ep))
 
 # Override MultiVarModel
 class MyMultiVarModel(MultiVarModel):
@@ -306,7 +306,7 @@ class MyMultiVarModel(MultiVarModel):
         """
         gp, inds = self._build_gp(params)
         log_prob = gp.log_probability(y=self.y[inds])
-        jax.debug.print("Log probability: {log_prob}", log_prob=log_prob)
+        #jax.debug.print("Log probability: {log_prob}", log_prob=log_prob)
         numpyro.sample("gp", gp.numpyro_dist(), obs=self.y[inds])
 
     @eqx.filter_jit
@@ -646,13 +646,13 @@ def fit_multiband(data, progress_bar=False, plot=False, svi=False):
                 )
 
             num_params = sum(p.size for p in bestP.values())
-            print(f"Number of parameters: {num_params}")
+            #print(f"Number of parameters: {num_params}")
 
             mcmc = MCMC(
                 nuts_kernel,
-                num_warmup=250, # This could be less than num_samples
-                num_samples=100,
-                num_chains=2*33,
+                num_warmup=500, # This could be less than num_samples
+                num_samples=250,
+                num_chains=2*num_params,
                 progress_bar=progress_bar,
                 chain_method="vectorized",
             )
@@ -681,33 +681,37 @@ def fit_multiband(data, progress_bar=False, plot=False, svi=False):
     lambda_ref = 2500 # Any reference wavelength
     lambda_s_RF = samples["lam_s"]/(1 + data['z'])
     
-    samples_log_sigma_UV = np.log10(np.exp(samples['log_kernel_param'][:, 1] + np.log(10) * log_broken_pl(lambda_ref, lambda_s_RF, eta_A1, eta_A2)))
-    samples_log_tau_UV = np.log10(np.exp(samples['log_kernel_param'][:, 0] + np.log(10) * log_broken_pl(lambda_ref, lambda_s_RF, eta_tau1, eta_tau2)))
+    samples_log_sigma_UV = samples['log_kernel_param'][:, 1] / np.log(10) + log_broken_pl(lambda_ref, lambda_s_RF, eta_A1, eta_A2)
+    samples_log_tau_UV   = samples['log_kernel_param'][:, 0] / np.log(10) + log_broken_pl(lambda_ref, lambda_s_RF, eta_tau1, eta_tau2)
     samples_log_tau_UV_RF = samples_log_tau_UV - np.log10(1 + data['z']) # time dilation correction
 
-    def sym_perecentile(x, p=[16, 50, 84], axis=0):
+    def sym_percentile(x, p=[16, 50, 84], axis=0):
         lower, median, upper = np.percentile(x, p, axis=axis)
         return median, 0.5 * (upper - lower)
 
     # parameter estimates
-    log_jitter, log_jitter_err = sym_perecentile(np.log10(np.exp(2*samples['log_jitter'])))
-    poly1, poly1_err = sym_perecentile(samples['poly1'])
-    mean, mean_err = sym_perecentile(samples['mean'])
-    log_lag_blr, log_lag_blr_err = sym_perecentile(np.log10(np.exp(samples['log_lag_blr'])))
-    lag, lag_err = sym_perecentile(samples['lag'])
+    log_jitter, log_jitter_err = sym_percentile(np.log10(np.exp(2*samples['log_jitter'])))
+    poly1, poly1_err = sym_percentile(samples['poly1'])
+    mean, mean_err = sym_percentile(samples['mean'])
+    log_amp_delta_blr, log_amp_delta_blr_err = sym_percentile(samples['log_amp_delta_blr']/ np.log(10))
+    log_lag_blr, log_lag_blr_err = sym_percentile(np.log10(np.exp(samples['log_lag_blr'])))
+    lag, lag_err = sym_percentile(samples['lag'])
+    eta_A1, eta_A1_err = sym_percentile(eta_A1)
+    eta_A2, eta_A2_err = sym_percentile(eta_A2)
+    eta_tau1, eta_tau1_err = sym_percentile(eta_tau1)
+    eta_tau2, eta_tau2_err = sym_percentile(eta_tau2)
 
-    log_tau, log_tau_err = sym_perecentile(np.log10(np.exp(samples['log_kernel_param'][:, 0])))
-    log_sigma, log_sigma_err = sym_perecentile(np.log10(np.exp(samples['log_kernel_param'][:, 1])))
+    log_tau, log_tau_err = sym_percentile(np.log10(np.exp(samples['log_kernel_param'][:, 0])))
+    log_sigma, log_sigma_err = sym_percentile(np.log10(np.exp(samples['log_kernel_param'][:, 1])))
 
-    log_tau_UV_RF, log_tau_UV_RF_err = sym_perecentile(samples_log_tau_UV_RF)
-    log_sigma_UV, log_sigma_UV_err = sym_perecentile(samples_log_sigma_UV)
+    log_tau_UV_RF, log_tau_UV_RF_err = sym_percentile(samples_log_tau_UV_RF)
+    log_sigma_UV, log_sigma_UV_err = sym_percentile(samples_log_sigma_UV)
 
     # BLR
-    log_tau_blr, log_tau_blr_err = sym_perecentile(np.log10(np.exp(samples['log_tau_drw_blr'])))
-    log_sigma_blr, log_sigma_blr_err = sym_perecentile(np.log10(np.exp(samples['log_kernel_param'][:, 1])[:, None]*np.exp(samples['log_amp_delta_blr'])))
-    log_sigma_band, log_sigma_band_err = sym_perecentile(np.log10(np.exp(samples['log_kernel_param'][:, 1])[:, None]*np.exp(samples['log_amp_delta'])))
+    log_tau_blr, log_tau_blr_err = sym_percentile(np.log10(np.exp(samples['log_tau_drw_blr'])))
+    log_sigma_blr, log_sigma_blr_err = sym_percentile((samples['log_kernel_param'][:, 1:2] + samples['log_amp_delta_blr']) / np.log(10), axis=0)
 
-    lambda_s_RF, lambda_s_RF_err = sym_perecentile(lambda_s_RF)
+    lambda_s_RF, lambda_s_RF_err = sym_percentile(lambda_s_RF)
 
     # Construct the result dictionary
     d = dict(object_id=data['object_id'],
@@ -718,14 +722,15 @@ def fit_multiband(data, progress_bar=False, plot=False, svi=False):
             log_sigma_UV=log_sigma_UV,
             log_sigma_UV_err=log_sigma_UV_err,
             eta_A1=eta_A1,
+            eta_A1_err=eta_A1_err,
             eta_A2=eta_A2,
+            eta_A2_err=eta_A2_err,
             eta_tau1=eta_tau1,
+            eta_tau1_err=eta_tau1_err,
             eta_tau2=eta_tau2,
+            eta_tau2_err=eta_tau2_err,
             lam_s=lambda_s_RF,
             lam_s_err=lambda_s_RF_err,
-            # kernel params band
-            log_sigma_band=log_sigma_band,
-            log_sigma_band_err=log_sigma_band_err,
             # kernel params
             log_sigma=log_sigma,
             log_sigma_err=log_sigma_err,
@@ -748,14 +753,14 @@ def fit_multiband(data, progress_bar=False, plot=False, svi=False):
             lag=lag,
             lag_err=lag_err,
             )
-    
+    #print(d)
     if plot:
         save_combined_plot(samples, m1, X, y, yerr, band_idx[mask_outlier], d)
         #plot_mcmc_traces(samples, d)
         #plot_posterior(samples, data, clean_bands=clean_bands)
-    # psd_results = compute_psd_from_samples(samples, clean_bands)
-    # d['psd'] = psd_results
-    # plot_psd(psd_results, data['object_id'])    
+        # psd_results = compute_psd_from_samples(samples, clean_bands)
+        # d['psd'] = psd_results
+        # plot_psd(psd_results, data['object_id'])    
     return d
 
 
@@ -775,7 +780,7 @@ def process_quasar(i_data, n=0, progress_bar=False, plot=False, svi=False):
     #print(f"Quasar {i}/{n} ({data['object_id']}): log_tau_RF={data['log_tau_RF']:.3f}±{data['log_tau_RF_err']:.3f}, log_sigma_RF={data['log_sigma_RF']}±{data['log_sigma_RF_err']}", flush=True)
     return data
 
-def concat_light_curves(N=None, skip=None, filter_object_ids=None, save_file_path=None):
+def concat_light_curves(N=None, skip=None, filter_object_ids=None, save_file_path=None, progress_bar=False):
     print(f"concat_light_curves args: {N=}, {skip=}, {len(filter_object_ids)=}, {save_file_path=}")
     if save_file_path and os.path.exists(save_file_path):
         print(f"concat_light_curves Loading LC data from {save_file_path}")
@@ -813,7 +818,7 @@ def concat_light_curves(N=None, skip=None, filter_object_ids=None, save_file_pat
     print(f"Found {len(cat)} matching objects in concat_light_curves", len(cat))
 
     # Loop through the data and extract the relevant information        
-    for idx, row in tqdm(cat.iterrows(), total=len(cat), desc="Processing quasars"):
+    for idx, row in tqdm(cat.iterrows(), total=len(cat), desc="Processing quasars", disable=(not progress_bar)):
         object_id = row['objectId']
         if object_id in [obj['object_id'] for obj in s82_objs]:
             continue
@@ -829,7 +834,6 @@ def concat_light_curves(N=None, skip=None, filter_object_ids=None, save_file_pat
         times = {}
         mags = {}
         magerrs = {}
-        magerrs_mean = []
 
         for band in bands:  
             sdss_ps1_offset = {
@@ -889,7 +893,6 @@ def concat_light_curves(N=None, skip=None, filter_object_ids=None, save_file_pat
             'mags': mags,
             'mags_mean': mags_means,
             'magerrs': magerrs,
-            'magerrs_mean': magerrs_mean
         })
 
         #save_lc_plot(times, mags, magerrs, object_id, bands=bands)
@@ -898,7 +901,7 @@ def concat_light_curves(N=None, skip=None, filter_object_ids=None, save_file_pat
 
     print(f"Found {len(s82_objs)} objects in concat_light_curves after time cut", len(s82_objs))
 
-    s82_objs = populate_sdss_fields(s82_objs)
+    s82_objs = populate_sdss_fields(s82_objs, progress_bar=progress_bar)
 
     if save_file_path:
         with h5py.File(save_file_path, "w") as hdf:
@@ -943,13 +946,13 @@ def load_s82_from_hdf5(file_path="s82_objs.h5"):
 
     return s82_objs
 
-def populate_sdss_fields(s82_objs):
-    print(f"Populating SDSS fields: {len(s82_objs)}", flush=True)
+def populate_sdss_fields(s82_objs, progress_bar=False):
+    #print(f"Populating SDSS fields: {len(s82_objs)}", flush=True)
     cat = pd.read_parquet(f"data/S82/Catalog.parquet").set_index('idx')
     hdul = fits.open('data/dr16q_prop_May01_2024.fits')
     fits_data = hdul[1].data  # Assuming the data is in the first extension    
     fits_data_2 = hdul[2].data  # Assuming the data is in the first extension    
-    for d in tqdm(s82_objs, desc="Populating SDSS fields"):
+    for d in tqdm(s82_objs, desc="Populating SDSS fields", disable=(not progress_bar)):
         obj = cat.loc[cat['objectId'] == d['object_id']].iloc[0]
         c1 = SkyCoord(fits_data['RA'], fits_data['DEC'], unit='deg')
         c2 = SkyCoord(obj['RA'], obj['DEC'], unit='deg')
@@ -1007,6 +1010,7 @@ if __name__ == '__main__':
     parser.add_argument("--svi", action="store_true", help="Use stochastic variation inference (SVI).")
     parser.add_argument("--ignore_existing", action="store_true", help="Ignore sources already in the HDF5 file.")
     parser.add_argument("--create_lc", action="store_true", help="Only create LC file and exit.")
+    parser.add_argument("--progress", action="store_true", help="Show progress bar.")
 
     args = parser.parse_args()
 
@@ -1026,21 +1030,21 @@ if __name__ == '__main__':
     filter_object_ids = set(filter_object_ids) - set(existing_object_ids)
     if filter_object_ids is not None:
         print(f"Filtering object IDs: {len(filter_object_ids)}")
-    objs = concat_light_curves(filter_object_ids=filter_object_ids, N=args.N, skip=args.skip, save_file_path=args.lc_file)
+    objs = concat_light_curves(filter_object_ids=filter_object_ids, N=args.N, skip=args.skip, save_file_path=args.lc_file, progress_bar=args.progress)
     if args.create_lc:
         sys.exit("Created LC file. Exiting the program as requested.")
     print(f"Loaded {len(objs)} objects from concat_light_curves")
     #objs = populate_sdss_fields(objs)
     for i, obj in enumerate(objs):
         print(f"Processing quasar {i}/{len(objs)} ({obj['object_id']})", flush=True)
-        q = process_quasar((i, obj), n=len(objs), progress_bar=True, plot=args.plot, svi=args.svi)
+        q = process_quasar((i, obj), n=len(objs), progress_bar=args.progress, plot=args.plot, svi=args.svi)
         if q is None:
             #print(f"Skipping quasar {obj['object_id']}, no data", flush=True)
             continue
         fields_to_filter = ['times', 'mags', 'magerrs']
         filtered_q = {k: v for k, v in q.items() if k not in fields_to_filter}
         #print(filtered_q)
-        print(f"Quasar {i}/{len(objs)} ({q['object_id']}): log_tau_RF={q['log_tau_RF']:.3f}±{q['log_tau_RF_err']:.3f}, log_sigma_RF={q['log_sigma_RF']}±{q['log_sigma_RF_err']}", flush=True)
+        print(f"Quasar {i}/{len(objs)} Object ID: {q['object_id']}", flush=True)
         if args.file:
             append_hdf5_file([q], args.file)
 
