@@ -503,7 +503,7 @@ def numpyro_model(X, yerr, y=None, bestP=None, clean_bands=None, z=None):
     m1.sample(sample_params)
 
 
-def fit_multiband(data, progress_bar=True, plot=False, svi=False):
+def fit_multiband(data, progress_bar=False, plot=False, svi=False):
     times = data['times']
     mags = data['mags']
     data['mags_means'] = np.array([np.nanmean(mags[band]) for band in mags.keys()])
@@ -650,8 +650,8 @@ def fit_multiband(data, progress_bar=True, plot=False, svi=False):
 
             mcmc = MCMC(
                 nuts_kernel,
-                num_warmup=100, # This could be less than num_samples
-                num_samples=50,
+                num_warmup=750, # This could be less than num_samples
+                num_samples=250,
                 num_chains=2*num_params,
                 progress_bar=progress_bar,
                 chain_method="vectorized",
@@ -786,7 +786,7 @@ def process_quasar(i_data, n=0, progress_bar=False, plot=False, svi=False):
     return data
 
 def concat_light_curves(N=None, skip=None, filter_object_ids=None, save_file_path=None, progress_bar=False):
-    print(f"concat_light_curves args: {N=}, {skip=}, {len(filter_object_ids)=}, {save_file_path=}")
+    #print(f"concat_light_curves args: {N=}, {skip=}, {len(filter_object_ids)=}, {save_file_path=}")
     if save_file_path and os.path.exists(save_file_path):
         print(f"concat_light_curves Loading LC data from {save_file_path}")
         s82_objs = load_s82_from_hdf5(save_file_path)
@@ -1019,6 +1019,9 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
 
+    if args.create_lc:
+        objs = concat_light_curves(save_file_path=args.lc_file, progress_bar=args.progress)
+        sys.exit("Created LC file. Exiting the program as requested.")
 
     # Filter objects by object_id that exist in the HDF5 file
     existing_object_ids = set()
@@ -1047,8 +1050,8 @@ if __name__ == '__main__':
             #print(f"Skipping quasar {obj['object_id']}, no data", flush=True)
             continue
         fields_to_filter = ['times', 'mags', 'magerrs']
-        filtered_q = {k: v for k, v in q.items() if k not in fields_to_filter}
-        print(filtered_q)
+        #filtered_q = {k: v for k, v in q.items() if k not in fields_to_filter}
+        #print(filtered_q)
         print(f"Quasar {i}/{len(objs)} Object ID: {q['object_id']}", flush=True)
         if args.file:
             append_hdf5_file([q], args.file)

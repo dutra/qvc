@@ -85,14 +85,14 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, data):
         m = band_idx == n
         # Plot the observed data
         ax.errorbar(t[m], y[m]+offsets[n], yerr=yerr[m], fmt='o', 
-                label=f'{band_idx_map[n]}-band', alpha=0.7, color=colors[band_idx_map[n]], lw=2.0, capsize=3)
+                label=f'{band_idx_map[n]}-band', alpha=0.7, color=colors[band_idx_map[n]], lw=1.0, capsize=1, markersize=1)
         # Generate test times for predictions
         t_test = np.linspace(t.min(), t.max(), 1000)
         # Compute predictions using the model
         posterior_median = {k: np.median(v, axis=0) for k, v in samples.items()}
         mu, std = model.pred(posterior_median, (t_test, np.full_like(t_test, n, dtype=int)))
         # Plot the predictions
-        ax.plot(t_test, mu+offsets[n], alpha=0.8, color=colors[band_idx_map[n]], lw=2.5)
+        ax.plot(t_test, mu+offsets[n], alpha=0.8, color=colors[band_idx_map[n]], lw=1.0)
         ax.fill_between(t_test, mu+offsets[n]-std, mu+offsets[n]+std, alpha=0.3, 
                 lw=0.5, color=colors[band_idx_map[n]])
     ax.set_xlabel('MJD')
@@ -119,9 +119,9 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, data):
         f"$\\mathrm{{poly_1}}$: {data['poly1']:.2f} ± {data['poly1_err']:.2f}",
         xy=(0.05, 0.95),
         xycoords="axes fraction",
-        fontsize=12,
+        fontsize=10,
         verticalalignment="top",
-        bbox=dict(boxstyle="round,pad=0.3", edgecolor="black", facecolor="white", alpha=0.8),
+        bbox=dict(boxstyle="round,pad=0.3", edgecolor="black", facecolor="white", alpha=0.4),
     )
     # Annotate the legend with each letter in the same color
     for i, band in enumerate(np.flip(clean_bands)):
@@ -142,7 +142,7 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, data):
     # Save the plot as a PNG file
     output_dir = "light_curves_fits"
     os.makedirs(output_dir, exist_ok=True)
-    plt.savefig(os.path.join(output_dir, f'{object_id}_combined_plot.png'), dpi=120)
+    plt.savefig(os.path.join(output_dir, f'{data['z']:.1f}_{object_id}_combined_plot.png'), dpi=120)
     plt.close(fig)
     return fig
 
