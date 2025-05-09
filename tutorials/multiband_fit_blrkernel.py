@@ -81,6 +81,8 @@ import traceback
 from multiband_fit_utils import *
 from multiband_fit_plotting import *
 
+from solvers import DirectFullRank
+
 # define params
 zero_mean = False
 has_jitter = True
@@ -98,14 +100,57 @@ lambda_pivot = {
 filters = {"u": 0, "g": 1, "r": 2, "i": 3, "z": 4, "y": 5} # harcoded filter order for SDSS
 bands = ['u', 'g', 'r', 'i', 'z']#, 'y']
 
-class MyMultibandLowRankOld(MultibandLowRank):
-     amplitudes: jnp.ndarray
-     amplitudes_blr: jnp.ndarray
-     lag_blr: jnp.ndarray
+class MyGaussianProcess(GaussianProcess):
 
-     def observation_model(self, X) -> JAXArray:
-         return (self.amplitudes[X[1]] * self.kernel.observation_model(X[0]) +
-                self.amplitudes_blr[X[1]] * self.kernel.observation_model(X[0] - self.lag_blr[X[1]]))
+    def log_probability(self, y: JAXArray) -> JAXArray:
+        return self._compute_log_prob(self._get_alpha(y), y)
+
+    @jax.jit
+    def _compute_log_prob(self, alpha: JAXArray, y: JAXArray) -> JAXArray:
+        loglike = -0.5 * jnp.dot((y - self.loc).T, alpha) - self.solver.normalization()
+        return jnp.where(jnp.isfinite(loglike), loglike, -jnp.inf)
+
+    @partial(jax.jit, static_argnums=(3,))
+    def _condition(
+        self,
+        y: JAXArray,
+        X_test: JAXArray | None,
+        include_mean: bool,
+        kernel: kernels.Kernel | None = None,
+    ) -> tuple[JAXArray, JAXArray, JAXArray]:
+        alpha = self._get_alpha(y)
+        log_prob = self._compute_log_prob(alpha, y)
+
+        # Below, we actually want alpha = K^-1 y instead of alpha = L^-1 y
+        alpha = self.solver.solve_triangular(alpha, transpose=True)
+
+        if X_test is None:
+            X_test = self.X
+
+            # In this common case (where we're predicting the GP at the data
+            # points, using the original kernel), the mean is especially fast to
+            # compute; so let's use that calculation here.
+            if kernel is None:
+                delta = self.noise @ alpha
+                mean_value = y - delta
+                if not include_mean:
+                    mean_value -= self.loc
+
+            else:
+                mean_value = kernel.matmul(self.X, y=alpha)
+                if include_mean:
+                    mean_value += self.loc
+
+        else:
+            if kernel is None:
+                kernel = self.kernel
+
+            mean_value = kernel.matmul(X_test, self.X, alpha)
+            if include_mean:
+                mean_value += jax.vmap(self.mean_function)(X_test)
+
+        return alpha, log_prob, mean_value
+
     
 class MyMultibandLowRank(tinygp.kernels.Kernel):
     sigma: float
@@ -117,8 +162,8 @@ class MyMultibandLowRank(tinygp.kernels.Kernel):
 
     def __init__(self, sigma, scale, amplitudes, amplitudes_blr, lag_blr, taus, tau_drw_blr) -> None:
         self.sigma = sigma
-        self.amplitudes = amplitudes
-        self.amplitudes_blr = amplitudes_blr
+        self.amplitudes = amplitudes * sigma
+        self.amplitudes_blr = amplitudes_blr * sigma
         self.lag_blr = lag_blr
         self.tau_drw = scale * taus
         self.tau_drw_blr = tau_drw_blr
@@ -150,7 +195,6 @@ class MyMultibandLowRank(tinygp.kernels.Kernel):
         cov_ac = (
             self.amplitudes[b1]
             * self.amplitudes[b2]
-            * self.sigma**2
             * jnp.sqrt(
                 self.k(t2 - t1, self.tau_drw[b1])
                 * self.k(t2 - t1, self.tau_drw[b2])
@@ -159,7 +203,6 @@ class MyMultibandLowRank(tinygp.kernels.Kernel):
         cov_ad = (
             self.amplitudes[b1]
             * self.amplitudes_blr[b2]
-            * self.sigma**2
             * jnp.sqrt(
                 self.k(t2 - t1, self.tau_drw[b1])
                 * self.k(t2 - t1 - self.lag_blr[b2], self.tau_drw_blr)
@@ -168,7 +211,6 @@ class MyMultibandLowRank(tinygp.kernels.Kernel):
         cov_bc = (
             self.amplitudes_blr[b1]
             * self.amplitudes[b2]
-            * self.sigma**2
             * jnp.sqrt(
                 self.k(t2 - t1 - self.lag_blr[b1], self.tau_drw_blr)
                 * self.k(t2 - t1, self.tau_drw[b2])
@@ -177,7 +219,6 @@ class MyMultibandLowRank(tinygp.kernels.Kernel):
         cov_bd = (
             self.amplitudes_blr[b1]
             * self.amplitudes_blr[b2]
-            * self.sigma**2
             * jnp.sqrt(
                 self.k(t2 - t1 - self.lag_blr[b1], self.tau_drw_blr)
                 * self.k(t2 - t1 - self.lag_blr[b2], self.tau_drw_blr)
@@ -257,11 +298,12 @@ class MyMultiVarModel(MultiVarModel):
             tau_drw_blr=jnp.exp(params["log_tau_drw_blr"]),
         )
         return (
-            GaussianProcess(
+            MyGaussianProcess(
                 kernel,
                 (t[inds], band[inds]),
-                diag=diags + 1e-6,
+                diag=diags +1e-4,
                 mean=means,
+                solver=DirectFullRank,
             ),
             inds,
         )
@@ -306,7 +348,9 @@ class MyMultiVarModel(MultiVarModel):
         """
         gp, inds = self._build_gp(params)
         log_prob = gp.log_probability(y=self.y[inds])
-        #jax.debug.print("Log probability: {log_prob}", log_prob=log_prob)
+        K = gp.kernel(gp.X, gp.X) + gp.noise
+        jax.debug.print("sym: {s}", s= jnp.allclose(K, K.T, atol=1e-6))
+        jax.debug.print("Log probability: {log_prob}", log_prob=log_prob)
         numpyro.sample("gp", gp.numpyro_dist(), obs=self.y[inds])
 
     @eqx.filter_jit
@@ -329,7 +373,7 @@ class MyMultiVarModel(MultiVarModel):
 
         # build gp, cond
         gp, inds = self._build_gp(params)
-        _, cond = gp.condition(self.y[inds], new_X)
+        _, cond = gp.condition(self.y[inds], new_X, diag=1e-4)
         return cond.loc, jnp.sqrt(cond.variance)
 
 def compute_psd_from_samples(samples, clean_bands, num_points=1000, time_range=(0, 365*20)):
@@ -453,7 +497,7 @@ def numpyro_model(X, yerr, y=None, bestP=None, clean_bands=None, z=None):
     #jax.debug.print("{x} log_kernel_param_numpro_bestp", x=bestP["log_kernel_param"])
 
     log_amp_delta_blr = numpyro.sample(
-      "log_amp_delta_blr", dist.Normal(jnp.full_like(bestP["log_amp_delta_blr"], -2.0), 2.0)
+      "log_amp_delta_blr", dist.Normal(jnp.full_like(bestP["log_amp_delta_blr"], -8.0), 2.0)
     )
 
     # lag
@@ -465,14 +509,14 @@ def numpyro_model(X, yerr, y=None, bestP=None, clean_bands=None, z=None):
     
     # log jitter, mean => the prior for these two should be set small, otherwise
     # it is hard to converge
-    log_jitter = numpyro.sample("log_jitter", dist.Normal(np.full_like(bestP["log_jitter"], -4.0), 2.0))
+    log_jitter = numpyro.sample("log_jitter", dist.Normal(np.full_like(bestP["log_jitter"], np.log(1e-4)), 0.2))
     
     mean = numpyro.sample("mean", dist.Normal(jnp.full_like(bestP["mean"], 0.0), 0.1))
     poly1 = numpyro.sample("poly1", dist.Normal(0.0, 10.0))
 
     # power laws
     # < 2500
-    eta_A1 = numpyro.sample("eta_A1", dist.Normal(0.3, 0.1))
+    eta_A1 = numpyro.sample("eta_A1", dist.Normal(1.0, 0.1))
     eta_tau1 = numpyro.sample("eta_tau1", dist.Normal(0.0, 0.1))
     # > 2500
     ep_A = numpyro.sample("ep_A", dist.Normal(0.1, 0.1))
@@ -650,10 +694,10 @@ def fit_multiband(data, progress_bar=False, plot=False, svi=False):
 
             mcmc = MCMC(
                 nuts_kernel,
-                num_warmup=750, # This could be less than num_samples
-                num_samples=250,
+                num_warmup=50, # This could be less than num_samples
+                num_samples=10,
                 num_chains=2*num_params,
-                progress_bar=progress_bar,
+                progress_bar=True,
                 chain_method="vectorized",
             )
 
