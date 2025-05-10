@@ -2,13 +2,15 @@
 import jax
 import jax.numpy as jnp
 
+#============================================================================
+# JAX 64-bit mode check
 print("All JAX devices:", jax.devices())
 print("Default JAX device:", jax.devices()[0])
-
 print("JAX 64-bit enabled:", jax.config.read("jax_enable_x64"))
 
 if not jax.config.read("jax_enable_x64"):
     raise RuntimeError("JAX 64-bit mode is not enabled. Please set jax_enable_x64 = True.")
+
 # Create a float64 array
 arr = jnp.array([1.0, 2.0, 3.0], dtype=jnp.float64)
 assert arr.dtype == jnp.float64, "Array is not float64"
@@ -19,7 +21,7 @@ def dot64(x, y):
 
 x = jnp.ones((1000,), dtype=jnp.float64)
 y = jnp.ones((1000,), dtype=jnp.float64)
-print(dot64(x, y))  # Should run without error and return 1000.0
+print("JAX 64-bit Dot product (should be 1000.0):", dot64(x, y))  # Should run without error and return 1000.0
 
 def assert_jax_gpu_64bit_ok():
     all_ok = True
@@ -71,7 +73,7 @@ def assert_jax_gpu_64bit_ok():
         raise RuntimeError("❌ One or more JAX diagnostic checks failed.")
 
 assert_jax_gpu_64bit_ok()
-
+#============================================================================
 
 import os
 from collections.abc import Callable
@@ -93,7 +95,6 @@ import numpyro.distributions as dist
 
 from tinygp import kernels, solvers
 
-print("Total device count:", jax.local_device_count())
 learning_rate=0.001
 import warnings
 import jax.scipy as jsp
@@ -132,6 +133,7 @@ import traceback
 
 from multiband_fit_utils import *
 from multiband_fit_plotting import *
+from multiband_generate_lc import *
 
 from solvers import DirectFullRank
 
@@ -214,8 +216,8 @@ class MyMultibandLowRank(tinygp.kernels.Kernel):
 
     def __init__(self, sigma, scale, amplitudes, amplitudes_blr, lag_blr, taus, tau_drw_blr) -> None:
         self.sigma = sigma
-        self.amplitudes = amplitudes
-        self.amplitudes_blr = amplitudes_blr
+        self.amplitudes = amplitudes * sigma
+        self.amplitudes_blr = amplitudes_blr * sigma
         self.lag_blr = jnp.zeros_like(lag_blr)
         self.tau_drw = scale * taus
         self.tau_drw_blr = tau_drw_blr
@@ -357,15 +359,22 @@ class MyMultiVarModel(MultiVarModel):
             tau_drw_blr=jnp.exp(params["log_tau_drw_blr"]),
         )
         return (
-            MyGaussianProcess(
+            GaussianProcess(
                 kernel,
                 (t[inds], band[inds]),
                 diag=diags + 1e-5,
-                mean=means,
-                solver=DirectFullRank,
-            ),
-            inds,
-        )
+                mean=means), 
+        inds,)
+        # return (
+        #     MyGaussianProcess(
+        #         kernel,
+        #         (t[inds], band[inds]),
+        #         diag=diags + 1e-5,
+        #         mean=means,
+        #         solver=DirectFullRank,
+        #     ),
+        #     inds,
+        # )
     def my_amp_transform_blr(self, params: dict[str, JAXArray]) -> JAXArray:
         return jnp.atleast_1d(params["log_amp_delta_blr"])
     
@@ -408,8 +417,8 @@ class MyMultiVarModel(MultiVarModel):
         gp, inds = self._build_gp(params)
         log_prob = gp.log_probability(y=self.y[inds])
         K = gp.kernel(gp.X, gp.X) + gp.noise
-        jax.debug.print("sym: {s}", s= jnp.allclose(K, K.T, atol=1e-6))
-        jax.debug.print("Log probability: {log_prob}", log_prob=log_prob)
+        #jax.debug.print("sym: {s}", s= jnp.allclose(K, K.T, atol=1e-6))
+        #jax.debug.print("Log probability: {log_prob}", log_prob=log_prob)
         numpyro.sample("gp", gp.numpyro_dist(), obs=self.y[inds])
 
     @eqx.filter_jit
@@ -466,7 +475,7 @@ def compute_psd_from_samples(samples, clean_bands, num_points=1000, time_range=(
 
     # Compute amplitudes and taus for each band
     amplitudes = jnp.exp(log_kernel_param[1] + jnp.log(10) * jnp.array([log_broken_pl(lambda_pivot[band], params["lam_s"], eta_A1, eta_A2) for band in clean_bands]))
-    taus = jnp.exp(log_kernel_param[0] + jnp.log(10) * jnp.array([log_broken_pl(lambda_pivot[band], params["lam_s"], eta_tau1, eta_tau2) for band in self.clean_bands]))
+    taus = jnp.exp(log_kernel_param[0] + jnp.log(10) * jnp.array([log_broken_pl(lambda_pivot[band], params["lam_s"], eta_tau1, eta_tau2) for band in clean_bands]))
 
     # Instantiate the MyMultibandLowRank kernel
     kernel = MyMultibandLowRank(
@@ -515,7 +524,7 @@ def initSampler(key, nSample, nBand=None):
     poly1Sampler = UniformInit(1, [-10, 10])
     logAmpDeltaSampler = UniformInit(nBand-1, [-2.0, 0.0])
     logAmpDeltaBLRSampler = UniformInit(nBand, [-5.0, -2.0])
-    logJitterSampler = UniformInit(nBand, [jnp.log(1e-6), jnp.log(0.1)])
+    logJitterSampler = UniformInit(nBand, [jnp.log(1e-5), jnp.log(0.1)])
 
     # power laws
     etaA1Sampler = UniformInit(1, [0.5, 0.1])
@@ -568,7 +577,7 @@ def numpyro_model(X, yerr, y=None, bestP=None, clean_bands=None, z=None):
     
     # log jitter, mean => the prior for these two should be set small, otherwise
     # it is hard to converge
-    log_jitter = numpyro.sample("log_jitter", dist.Normal(np.full_like(bestP["log_jitter"],  np.log(1e-4)), 2.0))
+    log_jitter = numpyro.sample("log_jitter", dist.Normal(np.full_like(bestP["log_jitter"],  np.log(1e-3)), 4.0))
     
     mean = numpyro.sample("mean", dist.Normal(jnp.full_like(bestP["mean"], 0.0), 0.1))
     poly1 = numpyro.sample("poly1", dist.Normal(0.0, 10.0))
@@ -776,6 +785,8 @@ def fit_multiband(data, progress_bar=False, plot=False, svi=False):
         #    print(f"Diverging MCMC for quasar {data['object_id']}, skipping.", flush=True)
         #    #return None
 
+    save_samples_to_hdf5(samples, data['object_id'])
+
     # power laws
     eta_A1 = samples["eta_A1"]
     eta_A2 = eta_A1 + samples["ep_A"]
@@ -786,12 +797,12 @@ def fit_multiband(data, progress_bar=False, plot=False, svi=False):
     lambda_s_RF = samples["lam_s"]
     
     samples_log_sigma_UV = samples['log_kernel_param'][:, 1] / np.log(10) + log_broken_pl(lambda_ref, lambda_s_RF, eta_A1, eta_A2)
-    samples_log_amp_delta = np.array([log_broken_pl(lambda_pivot[band], samples["lam_s"], eta_A1, eta_A2) for band in clean_bands])
-    samples_log_sigma_UV_band = samples_log_sigma_UV[:, None] + samples_log_amp_delta.T
+    samples_log_amp_delta = np.array([log_broken_pl(lambda_pivot[band], samples["lam_s"], eta_A1, eta_A2) if band in clean_bands else np.full_like(samples["lam_s"], -9999) for band in bands])                                                                               
+    samples_log_sigma_band = samples['log_kernel_param'][:, 1:2] / np.log(10)  + samples_log_amp_delta.T
 
     samples_log_tau_UV_RF = samples['log_kernel_param'][:, 0] / np.log(10) - np.log10(1 + data['z']) + log_broken_pl(lambda_ref, lambda_s_RF, eta_tau1, eta_tau2)
-    samples_log_tau_delta = np.array([log_broken_pl(lambda_pivot[band], samples["lam_s"], eta_A1, eta_A2) for band in clean_bands])
-    samples_log_tau_UV_RF_band = samples_log_tau_UV_RF[:, None] + samples_log_tau_delta.T
+    samples_log_tau_delta = np.array([log_broken_pl(lambda_pivot[band], samples["lam_s"], eta_tau1, eta_tau2) if band in clean_bands else np.full_like(samples["lam_s"], -9999) for band in bands])
+    samples_log_tau_band_RF = samples['log_kernel_param'][:, 0:1] / np.log(10) - np.log10(1 + data['z']) + samples_log_tau_delta.T
 
     def sym_percentile(x, p=[16, 50, 84], axis=0):
         lower, median, upper = np.percentile(x, p, axis=axis)
@@ -812,9 +823,9 @@ def fit_multiband(data, progress_bar=False, plot=False, svi=False):
     log_sigma, log_sigma_err = sym_percentile(np.log10(np.exp(samples['log_kernel_param'][:, 1])))
 
     log_tau_UV_RF, log_tau_UV_RF_err = sym_percentile(samples_log_tau_UV_RF)
-    log_tau_UV_RF_band, log_tau_UV_RF_band_err = sym_percentile(samples_log_tau_UV_RF_band)
+    log_tau_band_RF, log_tau_band_RF_err = sym_percentile(samples_log_tau_band_RF)
     log_sigma_UV, log_sigma_UV_err = sym_percentile(samples_log_sigma_UV)
-    log_sigma_UV_band, log_sigma_UV_band_err = sym_percentile(samples_log_sigma_UV_band, axis=0)
+    log_sigma_band, log_sigma_band_err = sym_percentile(samples_log_sigma_band)
 
     # BLR
     log_tau_blr, log_tau_blr_err = sym_percentile(np.log10(np.exp(samples['log_tau_drw_blr'])))
@@ -828,12 +839,12 @@ def fit_multiband(data, progress_bar=False, plot=False, svi=False):
             # kernel params latent
             log_tau_UV_RF=log_tau_UV_RF,
             log_tau_UV_RF_err=log_tau_UV_RF_err,
-            log_tau_UV_RF_band=log_tau_UV_RF_band,
-            log_tau_UV_RF_band_err=log_tau_UV_RF_band_err,
+            log_tau_UV_RF_band=log_tau_band_RF,
+            log_tau_UV_RF_band_err=log_tau_band_RF_err,
             log_sigma_UV=log_sigma_UV,
             log_sigma_UV_err=log_sigma_UV_err,
-            log_sigma_UV_band=log_sigma_UV_band,
-            log_sigma_UV_band_err=log_sigma_UV_band_err,
+            log_sigma_UV_band=log_sigma_band,
+            log_sigma_UV_band_err=log_sigma_band_err,
             # broken power law params
             eta_A1=eta_A1,
             eta_A1_err=eta_A1_err,
@@ -893,221 +904,6 @@ def process_quasar(i_data, n=0, progress_bar=False, plot=False, svi=False):
 
     #print(f"Quasar {i}/{n} ({data['object_id']}): log_tau_RF={data['log_tau_RF']:.3f}±{data['log_tau_RF_err']:.3f}, log_sigma_RF={data['log_sigma_RF']}±{data['log_sigma_RF_err']}", flush=True)
     return data
-
-def concat_light_curves(N=None, skip=None, filter_object_ids=None, save_file_path=None, progress_bar=False):
-    #print(f"concat_light_curves args: {N=}, {skip=}, {len(filter_object_ids)=}, {save_file_path=}")
-    if save_file_path and os.path.exists(save_file_path):
-        print(f"concat_light_curves Loading LC data from {save_file_path}")
-        s82_objs = load_s82_from_hdf5(save_file_path)
-        print(f"Loaded {len(s82_objs)} objs from {save_file_path}")
-        if filter_object_ids is not None:
-            # Filter the loaded objects based on the provided object IDs
-            s82_objs = [obj for obj in s82_objs if obj['object_id'] in filter_object_ids]
-            print(f"After filtering {len(filter_object_ids)}, loaded {len(s82_objs)}")
-        if skip is not None:
-            s82_objs = s82_objs[skip:]
-            print(f"After skipping {skip}, loaded {len(s82_objs)} objs")
-        if N is not None:
-            s82_objs = s82_objs[:N]
-        return s82_objs
-    else: 
-        s82_objs = []
-    # Load the S82 data from the FITS file
-    hdul = fits.open('data/dr16q_prop_May01_2024.fits')
-    fits_data = hdul[1].data  # Assuming the data is in the first extension    
-
-    cat = pd.read_parquet(f"data/S82/Catalog.parquet").set_index('idx')
-    sdss = pd.read_parquet(f"data/S82/dr16s82_sdssLCRaw.parquet")
-    sdss = sdss[sdss.mjd.notna() & (len(sdss.mjd) > 0)]
-    ps1 = pd.read_parquet(f"data/S82/dr16s82_ps1LCRaw.parquet")
-    ztf = pd.read_parquet(f"data/S82/dr16s82_ZuberLCRaw.parquet")
-
-    # Find elements in cat where objectId exists in the list of objectId of sdss
-    match_object_ids = set(sdss.objectId) if filter_object_ids is None else filter_object_ids
-    matching_indices = cat[cat.objectId.isin(match_object_ids)].index
-    cat = cat.loc[matching_indices]
-    cat = cat[skip:] if skip else cat
-    cat = cat[:N] if N else cat
-
-    print(f"Found {len(cat)} matching objects in concat_light_curves", len(cat))
-
-    # Loop through the data and extract the relevant information        
-    for idx, row in tqdm(cat.iterrows(), total=len(cat), desc="Processing quasars", disable=(not progress_bar)):
-        object_id = row['objectId']
-        if object_id in [obj['object_id'] for obj in s82_objs]:
-            continue
-
-        # Filter light curves for the current object_id
-        sdss_lc = sdss[sdss.objectId == row['objectId']].copy()
-        ps1_lc = ps1[ps1.ps1objID == int(row['ps1objID'])].copy() if row['ps1objID'] is not None else pd.DataFrame()
-        ztf_lc = ztf[ztf.ps1objID == int(row['ps1objID'])].copy() if row['ps1objID'] is not None else pd.DataFrame()
-
-        #print("LC len: ", len(sdss_lc), len(ps1_lc), len(ztf_lc))
-
-        # Combine light curves from different catalogs
-        times = {}
-        mags = {}
-        magerrs = {}
-
-        for band in bands:  
-            sdss_ps1_offset = {
-                'g': row.sdss_g_qg - row.ps1_g_qg,
-                'r': row.sdss_r_qg - row.ps1_r_qg,
-                'i': row.sdss_i_qg - row.ps1_i_qg,
-                'z': row.sdss_z_qg - row.ps1_z_qg,
-            }
-
-            offset = sdss_ps1_offset[band] if band in sdss_ps1_offset else 0.0
-
-            times[band] = np.concatenate([
-                sdss_lc[sdss_lc.filterID == filters[band]].mjd.values if not sdss_lc.empty else [],
-                ps1_lc[ps1_lc.filterID == filters[band]].obsTime.values if not ps1_lc.empty else [],
-                ztf_lc[ztf_lc.filterID == filters[band]].mjd.values if not ztf_lc.empty else []
-            ])
-
-            mags[band] = np.concatenate([
-                sdss_lc[sdss_lc.filterID == filters[band]].psMag.values if not sdss_lc.empty else [],
-                ps1_lc[ps1_lc.filterID == filters[band]].psfMag.values + offset if not ps1_lc.empty else [],
-                ztf_lc[ztf_lc.filterID == filters[band]].mag.values + offset if not ztf_lc.empty else []
-            ])
-            mags_means = [np.nanmean(mags[band]) for band in mags.keys()]
-            #mags[band] = mags[band] - np.nanmean(mags[band])  # Center the magnitudes
-
-            magerrs[band] = np.concatenate([
-                sdss_lc[sdss_lc.filterID == filters[band]].psMagErr_p3.values if not sdss_lc.empty else [],
-                ps1_lc[ps1_lc.filterID == filters[band]].psfMagErr_p3.values if not ps1_lc.empty else [],
-                ztf_lc[ztf_lc.filterID == filters[band]].magerr_p3.values if not ztf_lc.empty else []
-            ])
-            # Select NaNs from mags and magerrs
-            nan_mask = np.isnan(mags[band]) | np.isnan(magerrs[band])
-
-            # Drop NaNs from mags and magerrs using the same indexes
-            times[band] = times[band][~nan_mask]
-            mags[band] = mags[band][~nan_mask]
-            magerrs[band] = magerrs[band][~nan_mask]
-
-            if len(times[band]) == 0 or len(mags[band]) == 0 or len(magerrs[band]) == 0:
-                continue
-
-            # Sort times, mags, magerrs by time
-            sort_idx = np.argsort(times[band])
-            times[band] = times[band][sort_idx]
-            mags[band] = mags[band][sort_idx]
-            magerrs[band] = magerrs[band][sort_idx]
-
-        # Skip if no data is available for the object
-        if all((len(times[band]) == 0 or len(mags[band]) == 0 or len(magerrs[band]) == 0) for band in bands):
-            print(f"No data available for object {object_id}, skipping.", flush=True)
-            continue
-
-
-        s82_objs.append({
-            'object_id': object_id,
-            'times': times,
-            'mags': mags,
-            'mags_mean': mags_means,
-            'magerrs': magerrs,
-        })
-
-        #save_lc_plot(times, mags, magerrs, object_id, bands=bands)
-
-    hdul.close()
-
-    print(f"Found {len(s82_objs)} objects in concat_light_curves after time cut", len(s82_objs))
-
-    s82_objs = populate_sdss_fields(s82_objs, progress_bar=progress_bar)
-
-    if save_file_path:
-        with h5py.File(save_file_path, "w") as hdf:
-            for obj in s82_objs:
-                object_id = obj["object_id"]
-                group = hdf.create_group(object_id)
-
-                # Save all attributes
-                for key, value in obj.items():
-                    if isinstance(value, dict):
-                        sub_group = group.create_group(key)
-                        for sub_key, sub_value in value.items():
-                            sub_group.create_dataset(sub_key, data=sub_value)
-                    else:
-                        group.attrs[key] = value
-        print(f"Saved {len(s82_objs)} LCs to {save_file_path}")
-
-    return s82_objs
-
-def load_s82_from_hdf5(file_path="s82_objs.h5"):
-    s82_objs = []
-
-    with h5py.File(file_path, "r") as hdf:
-        for object_id in hdf.keys():
-            group = hdf[object_id]
-            data = {"object_id": object_id}
-
-            # Load attributes
-            for attr_key in group.attrs.keys():
-                data[attr_key] = group.attrs[attr_key]
-
-            # Load datasets
-            for key in group.keys():
-                if isinstance(group[key], h5py.Group):
-                    data[key] = {}
-                    for sub_key in group[key].keys():
-                        data[key][sub_key] = group[key][sub_key][...]
-                else:
-                    data[key] = group[key][...]
-
-            s82_objs.append(data)
-
-    return s82_objs
-
-def populate_sdss_fields(s82_objs, progress_bar=False):
-    #print(f"Populating SDSS fields: {len(s82_objs)}", flush=True)
-    cat = pd.read_parquet(f"data/S82/Catalog.parquet").set_index('idx')
-    hdul = fits.open('data/dr16q_prop_May01_2024.fits')
-    fits_data = hdul[1].data  # Assuming the data is in the first extension    
-    fits_data_2 = hdul[2].data  # Assuming the data is in the first extension    
-    for d in tqdm(s82_objs, desc="Populating SDSS fields", disable=(not progress_bar)):
-        obj = cat.loc[cat['objectId'] == d['object_id']].iloc[0]
-        c1 = SkyCoord(fits_data['RA'], fits_data['DEC'], unit='deg')
-        c2 = SkyCoord(obj['RA'], obj['DEC'], unit='deg')
-        sep = c1.separation(c2).to(u.arcsec)
-        j = np.argwhere(sep < 1*u.arcsec).flatten()
-        if len(j) == 0:
-            print(f"Skipping entry {d['object_id']} as it does not exist in the fits data.")
-            continue
-        
-        j = j[0]  # Get the first index if there are multiple matches
-        d['ra'] = obj['RA']
-        d['dec'] = obj['DEC']
-        d['z'] = obj['Z_SYS']
-        d['sdss_name'] = fits_data['SDSS_NAME'][j]  # Extract SDSS_NAME
-        d['log_lbol'] = fits_data['LOGLBOL'][j]  # Extract log Lbol values
-        d["log_lbol_err"] = fits_data['LOGLBOL_ERR'][j]  # Extract log Lbol error values
-        d['log_mbh'] = fits_data['LOGMBH'][j]  # Extract log MBH values
-        d['log_mbh_err'] = fits_data['LOGMBH_ERR'][j]  # Extract log MBH error values
-        d['log_ledd_ratio'] = fits_data['LOGLEDD_RATIO'][j]  # Extract log L/edd values
-        d['log_ledd_ratio_err'] = fits_data['LOGLEDD_RATIO_ERR'][j]  # Extract log L/edd error values
-
-    return s82_objs
-
-def append_hdf5_file(quasar_list, file_path):
-    # Append to HDF5 file if it exists, otherwise create a new one
-    print(f"Appending {len(quasar_list)} quasars to {file_path}", flush=True)
-    with h5py.File(file_path, "a") as hdf:
-        for quasar in quasar_list:
-            object_id = quasar["object_id"]
-            if object_id in hdf:
-                continue
-
-            group = hdf.create_group(object_id)
-            for key, value in quasar.items():
-                if isinstance(value, dict):
-                    sub_group = group.create_group(key)
-                    for sub_key, sub_value in value.items():
-                        sub_group.create_dataset(sub_key, data=sub_value)
-                else:
-                    group.attrs[key] = value
-
                     
 if __name__ == '__main__': 
     print("Starting multiband fit", flush=True)

@@ -1,4 +1,7 @@
 import h5py
+import os
+
+suffix = os.environ.get('SUFFIX', None)
 
 def modify_h5_file(save_file_path, s82_objs):
     with h5py.File(save_file_path, "a") as hdf:  # Open in append mode to modify
@@ -167,3 +170,39 @@ def bands_with_any_contamination_annotated(z):
     results['combined'] = combined
 
     return results['combined']
+
+def save_samples_to_hdf5(samples, object_id):
+    """
+    Save all samples to an HDF5 file, one file per object_id.
+
+    Args:
+        samples (dict): Dictionary containing MCMC samples.
+        object_id (str): The object ID for which the samples belong.
+        output_dir (str): Directory where the HDF5 files will be saved.
+    """
+    output_dir=f"samples_{suffix}"
+    os.makedirs(output_dir, exist_ok=True)
+    file_path = os.path.join(output_dir, f"{object_id}.h5")
+
+    with h5py.File(file_path, "w") as hdf:
+        for key, value in samples.items():
+            hdf.create_dataset(key, data=value)
+    print(f"Saved samples for object_id {object_id} to {file_path}")
+
+def append_hdf5_file(quasar_list, file_path):
+    # Append to HDF5 file if it exists, otherwise create a new one
+    print(f"Appending {len(quasar_list)} quasars to {file_path}", flush=True)
+    with h5py.File(file_path, "a") as hdf:
+        for quasar in quasar_list:
+            object_id = quasar["object_id"]
+            if object_id in hdf:
+                continue
+
+            group = hdf.create_group(object_id)
+            for key, value in quasar.items():
+                if isinstance(value, dict):
+                    sub_group = group.create_group(key)
+                    for sub_key, sub_value in value.items():
+                        sub_group.create_dataset(sub_key, data=sub_value)
+                else:
+                    group.attrs[key] = value
