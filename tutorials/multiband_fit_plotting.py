@@ -4,6 +4,7 @@ import corner
 import numpy as np
 import os
 
+suffix = os.environ.get('SUFFIX', None)
 
 lambda_pivot = {
     'u': 3543,  # SDSS u-band
@@ -100,17 +101,23 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, data):
     ax.invert_yaxis()  # Magnitudes are brighter when lower
     #ax.legend(loc='lower right')
     
-    log_sigma_band = [f"{a:.2f}" for a in data['log_sigma_band']]
+    log_sigma_band = [f"{a:.2f}" for a in data['log_sigma_UV_band']]
     log_sigma_band = ",".join(log_sigma_band)
-    log_sigma_band_err = [f"{a:.2f}" for a in data['log_sigma_band_err']]
+    log_sigma_band_err = [f"{a:.2f}" for a in data['log_sigma_UV_band_err']]
     log_sigma_band_err = ",".join(log_sigma_band_err)
+
+    log_tau_UV_RF_band = [f"{a:.2f}" for a in data['log_tau_UV_RF_band']]
+    log_tau_UV_RF_band = ",".join(log_tau_UV_RF_band)
+    log_tau_UV_RF_band_err = [f"{a:.2f}" for a in data['log_tau_UV_RF_band_err']]
+    log_tau_UV_RF_band_err = ",".join(log_tau_UV_RF_band_err)
     # Annotate tau_RF and sigma_RF with their values and errors
     ax.annotate(
         f"z: {data['z']:.2f}\n"
         f"$\\log_{{10}}(\\tau_{{UV RF}})$: {data['log_tau_UV_RF']:.2f} ± {data['log_tau_UV_RF_err']:.2f}\n"
+        f"$\\log_{{10}}(\\tau_{{UV RF}})$: {log_tau_UV_RF_band}\n                 ± {log_tau_UV_RF_band_err}\n"
         f"$\\log_{{10}}(\\tau_{{blr}})$: {data['log_tau_blr']:.2f} ± {data['log_tau_blr_err']:.2f}\n"
         f"$\\log_{{10}}(\\sigma_{{UV}})$: {data['log_sigma_UV']:.2f} ± {data['log_sigma_UV_err']:.2f}\n"
-        f"$\\log_{{10}}(\\sigma_{{blr}})$: {log_sigma_band}\n                 ± {log_sigma_band_err}\n"
+        f"$\\log_{{10}}(\\sigma_{{UV}})$: {log_sigma_band}\n                 ± {log_sigma_band_err}\n"
         f"$\\eta_{{A_1}}$: {data['eta_A1']:.2f} ± {data['eta_A1_err']:.2f}\n"
         f"$\\eta_{{A_2}}$: {data['eta_A2']:.2f} ± {data['eta_A2_err']:.2f}\n"
         f"$\\eta_{{\\tau_1}}$: {data['eta_tau1']:.2f} ± {data['eta_tau1_err']:.2f}\n"
@@ -140,7 +147,7 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, data):
     plt.tight_layout()
 
     # Save the plot as a PNG file
-    output_dir = "light_curves_fits"
+    output_dir = f"light_curves_fits_{suffix}" if suffix else "light_curves_fits"
     os.makedirs(output_dir, exist_ok=True)
     plt.savefig(os.path.join(output_dir, f'{data['z']:.1f}_{object_id}_combined_plot.png'), dpi=120)
     plt.close(fig)

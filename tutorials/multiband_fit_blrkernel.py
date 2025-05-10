@@ -1,14 +1,79 @@
 
-import os
-os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=32"
-os.environ["OMP_NUM_THREADS"] = "32"
-os.environ["MKL_NUM_THREADS"] = "32"
-os.environ["NUMEXPR_NUM_THREADS"] = "32"
-os.environ["OPENBLAS_NUM_THREADS"] = "32"
-os.environ["VECLIB_MAXIMUM_THREADS"] = "32"
-os.environ["NUMBA_NUM_THREADS"] = "32"
-os.environ["JAX_TRACEBACK_FILTERING"] = "off"
+import jax
+import jax.numpy as jnp
 
+print("All JAX devices:", jax.devices())
+print("Default JAX device:", jax.devices()[0])
+
+print("JAX 64-bit enabled:", jax.config.read("jax_enable_x64"))
+
+if not jax.config.read("jax_enable_x64"):
+    raise RuntimeError("JAX 64-bit mode is not enabled. Please set jax_enable_x64 = True.")
+# Create a float64 array
+arr = jnp.array([1.0, 2.0, 3.0], dtype=jnp.float64)
+assert arr.dtype == jnp.float64, "Array is not float64"
+
+@jax.jit
+def dot64(x, y):
+    return jnp.dot(x, y)
+
+x = jnp.ones((1000,), dtype=jnp.float64)
+y = jnp.ones((1000,), dtype=jnp.float64)
+print(dot64(x, y))  # Should run without error and return 1000.0
+
+def assert_jax_gpu_64bit_ok():
+    all_ok = True
+
+    # 1. Check 64-bit mode
+    x64_enabled = jax.config.read("jax_enable_x64")
+    print(f"JAX 64-bit mode enabled: {x64_enabled}")
+    if not x64_enabled:
+        all_ok = False
+
+    # 2. Create matrix and check dtype
+    key = jax.random.PRNGKey(0)
+    A = jax.random.normal(key, (3, 3), dtype=jnp.float64)
+    print(f"Matrix dtype: {A.dtype}")
+    if A.dtype != jnp.float64:
+        all_ok = False
+
+    # 3. Check GPU availability
+    gpu_devices = [d for d in jax.devices() if d.platform == "gpu"]
+    if gpu_devices:
+        gpu = gpu_devices[0]
+        print(f"Using GPU device: {gpu}")
+    else:
+        print("❌ No GPU found by JAX.")
+        all_ok = False
+        gpu = None
+
+    # 4. Cholesky comparison
+    try:
+        K = A @ A.T + 1e-6 * jnp.eye(3)
+        K_cpu = jax.device_put(K, jax.devices("cpu")[0])
+        K_gpu = jax.device_put(K, gpu)
+
+        L_cpu = jnp.linalg.cholesky(K_cpu)
+        L_gpu = jnp.linalg.cholesky(K_gpu)
+        L_gpu_cpu = jax.device_get(L_gpu)
+
+        close = jnp.allclose(L_gpu_cpu, L_cpu, atol=1e-12)
+        print(f"Cholesky GPU vs CPU match: {close}")
+        if not close:
+            all_ok = False
+    except Exception as e:
+        print(f"❌ Cholesky comparison failed: {e}")
+        all_ok = False
+
+    if all_ok:
+        print("✅ All checks passed: 64-bit enabled, GPU available, and numerics consistent.")
+    else:
+        raise RuntimeError("❌ One or more JAX diagnostic checks failed.")
+
+assert_jax_gpu_64bit_ok()
+
+
+import os
 from collections.abc import Callable
 import equinox as eqx
 from tinygp.helpers import JAXArray
@@ -21,11 +86,6 @@ import pandas as pd
 from tqdm import tqdm, trange
 
 import scipy.stats as st
-
-import jax
-import jax.numpy as jnp
-
-
 import numpyro
 from numpyro import infer
 from numpyro.infer import MCMC, NUTS, AIES, Predictive
@@ -34,15 +94,7 @@ import numpyro.distributions as dist
 from tinygp import kernels, solvers
 
 print("Total device count:", jax.local_device_count())
-#numpyro.set_host_device_count(30)
-jax.config.update("jax_enable_x64", True)
-#jax.config.update("jax_platform_name", "cpu")
 learning_rate=0.001
-
-# jax.config.update("jax_enable_x64", True)
-# jax.config.update("jax_platform_name", "gpu")
-#learning_rate=0.0001
-
 import warnings
 import jax.scipy as jsp
 from jax.scipy.special import erfc, logsumexp
@@ -162,9 +214,9 @@ class MyMultibandLowRank(tinygp.kernels.Kernel):
 
     def __init__(self, sigma, scale, amplitudes, amplitudes_blr, lag_blr, taus, tau_drw_blr) -> None:
         self.sigma = sigma
-        self.amplitudes = amplitudes * sigma
-        self.amplitudes_blr = amplitudes_blr * sigma
-        self.lag_blr = lag_blr
+        self.amplitudes = amplitudes
+        self.amplitudes_blr = amplitudes_blr
+        self.lag_blr = jnp.zeros_like(lag_blr)
         self.tau_drw = scale * taus
         self.tau_drw_blr = tau_drw_blr
 
@@ -227,8 +279,15 @@ class MyMultibandLowRank(tinygp.kernels.Kernel):
 
         return cov_ac + cov_ad + cov_bc + cov_bd
 
-def log_broken_pl(lam, lam_s, d1, d2):
-    return -jnp.log10(jnp.power(lam/lam_s, d1) + jnp.power(lam/lam_s, d2))
+# def log_broken_pl(lam, lam_s, d1, d2):
+#     return -jnp.log10(jnp.power(lam/lam_s, d1) + jnp.power(lam/lam_s, d2))
+
+def log_broken_pl(lam, lam_s, d1, d2, ds=2.0):
+    x = lam / lam_s
+    log_f = -jnp.log10(
+        jnp.power(x, d1) * jnp.power(1.0 + jnp.power(x, ds), (d2 - d1) / ds)
+    )
+    return log_f
 
 # Override MultiVarModel
 class MyMultiVarModel(MultiVarModel):
@@ -293,7 +352,7 @@ class MyMultiVarModel(MultiVarModel):
             amplitudes_blr=jnp.exp(log_amps_blr),
             lag_blr=jnp.exp(params["log_lag_blr"])[band[inds]],
             sigma=jnp.exp(params["log_kernel_param"][1]),
-            scale=jnp.exp(params["log_kernel_param"][0]),
+            scale=jnp.exp(params["log_kernel_param"][0] - jnp.log(1+self.z)),
             taus=jnp.exp(log_taus)[band[inds]],
             tau_drw_blr=jnp.exp(params["log_tau_drw_blr"]),
         )
@@ -301,7 +360,7 @@ class MyMultiVarModel(MultiVarModel):
             MyGaussianProcess(
                 kernel,
                 (t[inds], band[inds]),
-                diag=diags +1e-4,
+                diag=diags + 1e-5,
                 mean=means,
                 solver=DirectFullRank,
             ),
@@ -502,14 +561,14 @@ def numpyro_model(X, yerr, y=None, bestP=None, clean_bands=None, z=None):
 
     # lag
     lag = numpyro.sample("lag", dist.Normal(jnp.full_like(bestP["lag"], 0.0), 10))
-    log_lag_blr = numpyro.sample("log_lag_blr", dist.Normal(jnp.full_like(bestP["log_lag_blr"], 5.0), 2.0))
+    log_lag_blr = numpyro.sample("log_lag_blr", dist.Normal(jnp.full_like(bestP["log_lag_blr"], 0.0), 2.0))
 
     # log tau drw blr
     log_tau_drw_blr = numpyro.sample("log_tau_drw_blr", dist.Normal(2.8, 2.0))
     
     # log jitter, mean => the prior for these two should be set small, otherwise
     # it is hard to converge
-    log_jitter = numpyro.sample("log_jitter", dist.Normal(np.full_like(bestP["log_jitter"], np.log(1e-4)), 0.2))
+    log_jitter = numpyro.sample("log_jitter", dist.Normal(np.full_like(bestP["log_jitter"],  np.log(1e-4)), 2.0))
     
     mean = numpyro.sample("mean", dist.Normal(jnp.full_like(bestP["mean"], 0.0), 0.1))
     poly1 = numpyro.sample("poly1", dist.Normal(0.0, 10.0))
@@ -561,6 +620,7 @@ def fit_multiband(data, progress_bar=False, plot=False, svi=False):
     clean_bands = list(set(bands) - set(blue_bands))
     # Reorder clean_bands to match the desired order
     clean_bands = list(sorted(clean_bands, key=lambda band: ['u', 'g', 'r', 'i', 'z', 'y'].index(band)))
+    #clean_bands = bands
     data['clean_bands'] = clean_bands
     if len(clean_bands) == 0:
         print(f"No clean bands for quasar {data['object_id']}, skipping.", flush=True)
@@ -694,8 +754,8 @@ def fit_multiband(data, progress_bar=False, plot=False, svi=False):
 
             mcmc = MCMC(
                 nuts_kernel,
-                num_warmup=50, # This could be less than num_samples
-                num_samples=10,
+                num_warmup=250, # This could be less than num_samples
+                num_samples=100,
                 num_chains=2*num_params,
                 progress_bar=True,
                 chain_method="vectorized",
@@ -727,11 +787,12 @@ def fit_multiband(data, progress_bar=False, plot=False, svi=False):
     
     samples_log_sigma_UV = samples['log_kernel_param'][:, 1] / np.log(10) + log_broken_pl(lambda_ref, lambda_s_RF, eta_A1, eta_A2)
     samples_log_amp_delta = np.array([log_broken_pl(lambda_pivot[band], samples["lam_s"], eta_A1, eta_A2) for band in clean_bands])
-    samples_log_sigma_band = samples_log_sigma_UV[:, None] + samples_log_amp_delta.T
+    samples_log_sigma_UV_band = samples_log_sigma_UV[:, None] + samples_log_amp_delta.T
 
-    samples_log_tau_UV   = samples['log_kernel_param'][:, 0] / np.log(10) + log_broken_pl(lambda_ref, lambda_s_RF, eta_tau1, eta_tau2)
-    samples_log_tau_UV_RF = samples_log_tau_UV - np.log10(1 + data['z']) # time dilation correction
-    
+    samples_log_tau_UV_RF = samples['log_kernel_param'][:, 0] / np.log(10) - np.log10(1 + data['z']) + log_broken_pl(lambda_ref, lambda_s_RF, eta_tau1, eta_tau2)
+    samples_log_tau_delta = np.array([log_broken_pl(lambda_pivot[band], samples["lam_s"], eta_A1, eta_A2) for band in clean_bands])
+    samples_log_tau_UV_RF_band = samples_log_tau_UV_RF[:, None] + samples_log_tau_delta.T
+
     def sym_percentile(x, p=[16, 50, 84], axis=0):
         lower, median, upper = np.percentile(x, p, axis=axis)
         return median, 0.5 * (upper - lower)
@@ -751,8 +812,9 @@ def fit_multiband(data, progress_bar=False, plot=False, svi=False):
     log_sigma, log_sigma_err = sym_percentile(np.log10(np.exp(samples['log_kernel_param'][:, 1])))
 
     log_tau_UV_RF, log_tau_UV_RF_err = sym_percentile(samples_log_tau_UV_RF)
+    log_tau_UV_RF_band, log_tau_UV_RF_band_err = sym_percentile(samples_log_tau_UV_RF_band)
     log_sigma_UV, log_sigma_UV_err = sym_percentile(samples_log_sigma_UV)
-    log_sigma_band, log_sigma_band_err = sym_percentile(samples_log_sigma_band, axis=0)
+    log_sigma_UV_band, log_sigma_UV_band_err = sym_percentile(samples_log_sigma_UV_band, axis=0)
 
     # BLR
     log_tau_blr, log_tau_blr_err = sym_percentile(np.log10(np.exp(samples['log_tau_drw_blr'])))
@@ -766,8 +828,13 @@ def fit_multiband(data, progress_bar=False, plot=False, svi=False):
             # kernel params latent
             log_tau_UV_RF=log_tau_UV_RF,
             log_tau_UV_RF_err=log_tau_UV_RF_err,
+            log_tau_UV_RF_band=log_tau_UV_RF_band,
+            log_tau_UV_RF_band_err=log_tau_UV_RF_band_err,
             log_sigma_UV=log_sigma_UV,
             log_sigma_UV_err=log_sigma_UV_err,
+            log_sigma_UV_band=log_sigma_UV_band,
+            log_sigma_UV_band_err=log_sigma_UV_band_err,
+            # broken power law params
             eta_A1=eta_A1,
             eta_A1_err=eta_A1_err,
             eta_A2=eta_A2,
@@ -781,8 +848,6 @@ def fit_multiband(data, progress_bar=False, plot=False, svi=False):
             # kernel params
             log_sigma=log_sigma,
             log_sigma_err=log_sigma_err,
-            log_sigma_band=log_sigma_band,
-            log_sigma_band_err=log_sigma_band_err,
             log_tau=log_tau,
             log_tau_err=log_tau_err,
             # BLR
@@ -806,7 +871,7 @@ def fit_multiband(data, progress_bar=False, plot=False, svi=False):
     if plot:
         save_combined_plot(samples, m1, X, y, yerr, band_idx[mask_outlier], d)
         #plot_mcmc_traces(samples, d)
-        #plot_posterior(samples, data, clean_bands=clean_bands)
+        # plot_posterior(samples, data, clean_bands=clean_bands)
         # psd_results = compute_psd_from_samples(samples, clean_bands)
         # d['psd'] = psd_results
         # plot_psd(psd_results, data['object_id'])    
