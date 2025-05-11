@@ -1,7 +1,22 @@
 import h5py
 import os
+import numpy as np
+import jax.numpy as jnp
 
 suffix = os.environ.get('SUFFIX', None)
+
+
+lambda_pivot = {
+    'u': 3543,  # SDSS u-band
+    'g': 4770,  # SDSS g-band
+    'r': 6231,  # SDSS r-band
+    'i': 7625,  # SDSS i-band
+    'z': 9134,  # SDSS z-band
+    'y': 9633,  # PS1 y-band
+}
+
+filters = {"u": 0, "g": 1, "r": 2, "i": 3, "z": 4, "y": 5} # harcoded filter order for SDSS
+bands = ['u', 'g', 'r', 'i', 'z']#, 'y']
 
 def modify_h5_file(save_file_path, s82_objs):
     with h5py.File(save_file_path, "a") as hdf:  # Open in append mode to modify
@@ -206,3 +221,111 @@ def append_hdf5_file(quasar_list, file_path):
                         sub_group.create_dataset(sub_key, data=sub_value)
                 else:
                     group.attrs[key] = value
+
+# def log_broken_pl(lam, lam_s, d1, d2):
+#     return -jnp.log10(jnp.power(lam/lam_s, d1) + jnp.power(lam/lam_s, d2))
+
+def log_broken_pl(lam, lam_s, d1, d2, ds=2.0):
+    x = lam / lam_s
+    log_f = -jnp.log10(
+        jnp.power(x, d1) * jnp.power(1.0 + jnp.power(x, ds), (d2 - d1) / ds)
+    )
+    return log_f
+
+def process_samples(samples, data):
+    clean_bands = data['clean_bands']
+    object_id = data['object_id']
+    save_samples_to_hdf5(samples, data['object_id'])
+
+    # power laws
+    eta_A1 = samples["eta_A1"]
+    eta_A2 = eta_A1 + samples["ep_A"]
+    eta_tau1 = samples["eta_tau1"]
+    eta_tau2 = eta_tau1 + samples["ep_tau"]
+    
+    lambda_ref = 2500 # Any reference wavelength
+    lambda_s_RF = samples["lam_s"]
+    
+    samples_log_sigma_UV = samples['log_kernel_param'][:, 1] / np.log(10) + log_broken_pl(lambda_ref, lambda_s_RF, eta_A1, eta_A2)
+    samples_log_amp_delta = np.array([log_broken_pl(lambda_pivot[band], samples["lam_s"], eta_A1, eta_A2) if band in clean_bands else np.full_like(samples["lam_s"], -9999) for band in bands])                                                                               
+    samples_log_sigma_band = samples['log_kernel_param'][:, 1:2] / np.log(10)  + samples_log_amp_delta.T
+
+    samples_log_tau_UV_RF = samples['log_kernel_param'][:, 0] / np.log(10) - np.log10(1 + data['z']) + log_broken_pl(lambda_ref, lambda_s_RF, eta_tau1, eta_tau2)
+    samples_log_tau_delta = np.array([log_broken_pl(lambda_pivot[band], samples["lam_s"], eta_tau1, eta_tau2) if band in clean_bands else np.full_like(samples["lam_s"], -9999) for band in bands])
+    samples_log_tau_band_RF = samples['log_kernel_param'][:, 0:1] / np.log(10) - np.log10(1 + data['z']) + samples_log_tau_delta.T
+
+    def sym_percentile(x, p=[16, 50, 84], axis=0):
+        lower, median, upper = np.percentile(x, p, axis=axis)
+        return median, 0.5 * (upper - lower)
+
+    # parameter estimates
+    log_jitter, log_jitter_err = sym_percentile(np.log10(np.exp(2*samples['log_jitter'])))
+    poly1, poly1_err = sym_percentile(samples['poly1'])
+    mean, mean_err = sym_percentile(samples['mean'])
+    log_lag_blr, log_lag_blr_err = sym_percentile(np.log10(np.exp(samples['log_lag_blr'])))
+    lag, lag_err = sym_percentile(samples['lag'])
+    eta_A1, eta_A1_err = sym_percentile(eta_A1)
+    eta_A2, eta_A2_err = sym_percentile(eta_A2)
+    eta_tau1, eta_tau1_err = sym_percentile(eta_tau1)
+    eta_tau2, eta_tau2_err = sym_percentile(eta_tau2)
+
+    log_tau, log_tau_err = sym_percentile(np.log10(np.exp(samples['log_kernel_param'][:, 0])))
+    log_sigma, log_sigma_err = sym_percentile(np.log10(np.exp(samples['log_kernel_param'][:, 1])))
+
+    log_tau_UV_RF, log_tau_UV_RF_err = sym_percentile(samples_log_tau_UV_RF)
+    log_tau_band_RF, log_tau_band_RF_err = sym_percentile(samples_log_tau_band_RF)
+    log_sigma_UV, log_sigma_UV_err = sym_percentile(samples_log_sigma_UV)
+    log_sigma_band, log_sigma_band_err = sym_percentile(samples_log_sigma_band)
+
+    # BLR
+    log_tau_blr, log_tau_blr_err = sym_percentile(np.log10(np.exp(samples['log_tau_drw_blr'])))
+    log_sigma_blr, log_sigma_blr_err = sym_percentile((samples['log_kernel_param'][:, 1:2] + samples['log_amp_delta_blr']) / np.log(10), axis=0)
+
+    lambda_s_RF, lambda_s_RF_err = sym_percentile(lambda_s_RF)
+
+    # Construct the result dictionary
+    d = dict(object_id=data['object_id'],
+            z=data['z'],
+            # kernel params latent
+            log_tau_UV_RF=log_tau_UV_RF,
+            log_tau_UV_RF_err=log_tau_UV_RF_err,
+            log_tau_band_RF=log_tau_band_RF,
+            log_tau_band_RF_err=log_tau_band_RF_err,
+            log_sigma_UV=log_sigma_UV,
+            log_sigma_UV_err=log_sigma_UV_err,
+            log_sigma_band=log_sigma_band,
+            log_sigma_band_err=log_sigma_band_err,
+            # broken power law params
+            eta_A1=eta_A1,
+            eta_A1_err=eta_A1_err,
+            eta_A2=eta_A2,
+            eta_A2_err=eta_A2_err,
+            eta_tau1=eta_tau1,
+            eta_tau1_err=eta_tau1_err,
+            eta_tau2=eta_tau2,
+            eta_tau2_err=eta_tau2_err,
+            lam_s=lambda_s_RF,
+            lam_s_err=lambda_s_RF_err,
+            # kernel params
+            log_sigma=log_sigma,
+            log_sigma_err=log_sigma_err,
+            log_tau=log_tau,
+            log_tau_err=log_tau_err,
+            # BLR
+            log_tau_blr=log_tau_blr,
+            log_tau_blr_err=log_tau_blr_err,
+            log_sigma_blr=log_sigma_blr,
+            log_sigma_blr_err=log_sigma_blr_err,
+            # other
+            log_jitter=log_jitter,
+            poly1=poly1,
+            poly1_err=poly1_err,
+            mean=mean,
+            mean_err=mean_err,
+            clean_bands=clean_bands,
+            log_lag_blr=log_lag_blr,
+            log_lag_blr_err=log_lag_blr_err,
+            lag=lag,
+            lag_err=lag_err,
+            )
+    return d
