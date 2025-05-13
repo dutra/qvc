@@ -508,12 +508,14 @@ def initSampler(key, nSample, nBand=None):
     logJitterSampler = UniformInit(nBand, [jnp.log(1e-4), jnp.log(0.1)])
 
     # power laws
-    etaA1Sampler = UniformInit(1, [-1, -0.2])
-    etaTau1Sampler = UniformInit(1, [-0.1, 0.1])
-    epTauSampler = UniformInit(1, [0.1, 0.4])
-    epASampler = UniformInit(1, [0, 1])
-    etaBreakSampler = UniformInit(1, [1, 6])
-    lamsSampler = UniformInit(1, [2000.0, 2500.0])
+    etaBreakSampler = UniformInit(1, [2, 6])
+    lamsSampler = UniformInit(1, [2300.0, 2700.0])
+    # sigma
+    etaA1Sampler = UniformInit(1, [-0.8, -0.6])
+    epASampler = UniformInit(1, [-0.1, 0.1])
+    # tau
+    etaTau1Sampler = UniformInit(1, [-0.1,0.1])
+    epTauSampler = UniformInit(1, [-1.2, -0.8])
 
     # kernel init
     kernelSampler = DRWInit([jnp.log(10**2.5), jnp.log(10**4.5)], [jnp.log(0.1), jnp.log(1.0)])
@@ -566,16 +568,14 @@ def numpyro_model(X, yerr, y=None, bestP=None, clean_bands=None, z=None):
     poly1 = numpyro.sample("poly1", dist.Normal(0.0, 10.0))
 
     # power laws
-    # < 2500
-    eta_A1 = numpyro.sample("eta_A1", dist.Normal(-1.0, 0.1))
-    eta_tau1 = numpyro.sample("eta_tau1", dist.Normal(0.0, 0.1))
-    # > 2500
-    ep_A = numpyro.sample("ep_A", dist.Normal(1, 0.1))
-    ep_tau = numpyro.sample("ep_tau", dist.Normal(0.4, 0.1))
-
     eta_break = numpyro.sample("eta_break", dist.Normal(4, 0.5))
-
-    lams = numpyro.sample("lam_s", dist.Normal(2500.0, 50.0))
+    lams = numpyro.sample("lam_s", dist.Normal(2500.0, 100.0))
+    # sigma
+    eta_A1 = numpyro.sample("eta_A1", dist.Normal(-0.7, 0.1))
+    ep_A = numpyro.sample("ep_A", dist.Normal(0, 0.1))
+    # tau
+    eta_tau1 = numpyro.sample("eta_tau1", dist.Normal(0.0, 0.1))
+    ep_tau = numpyro.sample("ep_tau", dist.Normal(-1, 0.1))
 
     # kernel
     k = kernels.quasisep.Exp(*jnp.exp(log_kernel_param))
@@ -749,8 +749,8 @@ def fit_multiband(data, progress_bar=False, plot=False, svi=False):
 
             mcmc = MCMC(
                 nuts_kernel,
-                num_warmup=250, # This could be less than num_samples
-                num_samples=100,
+                num_warmup=500, # This could be less than num_samples
+                num_samples=250,
                 num_chains=2*num_params,
                 progress_bar=True,
                 chain_method="vectorized",
