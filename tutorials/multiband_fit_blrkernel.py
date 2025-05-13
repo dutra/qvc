@@ -285,7 +285,7 @@ class MyMultiVarModel(MultiVarModel):
     ) -> None:
         super().__init__(X, y, yerr, kernel, **kwargs)
         self.clean_bands = kwargs.get("clean_bands", None)
-        self.z = kwargs.get("z", 0.0)
+        self.z = kwargs.get("z", None)
 
     @staticmethod
     def mean_func(
@@ -296,7 +296,7 @@ class MyMultiVarModel(MultiVarModel):
         else:
             time_centered = (X[0] - jnp.nanmean(X[0]))
             time_scaled = time_centered #/ (jnp.nanmax(X[0]) - jnp.nanmin(X[0]))
-            means = jnp.atleast_1d(params["mean"]) #+ params["poly1"] * time_scaled
+            means = jnp.atleast_1d(params["mean"]) + params["poly1"] * time_scaled
         return means[X[1]]
     
     def _build_gp(
@@ -341,7 +341,7 @@ class MyMultiVarModel(MultiVarModel):
             GaussianProcess(
                 kernel,
                 (t[inds], band[inds]),
-                diag=diags + 1e-5,
+                diag=diags + 1e-6,
                 mean=means), 
         inds,)
         # return (
@@ -361,14 +361,16 @@ class MyMultiVarModel(MultiVarModel):
         eta_tau1 = params["eta_tau1"]
         eta_tau2 = eta_tau1 + params["ep_tau"]
         lam_s = params["lam_s"]
-        params["log_tau_delta"] = jnp.log(10) * jnp.array([log_broken_pl(lambda_pivot[band]/(1 + self.z), lam_s, eta_tau1, eta_tau2) for band in self.clean_bands])
+        eta_break = params["eta_break"]
+        params["log_tau_delta"] = jnp.log(10) * jnp.array([log_broken_pl(lambda_pivot[band]/(1 + self.z), lam_s, eta_tau1, eta_tau2, eta_break) for band in self.clean_bands])
         return params["log_tau_delta"]
 
     def my_amp_transform(self, params: dict[str, JAXArray]) -> JAXArray:
         eta_A1 = params["eta_A1"]
         eta_A2 = eta_A1 + params["ep_A"]
         lam_s = params["lam_s"]
-        params["log_amp_delta"] = jnp.log(10) * jnp.array([log_broken_pl(lambda_pivot[band]/(1 + self.z), lam_s, eta_A1, eta_A2) for band in self.clean_bands])
+        eta_break = params["eta_break"]
+        params["log_amp_delta"] = jnp.log(10) * jnp.array([log_broken_pl(lambda_pivot[band]/(1 + self.z), lam_s, eta_A1, eta_A2, eta_break) for band in self.clean_bands])
         return params["log_amp_delta"]
     
     @eqx.filter_jit
@@ -503,13 +505,14 @@ def initSampler(key, nSample, nBand=None):
     poly1Sampler = UniformInit(1, [-10, 10])
     logAmpDeltaSampler = UniformInit(nBand-1, [-2.0, 0.0])
     logAmpDeltaBLRSampler = UniformInit(nBand, [-5.0, -2.0])
-    logJitterSampler = UniformInit(nBand, [jnp.log(1e-5), jnp.log(0.1)])
+    logJitterSampler = UniformInit(nBand, [jnp.log(1e-4), jnp.log(0.1)])
 
     # power laws
-    etaA1Sampler = UniformInit(1, [0.5, 0.1])
-    etaTau1Sampler = UniformInit(1, [-1.5, -2.0])
-    epTauSampler = UniformInit(1, [-0.1, 0.1])
-    epASampler = UniformInit(1, [-0.1, 0.1])
+    etaA1Sampler = UniformInit(1, [-1, -0.2])
+    etaTau1Sampler = UniformInit(1, [-0.1, 0.1])
+    epTauSampler = UniformInit(1, [0.1, 0.4])
+    epASampler = UniformInit(1, [0, 1])
+    etaBreakSampler = UniformInit(1, [1, 6])
     lamsSampler = UniformInit(1, [2000.0, 2500.0])
 
     # kernel init
@@ -530,7 +533,8 @@ def initSampler(key, nSample, nBand=None):
         "eta_tau1": etaTau1Sampler(subkeys[10], nSample),
         "ep_A": epASampler(subkeys[11], nSample),
         "ep_tau": epTauSampler(subkeys[12], nSample),
-        "lam_s": lamsSampler(subkeys[13], nSample),
+        "eta_break": etaBreakSampler(subkeys[13], nSample),
+        "lam_s": lamsSampler(subkeys[14], nSample),
     }
 
 def numpyro_model(X, yerr, y=None, bestP=None, clean_bands=None, z=None):
@@ -557,17 +561,19 @@ def numpyro_model(X, yerr, y=None, bestP=None, clean_bands=None, z=None):
     # log jitter, mean => the prior for these two should be set small, otherwise
     # it is hard to converge
     #log_jitter = numpyro.sample("log_jitter", dist.Normal(np.full_like(bestP["log_jitter"],  np.log(1e-3)), 10.0))
-    log_jitter = numpyro.sample("log_jitter", dist.Normal(jnp.full_like(bestP["log_jitter"], np.log(1e-4)), 2.0))    
+    log_jitter = numpyro.sample("log_jitter", dist.Normal(jnp.full_like(bestP["log_jitter"], np.log(1e-4)), 1.0))    
     mean = numpyro.sample("mean", dist.Normal(jnp.full_like(bestP["mean"], 0.0), 0.1))
     poly1 = numpyro.sample("poly1", dist.Normal(0.0, 10.0))
 
     # power laws
     # < 2500
-    eta_A1 = numpyro.sample("eta_A1", dist.Normal(1.0, 0.1))
+    eta_A1 = numpyro.sample("eta_A1", dist.Normal(-1.0, 0.1))
     eta_tau1 = numpyro.sample("eta_tau1", dist.Normal(0.0, 0.1))
     # > 2500
-    ep_A = numpyro.sample("ep_A", dist.Normal(0.1, 0.1))
-    ep_tau = numpyro.sample("ep_tau", dist.Normal(-0.5, 0.1))
+    ep_A = numpyro.sample("ep_A", dist.Normal(1, 0.1))
+    ep_tau = numpyro.sample("ep_tau", dist.Normal(0.4, 0.1))
+
+    eta_break = numpyro.sample("eta_break", dist.Normal(4, 0.5))
 
     lams = numpyro.sample("lam_s", dist.Normal(2500.0, 50.0))
 
@@ -589,6 +595,7 @@ def numpyro_model(X, yerr, y=None, bestP=None, clean_bands=None, z=None):
         "ep_tau": ep_tau,
         "eta_A1": eta_A1,
         "eta_tau1": eta_tau1,
+        "eta_break": eta_break,
         "lam_s": lams,
     }
     m1.sample(sample_params)
@@ -605,7 +612,7 @@ def fit_multiband(data, progress_bar=False, plot=False, svi=False):
     red_bands = bands_redder_than_5000(data['z'])
     blue_bands = bands_bluer_than_lyman_alpha(data['z'])
 
-    clean_bands = list(set(bands) - set(blue_bands))
+    clean_bands = list(set(bands) - set(blue_bands) - set(red_bands))
     # Reorder clean_bands to match the desired order
     clean_bands = list(sorted(clean_bands, key=lambda band: ['u', 'g', 'r', 'i', 'z', 'y'].index(band)))
     #clean_bands = bands
@@ -742,8 +749,8 @@ def fit_multiband(data, progress_bar=False, plot=False, svi=False):
 
             mcmc = MCMC(
                 nuts_kernel,
-                num_warmup=100, # This could be less than num_samples
-                num_samples=50,
+                num_warmup=250, # This could be less than num_samples
+                num_samples=100,
                 num_chains=2*num_params,
                 progress_bar=True,
                 chain_method="vectorized",
@@ -823,10 +830,10 @@ if __name__ == '__main__':
         else:
             existing_object_ids = set()
 
-    filter_object_ids = set(args.filter_object_id) if args.filter_object_id else None
+    filter_object_ids = set(args.filter_object_id) if args.filter_object_id else set()
     filter_object_ids = set(pd.read_csv(args.filter_file, dtype={"object_id": str})["object_id"].values) if args.filter_file else filter_object_ids
     filter_object_ids = set(filter_object_ids) - set(existing_object_ids)
-    if filter_object_ids is not None:
+    if len(filter_object_ids) > 0:
         print(f"Filtering object IDs: {len(filter_object_ids)}")
     objs = concat_light_curves(filter_object_ids=filter_object_ids, N=args.N, skip=args.skip, save_file_path=args.lc_file, progress_bar=args.progress)
     if args.create_lc:
@@ -842,7 +849,8 @@ if __name__ == '__main__':
         fields_to_filter = ['times', 'mags', 'magerrs']
         #filtered_q = {k: v for k, v in q.items() if k not in fields_to_filter}
         #print(filtered_q)
-        print(f"Quasar {i}/{len(objs)} Object ID: {q['object_id']}", flush=True)
+        print("++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++\n", flush=True)
+        print(f"Quasar {i+1}/{len(objs)} Object ID: {q['object_id']}", flush=True)
         if args.file:
             append_hdf5_file([q], args.file)
 
