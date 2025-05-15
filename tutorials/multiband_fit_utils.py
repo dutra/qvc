@@ -18,6 +18,41 @@ lambda_pivot = {
 filters = {"u": 0, "g": 1, "r": 2, "i": 3, "z": 4, "y": 5} # harcoded filter order for SDSS
 bands = ['u', 'g', 'r', 'i', 'z']#, 'y']
 
+def get_unique_times(t, band, lag_blr):
+    # Step 1: build full latent time grid (t, t - lag_blr)
+    t_direct = t
+    t_lagged = t - lag_blr
+
+    t_latent = jnp.concatenate([t_direct, t_lagged])
+    band_latent = jnp.concatenate([band, band])
+
+    # Step 2: sort the combined time array (to make GP matrix construction more stable)
+    sort_idx = jnp.argsort(t_latent)
+    t_latent_sorted = t_latent[sort_idx]
+    band_latent_sorted = band_latent[sort_idx]
+
+    # Step 3: construct index maps back to sorted array
+    def find_index(t_query, t_sorted):
+        return jnp.argmin(jnp.abs(t_query[:, None] - t_sorted[None, :]), axis=1)
+
+    inv_direct = find_index(t_direct, t_latent_sorted)
+    inv_lagged = find_index(t_lagged, t_latent_sorted)
+
+    return t_latent_sorted, band_latent_sorted, inv_direct, inv_lagged
+
+def build_H(t, band, inv_direct, inv_lagged, A_c, A_b, M):
+    # Observation operator H: shape (N, M)
+    N = len(t)
+    rows = jnp.arange(N)
+    H = jnp.zeros((N, M))
+
+    # Add direct term: A_c[band] * f(t)
+    H = H.at[rows, inv_direct].add(A_c[band])
+
+    # Add lagged term: A_b[band] * f(t - tau[band])
+    H = H.at[rows, inv_lagged].add(A_b[band])
+    return H
+
 def modify_h5_file(save_file_path, s82_objs):
     with h5py.File(save_file_path, "a") as hdf:  # Open in append mode to modify
         for object_id in hdf.keys():  # Iterate through every object in the HDF5 file
