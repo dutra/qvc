@@ -616,6 +616,54 @@ def numpyro_model(X, yerr, y=None, bestP=None, clean_bands=None, z=None):
     }
     m1.sample(sample_params)
 
+def numpyro_joint_model(batch_data):
+    # --- Shared (universal) parameters ---
+    # TODO: update the priors from the previous batch
+    eta_A1 = numpyro.sample("eta_A1", dist.Normal(-1.0, 0.1))
+    eta_A2 = numpyro.sample("eta_A2", dist.Normal(-0.2, 0.1))
+    eta_tau1 = numpyro.sample("eta_tau1", dist.Normal(0.1, 0.1))
+    eta_tau2 = numpyro.sample("eta_tau2", dist.Normal(0.8, 0.1))
+    lam_s = numpyro.sample("lam_s", dist.Normal(2500.0, 50.0))
+    eta_break = numpyro.sample("eta_break", dist.Normal(4, 0.2))
+
+    for i, data in enumerate(batch_data):
+        # Object-specific parameters
+        log_kernel_param = numpyro.sample(f"log_kernel_param_{i}", dist.Uniform(jnp.array([2.0, -3.0]), jnp.array([10.0, 0.5])))
+        log_amp_delta_blr = numpyro.sample(f"log_amp_delta_blr_{i}", dist.Normal(jnp.full((len(data['clean_bands']),), -8.0), 2.0))
+        lag = numpyro.sample(f"lag_{i}", dist.Normal(jnp.zeros(len(data['clean_bands'])-1), 10))
+        log_lag_blr = numpyro.sample(f"log_lag_blr_{i}", dist.Normal(jnp.zeros(len(data['clean_bands'])), 2.0))
+        log_tau_drw_blr = numpyro.sample(f"log_tau_drw_blr_{i}", dist.Normal(2.8, 2.0))
+        log_jitter = numpyro.sample(f"log_jitter_{i}", dist.Normal(jnp.full((len(data['clean_bands']),), np.log(1e-4)), 1.0))
+        mean = numpyro.sample(f"mean_{i}", dist.Normal(jnp.zeros(len(data['clean_bands'])), 0.1))
+        poly1 = numpyro.sample(f"poly1_{i}", dist.Normal(0.0, 10.0))
+
+        params = {
+            "log_kernel_param": log_kernel_param,
+            "log_amp_delta_blr": log_amp_delta_blr,
+            "lag": lag,
+            "log_lag_blr": log_lag_blr,
+            "log_tau_drw_blr": log_tau_drw_blr,
+            "log_jitter": log_jitter,
+            "mean": mean,
+            "poly1": poly1,
+            # --- Shared parameters ---
+            "eta_A1": eta_A1,
+            "eta_A2": eta_A2,
+            "eta_tau1": eta_tau1,
+            "eta_tau2": eta_tau2,
+            "lam_s": lam_s,
+            "eta_break": eta_break,
+        }
+
+        m = MyMultiVarModel(
+            data['X'], data['y'], data['yerr'],
+            kernels.quasisep.Exp(*jnp.exp(log_kernel_param)),
+            zero_mean=zero_mean, has_jitter=has_jitter, has_lag=has_lag,
+            clean_bands=data['clean_bands'], z=data['z']
+        )
+        log_prob = m.log_prob(params)
+        numpyro.factor(f"loglike_{i}", log_prob)
+
 
 def fit_multiband(data, progress_bar=False, plot=False, svi=False):
     times = data['times']
@@ -759,6 +807,14 @@ def fit_multiband(data, progress_bar=False, plot=False, svi=False):
                 moves={AIES.DEMove() : 0.5, AIES.StretchMove() : 0.5},
                 init_strategy=init_strategy,
                 )
+
+            # Probably crazy - but why not
+            #data = {'X': X, 'y': y, 'yerr': yerr, 'band_idx': band_idx, 'object_id': data['object_id'], 'clean_bands': clean_bands, 'z': data['z']}
+            #nuts_kernel = AIES(
+            #    partial(numpyro_joint_model, batch_data=[data]),
+            #    moves={AIES.DEMove() : 0.5, AIES.StretchMove() : 0.5},
+            #    init_strategy=init_strategy,
+            #    )
 
             num_params = sum(p.size for p in bestP.values())
             #print(f"Number of parameters: {num_params}")
