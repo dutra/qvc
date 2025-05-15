@@ -587,11 +587,11 @@ def numpyro_model(X, yerr, y=None, bestP=None, clean_bands=None, z=None):
     # eta_tau2 = numpyro.sample("eta_tau2", dist.Normal(0.2, 0.1))
     # Updated (Kelly+2022, Yu+2022)
     # sigma
-    eta_A1 = numpyro.sample("eta_A1", dist.Normal(-0.15, 0.1))
-    eta_A2 = numpyro.sample("eta_A2", dist.Normal(-0.15, 0.1))
+    eta_A1 = numpyro.sample("eta_A1", dist.Normal(-1.0, 0.1)) # < 2500 AA
+    eta_A2 = numpyro.sample("eta_A2", dist.Normal(-0.2, 0.1)) # > 2500 AA
     # tau
-    eta_tau1 = numpyro.sample("eta_tau1", dist.Normal(0.3, 0.1))
-    eta_tau2 = numpyro.sample("eta_tau2", dist.Normal(0.3, 0.1))
+    eta_tau1 = numpyro.sample("eta_tau1", dist.Normal(0.1, 0.1)) # < 2500 AA
+    eta_tau2 = numpyro.sample("eta_tau2", dist.Normal(0.8, 0.1)) # > 2500 AA
 
     # kernel
     k = kernels.quasisep.Exp(*jnp.exp(log_kernel_param))
