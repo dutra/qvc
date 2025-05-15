@@ -274,9 +274,9 @@ def process_samples(samples, data):
 
     # power laws
     eta_A1 = samples["eta_A1"]
-    eta_A2 = eta_A1 + samples["ep_A"]
+    eta_A2 = samples["eta_A2"]
     eta_tau1 = samples["eta_tau1"]
-    eta_tau2 = eta_tau1 + samples["ep_tau"]
+    eta_tau2 = samples["eta_tau2"]
     eta_break = samples["eta_break"]
     
     lambda_ref = 2500 # Any reference wavelength
@@ -308,6 +308,7 @@ def process_samples(samples, data):
 
     log_tau, log_tau_err = sym_percentile(np.log10(np.exp(samples['log_kernel_param'][:, 0])))
     log_sigma, log_sigma_err = sym_percentile(np.log10(np.exp(samples['log_kernel_param'][:, 1])))
+    log_w, log_w_err = sym_percentile(np.log10(np.exp(samples.get("dlog_w", np.array([0])) + samples['log_kernel_param'][:, 0])))
 
     log_tau_UV_RF, log_tau_UV_RF_err = sym_percentile(samples_log_tau_UV_RF)
     log_tau_band_RF, log_tau_band_RF_err = sym_percentile(samples_log_tau_band_RF)
@@ -350,6 +351,8 @@ def process_samples(samples, data):
             log_sigma_err=log_sigma_err,
             log_tau=log_tau,
             log_tau_err=log_tau_err,
+            log_w=log_w,
+            log_w_err=log_w_err,
             # BLR
             log_tau_blr=log_tau_blr,
             log_tau_blr_err=log_tau_blr_err,

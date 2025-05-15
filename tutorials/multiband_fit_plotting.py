@@ -3,6 +3,7 @@ plt.style.use("style.mplstyle")
 import corner
 import numpy as np
 import os
+import jax.numpy as jnp
 
 suffix = os.environ.get('SUFFIX', None)
 
@@ -88,11 +89,12 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, data):
         ax.errorbar(t[m], y[m]+offsets[n], yerr=yerr[m], fmt='o', 
                 label=f'{band_idx_map[n]}-band', alpha=0.7, color=colors[band_idx_map[n]], lw=1.0, capsize=1, markersize=1)
         # Generate test times for predictions
-        t_test = np.linspace(t.min(), t.max(), 1000)
+        t_test = np.linspace(t.min(), t.max(), 10000)
         # Compute predictions using the model
         posterior_median = {k: np.median(v, axis=0) for k, v in samples.items()}
-        mu, std = model.pred(posterior_median, (t_test, np.full_like(t_test, n, dtype=int)))
+        mu, std = model.pred(posterior_median, (t_test, jnp.full_like(t_test, n, dtype=int)))
         # Plot the predictions
+        print(mu)
         ax.plot(t_test, mu+offsets[n], alpha=0.8, color=colors[band_idx_map[n]], lw=1.0)
         ax.fill_between(t_test, mu+offsets[n]-std, mu+offsets[n]+std, alpha=0.3, 
                 lw=0.5, color=colors[band_idx_map[n]])
@@ -124,7 +126,8 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, data):
         f"$\\eta_{{\\tau_2}}$: {data['eta_tau2']:.2f} ± {data['eta_tau2_err']:.2f}\n"
         f"$\\eta_{{\\mathrm{{break}}}}$: {data['eta_break']:.2f} ± {data['eta_break_err']:.2f}\n"
         f"$\\eta_{{\\lambda_s}}$: {data['lam_s']:.2f} ± {data['lam_s_err']:.2f}\n"        
-        f"$\\mathrm{{poly_1}}$: {data['poly1']:.2f} ± {data['poly1_err']:.2f}",
+        f"$\\mathrm{{poly_1}}$: {data['poly1']:.2f} ± {data['poly1_err']:.2f}\n"
+        f"$\\log_{{10}}(w)$: {data['log_w']:.2f} ± {data['log_w_err']:.2f}",
         xy=(0.05, 0.95),
         xycoords="axes fraction",
         fontsize=10,
@@ -151,6 +154,7 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, data):
     output_dir = f"light_curves_fits_{suffix}" if suffix else "light_curves_fits"
     os.makedirs(output_dir, exist_ok=True)
     plt.savefig(os.path.join(output_dir, f'{data['z']:.1f}_{object_id}_combined_plot.png'), dpi=120)
+    print(f"Saving figure to ", os.path.join(output_dir, f'{data['z']:.1f}_{object_id}_combined_plot.png'))
     plt.close(fig)
     return fig
 

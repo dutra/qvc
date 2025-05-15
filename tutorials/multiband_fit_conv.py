@@ -194,7 +194,11 @@ class MyGaussianProcess(GaussianProcess):
 
         return alpha, log_prob, mean_value
 
-    
+def safe_erfcx(u: JAXArray) -> JAXArray:
+    # Avoid overflow in extreme cases
+    u = jnp.clip(u, a_min=-10.0, a_max=10.0)
+    return jnp.exp(u**2) * erfc(u)
+
 class MyMultibandLowRank(tinygp.kernels.Kernel):
     sigma: float
     amplitudes: jnp.ndarray
@@ -202,39 +206,43 @@ class MyMultibandLowRank(tinygp.kernels.Kernel):
     lag_blr: jnp.ndarray
     tau_drw: jnp.ndarray
     tau_drw_blr: float
+    w: float
 
-    def __init__(self, sigma, scale, amplitudes, amplitudes_blr, lag_blr, taus, tau_drw_blr) -> None:
+    def __init__(self, sigma, scale, amplitudes, amplitudes_blr, lag_blr, taus, tau_drw_blr, w) -> None:
         self.sigma = sigma
-        self.amplitudes = amplitudes * sigma
-        self.amplitudes_blr = amplitudes_blr * sigma
         self.lag_blr = jnp.zeros_like(lag_blr)
-        self.tau_drw = scale * taus
-        self.tau_drw_blr = tau_drw_blr
+        self.amplitudes = jnp.maximum(amplitudes * sigma, 1e-6)
+        self.amplitudes_blr = jnp.maximum(amplitudes_blr * sigma, 1e-6)
+        self.tau_drw = jnp.maximum(scale * taus, 1e-6)
+        self.tau_drw_blr = jnp.maximum(tau_drw_blr, 1e-6)
+        self.w = w
 
     def coord_to_sortable(self, X) -> JAXArray:
         return X[0]
 
-    def k(self, tau, tau_drw) -> JAXArray:
-        tau = jnp.abs(tau)
-        drw = jnp.exp(-tau / tau_drw)
-        return drw
+    # def k(self, tau, tau_drw) -> JAXArray:
+    #     tau_drw = jnp.maximum(tau_drw, 1e-6)
+    #     tau = jnp.abs(tau)
+    #     sqrt2 = jnp.sqrt(2.0)
+    #     u = (self.w / (sqrt2 * tau_drw)) - (tau / (sqrt2 * self.w))
+    #     exp_term = jnp.exp(-tau / tau_drw - u**2)
+    #     return (1.0 / jnp.sqrt(2 * jnp.pi)) * exp_term * safe_erfcx(u) / self.w
 
-    # def k(self, tau, tau_drw, w=5) -> JAXArray:
-    #     # Compute the analytic convolution of DRW and Gaussian kernels
-    #     prefactor = 1 / (jnp.sqrt(2 * jnp.pi) * w)
-    #     # IDEA: take w out of the prefactor multiply it back after
-    #     exp_term = jnp.exp((w**2) / (2 * tau_drw**2) - jnp.abs(tau) / tau_drw)
-    #     erfc_term = erfc((w / jnp.sqrt(2) / tau_drw) - (jnp.abs(tau) / jnp.sqrt(2) / w))
-    #     return prefactor * exp_term * erfc_term
+    def k(self, tau, tau_drw, amplitude=1):
+        small = 1e-3
+        is_small = self.w < small
+        k_drw = amplitude**2 * jnp.exp(-jnp.abs(tau) / tau_drw)
 
+        w_safe = jnp.maximum(self.w, small)
+        exp_term = jnp.exp((w_safe**2) / (2 * tau_drw**2) - jnp.abs(tau) / tau_drw)
+        erfc_term = erfc((w_safe / jnp.sqrt(2) / tau_drw) - (jnp.abs(tau) / jnp.sqrt(2) / w_safe))
+        k_conv = 0.5 * amplitude**2 * exp_term * erfc_term
+
+        return jnp.where(is_small, k_drw, k_conv)
     def evaluate(self, X1, X2) -> JAXArray:
         t1, b1 = X1
         t2, b2 = X2
 
-        # a is cont at t1
-        # b is blr at t1
-        # c is cont at t2
-        # d is blr at t2
         cov_ac = (
             self.amplitudes[b1]
             * self.amplitudes[b2]
@@ -269,7 +277,6 @@ class MyMultibandLowRank(tinygp.kernels.Kernel):
         )
 
         return cov_ac + cov_ad + cov_bc + cov_bd
-
 # Override MultiVarModel
 class MyMultiVarModel(MultiVarModel):
     clean_bands: JAXArray
@@ -336,6 +343,7 @@ class MyMultiVarModel(MultiVarModel):
             scale=jnp.exp(params["log_kernel_param"][0] - jnp.log(1+self.z)),
             taus=jnp.exp(log_taus)[band[inds]],
             tau_drw_blr=jnp.exp(params["log_tau_drw_blr"]),
+            w=jnp.exp(log_taus[band[inds]][0] + params["dlog_w"])
         )
         return (
             GaussianProcess(
@@ -403,27 +411,36 @@ class MyMultiVarModel(MultiVarModel):
         numpyro.sample("gp", gp.numpyro_dist(), obs=self.y[inds])
 
     @eqx.filter_jit
-    def pred(
-        self, params: dict[str, JAXArray], X: JAXArray
-    ) -> tuple[JAXArray, JAXArray]:
-        """Make conditional GP prediction.
+    def pred(self, params: dict[str, JAXArray], X: JAXArray) -> tuple[JAXArray, JAXArray]:
+        """Make conditional GP prediction with debug safeguards."""
+        from jax import device_put
+        import jax
+        import jax.numpy as jnp
 
-        Args:
-            params (dict[str, JAXArray]): A dictionary containing model
-                parameters.
-            X (JAXArray): The time and band information for creating the
-                conditional GP prediction.
+        # Ensure X is on the same device
+        X = device_put(X)
 
-        Returns:
-            tuple[JAXArray, JAXArray]: A tuple of the mean GP prediction and
-        """
-        # transform time axis
+        # Transform time axis
         new_X, inds = self.lag_transform(X, self.has_lag, params)
 
-        # build gp, cond
+        # Build GP and get subset of y
         gp, inds = self._build_gp(params)
-        _, cond = gp.condition(self.y[inds], new_X)
-        return cond.loc, jnp.sqrt(cond.variance)
+        y_subset = self.y[inds]
+
+        # Debug checks
+        jax.debug.print("NaNs in y_subset: {}", jnp.isnan(y_subset).any())
+        jax.debug.print("y_subset min/max: {} / {}", jnp.nanmin(y_subset), jnp.nanmax(y_subset))
+
+        _, cond = gp.condition(y_subset, new_X)
+
+        jax.debug.print("NaNs in cond.loc: {}", jnp.isnan(cond.loc).any())
+        jax.debug.print("NaNs in cond.variance: {}", jnp.isnan(cond.variance).any())
+        jax.debug.print("Min cond.variance: {}", jnp.min(cond.variance))
+
+        safe_std = jnp.sqrt(jnp.clip(cond.variance, a_min=0.0))
+
+        return cond.loc, safe_std
+
 
 def compute_psd_from_samples(samples, clean_bands, num_points=1000, time_range=(0, 365*20)):
     """
@@ -442,6 +459,7 @@ def compute_psd_from_samples(samples, clean_bands, num_points=1000, time_range=(
     log_kernel_param = samples["log_kernel_param"]
     log_amp_delta_blr = samples["log_amp_delta_blr"]
     log_lag_blr = samples["log_lag_blr"]
+    log_w = samples["dlog_w"] + samples["log_kernel_param"][:, 0]
     eta_A1 = samples["eta_A1"]
     eta_A2 = samples["eta_A2"]
     eta_tau1 = samples["eta_tau1"]
@@ -466,6 +484,7 @@ def compute_psd_from_samples(samples, clean_bands, num_points=1000, time_range=(
         amplitudes_blr=amp_delta_blr,
         lag_blr=lag_blr,
         taus=taus,
+        w=jnp.exp(w)
     )
 
     # Generate time lags
@@ -506,24 +525,17 @@ def initSampler(key, nSample, nBand=None):
     logAmpDeltaSampler = UniformInit(nBand-1, [-2.0, 0.0])
     logAmpDeltaBLRSampler = UniformInit(nBand, [-5.0, -2.0])
     logJitterSampler = UniformInit(nBand, [jnp.log(1e-4), jnp.log(0.1)])
+    logwSampler = UniformInit(1, [0, np.log(100)])
 
     # power laws
     etaBreakSampler = UniformInit(1, [2, 5])
     lamsSampler = UniformInit(1, [2400.0, 2600.0])
-    # Colins
-    # # sigma
-    # etaA1Sampler = UniformInit(1, [-0.8, -0.6])
-    # etaA2Sampler = UniformInit(1, [-0.1, 0.1])
-    # # tau
-    # etaTau1Sampler = UniformInit(1, [0.2,0.6])
-    # etaA2Sampler = UniformInit(1, [-0.2, 0.2])
-    # Updated (Kelly+2022, Yu+2022)
     # sigma
-    etaA1Sampler = UniformInit(1, [-0.25, -0.05])
-    etaA2Sampler = UniformInit(1, [-0.25, -0.05])
+    etaA1Sampler = UniformInit(1, [-0.8, -0.6])
+    epASampler = UniformInit(1, [-0.1, 0.1])
     # tau
-    etaTau1Sampler = UniformInit(1, [0.2, 0.6])
-    etaTau2Sampler = UniformInit(1, [0.2, 0.6])
+    etaTau1Sampler = UniformInit(1, [0.2,0.6])
+    epTauSampler = UniformInit(1, [-0.2, 0.2])
 
     # kernel init
     kernelSampler = DRWInit([jnp.log(10**2.5), jnp.log(10**4.5)], [jnp.log(0.1), jnp.log(1.0)])
@@ -538,13 +550,14 @@ def initSampler(key, nSample, nBand=None):
         "log_lag_blr": loglagBLRSampler(subkeys[6], nSample),
         "log_tau_drw_blr": logtauBLRSampler(subkeys[7], nSample),
         "log_jitter": logJitterSampler(subkeys[8], nSample),
+        "dlog_w": logwSampler(subkeys[9], nSample),
         # power laws
-        "eta_A1": etaA1Sampler(subkeys[9], nSample),
-        "eta_A2": etaA2Sampler(subkeys[10], nSample),
-        "eta_tau1": etaTau1Sampler(subkeys[11], nSample),
-        "eta_tau2": etaTau2Sampler(subkeys[12], nSample),
-        "eta_break": etaBreakSampler(subkeys[13], nSample),
-        "lam_s": lamsSampler(subkeys[14], nSample),
+        "eta_A1": etaA1Sampler(subkeys[10], nSample),
+        "eta_A2": etaA1Sampler(subkeys[11], nSample),
+        "eta_tau1": etaTau1Sampler(subkeys[12], nSample),
+        "eta_tau2": etaTau1Sampler(subkeys[13], nSample),
+        "eta_break": etaBreakSampler(subkeys[14], nSample),
+        "lam_s": lamsSampler(subkeys[15], nSample),
     }
 
 def numpyro_model(X, yerr, y=None, bestP=None, clean_bands=None, z=None):
@@ -571,31 +584,27 @@ def numpyro_model(X, yerr, y=None, bestP=None, clean_bands=None, z=None):
     # log jitter, mean => the prior for these two should be set small, otherwise
     # it is hard to converge
     #log_jitter = numpyro.sample("log_jitter", dist.Normal(np.full_like(bestP["log_jitter"],  np.log(1e-3)), 10.0))
-    log_jitter = numpyro.sample("log_jitter", dist.Normal(jnp.full_like(bestP["log_jitter"], np.log(1e-4)), 1.0))    
+    log_jitter = numpyro.sample("log_jitter", dist.Normal(jnp.full_like(bestP["log_jitter"], np.log(1e-4)), 1.0))  
+    dlog_w = numpyro.sample("dlog_w", dist.Normal(jnp.full_like(bestP["dlog_w"], np.log(5)), 1))
     mean = numpyro.sample("mean", dist.Normal(jnp.full_like(bestP["mean"], 0.0), 0.1))
     poly1 = numpyro.sample("poly1", dist.Normal(0.0, 10.0))
+
+    #
+    log_w = log_kernel_param[0] + dlog_w
 
     # power laws
     eta_break = numpyro.sample("eta_break", dist.Normal(4, 0.2))
     lams = numpyro.sample("lam_s", dist.Normal(2500.0, 50.0))
-    # Colin values
-    # # sigma
-    # eta_A1 = numpyro.sample("eta_A1", dist.Normal(-0.7, 0.2))
-    # eta_A2 = numpyro.sample("eta_A2", dist.Normal(-0.7, 0.2))
-    # # tau
-    # eta_tau1 = numpyro.sample("eta_tau1", dist.Normal(0.2, 0.1))
-    # eta_tau2 = numpyro.sample("eta_tau2", dist.Normal(0.2, 0.1))
-    # Updated (Kelly+2022, Yu+2022)
     # sigma
-    eta_A1 = numpyro.sample("eta_A1", dist.Normal(-0.15, 0.1))
-    eta_A2 = numpyro.sample("eta_A2", dist.Normal(-0.15, 0.1))
+    eta_A1 = numpyro.sample("eta_A1", dist.Normal(-0.7, 0.2))
+    eta_A2 = numpyro.sample("eta_A2", dist.Normal(-0.7, 0.2))
     # tau
-    eta_tau1 = numpyro.sample("eta_tau1", dist.Normal(0.3, 0.1))
-    eta_tau2 = numpyro.sample("eta_tau2", dist.Normal(0.3, 0.1))
+    eta_tau1 = numpyro.sample("eta_tau1", dist.Normal(0.2, 0.1))
+    eta_tau2 = numpyro.sample("eta_tau2", dist.Normal(0.2, 0.1))
 
     # kernel
     k = kernels.quasisep.Exp(*jnp.exp(log_kernel_param))
-    m1 = MyMultiVarModel(X, y, yerr, k, zero_mean=zero_mean, has_jitter=has_jitter, has_lag=has_lag, clean_bands=clean_bands, z=z)
+    m1 = MyMultiVarModel(X, y, yerr, k, zero_mean=zero_mean, has_jitter=has_jitter, has_lag=has_lag, clean_bands=clean_bands, z=z, w=jnp.exp(log_w))
 
     sample_params = {
         "log_kernel_param": log_kernel_param,
@@ -606,6 +615,7 @@ def numpyro_model(X, yerr, y=None, bestP=None, clean_bands=None, z=None):
         "mean": mean,
         "poly1": poly1, 
         "log_jitter": log_jitter,
+        "dlog_w": dlog_w,
         # power laws
         "eta_A1": eta_A1,
         "eta_A2": eta_A2,
@@ -765,8 +775,8 @@ def fit_multiband(data, progress_bar=False, plot=False, svi=False):
 
             mcmc = MCMC(
                 nuts_kernel,
-                num_warmup=500, # This could be less than num_samples
-                num_samples=250,
+                num_warmup=250, # This could be less than num_samples
+                num_samples=100,
                 num_chains=2*num_params,
                 progress_bar=True,
                 chain_method="vectorized",
