@@ -26,7 +26,7 @@ def concat_light_curves(N=None, skip=None, filter_object_ids=None, save_file_pat
         print(f"concat_light_curves Loading LC data from {save_file_path}")
         s82_objs = load_s82_from_hdf5(save_file_path)
         print(f"Loaded {len(s82_objs)} objs from {save_file_path}")
-        if filter_object_ids is not None:
+        if len(filter_object_ids) > 0:
             # Filter the loaded objects based on the provided object IDs
             s82_objs = [obj for obj in s82_objs if obj['object_id'] in filter_object_ids]
             print(f"After filtering {len(filter_object_ids)}, loaded {len(s82_objs)}")
