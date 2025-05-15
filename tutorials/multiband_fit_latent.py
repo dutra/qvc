@@ -350,8 +350,7 @@ class MyMultiVarModel(MultiVarModel):
         kernel = MyMultibandLowRank(
             sigma=jnp.exp(params["log_kernel_param"][1]),
             scale=jnp.exp(params["log_kernel_param"][0] - jnp.log(1 + self.z)),
-            taus=jnp.exp(self.my_tau_drw_transform(params))[band_latent],
-            tau_drw_blr=jnp.exp(params["log_tau_drw_blr"]),
+            tau_drw=jnp.exp(self.my_tau_drw_transform(params))[band_latent],
         )
 
         t_new_latent, band_new_latent, inv_d_new, inv_l_new = get_unique_times(t_new, band_new, lag_blr)
