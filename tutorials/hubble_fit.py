@@ -121,9 +121,9 @@ def filter_unresolved_quasars(df):
 
 def load_quasar_data(file_path="s82_objs.h5"):
 
-    #quasar_list = read_quasars_from_hdf5("data/may12_objs_tauwavelength_taublr_redbands_ds4_merged.h5")
+    quasar_list = read_quasars_from_hdf5("data/may12_objs_tauwavelength_taublr_redbands_ds4_merged.h5")
     #quasar_list = read_quasars_from_hdf5("data/may13_objs_tauwavelength_taublr_freebreak_newpriors4_merged.h5")
-    quasar_list = read_quasars_from_hdf5("data/may13_objs_tauwavelength_taublr_freebreak_newpriors_all_merged.h5")
+    #quasar_list = read_quasars_from_hdf5("data/may13_objs_tauwavelength_taublr_freebreak_newpriors_all_merged.h5")
 
     print("Number of quasars loaded:", len(quasar_list))
 
@@ -162,14 +162,6 @@ def load_quasar_data(file_path="s82_objs.h5"):
     print("Final number of quasars:", len(df))
     return df
 
-
-# print("Loading quasar data...")
-# df = load_quasar_data()
-# print("Loading Pantheon data...")
-# df_pantheon = pd.read_csv('https://github.com/PantheonPlusSH0ES/DataRelease/blob/main/Pantheon%2B_Data/4_DISTANCES_AND_COVAR/Pantheon%2BSH0ES.dat?raw=true',
-#                         sep=r'\s+')
-#print("Done loading data.")
-
 def get_completeness_function_simple(mag_lim, center=20):
     """
     Simpler completeness function based on a normal CDF.
@@ -197,8 +189,12 @@ def get_completeness_function_simple(mag_lim, center=20):
 # p_detect, mag_eval, dm = get_completeness_function_simple(mag_lim=1.0, center=20)
 
 def get_completeness_function(df_agn):
+    import numpy as np
+    import h5py
+    from scipy.ndimage import gaussian_filter1d
+    from scipy.interpolate import interp1d
+
     n_bins_completeness = 26
-    # Load the magnitude true dist data
     file_path = "stacked_sampled_apparent_magnitudes.h5"
 
     with h5py.File(file_path, "r") as f:
@@ -206,46 +202,34 @@ def get_completeness_function(df_agn):
 
     mags_obs = df_agn['apparent_mag_i'].values
 
-    # Clean both datasets
+    # Clean both
     mags_true = mags_true[np.isfinite(mags_true)]
-    #mags_true += 1
     mags_obs = mags_obs[np.isfinite(mags_obs)]
 
-    # mag_min, mag_max = np.min(mags_obs), np.max(mags_obs)
     mag_min, mag_max = 14, 26
-
-    # Histogram bins
     bin_edges = np.linspace(mag_min, mag_max, n_bins_completeness)
     bin_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
-    dm = np.diff(bin_edges)[0]
 
-    # Histogram both samples
     hist_true, _ = np.histogram(mags_true, bins=bin_edges)
     hist_obs, _ = np.histogram(mags_obs, bins=bin_edges)
 
-    # Avoid division by zero
     mask = hist_true > 0
     completeness_ratio = np.zeros_like(hist_true, dtype=float)
     completeness_ratio[mask] = hist_obs[mask] / hist_true[mask]
-
-    # Smooth or regularize if needed
-    # Apply Gaussian smoothing to the completeness ratio
     completeness_ratio = gaussian_filter1d(completeness_ratio, sigma=0.5)
     completeness_ratio = np.clip(completeness_ratio, 0, 1)
 
-    # Interpolation
-    p_detect_interp = interp1d(
-        bin_centers,
-        completeness_ratio,
-        kind='quadratic',
-        bounds_error=False,
-        fill_value=(1.0, 0.0)
-    )
-
-    # --- Build Empirical Completeness Function ---
+    # Use fixed eval grid for later convolution
     mag_eval = np.linspace(mag_min, mag_max, 500)
     dm = mag_eval[1] - mag_eval[0]
-    p_detect = p_detect_interp(mag_eval)
+    interp_fn = interp1d(
+        bin_centers, completeness_ratio,
+        kind='quadratic', bounds_error=False, fill_value=(1.0, 0.0)
+    )
+    p_detect = interp_fn(mag_eval)
+
+    return p_detect, mag_eval, dm
+
 
     plt.scatter(mag_eval, p_detect)
     plt.xlabel("i-band magnitude"); plt.ylabel("Completeness")
@@ -271,9 +255,10 @@ sigma_pivot = -0.8
 tau_pivot = 2.0
 
 # --- Model Functions ---
-def M_model_single(M0, alpha, delta, log_sigma_UV, log_tau_UV_RF):
+def M_model_single(M0, alpha, log_sigma_UV, log_tau_UV_RF):
     """Variability-luminosity relation for one AGN."""
-    return M0 + alpha * (log_sigma_UV - sigma_pivot) + delta * (log_tau_UV_RF - tau_pivot)
+    #return M0 + alpha * (log_sigma_UV - sigma_pivot) + delta * (log_tau_UV_RF - tau_pivot)
+    return M0 + alpha * 2*(log_sigma_UV - sigma_pivot) - (log_tau_UV_RF - tau_pivot)
 
 def K_corr(z, alpha_nu=-0.5):
     """Simple K-correction."""
@@ -281,8 +266,7 @@ def K_corr(z, alpha_nu=-0.5):
 
 # --- Priors ---
 priors = {
-    "alpha": (0, 10),
-    "delta": (-5, 5),
+    "alpha": (-10, 10),
     "M0": (-30, -10),
     "log_f": (-3, 1),
     "H0": (60, 80),
@@ -294,7 +278,7 @@ labels = list(priors.keys())
 
 def log_likelihood(theta, cosmo_model, model_labels, model_priors, df_agn, df_pantheon, completeness_params, only_sna=False):
     params = dict(zip(model_labels, theta))
-    p_detect, mag_eval, dm = completeness_params
+  
     # Check prior bounds
     for key, (low, high) in model_priors.items():
         if not (low < params[key] < high):
@@ -317,15 +301,14 @@ def log_likelihood(theta, cosmo_model, model_labels, model_priors, df_agn, df_pa
 
     mu_cosmo = cosmo.distmod(z).value
     Kcorr = K_corr(z) + K_corr(2)
-    M_pred = M_model_single(params['M0'], params['alpha'], params['delta'], log_sigma, log_tau)
+    M_pred = M_model_single(params['M0'], params['alpha'], log_sigma, log_tau)
     mu_pred = m_obs - M_pred - Kcorr
 
     mu_err = np.sqrt(
         m_err**2 +
-        (params['alpha'] * log_sigma_err)**2 +
-        (params['delta'] * log_tau_err)**2 +
-        #(2.5 * 0.3 * np.log10(1 + z))**2 +
-        (K_corr(z) * 0.05)**2 +
+        (params['alpha'] * np.sqrt((2*log_sigma_err)**2+log_tau_err**2))**2 +
+        (2.5 * 0.3 * np.log10(1 + z))**2 +
+        #(K_corr(z) * 0.05)**2 +
         (0.055 * z)**2 +
         np.exp(2 * params['log_f'])
     )
@@ -334,30 +317,36 @@ def log_likelihood(theta, cosmo_model, model_labels, model_priors, df_agn, df_pa
     ll_agn = np.sum(stats.norm.logpdf(dmu, scale=mu_err))
 
     # Selection correction
-    m_model = M_pred + mu_cosmo
-    integrals = np.zeros(len(df_agn))
-    unique_errors = np.round(mu_err, 4)
-    unique_vals = np.unique(unique_errors)
+    if completeness_params:
+        p_detect, mag_eval, dm = completeness_params
+        m_model = M_pred + mu_cosmo
 
-    for sigma in unique_vals:
-        mask = (np.abs(mu_err - sigma) < 1e-6)
-        if np.sum(mask) == 0:
-            continue
+        integrals = np.zeros(len(df_agn))
+        unique_errors = np.round(mu_err, 4)
+        unique_vals = np.unique(unique_errors)
 
-        #kernel = stats.norm.pdf(mag_eval, loc=0.0, scale=sigma)
-        # kernel = stats.norm.pdf(mag_eval, loc=mag_eval[mag_eval.size//2], scale=sigma)
-        # conv = fftconvolve(p_detect, kernel, mode="same") * dm
-        
-        mag_eval = np.linspace(np.min(m_model) - 2, np.max(m_model) + 2, 500)
-        dm = mag_eval[1] - mag_eval[0]
+        # Precompute kernel grid
         x_kernel = mag_eval - np.median(mag_eval)
-        kernel = stats.norm.pdf(x_kernel, loc=0, scale=sigma)
-        conv = fftconvolve(p_detect, kernel, mode="same") * dm
-        integrals[mask] = np.interp(m_model[mask], mag_eval, conv)
 
-    norm_correction = np.sum(np.log(integrals + 1e-20))
+        for sigma in unique_vals:
+            if sigma <= 0 or not np.isfinite(sigma):
+                continue
 
+            mask = np.abs(mu_err - sigma) < 1e-6
+            if np.sum(mask) == 0:
+                continue
 
+            kernel = stats.norm.pdf(x_kernel, loc=0, scale=sigma)
+            conv = fftconvolve(p_detect, kernel, mode="same") * dm
+            # Avoid extrapolation issues
+            conv = np.clip(conv, 1e-12, 1.0)
+
+            # Interpolate safely
+            integrals[mask] = np.interp(m_model[mask], mag_eval, conv, left=1e-12, right=1e-12)
+
+        # Avoid NaNs in log
+        integrals = np.clip(integrals, 1e-12, None)
+        norm_correction = np.sum(np.log(integrals))
     # SNIa likelihood
     mu_snia = cosmo.distmod(df_pantheon['zHD']).value
     dmu_snia = df_pantheon['MU_SH0ES'] - mu_snia
@@ -365,11 +354,13 @@ def log_likelihood(theta, cosmo_model, model_labels, model_priors, df_agn, df_pa
 
     if only_sna:
         return ll_snia
-    
-    return ll_snia + ll_agn - norm_correction
+    if completeness_params:
+        return ll_snia + ll_agn - norm_correction
+    else:
+        return ll_snia + ll_agn
 
 
-def run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model='Flatw0waCDM', only_sna=False):
+def run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model='Flatw0waCDM', only_sna=False, completeness=True):
     if cosmo_model == 'FlatwCDM':
         cosmo_params = ['H0', 'Om0', 'w0']
     elif cosmo_model == 'Flatw0waCDM':
@@ -377,14 +368,14 @@ def run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model='Flatw0waCDM', only_sna=F
     else:
         raise ValueError("cosmo_model must be 'FlatwCDM' or 'Flatw0waCDM'")
 
-    model_labels = ['alpha', 'delta', 'M0', 'log_f'] + cosmo_params
+    model_labels = ['alpha', 'M0', 'log_f'] + cosmo_params
     ndim = len(model_labels)
 
     # Reduced priors for selected cosmology
     model_priors = {key: priors[key] for key in model_labels}
 
     nwalkers = ndim * 2 * 15
-    num_warmup, num_samples = 50, 50
+    num_warmup, num_samples = 200, 500
 
     initial_pos = np.array([
         np.random.uniform(low, high, nwalkers) for low, high in model_priors.values()
@@ -394,8 +385,10 @@ def run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model='Flatw0waCDM', only_sna=F
     # passing all the data to the log_likelihood function makes it SLOW!
     df_pantheon_filtered = df_pantheon[['zHD', 'MU_SH0ES', 'MU_SH0ES_ERR_DIAG']]
     df_agn_filtered = df_agn[['z', 'apparent_mag_i', 'apparent_mag_i_err', 'log_sigma_UV', 'log_sigma_UV_err', 'log_tau_UV_RF', 'log_tau_UV_RF_err']]
-    completeness_params = get_completeness_function(df_agn_filtered)
-
+    if completeness:
+        completeness_params = get_completeness_function(df_agn_filtered)
+    else:
+        completeness_params = None
     with multiprocessing.Pool(multiprocessing.cpu_count()) as pool:
         sampler = emcee.EnsembleSampler(
             nwalkers, ndim, log_likelihood,
@@ -527,7 +520,7 @@ def plot_hubble(sampler, df_agn, df_pantheon, cosmo_model, show=False):
         cosmo_params = ['H0', 'Om0', 'w0', 'wa']
         mu_models = np.array([Flatw0waCDM(H0=s[-4], Om0=s[-3], w0=s[-2], wa=s[-1]).distmod(z_grid).value for s in flat_samples])
 
-    model_labels = ['alpha', 'delta', 'M0', 'log_f'] + cosmo_params
+    model_labels = ['alpha', 'M0', 'log_f'] + cosmo_params
     results = {key: np.percentile(flat_samples[:, i], [16, 50, 84]) for i, key in enumerate(model_labels)}
 
 
@@ -539,7 +532,7 @@ def plot_hubble(sampler, df_agn, df_pantheon, cosmo_model, show=False):
     # --- AGN distance modulus ---
     Kcorr = K_corr(df_agn['z']) + K_corr(2)
     mu_pred = np.array([
-        df_agn['apparent_mag_i'] - M_model_single(s[2], s[0], s[1], df_agn['log_sigma_UV'], df_agn['log_tau_UV_RF']) - Kcorr
+        df_agn['apparent_mag_i'] - M_model_single(s[1], s[0], df_agn['log_sigma_UV'], df_agn['log_tau_UV_RF']) - Kcorr
         for s in flat_samples
     ])
     mu_pred_median = np.percentile(mu_pred, 50, axis=0)
@@ -547,11 +540,10 @@ def plot_hubble(sampler, df_agn, df_pantheon, cosmo_model, show=False):
     mu_pred_84th = np.percentile(mu_pred, 84, axis=0)
     mu_pred_std = np.sqrt(df_agn['apparent_mag_i_err']**2 +
             np.abs(0.5 * (mu_pred_84th - mu_pred_16th))**2 +
-                 #(-2.5 * 0.3 * np.log10(1 + df_agn["z"]))**2 +
-                 (Kcorr * 0.05)**2 +
-                (results["alpha"][1] * df_agn['log_sigma_UV_err'])**2 +
-                (results["delta"][1] * df_agn['log_tau_UV_RF_err'])**2)
-    
+                 (-2.5 * 0.3 * np.log10(1 + df_agn["z"]))**2 +
+                 #(Kcorr * 0.05)**2 +
+                (results["alpha"][1] * np.sqrt((2*df_agn['log_sigma_UV_err'])**2+df_agn['log_tau_UV_RF_err']**2))**2)
+
     #--- Residuals ---
     mu_interp = np.interp(df_agn["z"], z_grid, mu_model_median)
     residuals = mu_pred_median - mu_interp
@@ -617,7 +609,9 @@ def plot_hubble(sampler, df_agn, df_pantheon, cosmo_model, show=False):
     plt.close()
     return residuals, mu_pred_std
 
-def plot_predicted_vs_actual_Mi(sampler, df_agn, cosmo_model):
+
+
+def plot_predicted_vs_actual_Mi(sampler, df_agn, cosmo_model, show=False):
     """Plot predicted vs actual M_i binned by redshift in multiple panels."""
 
     flat_samples = sampler.get_chain(flat=True, thin=15)
@@ -629,15 +623,17 @@ def plot_predicted_vs_actual_Mi(sampler, df_agn, cosmo_model):
     else:
         raise ValueError("Invalid cosmology model.")
 
-    model_labels = ['alpha', 'delta', 'M0', 'log_f'] + cosmo_params
+    model_labels = ['alpha', 'M0', 'log_f'] + cosmo_params
     results = {key: np.percentile(flat_samples[:, i], [16, 50, 84]) for i, key in enumerate(model_labels)}
 
     # --- Predicted M_i ---
     Kcorr = K_corr(df_agn['z']) + K_corr(2)
     M_pred = np.array([
-        M_model_single(s[2], s[0], s[1], df_agn['log_sigma_UV'], df_agn['log_tau_UV_RF'])
+        M_model_single(s[1], s[0], df_agn['log_sigma_UV'], df_agn['log_tau_UV_RF'])- Kcorr
         for s in flat_samples
-    ])
+    ]) 
+
+
     M_pred_median = np.percentile(M_pred, 50, axis=0)
     M_pred_16th = np.percentile(M_pred, 16, axis=0)
     M_pred_84th = np.percentile(M_pred, 84, axis=0)
@@ -652,7 +648,7 @@ def plot_predicted_vs_actual_Mi(sampler, df_agn, cosmo_model):
     binned_M_actual_err = [np.std(df_agn['M_i'][bin_indices == i]) for i in range(1, len(z_bins))]
 
     # --- Plot setup ---
-    fig, axes = plt.subplots(3, len(binned_z)/3, figsize=(15, 5), sharey=True)
+    fig, axes = plt.subplots(len(binned_z)//3, 3, figsize=(12, 8), sharey=True, sharex=True)
     axes = axes.flatten()
     for i, ax in enumerate(axes):
         if i >= len(binned_z):
@@ -663,21 +659,25 @@ def plot_predicted_vs_actual_Mi(sampler, df_agn, cosmo_model):
         ax.errorbar(
             df_agn['M_i'][mask], M_pred_median[mask],
             xerr=df_agn['M_i'][mask].std(), yerr=M_pred_median[mask].std(),
-            fmt='o', markersize=4, alpha=0.6, label=f"z ~ {binned_z[i]:.2f}"
+            fmt='o', markersize=2, alpha=0.6, label=f"z ~ {binned_z[i]:.2f}", lw=1
         )
-        ax.plot([-30, -10], [-30, -10], 'k--', lw=1, label="1:1 Line")
-        ax.set_xlim(-30, -10)
-        ax.set_ylim(-30, -10)
+        ax.plot([-30, -20], [-30, -20], 'k--', lw=1, label="1:1 Line")
+        ax.set_xlim(-30, -20)
+        ax.set_ylim(-30, -20)
         ax.set_xlabel(r"Actual $M_i$")
         if i == 0:
             ax.set_ylabel(r"Predicted $M_i$")
         ax.legend(frameon=False, fontsize=8)
-
+    fig.subplots_adjust(wspace=0.05, hspace=0.05)
     fig.suptitle(f"Predicted vs Actual $M_i$ Binned by Redshift ({cosmo_model})", fontsize=16)
-    fig.tight_layout()
+    #fig.tight_layout()
     plt.savefig(f"plots/predicted_vs_actual_Mi_{cosmo_model}.png", dpi=300)
     plt.savefig(f"plots/predicted_vs_actual_Mi_{cosmo_model}.pdf", dpi=300)
+    if show:
+        plt.show()
     plt.close()
+
+
 
 def main():
     print("Loading quasar data...")
@@ -700,8 +700,8 @@ def main():
         print("Plotting corner plot...")
         plot_cosmo_corner(sampler_sna, sampler_agn, cosmo_model=cosmo_model)
         print(f"Corner plot for {cosmo_model} saved.")
-        #plot_predicted_vs_actual_Mi(flat_samples_agn, cosmo_model=cosmo_model)
-        #print(f"Predicted vs Actual M_i plot for {cosmo_model} saved.")
+        plot_predicted_vs_actual_Mi(sampler_agn, df_agn, cosmo_model=cosmo_model)
+        print(f"Predicted vs Actual M_i plot for {cosmo_model} saved.")
         #break
     print("All plots saved.")
 
