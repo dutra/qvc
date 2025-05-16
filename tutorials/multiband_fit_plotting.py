@@ -5,7 +5,8 @@ import numpy as np
 import os
 import jax.numpy as jnp
 
-suffix = os.environ.get('SUFFIX', None)
+prefix = os.environ.get('PREFIX', "test")
+suffix = os.environ.get('SUFFIX', "test")
 
 lambda_pivot = {
     'u': 3543,  # SDSS u-band
@@ -144,7 +145,7 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, data):
     plt.tight_layout()
 
     # Save the plot as a PNG file
-    output_dir = f"light_curves_fits_{suffix}" if suffix else "light_curves_fits"
+    output_dir = f"light_curves_fits/{prefix}_{suffix}"
     os.makedirs(output_dir, exist_ok=True)
     plt.savefig(os.path.join(output_dir, f'{data['z']:.1f}_{object_id}_combined_plot.png'), dpi=120)
     print(f"Saving figure to ", os.path.join(output_dir, f'{data['z']:.1f}_{object_id}_combined_plot.png'))

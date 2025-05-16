@@ -5,7 +5,7 @@ import pandas as pd
 # Parameters
 chunk_size = 3900      # Number of objects per job
 prefix = "may15"
-suffix = "etasep_newpriors1_all"
+suffix = "etasep_colinpriors_all"
 lc_file = "data/may8_lc_all.h5"
 #filter_file = "data/df_quasars_filtered_apr29.csv"
 filter_file = "data/all_object_ids.csv"
@@ -34,7 +34,7 @@ print(f"Found {total_objects} objects in {filter_file}")
 
 # Generate and submit new sbatch scripts
 for i, skip in enumerate(range(0, total_objects, chunk_size)):
-    sbatch_filename = os.path.join(script_path, f"{prefix}_job_{i}.sh")
+    sbatch_filename = os.path.join(script_path, f"{prefix}_job_{suffix}_{i}.sh")
     output_filename = f"{script_path}/{prefix}_gpu_job_{suffix}_{i}.txt"
     result_file = f"data/{prefix}_objs_tauwavelength_taublr_{suffix}_{i}.h5"
 
@@ -51,6 +51,7 @@ for i, skip in enumerate(range(0, total_objects, chunk_size)):
 #SBATCH --constraint="a100"
 
 export JAX_ENABLE_X64=True
+export PREFIX={prefix}
 export SUFFIX={suffix}
 
 module load miniconda

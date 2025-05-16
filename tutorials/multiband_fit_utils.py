@@ -3,8 +3,8 @@ import os
 import numpy as np
 import jax.numpy as jnp
 
-suffix = os.environ.get('SUFFIX', None)
-
+prefix = os.environ.get('PREFIX', "test")
+suffix = os.environ.get('SUFFIX', "test")
 
 lambda_pivot = {
     'u': 3543,  # SDSS u-band
@@ -310,7 +310,7 @@ def save_samples_to_hdf5(samples, object_id):
         object_id (str): The object ID for which the samples belong.
         output_dir (str): Directory where the HDF5 files will be saved.
     """
-    output_dir=f"samples_{suffix}"
+    output_dir=f"samples/{prefix}_{suffix}"
     os.makedirs(output_dir, exist_ok=True)
     file_path = os.path.join(output_dir, f"{object_id}.h5")
 
