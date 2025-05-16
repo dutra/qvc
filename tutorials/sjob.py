@@ -3,9 +3,10 @@ import glob
 import pandas as pd
 
 # Parameters
-chunk_size = 3900      # Number of objects per job
-prefix = "may15"
-suffix = "etasep_colinpriors_all"
+chunk_size = 3000      # Number of objects per job
+prefix = "may16"
+#suffix = "etasep_colinpriors_all"
+suffix = "singlepl2_all"
 lc_file = "data/may8_lc_all.h5"
 #filter_file = "data/df_quasars_filtered_apr29.csv"
 filter_file = "data/all_object_ids.csv"
@@ -57,8 +58,8 @@ export SUFFIX={suffix}
 module load miniconda
 conda activate jaxgpu
 
-python multiband_fit_blrkernel.py --skip {skip} --N {chunk_size} --lc_file {lc_file} \\
-    --filter_file {filter_file} --file {result_file} --plot
+python multiband_fit.py --skip {skip} --N {chunk_size} --lc_file {lc_file} \\
+    --filter_file {filter_file} --file {result_file} --plot --nwarm 200 --nsamp 100
 """)
 # 
     os.system(f"sbatch {sbatch_filename}")
