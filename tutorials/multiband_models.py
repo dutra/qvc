@@ -81,12 +81,13 @@ class MyMultibandContiBLR(tinygp.kernels.Kernel):
     tau_drw_blr: float
 
     def __init__(self, sigma, scale, amplitudes, amplitudes_blr, lag_blr, taus, tau_drw_blr) -> None:
-        self.sigma = sigma
-        self.amplitudes = amplitudes * sigma
-        self.amplitudes_blr = amplitudes_blr * sigma
+        self.sigma = sigma # sigma_hat now
         self.lag_blr = jnp.zeros_like(lag_blr)
         self.tau_drw = scale * taus
         self.tau_drw_blr = tau_drw_blr
+        #
+        self.amplitudes = jnp.sqrt( (amplitudes * sigma)**2 * self.tau_drw )
+        self.amplitudes_blr = jnp.sqrt( (amplitudes_blr * sigma)**2 * self.tau_drw_blr )
 
     def coord_to_sortable(self, X) -> JAXArray:
         return X[0]
@@ -163,30 +164,36 @@ class MyMultibandConti(tinygp.kernels.Kernel):
     tau_drw: jnp.ndarray
     w: jnp.ndarray
 
-    def __init__(self, sigma, scale, tau_drw, log_w) -> None:
-        self.sigma = sigma
+    def __init__(self, sigma_hat, scale, tau_drw, log_w) -> None:
         self.tau_drw = scale * tau_drw
-        self.w = scale - jnp.exp(log_w)
+        self.sigma = jnp.sqrt(sigma_hat**2 * self.tau_drw)
+        self.w = jnp.exp(log_w)
 
     def coord_to_sortable(self, X) -> JAXArray:
         return X[0]
 
-    #def k(self, tau, tau_drw) -> JAXArray:
-    #    tau = jnp.abs(tau)
-    #    drw = jnp.exp(-tau / tau_drw)
-    #    return drw
+    def k(self, tau, tau_drw) -> JAXArray:
+        tau = jnp.abs(tau)
+        drw = jnp.exp(-tau / tau_drw)
+        return drw
 
-    def k(self, tau, tau_drw, amplitude=1):
-        small = 1e-3
-        is_small = self.w < small
-        k_drw = amplitude**2 * jnp.exp(-jnp.abs(tau) / tau_drw)
-
+    def kconv(self, tau, tau_drw) -> JAXArray:
+        small = 1e-4
         w_safe = jnp.maximum(self.w, small)
-        exp_term = jnp.exp((w_safe**2) / (2 * tau_drw**2) - jnp.abs(tau) / tau_drw)
-        erfc_term = erfc((w_safe / jnp.sqrt(2) / tau_drw) - (jnp.abs(tau) / jnp.sqrt(2) / w_safe))
-        k_conv = 0.5 * amplitude**2 * exp_term * erfc_term
 
-        return jnp.where(is_small, k_drw, k_conv)
+        dt = jnp.abs(tau)
+        a = w_safe / (jnp.sqrt(2) * tau_drw)
+        b = dt / (jnp.sqrt(2) * w_safe)
+
+        exp_term = jnp.exp((w_safe**2) / (2 * tau_drw**2) - dt / tau_drw)
+        erfc_arg = a - b
+
+        # Clip erfc_arg to avoid domain errors in erfc
+        #erfc_arg = jnp.clip(erfc_arg, -10.0, 10.0)  # You can tune these limits
+
+        erfc_term = jax.scipy.special.erfc(erfc_arg)
+        k = 0.5 * exp_term * erfc_term
+        return k
 
     def evaluate(self, X1, X2) -> JAXArray:
         t1, b1 = X1
@@ -233,7 +240,7 @@ class MyMultiVarModel(MultiVarModel):
         else:
             time_centered = (X[0] - jnp.nanmean(X[0]))
             time_scaled = time_centered #/ (jnp.nanmax(X[0]) - jnp.nanmin(X[0]))
-            means = jnp.atleast_1d(params["mean"])[X[1]] + params["poly1"] * time_scaled / 100000
+            means = jnp.atleast_1d(params["mean"])[X[1]] #+ params["poly1"] * time_scaled / 100000
         return means
     
     def _build_gp(
@@ -422,7 +429,7 @@ class MyMultiVarModelLatent(MyMultiVarModel):
         y_centered = y_obs - mu_obs
 
         # Cholesky solve for log-likelihood
-        L = jnp.linalg.cholesky(K_obs + 1e-6 * jnp.eye(K_obs.shape[0]))  # small jitter for stability
+        L = jnp.linalg.cholesky(K_obs + 1e-2 * jnp.eye(K_obs.shape[0]))  # small jitter for stability
         alpha = jax.scipy.linalg.cho_solve((L, True), y_centered)
 
         logdet = 2.0 * jnp.sum(jnp.log(jnp.diag(L)))
@@ -456,7 +463,7 @@ class MyMultiVarModelLatent(MyMultiVarModel):
         y_centered = y_obs - mu_obs
 
         # Cholesky solve for alpha
-        L = jnp.linalg.cholesky(K_obs + 1e-6 * jnp.eye(K_obs.shape[0]))
+        L = jnp.linalg.cholesky(K_obs + 1e-2 * jnp.eye(K_obs.shape[0]))
         alpha = jax.scipy.linalg.cho_solve((L, True), y_centered)
 
         # Prepare new latent inputs
