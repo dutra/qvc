@@ -221,12 +221,13 @@ class MyMultiVarModel(MultiVarModel):
     def mean_func(
         zero_mean: bool, nBand: int, params: dict[str, JAXArray], X: JAXArray
     ) -> JAXArray:
+        #zero_mean = True
         if zero_mean is True:
-            means = jnp.zeros(nBand)
+            means = jnp.zeros(nBand)[X[1]]
         else:
             time_centered = (X[0] - jnp.nanmean(X[0]))
             time_scaled = time_centered #/ (jnp.nanmax(X[0]) - jnp.nanmin(X[0]))
-            means = jnp.atleast_1d(params["mean"])[X[1]] + params["poly1"] * time_scaled
+            means = jnp.atleast_1d(params["mean"])[X[1]] + params["poly1"] * time_scaled / 100000
         return means
     
     def _build_gp(
@@ -352,7 +353,7 @@ class MyMultiVarModelLatent(MyMultiVarModel):
         X, inds = self.lag_transform(self.X, self.has_lag, params)
         t_obs, band_obs = X
         y_obs = self.y[inds]
-        band_obs = band_obs[inds]
+        band_obs = band_obs #[inds]
 
         amp_conti = jnp.exp(log_amps)
         amp_blr = jnp.exp(log_amps_blr)
@@ -383,9 +384,11 @@ class MyMultiVarModelLatent(MyMultiVarModel):
         # Construct observation operator H
         H = build_H(t_obs, band_obs, inv_d, inv_l, amp_conti, amp_blr, M)
 
+        print("amp_conti.shape[0]", amp_conti.shape[0])
+
         # Mean function
-        mean_fn = partial(self.mean_func, self.zero_mean, amp_conti.shape[0], params)
-        mu_obs = mean_fn((t_obs, band_obs))
+        mu_obs = self.mean_func(self.zero_mean, amp_conti.shape[0], params, (t_obs, band_obs))
+        #mu_obs = mean_fn((t_obs, band_obs))
 
         return {
             "H": H,

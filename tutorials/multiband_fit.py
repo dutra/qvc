@@ -127,7 +127,7 @@ def initSampler(key, nSample, nBand=None):
         "lam_s": lamsSampler(subkeys[14], nSample),
     }
 
-def numpyro_model(X, yerr, y=None, bestP=None, clean_bands=None, z=None):
+def numpyro_model(Model, X, yerr, y=None, bestP=None, clean_bands=None, z=None):
     # kernel param
     #flat_normal = dist.Normal(bestP["log_kernel_param"], jnp.array([0.1, 0.1]))
     # This works better with the direct GP solver
@@ -175,7 +175,7 @@ def numpyro_model(X, yerr, y=None, bestP=None, clean_bands=None, z=None):
 
     # kernel
     k = kernels.quasisep.Exp(*jnp.exp(log_kernel_param))
-    m1 = MyMultiVarModel(X, y, yerr, k, zero_mean=zero_mean, has_jitter=has_jitter, has_lag=has_lag, clean_bands=clean_bands, z=z)
+    m = Model(X, y, yerr, k, zero_mean=zero_mean, has_jitter=has_jitter, has_lag=has_lag, clean_bands=clean_bands, z=z)
 
     sample_params = {
         "log_kernel_param": log_kernel_param,
@@ -194,9 +194,9 @@ def numpyro_model(X, yerr, y=None, bestP=None, clean_bands=None, z=None):
         "eta_break": eta_break,
         "lam_s": lams,
     }
-    m1.sample(sample_params)
+    m.sample(sample_params)
 
-def numpyro_joint_model(batch_data):
+def numpyro_joint_model(Model, batch_data):
     # --- Shared (universal) parameters ---
     # TODO: update the priors from the previous batch
     eta_A1 = numpyro.sample("eta_A1", dist.Normal(-1.0, 0.1))
@@ -235,7 +235,7 @@ def numpyro_joint_model(batch_data):
             "eta_break": eta_break,
         }
 
-        m = MyMultiVarModel(
+        m = Model(
             data['X'], data['y'], data['yerr'],
             kernels.quasisep.Exp(*jnp.exp(log_kernel_param)),
             zero_mean=zero_mean, has_jitter=has_jitter, has_lag=has_lag,
@@ -246,7 +246,7 @@ def numpyro_joint_model(batch_data):
         numpyro.factor(f"loglike_{i}", log_prob)
 
 
-def fit_multiband(data, nwarm=500, nsamp=250, progress_bar=False, plot=False, svi=False, fit=True):
+def fit_multiband(Model, data, nwarm=500, nsamp=250, progress_bar=False, plot=False, svi=False, fit=True):
     times = data['times']
     mags = data['mags']
     data['mags_means'] = np.array([np.nanmean(mags[band]) for band in mags.keys()])
@@ -330,7 +330,7 @@ def fit_multiband(data, nwarm=500, nsamp=250, progress_bar=False, plot=False, sv
     k = kernels.quasisep.Exp(*jnp.exp(initial_drw_params["log_kernel_param"]))
 
     # define model
-    m1 = MyMultiVarModel(
+    m1 = Model(
         X, y, yerr, k, zero_mean=zero_mean, has_jitter=has_jitter, has_lag=has_lag, clean_bands=clean_bands, z=data['z']
     )
 
@@ -405,7 +405,7 @@ def fit_multiband(data, nwarm=500, nsamp=250, progress_bar=False, plot=False, sv
                 chain_method="vectorized",
             )
 
-            mcmc.run(jax.random.PRNGKey(int(data['object_id'])), X, yerr, y=y)
+            mcmc.run(jax.random.PRNGKey(int(data['object_id'])), Model, X, yerr, y=y)
             samples = mcmc.get_samples(group_by_chain=False)
             diagnostics = mcmc.get_extra_fields()
         except Exception as e:
@@ -430,10 +430,10 @@ def fit_multiband(data, nwarm=500, nsamp=250, progress_bar=False, plot=False, sv
     return result
 
 
-def process_quasar(i_data, n=0, **kwargs):
+def process_quasar(Model, i_data, n=0, **kwargs):
     i, data = i_data
     # Load the quasar data
-    result = fit_multiband(data, **kwargs)
+    result = fit_multiband(Model, data, **kwargs)
     if result is None:
         print(f"Skipping quasar {data['object_id']}.")
         return None
@@ -461,6 +461,7 @@ if __name__ == '__main__':
     parser.add_argument("--cpu", action="store_true", help="Use CPU.")
     parser.add_argument("--nwarm", type=int, default=500, help="Number of warmup steps for MCMC.")
     parser.add_argument("--nsamp", type=int, default=250, help="Number of samples for MCMC.")
+    parser.add_argument("--latent", action="store_true", help="Use latent variable model.")
 
     args = parser.parse_args()
 
@@ -492,12 +493,18 @@ if __name__ == '__main__':
 
     #objs = populate_sdss_fields(objs)
 
+    Model = MyMultiVarModel
+
+    if args.latent:
+        print("Using latent model (with BLR contribution)")
+        Model = MyMultiVarModelLatent
+
     # After loading objs
     if args.joint:
         batch_data = []
         for i, obj in enumerate(objs):
             # Prepare each object's data for the joint model
-            result = fit_multiband(obj, nwarm=args.nwarm, nsamp=args.nsamp, progress_bar=args.progress, plot=False, svi=False, fit=False)
+            result = fit_multiband(Model, obj, nwarm=args.nwarm, nsamp=args.nsamp, progress_bar=args.progress, plot=False, svi=False, fit=False)
             if result is None:
                 continue
             obj['i'] = i
@@ -534,7 +541,7 @@ if __name__ == '__main__':
     else:
         for i, obj in enumerate(objs):
             print(f"Processing quasar {i}/{len(objs)} ({obj['object_id']})", flush=True)
-            q = process_quasar((i, obj), n=len(objs), nwarm=args.nwarm, nsamp=args.nsamp, progress_bar=args.progress, plot=args.plot, svi=args.svi)
+            q = process_quasar(Model, (i, obj), n=len(objs), nwarm=args.nwarm, nsamp=args.nsamp, progress_bar=args.progress, plot=args.plot, svi=args.svi)
             if q is None:
                 #print(f"Skipping quasar {obj['object_id']}, no data", flush=True)
                 continue
