@@ -601,6 +601,7 @@ def numpyro_joint_model(batch_data):
             clean_bands=data['clean_bands'], z=data['z']
         )
         log_prob = m.log_prob(params)
+        # numpyro does the summation for us
         numpyro.factor(f"loglike_{i}", log_prob)
 
 
