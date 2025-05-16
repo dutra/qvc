@@ -107,9 +107,11 @@ def initSampler(key, nSample, nBand=None):
 
     # kernel init
     kernelSampler = DRWInit([jnp.log(10**2.5), jnp.log(10**4.5)], [jnp.log(0.1), jnp.log(1.0)])
+    logwSampler = UniformInit(1, [0.0, 1.0])
     
     return {
         "log_kernel_param": kernelSampler(subkeys[0], nSample),
+        "log_w": logwSampler(subkeys[1], nSample),
         "log_amp_delta": logAmpDeltaSampler(subkeys[1], nSample),
         "log_amp_delta_blr": logAmpDeltaBLRSampler(subkeys[2], nSample),
         "mean": meanSampler(subkeys[3], nSample),
@@ -134,6 +136,7 @@ def numpyro_model(Model, X, yerr, y=None, bestP=None, clean_bands=None, z=None):
     flat_normal = dist.Uniform(jnp.array([2.0, -3.0]), jnp.array([10.0, 0.5]))
     diag_normal = dist.Independent(flat_normal, 1)
     log_kernel_param = numpyro.sample("log_kernel_param", diag_normal)
+    log_w = numpyro.sample("log_w", dist.Normal(jnp.full_like(bestP["log_w"], jnp.log(2.0)), 0.1))
     #jax.debug.print("{x} log_kernel_param_numpro", x=log_kernel_param)
     #jax.debug.print("{x} log_kernel_param_numpro_bestp", x=bestP["log_kernel_param"])
 
@@ -179,6 +182,7 @@ def numpyro_model(Model, X, yerr, y=None, bestP=None, clean_bands=None, z=None):
 
     sample_params = {
         "log_kernel_param": log_kernel_param,
+        "log_w": log_w,
         "log_amp_delta_blr": log_amp_delta_blr, 
         "lag": lag,
         "log_lag_blr": log_lag_blr,

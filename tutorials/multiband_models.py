@@ -161,26 +161,32 @@ class MyMultibandContiBLR(tinygp.kernels.Kernel):
 class MyMultibandConti(tinygp.kernels.Kernel):
     sigma: float
     tau_drw: jnp.ndarray
+    w: jnp.ndarray
 
-    def __init__(self, sigma, scale, tau_drw) -> None:
+    def __init__(self, sigma, scale, tau_drw, log_w) -> None:
         self.sigma = sigma
         self.tau_drw = scale * tau_drw
+        self.w = scale - jnp.exp(log_w)
 
     def coord_to_sortable(self, X) -> JAXArray:
         return X[0]
 
-    def k(self, tau, tau_drw) -> JAXArray:
-        tau = jnp.abs(tau)
-        drw = jnp.exp(-tau / tau_drw)
-        return drw
+    #def k(self, tau, tau_drw) -> JAXArray:
+    #    tau = jnp.abs(tau)
+    #    drw = jnp.exp(-tau / tau_drw)
+    #    return drw
 
-    # def k(self, tau, tau_drw, w=5) -> JAXArray:
-    #     # Compute the analytic convolution of DRW and Gaussian kernels
-    #     prefactor = 1 / (jnp.sqrt(2 * jnp.pi) * w)
-    #     # IDEA: take w out of the prefactor multiply it back after
-    #     exp_term = jnp.exp((w**2) / (2 * tau_drw**2) - jnp.abs(tau) / tau_drw)
-    #     erfc_term = erfc((w / jnp.sqrt(2) / tau_drw) - (jnp.abs(tau) / jnp.sqrt(2) / w))
-    #     return prefactor * exp_term * erfc_term
+    def k(self, tau, tau_drw, amplitude=1):
+        small = 1e-3
+        is_small = self.w < small
+        k_drw = amplitude**2 * jnp.exp(-jnp.abs(tau) / tau_drw)
+
+        w_safe = jnp.maximum(self.w, small)
+        exp_term = jnp.exp((w_safe**2) / (2 * tau_drw**2) - jnp.abs(tau) / tau_drw)
+        erfc_term = erfc((w_safe / jnp.sqrt(2) / tau_drw) - (jnp.abs(tau) / jnp.sqrt(2) / w_safe))
+        k_conv = 0.5 * amplitude**2 * exp_term * erfc_term
+
+        return jnp.where(is_small, k_drw, k_conv)
 
     def evaluate(self, X1, X2) -> JAXArray:
         t1, b1 = X1
@@ -377,6 +383,7 @@ class MyMultiVarModelLatent(MyMultiVarModel):
             sigma=jnp.exp(params["log_kernel_param"][1]),
             scale=jnp.exp(params["log_kernel_param"][0] - jnp.log(1 + self.z)),
             tau_drw=jnp.exp(log_taus)[band_obs],
+            log_w=params["log_w"] - jnp.log(1 + self.z),
         )
         X_latent = (t_latent, band_latent)
         K_latent = kernel(X_latent, X_latent) + 1e-6 * jnp.eye(M)
@@ -471,6 +478,7 @@ class MyMultiVarModelLatent(MyMultiVarModel):
             sigma=jnp.exp(params["log_kernel_param"][1]),
             scale=jnp.exp(params["log_kernel_param"][0] - jnp.log(1 + self.z)),
             tau_drw=jnp.exp(self.my_tau_drw_transform(params))[band_latent],
+            log_w=params["log_w"] - jnp.log(1 + self.z),
         )
 
         t_new_latent, band_new_latent, inv_d_new, inv_l_new = get_unique_times(t_new, band_new, lag_blr)
