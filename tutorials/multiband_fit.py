@@ -483,14 +483,15 @@ if __name__ == '__main__':
                 existing_object_ids = set(hdf.keys())
                 print(f"Found {len(existing_object_ids)} existing object IDs in {args.file}")
         else:
-            existing_object_ids = set()
+            print("WARNING! --ignore_existing flag but no existing file")
 
-    filter_object_ids = set(args.filter_object_id) if args.filter_object_id else set()
-    filter_object_ids = set(pd.read_csv(args.filter_file, dtype={"object_id": str})["object_id"].values) if args.filter_file else filter_object_ids
-    filter_object_ids = set(filter_object_ids) - set(existing_object_ids)
+    filter_object_ids = args.filter_object_id if args.filter_object_id else []
+    filter_object_ids = pd.read_csv(args.filter_file, dtype={"object_id": str})["object_id"].values if args.filter_file else filter_object_ids
+
     if len(filter_object_ids) > 0:
         print(f"Filtering object IDs: {len(filter_object_ids)}")
-    objs = concat_light_curves(filter_object_ids=filter_object_ids, N=args.N, skip=args.skip, save_file_path=args.lc_file, progress_bar=args.progress)
+
+    objs = concat_light_curves(filter_object_ids=filter_object_ids, existing_object_ids=existing_object_ids, N=args.N, skip=args.skip, save_file_path=args.lc_file, progress_bar=args.progress)
     if args.create_lc:
         sys.exit("Created LC file. Exiting the program as requested.")
     print(f"Loaded {len(objs)} objects from concat_light_curves")
