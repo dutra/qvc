@@ -63,8 +63,89 @@ def modify_h5_file(save_file_path, s82_objs):
                 if key in group:
                     del group[key]
 
+def check_64bit(gpu=True):
+    import jax
+    jax.config.update("jax_enable_x64", True)
+    import jax.numpy as jnp
 
-def bands_redder_than_5000(z):
+    # JAX 64-bit mode check
+    print("All JAX devices:", jax.devices())
+    print("Default JAX device:", jax.devices()[0])
+    print("JAX 64-bit enabled:", jax.config.read("jax_enable_x64"))
+
+    if not jax.config.read("jax_enable_x64"):
+        raise RuntimeError("JAX 64-bit mode is not enabled. Please set jax_enable_x64 = True.")
+
+    # Create a float64 array
+    arr = jnp.array([1.0, 2.0, 3.0], dtype=jnp.float64)
+    assert arr.dtype == jnp.float64, "Array is not float64"
+
+    @jax.jit
+    def dot64(x, y):
+        return jnp.dot(x, y)
+
+    x = jnp.ones((1000,), dtype=jnp.float64)
+    y = jnp.ones((1000,), dtype=jnp.float64)
+    print("JAX 64-bit Dot product (should be 1000.0):", dot64(x, y))  # Should run without error and return 1000.0
+
+    def assert_jax_gpu_64bit_ok():
+        all_ok = True
+
+        # 1. Check 64-bit mode
+        x64_enabled = jax.config.read("jax_enable_x64")
+        print(f"JAX 64-bit mode enabled: {x64_enabled}")
+        if not x64_enabled:
+            all_ok = False
+
+        # 2. Create matrix and check dtype
+        key = jax.random.PRNGKey(0)
+        A = jax.random.normal(key, (3, 3), dtype=jnp.float64)
+        print(f"Matrix dtype: {A.dtype}")
+        if A.dtype != jnp.float64:
+            all_ok = False
+
+        # 3. Check GPU availability
+        gpu_devices = [d for d in jax.devices() if d.platform == "gpu"]
+        if gpu_devices:
+            gpu = gpu_devices[0]
+            print(f"Using GPU device: {gpu}")
+        else:
+            print("❌ No GPU found by JAX.")
+            all_ok = False
+            gpu = None
+
+        # 4. Cholesky comparison
+        try:
+            K = A @ A.T + 1e-6 * jnp.eye(3)
+            K_cpu = jax.device_put(K, jax.devices("cpu")[0])
+            K_gpu = jax.device_put(K, gpu)
+
+            L_cpu = jnp.linalg.cholesky(K_cpu)
+            L_gpu = jnp.linalg.cholesky(K_gpu)
+            L_gpu_cpu = jax.device_get(L_gpu)
+
+            close = jnp.allclose(L_gpu_cpu, L_cpu, atol=1e-12)
+            print(f"Cholesky GPU vs CPU match: {close}")
+            if not close:
+                all_ok = False
+        except Exception as e:
+            print(f"❌ Cholesky comparison failed: {e}")
+            all_ok = False
+
+        if all_ok:
+            print("✅ All checks passed: 64-bit enabled, GPU available, and numerics consistent.")
+        else:
+            raise RuntimeError("❌ One or more JAX diagnostic checks failed.")
+
+    if gpu:
+        print(gpu)
+        print('GPU')
+        assert_jax_gpu_64bit_ok()
+
+    return 1
+
+
+def bands_redder_than_5000(z, threshold=5000):
     """
     Returns a list of bands with rest-frame effective wavelength > 5000 Å.
 
@@ -74,7 +155,6 @@ def bands_redder_than_5000(z):
     Returns:
         list: Bands redder than 5000 Å at rest frame.
     """
-    threshold = 5000
     bands = {
         'u': {'lambda_eff': 3551},
         'g': {'lambda_eff': 4686},
@@ -257,9 +337,6 @@ def append_hdf5_file(quasar_list, file_path):
                 else:
                     group.attrs[key] = value
 
-# def log_broken_pl(lam, lam_s, d1, d2):
-#     return -jnp.log10(jnp.power(lam/lam_s, d1) + jnp.power(lam/lam_s, d2))
-
 def log_broken_pl(lam, lam_s, d1, d2, ds=4.0):
     x = lam / lam_s
     log_f = -jnp.log10(
@@ -371,3 +448,73 @@ def process_samples(samples, data):
             lag_err=lag_err,
             )
     return d
+
+
+def compute_psd_from_samples(samples, clean_bands, num_points=1000, time_range=(0, 365*20)):
+    """
+    Compute the Power Spectral Density (PSD) using the kernel parameters from MCMC samples.
+
+    Args:
+        samples (dict): MCMC samples containing kernel parameters.
+        clean_bands (list): List of clean bands used in the model.
+        num_points (int): Number of points to sample in the time range.
+        time_range (tuple): A tuple specifying the range of time lags (min_time, max_time).
+
+    Returns:
+        dict: A dictionary containing frequencies and PSD for each band.
+    """
+    # Extract kernel parameters from samples
+    log_kernel_param = samples["log_kernel_param"]
+    log_amp_delta_blr = samples["log_amp_delta_blr"]
+    log_lag_blr = samples["log_lag_blr"]
+    eta_A1 = samples["eta_A1"]
+    eta_A2 = samples["eta_A2"]
+    eta_tau1 = samples["eta_tau1"]
+    eta_tau2 = samples["eta_tau2"]
+
+    # Compute the median values of the parameters
+    kernel_param = jnp.exp(jnp.median(log_kernel_param, axis=0))
+    amp_delta_blr = jnp.exp(jnp.median(log_amp_delta_blr, axis=0))
+    lag_blr = jnp.exp(jnp.median(log_lag_blr, axis=0))
+    beta = jnp.median(beta)
+    delta = jnp.median(delta)
+
+    # Compute amplitudes and taus for each band
+    amplitudes = jnp.exp(log_kernel_param[1] + jnp.log(10) * jnp.array([log_broken_pl(lambda_pivot[band], params["lam_s"], eta_A1, eta_A2) for band in clean_bands]))
+    taus = jnp.exp(log_kernel_param[0] + jnp.log(10) * jnp.array([log_broken_pl(lambda_pivot[band], params["lam_s"], eta_tau1, eta_tau2) for band in clean_bands]))
+
+    # Instantiate the MyMultibandLowRank kernel
+    kernel = MyMultibandLowRank(
+        sigma=kernel_param[1],
+        scale=kernel_param[0],
+        amplitudes=amplitudes,
+        amplitudes_blr=amp_delta_blr,
+        lag_blr=lag_blr,
+        taus=taus,
+    )
+
+    # Generate time lags
+    min_time, max_time = time_range
+    time_lags = jnp.linspace(min_time, max_time, num_points)
+
+    # Compute PSD for each band
+    psd_results = {}
+    for band_idx, band in enumerate(clean_bands):
+        # Compute the covariance for the given band
+        covariances = jnp.array([kernel.evaluate((0, band_idx), (lag, band_idx)) for lag in time_lags])
+
+        # Apply the Fourier Transform to compute the PSD
+        fft_result = jnp.fft.fft(covariances)
+        freqs = jnp.fft.fftfreq(num_points, d=(max_time - min_time) / num_points)
+
+        # Compute the PSD (magnitude squared of the FFT)
+        psd = jnp.abs(fft_result) ** 2
+
+        # Store only the positive frequencies and corresponding PSD values
+        positive_freqs = freqs[:num_points // 2]
+        positive_psd = psd[:num_points // 2]
+
+        psd_results[band] = {"freqs": np.array(positive_freqs), "psd": np.array(positive_psd)}
+
+    return psd_results
+    
