@@ -89,7 +89,7 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, data):
         ax.errorbar(t[m], y[m]+offsets[n], yerr=yerr[m], fmt='o', 
                 label=f'{band_idx_map[n]}-band', alpha=0.7, color=colors[band_idx_map[n]], lw=1.0, capsize=1, markersize=1)
         # Generate test times for predictions
-        t_test = np.linspace(t.min(), t.max(), 10000)
+        t_test = np.linspace(t.min(), t.max(), 1000)
         # Compute predictions using the model
         posterior_median = {k: np.median(v, axis=0) for k, v in samples.items()}
         mu, std = model.pred(posterior_median, (t_test, jnp.full_like(t_test, n, dtype=int)))

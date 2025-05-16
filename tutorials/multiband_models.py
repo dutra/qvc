@@ -359,8 +359,8 @@ class MyMultiVarModelLatent(MyMultiVarModel):
         lag_blr = jnp.exp(params["log_lag_blr"])[band_obs]
 
         # Clip amplitudes to lower limit of 1e-2
-        amp_conti = jnp.clip(amp_conti, 1e-2, None)
-        amp_blr = jnp.clip(amp_blr, 1e-2, None)
+        amp_conti = jnp.clip(amp_conti, 1e-4, None)
+        amp_blr = jnp.clip(amp_blr, 1e-4, None)
 
         # Noise (diagonal)
         noise_diag = self.diag[inds]
@@ -412,7 +412,7 @@ class MyMultiVarModelLatent(MyMultiVarModel):
         y_centered = y_obs - mu_obs
 
         # Cholesky solve for log-likelihood
-        L = jnp.linalg.cholesky(K_obs + 1e-2 * jnp.eye(K_obs.shape[0]))  # small jitter for stability
+        L = jnp.linalg.cholesky(K_obs + 1e-6 * jnp.eye(K_obs.shape[0]))  # small jitter for stability
         alpha = jax.scipy.linalg.cho_solve((L, True), y_centered)
 
         logdet = 2.0 * jnp.sum(jnp.log(jnp.diag(L)))
@@ -446,7 +446,7 @@ class MyMultiVarModelLatent(MyMultiVarModel):
         y_centered = y_obs - mu_obs
 
         # Cholesky solve for alpha
-        L = jnp.linalg.cholesky(K_obs + 1e-2 * jnp.eye(K_obs.shape[0]))
+        L = jnp.linalg.cholesky(K_obs + 1e-6 * jnp.eye(K_obs.shape[0]))
         alpha = jax.scipy.linalg.cho_solve((L, True), y_centered)
 
         # Prepare new latent inputs
@@ -472,14 +472,14 @@ class MyMultiVarModelLatent(MyMultiVarModel):
 
         t_new_latent, band_new_latent, inv_d_new, inv_l_new = get_unique_times(t_new, band_new, lag_blr)
         X_new_latent = (t_new_latent, band_new_latent)
-        H_new = build_H(t_new, band_new, inv_d_new, inv_l_new, amp_conti, amp_blr, len(t_latent))
+        H_new = build_H(t_new, band_new, inv_d_new, inv_l_new, amp_conti, amp_blr, len(t_new_latent))
 
         K_lat_new_obs = H_new @ kernel(X_new_latent, X_latent) @ H.T
-        pred_mean = self.mean_func(self.zero_mean, amp_conti.shape[0], params)((t_new, band_new)) + K_lat_new_obs @ alpha
+        pred_mean = self.mean_func(self.zero_mean, amp_conti.shape[0], params, (t_new, band_new)) + K_lat_new_obs @ alpha
 
         # Predictive variance (optional)
         v = jax.scipy.linalg.cho_solve((L, True), K_lat_new_obs.T)
         K_new = H_new @ kernel(X_new_latent, X_new_latent) @ H_new.T + 1e-6 * jnp.eye(H_new.shape[0])
         pred_cov = K_new - K_lat_new_obs @ v
 
-        return pred_mean, pred_cov
+        return pred_mean, jnp.sqrt(jnp.diag(pred_cov))
