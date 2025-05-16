@@ -80,8 +80,8 @@ class MyMultibandContiBLR(tinygp.kernels.Kernel):
     tau_drw: jnp.ndarray
     tau_drw_blr: float
 
-    def __init__(self, sigma, scale, amplitudes, amplitudes_blr, lag_blr, taus, tau_drw_blr) -> None:
-        self.sigma = sigma # sigma_hat now
+    def __init__(self, sigma_hat, scale, amplitudes, amplitudes_blr, lag_blr, taus, tau_drw_blr) -> None:
+        self.sigma = sigma_hat 
         self.lag_blr = jnp.zeros_like(lag_blr)
         self.tau_drw = scale * taus
         self.tau_drw_blr = tau_drw_blr
@@ -271,7 +271,7 @@ class MyMultiVarModel(MultiVarModel):
             amplitudes=jnp.exp(log_amps),
             amplitudes_blr=jnp.exp(log_amps_blr),
             lag_blr=jnp.exp(params["log_lag_blr"])[band[inds]],
-            sigma=jnp.exp(params["log_kernel_param"][1]),
+            sigma_hat=jnp.exp(params["log_kernel_param"][1]),
             scale=jnp.exp(params["log_kernel_param"][0] - jnp.log(1+self.z)),
             taus=jnp.exp(log_taus)[band[inds]],
             tau_drw_blr=jnp.exp(params["log_tau_drw_blr"]),
@@ -387,7 +387,7 @@ class MyMultiVarModelLatent(MyMultiVarModel):
 
         # Construct latent-space kernel
         kernel = MyMultibandConti(
-            sigma=jnp.exp(params["log_kernel_param"][1]),
+            sigma_hat=jnp.exp(params["log_kernel_param"][1]),
             scale=jnp.exp(params["log_kernel_param"][0] - jnp.log(1 + self.z)),
             tau_drw=jnp.exp(log_taus)[band_obs],
             log_w=params["log_w"] - jnp.log(1 + self.z),
@@ -482,7 +482,7 @@ class MyMultiVarModelLatent(MyMultiVarModel):
         X_latent = (t_latent, band_latent)
 
         kernel = MyMultibandConti(
-            sigma=jnp.exp(params["log_kernel_param"][1]),
+            sigma_hat=jnp.exp(params["log_kernel_param"][1]),
             scale=jnp.exp(params["log_kernel_param"][0] - jnp.log(1 + self.z)),
             tau_drw=jnp.exp(self.my_tau_drw_transform(params))[band_latent],
             log_w=params["log_w"] - jnp.log(1 + self.z),
