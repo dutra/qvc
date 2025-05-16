@@ -142,58 +142,6 @@ zero_mean = False
 has_jitter = True
 has_lag = True
 
-
-class MyGaussianProcess(GaussianProcess):
-
-    def log_probability(self, y: JAXArray) -> JAXArray:
-        return self._compute_log_prob(self._get_alpha(y), y)
-
-    @jax.jit
-    def _compute_log_prob(self, alpha: JAXArray, y: JAXArray) -> JAXArray:
-        loglike = -0.5 * jnp.dot((y - self.loc).T, alpha) - self.solver.normalization()
-        return jnp.where(jnp.isfinite(loglike), loglike, -jnp.inf)
-
-    @partial(jax.jit, static_argnums=(3,))
-    def _condition(
-        self,
-        y: JAXArray,
-        X_test: JAXArray | None,
-        include_mean: bool,
-        kernel: kernels.Kernel | None = None,
-    ) -> tuple[JAXArray, JAXArray, JAXArray]:
-        alpha = self._get_alpha(y)
-        log_prob = self._compute_log_prob(alpha, y)
-
-        # Below, we actually want alpha = K^-1 y instead of alpha = L^-1 y
-        alpha = self.solver.solve_triangular(alpha, transpose=True)
-
-        if X_test is None:
-            X_test = self.X
-
-            # In this common case (where we're predicting the GP at the data
-            # points, using the original kernel), the mean is especially fast to
-            # compute; so let's use that calculation here.
-            if kernel is None:
-                delta = self.noise @ alpha
-                mean_value = y - delta
-                if not include_mean:
-                    mean_value -= self.loc
-
-            else:
-                mean_value = kernel.matmul(self.X, y=alpha)
-                if include_mean:
-                    mean_value += self.loc
-
-        else:
-            if kernel is None:
-                kernel = self.kernel
-
-            mean_value = kernel.matmul(X_test, self.X, alpha)
-            if include_mean:
-                mean_value += jax.vmap(self.mean_function)(X_test)
-
-        return alpha, log_prob, mean_value
-
     
 class MyMultibandLowRank(tinygp.kernels.Kernel):
     sigma: float
@@ -344,16 +292,7 @@ class MyMultiVarModel(MultiVarModel):
                 diag=diags + 1e-6,
                 mean=means), 
         inds,)
-        # return (
-        #     MyGaussianProcess(
-        #         kernel,
-        #         (t[inds], band[inds]),
-        #         diag=diags + 1e-5,
-        #         mean=means,
-        #         solver=DirectFullRank,
-        #     ),
-        #     inds,
-        # )
+
     def my_amp_transform_blr(self, params: dict[str, JAXArray]) -> JAXArray:
         return jnp.atleast_1d(params["log_amp_delta_blr"])
     
@@ -665,7 +604,7 @@ def numpyro_joint_model(batch_data):
         numpyro.factor(f"loglike_{i}", log_prob)
 
 
-def fit_multiband(data, progress_bar=False, plot=False, svi=False):
+def fit_multiband(data, progress_bar=False, plot=False, svi=False, fit=True):
     times = data['times']
     mags = data['mags']
     data['mags_means'] = np.array([np.nanmean(mags[band]) for band in mags.keys()])
@@ -740,6 +679,10 @@ def fit_multiband(data, progress_bar=False, plot=False, svi=False):
     yerr = jnp.array(yerr[mask_outlier])
     t = jnp.array(t[mask_outlier])
 
+    if fit == False:
+        batch_dict = {'X': X, 'y': y, 'yerr': yerr, 'clean_bands': clean_bands, 'z': data['z']}
+        return batch_dict
+
     # define kernel
     initial_drw_params = {"log_kernel_param": jnp.log(np.array([100.0, 0.35]))}
     k = kernels.quasisep.Exp(*jnp.exp(initial_drw_params["log_kernel_param"]))
@@ -807,14 +750,6 @@ def fit_multiband(data, progress_bar=False, plot=False, svi=False):
                 moves={AIES.DEMove() : 0.5, AIES.StretchMove() : 0.5},
                 init_strategy=init_strategy,
                 )
-
-            # Probably crazy - but why not
-            #data = {'X': X, 'y': y, 'yerr': yerr, 'band_idx': band_idx, 'object_id': data['object_id'], 'clean_bands': clean_bands, 'z': data['z']}
-            #nuts_kernel = AIES(
-            #    partial(numpyro_joint_model, batch_data=[data]),
-            #    moves={AIES.DEMove() : 0.5, AIES.StretchMove() : 0.5},
-            #    init_strategy=init_strategy,
-            #    )
 
             num_params = sum(p.size for p in bestP.values())
             #print(f"Number of parameters: {num_params}")
@@ -885,6 +820,7 @@ if __name__ == '__main__':
     parser.add_argument("--ignore_existing", action="store_true", help="Ignore sources already in the HDF5 file.")
     parser.add_argument("--create_lc", action="store_true", help="Only create LC file and exit.")
     parser.add_argument("--progress", action="store_true", help="Show progress bar.")
+    parser.add_argument("--joint", action="store_true", help="Use joint model fitting.")
 
     args = parser.parse_args()
 
@@ -911,20 +847,62 @@ if __name__ == '__main__':
     if args.create_lc:
         sys.exit("Created LC file. Exiting the program as requested.")
     print(f"Loaded {len(objs)} objects from concat_light_curves")
-    #objs = populate_sdss_fields(objs)
-    for i, obj in enumerate(objs):
-        print(f"Processing quasar {i}/{len(objs)} ({obj['object_id']})", flush=True)
-        q = process_quasar((i, obj), n=len(objs), progress_bar=args.progress, plot=args.plot, svi=args.svi)
-        if q is None:
-            #print(f"Skipping quasar {obj['object_id']}, no data", flush=True)
-            continue
-        fields_to_filter = ['times', 'mags', 'magerrs']
-        #filtered_q = {k: v for k, v in q.items() if k not in fields_to_filter}
-        #print(filtered_q)
-        print("++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++\n", flush=True)
-        print(f"Quasar {i+1}/{len(objs)} Object ID: {q['object_id']}", flush=True)
-        if args.file:
-            append_hdf5_file([q], args.file)
+
+
+    # After loading objs
+    if args.joint:
+        batch_data = []
+        for i, obj in enumerate(objs):
+            # Prepare each object's data for the joint model
+            result = fit_multiband(obj, progress_bar=args.progress, plot=False, svi=False, fit=False)
+            if result is None:
+                continue
+            obj['i'] = i
+            obj |= result
+            batch_data.append({
+                'X': obj['X'],
+                'y': obj['y'],
+                'yerr': obj['yerr'],
+                'clean_bands': obj['clean_bands'],
+                'z': obj['z'],
+                # add any other fields needed by your model
+            })
+            print(f"Running joint fit on {len(batch_data)} objects...")
+            init_strategy = numpyro.infer.init_to_sample()
+
+            # emcee works better than NUTS for multimodal posteriors
+            nuts_kernel = AIES(
+                partial(numpyro_model, bestP=bestP, clean_bands=clean_bands, z=data['z']),
+                moves={AIES.DEMove() : 0.5, AIES.StretchMove() : 0.5},
+                init_strategy=init_strategy,
+                )
+            mcmc = MCMC(
+                nuts_kernel,
+                num_warmup=500, # This could be less than num_samples
+                num_samples=250,
+                num_chains=2*num_params,
+                progress_bar=True,
+                chain_method="vectorized",
+            )
+            mcmc.run(jax.random.PRNGKey(0), batch_data)
+            samples = mcmc.get_samples(group_by_chain=False)
+            diagnostics = mcmc.get_extra_fields()
+
+    else:
+        #objs = populate_sdss_fields(objs)
+        for i, obj in enumerate(objs):
+            print(f"Processing quasar {i}/{len(objs)} ({obj['object_id']})", flush=True)
+            q = process_quasar((i, obj), n=len(objs), progress_bar=args.progress, plot=args.plot, svi=args.svi)
+            if q is None:
+                #print(f"Skipping quasar {obj['object_id']}, no data", flush=True)
+                continue
+            fields_to_filter = ['times', 'mags', 'magerrs']
+            #filtered_q = {k: v for k, v in q.items() if k not in fields_to_filter}
+            #print(filtered_q)
+            print("++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++\n", flush=True)
+            print(f"Quasar {i+1}/{len(objs)} Object ID: {q['object_id']}", flush=True)
+            if args.file:
+                append_hdf5_file([q], args.file)
 
     sys.exit("Exiting the program as requested.")
 
