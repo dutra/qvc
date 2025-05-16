@@ -848,6 +848,7 @@ if __name__ == '__main__':
         sys.exit("Created LC file. Exiting the program as requested.")
     print(f"Loaded {len(objs)} objects from concat_light_curves")
 
+    #objs = populate_sdss_fields(objs)
 
     # After loading objs
     if args.joint:
@@ -889,7 +890,6 @@ if __name__ == '__main__':
             diagnostics = mcmc.get_extra_fields()
 
     else:
-        #objs = populate_sdss_fields(objs)
         for i, obj in enumerate(objs):
             print(f"Processing quasar {i}/{len(objs)} ({obj['object_id']})", flush=True)
             q = process_quasar((i, obj), n=len(objs), progress_bar=args.progress, plot=args.plot, svi=args.svi)
