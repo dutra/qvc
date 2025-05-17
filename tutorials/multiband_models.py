@@ -175,7 +175,7 @@ class MyMultibandConti(tinygp.kernels.Kernel):
     w: jnp.ndarray
 
     def __init__(self, sigma_hat, scale, tau_drw, log_w) -> None:
-        self.tau_drw = scale * tau_drw
+        self.tau_drw = tau_drw
         self.sigma_hat = sigma_hat
         self.w = jnp.exp(log_w)
 
@@ -301,7 +301,7 @@ class MyMultiVarModel(MultiVarModel):
             GaussianProcess(
                 kernel,
                 (t[inds], band[inds]),
-                diag=diags + 1e-6,
+                diag=diags + 1e-4,
                 mean=means), 
         inds,)
 
@@ -349,7 +349,7 @@ class MyMultiVarModel(MultiVarModel):
         log_prob = gp.log_probability(y=self.y[inds])
         #K = gp.kernel(gp.X, gp.X) + gp.noise
         #jax.debug.print("sym: {s}", s= jnp.allclose(K, K.T, atol=1e-6))
-        jax.debug.print("Log probability: {log_prob}", log_prob=log_prob)
+        #jax.debug.print("Log probability: {log_prob}", log_prob=log_prob)
         numpyro.sample("gp", gp.numpyro_dist(), obs=self.y[inds])
 
     @eqx.filter_jit
@@ -391,7 +391,7 @@ class MyMultiVarModelLatent(MyMultiVarModel):
 
         amp_conti = jnp.exp(log_amps)
         amp_blr = jnp.exp(log_amps_blr)
-        lag_blr = jnp.exp(params["log_lag_blr"])[band_obs]
+        lag_blr = jnp.exp(params["log_lag_blr"] - jnp.log(1 + self.z))[band_obs]
 
         # Clip amplitudes to lower limit of 1e-2
         amp_conti = jnp.clip(amp_conti, 1e-4, None)
@@ -408,9 +408,9 @@ class MyMultiVarModelLatent(MyMultiVarModel):
 
         # Construct latent-space kernel
         kernel = MyMultibandConti(
-            sigma_hat=params["log_sigma_hat_0"],
-            scale=params["log_tau_drw_0"] - jnp.log(1+self.z),
-            tau_drw=jnp.exp(log_taus)[band_obs],
+            sigma_hat=jnp.exp(params["log_sigma_hat_0"]),
+            scale=jnp.exp(params["log_tau_drw_0"] - jnp.log(1+self.z)),
+            tau_drw=jnp.exp(log_taus)[band_latent],
             log_w=params["log_w"] - jnp.log(1 + self.z),
         )
         X_latent = (t_latent, band_latent)
@@ -503,9 +503,9 @@ class MyMultiVarModelLatent(MyMultiVarModel):
         X_latent = (t_latent, band_latent)
 
         kernel = MyMultibandConti(
-            sigma_hat=params["log_sigma_hat_0"],
-            scale=params["log_tau_drw_0"] - jnp.log(1+self.z),
-            tau_drw=jnp.exp(self.my_tau_drw_transform(params))[band_latent],
+            sigma_hat=jnp.exp(params["log_sigma_hat_0"]),
+            scale=jnp.exp(params["log_tau_drw_0"] - jnp.log(1+self.z)),
+            tau_drw=jnp.exp(log_taus)[band_latent], # I think?
             log_w=params["log_w"] - jnp.log(1 + self.z),
         )
 

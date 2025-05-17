@@ -360,11 +360,11 @@ def process_samples(samples, data):
     lambda_s_RF = samples["lam_s"]
     
     samples_log_sigma_UV = samples["log_sigma_hat0"] / jnp.log(10) + log_broken_pl(lambda_ref, lambda_s_RF, eta_A1, eta_A2, eta_break)
-    samples_log_sigma_band = samples["log_sigma_hat0"] / jnp.log(10) + np.array([log_broken_pl(lambda_pivot[band], samples["lam_s"], eta_A1, eta_A2) if band in clean_bands else np.full_like(samples["lam_s"], -9999) for band in bands])                                                                               
+    samples_log_sigma_band = samples["log_sigma_hat0"] / jnp.log(10) + np.array([log_broken_pl(lambda_pivot[band]/(1 + data['z']), samples["lam_s"], eta_A1, eta_A2) if band in clean_bands else np.full_like(samples["lam_s"], -9999) for band in bands])                                                                               
     samples_log_sigma_band = samples_log_sigma_band.T
 
     samples_log_tau_UV_RF = samples["log_tau_drw0"] / jnp.log(10) - np.log10(1 + data['z']) + log_broken_pl(lambda_ref, lambda_s_RF, eta_tau1, eta_tau2, eta_break)
-    samples_log_tau_band_RF = samples["log_tau_drw0"] / jnp.log(10) - np.log10(1 + data['z']) + np.array([log_broken_pl(lambda_pivot[band], samples["lam_s"], eta_tau1, eta_tau2) if band in clean_bands else np.full_like(samples["lam_s"], -9999) for band in bands])
+    samples_log_tau_band_RF = samples["log_tau_drw0"] / jnp.log(10) - np.log10(1 + data['z']) + np.array([log_broken_pl(lambda_pivot[band]/(1 + data['z']), samples["lam_s"], eta_tau1, eta_tau2) if band in clean_bands else np.full_like(samples["lam_s"], -9999) for band in bands])
     samples_log_tau_band_RF = samples_log_tau_band_RF.T
 
     def sym_percentile(x, p=[16, 50, 84], axis=0):
