@@ -195,6 +195,7 @@ def numpyro_model(Model, X, yerr, y=None, bestP=None, clean_bands=None, z=None):
 
 def numpyro_joint_model(Model, batch_data):
     # --- Shared (universal) parameters ---
+    # These priors can be broader
     powerlaw_priors = {
         "eta_A1": (-1.0, 0.1),
         "eta_A2": (-0.2, 0.1),
@@ -213,8 +214,8 @@ def numpyro_joint_model(Model, batch_data):
 
         # Object-specific parameters
         log_w = numpyro.sample(f"log_w_{i}", dist.Normal(jnp.log(20.0), 1.0))
-        log_tau_drw_0 = numpyro.sample(f"log_tau_drw_0_{i}", dist.Uniform(jnp.log(1e1), jnp.log(1e5)))
-        log_sigma_hat_0 = numpyro.sample(f"log_sigma_hat_0_{i}", dist.Uniform(jnp.log(1e-3), jnp.log(1e2)))
+        log_tau_drw_0 = numpyro.sample(f"log_tau_drw0_{i}", dist.Uniform(jnp.log(1e1), jnp.log(1e5)))
+        log_sigma_hat_0 = numpyro.sample(f"log_sigma_hat0_{i}", dist.Uniform(jnp.log(1e-3), jnp.log(1e2)))
         log_amp_delta_blr = numpyro.sample(f"log_amp_delta_blr_{i}", dist.Normal(jnp.full((n_bands,), jnp.log(1e-3)), 2.0))
         lag = numpyro.sample(f"lag_{i}", dist.Normal(jnp.zeros(n_bands-1), 10))
         log_lag_blr = numpyro.sample(f"log_lag_blr_{i}", dist.Normal(jnp.full((n_bands,), jnp.log(1e2)), 2.0))
@@ -227,8 +228,8 @@ def numpyro_joint_model(Model, batch_data):
 
         params = {
             "log_w": log_w,
-            "log_tau_drw_0": log_tau_drw_0,
-            "log_sigma_hat_0": log_sigma_hat_0,
+            "log_tau_drw0": log_tau_drw_0,
+            "log_sigma_hat0": log_sigma_hat_0,
             "log_amp_delta_blr": log_amp_delta_blr,
             "lag": lag,
             "log_lag_blr": log_lag_blr,
@@ -325,7 +326,7 @@ def fit_multiband(Model, data, nwarm=500, nsamp=250, progress_bar=False, plot=Fa
     t = jnp.array(t[mask_outlier])
 
     if fit == False:
-        batch_dict = {'X': X, 'y': y, 'yerr': yerr, 'clean_bands': clean_bands, 'z': data['z']}
+        batch_dict = {'X': X, 'y': y, 'yerr': yerr, 'clean_bands': clean_bands, 'z': data['z'], 'band_idx': band_idx[mask_outlier]}
         return batch_dict
 
     # define kernel
@@ -333,7 +334,7 @@ def fit_multiband(Model, data, nwarm=500, nsamp=250, progress_bar=False, plot=Fa
     k = kernels.quasisep.Exp(*jnp.exp(initial_drw_params["log_kernel_param"]))
 
     # define model
-    m1 = Model(
+    m = Model(
         X, y, yerr, k, zero_mean=zero_mean, has_jitter=has_jitter, has_lag=has_lag, clean_bands=clean_bands, z=data['z']
     )
 
@@ -424,9 +425,9 @@ def fit_multiband(Model, data, nwarm=500, nsamp=250, progress_bar=False, plot=Fa
         #    #return None
     result = process_samples(samples, data)
     if plot:
-        save_combined_plot(samples, m1, X, y, yerr, band_idx[mask_outlier], result)
+        save_combined_plot(samples, m, X, y, yerr, band_idx[mask_outlier], result)
         #plot_mcmc_traces(samples, result)
-        plot_posterior(samples, data, clean_bands=clean_bands)
+        #plot_posterior(samples, data, clean_bands=clean_bands)
         # psd_results = compute_psd_from_samples(samples, clean_bands)
         # d['psd'] = psd_results
         # plot_psd(psd_results, data['object_id'])    
@@ -516,10 +517,12 @@ if __name__ == '__main__':
             bestP = initSampler(jax.random.PRNGKey(i), 1, n_bands)
             num_params = sum(p.size for p in bestP.values())
             batch_data.append({
+                'object_id': obj['object_id'],
                 'X': obj['X'],
                 'y': obj['y'],
                 'yerr': obj['yerr'],
                 'clean_bands': obj['clean_bands'],
+                'band_idx': obj['band_idx'],
                 'z': obj['z'],
                 'bestP': bestP,
                 # add any other fields needed by your model
@@ -547,10 +550,28 @@ if __name__ == '__main__':
 
         print(samples)
 
-        # Plot the results
-        result = process_samples(samples, batch_data)
-        if plot:
-            save_combined_plot(samples, m1, X, y, yerr, band_idx[mask_outlier], result)
+        # Save and plot the results
+        results = []
+        for i, obj in enumerate(batch_data):
+            obj_samples = {k: v[..., i] if v.ndim > 1 and v.shape[-1] == len(batch_data) else v for k, v in samples.items()}
+            # Remove the _{i} index from parameter names before passing to process_samples
+            obj_samples_clean = {}
+            for k, v in obj_samples.items():
+                if k.endswith(f"_{i}"):
+                    k_clean = k[:-(len(f"_{i}"))]
+                    obj_samples_clean[k_clean] = v
+                else:
+                    obj_samples_clean[k] = v
+            result = process_samples(obj_samples_clean, obj)
+            if args.plot:
+                m = Model(
+                    obj['X'], obj['y'], obj['yerr'], 
+                    kernels.quasisep.Exp(jnp.array([1, 1])),
+                    zero_mean=False, has_jitter=True, has_lag=True,
+                    clean_bands=obj['clean_bands'], z=obj['z']
+                )
+                save_combined_plot(obj_samples_clean, m, obj['X'], obj['y'], obj['yerr'], obj['band_idx'], result)
+            results.append(result)
 
     else:
         for i, obj in enumerate(objs):

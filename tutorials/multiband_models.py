@@ -306,14 +306,14 @@ class MyMultiVarModel(MultiVarModel):
         inds,)
 
     def my_amp_transform_blr(self, params: dict[str, JAXArray]) -> JAXArray:
-        return params["log_sigma_hat_0"] + jnp.atleast_1d(params["log_amp_delta_blr"])
+        return params["log_sigma_hat0"] + jnp.atleast_1d(params["log_amp_delta_blr"])
     
     def my_tau_drw_transform(self, params: dict[str, JAXArray]) -> JAXArray:
         eta_tau1 = params["eta_tau1"]
         eta_tau2 = params["eta_tau2"]
         lam_s = params["lam_s"]
         eta_break = params["eta_break"]
-        params["log_tau_band_RF"] = params["log_tau_drw_0"] - jnp.log(1 + self.z) + jnp.log(10) * jnp.array([log_broken_pl(lambda_pivot[band]/(1 + self.z), lam_s, eta_tau1, eta_tau2, eta_break) for band in self.clean_bands])
+        params["log_tau_band_RF"] = params["log_tau_drw0"] - jnp.log(1 + self.z) + jnp.log(10) * jnp.array([log_broken_pl(lambda_pivot[band]/(1 + self.z), lam_s, eta_tau1, eta_tau2, eta_break) for band in self.clean_bands])
         return params["log_tau_band_RF"]
 
     def my_amp_transform(self, params: dict[str, JAXArray]) -> JAXArray:
@@ -321,7 +321,7 @@ class MyMultiVarModel(MultiVarModel):
         eta_A2 = params["eta_A2"]
         lam_s = params["lam_s"]
         eta_break = params["eta_break"]
-        params["log_sigma_hat_band"] = params["log_sigma_hat_0"] + jnp.log(10) * jnp.array([log_broken_pl(lambda_pivot[band]/(1 + self.z), lam_s, eta_A1, eta_A2, eta_break) for band in self.clean_bands])
+        params["log_sigma_hat_band"] = params["log_sigma_hat0"] + jnp.log(10) * jnp.array([log_broken_pl(lambda_pivot[band]/(1 + self.z), lam_s, eta_A1, eta_A2, eta_break) for band in self.clean_bands])
         return params["log_sigma_hat_band"]
     
     @eqx.filter_jit
