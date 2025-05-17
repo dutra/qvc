@@ -383,7 +383,7 @@ def process_samples(samples, data):
     eta_tau2, eta_tau2_err = sym_percentile(eta_tau2)
     eta_break, eta_break_err = sym_percentile(eta_break)
 
-    log_w, log_w_err = sym_percentile(np.log10(np.exp(samples.get("dlog_w", np.array([0])))))
+    log_w, log_w_err = sym_percentile(np.log10(np.exp(samples['log_w'])))
 
     log_tau_UV_RF, log_tau_UV_RF_err = sym_percentile(samples_log_tau_UV_RF)
     log_tau_band_RF, log_tau_band_RF_err = sym_percentile(samples_log_tau_band_RF)

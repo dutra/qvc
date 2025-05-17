@@ -98,19 +98,30 @@ class MyMultibandContiBLR(tinygp.kernels.Kernel):
         drw = jnp.exp(-tau / tau_drw)
         return drw
 
-    def ktt(self, tau, tau_drw, delta=10) -> JAXArray:
-        abs_tau = jnp.abs(tau)
-        delta = 100 #self.w
-    
-        def inner(tau):
-            return (1 - tau / delta) * jnp.exp(-tau / tau_drw)
-        
-        def outer(tau):
-            term1 = jnp.exp(-(tau - delta) / tau_drw)
-            term2 = jnp.exp(-(tau + delta) / tau_drw)
-            return 1 / delta * (term1 - term2)
+    def ktophat(self, tau, tau_d) -> JAXArray:
+        delta_t = jnp.abs(tau)
+        width = self.w
 
-        return jnp.where(abs_tau < delta, inner(abs_tau), outer(abs_tau))
+        t_L = delta_t - width
+        t_H = delta_t         # delay = 0, so t_H = delta_t - 0
+
+        A = 1.0 / width  # normalized top-hat amplitude
+        prefactor = A
+
+        def case1(t_L, t_H):
+            return jnp.exp(-t_L / tau_d) - jnp.exp(-t_H / tau_d)
+
+        def case2(t_L, t_H):
+            return jnp.exp(t_H / tau_d) - jnp.exp(t_L / tau_d)
+
+        def case3(t_L, t_H):
+            return 2.0 - jnp.exp(t_L / tau_d) - jnp.exp(-t_H / tau_d)
+
+        return prefactor * jnp.select(
+            [t_L > 0, t_H < 0, (t_L <= 0) & (t_H >= 0)],
+            [case1(t_L, t_H), case2(t_L, t_H), case3(t_L, t_H)],
+            default=0.0
+        )
 
     def evaluate(self, X1, X2) -> JAXArray:
         t1, b1 = X1
@@ -178,19 +189,30 @@ class MyMultibandConti(tinygp.kernels.Kernel):
         drw = jnp.exp(-tau / tau_drw)
         return drw
 
-    def ktt(self, tau, tau_drw, delta=10) -> JAXArray:
-        abs_tau = jnp.abs(tau)
-        delta = self.w
-    
-        def inner(tau):
-            return (1 - tau / delta) * jnp.exp(-tau / tau_drw)
-        
-        def outer(tau):
-            term1 = jnp.exp(-(tau - delta) / tau_drw)
-            term2 = jnp.exp(-(tau + delta) / tau_drw)
-            return 1 / delta * (term1 - term2)
+    def kktophat(self, tau, tau_d) -> JAXArray:
+        delta_t = jnp.abs(tau)
+        width = self.w
 
-        return jnp.where(abs_tau < delta, inner(abs_tau), outer(abs_tau))
+        t_L = delta_t - width
+        t_H = delta_t         # delay = 0, so t_H = delta_t - 0
+
+        A = 1.0 / width  # normalized top-hat amplitude
+        prefactor = A
+
+        def case1(t_L, t_H):
+            return jnp.exp(-t_L / tau_d) - jnp.exp(-t_H / tau_d)
+
+        def case2(t_L, t_H):
+            return jnp.exp(t_H / tau_d) - jnp.exp(t_L / tau_d)
+
+        def case3(t_L, t_H):
+            return 2.0 - jnp.exp(t_L / tau_d) - jnp.exp(-t_H / tau_d)
+
+        return prefactor * jnp.select(
+            [t_L > 0, t_H < 0, (t_L <= 0) & (t_H >= 0)],
+            [case1(t_L, t_H), case2(t_L, t_H), case3(t_L, t_H)],
+            default=0.0
+        )
 
     def evaluate(self, X1, X2) -> JAXArray:
         t1, b1 = X1
@@ -241,7 +263,7 @@ class MyMultiVarModel(MultiVarModel):
         else:
             time_centered = (X[0] - jnp.nanmean(X[0]))
             time_scaled = time_centered #/ (jnp.nanmax(X[0]) - jnp.nanmin(X[0]))
-            means = jnp.atleast_1d(params["mean"])[X[1]] #+ params["poly1"] * time_scaled / 100000
+            means = jnp.atleast_1d(params["mean"])[X[1]] + params["poly1"] * time_scaled / 100000
         return means
     
     def _build_gp(
