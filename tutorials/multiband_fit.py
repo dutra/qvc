@@ -243,7 +243,7 @@ def numpyro_joint_model(Model, batch_data):
         m = Model(
             data['X'], data['y'], data['yerr'],
             kernels.quasisep.Exp(jnp.array([1, 1])),  # Placeholder, your Model will build the kernel
-            zero_mean=False, has_jitter=True, has_lag=True,
+            zero_mean=zero_mean, has_jitter=has_jitter, has_lag=has_lag,
             clean_bands=data['clean_bands'], z=data['z']
         )
         log_prob = m.log_prob(params)
@@ -565,7 +565,7 @@ if __name__ == '__main__':
                 m = Model(
                     obj['X'], obj['y'], obj['yerr'], 
                     kernels.quasisep.Exp(jnp.array([1, 1])),
-                    zero_mean=False, has_jitter=True, has_lag=True,
+                    zero_mean=has_lag, has_jitter=has_jitter, has_lag=has_lag,
                     clean_bands=obj['clean_bands'], z=obj['z']
                 )
                 save_combined_plot(obj_samples_clean, m, obj['X'], obj['y'], obj['yerr'], obj['band_idx'], result)
