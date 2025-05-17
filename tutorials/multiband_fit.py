@@ -195,51 +195,57 @@ def numpyro_model(Model, X, yerr, y=None, bestP=None, clean_bands=None, z=None):
 
 def numpyro_joint_model(Model, batch_data):
     # --- Shared (universal) parameters ---
-    # TODO: update the priors from the previous batch
-    eta_A1 = numpyro.sample("eta_A1", dist.Normal(-1.0, 0.1))
-    eta_A2 = numpyro.sample("eta_A2", dist.Normal(-0.2, 0.1))
-    eta_tau1 = numpyro.sample("eta_tau1", dist.Normal(1.0, 0.1))
-    eta_tau2 = numpyro.sample("eta_tau2", dist.Normal(0.1, 0.1))
-    lam_s = numpyro.sample("lam_s", dist.Normal(2500.0, 50.0))
-    eta_break = numpyro.sample("eta_break", dist.Normal(4, 0.2))
+    powerlaw_priors = {
+        "eta_A1": (-1.0, 0.1),
+        "eta_A2": (-0.2, 0.1),
+        "eta_tau1": (0.8, 0.1),
+        "eta_tau2": (0.1, 0.1),
+        "eta_break": (4, 0.1),
+        "lam_s": (2500.0, 1.0),
+    }
+    powerlaw_samples = {
+        k: numpyro.sample(k, dist.Normal(loc, scale))
+        for k, (loc, scale) in powerlaw_priors.items()
+    }
 
     for i, data in enumerate(batch_data):
+        n_bands = len(data['clean_bands'])
+
         # Object-specific parameters
-        log_kernel_param = numpyro.sample(f"log_kernel_param_{i}", dist.Uniform(jnp.array([2.0, -3.0]), jnp.array([10.0, 0.5])))
-        log_amp_delta_blr = numpyro.sample(f"log_amp_delta_blr_{i}", dist.Normal(jnp.full((len(data['clean_bands']),), -8.0), 2.0))
-        lag = numpyro.sample(f"lag_{i}", dist.Normal(jnp.zeros(len(data['clean_bands'])-1), 10))
-        log_lag_blr = numpyro.sample(f"log_lag_blr_{i}", dist.Normal(jnp.zeros(len(data['clean_bands'])), 2.0))
-        log_tau_drw_blr = numpyro.sample(f"log_tau_drw_blr_{i}", dist.Normal(2.8, 2.0))
-        log_jitter = numpyro.sample(f"log_jitter_{i}", dist.Normal(jnp.full((len(data['clean_bands']),), np.log(1e-4)), 1.0))
-        mean = numpyro.sample(f"mean_{i}", dist.Normal(jnp.zeros(len(data['clean_bands'])), 0.1))
+        log_w = numpyro.sample(f"log_w_{i}", dist.Normal(jnp.log(20.0), 1.0))
+        log_tau_drw_0 = numpyro.sample(f"log_tau_drw_0_{i}", dist.Uniform(jnp.log(1e1), jnp.log(1e5)))
+        log_sigma_hat_0 = numpyro.sample(f"log_sigma_hat_0_{i}", dist.Uniform(jnp.log(1e-3), jnp.log(1e2)))
+        log_amp_delta_blr = numpyro.sample(f"log_amp_delta_blr_{i}", dist.Normal(jnp.full((n_bands,), jnp.log(1e-3)), 2.0))
+        lag = numpyro.sample(f"lag_{i}", dist.Normal(jnp.zeros(n_bands-1), 10))
+        log_lag_blr = numpyro.sample(f"log_lag_blr_{i}", dist.Normal(jnp.full((n_bands,), jnp.log(1e2)), 2.0))
+        log_tau_drw_blr = numpyro.sample(f"log_tau_drw_blr_{i}", dist.Normal(jnp.log(1e2), 2.0))
+        mean = numpyro.sample(f"mean_{i}", dist.Normal(jnp.zeros(n_bands), 0.1))
         poly1 = numpyro.sample(f"poly1_{i}", dist.Normal(0.0, 10.0))
+        mean_yerr = jnp.mean(data['yerr'])
+        log_jitter_init = jnp.log(mean_yerr + 1e-6)
+        log_jitter = numpyro.sample(f"log_jitter_{i}", dist.Normal(jnp.full((n_bands,), log_jitter_init), 1.0))
 
         params = {
-            "log_kernel_param": log_kernel_param,
+            "log_w": log_w,
+            "log_tau_drw_0": log_tau_drw_0,
+            "log_sigma_hat_0": log_sigma_hat_0,
             "log_amp_delta_blr": log_amp_delta_blr,
             "lag": lag,
             "log_lag_blr": log_lag_blr,
             "log_tau_drw_blr": log_tau_drw_blr,
-            "log_jitter": log_jitter,
             "mean": mean,
             "poly1": poly1,
-            # --- Shared parameters ---
-            "eta_A1": eta_A1,
-            "eta_A2": eta_A2,
-            "eta_tau1": eta_tau1,
-            "eta_tau2": eta_tau2,
-            "lam_s": lam_s,
-            "eta_break": eta_break,
+            "log_jitter": log_jitter,
+            **powerlaw_samples,
         }
 
         m = Model(
             data['X'], data['y'], data['yerr'],
-            kernels.quasisep.Exp(*jnp.exp(log_kernel_param)),
-            zero_mean=zero_mean, has_jitter=has_jitter, has_lag=has_lag,
+            kernels.quasisep.Exp(jnp.array([1, 1])),  # Placeholder, your Model will build the kernel
+            zero_mean=False, has_jitter=True, has_lag=True,
             clean_bands=data['clean_bands'], z=data['z']
         )
         log_prob = m.log_prob(params)
-        # numpyro does the summation for us
         numpyro.factor(f"loglike_{i}", log_prob)
 
 
@@ -491,7 +497,6 @@ if __name__ == '__main__':
     #objs = populate_sdss_fields(objs)
 
     Model = MyMultiVarModel
-
     if args.latent:
         print("Using latent model (with BLR contribution)")
         Model = MyMultiVarModelLatent
@@ -506,34 +511,46 @@ if __name__ == '__main__':
                 continue
             obj['i'] = i
             obj |= result
+            # Run bestP for each object
+            n_bands = len(obj['clean_bands'])
+            bestP = initSampler(jax.random.PRNGKey(i), 1, n_bands)
+            num_params = sum(p.size for p in bestP.values())
             batch_data.append({
                 'X': obj['X'],
                 'y': obj['y'],
                 'yerr': obj['yerr'],
                 'clean_bands': obj['clean_bands'],
                 'z': obj['z'],
+                'bestP': bestP,
                 # add any other fields needed by your model
             })
-            print(f"Running joint fit on {len(batch_data)} objects...")
-            init_strategy = numpyro.infer.init_to_sample()
+        print(f"Running joint fit on {len(batch_data)} objects...")
+        init_strategy = numpyro.infer.init_to_sample()
 
-            # emcee works better than NUTS for multimodal posteriors
-            nuts_kernel = AIES(
-                partial(numpyro_model, bestP=bestP, clean_bands=clean_bands, z=data['z']),
-                moves={AIES.DEMove() : 0.5, AIES.StretchMove() : 0.5},
-                init_strategy=init_strategy,
-                )
-            mcmc = MCMC(
-                nuts_kernel,
-                num_warmup=nwarm, # This could be less than num_samples
-                num_samples=nsamp,
-                num_chains=2*num_params,
-                progress_bar=True,
-                chain_method="vectorized",
+        # emcee works better than NUTS for multimodal posteriors
+        nuts_kernel = AIES(
+            numpyro_joint_model,
+            moves={AIES.DEMove() : 0.5, AIES.StretchMove() : 0.5},
+            init_strategy=init_strategy,
             )
-            mcmc.run(jax.random.PRNGKey(0), batch_data)
-            samples = mcmc.get_samples(group_by_chain=False)
-            diagnostics = mcmc.get_extra_fields()
+        mcmc = MCMC(
+            nuts_kernel,
+            num_warmup=args.nwarm, # This could be less than num_samples
+            num_samples=args.nsamp,
+            num_chains=(2*num_params - 6)*len(batch_data) + 6,
+            progress_bar=args.progress,
+            chain_method="vectorized",
+        )
+        mcmc.run(jax.random.PRNGKey(0), Model, batch_data)
+        samples = mcmc.get_samples(group_by_chain=False)
+        diagnostics = mcmc.get_extra_fields()
+
+        print(samples)
+
+        # Plot the results
+        result = process_samples(samples, batch_data)
+        if plot:
+            save_combined_plot(samples, m1, X, y, yerr, band_idx[mask_outlier], result)
 
     else:
         for i, obj in enumerate(objs):
