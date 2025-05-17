@@ -167,7 +167,7 @@ class MyMultibandContiBLR(tinygp.kernels.Kernel):
             )
         )
 
-        return cov_ac #+ cov_ad + cov_bc + cov_bd
+        return cov_ac + cov_ad + cov_bc + cov_bd
 
 class MyMultibandConti(tinygp.kernels.Kernel):
     sigma_hat: float
@@ -301,7 +301,7 @@ class MyMultiVarModel(MultiVarModel):
             GaussianProcess(
                 kernel,
                 (t[inds], band[inds]),
-                diag=diags + 1e-4,
+                diag=diags + 1e-6,
                 mean=means), 
         inds,)
 
