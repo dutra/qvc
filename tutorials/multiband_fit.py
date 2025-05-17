@@ -212,8 +212,6 @@ def numpyro_joint_model(Model, batch_data):
     }
 
     for i, data in enumerate(batch_data):
-        n_bands = len(data['clean_bands'])
-
         # Object-specific parameters
         log_w = numpyro.sample(f"log_w_{i}", dist.Normal(jnp.log(20.0), 1.0))
         log_tau_drw_0 = numpyro.sample(f"log_tau_drw0_{i}", dist.Uniform(jnp.log(1e1), jnp.log(1e5)))
@@ -248,7 +246,7 @@ def numpyro_joint_model(Model, batch_data):
             data['X'], data['y'], data['yerr'],
             kernels.quasisep.Exp(jnp.array([1, 1])),  # Placeholder, your Model will build the kernel
             zero_mean=False, has_jitter=True, has_lag=True,
-            clean_bands=data['clean_bands'], z=data['z']
+            clean_bands=['u','g','r','i','z'], z=data['z']
         )
         log_prob = m.log_prob(params)
         numpyro.factor(f"loglike_{i}", log_prob)
@@ -519,8 +517,7 @@ if __name__ == '__main__':
             obj |= result
             # Run bestP for each object
             n_bands = len(obj['clean_bands'])
-            print(f'n_bands {i}', n_bands)
-            bestP = initSampler(jax.random.PRNGKey(i), 1, n_bands)
+            bestP = initSampler(jax.random.PRNGKey(i), 1, 5)
             num_params = sum(p.size for p in bestP.values())
             batch_data.append({
                 'object_id': obj['object_id'],
@@ -561,6 +558,9 @@ if __name__ == '__main__':
             # Remove the _{i} index from parameter names before passing to process_samples
             obj_samples_clean = {k[:-(len(f"_{i}"))] if k.endswith(f"_{i}") else k: v for k, v in obj_samples.items()}
             result = process_samples(obj_samples_clean, obj)
+            # Only keep the first clean_bands for the multi-band parameters in obj_samples_clean
+            multi_band_keys = ["log_amp_delta_blr", "lag", "log_lag_blr", "log_tau_drw_blr","mean", "log_jitter"]
+            [obj_samples_clean.update({k: obj_samples_clean[k][..., :len(obj["clean_bands"])]}) for k in multi_band_keys if k in obj_samples_clean and obj_samples_clean[k].ndim > 0]
             if args.plot:
                 m = Model(
                     obj['X'], obj['y'], obj['yerr'], 
