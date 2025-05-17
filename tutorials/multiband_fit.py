@@ -199,10 +199,10 @@ def numpyro_joint_model(Model, batch_data):
     # --- Shared (universal) parameters ---
     # These priors can be broader
     powerlaw_priors = {
-        "eta_A1": (-1.0, 0.1),
-        "eta_A2": (-0.2, 0.1),
-        "eta_tau1": (0.8, 0.1),
-        "eta_tau2": (0.1, 0.1),
+        "eta_A1": (-1.0, 0.5),
+        "eta_A2": (-0.2, 0.5),
+        "eta_tau1": (0.8, 0.5),
+        "eta_tau2": (0.1, 0.5),
         "eta_break": (4, 0.1),
         "lam_s": (2500.0, 1.0),
     }
@@ -214,8 +214,8 @@ def numpyro_joint_model(Model, batch_data):
     for i, data in enumerate(batch_data):
         # Object-specific parameters
         log_w = numpyro.sample(f"log_w_{i}", dist.Normal(jnp.log(20.0), 1.0))
-        log_tau_drw_0 = numpyro.sample(f"log_tau_drw0_{i}", dist.Uniform(jnp.log(1e1), jnp.log(1e5)))
-        log_sigma_hat_0 = numpyro.sample(f"log_sigma_hat0_{i}", dist.Uniform(jnp.log(1e-3), jnp.log(1e2)))
+        log_tau_drw_0 = numpyro.sample(f"log_tau_drw0_{i}", dist.Uniform(jnp.log(1e1), jnp.log(1e6)))
+        log_sigma_hat_0 = numpyro.sample(f"log_sigma_hat0_{i}", dist.Uniform(jnp.log(1e-4), jnp.log(1e2)))
         log_amp_delta_blr = numpyro.sample(f"log_amp_delta_blr_{i}", dist.Normal(jnp.full_like(bestP["log_amp_delta_blr"], jnp.log(1e-3)), 2.0))
         lag = numpyro.sample(f"lag_{i}", dist.Normal(jnp.full_like(bestP["lag"], 0.0), 10.0))
         log_lag_blr = numpyro.sample(f"log_lag_blr_{i}", dist.Normal(jnp.full_like(bestP["log_lag_blr"], jnp.log(1e2)), 2.0))
@@ -225,8 +225,6 @@ def numpyro_joint_model(Model, batch_data):
         mean_yerr = jnp.mean(data['yerr'])
         log_jitter_init = jnp.log(mean_yerr + 1e-6)
         log_jitter = numpyro.sample(f"log_jitter_{i}", dist.Normal(jnp.full_like(bestP["log_jitter"], log_jitter_init), 1.0))
-        print(f"log_jitter shape for object {i}: {log_jitter.shape}")
-
 
         params = {
             "log_w": log_w,
