@@ -87,6 +87,8 @@ def initSampler(key, nSample, nBand=None):
     logAmpDeltaBLRSampler = UniformInit(nBand, [-5.0, -2.0])
     logJitterSampler = UniformInit(nBand, [jnp.log(1e-4), jnp.log(0.1)])
 
+    print(f"initSampler logJitterSampler {key}", nBand)
+
     # power laws
     etaBreakSampler = UniformInit(1, [2, 5])
     lamsSampler = UniformInit(1, [2400.0, 2600.0])
@@ -216,15 +218,17 @@ def numpyro_joint_model(Model, batch_data):
         log_w = numpyro.sample(f"log_w_{i}", dist.Normal(jnp.log(20.0), 1.0))
         log_tau_drw_0 = numpyro.sample(f"log_tau_drw0_{i}", dist.Uniform(jnp.log(1e1), jnp.log(1e5)))
         log_sigma_hat_0 = numpyro.sample(f"log_sigma_hat0_{i}", dist.Uniform(jnp.log(1e-3), jnp.log(1e2)))
-        log_amp_delta_blr = numpyro.sample(f"log_amp_delta_blr_{i}", dist.Normal(jnp.full((n_bands,), jnp.log(1e-3)), 2.0))
-        lag = numpyro.sample(f"lag_{i}", dist.Normal(jnp.zeros(n_bands-1), 10))
-        log_lag_blr = numpyro.sample(f"log_lag_blr_{i}", dist.Normal(jnp.full((n_bands,), jnp.log(1e2)), 2.0))
+        log_amp_delta_blr = numpyro.sample(f"log_amp_delta_blr_{i}", dist.Normal(jnp.full_like(bestP["log_amp_delta_blr"], jnp.log(1e-3)), 2.0))
+        lag = numpyro.sample(f"lag_{i}", dist.Normal(jnp.full_like(bestP["lag"], 0.0), 10.0))
+        log_lag_blr = numpyro.sample(f"log_lag_blr_{i}", dist.Normal(jnp.full_like(bestP["log_lag_blr"], jnp.log(1e2)), 2.0))
         log_tau_drw_blr = numpyro.sample(f"log_tau_drw_blr_{i}", dist.Normal(jnp.log(1e2), 2.0))
-        mean = numpyro.sample(f"mean_{i}", dist.Normal(jnp.zeros(n_bands), 0.1))
+        mean = numpyro.sample(f"mean_{i}", dist.Normal(jnp.full_like(bestP["mean"], 0.0), 0.1))
         poly1 = numpyro.sample(f"poly1_{i}", dist.Normal(0.0, 10.0))
         mean_yerr = jnp.mean(data['yerr'])
         log_jitter_init = jnp.log(mean_yerr + 1e-6)
-        log_jitter = numpyro.sample(f"log_jitter_{i}", dist.Normal(jnp.full((n_bands,), log_jitter_init), 1.0))
+        log_jitter = numpyro.sample(f"log_jitter_{i}", dist.Normal(jnp.full_like(bestP["log_jitter"], log_jitter_init), 1.0))
+        print(f"log_jitter shape for object {i}: {log_jitter.shape}")
+
 
         params = {
             "log_w": log_w,
@@ -515,6 +519,7 @@ if __name__ == '__main__':
             obj |= result
             # Run bestP for each object
             n_bands = len(obj['clean_bands'])
+            print(f'n_bands {i}', n_bands)
             bestP = initSampler(jax.random.PRNGKey(i), 1, n_bands)
             num_params = sum(p.size for p in bestP.values())
             batch_data.append({
@@ -549,20 +554,12 @@ if __name__ == '__main__':
         samples = mcmc.get_samples(group_by_chain=False)
         diagnostics = mcmc.get_extra_fields()
 
-        print(samples)
-
         # Save and plot the results
         results = []
         for i, obj in enumerate(batch_data):
             obj_samples = {k: v[..., i] if v.ndim > 1 and v.shape[-1] == len(batch_data) else v for k, v in samples.items()}
             # Remove the _{i} index from parameter names before passing to process_samples
-            obj_samples_clean = {}
-            for k, v in obj_samples.items():
-                if k.endswith(f"_{i}"):
-                    k_clean = k[:-(len(f"_{i}"))]
-                    obj_samples_clean[k_clean] = v
-                else:
-                    obj_samples_clean[k] = v
+            obj_samples_clean = {k[:-(len(f"_{i}"))] if k.endswith(f"_{i}") else k: v for k, v in obj_samples.items()}
             result = process_samples(obj_samples_clean, obj)
             if args.plot:
                 m = Model(
