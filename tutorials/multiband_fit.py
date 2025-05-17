@@ -136,7 +136,12 @@ def numpyro_model(Model, X, yerr, y=None, bestP=None, clean_bands=None, z=None):
     lag = numpyro.sample("lag", dist.Normal(jnp.full_like(bestP["lag"], 0.0), 10))
     log_lag_blr = numpyro.sample("log_lag_blr", dist.Normal(jnp.full_like(bestP["log_lag_blr"], 0.0), 2.0))
     log_tau_drw_blr = numpyro.sample("log_tau_drw_blr", dist.Normal(2.8, 2.0))
-    log_jitter = numpyro.sample("log_jitter", dist.Normal(jnp.full_like(bestP["log_jitter"], np.log(1e-4)), 1.0))
+
+    # Initialize jitter using the mean yerr
+    mean_yerr = jnp.mean(yerr)
+    log_jitter_init = jnp.log(mean_yerr**2 + 1e-6)
+
+    log_jitter = numpyro.sample("log_jitter", dist.Normal(jnp.full_like(bestP["log_jitter"], log_jitter_init), 1.0))
 
     # --- Mean function parameters ---
     mean = numpyro.sample("mean", dist.Normal(jnp.full_like(bestP["mean"], 0.0), 0.1))
