@@ -359,13 +359,13 @@ def process_samples(samples, data):
     lambda_ref = 2500 # Any reference wavelength
     lambda_s_RF = samples["lam_s"]
     
-    samples_log_sigma_UV = samples['log_kernel_param'][:, 1] / np.log(10) + log_broken_pl(lambda_ref, lambda_s_RF, eta_A1, eta_A2, eta_break)
+    samples_log_sigma_UV = -2 + log_broken_pl(lambda_ref, lambda_s_RF, eta_A1, eta_A2, eta_break)
     samples_log_amp_delta = np.array([log_broken_pl(lambda_pivot[band], samples["lam_s"], eta_A1, eta_A2) if band in clean_bands else np.full_like(samples["lam_s"], -9999) for band in bands])                                                                               
-    samples_log_sigma_band = samples['log_kernel_param'][:, 1:2] / np.log(10)  + samples_log_amp_delta.T
+    samples_log_sigma_band = jnp.full_like(samples_log_amp_delta.T, -2) + samples_log_amp_delta.T
 
-    samples_log_tau_UV_RF = samples['log_kernel_param'][:, 0] / np.log(10) - np.log10(1 + data['z']) + log_broken_pl(lambda_ref, lambda_s_RF, eta_tau1, eta_tau2, eta_break)
+    samples_log_tau_UV_RF = 3 - np.log10(1 + data['z']) + log_broken_pl(lambda_ref, lambda_s_RF, eta_tau1, eta_tau2, eta_break)
     samples_log_tau_delta = np.array([log_broken_pl(lambda_pivot[band], samples["lam_s"], eta_tau1, eta_tau2) if band in clean_bands else np.full_like(samples["lam_s"], -9999) for band in bands])
-    samples_log_tau_band_RF = samples['log_kernel_param'][:, 0:1] / np.log(10) - np.log10(1 + data['z']) + samples_log_tau_delta.T
+    samples_log_tau_band_RF = jnp.full_like(samples_log_tau_delta.T, 3) - np.log10(1 + data['z']) + samples_log_tau_delta.T
 
     def sym_percentile(x, p=[16, 50, 84], axis=0):
         lower, median, upper = np.percentile(x, p, axis=axis)
@@ -383,9 +383,7 @@ def process_samples(samples, data):
     eta_tau2, eta_tau2_err = sym_percentile(eta_tau2)
     eta_break, eta_break_err = sym_percentile(eta_break)
 
-    log_tau, log_tau_err = sym_percentile(np.log10(np.exp(samples['log_kernel_param'][:, 0])))
-    log_sigma, log_sigma_err = sym_percentile(np.log10(np.exp(samples['log_kernel_param'][:, 1])))
-    log_w, log_w_err = sym_percentile(np.log10(np.exp(samples.get("dlog_w", np.array([0])) + samples['log_kernel_param'][:, 0])))
+    log_w, log_w_err = sym_percentile(np.log10(np.exp(samples.get("dlog_w", np.array([0])))))
 
     log_tau_UV_RF, log_tau_UV_RF_err = sym_percentile(samples_log_tau_UV_RF)
     log_tau_band_RF, log_tau_band_RF_err = sym_percentile(samples_log_tau_band_RF)
@@ -394,7 +392,7 @@ def process_samples(samples, data):
 
     # BLR
     log_tau_blr, log_tau_blr_err = sym_percentile(np.log10(np.exp(samples['log_tau_drw_blr'])))
-    log_sigma_blr, log_sigma_blr_err = sym_percentile((samples['log_kernel_param'][:, 1:2] + samples['log_amp_delta_blr']) / np.log(10), axis=0)
+    log_sigma_blr, log_sigma_blr_err = sym_percentile((1e-2 + samples['log_amp_delta_blr']) / np.log(10), axis=0) #TODO: Fix
 
     lambda_s_RF, lambda_s_RF_err = sym_percentile(lambda_s_RF)
 
@@ -406,8 +404,8 @@ def process_samples(samples, data):
             log_tau_UV_RF_err=log_tau_UV_RF_err,
             log_tau_band_RF=log_tau_band_RF,
             log_tau_band_RF_err=log_tau_band_RF_err,
-            log_sigma_UV=log_sigma_UV,
-            log_sigma_UV_err=log_sigma_UV_err,
+            log_sigma_hat_UV=log_sigma_UV,
+            log_sigma_hat_UV_err=log_sigma_UV_err,
             log_sigma_band=log_sigma_band,
             log_sigma_band_err=log_sigma_band_err,
             # broken power law params
@@ -424,10 +422,6 @@ def process_samples(samples, data):
             lam_s=lambda_s_RF,
             lam_s_err=lambda_s_RF_err,
             # kernel params
-            log_sigma=log_sigma,
-            log_sigma_err=log_sigma_err,
-            log_tau=log_tau,
-            log_tau_err=log_tau_err,
             log_w=log_w,
             log_w_err=log_w_err,
             # BLR

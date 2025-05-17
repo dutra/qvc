@@ -73,100 +73,21 @@ has_jitter = True
 has_lag = True
 
 class MyMultibandContiBLR(tinygp.kernels.Kernel):
-    sigma: float
+    sigma_hat: float
     amplitudes: jnp.ndarray
     amplitudes_blr: jnp.ndarray
     lag_blr: jnp.ndarray
     tau_drw: jnp.ndarray
     tau_drw_blr: float
+    w: jnp.ndarray
 
-    def __init__(self, sigma_hat, scale, amplitudes, amplitudes_blr, lag_blr, taus, tau_drw_blr) -> None:
-        self.sigma = sigma_hat 
+    def __init__(self, sigma_hat, scale, amplitudes, amplitudes_blr, lag_blr, taus, tau_drw_blr, log_w) -> None:
+        self.sigma_hat = sigma_hat
         self.lag_blr = jnp.zeros_like(lag_blr)
         self.tau_drw = scale * taus
         self.tau_drw_blr = tau_drw_blr
-        #
-        self.amplitudes = jnp.sqrt( (amplitudes * sigma)**2 * self.tau_drw )
-        self.amplitudes_blr = jnp.sqrt( (amplitudes_blr * sigma)**2 * self.tau_drw_blr )
-
-    def coord_to_sortable(self, X) -> JAXArray:
-        return X[0]
-
-    def k(self, tau, tau_drw) -> JAXArray:
-        tau = jnp.abs(tau)
-        drw = jnp.exp(-tau / tau_drw)
-        return drw
-
-    """
-    def k(self, tau, tau_drw) -> JAXArray:
-        tau = jnp.abs(tau)
-        drw = jnp.exp(-tau / tau_drw)
-        return drw
-
-        def k(self, tau, tau_drw, amplitude=1):
-        small = 1e-3
-        is_small = self.w < small
-        k_drw = amplitude**2 * jnp.exp(-jnp.abs(tau) / tau_drw)
-
-        w_safe = jnp.maximum(self.w, small)
-        exp_term = jnp.exp((w_safe**2) / (2 * tau_drw**2) - jnp.abs(tau) / tau_drw)
-        erfc_term = erfc((w_safe / jnp.sqrt(2) / tau_drw) - (jnp.abs(tau) / jnp.sqrt(2) / w_safe))
-        k_conv = 0.5 * amplitude**2 * exp_term * erfc_term
-
-        return jnp.where(is_small, k_drw, k_conv)
-    """
-
-    def evaluate(self, X1, X2) -> JAXArray:
-        t1, b1 = X1
-        t2, b2 = X2
-
-        # a is cont at t1
-        # b is blr at t1
-        # c is cont at t2
-        # d is blr at t2
-        cov_ac = (
-            self.amplitudes[b1]
-            * self.amplitudes[b2]
-            * jnp.sqrt(
-                self.k(t2 - t1, self.tau_drw[b1])
-                * self.k(t2 - t1, self.tau_drw[b2])
-            )
-        )
-        cov_ad = (
-            self.amplitudes[b1]
-            * self.amplitudes_blr[b2]
-            * jnp.sqrt(
-                self.k(t2 - t1, self.tau_drw[b1])
-                * self.k(t2 - t1 - self.lag_blr[b2], self.tau_drw_blr)
-            )
-        )
-        cov_bc = (
-            self.amplitudes_blr[b1]
-            * self.amplitudes[b2]
-            * jnp.sqrt(
-                self.k(t2 - t1 - self.lag_blr[b1], self.tau_drw_blr)
-                * self.k(t2 - t1, self.tau_drw[b2])
-            )
-        )
-        cov_bd = (
-            self.amplitudes_blr[b1]
-            * self.amplitudes_blr[b2]
-            * jnp.sqrt(
-                self.k(t2 - t1 - self.lag_blr[b1], self.tau_drw_blr)
-                * self.k(t2 - t1 - self.lag_blr[b2], self.tau_drw_blr)
-            )
-        )
-
-        return cov_ac + cov_ad + cov_bc + cov_bd
-
-class MyMultibandConti(tinygp.kernels.Kernel):
-    sigma: float
-    tau_drw: jnp.ndarray
-    w: jnp.ndarray
-
-    def __init__(self, sigma_hat, scale, tau_drw, log_w) -> None:
-        self.tau_drw = scale * tau_drw
-        self.sigma = jnp.sqrt(sigma_hat**2 * self.tau_drw)
+        self.amplitudes = amplitudes
+        self.amplitudes_blr = amplitudes_blr
         self.w = jnp.exp(log_w)
 
     def coord_to_sortable(self, X) -> JAXArray:
@@ -177,34 +98,114 @@ class MyMultibandConti(tinygp.kernels.Kernel):
         drw = jnp.exp(-tau / tau_drw)
         return drw
 
-    def kconv(self, tau, tau_drw) -> JAXArray:
-        small = 1e-4
-        w_safe = jnp.maximum(self.w, small)
+    def ktt(self, tau, tau_drw, delta=10) -> JAXArray:
+        abs_tau = jnp.abs(tau)
+        delta = 100 #self.w
+    
+        def inner(tau):
+            return (1 - tau / delta) * jnp.exp(-tau / tau_drw)
+        
+        def outer(tau):
+            term1 = jnp.exp(-(tau - delta) / tau_drw)
+            term2 = jnp.exp(-(tau + delta) / tau_drw)
+            return 1 / delta * (term1 - term2)
 
-        dt = jnp.abs(tau)
-        a = w_safe / (jnp.sqrt(2) * tau_drw)
-        b = dt / (jnp.sqrt(2) * w_safe)
-
-        exp_term = jnp.exp((w_safe**2) / (2 * tau_drw**2) - dt / tau_drw)
-        erfc_arg = a - b
-
-        # Clip erfc_arg to avoid domain errors in erfc
-        #erfc_arg = jnp.clip(erfc_arg, -10.0, 10.0)  # You can tune these limits
-
-        erfc_term = jax.scipy.special.erfc(erfc_arg)
-        k = 0.5 * exp_term * erfc_term
-        return k
+        return jnp.where(abs_tau < delta, inner(abs_tau), outer(abs_tau))
 
     def evaluate(self, X1, X2) -> JAXArray:
         t1, b1 = X1
         t2, b2 = X2
+
+        amplitudes_b1 = jnp.sqrt( (self.amplitudes[b1] * self.sigma_hat)**2 * self.tau_drw[b1] )
+        amplitudes_b2 = jnp.sqrt( (self.amplitudes[b2] * self.sigma_hat)**2 * self.tau_drw[b2] )
+        amplitudes_blr_b1 = jnp.sqrt( (self.amplitudes_blr[b1] * self.sigma_hat)**2 * self.tau_drw_blr )
+        amplitudes_blr_b2 = jnp.sqrt( (self.amplitudes_blr[b2] * self.sigma_hat)**2 * self.tau_drw_blr )
 
         # a is cont at t1
         # b is blr at t1
         # c is cont at t2
         # d is blr at t2
         cov_ac = (
-            self.sigma**2
+            amplitudes_b1
+            * amplitudes_b2
+            * jnp.sqrt(
+                self.k(t2 - t1, self.tau_drw[b1])
+                * self.k(t2 - t1, self.tau_drw[b2])
+            )
+        )
+        cov_ad = (
+            amplitudes_b1
+            * amplitudes_blr_b2
+            * jnp.sqrt(
+                self.k(t2 - t1, self.tau_drw[b1])
+                * self.k(t2 - t1 - self.lag_blr[b2], self.tau_drw_blr)
+            )
+        )
+        cov_bc = (
+            amplitudes_blr_b1
+            * amplitudes_b2
+            * jnp.sqrt(
+                self.k(t2 - t1 - self.lag_blr[b1], self.tau_drw_blr)
+                * self.k(t2 - t1, self.tau_drw[b2])
+            )
+        )
+        cov_bd = (
+            amplitudes_blr_b1
+            * amplitudes_blr_b2
+            * jnp.sqrt(
+                self.k(t2 - t1 - self.lag_blr[b1], self.tau_drw_blr)
+                * self.k(t2 - t1 - self.lag_blr[b2], self.tau_drw_blr)
+            )
+        )
+
+        return cov_ac + cov_ad + cov_bc + cov_bd
+
+class MyMultibandConti(tinygp.kernels.Kernel):
+    sigma_hat: float
+    tau_drw: jnp.ndarray
+    w: jnp.ndarray
+
+    def __init__(self, sigma_hat, scale, tau_drw, log_w) -> None:
+        self.tau_drw = scale * tau_drw
+        self.sigma_hat = sigma_hat
+        self.w = jnp.exp(log_w)
+
+    def coord_to_sortable(self, X) -> JAXArray:
+        return X[0]
+
+    def k(self, tau, tau_drw) -> JAXArray:
+        tau = jnp.abs(tau)
+        drw = jnp.exp(-tau / tau_drw)
+        return drw
+
+    def ktt(self, tau, tau_drw, delta=10) -> JAXArray:
+        abs_tau = jnp.abs(tau)
+        delta = self.w
+    
+        def inner(tau):
+            return (1 - tau / delta) * jnp.exp(-tau / tau_drw)
+        
+        def outer(tau):
+            term1 = jnp.exp(-(tau - delta) / tau_drw)
+            term2 = jnp.exp(-(tau + delta) / tau_drw)
+            return 1 / delta * (term1 - term2)
+
+        return jnp.where(abs_tau < delta, inner(abs_tau), outer(abs_tau))
+
+    def evaluate(self, X1, X2) -> JAXArray:
+        t1, b1 = X1
+        t2, b2 = X2
+
+        sigma_b1 = jnp.sqrt(self.sigma_hat**2 * self.tau_drw[b1])
+        sigma_b2 = jnp.sqrt(self.sigma_hat**2 * self.tau_drw[b2])
+
+        # a is cont at t1
+        # b is blr at t1
+        # c is cont at t2
+        # d is blr at t2
+        cov_ac = (
+            sigma_b1
+            * sigma_b2
             * jnp.sqrt(
                 self.k(t2 - t1, self.tau_drw[b1])
                 * self.k(t2 - t1, self.tau_drw[b2])
@@ -258,6 +259,7 @@ class MyMultiVarModel(MultiVarModel):
         # time axis transform: t and band are not sorted,
         # inds gives the sorted indices for the new_t
         X, inds = self.lag_transform(self.X, self.has_lag, params)
+
         t = X[0]
         band = X[1]
 
@@ -271,10 +273,11 @@ class MyMultiVarModel(MultiVarModel):
             amplitudes=jnp.exp(log_amps),
             amplitudes_blr=jnp.exp(log_amps_blr),
             lag_blr=jnp.exp(params["log_lag_blr"])[band[inds]],
-            sigma_hat=jnp.exp(params["log_kernel_param"][1]),
-            scale=jnp.exp(params["log_kernel_param"][0] - jnp.log(1+self.z)),
+            sigma_hat=1e-2,
+            scale=1e3/(1+self.z),
             taus=jnp.exp(log_taus)[band[inds]],
             tau_drw_blr=jnp.exp(params["log_tau_drw_blr"]),
+            log_w=params["log_w"] - jnp.log(1 + self.z),
         )
         return (
             GaussianProcess(
@@ -365,8 +368,9 @@ class MyMultiVarModelLatent(MyMultiVarModel):
 
         X, inds = self.lag_transform(self.X, self.has_lag, params)
         t_obs, band_obs = X
+        t_obs = t_obs[inds]
+        band_obs = band_obs[inds]
         y_obs = self.y[inds]
-        band_obs = band_obs #[inds]
 
         amp_conti = jnp.exp(log_amps)
         amp_blr = jnp.exp(log_amps_blr)
@@ -429,7 +433,7 @@ class MyMultiVarModelLatent(MyMultiVarModel):
         y_centered = y_obs - mu_obs
 
         # Cholesky solve for log-likelihood
-        L = jnp.linalg.cholesky(K_obs + 1e-2 * jnp.eye(K_obs.shape[0]))  # small jitter for stability
+        L = jnp.linalg.cholesky(K_obs + 1e-4 * jnp.eye(K_obs.shape[0]))  # small jitter for stability
         alpha = jax.scipy.linalg.cho_solve((L, True), y_centered)
 
         logdet = 2.0 * jnp.sum(jnp.log(jnp.diag(L)))
@@ -463,7 +467,7 @@ class MyMultiVarModelLatent(MyMultiVarModel):
         y_centered = y_obs - mu_obs
 
         # Cholesky solve for alpha
-        L = jnp.linalg.cholesky(K_obs + 1e-2 * jnp.eye(K_obs.shape[0]))
+        L = jnp.linalg.cholesky(K_obs + 1e-4 * jnp.eye(K_obs.shape[0]))
         alpha = jax.scipy.linalg.cho_solve((L, True), y_centered)
 
         # Prepare new latent inputs

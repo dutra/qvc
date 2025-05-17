@@ -44,29 +44,23 @@ def save_lc_plot(times, mags, magerrs, object_id):
     plt.close(fig)
 
 def plot_posterior(samples, data, clean_bands=None):
-    # Extract the posterior samples
+    """
+    Plot a corner plot of all posterior parameters found in the samples dict.
+    """
     object_id = data['object_id']
-    lambda_ref = 2500 # Any reference wavelength
-    lambda_pivot_RF = lambda_pivot[clean_bands[0]]/(1 + data['z'])
-    log_sigma_RF = np.log10(np.exp(samples['log_kernel_param'][:, 1] + samples['beta']*np.log(lambda_ref/lambda_pivot_RF)))
-    log_tau_RF = np.log10(np.exp(samples['log_kernel_param'][:, 0])/(1+data['z']))
 
-    posterior_samples = {
-        r'$\eta_{A}$': samples['beta'],
-        r'$\eta_{\tau}$': samples['delta'],
-        r'$\log(\tau_\mathrm{RF})$': log_tau_RF,
-        r'$\log(\sigma_\mathrm{RF})$': log_sigma_RF,
-        r'poly1': samples['poly1'],
-    }
-    for i, band in enumerate(clean_bands):
-        posterior_samples[f'mean_{band}'] = samples['mean'][:, i]
-        posterior_samples[f'lag_{band}'] = samples['lag'][:, i]
-        posterior_samples[f'log_lag_blr_{band}'] = samples['log_lag_blr'][:, i]
-        posterior_samples[f'log_amp_delta_blr_{band}'] = samples['log_amp_delta_blr'][:, i]
-        posterior_samples[f'log_jitter_{band}'] = samples['log_jitter'][:, i]
+    # Only use 1D or 2D arrays (with shape [n_samples, ...])
+    posterior_samples = {}
+    for key, val in samples.items():
+        arr = np.asarray(val)
+        if arr.ndim == 1:
+            posterior_samples[key] = arr
+        elif arr.ndim == 2:
+            for i in range(arr.shape[1]):
+                posterior_samples[f"{key}_{i}"] = arr[:, i]
 
-    # Convert the samples to a 2D array for corner
-    corner_data = np.vstack([posterior_samples[key] for key in posterior_samples.keys()]).T
+    # Stack for corner plot
+    corner_data = np.vstack([posterior_samples[k] for k in posterior_samples]).T
     fig = corner.corner(corner_data, labels=list(posterior_samples.keys()), show_titles=True)
     output_dir = "posterior_plots"
     os.makedirs(output_dir, exist_ok=True)
@@ -94,7 +88,6 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, data):
         posterior_median = {k: np.median(v, axis=0) for k, v in samples.items()}
         mu, std = model.pred(posterior_median, (t_test, jnp.full_like(t_test, n, dtype=int)))
         # Plot the predictions
-        print(mu)
         ax.plot(t_test, mu+offsets[n], alpha=0.8, color=colors[band_idx_map[n]], lw=1.0)
         ax.fill_between(t_test, mu+offsets[n]-std, mu+offsets[n]+std, alpha=0.3, 
                 lw=0.5, color=colors[band_idx_map[n]])

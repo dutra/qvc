@@ -130,74 +130,57 @@ def initSampler(key, nSample, nBand=None):
     }
 
 def numpyro_model(Model, X, yerr, y=None, bestP=None, clean_bands=None, z=None):
-    # kernel param
-    #flat_normal = dist.Normal(bestP["log_kernel_param"], jnp.array([0.1, 0.1]))
-    # This works better with the direct GP solver
-    flat_normal = dist.Uniform(jnp.array([2.0, -3.0]), jnp.array([10.0, 0.5]))
-    diag_normal = dist.Independent(flat_normal, 1)
-    log_kernel_param = numpyro.sample("log_kernel_param", diag_normal)
-    log_w = numpyro.sample("log_w", dist.Normal(jnp.full_like(bestP["log_w"], jnp.log(2.0)), 0.1))
-    #jax.debug.print("{x} log_kernel_param_numpro", x=log_kernel_param)
-    #jax.debug.print("{x} log_kernel_param_numpro_bestp", x=bestP["log_kernel_param"])
-
-    log_amp_delta_blr = numpyro.sample(
-      "log_amp_delta_blr", dist.Normal(jnp.full_like(bestP["log_amp_delta_blr"], -8.0), 2.0)
-    )
-
-    # lag
+    # --- Kernel and lag parameters ---
+    log_w = numpyro.sample("log_w", dist.Normal(jnp.full_like(bestP["log_w"], jnp.log(5.0)), 1.0))
+    log_amp_delta_blr = numpyro.sample("log_amp_delta_blr", dist.Normal(jnp.full_like(bestP["log_amp_delta_blr"], -8.0), 2.0))
     lag = numpyro.sample("lag", dist.Normal(jnp.full_like(bestP["lag"], 0.0), 10))
     log_lag_blr = numpyro.sample("log_lag_blr", dist.Normal(jnp.full_like(bestP["log_lag_blr"], 0.0), 2.0))
-
-    # log tau drw blr
     log_tau_drw_blr = numpyro.sample("log_tau_drw_blr", dist.Normal(2.8, 2.0))
-    
-    # log jitter, mean => the prior for these two should be set small, otherwise
-    # it is hard to converge
-    #log_jitter = numpyro.sample("log_jitter", dist.Normal(np.full_like(bestP["log_jitter"],  np.log(1e-3)), 10.0))
-    log_jitter = numpyro.sample("log_jitter", dist.Normal(jnp.full_like(bestP["log_jitter"], np.log(1e-4)), 1.0))    
+    log_jitter = numpyro.sample("log_jitter", dist.Normal(jnp.full_like(bestP["log_jitter"], np.log(1e-4)), 1.0))
+
+    # --- Mean function parameters ---
     mean = numpyro.sample("mean", dist.Normal(jnp.full_like(bestP["mean"], 0.0), 0.1))
     poly1 = numpyro.sample("poly1", dist.Normal(0.0, 10.0))
 
-    # power laws
-    eta_break = numpyro.sample("eta_break", dist.Normal(4, 0.2))
-    lams = numpyro.sample("lam_s", dist.Normal(2500.0, 50.0))
-    # Colin values
-    # # sigma
-    # eta_A1 = numpyro.sample("eta_A1", dist.Normal(-0.7, 0.2))
-    # eta_A2 = numpyro.sample("eta_A2", dist.Normal(-0.7, 0.2))
-    # # tau
-    # eta_tau1 = numpyro.sample("eta_tau1", dist.Normal(0.2, 0.1))
-    # eta_tau2 = numpyro.sample("eta_tau2", dist.Normal(0.2, 0.1))
-    # Updated (Kelly+2022, Yu+2022)
-    # sigma
-    eta_A1 = numpyro.sample("eta_A1", dist.Normal(-1.0, 0.1)) # < 2500 AA
-    eta_A2 = numpyro.sample("eta_A2", dist.Normal(-0.2, 0.1)) # > 2500 AA
-    # tau
-    eta_tau1 = numpyro.sample("eta_tau1", dist.Normal(0.1, 0.1)) # < 2500 AA
-    eta_tau2 = numpyro.sample("eta_tau2", dist.Normal(0.8, 0.1)) # > 2500 AA
+    # --- Power law parameters ---
+    powerlaw_priors = {
+        "eta_A1": (-1.0, 1.0),
+        "eta_A2": (-0.2, 1.0),
+        "eta_tau1": (0.8, 1.0),
+        "eta_tau2": (0.1, 1.0),
+        "eta_break": (4, 0.1),
+        "lam_s": (2500.0, 1.0),
+    }
+    powerlaw_samples = {
+        k: numpyro.sample(k, dist.Normal(loc, scale))
+        for k, (loc, scale) in powerlaw_priors.items()
+    }
 
-    # kernel
-    k = kernels.quasisep.Exp(*jnp.exp(log_kernel_param))
-    m = Model(X, y, yerr, k, zero_mean=zero_mean, has_jitter=has_jitter, has_lag=has_lag, clean_bands=clean_bands, z=z)
+    # --- Build model instance ---
+    k = kernels.quasisep.Exp(jnp.array([1, 1]))
+    m = Model(
+        X, y, yerr, k,
+        zero_mean=zero_mean,
+        has_jitter=has_jitter,
+        has_lag=has_lag,
+        clean_bands=clean_bands,
+        z=z
+    )
 
+    # --- Collect parameters for the model ---
     sample_params = {
-        "log_kernel_param": log_kernel_param,
         "log_w": log_w,
-        "log_amp_delta_blr": log_amp_delta_blr, 
+        "log_amp_delta_blr": log_amp_delta_blr,
         "lag": lag,
         "log_lag_blr": log_lag_blr,
         "log_tau_drw_blr": log_tau_drw_blr,
         "mean": mean,
-        "poly1": poly1, 
+        "poly1": poly1,
         "log_jitter": log_jitter,
-        # power laws
-        "eta_A1": eta_A1,
-        "eta_A2": eta_A2,
-        "eta_tau1": eta_tau1,
-        "eta_tau2": eta_tau2,
-        "eta_break": eta_break,
-        "lam_s": lams,
+        **powerlaw_samples,
     }
+
+    # --- Evaluate model likelihood ---
     m.sample(sample_params)
 
 def numpyro_joint_model(Model, batch_data):
@@ -205,8 +188,8 @@ def numpyro_joint_model(Model, batch_data):
     # TODO: update the priors from the previous batch
     eta_A1 = numpyro.sample("eta_A1", dist.Normal(-1.0, 0.1))
     eta_A2 = numpyro.sample("eta_A2", dist.Normal(-0.2, 0.1))
-    eta_tau1 = numpyro.sample("eta_tau1", dist.Normal(0.1, 0.1))
-    eta_tau2 = numpyro.sample("eta_tau2", dist.Normal(0.8, 0.1))
+    eta_tau1 = numpyro.sample("eta_tau1", dist.Normal(1.0, 0.1))
+    eta_tau2 = numpyro.sample("eta_tau2", dist.Normal(0.1, 0.1))
     lam_s = numpyro.sample("lam_s", dist.Normal(2500.0, 50.0))
     eta_break = numpyro.sample("eta_break", dist.Normal(4, 0.2))
 
@@ -427,7 +410,7 @@ def fit_multiband(Model, data, nwarm=500, nsamp=250, progress_bar=False, plot=Fa
     if plot:
         save_combined_plot(samples, m1, X, y, yerr, band_idx[mask_outlier], result)
         #plot_mcmc_traces(samples, result)
-        # plot_posterior(samples, data, clean_bands=clean_bands)
+        plot_posterior(samples, data, clean_bands=clean_bands)
         # psd_results = compute_psd_from_samples(samples, clean_bands)
         # d['psd'] = psd_results
         # plot_psd(psd_results, data['object_id'])    
