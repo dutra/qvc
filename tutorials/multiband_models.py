@@ -391,8 +391,8 @@ class MyMultiVarModelLatent(MyMultiVarModel):
 
         # Construct latent-space kernel
         kernel = MyMultibandConti(
-            sigma_hat=jnp.exp(params["log_kernel_param"][1]),
-            scale=jnp.exp(params["log_kernel_param"][0] - jnp.log(1 + self.z)),
+            sigma_hat=1e-2,
+            scale=1e3/(1+self.z),
             tau_drw=jnp.exp(log_taus)[band_obs],
             log_w=params["log_w"] - jnp.log(1 + self.z),
         )
@@ -486,8 +486,8 @@ class MyMultiVarModelLatent(MyMultiVarModel):
         X_latent = (t_latent, band_latent)
 
         kernel = MyMultibandConti(
-            sigma_hat=jnp.exp(params["log_kernel_param"][1]),
-            scale=jnp.exp(params["log_kernel_param"][0] - jnp.log(1 + self.z)),
+            sigma_hat=1e-2,
+            scale=1e3/(1+self.z),
             tau_drw=jnp.exp(self.my_tau_drw_transform(params))[band_latent],
             log_w=params["log_w"] - jnp.log(1 + self.z),
         )
