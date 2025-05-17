@@ -258,6 +258,7 @@ tau_pivot = 2.0
 def M_model_single(M0, alpha, log_sigma_UV, log_tau_UV_RF):
     """Variability-luminosity relation for one AGN."""
     #return M0 + alpha * (log_sigma_UV - sigma_pivot) + delta * (log_tau_UV_RF - tau_pivot)
+
     return M0 + alpha * 2*(log_sigma_UV - sigma_pivot) - (log_tau_UV_RF - tau_pivot)
 
 def K_corr(z, alpha_nu=-0.5):
@@ -300,9 +301,8 @@ def log_likelihood(theta, cosmo_model, model_labels, model_priors, df_agn, df_pa
     log_tau_err = df_agn['log_tau_UV_RF_err'].values
 
     mu_cosmo = cosmo.distmod(z).value
-    Kcorr = K_corr(z) + K_corr(2)
     M_pred = M_model_single(params['M0'], params['alpha'], log_sigma, log_tau)
-    mu_pred = m_obs - M_pred - Kcorr
+    mu_pred = m_obs - K_corr(z) - (M_pred - K_corr(2))
 
     mu_err = np.sqrt(
         m_err**2 +
@@ -375,7 +375,7 @@ def run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model='Flatw0waCDM', only_sna=F
     model_priors = {key: priors[key] for key in model_labels}
 
     nwalkers = ndim * 2 * 15
-    num_warmup, num_samples = 200, 500
+    num_warmup, num_samples = 50, 50
 
     initial_pos = np.array([
         np.random.uniform(low, high, nwalkers) for low, high in model_priors.values()
@@ -530,9 +530,8 @@ def plot_hubble(sampler, df_agn, df_pantheon, cosmo_model, show=False):
     mu_model_84th = np.percentile(mu_models, 84, axis=0)
 
     # --- AGN distance modulus ---
-    Kcorr = K_corr(df_agn['z']) + K_corr(2)
     mu_pred = np.array([
-        df_agn['apparent_mag_i'] - M_model_single(s[1], s[0], df_agn['log_sigma_UV'], df_agn['log_tau_UV_RF']) - Kcorr
+        df_agn['apparent_mag_i'] - K_corr(df_agn['z']) - (M_model_single(s[1], s[0], df_agn['log_sigma_UV'], df_agn['log_tau_UV_RF']) - K_corr(2))
         for s in flat_samples
     ])
     mu_pred_median = np.percentile(mu_pred, 50, axis=0)
@@ -627,9 +626,8 @@ def plot_predicted_vs_actual_Mi(sampler, df_agn, cosmo_model, show=False):
     results = {key: np.percentile(flat_samples[:, i], [16, 50, 84]) for i, key in enumerate(model_labels)}
 
     # --- Predicted M_i ---
-    Kcorr = K_corr(df_agn['z']) + K_corr(2)
     M_pred = np.array([
-        M_model_single(s[1], s[0], df_agn['log_sigma_UV'], df_agn['log_tau_UV_RF'])- Kcorr
+        M_model_single(s[1], s[0], df_agn['log_sigma_UV'], df_agn['log_tau_UV_RF']) + K_corr(2) # TODO: check this
         for s in flat_samples
     ]) 
 
@@ -669,7 +667,7 @@ def plot_predicted_vs_actual_Mi(sampler, df_agn, cosmo_model, show=False):
             ax.set_ylabel(r"Predicted $M_i$")
         ax.legend(frameon=False, fontsize=8)
     fig.subplots_adjust(wspace=0.05, hspace=0.05)
-    fig.suptitle(f"Predicted vs Actual $M_i$ Binned by Redshift ({cosmo_model})", fontsize=16)
+    #fig.suptitle(f"Predicted vs Actual $M_i$ Binned by Redshift ({cosmo_model})", fontsize=16)
     #fig.tight_layout()
     plt.savefig(f"plots/predicted_vs_actual_Mi_{cosmo_model}.png", dpi=300)
     plt.savefig(f"plots/predicted_vs_actual_Mi_{cosmo_model}.pdf", dpi=300)
