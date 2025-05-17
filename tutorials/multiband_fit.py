@@ -244,7 +244,7 @@ def numpyro_joint_model(Model, batch_data):
             data['X'], data['y'], data['yerr'],
             kernels.quasisep.Exp(jnp.array([1, 1])),  # Placeholder, your Model will build the kernel
             zero_mean=False, has_jitter=True, has_lag=True,
-            clean_bands=['u','g','r','i','z'], z=data['z']
+            clean_bands=data['clean_bands'], z=data['z']
         )
         log_prob = m.log_prob(params)
         jax.debug.print("log_prob: {lp} {i}", lp=log_prob, i=i)
