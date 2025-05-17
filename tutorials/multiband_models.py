@@ -73,7 +73,6 @@ has_jitter = True
 has_lag = True
 
 class MyMultibandContiBLR(tinygp.kernels.Kernel):
-    sigma_hat: float
     amplitudes: jnp.ndarray
     amplitudes_blr: jnp.ndarray
     lag_blr: jnp.ndarray
@@ -81,13 +80,12 @@ class MyMultibandContiBLR(tinygp.kernels.Kernel):
     tau_drw_blr: float
     w: jnp.ndarray
 
-    def __init__(self, sigma_hat, scale, amplitudes, amplitudes_blr, lag_blr, taus, tau_drw_blr, log_w) -> None:
-        self.sigma_hat = sigma_hat
-        self.lag_blr = jnp.zeros_like(lag_blr)
-        self.tau_drw = scale * taus
-        self.tau_drw_blr = tau_drw_blr
+    def __init__(self, amplitudes, amplitudes_blr, lag_blr, taus, tau_drw_blr, log_w) -> None:
         self.amplitudes = amplitudes
         self.amplitudes_blr = amplitudes_blr
+        self.lag_blr = jnp.zeros_like(lag_blr)
+        self.tau_drw = taus
+        self.tau_drw_blr = tau_drw_blr
         self.w = jnp.exp(log_w)
 
     def coord_to_sortable(self, X) -> JAXArray:
@@ -127,10 +125,10 @@ class MyMultibandContiBLR(tinygp.kernels.Kernel):
         t1, b1 = X1
         t2, b2 = X2
 
-        amplitudes_b1 = jnp.sqrt( (self.amplitudes[b1] * self.sigma_hat)**2 * self.tau_drw[b1] )
-        amplitudes_b2 = jnp.sqrt( (self.amplitudes[b2] * self.sigma_hat)**2 * self.tau_drw[b2] )
-        amplitudes_blr_b1 = jnp.sqrt( (self.amplitudes_blr[b1] * self.sigma_hat)**2 * self.tau_drw_blr )
-        amplitudes_blr_b2 = jnp.sqrt( (self.amplitudes_blr[b2] * self.sigma_hat)**2 * self.tau_drw_blr )
+        amplitudes_b1 = jnp.sqrt( (self.amplitudes[b1])**2 * self.tau_drw[b1] )
+        amplitudes_b2 = jnp.sqrt( (self.amplitudes[b2])**2 * self.tau_drw[b2] )
+        amplitudes_blr_b1 = jnp.sqrt( (self.amplitudes_blr[b1])**2 * self.tau_drw_blr )
+        amplitudes_blr_b2 = jnp.sqrt( (self.amplitudes_blr[b2])**2 * self.tau_drw_blr )
 
         # a is cont at t1
         # b is blr at t1
@@ -169,7 +167,7 @@ class MyMultibandContiBLR(tinygp.kernels.Kernel):
             )
         )
 
-        return cov_ac + cov_ad + cov_bc + cov_bd
+        return cov_ac #+ cov_ad + cov_bc + cov_bd
 
 class MyMultibandConti(tinygp.kernels.Kernel):
     sigma_hat: float
@@ -270,12 +268,12 @@ class MyMultiVarModel(MultiVarModel):
         self, params: dict[str, JAXArray]
     ) -> tuple[GaussianProcess, JAXArray]:
         # log amp + mean
-        log_amps = self.my_amp_transform(params)
-        log_amps_blr = self.my_amp_transform_blr(params)
-        log_taus = self.my_tau_drw_transform(params)
+        log_sigma_hat_band = self.my_amp_transform(params)
+        log_sigma_hat_band_blr = self.my_amp_transform_blr(params)
+        log_tau_band_rf = self.my_tau_drw_transform(params)
 
         means = partial(
-            MyMultiVarModel.mean_func, self.zero_mean, log_amps.shape[0], params
+            MyMultiVarModel.mean_func, self.zero_mean, log_sigma_hat_band.shape[0], params
         )
 
         # time axis transform: t and band are not sorted,
@@ -292,13 +290,11 @@ class MyMultiVarModel(MultiVarModel):
             diags = self.diag[inds]
 
         kernel = MyMultibandContiBLR(
-            amplitudes=jnp.exp(log_amps),
-            amplitudes_blr=jnp.exp(log_amps_blr),
-            lag_blr=jnp.exp(params["log_lag_blr"])[band[inds]],
-            sigma_hat=1e-2,
-            scale=1e3/(1+self.z),
-            taus=jnp.exp(log_taus)[band[inds]],
-            tau_drw_blr=jnp.exp(params["log_tau_drw_blr"]),
+            amplitudes=jnp.exp(log_sigma_hat_band),
+            taus=jnp.exp(log_tau_band_rf),
+            amplitudes_blr=jnp.exp(log_sigma_hat_band_blr),
+            tau_drw_blr=jnp.exp(params["log_tau_drw_blr"] - jnp.log(1 + self.z)),
+            lag_blr=jnp.exp(params["log_lag_blr"] - jnp.log(1 + self.z))[band[inds]],
             log_w=params["log_w"] - jnp.log(1 + self.z),
         )
         return (
@@ -310,23 +306,23 @@ class MyMultiVarModel(MultiVarModel):
         inds,)
 
     def my_amp_transform_blr(self, params: dict[str, JAXArray]) -> JAXArray:
-        return jnp.atleast_1d(params["log_amp_delta_blr"])
+        return params["log_sigma_hat_0"] + jnp.atleast_1d(params["log_amp_delta_blr"])
     
     def my_tau_drw_transform(self, params: dict[str, JAXArray]) -> JAXArray:
         eta_tau1 = params["eta_tau1"]
         eta_tau2 = params["eta_tau2"]
         lam_s = params["lam_s"]
         eta_break = params["eta_break"]
-        params["log_tau_delta"] = jnp.log(10) * jnp.array([log_broken_pl(lambda_pivot[band]/(1 + self.z), lam_s, eta_tau1, eta_tau2, eta_break) for band in self.clean_bands])
-        return params["log_tau_delta"]
+        params["log_tau_band_RF"] = params["log_tau_drw_0"] - jnp.log(1 + self.z) + jnp.log(10) * jnp.array([log_broken_pl(lambda_pivot[band]/(1 + self.z), lam_s, eta_tau1, eta_tau2, eta_break) for band in self.clean_bands])
+        return params["log_tau_band_RF"]
 
     def my_amp_transform(self, params: dict[str, JAXArray]) -> JAXArray:
         eta_A1 = params["eta_A1"]
         eta_A2 = params["eta_A2"]
         lam_s = params["lam_s"]
         eta_break = params["eta_break"]
-        params["log_amp_delta"] = jnp.log(10) * jnp.array([log_broken_pl(lambda_pivot[band]/(1 + self.z), lam_s, eta_A1, eta_A2, eta_break) for band in self.clean_bands])
-        return params["log_amp_delta"]
+        params["log_sigma_hat_band"] = params["log_sigma_hat_0"] + jnp.log(10) * jnp.array([log_broken_pl(lambda_pivot[band]/(1 + self.z), lam_s, eta_A1, eta_A2, eta_break) for band in self.clean_bands])
+        return params["log_sigma_hat_band"]
     
     @eqx.filter_jit
     def log_prob(self, params: dict[str, JAXArray]) -> JAXArray:
@@ -339,7 +335,6 @@ class MyMultiVarModel(MultiVarModel):
             JAXArray: Log probability of the input parameters.
         """
         gp, inds = self._build_gp(params)
-        #jax.debug.print("amps {a}, amps_blr {b}, lag_blr {l}", a=self.kernel.amplitudes, b=self.kernel.amplitudes_blr, l=self.kernel.lag_blr)
         log_prob = gp.log_probability(y=self.y[inds])
         #jax.debug.print("Log probability: {log_prob}", log_prob=log_prob)
         return log_prob
@@ -352,9 +347,9 @@ class MyMultiVarModel(MultiVarModel):
         """
         gp, inds = self._build_gp(params)
         log_prob = gp.log_probability(y=self.y[inds])
-        K = gp.kernel(gp.X, gp.X) + gp.noise
+        #K = gp.kernel(gp.X, gp.X) + gp.noise
         #jax.debug.print("sym: {s}", s= jnp.allclose(K, K.T, atol=1e-6))
-        #jax.debug.print("Log probability: {log_prob}", log_prob=log_prob)
+        jax.debug.print("Log probability: {log_prob}", log_prob=log_prob)
         numpyro.sample("gp", gp.numpyro_dist(), obs=self.y[inds])
 
     @eqx.filter_jit
@@ -413,8 +408,8 @@ class MyMultiVarModelLatent(MyMultiVarModel):
 
         # Construct latent-space kernel
         kernel = MyMultibandConti(
-            sigma_hat=1e-2,
-            scale=1e3/(1+self.z),
+            sigma_hat=params["log_sigma_hat_0"],
+            scale=params["log_tau_drw_0"] - jnp.log(1+self.z),
             tau_drw=jnp.exp(log_taus)[band_obs],
             log_w=params["log_w"] - jnp.log(1 + self.z),
         )
@@ -508,8 +503,8 @@ class MyMultiVarModelLatent(MyMultiVarModel):
         X_latent = (t_latent, band_latent)
 
         kernel = MyMultibandConti(
-            sigma_hat=1e-2,
-            scale=1e3/(1+self.z),
+            sigma_hat=params["log_sigma_hat_0"],
+            scale=params["log_tau_drw_0"] - jnp.log(1+self.z),
             tau_drw=jnp.exp(self.my_tau_drw_transform(params))[band_latent],
             log_w=params["log_w"] - jnp.log(1 + self.z),
         )

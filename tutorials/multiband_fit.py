@@ -135,7 +135,9 @@ def numpyro_model(Model, X, yerr, y=None, bestP=None, clean_bands=None, z=None):
     log_amp_delta_blr = numpyro.sample("log_amp_delta_blr", dist.Normal(jnp.full_like(bestP["log_amp_delta_blr"], jnp.log(1e-3)), 2.0))
     lag = numpyro.sample("lag", dist.Normal(jnp.full_like(bestP["lag"], 0.0), 10))
     log_lag_blr = numpyro.sample("log_lag_blr", dist.Normal(jnp.full_like(bestP["log_lag_blr"], jnp.log(1e2)), 2.0))
-    log_tau_drw_blr = numpyro.sample("log_tau_drw_blr", dist.Normal(2.8, 2.0))
+    log_tau_drw_blr = numpyro.sample("log_tau_drw_blr", dist.Normal(jnp.log(1e2), 2.0))
+    log_tau_drw_0 = numpyro.sample("log_tau_drw_0", dist.Uniform(jnp.log(1e1), jnp.log(1e5))) # tau_drw at 2500 AA
+    log_sigma_hat_0 = numpyro.sample("log_sigma_hat_0", dist.Uniform(jnp.log(1e-3), jnp.log(1e2))) # sigma_hat at 2500 AA
 
 
     # Initialize jitter using the mean yerr
@@ -150,10 +152,10 @@ def numpyro_model(Model, X, yerr, y=None, bestP=None, clean_bands=None, z=None):
 
     # --- Power law parameters ---
     powerlaw_priors = {
-        "eta_A1": (-1.0, 1.0),
-        "eta_A2": (-0.2, 1.0),
-        "eta_tau1": (0.8, 1.0),
-        "eta_tau2": (0.1, 1.0),
+        "eta_A1": (-1.0, 0.1),
+        "eta_A2": (-0.2, 0.1),
+        "eta_tau1": (0.8, 0.1),
+        "eta_tau2": (0.1, 0.1),
         "eta_break": (4, 0.1),
         "lam_s": (2500.0, 1.0),
     }
@@ -175,6 +177,8 @@ def numpyro_model(Model, X, yerr, y=None, bestP=None, clean_bands=None, z=None):
 
     # --- Collect parameters for the model ---
     sample_params = {
+        "log_tau_drw_0": log_tau_drw_0,
+        "log_sigma_hat_0": log_sigma_hat_0,
         "log_w": log_w,
         "log_amp_delta_blr": log_amp_delta_blr,
         "lag": lag,
