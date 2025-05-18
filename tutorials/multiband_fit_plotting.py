@@ -120,8 +120,8 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, data):
         f"$\\eta_{{\\tau_2}}$: {data['eta_tau2']:.2f} ± {data['eta_tau2_err']:.2f}\n"
         f"$\\eta_{{\\mathrm{{break}}}}$: {data['eta_break']:.2f} ± {data['eta_break_err']:.2f}\n"
         f"$\\eta_{{\\lambda_s}}$: {data['lam_s']:.2f} ± {data['lam_s_err']:.2f}\n"        
-        f"$\\mathrm{{poly_1}}$: {data['poly1']:.2f} ± {data['poly1_err']:.2f}\n"
-        f"$\\log_{{10}}(w)$: {data['log_w']:.2f} ± {data['log_w_err']:.2f}",
+        f"$\\mathrm{{poly_1}}$: {data['poly1']:.2f} ± {data['poly1_err']:.2f}",
+        #f"$\\log_{{10}}(w)$: {data['log_w']:.2f} ± {data['log_w_err']:.2f}",
         xy=(0.05, 0.95),
         xycoords="axes fraction",
         fontsize=10,

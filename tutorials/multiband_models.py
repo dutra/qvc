@@ -294,8 +294,11 @@ class MyMultiVarModel(MultiVarModel):
             taus=jnp.exp(log_tau_band_rf),
             amplitudes_blr=jnp.exp(log_sigma_hat_band_blr),
             tau_drw_blr=jnp.exp(params["log_tau_drw_blr"] - jnp.log(1 + self.z)),
-            lag_blr=jnp.exp(params["log_lag_blr"] - jnp.log(1 + self.z))[band[inds]],
-            log_w=params["log_w"] - jnp.log(1 + self.z),
+            #lag_blr=jnp.exp(params["log_lag_blr"] - jnp.log(1 + self.z))[band[inds]],
+            #log_w=params["log_w"] - jnp.log(1 + self.z),
+
+            lag_blr=jnp.zeros_like(log_sigma_hat_band_blr),
+            log_w=0
         )
         return (
             GaussianProcess(
