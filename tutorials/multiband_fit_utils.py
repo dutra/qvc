@@ -347,7 +347,7 @@ def log_broken_pl(lam, lam_s, d1, d2, ds=4.0):
 def process_samples(samples, data):
     clean_bands = data['clean_bands']
     object_id = data['object_id']
-    save_samples_to_hdf5(samples, data['object_id'])
+    #save_samples_to_hdf5(samples, data['object_id'])
 
     # power laws
     eta_A1 = samples["eta_A1"]

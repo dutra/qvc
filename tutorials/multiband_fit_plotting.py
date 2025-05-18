@@ -153,39 +153,50 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, data):
     return fig
 
 
-def plot_mcmc_traces(samples, data):
-    """
-    Plot the MCMC traces for all parameters in the samples.
-
-    Parameters:
-    - samples: dict of arrays, where each key corresponds to a parameter name and the value is an array of MCMC samples.
-    - object_id: identifier for the object being analyzed.
-    """
-    param_names = list(set(samples.keys()) - set(['log_kernel_param']))
-    n_params = len(param_names)
-    fig, axes = plt.subplots(n_params+2, 1, figsize=(10, 2 * n_params), sharex=True)
+def plot_mcmc_traces(mcmc, data, thinning=10):
+    samples = mcmc.get_samples(group_by_chain=True)
+    num_warmup = mcmc.num_warmup
     object_id = data['object_id']
+
+    param_names = [k for k in samples if k != 'log_kernel_param']
+    n_params = len(param_names)
+    num_chains, total_samples = samples[param_names[0]].shape
+
+    # Thinning indices (along sample axis)
+    thinned_idx = np.arange(total_samples)[::thinning]
+    thinned_warmup = num_warmup // thinning
+
+    # Limit total figure height for display
+    height_per_plot = 2.0
+    max_height = 50
+    fig_height = min(n_params * height_per_plot, max_height)
+
+    fig, axes = plt.subplots(n_params, 1, figsize=(12, fig_height), sharex=True)
+
+    if n_params == 1:
+        axes = [axes]  # ensure axes is iterable
+
     for i, param in enumerate(param_names):
-        ax = axes[i] if n_params > 1 else axes
-        ax.plot(samples[param], alpha=0.7, lw=0.5)
-        ax.set_ylabel(param, fontsize=12)
-        ax.grid(True)
+        ax = axes[i]
+        for c in range(num_chains):
+            trace = samples[param][c, thinned_idx]
+            ax.plot(thinned_idx, trace, alpha=0.6, lw=0.5, label=f'Chain {c+1}')
+        ax.axvline(thinned_warmup, color='k', ls='--', lw=0.8)
+        ax.set_ylabel(param, fontsize=10)
+        ax.grid(True, alpha=0.3)
+        #if i == 0:
+            #ax.legend(loc='upper right', fontsize=7)
 
-    axes[-1].plot(np.log10(np.exp(samples['log_kernel_param'][:, 0])), alpha=0.7, lw=0.5)
-    axes[-1].set_ylabel("log10_tau", fontsize=12)
-    axes[-2].plot(np.log10(np.exp(samples['log_kernel_param'][:, 1])), alpha=0.7, lw=0.5)
-    axes[-2].set_ylabel("log10_sigma", fontsize=12)
-
-    axes[-1].set_xlabel("Step", fontsize=12)
+    axes[-1].set_xlabel("Step (thinned)", fontsize=11)
     plt.tight_layout()
 
-    # Save the plot as a PNG file
-    output_dir = "mcmc_traces"
+    output_dir = f"mcmc_traces/{prefix}_{suffix}/"
     os.makedirs(output_dir, exist_ok=True)
-    plt.savefig(os.path.join(output_dir, f"{object_id}_mcmc_traces.png"), dpi=120)
+    save_path = os.path.join(output_dir, f"{object_id}_mcmc_traces.png")
+    plt.savefig(save_path, dpi=150)
+    print("Saved trace plot to", save_path)
     plt.close(fig)
     return fig
-
 
 
 def plot_psd(psd_results, object_id):

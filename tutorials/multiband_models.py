@@ -467,7 +467,7 @@ class MyMultiVarModelLatent(MyMultiVarModel):
         Wraps the custom log-likelihood into a custom Distribution for NumPyro sampling.
         """
 
-        jax.debug.print("log_likelihood: {x}", x=self.log_prob(params))
+        #jax.debug.print("log_likelihood: {x}", x=self.log_prob(params))
 
         # Use numpyro.factor or wrap in a custom Distribution
         numpyro.factor("gp_loglike", self.log_prob(params))
