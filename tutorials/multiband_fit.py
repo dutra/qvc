@@ -92,20 +92,12 @@ def initSampler(key, nSample, nBand=None):
     # power laws
     etaBreakSampler = UniformInit(1, [2, 5])
     lamsSampler = UniformInit(1, [2400.0, 2600.0])
-    # Colins
-    # # sigma
-    # etaA1Sampler = UniformInit(1, [-0.8, -0.6])
-    # etaA2Sampler = UniformInit(1, [-0.1, 0.1])
-    # # tau
-    # etaTau1Sampler = UniformInit(1, [0.2,0.6])
-    # etaA2Sampler = UniformInit(1, [-0.2, 0.2])
-    # Updated (Kelly+2022, Yu+2022)
     # sigma
-    etaA1Sampler = UniformInit(1, [-0.25, -0.05])
-    etaA2Sampler = UniformInit(1, [-0.25, -0.05])
+    etaA1Sampler = UniformInit(1, [-1.1, -0.5])
+    etaA2Sampler = UniformInit(1, [-1.1, -0.5])
     # tau
-    etaTau1Sampler = UniformInit(1, [0.2, 0.6])
-    etaTau2Sampler = UniformInit(1, [0.2, 0.6])
+    etaTau1Sampler = UniformInit(1, [-0.4, 0.4])
+    etaTau2Sampler = UniformInit(1, [-0.4, 0.4])
 
     # kernel init
     kernelSampler = DRWInit([jnp.log(10**2.5), jnp.log(10**4.5)], [jnp.log(0.1), jnp.log(1.0)])
@@ -113,13 +105,13 @@ def initSampler(key, nSample, nBand=None):
     
     return {
         "log_kernel_param": kernelSampler(subkeys[0], nSample),
-        "log_w": logwSampler(subkeys[1], nSample),
+        #"log_w": logwSampler(subkeys[1], nSample),
         "log_amp_delta": logAmpDeltaSampler(subkeys[1], nSample),
         "log_amp_delta_blr": logAmpDeltaBLRSampler(subkeys[2], nSample),
         "mean": meanSampler(subkeys[3], nSample),
         "poly1": poly1Sampler(subkeys[4], nSample),
         "lag": lagSampler(subkeys[5], nSample),
-        "log_lag_blr": loglagBLRSampler(subkeys[6], nSample),
+        #"log_lag_blr": loglagBLRSampler(subkeys[6], nSample),
         "log_tau_drw_blr": logtauBLRSampler(subkeys[7], nSample),
         "log_jitter": logJitterSampler(subkeys[8], nSample),
         # power laws
@@ -133,10 +125,10 @@ def initSampler(key, nSample, nBand=None):
 
 def numpyro_model(Model, X, yerr, y=None, bestP=None, clean_bands=None, z=None):
     # --- Kernel and lag parameters ---
-    log_w = numpyro.sample("log_w", dist.Normal(jnp.full_like(bestP["log_w"], jnp.log(20.0)), 1.0))
+    #log_w = numpyro.sample("log_w", dist.Normal(jnp.full_like(bestP["log_w"], jnp.log(20.0)), 1.0))
     log_amp_delta_blr = numpyro.sample("log_amp_delta_blr", dist.Normal(jnp.full_like(bestP["log_amp_delta_blr"], jnp.log(1e-3)), 2.0))
     lag = numpyro.sample("lag", dist.Normal(jnp.full_like(bestP["lag"], 0.0), 10))
-    log_lag_blr = numpyro.sample("log_lag_blr", dist.Normal(jnp.full_like(bestP["log_lag_blr"], jnp.log(1e2)), 2.0))
+    #log_lag_blr = numpyro.sample("log_lag_blr", dist.Normal(jnp.full_like(bestP["log_lag_blr"], jnp.log(1e2)), 2.0))
     log_tau_drw_blr = numpyro.sample("log_tau_drw_blr", dist.Normal(jnp.log(1e2), 2.0))
     log_tau_drw_0 = numpyro.sample("log_tau_drw_0", dist.Uniform(jnp.log(1e1), jnp.log(1e5))) # tau_drw at 2500 AA
     log_sigma_hat_0 = numpyro.sample("log_sigma_hat_0", dist.Uniform(jnp.log(1e-3), jnp.log(1e2))) # sigma_hat at 2500 AA
@@ -181,10 +173,10 @@ def numpyro_model(Model, X, yerr, y=None, bestP=None, clean_bands=None, z=None):
     sample_params = {
         "log_tau_drw_0": log_tau_drw_0,
         "log_sigma_hat_0": log_sigma_hat_0,
-        "log_w": log_w,
+        #"log_w": log_w,
         "log_amp_delta_blr": log_amp_delta_blr,
         "lag": lag,
-        "log_lag_blr": log_lag_blr,
+        #"log_lag_blr": log_lag_blr,
         "log_tau_drw_blr": log_tau_drw_blr,
         "mean": mean,
         "poly1": poly1,
@@ -199,11 +191,11 @@ def numpyro_joint_model(Model, batch_data):
     # --- Shared (universal) parameters ---
     # These priors can be broader
     powerlaw_priors = {
-        "eta_A1": (-1.0, 0.5),
-        "eta_A2": (-0.2, 0.5),
-        "eta_tau1": (0.8, 0.5),
-        "eta_tau2": (0.1, 0.5),
-        "eta_break": (4, 0.1),
+        "eta_A1": (-0.7, 0.2),
+        "eta_A2": (-0.7, 0.2),
+        "eta_tau1": (0.0, 0.2),
+        "eta_tau2": (0.0, 0.2),
+        "eta_break": (3, 0.2),
         "lam_s": (2500.0, 1.0),
     }
     powerlaw_samples = {
@@ -213,12 +205,12 @@ def numpyro_joint_model(Model, batch_data):
 
     for i, data in enumerate(batch_data):
         # Object-specific parameters
-        log_w = numpyro.sample(f"log_w_{i}", dist.Normal(jnp.log(20.0), 1.0))
-        log_tau_drw_0 = numpyro.sample(f"log_tau_drw0_{i}", dist.Normal(jnp.log(1e2), 6.0))
-        log_sigma_hat_0 = numpyro.sample(f"log_sigma_hat0_{i}", dist.Normal(jnp.log(1e-3), 6.0))
+        #log_w = numpyro.sample(f"log_w_{i}", dist.Normal(jnp.log(20.0), 1.0))
+        log_tau_drw_0 = numpyro.sample(f"log_tau_drw0_{i}", dist.Normal(5.0 + np.log(1 + data['z']), 4.0))
+        log_sigma_hat_0 = numpyro.sample(f"log_sigma_hat0_{i}", dist.Normal(jnp.log(jnp.sqrt(jnp.std(data['y'])**2/jnp.exp(4 * (1 + data['z'])))), 1.0))
         log_amp_delta_blr = numpyro.sample(f"log_amp_delta_blr_{i}", dist.Normal(jnp.full_like(bestP["log_amp_delta_blr"], jnp.log(1e-3)), 2.0))
         lag = numpyro.sample(f"lag_{i}", dist.Normal(jnp.full_like(bestP["lag"], 0.0), 10.0))
-        log_lag_blr = numpyro.sample(f"log_lag_blr_{i}", dist.Normal(jnp.full_like(bestP["log_lag_blr"], jnp.log(1e2)), 2.0))
+        #log_lag_blr = numpyro.sample(f"log_lag_blr_{i}", dist.Normal(jnp.full_like(bestP["log_lag_blr"], jnp.log(1e2)), 2.0))
         log_tau_drw_blr = numpyro.sample(f"log_tau_drw_blr_{i}", dist.Normal(jnp.log(1e2), 2.0))
         mean = numpyro.sample(f"mean_{i}", dist.Normal(jnp.full_like(bestP["mean"], 0.0), 0.1))
         poly1 = numpyro.sample(f"poly1_{i}", dist.Normal(0.0, 10.0))
@@ -227,12 +219,12 @@ def numpyro_joint_model(Model, batch_data):
         log_jitter = numpyro.sample(f"log_jitter_{i}", dist.Normal(jnp.full_like(bestP["log_jitter"], log_jitter_init), 1.0))
 
         params = {
-            "log_w": log_w,
+            #"log_w": log_w,
             "log_tau_drw0": log_tau_drw_0,
             "log_sigma_hat0": log_sigma_hat_0,
             "log_amp_delta_blr": log_amp_delta_blr,
             "lag": lag,
-            "log_lag_blr": log_lag_blr,
+            #"log_lag_blr": log_lag_blr,
             "log_tau_drw_blr": log_tau_drw_blr,
             "mean": mean,
             "poly1": poly1,
@@ -247,7 +239,7 @@ def numpyro_joint_model(Model, batch_data):
             clean_bands=data['clean_bands'], z=data['z']
         )
         log_prob = m.log_prob(params)
-        jax.debug.print("log_prob: {lp} {i}", lp=log_prob, i=i)
+        #jax.debug.print("log_prob: {lp} {i}", lp=log_prob, i=i)
         #log_prob = jnp.where(jnp.isfinite(log_prob), log_prob, -1e10)
         numpyro.factor(f"loglike_{i}", log_prob)
 
@@ -428,8 +420,8 @@ def fit_multiband(Model, data, nwarm=500, nsamp=250, progress_bar=False, plot=Fa
     result = process_samples(samples, data)
     if plot:
         save_combined_plot(samples, m, X, y, yerr, band_idx[mask_outlier], result)
-        #plot_mcmc_traces(samples, result)
-        #plot_posterior(samples, data, clean_bands=clean_bands)
+        # plot_mcmc_traces(samples, result)
+        # plot_posterior(samples, data, clean_bands=clean_bands)
         # psd_results = compute_psd_from_samples(samples, clean_bands)
         # d['psd'] = psd_results
         # plot_psd(psd_results, data['object_id'])    
@@ -468,6 +460,7 @@ if __name__ == '__main__':
     parser.add_argument("--nwarm", type=int, default=500, help="Number of warmup steps for MCMC.")
     parser.add_argument("--nsamp", type=int, default=250, help="Number of samples for MCMC.")
     parser.add_argument("--latent", action="store_true", help="Use latent variable model.")
+    parser.add_argument("--choose_N", type=int, default=-1, help="Sample choose_N objects.")
 
     args = parser.parse_args()
 
@@ -489,6 +482,10 @@ if __name__ == '__main__':
 
     filter_object_ids = args.filter_object_id if args.filter_object_id else []
     filter_object_ids = pd.read_csv(args.filter_file, dtype={"object_id": str})["object_id"].values if args.filter_file else filter_object_ids
+    print(f"Loaded {len(filter_object_ids)=}")
+    if args.choose_N > 0:
+        filter_object_ids = np.random.choice(filter_object_ids, size=args.choose_N, replace=False)
+        print(f"After choosing, total of {len(filter_object_ids)=}")
 
     if len(filter_object_ids) > 0:
         print(f"Filtering object IDs: {len(filter_object_ids)}")
@@ -507,6 +504,7 @@ if __name__ == '__main__':
 
     # After loading objs
     if args.joint:
+        print("--- Joint fitting")
         batch_data = []
         for i, obj in enumerate(objs):
             # Prepare each object's data for the joint model
@@ -569,6 +567,7 @@ if __name__ == '__main__':
                     clean_bands=obj['clean_bands'], z=obj['z']
                 )
                 save_combined_plot(obj_samples_clean, m, obj['X'], obj['y'], obj['yerr'], obj['band_idx'], result)
+                #plot_mcmc_traces(mcmc, result)
             results.append(result)
 
     else:

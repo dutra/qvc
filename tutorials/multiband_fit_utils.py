@@ -347,7 +347,7 @@ def log_broken_pl(lam, lam_s, d1, d2, ds=4.0):
 def process_samples(samples, data):
     clean_bands = data['clean_bands']
     object_id = data['object_id']
-    save_samples_to_hdf5(samples, data['object_id'])
+    #save_samples_to_hdf5(samples, data['object_id'])
 
     # power laws
     eta_A1 = samples["eta_A1"]
@@ -375,7 +375,7 @@ def process_samples(samples, data):
     log_jitter, log_jitter_err = sym_percentile(np.log10(np.exp(2*samples['log_jitter'])))
     poly1, poly1_err = sym_percentile(samples['poly1'])
     mean, mean_err = sym_percentile(samples['mean'])
-    log_lag_blr, log_lag_blr_err = sym_percentile(np.log10(np.exp(samples['log_lag_blr'])))
+    #log_lag_blr, log_lag_blr_err = sym_percentile(np.log10(np.exp(samples['log_lag_blr'])))
     lag, lag_err = sym_percentile(samples['lag'])
     eta_A1, eta_A1_err = sym_percentile(eta_A1)
     eta_A2, eta_A2_err = sym_percentile(eta_A2)
@@ -383,7 +383,7 @@ def process_samples(samples, data):
     eta_tau2, eta_tau2_err = sym_percentile(eta_tau2)
     eta_break, eta_break_err = sym_percentile(eta_break)
 
-    log_w, log_w_err = sym_percentile(np.log10(np.exp(samples['log_w'])))
+    #log_w, log_w_err = sym_percentile(np.log10(np.exp(samples['log_w'])))
 
     log_tau_UV_RF, log_tau_UV_RF_err = sym_percentile(samples_log_tau_UV_RF)
     log_tau_band_RF, log_tau_band_RF_err = sym_percentile(samples_log_tau_band_RF)
@@ -422,8 +422,8 @@ def process_samples(samples, data):
             lam_s=lambda_s_RF,
             lam_s_err=lambda_s_RF_err,
             # kernel params
-            log_w=log_w,
-            log_w_err=log_w_err,
+            #log_w=log_w,
+            #log_w_err=log_w_err,
             # BLR
             log_tau_blr=log_tau_blr,
             log_tau_blr_err=log_tau_blr_err,
@@ -436,8 +436,8 @@ def process_samples(samples, data):
             mean=mean,
             mean_err=mean_err,
             clean_bands=clean_bands,
-            log_lag_blr=log_lag_blr,
-            log_lag_blr_err=log_lag_blr_err,
+            #log_lag_blr=log_lag_blr,
+            #log_lag_blr_err=log_lag_blr_err,
             lag=lag,
             lag_err=lag_err,
             )
@@ -460,7 +460,7 @@ def compute_psd_from_samples(samples, clean_bands, num_points=1000, time_range=(
     # Extract kernel parameters from samples
     log_kernel_param = samples["log_kernel_param"]
     log_amp_delta_blr = samples["log_amp_delta_blr"]
-    log_lag_blr = samples["log_lag_blr"]
+    #log_lag_blr = samples["log_lag_blr"]
     eta_A1 = samples["eta_A1"]
     eta_A2 = samples["eta_A2"]
     eta_tau1 = samples["eta_tau1"]
@@ -469,7 +469,7 @@ def compute_psd_from_samples(samples, clean_bands, num_points=1000, time_range=(
     # Compute the median values of the parameters
     kernel_param = jnp.exp(jnp.median(log_kernel_param, axis=0))
     amp_delta_blr = jnp.exp(jnp.median(log_amp_delta_blr, axis=0))
-    lag_blr = jnp.exp(jnp.median(log_lag_blr, axis=0))
+    #lag_blr = jnp.exp(jnp.median(log_lag_blr, axis=0))
     beta = jnp.median(beta)
     delta = jnp.median(delta)
 

@@ -294,8 +294,11 @@ class MyMultiVarModel(MultiVarModel):
             taus=jnp.exp(log_tau_band_rf),
             amplitudes_blr=jnp.exp(log_sigma_hat_band_blr),
             tau_drw_blr=jnp.exp(params["log_tau_drw_blr"] - jnp.log(1 + self.z)),
-            lag_blr=jnp.exp(params["log_lag_blr"] - jnp.log(1 + self.z))[band[inds]],
-            log_w=params["log_w"] - jnp.log(1 + self.z),
+            #lag_blr=jnp.exp(params["log_lag_blr"] - jnp.log(1 + self.z))[band[inds]],
+            #log_w=params["log_w"] - jnp.log(1 + self.z),
+
+            lag_blr=jnp.zeros_like(log_sigma_hat_band_blr),
+            log_w=0
         )
         return (
             GaussianProcess(
@@ -408,8 +411,8 @@ class MyMultiVarModelLatent(MyMultiVarModel):
 
         # Construct latent-space kernel
         kernel = MyMultibandConti(
-            sigma_hat=jnp.exp(params["log_sigma_hat_0"]),
-            scale=jnp.exp(params["log_tau_drw_0"] - jnp.log(1+self.z)),
+            sigma_hat=jnp.exp(params["log_sigma_hat0"]),
+            scale=jnp.exp(params["log_tau_drw0"] - jnp.log(1+self.z)),
             tau_drw=jnp.exp(log_taus)[band_latent],
             log_w=params["log_w"] - jnp.log(1 + self.z),
         )
@@ -467,7 +470,7 @@ class MyMultiVarModelLatent(MyMultiVarModel):
         Wraps the custom log-likelihood into a custom Distribution for NumPyro sampling.
         """
 
-        jax.debug.print("log_likelihood: {x}", x=self.log_prob(params))
+        #jax.debug.print("log_likelihood: {x}", x=self.log_prob(params))
 
         # Use numpyro.factor or wrap in a custom Distribution
         numpyro.factor("gp_loglike", self.log_prob(params))
@@ -494,6 +497,7 @@ class MyMultiVarModelLatent(MyMultiVarModel):
 
         log_amps = self.my_amp_transform(params)
         log_amps_blr = self.my_amp_transform_blr(params)
+        log_taus = self.my_tau_drw_transform(params)
         amp_conti = jnp.exp(log_amps)
         amp_blr = jnp.exp(log_amps_blr)
 
@@ -503,8 +507,8 @@ class MyMultiVarModelLatent(MyMultiVarModel):
         X_latent = (t_latent, band_latent)
 
         kernel = MyMultibandConti(
-            sigma_hat=jnp.exp(params["log_sigma_hat_0"]),
-            scale=jnp.exp(params["log_tau_drw_0"] - jnp.log(1+self.z)),
+            sigma_hat=jnp.exp(params["log_sigma_hat0"]),
+            scale=jnp.exp(params["log_tau_drw0"] - jnp.log(1+self.z)),
             tau_drw=jnp.exp(log_taus)[band_latent], # I think?
             log_w=params["log_w"] - jnp.log(1 + self.z),
         )
