@@ -353,15 +353,28 @@ def plot_completeness_vs_mag_at_redshifts(p_detect, mag_centers, z_centers,
     """
     mag_eval = np.linspace(np.min(mag_centers), np.max(mag_centers), 1000)
 
-    plt.figure(figsize=(8, 5))
-    for z in redshifts:
+    import matplotlib.cm as cm
+    import matplotlib.colors as mcolors
+
+    # Choose a colormap
+    cmap = cm.get_cmap('viridis', len(redshifts))
+    norm = mcolors.Normalize(vmin=min(redshifts), vmax=max(redshifts))
+
+    plt.figure(figsize=(7, 5))
+    for i, z in enumerate(redshifts):
         p_vals = p_detect(mag_eval, np.full_like(mag_eval, z))
-        plt.plot(mag_eval, p_vals, label=fr"$z = {z}$")
+        color = cmap(norm(z))
+        plt.plot(mag_eval, p_vals, label=fr"$z = {z}$", color=color)
+
+    #sm = cm.ScalarMappable(cmap=cmap, norm=norm)
+    #sm.set_array([])
+    #plt.colorbar(sm, label="Redshift", ticks=redshifts)
 
     plt.xlabel(r"$m$ ($i$ mag)")
     plt.ylabel(r"$p(I{=}1|m, z)$")
-    plt.legend(title="Redshift")
-    plt.ylim(0, 1.05)
+    plt.legend(fontsize=16, loc="upper right", frameon=False)
+    plt.ylim(0, .02)
+    plt.xlim(17, 25)
     plt.grid(False)
     plt.tight_layout()
     if show:
