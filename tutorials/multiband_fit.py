@@ -249,13 +249,14 @@ def numpyro_joint_model(Model, batch_data):
     for i, data in enumerate(batch_data):
         # Object-specific parameters
         #log_w = numpyro.sample(f"log_w_{i}", dist.Normal(jnp.log(20.0), 1.0))
-        log_tau_drw_0 = numpyro.sample(f"log_tau_drw0_{i}", dist.Normal(5.0 + np.log(1 + data['z']), 4.0))
-        log_sigma_hat_0 = numpyro.sample(f"log_sigma_hat0_{i}", dist.Normal(jnp.log(jnp.sqrt(jnp.std(data['y'])**2/jnp.exp(4 * (1 + data['z'])))), 1.0))
+
+        log_tau_drw_0 = numpyro.sample(f"log_tau_drw0_{i}", dist.Normal(bestP['log_kernel_param'][0], 1.0))
+        log_sigma_hat_0 = numpyro.sample(f"log_sigma_hat0_{i}", dist.Normal(bestP['log_kernel_param'][1], 1.0))
         log_amp_delta_blr = numpyro.sample(f"log_amp_delta_blr_{i}", dist.Normal(jnp.full_like(bestP["log_amp_delta_blr"], jnp.log(1e-3)), 2.0))
         lag = numpyro.sample(f"lag_{i}", dist.Normal(jnp.full_like(bestP["lag"], 0.0), 10.0))
         #log_lag_blr = numpyro.sample(f"log_lag_blr_{i}", dist.Normal(jnp.full_like(bestP["log_lag_blr"], jnp.log(1e2)), 2.0))
         log_tau_drw_blr = numpyro.sample(f"log_tau_drw_blr_{i}", dist.Normal(jnp.log(1e2), 2.0))
-        mean = numpyro.sample(f"mean_{i}", dist.Normal(jnp.full_like(bestP["mean"], 0.0), 0.1))
+        mean = numpyro.sample(f"mean_{i}", dist.Normal(bestP["mean"], 0.1))
         poly1 = numpyro.sample(f"poly1_{i}", dist.Normal(0.0, 10.0))
         mean_yerr = jnp.mean(data['yerr'])
         log_jitter_init = jnp.log(mean_yerr + 1e-6)
