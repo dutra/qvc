@@ -358,7 +358,7 @@ def plot_completeness_vs_mag_at_redshifts(p_detect, mag_centers, z_centers,
         p_vals = p_detect(mag_eval, np.full_like(mag_eval, z))
         plt.plot(mag_eval, p_vals, label=fr"$z = {z}$")
 
-    plt.xlabel(r"m (mag) i")
+    plt.xlabel(r"$m$ ($i$ mag)")
     plt.ylabel(r"$p(I=1|m, z)$")
     plt.legend(title="Redshift")
     plt.ylim(0, 1.05)
