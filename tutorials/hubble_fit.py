@@ -71,8 +71,8 @@ def log_likelihood(theta, cosmo_model,
         df_pantheon['c'].values,
         df_pantheon['biasCor_m_b'].values,
         df_pantheon['HOST_LOGMASS'].values,
-        params['alpha'], params['beta'], params['M0_sn'],
-        params['gamma'], params['tau_Ms']
+        params['alpha_sn'], params['beta_sn'], params['M0_sn'],
+        params['gamma_sn'], params['tau_Ms']
     )
 
     # --- Residuals between SN model and theory ---
@@ -155,7 +155,7 @@ def log_likelihood(theta, cosmo_model,
 
 def run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model='Flatw0waCDM', 
                       only_sna=False, completeness=True, use_full_cov=False,
-                      num_samples=2000, num_warmup=1000):
+                      num_samples=2000, num_warmup=2000):
     priors, model_labels = get_model_params(cosmo_model)
     ndim = len(model_labels)
     model_priors = {key: priors[key] for key in model_labels}
@@ -229,7 +229,7 @@ def main():
     logdetCov = logdet
     print("Data loaded. Running joint cosmographic fits...")
 
-    num_warmup, num_samples = 1000, 2000
+    num_warmup, num_samples = 250, 250
     # Run MCMC fits for SNIa only and SNIa+AGN, for each cosmological model
     for cosmo_model in ['Flatw0waCDM', 'FlatwCDM']:
         print(f"Running MCMC for {cosmo_model}: SNIa only")
@@ -274,7 +274,7 @@ def test():
     cosmo_model = 'FlatwCDM'
     sampler_joint, _ = run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model=cosmo_model, 
                                          only_sna=False, completeness=True, use_full_cov=False,
-                                         num_warmup=10, num_samples=50)
+                                         num_warmup=250, num_samples=250)
     print("Plotting Hubble diagram...")
     plot_hubble(sampler_joint, df_agn, df_pantheon, cosmo_model=cosmo_model)
     print("Plotting cosmological posteriors corner plot...")
@@ -283,5 +283,5 @@ def test():
     plot_predicted_vs_actual_Mi(sampler_joint, df_agn, cosmo_model=cosmo_model)
 
 if __name__ == "__main__":
-    main()
-    #test()
+    #main()
+    test()

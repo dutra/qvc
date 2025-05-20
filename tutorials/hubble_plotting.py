@@ -7,6 +7,7 @@ import corner
 from mpl_toolkits.axes_grid1.inset_locator import inset_axes
 from astropy.cosmology import FlatwCDM, Flatw0waCDM
 import matplotlib.pyplot as plt
+import os
 
 from hubble_model import *
 
@@ -21,13 +22,23 @@ def plot_corner(sampler, only_sna=False, cosmo_model='Flatw0waCDM'):
     # Model parameters: AGN correlation + SN calibration + cosmology
     priors, model_labels = get_model_params(cosmo_model)
     flat_samples = sampler.get_chain(flat=True)
-    fig = corner.corner(flat_samples, labels=model_labels, truths=None, show_titles=True, title_fmt=".2f")
+    
+    fig = corner.corner(
+        flat_samples,
+        labels=model_labels,
+        truths=None,
+        show_titles=True,
+        title_fmt=".2f",
+        title_kwargs={"fontsize": 12}  # Reduce title font size
+    )
+
+    os.makedirs("plots/hubble", exist_ok=True)
     if only_sna:
         fig.suptitle("SNIa only", fontsize=16)
-        plt.savefig(f"plots/posterior_{cosmo_model}_sna.png", dpi=200)
+        plt.savefig(f"plots/hubble/posterior_{cosmo_model}_sna.png", dpi=200)
     else:
-        fig.suptitle("SNIa + AGN", fontsize=16)
-        plt.savefig(f"plots/posterior_{cosmo_model}_agn.png", dpi=200)
+        fig.suptitle("SNIa + AGN", fontsize=28)
+        plt.savefig(f"plots/hubble/posterior_{cosmo_model}_agn.png", dpi=200)
     #plt.show()
     plt.close()
 
@@ -118,8 +129,10 @@ def plot_cosmo_corner(sampler_sna, sampler_agn, cosmo_model='Flatw0waCDM', show=
 
     # === Layout & Save ===
     fig.subplots_adjust(left=0.1, right=0.9, bottom=0.1, top=0.9, wspace=0.05, hspace=0.05)
-    fig.savefig(f"plots/corner_kde_{cosmo_model}.pdf", bbox_inches="tight", transparent=True)
-    fig.savefig(f"plots/corner_kde_{cosmo_model}.png", bbox_inches="tight")
+
+    os.makedirs("plots/hubble", exist_ok=True)
+    fig.savefig(f"plots/hubble/corner_kde_{cosmo_model}.pdf", bbox_inches="tight", transparent=True)
+    fig.savefig(f"plots/hubble/corner_kde_{cosmo_model}.png", bbox_inches="tight")
     if show:
         plt.show()
     plt.close()
@@ -181,10 +194,9 @@ def plot_hubble(sampler, df_agn, df_pantheon, cosmo_model, show=False):
     mu_pred_16th = np.percentile(mu_pred, 16, axis=0)
     mu_pred_84th = np.percentile(mu_pred, 84, axis=0)
     mu_pred_std = np.sqrt(df_agn['apparent_mag_i_err']**2 +
-            np.abs(0.5 * (mu_pred_84th - mu_pred_16th))**2 +
                  (-2.5 * 0.3 * np.log10(1 + df_agn["z"]))**2 +
-                 #(Kcorr * 0.05)**2 +
-                (results["alpha"][1] * np.sqrt((2*df_agn['log_sigma_UV_err'])**2+df_agn['log_tau_UV_RF_err']**2))**2)
+                 (0.055 * df_agn["z"])**2 +
+                (results["alpha_agn"][1] * np.sqrt((2*df_agn['log_sigma_UV_err'])**2+df_agn['log_tau_UV_RF_err']**2))**2)
 
     #--- Residuals ---
     mu_interp = np.interp(df_agn["z"], z_grid, mu_model_median)
@@ -244,8 +256,9 @@ def plot_hubble(sampler, df_agn, df_pantheon, cosmo_model, show=False):
         axi.tick_params(axis='both', which='major', direction='in', length=8, top=True, right=True)
 
     fig.tight_layout()
-    plt.savefig(f"plots/hubble_diagram_{cosmo_model}.pdf", dpi=300)
-    plt.savefig(f"plots/hubble_diagram_{cosmo_model}.png")
+    os.makedirs("plots/hubble", exist_ok=True)
+    plt.savefig(f"plots/hubble/hubble_diagram_{cosmo_model}.pdf", dpi=300)
+    plt.savefig(f"plots/hubble/hubble_diagram_{cosmo_model}.png")
     if show:
         plt.show()
     plt.close()
@@ -329,8 +342,9 @@ def plot_predicted_vs_actual_Mi(sampler, df_agn, cosmo_model, show=False):
     # Adjust layout to remove whitespace
     plt.subplots_adjust(wspace=0, hspace=0)
 
-    plt.savefig(f"plots/predicted_vs_actual_Mi_{cosmo_model}.png", dpi=300)
-    plt.savefig(f"plots/predicted_vs_actual_Mi_{cosmo_model}.pdf", dpi=300)
+    os.makedirs("plots/hubble", exist_ok=True)
+    plt.savefig(f"plots/hubble/predicted_vs_actual_Mi_{cosmo_model}.png", dpi=300)
+    plt.savefig(f"plots/hubble/predicted_vs_actual_Mi_{cosmo_model}.pdf", dpi=300)
     if show:
         plt.show()
     plt.close()
@@ -383,6 +397,7 @@ def plot_completeness_vs_mag_at_redshifts(p_detect, mag_centers, z_centers,
     plt.tight_layout()
     if show:
         plt.show()
-    plt.savefig("plots/completeness_vs_mag_at_redshifts.png", dpi=300)
-    plt.savefig("plots/completeness_vs_mag_at_redshifts.pdf", dpi=300)
+    os.makedirs("plots/hubble", exist_ok=True)
+    plt.savefig("plots/hubble/completeness_vs_mag_at_redshifts.png", dpi=300)
+    plt.savefig("plots/hubble/completeness_vs_mag_at_redshifts.pdf", dpi=300)
     plt.close()

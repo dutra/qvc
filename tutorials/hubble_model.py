@@ -21,13 +21,13 @@ def M_model_agn(M0_agn, alpha_agn, log_sigma_UV, log_tau_UV_RF):
 # SN calibration: anchor absolute magnitude from SH0ES (Riess et al. 2022:contentReference[oaicite:0]{index=0})
 # M_anchor = -19.253  # SH0ES-calibrated SN Ia absolute magnitude (reference value)
 
-def M_model_SN(m_b, x1, c, bias, host_logmass, alpha, beta, M0, gamma, tau_Ms):
+def M_model_SN(m_b, x1, c, bias, host_logmass, alpha_sn, beta_sn, M0_sn, gamma_sn, tau_Ms):
     """Brout+ 2022 SN model with stable host correction."""
     # Stable logistic function: delta_host = gamma / (1 + exp(...)) = gamma * sigmoid(...)
     S = 1e10
     host_mass = 10**host_logmass
-    delta_host = gamma * expit(-(host_mass - S) / tau_Ms) - gamma/2
-    return m_b + alpha * x1 - beta * c - M0 - bias + delta_host
+    delta_host = gamma_sn * expit(-(host_mass - S) / tau_Ms) - gamma_sn/2
+    return m_b + alpha_sn * x1 - beta_sn * c - M0_sn - bias + delta_host
 
 
 def get_model_params(cosmo_model):
@@ -39,13 +39,13 @@ def get_model_params(cosmo_model):
     else:
         raise ValueError("cosmo_model must be 'FlatwCDM' or 'Flatw0waCDM'")
     # Model parameters: AGN correlation + SN calibration + cosmology
-    model_labels = ['alpha', 'beta', 'gamma', 'tau_Ms', 'M0_sn', 'alpha_agn', 'M0_agn', 'log_f'] + cosmo_params
+    model_labels = ['alpha_sn', 'beta_sn', 'gamma_sn', 'tau_Ms', 'M0_sn', 'alpha_agn', 'M0_agn', 'log_f'] + cosmo_params
 
     # --- Priors ---
     priors = {
-        "alpha":    (-1, 1),        # SN stretch coefficient
-        "beta":     (0, 5),         # SN color-luminosity
-        "gamma":    (-0.5, 0.5),    # Host mass step
+        "alpha_sn":    (-1, 1),        # SN stretch coefficient
+        "beta_sn":     (0, 5),         # SN color-luminosity
+        "gamma_sn":    (-0.5, 0.5),    # Host mass step
         "tau_Ms":   (0.5, 1.5),        # Host mass transition
         "M0_sn":    (-21, -17),
         "alpha_agn": (-10, 10),     # AGN variability correlation
