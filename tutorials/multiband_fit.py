@@ -181,10 +181,10 @@ def numpyro_model(Model, X, yerr, y=None, bestP=None, clean_bands=None, z=None):
     mean_yerr = jnp.mean(yerr)
     log_jitter_init = jnp.log(mean_yerr + 1e-6)
 
-    log_jitter = numpyro.sample("log_jitter", dist.Normal(jnp.full_like(bestP["log_jitter"], log_jitter_init), 1.0))
+    log_jitter = numpyro.sample("log_jitter", dist.Normal(bestP["log_jitter"], 1.0))
 
     # --- Mean function parameters ---
-    mean = numpyro.sample("mean", dist.Normal(jnp.full_like(bestP["mean"], 0.0), 0.1))
+    mean = numpyro.sample("mean", dist.Normal(bestP["mean"], 0.1))
     poly1 = numpyro.sample("poly1", dist.Normal(0.0, 10.0))
 
     # --- Power law parameters ---
