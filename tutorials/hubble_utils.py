@@ -234,20 +234,31 @@ class Completeness2D:
         vals = self.interp_fn(pts)
         return vals.reshape(np.shape(mag))
     
-def get_completeness_function_2d(df_agn, sim_file="sampled_apparent_magnitudes_redshift.h5",
+def get_completeness_function_2d(df_agn, sim_file="sampled_apparent_magnitudes_by_redshift.h5",
                                  n_mag_bins=26, n_z_bins=16, mag_min=14, mag_max=26):
     """
     Returns a completeness function p_detect(mag, z) as a callable.
-    Uses observed AGN sample and simulated sample from HDF5 file.
+    Uses observed AGN sample and simulated sample from HDF5 file
+    with 'redshift_bins' group (one dataset per redshift bin).
     """
+    import numpy as np
+    import h5py
+    from scipy.ndimage import gaussian_filter
+    from scipy.interpolate import RegularGridInterpolator
 
-    # Load simulated (true) sample
+    # Load simulated (true) sample: flatten all bins into arrays
+    mags_true_list = []
+    z_true_list = []
     with h5py.File(sim_file, "r") as f:
-        mags_true = f["sampled_apparent_magnitudes"][:]
-        z_true = f["redshift_bin"][:]
-        # If z_true is a scalar, broadcast to match mags_true
-        if np.isscalar(z_true) or z_true.shape == () or len(z_true) == 1:
-            z_true = np.full_like(mags_true, float(z_true), dtype=float)
+        grp = f["redshift_bins"]
+        for ds_name in grp:
+            ds = grp[ds_name]
+            mags = ds[()]
+            z_bin = ds.attrs["redshift"]
+            mags_true_list.append(mags)
+            z_true_list.append(np.full_like(mags, z_bin, dtype=float))
+    mags_true = np.concatenate(mags_true_list)
+    z_true = np.concatenate(z_true_list)
 
     # Observed sample
     mags_obs = df_agn['apparent_mag_i'].values
@@ -281,12 +292,27 @@ def get_completeness_function_2d(df_agn, sim_file="sampled_apparent_magnitudes_r
 
     # Interpolator: returns completeness for any (mag, z)
     interp_fn = RegularGridInterpolator(
-        (mag_centers, z_centers), completeness_ratio,  # .T for (mag, z) order
+        (mag_centers, z_centers), completeness_ratio,  # (mag, z) order
         bounds_error=False, fill_value=0.0
     )
 
     # Compute grid spacing for mag and z
     dm = mag_centers[1] - mag_centers[0]
     dz = z_centers[1] - z_centers[0]
+
+    class Completeness2D:
+        def __init__(self, mag_centers, z_centers, completeness_ratio):
+            self.mag_centers = mag_centers
+            self.z_centers = z_centers
+            self.interp_fn = RegularGridInterpolator(
+                (mag_centers, z_centers),
+                completeness_ratio,
+                bounds_error=False, fill_value=0.0
+            )
+
+        def __call__(self, mag, z):
+            pts = np.column_stack([np.ravel(mag), np.ravel(z)])
+            vals = self.interp_fn(pts)
+            return vals.reshape(np.shape(mag))
 
     return Completeness2D(mag_centers, z_centers, completeness_ratio), mag_centers, z_centers, dm, dz
