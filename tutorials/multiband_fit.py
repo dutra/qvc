@@ -103,7 +103,8 @@ def initSampler(key, nSample, nBand, X, y, yerr, clean_bands, z):
     logwSampler = UniformInit(1, [0.0, 1.0])
 
     # --- Build model instance ---
-    k = kernels.quasisep.Exp(jnp.array([1e3, 0.1]))
+    initial_drw_params = {"log_kernel_param": jnp.log(np.array([500.0, 0.35]))}
+    k = kernels.quasisep.Exp(*jnp.exp(initial_drw_params["log_kernel_param"]))
     m = MultiVarModel(
         X, y, yerr, k,
         zero_mean=zero_mean,
@@ -112,50 +113,53 @@ def initSampler(key, nSample, nBand, X, y, yerr, clean_bands, z):
         clean_bands=clean_bands,
         z=z
     )
+    
     # MLE fit of log_prob of m
-
-    def neg_log_prob(params):
+    @jax.jit
+    def loss(params) -> JAXArray:
         return -m.log_prob(params)
+
+    def single_loop(params) -> tuple[dict[str, JAXArray], JAXArray]:
+        opt_state = optimizer.init(params)
+        for _ in range(nIter):
+            grads = jax.grad(loss)(params)
+            updates, opt_state = optimizer.update(grads, opt_state)
+            params = optax.apply_updates(params, updates)
+
+        return params, loss(params)
+
 
     # Collect initial params from m (use bestP or m.default_params)
     init_params = {
-        "log_kernel_param": kernelSampler(subkeys[0], 1).squeeze(),
-        "log_amp_delta": logAmpDeltaSampler(subkeys[1], 1).squeeze(),
-        "log_amp_delta_blr": logAmpDeltaBLRSampler(subkeys[2], 1).squeeze(),
-        "mean": meanSampler(subkeys[3], 1).squeeze(),
-        "poly1": poly1Sampler(subkeys[4], 1).squeeze(),
-        "lag": lagSampler(subkeys[5], 1).squeeze(),
-        "log_tau_drw_blr": logtauBLRSampler(subkeys[7], 1).squeeze(),
-        "log_jitter": logJitterSampler(subkeys[8], 1).squeeze(),
-        "eta_A1": etaA1Sampler(subkeys[9], 1).squeeze(),
-        "eta_A2": etaA2Sampler(subkeys[10], 1).squeeze(),
-        "eta_tau1": etaTau1Sampler(subkeys[11], 1).squeeze(),
-        "eta_tau2": etaTau2Sampler(subkeys[12], 1).squeeze(),
-        "eta_break": etaBreakSampler(subkeys[13], 1).squeeze(),
-        "lam_s": lamsSampler(subkeys[14], 1).squeeze(),
+        "log_kernel_param": kernelSampler(subkeys[0], 1),
+        "log_amp_delta": logAmpDeltaSampler(subkeys[1], 1),
+        "log_amp_delta_blr": logAmpDeltaBLRSampler(subkeys[2], 1),
+        "mean": meanSampler(subkeys[3], 1),
+        "poly1": poly1Sampler(subkeys[4], 1),
+        "lag": lagSampler(subkeys[5], 1),
+        "log_tau_drw_blr": logtauBLRSampler(subkeys[7], 1),
+        "log_jitter": logJitterSampler(subkeys[8], 1),
+        "eta_A1": etaA1Sampler(subkeys[9], 1),
+        "eta_A2": etaA2Sampler(subkeys[10], 1),
+        "eta_tau1": etaTau1Sampler(subkeys[11], 1),
+        "eta_tau2": etaTau2Sampler(subkeys[12], 1),
+        "eta_break": etaBreakSampler(subkeys[13], 1),
+        "lam_s": lamsSampler(subkeys[14], 1),
     }
+
     print('Starting MLE')
-    res = minimize(
-        neg_log_prob,
-        init_params,
-        method="L-BFGS-B",
-        options={"maxiter": 500}
-    )
+
+    import jaxopt
+
+    # jaxopt optimize
+    opt = jaxopt.ScipyMinimize(fun=loss, method="SLSQP",)
+    soln = opt.run(init_params)
+    best_param = soln.params
     print('done MLE')
 
-    # Unpack result
-    mle_params = {}
-    idx = 0
-    for name, shape in zip(param_names, param_shapes):
-        size = np.prod(shape)
-        mle_params[name] = jnp.array(res.x[idx:idx+size]).reshape(shape)
-        idx += size
+    print("best",best_param)
 
-    print("MLE fit success:", res.success)
-    print("MLE log_prob:", -res.fun)
-    print("MLE params:", mle_params)
-
-    return mle_params
+    return best_param
 
 def numpyro_model(Model, X, yerr, y=None, bestP=None, clean_bands=None, z=None):
     # --- Kernel and lag parameters ---
@@ -164,8 +168,13 @@ def numpyro_model(Model, X, yerr, y=None, bestP=None, clean_bands=None, z=None):
     lag = numpyro.sample("lag", dist.Normal(jnp.full_like(bestP["lag"], 0.0), 10))
     #log_lag_blr = numpyro.sample("log_lag_blr", dist.Normal(jnp.full_like(bestP["log_lag_blr"], jnp.log(1e2)), 2.0))
     log_tau_drw_blr = numpyro.sample("log_tau_drw_blr", dist.Normal(jnp.log(1e2), 2.0))
-    log_tau_drw_0 = numpyro.sample("log_tau_drw0", dist.Uniform(jnp.log(1e1), jnp.log(1e5))) # tau_drw at 2500 AA
-    log_sigma_hat_0 = numpyro.sample("log_sigma_hat0", dist.Uniform(jnp.log(1e-3), jnp.log(1e2))) # sigma_hat at 2500 AA
+
+    log_tau_drw_0 = numpyro.sample("log_tau_drw0", dist.Uniform(bestP['log_kernel_param'][0], jnp.log(1e5))) # tau_drw at 2500 AA
+    log_sigma_hat_0 = numpyro.sample("log_sigma_hat0", dist.Uniform(bestP['log_kernel_param'][1], jnp.log(1e2))) # sigma_hat at 2500 AA
+
+
+    #log_tau_drw_0 = numpyro.sample("log_tau_drw0", dist.Uniform(jnp.log(1e1), jnp.log(1e5))) # tau_drw at 2500 AA
+    #log_sigma_hat_0 = numpyro.sample("log_sigma_hat0", dist.Uniform(jnp.log(1e-3), jnp.log(1e2))) # sigma_hat at 2500 AA
 
 
     # Initialize jitter using the mean yerr
