@@ -258,8 +258,8 @@ def numpyro_joint_model(Model, batch_data):
         # Object-specific parameters
         #log_w = numpyro.sample(f"log_w_{i}", dist.Normal(jnp.log(20.0), 1.0))
 
-        log_tau_drw_0 = numpyro.sample(f"log_tau_drw0_{i}", dist.Normal(bestP['log_kernel_param'][0], 1.0))
-        log_sigma_hat_0 = numpyro.sample(f"log_sigma_hat0_{i}", dist.Normal(bestP['log_kernel_param'][1], 1.0))
+        log_tau_drw_0 = numpyro.sample(f"log_tau_drw0_{i}", dist.Normal(bestP['log_tau_drw0'], 1.0))
+        log_sigma_hat_0 = numpyro.sample(f"log_sigma_hat0_{i}", dist.Normal(bestP['log_sigma_hat0'], 1.0))
         log_amp_delta_blr = numpyro.sample(f"log_amp_delta_blr_{i}", dist.Normal(jnp.full_like(bestP["log_amp_delta_blr"], jnp.log(1e-3)), 2.0))
         lag = numpyro.sample(f"lag_{i}", dist.Normal(jnp.full_like(bestP["lag"], 0.0), 10.0))
         #log_lag_blr = numpyro.sample(f"log_lag_blr_{i}", dist.Normal(jnp.full_like(bestP["log_lag_blr"], jnp.log(1e2)), 2.0))
