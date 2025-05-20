@@ -471,7 +471,8 @@ def fit_multiband(Model, data, nwarm=500, nsamp=250, progress_bar=False, plot=Fa
         #    #return None
     result = process_samples(samples, data)
     if plot:
-        save_combined_plot(samples, m, X, y, yerr, band_idx[mask_outlier], result)
+        psd_results = compute_psd_from_samples(samples, clean_bands)
+        save_combined_plot(samples, m, X, y, yerr, band_idx[mask_outlier], result, psd_results=psd_results)
         # plot_mcmc_traces(samples, result)
         # plot_posterior(samples, data, clean_bands=clean_bands)
         # psd_results = compute_psd_from_samples(samples, clean_bands)
@@ -641,7 +642,8 @@ if __name__ == '__main__':
                     zero_mean=has_lag, has_jitter=has_jitter, has_lag=has_lag,
                     clean_bands=obj['clean_bands'], z=obj['z']
                 )
-                save_combined_plot(obj_samples_clean, m, obj['X'], obj['y'], obj['yerr'], obj['band_idx'], result)
+                psd_results = compute_psd_from_samples(obj_samples_clean, obj["clean_bands"])
+                save_combined_plot(obj_samples_clean, m, obj['X'], obj['y'], obj['yerr'], obj['band_idx'], result, psd_results=psd_results)
                 #plot_mcmc_traces(mcmc, result)
             results.append(result)
 

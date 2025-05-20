@@ -444,71 +444,63 @@ def process_samples(samples, data):
     return d
 
 
-def compute_psd_from_samples(samples, clean_bands, num_points=1000, time_range=(0, 365*20)):
+def compute_psd_from_samples(samples, clean_bands, num_points=1000, time_range=(1.0, 365*20)):
     """
-    Compute the Power Spectral Density (PSD) using the kernel parameters from MCMC samples.
+    Compute the Power Spectral Density (PSD) for each band using the median of the posterior samples.
 
     Args:
-        samples (dict): MCMC samples containing kernel parameters.
+        samples (dict): MCMC samples containing kernel and power-law parameters.
         clean_bands (list): List of clean bands used in the model.
-        num_points (int): Number of points to sample in the time range.
-        time_range (tuple): A tuple specifying the range of time lags (min_time, max_time).
+        num_points (int): Number of frequency points.
+        time_range (tuple): Range of time lags (min_time, max_time) in days.
 
     Returns:
-        dict: A dictionary containing frequencies and PSD for each band.
+        dict: {band: {"freqs": ..., "psd": ...}} for each band in clean_bands.
     """
-    # Extract kernel parameters from samples
-    log_kernel_param = samples["log_kernel_param"]
-    log_amp_delta_blr = samples["log_amp_delta_blr"]
-    #log_lag_blr = samples["log_lag_blr"]
-    eta_A1 = samples["eta_A1"]
-    eta_A2 = samples["eta_A2"]
-    eta_tau1 = samples["eta_tau1"]
-    eta_tau2 = samples["eta_tau2"]
+    import numpy as np
 
-    # Compute the median values of the parameters
-    kernel_param = jnp.exp(jnp.median(log_kernel_param, axis=0))
-    amp_delta_blr = jnp.exp(jnp.median(log_amp_delta_blr, axis=0))
-    #lag_blr = jnp.exp(jnp.median(log_lag_blr, axis=0))
-    beta = jnp.median(beta)
-    delta = jnp.median(delta)
+    # Reference wavelength (rest-frame)
+    lambda_ref = 2500.0
 
-    # Compute amplitudes and taus for each band
-    amplitudes = jnp.exp(log_kernel_param[1] + jnp.log(10) * jnp.array([log_broken_pl(lambda_pivot[band], params["lam_s"], eta_A1, eta_A2) for band in clean_bands]))
-    taus = jnp.exp(log_kernel_param[0] + jnp.log(10) * jnp.array([log_broken_pl(lambda_pivot[band], params["lam_s"], eta_tau1, eta_tau2) for band in clean_bands]))
+    # Median parameters
+    log_sigma_hat0 = np.median(samples["log_sigma_hat0"])
+    log_tau_drw0 = np.median(samples["log_tau_drw0"])
+    eta_A1 = np.median(samples["eta_A1"])
+    eta_A2 = np.median(samples["eta_A2"])
+    eta_break = np.median(samples["eta_break"])
+    lam_s = np.median(samples["lam_s"])
+    eta_tau1 = np.median(samples["eta_tau1"])
+    eta_tau2 = np.median(samples["eta_tau2"])
 
-    # Instantiate the MyMultibandLowRank kernel
-    kernel = MyMultibandLowRank(
-        sigma=kernel_param[1],
-        scale=kernel_param[0],
-        amplitudes=amplitudes,
-        amplitudes_blr=amp_delta_blr,
-        lag_blr=lag_blr,
-        taus=taus,
-    )
+    # Helper: broken power law scaling
+    def log_broken_pl(lam, lam_s, d1, d2, ds=4.0):
+        x = lam / lam_s
+        log_f = -np.log10(
+            np.power(x, -d1) * np.power(1.0 + np.power(x, ds), -(d2 - d1) / ds)
+        )
+        return log_f
 
-    # Generate time lags
+    # Frequency grid (cycles/day)
     min_time, max_time = time_range
-    time_lags = jnp.linspace(min_time, max_time, num_points)
+    t_span = max_time - min_time
+    freqs = np.logspace(-4, 0, num_points)  # 1/10,000 to 1 cycles/day
 
-    # Compute PSD for each band
     psd_results = {}
-    for band_idx, band in enumerate(clean_bands):
-        # Compute the covariance for the given band
-        covariances = jnp.array([kernel.evaluate((0, band_idx), (lag, band_idx)) for lag in time_lags])
+    for band in clean_bands:
+        # Get pivot wavelength for this band (rest-frame)
+        lam_eff = lambda_pivot[band]
 
-        # Apply the Fourier Transform to compute the PSD
-        fft_result = jnp.fft.fft(covariances)
-        freqs = jnp.fft.fftfreq(num_points, d=(max_time - min_time) / num_points)
+        # Compute log_sigma and log_tau for this band (rest-frame)
+        log_sigma = log_sigma_hat0 / np.log(10) + log_broken_pl(lam_eff, lam_s, eta_A1, eta_A2, eta_break)
+        log_tau = log_tau_drw0 / np.log(10) + log_broken_pl(lam_eff, lam_s, eta_tau1, eta_tau2, eta_break)
 
-        # Compute the PSD (magnitude squared of the FFT)
-        psd = jnp.abs(fft_result) ** 2
+        sigma = 10 ** log_sigma
+        tau = 10 ** log_tau
 
-        # Store only the positive frequencies and corresponding PSD values
-        positive_freqs = freqs[:num_points // 2]
-        positive_psd = psd[:num_points // 2]
+        # DRW PSD: S(f) = 2 sigma^2 tau^2 / [1 + (2 pi tau f)^2]
+        S_f = 2 * sigma**2 * tau**2 / (1 + (2 * np.pi * tau * freqs) ** 2)
 
-        psd_results[band] = {"freqs": np.array(positive_freqs), "psd": np.array(positive_psd)}
+        psd_results[band] = {"freqs": freqs, "psd": S_f}
 
     return psd_results
 
