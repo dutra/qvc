@@ -109,11 +109,9 @@ def filter_unresolved_quasars(df):
 
     return df
 
-def load_quasar_data():
+def load_quasar_data(file_path):
 
-    quasar_list = read_quasars_from_hdf5("data/may12_objs_tauwavelength_taublr_redbands_ds4_merged.h5")
-    #quasar_list = read_quasars_from_hdf5("data/may13_objs_tauwavelength_taublr_freebreak_newpriors4_merged.h5")
-    #quasar_list = read_quasars_from_hdf5("data/may13_objs_tauwavelength_taublr_freebreak_newpriors_all_merged.h5")
+    quasar_list = read_quasars_from_hdf5(file_path)
     print("Number of quasars loaded:", len(quasar_list))
 
 
