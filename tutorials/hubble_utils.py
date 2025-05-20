@@ -220,7 +220,6 @@ def get_completeness_function(df_agn):
 
 class Completeness2D:
     def __init__(self, mag_centers, z_centers, completeness_ratio):
-        from scipy.interpolate import RegularGridInterpolator
         self.mag_centers = mag_centers
         self.z_centers = z_centers
         self.interp_fn = RegularGridInterpolator(
@@ -299,20 +298,5 @@ def get_completeness_function_2d(df_agn, sim_file="sampled_apparent_magnitudes_b
     # Compute grid spacing for mag and z
     dm = mag_centers[1] - mag_centers[0]
     dz = z_centers[1] - z_centers[0]
-
-    class Completeness2D:
-        def __init__(self, mag_centers, z_centers, completeness_ratio):
-            self.mag_centers = mag_centers
-            self.z_centers = z_centers
-            self.interp_fn = RegularGridInterpolator(
-                (mag_centers, z_centers),
-                completeness_ratio,
-                bounds_error=False, fill_value=0.0
-            )
-
-        def __call__(self, mag, z):
-            pts = np.column_stack([np.ravel(mag), np.ravel(z)])
-            vals = self.interp_fn(pts)
-            return vals.reshape(np.shape(mag))
 
     return Completeness2D(mag_centers, z_centers, completeness_ratio), mag_centers, z_centers, dm, dz

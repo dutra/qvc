@@ -155,7 +155,7 @@ def log_likelihood(theta, cosmo_model,
 
 def run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model='Flatw0waCDM', 
                       only_sna=False, completeness=True, use_full_cov=False,
-                      num_samples=100, num_warmup=500):
+                      num_samples=2000, num_warmup=1000):
     priors, model_labels = get_model_params(cosmo_model)
     ndim = len(model_labels)
     model_priors = {key: priors[key] for key in model_labels}
@@ -195,7 +195,7 @@ def run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model='Flatw0waCDM',
 
 def main():
     print("Loading quasar data...")
-    df_agn = load_quasar_data()
+    df_agn = load_quasar_data("data/may12_objs_tauwavelength_taublr_redbands_ds4_merged.h5")
     # Load Pantheon+ SN metadata
     print("Loading Pantheon+ supernova data...")
     df_pantheon = pd.read_csv(
@@ -229,7 +229,7 @@ def main():
     logdetCov = logdet
     print("Data loaded. Running joint cosmographic fits...")
 
-    num_warmup, num_samples = 500, 100
+    num_warmup, num_samples = 1000, 2000
     # Run MCMC fits for SNIa only and SNIa+AGN, for each cosmological model
     for cosmo_model in ['Flatw0waCDM', 'FlatwCDM']:
         print(f"Running MCMC for {cosmo_model}: SNIa only")
@@ -245,16 +245,24 @@ def main():
         # Plot results
         print("Plotting Hubble diagram...")
         plot_hubble(sampler_joint, df_agn, df_pantheon, cosmo_model=cosmo_model)
+
         print("Plotting cosmological posteriors corner plot...")
         plot_cosmo_corner(sampler_snia, sampler_joint, cosmo_model=cosmo_model)
         print("Plotting AGN M_i predictions vs actual...")
         plot_predicted_vs_actual_Mi(sampler_joint, df_agn, cosmo_model=cosmo_model)
+        print("Plotting completeness vs magnitude at redshifts...")
+        p_detect, mag_centers, z_centers, dm, dz = get_completeness_function_2d(df_agn)
+        plot_completeness_vs_mag_at_redshifts(p_detect, mag_centers, z_centers)
         print(f"Finished plots for {cosmo_model}\n")
         #break
     print("All analyses complete. Results saved to 'plots/' directory.")
 
 def test():
-    df_agn = load_quasar_data()
+    df_agn = load_quasar_data("data/may12_objs_tauwavelength_taublr_redbands_ds4_merged.h5")
+    print("Plotting completeness vs magnitude at redshifts...")
+    p_detect, mag_centers, z_centers, dm, dz = get_completeness_function_2d(df_agn)
+    plot_completeness_vs_mag_at_redshifts(p_detect, mag_centers, z_centers)
+
     #df_agn = df_agn.sample(n=500, random_state=42).reset_index(drop=True)
     # Load Pantheon+ SN metadata
     df_pantheon = pd.read_csv(
@@ -266,14 +274,13 @@ def test():
     cosmo_model = 'FlatwCDM'
     sampler_joint, _ = run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model=cosmo_model, 
                                          only_sna=False, completeness=True, use_full_cov=False,
-                                         num_warmup=250, num_samples=100)
+                                         num_warmup=10, num_samples=50)
     print("Plotting Hubble diagram...")
     plot_hubble(sampler_joint, df_agn, df_pantheon, cosmo_model=cosmo_model)
     print("Plotting cosmological posteriors corner plot...")
     plot_cosmo_corner(sampler_joint, sampler_joint, cosmo_model=cosmo_model)
     print("Plotting AGN M_i predictions vs actual...")
     plot_predicted_vs_actual_Mi(sampler_joint, df_agn, cosmo_model=cosmo_model)
-
 
 if __name__ == "__main__":
     main()
