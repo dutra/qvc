@@ -360,11 +360,15 @@ def plot_completeness_vs_mag_at_redshifts(p_detect, mag_centers, z_centers,
     cmap = cm.get_cmap('viridis', len(redshifts))
     norm = mcolors.Normalize(vmin=min(redshifts), vmax=max(redshifts))
 
+    # Define a list of line styles to cycle through
+    line_styles = ['-', '--', '-.', ':', (0, (3, 1, 1, 1)), (0, (5, 5))]
+    style_cycle = iter(line_styles)
+
     plt.figure(figsize=(7, 5))
     for i, z in enumerate(redshifts):
         p_vals = p_detect(mag_eval, np.full_like(mag_eval, z))
         color = cmap(norm(z))
-        plt.plot(mag_eval, p_vals, label=fr"$z = {z}$", color=color)
+        plt.plot(mag_eval, p_vals, label=fr"$z = {z}$", color=color, linestyle=line_styles[i % len(line_styles)])
 
     #sm = cm.ScalarMappable(cmap=cmap, norm=norm)
     #sm.set_array([])
