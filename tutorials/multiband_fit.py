@@ -3,7 +3,6 @@ import jax
 jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 
-
 import os
 from collections.abc import Callable
 import equinox as eqx
@@ -130,8 +129,8 @@ def numpyro_model(Model, X, yerr, y=None, bestP=None, clean_bands=None, z=None):
     lag = numpyro.sample("lag", dist.Normal(jnp.full_like(bestP["lag"], 0.0), 10))
     #log_lag_blr = numpyro.sample("log_lag_blr", dist.Normal(jnp.full_like(bestP["log_lag_blr"], jnp.log(1e2)), 2.0))
     log_tau_drw_blr = numpyro.sample("log_tau_drw_blr", dist.Normal(jnp.log(1e2), 2.0))
-    log_tau_drw_0 = numpyro.sample("log_tau_drw_0", dist.Uniform(jnp.log(1e1), jnp.log(1e5))) # tau_drw at 2500 AA
-    log_sigma_hat_0 = numpyro.sample("log_sigma_hat_0", dist.Uniform(jnp.log(1e-3), jnp.log(1e2))) # sigma_hat at 2500 AA
+    log_tau_drw_0 = numpyro.sample("log_tau_drw0", dist.Uniform(jnp.log(1e1), jnp.log(1e5))) # tau_drw at 2500 AA
+    log_sigma_hat_0 = numpyro.sample("log_sigma_hat0", dist.Uniform(jnp.log(1e-3), jnp.log(1e2))) # sigma_hat at 2500 AA
 
 
     # Initialize jitter using the mean yerr
@@ -146,12 +145,12 @@ def numpyro_model(Model, X, yerr, y=None, bestP=None, clean_bands=None, z=None):
 
     # --- Power law parameters ---
     powerlaw_priors = {
-        "eta_A1": (-1.0, 0.1),
-        "eta_A2": (-0.2, 0.1),
-        "eta_tau1": (0.8, 0.1),
-        "eta_tau2": (0.1, 0.1),
-        "eta_break": (4, 0.1),
-        "lam_s": (2500.0, 1.0),
+        "eta_A1": (-0.75, 0.1),
+        "eta_A2": (-0.6, 0.1),
+        "eta_tau1": (0.05, 0.1),
+        "eta_tau2": (0.01, 0.1),
+        "eta_break": (3, 0.1),
+        "lam_s": (2500.0, 100.0),
     }
     powerlaw_samples = {
         k: numpyro.sample(k, dist.Normal(loc, scale))
@@ -171,8 +170,8 @@ def numpyro_model(Model, X, yerr, y=None, bestP=None, clean_bands=None, z=None):
 
     # --- Collect parameters for the model ---
     sample_params = {
-        "log_tau_drw_0": log_tau_drw_0,
-        "log_sigma_hat_0": log_sigma_hat_0,
+        "log_tau_drw0": log_tau_drw_0,
+        "log_sigma_hat0": log_sigma_hat_0,
         #"log_w": log_w,
         "log_amp_delta_blr": log_amp_delta_blr,
         "lag": lag,
@@ -196,7 +195,7 @@ def numpyro_joint_model(Model, batch_data):
         "eta_tau1": (0.0, 0.2),
         "eta_tau2": (0.0, 0.2),
         "eta_break": (3, 0.2),
-        "lam_s": (2500.0, 1.0),
+        "lam_s": (2500.0, 100.0),
     }
     powerlaw_samples = {
         k: numpyro.sample(k, dist.Normal(loc, scale))
@@ -459,6 +458,7 @@ if __name__ == '__main__':
     parser.add_argument("--cpu", action="store_true", help="Use CPU.")
     parser.add_argument("--nwarm", type=int, default=500, help="Number of warmup steps for MCMC.")
     parser.add_argument("--nsamp", type=int, default=250, help="Number of samples for MCMC.")
+    parser.add_argument("--nchains", type=int, default=-1, help="Number of chains for MCMC.")
     parser.add_argument("--latent", action="store_true", help="Use latent variable model.")
     parser.add_argument("--choose_N", type=int, default=-1, help="Sample choose_N objects.")
 
@@ -528,20 +528,34 @@ if __name__ == '__main__':
                 'bestP': bestP,
                 # add any other fields needed by your model
             })
+        num_objects = len(batch_data)
         print(f"Running joint fit on {len(batch_data)} objects...")
+        estimated_nchains = 2*((num_params - 6)*len(batch_data) + 6)
+        if args.nchains < 1:
+            nchains = estimated_nchains
+        else:
+            nchains = args.nchains
+        print(f"{args.nwarm=}, {args.nsamp=}, {args.nchains=}, estimated num_chains: {estimated_nchains}, {num_params=}, {len(batch_data)=}")
+
+        # Print estimated memory usage
+        memory_est = estimate_numpyro_gpu_memory_vectorized(num_params_per_object=num_params, num_objects=num_objects, num_chains=nchains, num_samples=args.nsamp, num_warmup=args.nwarm)
+        print(f"Estimated GPU memory usage (vectorized): {memory_est:.2f} GB")
+        
         init_strategy = numpyro.infer.init_to_sample()
+        print("Done with numpyro.infer.init_to_sample")
 
         # emcee works better than NUTS for multimodal posteriors
         nuts_kernel = AIES(
             numpyro_joint_model,
-            moves={AIES.DEMove() : 0.5, AIES.StretchMove() : 0.5},
+            moves={AIES.DEMove() : 0.9, AIES.StretchMove() : 0.1},
             init_strategy=init_strategy,
             )
         mcmc = MCMC(
             nuts_kernel,
             num_warmup=args.nwarm, # This could be less than num_samples
             num_samples=args.nsamp,
-            num_chains=(2*num_params - 6)*len(batch_data) + 6,
+            #num_chains=(2*num_params - 6)*len(batch_data) + 6,
+            num_chains=nchains,
             progress_bar=args.progress,
             chain_method="vectorized",
         )

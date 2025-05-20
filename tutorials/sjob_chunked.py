@@ -3,13 +3,13 @@ import glob
 import pandas as pd
 
 # Parameters
-chunk_size = 800      # Number of objects per job
-prefix = "may16"
-suffix = "latent"
+chunk_size = 39000//12  # Number of objects per job
+prefix = "may19"
+suffix = "chunked_goodpriors"
 #suffix = "singlepl2_all"
 lc_file = "data/may8_lc_all.h5"
-filter_file = "data/df_quasars_filtered_apr29.csv"
-#filter_file = "data/all_object_ids.csv"
+#filter_file = "data/df_quasars_filtered_apr29.csv"
+filter_file = "data/all_object_ids.csv"
 script_path = "submit_jobs"
 output_glob = f"data/{prefix}_objs_{suffix}_*.h5"
 log_glob = f"{script_path}/{prefix}_gpu_job_{suffix}_*.txt"
@@ -59,7 +59,7 @@ module load miniconda
 conda activate jaxgpu
 
 python multiband_fit.py --skip {skip} --N {chunk_size} --lc_file {lc_file} \\
-    --filter_file {filter_file} --file {result_file} --plot --nwarm 150 --nsamp 50 --latent
+    --filter_file {filter_file} --file {result_file} --plot --nwarm 500 --nsamp 200
 """)
 # 
     os.system(f"sbatch {sbatch_filename}")
