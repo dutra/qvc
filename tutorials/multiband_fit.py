@@ -160,6 +160,13 @@ def initSampler(key, nSample, nBand, X, y, yerr, clean_bands, z):
     print("best",best_param)
     print("MLE loss: ", soln.state.fun_val)
 
+    best_param['log_sigma_hat0'] = 0.5 * (2*best_param['log_kernel_param'][1] - best_param['log_kernel_param'][0])
+    best_param['log_tau_drw0'] = best_param['log_kernel_param'][0]
+    best_param['log_sigma_band'] = best_param['log_kernel_param'][1] + best_param['log_amp_delta']
+    
+    print(best_param['log_kernel_param'])
+    print(best_param['log_sigma_hat0'],  best_param['log_tau_drw0'], ' <<<<<<<')
+
     return best_param
 
 def numpyro_model(Model, X, yerr, y=None, bestP=None, clean_bands=None, z=None):

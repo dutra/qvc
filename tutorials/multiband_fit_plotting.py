@@ -88,6 +88,7 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, data, fit_bestP=Fal
         # Compute predictions using the model
         if fit_bestP:
             mu, std = model.pred(samples, (t_test, jnp.full_like(t_test, n, dtype=int)))
+            print(mu, std, '!!!!!!!!!!!!!!')
         else:
             posterior_median = {k: np.median(v, axis=0) for k, v in samples.items()}
             mu, std = model.pred(posterior_median, (t_test, jnp.full_like(t_test, n, dtype=int)))
@@ -100,58 +101,60 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, data, fit_bestP=Fal
     ax.set_ylabel('Magnitude + arbitrary offset')
     ax.invert_yaxis()  # Magnitudes are brighter when lower
     #ax.legend(loc='lower right')
-    
-    log_sigma_band = [f"{a:.2f}" for a in data['log_sigma_band']]
-    log_sigma_band = ",".join(log_sigma_band)
-    log_sigma_band_err = [f"{a:.2f}" for a in data['log_sigma_band_err']]
-    log_sigma_band_err = ",".join(log_sigma_band_err)
 
-    log_tau_band_RF = [f"{a:.2f}" for a in data['log_tau_band_RF']]
-    log_tau_band_RF = ",".join(log_tau_band_RF)
-    log_tau_band_RF_err = [f"{a:.2f}" for a in data['log_tau_band_RF_err']]
-    log_tau_band_RF_err = ",".join(log_tau_band_RF_err)
-    # Annotate tau_RF and sigma_RF with their values and errors
-    ax.annotate(
-        f"Object ID: {object_id} (z={data['z']:.2f})\n"
-        f"$\\log_{{10}}(\\tau_{{UV RF}})$: {data['log_tau_UV_RF']:.2f} ± {data['log_tau_UV_RF_err']:.2f}\n"
-        f"$\\log_{{10}}(\\tau_{{RF}})$: {log_tau_band_RF}\n                 ± {log_tau_band_RF_err}\n"
-        f"$\\log_{{10}}(\\tau_{{blr}})$: {data['log_tau_blr']:.2f} ± {data['log_tau_blr_err']:.2f}\n"
-        f"$\\log_{{10}}(\\sigma_{{UV}})$: {data['log_sigma_hat_UV']:.2f} ± {data['log_sigma_hat_UV_err']:.2f}\n"
-        f"$\\log_{{10}}(\\sigma)$: {log_sigma_band}\n                 ± {log_sigma_band_err}\n"
-        f"$\\eta_{{A_1}}$: {data['eta_A1']:.2f} ± {data['eta_A1_err']:.2f}\n"
-        f"$\\eta_{{A_2}}$: {data['eta_A2']:.2f} ± {data['eta_A2_err']:.2f}\n"
-        f"$\\eta_{{\\tau_1}}$: {data['eta_tau1']:.2f} ± {data['eta_tau1_err']:.2f}\n"
-        f"$\\eta_{{\\tau_2}}$: {data['eta_tau2']:.2f} ± {data['eta_tau2_err']:.2f}\n"
-        f"$\\eta_{{\\mathrm{{break}}}}$: {data['eta_break']:.2f} ± {data['eta_break_err']:.2f}\n"
-        f"$\\eta_{{\\lambda_s}}$: {data['lam_s']:.2f} ± {data['lam_s_err']:.2f}\n"        
-        f"$\\mathrm{{poly_1}}$: {data['poly1']:.2f} ± {data['poly1_err']:.2f}",
-        #f"$\\log_{{10}}(w)$: {data['log_w']:.2f} ± {data['log_w_err']:.2f}",
-        xy=(0.05, 0.95),
-        xycoords="axes fraction",
-        fontsize=10,
-        verticalalignment="top",
-        bbox=dict(boxstyle="round,pad=0.3", edgecolor="black", facecolor="white", alpha=0.4),
-    )
-    # Annotate the legend with each letter in the same color
-    for i, band in enumerate(np.flip(clean_bands)):
+    if not fit_bestP:
+    
+        log_sigma_band = [f"{a:.2f}" for a in data['log_sigma_band']]
+        log_sigma_band = ",".join(log_sigma_band)
+        log_sigma_band_err = [f"{a:.2f}" for a in data['log_sigma_band_err']]
+        log_sigma_band_err = ",".join(log_sigma_band_err)
+
+        log_tau_band_RF = [f"{a:.2f}" for a in data['log_tau_band_RF']]
+        log_tau_band_RF = ",".join(log_tau_band_RF)
+        log_tau_band_RF_err = [f"{a:.2f}" for a in data['log_tau_band_RF_err']]
+        log_tau_band_RF_err = ",".join(log_tau_band_RF_err)
+        # Annotate tau_RF and sigma_RF with their values and errors
         ax.annotate(
-            band,
-            xy=(0.95 - i * 0.05, 0.95),  # Adjust horizontal spacing
+            f"Object ID: {object_id} (z={data['z']:.2f})\n"
+            f"$\\log_{{10}}(\\tau_{{UV RF}})$: {data['log_tau_UV_RF']:.2f} ± {data['log_tau_UV_RF_err']:.2f}\n"
+            f"$\\log_{{10}}(\\tau_{{RF}})$: {log_tau_band_RF}\n                 ± {log_tau_band_RF_err}\n"
+            f"$\\log_{{10}}(\\tau_{{blr}})$: {data['log_tau_blr']:.2f} ± {data['log_tau_blr_err']:.2f}\n"
+            f"$\\log_{{10}}(\\sigma_{{UV}})$: {data['log_sigma_hat_UV']:.2f} ± {data['log_sigma_hat_UV_err']:.2f}\n"
+            f"$\\log_{{10}}(\\sigma)$: {log_sigma_band}\n                 ± {log_sigma_band_err}\n"
+            f"$\\eta_{{A_1}}$: {data['eta_A1']:.2f} ± {data['eta_A1_err']:.2f}\n"
+            f"$\\eta_{{A_2}}$: {data['eta_A2']:.2f} ± {data['eta_A2_err']:.2f}\n"
+            f"$\\eta_{{\\tau_1}}$: {data['eta_tau1']:.2f} ± {data['eta_tau1_err']:.2f}\n"
+            f"$\\eta_{{\\tau_2}}$: {data['eta_tau2']:.2f} ± {data['eta_tau2_err']:.2f}\n"
+            f"$\\eta_{{\\mathrm{{break}}}}$: {data['eta_break']:.2f} ± {data['eta_break_err']:.2f}\n"
+            f"$\\eta_{{\\lambda_s}}$: {data['lam_s']:.2f} ± {data['lam_s_err']:.2f}\n"        
+            f"$\\mathrm{{poly_1}}$: {data['poly1']:.2f} ± {data['poly1_err']:.2f}",
+            #f"$\\log_{{10}}(w)$: {data['log_w']:.2f} ± {data['log_w_err']:.2f}",
+            xy=(0.05, 0.95),
             xycoords="axes fraction",
-            color=colors[band],
-            fontsize=18,
-            fontweight="bold",
-            ha="right",
-            va="top",
+            fontsize=10,
+            verticalalignment="top",
+            bbox=dict(boxstyle="round,pad=0.3", edgecolor="black", facecolor="white", alpha=0.4),
         )
-    #ax.set_title(f'Light Curve for AGN {object_id}')
+        # Annotate the legend with each letter in the same color
+        for i, band in enumerate(np.flip(clean_bands)):
+            ax.annotate(
+                band,
+                xy=(0.95 - i * 0.05, 0.95),  # Adjust horizontal spacing
+                xycoords="axes fraction",
+                color=colors[band],
+                fontsize=18,
+                fontweight="bold",
+                ha="right",
+                va="top",
+            )
+        #ax.set_title(f'Light Curve for AGN {object_id}')
 
     plt.tight_layout()
 
     # Save the plot as a PNG file
     output_dir = f"light_curves_fits/{prefix}_{suffix}"
     os.makedirs(output_dir, exist_ok=True)
-    if bestP:
+    if fit_bestP:
         fpath = os.path.join(output_dir, f'{data['z']:.1f}_{object_id}_combined_plot_MLE.png')
     else:
         fpath = os.path.join(output_dir, f'{data['z']:.1f}_{object_id}_combined_plot.png')
