@@ -7,6 +7,7 @@ import corner
 from mpl_toolkits.axes_grid1.inset_locator import inset_axes
 from astropy.cosmology import FlatwCDM, Flatw0waCDM
 import matplotlib.pyplot as plt
+
 from hubble_model import *
 
 def plot_corner(sampler, only_sna=False, cosmo_model='Flatw0waCDM'):
@@ -335,3 +336,36 @@ def plot_predicted_vs_actual_Mi(sampler, df_agn, cosmo_model, show=False):
     plt.close()
 
 
+def plot_completeness_vs_mag_at_redshifts(p_detect, mag_centers, z_centers, 
+                                          redshifts=[0.5, 1.0, 2.0, 3.0, 4.0], show=False):
+    """
+    Plot p(I=1 | m, z) vs apparent magnitude for several fixed redshifts.
+
+    Parameters:
+        p_detect : callable
+            A function p_detect(mag, z) returning the completeness probability.
+        mag_centers : ndarray
+            1D array of magnitude bin centers used for evaluation.
+        z_centers : ndarray
+            1D array of redshift bin centers (not used in plotting directly).
+        redshifts : list of floats
+            Redshift values at which to evaluate the completeness curves.
+    """
+    mag_eval = np.linspace(np.min(mag_centers), np.max(mag_centers), 1000)
+
+    plt.figure(figsize=(8, 5))
+    for z in redshifts:
+        p_vals = p_detect(mag_eval, np.full_like(mag_eval, z))
+        plt.plot(mag_eval, p_vals, label=fr"$z = {z}$")
+
+    plt.xlabel(r"m (mag) i")
+    plt.ylabel(r"$p(I=1|m, z)$")
+    plt.legend(title="Redshift")
+    plt.ylim(0, 1.05)
+    plt.grid(False)
+    plt.tight_layout()
+    if show:
+        plt.show()
+    plt.savefig("plots/completeness_vs_mag_at_redshifts.png", dpi=300)
+    plt.savefig("plots/completeness_vs_mag_at_redshifts.pdf", dpi=300)
+    plt.close()

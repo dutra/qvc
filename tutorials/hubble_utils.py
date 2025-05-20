@@ -2,7 +2,7 @@ import matplotlib.pyplot as plt
 
 import numpy as np
 import h5py
-from scipy.ndimage import gaussian_filter1d
+from scipy.ndimage import gaussian_filter1d, gaussian_filter
 from scipy.interpolate import interp1d
 import pandas as pd
 from astropy.io import fits
@@ -13,6 +13,7 @@ from astroquery.vizier import Vizier
 from tqdm import tqdm
 import warnings
 from scipy.stats import norm
+from scipy.interpolate import RegularGridInterpolator
 
 bands = ['u', 'g', 'r', 'i', 'z']#, 'y']
 bands_idx = {b: i for i, b in enumerate(bands)}
@@ -108,12 +109,11 @@ def filter_unresolved_quasars(df):
 
     return df
 
-def load_quasar_data(file_path="s82_objs.h5"):
+def load_quasar_data():
 
     quasar_list = read_quasars_from_hdf5("data/may12_objs_tauwavelength_taublr_redbands_ds4_merged.h5")
     #quasar_list = read_quasars_from_hdf5("data/may13_objs_tauwavelength_taublr_freebreak_newpriors4_merged.h5")
     #quasar_list = read_quasars_from_hdf5("data/may13_objs_tauwavelength_taublr_freebreak_newpriors_all_merged.h5")
-
     print("Number of quasars loaded:", len(quasar_list))
 
 
@@ -219,3 +219,76 @@ def get_completeness_function(df_agn):
     plt.close()
     
     return p_detect, mag_eval, dm
+
+class Completeness2D:
+    def __init__(self, mag_centers, z_centers, completeness_ratio):
+        from scipy.interpolate import RegularGridInterpolator
+        self.mag_centers = mag_centers
+        self.z_centers = z_centers
+        self.interp_fn = RegularGridInterpolator(
+            (mag_centers, z_centers),
+            completeness_ratio,
+            bounds_error=False, fill_value=0.0
+        )
+
+    def __call__(self, mag, z):
+        pts = np.column_stack([np.ravel(mag), np.ravel(z)])
+        vals = self.interp_fn(pts)
+        return vals.reshape(np.shape(mag))
+    
+def get_completeness_function_2d(df_agn, sim_file="sampled_apparent_magnitudes_redshift.h5",
+                                 n_mag_bins=26, n_z_bins=16, mag_min=14, mag_max=26):
+    """
+    Returns a completeness function p_detect(mag, z) as a callable.
+    Uses observed AGN sample and simulated sample from HDF5 file.
+    """
+
+    # Load simulated (true) sample
+    with h5py.File(sim_file, "r") as f:
+        mags_true = f["sampled_apparent_magnitudes"][:]
+        z_true = f["redshift_bin"][:]
+        # If z_true is a scalar, broadcast to match mags_true
+        if np.isscalar(z_true) or z_true.shape == () or len(z_true) == 1:
+            z_true = np.full_like(mags_true, float(z_true), dtype=float)
+
+    # Observed sample
+    mags_obs = df_agn['apparent_mag_i'].values
+    z_obs = df_agn['z'].values
+
+    # Clean both
+    mask_true = np.isfinite(mags_true) & np.isfinite(z_true)
+    mags_true = mags_true[mask_true]
+    z_true = z_true[mask_true]
+
+    mask_obs = np.isfinite(mags_obs) & np.isfinite(z_obs)
+    mags_obs = mags_obs[mask_obs]
+    z_obs = z_obs[mask_obs]
+
+    # Bin edges and centers
+    mag_edges = np.linspace(mag_min, mag_max, n_mag_bins)
+    z_edges = np.linspace(np.min(z_obs), np.max(z_obs), n_z_bins)
+    mag_centers = 0.5 * (mag_edges[:-1] + mag_edges[1:])
+    z_centers = 0.5 * (z_edges[:-1] + z_edges[1:])
+
+    # 2D histograms
+    hist_true, _, _ = np.histogram2d(mags_true, z_true, bins=[mag_edges, z_edges])
+    hist_obs, _, _ = np.histogram2d(mags_obs, z_obs, bins=[mag_edges, z_edges])
+
+    # Compute completeness ratio
+    mask = hist_true > 0
+    completeness_ratio = np.zeros_like(hist_true, dtype=float)
+    completeness_ratio[mask] = hist_obs[mask] / hist_true[mask]
+    completeness_ratio = gaussian_filter(completeness_ratio, sigma=0.7)
+    completeness_ratio = np.clip(completeness_ratio, 0, 1)
+
+    # Interpolator: returns completeness for any (mag, z)
+    interp_fn = RegularGridInterpolator(
+        (mag_centers, z_centers), completeness_ratio,  # .T for (mag, z) order
+        bounds_error=False, fill_value=0.0
+    )
+
+    # Compute grid spacing for mag and z
+    dm = mag_centers[1] - mag_centers[0]
+    dz = z_centers[1] - z_centers[0]
+
+    return Completeness2D(mag_centers, z_centers, completeness_ratio), mag_centers, z_centers, dm, dz
