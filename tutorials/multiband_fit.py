@@ -114,15 +114,8 @@ def initSampler(key, nSample, nBand, X, y, yerr, clean_bands, z):
     )
     # MLE fit of log_prob of m
 
-    def neg_log_prob(params_flat, m, param_shapes, param_names):
-        # Unflatten params
-        params = {}
-        idx = 0
-        for name, shape in zip(param_names, param_shapes):
-            size = np.prod(shape)
-            params[name] = jnp.array(params_flat[idx:idx+size]).reshape(shape)
-            idx += size
-        return -float(m.log_prob(params))
+    def neg_log_prob(params):
+        return -m.log_prob(params)
 
     # Collect initial params from m (use bestP or m.default_params)
     init_params = {
@@ -141,17 +134,14 @@ def initSampler(key, nSample, nBand, X, y, yerr, clean_bands, z):
         "eta_break": etaBreakSampler(subkeys[13], 1).squeeze(),
         "lam_s": lamsSampler(subkeys[14], 1).squeeze(),
     }
-    param_names = list(init_params.keys())
-    param_shapes = [np.atleast_1d(v).shape for v in init_params.values()]
-    params_flat0 = np.concatenate([np.atleast_1d(np.asarray(v)).flatten() for v in init_params.values()])
-
+    print('Starting MLE')
     res = minimize(
         neg_log_prob,
-        params_flat0,
-        args=(m, param_shapes, param_names),
+        init_params,
         method="L-BFGS-B",
         options={"maxiter": 500}
     )
+    print('done MLE')
 
     # Unpack result
     mle_params = {}
