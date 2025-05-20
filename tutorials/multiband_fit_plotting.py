@@ -69,7 +69,7 @@ def plot_posterior(samples, data, clean_bands=None):
     plt.close(fig)
     return fig
 
-def save_combined_plot(samples, model, X, y, yerr, band_idx, data):
+def save_combined_plot(samples, model, X, y, yerr, band_idx, data, fit_bestP=False):
     clean_bands = data['clean_bands']
     object_id = data['object_id']
     band_idx_map = {i: b for i, b in enumerate(clean_bands)}
@@ -86,8 +86,12 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, data):
         # Generate test times for predictions
         t_test = np.linspace(t.min(), t.max(), 1000)
         # Compute predictions using the model
-        posterior_median = {k: np.median(v, axis=0) for k, v in samples.items()}
-        mu, std = model.pred(posterior_median, (t_test, jnp.full_like(t_test, n, dtype=int)))
+        if fit_bestP:
+            mu, std = model.pred(samples, (t_test, jnp.full_like(t_test, n, dtype=int)))
+        else:
+            posterior_median = {k: np.median(v, axis=0) for k, v in samples.items()}
+            mu, std = model.pred(posterior_median, (t_test, jnp.full_like(t_test, n, dtype=int)))
+
         # Plot the predictions
         ax.plot(t_test, mu+offsets[n], alpha=0.8, color=colors[band_idx_map[n]], lw=1.0)
         ax.fill_between(t_test, mu+offsets[n]-std, mu+offsets[n]+std, alpha=0.3, 
@@ -147,10 +151,14 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, data):
     # Save the plot as a PNG file
     output_dir = f"light_curves_fits/{prefix}_{suffix}"
     os.makedirs(output_dir, exist_ok=True)
-    plt.savefig(os.path.join(output_dir, f'{data['z']:.1f}_{object_id}_combined_plot.png'), dpi=120)
-    print(f"Saving figure to ", os.path.join(output_dir, f'{data['z']:.1f}_{object_id}_combined_plot.png'))
+    if bestP:
+        fpath = os.path.join(output_dir, f'{data['z']:.1f}_{object_id}_combined_plot_MLE.png')
+    else:
+        fpath = os.path.join(output_dir, f'{data['z']:.1f}_{object_id}_combined_plot.png')
+    print(f"Saving figure to ", fpath)
+    plt.savefig(os.path.join(fpath), dpi=120)
     plt.close(fig)
-    return fig
+    #return fig
 
 
 def plot_mcmc_traces(mcmc, data, thinning=10):

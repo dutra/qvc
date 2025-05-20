@@ -80,7 +80,7 @@ def initSampler(key, nSample, nBand, X, y, yerr, clean_bands, z):
     lagSampler = UniformInit(nBand-1, [-10, 10])
     loglagBLRSampler = UniformInit(nBand, [0, 5])
     logtauBLRSampler = UniformInit(1, [jnp.log(10**2.5), jnp.log(10**4.5)])
-    meanSampler = UniformInit(nBand, [-1, 1])
+    meanSampler = UniformInit(nBand, [-.1, .1])
     poly1Sampler = UniformInit(1, [-10, 10])
     logAmpDeltaSampler = UniformInit(nBand-1, [-2.0, 0.0])
     logAmpDeltaBLRSampler = UniformInit(nBand, [-5.0, -2.0])
@@ -92,14 +92,14 @@ def initSampler(key, nSample, nBand, X, y, yerr, clean_bands, z):
     etaBreakSampler = UniformInit(1, [2, 5])
     lamsSampler = UniformInit(1, [2400.0, 2600.0])
     # sigma
-    etaA1Sampler = UniformInit(1, [-1.1, -0.5])
-    etaA2Sampler = UniformInit(1, [-1.1, -0.5])
+    etaA1Sampler = UniformInit(1, [-.8, -0.6])
+    etaA2Sampler = UniformInit(1, [-.8, -0.6])
     # tau
-    etaTau1Sampler = UniformInit(1, [-0.4, 0.4])
-    etaTau2Sampler = UniformInit(1, [-0.4, 0.4])
+    etaTau1Sampler = UniformInit(1, [-0.1, 0.1])
+    etaTau2Sampler = UniformInit(1, [-0.1, 0.1])
 
     # kernel init
-    kernelSampler = DRWInit([jnp.log(10**2.5), jnp.log(10**4.5)], [jnp.log(0.1), jnp.log(1.0)])
+    kernelSampler = DRWInit([jnp.log(10**2.5), jnp.log(10**4.5)], [jnp.log(0.01), jnp.log(1.5)])
     logwSampler = UniformInit(1, [0.0, 1.0])
 
     # --- Build model instance ---
@@ -158,6 +158,7 @@ def initSampler(key, nSample, nBand, X, y, yerr, clean_bands, z):
     print('done MLE')
 
     print("best",best_param)
+    print("MLE loss: ", soln.state.fun_val)
 
     return best_param
 
@@ -234,11 +235,11 @@ def numpyro_joint_model(Model, batch_data):
     # --- Shared (universal) parameters ---
     # These priors can be broader
     powerlaw_priors = {
-        "eta_A1": (-0.7, 0.2),
-        "eta_A2": (-0.7, 0.2),
-        "eta_tau1": (0.0, 0.2),
-        "eta_tau2": (0.0, 0.2),
-        "eta_break": (3, 0.2),
+        "eta_A1": (-0.7, 0.4),
+        "eta_A2": (-0.7, 0.4),
+        "eta_tau1": (0.0, 0.4),
+        "eta_tau2": (0.0, 0.4),
+        "eta_break": (3, 1),
         "lam_s": (2500.0, 100.0),
     }
     powerlaw_samples = {
@@ -561,6 +562,14 @@ if __name__ == '__main__':
             # Run bestP for each object
             n_bands = len(obj['clean_bands'])
             bestP = initSampler(jax.random.PRNGKey(i), 1, 5, obj['X'], obj['y'], obj['yerr'], obj['clean_bands'], obj['z'])
+            m = Model(
+                obj['X'], obj['y'], obj['yerr'], 
+                kernels.quasisep.Exp(jnp.array([1, 1])),
+                zero_mean=has_lag, has_jitter=has_jitter, has_lag=has_lag,
+                clean_bands=obj['clean_bands'], z=obj['z']
+            )
+            save_combined_plot(bestP, m, obj['X'], obj['y'], obj['yerr'], obj['band_idx'], obj, fit_bestP=True)
+
             num_params = sum(p.size for p in bestP.values())
             batch_data.append({
                 'object_id': obj['object_id'],
