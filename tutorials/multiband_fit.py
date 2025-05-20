@@ -14,7 +14,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import pandas as pd
 from tqdm import tqdm, trange
-
+from scipy.optimize import minimize
 import scipy.stats as st
 import numpyro
 from numpyro import infer
@@ -72,7 +72,7 @@ has_jitter = True
 has_lag = True
 
 
-def initSampler(key, nSample, nBand=None):
+def initSampler(key, nSample, nBand, X, y, yerr, clean_bands, z):
     # split keys
     subkeys = jax.random.split(key, 14)
 
@@ -101,26 +101,71 @@ def initSampler(key, nSample, nBand=None):
     # kernel init
     kernelSampler = DRWInit([jnp.log(10**2.5), jnp.log(10**4.5)], [jnp.log(0.1), jnp.log(1.0)])
     logwSampler = UniformInit(1, [0.0, 1.0])
-    
-    return {
-        "log_kernel_param": kernelSampler(subkeys[0], nSample),
-        #"log_w": logwSampler(subkeys[1], nSample),
-        "log_amp_delta": logAmpDeltaSampler(subkeys[1], nSample),
-        "log_amp_delta_blr": logAmpDeltaBLRSampler(subkeys[2], nSample),
-        "mean": meanSampler(subkeys[3], nSample),
-        "poly1": poly1Sampler(subkeys[4], nSample),
-        "lag": lagSampler(subkeys[5], nSample),
-        #"log_lag_blr": loglagBLRSampler(subkeys[6], nSample),
-        "log_tau_drw_blr": logtauBLRSampler(subkeys[7], nSample),
-        "log_jitter": logJitterSampler(subkeys[8], nSample),
-        # power laws
-        "eta_A1": etaA1Sampler(subkeys[9], nSample),
-        "eta_A2": etaA2Sampler(subkeys[10], nSample),
-        "eta_tau1": etaTau1Sampler(subkeys[11], nSample),
-        "eta_tau2": etaTau2Sampler(subkeys[12], nSample),
-        "eta_break": etaBreakSampler(subkeys[13], nSample),
-        "lam_s": lamsSampler(subkeys[14], nSample),
+
+    # --- Build model instance ---
+    k = kernels.quasisep.Exp(jnp.array([1e3, 0.1]))
+    m = MultiVarModel(
+        X, y, yerr, k,
+        zero_mean=zero_mean,
+        has_jitter=has_jitter,
+        has_lag=has_lag,
+        clean_bands=clean_bands,
+        z=z
+    )
+    # MLE fit of log_prob of m
+
+    def neg_log_prob(params_flat, m, param_shapes, param_names):
+        # Unflatten params
+        params = {}
+        idx = 0
+        for name, shape in zip(param_names, param_shapes):
+            size = np.prod(shape)
+            params[name] = jnp.array(params_flat[idx:idx+size]).reshape(shape)
+            idx += size
+        return -float(m.log_prob(params))
+
+    # Collect initial params from m (use bestP or m.default_params)
+    init_params = {
+        "log_kernel_param": kernelSampler(subkeys[0], 1).squeeze(),
+        "log_amp_delta": logAmpDeltaSampler(subkeys[1], 1).squeeze(),
+        "log_amp_delta_blr": logAmpDeltaBLRSampler(subkeys[2], 1).squeeze(),
+        "mean": meanSampler(subkeys[3], 1).squeeze(),
+        "poly1": poly1Sampler(subkeys[4], 1).squeeze(),
+        "lag": lagSampler(subkeys[5], 1).squeeze(),
+        "log_tau_drw_blr": logtauBLRSampler(subkeys[7], 1).squeeze(),
+        "log_jitter": logJitterSampler(subkeys[8], 1).squeeze(),
+        "eta_A1": etaA1Sampler(subkeys[9], 1).squeeze(),
+        "eta_A2": etaA2Sampler(subkeys[10], 1).squeeze(),
+        "eta_tau1": etaTau1Sampler(subkeys[11], 1).squeeze(),
+        "eta_tau2": etaTau2Sampler(subkeys[12], 1).squeeze(),
+        "eta_break": etaBreakSampler(subkeys[13], 1).squeeze(),
+        "lam_s": lamsSampler(subkeys[14], 1).squeeze(),
     }
+    param_names = list(init_params.keys())
+    param_shapes = [np.atleast_1d(v).shape for v in init_params.values()]
+    params_flat0 = np.concatenate([np.atleast_1d(np.asarray(v)).flatten() for v in init_params.values()])
+
+    res = minimize(
+        neg_log_prob,
+        params_flat0,
+        args=(m, param_shapes, param_names),
+        method="L-BFGS-B",
+        options={"maxiter": 500}
+    )
+
+    # Unpack result
+    mle_params = {}
+    idx = 0
+    for name, shape in zip(param_names, param_shapes):
+        size = np.prod(shape)
+        mle_params[name] = jnp.array(res.x[idx:idx+size]).reshape(shape)
+        idx += size
+
+    print("MLE fit success:", res.success)
+    print("MLE log_prob:", -res.fun)
+    print("MLE params:", mle_params)
+
+    return mle_params
 
 def numpyro_model(Model, X, yerr, y=None, bestP=None, clean_bands=None, z=None):
     # --- Kernel and lag parameters ---
@@ -332,7 +377,7 @@ def fit_multiband(Model, data, nwarm=500, nsamp=250, progress_bar=False, plot=Fa
     )
 
     print("Initializing bestP.")
-    bestP = initSampler(jax.random.PRNGKey(0), 1, len(clean_bands))
+    bestP = initSampler(jax.random.PRNGKey(0), 1, len(clean_bands), X, y, yerr)
     print(bestP)
 
     for k in bestP.keys():
@@ -515,7 +560,7 @@ if __name__ == '__main__':
             obj |= result
             # Run bestP for each object
             n_bands = len(obj['clean_bands'])
-            bestP = initSampler(jax.random.PRNGKey(i), 1, 5)
+            bestP = initSampler(jax.random.PRNGKey(i), 1, 5, obj['X'], obj['y'], obj['yerr'], obj['clean_bands'], obj['z'])
             num_params = sum(p.size for p in bestP.values())
             batch_data.append({
                 'object_id': obj['object_id'],
