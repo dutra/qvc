@@ -118,8 +118,17 @@ def log_likelihood(theta, cosmo_model,
         (0.055 * z)**2 +
         np.exp(2 * params['log_f'])
     )
+
     dmu = mu_pred - mu_cosmo
-    ll_agn = np.sum(stats.norm.logpdf(dmu, scale=mu_err))
+
+    if use_full_cov:
+        # Construct AGN covariance matrix (diagonal, using mu_err, but add 0.055*z to all elements)
+        Cov_agn = np.diag(mu_err**2 - (0.055 * z)**2) + np.full((len(z), len(z)), (0.055 * z[:, None]) * (0.055 * z[None, :]))
+        Cov_inv = np.linalg.inv(Cov_agn)
+        logdetCov = np.linalg.slogdet(Cov_agn)[1]
+        ll_agn = -0.5 * dmu @ Cov_inv_agn @ dmu - 0.5 * logdetCov - 0.5 * len(dmu) * np.log(2 * np.pi)
+    else:
+        ll_agn = np.sum(stats.norm.logpdf(dmu, scale=mu_err))
 
     # Optional AGN completeness correction
     norm_correction = 0.0
