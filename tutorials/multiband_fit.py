@@ -515,6 +515,7 @@ if __name__ == '__main__':
     parser.add_argument("--nchains", type=int, default=-1, help="Number of chains for MCMC.")
     parser.add_argument("--latent", action="store_true", help="Use latent variable model.")
     parser.add_argument("--choose_N", type=int, default=-1, help="Sample choose_N objects.")
+    parser.add_argument("--job_id", type=int, default=-1, help="Job Index for parallel processing.")
 
     args = parser.parse_args()
 
@@ -540,6 +541,11 @@ if __name__ == '__main__':
     if args.choose_N > 0:
         filter_object_ids = np.random.choice(filter_object_ids, size=args.choose_N, replace=False)
         print(f"After choosing, total of {len(filter_object_ids)=}")
+
+    elif args.job_id > -1:
+        filter_object_ids = np.array_split(filter_object_ids, int(np.ceil(len(filter_object_ids) / 20)))
+        filter_object_ids = filter_object_ids[args.job_id]
+        print(f"Job ID {args.job_id} processing {filter_object_ids=}")
 
     if len(filter_object_ids) > 0:
         print(f"Filtering object IDs: {len(filter_object_ids)}")
