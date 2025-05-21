@@ -9,7 +9,9 @@ from astropy.cosmology import FlatwCDM, Flatw0waCDM
 import matplotlib.pyplot as plt
 import os
 
+from hubble_utils import get_completeness_function_2d
 from hubble_model import *
+from hubble_fit import log_likelihood
 
 def plot_corner(sampler, only_sna=False, cosmo_model='Flatw0waCDM'):
     # Select cosmological parameters based on model
@@ -137,6 +139,95 @@ def plot_cosmo_corner(sampler_sna, sampler_agn, cosmo_model='Flatw0waCDM', show=
         plt.show()
     plt.close()
 
+def apply_delta_mag_correction(df_agn, m_model, z, norm_correction, p_detect, n_bins=8):
+    """
+    Estimate Δmag from norm_correction and apply it to the AGN apparent magnitudes.
+    Supports both global and redshift-binned corrections.
+
+    Parameters
+    ----------
+    df_agn : pd.DataFrame
+        AGN data with columns 'apparent_mag_i' and 'z'
+    m_model : array
+        Model-predicted apparent magnitudes (same length as df_agn)
+    z : array
+        Redshifts (same length as df_agn)
+    norm_correction : float
+        The completeness penalty from the likelihood
+    p_detect : callable
+        Completeness function p_detect(mag, z)
+    n_bins : int
+        Number of redshift bins for binned correction
+
+    Returns
+    -------
+    df_agn_corr : pd.DataFrame
+        Copy of df_agn with new column 'apparent_mag_i_corr'
+    delta_mag_arr : array
+        Δmag values used for each object
+    """
+
+    # Redshift bins
+    z_bins = np.linspace(np.min(z), np.max(z), n_bins + 1)
+    z_centers = 0.5 * (z_bins[:-1] + z_bins[1:])
+    delta_mag_arr = np.zeros_like(z, dtype=float)
+
+    # Distribute norm_correction across bins by number of objects
+    N_total = len(z)
+    for i in range(n_bins):
+        in_bin = (z >= z_bins[i]) & (z < z_bins[i+1])
+        N_bin = np.sum(in_bin)
+        if N_bin < 3:
+            delta_mag_arr[in_bin] = 0.0
+            continue
+        m_bin = m_model[in_bin]
+        z_bin = z[in_bin]
+        mean_mag = np.mean(m_bin)
+        z_typical = np.median(z_bin)
+        dm = 0.01
+        p1 = p_detect(mean_mag, z_typical)
+        p2 = p_detect(mean_mag + dm, z_typical)
+        alpha = - (np.log(p2) - np.log(p1)) / dm
+        norm_correction_bin = norm_correction * (N_bin / N_total)
+        delta_mag = -norm_correction_bin / (N_bin * alpha)
+        delta_mag_arr[in_bin] = delta_mag
+
+    # Apply correction
+    #df_agn_corr = df_agn.copy()
+    #df_agn_corr['apparent_mag_i_corr'] = df_agn_corr['apparent_mag_i'] - delta_mag_arr
+
+    return delta_mag_arr
+
+def compute_per_object_delta_mag(df_agn, p_detect, delta_m=0.01):
+    """
+    Compute per-object Δmag bias correction for each AGN.
+
+    Parameters
+    ----------
+    df_agn : pd.DataFrame
+        Must contain 'apparent_mag_i' and 'z'
+    p_detect : callable
+        Completeness function p_detect(mag, z)
+    delta_m : float
+        Step size for finite-difference derivative
+
+    Returns
+    -------
+    delta_mag_arr : np.ndarray
+        Δmag for each AGN (same length as df_agn)
+    """
+    mags = df_agn['apparent_mag_i'].values
+    zs = df_agn['z'].values
+
+    p1 = p_detect(mags, zs)
+    p2 = p_detect(mags + delta_m, zs)
+    # Avoid log(0)
+    p1 = np.clip(p1, 1e-12, 1)
+    p2 = np.clip(p2, 1e-12, 1)
+    alpha = - (np.log(p2) - np.log(p1)) / delta_m
+    delta_mag_arr = -np.log(p1) / alpha
+    return delta_mag_arr
+
 def plot_hubble(sampler, df_agn, df_pantheon, cosmo_model, show=False):
     """Plot Hubble diagram + residuals, classic Pantheon+ style."""
     # Define cosmological parameter labels
@@ -178,7 +269,6 @@ def plot_hubble(sampler, df_agn, df_pantheon, cosmo_model, show=False):
 
     results = {key: np.percentile(flat_samples[:, i], [16, 50, 84]) for i, key in enumerate(model_labels)}
 
-
     # --- Cosmology model ---    
     mu_model_median = np.percentile(mu_models, 50, axis=0)
     mu_model_16th = np.percentile(mu_models, 16, axis=0)
@@ -191,6 +281,28 @@ def plot_hubble(sampler, df_agn, df_pantheon, cosmo_model, show=False):
         for s in flat_samples
     ])
     mu_pred_median = np.percentile(mu_pred, 50, axis=0)
+
+
+    # compute delta mag correction
+    completeness_params = get_completeness_function_2d(df_agn)
+    p_detect, mag_centers, z_centers, dm, dz = completeness_params
+
+    # flat_samples = sampler.get_chain(discard=0, thin=1, flat=True)
+    # median_theta = np.median(flat_samples, axis=0)
+
+    # ll, norm_correction, m_model = log_likelihood(
+    #     median_theta, cosmo_model,
+    #     df_agn, df_pantheon, completeness_params,
+    #     only_sna=False, use_full_cov=False,
+    #     return_params=True
+    # )
+    # delta_mag_arr = apply_delta_mag_correction(df_agn, mu_pred_median, df_agn['z'], norm_correction, p_detect, n_bins=8)
+
+    delta_mag_arr = compute_per_object_delta_mag(df_agn, p_detect, delta_m=0.01)
+
+    print(delta_mag_arr)
+    mu_pred_median -= delta_mag_arr
+
     mu_pred_16th = np.percentile(mu_pred, 16, axis=0)
     mu_pred_84th = np.percentile(mu_pred, 84, axis=0)
     mu_pred_std = np.sqrt(df_agn['apparent_mag_i_err']**2 +
@@ -246,7 +358,7 @@ def plot_hubble(sampler, df_agn, df_pantheon, cosmo_model, show=False):
     ax.set_ylabel(r"$\mu$ (mag)")
     ax.set_xlabel(r"$z$")
     ax.set_xlim(-0.2, df_agn['z'].max())
-    ax.set_ylim(26, 51)
+    #ax.set_ylim(26, 51)
     ax.legend(frameon=False, loc="lower center", bbox_to_anchor=(0.3, 0.05))
 
     # Ticks styling
@@ -399,4 +511,73 @@ def plot_completeness_vs_mag_at_redshifts(p_detect, mag_centers, z_centers,
     os.makedirs("plots/hubble", exist_ok=True)
     plt.savefig("plots/hubble/completeness_vs_mag_at_redshifts.png", dpi=300)
     plt.savefig("plots/hubble/completeness_vs_mag_at_redshifts.pdf", dpi=300)
+    plt.close()
+
+# --- AGN model ---
+def M_model_agn(M0_agn, alpha_agn, log_sigma_hat_UV):
+    return M0_agn + alpha_agn * 2 * log_sigma_hat_UV
+
+def plot_predicted_sigma_hat_vs_luminosity(sampler, df_agn, cosmo_model, show=False):
+
+    flat_samples = sampler.get_chain(flat=True, thin=15)
+    priors, model_labels = get_model_params(cosmo_model)
+    results = {key: np.percentile(flat_samples[:, i], [16, 50, 84]) for i, key in enumerate(model_labels)}
+    param_indices = [list(priors.keys()).index(p) for p in param_names]
+
+    # --- AGN distance modulus ---
+    M_i_pred = np.array([(
+            M_model_agn(s[param_indices['M0_agn']], s[param_indices['alpha_agn']], df_agn['log_sigma_hat_UV']) - K_corr(2)
+            ) for s in flat_samples])
+
+    log_sigma_hat_pred = np.array([(M_i_pred - s[param_indices['M0_agn']]) / (2 * s[param_indices['alpha_agn']]) for s in flat_samples])
+    sigma_hat_sq_pred = 10**(2*log_sigma_hat_pred)
+    sigma_hat_sq_pred = np.percentile(sigma_hat_sq_pred, [16, 50, 84])
+    sigma_hat_sq_median = sigma_hat_sq_pred[1]
+    sigma_hat_sq_16th = sigma_hat_sq_pred[0]
+    sigma_hat_sq_84th = sigma_hat_sq_pred[2]
+
+    # Plot
+    plt.figure(figsize=(7, 5))
+    plt.scatter(df_agn['log_lbol'], 10**(2 * df_agn['log_sigma_hat_UV']), s=10, alpha=0.5, color='navy', label='Observed')
+    plt.plot(df_agn['log_lbol'], sigma_hat_sq_median, color='purple', lw=2, label='Predicted median')
+    plt.fill_between(df_agn['log_lbol'], sigma_hat_sq_16th, sigma_hat_sq_84th, color='purple', alpha=0.3, label='16th-84th percentile')
+    plt.xlabel(r'$\log L_{\mathrm{bol}}$')
+    plt.ylabel(r'$\hat{\sigma}_{\mathrm{UV}}^2$')
+    plt.title(r'Predicted $\hat{\sigma}_{\mathrm{UV}}^2$ vs $\log L_{\mathrm{bol}}$')
+    plt.grid(True, alpha=0.3)
+
+    plt.legend(frameon=False)
+    plt.tight_layout()
+    os.makedirs("plots/hubble", exist_ok=True)
+    plt.savefig(f"plots/hubble/predicted_sigma_hat_sq_{cosmo_model}.png", dpi=300)
+    plt.savefig(f"plots/hubble/predicted_sigma_hat_sq_{cosmo_model}.pdf", dpi=300)
+    if show:
+        plt.show()
+    plt.close()
+
+def plot_sigma_hat_vs_log_lbol(df_agn, show=False):
+    """
+    Plot 2 * log_sigma_hat_UV vs log_lbol for AGN sample.
+
+    Parameters:
+        df_agn : pandas.DataFrame
+            DataFrame containing 'log_sigma_hat_UV' and 'log_lbol' columns.
+        show : bool
+            Whether to display the plot interactively.
+    """
+    x = df_agn['log_lbol']
+    y = 2 * df_agn['log_sigma_hat_UV']
+
+    plt.figure(figsize=(7, 5))
+    plt.scatter(x, y, s=10, alpha=0.5, color='navy')
+    plt.xlabel(r'$\log L_{\mathrm{bol}}$')
+    plt.ylabel(r'$2 \log \hat{\sigma}_{\mathrm{UV}}$')
+    plt.title(r'$2 \log \hat{\sigma}_{\mathrm{UV}}$ vs $\log L_{\mathrm{bol}}$')
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    os.makedirs("plots/hubble", exist_ok=True)
+    plt.savefig("plots/hubble/2log_sigma_hat_vs_log_lbol.png", dpi=300)
+    plt.savefig("plots/hubble/2log_sigma_hat_vs_log_lbol.pdf", dpi=300)
+    if show:
+        plt.show()
     plt.close()

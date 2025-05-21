@@ -47,7 +47,8 @@ logdetCov = None
 # --- Log-likelihood ---
 def log_likelihood(theta, cosmo_model,
                    df_agn, df_pantheon, completeness_params,
-                   only_sna=False, use_full_cov=False):
+                   only_sna=False, use_full_cov=False,
+                   return_params=False):
     
     priors, model_labels = get_model_params(cosmo_model)
     model_priors = {key: priors[key] for key in model_labels}
@@ -80,6 +81,7 @@ def log_likelihood(theta, cosmo_model,
 
     # Compute main SN likelihood (with or without covariance)
     if use_full_cov:
+        global Cov_inv, logdetCov
         ll_snia = -0.5 * res_snia @ Cov_inv @ res_snia - 0.5 * logdetCov - 0.5 * len(res_snia) * np.log(2 * np.pi)
         # Use diagonal from covariance as proxy for Cepheid calibration residuals
         sigma = np.sqrt(np.diag(Cov_inv)**-1)  # approx only if Cov_inv is well-conditioned
@@ -121,14 +123,14 @@ def log_likelihood(theta, cosmo_model,
 
     dmu = mu_pred - mu_cosmo
 
-    if use_full_cov:
-        # Construct AGN covariance matrix (diagonal, using mu_err, but add 0.055*z to all elements)
-        Cov_agn = np.diag(mu_err**2 - (0.055 * z)**2) + np.full((len(z), len(z)), (0.055 * z[:, None]) * (0.055 * z[None, :]))
-        Cov_inv = np.linalg.inv(Cov_agn)
-        logdetCov = np.linalg.slogdet(Cov_agn)[1]
-        ll_agn = -0.5 * dmu @ Cov_inv_agn @ dmu - 0.5 * logdetCov - 0.5 * len(dmu) * np.log(2 * np.pi)
-    else:
-        ll_agn = np.sum(stats.norm.logpdf(dmu, scale=mu_err))
+    # if use_full_cov:
+    #     # Construct AGN covariance matrix (diagonal, using mu_err, but add 0.055*z to all elements)
+    #     Cov_agn = np.diag(mu_err**2 - (0.055 * z)**2) + np.full((len(z), len(z)), (0.055 * z[:, None]) * (0.055 * z[None, :]))
+    #     Cov_agn_inv = np.linalg.inv(Cov_agn)
+    #     logdetCov_agn = np.linalg.slogdet(Cov_agn)[1]
+    #     ll_agn = -0.5 * dmu @ Cov_agn_inv @ dmu - 0.5 * logdetCov_agn - 0.5 * len(dmu) * np.log(2 * np.pi)
+    # else:
+    ll_agn = np.sum(stats.norm.logpdf(dmu, scale=mu_err))
 
     # Optional AGN completeness correction
     norm_correction = 0.0
@@ -157,6 +159,9 @@ def log_likelihood(theta, cosmo_model,
 
         norm_correction = np.sum(np.log(np.clip(integrals, 1e-12, None)))
 
+    if return_params:
+        return ll_snia + ll_calib + ll_agn - norm_correction, norm_correction, m_model
+    
 
     return ll_snia + ll_calib + ll_agn - norm_correction
 
@@ -201,7 +206,8 @@ def run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model='Flatw0waCDM',
 
 def main():
     print("Loading quasar data...")
-    df_agn = load_quasar_data("data/may12_objs_tauwavelength_taublr_redbands_ds4_merged.h5")
+    #df_agn = load_quasar_data("data/may12_objs_tauwavelength_taublr_redbands_ds4_merged.h5")
+    df_agn = load_quasar_data("data/N20_w500_grace/may21_joint_fits_N20_merged.h5")
     # Load Pantheon+ SN metadata
     print("Loading Pantheon+ supernova data...")
     df_pantheon = pd.read_csv(
@@ -235,13 +241,13 @@ def main():
     logdetCov = logdet
     print("Data loaded. Running joint cosmographic fits...")
 
-    num_warmup, num_samples = 250, 250
+    num_warmup, num_samples = 500, 100
     # Run MCMC fits for SNIa only and SNIa+AGN, for each cosmological model
     for cosmo_model in ['Flatw0waCDM', 'FlatwCDM']:
-        print(f"Running MCMC for {cosmo_model}: SNIa only")
-        sampler_snia, _ = run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model=cosmo_model, only_sna=True, completeness=True, use_full_cov=True,
-                                             num_warmup=num_warmup, num_samples=num_samples)
-        plot_corner(sampler_snia, cosmo_model=cosmo_model, only_sna=True)
+        # print(f"Running MCMC for {cosmo_model}: SNIa only")
+        # sampler_snia, _ = run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model=cosmo_model, only_sna=True, completeness=True, use_full_cov=True,
+        #                                      num_warmup=num_warmup, num_samples=num_samples)
+        # plot_corner(sampler_snia, cosmo_model=cosmo_model, only_sna=True)
         
         print(f"Running MCMC for {cosmo_model}: SNIa + AGN")
         sampler_joint, _ = run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model=cosmo_model, only_sna=False, completeness=True, use_full_cov=True,
@@ -253,7 +259,7 @@ def main():
         plot_hubble(sampler_joint, df_agn, df_pantheon, cosmo_model=cosmo_model)
 
         print("Plotting cosmological posteriors corner plot...")
-        plot_cosmo_corner(sampler_snia, sampler_joint, cosmo_model=cosmo_model)
+        plot_cosmo_corner(sampler_joint, sampler_joint, cosmo_model=cosmo_model)
         print("Plotting AGN M_i predictions vs actual...")
         plot_predicted_vs_actual_Mi(sampler_joint, df_agn, cosmo_model=cosmo_model)
         print("Plotting completeness vs magnitude at redshifts...")
@@ -281,7 +287,7 @@ def test():
     cosmo_model = 'Flatw0waCDM'
     sampler_joint, _ = run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model=cosmo_model, 
                                          only_sna=False, completeness=True, use_full_cov=False,
-                                         num_warmup=500, num_samples=250)
+                                         num_warmup=20, num_samples=50)
     plot_corner(sampler_joint, cosmo_model=cosmo_model, only_sna=False)
     print("Plotting Hubble diagram...")
     plot_hubble(sampler_joint, df_agn, df_pantheon, cosmo_model=cosmo_model)
