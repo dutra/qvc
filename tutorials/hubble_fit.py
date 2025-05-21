@@ -271,7 +271,7 @@ def test():
         sep=r"\s+"
     )
 
-    cosmo_model = 'FlatwCDM'
+    cosmo_model = 'Flatw0waCDM'
     sampler_joint, _ = run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model=cosmo_model, 
                                          only_sna=False, completeness=True, use_full_cov=False,
                                          num_warmup=250, num_samples=250)
@@ -283,5 +283,5 @@ def test():
     plot_predicted_vs_actual_Mi(sampler_joint, df_agn, cosmo_model=cosmo_model)
 
 if __name__ == "__main__":
-    #main()
-    test()
+    main()
+    #test()

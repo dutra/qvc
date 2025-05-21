@@ -123,8 +123,8 @@ def load_quasar_data(file_path):
     df_all = df.copy()
 
     # data cuts
-    df = df[df['log_sigma_UV'] < 0]
-    df = df[df['log_tau_UV_RF'] > 1]
+    df = df[df['log_sigma_UV'] < -0.4]
+    df = df[df['log_tau_UV_RF'] > 1.5]
     # df = df[df['log_lbol'] > 44]
     # df = df[df['log_mbh'] > 1]
     # df = df[df['apparent_mag_i'] < 30]
