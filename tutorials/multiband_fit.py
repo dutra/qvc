@@ -543,8 +543,8 @@ if __name__ == '__main__':
         print(f"After choosing, total of {len(filter_object_ids)=}")
 
     elif args.job_id > -1:
-        filter_object_ids = np.array_split(filter_object_ids, int(np.ceil(len(filter_object_ids) / 20)))
-        filter_object_ids = filter_object_ids[args.job_id]
+        subarrays = [filter_object_ids[i:i + 20] for i in range(0, len(filter_object_ids), 20)]
+        filter_object_ids = subarrays[args.job_id]
         print(f"Job ID {args.job_id} processing {filter_object_ids=}")
 
     if len(filter_object_ids) > 0:
