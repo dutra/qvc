@@ -88,6 +88,7 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, data, fit_bestP=Fal
         # Compute predictions using the model
         if fit_bestP:
             mu, std = model.pred(samples, (t_test, jnp.full_like(t_test, n, dtype=int)))
+            #print(mu, std, '!!!!!!!!!!!!!!')
         else:
             posterior_median = {k: np.median(v, axis=0) for k, v in samples.items()}
             mu, std = model.pred(posterior_median, (t_test, jnp.full_like(t_test, n, dtype=int)))
