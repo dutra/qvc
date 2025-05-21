@@ -652,6 +652,15 @@ if __name__ == '__main__':
                 save_combined_plot(obj_samples_clean, m, obj['X'], obj['y'], obj['yerr'], obj['band_idx'], result, psd_results=psd_results)
                 #plot_mcmc_traces(mcmc, result)
             results.append(result)
+            print("++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++", flush=True)
+            print(f"Quasar {i+1}/{len(batch_data)} Object ID: {obj['object_id']}", flush=True)
+
+        print("++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++ Done fitting all objects")
+        if args.file:
+            print("Saving results to ", args.file)
+            append_hdf5_file(results, args.file)
+        else:
+            print("Warning!! Not saving results to file.")
 
     else:
         for i, obj in enumerate(objs):

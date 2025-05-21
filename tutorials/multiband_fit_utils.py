@@ -322,6 +322,9 @@ def save_samples_to_hdf5(samples, object_id):
 def append_hdf5_file(quasar_list, file_path):
     # Append to HDF5 file if it exists, otherwise create a new one
     print(f"Appending {len(quasar_list)} quasars to {file_path}", flush=True)
+    # Create directory if it doesn't exist
+    directory = os.path.dirname(file_path)
+    os.makedirs(directory, exist_ok=True)
     with h5py.File(file_path, "a") as hdf:
         for quasar in quasar_list:
             object_id = quasar["object_id"]

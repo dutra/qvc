@@ -17,7 +17,7 @@ filter_file = "data/colin_object_ids_test_rearrangedN20.csv"
 script_path = "submit_jobs"
 
 # Loop over each choose_N and submit a job
-for job_id in np.flip(np.arange(12, 20)):
+for job_id in np.flip(np.arange(0, 19)):
     print("Job id ", job_id)
     suffix = f"N20_job{job_id}"
     sbatch_filename = os.path.join(script_path, f"{prefix}_job_{suffix}.sh")
