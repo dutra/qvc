@@ -187,7 +187,7 @@ def plot_hubble(sampler, df_agn, df_pantheon, cosmo_model, show=False):
     # --- AGN distance modulus ---
     mu_pred = np.array([
         df_agn['apparent_mag_i'] - K_corr(df_agn['z']) - (
-            M_model_agn(s[param_indices['M0_agn']], s[param_indices['alpha_agn']], df_agn['log_sigma_UV'], df_agn['log_tau_UV_RF']) - K_corr(2))
+            M_model_agn(s[param_indices['M0_agn']], s[param_indices['alpha_agn']], df_agn['log_sigma_hat_UV']) - K_corr(2))
         for s in flat_samples
     ])
     mu_pred_median = np.percentile(mu_pred, 50, axis=0)
@@ -196,7 +196,7 @@ def plot_hubble(sampler, df_agn, df_pantheon, cosmo_model, show=False):
     mu_pred_std = np.sqrt(df_agn['apparent_mag_i_err']**2 +
                  (-2.5 * 0.3 * np.log10(1 + df_agn["z"]))**2 +
                  (0.055 * df_agn["z"])**2 +
-                (results["alpha_agn"][1] * np.sqrt((2*df_agn['log_sigma_UV_err'])**2+df_agn['log_tau_UV_RF_err']**2))**2)
+                (results["alpha_agn"][1] * 2*df_agn['log_sigma_hat_UV_err']))**2
 
     #--- Residuals ---
     mu_interp = np.interp(df_agn["z"], z_grid, mu_model_median)
@@ -272,15 +272,14 @@ def plot_predicted_vs_actual_Mi(sampler, df_agn, cosmo_model, show=False):
     M_i_pred = M_model_agn(
         results['M0_agn'][1], 
         results['alpha_agn'][1], 
-        df_agn['log_sigma_UV'], 
-        df_agn['log_tau_UV_RF']
+        df_agn['log_sigma_hat_UV'] 
     ) #+ K_corr(2) # TODO: check this
 
 
     # Calculate prediction errors
     M_i_pred_err = np.sqrt(
         #df_agn['M_i_err']**2 +
-        (results['alpha_agn'][1] * np.sqrt((2*df_agn["log_sigma_UV_err"])**2+df_agn["log_tau_UV_RF_err"]**2))**2
+        (results['alpha_agn'][1] * 2*df_agn["log_sigma_hat_UV_err"])**2
         # (2.5 * 0.3 * np.log10(1 + df_agn['z']))**2 +
         # (0.055 * df_agn['z'])**2 +
         # np.exp(2 * results['log_f'][1])

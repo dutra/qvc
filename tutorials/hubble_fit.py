@@ -104,18 +104,16 @@ def log_likelihood(theta, cosmo_model,
     z = df_agn['z'].values
     m_obs = df_agn['apparent_mag_i'].values
     m_err = df_agn['apparent_mag_i_err'].values
-    log_sigma = df_agn['log_sigma_UV'].values
-    log_tau = df_agn['log_tau_UV_RF'].values
-    log_sigma_err = df_agn['log_sigma_UV_err'].values
-    log_tau_err = df_agn['log_tau_UV_RF_err'].values
+    log_sigma_hat = df_agn['log_sigma_hat_UV'].values
+    log_sigma_hat_err = df_agn['log_sigma_hat_UV_err'].values
 
     mu_cosmo = cosmo.distmod(z).value
-    M_pred = M_model_agn(params['M0_agn'], params['alpha_agn'], log_sigma, log_tau)
+    M_pred = M_model_agn(params['M0_agn'], params['alpha_agn'], log_sigma_hat)
     mu_pred = m_obs - K_corr(z) - (M_pred - K_corr(2))
 
     mu_err = np.sqrt(
         m_err**2 +
-        (params['alpha_agn'] * np.sqrt((2 * log_sigma_err)**2 + log_tau_err**2))**2 +
+        (params['alpha_agn'] * 2*log_sigma_hat_err)**2 +
         (2.5 * 0.3 * np.log10(1 + z))**2 +
         (0.055 * z)**2 +
         np.exp(2 * params['log_f'])
@@ -173,8 +171,7 @@ def run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model='Flatw0waCDM',
     df_pantheon_filtered = df_pantheon[['zHD', 'MU_SH0ES', 'MU_SH0ES_ERR_DIAG', 'CEPH_DIST', 'IS_CALIBRATOR',
                                         'm_b_corr', 'x1', 'c', 'biasCor_m_b', 'HOST_LOGMASS']]  # SN data needed for likelihood
     df_agn_filtered = df_agn[['z', 'apparent_mag_i', 'apparent_mag_i_err',
-                               'log_sigma_UV', 'log_sigma_UV_err',
-                               'log_tau_UV_RF', 'log_tau_UV_RF_err']]
+                               'log_sigma_hat_UV', 'log_sigma_hat_UV_err']]
     completeness_params = get_completeness_function_2d(df_agn_filtered) if completeness else None
 
     # Run MCMC using EnsembleSampler with multiprocessing for speed
@@ -258,7 +255,8 @@ def main():
     print("All analyses complete. Results saved to 'plots/' directory.")
 
 def test():
-    df_agn = load_quasar_data("data/may12_objs_tauwavelength_taublr_redbands_ds4_merged.h5")
+    #df_agn = load_quasar_data("data/may12_objs_tauwavelength_taublr_redbands_ds4_merged.h5")
+    df_agn = load_quasar_data("data/N20_w500_grace/may21_joint_fits_N20_merged.h5")
     print("Plotting completeness vs magnitude at redshifts...")
     p_detect, mag_centers, z_centers, dm, dz = get_completeness_function_2d(df_agn)
     plot_completeness_vs_mag_at_redshifts(p_detect, mag_centers, z_centers)
@@ -274,7 +272,8 @@ def test():
     cosmo_model = 'Flatw0waCDM'
     sampler_joint, _ = run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model=cosmo_model, 
                                          only_sna=False, completeness=True, use_full_cov=False,
-                                         num_warmup=250, num_samples=250)
+                                         num_warmup=500, num_samples=250)
+    plot_corner(sampler_joint, cosmo_model=cosmo_model, only_sna=False)
     print("Plotting Hubble diagram...")
     plot_hubble(sampler_joint, df_agn, df_pantheon, cosmo_model=cosmo_model)
     print("Plotting cosmological posteriors corner plot...")
@@ -283,5 +282,5 @@ def test():
     plot_predicted_vs_actual_Mi(sampler_joint, df_agn, cosmo_model=cosmo_model)
 
 if __name__ == "__main__":
-    main()
-    #test()
+    #main()
+    test()

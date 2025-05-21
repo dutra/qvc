@@ -18,7 +18,58 @@ from scipy.interpolate import RegularGridInterpolator
 bands = ['u', 'g', 'r', 'i', 'z']#, 'y']
 bands_idx = {b: i for i, b in enumerate(bands)}
 
-def populate_sdss_fields(d, fits_data, fits_data_2):
+def populate_sdss_fields(objs, progress_bar=False):
+    print(f"Populating SDSS fields: {len(objs)}", flush=True)
+    cat = pd.read_parquet(f"data/S82/Catalog.parquet").set_index('idx')
+    hdul = fits.open('data/dr16q_prop_May01_2024.fits')
+    fits_data = hdul[1].data  # Assuming the data is in the first extension    
+    fits_data_2 = hdul[2].data  # Assuming the data is in the first extension    
+    for d in tqdm(objs, desc="Populating SDSS fields", disable=(not progress_bar)):
+        obj = cat.loc[cat['objectId'] == d['object_id']].iloc[0]
+        c1 = SkyCoord(fits_data['RA'], fits_data['DEC'], unit='deg')
+        c2 = SkyCoord(obj['RA'], obj['DEC'], unit='deg')
+        sep = c1.separation(c2).to(u.arcsec)
+        i = np.argwhere(sep < 1*u.arcsec).flatten()
+        if len(i) == 0:
+            print(f"Skipping entry {d['object_id']} as it does not exist in the fits data.")
+            continue
+        
+        i = i[0]  # Get the first index if there are multiple matches
+        d['ra'] = obj['RA']
+        d['dec'] = obj['DEC']
+        d['z'] = obj['Z_SYS']
+        d['sdss_name'] = fits_data['SDSS_NAME'][i]  # Extract SDSS_NAME
+        d['log_lbol'] = fits_data['LOGLBOL'][i]  # Extract log Lbol values
+        d["log_lbol_err"] = fits_data['LOGLBOL_ERR'][i]  # Extract log Lbol error values
+        d['log_mbh'] = fits_data['LOGMBH'][i]  # Extract log MBH values
+        d['log_mbh_err'] = fits_data['LOGMBH_ERR'][i]  # Extract log MBH error values
+        d['log_ledd_ratio'] = fits_data['LOGLEDD_RATIO'][i]  # Extract log L/edd values
+        d['log_ledd_ratio_err'] = fits_data['LOGLEDD_RATIO_ERR'][i]  # Extract log L/edd error values
+        d['ebv'] = fits_data['EBV'][i]
+        d['M_i'] = fits_data_2['M_I'][i]
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            d['log_lbol'] = fits_data['LOGLBOL'][i]
+            d['log_lbol_err'] = fits_data['LOGLBOL_ERR'][i]
+            d['apparent_mag_z'] = -2.5 * np.log10(fits_data_2['PSFFLUX'][i,4]) + 22.5
+            d['apparent_mag_i'] = -2.5 * np.log10(fits_data_2['PSFFLUX'][i,3]) + 22.5
+            d['apparent_mag_r'] = -2.5 * np.log10(fits_data_2['PSFFLUX'][i,2]) + 22.5
+            d['apparent_mag_g'] = -2.5 * np.log10(fits_data_2['PSFFLUX'][i,1]) + 22.5
+            d['apparent_mag_u'] = -2.5 * np.log10(fits_data_2['PSFFLUX'][i,0]) + 22.5
+            d['apparent_mag_z_err'] = 2.5/np.log(10) * np.sqrt(1/fits_data_2['PSFFLUX_IVAR'][i,4])/fits_data_2['PSFFLUX'][i,4]
+            d['apparent_mag_i_err'] = 2.5/np.log(10) * np.sqrt(1/fits_data_2['PSFFLUX_IVAR'][i,3])/fits_data_2['PSFFLUX'][i,3]
+            d['apparent_mag_r_err'] = 2.5/np.log(10) * np.sqrt(1/fits_data_2['PSFFLUX_IVAR'][i,2])/fits_data_2['PSFFLUX'][i,2]
+            d['apparent_mag_g_err'] = 2.5/np.log(10) * np.sqrt(1/fits_data_2['PSFFLUX_IVAR'][i,1])/fits_data_2['PSFFLUX'][i,1]
+            d['apparent_mag_u_err'] = 2.5/np.log(10) * np.sqrt(1/fits_data_2['PSFFLUX_IVAR'][i,0])/fits_data_2['PSFFLUX'][i,0]
+            d['color'] = -2.5 * np.log10(fits_data_2['PSFFLUX'][i, 0] / fits_data_2['PSFFLUX'][i, 3])
+        if any(issubclass(warning.category, RuntimeWarning) for warning in w):
+            print(f"RuntimeWarning occurred for {d['sdss_name']}")
+            print(fits_data_2['PSFFLUX'][i,:])
+            print(w)
+
+    return objs
+
+def populate_sdss_fields_sdssname(d, fits_data, fits_data_2):
     i = np.argwhere(d['sdss_name'] == fits_data['SDSS_NAME']).flatten()
     if len(i) == 0:
         print(f"Warning: {d['sdss_name']} not found in SDSS data")
@@ -57,11 +108,6 @@ def populate_sdss_fields(d, fits_data, fits_data_2):
 def read_quasars_from_hdf5(file_path):
     quasar_list = []
 
-    hdul = fits.open('data/dr16q_prop_May01_2024.fits')
-    fits_data = hdul[1].data  # Assuming the data is in the first extension    
-    fits_data_2 = hdul[2].data  # Assuming the data is in the first extension    
-
-
     with h5py.File(file_path, "r") as hdf:
         for group_name in tqdm(hdf.keys(), desc="Reading quasars from HDF5"):
             group = hdf[group_name]
@@ -71,8 +117,9 @@ def read_quasars_from_hdf5(file_path):
             for sub_group_name in group.keys():
                 sub_group = group[sub_group_name]
                 quasar[sub_group_name] = {sub_key: sub_group[sub_key][...] for sub_key in sub_group.keys()}
-            populate_sdss_fields(quasar, fits_data, fits_data_2)
             quasar_list.append(quasar)
+                #populate_sdss_fields(quasar, fits_data, fits_data_2)
+    populate_sdss_fields(quasar_list)
     return quasar_list
 
 def filter_unresolved_quasars(df):
@@ -118,13 +165,11 @@ def load_quasar_data(file_path):
     df = pd.DataFrame(quasar_list)
     #df = df.set_index('object_id')
     #df = df.drop(columns=['log_jitter', 'magerrs_mean', 'log_sigma_band', 'log_sigma_band_err', 'clean_bands'])
-    df = df.drop(columns=['mags', 'times', 'magerrs'])
-
-    df_all = df.copy()
+    #df = df.drop(columns=['mags', 'times', 'magerrs'])
 
     # data cuts
-    df = df[df['log_sigma_UV'] < -0.4]
-    df = df[df['log_tau_UV_RF'] > 1.5]
+    # df = df[df['log_sigma_UV'] < -0.4]
+    # df = df[df['log_tau_UV_RF'] > 1.5]
     # df = df[df['log_lbol'] > 44]
     # df = df[df['log_mbh'] > 1]
     # df = df[df['apparent_mag_i'] < 30]
