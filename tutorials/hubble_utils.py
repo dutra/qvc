@@ -172,10 +172,11 @@ def load_quasar_data(file_path):
     # data cuts
     # df = df[df['log_sigma_UV'] < -0.4]
     # df = df[df['log_tau_UV_RF'] > 1.5]
-    # df = df[df['log_lbol'] > 44]
-    # df = df[df['log_mbh'] > 1]
+    df = df[df['log_lbol'] > 1]
+    df = df[df['log_mbh'] > 1]
+    df = df[df['apparent_mag_i_err'] < 0.5]
     # df = df[df['apparent_mag_i'] < 30]
-    # #df = df[df['M_i'] > -27]
+    df = df[df['M_i'] < 0]
     df = df[df['ebv'] < 0.05]
     #df = df[df['apparent_mag_i'].between(18, 20)]
     #df = df[df['z'] < 1.2]
@@ -188,9 +189,9 @@ def load_quasar_data(file_path):
     df[numeric_cols] = df[numeric_cols].where(~np.isinf(df[numeric_cols]), np.nan)
     #df = df.dropna()
     
+    df = df.reset_index(drop=True)
     num_quasars_z_0_1 = len(df[(df['z'] > 0) & (df['z'] <= 1)])
     num_quasars_z_gt_3 = len(df[df['z'] > 3])
-    
     print("Number of quasars with 0 < z <= 1:", num_quasars_z_0_1)
     print("Number of quasars with z > 3:", num_quasars_z_gt_3)
     print("Final number of quasars:", len(df))

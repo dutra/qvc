@@ -10,12 +10,10 @@ def K_corr(z, alpha_nu=-0.5):
     return -2.5 * (1 + alpha_nu) * np.log10(1 + z)
 
 # --- Reference constants and pivot values ---
-sigma_pivot = -0.8
-tau_pivot = 2.0
+log_sigma_hat_pivot = -2.075
 
 # --- AGN model ---
 def M_model_agn(M0_agn, alpha_agn, log_sigma_hat_UV):
-    log_sigma_hat_pivot = -2.2
     return M0_agn + alpha_agn * 2 * (log_sigma_hat_UV - log_sigma_hat_pivot)
 
 # --- SN model (Brout+ 2022 Eq. 1 and 2) ---

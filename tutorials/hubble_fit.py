@@ -37,7 +37,7 @@ import matplotlib.pyplot as plt
 plt.style.use('style.mplstyle')
 
 from hubble_utils import *
-from hubble_plotting import plot_posterior_corner, plot_hubble, plot_cosmo_corner, plot_predicted_vs_actual_Mi, plot_completeness_vs_mag_at_redshifts
+from hubble_plotting import *
 from hubble_model import *
 
 # Placeholders for SN covariance (will be loaded in main)
@@ -230,8 +230,6 @@ def run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model='Flatw0waCDM',
     # Compute median of each parameter from the samples
     median_samples = np.median(samples, axis=0)
     params = dict(zip(model_labels, median_samples))
-    print("Median samples:", median_samples)
-    print(f"Sampler shape: {samples.shape}")
 
     # Calculate m_model and mu_cosmo using the median samples
     if cosmo_model == 'Flatw0waCDM':
@@ -251,6 +249,7 @@ def run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model='Flatw0waCDM',
     m_model = mu_cosmo + (K_corr(df_agn_filtered['z'].values) - K_corr(2)) + M_model_agn_samples
     #m_model = mu_cosmo + M_model_agn_samples
     mag_corr = predict_uncensored_magnitudes(df_agn_filtered, m_model, mu_err)
+    df_agn['apparent_mag_i_corr'] = mag_corr
 
     return sampler, model_labels, mag_corr
 
@@ -334,7 +333,7 @@ def main():
     logdetCov = logdet
     print("Data loaded. Running joint cosmographic fits...")
 
-    num_warmup, num_samples = 100, 100
+    num_warmup, num_samples = 10, 25
     use_full_cov = True
     completeness = True
     # Run MCMC fits for SNIa only and SNIa+AGN, for each cosmological model
@@ -349,7 +348,6 @@ def main():
         sampler_joint, _, mag_corr = run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model=cosmo_model, only_sna=False, 
                                                         completeness=completeness, use_full_cov=use_full_cov,
                                                         num_warmup=num_warmup, num_samples=num_samples)
-        df_agn['apparent_mag_i_corr'] = mag_corr
         plot_posterior_corner(sampler_joint, cosmo_model=cosmo_model, only_sna=False)
         
         # Plot results
@@ -363,6 +361,10 @@ def main():
         print("Plotting completeness vs magnitude at redshifts...")
         p_detect, mag_centers, z_centers, dm, dz = get_completeness_function_2d(df_agn)
         plot_completeness_vs_mag_at_redshifts(p_detect, mag_centers, z_centers)
+
+        print("Plotting AGN predicted sigma hat vs luminosity...")
+        plot_predicted_sigma_hat_vs_luminosity(sampler_joint, df_agn, cosmo_model=cosmo_model, show=True)
+
         print(f"Finished plots for {cosmo_model}\n")
         break
     print("All analyses complete. Results saved to 'plots/' directory.")

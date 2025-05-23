@@ -9,8 +9,7 @@ from astropy.cosmology import FlatwCDM, Flatw0waCDM
 import matplotlib.pyplot as plt
 import os
 
-from hubble_utils import get_completeness_function_2d, compute_delta_mag_bias_2d_zbins
-from hubble_model import *
+from hubble_model import K_corr, M_model_agn, M_model_SN, log_sigma_hat_pivot, get_model_params
 from numpy.polynomial.polynomial import Polynomial
 from scipy.interpolate import interp1d
 
@@ -312,8 +311,9 @@ def plot_hubble(sampler, df_agn, df_pantheon, cosmo_model, show=False, completen
 
     fig.tight_layout()
     os.makedirs("plots/hubble", exist_ok=True)
-    plt.savefig(f"plots/hubble/hubble_diagram_{cosmo_model}.pdf", dpi=300)
-    plt.savefig(f"plots/hubble/hubble_diagram_{cosmo_model}.png")
+    show_uncorrected_label = "_uncorrected" if show_uncorrected else ""
+    plt.savefig(f"plots/hubble/hubble_diagram_{cosmo_model}{show_uncorrected_label}.pdf", dpi=300)
+    plt.savefig(f"plots/hubble/hubble_diagram_{cosmo_model}{show_uncorrected_label}.png")
     if show:
         plt.show()
     plt.close()
@@ -359,8 +359,10 @@ def plot_predicted_vs_actual_Mi(sampler, df_agn, cosmo_model, show=False):
 
     # Loop through each redshift bin and plot
     for i, ax in enumerate(axes):
-        ax.set_xlim(df_agn['M_i'].min(), df_agn['M_i'].max())
-        ax.set_ylim(df_agn['M_i'].min(), df_agn['M_i'].max())
+        #ax.set_xlim(df_agn['M_i'].min(), df_agn['M_i'].max())
+        #ax.set_ylim(df_agn['M_i'].min(), df_agn['M_i'].max())
+        ax.set_xlim(-29.8, -21.2)
+        ax.set_ylim(-29.8, -21.2)
 
         if i < num_bins:
             # Filter data for the current redshift bin
@@ -373,7 +375,7 @@ def plot_predicted_vs_actual_Mi(sampler, df_agn, cosmo_model, show=False):
             # Scatter plot for the current bin with error bars
             scatter = ax.errorbar(
                 actual_M_i[bin_mask], predicted_M_i_bin, xerr=0.25, yerr=predicted_M_i_err_bin, 
-                fmt='o', alpha=0.4, lw=1.5, capsize=3, capthick=1, color='k'
+                fmt='o', markerfacecolor='k', markeredgecolor='k', alpha=0.4, lw=1.5, capsize=3, capthick=1, color='k'
             )
             # Invert x and y axes
             ax.invert_xaxis()
@@ -457,109 +459,8 @@ def plot_completeness_vs_mag_at_redshifts(p_detect, mag_centers, z_centers,
     plt.close()
 
 
+
 def plot_predicted_sigma_hat_vs_luminosity(sampler, df_agn, cosmo_model, show=False):
-
-    flat_samples = sampler.get_chain(flat=True, thin=20)
-    priors, model_labels = get_model_params(cosmo_model)
-    results = {key: np.percentile(flat_samples[:, i], [16, 50, 84]) for i, key in enumerate(model_labels)}
-
-    if cosmo_model == 'FlatwCDM':
-        param_names = ["H0", "Om0", "w0"]
-        labels = [r"$H_0$", r"$\Omega_M$", r"$w_0$"]
-    elif cosmo_model == 'Flatw0waCDM':
-        param_names = ["H0", "Om0", "w0", "wa"]
-        labels = [r"$H_0$", r"$\Omega_M$", r"$w_0$", r"$w_a$"]
-    priors, model_labels = get_model_params(cosmo_model)
-    
-    plt.figure(figsize=(7, 5))
-
-    param_indices = {name: model_labels.index(name) for name in model_labels}
-
-    sigma_hat_sq = 10**(2 * df_agn['log_sigma_hat_UV'])
-    lbol = 10**(df_agn['log_lbol'])
-
-
-    log_sigma_hat_pred = []
-    for s in flat_samples:
-        log_sigma_hat_pivot = -2.2
-        M0_agn = s[param_indices['M0_agn']]
-        alpha_agn = s[param_indices['alpha_agn']]
-        M_i_pred = M_model_agn(M0_agn, alpha_agn, df_agn['log_sigma_hat_UV'])
-        log_sigma_hat_pred.append((M_i_pred - M0_agn) / (2 * alpha_agn) + log_sigma_hat_pivot)
-    log_sigma_hat_pred = np.array(log_sigma_hat_pred)
-
-    log_sigma_hat_sq_pred = 2 * log_sigma_hat_pred
-    sigma_hat_sq_pred = 10**log_sigma_hat_sq_pred
-
-    # Work entirely in log-log space for both fitting and plotting
-    log_lbol = np.log10(lbol)
-    log_sigma_hat_sq = np.log10(sigma_hat_sq)
-    log_sigma_hat_sq_pred = np.log10(sigma_hat_sq_pred)
-    log_sigma_hat_sq_pred_median = np.median(log_sigma_hat_sq_pred, axis=0)
-
-    # Fit a polynomial (degree 1) in log-log space
-    coeffs = np.polyfit(log_lbol, log_sigma_hat_sq_pred_median, 1)
-    fit_line = np.poly1d(coeffs)
-
-    # Evaluate fit for plotting
-    log_lbol_fit = np.linspace(log_lbol.min(), log_lbol.max(), 200)
-    log_sigma_hat_sq_fit = fit_line(log_lbol_fit)
-
-    # Calculate a single std value (in log space) between predicted and fit
-    log_sigma_hat_sq_pred_fit = fit_line(log_lbol)
-    log_sigma_hat_sq_fit_std = np.std(log_sigma_hat_sq_pred_median - log_sigma_hat_sq_pred_fit)
-
-
-    plt.plot(log_lbol_fit, log_sigma_hat_sq_fit, color='purple', lw=2, label='Fit (median)')
-    # plt.fill_between(
-    #     log_lbol_fit,
-    #     log_sigma_hat_sq_fit - log_sigma_hat_sq_fit_std,
-    #     log_sigma_hat_sq_fit + log_sigma_hat_sq_fit_std,
-    #     color='purple', alpha=0.3, label='Fit ± std'
-    # )
-
-    z_bins = np.linspace(z.min(), z.max(), 4 + 1)
-    z_bin_indices = np.digitize(z, z_bins) - 1  # bin index for each object
-
-    # Normalize for colormap
-    norm = plt.Normalize(vmin=0, vmax=n_bins - 1)
-    cmap = plt.cm.viridis  # or any other colormap
-    scatter = plt.scatter(
-        log_lbol, log_sigma_hat_sq,
-        c=z_bin_indices,
-        cmap=cmap,
-        norm=norm,
-        s=10,
-        alpha=0.5,
-        label='Observed'
-    )
-
-    # Colorbar with proper bin labels
-    cbar = plt.colorbar(scatter, ticks=range(n_bins))
-    bin_labels = [f"{z_bins[i]:.2f}-{z_bins[i+1]:.2f}" for i in range(n_bins)]
-    cbar.ax.set_yticklabels(bin_labels)
-    cbar.set_label('Redshift bin (z)')
-    #plt.scatter(log_lbol, log_sigma_hat_sq, s=10, alpha=0.5, color='navy', label='Observed')
-    plt.xlabel(r'$\log L_{\mathrm{bol}}$')
-    plt.ylabel(r'$\log \hat{\sigma}_{\mathrm{UV}}^2$')
-    plt.title(r'Predicted $\log \hat{\sigma}_{\mathrm{UV}}^2$ vs $\log L_{\mathrm{bol}}$')
-    plt.grid(True, alpha=0.3)
-    plt.legend(frameon=False)
-    plt.tight_layout()
-    os.makedirs("plots/hubble", exist_ok=True)
-    plt.savefig(f"plots/hubble/predicted_sigma_hat_sq_{cosmo_model}_loglog.png", dpi=300)
-    plt.savefig(f"plots/hubble/predicted_sigma_hat_sq_{cosmo_model}_loglog.pdf", dpi=300)
-    if show:
-        plt.show()
-    plt.close()
-
-
-
-def plot_predicted_sigma_hat_vs_luminosity(sampler, df_agn, cosmo_model, show=False, log_sigma_hat_pivot=-2.2):
-    import numpy as np
-    import matplotlib.pyplot as plt
-    import os
-
     # Load samples
     flat_samples = sampler.get_chain(flat=True, thin=20)
     priors, model_labels = get_model_params(cosmo_model)
@@ -570,7 +471,7 @@ def plot_predicted_sigma_hat_vs_luminosity(sampler, df_agn, cosmo_model, show=Fa
     alpha_samples = flat_samples[:, param_indices['alpha_agn']]
 
     # Define grid in log L_bol
-    log_lbol_grid = np.linspace(44, 47, 200)
+    log_lbol_grid = np.linspace(43, 49, 200)
     lbol_grid = 10 ** log_lbol_grid
 
     # Precompute terms
@@ -601,71 +502,50 @@ def plot_predicted_sigma_hat_vs_luminosity(sampler, df_agn, cosmo_model, show=Fa
     lbol_err = np.log(10) * lbol * df_agn['log_lbol_err']
 
     # --- Plot ---
-    plt.figure(figsize=(7, 5))
+    plt.figure(figsize=(8, 6))
 
     # Posterior 1σ band and median line
-    # plt.fill_between(
-    #     lbol_grid,
-    #     y_low_lin,
-    #     y_high_lin,
-    #     color='orange',
-    #     alpha=0.4,
-    #     label=r'Fit $\pm 1\sigma$'
-    # )
+    plt.fill_between(
+        lbol_grid,
+        y_low_lin,
+        y_high_lin,
+        color='orange',
+        alpha=0.4,
+        label=r'Fit $\pm 1\sigma$'
+    )
     plt.plot(lbol_grid, y_median_lin, color='orange', lw=2, label='Median fit')
 
     # Observed data points with error bars
+    # Color points by redshift
+    import matplotlib.cm as cm
+    import matplotlib.colors as mcolors
+
     plt.errorbar(
         lbol,
         sigma_hat_sq,
-        yerr=0,
-        xerr=0,
+        yerr=sigma_hat_sq_err,
+        xerr=lbol_err,
         fmt='o',
-        color='black',
-        markerfacecolor='black',
-        markersize=3,
-        capsize=3,
-        elinewidth=1,
         linestyle='none',
-        alpha=0.7,
-        zorder=3,
-        label='Observed'
+        color='k',
+        alpha=0.2,
+        markersize=4, 
+        lw=1,
+        zorder=2,
+        label='Observed AGN'
     )
-    z = df_agn['z'].values
-    n_bins = 4
-    z_bins = np.linspace(z.min(), z.max(), n_bins + 1)
-    z_bin_indices = np.digitize(z, z_bins) - 1  # bin index for each object
-
-    # Normalize for colormap
-    norm = plt.Normalize(vmin=0, vmax=n_bins - 1)
-    cmap = plt.cm.viridis  # or any other colormap
-    # scatter = plt.scatter(
-    #     log_lbol, log_sigma_hat_sq,
-    #     c=z_bin_indices,
-    #     cmap=cmap,
-    #     norm=norm,
-    #     s=10,
-    #     alpha=0.5,
-    #     label='Observed'
-    # )
-
-    # Colorbar with proper bin labels
-    # cbar = plt.colorbar(scatter, ticks=range(n_bins))
-    # bin_labels = [f"{z_bins[i]:.2f}-{z_bins[i+1]:.2f}" for i in range(n_bins)]
-    # cbar.ax.set_yticklabels(bin_labels)
-    # cbar.set_label('Redshift bin (z)')
 
     plt.xscale('log')
     plt.yscale('log')
     plt.xlabel(r'$L_{\mathrm{bol}}$ [erg/s]')
-    plt.ylabel(r'$\hat{\sigma}_{\mathrm{UV}}^2$')
-    plt.grid(True, which='both', alpha=0.3)
-    plt.legend(frameon=False, fontsize=10)
+    plt.ylabel(r'$\hat{\sigma}_{\mathrm{UV}}^2$ $[\mathrm{mag}^2/\mathrm{day}]$')
+    plt.legend(fontsize=16)
     plt.tight_layout()
-
+    plt.xlim(2e43, 9e47)
+    plt.ylim(0.4e-6, 1.2e-2)
     os.makedirs("plots/hubble", exist_ok=True)
-    plt.savefig(f"plots/hubble/predicted_sigma_hat_sq_{cosmo_model}_analyticalband_withdata.png", dpi=300)
-    plt.savefig(f"plots/hubble/predicted_sigma_hat_sq_{cosmo_model}_analyticalband_withdata.pdf", dpi=300)
+    plt.savefig(f"plots/hubble/predicted_sigma_hat_sq_{cosmo_model}.png", dpi=300)
+    plt.savefig(f"plots/hubble/predicted_sigma_hat_sq_{cosmo_model}.pdf", dpi=300)
     if show:
         plt.show()
     plt.close()
