@@ -189,10 +189,10 @@ def plot_hubble(sampler, df_agn, df_pantheon, cosmo_model, show=False, completen
     mu_model_84th = np.percentile(mu_models, 84, axis=0)
 
     # Correct the apparent magnitude first
-    completeness2d, mag_centers, z_centers, dm, dz = get_completeness_function_2d(df_agn)
-    delta_mag_arr, delta_mag_arr_errs = compute_delta_mag_bias_2d_zbins(df_agn, completeness2d, mag_centers, z_centers, dm)
+    #completeness2d, mag_centers, z_centers, dm, dz = get_completeness_function_2d(df_agn)
+    #delta_mag_arr, delta_mag_arr_errs = compute_delta_mag_bias_2d_zbins(df_agn, completeness2d, mag_centers, z_centers, dm)
     if completeness:
-        corrected_apparent_mag = df_agn['apparent_mag_i'] - delta_mag_arr
+        corrected_apparent_mag = df_agn['apparent_mag_i_corr']
     else:
         corrected_apparent_mag = df_agn['apparent_mag_i']
 

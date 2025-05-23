@@ -267,7 +267,77 @@ def run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model='Flatw0waCDM',
         sampler.reset()
         # Main MCMC sampling
         sampler.run_mcmc(state, num_samples, progress=True)
-    return sampler, model_labels
+
+
+    
+    samples = sampler.get_chain(flat=True)
+    # Compute median of each parameter from the samples
+    median_samples = np.median(samples, axis=0)
+    params = dict(zip(model_labels, median_samples))
+    print("Median samples:", median_samples)
+    print(f"Sampler shape: {samples.shape}")
+
+    # Calculate m_model and mu_cosmo using the median samples
+    if cosmo_model == 'Flatw0waCDM':
+        mu_cosmo = Flatw0waCDM(H0=params['H0'], Om0=params['Om0'], w0=params['w0'], wa=params['wa']).distmod(df_agn_filtered['z'].values).value
+    else:
+        mu_cosmo = FlatwCDM(H0=params['H0'], Om0=params['Om0'], w0=params['w0']).distmod(df_agn_filtered['z'].values).value
+
+    mu_err = np.sqrt(
+        df_agn_filtered['apparent_mag_i_err'].values**2 +
+        (params['alpha_agn'] * 2*df_agn_filtered['log_sigma_hat_UV_err'].values)**2 +
+        (2.5 * 0.3 * np.log10(1 + df_agn_filtered['z'].values))**2 +
+        (0.055 * df_agn_filtered['z'].values)**2 +
+        np.exp(2 * params['log_f'])
+    )
+    # Predict median uncensored AGN magnitudes
+    M_model_agn_samples = M_model_agn(params['M0_agn'], params['alpha_agn'], df_agn_filtered['log_sigma_hat_UV'])
+    mu_model = df_agn_filtered['apparent_mag_i'].values - (K_corr(df_agn_filtered['z'].values) - K_corr(2)) - M_model_agn_samples
+
+    mag_corr = predict_uncensored_magnitudes(df_agn_filtered, mu_model, mu_err, M_model_agn_samples)
+
+    return sampler, model_labels, mag_corr
+
+
+def predict_uncensored_magnitudes(df_agn, mu_model, mu_err, M_model):
+    z = df_agn['z'].values
+
+    p_detect, mag_centers, z_centers, dm, dz = get_completeness_function_2d(df_agn)
+
+    uncensored_samples = []
+
+    for i in range(len(df_agn)):
+        mu = mu_model[i]
+        sigma = mu_err[i]
+        zval = z[i]
+
+        # Grid of possible m* values
+        m_grid = np.linspace(mu - 5*sigma, mu + 5*sigma, 500) + (K_corr(zval) - K_corr(2)) + M_model[i]
+
+        # Gaussian prior
+        prior = stats.norm.pdf(m_grid, loc=mu + (K_corr(zval) - K_corr(2)) + M_model[i], scale=sigma)
+
+        # Detection probability at each m
+        p_det = p_detect(m_grid, np.full_like(m_grid, zval))
+        p_det = np.clip(p_detect(m_grid, np.full_like(m_grid, zval)), 1e-12, 1.0)
+
+        if np.all(p_det == 0):
+            sampled_m = df_agn['apparent_mag_i'].iloc[i]
+            uncensored_samples.append(sampled_m)
+            continue
+
+        # Posterior (up to normalization)
+        posterior = prior * p_det
+        posterior /= np.trapz(posterior, m_grid)  # normalize
+
+        # Sample or get expected value
+        #sampled_m = np.random.choice(m_grid, p=posterior / posterior.sum())
+        mean_m = np.trapz(m_grid * posterior, m_grid)
+
+        uncensored_samples.append(mean_m)
+
+    return np.array(uncensored_samples)
+
 
 
 def main():
