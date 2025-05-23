@@ -37,7 +37,7 @@ import matplotlib.pyplot as plt
 plt.style.use('style.mplstyle')
 
 from hubble_utils import *
-from hubble_plotting import *
+#from hubble_plotting import *
 from hubble_model import *
 
 # Placeholders for SN covariance (will be loaded in main)
@@ -47,6 +47,7 @@ logdetCov = None
 # --- Log-likelihood ---
 def log_likelihood(theta, cosmo_model,
                    df_agn, df_pantheon, completeness_params,
+                   log_sigma_hat_pivot,
                    only_sna=False, use_full_cov=False,
                    return_params=False):
     
@@ -111,7 +112,7 @@ def log_likelihood(theta, cosmo_model,
 
     mu_cosmo = cosmo.distmod(z).value
     M_pred = M_model_agn(params['M0_agn'], params['alpha_agn'], log_sigma_hat)
-    mu_pred = m_obs - K_corr(z) - (M_pred - K_corr(2))
+    mu_pred = m_obs - (K_corr(z) - K_corr(2)) - M_pred
 
     mu_err = np.sqrt(
         m_err**2 +
@@ -123,46 +124,107 @@ def log_likelihood(theta, cosmo_model,
 
     dmu = mu_pred - mu_cosmo
 
-    # if use_full_cov:
-    #     # Construct AGN covariance matrix (diagonal, using mu_err, but add 0.055*z to all elements)
-    #     Cov_agn = np.diag(mu_err**2 - (0.055 * z)**2) + np.full((len(z), len(z)), (0.055 * z[:, None]) * (0.055 * z[None, :]))
-    #     Cov_agn_inv = np.linalg.inv(Cov_agn)
-    #     logdetCov_agn = np.linalg.slogdet(Cov_agn)[1]
-    #     ll_agn = -0.5 * dmu @ Cov_agn_inv @ dmu - 0.5 * logdetCov_agn - 0.5 * len(dmu) * np.log(2 * np.pi)
-    # else:
+    # if use_full_cov:  # TODO: test this
+    #     # Compute AGN covariance matrix
+    #     D = mu_err**2 - (0.055 * z)**2
+    #     u = 0.055 * z
+    #     inv_D = 1.0 / D
+
+    #     # Compute quadratic form
+    #     dmu = mu_pred - mu_cosmo
+    #     inv_D_dmu = inv_D * dmu
+    #     inv_D_u = inv_D * u
+    #     alpha = 1.0 + np.dot(u, inv_D_u)
+    #     quad = np.dot(dmu, inv_D_dmu) - (np.dot(inv_D_u, dmu) ** 2) / alpha
+
+    #     # Log determinant
+    #     logdet = np.sum(np.log(D)) + np.log(alpha)
+
+    #     ll_agn = -0.5 * quad - 0.5 * logdet - 0.5 * len(dmu) * np.log(2 * np.pi)    
+    # # else:
     ll_agn = np.sum(stats.norm.logpdf(dmu, scale=mu_err))
 
-    # Optional AGN completeness correction
+    # Corrected? AGN completeness correction 2D
+    # Optional AGN completeness correction 2D
     norm_correction = 0.0
     if completeness_params is not None:
-        p_detect, mag_centers, z_centers, dm, dz = completeness_params
+        completeness2d, mag_centers, z_centers, dm, dz = completeness_params
         m_model = M_pred + mu_cosmo
 
         integrals = np.zeros(len(df_agn))
         unique_err = np.round(mu_err, 4)
 
+        mag_range = mag_centers - np.mean(mag_centers)  # Center kernel around zero explicitly
+
         for sigma in np.unique(unique_err):
-            if sigma <= 0 or not np.isfinite(sigma): continue
+            if sigma <= 0 or not np.isfinite(sigma):
+                continue
             mask = np.abs(mu_err - sigma) < 1e-6
 
-            # 2D grid for convolution
-            kernel = stats.norm.pdf(mag_centers - np.median(mag_centers), loc=0, scale=sigma)
+            # Symmetric kernel centered on zero magnitude offset
+            kernel = stats.norm.pdf(mag_range, loc=0, scale=sigma)
+            kernel /= kernel.sum() * dm  # normalize kernel properly
+
             conv_values = []
             for zval in z[mask]:
-                p_z = p_detect(mag_centers, np.full_like(mag_centers, zval))
+                p_z = completeness2d(mag_centers, np.full_like(mag_centers, zval))
                 conv = fftconvolve(p_z, kernel, mode="same") * dm
                 conv = np.clip(conv, 1e-12, 1.0)
                 conv_values.append(conv)
+
             for i, idx in enumerate(np.where(mask)[0]):
                 val = np.interp(m_model[idx], mag_centers, conv_values[i], left=1e-12, right=1e-12)
                 integrals[idx] = val
 
         norm_correction = np.sum(np.log(np.clip(integrals, 1e-12, None)))
 
+
+    # # Optional AGN completeness correction 2D
+    # norm_correction = 0.0
+    # if completeness_params is not None:
+    #     p_detect, mag_centers, z_centers, dm, dz = completeness_params
+    #     m_model = M_pred + mu_cosmo
+
+    #     integrals = np.zeros(len(df_agn))
+    #     unique_err = np.round(mu_err, 4)
+
+    #     for sigma in np.unique(unique_err):
+    #         if sigma <= 0 or not np.isfinite(sigma): continue
+    #         mask = np.abs(mu_err - sigma) < 1e-6
+
+    #         # 2D grid for convolution
+    #         kernel = stats.norm.pdf(mag_centers - np.median(mag_centers), loc=0, scale=sigma)
+    #         conv_values = []
+    #         for zval in z[mask]:
+    #             p_z = p_detect(mag_centers, np.full_like(mag_centers, zval))
+    #             conv = fftconvolve(p_z, kernel, mode="same") * dm
+    #             conv = np.clip(conv, 1e-12, 1.0)
+    #             conv_values.append(conv)
+    #         for i, idx in enumerate(np.where(mask)[0]):
+    #             val = np.interp(m_model[idx], mag_centers, conv_values[i], left=1e-12, right=1e-12)
+    #             integrals[idx] = val
+
+    #     norm_correction = np.sum(np.log(np.clip(integrals, 1e-12, None)))
+    # Optional AGN completeness correction 1D
+    # norm_correction = 0
+    # if completeness_params is not None:
+    #     p_detect, mag_eval, dm = completeness_params
+    #     m_model = M_pred + mu_cosmo
+    #     integrals = np.zeros(len(df_agn))
+    #     unique_err = np.round(mu_err, 4)
+    #     for sigma in np.unique(unique_err):
+    #         if sigma <= 0 or not np.isfinite(sigma): continue
+    #         mask = np.abs(mu_err - sigma) < 1e-6
+    #         kernel = stats.norm.pdf(mag_eval - np.median(mag_eval), loc=0, scale=sigma)
+    #         conv = fftconvolve(p_detect, kernel, mode="same") * dm
+    #         conv = np.clip(conv, 1e-12, 1.0)
+    #         integrals[mask] = np.interp(m_model[mask], mag_eval, conv, left=1e-12, right=1e-12)
+        # norm_correction = np.sum(np.log(np.clip(integrals, 1e-12, None)))
+
     if return_params:
         return ll_snia + ll_calib + ll_agn - norm_correction, norm_correction, m_model
     
-
+    #print(norm_correction/ll_agn)
     return ll_snia + ll_calib + ll_agn - norm_correction
 
 def run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model='Flatw0waCDM', 
@@ -187,6 +249,9 @@ def run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model='Flatw0waCDM',
     df_agn_filtered = df_agn[['z', 'apparent_mag_i', 'apparent_mag_i_err',
                                'log_sigma_hat_UV', 'log_sigma_hat_UV_err']]
     completeness_params = get_completeness_function_2d(df_agn_filtered) if completeness else None
+    #completeness_params = get_completeness_function_simple(20) if completeness else None
+    log_sigma_hat_pivot = df_agn_filtered['log_sigma_hat_UV'].mean()
+    print(f"Log sigma hat pivot: {log_sigma_hat_pivot:.3f}")
 
     # Run MCMC using EnsembleSampler with multiprocessing for speed
     num_cpus = multiprocessing.cpu_count()-2
@@ -194,7 +259,8 @@ def run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model='Flatw0waCDM',
         sampler = emcee.EnsembleSampler(nwalkers, ndim, log_likelihood, 
                                         args=(cosmo_model, 
                                               df_agn_filtered, df_pantheon_filtered, 
-                                              completeness_params, only_sna, use_full_cov), 
+                                              completeness_params, log_sigma_hat_pivot,
+                                              only_sna, use_full_cov), 
                                         pool=pool)
         # Burn-in
         state = sampler.run_mcmc(initial_pos, num_warmup, progress=True)
@@ -241,7 +307,7 @@ def main():
     logdetCov = logdet
     print("Data loaded. Running joint cosmographic fits...")
 
-    num_warmup, num_samples = 500, 100
+    num_warmup, num_samples = 250, 50
     # Run MCMC fits for SNIa only and SNIa+AGN, for each cosmological model
     for cosmo_model in ['Flatw0waCDM', 'FlatwCDM']:
         # print(f"Running MCMC for {cosmo_model}: SNIa only")
@@ -250,7 +316,7 @@ def main():
         # plot_corner(sampler_snia, cosmo_model=cosmo_model, only_sna=True)
         
         print(f"Running MCMC for {cosmo_model}: SNIa + AGN")
-        sampler_joint, _ = run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model=cosmo_model, only_sna=False, completeness=True, use_full_cov=True,
+        sampler_joint, _ = run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model=cosmo_model, only_sna=False, completeness=True, use_full_cov=False,
                                              num_warmup=num_warmup, num_samples=num_samples)
         plot_corner(sampler_joint, cosmo_model=cosmo_model, only_sna=False)
         
@@ -297,5 +363,5 @@ def test():
     plot_predicted_vs_actual_Mi(sampler_joint, df_agn, cosmo_model=cosmo_model)
 
 if __name__ == "__main__":
-    #main()
-    test()
+    main()
+    #test()

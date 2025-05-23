@@ -33,7 +33,8 @@ def populate_sdss_fields(objs, progress_bar=False):
         if len(i) == 0:
             print(f"Skipping entry {d['object_id']} as it does not exist in the fits data.")
             continue
-        
+        if len(i) > 1:
+            print(f"Warning: {d['sdss_name']} found multiple times in SDSS data")
         i = i[0]  # Get the first index if there are multiple matches
         d['ra'] = obj['RA']
         d['dec'] = obj['DEC']
@@ -74,6 +75,7 @@ def populate_sdss_fields_sdssname(d, fits_data, fits_data_2):
     if len(i) == 0:
         print(f"Warning: {d['sdss_name']} not found in SDSS data")
         return d
+
     i = i[0]
     if np.any(fits_data_2['PSFFLUX'][i,:] <= 0):
         return d
@@ -184,7 +186,7 @@ def load_quasar_data(file_path):
     print("Columns with NaNs:", columns_with_nans)
     numeric_cols = df.select_dtypes(include=[np.number]).columns
     df[numeric_cols] = df[numeric_cols].where(~np.isinf(df[numeric_cols]), np.nan)
-    df = df.dropna()
+    #df = df.dropna()
     
     num_quasars_z_0_1 = len(df[(df['z'] > 0) & (df['z'] <= 1)])
     num_quasars_z_gt_3 = len(df[df['z'] > 3])
@@ -194,18 +196,22 @@ def load_quasar_data(file_path):
     print("Final number of quasars:", len(df))
     return df
 
+def completeness(m, center, mag_lim):
+    print("m shape:", np.shape(m))
+    print("center shape:", np.shape(center))
+    print("mag_lim shape:", np.shape(mag_lim))
+    return 1 - norm.cdf(m, loc=center, scale=mag_lim)
 def get_completeness_function_simple(mag_lim, center=20):
     """
     Simpler completeness function based on a normal CDF.
     Returns p(I=1|m) = 1 - normal.cdf(m, center=mag_lim).
     """
-    raise NotImplementedError("This function is not implemented yet.")
-    def completeness(m):
-        return 1 - norm.cdf(m, loc=center, scale=mag_lim)
+    #raise NotImplementedError("This function is not implemented yet.")
+
 
     mag_eval = np.linspace(14, 26, 500)
     dm = mag_eval[1] - mag_eval[0]
-    p_detect = completeness(mag_eval)
+    p_detect = completeness(mag_eval, center, mag_lim)
 
     plt.plot(mag_eval, p_detect, label=f"Center={center}, Mag Lim={mag_lim}")
     plt.xlabel("i-band magnitude")
@@ -217,11 +223,30 @@ def get_completeness_function_simple(mag_lim, center=20):
     plt.close()
     return p_detect, mag_eval, dm
 
+def compute_delta_mag_bias(agn_magnitudes, mag_lim, center=20):
+    p_detect, mag_grid, dm = get_completeness_function_simple(mag_lim, center)
+    C_interp = interp1d(mag_grid, p_detect, kind='linear', bounds_error=False, fill_value=(p_detect[0], p_detect[-1]))
+
+    delta_mags = []
+    for m_i in agn_magnitudes:
+        C_i = C_interp(m_i)
+        if C_i <= 0:
+            delta_mags.append(np.nan)  # Avoid divide-by-zero
+            continue
+
+        # Assume flat prior for true magnitude distribution over mag_grid
+        weights = 1.0 - p_detect  # Non-detection weights
+        mean_mag = np.sum(mag_grid * weights) * dm / (np.sum(weights) * dm)
+        delta_mag = mean_mag - m_i  # Shift toward undetected fainter population
+        delta_mags.append(delta_mag)
+
+    return np.array(delta_mags)
+
 # Example usage
 # p_detect, mag_eval, dm = get_completeness_function_simple(mag_lim=1.0, center=20)
 
 def get_completeness_function(df_agn):
-    n_bins_completeness = 26
+    n_bins_completeness = 12
     file_path = "stacked_sampled_apparent_magnitudes.h5"
 
     with h5py.File(file_path, "r") as f:
@@ -279,7 +304,7 @@ class Completeness2D:
         return vals.reshape(np.shape(mag))
     
 def get_completeness_function_2d(df_agn, sim_file="sampled_apparent_magnitudes_by_redshift.h5",
-                                 n_mag_bins=26, n_z_bins=16, mag_min=14, mag_max=26):
+                                 n_mag_bins=12, n_z_bins=12, mag_min=14, mag_max=26):
     """
     Returns a completeness function p_detect(mag, z) as a callable.
     Uses observed AGN sample and simulated sample from HDF5 file
@@ -290,13 +315,11 @@ def get_completeness_function_2d(df_agn, sim_file="sampled_apparent_magnitudes_b
     from scipy.ndimage import gaussian_filter
     from scipy.interpolate import RegularGridInterpolator
 
-    # Load simulated (true) sample: flatten all bins into arrays
-    mags_true_list = []
-    z_true_list = []
+    # Load simulated (true) sample
+    mags_true_list, z_true_list = [], []
     with h5py.File(sim_file, "r") as f:
-        grp = f["redshift_bins"]
-        for ds_name in grp:
-            ds = grp[ds_name]
+        for name in f["redshift_bins"]:
+            ds = f["redshift_bins"][name]
             mags = ds[()]
             z_bin = ds.attrs["redshift"]
             mags_true_list.append(mags)
@@ -304,11 +327,10 @@ def get_completeness_function_2d(df_agn, sim_file="sampled_apparent_magnitudes_b
     mags_true = np.concatenate(mags_true_list)
     z_true = np.concatenate(z_true_list)
 
-    # Observed sample
     mags_obs = df_agn['apparent_mag_i'].values
     z_obs = df_agn['z'].values
 
-    # Clean both
+    # Clean
     mask_true = np.isfinite(mags_true) & np.isfinite(z_true)
     mags_true = mags_true[mask_true]
     z_true = z_true[mask_true]
@@ -318,8 +340,8 @@ def get_completeness_function_2d(df_agn, sim_file="sampled_apparent_magnitudes_b
     z_obs = z_obs[mask_obs]
 
     # Bin edges and centers
-    mag_edges = np.linspace(mag_min, mag_max, n_mag_bins)
-    z_edges = np.linspace(np.min(z_obs), np.max(z_obs), n_z_bins)
+    mag_edges = np.linspace(mag_min, mag_max, n_mag_bins + 1)
+    z_edges = np.linspace(np.min(z_true), np.max(z_true), n_z_bins + 1)
     mag_centers = 0.5 * (mag_edges[:-1] + mag_edges[1:])
     z_centers = 0.5 * (z_edges[:-1] + z_edges[1:])
 
@@ -328,20 +350,97 @@ def get_completeness_function_2d(df_agn, sim_file="sampled_apparent_magnitudes_b
     hist_obs, _, _ = np.histogram2d(mags_obs, z_obs, bins=[mag_edges, z_edges])
 
     # Compute completeness ratio
-    mask = hist_true > 0
-    completeness_ratio = np.zeros_like(hist_true, dtype=float)
-    completeness_ratio[mask] = hist_obs[mask] / hist_true[mask]
-    completeness_ratio = gaussian_filter(completeness_ratio, sigma=0.7)
-    completeness_ratio = np.clip(completeness_ratio, 0, 1)
+    with np.errstate(divide='ignore', invalid='ignore'):
+        completeness_ratio = np.zeros_like(hist_true, dtype=float)
+        mask = hist_true > 0
+        completeness_ratio[mask] = hist_obs[mask] / hist_true[mask]
 
-    # Interpolator: returns completeness for any (mag, z)
+    # Apply gentle smoothing
+    #completeness_ratio = gaussian_filter(completeness_ratio, sigma=0.7)
+    completeness_ratio = np.clip(completeness_ratio, 0.0, 1.0)
+
+    # Interpolator
     interp_fn = RegularGridInterpolator(
-        (mag_centers, z_centers), completeness_ratio,  # (mag, z) order
+        (mag_centers, z_centers), completeness_ratio,
         bounds_error=False, fill_value=0.0
     )
 
-    # Compute grid spacing for mag and z
+    # Compute grid spacing
     dm = mag_centers[1] - mag_centers[0]
     dz = z_centers[1] - z_centers[0]
 
+    # Return as a wrapper class with callable behavior
     return Completeness2D(mag_centers, z_centers, completeness_ratio), mag_centers, z_centers, dm, dz
+
+
+from scipy.interpolate import RegularGridInterpolator
+
+
+def compute_delta_mag_bias_2d_zbins(df_agn, completeness2d, mag_centers, z_centers, dm, n_z_bins=12):
+    """
+    Estimate AGN magnitude bias corrections using completeness-corrected intrinsic magnitudes
+    binned by redshift, and interpolate them across the full sample.
+
+    Parameters:
+    -----------
+    df_agn : DataFrame
+        Contains 'apparent_mag_i', 'z', and optionally 'apparent_mag_i_err'.
+    completeness2d : callable
+        Completeness function p_detect(m, z).
+    mag_centers : array_like
+        Centers of magnitude bins.
+    z_centers : array_like
+        Centers of redshift bins.
+    dm : float
+        Bin width in magnitude.
+    n_z_bins : int
+        Number of redshift bins for intrinsic mag estimation.
+
+    Returns:
+    --------
+    delta_mags : ndarray
+        Δm = ⟨m_intrinsic⟩ - m_observed for each AGN.
+    delta_mag_errs : ndarray
+        Propagated uncertainty combining measurement error and intrinsic scatter.
+    """
+    import numpy as np
+    from scipy.interpolate import interp1d
+
+    apparent_mags = df_agn['apparent_mag_i'].values
+    z_vals = df_agn['z'].values
+    mag_errs = df_agn['apparent_mag_i_err'].values if 'apparent_mag_i_err' in df_agn.columns else np.zeros_like(apparent_mags)
+
+    z_bins = np.linspace(z_vals.min(), z_vals.max(), n_z_bins + 1)
+    z_bin_centers = 0.5 * (z_bins[:-1] + z_bins[1:])
+
+    mean_mags = np.full(n_z_bins, np.nan)
+    std_mags = np.full(n_z_bins, np.nan)
+
+    for i in range(n_z_bins):
+        z_low, z_high = z_bins[i], z_bins[i + 1]
+        z_bin_mask = (z_centers >= z_low) & (z_centers < z_high)
+        if not np.any(z_bin_mask):
+            continue
+
+        mag_grid, z_grid = np.meshgrid(mag_centers, z_centers[z_bin_mask], indexing='ij')
+        completeness = completeness2d(mag_grid, z_grid)
+        completeness = np.clip(completeness, 1e-3, 1.0)
+        weights = 1.0 / completeness
+
+        weighted_mags = mag_grid * weights
+        weighted_sum = np.nansum(weighted_mags)
+        total_weights = np.nansum(weights)
+
+        if total_weights > 0:
+            mean_mags[i] = weighted_sum / total_weights
+            variance = np.nansum(weights * (mag_grid - mean_mags[i])**2) / total_weights
+            std_mags[i] = np.sqrt(variance)
+
+    # Interpolate over z to get delta_m for each object
+    interp_mean = interp1d(z_bin_centers[~np.isnan(mean_mags)], mean_mags[~np.isnan(mean_mags)], kind='linear', fill_value='extrapolate')
+    interp_std = interp1d(z_bin_centers[~np.isnan(std_mags)], std_mags[~np.isnan(std_mags)], kind='linear', fill_value='extrapolate')
+
+    delta_mags = interp_mean(z_vals) - apparent_mags
+    delta_mag_errs = np.sqrt(interp_std(z_vals)**2 + mag_errs**2)
+
+    return delta_mags, delta_mag_errs

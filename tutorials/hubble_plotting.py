@@ -9,9 +9,11 @@ from astropy.cosmology import FlatwCDM, Flatw0waCDM
 import matplotlib.pyplot as plt
 import os
 
-from hubble_utils import get_completeness_function_2d
-from hubble_model import *
 from hubble_fit import log_likelihood
+from hubble_utils import get_completeness_function_2d, compute_delta_mag_bias_2d_zbins
+from hubble_model import *
+from numpy.polynomial.polynomial import Polynomial
+from scipy.interpolate import interp1d
 
 def plot_corner(sampler, only_sna=False, cosmo_model='Flatw0waCDM'):
     # Select cosmological parameters based on model
@@ -139,96 +141,8 @@ def plot_cosmo_corner(sampler_sna, sampler_agn, cosmo_model='Flatw0waCDM', show=
         plt.show()
     plt.close()
 
-def apply_delta_mag_correction(df_agn, m_model, z, norm_correction, p_detect, n_bins=8):
-    """
-    Estimate Δmag from norm_correction and apply it to the AGN apparent magnitudes.
-    Supports both global and redshift-binned corrections.
 
-    Parameters
-    ----------
-    df_agn : pd.DataFrame
-        AGN data with columns 'apparent_mag_i' and 'z'
-    m_model : array
-        Model-predicted apparent magnitudes (same length as df_agn)
-    z : array
-        Redshifts (same length as df_agn)
-    norm_correction : float
-        The completeness penalty from the likelihood
-    p_detect : callable
-        Completeness function p_detect(mag, z)
-    n_bins : int
-        Number of redshift bins for binned correction
-
-    Returns
-    -------
-    df_agn_corr : pd.DataFrame
-        Copy of df_agn with new column 'apparent_mag_i_corr'
-    delta_mag_arr : array
-        Δmag values used for each object
-    """
-
-    # Redshift bins
-    z_bins = np.linspace(np.min(z), np.max(z), n_bins + 1)
-    z_centers = 0.5 * (z_bins[:-1] + z_bins[1:])
-    delta_mag_arr = np.zeros_like(z, dtype=float)
-
-    # Distribute norm_correction across bins by number of objects
-    N_total = len(z)
-    for i in range(n_bins):
-        in_bin = (z >= z_bins[i]) & (z < z_bins[i+1])
-        N_bin = np.sum(in_bin)
-        if N_bin < 3:
-            delta_mag_arr[in_bin] = 0.0
-            continue
-        m_bin = m_model[in_bin]
-        z_bin = z[in_bin]
-        mean_mag = np.mean(m_bin)
-        z_typical = np.median(z_bin)
-        dm = 0.01
-        p1 = p_detect(mean_mag, z_typical)
-        p2 = p_detect(mean_mag + dm, z_typical)
-        alpha = - (np.log(p2) - np.log(p1)) / dm
-        norm_correction_bin = norm_correction * (N_bin / N_total)
-        delta_mag = -norm_correction_bin / (N_bin * alpha)
-        delta_mag_arr[in_bin] = delta_mag
-
-    # Apply correction
-    #df_agn_corr = df_agn.copy()
-    #df_agn_corr['apparent_mag_i_corr'] = df_agn_corr['apparent_mag_i'] - delta_mag_arr
-
-    return delta_mag_arr
-
-def compute_per_object_delta_mag(df_agn, p_detect, delta_m=0.01):
-    """
-    Compute per-object Δmag bias correction for each AGN.
-
-    Parameters
-    ----------
-    df_agn : pd.DataFrame
-        Must contain 'apparent_mag_i' and 'z'
-    p_detect : callable
-        Completeness function p_detect(mag, z)
-    delta_m : float
-        Step size for finite-difference derivative
-
-    Returns
-    -------
-    delta_mag_arr : np.ndarray
-        Δmag for each AGN (same length as df_agn)
-    """
-    mags = df_agn['apparent_mag_i'].values
-    zs = df_agn['z'].values
-
-    p1 = p_detect(mags, zs)
-    p2 = p_detect(mags + delta_m, zs)
-    # Avoid log(0)
-    p1 = np.clip(p1, 1e-12, 1)
-    p2 = np.clip(p2, 1e-12, 1)
-    alpha = - (np.log(p2) - np.log(p1)) / delta_m
-    delta_mag_arr = -np.log(p1) / alpha
-    return delta_mag_arr
-
-def plot_hubble(sampler, df_agn, df_pantheon, cosmo_model, show=False):
+def plot_hubble(sampler, df_agn, df_pantheon, cosmo_model, show=False, completeness=True):
     """Plot Hubble diagram + residuals, classic Pantheon+ style."""
     # Define cosmological parameter labels
     if cosmo_model == 'FlatwCDM':
@@ -274,34 +188,36 @@ def plot_hubble(sampler, df_agn, df_pantheon, cosmo_model, show=False):
     mu_model_16th = np.percentile(mu_models, 16, axis=0)
     mu_model_84th = np.percentile(mu_models, 84, axis=0)
 
-    # --- AGN distance modulus ---
+    # Correct the apparent magnitude first
+    completeness2d, mag_centers, z_centers, dm, dz = get_completeness_function_2d(df_agn)
+    delta_mag_arr, delta_mag_arr_errs = compute_delta_mag_bias_2d_zbins(df_agn, completeness2d, mag_centers, z_centers, dm)
+    if completeness:
+        corrected_apparent_mag = df_agn['apparent_mag_i'] - delta_mag_arr
+    else:
+        corrected_apparent_mag = df_agn['apparent_mag_i']
+
+    # delta_mag_fit = -0.11 * df_agn['z'].values + 0.11
+    # corrected_apparent_mag = df_agn['apparent_mag_i'] - delta_mag_fit
+    
+    # Then re-compute the distance modulus
     mu_pred = np.array([
-        df_agn['apparent_mag_i'] - K_corr(df_agn['z']) - (
-            M_model_agn(s[param_indices['M0_agn']], s[param_indices['alpha_agn']], df_agn['log_sigma_hat_UV']) - K_corr(2))
+        corrected_apparent_mag - (K_corr(df_agn['z']) - K_corr(2)) -
+            M_model_agn(s[param_indices['M0_agn']], s[param_indices['alpha_agn']], 
+                        df_agn['log_sigma_hat_UV'])
         for s in flat_samples
     ])
+
+    # Now take the median again:
     mu_pred_median = np.percentile(mu_pred, 50, axis=0)
 
-
-    # compute delta mag correction
-    completeness_params = get_completeness_function_2d(df_agn)
-    p_detect, mag_centers, z_centers, dm, dz = completeness_params
-
-    # flat_samples = sampler.get_chain(discard=0, thin=1, flat=True)
-    # median_theta = np.median(flat_samples, axis=0)
-
-    # ll, norm_correction, m_model = log_likelihood(
-    #     median_theta, cosmo_model,
-    #     df_agn, df_pantheon, completeness_params,
-    #     only_sna=False, use_full_cov=False,
-    #     return_params=True
-    # )
-    # delta_mag_arr = apply_delta_mag_correction(df_agn, mu_pred_median, df_agn['z'], norm_correction, p_detect, n_bins=8)
-
-    delta_mag_arr = compute_per_object_delta_mag(df_agn, p_detect, delta_m=0.01)
-
-    print(delta_mag_arr)
-    mu_pred_median -= delta_mag_arr
+    # --- Also compute uncorrected mu_pred for plotting ---
+    mu_pred_uncorrected = np.array([
+        df_agn['apparent_mag_i'] - K_corr(df_agn['z']) - (
+            M_model_agn(s[param_indices['M0_agn']], s[param_indices['alpha_agn']], 
+                        df_agn['log_sigma_hat_UV']) - K_corr(2))
+        for s in flat_samples
+    ])
+    mu_pred_uncorrected_median = np.percentile(mu_pred_uncorrected, 50, axis=0)
 
     mu_pred_16th = np.percentile(mu_pred, 16, axis=0)
     mu_pred_84th = np.percentile(mu_pred, 84, axis=0)
@@ -343,6 +259,9 @@ def plot_hubble(sampler, df_agn, df_pantheon, cosmo_model, show=False):
     # Original AGNs
     ax.errorbar(df_agn["z"], mu_pred_median, yerr=mu_pred_std, fmt='o', linestyle='none',
                 markersize=2, alpha=0.2, color='k', lw=1.5, zorder=-10, label="AGN")
+    
+    ax.errorbar(df_agn["z"], mu_pred_uncorrected_median, yerr=mu_pred_std, fmt='o', linestyle='none',
+                markersize=2, alpha=0.2, color='green', lw=1.5, zorder=-10, label="Uncorrected AGN")
     # Binned AGNs
     ax.errorbar(binned_z, binned_mu_pred_median, yerr=binned_mu_pred_std, label="Binned AGN",
                 fmt='o', markersize=4, capsize=3, lw=1.5,alpha=0.9, color="red", zorder=-7)
@@ -384,7 +303,7 @@ def plot_predicted_vs_actual_Mi(sampler, df_agn, cosmo_model, show=False):
     M_i_pred = M_model_agn(
         results['M0_agn'][1], 
         results['alpha_agn'][1], 
-        df_agn['log_sigma_hat_UV'] 
+        df_agn['log_sigma_hat_UV']
     ) #+ K_corr(2) # TODO: check this
 
 
@@ -513,47 +432,223 @@ def plot_completeness_vs_mag_at_redshifts(p_detect, mag_centers, z_centers,
     plt.savefig("plots/hubble/completeness_vs_mag_at_redshifts.pdf", dpi=300)
     plt.close()
 
-# --- AGN model ---
-def M_model_agn(M0_agn, alpha_agn, log_sigma_hat_UV):
-    return M0_agn + alpha_agn * 2 * log_sigma_hat_UV
 
 def plot_predicted_sigma_hat_vs_luminosity(sampler, df_agn, cosmo_model, show=False):
 
-    flat_samples = sampler.get_chain(flat=True, thin=15)
+    flat_samples = sampler.get_chain(flat=True, thin=20)
     priors, model_labels = get_model_params(cosmo_model)
     results = {key: np.percentile(flat_samples[:, i], [16, 50, 84]) for i, key in enumerate(model_labels)}
-    param_indices = [list(priors.keys()).index(p) for p in param_names]
 
-    # --- AGN distance modulus ---
-    M_i_pred = np.array([(
-            M_model_agn(s[param_indices['M0_agn']], s[param_indices['alpha_agn']], df_agn['log_sigma_hat_UV']) - K_corr(2)
-            ) for s in flat_samples])
-
-    log_sigma_hat_pred = np.array([(M_i_pred - s[param_indices['M0_agn']]) / (2 * s[param_indices['alpha_agn']]) for s in flat_samples])
-    sigma_hat_sq_pred = 10**(2*log_sigma_hat_pred)
-    sigma_hat_sq_pred = np.percentile(sigma_hat_sq_pred, [16, 50, 84])
-    sigma_hat_sq_median = sigma_hat_sq_pred[1]
-    sigma_hat_sq_16th = sigma_hat_sq_pred[0]
-    sigma_hat_sq_84th = sigma_hat_sq_pred[2]
-
-    # Plot
+    if cosmo_model == 'FlatwCDM':
+        param_names = ["H0", "Om0", "w0"]
+        labels = [r"$H_0$", r"$\Omega_M$", r"$w_0$"]
+    elif cosmo_model == 'Flatw0waCDM':
+        param_names = ["H0", "Om0", "w0", "wa"]
+        labels = [r"$H_0$", r"$\Omega_M$", r"$w_0$", r"$w_a$"]
+    priors, model_labels = get_model_params(cosmo_model)
+    
     plt.figure(figsize=(7, 5))
-    plt.scatter(df_agn['log_lbol'], 10**(2 * df_agn['log_sigma_hat_UV']), s=10, alpha=0.5, color='navy', label='Observed')
-    plt.plot(df_agn['log_lbol'], sigma_hat_sq_median, color='purple', lw=2, label='Predicted median')
-    plt.fill_between(df_agn['log_lbol'], sigma_hat_sq_16th, sigma_hat_sq_84th, color='purple', alpha=0.3, label='16th-84th percentile')
-    plt.xlabel(r'$\log L_{\mathrm{bol}}$')
-    plt.ylabel(r'$\hat{\sigma}_{\mathrm{UV}}^2$')
-    plt.title(r'Predicted $\hat{\sigma}_{\mathrm{UV}}^2$ vs $\log L_{\mathrm{bol}}$')
-    plt.grid(True, alpha=0.3)
 
+    param_indices = {name: model_labels.index(name) for name in model_labels}
+
+    sigma_hat_sq = 10**(2 * df_agn['log_sigma_hat_UV'])
+    lbol = 10**(df_agn['log_lbol'])
+
+
+    log_sigma_hat_pred = []
+    for s in flat_samples:
+        log_sigma_hat_pivot = -2.2
+        M0_agn = s[param_indices['M0_agn']]
+        alpha_agn = s[param_indices['alpha_agn']]
+        M_i_pred = M_model_agn(M0_agn, alpha_agn, df_agn['log_sigma_hat_UV'])
+        log_sigma_hat_pred.append((M_i_pred - M0_agn) / (2 * alpha_agn) + log_sigma_hat_pivot)
+    log_sigma_hat_pred = np.array(log_sigma_hat_pred)
+
+    log_sigma_hat_sq_pred = 2 * log_sigma_hat_pred
+    sigma_hat_sq_pred = 10**log_sigma_hat_sq_pred
+
+    # Work entirely in log-log space for both fitting and plotting
+    log_lbol = np.log10(lbol)
+    log_sigma_hat_sq = np.log10(sigma_hat_sq)
+    log_sigma_hat_sq_pred = np.log10(sigma_hat_sq_pred)
+    log_sigma_hat_sq_pred_median = np.median(log_sigma_hat_sq_pred, axis=0)
+
+    # Fit a polynomial (degree 1) in log-log space
+    coeffs = np.polyfit(log_lbol, log_sigma_hat_sq_pred_median, 1)
+    fit_line = np.poly1d(coeffs)
+
+    # Evaluate fit for plotting
+    log_lbol_fit = np.linspace(log_lbol.min(), log_lbol.max(), 200)
+    log_sigma_hat_sq_fit = fit_line(log_lbol_fit)
+
+    # Calculate a single std value (in log space) between predicted and fit
+    log_sigma_hat_sq_pred_fit = fit_line(log_lbol)
+    log_sigma_hat_sq_fit_std = np.std(log_sigma_hat_sq_pred_median - log_sigma_hat_sq_pred_fit)
+
+
+    plt.plot(log_lbol_fit, log_sigma_hat_sq_fit, color='purple', lw=2, label='Fit (median)')
+    plt.fill_between(
+        log_lbol_fit,
+        log_sigma_hat_sq_fit - log_sigma_hat_sq_fit_std,
+        log_sigma_hat_sq_fit + log_sigma_hat_sq_fit_std,
+        color='purple', alpha=0.3, label='Fit ± std'
+    )
+
+    z_bins = np.linspace(z.min(), z.max(), 4 + 1)
+    z_bin_indices = np.digitize(z, z_bins) - 1  # bin index for each object
+
+    # Normalize for colormap
+    norm = plt.Normalize(vmin=0, vmax=n_bins - 1)
+    cmap = plt.cm.viridis  # or any other colormap
+    scatter = plt.scatter(
+        log_lbol, log_sigma_hat_sq,
+        c=z_bin_indices,
+        cmap=cmap,
+        norm=norm,
+        s=10,
+        alpha=0.5,
+        label='Observed'
+    )
+
+    # Colorbar with proper bin labels
+    cbar = plt.colorbar(scatter, ticks=range(n_bins))
+    bin_labels = [f"{z_bins[i]:.2f}-{z_bins[i+1]:.2f}" for i in range(n_bins)]
+    cbar.ax.set_yticklabels(bin_labels)
+    cbar.set_label('Redshift bin (z)')
+    #plt.scatter(log_lbol, log_sigma_hat_sq, s=10, alpha=0.5, color='navy', label='Observed')
+    plt.xlabel(r'$\log L_{\mathrm{bol}}$')
+    plt.ylabel(r'$\log \hat{\sigma}_{\mathrm{UV}}^2$')
+    plt.title(r'Predicted $\log \hat{\sigma}_{\mathrm{UV}}^2$ vs $\log L_{\mathrm{bol}}$')
+    plt.grid(True, alpha=0.3)
     plt.legend(frameon=False)
     plt.tight_layout()
     os.makedirs("plots/hubble", exist_ok=True)
-    plt.savefig(f"plots/hubble/predicted_sigma_hat_sq_{cosmo_model}.png", dpi=300)
-    plt.savefig(f"plots/hubble/predicted_sigma_hat_sq_{cosmo_model}.pdf", dpi=300)
+    plt.savefig(f"plots/hubble/predicted_sigma_hat_sq_{cosmo_model}_loglog.png", dpi=300)
+    plt.savefig(f"plots/hubble/predicted_sigma_hat_sq_{cosmo_model}_loglog.pdf", dpi=300)
     if show:
         plt.show()
     plt.close()
+
+
+
+#def plot_predicted_sigma_hat_vs_luminosity_linear_fit(sampler, df_agn, cosmo_model, show=False):
+def plot_predicted_sigma_hat_vs_luminosity(sampler, df_agn, cosmo_model, show=False, log_sigma_hat_pivot=-2.2):
+    import numpy as np
+    import matplotlib.pyplot as plt
+    import os
+
+    # Load samples
+    flat_samples = sampler.get_chain(flat=True, thin=20)
+    priors, model_labels = get_model_params(cosmo_model)
+    param_indices = {name: model_labels.index(name) for name in model_labels}
+
+    # Extract arrays of model parameters
+    M0_samples = flat_samples[:, param_indices['M0_agn']]
+    alpha_samples = flat_samples[:, param_indices['alpha_agn']]
+
+    # Define grid in log L_bol
+    log_lbol_grid = np.linspace(44, 47, 200)
+    lbol_grid = 10 ** log_lbol_grid
+
+    # Precompute terms
+    pivot_term = 2 * log_sigma_hat_pivot
+    slopes = -2.5 / alpha_samples
+    intercepts = (90 - M0_samples) / alpha_samples + pivot_term
+
+    # Evaluate log_sigma_hat_sq across all posterior lines
+    ys = np.outer(slopes, log_lbol_grid) + intercepts[:, None]  # shape: (n_samples, n_grid)
+
+    # Compute 1σ band and median in log space
+    y_low, y_high = np.percentile(ys, [16, 84], axis=0)
+    y_median = np.median(ys, axis=0)
+
+    # Convert to linear space
+    y_low_lin = 10 ** y_low
+    y_high_lin = 10 ** y_high
+    y_median_lin = 10 ** y_median
+
+    # --- Observed AGN data ---
+    log_lbol = df_agn['log_lbol'].values
+    log_sigma_hat_sq = 2 * df_agn['log_sigma_hat_UV'].values
+
+    lbol = 10 ** log_lbol
+    sigma_hat_sq = 10 ** log_sigma_hat_sq
+
+    sigma_hat_sq_err = np.log(10) * sigma_hat_sq * 2 * df_agn['log_sigma_hat_UV_err']
+    lbol_err = np.log(10) * lbol * df_agn['log_lbol_err']
+
+    # --- Plot ---
+    plt.figure(figsize=(7, 5))
+
+    # Posterior 1σ band and median line
+    plt.fill_between(
+        lbol_grid,
+        y_low_lin,
+        y_high_lin,
+        color='orange',
+        alpha=0.4,
+        label=r'Fit $\pm 1\sigma$'
+    )
+    plt.plot(lbol_grid, y_median_lin, color='orange', lw=2, label='Median fit')
+
+    # Observed data points with error bars
+    plt.errorbar(
+        lbol,
+        sigma_hat_sq,
+        yerr=sigma_hat_sq_err,
+        xerr=lbol_err,
+        fmt='o',
+        color='black',
+        markerfacecolor='black',
+        markersize=3,
+        capsize=3,
+        elinewidth=1,
+        linestyle='none',
+        alpha=0.7,
+        zorder=3,
+        label='Observed'
+    )
+    z = df_agn['z'].values
+    n_bins = 4
+    z_bins = np.linspace(z.min(), z.max(), n_bins + 1)
+    z_bin_indices = np.digitize(z, z_bins) - 1  # bin index for each object
+
+    # Normalize for colormap
+    norm = plt.Normalize(vmin=0, vmax=n_bins - 1)
+    cmap = plt.cm.viridis  # or any other colormap
+    # scatter = plt.scatter(
+    #     log_lbol, log_sigma_hat_sq,
+    #     c=z_bin_indices,
+    #     cmap=cmap,
+    #     norm=norm,
+    #     s=10,
+    #     alpha=0.5,
+    #     label='Observed'
+    # )
+
+    # Colorbar with proper bin labels
+    # cbar = plt.colorbar(scatter, ticks=range(n_bins))
+    # bin_labels = [f"{z_bins[i]:.2f}-{z_bins[i+1]:.2f}" for i in range(n_bins)]
+    # cbar.ax.set_yticklabels(bin_labels)
+    # cbar.set_label('Redshift bin (z)')
+
+    plt.xscale('log')
+    plt.yscale('log')
+    plt.xlabel(r'$L_{\mathrm{bol}}$ [erg/s]')
+    plt.ylabel(r'$\hat{\sigma}_{\mathrm{UV}}^2$')
+    plt.grid(True, which='both', alpha=0.3)
+    plt.legend(frameon=False, fontsize=10)
+    plt.tight_layout()
+
+    os.makedirs("plots/hubble", exist_ok=True)
+    plt.savefig(f"plots/hubble/predicted_sigma_hat_sq_{cosmo_model}_analyticalband_withdata.png", dpi=300)
+    plt.savefig(f"plots/hubble/predicted_sigma_hat_sq_{cosmo_model}_analyticalband_withdata.pdf", dpi=300)
+    if show:
+        plt.show()
+    plt.close()
+
+    return slopes, intercepts
+
 
 def plot_sigma_hat_vs_log_lbol(df_agn, show=False):
     """

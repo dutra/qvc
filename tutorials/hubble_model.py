@@ -15,7 +15,8 @@ tau_pivot = 2.0
 
 # --- AGN model ---
 def M_model_agn(M0_agn, alpha_agn, log_sigma_hat_UV):
-    return M0_agn + alpha_agn * 2 * log_sigma_hat_UV
+    log_sigma_hat_pivot = -2.2
+    return M0_agn + alpha_agn * 2 * (log_sigma_hat_UV - log_sigma_hat_pivot)
 
 # --- SN model (Brout+ 2022 Eq. 1 and 2) ---
 # SN calibration: anchor absolute magnitude from SH0ES (Riess et al. 2022:contentReference[oaicite:0]{index=0})
