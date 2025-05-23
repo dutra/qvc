@@ -9,13 +9,12 @@ from astropy.cosmology import FlatwCDM, Flatw0waCDM
 import matplotlib.pyplot as plt
 import os
 
-from hubble_fit import log_likelihood
 from hubble_utils import get_completeness_function_2d, compute_delta_mag_bias_2d_zbins
 from hubble_model import *
 from numpy.polynomial.polynomial import Polynomial
 from scipy.interpolate import interp1d
 
-def plot_corner(sampler, only_sna=False, cosmo_model='Flatw0waCDM'):
+def plot_posterior_corner(sampler, only_sna=False, cosmo_model='Flatw0waCDM', show=True):
     # Select cosmological parameters based on model
     if cosmo_model == 'FlatwCDM':
         cosmo_params = ['H0', 'Om0', 'w0']
@@ -43,7 +42,8 @@ def plot_corner(sampler, only_sna=False, cosmo_model='Flatw0waCDM'):
     else:
         fig.suptitle("SNIa + AGN", fontsize=28)
         plt.savefig(f"plots/hubble/posterior_{cosmo_model}_agn.png", dpi=200)
-    #plt.show()
+    if show:
+        plt.show()
     plt.close()
 
 def plot_cosmo_corner(sampler_sna, sampler_agn, cosmo_model='Flatw0waCDM', show=False):
@@ -142,7 +142,7 @@ def plot_cosmo_corner(sampler_sna, sampler_agn, cosmo_model='Flatw0waCDM', show=
     plt.close()
 
 
-def plot_hubble(sampler, df_agn, df_pantheon, cosmo_model, show=False, completeness=True):
+def plot_hubble(sampler, df_agn, df_pantheon, cosmo_model, show=False, completeness=True, show_uncorrected=False):
     """Plot Hubble diagram + residuals, classic Pantheon+ style."""
     # Define cosmological parameter labels
     if cosmo_model == 'FlatwCDM':
@@ -154,7 +154,7 @@ def plot_hubble(sampler, df_agn, df_pantheon, cosmo_model, show=False, completen
     
     flat_samples = sampler.get_chain(thin=15, flat=True)
     
-    z_grid = np.linspace(0.0001, df_agn['z'].max(), len(df_agn))
+    z_grid = np.linspace(0.0001, 5, 1000)
 
     # Build model_labels and get indices for cosmological parameters
     priors, model_labels = get_model_params(cosmo_model)
@@ -192,13 +192,12 @@ def plot_hubble(sampler, df_agn, df_pantheon, cosmo_model, show=False, completen
     #completeness2d, mag_centers, z_centers, dm, dz = get_completeness_function_2d(df_agn)
     #delta_mag_arr, delta_mag_arr_errs = compute_delta_mag_bias_2d_zbins(df_agn, completeness2d, mag_centers, z_centers, dm)
     if completeness:
+        print("Applying completeness correction in hubble diagram...")
         corrected_apparent_mag = df_agn['apparent_mag_i_corr']
     else:
+        print("NOT applying completeness correction in hubble diagram...")
         corrected_apparent_mag = df_agn['apparent_mag_i']
 
-    # delta_mag_fit = -0.11 * df_agn['z'].values + 0.11
-    # corrected_apparent_mag = df_agn['apparent_mag_i'] - delta_mag_fit
-    
     # Then re-compute the distance modulus
     mu_pred = np.array([
         corrected_apparent_mag - (K_corr(df_agn['z']) - K_corr(2)) -
@@ -207,18 +206,6 @@ def plot_hubble(sampler, df_agn, df_pantheon, cosmo_model, show=False, completen
         for s in flat_samples
     ])
 
-    # Now take the median again:
-    mu_pred_median = np.percentile(mu_pred, 50, axis=0)
-
-    # --- Also compute uncorrected mu_pred for plotting ---
-    mu_pred_uncorrected = np.array([
-        df_agn['apparent_mag_i'] - K_corr(df_agn['z']) - (
-            M_model_agn(s[param_indices['M0_agn']], s[param_indices['alpha_agn']], 
-                        df_agn['log_sigma_hat_UV']) - K_corr(2))
-        for s in flat_samples
-    ])
-    mu_pred_uncorrected_median = np.percentile(mu_pred_uncorrected, 50, axis=0)
-
     mu_pred_16th = np.percentile(mu_pred, 16, axis=0)
     mu_pred_84th = np.percentile(mu_pred, 84, axis=0)
     mu_pred_std = np.sqrt(df_agn['apparent_mag_i_err']**2 +
@@ -226,16 +213,48 @@ def plot_hubble(sampler, df_agn, df_pantheon, cosmo_model, show=False, completen
                  (0.055 * df_agn["z"])**2 +
                 (results["alpha_agn"][1] * 2*df_agn['log_sigma_hat_UV_err']))**2
 
+    # Now take the median again:
+    mu_pred_median = np.percentile(mu_pred, 50, axis=0)
+
     #--- Residuals ---
     mu_interp = np.interp(df_agn["z"], z_grid, mu_model_median)
     residuals = mu_pred_median - mu_interp
 
     # --- Binning ---
-    bins = np.linspace(df_agn["z"].min(), df_agn["z"].max(), 25)
+    bins = np.linspace(df_agn["z"].min(), df_agn["z"].max(), 27)
     bin_indices = np.digitize(df_agn["z"], bins)
-    binned_mu_pred_median = [np.mean(mu_pred_median[bin_indices == i]) for i in range(1, len(bins))]
+    # Compute counts per bin
+    bin_counts = [np.sum(bin_indices == i) for i in range(1, len(bins))]
+    # Mask: True if bin has at least 3 items
+    valid_mask = np.array(bin_counts) >= 5
+
+    binned_mu_pred_mean = [np.mean(mu_pred_median[bin_indices == i]) for i in range(1, len(bins))]
     binned_mu_pred_std = [np.std(mu_pred_median[bin_indices == i])/np.sqrt(len(mu_pred_median[bin_indices == i])) for i in range(1, len(bins))]
     binned_z = [np.median(df_agn["z"][bin_indices == i]) for i in range(1, len(bins))]
+
+    # Apply mask
+    binned_mu_pred_mean = np.array(binned_mu_pred_mean)[valid_mask]
+    binned_mu_pred_std = np.array(binned_mu_pred_std)[valid_mask]
+    binned_z = np.array(binned_z)[valid_mask]
+
+    if show_uncorrected:
+        # --- Also compute uncorrected mu_pred for plotting ---
+        mu_pred_uncorrected = np.array([
+            df_agn['apparent_mag_i'] - K_corr(df_agn['z']) - (
+                M_model_agn(s[param_indices['M0_agn']], s[param_indices['alpha_agn']], 
+                            df_agn['log_sigma_hat_UV']) - K_corr(2))
+            for s in flat_samples
+        ])
+        mu_pred_uncorrected_median = np.percentile(mu_pred_uncorrected, 50, axis=0)
+        # --- Binning ---
+        bin_indices = np.digitize(df_agn["z"], bins)
+        binned_mu_pred_uncorrected_mean = [np.mean(mu_pred_uncorrected_median[bin_indices == i]) for i in range(1, len(bins))]
+        binned_mu_pred_uncorrected_std = [np.std(mu_pred_uncorrected_median[bin_indices == i])/np.sqrt(len(mu_pred_uncorrected_median[bin_indices == i])) for i in range(1, len(bins))]
+        binned_z_uncorrected = [np.median(df_agn["z"][bin_indices == i]) for i in range(1, len(bins))]
+        # Apply mask to remove bins with less than 3 objects
+        binned_mu_pred_uncorrected_mean = np.array(binned_mu_pred_uncorrected_mean)[valid_mask]
+        binned_mu_pred_uncorrected_std = np.array(binned_mu_pred_uncorrected_std)[valid_mask]
+        binned_z_uncorrected = np.array(binned_z_uncorrected)[valid_mask]
 
 
     # --- Plot setup ---
@@ -260,12 +279,17 @@ def plot_hubble(sampler, df_agn, df_pantheon, cosmo_model, show=False, completen
     ax.errorbar(df_agn["z"], mu_pred_median, yerr=mu_pred_std, fmt='o', linestyle='none',
                 markersize=2, alpha=0.2, color='k', lw=1.5, zorder=-10, label="AGN")
     
-    ax.errorbar(df_agn["z"], mu_pred_uncorrected_median, yerr=mu_pred_std, fmt='o', linestyle='none',
-                markersize=2, alpha=0.2, color='green', lw=1.5, zorder=-10, label="Uncorrected AGN")
     # Binned AGNs
-    ax.errorbar(binned_z, binned_mu_pred_median, yerr=binned_mu_pred_std, label="Binned AGN",
+    ax.errorbar(binned_z, binned_mu_pred_mean, yerr=binned_mu_pred_std, label="Binned AGN",
                 fmt='o', markersize=4, capsize=3, lw=1.5,alpha=0.9, color="red", zorder=-7)
 
+    # Uncorrected AGNs
+    if show_uncorrected:
+        inset_ax.scatter(df_agn["z"], mu_pred_uncorrected_median, s=2, label="AGN (uncorrected)", alpha=0.5, color="green",zorder=-8)
+        ax.errorbar(df_agn["z"], mu_pred_uncorrected_median, yerr=mu_pred_std, fmt='o', linestyle='none',
+                    markersize=2, alpha=0.2, color='green', lw=1.5, zorder=-9, label="AGN (uncorrected)")
+        ax.errorbar(binned_z, binned_mu_pred_uncorrected_mean, yerr=binned_mu_pred_uncorrected_std, label="Binned AGN (uncorrected)", 
+                    fmt='o', markerfacecolor='none', markeredgecolor='red', markersize=4, capsize=3, lw=1.5, alpha=0.9, color="red", zorder=-8)
     # SNIa points
     ax.errorbar(df_pantheon["zHD"], df_pantheon["MU_SH0ES"], yerr=df_pantheon["MU_SH0ES_ERR_DIAG"], 
                 fmt='s', markersize=3, color="dodgerblue", linestyle='none', lw=1, label="SN Ia", alpha=0.7, zorder=-8)
@@ -276,9 +300,9 @@ def plot_hubble(sampler, df_agn, df_pantheon, cosmo_model, show=False, completen
 
     ax.set_ylabel(r"$\mu$ (mag)")
     ax.set_xlabel(r"$z$")
-    ax.set_xlim(-0.2, df_agn['z'].max())
-    #ax.set_ylim(26, 51)
-    ax.legend(frameon=False, loc="lower center", bbox_to_anchor=(0.3, 0.05))
+    ax.set_xlim(-0.2, np.round(df_agn['z'].max())+0.1)
+    ax.set_ylim(26, 51)
+    ax.legend(frameon=False, loc="lower center", bbox_to_anchor=(0.3, 0.05), fontsize=16)
 
     # Ticks styling
     for axi in [ax, inset_ax]:
@@ -487,12 +511,12 @@ def plot_predicted_sigma_hat_vs_luminosity(sampler, df_agn, cosmo_model, show=Fa
 
 
     plt.plot(log_lbol_fit, log_sigma_hat_sq_fit, color='purple', lw=2, label='Fit (median)')
-    plt.fill_between(
-        log_lbol_fit,
-        log_sigma_hat_sq_fit - log_sigma_hat_sq_fit_std,
-        log_sigma_hat_sq_fit + log_sigma_hat_sq_fit_std,
-        color='purple', alpha=0.3, label='Fit ± std'
-    )
+    # plt.fill_between(
+    #     log_lbol_fit,
+    #     log_sigma_hat_sq_fit - log_sigma_hat_sq_fit_std,
+    #     log_sigma_hat_sq_fit + log_sigma_hat_sq_fit_std,
+    #     color='purple', alpha=0.3, label='Fit ± std'
+    # )
 
     z_bins = np.linspace(z.min(), z.max(), 4 + 1)
     z_bin_indices = np.digitize(z, z_bins) - 1  # bin index for each object
@@ -531,7 +555,6 @@ def plot_predicted_sigma_hat_vs_luminosity(sampler, df_agn, cosmo_model, show=Fa
 
 
 
-#def plot_predicted_sigma_hat_vs_luminosity_linear_fit(sampler, df_agn, cosmo_model, show=False):
 def plot_predicted_sigma_hat_vs_luminosity(sampler, df_agn, cosmo_model, show=False, log_sigma_hat_pivot=-2.2):
     import numpy as np
     import matplotlib.pyplot as plt
@@ -581,22 +604,22 @@ def plot_predicted_sigma_hat_vs_luminosity(sampler, df_agn, cosmo_model, show=Fa
     plt.figure(figsize=(7, 5))
 
     # Posterior 1σ band and median line
-    plt.fill_between(
-        lbol_grid,
-        y_low_lin,
-        y_high_lin,
-        color='orange',
-        alpha=0.4,
-        label=r'Fit $\pm 1\sigma$'
-    )
+    # plt.fill_between(
+    #     lbol_grid,
+    #     y_low_lin,
+    #     y_high_lin,
+    #     color='orange',
+    #     alpha=0.4,
+    #     label=r'Fit $\pm 1\sigma$'
+    # )
     plt.plot(lbol_grid, y_median_lin, color='orange', lw=2, label='Median fit')
 
     # Observed data points with error bars
     plt.errorbar(
         lbol,
         sigma_hat_sq,
-        yerr=sigma_hat_sq_err,
-        xerr=lbol_err,
+        yerr=0,
+        xerr=0,
         fmt='o',
         color='black',
         markerfacecolor='black',

@@ -18,7 +18,7 @@ from scipy.interpolate import RegularGridInterpolator
 bands = ['u', 'g', 'r', 'i', 'z']#, 'y']
 bands_idx = {b: i for i, b in enumerate(bands)}
 
-def populate_sdss_fields(objs, progress_bar=False):
+def populate_sdss_fields(objs, progress_bar=True):
     print(f"Populating SDSS fields: {len(objs)}", flush=True)
     cat = pd.read_parquet(f"data/S82/Catalog.parquet").set_index('idx')
     hdul = fits.open('data/dr16q_prop_May01_2024.fits')
