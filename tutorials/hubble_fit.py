@@ -292,14 +292,14 @@ def run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model='Flatw0waCDM',
     )
     # Predict median uncensored AGN magnitudes
     M_model_agn_samples = M_model_agn(params['M0_agn'], params['alpha_agn'], df_agn_filtered['log_sigma_hat_UV'])
-    mu_model = df_agn_filtered['apparent_mag_i'].values - (K_corr(df_agn_filtered['z'].values) - K_corr(2)) - M_model_agn_samples
+    m_model = mu_cosmo + (K_corr(df_agn_filtered['z'].values) - K_corr(2)) + M_model_agn_samples
 
-    mag_corr = predict_uncensored_magnitudes(df_agn_filtered, mu_model, mu_err, M_model_agn_samples)
+    mag_corr = predict_uncensored_magnitudes(df_agn_filtered, m_model, mu_err)
 
     return sampler, model_labels, mag_corr
 
 
-def predict_uncensored_magnitudes(df_agn, mu_model, mu_err, M_model):
+def predict_uncensored_magnitudes(df_agn, m_model, mu_err):
     z = df_agn['z'].values
 
     p_detect, mag_centers, z_centers, dm, dz = get_completeness_function_2d(df_agn)
@@ -307,15 +307,15 @@ def predict_uncensored_magnitudes(df_agn, mu_model, mu_err, M_model):
     uncensored_samples = []
 
     for i in range(len(df_agn)):
-        mu = mu_model[i]
+        m = m_model[i]
         sigma = mu_err[i]
         zval = z[i]
 
         # Grid of possible m* values
-        m_grid = np.linspace(mu - 5*sigma, mu + 5*sigma, 500) + (K_corr(zval) - K_corr(2)) + M_model[i]
+        m_grid = np.linspace(m - 5*sigma, m + 5*sigma, 500)
 
         # Gaussian prior
-        prior = stats.norm.pdf(m_grid, loc=mu + (K_corr(zval) - K_corr(2)) + M_model[i], scale=sigma)
+        prior = stats.norm.pdf(m_grid, loc=m, scale=sigma)
 
         # Detection probability at each m
         p_det = p_detect(m_grid, np.full_like(m_grid, zval))
