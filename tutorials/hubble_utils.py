@@ -1,5 +1,5 @@
 import matplotlib.pyplot as plt
-
+import os
 import numpy as np
 import h5py
 from scipy.ndimage import gaussian_filter1d, gaussian_filter
@@ -40,14 +40,19 @@ def populate_sdss_fields(objs, progress_bar=True):
         d['dec'] = obj['DEC']
         d['z'] = obj['Z_SYS']
         d['sdss_name'] = fits_data['SDSS_NAME'][i]  # Extract SDSS_NAME
-        d['log_lbol'] = fits_data['LOGLBOL'][i]  # Extract log Lbol values
-        d["log_lbol_err"] = fits_data['LOGLBOL_ERR'][i]  # Extract log Lbol error values
+        if d['z'] < 0.7:
+            d['log_lbol'] = np.log10(5.15) + fits_data['LOGL3000'][i]
+            d['log_lbol_err'] = fits_data['LOGL3000_ERR'][i]
+        else:
+            d['log_lbol'] = fits_data['LOGLBOL'][i]  # Extract log Lbol values
+            d["log_lbol_err"] = fits_data['LOGLBOL_ERR'][i]  # Extract log Lbol error values
         d['log_mbh'] = fits_data['LOGMBH'][i]  # Extract log MBH values
         d['log_mbh_err'] = fits_data['LOGMBH_ERR'][i]  # Extract log MBH error values
         d['log_ledd_ratio'] = fits_data['LOGLEDD_RATIO'][i]  # Extract log L/edd values
         d['log_ledd_ratio_err'] = fits_data['LOGLEDD_RATIO_ERR'][i]  # Extract log L/edd error values
         d['ebv'] = fits_data['EBV'][i]
         d['M_i'] = fits_data_2['M_I'][i]
+        d['sn_median_all'] = fits_data['SN_MEDIAN_ALL'][i]
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
             d['log_lbol'] = fits_data['LOGLBOL'][i]
@@ -70,41 +75,6 @@ def populate_sdss_fields(objs, progress_bar=True):
 
     return objs
 
-def populate_sdss_fields_sdssname(d, fits_data, fits_data_2):
-    i = np.argwhere(d['sdss_name'] == fits_data['SDSS_NAME']).flatten()
-    if len(i) == 0:
-        print(f"Warning: {d['sdss_name']} not found in SDSS data")
-        return d
-
-    i = i[0]
-    if np.any(fits_data_2['PSFFLUX'][i,:] <= 0):
-        return d
-    d['log_mbh'] = fits_data['LOGMBH'][i]
-    d['log_mbh_err'] = fits_data['LOGMBH_ERR'][i]
-    d['log_ledd_ratio'] = fits_data['LOGLEDD_RATIO'][i]
-    d['log_ledd_ratio_err'] = fits_data['LOGLEDD_RATIO_ERR'][i]
-    d['ebv'] = fits_data['EBV'][i]
-    d['M_i'] = fits_data_2['M_I'][i]
-    with warnings.catch_warnings(record=True) as w:
-        warnings.simplefilter("always")
-        d['log_lbol'] = fits_data['LOGLBOL'][i]
-        d['log_lbol_err'] = fits_data['LOGLBOL_ERR'][i]
-        d['apparent_mag_z'] = -2.5 * np.log10(fits_data_2['PSFFLUX'][i,4]) + 22.5
-        d['apparent_mag_i'] = -2.5 * np.log10(fits_data_2['PSFFLUX'][i,3]) + 22.5
-        d['apparent_mag_r'] = -2.5 * np.log10(fits_data_2['PSFFLUX'][i,2]) + 22.5
-        d['apparent_mag_g'] = -2.5 * np.log10(fits_data_2['PSFFLUX'][i,1]) + 22.5
-        d['apparent_mag_u'] = -2.5 * np.log10(fits_data_2['PSFFLUX'][i,0]) + 22.5
-        d['apparent_mag_z_err'] = 2.5/np.log(10) * np.sqrt(1/fits_data_2['PSFFLUX_IVAR'][i,4])/fits_data_2['PSFFLUX'][i,4]
-        d['apparent_mag_i_err'] = 2.5/np.log(10) * np.sqrt(1/fits_data_2['PSFFLUX_IVAR'][i,3])/fits_data_2['PSFFLUX'][i,3]
-        d['apparent_mag_r_err'] = 2.5/np.log(10) * np.sqrt(1/fits_data_2['PSFFLUX_IVAR'][i,2])/fits_data_2['PSFFLUX'][i,2]
-        d['apparent_mag_g_err'] = 2.5/np.log(10) * np.sqrt(1/fits_data_2['PSFFLUX_IVAR'][i,1])/fits_data_2['PSFFLUX'][i,1]
-        d['apparent_mag_u_err'] = 2.5/np.log(10) * np.sqrt(1/fits_data_2['PSFFLUX_IVAR'][i,0])/fits_data_2['PSFFLUX'][i,0]
-        d['color'] = -2.5 * np.log10(fits_data_2['PSFFLUX'][i, 0] / fits_data_2['PSFFLUX'][i, 3])
-    if any(issubclass(warning.category, RuntimeWarning) for warning in w):
-        print(f"RuntimeWarning occurred for {d['sdss_name']}")
-        print(fits_data_2['PSFFLUX'][i,:])
-        print(w)
-    return d
 
 
 def read_quasars_from_hdf5(file_path):
@@ -121,7 +91,6 @@ def read_quasars_from_hdf5(file_path):
                 quasar[sub_group_name] = {sub_key: sub_group[sub_key][...] for sub_key in sub_group.keys()}
             quasar_list.append(quasar)
                 #populate_sdss_fields(quasar, fits_data, fits_data_2)
-    populate_sdss_fields(quasar_list)
     return quasar_list
 
 def filter_unresolved_quasars(df):
@@ -158,10 +127,14 @@ def filter_unresolved_quasars(df):
 
     return df
 
-def load_quasar_data(file_path):
+def load_quasar_data(file_path, populate_sdss=False):
 
     quasar_list = read_quasars_from_hdf5(file_path)
     print("Number of quasars loaded:", len(quasar_list))
+    if populate_sdss:
+        print("Populating SDSS fields...")
+        populate_sdss_fields(quasar_list)
+        write_hdf5_file(quasar_list, file_path)
 
 
     df = pd.DataFrame(quasar_list)
@@ -197,10 +170,10 @@ def load_quasar_data(file_path):
     print("Final number of quasars:", len(df))
     return df
 
-def load_data(file_path):
+def load_data(file_path, populate_sdss=False):
     print("Loading quasar data...")
     #df_agn = load_quasar_data("data/may12_objs_tauwavelength_taublr_redbands_ds4_merged.h5")
-    df_agn = load_quasar_data(file_path=file_path)
+    df_agn = load_quasar_data(file_path=file_path, populate_sdss=populate_sdss)
     # Load Pantheon+ SN metadata
     print("Loading Pantheon+ supernova data...")
     df_pantheon = pd.read_csv(
@@ -536,3 +509,21 @@ def compare_models_by_log_evidence(logZ_1, logZerr_1, logZ_2, logZerr_2, model_1
     print(f"  Evidence strength: {strength}")
 
     return result
+
+def write_hdf5_file(quasar_list, file_path):
+    print(f"Writing {len(quasar_list)} quasars to {file_path}", flush=True)
+    # Create directory if it doesn't exist
+    directory = os.path.dirname(file_path)
+    os.makedirs(directory, exist_ok=True)
+    with h5py.File(file_path, "w") as hdf:
+        for quasar in quasar_list:
+            object_id = quasar["object_id"]
+
+            group = hdf.create_group(object_id)
+            for key, value in quasar.items():
+                if isinstance(value, dict):
+                    sub_group = group.create_group(key)
+                    for sub_key, sub_value in value.items():
+                        sub_group.create_dataset(sub_key, data=sub_value)
+                else:
+                    group.attrs[key] = value

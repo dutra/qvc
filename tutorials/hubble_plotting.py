@@ -51,7 +51,11 @@ def plot_traces(sampler, only_sna=False, cosmo_model='Flatw0waCDM', show=True, d
     plt.tight_layout()
     if show:
         plt.show()
-    plt.savefig(f"plots/hubble/trace_{cosmo_model}_agn.png", dpi=200)
+    if only_sna:
+        file_path = f"plots/hubble/traces_{cosmo_model}_sna.png"
+    else:
+        file_path = f"plots/hubble/traces_{cosmo_model}_agn.png"
+    plt.savefig(file_path, dpi=200)
 
     return fig
 
@@ -558,11 +562,9 @@ def plot_predicted_sigma_hat_vs_luminosity(sampler, df_agn, cosmo_model, show=Fa
         lbol_grid,
         y_low_lin,
         y_high_lin,
-        color='orange',
-        alpha=0.4,
-        label=r'Fit $\pm 1\sigma$'
-    )
-    plt.plot(lbol_grid, y_median_lin, color='orange', lw=2, label='Median fit')
+        color='m',
+        alpha=0.4)
+    plt.plot(lbol_grid, y_median_lin, color='m', lw=2, label='Best fit model')
 
     # Observed data points with error bars
     # Color points by redshift
@@ -581,13 +583,13 @@ def plot_predicted_sigma_hat_vs_luminosity(sampler, df_agn, cosmo_model, show=Fa
         markersize=4, 
         lw=1,
         zorder=2,
-        label='Observed AGN'
+        label='AGN'
     )
 
     plt.xscale('log')
     plt.yscale('log')
-    plt.xlabel(r'$L_{\mathrm{bol}}$ [erg/s]')
-    plt.ylabel(r'$\hat{\sigma}_{\mathrm{UV}}^2$ $[\mathrm{mag}^2/\mathrm{day}]$')
+    plt.xlabel(r'$L_{\mathrm{bol}}$ (erg $\mathrm{s}^{-1}$)')
+    plt.ylabel(r'$\hat{\sigma}_{\mathrm{UV}}^2$ $(\mathrm{mag}^2\ \mathrm{day}^{-1})$')
     plt.legend(fontsize=16)
     plt.tight_layout()
     plt.xlim(2e43, 9e47)

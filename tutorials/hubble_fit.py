@@ -200,7 +200,8 @@ def run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model='Flatw0waCDM',
                       only_sna=False, completeness=True, use_full_cov=False,
                       num_samples=2000, num_warmup=2000, 
                       use_dynesty=False, nlive=500, maxiter=None, n_effective=5000):
-    
+    import multiprocessing
+
     priors, model_labels = get_model_params(cosmo_model)
     model_priors = {key: priors[key] for key in model_labels}
     ndim = len(model_labels)
@@ -215,9 +216,6 @@ def run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model='Flatw0waCDM',
     print(f"Log sigma hat pivot: {log_sigma_hat_pivot:.3f}")
 
     if use_dynesty:
-        import dynesty
-        import multiprocessing
-
         # Set dynesty global context
         _dynesty_config.update({
             'model_priors': model_priors,
@@ -273,6 +271,21 @@ def run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model='Flatw0waCDM',
             sampler.run_mcmc(state, num_samples, progress=True)
 
         samples = sampler.get_chain(flat=True)
+
+        # Check convergence using autocorrelation time
+        try:
+            tau = sampler.get_autocorr_time(quiet=True)
+            converged = np.all((sampler.iteration > 50 * tau) & (tau * 100 < sampler.iteration))
+            print(f"Autocorr time: {tau}")
+            if converged:
+                print("MCMC appears to have converged.")
+            else:
+                print("Warning: MCMC may not have converged. Consider running for more steps.")
+        except Exception as e:
+            print(f"Could not compute autocorrelation time: {e}")
+        
+        if not only_sna:
+            np.save(f"data/samples_emcee_{cosmo_model}_agn.npy", samples)
         median_samples = np.median(samples, axis=0)
         logZ = logZerr = None  # Not available from emcee
 
@@ -341,24 +354,28 @@ def predict_uncensored_magnitudes(df_agn, m_model, mu_err):
 def main():
     # Load data
     global Cov_inv, logdetCov
-    df_agn, df_pantheon, Cov_inv, logdetCov = load_data("data/may23_all_merged.h5")
+    df_agn, df_pantheon, Cov_inv, logdetCov = load_data("data/may23_all_merged.h5", populate_sdss=True)
 
-    num_warmup, num_samples = 10, 25
+    num_warmup, num_samples = 5000, 1000
     use_full_cov = True
     completeness = True
     # Run MCMC fits for SNIa only and SNIa+AGN, for each cosmological model
     for cosmo_model in ['Flatw0waCDM', 'FlatwCDM']:
         print(f"Running MCMC for {cosmo_model}: SNIa only")
-        sampler_snia, _, _, _, _ = run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model=cosmo_model, only_sna=True, 
+        sampler_snia, _, _, _, _ = run_mcmc_pipeline(
+                                            df_agn, df_pantheon, cosmo_model=cosmo_model, only_sna=True, 
                                             completeness=completeness, use_full_cov=use_full_cov,
                                             num_warmup=num_warmup, num_samples=num_samples)
         plot_posterior_corner(sampler_snia, cosmo_model=cosmo_model, only_sna=True)
-        
+        plot_traces(sampler_snia, only_sna=True, cosmo_model=cosmo_model, show=False, dynasty=False)
+
         print(f"Running MCMC for {cosmo_model}: SNIa + AGN")
-        sampler_joint, model_labels, mag_corr, logZ, logZerr = run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model=cosmo_model, only_sna=False, 
-                                                        completeness=completeness, use_full_cov=use_full_cov,
-                                                        num_warmup=num_warmup, num_samples=num_samples)
+        sampler_joint, model_labels, mag_corr, logZ, logZerr = run_mcmc_pipeline(
+                                                    df_agn, df_pantheon, cosmo_model=cosmo_model, only_sna=False, 
+                                                    completeness=completeness, use_full_cov=use_full_cov,
+                                                    num_warmup=num_warmup, num_samples=num_samples)
         plot_posterior_corner(sampler_joint, cosmo_model=cosmo_model, only_sna=False)
+        plot_traces(sampler_joint, only_sna=False, cosmo_model=cosmo_model, show=False, dynasty=False)
         
         # Plot results
         print("Plotting Hubble diagram...")
@@ -436,6 +453,6 @@ def test():
     plot_predicted_vs_actual_Mi(sampler_joint, df_agn, cosmo_model=cosmo_model)
 
 if __name__ == "__main__":
-    #main()
+    main()
     #test()
-    compare_models()
+    #compare_models()
