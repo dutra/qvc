@@ -358,7 +358,7 @@ def get_completeness_function_2d(df_agn, sim_file="sampled_apparent_magnitudes_r
 
     # Bin edges and centers
     mag_edges = np.linspace(mag_min, mag_max, n_mag_bins + 1)
-    z_edges = np.linspace(np.min(z_true), np.max(z_true), n_z_bins + 1)
+    z_edges = np.linspace(0.0, np.max(z_true)+0.5, n_z_bins + 1)
     mag_centers = 0.5 * (mag_edges[:-1] + mag_edges[1:])
     z_centers = 0.5 * (z_edges[:-1] + z_edges[1:])
 

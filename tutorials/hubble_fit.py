@@ -146,17 +146,17 @@ def log_likelihood(theta, cosmo_model,
     norm_correction = 0.0
     if completeness_params is not None:
         completeness2d, mag_centers, z_centers, dm, dz = completeness_params
-        m_model = M_pred + mu_cosmo
+        m_model = m_obs #M_pred + mu_cosmo
 
         integrals = np.zeros(len(df_agn))
-        unique_err = np.round(mu_err, 4)
+        unique_err = np.round(mu_err, 2)
 
         mag_range = mag_centers - np.mean(mag_centers)  # Center kernel around zero explicitly
 
         for sigma in np.unique(unique_err):
             if sigma <= 0 or not np.isfinite(sigma):
                 continue
-            mask = np.abs(mu_err - sigma) < 1e-6
+            mask = np.abs(mu_err - sigma) < 1e-2
 
             # Symmetric kernel centered on zero magnitude offset
             kernel = stats.norm.pdf(mag_range, loc=0, scale=sigma)
@@ -170,13 +170,13 @@ def log_likelihood(theta, cosmo_model,
                 conv_values.append(conv)
 
             for i, idx in enumerate(np.where(mask)[0]):
-                val = np.interp(m_model[idx], mag_centers, conv_values[i], left=1e-12, right=1e-12)
+                val = np.interp(m_model[idx], mag_centers, conv_values[i])
                 integrals[idx] = val
 
         norm_correction = np.sum(np.log(np.clip(integrals, 1e-12, None)))
 
     if return_params:
-        return ll_snia + ll_calib + ll_agn - norm_correction, norm_correction, m_model
+        return ll_snia + ll_calib + ll_agn - norm_correction, np.log(np.clip(integrals, 1e-12, None)), m_model
     
     return ll_snia + ll_calib + ll_agn - norm_correction
 

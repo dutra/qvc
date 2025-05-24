@@ -513,7 +513,7 @@ def plot_completeness_vs_mag_at_redshifts(p_detect, mag_centers, z_centers,
     plt.ylabel(r"$p(I{=}1|m, z)$")
     plt.legend(fontsize=16, loc="upper right", frameon=False)
     #plt.ylim(0, .02)
-    #plt.xlim(17, 25)
+    plt.xlim(17, 25)
     plt.grid(False)
     plt.tight_layout()
     if show:
