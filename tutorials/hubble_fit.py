@@ -13,10 +13,7 @@ import h5py
 from astropy.io import fits
 from scipy import stats
 from scipy.signal import fftconvolve
-from scipy.stats import gaussian_kde
-import emcee
 import corner
-import multiprocessing
 from matplotlib.lines import Line2D
 import warnings
 from scipy.interpolate import interp1d
@@ -26,11 +23,8 @@ from mpl_toolkits.axes_grid1.inset_locator import inset_axes
 from astroquery.vizier import Vizier
 from astropy.coordinates import match_coordinates_sky
 from astropy.coordinates import SkyCoord
-from astropy.table import Table
-from scipy.stats import norm
-from scipy.special import expit  # numerically stable sigmoid
-import astropy.units as u
-import math
+from dynesty import DynamicNestedSampler
+from dynesty.utils import resample_equal
 
 import matplotlib.pyplot as plt
 
@@ -62,9 +56,8 @@ def log_likelihood(theta, cosmo_model,
     # Cosmology
     if cosmo_model == 'FlatwCDM':
         cosmo = FlatwCDM(H0=params['H0'], Om0=params['Om0'], w0=params['w0'])
-    else:
+    elif cosmo_model == 'Flatw0waCDM':
         cosmo = Flatw0waCDM(H0=params['H0'], Om0=params['Om0'], w0=params['w0'], wa=params['wa'])
-
     # SN model
     mu_theory = cosmo.distmod(df_pantheon['zHD'].values).value
     mu_obs = M_model_SN(
@@ -183,55 +176,108 @@ def log_likelihood(theta, cosmo_model,
     
     return ll_snia + ll_calib + ll_agn - norm_correction
 
+# Globals used by dynesty
+_dynesty_config = {}
+
+def prior_transform_dynesty(unit_cube):
+    priors = _dynesty_config['model_priors']
+    keys = _dynesty_config['model_labels']
+    return [priors[key][0] + (priors[key][1] - priors[key][0]) * x
+            for x, key in zip(unit_cube, keys)]
+
+def loglike_dynesty(theta):
+    cfg = _dynesty_config
+    return log_likelihood(theta,
+                          cfg['cosmo_model'],
+                          cfg['df_agn'],
+                          cfg['df_pantheon'],
+                          cfg['completeness_params'],
+                          cfg['log_sigma_hat_pivot'],
+                          cfg['only_sna'],
+                          cfg['use_full_cov'])
+
 def run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model='Flatw0waCDM', 
                       only_sna=False, completeness=True, use_full_cov=False,
-                      num_samples=2000, num_warmup=2000):
+                      num_samples=2000, num_warmup=2000, 
+                      use_dynesty=False, nlive=500, maxiter=None, n_effective=5000):
+    
     priors, model_labels = get_model_params(cosmo_model)
-    ndim = len(model_labels)
     model_priors = {key: priors[key] for key in model_labels}
+    ndim = len(model_labels)
 
-    # MCMC initialization
-    nwalkers = ndim * 2 * 15
-    num_warmup = num_warmup    # increased burn-in steps for better convergence
-    num_samples = num_samples  # increased MCMC sample steps for robust posterior
-    # Random initial positions drawn uniformly within prior bounds
-    initial_pos = np.array([
-        np.random.uniform(low, high, nwalkers) for low, high in model_priors.values()
-    ]).T
-
-    # Prepare data (reduce DataFrame size for efficiency)
+    # Prepare data
     df_pantheon_filtered = df_pantheon[['zHD', 'MU_SH0ES', 'MU_SH0ES_ERR_DIAG', 'CEPH_DIST', 'IS_CALIBRATOR',
-                                        'm_b_corr', 'x1', 'c', 'biasCor_m_b', 'HOST_LOGMASS']]  # SN data needed for likelihood
+                                        'm_b_corr', 'x1', 'c', 'biasCor_m_b', 'HOST_LOGMASS']]
     df_agn_filtered = df_agn[['z', 'apparent_mag_i', 'apparent_mag_i_err',
-                               'log_sigma_hat_UV', 'log_sigma_hat_UV_err']]
+                              'log_sigma_hat_UV', 'log_sigma_hat_UV_err']]
     completeness_params = get_completeness_function_2d(df_agn_filtered) if completeness else None
-    #completeness_params = get_completeness_function_simple(20) if completeness else None
     log_sigma_hat_pivot = df_agn_filtered['log_sigma_hat_UV'].mean()
     print(f"Log sigma hat pivot: {log_sigma_hat_pivot:.3f}")
 
-    # Run MCMC using EnsembleSampler with multiprocessing for speed
-    num_cpus = multiprocessing.cpu_count()-2
-    with multiprocessing.Pool(processes=num_cpus) as pool:
-        sampler = emcee.EnsembleSampler(nwalkers, ndim, log_likelihood, 
-                                        args=(cosmo_model, 
-                                              df_agn_filtered, df_pantheon_filtered, 
-                                              completeness_params, log_sigma_hat_pivot,
-                                              only_sna, use_full_cov), 
-                                        pool=pool)
-        # Burn-in
-        state = sampler.run_mcmc(initial_pos, num_warmup, progress=True)
-        sampler.reset()
-        # Main MCMC sampling
-        sampler.run_mcmc(state, num_samples, progress=True)
+    if use_dynesty:
+        import dynesty
+        import multiprocessing
 
+        # Set dynesty global context
+        _dynesty_config.update({
+            'model_priors': model_priors,
+            'model_labels': model_labels,
+            'cosmo_model': cosmo_model,
+            'df_agn': df_agn_filtered,
+            'df_pantheon': df_pantheon_filtered,
+            'completeness_params': completeness_params,
+            'log_sigma_hat_pivot': log_sigma_hat_pivot,
+            'only_sna': only_sna,
+            'use_full_cov': use_full_cov,
+        })
 
-    
-    samples = sampler.get_chain(flat=True)
-    # Compute median of each parameter from the samples
-    median_samples = np.median(samples, axis=0)
+        num_cpus = multiprocessing.cpu_count() - 2
+        with multiprocessing.Pool(processes=num_cpus) as pool:
+            sampler = DynamicNestedSampler(
+                loglike_dynesty,
+                prior_transform_dynesty,
+                ndim,
+                bound='single', # assuming gaussian like posterior, if multimodal use 'multi'
+                sample='unif', # fast works well for moderately correlated parameters, use 'auto' if unsure
+                nlive=nlive,
+                pool=pool,
+                queue_size=num_cpus
+            )
+            sampler.run_nested(maxiter=maxiter, n_effective=n_effective, print_progress=True)
+            results = sampler.results
+        logZ, logZerr = results.logz[-1], results.logzerr[-1]
+        print(f"\nBayesian evidence logZ = {logZ:.2f} ± {logZerr:.2f}")
+        if logZerr > 1:
+            print("Warning: logZ error is large, consider increasing nlive or maxiter.")
+
+        samples, weights = results.samples, np.exp(results.logwt - results.logz[-1])
+        resampled = resample_equal(samples, weights)
+        median_samples = np.median(resampled, axis=0)
+    else:
+        # --- emcee logic ---
+        nwalkers = ndim * 2 * 15
+        initial_pos = np.array([
+            np.random.uniform(low, high, nwalkers) for low, high in model_priors.values()
+        ]).T
+
+        num_cpus = multiprocessing.cpu_count() - 2
+        with multiprocessing.Pool(processes=num_cpus) as pool:
+            sampler = emcee.EnsembleSampler(nwalkers, ndim, log_likelihood,
+                                            args=(cosmo_model,
+                                                  df_agn_filtered, df_pantheon_filtered,
+                                                  completeness_params, log_sigma_hat_pivot,
+                                                  only_sna, use_full_cov),
+                                            pool=pool)
+            state = sampler.run_mcmc(initial_pos, num_warmup, progress=True)
+            sampler.reset()
+            sampler.run_mcmc(state, num_samples, progress=True)
+
+        samples = sampler.get_chain(flat=True)
+        median_samples = np.median(samples, axis=0)
+        logZ = logZerr = None  # Not available from emcee
+
+    # Common post-processing
     params = dict(zip(model_labels, median_samples))
-
-    # Calculate m_model and mu_cosmo using the median samples
     if cosmo_model == 'Flatw0waCDM':
         mu_cosmo = Flatw0waCDM(H0=params['H0'], Om0=params['Om0'], w0=params['w0'], wa=params['wa']).distmod(df_agn_filtered['z'].values).value
     else:
@@ -239,20 +285,18 @@ def run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model='Flatw0waCDM',
 
     mu_err = np.sqrt(
         df_agn_filtered['apparent_mag_i_err'].values**2 +
-        (params['alpha_agn'] * 2*df_agn_filtered['log_sigma_hat_UV_err'].values)**2 +
+        (params['alpha_agn'] * 2 * df_agn_filtered['log_sigma_hat_UV_err'].values)**2 +
         (2.5 * 0.3 * np.log10(1 + df_agn_filtered['z'].values))**2 +
         (0.055 * df_agn_filtered['z'].values)**2 +
         np.exp(2 * params['log_f'])
     )
-    # Predict median uncensored AGN magnitudes
+
     M_model_agn_samples = M_model_agn(params['M0_agn'], params['alpha_agn'], df_agn_filtered['log_sigma_hat_UV'])
     m_model = mu_cosmo + (K_corr(df_agn_filtered['z'].values) - K_corr(2)) + M_model_agn_samples
-    #m_model = mu_cosmo + M_model_agn_samples
     mag_corr = predict_uncensored_magnitudes(df_agn_filtered, m_model, mu_err)
     df_agn['apparent_mag_i_corr'] = mag_corr
 
-    return sampler, model_labels, mag_corr
-
+    return sampler, model_labels, mag_corr, logZ, logZerr
 
 def predict_uncensored_magnitudes(df_agn, m_model, mu_err):
     z = df_agn['z'].values
@@ -294,44 +338,10 @@ def predict_uncensored_magnitudes(df_agn, m_model, mu_err):
 
     return np.array(uncensored_samples)
 
-
-
 def main():
-    print("Loading quasar data...")
-    #df_agn = load_quasar_data("data/may12_objs_tauwavelength_taublr_redbands_ds4_merged.h5")
-    df_agn = load_quasar_data("data/may23_all_merged.h5")
-    # Load Pantheon+ SN metadata
-    print("Loading Pantheon+ supernova data...")
-    df_pantheon = pd.read_csv(
-        #"https://raw.githubusercontent.com/PantheonPlusSH0ES/DataRelease/main/Pantheon%2B_Data/4_DISTANCES_AND_COVAR/Pantheon%2BSH0ES.dat",
-        "data/Pantheon+SH0ES.dat",
-        sep=r"\s+"
-    )
-
-    print("Loading SN covariance matrix...")
-    n_sn = len(df_pantheon)
-
-    # Load .cov file with NumPy, skipping the first line (which contains just "1701")
-    cov_flat = np.loadtxt(
-        #"https://raw.githubusercontent.com/PantheonPlusSH0ES/DataRelease/main/Pantheon%2B_Data/4_DISTANCES_AND_COVAR/Pantheon%2BSH0ES_STAT%2BSYS.cov",
-        "data/Pantheon+SH0ES_STAT+SYS.cov",
-        skiprows=1
-    )
-
-    # Reshape into square matrix
-    cov_matrix = cov_flat.reshape((n_sn, n_sn))
-
-    # Confirm shape is correct
-    assert cov_matrix.shape == (n_sn, n_sn), f"Expected ({n_sn},{n_sn}), got {cov_matrix.shape}"
-
-    # Invert covariance and pre-compute log-determinant for SN likelihood
+    # Load data
     global Cov_inv, logdetCov
-    Cov_inv = np.linalg.inv(cov_matrix)
-    sign, logdet = np.linalg.slogdet(cov_matrix)
-    if sign <= 0:
-        raise ValueError("Covariance matrix is not positive-definite!")
-    logdetCov = logdet
-    print("Data loaded. Running joint cosmographic fits...")
+    df_agn, df_pantheon, Cov_inv, logdetCov = load_data("data/may23_all_merged.h5")
 
     num_warmup, num_samples = 10, 25
     use_full_cov = True
@@ -339,13 +349,13 @@ def main():
     # Run MCMC fits for SNIa only and SNIa+AGN, for each cosmological model
     for cosmo_model in ['Flatw0waCDM', 'FlatwCDM']:
         print(f"Running MCMC for {cosmo_model}: SNIa only")
-        sampler_snia, _, _ = run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model=cosmo_model, only_sna=True, 
+        sampler_snia, _, _, _, _ = run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model=cosmo_model, only_sna=True, 
                                             completeness=completeness, use_full_cov=use_full_cov,
                                             num_warmup=num_warmup, num_samples=num_samples)
         plot_posterior_corner(sampler_snia, cosmo_model=cosmo_model, only_sna=True)
         
         print(f"Running MCMC for {cosmo_model}: SNIa + AGN")
-        sampler_joint, _, mag_corr = run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model=cosmo_model, only_sna=False, 
+        sampler_joint, model_labels, mag_corr, logZ, logZerr = run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model=cosmo_model, only_sna=False, 
                                                         completeness=completeness, use_full_cov=use_full_cov,
                                                         num_warmup=num_warmup, num_samples=num_samples)
         plot_posterior_corner(sampler_joint, cosmo_model=cosmo_model, only_sna=False)
@@ -369,26 +379,55 @@ def main():
         break
     print("All analyses complete. Results saved to 'plots/' directory.")
 
-def test():
-    #df_agn = load_quasar_data("data/may12_objs_tauwavelength_taublr_redbands_ds4_merged.h5")
-    df_agn = load_quasar_data("data/N20_w500_grace/may21_joint_fits_N20_merged.h5")
-    print("Plotting completeness vs magnitude at redshifts...")
-    p_detect, mag_centers, z_centers, dm, dz = get_completeness_function_2d(df_agn)
-    plot_completeness_vs_mag_at_redshifts(p_detect, mag_centers, z_centers)
+def compare_models():
+    priors, model_labels = get_model_params('Flatw0waCDM')
+    ndim = len(priors.keys())
+    nlive = 25 * ndim # basic
+    # nlive = 50 * ndim # modeerate precision
+    # nlive = 100 * ndim # high precision
+    #maxiter = 2000 # TESTING
+    maxiter = None # full run
+    n_effective = 100 # Testing
+    #n_effective = 2000 # moderate quality
+    #n_effective = 5000 # high quality
+    #n_effective = 10000 # publication quality
+    
+    use_full_cov = True
+    completeness = True
 
-    #df_agn = df_agn.sample(n=500, random_state=42).reset_index(drop=True)
-    # Load Pantheon+ SN metadata
-    df_pantheon = pd.read_csv(
-        #"https://raw.githubusercontent.com/PantheonPlusSH0ES/DataRelease/main/Pantheon%2B_Data/4_DISTANCES_AND_COVAR/Pantheon%2BSH0ES.dat",
-        "data/Pantheon+SH0ES.dat",
-        sep=r"\s+"
-    )
+    global Cov_inv, logdetCov
+    df_agn, df_pantheon, Cov_inv, logdetCov = load_data("data/N20_w500_grace/may21_joint_fits_N20_merged.h5")
+
+    # Run MCMC pipeline for FlatLambdaCDM model
+    sampler_FlatwCDM, _, _, logZ_FlatwCDM, logZerr_FlatwCDM = run_mcmc_pipeline(
+                                        df_agn, df_pantheon, cosmo_model='FlatwCDM', 
+                                        only_sna=False, completeness=completeness, use_full_cov=use_full_cov,
+                                        use_dynesty=True, nlive=nlive, maxiter=maxiter, n_effective=n_effective)
+    #plot_posterior_corner(sampler_FlatwCDM, cosmo_model='FlatwCDM', only_sna=False, dynasty=True)
+    plot_traces(sampler_FlatwCDM, cosmo_model='FlatwCDM', only_sna=False, dynasty=True)
+
+    # Run MCMC pipeline for Flatw0waCDM model
+    sampler_Flatw0waCDM, _, _, logZ_Flatw0waCDM, logZerr_Flatw0waCDM = run_mcmc_pipeline(
+                                        df_agn, df_pantheon, cosmo_model='Flatw0waCDM', 
+                                        only_sna=False, completeness=completeness, use_full_cov=use_full_cov,
+                                        use_dynesty=True, nlive=nlive, maxiter=maxiter, n_effective=n_effective)
+
+    #plot_posterior_corner(sampler_Flatw0waCDM, cosmo_model='Flatw0waCDM', only_sna=False, dynasty=True)
+    plot_traces(sampler_Flatw0waCDM, cosmo_model='Flatw0waCDM', only_sna=False, dynasty=True)
+    
+    compare_models_by_log_evidence(logZ_FlatwCDM, logZerr_FlatwCDM, logZ_Flatw0waCDM, logZerr_Flatw0waCDM,
+                                    model_1_name="FlatwCDM", model_2_name="Flatw0waCDM")
+
+def test():
+    # Load data
+    global Cov_inv, logdetCov
+    df_agn, df_pantheon, Cov_inv, logdetCov = load_data("data/N20_w500_grace/may21_joint_fits_N20_merged.h5")
 
     cosmo_model = 'Flatw0waCDM'
-    sampler_joint, _ = run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model=cosmo_model, 
-                                         only_sna=False, completeness=True, use_full_cov=False,
-                                         num_warmup=20, num_samples=50)
-    plot_corner(sampler_joint, cosmo_model=cosmo_model, only_sna=False)
+    sampler_joint, model_labels, mag_corr, logZ, logZerr = run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model=cosmo_model, 
+                                        only_sna=False, completeness=True, use_full_cov=True,
+                                        num_warmup=20, num_samples=50)
+    plot_posterior_corner(sampler_joint, cosmo_model=cosmo_model, only_sna=False)
     print("Plotting Hubble diagram...")
     plot_hubble(sampler_joint, df_agn, df_pantheon, cosmo_model=cosmo_model)
     print("Plotting cosmological posteriors corner plot...")
@@ -397,5 +436,6 @@ def test():
     plot_predicted_vs_actual_Mi(sampler_joint, df_agn, cosmo_model=cosmo_model)
 
 if __name__ == "__main__":
-    main()
+    #main()
     #test()
+    compare_models()

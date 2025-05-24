@@ -197,6 +197,45 @@ def load_quasar_data(file_path):
     print("Final number of quasars:", len(df))
     return df
 
+def load_data(file_path):
+    print("Loading quasar data...")
+    #df_agn = load_quasar_data("data/may12_objs_tauwavelength_taublr_redbands_ds4_merged.h5")
+    df_agn = load_quasar_data(file_path=file_path)
+    # Load Pantheon+ SN metadata
+    print("Loading Pantheon+ supernova data...")
+    df_pantheon = pd.read_csv(
+        #"https://raw.githubusercontent.com/PantheonPlusSH0ES/DataRelease/main/Pantheon%2B_Data/4_DISTANCES_AND_COVAR/Pantheon%2BSH0ES.dat",
+        "data/Pantheon+SH0ES.dat",
+        sep=r"\s+"
+    )
+
+    print("Loading SN covariance matrix...")
+    n_sn = len(df_pantheon)
+
+    # Load .cov file with NumPy, skipping the first line (which contains just "1701")
+    cov_flat = np.loadtxt(
+        #"https://raw.githubusercontent.com/PantheonPlusSH0ES/DataRelease/main/Pantheon%2B_Data/4_DISTANCES_AND_COVAR/Pantheon%2BSH0ES_STAT%2BSYS.cov",
+        "data/Pantheon+SH0ES_STAT+SYS.cov",
+        skiprows=1
+    )
+
+    # Reshape into square matrix
+    cov_matrix = cov_flat.reshape((n_sn, n_sn))
+
+    # Confirm shape is correct
+    assert cov_matrix.shape == (n_sn, n_sn), f"Expected ({n_sn},{n_sn}), got {cov_matrix.shape}"
+
+    # Invert covariance and pre-compute log-determinant for SN likelihood
+    #global Cov_inv, logdetCov
+    Cov_inv = np.linalg.inv(cov_matrix)
+    sign, logdet = np.linalg.slogdet(cov_matrix)
+    if sign <= 0:
+        raise ValueError("Covariance matrix is not positive-definite!")
+    logdetCov = logdet
+    print("Data loaded. Running joint cosmographic fits...")
+    return df_agn, df_pantheon, Cov_inv, logdetCov
+
+
 def completeness(m, center, mag_lim):
     print("m shape:", np.shape(m))
     print("center shape:", np.shape(center))
@@ -445,3 +484,55 @@ def compute_delta_mag_bias_2d_zbins(df_agn, completeness2d, mag_centers, z_cente
     delta_mag_errs = np.sqrt(interp_std(z_vals)**2 + mag_errs**2)
 
     return delta_mags, delta_mag_errs
+
+
+def compare_models_by_log_evidence(logZ_1, logZerr_1, logZ_2, logZerr_2, model_1_name="Model 1", model_2_name="Model 2"):
+    """
+    Compare two models based on their log-evidence (logZ) and uncertainties.
+
+    Parameters:
+        logZ_1 (float): Log-evidence of model 1
+        logZerr_1 (float): Uncertainty in logZ_1
+        logZ_2 (float): Log-evidence of model 2
+        logZerr_2 (float): Uncertainty in logZ_2
+        model_1_name (str): Name of model 1
+        model_2_name (str): Name of model 2
+
+    Returns:
+        dict: A dictionary containing Bayes factor, delta_logZ, sigma_equivalent, and evidence strength.
+    """
+    delta_logZ = logZ_1 - logZ_2
+    delta_logZ_err = np.sqrt(logZerr_1**2 + logZerr_2**2)
+    bayes_factor = np.exp(delta_logZ)
+    sigma_equiv = np.sqrt(2 * abs(delta_logZ))
+
+    # Interpret strength using Jeffreys' scale
+    abs_delta = abs(delta_logZ)
+    if abs_delta < 1:
+        strength = "Not worth more than a bare mention"
+    elif abs_delta < 2.5:
+        strength = "Substantial evidence"
+    elif abs_delta < 5:
+        strength = "Strong evidence"
+    else:
+        strength = "Very strong evidence"
+
+    preferred_model = model_1_name if delta_logZ > 0 else model_2_name
+
+    result = {
+        "delta_logZ": delta_logZ,
+        "delta_logZ_err": delta_logZ_err,
+        "Bayes_factor": bayes_factor,
+        "preferred_model": preferred_model,
+        "strength": strength,
+        "sigma_equivalent": sigma_equiv
+    }
+
+    print(f"\nBayesian Model Comparison:")
+    print(f"  ΔlogZ = {delta_logZ:.2f} ± {delta_logZ_err:.2f}")
+    print(f"  Bayes factor (B_12) = {bayes_factor:.2f}")
+    print(f"  Sigma-equivalent ≈ {sigma_equiv:.2f}σ")
+    print(f"  Preferred model: {preferred_model}")
+    print(f"  Evidence strength: {strength}")
+
+    return result

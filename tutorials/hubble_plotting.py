@@ -12,8 +12,50 @@ import os
 from hubble_model import K_corr, M_model_agn, M_model_SN, log_sigma_hat_pivot, get_model_params
 from numpy.polynomial.polynomial import Polynomial
 from scipy.interpolate import interp1d
+from dynesty.utils import resample_equal
 
-def plot_posterior_corner(sampler, only_sna=False, cosmo_model='Flatw0waCDM', show=True):
+def plot_traces(sampler, only_sna=False, cosmo_model='Flatw0waCDM', show=True, dynasty=False):
+    """
+    Plot parameter traces from dynesty nested sampling results.
+    
+    Parameters
+    ----------
+    results : dynesty.results.Results
+        The result object returned by `sampler.results`.
+    labels : list of str, optional
+        Parameter names to label each subplot. If None, uses param index.
+    figsize : tuple
+        Base size for each subplot (width, height).
+    """
+    if dynasty:
+        results = sampler.results
+        samples, weights = results.samples, np.exp(results.logwt - results.logz[-1])
+        samples = resample_equal(samples, weights)
+    else:
+        samples = sampler.get_chain(flat=True)
+
+    ndim = samples.shape[1]
+    priors, model_labels = get_model_params(cosmo_model)
+
+    fig, axes = plt.subplots(ndim, 1, figsize=(10, ndim*2.5), sharex=True)
+    if ndim == 1:
+        axes = [axes]
+
+    for i in range(ndim):
+        ax = axes[i]
+        ax.plot(samples[:, i], color="black", alpha=0.6, lw=0.8)
+        ax.set_ylabel(model_labels[i])
+        ax.grid(True, alpha=0.3)
+
+    axes[-1].set_xlabel("Iteration")
+    plt.tight_layout()
+    if show:
+        plt.show()
+    plt.savefig(f"plots/hubble/trace_{cosmo_model}_agn.png", dpi=200)
+
+    return fig
+
+def plot_posterior_corner(sampler, only_sna=False, cosmo_model='Flatw0waCDM', show=True, dynasty=False):
     # Select cosmological parameters based on model
     if cosmo_model == 'FlatwCDM':
         cosmo_params = ['H0', 'Om0', 'w0']
@@ -23,7 +65,14 @@ def plot_posterior_corner(sampler, only_sna=False, cosmo_model='Flatw0waCDM', sh
         raise ValueError("cosmo_model must be 'FlatwCDM' or 'Flatw0waCDM'")
     # Model parameters: AGN correlation + SN calibration + cosmology
     priors, model_labels = get_model_params(cosmo_model)
-    flat_samples = sampler.get_chain(flat=True)
+
+    if dynasty:
+        results = sampler.results
+        samples = results.samples
+        weights = np.exp(results.logwt - results.logz[-1])
+        flat_samples = resample_equal(samples, weights)  # this is crucial
+    else:
+        flat_samples = sampler.get_chain(flat=True)
     
     fig = corner.corner(
         flat_samples,
