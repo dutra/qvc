@@ -98,7 +98,7 @@ def plot_posterior_corner(sampler, only_sna=False, cosmo_model='Flatw0waCDM', sh
         plt.show()
     plt.close()
 
-def plot_cosmo_corner(sampler_sna, sampler_agn, cosmo_model='Flatw0waCDM', show=False):
+def plot_cosmo_corner(sampler_sna, sampler_agn, cosmo_model='Flatw0waCDM', show=False, sna_data=None, agn_data=None):
 # === Parameter setup ===
     if cosmo_model == 'FlatwCDM':
         param_names = ["H0", "Om0", "w0"]
@@ -111,8 +111,9 @@ def plot_cosmo_corner(sampler_sna, sampler_agn, cosmo_model='Flatw0waCDM', show=
     param_indices = [list(priors.keys()).index(p) for p in param_names]
 
     # === Get flattened MCMC chains ===
-    sna_data = sampler_sna.get_chain(flat=True)[:, param_indices]
-    agn_data = sampler_agn.get_chain(flat=True)[:, param_indices]
+    if sna_data is None and agn_data is None:
+        sna_data = sampler_sna.get_chain(flat=True)[:, param_indices]
+        agn_data = sampler_agn.get_chain(flat=True)[:, param_indices]
 
     # === Fast KDE-level calculator ===
     def get_density_levels(values, probs=[0.393, 0.865]):
@@ -181,7 +182,7 @@ def plot_cosmo_corner(sampler_sna, sampler_agn, cosmo_model='Flatw0waCDM', show=
         Line2D([0], [0], color="blue", lw=4, label="SN Ia"),
         Line2D([0], [0], color="red", lw=4, label="SN Ia + AGN"),
     ]
-    fig.legend(handles=legend_elements, loc="upper right", fontsize=26, frameon=False, markerscale=1.5)
+    fig.legend(handles=legend_elements, bbox_to_anchor=(0.5, 0.92), loc="upper left", fontsize=26, frameon=False, markerscale=1.5)
 
     # === Layout & Save ===
     fig.subplots_adjust(left=0.1, right=0.9, bottom=0.1, top=0.9, wspace=0.05, hspace=0.05)
@@ -194,7 +195,7 @@ def plot_cosmo_corner(sampler_sna, sampler_agn, cosmo_model='Flatw0waCDM', show=
     plt.close()
 
 
-def plot_hubble(sampler, df_agn, df_pantheon, cosmo_model, show=False, completeness=True, show_uncorrected=False):
+def plot_hubble(sampler, df_agn, df_pantheon, cosmo_model, show=False, completeness=True, show_uncorrected=False, flat_samples=None):
     """Plot Hubble diagram + residuals, classic Pantheon+ style."""
     # Define cosmological parameter labels
     if cosmo_model == 'FlatwCDM':
@@ -204,7 +205,8 @@ def plot_hubble(sampler, df_agn, df_pantheon, cosmo_model, show=False, completen
     else:
         raise ValueError("Invalid cosmology model.")
     
-    flat_samples = sampler.get_chain(thin=15, flat=True)
+    if flat_samples is None:
+        flat_samples = sampler.get_chain(thin=15, flat=True)
     
     z_grid = np.linspace(0.0001, 5, 1000)
 
@@ -372,8 +374,9 @@ def plot_hubble(sampler, df_agn, df_pantheon, cosmo_model, show=False, completen
     plt.close()
     return residuals, mu_pred_std
 
-def plot_predicted_vs_actual_Mi(sampler, df_agn, cosmo_model, show=False):
-    flat_samples = sampler.get_chain(flat=True, thin=15)
+def plot_predicted_vs_actual_Mi(sampler, df_agn, cosmo_model, show=False, flat_samples=None):
+    if flat_samples is None:
+        flat_samples = sampler.get_chain(flat=True, thin=15)
     priors, model_labels = get_model_params(cosmo_model)
     results = {key: np.percentile(flat_samples[:, i], [16, 50, 84]) for i, key in enumerate(model_labels)}
 
@@ -412,10 +415,10 @@ def plot_predicted_vs_actual_Mi(sampler, df_agn, cosmo_model, show=False):
 
     # Loop through each redshift bin and plot
     for i, ax in enumerate(axes):
-        #ax.set_xlim(df_agn['M_i'].min(), df_agn['M_i'].max())
-        #ax.set_ylim(df_agn['M_i'].min(), df_agn['M_i'].max())
-        ax.set_xlim(-29.8, -21.2)
-        ax.set_ylim(-29.8, -21.2)
+        ax.set_xlim(df_agn['M_i'].min(), df_agn['M_i'].max())
+        ax.set_ylim(M_i_pred.min(), M_i_pred.max())
+        #ax.set_xlim(-29.8, -21.2)
+        #ax.set_ylim(-29.8, -21.2)
 
         if i < num_bins:
             # Filter data for the current redshift bin
@@ -513,9 +516,10 @@ def plot_completeness_vs_mag_at_redshifts(p_detect, mag_centers, z_centers,
 
 
 
-def plot_predicted_sigma_hat_vs_luminosity(sampler, df_agn, cosmo_model, show=False):
+def plot_predicted_sigma_hat_vs_luminosity(sampler, df_agn, cosmo_model, show=False, flat_samples=None):
     # Load samples
-    flat_samples = sampler.get_chain(flat=True, thin=20)
+    if flat_samples is None:
+        flat_samples = sampler.get_chain(flat=True, thin=20)
     priors, model_labels = get_model_params(cosmo_model)
     param_indices = {name: model_labels.index(name) for name in model_labels}
 

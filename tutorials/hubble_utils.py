@@ -18,6 +18,8 @@ from scipy.interpolate import RegularGridInterpolator
 bands = ['u', 'g', 'r', 'i', 'z']#, 'y']
 bands_idx = {b: i for i, b in enumerate(bands)}
 
+
+
 def populate_sdss_fields(objs, progress_bar=True):
     print(f"Populating SDSS fields: {len(objs)}", flush=True)
     cat = pd.read_parquet(f"data/S82/Catalog.parquet").set_index('idx')
@@ -205,8 +207,9 @@ def load_data(file_path, populate_sdss=False):
     if sign <= 0:
         raise ValueError("Covariance matrix is not positive-definite!")
     logdetCov = logdet
+    L = np.linalg.cholesky(np.linalg.inv(Cov_inv))
     print("Data loaded. Running joint cosmographic fits...")
-    return df_agn, df_pantheon, Cov_inv, logdetCov
+    return df_agn, df_pantheon, Cov_inv, logdetCov, L
 
 
 def completeness(m, center, mag_lim):
@@ -527,3 +530,107 @@ def write_hdf5_file(quasar_list, file_path):
                         sub_group.create_dataset(sub_key, data=sub_value)
                 else:
                     group.attrs[key] = value
+
+def generate_cosmo_table_latex(results):
+    """
+    Generate a LaTeX table for cosmological parameter results.
+
+    Parameters
+    ----------
+    results : list of dict
+        Each dictionary must contain:
+        - model (str)
+        - data (str): "SN~Ia" or "SN~Ia + AGN"
+        - Om0 (tuple): (mean, err)
+        - H0 (tuple): (mean, err)
+        - w0 (tuple): (mean, err)
+        - wa (tuple or None): (mean, err) or None
+        - logZ (tuple or None): (mean, err) or None
+    """
+    lines = []
+    lines.append("\\begin{table*}")
+    lines.append("\\centering")
+    lines.append("\\caption{Marginalized Cosmological Parameters and Bayesian Evidence}")
+    lines.append("\\label{tab:cosmoparams}")
+    lines.append("\\begin{tabular}{lcccccc}")
+    lines.append("\\hline\\hline")
+    lines.append("Model & Data & $\\Omega_m$ & $H_0$ [km s$^{-1}$ Mpc$^{-1}$] & $w$ / $w_0$ & $w_a$ & $\\ln \\mathcal{Z}$ \\\\")
+    lines.append("\\hline")
+
+    for res in results:
+        Om0 = f"${res['Om0'][0]:.3f} \\pm {res['Om0'][1]:.3f}$"
+        H0 = f"${res['H0'][0]:.1f} \\pm {res['H0'][1]:.1f}$"
+        w0 = f"${res['w0'][0]:+.2f} \\pm {res['w0'][1]:.2f}$"
+        wa = "--" if res['wa'] is None else f"${res['wa'][0]:+.1f} \\pm {res['wa'][1]:.1f}$"
+        logZ = "--" if res['logZ'] is None else f"${res['logZ'][0]:.1f} \\pm {res['logZ'][1]:.1f}$"
+        lines.append(f"{res['model']} & {res['data']} & {Om0} & {H0} & {w0} & {wa} & {logZ} \\\\")
+
+    lines.append("\\hline")
+    lines.append("\\end{tabular}")
+    lines.append("\\end{table*}")
+
+    latex_table = "\n".join(lines)
+    filename = "plots/hubble/table.tex"
+    with open(filename, "w") as f:
+        f.write(latex_table)
+        print(f"LaTeX table written to: {filename}")
+
+
+def extract_cosmo_results_from_sampler(sampler, cosmo_model, only_sna, dynasty=False, logZ_tuple=None):
+    """
+    Extract mean and stddev of cosmological parameters from a sampler.
+
+    Parameters
+    ----------
+    sampler : emcee.EnsembleSampler or dynesty.DynamicNestedSampler
+        The sampler object from your pipeline.
+    cosmo_model : str
+        'FlatwCDM' or 'Flatw0waCDM'
+    only_sna : bool
+        True if SN Ia only; False if SN Ia + AGN.
+    dynasty : bool
+        True if using dynesty; False if using emcee.
+    logZ_tuple : tuple or None
+        (logZ, logZerr), only available from dynesty.
+
+    Returns
+    -------
+    dict
+        Result row for LaTeX table.
+    """
+    import numpy as np
+    from dynesty.utils import resample_equal
+    from hubble_model import get_model_params
+
+    priors, model_labels = get_model_params(cosmo_model)
+    data_label = "SN~Ia" if only_sna else "SN~Ia + AGN"
+
+    # Flatten or resample samples
+    if dynasty:
+        samples = sampler.results.samples
+        weights = np.exp(sampler.results.logwt - sampler.results.logz[-1])
+        samples = resample_equal(samples, weights)
+    else:
+        samples = sampler.get_chain(flat=True)
+
+    # Extract parameter stats
+    def mean_std(param_name):
+        idx = model_labels.index(param_name)
+        return np.mean(samples[:, idx]), np.std(samples[:, idx])
+
+    param_stats = {
+        "Om0": mean_std("Om0"),
+        "H0": mean_std("H0"),
+        "w0": mean_std("w0"),
+        "wa": mean_std("wa") if cosmo_model == "Flatw0waCDM" else None
+    }
+
+    return {
+        "model": "Flat$w_0w_a$CDM" if cosmo_model == "Flatw0waCDM" else "Flat$w$CDM",
+        "data": data_label,
+        "Om0": param_stats["Om0"],
+        "H0": param_stats["H0"],
+        "w0": param_stats["w0"],
+        "wa": param_stats["wa"],
+        "logZ": logZ_tuple
+    }
