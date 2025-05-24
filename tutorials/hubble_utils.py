@@ -42,6 +42,7 @@ def populate_sdss_fields(objs, progress_bar=True):
         d['dec'] = obj['DEC']
         d['z'] = obj['Z_SYS']
         d['sdss_name'] = fits_data['SDSS_NAME'][i]  # Extract SDSS_NAME
+        d['log_lbol'] = -999.0
         if d['z'] < 0.7:
             d['log_lbol'] = np.log10(5.15) + fits_data['LOGL3000'][i]
             d['log_lbol_err'] = fits_data['LOGL3000_ERR'][i]
@@ -319,7 +320,7 @@ class Completeness2D:
         vals = self.interp_fn(pts)
         return vals.reshape(np.shape(mag))
     
-def get_completeness_function_2d(df_agn, sim_file="sampled_apparent_magnitudes_by_redshift.h5",
+def get_completeness_function_2d(df_agn, sim_file="sampled_apparent_magnitudes_redshift_vol.h5",
                                  n_mag_bins=12, n_z_bins=12, mag_min=14, mag_max=26):
     """
     Returns a completeness function p_detect(mag, z) as a callable.
@@ -334,8 +335,8 @@ def get_completeness_function_2d(df_agn, sim_file="sampled_apparent_magnitudes_b
     # Load simulated (true) sample
     mags_true_list, z_true_list = [], []
     with h5py.File(sim_file, "r") as f:
-        for name in f["redshift_bins"]:
-            ds = f["redshift_bins"][name]
+        for name in f["redshift_bin"]:
+            ds = f["redshift_bin"][name]
             mags = ds[()]
             z_bin = ds.attrs["redshift"]
             mags_true_list.append(mags)

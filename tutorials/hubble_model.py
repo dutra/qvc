@@ -14,8 +14,9 @@ log_sigma_hat_pivot = -2.075
 
 # --- AGN model ---
 def M_model_agn(M0_agn, alpha_agn, log_sigma_hat_UV):
-    return M0_agn + alpha_agn * 2 * (log_sigma_hat_UV - log_sigma_hat_pivot)
-
+    m = M0_agn - 25 + alpha_agn * 2 * (log_sigma_hat_UV - log_sigma_hat_pivot)
+    return m
+    
 # --- SN model (Brout+ 2022 Eq. 1 and 2) ---
 # SN calibration: anchor absolute magnitude from SH0ES (Riess et al. 2022:contentReference[oaicite:0]{index=0})
 # M_anchor = -19.253  # SH0ES-calibrated SN Ia absolute magnitude (reference value)
@@ -47,9 +48,9 @@ def get_model_params(cosmo_model):
         "gamma_sn":    (-0.5, 0.5),    # Host mass step
         "tau_Ms":   (0.5, 1.5),        # Host mass transition
         "M0_sn":    (-21, -17),
-        "alpha_agn": (-10, 10),     # AGN variability correlation
-        "M0_agn":   (-30, -10),
-        "log_f":    (-3, 1),
+        "alpha_agn": (1, 3),     # AGN variability correlation
+        "M0_agn":   (-5, 5),
+        "log_f":    (-3, .5),
         "H0":       (60, 80),
         "Om0":      (0.2, 0.7),
         "w0":       (-3, 0),

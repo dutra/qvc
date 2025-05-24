@@ -206,7 +206,7 @@ def plot_hubble(sampler, df_agn, df_pantheon, cosmo_model, show=False, completen
         raise ValueError("Invalid cosmology model.")
     
     if flat_samples is None:
-        flat_samples = sampler.get_chain(thin=15, flat=True)
+        flat_samples = sampler.get_chain(flat=True)
     
     z_grid = np.linspace(0.0001, 5, 1000)
 
@@ -255,8 +255,8 @@ def plot_hubble(sampler, df_agn, df_pantheon, cosmo_model, show=False, completen
     # Then re-compute the distance modulus
     mu_pred = np.array([
         corrected_apparent_mag - (K_corr(df_agn['z']) - K_corr(2)) -
-            M_model_agn(s[param_indices['M0_agn']], s[param_indices['alpha_agn']], 
-                        df_agn['log_sigma_hat_UV'])
+            (M_model_agn(s[param_indices['M0_agn']], s[param_indices['alpha_agn']], 
+                        df_agn['log_sigma_hat_UV']))
         for s in flat_samples
     ])
 
@@ -295,10 +295,10 @@ def plot_hubble(sampler, df_agn, df_pantheon, cosmo_model, show=False, completen
         # --- Also compute uncorrected mu_pred for plotting ---
         mu_pred_uncorrected = np.array([
             df_agn['apparent_mag_i'] - K_corr(df_agn['z']) - (
-                M_model_agn(s[param_indices['M0_agn']], s[param_indices['alpha_agn']], 
-                            df_agn['log_sigma_hat_UV']) - K_corr(2))
+                (M_model_agn(s[param_indices['M0_agn']], s[param_indices['alpha_agn']], 
+                            df_agn['log_sigma_hat_UV'])) - K_corr(2))
             for s in flat_samples
-        ])
+        ]) 
         mu_pred_uncorrected_median = np.percentile(mu_pred_uncorrected, 50, axis=0)
         # --- Binning ---
         bin_indices = np.digitize(df_agn["z"], bins)
@@ -376,15 +376,24 @@ def plot_hubble(sampler, df_agn, df_pantheon, cosmo_model, show=False, completen
 
 def plot_predicted_vs_actual_Mi(sampler, df_agn, cosmo_model, show=False, flat_samples=None):
     if flat_samples is None:
-        flat_samples = sampler.get_chain(flat=True, thin=15)
+        flat_samples = sampler.get_chain(flat=True)
     priors, model_labels = get_model_params(cosmo_model)
     results = {key: np.percentile(flat_samples[:, i], [16, 50, 84]) for i, key in enumerate(model_labels)}
 
     M_i_pred = M_model_agn(
         results['M0_agn'][1], 
         results['alpha_agn'][1], 
-        df_agn['log_sigma_hat_UV']
-    ) #+ K_corr(2) # TODO: check this
+        df_agn['log_sigma_hat_UV'].values
+    )  #+ K_corr(2) # TODO: check this
+
+    print("M_i_pred", M_i_pred)
+    print("M0_AGN", results['M0_agn'][1])
+    print("alpha_AGN", results['alpha_agn'][1])
+    print(M_model_agn(
+        results['M0_agn'][1], 
+        results['alpha_agn'][1], 
+        df_agn['log_sigma_hat_UV'].values
+    ))
 
 
     # Calculate prediction errors
@@ -519,12 +528,12 @@ def plot_completeness_vs_mag_at_redshifts(p_detect, mag_centers, z_centers,
 def plot_predicted_sigma_hat_vs_luminosity(sampler, df_agn, cosmo_model, show=False, flat_samples=None):
     # Load samples
     if flat_samples is None:
-        flat_samples = sampler.get_chain(flat=True, thin=20)
+        flat_samples = sampler.get_chain(flat=True)
     priors, model_labels = get_model_params(cosmo_model)
     param_indices = {name: model_labels.index(name) for name in model_labels}
 
     # Extract arrays of model parameters
-    M0_samples = flat_samples[:, param_indices['M0_agn']]
+    M0_samples = flat_samples[:, param_indices['M0_agn']] - 25
     alpha_samples = flat_samples[:, param_indices['alpha_agn']]
 
     # Define grid in log L_bol
@@ -535,6 +544,8 @@ def plot_predicted_sigma_hat_vs_luminosity(sampler, df_agn, cosmo_model, show=Fa
     pivot_term = 2 * log_sigma_hat_pivot
     slopes = -2.5 / alpha_samples
     intercepts = (90 - M0_samples) / alpha_samples + pivot_term
+
+    print("Intercepts:", intercepts)
 
     # Evaluate log_sigma_hat_sq across all posterior lines
     ys = np.outer(slopes, log_lbol_grid) + intercepts[:, None]  # shape: (n_samples, n_grid)
