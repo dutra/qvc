@@ -195,7 +195,7 @@ def plot_cosmo_corner(sampler_sna, sampler_agn, cosmo_model='Flatw0waCDM', show=
     plt.close()
 
 
-def plot_hubble(sampler, df_agn, df_pantheon, cosmo_model, show=False, completeness=True, show_uncorrected=False, flat_samples=None):
+def plot_hubble(sampler, df_agn, df_pantheon, cosmo_model, show=False, completeness=True, show_uncorrected=False, show_true=False, flat_samples=None):
     """Plot Hubble diagram + residuals, classic Pantheon+ style."""
     # Define cosmological parameter labels
     if cosmo_model == 'FlatwCDM':
@@ -344,6 +344,10 @@ def plot_hubble(sampler, df_agn, df_pantheon, cosmo_model, show=False, completen
                     markersize=2, alpha=0.2, color='green', lw=1.5, zorder=-9, label="AGN (uncorrected)")
         ax.errorbar(binned_z, binned_mu_pred_uncorrected_mean, yerr=binned_mu_pred_uncorrected_std, label="Binned AGN (uncorrected)", 
                     fmt='o', markerfacecolor='none', markeredgecolor='red', markersize=4, capsize=3, lw=1.5, alpha=0.9, color="red", zorder=-8)
+    
+    if show_true:
+        ax.scatter(df_agn['z'], df_agn['apparent_mag_i'] - df_agn['M_i'], alpha=0.7, edgecolor='k')
+    
     # SNIa points
     ax.errorbar(df_pantheon["zHD"], df_pantheon["MU_SH0ES"], yerr=df_pantheon["MU_SH0ES_ERR_DIAG"], 
                 fmt='s', markersize=3, color="dodgerblue", linestyle='none', lw=1, label="SN Ia", alpha=0.7, zorder=-8)

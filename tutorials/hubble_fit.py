@@ -138,44 +138,35 @@ def log_likelihood(theta, cosmo_model,
         logdet = np.sum(np.log(D)) + np.log(alpha)
 
         ll_agn = -0.5 * quad - 0.5 * logdet - 0.5 * len(dmu) * np.log(2 * np.pi)  
-        print(ll_agn)  
     else:
         ll_agn = np.sum(stats.norm.logpdf(dmu, scale=mu_err))
 
     # Corrected? AGN completeness correction 2D
     # Optional AGN completeness correction 2D
-    norm_correction = 0.0
+    per_agn_log_weights = 0.0
     if completeness_params is not None:
         completeness2d, mag_centers, z_centers, dm, dz = completeness_params
-        m_model = M_pred + mu_cosmo
+        m_model = M_pred + mu_cosmo  # model-predicted magnitude
 
-        integrals = np.zeros(len(df_agn))
-        unique_err = np.round(mu_err, 2)
+        sigma = mu_err               # total uncertainty on m_model
 
-        mag_range = mag_centers - np.mean(mag_centers)  # Center kernel around zero explicitly
+        # Define the magnitude grid for integration (must cover m_model ± ~4σ)
+        m_grid = mag_centers
+        m_grid_broadcasted = np.tile(m_grid, (len(z), 1))      # (N_obj, N_grid)
+        z_broadcasted = np.tile(z[:, None], (1, len(m_grid)))  # (N_obj, N_grid)
 
-        for sigma in np.unique(unique_err):
-            if sigma <= 0 or not np.isfinite(sigma):
-                continue
-            mask = np.abs(mu_err - sigma) < 1e-2
+        # Evaluate the Gaussian p(m | m_model, sigma) for each AGN
+        gauss_weights = stats.norm.pdf(m_grid_broadcasted, loc=m_model[:, None], scale=sigma[:, None])
+        gauss_weights /= np.sum(gauss_weights, axis=1)[:, None] * dm
 
-            # Symmetric kernel centered on zero magnitude offset
-            kernel = stats.norm.pdf(mag_range, loc=0, scale=sigma)
-            kernel /= kernel.sum() * dm  # normalize kernel properly
+        # Evaluate completeness function p(I=1 | m, z_i)
+        p_detect = completeness2d(m_grid_broadcasted, z_broadcasted)
+        integrals = np.sum(gauss_weights * p_detect, axis=1) * dm
+        integrals = np.clip(integrals, 1e-12, 1.0)
 
-            conv_values = []
-            for zval in z[mask]:
-                p_z = completeness2d(mag_centers, np.full_like(mag_centers, zval))
-                conv = fftconvolve(p_z, kernel, mode="same") * dm
-                conv = np.clip(conv, 1e-12, 1.0)
-                conv_values.append(conv)
-
-            for i, idx in enumerate(np.where(mask)[0]):
-                val = np.interp(m_model[idx], mag_centers, conv_values[i])
-                integrals[idx] = val
-
-        per_agn_log_weights = np.log(np.clip(integrals, 1e-12, None))
-        ll_agn += np.sum(per_agn_log_weights)
+        # Apply selection correction to log-likelihood
+        per_agn_log_weights = np.log(integrals)
+        ll_agn -= np.sum(per_agn_log_weights)
 
     if return_params:
         return ll_snia + ll_calib + ll_agn, per_agn_log_weights, m_model
