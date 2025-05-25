@@ -137,7 +137,8 @@ def log_likelihood(theta, cosmo_model,
         # Log determinant
         logdet = np.sum(np.log(D)) + np.log(alpha)
 
-        ll_agn = -0.5 * quad - 0.5 * logdet - 0.5 * len(dmu) * np.log(2 * np.pi)    
+        ll_agn = -0.5 * quad - 0.5 * logdet - 0.5 * len(dmu) * np.log(2 * np.pi)  
+        print(ll_agn)  
     else:
         ll_agn = np.sum(stats.norm.logpdf(dmu, scale=mu_err))
 
@@ -146,7 +147,7 @@ def log_likelihood(theta, cosmo_model,
     norm_correction = 0.0
     if completeness_params is not None:
         completeness2d, mag_centers, z_centers, dm, dz = completeness_params
-        m_model = m_obs #M_pred + mu_cosmo
+        m_model = M_pred + mu_cosmo
 
         integrals = np.zeros(len(df_agn))
         unique_err = np.round(mu_err, 2)
@@ -173,12 +174,13 @@ def log_likelihood(theta, cosmo_model,
                 val = np.interp(m_model[idx], mag_centers, conv_values[i])
                 integrals[idx] = val
 
-        norm_correction = np.sum(np.log(np.clip(integrals, 1e-12, None)))
+        per_agn_log_weights = np.log(np.clip(integrals, 1e-12, None))
+        ll_agn += np.sum(per_agn_log_weights)
 
     if return_params:
-        return ll_snia + ll_calib + ll_agn - norm_correction, np.log(np.clip(integrals, 1e-12, None)), m_model
+        return ll_snia + ll_calib + ll_agn, per_agn_log_weights, m_model
     
-    return ll_snia + ll_calib + ll_agn - norm_correction
+    return ll_snia + ll_calib + ll_agn
 
 # Globals used by dynesty
 _dynesty_config = {}
