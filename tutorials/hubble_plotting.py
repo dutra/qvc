@@ -537,7 +537,7 @@ def plot_predicted_sigma_hat_vs_luminosity(sampler, df_agn, cosmo_model, show=Fa
     param_indices = {name: model_labels.index(name) for name in model_labels}
 
     # Extract arrays of model parameters
-    M0_samples = flat_samples[:, param_indices['M0_agn']] - 25
+    M0_samples = flat_samples[:, param_indices['M0_agn']] - 26
     alpha_samples = flat_samples[:, param_indices['alpha_agn']]
 
     # Define grid in log L_bol
