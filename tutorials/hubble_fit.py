@@ -358,11 +358,11 @@ def main():
     
     results = []
 
-    num_warmup, num_samples = 1000, 500
+    num_warmup, num_samples = 250, 250
     use_full_cov = True
     completeness = True
     # Run MCMC fits for SNIa only and SNIa+AGN, for each cosmological model
-    for cosmo_model in ['FlatwCDM', 'Flatw0waCDM']:
+    for cosmo_model in ['Flatw0waCDM', 'FlatwCDM']:
         print(f"Running MCMC for {cosmo_model}: SNIa only")
         sampler_snia, _, _, _, _ = run_mcmc_pipeline(
                                             df_agn, df_pantheon, cosmo_model=cosmo_model, only_sna=True, 
@@ -444,19 +444,21 @@ def compare_models():
 def test():
     # Load data
     global Cov_inv, logdetCov, L
-    df_agn, df_pantheon, Cov_inv, logdetCov, L = load_data("data/N20_w500_grace/may21_joint_fits_N20_merged.h5")
+    #df_agn, df_pantheon, Cov_inv, logdetCov, L = load_data("data/N20_w500_grace/may21_joint_fits_N20_merged.h5")
+
+    df_agn, df_pantheon, Cov_inv, logdetCov, L = load_data("data/may23_all_merged.h5", populate_sdss=False)
 
     cosmo_model = 'Flatw0waCDM'
     sampler_joint, model_labels, mag_corr, logZ, logZerr = run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model=cosmo_model, 
-                                        only_sna=False, completeness=True, use_full_cov=True,
-                                        num_warmup=20, num_samples=50)
+                                        only_sna=False, completeness=True, use_full_cov=False,
+                                        num_warmup=50, num_samples=25)
     plot_posterior_corner(sampler_joint, cosmo_model=cosmo_model, only_sna=False)
+    print("Plotting AGN M_i predictions vs actual...")
+    plot_predicted_vs_actual_Mi(sampler_joint, df_agn, cosmo_model=cosmo_model)
     print("Plotting Hubble diagram...")
     plot_hubble(sampler_joint, df_agn, df_pantheon, cosmo_model=cosmo_model)
     print("Plotting cosmological posteriors corner plot...")
     plot_cosmo_corner(sampler_joint, sampler_joint, cosmo_model=cosmo_model)
-    print("Plotting AGN M_i predictions vs actual...")
-    plot_predicted_vs_actual_Mi(sampler_joint, df_agn, cosmo_model=cosmo_model)
 
 if __name__ == "__main__":
     main()

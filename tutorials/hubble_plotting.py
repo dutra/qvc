@@ -32,10 +32,10 @@ def plot_traces(sampler, only_sna=False, cosmo_model='Flatw0waCDM', show=True, d
         samples, weights = results.samples, np.exp(results.logwt - results.logz[-1])
         samples = resample_equal(samples, weights)
     else:
-        samples = sampler.get_chain(flat=True)
+        samples = sampler.get_chain()
 
-    ndim = samples.shape[1]
     priors, model_labels = get_model_params(cosmo_model)
+    ndim = len(priors.keys())
 
     fig, axes = plt.subplots(ndim, 1, figsize=(10, ndim*2.5), sharex=True)
     if ndim == 1:
@@ -43,7 +43,7 @@ def plot_traces(sampler, only_sna=False, cosmo_model='Flatw0waCDM', show=True, d
 
     for i in range(ndim):
         ax = axes[i]
-        ax.plot(samples[:, i], color="black", alpha=0.6, lw=0.8)
+        ax.plot(samples[:, :, i], color="black", alpha=0.6, lw=0.8)
         ax.set_ylabel(model_labels[i])
         ax.grid(True, alpha=0.3)
 
@@ -430,8 +430,8 @@ def plot_predicted_vs_actual_Mi(sampler, df_agn, cosmo_model, show=False, flat_s
     for i, ax in enumerate(axes):
         ax.set_xlim(df_agn['M_i'].min(), df_agn['M_i'].max())
         ax.set_ylim(M_i_pred.min(), M_i_pred.max())
-        #ax.set_xlim(-29.8, -21.2)
-        #ax.set_ylim(-29.8, -21.2)
+        ax.set_xlim(-29.8, -21.2)
+        ax.set_ylim(-29.8, -21.2)
 
         if i < num_bins:
             # Filter data for the current redshift bin
