@@ -1,8 +1,5 @@
 import numpy as np
 from scipy.special import expit
-from scipy import stats
-from scipy.signal import fftconvolve
-from astropy.cosmology import FlatwCDM, Flatw0waCDM
 
 
 def K_corr(z, alpha_nu=-0.5):
@@ -10,11 +7,15 @@ def K_corr(z, alpha_nu=-0.5):
     return -2.5 * (1 + alpha_nu) * np.log10(1 + z)
 
 # --- Reference constants and pivot values ---
-log_sigma_hat_pivot = -2.075
+log_sigma_hat_pivot = -2.04
+log_tau_UV_RF_pivot = 2.7
 
 # --- AGN model ---
-def M_model_agn(M0_agn, alpha_agn, log_sigma_hat_UV):
-    return M0_agn - 26 + alpha_agn * 2 * (log_sigma_hat_UV - log_sigma_hat_pivot)
+# def M_model_agn(M0_agn, alpha_agn, log_sigma_hat_UV):
+#     return M0_agn - 26 + alpha_agn * 2 * (log_sigma_hat_UV - log_sigma_hat_pivot)
+
+def M_model_agn(M0_sn, delta_M_agn, alpha_agn, beta_agn, log_sigma_hat_UV, log_tau_UV_RF):
+    return M0_sn - 5 + delta_M_agn + alpha_agn * 2 * (log_sigma_hat_UV - log_sigma_hat_pivot) + beta_agn * (log_tau_UV_RF - log_tau_UV_RF_pivot)
 
 # --- SN model (Brout+ 2022 Eq. 1 and 2) ---
 # SN calibration: anchor absolute magnitude from SH0ES (Riess et al. 2022:contentReference[oaicite:0]{index=0})
@@ -26,19 +27,21 @@ def M_model_SN(m_b, x1, c, bias, host_logmass, alpha_sn, beta_sn, M0_sn, gamma_s
     S = 1e10
     host_mass = 10**host_logmass
     delta_host = gamma_sn * expit(-(host_mass - S) / tau_Ms) - gamma_sn/2
-    return m_b + alpha_sn * x1 - beta_sn * c - M0_sn - bias + delta_host
+    return m_b + alpha_sn * x1 - beta_sn * c - M0_sn + delta_host - bias # bias may be already included in m_b
 
 
 def get_model_params(cosmo_model):
     # Select cosmological parameters based on model
-    if cosmo_model == 'FlatwCDM':
+    if cosmo_model == 'FlatLambdaCDM':
+        cosmo_params = ['H0', 'Om0']
+    elif cosmo_model == 'FlatwCDM':
         cosmo_params = ['H0', 'Om0', 'w0']
     elif cosmo_model == 'Flatw0waCDM':
         cosmo_params = ['H0', 'Om0', 'w0', 'wa']
     else:
         raise ValueError("cosmo_model must be 'FlatwCDM' or 'Flatw0waCDM'")
     # Model parameters: AGN correlation + SN calibration + cosmology
-    model_labels = ['alpha_sn', 'beta_sn', 'gamma_sn', 'tau_Ms', 'M0_sn', 'alpha_agn', 'M0_agn', 'log_f'] + cosmo_params
+    model_labels = ['alpha_sn', 'beta_sn', 'gamma_sn', 'tau_Ms', 'M0_sn', 'delta_M_agn', 'alpha_agn', 'beta_agn', 'log_f'] + cosmo_params
 
     # --- Priors ---
     priors = {
@@ -47,12 +50,13 @@ def get_model_params(cosmo_model):
         "gamma_sn":    (-0.5, 0.5),    # Host mass step
         "tau_Ms":   (0.5, 1.5),        # Host mass transition
         "M0_sn":    (-21, -17),
-        "alpha_agn": (1, 3),     # AGN variability correlation
-        "M0_agn":   (-5, 5),
+        "delta_M_agn": (-3, 3),  # AGN offset from SN
+        "alpha_agn": (-3, 3),     # AGN variability correlation
+        "beta_agn":  (-2, 2),     # AGN variability correlation
         "log_f":    (-3, .5),
         "H0":       (60, 80),
         "Om0":      (0.2, 0.7),
         "w0":       (-3, 0),
-        "wa":       (-3, 3)
+        "wa":       (-3, 0)
     }
     return priors, model_labels

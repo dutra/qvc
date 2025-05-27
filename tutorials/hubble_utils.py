@@ -14,11 +14,18 @@ from tqdm import tqdm
 import warnings
 from scipy.stats import norm
 from scipy.interpolate import RegularGridInterpolator
+from scipy.stats import norm
 
 bands = ['u', 'g', 'r', 'i', 'z']#, 'y']
 bands_idx = {b: i for i, b in enumerate(bands)}
 
-
+def sn_completeness_function(m_b, z, mlim=24.1, sigma=0.5):
+    """
+    Return probability of SN detection given apparent magnitude m_b and redshift z.
+    mlim: effective magnitude limit for SN survey.
+    sigma: sharpness of detection efficiency curve.
+    """
+    return 1.0 - norm.cdf(m_b, loc=mlim, scale=sigma)
 
 def populate_sdss_fields(objs, progress_bar=True):
     print(f"Populating SDSS fields: {len(objs)}", flush=True)
@@ -146,17 +153,18 @@ def load_quasar_data(file_path, populate_sdss=False):
     #df = df.drop(columns=['mags', 'times', 'magerrs'])
 
     # data cuts
-    # df = df[df['log_sigma_UV'] < -0.4]
-    # df = df[df['log_tau_UV_RF'] > 1.5]
-    df = df[df['log_lbol'] > 1]
-    df = df[df['log_mbh'] > 1]
-    df = df[df['apparent_mag_i_err'] < 0.5]
-    # df = df[df['apparent_mag_i'] < 30]
-    df = df[df['M_i'] < 0]
-    df = df[df['ebv'] < 0.05]
-    #df = df[df['apparent_mag_i'].between(18, 20)]
-    #df = df[df['z'] < 1.2]
-    #df = filter_unresolved_quasars(df)
+
+    df = df[
+        df['log_sigma_hat_UV'].between(-3, 0) &
+        (df['log_sigma_hat_UV_err'] > 0) & (df['log_sigma_hat_UV_err'] < 0.5) &
+        (df['apparent_mag_i'] < 26) &
+        (df['apparent_mag_i_err'] < 0.5) &
+        (df['M_i'] < -21) &
+        (df['z'] > 0) &
+        (df['log_lbol'] > 1) &
+        (df['log_mbh'] > 1) &
+        (df['ebv'] < 0.05)
+    ].dropna()
     
     # Remove infinite values from numeric columns
     columns_with_nans = df.columns[df.isna().any()].tolist()
@@ -321,7 +329,7 @@ class Completeness2D:
         return vals.reshape(np.shape(mag))
     
 def get_completeness_function_2d(df_agn, sim_file="sampled_apparent_magnitudes_redshift_vol.h5",
-                                 n_mag_bins=12, n_z_bins=12, mag_min=14, mag_max=26):
+                                 n_mag_bins=36, n_z_bins=36, mag_min=14, mag_max=26):
     """
     Returns a completeness function p_detect(mag, z) as a callable.
     Uses observed AGN sample and simulated sample from HDF5 file
@@ -373,7 +381,7 @@ def get_completeness_function_2d(df_agn, sim_file="sampled_apparent_magnitudes_r
         completeness_ratio[mask] = hist_obs[mask] / hist_true[mask]
 
     # Apply gentle smoothing
-    #completeness_ratio = gaussian_filter(completeness_ratio, sigma=0.7)
+    completeness_ratio = gaussian_filter(completeness_ratio, sigma=0.4)
     completeness_ratio = np.clip(completeness_ratio, 0.0, 1.0)
 
     # Interpolator

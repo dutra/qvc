@@ -35,12 +35,18 @@ def plot_traces(sampler, only_sna=False, cosmo_model='Flatw0waCDM', show=True, d
         samples = sampler.get_chain()
 
     priors, model_labels = get_model_params(cosmo_model)
-    ndim = len(priors.keys())
+    ndim = len(model_labels)
 
     fig, axes = plt.subplots(ndim, 1, figsize=(10, ndim*2.5), sharex=True)
     if ndim == 1:
         axes = [axes]
-
+    print("Plotting traces for cosmological model:", cosmo_model)
+    print("Number of parameters:", ndim)
+    print("Parameter labels:", model_labels)
+    print("Priors: ", priors)
+    print("Number of samples:", samples.shape[0])
+    print("Number of iterations:", samples.shape[1])
+    print("Shape of samples array:", samples.shape)
     for i in range(ndim):
         ax = axes[i]
         ax.plot(samples[:, :, i], color="black", alpha=0.6, lw=0.8)
@@ -59,7 +65,7 @@ def plot_traces(sampler, only_sna=False, cosmo_model='Flatw0waCDM', show=True, d
 
     return fig
 
-def plot_posterior_corner(sampler, only_sna=False, cosmo_model='Flatw0waCDM', show=True, dynasty=False):
+def plot_posterior_corner(sampler, only_sna=False, cosmo_model='Flatw0waCDM', show=False, dynasty=False):
     # Select cosmological parameters based on model
     if cosmo_model == 'FlatwCDM':
         cosmo_params = ['H0', 'Om0', 'w0']
@@ -206,7 +212,11 @@ def plot_hubble(sampler, df_agn, df_pantheon, cosmo_model, show=False, completen
         raise ValueError("Invalid cosmology model.")
     
     if flat_samples is None:
-        flat_samples = sampler.get_chain(flat=True)
+        # Thin the samples to speed up plotting
+        chain = sampler.get_chain(flat=True)
+        n_samples = chain.shape[0]
+        thin_factor = max(1, n_samples // 500)
+        flat_samples = chain[::thin_factor]
     
     z_grid = np.linspace(0.0001, 5, 1000)
 
@@ -255,8 +265,8 @@ def plot_hubble(sampler, df_agn, df_pantheon, cosmo_model, show=False, completen
     # Then re-compute the distance modulus
     mu_pred = np.array([
         corrected_apparent_mag - (K_corr(df_agn['z']) - K_corr(2)) -
-            (M_model_agn(s[param_indices['M0_agn']], s[param_indices['alpha_agn']], 
-                        df_agn['log_sigma_hat_UV']))
+            (M_model_agn(s[param_indices['M0_sn']], s[param_indices['delta_M_agn']], s[param_indices['alpha_agn']], s[param_indices['beta_agn']],
+                        df_agn['log_sigma_hat_UV'], df_agn['log_tau_UV_RF']))
         for s in flat_samples
     ])
 
@@ -295,8 +305,8 @@ def plot_hubble(sampler, df_agn, df_pantheon, cosmo_model, show=False, completen
         # --- Also compute uncorrected mu_pred for plotting ---
         mu_pred_uncorrected = np.array([
             df_agn['apparent_mag_i'] - K_corr(df_agn['z']) - (
-                (M_model_agn(s[param_indices['M0_agn']], s[param_indices['alpha_agn']], 
-                            df_agn['log_sigma_hat_UV'])) - K_corr(2))
+                (M_model_agn(s[param_indices['M0_sn']], s[param_indices['delta_M_agn']], s[param_indices['alpha_agn']], s[param_indices['beta_agn']], 
+                            df_agn['log_sigma_hat_UV'], df_agn['log_tau_UV_RF'])) - K_corr(2))
             for s in flat_samples
         ]) 
         mu_pred_uncorrected_median = np.percentile(mu_pred_uncorrected, 50, axis=0)
@@ -385,25 +395,31 @@ def plot_predicted_vs_actual_Mi(sampler, df_agn, cosmo_model, show=False, flat_s
     results = {key: np.percentile(flat_samples[:, i], [16, 50, 84]) for i, key in enumerate(model_labels)}
 
     M_i_pred = M_model_agn(
-        results['M0_agn'][1], 
+        results['M0_sn'][1], 
+        results['delta_M_agn'][1], 
         results['alpha_agn'][1], 
-        df_agn['log_sigma_hat_UV'].values
-    )  #+ K_corr(2) # TODO: check this
+        results['beta_agn'][1], 
+        df_agn['log_sigma_hat_UV'].values,
+        df_agn['log_tau_UV_RF'].values
+    )  #- K_corr(2) # TODO: check this
 
-    print("M_i_pred", M_i_pred)
-    print("M0_AGN", results['M0_agn'][1])
-    print("alpha_AGN", results['alpha_agn'][1])
-    print(M_model_agn(
-        results['M0_agn'][1], 
-        results['alpha_agn'][1], 
-        df_agn['log_sigma_hat_UV'].values
-    ))
+    #print("M_i_pred", M_i_pred)
+    # print("M0_sn", results['M0_sn'][1])
+    # print("alpha_AGN", results['alpha_agn'][1])
+    # print(M_model_agn(
+    #     results['M0_sn'][1],
+    #     results['delta_M_agn'][1],
+    #     results['alpha_agn'][1], 
+    #     df_agn['log_sigma_hat_UV'].values
+    # ))
 
 
     # Calculate prediction errors
     M_i_pred_err = np.sqrt(
         #df_agn['M_i_err']**2 +
-        (results['alpha_agn'][1] * 2*df_agn["log_sigma_hat_UV_err"])**2
+
+        (results['alpha_agn'][1] * 2*df_agn["log_sigma_hat_UV_err"])**2 +
+        (results['beta_agn'][1] * df_agn['log_tau_UV_RF_err'])**2
         # (2.5 * 0.3 * np.log10(1 + df_agn['z']))**2 +
         # (0.055 * df_agn['z'])**2 +
         # np.exp(2 * results['log_f'][1])
@@ -537,8 +553,9 @@ def plot_predicted_sigma_hat_vs_luminosity(sampler, df_agn, cosmo_model, show=Fa
     param_indices = {name: model_labels.index(name) for name in model_labels}
 
     # Extract arrays of model parameters
-    M0_samples = flat_samples[:, param_indices['M0_agn']] - 26
+    M0_samples = flat_samples[:, param_indices['M0_sn']] - 5
     alpha_samples = flat_samples[:, param_indices['alpha_agn']]
+    beta_samples = flat_samples[:, param_indices['beta_agn']]
 
     # Define grid in log L_bol
     log_lbol_grid = np.linspace(43, 49, 200)
@@ -549,7 +566,7 @@ def plot_predicted_sigma_hat_vs_luminosity(sampler, df_agn, cosmo_model, show=Fa
     slopes = -2.5 / alpha_samples
     intercepts = (90 - M0_samples) / alpha_samples + pivot_term
 
-    print("Intercepts:", intercepts)
+    #print("Intercepts:", intercepts)
 
     # Evaluate log_sigma_hat_sq across all posterior lines
     ys = np.outer(slopes, log_lbol_grid) + intercepts[:, None]  # shape: (n_samples, n_grid)
@@ -584,11 +601,6 @@ def plot_predicted_sigma_hat_vs_luminosity(sampler, df_agn, cosmo_model, show=Fa
         color='m',
         alpha=0.4)
     plt.plot(lbol_grid, y_median_lin, color='m', lw=2, label='Best fit model')
-
-    # Observed data points with error bars
-    # Color points by redshift
-    import matplotlib.cm as cm
-    import matplotlib.colors as mcolors
 
     plt.errorbar(
         lbol,
