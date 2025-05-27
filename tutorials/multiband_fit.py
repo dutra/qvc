@@ -92,11 +92,11 @@ def initSampler(key, nSample, nBand, X, y, yerr, clean_bands, z):
     etaBreakSampler = UniformInit(1, [2, 5])
     lamsSampler = UniformInit(1, [2400.0, 2600.0])
     # sigma
-    etaA1Sampler = UniformInit(1, [-.8, -0.6])
-    etaA2Sampler = UniformInit(1, [-.8, -0.6])
+    etaA1Sampler = UniformInit(1, [-1, -0.6])
+    etaA2Sampler = UniformInit(1, [-1, -0.6])
     # tau
-    etaTau1Sampler = UniformInit(1, [-0.1, 0.1])
-    etaTau2Sampler = UniformInit(1, [-0.1, 0.1])
+    etaTau1Sampler = UniformInit(1, [-0.1, 0.2])
+    etaTau2Sampler = UniformInit(1, [-0.1, 0.2])
 
     # kernel init
     kernelSampler = DRWInit([jnp.log(10**2.5), jnp.log(10**4.5)], [jnp.log(0.01), jnp.log(1.5)])
@@ -242,10 +242,10 @@ def numpyro_joint_model(Model, batch_data):
     # --- Shared (universal) parameters ---
     # These priors can be broader
     powerlaw_priors = {
-        "eta_A1": (-0.7, 0.4),
-        "eta_A2": (-0.7, 0.4),
-        "eta_tau1": (0.0, 0.4),
-        "eta_tau2": (0.0, 0.4),
+        "eta_A1": (-0.7, 0.2),
+        "eta_A2": (-0.7, 0.2),
+        "eta_tau1": (0.0, 0.2),
+        "eta_tau2": (0.0, 0.2),
         "eta_break": (3, 1),
         "lam_s": (2500.0, 100.0),
     }
@@ -516,6 +516,7 @@ if __name__ == '__main__':
     parser.add_argument("--latent", action="store_true", help="Use latent variable model.")
     parser.add_argument("--choose_N", type=int, default=-1, help="Sample choose_N objects.")
     parser.add_argument("--job_id", type=int, default=-1, help="Job Index for parallel processing.")
+    parser.add_argument("--job_N", type=int, default=-1, help="Number of objects to divide.")
 
     args = parser.parse_args()
 
@@ -543,7 +544,7 @@ if __name__ == '__main__':
         print(f"After choosing, total of {len(filter_object_ids)=}")
 
     elif args.job_id > -1:
-        subarrays = [filter_object_ids[i:i + 20] for i in range(0, len(filter_object_ids), 20)]
+        subarrays = [filter_object_ids[i:i + args.job_N] for i in range(0, len(filter_object_ids), args.job_N)]
         filter_object_ids = subarrays[args.job_id]
         print(f"Job ID {args.job_id} processing {filter_object_ids=}")
 
@@ -651,7 +652,7 @@ if __name__ == '__main__':
                 psd_results = compute_psd_from_samples(obj_samples_clean, obj["clean_bands"])
                 save_combined_plot(obj_samples_clean, m, obj['X'], obj['y'], obj['yerr'], obj['band_idx'], result, psd_results=psd_results)
                 #plot_mcmc_traces(mcmc, result)
-            results.append(result)
+            results.append(obj | result)
             print("++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++", flush=True)
             print(f"Quasar {i+1}/{len(batch_data)} Object ID: {obj['object_id']}", flush=True)
 
