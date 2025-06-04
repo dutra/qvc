@@ -141,10 +141,14 @@ def load_quasar_data(file_path, populate_sdss=False):
 
     quasar_list = read_quasars_from_hdf5(file_path)
     print("Number of quasars loaded:", len(quasar_list))
-    if populate_sdss:
-        print("Populating SDSS fields...")
-        populate_sdss_fields(quasar_list)
-        write_hdf5_file(quasar_list, file_path)
+
+    #if populate_sdss:
+    for quasar in quasar_list:
+        if 'apparent_mag_i' not in quasar.keys():
+            print("Populating SDSS fields...")
+            populate_sdss_fields(quasar_list)
+            write_hdf5_file(quasar_list, file_path)
+            break
 
 
     df = pd.DataFrame(quasar_list)
@@ -329,7 +333,7 @@ class Completeness2D:
         return vals.reshape(np.shape(mag))
     
 def get_completeness_function_2d(df_agn, sim_file="sampled_apparent_magnitudes_redshift_vol.h5",
-                                 n_mag_bins=36, n_z_bins=36, mag_min=14, mag_max=26):
+                                 n_mag_bins=16, n_z_bins=16, mag_min=14, mag_max=26):
     """
     Returns a completeness function p_detect(mag, z) as a callable.
     Uses observed AGN sample and simulated sample from HDF5 file

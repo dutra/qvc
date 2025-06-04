@@ -9,10 +9,11 @@ from astropy.cosmology import FlatwCDM, Flatw0waCDM
 import matplotlib.pyplot as plt
 import os
 
-from hubble_model import K_corr, M_model_agn, M_model_SN, log_sigma_hat_pivot, get_model_params
+from hubble_model import K_corr, M_model_agn, M_model_SN, get_model_params, log_sigma_hat_pivot, log_tau_UV_RF_pivot, M0_agn_offset
 from numpy.polynomial.polynomial import Polynomial
 from scipy.interpolate import interp1d
 from dynesty.utils import resample_equal
+from tqdm import tqdm
 
 def plot_traces(sampler, only_sna=False, cosmo_model='Flatw0waCDM', show=True, dynasty=False):
     """
@@ -265,7 +266,9 @@ def plot_hubble(sampler, df_agn, df_pantheon, cosmo_model, show=False, completen
     # Then re-compute the distance modulus
     mu_pred = np.array([
         corrected_apparent_mag - (K_corr(df_agn['z']) - K_corr(2)) -
-            (M_model_agn(s[param_indices['M0_sn']], s[param_indices['delta_M_agn']], s[param_indices['alpha_agn']], s[param_indices['beta_agn']],
+            (M_model_agn(s[param_indices['M0_sn']], s[param_indices['delta_M_agn']], s[param_indices['alpha_agn']], 
+                         #s[param_indices['eta_A1_agn']], s[param_indices['eta_A2_agn']],
+                         s[param_indices['beta_agn']],
                         df_agn['log_sigma_hat_UV'], df_agn['log_tau_UV_RF']))
         for s in flat_samples
     ])
@@ -305,7 +308,9 @@ def plot_hubble(sampler, df_agn, df_pantheon, cosmo_model, show=False, completen
         # --- Also compute uncorrected mu_pred for plotting ---
         mu_pred_uncorrected = np.array([
             df_agn['apparent_mag_i'] - K_corr(df_agn['z']) - (
-                (M_model_agn(s[param_indices['M0_sn']], s[param_indices['delta_M_agn']], s[param_indices['alpha_agn']], s[param_indices['beta_agn']], 
+                (M_model_agn(s[param_indices['M0_sn']], s[param_indices['delta_M_agn']], s[param_indices['alpha_agn']],
+                             #s[param_indices['eta_A1_agn']], s[param_indices['eta_A2_agn']],
+                              s[param_indices['beta_agn']], 
                             df_agn['log_sigma_hat_UV'], df_agn['log_tau_UV_RF'])) - K_corr(2))
             for s in flat_samples
         ]) 
@@ -398,20 +403,11 @@ def plot_predicted_vs_actual_Mi(sampler, df_agn, cosmo_model, show=False, flat_s
         results['M0_sn'][1], 
         results['delta_M_agn'][1], 
         results['alpha_agn'][1], 
+        # results['eta_A1_agn'][1], results['eta_A2_agn'][1],
         results['beta_agn'][1], 
         df_agn['log_sigma_hat_UV'].values,
         df_agn['log_tau_UV_RF'].values
-    )  #- K_corr(2) # TODO: check this
-
-    #print("M_i_pred", M_i_pred)
-    # print("M0_sn", results['M0_sn'][1])
-    # print("alpha_AGN", results['alpha_agn'][1])
-    # print(M_model_agn(
-    #     results['M0_sn'][1],
-    #     results['delta_M_agn'][1],
-    #     results['alpha_agn'][1], 
-    #     df_agn['log_sigma_hat_UV'].values
-    # ))
+    ) #+ K_corr(2) # TODO: check this
 
 
     # Calculate prediction errors
@@ -446,8 +442,8 @@ def plot_predicted_vs_actual_Mi(sampler, df_agn, cosmo_model, show=False, flat_s
     for i, ax in enumerate(axes):
         ax.set_xlim(df_agn['M_i'].min(), df_agn['M_i'].max())
         ax.set_ylim(M_i_pred.min(), M_i_pred.max())
-        ax.set_xlim(-29.8, -21.2)
-        ax.set_ylim(-29.8, -21.2)
+        #ax.set_xlim(-29.8, -21.2)
+        #ax.set_ylim(-29.8, -21.2)
 
         if i < num_bins:
             # Filter data for the current redshift bin
@@ -553,7 +549,8 @@ def plot_predicted_sigma_hat_vs_luminosity(sampler, df_agn, cosmo_model, show=Fa
     param_indices = {name: model_labels.index(name) for name in model_labels}
 
     # Extract arrays of model parameters
-    M0_samples = flat_samples[:, param_indices['M0_sn']] - 5
+    M0_sn_samples = flat_samples[:, param_indices['M0_sn']]
+    delta_M_agn_samples = flat_samples[:, param_indices['delta_M_agn']]
     alpha_samples = flat_samples[:, param_indices['alpha_agn']]
     beta_samples = flat_samples[:, param_indices['beta_agn']]
 
@@ -562,9 +559,12 @@ def plot_predicted_sigma_hat_vs_luminosity(sampler, df_agn, cosmo_model, show=Fa
     lbol_grid = 10 ** log_lbol_grid
 
     # Precompute terms
-    pivot_term = 2 * log_sigma_hat_pivot
+    # slopes = -2.5 / alpha_samples
+    # intercepts = (90 - M0_samples) / alpha_samples + 2 * log_sigma_hat_pivot
+
     slopes = -2.5 / alpha_samples
-    intercepts = (90 - M0_samples) / alpha_samples + pivot_term
+    intercepts = 1/alpha_samples * (90 - M0_sn_samples + M0_agn_offset + 2 * log_sigma_hat_pivot -2 - beta_samples * (df_agn['log_tau_UV_RF'].mean() - log_tau_UV_RF_pivot))
+
 
     #print("Intercepts:", intercepts)
 
@@ -624,7 +624,7 @@ def plot_predicted_sigma_hat_vs_luminosity(sampler, df_agn, cosmo_model, show=Fa
     plt.legend(fontsize=16)
     plt.tight_layout()
     plt.xlim(2e43, 9e47)
-    plt.ylim(0.4e-6, 1.2e-2)
+    plt.ylim(0.4e-3, 0.4e1)
     os.makedirs("plots/hubble", exist_ok=True)
     plt.savefig(f"plots/hubble/predicted_sigma_hat_sq_{cosmo_model}.png", dpi=300)
     plt.savefig(f"plots/hubble/predicted_sigma_hat_sq_{cosmo_model}.pdf", dpi=300)
@@ -635,29 +635,114 @@ def plot_predicted_sigma_hat_vs_luminosity(sampler, df_agn, cosmo_model, show=Fa
     return slopes, intercepts
 
 
-def plot_sigma_hat_vs_log_lbol(df_agn, show=False):
-    """
-    Plot 2 * log_sigma_hat_UV vs log_lbol for AGN sample.
+def plot_predicted_sigma_hat_vs_luminosity_pl(sampler, df_agn, cosmo_model, show=False, flat_samples=None):
+    # Load samples
+    if flat_samples is None:
+        flat_samples = sampler.get_chain(flat=True, thin=20)
+    priors, model_labels = get_model_params(cosmo_model)
+    param_indices = {name: model_labels.index(name) for name in model_labels}
 
-    Parameters:
-        df_agn : pandas.DataFrame
-            DataFrame containing 'log_sigma_hat_UV' and 'log_lbol' columns.
-        show : bool
-            Whether to display the plot interactively.
-    """
-    x = df_agn['log_lbol']
-    y = 2 * df_agn['log_sigma_hat_UV']
+    # Extract arrays of model parameters
+    M0_sn_samples = flat_samples[:, param_indices['M0_sn']]
+    delta_M_agn_samples = flat_samples[:, param_indices['delta_M_agn']]
+    alpha_samples = flat_samples[:, param_indices['alpha_agn']]
+    #eta_A1_samples = flat_samples[:, param_indices['eta_A1_agn']]
+    #eta_A2_samples = flat_samples[:, param_indices['eta_A2_agn']]
+    beta_samples = flat_samples[:, param_indices['beta_agn']]
 
-    plt.figure(figsize=(7, 5))
-    plt.scatter(x, y, s=10, alpha=0.5, color='navy')
-    plt.xlabel(r'$\log L_{\mathrm{bol}}$')
-    plt.ylabel(r'$2 \log \hat{\sigma}_{\mathrm{UV}}$')
-    plt.title(r'$2 \log \hat{\sigma}_{\mathrm{UV}}$ vs $\log L_{\mathrm{bol}}$')
-    plt.grid(True, alpha=0.3)
+    # Define grid in log L_bol
+    log_lbol_grid = np.linspace(43, 49, 200)
+    lbol_grid = 10 ** log_lbol_grid
+
+    # Predicted M_i from model function
+    mean_log_sigma_hat_UV = df_agn['log_sigma_hat_UV'].mean()
+    mean_log_tau_UV_RF = df_agn['log_tau_UV_RF'].mean()
+
+    predicted_M_i_samples = []
+    for log_sigma_hat_UV, log_tau_UV_RF in tqdm(zip(df_agn['log_sigma_hat_UV'], df_agn['log_tau_UV_RF']), total=len(df_agn), desc="Predicting M_i"):
+        predicted_M_i_samples.extend(
+            M_model_agn(
+                M0_sn_samples, delta_M_agn_samples, alpha_samples, 
+                #eta_A1_samples, eta_A2_samples,
+                beta_samples,
+                log_sigma_hat_UV, log_tau_UV_RF
+            )
+        )
+    predicted_M_i_samples = np.array(predicted_M_i_samples)
+    # Convert predicted M_i to luminosity
+    predicted_log_lbol_samples = (90 - predicted_M_i_samples) / 2.5
+
+    # Fix the break at Lbol = 1e46
+    log_lbol_break = np.log10(1e46)
+
+    # Calculate eta1 and eta2 transitions from observed data
+    mask_low = df_agn['log_lbol'] < log_lbol_break
+    mask_high = df_agn['log_lbol'] >= log_lbol_break
+
+    eta1 = np.polyfit(df_agn['log_lbol'][mask_low], 2 * df_agn['log_sigma_hat_UV'][mask_low], 1)[0]
+    eta2 = np.polyfit(df_agn['log_lbol'][mask_high], 2 * df_agn['log_sigma_hat_UV'][mask_high], 1)[0]
+
+    smoothness = 0.5
+
+    log_sigma_hat_sq_samples = []
+    for pred_log_lbol in tqdm(predicted_log_lbol_samples, desc="Computing log_sigma_hat_sq samples"):
+        delta_log_lbol = log_lbol_grid - log_lbol_break
+        slope_transition = (eta1 + eta2) / 2 + (eta2 - eta1) / 2 * np.tanh(delta_log_lbol / smoothness)
+        log_sigma_hat_sq = slope_transition * (log_lbol_grid - pred_log_lbol) + 2 * log_sigma_hat_pivot
+        log_sigma_hat_sq_samples.append(log_sigma_hat_sq)
+
+    log_sigma_hat_sq_samples = np.array(log_sigma_hat_sq_samples)
+
+    # Compute percentile bands
+    y_low, y_high = np.percentile(log_sigma_hat_sq_samples, [16, 84], axis=0)
+    y_median = np.median(log_sigma_hat_sq_samples, axis=0)
+
+    # Convert to linear space
+    y_low_lin = 10 ** y_low
+    y_high_lin = 10 ** y_high
+    y_median_lin = 10 ** y_median
+
+    # Observed AGN data
+    log_lbol = df_agn['log_lbol'].values
+    log_sigma_hat_sq = 2 * df_agn['log_sigma_hat_UV'].values
+
+    lbol = 10 ** log_lbol
+    sigma_hat_sq = 10 ** log_sigma_hat_sq
+
+    sigma_hat_sq_err = np.log(10) * sigma_hat_sq * 2 * df_agn['log_sigma_hat_UV_err']
+    lbol_err = np.log(10) * lbol * df_agn['log_lbol_err']
+
+    # Plotting
+    plt.figure(figsize=(8, 6))
+
+    # Plot the posterior band
+    plt.fill_between(lbol_grid, y_low_lin, y_high_lin, color='m', alpha=0.4)
+    plt.plot(lbol_grid, y_median_lin, color='m', lw=2, label='Model')
+
+    # Observed data
+    plt.errorbar(
+        lbol,
+        sigma_hat_sq,
+        yerr=sigma_hat_sq_err,
+        xerr=lbol_err,
+        fmt='o', linestyle='none', color='k', alpha=0.2, markersize=4, lw=1, label='AGN'
+    )
+
+    plt.xscale('log')
+    plt.yscale('log')
+    plt.xlabel(r'$L_{\mathrm{bol}}$ (erg $\mathrm{s}^{-1}$)')
+    plt.ylabel(r'$\hat{\sigma}_{\mathrm{UV}}^2$ $(\mathrm{mag}^2\ \mathrm{day}^{-1})$')
+    plt.legend(fontsize=16)
     plt.tight_layout()
+    plt.xlim(2e43, 9e47)
+    plt.ylim(0.4e-3, 0.4e1)
+
     os.makedirs("plots/hubble", exist_ok=True)
-    plt.savefig("plots/hubble/2log_sigma_hat_vs_log_lbol.png", dpi=300)
-    plt.savefig("plots/hubble/2log_sigma_hat_vs_log_lbol.pdf", dpi=300)
+    plt.savefig(f"plots/hubble/predicted_sigma_hat_sq_{cosmo_model}.png", dpi=300)
+    plt.savefig(f"plots/hubble/predicted_sigma_hat_sq_{cosmo_model}.pdf", dpi=300)
+
     if show:
         plt.show()
     plt.close()
+
+    return log_sigma_hat_sq_samples
