@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 import emcee
 import matplotlib.pyplot as plt
-from astropy.cosmology import FlatwCDM, Flatw0waCDM, FlatLambdaCDM
+from astropy.cosmology import FlatwCDM, Flatw0waCDM, FlatLambdaCDM, FlatwpwaCDM
 from scipy import stats
 from scipy.signal import fftconvolve
 import numpy as np
@@ -47,7 +47,9 @@ def log_likelihood(theta, cosmo_model,
     if cosmo_model == 'FlatwCDM':
         cosmo = FlatwCDM(H0=params['H0'], Om0=params['Om0'], w0=params['w0'])
     elif cosmo_model == 'Flatw0waCDM':
-        cosmo = Flatw0waCDM(H0=params['H0'], Om0=params['Om0'], w0=params['w0'], wa=params['wa'])
+        a_pivot = 1 / (1 + z_agn_pivot)
+        wp = params['w0'] + (1 - a_pivot) * params['wa']
+        cosmo = FlatwpwaCDM(H0=params['H0'], Om0=params['Om0'], wp=wp, wa=params['wa'], zp=z_agn_pivot)
     # SN model
     mu_theory = cosmo.distmod(df_pantheon['zHD'].values).value
     mu_obs = M_model_SN(
@@ -205,7 +207,7 @@ def run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model='Flatw0waCDM',
                               'log_sigma_hat_UV', 'log_sigma_hat_UV_err', 'log_tau_UV_RF', 'log_tau_UV_RF_err']].copy()
     completeness_params = get_completeness_function_2d(df_agn_filtered) if completeness else None
     log_sigma_hat_pivot = df_agn_filtered['log_sigma_hat_UV'].mean()
-    print(f"Log sigma hat pivot: {log_sigma_hat_pivot:.3f}, log tau UV RF pivot: {df_agn_filtered['log_tau_UV_RF'].mean():.3f}")
+    print(f"Log sigma hat pivot: {log_sigma_hat_pivot:.3f}, log tau UV RF pivot: {df_agn_filtered['log_tau_UV_RF'].mean():.3f}, z_agn_pivot: {df_agn_filtered['z'].median():.3f}")
     print(f"Mean AGN M_i: {df_agn_filtered['M_i'].mean()}, delta_M_agn ~ {-19.3 - df_agn_filtered['M_i'].mean():.3f}")
 
     if use_dynesty:
@@ -298,6 +300,7 @@ def run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model='Flatw0waCDM',
 
     mu_err = np.sqrt(
         df_agn_filtered['apparent_mag_i_err'].values**2 +
+        (params['alpha_agn'] * 2 * df_agn_filtered['log_sigma_hat_UV_err'].values)**2 +
         (params['beta_agn'] * df_agn_filtered['log_tau_UV_RF_err'].values)**2 +
         (2.5 * 0.3 * np.log10(1 + df_agn_filtered['z'].values))**2 +
         (0.055 * df_agn_filtered['z'].values)**2 +

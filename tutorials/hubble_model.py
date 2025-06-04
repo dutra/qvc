@@ -7,9 +7,10 @@ def K_corr(z, alpha_nu=-0.5):
     return -2.5 * (1 + alpha_nu) * np.log10(1 + z)
 
 # --- Reference constants and pivot values ---
-log_sigma_hat_pivot = -0.618 # TODO make this a parameter
-log_tau_UV_RF_pivot = 3.122  # TODO make this a parameter
-M0_agn_offset = 5.186  # TODO make this a parameter
+log_sigma_hat_pivot = -0.638 # TODO make this a parameter
+log_tau_UV_RF_pivot = 3.110  # TODO make this a parameter
+M0_agn_offset = 5.162  # TODO make this a parameter
+z_agn_pivot = 2 # TODO make this a parameter
 
 # --- AGN model ---
 # def M_model_agn(M0_agn, alpha_agn, log_sigma_hat_UV):
@@ -17,7 +18,6 @@ M0_agn_offset = 5.186  # TODO make this a parameter
 
 def M_model_agn(M0_sn, delta_M_agn, alpha_agn, beta_agn, log_sigma_hat_UV, log_tau_UV_RF):
     return M0_sn - M0_agn_offset + alpha_agn * 2 * (log_sigma_hat_UV - log_sigma_hat_pivot) + beta_agn * (log_tau_UV_RF - log_tau_UV_RF_pivot)
-
 
 def M_model_SN(m_b, x1, c, bias, host_logmass, alpha_sn, beta_sn, M0_sn, gamma_sn, tau_Ms):
     """Brout+ 2022 SN model with stable host correction."""
@@ -55,8 +55,8 @@ def get_model_params(cosmo_model):
         "beta_agn":  (-5, 0),        # AGN variability correlation
         "log_f":    (-3, .5),
         "H0":       (60, 80),
-        "Om0":      (0.25, 0.35),
+        "Om0":      (0.2, 0.4),
         "w0":       (-3, 0),
-        "wa":       (-3, 0)
+        "wa":       (-5, 0)
     }
     return priors, model_labels
