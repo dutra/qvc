@@ -848,14 +848,6 @@ def plot_Mi_vs_log_sigma_hat_sq(samples, df_agn, cosmo_model, show=False):
     param_indices = {name: model_labels.index(name) for name in model_labels}
     results = {key: np.percentile(samples[:, i], [16, 50, 84]) for i, key in enumerate(model_labels)}
 
-    #M_i = df_agn['M_i'].values
-    predicted_M_i = M_model_agn(results['M0_sn'][1] + results['delta_M0_agn'][1],
-                     results['log_sigma_hat_sq_break'][1],
-                     results['eta_A1_agn'][1], results['eta_A2_agn'][1], 
-                     results['eta_break_agn'][1],
-                     results['beta_agn'][1],
-                     df_agn['log_sigma_hat_UV'].values, df_agn['log_tau_UV_RF'].values)
-
     # Fit model: reparametrize alpha to log_alpha for fitting
     x_fit = np.linspace(-2.5, 0, 200)
     y_fit = M_model_agn(
@@ -867,11 +859,11 @@ def plot_Mi_vs_log_sigma_hat_sq(samples, df_agn, cosmo_model, show=False):
         x_fit/2, df_agn['log_tau_UV_RF'].mean()
     ) 
     fig, ax = plt.subplots(figsize=(7, 5))
-    ax.scatter(2*df_agn['log_sigma_hat_UV'], predicted_M_i, alpha=0.7, edgecolor='k', zorder=-2)
+    ax.scatter(2*df_agn['log_sigma_hat_UV'], df_agn['M_i'], alpha=0.7, edgecolor='k', zorder=-2)
     ax.plot(x_fit, y_fit, color='red', zorder=-1)
 
     ax.set_xlabel(r'$\log_{10}(\hat{\sigma}_{\mathrm{UV}}^2)$ (mag$^2$ day$^{-1}$)')
-    ax.set_ylabel(r'Predicted $M_i$')
+    ax.set_ylabel(r'$M_i$')
     #ax.invert_yaxis()
     #ax.grid(True, which='both', ls='--', lw=0.3)
     ax.set_xlim(log_sigma_hat_sq.min() - 0.1, log_sigma_hat_sq.max() + 0.1)
@@ -881,7 +873,8 @@ def plot_Mi_vs_log_sigma_hat_sq(samples, df_agn, cosmo_model, show=False):
         plt.show()
 
     os.makedirs("plots/hubble", exist_ok=True)
-    fig.savefig("plots/hubble/predicted_Mi_vs_log_sigma_hat_sq_fit.png", dpi=300)
+    fig.savefig("plots/hubble/observed_Mi_vs_log_sigma_hat_sq_fit.png", dpi=300)
+    #fig.savefig("plots/hubble/observed_Mi_vs_log_sigma_hat_sq_fit.pdf", dpi=300)
 
     return fig, ax
 
