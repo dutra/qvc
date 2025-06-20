@@ -31,7 +31,7 @@ import yaml
 _agn_data = None
 _pantheon_data = None
 
-sna_logdetCov, sna_L, sna_lower = None, None, None
+_sna_LogdetCov, _sna_L, _sna_Lower = None, None, None
 
 z_agn_pivot = 1.4
 
@@ -76,9 +76,9 @@ def log_likelihood(theta, cosmo_model,
 
     # Compute main SN likelihood (with or without covariance)
     if use_full_cov:
-        global sna_L, sna_lower, sna_logdetCov  # Ensure these are set when loading data
-        quad_form = res_snia.T @ cho_solve((sna_L, sna_lower), res_snia)
-        ll_snia = -0.5 * quad_form - 0.5 * sna_logdetCov - 0.5 * len(res_snia) * np.log(2 * np.pi)
+        global _sna_L, _sna_Lower, _sna_LogdetCov  # Ensure these are set when loading data
+        quad_form = res_snia.T @ cho_solve((_sna_L, _sna_Lower), res_snia)
+        ll_snia = -0.5 * quad_form - 0.5 * _sna_LogdetCov - 0.5 * len(res_snia) * np.log(2 * np.pi)
     else:
         sigma = _pantheon_data['MU_SH0ES_ERR_DIAG']
         ll_snia = np.sum(stats.norm.logpdf(res_snia, scale=sigma))
@@ -205,6 +205,16 @@ def loglike_dynesty(theta):
                           cfg['only_sna'],
                           cfg['use_full_cov'])
 
+def dynesty_initializer(agn_data, pantheon_data, dynesty_config, sna_LogdetCov, sna_L, sna_Lower):
+    global _agn_data, _pantheon_data, _dynesty_config
+    global _sna_LogdetCov, _sna_L, _sna_Lower
+    _agn_data = agn_data
+    _pantheon_data = pantheon_data
+    _dynesty_config = dynesty_config
+    _sna_LogdetCov = sna_LogdetCov
+    _sna_L = sna_L
+    _sna_Lower = sna_Lower
+
 def run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model='Flatw0waCDM', 
                       only_sna=False, completeness=True, use_full_cov=False,
                       resume=False, dlogz_init=np.inf, nlive_init=25, nlive_batch=10,
@@ -262,16 +272,21 @@ def run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model='Flatw0waCDM',
             'use_full_cov': use_full_cov,
         })
 
-        u = np.random.rand(1000, ndim)
-        v = np.array([prior_transform_dynesty(ui) for ui in u])
-        l = np.array([loglike_dynesty(vi) for vi in v])
-        print("Fraction of finite likelihoods:", np.sum(np.isfinite(l)) / len(l))
 
         num_cpus = multiprocessing.cpu_count()
-        with multiprocessing.Pool(processes=num_cpus) as pool:
+        with multiprocessing.get_context("spawn").Pool(
+            processes=num_cpus,
+            initializer=dynesty_initializer,
+            initargs=(_agn_data, _pantheon_data, _dynesty_config, 
+                      _sna_LogdetCov, _sna_L, _sna_Lower)
+        ) as pool:            
             # use NestedSampler for precise log-evidence estimates (e.g., model selection)
             # use DynamicNestSampler for Cosmological parameter inference
-            resume = False
+            u = np.random.rand(1000, ndim)
+            v = pool.map(prior_transform_dynesty, u)
+            l = pool.map(loglike_dynesty, v)
+            print("Fraction of finite likelihoods:", np.sum(np.isfinite(l)) / len(l))
+
             if resume:
                 sampler = DynamicNestedSampler.restore(f'data/dynesty_{cosmo_model}.save', pool=pool)
             else:
@@ -388,8 +403,8 @@ def compare_models():
     use_full_cov = True
     completeness = True
 
-    global sna_logdetCov, sna_L, sna_lower
-    df_agn, df_pantheon, sna_logdetCov, sna_L, sna_lower = load_data("data/N20_w500_grace/may21_joint_fits_N20_merged.h5")
+    global _sna_LogdetCov, _sna_L, _sna_Lower
+    df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/N20_w500_grace/may21_joint_fits_N20_merged.h5")
 
     # Run MCMC pipeline for FlatLambdaCDM model
     sampler_FlatwCDM, _, _, logZ_FlatwCDM, logZerr_FlatwCDM = run_mcmc_pipeline(
@@ -474,11 +489,11 @@ def test():
     cosmo_model = 'Flatw0waCDM'
 
     # Load data
-    global sna_logdetCov, sna_L, sna_lower
+    global _sna_LogdetCov, _sna_L, _sna_Lower
 
     #df_agn, df_pantheon, Cov_inv, logdetCov, L = load_data("data/N20_w500_grace/may21_joint_fits_N20_merged.h5")
     #df_agn, df_pantheon, Cov_inv, logdetCov, L = load_data("data/may23_all_merged.h5", populate_sdss=False)
-    df_agn, df_pantheon, sna_logdetCov, sna_L, sna_lower = load_data("data/june1_joint_N20w2000s1000_fits_merged.h5")
+    df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/june1_joint_N20w2000s1000_fits_merged.h5")
     fitting_method = 'dynesty'
 
     sampler_joint, flat_samples, model_labels, mag_corr, logZ, logZerr = run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model=cosmo_model, 
