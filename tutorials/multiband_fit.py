@@ -66,6 +66,9 @@ from multiband_models import *
 
 from solvers import DirectFullRank
 
+#bands = ['g', 'r', 'i']
+
+
 # define params
 zero_mean = False
 has_jitter = True
@@ -87,16 +90,15 @@ def initSampler(key, nSample, nBand, X, y, yerr, clean_bands, z):
     logJitterSampler = UniformInit(nBand, [jnp.log(1e-4), jnp.log(0.1)])
 
     print(f"initSampler logJitterSampler {key}", nBand)
-
     # power laws
-    etaBreakSampler = UniformInit(1, [2, 5])
-    lamsSampler = UniformInit(1, [2400.0, 2600.0])
+    #etaBreakSampler = UniformInit(1, [0, 3])
+    #lamsSampler = UniformInit(1, [2400.0, 2600.0])
     # sigma
-    etaA1Sampler = UniformInit(1, [-1, -0.6])
-    etaA2Sampler = UniformInit(1, [-1, -0.6])
+    etaA1Sampler = UniformInit(1, [-2, 2])
+    etaA2Sampler = UniformInit(1, [-2, 2])
     # tau
-    etaTau1Sampler = UniformInit(1, [-0.1, 0.2])
-    etaTau2Sampler = UniformInit(1, [-0.1, 0.2])
+    etaTau1Sampler = UniformInit(1, [-2, 2])
+    etaTau2Sampler = UniformInit(1, [-2, 2])
 
     # kernel init
     kernelSampler = DRWInit([jnp.log(10**2.5), jnp.log(10**4.5)], [jnp.log(0.01), jnp.log(1.5)])
@@ -143,8 +145,8 @@ def initSampler(key, nSample, nBand, X, y, yerr, clean_bands, z):
         "eta_A2": etaA2Sampler(subkeys[10], 1),
         "eta_tau1": etaTau1Sampler(subkeys[11], 1),
         "eta_tau2": etaTau2Sampler(subkeys[12], 1),
-        "eta_break": etaBreakSampler(subkeys[13], 1),
-        "lam_s": lamsSampler(subkeys[14], 1),
+        #"eta_break": etaBreakSampler(subkeys[13], 1),
+        #"lam_s": lamsSampler(subkeys[14], 1),
     }
 
     print('Starting MLE')
@@ -196,13 +198,14 @@ def numpyro_model(Model, X, yerr, y=None, bestP=None, clean_bands=None, z=None):
     poly1 = numpyro.sample("poly1", dist.Normal(0.0, 10.0))
 
     # --- Power law parameters ---
+    # WARNING: SINGLE NOT JOINT
     powerlaw_priors = {
         "eta_A1": (-0.75, 0.1),
         "eta_A2": (-0.6, 0.1),
         "eta_tau1": (0.05, 0.1),
         "eta_tau2": (0.01, 0.1),
-        "eta_break": (3, 0.1),
-        "lam_s": (2500.0, 100.0),
+        #"eta_break": (3, 0.1),
+        #"lam_s": (2500.0, 100.0),
     }
     powerlaw_samples = {
         k: numpyro.sample(k, dist.Normal(loc, scale))
@@ -241,13 +244,19 @@ def numpyro_model(Model, X, yerr, y=None, bestP=None, clean_bands=None, z=None):
 def numpyro_joint_model(Model, batch_data):
     # --- Shared (universal) parameters ---
     # These priors can be broader
+    #powerlaw_priors = {
+        #"eta_A1": (-1.25, 0.2),
+        #"eta_A2": (-0.3, 0.2),
+        #"eta_tau1": (0.0, 0.2),
+        #"eta_tau2": (0.0, 0.2),
+        #"eta_break": (1, 0.1),
+        #"lam_s": (2500.0, 100.0),
+    #}
     powerlaw_priors = {
-        "eta_A1": (-0.7, 0.2),
-        "eta_A2": (-0.7, 0.2),
-        "eta_tau1": (0.0, 0.2),
-        "eta_tau2": (0.0, 0.2),
-        "eta_break": (3, 1),
-        "lam_s": (2500.0, 100.0),
+        "eta_A1": (0, 1.),
+        "eta_A2": (0, 1.),
+        "eta_tau1": (0.0, 1.),
+        "eta_tau2": (0.0, 1.),
     }
     powerlaw_samples = {
         k: numpyro.sample(k, dist.Normal(loc, scale))
@@ -312,10 +321,12 @@ def fit_multiband(Model, data, nwarm=500, nsamp=250, progress_bar=False, plot=Fa
     clean_bands = list(sorted(clean_bands, key=lambda band: ['u', 'g', 'r', 'i', 'z', 'y'].index(band)))
     #clean_bands = bands
     data['clean_bands'] = clean_bands
+    print(f"Bands: {bands}, Clean Bands: {clean_bands}")
     if len(clean_bands) == 0:
         print(f"No clean bands for quasar {data['object_id']}, skipping.", flush=True)
         return None
     # Combine
+    print(times.keys())
     all_times = np.concatenate([times[b] for b in clean_bands])
     all_mags = np.concatenate([mags[b] for b in clean_bands]) 
     all_magerrs = np.concatenate([magerrs[b] for b in clean_bands])
@@ -473,6 +484,7 @@ def fit_multiband(Model, data, nwarm=500, nsamp=250, progress_bar=False, plot=Fa
     if plot:
         psd_results = compute_psd_from_samples(samples, clean_bands)
         save_combined_plot(samples, m, X, y, yerr, band_idx[mask_outlier], result, psd_results=psd_results)
+        plot_traces(samples)
         # plot_mcmc_traces(samples, result)
         # plot_posterior(samples, data, clean_bands=clean_bands)
         # psd_results = compute_psd_from_samples(samples, clean_bands)
@@ -597,6 +609,7 @@ if __name__ == '__main__':
                 'bestP': bestP,
                 # add any other fields needed by your model
             })
+        num_params = sum(p.size for p in batch_data[0]['bestP'].values())
         num_objects = len(batch_data)
         print(f"Running joint fit on {len(batch_data)} objects...")
         estimated_nchains = 2*((num_params - 6)*len(batch_data) + 6)
@@ -619,6 +632,7 @@ if __name__ == '__main__':
             moves={AIES.DEMove() : 0.9, AIES.StretchMove() : 0.1},
             init_strategy=init_strategy,
             )
+        #nuts_kernel = NUTS(numpyro_joint_model, init_strategy=init_strategy)
         mcmc = MCMC(
             nuts_kernel,
             num_warmup=args.nwarm, # This could be less than num_samples
@@ -629,19 +643,20 @@ if __name__ == '__main__':
             chain_method="vectorized",
         )
         mcmc.run(jax.random.PRNGKey(0), Model, batch_data)
-        samples = mcmc.get_samples(group_by_chain=False)
+        samples_flat = mcmc.get_samples(group_by_chain=False)
         diagnostics = mcmc.get_extra_fields()
 
         # Save and plot the results
         results = []
         for i, obj in enumerate(batch_data):
-            obj_samples = {k: v[..., i] if v.ndim > 1 and v.shape[-1] == len(batch_data) else v for k, v in samples.items()}
+            obj_samples = {k: v[..., i] if v.ndim > 1 and v.shape[-1] == len(batch_data) else v for k, v in samples_flat.items()}
             # Remove the _{i} index from parameter names before passing to process_samples
             obj_samples_clean = {k[:-(len(f"_{i}"))] if k.endswith(f"_{i}") else k: v for k, v in obj_samples.items()}
             result = process_samples(obj_samples_clean, obj)
             # Only keep the first clean_bands for the multi-band parameters in obj_samples_clean
             multi_band_keys = ["log_amp_delta_blr", "lag", "log_lag_blr", "log_tau_drw_blr","mean", "log_jitter"]
             [obj_samples_clean.update({k: obj_samples_clean[k][..., :len(obj["clean_bands"])]}) for k in multi_band_keys if k in obj_samples_clean and obj_samples_clean[k].ndim > 0]
+            
             if args.plot:
                 m = Model(
                     obj['X'], obj['y'], obj['yerr'], 
@@ -650,8 +665,10 @@ if __name__ == '__main__':
                     clean_bands=obj['clean_bands'], z=obj['z']
                 )
                 psd_results = compute_psd_from_samples(obj_samples_clean, obj["clean_bands"])
-                save_combined_plot(obj_samples_clean, m, obj['X'], obj['y'], obj['yerr'], obj['band_idx'], result, psd_results=psd_results)
-                #plot_mcmc_traces(mcmc, result)
+                save_combined_plot(obj_samples_clean, m, obj['X'], obj['y'], obj['yerr'], obj['band_idx'], result, fit_bestP=False, psd_results=psd_results)
+                dump_mcmc_diagnostics(mcmc, obj, i, len(batch_data))
+                plot_trace_numpyro_for_object(mcmc, obj, i, len(batch_data))
+                plot_posterior_for_object(mcmc, obj, i, len(batch_data))
             results.append(obj | result)
             print("++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++", flush=True)
             print(f"Quasar {i+1}/{len(batch_data)} Object ID: {obj['object_id']}", flush=True)

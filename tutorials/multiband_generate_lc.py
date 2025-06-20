@@ -18,6 +18,8 @@ lambda_pivot = {
 
 filters = {"u": 0, "g": 1, "r": 2, "i": 3, "z": 4, "y": 5} # harcoded filter order for SDSS
 bands = ['u', 'g', 'r', 'i', 'z']#, 'y']
+#bands = ['g', 'r', 'i']
+
 
 
 def concat_light_curves(N=None, skip=None, filter_object_ids=[], existing_object_ids=set(), save_file_path=None, progress_bar=False):

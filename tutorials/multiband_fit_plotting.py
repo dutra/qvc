@@ -4,6 +4,9 @@ import corner
 import numpy as np
 import os
 import jax.numpy as jnp
+import arviz as az
+import numpyro
+from numpyro.diagnostics import print_summary
 
 prefix = os.environ.get('PREFIX', "test")
 suffix = os.environ.get('SUFFIX', "test")
@@ -23,6 +26,68 @@ colors = {'u': 'tab:blue',
           'i': 'tab:red', 
           'z': 'tab:brown', 
           'y': 'tab:gray'}
+
+
+def plot_trace_numpyro_for_object(mcmc, data, i, batch_data_len):
+    """
+    Plot trace plots for object-specific parameters from NumPyro MCMC samples.
+
+    Parameters
+    ----------
+    mcmc : numpyro.infer.MCMC
+        A completed NumPyro MCMC sampler.
+    data : dict
+        Object metadata (must include 'object_id').
+    i : int
+        Index of the object in the batch.
+    batch_data_len : int
+        Total number of objects in the batch.
+    prefix : str
+        Prefix for output directory.
+    suffix : str
+        Suffix for output directory.
+    """
+    object_id = data['object_id']
+    samples = mcmc.get_samples(group_by_chain=True)
+
+    # Extract per-object samples
+    obj_samples = {
+        k: v[..., i] if v.ndim == 3 and v.shape[-1] == batch_data_len else v
+        for k, v in samples.items()
+    }
+
+    # Clean parameter names like param_3 → param
+    obj_samples_clean = {
+        k[:-(len(f"_{i}"))] if k.endswith(f"_{i}") else k: v
+        for k, v in obj_samples.items()
+    }
+
+    # Convert to ArviZ InferenceData
+    idata = az.from_dict(posterior=obj_samples_clean)
+
+    # Get parameter names
+    var_names = list(idata.posterior.data_vars)
+        
+    var_names = [k for k in var_names if k in ['eta_A1', 'eta_A2', 'eta_tau1', 'eta_tau2', 'log_sigma_hat0', 'log_tau_drw0', 'poly1']]
+
+    print(var_names)
+    n_vars = len(var_names)
+
+    # Create trace plots
+    fig, axes = plt.subplots(n_vars, 2, figsize=(14, 2.8 * n_vars), constrained_layout=True)
+    if n_vars == 1:
+        axes = axes.reshape(1, 2)
+
+    az.plot_trace(idata, var_names=var_names, compact=True, axes=axes, show=False)
+
+    # Save plot
+    output_dir = f"mcmc_traces/{prefix}_{suffix}/"
+    os.makedirs(output_dir, exist_ok=True)
+    save_path = os.path.join(output_dir, f"{data['z']:.1f}_{object_id}_mcmc_traces.png")
+    plt.savefig(save_path, dpi=150)
+    plt.close(fig)
+    print(f"Saved trace plot to {save_path}")
+
 
 def save_lc_plot(times, mags, magerrs, object_id):
     # Plot and save the light curves
@@ -44,30 +109,68 @@ def save_lc_plot(times, mags, magerrs, object_id):
     plt.savefig(os.path.join("light_curves", f'{object_id}_light_curve.png'))
     plt.close(fig)
 
-def plot_posterior(samples, data, clean_bands=None):
+def plot_posterior_for_object(mcmc, data, i, batch_data_len):
     """
-    Plot a corner plot of all posterior parameters found in the samples dict.
+    Plot a corner plot of posterior parameters for a specific object from NumPyro MCMC output.
+
+    Parameters
+    ----------
+    mcmc : numpyro.infer.MCMC
+        Completed MCMC object.
+    data : dict
+        Object metadata (must contain 'object_id' and 'z').
+    i : int
+        Index of the object in the batch.
+    batch_data_len : int
+        Total number of objects in the batch.
+    prefix : str
+        Output directory prefix.
+    suffix : str
+        Output directory suffix.
     """
     object_id = data['object_id']
 
-    # Only use 1D or 2D arrays (with shape [n_samples, ...])
-    posterior_samples = {}
-    for key, val in samples.items():
-        arr = np.asarray(val)
-        if arr.ndim == 1:
-            posterior_samples[key] = arr
-        elif arr.ndim == 2:
-            for i in range(arr.shape[1]):
-                posterior_samples[f"{key}_{i}"] = arr[:, i]
+    # Get flat samples
+    samples_flat = mcmc.get_samples(group_by_chain=False)
 
-    # Stack for corner plot
-    corner_data = np.vstack([posterior_samples[k] for k in posterior_samples]).T
-    fig = corner.corner(corner_data, labels=list(posterior_samples.keys()), show_titles=True)
-    output_dir = "posterior_plots"
+    # Select per-object parameters
+    obj_samples = {
+        k: v[:, i] if v.ndim == 2 and v.shape[1] == batch_data_len else v
+        for k, v in samples_flat.items()
+    }
+
+    # Clean names and flatten vector-valued parameters
+    obj_samples_flattened = {}
+    for k, v in obj_samples.items():
+        print(k)
+        if k not in ['eta_A1', 'eta_A2', 'eta_tau1', 'eta_tau2', 'log_sigma_hat0', 'log_tau_drw0', 'poly1']:
+            continue
+        v = np.asarray(v)
+        base_name = k[:-(len(f"_{i}"))] if k.endswith(f"_{i}") else k
+        if v.ndim == 1:
+            obj_samples_flattened[base_name] = v
+        elif v.ndim == 2:
+            for j in range(v.shape[1]):
+                obj_samples_flattened[f"{base_name}_{j}"] = v[:, j]
+        else:
+            print(f"Skipping {k} with shape {v.shape}")
+
+    # Stack into matrix for corner plot
+    corner_data = np.vstack([obj_samples_flattened[k] for k in obj_samples_flattened]).T
+    labels = list(obj_samples_flattened.keys())
+
+    fig = corner.corner(corner_data, labels=labels, show_titles=True)
+
+    # Save plot
+    output_dir = f"posterior_plots/{prefix}_{suffix}/"
     os.makedirs(output_dir, exist_ok=True)
-    plt.savefig(os.path.join(output_dir, f"{object_id}_posterior.png"), dpi=200)
+    save_path = os.path.join(output_dir, f"{data['z']:.1f}_{object_id}_posterior.png")
+    plt.savefig(save_path, dpi=200)
     plt.close(fig)
+
+    print(f"Saved posterior corner plot to {save_path}")
     return fig
+
 
 def save_combined_plot(samples, model, X, y, yerr, band_idx, data, fit_bestP=False, psd_results=None):
     clean_bands = data['clean_bands']
@@ -145,7 +248,7 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, data, fit_bestP=Fal
     #ax_lc.legend(loc='best')
 
     if not fit_bestP:
-    
+
         log_sigma_band = [f"{a:.2f}" for a in data['log_sigma_band']]
         log_sigma_band = ",".join(log_sigma_band)
         log_sigma_band_err = [f"{a:.2f}" for a in data['log_sigma_band_err']]
@@ -167,8 +270,6 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, data, fit_bestP=Fal
             f"$\\eta_{{A_2}}$: {data['eta_A2']:.2f} ± {data['eta_A2_err']:.2f}\n"
             f"$\\eta_{{\\tau_1}}$: {data['eta_tau1']:.2f} ± {data['eta_tau1_err']:.2f}\n"
             f"$\\eta_{{\\tau_2}}$: {data['eta_tau2']:.2f} ± {data['eta_tau2_err']:.2f}\n"
-            f"$\\eta_{{\\mathrm{{break}}}}$: {data['eta_break']:.2f} ± {data['eta_break_err']:.2f}\n"
-            f"$\\eta_{{\\lambda_s}}$: {data['lam_s']:.2f} ± {data['lam_s_err']:.2f}\n"        
             f"$\\mathrm{{poly_1}}$: {data['poly1']:.2f} ± {data['poly1_err']:.2f}",
             #f"$\\log_{{10}}(w)$: {data['log_w']:.2f} ± {data['log_w_err']:.2f}",
             xy=(0.05, 0.95),
@@ -225,14 +326,16 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, data, fit_bestP=Fal
     print(f"Saving figure to ", fpath)
     plt.savefig(fpath, dpi=120)
     plt.close(fig)
+    
 
-
-def plot_mcmc_traces(mcmc, data, thinning=10):
+def plot_mcmc_traces(mcmc, data):
     samples = mcmc.get_samples(group_by_chain=True)
     num_warmup = mcmc.num_warmup
     object_id = data['object_id']
 
     param_names = [k for k in samples if k != 'log_kernel_param']
+    print(param_names)
+    param_names = param_names[:20]
     n_params = len(param_names)
     num_chains, total_samples = samples[param_names[0]].shape
 

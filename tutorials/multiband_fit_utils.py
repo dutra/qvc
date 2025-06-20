@@ -17,6 +17,113 @@ lambda_pivot = {
 
 filters = {"u": 0, "g": 1, "r": 2, "i": 3, "z": 4, "y": 5} # harcoded filter order for SDSS
 bands = ['u', 'g', 'r', 'i', 'z']#, 'y']
+#bands = ['g', 'r', 'i']
+
+def compute_rhat_dict(samples_dict):
+    """Compute R-hat for each scalar parameter or vector component."""
+    rhat_dict = {}
+    for name, values in samples_dict.items():
+        arr = jnp.asarray(values)
+        if arr.ndim == 2:
+            # Scalar parameter: shape (n_chains, n_samples)
+            n_chains, n_samples = arr.shape
+            chain_means = jnp.mean(arr, axis=1)
+            chain_vars = jnp.var(arr, axis=1, ddof=1)
+            B = n_samples * jnp.var(chain_means, axis=0, ddof=1)
+            W = jnp.mean(chain_vars, axis=0)
+            var_hat = ((n_samples - 1) / n_samples) * W + (1 / n_samples) * B
+            rhat = jnp.sqrt(var_hat / W)
+            rhat_dict[name] = rhat
+
+        elif arr.ndim == 3:
+            # Vector parameter: shape (n_chains, n_samples, n_dim)
+            for j in range(arr.shape[2]):
+                sliced = arr[:, :, j]
+                chain_means = jnp.mean(sliced, axis=1)
+                chain_vars = jnp.var(sliced, axis=1, ddof=1)
+                B = n_samples * jnp.var(chain_means, axis=0, ddof=1)
+                W = jnp.mean(chain_vars, axis=0)
+                var_hat = ((n_samples - 1) / n_samples) * W + (1 / n_samples) * B
+                rhat = jnp.sqrt(var_hat / W)
+                rhat_dict[f"{name}_{j}"] = rhat
+        else:
+            raise ValueError(f"Unsupported shape {arr.shape} for parameter {name}")
+    return rhat_dict
+
+def compute_ess_dict(samples_dict):
+    """Compute simplified variance-ratio ESS for each scalar parameter or vector component."""
+    ess_dict = {}
+    for name, values in samples_dict.items():
+        arr = jnp.asarray(values)
+        if arr.ndim == 2:
+            n_chains, n_samples = arr.shape
+            flat = arr.reshape(-1)
+            var_total = jnp.var(flat, ddof=1)
+            within_var = jnp.mean(jnp.var(arr, axis=1, ddof=1))
+            ess = (n_chains * n_samples) * var_total / within_var
+            ess_dict[name] = ess
+        elif arr.ndim == 3:
+            for j in range(arr.shape[2]):
+                sliced = arr[:, :, j]
+                flat = sliced.reshape(-1)
+                var_total = jnp.var(flat, ddof=1)
+                within_var = jnp.mean(jnp.var(sliced, axis=1, ddof=1))
+                ess = (arr.shape[0] * arr.shape[1]) * var_total / within_var
+                ess_dict[f"{name}_{j}"] = ess
+        else:
+            raise ValueError(f"Unsupported shape {arr.shape} for parameter {name}")
+    return ess_dict
+
+import os
+import jax.numpy as jnp
+from datetime import datetime
+
+def dump_mcmc_diagnostics(mcmc, data, i, batch_data_len):
+    object_id = data['object_id']
+    samples = mcmc.get_samples(group_by_chain=True)  # (n_chains, n_samples, ...) or (n_chains, n_samples, n_objects)
+
+    # Extract samples for object i
+    obj_samples = {
+        k: v[..., i] if v.ndim == 3 and v.shape[-1] == batch_data_len else v
+        for k, v in samples.items()
+    }
+
+    # Clean up parameter names like "param_3" → "param"
+    obj_samples_clean = {
+        k[:-(len(f"_{i}"))] if k.endswith(f"_{i}") else k: v
+        for k, v in obj_samples.items()
+    }
+
+    # Compute diagnostics
+    rhat = compute_rhat_dict(obj_samples_clean)
+    ess = compute_ess_dict(obj_samples_clean)
+
+    # Output path
+    output_dir = f"diagnostics/{prefix}_{suffix}"
+    os.makedirs(output_dir, exist_ok=True)
+    fpath = os.path.join(output_dir, f'{data["z"]:.1f}_{object_id}_diagnostics.txt')
+
+    # Write diagnostics
+    with open(fpath, 'w') as f:
+        f.write(f"# MCMC diagnostics generated on {datetime.now()}\n")
+        f.write(f"# Object ID: {object_id}, z = {data['z']:.3f}\n\n")
+        f.write(f"{'Param':>20} {'R-hat':>10} {'ESS':>10}\n")
+        f.write("-" * 45 + "\n")
+        for name in sorted(rhat.keys()):
+            f.write(f"{name:>20} {rhat[name]:10.4f} {ess[name]:10.1f}\n")
+
+        rhat_vals = jnp.array(list(rhat.values()))
+        ess_vals = jnp.array(list(ess.values()))
+
+        f.write("\nSummary:\n")
+        f.write(f"Max R-hat: {jnp.max(rhat_vals):.4f}\n")
+        f.write(f"Min ESS : {jnp.min(ess_vals):.1f}\n")
+        f.write(f"Median ESS: {jnp.median(ess_vals):.1f}\n")
+        f.write(f"Params with R-hat > 1.01: {jnp.sum(rhat_vals > 1.01)}\n")
+        f.write(f"Params with ESS < 100  : {jnp.sum(ess_vals < 100)}\n")
+
+    print(f"Diagnostics written to {fpath}")
+
 
 def get_unique_times(t, band, lag_blr):
     # Step 1: build full latent time grid (t, t - lag_blr)
@@ -357,17 +464,17 @@ def process_samples(samples, data):
     eta_A2 = samples["eta_A2"]
     eta_tau1 = samples["eta_tau1"]
     eta_tau2 = samples["eta_tau2"]
-    eta_break = samples["eta_break"]
+    eta_break = 1 #samples["eta_break"]
     
     lambda_ref = 2500 # Any reference wavelength
-    lambda_s_RF = samples["lam_s"]
+    lambda_s_RF = 2500 #samples["lam_s"]
     
     samples_log_sigma_UV = samples["log_sigma_hat0"] / jnp.log(10) + log_broken_pl(lambda_ref, lambda_s_RF, eta_A1, eta_A2, eta_break)
-    samples_log_sigma_band = samples["log_sigma_hat0"] / jnp.log(10) + np.array([log_broken_pl(lambda_pivot[band]/(1 + data['z']), samples["lam_s"], eta_A1, eta_A2) if band in clean_bands else np.full_like(samples["lam_s"], -9999) for band in bands])                                                                               
+    samples_log_sigma_band = samples["log_sigma_hat0"] / jnp.log(10) + np.array([log_broken_pl(lambda_pivot[band]/(1 + data['z']), 2500, eta_A1, eta_A2) if band in clean_bands else np.full_like(samples["eta_A1"], -9999) for band in bands])                                                                               
     samples_log_sigma_band = samples_log_sigma_band.T
 
     samples_log_tau_UV_RF = samples["log_tau_drw0"] / jnp.log(10) - np.log10(1 + data['z']) + log_broken_pl(lambda_ref, lambda_s_RF, eta_tau1, eta_tau2, eta_break)
-    samples_log_tau_band_RF = samples["log_tau_drw0"] / jnp.log(10) - np.log10(1 + data['z']) + np.array([log_broken_pl(lambda_pivot[band]/(1 + data['z']), samples["lam_s"], eta_tau1, eta_tau2) if band in clean_bands else np.full_like(samples["lam_s"], -9999) for band in bands])
+    samples_log_tau_band_RF = samples["log_tau_drw0"] / jnp.log(10) - np.log10(1 + data['z']) + np.array([log_broken_pl(lambda_pivot[band]/(1 + data['z']), 2500, eta_tau1, eta_tau2) if band in clean_bands else np.full_like(samples["eta_A1"], -9999) for band in bands])
     samples_log_tau_band_RF = samples_log_tau_band_RF.T
 
     def sym_percentile(x, p=[16, 50, 84], axis=0):
@@ -384,7 +491,7 @@ def process_samples(samples, data):
     eta_A2, eta_A2_err = sym_percentile(eta_A2)
     eta_tau1, eta_tau1_err = sym_percentile(eta_tau1)
     eta_tau2, eta_tau2_err = sym_percentile(eta_tau2)
-    eta_break, eta_break_err = sym_percentile(eta_break)
+    #eta_break, eta_break_err = sym_percentile(eta_break)
 
     #log_w, log_w_err = sym_percentile(np.log10(np.exp(samples['log_w'])))
 
@@ -397,7 +504,7 @@ def process_samples(samples, data):
     log_tau_blr, log_tau_blr_err = sym_percentile(np.log10(np.exp(samples['log_tau_drw_blr'])))
     log_sigma_blr, log_sigma_blr_err = sym_percentile((1e-2 + samples['log_amp_delta_blr']) / np.log(10), axis=0) #TODO: Fix
 
-    lambda_s_RF, lambda_s_RF_err = sym_percentile(lambda_s_RF)
+    #lambda_s_RF, lambda_s_RF_err = sym_percentile(lambda_s_RF)
 
     # Construct the result dictionary
     d = dict(object_id=data['object_id'],
@@ -420,10 +527,10 @@ def process_samples(samples, data):
             eta_tau1_err=eta_tau1_err,
             eta_tau2=eta_tau2,
             eta_tau2_err=eta_tau2_err,
-            eta_break=eta_break,
-            eta_break_err=eta_break_err,
-            lam_s=lambda_s_RF,
-            lam_s_err=lambda_s_RF_err,
+            #eta_break=eta_break,
+            #eta_break_err=eta_break_err,
+            #lam_s=lambda_s_RF,
+            #lam_s_err=lambda_s_RF_err,
             # kernel params
             #log_w=log_w,
             #log_w_err=log_w_err,
@@ -470,13 +577,13 @@ def compute_psd_from_samples(samples, clean_bands, num_points=1000, time_range=(
     log_tau_drw0 = np.median(samples["log_tau_drw0"])
     eta_A1 = np.median(samples["eta_A1"])
     eta_A2 = np.median(samples["eta_A2"])
-    eta_break = np.median(samples["eta_break"])
-    lam_s = np.median(samples["lam_s"])
+    eta_break = 1.0 #np.median(samples["eta_break"])
+    lam_s = 2500 #np.median(samples["lam_s"])
     eta_tau1 = np.median(samples["eta_tau1"])
     eta_tau2 = np.median(samples["eta_tau2"])
 
     # Helper: broken power law scaling
-    def log_broken_pl(lam, lam_s, d1, d2, ds=4.0):
+    def log_broken_pl(lam, lam_s, d1, d2, ds):
         x = lam / lam_s
         log_f = -np.log10(
             np.power(x, -d1) * np.power(1.0 + np.power(x, ds), -(d2 - d1) / ds)
