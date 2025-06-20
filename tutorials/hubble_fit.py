@@ -190,12 +190,14 @@ def log_likelihood(theta, cosmo_model,
 _dynesty_config = {}
 
 def prior_transform_dynesty(unit_cube):
+    global _dynesty_config
     priors = _dynesty_config['model_priors']
     keys = _dynesty_config['model_labels']
     return [priors[key][0] + (priors[key][1] - priors[key][0]) * x
             for x, key in zip(unit_cube, keys)]
 
 def loglike_dynesty(theta):
+    global _dynesty_config
     cfg = _dynesty_config
     return log_likelihood(theta,
                           cfg['cosmo_model'],
@@ -210,7 +212,6 @@ def run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model='Flatw0waCDM',
                       fitting_method=None):
 
     priors, model_labels, model_labels_latex = get_model_params(cosmo_model)
-    model_priors = {key: priors[key] for key in model_labels}
     ndim = len(model_labels)
 
     # Prepare data
@@ -251,8 +252,9 @@ def run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model='Flatw0waCDM',
 
     if fitting_method == 'dynesty':
         # Set dynesty global context
+        global _dynesty_config
         _dynesty_config.update({
-            'model_priors': model_priors,
+            'model_priors': priors,
             'model_labels': model_labels,
             'cosmo_model': cosmo_model,
             'completeness_params': completeness_params,
