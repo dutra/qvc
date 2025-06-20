@@ -2,6 +2,7 @@ import matplotlib.pyplot as plt
 import os
 import numpy as np
 import h5py
+from astropy.cosmology import FlatwCDM, Flatw0waCDM, FlatLambdaCDM, FlatwpwaCDM
 from scipy.ndimage import gaussian_filter1d, gaussian_filter
 from scipy.interpolate import interp1d
 import pandas as pd
@@ -12,9 +13,13 @@ from astropy import units as u
 from astroquery.vizier import Vizier
 from tqdm import tqdm
 import warnings
-from scipy.stats import norm
+from scipy import stats
+from scipy.stats import norm, sigmaclip, multivariate_normal
 from scipy.interpolate import RegularGridInterpolator
-from scipy.stats import norm
+import arviz as az
+from dynesty.utils import resample_equal
+from hubble_model import get_model_params, M_model_agn, M_model_agn_err, M_model_SN, K_corr
+from scipy.linalg import cho_factor, cho_solve, eigh
 
 bands = ['u', 'g', 'r', 'i', 'z']#, 'y']
 bands_idx = {b: i for i, b in enumerate(bands)}
@@ -85,8 +90,6 @@ def populate_sdss_fields(objs, progress_bar=True):
 
     return objs
 
-
-
 def read_quasars_from_hdf5(file_path):
     quasar_list = []
 
@@ -137,7 +140,22 @@ def filter_unresolved_quasars(df):
 
     return df
 
-def load_quasar_data(file_path, populate_sdss=False):
+def sigma_clip_in_bins(df, bin_width=0.1, sigma=2):
+    df_clean = []
+    z_min, z_max = df['z'].min(), df['z'].max()
+    bins = np.arange(z_min, z_max + bin_width, bin_width)
+
+    for i in range(len(bins) - 1):
+        bin_df = df[(df['z'] >= bins[i]) & (df['z'] < bins[i+1])]
+        if len(bin_df) < 5:
+            continue
+        y = bin_df['apparent_mag_i'] - bin_df['M_i']
+        clipped, _, _ = sigmaclip(y, low=sigma, high=sigma)
+        df_clean.append(bin_df[y.isin(clipped)])
+
+    return pd.concat(df_clean)
+
+def load_quasar_data(file_path):
 
     quasar_list = read_quasars_from_hdf5(file_path)
     print("Number of quasars loaded:", len(quasar_list))
@@ -150,17 +168,13 @@ def load_quasar_data(file_path, populate_sdss=False):
             write_hdf5_file(quasar_list, file_path)
             break
 
-
     df = pd.DataFrame(quasar_list)
-    #df = df.set_index('object_id')
-    #df = df.drop(columns=['log_jitter', 'magerrs_mean', 'log_sigma_band', 'log_sigma_band_err', 'clean_bands'])
-    #df = df.drop(columns=['mags', 'times', 'magerrs'])
-
-    # data cuts
-
     df = df[
+        #(df['z'] > 0.4) &
+        (df['eta_A1_err'] > 0.1) &
         df['log_sigma_hat_UV'].between(-3, 0) &
         (df['log_sigma_hat_UV_err'] > 0) & (df['log_sigma_hat_UV_err'] < 0.5) &
+        (df['log_tau_UV_RF'] > 2) &
         (df['apparent_mag_i'] < 26) &
         (df['apparent_mag_i_err'] < 0.5) &
         (df['M_i'] < -21) &
@@ -169,15 +183,25 @@ def load_quasar_data(file_path, populate_sdss=False):
         (df['log_mbh'] > 1) &
         (df['ebv'] < 0.05)
     ].dropna()
+        
+    #df = df.set_index('object_id')
+    #df = df.drop(columns=['log_jitter', 'magerrs_mean', 'log_sigma_band', 'log_sigma_band_err', 'clean_bands'])
+    #df = df.drop(columns=['mags', 'times', 'magerrs'])
+
+
     
     # Remove infinite values from numeric columns
     columns_with_nans = df.columns[df.isna().any()].tolist()
     print("Columns with NaNs:", columns_with_nans)
     numeric_cols = df.select_dtypes(include=[np.number]).columns
     df[numeric_cols] = df[numeric_cols].where(~np.isinf(df[numeric_cols]), np.nan)
-    #df = df.dropna()
+    df = df.dropna()
     
     df = df.reset_index(drop=True)
+
+    # sigma clip in bins can almost replace all the previous cuts!
+    df = sigma_clip_in_bins(df)
+
     num_quasars_z_0_1 = len(df[(df['z'] > 0) & (df['z'] <= 1)])
     num_quasars_z_gt_3 = len(df[df['z'] > 3])
     print("Number of quasars with 0 < z <= 1:", num_quasars_z_0_1)
@@ -185,10 +209,13 @@ def load_quasar_data(file_path, populate_sdss=False):
     print("Final number of quasars:", len(df))
     return df
 
-def load_data(file_path, populate_sdss=False):
+def load_data(file_path):
     print("Loading quasar data...")
     #df_agn = load_quasar_data("data/may12_objs_tauwavelength_taublr_redbands_ds4_merged.h5")
-    df_agn = load_quasar_data(file_path=file_path, populate_sdss=populate_sdss)
+    df_agn = load_quasar_data(file_path=file_path)
+    # Return 200 randomly sampled AGNs for speed
+    #df_agn = df_agn.sample(n=500, random_state=42).reset_index(drop=True)
+
     # Load Pantheon+ SN metadata
     print("Loading Pantheon+ supernova data...")
     df_pantheon = pd.read_csv(
@@ -213,16 +240,18 @@ def load_data(file_path, populate_sdss=False):
     # Confirm shape is correct
     assert cov_matrix.shape == (n_sn, n_sn), f"Expected ({n_sn},{n_sn}), got {cov_matrix.shape}"
 
-    # Invert covariance and pre-compute log-determinant for SN likelihood
-    #global Cov_inv, logdetCov
-    Cov_inv = np.linalg.inv(cov_matrix)
-    sign, logdet = np.linalg.slogdet(cov_matrix)
-    if sign <= 0:
+    # Pre-compute Cholesky decomposition and log-determinant for SN likelihood
+    try:
+        sna_L, sna_lower = cho_factor(cov_matrix, lower=True)
+    except np.linalg.LinAlgError:
         raise ValueError("Covariance matrix is not positive-definite!")
-    logdetCov = logdet
-    L = np.linalg.cholesky(np.linalg.inv(Cov_inv))
-    print("Data loaded. Running joint cosmographic fits...")
-    return df_agn, df_pantheon, Cov_inv, logdetCov, L
+
+    # Compute log-determinant: log|C| = 2 * sum(log(diagonal of Cholesky factor))
+    sna_logdetCov = 2.0 * np.sum(np.log(np.diag(sna_L)))
+
+    print("Cholesky factorization successful. Data loaded. ")
+
+    return df_agn, df_pantheon, sna_logdetCov, sna_L, sna_lower
 
 
 def completeness(m, center, mag_lim):
@@ -252,99 +281,67 @@ def get_completeness_function_simple(mag_lim, center=20):
     plt.close()
     return p_detect, mag_eval, dm
 
-def compute_delta_mag_bias(agn_magnitudes, mag_lim, center=20):
-    p_detect, mag_grid, dm = get_completeness_function_simple(mag_lim, center)
-    C_interp = interp1d(mag_grid, p_detect, kind='linear', bounds_error=False, fill_value=(p_detect[0], p_detect[-1]))
 
-    delta_mags = []
-    for m_i in agn_magnitudes:
-        C_i = C_interp(m_i)
-        if C_i <= 0:
-            delta_mags.append(np.nan)  # Avoid divide-by-zero
-            continue
+# class Completeness2D:
+#     def __init__(self, mag_centers, z_centers, completeness_ratio):
+#         self.mag_centers = mag_centers
+#         self.z_centers = z_centers
+#         self.interp_fn = RegularGridInterpolator(
+#             (mag_centers, z_centers),
+#             completeness_ratio,
+#             bounds_error=False, fill_value=0.0
+#         )
 
-        # Assume flat prior for true magnitude distribution over mag_grid
-        weights = 1.0 - p_detect  # Non-detection weights
-        mean_mag = np.sum(mag_grid * weights) * dm / (np.sum(weights) * dm)
-        delta_mag = mean_mag - m_i  # Shift toward undetected fainter population
-        delta_mags.append(delta_mag)
-
-    return np.array(delta_mags)
-
-# Example usage
-# p_detect, mag_eval, dm = get_completeness_function_simple(mag_lim=1.0, center=20)
-
-def get_completeness_function(df_agn):
-    n_bins_completeness = 12
-    file_path = "stacked_sampled_apparent_magnitudes.h5"
-
-    with h5py.File(file_path, "r") as f:
-        mags_true = f["stacked_apparent_magnitudes"][:]
-
-    mags_obs = df_agn['apparent_mag_i'].values
-
-    # Clean both
-    mags_true = mags_true[np.isfinite(mags_true)]
-    mags_obs = mags_obs[np.isfinite(mags_obs)]
-
-    mag_min, mag_max = 14, 26
-    bin_edges = np.linspace(mag_min, mag_max, n_bins_completeness)
-    bin_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
-
-    hist_true, _ = np.histogram(mags_true, bins=bin_edges)
-    hist_obs, _ = np.histogram(mags_obs, bins=bin_edges)
-
-    mask = hist_true > 0
-    completeness_ratio = np.zeros_like(hist_true, dtype=float)
-    completeness_ratio[mask] = hist_obs[mask] / hist_true[mask]
-    completeness_ratio = gaussian_filter1d(completeness_ratio, sigma=0.5)
-    completeness_ratio = np.clip(completeness_ratio, 0, 1)
-
-    # Use fixed eval grid for later convolution
-    mag_eval = np.linspace(mag_min, mag_max, 500)
-    dm = mag_eval[1] - mag_eval[0]
-    interp_fn = interp1d(
-        bin_centers, completeness_ratio,
-        kind='quadratic', bounds_error=False, fill_value=(1.0, 0.0)
-    )
-    p_detect = interp_fn(mag_eval)
-    plt.scatter(mag_eval, p_detect)
-    plt.xlabel("i-band magnitude"); plt.ylabel("Completeness")
-    plt.title("Empirical completeness function")
-    plt.savefig("plots/completeness_function.png", dpi=200)
-    #plt.show()
-    plt.close()
+#     def __call__(self, mag, z):
+#         pts = np.column_stack([np.ravel(mag), np.ravel(z)])
+#         vals = self.interp_fn(pts)
+#         return vals.reshape(np.shape(mag))
     
-    return p_detect, mag_eval, dm
-
 class Completeness2D:
-    def __init__(self, mag_centers, z_centers, completeness_ratio):
+    def __init__(self, mag_centers, z_centers, completeness_map):
         self.mag_centers = mag_centers
         self.z_centers = z_centers
+
+        # Clip NaNs and store minimum finite completeness
+        completeness_map_clean = np.nan_to_num(completeness_map, nan=0.0)
+        self.min_completeness_value = float(np.nanmin(completeness_map_clean))
+
+        self.mag_min = mag_centers[0]
+        self.mag_max = mag_centers[-1]
+        self.z_min = z_centers[0]
+        self.z_max = z_centers[-1]
+
         self.interp_fn = RegularGridInterpolator(
             (mag_centers, z_centers),
-            completeness_ratio,
-            bounds_error=False, fill_value=0.0
+            completeness_map_clean,
+            bounds_error=False,
+            fill_value=0.0
         )
 
     def __call__(self, mag, z):
-        pts = np.column_stack([np.ravel(mag), np.ravel(z)])
-        vals = self.interp_fn(pts)
-        return vals.reshape(np.shape(mag))
-    
-def get_completeness_function_2d(df_agn, sim_file="sampled_apparent_magnitudes_redshift_vol.h5",
-                                 n_mag_bins=16, n_z_bins=16, mag_min=14, mag_max=26):
-    """
-    Returns a completeness function p_detect(mag, z) as a callable.
-    Uses observed AGN sample and simulated sample from HDF5 file
-    with 'redshift_bins' group (one dataset per redshift bin).
-    """
-    import numpy as np
-    import h5py
-    from scipy.ndimage import gaussian_filter
-    from scipy.interpolate import RegularGridInterpolator
+        mag = np.asarray(mag)
+        z = np.asarray(z)
+        mag_b, z_b = np.broadcast_arrays(mag, z)
 
-    # Load simulated (true) sample
+        mag_clipped = np.clip(mag_b, self.mag_min, self.mag_max)
+        z_clipped = np.clip(z_b, self.z_min, self.z_max)
+
+        pts = np.column_stack([mag_clipped.ravel(), z_clipped.ravel()])
+        vals = self.interp_fn(pts)
+        return vals.reshape(mag_b.shape)
+
+    def get_completeness_map(self):
+        return self.interp_fn.values
+
+
+def get_completeness_function_2d(df_agn,
+                                 sim_file="sampled_apparent_magnitudes_redshift_vol.h5",
+                                 n_mag_bins=20, n_z_bins=30,
+                                 mag_min=15, mag_max=24,
+                                 sigma_mag=1.0, sigma_z=0.7,
+                                 normalize=True,
+                                 plot=False):
+    # --- Load simulated (true) sample
     mags_true_list, z_true_list = [], []
     with h5py.File(sim_file, "r") as f:
         for name in f["redshift_bin"]:
@@ -353,13 +350,15 @@ def get_completeness_function_2d(df_agn, sim_file="sampled_apparent_magnitudes_r
             z_bin = ds.attrs["redshift"]
             mags_true_list.append(mags)
             z_true_list.append(np.full_like(mags, z_bin, dtype=float))
+
     mags_true = np.concatenate(mags_true_list)
     z_true = np.concatenate(z_true_list)
 
+    # --- Load observed sample
     mags_obs = df_agn['apparent_mag_i'].values
     z_obs = df_agn['z'].values
 
-    # Clean
+    # --- Clean NaNs/Infs
     mask_true = np.isfinite(mags_true) & np.isfinite(z_true)
     mags_true = mags_true[mask_true]
     z_true = z_true[mask_true]
@@ -368,112 +367,58 @@ def get_completeness_function_2d(df_agn, sim_file="sampled_apparent_magnitudes_r
     mags_obs = mags_obs[mask_obs]
     z_obs = z_obs[mask_obs]
 
-    # Bin edges and centers
+    # --- Bin edges and centers
+    z_min, z_max = np.min(z_true), np.max(z_true)
+    if z_max - z_min < 1e-3:
+        z_min -= 0.01
+        z_max += 0.01
+
     mag_edges = np.linspace(mag_min, mag_max, n_mag_bins + 1)
-    z_edges = np.linspace(0.0, np.max(z_true)+0.5, n_z_bins + 1)
+    z_edges = np.linspace(z_min, z_max, n_z_bins + 1)
     mag_centers = 0.5 * (mag_edges[:-1] + mag_edges[1:])
     z_centers = 0.5 * (z_edges[:-1] + z_edges[1:])
 
-    # 2D histograms
+    # --- Histogram both samples
     hist_true, _, _ = np.histogram2d(mags_true, z_true, bins=[mag_edges, z_edges])
     hist_obs, _, _ = np.histogram2d(mags_obs, z_obs, bins=[mag_edges, z_edges])
 
-    # Compute completeness ratio
+    # --- Compute completeness ratio
     with np.errstate(divide='ignore', invalid='ignore'):
-        completeness_ratio = np.zeros_like(hist_true, dtype=float)
-        mask = hist_true > 0
-        completeness_ratio[mask] = hist_obs[mask] / hist_true[mask]
+        completeness = np.zeros_like(hist_true, dtype=float)
+        valid = hist_true > 0
+        completeness[valid] = hist_obs[valid] / hist_true[valid]
 
-    # Apply gentle smoothing
-    completeness_ratio = gaussian_filter(completeness_ratio, sigma=0.4)
-    completeness_ratio = np.clip(completeness_ratio, 0.0, 1.0)
+    # --- Optional smoothing
+    completeness_smoothed = gaussian_filter(completeness, sigma=(sigma_mag, sigma_z), mode='nearest')
 
-    # Interpolator
-    interp_fn = RegularGridInterpolator(
-        (mag_centers, z_centers), completeness_ratio,
-        bounds_error=False, fill_value=0.0
-    )
+    # --- Clip to [0, 1] and normalize if requested
+    completeness_smoothed = np.clip(completeness_smoothed, 0.0, 1.0)
+    if normalize and np.nanmax(completeness_smoothed) > 0:
+        completeness_smoothed /= np.nanmax(completeness_smoothed)
 
-    # Compute grid spacing
+    # --- Compute bin widths for completeness convolution
     dm = mag_centers[1] - mag_centers[0]
     dz = z_centers[1] - z_centers[0]
 
-    # Return as a wrapper class with callable behavior
-    return Completeness2D(mag_centers, z_centers, completeness_ratio), mag_centers, z_centers, dm, dz
+    # --- Optional diagnostic plot
+    if plot:
+        import matplotlib.pyplot as plt
+        plt.imshow(completeness_smoothed.T, origin='lower', aspect='auto',
+                   extent=[mag_edges[0], mag_edges[-1], z_edges[0], z_edges[-1]])
+        plt.xlabel('Apparent Magnitude')
+        plt.ylabel('Redshift')
+        plt.title('Completeness Map (Smoothed)')
+        plt.colorbar(label='p(detect | m, z)')
+        plt.tight_layout()
+        plt.show()
+
+    return Completeness2D(mag_centers, z_centers, completeness_smoothed), mag_centers, z_centers, dm, dz
 
 
-from scipy.interpolate import RegularGridInterpolator
 
-
-def compute_delta_mag_bias_2d_zbins(df_agn, completeness2d, mag_centers, z_centers, dm, n_z_bins=12):
-    """
-    Estimate AGN magnitude bias corrections using completeness-corrected intrinsic magnitudes
-    binned by redshift, and interpolate them across the full sample.
-
-    Parameters:
-    -----------
-    df_agn : DataFrame
-        Contains 'apparent_mag_i', 'z', and optionally 'apparent_mag_i_err'.
-    completeness2d : callable
-        Completeness function p_detect(m, z).
-    mag_centers : array_like
-        Centers of magnitude bins.
-    z_centers : array_like
-        Centers of redshift bins.
-    dm : float
-        Bin width in magnitude.
-    n_z_bins : int
-        Number of redshift bins for intrinsic mag estimation.
-
-    Returns:
-    --------
-    delta_mags : ndarray
-        Δm = ⟨m_intrinsic⟩ - m_observed for each AGN.
-    delta_mag_errs : ndarray
-        Propagated uncertainty combining measurement error and intrinsic scatter.
-    """
-    import numpy as np
-    from scipy.interpolate import interp1d
-
-    apparent_mags = df_agn['apparent_mag_i'].values
-    z_vals = df_agn['z'].values
-    mag_errs = df_agn['apparent_mag_i_err'].values if 'apparent_mag_i_err' in df_agn.columns else np.zeros_like(apparent_mags)
-
-    z_bins = np.linspace(z_vals.min(), z_vals.max(), n_z_bins + 1)
-    z_bin_centers = 0.5 * (z_bins[:-1] + z_bins[1:])
-
-    mean_mags = np.full(n_z_bins, np.nan)
-    std_mags = np.full(n_z_bins, np.nan)
-
-    for i in range(n_z_bins):
-        z_low, z_high = z_bins[i], z_bins[i + 1]
-        z_bin_mask = (z_centers >= z_low) & (z_centers < z_high)
-        if not np.any(z_bin_mask):
-            continue
-
-        mag_grid, z_grid = np.meshgrid(mag_centers, z_centers[z_bin_mask], indexing='ij')
-        completeness = completeness2d(mag_grid, z_grid)
-        completeness = np.clip(completeness, 1e-3, 1.0)
-        weights = 1.0 / completeness
-
-        weighted_mags = mag_grid * weights
-        weighted_sum = np.nansum(weighted_mags)
-        total_weights = np.nansum(weights)
-
-        if total_weights > 0:
-            mean_mags[i] = weighted_sum / total_weights
-            variance = np.nansum(weights * (mag_grid - mean_mags[i])**2) / total_weights
-            std_mags[i] = np.sqrt(variance)
-
-    # Interpolate over z to get delta_m for each object
-    interp_mean = interp1d(z_bin_centers[~np.isnan(mean_mags)], mean_mags[~np.isnan(mean_mags)], kind='linear', fill_value='extrapolate')
-    interp_std = interp1d(z_bin_centers[~np.isnan(std_mags)], std_mags[~np.isnan(std_mags)], kind='linear', fill_value='extrapolate')
-
-    delta_mags = interp_mean(z_vals) - apparent_mags
-    delta_mag_errs = np.sqrt(interp_std(z_vals)**2 + mag_errs**2)
-
-    return delta_mags, delta_mag_errs
-
+def soft_clip(x, floor=1e-5, sharpness=5):
+    # Smoother logistic-like clipping
+    return floor + (1 - floor) * (1 / (1 + np.exp(-sharpness * (x - floor))))
 
 def compare_models_by_log_evidence(logZ_1, logZerr_1, logZ_2, logZerr_2, model_1_name="Model 1", model_2_name="Model 2"):
     """
@@ -611,11 +556,7 @@ def extract_cosmo_results_from_sampler(sampler, cosmo_model, only_sna, dynasty=F
     dict
         Result row for LaTeX table.
     """
-    import numpy as np
-    from dynesty.utils import resample_equal
-    from hubble_model import get_model_params
-
-    priors, model_labels = get_model_params(cosmo_model)
+    priors, model_labels, model_labels_latex = get_model_params(cosmo_model)
     data_label = "SN~Ia" if only_sna else "SN~Ia + AGN"
 
     # Flatten or resample samples
@@ -647,3 +588,295 @@ def extract_cosmo_results_from_sampler(sampler, cosmo_model, only_sna, dynasty=F
         "wa": param_stats["wa"],
         "logZ": logZ_tuple
     }
+
+def display_results_summary(samples, cosmo_model):
+    _, model_labels, _ = get_model_params(cosmo_model)
+    median_samples = np.median(samples, axis=0)
+    lowers = np.percentile(samples, 16, axis=0)
+    uppers = np.percentile(samples, 84, axis=0)
+    
+    for name, med, lo, hi in zip(model_labels, median_samples, lowers, uppers):
+        print(f"{name:>15}: {med:.4f} (+{hi - med:.4f}, -{med - lo:.4f})")
+
+def display_diagnostics(sampler, cosmo_model, fitting_method=False):
+    priors, model_labels, _ = get_model_params(cosmo_model)
+    if fitting_method == 'dynesty':
+        # For dynesty, use weighted samples
+        samples = sampler.results.samples
+        weights = np.exp(sampler.results.logwt - sampler.results.logz[-1])
+        # Resample to equal weights for diagnostics
+        samples_equal = resample_equal(samples, weights)
+        # ArviZ expects (chain, draw, param), so fake a single chain
+        chain = samples_equal[np.newaxis, :, :]
+        # No log_prob for dynesty, so skip
+        idata = az.from_dict(posterior={name: chain[:, :, i] for i, name in enumerate(model_labels)})
+    elif fitting_method == 'emcee':
+        # --- Convergence diagnostics for emcee sampler ---
+        # Extract chains and log probabilities
+        chain = sampler.get_chain()  # shape: (nsteps, nwalkers, ndim)
+        log_prob = sampler.get_log_prob()  # shape: (nsteps, nwalkers)
+        # Transpose to match (chain, draw, dim) expected by ArviZ
+        chain = np.transpose(chain, (1, 0, 2))
+        log_prob = np.transpose(log_prob, (1, 0))
+        idata = az.from_dict(
+            posterior={name: chain[:, :, i] for i, name in enumerate(model_labels)},
+            log_likelihood={"log_likelihood": log_prob}
+        )
+    else:
+        raise ValueError("Unsupported fitting method. Use 'dynesty' or 'emcee'.")
+    # Compute Rhat and ESS
+    rhat = az.rhat(idata)
+    ess = az.ess(idata)
+    print("Gelman-Rubin Rhat diagnostic:")
+    print(rhat)
+    print("Effective Sample Size (ESS):")
+    print(ess)
+    print(az.summary(idata, round_to=3))
+
+
+def approximate_sound_horizon(Om0, h, Omega_b=0.049):
+    """
+    Eisenstein & Hu (1998) approximation to sound horizon at drag epoch (in Mpc).
+    """
+    omega_m = Om0 * h**2
+    omega_b = Omega_b * h**2
+    b1 = 0.313 * omega_m**(-0.419) * (1 + 0.607 * omega_m**0.674)
+    b2 = 0.238 * omega_m**0.223
+    z_drag = 1291 * omega_m**0.251 / (1 + 0.659 * omega_m**0.828) * (1 + b1 * omega_b**b2)
+    R_drag = 31.5 * omega_b * 1e3 / (z_drag * omega_m * 1e3)
+    return 44.5 * np.log(9.83 / omega_m) / np.sqrt(1 + 10 * R_drag)
+
+def make_psd(matrix, epsilon=1e-10):
+    """
+    Enforce symmetric positive semi-definiteness.
+    """
+    matrix = (matrix + matrix.T) / 2
+    eigvals, eigvecs = eigh(matrix)
+    eigvals[eigvals < epsilon] = epsilon
+    return eigvecs @ np.diag(eigvals) @ eigvecs.T
+
+def log_likelihood_planck2018_cmb(cosmo, Omega_b=0.049):
+    """
+    Log-likelihood from Planck 2018 compressed CMB distance priors:
+    (ℓ_A, R, z_*) for flat w0waCDM.
+    
+    Parameters
+    ----------
+    cosmo : astropy.cosmology.FRW
+        Cosmology instance (Flatw0waCDM or similar).
+    Omega_b : float
+        Baryon density (default from Planck 2018 best-fit).
+
+    Returns
+    -------
+    float
+        Log-likelihood contribution from Planck 2018 CMB data.
+    """
+    h = cosmo.H0.value / 100
+    Om0 = cosmo.Om0
+    z_star = 1089.92  # Planck best-fit decoupling redshift
+
+    # Comoving distance to z_star
+    D_M = cosmo.comoving_distance(z_star).value  # in Mpc
+
+    # Sound horizon
+    r_s = approximate_sound_horizon(Om0, h, Omega_b)
+
+    # Acoustic scale and shift parameter
+    l_A = np.pi * D_M / r_s
+    R = np.sqrt(Om0) * D_M * cosmo.H0.value / 299792.458  # c in km/s
+
+    # Planck 2018 compressed parameters
+    PLANCK_MEAN = np.array([301.77, 1.7492, z_star])
+    PLANCK_COV = np.array([
+        [0.090**2,  0.00045,  0.057],
+        [0.00045,   0.0042**2, 0.0036],
+        [0.057,     0.0036,    0.25**2]
+    ])
+    PLANCK_COV = make_psd(PLANCK_COV)
+
+    data = np.array([l_A, R, z_star])
+    return multivariate_normal.logpdf(data, mean=PLANCK_MEAN, cov=PLANCK_COV)
+
+
+
+def log_likelihood_cmb_distance_priors_simpler(cosmo):
+    z_star = 1089 # # Last scattering surface
+    h = cosmo.H0.value / 100
+
+    # Planck values in h^-1 Mpc
+    D_M_CMB_hinv = 1394.4
+    sigma_D_M_hinv = 61.0
+
+    # Convert to Mpc using model H0
+    D_M_CMB = D_M_CMB_hinv / h
+    sigma_D_M = sigma_D_M_hinv / h
+
+    # model's prediction
+    D_M_model = (1 + z_star) * cosmo.angular_diameter_distance(z_star).value
+
+    # Log-likelihood
+    ll_cmb = norm.logpdf(D_M_model, loc=D_M_CMB, scale=sigma_D_M)
+    return ll_cmb
+
+
+
+def predict_uncensored_magnitudes_from_observed(df_agn, completeness_params, nsig=4, n_grid=500):
+    """
+    Computes bias-corrected apparent magnitudes using a log-space stabilized posterior.
+
+    Parameters
+    ----------
+    df_agn : pd.DataFrame
+        Must contain 'apparent_mag_i', 'apparent_mag_i_err', 'z'.
+    completeness_params : tuple
+        Output from get_completeness_function_2d.
+    nsig : float
+        Number of sigmas for grid range.
+    n_grid : int
+        Number of magnitude samples.
+
+    Returns
+    -------
+    np.ndarray
+        Posterior-mean corrected magnitudes.
+    """
+    completeness2d, *_ = completeness_params
+
+    m_obs = df_agn['apparent_mag_i'].values.astype(np.float64)
+    m_err = df_agn['apparent_mag_i_err'].values.astype(np.float64)
+    z = df_agn['z'].values.astype(np.float64)
+    N = len(m_obs)
+
+    # Build expanded mag grid
+    m_offsets = np.linspace(-nsig, nsig, n_grid)
+    m_grid = m_obs[:, None] + m_err[:, None] * m_offsets  # shape (N, n_grid)
+
+    # Gaussian log-prior
+    log_prior = norm.logpdf(m_grid, loc=m_obs[:, None], scale=m_err[:, None])
+
+    # Evaluate completeness and soft-clip in log-space
+    z_grid = np.tile(z[:, None], (1, n_grid))
+    p_det = completeness2d(m_grid, z_grid)
+
+    # Estimate more adaptive floor (5th percentile of nonzero completeness)
+    finite_p = p_det[np.isfinite(p_det) & (p_det > 0)]
+    min_c = np.percentile(finite_p, 5) if len(finite_p) > 0 else 1e-4
+    p_det = soft_clip(p_det, floor=min_c, sharpness=20)
+
+    log_p_det = np.log(p_det + 1e-300)
+
+    # Log posterior (unnormalized)
+    log_post = log_prior + log_p_det
+    log_post -= np.max(log_post, axis=1, keepdims=True)  # for stability
+
+    post = np.exp(log_post)
+    post /= np.trapz(post, m_grid, axis=1)[:, None] + 1e-12
+
+    m_corr = np.trapz(m_grid * post, m_grid, axis=1)
+
+    return m_corr
+
+def predict_uncensored_magnitudes(df_agn, m_model, mu_err, completeness_params, nsig=4, n_grid=300):
+    z = df_agn['z'].values
+    p_detect_fn, *_ = completeness_params
+
+    uncensored_samples = []
+    min_c = p_detect_fn.min_completeness_value
+
+    for i in range(len(df_agn)):
+        m = m_model[i]
+        sigma = mu_err[i]
+        zval = z[i]
+
+        m_offsets = np.linspace(-nsig, nsig, n_grid)
+        m_grid = m + sigma * m_offsets
+        prior = stats.norm.pdf(m_grid, loc=m, scale=sigma)
+
+        p_det = p_detect_fn(m_grid, np.full_like(m_grid, zval))
+        p_det = soft_clip(p_det, floor=min_c, sharpness=20)
+
+        if np.sum(p_det) < 1e-6:
+            uncensored_samples.append(m)
+            continue
+
+        posterior = prior * p_det
+        posterior /= np.trapezoid(posterior, m_grid)
+
+        mean_m = np.trapezoid(m_grid * posterior, m_grid)
+        uncensored_samples.append(mean_m)
+
+    return np.array(uncensored_samples)
+
+def apply_forward_completeness_correction(df_agn, params, cosmo_model, completeness_params):
+    """
+    Apply completeness-aware correction to model-predicted apparent magnitudes.
+
+    Parameters
+    ----------
+    df_agn : pd.DataFrame
+        AGN data including redshift, apparent magnitude error, and variability features.
+    params : dict
+        Dictionary of model parameters.
+    cosmo : astropy cosmology instance
+        Cosmology model used to compute distance moduli.
+    completeness_params : tuple
+        Output from get_completeness_function_2d.
+
+    Returns
+    -------
+    np.ndarray
+        Completeness-corrected apparent magnitudes (posterior means).
+    """
+
+    priors, model_labels, _ = get_model_params(cosmo_model)
+    # Common post-processing
+    
+    #params = dict(zip(model_labels, params))
+    
+    if cosmo_model == 'Flatw0waCDM':
+        cosmo = Flatw0waCDM(H0=params['H0'], Om0=params['Om0'], w0=params['w0'], wa=params['wa'])
+    elif cosmo_model == 'FlatwCDM':
+        cosmo = FlatwCDM(H0=params['H0'], Om0=params['Om0'], w0=params['w0'])
+    elif cosmo_model == 'FlatLambdaCDM':
+        cosmo = FlatLambdaCDM(H0=params['H0'], Om0=params['Om0'])
+    else:
+        raise ValueError("cosmo_model must be 'FlatwCDM', 'Flatw0waCDM' or 'FlatLambdaCDM'")
+
+    # Compute model-predicted absolute magnitude
+    M_model = M_model_agn(
+        params['M0_sn'] + params['delta_M0_agn'],
+        params['log_sigma_hat_sq_break'],
+        params['eta_A1_agn'], params['eta_A2_agn'],
+        params['eta_break_agn'],
+        params['beta_agn'],
+        df_agn['log_sigma_hat_UV'].values,
+        df_agn['log_tau_UV_RF'].values
+    )
+
+    # Cosmological distance modulus + K-correction
+    mu_cosmo = cosmo.distmod(df_agn['z'].values).value
+    m_model = mu_cosmo + (K_corr(df_agn['z'].values) - K_corr(2)) + M_model
+
+    # Total uncertainty on m_model
+    mu_err = np.sqrt(
+        df_agn['apparent_mag_i_err'].values**2 +
+        M_model_agn_err(
+            params['M0_sn'] + params['delta_M0_agn'],
+            params['log_sigma_hat_sq_break'],
+            params['eta_A1_agn'], params['eta_A2_agn'],
+            params['eta_break_agn'],
+            params['beta_agn'],
+            df_agn['log_sigma_hat_UV'].values,
+            df_agn['log_sigma_hat_UV_err'].values,
+            df_agn['log_tau_UV_RF'].values
+        )**2 +
+        (2.5 * 0.3 * np.log10(1 + df_agn['z'].values))**2 +
+        (0.055 * df_agn['z'].values)**2 +
+        np.exp(2 * params['log_f'])
+    )
+
+    # Apply marginalization over completeness
+    m_corr = predict_uncensored_magnitudes(df_agn, m_model, mu_err, completeness_params)
+    return m_corr
+

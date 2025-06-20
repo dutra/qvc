@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
 import emcee
+from emcee.moves import DEMove, DESnookerMove
 import matplotlib.pyplot as plt
 from astropy.cosmology import FlatwCDM, Flatw0waCDM, FlatLambdaCDM, FlatwpwaCDM
 from scipy import stats
@@ -13,6 +14,8 @@ from tqdm import tqdm
 from dynesty import DynamicNestedSampler
 from dynesty.utils import resample_equal
 import pickle
+import multiprocessing
+from scipy.linalg import cho_solve
 
 import matplotlib.pyplot as plt
 
@@ -21,21 +24,24 @@ plt.style.use('style.mplstyle')
 from hubble_utils import *
 from hubble_plotting import *
 from hubble_model import *
+import os
+import yaml
 
-# Placeholders for SN covariance (will be loaded in main)
-Cov_inv = None
-logdetCov = None
-L = None
+# Placeholders for global data (improves speed?)
+_agn_data = None
+_pantheon_data = None
 
+sna_logdetCov, sna_L, sna_lower = None, None, None
+
+z_agn_pivot = 1.4
 
 # --- Log-likelihood ---
 def log_likelihood(theta, cosmo_model,
-                   df_agn, df_pantheon, completeness_params,
-                   log_sigma_hat_pivot,
+                   completeness_params,
                    only_sna=False, use_full_cov=False,
                    return_params=False):
     
-    priors, model_labels = get_model_params(cosmo_model)
+    priors, model_labels, model_labels_latex = get_model_params(cosmo_model)
     model_priors = {key: priors[key] for key in model_labels}
     params = dict(zip(model_labels, theta))
 
@@ -50,125 +56,135 @@ def log_likelihood(theta, cosmo_model,
         a_pivot = 1 / (1 + z_agn_pivot)
         wp = params['w0'] + (1 - a_pivot) * params['wa']
         cosmo = FlatwpwaCDM(H0=params['H0'], Om0=params['Om0'], wp=wp, wa=params['wa'], zp=z_agn_pivot)
-    # SN model
-    mu_theory = cosmo.distmod(df_pantheon['zHD'].values).value
-    mu_obs = M_model_SN(
-        df_pantheon['m_b_corr'].values,
-        df_pantheon['x1'].values,
-        df_pantheon['c'].values,
-        df_pantheon['biasCor_m_b'].values,
-        df_pantheon['HOST_LOGMASS'].values,
-        params['alpha_sn'], params['beta_sn'], params['M0_sn'],
-        params['gamma_sn'], params['tau_Ms']
-    )
+        #cosmo = Flatw0waCDM(H0=params['H0'], Om0=params['Om0'], w0=params['w0'], wa=params['wa'])
+    elif cosmo_model == 'FlatLambdaCDM':
+        cosmo = FlatLambdaCDM(H0=params['H0'], Om0=params['Om0'])
 
-    # --- Residuals between SN model and theory ---
-    res_snia = mu_obs - mu_theory
+
+    # SN model: compute host mass correction
+    delta_host = params['gamma_sn'] * expit(-( _pantheon_data['HOST_LOGMASS'] - 10) / params['tau_Ms']) - params['gamma_sn'] / 2
+
+    # Start with cosmological prediction
+    sn_mu_model = cosmo.distmod(_pantheon_data['zHD']).value
+
+    # Apply Cepheid distances for calibrator hosts
+    mask_calib = _pantheon_data['IS_CALIBRATOR'] == 1
+    sn_mu_model[mask_calib] = _pantheon_data['CEPH_DIST'][mask_calib]
+
+    # Residuals: observed standardized SN magnitude minus theoretical prediction
+    res_snia = _pantheon_data['m_b_corr'] - (sn_mu_model + params['M0_sn'] - delta_host)
 
     # Compute main SN likelihood (with or without covariance)
     if use_full_cov:
-        global Cov_inv, logdetCov, L
-        ll_snia = -0.5 * res_snia @ Cov_inv @ res_snia - 0.5 * logdetCov - 0.5 * len(res_snia) * np.log(2 * np.pi)
-        # Use Cholesky decomposition
-        #y = L @ res_snia
-        #ll_snia = -0.5 * np.dot(y, y) - np.sum(np.log(np.diag(L))) - 0.5 * len(res_snia) * np.log(2 * np.pi)
-        # Use diagonal from covariance as proxy for Cepheid calibration residuals
-        sigma = np.sqrt(np.diag(Cov_inv)**-1)  # approx only if Cov_inv is well-conditioned
+        global sna_L, sna_lower, sna_logdetCov  # Ensure these are set when loading data
+        quad_form = res_snia.T @ cho_solve((sna_L, sna_lower), res_snia)
+        ll_snia = -0.5 * quad_form - 0.5 * sna_logdetCov - 0.5 * len(res_snia) * np.log(2 * np.pi)
     else:
-        sigma = df_pantheon['MU_SH0ES_ERR_DIAG'].values
+        sigma = _pantheon_data['MU_SH0ES_ERR_DIAG']
         ll_snia = np.sum(stats.norm.logpdf(res_snia, scale=sigma))
 
-    # --- Cepheid calibration: always applied ---
-    mask_calib = df_pantheon['IS_CALIBRATOR'].values == 1
-    if np.any(mask_calib):
-        mu_ceph = df_pantheon['CEPH_DIST'].values[mask_calib]
-        mu_sn_calib = mu_obs[mask_calib]
-        mu_ceph_err = sigma[mask_calib]  # proxy for CEPH_DIST error
-        ll_calib = np.sum(stats.norm.logpdf(mu_sn_calib - mu_ceph, scale=mu_ceph_err))
-    else:
-        ll_calib = 0.0
-
     if only_sna:
-        return ll_snia + ll_calib
+        return ll_snia
 
     # AGN model
-    z = df_agn['z'].values
-    m_obs = df_agn['apparent_mag_i'].values
-    m_err = df_agn['apparent_mag_i_err'].values
-    log_sigma_hat = df_agn['log_sigma_hat_UV'].values
-    log_sigma_hat_err = df_agn['log_sigma_hat_UV_err'].values
-    log_tau_UV_RF = df_agn['log_tau_UV_RF'].values
-    log_tau_UV_RF_err = df_agn['log_tau_UV_RF_err'].values
+    z = _agn_data['z']
+    m_obs = _agn_data['apparent_mag_i']
+    m_err = _agn_data['apparent_mag_i_err']
+    log_sigma_hat = _agn_data['log_sigma_hat_UV']
+    log_sigma_hat_err = _agn_data['log_sigma_hat_UV_err']
+    log_tau_UV_RF = _agn_data['log_tau_UV_RF']
+    log_tau_UV_RF_err = _agn_data['log_tau_UV_RF_err']
 
     mu_cosmo = cosmo.distmod(z).value
-    M_pred = M_model_agn(params['M0_sn'], params['delta_M_agn'], params['alpha_agn'],
-                         params['beta_agn'], log_sigma_hat, log_tau_UV_RF)
-    mu_pred = m_obs - (K_corr(z) - K_corr(2)) - M_pred
+    M_pred = M_model_agn(params['M0_sn']+params['delta_M0_agn'], 
+                         params['log_sigma_hat_sq_break'], 
+                         params['eta_A1_agn'], params['eta_A2_agn'], 
+                         params['eta_break_agn'],
+                         params['beta_agn'], 
+                         log_sigma_hat, log_tau_UV_RF)
 
+
+    mu_pred = m_obs - (K_corr(z) - K_corr(2)) - M_pred
+    M_i_pred_err = M_model_agn_err(params['M0_sn']+params['delta_M0_agn'],
+                        params['log_sigma_hat_sq_break'],
+                        params['eta_A1_agn'], params['eta_A2_agn'], 
+                        params['eta_break_agn'],
+                        params['beta_agn'],
+                        log_sigma_hat, log_sigma_hat_err,
+                        log_tau_UV_RF_err)
+    
     mu_err = np.sqrt(
         m_err**2 +
-        (params['alpha_agn'] * 2*log_sigma_hat_err)**2 +
-        (params['beta_agn'] * log_tau_UV_RF_err)**2 +
+        M_i_pred_err**2 +
         (2.5 * 0.3 * np.log10(1 + z))**2 +
         (0.055 * z)**2 +
         np.exp(2 * params['log_f'])
     )
 
-    dmu = mu_pred - mu_cosmo
+    # we can predict uncensored magnitudes instead
+    # check predict_uncensored_magnitudes function call
+    if False and use_full_cov:
+        # Residuals
+        dmu = mu_pred - mu_cosmo
 
-    if use_full_cov:  # TODO: test this
-        # Compute AGN covariance matrix
-        D = mu_err**2 - (0.055 * z)**2
+        # Diagonal variance excluding correlated PV
+        sigma_diag_sq = (
+            m_err**2 +
+            M_i_pred_err**2 +
+            (2.5 * 0.3 * np.log10(1 + z))**2 +
+            np.exp(2 * params['log_f'])
+        )
+        D = sigma_diag_sq
         u = 0.055 * z
+
+        # Add small floor to avoid division by zero or negative variance
+        D = np.maximum(sigma_diag_sq, 1e-6)  # [mag^2], adjust if needed
         inv_D = 1.0 / D
 
-        # Compute quadratic form
-        dmu = mu_pred - mu_cosmo
+        # Sherman–Morrison terms
         inv_D_dmu = inv_D * dmu
         inv_D_u = inv_D * u
         alpha = 1.0 + np.dot(u, inv_D_u)
-        quad = np.dot(dmu, inv_D_dmu) - (np.dot(inv_D_u, dmu) ** 2) / alpha
 
-        # Log determinant
+        quad = np.dot(dmu, inv_D_dmu) - (np.dot(inv_D_u, dmu) ** 2) / alpha
         logdet = np.sum(np.log(D)) + np.log(alpha)
 
-        ll_agn = -0.5 * quad - 0.5 * logdet - 0.5 * len(dmu) * np.log(2 * np.pi)  
+        ll_agn = -0.5 * quad - 0.5 * logdet - 0.5 * len(dmu) * np.log(2 * np.pi)
     else:
-        ll_agn = np.sum(stats.norm.logpdf(dmu, scale=mu_err))
+        ll_agn = np.sum(stats.norm.logpdf(mu_pred - mu_cosmo, scale=mu_err))
 
     # Corrected? AGN completeness correction 2D
     # Optional AGN completeness correction 2D
-    per_agn_log_weights = 0.0
-    m_model = M_pred + (K_corr(df_agn['z'].values) - K_corr(2)) + mu_cosmo  # model-predicted magnitude
-    sigma = mu_err               # total uncertainty on m_model
-    if completeness_params is not None:
-        completeness2d, mag_centers, z_centers, dm, dz = completeness_params
-        m_model = M_pred + (K_corr(df_agn['z'].values) - K_corr(2)) + mu_cosmo  # model-predicted magnitude
+    m_model = M_pred + mu_cosmo #+ (K_corr(_agn_data['z']) - K_corr(2)) + mu_cosmo  # model-predicted magnitude
 
-        sigma = mu_err               # total uncertainty on m_model
+    ll_completeness = 0.0
+    # selection bias correction during inference
+    if False and completeness_params is not None:
+        completeness2d, mag_centers, _, dm, _ = completeness_params
 
-        # Define the magnitude grid for integration (must cover m_model ± ~4σ)
         m_grid = mag_centers
-        m_grid_broadcasted = np.tile(m_grid, (len(z), 1))      # (N_obj, N_grid)
-        z_broadcasted = np.tile(z[:, None], (1, len(m_grid)))  # (N_obj, N_grid)
+        N_obj = len(z)
 
-        # Evaluate the Gaussian p(m | m_model, sigma) for each AGN
-        gauss_weights = stats.norm.pdf(m_grid_broadcasted, loc=m_model[:, None], scale=sigma[:, None])
-        gauss_weights /= np.sum(gauss_weights, axis=1)[:, None] * dm
+        # Shape: (N_obj, N_grid)
+        m_grid_broadcasted = np.tile(m_grid, (N_obj, 1))
+        z_broadcasted = np.tile(z[:, None], (1, len(m_grid)))
 
-        # Evaluate completeness function p(I=1 | m, z_i)
+        # Gaussian weights: P(m | model)
+        gauss_weights = stats.norm.pdf(m_grid_broadcasted, loc=m_model[:, None], scale=mu_err[:, None])
+        gauss_weights /= np.trapezoid(gauss_weights, m_grid, axis=1)[:, None] + 1e-12
+
+        # Evaluate p(detect | m, z)
         p_detect = completeness2d(m_grid_broadcasted, z_broadcasted)
-        integrals = np.sum(gauss_weights * p_detect, axis=1) * dm
-        integrals = np.clip(integrals, 1e-12, 1.0)
+        p_detect = soft_clip(p_detect, floor=1e-4, sharpness=20)
 
-        # Apply selection correction to log-likelihood
-        per_agn_log_weights = np.log(integrals)
-        ll_agn -= np.sum(per_agn_log_weights)
+        # Marginalized likelihood: ∫ P(m | model) × p_detect(m, z) dm
+        integrals = np.trapezoid(gauss_weights * p_detect, m_grid, axis=1)
+        integrals = np.maximum(integrals, 1e-12)
 
-    if return_params:
-        return ll_snia + ll_calib + ll_agn, per_agn_log_weights, m_model
-    
-    return ll_snia + ll_calib + ll_agn
+        ll_completeness = np.sum(np.log(integrals))
+
+
+    return ll_snia + ll_agn + ll_completeness
 
 # Globals used by dynesty
 _dynesty_config = {}
@@ -183,20 +199,17 @@ def loglike_dynesty(theta):
     cfg = _dynesty_config
     return log_likelihood(theta,
                           cfg['cosmo_model'],
-                          cfg['df_agn'],
-                          cfg['df_pantheon'],
                           cfg['completeness_params'],
-                          cfg['log_sigma_hat_pivot'],
                           cfg['only_sna'],
                           cfg['use_full_cov'])
 
 def run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model='Flatw0waCDM', 
                       only_sna=False, completeness=True, use_full_cov=False,
+                      resume=False, dlogz_init=np.inf, nlive_init=25, nlive_batch=10,
                       num_samples=2000, num_warmup=2000, 
-                      use_dynesty=False, nlive=500, maxiter=None, n_effective=5000):
-    import multiprocessing
+                      fitting_method=None):
 
-    priors, model_labels = get_model_params(cosmo_model)
+    priors, model_labels, model_labels_latex = get_model_params(cosmo_model)
     model_priors = {key: priors[key] for key in model_labels}
     ndim = len(model_labels)
 
@@ -205,61 +218,114 @@ def run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model='Flatw0waCDM',
                                         'm_b_corr', 'x1', 'c', 'biasCor_m_b', 'HOST_LOGMASS']].copy()
     df_agn_filtered = df_agn[['z', 'apparent_mag_i', 'apparent_mag_i_err', 'M_i',
                               'log_sigma_hat_UV', 'log_sigma_hat_UV_err', 'log_tau_UV_RF', 'log_tau_UV_RF_err']].copy()
-    completeness_params = get_completeness_function_2d(df_agn_filtered) if completeness else None
-    log_sigma_hat_pivot = df_agn_filtered['log_sigma_hat_UV'].mean()
-    print(f"Log sigma hat pivot: {log_sigma_hat_pivot:.3f}, log tau UV RF pivot: {df_agn_filtered['log_tau_UV_RF'].mean():.3f}, z_agn_pivot: {df_agn_filtered['z'].median():.3f}")
-    print(f"Mean AGN M_i: {df_agn_filtered['M_i'].mean()}, delta_M_agn ~ {-19.3 - df_agn_filtered['M_i'].mean():.3f}")
 
-    if use_dynesty:
+    if completeness:
+        completeness_params = get_completeness_function_2d(df_agn_filtered)
+   
+        # Optionally load initial parameter values from file if available
+        # initial_params = None
+        # params_yaml_path = f"data/median_params_{cosmo_model}.yaml"
+        # if os.path.exists(params_yaml_path):
+        #     print(f"Loading initial parameter values from {params_yaml_path}")
+        #     with open(params_yaml_path, "r") as f:
+        #         initial_params = yaml.safe_load(f)
+        #         print(initial_params)
+        #     if not set(model_labels).issubset(initial_params.keys()):
+        #         raise ValueError(f"YAML file does not contain all required model labels: {model_labels}")
+        # if initial_params is not None:
+        #     print("Applying forward completeness correction to AGN apparent magnitudes before fitting...")
+        #     mag_corr = apply_forward_completeness_correction(df_agn_filtered, initial_params, cosmo_model, completeness_params)
+        #     df_agn.loc[df_agn_filtered.index, 'apparent_mag_i'] = mag_corr.astype(np.float32)
+
+    z_pivot = (1 / np.exp(np.mean(np.log(1 / (1 + df_agn_filtered['z']))))) - 1
+    #print(f"Log sigma hat pivot: {log_sigma_hat_pivot:.3f}, log tau UV RF pivot: {df_agn_filtered['log_tau_UV_RF'].median():.3f}")
+    print("log tau UV RF pivot: ", np.average(df_agn_filtered['log_tau_UV_RF'], weights=1 / df_agn_filtered['log_tau_UV_RF_err']**2))
+    print(f"z mean: {df_agn_filtered['z'].mean():.3f},  z_agn_pivot: {z_pivot:.3f}")
+
+    print(f"Mean AGN M_i: {df_agn_filtered['M_i'].mean()}, delta_M_agn ~ {df_agn_filtered['M_i'].mean()-(-19.3):.3f}")
+
+
+    global _agn_data, _pantheon_data
+    _agn_data = {col: df_agn_filtered[col].values for col in df_agn_filtered.columns}
+    _pantheon_data = {col: df_pantheon_filtered[col].values for col in df_pantheon_filtered.columns}
+
+    if fitting_method == 'dynesty':
         # Set dynesty global context
         _dynesty_config.update({
             'model_priors': model_priors,
             'model_labels': model_labels,
             'cosmo_model': cosmo_model,
-            'df_agn': df_agn_filtered,
-            'df_pantheon': df_pantheon_filtered,
             'completeness_params': completeness_params,
-            'log_sigma_hat_pivot': log_sigma_hat_pivot,
             'only_sna': only_sna,
             'use_full_cov': use_full_cov,
         })
 
-        num_cpus = multiprocessing.cpu_count() - 2
+        u = np.random.rand(1000, ndim)
+        v = np.array([prior_transform_dynesty(ui) for ui in u])
+        l = np.array([loglike_dynesty(vi) for vi in v])
+        print("Fraction of finite likelihoods:", np.sum(np.isfinite(l)) / len(l))
+
+        num_cpus = multiprocessing.cpu_count()
         with multiprocessing.Pool(processes=num_cpus) as pool:
-            sampler = DynamicNestedSampler(
-                loglike_dynesty,
-                prior_transform_dynesty,
-                ndim,
-                bound='single', # assuming gaussian like posterior, if multimodal use 'multi'
-                sample='unif', # fast works well for moderately correlated parameters, use 'auto' if unsure
-                nlive=nlive,
-                pool=pool,
-                queue_size=num_cpus
+            # use NestedSampler for precise log-evidence estimates (e.g., model selection)
+            # use DynamicNestSampler for Cosmological parameter inference
+            resume = False
+            if resume:
+                sampler = DynamicNestedSampler.restore(f'data/dynesty_{cosmo_model}.save', pool=pool)
+            else:
+                sampler = DynamicNestedSampler(
+                    loglike_dynesty,
+                    prior_transform_dynesty,
+                    ndim,
+                    update_interval=10*ndim,
+                    bound='single',
+                    sample='rwalk',
+                    pool=pool,
+                    queue_size=num_cpus
+                )
+            sampler.run_nested(
+                resume=resume,
+                checkpoint_file=f'data/dynesty_{cosmo_model}.save',
+                print_progress=True,
+                dlogz_init=dlogz_init,
+                n_effective=10,               
+                nlive_init=5 * ndim,         
+                nlive_batch=2 * ndim  # 2 * ndim is low, but seems to work
             )
-            sampler.run_nested(maxiter=maxiter, n_effective=n_effective, print_progress=True)
-            results = sampler.results
+
+        results = sampler.results
         logZ, logZerr = results.logz[-1], results.logzerr[-1]
         print(f"\nBayesian evidence logZ = {logZ:.2f} ± {logZerr:.2f}")
         if logZerr > 1:
             print("Warning: logZ error is large, consider increasing nlive or maxiter.")
 
-        samples, weights = results.samples, np.exp(results.logwt - results.logz[-1])
-        resampled = resample_equal(samples, weights)
-        median_samples = np.median(resampled, axis=0)
-    else:
+        unweighted_samples, weights = results.samples, np.exp(results.logwt - results.logz[-1])
+        flat_samples = resample_equal(unweighted_samples, weights)
+        median_samples = np.median(flat_samples, axis=0)
+
+        print("Dynesty results stats:")
+        print("  samples shape:", unweighted_samples.shape)
+        print("  weights max:", np.max(weights))
+        print("  effective samples:", np.sum(weights)**2 / np.sum(weights**2))
+        display_results_summary(flat_samples, cosmo_model)
+        plot_dynesty(results, cosmo_model)
+
+    elif fitting_method == 'emcee':
         # --- emcee logic ---
-        nwalkers = ndim * 2 * 15
+        print("Number of parameters:", ndim)
+        nwalkers = ndim * 2 * 10 #* 15
         initial_pos = np.array([
             np.random.uniform(low, high, nwalkers) for low, high in model_priors.values()
         ]).T
 
-        num_cpus = multiprocessing.cpu_count() - 2
+        num_cpus = multiprocessing.cpu_count()
         with multiprocessing.Pool(processes=num_cpus) as pool:
             sampler = emcee.EnsembleSampler(nwalkers, ndim, log_likelihood,
                                             args=(cosmo_model,
-                                                  df_agn_filtered, df_pantheon_filtered,
-                                                  completeness_params, log_sigma_hat_pivot,
-                                                  only_sna, use_full_cov),
+                                                    df_agn_filtered, df_pantheon_filtered,
+                                                    completeness_params,
+                                                    only_sna, use_full_cov),
+                                            moves=[(DEMove(), 0.8), (DESnookerMove(), 0.2)],
                                             pool=pool)
             state = sampler.run_mcmc(initial_pos, num_warmup, progress=True)
             sampler.reset()
@@ -286,75 +352,23 @@ def run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model='Flatw0waCDM',
 
         median_samples = np.median(samples, axis=0)
         logZ = logZerr = None  # Not available from emcee
-
-    # Common post-processing
-    params = dict(zip(model_labels, median_samples))
-    if cosmo_model == 'Flatw0waCDM':
-        mu_cosmo = Flatw0waCDM(H0=params['H0'], Om0=params['Om0'], w0=params['w0'], wa=params['wa']).distmod(df_agn_filtered['z'].values).value
-    elif cosmo_model == 'FlatwCDM':
-        mu_cosmo = FlatwCDM(H0=params['H0'], Om0=params['Om0'], w0=params['w0']).distmod(df_agn_filtered['z'].values).value
-    elif cosmo_model == 'FlatLambdaCDM':
-        mu_cosmo = FlatLambdaCDM(H0=params['H0'], Om0=params['Om0']).distmod(df_agn_filtered['z'].values).value
     else:
-        raise ValueError("cosmo_model must be 'FlatwCDM', 'Flatw0waCDM' or 'FlatLambdaCDM'")
+        raise ValueError("fitting_method must be 'emcee', 'dynesty', or 'ultranest'")
 
-    mu_err = np.sqrt(
-        df_agn_filtered['apparent_mag_i_err'].values**2 +
-        (params['alpha_agn'] * 2 * df_agn_filtered['log_sigma_hat_UV_err'].values)**2 +
-        (params['beta_agn'] * df_agn_filtered['log_tau_UV_RF_err'].values)**2 +
-        (2.5 * 0.3 * np.log10(1 + df_agn_filtered['z'].values))**2 +
-        (0.055 * df_agn_filtered['z'].values)**2 +
-        np.exp(2 * params['log_f'])
-    )
+    params = dict(zip(model_labels, median_samples))
 
-    M_model_agn_samples = M_model_agn(params['M0_sn'], params['delta_M_agn'], params['alpha_agn'], 
-                                       params['beta_agn'], 
-                                      df_agn_filtered['log_sigma_hat_UV'], df_agn_filtered['log_tau_UV_RF'])
-    m_model = mu_cosmo + (K_corr(df_agn_filtered['z'].values) - K_corr(2)) + M_model_agn_samples
-    mag_corr = predict_uncensored_magnitudes(df_agn_filtered, m_model, mu_err)
-    df_agn['apparent_mag_i_corr'] = mag_corr
+    # Save median parameter values to file
+    # Convert all parameter values to plain Python floats before saving
+    with open(f"data/median_params_{cosmo_model}.yaml", "w") as f:
+        yaml.dump( {k: float(v) for k, v in params.items()}, f)
 
-    return sampler, model_labels, mag_corr, logZ, logZerr
+    completeness_params = get_completeness_function_2d(df_agn_filtered)
+    mag_corr = apply_forward_completeness_correction(df_agn_filtered, params, cosmo_model, completeness_params)
+    df_agn.loc[df_agn_filtered.index, 'apparent_mag_i_corr'] = mag_corr.astype(np.float32)
 
-def predict_uncensored_magnitudes(df_agn, m_model, mu_err):
-    z = df_agn['z'].values
-
-    p_detect, mag_centers, z_centers, dm, dz = get_completeness_function_2d(df_agn)
-
-    uncensored_samples = []
-
-    for i in range(len(df_agn)):
-        m = m_model[i]
-        sigma = mu_err[i]
-        zval = z[i]
-
-        # Grid of possible m* values
-        m_grid = np.linspace(m - 5*sigma, m + 5*sigma, 500)
-
-        # Gaussian prior
-        prior = stats.norm.pdf(m_grid, loc=m, scale=sigma)
-
-        # Detection probability at each m
-        p_det = p_detect(m_grid, np.full_like(m_grid, zval))
-        p_det = np.clip(p_detect(m_grid, np.full_like(m_grid, zval)), 1e-12, 1.0)
-
-        if np.all(p_det == 0):
-            sampled_m = df_agn['apparent_mag_i'].iloc[i]
-            uncensored_samples.append(sampled_m)
-            continue
-
-        # Posterior (up to normalization)
-        posterior = prior #* p_det
-        posterior /= np.trapezoid(posterior, m_grid)  # normalize
-
-        # Sample or get expected value
-        sampled_m = np.random.choice(m_grid, p=posterior / posterior.sum())
-        #mean_m = np.trapz(m_grid * posterior, m_grid)
-
-        #uncensored_samples.append(mean_m)
-        uncensored_samples.append(sampled_m)
-
-    return np.array(uncensored_samples)
+    #display_diagnostics(sampler, cosmo_model, fitting_method=fitting_method)
+    np.save(f"data/flat_samples_{cosmo_model}_{'sna' if only_sna else 'agn'}.npy", flat_samples)
+    return sampler, flat_samples, model_labels, mag_corr, logZ, logZerr
 
 def compare_models():
     priors, model_labels = get_model_params('Flatw0waCDM')
@@ -364,16 +378,16 @@ def compare_models():
     # nlive = 100 * ndim # high precision
     #maxiter = 2000 # TESTING
     maxiter = None # full run
-    n_effective = 100 # Testing
-    #n_effective = 2000 # moderate quality
+    #n_effective = 100 # Testing
+    n_effective = 2000 # moderate quality
     #n_effective = 5000 # high quality
     #n_effective = 10000 # publication quality
     
     use_full_cov = True
     completeness = True
 
-    global Cov_inv, logdetCov, L
-    df_agn, df_pantheon, Cov_inv, logdetCov, L = load_data("data/N20_w500_grace/may21_joint_fits_N20_merged.h5")
+    global sna_logdetCov, sna_L, sna_lower
+    df_agn, df_pantheon, sna_logdetCov, sna_L, sna_lower = load_data("data/N20_w500_grace/may21_joint_fits_N20_merged.h5")
 
     # Run MCMC pipeline for FlatLambdaCDM model
     sampler_FlatwCDM, _, _, logZ_FlatwCDM, logZerr_FlatwCDM = run_mcmc_pipeline(
@@ -400,7 +414,7 @@ def main():
     global Cov_inv, logdetCov, L
     #df_agn, df_pantheon, Cov_inv, logdetCov, L = load_data("data/may23_all_merged.h5", populate_sdss=True)
     #df_agn, df_pantheon, Cov_inv, logdetCov, L = load_data("data/N20_w500_grace/may21_joint_fits_N20_merged.h5", False)
-    df_agn, df_pantheon, Cov_inv, logdetCov, L = load_data("data/june1_joint_N20w2000s1000_fits_merged.h5", False)
+    df_agn, df_pantheon, Cov_inv, logdetCov, L = load_data("data/june1_joint_N20w2000s1000_fits_merged.h5")
     print(len(df_pantheon))
     
     results = []
@@ -433,8 +447,8 @@ def main():
 
         # Plot results
         print("Plotting Hubble diagram...")
-        plot_hubble(sampler_joint, df_agn, df_pantheon, cosmo_model=cosmo_model, completeness=True, show_uncorrected=False)
-        plot_hubble(sampler_joint, df_agn, df_pantheon, cosmo_model=cosmo_model, completeness=True, show_uncorrected=True)
+        #plot_hubble(sampler_joint, df_agn, df_pantheon, cosmo_model=cosmo_model, completeness=True, show_uncorrected=False)
+        plot_hubble(sampler_joint, df_agn, df_pantheon, cosmo_model=cosmo_model, completeness=True, show_uncorrected=True, show_true=True)
         
         print("Plotting cosmological posteriors corner plot...")
         plot_cosmo_corner(sampler_snia, sampler_joint, cosmo_model=cosmo_model)
@@ -455,33 +469,44 @@ def main():
 
 
 def test():
+    cosmo_model = 'Flatw0waCDM'
+
     # Load data
-    global Cov_inv, logdetCov, L
+    global sna_logdetCov, sna_L, sna_lower
+
     #df_agn, df_pantheon, Cov_inv, logdetCov, L = load_data("data/N20_w500_grace/may21_joint_fits_N20_merged.h5")
     #df_agn, df_pantheon, Cov_inv, logdetCov, L = load_data("data/may23_all_merged.h5", populate_sdss=False)
-    df_agn, df_pantheon, Cov_inv, logdetCov, L = load_data("data/june1_joint_N20w2000s1000_fits_merged.h5", False)
-    #df_agn, df_pantheon, Cov_inv, logdetCov, L = load_data("data/june3_etab05_20w1000s500_fits_merged.h5", False)
+    df_agn, df_pantheon, sna_logdetCov, sna_L, sna_lower = load_data("data/june1_joint_N20w2000s1000_fits_merged.h5")
+    fitting_method = 'dynesty'
 
-    cosmo_model = 'Flatw0waCDM'
-    sampler_joint, model_labels, mag_corr, logZ, logZerr = run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model=cosmo_model, 
+    sampler_joint, flat_samples, model_labels, mag_corr, logZ, logZerr = run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model=cosmo_model, 
                                         only_sna=False, completeness=True, use_full_cov=True,
-                                        num_warmup=250, num_samples=100)
-    plot_posterior_corner(sampler_joint, cosmo_model=cosmo_model, only_sna=False)
+                                        fitting_method=fitting_method,
+                                        num_warmup=8000, num_samples=1000, resume=False)
+    try:
+        plot_posterior_corner(flat_samples, cosmo_model=cosmo_model, only_sna=False)
+    except Exception as e:
+        print(f"Could not plot posterior corner: {e}")
+        #plot_traces(sampler_joint, only_sna=False, cosmo_model=cosmo_model, show=False, use_dynesty=use_dynesty)
+    print("Plotting AGN predicted sigma hat vs luminosity...")
+    plot_Mi_vs_log_sigma_hat_sq(flat_samples, df_agn, cosmo_model=cosmo_model, show=False)
+    
     print("Plotting AGN M_i predictions vs actual...")
-    plot_predicted_vs_actual_Mi(sampler_joint, df_agn, cosmo_model=cosmo_model)
+    plot_predicted_vs_actual_Mi(flat_samples, df_agn, cosmo_model=cosmo_model)
+    
     print("Plotting Hubble diagram...")
-    plot_hubble(sampler_joint, df_agn, df_pantheon, cosmo_model=cosmo_model, show_uncorrected=True, completeness=True)
-    print("Plotting cosmological posteriors corner plot...")
-    plot_cosmo_corner(sampler_joint, sampler_joint, cosmo_model=cosmo_model)
+    plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model=cosmo_model, show_uncorrected=True, completeness=True)
+    
+    #print("Plotting cosmological posteriors corner plot...")
+    #plot_cosmo_corner(sampler_joint, sampler_joint, cosmo_model=cosmo_model)
 
-    print("Plotting AGN M_i predictions vs actual...")
-    plot_predicted_vs_actual_Mi(sampler_joint, df_agn, cosmo_model=cosmo_model)
+    
     print("Plotting completeness vs magnitude at redshifts...")
     p_detect, mag_centers, z_centers, dm, dz = get_completeness_function_2d(df_agn)
     plot_completeness_vs_mag_at_redshifts(p_detect, mag_centers, z_centers)
+    plot_completeness_diagnostics(df_agn, p_detect, mag_centers, z_centers)
 
-    print("Plotting AGN predicted sigma hat vs luminosity...")
-    plot_predicted_sigma_hat_vs_luminosity(sampler_joint, df_agn, cosmo_model=cosmo_model, show=False)
+    #plot_predicted_sigma_hat_vs_luminosity(sampler_joint, df_agn, cosmo_model=cosmo_model, show=False)
 if __name__ == "__main__":
     #main()
     test()

@@ -5,17 +5,78 @@ from tqdm import tqdm
 import math
 import corner
 from mpl_toolkits.axes_grid1.inset_locator import inset_axes
-from astropy.cosmology import FlatwCDM, Flatw0waCDM
+from astropy.cosmology import FlatwCDM, Flatw0waCDM, FlatLambdaCDM
 import matplotlib.pyplot as plt
 import os
+import copy
 
-from hubble_model import K_corr, M_model_agn, M_model_SN, get_model_params, log_sigma_hat_pivot, log_tau_UV_RF_pivot, M0_agn_offset
+from hubble_model import K_corr, M_model_agn, M_model_agn_err, M_model_SN, get_model_params, log_tau_UV_RF_pivot
 from numpy.polynomial.polynomial import Polynomial
 from scipy.interpolate import interp1d
 from dynesty.utils import resample_equal
 from tqdm import tqdm
+from dynesty import plotting as dyplot
 
-def plot_traces(sampler, only_sna=False, cosmo_model='Flatw0waCDM', show=True, dynasty=False):
+def plot_dynesty(results, cosmo_model, basename="plots/hubble/dynesty", show=False):
+    """
+    Plot dynesty diagnostics: runplot, traceplot, and cornerpoints using dyplot.
+    Saves figures to files with the given basename.
+    """
+
+    os.makedirs(os.path.dirname(basename), exist_ok=True)
+    priors, model_labels, model_labels_latex = get_model_params(cosmo_model)
+
+    # Traceplot
+    fig_trace, axes_trace = dyplot.traceplot(
+        results,
+        labels=model_labels_latex,
+        quantiles=[0.16, 0.5, 0.84],
+        show_titles=True,
+        title_quantiles=[0.16, 0.5, 0.84],
+    )
+    fig_trace.tight_layout(pad=2.0, h_pad=1)
+
+    fig_trace.savefig(f"{basename}_traceplot.png", dpi=100)
+    if show:
+        fig_trace.show()
+    plt.close(fig_trace)
+
+    # Cornerplot
+    fig_corner, axes_corner = dyplot.cornerplot(results, labels=model_labels_latex, quantiles=[0.16, 0.5, 0.84],
+                                                 quantiles_2d = [0.393, 0.865, 0.989],
+                                                 show_titles=True, title_quantiles=[0.16, 0.5, 0.84],
+                                                 color='blue',
+                                                 #fig=plt.subplots(1, 1, figsize=(10, 2.5 * len(model_labels))))
+    )
+    fig_corner.savefig(f"{basename}_cornerplots.png", dpi=100)
+    if show:
+        fig_corner.show()    
+    plt.close(fig_corner)
+
+
+    # Cornerpoints
+    fig_corner, axes_corner = dyplot.cornerpoints(results, labels=model_labels_latex, cmap='plasma')
+    fig_corner.savefig(f"{basename}_cornerpoints.png", dpi=100)
+    if show:
+        fig_corner.show()    
+    plt.close(fig_corner)
+
+    # Make a shallow copy of results to avoid touching the real object
+    results_plot = copy.deepcopy(results)
+    try:
+        if results_plot.logz[-1] > 700:
+            results_plot.logz[-1] = 700  # Safe maximum for exp
+            print("🔧 Clipped logz[-1] to prevent overflow in runplot")
+
+        fig_run, axes_run = dyplot.runplot(results_plot)
+        fig_run.savefig(f"{basename}_runplot.png", dpi=100)
+        if show:
+            fig_run.show()
+        plt.close(fig_run)
+    except Exception as e:
+        print(f"Error in runplot: {e}")
+        
+def plot_traces(sampler, only_sna=False, cosmo_model='Flatw0waCDM', show=True, use_dynesty=False):
     """
     Plot parameter traces from dynesty nested sampling results.
     
@@ -28,14 +89,14 @@ def plot_traces(sampler, only_sna=False, cosmo_model='Flatw0waCDM', show=True, d
     figsize : tuple
         Base size for each subplot (width, height).
     """
-    if dynasty:
+    if use_dynesty:
         results = sampler.results
         samples, weights = results.samples, np.exp(results.logwt - results.logz[-1])
         samples = resample_equal(samples, weights)
     else:
         samples = sampler.get_chain()
 
-    priors, model_labels = get_model_params(cosmo_model)
+    priors, model_labels, model_labels_latex = get_model_params(cosmo_model)
     ndim = len(model_labels)
 
     fig, axes = plt.subplots(ndim, 1, figsize=(10, ndim*2.5), sharex=True)
@@ -66,32 +127,27 @@ def plot_traces(sampler, only_sna=False, cosmo_model='Flatw0waCDM', show=True, d
 
     return fig
 
-def plot_posterior_corner(sampler, only_sna=False, cosmo_model='Flatw0waCDM', show=False, dynasty=False):
+def plot_posterior_corner(flat_samples, only_sna=False, cosmo_model='Flatw0waCDM', show=False):
     # Select cosmological parameters based on model
     if cosmo_model == 'FlatwCDM':
         cosmo_params = ['H0', 'Om0', 'w0']
     elif cosmo_model == 'Flatw0waCDM':
         cosmo_params = ['H0', 'Om0', 'w0', 'wa']
+    elif cosmo_model == 'FlatLambdaCDM':
+        cosmo_params = ['H0', 'Om0']
     else:
-        raise ValueError("cosmo_model must be 'FlatwCDM' or 'Flatw0waCDM'")
-    # Model parameters: AGN correlation + SN calibration + cosmology
-    priors, model_labels = get_model_params(cosmo_model)
+        raise ValueError("cosmo_model must be 'FlatwCDM', 'Flatw0waCDM', or 'FlatLambdaCDM'")
 
-    if dynasty:
-        results = sampler.results
-        samples = results.samples
-        weights = np.exp(results.logwt - results.logz[-1])
-        flat_samples = resample_equal(samples, weights)  # this is crucial
-    else:
-        flat_samples = sampler.get_chain(flat=True)
-    
+    # Model parameters: AGN correlation + SN calibration + cosmology
+    priors, model_labels, model_labels_latex = get_model_params(cosmo_model)
+
     fig = corner.corner(
         flat_samples,
         labels=model_labels,
         truths=None,
         show_titles=True,
         title_fmt=".2f",
-        title_kwargs={"fontsize": 12}  # Reduce title font size
+        title_kwargs={"fontsize": 12}
     )
 
     os.makedirs("plots/hubble", exist_ok=True)
@@ -101,6 +157,7 @@ def plot_posterior_corner(sampler, only_sna=False, cosmo_model='Flatw0waCDM', sh
     else:
         fig.suptitle("SNIa + AGN", fontsize=28)
         plt.savefig(f"plots/hubble/posterior_{cosmo_model}_agn.png", dpi=200)
+
     if show:
         plt.show()
     plt.close()
@@ -113,7 +170,10 @@ def plot_cosmo_corner(sampler_sna, sampler_agn, cosmo_model='Flatw0waCDM', show=
     elif cosmo_model == 'Flatw0waCDM':
         param_names = ["H0", "Om0", "w0", "wa"]
         labels = [r"$H_0$", r"$\Omega_M$", r"$w_0$", r"$w_a$"]
-    priors, model_labels = get_model_params(cosmo_model)
+    elif cosmo_model == 'FlatLambdaCDM':
+        param_names = ["H0", "Om0"]
+        labels = [r"$H_0$", r"$\Omega_M$"]
+    priors, model_labels, model_labels_latex = get_model_params(cosmo_model)
     n_params = len(labels)
     param_indices = [list(priors.keys()).index(p) for p in param_names]
 
@@ -202,27 +262,26 @@ def plot_cosmo_corner(sampler_sna, sampler_agn, cosmo_model='Flatw0waCDM', show=
     plt.close()
 
 
-def plot_hubble(sampler, df_agn, df_pantheon, cosmo_model, show=False, completeness=True, show_uncorrected=False, show_true=False, flat_samples=None):
+def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, show=False, completeness=True, show_uncorrected=False, show_true=False):
     """Plot Hubble diagram + residuals, classic Pantheon+ style."""
     # Define cosmological parameter labels
     if cosmo_model == 'FlatwCDM':
         label = r"Flat$w$CDM Model"
     elif cosmo_model == 'Flatw0waCDM':
         label = r"Flat$w_0w_a$CDM Model"
+    elif cosmo_model == 'FlatLambdaCDM':
+        label = r"Flat$\Lambda$CDM Model"
     else:
         raise ValueError("Invalid cosmology model.")
     
-    if flat_samples is None:
-        # Thin the samples to speed up plotting
-        chain = sampler.get_chain(flat=True)
-        n_samples = chain.shape[0]
-        thin_factor = max(1, n_samples // 500)
-        flat_samples = chain[::thin_factor]
+    n_samples = flat_samples.shape[0]
+    thin_factor = max(1, n_samples // 200)
+    flat_samples = flat_samples[::thin_factor]
     
-    z_grid = np.linspace(0.0001, 5, 1000)
+    z_grid = np.linspace(0.0001, 5, 200)
 
     # Build model_labels and get indices for cosmological parameters
-    priors, model_labels = get_model_params(cosmo_model)
+    priors, model_labels, model_labels_latex = get_model_params(cosmo_model)
     param_indices = {name: model_labels.index(name) for name in model_labels}
 
     # Compute mu_models using parameter indices by label
@@ -245,6 +304,17 @@ def plot_hubble(sampler, df_agn, df_pantheon, cosmo_model, show=False, completen
             ).distmod(z_grid).value
             for s in flat_samples
         ])
+    elif cosmo_model == 'FlatLambdaCDM':
+        mu_models = np.array([
+            FlatLambdaCDM(
+                H0=s[param_indices['H0']],
+                Om0=s[param_indices['Om0']]
+            ).distmod(z_grid).value
+            for s in flat_samples
+        ])
+    else:
+        raise ValueError("Invalid cosmology model.")
+        
 
     results = {key: np.percentile(flat_samples[:, i], [16, 50, 84]) for i, key in enumerate(model_labels)}
 
@@ -265,11 +335,13 @@ def plot_hubble(sampler, df_agn, df_pantheon, cosmo_model, show=False, completen
 
     # Then re-compute the distance modulus
     mu_pred = np.array([
-        corrected_apparent_mag - (K_corr(df_agn['z']) - K_corr(2)) -
-            (M_model_agn(s[param_indices['M0_sn']], s[param_indices['delta_M_agn']], s[param_indices['alpha_agn']], 
-                         #s[param_indices['eta_A1_agn']], s[param_indices['eta_A2_agn']],
-                         s[param_indices['beta_agn']],
-                        df_agn['log_sigma_hat_UV'], df_agn['log_tau_UV_RF']))
+        corrected_apparent_mag - (K_corr(df_agn['z'].values) - K_corr(2)) -
+            (M_model_agn(s[param_indices['M0_sn']]+s[param_indices['delta_M0_agn']], 
+                         s[param_indices['log_sigma_hat_sq_break']], 
+                         s[param_indices['eta_A1_agn']], s[param_indices['eta_A2_agn']], 
+                         s[param_indices['eta_break_agn']],
+                        s[param_indices['beta_agn']],
+                        df_agn['log_sigma_hat_UV'].values, df_agn['log_tau_UV_RF'].values))
         for s in flat_samples
     ])
 
@@ -278,8 +350,15 @@ def plot_hubble(sampler, df_agn, df_pantheon, cosmo_model, show=False, completen
     mu_pred_std = np.sqrt(df_agn['apparent_mag_i_err']**2 +
                  (-2.5 * 0.3 * np.log10(1 + df_agn["z"]))**2 +
                  (0.055 * df_agn["z"])**2 +
-                (results["alpha_agn"][1] * 2*df_agn['log_sigma_hat_UV_err']))**2
-
+                #(results["alpha_agn"][1] * 2*df_agn['log_sigma_hat_UV_err']))**2
+                M_model_agn_err(results['M0_sn'][1] + results['delta_M0_agn'][1],
+                                  results['log_sigma_hat_sq_break'][1],
+                                  results['eta_A1_agn'][1], results['eta_A2_agn'][1], 
+                                  results['eta_break_agn'][1],
+                                  results['beta_agn'][1],
+                                  df_agn['log_sigma_hat_UV'].values,
+                                  df_agn['log_sigma_hat_UV_err'].values,
+                                  df_agn['log_tau_UV_RF_err'].values)**2)
     # Now take the median again:
     mu_pred_median = np.percentile(mu_pred, 50, axis=0)
 
@@ -308,10 +387,12 @@ def plot_hubble(sampler, df_agn, df_pantheon, cosmo_model, show=False, completen
         # --- Also compute uncorrected mu_pred for plotting ---
         mu_pred_uncorrected = np.array([
             df_agn['apparent_mag_i'] - K_corr(df_agn['z']) - (
-                (M_model_agn(s[param_indices['M0_sn']], s[param_indices['delta_M_agn']], s[param_indices['alpha_agn']],
-                             #s[param_indices['eta_A1_agn']], s[param_indices['eta_A2_agn']],
-                              s[param_indices['beta_agn']], 
-                            df_agn['log_sigma_hat_UV'], df_agn['log_tau_UV_RF'])) - K_corr(2))
+                (M_model_agn(s[param_indices['M0_sn']] + s[param_indices['delta_M0_agn']],
+                             s[param_indices['log_sigma_hat_sq_break']],
+                             s[param_indices['eta_A1_agn']], s[param_indices['eta_A2_agn']], 
+                             s[param_indices['eta_break_agn']], 
+                            s[param_indices['beta_agn']],
+                            df_agn['log_sigma_hat_UV'], df_agn['log_tau_UV_RF'])) - K_corr(2.0))
             for s in flat_samples
         ]) 
         mu_pred_uncorrected_median = np.percentile(mu_pred_uncorrected, 50, axis=0)
@@ -331,10 +412,10 @@ def plot_hubble(sampler, df_agn, df_pantheon, cosmo_model, show=False, completen
     inset_ax = inset_axes(ax, width="40%", height="40%", loc="lower right", borderpad=1.5)
 
     # --- Inset plot ---
-    inset_ax.scatter(df_agn["z"], mu_pred_median, s=2, label="AGN", alpha=0.5, color="black",zorder=-9)
+    inset_ax.scatter(df_agn["z"], mu_pred_median, s=2, label="AGN", alpha=0.5, color="black",zorder=1)
     inset_ax.scatter(df_pantheon["zHD"], df_pantheon["MU_SH0ES"], color="dodgerblue", s=2, label="SN Ia", alpha=0.5, zorder=-10)
-    inset_ax.plot(z_grid, mu_model_median, alpha=0.9, color="purple", zorder=-9, lw=0.5, label="ΛCDM Model")
-    inset_ax.fill_between(z_grid, mu_model_16th, mu_model_84th, color="purple", alpha=0.9)
+    inset_ax.plot(z_grid, mu_model_median, alpha=0.9, color="purple", zorder=10, lw=0.5, label="ΛCDM Model")
+    inset_ax.fill_between(z_grid, mu_model_16th, mu_model_84th, color="purple", alpha=0.9, zorder=9)
     inset_ax.set_xscale('log')
     inset_ax.set_xlim(0.02, 4.2)
     inset_ax.set_ylim(32, 51)
@@ -346,26 +427,26 @@ def plot_hubble(sampler, df_agn, df_pantheon, cosmo_model, show=False, completen
     # --- Main Hubble diagram ---
     # Original AGNs
     ax.errorbar(df_agn["z"], mu_pred_median, yerr=mu_pred_std, fmt='o', linestyle='none',
-                markersize=2, alpha=0.2, color='k', lw=1.5, zorder=-10, label="AGN")
+                markersize=2, alpha=0.2, color='k', lw=1.5, zorder=-7, label="AGN")
     
     # Binned AGNs
     ax.errorbar(binned_z, binned_mu_pred_mean, yerr=binned_mu_pred_std, label="Binned AGN",
-                fmt='o', markersize=4, capsize=3, lw=1.5,alpha=0.9, color="red", zorder=-7)
+                fmt='o', markersize=4, capsize=3, lw=1.5,alpha=0.9, color="red", zorder=-1)
 
     # Uncorrected AGNs
     if show_uncorrected:
-        inset_ax.scatter(df_agn["z"], mu_pred_uncorrected_median, s=2, label="AGN (uncorrected)", alpha=0.5, color="green",zorder=-8)
+        inset_ax.scatter(df_agn["z"], mu_pred_uncorrected_median, s=2, label="AGN (uncorrected)", alpha=0.5, color="green",zorder=-16)
         ax.errorbar(df_agn["z"], mu_pred_uncorrected_median, yerr=mu_pred_std, fmt='o', linestyle='none',
                     markersize=2, alpha=0.2, color='green', lw=1.5, zorder=-9, label="AGN (uncorrected)")
         ax.errorbar(binned_z, binned_mu_pred_uncorrected_mean, yerr=binned_mu_pred_uncorrected_std, label="Binned AGN (uncorrected)", 
-                    fmt='o', markerfacecolor='none', markeredgecolor='red', markersize=4, capsize=3, lw=1.5, alpha=0.9, color="red", zorder=-8)
+                    fmt='o', markerfacecolor='none', markeredgecolor='red', markersize=4, capsize=3, lw=1.5, alpha=0.9, color="red", zorder=-6)
     
     if show_true:
         ax.scatter(df_agn['z'], df_agn['apparent_mag_i'] - df_agn['M_i'], alpha=0.7, edgecolor='k')
     
     # SNIa points
     ax.errorbar(df_pantheon["zHD"], df_pantheon["MU_SH0ES"], yerr=df_pantheon["MU_SH0ES_ERR_DIAG"], 
-                fmt='s', markersize=3, color="dodgerblue", linestyle='none', lw=1, label="SN Ia", alpha=0.7, zorder=-8)
+                fmt='s', markersize=3, color="dodgerblue", linestyle='none', lw=1, label="SN Ia", alpha=0.7, zorder=-9)
 
     # Cosmo model band
     ax.plot(z_grid, mu_model_median, alpha=0.9, color="m", zorder=-5, lw=2, label=label)
@@ -386,39 +467,45 @@ def plot_hubble(sampler, df_agn, df_pantheon, cosmo_model, show=False, completen
     fig.tight_layout()
     os.makedirs("plots/hubble", exist_ok=True)
     show_uncorrected_label = "_uncorrected" if show_uncorrected else ""
-    plt.savefig(f"plots/hubble/hubble_diagram_{cosmo_model}{show_uncorrected_label}.pdf", dpi=300)
+    #plt.savefig(f"plots/hubble/hubble_diagram_{cosmo_model}{show_uncorrected_label}.pdf", dpi=300)
     plt.savefig(f"plots/hubble/hubble_diagram_{cosmo_model}{show_uncorrected_label}.png")
+
+    ax.set_yscale('log')
+    ax.set_ylim(39, 50)
+    plt.savefig(f"plots/hubble/hubble_diagram_{cosmo_model}{show_uncorrected_label}_ylog.png")
+
     if show:
         plt.show()
     plt.close()
     return residuals, mu_pred_std
 
-def plot_predicted_vs_actual_Mi(sampler, df_agn, cosmo_model, show=False, flat_samples=None):
-    if flat_samples is None:
-        flat_samples = sampler.get_chain(flat=True)
-    priors, model_labels = get_model_params(cosmo_model)
+def plot_predicted_vs_actual_Mi(flat_samples, df_agn, cosmo_model, show=False):
+    priors, model_labels, model_labels_latex = get_model_params(cosmo_model)
     results = {key: np.percentile(flat_samples[:, i], [16, 50, 84]) for i, key in enumerate(model_labels)}
 
     M_i_pred = M_model_agn(
-        results['M0_sn'][1], 
-        results['delta_M_agn'][1], 
-        results['alpha_agn'][1], 
-        # results['eta_A1_agn'][1], results['eta_A2_agn'][1],
+        results['M0_sn'][1] + results['delta_M0_agn'][1], 
+        results['log_sigma_hat_sq_break'][1],
+        results['eta_A1_agn'][1], results['eta_A2_agn'][1], 
+        results['eta_break_agn'][1],
         results['beta_agn'][1], 
         df_agn['log_sigma_hat_UV'].values,
         df_agn['log_tau_UV_RF'].values
-    ) #+ K_corr(2) # TODO: check this
+    ) + K_corr(2.0) # TODO: check this
 
 
     # Calculate prediction errors
     M_i_pred_err = np.sqrt(
-        #df_agn['M_i_err']**2 +
-
-        (results['alpha_agn'][1] * 2*df_agn["log_sigma_hat_UV_err"])**2 +
-        (results['beta_agn'][1] * df_agn['log_tau_UV_RF_err'])**2
-        # (2.5 * 0.3 * np.log10(1 + df_agn['z']))**2 +
-        # (0.055 * df_agn['z'])**2 +
-        # np.exp(2 * results['log_f'][1])
+        M_model_agn_err(
+            results['M0_sn'][1] + results['delta_M0_agn'][1],
+            results['log_sigma_hat_sq_break'][1],
+            results['eta_A1_agn'][1], results['eta_A2_agn'][1], 
+            results['eta_break_agn'][1],
+            results['beta_agn'][1], 
+            df_agn['log_sigma_hat_UV'].values, 
+            df_agn['log_sigma_hat_UV_err'].values, 
+            df_agn['log_tau_UV_RF_err'].values
+        )**2
     )
 
     # Bin and color by redshift
@@ -481,7 +568,7 @@ def plot_predicted_vs_actual_Mi(sampler, df_agn, cosmo_model, show=False, flat_s
 
     os.makedirs("plots/hubble", exist_ok=True)
     plt.savefig(f"plots/hubble/predicted_vs_actual_Mi_{cosmo_model}.png", dpi=300)
-    plt.savefig(f"plots/hubble/predicted_vs_actual_Mi_{cosmo_model}.pdf", dpi=300)
+    #plt.savefig(f"plots/hubble/predicted_vs_actual_Mi_{cosmo_model}.pdf", dpi=300)
     if show:
         plt.show()
     plt.close()
@@ -536,7 +623,7 @@ def plot_completeness_vs_mag_at_redshifts(p_detect, mag_centers, z_centers,
         plt.show()
     os.makedirs("plots/hubble", exist_ok=True)
     plt.savefig("plots/hubble/completeness_vs_mag_at_redshifts.png", dpi=300)
-    plt.savefig("plots/hubble/completeness_vs_mag_at_redshifts.pdf", dpi=300)
+    #plt.savefig("plots/hubble/completeness_vs_mag_at_redshifts.pdf", dpi=300)
     plt.close()
 
 
@@ -545,7 +632,7 @@ def plot_predicted_sigma_hat_vs_luminosity(sampler, df_agn, cosmo_model, show=Fa
     # Load samples
     if flat_samples is None:
         flat_samples = sampler.get_chain(flat=True)
-    priors, model_labels = get_model_params(cosmo_model)
+    priors, model_labels, model_labels_latex = get_model_params(cosmo_model)
     param_indices = {name: model_labels.index(name) for name in model_labels}
 
     # Extract arrays of model parameters
@@ -563,7 +650,7 @@ def plot_predicted_sigma_hat_vs_luminosity(sampler, df_agn, cosmo_model, show=Fa
     # intercepts = (90 - M0_samples) / alpha_samples + 2 * log_sigma_hat_pivot
 
     slopes = -2.5 / alpha_samples
-    intercepts = 1/alpha_samples * (90 - M0_sn_samples + M0_agn_offset + 2 * log_sigma_hat_pivot -2 - beta_samples * (df_agn['log_tau_UV_RF'].mean() - log_tau_UV_RF_pivot))
+    intercepts = 1/alpha_samples * (90 - M0_sn_samples + M0_agn_offset) #+ 2 * log_sigma_hat_pivot -2 - beta_samples * (df_agn['log_tau_UV_RF'].mean() - log_tau_UV_RF_pivot))
 
 
     #print("Intercepts:", intercepts)
@@ -627,7 +714,7 @@ def plot_predicted_sigma_hat_vs_luminosity(sampler, df_agn, cosmo_model, show=Fa
     plt.ylim(0.4e-3, 0.4e1)
     os.makedirs("plots/hubble", exist_ok=True)
     plt.savefig(f"plots/hubble/predicted_sigma_hat_sq_{cosmo_model}.png", dpi=300)
-    plt.savefig(f"plots/hubble/predicted_sigma_hat_sq_{cosmo_model}.pdf", dpi=300)
+    #plt.savefig(f"plots/hubble/predicted_sigma_hat_sq_{cosmo_model}.pdf", dpi=300)
     if show:
         plt.show()
     plt.close()
@@ -635,72 +722,61 @@ def plot_predicted_sigma_hat_vs_luminosity(sampler, df_agn, cosmo_model, show=Fa
     return slopes, intercepts
 
 
-def plot_predicted_sigma_hat_vs_luminosity_pl(sampler, df_agn, cosmo_model, show=False, flat_samples=None):
+def plot_predicted_sigma_hat_vs_luminosity_pl(sampler, df_agn, cosmo_model, show=False):
     # Load samples
-    if flat_samples is None:
-        flat_samples = sampler.get_chain(flat=True, thin=20)
-    priors, model_labels = get_model_params(cosmo_model)
+    if hasattr(sampler, "results"):  # dynesty
+        results = sampler.results
+        samples = results.samples
+        weights = np.exp(results.logwt - results.logz[-1])
+        samples = resample_equal(samples, weights)
+    else:
+        samples = sampler.get_chain(flat=True, thin=200)
+    priors, model_labels, model_labels_latex = get_model_params(cosmo_model)
     param_indices = {name: model_labels.index(name) for name in model_labels}
-
-    # Extract arrays of model parameters
-    M0_sn_samples = flat_samples[:, param_indices['M0_sn']]
-    delta_M_agn_samples = flat_samples[:, param_indices['delta_M_agn']]
-    alpha_samples = flat_samples[:, param_indices['alpha_agn']]
-    #eta_A1_samples = flat_samples[:, param_indices['eta_A1_agn']]
-    #eta_A2_samples = flat_samples[:, param_indices['eta_A2_agn']]
-    beta_samples = flat_samples[:, param_indices['beta_agn']]
 
     # Define grid in log L_bol
     log_lbol_grid = np.linspace(43, 49, 200)
     lbol_grid = 10 ** log_lbol_grid
 
-    # Predicted M_i from model function
-    mean_log_sigma_hat_UV = df_agn['log_sigma_hat_UV'].mean()
-    mean_log_tau_UV_RF = df_agn['log_tau_UV_RF'].mean()
 
     predicted_M_i_samples = []
+    zipped_samples = []
     for log_sigma_hat_UV, log_tau_UV_RF in tqdm(zip(df_agn['log_sigma_hat_UV'], df_agn['log_tau_UV_RF']), total=len(df_agn), desc="Predicting M_i"):
-        predicted_M_i_samples.extend(
-            M_model_agn(
-                M0_sn_samples, delta_M_agn_samples, alpha_samples, 
-                #eta_A1_samples, eta_A2_samples,
-                beta_samples,
+        predicted_M_i_sample = M_model_agn(
+                samples[:, param_indices['M0_sn']] + samples[:, param_indices['delta_M_agn']], 
+                samples[:, param_indices['log_sigma_hat_sq_break']],
+                samples[:, param_indices['eta_A1_agn']], samples[:, param_indices['eta_A2_agn']], 
+                samples[:, param_indices['eta_break_agn']],
+                samples[:, param_indices['beta_agn']],
                 log_sigma_hat_UV, log_tau_UV_RF
             )
-        )
+        predicted_M_i_samples.extend(predicted_M_i_sample)
+        zipped_samples.append((log_sigma_hat_UV, log_tau_UV_RF, predicted_M_i_sample))
     predicted_M_i_samples = np.array(predicted_M_i_samples)
+
     # Convert predicted M_i to luminosity
     predicted_log_lbol_samples = (90 - predicted_M_i_samples) / 2.5
 
-    # Fix the break at Lbol = 1e46
-    log_lbol_break = np.log10(1e46)
+    # from scipy.optimize import brentq
+    
+    # log_sigma_hat_sq_samples = []
+    # for predicted_M_i_sample in tqdm(range(len()), desc="Computing log_sigma_hat_sq samples"):
+    #     log_sigma_hat_brentq = brentq(lambda log_sigma_hat: M_model_agn(
+    #         M0_sn_samples, delta_M_agn_samples, alpha_samples, beta_samples,
+    #         eta_A1_samples, eta_A2_samples, log_sigma_hat_break_samples,
+    #         log_sigma_hat, mean_log_tau_UV_RF) - predicted_M_i_sample, -3.0, 0)
+    #     log_sigma_hat_sq_samples.append(2 * log_sigma_hat_brentq)
 
-    # Calculate eta1 and eta2 transitions from observed data
-    mask_low = df_agn['log_lbol'] < log_lbol_break
-    mask_high = df_agn['log_lbol'] >= log_lbol_break
+    # log_sigma_hat_sq_samples = np.array(log_sigma_hat_sq_samples)
 
-    eta1 = np.polyfit(df_agn['log_lbol'][mask_low], 2 * df_agn['log_sigma_hat_UV'][mask_low], 1)[0]
-    eta2 = np.polyfit(df_agn['log_lbol'][mask_high], 2 * df_agn['log_sigma_hat_UV'][mask_high], 1)[0]
+    # # Compute percentile bands
+    # y_low, y_high = np.percentile(log_sigma_hat_sq_samples, [16, 84], axis=0)
+    # y_median = np.median(log_sigma_hat_sq_samples, axis=0)
 
-    smoothness = 0.5
-
-    log_sigma_hat_sq_samples = []
-    for pred_log_lbol in tqdm(predicted_log_lbol_samples, desc="Computing log_sigma_hat_sq samples"):
-        delta_log_lbol = log_lbol_grid - log_lbol_break
-        slope_transition = (eta1 + eta2) / 2 + (eta2 - eta1) / 2 * np.tanh(delta_log_lbol / smoothness)
-        log_sigma_hat_sq = slope_transition * (log_lbol_grid - pred_log_lbol) + 2 * log_sigma_hat_pivot
-        log_sigma_hat_sq_samples.append(log_sigma_hat_sq)
-
-    log_sigma_hat_sq_samples = np.array(log_sigma_hat_sq_samples)
-
-    # Compute percentile bands
-    y_low, y_high = np.percentile(log_sigma_hat_sq_samples, [16, 84], axis=0)
-    y_median = np.median(log_sigma_hat_sq_samples, axis=0)
-
-    # Convert to linear space
-    y_low_lin = 10 ** y_low
-    y_high_lin = 10 ** y_high
-    y_median_lin = 10 ** y_median
+    # # Convert to linear space
+    # y_low_lin = 10 ** y_low
+    # y_high_lin = 10 ** y_high
+    # y_median_lin = 10 ** y_median
 
     # Observed AGN data
     log_lbol = df_agn['log_lbol'].values
@@ -716,8 +792,8 @@ def plot_predicted_sigma_hat_vs_luminosity_pl(sampler, df_agn, cosmo_model, show
     plt.figure(figsize=(8, 6))
 
     # Plot the posterior band
-    plt.fill_between(lbol_grid, y_low_lin, y_high_lin, color='m', alpha=0.4)
-    plt.plot(lbol_grid, y_median_lin, color='m', lw=2, label='Model')
+    # plt.fill_between(lbol_grid, y_low_lin, y_high_lin, color='m', alpha=0.4)
+    # plt.plot(lbol_grid, y_median_lin, color='m', lw=2, label='Model')
 
     # Observed data
     plt.errorbar(
@@ -739,10 +815,190 @@ def plot_predicted_sigma_hat_vs_luminosity_pl(sampler, df_agn, cosmo_model, show
 
     os.makedirs("plots/hubble", exist_ok=True)
     plt.savefig(f"plots/hubble/predicted_sigma_hat_sq_{cosmo_model}.png", dpi=300)
-    plt.savefig(f"plots/hubble/predicted_sigma_hat_sq_{cosmo_model}.pdf", dpi=300)
+    #plt.savefig(f"plots/hubble/predicted_sigma_hat_sq_{cosmo_model}.pdf", dpi=300)
 
     if show:
         plt.show()
     plt.close()
 
-    return log_sigma_hat_sq_samples
+    #return log_sigma_hat_sq_samples
+
+def plot_Mi_vs_log_sigma_hat_sq(samples, df_agn, cosmo_model, show=False):
+
+    # Observed values (already in log base 10)
+    log_sigma_hat_sq = 2 * df_agn['log_sigma_hat_UV'].values
+    log_sigma_hat_sq_err = 2 * df_agn['log_sigma_hat_UV_err'].values
+    M_i = df_agn['M_i'].values
+
+    priors, model_labels, model_labels_latex = get_model_params(cosmo_model)
+    param_indices = {name: model_labels.index(name) for name in model_labels}
+    results = {key: np.percentile(samples[:, i], [16, 50, 84]) for i, key in enumerate(model_labels)}
+
+    # Fit model: reparametrize alpha to log_alpha for fitting
+    x_fit = np.linspace(-2.5, 0, 200)
+    y_fit = M_model_agn(
+        results['M0_sn'][1] + results['delta_M0_agn'][1],
+        results['log_sigma_hat_sq_break'][1],
+        results['eta_A1_agn'][1], results['eta_A2_agn'][1], 
+        results['eta_break_agn'][1],
+        results['beta_agn'][1],
+        x_fit/2, df_agn['log_tau_UV_RF'].mean()
+    ) 
+    fig, ax = plt.subplots(figsize=(7, 5))
+    ax.scatter(2*df_agn['log_sigma_hat_UV'], df_agn['M_i'], alpha=0.7, edgecolor='k', zorder=-2)
+    ax.plot(x_fit, y_fit, color='red', zorder=-1)
+
+    ax.set_xlabel(r'$\log_{10}(\hat{\sigma}_{\mathrm{UV}}^2)$ (mag$^2$ day$^{-1}$)')
+    ax.set_ylabel(r'$M_i$')
+    #ax.invert_yaxis()
+    #ax.grid(True, which='both', ls='--', lw=0.3)
+    ax.set_xlim(log_sigma_hat_sq.min() - 0.1, log_sigma_hat_sq.max() + 0.1)
+    ax.legend(fontsize=12)
+    fig.tight_layout()
+    if show:
+        plt.show()
+
+    os.makedirs("plots/hubble", exist_ok=True)
+    fig.savefig("plots/hubble/observed_Mi_vs_log_sigma_hat_sq_fit.png", dpi=300)
+    #fig.savefig("plots/hubble/observed_Mi_vs_log_sigma_hat_sq_fit.pdf", dpi=300)
+
+    return fig, ax
+
+def plot_Mi_vs_sigma_hat_sq_linearx(df_agn, show=False):
+    # Base-10 log quantities
+    log_sigma_hat_sq = 2 * df_agn['log_sigma_hat_UV'].values
+    log_sigma_hat_sq_err = 2 * df_agn['log_sigma_hat_UV_err'].values
+    M_i = df_agn['M_i'].values
+    M_i_err = df_agn['M_i_err'].values if 'M_i_err' in df_agn.columns else np.zeros_like(M_i)
+
+    # Fit model: parameterize with log_alpha
+    def fit_model(logx, log_alpha, d1, d2):
+        return (
+            log_alpha
+            + d1 * logx
+            - (d2 - d1) * np.log10(1 + 10**(logx))  # ds = 1.0
+        )
+
+    # Initial guess
+    p0 = [np.median(M_i), -1.0, -0.2]
+
+    # Fit the curve
+    popt, pcov = curve_fit(
+        fit_model,
+        log_sigma_hat_sq,
+        M_i,
+        sigma=M_i_err,
+        absolute_sigma=True,
+        p0=p0,
+        maxfev=10000
+    )
+
+    # Fit curve in log-space, then convert to linear x
+    x_fit_log = np.linspace(log_sigma_hat_sq.min(), log_sigma_hat_sq.max(), 300)
+    y_fit = fit_model(x_fit_log, *popt)
+    x_fit_lin = 10**x_fit_log
+
+    # Plot in linear scale
+    plt.figure(figsize=(8, 6))
+    plt.errorbar(
+        10**log_sigma_hat_sq,  # linear x
+        M_i,
+        xerr=(np.log(10) * 10**log_sigma_hat_sq * log_sigma_hat_sq_err),  # propagate log err
+        yerr=M_i_err,
+        fmt='o', color='k', alpha=0.3, markersize=4, label='AGN'
+    )
+    #plt.plot(x_fit_lin, y_fit, color='crimson', lw=2, label='Broken PL Fit')
+    plt.axvline(x=(10**(-0.638))**2, color='blue', linestyle='--', lw=2, label=r'pivot')
+    plt.xscale('log')
+    plt.xlabel(r'$\hat{\sigma}_{\mathrm{UV}}^2$ (mag$^2$ day$^{-1}$)')
+    plt.ylabel(r'$M_i$')
+    #plt.gca().invert_yaxis()
+    plt.legend(fontsize=12)
+    plt.tight_layout()
+    plt.grid(True, which='both', ls='--', lw=0.3)
+    plt.xlim(1e-3, 1e1)
+
+    os.makedirs("plots/hubble", exist_ok=True)
+    plt.savefig("plots/hubble/observed_Mi_vs_sigma_hat_sq_fit_linearx.png", dpi=300)
+    #plt.savefig("plots/hubble/observed_Mi_vs_sigma_hat_sq_fit_linearx.pdf", dpi=300)
+
+    if show:
+        plt.show()
+    plt.close()
+
+    # Return parameters
+    log_alpha, d1, d2 = popt
+    return {"alpha": 10**log_alpha, "d1": d1, "d2": d2, "log_alpha": log_alpha}, pcov
+
+
+def plot_completeness_diagnostics(df_agn, completeness2d, mag_centers, z_centers, output_prefix="plots/hubble/completeness_diag"):
+    """
+    Plot and save diagnostic figures for completeness:
+    - Empirical P(detect) vs. redshift
+    - 2D completeness map
+    - Inverse completeness correction map (log10[1 / P])
+    
+    Parameters:
+        df_agn           : DataFrame with 'z' and 'apparent_mag_i'
+        completeness2d   : callable completeness function (mag, z)
+        mag_centers      : 1D array of magnitude bin centers
+        z_centers        : 1D array of redshift bin centers
+        output_prefix    : filename prefix for saved figures (default: "completeness_diag")
+    """
+    z = df_agn['z'].values
+    m = df_agn['apparent_mag_i'].values
+    completeness = completeness2d(m, z)
+
+    os.makedirs(os.path.dirname(output_prefix), exist_ok=True)
+
+    # --- 1. P(detect) vs z ---
+    plt.figure(figsize=(5, 5))
+    plt.scatter(z, completeness, s=3, alpha=1)
+    plt.xlabel('z')
+    plt.ylabel('P(detect)')
+    plt.title('Empirical Completeness')
+    plt.grid(True)
+    plt.tight_layout()
+    plt.yscale('log')
+    plt.savefig(f"{output_prefix}_vs_redshift.png", dpi=200)
+    plt.close()
+
+    # --- 2. 2D completeness map ---
+    M_grid, Z_grid = np.meshgrid(mag_centers, z_centers, indexing='ij')
+    P_grid = completeness2d(M_grid, Z_grid)
+
+    fig, ax = plt.subplots(figsize=(6, 5))
+    im = ax.imshow(
+        P_grid,
+        extent=[z_centers[0], z_centers[-1], mag_centers[-1], mag_centers[0]],
+        aspect='auto',
+        cmap='viridis',
+        interpolation='nearest'
+    )
+    cbar = fig.colorbar(im, ax=ax)
+    cbar.set_label(r"$P(\mathrm{detect} \mid m, z)$")
+    ax.set_xlabel(r"Redshift $z$")
+    ax.set_ylabel(r"Apparent Magnitude $m$")
+    ax.set_title("2D Completeness Map")
+    plt.tight_layout()
+    plt.savefig(f"{output_prefix}_2d_map.png", dpi=200)
+    plt.close()
+
+    # --- 3. log10(1/P) correction map ---
+    fig, ax = plt.subplots(figsize=(6, 5))
+    im = ax.imshow(
+        np.log10(1.0 / np.clip(P_grid, 1e-3, 1.0)),
+        extent=[z_centers[0], z_centers[-1], mag_centers[-1], mag_centers[0]],
+        origin='lower',
+        aspect='auto',
+        cmap='viridis',
+        interpolation='nearest'
+    )
+    cbar = fig.colorbar(im, ax=ax)
+    cbar.set_label("Effective Correction log10(1 / P_detect)")
+    ax.set_xlabel("Redshift z")
+    ax.set_ylabel("Apparent Magnitude m")
+    ax.set_title("Inverse Completeness Correction")
+    plt.tight_layout()
+    plt.savefig(f"{output_prefix}_inverse_correction.png", dpi=200)
+    plt.close()
