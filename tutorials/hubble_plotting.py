@@ -262,7 +262,7 @@ def plot_cosmo_corner(sampler_sna, sampler_agn, cosmo_model='Flatw0waCDM', show=
     plt.close()
 
 
-def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, show=False, completeness=True, show_uncorrected=False, show_true=False):
+def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, show=False, completeness=True, show_uncorrected=False, show_true=False, fake_params=None):
     """Plot Hubble diagram + residuals, classic Pantheon+ style."""
     # Define cosmological parameter labels
     if cosmo_model == 'FlatwCDM':
@@ -333,14 +333,29 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, show=False, comp
         print("NOT applying completeness correction in hubble diagram...")
         corrected_apparent_mag = df_agn['apparent_mag_i']
 
-    # Then re-compute the distance modulus
+    # Then re-compute the distance modulus        
     mu_pred = np.array([
         corrected_apparent_mag - (K_corr(df_agn['z'].values) - K_corr(2)) -
-            (M_model_agn(s[param_indices['M0_sn']]+s[param_indices['delta_M0_agn']], 
+            (M_model_agn(
+                s[param_indices['M0_sn']]+s[param_indices['delta_M0_agn']], 
                          s[param_indices['log_sigma_hat_sq_break']], 
-                         s[param_indices['eta_A1_agn']], s[param_indices['eta_A2_agn']], 
+                         s[param_indices['eta_A1_agn']], 
+                         s[param_indices['eta_A2_agn']], 
                          s[param_indices['eta_break_agn']],
                         s[param_indices['beta_agn']],
+                        df_agn['log_sigma_hat_UV'].values, df_agn['log_tau_UV_RF'].values))
+        for s in flat_samples
+    ])
+
+    if fake_params is not None:
+        mu_pred = np.array([
+        corrected_apparent_mag - (K_corr(df_agn['z'].values) - K_corr(2)) -
+            (M_model_agn(fake_params['M0_sn']+fake_params['delta_M0_agn'], 
+                         fake_params['log_sigma_hat_sq_break'], 
+                         fake_params['eta_A1_agn'], 
+                         fake_params['eta_A2_agn'], 
+                         fake_params['eta_break_agn'],
+                        fake_params['beta_agn'],
                         df_agn['log_sigma_hat_UV'].values, df_agn['log_tau_UV_RF'].values))
         for s in flat_samples
     ])
@@ -468,11 +483,11 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, show=False, comp
     os.makedirs("plots/hubble", exist_ok=True)
     show_uncorrected_label = "_uncorrected" if show_uncorrected else ""
     #plt.savefig(f"plots/hubble/hubble_diagram_{cosmo_model}{show_uncorrected_label}.pdf", dpi=300)
-    plt.savefig(f"plots/hubble/hubble_diagram_{cosmo_model}{show_uncorrected_label}.png")
+    #plt.savefig(f"plots/hubble/hubble_diagram_{cosmo_model}{show_uncorrected_label}.png")
 
-    ax.set_yscale('log')
-    ax.set_ylim(39, 50)
-    plt.savefig(f"plots/hubble/hubble_diagram_{cosmo_model}{show_uncorrected_label}_ylog.png")
+    #ax.set_yscale('log')
+    #ax.set_ylim(39, 50)
+    #plt.savefig(f"plots/hubble/hubble_diagram_{cosmo_model}{show_uncorrected_label}_ylog.png")
 
     if show:
         plt.show()

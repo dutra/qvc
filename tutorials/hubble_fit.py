@@ -495,7 +495,7 @@ def test():
     plot_predicted_vs_actual_Mi(flat_samples, df_agn, cosmo_model=cosmo_model)
     
     print("Plotting Hubble diagram...")
-    plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model=cosmo_model, show_uncorrected=True, completeness=True)
+    plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model=cosmo_model, show_uncorrected=False, completeness=False)
     
     #print("Plotting cosmological posteriors corner plot...")
     #plot_cosmo_corner(sampler_joint, sampler_joint, cosmo_model=cosmo_model)

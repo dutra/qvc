@@ -71,9 +71,9 @@ def get_model_params(cosmo_model):
         ("M0_sn",       (-20, -19)),    # SN absolute magnitude, MLE: ~-19.3
         ("delta_M0_agn", (-5, -2)),         # M0_agn = M0_sn + delta_M0, MLE: ~-5.179
         ("log_sigma_hat_sq_break", (-1.3, -0.5)), # AGN broken power law break point
-        ("eta_A1_agn",  (0, 10)),          # AGN broken power law slope 1
-        ("eta_A2_agn",  (-1, 10)),          # AGN broken power law slope 2
-        ("eta_break_agn", (0.5, 4)),      # AGN broken power law slope transition
+        ("eta_A1_agn",  (-10, 10)),          # AGN broken power law slope 1
+        ("eta_A2_agn",  (-10, 10)),          # AGN broken power law slope 2
+        ("eta_break_agn", (0, 10)),      # AGN broken power law slope transition
         ("beta_agn",    (-3, 0)),         # AGN tau correlation
         ("log_f",       (-1, 0.5)),
         ("H0",          (65, 80)),
