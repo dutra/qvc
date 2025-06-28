@@ -20,9 +20,87 @@ import arviz as az
 from dynesty.utils import resample_equal
 from hubble_model import get_model_params, M_model_agn, M_model_agn_err, M_model_SN, K_corr
 from scipy.linalg import cho_factor, cho_solve, eigh
+from scipy.stats import linregress
+from scipy.stats import pearsonr
 
 bands = ['u', 'g', 'r', 'i', 'z']#, 'y']
 bands_idx = {b: i for i, b in enumerate(bands)}
+filters = {"u": 0, "g": 1, "r": 2, "i": 3, "z": 4, "y": 5} # harcoded filter order for SDSS
+
+def find_optimal_pivot(flat_samples,
+                       cosmo_model,
+                       df_agn):
+    """
+    Find the pivot redshift z_pivot that minimizes the correlation between 
+    M_pred(z_pivot) and H0 using AGN samples and model.
+
+    Parameters
+    ----------
+    flat_samples : ndarray of shape (nsamples, nparams)
+        Posterior samples from MCMC or nested sampling.
+    param_indices : dict
+        Dictionary mapping parameter names to column indices in flat_samples.
+    df_agn : DataFrame
+        AGN data with columns: 'z', 'alpha_nu', 'log_sigma_hat_UV', 'log_tau_UV_RF'.
+    apparent_mag : array-like
+        Observed apparent magnitude at 2500 Å for each AGN.
+    z_grid : array-like
+        Grid of redshifts to scan as possible pivot values.
+    alpha_nu_default : float
+        Default alpha_nu if not given in df_agn.
+
+    Returns
+    -------
+    z_best : float
+        Optimal pivot redshift where Corr(H0, M_pred(z)) ≈ 0.
+    z_grid : array
+        Array of pivot redshifts tested.
+    corrs : array
+        Pearson correlations between M_pred(z_pivot) and H0 for each pivot redshift.
+    """
+    priors, model_labels, model_labels_latex = get_model_params(cosmo_model)
+    param_indices = {name: model_labels.index(name) for name in model_labels}
+    # If alpha_nu not in df_agn, use constant
+    alpha_nu = df_agn['alpha_nu'].values
+
+    z_grid = np.linspace(0.1, 3.0, 1000)  # Grid of redshifts to test as pivot
+    # Precompute redshift-independent K-correction difference terms for each z_pivot
+    z_data = df_agn['z'].values
+
+    def K_corr(z, alpha_nu):
+        return -2.5 * (1 + alpha_nu) * np.log10(1 + z)
+
+    H0_samples = flat_samples[:, param_indices['H0']]
+    apparent_mag_2500 = df_agn['apparent_mag_2500'].values
+    corrs = []
+
+    for z_pivot in z_grid:
+        delta_K = K_corr(z_data, alpha_nu) - K_corr(z_pivot, alpha_nu)
+
+        M_pred_samples = np.array([
+            apparent_mag_2500 - delta_K - M_model_agn(
+                s[param_indices['M0_agn']],
+                s[param_indices['log_sigma_hat_sq_break']],
+                s[param_indices['eta_A1_agn']],
+                s[param_indices['eta_A2_agn']],
+                s[param_indices['eta_break_agn']],
+                s[param_indices['beta_agn']],
+                df_agn['log_sigma_hat_UV'].values,
+                df_agn['log_tau_UV_RF'].values
+            )
+            for s in flat_samples
+        ])  # shape: (nsamples, n_agn)
+
+        # Collapse across AGNs: average M_pred per sample
+        M_pred_mean = M_pred_samples.mean(axis=1)
+
+        r, _ = pearsonr(M_pred_mean, H0_samples)
+        corrs.append(r)
+
+    corrs = np.array(corrs)
+    z_best = z_grid[np.argmin(np.abs(corrs))]
+
+    return z_best, z_grid, corrs
 
 def sn_completeness_function(m_b, z, mlim=24.1, sigma=0.5):
     """
@@ -31,6 +109,245 @@ def sn_completeness_function(m_b, z, mlim=24.1, sigma=0.5):
     sigma: sharpness of detection efficiency curve.
     """
     return 1.0 - norm.cdf(m_b, loc=mlim, scale=sigma)
+
+def log_nuLnu_to_m2500(log_nuLnu, z):
+    cosmo = FlatLambdaCDM(H0=70, Om0=0.3)
+    DL_cm = cosmo.luminosity_distance(z).to('cm').value
+    m_AB = (
+        -2.5 * log_nuLnu
+        + 5 * np.log10(DL_cm)
+        + 2.5 * np.log10(4 * np.pi)
+        - 48.6
+    )
+    return m_AB
+
+def compute_apparent_mag_2500(df, logL_col='MY_LOGL2500', logL_err_col='MY_LOGL2500_ERR', z_col='z', H0=70, Om0=0.3):
+    cosmo = FlatLambdaCDM(H0=H0, Om0=Om0)
+    c = 2.99792458e10  # cm/s
+    lambda_ = 2500e-8  # cm
+
+    z = df[z_col].values
+    logL_2500 = df[logL_col].values
+    logL_2500_err = df[logL_err_col].values
+
+    DL = cosmo.luminosity_distance(z).to(u.cm).value  # cm
+
+    log_Lnu = logL_2500 + np.log10(lambda_ / c)
+    log_fnu = log_Lnu - np.log10(4 * np.pi * DL**2 * (1 + z))
+    m_ab = -2.5 * log_fnu - 48.60
+    m_ab_err = 2.5 * logL_2500_err
+
+    df['apparent_mag_2500'] = m_ab
+    df['apparent_mag_2500_err'] = m_ab_err
+    return df
+
+
+def calculate_all_alpha_nu(df):
+    """
+    Estimate alpha_nu from total monochromatic luminosities L (in erg/s),
+    propagating errors from LOGLxxxx_ERR columns.
+
+    Assumes columns LOGLxxxx contain log10(lambda * L_lambda) and their corresponding errors LOGLxxxx_ERR.
+
+    Fits:
+        log10(L_lambda) ∝ -(alpha_nu + 2) * log10(lambda)
+
+    So:
+        alpha_nu = -slope - 2
+
+    Error propagation based on linear fit uncertainty.
+    """
+    # Wavelengths in Angstroms
+    band_waves = {
+        'LOGL1350': 1350,
+        'LOGL1700': 1700,
+        'LOGL2500': 2500,
+        'LOGL3000': 3000,
+        'LOGL5100': 5100,
+    }
+
+    valid_bands = [k for k, v in band_waves.items() if 1216 <= v <= 5200]
+    waves = np.array([band_waves[k] for k in valid_bands])  # in Å
+    log_lambda = np.log10(waves)
+
+    alpha_nu_list = []
+    alpha_nu_err_list = []
+
+    for _, row in df.iterrows():
+        logL_total = np.array([row[k] for k in valid_bands])
+        logL_err = np.array([row[f'{k}_ERR'] for k in valid_bands])
+
+        mask = np.isfinite(logL_total) & (logL_total > 0) & np.isfinite(logL_err) & (logL_err > 0)
+
+        if mask.sum() >= 3:
+            logL_lambda = logL_total[mask] - log_lambda[mask]
+            logL_lambda_err = logL_err[mask]
+
+            p, cov = np.polyfit(log_lambda[mask], logL_lambda, 1, w=1/logL_lambda_err, cov=True)
+            slope_err = np.sqrt(np.diag(cov))[0]
+
+            alpha_nu = -p[0] - 2
+            alpha_nu_err = slope_err
+
+        elif mask.sum() == 2:
+            logL_lambda = logL_total[mask] - log_lambda[mask]
+            logL_lambda_err = logL_err[mask]
+
+            # Simple two-point fit without covariance
+            slope = (logL_lambda[1] - logL_lambda[0]) / (log_lambda[1] - log_lambda[0])
+            slope_err = np.sqrt(logL_lambda_err[0]**2 + logL_lambda_err[1]**2) / abs(log_lambda[1] - log_lambda[0])
+
+            alpha_nu = -slope - 2
+            alpha_nu_err = slope_err
+
+        else:
+            alpha_nu = np.nan
+            alpha_nu_err = np.nan
+
+        alpha_nu_list.append(alpha_nu)
+        alpha_nu_err_list.append(alpha_nu_err)
+    df['alpha_nu'] = alpha_nu_list
+    df['alpha_nu_err'] = alpha_nu_err_list
+
+    return df
+
+def compute_MY_LOGL2500(df):
+    """
+    Compute MY_LOGL2500 and its propagated uncertainty from available LOGLxxxx bands and alpha_nu.
+
+    Parameters:
+    - df: DataFrame with columns LOGLxxxx, LOGLxxxx_ERR, and alpha_nu
+
+    Returns:
+    - Two pandas Series:
+        MY_LOGL2500      : mean log10 L_2500 in erg/s
+        MY_LOGL2500_ERR  : propagated uncertainty [dex]
+    """
+    lambda_target = 2500  # Å
+    log_lambda_target = np.log10(lambda_target)
+
+    bands = {
+        'LOGL1350': 1350,
+        'LOGL1700': 1700,
+        'LOGL2500': 2500,  # included directly
+        'LOGL3000': 3000,
+        'LOGL5100': 5100,
+    }
+
+    log_lambda_bands = {band: np.log10(lam) for band, lam in bands.items()}
+
+    logL_vals = []
+    logL_errs = []
+
+    for _, row in df.iterrows():
+        alpha = row.get('alpha_nu', np.nan)
+        if not np.isfinite(alpha):
+            logL_vals.append(np.nan)
+            logL_errs.append(np.nan)
+            continue
+
+        est_list = []
+        var_list = []
+
+        for band, lam in bands.items():
+            logL = row.get(band, np.nan)
+            logL_err = row.get(f"{band}_ERR", np.nan)
+
+            if np.isfinite(logL) and logL > 0 and np.isfinite(logL_err) and logL_err > 0:
+                delta = log_lambda_target - log_lambda_bands[band]
+                logL2500 = logL + (-(alpha + 1)) * delta
+                logL2500_err = logL_err  # Only propagate observational error
+
+                est_list.append(logL2500)
+                var_list.append(logL2500_err**2)
+
+        if len(est_list) == 0:
+            logL_vals.append(np.nan)
+            logL_errs.append(np.nan)
+        else:
+            # Inverse-variance weighted average
+            weights = 1.0 / np.array(var_list)
+            avg = np.sum(weights * est_list) / np.sum(weights)
+            err = np.sqrt(1.0 / np.sum(weights))
+
+            logL_vals.append(avg)
+            logL_errs.append(err)
+
+    return (
+        pd.Series(logL_vals, index=df.index, name='MY_LOGL2500'),
+        pd.Series(logL_errs, index=df.index, name='MY_LOGL2500_ERR')
+    )
+
+
+# Constants
+c = 2.99792458e18  # speed of light in Angstrom/s
+
+
+def calc_Mi_from_M2500(M_2500, alpha_nu, z):
+    """
+    Compute SDSS i-band absolute magnitude at observed frame (z) from M_2500.
+    Assumes f_nu ∝ ν^alpha_nu.
+    
+    Parameters
+    ----------
+    M_2500 : array-like
+        Absolute magnitude at rest-frame 2500 Å (AB system)
+    alpha_nu : array-like
+        Power-law slope of the quasar spectrum (f_nu ∝ ν^alpha)
+    z : array-like
+        Redshift of each source
+
+    Returns
+    -------
+    M_i_z : ndarray
+        Absolute magnitude in observed-frame SDSS i-band
+    """
+
+    # Load SDSS i-band filter curve
+    df_filter = pd.read_csv("data/sdss_i.dat", sep=r'\s+', skiprows=6, header=None,
+                            names=['wavelength', 'throughput_1', 'throughput_2', 'throughput_3', 'atm_trans'])
+
+    wavelengths = df_filter['wavelength'].values  # Angstrom
+    transmission = df_filter['throughput_1'].values
+
+    lambda_2500 = 2500.0  # Angstrom
+
+    # Convert inputs to arrays
+    M_2500 = np.atleast_1d(M_2500).astype(float)
+    alpha_nu = np.atleast_1d(alpha_nu).astype(float)
+    z = np.atleast_1d(z).astype(float)
+
+    # Check that all arrays are the same shape
+    if not (M_2500.shape == alpha_nu.shape == z.shape):
+        raise ValueError("M_2500, alpha_nu, and z must have the same shape")
+
+    M_i_z = np.full_like(M_2500, np.nan, dtype=float)
+
+    for i in range(len(M_2500)):
+        λ_obs = wavelengths
+        T = transmission
+        α = alpha_nu[i]
+        z_i = z[i]
+
+        # observed λ corresponds to rest-frame λ_rest = λ_obs / (1 + z)
+        λ_rest = λ_obs / (1 + z_i)
+
+        # Monochromatic correction: 2500 → λ_eff
+        λ_eff = np.average(λ_rest, weights=T)
+        mono_corr = -2.5 * (α + 2) * np.log10(λ_eff / lambda_2500)
+
+        # Broadband correction using power-law weighting
+        integrand = T * λ_obs**(-(α + 2))
+        numerator = np.trapezoid(integrand, λ_obs)
+        denominator = np.trapezoid(T, λ_obs)
+        broadband_weighted = numerator / denominator
+
+        broadband_corr = -2.5 * np.log10(broadband_weighted / λ_eff**(-(α + 2)))
+
+        delta_M = mono_corr + broadband_corr
+        M_i_z[i] = M_2500[i] + delta_M
+
+    return M_i_z
 
 def populate_sdss_fields(objs, progress_bar=True):
     print(f"Populating SDSS fields: {len(objs)}", flush=True)
@@ -66,23 +383,62 @@ def populate_sdss_fields(objs, progress_bar=True):
         d['log_ledd_ratio'] = fits_data['LOGLEDD_RATIO'][i]  # Extract log L/edd values
         d['log_ledd_ratio_err'] = fits_data['LOGLEDD_RATIO_ERR'][i]  # Extract log L/edd error values
         d['ebv'] = fits_data['EBV'][i]
-        d['M_i'] = fits_data_2['M_I'][i]
         d['sn_median_all'] = fits_data['SN_MEDIAN_ALL'][i]
+        d['M_i'] = fits_data_2['M_I'][i]
+        d['CIV'] = fits_data['CIV'][i, 0]
+        d['FEII_UV_EW'] = fits_data['FEII_UV_EW'][i]
+        d['FEII_OPT_EW'] = fits_data['FEII_OPT_EW'][i]
+        d['HBETA'] = fits_data['HBETA'][i, 0]
+        d['HALPHA'] = fits_data['HALPHA'][i, 0]
+
+
+        d['LOGL1350'] = fits_data['LOGL1350'][i]
+        d['LOGL1700'] = fits_data['LOGL1700'][i]
+        d['LOGL2500'] = fits_data['LOGL2500'][i]
+        d['LOGL3000'] = fits_data['LOGL3000'][i]
+        d['LOGL5100'] = fits_data['LOGL5100'][i]
+        d['LOGL1350_ERR'] = fits_data['LOGL1350_ERR'][i]
+        d['LOGL1700_ERR'] = fits_data['LOGL1700_ERR'][i]
+        d['LOGL2500_ERR'] = fits_data['LOGL2500_ERR'][i]
+        d['LOGL3000_ERR'] = fits_data['LOGL3000_ERR'][i]
+        d['LOGL5100_ERR'] = fits_data['LOGL5100_ERR'][i]
+
+
+        # Other fields, not used
+        # d['IF_BOSS_SDSS'] = fits_data['IF_BOSS_SDSS'][i]
+        d['FHOST_5100'] = fits_data['FHOST_5100'][i]
+        # d['BAL_PROB'] = fits_data_2['BAL_PROB'][i]
+        d['EXTINCTION'] = fits_data_2['EXTINCTION'][i, filters['i']]
+        # d['XMM_TOTAL_FLUX'] = fits_data_2['XMM_TOTAL_FLUX'][i]
+        # d['XMM_HARD_FLUX'] = fits_data_2['XMM_HARD_FLUX'][i]
+        # d['XMM_SOFT_FLUX'] = fits_data_2['XMM_SOFT_FLUX'][i]
+
+
+        d['fhost'] = fits_data['FHOST_5100'][i]
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
             d['log_lbol'] = fits_data['LOGLBOL'][i]
             d['log_lbol_err'] = fits_data['LOGLBOL_ERR'][i]
-            d['apparent_mag_z'] = -2.5 * np.log10(fits_data_2['PSFFLUX'][i,4]) + 22.5
-            d['apparent_mag_i'] = -2.5 * np.log10(fits_data_2['PSFFLUX'][i,3]) + 22.5
-            d['apparent_mag_r'] = -2.5 * np.log10(fits_data_2['PSFFLUX'][i,2]) + 22.5
-            d['apparent_mag_g'] = -2.5 * np.log10(fits_data_2['PSFFLUX'][i,1]) + 22.5
-            d['apparent_mag_u'] = -2.5 * np.log10(fits_data_2['PSFFLUX'][i,0]) + 22.5
-            d['apparent_mag_z_err'] = 2.5/np.log(10) * np.sqrt(1/fits_data_2['PSFFLUX_IVAR'][i,4])/fits_data_2['PSFFLUX'][i,4]
-            d['apparent_mag_i_err'] = 2.5/np.log(10) * np.sqrt(1/fits_data_2['PSFFLUX_IVAR'][i,3])/fits_data_2['PSFFLUX'][i,3]
-            d['apparent_mag_r_err'] = 2.5/np.log(10) * np.sqrt(1/fits_data_2['PSFFLUX_IVAR'][i,2])/fits_data_2['PSFFLUX'][i,2]
-            d['apparent_mag_g_err'] = 2.5/np.log(10) * np.sqrt(1/fits_data_2['PSFFLUX_IVAR'][i,1])/fits_data_2['PSFFLUX'][i,1]
-            d['apparent_mag_u_err'] = 2.5/np.log(10) * np.sqrt(1/fits_data_2['PSFFLUX_IVAR'][i,0])/fits_data_2['PSFFLUX'][i,0]
+            for b in ['u', 'g', 'r', 'i', 'z']:
+                d[f'apparent_mag_{b}'] = -2.5 * np.log10(fits_data_2['PSFFLUX'][i, filters[b]]) + 22.5
+                d[f'apparent_mag_{b}_err'] = 2.5/np.log(10) * np.sqrt(1/fits_data_2['PSFFLUX_IVAR'][i, filters[b]])/fits_data_2['PSFFLUX'][i, filters[b]]
+            #     d[f'extinction_{b}'] = fits_data_2['EXTINCTION'][i, filters[b]]
             d['color'] = -2.5 * np.log10(fits_data_2['PSFFLUX'][i, 0] / fits_data_2['PSFFLUX'][i, 3])
+            # Error propagation for color
+            flux_g = fits_data_2['PSFFLUX'][i, 0]
+            flux_i = fits_data_2['PSFFLUX'][i, 3]
+            ivar_g = fits_data_2['PSFFLUX_IVAR'][i, 0]
+            ivar_i = fits_data_2['PSFFLUX_IVAR'][i, 3]
+            # Convert inverse variance to variance, handle zero/negative ivar
+            var_g = 1.0 / ivar_g if ivar_g > 0 else np.inf
+            var_i = 1.0 / ivar_i if ivar_i > 0 else np.inf
+            # Error propagation formula for color = -2.5 * log10(flux_g / flux_i)
+            # σ_color^2 = (2.5/ln10)^2 * [ (σ_g/flux_g)^2 + (σ_i/flux_i)^2 ]
+            if flux_g > 0 and flux_i > 0 and np.isfinite(var_g) and np.isfinite(var_i):
+                d['color_err'] = 2.5 / np.log(10) * np.sqrt(var_g / flux_g**2 + var_i / flux_i**2)
+            else:
+                d['color_err'] = np.nan
+            
         if any(issubclass(warning.category, RuntimeWarning) for warning in w):
             print(f"RuntimeWarning occurred for {d['sdss_name']}")
             print(fits_data_2['PSFFLUX'][i,:])
@@ -90,11 +446,11 @@ def populate_sdss_fields(objs, progress_bar=True):
 
     return objs
 
-def read_quasars_from_hdf5(file_path):
+def read_quasars_from_hdf5(file_path, N=-1):
     quasar_list = []
 
     with h5py.File(file_path, "r") as hdf:
-        for group_name in tqdm(hdf.keys(), desc="Reading quasars from HDF5"):
+        for group_name in tqdm(list(hdf.keys())[:N], desc="Reading quasars from HDF5"):
             group = hdf[group_name]
             quasar = {"object_id": group_name}
             for key, value in group.attrs.items():
@@ -103,7 +459,6 @@ def read_quasars_from_hdf5(file_path):
                 sub_group = group[sub_group_name]
                 quasar[sub_group_name] = {sub_key: sub_group[sub_key][...] for sub_key in sub_group.keys()}
             quasar_list.append(quasar)
-                #populate_sdss_fields(quasar, fits_data, fits_data_2)
     return quasar_list
 
 def filter_unresolved_quasars(df):
@@ -149,47 +504,46 @@ def sigma_clip_in_bins(df, bin_width=0.1, sigma=2):
         bin_df = df[(df['z'] >= bins[i]) & (df['z'] < bins[i+1])]
         if len(bin_df) < 5:
             continue
-        y = bin_df['apparent_mag_i'] - bin_df['M_i']
+        y = bin_df['apparent_mag_2500'] - bin_df['M_i']
         clipped, _, _ = sigmaclip(y, low=sigma, high=sigma)
         df_clean.append(bin_df[y.isin(clipped)])
 
     return pd.concat(df_clean)
 
-def load_quasar_data(file_path):
-
+def load_quasar_data(file_path, populate_sdss=False):
     quasar_list = read_quasars_from_hdf5(file_path)
     print("Number of quasars loaded:", len(quasar_list))
+    #populate_sdss = False
+    if populate_sdss:
+        print("Populating SDSS fields...")
+        populate_sdss_fields(quasar_list)
+        write_hdf5_file(quasar_list, file_path)
 
-    #if populate_sdss:
     for quasar in quasar_list:
-        if 'apparent_mag_i' not in quasar.keys():
+        if 'ebv' not in quasar.keys():
             print("Populating SDSS fields...")
             populate_sdss_fields(quasar_list)
             write_hdf5_file(quasar_list, file_path)
             break
 
     df = pd.DataFrame(quasar_list)
-    df = df[
-        #(df['z'] > 0.4) &
-        (df['eta_A1_err'] > 0.1) &
-        df['log_sigma_hat_UV'].between(-3, 0) &
-        (df['log_sigma_hat_UV_err'] > 0) & (df['log_sigma_hat_UV_err'] < 0.5) &
-        (df['log_tau_UV_RF'] > 2) &
-        (df['apparent_mag_i'] < 26) &
-        (df['apparent_mag_i_err'] < 0.5) &
-        (df['M_i'] < -21) &
-        (df['z'] > 0) &
-        (df['log_lbol'] > 1) &
-        (df['log_mbh'] > 1) &
-        (df['ebv'] < 0.05)
-    ].dropna()
-        
-    #df = df.set_index('object_id')
-    #df = df.drop(columns=['log_jitter', 'magerrs_mean', 'log_sigma_band', 'log_sigma_band_err', 'clean_bands'])
-    #df = df.drop(columns=['mags', 'times', 'magerrs'])
+    #return df
 
-
+    df = calculate_all_alpha_nu(df)
+    df['MY_LOGL2500'], df['MY_LOGL2500_ERR'] = compute_MY_LOGL2500(df)
     
+
+    df = compute_apparent_mag_2500(df, logL_col='MY_LOGL2500', logL_err_col='MY_LOGL2500_ERR')
+    
+    print("Before dropping NaNs and infs, number of quasars:", len(df))
+    num_quasars_z_0_1_before = len(df[(df['z'] > 0) & (df['z'] <= 0.5)])
+    num_quasars_z_gt_3_before = len(df[df['z'] > 3])
+    print("Number of quasars with 0 < z <= 0.5:", num_quasars_z_0_1_before)
+    print("Number of quasars with z > 3:", num_quasars_z_gt_3_before)
+
+    # Replace NaNs with 0 in all columns
+    df = df.fillna(0)
+
     # Remove infinite values from numeric columns
     columns_with_nans = df.columns[df.isna().any()].tolist()
     print("Columns with NaNs:", columns_with_nans)
@@ -197,14 +551,81 @@ def load_quasar_data(file_path):
     df[numeric_cols] = df[numeric_cols].where(~np.isinf(df[numeric_cols]), np.nan)
     df = df.dropna()
     
+
+    print("Before data cuts, number of quasars:", len(df))
+    num_quasars_z_0_1 = len(df[(df['z'] > 0) & (df['z'] <= 0.5)])
+    num_quasars_z_gt_3 = len(df[df['z'] > 3])
+    print("Number of quasars with 0 < z <= 0.5:", num_quasars_z_0_1)
+    print("Number of quasars with z > 3:", num_quasars_z_gt_3)
+
+    
+    df['M_2500'] = -2.5 * df['MY_LOGL2500'] + 89.29
+    
     df = df.reset_index(drop=True)
+    # Select eta_A1 and eta_A2 within 2 sigma of their median values
+    eta_A1_med = df['eta_A1'].median()
+    eta_A1_std = df['eta_A1'].std()
+    eta_A2_med = df['eta_A2'].median()
+    eta_A2_std = df['eta_A2'].std()
+
+    df = df[
+        (df['alpha_nu'].between(-2, 0)) & 
+        (df['M_i'] < -22.6) & 
+        (df['apparent_mag_2500'] > 0) &
+        (df['ebv'] < 0.05) & # 0 &
+        (df['sn_median_all'] > 3) & # 6  # reliable spectrum
+        df['FHOST_5100'] == 0
+
+        # (df['eta_A1'] >= eta_A1_med - 1 * eta_A1_std) & (df['eta_A1'] <= eta_A1_med + 1 * eta_A1_std) &
+        # (df['eta_A2'] >= eta_A2_med - 1 * eta_A2_std) & (df['eta_A2'] <= eta_A2_med + 1 * eta_A2_std)
+    ]
+    # df = df[
+    #     (df['eta_A1_err'] > 0.1) & # 2
+    #     #(df['alpha_nu'].between(-5, 5)) &
+    #     (df['log_sigma_hat_UV'].between(-3, 0)) & # 0
+    #     (df['log_sigma_hat_UV_err'] > 0) & (df['log_sigma_hat_UV_err'] < 0.5) & #0
+    #     (df['log_tau_UV_RF'] > 2) &# 0
+    #     (df['z'] > 0) &
+    #     (df['log_lbol'] > 1) & # 2
+    #     (df['log_mbh'] > 1) & # 2
+    #     (df['ebv'] < 0.05) & # 0 &
+    #     (df['sn_median_all'] > 3) & # 6  # reliable spectrum
+    #     (df['apparent_mag_2500'].between(1, 60)) &
+    #     (df['M_i'] < 0) &
+    #     (df['MY_LOGL2500'] > 0) &
+    #     (df['MY_LOGL2500_ERR'] > 0) &
+    #     (df['M_2500'] < 0) &
+    #     #(df['alpha_nu'] > -2) &
+    #     (df['FHOST_5100'] == 0)
+
+
+    #     #(df['z'] < 2.7) &
+    #     #(df['color'] < 3) &
+    #     #(df['apparent_mag_2500_err'] < 0.5) &
+    #     #(df['color'] < 4)
+    # ]
+    # outlier_ids_loaded = np.loadtxt("data/outlier_object_ids.txt", dtype=str)
+    # df = df[~df['object_id'].isin(outlier_ids_loaded)]
+
+    
+
+    #df['apparent_mag_2500'] = df['apparent_mag_2500']
+    #df['apparent_mag_2500_err'] = df['apparent_mag_2500_err']
+        
+    #df = df.set_index('object_id')
+    #df = df.drop(columns=['log_jitter', 'magerrs_mean', 'log_sigma_band', 'log_sigma_band_err', 'clean_bands'])
+    #df = df.drop(columns=['mags', 'times', 'magerrs'])
+
+    df = df.reset_index(drop=True)
+    
 
     # sigma clip in bins can almost replace all the previous cuts!
-    df = sigma_clip_in_bins(df)
+    # df = sigma_clip_in_bins(df)
 
-    num_quasars_z_0_1 = len(df[(df['z'] > 0) & (df['z'] <= 1)])
+    num_quasars_z_0_1 = len(df[(df['z'] > 0) & (df['z'] <= 0.5)])
     num_quasars_z_gt_3 = len(df[df['z'] > 3])
-    print("Number of quasars with 0 < z <= 1:", num_quasars_z_0_1)
+    print("Number of quasars with 0 < z <= 0.5:", num_quasars_z_0_1)
+    print("Number of dropped quasars with 0 < z <= 0.5:", num_quasars_z_0_1_before - num_quasars_z_0_1)
     print("Number of quasars with z > 3:", num_quasars_z_gt_3)
     print("Final number of quasars:", len(df))
     return df
@@ -355,7 +776,7 @@ def get_completeness_function_2d(df_agn,
     z_true = np.concatenate(z_true_list)
 
     # --- Load observed sample
-    mags_obs = df_agn['apparent_mag_i'].values
+    mags_obs = df_agn['apparent_mag_2500'].values
     z_obs = df_agn['z'].values
 
     # --- Clean NaNs/Infs
@@ -728,7 +1149,7 @@ def predict_uncensored_magnitudes_from_observed(df_agn, completeness_params, nsi
     Parameters
     ----------
     df_agn : pd.DataFrame
-        Must contain 'apparent_mag_i', 'apparent_mag_i_err', 'z'.
+        Must contain 'apparent_mag_2500', 'apparent_mag_2500_err', 'z'.
     completeness_params : tuple
         Output from get_completeness_function_2d.
     nsig : float
@@ -743,8 +1164,8 @@ def predict_uncensored_magnitudes_from_observed(df_agn, completeness_params, nsi
     """
     completeness2d, *_ = completeness_params
 
-    m_obs = df_agn['apparent_mag_i'].values.astype(np.float64)
-    m_err = df_agn['apparent_mag_i_err'].values.astype(np.float64)
+    m_obs = df_agn['apparent_mag_2500'].values.astype(np.float64)
+    m_err = df_agn['apparent_mag_2500_err'].values.astype(np.float64)
     z = df_agn['z'].values.astype(np.float64)
     N = len(m_obs)
 
@@ -845,7 +1266,7 @@ def apply_forward_completeness_correction(df_agn, params, cosmo_model, completen
 
     # Compute model-predicted absolute magnitude
     M_model = M_model_agn(
-        params['M0_sn'] + params['delta_M0_agn'],
+        params['M0_agn'],
         params['log_sigma_hat_sq_break'],
         params['eta_A1_agn'], params['eta_A2_agn'],
         params['eta_break_agn'],
@@ -860,9 +1281,9 @@ def apply_forward_completeness_correction(df_agn, params, cosmo_model, completen
 
     # Total uncertainty on m_model
     mu_err = np.sqrt(
-        df_agn['apparent_mag_i_err'].values**2 +
+        df_agn['apparent_mag_2500_err'].values**2 +
         M_model_agn_err(
-            params['M0_sn'] + params['delta_M0_agn'],
+            params['M0_agn'],
             params['log_sigma_hat_sq_break'],
             params['eta_A1_agn'], params['eta_A2_agn'],
             params['eta_break_agn'],
