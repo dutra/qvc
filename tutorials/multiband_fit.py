@@ -84,6 +84,7 @@ def initSampler(key, nSample, nBand, X, y, yerr, clean_bands, z):
     loglagBLRSampler = UniformInit(nBand, [0, 5])
     logtauBLRSampler = UniformInit(1, [jnp.log(10**2.5), jnp.log(10**4.5)])
     meanSampler = UniformInit(nBand, [-1, 1])
+    logHostFracSampler = UniformInit(nBand, [-2, 0.1])
     poly1Sampler = UniformInit(1, [-10, 10])
     logAmpDeltaSampler = UniformInit(nBand-1, [-2.0, 0.0])
     logAmpDeltaBLRSampler = UniformInit(nBand, [-5.0, -2.0])
@@ -137,8 +138,9 @@ def initSampler(key, nSample, nBand, X, y, yerr, clean_bands, z):
         "log_amp_delta": logAmpDeltaSampler(subkeys[1], 1),
         "log_amp_delta_blr": logAmpDeltaBLRSampler(subkeys[2], 1),
         "mean": meanSampler(subkeys[3], 1),
-        "poly1": poly1Sampler(subkeys[4], 1),
-        "lag": lagSampler(subkeys[5], 1),
+        "log_host_frac": logHostFracSampler(subkeys[4], 1),
+        "poly1": poly1Sampler(subkeys[5], 1),
+        "lag": lagSampler(subkeys[6], 1),
         "log_tau_drw_blr": logtauBLRSampler(subkeys[7], 1),
         "log_jitter": logJitterSampler(subkeys[8], 1),
         "eta_A1": etaA1Sampler(subkeys[9], 1),
@@ -274,6 +276,7 @@ def numpyro_joint_model(Model, batch_data):
         #log_lag_blr = numpyro.sample(f"log_lag_blr_{i}", dist.Normal(jnp.full_like(bestP["log_lag_blr"], jnp.log(1e2)), 2.0))
         log_tau_drw_blr = numpyro.sample(f"log_tau_drw_blr_{i}", dist.Normal(jnp.log(1e2), 2.0))
         mean = numpyro.sample(f"mean_{i}", dist.Normal(bestP["mean"], 1.0))
+        #log_host_frac = numpyro.sample(f"log_host_frac_{i}", dist.Uniform(jnp.full_like(bestP["mean"], -2.0), jnp.full_like(bestP["mean"], 0.0)))
         poly1 = numpyro.sample(f"poly1_{i}", dist.Normal(0.0, 10.0))
         mean_yerr = jnp.mean(data['yerr'])
         log_jitter_init = jnp.log(mean_yerr + 1e-6)
@@ -288,6 +291,7 @@ def numpyro_joint_model(Model, batch_data):
             #"log_lag_blr": log_lag_blr,
             "log_tau_drw_blr": log_tau_drw_blr,
             "mean": mean,
+            #"log_host_frac": log_host_frac,
             "poly1": poly1,
             "log_jitter": log_jitter,
             **powerlaw_samples,
@@ -654,8 +658,9 @@ if __name__ == '__main__':
             obj_samples_clean = {k[:-(len(f"_{i}"))] if k.endswith(f"_{i}") else k: v for k, v in obj_samples.items()}
             result = process_samples(obj_samples_clean, obj)
             # Only keep the first clean_bands for the multi-band parameters in obj_samples_clean
-            multi_band_keys = ["log_amp_delta_blr", "lag", "log_lag_blr", "log_tau_drw_blr","mean", "log_jitter"]
+            multi_band_keys = ["log_amp_delta_blr", "lag", "log_lag_blr", "log_tau_drw_blr", "mean", "log_host_frac", "log_jitter"]
             [obj_samples_clean.update({k: obj_samples_clean[k][..., :len(obj["clean_bands"])]}) for k in multi_band_keys if k in obj_samples_clean and obj_samples_clean[k].ndim > 0]
+            # TODO: This may not be correct for high-z ones
             
             if args.plot:
                 m = Model(

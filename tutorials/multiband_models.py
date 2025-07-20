@@ -327,6 +327,22 @@ class MyMultiVarModel(MultiVarModel):
         eta_break = 1.0 #params["eta_break"]
         params["log_sigma_hat_band"] = params["log_sigma_hat0"] + jnp.log(10) * jnp.array([log_broken_pl(lambda_pivot[band]/(1 + self.z), lam_s, eta_A1, eta_A2, eta_break) for band in self.clean_bands])
         return params["log_sigma_hat_band"]
+
+    def my_amp_transform_NEW(self, params: dict[str, JAXArray]) -> JAXArray:
+        eta_A1 = params["eta_A1"]
+        eta_A2 = params["eta_A2"]
+        lam_s = 2500 #params["lam_s"]
+        eta_break = 1.0 #params["eta_break"]
+
+        # Host dilution: apply per-band correction
+        log_host_frac = jnp.atleast_1d(params["log_host_frac"])  # shape: (nBands,)
+        dilution_factor = 1.0 / (1.0 + jnp.exp(log_host_frac))   # shape: (nBands,)
+        log_dilution = jnp.log(dilution_factor)
+
+        # Power-law scaling across rest-frame wavelength
+        params["log_sigma_hat_band"] = params["log_sigma_hat0"] + log_dilution[:len(self.clean_bands)] + jnp.log(10) * jnp.array([log_broken_pl(lambda_pivot[band]/(1 + self.z), lam_s, eta_A1, eta_A2, eta_break) for band in self.clean_bands])
+
+        return params["log_sigma_hat_band"]
     
     @eqx.filter_jit
     def log_prob(self, params: dict[str, JAXArray]) -> JAXArray:
