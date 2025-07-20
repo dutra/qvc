@@ -33,7 +33,7 @@ _pantheon_data = None
 
 _sna_LogdetCov, _sna_L, _sna_Lower = None, None, None
 
-z_agn_pivot = 1.6
+z_agn_pivot = 1.5
 
 # --- Log-likelihood ---
 def log_likelihood(theta, cosmo_model,
@@ -104,8 +104,7 @@ def log_likelihood(theta, cosmo_model,
                          params['eta_A1_agn'], params['eta_A2_agn'], 
                          params['eta_break_agn'],
                          params['beta_agn'], 
-                         params['gamma_agn'],
-                         log_sigma_hat, log_tau_UV_RF, alpha_nu)
+                         log_sigma_hat, log_tau_UV_RF)
     
 
     mu_pred = m_obs - M_pred - (K_corr(z, alpha_nu) - K_corr(2, alpha_nu)) 
@@ -114,9 +113,8 @@ def log_likelihood(theta, cosmo_model,
                         params['eta_A1_agn'], params['eta_A2_agn'], 
                         params['eta_break_agn'],
                         params['beta_agn'],
-                        params['gamma_agn'],
                         log_sigma_hat, log_sigma_hat_err,
-                        log_tau_UV_RF_err, alpha_nu_err)
+                        log_tau_UV_RF_err)
     
     mu_err = np.sqrt(
         m_err**2 +
@@ -252,6 +250,7 @@ def run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model='Flatw0waCDM',
             v = pool.map(prior_transform_dynesty, u)
             l = pool.map(loglike_dynesty, v)
             print("Fraction of finite likelihoods:", np.sum(np.isfinite(l)) / len(l))
+            #resume = True
             if resume:
                 sampler = DynamicNestedSampler.restore(f'data/dynesty_{cosmo_model}.save', pool=pool)
             else:
@@ -271,8 +270,8 @@ def run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model='Flatw0waCDM',
                 print_progress=True,
                 dlogz_init=dlogz_init,
                 n_effective=10,               
-                nlive_init=10 * ndim,         
-                nlive_batch=5 * ndim  # 2 * ndim is low, but seems to work
+                nlive_init=20 * ndim,         
+                nlive_batch=10 * ndim  # 2 * ndim is low, but seems to work
             )
 
         results = sampler.results
@@ -455,8 +454,9 @@ def main():
 
 
 def test():
-    # cosmo_model = 'Flatw0waCDM'
+    #cosmo_model = 'Flatw0waCDM'
     cosmo_model = 'FlatwCDM'
+    # cosmo_model = 'FlatLambdaCDM'
     only_sna = False
 
     # Load data
@@ -464,13 +464,36 @@ def test():
 
     #df_agn, df_pantheon, Cov_inv, logdetCov, L = load_data("data/N20_w500_grace/may21_joint_fits_N20_merged.h5")
     #df_agn, df_pantheon, Cov_inv, logdetCov, L = load_data("data/may23_all_merged.h5", populate_sdss=False)
-    df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/june1_joint_N20w2000s1000_fits_merged.h5")
+    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/june1_joint_N20w2000s1000_fits_merged.h5")
+    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/june30_joint_allebv005_N20w500s250_merged.h5")
+    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/july5_joint_chisq_lcrf2500_mean1_N20w2000s1000_merged.h5")
+
+    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/july12_joint_mean1_zsort_N20w2000s500_merged.h5")
+    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/july14_chi10_extinction04_ebv005_N20w500s250_merged.h5")
+    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/july8_joint_chisq_lcrf_exactly2000_N20w500s250_merged.h5")
+    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/july15_chi2_otherfilters_N30w500s250_merged.h5")
+    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/july15_nochi2_filters_N30w250s100_merged.h5")
+    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/july16_nochi2_filters_N30w500s250_merged.h5")
+    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/july17_goodsources_chisq5and10_N30w250s100_merged.h5")
+    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/july17_goodsources_chisq5and10_mean01_N30w250s100_merged.h5")
+    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/july17_goodsources_chisq5and10_mean01_N20w4000s500_merged.h5")
+    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/july18_goodsources_chisq5and10_mean1_N20w4000s500_merged.h5")
+    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/july19_goodsources_chisq2_otherfilters_mean1_N20w4000s500_merged.h5")
+    
+    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/july19_goodsources_chisq10_otherfilters_mean1_N20w4000s500_merged.h5")
+    df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/july19_goodsources_chisq5and10_mean1_N20w4000s500_merged.h5")
+
+    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/june1_joint_N20w2000s1000_fits_merged.h5")
+    #df_agn = df_agn[:400]
     fitting_method = 'dynesty'
 
     sampler_joint, flat_samples, model_labels, mag_corr, logZ, logZerr = run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model=cosmo_model, 
                                         only_sna=only_sna, completeness=True, use_full_cov=True,
                                         fitting_method=fitting_method,
                                         num_warmup=8000, num_samples=1000, resume=False)
+    if cosmo_model == 'Flatw0waCDM':
+        zp = compute_pivot_redshift(flat_samples, cosmo_model)
+        print("Pivot redshift: ", zp)
     try:
         plot_posterior_corner(flat_samples, cosmo_model=cosmo_model, only_sna=False)
     except Exception as e:
@@ -481,11 +504,16 @@ def test():
     #plot_Mi_vs_log_sigma_hat_sq(flat_samples, df_agn, cosmo_model=cosmo_model, show=False)
     
     print("Plotting AGN M_i predictions vs actual...")
+    plot_predicted_vs_actual_M2500(flat_samples, df_agn, cosmo_model=cosmo_model)
     plot_predicted_vs_actual_Mi(flat_samples, df_agn, cosmo_model=cosmo_model)
     
     print("Plotting Hubble diagram...")
     residuals, mu_pred_median, mu_pred_std = plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model=cosmo_model, show_true=False)
     
+    plot_Mi_vs_sigmahat(df_agn, cosmo_model=cosmo_model, show=False)
+    plot_predicted_M2500_vs_sigmahat(flat_samples, df_agn, cosmo_model=cosmo_model, show=False)
+    plot_predicted_L2500_vs_sigmahat(flat_samples, df_agn, cosmo_model=cosmo_model, show=False)
+    plot_inverted_sigmahat_vs_l2500_pl(flat_samples, df_agn, cosmo_model=cosmo_model, show=False)
     #print("Plotting cosmological posteriors corner plot...")
     #plot_cosmo_corner(flat_samples, flat_samples, cosmo_model=cosmo_model)
 
