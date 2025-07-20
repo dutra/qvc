@@ -83,7 +83,7 @@ def initSampler(key, nSample, nBand, X, y, yerr, clean_bands, z):
     lagSampler = UniformInit(nBand-1, [-10, 10])
     loglagBLRSampler = UniformInit(nBand, [0, 5])
     logtauBLRSampler = UniformInit(1, [jnp.log(10**2.5), jnp.log(10**4.5)])
-    meanSampler = UniformInit(nBand, [-.1, .1])
+    meanSampler = UniformInit(nBand, [-1, 1])
     poly1Sampler = UniformInit(1, [-10, 10])
     logAmpDeltaSampler = UniformInit(nBand-1, [-2.0, 0.0])
     logAmpDeltaBLRSampler = UniformInit(nBand, [-5.0, -2.0])
@@ -194,7 +194,7 @@ def numpyro_model(Model, X, yerr, y=None, bestP=None, clean_bands=None, z=None):
     log_jitter = numpyro.sample("log_jitter", dist.Normal(bestP["log_jitter"], 1.0))
 
     # --- Mean function parameters ---
-    mean = numpyro.sample("mean", dist.Normal(bestP["mean"], 0.1))
+    mean = numpyro.sample("mean", dist.Normal(bestP["mean"], 1.0))
     poly1 = numpyro.sample("poly1", dist.Normal(0.0, 10.0))
 
     # --- Power law parameters ---
@@ -273,7 +273,7 @@ def numpyro_joint_model(Model, batch_data):
         lag = numpyro.sample(f"lag_{i}", dist.Normal(jnp.full_like(bestP["lag"], 0.0), 10.0))
         #log_lag_blr = numpyro.sample(f"log_lag_blr_{i}", dist.Normal(jnp.full_like(bestP["log_lag_blr"], jnp.log(1e2)), 2.0))
         log_tau_drw_blr = numpyro.sample(f"log_tau_drw_blr_{i}", dist.Normal(jnp.log(1e2), 2.0))
-        mean = numpyro.sample(f"mean_{i}", dist.Normal(bestP["mean"], 0.1))
+        mean = numpyro.sample(f"mean_{i}", dist.Normal(bestP["mean"], 1.0))
         poly1 = numpyro.sample(f"poly1_{i}", dist.Normal(0.0, 10.0))
         mean_yerr = jnp.mean(data['yerr'])
         log_jitter_init = jnp.log(mean_yerr + 1e-6)
