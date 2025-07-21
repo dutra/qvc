@@ -622,7 +622,7 @@ def load_quasar_data(file_path, populate_sdss=False, apply_cut=True):
         (df['ebv'] < 0.05) & # 0 &
         #(df['EXTINCTION'] < 0.1) & 
         (df['sn_median_all'] > 1) & # 6  # reliable spectrum
-        (df['FHOST_5100'] <= 0) &
+        #(df['FHOST_5100'] <= 0) &
         
         #(df['f_host_4200'] <= 0) & 
         (df['ebv'] < 0.05) # 0 &

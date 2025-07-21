@@ -466,7 +466,7 @@ def test():
     #df_agn, df_pantheon, Cov_inv, logdetCov, L = load_data("data/may23_all_merged.h5", populate_sdss=False)
     #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/june1_joint_N20w2000s1000_fits_merged.h5")
     #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/june30_joint_allebv005_N20w500s250_merged.h5")
-    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/july5_joint_chisq_lcrf2500_mean1_N20w2000s1000_merged.h5")
+    df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/july5_joint_chisq_lcrf2500_mean1_N20w2000s1000_merged.h5")
 
     #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/july12_joint_mean1_zsort_N20w2000s500_merged.h5")
     #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/july14_chi10_extinction04_ebv005_N20w500s250_merged.h5")
@@ -481,7 +481,8 @@ def test():
     #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/july19_goodsources_chisq2_otherfilters_mean1_N20w4000s500_merged.h5")
     
     #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/july19_goodsources_chisq10_otherfilters_mean1_N20w4000s500_merged.h5")
-    df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/july19_goodsources_chisq5and10_mean1_N20w4000s500_merged.h5")
+    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/july19_goodsources_chisq5and10_mean1_N20w4000s500_merged.h5")
+    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/july20_goodsources_chisq5and10_hostpl_N20w4000s500_merged.h5")
 
     #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/june1_joint_N20w2000s1000_fits_merged.h5")
     #df_agn = df_agn[:400]
