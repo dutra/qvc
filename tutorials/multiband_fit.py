@@ -447,7 +447,7 @@ def numpyro_joint_model_OLD(Model, batch_data):
         #log_prob = jnp.where(jnp.isfinite(log_prob), log_prob, -1e10)
         numpyro.factor(f"loglike_{i}", log_prob)
 
-def fit_multiband(Model, data, nwarm=500, nsamp=250, progress_bar=False, plot=False, svi=False, fit=True):
+def make_lc(Model, data):
     times = data['times']
     mags = data['mags']
     data['mags_means'] = np.array([np.nanmean(mags[band]) for band in mags.keys()])
@@ -524,89 +524,9 @@ def fit_multiband(Model, data, nwarm=500, nsamp=250, progress_bar=False, plot=Fa
     yerr = jnp.array(yerr[mask_outlier])
     t = jnp.array(t[mask_outlier])
 
-    if fit == False:
-        batch_dict = {'X': X, 'y': y, 'yerr': yerr, 'clean_bands': clean_bands, 'z': data['z'], 'band_idx': band_idx[mask_outlier]}
-        return batch_dict
+    batch_dict = {'X': X, 'y': y, 'yerr': yerr, 'clean_bands': clean_bands, 'z': data['z'], 'band_idx': band_idx[mask_outlier]}
+    return batch_dict
 
-    # define kernel
-    initial_drw_params = {"log_kernel_param": jnp.log(np.array([100.0, 0.35]))}
-    k = kernels.quasisep.Exp(*jnp.exp(initial_drw_params["log_kernel_param"]))
-
-    # define model
-    m = Model(
-        X, y, yerr, k, zero_mean=zero_mean, has_jitter=has_jitter, has_lag=has_lag, clean_bands=clean_bands, z=data['z']
-    )
-
-    print("Initializing bestP.")
-    bestP = initSampler(jax.random.PRNGKey(0), 1, len(clean_bands), X, y, yerr)
-    print(bestP)
-
-    for k in bestP.keys():
-        bestP[k] += 1e-4 * np.random.randn(*bestP[k].shape)
-
-    print('Starting EMCEE MCMC')
-    try:
-        #init_strategy = numpyro.infer.init_to_value(values=bestP)
-        init_strategy = numpyro.infer.init_to_sample()
-
-        # emcee works better than NUTS for multimodal posteriors
-        nuts_kernel = AIES(
-            partial(numpyro_model, bestP=bestP, clean_bands=clean_bands, z=data['z']),
-            moves={AIES.DEMove() : 0.5, AIES.StretchMove() : 0.5},
-            init_strategy=init_strategy,
-            )
-
-        num_params = sum(p.size for p in bestP.values())
-        #print(f"Number of parameters: {num_params}")
-
-        mcmc = MCMC(
-            nuts_kernel,
-            num_warmup=nwarm, # This could be less than num_samples
-            num_samples=nsamp,
-            num_chains=2*num_params,
-            progress_bar=True,
-            chain_method="vectorized",
-        )
-
-        mcmc.run(jax.random.PRNGKey(int(data['object_id'])), Model, X, yerr, y=y)
-        samples = mcmc.get_samples(group_by_chain=False)
-        diagnostics = mcmc.get_extra_fields()
-    except Exception as e:
-        print(f"Error during MCMC for quasar {data['object_id']}: {e}", flush=True)
-        print("Traceback details:")
-        traceback.print_exc()            
-        return None
-
-        #print(samples)
-
-        #if np.all(diagnostics['diverging']):
-        #    print(f"Diverging MCMC for quasar {data['object_id']}, skipping.", flush=True)
-        #    #return None
-
-    result = process_samples(samples, data)
-    
-    if plot:
-        psd_results = compute_psd_from_samples(samples, clean_bands)
-        save_combined_plot(samples, m, X, y, yerr, band_idx[mask_outlier], result, psd_results=psd_results)
-        plot_traces(samples)
-        # plot_mcmc_traces(samples, result)
-        # plot_posterior(samples, data, clean_bands=clean_bands)
-        # psd_results = compute_psd_from_samples(samples, clean_bands)
-        # d['psd'] = psd_results
-        # plot_psd(psd_results, data['object_id'])    
-    return result
-
-
-def process_quasar(Model, i_data, n=0, **kwargs):
-    i, data = i_data
-    # Load the quasar data
-    result = fit_multiband(Model, data, **kwargs)
-    if result is None:
-        print(f"Skipping quasar {data['object_id']}.")
-        return None
-    data['i'] = i
-    data |= result
-    return data
                     
 if __name__ == '__main__': 
     print("Starting multiband fit", flush=True)
@@ -684,7 +604,7 @@ if __name__ == '__main__':
     batch_data = []
     for i, obj in enumerate(objs):
         # Prepare each object's data for the joint model
-        result = fit_multiband(Model, obj, nwarm=args.nwarm, nsamp=args.nsamp, progress_bar=args.progress, plot=False, svi=False, fit=False)
+        result = make_lc(Model, obj)
         if result is None:
             continue
         obj['i'] = i
@@ -731,17 +651,16 @@ if __name__ == '__main__':
     print("Done with numpyro.infer.init_to_sample")
 
     # emcee works better than NUTS for multimodal posteriors
-    nuts_kernel = AIES(
-        numpyro_joint_model,
-        moves={AIES.DEMove() : 0.9, AIES.StretchMove() : 0.1},
-        init_strategy=init_strategy,
-        )
-    #nuts_kernel = NUTS(numpyro_joint_model, init_strategy=init_strategy)
+    #nuts_kernel = AIES(
+    #    numpyro_joint_model,
+    #    moves={AIES.DEMove() : 0.9, AIES.StretchMove() : 0.1},
+    #    init_strategy=init_strategy,
+    #    )
+    nuts_kernel = NUTS(numpyro_joint_model, init_strategy=init_strategy)
     mcmc = MCMC(
         nuts_kernel,
         num_warmup=args.nwarm,
         num_samples=args.nsamp,
-        #num_chains=(2*num_params - 6)*len(batch_data) + 6,
         num_chains=nchains,
         progress_bar=args.progress,
         chain_method="vectorized",
