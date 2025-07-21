@@ -332,8 +332,6 @@ def numpyro_joint_model(Model, batch_data):
     # Prepare padded observations ahead of time
     Xs, ys, yerrs, mask, clean_bands_list, zs = pad_batch_data(batch_data)
 
-    print("log_sigma_hat0 shape:", log_sigma_hat0.shape)
-
     def log_prob_fn(i):
         # Collect params for object i
         params = {
@@ -460,7 +458,7 @@ def fit_multiband(Model, data, nwarm=500, nsamp=250, progress_bar=False, plot=Fa
     #red_bands = bands_redder_than_5000(data['z'])
     blue_bands = bands_bluer_than_lyman_alpha(data['z'])
 
-    clean_bands = list(set(bands) - set(blue_bands))
+    clean_bands = list(set(bands))
     # Reorder clean_bands to match the desired order
     clean_bands = list(sorted(clean_bands, key=lambda band: ['u', 'g', 'r', 'i', 'z', 'y'].index(band)))
     #clean_bands = bands
@@ -780,7 +778,7 @@ if __name__ == '__main__':
         #nuts_kernel = NUTS(numpyro_joint_model, init_strategy=init_strategy)
         mcmc = MCMC(
             nuts_kernel,
-            num_warmup=args.nwarm, # This could be less than num_samples
+            num_warmup=args.nwarm,
             num_samples=args.nsamp,
             #num_chains=(2*num_params - 6)*len(batch_data) + 6,
             num_chains=nchains,
@@ -791,18 +789,19 @@ if __name__ == '__main__':
         samples_flat = mcmc.get_samples(group_by_chain=False)
         diagnostics = mcmc.get_extra_fields()
 
+        print("Done with MCMC run")
+
         # Save and plot the results
         results = []
         for i, obj in enumerate(batch_data):
-            obj_samples = {k: v[..., i] if v.ndim > 1 and v.shape[-1] == len(batch_data) else v for k, v in samples_flat.items()}
-            # Remove the _{i} index from parameter names before passing to process_samples
-            obj_samples_clean = {k[:-(len(f"_{i}"))] if k.endswith(f"_{i}") else k: v for k, v in obj_samples.items()}
-            result = process_samples(obj_samples_clean, obj)
-            # Only keep the first clean_bands for the multi-band parameters in obj_samples_clean
-            multi_band_keys = ["log_amp_delta_blr", "lag", "log_lag_blr", "log_tau_drw_blr", "mean", "log_host_frac", "log_jitter"]
-            [obj_samples_clean.update({k: obj_samples_clean[k][..., :len(obj["clean_bands"])]}) for k in multi_band_keys if k in obj_samples_clean and obj_samples_clean[k].ndim > 0]
-            # TODO: This may not be correct for high-z ones
-            
+            for k, v in samples_flat.items():
+                print(v.shape, k)
+            # The if v.ndim == 2 is needed, because the universal parameters are 1D
+            obj_samples_clean = {
+                k: v[:, i] if v.ndim == 2 else v
+                for k, v in samples_flat.items()
+            }
+            # plot
             if args.plot:
                 m = Model(
                     obj['X'], obj['y'], obj['yerr'], 
