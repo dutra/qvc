@@ -84,7 +84,8 @@ def initSampler(key, nSample, nBand, X, y, yerr, clean_bands, z):
     loglagBLRSampler = UniformInit(nBand, [0, 5])
     logtauBLRSampler = UniformInit(1, [jnp.log(10**2.5), jnp.log(10**4.5)])
     meanSampler = UniformInit(nBand, [-1, 1])
-    logHostFracSampler = UniformInit(nBand, [-2, 0.1])
+    alphaHostFracSampler = UniformInit(nBand, [0.0, 1.0])
+    fHostFracSampler = UniformInit(nBand, [0.0, 1.0])
     poly1Sampler = UniformInit(1, [-10, 10])
     logAmpDeltaSampler = UniformInit(nBand-1, [-2.0, 0.0])
     logAmpDeltaBLRSampler = UniformInit(nBand, [-5.0, -2.0])
@@ -138,17 +139,18 @@ def initSampler(key, nSample, nBand, X, y, yerr, clean_bands, z):
         "log_amp_delta": logAmpDeltaSampler(subkeys[1], 1),
         "log_amp_delta_blr": logAmpDeltaBLRSampler(subkeys[2], 1),
         "mean": meanSampler(subkeys[3], 1),
-        "log_host_frac": logHostFracSampler(subkeys[4], 1),
-        "poly1": poly1Sampler(subkeys[5], 1),
-        "lag": lagSampler(subkeys[6], 1),
-        "log_tau_drw_blr": logtauBLRSampler(subkeys[7], 1),
-        "log_jitter": logJitterSampler(subkeys[8], 1),
-        "eta_A1": etaA1Sampler(subkeys[9], 1),
-        "eta_A2": etaA2Sampler(subkeys[10], 1),
-        "eta_tau1": etaTau1Sampler(subkeys[11], 1),
-        "eta_tau2": etaTau2Sampler(subkeys[12], 1),
-        #"eta_break": etaBreakSampler(subkeys[13], 1),
-        #"lam_s": lamsSampler(subkeys[14], 1),
+        "alpha_host": alphaHostFracSampler(subkeys[4], 1),
+        "f_host": fHostFracSampler(subkeys[5], 1),
+        "poly1": poly1Sampler(subkeys[6], 1),
+        "lag": lagSampler(subkeys[7], 1),
+        "log_tau_drw_blr": logtauBLRSampler(subkeys[8], 1),
+        "log_jitter": logJitterSampler(subkeys[9], 1),
+        "eta_A1": etaA1Sampler(subkeys[10], 1),
+        "eta_A2": etaA2Sampler(subkeys[11], 1),
+        "eta_tau1": etaTau1Sampler(subkeys[12], 1),
+        "eta_tau2": etaTau2Sampler(subkeys[13], 1),
+        #"eta_break": etaBreakSampler(subkeys[14], 1),
+        #"lam_s": lamsSampler(subkeys[15], 1),
     }
 
     print('Starting MLE')
@@ -276,7 +278,8 @@ def numpyro_joint_model(Model, batch_data):
         #log_lag_blr = numpyro.sample(f"log_lag_blr_{i}", dist.Normal(jnp.full_like(bestP["log_lag_blr"], jnp.log(1e2)), 2.0))
         log_tau_drw_blr = numpyro.sample(f"log_tau_drw_blr_{i}", dist.Normal(jnp.log(1e2), 2.0))
         mean = numpyro.sample(f"mean_{i}", dist.Normal(bestP["mean"], 1.0))
-        #log_host_frac = numpyro.sample(f"log_host_frac_{i}", dist.Uniform(jnp.full_like(bestP["mean"], -2.0), jnp.full_like(bestP["mean"], 0.0)))
+        alpha_host = numpyro.sample(f"alpha_host_{i}", dist.Normal(0.5, 1.0))
+        f_host = numpyro.sample(f"f_host_{i}", dist.Uniform(0.0, 1.0))
         poly1 = numpyro.sample(f"poly1_{i}", dist.Normal(0.0, 10.0))
         mean_yerr = jnp.mean(data['yerr'])
         log_jitter_init = jnp.log(mean_yerr + 1e-6)
@@ -291,7 +294,8 @@ def numpyro_joint_model(Model, batch_data):
             #"log_lag_blr": log_lag_blr,
             "log_tau_drw_blr": log_tau_drw_blr,
             "mean": mean,
-            #"log_host_frac": log_host_frac,
+            "alpha_host": alpha_host,
+            "f_host": f_host,
             "poly1": poly1,
             "log_jitter": log_jitter,
             **powerlaw_samples,

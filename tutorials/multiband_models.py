@@ -335,7 +335,8 @@ class MyMultiVarModel(MultiVarModel):
         eta_break = 1.0 #params["eta_break"]
 
         # Host dilution: apply per-band correction
-        log_host_frac = jnp.atleast_1d(params["log_host_frac"])  # shape: (nBands,)
+        # Host galaxy contribution modeled as a power-law in wavelength
+        log_host_frac = jnp.array([jnp.log(params["f_host"] + jnp.power(lambda_pivot[band]/(1 + self.z), params["alpha_host"])) for band in self.clean_bands])
         dilution_factor = 1.0 / (1.0 + jnp.exp(log_host_frac))   # shape: (nBands,)
         log_dilution = jnp.log(dilution_factor)
 
