@@ -796,18 +796,20 @@ if __name__ == '__main__':
         for i, obj in enumerate(batch_data):
             for k, v in samples_flat.items():
                 print(v.shape, k)
-            # The if v.ndim == 2 is needed, because the universal parameters are 1D
+            # The universal parameters are 1D
             obj_samples_clean = {
-                k: v[:, i] if v.ndim == 2 else v
+                k: v[:, i] if k not in ['eta_A1', 'eta_A2', 'eta_tau1', 'eta_tau2'] else v
                 for k, v in samples_flat.items()
             }
+            print(obj_samples_clean['log_jitter'].shape)
+            result = process_samples(obj_samples_clean, obj)
             # plot
             if args.plot:
                 m = Model(
                     obj['X'], obj['y'], obj['yerr'], 
                     kernels.quasisep.Exp(jnp.array([1, 1])),
                     zero_mean=has_lag, has_jitter=has_jitter, has_lag=has_lag,
-                    clean_bands=obj['clean_bands'], z=obj['z']
+                    clean_bands=['u','g','r','i','z'], z=obj['z']
                 )
                 psd_results = compute_psd_from_samples(obj_samples_clean, obj["clean_bands"])
                 save_combined_plot(obj_samples_clean, m, obj['X'], obj['y'], obj['yerr'], obj['band_idx'], result, fit_bestP=False, psd_results=psd_results)
