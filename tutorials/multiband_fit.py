@@ -334,10 +334,7 @@ def numpyro_joint_model(Model, batch_data):
     # Prepare padded observations ahead of time
     Xs, ys, yerrs, mask, clean_bands_list, zs = pad_batch_data(batch_data)
 
-    # Pad clean_bands_list to a JAX array for indexing inside JAX traced functions
-    band_to_idx = {'u':0, 'g':1, 'r':2, 'i':3, 'z':4}
-    idx_to_band = {v:k for k,v in band_to_idx.items()}
-    clean_bands_arr = encode_clean_bands(clean_bands_list, band_to_idx)
+    print("log_sigma_hat0 shape:", log_sigma_hat0.shape)
 
     def log_prob_fn(i):
         # Collect params for object i
@@ -365,13 +362,20 @@ def numpyro_joint_model(Model, batch_data):
         y_masked = jnp.where(valid_idx, y_i, 0.0)
         yerr_masked = jnp.where(valid_idx, yerr_i, 99999.0)
 
+        # Mask Lyman-alpha affected bands
+        band_idx = X_masked[:, 1].astype(int)  # assumes 2nd column of X is band index
+        lambda_obs = jnp.array([3551., 4686., 6165., 7481., 8931.])  # ugriz in Å
+        lambda_rest = lambda_obs[band_idx] / (1 + zs[i])
+        yerr_masked = jnp.where(lambda_rest < 1216.0, 99999.0, yerr_masked)
+        # TODO: pad width
+        
         m = Model(
             X_masked, y_masked, yerr_masked,
             kernels.quasisep.Exp(jnp.array([1.0, 1.0])),
             zero_mean=zero_mean,
             has_jitter=has_jitter,
             has_lag=has_lag,
-            clean_bands=clean_bands_i,
+            clean_bands=['u', 'g', 'r', 'i', 'z'],  # or use clean_bands_arr[i]
             z=zs[i],
         )
         return m.log_prob(params)
