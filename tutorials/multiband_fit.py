@@ -250,10 +250,15 @@ def numpyro_joint_model(Model, batch_data):
     Vectorized joint model for multiband light curves.
     Assumes batch_data is a list of dicts, each with keys:
         'X', 'y', 'yerr', 'clean_bands', 'band_idx', 'z', 'bestP'
+    Assumes nBands = 5 for all objects.
     """
+    import numpyro
+    import numpyro.distributions as dist
+    import jax
+    import jax.numpy as jnp
 
     batch_size = len(batch_data)
-    nBands = max(len(obj['clean_bands']) for obj in batch_data)
+    nBands = 5  # Fixed for all objects
 
     # --- Shared (universal) parameters ---
     powerlaw_priors = {
@@ -270,11 +275,11 @@ def numpyro_joint_model(Model, batch_data):
     # Prepare per-object parameter arrays
     log_tau_drw_0_mean = jnp.array([obj['bestP']['log_tau_drw0'] for obj in batch_data])
     log_sigma_hat_0_mean = jnp.array([obj['bestP']['log_sigma_hat0'] for obj in batch_data])
-    log_amp_delta_blr_mean = jnp.stack([obj['bestP']["log_amp_delta_blr"].reshape(-1) for obj in batch_data])
-    lag_mean = jnp.stack([obj['bestP']["lag"].reshape(-1) for obj in batch_data])
-    log_tau_drw_blr_mean = jnp.stack([obj['bestP']["log_tau_drw_blr"].reshape(-1) for obj in batch_data])
-    mean_mean = jnp.stack([obj['bestP']["mean"].reshape(-1) for obj in batch_data])
-    log_jitter_mean = jnp.stack([obj['bestP']["log_jitter"].reshape(-1) for obj in batch_data])
+    log_amp_delta_blr_mean = jnp.stack([obj['bestP']["log_amp_delta_blr"].reshape(nBands) for obj in batch_data])
+    lag_mean = jnp.stack([obj['bestP']["lag"].reshape(nBands-1) for obj in batch_data])
+    log_tau_drw_blr_mean = jnp.stack([obj['bestP']["log_tau_drw_blr"] for obj in batch_data])
+    mean_mean = jnp.stack([obj['bestP']["mean"].reshape(nBands) for obj in batch_data])
+    log_jitter_mean = jnp.stack([obj['bestP']["log_jitter"].reshape(nBands) for obj in batch_data])
 
     # Object-specific parameters (vectorized, shapes: (batch_size, ...) )
     with numpyro.plate("objects", batch_size):
@@ -287,7 +292,7 @@ def numpyro_joint_model(Model, batch_data):
         lag = numpyro.sample("lag", dist.Normal(
             lag_mean, jnp.full((batch_size, nBands-1), 10.0)))
         log_tau_drw_blr = numpyro.sample("log_tau_drw_blr", dist.Normal(
-            log_tau_drw_blr_mean, jnp.full((batch_size, nBands), 2.0)))
+            log_tau_drw_blr_mean, 2.0))
         mean = numpyro.sample("mean", dist.Normal(
             mean_mean, jnp.full((batch_size, nBands), 1.0)))
         alpha_host = numpyro.sample("alpha_host", dist.Normal(
@@ -399,45 +404,6 @@ def numpyro_joint_model_OLD(Model, batch_data):
         #log_prob = jnp.where(jnp.isfinite(log_prob), log_prob, -1e10)
         numpyro.factor(f"loglike_{i}", log_prob)
 
-
-def pad_batch_data(batch_data):
-    batch_size = len(batch_data)
-    max_T = max(obj['y'].shape[0] for obj in batch_data)
-    nBands = max(len(obj['clean_bands']) for obj in batch_data)
-
-    # Pad arrays and create mask
-    y = np.full((batch_size, max_T), np.nan)
-    yerr = np.full((batch_size, max_T), np.nan)
-    mask = np.zeros((batch_size, max_T), dtype=bool)
-    times = np.full((batch_size, max_T), np.nan)
-    band_idx = np.full((batch_size, max_T), -1)
-    z = np.zeros(batch_size)
-    clean_bands = []
-
-    for i, obj in enumerate(batch_data):
-        Ti = obj['y'].shape[0]
-        y[i, :Ti] = obj['y']
-        yerr[i, :Ti] = obj['yerr']
-        mask[i, :Ti] = True
-        times[i, :Ti] = obj['X'][0]
-        band_idx[i, :Ti] = obj['X'][1]
-        z[i] = obj['z']
-        clean_bands.append(obj['clean_bands'])
-
-    return {
-        'y': jnp.array(y),
-        'yerr': jnp.array(yerr),
-        'mask': jnp.array(mask),
-        'times': jnp.array(times),
-        'band_idx': jnp.array(band_idx),
-        'z': jnp.array(z),
-        'clean_bands': clean_bands,
-        'max_T': max_T,
-        'batch_size': batch_size,
-        'nBands': nBands,
-    }
-
-
 def fit_multiband(Model, data, nwarm=500, nsamp=250, progress_bar=False, plot=False, svi=False, fit=True):
     times = data['times']
     mags = data['mags']
@@ -446,10 +412,10 @@ def fit_multiband(Model, data, nwarm=500, nsamp=250, progress_bar=False, plot=Fa
        mags[band] = mags[band] - np.nanmean(mags[band])  # Center the magnitudes
     magerrs = data['magerrs']
     
-    red_bands = bands_redder_than_5000(data['z'])
+    #red_bands = bands_redder_than_5000(data['z'])
     blue_bands = bands_bluer_than_lyman_alpha(data['z'])
 
-    clean_bands = list(set(bands) - set(blue_bands) - set(red_bands))
+    clean_bands = list(set(bands) - set(blue_bands))
     # Reorder clean_bands to match the desired order
     clean_bands = list(sorted(clean_bands, key=lambda band: ['u', 'g', 'r', 'i', 'z', 'y'].index(band)))
     #clean_bands = bands

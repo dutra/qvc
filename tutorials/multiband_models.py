@@ -336,9 +336,12 @@ class MyMultiVarModel(MultiVarModel):
 
         # Host dilution: apply per-band correction
         # Host galaxy contribution modeled as a power-law in wavelength
-        log_host_frac = jnp.array([jnp.log(params["f_host"] + jnp.power(lambda_pivot[band]/(1 + self.z)/5500.0, params["alpha_host"])) for band in self.clean_bands])
-        dilution_factor = 1.0 / (1.0 + jnp.exp(log_host_frac))   # shape: (nBands,)
-        log_dilution = jnp.log(dilution_factor)
+        if self.z < 2.0:
+            log_host_frac = jnp.array([jnp.log(params["f_host"] + jnp.power(lambda_pivot[band]/(1 + self.z)/5500.0, params["alpha_host"])) for band in self.clean_bands])
+            dilution_factor = 1.0 / (1.0 + jnp.exp(log_host_frac))   # shape: (nBands,)
+            log_dilution = jnp.log(dilution_factor)
+        else:
+            log_dilution = 0.0
 
         # Power-law scaling across rest-frame wavelength
         params["log_sigma_hat_band"] = params["log_sigma_hat0"] + log_dilution + jnp.log(10) * jnp.array([log_broken_pl(lambda_pivot[band]/(1 + self.z), lam_s, eta_A1, eta_A2, eta_break) for band in self.clean_bands])
