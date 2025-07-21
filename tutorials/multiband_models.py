@@ -320,7 +320,7 @@ class MyMultiVarModel(MultiVarModel):
         params["log_tau_band_RF"] = params["log_tau_drw0"] - jnp.log(1 + self.z) + jnp.log(10) * jnp.array([log_broken_pl(lambda_pivot[band]/(1 + self.z), lam_s, eta_tau1, eta_tau2, eta_break) for band in self.clean_bands])
         return params["log_tau_band_RF"]
 
-    def my_amp_transform(self, params: dict[str, JAXArray]) -> JAXArray:
+    def my_amp_transform_OLD(self, params: dict[str, JAXArray]) -> JAXArray:
         eta_A1 = params["eta_A1"]
         eta_A2 = params["eta_A2"]
         lam_s = 2500 #params["lam_s"]
@@ -328,7 +328,7 @@ class MyMultiVarModel(MultiVarModel):
         params["log_sigma_hat_band"] = params["log_sigma_hat0"] + jnp.log(10) * jnp.array([log_broken_pl(lambda_pivot[band]/(1 + self.z), lam_s, eta_A1, eta_A2, eta_break) for band in self.clean_bands])
         return params["log_sigma_hat_band"]
 
-    def my_amp_transform_NEW(self, params: dict[str, JAXArray]) -> JAXArray:
+    def my_amp_transform(self, params: dict[str, JAXArray]) -> JAXArray:
         eta_A1 = params["eta_A1"]
         eta_A2 = params["eta_A2"]
         lam_s = 2500 #params["lam_s"]
@@ -336,12 +336,12 @@ class MyMultiVarModel(MultiVarModel):
 
         # Host dilution: apply per-band correction
         # Host galaxy contribution modeled as a power-law in wavelength
-        log_host_frac = jnp.array([jnp.log(params["f_host"] + jnp.power(lambda_pivot[band]/(1 + self.z), params["alpha_host"])) for band in self.clean_bands])
+        log_host_frac = jnp.array([jnp.log(params["f_host"] + jnp.power(lambda_pivot[band]/(1 + self.z)/5500.0, params["alpha_host"])) for band in self.clean_bands])
         dilution_factor = 1.0 / (1.0 + jnp.exp(log_host_frac))   # shape: (nBands,)
         log_dilution = jnp.log(dilution_factor)
 
         # Power-law scaling across rest-frame wavelength
-        params["log_sigma_hat_band"] = params["log_sigma_hat0"] + log_dilution[:len(self.clean_bands)] + jnp.log(10) * jnp.array([log_broken_pl(lambda_pivot[band]/(1 + self.z), lam_s, eta_A1, eta_A2, eta_break) for band in self.clean_bands])
+        params["log_sigma_hat_band"] = params["log_sigma_hat0"] + log_dilution + jnp.log(10) * jnp.array([log_broken_pl(lambda_pivot[band]/(1 + self.z), lam_s, eta_A1, eta_A2, eta_break) for band in self.clean_bands])
 
         return params["log_sigma_hat_band"]
     
