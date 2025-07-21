@@ -153,31 +153,20 @@ def plot_posterior_for_object(mcmc, data, i, batch_data_len):
             print(v.shape)
             for j in range(v.shape[-1]):
                 obj_samples_clean_split[f"mean_{j}"] = v[:, j]
+        # Do not plot
+        if k in ['lag', 'log_amp_delta_blr', 'log_jitter', 'log_tau_drw_blr']:
+            continue
         else:
             obj_samples_clean_split[k] = v
     obj_samples_clean = obj_samples_clean_split
     # Remove "mean" from obj_samples_clean if present
     obj_samples_clean.pop("mean", None)
 
-    # Clean names and flatten vector-valued parameters
-    obj_samples_flattened = {}
-    for k, v in obj_samples_clean.items():
-        base_name = k[:-(len(f"_{i}"))] if k.endswith(f"_{i}") else k
-        if base_name not in ['eta_A1', 'eta_A2', 'eta_tau1', 'eta_tau2', 'log_sigma_hat0', 'log_tau_drw0', 'poly1', 'mean', 'f_host', 'alpha_host']:
-            continue
-
-        v = np.asarray(v)
-        if v.ndim == 1:
-            obj_samples_flattened[base_name] = v
-        elif v.ndim == 2:
-            for j in range(v.shape[1]):
-                obj_samples_flattened[f"{base_name}_{j}"] = v[:, j]
-        else:
-            print(f"Skipping {k} with shape {v.shape}")
-
+    print('keys posterior samples:')
+    print(obj_samples_clean.keys())
     # Stack into matrix for corner plot
-    corner_data = np.vstack([obj_samples_flattened[k] for k in obj_samples_flattened]).T
-    labels = list(obj_samples_flattened.keys())
+    corner_data = np.vstack([obj_samples_clean[k] for k in obj_samples_clean]).T
+    labels = list(obj_samples_clean.keys())
 
     fig = corner.corner(corner_data, labels=labels, show_titles=True)
 
