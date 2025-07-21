@@ -143,7 +143,7 @@ def plot_posterior_for_object(mcmc, data, i, batch_data_len):
     obj_samples_flattened = {}
     for k, v in obj_samples.items():
         base_name = k[:-(len(f"_{i}"))] if k.endswith(f"_{i}") else k
-        if base_name not in ['eta_A1', 'eta_A2', 'eta_tau1', 'eta_tau2', 'log_sigma_hat0', 'log_tau_drw0', 'poly1', 'mean']:
+        if base_name not in ['eta_A1', 'eta_A2', 'eta_tau1', 'eta_tau2', 'log_sigma_hat0', 'log_tau_drw0', 'poly1', 'mean', 'f_host', 'alpha_host']:
             continue
 
         v = np.asarray(v)
