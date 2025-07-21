@@ -245,78 +245,140 @@ def numpyro_model(Model, X, yerr, y=None, bestP=None, clean_bands=None, z=None):
     # --- Evaluate model likelihood ---
     m.sample(sample_params)
 
-def numpyro_joint_model(Model, batch_data):
-    """
-    Vectorized joint model for multiband light curves.
-    Assumes batch_data is a list of dicts, each with keys:
-        'X', 'y', 'yerr', 'clean_bands', 'band_idx', 'z', 'bestP'
-    Assumes nBands = 5 for all objects.
-    """
-    import numpyro
-    import numpyro.distributions as dist
-    import jax
-    import jax.numpy as jnp
+import jax.numpy as jnp
+from jax import numpy as jnp
+from typing import List
 
+def pad_batch_data(batch_data):
     batch_size = len(batch_data)
-    nBands = 5  # Fixed for all objects
 
-    # --- Shared (universal) parameters ---
-    powerlaw_priors = {
-        "eta_A1": (0, 1.),
-        "eta_A2": (0, 1.),
-        "eta_tau1": (0.0, 1.),
-        "eta_tau2": (0.0, 1.),
-    }
+    # Assuming X is a tuple, where first element is array with shape (N_i, feature_dim)
+    first_X_array = batch_data[0]['X'][0]  # e.g. times array
+
+    if len(first_X_array.shape) > 1:
+        feature_dim = first_X_array.shape[1]
+    else:
+        feature_dim = 1
+
+    max_len = max(obj['X'][0].shape[0] for obj in batch_data)  # max time points length
+
+    # Prepare padded arrays
+    Xs = jnp.zeros((batch_size, max_len, feature_dim))
+    ys = jnp.zeros((batch_size, max_len))
+    yerrs = jnp.zeros((batch_size, max_len))
+    mask = jnp.zeros((batch_size, max_len), dtype=bool)
+    clean_bands_list = []
+    zs = []
+
+    for i, obj in enumerate(batch_data):
+        Xi = obj['X'][0]  # first element of tuple, e.g. times, shape (N_i, feature_dim)
+        N = Xi.shape[0]
+        if feature_dim == 1:
+            Xs = Xs.at[i, :N, 0].set(Xi)
+        else:
+            Xs = Xs.at[i, :N, :].set(Xi)
+        ys = ys.at[i, :N].set(obj['y'])
+        yerrs = yerrs.at[i, :N].set(obj['yerr'])
+        mask = mask.at[i, :N].set(True)
+        clean_bands_list.append(obj['clean_bands'])
+        zs.append(obj['z'])
+
+    zs = jnp.array(zs)
+    return Xs, ys, yerrs, mask, clean_bands_list, zs
+
+def numpyro_joint_model(Model, batch_data):
+    batch_size = len(batch_data)
+    nBands = 5  # or use from config
+    band_lag_count = 4  # if e.g. lag is only defined for 4 bands
+
+    # Shared across all objects
     powerlaw_samples = {
         k: numpyro.sample(k, dist.Normal(loc, scale))
-        for k, (loc, scale) in powerlaw_priors.items()
+        for k, (loc, scale) in {
+            "eta_A1": (0.0, 1.0),
+            "eta_A2": (0.0, 1.0),
+            "eta_tau1": (0.0, 1.0),
+            "eta_tau2": (0.0, 1.0),
+        }.items()
     }
 
-    # Object-specific parameters (vectorized, shapes: (batch_size, ...) )
-    with numpyro.plate("objects", batch_size):
-        log_tau_drw_0 = numpyro.sample("log_tau_drw0", dist.Normal(bestP['log_tau_drw0'], 1.0))
-        log_sigma_hat_0 = numpyro.sample("log_sigma_hat0", dist.Normal(bestP['log_sigma_hat0'], 1.0))
-        log_amp_delta_blr = numpyro.sample("log_amp_delta_blr", dist.Normal(jnp.full_like(bestP["log_amp_delta_blr"], jnp.log(1e-3)), 2.0))
-        lag = numpyro.sample("lag", dist.Normal(jnp.full_like(bestP["lag"], 0.0), 10.0))
+    # Extract object-level prior means
+    log_tau_drw0_mean = jnp.array([obj['bestP']['log_tau_drw0'] for obj in batch_data])
+    log_sigma_hat0_mean = jnp.array([obj['bestP']['log_sigma_hat0'] for obj in batch_data])
+    log_amp_delta_blr_mean = jnp.stack([jnp.array(obj['bestP']['log_amp_delta_blr']) for obj in batch_data])  # (B, 5)
+    lag_mean = jnp.stack([jnp.array(obj['bestP']['lag']) for obj in batch_data])                              # (B, 4)
+    mean_mean = jnp.stack([jnp.array(obj['bestP']['mean']) for obj in batch_data])                            # (B, 5)
+    log_jitter_mean = jnp.stack([jnp.array(obj['bestP']['log_jitter']) for obj in batch_data])                # (B, 5)
+
+    with numpyro.plate("objects", batch_size, dim=-2):
+        # Object-level parameters (shape: [B])
+        log_tau_drw0 = numpyro.sample("log_tau_drw0", dist.Normal(log_tau_drw0_mean, 1.0))
+        log_sigma_hat0 = numpyro.sample("log_sigma_hat0", dist.Normal(log_sigma_hat0_mean, 1.0))
         log_tau_drw_blr = numpyro.sample("log_tau_drw_blr", dist.Normal(jnp.log(1e2), 2.0))
-        mean = numpyro.sample("mean", dist.Normal(bestP["mean"], 1.0))
         alpha_host = numpyro.sample("alpha_host", dist.Normal(0.5, 1.0))
         f_host = numpyro.sample("f_host", dist.Uniform(0.0, 1.0))
         poly1 = numpyro.sample("poly1", dist.Normal(0.0, 10.0))
-        log_jitter = numpyro.sample("log_jitter", dist.Normal(jnp.full_like(bestP["log_jitter"], jnp.log(1e-4)), 1.0))
 
-    # Prepare all arrays for vectorized likelihood
-    Xs = [obj['X'] for obj in batch_data]
-    ys = [obj['y'] for obj in batch_data]
-    yerrs = [obj['yerr'] for obj in batch_data]
-    clean_bands_list = [obj['clean_bands'] for obj in batch_data]
-    zs = [obj['z'] for obj in batch_data]
+        print("mean shape:", mean_mean.shape, "log_amp_delta_blr shape:", log_amp_delta_blr_mean.shape, "log_jitter shape:", log_jitter_mean.shape)
 
-    # Vectorized likelihood using vmap
-    def single_log_prob(i):
+        with numpyro.plate("band", nBands, dim=-1):
+            # Parameters with shape [B, nBands]
+            print("mean_mean shape:", mean_mean.shape)  # should be (batch_size, nBands)
+            mean = numpyro.sample("mean", dist.Normal(mean_mean, 1.0))
+            log_amp_delta_blr = numpyro.sample("log_amp_delta_blr", dist.Normal(log_amp_delta_blr_mean, 2.0))
+            log_jitter = numpyro.sample("log_jitter", dist.Normal(log_jitter_mean, 1.0))
+
+        with numpyro.plate("band_lag", nBands-1):  # Only first 4 bands have lags?
+            lag = numpyro.sample("lag", dist.Normal(lag_mean, 10.0))
+
+    # Prepare padded observations ahead of time
+    Xs, ys, yerrs, mask, clean_bands_list, zs = pad_batch_data(batch_data)
+
+    # Pad clean_bands_list to a JAX array for indexing inside JAX traced functions
+    band_to_idx = {'u':0, 'g':1, 'r':2, 'i':3, 'z':4}
+    idx_to_band = {v:k for k,v in band_to_idx.items()}
+    clean_bands_arr = encode_clean_bands(clean_bands_list, band_to_idx)
+
+    def log_prob_fn(i):
+        # Collect params for object i
         params = {
-            "log_tau_drw0": log_tau_drw_0[i],
-            "log_sigma_hat0": log_sigma_hat_0[i],
-            "log_amp_delta_blr": log_amp_delta_blr[i],
-            "lag": lag[i],
+            "log_tau_drw0": log_tau_drw0[i],
+            "log_sigma_hat0": log_sigma_hat0[i],
             "log_tau_drw_blr": log_tau_drw_blr[i],
-            "mean": mean[i],
             "alpha_host": alpha_host[i],
             "f_host": f_host[i],
             "poly1": poly1[i],
+            "mean": mean[i],
+            "log_amp_delta_blr": log_amp_delta_blr[i],
             "log_jitter": log_jitter[i],
-            **{k: v for k, v in powerlaw_samples.items()},
+            "lag": lag[i],
+            **powerlaw_samples,
         }
+
+        X_i = Xs[i]      # shape (max_len, feature_dim)
+        y_i = ys[i]      # shape (max_len,)
+        yerr_i = yerrs[i]  # shape (max_len,)
+
+        # Slice valid data points using mask[i]
+        valid_idx = mask[i]
+        X_masked = jnp.where(valid_idx[:, None], X_i, 0.0)
+        y_masked = jnp.where(valid_idx, y_i, 0.0)
+        yerr_masked = jnp.where(valid_idx, yerr_i, 99999.0)
+
         m = Model(
-            Xs[i], ys[i], yerrs[i],
-            kernels.quasisep.Exp(jnp.array([1, 1])),
-            zero_mean=zero_mean, has_jitter=has_jitter, has_lag=has_lag,
-            clean_bands=clean_bands_list[i], z=zs[i]
+            X_masked, y_masked, yerr_masked,
+            kernels.quasisep.Exp(jnp.array([1.0, 1.0])),
+            zero_mean=zero_mean,
+            has_jitter=has_jitter,
+            has_lag=has_lag,
+            clean_bands=clean_bands_i,
+            z=zs[i],
         )
         return m.log_prob(params)
 
-    log_probs = jax.vmap(single_log_prob)(jnp.arange(batch_size))
-    numpyro.factor("loglike", jnp.sum(log_probs))
+    total_log_prob = jax.vmap(log_prob_fn)(jnp.arange(batch_size)).sum()
+    numpyro.factor("likelihood", total_log_prob)
+
 
 def numpyro_joint_model_OLD(Model, batch_data):
     # --- Shared (universal) parameters ---
