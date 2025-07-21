@@ -251,10 +251,6 @@ def numpyro_joint_model(Model, batch_data):
     Assumes batch_data is a list of dicts, each with keys:
         'X', 'y', 'yerr', 'clean_bands', 'band_idx', 'z', 'bestP'
     """
-    import numpyro
-    import numpyro.distributions as dist
-    import jax
-    import jax.numpy as jnp
 
     batch_size = len(batch_data)
     nBands = max(len(obj['clean_bands']) for obj in batch_data)
@@ -271,20 +267,29 @@ def numpyro_joint_model(Model, batch_data):
         for k, (loc, scale) in powerlaw_priors.items()
     }
 
-    # Object-specific parameters (vectorized)
+    # Prepare per-object parameter arrays
+    log_tau_drw_0_mean = jnp.array([obj['bestP']['log_tau_drw0'] for obj in batch_data])
+    log_sigma_hat_0_mean = jnp.array([obj['bestP']['log_sigma_hat0'] for obj in batch_data])
+    log_amp_delta_blr_mean = jnp.stack([obj['bestP']["log_amp_delta_blr"].reshape(-1) for obj in batch_data])
+    lag_mean = jnp.stack([obj['bestP']["lag"].reshape(-1) for obj in batch_data])
+    log_tau_drw_blr_mean = jnp.stack([obj['bestP']["log_tau_drw_blr"].reshape(-1) for obj in batch_data])
+    mean_mean = jnp.stack([obj['bestP']["mean"].reshape(-1) for obj in batch_data])
+    log_jitter_mean = jnp.stack([obj['bestP']["log_jitter"].reshape(-1) for obj in batch_data])
+
+    # Object-specific parameters (vectorized, shapes: (batch_size, ...) )
     with numpyro.plate("objects", batch_size):
         log_tau_drw_0 = numpyro.sample("log_tau_drw0", dist.Normal(
-            jnp.array([obj['bestP']['log_tau_drw0'] for obj in batch_data]), 1.0))
+            log_tau_drw_0_mean, 1.0))
         log_sigma_hat_0 = numpyro.sample("log_sigma_hat0", dist.Normal(
-            jnp.array([obj['bestP']['log_sigma_hat0'] for obj in batch_data]), 1.0))
+            log_sigma_hat_0_mean, 1.0))
         log_amp_delta_blr = numpyro.sample("log_amp_delta_blr", dist.Normal(
-            jnp.stack([obj['bestP']["log_amp_delta_blr"].reshape(-1) for obj in batch_data]), 2.0))
+            log_amp_delta_blr_mean, jnp.full((batch_size, nBands), 2.0)))
         lag = numpyro.sample("lag", dist.Normal(
-            jnp.stack([obj['bestP']["lag"].reshape(-1) for obj in batch_data]), 10.0))
+            lag_mean, jnp.full((batch_size, nBands-1), 10.0)))
         log_tau_drw_blr = numpyro.sample("log_tau_drw_blr", dist.Normal(
-            jnp.stack([obj['bestP']["log_tau_drw_blr"].reshape(-1) for obj in batch_data]), 2.0))
+            log_tau_drw_blr_mean, jnp.full((batch_size, nBands), 2.0)))
         mean = numpyro.sample("mean", dist.Normal(
-            jnp.stack([obj['bestP']["mean"].reshape(-1) for obj in batch_data]), 1.0))
+            mean_mean, jnp.full((batch_size, nBands), 1.0)))
         alpha_host = numpyro.sample("alpha_host", dist.Normal(
             jnp.full((batch_size,), 0.5), 1.0))
         f_host = numpyro.sample("f_host", dist.Uniform(
@@ -292,7 +297,7 @@ def numpyro_joint_model(Model, batch_data):
         poly1 = numpyro.sample("poly1", dist.Normal(
             jnp.zeros(batch_size), 10.0))
         log_jitter = numpyro.sample("log_jitter", dist.Normal(
-            jnp.stack([obj['bestP']["log_jitter"].reshape(-1) for obj in batch_data]), 1.0))
+            log_jitter_mean, jnp.full((batch_size, nBands), 1.0)))
 
     # Prepare all arrays for vectorized likelihood
     Xs = [obj['X'] for obj in batch_data]
@@ -327,7 +332,7 @@ def numpyro_joint_model(Model, batch_data):
     log_probs = jax.vmap(single_log_prob)(jnp.arange(batch_size))
     numpyro.factor("loglike", jnp.sum(log_probs))
 
-def numpyro_joint_model_NEW(Model, batch_data):
+def numpyro_joint_model_OLD(Model, batch_data):
     # --- Shared (universal) parameters ---
     # These priors can be broader
     #powerlaw_priors = {
@@ -737,12 +742,10 @@ if __name__ == '__main__':
                 'bestP': bestP,
                 # add any other fields needed by your model
             })
-        # Pad the batch data for joint fitting
-        batch_data = pad_batch_data(batch_data)
-        #
         num_params = sum(p.size for p in batch_data[0]['bestP'].values())
         num_objects = len(batch_data)
         print(f"Running joint fit on {len(batch_data)} objects...")
+
         estimated_nchains = 2*((num_params - 6)*len(batch_data) + 6)
         if args.nchains < 1:
             nchains = estimated_nchains
