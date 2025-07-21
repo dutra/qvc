@@ -695,7 +695,7 @@ if __name__ == '__main__':
         m = Model(
             obj['X'], obj['y'], obj['yerr'], 
             kernels.quasisep.Exp(jnp.array([1, 1])),
-            zero_mean=has_lag, has_jitter=has_jitter, has_lag=has_lag,
+            zero_mean=zero_mean, has_jitter=has_jitter, has_lag=has_lag,
             clean_bands=obj['clean_bands'], z=obj['z']
         )
         save_combined_plot(bestP, m, obj['X'], obj['y'], obj['yerr'], obj['band_idx'], obj, fit_bestP=True)
