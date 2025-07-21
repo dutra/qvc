@@ -48,19 +48,26 @@ def plot_trace_numpyro_for_object(mcmc, data, i, batch_data_len):
         Suffix for output directory.
     """
     object_id = data['object_id']
-    samples = mcmc.get_samples(group_by_chain=True)
+    samples_flat = mcmc.get_samples(group_by_chain=False)
 
     # Extract per-object samples
-    obj_samples = {
-        k: v[..., i] if v.ndim == 3 and v.shape[-1] == batch_data_len else v
-        for k, v in samples.items()
-    }
-
-    # Clean parameter names like param_3 → param
     obj_samples_clean = {
-        k[:-(len(f"_{i}"))] if k.endswith(f"_{i}") else k: v
-        for k, v in obj_samples.items()
-    }
+            k: v[:, i] if k not in ['eta_A1', 'eta_A2', 'eta_tau1', 'eta_tau2'] else v
+            for k, v in samples_flat.items()
+        }
+    # Split "mean" entries into mean_0, mean_1, ... using the last dimension
+    obj_samples_clean_split = {}
+    for k, v in obj_samples_clean.items():
+        if k == "mean":
+            v = np.asarray(v)
+            print(v.shape)
+            for j in range(v.shape[-1]):
+                obj_samples_clean_split[f"mean_{j}"] = v[:, j]
+        else:
+            obj_samples_clean_split[k] = v
+    obj_samples_clean = obj_samples_clean_split
+    # Remove "mean" from obj_samples_clean if present
+    obj_samples_clean.pop("mean", None)
 
     # Convert to ArviZ InferenceData
     idata = az.from_dict(posterior=obj_samples_clean)
@@ -133,15 +140,28 @@ def plot_posterior_for_object(mcmc, data, i, batch_data_len):
     # Get flat samples
     samples_flat = mcmc.get_samples(group_by_chain=False)
 
-    # Select per-object parameters
-    obj_samples = {
-        k: v[:, i] if v.ndim == 2 and v.shape[1] == batch_data_len else v
-        for k, v in samples_flat.items()
-    }
+    # Extract per-object samples
+    obj_samples_clean = {
+            k: v[:, i] if k not in ['eta_A1', 'eta_A2', 'eta_tau1', 'eta_tau2'] else v
+            for k, v in samples_flat.items()
+        }
+    # Split "mean" entries into mean_0, mean_1, ... using the last dimension
+    obj_samples_clean_split = {}
+    for k, v in obj_samples_clean.items():
+        if k == "mean":
+            v = np.asarray(v)
+            print(v.shape)
+            for j in range(v.shape[-1]):
+                obj_samples_clean_split[f"mean_{j}"] = v[:, j]
+        else:
+            obj_samples_clean_split[k] = v
+    obj_samples_clean = obj_samples_clean_split
+    # Remove "mean" from obj_samples_clean if present
+    obj_samples_clean.pop("mean", None)
 
     # Clean names and flatten vector-valued parameters
     obj_samples_flattened = {}
-    for k, v in obj_samples.items():
+    for k, v in obj_samples_clean.items():
         base_name = k[:-(len(f"_{i}"))] if k.endswith(f"_{i}") else k
         if base_name not in ['eta_A1', 'eta_A2', 'eta_tau1', 'eta_tau2', 'log_sigma_hat0', 'log_tau_drw0', 'poly1', 'mean', 'f_host', 'alpha_host']:
             continue
@@ -176,6 +196,8 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, data, fit_bestP=Fal
     clean_bands = data['clean_bands']
     object_id = data['object_id']
     band_idx_map = {i: b for i, b in enumerate(clean_bands)}
+
+    #TODO: Check what samples looks like, what happens to means
 
     fig, (ax_lc, ax_psd) = plt.subplots(2, 1, figsize=(10, 10), sharex=False, gridspec_kw={'height_ratios': [1.5, 1]})
     offsets = np.arange(len(clean_bands)) * 0.25
@@ -329,7 +351,7 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, data, fit_bestP=Fal
     
 
 def plot_mcmc_traces(mcmc, data):
-    samples = mcmc.get_samples(group_by_chain=True)
+    samples = mcmc.get_samples(group_by_chain=False)
     num_warmup = mcmc.num_warmup
     object_id = data['object_id']
 

@@ -326,7 +326,7 @@ def numpyro_joint_model(Model, batch_data):
             log_amp_delta_blr = numpyro.sample("log_amp_delta_blr", dist.Normal(log_amp_delta_blr_mean, 2.0))
             log_jitter = numpyro.sample("log_jitter", dist.Normal(log_jitter_mean, 1.0))
 
-        with numpyro.plate("band_lag", nBands-1):  # Only first 4 bands have lags?
+        with numpyro.plate("band_lag", nBands-1):
             lag = numpyro.sample("lag", dist.Normal(lag_mean, 10.0))
 
     # Prepare padded observations ahead of time
@@ -775,7 +775,7 @@ if __name__ == '__main__':
             psd_results = compute_psd_from_samples(obj_samples_clean, obj["clean_bands"])
             save_combined_plot(obj_samples_clean, m, obj['X'], obj['y'], obj['yerr'], obj['band_idx'], result, fit_bestP=False, psd_results=psd_results)
             dump_mcmc_diagnostics(mcmc, obj, i, len(batch_data))
-            plot_trace_numpyro_for_object(mcmc, obj, i, len(batch_data))
+            #plot_trace_numpyro_for_object(mcmc, obj, i, len(batch_data))
             plot_posterior_for_object(mcmc, obj, i, len(batch_data))
         results.append(obj | result)
         print("++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++", flush=True)
