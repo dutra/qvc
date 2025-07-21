@@ -310,7 +310,7 @@ def numpyro_joint_model(Model, batch_data):
     mean_mean = jnp.stack([jnp.array(obj['bestP']['mean']) for obj in batch_data])                            # (B, 5)
     log_jitter_mean = jnp.stack([jnp.array(obj['bestP']['log_jitter']) for obj in batch_data])                # (B, 5)
 
-    with numpyro.plate("objects", batch_size, dim=-2):
+    with numpyro.plate("objects", batch_size):
         # Object-level parameters (shape: [B])
         log_tau_drw0 = numpyro.sample("log_tau_drw0", dist.Normal(log_tau_drw0_mean, 1.0))
         log_sigma_hat0 = numpyro.sample("log_sigma_hat0", dist.Normal(log_sigma_hat0_mean, 1.0))
@@ -319,11 +319,9 @@ def numpyro_joint_model(Model, batch_data):
         f_host = numpyro.sample("f_host", dist.Uniform(0.0, 1.0))
         poly1 = numpyro.sample("poly1", dist.Normal(0.0, 10.0))
 
-        print("mean shape:", mean_mean.shape, "log_amp_delta_blr shape:", log_amp_delta_blr_mean.shape, "log_jitter shape:", log_jitter_mean.shape)
-
+    with numpyro.plate("objects", batch_size, dim=-2):
         with numpyro.plate("band", nBands, dim=-1):
             # Parameters with shape [B, nBands]
-            print("mean_mean shape:", mean_mean.shape)  # should be (batch_size, nBands)
             mean = numpyro.sample("mean", dist.Normal(mean_mean, 1.0))
             log_amp_delta_blr = numpyro.sample("log_amp_delta_blr", dist.Normal(log_amp_delta_blr_mean, 2.0))
             log_jitter = numpyro.sample("log_jitter", dist.Normal(log_jitter_mean, 1.0))
