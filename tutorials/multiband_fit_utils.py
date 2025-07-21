@@ -83,16 +83,10 @@ def dump_mcmc_diagnostics(mcmc, data, i, batch_data_len):
     samples = mcmc.get_samples(group_by_chain=True)  # (n_chains, n_samples, ...) or (n_chains, n_samples, n_objects)
 
     # Extract samples for object i
-    obj_samples = {
-        k: v[..., i] if v.ndim == 3 and v.shape[-1] == batch_data_len else v
-        for k, v in samples.items()
-    }
-
-    # Clean up parameter names like "param_3" → "param"
     obj_samples_clean = {
-        k[:-(len(f"_{i}"))] if k.endswith(f"_{i}") else k: v
-        for k, v in obj_samples.items()
-    }
+            k: v[:, i] if k not in ['eta_A1', 'eta_A2', 'eta_tau1', 'eta_tau2'] else v
+            for k, v in samples.items()
+        }
 
     # Compute diagnostics
     rhat = compute_rhat_dict(obj_samples_clean)

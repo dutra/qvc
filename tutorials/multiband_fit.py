@@ -371,7 +371,7 @@ def numpyro_joint_model(Model, batch_data):
             zero_mean=zero_mean,
             has_jitter=has_jitter,
             has_lag=has_lag,
-            clean_bands=['u', 'g', 'r', 'i', 'z'],  # or use clean_bands_arr[i]
+            clean_bands=['u', 'g', 'r', 'i', 'z'],
             z=zs[i],
         )
         return m.log_prob(params)
@@ -544,85 +544,47 @@ def fit_multiband(Model, data, nwarm=500, nsamp=250, progress_bar=False, plot=Fa
     for k in bestP.keys():
         bestP[k] += 1e-4 * np.random.randn(*bestP[k].shape)
 
-    if svi == True:
+    print('Starting EMCEE MCMC')
+    try:
+        #init_strategy = numpyro.infer.init_to_value(values=bestP)
+        init_strategy = numpyro.infer.init_to_sample()
 
-        print('Starting SVI')
-
-        # SVI
-        #guide = numpyro.infer.autoguide.AutoDiagonalNormal(numpyro_model)
-        #guide = numpyro.infer.autoguide.AutoLowRankMultivariateNormal(numpyro_model)
-        guide = numpyro.infer.autoguide.AutoMultivariateNormal(numpyro_model)
-
-        svi = numpyro.infer.SVI(
-            model=numpyro_model,
-            guide=guide,
-            optim=numpyro.optim.Adam(1e-2),
-            loss=numpyro.infer.Trace_ELBO(),
-        )
-
-        svi_state = svi.init(jax.random.PRNGKey(0), X, yerr, y=y, bestP=bestP, clean_bands=clean_bands)
-
-        # Training loop
-        def run_svi_training(svi_state):
-            def svi_step(carry, _):
-                svi_state = carry
-                svi_state, loss = svi.update(svi_state, X, yerr, y=y, bestP=bestP, clean_bands=clean_bands)
-                return svi_state, loss
-
-            return lax.scan(svi_step, svi_state, None, length=1000)
-
-        # JIT the wrapper function
-        run_svi_training_jit = jax.jit(run_svi_training)
-        svi_state, losses = run_svi_training_jit(svi_state)
-
-        print(losses)
-
-        params = svi.get_params(svi_state)
-        print(guide.get_posterior(params))
-        samples = guide.sample_posterior(jax.random.PRNGKey(1), params, sample_shape=(250,))
-        print(samples)
-
-    else:
-
-        print('Starting EMCEE MCMC')
-        try:
-            #init_strategy = numpyro.infer.init_to_value(values=bestP)
-            init_strategy = numpyro.infer.init_to_sample()
-
-            # emcee works better than NUTS for multimodal posteriors
-            nuts_kernel = AIES(
-                partial(numpyro_model, bestP=bestP, clean_bands=clean_bands, z=data['z']),
-                moves={AIES.DEMove() : 0.5, AIES.StretchMove() : 0.5},
-                init_strategy=init_strategy,
-                )
-
-            num_params = sum(p.size for p in bestP.values())
-            #print(f"Number of parameters: {num_params}")
-
-            mcmc = MCMC(
-                nuts_kernel,
-                num_warmup=nwarm, # This could be less than num_samples
-                num_samples=nsamp,
-                num_chains=2*num_params,
-                progress_bar=True,
-                chain_method="vectorized",
+        # emcee works better than NUTS for multimodal posteriors
+        nuts_kernel = AIES(
+            partial(numpyro_model, bestP=bestP, clean_bands=clean_bands, z=data['z']),
+            moves={AIES.DEMove() : 0.5, AIES.StretchMove() : 0.5},
+            init_strategy=init_strategy,
             )
 
-            mcmc.run(jax.random.PRNGKey(int(data['object_id'])), Model, X, yerr, y=y)
-            samples = mcmc.get_samples(group_by_chain=False)
-            diagnostics = mcmc.get_extra_fields()
-        except Exception as e:
-            print(f"Error during MCMC for quasar {data['object_id']}: {e}", flush=True)
-            print("Traceback details:")
-            traceback.print_exc()            
-            return None
+        num_params = sum(p.size for p in bestP.values())
+        #print(f"Number of parameters: {num_params}")
+
+        mcmc = MCMC(
+            nuts_kernel,
+            num_warmup=nwarm, # This could be less than num_samples
+            num_samples=nsamp,
+            num_chains=2*num_params,
+            progress_bar=True,
+            chain_method="vectorized",
+        )
+
+        mcmc.run(jax.random.PRNGKey(int(data['object_id'])), Model, X, yerr, y=y)
+        samples = mcmc.get_samples(group_by_chain=False)
+        diagnostics = mcmc.get_extra_fields()
+    except Exception as e:
+        print(f"Error during MCMC for quasar {data['object_id']}: {e}", flush=True)
+        print("Traceback details:")
+        traceback.print_exc()            
+        return None
 
         #print(samples)
 
         #if np.all(diagnostics['diverging']):
         #    print(f"Diverging MCMC for quasar {data['object_id']}, skipping.", flush=True)
         #    #return None
+
     result = process_samples(samples, data)
+    
     if plot:
         psd_results = compute_psd_from_samples(samples, clean_bands)
         save_combined_plot(samples, m, X, y, yerr, band_idx[mask_outlier], result, psd_results=psd_results)
@@ -718,107 +680,106 @@ if __name__ == '__main__':
         Model = MyMultiVarModelLatent
 
     # After loading objs
-    if args.joint:
-        print("--- Joint fitting")
-        batch_data = []
-        for i, obj in enumerate(objs):
-            # Prepare each object's data for the joint model
-            result = fit_multiband(Model, obj, nwarm=args.nwarm, nsamp=args.nsamp, progress_bar=args.progress, plot=False, svi=False, fit=False)
-            if result is None:
-                continue
-            obj['i'] = i
-            obj |= result
-            # Run bestP for each object
-            n_bands = len(obj['clean_bands'])
-            bestP = initSampler(jax.random.PRNGKey(i), 1, 5, obj['X'], obj['y'], obj['yerr'], obj['clean_bands'], obj['z'])
+    print("--- Joint fitting")
+    batch_data = []
+    for i, obj in enumerate(objs):
+        # Prepare each object's data for the joint model
+        result = fit_multiband(Model, obj, nwarm=args.nwarm, nsamp=args.nsamp, progress_bar=args.progress, plot=False, svi=False, fit=False)
+        if result is None:
+            continue
+        obj['i'] = i
+        obj |= result
+        # Run bestP for each object
+        n_bands = len(obj['clean_bands'])
+        bestP = initSampler(jax.random.PRNGKey(i), 1, 5, obj['X'], obj['y'], obj['yerr'], obj['clean_bands'], obj['z'])
+        m = Model(
+            obj['X'], obj['y'], obj['yerr'], 
+            kernels.quasisep.Exp(jnp.array([1, 1])),
+            zero_mean=has_lag, has_jitter=has_jitter, has_lag=has_lag,
+            clean_bands=obj['clean_bands'], z=obj['z']
+        )
+        save_combined_plot(bestP, m, obj['X'], obj['y'], obj['yerr'], obj['band_idx'], obj, fit_bestP=True)
+
+        num_params = sum(p.size for p in bestP.values())
+        batch_data.append({
+            'object_id': obj['object_id'],
+            'X': obj['X'],
+            'y': obj['y'],
+            'yerr': obj['yerr'],
+            'clean_bands': obj['clean_bands'],
+            'band_idx': obj['band_idx'],
+            'z': obj['z'],
+            'bestP': bestP,
+            # add any other fields needed by your model
+        })
+    num_params = sum(p.size for p in batch_data[0]['bestP'].values())
+    num_objects = len(batch_data)
+    print(f"Running joint fit on {len(batch_data)} objects...")
+
+    estimated_nchains = 2*((num_params - 6)*len(batch_data) + 6)
+    if args.nchains < 1:
+        nchains = estimated_nchains
+    else:
+        nchains = args.nchains
+    print(f"{args.nwarm=}, {args.nsamp=}, {args.nchains=}, estimated num_chains: {estimated_nchains}, {num_params=}, {len(batch_data)=}")
+
+    # Print estimated memory usage
+    memory_est = estimate_numpyro_gpu_memory_vectorized(num_params_per_object=num_params, num_objects=num_objects, num_chains=nchains, num_samples=args.nsamp, num_warmup=args.nwarm)
+    print(f"Estimated GPU memory usage (vectorized): {memory_est:.2f} GB")
+    
+    init_strategy = numpyro.infer.init_to_sample()
+    print("Done with numpyro.infer.init_to_sample")
+
+    # emcee works better than NUTS for multimodal posteriors
+    nuts_kernel = AIES(
+        numpyro_joint_model,
+        moves={AIES.DEMove() : 0.9, AIES.StretchMove() : 0.1},
+        init_strategy=init_strategy,
+        )
+    #nuts_kernel = NUTS(numpyro_joint_model, init_strategy=init_strategy)
+    mcmc = MCMC(
+        nuts_kernel,
+        num_warmup=args.nwarm,
+        num_samples=args.nsamp,
+        #num_chains=(2*num_params - 6)*len(batch_data) + 6,
+        num_chains=nchains,
+        progress_bar=args.progress,
+        chain_method="vectorized",
+    )
+    mcmc.run(jax.random.PRNGKey(0), Model, batch_data)
+    samples_flat = mcmc.get_samples(group_by_chain=False)
+    diagnostics = mcmc.get_extra_fields()
+
+    print("Done with MCMC run")
+
+    # Save and plot the results
+    results = []
+    for i, obj in enumerate(batch_data):
+        for k, v in samples_flat.items():
+            print(v.shape, k)
+        # The universal parameters are 1D
+        obj_samples_clean = {
+            k: v[:, i] if k not in ['eta_A1', 'eta_A2', 'eta_tau1', 'eta_tau2'] else v
+            for k, v in samples_flat.items()
+        }
+        print(obj_samples_clean['log_jitter'].shape)
+        result = process_samples(obj_samples_clean, obj)
+        # plot
+        if args.plot:
             m = Model(
                 obj['X'], obj['y'], obj['yerr'], 
                 kernels.quasisep.Exp(jnp.array([1, 1])),
                 zero_mean=has_lag, has_jitter=has_jitter, has_lag=has_lag,
-                clean_bands=obj['clean_bands'], z=obj['z']
+                clean_bands=['u','g','r','i','z'], z=obj['z']
             )
-            save_combined_plot(bestP, m, obj['X'], obj['y'], obj['yerr'], obj['band_idx'], obj, fit_bestP=True)
-
-            num_params = sum(p.size for p in bestP.values())
-            batch_data.append({
-                'object_id': obj['object_id'],
-                'X': obj['X'],
-                'y': obj['y'],
-                'yerr': obj['yerr'],
-                'clean_bands': obj['clean_bands'],
-                'band_idx': obj['band_idx'],
-                'z': obj['z'],
-                'bestP': bestP,
-                # add any other fields needed by your model
-            })
-        num_params = sum(p.size for p in batch_data[0]['bestP'].values())
-        num_objects = len(batch_data)
-        print(f"Running joint fit on {len(batch_data)} objects...")
-
-        estimated_nchains = 2*((num_params - 6)*len(batch_data) + 6)
-        if args.nchains < 1:
-            nchains = estimated_nchains
-        else:
-            nchains = args.nchains
-        print(f"{args.nwarm=}, {args.nsamp=}, {args.nchains=}, estimated num_chains: {estimated_nchains}, {num_params=}, {len(batch_data)=}")
-
-        # Print estimated memory usage
-        memory_est = estimate_numpyro_gpu_memory_vectorized(num_params_per_object=num_params, num_objects=num_objects, num_chains=nchains, num_samples=args.nsamp, num_warmup=args.nwarm)
-        print(f"Estimated GPU memory usage (vectorized): {memory_est:.2f} GB")
-        
-        init_strategy = numpyro.infer.init_to_sample()
-        print("Done with numpyro.infer.init_to_sample")
-
-        # emcee works better than NUTS for multimodal posteriors
-        nuts_kernel = AIES(
-            numpyro_joint_model,
-            moves={AIES.DEMove() : 0.9, AIES.StretchMove() : 0.1},
-            init_strategy=init_strategy,
-            )
-        #nuts_kernel = NUTS(numpyro_joint_model, init_strategy=init_strategy)
-        mcmc = MCMC(
-            nuts_kernel,
-            num_warmup=args.nwarm,
-            num_samples=args.nsamp,
-            #num_chains=(2*num_params - 6)*len(batch_data) + 6,
-            num_chains=nchains,
-            progress_bar=args.progress,
-            chain_method="vectorized",
-        )
-        mcmc.run(jax.random.PRNGKey(0), Model, batch_data)
-        samples_flat = mcmc.get_samples(group_by_chain=False)
-        diagnostics = mcmc.get_extra_fields()
-
-        print("Done with MCMC run")
-
-        # Save and plot the results
-        results = []
-        for i, obj in enumerate(batch_data):
-            for k, v in samples_flat.items():
-                print(v.shape, k)
-            # The universal parameters are 1D
-            obj_samples_clean = {
-                k: v[:, i] if k not in ['eta_A1', 'eta_A2', 'eta_tau1', 'eta_tau2'] else v
-                for k, v in samples_flat.items()
-            }
-            print(obj_samples_clean['log_jitter'].shape)
-            result = process_samples(obj_samples_clean, obj)
-            # plot
-            if args.plot:
-                m = Model(
-                    obj['X'], obj['y'], obj['yerr'], 
-                    kernels.quasisep.Exp(jnp.array([1, 1])),
-                    zero_mean=has_lag, has_jitter=has_jitter, has_lag=has_lag,
-                    clean_bands=['u','g','r','i','z'], z=obj['z']
-                )
-                psd_results = compute_psd_from_samples(obj_samples_clean, obj["clean_bands"])
-                save_combined_plot(obj_samples_clean, m, obj['X'], obj['y'], obj['yerr'], obj['band_idx'], result, fit_bestP=False, psd_results=psd_results)
-                dump_mcmc_diagnostics(mcmc, obj, i, len(batch_data))
-                plot_trace_numpyro_for_object(mcmc, obj, i, len(batch_data))
-                plot_posterior_for_object(mcmc, obj, i, len(batch_data))
-            results.append(obj | result)
-            print("++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++", flush=True)
-            print(f"Quasar {i+1}/{len(batch_data)} Object ID: {obj['object_id']}", flush=True)
+            psd_results = compute_psd_from_samples(obj_samples_clean, obj["clean_bands"])
+            save_combined_plot(obj_samples_clean, m, obj['X'], obj['y'], obj['yerr'], obj['band_idx'], result, fit_bestP=False, psd_results=psd_results)
+            dump_mcmc_diagnostics(mcmc, obj, i, len(batch_data))
+            plot_trace_numpyro_for_object(mcmc, obj, i, len(batch_data))
+            plot_posterior_for_object(mcmc, obj, i, len(batch_data))
+        results.append(obj | result)
+        print("++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++", flush=True)
+        print(f"Quasar {i+1}/{len(batch_data)} Object ID: {obj['object_id']}", flush=True)
 
         print("++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++ Done fitting all objects")
         if args.file:
@@ -826,20 +787,5 @@ if __name__ == '__main__':
             append_hdf5_file(results, args.file)
         else:
             print("Warning!! Not saving results to file.")
-
-    else:
-        for i, obj in enumerate(objs):
-            print(f"Processing quasar {i}/{len(objs)} ({obj['object_id']})", flush=True)
-            q = process_quasar(Model, (i, obj), n=len(objs), nwarm=args.nwarm, nsamp=args.nsamp, progress_bar=args.progress, plot=args.plot, svi=args.svi)
-            if q is None:
-                #print(f"Skipping quasar {obj['object_id']}, no data", flush=True)
-                continue
-            fields_to_filter = ['times', 'mags', 'magerrs']
-            #filtered_q = {k: v for k, v in q.items() if k not in fields_to_filter}
-            #print(filtered_q)
-            print("++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++\n", flush=True)
-            print(f"Quasar {i+1}/{len(objs)} Object ID: {q['object_id']}", flush=True)
-            if args.file:
-                append_hdf5_file([q], args.file)
 
     sys.exit("Exiting the program as requested.")
