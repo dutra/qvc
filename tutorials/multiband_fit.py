@@ -272,37 +272,18 @@ def numpyro_joint_model(Model, batch_data):
         for k, (loc, scale) in powerlaw_priors.items()
     }
 
-    # Prepare per-object parameter arrays
-    log_tau_drw_0_mean = jnp.array([obj['bestP']['log_tau_drw0'] for obj in batch_data])
-    log_sigma_hat_0_mean = jnp.array([obj['bestP']['log_sigma_hat0'] for obj in batch_data])
-    log_amp_delta_blr_mean = jnp.stack([obj['bestP']["log_amp_delta_blr"].reshape(nBands) for obj in batch_data])
-    lag_mean = jnp.stack([obj['bestP']["lag"].reshape(nBands-1) for obj in batch_data])
-    log_tau_drw_blr_mean = jnp.stack([obj['bestP']["log_tau_drw_blr"] for obj in batch_data])
-    mean_mean = jnp.stack([obj['bestP']["mean"].reshape(nBands) for obj in batch_data])
-    log_jitter_mean = jnp.stack([obj['bestP']["log_jitter"].reshape(nBands) for obj in batch_data])
-
     # Object-specific parameters (vectorized, shapes: (batch_size, ...) )
     with numpyro.plate("objects", batch_size):
-        log_tau_drw_0 = numpyro.sample("log_tau_drw0", dist.Normal(
-            log_tau_drw_0_mean, 1.0))
-        log_sigma_hat_0 = numpyro.sample("log_sigma_hat0", dist.Normal(
-            log_sigma_hat_0_mean, 1.0))
-        log_amp_delta_blr = numpyro.sample("log_amp_delta_blr", dist.Normal(
-            log_amp_delta_blr_mean, jnp.full((batch_size, nBands), 2.0)))
-        lag = numpyro.sample("lag", dist.Normal(
-            lag_mean, jnp.full((batch_size, nBands-1), 10.0)))
-        log_tau_drw_blr = numpyro.sample("log_tau_drw_blr", dist.Normal(
-            log_tau_drw_blr_mean, 2.0))
-        mean = numpyro.sample("mean", dist.Normal(
-            mean_mean, jnp.full((batch_size, nBands), 1.0)))
-        alpha_host = numpyro.sample("alpha_host", dist.Normal(
-            jnp.full((batch_size,), 0.5), 1.0))
-        f_host = numpyro.sample("f_host", dist.Uniform(
-            jnp.zeros(batch_size), jnp.ones(batch_size)))
-        poly1 = numpyro.sample("poly1", dist.Normal(
-            jnp.zeros(batch_size), 10.0))
-        log_jitter = numpyro.sample("log_jitter", dist.Normal(
-            log_jitter_mean, jnp.full((batch_size, nBands), 1.0)))
+        log_tau_drw_0 = numpyro.sample("log_tau_drw0", dist.Normal(bestP['log_tau_drw0'], 1.0))
+        log_sigma_hat_0 = numpyro.sample("log_sigma_hat0", dist.Normal(bestP['log_sigma_hat0'], 1.0))
+        log_amp_delta_blr = numpyro.sample("log_amp_delta_blr", dist.Normal(jnp.full_like(bestP["log_amp_delta_blr"], jnp.log(1e-3)), 2.0))
+        lag = numpyro.sample("lag", dist.Normal(jnp.full_like(bestP["lag"], 0.0), 10.0))
+        log_tau_drw_blr = numpyro.sample("log_tau_drw_blr", dist.Normal(jnp.log(1e2), 2.0))
+        mean = numpyro.sample("mean", dist.Normal(bestP["mean"], 1.0))
+        alpha_host = numpyro.sample("alpha_host", dist.Normal(0.5, 1.0))
+        f_host = numpyro.sample("f_host", dist.Uniform(0.0, 1.0))
+        poly1 = numpyro.sample("poly1", dist.Normal(0.0, 10.0))
+        log_jitter = numpyro.sample("log_jitter", dist.Normal(jnp.full_like(bestP["log_jitter"], jnp.log(1e-4)), 1.0))
 
     # Prepare all arrays for vectorized likelihood
     Xs = [obj['X'] for obj in batch_data]
