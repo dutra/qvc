@@ -121,6 +121,21 @@ def log_nuLnu_to_m2500(log_nuLnu, z):
     )
     return m_AB
 
+def compute_apparent_mag_2500_colin(df):
+    # Load Colin's SDSS QSO 2500A magnitudes and merge with df on SDSS_NAME
+    colin_df = pd.read_csv("data/sdss_qso_mag_2500_colin.csv")
+    # Ensure SDSS_NAME is string for matching
+    colin_df['SDSS_NAME'] = colin_df['SDSS_NAME'].astype(str)
+    df['sdss_name'] = df['sdss_name'].astype(str)
+    # Merge on SDSS_NAME, bring in apparent_mag_2500
+    merged = pd.merge(df, colin_df[['SDSS_NAME', 'apparent_mag_2500_colin', 'f_host_4200']], left_on='sdss_name', right_on='SDSS_NAME', how='left')
+    # Overwrite or add the column
+    df['f_host_4200'] = merged['f_host_4200']
+    df['apparent_mag_2500'] = merged['apparent_mag_2500_colin']
+    df['apparent_mag_2500_err'] = 0.1  # Set error to NaN as not provided in Colin's data
+    return df
+
+
 def compute_apparent_mag_2500(df, logL_col='MY_LOGL2500', logL_err_col='MY_LOGL2500_ERR', z_col='z', H0=70, Om0=0.3):
     cosmo = FlatLambdaCDM(H0=H0, Om0=Om0)
     c = 2.99792458e10  # cm/s
@@ -208,6 +223,8 @@ def calculate_all_alpha_nu(df):
         alpha_nu_err_list.append(alpha_nu_err)
     df['alpha_nu'] = alpha_nu_list
     df['alpha_nu_err'] = alpha_nu_err_list
+    df['alpha_nu'] = -0.5
+    df['alpha_nu_err'] = 0.1  # Default values if no valid data
 
     return df
 
@@ -367,8 +384,8 @@ def populate_sdss_fields(objs, progress_bar=True):
         if len(i) > 1:
             print(f"Warning: {d['sdss_name']} found multiple times in SDSS data")
         i = i[0]  # Get the first index if there are multiple matches
-        d['ra'] = obj['RA']
-        d['dec'] = obj['DEC']
+        # d['ra'] = obj['RA']
+        # d['dec'] = obj['DEC']
         d['z'] = obj['Z_SYS']
         d['sdss_name'] = fits_data['SDSS_NAME'][i]  # Extract SDSS_NAME
         d['log_lbol'] = -999.0
@@ -385,11 +402,11 @@ def populate_sdss_fields(objs, progress_bar=True):
         d['ebv'] = fits_data['EBV'][i]
         d['sn_median_all'] = fits_data['SN_MEDIAN_ALL'][i]
         d['M_i'] = fits_data_2['M_I'][i]
-        d['CIV'] = fits_data['CIV'][i, 0]
-        d['FEII_UV_EW'] = fits_data['FEII_UV_EW'][i]
-        d['FEII_OPT_EW'] = fits_data['FEII_OPT_EW'][i]
-        d['HBETA'] = fits_data['HBETA'][i, 0]
-        d['HALPHA'] = fits_data['HALPHA'][i, 0]
+        # d['CIV'] = fits_data['CIV'][i, 0]
+        # d['FEII_UV_EW'] = fits_data['FEII_UV_EW'][i]
+        # d['FEII_OPT_EW'] = fits_data['FEII_OPT_EW'][i]
+        # d['HBETA'] = fits_data['HBETA'][i, 0]
+        # d['HALPHA'] = fits_data['HALPHA'][i, 0]
 
 
         d['LOGL1350'] = fits_data['LOGL1350'][i]
@@ -434,11 +451,10 @@ def populate_sdss_fields(objs, progress_bar=True):
             var_i = 1.0 / ivar_i if ivar_i > 0 else np.inf
             # Error propagation formula for color = -2.5 * log10(flux_g / flux_i)
             # σ_color^2 = (2.5/ln10)^2 * [ (σ_g/flux_g)^2 + (σ_i/flux_i)^2 ]
-            if flux_g > 0 and flux_i > 0 and np.isfinite(var_g) and np.isfinite(var_i):
-                d['color_err'] = 2.5 / np.log(10) * np.sqrt(var_g / flux_g**2 + var_i / flux_i**2)
-            else:
-                d['color_err'] = np.nan
-            
+            # if flux_g > 0 and flux_i > 0 and np.isfinite(var_g) and np.isfinite(var_i):
+            #     d['color_err'] = 2.5 / np.log(10) * np.sqrt(var_g / flux_g**2 + var_i / flux_i**2)
+            # else:
+            #     d['color_err'] = np.nan
         if any(issubclass(warning.category, RuntimeWarning) for warning in w):
             print(f"RuntimeWarning occurred for {d['sdss_name']}")
             print(fits_data_2['PSFFLUX'][i,:])
@@ -510,7 +526,34 @@ def sigma_clip_in_bins(df, bin_width=0.1, sigma=2):
 
     return pd.concat(df_clean)
 
-def load_quasar_data(file_path, populate_sdss=False):
+def populate_chi_sq_from_csv(df, csv_path="data/jul14_chi_squared_ranking_all.csv"):
+    """
+    Populate the 'chi_sq' field in df by matching 'object_id' with the CSV file.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        DataFrame with at least an 'object_id' column.
+    csv_path : str
+        Path to the CSV file containing 'object_id' and 'chi_sq' columns.
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame with a new/updated 'chi_sq' column.
+    """
+    chi_sq_df = pd.read_csv(csv_path)
+    print(chi_sq_df.head())
+    # Ensure object_id is string for matching
+    df['object_id'] = df['object_id'].astype(str)
+    chi_sq_df['object_id'] = chi_sq_df['object_id'].astype(str)
+    # Merge on object_id
+    merged = pd.merge(df, chi_sq_df[['object_id', 'chi_sq']], on='object_id', how='left')
+    # If chi_sq already exists, overwrite; else, add
+    df['chi_sq'] = merged['chi_sq']
+    return df
+
+def load_quasar_data(file_path, populate_sdss=False, apply_cut=True):
     quasar_list = read_quasars_from_hdf5(file_path)
     print("Number of quasars loaded:", len(quasar_list))
     #populate_sdss = False
@@ -527,14 +570,22 @@ def load_quasar_data(file_path, populate_sdss=False):
             break
 
     df = pd.DataFrame(quasar_list)
+    df = populate_chi_sq_from_csv(df)
     #return df
 
     df = calculate_all_alpha_nu(df)
     df['MY_LOGL2500'], df['MY_LOGL2500_ERR'] = compute_MY_LOGL2500(df)
     
 
-    df = compute_apparent_mag_2500(df, logL_col='MY_LOGL2500', logL_err_col='MY_LOGL2500_ERR')
-    
+    #df = compute_apparent_mag_2500(df, logL_col='LOGL2500', logL_err_col='LOGL2500_ERR')
+    df = compute_apparent_mag_2500_colin(df)
+
+    # Remove infinite values from numeric columns
+    columns_with_nans = df.columns[df.isna().any()].tolist()
+    print("Columns with NaNs:", columns_with_nans)
+    numeric_cols = df.select_dtypes(include=[np.number]).columns
+    df[numeric_cols] = df[numeric_cols].where(~np.isinf(df[numeric_cols]), np.nan)
+
     print("Before dropping NaNs and infs, number of quasars:", len(df))
     num_quasars_z_0_1_before = len(df[(df['z'] > 0) & (df['z'] <= 0.5)])
     num_quasars_z_gt_3_before = len(df[df['z'] > 3])
@@ -544,11 +595,11 @@ def load_quasar_data(file_path, populate_sdss=False):
     # Replace NaNs with 0 in all columns
     df = df.fillna(0)
 
-    # Remove infinite values from numeric columns
-    columns_with_nans = df.columns[df.isna().any()].tolist()
-    print("Columns with NaNs:", columns_with_nans)
-    numeric_cols = df.select_dtypes(include=[np.number]).columns
-    df[numeric_cols] = df[numeric_cols].where(~np.isinf(df[numeric_cols]), np.nan)
+    if apply_cut is False:
+        print("Skipping data cuts as apply_cut is False.")
+        return df
+
+
     df = df.dropna()
     
 
@@ -559,25 +610,24 @@ def load_quasar_data(file_path, populate_sdss=False):
     print("Number of quasars with z > 3:", num_quasars_z_gt_3)
 
     
-    df['M_2500'] = -2.5 * df['MY_LOGL2500'] + 89.29
+    #df['M_2500'] = -2.5 * df['MY_LOGL2500'] + 89.29
     
     df = df.reset_index(drop=True)
-    # Select eta_A1 and eta_A2 within 2 sigma of their median values
-    eta_A1_med = df['eta_A1'].median()
-    eta_A1_std = df['eta_A1'].std()
-    eta_A2_med = df['eta_A2'].median()
-    eta_A2_std = df['eta_A2'].std()
 
     df = df[
-        (df['alpha_nu'].between(-2, 0)) & 
+        #(df['z'].between(0.3, 1.5)) &
+        #(df['alpha_nu'].between(-2, 0)) & 
         (df['M_i'] < -22.6) & 
-        (df['apparent_mag_2500'] > 0) &
+        (df['apparent_mag_2500'].between(1, 40)) &
         (df['ebv'] < 0.05) & # 0 &
-        (df['sn_median_all'] > 3) & # 6  # reliable spectrum
-        df['FHOST_5100'] == 0
-
-        # (df['eta_A1'] >= eta_A1_med - 1 * eta_A1_std) & (df['eta_A1'] <= eta_A1_med + 1 * eta_A1_std) &
-        # (df['eta_A2'] >= eta_A2_med - 1 * eta_A2_std) & (df['eta_A2'] <= eta_A2_med + 1 * eta_A2_std)
+        #(df['EXTINCTION'] < 0.1) & 
+        (df['sn_median_all'] > 1) & # 6  # reliable spectrum
+        #(df['FHOST_5100'] <= 0) &
+        
+        #(df['f_host_4200'] <= 0) & 
+        (df['ebv'] < 0.05) # 0 &
+        #(df['LOGL2500'] > 0)
+        
     ]
     # df = df[
     #     (df['eta_A1_err'] > 0.1) & # 2
@@ -1300,4 +1350,35 @@ def apply_forward_completeness_correction(df_agn, params, cosmo_model, completen
     # Apply marginalization over completeness
     m_corr = predict_uncensored_magnitudes(df_agn, m_model, mu_err, completeness_params)
     return m_corr
+
+
+def compute_pivot_redshift(flat_samples, cosmo_model):
+    """
+    Compute the pivot redshift z_p from MCMC samples of w0 and wa.
+
+    Parameters:
+    - samples: ndarray of shape (N_samples, N_params)
+    - w0_label, wa_label: names of parameters in model_labels
+    - model_labels: list of parameter names in the same order as columns in samples
+
+    Returns:
+    - z_pivot: the pivot redshift
+    """
+
+    priors, model_labels, model_labels_latex = get_model_params(cosmo_model)
+    param_indices = {name: model_labels.index(name) for name in model_labels}
+
+
+
+    w0_samples = flat_samples[:, param_indices['w0']]
+    wa_samples = flat_samples[:, param_indices['wa']]
+
+    cov = np.cov(w0_samples, wa_samples)
+    cov_w0_wa = cov[0, 1]
+    var_wa = cov[1, 1]
+
+    a_p = 1 + cov_w0_wa / var_wa
+    z_p = 1 / a_p - 1
+
+    return z_p
 
