@@ -643,16 +643,16 @@ if __name__ == '__main__':
     print("Done with numpyro.infer.init_to_sample")
 
     # emcee works better than NUTS for multimodal posteriors
-    # nuts_kernel = AIES(
-    #     numpyro_joint_model,
-    #     moves={AIES.DEMove() : 0.9, AIES.StretchMove() : 0.1},
-    #     init_strategy=init_strategy,
-    #     )
+    nuts_kernel = AIES(
+        numpyro_joint_model,
+        moves={AIES.DEMove() : 0.9, AIES.StretchMove() : 0.1},
+        init_strategy=init_strategy,
+        )
 
     #graph = numpyro.render_model(numpyro_joint_model, model_args=(Model, batch_data,), render_distributions=True)
     #graph.render(filename="model_graph", format="png")
 
-    nuts_kernel = NUTS(numpyro_joint_model, dense_mass=True, init_strategy=init_strategy)
+    # nuts_kernel = NUTS(numpyro_joint_model, dense_mass=True, init_strategy=init_strategy)
     mcmc = MCMC(
         nuts_kernel,
         num_warmup=args.nwarm,
@@ -723,6 +723,7 @@ if __name__ == '__main__':
         result = process_samples(obj_samples_clean, obj)
         # plot
         if args.plot:
+            plot_mcmc_traces(obj_samples_clean, obj)
             m = Model(
                 obj['X'], obj['y'], obj['yerr'], 
                 kernels.quasisep.Exp(jnp.array([1, 1])),
