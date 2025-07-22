@@ -9,21 +9,26 @@ a100-80g are required to joint fit 20 sources,
 but if you just want to test small things, you can request a100 or even a5000
 
 ## Clone eztaox
-git clone git@github.com:dutra/eztaox.git
-cd eztaox
-git checkout preview
+``git clone git@github.com:dutra/eztaox.git``
+
+``cd eztaox``
+
+``git checkout preview``
 
 
 ## Create new conda env
-module load miniconda
-conda create -n jaxgpu python=3.12.11 jupyter jupyterlab "jax[cuda12]" numpyro tinygp matplotlib astropy jaxopt h5py tqdm ipykernel pandas corner scipy 
-conda activate jaxgpu
+``module load miniconda``
+
+``conda create -n jaxgpu python=3.12.11 jupyter jupyterlab "jax[cuda12]" numpyro tinygp matplotlib astropy jaxopt h5py tqdm ipykernel pandas corner scipy ``
+
+``conda activate jaxgpu``
 
 ## Install eztaox for dev
 delete the dependencies in dependencies array in eztaox/pyproject.toml
 
 in eztaox folder, run
-pip install -e .
+
+``pip install -e .``
 
 you may need to install other packages with pip, make a note of them:
 
@@ -31,21 +36,25 @@ pip install <package>
 
 ## Upload data
 
-cd eztaox/tutorials/data 
+``cd eztaox/tutorials/data ``
 
-curl -O http://quasar.astro.illinois.edu/paper_data/DR16Q/dr16q_prop_May01_2024.fits.gz gunzip dr16q_prop_May01_2024.fits.gz
+``curl -O http://quasar.astro.illinois.edu/paper_data/DR16Q/dr16q_prop_May01_2024.fits.gz gunzip dr16q_prop_May01_2024.fits.gz``
 
 Also under tutorials/data, upload the parquet files from https://www.dropbox.com/scl/fo/7a6wz93al26xm8xzv2355/ANJTBMmTSwMywlr0wSO4esM?rlkey=66tshxe23ezyjiohcrpjkdne9&e=1&st=9od96bti&dl=0
 
 ## every time you want to work:
 
-module load miniconda
-conda activate jaxgpu
+``module load miniconda``
+
+``conda activate jaxgpu``
 
 
 ## Running
 
-### Fitting multiband
+### Multiband fit
+#### Specifying objects per id
 
-JAX_ENABLE_X64=True PREFIX=test SUFFIX=joint python multiband_fit.py --progress --plot --nwarm 50 --nsamp 20 --joint --filter_object_id 1406548 1412797
+``JAX_ENABLE_X64=True PREFIX=test SUFFIX=joint python multiband_fit.py --progress --plot --nwarm 50 --nsamp 20 --joint --filter_object_id 1406548 1412797``
 
+#### Running a batch of N
+``python multiband_fit.py  --progress --filter_file data/july21_chisq2_ebv_sn.csv --file data/test_joint.h5 --plot arm 4000 --nsamp 200 --nchains -1 --joint --job_id 0 --job_N 20``
