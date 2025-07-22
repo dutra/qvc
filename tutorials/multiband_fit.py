@@ -278,7 +278,7 @@ def numpyro_joint_model(Model, batch_data, obs=None):
         log_tau_drw_blr = numpyro.sample("log_tau_drw_blr", dist.Normal(jnp.log(1e2), 2.0))
         alpha_host = numpyro.sample("alpha_host", dist.Normal(0.5, 1.0))
         f_host = numpyro.sample("f_host", dist.Uniform(0.0, 1.0))
-        poly1 = numpyro.sample("poly1", dist.Normal(0.0, 20.0))
+        poly1 = numpyro.sample("poly1", dist.Normal(0.0, 10.0))
         #bwb_A = numpyro.sample("bwb_A", dist.Normal(2.0, 0.5))
 
     with numpyro.plate("objects", batch_size, dim=-2):
@@ -576,7 +576,7 @@ if __name__ == '__main__':
     num_objects = len(batch_data)
     print(f"Running joint fit on {len(batch_data)} objects...")
 
-    estimated_nchains = 8
+    estimated_nchains = 2*((num_params - 6)*len(batch_data) + 6)
     if args.nchains < 1:
         nchains = estimated_nchains
     else:
@@ -589,14 +589,14 @@ if __name__ == '__main__':
     # emcee works better than NUTS for multimodal posteriors
     #nuts_kernel = AIES(
     #    numpyro_joint_model,
-    #    moves={AIES.DEMove() : 0.5, AIES.StretchMove() : 0.5},
+    #    moves={AIES.DEMove() : 0.9, AIES.StretchMove() : 0.1},
     #    init_strategy=init_strategy,
     #    )
 
     #graph = numpyro.render_model(numpyro_joint_model, model_args=(Model, batch_data,), render_distributions=True)
     #graph.render(filename="model_graph", format="png")
 
-    nuts_kernel = NUTS(numpyro_joint_model, init_strategy=init_strategy, dense_mass=True, max_tree_depth=4)
+     nuts_kernel = NUTS(numpyro_joint_model, init_strategy=init_strategy, dense_mass=True, max_tree_depth=4)
     mcmc = MCMC(
         nuts_kernel,
         num_warmup=args.nwarm,
@@ -667,10 +667,11 @@ if __name__ == '__main__':
         result = process_samples(obj_samples_clean, obj)
         # plot
         if args.plot:
+            plot_mcmc_traces(obj_samples_clean, obj)
             m = Model(
                 obj['X'], obj['y'], obj['yerr'], 
                 kernels.quasisep.Exp(jnp.array([1, 1])),
-                zero_mean=has_lag, has_jitter=has_jitter, has_lag=has_lag,
+                zero_mean=zero_mean, has_jitter=has_jitter, has_lag=has_lag,
                 clean_bands=['u','g','r','i','z'], z=obj['z']
             )
             psd_results = compute_psd_from_samples(obj_samples_clean, obj["clean_bands"])

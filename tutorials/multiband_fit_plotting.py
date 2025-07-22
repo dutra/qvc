@@ -343,48 +343,48 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, data, fit_bestP=Fal
     plt.close(fig)
     
 
-def plot_mcmc_traces(mcmc, data):
-    samples = mcmc.get_samples(group_by_chain=False)
-    num_warmup = mcmc.num_warmup
-    object_id = data['object_id']
+def plot_mcmc_traces(samples_dict, data, figsize=(12, 2.5), alpha=0.7):
+    """
+    Plot MCMC traces from a dictionary of samples. Supports 1D and 2D param values.
+    
+    Parameters:
+    - samples_dict: dict with keys as parameter names and values as arrays of shape (n_samples, ...)
+    - figsize: tuple, base figure size (width, height per subplot)
+    - alpha: float, line transparency
+    """
+    trace_data = {}
 
-    param_names = [k for k in samples if k != 'log_kernel_param']
-    print(param_names)
-    param_names = param_names[:20]
-    n_params = len(param_names)
-    num_chains, total_samples = samples[param_names[0]].shape
+    for name, val in samples_dict.items():
+        val = np.asarray(val)
+        if val.ndim == 1:
+            trace_data[name] = [val]
+        elif val.ndim == 2:
+            trace_data[name] = [val[:, i] for i in range(val.shape[1])]
+        else:
+            warnings.warn(f"Skipping param '{name}' with ndim={val.ndim}; only ndim=1 or 2 supported.")
+            continue
 
-    # Thinning indices (along sample axis)
-    thinned_idx = np.arange(total_samples)[::thinning]
-    thinned_warmup = num_warmup // thinning
+    total_traces = sum(len(v) for v in trace_data.values())
 
-    # Limit total figure height for display
-    height_per_plot = 2.0
-    max_height = 50
-    fig_height = min(n_params * height_per_plot, max_height)
+    fig, axes = plt.subplots(total_traces, 1, figsize=(figsize[0], figsize[1] * total_traces), sharex=True)
+    if total_traces == 1:
+        axes = [axes]
 
-    fig, axes = plt.subplots(n_params, 1, figsize=(12, fig_height), sharex=True)
+    idx = 0
+    for name, series_list in trace_data.items():
+        for j, series in enumerate(series_list):
+            label = f"{name}" if len(series_list) == 1 else f"{name}_{j}"
+            axes[idx].plot(series, alpha=alpha)
+            axes[idx].set_ylabel(label)
+            axes[idx].grid(True)
+            idx += 1
 
-    if n_params == 1:
-        axes = [axes]  # ensure axes is iterable
-
-    for i, param in enumerate(param_names):
-        ax = axes[i]
-        for c in range(num_chains):
-            trace = samples[param][c, thinned_idx]
-            ax.plot(thinned_idx, trace, alpha=0.6, lw=0.5, label=f'Chain {c+1}')
-        ax.axvline(thinned_warmup, color='k', ls='--', lw=0.8)
-        ax.set_ylabel(param, fontsize=10)
-        ax.grid(True, alpha=0.3)
-        #if i == 0:
-            #ax.legend(loc='upper right', fontsize=7)
-
-    axes[-1].set_xlabel("Step (thinned)", fontsize=11)
+    axes[-1].set_xlabel("Sample index")
     plt.tight_layout()
 
     output_dir = f"mcmc_traces/{prefix}_{suffix}/"
     os.makedirs(output_dir, exist_ok=True)
-    save_path = os.path.join(output_dir, f"{object_id}_mcmc_traces.png")
+    save_path = os.path.join(output_dir, f"{data['object_id']}_mcmc_traces.png")
     plt.savefig(save_path, dpi=150)
     print("Saved trace plot to", save_path)
     plt.close(fig)
