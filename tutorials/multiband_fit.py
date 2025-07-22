@@ -249,6 +249,9 @@ def numpyro_model(Model, X, yerr, y=None, bestP=None, clean_bands=None, z=None):
 import jax.numpy as jnp
 from jax import numpy as jnp
 from typing import List
+from numpyro.infer import SVI, Trace_ELBO
+import optax
+from numpyro.infer.autoguide import AutoNormal
 
 def pad_batch_data(batch_data):
     batch_size = len(batch_data)
@@ -309,6 +312,7 @@ def numpyro_joint_model(Model, batch_data):
     lag_mean = jnp.stack([jnp.array(obj['bestP']['lag']) for obj in batch_data])                              # (B, 4)
     mean_mean = jnp.stack([jnp.array(obj['bestP']['mean']) for obj in batch_data])                            # (B, 5)
     log_jitter_mean = jnp.stack([jnp.array(obj['bestP']['log_jitter']) + jnp.mean(obj['yerr']) for obj in batch_data]) # (B, 5)
+    
 
     with numpyro.plate("objects", batch_size):
         # Object-level parameters (shape: [B])
@@ -318,7 +322,7 @@ def numpyro_joint_model(Model, batch_data):
         alpha_host = numpyro.sample("alpha_host", dist.Normal(0.5, 1.0))
         f_host = numpyro.sample("f_host", dist.Uniform(0.0, 1.0))
         poly1 = numpyro.sample("poly1", dist.Normal(0.0, 10.0))
-        bwb_A = numpyro.sample("bwb_A", dist.Normal(2.0, 0.5))
+        #bwb_A = numpyro.sample("bwb_A", dist.Normal(2.0, 0.5))
 
     with numpyro.plate("objects", batch_size, dim=-2):
         with numpyro.plate("band", nBands, dim=-1):
@@ -346,7 +350,7 @@ def numpyro_joint_model(Model, batch_data):
             "log_amp_delta_blr": log_amp_delta_blr[i],
             "log_jitter": log_jitter[i],
             "lag": lag[i],
-            "bwb_A": bwb_A[i],
+            #"bwb_A": bwb_A[i],
             **powerlaw_samples,
         }
 
@@ -358,13 +362,13 @@ def numpyro_joint_model(Model, batch_data):
         valid_idx = mask[i]
         X_masked = (jnp.where(valid_idx, X_i[:,0], jnp.max(X_i[:,0])), jnp.where(valid_idx, X_i[:,1], 0))
         y_masked = jnp.where(valid_idx, y_i, 0.0)
-        yerr_masked = jnp.where(valid_idx, yerr_i, 99999.0)
+        yerr_masked = jnp.where(valid_idx, yerr_i, 9.0)
 
         # Mask Lyman-alpha affected bands
         band_idx = X_masked[1].astype(int)  # assumes 2nd column of X is band index
         lambda_obs = jnp.array([3551., 4686., 6165., 7481., 8931.])  # ugriz in Å
         lambda_rest = lambda_obs[band_idx] / (1 + zs[i])
-        yerr_masked = jnp.where(lambda_rest < 1216.0, 99999.0, yerr_masked)
+        yerr_masked = jnp.where(lambda_rest < 1216.0, 9.0, yerr_masked)
         # TODO: pad width
         
         m = Model(
@@ -662,7 +666,7 @@ if __name__ == '__main__':
     # emcee works better than NUTS for multimodal posteriors
     nuts_kernel = AIES(
         numpyro_joint_model,
-        moves={AIES.DEMove() : 0.9, AIES.StretchMove() : 0.1},
+        moves={AIES.DEMove() : 0.5, AIES.StretchMove() : 0.5},
         init_strategy=init_strategy,
         )
 
@@ -685,6 +689,44 @@ if __name__ == '__main__':
     #ns = NestedSampler(numpyro_joint_model)
     #ns.run(jax.random.PRNGKey(0), Model, batch_data)
     #samples_flat = ns.get_samples(jax.random.PRNGKey(0), num_samples=1000)
+
+    # --- SVI setup ---
+
+    # Define guide (mean-field)
+    """
+
+    guide = numpyro.infer.autoguide.AutoMultivariateNormal(numpyro_joint_model)
+
+    svi = numpyro.infer.SVI(
+        model=numpyro_joint_model,
+        guide=guide,
+        optim=numpyro.optim.Adam(1e-2),
+        loss=numpyro.infer.Trace_ELBO(),
+    )
+
+    svi_state = svi.init(jax.random.PRNGKey(0), Model, batch_data)
+
+    # Training loop
+    def run_svi_training(svi_state):
+        def svi_step(carry, _):
+            svi_state = carry
+            svi_state, loss = svi.update(svi_state, Model, batch_data)
+            return svi_state, loss
+
+        return lax.scan(svi_step, svi_state, None, length=1000)
+
+    # JIT the wrapper function
+    run_svi_training_jit = jax.jit(run_svi_training)
+    svi_state, losses = run_svi_training_jit(svi_state)
+
+    print(losses)
+
+    params = svi.get_params(svi_state)
+    print(guide.get_posterior(params))
+    samples_flat = guide.sample_posterior(jax.random.PRNGKey(1), params, sample_shape=(args.nsamp,))
+
+    print("Done with SVI run")
+    """
 
     print("Done with MCMC run")
 
@@ -711,7 +753,7 @@ if __name__ == '__main__':
             psd_results = compute_psd_from_samples(obj_samples_clean, obj["clean_bands"])
             save_combined_plot(obj_samples_clean, m, obj['X'], obj['y'], obj['yerr'], obj['band_idx'], result, fit_bestP=False, psd_results=psd_results)
             #dump_mcmc_diagnostics(mcmc, obj, i, len(batch_data))
-            #plot_trace_numpyro_for_object(mcmc, obj, i, len(batch_data))
+            plot_trace_numpyro_for_object(samples_flat, obj, i, len(batch_data))
             plot_posterior_for_object(samples_flat, obj, i, len(batch_data))
         results.append(obj | result)
         print("++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++", flush=True)

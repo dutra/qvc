@@ -28,7 +28,7 @@ colors = {'u': 'tab:blue',
           'y': 'tab:gray'}
 
 
-def plot_trace_numpyro_for_object(mcmc, data, i, batch_data_len):
+def plot_trace_numpyro_for_object(samples_flat, data, i, batch_data_len):
     """
     Plot trace plots for object-specific parameters from NumPyro MCMC samples.
 
@@ -48,7 +48,6 @@ def plot_trace_numpyro_for_object(mcmc, data, i, batch_data_len):
         Suffix for output directory.
     """
     object_id = data['object_id']
-    samples_flat = mcmc.get_samples(group_by_chain=False)
 
     # Extract per-object samples
     obj_samples_clean = {
