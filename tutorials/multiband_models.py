@@ -91,12 +91,12 @@ class MyMultibandContiBLR(tinygp.kernels.Kernel):
     def coord_to_sortable(self, X) -> JAXArray:
         return X[0]
 
-    def ke(self, tau, tau_drw) -> JAXArray:
+    def k(self, tau, tau_drw) -> JAXArray:
         tau = jnp.abs(tau)
         drw = jnp.exp(-tau / tau_drw)
         return drw
 
-    def k(self, tau, tau_d) -> JAXArray:
+    def ke(self, tau, tau_d) -> JAXArray:
         delta_t = jnp.abs(tau)
         width = self.w
 

@@ -308,7 +308,7 @@ def numpyro_joint_model(Model, batch_data):
     log_amp_delta_blr_mean = jnp.stack([jnp.array(obj['bestP']['log_amp_delta_blr']) for obj in batch_data])  # (B, 5)
     lag_mean = jnp.stack([jnp.array(obj['bestP']['lag']) for obj in batch_data])                              # (B, 4)
     mean_mean = jnp.stack([jnp.array(obj['bestP']['mean']) for obj in batch_data])                            # (B, 5)
-    log_jitter_mean = jnp.stack([jnp.array(obj['bestP']['log_jitter']) for obj in batch_data])                # (B, 5)
+    log_jitter_mean = jnp.stack([jnp.array(obj['bestP']['log_jitter']) + jnp.mean(obj['yerr']) for obj in batch_data]) # (B, 5)
 
     with numpyro.plate("objects", batch_size):
         # Object-level parameters (shape: [B])
@@ -324,7 +324,7 @@ def numpyro_joint_model(Model, batch_data):
             # Parameters with shape [B, nBands]
             mean = numpyro.sample("mean", dist.Normal(mean_mean, 1.0))
             log_amp_delta_blr = numpyro.sample("log_amp_delta_blr", dist.Normal(log_amp_delta_blr_mean, 2.0))
-            log_jitter = numpyro.sample("log_jitter", dist.Normal(log_jitter_mean, 1.0))
+            log_jitter = numpyro.sample("log_jitter", dist.Normal(log_jitter_mean + 1e-6, 1.0))
 
         with numpyro.plate("band_lag", nBands-1):
             lag = numpyro.sample("lag", dist.Normal(lag_mean, 10.0))
