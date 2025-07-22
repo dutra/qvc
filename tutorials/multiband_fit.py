@@ -596,7 +596,7 @@ if __name__ == '__main__':
     #graph = numpyro.render_model(numpyro_joint_model, model_args=(Model, batch_data,), render_distributions=True)
     #graph.render(filename="model_graph", format="png")
 
-     nuts_kernel = NUTS(numpyro_joint_model, init_strategy=init_strategy, dense_mass=True, max_tree_depth=4)
+    nuts_kernel = NUTS(numpyro_joint_model, init_strategy=init_strategy, dense_mass=True, max_tree_depth=5)
     mcmc = MCMC(
         nuts_kernel,
         num_warmup=args.nwarm,
