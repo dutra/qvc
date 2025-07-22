@@ -19,6 +19,7 @@ import scipy.stats as st
 import numpyro
 from numpyro import infer
 from numpyro.infer import MCMC, NUTS, AIES, Predictive
+from numpyro.contrib.nested_sampling import NestedSampler
 import numpyro.distributions as dist
 
 from tinygp import kernels, solvers
@@ -289,7 +290,6 @@ def pad_batch_data(batch_data):
 def numpyro_joint_model(Model, batch_data):
     batch_size = len(batch_data)
     nBands = 5  # or use from config
-    band_lag_count = 4  # if e.g. lag is only defined for 4 bands
 
     # Shared across all objects
     powerlaw_samples = {
@@ -312,12 +312,13 @@ def numpyro_joint_model(Model, batch_data):
 
     with numpyro.plate("objects", batch_size):
         # Object-level parameters (shape: [B])
-        log_tau_drw0 = numpyro.sample("log_tau_drw0", dist.Normal(log_tau_drw0_mean, 1.0))
-        log_sigma_hat0 = numpyro.sample("log_sigma_hat0", dist.Normal(log_sigma_hat0_mean, 1.0))
+        log_tau_drw0 = numpyro.sample("log_tau_drw0", dist.Normal(log_tau_drw0_mean, 3.0))
+        log_sigma_hat0 = numpyro.sample("log_sigma_hat0", dist.Normal(log_sigma_hat0_mean, 3.0))
         log_tau_drw_blr = numpyro.sample("log_tau_drw_blr", dist.Normal(jnp.log(1e2), 2.0))
         alpha_host = numpyro.sample("alpha_host", dist.Normal(0.5, 1.0))
         f_host = numpyro.sample("f_host", dist.Uniform(0.0, 1.0))
         poly1 = numpyro.sample("poly1", dist.Normal(0.0, 10.0))
+        bwb_A = numpyro.sample("bwb_A", dist.Normal(2.0, 0.5))
 
     with numpyro.plate("objects", batch_size, dim=-2):
         with numpyro.plate("band", nBands, dim=-1):
@@ -345,6 +346,7 @@ def numpyro_joint_model(Model, batch_data):
             "log_amp_delta_blr": log_amp_delta_blr[i],
             "log_jitter": log_jitter[i],
             "lag": lag[i],
+            "bwb_A": bwb_A[i],
             **powerlaw_samples,
         }
 
@@ -354,12 +356,12 @@ def numpyro_joint_model(Model, batch_data):
 
         # Slice valid data points using mask[i]
         valid_idx = mask[i]
-        X_masked = jnp.where(valid_idx[:, None], X_i, 0.0)
+        X_masked = (jnp.where(valid_idx, X_i[:,0], jnp.max(X_i[:,0])), jnp.where(valid_idx, X_i[:,1], 0))
         y_masked = jnp.where(valid_idx, y_i, 0.0)
         yerr_masked = jnp.where(valid_idx, yerr_i, 99999.0)
 
         # Mask Lyman-alpha affected bands
-        band_idx = X_masked[:, 1].astype(int)  # assumes 2nd column of X is band index
+        band_idx = X_masked[1].astype(int)  # assumes 2nd column of X is band index
         lambda_obs = jnp.array([3551., 4686., 6165., 7481., 8931.])  # ugriz in Å
         lambda_rest = lambda_obs[band_idx] / (1 + zs[i])
         yerr_masked = jnp.where(lambda_rest < 1216.0, 99999.0, yerr_masked)
@@ -376,8 +378,15 @@ def numpyro_joint_model(Model, batch_data):
         )
         return m.log_prob(params)
 
-    total_log_prob = jax.vmap(log_prob_fn)(jnp.arange(batch_size)).sum()
-    numpyro.factor("likelihood", total_log_prob)
+    log_probs = jax.vmap(log_prob_fn)(jnp.arange(batch_size))
+
+    # Final log probability
+    #with numpyro.plate("objects", batch_size):
+    #    for i in range(batch_size):
+    #        #jax.debug.print("log_prob for object {i}: {lp}", i=i, lp=log_probs[i])
+    #        numpyro.factor(f"log_like_{i}", log_probs[i])
+    #jax.debug.print("total_log_prob = {x}:", x=log_probs.sum())
+    numpyro.factor("likelihood", log_probs.sum())
 
 
 def numpyro_joint_model_OLD(Model, batch_data):
@@ -636,7 +645,7 @@ if __name__ == '__main__':
     num_objects = len(batch_data)
     print(f"Running joint fit on {len(batch_data)} objects...")
 
-    estimated_nchains = 2*((num_params - 6)*len(batch_data) + 6)
+    estimated_nchains = 8
     if args.nchains < 1:
         nchains = estimated_nchains
     else:
@@ -656,7 +665,11 @@ if __name__ == '__main__':
     #    moves={AIES.DEMove() : 0.9, AIES.StretchMove() : 0.1},
     #    init_strategy=init_strategy,
     #    )
-    nuts_kernel = NUTS(numpyro_joint_model, init_strategy=init_strategy)
+
+    #graph = numpyro.render_model(numpyro_joint_model, model_args=(Model, batch_data,), render_distributions=True)
+    #graph.render(filename="model_graph", format="png")
+
+    nuts_kernel = NUTS(numpyro_joint_model, dense_mass=True, init_strategy=init_strategy)
     mcmc = MCMC(
         nuts_kernel,
         num_warmup=args.nwarm,
@@ -668,6 +681,10 @@ if __name__ == '__main__':
     mcmc.run(jax.random.PRNGKey(0), Model, batch_data)
     samples_flat = mcmc.get_samples(group_by_chain=False)
     diagnostics = mcmc.get_extra_fields()
+
+    #ns = NestedSampler(numpyro_joint_model)
+    #ns.run(jax.random.PRNGKey(0), Model, batch_data)
+    #samples_flat = ns.get_samples(jax.random.PRNGKey(0), num_samples=1000)
 
     print("Done with MCMC run")
 
@@ -693,9 +710,9 @@ if __name__ == '__main__':
             )
             psd_results = compute_psd_from_samples(obj_samples_clean, obj["clean_bands"])
             save_combined_plot(obj_samples_clean, m, obj['X'], obj['y'], obj['yerr'], obj['band_idx'], result, fit_bestP=False, psd_results=psd_results)
-            dump_mcmc_diagnostics(mcmc, obj, i, len(batch_data))
+            #dump_mcmc_diagnostics(mcmc, obj, i, len(batch_data))
             #plot_trace_numpyro_for_object(mcmc, obj, i, len(batch_data))
-            plot_posterior_for_object(mcmc, obj, i, len(batch_data))
+            plot_posterior_for_object(samples_flat, obj, i, len(batch_data))
         results.append(obj | result)
         print("++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++", flush=True)
         print(f"Quasar {i+1}/{len(batch_data)} Object ID: {obj['object_id']}", flush=True)

@@ -116,7 +116,7 @@ def save_lc_plot(times, mags, magerrs, object_id):
     plt.savefig(os.path.join("light_curves", f'{object_id}_light_curve.png'))
     plt.close(fig)
 
-def plot_posterior_for_object(mcmc, data, i, batch_data_len):
+def plot_posterior_for_object(samples_flat, data, i, batch_data_len):
     """
     Plot a corner plot of posterior parameters for a specific object from NumPyro MCMC output.
 
@@ -136,9 +136,6 @@ def plot_posterior_for_object(mcmc, data, i, batch_data_len):
         Output directory suffix.
     """
     object_id = data['object_id']
-
-    # Get flat samples
-    samples_flat = mcmc.get_samples(group_by_chain=False)
 
     # Extract per-object samples
     obj_samples_clean = {

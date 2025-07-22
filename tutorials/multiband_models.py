@@ -236,6 +236,7 @@ class MyMultibandConti(tinygp.kernels.Kernel):
 
 # Override MultiVarModel
 class MyMultiVarModel(MultiVarModel):
+    yerr: JAXArray | NDArray
     clean_bands: JAXArray
     z: float
 
@@ -248,21 +249,37 @@ class MyMultiVarModel(MultiVarModel):
         **kwargs,
     ) -> None:
         super().__init__(X, y, yerr, kernel, **kwargs)
+        self.yerr = yerr
         self.clean_bands = kwargs.get("clean_bands", None)
         self.z = kwargs.get("z", None)
 
     @staticmethod
     def mean_func(
-        zero_mean: bool, nBand: int, params: dict[str, JAXArray], X: JAXArray
+        zero_mean: bool, nBand: int, params: dict[str, JAXArray], y: JAXArray, yerr: JAXArray, X: JAXArray
     ) -> JAXArray:
-        #zero_mean = True
+
+        band_idx = X[1]
+
         if zero_mean is True:
-            means = jnp.zeros(nBand)[X[1]]
+            mean_per_obs = jnp.zeros(nBand)[band_idx]
         else:
             time_centered = (X[0] - jnp.nanmean(X[0]))
             time_scaled = time_centered #/ (jnp.nanmax(X[0]) - jnp.nanmin(X[0]))
-            means = jnp.atleast_1d(params["mean"])[X[1]] + params["poly1"] * time_scaled / 100000
-        return means
+            mean_per_obs = jnp.atleast_1d(params["mean"])[band_idx] + params["poly1"] * time_scaled / 100000
+
+            # Bluer when brighter
+            """
+            if "bwb_A" in params:
+
+                lambda_pivot = jnp.array([3551., 4686., 6165., 7481., 8931.])
+                beta_per_obs = params["bwb_A"] * jnp.log(lambda_pivot[band_idx] / 2500.0)
+
+                print(jnp.shape(beta_per_obs), jnp.shape(y), jnp.shape(mean_per_obs))
+
+                mean_per_obs = mean_per_obs - beta_per_obs * y
+            """
+
+        return mean_per_obs
     
     def _build_gp(
         self, params: dict[str, JAXArray]
@@ -272,13 +289,13 @@ class MyMultiVarModel(MultiVarModel):
         log_sigma_hat_band_blr = self.my_amp_transform_blr(params)
         log_tau_band_rf = self.my_tau_drw_transform(params)
 
-        means = partial(
-            MyMultiVarModel.mean_func, self.zero_mean, log_sigma_hat_band.shape[0], params
-        )
-
         # time axis transform: t and band are not sorted,
         # inds gives the sorted indices for the new_t
         X, inds = self.lag_transform(self.X, self.has_lag, params)
+
+        means = partial(
+            MyMultiVarModel.mean_func, self.zero_mean, log_sigma_hat_band.shape[0], params, self.y, self.yerr
+        )
 
         t = X[0]
         band = X[1]
