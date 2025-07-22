@@ -331,9 +331,7 @@ def numpyro_joint_model(Model, batch_data):
         alpha_host = numpyro.sample("alpha_host", dist.Normal(0.5, 1.0))
         #alpha_host = jnp.full_like(alpha_host, 0.5)  # Fix to a constant value
         f_host = numpyro.sample("f_host", dist.Uniform(0.0, 1.0))
-        #f_host = jnp.full_like(f_host, 0.5)  # Fix to a constant value
-        poly1 = numpyro.sample("poly1", dist.Normal(0.0, 20.0))
-        #poly1 = jnp.full_like(poly1, 0.0)  # Fix to a constant value
+        poly1 = numpyro.sample("poly1", dist.Normal(0.0, 10.0))
         #bwb_A = numpyro.sample("bwb_A", dist.Normal(2.0, 0.5))
 
     with numpyro.plate("objects", batch_size, dim=-2):
@@ -634,7 +632,7 @@ if __name__ == '__main__':
     num_objects = len(batch_data)
     print(f"Running joint fit on {len(batch_data)} objects...")
 
-    estimated_nchains = 8
+    estimated_nchains = 2*((num_params - 6)*len(batch_data) + 6)
     if args.nchains < 1:
         nchains = estimated_nchains
     else:
@@ -645,16 +643,16 @@ if __name__ == '__main__':
     print("Done with numpyro.infer.init_to_sample")
 
     # emcee works better than NUTS for multimodal posteriors
-    nuts_kernel = AIES(
-        numpyro_joint_model,
-        moves={AIES.DEMove() : 0.5, AIES.StretchMove() : 0.5},
-        init_strategy=init_strategy,
-        )
+    # nuts_kernel = AIES(
+    #     numpyro_joint_model,
+    #     moves={AIES.DEMove() : 0.9, AIES.StretchMove() : 0.1},
+    #     init_strategy=init_strategy,
+    #     )
 
     #graph = numpyro.render_model(numpyro_joint_model, model_args=(Model, batch_data,), render_distributions=True)
     #graph.render(filename="model_graph", format="png")
 
-    #nuts_kernel = NUTS(numpyro_joint_model, dense_mass=True, init_strategy=init_strategy)
+    nuts_kernel = NUTS(numpyro_joint_model, dense_mass=True, init_strategy=init_strategy)
     mcmc = MCMC(
         nuts_kernel,
         num_warmup=args.nwarm,
