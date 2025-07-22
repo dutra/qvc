@@ -476,7 +476,7 @@ def process_samples(samples, data):
         return median, 0.5 * (upper - lower)
 
     # parameter estimates
-    log_jitter, log_jitter_err = sym_percentile(np.log10(np.exp(2*samples['log_jitter'])))
+    #log_jitter, log_jitter_err = sym_percentile(np.log10(np.exp(2*samples['log_jitter'])))
     poly1, poly1_err = sym_percentile(samples['poly1'])
     mean, mean_err = sym_percentile(samples['mean'])
     #log_lag_blr, log_lag_blr_err = sym_percentile(np.log10(np.exp(samples['log_lag_blr'])))
@@ -534,7 +534,7 @@ def process_samples(samples, data):
             log_sigma_blr=log_sigma_blr,
             log_sigma_blr_err=log_sigma_blr_err,
             # other
-            log_jitter=log_jitter,
+            #log_jitter=log_jitter,
             poly1=poly1,
             poly1_err=poly1_err,
             mean=mean,

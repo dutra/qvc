@@ -72,7 +72,7 @@ from solvers import DirectFullRank
 
 # define params
 zero_mean = False
-has_jitter = True
+has_jitter = False
 has_lag = True
 
 
@@ -305,39 +305,51 @@ def numpyro_joint_model(Model, batch_data):
         }.items()
     }
 
+    #powerlaw_samples = {
+    #    "eta_A1": 0.0,
+    #    "eta_A2": 0.0,
+    #    "eta_tau1": 0.0,
+    #    "eta_tau2": 0.0,
+    #}
+
     # Extract object-level prior means
     log_tau_drw0_mean = jnp.array([obj['bestP']['log_tau_drw0'] for obj in batch_data])
     log_sigma_hat0_mean = jnp.array([obj['bestP']['log_sigma_hat0'] for obj in batch_data])
     log_amp_delta_blr_mean = jnp.stack([jnp.array(obj['bestP']['log_amp_delta_blr']) for obj in batch_data])  # (B, 5)
     lag_mean = jnp.stack([jnp.array(obj['bestP']['lag']) for obj in batch_data])                              # (B, 4)
     mean_mean = jnp.stack([jnp.array(obj['bestP']['mean']) for obj in batch_data])                            # (B, 5)
-    log_jitter_mean = jnp.stack([jnp.array(obj['bestP']['log_jitter']) + jnp.mean(obj['yerr']) for obj in batch_data]) # (B, 5)
+    #log_jitter_mean = jnp.stack([jnp.array(obj['bestP']['log_jitter']) + jnp.mean(obj['yerr']) for obj in batch_data]) # (B, 5)
     
-
     with numpyro.plate("objects", batch_size):
         # Object-level parameters (shape: [B])
-        log_tau_drw0 = numpyro.sample("log_tau_drw0", dist.Normal(log_tau_drw0_mean, 3.0))
-        log_sigma_hat0 = numpyro.sample("log_sigma_hat0", dist.Normal(log_sigma_hat0_mean, 3.0))
+        log_tau_drw0 = numpyro.sample("log_tau_drw0", dist.Normal(log_tau_drw0_mean, 2.0))
+        #log_tau_drw0 = jnp.full_like(log_tau_drw0, jnp.log(1e2))  # Fix to a constant value
+        log_sigma_hat0 = numpyro.sample("log_sigma_hat0", dist.Normal(log_sigma_hat0_mean, 2.0))
+        #log_sigma_hat0 = jnp.full_like(log_sigma_hat0_mean, jnp.log(1e-1))  # Fix to a constant value
         log_tau_drw_blr = numpyro.sample("log_tau_drw_blr", dist.Normal(jnp.log(1e2), 2.0))
+        #log_tau_drw_blr = jnp.full_like(log_tau_drw_blr, jnp.log(1e2))  # Fix to a constant value
         alpha_host = numpyro.sample("alpha_host", dist.Normal(0.5, 1.0))
+        #alpha_host = jnp.full_like(alpha_host, 0.5)  # Fix to a constant value
         f_host = numpyro.sample("f_host", dist.Uniform(0.0, 1.0))
-        poly1 = numpyro.sample("poly1", dist.Normal(0.0, 10.0))
+        #f_host = jnp.full_like(f_host, 0.5)  # Fix to a constant value
+        poly1 = numpyro.sample("poly1", dist.Normal(0.0, 20.0))
+        #poly1 = jnp.full_like(poly1, 0.0)  # Fix to a constant value
         #bwb_A = numpyro.sample("bwb_A", dist.Normal(2.0, 0.5))
 
     with numpyro.plate("objects", batch_size, dim=-2):
         with numpyro.plate("band", nBands, dim=-1):
             # Parameters with shape [B, nBands]
             mean = numpyro.sample("mean", dist.Normal(mean_mean, 1.0))
+            #mean = jnp.full_like(mean_mean, 0.0)  # Fix to a constant value
             log_amp_delta_blr = numpyro.sample("log_amp_delta_blr", dist.Normal(log_amp_delta_blr_mean, 2.0))
-            log_jitter = numpyro.sample("log_jitter", dist.Normal(log_jitter_mean + 1e-6, 1.0))
+            #log_amp_delta_blr = jnp.full_like(log_amp_delta_blr_mean, jnp.log(1e-3))  # Fix to a constant value
+            #log_jitter = numpyro.sample("log_jitter", dist.Normal(log_jitter_mean + 1e-6, 1.0))
 
         with numpyro.plate("band_lag", nBands-1):
             lag = numpyro.sample("lag", dist.Normal(lag_mean, 10.0))
+            #lag = jnp.full_like(lag_mean, 0.0)  # Fix to a constant value
 
-    # Prepare padded observations ahead of time
-    Xs, ys, yerrs, mask, clean_bands_list, zs = pad_batch_data(batch_data)
-
-    def log_prob_fn(i):
+    for i, data in enumerate(batch_data):
         # Collect params for object i
         params = {
             "log_tau_drw0": log_tau_drw0[i],
@@ -348,49 +360,22 @@ def numpyro_joint_model(Model, batch_data):
             "poly1": poly1[i],
             "mean": mean[i],
             "log_amp_delta_blr": log_amp_delta_blr[i],
-            "log_jitter": log_jitter[i],
+            #"log_jitter": log_jitter[i],
             "lag": lag[i],
             #"bwb_A": bwb_A[i],
             **powerlaw_samples,
         }
 
-        X_i = Xs[i]      # shape (max_len, feature_dim)
-        y_i = ys[i]      # shape (max_len,)
-        yerr_i = yerrs[i]  # shape (max_len,)
-
-        # Slice valid data points using mask[i]
-        valid_idx = mask[i]
-        X_masked = (jnp.where(valid_idx, X_i[:,0], jnp.max(X_i[:,0])), jnp.where(valid_idx, X_i[:,1], 0))
-        y_masked = jnp.where(valid_idx, y_i, 0.0)
-        yerr_masked = jnp.where(valid_idx, yerr_i, 9.0)
-
-        # Mask Lyman-alpha affected bands
-        band_idx = X_masked[1].astype(int)  # assumes 2nd column of X is band index
-        lambda_obs = jnp.array([3551., 4686., 6165., 7481., 8931.])  # ugriz in Å
-        lambda_rest = lambda_obs[band_idx] / (1 + zs[i])
-        yerr_masked = jnp.where(lambda_rest < 1216.0, 9.0, yerr_masked)
-        # TODO: pad width
-        
         m = Model(
-            X_masked, y_masked, yerr_masked,
-            kernels.quasisep.Exp(jnp.array([1.0, 1.0])),
-            zero_mean=zero_mean,
-            has_jitter=has_jitter,
-            has_lag=has_lag,
-            clean_bands=['u', 'g', 'r', 'i', 'z'],
-            z=zs[i],
+            data['X'], data['y'], data['yerr'],
+            kernels.quasisep.Exp(jnp.array([1, 1])),  # Placeholder, your Model will build the kernel
+            zero_mean=zero_mean, has_jitter=has_jitter, has_lag=has_lag,
+            clean_bands=data['clean_bands'], z=data['z']
         )
-        return m.log_prob(params)
-
-    log_probs = jax.vmap(log_prob_fn)(jnp.arange(batch_size))
-
-    # Final log probability
-    #with numpyro.plate("objects", batch_size):
-    #    for i in range(batch_size):
-    #        #jax.debug.print("log_prob for object {i}: {lp}", i=i, lp=log_probs[i])
-    #        numpyro.factor(f"log_like_{i}", log_probs[i])
-    #jax.debug.print("total_log_prob = {x}:", x=log_probs.sum())
-    numpyro.factor("likelihood", log_probs.sum())
+        log_prob = m.log_prob(params)
+        #jax.debug.print("log_prob: {lp} {i}", lp=log_prob, i=i)
+        log_prob = jnp.where(jnp.isfinite(log_prob), log_prob, -1e20)
+        numpyro.factor(f"loglike_{i}", log_prob)
 
 
 def numpyro_joint_model_OLD(Model, batch_data):
@@ -655,10 +640,6 @@ if __name__ == '__main__':
     else:
         nchains = args.nchains
     print(f"{args.nwarm=}, {args.nsamp=}, {args.nchains=}, estimated num_chains: {estimated_nchains}, {num_params=}, {len(batch_data)=}")
-
-    # Print estimated memory usage
-    memory_est = estimate_numpyro_gpu_memory_vectorized(num_params_per_object=num_params, num_objects=num_objects, num_chains=nchains, num_samples=args.nsamp, num_warmup=args.nwarm)
-    print(f"Estimated GPU memory usage (vectorized): {memory_est:.2f} GB")
     
     init_strategy = numpyro.infer.init_to_sample()
     print("Done with numpyro.infer.init_to_sample")
@@ -740,7 +721,7 @@ if __name__ == '__main__':
             k: v[:, i] if k not in ['eta_A1', 'eta_A2', 'eta_tau1', 'eta_tau2'] else v
             for k, v in samples_flat.items()
         }
-        print(obj_samples_clean['log_jitter'].shape)
+        #print(obj_samples_clean['log_jitter'].shape)
         result = process_samples(obj_samples_clean, obj)
         # plot
         if args.plot:

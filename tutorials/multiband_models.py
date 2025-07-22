@@ -80,7 +80,7 @@ class MyMultibandContiBLR(tinygp.kernels.Kernel):
     tau_drw_blr: float
     w: jnp.ndarray
 
-    def __init__(self, amplitudes, amplitudes_blr, lag_blr, taus, tau_drw_blr, log_w) -> None:
+    def __init__(self, amplitudes, amplitudes_blr, lag_blr, taus, tau_drw_blr, log_w=1) -> None:
         self.amplitudes = amplitudes
         self.amplitudes_blr = amplitudes_blr
         self.lag_blr = jnp.zeros_like(lag_blr)
@@ -294,7 +294,7 @@ class MyMultiVarModel(MultiVarModel):
         X, inds = self.lag_transform(self.X, self.has_lag, params)
 
         means = partial(
-            MyMultiVarModel.mean_func, self.zero_mean, log_sigma_hat_band.shape[0], params, self.y, self.yerr
+            MyMultiVarModel.mean_func, self.zero_mean, log_sigma_hat_band.shape[0], params, self.y[inds], self.yerr[inds]
         )
 
         t = X[0]
@@ -429,7 +429,8 @@ class MyMultiVarModelLatent(MyMultiVarModel):
 
         amp_conti = jnp.exp(log_amps)
         amp_blr = jnp.exp(log_amps_blr)
-        lag_blr = jnp.exp(params["log_lag_blr"] - jnp.log(1 + self.z))[band_obs]
+        #lag_blr = jnp.exp(params["log_lag_blr"] - jnp.log(1 + self.z))[band_obs]
+        lag_blr = jnp.exp(2 - jnp.log(1 + self.z))[band_obs]
 
         # Clip amplitudes to lower limit of 1e-2
         amp_conti = jnp.clip(amp_conti, 1e-4, None)
@@ -449,7 +450,7 @@ class MyMultiVarModelLatent(MyMultiVarModel):
             sigma_hat=jnp.exp(params["log_sigma_hat0"]),
             scale=jnp.exp(params["log_tau_drw0"] - jnp.log(1+self.z)),
             tau_drw=jnp.exp(log_taus)[band_latent],
-            log_w=params["log_w"] - jnp.log(1 + self.z),
+            #log_w=params["log_w"] - jnp.log(1 + self.z),
         )
         X_latent = (t_latent, band_latent)
         K_latent = kernel(X_latent, X_latent) + 1e-6 * jnp.eye(M)
@@ -545,7 +546,7 @@ class MyMultiVarModelLatent(MyMultiVarModel):
             sigma_hat=jnp.exp(params["log_sigma_hat0"]),
             scale=jnp.exp(params["log_tau_drw0"] - jnp.log(1+self.z)),
             tau_drw=jnp.exp(log_taus)[band_latent], # I think?
-            log_w=params["log_w"] - jnp.log(1 + self.z),
+            #log_w=params["log_w"] - jnp.log(1 + self.z),
         )
 
         t_new_latent, band_new_latent, inv_d_new, inv_l_new = get_unique_times(t_new, band_new, lag_blr)

@@ -209,7 +209,7 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, data, fit_bestP=Fal
         else:
             posterior_median = {k: np.median(v, axis=0) for k, v in samples.items()}
             mu, std = model.pred(posterior_median, (t_test, jnp.full_like(t_test, n, dtype=int)))
-            #print(mu, std, '!!!!!!!!!!!!!!')
+            print(mu, std, '!!!!!!!!!!!!!!')
 
         # Plot the predictions
         ax_lc.plot(t_test, mu+offsets[n], alpha=0.8, color=colors[band_idx_map[n]], lw=1.0)
@@ -229,9 +229,9 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, data, fit_bestP=Fal
             psd = LombScargle(t_band[mask], y_band[mask]).power(freqs, normalization='psd')
             # Estimate the noise level (mean of error bars squared)
             if fit_bestP:
-                noise_var = np.mean(yerr[m][mask] ** 2) + np.exp(np.median(2 * samples['log_jitter'], axis=0)) #[m]
+                noise_var = np.mean(yerr[m][mask] ** 2) #+ np.exp(np.median(2 * samples['log_jitter'], axis=0)) #[m]
             else:
-                noise_var = np.mean(yerr[m][mask] ** 2) + np.exp(2 * np.median(samples['log_jitter'], axis=0))[n]
+                noise_var = np.mean(yerr[m][mask] ** 2) #+ np.exp(2 * np.median(samples['log_jitter'], axis=0))[n]
             # The Lomb-Scargle normalization is in mag^2/days, so subtract noise variance
             psd = np.clip(psd - noise_var, a_min=1e-10, a_max=None)
             # Bin the PSD in log-frequency space and plot it
