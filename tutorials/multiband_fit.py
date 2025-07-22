@@ -726,7 +726,7 @@ if __name__ == '__main__':
             m = Model(
                 obj['X'], obj['y'], obj['yerr'], 
                 kernels.quasisep.Exp(jnp.array([1, 1])),
-                zero_mean=has_lag, has_jitter=has_jitter, has_lag=has_lag,
+                zero_mean=zero_mean, has_jitter=has_jitter, has_lag=has_lag,
                 clean_bands=['u','g','r','i','z'], z=obj['z']
             )
             psd_results = compute_psd_from_samples(obj_samples_clean, obj["clean_bands"])
