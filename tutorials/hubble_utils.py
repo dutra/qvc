@@ -617,11 +617,11 @@ def load_quasar_data(file_path, populate_sdss=False, apply_cut=True):
     df = df[
         #(df['z'].between(0.3, 1.5)) &
         #(df['alpha_nu'].between(-2, 0)) & 
-        (df['M_i'] < -22.6) & 
+        #(df['M_i'] < -22.6) & 
         (df['apparent_mag_2500'].between(1, 40)) &
         (df['ebv'] < 0.05) & # 0 &
         #(df['EXTINCTION'] < 0.1) & 
-        (df['sn_median_all'] > 1) & # 6  # reliable spectrum
+        (df['sn_median_all'] > 3) & # 6  # reliable spectrum
         #(df['FHOST_5100'] <= 0) &
         
         #(df['f_host_4200'] <= 0) & 
