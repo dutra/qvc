@@ -37,6 +37,7 @@ from eztaox.initializers import DRWInit, UniformInit
 from eztaox.models import MultiVarModel, MultiVarModelFFT
 from eztaox.utils import formatlc
 
+from eztaox.models import MultiVarModel
 from eztaox.kernels.quasisep import MultibandLowRank
 from tinygp import kernels
 from tinygp import GaussianProcess
@@ -246,51 +247,8 @@ def numpyro_model(Model, X, yerr, y=None, bestP=None, clean_bands=None, z=None):
     # --- Evaluate model likelihood ---
     m.sample(sample_params)
 
-import jax.numpy as jnp
-from jax import numpy as jnp
-from typing import List
-from numpyro.infer import SVI, Trace_ELBO
-import optax
-from numpyro.infer.autoguide import AutoNormal
 
-def pad_batch_data(batch_data):
-    batch_size = len(batch_data)
-
-    # Assuming X is a tuple, where first element is array with shape (N_i, feature_dim)
-    first_X_array = batch_data[0]['X'][0]  # e.g. times array
-
-    if len(first_X_array.shape) > 1:
-        feature_dim = first_X_array.shape[1]
-    else:
-        feature_dim = 1
-
-    max_len = max(obj['X'][0].shape[0] for obj in batch_data)  # max time points length
-
-    # Prepare padded arrays
-    Xs = jnp.zeros((batch_size, max_len, feature_dim))
-    ys = jnp.zeros((batch_size, max_len))
-    yerrs = jnp.zeros((batch_size, max_len))
-    mask = jnp.zeros((batch_size, max_len), dtype=bool)
-    clean_bands_list = []
-    zs = []
-
-    for i, obj in enumerate(batch_data):
-        Xi = obj['X'][0]  # first element of tuple, e.g. times, shape (N_i, feature_dim)
-        N = Xi.shape[0]
-        if feature_dim == 1:
-            Xs = Xs.at[i, :N, 0].set(Xi)
-        else:
-            Xs = Xs.at[i, :N, :].set(Xi)
-        ys = ys.at[i, :N].set(obj['y'])
-        yerrs = yerrs.at[i, :N].set(obj['yerr'])
-        mask = mask.at[i, :N].set(True)
-        clean_bands_list.append(obj['clean_bands'])
-        zs.append(obj['z'])
-
-    zs = jnp.array(zs)
-    return Xs, ys, yerrs, mask, clean_bands_list, zs
-
-def numpyro_joint_model(Model, batch_data):
+def numpyro_joint_model(Model, batch_data, obs=None):
     batch_size = len(batch_data)
     nBands = 5  # or use from config
 
@@ -305,13 +263,6 @@ def numpyro_joint_model(Model, batch_data):
         }.items()
     }
 
-    #powerlaw_samples = {
-    #    "eta_A1": 0.0,
-    #    "eta_A2": 0.0,
-    #    "eta_tau1": 0.0,
-    #    "eta_tau2": 0.0,
-    #}
-
     # Extract object-level prior means
     log_tau_drw0_mean = jnp.array([obj['bestP']['log_tau_drw0'] for obj in batch_data])
     log_sigma_hat0_mean = jnp.array([obj['bestP']['log_sigma_hat0'] for obj in batch_data])
@@ -323,31 +274,22 @@ def numpyro_joint_model(Model, batch_data):
     with numpyro.plate("objects", batch_size):
         # Object-level parameters (shape: [B])
         log_tau_drw0 = numpyro.sample("log_tau_drw0", dist.Normal(log_tau_drw0_mean, 2.0))
-        #log_tau_drw0 = jnp.full_like(log_tau_drw0, jnp.log(1e2))  # Fix to a constant value
         log_sigma_hat0 = numpyro.sample("log_sigma_hat0", dist.Normal(log_sigma_hat0_mean, 2.0))
-        #log_sigma_hat0 = jnp.full_like(log_sigma_hat0_mean, jnp.log(1e-1))  # Fix to a constant value
         log_tau_drw_blr = numpyro.sample("log_tau_drw_blr", dist.Normal(jnp.log(1e2), 2.0))
-        #log_tau_drw_blr = jnp.full_like(log_tau_drw_blr, jnp.log(1e2))  # Fix to a constant value
         alpha_host = numpyro.sample("alpha_host", dist.Normal(0.5, 1.0))
-        #alpha_host = jnp.full_like(alpha_host, 0.5)  # Fix to a constant value
         f_host = numpyro.sample("f_host", dist.Uniform(0.0, 1.0))
-        #f_host = jnp.full_like(f_host, 0.5)  # Fix to a constant value
         poly1 = numpyro.sample("poly1", dist.Normal(0.0, 20.0))
-        #poly1 = jnp.full_like(poly1, 0.0)  # Fix to a constant value
         #bwb_A = numpyro.sample("bwb_A", dist.Normal(2.0, 0.5))
 
     with numpyro.plate("objects", batch_size, dim=-2):
         with numpyro.plate("band", nBands, dim=-1):
             # Parameters with shape [B, nBands]
             mean = numpyro.sample("mean", dist.Normal(mean_mean, 1.0))
-            #mean = jnp.full_like(mean_mean, 0.0)  # Fix to a constant value
             log_amp_delta_blr = numpyro.sample("log_amp_delta_blr", dist.Normal(log_amp_delta_blr_mean, 2.0))
-            #log_amp_delta_blr = jnp.full_like(log_amp_delta_blr_mean, jnp.log(1e-3))  # Fix to a constant value
             #log_jitter = numpyro.sample("log_jitter", dist.Normal(log_jitter_mean + 1e-6, 1.0))
 
         with numpyro.plate("band_lag", nBands-1):
             lag = numpyro.sample("lag", dist.Normal(lag_mean, 10.0))
-            #lag = jnp.full_like(lag_mean, 0.0)  # Fix to a constant value
 
     for i, data in enumerate(batch_data):
         # Collect params for object i
@@ -645,16 +587,16 @@ if __name__ == '__main__':
     print("Done with numpyro.infer.init_to_sample")
 
     # emcee works better than NUTS for multimodal posteriors
-    nuts_kernel = AIES(
-        numpyro_joint_model,
-        moves={AIES.DEMove() : 0.5, AIES.StretchMove() : 0.5},
-        init_strategy=init_strategy,
-        )
+    #nuts_kernel = AIES(
+    #    numpyro_joint_model,
+    #    moves={AIES.DEMove() : 0.5, AIES.StretchMove() : 0.5},
+    #    init_strategy=init_strategy,
+    #    )
 
     #graph = numpyro.render_model(numpyro_joint_model, model_args=(Model, batch_data,), render_distributions=True)
     #graph.render(filename="model_graph", format="png")
 
-    #nuts_kernel = NUTS(numpyro_joint_model, dense_mass=True, init_strategy=init_strategy)
+    nuts_kernel = NUTS(numpyro_joint_model, init_strategy=init_strategy, dense_mass=True, max_tree_depth=4)
     mcmc = MCMC(
         nuts_kernel,
         num_warmup=args.nwarm,
