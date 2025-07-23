@@ -253,8 +253,6 @@ class MyMultiVarModel(MultiVarModel):
         self.clean_bands = kwargs.get("clean_bands", None)
         self.z = kwargs.get("z", None)
 
-        self.clean_bands = ['u','g','r','i','z']
-
     @staticmethod
     def mean_func(
         zero_mean: bool, nBand: int, params: dict[str, JAXArray], X: JAXArray
