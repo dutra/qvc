@@ -333,41 +333,13 @@ class MyMultiVarModel(MultiVarModel):
     def my_amp_transform_blr(self, params: dict[str, JAXArray]) -> JAXArray:
         return params["log_sigma_hat0"] + jnp.atleast_1d(params["log_amp_delta_blr"])
     
-    #def my_tau_drw_transform(self, params: dict[str, JAXArray]) -> JAXArray:
-    #    eta_tau1 = params["eta_tau1"]
-    #    eta_tau2 = params["eta_tau2"]
-    #    lam_s = 2500 #params["lam_s"]
-    #    eta_break = 1.0 #params["eta_break"]
-    #    params["log_tau_band_RF"] = params["log_tau_drw0"] - jnp.log(1 + self.z) + jnp.log(10) * jnp.array([log_broken_pl(lambda_pivot[band]/(1 + self.z), lam_s, eta_tau1, eta_tau2, eta_break) for band in self.clean_bands])
-    #    return params["log_tau_band_RF"]
-
     def my_tau_drw_transform(self, params: dict[str, JAXArray]) -> JAXArray:
         eta_tau1 = params["eta_tau1"]
         eta_tau2 = params["eta_tau2"]
-        lam_s = 2500  # params["lam_s"]
-        eta_break = 1.0  # params["eta_break"]
-
-        lambda_pivot = jnp.array([3551., 4686., 6165., 7481., 8931.])
-        lambda_rf = lambda_pivot[self.bands_arr] / (1 + self.z)
-
-        # Vectorize log_broken_pl if needed
-        log_broken_pl_v = jax.vmap(log_broken_pl, in_axes=(0, None, None, None, None))
-        log_bpl = log_broken_pl_v(lambda_rf, lam_s, eta_tau1, eta_tau2, eta_break)
-
-        params["log_tau_band_RF"] = (
-            params["log_tau_drw0"]
-            - jnp.log(1 + self.z)
-            + jnp.log(10) * log_bpl
-        )
-        return params["log_tau_band_RF"]
-
-    def my_amp_transform_OLD(self, params: dict[str, JAXArray]) -> JAXArray:
-        eta_A1 = params["eta_A1"]
-        eta_A2 = params["eta_A2"]
         lam_s = 2500 #params["lam_s"]
         eta_break = 1.0 #params["eta_break"]
-        params["log_sigma_hat_band"] = params["log_sigma_hat0"] + jnp.log(10) * jnp.array([log_broken_pl(lambda_pivot[band]/(1 + self.z), lam_s, eta_A1, eta_A2, eta_break) for band in self.clean_bands])
-        return params["log_sigma_hat_band"]
+        params["log_tau_band_RF"] = params["log_tau_drw0"] - jnp.log(1 + self.z) + jnp.log(10) * jnp.array([log_broken_pl(lambda_pivot[band]/(1 + self.z), lam_s, eta_tau1, eta_tau2, eta_break) for band in self.clean_bands])
+        return params["log_tau_band_RF"]
 
     def my_amp_transform_OLDER(self, params: dict[str, JAXArray]) -> JAXArray:
         eta_A1 = params["eta_A1"]
@@ -381,34 +353,16 @@ class MyMultiVarModel(MultiVarModel):
         dilution_factor = 1.0 / (1.0 + jnp.exp(log_host_frac))   # shape: (nBands,)
         log_dilution = jnp.log(dilution_factor)
 
+        host_frac = jnp.array([
+            params["f_host"] * (lambda_pivot[band] / (1 + self.z) / 5500.0) ** params["alpha_host"]
+            for band in self.clean_bands
+        ])
+        dilution_factor = 1.0 / (1.0 + host_frac)
+        log_dilution = jnp.log(dilution_factor)
+
         # Power-law scaling across rest-frame wavelength
         params["log_sigma_hat_band"] = params["log_sigma_hat0"] + log_dilution + jnp.log(10) * jnp.array([log_broken_pl(lambda_pivot[band]/(1 + self.z), lam_s, eta_A1, eta_A2, eta_break) for band in self.clean_bands])
 
-        return params["log_sigma_hat_band"]
-
-    def my_amp_transform(self, params: dict[str, JAXArray]) -> JAXArray:
-        eta_A1 = params["eta_A1"]
-        eta_A2 = params["eta_A2"]
-        lam_s = 2500  # params["lam_s"]
-        eta_break = 1.0  # params["eta_break"]
-
-        lambda_pivot = jnp.array([3551., 4686., 6165., 7481., 8931.])
-        lambda_rf = lambda_pivot[self.bands_arr] / (1 + self.z)
-
-        # Host dilution: apply per-band correction
-        log_host_frac = jnp.log(
-            params["f_host"] + jnp.power(lambda_rf / 5500.0, params["alpha_host"])
-        )
-        dilution_factor = 1.0 / (1.0 + jnp.exp(log_host_frac))  # shape: (nBands,)
-        log_dilution = jnp.log(dilution_factor)
-
-        # Vectorize log_broken_pl if needed
-        log_broken_pl_v = jax.vmap(log_broken_pl, in_axes=(0, None, None, None, None))
-        log_bpl = log_broken_pl_v(lambda_rf, lam_s, eta_A1, eta_A2, eta_break)
-
-        params["log_sigma_hat_band"] = (
-            params["log_sigma_hat0"] + log_dilution + jnp.log(10) * log_bpl
-        )
         return params["log_sigma_hat_band"]
     
     @eqx.filter_jit

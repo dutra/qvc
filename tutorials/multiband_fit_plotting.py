@@ -209,7 +209,7 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, data, fit_bestP=Fal
         else:
             posterior_median = {k: np.median(v, axis=0) for k, v in samples.items()}
             mu, std = model.pred(posterior_median, (t_test, jnp.full_like(t_test, n, dtype=int)))
-            print(mu, std, '!!!!!!!!!!!!!!')
+            #print(mu, std, '!!!!!!!!!!!!!!')
 
         # Plot the predictions
         ax_lc.plot(t_test, mu+offsets[n], alpha=0.8, color=colors[band_idx_map[n]], lw=1.0)
@@ -278,7 +278,7 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, data, fit_bestP=Fal
             f"Object ID: {object_id} (z={data['z']:.2f})\n"
             f"$\\log_{{10}}(\\tau_{{UV RF}})$: {data['log_tau_UV_RF']:.2f} ± {data['log_tau_UV_RF_err']:.2f}\n"
             f"$\\log_{{10}}(\\tau_{{RF}})$: {log_tau_band_RF}\n                 ± {log_tau_band_RF_err}\n"
-            f"$\\log_{{10}}(\\tau_{{blr}})$: {data['log_tau_blr']:.2f} ± {data['log_tau_blr_err']:.2f}\n"
+            #f"$\\log_{{10}}(\\tau_{{blr}})$: {data['log_tau_blr']:.2f} ± {data['log_tau_blr_err']:.2f}\n"
             f"$\\log_{{10}}(\\sigma_{{UV}})$: {data['log_sigma_hat_UV']:.2f} ± {data['log_sigma_hat_UV_err']:.2f}\n"
             f"$\\log_{{10}}(\\sigma)$: {log_sigma_band}\n                 ± {log_sigma_band_err}\n"
             f"$\\eta_{{A_1}}$: {data['eta_A1']:.2f} ± {data['eta_A1_err']:.2f}\n"
