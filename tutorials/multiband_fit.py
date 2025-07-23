@@ -274,8 +274,8 @@ def numpyro_joint_model(Model, batch_data, obs=None):
     with numpyro.plate("objects", batch_size):
         # Object-level parameters (shape: [B])
         log_tau_drw0 = numpyro.sample("log_tau_drw0", dist.Normal(log_tau_drw0_mean, 2.0))
-        log_sigma_hat0 = numpyro.sample("log_sigma_hat0", dist.Normal(log_sigma_hat0_mean, 2.0))
-        log_tau_drw_blr = numpyro.sample("log_tau_drw_blr", dist.Normal(jnp.log(1e2), 2.0))
+        log_sigma_hat0 = numpyro.sample("log_sigma_hat0", dist.Normal(log_sigma_hat0_mean, 1.0))
+        #log_tau_drw_blr = numpyro.sample("log_tau_drw_blr", dist.Normal(jnp.log(1e2), 2.0))
         alpha_host = numpyro.sample("alpha_host", dist.Normal(0.5, 1.0))
         f_host = numpyro.sample("f_host", dist.Uniform(0.0, 1.0))
         poly1 = numpyro.sample("poly1", dist.Normal(0.0, 10.0))
@@ -296,7 +296,7 @@ def numpyro_joint_model(Model, batch_data, obs=None):
         params = {
             "log_tau_drw0": log_tau_drw0[i],
             "log_sigma_hat0": log_sigma_hat0[i],
-            "log_tau_drw_blr": log_tau_drw_blr[i],
+            #"log_tau_drw_blr": log_tau_drw_blr[i],
             "alpha_host": alpha_host[i],
             "f_host": f_host[i],
             "poly1": poly1[i],
@@ -469,6 +469,7 @@ def make_lc(Model, data):
 
                     
 if __name__ == '__main__': 
+    
     print("Starting multiband fit", flush=True)
 
     parser = argparse.ArgumentParser(description="Process quasars with optional filtering.")
@@ -596,7 +597,7 @@ if __name__ == '__main__':
     #graph = numpyro.render_model(numpyro_joint_model, model_args=(Model, batch_data,), render_distributions=True)
     #graph.render(filename="model_graph", format="png")
 
-    nuts_kernel = NUTS(numpyro_joint_model, init_strategy=init_strategy, dense_mass=True, max_tree_depth=5)
+    nuts_kernel = NUTS(numpyro_joint_model, init_strategy=init_strategy, dense_mass=True, max_tree_depth=6)
     mcmc = MCMC(
         nuts_kernel,
         num_warmup=args.nwarm,
