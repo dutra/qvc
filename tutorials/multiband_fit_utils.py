@@ -495,7 +495,7 @@ def process_samples(samples, data):
     log_sigma_band, log_sigma_band_err = sym_percentile(samples_log_sigma_band)
 
     # BLR
-    log_tau_blr, log_tau_blr_err = sym_percentile(np.log10(np.exp(samples['log_tau_drw_blr'])))
+    #log_tau_blr, log_tau_blr_err = sym_percentile(np.log10(np.exp(samples['log_tau_drw_blr'])))
     log_sigma_blr, log_sigma_blr_err = sym_percentile((1e-2 + samples['log_amp_delta_blr']) / np.log(10), axis=0) #TODO: Fix
 
     #lambda_s_RF, lambda_s_RF_err = sym_percentile(lambda_s_RF)
@@ -529,8 +529,8 @@ def process_samples(samples, data):
             #log_w=log_w,
             #log_w_err=log_w_err,
             # BLR
-            log_tau_blr=log_tau_blr,
-            log_tau_blr_err=log_tau_blr_err,
+            #log_tau_blr=log_tau_blr,
+            #log_tau_blr_err=log_tau_blr_err,
             log_sigma_blr=log_sigma_blr,
             log_sigma_blr_err=log_sigma_blr_err,
             # other
