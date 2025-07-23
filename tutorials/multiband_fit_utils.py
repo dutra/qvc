@@ -480,7 +480,7 @@ def process_samples(samples, data):
     poly1, poly1_err = sym_percentile(samples['poly1'])
     mean, mean_err = sym_percentile(samples['mean'])
     #log_lag_blr, log_lag_blr_err = sym_percentile(np.log10(np.exp(samples['log_lag_blr'])))
-    lag, lag_err = sym_percentile(samples['lag'])
+    #lag, lag_err = sym_percentile(samples['lag'])
     eta_A1, eta_A1_err = sym_percentile(eta_A1)
     eta_A2, eta_A2_err = sym_percentile(eta_A2)
     eta_tau1, eta_tau1_err = sym_percentile(eta_tau1)

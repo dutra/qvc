@@ -295,7 +295,7 @@ class MyMultiVarModel(MultiVarModel):
 
         # time axis transform: t and band are not sorted,
         # inds gives the sorted indices for the new_t
-        X, inds = self.lag_transform(self.X, self.has_lag, params)
+        X, inds = self.my_lag_transform(self.X, self.has_lag, params)
 
         means = partial(
             MyMultiVarModel.mean_func, self.zero_mean, log_sigma_hat_band.shape[0], params, self.y[inds], self.yerr[inds]
@@ -329,6 +329,23 @@ class MyMultiVarModel(MultiVarModel):
                 diag=diags + 1e-6,
                 mean=means), 
         inds,)
+
+    def my_lag_transform(
+        self, X: JAXArray, has_lag: bool, params: dict[str, JAXArray]
+    ) -> tuple[tuple[JAXArray, JAXArray], JAXArray]:
+        if has_lag is True:
+            lags = jnp.array([
+                params["lag0"] * (lambda_pivot[band] / (1 + self.z) / 2500.0) ** params["lag_beta"]
+                for band in self.clean_bands
+            ])
+            lags = jnp.insert(lags, 0, 0.0)
+        else:
+            nBand = params["log_amp_delta"].size + 1
+            lags = jnp.zeros(nBand)
+        t, band = X
+        new_t = t - lags[band]
+        inds = jnp.argsort(new_t)
+        return (new_t, band), inds
 
     def my_amp_transform_blr(self, params: dict[str, JAXArray]) -> JAXArray:
         return params["log_sigma_hat0"] + jnp.atleast_1d(params["log_amp_delta_blr"])
@@ -405,7 +422,7 @@ class MyMultiVarModel(MultiVarModel):
             tuple[JAXArray, JAXArray]: A tuple of the mean GP prediction and
         """
         # transform time axis
-        new_X, inds = self.lag_transform(X, self.has_lag, params)
+        new_X, inds = self.my_lag_transform(X, self.has_lag, params)
 
         # build gp, cond
         gp, inds = self._build_gp(params)

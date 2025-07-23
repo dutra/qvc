@@ -156,9 +156,10 @@ def plot_posterior_for_object(samples_flat, data, i, batch_data_len):
             v = np.asarray(v)
             for j in range(v.shape[-1]):
                 obj_samples_clean_split[f"log_amp_delta_blr_{j}"] = v[:, j]
-        # Do not plot
-        elif k in ['lag', 'log_tau_drw_blr']:
-            continue
+        elif k == "lag":
+            v = np.asarray(v)
+            for j in range(v.shape[-1]):
+                obj_samples_clean_split[f"lag_{j}"] = v[:, j]
         else:
             obj_samples_clean_split[k] = v
     obj_samples_clean = obj_samples_clean_split
