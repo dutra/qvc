@@ -19,7 +19,7 @@ import scipy.stats as st
 import numpyro
 from numpyro import infer
 from numpyro.infer import MCMC, NUTS, AIES, Predictive
-from numpyro.contrib.nested_sampling import NestedSampler
+#from numpyro.contrib.nested_sampling import NestedSampler
 import numpyro.distributions as dist
 
 from tinygp import kernels, solvers
@@ -212,7 +212,7 @@ def numpyro_joint_model(Model, batch_data, obs=None):
         #log_tau_drw_blr = numpyro.sample("log_tau_drw_blr", dist.Normal(jnp.log(1e2), 2.0))
         alpha_host = numpyro.sample("alpha_host", dist.Normal(0.5, 1.0))
         f_host = numpyro.sample("f_host", dist.Uniform(0.0, 1.0))
-        poly1 = numpyro.sample("poly1", dist.Normal(0.0, 5.0))
+        poly1 = numpyro.sample("poly1", dist.Normal(0.0, 1.0))
         #bwb_A = numpyro.sample("bwb_A", dist.Normal(2.0, 0.5))
 
         lag0 = numpyro.sample("lag0", dist.TruncatedNormal(2.0, 10.0, low=0))
@@ -221,7 +221,7 @@ def numpyro_joint_model(Model, batch_data, obs=None):
     with numpyro.plate("objects", batch_size, dim=-2):
         with numpyro.plate("band", nBands, dim=-1):
             # Parameters with shape [B, nBands]
-            mean = numpyro.sample("mean", dist.Normal(mean_mean, 0.1))
+            mean = numpyro.sample("mean", dist.Normal(mean_mean, 0.2))
             log_amp_delta_blr = numpyro.sample("log_amp_delta_blr", dist.Normal(log_amp_delta_blr_mean, 2.0))
             #log_jitter = numpyro.sample("log_jitter", dist.Normal(log_jitter_mean + 1e-6, 1.0))
 

@@ -542,8 +542,8 @@ def process_samples(samples, data):
             clean_bands=clean_bands,
             #log_lag_blr=log_lag_blr,
             #log_lag_blr_err=log_lag_blr_err,
-            lag=lag,
-            lag_err=lag_err,
+            #lag=lag,
+            #lag_err=lag_err,
             )
     return d
 

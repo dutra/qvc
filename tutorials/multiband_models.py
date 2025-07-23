@@ -238,7 +238,6 @@ class MyMultibandConti(tinygp.kernels.Kernel):
 class MyMultiVarModel(MultiVarModel):
     yerr: JAXArray | NDArray
     clean_bands: JAXArray
-    bands_arr: JAXArray
     z: float
 
     def __init__(
@@ -254,12 +253,11 @@ class MyMultiVarModel(MultiVarModel):
         self.clean_bands = kwargs.get("clean_bands", None)
         self.z = kwargs.get("z", None)
 
-        band_map = {'u': 0, 'g': 1, 'r': 2, 'i': 3, 'z': 4}
-        self.bands_arr = jnp.array([band_map[b] for b in self.clean_bands])
+        self.clean_bands = ['u','g','r','i','z']
 
     @staticmethod
     def mean_func(
-        zero_mean: bool, nBand: int, params: dict[str, JAXArray], y: JAXArray, yerr: JAXArray, X: JAXArray
+        zero_mean: bool, nBand: int, params: dict[str, JAXArray], X: JAXArray
     ) -> JAXArray:
 
         band_idx = X[1]
@@ -267,21 +265,10 @@ class MyMultiVarModel(MultiVarModel):
         if zero_mean is True:
             mean_per_obs = jnp.zeros(nBand)[band_idx]
         else:
-            time_centered = (X[0] - jnp.nanmean(X[0]))
-            time_scaled = time_centered #/ (jnp.nanmax(X[0]) - jnp.nanmin(X[0]))
-            mean_per_obs = jnp.atleast_1d(params["mean"])[band_idx] + params["poly1"] * time_scaled / 100000
-
-            # Bluer when brighter
-            """
-            if "bwb_A" in params:
-
-                lambda_pivot = jnp.array([3551., 4686., 6165., 7481., 8931.])
-                beta_per_obs = params["bwb_A"] * jnp.log(lambda_pivot[band_idx] / 2500.0)
-
-                print(jnp.shape(beta_per_obs), jnp.shape(y), jnp.shape(mean_per_obs))
-
-                mean_per_obs = mean_per_obs - beta_per_obs * y
-            """
+            time_centered = (X[0] - params['t_center'])
+            time_scaled = time_centered/params['t_std']
+            coeffs = jnp.stack([params["poly1"], params["mean"][band_idx]])
+            mean_per_obs = jnp.polyval(coeffs, time_scaled)
 
         return mean_per_obs
     
@@ -297,8 +284,12 @@ class MyMultiVarModel(MultiVarModel):
         # inds gives the sorted indices for the new_t
         X, inds = self.my_lag_transform(self.X, self.has_lag, params)
 
+        params_mean = params
+        params_mean['t_center'] = jnp.mean(X[0])
+        params_mean['t_std'] = jnp.std(X[0])
+
         means = partial(
-            MyMultiVarModel.mean_func, self.zero_mean, log_sigma_hat_band.shape[0], params, self.y[inds], self.yerr[inds]
+            MyMultiVarModel.mean_func, self.zero_mean, log_sigma_hat_band.shape[0], params_mean
         )
 
         t = X[0]
