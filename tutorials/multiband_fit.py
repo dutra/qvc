@@ -212,7 +212,7 @@ def numpyro_joint_model(Model, batch_data, obs=None):
         #log_tau_drw_blr = numpyro.sample("log_tau_drw_blr", dist.Normal(jnp.log(1e2), 2.0))
         alpha_host = numpyro.sample("alpha_host", dist.Normal(0.5, 1.0))
         f_host = numpyro.sample("f_host", dist.Uniform(0.0, 1.0))
-        poly1 = numpyro.sample("poly1", dist.Normal(0.0, 1.0))
+        poly1 = numpyro.sample("poly1", dist.Normal(0.0, 0.1))
         #bwb_A = numpyro.sample("bwb_A", dist.Normal(2.0, 0.5))
 
         lag0 = numpyro.sample("lag0", dist.TruncatedNormal(2.0, 10.0, low=0))
@@ -519,7 +519,8 @@ if __name__ == '__main__':
         nchains = args.nchains
     print(f"{args.nwarm=}, {args.nsamp=}, {args.nchains=}, estimated num_chains: {estimated_nchains}, {num_params=}, {len(batch_data)=}")
     
-    init_strategy = numpyro.infer.init_to_sample()
+    #init_strategy = numpyro.infer.init_to_sample()
+    init_strategy = numpyro.infer.init_to_median()
     print("Done with numpyro.infer.init_to_sample")
 
     # emcee works better than NUTS for multimodal posteriors
