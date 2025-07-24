@@ -77,109 +77,64 @@ has_jitter = False
 has_lag = True
 
 
-def initSampler(key, nSample, nBand, X, y, yerr, clean_bands, z):
-    # split keys
-    subkeys = jax.random.split(key, 20)
+def mle(Model, nBand, X, y, yerr, clean_bands, z):
+    print('Starting MLE...')
 
-    # uniform sampler
-    lagSampler = UniformInit(nBand-1, [-10, 10])
-    lag0Sampler = UniformInit(1, [-10, 10])
-    lagBetaSampler = UniformInit(1, [1.0, 1.5])
-    loglagBLRSampler = UniformInit(nBand, [0, 5])
-    logtauBLRSampler = UniformInit(1, [jnp.log(10**2.5), jnp.log(10**4.5)])
-    meanSampler = UniformInit(nBand, [-1, 1])
-    alphaHostFracSampler = UniformInit(1, [0.0, 1.0])
-    fHostFracSampler = UniformInit(1, [0.0, 1.0])
-    poly1Sampler = UniformInit(1, [-10, 10])
-    logAmpDeltaSampler = UniformInit(nBand-1, [-2.0, 0.0])
-    logAmpDeltaBLRSampler = UniformInit(nBand, [-5.0, -2.0])
-    logJitterSampler = UniformInit(nBand, [jnp.log(1e-4), jnp.log(0.1)])
-
-    print(f"initSampler logJitterSampler {key}", nBand)
-    # power laws
-    #etaBreakSampler = UniformInit(1, [0, 3])
-    #lamsSampler = UniformInit(1, [2400.0, 2600.0])
-    # sigma
-    etaA1Sampler = UniformInit(1, [-2, 2])
-    etaA2Sampler = UniformInit(1, [-2, 2])
-    # tau
-    etaTau1Sampler = UniformInit(1, [-2, 2])
-    etaTau2Sampler = UniformInit(1, [-2, 2])
-
-    # kernel init
-    kernelSampler = DRWInit([jnp.log(10**2.5), jnp.log(10**4.5)], [jnp.log(0.01), jnp.log(1.5)])
-    logwSampler = UniformInit(1, [0.0, 1.0])
-
-    # --- Build model instance ---
-    initial_drw_params = {"log_kernel_param": jnp.log(np.array([500.0, 0.35]))}
-    k = kernels.quasisep.Exp(*jnp.exp(initial_drw_params["log_kernel_param"]))
-    m = MultiVarModel(
-        X, y, yerr, k,
-        zero_mean=zero_mean,
-        has_jitter=has_jitter,
-        has_lag=has_lag,
-        clean_bands=clean_bands,
-        z=z
-    )
-    
-    # MLE fit of log_prob of m
-    @jax.jit
-    def loss(params) -> JAXArray:
-        return -m.log_prob(params)
-
-    def single_loop(params) -> tuple[dict[str, JAXArray], JAXArray]:
-        opt_state = optimizer.init(params)
-        for _ in range(nIter):
-            grads = jax.grad(loss)(params)
-            updates, opt_state = optimizer.update(grads, opt_state)
-            params = optax.apply_updates(params, updates)
-
-        return params, loss(params)
-
-
-    # Collect initial params from m (use bestP or m.default_params)
-    init_params = {
-        "log_kernel_param": kernelSampler(subkeys[0], 1),
-        "log_amp_delta": logAmpDeltaSampler(subkeys[1], 1),
-        "log_amp_delta_blr": logAmpDeltaBLRSampler(subkeys[2], 1),
-        "mean": meanSampler(subkeys[3], 1),
-        "alpha_host": alphaHostFracSampler(subkeys[4], 1),
-        "f_host": fHostFracSampler(subkeys[5], 1),
-        "poly1": poly1Sampler(subkeys[6], 1),
-        "lag0": lag0Sampler(subkeys[7], 1),
-        "lag_beta": lagBetaSampler(subkeys[8], 1),
-        "log_jitter": logJitterSampler(subkeys[9], 1),
-        "eta_A1": etaA1Sampler(subkeys[10], 1),
-        "eta_A2": etaA2Sampler(subkeys[11], 1),
-        "eta_tau1": etaTau1Sampler(subkeys[12], 1),
-        "eta_tau2": etaTau2Sampler(subkeys[13], 1),
-        "lag": lagSampler(subkeys[14], 1),
-        #"eta_break": etaBreakSampler(subkeys[14], 1),
-        #"lam_s": lamsSampler(subkeys[15], 1),
-    }
-
-    print('Starting MLE')
-
+    from jax.tree_util import tree_map
     import jaxopt
 
-    # jaxopt optimize
-    opt = jaxopt.ScipyMinimize(fun=loss, method="SLSQP",)
+    # Initial parameters (convert all to jnp.array for consistency)
+    init_params = tree_map(
+        jnp.array,
+        {
+            "log_tau_drw0": 6.0,
+            "log_sigma_hat0": -5.0,
+            "alpha_host": 0.3,
+            "f_host": 0.0,
+            "poly1": 0.0,
+            "mean": jnp.full(nBand, 0.0),
+            "log_amp_delta_blr": jnp.full(nBand, -4.0),
+            "lag0": 2.0,
+            "lag_beta": 4.0 / 3.0,
+            "eta_A1": 0.0,
+            "eta_A2": 0.0,
+            "eta_tau1": 0.0,
+            "eta_tau2": 0.0,
+        }
+    )
+
+    m = Model(
+            X, y, yerr, kernels.quasisep.Exp(jnp.array([1.0, 1.0])),
+            zero_mean=zero_mean,
+            has_jitter=False,
+            has_lag=has_lag,
+            clean_bands=clean_bands,
+            z=z
+        )
+
+    def loss(params):
+        return -m.log_prob(params)
+
+    loss_jit = jax.jit(loss)
+
+    # Run LBFGS (JAX-native and GPU-capable)
+    """
+    opt = jaxopt.LBFGS(fun=loss_jit) #, maxiter=500)
     soln = opt.run(init_params)
     best_param = soln.params
-    print('done MLE')
 
-    print("best",best_param)
-    print("MLE loss: ", soln.state.fun_val)
+    print('Done MLE')
+    #print("MLE loss:", soln.state.fun_val)
+    print("Best params:")
+    for k, v in best_param.items():
+        print(f"  {k}: {v}")
 
-    best_param['log_sigma_hat0'] = 0.5 * (2*best_param['log_kernel_param'][1] - best_param['log_kernel_param'][0])
-    best_param['log_tau_drw0'] = best_param['log_kernel_param'][0]
-    best_param['log_sigma_band'] = best_param['log_kernel_param'][1] + best_param['log_amp_delta']
-    
-    print(best_param['log_kernel_param'])
-    print(best_param['log_sigma_hat0'],  best_param['log_tau_drw0'], ' <<<<<<<')
+    print("Log prob at best fit:", m.log_prob(best_param))
+    """
+
+    best_param = init_params
 
     return best_param
-
 
 def numpyro_joint_model(Model, batch_data, obs=None):
     batch_size = len(batch_data)
@@ -254,74 +209,6 @@ def numpyro_joint_model(Model, batch_data, obs=None):
         log_prob = jnp.where(jnp.isfinite(log_prob), log_prob, -1e20)
         numpyro.factor(f"loglike_{i}", log_prob)
 
-
-def numpyro_joint_model_OLD(Model, batch_data):
-    # --- Shared (universal) parameters ---
-    # These priors can be broader
-    #powerlaw_priors = {
-        #"eta_A1": (-1.25, 0.2),
-        #"eta_A2": (-0.3, 0.2),
-        #"eta_tau1": (0.0, 0.2),
-        #"eta_tau2": (0.0, 0.2),
-        #"eta_break": (1, 0.1),
-        #"lam_s": (2500.0, 100.0),
-    #}
-    powerlaw_priors = {
-        "eta_A1": (0, 1.),
-        "eta_A2": (0, 1.),
-        "eta_tau1": (0.0, 1.),
-        "eta_tau2": (0.0, 1.),
-    }
-    powerlaw_samples = {
-        k: numpyro.sample(k, dist.Normal(loc, scale))
-        for k, (loc, scale) in powerlaw_priors.items()
-    }
-
-    for i, data in enumerate(batch_data):
-        # Object-specific parameters
-        #log_w = numpyro.sample(f"log_w_{i}", dist.Normal(jnp.log(20.0), 1.0))
-
-        log_tau_drw_0 = numpyro.sample(f"log_tau_drw0_{i}", dist.Normal(bestP['log_tau_drw0'], 1.0))
-        log_sigma_hat_0 = numpyro.sample(f"log_sigma_hat0_{i}", dist.Normal(bestP['log_sigma_hat0'], 1.0))
-        log_amp_delta_blr = numpyro.sample(f"log_amp_delta_blr_{i}", dist.Normal(jnp.full_like(bestP["log_amp_delta_blr"], jnp.log(1e-3)), 2.0))
-        lag = numpyro.sample(f"lag_{i}", dist.Normal(jnp.full_like(bestP["lag"], 0.0), 10.0))
-        #log_lag_blr = numpyro.sample(f"log_lag_blr_{i}", dist.Normal(jnp.full_like(bestP["log_lag_blr"], jnp.log(1e2)), 2.0))
-        log_tau_drw_blr = numpyro.sample(f"log_tau_drw_blr_{i}", dist.Normal(jnp.log(1e2), 2.0))
-        mean = numpyro.sample(f"mean_{i}", dist.Normal(bestP["mean"], 1.0))
-        alpha_host = numpyro.sample(f"alpha_host_{i}", dist.Normal(0.5, 1.0))
-        f_host = numpyro.sample(f"f_host_{i}", dist.Uniform(0.0, 1.0))
-        poly1 = numpyro.sample(f"poly1_{i}", dist.Normal(0.0, 10.0))
-        mean_yerr = jnp.mean(data['yerr'])
-        log_jitter_init = jnp.log(mean_yerr + 1e-6)
-        log_jitter = numpyro.sample(f"log_jitter_{i}", dist.Normal(jnp.full_like(bestP["log_jitter"], log_jitter_init), 1.0))
-
-        params = {
-            #"log_w": log_w,
-            "log_tau_drw0": log_tau_drw_0,
-            "log_sigma_hat0": log_sigma_hat_0,
-            "log_amp_delta_blr": log_amp_delta_blr,
-            "lag": lag,
-            #"log_lag_blr": log_lag_blr,
-            "log_tau_drw_blr": log_tau_drw_blr,
-            "mean": mean,
-            "alpha_host": alpha_host,
-            "f_host": f_host,
-            "poly1": poly1,
-            "log_jitter": log_jitter,
-            **powerlaw_samples,
-        }
-
-        m = Model(
-            data['X'], data['y'], data['yerr'],
-            kernels.quasisep.Exp(jnp.array([1, 1])),  # Placeholder, your Model will build the kernel
-            zero_mean=zero_mean, has_jitter=has_jitter, has_lag=has_lag,
-            clean_bands=data['clean_bands'], z=data['z']
-        )
-        log_prob = m.log_prob(params)
-        #jax.debug.print("log_prob: {lp} {i}", lp=log_prob, i=i)
-        #log_prob = jnp.where(jnp.isfinite(log_prob), log_prob, -1e10)
-        numpyro.factor(f"loglike_{i}", log_prob)
-
 def make_lc(Model, data):
     times = data['times']
     mags = data['mags']
@@ -382,18 +269,30 @@ def make_lc(Model, data):
     window_size = 6
     mask_outlier = np.ones(len(y), dtype=bool)
 
+    from numpy.lib.stride_tricks import sliding_window_view
+    from scipy.stats import median_abs_deviation
+
     for band in np.unique(band_idx):
         band_mask = band_idx == band
+        idx_band = np.where(band_mask)[0]
         band_y = y[band_mask]
-        band_times = all_times[band_mask]
 
-        for i in range(len(band_y)):
-            if i < window_size or i >= len(band_y) - window_size:
-                continue
-            window = band_y[i - window_size:i + window_size + 1]
-            if jnp.abs(band_y[i] - jnp.nanmean(window)) > 2.5 * st.median_abs_deviation(window):
-                mask_outlier[np.where(band_mask)[0][i]] = False
+        # Generate sliding windows: shape (N - 2*window, 2*window + 1)
+        if len(band_y) < 2 * window_size + 1:
+            continue  # Skip small bands
 
+        windows = sliding_window_view(band_y, 2 * window_size + 1)
+        centers = band_y[window_size:-window_size]
+        medians = np.nanmean(windows, axis=1)
+        mads = median_abs_deviation(windows, axis=1)
+
+        # Compute boolean mask for which center points are outliers
+        is_outlier = np.abs(centers - medians) > 2.5 * mads
+
+        # Translate back to original indices
+        mask_outlier[idx_band[window_size:-window_size][is_outlier]] = False
+
+    # Apply final mask
     X = (jnp.array(all_times[mask_outlier]) - jnp.min(all_times[mask_outlier]), jnp.array(band_idx[mask_outlier]))
     y = jnp.array(y[mask_outlier])
     yerr = jnp.array(yerr[mask_outlier])
@@ -476,7 +375,7 @@ if __name__ == '__main__':
         Model = MyMultiVarModelLatent
 
     # After loading objs
-    print("--- Joint fitting")
+    print("--- Joint fitting ---")
     batch_data = []
     for i, obj in enumerate(objs):
         # Prepare each object's data for the joint model
@@ -487,11 +386,11 @@ if __name__ == '__main__':
         obj |= result
         # Run bestP for each object
         n_bands = len(obj['clean_bands'])
-        bestP = initSampler(jax.random.PRNGKey(i), 1, 5, obj['X'], obj['y'], obj['yerr'], obj['clean_bands'], obj['z'])
+        bestP = mle(Model, 5, obj['X'], obj['y'], obj['yerr'], obj['clean_bands'], obj['z'])
         m = Model(
             obj['X'], obj['y'], obj['yerr'], 
             kernels.quasisep.Exp(jnp.array([1, 1])),
-            zero_mean=zero_mean, has_jitter=has_jitter, has_lag=has_lag,
+            zero_mean=zero_mean, has_jitter=False, has_lag=has_lag,
             clean_bands=obj['clean_bands'], z=obj['z']
         )
         save_combined_plot(bestP, m, obj['X'], obj['y'], obj['yerr'], obj['band_idx'], obj, fit_bestP=True)
