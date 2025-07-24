@@ -77,7 +77,7 @@ has_jitter = False
 has_lag = True
 
 
-def mle(Model, nBand, X, y, yerr, clean_bands, z):
+def mle(Model, nBand, X, y, yerr, clean_bands, z, latent=False):
     print('Starting MLE...')
 
     from jax.tree_util import tree_map
@@ -102,6 +102,8 @@ def mle(Model, nBand, X, y, yerr, clean_bands, z):
             "eta_tau2": 0.0,
         }
     )
+    if latent:
+        init_params["log_lag_blr"] = jnp.full(nBand, jnp.log(1e2))
 
     m = Model(
             X, y, yerr, kernels.quasisep.Exp(jnp.array([1.0, 1.0])),
@@ -136,7 +138,7 @@ def mle(Model, nBand, X, y, yerr, clean_bands, z):
 
     return best_param
 
-def numpyro_joint_model(Model, batch_data, obs=None):
+def numpyro_joint_model(Model, batch_data, latent=False):
     batch_size = len(batch_data)
     nBands = 5  # or use from config
 
@@ -158,13 +160,14 @@ def numpyro_joint_model(Model, batch_data, obs=None):
     mean_mean = jnp.stack([jnp.array(obj['bestP']['mean']) for obj in batch_data])                            # (B, 5)
     lag0_mean = jnp.stack([jnp.array(obj['bestP']['lag0']) for obj in batch_data])                            # (B, 5)
     lag_beta_mean = jnp.stack([jnp.array(obj['bestP']['lag_beta']) for obj in batch_data])                    # (B, 5)
+    if latent:
+        log_lag_blr_mean = jnp.stack([jnp.array(obj['bestP']['log_lag_blr']) for obj in batch_data])
     #log_jitter_mean = jnp.stack([jnp.array(obj['bestP']['log_jitter']) + jnp.mean(obj['yerr']) for obj in batch_data]) # (B, 5)
     
     with numpyro.plate("objects", batch_size):
         # Object-level parameters (shape: [B])
         log_tau_drw0 = numpyro.sample("log_tau_drw0", dist.Normal(log_tau_drw0_mean, 2.0))
         log_sigma_hat0 = numpyro.sample("log_sigma_hat0", dist.Normal(log_sigma_hat0_mean, 1.0))
-        #log_tau_drw_blr = numpyro.sample("log_tau_drw_blr", dist.Normal(jnp.log(1e2), 2.0))
         alpha_host = numpyro.sample("alpha_host", dist.Normal(0.5, 1.0))
         f_host = numpyro.sample("f_host", dist.Uniform(0.0, 1.0))
         poly1 = numpyro.sample("poly1", dist.Normal(0.0, 0.1))
@@ -178,6 +181,8 @@ def numpyro_joint_model(Model, batch_data, obs=None):
             # Parameters with shape [B, nBands]
             mean = numpyro.sample("mean", dist.Normal(mean_mean, 0.2))
             log_amp_delta_blr = numpyro.sample("log_amp_delta_blr", dist.Normal(log_amp_delta_blr_mean, 2.0))
+            if latent:
+                log_lag_blr = numpyro.sample("log_lag_blr", dist.Normal(log_lag_blr_mean, 2.0))
             #log_jitter = numpyro.sample("log_jitter", dist.Normal(log_jitter_mean + 1e-6, 1.0))
 
     for i, data in enumerate(batch_data):
@@ -197,6 +202,8 @@ def numpyro_joint_model(Model, batch_data, obs=None):
             #"bwb_A": bwb_A[i],
             **powerlaw_samples,
         }
+        if latent:
+            params["log_lag_blr"] = log_lag_blr[i]
 
         m = Model(
             data['X'], data['y'], data['yerr'],
@@ -386,7 +393,7 @@ if __name__ == '__main__':
         obj |= result
         # Run bestP for each object
         n_bands = len(obj['clean_bands'])
-        bestP = mle(Model, 5, obj['X'], obj['y'], obj['yerr'], obj['clean_bands'], obj['z'])
+        bestP = mle(Model, 5, obj['X'], obj['y'], obj['yerr'], obj['clean_bands'], obj['z'], latent=args.latent)
         m = Model(
             obj['X'], obj['y'], obj['yerr'], 
             kernels.quasisep.Exp(jnp.array([1, 1])),
@@ -441,50 +448,13 @@ if __name__ == '__main__':
         progress_bar=args.progress,
         chain_method="vectorized",
     )
-    mcmc.run(jax.random.PRNGKey(0), Model, batch_data)
+    mcmc.run(jax.random.PRNGKey(0), Model, batch_data, args.latent)
     samples_flat = mcmc.get_samples(group_by_chain=False)
     diagnostics = mcmc.get_extra_fields()
 
     #ns = NestedSampler(numpyro_joint_model)
     #ns.run(jax.random.PRNGKey(0), Model, batch_data)
     #samples_flat = ns.get_samples(jax.random.PRNGKey(0), num_samples=1000)
-
-    # --- SVI setup ---
-
-    # Define guide (mean-field)
-    """
-    guide = numpyro.infer.autoguide.AutoMultivariateNormal(numpyro_joint_model)
-
-    svi = numpyro.infer.SVI(
-        model=numpyro_joint_model,
-        guide=guide,
-        optim=numpyro.optim.Adam(1e-2),
-        loss=numpyro.infer.Trace_ELBO(),
-    )
-
-    svi_state = svi.init(jax.random.PRNGKey(0), Model, batch_data)
-
-    # Training loop
-    def run_svi_training(svi_state):
-        def svi_step(carry, _):
-            svi_state = carry
-            svi_state, loss = svi.update(svi_state, Model, batch_data)
-            return svi_state, loss
-
-        return lax.scan(svi_step, svi_state, None, length=1000)
-
-    # JIT the wrapper function
-    run_svi_training_jit = jax.jit(run_svi_training)
-    svi_state, losses = run_svi_training_jit(svi_state)
-
-    print(losses)
-
-    params = svi.get_params(svi_state)
-    print(guide.get_posterior(params))
-    samples_flat = guide.sample_posterior(jax.random.PRNGKey(1), params, sample_shape=(args.nsamp,))
-
-    print("Done with SVI run")
-    """
 
     print("Done with MCMC run")
 

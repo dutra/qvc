@@ -160,6 +160,10 @@ def plot_posterior_for_object(samples_flat, data, i, batch_data_len):
             v = np.asarray(v)
             for j in range(v.shape[-1]):
                 obj_samples_clean_split[f"lag_{j}"] = v[:, j]
+        elif k == "log_lag_blr":
+            v = np.asarray(v)
+            for j in range(v.shape[-1]):
+                obj_samples_clean_split[f"log_lag_blr_{j}"] = v[:, j]
         else:
             obj_samples_clean_split[k] = v
     obj_samples_clean = obj_samples_clean_split
@@ -210,7 +214,7 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, data, fit_bestP=Fal
         else:
             posterior_median = {k: np.median(v, axis=0) for k, v in samples.items()}
             mu, std = model.pred(posterior_median, (t_test, jnp.full_like(t_test, n, dtype=int)))
-            #print(mu, std, '!!!!!!!!!!!!!!')
+            print(mu, std, '!!!!!!!!!!!!!!')
 
         # Plot the predictions
         ax_lc.plot(t_test, mu+offsets[n], alpha=0.8, color=colors[band_idx_map[n]], lw=1.0)
