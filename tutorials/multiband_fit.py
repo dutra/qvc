@@ -512,7 +512,7 @@ if __name__ == '__main__':
             psd_results = compute_psd_from_samples(obj_samples_clean, obj["clean_bands"])
             save_combined_plot(obj_samples_clean, m, obj['X'], obj['y'], obj['yerr'], obj['band_idx'], result, fit_bestP=False, psd_results=psd_results)
             #dump_mcmc_diagnostics(mcmc, obj, i, len(batch_data))
-            plot_trace_numpyro_for_object(samples_flat, obj, i, len(batch_data))
+            #plot_trace_numpyro_for_object(samples_flat, obj, i, len(batch_data))
             plot_posterior_for_object(samples_flat, obj, i, len(batch_data))
         results.append(obj | result)
         print("++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++", flush=True)
