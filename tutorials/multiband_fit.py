@@ -414,12 +414,12 @@ if __name__ == '__main__':
     num_objects = len(batch_data)
     print(f"Running joint fit on {len(batch_data)} objects...")
 
-    estimated_nchains = 2*((num_params - 6)*len(batch_data) + 6)
+    estimated_nchains = 4
     if args.nchains < 1:
         nchains = estimated_nchains
     else:
         nchains = args.nchains
-    print(f"{args.nwarm=}, {args.nsamp=}, {args.nchains=}, estimated num_chains: {estimated_nchains}, {num_params=}, {len(batch_data)=}")
+    print(f"{args.nwarm=}, {args.nsamp=}, {args.nchains=}, default num_chains: {estimated_nchains}, {num_params=}, {len(batch_data)=}")
     
     #init_strategy = numpyro.infer.init_to_sample()
     init_strategy = numpyro.infer.init_to_median()
