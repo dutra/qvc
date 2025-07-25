@@ -420,6 +420,41 @@ class MyMultiVarModel(MultiVarModel):
 
 class MyMultiVarModelLatent(MyMultiVarModel):
 
+    def _get_unique_times(self, t, band, lag_blr):
+        # Step 1: build full latent time grid (t, t - lag_blr)
+        t_direct = t
+        t_lagged = t - lag_blr
+
+        t_latent = jnp.concatenate([t_direct, t_lagged])
+        band_latent = jnp.concatenate([band, band])
+
+        # Step 2: sort the combined time array (to make GP matrix construction more stable)
+        sort_idx = jnp.argsort(t_latent)
+        t_latent_sorted = t_latent[sort_idx]
+        band_latent_sorted = band_latent[sort_idx]
+
+        # Step 3: construct index maps back to sorted array
+        def find_index(t_query, t_sorted):
+            return jnp.argmin(jnp.abs(t_query[:, None] - t_sorted[None, :]), axis=1)
+
+        inv_direct = find_index(t_direct, t_latent_sorted)
+        inv_lagged = find_index(t_lagged, t_latent_sorted)
+
+        return t_latent_sorted, band_latent_sorted, inv_direct, inv_lagged
+
+    def _build_H(self, t, band, inv_direct, inv_lagged, A_c, A_b, M):
+        # Observation operator H: shape (N, M)
+        N = len(t)
+        rows = jnp.arange(N)
+        H = jnp.zeros((N, M))
+
+        # Add direct term: A_c[band] * f(t)
+        H = H.at[rows, inv_direct].add(A_c[band])
+
+        # Add lagged term: A_b[band] * f(t - tau[band])
+        H = H.at[rows, inv_lagged].add(A_b[band])
+        return H
+
     def _build_latent_model(self, params: dict[str, JAXArray]) -> tuple[GaussianProcess, JAXArray]:
         log_amps = self.my_amp_transform(params)
         log_amps_blr = self.my_amp_transform_blr(params)
@@ -441,7 +476,7 @@ class MyMultiVarModelLatent(MyMultiVarModel):
             noise_diag += (jnp.exp(params["log_jitter"]) ** 2)[band_obs]
 
         # Latent lag transformation
-        t_latent, band_latent, inv_d, inv_l = get_unique_times(t_obs, band_obs, lag_blr)
+        t_latent, band_latent, inv_d, inv_l = self._get_unique_times(t_obs, band_obs, lag_blr)
         M = len(t_latent)
 
         # Construct latent-space kernel
@@ -454,7 +489,7 @@ class MyMultiVarModelLatent(MyMultiVarModel):
         K_latent = kernel(X_latent, X_latent) + 1e-6 * jnp.eye(M)
 
         # Construct observation operator H
-        H = build_H(t_obs, band_obs, inv_d, inv_l, amp_conti, amp_blr, M)
+        H = self._build_H(t_obs, band_obs, inv_d, inv_l, amp_conti, amp_blr, M)
 
         # Mean function
         params_mean = params
@@ -483,7 +518,13 @@ class MyMultiVarModelLatent(MyMultiVarModel):
         K_obs = H @ K_latent @ H.T
         K_obs += jnp.diag(D)  # add diagonal noise
 
-        #jax.debug.print("H: {h}", h=H)
+        # Check if K_obs is symmetric
+        #is_symmetric = jnp.allclose(K_obs, K_obs.T, atol=1e-6)
+        #jax.debug.print("K_obs symmetric: {sym}", sym=is_symmetric)
+        # Check if K_obs is positive semi-definite
+        #eigvals = jnp.linalg.eigvalsh(K_obs)
+        #is_psd = jnp.all(eigvals >= -1e-8)
+        #jax.debug.print("K_obs PSD: {x}", x=is_psd)
 
         # Subtract mean
         y_centered = y_obs - mu_obs
@@ -509,21 +550,20 @@ class MyMultiVarModelLatent(MyMultiVarModel):
         numpyro.factor("gp_loglike", self.log_prob(params))
 
     @eqx.filter_jit
-    def pred(self, params: dict[str, JAXArray], X_new: JAXArray) -> tuple[JAXArray, JAXArray]:
+    def pred(self, params: dict[str, JAXArray], X_new: JAXArray) -> tuple[JAXArray, JAXArray, JAXArray, JAXArray, JAXArray, JAXArray]:
+        # Build latent model from training data
         latent = self._build_latent_model(params)
-        H, K_latent, D, mu_obs, y_obs = (
+        H_train, K_latent, D, mu_obs, y_obs = (
             latent["H"], latent["K_latent"], latent["D"], latent["mu_obs"], latent["y_obs"]
         )
 
-        # Build full observed-space covariance matrix
-        K_obs = H @ K_latent @ H.T + jnp.diag(D)
+        # Observation covariance and Cholesky factor for training data
+        K_obs = H_train @ K_latent @ H_train.T + jnp.diag(D)
         y_centered = y_obs - mu_obs
-
-        # Cholesky solve for alpha
         L = jnp.linalg.cholesky(K_obs + 1e-6 * jnp.eye(K_obs.shape[0]))
         alpha = jax.scipy.linalg.cho_solve((L, True), y_centered)
 
-        # Prepare new latent inputs
+        # Prepare new latent inputs (times, bands, lags)
         X_new_lagged, _ = self.my_lag_transform(X_new, self.has_lag, params)
         t_new, band_new = X_new_lagged
         lag_blr = jnp.exp(params["log_lag_blr"])[band_new]
@@ -534,35 +574,58 @@ class MyMultiVarModelLatent(MyMultiVarModel):
         amp_conti = jnp.exp(log_amps)
         amp_blr = jnp.exp(log_amps_blr)
 
-        t_latent, band_latent, _, _ = get_unique_times(
-            self.X[0], self.X[1], jnp.exp(params["log_lag_blr"])[self.X[1]]
-        )
-        X_latent = (t_latent, band_latent)
-
+        # Build latent kernel and latent inputs for prediction
         kernel = MyMultibandConti(
             amplitudes=jnp.ones_like(amp_conti),
             taus=jnp.exp(log_taus),
         )
+        t_latent, band_latent, _, _ = self._get_unique_times(
+            self.X[0], self.X[1], jnp.exp(params["log_lag_blr"])[self.X[1]]
+        )
+        X_latent = (t_latent, band_latent)
 
-        # Prepare new latent inputs
-        t_new_latent, band_new_latent, inv_d_new, inv_l_new = get_unique_times(t_new, band_new, lag_blr)
+        t_new_latent, band_new_latent, inv_d_new, inv_l_new = self._get_unique_times(t_new, band_new, lag_blr)
         X_new_latent = (t_new_latent, band_new_latent)
-        H_new = build_H(t_new, band_new, inv_d_new, inv_l_new, amp_conti, amp_blr, len(t_new_latent))
 
-        K_lat_new_obs = H_new @ kernel(X_new_latent, X_latent) @ H.T
+        # Helper to build H matrix given amplitudes (A_c, A_b)
+        def build_H_for_amp(A_c, A_b):
+            return self._build_H(t_new, band_new, inv_d_new, inv_l_new, A_c, A_b, len(t_new_latent))
 
-        # Predictive mean
-        params_mean = params
-        params_mean['t_center'] = jnp.mean(t_new)
-        params_mean['t_std'] = jnp.std(t_new)
-        means = partial(MyMultiVarModelLatent.mean_func, self.zero_mean, amp_conti.shape[0], params_mean)
-        mu_obs = means((t_new, band_new))
+        # Full H_new with all amps
+        H_new_full = build_H_for_amp(amp_conti, amp_blr)
 
-        pred_mean = mu_obs + K_lat_new_obs @ alpha
+        # Predictive cross-covariance and covariance
+        K_cross = H_new_full @ kernel(X_new_latent, X_latent) @ H_train.T
+        K_new = H_new_full @ kernel(X_new_latent, X_new_latent) @ H_new_full.T + 1e-6 * jnp.eye(H_new_full.shape[0])
 
-        # Predictive variance
-        v = jax.scipy.linalg.cho_solve((L, True), K_lat_new_obs.T)
-        K_new = H_new @ kernel(X_new_latent, X_new_latent) @ H_new.T + 1e-6 * jnp.eye(H_new.shape[0])
-        pred_cov = K_new - K_lat_new_obs @ v
+        # Predictive mean and covariance in observation space
+        mean_fn = partial(MyMultiVarModelLatent.mean_func, self.zero_mean, amp_conti.shape[0], params)
+        mu_new_obs = mean_fn((t_new, band_new))
 
-        return pred_mean, jnp.sqrt(jnp.diag(pred_cov))
+        # Continuum-only prediction: zero BLR amps
+        H_new_cont = build_H_for_amp(amp_conti, jnp.zeros_like(amp_blr))
+        K_cross_cont = H_new_cont @ kernel(X_new_latent, X_latent) @ H_train.T
+        K_new_cont = H_new_cont @ kernel(X_new_latent, X_new_latent) @ H_new_cont.T + 1e-6 * jnp.eye(H_new_cont.shape[0])
+
+        pred_mean_cont = mu_new_obs + K_cross_cont @ alpha
+        pred_cov_cont = K_new_cont - K_cross_cont @ jax.scipy.linalg.cho_solve((L, True), K_cross_cont.T)
+        pred_cov_cont = 0.5 * (pred_cov_cont + pred_cov_cont.T)
+        pred_std_cont = jnp.sqrt(jnp.clip(jnp.diag(pred_cov_cont), a_min=0.0))
+
+        # BLR-only prediction: zero continuum amps
+        H_new_blr = build_H_for_amp(jnp.zeros_like(amp_conti), amp_blr)
+        K_cross_blr = H_new_blr @ kernel(X_new_latent, X_latent) @ H_train.T
+        K_new_blr = H_new_blr @ kernel(X_new_latent, X_new_latent) @ H_new_blr.T + 1e-6 * jnp.eye(H_new_blr.shape[0])
+
+        pred_mean_blr = mu_new_obs + K_cross_blr @ alpha
+        pred_cov_blr = K_new_blr - K_cross_blr @ jax.scipy.linalg.cho_solve((L, True), K_cross_blr.T)
+        pred_cov_blr = 0.5 * (pred_cov_blr + pred_cov_blr.T)
+        pred_std_blr = jnp.sqrt(jnp.clip(jnp.diag(pred_cov_blr), a_min=0.0))
+
+        # Debug prints
+        #jax.debug.print("pred_cov min eigenvalue: {x}", x=jnp.min(jnp.linalg.eigvalsh(pred_cov)))
+        #jax.debug.print("any nan in pred_cov diag: {x}", x=jnp.any(jnp.isnan(jnp.diag(pred_cov))))
+
+        return (pred_mean_cont + pred_mean_blr, jnp.sqrt(pred_std_cont**2 + pred_std_blr**2),
+                pred_mean_cont, pred_std_cont,
+                pred_mean_blr, pred_std_blr)

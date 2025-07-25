@@ -66,8 +66,6 @@ from multiband_fit_plotting import *
 from multiband_generate_lc import *
 from multiband_models import *
 
-from solvers import DirectFullRank
-
 #bands = ['g', 'r', 'i']
 
 
@@ -93,7 +91,7 @@ def mle(Model, nBand, X, y, yerr, clean_bands, z, latent=False):
             "f_host": 0.0,
             "poly1": 0.0,
             "mean": jnp.full(nBand, 0.0),
-            "log_amp_delta_blr": jnp.full(nBand, -4.0),
+            "log_amp_delta_blr": jnp.full(nBand, -1.0),
             "lag0": 2.0,
             "lag_beta": 4.0 / 3.0,
             "eta_A1": 0.0,
@@ -182,7 +180,7 @@ def numpyro_joint_model(Model, batch_data, latent=False):
             mean = numpyro.sample("mean", dist.Normal(mean_mean, 0.2))
             log_amp_delta_blr = numpyro.sample("log_amp_delta_blr", dist.Normal(log_amp_delta_blr_mean, 2.0))
             if latent:
-                log_lag_blr = numpyro.sample("log_lag_blr", dist.Normal(log_lag_blr_mean, 2.0))
+                log_lag_blr = numpyro.sample("log_lag_blr", dist.Normal(log_lag_blr_mean, 4.0))
             #log_jitter = numpyro.sample("log_jitter", dist.Normal(log_jitter_mean + 1e-6, 1.0))
 
     for i, data in enumerate(batch_data):

@@ -209,17 +209,35 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, data, fit_bestP=Fal
         t_test = np.linspace(t.min(), t.max(), 1000)
         # Compute predictions using the model
         if fit_bestP:
-            mu, std = model.pred(samples, (t_test, jnp.full_like(t_test, n, dtype=int)))
+            result = model.pred(samples, (t_test, jnp.full_like(t_test, n, dtype=int)))
             #print(mu, std, '!!!!!!!!!!!!!!')
         else:
             posterior_median = {k: np.median(v, axis=0) for k, v in samples.items()}
-            mu, std = model.pred(posterior_median, (t_test, jnp.full_like(t_test, n, dtype=int)))
-            print(mu, std, '!!!!!!!!!!!!!!')
+            result = model.pred(posterior_median, (t_test, jnp.full_like(t_test, n, dtype=int)))
+            #print(mu, std, '!!!!!!!!!!!!!!')
 
         # Plot the predictions
-        ax_lc.plot(t_test, mu+offsets[n], alpha=0.8, color=colors[band_idx_map[n]], lw=1.0)
-        ax_lc.fill_between(t_test, mu+offsets[n]-std, mu+offsets[n]+std, alpha=0.3, 
+        if len(result) == 2:
+            mu, std = result
+            ax_lc.plot(t_test, mu+offsets[n], alpha=0.8, color=colors[band_idx_map[n]], lw=1.0)
+            ax_lc.fill_between(t_test, mu+offsets[n]-std, mu+offsets[n]+std, alpha=0.3, 
                 lw=0.5, color=colors[band_idx_map[n]])
+        else:
+            mu, std, mu_cont, std_cont, mu_blr, std_blr = result
+            # Plot the continuum and BLR components if available
+            ax_lc.plot(t_test, mu_cont + offsets[n], alpha=0.5
+                    , color=colors[band_idx_map[n]], lw=1.0, label=f'{band_idx_map[n]}-band continuum', linestyle='--')
+            ax_lc.fill_between(t_test, mu_cont + offsets[n] - std_cont,
+                               mu_cont + offsets[n] + std_cont, alpha=0.15, lw=0.5, color=colors[band_idx_map[n]])
+            ax_lc.plot(t_test, mu_blr + offsets[n], alpha=0.5,
+                    color=colors[band_idx_map[n]], lw=1.0, label=f'{band_idx_map[n]}-band BLR', linestyle=':')
+            ax_lc.fill_between(t_test, mu_blr + offsets[n] - std_blr,
+                               mu_blr + offsets[n] + std_blr, alpha=0.15, lw=0.5, color=colors[band_idx_map[n]])
+            # Total
+            ax_lc.plot(t_test, mu + offsets[n], alpha=0.8, color=colors[band_idx_map[n]], lw=1.0)
+            ax_lc.fill_between(t_test, mu + offsets[n] - std, mu + offsets[n] + std, alpha=0.3,
+                               lw=0.5, color=colors[band_idx_map[n]])
+
 
         # --- PSD calculation and plotting ---
         # Remove offset for PSD calculation
