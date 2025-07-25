@@ -134,7 +134,7 @@ def mle(Model, nBand, X, y, yerr, clean_bands, z, latent=False, fixed=True):
 
     return best_param
 
-def numpyro_joint_model(Model, batch_data, latent=False):
+def numpyro_joint_model(Model, batch_data, latent=False, bwb=False):
     batch_size = len(batch_data)
     nBands = 5  # or use from config
 
@@ -167,10 +167,10 @@ def numpyro_joint_model(Model, batch_data, latent=False):
         alpha_host = numpyro.sample("alpha_host", dist.Normal(0.5, 1.0))
         f_host = numpyro.sample("f_host", dist.Uniform(0.0, 1.0))
         poly1 = numpyro.sample("poly1", dist.Normal(0.0, 0.1))
-        #bwb_A = numpyro.sample("bwb_A", dist.Normal(2.0, 0.5))
-
         lag0 = numpyro.sample("lag0", dist.TruncatedNormal(2.0, 10.0, low=0))
         lag_beta = numpyro.sample("lag_beta", dist.TruncatedNormal(4/3, 0.2, low=0))
+        if bwb:
+            bwb_A = numpyro.sample("bwb_A", dist.TruncatedNormal(0.0, 2.0, low=0))
 
     with numpyro.plate("objects", batch_size, dim=-2):
         with numpyro.plate("band", nBands, dim=-1):
@@ -195,11 +195,12 @@ def numpyro_joint_model(Model, batch_data, latent=False):
             #"log_jitter": log_jitter[i],
             "lag0": lag0[i],
             "lag_beta": lag_beta[i],
-            #"bwb_A": bwb_A[i],
             **powerlaw_samples,
         }
         if latent:
             params["log_lag_blr"] = log_lag_blr[i]
+        if bwb:
+            params["bwb_A"] = bwb_A[i]
 
         m = Model(
             data['X'], data['y'], data['yerr'],
@@ -207,10 +208,14 @@ def numpyro_joint_model(Model, batch_data, latent=False):
             zero_mean=zero_mean, has_jitter=has_jitter, has_lag=has_lag,
             clean_bands=data['clean_bands'], z=data['z']
         )
-        log_prob = m.log_prob(params)
-        #jax.debug.print("log_prob: {lp} {i}", lp=log_prob, i=i)
-        log_prob = jnp.where(jnp.isfinite(log_prob), log_prob, -1e20)
-        numpyro.factor(f"loglike_{i}", log_prob)
+        # Test BWB
+        if bwb:
+            m.sample(params, i)
+        else:
+            log_prob = m.log_prob(params)
+            #jax.debug.print("log_prob: {lp} {i}", lp=log_prob, i=i)
+            log_prob = jnp.where(jnp.isfinite(log_prob), log_prob, -1e20)
+            numpyro.factor(f"loglike_{i}", log_prob)
 
 def make_lc(Model, data):
     times = data['times']
@@ -328,6 +333,7 @@ if __name__ == '__main__':
     parser.add_argument("--nsamp", type=int, default=250, help="Number of samples for MCMC.")
     parser.add_argument("--nchains", type=int, default=-1, help="Number of chains for MCMC.")
     parser.add_argument("--latent", action="store_true", help="Use latent variable model.")
+    parser.add_argument("--bwb", action="store_true", help="Use BWB model.")
     parser.add_argument("--choose_N", type=int, default=-1, help="Sample choose_N objects.")
     parser.add_argument("--job_id", type=int, default=-1, help="Job Index for parallel processing.")
     parser.add_argument("--job_N", type=int, default=-1, help="Number of objects to divide.")
@@ -444,7 +450,7 @@ if __name__ == '__main__':
         progress_bar=args.progress,
         chain_method="vectorized",
     )
-    mcmc.run(jax.random.PRNGKey(0), Model, batch_data, args.latent)
+    mcmc.run(jax.random.PRNGKey(0), Model, batch_data, args.latent, args.bwb)
     samples_flat = mcmc.get_samples(group_by_chain=False)
     diagnostics = mcmc.get_extra_fields()
 

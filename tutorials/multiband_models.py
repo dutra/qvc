@@ -381,7 +381,7 @@ class MyMultiVarModel(MultiVarModel):
         #jax.debug.print("Log probability: {log_prob}", log_prob=log_prob)
         return log_prob
 
-    def sample(self, params: dict[str, JAXArray]) -> None:
+    def sample(self, params: dict[str, JAXArray], i) -> None:
         """A convience function for intergrating with numpyro for MCMC sampling.
 
         Args:
@@ -389,10 +389,20 @@ class MyMultiVarModel(MultiVarModel):
         """
         gp, inds = self._build_gp(params)
         log_prob = gp.log_probability(y=self.y[inds])
-        #K = gp.kernel(gp.X, gp.X) + gp.noise
-        #jax.debug.print("sym: {s}", s= jnp.allclose(K, K.T, atol=1e-6))
-        #jax.debug.print("Log probability: {log_prob}", log_prob=log_prob)
-        numpyro.sample("gp", gp.numpyro_dist(), obs=self.y[inds])
+
+        f = numpyro.sample(f"gp_{i}", gp.numpyro_dist())
+
+        # Compute s_b = bwb_A * log(lambda_b / 2500 Å)
+        s_b = jnp.array([
+            params["bwb_A"] * jnp.log(lambda_pivot[band] / 2500.0)
+            for band in self.clean_bands
+        ])
+        s_per_obs = s_b[self.X[1]]
+
+        # Model mean with BWB nonlinear effect
+        mean = f + s_per_obs * f**2
+
+        numpyro.sample(f"obs_{i}", dist.Normal(mean[inds], self.yerr[inds]), obs=self.y[inds])
 
     @eqx.filter_jit
     def pred(

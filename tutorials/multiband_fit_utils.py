@@ -265,32 +265,6 @@ def bands_bluer_than_lyman_alpha(z):
 
     return bluer_bands
 
-def bands_with_host_contamination(z):
-    """
-    Returns a list of bands contaminated by the host galaxy, defined as rest-frame wavelength > 6000 Å.
-
-    Returns:
-        list of contaminated bands
-    """
-    host_contamination_threshold = 6000
-    bands = {
-        'u': {'lambda_eff': 3551, 'lambda_lo_90': 3152.4, 'lambda_hi_90': 3949.6},
-        'g': {'lambda_eff': 4686, 'lambda_lo_90': 3715.4, 'lambda_hi_90': 5656.6},
-        'r': {'lambda_eff': 6165, 'lambda_lo_90': 5207.0, 'lambda_hi_90': 7123.0},
-        'i': {'lambda_eff': 7481, 'lambda_lo_90': 6407.6, 'lambda_hi_90': 8554.4},
-        'z': {'lambda_eff': 8931, 'lambda_lo_90': 8266.7, 'lambda_hi_90': 9595.3},
-        'y': {'lambda_eff': 9700, 'lambda_lo_90': 8900.0, 'lambda_hi_90': 10500.0}
-    }
-
-    contaminated_bands = []
-    for band, props in bands.items():
-        rest_lo = props['lambda_lo_90'] / (1 + z)
-        rest_hi = props['lambda_hi_90'] / (1 + z)
-        if rest_lo > host_contamination_threshold or rest_hi > host_contamination_threshold:
-            contaminated_bands.append(band)
-
-    return contaminated_bands
-
 def bands_with_any_contamination_annotated(z):
     """
     Returns ugrizy bands contaminated by Hα, Lyα, Lyman break, C IV, Mg II, or Hβ at redshift z,
