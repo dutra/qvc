@@ -176,7 +176,7 @@ def plot_posterior_for_object(samples_flat, data, i, batch_data_len):
     corner_data = np.vstack([obj_samples_clean[k] for k in obj_samples_clean]).T
     labels = list(obj_samples_clean.keys())
 
-    fig = corner.corner(corner_data, labels=labels, show_titles=True)
+    fig = corner.corner(corner_data, labels=labels, show_titles=True, quantiles=[0.16, 0.5, 0.84], bins=12,)
 
     # Save plot
     output_dir = f"posterior_plots/{prefix}_{suffix}/"
@@ -284,51 +284,6 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, data, fit_bestP=Fal
     ax_lc.set_ylabel('Magnitude + arbitrary offset')
     ax_lc.invert_yaxis()
     #ax_lc.legend(loc='best')
-
-    if not fit_bestP:
-
-        log_sigma_band = [f"{a:.2f}" for a in data['log_sigma_band']]
-        log_sigma_band = ",".join(log_sigma_band)
-        log_sigma_band_err = [f"{a:.2f}" for a in data['log_sigma_band_err']]
-        log_sigma_band_err = ",".join(log_sigma_band_err)
-
-        log_tau_band_RF = [f"{a:.2f}" for a in data['log_tau_band_RF']]
-        log_tau_band_RF = ",".join(log_tau_band_RF)
-        log_tau_band_RF_err = [f"{a:.2f}" for a in data['log_tau_band_RF_err']]
-        log_tau_band_RF_err = ",".join(log_tau_band_RF_err)
-        # Annotate tau_RF and sigma_RF with their values and errors
-        ax_lc.annotate(
-            f"Object ID: {object_id} (z={data['z']:.2f})\n"
-            f"$\\log_{{10}}(\\tau_{{UV RF}})$: {data['log_tau_UV_RF']:.2f} ± {data['log_tau_UV_RF_err']:.2f}\n"
-            f"$\\log_{{10}}(\\tau_{{RF}})$: {log_tau_band_RF}\n                 ± {log_tau_band_RF_err}\n"
-            #f"$\\log_{{10}}(\\tau_{{blr}})$: {data['log_tau_blr']:.2f} ± {data['log_tau_blr_err']:.2f}\n"
-            f"$\\log_{{10}}(\\sigma_{{UV}})$: {data['log_sigma_hat_UV']:.2f} ± {data['log_sigma_hat_UV_err']:.2f}\n"
-            f"$\\log_{{10}}(\\sigma)$: {log_sigma_band}\n                 ± {log_sigma_band_err}\n"
-            f"$\\eta_{{A_1}}$: {data['eta_A1']:.2f} ± {data['eta_A1_err']:.2f}\n"
-            f"$\\eta_{{A_2}}$: {data['eta_A2']:.2f} ± {data['eta_A2_err']:.2f}\n"
-            f"$\\eta_{{\\tau_1}}$: {data['eta_tau1']:.2f} ± {data['eta_tau1_err']:.2f}\n"
-            f"$\\eta_{{\\tau_2}}$: {data['eta_tau2']:.2f} ± {data['eta_tau2_err']:.2f}\n"
-            f"$\\mathrm{{poly_1}}$: {data['poly1']:.2f} ± {data['poly1_err']:.2f}",
-            #f"$\\log_{{10}}(w)$: {data['log_w']:.2f} ± {data['log_w_err']:.2f}",
-            xy=(0.05, 0.95),
-            xycoords="axes fraction",
-            fontsize=10,
-            verticalalignment="top",
-            bbox=dict(boxstyle="round,pad=0.3", edgecolor="black", facecolor="white", alpha=0.4),
-        )
-        # Annotate the legend with each letter in the same color
-        for i, band in enumerate(np.flip(clean_bands)):
-            ax_lc.annotate(
-                band,
-                xy=(0.95 - i * 0.05, 0.95),  # Adjust horizontal spacing
-                xycoords="axes fraction",
-                color=colors[band],
-                fontsize=18,
-                fontweight="bold",
-                ha="right",
-                va="top",
-            )
-        #ax.set_title(f'Light Curve for AGN {object_id}')
 
     # PSD axis formatting
     ax_psd.set_xlabel("Frequency (days$^{-1}$)")

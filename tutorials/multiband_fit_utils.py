@@ -412,104 +412,75 @@ def log_broken_pl(lam, lam_s, d1, d2, ds=4.0):
     )
     return log_f
 
-def process_samples(samples, data):
-    clean_bands = data['clean_bands']
-    object_id = data['object_id']
-    #save_samples_to_hdf5(samples, data['object_id'])
+def process_samples(samples, data, bands=None, percentiles=[16, 50, 84]):
+    """
+    Generalized processing of MCMC samples for arbitrary parameters and bands.
 
-    # power laws
-    eta_A1 = samples["eta_A1"]
-    eta_A2 = samples["eta_A2"]
-    eta_tau1 = samples["eta_tau1"]
-    eta_tau2 = samples["eta_tau2"]
-    eta_break = 1 #samples["eta_break"]
-    
-    lambda_ref = 2500 # Any reference wavelength
-    lambda_s_RF = 2500 #samples["lam_s"]
-    
-    samples_log_sigma_UV = samples["log_sigma_hat0"] / jnp.log(10) + log_broken_pl(lambda_ref, lambda_s_RF, eta_A1, eta_A2, eta_break)
-    samples_log_sigma_band = samples["log_sigma_hat0"] / jnp.log(10) + np.array([log_broken_pl(lambda_pivot[band]/(1 + data['z']), 2500, eta_A1, eta_A2) if band in clean_bands else np.full_like(samples["eta_A1"], -9999) for band in bands])                                                                               
-    samples_log_sigma_band = samples_log_sigma_band.T
+    Args:
+        samples (dict): Dictionary of MCMC samples, each value is (n_samples,) or (n_samples, n_dim).
+        data (dict): Data dictionary, must contain 'object_id', 'z', and optionally 'clean_bands'.
+        bands (list): List of bands to process. If None, uses data['clean_bands'] or all keys in lambda_pivot.
+        percentiles (list): Percentiles for summary statistics.
 
-    samples_log_tau_UV_RF = samples["log_tau_drw0"] / jnp.log(10) - np.log10(1 + data['z']) + log_broken_pl(lambda_ref, lambda_s_RF, eta_tau1, eta_tau2, eta_break)
-    samples_log_tau_band_RF = samples["log_tau_drw0"] / jnp.log(10) - np.log10(1 + data['z']) + np.array([log_broken_pl(lambda_pivot[band]/(1 + data['z']), 2500, eta_tau1, eta_tau2) if band in clean_bands else np.full_like(samples["eta_A1"], -9999) for band in bands])
-    samples_log_tau_band_RF = samples_log_tau_band_RF.T
+    Returns:
+        dict: Summary statistics for all parameters and bands.
+    """
+    import numpy as np
 
-    def sym_percentile(x, p=[16, 50, 84], axis=0):
+    def sym_percentile(x, p=percentiles, axis=0):
         lower, median, upper = np.percentile(x, p, axis=axis)
         return median, 0.5 * (upper - lower)
 
-    # parameter estimates
-    #log_jitter, log_jitter_err = sym_percentile(np.log10(np.exp(2*samples['log_jitter'])))
-    poly1, poly1_err = sym_percentile(samples['poly1'])
-    mean, mean_err = sym_percentile(samples['mean'])
-    #log_lag_blr, log_lag_blr_err = sym_percentile(np.log10(np.exp(samples['log_lag_blr'])))
-    #lag, lag_err = sym_percentile(samples['lag'])
-    eta_A1, eta_A1_err = sym_percentile(eta_A1)
-    eta_A2, eta_A2_err = sym_percentile(eta_A2)
-    eta_tau1, eta_tau1_err = sym_percentile(eta_tau1)
-    eta_tau2, eta_tau2_err = sym_percentile(eta_tau2)
-    #eta_break, eta_break_err = sym_percentile(eta_break)
+    result = dict(object_id=data.get('object_id', None), z=data.get('z', None))
 
-    #log_w, log_w_err = sym_percentile(np.log10(np.exp(samples['log_w'])))
+    # Determine bands to use
+    if bands is None:
+        bands = data.get('clean_bands', list(lambda_pivot.keys()))
 
-    log_tau_UV_RF, log_tau_UV_RF_err = sym_percentile(samples_log_tau_UV_RF)
-    log_tau_band_RF, log_tau_band_RF_err = sym_percentile(samples_log_tau_band_RF)
-    log_sigma_UV, log_sigma_UV_err = sym_percentile(samples_log_sigma_UV)
-    log_sigma_band, log_sigma_band_err = sym_percentile(samples_log_sigma_band)
+    # Process all parameters in samples
+    for key, arr in samples.items():
+        arr = np.asarray(arr)
+        if arr.ndim == 1:
+            # Scalar parameter
+            median, err = sym_percentile(arr)
+            result[key] = median
+            result[f"{key}_err"] = err
+        elif arr.ndim == 2:
+            # Vector parameter (e.g., per-band)
+            for i in range(arr.shape[1]):
+                median, err = sym_percentile(arr[:, i])
+                result[f"{key}_{i}"] = median
+                result[f"{key}_{i}_err"] = err
+        else:
+            # Higher dimensions: flatten and summarize
+            median, err = sym_percentile(arr.reshape(-1))
+            result[key] = median
+            result[f"{key}_err"] = err
 
-    # BLR
-    #log_tau_blr, log_tau_blr_err = sym_percentile(np.log10(np.exp(samples['log_tau_drw_blr'])))
-    log_sigma_blr, log_sigma_blr_err = sym_percentile((1e-2 + samples['log_amp_delta_blr']) / np.log(10), axis=0) #TODO: Fix
+    # Example: generalized per-band computation (e.g., for log_sigma_band)
+    # If you have a function to compute a derived quantity per band, apply it here:
+    if "log_sigma_hat0" in samples and "eta_A1" in samples and "eta_A2" in samples:
+        log_sigma_hat0 = np.asarray(samples["log_sigma_hat0"])
+        eta_A1 = np.asarray(samples["eta_A1"])
+        eta_A2 = np.asarray(samples["eta_A2"])
+        eta_break = 1  # or samples.get("eta_break", 1)
+        lambda_ref = 2500
+        lam_s = 2500
 
-    #lambda_s_RF, lambda_s_RF_err = sym_percentile(lambda_s_RF)
+        log_sigma_band = []
+        for band in bands:
+            lam_eff = lambda_pivot.get(band, lambda_ref)
+            val = log_sigma_hat0 / np.log(10) + log_broken_pl(lam_eff, lam_s, eta_A1, eta_A2, eta_break)
+            log_sigma_band.append(val)
+        log_sigma_band = np.array(log_sigma_band).T  # shape (n_samples, n_bands)
 
-    # Construct the result dictionary
-    d = dict(object_id=data['object_id'],
-            z=data['z'],
-            # kernel params latent
-            log_tau_UV_RF=log_tau_UV_RF,
-            log_tau_UV_RF_err=log_tau_UV_RF_err,
-            log_tau_band_RF=log_tau_band_RF,
-            log_tau_band_RF_err=log_tau_band_RF_err,
-            log_sigma_hat_UV=log_sigma_UV,
-            log_sigma_hat_UV_err=log_sigma_UV_err,
-            log_sigma_band=log_sigma_band,
-            log_sigma_band_err=log_sigma_band_err,
-            # broken power law params
-            eta_A1=eta_A1,
-            eta_A1_err=eta_A1_err,
-            eta_A2=eta_A2,
-            eta_A2_err=eta_A2_err,
-            eta_tau1=eta_tau1,
-            eta_tau1_err=eta_tau1_err,
-            eta_tau2=eta_tau2,
-            eta_tau2_err=eta_tau2_err,
-            #eta_break=eta_break,
-            #eta_break_err=eta_break_err,
-            #lam_s=lambda_s_RF,
-            #lam_s_err=lambda_s_RF_err,
-            # kernel params
-            #log_w=log_w,
-            #log_w_err=log_w_err,
-            # BLR
-            #log_tau_blr=log_tau_blr,
-            #log_tau_blr_err=log_tau_blr_err,
-            log_sigma_blr=log_sigma_blr,
-            log_sigma_blr_err=log_sigma_blr_err,
-            # other
-            #log_jitter=log_jitter,
-            poly1=poly1,
-            poly1_err=poly1_err,
-            mean=mean,
-            mean_err=mean_err,
-            clean_bands=clean_bands,
-            #log_lag_blr=log_lag_blr,
-            #log_lag_blr_err=log_lag_blr_err,
-            #lag=lag,
-            #lag_err=lag_err,
-            )
-    return d
+        for i, band in enumerate(bands):
+            median, err = sym_percentile(log_sigma_band[:, i])
+            result[f"log_sigma_band_{band}"] = median
+            result[f"log_sigma_band_{band}_err"] = err
+
+    result["clean_bands"] = bands
+    return result
 
 
 def compute_psd_from_samples(samples, clean_bands, num_points=1000, time_range=(1.0, 365*20)):

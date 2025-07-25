@@ -75,7 +75,7 @@ has_jitter = False
 has_lag = True
 
 
-def mle(Model, nBand, X, y, yerr, clean_bands, z, latent=False):
+def mle(Model, nBand, X, y, yerr, clean_bands, z, latent=False, fixed=True):
     print('Starting MLE...')
 
     from jax.tree_util import tree_map
@@ -103,36 +103,34 @@ def mle(Model, nBand, X, y, yerr, clean_bands, z, latent=False):
     if latent:
         init_params["log_lag_blr"] = jnp.full(nBand, jnp.log(1e2))
 
-    m = Model(
-            X, y, yerr, kernels.quasisep.Exp(jnp.array([1.0, 1.0])),
-            zero_mean=zero_mean,
-            has_jitter=False,
-            has_lag=has_lag,
-            clean_bands=clean_bands,
-            z=z
-        )
+    if not fixed:
+        m = Model(
+                X, y, yerr, kernels.quasisep.Exp(jnp.array([1.0, 1.0])),
+                zero_mean=zero_mean,
+                has_jitter=False,
+                has_lag=has_lag,
+                clean_bands=clean_bands,
+                z=z
+            )
 
-    def loss(params):
-        return -m.log_prob(params)
+        def loss(params):
+            return -m.log_prob(params)
 
-    loss_jit = jax.jit(loss)
+        loss_jit = jax.jit(loss)
 
-    # Run LBFGS (JAX-native and GPU-capable)
-    """
-    opt = jaxopt.LBFGS(fun=loss_jit) #, maxiter=500)
-    soln = opt.run(init_params)
-    best_param = soln.params
+        # Run LBFGS (JAX-native and GPU-capable)
+        opt = jaxopt.LBFGS(fun=loss_jit) #, maxiter=500)
+        soln = opt.run(init_params)
+        best_param = soln.params
 
-    print('Done MLE')
-    #print("MLE loss:", soln.state.fun_val)
-    print("Best params:")
-    for k, v in best_param.items():
-        print(f"  {k}: {v}")
+        print("Log prob at best fit:", m.log_prob(best_param))
 
-    print("Log prob at best fit:", m.log_prob(best_param))
-    """
-
-    best_param = init_params
+        print('Done MLE')
+        print("Best params:")
+        for k, v in best_param.items():
+            print(f"  {k}: {v}")
+    else:
+        best_param = init_params
 
     return best_param
 
