@@ -18,7 +18,7 @@ from scipy.optimize import minimize
 import scipy.stats as st
 import numpyro
 from numpyro import infer
-from numpyro.infer import MCMC, NUTS, AIES, Predictive
+from numpyro.infer import MCMC, NUTS
 #from numpyro.contrib.nested_sampling import NestedSampler
 import numpyro.distributions as dist
 
@@ -431,16 +431,6 @@ if __name__ == '__main__':
     init_strategy = numpyro.infer.init_to_median()
     print("Done with numpyro.infer.init_to_sample")
 
-    # emcee works better than NUTS for multimodal posteriors
-    #nuts_kernel = AIES(
-    #    numpyro_joint_model,
-    #    moves={AIES.DEMove() : 0.9, AIES.StretchMove() : 0.1},
-    #    init_strategy=init_strategy,
-    #    )
-
-    #graph = numpyro.render_model(numpyro_joint_model, model_args=(Model, batch_data,), render_distributions=True)
-    #graph.render(filename="model_graph", format="png")
-
     nuts_kernel = NUTS(numpyro_joint_model, init_strategy=init_strategy, dense_mass=True, max_tree_depth=6)
     mcmc = MCMC(
         nuts_kernel,
@@ -463,16 +453,20 @@ if __name__ == '__main__':
     # Save and plot the results
     results = []
     for i, obj in enumerate(batch_data):
+
         for k, v in samples_flat.items():
             print(v.shape, k)
+            
         # The universal parameters are 1D
         obj_samples_clean = {
             k: v[:, i] if k not in ['eta_A1', 'eta_A2', 'eta_tau1', 'eta_tau2'] else v
             for k, v in samples_flat.items()
         }
-        #print(obj_samples_clean['log_jitter'].shape)
+
+        # Add the object-specific parameters
         result = process_samples(obj_samples_clean, obj)
-        # plot
+
+        # Plotting
         if args.plot:
             plot_mcmc_traces(obj_samples_clean, obj)
             m = Model(
@@ -484,13 +478,13 @@ if __name__ == '__main__':
             psd_results = compute_psd_from_samples(obj_samples_clean, obj["clean_bands"])
             save_combined_plot(obj_samples_clean, m, obj['X'], obj['y'], obj['yerr'], obj['band_idx'], result, fit_bestP=False, psd_results=psd_results)
             #dump_mcmc_diagnostics(mcmc, obj, i, len(batch_data))
-            #plot_trace_numpyro_for_object(samples_flat, obj, i, len(batch_data))
             plot_posterior_for_object(samples_flat, obj, i, len(batch_data))
         results.append(obj | result)
         print("++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++", flush=True)
         print(f"Quasar {i+1}/{len(batch_data)} Object ID: {obj['object_id']}", flush=True)
-
         print("++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++ Done fitting all objects")
+
+        # Save results to HDF5 file
         if args.file:
             print("Saving results to ", args.file)
             append_hdf5_file(results, args.file)

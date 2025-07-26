@@ -3,6 +3,7 @@ plt.style.use("style.mplstyle")
 import corner
 import numpy as np
 import os
+import re
 import jax.numpy as jnp
 import arviz as az
 import numpyro
@@ -28,73 +29,6 @@ colors = {'u': 'tab:blue',
           'y': 'tab:gray'}
 
 
-def plot_trace_numpyro_for_object(samples_flat, data, i, batch_data_len):
-    """
-    Plot trace plots for object-specific parameters from NumPyro MCMC samples.
-
-    Parameters
-    ----------
-    mcmc : numpyro.infer.MCMC
-        A completed NumPyro MCMC sampler.
-    data : dict
-        Object metadata (must include 'object_id').
-    i : int
-        Index of the object in the batch.
-    batch_data_len : int
-        Total number of objects in the batch.
-    prefix : str
-        Prefix for output directory.
-    suffix : str
-        Suffix for output directory.
-    """
-    object_id = data['object_id']
-
-    # Extract per-object samples
-    obj_samples_clean = {
-            k: v[:, i] if k not in ['eta_A1', 'eta_A2', 'eta_tau1', 'eta_tau2'] else v
-            for k, v in samples_flat.items()
-        }
-    # Split "mean" entries into mean_0, mean_1, ... using the last dimension
-    obj_samples_clean_split = {}
-    for k, v in obj_samples_clean.items():
-        if k == "mean":
-            v = np.asarray(v)
-            print(v.shape)
-            for j in range(v.shape[-1]):
-                obj_samples_clean_split[f"mean_{j}"] = v[:, j]
-        else:
-            obj_samples_clean_split[k] = v
-    obj_samples_clean = obj_samples_clean_split
-    # Remove "mean" from obj_samples_clean if present
-    obj_samples_clean.pop("mean", None)
-
-    # Convert to ArviZ InferenceData
-    idata = az.from_dict(posterior=obj_samples_clean)
-
-    # Get parameter names
-    var_names = list(idata.posterior.data_vars)
-        
-    var_names = [k for k in var_names if k in ['eta_A1', 'eta_A2', 'eta_tau1', 'eta_tau2', 'log_sigma_hat0', 'log_tau_drw0', 'poly1']]
-
-    print(var_names)
-    n_vars = len(var_names)
-
-    # Create trace plots
-    fig, axes = plt.subplots(n_vars, 2, figsize=(14, 2.8 * n_vars), constrained_layout=True)
-    if n_vars == 1:
-        axes = axes.reshape(1, 2)
-
-    az.plot_trace(idata, var_names=var_names, compact=True, axes=axes, show=False)
-
-    # Save plot
-    output_dir = f"mcmc_traces/{prefix}_{suffix}/"
-    os.makedirs(output_dir, exist_ok=True)
-    save_path = os.path.join(output_dir, f"{data['z']:.1f}_{object_id}_mcmc_traces.png")
-    plt.savefig(save_path, dpi=150)
-    plt.close(fig)
-    print(f"Saved trace plot to {save_path}")
-
-
 def save_lc_plot(times, mags, magerrs, object_id):
     # Plot and save the light curves
     fig, ax = plt.subplots(figsize=(10, 6))
@@ -115,76 +49,62 @@ def save_lc_plot(times, mags, magerrs, object_id):
     plt.savefig(os.path.join("light_curves", f'{object_id}_light_curve.png'))
     plt.close(fig)
 
-def plot_posterior_for_object(samples_flat, data, i, batch_data_len):
+def plot_posterior_for_object(samples_flat, data, i, batch_data_len, include=None, exclude=['gp', 'f', 'log_amp_delta_blr'], bins=20):
     """
-    Plot a corner plot of posterior parameters for a specific object from NumPyro MCMC output.
+    Generalized corner plot of posterior parameters for a specific object.
 
     Parameters
     ----------
-    mcmc : numpyro.infer.MCMC
-        Completed MCMC object.
+    samples_flat : dict
+        Dict of MCMC samples, shape (n_samples, n_objects, ...) or (n_samples, ...) for global params.
     data : dict
         Object metadata (must contain 'object_id' and 'z').
     i : int
         Index of the object in the batch.
     batch_data_len : int
         Total number of objects in the batch.
-    prefix : str
-        Output directory prefix.
-    suffix : str
-        Output directory suffix.
+    include : list or None
+        List of parameter names to include (default: all).
+    exclude : list or None
+        List of parameter names to exclude (default: none).
+    bins : int
+        Number of bins for corner plot.
     """
-    object_id = data['object_id']
+    object_id = data.get('object_id', f'obj_{i}')
+    z = data.get('z', 0)
 
-    # Extract per-object samples
-    obj_samples_clean = {
-            k: v[:, i] if k not in ['eta_A1', 'eta_A2', 'eta_tau1', 'eta_tau2'] else v
-            for k, v in samples_flat.items()
-        }
-    # Split "mean" entries into mean_0, mean_1, ... using the last dimension
-    obj_samples_clean_split = {}
-    for k, v in obj_samples_clean.items():
-        if k == "mean":
-            v = np.asarray(v)
-            for j in range(v.shape[-1]):
-                obj_samples_clean_split[f"mean_{j}"] = v[:, j]
-        elif k == "log_jitter":
-            v = np.asarray(v)
-            for j in range(v.shape[-1]):
-                obj_samples_clean_split[f"log_jitter_{j}"] = v[:, j]
-        elif k == "log_amp_delta_blr":
-            v = np.asarray(v)
-            for j in range(v.shape[-1]):
-                obj_samples_clean_split[f"log_amp_delta_blr_{j}"] = v[:, j]
-        elif k == "lag":
-            v = np.asarray(v)
-            for j in range(v.shape[-1]):
-                obj_samples_clean_split[f"lag_{j}"] = v[:, j]
-        elif k == "log_lag_blr":
-            v = np.asarray(v)
-            for j in range(v.shape[-1]):
-                obj_samples_clean_split[f"log_lag_blr_{j}"] = v[:, j]
-        else:
-            obj_samples_clean_split[k] = v
-    obj_samples_clean = obj_samples_clean_split
-    # Remove "mean" from obj_samples_clean if present
-    #obj_samples_clean.pop("mean", None)
+    # Flatten all parameters for plotting
+    flat_arrays = []
+    flat_labels = []
+    for k, v in samples_flat.items():
+        arr = np.asarray(v)
+        # Select per-object slice if needed
+        if arr.ndim == 2 and arr.shape[1] == batch_data_len:
+            arr = arr[:, i]
+        elif arr.ndim == 3 and arr.shape[1] == batch_data_len:
+            arr = arr[:, i, :]
+        # Now flatten over bands
+        if arr.ndim == 1:
+            flat_arrays.append(arr)
+            flat_labels.append(k)
+        elif arr.ndim == 2:
+            for j in range(arr.shape[1]):
+                flat_arrays.append(arr[:, j])
+                flat_labels.append(f"{k}_{j}")
 
-    print('keys posterior samples:')
-    print(obj_samples_clean.keys())
-    # Stack into matrix for corner plot
-    corner_data = np.vstack([obj_samples_clean[k] for k in obj_samples_clean]).T
-    labels = list(obj_samples_clean.keys())
+    if not flat_arrays:
+        print("No parameters to plot.")
+        return None
 
-    fig = corner.corner(corner_data, labels=labels, show_titles=True, quantiles=[0.16, 0.5, 0.84], bins=12,)
+    corner_data = np.vstack(flat_arrays).T
+    fig = corner.corner(corner_data, labels=flat_labels, show_titles=True, quantiles=[0.16, 0.5, 0.84], bins=bins)
 
     # Save plot
     output_dir = f"posterior_plots/{prefix}_{suffix}/"
     os.makedirs(output_dir, exist_ok=True)
-    save_path = os.path.join(output_dir, f"{data['z']:.1f}_{object_id}_posterior.png")
+    save_path = os.path.join(output_dir, f"{z:.1f}_{object_id}_posterior.png")
     plt.savefig(save_path, dpi=200)
     plt.close(fig)
-
     print(f"Saved posterior corner plot to {save_path}")
     return fig
 
@@ -193,8 +113,6 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, data, fit_bestP=Fal
     clean_bands = data['clean_bands']
     object_id = data['object_id']
     band_idx_map = {i: b for i, b in enumerate(clean_bands)}
-
-    #TODO: Check what samples looks like, what happens to means
 
     fig, (ax_lc, ax_psd) = plt.subplots(2, 1, figsize=(10, 10), sharex=False, gridspec_kw={'height_ratios': [1.5, 1]})
     offsets = np.arange(len(clean_bands)) * 0.25
@@ -321,49 +239,56 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, data, fit_bestP=Fal
     plt.close(fig)
     
 
-def plot_mcmc_traces(samples_dict, data, figsize=(12, 2.5), alpha=0.7):
+def plot_mcmc_traces(samples_dict, data, include=None, exclude=None, figsize=(12, 2.5), alpha=0.7):
     """
-    Plot MCMC traces from a dictionary of samples. Supports 1D and 2D param values.
-    
+    Generalized MCMC trace plotter for any set of parameters.
+
     Parameters:
-    - samples_dict: dict with keys as parameter names and values as arrays of shape (n_samples, ...)
+    - samples_dict: dict with keys as parameter names and values as arrays of shape (n_samples, ...) or (n_samples, n_dim)
+    - data: dict, must contain 'object_id'
+    - include: list of parameter names to include (default: all)
+    - exclude: list of parameter names to exclude (default: none)
     - figsize: tuple, base figure size (width, height per subplot)
     - alpha: float, line transparency
     """
     trace_data = {}
 
+    # Flatten and filter parameters
     for name, val in samples_dict.items():
-        val = np.asarray(val)
-        if val.ndim == 1:
-            trace_data[name] = [val]
-        elif val.ndim == 2:
-            trace_data[name] = [val[:, i] for i in range(val.shape[1])]
-        else:
-            warnings.warn(f"Skipping param '{name}' with ndim={val.ndim}; only ndim=1 or 2 supported.")
-            continue
+        arr = np.asarray(val)
+        # Per-object or global param
+        if arr.ndim == 2 and arr.shape[1] == 1:
+            arr = arr[:, 0]
+        # Split vector-valued params
+        if arr.ndim == 2 and arr.shape[1] > 1:
+            for j in range(arr.shape[1]):
+                trace_data[f"{name}_{j}"] = arr[:, j]
+        elif arr.ndim == 1:
+            trace_data[name] = arr
 
-    total_traces = sum(len(v) for v in trace_data.values())
 
+    # Filter included/excluded parameters
+    keys = list(trace_data.keys())
+    if include is not None:
+        keys = [k for k in keys if k.split('_')[0] in include]
+    if exclude is not None:
+        keys = [k for k in keys if k.split('_')[0] not in exclude]
+
+    total_traces = len(keys)
     fig, axes = plt.subplots(total_traces, 1, figsize=(figsize[0], figsize[1] * total_traces), sharex=True)
     if total_traces == 1:
         axes = [axes]
 
-    idx = 0
-    for name, series_list in trace_data.items():
-        for j, series in enumerate(series_list):
-            label = f"{name}" if len(series_list) == 1 else f"{name}_{j}"
-            axes[idx].plot(series, alpha=alpha)
-            axes[idx].set_ylabel(label)
-            axes[idx].grid(True)
-            idx += 1
+    for idx, key in enumerate(keys):
+        axes[idx].plot(trace_data[key], alpha=alpha)
+        axes[idx].set_ylabel(key)
+        axes[idx].grid(True)
 
     axes[-1].set_xlabel("Sample index")
     plt.tight_layout()
 
     output_dir = f"mcmc_traces/{prefix}_{suffix}/"
     os.makedirs(output_dir, exist_ok=True)
-    save_path = os.path.join(output_dir, f"{data['object_id']}_mcmc_traces.png")
+    save_path = os.path.join(output_dir, f"{data['z']:.1f}_{data['object_id']}_mcmc_traces.png")
     plt.savefig(save_path, dpi=150)
     print("Saved trace plot to", save_path)
-    plt.close(fig)
-    return fig

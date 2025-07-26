@@ -498,6 +498,12 @@ class MyMultiVarModelLatent(MyMultiVarModel):
         X_latent = (t_latent, band_latent)
         K_latent = kernel(X_latent, X_latent) + 1e-6 * jnp.eye(M)
 
+        params_mean_latent = params
+        params_mean_latent['t_center'] = jnp.mean(t_latent)
+        params_mean_latent['t_std'] = jnp.std(t_latent)
+
+        means_latent = partial(MyMultiVarModelLatent.mean_func, self.zero_mean, amp_conti.shape[0], params_mean_latent)
+
         # Construct observation operator H
         H = self._build_H(t_obs, band_obs, inv_d, inv_l, amp_conti, amp_blr, M)
 
@@ -509,20 +515,18 @@ class MyMultiVarModelLatent(MyMultiVarModel):
         means = partial(MyMultiVarModelLatent.mean_func, self.zero_mean, amp_conti.shape[0], params_mean)
         mu_obs = means((t_obs, band_obs))
 
-        return {
-            "H": H,
-            "K_latent": K_latent,
-            "D": noise_diag,
-            "mu_obs": mu_obs,
-            "y_obs": y_obs
-        }
+        # Build GP
+        gp = GaussianProcess(
+                kernel,
+                X_latent,
+                diag=1e-6 * jnp.ones_like(t_latent),
+                mean=means_latent)
+
+        return gp, H, K_latent, noise_diag, mu_obs, y_obs
 
     @eqx.filter_jit
     def log_prob(self, params: dict[str, JAXArray]) -> JAXArray:
-        latent = self._build_latent_model(params)
-        H, K_latent, D, mu_obs, y_obs = (
-            latent["H"], latent["K_latent"], latent["D"], latent["mu_obs"], latent["y_obs"]
-        )
+        gp, H, K_latent, D, mu_obs, y_obs = self._build_latent_model(params)
 
         # Build full covariance in observation space: K_obs = H K_latent H.T + D
         K_obs = H @ K_latent @ H.T
@@ -550,22 +554,33 @@ class MyMultiVarModelLatent(MyMultiVarModel):
         #jax.debug.print("log_likelihood: {x}", x=log_likelihood)   
         return log_likelihood
 
-    def sample(self, params: dict[str, JAXArray]) -> None:
-        """
-        NumPyro-compatible likelihood evaluation using Woodbury identity for efficiency.
-        Wraps the custom log-likelihood into a custom Distribution for NumPyro sampling.
-        """
+    def sample(self, params: dict[str, JAXArray], i) -> None:
+        """A convience function for intergrating with numpyro for MCMC sampling.
 
-        # Use numpyro.factor or wrap in a custom Distribution
-        numpyro.factor("gp_loglike", self.log_prob(params))
+        Args:
+            params (dict[str, JAXArray]): Model parameters.
+        """
+        gp, H, K_latent, D, mu_obs, y_obs = self._build_latent_model(params)
+        # Latent GP
+        f_latent = numpyro.sample(f"gp_{i}", gp.numpyro_dist())
+
+        # Compute s_b = bwb_A * log(lambda_b / 2500 Å)
+        s_b = jnp.array([
+            params["bwb_A"] * jnp.log(lambda_pivot[band] / 2500.0)
+            for band in self.clean_bands
+        ])
+        s_per_obs = s_b[self.X[1]]
+
+        # Model mean with BWB nonlinear effect
+        mean = H @ f_latent + s_per_obs * (H @ f_latent) ** 2
+
+        std = jnp.sqrt(jnp.clip(D, a_min=1e-6))
+        numpyro.sample(f"obs_{i}", dist.Normal(mean, std), obs=y_obs)
 
     @eqx.filter_jit
     def pred(self, params: dict[str, JAXArray], X_new: JAXArray) -> tuple[JAXArray, JAXArray, JAXArray, JAXArray, JAXArray, JAXArray]:
         # Build latent model from training data
-        latent = self._build_latent_model(params)
-        H_train, K_latent, D, mu_obs, y_obs = (
-            latent["H"], latent["K_latent"], latent["D"], latent["mu_obs"], latent["y_obs"]
-        )
+        gp, H_train, K_latent, D, mu_obs, y_obs = self._build_latent_model(params)
 
         # Observation covariance and Cholesky factor for training data
         K_obs = H_train @ K_latent @ H_train.T + jnp.diag(D)
