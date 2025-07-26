@@ -5,9 +5,6 @@ import numpy as np
 import os
 import re
 import jax.numpy as jnp
-import arviz as az
-import numpyro
-from numpyro.diagnostics import print_summary
 
 prefix = os.environ.get('PREFIX', "test")
 suffix = os.environ.get('SUFFIX', "test")

@@ -1,76 +1,32 @@
 import jax
-
 jax.config.update("jax_enable_x64", True)
-
 import jax.numpy as jnp
-
-import os
-from collections.abc import Callable
 import equinox as eqx
-from tinygp.helpers import JAXArray
-from numpy.typing import NDArray
-import tinygp
-from functools import partial
 import numpy as np
 import matplotlib.pyplot as plt
-import pandas as pd
-from tqdm import tqdm, trange
-
-import scipy.stats as st
-import numpyro
-from numpyro import infer
-from numpyro.infer import MCMC, NUTS, AIES, Predictive
-import numpyro.distributions as dist
-
-from tinygp import kernels, solvers
-
-learning_rate=0.001
 import warnings
-import jax.scipy as jsp
-from jax.scipy.special import erfc, logsumexp
-
-from jax import lax
-import numpy as np
-import optax
-from eztaox.fitter import fit
-from eztaox.initializers import DRWInit, UniformInit
-from eztaox.models import MultiVarModel, MultiVarModelFFT
-from eztaox.utils import formatlc
-
-from eztaox.kernels.quasisep import MultibandLowRank
-from tinygp import kernels
-from tinygp import GaussianProcess
-from eztaox.kernels import direct, quasisep
-
-from astropy.coordinates import SkyCoord
-from astropy import units as u
-
-import numpyro
-import numpyro.distributions as dist
-from numpyro.infer import MCMC, NUTS
-
-warnings.filterwarnings("ignore", category=RuntimeWarning)
-
-from astropy.io import fits
-from multiprocessing import Pool, get_context
-import h5py
+import argparse
+import os
 import sys
 
+import tinygp
+
 from tinygp.helpers import JAXArray
-import argparse
-import traceback
+from numpy.typing import NDArray
+
+from functools import partial
+
+import numpyro
+import numpyro.distributions as dist
+
+from tinygp import kernels
+from tinygp import GaussianProcess
+
+from eztaox.models import MultiVarModel
 
 from multiband_fit_utils import *
 from multiband_fit_plotting import *
 from multiband_generate_lc import *
-
-from solvers import DirectFullRank
-
-
-# define params
-zero_mean = False
-has_jitter = True
-has_lag = True
 
 class MyMultibandContiBLR(tinygp.kernels.Kernel):
     amplitudes: jnp.ndarray
