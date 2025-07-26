@@ -89,6 +89,118 @@ def numpyro_joint_model(Model, batch_data, latent=False, bwb=False):
     batch_size = len(batch_data)
     nBands = 5  # or use from config
 
+    # --- Global parameters (non-centered) ---
+    powerlaw_loc = jnp.array([0.0, 0.0, 0.0, 0.0])
+    powerlaw_scale = jnp.array([1.0, 1.0, 1.0, 1.0])
+    powerlaw_raw = numpyro.sample("powerlaw_raw", dist.Normal(jnp.zeros(4), 1.0))
+    powerlaw_samples = {
+        k: loc + scale * raw
+        for k, loc, scale, raw in zip(
+            ["eta_A1", "eta_A2", "eta_tau1", "eta_tau2"],
+            powerlaw_loc,
+            powerlaw_scale,
+            powerlaw_raw
+        )
+    }
+    for k, v in powerlaw_samples.items():
+        numpyro.deterministic(k, v)
+
+    # --- Extract object-level prior means ---
+    log_tau_drw0_mean = jnp.array([obj['bestP']['log_tau_drw0'] for obj in batch_data])
+    log_sigma0_mean = jnp.array([obj['bestP']['log_sigma0'] for obj in batch_data])
+    log_amp_delta_blr_mean = jnp.stack([jnp.array(obj['bestP']['log_amp_delta_blr']) for obj in batch_data])  # (B, nBands)
+    mean_mean = jnp.stack([jnp.array(obj['bestP']['mean']) for obj in batch_data])                            # (B, nBands)
+    lag0_mean = jnp.stack([jnp.array(obj['bestP']['lag0']) for obj in batch_data])                            # (B, nBands)
+    lag_beta_mean = jnp.stack([jnp.array(obj['bestP']['lag_beta']) for obj in batch_data])                    # (B, nBands)
+    if latent:
+        log_lag_blr_mean = jnp.stack([jnp.array(obj['bestP']['log_lag_blr']) for obj in batch_data])
+
+    # --- Non-centered object-level parameters ---
+    with numpyro.plate("objects", batch_size):
+        log_tau_drw0_raw = numpyro.sample("log_tau_drw0_raw", dist.Normal(0.0, 1.0))
+        log_tau_drw0 = log_tau_drw0_mean + 1.0 * log_tau_drw0_raw
+        numpyro.deterministic("log_tau_drw0", log_tau_drw0)
+
+        log_sigma0_raw = numpyro.sample("log_sigma0_raw", dist.Normal(0.0, 1.0))
+        log_sigma0 = log_sigma0_mean + 1.0 * log_sigma0_raw
+        numpyro.deterministic("log_sigma0", log_sigma0)
+
+        log_sigma_hat0 = 2.0 * log_sigma0 - log_tau_drw0
+        numpyro.deterministic("log_sigma_hat0", log_sigma_hat0)
+
+        alpha_host_raw = numpyro.sample("alpha_host_raw", dist.Normal(0.0, 1.0))
+        alpha_host = 0.5 + 1.0 * alpha_host_raw
+        numpyro.deterministic("alpha_host", alpha_host)
+
+        f_host_raw = numpyro.sample("f_host_raw", dist.Normal(0.0, 1.0))
+        f_host = jnp.clip(f_host_raw, 0.0, 1.0)
+        numpyro.deterministic("f_host", f_host)
+
+        poly1_raw = numpyro.sample("poly1_raw", dist.Normal(0.0, 1.0))
+        poly1 = 0.0 + 0.1 * poly1_raw
+        numpyro.deterministic("poly1", poly1)
+
+        lag0_raw = numpyro.sample("lag0_raw", dist.Normal(0.0, 1.0))
+        lag0 = lag0_mean + 10.0 * lag0_raw
+        numpyro.deterministic("lag0", lag0)
+
+        lag_beta_raw = numpyro.sample("lag_beta_raw", dist.Normal(0.0, 1.0))
+        lag_beta = lag_beta_mean + 0.2 * lag_beta_raw
+        numpyro.deterministic("lag_beta", lag_beta)
+
+        if bwb:
+            bwb_A_raw = numpyro.sample("bwb_A_raw", dist.Normal(0.0, 1.0))
+            bwb_A = jnp.clip(bwb_A_raw, 0.0, None)
+            numpyro.deterministic("bwb_A", bwb_A)
+
+    with numpyro.plate("objects", batch_size, dim=-2):
+        with numpyro.plate("band", nBands, dim=-1):
+            mean_raw = numpyro.sample("mean_raw", dist.Normal(0.0, 1.0))
+            mean = mean_mean + 0.2 * mean_raw
+            numpyro.deterministic("mean", mean)
+
+            log_amp_delta_blr_raw = numpyro.sample("log_amp_delta_blr_raw", dist.Normal(0.0, 1.0))
+            log_amp_delta_blr = log_amp_delta_blr_mean + 2.0 * log_amp_delta_blr_raw
+            numpyro.deterministic("log_amp_delta_blr", log_amp_delta_blr)
+
+            if latent:
+                log_lag_blr_raw = numpyro.sample("log_lag_blr_raw", dist.Normal(0.0, 1.0))
+                log_lag_blr = log_lag_blr_mean + 4.0 * log_lag_blr_raw
+                numpyro.deterministic("log_lag_blr", log_lag_blr)
+
+    # --- Likelihood ---
+    for i, data in enumerate(batch_data):
+        params = {
+            "log_tau_drw0": log_tau_drw0[i],
+            "log_sigma_hat0": log_sigma_hat0[i],
+            "alpha_host": alpha_host[i],
+            "f_host": f_host[i],
+            "poly1": poly1[i],
+            "mean": mean[i],
+            "log_amp_delta_blr": log_amp_delta_blr[i],
+            "lag0": lag0[i],
+            "lag_beta": lag_beta[i],
+            **powerlaw_samples,
+        }
+        if latent:
+            params["log_lag_blr"] = log_lag_blr[i]
+        if bwb:
+            params["bwb_A"] = bwb_A[i]
+
+        m = Model(
+            data['X'], data['y'], data['yerr'],
+            kernels.quasisep.Exp(jnp.array([1, 1])),
+            zero_mean=zero_mean, has_jitter=has_jitter, has_lag=has_lag,
+            clean_bands=data['clean_bands'], z=data['z']
+        )
+        log_prob = m.log_prob(params)
+        log_prob = jnp.where(jnp.isfinite(log_prob), log_prob, -jnp.inf)
+        numpyro.factor(f"loglike_{i}", log_prob)
+
+def numpyro_joint_model_CENT(Model, batch_data, latent=False, bwb=False):
+    batch_size = len(batch_data)
+    nBands = 5  # or use from config
+
     # Shared across all objects
     powerlaw_samples = {
         k: numpyro.sample(k, dist.Normal(loc, scale))
