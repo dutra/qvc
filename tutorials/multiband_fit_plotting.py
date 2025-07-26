@@ -46,7 +46,7 @@ def save_lc_plot(times, mags, magerrs, object_id):
     plt.savefig(os.path.join("light_curves", f'{object_id}_light_curve.png'))
     plt.close(fig)
 
-def plot_posterior_for_object(samples_flat, data, i, batch_data_len, include=None, exclude=['gp', 'f', 'log_amp_delta_blr'], bins=20):
+def plot_posterior_for_object(samples_flat, data, i, batch_data_len, include=None, exclude=['gp', 'f', 'log_amp_delta_blr', 'raw'], bins=20):
     """
     Generalized corner plot of posterior parameters for a specific object.
 
@@ -236,7 +236,7 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, data, fit_bestP=Fal
     plt.close(fig)
     
 
-def plot_mcmc_traces(samples_dict, data, include=None, exclude=None, figsize=(12, 2.5), alpha=0.7):
+def plot_mcmc_traces(samples_dict, data, include=None, exclude=['gp', 'f', 'log_amp_delta_blr', 'raw'], figsize=(12, 2.5), alpha=0.7):
     """
     Generalized MCMC trace plotter for any set of parameters.
 
@@ -289,3 +289,31 @@ def plot_mcmc_traces(samples_dict, data, include=None, exclude=None, figsize=(12
     save_path = os.path.join(output_dir, f"{data['z']:.1f}_{data['object_id']}_mcmc_traces.png")
     plt.savefig(save_path, dpi=150)
     print("Saved trace plot to", save_path)
+
+    # Plot eta_A1 vs. log_tau trace if both are present
+    if 'eta_A1' in trace_data and 'log_tau_drw0' in trace_data:
+        fig2, ax2 = plt.subplots(figsize=(6, 5))
+        ax2.scatter(trace_data['log_tau_drw0'], trace_data['eta_A1'], alpha=alpha, lw=0.7)
+        ax2.set_xlabel('log_tau_drw0')
+        ax2.set_ylabel('eta_A1')
+        ax2.set_title('Trace: eta_A1 vs. log_tau_drw0')
+        ax2.grid(True)
+        save_path2 = os.path.join(output_dir, f"{data['z']:.1f}_{data['object_id']}_etaA1_vs_logtau.png")
+        plt.tight_layout()
+        plt.savefig(save_path2, dpi=150)
+        plt.close(fig2)
+        print("Saved eta_A1 vs. log_tau trace plot to", save_path2)
+
+    # Plot log_tau_drw0 vs. log_sigma_hat0 trace if both are present
+    if 'log_tau_drw0' in trace_data and 'log_sigma_hat0' in trace_data:
+        fig3, ax3 = plt.subplots(figsize=(6, 5))
+        ax3.scatter(trace_data['log_tau_drw0'], trace_data['log_sigma_hat0'], alpha=alpha, lw=0.7)
+        ax3.set_xlabel('log_tau_drw0')
+        ax3.set_ylabel('log_sigma_hat0')
+        ax3.set_title('Trace: log_tau_drw0 vs. log_sigma_hat0')
+        ax3.grid(True)
+        save_path3 = os.path.join(output_dir, f"{data['z']:.1f}_{data['object_id']}_logtau_vs_logsigma.png")
+        plt.tight_layout()
+        plt.savefig(save_path3, dpi=150)
+        plt.close(fig3)
+        print("Saved log_tau_drw0 vs. log_sigma_hat0 trace plot to", save_path3)

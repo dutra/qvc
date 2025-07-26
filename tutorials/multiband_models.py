@@ -195,6 +195,7 @@ class MyMultiVarModel(MultiVarModel):
     yerr: JAXArray | NDArray
     clean_bands: JAXArray
     z: float
+    lam_rf: JAXArray
 
     def __init__(
         self,
@@ -208,6 +209,7 @@ class MyMultiVarModel(MultiVarModel):
         self.yerr = yerr
         self.clean_bands = kwargs.get("clean_bands", None)
         self.z = kwargs.get("z", None)
+        self.lam_rf = jnp.array([lambda_pivot[band] for band in self.clean_bands]) / (1 + self.z)
 
     @staticmethod
     def mean_func(
@@ -278,10 +280,7 @@ class MyMultiVarModel(MultiVarModel):
         self, X: JAXArray, has_lag: bool, params: dict[str, JAXArray]
     ) -> tuple[tuple[JAXArray, JAXArray], JAXArray]:
         if has_lag is True:
-            lags = jnp.array([
-                params["lag0"] * (lambda_pivot[band] / (1 + self.z) / 2500.0) ** params["lag_beta"]
-                for band in self.clean_bands
-            ])
+            lags = params["lag0"] * (self.lam_rf / (1 + self.z) / 2500.0) ** params["lag_beta"]
             lags = jnp.insert(lags, 0, 0.0)
         else:
             nBand = params["log_amp_delta"].size + 1
@@ -299,7 +298,7 @@ class MyMultiVarModel(MultiVarModel):
         eta_tau2 = params["eta_tau2"]
         lam_s = 2500 #params["lam_s"]
         eta_break = 1.0 #params["eta_break"]
-        params["log_tau_band_RF"] = params["log_tau_drw0"] - jnp.log(1 + self.z) + jnp.log(10) * jnp.array([log_broken_pl(lambda_pivot[band]/(1 + self.z), lam_s, eta_tau1, eta_tau2, eta_break) for band in self.clean_bands])
+        params["log_tau_band_RF"] = params["log_tau_drw0"] - jnp.log(1 + self.z) + jnp.log(10) * log_broken_pl(self.lam_rf, lam_s, eta_tau1, eta_tau2, eta_break)
         return params["log_tau_band_RF"]
 
     def my_amp_transform(self, params: dict[str, JAXArray]) -> JAXArray:
@@ -310,15 +309,12 @@ class MyMultiVarModel(MultiVarModel):
 
         # Host dilution: apply per-band correction
         # Host galaxy contribution modeled as a power-law in wavelength
-        host_frac = jnp.array([
-            params["f_host"] * (lambda_pivot[band] / (1 + self.z) / 5500.0) ** params["alpha_host"]
-            for band in self.clean_bands
-        ])
+        host_frac = params["f_host"] * (self.lam_rf / (1 + self.z) / 5500.0) ** params["alpha_host"]
         dilution_factor = 1.0 / (1.0 + host_frac)
         log_dilution = jnp.log(dilution_factor)
 
         # Power-law scaling across rest-frame wavelength
-        params["log_sigma_hat_band"] = params["log_sigma_hat0"] + log_dilution + jnp.log(10) * jnp.array([log_broken_pl(lambda_pivot[band]/(1 + self.z), lam_s, eta_A1, eta_A2, eta_break) for band in self.clean_bands])
+        params["log_sigma_hat_band"] = params["log_sigma_hat0"] + log_dilution + jnp.log(10) * log_broken_pl(self.lam_rf, lam_s, eta_A1, eta_A2, eta_break)
 
         return params["log_sigma_hat_band"]
     
@@ -349,10 +345,7 @@ class MyMultiVarModel(MultiVarModel):
         f = numpyro.sample(f"gp_{i}", gp.numpyro_dist())
 
         # Compute s_b = bwb_A * log(lambda_b / 2500 Å)
-        s_b = jnp.array([
-            params["bwb_A"] * jnp.log(lambda_pivot[band] / 2500.0)
-            for band in self.clean_bands
-        ])
+        s_b = params["bwb_A"] * jnp.log(self.lam_rf / 2500.0)
         s_per_obs = s_b[self.X[1]]
 
         # Model mean with BWB nonlinear effect

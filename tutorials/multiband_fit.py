@@ -37,7 +37,7 @@ def mle(Model, nBand, X, y, yerr, clean_bands, z, latent=False, fixed=True):
         jnp.array,
         {
             "log_tau_drw0": 6.0,
-            "log_sigma_hat0": -5.0,
+            "log_sigma_hat0": -0.2,
             "alpha_host": 0.3,
             "f_host": 0.0,
             "poly1": 0.0,
@@ -114,7 +114,8 @@ def numpyro_joint_model(Model, batch_data, latent=False, bwb=False):
     with numpyro.plate("objects", batch_size):
         # Object-level parameters (shape: [B])
         log_tau_drw0 = numpyro.sample("log_tau_drw0", dist.Normal(log_tau_drw0_mean, 2.0))
-        log_sigma_hat0 = numpyro.sample("log_sigma_hat0", dist.Normal(log_sigma_hat0_mean, 1.0))
+        log_sigma0 = numpyro.sample("log_sigma0", dist.Normal(log_sigma0_mean, 1.0))
+        log_sigma_hat0 = numpyro.deterministic("log_sigma_hat0", 2.0 * log_sigma0 - log_tau_drw0)
         alpha_host = numpyro.sample("alpha_host", dist.Normal(0.5, 1.0))
         f_host = numpyro.sample("f_host", dist.Uniform(0.0, 1.0))
         poly1 = numpyro.sample("poly1", dist.Normal(0.0, 0.1))
@@ -167,6 +168,11 @@ def numpyro_joint_model(Model, batch_data, latent=False, bwb=False):
             #jax.debug.print("log_prob: {lp} {i}", lp=log_prob, i=i)
             log_prob = jnp.where(jnp.isfinite(log_prob), log_prob, -1e20)
             numpyro.factor(f"loglike_{i}", log_prob)
+
+        def log_prob_single(params, model):
+            return model.log_prob(params)
+
+        log_prob_batch = jax.vmap(log_prob_single, in_axes=(0, 0))
 
 def make_lc(Model, data):
     times = data['times']
@@ -353,7 +359,7 @@ if __name__ == '__main__':
             zero_mean=zero_mean, has_jitter=False, has_lag=has_lag,
             clean_bands=obj['clean_bands'], z=obj['z']
         )
-        save_combined_plot(bestP, m, obj['X'], obj['y'], obj['yerr'], obj['band_idx'], obj, fit_bestP=True)
+        #save_combined_plot(bestP, m, obj['X'], obj['y'], obj['yerr'], obj['band_idx'], obj, fit_bestP=True)
 
         num_params = sum(p.size for p in bestP.values())
         batch_data.append({
@@ -378,8 +384,8 @@ if __name__ == '__main__':
         nchains = args.nchains
     print(f"{args.nwarm=}, {args.nsamp=}, {args.nchains=}, default num_chains: {estimated_nchains}, {num_params=}, {len(batch_data)=}")
     
-    #init_strategy = numpyro.infer.init_to_sample()
-    init_strategy = numpyro.infer.init_to_median()
+    init_strategy = numpyro.infer.init_to_sample()
+    #init_strategy = numpyro.infer.init_to_median()
     print("Done with numpyro.infer.init_to_sample")
 
     nuts_kernel = NUTS(numpyro_joint_model, init_strategy=init_strategy, dense_mass=True, max_tree_depth=6)
