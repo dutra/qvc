@@ -179,7 +179,7 @@ def make_lc(Model, data):
     #red_bands = bands_redder_than_5000(data['z'])
     blue_bands = bands_bluer_than_lyman_alpha(data['z'])
 
-    clean_bands = list(set(bands))
+    clean_bands = list(set(bands) - set(blue_bands))
     # Reorder clean_bands to match the desired order
     clean_bands = list(sorted(clean_bands, key=lambda band: ['u', 'g', 'r', 'i', 'z', 'y'].index(band)))
     #clean_bands = bands
@@ -424,7 +424,7 @@ if __name__ == '__main__':
                 obj['X'], obj['y'], obj['yerr'], 
                 kernels.quasisep.Exp(jnp.array([1, 1])),
                 zero_mean=zero_mean, has_jitter=has_jitter, has_lag=has_lag,
-                clean_bands=['u','g','r','i','z'], z=obj['z']
+                clean_bands=obj['clean_bands'], z=obj['z']
             )
             psd_results = compute_psd_from_samples(obj_samples_clean, obj["clean_bands"])
             save_combined_plot(obj_samples_clean, m, obj['X'], obj['y'], obj['yerr'], obj['band_idx'], result, fit_bestP=False, psd_results=psd_results)
