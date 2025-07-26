@@ -37,7 +37,7 @@ def mle(Model, nBand, X, y, yerr, clean_bands, z, latent=False, fixed=True):
         jnp.array,
         {
             "log_tau_drw0": 6.0,
-            "log_sigma_hat0": -0.2,
+            "log_sigma0": -0.2,
             "alpha_host": 0.3,
             "f_host": 0.0,
             "poly1": 0.0,
@@ -102,7 +102,7 @@ def numpyro_joint_model(Model, batch_data, latent=False, bwb=False):
 
     # Extract object-level prior means
     log_tau_drw0_mean = jnp.array([obj['bestP']['log_tau_drw0'] for obj in batch_data])
-    log_sigma_hat0_mean = jnp.array([obj['bestP']['log_sigma_hat0'] for obj in batch_data])
+    log_sigma0_mean = jnp.array([obj['bestP']['log_sigma0'] for obj in batch_data])
     log_amp_delta_blr_mean = jnp.stack([jnp.array(obj['bestP']['log_amp_delta_blr']) for obj in batch_data])  # (B, 5)
     mean_mean = jnp.stack([jnp.array(obj['bestP']['mean']) for obj in batch_data])                            # (B, 5)
     lag0_mean = jnp.stack([jnp.array(obj['bestP']['lag0']) for obj in batch_data])                            # (B, 5)
@@ -113,7 +113,7 @@ def numpyro_joint_model(Model, batch_data, latent=False, bwb=False):
     
     with numpyro.plate("objects", batch_size):
         # Object-level parameters (shape: [B])
-        log_tau_drw0 = numpyro.sample("log_tau_drw0", dist.Normal(log_tau_drw0_mean, 2.0))
+        log_tau_drw0 = numpyro.sample("log_tau_drw0", dist.Normal(log_tau_drw0_mean, 1.0))
         log_sigma0 = numpyro.sample("log_sigma0", dist.Normal(log_sigma0_mean, 1.0))
         log_sigma_hat0 = numpyro.deterministic("log_sigma_hat0", 2.0 * log_sigma0 - log_tau_drw0)
         alpha_host = numpyro.sample("alpha_host", dist.Normal(0.5, 1.0))
