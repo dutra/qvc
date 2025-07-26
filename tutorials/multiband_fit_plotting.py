@@ -304,6 +304,20 @@ def plot_mcmc_traces(samples_dict, data, include=None, exclude=['gp', 'f', 'log_
         plt.close(fig2)
         print("Saved eta_A1 vs. log_tau trace plot to", save_path2)
 
+    # Plot eta_A1 vs. log_sigma_hat0 trace if both are present
+    if 'eta_A1' in trace_data and 'log_sigma_hat0' in trace_data:
+        fig_eta_sigma, ax_eta_sigma = plt.subplots(figsize=(6, 5))
+        ax_eta_sigma.scatter(trace_data['log_sigma_hat0'], trace_data['eta_A1'], alpha=alpha, lw=0.7)
+        ax_eta_sigma.set_xlabel('log_sigma_hat0')
+        ax_eta_sigma.set_ylabel('eta_A1')
+        ax_eta_sigma.set_title('Trace: eta_A1 vs. log_sigma_hat0')
+        ax_eta_sigma.grid(True)
+        save_path_eta_sigma = os.path.join(output_dir, f"{data['z']:.1f}_{data['object_id']}_etaA1_vs_logsigma.png")
+        plt.tight_layout()
+        plt.savefig(save_path_eta_sigma, dpi=150)
+        plt.close(fig_eta_sigma)
+        print("Saved eta_A1 vs. log_sigma_hat0 trace plot to", save_path_eta_sigma)
+
     # Plot log_tau_drw0 vs. log_sigma_hat0 trace if both are present
     if 'log_tau_drw0' in trace_data and 'log_sigma_hat0' in trace_data:
         fig3, ax3 = plt.subplots(figsize=(6, 5))
