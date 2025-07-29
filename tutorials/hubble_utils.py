@@ -123,15 +123,19 @@ def log_nuLnu_to_m2500(log_nuLnu, z):
 
 def compute_apparent_mag_2500_colin(df):
     # Load Colin's SDSS QSO 2500A magnitudes and merge with df on SDSS_NAME
-    colin_df = pd.read_csv("data/sdss_qso_mag_2500_colin.csv")
+    #colin_df = pd.read_csv("data/sdss_qso_mag_2500_colin.csv")
+    colin_df = pd.read_csv("data/july19_goodsources_chisq5and10_mean1_N20w4000s500_merged_magscorrected_fittedm2500.csv")
     # Ensure SDSS_NAME is string for matching
-    colin_df['SDSS_NAME'] = colin_df['SDSS_NAME'].astype(str)
+    colin_df['object_id'] = colin_df['object_id'].astype(str)
+    print("Length of colin_df:", len(colin_df))
+    print("Number with apparent_mag_2500 > 0:", np.sum(colin_df['apparent_mag_2500'] > 0))
     df['sdss_name'] = df['sdss_name'].astype(str)
     # Merge on SDSS_NAME, bring in apparent_mag_2500
-    merged = pd.merge(df, colin_df[['SDSS_NAME', 'apparent_mag_2500_colin', 'f_host_4200']], left_on='sdss_name', right_on='SDSS_NAME', how='left')
+    merged = pd.merge(df, colin_df[['object_id', 'sdss_name', 'apparent_mag_2500', 'f_host_4200']], left_on='object_id', right_on='object_id', how='left')
+    print("Length of merged DataFrame:", len(merged))
     # Overwrite or add the column
     df['f_host_4200'] = merged['f_host_4200']
-    df['apparent_mag_2500'] = merged['apparent_mag_2500_colin']
+    df['apparent_mag_2500'] = merged['apparent_mag_2500']
     df['apparent_mag_2500_err'] = 0.1  # Set error to NaN as not provided in Colin's data
     return df
 
@@ -408,7 +412,7 @@ def populate_sdss_fields(objs, progress_bar=True):
         # d['HBETA'] = fits_data['HBETA'][i, 0]
         # d['HALPHA'] = fits_data['HALPHA'][i, 0]
 
-
+        d['LOGLBOL'] = fits_data['LOGLBOL'][i]
         d['LOGL1350'] = fits_data['LOGL1350'][i]
         d['LOGL1700'] = fits_data['LOGL1700'][i]
         d['LOGL2500'] = fits_data['LOGL2500'][i]
@@ -577,8 +581,8 @@ def load_quasar_data(file_path, populate_sdss=False, apply_cut=True):
     df['MY_LOGL2500'], df['MY_LOGL2500_ERR'] = compute_MY_LOGL2500(df)
     
 
-    #df = compute_apparent_mag_2500(df, logL_col='LOGL2500', logL_err_col='LOGL2500_ERR')
-    df = compute_apparent_mag_2500_colin(df)
+    df = compute_apparent_mag_2500(df, logL_col='LOGL2500', logL_err_col='LOGL2500_ERR')
+    #df = compute_apparent_mag_2500_colin(df)
 
     # Remove infinite values from numeric columns
     columns_with_nans = df.columns[df.isna().any()].tolist()
@@ -617,12 +621,12 @@ def load_quasar_data(file_path, populate_sdss=False, apply_cut=True):
     df = df[
         #(df['z'].between(0.3, 1.5)) &
         #(df['alpha_nu'].between(-2, 0)) & 
+        #(df['LOGLBOL'] > 45) &
         #(df['M_i'] < -22.6) & 
         (df['apparent_mag_2500'].between(1, 40)) &
-        (df['ebv'] < 0.05) & # 0 &
         #(df['EXTINCTION'] < 0.1) & 
-        (df['sn_median_all'] > 3) & # 6  # reliable spectrum
-        #(df['FHOST_5100'] <= 0) &
+        #(df['sn_median_all'] > 1) & # 6  # reliable spectrum
+        (df['FHOST_5100'] <= 0) &
         
         #(df['f_host_4200'] <= 0) & 
         (df['ebv'] < 0.05) # 0 &
@@ -680,10 +684,10 @@ def load_quasar_data(file_path, populate_sdss=False, apply_cut=True):
     print("Final number of quasars:", len(df))
     return df
 
-def load_data(file_path):
+def load_data(file_path, populate_sdss=False):
     print("Loading quasar data...")
     #df_agn = load_quasar_data("data/may12_objs_tauwavelength_taublr_redbands_ds4_merged.h5")
-    df_agn = load_quasar_data(file_path=file_path)
+    df_agn = load_quasar_data(file_path=file_path, populate_sdss=populate_sdss)
     # Return 200 randomly sampled AGNs for speed
     #df_agn = df_agn.sample(n=500, random_state=42).reset_index(drop=True)
 

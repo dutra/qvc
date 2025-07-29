@@ -454,8 +454,8 @@ def main():
 
 
 def test():
-    #cosmo_model = 'Flatw0waCDM'
-    cosmo_model = 'FlatwCDM'
+    cosmo_model = 'Flatw0waCDM'
+    #cosmo_model = 'FlatwCDM'
     # cosmo_model = 'FlatLambdaCDM'
     only_sna = False
 
@@ -466,7 +466,7 @@ def test():
     #df_agn, df_pantheon, Cov_inv, logdetCov, L = load_data("data/may23_all_merged.h5", populate_sdss=False)
     #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/june1_joint_N20w2000s1000_fits_merged.h5")
     #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/june30_joint_allebv005_N20w500s250_merged.h5")
-    df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/july5_joint_chisq_lcrf2500_mean1_N20w2000s1000_merged.h5")
+    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/july5_joint_chisq_lcrf2500_mean1_N20w2000s1000_merged.h5")
 
     #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/july12_joint_mean1_zsort_N20w2000s500_merged.h5")
     #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/july14_chi10_extinction04_ebv005_N20w500s250_merged.h5")
@@ -480,12 +480,19 @@ def test():
     #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/july18_goodsources_chisq5and10_mean1_N20w4000s500_merged.h5")
     #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/july19_goodsources_chisq2_otherfilters_mean1_N20w4000s500_merged.h5")
     
+    
     #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/july19_goodsources_chisq10_otherfilters_mean1_N20w4000s500_merged.h5")
-    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/july19_goodsources_chisq5and10_mean1_N20w4000s500_merged.h5")
+    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/july19_goodsources_chisq5and10_mean1_N20w4000s500_merged.h5", populate_sdss=True)
+    
     #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/july20_goodsources_chisq5and10_hostpl_N20w4000s500_merged.h5")
+    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/july21_chisq2_hostpl_N20w4000s200_merged.h5")
+    df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/july27_chisq2_preview_tree8_N20w4000s500_merged.h5", populate_sdss=True)
 
+    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/july19_goodsources_chisq5and10_mean1_N20w4000s500_merged.h5", populate_sdss=True)
     #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/june1_joint_N20w2000s1000_fits_merged.h5")
     #df_agn = df_agn[:400]
+    #df_agn = df_agn[df_agn['z'] > 1]  # Filter AGN data to z < 2.5
+
     fitting_method = 'dynesty'
 
     sampler_joint, flat_samples, model_labels, mag_corr, logZ, logZerr = run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model=cosmo_model, 
@@ -496,7 +503,7 @@ def test():
         zp = compute_pivot_redshift(flat_samples, cosmo_model)
         print("Pivot redshift: ", zp)
     try:
-        plot_posterior_corner(flat_samples, cosmo_model=cosmo_model, only_sna=False)
+        plot_posterior_corner(flat_samples, cosmo_model=cosmo_model, only_sna=False, show=False)
     except Exception as e:
         print(f"Could not plot posterior corner: {e}")
     
@@ -505,11 +512,11 @@ def test():
     #plot_Mi_vs_log_sigma_hat_sq(flat_samples, df_agn, cosmo_model=cosmo_model, show=False)
     
     print("Plotting AGN M_i predictions vs actual...")
-    plot_predicted_vs_actual_M2500(flat_samples, df_agn, cosmo_model=cosmo_model)
-    plot_predicted_vs_actual_Mi(flat_samples, df_agn, cosmo_model=cosmo_model)
+    plot_predicted_vs_actual_M2500(flat_samples, df_agn, cosmo_model=cosmo_model, show=False)
+    plot_predicted_vs_actual_Mi(flat_samples, df_agn, cosmo_model=cosmo_model, show=False)
     
     print("Plotting Hubble diagram...")
-    residuals, mu_pred_median, mu_pred_std = plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model=cosmo_model, show_true=False)
+    residuals, mu_pred_median, mu_pred_std = plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model=cosmo_model, show_true=False, show=False)
     
     plot_Mi_vs_sigmahat(df_agn, cosmo_model=cosmo_model, show=False)
     plot_predicted_M2500_vs_sigmahat(flat_samples, df_agn, cosmo_model=cosmo_model, show=False)
@@ -524,7 +531,7 @@ def test():
     plot_completeness_vs_mag_at_redshifts(p_detect, mag_centers, z_centers)
     plot_completeness_diagnostics(df_agn, p_detect, mag_centers, z_centers)
 
-    plot_full_residuals(df_agn, residuals)
+    plot_full_residuals(df_agn, residuals, show=False)
 
     #plot_predicted_sigma_hat_vs_luminosity(sampler_joint, df_agn, cosmo_model=cosmo_model, show=False)
 if __name__ == "__main__":

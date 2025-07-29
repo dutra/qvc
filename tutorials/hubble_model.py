@@ -43,24 +43,24 @@ def broken_power_law(x, x_break, d1, d2, ds):
     return d1 * delta + term - offset
 
 # # Broken power law model
-# def M_model_agn(M0_agn, log_sigma_hat_sq_break, eta_A1_agn, eta_A2_agn, eta_break_agn, beta_agn, log_sigma_hat_UV, log_tau_UV_RF):
-#     """AGN model with broken power law in log_sigma_hat_UV."""
-#     bpl = broken_power_law(2*log_sigma_hat_UV, log_sigma_hat_sq_break, eta_A1_agn, eta_A2_agn, ds=eta_break_agn)
-#     return M0_agn + bpl + beta_agn * (log_tau_UV_RF - log_tau_UV_RF_pivot)
-
-# # keep this same(ish) signature as M_model_agn + x_err
-# def M_model_agn_err(M0_agn, log_sigma_hat_sq_break, eta_A1_agn, eta_A2_agn, eta_break_agn, beta_agn,
-#                     log_sigma_hat_UV, log_sigma_hat_UV_err, log_tau_UV_RF_err):
-#     err_bpl = broken_power_law_err(2*log_sigma_hat_UV, 2*log_sigma_hat_UV_err, log_sigma_hat_sq_break, eta_A1_agn, eta_A2_agn, ds=eta_break_agn)    
-#     return np.sqrt(err_bpl**2 + (beta_agn * log_tau_UV_RF_err)**2)
-
-# Linear model
 def M_model_agn(M0_agn, log_sigma_hat_sq_break, eta_A1_agn, eta_A2_agn, eta_break_agn, beta_agn, log_sigma_hat_UV, log_tau_UV_RF):
-    return M0_agn + eta_A1_agn * (2 * log_sigma_hat_UV - log_sigma_hat_sq_pivot) + beta_agn * (log_tau_UV_RF - log_tau_UV_RF_pivot)
-    
+    """AGN model with broken power law in log_sigma_hat_UV."""
+    bpl = broken_power_law(2*log_sigma_hat_UV, log_sigma_hat_sq_break, eta_A1_agn, eta_A2_agn, ds=eta_break_agn)
+    return M0_agn + bpl + beta_agn * (log_tau_UV_RF - log_tau_UV_RF_pivot)
+
+# keep this same(ish) signature as M_model_agn + x_err
 def M_model_agn_err(M0_agn, log_sigma_hat_sq_break, eta_A1_agn, eta_A2_agn, eta_break_agn, beta_agn,
                     log_sigma_hat_UV, log_sigma_hat_UV_err, log_tau_UV_RF_err):
-    return np.sqrt((eta_A1_agn * 2*log_sigma_hat_UV_err)**2 + (beta_agn * log_tau_UV_RF_err)**2)
+    err_bpl = broken_power_law_err(2*log_sigma_hat_UV, 2*log_sigma_hat_UV_err, log_sigma_hat_sq_break, eta_A1_agn, eta_A2_agn, ds=eta_break_agn)    
+    return np.sqrt(err_bpl**2 + (beta_agn * log_tau_UV_RF_err)**2)
+
+# Linear model
+# def M_model_agn(M0_agn, log_sigma_hat_sq_break, eta_A1_agn, eta_A2_agn, eta_break_agn, beta_agn, log_sigma_hat_UV, log_tau_UV_RF):
+#     return M0_agn + eta_A1_agn * (2 * log_sigma_hat_UV - log_sigma_hat_sq_pivot) + beta_agn * (log_tau_UV_RF - log_tau_UV_RF_pivot)
+    
+# def M_model_agn_err(M0_agn, log_sigma_hat_sq_break, eta_A1_agn, eta_A2_agn, eta_break_agn, beta_agn,
+#                     log_sigma_hat_UV, log_sigma_hat_UV_err, log_tau_UV_RF_err):
+#     return np.sqrt((eta_A1_agn * 2*log_sigma_hat_UV_err)**2 + (beta_agn * log_tau_UV_RF_err)**2)
 
 def M_model_SN(m_b_corr, host_logmass, M0_sn, gamma_sn, tau_Ms):
     """
@@ -113,7 +113,7 @@ def get_model_params(cosmo_model):
     elif cosmo_model == 'Flatw0waCDM':
         priors |= OrderedDict([
             ("w0",          (-3, -0.5)),
-            ("wa",          (-3, 2))
+            ("wa",          (-3, 0))
         ])
 
     else:

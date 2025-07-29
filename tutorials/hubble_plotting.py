@@ -77,7 +77,7 @@ def plot_dynesty(results, cosmo_model, basename="plots/hubble/dynesty", show=Fal
     # except Exception as e:
     #     print(f"Error in runplot: {e}")
         
-def plot_traces(sampler, only_sna=False, cosmo_model='Flatw0waCDM', show=True, use_dynesty=False):
+def plot_traces(sampler, only_sna=False, cosmo_model='Flatw0waCDM', show=False, use_dynesty=False):
     """
     Plot parameter traces from dynesty nested sampling results.
     
@@ -441,7 +441,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, show=False, comp
     #             markersize=2, alpha=0.2, color='k', lw=1.5, zorder=-7, label="AGN")
     # Color AGN points by M_i
     sc = ax.scatter(
-        df_agn["z"], mu_pred_median, c=df_agn["M_i"], cmap="viridis",
+        df_agn["z"], mu_pred_median, c=df_agn["LOGLBOL"], cmap="viridis",
         s=20, alpha=0.7, edgecolor='k', lw=0.3, zorder=-7, label="AGN"
     )
     ax.errorbar(
@@ -449,7 +449,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, show=False, comp
         ecolor='gray', alpha=0.3, lw=1, zorder=-8
     )
     cbar = plt.colorbar(sc, ax=ax, pad=0.01)
-    cbar.set_label(r"M_i", fontsize=12)
+    cbar.set_label(r"LOGLBOL", fontsize=12)
 
     # Binned AGNs
     ax.errorbar(binned_z, binned_mu_pred_mean, yerr=binned_mu_pred_std, label="Binned AGN",

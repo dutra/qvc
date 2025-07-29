@@ -39,9 +39,10 @@ def read_quasars_from_hdf5(file_path):
     return quasar_list
 
 
-objs = read_quasars_from_hdf5("data/july2_hd_objects_means.h5")
-
+#objs = read_quasars_from_hdf5("data/july21_chisq2_hostpl_N20w4000s200_merged_magscorrected.h5")
+agn_df = pd.read_csv('data/july19_goodsources_chisq5and10_mean1_N20w4000s500_merged_magscorrected.csv')
 # %
+bands = ['u', 'g', 'r', 'i', 'z']
 
 from astropy import units as u
 from astropy.table import Table
@@ -57,20 +58,10 @@ with fits.open('data/dr16q_prop_May01_2024.fits') as hdul:
         frame='icrs'
     )
 
-    agn_df = pd.read_csv('data/agn_sdssname_m2500.csv')
-
     # ...existing code...
     # Ensure all object_ids are strings and stripped
     agn_df['object_id'] = agn_df['object_id'].astype(str).str.strip()
-    obj_mean_corr_map = {str(obj['object_id']).strip(): obj['mean_corrected'] for obj in objs}
-
-    # Create new columns for each band
-    bands = ['g', 'r', 'i', 'z', 'u']
-    for i, band in enumerate(bands):
-        agn_df[f'mean_corrected_{band}'] = agn_df['object_id'].map(
-            lambda oid: obj_mean_corr_map.get(oid, [np.nan]*5)[i]
-        )
-    # ...existing code...
+    #obj_mean_corr_map = {str(obj['object_id']).strip(): obj['mean_corrected'] for obj in objs}
 
     coords_agn = SkyCoord(
         ra=agn_df['ra'],
@@ -108,13 +99,14 @@ with fits.open('data/dr16q_prop_May01_2024.fits') as hdul:
     if not isinstance(data_cat, Table):
         data_cat = Table(data_cat)
 
-    data_cat['apparent_mag_2500'] = agn_df_matched['apparent_mag_2500'].values
+    #data_cat['apparent_mag_2500'] = agn_df_matched['apparent_mag_2500'].values
 
     # Add the mean_corrected magnitudes for each band to data_cat
     # The order of agn_df_matched matches data_cat after filtering
 
     for i, band in enumerate(bands):
         data_cat[f'mean_corrected_{band}'] = agn_df_matched[f'mean_corrected_{band}'].values
+        data_cat['object_id'] = agn_df_matched['object_id'].values
 
 # %%
 path_ex = '.' #os.path.join(pyqsofit.__path__[0], '..', 'example')
@@ -311,6 +303,8 @@ def get_alpha(i):
     # Query SDSS for the spectrum using the SDSS_NAME
     #try:
     if True:
+        print(f"Fetching spectrum for index {i} with SDSS_NAME: {sdss_name}")
+        print("Plate:", data_cat['PLATE'][i], "FiberID:", data_cat['FIBERID'][i], "MJD:", data_cat['MJD'][i])
         spec = SDSS.get_spectra(plate=data_cat['PLATE'][i], 
                                 fiberID=data_cat['FIBERID'][i], 
                                 mjd=data_cat['MJD'][i])
@@ -329,7 +323,7 @@ def get_alpha(i):
 
         if np.min(lam) > 3619.0:
             print("NO g band!")
-            return -1, -1, -1, -1
+            return -1, -1, -1
 
 
         # Absolute flux calibration
@@ -479,10 +473,11 @@ def get_alpha(i):
 
     #plt.show()
     
-    return m_2500_new, data_cat['apparent_mag_2500'][i], f_host, delta_m_avg
+    return m_2500_new, f_host, delta_m_avg
 
 
 from astropy.cosmology import FlatLambdaCDM
+from tqdm import trange
 import astropy.units as u
 
 def compute_apparent_mag_2500_astropy(conti_table, logL_col='L2500', logL_err_col='LOGL2500_ERR', z_col='z', H0=70, Om0=0.3):
@@ -507,13 +502,34 @@ def compute_apparent_mag_2500_astropy(conti_table, logL_col='L2500', logL_err_co
 
 
 # %%
-ntest = 2
+#ntest = 2
 ntest = len(data_cat)
 
 m_new = np.zeros(ntest, dtype=float)
 m_old = np.zeros(ntest, dtype=float)
 f_host = np.zeros(ntest, dtype=float)
 dmag_avg = np.zeros(ntest, dtype=float)
-for i in range(ntest):
-    m_new[i], m_old[i], f_host[i], dmag_avg[i] = get_alpha(i)
-    print(f"m_new: {m_new[i]}, m_old: {m_old[i]}, f_host: {f_host[i]}, dmag_avg: {dmag_avg[i]}")
+
+new_data = []
+
+for i in trange(ntest, desc="Processing objects"):
+    object_id = data_cat['object_id'][i]
+    try:
+        m_new[i], f_host[i], dmag_avg[i] = get_alpha(i)
+        print(f"m_new: {m_new[i]}, f_host: {f_host[i]}, dmag_avg: {dmag_avg[i]}")
+    except Exception as e:
+        print(f"Error processing object {object_id}: {e}")
+        m_new[i] = -99
+        f_host[i] = -99
+        dmag_avg[i] = -99
+
+# Save results to CSV
+results_df = pd.DataFrame({
+    'object_id': data_cat['object_id'][:ntest],
+    'sdss_name': data_cat['SDSS_NAME'][:ntest],
+    'apparent_mag_2500': m_new,
+    'f_host_4200': f_host
+})
+results_df.to_csv('data/july19_goodsources_chisq5and10_mean1_N20w4000s500_merged_magscorrected_fittedm2500.csv', index=False)
+
+
