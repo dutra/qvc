@@ -27,104 +27,120 @@ filters = {"u": 0, "g": 1, "r": 2, "i": 3, "z": 4, "y": 5} # harcoded filter ord
 bands = ['u', 'g', 'r', 'i', 'z']#, 'y']
 #bands = ['g', 'r', 'i']
 
-def compute_rhat_dict(samples_dict):
-    """Compute R-hat for each scalar parameter or vector component."""
-    rhat_dict = {}
-    for name, values in samples_dict.items():
-        arr = jnp.asarray(values)
-        if arr.ndim == 2:
-            # Scalar parameter: shape (n_chains, n_samples)
-            n_chains, n_samples = arr.shape
-            chain_means = jnp.mean(arr, axis=1)
-            chain_vars = jnp.var(arr, axis=1, ddof=1)
-            B = n_samples * jnp.var(chain_means, axis=0, ddof=1)
-            W = jnp.mean(chain_vars, axis=0)
-            var_hat = ((n_samples - 1) / n_samples) * W + (1 / n_samples) * B
-            rhat = jnp.sqrt(var_hat / W)
-            rhat_dict[name] = rhat
-
-        elif arr.ndim == 3:
-            # Vector parameter: shape (n_chains, n_samples, n_dim)
-            for j in range(arr.shape[2]):
-                sliced = arr[:, :, j]
-                chain_means = jnp.mean(sliced, axis=1)
-                chain_vars = jnp.var(sliced, axis=1, ddof=1)
-                B = n_samples * jnp.var(chain_means, axis=0, ddof=1)
-                W = jnp.mean(chain_vars, axis=0)
-                var_hat = ((n_samples - 1) / n_samples) * W + (1 / n_samples) * B
-                rhat = jnp.sqrt(var_hat / W)
-                rhat_dict[f"{name}_{j}"] = rhat
-        else:
-            raise ValueError(f"Unsupported shape {arr.shape} for parameter {name}")
-    return rhat_dict
-
-def compute_ess_dict(samples_dict):
-    """Compute simplified variance-ratio ESS for each scalar parameter or vector component."""
-    ess_dict = {}
-    for name, values in samples_dict.items():
-        arr = jnp.asarray(values)
-        if arr.ndim == 2:
-            n_chains, n_samples = arr.shape
-            flat = arr.reshape(-1)
-            var_total = jnp.var(flat, ddof=1)
-            within_var = jnp.mean(jnp.var(arr, axis=1, ddof=1))
-            ess = (n_chains * n_samples) * var_total / within_var
-            ess_dict[name] = ess
-        elif arr.ndim == 3:
-            for j in range(arr.shape[2]):
-                sliced = arr[:, :, j]
-                flat = sliced.reshape(-1)
-                var_total = jnp.var(flat, ddof=1)
-                within_var = jnp.mean(jnp.var(sliced, axis=1, ddof=1))
-                ess = (arr.shape[0] * arr.shape[1]) * var_total / within_var
-                ess_dict[f"{name}_{j}"] = ess
-        else:
-            raise ValueError(f"Unsupported shape {arr.shape} for parameter {name}")
-    return ess_dict
 
 import os
 import jax.numpy as jnp
 from datetime import datetime
 
-def dump_mcmc_diagnostics(mcmc, data, i, batch_data_len):
-    object_id = data['object_id']
-    samples = mcmc.get_samples(group_by_chain=True)  # (n_chains, n_samples, ...) or (n_chains, n_samples, n_objects)
+import numpy as np
 
-    # Extract samples for object i
+def clean_flat_samples(samples_flat):
+    """
+    Clean flat samples (group_by_chain=False) in your style:
+    - Universal params kept as-is (1D)
+    - Object-specific params indexed [:, i]
+    """
+    universal_keys = ['eta_A1', 'eta_A2', 'eta_tau1', 'eta_tau2']
+
+    # Print shapes for inspection
+    for k, v in samples_flat.items():
+        print(v.shape, k)
+
     obj_samples_clean = {
-            k: v[:, i] if k not in ['eta_A1', 'eta_A2', 'eta_tau1', 'eta_tau2'] else v
-            for k, v in samples.items()
-        }
+        k: v[:, i] if k not in universal_keys else v
+        for k, v in samples_flat.items()
+        for i in range(v.shape[1] if (k not in universal_keys and v.ndim > 1) else 1)
+    }
 
-    # Compute diagnostics
-    rhat = compute_rhat_dict(obj_samples_clean)
-    ess = compute_ess_dict(obj_samples_clean)
+    return obj_samples_clean
 
-    # Output path
-    output_dir = f"diagnostics/{prefix}_{suffix}"
-    os.makedirs(output_dir, exist_ok=True)
-    fpath = os.path.join(output_dir, f'{data["z"]:.1f}_{object_id}_diagnostics.txt')
+def clean_grouped_samples(samples_grouped):
+    """
+    Clean grouped samples (group_by_chain=True) in your style:
+    - Universal params kept as-is (transpose to (n_samples, n_chains))
+    - Object-specific params indexed [:, :, i] and transposed
+    """
+    universal_keys = ['eta_A1', 'eta_A2', 'eta_tau1', 'eta_tau2']
 
-    # Write diagnostics
-    with open(fpath, 'w') as f:
-        f.write(f"# MCMC diagnostics generated on {datetime.now()}\n")
-        f.write(f"# Object ID: {object_id}, z = {data['z']:.3f}\n\n")
-        f.write(f"{'Param':>20} {'R-hat':>10} {'ESS':>10}\n")
-        f.write("-" * 45 + "\n")
-        for name in sorted(rhat.keys()):
-            f.write(f"{name:>20} {rhat[name]:10.4f} {ess[name]:10.1f}\n")
+    # Print shapes for inspection
+    for k, v in samples_grouped.items():
+        print(v.shape, k)
 
-        rhat_vals = jnp.array(list(rhat.values()))
-        ess_vals = jnp.array(list(ess.values()))
+    obj_samples_clean = {
+        k: (v[:, :, i].T if k not in universal_keys else v.T)
+        for k, v in samples_grouped.items()
+        for i in range(v.shape[2] if (k not in universal_keys and v.ndim > 2) else 1)
+    }
 
-        f.write("\nSummary:\n")
-        f.write(f"Max R-hat: {jnp.max(rhat_vals):.4f}\n")
-        f.write(f"Min ESS : {jnp.min(ess_vals):.1f}\n")
-        f.write(f"Median ESS: {jnp.median(ess_vals):.1f}\n")
-        f.write(f"Params with R-hat > 1.01: {jnp.sum(rhat_vals > 1.01)}\n")
-        f.write(f"Params with ESS < 100  : {jnp.sum(ess_vals < 100)}\n")
+    return obj_samples_clean
 
-    print(f"Diagnostics written to {fpath}")
+
+
+import numpy as np
+import logging
+
+def compute_rhat_ess_dict(samples_dict):
+    """
+    Compute R-hat and ESS for a dict of MCMC chains without ArviZ.
+    
+    Parameters
+    ----------
+    samples_dict : dict[str, np.ndarray]
+        Keys are parameter names.
+        Values are arrays of shape:
+        - (n_samples, n_chains) for scalar/global params
+        - (n_samples, n_chains) for per-object params (already split)
+
+    Returns
+    -------
+    dict[str, float]
+        Dictionary mapping "<param>_rhat" and "<param>_ess" to values.
+    """
+    logging.info("Computing Rhat and ESS for dictionary of parameters")
+    diagnostics = {}
+
+    for k, chains in samples_dict.items():
+        chains = np.asarray(chains)
+
+        # Ensure shape: (n_samples, n_chains, n_params)
+        if chains.ndim == 1:
+            raise ValueError(f"Parameter {k} is 1D; need multiple chains for R-hat.")
+        elif chains.ndim == 2:  # (n_samples, n_chains)
+            chains = chains[..., None]
+        elif chains.ndim != 3:
+            raise ValueError(f"Parameter {k} has invalid shape {chains.shape}")
+
+        n_samples, n_chains, n_params = chains.shape
+
+        # Compute chain means and variances
+        chain_means = chains.mean(axis=0)             # (n_chains, n_params)
+        chain_variances = chains.var(axis=0, ddof=1)  # (n_chains, n_params)
+
+        # Between-chain variance B
+        B = n_samples * np.var(chain_means, axis=0, ddof=1)
+
+        # Within-chain variance W
+        W = chain_variances.mean(axis=0)
+
+        # Marginal posterior variance estimate
+        var_hat = (n_samples - 1)/n_samples * W + B/n_samples
+
+        # R-hat (Gelman-Rubin)
+        rhat = np.sqrt(var_hat / W)
+
+        # Effective Sample Size (naive approximation)
+        ess = (n_chains * n_samples) / rhat**2
+
+        # Store in flat dict
+        if n_params == 1:
+            diagnostics[f"{k}_rhat"] = float(rhat.squeeze())
+            diagnostics[f"{k}_ess"] = float(ess.squeeze())
+        else:
+            for i in range(n_params):
+                diagnostics[f"{k}_{i}_rhat"] = float(rhat[i])
+                diagnostics[f"{k}_{i}_ess"] = float(ess[i])
+
+    return diagnostics
 
 def modify_h5_file(save_file_path, s82_objs):
     with h5py.File(save_file_path, "a") as hdf:  # Open in append mode to modify
@@ -366,27 +382,66 @@ def save_samples_to_hdf5(samples, object_id):
             hdf.create_dataset(key, data=value)
     print(f"Saved samples for object_id {object_id} to {file_path}")
 
-def append_hdf5_file(quasar_list, file_path):
-    # Append to HDF5 file if it exists, otherwise create a new one
-    print(f"Appending {len(quasar_list)} quasars to {file_path}", flush=True)
+def append_hdf5_file(quasar_list, file_path, large_keys=None, size_threshold=1024):
+    """
+    Append quasar dictionaries to an HDF5 file.
+    
+    - Small values -> stored as attributes
+    - Large arrays or specified keys -> stored as datasets
+
+    Parameters
+    ----------
+    quasar_list : list[dict]
+        List of quasar dictionaries to save.
+    file_path : str
+        Path to the HDF5 file.
+    large_keys : list[str], optional
+        Keys that should always be stored as datasets.
+    size_threshold : int, optional
+        Store arrays larger than this many elements as datasets.
+    """
+
+    logging.info(f"Appending {len(quasar_list)} quasars to {file_path}")
+
     # Create directory if it doesn't exist
-    directory = os.path.dirname(file_path)
-    os.makedirs(directory, exist_ok=True)
+    os.makedirs(os.path.dirname(file_path), exist_ok=True)
+
     with h5py.File(file_path, "a") as hdf:
         for quasar in quasar_list:
-            print("Saving Quasar list keys: ", quasar.keys())
-            object_id = quasar["object_id"]
+            print("Saving Quasar list keys: ", list(quasar.keys()))
+            object_id = str(quasar["object_id"])
             if object_id in hdf:
-                continue
+                continue  # Skip if already saved
 
             group = hdf.create_group(object_id)
+
             for key, value in quasar.items():
+                if key == "object_id":
+                    # store ID as an attribute
+                    group.attrs[key] = value
+                    continue
+
                 if isinstance(value, dict):
+                    # Sub-dictionary -> nested group
                     sub_group = group.create_group(key)
                     for sub_key, sub_value in value.items():
-                        sub_group.create_dataset(sub_key, data=sub_value)
+                        arr = np.asarray(sub_value)
+                        if (
+                            sub_key in large_keys
+                            or arr.ndim > 0 and arr.size > size_threshold
+                        ):
+                            sub_group.create_dataset(sub_key, data=arr)
+                        else:
+                            sub_group.attrs[sub_key] = arr
                 else:
-                    group.attrs[key] = value
+                    arr = np.asarray(value)
+                    if (
+                        key in large_keys
+                        or arr.ndim > 0 and arr.size > size_threshold
+                    ):
+                        group.create_dataset(key, data=arr)
+                    else:
+                        group.attrs[key] = arr
 
 def log_broken_pl(lam, lam_s, d1, d2, ds=4.0):
     x = lam / lam_s

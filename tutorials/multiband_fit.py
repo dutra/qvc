@@ -423,17 +423,15 @@ if __name__ == '__main__':
     results = []
     for i, obj in enumerate(batch_data):
 
-        for k, v in samples_flat.items():
-            print(v.shape, k)
-            
-        # The universal parameters are 1D
-        obj_samples_clean = {
-            k: v[:, i] if k not in ['eta_A1', 'eta_A2', 'eta_tau1', 'eta_tau2'] else v
-            for k, v in samples_flat.items()
-        }
+
+        obj_samples_clean = clean_flat_samples(samples_flat)
 
         # Add the object-specific parameters
         result = process_samples(obj_samples_clean, obj)
+
+        samples_grouped = mcmc.get_samples(group_by_chain=True)
+        samples_grouped_cleaned = clean_grouped_samples(samples_grouped)
+        rhat_ess = compute_rhat_ess_dict(samples_grouped_cleaned)
 
         # Plotting
         if args.plot:
@@ -448,7 +446,7 @@ if __name__ == '__main__':
             save_combined_plot(obj_samples_clean, m, obj['X'], obj['y'], obj['yerr'], obj['band_idx'], result, fit_bestP=False, psd_results=psd_results)
             #dump_mcmc_diagnostics(mcmc, obj, i, len(batch_data))
             plot_posterior_for_object(samples_flat, obj, i, len(batch_data))
-        results.append(obj | result)
+        results.append(obj | result | rhat_ess)
         print("++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++", flush=True)
         print(f"Quasar {i+1}/{len(batch_data)} Object ID: {obj['object_id']}", flush=True)
         print("++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++ Done fitting all objects")
@@ -456,7 +454,7 @@ if __name__ == '__main__':
         # Save results to HDF5 file
         if args.file:
             print("Saving results to ", args.file)
-            append_hdf5_file(results, args.file)
+            append_hdf5_file(results, args.file, large_keys=['X', 'y', 'yerr', 'band_idx'])
         else:
             print("Warning!! Not saving results to file.")
 
