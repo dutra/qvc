@@ -366,6 +366,7 @@ def append_hdf5_file(quasar_list, file_path):
     os.makedirs(directory, exist_ok=True)
     with h5py.File(file_path, "a") as hdf:
         for quasar in quasar_list:
+            print("Saving Quasar list keys: ", quasar.keys())
             object_id = quasar["object_id"]
             if object_id in hdf:
                 continue
@@ -399,7 +400,6 @@ def process_samples(samples, data, bands=None, percentiles=[16, 50, 84]):
     Returns:
         dict: Summary statistics for all parameters and bands.
     """
-    import numpy as np
 
     def sym_percentile(x, p=percentiles, axis=0):
         lower, median, upper = np.percentile(x, p, axis=axis)
@@ -431,27 +431,36 @@ def process_samples(samples, data, bands=None, percentiles=[16, 50, 84]):
             result[key] = median
             result[f"{key}_err"] = err
 
-    # Example: generalized per-band computation (e.g., for log_sigma_band)
-    # If you have a function to compute a derived quantity per band, apply it here:
-    if "log_sigma_hat0" in samples and "eta_A1" in samples and "eta_A2" in samples:
-        log_sigma_hat0 = np.asarray(samples["log_sigma_hat0"])
-        eta_A1 = np.asarray(samples["eta_A1"])
-        eta_A2 = np.asarray(samples["eta_A2"])
-        eta_break = 1  # or samples.get("eta_break", 1)
-        lambda_ref = 2500
-        lam_s = 2500
+    # generalized per-band computation
+    # Power Law Params
+    log_sigma_hat0 = np.asarray(samples["log_sigma_hat0"])
+    eta_A1 = np.asarray(samples["eta_A1"])
+    eta_A2 = np.asarray(samples["eta_A2"])
+    eta_tau1 = np.asarray(samples["eta_tau1"])
+    eta_tau2 = np.asarray(samples["eta_tau2"])
+    eta_break = 1  # or samples.get("eta_break", 1)
+    lambda_ref = 2500
+    lam_s = 2500
 
-        log_sigma_band = []
-        for band in bands:
-            lam_eff = lambda_pivot.get(band, lambda_ref)
-            val = log_sigma_hat0 / np.log(10) + log_broken_pl(lam_eff, lam_s, eta_A1, eta_A2, eta_break)
-            log_sigma_band.append(val)
-        log_sigma_band = np.array(log_sigma_band).T  # shape (n_samples, n_bands)
+    log_sigma_band = []
+    for band in bands:
+        lam_eff = lambda_pivot.get(band, lambda_ref)
+        val = log_sigma_hat0 / np.log(10) + log_broken_pl(lam_eff, lam_s, eta_A1, eta_A2, eta_break)
+        log_sigma_band.append(val)
+    log_sigma_band = np.array(log_sigma_band).T  # shape (n_samples, n_bands)
 
-        for i, band in enumerate(bands):
-            median, err = sym_percentile(log_sigma_band[:, i])
-            result[f"log_sigma_band_{band}"] = median
-            result[f"log_sigma_band_{band}_err"] = err
+    for i, band in enumerate(bands):
+        median, err = sym_percentile(log_sigma_band[:, i])
+        result[f"log_sigma_band_{band}"] = median
+        result[f"log_sigma_band_{band}_err"] = err
+
+    # Other special params
+    # log_sigma_hat_UV
+    samples_log_sigma_hat_UV = samples["log_sigma_hat0"] / np.log(10) + log_broken_pl(lambda_ref, lam_s, eta_A1, eta_A2, eta_break)
+    result['log_sigma_hat_UV'], result['log_sigma_hat_UV_err'] = sym_percentile(samples_log_sigma_hat_UV)
+    # log_tau_UV_RF
+    samples_log_tau_UV_RF = samples["log_tau_drw0"] / np.log(10) - np.log10(1 + data['z']) + log_broken_pl(lambda_ref, lam_s, eta_tau1, eta_tau2, eta_break)
+    result['log_tau_UV_RF'], result['log_tau_UV_RF_err'] = sym_percentile(samples_log_tau_UV_RF)
 
     result["clean_bands"] = bands
     return result
@@ -470,7 +479,6 @@ def compute_psd_from_samples(samples, clean_bands, num_points=1000, time_range=(
     Returns:
         dict: {band: {"freqs": ..., "psd": ...}} for each band in clean_bands.
     """
-    import numpy as np
 
     # Reference wavelength (rest-frame)
     lambda_ref = 2500.0
