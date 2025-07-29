@@ -280,7 +280,7 @@ class MyMultiVarModel(MultiVarModel):
         self, X: JAXArray, has_lag: bool, params: dict[str, JAXArray]
     ) -> tuple[tuple[JAXArray, JAXArray], JAXArray]:
         if has_lag is True:
-            lags = params["lag0"] * (self.lam_rf / (1 + self.z) / 2500.0) ** params["lag_beta"]
+            lags = params["lag0"] * (self.lam_rf / 2500.0) ** params["lag_beta"]
             lags = jnp.insert(lags, 0, 0.0)
         else:
             nBand = params["log_amp_delta"].size + 1
@@ -296,20 +296,20 @@ class MyMultiVarModel(MultiVarModel):
     def my_tau_drw_transform(self, params: dict[str, JAXArray]) -> JAXArray:
         eta_tau1 = params["eta_tau1"]
         eta_tau2 = params["eta_tau2"]
-        lam_s = 2500 #params["lam_s"]
-        eta_break = 1.0 #params["eta_break"]
+        lam_s = 2500
+        eta_break = 1.0
         params["log_tau_band_RF"] = params["log_tau_drw0"] - jnp.log(1 + self.z) + jnp.log(10) * log_broken_pl(self.lam_rf, lam_s, eta_tau1, eta_tau2, eta_break)
         return params["log_tau_band_RF"]
 
     def my_amp_transform(self, params: dict[str, JAXArray]) -> JAXArray:
         eta_A1 = params["eta_A1"]
         eta_A2 = params["eta_A2"]
-        lam_s = 2500 #params["lam_s"]
-        eta_break = 1.0 #params["eta_break"]
+        lam_s = 2500
+        eta_break = 1.0
 
         # Host dilution: apply per-band correction
         # Host galaxy contribution modeled as a power-law in wavelength
-        host_frac = params["f_host"] * (self.lam_rf / (1 + self.z) / 5500.0) ** params["alpha_host"]
+        host_frac = params["f_host"] * (self.lam_rf / 5500.0) ** params["alpha_host"]
         dilution_factor = 1.0 / (1.0 + host_frac)
         log_dilution = jnp.log(dilution_factor)
 
