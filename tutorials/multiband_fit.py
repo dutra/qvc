@@ -128,7 +128,8 @@ def numpyro_joint_model(Model, batch_data, latent=False, bwb=False):
         alpha_host = numpyro.sample("alpha_host", dist.Normal(0.5, 1.0))
         f_host = numpyro.sample("f_host", dist.Uniform(0.0, 1.0))
         poly1 = numpyro.sample("poly1", dist.Normal(0.0, 0.1))
-        lag0 = numpyro.sample("lag0", dist.TruncatedNormal(2.0, 10.0, low=0))
+        #lag0 = numpyro.sample("lag0", dist.TruncatedNormal(2.0, 10.0, low=0))
+        lag0 = numpyro.sample("lag0", dist.TruncatedNormal(10.0, 5.0, low=0))
         lag_beta = numpyro.sample("lag_beta", dist.TruncatedNormal(4/3, 0.2, low=0))
         if bwb:
             bwb_A = numpyro.sample("bwb_A", dist.TruncatedNormal(0.0, 2.0, low=0))
