@@ -9,6 +9,14 @@ import jax.numpy as jnp
 prefix = os.environ.get('PREFIX', "test")
 suffix = os.environ.get('SUFFIX', "test")
 
+import logging
+
+logging.basicConfig(
+    format='%(asctime)s - %(message)s',
+    level=logging.INFO,
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+
 lambda_pivot = {
     'u': 3543,  # SDSS u-band
     'g': 4770,  # SDSS g-band
@@ -27,6 +35,7 @@ colors = {'u': 'tab:blue',
 
 
 def save_lc_plot(times, mags, magerrs, object_id):
+    logging.info("Saving LC plot")
     # Plot and save the light curves
     fig, ax = plt.subplots(figsize=(10, 6))
     for band in bands:
@@ -45,6 +54,7 @@ def save_lc_plot(times, mags, magerrs, object_id):
     os.makedirs(output_dir, exist_ok=True)
     plt.savefig(os.path.join("light_curves", f'{object_id}_light_curve.png'))
     plt.close(fig)
+    logging.info(f"Saved LC plot to light_curves/{object_id}_light_curve.png")
 
 def plot_posterior_for_object(samples_flat, data, i, batch_data_len, include=None, exclude=['gp', 'f', 'log_amp_delta_blr', 'raw'], bins=20):
     """
@@ -67,6 +77,7 @@ def plot_posterior_for_object(samples_flat, data, i, batch_data_len, include=Non
     bins : int
         Number of bins for corner plot.
     """
+    logging.info("Saving posterior plot")
     object_id = data.get('object_id', f'obj_{i}')
     z = data.get('z', 0)
 
@@ -102,11 +113,13 @@ def plot_posterior_for_object(samples_flat, data, i, batch_data_len, include=Non
     save_path = os.path.join(output_dir, f"{z:.1f}_{object_id}_posterior.png")
     plt.savefig(save_path, dpi=200)
     plt.close(fig)
-    print(f"Saved posterior corner plot to {save_path}")
+    logging.info(f"Saved posterior corner plot to {save_path}")
     return fig
 
 
 def save_combined_plot(samples, model, X, y, yerr, band_idx, data, fit_bestP=False, psd_results=None):
+    logging.info("Saving combined plot")
+
     clean_bands = data['clean_bands']
     object_id = data['object_id']
     band_idx_map = {i: b for i, b in enumerate(clean_bands)}
@@ -231,7 +244,7 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, data, fit_bestP=Fal
         fpath = os.path.join(output_dir, f'{data["z"]:.1f}_{object_id}_combined_plot_MLE.png')
     else:
         fpath = os.path.join(output_dir, f'{data["z"]:.1f}_{object_id}_combined_plot.png')
-    print(f"Saving figure to ", fpath)
+    logging.info(f"Saving figure to {fpath}")
     plt.savefig(fpath, dpi=120)
     plt.close(fig)
     
@@ -248,6 +261,7 @@ def plot_mcmc_traces(samples_dict, data, include=None, exclude=['gp', 'f', 'log_
     - figsize: tuple, base figure size (width, height per subplot)
     - alpha: float, line transparency
     """
+    logging.info("Plotting MCMC Traces")
     trace_data = {}
 
     # Flatten and filter parameters
@@ -288,7 +302,7 @@ def plot_mcmc_traces(samples_dict, data, include=None, exclude=['gp', 'f', 'log_
     os.makedirs(output_dir, exist_ok=True)
     save_path = os.path.join(output_dir, f"{data['z']:.1f}_{data['object_id']}_mcmc_traces.png")
     plt.savefig(save_path, dpi=150)
-    print("Saved trace plot to", save_path)
+    logging.info(f"Saved trace plot to {save_path}")
 
     # Plot eta_A1 vs. log_tau trace if both are present
     if 'eta_A1' in trace_data and 'log_tau_drw0' in trace_data:
@@ -316,7 +330,7 @@ def plot_mcmc_traces(samples_dict, data, include=None, exclude=['gp', 'f', 'log_
         plt.tight_layout()
         plt.savefig(save_path_eta_sigma, dpi=150)
         plt.close(fig_eta_sigma)
-        print("Saved eta_A1 vs. log_sigma_hat0 trace plot to", save_path_eta_sigma)
+        logging.info(f"Saved eta_A1 vs. log_sigma_hat0 trace plot to {save_path_eta_sigma}")
 
     # Plot log_tau_drw0 vs. log_sigma_hat0 trace if both are present
     if 'log_tau_drw0' in trace_data and 'log_sigma_hat0' in trace_data:
@@ -330,4 +344,4 @@ def plot_mcmc_traces(samples_dict, data, include=None, exclude=['gp', 'f', 'log_
         plt.tight_layout()
         plt.savefig(save_path3, dpi=150)
         plt.close(fig3)
-        print("Saved log_tau_drw0 vs. log_sigma_hat0 trace plot to", save_path3)
+        logging.info(f"Saved log_tau_drw0 vs. log_sigma_hat0 trace plot to {save_path3}")

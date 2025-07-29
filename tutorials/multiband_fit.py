@@ -16,6 +16,14 @@ from tinygp import kernels
 import warnings
 warnings.filterwarnings("ignore", category=RuntimeWarning)
 
+import logging
+
+logging.basicConfig(
+    format='%(asctime)s - %(message)s',
+    level=logging.INFO,
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+
 from multiband_fit_utils import *
 from multiband_fit_plotting import *
 from multiband_generate_lc import *
@@ -270,7 +278,7 @@ def make_lc(Model, data):
                     
 if __name__ == '__main__': 
     
-    print("Starting multiband fit", flush=True)
+    logging.info("Starting multiband fit")
 
     parser = argparse.ArgumentParser(description="Process quasars with optional filtering.")
     parser.add_argument("--filter_object_id", nargs="+", help="List of object IDs to filter.")
@@ -295,8 +303,10 @@ if __name__ == '__main__':
     parser.add_argument("--choose_N", type=int, default=-1, help="Sample choose_N objects.")
     parser.add_argument("--job_id", type=int, default=-1, help="Job Index for parallel processing.")
     parser.add_argument("--job_N", type=int, default=-1, help="Number of objects to divide.")
+    parser.add_argument("--max_tree_depth", type=int, default=8, help="Max tree depth param for NUTS sampler.")
 
     args = parser.parse_args()
+    print("Args: ", args)
 
     check_64bit(gpu=not bool(args.cpu))
 
@@ -342,7 +352,7 @@ if __name__ == '__main__':
         Model = MyMultiVarModelLatent
 
     # After loading objs
-    print("--- Joint fitting ---")
+    logging.info("--- Joint fitting ---")
     batch_data = []
     for i, obj in enumerate(objs):
         # Prepare each object's data for the joint model
@@ -376,20 +386,20 @@ if __name__ == '__main__':
         })
     num_params = sum(p.size for p in batch_data[0]['bestP'].values())
     num_objects = len(batch_data)
-    print(f"Running joint fit on {len(batch_data)} objects...")
+    logging.info(f"Running joint fit on {len(batch_data)} objects...")
 
     estimated_nchains = 4
     if args.nchains < 1:
         nchains = estimated_nchains
     else:
         nchains = args.nchains
-    print(f"{args.nwarm=}, {args.nsamp=}, {args.nchains=}, default num_chains: {estimated_nchains}, {num_params=}, {len(batch_data)=}")
+    print(f"{args.max_tree_depth=}, {args.nwarm=}, {args.nsamp=}, {args.nchains=}, default num_chains: {estimated_nchains}, {num_params=}, {len(batch_data)=}")
     
     init_strategy = numpyro.infer.init_to_sample()
     #init_strategy = numpyro.infer.init_to_median()
-    print("Done with numpyro.infer.init_to_sample")
+    logging.info("Done with numpyro.infer.init_to_sample")
 
-    nuts_kernel = NUTS(numpyro_joint_model, init_strategy=init_strategy, dense_mass=True, max_tree_depth=6)
+    nuts_kernel = NUTS(numpyro_joint_model, init_strategy=init_strategy, dense_mass=True, max_tree_depth=args.max_tree_depth)
     mcmc = MCMC(
         nuts_kernel,
         num_warmup=args.nwarm,
@@ -406,7 +416,7 @@ if __name__ == '__main__':
     #ns.run(jax.random.PRNGKey(0), Model, batch_data)
     #samples_flat = ns.get_samples(jax.random.PRNGKey(0), num_samples=1000)
 
-    print("Done with MCMC run")
+    logging.info("Done with MCMC run")
 
     # Save and plot the results
     results = []

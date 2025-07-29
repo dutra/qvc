@@ -6,6 +6,14 @@ import jax.numpy as jnp
 prefix = os.environ.get('PREFIX', "test")
 suffix = os.environ.get('SUFFIX', "test")
 
+import logging
+
+logging.basicConfig(
+    format='%(asctime)s - %(message)s',
+    level=logging.INFO,
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+
 lambda_pivot = {
     'u': 3543,  # SDSS u-band
     'g': 4770,  # SDSS g-band
