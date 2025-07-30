@@ -201,7 +201,7 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, data, fit_bestP=Fal
         
         # Model PSD
         if psd_results is not None:
-            print('model PSD')
+            logging.info('Plotting Model PSD')
             band = band_idx_map[n]
             result = psd_results[band].items()
             freqs = psd_results[band]["freqs"]

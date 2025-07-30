@@ -200,12 +200,12 @@ def make_lc(Model, data):
     clean_bands = list(sorted(clean_bands, key=lambda band: ['u', 'g', 'r', 'i', 'z', 'y'].index(band)))
     #clean_bands = bands
     data['clean_bands'] = clean_bands
-    print(f"Bands: {bands}, Clean Bands: {clean_bands}")
+    #print(f"Bands: {bands}, Clean Bands: {clean_bands}")
     if len(clean_bands) == 0:
         print(f"No clean bands for quasar {data['object_id']}, skipping.", flush=True)
         return None
     # Combine
-    print(times.keys())
+    #print(times.keys())
     all_times = np.concatenate([times[b] for b in clean_bands])
     all_mags = np.concatenate([mags[b] for b in clean_bands]) 
     all_magerrs = np.concatenate([magerrs[b] for b in clean_bands])
@@ -419,10 +419,14 @@ if __name__ == '__main__':
 
     logging.info("Done with MCMC run")
 
+    if args.file:
+        delete_file(args.file)
+
     # Save and plot the results
     results = []
     for i, obj in enumerate(batch_data):
-
+        print("++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++")
+        logging.info(f"Quasar {i+1}/{len(batch_data)} Object ID: {obj['object_id']}")
 
         obj_samples_clean = clean_flat_samples(samples_flat)
 
@@ -446,16 +450,15 @@ if __name__ == '__main__':
             save_combined_plot(obj_samples_clean, m, obj['X'], obj['y'], obj['yerr'], obj['band_idx'], result, fit_bestP=False, psd_results=psd_results)
             #dump_mcmc_diagnostics(mcmc, obj, i, len(batch_data))
             plot_posterior_for_object(samples_flat, obj, i, len(batch_data))
-        results.append(obj | result | rhat_ess)
-        print("++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++", flush=True)
-        print(f"Quasar {i+1}/{len(batch_data)} Object ID: {obj['object_id']}", flush=True)
-        print("++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++ Done fitting all objects")
+            
+        final_result_obj = obj | result | rhat_ess
+        results.append(final_result_obj)
 
         # Save results to HDF5 file
         if args.file:
-            print("Saving results to ", args.file)
-            append_hdf5_file(results, args.file, large_keys=['X', 'y', 'yerr', 'band_idx'])
+            append_quasar_hdf5(final_result_obj, args.file, ignored_keys=['X', 'y', 'yerr', 'band_idx', 'bestP'])
         else:
             print("Warning!! Not saving results to file.")
 
+        logging.info("--------------------------------------------------------------")
     sys.exit("Exiting the program as requested.")
