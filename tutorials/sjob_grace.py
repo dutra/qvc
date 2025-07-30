@@ -4,17 +4,20 @@ import pandas as pd
 import numpy as np
 
 # Parameters
-N = 20
-nwarm = 2000
-nsamp = 1000
-nchains = -1
+N = 1
+#nwarm = 2000
+nsamp = 100
+nchains = 4
+max_tree_depth = 6
+job_id = 0
 #lc_file = "data/may8_lc_all.h5"
 #lc_file = "data/s82_lc_rf2000days_allsame.h5"
 #filter_file = "data/df_quasars_filtered_apr29.csv"
 #filter_file = "data/may19_quasars_filtered_ebv005.csv"
 #filter_file = "data/colin_object_ids_test_rearrangedN20.csv"
 #filter_file = "data/may28_rf2000days_allsame_ranked.csv"
-filter_file = "data/may22_good_sources_chisqcut.csv"
+#filter_file = "data/may22_good_sources_chisqcut.csv"
+filter_file = "data/july21_chisq2_ebv_sn.csv"
 script_path = "submit_jobs"
 log_path = "log_jobs"
 
@@ -26,8 +29,9 @@ print(f"Found {total_objects} objects in {filter_file}")
 os.makedirs(script_path, exist_ok=True)
 #SBATCH --time=2-00:00:00
 
-for job_id in range(250, 260):
-    prefix = f"june1_joint_N{N}w{nwarm}s{nsamp}"
+#for job_id in range(250, 260):
+for nwarm in np.flip(np.array([2000, 4000, 8000])):
+    prefix = f"july30_single_{N}w{nwarm}s{nsamp}"
 
     suffix = f"job{job_id}"
     sbatch_filename = os.path.join(script_path, f"{prefix}_job_{suffix}.sh")
@@ -42,7 +46,7 @@ for job_id in range(250, 260):
 #SBATCH --output={output_filename}
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=2
-#SBATCH --mem=64G
+#SBATCH --mem=32G
 #SBATCH --gpus=1
 #SBATCH --partition=gpu
 #SBATCH --time=2-00:00:00
@@ -57,20 +61,27 @@ conda activate jaxgpu
 
 nvidia-smi
 
-lscpi | grep NVIDIA
-lscpi | grep A100
+start=$(date +%s)
+echo "Start time: $start"
 
-start=`date +%s`
-echo $start
+python multiband_fit.py --progress \
+--file {result_file} --plot \
+--nwarm {nwarm} --nsamp {nsamp} --nchains {nchains} \
+--max_tree_depth {max_tree_depth} \
+--joint --filter_object_id 1411060
+#--joint --filter_file {filter_file} --job_id {job_id} --job_N {N} 
 
-python multiband_fit.py  --progress \
---filter_file {filter_file} --file {result_file} --plot --nwarm {nwarm} --nsamp {nsamp} --nchains {nchains} --joint --job_id {job_id} --job_N {N}
+end=$(date +%s)
+echo "End time: $end"
 
-end=`date +%s`
-echo $end
+runtime=$((end - start))
 
-runtime=$( echo "$end - $start" | bc -l )
-echo $runtime
+hours=$((runtime / 3600))
+minutes=$(((runtime % 3600) / 60))
+seconds=$((runtime % 60))
+
+echo "Total runtime: ${{hours}}h ${{minutes}}m ${{seconds}}s"
+
 """)
 
     os.system(f"sbatch {sbatch_filename}")
