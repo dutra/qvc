@@ -143,7 +143,7 @@ def numpyro_joint_model(Model, batch_data, latent=False, bwb=False):
                 log_lag_blr = numpyro.sample("log_lag_blr", dist.Normal(log_lag_blr_mean, 4.0))
             #log_jitter = numpyro.sample("log_jitter", dist.Normal(log_jitter_mean + 1e-6, 1.0))
 
-    for i, data in enumerate(batch_data):
+    def run_batch(data, i):
         # Collect params for object i
         params = {
             "log_tau_drw0": log_tau_drw0[i],
@@ -183,6 +183,13 @@ def numpyro_joint_model(Model, batch_data, latent=False, bwb=False):
             return model.log_prob(params)
 
         log_prob_batch = jax.vmap(log_prob_single, in_axes=(0, 0))
+
+    if len(batch_data) == 1:
+        run_batch(batch_data[0], 0)
+    else:
+        for i, data in enumerate(batch_data):
+            run_batch(data, i)
+
 
 def make_lc(Model, data):
     times = data['times']
