@@ -213,10 +213,11 @@ def populate_sdss_fields(s82_objs, progress_bar=False):
         d['sdss_name'] = fits_data['SDSS_NAME'][j]  # Extract SDSS_NAME
         d['log_lbol'] = fits_data['LOGLBOL'][j]  # Extract log Lbol values
         d["log_lbol_err"] = fits_data['LOGLBOL_ERR'][j]  # Extract log Lbol error values
+        d['LOGL5100'] = fits_data['LOGL5100'][j]  # Extract log Lbol values
+        d['LOGL5100_ERR'] = fits_data['LOGL5100_ERR'][j]
         d['log_mbh'] = fits_data['LOGMBH'][j]  # Extract log MBH values
         d['log_mbh_err'] = fits_data['LOGMBH_ERR'][j]  # Extract log MBH error values
         d['log_ledd_ratio'] = fits_data['LOGLEDD_RATIO'][j]  # Extract log L/edd values
         d['log_ledd_ratio_err'] = fits_data['LOGLEDD_RATIO_ERR'][j]  # Extract log L/edd error values
-
     return s82_objs
 

@@ -120,6 +120,20 @@ def numpyro_joint_model(Model, batch_data, latent=False, bwb=False, f_host_shen1
         log_lag_blr_mean = jnp.stack([jnp.array(obj['bestP']['log_lag_blr']) for obj in batch_data])
     #log_jitter_mean = jnp.stack([jnp.array(obj['bestP']['log_jitter']) + jnp.mean(obj['yerr']) for obj in batch_data]) # (B, 5)
     
+    for i, obj in enumerate(batch_data):
+        print("i: ", obj.keys())
+    
+    if f_host_shen11:
+        # Host flux empirical relation
+        logl5100 = jnp.array([obj['LOGL5100'] for obj in batch_data])
+
+        x = logl5100 - 44.0
+        f_host = 0.8052 - 1.5502 * x + 0.9121 * jnp.power(x, 2) - 0.1577 * jnp.power(x, 3)
+        f_host = jnp.clip(f_host, 0.0, 1.0)
+        f_host = jnp.where(logl5100 < 45.053, f_host, 0.0)
+    else:
+        f_host = jnp.zeros(batch_size)
+
     with numpyro.plate("objects", batch_size):
         # Object-level parameters (shape: [B])
         log_tau_drw0 = numpyro.sample("log_tau_drw0", dist.Normal(log_tau_drw0_mean, 1.0))
@@ -129,14 +143,7 @@ def numpyro_joint_model(Model, batch_data, latent=False, bwb=False, f_host_shen1
         
         
         #f_host = numpyro.sample("f_host", dist.Uniform(0.0, 1.0))
-        if f_host_shen11:
-                # Host flux empirical relation
-            x = batch_data["LOGL5100"] - 44.0
-            f_host_shen11 = 0.8052 - 1.5502 * x + 0.9121 * x**2 - 0.1577 * x**3
-            f_host_shen11 = jnp.clip(f_host_shen11, 0.0, 1.0)
-            f_host = numpyro.deterministic("f_host", jnp.where(batch_data["LOGL5100"] < 45.053, f_host_shen11, 0.0))
-        else:
-            f_host = numpyro.deterministic("f_host", jnp.zeros(batch_size))
+        f_host = numpyro.deterministic("f_host", f_host)
 
         poly1 = numpyro.sample("poly1", dist.Normal(0.0, 0.1))
         #lag0 = numpyro.sample("lag0", dist.TruncatedNormal(2.0, 10.0, low=0))
@@ -403,6 +410,7 @@ if __name__ == '__main__':
             'z': obj['z'],
             'bestP': bestP,
             # add any other fields needed by your model
+            'LOGL5100': obj['LOGL5100'],
         })
     num_params = sum(p.size for p in batch_data[0]['bestP'].values())
     num_objects = len(batch_data)
