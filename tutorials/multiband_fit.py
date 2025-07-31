@@ -109,6 +109,11 @@ def numpyro_joint_model(Model, batch_data, latent=False, bwb=False):
         }.items()
     }
 
+    # Host flux emperical relation
+    ##x = batch_data["logl5100"] - 44.0
+    ##f_host_shen11 = 0.8052 - 1.5502 * x + 0.9121 * x**2 - 0.1577 * x**3
+    ##f_host_shen11 = jnp.clip(f_host_shen11, 0.0, 1.0)
+
     # Extract object-level prior means
     log_tau_drw0_mean = jnp.array([obj['bestP']['log_tau_drw0'] for obj in batch_data])
     log_sigma0_mean = jnp.array([obj['bestP']['log_sigma0'] for obj in batch_data])
@@ -125,10 +130,11 @@ def numpyro_joint_model(Model, batch_data, latent=False, bwb=False):
         log_tau_drw0 = numpyro.sample("log_tau_drw0", dist.Normal(log_tau_drw0_mean, 1.0))
         log_sigma0 = numpyro.sample("log_sigma0", dist.Normal(log_sigma0_mean, 1.0))
         log_sigma_hat0 = numpyro.deterministic("log_sigma_hat0", 2.0 * log_sigma0 - log_tau_drw0)
-        alpha_host = numpyro.sample("alpha_host", dist.Normal(0.5, 1.0))
+        alpha_host = numpyro.sample("alpha_host", dist.Normal(1.0, 0.1))
         #f_host = numpyro.sample("f_host", dist.Uniform(0.0, 1.0))
         f_host = numpyro.deterministic("f_host", jnp.zeros(batch_size))
-        
+        ##f_host = numpyro.deterministic("f_host", jnp.where(batch_data["logl5100"] < 45.053, f_host, 0.0))
+
         poly1 = numpyro.sample("poly1", dist.Normal(0.0, 0.1))
         #lag0 = numpyro.sample("lag0", dist.TruncatedNormal(2.0, 10.0, low=0))
         lag0 = numpyro.sample("lag0", dist.TruncatedNormal(10.0, 5.0, low=0))
