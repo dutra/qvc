@@ -133,7 +133,7 @@ def numpyro_joint_model(Model, batch_data, latent=False, bwb=False):
         alpha_host = numpyro.sample("alpha_host", dist.Normal(1.0, 0.1))
         #f_host = numpyro.sample("f_host", dist.Uniform(0.0, 1.0))
         f_host = numpyro.deterministic("f_host", jnp.zeros(batch_size))
-        ##f_host = numpyro.deterministic("f_host", jnp.where(batch_data["logl5100"] < 45.053, f_host, 0.0))
+        ##f_host = numpyro.deterministic("f_host", jnp.where(batch_data["logl5100"] < 45.053, f_host_shen11, 0.0))
 
         poly1 = numpyro.sample("poly1", dist.Normal(0.0, 0.1))
         #lag0 = numpyro.sample("lag0", dist.TruncatedNormal(2.0, 10.0, low=0))
