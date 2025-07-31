@@ -119,10 +119,7 @@ def numpyro_joint_model(Model, batch_data, latent=False, bwb=False, f_host_shen1
     if latent:
         log_lag_blr_mean = jnp.stack([jnp.array(obj['bestP']['log_lag_blr']) for obj in batch_data])
     #log_jitter_mean = jnp.stack([jnp.array(obj['bestP']['log_jitter']) + jnp.mean(obj['yerr']) for obj in batch_data]) # (B, 5)
-    
-    for i, obj in enumerate(batch_data):
-        print("i: ", obj.keys())
-    
+        
     if f_host_shen11:
         # Host flux empirical relation
         logl5100 = jnp.array([obj['LOGL5100'] for obj in batch_data])

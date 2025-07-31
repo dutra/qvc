@@ -105,7 +105,17 @@ def plot_posterior_for_object(samples_flat, data, i, batch_data_len, include=Non
         return None
 
     corner_data = np.vstack(flat_arrays).T
-    fig = corner.corner(corner_data, labels=flat_labels, show_titles=True, quantiles=[0.16, 0.5, 0.84], bins=bins)
+
+    ranges = []
+    for i in range(corner_data.shape[1]):
+        lo, hi = corner_data[:, i].min(), corner_data[:, i].max()
+        if lo == hi:  # constant parameter
+            # add jitter so corner doesn't fail
+            print("Constant param: ", flat_labels[i])
+            corner_data[:, i] += np.random.normal(0, 1e-6, size=corner_data.shape[0])
+    
+    fig = corner.corner(corner_data, labels=flat_labels, show_titles=True, 
+                        quantiles=[0.16, 0.5, 0.84], bins=bins)
 
     # Save plot
     output_dir = f"posterior_plots/{prefix}_{suffix}/"
