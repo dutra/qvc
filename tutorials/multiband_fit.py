@@ -126,7 +126,9 @@ def numpyro_joint_model(Model, batch_data, latent=False, bwb=False):
         log_sigma0 = numpyro.sample("log_sigma0", dist.Normal(log_sigma0_mean, 1.0))
         log_sigma_hat0 = numpyro.deterministic("log_sigma_hat0", 2.0 * log_sigma0 - log_tau_drw0)
         alpha_host = numpyro.sample("alpha_host", dist.Normal(0.5, 1.0))
-        f_host = numpyro.sample("f_host", dist.Uniform(0.0, 1.0))
+        #f_host = numpyro.sample("f_host", dist.Uniform(0.0, 1.0))
+        f_host = numpyro.deterministic("f_host", jnp.zeros(batch_size))
+        
         poly1 = numpyro.sample("poly1", dist.Normal(0.0, 0.1))
         #lag0 = numpyro.sample("lag0", dist.TruncatedNormal(2.0, 10.0, low=0))
         lag0 = numpyro.sample("lag0", dist.TruncatedNormal(10.0, 5.0, low=0))
