@@ -40,7 +40,7 @@ def read_quasars_from_hdf5(file_path):
 
 
 #objs = read_quasars_from_hdf5("data/july21_chisq2_hostpl_N20w4000s200_merged_magscorrected.h5")
-agn_df = pd.read_csv('data/july19_goodsources_chisq5and10_mean1_N20w4000s500_merged_magscorrected.csv')
+agn_df = pd.read_csv('data/july31_chisq2_preview_tree8_N10w1000s250_merged_magscorrected.csv')
 # %
 bands = ['u', 'g', 'r', 'i', 'z']
 
@@ -294,6 +294,59 @@ from astroquery.sdss import SDSS
 from astropy.table import Table
 import pyqsofit
 
+
+import os
+from astroquery.sdss import SDSS
+from astropy.coordinates import SkyCoord
+import astropy.units as u
+
+def fetch_spectrum_fits(data_cat, i, cache_dir="data/spectra_cache"):
+    """
+    Fetch SDSS spectrum for a given index in data_cat.
+    Downloads and saves to FITS file if not already cached.
+    
+    Parameters
+    ----------
+    data_cat : pandas.DataFrame
+        Catalog with columns: SDSS_NAME, PLATE, FIBERID, MJD, RA, DEC
+    i : int
+        Index of the object
+    cache_dir : str
+        Directory to store cached spectra as FITS files
+        
+    Returns
+    -------
+    data : astropy.io.fits.HDUList
+        The FITS HDUList for the spectrum
+    """
+    os.makedirs(cache_dir, exist_ok=True)
+
+    sdss_name = data_cat['SDSS_NAME'][i]
+    plate, fiber, mjd = data_cat['PLATE'][i], data_cat['FIBERID'][i], data_cat['MJD'][i]
+    cache_file = os.path.join(cache_dir, f"{sdss_name}_p{plate}_f{fiber}_m{mjd}.fits")
+
+    # Return cached FITS if available
+    if os.path.exists(cache_file):
+        from astropy.io import fits
+        print(f"Loaded cached spectrum for {sdss_name} from {cache_file}")
+        return fits.open(cache_file, memmap=False), True
+
+    # Download spectrum
+    print(f"Fetching spectrum for index {i} with SDSS_NAME: {sdss_name}")
+    print("Plate:", plate, "FiberID:", fiber, "MJD:", mjd)
+    
+    spec = SDSS.get_spectra(plate=plate, fiberID=fiber, mjd=mjd)
+    if spec is None or len(spec) == 0:
+        raise ValueError(f"No spectrum found for index {i}, SDSS_NAME {sdss_name}")
+
+    data = spec[0]  # First HDUList
+    
+    # Save to FITS file
+    data.writeto(cache_file, overwrite=True)
+    print(f"Spectrum saved to {cache_file}")
+    
+    return data, False
+
 def get_alpha(i):
 
     # Get the SDSS_NAME for the current index i
@@ -303,16 +356,15 @@ def get_alpha(i):
     # Query SDSS for the spectrum using the SDSS_NAME
     #try:
     if True:
-        print(f"Fetching spectrum for index {i} with SDSS_NAME: {sdss_name}")
-        print("Plate:", data_cat['PLATE'][i], "FiberID:", data_cat['FIBERID'][i], "MJD:", data_cat['MJD'][i])
-        spec = SDSS.get_spectra(plate=data_cat['PLATE'][i], 
-                                fiberID=data_cat['FIBERID'][i], 
-                                mjd=data_cat['MJD'][i])
-        coord = SkyCoord(ra=data_cat['RA'][i] * u.deg,
-                        dec=data_cat['DEC'][i] * u.deg,
-                        frame='icrs')
-        data = spec[0]
+        # Use the new caching function
+        data, exists = fetch_spectrum_fits(data_cat, i)
 
+        # Optional: compute the SkyCoord if you still need the coordinates
+        coord = SkyCoord(
+            ra=data_cat['RA'][i] * u.deg,
+            dec=data_cat['DEC'][i] * u.deg,
+            frame='icrs'
+        )
         # Extract the spectrum data from the FITS file
         # Requried
         lam = 10 ** data[1].data['loglam']  # OBS wavelength [A]
