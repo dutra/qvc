@@ -217,10 +217,11 @@ def make_lc(Model, data):
        mags[band] = mags[band] - np.nanmean(mags[band])  # Center the magnitudes
     magerrs = data['magerrs']
     
-    #red_bands = bands_redder_than_5000(data['z'])
+    red_bands = bands_redder_than(data['z'], threshold=4000)
     blue_bands = bands_bluer_than_lyman_alpha(data['z'])
 
-    clean_bands = list(set(bands) - set(blue_bands))
+    clean_bands = list(set(bands) - set(blue_bands) - set(red_bands))
+
     # Reorder clean_bands to match the desired order
     clean_bands = list(sorted(clean_bands, key=lambda band: ['u', 'g', 'r', 'i', 'z', 'y'].index(band)))
     #clean_bands = bands

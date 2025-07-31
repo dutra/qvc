@@ -234,15 +234,15 @@ def check_64bit(gpu=True):
     return 1
 
 
-def bands_redder_than_5000(z, threshold=5000):
+def bands_redder_than(z, threshold=4000):
     """
-    Returns a list of bands with rest-frame effective wavelength > 5000 Å.
+    Returns a list of bands with rest-frame effective wavelength > 4000 Å.
 
     Args:
         z (float): Redshift.
 
     Returns:
-        list: Bands redder than 5000 Å at rest frame.
+        list: Bands redder than 4000 Å at rest frame.
     """
     bands = {
         'u': {'lambda_eff': 3551},
