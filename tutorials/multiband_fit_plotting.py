@@ -87,7 +87,7 @@ def plot_posterior(samples_flat, data, bins=20):
                         quantiles=[0.16, 0.5, 0.84], bins=bins)
 
     # Save plot
-    output_dir = "posterior_plots/{prefix}_{suffix}"
+    output_dir = f"posterior_plots/{prefix}_{suffix}"
     os.makedirs(output_dir, exist_ok=True)
     save_path = os.path.join(output_dir, f"{z:.1f}_{object_id}_posterior.png")
     plt.savefig(save_path, dpi=100)
