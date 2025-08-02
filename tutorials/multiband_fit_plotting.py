@@ -56,76 +56,44 @@ def save_lc_plot(times, mags, magerrs, object_id):
     plt.close(fig)
     logging.info(f"Saved LC plot to light_curves/{object_id}_light_curve.png")
 
-def plot_posterior_for_object(samples_flat, data, i, batch_data_len, include=None, exclude=['gp', 'f', 'log_amp_delta_blr', 'raw'], bins=20):
+def plot_posterior(samples_flat, data, bins=20):
     """
-    Generalized corner plot of posterior parameters for a specific object.
+    Generalized corner plot of posterior parameters
 
     Parameters
     ----------
     samples_flat : dict
-        Dict of MCMC samples, shape (n_samples, n_objects, ...) or (n_samples, ...) for global params.
+        Dict of MCMC samples, shape (n_samples, ...) for each param.
     data : dict
         Object metadata (must contain 'object_id' and 'z').
-    i : int
-        Index of the object in the batch.
-    batch_data_len : int
-        Total number of objects in the batch.
-    include : list or None
-        List of parameter names to include (default: all).
-    exclude : list or None
-        List of parameter names to exclude (default: none).
     bins : int
         Number of bins for corner plot.
     """
     logging.info("Saving posterior plot")
-    object_id = data.get('object_id', f'obj_{i}')
-    z = data.get('z', 0)
-
-    # Flatten all parameters for plotting
-    flat_arrays = []
-    flat_labels = []
-    for k, v in samples_flat.items():
-        arr = np.asarray(v)
-        # Select per-object slice if needed
-        if arr.ndim == 2 and arr.shape[1] == batch_data_len:
-            arr = arr[:, i]
-        elif arr.ndim == 3 and arr.shape[1] == batch_data_len:
-            arr = arr[:, i, :]
-        # Now flatten over bands
-        if arr.ndim == 1:
-            flat_arrays.append(arr)
-            flat_labels.append(k)
-        elif arr.ndim == 2:
-            for j in range(arr.shape[1]):
-                flat_arrays.append(arr[:, j])
-                flat_labels.append(f"{k}_{j}")
-
-    if not flat_arrays:
-        print("No parameters to plot.")
-        return None
+    object_id = data['object_id']
+    z = data['z']
+    flat_labels = list(samples_flat.keys())
+    flat_arrays = [np.asarray(samples_flat[k]).flatten() for k in flat_labels]
 
     corner_data = np.vstack(flat_arrays).T
 
-    ranges = []
     for i in range(corner_data.shape[1]):
         lo, hi = corner_data[:, i].min(), corner_data[:, i].max()
         if lo == hi:  # constant parameter
-            # add jitter so corner doesn't fail
-            print("Constant param: ", flat_labels[i])
+            print("Corner Constant param: ", flat_labels[i])
             corner_data[:, i] += np.random.normal(0, 1e-6, size=corner_data.shape[0])
-    
+
     fig = corner.corner(corner_data, labels=flat_labels, show_titles=True, 
                         quantiles=[0.16, 0.5, 0.84], bins=bins)
 
     # Save plot
-    output_dir = f"posterior_plots/{prefix}_{suffix}/"
+    output_dir = "posterior_plots/"
     os.makedirs(output_dir, exist_ok=True)
     save_path = os.path.join(output_dir, f"{z:.1f}_{object_id}_posterior.png")
     plt.savefig(save_path, dpi=200)
     plt.close(fig)
     logging.info(f"Saved posterior corner plot to {save_path}")
     return fig
-
 
 def save_combined_plot(samples, model, X, y, yerr, band_idx, data, fit_bestP=False, psd_results=None):
     logging.info("Saving combined plot")
@@ -259,49 +227,23 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, data, fit_bestP=Fal
     plt.close(fig)
     
 
-def plot_mcmc_traces(samples_dict, data, include=None, exclude=['gp', 'f', 'log_amp_delta_blr', 'raw'], figsize=(12, 2.5), alpha=0.7):
+def plot_mcmc_traces(samples_dict, data):
     """
     Generalized MCMC trace plotter for any set of parameters.
 
     Parameters:
-    - samples_dict: dict with keys as parameter names and values as arrays of shape (n_samples, ...) or (n_samples, n_dim)
+    - samples_dict: dict with keys as parameter names and values as arrays of shape (n_samples, ...)
     - data: dict, must contain 'object_id'
-    - include: list of parameter names to include (default: all)
-    - exclude: list of parameter names to exclude (default: none)
-    - figsize: tuple, base figure size (width, height per subplot)
-    - alpha: float, line transparency
     """
     logging.info("Plotting MCMC Traces")
-    trace_data = {}
 
-    # Flatten and filter parameters
-    for name, val in samples_dict.items():
-        arr = np.asarray(val)
-        # Per-object or global param
-        if arr.ndim == 2 and arr.shape[1] == 1:
-            arr = arr[:, 0]
-        # Split vector-valued params
-        if arr.ndim == 2 and arr.shape[1] > 1:
-            for j in range(arr.shape[1]):
-                trace_data[f"{name}_{j}"] = arr[:, j]
-        elif arr.ndim == 1:
-            trace_data[name] = arr
-
-
-    # Filter included/excluded parameters
-    keys = list(trace_data.keys())
-    if include is not None:
-        keys = [k for k in keys if k.split('_')[0] in include]
-    if exclude is not None:
-        keys = [k for k in keys if k.split('_')[0] not in exclude]
-
-    total_traces = len(keys)
-    fig, axes = plt.subplots(total_traces, 1, figsize=(figsize[0], figsize[1] * total_traces), sharex=True)
+    total_traces = len(samples_dict)
+    fig, axes = plt.subplots(total_traces, 1, figsize=(12, 2.5 * total_traces), sharex=True)
     if total_traces == 1:
         axes = [axes]
 
-    for idx, key in enumerate(keys):
-        axes[idx].plot(trace_data[key], alpha=alpha)
+    for idx, key in enumerate(samples_dict.keys()):
+        axes[idx].plot(samples_dict[key], alpha=0.7)
         axes[idx].set_ylabel(key)
         axes[idx].grid(True)
 
@@ -315,9 +257,9 @@ def plot_mcmc_traces(samples_dict, data, include=None, exclude=['gp', 'f', 'log_
     logging.info(f"Saved trace plot to {save_path}")
 
     # Plot eta_A1 vs. log_tau trace if both are present
-    if 'eta_A1' in trace_data and 'log_tau_drw0' in trace_data:
+    if 'eta_A1' in samples_dict and 'log_tau_drw0' in samples_dict:
         fig2, ax2 = plt.subplots(figsize=(6, 5))
-        ax2.scatter(trace_data['log_tau_drw0'], trace_data['eta_A1'], alpha=alpha, lw=0.7)
+        ax2.scatter(samples_dict['log_tau_drw0'], samples_dict['eta_A1'], alpha=0.7, lw=0.7)
         ax2.set_xlabel('log_tau_drw0')
         ax2.set_ylabel('eta_A1')
         ax2.set_title('Trace: eta_A1 vs. log_tau_drw0')
@@ -329,9 +271,9 @@ def plot_mcmc_traces(samples_dict, data, include=None, exclude=['gp', 'f', 'log_
         print("Saved eta_A1 vs. log_tau trace plot to", save_path2)
 
     # Plot eta_A1 vs. log_sigma_hat0 trace if both are present
-    if 'eta_A1' in trace_data and 'log_sigma_hat0' in trace_data:
+    if 'eta_A1' in samples_dict and 'log_sigma_hat0' in samples_dict:
         fig_eta_sigma, ax_eta_sigma = plt.subplots(figsize=(6, 5))
-        ax_eta_sigma.scatter(trace_data['log_sigma_hat0'], trace_data['eta_A1'], alpha=alpha, lw=0.7)
+        ax_eta_sigma.scatter(samples_dict['log_sigma_hat0'], samples_dict['eta_A1'], alpha=0.7, lw=0.7)
         ax_eta_sigma.set_xlabel('log_sigma_hat0')
         ax_eta_sigma.set_ylabel('eta_A1')
         ax_eta_sigma.set_title('Trace: eta_A1 vs. log_sigma_hat0')
@@ -343,9 +285,9 @@ def plot_mcmc_traces(samples_dict, data, include=None, exclude=['gp', 'f', 'log_
         logging.info(f"Saved eta_A1 vs. log_sigma_hat0 trace plot to {save_path_eta_sigma}")
 
     # Plot log_tau_drw0 vs. log_sigma_hat0 trace if both are present
-    if 'log_tau_drw0' in trace_data and 'log_sigma_hat0' in trace_data:
+    if 'log_tau_drw0' in samples_dict and 'log_sigma_hat0' in samples_dict:
         fig3, ax3 = plt.subplots(figsize=(6, 5))
-        ax3.scatter(trace_data['log_tau_drw0'], trace_data['log_sigma_hat0'], alpha=alpha, lw=0.7)
+        ax3.scatter(samples_dict['log_tau_drw0'], samples_dict['log_sigma_hat0'], alpha=0.7, lw=0.7)
         ax3.set_xlabel('log_tau_drw0')
         ax3.set_ylabel('log_sigma_hat0')
         ax3.set_title('Trace: log_tau_drw0 vs. log_sigma_hat0')

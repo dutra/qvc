@@ -34,7 +34,7 @@ from datetime import datetime
 
 import numpy as np
 
-def clean_flat_samples(samples_flat):
+def clean_flat_samples(samples_flat, obj_index, batch_data_len, clean_bands):
     """
     Clean flat samples (group_by_chain=False) in your style:
     - Universal params kept as-is (1D)
@@ -43,22 +43,39 @@ def clean_flat_samples(samples_flat):
     universal_keys = ['eta_A1', 'eta_A2', 'eta_tau1', 'eta_tau2']
 
     # Print shapes for inspection
+    print("Before sample cleaning: ", end='')
     for k, v in samples_flat.items():
         print(f"{k}={v.shape}", end='; ')
 
-    obj_samples_clean = {
-        k: v[:, i] if k not in universal_keys else v
-        for k, v in samples_flat.items()
-        for i in range(v.shape[1] if (k not in universal_keys and v.ndim > 1) else 1)
-    }
+    # Flatten all parameters for plotting
+    obj_samples_clean = dict()
+    for k, v in samples_flat.items():
+        arr = np.asarray(v)
+        
+        if arr.ndim == 1:
+            # Universal parameters, keep as is
+            obj_samples_clean[k] = arr
+        # Select per-object slice if needed
+        elif arr.ndim == 2 and arr.shape[1] == batch_data_len:
+            obj_samples_clean[k] = arr[:, obj_index]
+        elif arr.ndim == 3 and arr.shape[1] == batch_data_len:
+            arr = arr[:, obj_index, :]
+            if arr.shape[1] != len(clean_bands):
+                print(f"Warning: {k} has {arr.shape[1]} bands, but clean_bands has {len(clean_bands)}: {clean_bands}")
+            for j, b in enumerate(clean_bands):
+                obj_samples_clean[f"{k}_{b}"] = arr[:, j]
 
+    print("\nAfter sample cleaning: ", end='')
+    for k, v in obj_samples_clean.items():
+        print(f"{k}={v.shape}", end='; ')
     return obj_samples_clean
 
-def clean_grouped_samples(samples_grouped):
+def clean_grouped_samples(samples_grouped, obj_index, batch_data_len):
+    raise NotImplementedError("clean_grouped_samples is not implemented yet.")
     """
     Clean grouped samples (group_by_chain=True) in your style:
-    - Universal params kept as-is (transpose to (n_samples, n_chains))
-    - Object-specific params indexed [:, :, i] and transposed
+    - Universal params kept as-is (flattened over chains)
+    - Object-specific params indexed [:, :, i]
     """
     universal_keys = ['eta_A1', 'eta_A2', 'eta_tau1', 'eta_tau2']
 
@@ -66,11 +83,27 @@ def clean_grouped_samples(samples_grouped):
     for k, v in samples_grouped.items():
         print(f"{k}={v.shape}", end='; ')
 
-    obj_samples_clean = {
-        k: (v[:, :, i].T if k not in universal_keys else v.T)
-        for k, v in samples_grouped.items()
-        for i in range(v.shape[2] if (k not in universal_keys and v.ndim > 2) else 1)
-    }
+    obj_samples_clean = dict()
+    for k, v in samples_grouped.items():
+        arr = np.asarray(v)  # shape: (n_chains, n_samples[, ...])
+
+        # Flatten chains into single axis first: (n_samples_total, ...)
+        arr = arr.reshape(-1, *arr.shape[2:])
+
+        # Select per-object slice if needed
+        if arr.ndim == 2 and arr.shape[1] == batch_data_len:
+            arr = arr[:, obj_index]
+        elif arr.ndim == 3 and arr.shape[1] == batch_data_len:
+            arr = arr[:, obj_index, :]
+
+        # Flatten dimensions for plotting
+        if arr.ndim == 1:
+            obj_samples_clean[k] = arr
+        elif arr.ndim == 2:
+            print("Flattening 2D array for parameter:", k)
+            print("Shape before flattening:", arr.shape)
+            for j in range(arr.shape[1]):
+                obj_samples_clean[f"{k}_{j}"] = arr[:, j]
 
     return obj_samples_clean
 
@@ -364,7 +397,24 @@ def bands_with_any_contamination_annotated(z):
 
     return results['combined']
 
-def save_samples_to_hdf5(samples, object_id):
+def save_all_samples_to_hdf5(samples):
+    """
+    Save all samples to an HDF5 file
+    Args:
+        samples (dict): Dictionary containing MCMC samples.
+    """
+    output_dir=f"samples/{prefix}_{suffix}"
+    os.makedirs(output_dir, exist_ok=True)
+    file_path = os.path.join(output_dir, f"{prefix}_{suffix}_all.h5")
+
+    logging.info(f"Saving all samples to {file_path}")
+
+    with h5py.File(file_path, "w") as hdf:
+        for key, value in samples.items():
+            hdf.create_dataset(key, data=value)
+    print(f"Saved all samples to {file_path}")
+
+def save_obj_samples_to_hdf5(samples, object_id):
     """
     Save all samples to an HDF5 file, one file per object_id.
 
@@ -455,14 +505,13 @@ def log_broken_pl(lam, lam_s, d1, d2, ds=4.0):
     )
     return log_f
 
-def process_samples(samples, data, bands=None, percentiles=[16, 50, 84]):
+def process_samples(flat_samples, data, percentiles=[16, 50, 84]):
     """
     Generalized processing of MCMC samples for arbitrary parameters and bands.
 
     Args:
-        samples (dict): Dictionary of MCMC samples, each value is (n_samples,) or (n_samples, n_dim).
-        data (dict): Data dictionary, must contain 'object_id', 'z', and optionally 'clean_bands'.
-        bands (list): List of bands to process. If None, uses data['clean_bands'] or all keys in lambda_pivot.
+        flat_samples (dict): Dictionary of flat MCMC samples, each value is (n_samples,).
+        data (dict): Data dictionary, must contain 'object_id', 'z', and 'clean_bands'.
         percentiles (list): Percentiles for summary statistics.
 
     Returns:
@@ -473,66 +522,49 @@ def process_samples(samples, data, bands=None, percentiles=[16, 50, 84]):
         lower, median, upper = np.percentile(x, p, axis=axis)
         return median, 0.5 * (upper - lower)
 
-    result = dict(object_id=data.get('object_id', None), z=data.get('z', None))
+    result = dict(object_id=data['object_id'], z=data['z'])
 
-    # Determine bands to use
-    if bands is None:
-        bands = data.get('clean_bands', list(lambda_pivot.keys()))
-
-    # Process all parameters in samples
-    for key, arr in samples.items():
-        arr = np.asarray(arr)
-        if arr.ndim == 1:
-            # Scalar parameter
-            median, err = sym_percentile(arr)
-            result[key] = median
-            result[f"{key}_err"] = err
-        elif arr.ndim == 2:
-            # Vector parameter (e.g., per-band)
-            for i in range(arr.shape[1]):
-                median, err = sym_percentile(arr[:, i])
-                result[f"{key}_{i}"] = median
-                result[f"{key}_{i}_err"] = err
-        else:
-            # Higher dimensions: flatten and summarize
-            median, err = sym_percentile(arr.reshape(-1))
-            result[key] = median
-            result[f"{key}_err"] = err
+    # per flat param computation
+    for k, v in flat_samples.items():
+        if v.ndim > 1:
+            print(f"Warning: {k} has shape {v.shape}, expected flat samples")
+        median, err = sym_percentile(v)
+        result[k] = median
+        result[f"{k}_err"] = err
 
     # generalized per-band computation
     # Power Law Params
-    log_sigma_hat0 = np.asarray(samples["log_sigma_hat0"])
-    eta_A1 = np.asarray(samples["eta_A1"])
-    eta_A2 = np.asarray(samples["eta_A2"])
-    eta_tau1 = np.asarray(samples["eta_tau1"])
-    eta_tau2 = np.asarray(samples["eta_tau2"])
-    eta_break = 1  # or samples.get("eta_break", 1)
+    log_sigma_hat0 = np.asarray(flat_samples["log_sigma_hat0"])
+    eta_A1 = np.asarray(flat_samples["eta_A1"])
+    eta_A2 = np.asarray(flat_samples["eta_A2"])
+    eta_tau1 = np.asarray(flat_samples["eta_tau1"])
+    eta_tau2 = np.asarray(flat_samples["eta_tau2"])
+    eta_break = 1
     lambda_ref = 2500
     lam_s = 2500
 
     log_sigma_band = []
-    for band in bands:
-        lam_eff = lambda_pivot.get(band, lambda_ref)
+    for band in data['clean_bands']:
+        lam_eff = lambda_pivot[band]
         val = log_sigma_hat0 / np.log(10) + log_broken_pl(lam_eff, lam_s, eta_A1, eta_A2, eta_break)
         log_sigma_band.append(val)
-    log_sigma_band = np.array(log_sigma_band).T  # shape (n_samples, n_bands)
+    log_sigma_band = np.array(log_sigma_band).T
 
-    for i, band in enumerate(bands):
+    for i, band in enumerate(data['clean_bands']):
         median, err = sym_percentile(log_sigma_band[:, i])
         result[f"log_sigma_band_{band}"] = median
         result[f"log_sigma_band_{band}_err"] = err
 
     # Other special params
     # log_sigma_hat_UV
-    samples_log_sigma_hat_UV = samples["log_sigma_hat0"] / np.log(10) + log_broken_pl(lambda_ref, lam_s, eta_A1, eta_A2, eta_break)
+    samples_log_sigma_hat_UV = flat_samples["log_sigma_hat0"] / np.log(10) + log_broken_pl(lambda_ref, lam_s, eta_A1, eta_A2, eta_break)
     result['log_sigma_hat_UV'], result['log_sigma_hat_UV_err'] = sym_percentile(samples_log_sigma_hat_UV)
     # log_tau_UV_RF
-    samples_log_tau_UV_RF = samples["log_tau_drw0"] / np.log(10) - np.log10(1 + data['z']) + log_broken_pl(lambda_ref, lam_s, eta_tau1, eta_tau2, eta_break)
+    samples_log_tau_UV_RF = flat_samples["log_tau_drw0"] / np.log(10) - np.log10(1 + data['z']) + log_broken_pl(lambda_ref, lam_s, eta_tau1, eta_tau2, eta_break)
     result['log_tau_UV_RF'], result['log_tau_UV_RF_err'] = sym_percentile(samples_log_tau_UV_RF)
 
-    result["clean_bands"] = bands
+    result["clean_bands"] = data['clean_bands']
     return result
-
 
 def compute_psd_from_samples(samples, clean_bands, num_points=1000, time_range=(1.0, 365*20)):
     """
