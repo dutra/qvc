@@ -253,7 +253,7 @@ def plot_mcmc_traces(samples_dict, data):
     output_dir = f"mcmc_traces/{prefix}_{suffix}/"
     os.makedirs(output_dir, exist_ok=True)
     save_path = os.path.join(output_dir, f"{data['z']:.1f}_{data['object_id']}_mcmc_traces.png")
-    plt.savefig(save_path, dpi=150)
+    plt.savefig(save_path, dpi=100)
     logging.info(f"Saved trace plot to {save_path}")
 
     # Plot eta_A1 vs. log_tau trace if both are present
@@ -266,7 +266,7 @@ def plot_mcmc_traces(samples_dict, data):
         ax2.grid(True)
         save_path2 = os.path.join(output_dir, f"{data['z']:.1f}_{data['object_id']}_etaA1_vs_logtau.png")
         plt.tight_layout()
-        plt.savefig(save_path2, dpi=150)
+        plt.savefig(save_path2, dpi=100)
         plt.close(fig2)
         print("Saved eta_A1 vs. log_tau trace plot to", save_path2)
 
@@ -280,7 +280,7 @@ def plot_mcmc_traces(samples_dict, data):
         ax_eta_sigma.grid(True)
         save_path_eta_sigma = os.path.join(output_dir, f"{data['z']:.1f}_{data['object_id']}_etaA1_vs_logsigma.png")
         plt.tight_layout()
-        plt.savefig(save_path_eta_sigma, dpi=150)
+        plt.savefig(save_path_eta_sigma, dpi=100)
         plt.close(fig_eta_sigma)
         logging.info(f"Saved eta_A1 vs. log_sigma_hat0 trace plot to {save_path_eta_sigma}")
 
@@ -294,6 +294,6 @@ def plot_mcmc_traces(samples_dict, data):
         ax3.grid(True)
         save_path3 = os.path.join(output_dir, f"{data['z']:.1f}_{data['object_id']}_logtau_vs_logsigma.png")
         plt.tight_layout()
-        plt.savefig(save_path3, dpi=150)
+        plt.savefig(save_path3, dpi=100)
         plt.close(fig3)
         logging.info(f"Saved log_tau_drw0 vs. log_sigma_hat0 trace plot to {save_path3}")
