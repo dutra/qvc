@@ -10,6 +10,15 @@
 __pycache__/
 *.py[cod]
 *$py.class
+*.parquet
+*.fits
+*.h5
+*.csv
+*.npy
+*.save
+*.yaml
+*.dat
+*.vot
 
 # C extensions
 *.so

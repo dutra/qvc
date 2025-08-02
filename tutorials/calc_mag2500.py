@@ -300,29 +300,17 @@ from astroquery.sdss import SDSS
 from astropy.coordinates import SkyCoord
 import astropy.units as u
 
-def fetch_spectrum_fits(data_cat, i, cache_dir="data/spectra_cache"):
+def fetch_spectrum_fits(sdss_name, plate, fiber, mjd, cache_dir="data/spectra_cache"):
     """
     Fetch SDSS spectrum for a given index in data_cat.
     Downloads and saves to FITS file if not already cached.
-    
-    Parameters
-    ----------
-    data_cat : pandas.DataFrame
-        Catalog with columns: SDSS_NAME, PLATE, FIBERID, MJD, RA, DEC
-    i : int
-        Index of the object
-    cache_dir : str
-        Directory to store cached spectra as FITS files
-        
-    Returns
-    -------
-    data : astropy.io.fits.HDUList
-        The FITS HDUList for the spectrum
     """
+    
+
     os.makedirs(cache_dir, exist_ok=True)
 
-    sdss_name = data_cat['SDSS_NAME'][i]
-    plate, fiber, mjd = data_cat['PLATE'][i], data_cat['FIBERID'][i], data_cat['MJD'][i]
+    # sdss_name = data_cat['SDSS_NAME'][i]
+    # plate, fiber, mjd = data_cat['PLATE'][i], data_cat['FIBERID'][i], data_cat['MJD'][i]
     cache_file = os.path.join(cache_dir, f"{sdss_name}_p{plate}_f{fiber}_m{mjd}.fits")
 
     # Return cached FITS if available
@@ -345,19 +333,22 @@ def fetch_spectrum_fits(data_cat, i, cache_dir="data/spectra_cache"):
     data.writeto(cache_file, overwrite=True)
     print(f"Spectrum saved to {cache_file}")
     
-    return data, False
+    return data
 
 def get_alpha(i):
 
     # Get the SDSS_NAME for the current index i
     sdss_name = data_cat['SDSS_NAME'][i]
     print(f"Processing SDSS_NAME: {sdss_name}")
+    plate = data_cat['PLATE'][i]
+    fiber = data_cat['FIBERID'][i]
+    mjd = data_cat['MJD'][i]
 
     # Query SDSS for the spectrum using the SDSS_NAME
     #try:
     if True:
         # Use the new caching function
-        data, exists = fetch_spectrum_fits(data_cat, i)
+        data = fetch_spectrum_fits(sdss_name, plate, fiber, mjd)
 
         # Optional: compute the SkyCoord if you still need the coordinates
         coord = SkyCoord(

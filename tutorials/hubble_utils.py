@@ -547,7 +547,7 @@ def populate_chi_sq_from_csv(df, csv_path="data/jul14_chi_squared_ranking_all.cs
         DataFrame with a new/updated 'chi_sq' column.
     """
     chi_sq_df = pd.read_csv(csv_path)
-    print(chi_sq_df.head())
+    #print(chi_sq_df.head())
     # Ensure object_id is string for matching
     df['object_id'] = df['object_id'].astype(str)
     chi_sq_df['object_id'] = chi_sq_df['object_id'].astype(str)
