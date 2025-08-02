@@ -34,41 +34,64 @@ from datetime import datetime
 
 import numpy as np
 
-def clean_flat_samples(samples_flat, obj_index, batch_data_len, clean_bands):
+def select_samples_for_object(samples_flat, obj_index, universal_params):
     """
-    Clean flat samples (group_by_chain=False) in your style:
-    - Universal params kept as-is (1D)
-    - Object-specific params indexed [:, i]
+    Select samples for a specific object from flat samples.
+    
+    Parameters
+    ----------
+    samples_flat : dict
+        Dictionary of flat samples with keys as parameter names.
+    obj_index : int
+        Index of the object to select samples for.
+    universal_params : list
+        List of universal parameter names to keep.
+
+    Returns
+    -------
+    dict
+        Dictionary with selected samples for the object.
     """
-    universal_keys = ['eta_A1', 'eta_A2', 'eta_tau1', 'eta_tau2']
+    obj_samples = {
+            k: v[:, obj_index] if k not in ['eta_A1', 'eta_A2', 'eta_tau1', 'eta_tau2'] else v
+            for k, v in samples_flat.items()
+        }    
 
     # Print shapes for inspection
-    print("Before sample cleaning: ", end='')
-    for k, v in samples_flat.items():
+    print("Selected object samples: ", end='')
+    for k, v in obj_samples.items():
         print(f"{k}={v.shape}", end='; ')
+    
+    return obj_samples
 
-    # Flatten all parameters for plotting
-    obj_samples_clean = dict()
+def flatten_flat_samples_per_band(samples_flat, clean_bands):
+    """
+    Flatten flat samples for each band in clean_bands.
+    
+    Parameters
+    ----------
+    samples_flat : dict
+        Dictionary of flat samples with keys as parameter names.
+    clean_bands : list
+        List of clean bands to flatten.
+
+    Returns
+    -------
+    dict
+        Dictionary with flattened samples for each band.
+    """
+    flattened_samples = {}
     for k, v in samples_flat.items():
-        arr = np.asarray(v)
-        
-        if arr.ndim == 1:
-            # Universal parameters, keep as is
-            obj_samples_clean[k] = arr
-        # Select per-object slice if needed
-        elif arr.ndim == 2 and arr.shape[1] == batch_data_len:
-            obj_samples_clean[k] = arr[:, obj_index]
-        elif arr.ndim == 3 and arr.shape[1] == batch_data_len:
-            arr = arr[:, obj_index, :]
-            if arr.shape[1] != len(clean_bands):
-                print(f"Warning: {k} has {arr.shape[1]} bands, but clean_bands has {len(clean_bands)}: {clean_bands}")
-            for j, b in enumerate(clean_bands):
-                obj_samples_clean[f"{k}_{b}"] = arr[:, j]
+        if v.ndim == 1:
+            flattened_samples[k] = v
+        elif v.ndim == 2:
+            # Flatten over bands
+            for i, band in enumerate(clean_bands):
+                flattened_samples[f"{k}_{band}"] = v[:, i]
+        else:
+            raise ValueError(f"Unexpected shape for {k}: {v.shape}") 
+    return flattened_samples
 
-    print("\nAfter sample cleaning: ", end='')
-    for k, v in obj_samples_clean.items():
-        print(f"{k}={v.shape}", end='; ')
-    return obj_samples_clean
 
 def clean_grouped_samples(samples_grouped, obj_index, batch_data_len):
     raise NotImplementedError("clean_grouped_samples is not implemented yet.")

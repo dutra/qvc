@@ -461,11 +461,13 @@ if __name__ == '__main__':
         print("++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++")
         logging.info(f"Quasar {i+1}/{len(batch_data)} Object ID: {obj['object_id']}")
 
-        obj_samples_clean_flat = clean_flat_samples(samples_flat, i, len(batch_data), obj['clean_bands'])
-        save_obj_samples_to_hdf5(obj_samples_clean_flat, obj['object_id'])
-        # Add the object-specific parameters
+        obj_flat_samples = select_samples_for_object(samples_flat, i, universal_params=['eta_A1', 'eta_A2', 'eta_tau1', 'eta_tau2'])
+        obj_flat_samples_flatten_per_band = flatten_flat_samples_per_band(obj_flat_samples, obj['clean_bands'])
+
+        save_obj_samples_to_hdf5(obj_flat_samples_flatten_per_band, obj['object_id'])
         
-        result = process_samples(obj_samples_clean_flat, obj)
+        # Add the object-specific parameters
+        result = process_samples(obj_flat_samples_flatten_per_band, obj)
 
         #samples_grouped = mcmc.get_samples(group_by_chain=True)
         #samples_grouped_cleaned = clean_grouped_samples(samples_grouped)
@@ -473,17 +475,17 @@ if __name__ == '__main__':
 
         # Plotting
         if args.plot:
-            plot_mcmc_traces(obj_samples_clean_flat, obj)
-            plot_posterior(obj_samples_clean_flat, obj)
+            plot_mcmc_traces(obj_flat_samples_flatten_per_band, obj)
+            plot_posterior(obj_flat_samples_flatten_per_band, obj)
 
-            # m = Model(
-            #     obj['X'], obj['y'], obj['yerr'], 
-            #     kernels.quasisep.Exp(jnp.array([1, 1])),
-            #     zero_mean=zero_mean, has_jitter=has_jitter, has_lag=has_lag,
-            #     clean_bands=obj['clean_bands'], z=obj['z']
-            # )
-            # psd_results = compute_psd_from_samples(obj_samples_clean_flat, obj["clean_bands"])
-            # save_combined_plot(obj_samples_clean_flat, m, obj['X'], obj['y'], obj['yerr'], obj['band_idx'], result, fit_bestP=False, psd_results=psd_results)
+            m = Model(
+                obj['X'], obj['y'], obj['yerr'], 
+                kernels.quasisep.Exp(jnp.array([1, 1])),
+                zero_mean=zero_mean, has_jitter=has_jitter, has_lag=has_lag,
+                clean_bands=obj['clean_bands'], z=obj['z']
+            )
+            psd_results = compute_psd_from_samples(obj_flat_samples, obj["clean_bands"])
+            save_combined_plot(obj_flat_samples, m, obj['X'], obj['y'], obj['yerr'], obj['band_idx'], result, fit_bestP=False, psd_results=psd_results)
             #dump_mcmc_diagnostics(mcmc, obj, i, len(batch_data))
             
         final_result_obj = obj | result #| rhat_ess
