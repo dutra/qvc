@@ -206,7 +206,7 @@ def numpyro_joint_model(Model, batch_data, latent=False, bwb=False, f_host_shen1
             run_batch(data, i)
 
 
-def make_lc(Model, data):
+def make_lc(Model, data, filter_red_bands=False):
     times = data['times']
     mags = data['mags']
     data['mags_means'] = np.array([np.nanmean(mags[band]) for band in mags.keys()])
@@ -214,14 +214,20 @@ def make_lc(Model, data):
        mags[band] = mags[band] - np.nanmean(mags[band])  # Center the magnitudes
     magerrs = data['magerrs']
     
-    red_bands = bands_redder_than(data['z'], threshold=4000)
     blue_bands = bands_bluer_than_lyman_alpha(data['z'])
 
-    clean_bands = list(set(bands) - set(blue_bands) - set(red_bands))
+    if filter_red_bands:
+        logging.info(f"Filtering out red bands (wavelength > 4000 Angstroms) {red_bands} for quasar {data['object_id']} at z={data['z']}")
+        red_bands = bands_redder_than(data['z'], threshold=4000)
+        clean_bands = list(set(bands) - set(blue_bands) - set(red_bands))
+    else:
+        logging.info(f"Excluding only blue bands {blue_bands} for quasar {data['object_id']} at z={data['z']}")
+        clean_bands = list(set(bands) - set(blue_bands))
 
     # Reorder clean_bands to match the desired order
     clean_bands = list(sorted(clean_bands, key=lambda band: ['u', 'g', 'r', 'i', 'z', 'y'].index(band)))
     #clean_bands = bands
+    logging.info(f"Clean bands for quasar {data['object_id']} at z={data['z']}: {clean_bands}")
     data['clean_bands'] = clean_bands
     #print(f"Bands: {bands}, Clean Bands: {clean_bands}")
     if len(clean_bands) == 0:
@@ -329,6 +335,7 @@ if __name__ == '__main__':
     parser.add_argument("--job_N", type=int, default=-1, help="Number of objects to divide.")
     parser.add_argument("--max_tree_depth", type=int, default=8, help="Max tree depth param for NUTS sampler.")
     parser.add_argument("--f_host_shen11", action="store_true", help="Use host flux empirical relation from Shen et al. 2011.")
+    parser.add_argument("--filter_red_bands", action="store_true", help="Filter out red bands (wavelength > 4000 Angstroms).")
 
     args = parser.parse_args()
     print("Args: ", args)
@@ -381,7 +388,7 @@ if __name__ == '__main__':
     batch_data = []
     for i, obj in enumerate(objs):
         # Prepare each object's data for the joint model
-        result = make_lc(Model, obj)
+        result = make_lc(Model, obj, filter_red_bands=args.filter_red_bands)
         if result is None:
             continue
         obj['i'] = i
