@@ -461,7 +461,7 @@ if __name__ == '__main__':
         print("++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++")
         logging.info(f"Quasar {i+1}/{len(batch_data)} Object ID: {obj['object_id']}")
 
-        obj_samples_clean_flat = clean_flat_samples(samples_flat)
+        obj_samples_clean_flat = clean_flat_samples(samples_flat, i, len(batch_data), obj['clean_bands'])
         save_obj_samples_to_hdf5(obj_samples_clean_flat, obj['object_id'])
         # Add the object-specific parameters
         
