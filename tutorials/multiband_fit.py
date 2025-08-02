@@ -217,9 +217,9 @@ def make_lc(Model, data, filter_red_bands=False):
     blue_bands = bands_bluer_than_lyman_alpha(data['z'])
 
     if filter_red_bands:
-        logging.info(f"Filtering out red bands (wavelength > 4000 Angstroms) {red_bands} for quasar {data['object_id']} at z={data['z']}")
         red_bands = bands_redder_than(data['z'], threshold=4000)
         clean_bands = list(set(bands) - set(blue_bands) - set(red_bands))
+        logging.info(f"Filtering out red bands (wavelength > 4000 Angstroms) {red_bands} for quasar {data['object_id']} at z={data['z']}")
     else:
         logging.info(f"Excluding only blue bands {blue_bands} for quasar {data['object_id']} at z={data['z']}")
         clean_bands = list(set(bands) - set(blue_bands))
