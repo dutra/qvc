@@ -377,6 +377,8 @@ def save_samples_to_hdf5(samples, object_id):
     os.makedirs(output_dir, exist_ok=True)
     file_path = os.path.join(output_dir, f"{object_id}.h5")
 
+    logging.info(f"Saving samples for object_id {object_id} to {file_path}")
+
     with h5py.File(file_path, "w") as hdf:
         for key, value in samples.items():
             hdf.create_dataset(key, data=value)

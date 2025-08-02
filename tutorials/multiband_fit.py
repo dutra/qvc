@@ -456,6 +456,7 @@ if __name__ == '__main__':
         obj_samples_clean = clean_flat_samples(samples_flat)
 
         # Add the object-specific parameters
+        save_samples_to_hdf5(obj_samples_clean, obj['object_id'])
         result = process_samples(obj_samples_clean, obj)
 
         samples_grouped = mcmc.get_samples(group_by_chain=True)
