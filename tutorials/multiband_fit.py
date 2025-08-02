@@ -335,7 +335,6 @@ if __name__ == '__main__':
     parser.add_argument("--job_N", type=int, default=-1, help="Number of objects to divide.")
     parser.add_argument("--max_tree_depth", type=int, default=8, help="Max tree depth param for NUTS sampler.")
     parser.add_argument("--f_host_shen11", action="store_true", help="Use host flux empirical relation from Shen et al. 2011.")
-    parser.add_argument("--filter_red_bands", action="store_true", help="Filter out red bands (wavelength > 4000 Angstroms).")
 
     args = parser.parse_args()
     print("Args: ", args)
@@ -388,7 +387,7 @@ if __name__ == '__main__':
     batch_data = []
     for i, obj in enumerate(objs):
         # Prepare each object's data for the joint model
-        result = make_lc(Model, obj, filter_red_bands=args.filter_red_bands)
+        result = make_lc(Model, obj, filter_red_bands=(not args.f_host_shen11))
         if result is None:
             continue
         obj['i'] = i
