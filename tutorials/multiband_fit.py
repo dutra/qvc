@@ -122,7 +122,8 @@ def numpyro_joint_model(Model, batch_data, latent=False, bwb=False, f_host_shen1
         
     if f_host_shen11:
         # Host flux empirical relation
-        logl5100 = jnp.array([obj['LOGL5100'] for obj in batch_data])
+        #logl5100 = jnp.array([obj['LOGL5100'] for obj in batch_data])
+        logl5100 = jnp.array([obj['LOGLBOL'] - jnp.log10(9.26) for obj in batch_data])
 
         x = logl5100 - 44.0
         f_host = 0.8052 - 1.5502 * x + 0.9121 * jnp.power(x, 2) - 0.1577 * jnp.power(x, 3)
@@ -414,7 +415,7 @@ if __name__ == '__main__':
             'z': obj['z'],
             'bestP': bestP,
             # add any other fields needed by your model
-            'LOGL5100': obj['LOGL5100'],
+            'LOGLBOL': obj['LOGLBOL'],
         })
     num_params = sum(p.size for p in batch_data[0]['bestP'].values())
     num_objects = len(batch_data)
