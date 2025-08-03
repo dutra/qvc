@@ -40,7 +40,7 @@ def read_quasars_from_hdf5(file_path):
 
 
 #objs = read_quasars_from_hdf5("data/july21_chisq2_hostpl_N20w4000s200_merged_magscorrected.h5")
-agn_df = pd.read_csv('data/july31_chisq2_preview_tree8_N10w1000s250_merged_magscorrected.csv')
+agn_df = pd.read_csv('data/aug3_fhostshen11_N10t8w2000s1000_merged_means_corrected.csv')
 # %
 bands = ['u', 'g', 'r', 'i', 'z']
 
@@ -557,14 +557,14 @@ new_data = []
 
 for i in trange(ntest, desc="Processing objects"):
     object_id = data_cat['object_id'][i]
-    try:
-        m_new[i], f_host[i], dmag_avg[i] = get_alpha(i)
-        print(f"m_new: {m_new[i]}, f_host: {f_host[i]}, dmag_avg: {dmag_avg[i]}")
-    except Exception as e:
-        print(f"Error processing object {object_id}: {e}")
-        m_new[i] = -99
-        f_host[i] = -99
-        dmag_avg[i] = -99
+    # try:
+    m_new[i], f_host[i], dmag_avg[i] = get_alpha(i)
+    print(f"m_new: {m_new[i]}, f_host: {f_host[i]}, dmag_avg: {dmag_avg[i]}")
+    # except Exception as e:
+    #     print(f"Error processing object {object_id}: {e}")
+    #     m_new[i] = -99
+    #     f_host[i] = -99
+    #     dmag_avg[i] = -99
 
 # Save results to CSV
 results_df = pd.DataFrame({
@@ -573,6 +573,6 @@ results_df = pd.DataFrame({
     'apparent_mag_2500': m_new,
     'f_host_4200': f_host
 })
-results_df.to_csv('data/july19_goodsources_chisq5and10_mean1_N20w4000s500_merged_magscorrected_fittedm2500.csv', index=False)
+results_df.to_csv('data/aug3_fhostshen11_N10t8w2000s1000_merged_means_corrected_fittedm2500.csv', index=False)
 
 

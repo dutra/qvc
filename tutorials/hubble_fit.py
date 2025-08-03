@@ -454,8 +454,8 @@ def main():
 
 
 def test():
-    cosmo_model = 'Flatw0waCDM'
-    #cosmo_model = 'FlatwCDM'
+    #cosmo_model = 'Flatw0waCDM'
+    cosmo_model = 'FlatwCDM'
     # cosmo_model = 'FlatLambdaCDM'
     only_sna = False
 
@@ -491,7 +491,10 @@ def test():
     #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/july31_chisq2_preview_tree8_N10w1000s250_merged.h5", populate_sdss=False)
     #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/july31_chisq2_preview_grae_tree8_N10w1000s250_grace_merged.h5", populate_sdss=False)
     #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/aug1_fhostshen_wred_N10t8w2000s500_merged.h5", populate_sdss=False)
-    df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/aug1_wored_N10t8w2000s500_merged.h5", populate_sdss=False)
+    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/aug1_wored_N10t8w2000s500_merged.h5", populate_sdss=False)
+    
+    df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/aug3_fhostshen11_N10t8w2000s1000_merged.h5", populate_sdss=False)
+    
     #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/july19_goodsources_chisq5and10_mean1_N20w4000s500_merged.h5", populate_sdss=True)
     #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/june1_joint_N20w2000s1000_fits_merged.h5")
     #df_agn = df_agn[:400]

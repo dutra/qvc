@@ -603,8 +603,7 @@ def load_quasar_data(file_path, populate_sdss=False, apply_cut=True):
         print("Skipping data cuts as apply_cut is False.")
         return df
 
-
-    df = df.dropna()
+    #df = df.dropna()
     
 
     print("Before data cuts, number of quasars:", len(df))
@@ -626,7 +625,7 @@ def load_quasar_data(file_path, populate_sdss=False, apply_cut=True):
         (df['apparent_mag_2500'].between(1, 40)) &
         #(df['EXTINCTION'] < 0.1) & 
         #(df['sn_median_all'] > 1) & # 6  # reliable spectrum
-        (df['FHOST_5100'] <= 0) &
+        #(df['FHOST_5100'] <= 0) &
         
         #(df['f_host_4200'] <= 0) & 
         (df['ebv'] < 0.05) # 0 &

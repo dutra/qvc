@@ -1361,8 +1361,8 @@ def plot_predicted_L2500_vs_sigmahat(flat_samples, df_agn, cosmo_model, show=Fal
     ax.set_ylabel(r'$L_{2500}$ (erg s$^{-1})$')
     ax.set_yscale('log')
     ax.set_xscale('log')
-    ax.set_xlim(4e-4, 2)
-    ax.set_ylim(6e43, 6e46)
+    #ax.set_xlim(4e-4, 2)
+    #ax.set_ylim(6e43, 6e46)
     ax.legend()
     ax.text(
         0.05, 0.95,
