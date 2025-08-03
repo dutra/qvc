@@ -455,6 +455,10 @@ if __name__ == '__main__':
         "f_host": f_host
     }
 
+    # Check device
+    print(means["log_tau_drw0_mean"].device)
+    print(batch_data[0]["X"][0].device)
+
     nuts_kernel = NUTS(numpyro_joint_model, init_strategy=init_strategy, dense_mass=True, max_tree_depth=args.max_tree_depth)
     mcmc = MCMC(
         nuts_kernel,
