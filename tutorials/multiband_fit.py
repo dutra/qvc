@@ -94,11 +94,10 @@ def mle(Model, nBand, X, y, yerr, clean_bands, z, latent=False, fixed=True):
     return best_param
 
 
-def numpyro_joint_model(Model, batch_data, latent=False, bwb=False, f_host_shen11=False):
+def numpyro_joint_model(models, means, batch_data, latent=False, bwb=False, f_host_shen11=False):
     batch_size = len(batch_data)
     nBands = 5  # or use from config
 
-    # Shared across all objects
     powerlaw_samples = {
         k: numpyro.sample(k, dist.Normal(loc, scale))
         for k, (loc, scale) in {
@@ -109,28 +108,15 @@ def numpyro_joint_model(Model, batch_data, latent=False, bwb=False, f_host_shen1
         }.items()
     }
 
-    # Extract object-level prior means
-    log_tau_drw0_mean = jnp.array([obj['bestP']['log_tau_drw0'] for obj in batch_data])
-    log_sigma0_mean = jnp.array([obj['bestP']['log_sigma0'] for obj in batch_data])
-    log_amp_delta_blr_mean = jnp.stack([jnp.array(obj['bestP']['log_amp_delta_blr']) for obj in batch_data])  # (B, 5)
-    mean_mean = jnp.stack([jnp.array(obj['bestP']['mean']) for obj in batch_data])                            # (B, 5)
-    lag0_mean = jnp.stack([jnp.array(obj['bestP']['lag0']) for obj in batch_data])                            # (B, 5)
-    lag_beta_mean = jnp.stack([jnp.array(obj['bestP']['lag_beta']) for obj in batch_data])                    # (B, 5)
-    if latent:
-        log_lag_blr_mean = jnp.stack([jnp.array(obj['bestP']['log_lag_blr']) for obj in batch_data])
-    #log_jitter_mean = jnp.stack([jnp.array(obj['bestP']['log_jitter']) + jnp.mean(obj['yerr']) for obj in batch_data]) # (B, 5)
-        
-    if f_host_shen11:
-        # Host flux empirical relation
-        #logl5100 = jnp.array([obj['LOGL5100'] for obj in batch_data])
-        logl5100 = jnp.array([obj['LOGLBOL'] - jnp.log10(9.26) for obj in batch_data])
-
-        x = logl5100 - 44.0
-        f_host = 0.8052 - 1.5502 * x + 0.9121 * jnp.power(x, 2) - 0.1577 * jnp.power(x, 3)
-        f_host = jnp.clip(f_host, 0.0, 1.0)
-        f_host = jnp.where(logl5100 < 45.053, f_host, 0.0)
-    else:
-        f_host = jnp.zeros(batch_size)
+    # Initialize parameters
+    log_tau_drw0_mean = means["log_tau_drw0_mean"]
+    log_sigma0_mean = means["log_sigma0_mean"]
+    log_amp_delta_blr_mean = means["log_amp_delta_blr_mean"]
+    mean_mean = means["mean_mean"]
+    lag0_mean = means["lag0_mean"]
+    lag_beta_mean = means["lag_beta_mean"]
+    log_lag_blr_mean = means["log_lag_blr_mean"]
+    f_host = means["f_host"]
 
     with numpyro.plate("objects", batch_size):
         # Object-level parameters (shape: [B])
@@ -180,12 +166,7 @@ def numpyro_joint_model(Model, batch_data, latent=False, bwb=False, f_host_shen1
         if bwb:
             params["bwb_A"] = bwb_A[i]
 
-        m = Model(
-            data['X'], data['y'], data['yerr'],
-            kernels.quasisep.Exp(jnp.array([1, 1])),  # Placeholder, your Model will build the kernel
-            zero_mean=zero_mean, has_jitter=has_jitter, has_lag=has_lag,
-            clean_bands=data['clean_bands'], z=data['z']
-        )
+        m = models[i]
         # Test BWB
         if bwb:
             m.sample(params, i)
@@ -427,6 +408,53 @@ if __name__ == '__main__':
     #init_strategy = numpyro.infer.init_to_median()
     logging.info("Done with numpyro.infer.init_to_sample")
 
+    # Create the models
+    models = [
+        Model(
+            obj['X'], obj['y'], obj['yerr'],
+            kernels.quasisep.Exp(jnp.array([1, 1])),
+            zero_mean=zero_mean, has_jitter=has_jitter, has_lag=has_lag,
+            clean_bands=obj['clean_bands'], z=obj['z']
+        )
+        for obj in batch_data
+    ]
+
+    # Extract object-level prior means
+    log_tau_drw0_mean = jnp.array([obj['bestP']['log_tau_drw0'] for obj in batch_data])
+    log_sigma0_mean = jnp.array([obj['bestP']['log_sigma0'] for obj in batch_data])
+    log_amp_delta_blr_mean = jnp.stack([jnp.array(obj['bestP']['log_amp_delta_blr']) for obj in batch_data])  # (B, 5)
+    mean_mean = jnp.stack([jnp.array(obj['bestP']['mean']) for obj in batch_data])                            # (B, 5)
+    lag0_mean = jnp.stack([jnp.array(obj['bestP']['lag0']) for obj in batch_data])                            # (B, 5)
+    lag_beta_mean = jnp.stack([jnp.array(obj['bestP']['lag_beta']) for obj in batch_data])                    # (B, 5)
+    if args.latent:
+        log_lag_blr_mean = jnp.stack([jnp.array(obj['bestP']['log_lag_blr']) for obj in batch_data])
+    #log_jitter_mean = jnp.stack([jnp.array(obj['bestP']['log_jitter']) + jnp.mean(obj['yerr']) for obj in batch_data]) # (B, 5)
+        
+    if args.f_host_shen11:
+        # Host flux empirical relation
+        #logl5100 = jnp.array([obj['LOGL5100'] for obj in batch_data])
+        logl5100 = jnp.array([obj['LOGLBOL'] - jnp.log10(9.26) for obj in batch_data])
+
+        x = logl5100 - 44.0
+        f_host = 0.8052 - 1.5502 * x + 0.9121 * jnp.power(x, 2) - 0.1577 * jnp.power(x, 3)
+        f_host = jnp.clip(f_host, 0.0, 1.0)
+        f_host = jnp.where(logl5100 < 45.053, f_host, 0.0)
+    else:
+        batch_size = len(batch_data)
+        f_host = jnp.zeros(batch_size)
+
+    means = {
+        "log_tau_drw0_mean": log_tau_drw0_mean,
+        "log_sigma0_mean": log_sigma0_mean,
+        "log_amp_delta_blr_mean": log_amp_delta_blr_mean,
+        "mean_mean": mean_mean,
+        "lag0_mean": lag0_mean,
+        "lag_beta_mean": lag_beta_mean,
+        "log_lag_blr_mean": log_lag_blr_mean if args.latent else None,
+        #"log_jitter_mean": log_jitter_mean,
+        "f_host": f_host
+    }
+
     nuts_kernel = NUTS(numpyro_joint_model, init_strategy=init_strategy, dense_mass=True, max_tree_depth=args.max_tree_depth)
     mcmc = MCMC(
         nuts_kernel,
@@ -436,7 +464,7 @@ if __name__ == '__main__':
         progress_bar=args.progress,
         chain_method="vectorized",
     )
-    mcmc.run(jax.random.PRNGKey(0), Model, batch_data, args.latent, args.bwb, args.f_host_shen11)
+    mcmc.run(jax.random.PRNGKey(0), models, means, batch_data, args.latent, args.bwb, args.f_host_shen11)
     samples_flat = mcmc.get_samples(group_by_chain=False)
     diagnostics = mcmc.get_extra_fields()
 
