@@ -45,8 +45,8 @@ def mle(Model, nBand, X, y, yerr, clean_bands, z, latent=False, fixed=True):
         jnp.array,
         {
             "log_tau_drw0": 6.0,
-            "log_sigma0": -0.2,
-            "alpha_host": 0.3,
+            "log_sigma0": 0.2,
+            "alpha_host": 1.0,
             "f_host": 0.0,
             "poly1": 0.0,
             "mean": jnp.full(nBand, 0.0),
@@ -122,7 +122,7 @@ def numpyro_joint_model(models, means, batch_data, latent=False, bwb=False, f_ho
         # Object-level parameters (shape: [B])
         log_tau_drw0 = numpyro.sample("log_tau_drw0", dist.Normal(log_tau_drw0_mean, 2.0))
         log_sigma0 = numpyro.sample("log_sigma0", dist.Normal(log_sigma0_mean, 1.0))
-        log_sigma_hat0 = numpyro.deterministic("log_sigma_hat0", 2.0 * log_sigma0 - log_tau_drw0)
+        log_sigma_hat0 = numpyro.deterministic("log_sigma_hat0", log_sigma0 - 0.5 * log_tau_drw0)
         alpha_host = numpyro.sample("alpha_host", dist.Normal(1.0, 0.1))
         
         
