@@ -195,11 +195,6 @@ def numpyro_joint_model(Model, batch_data, latent=False, bwb=False, f_host_shen1
             log_prob = jnp.where(jnp.isfinite(log_prob), log_prob, -1e20)
             numpyro.factor(f"loglike_{i}", log_prob)
 
-        def log_prob_single(params, model):
-            return model.log_prob(params)
-
-        log_prob_batch = jax.vmap(log_prob_single, in_axes=(0, 0))
-
     if len(batch_data) == 1:
         run_batch(batch_data[0], 0)
     else:
