@@ -82,6 +82,8 @@ def plot_posterior(samples_flat, data, bins=20):
         if lo == hi:  # constant parameter
             print("Corner Constant param: ", flat_labels[i])
             corner_data[:, i] += np.random.normal(0, 1e-6, size=corner_data.shape[0])
+        if 'log_' in flat_labels[i]:
+            corner_data[:, i] = corner_data[:, i] / np.log(10)
 
     fig = corner.corner(corner_data, labels=flat_labels, show_titles=True, 
                         quantiles=[0.16, 0.5, 0.84], bins=bins)
@@ -243,7 +245,10 @@ def plot_mcmc_traces(samples_dict, data):
         axes = [axes]
 
     for idx, key in enumerate(samples_dict.keys()):
-        axes[idx].plot(samples_dict[key], alpha=0.7)
+        if 'log_' in key:
+            axes[idx].plot(samples_dict[key] / np.log(10), alpha=0.7)
+        else:
+            axes[idx].plot(samples_dict[key], alpha=0.7)
         axes[idx].set_ylabel(key)
         axes[idx].grid(True)
 
@@ -256,6 +261,7 @@ def plot_mcmc_traces(samples_dict, data):
     plt.savefig(save_path, dpi=100)
     logging.info(f"Saved trace plot to {save_path}")
 
+    """
     # Plot eta_A1 vs. log_tau trace if both are present
     if 'eta_A1' in samples_dict and 'log_tau_drw0' in samples_dict:
         fig2, ax2 = plt.subplots(figsize=(6, 5))
@@ -297,3 +303,4 @@ def plot_mcmc_traces(samples_dict, data):
         plt.savefig(save_path3, dpi=100)
         plt.close(fig3)
         logging.info(f"Saved log_tau_drw0 vs. log_sigma_hat0 trace plot to {save_path3}")
+    """
