@@ -517,12 +517,9 @@ if __name__ == '__main__':
             
         final_result_obj = obj | result #| rhat_ess
         results.append(final_result_obj)
-
-        # Save results to HDF5 file
-        if args.file:
-            append_quasar_hdf5(final_result_obj, args.file, ignored_keys=['X', 'y', 'yerr', 'band_idx', 'bestP'])
-        else:
-            print("Warning!! Not saving results to file.")
-
         logging.info("--------------------------------------------------------------")
+    if args.file:
+        save_quasar_list_hdf5(results, args.file, ignored_keys=['X', 'y', 'yerr', 'band_idx', 'bestP'])
+    else:
+        logging.warning("No file specified for saving results. Results will not be saved to HDF5.")
     sys.exit("Exiting the program as requested.")

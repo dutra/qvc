@@ -467,59 +467,61 @@ def delete_file(file_path):
     else:
         logging.info(f"File does not exist; not deleting: {file_path}")
 
-def append_quasar_hdf5(quasar, file_path, ignored_keys=None, size_threshold=1024):
+def save_quasar_list_hdf5(quasars, file_path, ignored_keys=None, size_threshold=1024):
     """
-    Save or overwrite a single quasar dictionary in an HDF5 file.
-    - Existing group for the same object_id is deleted first.
-    - Dict values become sub-groups with datasets.
-    - Other keys become attributes on the main group.
-    - Keys in ignored_keys or with array size > size_threshold are skipped with a warning.
+    Save a list of quasar dictionaries to an HDF5 file, overwriting the file if it exists.
+    
+    - The file is always truncated to start fresh.
+    - Each quasar is stored under a group named by its object_id.
+    - Nested dicts become sub-groups with datasets.
+    - Simple values are stored as attributes.
+    - Keys in ignored_keys or arrays larger than size_threshold are skipped.
+    - Prints progress in the form 'i/N: Saved quasar <object_id>'.
     """
     ignored_keys = set(ignored_keys or [])
-    object_id = str(quasar["object_id"])
-    logging.info(f"Saving quasar {object_id} to {file_path}")
-    print(f"Ignored keys: ", ignored_keys)
-
-    # Ensure directory exists
     os.makedirs(os.path.dirname(file_path), exist_ok=True)
-
     string_dt = h5py.string_dtype(encoding="utf-8")
 
-    with h5py.File(file_path, "a") as hdf:
-        # If group already exists, remove it (overwrite mode)
-        if object_id in hdf:
-            del hdf[object_id]
+    total = len(quasars)
+    logging.info(f"Saving {total} quasars to {file_path}")
+    with h5py.File(file_path, "w") as hdf:
+        for i, quasar in enumerate(quasars, start=1):
+            object_id = str(quasar["object_id"])
+            logging.info(f"Saving quasar {object_id} to {file_path}")
+            
+            group = hdf.create_group(object_id)
+            for key, value in quasar.items():
+                # Skip ignored keys
+                if key in ignored_keys:
+                    print(f"Warning: Skipping key '{key}' (ignored key)")
+                    continue
 
-        group = hdf.create_group(object_id)
-        print("Saving Quasar keys:", quasar.keys())
-
-        for key, value in quasar.items():
-            # Skip ignored keys
-            if key in ignored_keys:
-                print(f"Warning: Skipping key '{key}' (ignored key)")
-                continue
-
-            if isinstance(value, dict):
-                # Nested dict → sub-group with datasets
-                sub_group = group.create_group(key)
-                for sub_key, sub_value in value.items():
-                    arr = np.asarray(sub_value)
+                if isinstance(value, dict):
+                    # Nested dict → sub-group with datasets
+                    sub_group = group.create_group(key)
+                    for sub_key, sub_value in value.items():
+                        arr = np.asarray(sub_value)
+                        if arr.size > size_threshold:
+                            print(f"Warning: Skipping sub-key '{key}/{sub_key}' (too large: {arr.size})")
+                            continue
+                        if arr.dtype.kind in {'U', 'S', 'O'}:
+                            arr = arr.astype(string_dt)
+                        sub_group.create_dataset(sub_key, data=arr)
+                else:
+                    # Attributes for simple values
+                    arr = np.asarray(value)
                     if arr.size > size_threshold:
-                        print(f"Warning: Skipping sub-key '{key}/{sub_key}' (too large: {arr.size})")
+                        print(f"Warning: Skipping key '{key}' (too large: {arr.size})")
                         continue
                     if arr.dtype.kind in {'U', 'S', 'O'}:
                         arr = arr.astype(string_dt)
-                    sub_group.create_dataset(sub_key, data=arr)
-            else:
-                # Attributes for simple values
-                arr = np.asarray(value)
-                if arr.size > size_threshold:
-                    print(f"Warning: Skipping key '{key}' (too large: {arr.size})")
-                    continue
-                if arr.dtype.kind in {'U', 'S', 'O'}:
-                    arr = arr.astype(string_dt)
-                group.attrs[key] = arr
-    logging.info("Done saving quasar.")
+                    group.attrs[key] = arr
+            
+            # Print progress
+            print(f"{i}/{total}: Saved quasar {object_id}")
+
+    logging.info("All quasars saved successfully.")
+
 
 def log_broken_pl(lam, lam_s, d1, d2, ds=4.0):
     x = lam / lam_s
