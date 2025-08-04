@@ -35,7 +35,7 @@ has_jitter = False
 has_lag = True
 
 def mle(Model, nBand, X, y, yerr, clean_bands, z, latent=False, fixed=True):
-    print('Starting MLE...')
+    logging.debug('Starting MLE...')
 
     from jax.tree_util import tree_map
     import jaxopt
@@ -82,12 +82,10 @@ def mle(Model, nBand, X, y, yerr, clean_bands, z, latent=False, fixed=True):
         soln = opt.run(init_params)
         best_param = soln.params
 
-        print("Log prob at best fit:", m.log_prob(best_param))
+        logging.debug("Log prob at best fit:", m.log_prob(best_param))
 
-        print('Done MLE')
-        print("Best params:")
-        for k, v in best_param.items():
-            print(f"  {k}: {v}")
+        logging.debug('Done MLE')
+        logging.debug("Best params: " + ", ".join(f"{k}: {v}" for k, v in best_param.items()))
     else:
         best_param = init_params
 
@@ -485,7 +483,7 @@ if __name__ == '__main__':
     # Save and plot the results
     results = []
     for i, obj in enumerate(batch_data):
-        print("++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++")
+        logging.info("++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++")
         logging.info(f"Quasar {i+1}/{len(batch_data)} Object ID: {obj['object_id']}")
 
         obj_flat_samples = select_samples_for_object(samples_flat, i, universal_params=['eta_A1', 'eta_A2', 'eta_tau1', 'eta_tau2'])

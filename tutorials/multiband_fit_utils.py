@@ -58,10 +58,8 @@ def select_samples_for_object(samples_flat, obj_index, universal_params):
         }    
 
     # Print shapes for inspection
-    print("Selected object samples: ", end='')
-    for k, v in obj_samples.items():
-        print(f"{k}={v.shape}", end='; ')
-    
+    logging.debug("Selected object samples: " + ", ".join(f"{k}={v.shape}" for k, v in obj_samples.items()))
+
     return obj_samples
 
 def flatten_flat_samples_per_band(samples_flat, clean_bands):
@@ -435,7 +433,7 @@ def save_all_samples_to_hdf5(samples):
     with h5py.File(file_path, "w") as hdf:
         for key, value in samples.items():
             hdf.create_dataset(key, data=value)
-    print(f"Saved all samples to {file_path}")
+    logging.info(f"Saved all samples to {file_path}")
 
 def save_obj_samples_to_hdf5(samples, object_id):
     """
@@ -455,7 +453,7 @@ def save_obj_samples_to_hdf5(samples, object_id):
     with h5py.File(file_path, "w") as hdf:
         for key, value in samples.items():
             hdf.create_dataset(key, data=value)
-    print(f"Saved samples for object_id {object_id} to {file_path}")
+    logging.info(f"Saved samples for object_id {object_id} to {file_path}")
 
 def delete_file(file_path):
     """
@@ -493,7 +491,6 @@ def save_quasar_list_hdf5(quasars, file_path, ignored_keys=None, size_threshold=
             for key, value in quasar.items():
                 # Skip ignored keys
                 if key in ignored_keys:
-                    print(f"Warning: Skipping key '{key}' (ignored key)")
                     continue
 
                 if isinstance(value, dict):
@@ -502,7 +499,7 @@ def save_quasar_list_hdf5(quasars, file_path, ignored_keys=None, size_threshold=
                     for sub_key, sub_value in value.items():
                         arr = np.asarray(sub_value)
                         if arr.size > size_threshold:
-                            print(f"Warning: Skipping sub-key '{key}/{sub_key}' (too large: {arr.size})")
+                            logging.warning(f"Warning: Skipping sub-key '{key}/{sub_key}' (too large: {arr.size})")
                             continue
                         if arr.dtype.kind in {'U', 'S', 'O'}:
                             arr = arr.astype(string_dt)
@@ -511,14 +508,14 @@ def save_quasar_list_hdf5(quasars, file_path, ignored_keys=None, size_threshold=
                     # Attributes for simple values
                     arr = np.asarray(value)
                     if arr.size > size_threshold:
-                        print(f"Warning: Skipping key '{key}' (too large: {arr.size})")
+                        logging.warning(f"Warning: Skipping key '{key}' (too large: {arr.size})")
                         continue
                     if arr.dtype.kind in {'U', 'S', 'O'}:
                         arr = arr.astype(string_dt)
                     group.attrs[key] = arr
             
             # Print progress
-            print(f"{i}/{total}: Saved quasar {object_id}")
+            logging.info(f"{i}/{total}: Saved quasar {object_id}")
 
     logging.info("All quasars saved successfully.")
 
@@ -552,7 +549,7 @@ def process_samples(flat_samples, data, percentiles=[16, 50, 84]):
     # per flat param computation
     for k, v in flat_samples.items():
         if v.ndim > 1:
-            print(f"Warning: {k} has shape {v.shape}, expected flat samples")
+            logging.warning(f"Warning: {k} has shape {v.shape}, expected flat samples")
         median, err = sym_percentile(v)
         result[k] = median
         result[f"{k}_err"] = err
