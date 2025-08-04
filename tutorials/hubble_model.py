@@ -9,8 +9,8 @@ def K_corr(z, alpha_nu):
     #return -2.5 * (1 + alpha_nu) * np.log10(1 + z)
 
 # --- Reference constants and pivot values ---
-log_sigma_hat_sq_pivot = -1.4 # TODO make this a parameter
-log_tau_UV_RF_pivot = 3.1  # TODO make this a parameter
+log_sigma_hat_sq_pivot = -4.4 # TODO make this a parameter
+log_tau_UV_RF_pivot = 2.4  # TODO make this a parameter
 #M0_agn_offset = -5.179  # TODO make this a parameter
 #z_agn_pivot = 1.2 # TODO make this a parameter
 alpha_nu_pivot = -1
@@ -43,24 +43,24 @@ def broken_power_law(x, x_break, d1, d2, ds):
     return d1 * delta + term - offset
 
 # # Broken power law model
-def M_model_agn(M0_agn, log_sigma_hat_sq_break, eta_A1_agn, eta_A2_agn, eta_break_agn, beta_agn, log_sigma_hat_UV, log_tau_UV_RF):
-    """AGN model with broken power law in log_sigma_hat_UV."""
-    bpl = broken_power_law(2*log_sigma_hat_UV, log_sigma_hat_sq_break, eta_A1_agn, eta_A2_agn, ds=eta_break_agn)
-    return M0_agn + bpl + beta_agn * (log_tau_UV_RF - log_tau_UV_RF_pivot)
-
-# keep this same(ish) signature as M_model_agn + x_err
-def M_model_agn_err(M0_agn, log_sigma_hat_sq_break, eta_A1_agn, eta_A2_agn, eta_break_agn, beta_agn,
-                    log_sigma_hat_UV, log_sigma_hat_UV_err, log_tau_UV_RF_err):
-    err_bpl = broken_power_law_err(2*log_sigma_hat_UV, 2*log_sigma_hat_UV_err, log_sigma_hat_sq_break, eta_A1_agn, eta_A2_agn, ds=eta_break_agn)    
-    return np.sqrt(err_bpl**2 + (beta_agn * log_tau_UV_RF_err)**2)
-
-# Linear model
 # def M_model_agn(M0_agn, log_sigma_hat_sq_break, eta_A1_agn, eta_A2_agn, eta_break_agn, beta_agn, log_sigma_hat_UV, log_tau_UV_RF):
-#     return M0_agn + eta_A1_agn * (2 * log_sigma_hat_UV - log_sigma_hat_sq_pivot) + beta_agn * (log_tau_UV_RF - log_tau_UV_RF_pivot)
-    
+#     """AGN model with broken power law in log_sigma_hat_UV."""
+#     bpl = broken_power_law(2*log_sigma_hat_UV, log_sigma_hat_sq_break, eta_A1_agn, eta_A2_agn, ds=eta_break_agn)
+#     return M0_agn + bpl + beta_agn * (log_tau_UV_RF - log_tau_UV_RF_pivot)
+
+# # keep this same(ish) signature as M_model_agn + x_err
 # def M_model_agn_err(M0_agn, log_sigma_hat_sq_break, eta_A1_agn, eta_A2_agn, eta_break_agn, beta_agn,
 #                     log_sigma_hat_UV, log_sigma_hat_UV_err, log_tau_UV_RF_err):
-#     return np.sqrt((eta_A1_agn * 2*log_sigma_hat_UV_err)**2 + (beta_agn * log_tau_UV_RF_err)**2)
+#     err_bpl = broken_power_law_err(2*log_sigma_hat_UV, 2*log_sigma_hat_UV_err, log_sigma_hat_sq_break, eta_A1_agn, eta_A2_agn, ds=eta_break_agn)    
+#     return np.sqrt(err_bpl**2 + (beta_agn * log_tau_UV_RF_err)**2)
+
+# Linear model
+def M_model_agn(M0_agn, log_sigma_hat_sq_break, eta_A1_agn, eta_A2_agn, eta_break_agn, beta_agn, log_sigma_hat_UV, log_tau_UV_RF):
+    return M0_agn + eta_A1_agn * (2 * log_sigma_hat_UV - log_sigma_hat_sq_pivot) + beta_agn * (log_tau_UV_RF - log_tau_UV_RF_pivot)
+    
+def M_model_agn_err(M0_agn, log_sigma_hat_sq_break, eta_A1_agn, eta_A2_agn, eta_break_agn, beta_agn,
+                    log_sigma_hat_UV, log_sigma_hat_UV_err, log_tau_UV_RF_err):
+    return np.sqrt((eta_A1_agn * 2*log_sigma_hat_UV_err)**2 + (beta_agn * log_tau_UV_RF_err)**2)
 
 def M_model_SN(m_b_corr, host_logmass, M0_sn, gamma_sn, tau_Ms):
     """
@@ -91,7 +91,7 @@ def get_model_params(cosmo_model):
         ("gamma_sn",    (-0.1, 0.1)),     # Host mass step usually ~0.05
         ("tau_Ms",      (0.01, 0.2)),     # LOG Width of sigmoid transition usually ~0.043
         ("M0_sn",       (-20, -19)),    # SN absolute magnitude, MLE: ~-19.3
-        ("M0_agn", (-26, -20)),         # M0_agn = M0_sn + delta_M0, MLE: ~-5.179
+        ("M0_agn", (-26, -14)),         # M0_agn
         ("log_sigma_hat_sq_break", (-1.4, -0.5)), # AGN broken power law break point
         ("eta_A1_agn",  (0, 6)),          # AGN broken power law slope 1
         ("eta_A2_agn",  (-2, 6)),          # AGN broken power law slope 2
