@@ -435,7 +435,7 @@ if __name__ == '__main__':
 
         x = logl5100 - 44.0
         f_host = 0.8052 - 1.5502 * x + 0.9121 * jnp.power(x, 2) - 0.1577 * jnp.power(x, 3)
-        f_host = jnp.clip(f_host, 0.0, 1.0)
+        f_host = jnp.clip(f_host, 0.0, None)
         f_host = jnp.where(logl5100 < 45.053, f_host, 0.0)
     else:
         batch_size = len(batch_data)
