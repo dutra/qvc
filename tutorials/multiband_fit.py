@@ -101,8 +101,8 @@ def numpyro_joint_model(models, means, batch_data, latent=False, bwb=False, f_ho
         for k, (loc, scale) in {
             "eta_A1": (0.0, 1.0),
             "eta_A2": (0.0, 1.0),
-            "eta_tau1": (0.0, 1.0),
-            "eta_tau2": (0.0, 1.0),
+            "eta_tau1": (0.0, 0.2),
+            "eta_tau2": (0.0, 0.2),
         }.items()
     }
 
