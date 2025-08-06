@@ -338,7 +338,7 @@ def bands_bluer_than_lyman_alpha(z):
     bluer_bands = []
     for band, props in bands.items():
         rest_lambda_eff = props['lambda_eff'] / (1 + z)
-        if rest_lambda_eff < lyman_alpha:
+        if rest_lambda_eff + 1000 < lyman_alpha:
             bluer_bands.append(band)
 
     return bluer_bands
