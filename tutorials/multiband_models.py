@@ -334,24 +334,25 @@ class MyMultiVarModel(MultiVarModel):
         return log_prob
 
     def sample(self, params: dict[str, JAXArray], i) -> None:
-        """A convience function for intergrating with numpyro for MCMC sampling.
+            """A convience function for integrating with numpyro for MCMC sampling.
 
-        Args:
-            params (dict[str, JAXArray]): Model parameters.
-        """
-        gp, inds = self._build_gp(params)
-        log_prob = gp.log_probability(y=self.y[inds])
+            Args:
+                params (dict[str, JAXArray]): Model parameters.
+            """
 
-        f = numpyro.sample(f"gp_{i}", gp.numpyro_dist())
+            X, inds = self.my_lag_transform(self.X, self.has_lag, params)
+            gp, inds = self._build_gp(params)
 
-        # Compute s_b = bwb_A * log(lambda_b / 2500 Å)
-        s_b = params["bwb_A"] * jnp.log(self.lam_rf / 2500.0)
-        s_per_obs = s_b[self.X[1]]
+            f = numpyro.sample(f"gp_{i}", gp.numpyro_dist())
 
-        # Model mean with BWB nonlinear effect
-        mean = f + s_per_obs * f**2
+            # Compute s_b = bwb_A * log(lambda_b / 2500 Å)
+            s_b = params["bwb_A"] * jnp.log(self.lam_rf / 2500.0)
+            s_per_obs = s_b[X[1][inds]]
 
-        numpyro.sample(f"obs_{i}", dist.Normal(mean[inds], self.yerr[inds]), obs=self.y[inds])
+            # Model mean with BWB nonlinear effect
+            mean = f + 0. * f
+
+            numpyro.sample(f"obs_{i}", dist.Normal(mean), obs=self.y[inds])
 
     @eqx.filter_jit
     def pred(
