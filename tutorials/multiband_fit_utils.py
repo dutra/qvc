@@ -520,11 +520,41 @@ def save_quasar_list_hdf5(quasars, file_path, ignored_keys=None, size_threshold=
     logging.info("All quasars saved successfully.")
 
 
+# def log_broken_pl(lam, lam_s, d1, d2, ds=4.0):
+#     x = lam / lam_s
+#     log_f = -jnp.log10(
+#         jnp.power(x, -d1) * jnp.power(1.0 + jnp.power(x, ds), -(d2 - d1) / ds)
+#     )
+#     return log_f
+
+# def log_broken_pl(lam, lam_s, d1, d2, ds=4.0):
+#     """
+#     Smooth broken power-law in log10-space, normalized to 0 at lam_s.
+
+#     log10(f(lam)) = d1 * log10(x) 
+#                   + (d2-d1)/ds * log10(1 + x^ds)
+#                   - (d2-d1)/ds * log10(2)
+#     """
+#     x = lam / lam_s
+#     delta = d2 - d1
+#     log_f = d1 * jnp.log10(x) + (delta / ds) * jnp.log10(1.0 + jnp.power(x, ds))
+#     log_f -= (delta / ds) * jnp.log10(2.0)  # normalize to 0 at lam_s
+#     return log_f
+
 def log_broken_pl(lam, lam_s, d1, d2, ds=4.0):
+    """
+    Log10 of a smooth broken power-law, normalized to 0 at lam_s.
+    Fully log-domain for stability and NumPyro compatibility.
+    """
     x = lam / lam_s
-    log_f = -jnp.log10(
-        jnp.power(x, -d1) * jnp.power(1.0 + jnp.power(x, ds), -(d2 - d1) / ds)
-    )
+    delta = d2 - d1
+
+    # log10(1 + x^ds) safely using log1p and ln->log10 conversion
+    log10_1px = jnp.log1p(x**ds) / jnp.log(10.0)
+    
+    log_f = -d1 * jnp.log10(x) - (delta / ds) * log10_1px
+    log_f += (delta / ds) * jnp.log10(2.0)  # normalize to 0 at lam_s
+    
     return log_f
 
 def process_samples(flat_samples, data, percentiles=[16, 50, 84]):
@@ -577,10 +607,25 @@ def process_samples(flat_samples, data, percentiles=[16, 50, 84]):
         result[f"log_sigma_band_{band}"] = median
         result[f"log_sigma_band_{band}_err"] = err
 
-    # Other special params
+
+
+
+    # Other special params    
+    # log_sigma_hat0_diluted
+    host_frac = flat_samples["f_host"] * (lambda_ref / 5100.0) ** flat_samples["alpha_host"]
+    dilution_factor = 1.0 / (1.0 + host_frac)
+    log_dilution = jnp.log(dilution_factor)
+    samples_log_sigma_hat0_diluted = (flat_samples["log_sigma_hat0"] + log_dilution) / np.log(10)
+    result['log_sigma_hat0_diluted'], result['log_sigma_hat0_diluted_err'] = sym_percentile(samples_log_sigma_hat0_diluted)
+
     # log_sigma_hat_UV
     samples_log_sigma_hat_UV = flat_samples["log_sigma_hat0"] / np.log(10) + log_broken_pl(lambda_ref, lam_s, eta_A1, eta_A2, eta_break)
     result['log_sigma_hat_UV'], result['log_sigma_hat_UV_err'] = sym_percentile(samples_log_sigma_hat_UV)
+
+    # log_sigma_hat_UV_diluted
+    samples_log_sigma_hat_UV_diluted = (flat_samples["log_sigma_hat0"] + log_dilution) / np.log(10) + log_broken_pl(lambda_ref, lam_s, eta_A1, eta_A2, eta_break)
+    result['log_sigma_hat_diluted_UV'], result['log_sigma_hat_UV_diluted_err'] = sym_percentile(samples_log_sigma_hat_UV_diluted)
+
     # log_tau_UV_RF
     samples_log_tau_UV_RF = flat_samples["log_tau_drw0"] / np.log(10) - np.log10(1 + data['z']) + log_broken_pl(lambda_ref, lam_s, eta_tau1, eta_tau2, eta_break)
     result['log_tau_UV_RF'], result['log_tau_UV_RF_err'] = sym_percentile(samples_log_tau_UV_RF)
@@ -615,13 +660,6 @@ def compute_psd_from_samples(samples, clean_bands, num_points=1000, time_range=(
     eta_tau1 = np.median(samples["eta_tau1"])
     eta_tau2 = np.median(samples["eta_tau2"])
 
-    # Helper: broken power law scaling
-    def log_broken_pl(lam, lam_s, d1, d2, ds):
-        x = lam / lam_s
-        log_f = -np.log10(
-            np.power(x, -d1) * np.power(1.0 + np.power(x, ds), -(d2 - d1) / ds)
-        )
-        return log_f
 
     # Frequency grid (cycles/day)
     min_time, max_time = time_range

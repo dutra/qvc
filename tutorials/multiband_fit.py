@@ -101,8 +101,8 @@ def numpyro_joint_model(models, means, batch_data, latent=False, bwb=False, f_ho
         for k, (loc, scale) in {
             "eta_A1": (0.0, 1.0),
             "eta_A2": (0.0, 1.0),
-            "eta_tau1": (0.0, 0.2),
-            "eta_tau2": (0.0, 0.2),
+            "eta_tau1": (0.0, 1.0),
+            "eta_tau2": (0.0, 1.0),
         }.items()
     }
 
@@ -121,7 +121,7 @@ def numpyro_joint_model(models, means, batch_data, latent=False, bwb=False, f_ho
         log_tau_drw0 = numpyro.sample("log_tau_drw0", dist.Normal(log_tau_drw0_mean, 1.0))
         log_sigma0 = numpyro.sample("log_sigma0", dist.Normal(log_sigma0_mean, 1.0))
         log_sigma_hat0 = numpyro.deterministic("log_sigma_hat0", log_sigma0 - 0.5 * log_tau_drw0)
-        alpha_host = numpyro.sample("alpha_host", dist.Normal(1.0, 0.5))
+        alpha_host = numpyro.sample("alpha_host", dist.Normal(1.0, 0.1))
         
         
         #f_host = numpyro.sample("f_host", dist.Uniform(0.0, 1.0))
