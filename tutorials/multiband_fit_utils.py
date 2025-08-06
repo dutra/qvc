@@ -315,7 +315,7 @@ def bands_redder_than(z, threshold=4000):
 
     return redder_bands
 
-def bands_bluer_than_lyman_alpha(z):
+def bands_bluer_than_lyman_alpha(z, buffer=1000):
     """
     Returns a list of bands with rest-frame effective wavelength < Lyman-alpha (1216 Å).
 
@@ -338,7 +338,7 @@ def bands_bluer_than_lyman_alpha(z):
     bluer_bands = []
     for band, props in bands.items():
         rest_lambda_eff = props['lambda_eff'] / (1 + z)
-        if rest_lambda_eff + 1000 < lyman_alpha:
+        if rest_lambda_eff + buffer < lyman_alpha:
             bluer_bands.append(band)
 
     return bluer_bands
