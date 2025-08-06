@@ -184,69 +184,67 @@ def numpyro_joint_model(models, means, batch_data, latent=False, bwb=False, f_ho
 def make_lc(Model, data, filter_red_bands=False):
     times = data['times']
     mags = data['mags']
-    data['mags_means'] = np.array([np.nanmean(mags[band]) for band in mags.keys()])
-    for band in mags.keys():
-       mags[band] = mags[band] - np.nanmean(mags[band])  # Center the magnitudes
     magerrs = data['magerrs']
-    
+
     blue_bands = bands_bluer_than_lyman_alpha(data['z'])
 
     if filter_red_bands:
         red_bands = bands_redder_than(data['z'], threshold=4000)
         clean_bands = list(set(bands) - set(blue_bands) - set(red_bands))
-        logging.info(f"Filtering out red bands (wavelength > 4000 Angstroms) {red_bands} for quasar {data['object_id']} at z={data['z']}")
+        logging.info(
+            f"Filtering out red bands (wavelength > 4000 Å) {red_bands} "
+            f"for quasar {data['object_id']} at z={data['z']}"
+        )
     else:
-        logging.info(f"Excluding only blue bands {blue_bands} for quasar {data['object_id']} at z={data['z']}")
+        logging.info(
+            f"Excluding only blue bands {blue_bands} "
+            f"for quasar {data['object_id']} at z={data['z']}"
+        )
         clean_bands = list(set(bands) - set(blue_bands))
 
-    # Reorder clean_bands to match the desired order
-    clean_bands = list(sorted(clean_bands, key=lambda band: ['u', 'g', 'r', 'i', 'z', 'y'].index(band)))
-    #clean_bands = bands
-    logging.info(f"Clean bands for quasar {data['object_id']} at z={data['z']}: {clean_bands}")
+    # Sort clean_bands in desired photometric order
+    clean_bands = list(sorted(clean_bands, key=lambda b: ['u', 'g', 'r', 'i', 'z', 'y'].index(b)))
     data['clean_bands'] = clean_bands
-    #print(f"Bands: {bands}, Clean Bands: {clean_bands}")
+
     if len(clean_bands) == 0:
         print(f"No clean bands for quasar {data['object_id']}, skipping.", flush=True)
         return None
-    # Combine
-    #print(times.keys())
+
+    # Combine data across bands
     all_times = np.concatenate([times[b] for b in clean_bands])
-    all_mags = np.concatenate([mags[b] for b in clean_bands]) 
+    all_mags = np.concatenate([mags[b] for b in clean_bands])
     all_magerrs = np.concatenate([magerrs[b] for b in clean_bands])
     band_idx = np.concatenate([np.full(len(times[b]), i) for i, b in enumerate(clean_bands)])
 
-    if len(all_times) == 0 or len(all_mags) == 0 or len(all_magerrs) == 0:
-        print(f"No magnitudes or errors for quasar {data['object_id']}, skipping.", flush=True)
-        return None
-    # Check for NaNs
-    if np.all(~np.isfinite(all_times)) or np.all(~np.isfinite(all_mags)) or np.all(~np.isfinite(all_magerrs)):
-        print(f"NaN values ({len(~np.isfinite(all_mags))}/{len(all_mags)}) found in data for quasar {data['object_id']}, skipping.", flush=True)
+    if len(all_times) == 0:
+        print(f"No magnitudes for quasar {data['object_id']}, skipping.", flush=True)
         return None
 
-    # Sort in time
+    # Sort by time
     sort_idx = np.argsort(all_times)
-    all_times = all_times[sort_idx]
-    all_mags = all_mags[sort_idx]
-    all_magerrs = all_magerrs[sort_idx]
-    band_idx = band_idx[sort_idx]
+    all_times, all_mags, all_magerrs, band_idx = (
+        all_times[sort_idx],
+        all_mags[sort_idx],
+        all_magerrs[sort_idx],
+        band_idx[sort_idx]
+    )
 
-    # Mask NaNs
-    mask = np.isfinite(all_mags)
-    all_times = all_times[mask]
-    all_mags = all_mags[mask]
-    all_magerrs = all_magerrs[mask]
-    band_idx = band_idx[mask]
+    # Remove NaNs
+    mask = np.isfinite(all_mags) & np.isfinite(all_magerrs) & np.isfinite(all_times)
+    all_times, all_mags, all_magerrs, band_idx = (
+        all_times[mask],
+        all_mags[mask],
+        all_magerrs[mask],
+        band_idx[mask]
+    )
 
-    # Define X, y, yerr, t
-    # X = (all_times, band_idx)
-    X = (jnp.array(all_times)-jnp.min(all_times), jnp.array(band_idx))
-    y = np.array(all_mags)
-    yerr = np.array(all_magerrs)
-    t = np.array(all_times)
+    if len(all_times) == 0:
+        print(f"No finite magnitudes for quasar {data['object_id']}, skipping.", flush=True)
+        return None
 
-    # Reject outliers in moving window per band
+    # --- Outlier rejection ---
     window_size = 6
-    mask_outlier = np.ones(len(y), dtype=bool)
+    mask_outlier = np.ones(len(all_times), dtype=bool)
 
     from numpy.lib.stride_tricks import sliding_window_view
     from scipy.stats import median_abs_deviation
@@ -254,30 +252,50 @@ def make_lc(Model, data, filter_red_bands=False):
     for band in np.unique(band_idx):
         band_mask = band_idx == band
         idx_band = np.where(band_mask)[0]
-        band_y = y[band_mask]
+        band_y = all_mags[band_mask]
 
-        # Generate sliding windows: shape (N - 2*window, 2*window + 1)
         if len(band_y) < 2 * window_size + 1:
-            continue  # Skip small bands
+            continue
 
         windows = sliding_window_view(band_y, 2 * window_size + 1)
         centers = band_y[window_size:-window_size]
         medians = np.nanmean(windows, axis=1)
         mads = median_abs_deviation(windows, axis=1)
 
-        # Compute boolean mask for which center points are outliers
         is_outlier = np.abs(centers - medians) > 2.5 * mads
-
-        # Translate back to original indices
         mask_outlier[idx_band[window_size:-window_size][is_outlier]] = False
 
-    # Apply final mask
-    X = (jnp.array(all_times[mask_outlier]) - jnp.min(all_times[mask_outlier]), jnp.array(band_idx[mask_outlier]))
-    y = jnp.array(y[mask_outlier])
-    yerr = jnp.array(yerr[mask_outlier])
-    t = jnp.array(t[mask_outlier])
+    # Apply outlier mask
+    all_times = all_times[mask_outlier]
+    all_mags = all_mags[mask_outlier]
+    all_magerrs = all_magerrs[mask_outlier]
+    band_idx = band_idx[mask_outlier]
 
-    batch_dict = {'X': X, 'y': y, 'yerr': yerr, 'clean_bands': clean_bands, 'z': data['z'], 'band_idx': band_idx[mask_outlier]}
+    # --- Center magnitudes per band AFTER outlier rejection ---
+    data['mags_means'] = np.array([
+        np.nanmean(all_mags[band_idx == i]) for i in range(len(clean_bands))
+    ])
+    for i in range(len(clean_bands)):
+        band_mask = band_idx == i
+        all_mags[band_mask] -= np.nanmean(all_mags[band_mask])
+
+    # Define arrays for model
+    X = (
+        jnp.array(all_times) - jnp.min(all_times),
+        jnp.array(band_idx)
+    )
+    y = jnp.array(all_mags)
+    yerr = jnp.array(all_magerrs)
+    t = jnp.array(all_times)
+
+    batch_dict = {
+        'X': X,
+        'y': y,
+        'yerr': yerr,
+        'clean_bands': clean_bands,
+        'z': data['z'],
+        'band_idx': band_idx
+    }
     return batch_dict
 
                     
