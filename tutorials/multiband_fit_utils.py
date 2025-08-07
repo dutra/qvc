@@ -424,7 +424,7 @@ def save_all_samples_to_hdf5(samples):
     Args:
         samples (dict): Dictionary containing MCMC samples.
     """
-    output_dir=f"samples/{prefix}_{suffix}"
+    output_dir=f"samples/{prefix}/"
     os.makedirs(output_dir, exist_ok=True)
     file_path = os.path.join(output_dir, f"{prefix}_{suffix}_all.h5")
 
@@ -444,7 +444,7 @@ def save_obj_samples_to_hdf5(samples, object_id):
         object_id (str): The object ID for which the samples belong.
         output_dir (str): Directory where the HDF5 files will be saved.
     """
-    output_dir=f"samples/{prefix}_{suffix}"
+    output_dir=f"samples/{prefix}/{suffix}"
     os.makedirs(output_dir, exist_ok=True)
     file_path = os.path.join(output_dir, f"{object_id}.h5")
 
@@ -615,7 +615,7 @@ def process_samples(flat_samples, data, percentiles=[16, 50, 84]):
     host_frac = flat_samples["f_host"] * (lambda_ref / 5100.0) ** flat_samples["alpha_host"]
     dilution_factor = 1.0 / (1.0 + host_frac)
     log_dilution = jnp.log(dilution_factor)
-    samples_log_sigma_hat0_diluted = (flat_samples["log_sigma_hat0"] + log_dilution) / np.log(10)
+    samples_log_sigma_hat0_diluted = (flat_samples["log_sigma_hat0"] - log_dilution) / np.log(10)
     result['log_sigma_hat0_diluted'], result['log_sigma_hat0_diluted_err'] = sym_percentile(samples_log_sigma_hat0_diluted)
 
     # log_sigma_hat_UV
@@ -623,8 +623,8 @@ def process_samples(flat_samples, data, percentiles=[16, 50, 84]):
     result['log_sigma_hat_UV'], result['log_sigma_hat_UV_err'] = sym_percentile(samples_log_sigma_hat_UV)
 
     # log_sigma_hat_UV_diluted
-    samples_log_sigma_hat_UV_diluted = (flat_samples["log_sigma_hat0"] + log_dilution) / np.log(10) + log_broken_pl(lambda_ref, lam_s, eta_A1, eta_A2, eta_break)
-    result['log_sigma_hat_diluted_UV'], result['log_sigma_hat_UV_diluted_err'] = sym_percentile(samples_log_sigma_hat_UV_diluted)
+    samples_log_sigma_hat_diluted_UV = (flat_samples["log_sigma_hat0"] - log_dilution) / np.log(10) + log_broken_pl(lambda_ref, lam_s, eta_A1, eta_A2, eta_break)
+    result['log_sigma_hat_diluted_UV'], result['log_sigma_hat_diluted_UV_err'] = sym_percentile(samples_log_sigma_hat_diluted_UV)
 
     # log_tau_UV_RF
     samples_log_tau_UV_RF = flat_samples["log_tau_drw0"] / np.log(10) - np.log10(1 + data['z']) + log_broken_pl(lambda_ref, lam_s, eta_tau1, eta_tau2, eta_break)
