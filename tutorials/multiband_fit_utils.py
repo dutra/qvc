@@ -418,6 +418,31 @@ def bands_with_any_contamination_annotated(z):
 
     return results['combined']
 
+def load_all_samples_from_hdf5(file_path):
+    """
+    Load all samples from an HDF5 file.
+    
+    Args:
+        prefix (str): Prefix used for the samples directory and filename.
+        suffix (str): Suffix used in the filename.
+    
+    Returns:
+        dict: Dictionary containing all loaded samples.
+    """
+
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(f"HDF5 file not found: {file_path}")
+
+    logging.info(f"Loading all samples from {file_path}")
+
+    samples = {}
+    with h5py.File(file_path, "r") as hdf:
+        for key in hdf.keys():
+            samples[key] = np.array(hdf[key])
+
+    logging.info(f"Loaded {len(samples)} datasets from {file_path}")
+    return samples
+
 def save_all_samples_to_hdf5(samples):
     """
     Save all samples to an HDF5 file
