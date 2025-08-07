@@ -273,9 +273,13 @@ def make_lc(Model, data, filter_red_bands=False):
     band_idx = band_idx[mask_outlier]
 
     # --- Center magnitudes per band AFTER outlier rejection ---
-    data['mags_means'] = np.array([
+    mags_means = np.array([
         np.nanmean(all_mags[band_idx == i]) for i in range(len(clean_bands))
     ])
+    mags_stds = np.array([
+        np.nanstd(all_mags[band_idx == i]) for i in range(len(clean_bands))
+    ])
+    
     for i in range(len(clean_bands)):
         band_mask = band_idx == i
         all_mags[band_mask] -= np.nanmean(all_mags[band_mask])
@@ -295,7 +299,9 @@ def make_lc(Model, data, filter_red_bands=False):
         'yerr': yerr,
         'clean_bands': clean_bands,
         'z': data['z'],
-        'band_idx': band_idx
+        'band_idx': band_idx,
+        'mags_means': mags_means,
+        'mags_stds': mags_stds
     }
     return batch_dict
 
@@ -409,6 +415,8 @@ if __name__ == '__main__':
             'bestP': bestP,
             # add any other fields needed by your model
             'LOGLBOL': obj['LOGLBOL'],
+            'mags_means': obj['mags_means'],
+            'mags_stds': obj['mags_stds']
         })
     num_params = sum(p.size for p in batch_data[0]['bestP'].values())
     num_objects = len(batch_data)
