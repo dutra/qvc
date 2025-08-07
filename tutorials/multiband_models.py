@@ -241,7 +241,7 @@ class MyMultiVarModel(MultiVarModel):
         # inds gives the sorted indices for the new_t
         X, inds = self.my_lag_transform(self.X, self.has_lag, params)
 
-        params_mean = params
+        params_mean = dict(params)
         params_mean['t_center'] = jnp.mean(X[0])
         params_mean['t_std'] = jnp.std(X[0])
 
@@ -298,8 +298,8 @@ class MyMultiVarModel(MultiVarModel):
         eta_tau2 = params["eta_tau2"]
         lam_s = 2500
         eta_break = 1.0
-        params["log_tau_band_RF"] = params["log_tau_drw0"] - jnp.log(1 + self.z) + jnp.log(10) * log_broken_pl(self.lam_rf, lam_s, eta_tau1, eta_tau2, eta_break)
-        return params["log_tau_band_RF"]
+        log_tau_band_RF = params["log_tau_drw0"] - jnp.log(1 + self.z) + jnp.log(10) * log_broken_pl(self.lam_rf, lam_s, eta_tau1, eta_tau2, eta_break)
+        return log_tau_band_RF
 
     def my_amp_transform(self, params: dict[str, JAXArray]) -> JAXArray:
         eta_A1 = params["eta_A1"]
@@ -314,9 +314,9 @@ class MyMultiVarModel(MultiVarModel):
         log_dilution = jnp.log(dilution_factor)
 
         # Power-law scaling across rest-frame wavelength
-        params["log_sigma_hat_band"] = params["log_sigma_hat0"] + log_dilution + jnp.log(10) * log_broken_pl(self.lam_rf, lam_s, eta_A1, eta_A2, eta_break)
+        log_sigma_hat_band = params["log_sigma_hat0"] + log_dilution + jnp.log(10) * log_broken_pl(self.lam_rf, lam_s, eta_A1, eta_A2, eta_break)
 
-        return params["log_sigma_hat_band"]
+        return log_sigma_hat_band
     
     @eqx.filter_jit
     def log_prob(self, params: dict[str, JAXArray]) -> JAXArray:
