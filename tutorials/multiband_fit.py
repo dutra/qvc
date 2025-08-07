@@ -124,7 +124,6 @@ def numpyro_joint_model(models, means, batch_data, latent=False, bwb=False, f_ho
         log_sigma_hat0 = numpyro.deterministic("log_sigma_hat0", log_sigma0 - 0.5 * log_tau_drw0)
         alpha_host = numpyro.sample("alpha_host", dist.Normal(1.0, 0.1))
         
-        
         #f_host = numpyro.sample("f_host", dist.Uniform(0.0, 1.0))
         f_host = numpyro.deterministic("f_host", f_host)
 
@@ -132,8 +131,10 @@ def numpyro_joint_model(models, means, batch_data, latent=False, bwb=False, f_ho
         #lag0 = numpyro.sample("lag0", dist.TruncatedNormal(2.0, 10.0, low=0))
         lag0 = numpyro.sample("lag0", dist.TruncatedNormal(10.0, 5.0, low=0))
         lag_beta = numpyro.sample("lag_beta", dist.TruncatedNormal(4/3, 0.2, low=0))
-        if bwb:
-            bwb_A = numpyro.sample("bwb_A", dist.TruncatedNormal(0.0, 2.0, low=0))
+        bwb_A = numpyro.sample("bwb_A", dist.TruncatedNormal(0.0, 2.0, low=0))
+        if bwb is False:
+            bwb_A = numpyro.deterministic("bwb_A", jnp.zeros(batch_size))
+
 
     with numpyro.plate("objects", batch_size, dim=-2):
         with numpyro.plate("band", nBands, dim=-1):
@@ -158,22 +159,17 @@ def numpyro_joint_model(models, means, batch_data, latent=False, bwb=False, f_ho
             "log_jitter": log_jitter[i],
             "lag0": lag0[i],
             "lag_beta": lag_beta[i],
+            "bwb_A": bwb_A[i],
             **powerlaw_samples,
         }
         if latent:
             params["log_lag_blr"] = log_lag_blr[i]
-        if bwb:
-            params["bwb_A"] = bwb_A[i]
 
         m = models[i]
-        # Test BWB
-        if bwb:
-            m.sample(params, i)
-        else:
-            log_prob = m.log_prob(params)
-            #jax.debug.print("log_prob: {lp} {i}", lp=log_prob, i=i)
-            log_prob = jnp.where(jnp.isfinite(log_prob), log_prob, -1e20)
-            numpyro.factor(f"loglike_{i}", log_prob)
+        log_prob = m.log_prob(params)
+        #jax.debug.print("log_prob: {lp} {i}", lp=log_prob, i=i)
+        log_prob = jnp.where(jnp.isfinite(log_prob), log_prob, -1e20)
+        numpyro.factor(f"loglike_{i}", log_prob)
 
     if len(batch_data) == 1:
         run_batch(batch_data[0], 0)

@@ -290,6 +290,22 @@ class MyMultiVarModel(MultiVarModel):
         inds = jnp.argsort(new_t)
         return (new_t, band), inds
 
+    def my_bwb_transform(
+        self, X: JAXArray, y: JAXArray, params: dict[str, JAXArray]
+    ) -> JAXArray:
+        # Compute BWB slope for each band
+        s_b = params["bwb_A"] * jnp.log(self.lam_rf / 2500.0)
+
+        # Apply band-wise correction
+        correction = s_b[X[1]] * y
+        return y - correction
+
+    def inverse_bwb_transform(
+        self, X: JAXArray, y_transformed: JAXArray, params: dict[str, JAXArray]
+    ) -> JAXArray:
+        s_b = params["bwb_A"] * jnp.log(self.lam_rf / 2500.0)
+        return y_transformed / (1.0 - s_b[X[1]])
+
     def my_amp_transform_blr(self, params: dict[str, JAXArray]) -> JAXArray:
         return params["log_sigma_hat0"] + jnp.atleast_1d(params["log_amp_delta_blr"])
     
@@ -328,31 +344,12 @@ class MyMultiVarModel(MultiVarModel):
         Returns:
             JAXArray: Log probability of the input parameters.
         """
+        y_new = self.my_bwb_transform(self.X, self.y, params)
+
         gp, inds = self._build_gp(params)
-        log_prob = gp.log_probability(y=self.y[inds])
+        log_prob = gp.log_probability(y=y_new[inds])
         #jax.debug.print("Log probability: {log_prob}", log_prob=log_prob)
         return log_prob
-
-    def sample(self, params: dict[str, JAXArray], i) -> None:
-            """A convience function for integrating with numpyro for MCMC sampling.
-
-            Args:
-                params (dict[str, JAXArray]): Model parameters.
-            """
-
-            X, inds = self.my_lag_transform(self.X, self.has_lag, params)
-            gp, inds = self._build_gp(params)
-
-            f = numpyro.sample(f"gp_{i}", gp.numpyro_dist())
-
-            # Compute s_b = bwb_A * log(lambda_b / 2500 Å)
-            s_b = params["bwb_A"] * jnp.log(self.lam_rf / 2500.0)
-            s_per_obs = s_b[X[1][inds]]
-
-            # Model mean with BWB nonlinear effect
-            mean = f + 0. * f
-
-            numpyro.sample(f"obs_{i}", dist.Normal(mean), obs=self.y[inds])
 
     @eqx.filter_jit
     def pred(
@@ -375,7 +372,13 @@ class MyMultiVarModel(MultiVarModel):
         # build gp, cond
         gp, inds = self._build_gp(params)
         _, cond = gp.condition(self.y[inds], new_X)
-        return cond.loc, jnp.sqrt(cond.variance)
+
+        mean = cond.loc
+        std = jnp.sqrt(cond.variance)
+
+        mean = self.inverse_bwb_transform(new_X, mean, params)
+
+        return mean, std
 
 
 class MyMultiVarModelLatent(MyMultiVarModel):
