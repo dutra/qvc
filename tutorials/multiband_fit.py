@@ -31,7 +31,7 @@ from multiband_models import *
 
 # define params
 zero_mean = False
-has_jitter = False
+has_jitter = True
 has_lag = True
 
 def mle(Model, nBand, X, y, yerr, clean_bands, z, latent=False, fixed=True):
@@ -57,6 +57,7 @@ def mle(Model, nBand, X, y, yerr, clean_bands, z, latent=False, fixed=True):
             "eta_A2": 0.0,
             "eta_tau1": 0.0,
             "eta_tau2": 0.0,
+            "log_jitter": jnp.full(nBand, 1e-6)
         }
     )
     if latent:
@@ -66,7 +67,7 @@ def mle(Model, nBand, X, y, yerr, clean_bands, z, latent=False, fixed=True):
         m = Model(
                 X, y, yerr, kernels.quasisep.Exp(jnp.array([1.0, 1.0])),
                 zero_mean=zero_mean,
-                has_jitter=False,
+                has_jitter=has_jitter,
                 has_lag=has_lag,
                 clean_bands=clean_bands,
                 z=z
@@ -141,7 +142,7 @@ def numpyro_joint_model(models, means, batch_data, latent=False, bwb=False, f_ho
             log_amp_delta_blr = numpyro.sample("log_amp_delta_blr", dist.Normal(log_amp_delta_blr_mean, 2.0))
             if latent:
                 log_lag_blr = numpyro.sample("log_lag_blr", dist.Normal(log_lag_blr_mean, 4.0))
-            #log_jitter = numpyro.sample("log_jitter", dist.Normal(log_jitter_mean + 1e-6, 1.0))
+            log_jitter = numpyro.sample("log_jitter", dist.Normal(log_jitter_mean + 1e-6, 1.0))
 
     def run_batch(data, i):
         # Collect params for object i
@@ -154,7 +155,7 @@ def numpyro_joint_model(models, means, batch_data, latent=False, bwb=False, f_ho
             "poly1": poly1[i],
             "mean": mean[i],
             "log_amp_delta_blr": log_amp_delta_blr[i],
-            #"log_jitter": log_jitter[i],
+            "log_jitter": log_jitter[i],
             "lag0": lag0[i],
             "lag_beta": lag_beta[i],
             **powerlaw_samples,
@@ -391,7 +392,7 @@ if __name__ == '__main__':
         m = Model(
             obj['X'], obj['y'], obj['yerr'], 
             kernels.quasisep.Exp(jnp.array([1, 1])),
-            zero_mean=zero_mean, has_jitter=False, has_lag=has_lag,
+            zero_mean=zero_mean, has_jitter=has_jitter, has_lag=has_lag,
             clean_bands=obj['clean_bands'], z=obj['z']
         )
         #save_combined_plot(bestP, m, obj['X'], obj['y'], obj['yerr'], obj['band_idx'], obj, fit_bestP=True)
@@ -444,7 +445,7 @@ if __name__ == '__main__':
     lag_beta_mean = jnp.stack([jnp.array(obj['bestP']['lag_beta']) for obj in batch_data])                    # (B, 5)
     if args.latent:
         log_lag_blr_mean = jnp.stack([jnp.array(obj['bestP']['log_lag_blr']) for obj in batch_data])
-    #log_jitter_mean = jnp.stack([jnp.array(obj['bestP']['log_jitter']) + jnp.mean(obj['yerr']) for obj in batch_data]) # (B, 5)
+    log_jitter_mean = jnp.stack([jnp.array(obj['bestP']['log_jitter']) + jnp.mean(obj['yerr']) for obj in batch_data]) # (B, 5)
         
     if args.f_host_shen11:
         # Host flux empirical relation
@@ -467,7 +468,7 @@ if __name__ == '__main__':
         "lag0_mean": lag0_mean,
         "lag_beta_mean": lag_beta_mean,
         "log_lag_blr_mean": log_lag_blr_mean if args.latent else None,
-        #"log_jitter_mean": log_jitter_mean,
+        "log_jitter_mean": log_jitter_mean,
         "f_host": f_host
     }
 
