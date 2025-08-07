@@ -376,7 +376,7 @@ class MyMultiVarModel(MultiVarModel):
         mean = cond.loc
         std = jnp.sqrt(cond.variance)
 
-        scaling = self.inverse_bwb_transform((new_X[0][inds], new_X[1][inds]), mean, params)
+        scaling = self.inverse_bwb_transform(new_X, params)
 
         return mean*scaling, std*scaling
 
