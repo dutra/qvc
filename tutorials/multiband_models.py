@@ -301,10 +301,10 @@ class MyMultiVarModel(MultiVarModel):
         return y - correction
 
     def inverse_bwb_transform(
-        self, X: JAXArray, y_transformed: JAXArray, params: dict[str, JAXArray]
+        self, X: JAXArray, params: dict[str, JAXArray]
     ) -> JAXArray:
         s_b = params["bwb_A"] * jnp.log(self.lam_rf / 2500.0)
-        return y_transformed / (1.0 - s_b[X[1]])
+        return 1.0 / (1.0 - s_b[X[1]])
 
     def my_amp_transform_blr(self, params: dict[str, JAXArray]) -> JAXArray:
         return params["log_sigma_hat0"] + jnp.atleast_1d(params["log_amp_delta_blr"])
@@ -376,9 +376,9 @@ class MyMultiVarModel(MultiVarModel):
         mean = cond.loc
         std = jnp.sqrt(cond.variance)
 
-        mean = self.inverse_bwb_transform(new_X, mean, params)
+        scaling = self.inverse_bwb_transform((new_X[0][inds], new_X[1][inds]), mean, params)
 
-        return mean, std
+        return mean*scaling, std*scaling
 
 
 class MyMultiVarModelLatent(MyMultiVarModel):
