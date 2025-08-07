@@ -89,7 +89,7 @@ def plot_posterior(samples_flat, data, bins=20):
                         quantiles=[0.16, 0.5, 0.84], bins=bins)
 
     # Save plot
-    output_dir = f"posterior_plots/{prefix}_{suffix}"
+    output_dir = f"posterior_plots/{prefix}/{prefix}_{suffix}"
     os.makedirs(output_dir, exist_ok=True)
     save_path = os.path.join(output_dir, f"{z:.1f}_{object_id}_posterior.png")
     plt.savefig(save_path, dpi=100)
@@ -218,7 +218,7 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, data, fit_bestP=Fal
     plt.tight_layout()
 
     # Save the plot as a PNG file
-    output_dir = f"light_curves_fits/{prefix}_{suffix}"
+    output_dir = f"light_curves_fits/{prefix}/{prefix}_{suffix}"
     os.makedirs(output_dir, exist_ok=True)
     if fit_bestP:
         fpath = os.path.join(output_dir, f'{data["z"]:.1f}_{object_id}_combined_plot_MLE.png')
@@ -255,7 +255,7 @@ def plot_mcmc_traces(samples_dict, data):
     axes[-1].set_xlabel("Sample index")
     plt.tight_layout()
 
-    output_dir = f"mcmc_traces/{prefix}_{suffix}/"
+    output_dir = f"mcmc_traces/{prefix}/{prefix}_{suffix}/"
     os.makedirs(output_dir, exist_ok=True)
     save_path = os.path.join(output_dir, f"{data['z']:.1f}_{data['object_id']}_mcmc_traces.png")
     plt.savefig(save_path, dpi=100)
