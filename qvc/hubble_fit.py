@@ -1,7 +1,5 @@
 import numpy as np
 import pandas as pd
-import emcee
-from emcee.moves import DEMove, DESnookerMove
 import matplotlib.pyplot as plt
 from astropy.cosmology import FlatwCDM, Flatw0waCDM, FlatLambdaCDM, FlatwpwaCDM
 from scipy import stats
@@ -291,29 +289,6 @@ def run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model='Flatw0waCDM',
         display_results_summary(flat_samples, cosmo_model)
         plot_dynesty(results, cosmo_model)
 
-    elif fitting_method == 'emcee':
-        # --- emcee logic ---
-        print("Number of parameters:", ndim)
-        nwalkers = ndim * 2 * 10 #* 15
-        initial_pos = np.array([
-            np.random.uniform(low, high, nwalkers) for low, high in model_priors.values()
-        ]).T
-
-        num_cpus = multiprocessing.cpu_count()
-        with multiprocessing.Pool(processes=num_cpus) as pool:
-            sampler = emcee.EnsembleSampler(nwalkers, ndim, log_likelihood,
-                                            args=(cosmo_model,
-                                                    df_agn_filtered, df_pantheon_filtered,
-                                                    completeness_params,
-                                                    only_sna, use_full_cov),
-                                            moves=[(DEMove(), 0.8), (DESnookerMove(), 0.2)],
-                                            pool=pool)
-            state = sampler.run_mcmc(initial_pos, num_warmup, progress=True)
-            sampler.reset()
-            sampler.run_mcmc(state, num_samples, progress=True)
-
-        samples = sampler.get_chain(flat=True)
-
         # Check convergence using autocorrelation time
         try:
             tau = sampler.get_autocorr_time(quiet=True)
@@ -334,7 +309,7 @@ def run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model='Flatw0waCDM',
         median_samples = np.median(samples, axis=0)
         logZ = logZerr = None  # Not available from emcee
     else:
-        raise ValueError("fitting_method must be 'emcee', 'dynesty', or 'ultranest'")
+        raise ValueError("fitting_method must be 'dynesty', or 'ultranest'")
 
     params = dict(zip(model_labels, median_samples))
 

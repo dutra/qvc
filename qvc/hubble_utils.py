@@ -124,7 +124,7 @@ def log_nuLnu_to_m2500(log_nuLnu, z):
 def compute_apparent_mag_2500_colin(df):
     # Load Colin's SDSS QSO 2500A magnitudes and merge with df on SDSS_NAME
     #colin_df = pd.read_csv("data/sdss_qso_mag_2500_colin.csv")
-    colin_df = pd.read_csv("data/july19_goodsources_chisq5and10_mean1_N20w4000s500_merged_magscorrected_fittedm2500.csv")
+    colin_df = pd.read_csv("data/aug4_sample_chisqg10_ebv005sn3.csv")
     # Ensure SDSS_NAME is string for matching
     colin_df['object_id'] = colin_df['object_id'].astype(str)
     print("Length of colin_df:", len(colin_df))
@@ -530,7 +530,7 @@ def sigma_clip_in_bins(df, bin_width=0.1, sigma=2):
 
     return pd.concat(df_clean)
 
-def populate_chi_sq_from_csv(df, csv_path="data/jul14_chi_squared_ranking_all.csv"):
+def populate_chi_sq_from_csv(df, csv_path="data/aug4_sample_chisqg10_ebv005sn3.csv"):
     """
     Populate the 'chi_sq' field in df by matching 'object_id' with the CSV file.
 
@@ -582,7 +582,6 @@ def load_quasar_data(file_path, populate_sdss=False, apply_cut=True):
     
 
     df = compute_apparent_mag_2500(df, logL_col='LOGL2500', logL_err_col='LOGL2500_ERR')
-    #df = compute_apparent_mag_2500_colin(df)
 
     # Remove infinite values from numeric columns
     columns_with_nans = df.columns[df.isna().any()].tolist()
@@ -809,7 +808,7 @@ class Completeness2D:
 
 
 def get_completeness_function_2d(df_agn,
-                                 sim_file="sampled_apparent_magnitudes_redshift_vol.h5",
+                                 sim_file="data/sampled_apparent_magnitudes_redshift_vol.h5",
                                  n_mag_bins=20, n_z_bins=30,
                                  mag_min=15, mag_max=24,
                                  sigma_mag=1.0, sigma_z=0.7,
