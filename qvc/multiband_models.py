@@ -39,43 +39,19 @@ class MyMultibandContiBLR(tinygp.kernels.Kernel):
     def __init__(self, amplitudes, amplitudes_blr, lag_blr, taus, log_w, s_b) -> None:
         self.amplitudes = amplitudes
         self.amplitudes_blr = amplitudes_blr
-        self.lag_blr = jnp.zeros_like(lag_blr)
+        self.lag_blr = lag_blr
         self.tau_drw = taus
+        jax.debug.print("{ta}", ta=self.tau_drw)
         self.w = jnp.exp(log_w)
         self.s_b = s_b
 
     def coord_to_sortable(self, X) -> JAXArray:
         return X[0]
 
-    def k(self, tau, tau_drw) -> JAXArray:
-        tau = jnp.abs(tau)
+    def k(self, t1, t2, tau_drw) -> JAXArray:
+        tau = jnp.abs(t1 - t2)
         drw = jnp.exp(-tau / tau_drw)
         return drw
-
-    def ke(self, tau, tau_d) -> JAXArray:
-        delta_t = jnp.abs(tau)
-        width = self.w
-
-        t_L = delta_t - width
-        t_H = delta_t         # delay = 0, so t_H = delta_t - 0
-
-        A = 1.0 / width  # normalized top-hat amplitude
-        prefactor = A
-
-        def case1(t_L, t_H):
-            return jnp.exp(-t_L / tau_d) - jnp.exp(-t_H / tau_d)
-
-        def case2(t_L, t_H):
-            return jnp.exp(t_H / tau_d) - jnp.exp(t_L / tau_d)
-
-        def case3(t_L, t_H):
-            return 2.0 - jnp.exp(t_L / tau_d) - jnp.exp(-t_H / tau_d)
-
-        return prefactor * jnp.select(
-            [t_L > 0, t_H < 0, (t_L <= 0) & (t_H >= 0)],
-            [case1(t_L, t_H), case2(t_L, t_H), case3(t_L, t_H)],
-            default=0.0
-        )
 
     def evaluate(self, X1, X2) -> JAXArray:
         t1, b1 = X1
@@ -95,36 +71,24 @@ class MyMultibandContiBLR(tinygp.kernels.Kernel):
             * (1 + self.s_b[b2])
             * amplitudes_b1
             * amplitudes_b2
-            * jnp.sqrt(
-                self.k(t2 - t1, self.tau_drw[b1])
-                * self.k(t2 - t1, self.tau_drw[b2])
-            )
+            * self.k(t1, t2, self.tau_drw[b1])
         )
         cov_ad = (
             (1 + self.s_b[b1])
             * amplitudes_b1
             * amplitudes_blr_b2
-            * jnp.sqrt(
-                self.k(t2 - t1, self.tau_drw[b1])
-                * self.k(t2 - t1 - self.lag_blr[b2], self.tau_drw[b2])
-            )
+            * self.k(t1, t2 - self.lag_blr[b2], self.tau_drw[b2])
         )
         cov_bc = (
             amplitudes_blr_b1
             * (1 + self.s_b[b2])
             * amplitudes_b2
-            * jnp.sqrt(
-                self.k(t2 - t1 - self.lag_blr[b1], self.tau_drw[b1])
-                * self.k(t2 - t1, self.tau_drw[b2])
-            )
+            * self.k(t1 - self.lag_blr[b1], t2, self.tau_drw[b1])
         )
         cov_bd = (
             amplitudes_blr_b1
             * amplitudes_blr_b2
-            * jnp.sqrt(
-                self.k(t2 - t1 - self.lag_blr[b1], self.tau_drw[b1])
-                * self.k(t2 - t1 - self.lag_blr[b2], self.tau_drw[b2])
-            )
+            * self.k(t1 - self.lag_blr[b1], t2 - self.lag_blr[b2], self.tau_drw[b2])
         )
 
         return cov_ac + cov_ad + cov_bc + cov_bd
@@ -146,31 +110,6 @@ class MyMultibandConti(tinygp.kernels.Kernel):
         tau = jnp.abs(tau)
         drw = jnp.exp(-tau / tau_drw)
         return drw
-
-    def kktophat(self, tau, tau_d) -> JAXArray:
-        delta_t = jnp.abs(tau)
-        width = self.w
-
-        t_L = delta_t - width
-        t_H = delta_t         # delay = 0, so t_H = delta_t - 0
-
-        A = 1.0 / width  # normalized top-hat amplitude
-        prefactor = A
-
-        def case1(t_L, t_H):
-            return jnp.exp(-t_L / tau_d) - jnp.exp(-t_H / tau_d)
-
-        def case2(t_L, t_H):
-            return jnp.exp(t_H / tau_d) - jnp.exp(t_L / tau_d)
-
-        def case3(t_L, t_H):
-            return 2.0 - jnp.exp(t_L / tau_d) - jnp.exp(-t_H / tau_d)
-
-        return prefactor * jnp.select(
-            [t_L > 0, t_H < 0, (t_L <= 0) & (t_H >= 0)],
-            [case1(t_L, t_H), case2(t_L, t_H), case3(t_L, t_H)],
-            default=0.0
-        )
 
     def evaluate(self, X1, X2) -> JAXArray:
         t1, b1 = X1
@@ -239,7 +178,7 @@ class MyMultiVarModel(MultiVarModel):
         # log amp + mean
         log_sigma_hat_band = self.my_amp_transform(params)
         log_sigma_hat_band_blr = self.my_amp_transform_blr(params)
-        log_tau_band_rf = self.my_tau_drw_transform(params)
+        log_tau_band = self.my_tau_drw_transform(params)
 
         # time axis transform: t and band are not sorted,
         # inds gives the sorted indices for the new_t
@@ -269,7 +208,7 @@ class MyMultiVarModel(MultiVarModel):
 
         kernel = MyMultibandContiBLR(
             amplitudes=jnp.exp(log_sigma_hat_band),
-            taus=jnp.exp(log_tau_band_rf),
+            taus=jnp.exp(log_tau_band),
             amplitudes_blr=jnp.exp(log_sigma_hat_band_blr),
             lag_blr=jnp.exp(params["log_lag_blr"]),
             log_w=0,
@@ -311,8 +250,9 @@ class MyMultiVarModel(MultiVarModel):
         eta_tau2 = params["eta_tau2"]
         lam_s = 2500
         eta_break = 1.0
-        log_tau_band_RF = params["log_tau_drw0"] + jnp.log(10) * log_broken_pl(self.lam_rf, lam_s, eta_tau1, eta_tau2, eta_break)
-        return log_tau_band_RF
+        lam_rf_center = jnp.full_like(self.lam_rf, jnp.mean(self.lam_rf))
+        log_tau_band = params["log_tau_drw0"] + jnp.log(10) * log_broken_pl(lam_rf_center, lam_s, eta_tau1, eta_tau2, eta_break)
+        return log_tau_band
 
     def my_amp_transform(self, params: dict[str, JAXArray]) -> JAXArray:
         eta_A1 = params["eta_A1"]
