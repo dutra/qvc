@@ -331,6 +331,8 @@ if __name__ == '__main__':
     parser.add_argument("--job_N", type=int, default=-1, help="Number of objects to divide.")
     parser.add_argument("--max_tree_depth", type=int, default=8, help="Max tree depth param for NUTS sampler.")
     parser.add_argument("--f_host_shen11", action="store_true", help="Use host flux empirical relation from Shen et al. 2011.")
+    parser.add_argument("--load_sample_file", type=str, help="Path to the file containing saved samples.")
+
 
     args = parser.parse_args()
     print("Args: ", args)
@@ -352,7 +354,8 @@ if __name__ == '__main__':
             print("WARNING! --ignore_existing flag but no existing file")
 
     filter_object_ids = args.filter_object_id if args.filter_object_id else []
-    filter_object_ids = pd.read_csv(args.filter_file, dtype={"object_id": str})["object_id"].values if args.filter_file else filter_object_ids
+    print(f"filter_object_ids: {filter_object_ids}")
+    filter_object_ids = pd.read_csv(args.filter_file, dtype={"object_id": str})["object_id"].values if (args.filter_file and (not args.filter_object_id)) else filter_object_ids
     print(f"Loaded {len(filter_object_ids)=}")
     if args.choose_N > 0:
         filter_object_ids = np.random.choice(filter_object_ids, size=args.choose_N, replace=False)
@@ -489,9 +492,15 @@ if __name__ == '__main__':
         progress_bar=args.progress,
         chain_method="vectorized",
     )
-    mcmc.run(jax.random.PRNGKey(0), models, means, batch_data, args.latent, args.bwb, args.f_host_shen11)
-    samples_flat = mcmc.get_samples(group_by_chain=False)
-    diagnostics = mcmc.get_extra_fields()
+
+    if args.load_sample_file:
+        logging.warning(f"Loading samples from file {args.load_sample_file}")
+        samples_flat = load_all_samples_from_hdf5(args.load_sample_file)
+    else:
+        mcmc.run(jax.random.PRNGKey(0), models, means, batch_data, args.latent, args.bwb, args.f_host_shen11)
+        samples_flat = mcmc.get_samples(group_by_chain=False)
+        save_all_samples_to_hdf5(samples_flat)
+        diagnostics = mcmc.get_extra_fields()
 
     #ns = NestedSampler(numpyro_joint_model)
     #ns.run(jax.random.PRNGKey(0), Model, batch_data)
@@ -502,7 +511,6 @@ if __name__ == '__main__':
     if args.file:
         delete_file(args.file)
 
-    save_all_samples_to_hdf5(samples_flat)
     # Save and plot the results
     results = []
     for i, obj in enumerate(batch_data):

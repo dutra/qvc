@@ -213,7 +213,7 @@ class MyMultiVarModel(MultiVarModel):
 
     @staticmethod
     def mean_func(
-        zero_mean: bool, nBand: int, params: dict[str, JAXArray], X: JAXArray
+        zero_mean: bool, nBand: int, t_center: float, t_std: float, params: dict[str, JAXArray], X: JAXArray
     ) -> JAXArray:
 
         band_idx = X[1]
@@ -221,8 +221,8 @@ class MyMultiVarModel(MultiVarModel):
         if zero_mean is True:
             mean_per_obs = jnp.zeros(nBand)[band_idx]
         else:
-            time_centered = (X[0] - params['t_center'])
-            time_scaled = time_centered/params['t_std']
+            time_centered = (X[0] - t_center)
+            time_scaled = time_centered/t_std
             #coeffs = jnp.stack([params["poly1"], params["mean"][band_idx]])
             #mean_per_obs = jnp.polyval(coeffs, time_scaled)
             mean_per_obs = params["poly1"] * time_scaled + params["mean"][band_idx]
@@ -241,12 +241,12 @@ class MyMultiVarModel(MultiVarModel):
         # inds gives the sorted indices for the new_t
         X, inds = self.my_lag_transform(self.X, self.has_lag, params)
 
-        params_mean = dict(params)
-        params_mean['t_center'] = jnp.mean(X[0])
-        params_mean['t_std'] = jnp.std(X[0])
+        t_center = jnp.mean(X[0])
+        t_std = jnp.std(X[0])
 
         means = partial(
-            MyMultiVarModel.mean_func, self.zero_mean, log_sigma_hat_band.shape[0], params_mean
+            MyMultiVarModel.mean_func, self.zero_mean, log_sigma_hat_band.shape[0], 
+            t_center, t_std, params
         )
 
         t = X[0]
@@ -418,6 +418,7 @@ class MyMultiVarModelLatent(MyMultiVarModel):
         H = H.at[rows, inv_lagged].add(A_b[band])
         return H
 
+    @eqx.filter_jit
     def _build_latent_model(self, params: dict[str, JAXArray]) -> tuple[GaussianProcess, JAXArray]:
         log_amps = self.my_amp_transform(params)
         log_amps_blr = self.my_amp_transform_blr(params)
@@ -451,21 +452,21 @@ class MyMultiVarModelLatent(MyMultiVarModel):
         X_latent = (t_latent, band_latent)
         K_latent = kernel(X_latent, X_latent) + 1e-6 * jnp.eye(M)
 
-        params_mean_latent = params
-        params_mean_latent['t_center'] = jnp.mean(t_latent)
-        params_mean_latent['t_std'] = jnp.std(t_latent)
+        t_center_latent = jnp.mean(t_latent)
+        t_std_latent = jnp.std(t_latent)
 
-        means_latent = partial(MyMultiVarModelLatent.mean_func, self.zero_mean, amp_conti.shape[0], params_mean_latent)
+        means_latent = partial(MyMultiVarModelLatent.mean_func, self.zero_mean, amp_conti.shape[0], 
+                               t_center_latent, t_std_latent, params)
 
         # Construct observation operator H
         H = self._build_H(t_obs, band_obs, inv_d, inv_l, amp_conti, amp_blr, M)
 
         # Mean function
-        params_mean = params
-        params_mean['t_center'] = jnp.mean(t_obs)
-        params_mean['t_std'] = jnp.std(t_obs)
+        t_center = jnp.mean(t_obs)
+        t_std = jnp.std(t_obs)
 
-        means = partial(MyMultiVarModelLatent.mean_func, self.zero_mean, amp_conti.shape[0], params_mean)
+        means = partial(MyMultiVarModelLatent.mean_func, self.zero_mean, amp_conti.shape[0],
+                        t_center, t_std, params)
         mu_obs = means((t_obs, band_obs))
 
         # Build GP
@@ -544,7 +545,7 @@ class MyMultiVarModelLatent(MyMultiVarModel):
         # Prepare new latent inputs (times, bands, lags)
         X_new_lagged, _ = self.my_lag_transform(X_new, self.has_lag, params)
         t_new, band_new = X_new_lagged
-        lag_blr = jnp.exp(params["log_lag_blr"])[band_new]
+        lag_blr = jnp.exp(params["log_lag_blr"] - jnp.log(1 + self.z))[band_new]
 
         log_amps = self.my_amp_transform(params)
         log_amps_blr = self.my_amp_transform_blr(params)
@@ -576,8 +577,15 @@ class MyMultiVarModelLatent(MyMultiVarModel):
         K_cross = H_new_full @ kernel(X_new_latent, X_latent) @ H_train.T
         K_new = H_new_full @ kernel(X_new_latent, X_new_latent) @ H_new_full.T + 1e-6 * jnp.eye(H_new_full.shape[0])
 
+        # params_new = dict(params)
+        # params_new['t_center'] = jnp.mean(t_new)
+        # params_new['t_std'] = jnp.std(t_new)
+
+        t_center = jnp.mean(t_new_latent)
+        t_std = jnp.std(t_new_latent)
         # Predictive mean and covariance in observation space
-        mean_fn = partial(MyMultiVarModelLatent.mean_func, self.zero_mean, amp_conti.shape[0], params)
+        mean_fn = partial(MyMultiVarModelLatent.mean_func, self.zero_mean, amp_conti.shape[0], 
+        t_center, t_std, params)
         mu_new_obs = mean_fn((t_new, band_new))
 
         # Continuum-only prediction: zero BLR amps
