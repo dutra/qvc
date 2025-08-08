@@ -277,9 +277,9 @@ class MyMultiVarModel(MultiVarModel):
         )
 
         # Check if kernel covariance is symmetric
-        cov_matrix = kernel((t[inds], band[inds]), (t[inds], band[inds]))
-        is_symmetric = jnp.allclose(cov_matrix, cov_matrix.T, atol=1e-5)
-        jax.debug.print("Kernel covariance symmetric: {sym}", sym=is_symmetric)
+        #cov_matrix = kernel((t[inds], band[inds]), (t[inds], band[inds]))
+        #is_symmetric = jnp.allclose(cov_matrix, cov_matrix.T, atol=1e-5)
+        #jax.debug.print("Kernel covariance symmetric: {sym}", sym=is_symmetric)
 
         return (
             GaussianProcess(
