@@ -41,7 +41,6 @@ class MyMultibandContiBLR(tinygp.kernels.Kernel):
         self.amplitudes_blr = amplitudes_blr
         self.lag_blr = lag_blr
         self.tau_drw = taus
-        jax.debug.print("{ta}", ta=self.tau_drw)
         self.w = jnp.exp(log_w)
         self.s_b = s_b
 
