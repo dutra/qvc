@@ -34,151 +34,106 @@ zero_mean = False
 has_jitter = True
 has_lag = True
 
-def mle(Model, nBand, X, y, yerr, clean_bands, z, latent=False, fixed=True):
-    logging.debug('Starting MLE...')
-
-    from jax.tree_util import tree_map
-    import jaxopt
-
-    # Initial parameters (convert all to jnp.array for consistency)
-    init_params = tree_map(
-        jnp.array,
-        {
-            "log_tau_drw0": 6.0,
-            "log_sigma0": -0.2,
-            "alpha_host": 1.0,
-            "f_host": 0.0,
-            "poly1": 0.0,
-            "mean": jnp.full(nBand, 0.0),
-            "log_amp_delta_blr": jnp.full(nBand, -1.0),
-            "log_lag_blr": jnp.full(nBand, jnp.log(1e2)),
-            "lag0": 2.0,
-            "lag_beta": 4.0 / 3.0,
-            "eta_A1": 0.0,
-            "eta_A2": 0.0,
-            "eta_tau1": 0.0,
-            "eta_tau2": 0.0,
-            "eta_break": 1.0,
-            "log_jitter": jnp.full(nBand, 1e-6)
-        }
-    )
-
-    if not fixed:
-        m = Model(
-                X, y, yerr, kernels.quasisep.Exp(jnp.array([1.0, 1.0])),
-                zero_mean=zero_mean,
-                has_jitter=has_jitter,
-                has_lag=has_lag,
-                clean_bands=clean_bands,
-                z=z
-            )
-
-        def loss(params):
-            return -m.log_prob(params)
-
-        loss_jit = jax.jit(loss)
-
-        # Run LBFGS (JAX-native and GPU-capable)
-        opt = jaxopt.LBFGS(fun=loss_jit) #, maxiter=500)
-        soln = opt.run(init_params)
-        best_param = soln.params
-
-        logging.debug("Log prob at best fit:", m.log_prob(best_param))
-
-        logging.debug('Done MLE')
-        logging.debug("Best params: " + ", ".join(f"{k}: {v}" for k, v in best_param.items()))
-    else:
-        best_param = init_params
-
-    return best_param
-
-
-def numpyro_joint_model(models, means, batch_data, latent=False, bwb=False, f_host_shen11=False):
+def build_model(models, batch_data, f_host_shen11=True, latent=False, bwb=True):
+    # Precompute and capture constants in the closure so they are treated as
+    # static by JAX/NumPyro. This prevents unnecessary retracing/recompilation
+    # when running MCMC, as these values do not change between runs.
     batch_size = len(batch_data)
     nBands = 5  # or use from config
 
-    # Initialize parameters
-    # power law
-    eta_A1 = numpyro.sample("eta_A1", dist.Normal(0.0, 1.0))
-    eta_A2 = numpyro.sample("eta_A2", dist.Normal(0.0, 1.0))
-    eta_tau1 = numpyro.sample("eta_tau1", dist.Normal(0.0, 1.0))
-    eta_tau2 = numpyro.sample("eta_tau2", dist.Normal(0.0, 1.0))
-    eta_break = numpyro.sample("eta_break", dist.TruncatedNormal(1.0, 1.0, low=0.0))
+    if f_host_shen11:
+        # Host flux empirical relation
+        #logl5100 = jnp.array([obj['LOGL5100'] for obj in batch_data])
+        logl5100 = jnp.array([obj['LOGLBOL'] - jnp.log10(9.26) for obj in batch_data])
 
-    log_tau_drw0_mean = means["log_tau_drw0_mean"]
-    log_sigma0_mean = means["log_sigma0_mean"]
-    log_amp_delta_blr_mean = means["log_amp_delta_blr_mean"]
-    mean_mean = means["mean_mean"]
-    lag0_mean = means["lag0_mean"]
-    lag_beta_mean = means["lag_beta_mean"]
-    log_lag_blr_mean = means["log_lag_blr_mean"]
-    f_host = means["f_host"]
-
-    with numpyro.plate("objects", batch_size):
-        # Object-level parameters (shape: [B])
-        log_tau_drw0 = numpyro.sample("log_tau_drw0", dist.Normal(log_tau_drw0_mean, 1.0))
-        log_sigma0 = numpyro.sample("log_sigma0", dist.Normal(log_sigma0_mean, 1.0))
-        log_sigma_hat0 = numpyro.deterministic("log_sigma_hat0", log_sigma0 - 0.5 * log_tau_drw0)
-        alpha_host = numpyro.sample("alpha_host", dist.Normal(1.0, 0.1))
-        
-        #f_host = numpyro.sample("f_host", dist.Uniform(0.0, 1.0))
-        f_host = numpyro.deterministic("f_host", f_host)
-
-        poly1 = numpyro.sample("poly1", dist.Normal(0.0, 0.1))
-        #lag0 = numpyro.sample("lag0", dist.TruncatedNormal(2.0, 10.0, low=0))
-        lag0 = numpyro.sample("lag0", dist.TruncatedNormal(10.0, 5.0, low=0))
-        lag_beta = numpyro.sample("lag_beta", dist.TruncatedNormal(4/3, 0.2, low=0))
-        bwb_alpha = numpyro.sample("bwb_alpha", dist.Normal(0.2, 0.1))
-        bwb_beta = numpyro.sample("bwb_beta", dist.TruncatedNormal(0.2, 0.1, low=0))
-        if bwb is False:
-            bwb_A = numpyro.deterministic("bwb_alpha", jnp.zeros(batch_size))
-            bwb_A = numpyro.deterministic("bwb_beta", jnp.zeros(batch_size))
-
-
-    with numpyro.plate("objects", batch_size, dim=-2):
-        with numpyro.plate("band", nBands, dim=-1):
-            # Parameters with shape [B, nBands]
-            mean = numpyro.sample("mean", dist.Normal(mean_mean, 0.2))
-            log_amp_delta_blr = numpyro.sample("log_amp_delta_blr", dist.Normal(log_amp_delta_blr_mean, 2.0))
-            log_lag_blr = numpyro.sample("log_lag_blr", dist.Normal(log_lag_blr_mean, 1.0))
-            #log_lag_blr = numpyro.deterministic("log_lag_blr", jnp.zeros_like(mean))
-            log_jitter = numpyro.sample("log_jitter", dist.Normal(log_jitter_mean + 1e-6, 1.0))
-
-    def run_batch(data, i):
-        # Collect params for object i
-        params = {
-            "log_tau_drw0": log_tau_drw0[i],
-            "log_sigma_hat0": log_sigma_hat0[i],
-            "alpha_host": alpha_host[i],
-            "f_host": f_host[i],
-            "poly1": poly1[i],
-            "mean": mean[i],
-            "log_amp_delta_blr": log_amp_delta_blr[i],
-            "log_lag_blr": log_lag_blr[i],
-            "log_jitter": log_jitter[i],
-            "lag0": lag0[i],
-            "lag_beta": lag_beta[i],
-            "bwb_alpha": bwb_alpha[i],
-            "bwb_beta": bwb_beta[i],
-            # power law
-            "eta_A1": eta_A1,
-            "eta_A2": eta_A2,
-            "eta_tau1": eta_tau1,
-            "eta_tau2": eta_tau2,
-            "eta_break": eta_break
-        }
-
-        m = models[i]
-        log_prob = m.log_prob(params)
-        #jax.debug.print("log_prob: {lp} {i}", lp=log_prob, i=i)
-        log_prob = jnp.where(jnp.isfinite(log_prob), log_prob, -1e20)
-        numpyro.factor(f"loglike_{i}", log_prob)
-
-    if len(batch_data) == 1:
-        run_batch(batch_data[0], 0)
+        x = logl5100 - 44.0
+        f_host = 0.8052 - 1.5502 * x + 0.9121 * jnp.power(x, 2) - 0.1577 * jnp.power(x, 3)
+        f_host = jnp.clip(f_host, 0.0, None)
+        f_host_value = jnp.where(logl5100 < 45.053, f_host, 0.0)
     else:
-        for i, data in enumerate(batch_data):
-            run_batch(data, i)
+        batch_size = len(batch_data)
+        f_host_value = jnp.zeros(batch_size)
+
+
+    def numpyro_joint_model():
+        # Initialize parameters
+        # power law
+        eta_A1 = numpyro.sample("eta_A1", dist.Normal(0.0, 1.0))
+        eta_A2 = numpyro.sample("eta_A2", dist.Normal(0.0, 1.0))
+        eta_tau1 = numpyro.sample("eta_tau1", dist.Normal(0.0, 1.0))
+        eta_tau2 = numpyro.sample("eta_tau2", dist.Normal(0.0, 1.0))
+        eta_break = numpyro.sample("eta_break", dist.TruncatedNormal(1.0, 1.0, low=0.5))
+        lam_s = numpyro.deterministic("lam_s", 2500.0)
+
+
+        with numpyro.plate("objects", batch_size):
+            # Object-level parameters (shape: [B])
+            log_tau_drw0 = numpyro.sample("log_tau_drw0", dist.Normal(6.0, 1.0))
+            log_sigma0 = numpyro.sample("log_sigma0", dist.Normal(-0.2, 1.0))
+            log_sigma_hat0 = numpyro.deterministic("log_sigma_hat0", log_sigma0 - 0.5 * log_tau_drw0)
+            alpha_host = numpyro.sample("alpha_host", dist.Normal(1.0, 0.1))
+            
+            #f_host = numpyro.sample("f_host", dist.Uniform(0.0, 1.0))
+            f_host = numpyro.deterministic("f_host", f_host_value)
+
+            poly1 = numpyro.sample("poly1", dist.Normal(0.0, 0.1))
+            #lag0 = numpyro.sample("lag0", dist.TruncatedNormal(2.0, 10.0, low=0))
+            lag0 = numpyro.sample("lag0", dist.TruncatedNormal(10.0, 5.0, low=0))
+            lag_beta = numpyro.sample("lag_beta", dist.TruncatedNormal(4/3, 0.2, low=0))
+            if bwb:
+                bwb_alpha = numpyro.sample("bwb_alpha", dist.Normal(0.2, 0.1))
+                bwb_beta = numpyro.sample("bwb_beta", dist.TruncatedNormal(0.2, 0.1, low=0))
+            else:
+                bwb_alpha = numpyro.deterministic("bwb_alpha", jnp.zeros(batch_size))
+                bwb_beta = numpyro.deterministic("bwb_beta", jnp.zeros(batch_size))
+
+
+        with numpyro.plate("objects", batch_size, dim=-2):
+            with numpyro.plate("band", nBands, dim=-1):
+                # Parameters with shape [B, nBands]
+                mean = numpyro.sample("mean", dist.Normal(jnp.full(nBands, 0.0), 0.2))
+                log_amp_delta_blr = numpyro.sample("log_amp_delta_blr", dist.Normal(jnp.full(nBands, -1.0), 2.0))
+                log_lag_blr = numpyro.sample("log_lag_blr", dist.Normal(jnp.full(nBands, jnp.log(1e2)), 1.0))
+                #log_lag_blr = numpyro.deterministic("log_lag_blr", jnp.zeros_like(mean))
+                log_jitter = numpyro.sample("log_jitter", dist.Normal(jnp.full(nBands, 1e-6) + 1e-6, 1.0))
+
+        def run_batch(data, i):
+            # Collect params for object i
+            params = {
+                "log_tau_drw0": log_tau_drw0[i],
+                "log_sigma_hat0": log_sigma_hat0[i],
+                "alpha_host": alpha_host[i],
+                "f_host": f_host[i],
+                "poly1": poly1[i],
+                "mean": mean[i],
+                "log_amp_delta_blr": log_amp_delta_blr[i],
+                "log_lag_blr": log_lag_blr[i],
+                "log_jitter": log_jitter[i],
+                "lag0": lag0[i],
+                "lag_beta": lag_beta[i],
+                "bwb_alpha": bwb_alpha[i],
+                "bwb_beta": bwb_beta[i],
+                # power law
+                "eta_A1": eta_A1,
+                "eta_A2": eta_A2,
+                "eta_tau1": eta_tau1,
+                "eta_tau2": eta_tau2,
+                "eta_break": eta_break,
+                "lam_s": lam_s
+            }
+
+            m = models[i]
+            log_prob = m.log_prob(params)
+            #jax.debug.print("log_prob: {lp} {i}", lp=log_prob, i=i)
+            log_prob = jnp.where(jnp.isfinite(log_prob), log_prob, -1e20)
+            numpyro.factor(f"loglike_{i}", log_prob)
+
+        if len(batch_data) == 1:
+            run_batch(batch_data[0], 0)
+        else:
+            for i, data in enumerate(batch_data):
+                run_batch(data, i)
+    return numpyro_joint_model
 
 
 def make_lc(Model, data, filter_red_bands=False):
@@ -396,7 +351,6 @@ if __name__ == '__main__':
         obj |= result
         # Run bestP for each object
         n_bands = len(obj['clean_bands'])
-        bestP = mle(Model, 5, obj['X'], obj['y'], obj['yerr'], obj['clean_bands'], obj['z'], latent=args.latent)
         m = Model(
             obj['X'], obj['y'], obj['yerr'], 
             kernels.quasisep.Exp(jnp.array([1, 1])),
@@ -405,7 +359,6 @@ if __name__ == '__main__':
         )
         #save_combined_plot(bestP, m, obj['X'], obj['y'], obj['yerr'], obj['band_idx'], obj, fit_bestP=True)
 
-        num_params = sum(p.size for p in bestP.values())
         batch_data.append({
             'object_id': obj['object_id'],
             'X': obj['X'],
@@ -414,13 +367,11 @@ if __name__ == '__main__':
             'clean_bands': obj['clean_bands'],
             'band_idx': obj['band_idx'],
             'z': obj['z'],
-            'bestP': bestP,
             # add any other fields needed by your model
             'LOGLBOL': obj['LOGLBOL'],
             'mags_means': obj['mags_means'],
             'mags_stds': obj['mags_stds']
         })
-    num_params = sum(p.size for p in batch_data[0]['bestP'].values())
     num_objects = len(batch_data)
     logging.info(f"Running joint fit on {len(batch_data)} objects...")
 
@@ -429,7 +380,7 @@ if __name__ == '__main__':
         nchains = estimated_nchains
     else:
         nchains = args.nchains
-    print(f"{args.max_tree_depth=}, {args.nwarm=}, {args.nsamp=}, {args.nchains=}, default num_chains: {estimated_nchains}, {num_params=}, {len(batch_data)=}")
+    print(f"{args.max_tree_depth=}, {args.nwarm=}, {args.nsamp=}, {args.nchains=}, default num_chains: {estimated_nchains}")
     
     init_strategy = numpyro.infer.init_to_sample()
     #init_strategy = numpyro.infer.init_to_median()
@@ -445,45 +396,8 @@ if __name__ == '__main__':
         )
         for obj in batch_data
     ]
-
-    # Extract object-level prior means
-    log_tau_drw0_mean = jnp.array([obj['bestP']['log_tau_drw0'] for obj in batch_data])
-    log_sigma0_mean = jnp.array([obj['bestP']['log_sigma0'] for obj in batch_data])
-    log_amp_delta_blr_mean = jnp.stack([jnp.array(obj['bestP']['log_amp_delta_blr']) for obj in batch_data])  # (B, 5)
-    mean_mean = jnp.stack([jnp.array(obj['bestP']['mean']) for obj in batch_data])                            # (B, 5)
-    lag0_mean = jnp.stack([jnp.array(obj['bestP']['lag0']) for obj in batch_data])                            # (B, 5)
-    lag_beta_mean = jnp.stack([jnp.array(obj['bestP']['lag_beta']) for obj in batch_data])                    # (B, 5)
-    log_lag_blr_mean = jnp.stack([jnp.array(obj['bestP']['log_lag_blr']) for obj in batch_data])
-    log_jitter_mean = jnp.stack([jnp.array(obj['bestP']['log_jitter']) + jnp.mean(obj['yerr']) for obj in batch_data]) # (B, 5)
         
-    if args.f_host_shen11:
-        # Host flux empirical relation
-        #logl5100 = jnp.array([obj['LOGL5100'] for obj in batch_data])
-        logl5100 = jnp.array([obj['LOGLBOL'] - jnp.log10(9.26) for obj in batch_data])
-
-        x = logl5100 - 44.0
-        f_host = 0.8052 - 1.5502 * x + 0.9121 * jnp.power(x, 2) - 0.1577 * jnp.power(x, 3)
-        f_host = jnp.clip(f_host, 0.0, None)
-        f_host = jnp.where(logl5100 < 45.053, f_host, 0.0)
-    else:
-        batch_size = len(batch_data)
-        f_host = jnp.zeros(batch_size)
-
-    means = {
-        "log_tau_drw0_mean": log_tau_drw0_mean,
-        "log_sigma0_mean": log_sigma0_mean,
-        "log_amp_delta_blr_mean": log_amp_delta_blr_mean,
-        "mean_mean": mean_mean,
-        "lag0_mean": lag0_mean,
-        "lag_beta_mean": lag_beta_mean,
-        "log_lag_blr_mean": log_lag_blr_mean,
-        "log_jitter_mean": log_jitter_mean,
-        "f_host": f_host
-    }
-
-    # Check device
-    print(means["log_tau_drw0_mean"].device)
-    print(batch_data[0]["X"][0].device)
+    numpyro_joint_model = build_model(models, batch_data, args.f_host_shen11, args.latent, args.bwb)
 
     nuts_kernel = NUTS(numpyro_joint_model, init_strategy=init_strategy, dense_mass=True, max_tree_depth=args.max_tree_depth)
     mcmc = MCMC(
@@ -499,7 +413,7 @@ if __name__ == '__main__':
         logging.warning(f"Loading samples from file {args.load_sample_file}")
         samples_flat = load_all_samples_from_hdf5(args.load_sample_file)
     else:
-        mcmc.run(jax.random.PRNGKey(0), models, means, batch_data, args.latent, args.bwb, args.f_host_shen11)
+        mcmc.run(jax.random.PRNGKey(0))
         samples_flat = mcmc.get_samples(group_by_chain=False)
         save_all_samples_to_hdf5(samples_flat)
         diagnostics = mcmc.get_extra_fields()
@@ -543,14 +457,14 @@ if __name__ == '__main__':
                 clean_bands=obj['clean_bands'], z=obj['z']
             )
             psd_results = compute_psd_from_samples(obj_flat_samples, obj["clean_bands"])
-            save_combined_plot(obj_flat_samples, m, obj['X'], obj['y'], obj['yerr'], obj['band_idx'], result, fit_bestP=False, psd_results=psd_results)
+            save_combined_plot(obj_flat_samples, m, obj['X'], obj['y'], obj['yerr'], obj['band_idx'], result, psd_results=psd_results)
             #dump_mcmc_diagnostics(mcmc, obj, i, len(batch_data))
             
         final_result_obj = obj | result #| rhat_ess
         results.append(final_result_obj)
         logging.info("--------------------------------------------------------------")
     if args.file:
-        save_quasar_list_hdf5(results, args.file, ignored_keys=['X', 'y', 'yerr', 'band_idx', 'bestP'])
+        save_quasar_list_hdf5(results, args.file, ignored_keys=['X', 'y', 'yerr', 'band_idx'])
     else:
         logging.warning("No file specified for saving results. Results will not be saved to HDF5.")
     sys.exit("Exiting the program as requested.")

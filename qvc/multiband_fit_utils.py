@@ -53,7 +53,7 @@ def select_samples_for_object(samples_flat, obj_index, universal_params):
         Dictionary with selected samples for the object.
     """
     obj_samples = {
-            k: v[:, obj_index] if k not in ['eta_A1', 'eta_A2', 'eta_tau1', 'eta_tau2', 'eta_break'] else v
+            k: v[:, obj_index] if k not in ['eta_A1', 'eta_A2', 'eta_tau1', 'eta_tau2', 'eta_break', 'lam_s'] else v
             for k, v in samples_flat.items()
         }    
 
@@ -98,7 +98,7 @@ def clean_grouped_samples(samples_grouped, obj_index, batch_data_len):
     - Universal params kept as-is (flattened over chains)
     - Object-specific params indexed [:, :, i]
     """
-    universal_keys = ['eta_A1', 'eta_A2', 'eta_tau1', 'eta_tau2', 'eta_break']
+    universal_keys = ['eta_A1', 'eta_A2', 'eta_tau1', 'eta_tau2', 'eta_break', 'lam_s']
 
     # Print shapes for inspection
     for k, v in samples_grouped.items():
@@ -566,7 +566,7 @@ def save_quasar_list_hdf5(quasars, file_path, ignored_keys=None, size_threshold=
 #     log_f -= (delta / ds) * jnp.log10(2.0)  # normalize to 0 at lam_s
 #     return log_f
 
-def log_broken_pl(lam, lam_s, d1, d2, ds=4.0):
+def log_broken_pl(lam, lam_s, d1, d2, ds=1.0):
     """
     Log10 of a smooth broken power-law, normalized to 0 at lam_s.
     Fully log-domain for stability and NumPyro compatibility.
@@ -618,7 +618,7 @@ def process_samples(flat_samples, data, percentiles=[16, 50, 84]):
     eta_tau2 = np.asarray(flat_samples["eta_tau2"])
     eta_break = np.asarray(flat_samples["eta_break"])
     lambda_ref = 2500
-    lam_s = 2500
+    lam_s = np.asarray(flat_samples["lam_s"])
 
     log_sigma_band = []
     for band in data['clean_bands']:
@@ -680,7 +680,7 @@ def compute_psd_from_samples(samples, clean_bands, num_points=1000, time_range=(
     eta_A1 = np.median(samples["eta_A1"])
     eta_A2 = np.median(samples["eta_A2"])
     eta_break = np.median(samples["eta_break"])
-    lam_s = 2500 #np.median(samples["lam_s"])
+    lam_s = np.median(samples["lam_s"])
     eta_tau1 = np.median(samples["eta_tau1"])
     eta_tau2 = np.median(samples["eta_tau2"])
 

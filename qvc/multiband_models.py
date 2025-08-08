@@ -247,16 +247,16 @@ class MyMultiVarModel(MultiVarModel):
     def my_tau_drw_transform(self, params: dict[str, JAXArray]) -> JAXArray:
         eta_tau1 = params["eta_tau1"]
         eta_tau2 = params["eta_tau2"]
-        lam_s = 2500
-        eta_break = 1.0
+        lam_s = params["lam_s"]
+        eta_break = params["eta_break"]
         log_tau_band = params["log_tau_drw0"] + jnp.log(10) * log_broken_pl(self.lam_rf, lam_s, eta_tau1, eta_tau2, eta_break)
         return jnp.mean(log_tau_band)
 
     def my_amp_transform(self, params: dict[str, JAXArray]) -> JAXArray:
         eta_A1 = params["eta_A1"]
         eta_A2 = params["eta_A2"]
-        lam_s = 2500
-        eta_break = 1.0
+        lam_s = params["lam_s"]
+        eta_break = params["eta_break"]
 
         # Host dilution: apply per-band correction
         # Host galaxy contribution modeled as a power-law in wavelength
