@@ -58,6 +58,7 @@ def mle(Model, nBand, X, y, yerr, clean_bands, z, latent=False, fixed=True):
             "eta_A2": 0.0,
             "eta_tau1": 0.0,
             "eta_tau2": 0.0,
+            "eta_break": 1.0,
             "log_jitter": jnp.full(nBand, 1e-6)
         }
     )
@@ -96,17 +97,14 @@ def numpyro_joint_model(models, means, batch_data, latent=False, bwb=False, f_ho
     batch_size = len(batch_data)
     nBands = 5  # or use from config
 
-    powerlaw_samples = {
-        k: numpyro.sample(k, dist.Normal(loc, scale))
-        for k, (loc, scale) in {
-            "eta_A1": (0.0, 1.0),
-            "eta_A2": (0.0, 1.0),
-            "eta_tau1": (0.0, 1.0),
-            "eta_tau2": (0.0, 1.0),
-        }.items()
-    }
-
     # Initialize parameters
+    # power law
+    eta_A1 = numpyro.sample("eta_A1", dist.Normal(0.0, 1.0))
+    eta_A2 = numpyro.sample("eta_A2", dist.Normal(0.0, 1.0))
+    eta_tau1 = numpyro.sample("eta_tau1", dist.Normal(0.0, 1.0))
+    eta_tau2 = numpyro.sample("eta_tau2", dist.Normal(0.0, 1.0))
+    eta_break = numpyro.sample("eta_break", dist.TruncatedNormal(1.0, 1.0, low=0.0))
+
     log_tau_drw0_mean = means["log_tau_drw0_mean"]
     log_sigma0_mean = means["log_sigma0_mean"]
     log_amp_delta_blr_mean = means["log_amp_delta_blr_mean"]
@@ -162,7 +160,12 @@ def numpyro_joint_model(models, means, batch_data, latent=False, bwb=False, f_ho
             "lag_beta": lag_beta[i],
             "bwb_alpha": bwb_alpha[i],
             "bwb_beta": bwb_beta[i],
-            **powerlaw_samples,
+            # power law
+            "eta_A1": eta_A1,
+            "eta_A2": eta_A2,
+            "eta_tau1": eta_tau1,
+            "eta_tau2": eta_tau2,
+            "eta_break": eta_break
         }
 
         m = models[i]

@@ -53,7 +53,7 @@ def select_samples_for_object(samples_flat, obj_index, universal_params):
         Dictionary with selected samples for the object.
     """
     obj_samples = {
-            k: v[:, obj_index] if k not in ['eta_A1', 'eta_A2', 'eta_tau1', 'eta_tau2'] else v
+            k: v[:, obj_index] if k not in ['eta_A1', 'eta_A2', 'eta_tau1', 'eta_tau2', 'eta_break'] else v
             for k, v in samples_flat.items()
         }    
 
@@ -98,7 +98,7 @@ def clean_grouped_samples(samples_grouped, obj_index, batch_data_len):
     - Universal params kept as-is (flattened over chains)
     - Object-specific params indexed [:, :, i]
     """
-    universal_keys = ['eta_A1', 'eta_A2', 'eta_tau1', 'eta_tau2']
+    universal_keys = ['eta_A1', 'eta_A2', 'eta_tau1', 'eta_tau2', 'eta_break']
 
     # Print shapes for inspection
     for k, v in samples_grouped.items():
@@ -616,7 +616,7 @@ def process_samples(flat_samples, data, percentiles=[16, 50, 84]):
     eta_A2 = np.asarray(flat_samples["eta_A2"])
     eta_tau1 = np.asarray(flat_samples["eta_tau1"])
     eta_tau2 = np.asarray(flat_samples["eta_tau2"])
-    eta_break = 1
+    eta_break = np.asarray(flat_samples["eta_break"])
     lambda_ref = 2500
     lam_s = 2500
 
@@ -679,7 +679,7 @@ def compute_psd_from_samples(samples, clean_bands, num_points=1000, time_range=(
     log_tau_drw0 = np.median(samples["log_tau_drw0"])
     eta_A1 = np.median(samples["eta_A1"])
     eta_A2 = np.median(samples["eta_A2"])
-    eta_break = 1.0 #np.median(samples["eta_break"])
+    eta_break = np.median(samples["eta_break"])
     lam_s = 2500 #np.median(samples["lam_s"])
     eta_tau1 = np.median(samples["eta_tau1"])
     eta_tau2 = np.median(samples["eta_tau2"])
