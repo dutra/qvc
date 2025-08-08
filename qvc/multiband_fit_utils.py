@@ -449,9 +449,9 @@ def save_all_samples_to_hdf5(samples):
     Args:
         samples (dict): Dictionary containing MCMC samples.
     """
-    output_dir=f"samples/{prefix}/"
+    output_dir=f"results/samples/{prefix}/"
     os.makedirs(output_dir, exist_ok=True)
-    file_path = os.path.join(output_dir, f"{prefix}_{suffix}_all.h5")
+    file_path = os.path.join(output_dir, f"all_{suffix}.h5")
 
     logging.info(f"Saving all samples to {file_path}")
 
@@ -469,9 +469,9 @@ def save_obj_samples_to_hdf5(samples, object_id):
         object_id (str): The object ID for which the samples belong.
         output_dir (str): Directory where the HDF5 files will be saved.
     """
-    output_dir=f"samples/{prefix}/{suffix}"
+    output_dir=f"results/samples/{prefix}"
     os.makedirs(output_dir, exist_ok=True)
-    file_path = os.path.join(output_dir, f"{object_id}.h5")
+    file_path = os.path.join(output_dir, f"{object_id}_{suffix}.h5")
 
     logging.info(f"Saving samples for object_id {object_id} to {file_path}")
 
@@ -490,7 +490,7 @@ def delete_file(file_path):
     else:
         logging.info(f"File does not exist; not deleting: {file_path}")
 
-def save_quasar_list_hdf5(quasars, file_path, ignored_keys=None, size_threshold=1024):
+def save_quasar_list_hdf5(quasars, ignored_keys=None, size_threshold=1024):
     """
     Save a list of quasar dictionaries to an HDF5 file, overwriting the file if it exists.
     
@@ -502,15 +502,19 @@ def save_quasar_list_hdf5(quasars, file_path, ignored_keys=None, size_threshold=
     - Prints progress in the form 'i/N: Saved quasar <object_id>'.
     """
     ignored_keys = set(ignored_keys or [])
-    os.makedirs(os.path.dirname(file_path), exist_ok=True)
+    
     string_dt = h5py.string_dtype(encoding="utf-8")
 
     total = len(quasars)
+    output_dir=f"results/data/{prefix}"
+    os.makedirs(output_dir, exist_ok=True)
+    file_path = os.path.join(output_dir, f"{suffix}.h5")
     logging.info(f"Saving {total} quasars to {file_path}")
+
     with h5py.File(file_path, "w") as hdf:
-        for i, quasar in enumerate(quasars, start=1):
+        for i, quasar in enumerate(quasars):
             object_id = str(quasar["object_id"])
-            logging.info(f"Saving quasar {object_id} to {file_path}")
+            logging.info(f"Writing quasar {object_id} to {file_path}")
             
             group = hdf.create_group(object_id)
             for key, value in quasar.items():
@@ -540,7 +544,7 @@ def save_quasar_list_hdf5(quasars, file_path, ignored_keys=None, size_threshold=
                     group.attrs[key] = arr
             
             # Print progress
-            logging.info(f"{i}/{total}: Saved quasar {object_id}")
+            logging.info(f"{i+1}/{total}: Saved quasar {object_id}")
 
     logging.info("All quasars saved successfully.")
 

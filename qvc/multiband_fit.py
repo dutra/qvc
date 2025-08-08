@@ -269,7 +269,6 @@ if __name__ == '__main__':
     parser.add_argument("--N", type=int, help="Number of objects to process.")
     parser.add_argument("--skip", type=int, help="Number of objects to skip.")
     parser.add_argument("--chunk_size", type=int, default=500, help="Chunk size for processing objects.")
-    parser.add_argument("-f", "--file", type=str, help="Path to the file to append (read and write) objects.") 
     parser.add_argument("--lc_file", type=str, help="Path to the light curve file.")
     parser.add_argument("--filter_file", type=str, help="Path to the file containing object IDs to filter.")
     parser.add_argument("--plot", action="store_true", help="Enable plotting of results.")
@@ -301,15 +300,6 @@ if __name__ == '__main__':
         objs = concat_light_curves(save_file_path=args.lc_file, progress_bar=args.progress)
         sys.exit("Created LC file. Exiting the program as requested.")
 
-    # Filter objects by object_id that exist in the HDF5 file
-    existing_object_ids = set()
-    if args.ignore_existing:
-        if os.path.exists(args.file):
-            with h5py.File(args.file, "r") as hdf:
-                existing_object_ids = set(hdf.keys())
-                print(f"Found {len(existing_object_ids)} existing object IDs in {args.file}")
-        else:
-            print("WARNING! --ignore_existing flag but no existing file")
 
     filter_object_ids = args.filter_object_id if args.filter_object_id else []
     print(f"filter_object_ids: {filter_object_ids}")
@@ -327,7 +317,7 @@ if __name__ == '__main__':
     if len(filter_object_ids) > 0:
         print(f"Filtering object IDs: {len(filter_object_ids)}")
 
-    objs = concat_light_curves(filter_object_ids=filter_object_ids, existing_object_ids=existing_object_ids, N=args.N, skip=args.skip, save_file_path=args.lc_file, progress_bar=args.progress)
+    objs = concat_light_curves(filter_object_ids=filter_object_ids, N=args.N, skip=args.skip, save_file_path=args.lc_file, progress_bar=args.progress)
     if args.create_lc:
         sys.exit("Created LC file. Exiting the program as requested.")
     print(f"Loaded {len(objs)} objects from concat_light_curves")
@@ -424,9 +414,6 @@ if __name__ == '__main__':
 
     logging.info("Done with MCMC run")
 
-    if args.file:
-        delete_file(args.file)
-
     # Save and plot the results
     results = []
     for i, obj in enumerate(batch_data):
@@ -463,8 +450,6 @@ if __name__ == '__main__':
         final_result_obj = obj | result #| rhat_ess
         results.append(final_result_obj)
         logging.info("--------------------------------------------------------------")
-    if args.file:
-        save_quasar_list_hdf5(results, args.file, ignored_keys=['X', 'y', 'yerr', 'band_idx'])
-    else:
-        logging.warning("No file specified for saving results. Results will not be saved to HDF5.")
+        save_quasar_list_hdf5(results, ignored_keys=['X', 'y', 'yerr', 'band_idx'])
+        
     sys.exit("Exiting the program as requested.")

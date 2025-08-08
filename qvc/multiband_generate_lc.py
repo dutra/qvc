@@ -22,8 +22,8 @@ bands = ['u', 'g', 'r', 'i', 'z']#, 'y']
 
 
 
-def concat_light_curves(N=None, skip=None, filter_object_ids=[], existing_object_ids=set(), save_file_path=None, progress_bar=False):
-    print(f"DEBUG concat_light_curves args: {N=}, {skip=}, {len(filter_object_ids)=}, {len(existing_object_ids)=}, {save_file_path=}")
+def concat_light_curves(N=None, skip=None, filter_object_ids=[], save_file_path=None, progress_bar=False):
+    print(f"DEBUG concat_light_curves args: {N=}, {skip=}, {len(filter_object_ids)=}, {save_file_path=}")
 
     if skip:
         filter_object_ids = filter_object_ids[skip:]
@@ -36,7 +36,7 @@ def concat_light_curves(N=None, skip=None, filter_object_ids=[], existing_object
         print(f"DEBUG concat_light_curves Loading LC data from {save_file_path}")
         s82_objs = load_s82_from_hdf5(save_file_path)
         print(f"DEBUG Loaded {len(s82_objs)} objs from {save_file_path}")
-        s82_objs = [obj for obj in s82_objs if obj['object_id'] in filter_object_ids and obj['object_id'] not in existing_object_ids]
+        s82_objs = [obj for obj in s82_objs if obj['object_id'] in filter_object_ids]
         return s82_objs
     else: 
         s82_objs = []
@@ -52,7 +52,7 @@ def concat_light_curves(N=None, skip=None, filter_object_ids=[], existing_object
     ztf = pd.read_parquet(f"data/S82/dr16s82_ZuberLCRaw.parquet")
 
     # Find elements in cat where objectId exists in the list of objectId of sdss
-    match_object_ids = set(sdss.objectId) & set(filter_object_ids) - set(existing_object_ids)
+    match_object_ids = set(sdss.objectId) & set(filter_object_ids)
     matching_indices = cat[cat.objectId.isin(match_object_ids)].index
 
     cat = cat.loc[matching_indices]
