@@ -289,6 +289,8 @@ def run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model='Flatw0waCDM',
         display_results_summary(flat_samples, cosmo_model)
         plot_dynesty(results, cosmo_model)
 
+        samples = sampler.get_chain(flat=True)
+
         # Check convergence using autocorrelation time
         try:
             tau = sampler.get_autocorr_time(quiet=True)
@@ -309,7 +311,7 @@ def run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model='Flatw0waCDM',
         median_samples = np.median(samples, axis=0)
         logZ = logZerr = None  # Not available from emcee
     else:
-        raise ValueError("fitting_method must be 'dynesty', or 'ultranest'")
+        raise ValueError("fitting_method must be 'emcee', 'dynesty', or 'ultranest'")
 
     params = dict(zip(model_labels, median_samples))
 
