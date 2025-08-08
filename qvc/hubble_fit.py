@@ -289,27 +289,6 @@ def run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model='Flatw0waCDM',
         display_results_summary(flat_samples, cosmo_model)
         plot_dynesty(results, cosmo_model)
 
-        samples = sampler.get_chain(flat=True)
-
-        # Check convergence using autocorrelation time
-        try:
-            tau = sampler.get_autocorr_time(quiet=True)
-            converged = np.all((sampler.iteration > 50 * tau) & (tau * 100 < sampler.iteration))
-            print(f"Autocorr time: {tau}")
-            if converged:
-                print("MCMC appears to have converged.")
-            else:
-                print("Warning: MCMC may not have converged. Consider running for more steps.")
-        except Exception as e:
-            print(f"Could not compute autocorrelation time: {e}")
-        
-        # save sampler and samples
-        with open(f"data/sampler_emcee_{cosmo_model}_{'sna' if only_sna else 'agn'}.pkl", "wb") as f:
-            pickle.dump(sampler, f)
-        np.save(f"data/samples_emcee_{cosmo_model}_{'sna' if only_sna else 'agn'}.npy", samples)
-
-        median_samples = np.median(samples, axis=0)
-        logZ = logZerr = None  # Not available from emcee
     else:
         raise ValueError("fitting_method must be 'emcee', 'dynesty', or 'ultranest'")
 
