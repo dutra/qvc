@@ -32,7 +32,7 @@ class MyMultibandContiBLR(tinygp.kernels.Kernel):
     amplitudes: jnp.ndarray
     amplitudes_blr: jnp.ndarray
     lag_blr: jnp.ndarray
-    tau_drw: jnp.ndarray
+    tau_drw: float
     w: jnp.ndarray
     s_b: jnp.ndarray
 
@@ -56,10 +56,10 @@ class MyMultibandContiBLR(tinygp.kernels.Kernel):
         t1, b1 = X1
         t2, b2 = X2
 
-        amplitudes_b1 = jnp.sqrt( (self.amplitudes[b1])**2 * self.tau_drw[b1] )
-        amplitudes_b2 = jnp.sqrt( (self.amplitudes[b2])**2 * self.tau_drw[b2] )
-        amplitudes_blr_b1 = jnp.sqrt( (self.amplitudes_blr[b1])**2 * self.tau_drw[b1] )
-        amplitudes_blr_b2 = jnp.sqrt( (self.amplitudes_blr[b2])**2 * self.tau_drw[b2] )
+        amplitudes_b1 = jnp.sqrt( (self.amplitudes[b1])**2 * self.tau_drw )
+        amplitudes_b2 = jnp.sqrt( (self.amplitudes[b2])**2 * self.tau_drw )
+        amplitudes_blr_b1 = jnp.sqrt( (self.amplitudes_blr[b1])**2 * self.tau_drw )
+        amplitudes_blr_b2 = jnp.sqrt( (self.amplitudes_blr[b2])**2 * self.tau_drw )
 
         # a is cont at t1
         # b is blr at t1
@@ -70,24 +70,24 @@ class MyMultibandContiBLR(tinygp.kernels.Kernel):
             * (1 + self.s_b[b2])
             * amplitudes_b1
             * amplitudes_b2
-            * self.k(t1, t2, self.tau_drw[b1])
+            * self.k(t1, t2, self.tau_drw)
         )
         cov_ad = (
             (1 + self.s_b[b1])
             * amplitudes_b1
             * amplitudes_blr_b2
-            * self.k(t1, t2 - self.lag_blr[b2], self.tau_drw[b2])
+            * self.k(t1, t2 - self.lag_blr[b2], self.tau_drw)
         )
         cov_bc = (
             amplitudes_blr_b1
             * (1 + self.s_b[b2])
             * amplitudes_b2
-            * self.k(t1 - self.lag_blr[b1], t2, self.tau_drw[b1])
+            * self.k(t1 - self.lag_blr[b1], t2, self.tau_drw)
         )
         cov_bd = (
             amplitudes_blr_b1
             * amplitudes_blr_b2
-            * self.k(t1 - self.lag_blr[b1], t2 - self.lag_blr[b2], self.tau_drw[b2])
+            * self.k(t1 - self.lag_blr[b1], t2 - self.lag_blr[b2], self.tau_drw)
         )
 
         return cov_ac + cov_ad + cov_bc + cov_bd
@@ -249,9 +249,8 @@ class MyMultiVarModel(MultiVarModel):
         eta_tau2 = params["eta_tau2"]
         lam_s = 2500
         eta_break = 1.0
-        lam_rf_center = jnp.full_like(self.lam_rf, jnp.mean(self.lam_rf))
-        log_tau_band = params["log_tau_drw0"] + jnp.log(10) * log_broken_pl(lam_rf_center, lam_s, eta_tau1, eta_tau2, eta_break)
-        return log_tau_band
+        log_tau_band = params["log_tau_drw0"] + jnp.log(10) * log_broken_pl(self.lam_rf, lam_s, eta_tau1, eta_tau2, eta_break)
+        return jnp.mean(log_tau_band)
 
     def my_amp_transform(self, params: dict[str, JAXArray]) -> JAXArray:
         eta_A1 = params["eta_A1"]
