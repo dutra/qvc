@@ -51,6 +51,7 @@ def mle(Model, nBand, X, y, yerr, clean_bands, z, latent=False, fixed=True):
             "poly1": 0.0,
             "mean": jnp.full(nBand, 0.0),
             "log_amp_delta_blr": jnp.full(nBand, -1.0),
+            "log_lag_blr": jnp.full(nBand, jnp.log(1e2)),
             "lag0": 2.0,
             "lag_beta": 4.0 / 3.0,
             "eta_A1": 0.0,
@@ -60,8 +61,6 @@ def mle(Model, nBand, X, y, yerr, clean_bands, z, latent=False, fixed=True):
             "log_jitter": jnp.full(nBand, 1e-6)
         }
     )
-    if latent:
-        init_params["log_lag_blr"] = jnp.full(nBand, jnp.log(1e2))
 
     if not fixed:
         m = Model(
@@ -143,8 +142,8 @@ def numpyro_joint_model(models, means, batch_data, latent=False, bwb=False, f_ho
             # Parameters with shape [B, nBands]
             mean = numpyro.sample("mean", dist.Normal(mean_mean, 0.2))
             log_amp_delta_blr = numpyro.sample("log_amp_delta_blr", dist.Normal(log_amp_delta_blr_mean, 2.0))
-            if latent:
-                log_lag_blr = numpyro.sample("log_lag_blr", dist.Normal(log_lag_blr_mean, 4.0))
+            log_lag_blr = numpyro.sample("log_lag_blr", dist.Normal(log_lag_blr_mean, 1.0))
+            #log_lag_blr = numpyro.deterministic("log_lag_blr", jnp.zeros_like(mean))
             log_jitter = numpyro.sample("log_jitter", dist.Normal(log_jitter_mean + 1e-6, 1.0))
 
     def run_batch(data, i):
@@ -152,12 +151,12 @@ def numpyro_joint_model(models, means, batch_data, latent=False, bwb=False, f_ho
         params = {
             "log_tau_drw0": log_tau_drw0[i],
             "log_sigma_hat0": log_sigma_hat0[i],
-            #"log_tau_drw_blr": log_tau_drw_blr[i],
             "alpha_host": alpha_host[i],
             "f_host": f_host[i],
             "poly1": poly1[i],
             "mean": mean[i],
             "log_amp_delta_blr": log_amp_delta_blr[i],
+            "log_lag_blr": log_lag_blr[i],
             "log_jitter": log_jitter[i],
             "lag0": lag0[i],
             "lag_beta": lag_beta[i],
@@ -165,8 +164,6 @@ def numpyro_joint_model(models, means, batch_data, latent=False, bwb=False, f_ho
             "bwb_beta": bwb_beta[i],
             **powerlaw_samples,
         }
-        if latent:
-            params["log_lag_blr"] = log_lag_blr[i]
 
         m = models[i]
         log_prob = m.log_prob(params)
@@ -453,8 +450,7 @@ if __name__ == '__main__':
     mean_mean = jnp.stack([jnp.array(obj['bestP']['mean']) for obj in batch_data])                            # (B, 5)
     lag0_mean = jnp.stack([jnp.array(obj['bestP']['lag0']) for obj in batch_data])                            # (B, 5)
     lag_beta_mean = jnp.stack([jnp.array(obj['bestP']['lag_beta']) for obj in batch_data])                    # (B, 5)
-    if args.latent:
-        log_lag_blr_mean = jnp.stack([jnp.array(obj['bestP']['log_lag_blr']) for obj in batch_data])
+    log_lag_blr_mean = jnp.stack([jnp.array(obj['bestP']['log_lag_blr']) for obj in batch_data])
     log_jitter_mean = jnp.stack([jnp.array(obj['bestP']['log_jitter']) + jnp.mean(obj['yerr']) for obj in batch_data]) # (B, 5)
         
     if args.f_host_shen11:
@@ -477,7 +473,7 @@ if __name__ == '__main__':
         "mean_mean": mean_mean,
         "lag0_mean": lag0_mean,
         "lag_beta_mean": lag_beta_mean,
-        "log_lag_blr_mean": log_lag_blr_mean if args.latent else None,
+        "log_lag_blr_mean": log_lag_blr_mean,
         "log_jitter_mean": log_jitter_mean,
         "f_host": f_host
     }

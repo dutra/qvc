@@ -33,16 +33,14 @@ class MyMultibandContiBLR(tinygp.kernels.Kernel):
     amplitudes_blr: jnp.ndarray
     lag_blr: jnp.ndarray
     tau_drw: jnp.ndarray
-    tau_drw_blr: float
     w: jnp.ndarray
     s_b: jnp.ndarray
 
-    def __init__(self, amplitudes, amplitudes_blr, lag_blr, taus, tau_drw_blr, log_w, s_b) -> None:
+    def __init__(self, amplitudes, amplitudes_blr, lag_blr, taus, log_w, s_b) -> None:
         self.amplitudes = amplitudes
         self.amplitudes_blr = amplitudes_blr
         self.lag_blr = jnp.zeros_like(lag_blr)
         self.tau_drw = taus
-        self.tau_drw_blr = tau_drw_blr
         self.w = jnp.exp(log_w)
         self.s_b = s_b
 
@@ -85,8 +83,8 @@ class MyMultibandContiBLR(tinygp.kernels.Kernel):
 
         amplitudes_b1 = jnp.sqrt( (self.amplitudes[b1])**2 * self.tau_drw[b1] )
         amplitudes_b2 = jnp.sqrt( (self.amplitudes[b2])**2 * self.tau_drw[b2] )
-        amplitudes_blr_b1 = jnp.sqrt( (self.amplitudes_blr[b1])**2 * self.tau_drw_blr )
-        amplitudes_blr_b2 = jnp.sqrt( (self.amplitudes_blr[b2])**2 * self.tau_drw_blr )
+        amplitudes_blr_b1 = jnp.sqrt( (self.amplitudes_blr[b1])**2 * self.tau_drw[b1] )
+        amplitudes_blr_b2 = jnp.sqrt( (self.amplitudes_blr[b2])**2 * self.tau_drw[b2] )
 
         # a is cont at t1
         # b is blr at t1
@@ -108,7 +106,7 @@ class MyMultibandContiBLR(tinygp.kernels.Kernel):
             * amplitudes_blr_b2
             * jnp.sqrt(
                 self.k(t2 - t1, self.tau_drw[b1])
-                * self.k(t2 - t1 - self.lag_blr[b2], self.tau_drw_blr)
+                * self.k(t2 - t1 - self.lag_blr[b2], self.tau_drw[b2])
             )
         )
         cov_bc = (
@@ -116,7 +114,7 @@ class MyMultibandContiBLR(tinygp.kernels.Kernel):
             * (1 + self.s_b[b2])
             * amplitudes_b2
             * jnp.sqrt(
-                self.k(t2 - t1 - self.lag_blr[b1], self.tau_drw_blr)
+                self.k(t2 - t1 - self.lag_blr[b1], self.tau_drw[b1])
                 * self.k(t2 - t1, self.tau_drw[b2])
             )
         )
@@ -124,8 +122,8 @@ class MyMultibandContiBLR(tinygp.kernels.Kernel):
             amplitudes_blr_b1
             * amplitudes_blr_b2
             * jnp.sqrt(
-                self.k(t2 - t1 - self.lag_blr[b1], self.tau_drw_blr)
-                * self.k(t2 - t1 - self.lag_blr[b2], self.tau_drw_blr)
+                self.k(t2 - t1 - self.lag_blr[b1], self.tau_drw[b1])
+                * self.k(t2 - t1 - self.lag_blr[b2], self.tau_drw[b2])
             )
         )
 
@@ -267,15 +265,21 @@ class MyMultiVarModel(MultiVarModel):
         # BWB
         s_b = params["bwb_alpha"] + params["bwb_beta"] * jnp.log(self.lam_rf / 2500.0)  # shape (n_band,)
 
+        # TODO: Change log_sigma_hat to log_sigma
+
         kernel = MyMultibandContiBLR(
             amplitudes=jnp.exp(log_sigma_hat_band),
             taus=jnp.exp(log_tau_band_rf),
             amplitudes_blr=jnp.exp(log_sigma_hat_band_blr),
-            tau_drw_blr=jnp.exp(params["log_tau_drw0"]),
-            lag_blr=jnp.zeros_like(log_sigma_hat_band_blr),
+            lag_blr=jnp.exp(params["log_lag_blr"]),
             log_w=0,
             s_b=s_b
         )
+
+        # Check if kernel covariance is symmetric
+        cov_matrix = kernel((t[inds], band[inds]), (t[inds], band[inds]))
+        is_symmetric = jnp.allclose(cov_matrix, cov_matrix.T, atol=1e-5)
+        jax.debug.print("Kernel covariance symmetric: {sym}", sym=is_symmetric)
 
         return (
             GaussianProcess(
