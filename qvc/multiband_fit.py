@@ -131,10 +131,11 @@ def numpyro_joint_model(models, means, batch_data, latent=False, bwb=False, f_ho
         #lag0 = numpyro.sample("lag0", dist.TruncatedNormal(2.0, 10.0, low=0))
         lag0 = numpyro.sample("lag0", dist.TruncatedNormal(10.0, 5.0, low=0))
         lag_beta = numpyro.sample("lag_beta", dist.TruncatedNormal(4/3, 0.2, low=0))
-        bwb_alpha = numpyro.sample("bwb_alpha", dist.Normal(0.0, 0.1, low=0))
+        bwb_alpha = numpyro.sample("bwb_alpha", dist.Normal(0.2, 0.1))
         bwb_beta = numpyro.sample("bwb_beta", dist.TruncatedNormal(0.2, 0.1, low=0))
         if bwb is False:
-            bwb_A = numpyro.deterministic("bwb_A", jnp.zeros(batch_size))
+            bwb_A = numpyro.deterministic("bwb_alpha", jnp.zeros(batch_size))
+            bwb_A = numpyro.deterministic("bwb_beta", jnp.zeros(batch_size))
 
 
     with numpyro.plate("objects", batch_size, dim=-2):
@@ -160,7 +161,8 @@ def numpyro_joint_model(models, means, batch_data, latent=False, bwb=False, f_ho
             "log_jitter": log_jitter[i],
             "lag0": lag0[i],
             "lag_beta": lag_beta[i],
-            "bwb_A": bwb_A[i],
+            "bwb_alpha": bwb_alpha[i],
+            "bwb_beta": bwb_beta[i],
             **powerlaw_samples,
         }
         if latent:
