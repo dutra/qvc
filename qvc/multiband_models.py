@@ -262,8 +262,7 @@ class MyMultiVarModel(MultiVarModel):
             amplitudes=jnp.exp(log_sigma_hat_band),
             taus=jnp.exp(log_tau_band_rf),
             amplitudes_blr=jnp.exp(log_sigma_hat_band_blr),
-            tau_drw_blr=jnp.exp(params["log_tau_drw0"] - jnp.log(1 + self.z)), # Assume DRW tau is 2500AA
-            #log_w=params["log_w"] - jnp.log(1 + self.z),
+            tau_drw_blr=jnp.exp(params["log_tau_drw0"]),
             lag_blr=jnp.zeros_like(log_sigma_hat_band_blr),
             log_w=0
         )
@@ -294,7 +293,7 @@ class MyMultiVarModel(MultiVarModel):
         self, X: JAXArray, y: JAXArray, params: dict[str, JAXArray]
     ) -> JAXArray:
         # Compute BWB slope for each band
-        s_b = params["bwb_A"] * jnp.log(self.lam_rf / 2500.0)
+        s_b = params["bwb_a"] + params["bwb_b"] * jnp.log(self.lam_rf / 2500.0)
 
         # Apply band-wise correction
         correction = s_b[X[1]] * y
@@ -303,7 +302,7 @@ class MyMultiVarModel(MultiVarModel):
     def inverse_bwb_transform(
         self, X: JAXArray, params: dict[str, JAXArray]
     ) -> JAXArray:
-        s_b = params["bwb_A"] * jnp.log(self.lam_rf / 2500.0)
+        s_b = params["bwb_a"] + params["bwb_b"] * jnp.log(self.lam_rf / 2500.0)
         return 1.0 / (1.0 - s_b[X[1]])
 
     def my_amp_transform_blr(self, params: dict[str, JAXArray]) -> JAXArray:
@@ -314,7 +313,7 @@ class MyMultiVarModel(MultiVarModel):
         eta_tau2 = params["eta_tau2"]
         lam_s = 2500
         eta_break = 1.0
-        log_tau_band_RF = params["log_tau_drw0"] - jnp.log(1 + self.z) + jnp.log(10) * log_broken_pl(self.lam_rf, lam_s, eta_tau1, eta_tau2, eta_break)
+        log_tau_band_RF = params["log_tau_drw0"] + jnp.log(10) * log_broken_pl(self.lam_rf, lam_s, eta_tau1, eta_tau2, eta_break)
         return log_tau_band_RF
 
     def my_amp_transform(self, params: dict[str, JAXArray]) -> JAXArray:
@@ -432,7 +431,7 @@ class MyMultiVarModelLatent(MyMultiVarModel):
 
         amp_conti = jnp.exp(log_amps)
         amp_blr = jnp.exp(log_amps_blr)
-        lag_blr = jnp.exp(params["log_lag_blr"] - jnp.log(1 + self.z))[band_obs]
+        lag_blr = jnp.exp(params["log_lag_blr"])[band_obs]
 
         # Noise (diagonal)
         noise_diag = self.diag[inds]
@@ -545,7 +544,7 @@ class MyMultiVarModelLatent(MyMultiVarModel):
         # Prepare new latent inputs (times, bands, lags)
         X_new_lagged, _ = self.my_lag_transform(X_new, self.has_lag, params)
         t_new, band_new = X_new_lagged
-        lag_blr = jnp.exp(params["log_lag_blr"] - jnp.log(1 + self.z))[band_new]
+        lag_blr = jnp.exp(params["log_lag_blr"])[band_new]
 
         log_amps = self.my_amp_transform(params)
         log_amps_blr = self.my_amp_transform_blr(params)

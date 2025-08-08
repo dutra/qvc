@@ -633,8 +633,6 @@ def process_samples(flat_samples, data, percentiles=[16, 50, 84]):
         result[f"log_sigma_band_{band}_err"] = err
 
 
-
-
     # Other special params    
     # log_sigma_hat0_diluted
     host_frac = flat_samples["f_host"] * (lambda_ref / 5100.0) ** flat_samples["alpha_host"]
@@ -644,6 +642,7 @@ def process_samples(flat_samples, data, percentiles=[16, 50, 84]):
     result['log_sigma_hat0_diluted'], result['log_sigma_hat0_diluted_err'] = sym_percentile(samples_log_sigma_hat0_diluted)
 
     # log_sigma_hat_UV
+    #TODO: The tau here is not RF
     samples_log_sigma_hat_UV = flat_samples["log_sigma_hat0"] / np.log(10) + log_broken_pl(lambda_ref, lam_s, eta_A1, eta_A2, eta_break)
     result['log_sigma_hat_UV'], result['log_sigma_hat_UV_err'] = sym_percentile(samples_log_sigma_hat_UV)
 

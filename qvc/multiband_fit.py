@@ -131,7 +131,8 @@ def numpyro_joint_model(models, means, batch_data, latent=False, bwb=False, f_ho
         #lag0 = numpyro.sample("lag0", dist.TruncatedNormal(2.0, 10.0, low=0))
         lag0 = numpyro.sample("lag0", dist.TruncatedNormal(10.0, 5.0, low=0))
         lag_beta = numpyro.sample("lag_beta", dist.TruncatedNormal(4/3, 0.2, low=0))
-        bwb_A = numpyro.sample("bwb_A", dist.TruncatedNormal(0.2, 0.1, low=0))
+        bwb_alpha = numpyro.sample("bwb_alpha", dist.Normal(0.0, 0.1, low=0))
+        bwb_beta = numpyro.sample("bwb_beta", dist.TruncatedNormal(0.2, 0.1, low=0))
         if bwb is False:
             bwb_A = numpyro.deterministic("bwb_A", jnp.zeros(batch_size))
 
