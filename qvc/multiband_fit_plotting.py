@@ -89,15 +89,15 @@ def plot_posterior(samples_flat, data, bins=20):
                         quantiles=[0.16, 0.5, 0.84], bins=bins)
 
     # Save plot
-    output_dir = f"posterior_plots/{prefix}/{prefix}_{suffix}"
+    output_dir = f"results/posterior_plots/{prefix}"
     os.makedirs(output_dir, exist_ok=True)
-    save_path = os.path.join(output_dir, f"{z:.1f}_{object_id}_posterior.png")
+    save_path = os.path.join(output_dir, f"{z:.1f}_{object_id}_posterior_{suffix}.png")
     plt.savefig(save_path, dpi=100)
     plt.close(fig)
     logging.info(f"Saved posterior corner plot to {save_path}")
     return fig
 
-def save_combined_plot(samples, model, X, y, yerr, band_idx, data, fit_bestP=False, psd_results=None):
+def save_combined_plot(samples, model, X, y, yerr, band_idx, data, psd_results=None):
     logging.info("Saving combined plot")
 
     clean_bands = data['clean_bands']
@@ -116,13 +116,9 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, data, fit_bestP=Fal
         # Generate test times for predictions
         t_test = np.linspace(t.min(), t.max(), 1000)
         # Compute predictions using the model
-        if fit_bestP:
-            result = model.pred(samples, (t_test, jnp.full_like(t_test, n, dtype=int)))
-            #print(mu, std, '!!!!!!!!!!!!!!')
-        else:
-            posterior_median = {k: np.median(v, axis=0) for k, v in samples.items()}
-            result = model.pred(posterior_median, (t_test, jnp.full_like(t_test, n, dtype=int)))
-            #print(mu, std, '!!!!!!!!!!!!!!')
+        posterior_median = {k: np.median(v, axis=0) for k, v in samples.items()}
+        result = model.pred(posterior_median, (t_test, jnp.full_like(t_test, n, dtype=int)))
+        #print(mu, std, '!!!!!!!!!!!!!!')
 
         # Plot the predictions
         if len(result) == 2:
@@ -159,10 +155,7 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, data, fit_bestP=Fal
             freqs = np.logspace(-4, -1, 250)
             psd = LombScargle(t_band[mask], y_band[mask]).power(freqs, normalization='psd')
             # Estimate the noise level (mean of error bars squared)
-            if fit_bestP:
-                noise_var = np.mean(yerr[m][mask] ** 2) #+ np.exp(np.median(2 * samples['log_jitter'], axis=0)) #[m]
-            else:
-                noise_var = np.mean(yerr[m][mask] ** 2) #+ np.exp(2 * np.median(samples['log_jitter'], axis=0))[n]
+            noise_var = np.mean(yerr[m][mask] ** 2) #+ np.exp(2 * np.median(samples['log_jitter'], axis=0))[n]
             # The Lomb-Scargle normalization is in mag^2/days, so subtract noise variance
             psd = np.clip(psd - noise_var, a_min=1e-10, a_max=None)
             # Bin the PSD in log-frequency space and plot it
@@ -218,12 +211,9 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, data, fit_bestP=Fal
     plt.tight_layout()
 
     # Save the plot as a PNG file
-    output_dir = f"light_curves_fits/{prefix}/{prefix}_{suffix}"
+    output_dir = f"results/light_curves_fits/{prefix}"
     os.makedirs(output_dir, exist_ok=True)
-    if fit_bestP:
-        fpath = os.path.join(output_dir, f'{data["z"]:.1f}_{object_id}_combined_plot_MLE.png')
-    else:
-        fpath = os.path.join(output_dir, f'{data["z"]:.1f}_{object_id}_combined_plot.png')
+    fpath = os.path.join(output_dir, f'{data["z"]:.1f}_{object_id}_light_curve_{suffix}.png')
     logging.info(f"Saving figure to {fpath}")
     plt.savefig(fpath, dpi=120)
     plt.close(fig)
@@ -255,9 +245,9 @@ def plot_mcmc_traces(samples_dict, data):
     axes[-1].set_xlabel("Sample index")
     plt.tight_layout()
 
-    output_dir = f"mcmc_traces/{prefix}/{prefix}_{suffix}/"
+    output_dir = f"results/mcmc_traces/{prefix}/"
     os.makedirs(output_dir, exist_ok=True)
-    save_path = os.path.join(output_dir, f"{data['z']:.1f}_{data['object_id']}_mcmc_traces.png")
+    save_path = os.path.join(output_dir, f"{data['z']:.1f}_{data['object_id']}_mcmc_traces_{suffix}.png")
     plt.savefig(save_path, dpi=100)
     logging.info(f"Saved trace plot to {save_path}")
 

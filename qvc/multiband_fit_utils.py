@@ -53,7 +53,7 @@ def select_samples_for_object(samples_flat, obj_index, universal_params):
         Dictionary with selected samples for the object.
     """
     obj_samples = {
-            k: v[:, obj_index] if k not in ['eta_A1', 'eta_A2', 'eta_tau1', 'eta_tau2', 'eta_break'] else v
+            k: v[:, obj_index] if k not in ['eta_A1', 'eta_A2', 'eta_tau1', 'eta_tau2', 'eta_break', 'lam_s'] else v
             for k, v in samples_flat.items()
         }    
 
@@ -98,7 +98,7 @@ def clean_grouped_samples(samples_grouped, obj_index, batch_data_len):
     - Universal params kept as-is (flattened over chains)
     - Object-specific params indexed [:, :, i]
     """
-    universal_keys = ['eta_A1', 'eta_A2', 'eta_tau1', 'eta_tau2', 'eta_break']
+    universal_keys = ['eta_A1', 'eta_A2', 'eta_tau1', 'eta_tau2', 'eta_break', 'lam_s']
 
     # Print shapes for inspection
     for k, v in samples_grouped.items():
@@ -449,9 +449,9 @@ def save_all_samples_to_hdf5(samples):
     Args:
         samples (dict): Dictionary containing MCMC samples.
     """
-    output_dir=f"samples/{prefix}/"
+    output_dir=f"results/samples/{prefix}/"
     os.makedirs(output_dir, exist_ok=True)
-    file_path = os.path.join(output_dir, f"{prefix}_{suffix}_all.h5")
+    file_path = os.path.join(output_dir, f"all_{suffix}.h5")
 
     logging.info(f"Saving all samples to {file_path}")
 
@@ -469,9 +469,9 @@ def save_obj_samples_to_hdf5(samples, object_id):
         object_id (str): The object ID for which the samples belong.
         output_dir (str): Directory where the HDF5 files will be saved.
     """
-    output_dir=f"samples/{prefix}/{suffix}"
+    output_dir=f"results/samples/{prefix}"
     os.makedirs(output_dir, exist_ok=True)
-    file_path = os.path.join(output_dir, f"{object_id}.h5")
+    file_path = os.path.join(output_dir, f"{object_id}_{suffix}.h5")
 
     logging.info(f"Saving samples for object_id {object_id} to {file_path}")
 
@@ -490,7 +490,7 @@ def delete_file(file_path):
     else:
         logging.info(f"File does not exist; not deleting: {file_path}")
 
-def save_quasar_list_hdf5(quasars, file_path, ignored_keys=None, size_threshold=1024):
+def save_quasar_list_hdf5(quasars, ignored_keys=None, size_threshold=1024):
     """
     Save a list of quasar dictionaries to an HDF5 file, overwriting the file if it exists.
     
@@ -502,15 +502,19 @@ def save_quasar_list_hdf5(quasars, file_path, ignored_keys=None, size_threshold=
     - Prints progress in the form 'i/N: Saved quasar <object_id>'.
     """
     ignored_keys = set(ignored_keys or [])
-    os.makedirs(os.path.dirname(file_path), exist_ok=True)
+    
     string_dt = h5py.string_dtype(encoding="utf-8")
 
     total = len(quasars)
+    output_dir=f"results/data/{prefix}"
+    os.makedirs(output_dir, exist_ok=True)
+    file_path = os.path.join(output_dir, f"{suffix}.h5")
     logging.info(f"Saving {total} quasars to {file_path}")
+
     with h5py.File(file_path, "w") as hdf:
-        for i, quasar in enumerate(quasars, start=1):
+        for i, quasar in enumerate(quasars):
             object_id = str(quasar["object_id"])
-            logging.info(f"Saving quasar {object_id} to {file_path}")
+            logging.info(f"Writing quasar {object_id} to {file_path}")
             
             group = hdf.create_group(object_id)
             for key, value in quasar.items():
@@ -540,7 +544,7 @@ def save_quasar_list_hdf5(quasars, file_path, ignored_keys=None, size_threshold=
                     group.attrs[key] = arr
             
             # Print progress
-            logging.info(f"{i}/{total}: Saved quasar {object_id}")
+            logging.info(f"{i+1}/{total}: Saved quasar {object_id}")
 
     logging.info("All quasars saved successfully.")
 
@@ -566,7 +570,7 @@ def save_quasar_list_hdf5(quasars, file_path, ignored_keys=None, size_threshold=
 #     log_f -= (delta / ds) * jnp.log10(2.0)  # normalize to 0 at lam_s
 #     return log_f
 
-def log_broken_pl(lam, lam_s, d1, d2, ds=4.0):
+def log_broken_pl(lam, lam_s, d1, d2, ds=1.0):
     """
     Log10 of a smooth broken power-law, normalized to 0 at lam_s.
     Fully log-domain for stability and NumPyro compatibility.
@@ -618,7 +622,7 @@ def process_samples(flat_samples, data, percentiles=[16, 50, 84]):
     eta_tau2 = np.asarray(flat_samples["eta_tau2"])
     eta_break = np.asarray(flat_samples["eta_break"])
     lambda_ref = 2500
-    lam_s = 2500
+    lam_s = np.asarray(flat_samples["lam_s"])
 
     log_sigma_band = []
     for band in data['clean_bands']:
@@ -680,7 +684,7 @@ def compute_psd_from_samples(samples, clean_bands, num_points=1000, time_range=(
     eta_A1 = np.median(samples["eta_A1"])
     eta_A2 = np.median(samples["eta_A2"])
     eta_break = np.median(samples["eta_break"])
-    lam_s = 2500 #np.median(samples["lam_s"])
+    lam_s = np.median(samples["lam_s"])
     eta_tau1 = np.median(samples["eta_tau1"])
     eta_tau2 = np.median(samples["eta_tau2"])
 
