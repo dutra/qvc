@@ -603,7 +603,7 @@ def process_samples(flat_samples, data, percentiles=[16, 50, 84]):
     # generalized per-band computation
     # Power Law Params
     log_sigma_hat0 = np.asarray(flat_samples["log_sigma_hat0"])
-    log_sigma0 = np.asarray(flat_samples["log_sigma_hat0"])
+    log_sigma0 = np.asarray(flat_samples["log_sigma0"])
     log_tau_drw0 = np.asarray(flat_samples["log_tau_drw0"])
     eta_A1 = np.asarray(flat_samples["eta_A1"])
     eta_A2 = np.asarray(flat_samples["eta_A2"])
