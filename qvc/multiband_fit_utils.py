@@ -610,14 +610,24 @@ def process_samples(flat_samples, data, percentiles=[16, 50, 84]):
     log_sigma_band = []
     for band in data['clean_bands']:
         lam_eff = lambda_pivot[band]
-        val = log_sigma_hat0 / np.log(10) + log_broken_pl(lam_eff, lam_s, eta_A1, eta_A2, eta_break)
+        val = log_sigma0 / np.log(10) + log_broken_pl(lam_eff, lam_s, eta_A1, eta_A2, eta_break)
         log_sigma_band.append(val)
     log_sigma_band = np.array(log_sigma_band).T
+
+    log_tau_band = []
+    for band in data['clean_bands']:
+        lam_eff = lambda_pivot[band]
+        val = log_tau_drw0 / np.log(10) - np.log10(1 + data['z']) + log_broken_pl(lam_eff, lam_s, eta_A1, eta_A2, eta_break)
+        log_tau_band.append(val)
+    log_tau_band = np.array(log_tau_band).T
 
     for i, band in enumerate(data['clean_bands']):
         median, err = sym_percentile(log_sigma_band[:, i])
         result[f"log_sigma_band_{band}"] = median
         result[f"log_sigma_band_{band}_err"] = err
+        median, err = sym_percentile(log_tau_band[:, i])
+        result[f"log_tau_band_{band}_RF"] = median
+        result[f"log_tau_band_{band}_RF_err"] = err
 
 
     # Other special params    
