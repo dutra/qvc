@@ -54,9 +54,9 @@ def log_likelihood(theta, cosmo_model,
     if cosmo_model == 'FlatwCDM':
         cosmo = FlatwCDM(H0=params['H0'], Om0=params['Om0'], w0=params['w0'])
     elif cosmo_model == 'Flatw0waCDM':
-        a_pivot = 1 / (1 + z_agn_pivot)
-        wp = params['w0'] + (1 - a_pivot) * params['wa']
-        cosmo = FlatwpwaCDM(H0=params['H0'], Om0=params['Om0'], wp=wp, wa=params['wa'], zp=z_agn_pivot)
+        #a_pivot = 1 / (1 + z_agn_pivot)
+        #wp = params['w0'] + (1 - a_pivot) * params['wa']
+        cosmo = FlatwpwaCDM(H0=params['H0'], Om0=params['Om0'], wp=params['wp'], wa=params['wa'], zp=z_agn_pivot)
         #cosmo = Flatw0waCDM(H0=params['H0'], Om0=params['Om0'], w0=params['w0'], wa=params['wa'])
     elif cosmo_model == 'FlatLambdaCDM':
         cosmo = FlatLambdaCDM(H0=params['H0'], Om0=params['Om0'])
@@ -89,30 +89,34 @@ def log_likelihood(theta, cosmo_model,
     z = _agn_data['z']
     m_obs = _agn_data['apparent_mag_2500']
     m_err = _agn_data['apparent_mag_2500_err']
-    log_sigma_hat = _agn_data['log_sigma_hat_UV']
-    log_sigma_hat_err = _agn_data['log_sigma_hat_UV_err']
+    log_sigma0 = _agn_data['log_sigma0']
+    log_sigma0_err = _agn_data['log_sigma0_err']
     log_tau_UV_RF = _agn_data['log_tau_UV_RF']
     log_tau_UV_RF_err = _agn_data['log_tau_UV_RF_err']
     alpha_nu = _agn_data['alpha_nu']
     alpha_nu_err = _agn_data['alpha_nu_err']
+    f_host = _agn_data['f_host']
+    f_host_err = _agn_data['f_host_err']
 
     mu_cosmo = cosmo.distmod(z).value
     M_pred = M_model_agn(params['M0_agn'], 
-                         params['log_sigma_hat_sq_break'], 
+                         params['log_sigma0_break'], 
                          params['eta_A1_agn'], params['eta_A2_agn'], 
                          params['eta_break_agn'],
                          params['beta_agn'], 
-                         log_sigma_hat, log_tau_UV_RF)
+                         log_sigma0, log_tau_UV_RF,
+                         f_host)
     
 
     mu_pred = m_obs - M_pred - (K_corr(z, alpha_nu) - K_corr(2, alpha_nu)) 
     M_i_pred_err = M_model_agn_err(params['M0_agn'],
-                        params['log_sigma_hat_sq_break'],
+                        params['log_sigma0_break'],
                         params['eta_A1_agn'], params['eta_A2_agn'], 
                         params['eta_break_agn'],
                         params['beta_agn'],
-                        log_sigma_hat, log_sigma_hat_err,
-                        log_tau_UV_RF_err)
+                        log_sigma0, log_sigma0_err,
+                        log_tau_UV_RF_err,
+                        f_host_err)
     
     mu_err = np.sqrt(
         m_err**2 +
@@ -201,7 +205,8 @@ def run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model='Flatw0waCDM',
                                         'm_b_corr', 'x1', 'c', 'biasCor_m_b', 'HOST_LOGMASS']].copy()
     df_agn_filtered = df_agn[['z', 'apparent_mag_2500', 'apparent_mag_2500_err',
                               'alpha_nu', 'alpha_nu_err',
-                              'log_sigma_hat_UV', 'log_sigma_hat_UV_err', 'log_tau_UV_RF', 'log_tau_UV_RF_err']].copy()
+                              'log_sigma0', 'log_sigma0_err', 'log_tau_UV_RF', 'log_tau_UV_RF_err',
+                              'f_host', 'f_host_err']].copy()
 
     if completeness:
         completeness_params = get_completeness_function_2d(df_agn_filtered)
@@ -209,9 +214,15 @@ def run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model='Flatw0waCDM',
         completeness_params = None
 
     z_pivot = (1 / np.exp(np.mean(np.log(1 / (1 + df_agn_filtered['z']))))) - 1
-    #print(f"Log sigma hat pivot: {log_sigma_hat_pivot:.3f}, log tau UV RF pivot: {df_agn_filtered['log_tau_UV_RF'].median():.3f}")
+    #print(f"Log sigma hat pivot: {log_sigma0_pivot:.3f}, log tau UV RF pivot: {df_agn_filtered['log_tau_UV_RF'].median():.3f}")
+    print("log tau UV RF mean: ", np.average(df_agn_filtered['log_tau_UV_RF']))
     print("log tau UV RF pivot: ", np.average(df_agn_filtered['log_tau_UV_RF'], weights=1 / df_agn_filtered['log_tau_UV_RF_err']**2))
-    print("log sigma hat sq pivot: ", np.average(2*df_agn_filtered['log_sigma_hat_UV'], weights=1 / (2*df_agn_filtered['log_sigma_hat_UV_err'])**2))
+    
+    print("log sigma0 mean: ", np.average(df_agn_filtered['log_sigma0']))
+    print("log sigma0 pivot: ", np.average(df_agn_filtered['log_sigma0'], weights=1 / (df_agn_filtered['log_sigma0_err'])**2))
+    
+    print("f_host pivot: ", np.mean(df_agn_filtered['f_host']))
+    print("f_host pivot: ", np.average(df_agn_filtered['f_host'], weights=1 / (df_agn_filtered['f_host_err'])**2))
     print("alpha_nu pivot: ", np.average(df_agn_filtered['alpha_nu'], weights=1 / df_agn_filtered['alpha_nu_err']**2))
     print(f"z mean: {df_agn_filtered['z'].mean():.3f},  z_agn_pivot: {z_pivot:.3f}")
 
@@ -248,7 +259,6 @@ def run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model='Flatw0waCDM',
             v = pool.map(prior_transform_dynesty, u)
             l = pool.map(loglike_dynesty, v)
             print("Fraction of finite likelihoods:", np.sum(np.isfinite(l)) / len(l))
-            #resume = True
             if resume:
                 sampler = DynamicNestedSampler.restore(f'data/dynesty_{cosmo_model}.save', pool=pool)
             else:
@@ -410,8 +420,8 @@ def main():
 
 
 def test():
-    #cosmo_model = 'Flatw0waCDM'
-    cosmo_model = 'FlatwCDM'
+    cosmo_model = 'Flatw0waCDM'
+    #cosmo_model = 'FlatwCDM'
     # cosmo_model = 'FlatLambdaCDM'
     only_sna = False
 
@@ -449,8 +459,17 @@ def test():
     #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/aug1_fhostshen_wred_N10t8w2000s500_merged.h5", populate_sdss=False)
     #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/aug1_wored_N10t8w2000s500_merged.h5", populate_sdss=False)
     
-    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/aug3_fhostshen11_N10t8w2000s1000_merged.h5", populate_sdss=False)
-    df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/aug3_fhostzero_N10t8w2000s1000_merged.h5", populate_sdss=False)
+    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/aug4_fhostshen11_N10t6w1000s500_merged.h5", populate_sdss=False)
+    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/aug4_fhostzero_N10t6w1000s500_merged.h5", populate_sdss=False)
+    
+    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/aug5_fshen11_N20t6w4000s500_merged.h5", populate_sdss=False)
+    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/aug5_fshen11_fhostnocap_N10t6w1000s500_merged.h5", populate_sdss=False)
+
+    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/aug6_fshen11_fhostnocap_bplzero_N10t6w1000s500_merged.h5", populate_sdss=False)
+    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/aug6_fshen11_fhostnocap_bplzero_N10t6w2000s500_merged.h5", populate_sdss=False)
+    
+    df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("results/aug9_stone_N10w1000s500t6c4_merged.h5", populate_sdss=True)
+    
     
     #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/july19_goodsources_chisq5and10_mean1_N20w4000s500_merged.h5", populate_sdss=True)
     #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/june1_joint_N20w2000s1000_fits_merged.h5")
@@ -466,34 +485,34 @@ def test():
     if cosmo_model == 'Flatw0waCDM':
         zp = compute_pivot_redshift(flat_samples, cosmo_model)
         print("Pivot redshift: ", zp)
-    try:
-        plot_posterior_corner(flat_samples, cosmo_model=cosmo_model, only_sna=False, show=False)
-    except Exception as e:
-        print(f"Could not plot posterior corner: {e}")
+    # try:
+    #     plot_posterior_corner(flat_samples, cosmo_model=cosmo_model, only_sna=False, show=False)
+    # except Exception as e:
+    #     print(f"Could not plot posterior corner: {e}")
     
     #plot_traces(sampler_joint, only_sna=False, cosmo_model=cosmo_model, show=False, use_dynesty=use_dynesty)
     #print("Plotting AGN predicted sigma hat vs luminosity...")
-    #plot_Mi_vs_log_sigma_hat_sq(flat_samples, df_agn, cosmo_model=cosmo_model, show=False)
+    #plot_Mi_vs_log_sigma0(flat_samples, df_agn, cosmo_model=cosmo_model, show=False)
     
-    print("Plotting AGN M_i predictions vs actual...")
+    #print("Plotting AGN M_i predictions vs actual...")
     plot_predicted_vs_actual_M2500(flat_samples, df_agn, cosmo_model=cosmo_model, show=False)
-    plot_predicted_vs_actual_Mi(flat_samples, df_agn, cosmo_model=cosmo_model, show=False)
+    #plot_predicted_vs_actual_Mi(flat_samples, df_agn, cosmo_model=cosmo_model, show=False)
     
     print("Plotting Hubble diagram...")
     residuals, mu_pred_median, mu_pred_std = plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model=cosmo_model, show_true=False, show=False)
     
-    plot_Mi_vs_sigmahat(df_agn, cosmo_model=cosmo_model, show=False)
-    plot_predicted_M2500_vs_sigmahat(flat_samples, df_agn, cosmo_model=cosmo_model, show=False)
+    #plot_Mi_vs_sigmahat(df_agn, cosmo_model=cosmo_model, show=False)
+    #plot_predicted_M2500_vs_sigmahat(flat_samples, df_agn, cosmo_model=cosmo_model, show=False)
     plot_predicted_L2500_vs_sigmahat(flat_samples, df_agn, cosmo_model=cosmo_model, show=False)
-    plot_inverted_sigmahat_vs_l2500_pl(flat_samples, df_agn, cosmo_model=cosmo_model, show=False)
+    #plot_inverted_sigmahat_vs_l2500_pl(flat_samples, df_agn, cosmo_model=cosmo_model, show=False)
     #print("Plotting cosmological posteriors corner plot...")
     #plot_cosmo_corner(flat_samples, flat_samples, cosmo_model=cosmo_model)
 
     
     print("Plotting completeness vs magnitude at redshifts...")
-    p_detect, mag_centers, z_centers, dm, dz = get_completeness_function_2d(df_agn)
-    plot_completeness_vs_mag_at_redshifts(p_detect, mag_centers, z_centers)
-    plot_completeness_diagnostics(df_agn, p_detect, mag_centers, z_centers)
+    #p_detect, mag_centers, z_centers, dm, dz = get_completeness_function_2d(df_agn)
+    #plot_completeness_vs_mag_at_redshifts(p_detect, mag_centers, z_centers)
+    #plot_completeness_diagnostics(df_agn, p_detect, mag_centers, z_centers)
 
     plot_full_residuals(df_agn, residuals, show=False)
 
