@@ -592,6 +592,10 @@ def process_samples(flat_samples, data, percentiles=[16, 50, 84]):
     for k, v in flat_samples.items():
         if v.ndim > 1:
             logging.warning(f"Warning: {k} has shape {v.shape}, expected flat samples")
+        # Convert to base 10
+        if 'log_' in k:
+            v = v / np.log(10)
+        # Calculate median and 1-sigma error
         median, err = sym_percentile(v)
         result[k] = median
         result[f"{k}_err"] = err
@@ -638,8 +642,7 @@ def process_samples(flat_samples, data, percentiles=[16, 50, 84]):
     samples_log_sigma_hat0_diluted = (flat_samples["log_sigma_hat0"] - log_dilution) / np.log(10)
     result['log_sigma_hat0_diluted'], result['log_sigma_hat0_diluted_err'] = sym_percentile(samples_log_sigma_hat0_diluted)
 
-    # log_sigma_hat_UV
-    #TODO: The tau here is not RF
+    # log_sigma_hat_UV **NOTE: NOT in rest-frame**
     samples_log_sigma_hat_UV = flat_samples["log_sigma_hat0"] / np.log(10) + log_broken_pl(lambda_ref, lam_s, eta_A1, eta_A2, eta_break)
     result['log_sigma_hat_UV'], result['log_sigma_hat_UV_err'] = sym_percentile(samples_log_sigma_hat_UV)
 
