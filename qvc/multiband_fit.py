@@ -34,7 +34,7 @@ zero_mean = False
 has_jitter = True
 has_lag = True
 
-universal_params=['eta_A1', 'eta_A2', 'eta_tau1', 'eta_tau2', 'eta_break', 'lam_s']
+universal_params = ['eta_A1_mean', 'eta_A2_mean', 'eta_tau1_mean', 'eta_tau2_mean', 'eta_break', 'lam_s', 'sigma_eta_A1', 'sigma_eta_A2', 'sigma_eta_tau1', 'sigma_eta_tau2']
 
 def build_model(models, batch_data, f_host_shen11=True, latent=False, bwb=True):
     # Precompute and capture constants in the closure so they are treated as
@@ -65,30 +65,46 @@ def build_model(models, batch_data, f_host_shen11=True, latent=False, bwb=True):
 
     def numpyro_joint_model():
         # Initialize parameters
-        # power law
-        eta_A1 = numpyro.sample("eta_A1", dist.TruncatedNormal(-0.5, 0.5, high=0.0))
-        eta_A2 = numpyro.sample("eta_A2", dist.TruncatedNormal(-0.5, 0.5, high=0.0))
-        eta_tau1 = numpyro.sample("eta_tau1", dist.TruncatedNormal(0.0, 0.5, low=0.0))
-        eta_tau2 = numpyro.sample("eta_tau2", dist.TruncatedNormal(0.2, 0.5, low=0.0))
-        #eta_break = numpyro.sample("eta_break", dist.TruncatedNormal(1.0, 1.0, low=0.01))
+        # Global "universal" means for eta
+        eta_A1_mean = numpyro.sample("eta_A1_mean", dist.TruncatedNormal(-0.5, 0.5, high=0.0))
+        eta_A2_mean = numpyro.sample("eta_A2_mean", dist.TruncatedNormal(-0.5, 0.5, high=0.0))
+        eta_tau1_mean = numpyro.sample("eta_tau1_mean", dist.TruncatedNormal(0.0, 0.5, low=0.0))
+        eta_tau2_mean = numpyro.sample("eta_tau2_mean", dist.TruncatedNormal(0.2, 0.5, low=0.0))
         eta_break = numpyro.deterministic("eta_break", 0.1)
         lam_s = numpyro.deterministic("lam_s", 2500.0)
 
+        # Population-level scatter (how much objects can deviate) 
+        sigma_eta_A1 = numpyro.sample("sigma_eta_A1", dist.HalfNormal(0.2))
+        sigma_eta_A2 = numpyro.sample("sigma_eta_A2", dist.HalfNormal(0.2))
+        sigma_eta_tau1 = numpyro.sample("sigma_eta_tau1", dist.HalfNormal(0.2))
+        sigma_eta_tau2 = numpyro.sample("sigma_eta_tau2", dist.HalfNormal(0.2))
 
         with numpyro.plate("objects", batch_size):
             # Object-level parameters (shape: [B])
+            # Variability k-corrections
+            eta_A1 = numpyro.sample("eta_A1", dist.Normal(eta_A1_mean, sigma_eta_A1))
+            eta_A2 = numpyro.sample("eta_A2", dist.Normal(eta_A2_mean, sigma_eta_A2))
+            eta_tau1 = numpyro.sample("eta_tau1", dist.Normal(eta_tau1_mean, sigma_eta_tau1))
+            eta_tau2 = numpyro.sample("eta_tau2", dist.Normal(eta_tau2_mean, sigma_eta_tau2))
+            # Or, use deterministic to set them to the universal means
+
+            # Core kernel parameters
             log_tau_drw0 = numpyro.sample("log_tau_drw0", dist.Normal(6.0, 1.0))
             log_sigma0 = numpyro.sample("log_sigma0", dist.Normal(-0.2, 1.0))
             log_sigma_hat0 = numpyro.deterministic("log_sigma_hat0", log_sigma0 - 0.5 * log_tau_drw0)
+
+            # Host galaxy dilution
             alpha_host = numpyro.sample("alpha_host", dist.Normal(1.0, 0.1))
-            
-            #f_host = numpyro.sample("f_host", dist.Uniform(0.0, 1.0))
             f_host = numpyro.deterministic("f_host", f_host_value)
 
+            # Mean function detrending
             poly1 = numpyro.sample("poly1", dist.Normal(0.0, 0.1))
-            #lag0 = numpyro.sample("lag0", dist.TruncatedNormal(2.0, 10.0, low=0))
+
+            # Disk lags
             lag0 = numpyro.sample("lag0", dist.TruncatedNormal(10.0, 5.0, low=0))
             lag_beta = numpyro.sample("lag_beta", dist.TruncatedNormal(4/3, 0.2, low=0))
+
+            # Bluer when brighter (BWB) strength
             if bwb:
                 bwb_alpha = numpyro.sample("bwb_alpha", dist.Normal(0.2, 0.1))
                 bwb_beta = numpyro.sample("bwb_beta", dist.TruncatedNormal(0.2, 0.1, low=0))
@@ -96,14 +112,18 @@ def build_model(models, batch_data, f_host_shen11=True, latent=False, bwb=True):
                 bwb_alpha = numpyro.deterministic("bwb_alpha", jnp.zeros(batch_size))
                 bwb_beta = numpyro.deterministic("bwb_beta", jnp.zeros(batch_size))
 
-
         with numpyro.plate("objects", batch_size, dim=-2):
             with numpyro.plate("band", nBands, dim=-1):
                 # Parameters with shape [B, nBands]
+                # Means in each band
                 mean = numpyro.sample("mean", dist.Normal(jnp.full(nBands, 0.0), 0.2))
+
+                # BLR amplitudes and lags
                 log_amp_delta_blr = numpyro.sample("log_amp_delta_blr", dist.Normal(jnp.full(nBands, -1.0), 2.0))
                 log_lag_blr = numpyro.sample("log_lag_blr", dist.Normal(jnp.full(nBands, jnp.log(1e2)), 1.0))
                 #log_lag_blr = numpyro.deterministic("log_lag_blr", jnp.zeros_like(mean))
+
+                # Jitter
                 log_jitter = numpyro.sample("log_jitter", dist.Normal(log_jitter_mean, 1.0))
 
         def run_batch(data, i):
@@ -123,10 +143,10 @@ def build_model(models, batch_data, f_host_shen11=True, latent=False, bwb=True):
                 "bwb_alpha": bwb_alpha[i],
                 "bwb_beta": bwb_beta[i],
                 # power law
-                "eta_A1": eta_A1,
-                "eta_A2": eta_A2,
-                "eta_tau1": eta_tau1,
-                "eta_tau2": eta_tau2,
+                "eta_A1": eta_A1[i],
+                "eta_A2": eta_A2[i],
+                "eta_tau1": eta_tau1[i],
+                "eta_tau2": eta_tau2[i],
                 "eta_break": eta_break,
                 "lam_s": lam_s
             }

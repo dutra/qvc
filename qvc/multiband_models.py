@@ -61,26 +61,24 @@ class MyMultibandContiBLR(tinygp.kernels.Kernel):
         amplitudes_blr_b1 = jnp.sqrt( (self.amplitudes_blr[b1])**2 * self.tau_drw )
         amplitudes_blr_b2 = jnp.sqrt( (self.amplitudes_blr[b2])**2 * self.tau_drw )
 
+        k_ac = self.k(t1, t2, self.tau_drw)
+
         # a is cont at t1
         # b is blr at t1
         # c is cont at t2
         # d is blr at t2
         cov_ac = (
-            (1 + self.s_b[b1])
-            * (1 + self.s_b[b2])
-            * amplitudes_b1
+            amplitudes_b1
             * amplitudes_b2
-            * self.k(t1, t2, self.tau_drw)
+            * k_ac
         )
         cov_ad = (
-            (1 + self.s_b[b1])
-            * amplitudes_b1
+            amplitudes_b1
             * amplitudes_blr_b2
             * self.k(t1, t2 - self.lag_blr[b2], self.tau_drw)
         )
         cov_bc = (
             amplitudes_blr_b1
-            * (1 + self.s_b[b2])
             * amplitudes_b2
             * self.k(t1 - self.lag_blr[b1], t2, self.tau_drw)
         )
@@ -89,6 +87,11 @@ class MyMultibandContiBLR(tinygp.kernels.Kernel):
             * amplitudes_blr_b2
             * self.k(t1 - self.lag_blr[b1], t2 - self.lag_blr[b2], self.tau_drw)
         )
+
+        # BWB
+        q1 = self.s_b[b1] * amplitudes_b1
+        q2 = self.s_b[b2] * amplitudes_b2
+        cov_ac = cov_ac + 2.0 * q1 * q2 * k_ac * k_ac
 
         return cov_ac + cov_ad + cov_bc + cov_bd
 
