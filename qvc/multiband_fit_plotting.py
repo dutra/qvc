@@ -1,4 +1,5 @@
 import matplotlib.pyplot as plt
+from matplotlib.ticker import EngFormatter
 plt.style.use("style.mplstyle")
 import corner
 import numpy as np
@@ -8,6 +9,8 @@ import jax.numpy as jnp
 
 prefix = os.environ.get('PREFIX', "test")
 suffix = os.environ.get('SUFFIX', "test")
+
+from multiband_fit_utils import log_broken_pl
 
 import logging
 
@@ -97,6 +100,76 @@ def plot_posterior(samples_flat, data, bins=20):
     logging.info(f"Saved posterior corner plot to {save_path}")
     return fig
 
+def plot_broken_power_law(samples, data):
+    """
+    Plot two stacked panels of the smooth broken power law using posterior medians.
+      Top:    (eta_A1, eta_A2)
+      Bottom: (eta_tau1, eta_tau2)
+    Both share x = log10(lambda) and show a linear-lambda axis on top.
+
+    Parameters
+    ----------
+    samples : dict
+        Posterior samples with keys:
+        eta_A1, eta_A2, eta_tau1, eta_tau2, eta_break, lam_s
+    data : unused (placeholder for future use)
+    """
+
+    # --- posterior medians ---
+    pm = {k: np.median(np.asarray(samples[k])) for k in
+          ["eta_A1","eta_A2","eta_tau1","eta_tau2","eta_break","lam_s"]}
+    eta_A1, eta_A2   = pm["eta_A1"], pm["eta_A2"]
+    eta_tau1, eta_tau2 = pm["eta_tau1"], pm["eta_tau2"]
+    eta_break, lam_s = pm["eta_break"], pm["lam_s"]
+
+    # --- wavelength grid ---
+    xlog = np.linspace(2.9, 3.9, 600)
+    lam = 10.0**xlog
+    y_amp = log_broken_pl(lam, lam_s, eta_A1, eta_A2, eta_break)
+    y_tau = log_broken_pl(lam, lam_s, eta_tau1, eta_tau2, eta_break)
+
+    fig, (ax1, ax2) = plt.subplots(
+        2, 1, figsize=(8, 4*2), sharex=True, constrained_layout=True
+    )
+
+    def prettify(ax):
+        ax.grid(True, which="both", alpha=0.25, linewidth=0.8)
+        for spine in ("top", "right"):
+            ax.spines[spine].set_visible(False)
+        ax.axhline(0, ls="-", lw=0.8, color="k", alpha=0.5)
+        ax.axvline(np.log10(lam_s), ls="--", lw=1.0, color="gray", alpha=0.8, label=r'$\lambda_s$')
+
+    # --- top panel ---
+    ax1.plot(xlog, y_amp, lw=2.0,
+             label=fr'$\eta_A=({eta_A1:.2f},{eta_A2:.2f}),\ s={eta_break:.2f}$')
+    prettify(ax1)
+    ax1.set_ylabel(r'$\log_{10}\,f_A(\lambda)$')
+    ax1.legend(frameon=False, loc="best")
+
+    # --- bottom panel ---
+    ax2.plot(xlog, y_tau, lw=2.0,
+             label=fr'$\eta_\tau=({eta_tau1:.2f},{eta_tau2:.2f}),\ s={eta_break:.2f}$')
+    prettify(ax2)
+    ax2.set_xlabel(r'$\log_{10}\,\lambda\ \mathrm{(\AA)}$')
+    ax2.set_ylabel(r'$\log_{10}\,f_\tau(\lambda)$')
+    ax2.legend(frameon=False, loc="best")
+
+    # --- secondary λ-axis ---
+    secax = ax1.secondary_xaxis(
+        'top',
+        functions=(lambda x: 10.0**x, lambda l: np.log10(l))
+    )
+    secax.set_xlabel(r'$\lambda\ \mathrm{(\AA)}$')
+    secax.xaxis.set_major_formatter(EngFormatter(unit="Å"))
+
+    # --- save ---
+    output_dir = f"results/broken_power_law/{prefix}"
+    os.makedirs(output_dir, exist_ok=True)
+    fpath = os.path.join(output_dir, f'broken_power_law_{suffix}.png')
+    logging.info(f"Saving figure to {fpath}")
+    fig.savefig(fpath, dpi=200)
+    plt.close(fig)
+
 def save_combined_plot(samples, model, X, y, yerr, band_idx, data, psd_results=None):
     logging.info("Saving combined plot")
 
@@ -118,7 +191,6 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, data, psd_results=N
         # Compute predictions using the model
         posterior_median = {k: np.median(v, axis=0) for k, v in samples.items()}
         result = model.pred(posterior_median, (t_test, jnp.full_like(t_test, n, dtype=int)))
-        #print(mu, std, '!!!!!!!!!!!!!!')
 
         # Plot the predictions
         if len(result) == 2:
@@ -174,7 +246,6 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, data, psd_results=N
         
         # Model PSD
         if psd_results is not None:
-            logging.info('Plotting Model PSD')
             band = band_idx_map[n]
             result = psd_results[band].items()
             freqs = psd_results[band]["freqs"]

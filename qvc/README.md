@@ -54,7 +54,8 @@ Also under tutorials/data, upload the parquet files from https://www.dropbox.com
 ### Multiband fit
 #### Specifying objects per id
 
-``JAX_ENABLE_X64=True PREFIX=test SUFFIX=joint python multiband_fit.py --progress --plot --nwarm 50 --nsamp 20 --joint --filter_object_id 1406548 1412797``
+``JAX_ENABLE_X64=True PREFIX=test SUFFIX=joint python multiband_fit.py --progress --plot --nwarm 50 --nsamp 20 --f_host_shen11 --bwb --filter_object_id 1406548 1412797``
 
 #### Running a batch of N
-``python multiband_fit.py  --progress --filter_file data/july21_chisq2_ebv_sn.csv --file data/test_joint.h5 --plot arm 4000 --nsamp 200 --nchains -1 --joint --job_id 0 --job_N 20``
+``JAX_ENABLE_X64=True PREFIX=test SUFFIX=joint python multiband_fit.py  --progress --plot --filter_file data/aug4_sample_chisqg10_ebv005sn3.csv --nwarm 1000 --nsamp 500 --nchains 2 --max_tree_depth 6 --f_host_shen11 --bwb --job_N 20 --job_id 0
+``

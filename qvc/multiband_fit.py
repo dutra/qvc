@@ -34,6 +34,8 @@ zero_mean = False
 has_jitter = True
 has_lag = True
 
+universal_params=['eta_A1', 'eta_A2', 'eta_tau1', 'eta_tau2', 'eta_break', 'lam_s']
+
 def build_model(models, batch_data, f_host_shen11=True, latent=False, bwb=True):
     # Precompute and capture constants in the closure so they are treated as
     # static by JAX/NumPyro. This prevents unnecessary retracing/recompilation
@@ -41,6 +43,7 @@ def build_model(models, batch_data, f_host_shen11=True, latent=False, bwb=True):
     batch_size = len(batch_data)
     nBands = 5  # or use from config
 
+    # --- Precompute f_host_shen11 prior means ---
     if f_host_shen11:
         # Host flux empirical relation
         #logl5100 = jnp.array([obj['LOGL5100'] for obj in batch_data])
@@ -54,6 +57,11 @@ def build_model(models, batch_data, f_host_shen11=True, latent=False, bwb=True):
         batch_size = len(batch_data)
         f_host_value = jnp.zeros(batch_size)
 
+    # --- Precompute log_jitter prior means ---
+    log_jitter_mean = jnp.stack([
+        jnp.array(jnp.full(nBands, 1e-6) + jnp.mean(jnp.array(obj['yerr'])))
+        for obj in batch_data
+    ])  # shape (B, nBands)
 
     def numpyro_joint_model():
         # Initialize parameters
@@ -62,7 +70,8 @@ def build_model(models, batch_data, f_host_shen11=True, latent=False, bwb=True):
         eta_A2 = numpyro.sample("eta_A2", dist.Normal(0.0, 1.0))
         eta_tau1 = numpyro.sample("eta_tau1", dist.Normal(0.0, 1.0))
         eta_tau2 = numpyro.sample("eta_tau2", dist.Normal(0.0, 1.0))
-        eta_break = numpyro.sample("eta_break", dist.TruncatedNormal(1.0, 1.0, low=0.5))
+        #eta_break = numpyro.sample("eta_break", dist.TruncatedNormal(1.0, 1.0, low=0.01))
+        eta_break = numpyro.deterministic("eta_break", 0.1)
         lam_s = numpyro.deterministic("lam_s", 2500.0)
 
 
@@ -95,7 +104,7 @@ def build_model(models, batch_data, f_host_shen11=True, latent=False, bwb=True):
                 log_amp_delta_blr = numpyro.sample("log_amp_delta_blr", dist.Normal(jnp.full(nBands, -1.0), 2.0))
                 log_lag_blr = numpyro.sample("log_lag_blr", dist.Normal(jnp.full(nBands, jnp.log(1e2)), 1.0))
                 #log_lag_blr = numpyro.deterministic("log_lag_blr", jnp.zeros_like(mean))
-                log_jitter = numpyro.sample("log_jitter", dist.Normal(jnp.full(nBands, 1e-6) + 1e-6, 1.0))
+                log_jitter = numpyro.sample("log_jitter", dist.Normal(log_jitter_mean, 1.0))
 
         def run_batch(data, i):
             # Collect params for object i
@@ -276,7 +285,6 @@ if __name__ == '__main__':
     parser.add_argument("--ignore_existing", action="store_true", help="Ignore sources already in the HDF5 file.")
     parser.add_argument("--create_lc", action="store_true", help="Only create LC file and exit.")
     parser.add_argument("--progress", action="store_true", help="Show progress bar.")
-    parser.add_argument("--joint", action="store_true", help="Use joint model fitting.")
     parser.add_argument("--cpu", action="store_true", help="Use CPU.")
     parser.add_argument("--nwarm", type=int, default=500, help="Number of warmup steps for MCMC.")
     parser.add_argument("--nsamp", type=int, default=250, help="Number of samples for MCMC.")
@@ -347,7 +355,6 @@ if __name__ == '__main__':
             zero_mean=zero_mean, has_jitter=has_jitter, has_lag=has_lag,
             clean_bands=obj['clean_bands'], z=obj['z']
         )
-        #save_combined_plot(bestP, m, obj['X'], obj['y'], obj['yerr'], obj['band_idx'], obj, fit_bestP=True)
 
         batch_data.append({
             'object_id': obj['object_id'],
@@ -420,7 +427,7 @@ if __name__ == '__main__':
         logging.info("++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++")
         logging.info(f"Quasar {i+1}/{len(batch_data)} Object ID: {obj['object_id']}")
 
-        obj_flat_samples = select_samples_for_object(samples_flat, i, universal_params=['eta_A1', 'eta_A2', 'eta_tau1', 'eta_tau2'])
+        obj_flat_samples = select_samples_for_object(samples_flat, i, universal_params=universal_params)
         obj_flat_samples_flatten_per_band = flatten_flat_samples_per_band(obj_flat_samples, obj['clean_bands'])
 
         save_obj_samples_to_hdf5(obj_flat_samples_flatten_per_band, obj['object_id'])
@@ -445,6 +452,7 @@ if __name__ == '__main__':
             )
             psd_results = compute_psd_from_samples(obj_flat_samples, obj["clean_bands"])
             save_combined_plot(obj_flat_samples, m, obj['X'], obj['y'], obj['yerr'], obj['band_idx'], result, psd_results=psd_results)
+            plot_broken_power_law(obj_flat_samples, obj)
             #dump_mcmc_diagnostics(mcmc, obj, i, len(batch_data))
             
         final_result_obj = obj | result #| rhat_ess

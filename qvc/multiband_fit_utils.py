@@ -547,43 +547,26 @@ def save_quasar_list_hdf5(quasars, ignored_keys=None, size_threshold=1024):
             logging.info(f"{i+1}/{total}: Saved quasar {object_id}")
 
     logging.info("All quasars saved successfully.")
+    
 
-
-# def log_broken_pl(lam, lam_s, d1, d2, ds=4.0):
-#     x = lam / lam_s
-#     log_f = -jnp.log10(
-#         jnp.power(x, -d1) * jnp.power(1.0 + jnp.power(x, ds), -(d2 - d1) / ds)
-#     )
-#     return log_f
-
-# def log_broken_pl(lam, lam_s, d1, d2, ds=4.0):
-#     """
-#     Smooth broken power-law in log10-space, normalized to 0 at lam_s.
-
-#     log10(f(lam)) = d1 * log10(x) 
-#                   + (d2-d1)/ds * log10(1 + x^ds)
-#                   - (d2-d1)/ds * log10(2)
-#     """
-#     x = lam / lam_s
-#     delta = d2 - d1
-#     log_f = d1 * jnp.log10(x) + (delta / ds) * jnp.log10(1.0 + jnp.power(x, ds))
-#     log_f -= (delta / ds) * jnp.log10(2.0)  # normalize to 0 at lam_s
-#     return log_f
-
-def log_broken_pl(lam, lam_s, d1, d2, ds=1.0):
+def log_broken_pl(lam, lam_s, d1, d2, ds=0.1):
     """
     Log10 of a smooth broken power-law, normalized to 0 at lam_s.
-    Fully log-domain for stability and NumPyro compatibility.
+    Slopes approach d1 for lam << lam_s and d2 for lam >> lam_s.
+    
+    ds: smoothness control — larger ds = smoother transition,
+        smaller ds = sharper transition.
     """
     x = lam / lam_s
     delta = d2 - d1
 
-    # log10(1 + x^ds) safely using log1p and ln->log10 conversion
-    log10_1px = jnp.log1p(x**ds) / jnp.log(10.0)
-    
-    log_f = -d1 * jnp.log10(x) - (delta / ds) * log10_1px
-    log_f += (delta / ds) * jnp.log10(2.0)  # normalize to 0 at lam_s
-    
+    # Use exponent 1/ds so larger ds => smoother
+    smooth_exp = 1.0 / ds
+    log10_1px = jnp.log1p(x**smooth_exp) / jnp.log(10.0)
+
+    log_f = d1 * jnp.log10(x) + (delta / smooth_exp) * log10_1px
+    log_f -= (delta / smooth_exp) * jnp.log10(2.0)  # normalize to 0 at lam_s
+
     return log_f
 
 def process_samples(flat_samples, data, percentiles=[16, 50, 84]):
