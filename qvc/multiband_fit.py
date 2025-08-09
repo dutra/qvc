@@ -66,10 +66,10 @@ def build_model(models, batch_data, f_host_shen11=True, latent=False, bwb=True):
     def numpyro_joint_model():
         # Initialize parameters
         # power law
-        eta_A1 = numpyro.sample("eta_A1", dist.Normal(0.0, 1.0))
-        eta_A2 = numpyro.sample("eta_A2", dist.Normal(0.0, 1.0))
-        eta_tau1 = numpyro.sample("eta_tau1", dist.Normal(0.0, 1.0))
-        eta_tau2 = numpyro.sample("eta_tau2", dist.Normal(0.0, 1.0))
+        eta_A1 = numpyro.sample("eta_A1", dist.TruncatedNormal(-0.5, 0.5, high=0.0))
+        eta_A2 = numpyro.sample("eta_A2", dist.TruncatedNormal(-0.5, 0.5, high=0.0))
+        eta_tau1 = numpyro.sample("eta_tau1", dist.TruncatedNormal(0.0, 0.5, low=0.0))
+        eta_tau2 = numpyro.sample("eta_tau2", dist.TruncatedNormal(0.2, 0.5, low=0.0))
         #eta_break = numpyro.sample("eta_break", dist.TruncatedNormal(1.0, 1.0, low=0.01))
         eta_break = numpyro.deterministic("eta_break", 0.1)
         lam_s = numpyro.deterministic("lam_s", 2500.0)
