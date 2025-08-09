@@ -24,24 +24,22 @@ QSOFit.set_mpl_style()
 import h5py
 from tqdm import tqdm
 
-def read_quasars_from_hdf5(file_path):
-    quasar_list = []
-    with h5py.File(file_path, "r") as hdf:
-        for group_name in tqdm(hdf.keys(), desc="Reading quasars"):
-            group = hdf[group_name]
-            quasar = {"object_id": group_name}
-            for key, value in group.attrs.items():
-                quasar[key] = value
-            for sub_group_name in group.keys():
-                sub_group = group[sub_group_name]
-                quasar[sub_group_name] = {sub_key: sub_group[sub_key][...] for sub_key in sub_group.keys()}
-            quasar_list.append(quasar)
-    return quasar_list
 
 
-#objs = read_quasars_from_hdf5("data/july21_chisq2_hostpl_N20w4000s200_merged_magscorrected.h5")
-agn_df = pd.read_csv('data/aug3_fhostshen11_N10t8w2000s1000_merged_means_corrected.csv')
-# %
+#agn_df = pd.read_csv('data/csv/aug4_sample_chisqg10_ebv005sn3_magsmean.csv')
+# agn_df = pd.read_csv('data/aug8_stone_merged.csv')
+# agn_df['ra'] = agn_df['RA']
+# agn_df['dec'] = agn_df['DEC']
+agn_df = pd.read_csv('data/csv/aug8_stone_merged_magsmean.csv')
+
+#agn_df = agn_df[:3000]
+# agn_df = agn_df[agn_df['z'] < 1]
+# sdss_names = ['024939.57+000700.2', '024935.55-001336.8', '024923.20-005437.7', '024838.93-000326.0', '024831.08-005025.7', '024823.77-010002.5', '024541.30+005425.8', '024156.15+003441.8', '024144.68+003345.1', '022837.06-001005.1', '022801.05+003943.7', '022326.60-010406.7', '022114.04-003255.6', '021953.28-010025.3', '021953.04-004434.2', '021934.59+004559.3', '021844.83+005106.4', '021713.10+004107.2', '021544.67-003811.4', '021541.13-010250.9']
+# agn_df = agn_df[agn_df['sdss_name'].isin(sdss_names)]
+
+print(agn_df.head())
+print("Length of agn_df:", len(agn_df))
+
 bands = ['u', 'g', 'r', 'i', 'z']
 
 from astropy import units as u
@@ -71,7 +69,7 @@ with fits.open('data/dr16q_prop_May01_2024.fits') as hdul:
     )
 
     # Match using search_around_sky to find all pairs within a certain separation
-    max_sep = 2.0 * u.arcsec  # maximum separation for matching
+    max_sep = 1.0 * u.arcsec  # maximum separation for matching
 
     idx_sdss, idx_agn, sep2d, _ = coords_agn.search_around_sky(coords_sdss, max_sep)
 
@@ -90,6 +88,7 @@ with fits.open('data/dr16q_prop_May01_2024.fits') as hdul:
 
     # Only keep rows in agn_df that correspond to matched_sdss_indices
     agn_df_matched = agn_df.iloc[idx_agn].reset_index(drop=True)
+    print("Length of agn_df_matched:", len(agn_df_matched))
 
     # Add apparent_mag_2500 from agn_df_matched to data_cat as a new column
     # Assumes agn_df_matched['apparent_mag_2500'] exists and matches the order of data_cat after filtering
@@ -105,8 +104,8 @@ with fits.open('data/dr16q_prop_May01_2024.fits') as hdul:
     # The order of agn_df_matched matches data_cat after filtering
 
     for i, band in enumerate(bands):
-        data_cat[f'mean_corrected_{band}'] = agn_df_matched[f'mean_corrected_{band}'].values
-        data_cat['object_id'] = agn_df_matched['object_id'].values
+        data_cat[f'mean_corrected_{band}'] = agn_df_matched[f'mags_mean_{band}'].values
+    data_cat['object_id'] = agn_df_matched['object_id'].values
 
 # %%
 path_ex = '.' #os.path.join(pyqsofit.__path__[0], '..', 'example')
@@ -300,40 +299,23 @@ from astroquery.sdss import SDSS
 from astropy.coordinates import SkyCoord
 import astropy.units as u
 
-def fetch_spectrum_fits(sdss_name, plate, fiber, mjd, cache_dir="data/spectra_cache"):
-    """
-    Fetch SDSS spectrum for a given index in data_cat.
-    Downloads and saves to FITS file if not already cached.
-    """
+not_cached = []
+
+def load_spec(sdss_name, plate, fiber, mjd, cache_dir="data/spectra_cache_sdss_name"):
     
-
-    os.makedirs(cache_dir, exist_ok=True)
-
     # sdss_name = data_cat['SDSS_NAME'][i]
     # plate, fiber, mjd = data_cat['PLATE'][i], data_cat['FIBERID'][i], data_cat['MJD'][i]
-    cache_file = os.path.join(cache_dir, f"{sdss_name}_p{plate}_f{fiber}_m{mjd}.fits")
-
+    #cache_file = os.path.join(cache_dir, f"{sdss_name}_p{plate}_f{fiber}_m{mjd}.fits")
+    cache_file = os.path.join(cache_dir, f"{sdss_name}.fits")
+    
     # Return cached FITS if available
     if os.path.exists(cache_file):
         from astropy.io import fits
         print(f"Loaded cached spectrum for {sdss_name} from {cache_file}")
-        return fits.open(cache_file, memmap=False), True
-
-    # Download spectrum
-    print(f"Fetching spectrum for index {i} with SDSS_NAME: {sdss_name}")
-    print("Plate:", plate, "FiberID:", fiber, "MJD:", mjd)
-    
-    spec = SDSS.get_spectra(plate=plate, fiberID=fiber, mjd=mjd)
-    if spec is None or len(spec) == 0:
-        raise ValueError(f"No spectrum found for index {i}, SDSS_NAME {sdss_name}")
-
-    data = spec[0]  # First HDUList
-    
-    # Save to FITS file
-    data.writeto(cache_file, overwrite=True)
-    print(f"Spectrum saved to {cache_file}")
-    
-    return data
+        return fits.open(cache_file, memmap=False)
+    else:
+        print("WARNING: No cached spectrum found for", sdss_name)
+        not_cached.append(sdss_name)
 
 def get_alpha(i):
 
@@ -343,13 +325,16 @@ def get_alpha(i):
     plate = data_cat['PLATE'][i]
     fiber = data_cat['FIBERID'][i]
     mjd = data_cat['MJD'][i]
+    z = data_cat['Z_SYS'][i]
 
     # Query SDSS for the spectrum using the SDSS_NAME
     #try:
     if True:
         # Use the new caching function
-        data = fetch_spectrum_fits(sdss_name, plate, fiber, mjd)
-
+        data = load_spec(sdss_name, plate, fiber, mjd)
+        if data is None:
+            print(f"Data is none for {sdss_name}. Skipping...")
+            return -1, -1, -1
         # Optional: compute the SkyCoord if you still need the coordinates
         coord = SkyCoord(
             ra=data_cat['RA'][i] * u.deg,
@@ -360,13 +345,13 @@ def get_alpha(i):
         # Requried
         lam = 10 ** data[1].data['loglam']  # OBS wavelength [A]
         flux = data[1].data['flux']  # OBS flux [erg/s/cm^2/A]
-        print(np.mean(flux), np.std(flux))
+        #print(np.mean(flux), np.std(flux))
         err = 1 / np.sqrt(data[1].data['ivar'])  # 1 sigma error
         z = data_cat['Z_SYS'][i]  # Redshift
 
-        if np.min(lam) > 3619.0:
-            print("NO g band!")
-            return -1, -1, -1
+        # if np.min(lam) > 3619.0:
+        #     print("NO g band!")
+        #     return -1, -1, -1
 
 
         # Absolute flux calibration
@@ -380,17 +365,23 @@ def get_alpha(i):
         weights = []
 
         for b, filt in zip(bands, sdss_filters):
-            mag_fiber = data_cat[f'mean_corrected_{b}'][i]
-            print(mag_fiber)
-            if not np.isfinite(mag_fiber):
-                continue
+            try:
+                mag_fiber = data_cat[f'mean_corrected_{b}'][i]
+                #print(mag_fiber)
+                if not np.isfinite(mag_fiber) or mag_fiber < 0:
+                    continue
 
-            # Synthetic magnitude
-            mag_synth = filt.get_ab_magnitude(1e-17*flux*u.erg/u.s/u.cm**2/u.AA, lam*u.AA)
-            print(mag_synth, mag_fiber)
-            delta_m = mag_fiber - mag_synth
-            delta_mags.append(delta_m)
-            weights.append(1.0)  # could add mag error weights if available
+                # Synthetic magnitude
+                mag_synth = filt.get_ab_magnitude(1e-17*flux*u.erg/u.s/u.cm**2/u.AA, lam*u.AA)
+                #print(mag_synth, mag_fiber)
+                delta_m = mag_fiber - mag_synth
+                delta_mags.append(delta_m)
+                # TODO: Add mags_mean_err to weights
+                # check how weights are defined in np.average
+                weights.append(1.0)  # could add mag error weights if available
+            except Exception as e:
+                print(f"Error processing band {b} for SDSS_NAME {sdss_name}: {e}")
+                continue
 
         if len(delta_mags) == 0:
             delta_mags = 0.0
@@ -409,6 +400,8 @@ def get_alpha(i):
         flux_scaled = flux * scale_factor
 
         print("scale_factor", scale_factor)
+        if scale_factor < 0.5 or scale_factor > 1.5:
+            print(f"WARNING: scale_factor={scale_factor:.3f} is outside the expected range [0.5, 1.5]")
 
 
         # Prepare data
@@ -423,7 +416,7 @@ def get_alpha(i):
         start = timeit.default_timer()
         # Do the fitting
 
-        q_mle.Fit(name=None,  # customize the name of given targets. Default: plate-mjd-fiber
+        q_mle.Fit(name=f"{z:.2f}_{sdss_name}_{plate}-{mjd}-{fiber}",  # customize the name of given targets. Default: plate-mjd-fiber
                 # prepocessing parameters
                 nsmooth=1,  # do n-pixel smoothing to the raw input flux and err spectra
                 and_mask=False,  # delete the and masked pixels
@@ -477,8 +470,8 @@ def get_alpha(i):
                 save_result=False,  # If True, all the fitting results will be saved to a fits file
                 save_fits_name=None,  # The output name of the result fits
                 save_fits_path='.',  # The output path of the result fits
-                plot_fig=False,  # If True, the fitting results will be plotted
-                save_fig=False,  # If True, the figure will be saved
+                plot_fig=True,  # If True, the fitting results will be plotted
+                save_fig=True,  # If True, the figure will be saved
                 plot_corner=True,  # Whether or not to plot the corner plot results if MCMC=True
 
                 # debugging mode
@@ -486,7 +479,7 @@ def get_alpha(i):
 
                 # sublevel parameters for figure plot and emcee
                 kwargs_plot={
-                    'save_fig_path': '.',  # The output path of the figure
+                    'save_fig_path': './plots/pyqso',  # The output path of the figure
                     'broad_fwhm'   : 1200  # km/s, lower limit that code decide if a line component belongs to broad component
                 },
                 kwargs_conti_emcee={},
@@ -508,7 +501,7 @@ def get_alpha(i):
     conti_table['z'] = z
 
     m_2500_new = compute_apparent_mag_2500_astropy(conti_table)
-    print(conti_table)
+
     if 'frac_host_4200' in conti_table.colnames:
         f_host = conti_table['frac_host_4200']
     else:
@@ -541,12 +534,8 @@ def compute_apparent_mag_2500_astropy(conti_table, logL_col='L2500', logL_err_co
 
     return m_ab
 
-# %%
-
-
-# %%
-#ntest = 2
 ntest = len(data_cat)
+#ntest = 500
 
 m_new = np.zeros(ntest, dtype=float)
 m_old = np.zeros(ntest, dtype=float)
@@ -557,14 +546,14 @@ new_data = []
 
 for i in trange(ntest, desc="Processing objects"):
     object_id = data_cat['object_id'][i]
-    # try:
-    m_new[i], f_host[i], dmag_avg[i] = get_alpha(i)
-    print(f"m_new: {m_new[i]}, f_host: {f_host[i]}, dmag_avg: {dmag_avg[i]}")
-    # except Exception as e:
-    #     print(f"Error processing object {object_id}: {e}")
-    #     m_new[i] = -99
-    #     f_host[i] = -99
-    #     dmag_avg[i] = -99
+    try:
+        m_new[i], f_host[i], dmag_avg[i] = get_alpha(i)
+        print(f"m_new: {m_new[i]}, f_host: {f_host[i]}, dmag_avg: {dmag_avg[i]}")
+    except Exception as e:
+        print(f"Error processing object {object_id}: {e}")
+        m_new[i] = -99
+        f_host[i] = -99
+        dmag_avg[i] = -99
 
 # Save results to CSV
 results_df = pd.DataFrame({
@@ -573,6 +562,8 @@ results_df = pd.DataFrame({
     'apparent_mag_2500': m_new,
     'f_host_4200': f_host
 })
-results_df.to_csv('data/aug3_fhostshen11_N10t8w2000s1000_merged_means_corrected_fittedm2500.csv', index=False)
 
+results_df.to_csv('data/csv/aug8_stone_merged_fittedm2500.csv', index=False)
 
+#print("Results saved to 'data/csv/aug4_sample_chisqg10_ebv005sn3_magsmean_fittedm2500.csv'")
+print("Not cached objects:", not_cached)
