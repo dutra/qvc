@@ -53,7 +53,7 @@ def select_samples_for_object(samples_flat, obj_index, universal_params):
         Dictionary with selected samples for the object.
     """
     obj_samples = {
-            k: v[:, obj_index] if k not in ['eta_A1', 'eta_A2', 'eta_tau1', 'eta_tau2', 'eta_break', 'lam_s'] else v
+            k: v[:, obj_index] if k not in universal_params else v
             for k, v in samples_flat.items()
         }    
 
@@ -603,6 +603,8 @@ def process_samples(flat_samples, data, percentiles=[16, 50, 84]):
     # generalized per-band computation
     # Power Law Params
     log_sigma_hat0 = np.asarray(flat_samples["log_sigma_hat0"])
+    log_sigma0 = np.asarray(flat_samples["log_sigma_hat0"])
+    log_tau_drw0 = np.asarray(flat_samples["log_tau_drw0"])
     eta_A1 = np.asarray(flat_samples["eta_A1"])
     eta_A2 = np.asarray(flat_samples["eta_A2"])
     eta_tau1 = np.asarray(flat_samples["eta_tau1"])
@@ -649,6 +651,13 @@ def process_samples(flat_samples, data, percentiles=[16, 50, 84]):
     # log_sigma_hat_UV_diluted
     samples_log_sigma_hat_diluted_UV = (flat_samples["log_sigma_hat0"] - log_dilution) / np.log(10) + log_broken_pl(lambda_ref, lam_s, eta_A1, eta_A2, eta_break)
     result['log_sigma_hat_diluted_UV'], result['log_sigma_hat_diluted_UV_err'] = sym_percentile(samples_log_sigma_hat_diluted_UV)
+
+    # log_sigma_UV
+    samples_log_sigma_UV = flat_samples["log_sigma0"] / np.log(10) + log_broken_pl(lambda_ref, lam_s, eta_tau1, eta_tau2, eta_break)
+    result['log_sigma_UV'], result['log_sigma_UV_err'] = sym_percentile(samples_log_sigma_UV)
+
+    # log_sigma_UV -BWB-corrected
+    #params["bwb_alpha"] + params["bwb_beta"] * jnp.log(self.lam_rf / 2500.0)
 
     # log_tau_UV_RF
     samples_log_tau_UV_RF = flat_samples["log_tau_drw0"] / np.log(10) - np.log10(1 + data['z']) + log_broken_pl(lambda_ref, lam_s, eta_tau1, eta_tau2, eta_break)
