@@ -78,7 +78,7 @@ def get_model_params(cosmo_model):
         ("gamma_sn",    (-0.1, 0.1)),     # Host mass step usually ~0.05
         ("tau_Ms",      (0.01, 0.2)),     # LOG Width of sigmoid transition usually ~0.043
         ("M0_sn",       (-20, -19)),    # SN absolute magnitude, MLE: ~-19.3
-        ("M0_agn", (-24, -21)),         # M0_agn
+        ("M0_agn", (-24, -17)),         # M0_agn
         ("log_sigma0_break", (-3, 0)), # AGN broken power law break point
         ("eta_A1_agn",  (-10, 10)),          # AGN broken power law slope 1
         ("eta_A2_agn",  (-10, 10)),          # AGN broken power law slope 2

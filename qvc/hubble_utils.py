@@ -41,7 +41,7 @@ def find_optimal_pivot(flat_samples,
     param_indices : dict
         Dictionary mapping parameter names to column indices in flat_samples.
     df_agn : DataFrame
-        AGN data with columns: 'z', 'alpha_nu', 'log_sigma_hat0', 'log_tau_UV_RF'.
+        AGN data with columns: 'z', 'alpha_nu', 'log_sigma0', 'log_tau_UV_RF'.
     apparent_mag : array-like
         Observed apparent magnitude at 2500 Å for each AGN.
     z_grid : array-like
@@ -77,12 +77,12 @@ def find_optimal_pivot(flat_samples,
         M_pred_samples = np.array([
             apparent_mag_2500 - delta_K - M_model_agn(
                 s[param_indices['M0_agn']],
-                s[param_indices['log_sigma_hat_sq_break']],
+                s[param_indices['log_sigma0_break']],
                 s[param_indices['eta_A1_agn']],
                 s[param_indices['eta_A2_agn']],
                 s[param_indices['eta_break_agn']],
                 s[param_indices['beta_agn']],
-                df_agn['log_sigma_hat0'].values,
+                df_agn['log_sigma0'].values,
                 df_agn['log_tau_UV_RF'].values
             )
             for s in flat_samples
@@ -123,8 +123,8 @@ def compute_apparent_mag_2500_colin(df):
     #colin_df = pd.read_csv("data/sdss_qso_mag_2500_colin.csv")
     #colin_df = pd.read_csv("data/july19_goodsources_chisq5and10_mean1_N20w4000s500_merged_magscorrected_fittedm2500.csv")
     
-    #colin_df = pd.read_csv("data/csv/aug4_sample_chisqg10_ebv005sn3_magsmean_fittedm2500.csv")
-    colin_df = pd.read_csv("data/csv/aug8_stone_merged_fittedm2500.csv")
+    #colin_df = pd.read_csv("data/aug4_sample_chisqg10_ebv005sn3_magsmean_fittedm2500.csv")
+    colin_df = pd.read_csv("data/aug8_stone_merged_fittedm2500.csv")
 
     # Ensure SDSS_NAME is string for matching
     colin_df['object_id'] = colin_df['object_id'].astype(str)
@@ -534,7 +534,7 @@ def sigma_clip_in_bins(df, bin_width=0.1, sigma=2):
 
     return pd.concat(df_clean)
 
-def populate_chi_sq_from_csv(df, csv_path="data/csv/aug4_sample_chisqg10_ebv005sn3.csv"):
+def populate_chi_sq_from_csv(df, csv_path="data/aug4_sample_chisqg10_ebv005sn3.csv"):
     """
     Populate the 'chi_sq' field in df by matching 'object_id' with the CSV file.
 
@@ -581,8 +581,6 @@ def load_quasar_data(file_path, populate_sdss=False, apply_cut=True):
     df = pd.DataFrame(quasar_list)
 
     
-    df['log_sigma0'] = df['log_sigma0'] / np.log(10)  # Convert to dex
-    df['log_sigma0_err'] = df['log_sigma0_err'] / np.log(10)  # Convert to dex
     df = populate_chi_sq_from_csv(df)
 
     #df = calculate_all_alpha_nu(df)
@@ -1270,11 +1268,11 @@ def apply_forward_completeness_correction(df_agn, params, cosmo_model, completen
     # Compute model-predicted absolute magnitude
     M_model = M_model_agn(
         params['M0_agn'],
-        params['log_sigma_hat_sq_break'],
+        params['log_sigma0_break'],
         params['eta_A1_agn'], params['eta_A2_agn'],
         params['eta_break_agn'],
         params['beta_agn'],
-        df_agn['log_sigma_hat0'].values,
+        df_agn['log_sigma0'].values,
         df_agn['log_tau_UV_RF'].values
     )
 
@@ -1287,12 +1285,12 @@ def apply_forward_completeness_correction(df_agn, params, cosmo_model, completen
         df_agn['apparent_mag_2500_err'].values**2 +
         M_model_agn_err(
             params['M0_agn'],
-            params['log_sigma_hat_sq_break'],
+            params['log_sigma0_break'],
             params['eta_A1_agn'], params['eta_A2_agn'],
             params['eta_break_agn'],
             params['beta_agn'],
-            df_agn['log_sigma_hat0'].values,
-            df_agn['log_sigma_hat0_err'].values,
+            df_agn['log_sigma0'].values,
+            df_agn['log_sigma0_err'].values,
             df_agn['log_tau_UV_RF'].values
         )**2 +
         (2.5 * 0.3 * np.log10(1 + df_agn['z'].values))**2 +
