@@ -458,6 +458,7 @@ if __name__ == '__main__':
         final_result_obj = obj | result #| rhat_ess
         results.append(final_result_obj)
         logging.info("--------------------------------------------------------------")
-        save_quasar_list_hdf5(results, ignored_keys=['X', 'y', 'yerr', 'band_idx'])
+    
+    save_quasar_list_hdf5(results, ignored_keys=['X', 'y', 'yerr', 'band_idx'])
         
     sys.exit("Exiting the program as requested.")
