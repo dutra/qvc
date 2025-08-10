@@ -36,7 +36,7 @@ has_lag = True
 
 universal_params = ['eta_A1_mean', 'eta_A2_mean', 'eta_tau1_mean', 'eta_tau2_mean', 'eta_break', 'lam_s', 'sigma_eta_A1', 'sigma_eta_A2', 'sigma_eta_tau1', 'sigma_eta_tau2']
 
-def build_model(models, batch_data, f_host_shen11=True, latent=False, bwb=True):
+def build_model(models, batch_data, f_host_shen11=True, latent=False, bwb=True, disable_poly1=False):
     # Precompute and capture constants in the closure so they are treated as
     # static by JAX/NumPyro. This prevents unnecessary retracing/recompilation
     # when running MCMC, as these values do not change between runs.
@@ -98,7 +98,10 @@ def build_model(models, batch_data, f_host_shen11=True, latent=False, bwb=True):
             f_host = numpyro.deterministic("f_host", f_host_value)
 
             # Mean function detrending
-            poly1 = numpyro.sample("poly1", dist.Normal(0.0, 0.1))
+            if disable_poly1:
+                poly1 = numpyro.deterministic("poly1", jnp.zeros_like(log_sigma0))                
+            else:
+                poly1 = numpyro.sample("poly1", dist.Normal(0.0, 0.1))
 
             # Disk lags
             lag0 = numpyro.sample("lag0", dist.TruncatedNormal(10.0, 5.0, low=0))
@@ -317,6 +320,7 @@ if __name__ == '__main__':
     parser.add_argument("--max_tree_depth", type=int, default=8, help="Max tree depth param for NUTS sampler.")
     parser.add_argument("--f_host_shen11", action="store_true", help="Use host flux empirical relation from Shen et al. 2011.")
     parser.add_argument("--load_sample_file", type=str, help="Path to the file containing saved samples.")
+    parser.add_argument("--disable_poly1", action="store_true", help="Disable Mean function detrending.")
 
 
     args = parser.parse_args()
@@ -414,7 +418,7 @@ if __name__ == '__main__':
         for obj in batch_data
     ]
         
-    numpyro_joint_model = build_model(models, batch_data, args.f_host_shen11, args.latent, args.bwb)
+    numpyro_joint_model = build_model(models, batch_data, args.f_host_shen11, args.latent, args.bwb, args.disable_poly1)
 
     nuts_kernel = NUTS(numpyro_joint_model, init_strategy=init_strategy, dense_mass=True, max_tree_depth=args.max_tree_depth)
     mcmc = MCMC(
