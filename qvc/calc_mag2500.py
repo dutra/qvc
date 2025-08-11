@@ -242,9 +242,9 @@ conti_priors = np.rec.array([
     ('Blamer_norm', 0.0,   0.0,   1e10,  1), # Normalization of the Balmer continuum at < 3646 AA [flux] (Dietrich et al. 2002)
     ('Balmer_Te',   15000, 10000, 50000, 1), # Te of the Balmer continuum at < 3646 AA [K?]
     ('Balmer_Tau',  0.5,   0.1,   2.0,   1), # Tau of the Balmer continuum at < 3646 AA
-    ('conti_a_0',   0.0,   None,  None,  1), # 1st coefficient of the polynomial continuum
-    ('conti_a_1',   0.0,   None,  None,  1), # 2nd coefficient of the polynomial continuum
-    ('conti_a_2',   0.0,   None,  None,  1), # 3rd coefficient of the polynomial continuum
+    ('conti_a_0',   0.0,   None,  None,  0), # 1st coefficient of the polynomial continuum
+    ('conti_a_1',   0.0,   None,  None,  0), # 2nd coefficient of the polynomial continuum
+    ('conti_a_2',   0.0,   None,  None,  0), # 3rd coefficient of the polynomial continuum
     # Note: The min/max bounds on the conti_a_0 coefficients are ignored by the code,
     # so they can be determined automatically for numerical stability.
     ],
@@ -301,7 +301,7 @@ import astropy.units as u
 
 not_cached = []
 
-def load_spec(sdss_name, plate, fiber, mjd, cache_dir="data/spectra_cache_sdss_name"):
+def load_spec(sdss_name, plate, fiber, mjd, cache_dir="data/spectra_cache"):
     
     # sdss_name = data_cat['SDSS_NAME'][i]
     # plate, fiber, mjd = data_cat['PLATE'][i], data_cat['FIBERID'][i], data_cat['MJD'][i]
@@ -326,6 +326,7 @@ def get_alpha(i):
     fiber = data_cat['FIBERID'][i]
     mjd = data_cat['MJD'][i]
     z = data_cat['Z_SYS'][i]
+    loglbol = data_cat['LOGLBOL'][i]
 
     # Query SDSS for the spectrum using the SDSS_NAME
     #try:
@@ -334,7 +335,7 @@ def get_alpha(i):
         data = load_spec(sdss_name, plate, fiber, mjd)
         if data is None:
             print(f"Data is none for {sdss_name}. Skipping...")
-            return -1, -1, -1
+            return None
         # Optional: compute the SkyCoord if you still need the coordinates
         coord = SkyCoord(
             ra=data_cat['RA'][i] * u.deg,
@@ -415,6 +416,7 @@ def get_alpha(i):
 
         start = timeit.default_timer()
         # Do the fitting
+        decompose_host = True if loglbol < 46 else False
 
         q_mle.Fit(name=f"{z:.2f}_{sdss_name}_{plate}-{mjd}-{fiber}",  # customize the name of given targets. Default: plate-mjd-fiber
                 # prepocessing parameters
@@ -423,11 +425,11 @@ def get_alpha(i):
                 or_mask=False,  # delete the or masked pixels
                 reject_badpix=False,  # reject 10 most possible outliers by the test of pointDistGESD
                 deredden=True,  # correct the Galactic extinction
-                wave_range=[0, 4000],  # trim input wavelength
+                wave_range=[1150, 1e9],  # trim input wavelength
                 wave_mask=None,  # 2-D array, mask the given range(s)
 
                 # host decomposition parameters
-                decompose_host=False,  # If True, the host galaxy-QSO decomposition will be applied
+                decompose_host=decompose_host,  # If True, the host galaxy-QSO decomposition will be applied
                 host_prior=False, # If True, the code will adopt prior-informed method to assist decomposition. Currently, only 'CZBIN1' and 'DZBIN1' model for QSO PCA are available. And the model for galaxy must be PCA too.
                 host_prior_scale=0.2, # scale of prior panelty. Usually, 0.2 works fine for SDSS spectra. Adjust it smaller if you find the prior affect the fitting results too much.
 
@@ -456,7 +458,7 @@ def get_alpha(i):
                 # If True, do Monte Carlo resampling of the spectrum based on the input error array to produce the MC error array
                 MCMC=False,
                 # If True, do Markov Chain Monte Carlo sampling of the posterior probability densities to produce the error array
-                nsamp=4,
+                nsamp=20,
                 # The number of trials of the MC process (if MC=True) or number samples to run MCMC chain (if MCMC=True)
 
                 # advanced fitting parameters
@@ -492,78 +494,95 @@ def get_alpha(i):
 
     print(f'Fitting finished in {np.round(end - start, 1)}s')
 
-    # Combine q_mle.conti_result_name and q_mle.conti_result into an Astropy Table
-    conti_table = Table(q_mle.conti_result, names=q_mle.conti_result_name)
-    for name in conti_table.colnames:
-        if conti_table[name].dtype.kind in {'U', 'S'}:
-            conti_table[name] = conti_table[name].astype(float)
+    # Build a dictionary from q_mle.conti_result_name and q_mle.conti_result
+    conti_dict = {name: val for name, val in zip(q_mle.conti_result_name, q_mle.conti_result)}
+    # Convert string values to float if needed
+    for k, v in conti_dict.items():
+        if isinstance(v, str):
+            try:
+                conti_dict[k] = float(v)
+            except Exception:
+                conti_dict[k] = np.nan
 
-    conti_table['z'] = z
+    conti_dict['z'] = z
 
-    m_2500_new = compute_apparent_mag_2500_astropy(conti_table)
+    # Compute m_2500_new using the dictionary
+    m_2500, m_2500_err = compute_apparent_mag_2500_astropy(conti_dict)
 
-    if 'frac_host_4200' in conti_table.colnames:
-        f_host = conti_table['frac_host_4200']
-    else:
-        f_host = -1
-
+    result = {
+        'apparent_mag_2500': m_2500,
+        'apparent_mag_2500_err': m_2500_err,
+        'f_host_4200': conti_dict.get('frac_host_4200', -99),
+        'alpha_lambda': conti_dict.get('PL_slope', -99),
+        'alpha_lambda_err': conti_dict.get('PL_slope_err', -99),
+        'redchi': q_mle.conti_fit.redchi
+    }
     #plt.show()
-    
-    return m_2500_new, f_host, delta_m_avg
-
+    return result
 
 from astropy.cosmology import FlatLambdaCDM
 from tqdm import trange
 import astropy.units as u
 
-def compute_apparent_mag_2500_astropy(conti_table, logL_col='L2500', logL_err_col='LOGL2500_ERR', z_col='z', H0=70, Om0=0.3):
+def compute_apparent_mag_2500_astropy(conti_table, logL_col='L2500', logL_err_col='L2500_err', z_col='z', H0=70, Om0=0.3):
     cosmo = FlatLambdaCDM(H0=H0, Om0=Om0)
     c = 2.99792458e10  # cm/s
     lambda_ = 2500e-8  # cm
 
     z = conti_table[z_col]
     logL_2500 = conti_table[logL_col]
-    #logL_2500_err = conti_table[logL_err_col]
+    logL_2500_err = conti_table[logL_err_col]
+    
 
     DL = cosmo.luminosity_distance(z).to(u.cm).value  # cm
 
     log_Lnu = logL_2500 + np.log10(lambda_ / c)
     log_fnu = log_Lnu - np.log10(4 * np.pi * DL**2 * (1 + z))
     m_ab = -2.5 * log_fnu - 48.60
-    #m_ab_err = 2.5 * logL_2500_err
+    m_ab_err = 2.5 * logL_2500_err
 
-    return m_ab
+    return m_ab, m_ab_err
 
 ntest = len(data_cat)
 #ntest = 500
 
-m_new = np.zeros(ntest, dtype=float)
-m_old = np.zeros(ntest, dtype=float)
-f_host = np.zeros(ntest, dtype=float)
-dmag_avg = np.zeros(ntest, dtype=float)
-
 new_data = []
 
+results = []
 for i in trange(ntest, desc="Processing objects"):
     object_id = data_cat['object_id'][i]
+    sdss_name = data_cat['SDSS_NAME'][i]
+    # Initialize result with default -99 values
+    result = dict(
+        object_id=object_id,
+        sdss_name=sdss_name,
+        apparent_mag_2500=-1e9,
+        apparent_mag_2500_err=-1e9,
+        f_host_4200=-1e9,
+        alpha_lambda=-1e9,
+        alpha_lambda_err=-1e9,
+        redchi=-1e9,
+    )
+
+    r = get_alpha(i)
+    print(r)
     try:
-        m_new[i], f_host[i], dmag_avg[i] = get_alpha(i)
-        print(f"m_new: {m_new[i]}, f_host: {f_host[i]}, dmag_avg: {dmag_avg[i]}")
+        if r:
+            result |= r
+        else:
+            print(f"Error processing object {object_id} ({sdss_name})")
     except Exception as e:
-        print(f"Error processing object {object_id}: {e}")
-        m_new[i] = -99
-        f_host[i] = -99
-        dmag_avg[i] = -99
+        print(f"Exception processing object {object_id} ({sdss_name}): {e}")
+
+    results.append(result)
+
 
 # Save results to CSV
-results_df = pd.DataFrame({
-    'object_id': data_cat['object_id'][:ntest],
-    'sdss_name': data_cat['SDSS_NAME'][:ntest],
-    'apparent_mag_2500': m_new,
-    'f_host_4200': f_host
-})
 
-results_df.to_csv('data/csv/aug8_stone_merged_fittedm2500.csv', index=False)
+
+results_df = pd.DataFrame(results)
+
+results_df.to_csv('data/csv/aug10_stone_merged_fittedm2500.csv', index=False)
 
 #print("Results saved to 'data/csv/aug4_sample_chisqg10_ebv005sn3_magsmean_fittedm2500.csv'")
 print("Not cached objects:", not_cached)
