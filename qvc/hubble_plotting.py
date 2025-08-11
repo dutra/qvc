@@ -163,107 +163,171 @@ def plot_posterior_corner(flat_samples, only_sna=False, cosmo_model='Flatw0waCDM
         plt.show()
     plt.close()
 
-def plot_cosmo_corner(flat_samples_sn, flat_samples_agn, cosmo_model='Flatw0waCDM', show=False, sna_data=None, agn_data=None):
-# === Parameter setup ===
-    if cosmo_model == 'FlatwCDM':
-        param_names = ["H0", "Om0", "w0"]
-        labels = [r"$H_0$", r"$\Omega_M$", r"$w_0$"]
-    elif cosmo_model == 'Flatw0waCDM':
-        param_names = ["H0", "Om0", "w0", "wa"]
-        labels = [r"$H_0$", r"$\Omega_M$", r"$w_0$", r"$w_a$"]
-    elif cosmo_model == 'FlatLambdaCDM':
-        param_names = ["H0", "Om0"]
-        labels = [r"$H_0$", r"$\Omega_M$"]
-    priors, model_labels, model_labels_latex = get_model_params(cosmo_model)
-    n_params = len(labels)
-    param_indices = [list(priors.keys()).index(p) for p in param_names]
+import os
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib.lines import Line2D
+from scipy.stats import gaussian_kde
+from tqdm import tqdm
 
-    # === Get flattened MCMC chains ===
-    if sna_data is None and agn_data is None:
-        sna_data = sampler_sna.get_chain(flat=True)[:, param_indices]
-        agn_data = sampler_agn.get_chain(flat=True)[:, param_indices]
+import os
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib.lines import Line2D
+from scipy.stats import gaussian_kde
 
-    # === Fast KDE-level calculator ===
-    def get_density_levels(values, probs=[0.393, 0.865]):
+def plot_cosmo_corner(
+    flat_samples_sn,
+    flat_samples_agn,
+    cosmo_model,
+    z_agn_pivot,
+    show=False,
+):
+    """
+    Corner-style plot (custom) of key cosmology params with diagonal stats labels.
+      - Flatw0waCDM: H0, Om0, w0(= w(a=1) derived from wp,wa at z_agn_pivot), wa
+      - FlatwCDM:    H0, Om0, w0
+    If flat_samples_sn is None or empty, only the SN+AGN (red) set is plotted.
+    """
+    # --- pull model labels from your config ---
+    _, model_labels, _ = get_model_params(cosmo_model)
+
+    # ---------- helpers ----------
+    def _find(labels, *cands):
+        for c in cands:
+            if c in labels:
+                return labels.index(c)
+        raise KeyError(f"Could not find any of {cands} in labels {labels}")
+
+    def _subset(samples, labels):
+        """Return reduced samples (N,k) and latex labels for the chosen model."""
+        X = np.asarray(samples)
+        i_H0  = _find(labels, "H0", "H_0")
+        i_Om0 = _find(labels, "Om0", "OmegaM", "Omega_m")
+
+        if cosmo_model == "Flatw0waCDM":
+            i_wp = _find(labels, "wp", "w_p")
+            i_wa = _find(labels, "wa", "w_a")
+            a_p  = 1.0 / (1.0 + float(z_agn_pivot))
+            wp, wa = X[:, i_wp], X[:, i_wa]
+            w0 = wp - (1.0 - a_p) * wa
+            Y = np.column_stack([X[:, i_H0], X[:, i_Om0], w0, wa])
+            lab_latex = [r"$H_0$", r"$\Omega_m$", r"$w_0$", r"$w_a$"]
+        elif cosmo_model == "FlatwCDM":
+            i_w0 = _find(labels, "w0", "w_0", "w")
+            Y = np.column_stack([X[:, i_H0], X[:, i_Om0], X[:, i_w0]])
+            lab_latex = [r"$H_0$", r"$\Omega_m$", r"$w_0$"]
+        else:
+            raise ValueError(f"Unsupported cosmo_model '{cosmo_model}' for this plot.")
+        return Y, lab_latex
+
+    def _fmt_err(m, lo, hi):
+        # a small heuristic for decimals
+        nd = 3 if abs(m) < 1 else 2
+        return f"{m:.{nd}f}", f"{hi - m:.{nd}f}", f"{m - lo:.{nd}f}"
+
+    def _get_density_levels(values, probs=[0.393, 0.865]):
         z = values.ravel()
         z_sorted = np.sort(z)
-        cdf = np.cumsum(z_sorted)
-        cdf /= cdf[-1]
+        cdf = np.cumsum(z_sorted); cdf /= max(cdf[-1], 1e-300)
         levels = [z_sorted[np.searchsorted(cdf, 1 - p)] for p in probs]
-        return np.unique(np.sort(levels))  # ensure strictly increasing
+        return np.unique(np.sort(levels))
 
-    # === Fast 2D KDE plot with filled contours ===
-    def fast_filled_kde(ax, x, y, color, base_alpha=0.4, levels=[0.393, 0.865]):
-        data = np.vstack([x, y])
-        kde = gaussian_kde(data)
-
-        # Low-resolution grid
+    def _filled_kde(ax, x, y, color, base_alpha=0.4):
+        kde = gaussian_kde(np.vstack([x, y]))
         xmin, xmax = np.percentile(x, [0.5, 99.5])
         ymin, ymax = np.percentile(y, [0.5, 99.5])
-        xgrid = np.linspace(xmin, xmax, 100)
-        ygrid = np.linspace(ymin, ymax, 100)
+        xgrid = np.linspace(xmin, xmax, 120)
+        ygrid = np.linspace(ymin, ymax, 120)
         xx, yy = np.meshgrid(xgrid, ygrid)
         zz = kde(np.vstack([xx.ravel(), yy.ravel()])).reshape(xx.shape)
-
-        contour_levels = get_density_levels(zz, levels)
-        for i in range(len(contour_levels)-1, -1, -1):
+        levels = _get_density_levels(zz, [0.393, 0.865])
+        for i in range(len(levels)-1, -1, -1):
             ax.contourf(xx, yy, zz,
-                        levels=[contour_levels[i], zz.max()],
-                        colors=[color],
-                        alpha=base_alpha * (i + 1) / len(contour_levels))
-        ax.contour(xx, yy, zz, levels=contour_levels, colors=[color], linewidths=1.2)
+                        levels=[levels[i], zz.max()],
+                        colors=[color], alpha=base_alpha*(i+1)/len(levels))
+        ax.contour(xx, yy, zz, levels=levels, colors=[color], linewidths=1.2)
 
-    # === Triangle plot ===
-    fig, axes = plt.subplots(n_params, n_params, figsize=(10, 10))
+    # --- reduce to the parameters we actually plot ---
+    agn_data, labels_latex = _subset(flat_samples_agn, model_labels)
+    sna_data = None
+    if flat_samples_sn is not None and len(flat_samples_sn) > 0:
+        sna_data, _ = _subset(flat_samples_sn, model_labels)
 
-    for i in tqdm(range(n_params), desc="Generating corner plot"):
+    n_params = agn_data.shape[1]
+    fig, axes = plt.subplots(n_params, n_params, figsize=(2.3*n_params, 2.3*n_params))
+
+    # --- build the grid ---
+    for i in range(n_params):
         for j in range(n_params):
             ax = axes[i, j]
             ax.tick_params(direction='in')
 
             if i < j:
                 ax.axis("off")
-            elif i == j:
-                for data, color in [(sna_data, "blue"), (agn_data, "red")]:
-                    kde = gaussian_kde(data[:, i], bw_method=0.1)
-                    xmin = data[:, i].min()
-                    xmax = data[:, i].max()
-                    margin = 0.1 * (xmax - xmin)
-                    x_vals = np.linspace(xmin - margin, xmax + margin, 300)
-                    ax.plot(x_vals, kde(x_vals), color=color, lw=1.8)
-            else:
-                fast_filled_kde(ax, sna_data[:, j], sna_data[:, i], "blue", base_alpha=0.4)
-                fast_filled_kde(ax, agn_data[:, j], agn_data[:, i], "red", base_alpha=0.4)
+                continue
 
+            if i == j:
+                # 1D KDEs
+                xs = np.linspace(np.min(agn_data[:, i]), np.max(agn_data[:, i]), 400)
+                kde_r = gaussian_kde(agn_data[:, i])
+                ax.plot(xs, kde_r(xs), color="red", lw=1.8)
+
+                if sna_data is not None:
+                    xs_b = np.linspace(np.min(sna_data[:, i]), np.max(sna_data[:, i]), 400)
+                    kde_b = gaussian_kde(sna_data[:, i])
+                    ax.plot(xs_b, kde_b(xs_b), color="blue", lw=1.8)
+
+                # diagonal titles: AGN (red) on top; SN (blue) below if present
+                m, lo, hi = np.median(agn_data[:, i]), np.percentile(agn_data[:, i],16), np.percentile(agn_data[:, i],84)
+                ms, ps, ns = _fmt_err(m, lo, hi)
+                ax.set_title(rf"{labels_latex[i]} = {ms}" + rf"$^{{+{ps}}}_{{-{ns}}}$",
+                             color="red", fontsize=11, loc="left", pad=2)
+
+                if sna_data is not None:
+                    mb, lob, hib = np.median(sna_data[:, i]), np.percentile(sna_data[:, i],16), np.percentile(sna_data[:, i],84)
+                    msb, psb, nsb = _fmt_err(mb, lob, hib)
+                    ax.text(0.02, 0.86,
+                            rf"{labels_latex[i]} = {msb}" + rf"$^{{+{psb}}}_{{-{nsb}}}$",
+                            transform=ax.transAxes, ha="left", va="top",
+                            color="blue", fontsize=11)
+            else:
+                # 2D KDEs
+                if sna_data is not None:
+                    _filled_kde(ax, sna_data[:, j], sna_data[:, i], "blue", base_alpha=0.4)
+                _filled_kde(ax, agn_data[:, j], agn_data[:, i], "red", base_alpha=0.4)
+
+            # tidy labels
             if j == 0:
-                ax.set_ylabel(labels[i])
+                ax.set_ylabel(labels_latex[i])
             else:
                 ax.set_yticklabels([])
 
             if i == n_params - 1:
-                ax.set_xlabel(labels[j])
+                ax.set_xlabel(labels_latex[j])
             else:
                 ax.set_xticklabels([])
 
-    # === Legend ===
-    legend_elements = [
-        Line2D([0], [0], color="blue", lw=4, label="SN Ia"),
-        Line2D([0], [0], color="red", lw=4, label="SN Ia + AGN"),
-    ]
-    fig.legend(handles=legend_elements, bbox_to_anchor=(0.5, 0.92), loc="upper left", fontsize=26, frameon=False, markerscale=1.5)
+    # legend
+    legend = []
+    if sna_data is not None:
+        legend.append(Line2D([0],[0], color="blue", lw=4, label="SN Ia"))
+    legend.append(Line2D([0],[0], color="red",  lw=4, label="SN Ia + AGN"))
+    fig.legend(handles=legend, bbox_to_anchor=(0.5, 0.92), loc="upper left",
+               fontsize=12, frameon=False, markerscale=1.5)
 
-    # === Layout & Save ===
-    fig.subplots_adjust(left=0.1, right=0.9, bottom=0.1, top=0.9, wspace=0.05, hspace=0.05)
+    fig.subplots_adjust(left=0.08, right=0.98, bottom=0.08, top=0.9,
+                        wspace=0.05, hspace=0.05)
 
     os.makedirs("plots/hubble", exist_ok=True)
-    fig.savefig(f"plots/hubble/corner_kde_{cosmo_model}.pdf", bbox_inches="tight", transparent=True)
-    fig.savefig(f"plots/hubble/corner_kde_{cosmo_model}.png", bbox_inches="tight")
+    fig.savefig(f"plots/hubble/corner_kde_{cosmo_model}.png", bbox_inches="tight", dpi=150)
     if show:
         plt.show()
-    plt.close()
+    plt.close(fig)
 
 
-def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, show=False, completeness=True, show_true=False, fake_params=None):
+
+def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_agn_pivot, show=False, completeness=True, show_true=False, fake_params=None):
     """Plot Hubble diagram + residuals, classic Pantheon+ style."""
     # Define cosmological parameter labels
     if cosmo_model == 'FlatwCDM':
@@ -301,7 +365,8 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, show=False, comp
                 H0=s[param_indices['H0']],
                 Om0=s[param_indices['Om0']],
                 wp=s[param_indices['wp']],
-                wa=s[param_indices['wa']]
+                wa=s[param_indices['wa']],
+                zp=z_agn_pivot
             ).distmod(z_grid).value
             for s in flat_samples
         ])
@@ -338,7 +403,8 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, show=False, comp
             H0=results['H0'][1],
             Om0=results['Om0'][1],
             wp=results['wp'][1],
-            wa=results['wa'][1]
+            wa=results['wa'][1],
+            zp=z_agn_pivot
         )
     elif cosmo_model == 'FlatLambdaCDM':
         cosmo = FlatLambdaCDM(
@@ -502,7 +568,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, show=False, comp
     return residuals, mu_pred_median, mu_pred_std
 
 
-def plot_predicted_vs_actual_M2500(flat_samples, df_agn, cosmo_model, show=False):
+def plot_predicted_vs_actual_M2500(flat_samples, df_agn, cosmo_model, z_agn_pivot, show=False):
     priors, model_labels, model_labels_latex = get_model_params(cosmo_model)
     results = {key: np.percentile(flat_samples[:, i], [16, 50, 84]) for i, key in enumerate(model_labels)}
     # compute M_actual
@@ -517,7 +583,8 @@ def plot_predicted_vs_actual_M2500(flat_samples, df_agn, cosmo_model, show=False
             H0=results['H0'][1],
             Om0=results['Om0'][1],
             wp=results['wp'][1],
-            wa=results['wa'][1]
+            wa=results['wa'][1],
+            zp=z_agn_pivot
         )
     elif cosmo_model == 'FlatLambdaCDM':
         cosmo = FlatLambdaCDM(
@@ -527,7 +594,6 @@ def plot_predicted_vs_actual_M2500(flat_samples, df_agn, cosmo_model, show=False
     else:
         raise ValueError("Invalid cosmology model.")
         
-    #M_actual = M_2500_from_logL_2500_recosmo_pivot(df_agn['log_l2500'].values, df_agn['z'].values, cosmo_target=cosmo, z0=2, alpha_nu=df_agn['alpha_nu'].values)
     actual_M_2500 = df_agn['apparent_mag_2500'].values - np.array([cosmo.distmod(z).value for z in df_agn['z'].values])
 
     M_2500_pred = M_model_agn(
@@ -539,10 +605,8 @@ def plot_predicted_vs_actual_M2500(flat_samples, df_agn, cosmo_model, show=False
         df_agn['log_sigma0'].values,
         df_agn['log_tau_UV_RF'].values,
         df_agn['f_host'].values
-    ) #- (K_corr(df_agn['z'], df_agn['alpha_nu'].values) - K_corr(2.0, df_agn['alpha_nu'].values)) # TODO: check this
-    #) + K_corr(2.0, df_agn['alpha_nu'].values)
+    )
 
-    # Calculate prediction errors
     M_2500_pred_err = np.sqrt(
         M_model_agn_err(
             results['M0_agn'][1],
@@ -550,7 +614,6 @@ def plot_predicted_vs_actual_M2500(flat_samples, df_agn, cosmo_model, show=False
             results['eta_A1_agn'][1], results['eta_A2_agn'][1], 
             results['eta_break_agn'][1],
             results['beta_agn'][1], 
-            
             df_agn['log_sigma0'].values, 
             df_agn['log_sigma0_err'].values, 
             df_agn['log_tau_UV_RF_err'].values,
@@ -558,76 +621,63 @@ def plot_predicted_vs_actual_M2500(flat_samples, df_agn, cosmo_model, show=False
         )**2
     )
 
-    # Bin and color by redshift
-    #z_bins = np.linspace(df_agn['z'].min(), df_agn['z'].max(), 10)  # Define redshift bins
-    z_bins = np.linspace(0.5, 3.5, 10)  # Define redshift bins
-    z_bin_indices = np.digitize(df_agn['z'], bins=z_bins)  # Assign each redshift to a bin
-
-    # Define the number of redshift bins and their labels
+    z_bins = np.linspace(0.5, 3.5, 10)
+    z_bin_indices = np.digitize(df_agn['z'], bins=z_bins)
     num_bins = len(z_bins) - 1
     bin_labels = [f"{z_bins[i]:.1f} < z < {z_bins[i+1]:.1f}" for i in range(num_bins)]
+    num_cols = 3
+    num_rows = math.ceil(num_bins / num_cols)
 
-    # Calculate the number of rows and columns for the grid
-    num_cols = 3  # Number of columns
-    num_rows = math.ceil(num_bins / num_cols)  # Number of rows
-
-    # Create subplots with reduced height
     fig, axes = plt.subplots(num_rows, num_cols, figsize=(5 * num_cols, 4 * num_rows), sharey=True, sharex=True)
-    axes = axes.flatten()  # Flatten the 2D array of axes for easier indexing
+    axes = axes.flatten()
 
-    # Loop through each redshift bin and plot
+    f_host = df_agn['f_host'].values
+    vmin = np.nanmin(f_host)
+    vmax = np.nanmax(f_host)
+
     for i, ax in enumerate(axes):
-        #ax.set_xlim(actual_M_2500.min(), actual_M_2500.max())
-        #ax.set_ylim(M_2500_pred.min(), M_2500_pred.max())
         ax.set_xlim(-25.8, -18.2)
         ax.set_ylim(-25.8, -18.2)
 
         if i < num_bins:
-            # Filter data for the current redshift bin
             bin_mask = z_bin_indices == (i + 1)
             predicted_M_2500_bin = M_2500_pred[bin_mask]
-            #predicted_M_2500_err_bin = M_2500_pred_err[bin_mask]
+            actual_M_2500_bin = actual_M_2500[bin_mask]
+            f_host_bin = f_host[bin_mask]
             M_i_axis = np.linspace(actual_M_2500.min(), actual_M_2500.max(), 100)
             ax.plot(M_i_axis, M_i_axis, color='m', alpha=0.7, label='y = x (Perfect Prediction)', lw=3, linestyle='--')
-            # Scatter plot for the current bin with error bars
-            # scatter = ax.errorbar(
-            #     actual_M_i[bin_mask], predicted_M_i_bin, xerr=0.25, yerr=predicted_M_i_err_bin, 
-            #     fmt='o', markerfacecolor='k', markeredgecolor='k', alpha=0.4, lw=1.5, capsize=3, capthick=1, color='k'
-            # )
-            scatter = ax.scatter(
-                actual_M_2500[bin_mask], predicted_M_2500_bin, 
-                s=20, alpha=0.5, edgecolor='k', facecolor='k', lw=0.5,
+            sc = ax.scatter(
+                actual_M_2500_bin, predicted_M_2500_bin, 
+                c=f_host_bin, cmap='viridis', s=20, alpha=0.7, edgecolor='k', lw=0.5, vmin=vmin, vmax=vmax
             )
-            # Invert x and y axes
             ax.invert_xaxis()
             ax.invert_yaxis()
-            # Annotate bin label
             ax.annotate(bin_labels[i], xy=(0.05, 0.95), xycoords='axes fraction', 
-                    fontsize=18, color='k', alpha=0.7, ha='left', va='top')  # Annotate bin label in grey
-            # Annotate number of objects in the bin
+                        fontsize=18, color='k', alpha=0.7, ha='left', va='top')
             n_in_bin = np.sum(bin_mask)
             ax.annotate(f"N = {n_in_bin}", xy=(0.95, 0.05), xycoords='axes fraction',
                         fontsize=14, color='gray', ha='right', va='bottom')
-            if i >= (num_rows - 1) * num_cols:  # Add xlabel only for the bottom row
+            if i >= (num_rows - 1) * num_cols:
                 ax.set_xlabel('Actual $M_{2500}$')
-            if i % num_cols == 0:  # Add ylabel only for the first column
+            if i % num_cols == 0:
                 ax.set_ylabel('Predicted $M_{2500}$')
         else:
-            # Hide unused subplots
             ax.axis('off')
 
-    # Adjust layout to remove whitespace
     plt.subplots_adjust(wspace=0, hspace=0)
+
+    # Add a colorbar for f_host
+    cbar = fig.colorbar(sc, ax=axes, orientation='vertical', fraction=0.02, pad=0.02)
+    cbar.set_label(r'$f_{\rm host}$', fontsize=14)
 
     os.makedirs("plots/hubble", exist_ok=True)
     plt.savefig(f"plots/hubble/predicted_vs_actual_M2500_{cosmo_model}.png", dpi=300)
-    #plt.savefig(f"plots/hubble/predicted_vs_actual_Mi_{cosmo_model}.pdf", dpi=300)
     if show:
         plt.show()
     plt.close()
 
 
-def plot_predicted_vs_actual_Mi(flat_samples, df_agn, cosmo_model, show=False):
+def plot_predicted_vs_actual_Mi(flat_samples, df_agn, cosmo_model, z_agn_pivot, show=False):
     priors, model_labels, model_labels_latex = get_model_params(cosmo_model)
     results = {key: np.percentile(flat_samples[:, i], [16, 50, 84]) for i, key in enumerate(model_labels)}
     # compute M_actual
@@ -642,7 +692,8 @@ def plot_predicted_vs_actual_Mi(flat_samples, df_agn, cosmo_model, show=False):
             H0=results['H0'][1],
             Om0=results['Om0'][1],
             wp=results['wp'][1],
-            wa=results['wa'][1]
+            wa=results['wa'][1],
+            zp=z_agn_pivot
         )
     elif cosmo_model == 'FlatLambdaCDM':
         cosmo = FlatLambdaCDM(
@@ -1122,16 +1173,50 @@ def plot_completeness_diagnostics(df_agn, completeness2d, mag_centers, z_centers
     plt.close()
 
 
-def plot_full_residuals(df_agn, residuals, show=False):
+def plot_full_residuals(df_agn, residuals, flat_samples, cosmo_model, z_agn_pivot, show=False):
     import math
 
+    priors, model_labels, model_labels_latex = get_model_params(cosmo_model)
+    param_indices = {name: model_labels.index(name) for name in model_labels}
+
+    results = {key: np.percentile(flat_samples[:, i], [16, 50, 84]) for i, key in enumerate(model_labels)}
+
+    if cosmo_model == 'FlatwCDM':
+        cosmo = FlatwCDM(
+            H0=results['H0'][1],
+            Om0=results['Om0'][1],
+            w0=results['w0'][1]
+        )
+    elif cosmo_model == 'Flatw0waCDM':
+        cosmo = FlatwpwaCDM(
+            H0=results['H0'][1],
+            Om0=results['Om0'][1],
+            wp=results['wp'][1],
+            wa=results['wa'][1],
+            zp=z_agn_pivot,
+        )
+    else:
+        raise ValueError("Invalid cosmology model.")
+
+    df_agn['MY_M_2500'] = df_agn['apparent_mag_2500'].values - np.array([cosmo.distmod(z).value for z in df_agn['z'].values])
+
+
+    # Start with z < 10
     mask = df_agn['z'] < 10
-    # Exclude keys ending with 'ERR' or 'err'
-    #keys = [col for col in df_agn.columns if not (col.endswith('ERR') or col.endswith('err'))]
-    keys = [col for col in df_agn.columns if col in ['apparent_mag_2500', 'z', 'log_lbol', 'log_ledd_ratio', 
-                                                     'log_sigma0', 'log_sigma_hat_UV', 'log_tau_UV_RF', 'chi_sq_g',
-                                                     'f_host', 'sn_median_all',
-                                                     'eta_A1', 'eta_A2', 'eta_tau1', 'eta_tau2']]
+
+    # Exclude non-numeric columns from -1e9 check
+    num_cols = df_agn.select_dtypes(include=[np.number]).columns
+    mask &= ~(df_agn[num_cols] == -1e9).any(axis=1)
+
+    # Select only the keys in your specified list (order preserved by np.flip)
+    keys = [col for col in np.flip([
+        'apparent_mag_2500', 'MY_M_2500', 'z', 'log_lbol', 'log_ledd_ratio', 
+        'log_sigma0', 'log_sigma_hat_UV', 'log_tau_UV_RF', 'chi_sq_g',
+        'f_host', 'sn_median_all', 'bwb_alpha', 'bwb_beta', 'redchi', 'f_host_4200',
+        'alpha_lambda',
+        'eta_A1', 'eta_A2', 'eta_tau1', 'eta_tau2'
+    ]) if col in df_agn.columns]
+
     n_keys = len(keys)
     n_cols = 4
     n_rows = math.ceil(n_keys / n_cols)
@@ -1157,9 +1242,13 @@ def plot_full_residuals(df_agn, residuals, show=False):
                 cbar.set_label('Redshift', fontsize=12)
                 if key.upper() == 'LOGL2500':
                     ax.set_xlim(left=0)
+                if key == 'f_host_4200':
+                    ax.set_xlim(left=-1.1, right=2.5)
             else:
+                print(f"Skipping non-numeric or mismatched data for key: {key}")
                 ax.axis('off')
-        except Exception:
+        except Exception as e:
+            print(f"Error processing key {key}: {e}")
             ax.axis('off')
         ax.set_title(key)
         ax.grid(True)
@@ -1265,7 +1354,7 @@ def plot_inverted_sigmahat_vs_l2500_pl(flat_samples, df_agn, cosmo_model, show=F
     if show:
        plt.show()
 
-def plot_predicted_L2500_vs_sigmahat(flat_samples, df_agn, cosmo_model, show=False):
+def plot_predicted_L2500_vs_sigmahat(flat_samples, df_agn, cosmo_model, z_agn_pivot, show=False):
     d = df_agn.copy()
     #d = d[d['LOGL2500_ERR'] > 0]
 
@@ -1320,7 +1409,7 @@ def plot_predicted_L2500_vs_sigmahat(flat_samples, df_agn, cosmo_model, show=Fal
     if cosmo_model == 'FlatwCDM':
         cosmo = FlatwCDM(H0=results['H0'][1], Om0=results['Om0'][1], w0=results['w0'][1])
     elif cosmo_model == 'Flatw0waCDM':
-        cosmo = FlatwpwaCDM(H0=results['H0'][1], Om0=results['Om0'][1], wp=results['wp'][1], wa=results['wa'][1])
+        cosmo = FlatwpwaCDM(H0=results['H0'][1], Om0=results['Om0'][1], wp=results['wp'][1], wa=results['wa'][1], zp=z_agn_pivot)
     else:
         raise ValueError(f"Unknown cosmological model: {cosmo_model}")
 

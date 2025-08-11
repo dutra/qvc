@@ -9,8 +9,8 @@ def K_corr(z, alpha_nu):
     #return -2.5 * (1 + alpha_nu) * np.log10(1 + z)
 
 # --- Reference constants and pivot values ---
-log_sigma0_pivot = -0.9 # TODO make this a parameter
-log_tau_UV_RF_pivot = 2.6  # TODO make this a parameter
+log_sigma0_pivot = -0.84 # TODO make this a parameter
+log_tau_UV_RF_pivot = 2.76  # TODO make this a parameter
 f_host_pivot = 0.2
 #M0_agn_offset = -5.179  # TODO make this a parameter
 #z_agn_pivot = 1.2 # TODO make this a parameter
@@ -99,8 +99,8 @@ def get_model_params(cosmo_model):
         ])
     elif cosmo_model == 'Flatw0waCDM':
         priors |= OrderedDict([
-            ("wp", (-10.0, 1.0)),   # covers phantom (<-1), Λ (-1), quintessence (> -1), and even w>0
-            ("wa", (-10.0, 5.0))    # symmetric variation
+            ("wp", (-20.0, 1.0)),   # covers phantom (<-1), Λ (-1), quintessence (> -1), and even w>0
+            ("wa", (-20.0, 5.0))    # symmetric variation
         ])
 
     else:

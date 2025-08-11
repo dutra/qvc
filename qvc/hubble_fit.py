@@ -193,9 +193,7 @@ def dynesty_initializer(agn_data, pantheon_data, dynesty_config, sna_LogdetCov, 
 
 def run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model='Flatw0waCDM', 
                       only_sna=False, completeness=True, use_full_cov=False,
-                      resume=False, dlogz_init=np.inf, nlive_init=25, nlive_batch=10,
-                      num_samples=2000, num_warmup=2000, 
-                      fitting_method=None):
+                      resume=False, dlogz_init=np.inf, nlive_init=25, nlive_batch=10):
 
     priors, model_labels, model_labels_latex = get_model_params(cosmo_model)
     ndim = len(model_labels)
@@ -233,74 +231,71 @@ def run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model='Flatw0waCDM',
     _agn_data = {col: df_agn_filtered[col].values for col in df_agn_filtered.columns}
     _pantheon_data = {col: df_pantheon_filtered[col].values for col in df_pantheon_filtered.columns}
 
-    if fitting_method == 'dynesty':
-        # Set dynesty global context
-        global _dynesty_config
-        _dynesty_config.update({
-            'model_priors': priors,
-            'model_labels': model_labels,
-            'cosmo_model': cosmo_model,
-            'completeness_params': completeness_params,
-            'only_sna': only_sna,
-            'use_full_cov': use_full_cov,
-        })
+    # Set dynesty global context
+    global _dynesty_config
+    _dynesty_config.update({
+        'model_priors': priors,
+        'model_labels': model_labels,
+        'cosmo_model': cosmo_model,
+        'completeness_params': completeness_params,
+        'only_sna': only_sna,
+        'use_full_cov': use_full_cov,
+    })
 
 
-        num_cpus = multiprocessing.cpu_count()
-        with multiprocessing.get_context("spawn").Pool(
-            processes=num_cpus,
-            initializer=dynesty_initializer,
-            initargs=(_agn_data, _pantheon_data, _dynesty_config, 
-                      _sna_LogdetCov, _sna_L, _sna_Lower)
-        ) as pool:            
-            # use NestedSampler for precise log-evidence estimates (e.g., model selection)
-            # use DynamicNestSampler for Cosmological parameter inference
+    num_cpus = multiprocessing.cpu_count()
+    with multiprocessing.get_context("spawn").Pool(
+        processes=num_cpus,
+        initializer=dynesty_initializer,
+        initargs=(_agn_data, _pantheon_data, _dynesty_config, 
+                    _sna_LogdetCov, _sna_L, _sna_Lower)
+    ) as pool:            
+        # use NestedSampler for precise log-evidence estimates (e.g., model selection)
+        # use DynamicNestSampler for Cosmological parameter inference
+        if resume:
+            sampler = DynamicNestedSampler.restore(f'data/dynesty_{cosmo_model}.save', pool=pool)
+        else:
             u = np.random.rand(100, ndim)
             v = pool.map(prior_transform_dynesty, u)
             l = pool.map(loglike_dynesty, v)
             print("Fraction of finite likelihoods:", np.sum(np.isfinite(l)) / len(l))
-            if resume:
-                sampler = DynamicNestedSampler.restore(f'data/dynesty_{cosmo_model}.save', pool=pool)
-            else:
-                sampler = DynamicNestedSampler(
-                    loglike_dynesty,
-                    prior_transform_dynesty,
-                    ndim,
-                    update_interval=10*ndim,
-                    bound='multi',
-                    sample='rwalk',
-                    pool=pool,
-                    queue_size=num_cpus
-                )
-            sampler.run_nested(
-                resume=resume,
-                checkpoint_file=f'data/dynesty_{cosmo_model}.save',
-                print_progress=True,
-                dlogz_init=dlogz_init,
-                n_effective=10,               
-                nlive_init=20 * ndim,         
-                nlive_batch=10 * ndim  # 2 * ndim is low, but seems to work
+
+            sampler = DynamicNestedSampler(
+                loglike_dynesty,
+                prior_transform_dynesty,
+                ndim,
+                update_interval=10*ndim,
+                bound='multi',
+                sample='rwalk',
+                pool=pool,
+                queue_size=num_cpus
             )
+        sampler.run_nested(
+            resume=resume,
+            checkpoint_file=f'data/dynesty_{cosmo_model}.save',
+            print_progress=True,
+            dlogz_init=dlogz_init,
+            n_effective=10,               
+            nlive_init=20 * ndim,         
+            nlive_batch=10 * ndim  # 2 * ndim is low, but seems to work
+        )
 
-        results = sampler.results
-        logZ, logZerr = results.logz[-1], results.logzerr[-1]
-        print(f"\nBayesian evidence logZ = {logZ:.2f} ± {logZerr:.2f}")
-        if logZerr > 1:
-            print("Warning: logZ error is large, consider increasing nlive or maxiter.")
+    results = sampler.results
+    logZ, logZerr = results.logz[-1], results.logzerr[-1]
+    print(f"\nBayesian evidence logZ = {logZ:.2f} ± {logZerr:.2f}")
+    if logZerr > 1:
+        print("Warning: logZ error is large, consider increasing nlive or maxiter.")
 
-        unweighted_samples, weights = results.samples, np.exp(results.logwt - results.logz[-1])
-        flat_samples = resample_equal(unweighted_samples, weights)
-        median_samples = np.median(flat_samples, axis=0)
+    unweighted_samples, weights = results.samples, np.exp(results.logwt - results.logz[-1])
+    flat_samples = resample_equal(unweighted_samples, weights)
+    median_samples = np.median(flat_samples, axis=0)
 
-        print("Dynesty results stats:")
-        print("  samples shape:", unweighted_samples.shape)
-        print("  weights max:", np.max(weights))
-        print("  effective samples:", np.sum(weights)**2 / np.sum(weights**2))
-        display_results_summary(flat_samples, cosmo_model)
-        plot_dynesty(results, cosmo_model)
-
-    else:
-        raise ValueError("fitting_method must be 'emcee', 'dynesty', or 'ultranest'")
+    print("Dynesty results stats:")
+    print("  samples shape:", unweighted_samples.shape)
+    print("  weights max:", np.max(weights))
+    print("  effective samples:", np.sum(weights)**2 / np.sum(weights**2))
+    display_results_summary(flat_samples, cosmo_model, z_agn_pivot)
+    plot_dynesty(results, cosmo_model)
 
     params = dict(zip(model_labels, median_samples))
 
@@ -468,20 +463,20 @@ def test():
     #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/aug6_fshen11_fhostnocap_bplzero_N10t6w1000s500_merged.h5", populate_sdss=False)
     #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/aug6_fshen11_fhostnocap_bplzero_N10t6w2000s500_merged.h5", populate_sdss=False)
     
-    df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("results/aug9_stone_N10w1000s500t6c4_merged.h5", populate_sdss=True)
+    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("results/aug9_stone_N10w1000s500t6c4_merged.h5", populate_sdss=True)
+    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("results/aug9_stone_bwb_N10w1000s500t6c4_merged.h5", populate_sdss=True)
     
-    
+    df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("results/aug10_stonebwb_N20w2000s1000t6c4.h5", populate_sdss=True)
+    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("results/aug10_stonebwb_N30w2000s1000t6c4.h5", populate_sdss=False)
+
     #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/july19_goodsources_chisq5and10_mean1_N20w4000s500_merged.h5", populate_sdss=True)
     #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/june1_joint_N20w2000s1000_fits_merged.h5")
     #df_agn = df_agn[:400]
     #df_agn = df_agn[df_agn['z'] > 1]  # Filter AGN data to z < 2.5
 
-    fitting_method = 'dynesty'
-
     sampler_joint, flat_samples, model_labels, mag_corr, logZ, logZerr = run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model=cosmo_model, 
                                         only_sna=only_sna, completeness=True, use_full_cov=True,
-                                        fitting_method=fitting_method,
-                                        num_warmup=8000, num_samples=1000, resume=False)
+                                        resume=False)
     if cosmo_model == 'Flatw0waCDM':
         zp = compute_pivot_redshift(flat_samples, cosmo_model)
         print("Pivot redshift: ", zp)
@@ -495,18 +490,19 @@ def test():
     #plot_Mi_vs_log_sigma0(flat_samples, df_agn, cosmo_model=cosmo_model, show=False)
     
     #print("Plotting AGN M_i predictions vs actual...")
-    plot_predicted_vs_actual_M2500(flat_samples, df_agn, cosmo_model=cosmo_model, show=False)
+    plot_predicted_vs_actual_M2500(flat_samples, df_agn, cosmo_model=cosmo_model, z_agn_pivot=z_agn_pivot, show=False)
     #plot_predicted_vs_actual_Mi(flat_samples, df_agn, cosmo_model=cosmo_model, show=False)
     
     print("Plotting Hubble diagram...")
-    residuals, mu_pred_median, mu_pred_std = plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model=cosmo_model, show_true=False, show=False)
+    residuals, mu_pred_median, mu_pred_std = plot_hubble(flat_samples, df_agn, df_pantheon, 
+                                                         cosmo_model=cosmo_model, z_agn_pivot=z_agn_pivot, show_true=False, show=False)
     
     #plot_Mi_vs_sigmahat(df_agn, cosmo_model=cosmo_model, show=False)
     #plot_predicted_M2500_vs_sigmahat(flat_samples, df_agn, cosmo_model=cosmo_model, show=False)
-    plot_predicted_L2500_vs_sigmahat(flat_samples, df_agn, cosmo_model=cosmo_model, show=False)
+    plot_predicted_L2500_vs_sigmahat(flat_samples, df_agn, cosmo_model=cosmo_model, z_agn_pivot=z_agn_pivot, show=False)
     #plot_inverted_sigmahat_vs_l2500_pl(flat_samples, df_agn, cosmo_model=cosmo_model, show=False)
     #print("Plotting cosmological posteriors corner plot...")
-    #plot_cosmo_corner(flat_samples, flat_samples, cosmo_model=cosmo_model)
+    plot_cosmo_corner(None, flat_samples, cosmo_model, z_agn_pivot, show=False)
 
     
     print("Plotting completeness vs magnitude at redshifts...")
@@ -514,7 +510,15 @@ def test():
     #plot_completeness_vs_mag_at_redshifts(p_detect, mag_centers, z_centers)
     #plot_completeness_diagnostics(df_agn, p_detect, mag_centers, z_centers)
 
-    plot_full_residuals(df_agn, residuals, show=False)
+    print("Plotting residuals...")
+    plot_full_residuals(df_agn, residuals, flat_samples, cosmo_model, z_agn_pivot, show=False)
+
+    # Example usage:
+    # Assuming `samples` is a dict from your MCMC run
+    if cosmo_model == 'Flatw0waCDM':
+        rho_w0_wa = posterior_corr(flat_samples, cosmo_model, z_agn_pivot)
+        print(f"Posterior correlation coefficient (w0, wa) at z_p={z_agn_pivot}: {rho_w0_wa:.3f}")
+
 
     #plot_predicted_sigma_hat_vs_luminosity(sampler_joint, df_agn, cosmo_model=cosmo_model, show=False)
 if __name__ == "__main__":
