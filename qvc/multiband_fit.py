@@ -82,11 +82,15 @@ def build_model(models, batch_data, f_host_shen11=True, latent=False, bwb=True, 
         with numpyro.plate("objects", batch_size):
             # Object-level parameters (shape: [B])
             # Variability k-corrections
-            eta_A1 = numpyro.sample("eta_A1", dist.Normal(eta_A1_mean, sigma_eta_A1))
-            eta_A2 = numpyro.sample("eta_A2", dist.Normal(eta_A2_mean, sigma_eta_A2))
-            eta_tau1 = numpyro.sample("eta_tau1", dist.Normal(eta_tau1_mean, sigma_eta_tau1))
-            eta_tau2 = numpyro.sample("eta_tau2", dist.Normal(eta_tau2_mean, sigma_eta_tau2))
+            #eta_A1 = numpyro.sample("eta_A1", dist.Normal(eta_A1_mean, sigma_eta_A1))
+            #eta_A2 = numpyro.sample("eta_A2", dist.Normal(eta_A2_mean, sigma_eta_A2))
+            #eta_tau1 = numpyro.sample("eta_tau1", dist.Normal(eta_tau1_mean, sigma_eta_tau1))
+            #eta_tau2 = numpyro.sample("eta_tau2", dist.Normal(eta_tau2_mean, sigma_eta_tau2))
             # Or, use deterministic to set them to the universal means
+            eta_A1 = numpyro.deterministic("eta_A1", eta_A1_mean)
+            eta_A2 = numpyro.deterministic("eta_A2", eta_A2_mean)
+            eta_tau1 = numpyro.deterministic("eta_tau1", eta_tau1_mean)
+            eta_tau2 = numpyro.deterministic("eta_tau2", eta_tau2_mean)
 
             # Core kernel parameters
             log_tau_drw0 = numpyro.sample("log_tau_drw0", dist.Normal(6.0, 1.0))
