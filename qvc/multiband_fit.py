@@ -36,7 +36,7 @@ has_lag = True
 
 universal_params = ['eta_A1_mean', 'eta_A2_mean', 'eta_tau1_mean', 'eta_tau2_mean', 'eta_break', 'lam_s', 'sigma_eta_A1', 'sigma_eta_A2', 'sigma_eta_tau1', 'sigma_eta_tau2']
 
-def build_model(models, batch_data, f_host_shen11=True, latent=False, bwb=True, disable_poly1=False):
+def build_model(models, batch_data, f_host_shen11=True, latent=False, bwb=True, disable_poly1=False, d_eta=True):
     # Precompute and capture constants in the closure so they are treated as
     # static by JAX/NumPyro. This prevents unnecessary retracing/recompilation
     # when running MCMC, as these values do not change between runs.
@@ -82,15 +82,17 @@ def build_model(models, batch_data, f_host_shen11=True, latent=False, bwb=True, 
         with numpyro.plate("objects", batch_size):
             # Object-level parameters (shape: [B])
             # Variability k-corrections
-            #eta_A1 = numpyro.sample("eta_A1", dist.Normal(eta_A1_mean, sigma_eta_A1))
-            #eta_A2 = numpyro.sample("eta_A2", dist.Normal(eta_A2_mean, sigma_eta_A2))
-            #eta_tau1 = numpyro.sample("eta_tau1", dist.Normal(eta_tau1_mean, sigma_eta_tau1))
-            #eta_tau2 = numpyro.sample("eta_tau2", dist.Normal(eta_tau2_mean, sigma_eta_tau2))
+            if d_eta:
+                eta_A1 = numpyro.sample("eta_A1", dist.Normal(eta_A1_mean, sigma_eta_A1))
+                eta_A2 = numpyro.sample("eta_A2", dist.Normal(eta_A2_mean, sigma_eta_A2))
+                eta_tau1 = numpyro.sample("eta_tau1", dist.Normal(eta_tau1_mean, sigma_eta_tau1))
+                eta_tau2 = numpyro.sample("eta_tau2", dist.Normal(eta_tau2_mean, sigma_eta_tau2))
             # Or, use deterministic to set them to the universal means
-            eta_A1 = numpyro.deterministic("eta_A1", eta_A1_mean)
-            eta_A2 = numpyro.deterministic("eta_A2", eta_A2_mean)
-            eta_tau1 = numpyro.deterministic("eta_tau1", eta_tau1_mean)
-            eta_tau2 = numpyro.deterministic("eta_tau2", eta_tau2_mean)
+            else:
+                eta_A1 = numpyro.deterministic("eta_A1", eta_A1_mean)
+                eta_A2 = numpyro.deterministic("eta_A2", eta_A2_mean)
+                eta_tau1 = numpyro.deterministic("eta_tau1", eta_tau1_mean)
+                eta_tau2 = numpyro.deterministic("eta_tau2", eta_tau2_mean)
 
             # Core kernel parameters
             log_tau_drw0 = numpyro.sample("log_tau_drw0", dist.Normal(6.0, 1.0))
@@ -318,6 +320,7 @@ if __name__ == '__main__':
     parser.add_argument("--nchains", type=int, default=-1, help="Number of chains for MCMC.")
     parser.add_argument("--latent", action="store_true", help="Use latent variable model.")
     parser.add_argument("--bwb", action="store_true", help="Use BWB model.")
+    parser.add_argument("--d_eta", action="store_true", help="Vary eta for each quasar with prior.")
     parser.add_argument("--choose_N", type=int, default=-1, help="Sample choose_N objects.")
     parser.add_argument("--job_id", type=int, default=-1, help="Job Index for parallel processing.")
     parser.add_argument("--job_N", type=int, default=-1, help="Number of objects to divide.")
@@ -421,8 +424,8 @@ if __name__ == '__main__':
         )
         for obj in batch_data
     ]
-        
-    numpyro_joint_model = build_model(models, batch_data, args.f_host_shen11, args.latent, args.bwb, args.disable_poly1)
+    
+    numpyro_joint_model = build_model(models, batch_data, args.f_host_shen11, args.latent, args.bwb, args.disable_poly1l, args.d_eta)
 
     nuts_kernel = NUTS(numpyro_joint_model, init_strategy=init_strategy, dense_mass=True, max_tree_depth=args.max_tree_depth)
     mcmc = MCMC(
