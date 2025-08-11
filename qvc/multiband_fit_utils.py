@@ -645,10 +645,12 @@ def process_samples(flat_samples, data, percentiles=[16, 50, 84]):
     host_frac = flat_samples["f_host"] * (lambda_ref / 5100.0) ** flat_samples["alpha_host"]
     dilution_factor = 1.0 / (1.0 + host_frac)
     log_dilution = jnp.log(dilution_factor)
+    samples_log_sigma0_diluted = (flat_samples["log_sigma0"] - log_dilution) / np.log(10)
+    result['log_sigma_diluted'], result['log_sigma0_diluted_err'] = sym_percentile(samples_log_sigma0_diluted)
 
-    # log_sigma_hat_UV_diluted
-    samples_log_sigma_diluted_UV = (flat_samples["log_sigma0"] - log_dilution) / np.log(10) + log_broken_pl(lambda_ref, lam_s, eta_A1, eta_A2, eta_break)
-    result['log_sigma_UV_diluted'], result['log_sigma_diluted_UV_err'] = sym_percentile(samples_log_sigma_diluted_UV)
+    # log_sigma_UV_diluted
+    samples_log_sigma_UV_diluted = (flat_samples["log_sigma0"] - log_dilution) / np.log(10) + log_broken_pl(lambda_ref, lam_s, eta_A1, eta_A2, eta_break)
+    result['log_sigma_UV_diluted'], result['log_sigma_UV_diluted_err'] = sym_percentile(samples_log_sigma_UV_diluted)
 
     # log_sigma_UV
     samples_log_sigma_UV = flat_samples["log_sigma0"] / np.log(10) + log_broken_pl(lambda_ref, lam_s, eta_tau1, eta_tau2, eta_break)
