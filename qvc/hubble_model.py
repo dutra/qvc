@@ -56,12 +56,12 @@ def broken_power_law(x, x_break, d1, d2, ds):
 #     return np.sqrt(err_bpl**2 + (beta_agn * log_tau_UV_RF_err)**2)
 
 # # Linear model
-def M_model_agn(M0_agn, log_sigma0_break, eta_A1_agn, eta_A2_agn, eta_break_agn, beta_agn, log_sigma0, log_tau_UV_RF, f_host):
-    return M0_agn + eta_A1_agn * ( log_sigma0 - log_sigma0_pivot) + beta_agn * (log_tau_UV_RF - log_tau_UV_RF_pivot)# + eta_A2_agn * (f_host - f_host_pivot)
+def M_model_agn(M0_agn, alpha_agn, beta_agn, log_sigma0, log_tau_UV_RF, f_host):
+    return M0_agn + alpha_agn * ( log_sigma0 - log_sigma0_pivot) + beta_agn * (log_tau_UV_RF - log_tau_UV_RF_pivot)# + eta_A2_agn * (f_host - f_host_pivot)
     
-def M_model_agn_err(M0_agn, log_sigma0_break, eta_A1_agn, eta_A2_agn, eta_break_agn, beta_agn,
+def M_model_agn_err(M0_agn, alpha_agn, beta_agn,
                     log_sigma0, log_sigma0_err, log_tau_UV_RF_err, f_host_err):
-    return np.sqrt((eta_A1_agn * log_sigma0_err)**2 + (beta_agn * log_tau_UV_RF_err)**2)# + (eta_A2_agn * f_host_err)**2)
+    return np.sqrt((alpha_agn * log_sigma0_err)**2 + (beta_agn * log_tau_UV_RF_err)**2)# + (eta_A2_agn * f_host_err)**2)
 
 
 def M_model_SN(m_b_corr, host_logmass, M0_sn, gamma_sn, tau_Ms):
@@ -79,11 +79,8 @@ def get_model_params(cosmo_model):
         ("tau_Ms",      (0.01, 0.2)),     # LOG Width of sigmoid transition usually ~0.043
         ("M0_sn",       (-20, -19)),    # SN absolute magnitude, MLE: ~-19.3
         ("M0_agn", (-24, -17)),         # M0_agn
-        ("log_sigma0_break", (-3, 0)), # AGN broken power law break point
-        ("eta_A1_agn",  (-10, 10)),          # AGN broken power law slope 1
-        ("eta_A2_agn",  (-10, 10)),          # AGN broken power law slope 2
-        ("eta_break_agn", (0, 10)),      # AGN broken power law slope transition
-        ("beta_agn",    (-3, 3)),         # AGN tau correlation
+        ("alpha_agn",   (-10, 10)),         # AGN sigma correlation
+        ("beta_agn",    (-10, 10)),         # AGN tau correlation
         ("log_f",       (-3, 0.5)),
         ("H0",          (65, 80)),
         #("Om0",         (0.32, 0.324)),
