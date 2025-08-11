@@ -26,17 +26,13 @@ from tqdm import tqdm
 
 
 
-#agn_df = pd.read_csv('data/csv/aug4_sample_chisqg10_ebv005sn3_magsmean.csv')
-# agn_df = pd.read_csv('data/aug8_stone_merged.csv')
-# agn_df['ra'] = agn_df['RA']
-# agn_df['dec'] = agn_df['DEC']
-agn_df = pd.read_csv('data/csv/aug8_stone_merged_magsmean.csv')
+agn_df = pd.read_csv('data/csv/aug4_sample_chisqg10_ebv005sn3_magsmean.csv')
+agn_df = agn_df[:4000]
+#agn_df = pd.concat([agn_df.iloc[:1000], agn_df.iloc[2000:3000]], ignore_index=True)
 
-#agn_df = agn_df[:3000]
-# agn_df = agn_df[agn_df['z'] < 1]
-# sdss_names = ['024939.57+000700.2', '024935.55-001336.8', '024923.20-005437.7', '024838.93-000326.0', '024831.08-005025.7', '024823.77-010002.5', '024541.30+005425.8', '024156.15+003441.8', '024144.68+003345.1', '022837.06-001005.1', '022801.05+003943.7', '022326.60-010406.7', '022114.04-003255.6', '021953.28-010025.3', '021953.04-004434.2', '021934.59+004559.3', '021844.83+005106.4', '021713.10+004107.2', '021544.67-003811.4', '021541.13-010250.9']
-# agn_df = agn_df[agn_df['sdss_name'].isin(sdss_names)]
+#agn_df = pd.read_csv('data/csv/aug8_stone_merged_magsmean.csv')
 
+#
 print(agn_df.head())
 print("Length of agn_df:", len(agn_df))
 
@@ -469,7 +465,7 @@ def get_alpha(i):
                 # Initial jitter for every initial guass to avoid local minimum. (Under test, not recommanded to change)
 
                 # customize the results
-                save_result=False,  # If True, all the fitting results will be saved to a fits file
+                save_result=True,  # If True, all the fitting results will be saved to a fits file
                 save_fits_name=None,  # The output name of the result fits
                 save_fits_path='.',  # The output path of the result fits
                 plot_fig=True,  # If True, the fitting results will be plotted
@@ -485,7 +481,8 @@ def get_alpha(i):
                     'broad_fwhm'   : 1200  # km/s, lower limit that code decide if a line component belongs to broad component
                 },
                 kwargs_conti_emcee={},
-                kwargs_line_emcee={})
+                kwargs_line_emcee={}
+                )
 
     #except:
     #    return -99, -99, -99
@@ -564,9 +561,9 @@ for i in trange(ntest, desc="Processing objects"):
         redchi=-1e9,
     )
 
-    r = get_alpha(i)
-    print(r)
     try:
+        r = get_alpha(i)
+        print(r)
         if r:
             result |= r
         else:
@@ -582,7 +579,7 @@ for i in trange(ntest, desc="Processing objects"):
 
 results_df = pd.DataFrame(results)
 
-results_df.to_csv('data/csv/aug10_stone_merged_fittedm2500.csv', index=False)
+#results_df.to_csv('data/csv/aug10_stone_merged_fittedm2500.csv', index=False)
+results_df.to_csv('data/csv/aug11_sample_chisqg10_ebv005sn3_magsmean_fittedm2500.csv', index=False)
 
-#print("Results saved to 'data/csv/aug4_sample_chisqg10_ebv005sn3_magsmean_fittedm2500.csv'")
 print("Not cached objects:", not_cached)
