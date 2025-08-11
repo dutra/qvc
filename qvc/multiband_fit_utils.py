@@ -641,7 +641,6 @@ def process_samples(flat_samples, data, percentiles=[16, 50, 84]):
 
 
     # Other special params    
-    # log_sigma_hat0_diluted
     host_frac = flat_samples["f_host"] * (lambda_ref / 5100.0) ** flat_samples["alpha_host"]
     dilution_factor = 1.0 / (1.0 + host_frac)
     log_dilution = jnp.log(dilution_factor)
