@@ -319,7 +319,7 @@ if __name__ == '__main__':
     parser.add_argument("--job_N", type=int, default=-1, help="Number of objects to divide.")
     parser.add_argument("--max_tree_depth", type=int, default=8, help="Max tree depth param for NUTS sampler.")
     parser.add_argument("--f_host_shen11", action="store_true", help="Use host flux empirical relation from Shen et al. 2011.")
-    parser.add_argument("--load_sample_file", type=str, help="Path to the file containing saved samples.")
+    parser.add_argument("--load_sample_file", action="store_true", help="Load samples from previously ran job.")
     parser.add_argument("--disable_poly1", action="store_true", help="Disable Mean function detrending.")
 
 
@@ -431,8 +431,8 @@ if __name__ == '__main__':
     )
 
     if args.load_sample_file:
-        logging.warning(f"Loading samples from file {args.load_sample_file}")
-        samples_flat = load_all_samples_from_hdf5(args.load_sample_file)
+        logging.warning(f"Loading samples from saved file")
+        samples_flat = load_all_samples_from_hdf5()
     else:
         mcmc.run(jax.random.PRNGKey(0))
         samples_flat = mcmc.get_samples(group_by_chain=False)
