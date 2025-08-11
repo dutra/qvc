@@ -425,7 +425,7 @@ if __name__ == '__main__':
         for obj in batch_data
     ]
     
-    numpyro_joint_model = build_model(models, batch_data, args.f_host_shen11, args.latent, args.bwb, args.disable_poly1l, args.d_eta)
+    numpyro_joint_model = build_model(models, batch_data, args.f_host_shen11, args.latent, args.bwb, args.disable_poly1, args.d_eta)
 
     nuts_kernel = NUTS(numpyro_joint_model, init_strategy=init_strategy, dense_mass=True, max_tree_depth=args.max_tree_depth)
     mcmc = MCMC(
