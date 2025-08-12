@@ -139,7 +139,7 @@ def build_model(models, batch_data, f_host_shen11=True, latent=False, bwb=True, 
             # Collect params for object i
             params = {
                 "log_tau_drw0": log_tau_drw0[i],
-                "log_sigma_hat0": log_sigma_hat0[i],
+                "log_sigma0": log_sigma0[i],
                 "alpha_host": alpha_host[i],
                 "f_host": f_host[i],
                 "poly1": poly1[i],
