@@ -36,26 +36,12 @@ has_lag = True
 
 universal_params = ['eta_A1_mean', 'eta_A2_mean', 'eta_tau1_mean', 'eta_tau2_mean', 'eta_break', 'lam_s', 'sigma_eta_A1', 'sigma_eta_A2', 'sigma_eta_tau1', 'sigma_eta_tau2']
 
-def build_model(batch_data, zs, lam_rfs, f_host_shen11=True, latent=False, bwb=True, disable_poly1=False, d_eta=True):
+def build_model(batch_data, zs, f_host_value, lam_rfs, f_host_shen11=True, latent=False, bwb=True, disable_poly1=False, d_eta=True):
     # Precompute and capture constants in the closure so they are treated as
     # static by JAX/NumPyro. This prevents unnecessary retracing/recompilation
     # when running MCMC, as these values do not change between runs.
     batch_size = len(batch_data)
     nBands = 5  # or use from config
-
-    # --- Precompute f_host_shen11 prior means ---
-    if f_host_shen11:
-        # Host flux empirical relation
-        #logl5100 = jnp.array([obj['LOGL5100'] for obj in batch_data])
-        logl5100 = jnp.array([obj['LOGLBOL'] - jnp.log10(9.26) for obj in batch_data])
-
-        x = logl5100 - 44.0
-        f_host = 0.8052 - 1.5502 * x + 0.9121 * jnp.power(x, 2) - 0.1577 * jnp.power(x, 3)
-        f_host = jnp.clip(f_host, 0.0, None)
-        f_host_value = jnp.where(logl5100 < 45.053, f_host, 0.0)
-    else:
-        batch_size = len(batch_data)
-        f_host_value = jnp.zeros(batch_size)
 
     # --- Precompute log_jitter prior means ---
     log_jitter_mean = jnp.stack([
@@ -163,7 +149,7 @@ def build_model(batch_data, zs, lam_rfs, f_host_shen11=True, latent=False, bwb=T
                 X=(obj[:,0], obj[:,1]), y=obj[:,2], yerr=obj[:,3],
                 kernel=kernels.quasisep.Exp(jnp.array([1, 1])),
                 zero_mean=zero_mean, has_jitter=has_jitter, has_lag=has_lag,
-                lam_rf=lam_rfs[i], z=zs[i] #TODO: Fix clean bands
+                lam_rf=lam_rfs[i], z=zs[i]
             )
 
             return m.log_prob(params)
@@ -381,7 +367,9 @@ if __name__ == '__main__':
         obj |= result
         # Run bestP for each object
         n_bands = len(obj['clean_bands'])
-        lam_rf = jnp.array([lambda_pivot[band] for band in obj['clean_bands']]) / (1 + obj['z'])
+        lam_rf = np.zeros(n_bands)
+        lam_rf[:len(obj['clean_bands'])] = np.array([lambda_pivot[band] for band in obj['clean_bands']]) / (1 + obj['z'])
+        lam_rf = jnp.array(lam_rf)
 
         batch_data.append({
             'object_id': obj['object_id'],
@@ -429,7 +417,21 @@ if __name__ == '__main__':
 
     zs = jnp.array([obj['z'] for obj in batch_data])
 
-    numpyro_joint_model = build_model(padded_batch_data, zs, lam_rfs, args.f_host_shen11, args.latent, args.bwb, args.disable_poly1, args.d_eta)
+    # --- Precompute f_host_shen11 prior means ---
+    if args.f_host_shen11:
+        # Host flux empirical relation
+        #logl5100 = jnp.array([obj['LOGL5100'] for obj in batch_data])
+        logl5100 = jnp.array([obj['LOGLBOL'] - jnp.log10(9.26) for obj in batch_data])
+
+        x = logl5100 - 44.0
+        f_host = 0.8052 - 1.5502 * x + 0.9121 * jnp.power(x, 2) - 0.1577 * jnp.power(x, 3)
+        f_host = jnp.clip(f_host, 0.0, None)
+        f_host_value = jnp.where(logl5100 < 45.053, f_host, 0.0)
+    else:
+        batch_size = len(batch_data)
+        f_host_value = jnp.zeros(batch_size)
+
+    numpyro_joint_model = build_model(padded_batch_data, zs, f_host_value, lam_rfs, args.f_host_shen11, args.latent, args.bwb, args.disable_poly1, args.d_eta)
 
     nuts_kernel = NUTS(numpyro_joint_model, init_strategy=init_strategy, dense_mass=True, max_tree_depth=args.max_tree_depth)
     mcmc = MCMC(
