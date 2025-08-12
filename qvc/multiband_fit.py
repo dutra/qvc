@@ -474,7 +474,7 @@ if __name__ == '__main__':
                 obj['X'], obj['y'], obj['yerr'], 
                 kernels.quasisep.Exp(jnp.array([1, 1])),
                 zero_mean=zero_mean, has_jitter=has_jitter, has_lag=has_lag,
-                clean_bands=obj['clean_bands'], z=obj['z']
+                lam_rf=obj['lam_rf'], z=obj['z']
             )
             psd_results = compute_psd_from_samples(obj_flat_samples, obj["clean_bands"])
             save_combined_plot(obj_flat_samples, m, obj['X'], obj['y'], obj['yerr'], obj['band_idx'], result, psd_results=psd_results)
