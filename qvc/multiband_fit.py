@@ -132,7 +132,7 @@ def build_model(batch_data, zs, lam_rfs, f_host_shen11=True, latent=False, bwb=T
                 #log_lag_blr = numpyro.deterministic("log_lag_blr", jnp.zeros_like(mean))
 
                 # Jitter
-                log_jitter = numpyro.sample("log_jitter", dist.Normal(jnp.full(nBands, jnp.log(.1)), 1.0))
+                log_jitter = numpyro.sample("log_jitter", dist.Normal(log_jitter_mean, 1.0))
 
         def run_batch(obj, i):
             # Collect params for object i
