@@ -99,7 +99,6 @@ class MyMultibandContiBLR(tinygp.kernels.Kernel):
 # Override MultiVarModel
 class MyMultiVarModel(MultiVarModel):
     yerr: JAXArray | NDArray
-    clean_bands: JAXArray
     z: float
     lam_rf: JAXArray
 
@@ -113,9 +112,8 @@ class MyMultiVarModel(MultiVarModel):
     ) -> None:
         super().__init__(X, y, yerr, kernel, **kwargs)
         self.yerr = yerr
-        self.clean_bands = kwargs.get("clean_bands", None)
         self.z = kwargs.get("z", None)
-        self.lam_rf = jnp.array([lambda_pivot[band] for band in self.clean_bands]) / (1 + self.z)
+        self.lam_rf = kwargs.get("lam_rf", None)
 
     @staticmethod
     def mean_func(

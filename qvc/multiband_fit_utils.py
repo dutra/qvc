@@ -34,6 +34,35 @@ from datetime import datetime
 
 import numpy as np
 
+def pad_batch(batch_data, nBands):
+    """
+    Pads each object's time, band, y, and yerr arrays to the max length in the batch.
+    Returns a jax array of shape (batch_size, N_max, 4) with columns:
+    0 = t, 1 = b, 2 = y, 3 = yerr
+    """
+    import jax.numpy as jnp
+
+    lengths = np.array([len(obj["X"][0]) for obj in batch_data], dtype=int)
+    N_max = int(lengths.max())
+    B = len(batch_data)
+
+    arr = np.zeros((B, N_max, 4), dtype=float)
+    arr[..., 1] = 0      # band default
+    arr[..., 3] = 999.0    # yerr default
+
+    for i, obj in enumerate(batch_data):
+        t = np.asarray(obj["X"][0])
+        b = np.asarray(obj["X"][1])
+        y = np.asarray(obj["y"])
+        yerr = np.asarray(obj["yerr"])
+        n = len(t)
+        arr[i, :n, 0] = t
+        arr[i, :n, 1] = b
+        arr[i, :n, 2] = y
+        arr[i, :n, 3] = yerr
+
+    return jnp.array(arr)
+
 def select_samples_for_object(samples_flat, obj_index, universal_params):
     """
     Select samples for a specific object from flat samples.

@@ -36,7 +36,7 @@ has_lag = True
 
 universal_params = ['eta_A1_mean', 'eta_A2_mean', 'eta_tau1_mean', 'eta_tau2_mean', 'eta_break', 'lam_s', 'sigma_eta_A1', 'sigma_eta_A2', 'sigma_eta_tau1', 'sigma_eta_tau2']
 
-def build_model(models, batch_data, f_host_shen11=True, latent=False, bwb=True, disable_poly1=False, d_eta=True):
+def build_model(batch_data, zs, lam_rfs, f_host_shen11=True, latent=False, bwb=True, disable_poly1=False, d_eta=True):
     # Precompute and capture constants in the closure so they are treated as
     # static by JAX/NumPyro. This prevents unnecessary retracing/recompilation
     # when running MCMC, as these values do not change between runs.
@@ -59,8 +59,7 @@ def build_model(models, batch_data, f_host_shen11=True, latent=False, bwb=True, 
 
     # --- Precompute log_jitter prior means ---
     log_jitter_mean = jnp.stack([
-        jnp.array(jnp.full(nBands, 1e-6) + jnp.log(jnp.mean(jnp.array(obj['yerr']))))
-        for obj in batch_data
+        jnp.array(jnp.full(nBands, 1e-6) + jnp.log(jnp.mean(jnp.array(obj[:,3][obj[:,3] < 10])))) for obj in batch_data
     ])  # shape (B, nBands)
 
     def numpyro_joint_model():
@@ -133,9 +132,9 @@ def build_model(models, batch_data, f_host_shen11=True, latent=False, bwb=True, 
                 #log_lag_blr = numpyro.deterministic("log_lag_blr", jnp.zeros_like(mean))
 
                 # Jitter
-                log_jitter = numpyro.sample("log_jitter", dist.Normal(log_jitter_mean, 1.0))
+                log_jitter = numpyro.sample("log_jitter", dist.Normal(jnp.full(nBands, jnp.log(.1)), 1.0))
 
-        def run_batch(data, i):
+        def run_batch(obj, i):
             # Collect params for object i
             params = {
                 "log_tau_drw0": log_tau_drw0[i],
@@ -160,17 +159,19 @@ def build_model(models, batch_data, f_host_shen11=True, latent=False, bwb=True, 
                 "lam_s": lam_s
             }
 
-            m = models[i]
-            log_prob = m.log_prob(params)
-            #jax.debug.print("log_prob: {lp} {i}", lp=log_prob, i=i)
-            log_prob = jnp.where(jnp.isfinite(log_prob), log_prob, -1e20)
-            numpyro.factor(f"loglike_{i}", log_prob)
+            m = Model(
+                X=(obj[:,0], obj[:,1]), y=obj[:,2], yerr=obj[:,3],
+                kernel=kernels.quasisep.Exp(jnp.array([1, 1])),
+                zero_mean=zero_mean, has_jitter=has_jitter, has_lag=has_lag,
+                lam_rf=lam_rfs[i], z=zs[i] #TODO: Fix clean bands
+            )
 
-        if len(batch_data) == 1:
-            run_batch(batch_data[0], 0)
-        else:
-            for i, data in enumerate(batch_data):
-                run_batch(data, i)
+            return m.log_prob(params)
+
+        log_probs = jax.vmap(run_batch, in_axes=(0, 0))(batch_data, jnp.arange(batch_size))
+        log_probs = jnp.where(jnp.isfinite(log_probs), log_probs, -1e20)
+        numpyro.factor("loglike", log_probs.sum())
+    
     return numpyro_joint_model
 
 
@@ -380,12 +381,7 @@ if __name__ == '__main__':
         obj |= result
         # Run bestP for each object
         n_bands = len(obj['clean_bands'])
-        m = Model(
-            obj['X'], obj['y'], obj['yerr'], 
-            kernels.quasisep.Exp(jnp.array([1, 1])),
-            zero_mean=zero_mean, has_jitter=has_jitter, has_lag=has_lag,
-            clean_bands=obj['clean_bands'], z=obj['z']
-        )
+        lam_rf = jnp.array([lambda_pivot[band] for band in obj['clean_bands']]) / (1 + obj['z'])
 
         batch_data.append({
             'object_id': obj['object_id'],
@@ -398,10 +394,16 @@ if __name__ == '__main__':
             # add any other fields needed by your model
             'LOGLBOL': obj['LOGLBOL'],
             'mags_means': obj['mags_means'],
-            'mags_stds': obj['mags_stds']
+            'mags_stds': obj['mags_stds'],
+            'lam_rf': lam_rf
         })
+
     num_objects = len(batch_data)
     logging.info(f"Running joint fit on {len(batch_data)} objects...")
+
+    padded_batch_data = pad_batch(batch_data, nBands=5)
+
+    lam_rfs = jnp.array([obj['lam_rf'] for obj in batch_data])
 
     estimated_nchains = 4
     if args.nchains < 1:
@@ -415,17 +417,19 @@ if __name__ == '__main__':
     logging.info("Done with numpyro.infer.init_to_sample")
 
     # Create the models
-    models = [
-        Model(
-            obj['X'], obj['y'], obj['yerr'],
-            kernels.quasisep.Exp(jnp.array([1, 1])),
-            zero_mean=zero_mean, has_jitter=has_jitter, has_lag=has_lag,
-            clean_bands=obj['clean_bands'], z=obj['z']
-        )
-        for obj in batch_data
-    ]
-    
-    numpyro_joint_model = build_model(models, batch_data, args.f_host_shen11, args.latent, args.bwb, args.disable_poly1, args.d_eta)
+    #models = [
+    #    Model(
+    #        obj['X'], obj['y'], obj['yerr'],
+    #        kernels.quasisep.Exp(jnp.array([1, 1])),
+    #        zero_mean=zero_mean, has_jitter=has_jitter, has_lag=has_lag,
+    #        clean_bands=obj['clean_bands'], z=obj['z']
+    #    )
+    #    for obj in batch_data
+    #]
+
+    zs = jnp.array([obj['z'] for obj in batch_data])
+
+    numpyro_joint_model = build_model(padded_batch_data, zs, lam_rfs, args.f_host_shen11, args.latent, args.bwb, args.disable_poly1, args.d_eta)
 
     nuts_kernel = NUTS(numpyro_joint_model, init_strategy=init_strategy, dense_mass=True, max_tree_depth=args.max_tree_depth)
     mcmc = MCMC(
