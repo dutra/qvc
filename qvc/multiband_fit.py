@@ -89,10 +89,10 @@ def build_model(models, batch_data, f_host_shen11=True, latent=False, bwb=True, 
                 eta_tau2 = numpyro.sample("eta_tau2", dist.Normal(eta_tau2_mean, sigma_eta_tau2))
             # Or, use deterministic to set them to the universal means
             else:
-                eta_A1 = numpyro.deterministic("eta_A1", eta_A1_mean)
-                eta_A2 = numpyro.deterministic("eta_A2", eta_A2_mean)
-                eta_tau1 = numpyro.deterministic("eta_tau1", eta_tau1_mean)
-                eta_tau2 = numpyro.deterministic("eta_tau2", eta_tau2_mean)
+                eta_A1 = numpyro.deterministic("eta_A1", jnp.full(batch_size, eta_A1_mean))
+                eta_A2 = numpyro.deterministic("eta_A2", jnp.full(batch_size, eta_A2_mean))
+                eta_tau1 = numpyro.deterministic("eta_tau1", jnp.full(batch_size, eta_tau1_mean))
+                eta_tau2 = numpyro.deterministic("eta_tau2", jnp.full(batch_size, eta_tau2_mean))
 
             # Core kernel parameters
             log_tau_drw0 = numpyro.sample("log_tau_drw0", dist.Normal(6.0, 1.0))
