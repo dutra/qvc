@@ -93,27 +93,19 @@ def log_likelihood(theta, cosmo_model,
     log_sigma0_err = _agn_data['log_sigma0_err']
     log_tau_UV_RF = _agn_data['log_tau_UV_RF']
     log_tau_UV_RF_err = _agn_data['log_tau_UV_RF_err']
-    alpha_nu = _agn_data['alpha_nu']
-    alpha_nu_err = _agn_data['alpha_nu_err']
     f_host = _agn_data['f_host']
     f_host_err = _agn_data['f_host_err']
 
     mu_cosmo = cosmo.distmod(z).value
     M_pred = M_model_agn(params['M0_agn'], 
-                         params['log_sigma0_break'], 
-                         params['eta_A1_agn'], params['eta_A2_agn'], 
-                         params['eta_break_agn'],
-                         params['beta_agn'], 
+                         params['alpha_agn'], params['beta_agn'],
                          log_sigma0, log_tau_UV_RF,
                          f_host)
     
 
-    mu_pred = m_obs - M_pred - (K_corr(z, alpha_nu) - K_corr(2, alpha_nu)) 
+    mu_pred = m_obs - M_pred 
     M_i_pred_err = M_model_agn_err(params['M0_agn'],
-                        params['log_sigma0_break'],
-                        params['eta_A1_agn'], params['eta_A2_agn'], 
-                        params['eta_break_agn'],
-                        params['beta_agn'],
+                         params['alpha_agn'], params['beta_agn'],
                         log_sigma0, log_sigma0_err,
                         log_tau_UV_RF_err,
                         f_host_err)
@@ -131,7 +123,7 @@ def log_likelihood(theta, cosmo_model,
 
     # Corrected? AGN completeness correction 2D
     # Optional AGN completeness correction 2D
-    m_model = M_pred + mu_cosmo + (K_corr(z, alpha_nu) - K_corr(2, alpha_nu))  # model-predicted magnitude
+    m_model = M_pred + mu_cosmo  # model-predicted magnitude
 
     ll_completeness = 0.0
     # selection bias correction during inference
@@ -201,10 +193,10 @@ def run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model='Flatw0waCDM',
     # Prepare data
     df_pantheon_filtered = df_pantheon[['zHD', 'MU_SH0ES', 'MU_SH0ES_ERR_DIAG', 'CEPH_DIST', 'IS_CALIBRATOR',
                                         'm_b_corr', 'x1', 'c', 'biasCor_m_b', 'HOST_LOGMASS']].copy()
-    df_agn_filtered = df_agn[['z', 'apparent_mag_2500', 'apparent_mag_2500_err',
-                              'alpha_nu', 'alpha_nu_err',
+    df_agn_filtered = df_agn[['z', 'apparent_mag_2500', 'apparent_mag_2500_err', 'apparent_mag_i',
                               'log_sigma0', 'log_sigma0_err', 'log_tau_UV_RF', 'log_tau_UV_RF_err',
-                              'f_host', 'f_host_err']].copy()
+                              'f_host', 'f_host_err',
+                              ]].copy()
 
     if completeness:
         completeness_params = get_completeness_function_2d(df_agn_filtered)
@@ -219,9 +211,6 @@ def run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model='Flatw0waCDM',
     print("log sigma0 mean: ", np.average(df_agn_filtered['log_sigma0']))
     print("log sigma0 pivot: ", np.average(df_agn_filtered['log_sigma0'], weights=1 / (df_agn_filtered['log_sigma0_err'])**2))
     
-    print("f_host pivot: ", np.mean(df_agn_filtered['f_host']))
-    print("f_host pivot: ", np.average(df_agn_filtered['f_host'], weights=1 / (df_agn_filtered['f_host_err'])**2))
-    print("alpha_nu pivot: ", np.average(df_agn_filtered['alpha_nu'], weights=1 / df_agn_filtered['alpha_nu_err']**2))
     print(f"z mean: {df_agn_filtered['z'].mean():.3f},  z_agn_pivot: {z_pivot:.3f}")
 
     #print(f"Mean AGN M: {df_agn_filtered['M_2500'].mean()}, delta_M_agn ~ {df_agn_filtered['M_2500'].mean()-(-19.3):.3f}")
@@ -255,7 +244,8 @@ def run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model='Flatw0waCDM',
         if resume:
             sampler = DynamicNestedSampler.restore(f'data/dynesty_{cosmo_model}.save', pool=pool)
         else:
-            u = np.random.rand(100, ndim)
+            print("Testing likelihood and prior transform with random samples...")
+            u = np.random.rand(10, ndim)
             v = pool.map(prior_transform_dynesty, u)
             l = pool.map(loglike_dynesty, v)
             print("Fraction of finite likelihoods:", np.sum(np.isfinite(l)) / len(l))
@@ -357,60 +347,49 @@ def compare_models():
 
 def main():
     # Load data
-    global Cov_inv, logdetCov, L
+    global _sna_LogdetCov, _sna_L, _sna_Lower
     #df_agn, df_pantheon, Cov_inv, logdetCov, L = load_data("data/may23_all_merged.h5", populate_sdss=True)
     #df_agn, df_pantheon, Cov_inv, logdetCov, L = load_data("data/N20_w500_grace/may21_joint_fits_N20_merged.h5", False)
-    df_agn, df_pantheon, Cov_inv, logdetCov, L = load_data("data/june1_joint_N20w2000s1000_fits_merged.h5")
+    df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("results/aug10_stonebwb_N20w2000s1000t6c4.h5", populate_sdss=False)
+ 
     print(len(df_pantheon))
     
     results = []
 
-    num_warmup, num_samples = 250, 100
     use_full_cov = True
     completeness = True
 
     # Run MCMC fits for SNIa only and SNIa+AGN, for each cosmological model
-    for cosmo_model in ['Flatw0waCDM', 'FlatwCDM']:
+    for cosmo_model in ['Flatw0waCDM']:#, 'FlatwCDM']:
         print(f"Running MCMC for {cosmo_model}: SNIa + AGN")
-        sampler_joint, model_labels, mag_corr, logZ, logZerr = run_mcmc_pipeline(
-                                                    df_agn, df_pantheon, cosmo_model=cosmo_model, only_sna=False, 
-                                                    completeness=completeness, use_full_cov=use_full_cov,
-                                                    num_warmup=num_warmup, num_samples=num_samples)
-        results.append(extract_cosmo_results_from_sampler(sampler_joint, cosmo_model, only_sna=False, dynasty=False))
-        plot_posterior_corner(sampler_joint, cosmo_model=cosmo_model, only_sna=False)
-        plot_traces(sampler_joint, only_sna=False, cosmo_model=cosmo_model, show=False, dynasty=False)
-        plot_cosmo_corner(sampler_joint, sampler_joint, cosmo_model=cosmo_model)
+        sampler_joint, flat_samples_joint, model_labels, mag_corr, logZ, logZerr = run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model=cosmo_model, 
+                                            only_sna=False, completeness=True, use_full_cov=True,
+                                            resume=False)
+        
+        #results.append(extract_cosmo_results_from_sampler(sampler_joint, cosmo_model, only_sna=False, dynasty=False))
+
+        plot_predicted_vs_actual_M2500(flat_samples_joint, df_agn, cosmo_model=cosmo_model, z_agn_pivot=z_agn_pivot, show=False)
+        
+        print("Plotting Hubble diagram...")
+        residuals, mu_pred_median, mu_pred_std = plot_hubble(flat_samples_joint, df_agn, df_pantheon, 
+                                                            cosmo_model=cosmo_model, z_agn_pivot=z_agn_pivot, show_true=False, show=False)
+        #plot_predicted_L2500_vs_sigmahat(flat_samples_joint, df_agn, cosmo_model=cosmo_model, z_agn_pivot=z_agn_pivot, show=False)
+        #plot_full_residuals(df_agn, residuals, flat_samples_joint, cosmo_model, z_agn_pivot, show=False)
+        
+        #plot_posterior_corner(sampler_joint, cosmo_model=cosmo_model, only_sna=False)
+        #plot_traces(sampler_joint, only_sna=False, cosmo_model=cosmo_model, show=False, dynasty=False)
+        #plot_cosmo_corner(sampler_joint, sampler_joint, cosmo_model=cosmo_model)
 
         print(f"Running MCMC for {cosmo_model}: SNIa only")
-        sampler_snia, _, _, _, _ = run_mcmc_pipeline(
-                                            df_agn, df_pantheon, cosmo_model=cosmo_model, only_sna=True, 
-                                            completeness=completeness, use_full_cov=use_full_cov,
-                                            num_warmup=num_warmup, num_samples=num_samples)
-        results.append(extract_cosmo_results_from_sampler(sampler_snia, cosmo_model, only_sna=True, dynasty=False))
-        plot_posterior_corner(sampler_snia, cosmo_model=cosmo_model, only_sna=True)
-        plot_traces(sampler_snia, only_sna=True, cosmo_model=cosmo_model, show=False, dynasty=False)
-
-
-        # Plot results
-        print("Plotting Hubble diagram...")
-        #plot_hubble(sampler_joint, df_agn, df_pantheon, cosmo_model=cosmo_model, completeness=True, show_uncorrected=False)
-        plot_hubble(sampler_joint, df_agn, df_pantheon, cosmo_model=cosmo_model, completeness=True, show_uncorrected=True, show_true=True)
+        sampler_snia, flat_samples_snia, _, _, _, _ = run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model=cosmo_model, 
+                                            only_sna=True, completeness=True, use_full_cov=True,
+                                            resume=False)
         
-        #print("Plotting cosmological posteriors corner plot...")
-        #plot_cosmo_corner(sampler_snia, sampler_joint, cosmo_model=cosmo_model)
-        print("Plotting AGN M_i predictions vs actual...")
-        plot_predicted_vs_actual_Mi(sampler_joint, df_agn, cosmo_model=cosmo_model)
-        print("Plotting completeness vs magnitude at redshifts...")
-        p_detect, mag_centers, z_centers, dm, dz = get_completeness_function_2d(df_agn)
-        plot_completeness_vs_mag_at_redshifts(p_detect, mag_centers, z_centers)
-
-        print("Plotting AGN predicted sigma hat vs luminosity...")
-        plot_predicted_sigma_hat_vs_luminosity(sampler_joint, df_agn, cosmo_model=cosmo_model, show=True)
-
+        plot_cosmo_corner(flat_samples_snia, flat_samples_joint, cosmo_model, z_agn_pivot, show=False)
         print(f"Finished plots for {cosmo_model}\n")
-        break
-    latex_code = generate_cosmo_table_latex(results)
-    print("All analyses complete. Results saved to 'plots/hubble' directory.")
+
+    # latex_code = generate_cosmo_table_latex(results)
+    # print("All analyses complete. Results saved to 'plots/hubble' directory.")
 
 
 
@@ -466,7 +445,7 @@ def test():
     #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("results/aug9_stone_N10w1000s500t6c4_merged.h5", populate_sdss=True)
     #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("results/aug9_stone_bwb_N10w1000s500t6c4_merged.h5", populate_sdss=True)
     
-    df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("results/aug10_stonebwb_N20w2000s1000t6c4.h5", populate_sdss=True)
+    df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("results/aug10_stonebwb_N20w2000s1000t6c4.h5", populate_sdss=False)
     #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("results/aug10_stonebwb_N30w2000s1000t6c4.h5", populate_sdss=False)
 
     #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/july19_goodsources_chisq5and10_mean1_N20w4000s500_merged.h5", populate_sdss=True)

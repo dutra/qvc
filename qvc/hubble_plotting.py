@@ -422,10 +422,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_agn_pivot, sho
         apparent_mag - (K_corr(df_agn['z'].values, df_agn['alpha_nu'].values) - K_corr(2, df_agn['alpha_nu'].values)) -
             (M_model_agn(
                 s[param_indices['M0_agn']], 
-                         s[param_indices['log_sigma0_break']], 
-                         s[param_indices['eta_A1_agn']], 
-                         s[param_indices['eta_A2_agn']], 
-                         s[param_indices['eta_break_agn']],
+                        s[param_indices['beta_agn']],
                         s[param_indices['beta_agn']],
                         df_agn['log_sigma0'].values, df_agn['log_tau_UV_RF'].values,
                         df_agn['f_host'].values
@@ -437,10 +434,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_agn_pivot, sho
             apparent_mag - (K_corr(df_agn['z'].values, df_agn['alpha_nu'].values) - K_corr(2, df_agn['alpha_nu'].values)) -
             (M_model_agn(
                 fake_params['M0_agn'], 
-                fake_params['log_sigma0_break'], 
-                fake_params['eta_A1_agn'], 
-                fake_params['eta_A2_agn'], 
-                fake_params['eta_break_agn'],
+                fake_params['alpha_agn'],
                 fake_params['beta_agn'], 
                 df_agn['log_sigma0'].values, df_agn['log_tau_UV_RF'].values,
             ))
@@ -454,9 +448,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_agn_pivot, sho
                  (0.055 * df_agn["z"])**2 +
                 #(results["alpha_agn"][1] * df_agn['log_sigma0_err']))**2
                 M_model_agn_err(results['M0_agn'][1],
-                                  results['log_sigma0_break'][1],
-                                  results['eta_A1_agn'][1], results['eta_A2_agn'][1], 
-                                  results['eta_break_agn'][1],
+                                  results['alpha_agn'][1],
                                   results['beta_agn'][1],
                                   df_agn['log_sigma0'].values,
                                   df_agn['log_sigma0_err'].values,
@@ -598,9 +590,7 @@ def plot_predicted_vs_actual_M2500(flat_samples, df_agn, cosmo_model, z_agn_pivo
 
     M_2500_pred = M_model_agn(
         results['M0_agn'][1], 
-        results['log_sigma0_break'][1],
-        results['eta_A1_agn'][1], results['eta_A2_agn'][1], 
-        results['eta_break_agn'][1],
+        results['alpha_agn'][1],
         results['beta_agn'][1], 
         df_agn['log_sigma0'].values,
         df_agn['log_tau_UV_RF'].values,
@@ -610,9 +600,7 @@ def plot_predicted_vs_actual_M2500(flat_samples, df_agn, cosmo_model, z_agn_pivo
     M_2500_pred_err = np.sqrt(
         M_model_agn_err(
             results['M0_agn'][1],
-            results['log_sigma0_break'][1],
-            results['eta_A1_agn'][1], results['eta_A2_agn'][1], 
-            results['eta_break_agn'][1],
+            results['alpha_agn'][1], 
             results['beta_agn'][1], 
             df_agn['log_sigma0'].values, 
             df_agn['log_sigma0_err'].values, 
@@ -708,9 +696,7 @@ def plot_predicted_vs_actual_Mi(flat_samples, df_agn, cosmo_model, z_agn_pivot, 
 
     M_2500_pred = M_model_agn(
         results['M0_agn'][1], 
-        results['log_sigma0_break'][1],
-        results['eta_A1_agn'][1], results['eta_A2_agn'][1], 
-        results['eta_break_agn'][1],
+        results['alpha_agn'][1],
         results['beta_agn'][1], 
         df_agn['log_sigma0'].values,
         df_agn['log_tau_UV_RF'].values,
@@ -722,9 +708,7 @@ def plot_predicted_vs_actual_Mi(flat_samples, df_agn, cosmo_model, z_agn_pivot, 
     M_2500_pred_err = np.sqrt(
         M_model_agn_err(
             results['M0_agn'][1],
-            results['log_sigma0_break'][1],
-            results['eta_A1_agn'][1], results['eta_A2_agn'][1], 
-            results['eta_break_agn'][1],
+            results['alpha_agn'][1],
             results['beta_agn'][1], 
             
             df_agn['log_sigma0'].values, 
@@ -875,228 +859,6 @@ def plot_Mi_vs_sigmahat(df_agn, cosmo_model, show=False):
         plt.show()
     plt.savefig(f"plots/hubble/Mi_vs_sigmahat_{cosmo_model}.png", dpi=300)
     plt.close()
-
-def plot_predicted_M2500_vs_sigmahat(flat_samples, df_agn, cosmo_model, show=False):
-    priors, model_labels, model_labels_latex = get_model_params(cosmo_model)
-    param_indices = {name: model_labels.index(name) for name in model_labels}
-
-    predicted_M2500_samples = []
-
-    log_sigma0_grid = np.linspace(df_agn['log_sigma0'].min(), df_agn['log_sigma0'].max(), 20)
-    for log_sigma0 in log_sigma0_grid:
-        for s in flat_samples:
-            sample_params = {
-                'M0_agn': s[param_indices['M0_agn']],
-                'log_sigma0_break': s[param_indices['log_sigma0_break']],
-                'eta_A1': s[param_indices['eta_A1_agn']],
-                'eta_A2': s[param_indices['eta_A2_agn']],
-                'eta_break': s[param_indices['eta_break_agn']],
-                'beta': s[param_indices['beta_agn']],
-            }
-
-            predicted_M2500 = M_model_agn(
-                sample_params['M0_agn'],
-                sample_params['log_sigma0_break'],
-                sample_params['eta_A1'], sample_params['eta_A2'],
-                sample_params['eta_break'], sample_params['beta'],
-                log_sigma0, df_agn['log_tau_UV_RF'].mean()
-            )
-            predicted_M2500_samples.append(predicted_M2500)
-
-    predicted_M2500_samples = np.array(predicted_M2500_samples)
-    predicted_M2500_samples = predicted_M2500_samples.reshape(len(log_sigma0_grid), -1)
-
-    # Take percentiles in log space
-    predicted_M2500_median = np.nanmedian(predicted_M2500_samples, axis=1)
-    predicted_M2500_low = np.nanpercentile(predicted_M2500_samples, 16, axis=1)
-    predicted_M2500_high = np.nanpercentile(predicted_M2500_samples, 84, axis=1)
-
-    M_2500_actual = -2.5 * df_agn['LOGL2500'] + 90
-    mask = M_2500_actual < 0
-    M_2500_actual = M_2500_actual[mask]
-    log_sigma0 = 2 * df_agn['log_sigma0'][mask]
-    log_lbol = df_agn['log_lbol'][mask]
-
-    # Plot
-    plt.figure(figsize=(8, 6))
-    plt.scatter(log_sigma0, M_2500_actual, label='Data', color='k', alpha=0.5)
-    plt.fill_between(log_sigma0_grid, predicted_M2500_low, predicted_M2500_high, color='m', alpha=0.3, label='Model')
-    plt.scatter(log_sigma0_grid, predicted_M2500_median, color='m')
-    plt.xlabel(r'$\log \hat{\sigma}^2$')
-    plt.ylabel(r'$M_{2500}$')
-    plt.legend()
-    plt.savefig(f"plots/hubble/predicted_M2500_vs_sigmahat_{cosmo_model}.png", dpi=300)
-    if show:
-        plt.show()
-    plt.close()
-
-
-def plot_predicted_sigma_hat_vs_luminosity_pl(samples, df_agn, cosmo_model, show=False):
-    priors, model_labels, model_labels_latex = get_model_params(cosmo_model)
-    param_indices = {name: model_labels.index(name) for name in model_labels}
-
-    log_lbol = df_agn['log_lbol'].values
-    log_sigma0 = 2 * df_agn['log_sigma0'].values
-    sigma0 = 10 ** log_sigma0
-    sigma0_err = np.log(10) * sigma0 * 2 * df_agn['log_sigma0_err']
-    lbol = 10 ** log_lbol
-    lbol_err = np.log(10) * lbol * df_agn['log_lbol_err']
-
-    # Step 1: Define log_sigma0 grid
-    log_sigma0_linspace = np.linspace(
-        df_agn['log_sigma0'].min(), df_agn['log_sigma0'].max(), 100
-    )
-    log_sigma0_linspace = 2 * log_sigma0_linspace
-    sigma0_linspace = 10 ** log_sigma0_linspace  # y-axis
-
-    # Step 2: Predict L_bol for each sample
-    predicted_log_lbol_samples = []
-
-    for s in tqdm(samples, total=len(samples), desc="Processing samples"):
-        log_tau_UV_RF = df_agn['log_tau_UV_RF'].mean()
-        alpha_nu = df_agn['alpha_nu'].mean()
-        z = 2
-
-        predicted_M_2500_sample = M_model_agn(
-            s[param_indices['M0_sn']] + s[param_indices['delta_M0_agn']],
-            s[param_indices['log_sigma0_break']],
-            s[param_indices['eta_A1_agn']], s[param_indices['eta_A2_agn']],
-            s[param_indices['eta_break_agn']],
-            s[param_indices['beta_agn']],
-            log_sigma0_linspace, log_tau_UV_RF
-        )
-
-        #predicted_M_i_sample = convert_M2500_to_MI(predicted_M_2500_sample, alpha_nu) - 2
-        predicted_M__sample = convert_M2500_to_MI_z2_cosmology_corrected(
-            predicted_M_2500_sample, alpha_nu, z, 
-            cosmo_old=FlatLambdaCDM(H0=70, Om0=0.3), 
-            cosmo_new=FlatwCDM(
-                H0=s[param_indices['H0']],
-                Om0=s[param_indices['Om0']],
-                w0=s[param_indices['w0']]
-            ),
-            use_empirical_anchor=True
-        )
-        predicted_log_lbol_sample = (90 - predicted_M_i_sample) / 2.5
-        predicted_log_lbol_samples.append(predicted_log_lbol_sample)
-
-    # Step 3: Compute percentiles of predicted L_bol
-    predicted_log_lbol_samples = np.array(predicted_log_lbol_samples)  # shape: (n_samples, 100)
-    lbol_median = 10 ** np.median(predicted_log_lbol_samples, axis=0)
-    lbol_low = 10 ** np.percentile(predicted_log_lbol_samples, 16, axis=0)
-    lbol_high = 10 ** np.percentile(predicted_log_lbol_samples, 84, axis=0)
-
-    # Step 4: Plotting
-    plt.figure(figsize=(8, 6))
-
-    # Predictive band (x = L_bol, y = sigma_hat^2)
-    plt.fill_betweenx(
-        sigma0_linspace,
-        lbol_low, lbol_high,
-        color='m', alpha=0.3, label='Best fit model (1σ band)'
-    )
-    plt.plot(lbol_median, sigma0_linspace, color='m', lw=2)
-
-    # Observed data
-    log_lbol = df_agn['log_lbol'].values
-    log_sigma0 = 2 * df_agn['log_sigma0'].values
-    sigma0 = 10 ** log_sigma0
-    lbol = 10 ** log_lbol
-    sigma0_err = np.log(10) * sigma0 * 2 * df_agn['log_sigma0_err']
-    lbol_err = np.log(10) * lbol * df_agn['log_lbol_err']
-
-    plt.errorbar(
-        lbol,
-        sigma0,
-        xerr=lbol_err,
-        yerr=sigma0_err,
-        fmt='o', linestyle='none', color='k', alpha=0.2, markersize=4, lw=1, label='AGN'
-    )
-
-    plt.xscale('log')
-    plt.yscale('log')
-    plt.xlabel(r'$L_{\mathrm{bol}}$ (erg/s)')
-    plt.ylabel(r'$\hat{\sigma}^2_\mathrm{UV}$ (mag$^2$ day$^{-1}$)')
-    plt.title(r'$\hat{\sigma}^2$ vs. $L_{\mathrm{bol}}$')
-    plt.legend()
-    plt.grid(alpha=0.3)
-    plt.tight_layout()
-
-    if show:
-        plt.show()
-    plt.close()
-
-
-def plot_Mi_vs_log_sigma0(samples, df_agn, cosmo_model, show=False):
-
-    # Observed values (already in log base 10)
-    log_sigma0 = 2 * df_agn['log_sigma0'].values
-    log_sigma0_err = 2 * df_agn['log_sigma0_err'].values
-
-    priors, model_labels, model_labels_latex = get_model_params(cosmo_model)
-    param_indices = {name: model_labels.index(name) for name in model_labels}
-    results = {key: np.percentile(samples[:, i], [16, 50, 84]) for i, key in enumerate(model_labels)}
-
-    # Fit model: reparametrize alpha to log_alpha for fitting
-    log_sigma0_linspace = np.linspace(df_agn['log_sigma0'].min(), df_agn['log_sigma0'].max(), 100)
-
-    predicted_M_samples = []
-    for s in tqdm(samples, total=len(samples), desc="Processing samples"):
-        log_tau_UV_RF = df_agn['log_tau_UV_RF'].mean()
-        alpha_nu = df_agn['alpha_nu'].mean()
-        z = 2
-
-        predicted_M_2500_sample = M_model_agn(
-            s[param_indices['M0_sn']] + s[param_indices['delta_M0_agn']],
-            s[param_indices['log_sigma0_break']],
-            s[param_indices['eta_A1_agn']], s[param_indices['eta_A2_agn']],
-            s[param_indices['eta_break_agn']],
-            s[param_indices['beta_agn']],
-            log_sigma0_linspace, log_tau_UV_RF
-        )
-        predicted_M_samples.append(predicted_M_2500_sample)
-        #predicted_M_i_sample = convert_M2500_to_MI(predicted_M_2500_sample, alpha_nu) - 2
-        # predicted_M_i_sample = convert_M2500_to_MI_z2_cosmology_corrected(
-        #     predicted_M_2500_sample, alpha_nu, z, 
-        #     cosmo_old=FlatLambdaCDM(H0=70, Om0=0.3), 
-        #     cosmo_new=FlatwCDM(
-        #         H0=s[param_indices['H0']],
-        #         Om0=s[param_indices['Om0']],
-        #         w0=s[param_indices['w0']]
-        #     ),
-        #     use_empirical_anchor=True
-        # )
-        # predicted_M_i_samples.append(predicted_M_i_sample)
-    predicted_M_samples = np.array(predicted_M_samples)  # shape: (n_samples, 100)
-    M_median = np.median(predicted_M_samples, axis=0)
-    M_low = np.percentile(predicted_M_samples, 16, axis=0)
-    M_high = np.percentile(predicted_M_samples, 84, axis=0)
-
-    fig, ax = plt.subplots(figsize=(7, 5))
-    ax.scatter(df_agn['log_sigma0'], df_agn['M_2500'], alpha=0.7, edgecolor='k', zorder=-2)
-
-    ax.fill_between(
-        log_sigma0_linspace,
-        M_low,
-        M_high,
-        color='m',
-        alpha=0.3,
-        label='Best fit model (1σ band)'
-    )
-
-    ax.set_xlabel(r'$\log_{10}(\hat{\sigma}_{\mathrm{UV}}^2)$ (mag$^2$ day$^{-1}$)')
-    ax.set_ylabel(r'$M_{2500}$')
-    #ax.invert_yaxis()
-    #ax.grid(True, which='both', ls='--', lw=0.3)
-    ax.set_xlim(log_sigma0.min() - 0.1, log_sigma0.max() + 0.1)
-    ax.legend(fontsize=12)
-    fig.tight_layout()
-    if show:
-        plt.show()
-
-    os.makedirs("plots/hubble", exist_ok=True)
-    fig.savefig("plots/hubble/observed_Mi_vs_log_sigma0_fit.png", dpi=300)
-    #fig.savefig("plots/hubble/observed_Mi_vs_log_sigma0_fit.pdf", dpi=300)
 
 
 
@@ -1266,93 +1028,6 @@ def plot_full_residuals(df_agn, residuals, flat_samples, cosmo_model, z_agn_pivo
     plt.close()
 
 
-from scipy.optimize import basinhopping
-from functools import partial
-
-def invert_log_sigma0_basin(target_log_l2500, sample_params, log_tau_UV_RF):
-    def objective(log_sigma0):
-        predicted_M2500 = M_model_agn(
-            sample_params['M0_agn'],
-            sample_params['log_sigma0_break'],
-            sample_params['eta_A1'], sample_params['eta_A2'],
-            sample_params['eta_break'], sample_params['beta'],
-            log_sigma0, log_tau_UV_RF
-        )
-        #predicted_Mi = calc_Mi_from_M2500(predicted_M2500, alpha_nu, z)
-        #M_2500_actual = -2.5 * d['LOGL2500'] + 90
-        predicted_log_l2500 = (predicted_M2500-90) / (-2.5)
-        return (predicted_log_l2500 - target_log_l2500) ** 2  # Minimize squared error
-
-    minimizer_kwargs = {"method": "L-BFGS-B", "bounds": [(-3, 2)]}
-    result = basinhopping(objective, x0=0.0, minimizer_kwargs=minimizer_kwargs, niter=10, seed=42)
-
-    if result.lowest_optimization_result.success:
-        return result.x[0]
-    else:
-        return np.nan
-
-def invert_log_sigma0_basin_worker(arg, param_indices=None):
-    s, log_l, log_tau_UV_RF = arg
-    sample_params = {
-        'M0_agn': s[param_indices['M0_agn']],
-        'log_sigma0_break': s[param_indices['log_sigma0_break']],
-        'eta_A1': s[param_indices['eta_A1_agn']],
-        'eta_A2': s[param_indices['eta_A2_agn']],
-        'eta_break': s[param_indices['eta_break_agn']],
-        'beta': s[param_indices['beta_agn']],
-    }
-
-    log_sigma0 = invert_log_sigma0_basin(log_l, sample_params, log_tau_UV_RF)
-    return log_sigma0
-
-def plot_inverted_sigmahat_vs_l2500_pl(flat_samples, df_agn, cosmo_model, show=False):
-    df = df_agn.copy()
-    df = df[df['LOGL2500'] > 0]
-
-    priors, model_labels, model_labels_latex = get_model_params(cosmo_model)
-    param_indices = {name: model_labels.index(name) for name in model_labels}
-
-    #log_l2500_grid = np.linspace(df['LOGL2500'].min(), df['LOGL2500'].max(), 10)
-    log_l2500_grid = np.linspace(44.5, 48, 10)
-    #log_lbol_grid = np.array([44, 45, 46, 47])
-    inverted_log_sigma0_samples = []
-
-
-
-
-    from multiprocessing import Pool, cpu_count
-    n_processes = cpu_count() - 1
-
-    with Pool(processes=n_processes) as pool:
-        arg_list = []
-        for log_l in log_l2500_grid:
-            for s in flat_samples[:50]:
-                for i, d in df_agn.sample(10, random_state=42).iterrows():
-                    arg_list.append((s, log_l, d['log_tau_UV_RF']))
-
-        inverted_log_sigma0_samples = pool.map(partial(invert_log_sigma0_basin_worker, param_indices=param_indices), arg_list)
-
-    # Convert to numpy array and reshape to (n_samples, len(log_lbol_grid))
-    inverted_log_sigma0_samples = np.array(inverted_log_sigma0_samples)
-    inverted_log_sigma0_samples = inverted_log_sigma0_samples.reshape(len(log_l2500_grid), -1)
-
-    log_sigma0_samples = 2 * inverted_log_sigma0_samples
-
-    # Take percentiles in log space
-    log_sigma0_median = np.nanmedian(log_sigma0_samples, axis=1)
-    log_sigma0_low = np.nanpercentile(log_sigma0_samples, 16, axis=1)
-    log_sigma0_high = np.nanpercentile(log_sigma0_samples, 84, axis=1)
-
-    # Plot
-    plt.figure(figsize=(8, 6))
-    plt.scatter(df_agn['log_lbol'], (df_agn['log_sigma0']), label='Data', color='k', alpha=0.5)
-    plt.fill_between(log_l2500_grid, log_sigma0_low, log_sigma0_high, color='m', alpha=0.3, label='Best fit model (1σ band)')
-    plt.scatter(log_l2500_grid, log_sigma0_median)
-    plt.xlabel(r'$\log L_{\rm 2500}$')
-    plt.ylabel(r'$\log \sigma_{\rm hat}^2$')
-    plt.savefig(f"plots/hubble/inverted_sigmahat_vs_l2500_{cosmo_model}.png", dpi=300)
-    if show:
-       plt.show()
 
 def plot_predicted_L2500_vs_sigmahat(flat_samples, df_agn, cosmo_model, z_agn_pivot, show=False):
     d = df_agn.copy()
@@ -1378,9 +1053,7 @@ def plot_predicted_L2500_vs_sigmahat(flat_samples, df_agn, cosmo_model, z_agn_pi
 
             predicted_M2500 = M_model_agn(
                 sample_params['M0_agn'],
-                sample_params['log_sigma0_break'],
-                sample_params['eta_A1'], sample_params['eta_A2'],
-                sample_params['eta_break'], sample_params['beta'],
+                sample_params['alpha_agn'], sample_params['beta_agn'],
                 log_sigma0, d['log_tau_UV_RF'].mean(),
                 d['f_host'].mean()
             )
@@ -1389,9 +1062,7 @@ def plot_predicted_L2500_vs_sigmahat(flat_samples, df_agn, cosmo_model, z_agn_pi
 
             predicted_M2500_err = M_model_agn_err(
                 sample_params['M0_agn'],
-                sample_params['log_sigma0_break'],
-                sample_params['eta_A1'], sample_params['eta_A2'],
-                sample_params['eta_break'], sample_params['beta'],
+                sample_params['alpha_agn'], sample_params['beta_agn'],
                 log_sigma0, d['log_tau_UV_RF_err'].mean(), d['log_sigma0_err'].mean(),
                 d['f_host_err'].mean()
             )

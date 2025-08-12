@@ -125,7 +125,7 @@ def compute_apparent_mag_2500_colin(df):
     
     #colin_df = pd.read_csv("data/aug4_sample_chisqg10_ebv005sn3_magsmean_fittedm2500.csv")
     #colin_df = pd.read_csv("data/aug8_stone_merged_fittedm2500.csv")
-    colin_df = pd.read_csv('data/csv/aug10_stone_merged_fittedm2500.csv')
+    colin_df = pd.read_csv('data/aug10_stone_merged_fittedm2500.csv')
 
     # Ensure SDSS_NAME is string for matching
     colin_df['object_id'] = colin_df['object_id'].astype(str)
@@ -442,9 +442,9 @@ def populate_sdss_fields(objs, progress_bar=True):
             warnings.simplefilter("always")
             d['log_lbol'] = fits_data['LOGLBOL'][i]
             d['log_lbol_err'] = fits_data['LOGLBOL_ERR'][i]
-            # for b in ['u', 'g', 'r', 'i', 'z']:
-            #     d[f'apparent_mag_{b}'] = -2.5 * np.log10(fits_data_2['PSFFLUX'][i, filters[b]]) + 22.5
-            #     d[f'apparent_mag_{b}_err'] = 2.5/np.log(10) * np.sqrt(1/fits_data_2['PSFFLUX_IVAR'][i, filters[b]])/fits_data_2['PSFFLUX'][i, filters[b]]
+            for b in ['u', 'g', 'r', 'i', 'z']:
+                d[f'apparent_mag_{b}'] = -2.5 * np.log10(fits_data_2['PSFFLUX'][i, filters[b]]) + 22.5
+                d[f'apparent_mag_{b}_err'] = 2.5/np.log(10) * np.sqrt(1/fits_data_2['PSFFLUX_IVAR'][i, filters[b]])/fits_data_2['PSFFLUX'][i, filters[b]]
             # #     d[f'extinction_{b}'] = fits_data_2['EXTINCTION'][i, filters[b]]
             # d['color'] = -2.5 * np.log10(fits_data_2['PSFFLUX'][i, 0] / fits_data_2['PSFFLUX'][i, 3])
             # # Error propagation for color
@@ -837,160 +837,65 @@ def get_completeness_function_2d(df_agn,
 
     return Completeness2D(mag_centers, z_centers, completeness_smoothed), mag_centers, z_centers, dm, dz
 
-def get_completeness_function_2d_better(df_agn,
+
+def get_completeness_function_2d_(df_agn,
                                  sim_file="data/sampled_apparent_magnitudes_redshift_vol.h5",
                                  n_mag_bins=20, n_z_bins=30,
                                  mag_min=15, mag_max=24,
                                  sigma_mag=1.0, sigma_z=0.7,
-                                 normalize=False,             # default: no renorm
-                                 floor=0.02,                  # avoid 1/C blow-ups
-                                 alpha=0.5, beta=1.0,         # pseudocounts
-                                 smooth_counts=True,          # smooth numer/denom
+                                 normalize=True,
                                  plot=False):
-    # --- Load simulated (true) sample
-    mags_true_list, z_true_list = [], []
+    """
+    Build p(detect | m_2500, z) by:
+      1) Fitting a line m_2500 = a + b * m_i using observed AGN,
+      2) Converting simulated m_i -> m_2500 via that line,
+      3) Forming the 2D completeness histogram in (m_2500, z).
+
+    Expects df_agn to contain 'apparent_mag_2500', 'apparent_mag_i', and 'z'.
+    """
+    # --- Fit m_2500 = a + b * m_i from observed sample
+    print(df_agn.keys())
+    if ('apparent_mag_2500' not in df_agn.columns) or ('apparent_mag_i' not in df_agn.columns):
+        raise KeyError("df_agn must contain 'apparent_mag_2500' and 'apparent_mag_i' columns.")
+
+    m2500_obs_all = df_agn['apparent_mag_2500'].values
+    mi_obs_all    = df_agn['apparent_mag_i'].values
+    z_obs_all     = df_agn['z'].values
+
+    fit_mask = np.isfinite(m2500_obs_all) & np.isfinite(mi_obs_all)
+    if fit_mask.sum() < 2:
+        raise ValueError("Not enough finite points to fit m_2500 vs m_i.")
+
+    # y = a + b*x with x = m_i, y = m_2500
+    b, a = np.polyfit(mi_obs_all[fit_mask], m2500_obs_all[fit_mask], deg=1)  # returns [slope, intercept]
+
+    # --- Load simulated (true) sample: these mags are in band i
+    mi_true_list, z_true_list = [], []
     with h5py.File(sim_file, "r") as f:
         for name in f["redshift_bin"]:
             ds = f["redshift_bin"][name]
-            mags = ds[()]
-            z_bin = float(ds.attrs["redshift"])
-            mags_true_list.append(mags)
-            z_true_list.append(np.full_like(mags, z_bin, dtype=float))
-    mags_true = np.concatenate(mags_true_list)
-    z_true    = np.concatenate(z_true_list)
+            mi = ds[()]  # simulated apparent m_i
+            z_bin = ds.attrs["redshift"]
+            mi_true_list.append(mi)
+            z_true_list.append(np.full_like(mi, z_bin, dtype=float))
 
-    # --- Observed sample
-    mags_obs = df_agn['apparent_mag_2500'].values
-    z_obs    = df_agn['z'].values
+    mi_true = np.concatenate(mi_true_list)
+    z_true  = np.concatenate(z_true_list)
 
-    # --- Clean NaNs/Infs
-    tmask = np.isfinite(mags_true) & np.isfinite(z_true)
-    omask = np.isfinite(mags_obs)  & np.isfinite(z_obs)
-    mags_true, z_true = mags_true[tmask], z_true[tmask]
-    mags_obs,  z_obs  = mags_obs[omask],  z_obs[omask]
+    # --- Convert simulated m_i -> m_2500 via the fitted line
+    m2500_true = a + b * mi_true
 
-    # --- Bin edges (union of ranges to avoid dropping obs outside sim)
-    m_edges = np.linspace(mag_min, mag_max, n_mag_bins + 1)
-    z_all_min = np.nanmin(np.concatenate([z_true, z_obs])) if z_obs.size else np.nanmin(z_true)
-    z_all_max = np.nanmax(np.concatenate([z_true, z_obs])) if z_obs.size else np.nanmax(z_true)
-    if z_all_max - z_all_min < 1e-3:
-        z_all_min -= 0.01; z_all_max += 0.01
-    z_edges = np.linspace(z_all_min, z_all_max, n_z_bins + 1)
-
-    m_centers = 0.5 * (m_edges[:-1] + m_edges[1:])
-    z_centers = 0.5 * (z_edges[:-1] + z_edges[1:])
-
-    # --- Histograms
-    H_true, _, _ = np.histogram2d(mags_true, z_true, bins=[m_edges, z_edges])
-    H_obs,  _, _ = np.histogram2d(mags_obs,  z_obs,  bins=[m_edges, z_edges])
-
-    # --- Optional smoothing on counts (recommended)
-    if smooth_counts:
-        H_true_s = gaussian_filter(H_true, sigma=(sigma_mag, sigma_z), mode='reflect')
-        H_obs_s  = gaussian_filter(H_obs,  sigma=(sigma_mag, sigma_z), mode='reflect')
-    else:
-        H_true_s, H_obs_s = H_true, H_obs
-
-    # --- Completeness with pseudocounts
-    with np.errstate(divide='ignore', invalid='ignore'):
-        completeness = (H_obs_s + alpha) / (H_true_s + beta)
-
-    # --- Clip, floor, optional renorm
-    completeness = np.clip(completeness, 0.0, 1.0)
-    if floor is not None:
-        completeness = np.maximum(completeness, floor)
-    if normalize and np.nanmax(completeness) > 0:
-        completeness = completeness / np.nanmax(completeness)
-
-    # --- Bin widths
-    dm = (m_centers[1] - m_centers[0]) if len(m_centers) > 1 else (mag_max - mag_min)
-    dz = (z_centers[1] - z_centers[0]) if len(z_centers) > 1 else (z_all_max - z_all_min)
-
-    if plot:
-        import matplotlib.pyplot as plt
-        plt.imshow(completeness.T, origin='lower', aspect='auto',
-                   extent=[m_edges[0], m_edges[-1], z_edges[0], z_edges[-1]])
-        plt.xlabel(r'Apparent $m_{2500}$ (AB)')
-        plt.ylabel('Redshift z')
-        plt.title('Completeness Map')
-        plt.colorbar(label='p(detect | m$_{2500}$, z)')
-        plt.tight_layout()
-        plt.show()
-
-    return Completeness2D(m_centers, z_centers, completeness), m_centers, z_centers, dm, dz
-
-def get_completeness_function_2d_M2500_alpha_lambda(
-    df_agn,
-    sim_file="data/sampled_apparent_magnitudes_redshift_vol.h5",
-    n_mag_bins=20, n_z_bins=30,
-    mag_min=15, mag_max=24,
-    sigma_mag=1.0, sigma_z=0.7,
-    normalize=True,
-    plot=False,
-    *,
-    lambda_i_eff=7480.0,     # SDSS i effective wavelength [Å]
-    lambda0_rest=2500.0,     # target rest wavelength [Å]
-    alpha_window=0.25        # half-width in z to gather alpha_lambda around each z_bin
-):
-    """
-    Build p(detect | m_2500, z) using a simulation binned in m_i derived from M_i.
-    We convert simulated m_i -> m_2500 per redshift bin using df_agn's alpha_lambda:
-        alpha_nu(z) = -(median_alpha_lambda(z) + 2)
-        m_2500 = m_i - 2.5 * alpha_nu(z) * log10(lambda_i_eff / (2500*(1+z)))
-    """
-    import numpy as np
-    import h5py
-    from scipy.ndimage import gaussian_filter
-
-    # --- Precompute global fallback slope in case a bin has no nearby objects
-    if 'alpha_lambda' in df_agn.columns and np.isfinite(df_agn['alpha_lambda']).any():
-        alpha_lambda_global = float(np.nanmedian(df_agn['alpha_lambda'].values))
-    else:
-        # conservative fallback ~ f_nu slope -0.5 => alpha_lambda ~ -1.5
-        alpha_lambda_global = -1.5
-
-    z_obs_full = df_agn['z'].values
-    alpha_lambda_full = df_agn['alpha_lambda'].values if 'alpha_lambda' in df_agn.columns else np.full_like(z_obs_full, alpha_lambda_global)
-
-    # --- Load simulated (true) sample and convert m_i -> m_2500 per z-bin using local alpha_lambda
-    mags_true_list, z_true_list = [], []
-    with h5py.File(sim_file, "r") as f:
-        for name in f["redshift_bin"]:
-            ds = f["redshift_bin"][name]
-            m_i = ds[()]                         # simulated apparent magnitudes from M_i
-            z_bin = float(ds.attrs["redshift"])
-
-            # gather nearby alpha_lambda around this z_bin
-            mask = np.isfinite(z_obs_full) & np.isfinite(alpha_lambda_full) & (np.abs(z_obs_full - z_bin) <= alpha_window)
-            if np.any(mask):
-                alpha_lambda_bin = float(np.nanmedian(alpha_lambda_full[mask]))
-            else:
-                alpha_lambda_bin = alpha_lambda_global
-
-            alpha_nu_bin = -(alpha_lambda_bin + 2.0)
-
-            # color term to move from i band to observed 2500*(1+z_bin)
-            lam_obs_2500 = lambda0_rest * (1.0 + z_bin)  # Å
-            delta_m = -2.5 * alpha_nu_bin * np.log10(lambda_i_eff / lam_obs_2500)
-            m_2500 = m_i + delta_m
-
-            mags_true_list.append(m_2500)
-            z_true_list.append(np.full_like(m_i, z_bin, dtype=float))
-
-    mags_true = np.concatenate(mags_true_list)
-    z_true = np.concatenate(z_true_list)
-
-    # --- Observed sample is already in m_2500
-    mags_obs = df_agn['apparent_mag_2500'].values
-    z_obs = df_agn['z'].values
+    # --- Observed sample for completeness map (already in m_2500)
+    m2500_obs = m2500_obs_all
+    z_obs     = z_obs_all
 
     # --- Clean NaNs/Infs
-    mask_true = np.isfinite(mags_true) & np.isfinite(z_true)
-    mags_true = mags_true[mask_true]
+    mask_true = np.isfinite(m2500_true) & np.isfinite(z_true)
+    m2500_true = m2500_true[mask_true]
     z_true = z_true[mask_true]
 
-    mask_obs = np.isfinite(mags_obs) & np.isfinite(z_obs)
-    mags_obs = mags_obs[mask_obs]
+    mask_obs = np.isfinite(m2500_obs) & np.isfinite(z_obs)
+    m2500_obs = m2500_obs[mask_obs]
     z_obs = z_obs[mask_obs]
 
     # --- Bin edges and centers
@@ -1000,550 +905,46 @@ def get_completeness_function_2d_M2500_alpha_lambda(
         z_max += 0.01
 
     mag_edges = np.linspace(mag_min, mag_max, n_mag_bins + 1)
-    z_edges = np.linspace(z_min, z_max, n_z_bins + 1)
+    z_edges   = np.linspace(z_min, z_max, n_z_bins + 1)
     mag_centers = 0.5 * (mag_edges[:-1] + mag_edges[1:])
-    z_centers = 0.5 * (z_edges[:-1] + z_edges[1:])
+    z_centers   = 0.5 * (z_edges[:-1] + z_edges[1:])
 
     # --- Histogram both samples in (m_2500, z)
-    hist_true, _, _ = np.histogram2d(mags_true, z_true, bins=[mag_edges, z_edges])
-    hist_obs,  _, _ = np.histogram2d(mags_obs,  z_obs,  bins=[mag_edges, z_edges])
+    hist_true, _, _ = np.histogram2d(m2500_true, z_true, bins=[mag_edges, z_edges])
+    hist_obs,  _, _ = np.histogram2d(m2500_obs,  z_obs,  bins=[mag_edges, z_edges])
 
-    # --- Completeness ratio
+    # --- Compute completeness ratio
     with np.errstate(divide='ignore', invalid='ignore'):
         completeness = np.zeros_like(hist_true, dtype=float)
         valid = hist_true > 0
         completeness[valid] = hist_obs[valid] / hist_true[valid]
 
-    # --- Smooth, clip, normalize
+    # --- Optional smoothing
     completeness_smoothed = gaussian_filter(completeness, sigma=(sigma_mag, sigma_z), mode='nearest')
+
+    # --- Clip to [0, 1] and normalize if requested
     completeness_smoothed = np.clip(completeness_smoothed, 0.0, 1.0)
     if normalize and np.nanmax(completeness_smoothed) > 0:
         completeness_smoothed /= np.nanmax(completeness_smoothed)
 
-    # --- Bin widths
-    dm = mag_centers[1] - mag_centers[0] if len(mag_centers) > 1 else (mag_edges[-1]-mag_edges[0])
-    dz = z_centers[1] - z_centers[0] if len(z_centers) > 1 else (z_edges[-1]-z_edges[0])
+    # --- Bin widths for later convolution/integration
+    dm = mag_centers[1] - mag_centers[0] if len(mag_centers) > 1 else np.nan
+    dz = z_centers[1] - z_centers[0]     if len(z_centers) > 1 else np.nan
 
     # --- Optional diagnostic plot
     if plot:
         import matplotlib.pyplot as plt
         plt.imshow(completeness_smoothed.T, origin='lower', aspect='auto',
                    extent=[mag_edges[0], mag_edges[-1], z_edges[0], z_edges[-1]])
-        plt.xlabel(r'$m_{2500}$ (AB)')
+        plt.xlabel(r'Apparent Magnitude $m_{2500}$')
         plt.ylabel('Redshift z')
         plt.title('Completeness Map (Smoothed)')
-        plt.colorbar(label='p(detect | m₍₂₅₀₀₎, z)')
+        plt.colorbar(label='p(detect | m2500, z)')
         plt.tight_layout()
         plt.show()
 
+    # NB: Completeness2D assumed available in your environment
     return Completeness2D(mag_centers, z_centers, completeness_smoothed), mag_centers, z_centers, dm, dz
-
-def get_completeness_function_2d_sdssi(
-    df_agn,
-    sim_file="data/sampled_apparent_magnitudes_redshift_vol.h5",
-    n_mag_bins=20, n_z_bins=30,
-    mag_min=15, mag_max=24,
-    sigma_mag=1.0, sigma_z=0.7,
-    normalize=True,
-    plot=False,
-    *,
-    sdss_i_filter_path="data/SLOAN_SDSS.i.dat",  # two cols: wavelength[Å or nm], throughput
-    alpha_window=0.25,                             # |z - z_bin| window to take median alpha_lambda
-    lambda0_rest=2500.0,                           # target rest wavelength [Å]
-    lambda_i_eff_fallback=7480.0                   # used only if filter file unavailable
-):
-    """
-    Build p(detect | m_2500, z) using a simulation binned in apparent m_i (from M_i).
-    We convert simulated m_i -> m_2500 per redshift bin using the SDSS-i filter curve and a
-    power-law SED. For each z-bin, take median alpha_lambda from nearby objects (|z - z_bin| <= alpha_window),
-    convert to alpha_nu = -(alpha_lambda + 2), and compute:
-
-        m_2500 = m_i + Δm,
-        Δm = -2.5 * log10( <f_nu>_i / f_nu(λ_target) )
-
-    with λ_target = 2500*(1+z) Å (observed) and
-
-        <f_nu>_i = [∫ S(ν) f_nu(ν) dlnν] / [∫ S(ν) dlnν]
-
-    For f_nu ∝ ν^{α}, the ratio reduces (in wavelength space) to:
-        R = <f_nu>_i / f_nu(λ_target) = (I1/I0) * λ_target^{α},
-    where
-        I0 = ∫ S(λ) dlnλ,      I1 = ∫ S(λ) λ^{-α} dlnλ.
-
-    If the filter file is missing or invalid, we fall back to
-        Δm ≈ -2.5 * α * log10( λ_i_eff_fallback / λ_target ).
-    """
-    import numpy as np
-    import h5py
-    from scipy.ndimage import gaussian_filter
-
-    # ---------- helpers (kept local) ----------
-    def _load_filter_two_col(path):
-        try:
-            arr = np.loadtxt(path, dtype=float)
-            arr = np.atleast_2d(arr)
-            lam = arr[:, 0].astype(float)
-            S = arr[:, 1].astype(float)
-
-            # unit sniff: if median wavelength < 1000, assume nm and convert to Å
-            if np.nanmedian(lam) < 1000.0:
-                lam = lam * 10.0  # nm -> Å
-
-            # clean & sort
-            m = np.isfinite(lam) & np.isfinite(S) & (S > 0)
-            lam, S = lam[m], S[m]
-            if lam.size < 5:
-                return None, None
-            idx = np.argsort(lam)
-            return lam[idx], S[idx]
-        except Exception:
-            return None, None
-
-    def _delta_m_from_filter(z_bin, alpha_lambda_bin, lam, S):
-        """
-        Compute Δm = -2.5 * log10( <f_nu>_i / f_nu(λ_target) )
-        using integrals over ln λ with the SDSS-i response.
-        """
-        alpha_nu = -(alpha_lambda_bin + 2.0)
-        lam_target = lambda0_rest * (1.0 + z_bin)   # observed Å
-
-        # integrals in ln λ
-        x = np.log(lam)
-        I0 = np.trapz(S, x)
-        I1 = np.trapz(S * lam**(-alpha_nu), x)
-
-        if not np.isfinite(I0) or not np.isfinite(I1) or I0 <= 0 or I1 <= 0:
-            # fallback to effective-wavelength approximation if integrals are bad
-            return -2.5 * alpha_nu * np.log10(lambda_i_eff_fallback / lam_target)
-
-        # Δm = -2.5 * [ log10(I1/I0) + α * log10(λ_target) ]
-        return -2.5 * (np.log10(I1 / I0) + alpha_nu * np.log10(lam_target))
-
-    # ---------- choose alpha_lambda per z-bin ----------
-    if 'alpha_lambda' in df_agn.columns and np.isfinite(df_agn['alpha_lambda']).any():
-        alpha_lambda_global = float(np.nanmedian(df_agn['alpha_lambda'].values))
-    else:
-        alpha_lambda_global = -1.5  # ~f_nu slope -0.5 fallback
-
-    z_obs_full = df_agn['z'].values
-    alpha_lambda_full = (
-        df_agn['alpha_lambda'].values
-        if 'alpha_lambda' in df_agn.columns else
-        np.full_like(z_obs_full, alpha_lambda_global, dtype=float)
-    )
-
-    # ---------- load SDSS-i filter ----------
-    lam_i, S_i = _load_filter_two_col(sdss_i_filter_path)
-    use_filter = lam_i is not None and S_i is not None
-
-    # ---------- load simulated sample (m_i) and convert to m_2500 ----------
-    mags_true_list, z_true_list = [], []
-    with h5py.File(sim_file, "r") as f:
-        for name in f["redshift_bin"]:
-            ds = f["redshift_bin"][name]
-            m_i = ds[()]                   # simulated apparent mags from M_i
-            z_bin = float(ds.attrs["redshift"])
-
-            # pick alpha_lambda for this z-bin
-            mask = np.isfinite(z_obs_full) & np.isfinite(alpha_lambda_full) & (np.abs(z_obs_full - z_bin) <= alpha_window)
-            alpha_lambda_bin = float(np.nanmedian(alpha_lambda_full[mask])) if np.any(mask) else alpha_lambda_global
-
-            if use_filter:
-                delta_m = _delta_m_from_filter(z_bin, alpha_lambda_bin, lam_i, S_i)
-            else:
-                # fallback to simple color term with fixed λ_i_eff
-                alpha_nu = -(alpha_lambda_bin + 2.0)
-                lam_target = lambda0_rest * (1.0 + z_bin)
-                delta_m = -2.5 * alpha_nu * np.log10(lambda_i_eff_fallback / lam_target)
-
-            m_2500 = m_i + delta_m
-            mags_true_list.append(m_2500)
-            z_true_list.append(np.full_like(m_i, z_bin, dtype=float))
-
-    mags_true = np.concatenate(mags_true_list)
-    z_true = np.concatenate(z_true_list)
-
-    # ---------- observed sample already in m_2500 ----------
-    mags_obs = df_agn['apparent_mag_2500'].values
-    z_obs = df_agn['z'].values
-
-    # ---------- clean NaNs/Infs ----------
-    mt = np.isfinite(mags_true) & np.isfinite(z_true)
-    mo = np.isfinite(mags_obs) & np.isfinite(z_obs)
-    mags_true, z_true = mags_true[mt], z_true[mt]
-    mags_obs,  z_obs  = mags_obs[mo],  z_obs[mo]
-
-    # ---------- binning ----------
-    z_min, z_max = float(np.min(z_true)), float(np.max(z_true))
-    if z_max - z_min < 1e-3:
-        z_min -= 0.01; z_max += 0.01
-
-    mag_edges = np.linspace(mag_min, mag_max, n_mag_bins + 1)
-    z_edges   = np.linspace(z_min, z_max, n_z_bins + 1)
-    mag_centers = 0.5 * (mag_edges[:-1] + mag_edges[1:])
-    z_centers   = 0.5 * (z_edges[:-1]   + z_edges[1:])
-
-    hist_true, _, _ = np.histogram2d(mags_true, z_true, bins=[mag_edges, z_edges])
-    hist_obs,  _, _ = np.histogram2d(mags_obs,  z_obs,  bins=[mag_edges, z_edges])
-
-    with np.errstate(divide='ignore', invalid='ignore'):
-        completeness = np.zeros_like(hist_true, dtype=float)
-        valid = hist_true > 0
-        completeness[valid] = hist_obs[valid] / hist_true[valid]
-
-    completeness_smoothed = gaussian_filter(completeness, sigma=(sigma_mag, sigma_z), mode='nearest')
-    completeness_smoothed = np.clip(completeness_smoothed, 0.0, 1.0)
-    if normalize and np.nanmax(completeness_smoothed) > 0:
-        completeness_smoothed /= np.nanmax(completeness_smoothed)
-
-    dm = (mag_centers[1] - mag_centers[0]) if len(mag_centers) > 1 else (mag_edges[-1]-mag_edges[0])
-    dz = (z_centers[1]   - z_centers[0])   if len(z_centers)   > 1 else (z_edges[-1]-z_edges[0])
-
-    if plot:
-        import matplotlib.pyplot as plt
-        plt.imshow(completeness_smoothed.T, origin='lower', aspect='auto',
-                   extent=[mag_edges[0], mag_edges[-1], z_edges[0], z_edges[-1]])
-        plt.xlabel(r'$m_{2500}$ (AB)')
-        plt.ylabel('Redshift $z$')
-        plt.title('Completeness Map (Smoothed)')
-        plt.colorbar(label='p(detect | $m_{2500}$, $z$)')
-        plt.tight_layout()
-        plt.show()
-
-    return Completeness2D(mag_centers, z_centers, completeness_smoothed), mag_centers, z_centers, dm, dz
-
-def get_completeness_function_2d_sdssi_better(
-    df_agn,
-    sim_file="data/sampled_apparent_magnitudes_redshift_vol.h5",
-    n_mag_bins=20, n_z_bins=30,
-    mag_min=15, mag_max=24,
-    sigma_mag=1.0, sigma_z=0.7,
-    normalize=True,
-    plot=False,
-    *,
-    sdss_i_filter_path="data/filters/sdss_i.txt",  # two cols: wavelength [Å or nm], throughput
-    alpha_window=0.25,                             # |z - z_bin| window for median/MC of alpha_lambda
-    lambda0_rest=2500.0,                           # target rest wavelength [Å]
-    lambda_i_eff_fallback=7480.0,                  # used if filter file unavailable
-    # ---- advanced options (defaults keep old behavior-ish) ----
-    n_alpha_mc=0,             # >0 to Monte Carlo over alpha_lambda dispersion (e.g. 64)
-    sim_mag_err=None,         # float or callable(z)->sigma_m for Eddington jitter on sim (None = off)
-    enable_logistic_fallback=False,  # monotone fallback per z-slice in sparse regions
-    fallback_min_valid_bins=4,
-    fallback_min_total_counts=20,
-    use_quantile_z=False,     # optional adaptive z-binning by quantiles
-    obs_weights=None,         # optional array of weights for observed objects (len = len(df_agn))
-    sim_weights_provider=None,# optional callable(z_bin, m_i)->weights array (len = len(m_i))
-    random_state=None         # int seed for reproducibility (MC, jitter)
-):
-    """
-    Build p(detect | m_2500, z) by converting the Mi-based sim's m_i -> m_2500 using the SDSS-i filter
-    and df_agn's alpha_lambda. Uses a Jeffreys Binomial-Beta posterior for stability.
-
-    Returns:
-        (Completeness2D, mag_centers, z_centers, dm, dz)
-    Side attrs (set on the Completeness2D object if possible):
-        .interp  : RegularGridInterpolator over (m_2500, z)
-        .k, .n   : observed & true counts per bin
-        .lo, .hi : 68% CI from Beta posterior per bin
-    """
-    import numpy as np
-    import h5py
-    from scipy.ndimage import gaussian_filter
-    from scipy.interpolate import RegularGridInterpolator as RGI
-    from scipy.stats import beta as _beta
-    from scipy.optimize import curve_fit
-
-    rng = np.random.default_rng(random_state)
-
-    # ---- local caches on the function object ----
-    if not hasattr(get_completeness_function_2d, "_filter_cache"):
-        get_completeness_function_2d._filter_cache = {}
-    if not hasattr(get_completeness_function_2d, "_J_cache"):
-        get_completeness_function_2d._J_cache = {}
-
-    # ---------- helpers ----------
-    def _load_filter_two_col(path):
-        cache = get_completeness_function_2d._filter_cache
-        if path in cache:
-            return cache[path]
-        try:
-            arr = np.loadtxt(path, dtype=float)
-            arr = np.atleast_2d(arr)
-            lam = arr[:, 0].astype(float)
-            S = arr[:, 1].astype(float)
-            # unit sniff: nm -> Å
-            if np.nanmedian(lam) < 1000.0:
-                lam = lam * 10.0
-            m = np.isfinite(lam) & np.isfinite(S) & (S > 0)
-            lam, S = lam[m], S[m]
-            if lam.size < 5:
-                cache[path] = (None, None)
-            else:
-                idx = np.argsort(lam)
-                lam, S = lam[idx], S[idx]
-                cache[path] = (lam, S)
-        except Exception:
-            cache[path] = (None, None)
-        return cache[path]
-
-    def _precompute_J_grid(lam, S, lambda0_rest, alpha_grid):
-        # cache key
-        key = (id(lam), id(S), float(lambda0_rest), float(alpha_grid[0]), float(alpha_grid[-1]), len(alpha_grid))
-        cache = get_completeness_function_2d._J_cache
-        if key in cache:
-            return cache[key]
-        x = np.log(lam)
-        I0 = np.trapz(S, x)
-        # J(alpha) = I1/I0 with I1 = ∫ S * lam^{-alpha} dlnλ
-        I1_grid = np.array([np.trapz(S * lam**(-a), x) for a in alpha_grid])
-        J_grid = I1_grid / I0
-        cache[key] = (alpha_grid.copy(), J_grid)
-        return cache[key]
-
-    def _delta_m_from_filter_vec(alpha_nu, z_bin, lam, S, alpha_grid, J_grid):
-        # vectorized over alpha_nu
-        lam_target = lambda0_rest * (1.0 + z_bin)
-        J = np.interp(alpha_nu, alpha_grid, J_grid, left=J_grid[0], right=J_grid[-1])
-        # Δm = -2.5 * [ log10(J) + α * log10(λ_target) ]
-        return -2.5 * (np.log10(J) + alpha_nu * np.log10(lam_target))
-
-    def _delta_m_fallback(alpha_nu, z_bin):
-        lam_target = lambda0_rest * (1.0 + z_bin)
-        return -2.5 * alpha_nu * np.log10(lambda_i_eff_fallback / lam_target)
-
-    def _logistic(m, a, b):  # p = 1 / (1 + exp(-(a + b*m)))
-        return 1.0 / (1.0 + np.exp(-(a + b*m)))
-
-    # ---------- choose alpha_lambda datasets ----------
-    if 'alpha_lambda' in df_agn.columns and np.isfinite(df_agn['alpha_lambda']).any():
-        alpha_lambda_global = float(np.nanmedian(df_agn['alpha_lambda'].values))
-    else:
-        alpha_lambda_global = -1.5  # corresponds to <f_nu> slope ~ -0.5
-    z_obs_full = df_agn['z'].values
-    alpha_lambda_full = (
-        df_agn['alpha_lambda'].values
-        if 'alpha_lambda' in df_agn.columns else
-        np.full_like(z_obs_full, alpha_lambda_global, dtype=float)
-    )
-
-    # ---------- load SDSS-i filter & precompute J(alpha) ----------
-    lam_i, S_i = _load_filter_two_col(sdss_i_filter_path)
-    use_filter = lam_i is not None and S_i is not None
-    if use_filter:
-        alpha_grid = np.linspace(-3.0, 0.0, 121)  # covers typical AGN α_ν
-        alpha_grid, J_grid = _precompute_J_grid(lam_i, S_i, lambda0_rest, alpha_grid)
-
-    # ---------- read observed sample (already m_2500) ----------
-    mags_obs = df_agn['apparent_mag_2500'].values
-    z_obs = df_agn['z'].values
-    w_obs = None
-    if obs_weights is not None:
-        w_obs = np.asarray(obs_weights, dtype=float)
-        if w_obs.shape != mags_obs.shape:
-            raise ValueError("obs_weights must have same length as df_agn.")
-
-    # ---------- load simulated (true) sample and convert m_i -> m_2500 ----------
-    mags_true_list, z_true_list, w_true_list = [], [], []
-    with h5py.File(sim_file, "r") as f:
-        for name in f["redshift_bin"]:
-            ds = f["redshift_bin"][name]
-            m_i = ds[()]                    # simulated apparent mags from M_i
-            z_bin = float(ds.attrs["redshift"])
-
-            # alpha_lambda neighborhood
-            mask = np.isfinite(z_obs_full) & np.isfinite(alpha_lambda_full) & (np.abs(z_obs_full - z_bin) <= alpha_window)
-            alphas = alpha_lambda_full[mask]
-            if alphas.size == 0:
-                alphas = np.array([alpha_lambda_global], dtype=float)
-
-            # Monte Carlo over alpha_lambda if requested
-            if n_alpha_mc and n_alpha_mc > 0:
-                # sample with replacement from empirical α_λ
-                idx = rng.integers(0, alphas.size, size=min(n_alpha_mc, alphas.size))
-                alpha_nu_s = -(alphas[idx] + 2.0)
-                if use_filter:
-                    delta_m_s = _delta_m_from_filter_vec(alpha_nu_s, z_bin, lam_i, S_i, alpha_grid, J_grid)
-                else:
-                    delta_m_s = _delta_m_fallback(alpha_nu_s, z_bin)
-                # broadcast m_i over MC, then average histograms later
-                m_2500_mc = m_i[:, None] + delta_m_s[None, :]
-                # optional Eddington bias jitter on sim
-                if sim_mag_err is not None:
-                    if callable(sim_mag_err):
-                        sigma_m = float(sim_mag_err(z_bin))
-                    else:
-                        sigma_m = float(sim_mag_err)
-                    if sigma_m > 0:
-                        m_2500_mc = m_2500_mc + rng.normal(0.0, sigma_m, size=m_2500_mc.shape)
-                # stash as (flattened) with equal weights 1/n_alpha_mc
-                mags_true_list.append(m_2500_mc.reshape(-1))
-                z_true_list.append(np.full(m_2500_mc.size, z_bin, dtype=float))
-                w_true_list.append(np.full(m_2500_mc.size, 1.0 / float(m_2500_mc.shape[1]), dtype=float))
-            else:
-                # single median α_λ
-                alpha_lambda_bin = float(np.nanmedian(alphas))
-                alpha_nu_bin = -(alpha_lambda_bin + 2.0)
-                if use_filter:
-                    delta_m = _delta_m_from_filter_vec(np.array([alpha_nu_bin]), z_bin, lam_i, S_i, alpha_grid, J_grid)[0]
-                else:
-                    delta_m = _delta_m_fallback(alpha_nu_bin, z_bin)
-                m_2500 = m_i + delta_m
-                if sim_mag_err is not None:
-                    if callable(sim_mag_err):
-                        sigma_m = float(sim_mag_err(z_bin))
-                    else:
-                        sigma_m = float(sim_mag_err)
-                    if sigma_m > 0:
-                        m_2500 = m_2500 + rng.normal(0.0, sigma_m, size=m_2500.shape)
-                mags_true_list.append(m_2500)
-                z_true_list.append(np.full_like(m_i, z_bin, dtype=float))
-                w_true_list.append(None)
-
-            # optional per-sim weights via callback
-            if sim_weights_provider is not None:
-                w_sim = sim_weights_provider(z_bin, m_i)
-                if w_true_list[-1] is None:
-                    w_true_list[-1] = np.asarray(w_sim, dtype=float)
-                else:
-                    # MC case: replicate weights across MC samples & scale by 1/n_alpha_mc
-                    w_sim = np.asarray(w_sim, dtype=float)
-                    if w_sim.shape != m_i.shape:
-                        raise ValueError("sim_weights_provider must return weights matching m_i length.")
-                    fac = mags_true_list[-1].size // m_i.size
-                    w_true_list[-1] = np.repeat(w_sim / fac, fac)
-
-    mags_true = np.concatenate(mags_true_list)
-    z_true = np.concatenate(z_true_list)
-    w_true = None
-    if any(w is not None for w in w_true_list):
-        # if some were None, replace by 1
-        w_true = np.concatenate([
-            (np.ones_like(m) if w is None else w)
-            for m, w in zip(mags_true_list, w_true_list)
-        ])
-
-    # ---------- clean NaNs/Infs ----------
-    mt = np.isfinite(mags_true) & np.isfinite(z_true)
-    mags_true, z_true = mags_true[mt], z_true[mt]
-    if w_true is not None:
-        w_true = w_true[mt]
-
-    mo = np.isfinite(mags_obs) & np.isfinite(z_obs)
-    mags_obs, z_obs = mags_obs[mo], z_obs[mo]
-    if w_obs is not None:
-        w_obs = w_obs[mo]
-
-    # ---------- binning ----------
-    # z-range from sim ensures coverage
-    z_min, z_max = float(np.min(z_true)), float(np.max(z_true))
-    if z_max - z_min < 1e-3:
-        z_min -= 0.01; z_max += 0.01
-
-    if use_quantile_z:
-        # adaptive z-bins by quantiles of z_true (weights ignored here)
-        q = np.linspace(0, 1, n_z_bins + 1)
-        z_edges = np.quantile(z_true, q)
-        z_edges = np.unique(z_edges)
-        if z_edges.size < 3:  # fallback if degenerate
-            z_edges = np.linspace(z_min, z_max, n_z_bins + 1)
-    else:
-        z_edges = np.linspace(z_min, z_max, n_z_bins + 1)
-
-    mag_edges = np.linspace(mag_min, mag_max, n_mag_bins + 1)
-    mag_centers = 0.5 * (mag_edges[:-1] + mag_edges[1:])
-    z_centers   = 0.5 * (z_edges[:-1]   + z_edges[1:])
-    dm = (mag_edges[1:] - mag_edges[:-1]).mean()
-    dz = (z_edges[1:]   - z_edges[:-1]).mean() if len(z_edges) > 1 else (z_max - z_min)
-
-    # ---------- histograms ----------
-    hist_true, _, _ = np.histogram2d(mags_true, z_true, bins=[mag_edges, z_edges], weights=w_true)
-    hist_obs,  _, _ = np.histogram2d(mags_obs,  z_obs,  bins=[mag_edges, z_edges], weights=w_obs)
-
-    # ---------- Jeffreys Binomial-Beta posterior ----------
-    # interpret weights as counts approximation; for strict binomial, use integers.
-    # We'll still form a stable estimator:
-    alpha0, beta0 = 0.5, 0.5
-    k = hist_obs
-    n = hist_true
-    post_mean = (k + alpha0) / (n + alpha0 + beta0)
-    # CI (68%) — only where n>0, else NaN
-    with np.errstate(invalid='ignore'):
-        lo = _beta.ppf(0.16, k + alpha0, (n - k) + beta0)
-        hi = _beta.ppf(0.84, k + alpha0, (n - k) + beta0)
-
-    # ---------- optional logistic fallback in sparse z-slices ----------
-    if enable_logistic_fallback:
-        for j in range(len(z_centers)):
-            n_slice = n[:, j]
-            p_slice = post_mean[:, j]
-            valid = np.isfinite(p_slice) & (n_slice > 0)
-            if (valid.sum() < fallback_min_valid_bins) or (n_slice.sum() < fallback_min_total_counts):
-                # Fit logistic p = 1/(1+exp(-(a + b*m))); expect b<0 (p decreases with fainter mags)
-                mgrid = mag_centers[valid]
-                y = np.clip(p_slice[valid], 1e-3, 1-1e-3)
-                w = n_slice[valid]
-                if mgrid.size >= 3:
-                    try:
-                        p0 = [np.log(y.mean()/(1-y.mean())), -1.0]  # init: a, b<0
-                        bounds = ([-np.inf, -np.inf], [np.inf, 0.0])  # b <= 0
-                        popt, _ = curve_fit(_logistic, mgrid, y, p0=p0, sigma=1/np.sqrt(np.maximum(w,1e-6)),
-                                            absolute_sigma=False, bounds=bounds, maxfev=10000)
-                        # fill the whole slice with the fitted curve
-                        post_mean[:, j] = _logistic(mag_centers, *popt)
-                    except Exception:
-                        # if fit fails, enforce monotone smoothing by cumulative min from bright to faint
-                        pm = p_slice.copy()
-                        for i in range(1, len(pm)):
-                            pm[i] = min(pm[i], pm[i-1])
-                        post_mean[:, j] = pm
-
-    # ---------- smoothing in physical units (after building posterior) ----------
-    sigma_pix = (max(sigma_mag / max(dm, 1e-9), 1e-9), max(sigma_z / max(dz, 1e-9), 1e-9))
-    post_mean = np.nan_to_num(post_mean, nan=0.0, posinf=0.0, neginf=0.0)
-    post_mean = gaussian_filter(post_mean, sigma=sigma_pix, mode='nearest')
-    post_mean = np.clip(post_mean, 0.0, 1.0)
-
-    # ---------- optional normalization to max 1 (usually unnecessary now) ----------
-    if normalize and np.nanmax(post_mean) > 0:
-        post_mean /= np.nanmax(post_mean)
-
-    # ---------- interpolator ----------
-    interp = RGI((mag_centers, z_centers), post_mean, bounds_error=False, fill_value=0.0)
-
-    # ---------- plotting ----------
-    if plot:
-        import matplotlib.pyplot as plt
-        plt.imshow(post_mean.T, origin='lower', aspect='auto',
-                   extent=[mag_edges[0], mag_edges[-1], z_edges[0], z_edges[-1]])
-        plt.xlabel(r'$m_{2500}$ (AB)')
-        plt.ylabel('Redshift $z$')
-        plt.title('Completeness Map (Jeffreys-smoothed)')
-        cbar = plt.colorbar(label='p(detect | $m_{2500}$, $z$)')
-        # 50% contour
-        try:
-            cs = plt.contour(mag_centers, z_centers, post_mean.T, levels=[0.5], colors='k', linewidths=1.0)
-            cs.collections[0].set_label('50% contour')
-        except Exception:
-            pass
-        plt.gca().invert_xaxis()  # bright -> faint to the left
-        plt.tight_layout()
-        plt.show()
-
-    # ---------- pack and return (drop-in signature) ----------
-    # Build the object, then attach extras if possible
-    comp = Completeness2D(mag_centers, z_centers, post_mean)
-    # Attach helpful attrs when the object allows it
-    try:
-        comp.interp = interp
-        comp.k = k
-        comp.n = n
-        comp.lo = lo
-        comp.hi = hi
-    except Exception:
-        pass
-
-    return comp, mag_centers, z_centers, dm, dz
 
 
 def soft_clip(x, floor=1e-5, sharpness=5):
