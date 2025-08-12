@@ -59,7 +59,7 @@ def build_model(models, batch_data, f_host_shen11=True, latent=False, bwb=True, 
 
     # --- Precompute log_jitter prior means ---
     log_jitter_mean = jnp.stack([
-        jnp.array(jnp.full(nBands, 1e-6) + jnp.mean(jnp.array(obj['yerr'])))
+        jnp.array(jnp.full(nBands, 1e-6) + jnp.log(jnp.mean(jnp.array(obj['yerr']))))
         for obj in batch_data
     ])  # shape (B, nBands)
 
