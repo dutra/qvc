@@ -310,6 +310,7 @@ if __name__ == '__main__':
     parser.add_argument("--f_host_shen11", action="store_true", help="Use host flux empirical relation from Shen et al. 2011.")
     parser.add_argument("--load_sample_file", action="store_true", help="Load samples from previously ran job.")
     parser.add_argument("--disable_poly1", action="store_true", help="Disable Mean function detrending.")
+    parser.add_argument("--jax_trace", action="store_true", help="Enable jax tracing.")
 
 
     args = parser.parse_args()
@@ -422,6 +423,7 @@ if __name__ == '__main__':
 
     numpyro_joint_model = build_model(padded_batch_data, zs, f_host_value, lam_rfs, log_jitter_mean, args.f_host_shen11, args.latent, args.bwb, args.disable_poly1, args.d_eta)
 
+
     nuts_kernel = NUTS(numpyro_joint_model, init_strategy=init_strategy, dense_mass=True, max_tree_depth=args.max_tree_depth)
     mcmc = MCMC(
         nuts_kernel,
@@ -435,12 +437,33 @@ if __name__ == '__main__':
     if args.load_sample_file:
         logging.warning(f"Loading samples from saved file")
         samples_flat = load_all_samples_from_hdf5()
-    else:
-        mcmc.run(jax.random.PRNGKey(0))
+    else: # run MCMC sampler
+        if args.jax_trace:
+            from jax.profiler import StepTraceAnnotation, start_trace, stop_trace
+            # 1) Tiny compile pass OFF-trace (same chain_method/nchains to match shapes)
+            compile_mcmc = MCMC(
+                NUTS(numpyro_joint_model, init_strategy=init_strategy,
+                    dense_mass=True, max_tree_depth=args.max_tree_depth),
+                num_warmup=5,
+                num_samples=1,
+                num_chains=1,
+                progress_bar=False,
+                chain_method="vectorized",
+            )
+            compile_mcmc.run(jax.random.PRNGKey(0))  # triggers JIT compile
+
+            # 2) Real run ON-trace
+            trace_dir = getattr(args, "jax_trace_dir", "./jax_tb")
+            start_trace(trace_dir)
+            with StepTraceAnnotation("MCMC_run"):
+                mcmc.run(jax.random.PRNGKey(1))
+            stop_trace()
+        else:
+            # Plain run, no tracing
+            mcmc.run(jax.random.PRNGKey(0))
         samples_flat = mcmc.get_samples(group_by_chain=False)
         save_all_samples_to_hdf5(samples_flat)
-        diagnostics = mcmc.get_extra_fields()
-
+    
     #ns = NestedSampler(numpyro_joint_model)
     #ns.run(jax.random.PRNGKey(0), Model, batch_data)
     #samples_flat = ns.get_samples(jax.random.PRNGKey(0), num_samples=1000)
