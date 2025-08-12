@@ -89,8 +89,8 @@ class MyMultibandContiBLR(tinygp.kernels.Kernel):
         )
 
         # BWB
-        q1 = self.s_b[b1] * amplitudes_b1
-        q2 = self.s_b[b2] * amplitudes_b2
+        q1 = self.s_b[b1] * amplitudes_b1**2
+        q2 = self.s_b[b2] * amplitudes_b2**2
         cov_ac = cov_ac + 2.0 * q1 * q2 * k_ac * k_ac
 
         return cov_ac + cov_ad + cov_bc + cov_bd
