@@ -14,7 +14,7 @@ import numpyro.distributions as dist
 from tinygp import kernels
 
 import warnings
-warnings.filterwarnings("ignore", category=RuntimeWarning)
+#warnings.filterwarnings("ignore", category=RuntimeWarning)
 
 import logging
 
@@ -42,6 +42,9 @@ def build_model(batch_data, zs, f_host_value, lam_rfs, log_jitter_mean, f_host_s
     # when running MCMC, as these values do not change between runs.
     batch_size = len(batch_data)
     nBands = 5  # or use from config
+
+    log_tau_drw0_c = jnp.log(10**2.5 * (1 + zs))
+    log_lab_blr_c = jnp.log(10**2.0 * (1 + zs))
 
     def numpyro_joint_model():
         # Initialize parameters
@@ -75,8 +78,8 @@ def build_model(batch_data, zs, f_host_value, lam_rfs, log_jitter_mean, f_host_s
                 eta_tau2 = numpyro.deterministic("eta_tau2", jnp.full(batch_size, eta_tau2_mean))
 
             # Core kernel parameters
-            log_tau_drw0 = numpyro.sample("log_tau_drw0", dist.Normal(6.0, 1.0))
-            log_sigma0 = numpyro.sample("log_sigma0", dist.Normal(-0.2, 1.0))
+            log_tau_drw0 = numpyro.sample("log_tau_drw0", dist.Normal(log_tau_drw0_c, 1.0))
+            log_sigma0 = numpyro.sample("log_sigma0", dist.Normal(-1.0, 1.0))
             log_sigma_hat0 = numpyro.deterministic("log_sigma_hat0", log_sigma0 - 0.5 * log_tau_drw0)
 
             # Host galaxy dilution
@@ -109,7 +112,7 @@ def build_model(batch_data, zs, f_host_value, lam_rfs, log_jitter_mean, f_host_s
 
                 # BLR amplitudes and lags
                 log_amp_delta_blr = numpyro.sample("log_amp_delta_blr", dist.Normal(jnp.full(nBands, -1.0), 2.0))
-                log_lag_blr = numpyro.sample("log_lag_blr", dist.Normal(jnp.full(nBands, jnp.log(1e2)), 1.0))
+                log_lag_blr = numpyro.sample("log_lag_blr", dist.Normal(log_lab_blr_c[..., None], 1.0))
                 #log_lag_blr = numpyro.deterministic("log_lag_blr", jnp.zeros_like(mean))
 
                 # Jitter
