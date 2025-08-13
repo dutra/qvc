@@ -19,7 +19,7 @@ __pycache__/
 *.yaml
 *.dat
 *.vot
-
+jax_tb*
 # C extensions
 *.so
 
