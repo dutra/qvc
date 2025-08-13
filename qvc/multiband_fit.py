@@ -116,7 +116,7 @@ def build_model(batch_data, zs, f_host_value, lam_rfs, log_jitter_mean, f_host_s
                 mean = numpyro.sample("mean", dist.Normal(jnp.full(nBands, 0.0), 0.2))
 
                 # BLR amplitudes and lags
-                log_amp_delta_blr = numpyro.sample("log_amp_delta_blr", dist.Normal(jnp.full(nBands, -1.0), 2.0))
+                log_amp_delta_blr = numpyro.sample("log_amp_delta_blr", dist.Normal(jnp.full(nBands, -1.0), 1.0))
                 log_lag_blr = numpyro.sample("log_lag_blr", dist.Normal(log_lab_blr_c[..., None], 1.0))
                 #log_lag_blr = numpyro.deterministic("log_lag_blr", jnp.zeros_like(mean))
 
