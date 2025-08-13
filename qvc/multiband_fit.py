@@ -34,7 +34,7 @@ zero_mean = False
 has_jitter = True
 has_lag = True
 
-universal_params = ['eta_A1_mean', 'eta_A2_mean', 'eta_tau1_mean', 'eta_tau2_mean', 'eta_break', 'lam_s', 'sigma_eta_A1', 'sigma_eta_A2', 'sigma_eta_tau1', 'sigma_eta_tau2']
+universal_params = ['eta_A1_mean', 'eta_A2_mean', 'eta_tau1_mean', 'eta_tau2_mean', 'eta_break', 'lam_s', 'sigma_eta_A1', 'sigma_eta_A2', 'sigma_eta_tau1', 'sigma_eta_tau2', 'log_sigma_eta_A1', 'log_sigma_eta_A2', 'log_sigma_eta_tau1', 'log_sigma_eta_tau2']
 
 def build_model(batch_data, zs, f_host_value, lam_rfs, log_jitter_mean, f_host_shen11=True, latent=False, bwb=True, disable_poly1=False, d_eta=True):
     # Precompute and capture constants in the closure so they are treated as
