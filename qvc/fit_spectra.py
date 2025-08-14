@@ -373,7 +373,7 @@ def main():
     with Pool(processes=args.nproc) as pool:
         with tqdm(total=len(records), desc="Processing objects", dynamic_ncols=True, smoothing=0.0) as pbar:
             for res in pool.imap_unordered(worker, records, chunksize=chunksize):
-                obj_id = res.pop("object_id", None)
+                obj_id = res.get("object_id", None)
                 if obj_id is not None:
                     results_dict[obj_id] = res
                 pbar.update(1)
