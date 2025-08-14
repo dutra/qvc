@@ -371,7 +371,7 @@ if __name__ == '__main__':
         obj |= result
         # Run bestP for each object
         n_bands = len(obj['clean_bands'])
-        lam_rf = np.zeros(n_bands)
+        lam_rf = np.full(5, 2500.0)
         lam_rf[:len(obj['clean_bands'])] = np.array([lambda_pivot[band] for band in obj['clean_bands']]) / (1 + obj['z'])
         lam_rf = jnp.array(lam_rf)
 

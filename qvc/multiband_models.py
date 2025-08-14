@@ -28,6 +28,130 @@ from multiband_fit_utils import *
 from multiband_fit_plotting import *
 from multiband_generate_lc import *
 
+import jax
+import jax.numpy as jnp
+from typing import Sequence
+import tinygp
+from tinygp.kernels import quasisep as qs
+from tinygp.solvers.quasisep.core import SymmQSM  # (only if you want to inspect QSMs)
+
+class ContiBLRQS(qs.Wrapper):
+    """
+    Quasi-separable implementation of:
+        cov = A_b1 A_b2 k(τ)
+            + A_b1 A_blr_b2 k(τ - Δ_b2)
+            + A_blr_b1 A_b2 k(τ + Δ_b1)
+            + A_blr_b1 A_blr_b2 k(τ - (Δ_b2 - Δ_b1))
+            + 2 q_b1 q_b2 [k(τ)]^2,
+    with q_b = s_b[b] * (A_b)^2.
+
+    Parameters
+    ----------
+    tau_cont : float
+        DRW/OU timescale for the latent continuum.
+    amp_cont : array [B]
+        Per-band continuum amplitudes.
+    amp_blr : array [B]
+        Per-band BLR amplitudes.
+    lag_b : array [B]
+        Per-band BLR lags (days, same units as times).
+    alphas : array [K]
+        Decay rates for the exponential basis (1/time units).
+        Choose them to span the plausible lag range.
+    """
+
+    tau_drw: float
+    amp_cont: jnp.ndarray
+    amp_blr: jnp.ndarray
+    lag_blr: jnp.ndarray
+    s_b: jnp.ndarray
+
+    def __init__(self, amp_cont, amp_blr, lag_blr, tau_drw, s_b) -> None:
+        self.amp_cont = amp_cont
+        self.amp_blr = amp_blr
+        self.lag_blr = lag_blr
+        self.tau_drw = tau_drw
+        self.s_b = s_b
+        self.kernel = qs.Exp(scale=self.tau_drw, sigma=1.0)
+
+    def coord_to_sortable(self, X) -> JAXArray:
+        return X[0]
+
+    # ---- Helper: base matrices (block 0) ----
+    def _A0(self):
+        return self.kernel.design_matrix()
+
+    def _P0(self):
+        return self.kernel.stationary_covariance()
+
+    def _Phi0(self, dt):
+        return self.kernel.transition_matrix(0.0, dt)  # QS kernels ignore absolute times
+
+    # ---- Helper: k^2 kernel (block 1) ----
+    def _ensure_kernel_sq(self):
+        return qs.Exp(scale=self.tau_drw / 2.0)
+
+    def _A1(self):
+        return self._ensure_kernel_sq().design_matrix()
+
+    def _P1(self):
+        return self._ensure_kernel_sq().stationary_covariance()
+
+    def _Phi1(self, dt):
+        return self._ensure_kernel_sq().transition_matrix(0.0, dt)
+
+    def design_matrix(self) -> JAXArray:
+        # Block-diagonal of base and k^2 generators
+        A0 = self._A0()
+        A1 = self._A1()
+        z0 = jnp.zeros((A0.shape[0], A1.shape[1]))
+        z1 = jnp.zeros((A1.shape[0], A0.shape[1]))
+        return jnp.block([[A0, z0],
+                          [z1, A1]])
+
+    def stationary_covariance(self) -> JAXArray:
+        P0 = self._P0()
+        P1 = self._P1()
+        z01 = jnp.zeros((P0.shape[0], P1.shape[1]))
+        z10 = jnp.zeros((P1.shape[0], P0.shape[1]))
+        return jnp.block([[P0, z01],
+                          [z10, P1]])
+
+    def transition_matrix(self, X1: JAXArray, X2: JAXArray) -> JAXArray:
+        t1, _ = X1
+        t2, _ = X2
+        dt = t2 - t1
+        Phi0 = self._Phi0(dt)
+        Phi1 = self._Phi1(dt)
+        z01 = jnp.zeros((Phi0.shape[0], Phi1.shape[1]))
+        z10 = jnp.zeros((Phi1.shape[0], Phi0.shape[1]))
+        return jnp.block([[Phi0, z01],
+                          [z10, Phi1]])
+
+    def observation_model(self, X: JAXArray) -> JAXArray:
+        """
+        Return a single observation vector h_tot for the *augmented* state:
+            h_tot = [ h_base_total ,
+                      h_bwb        ].
+        """
+        t, b = X
+        b = jnp.asarray(b, dtype=int)
+
+        # Base kernel observation vector and delayed version
+        h = self.kernel.observation_model(t)                 # shape [m]
+        Phi_delay_T = self._Phi0(self.lag_blr[b]).T          # apply delay on the left
+        h_cont = self.amp_cont[b] * h
+        h_blr  = self.amp_blr[b] * (Phi_delay_T @ h)
+        h_base_total = h_cont + h_blr                        # yields the 4-term sum
+
+        # BWB component on k^2 with weight sqrt(2)*q_b where q_b = s_b * A_b^2
+        q_b = self.s_b[b] * (self.amp_cont[b] ** 2)
+        h_sq = self._ensure_kernel_sq().observation_model(t) # shape [m2]
+        h_bwb = jnp.sqrt(2.0) * q_b * h_sq                   # gives 2 q1 q2 k^2 in cov
+
+        # Concatenate into augmented-state observation
+        return jnp.concatenate([h_base_total, h_bwb], axis=0)
+
 class MyMultibandContiBLR(tinygp.kernels.Kernel):
     amplitudes: jnp.ndarray
     amplitudes_blr: jnp.ndarray
@@ -165,12 +289,20 @@ class MyMultiVarModel(MultiVarModel):
         # BWB
         s_b = params["bwb_alpha"] + params["bwb_beta"] * jnp.log(self.lam_rf / 2500.0)  # shape (n_band,)
 
-        kernel = MyMultibandContiBLR(
-            amplitudes=jnp.exp(log_sigma_band),
-            taus=jnp.exp(log_tau_band),
-            amplitudes_blr=jnp.exp(log_sigma_band_blr),
+        #kernel = MyMultibandContiBLR(
+        #    amplitudes=jnp.exp(log_sigma_band),
+        #    taus=jnp.exp(log_tau_band),
+        #    amplitudes_blr=jnp.exp(log_sigma_band_blr),
+        #    lag_blr=jnp.exp(params["log_lag_blr"]),
+        #    log_w=0,
+        #    s_b=s_b
+        #)
+
+        kernel = ContiBLRQS(
+            amp_cont=jnp.exp(log_sigma_band),
+            amp_blr=jnp.exp(log_sigma_band_blr),
+            tau_drw=jnp.exp(log_tau_band),
             lag_blr=jnp.exp(params["log_lag_blr"]),
-            log_w=0,
             s_b=s_b
         )
 
