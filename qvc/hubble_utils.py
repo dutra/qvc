@@ -124,11 +124,29 @@ def compute_apparent_mag_2500_colin(df):
     #colin_df = pd.read_csv("data/july19_goodsources_chisq5and10_mean1_N20w4000s500_merged_magscorrected_fittedm2500.csv")
     
     #colin_df = pd.read_csv("data/aug4_sample_chisqg10_ebv005sn3_magsmean_fittedm2500.csv")
-    #colin_df = pd.read_csv("data/aug8_stone_merged_fittedm2500.csv")
-    colin_df = pd.read_csv('data/aug10_stone_merged_fittedm2500.csv')
+    #colin_df = pd.read_csv("data/csv/aug10_stone_merged_fittedm2500.csv")
+    colin_df = pd.read_csv(
+        #'data/csv/aug11_sample_fittedm2500.csv',
+        'data/csv/aug11_sample_chisqg10_ebv005sn3_fittedm2500.csv',
+        dtype={'object_id': str},
+        converters={
+            'f_host_4200': float,
+            'apparent_mag_2500': float,
+            'apparent_mag_2500_err': float,
+            'alpha_lambda': float,
+            'redchi': float
+        }
+    )
+    # Discard rows with apparent_mag_2500_err <= 0
+    colin_df = colin_df[colin_df['apparent_mag_2500_err'] > 0].reset_index(drop=True)
+    
+    # Fill apparent_mag_2500_err == 0 with mean of nonzero errors
+    # mean_err = colin_df.loc[colin_df['apparent_mag_2500_err'] > 0, 'apparent_mag_2500_err'].mean()
+    # colin_df.loc[colin_df['apparent_mag_2500_err'] == 0, 'apparent_mag_2500_err'] = mean_err
 
-    # Ensure SDSS_NAME is string for matching
-    colin_df['object_id'] = colin_df['object_id'].astype(str)
+
+
+
     print("Length of colin_df:", len(colin_df))
     print("Number with apparent_mag_2500 > 0:", np.sum(colin_df['apparent_mag_2500'] > 0))
     df['sdss_name'] = df['sdss_name'].astype(str)
@@ -158,8 +176,8 @@ def compute_apparent_mag_2500(df, logL_col='MY_LOGL2500', logL_err_col='MY_LOGL2
     m_ab = -2.5 * log_fnu - 48.60
     m_ab_err = 2.5 * logL_2500_err
 
-    df['apparent_mag_2500_old'] = m_ab
-    df['apparent_mag_2500_old_err'] = m_ab_err
+    df['apparent_mag_2500'] = m_ab
+    df['apparent_mag_2500_err'] = m_ab_err
     return df
 
 
@@ -401,10 +419,10 @@ def populate_sdss_fields(objs, progress_bar=True):
         else:
             d['log_lbol'] = fits_data['LOGLBOL'][i]  # Extract log Lbol values
             d["log_lbol_err"] = fits_data['LOGLBOL_ERR'][i]  # Extract log Lbol error values
-        d['log_mbh'] = fits_data['LOGMBH'][i]  # Extract log MBH values
-        d['log_mbh_err'] = fits_data['LOGMBH_ERR'][i]  # Extract log MBH error values
-        d['log_ledd_ratio'] = fits_data['LOGLEDD_RATIO'][i]  # Extract log L/edd values
-        d['log_ledd_ratio_err'] = fits_data['LOGLEDD_RATIO_ERR'][i]  # Extract log L/edd error values
+        d['LOGMBH'] = fits_data['LOGMBH'][i]  # Extract log MBH values
+        d['LOGMBH_ERR'] = fits_data['LOGMBH_ERR'][i]  # Extract log MBH error values
+        d['LOGLEDD_RATIO'] = fits_data['LOGLEDD_RATIO'][i]  # Extract log L/edd values
+        d['LOGLEDD_RATIO_ERR'] = fits_data['LOGLEDD_RATIO_ERR'][i]  # Extract log L/edd error values
         d['ebv'] = fits_data['EBV'][i]
         d['sn_median_all'] = fits_data['SN_MEDIAN_ALL'][i]
         d['M_i'] = fits_data_2['M_I'][i]
@@ -440,8 +458,6 @@ def populate_sdss_fields(objs, progress_bar=True):
         d['fhost'] = fits_data['FHOST_5100'][i]
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
-            d['log_lbol'] = fits_data['LOGLBOL'][i]
-            d['log_lbol_err'] = fits_data['LOGLBOL_ERR'][i]
             for b in ['u', 'g', 'r', 'i', 'z']:
                 d[f'apparent_mag_{b}'] = -2.5 * np.log10(fits_data_2['PSFFLUX'][i, filters[b]]) + 22.5
                 d[f'apparent_mag_{b}_err'] = 2.5/np.log(10) * np.sqrt(1/fits_data_2['PSFFLUX_IVAR'][i, filters[b]])/fits_data_2['PSFFLUX'][i, filters[b]]
@@ -462,9 +478,10 @@ def populate_sdss_fields(objs, progress_bar=True):
             # else:
             #     d['color_err'] = np.nan
         if any(issubclass(warning.category, RuntimeWarning) for warning in w):
-            print(f"RuntimeWarning occurred for z={d['z']:.2f} {d['sdss_name']} log_lbol={d['log_lbol']:.2f}")
-            print(fits_data_2['PSFFLUX'][i,:])
-            print(w)
+            pass
+            # print(f"RuntimeWarning occurred for z={d['z']:.2f} {d['sdss_name']} log_lbol={d['log_lbol']:.2f}")
+            # print(fits_data_2['PSFFLUX'][i,:])
+            # print(w)
 
     return objs
 
@@ -587,7 +604,9 @@ def load_quasar_data(file_path, populate_sdss=False, apply_cut=True):
     #df['MY_LOGL2500'], df['MY_LOGL2500_ERR'] = compute_MY_LOGL2500(df)
     
 
-    #df = compute_apparent_mag_2500(df, logL_col='LOGL2500', logL_err_col='LOGL2500_ERR')
+    # df = compute_apparent_mag_2500(df, logL_col='LOGL2500', logL_err_col='LOGL2500_ERR')
+    # df['alpha_lambda'] = -1.5
+    # df['redchi'] = 1.0
     df = compute_apparent_mag_2500_colin(df)
 
     num_quasars_z_0_1_before = len(df[(df['z'] > 0) & (df['z'] <= 1.0)])
@@ -611,16 +630,32 @@ def load_quasar_data(file_path, populate_sdss=False, apply_cut=True):
     
     df = df.reset_index(drop=True)
 
-    df = df[
-        #(df['z'] > 1) &
-        (df['f_host'] < 0.6) &
-        (df['alpha_lambda'] < 0) &
-        (df['redchi'] < 10) &
-        (df['apparent_mag_2500'].between(1, 40)) #& #
-        
-        #(df['z'] < 3.2) &
-        #(df['ebv'] < 0.05) # 0 &
+    # Define cuts as (column, lower_limit, upper_limit)
+    cuts = [
+        #('f_host', None, 0.6),
+        ('alpha_lambda', None, 0),
+        ('redchi', None, 10),
+        ('apparent_mag_2500', 1, 40),
+        # Uncomment/add more cuts as needed
+        # ('z', 1, None),
+        # ('z', None, 3.2),
+        # ('ebv', None, 0.05),
     ]
+
+    initial_count = len(df)
+    mask = np.ones(len(df), dtype=bool)
+    for col, lower, upper in cuts:
+        col_mask = np.ones(len(df), dtype=bool)
+        if lower is not None:
+            col_mask &= df[col] >= lower
+        if upper is not None:
+            col_mask &= df[col] < upper
+        cut_count = np.sum(~col_mask)
+        print(f"Cut on {col}: {cut_count} objects removed")
+        mask &= col_mask
+
+    df = df[mask]
+    print(f"Total objects removed by all cuts: {initial_count - len(df)}")
 
     df = df.reset_index(drop=True)
     

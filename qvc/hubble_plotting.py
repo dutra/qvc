@@ -422,7 +422,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_agn_pivot, sho
         apparent_mag - (K_corr(df_agn['z'].values, df_agn['alpha_nu'].values) - K_corr(2, df_agn['alpha_nu'].values)) -
             (M_model_agn(
                 s[param_indices['M0_agn']], 
-                        s[param_indices['beta_agn']],
+                        s[param_indices['alpha_agn']],
                         s[param_indices['beta_agn']],
                         df_agn['log_sigma0'].values, df_agn['log_tau_UV_RF'].values,
                         df_agn['f_host'].values
@@ -535,7 +535,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_agn_pivot, sho
 
     ax.set_ylabel(r"$\mu$ (mag)")
     ax.set_xlabel(r"$z$")
-    ax.set_xlim(-0.2, 5.2)
+    ax.set_xlim(-0.2, 4.2)
     ax.set_ylim(26, 51)
     ax.legend(frameon=False, loc="lower center", bbox_to_anchor=(0.3, 0.05), fontsize=16)
 
@@ -551,7 +551,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_agn_pivot, sho
     plt.savefig(f"plots/hubble/hubble_diagram_{cosmo_model}.png")
     # ax.set_yscale('log')
     ax.set_ylim(26, 51)
-    ax.set_xlim(-0.2, 5.2)
+    ax.set_xlim(-0.2, 4.2)
     # plt.savefig(f"plots/hubble/hubble_diagram_{cosmo_model}_ylog.png")
 
     if show:
@@ -1044,11 +1044,8 @@ def plot_predicted_L2500_vs_sigmahat(flat_samples, df_agn, cosmo_model, z_agn_pi
         for s in flat_samples:
             sample_params = {
                 'M0_agn': s[param_indices['M0_agn']],
-                'log_sigma0_break': s[param_indices['log_sigma0_break']],
-                'eta_A1': s[param_indices['eta_A1_agn']],
-                'eta_A2': s[param_indices['eta_A2_agn']],
-                'eta_break': s[param_indices['eta_break_agn']],
-                'beta': s[param_indices['beta_agn']],
+                'alpha_agn': s[param_indices['alpha_agn']],
+                'beta_agn': s[param_indices['beta_agn']],
             }
 
             predicted_M2500 = M_model_agn(
