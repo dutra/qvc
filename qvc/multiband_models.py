@@ -287,16 +287,8 @@ class MyMultiVarModel(MultiVarModel):
             diags = self.diag[inds]
 
         # BWB
-        s_b = params["bwb_alpha"] + params["bwb_beta"] * jnp.log(self.lam_rf / 2500.0)  # shape (n_band,)
-
-        #kernel = MyMultibandContiBLR(
-        #    amplitudes=jnp.exp(log_sigma_band),
-        #    taus=jnp.exp(log_tau_band),
-        #    amplitudes_blr=jnp.exp(log_sigma_band_blr),
-        #    lag_blr=jnp.exp(params["log_lag_blr"]),
-        #    log_w=0,
-        #    s_b=s_b
-        #)
+        x_bwb = jnp.log10(self.lam_rf / 2500.0)
+        s_b = params["bwb_alpha"] + params["bwb_beta"] * x_bwb  # shape (n_band,)
 
         kernel = ContiBLRQS(
             amp_cont=jnp.exp(log_sigma_band),

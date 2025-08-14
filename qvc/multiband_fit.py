@@ -83,8 +83,8 @@ def build_model(batch_data, zs, f_host_value, lam_rfs, log_jitter_mean, f_host_s
                 eta_tau2 = numpyro.deterministic("eta_tau2", jnp.full(batch_size, eta_tau2_mean))
 
             # Core kernel parameters
-            log_tau_drw0 = numpyro.sample("log_tau_drw0", dist.Normal(log_tau_drw0_c, 1.0))
-            log_sigma0 = numpyro.sample("log_sigma0", dist.Normal(-1.0, 1.0))
+            log_tau_drw0 = numpyro.sample("log_tau_drw0", dist.Normal(log_tau_drw0_c, 2.0))
+            log_sigma0 = numpyro.sample("log_sigma0", dist.Normal(-0.8, 1.0))
             log_sigma_hat0 = numpyro.deterministic("log_sigma_hat0", log_sigma0 - 0.5 * log_tau_drw0)
 
             # Host galaxy dilution
@@ -103,8 +103,8 @@ def build_model(batch_data, zs, f_host_value, lam_rfs, log_jitter_mean, f_host_s
 
             # Bluer when brighter (BWB) strength
             if bwb:
-                bwb_alpha = numpyro.sample("bwb_alpha", dist.Normal(0.2, 0.1))
-                bwb_beta = numpyro.sample("bwb_beta", dist.TruncatedNormal(0.2, 0.1, low=0))
+                bwb_alpha = numpyro.sample("bwb_alpha", dist.Normal(0.2, 0.2))
+                bwb_beta = numpyro.sample("bwb_beta", dist.TruncatedNormal(0.2, 0.4, low=0))
             else:
                 bwb_alpha = numpyro.deterministic("bwb_alpha", jnp.zeros(batch_size))
                 bwb_beta = numpyro.deterministic("bwb_beta", jnp.zeros(batch_size))
@@ -439,7 +439,7 @@ if __name__ == '__main__':
         num_samples=args.nsamp,
         num_chains=nchains,
         progress_bar=args.progress,
-        chain_method="vectorized",
+        chain_method="parallel",
     )
 
     if args.load_sample_file:
