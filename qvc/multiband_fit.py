@@ -51,16 +51,16 @@ def build_model(batch_data, zs, f_host_value, lam_rfs, log_jitter_mean, f_host_s
         # Global "universal" means for eta
         eta_A1_mean = numpyro.sample("eta_A1_mean", dist.TruncatedNormal(-0.5, 0.5, high=0.0))
         eta_A2_mean = numpyro.sample("eta_A2_mean", dist.TruncatedNormal(-0.5, 0.5, high=0.0))
-        eta_tau1_mean = numpyro.sample("eta_tau1_mean", dist.TruncatedNormal(0.0, 0.5, low=-0.1))
+        eta_tau1_mean = numpyro.sample("eta_tau1_mean", dist.TruncatedNormal(0.0, 0.5))
         eta_tau2_mean = numpyro.sample("eta_tau2_mean", dist.TruncatedNormal(0.2, 0.5, low=0.0))
         eta_break = numpyro.deterministic("eta_break", 0.1)
         lam_s = numpyro.deterministic("lam_s", 2500.0)
 
         # Population-level scatter (how much objects can deviate) 
-        log_sigma_eta_A1 = numpyro.sample("log_sigma_eta_A1", dist.Normal(jnp.log(0.1), 0.2))
-        log_sigma_eta_A2 = numpyro.sample("log_sigma_eta_A2", dist.Normal(jnp.log(0.1), 0.2))
-        log_sigma_eta_tau1 = numpyro.sample("log_sigma_eta_tau1", dist.Normal(jnp.log(0.1), 0.2))
-        log_sigma_eta_tau2 = numpyro.sample("log_sigma_eta_tau2", dist.Normal(jnp.log(0.1), 0.2))
+        log_sigma_eta_A1 = numpyro.sample("log_sigma_eta_A1", dist.Normal(jnp.log(1.0), 0.2))
+        log_sigma_eta_A2 = numpyro.sample("log_sigma_eta_A2", dist.Normal(jnp.log(1.0), 0.2))
+        log_sigma_eta_tau1 = numpyro.sample("log_sigma_eta_tau1", dist.Normal(jnp.log(1.0), 0.2))
+        log_sigma_eta_tau2 = numpyro.sample("log_sigma_eta_tau2", dist.Normal(jnp.log(1.0), 0.2))
 
         sigma_eta_A1 = numpyro.deterministic("sigma_eta_A1", jnp.exp(log_sigma_eta_A1))
         sigma_eta_A2 = numpyro.deterministic("sigma_eta_A2", jnp.exp(log_sigma_eta_A2))
