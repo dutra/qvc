@@ -14,6 +14,7 @@ from dynesty.utils import resample_equal
 import pickle
 import multiprocessing
 from scipy.linalg import cho_solve
+from dynesty import utils as dyfunc
 
 import matplotlib.pyplot as plt
 
@@ -31,7 +32,33 @@ _pantheon_data = None
 
 _sna_LogdetCov, _sna_L, _sna_Lower = None, None, None
 
-z_agn_pivot = 1.7
+z_agn_pivot = 1.2
+
+def completeness_loglike(m_model, mu_err, z, completeness2d, m_grid, tiny=1e-300):
+    """
+    m_model : array (N_obj,) model-predicted apparent magnitudes
+    mu_err  : array (N_obj,) Gaussian sigma for each magnitude
+    z       : array (N_obj,) redshifts
+    m_grid  : array (N_grid,) magnitude grid (e.g., the map's mag_centers)
+    """
+    m_grid = np.asarray(m_grid)
+    z      = np.asarray(z)
+    m_model = np.asarray(m_model)
+    mu_err  = np.asarray(mu_err)
+
+    # Gaussian *pdf* over the real line, evaluated on m_grid
+    # Do NOT renormalize row-wise over m_grid.
+    sigma = np.maximum(mu_err, 1e-9)  # avoid zero-sigma
+    pdf = stats.norm.pdf(m_grid[None, :], loc=m_model[:, None], scale=sigma[:, None])
+
+    # p_detect(m, z)
+    p_det = completeness2d(m_grid[None, :], z[:, None])  # shape (N_obj, N_grid)
+
+    # ∫ pdf(m) * p_det(m, z) dm  (outside-grid p_det=0 by construction)
+    integrals = np.trapz(pdf * p_det, m_grid, axis=1)
+    integrals = np.clip(integrals, tiny, 1.0)            # numerical guard
+
+    return np.sum(np.log(integrals)), integrals
 
 # --- Log-likelihood ---
 def log_likelihood(theta, cosmo_model,
@@ -126,33 +153,42 @@ def log_likelihood(theta, cosmo_model,
     m_model = M_pred + mu_cosmo  # model-predicted magnitude
 
     ll_completeness = 0.0
-    # selection bias correction during inference
     if completeness_params is not None:
-        completeness2d, mag_centers, _, dm, _ = completeness_params
+        completeness2d, mag_centers, _, _, _ = completeness_params
+        ll_completeness, integrals = completeness_loglike(
+            m_model=m_model, mu_err=mu_err, z=z,
+            completeness2d=completeness2d, m_grid=mag_centers
+        )
 
-        m_grid = mag_centers
-        N_obj = len(z)
 
-        # Shape: (N_obj, N_grid)
-        m_grid_broadcasted = np.tile(m_grid, (N_obj, 1))
-        z_broadcasted = np.tile(z[:, None], (1, len(m_grid)))
+    # ll_completeness = 0.0
+    # # selection bias correction during inference
+    # if completeness_params is not None:
+    #     completeness2d, mag_centers, _, dm, _ = completeness_params
 
-        # Gaussian weights: P(m | model)
-        gauss_weights = stats.norm.pdf(m_grid_broadcasted, loc=m_model[:, None], scale=mu_err[:, None])
-        gauss_weights /= np.trapezoid(gauss_weights, m_grid, axis=1)[:, None] + 1e-12
+    #     m_grid = mag_centers
+    #     N_obj = len(z)
 
-        # Evaluate p(detect | m, z)
-        p_detect = completeness2d(m_grid_broadcasted, z_broadcasted)
-        p_detect = soft_clip(p_detect, floor=1e-12, sharpness=10)
+    #     # Shape: (N_obj, N_grid)
+    #     m_grid_broadcasted = np.tile(m_grid, (N_obj, 1))
+    #     z_broadcasted = np.tile(z[:, None], (1, len(m_grid)))
 
-        # Marginalized likelihood: ∫ P(m | model) × p_detect(m, z) dm
-        integrals = np.trapezoid(gauss_weights * p_detect, m_grid, axis=1)
-        integrals = np.maximum(integrals, 1e-12)
+    #     # Gaussian weights: P(m | model)
+    #     gauss_weights = stats.norm.pdf(m_grid_broadcasted, loc=m_model[:, None], scale=mu_err[:, None])
+    #     gauss_weights /= np.trapezoid(gauss_weights, m_grid, axis=1)[:, None] + 1e-12
 
-        ll_completeness = np.sum(np.log(integrals))
+    #     # Evaluate p(detect | m, z)
+    #     p_detect = completeness2d(m_grid_broadcasted, z_broadcasted)
+    #     p_detect = soft_clip(p_detect, floor=1e-12, sharpness=10)
+
+    #     # Marginalized likelihood: ∫ P(m | model) × p_detect(m, z) dm
+    #     integrals = np.trapezoid(gauss_weights * p_detect, m_grid, axis=1)
+    #     integrals = np.maximum(integrals, 1e-12)
+
+    #     ll_completeness = np.sum(np.log(integrals))
 
     # print(f"Log-likelihood components: ll_snia={ll_snia:.2f}, ll_agn={ll_agn:.2f}, ll_completeness={ll_completeness:.2f}")
-    return ll_snia + ll_agn + ll_completeness
+    return ll_snia + ll_agn - ll_completeness, np.log(integrals)
 
 # Globals used by dynesty
 _dynesty_config = {}
@@ -244,11 +280,11 @@ def run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model='Flatw0waCDM',
         if resume:
             sampler = DynamicNestedSampler.restore(f'data/dynesty_{cosmo_model}.save', pool=pool)
         else:
-            print("Testing likelihood and prior transform with random samples...")
-            u = np.random.rand(10, ndim)
-            v = pool.map(prior_transform_dynesty, u)
-            l = pool.map(loglike_dynesty, v)
-            print("Fraction of finite likelihoods:", np.sum(np.isfinite(l)) / len(l))
+            #print("Testing likelihood and prior transform with random samples...")
+            #u = np.random.rand(10, ndim)
+            #v = pool.map(prior_transform_dynesty, u)
+            #l = pool.map(loglike_dynesty, v)
+            #print("Fraction of finite likelihoods:", np.sum(np.isfinite(l)) / len(l))
 
             sampler = DynamicNestedSampler(
                 loglike_dynesty,
@@ -258,7 +294,8 @@ def run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model='Flatw0waCDM',
                 bound='multi',
                 sample='rwalk',
                 pool=pool,
-                queue_size=num_cpus
+                queue_size=num_cpus,
+                blob=True
             )
         sampler.run_nested(
             resume=resume,
@@ -276,23 +313,78 @@ def run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model='Flatw0waCDM',
     if logZerr > 1:
         print("Warning: logZ error is large, consider increasing nlive or maxiter.")
 
-    unweighted_samples, weights = results.samples, np.exp(results.logwt - results.logz[-1])
-    flat_samples = resample_equal(unweighted_samples, weights)
-    median_samples = np.median(flat_samples, axis=0)
-
-    print("Dynesty results stats:")
-    print("  samples shape:", unweighted_samples.shape)
-    print("  weights max:", np.max(weights))
-    print("  effective samples:", np.sum(weights)**2 / np.sum(weights**2))
-    display_results_summary(flat_samples, cosmo_model, z_agn_pivot)
     plot_dynesty(results, cosmo_model)
 
-    params = dict(zip(model_labels, median_samples))
+    # --- pull arrays from results ---
+    samples = results.samples                               # (nsamp, ndim)
+    logl    = results.logl                                  # (nsamp,)
+    weights = np.exp(results.logwt - results.logz[-1])      # (nsamp,)
+    blobs   = results.blob                                 # (nsamp, nobj) if blob=True
 
-    # Save median parameter values to file
-    # Convert all parameter values to plain Python floats before saving
-    with open(f"data/median_params_{cosmo_model}.yaml", "w") as f:
-        yaml.dump( {k: float(v) for k, v in params.items()}, f)
+    # --- safety checks ---
+    if blobs is None:
+        raise RuntimeError("results.blobs is None. Did you run with blob=True and return (logl, blob)?")
+
+    # grab redshifts (assumes your pipeline set _agn_data)
+    try:
+        z = _agn_data['z']
+    except Exception as e:
+        raise RuntimeError("Couldn't find AGN redshifts (_agn_data['z']). Make sure _agn_data is set.") from e
+
+    # ===== Highest posterior weight (MAP-ish) sample =====
+    idx_max_weight = np.argmax(weights)
+    logint_max_w   = blobs[idx_max_weight]  # this is np.log(integrals) for that sample, shape: (nobj,)
+
+    print("\nHighest-weight (posterior) sample:")
+    print("  idx:", idx_max_weight)
+    print("  logl:", float(logl[idx_max_weight]))
+    print("  weight:", float(weights[idx_max_weight]))
+    print("  (preview) log(integrals)[:10]:", logint_max_w[:10])
+
+    # ===== Plot: log(integrals) vs redshift for highest-weight sample =====
+    plt.figure(figsize=(8, 5))
+    plt.scatter(z, np.exp(logint_max_w), s=16, alpha=0.75)
+    plt.xlabel("Redshift (z)")
+    plt.ylabel("integral  (completeness)")
+    plt.title("Completeness integrals vs z — highest posterior weight sample")
+    plt.grid(True)
+    plt.tight_layout()
+    # Optional: save to disk
+    plt.savefig("plots/completeness/log_integrals_vs_z_highest_weight.png", dpi=150)
+    #plt.show()
+
+    # ===== (Optional) keep your equal-weight resampling utilities =====
+    idx = np.arange(weights.size)
+    flat_idx = dyfunc.resample_equal(idx, weights)          # (nsamp,)
+    flat_samples = samples[flat_idx]
+    flat_blobs   = blobs[flat_idx]
+
+    # Posterior summaries over resampled blobs (per-object)
+    posterior_mean_logint = np.mean(flat_blobs, axis=0)
+    posterior_med_logint  = np.median(flat_blobs, axis=0)
+
+    print("\nPosterior (equal-weight) blob summaries:")
+    print("  per-object mean (first 10):", posterior_mean_logint[:10])
+    print("  per-object median (first 10):", posterior_med_logint[:10])
+
+    # Stats
+    neff = (weights.sum()**2) / (weights**2).sum()
+    print("\nDynesty results stats:")
+    print("  samples shape:", samples.shape)
+    print("  blobs shape:", blobs.shape)
+    print("  weights max:", float(weights.max()))
+    print("  effective samples (ESS):", float(neff))
+    print("  resampled samples shape:", flat_samples.shape)
+    print("  resampled blobs shape:", flat_blobs.shape)
+
+    # Optional: median params from equal-weight posterior
+    median_samples = np.median(flat_samples, axis=0)
+    print("\nMedian parameters (equal-weight posterior):")
+    print(median_samples)
+
+    # If you want to keep your existing summary:
+    display_results_summary(flat_samples, cosmo_model, z_agn_pivot)
+
 
     #completeness_params = get_completeness_function_2d(df_agn_filtered)
     #mag_corr = apply_forward_completeness_correction(df_agn_filtered, params, cosmo_model, completeness_params)
@@ -394,8 +486,8 @@ def main():
 
 
 def test():
-    cosmo_model = 'Flatw0waCDM'
-    #cosmo_model = 'FlatwCDM'
+    #cosmo_model = 'Flatw0waCDM'
+    cosmo_model = 'FlatwCDM'
     # cosmo_model = 'FlatLambdaCDM'
     only_sna = False
 
@@ -449,6 +541,9 @@ def test():
     #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("results/aug10_stonebwb_N30w2000s1000t6c4.h5", populate_sdss=False)
 
     df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("results/data/aug12_chisq_qscpu_N20w4000s1000t8c4.h5", populate_sdss=False)
+    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("results/data/aug13_stone_N10w2000s1000t6c4.h5", populate_sdss=False)
+    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("results/data/aug13_stone_qs_cpu_N20w4000s1000t8c4.h5", populate_sdss=False)
+
 
     #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/july19_goodsources_chisq5and10_mean1_N20w4000s500_merged.h5", populate_sdss=True)
     #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/june1_joint_N20w2000s1000_fits_merged.h5")
@@ -487,9 +582,9 @@ def test():
 
     
     print("Plotting completeness vs magnitude at redshifts...")
-    #p_detect, mag_centers, z_centers, dm, dz = get_completeness_function_2d(df_agn)
-    #plot_completeness_vs_mag_at_redshifts(p_detect, mag_centers, z_centers)
-    #plot_completeness_diagnostics(df_agn, p_detect, mag_centers, z_centers)
+    p_detect, mag_centers, z_centers, dm, dz = get_completeness_function_2d(df_agn, plot=True)
+    plot_completeness_vs_mag_at_redshifts(p_detect, mag_centers, z_centers)
+    plot_completeness_diagnostics(df_agn, p_detect, mag_centers, z_centers)
 
     print("Plotting residuals...")
     plot_full_residuals(df_agn, residuals, flat_samples, cosmo_model, z_agn_pivot, show=False)

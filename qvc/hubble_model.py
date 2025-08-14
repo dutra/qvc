@@ -84,7 +84,7 @@ def get_model_params(cosmo_model):
         ("log_f",       (-3, 0.5)),
         ("H0",          (65, 80)),
         #("Om0",         (0.32, 0.324)),
-        ("Om0",         (0.2, 0.5)),
+        ("Om0",         (0.2, 0.7)),
     ])
 
     # Select cosmological parameters based on model

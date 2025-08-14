@@ -126,8 +126,8 @@ def compute_apparent_mag_2500_colin(df):
     #colin_df = pd.read_csv("data/aug4_sample_chisqg10_ebv005sn3_magsmean_fittedm2500.csv")
     #colin_df = pd.read_csv("data/csv/aug10_stone_merged_fittedm2500.csv")
     colin_df = pd.read_csv(
-        #'data/csv/aug11_sample_fittedm2500.csv',
-        'data/csv/aug11_sample_chisqg10_ebv005sn3_fittedm2500.csv',
+        #'data/csv/aug10_stone_merged_fittedm2500.csv',
+        'data/csv/aug14_sample_chisqg10_ebv005sn3_fittedm2500.csv',
         dtype={'object_id': str},
         converters={
             'f_host_4200': float,
@@ -138,11 +138,11 @@ def compute_apparent_mag_2500_colin(df):
         }
     )
     # Discard rows with apparent_mag_2500_err <= 0
-    colin_df = colin_df[colin_df['apparent_mag_2500_err'] > 0].reset_index(drop=True)
+    #colin_df = colin_df[colin_df['apparent_mag_2500_err'] > 0].reset_index(drop=True)
     
     # Fill apparent_mag_2500_err == 0 with mean of nonzero errors
-    # mean_err = colin_df.loc[colin_df['apparent_mag_2500_err'] > 0, 'apparent_mag_2500_err'].mean()
-    # colin_df.loc[colin_df['apparent_mag_2500_err'] == 0, 'apparent_mag_2500_err'] = mean_err
+    mean_err = colin_df.loc[colin_df['apparent_mag_2500_err'] > 0, 'apparent_mag_2500_err'].mean()
+    colin_df.loc[colin_df['apparent_mag_2500_err'] == 0, 'apparent_mag_2500_err'] = mean_err
 
 
 
@@ -636,6 +636,7 @@ def load_quasar_data(file_path, populate_sdss=False, apply_cut=True):
         ('alpha_lambda', None, 0),
         ('redchi', None, 10),
         ('apparent_mag_2500', 1, 40),
+        ('apparent_mag_i', 15, 25)
         # Uncomment/add more cuts as needed
         # ('z', 1, None),
         # ('z', None, 3.2),
@@ -754,8 +755,185 @@ def get_completeness_function_simple(mag_lim, center=20):
 #         pts = np.column_stack([np.ravel(mag), np.ravel(z)])
 #         vals = self.interp_fn(pts)
 #         return vals.reshape(np.shape(mag))
-    
+
 class Completeness2D:
+    """
+    Interpolates p(detect | m, z) on a (mag, z) grid.
+    - Outside the grid, returns 0 (via RegularGridInterpolator fill_value=0).
+    """
+    def __init__(self, mag_centers, z_centers, completeness_map):
+        self.mag_centers = np.asarray(mag_centers)
+        self.z_centers   = np.asarray(z_centers)
+
+        # Ensure finite in [0,1]
+        C = np.nan_to_num(completeness_map, nan=0.0, posinf=0.0, neginf=0.0)
+        C = np.clip(C, 0.0, 1.0).astype(float)
+
+        self.mag_min, self.mag_max = float(self.mag_centers[0]),  float(self.mag_centers[-1])
+        self.z_min,   self.z_max   = float(self.z_centers[0]),    float(self.z_centers[-1])
+
+        # No clipping before interpolation; rely on fill_value=0 for out-of-bounds
+        self._interp = RegularGridInterpolator(
+            (self.mag_centers, self.z_centers),
+            C,
+            bounds_error=False,
+            fill_value=0.0,
+        )
+
+    def __call__(self, mag, z):
+        mag = np.asarray(mag)
+        z   = np.asarray(z)
+        m_b, z_b = np.broadcast_arrays(mag, z)
+        pts = np.column_stack([m_b.ravel(), z_b.ravel()])
+        vals = self._interp(pts)
+        return vals.reshape(m_b.shape)
+
+    @property
+    def grid(self):
+        return dict(mag_centers=self.mag_centers, z_centers=self.z_centers)
+    
+# def K_corr(z, alpha_nu=-0.5):
+#     """K-correction for magnitude (assuming f_ν ~ ν^{alpha_nu})."""
+#     return -2.5 * (1 + alpha_nu) * np.log10(1 + z)
+
+def get_completeness_function_2d(
+    df_agn,
+    sim_file="data/sampled_apparent_magnitudes_redshift_vol.h5",
+    n_mag_bins=20, n_z_bins=30,
+    mag_min=15, mag_max=24,
+    sigma_mag=1.0, sigma_z=0.7,
+    smooth_counts=True,
+    plot=False,
+):
+    """
+    Build p(detect | m, z) from a simulated 'true' set and an observed set.
+
+    Key changes:
+      • Smooth counts, not the ratio.
+      • No normalization by max; result already in [0,1].
+      • Use fill_value=0 outside grid (no pre-clipping).
+    """
+    # --- Load simulated (true) sample
+    mags_true_list, z_true_list = [], []
+    with h5py.File(sim_file, "r") as f:
+        for name in f["redshift_bin"]:
+            ds = f["redshift_bin"][name]
+            mags = ds[()]
+            z_bin = ds.attrs["redshift"]
+            mags_true_list.append(mags)
+            z_true_list.append(np.full_like(mags, z_bin, dtype=float))
+
+    y = df_agn['apparent_mag_2500'].values
+    x = df_agn['apparent_mag_i'].values
+
+    # Fit line
+    x_pivot = np.mean(x)
+    print(f"Pivot point for x: {x_pivot}")
+    slope, intercept = np.polyfit(x-x_pivot, y, 1)
+    y_fit = slope * (x-x_pivot) + intercept
+
+    z_true    = np.concatenate(z_true_list)
+
+    mags_true_i = np.concatenate(mags_true_list)
+    calculated_mags_true_2500 = (mags_true_i-x_pivot)*slope + intercept
+
+    mags_true = calculated_mags_true_2500
+    
+    
+    # --- Observed sample
+    mags_obs = np.asarray(df_agn["apparent_mag_2500"].values)
+
+    #mags_obs = calculated_mag_i
+    z_obs    = np.asarray(df_agn["z"].values)
+
+
+    if plot:
+        from matplotlib import pyplot as plt
+        # Observed
+        plt.figure(figsize=(8, 6))
+        plt.scatter(x, y, alpha=0.7, label='Data')
+        plt.plot(x, y_fit, color='red', label=f'Best fit: y={slope:.2f}x+{intercept:.2f}')
+        plt.xlabel('apparent_mag_i')
+        plt.ylabel('apparent_mag_2500')
+        #plt.title('apparent_mag_i vs apparent_mag_2500')
+        plt.grid(True)
+        plt.legend()
+        plt.savefig("plots/completeness/mag2500_vs_magi_fit.png", dpi=200)
+        plt.close()
+
+        # True from sample
+        # plt.figure(figsize=(8, 6))
+        # plt.scatter(mags_true_i, calculated_mags_true_2500, alpha=0.7, label='True')
+        # plt.plot(x, y_fit, color='red', label=f'Best fit: y={slope:.2f}x+{intercept:.2f}')
+        # plt.xlabel('apparent_mag_i')
+        # plt.ylabel('apparent_mag_2500')
+        # #plt.title('apparent_mag_i vs apparent_mag_2500')
+        # plt.grid(True)
+        # plt.legend()
+        # plt.savefig("plots/completeness/mag2500_vs_magi_fit.png", dpi=200)
+        # plt.close()
+
+    
+    # --- Clean NaNs/Infs
+    mask_true = np.isfinite(mags_true) & np.isfinite(z_true)
+    mags_true, z_true = mags_true[mask_true], z_true[mask_true]
+
+    mask_obs = np.isfinite(mags_obs) & np.isfinite(z_obs)
+    mags_obs, z_obs = mags_obs[mask_obs], z_obs[mask_obs]
+
+    # --- Bin edges and centers
+    z_min, z_max = float(np.min(z_true)), float(np.max(z_true))
+    if z_max - z_min < 1e-3:
+        z_min -= 0.01
+        z_max += 0.01
+
+    mag_edges = np.linspace(mag_min, mag_max, n_mag_bins + 1)
+    z_edges   = np.linspace(z_min,  z_max,  n_z_bins   + 1)
+    mag_centers = 0.5 * (mag_edges[:-1] + mag_edges[1:])
+    z_centers   = 0.5 * (z_edges[:-1]   + z_edges[1:])
+
+    # --- 2D histograms
+    H_true, _, _ = np.histogram2d(mags_true, z_true, bins=[mag_edges, z_edges])
+    H_obs,  _, _ = np.histogram2d(mags_obs,  z_obs,  bins=[mag_edges, z_edges])
+
+    # --- Smooth COUNTS (not the ratio)
+    if smooth_counts:
+        # 'constant' with cval=0 avoids propagating edge values outward
+        H_true_s = gaussian_filter(H_true, sigma=(sigma_mag, sigma_z), mode="constant", cval=0.0)
+        H_obs_s  = gaussian_filter(H_obs,  sigma=(sigma_mag, sigma_z), mode="constant", cval=0.0)
+    else:
+        H_true_s, H_obs_s = H_true, H_obs
+
+    # --- Completeness ratio with small epsilon
+    eps = 1e-12
+    C = H_obs_s / (H_true_s + eps)
+    C[H_true_s < eps] = 0.0                     # no true support -> undefined -> 0
+    C = np.clip(C, 0.0, 1.0)
+
+    # --- Optional diagnostic plot
+    if plot:
+        import matplotlib.pyplot as plt
+        plt.imshow(
+            C.T, origin="lower", aspect="auto",
+            extent=[mag_edges[0], mag_edges[-1], z_edges[0], z_edges[-1]]
+        )
+        plt.xlabel("Apparent Magnitude")
+        plt.ylabel("Redshift")
+        plt.title("Completeness Map p(detect | m, z)")
+        cbar = plt.colorbar()
+        cbar.set_label("p(detect)")
+        plt.tight_layout()
+        plt.savefig("plots/completeness/completeness_map.png", dpi=200)
+        #plt.show()
+
+    # bin widths (uniform by construction)
+    dm = float(mag_centers[1] - mag_centers[0]) if len(mag_centers) > 1 else float(mag_edges[-1] - mag_edges[0])
+    dz = float(z_centers[1] - z_centers[0])     if len(z_centers)   > 1 else float(z_edges[-1] - z_edges[0])
+
+    return Completeness2D(mag_centers, z_centers, C), mag_centers, z_centers, dm, dz
+
+
+class Completeness2D__:
     def __init__(self, mag_centers, z_centers, completeness_map):
         self.mag_centers = mag_centers
         self.z_centers = z_centers
@@ -792,7 +970,7 @@ class Completeness2D:
         return self.interp_fn.values
 
 
-def get_completeness_function_2d(df_agn,
+def get_completeness_function_2d__(df_agn,
                                  sim_file="data/sampled_apparent_magnitudes_redshift_vol.h5",
                                  n_mag_bins=20, n_z_bins=30,
                                  mag_min=15, mag_max=24,
@@ -801,6 +979,7 @@ def get_completeness_function_2d(df_agn,
                                  plot=False):
     # --- Load simulated (true) sample
     mags_true_list, z_true_list = [], []
+
     with h5py.File(sim_file, "r") as f:
         for name in f["redshift_bin"]:
             ds = f["redshift_bin"][name]
@@ -809,11 +988,39 @@ def get_completeness_function_2d(df_agn,
             mags_true_list.append(mags)
             z_true_list.append(np.full_like(mags, z_bin, dtype=float))
 
+
+
     mags_true = np.concatenate(mags_true_list)
     z_true = np.concatenate(z_true_list)
 
     # --- Load observed sample
-    mags_obs = df_agn['apparent_mag_2500'].values
+
+    # x = df_agn['apparent_mag_2500']
+    # y = df_agn['apparent_mag_i']
+
+    # # Fit line
+    # x_pivot = np.mean(x)
+    # print(f"Pivot point for x: {x_pivot}")
+    # slope, intercept = np.polyfit(x-x_pivot, y, 1)
+    # y_fit = slope * (x-x_pivot) + intercept
+
+    # mag_2500 = df_agn['apparent_mag_2500'].values
+    # mag_i = (mag_2500-x_pivot)*slope + intercept
+
+    # if plot:
+    #     plt.figure(figsize=(8, 6))
+    #     plt.scatter(x, y, alpha=0.7, label='Data')
+    #     plt.plot(x, y_fit, color='red', label=f'Best fit: y={slope:.2f}x+{intercept:.2f}')
+    #     plt.xlabel('apparent_mag_2500')
+    #     plt.ylabel('apparent_mag_i')
+    #     plt.title('apparent_mag_2500 vs apparent_mag_i')
+    #     plt.grid(True)
+    #     plt.legend()
+    #     plt.savefig("plots/hubble/mag2500_vs_magi_fit.png", dpi=200)
+    #     plt.close()
+
+
+    mags_obs = df_agn['apparent_mag_2500']
     z_obs = df_agn['z'].values
 
     # --- Clean NaNs/Infs
