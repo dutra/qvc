@@ -1,3 +1,19 @@
+import os
+
+env_cores = os.environ.get("NUM_CORES")
+
+if env_cores is not None:
+        try:
+            num_cores = int(env_cores)
+            print(f"CPU Num Cores: {num_cores}")
+            os.environ["XLA_FLAGS"] = f"--xla_force_host_platform_device_count={num_cores}"
+            os.environ["JAX_PLATFORM_NAME"] = "cpu"
+        except ValueError:
+            print(f"Invalid NUM_CORES value '{env_cores}', ignoring.")
+else:
+    print("NUM_CORES not set, leaving defaults.")
+
+
 import jax
 jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
@@ -7,6 +23,13 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 import numpyro
+
+if env_cores is not None:
+    num_cores = int(env_cores)
+    numpyro.set_host_device_count(num_cores)  # Tell NumPyro how many to use
+
+numpyro.enable_x64()
+
 from numpyro import infer
 from numpyro.infer import MCMC, NUTS
 import numpyro.distributions as dist
