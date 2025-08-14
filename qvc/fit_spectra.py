@@ -250,11 +250,27 @@ def run_qsofit_record(rec, cache_dir="data/spectra_cache", path_ex="."):
             kwargs_conti_emcee={},
             kwargs_line_emcee={}
         )
-        conti_dict = {name: (float(val) if not isinstance(val, str) else np.nan)
-                      for name, val in zip(q_mle.conti_result_name, q_mle.conti_result)}
+        def _safe_float(x):
+            try:
+                # unwrap numpy scalars/arrays/masked values
+                x = np.asarray(x).squeeze()
+                if isinstance(x, (bytes, bytearray)):
+                    x = x.decode("ascii", "ignore")
+                return float(x)
+            except Exception:
+                return np.nan
+
+        conti_dict = {
+            name: _safe_float(val)
+            for name, val in zip(q_mle.conti_result_name, q_mle.conti_result)
+        }
         conti_dict['z'] = rec["z"]
 
-        m_2500, m_2500_err = compute_apparent_mag_2500_astropy(conti_dict)
+        L_ok = np.isfinite(conti_dict.get('L2500', np.nan)) and np.isfinite(conti_dict.get('L2500_err', np.nan))
+        if L_ok:
+            m_2500, m_2500_err = compute_apparent_mag_2500_astropy(conti_dict)
+        else:
+            m_2500, m_2500_err = -1e9, -1e9
 
         result.update(
             apparent_mag_2500=m_2500,
@@ -279,13 +295,13 @@ def parse_args():
                    help="Path to DR16Q FITS catalog.")
     p.add_argument("--cache-dir", default="data/spectra_cache",
                    help="Directory for cached spectra FITS.")
-    p.add_argument("--max-sep", type=float, default=2.0,
+    p.add_argument("--max-sep", type=float, default=1.0,
                    help="Max match separation in arcsec.")
     p.add_argument("--limit", type=int, default=None,
                    help="Optional limit on number of rows from input CSV to consider before matching.")
     p.add_argument("--download", action="store_true",
                    help="If set, download (and cache) all matched spectra and exit.")
-    p.add_argument("--out-csv", default="data/csv/aug11_sample_fittedm2500.csv",
+    p.add_argument("--out-csv", default="data/csv/aug11_sample_chisqg10_ebv005sn3_fittedm2500.csv",
                    help="Output CSV for QSOFit results.")
     p.add_argument("--nproc", type=int, default=max(1, (os.cpu_count() or 2) - 1),
                help="Number of parallel worker processes for QSOFit.")
@@ -346,11 +362,8 @@ def main():
 
     # Build a quick lookup of original order from the input CSV
     input_df = pd.read_csv(args.input_csv)
-    original_order = list(input_df["object_id"].astype(str))
-
-    # Attach object_id to each record for reassembly
-    for rec in records:
-        rec["__object_id__"] = str(rec["object_id"])
+    #original_order = list(input_df["object_id"].astype(str))
+    original_order = list(sample_df_matched["object_id"].astype(str))
 
     worker = partial(run_qsofit_record, cache_dir=args.cache_dir, path_ex=".")
 
@@ -360,15 +373,18 @@ def main():
     with Pool(processes=args.nproc) as pool:
         with tqdm(total=len(records), desc="Processing objects", dynamic_ncols=True, smoothing=0.0) as pbar:
             for res in pool.imap_unordered(worker, records, chunksize=chunksize):
-                obj_id = res.pop("__object_id__", None)
+                obj_id = res.pop("object_id", None)
                 if obj_id is not None:
                     results_dict[obj_id] = res
                 pbar.update(1)
 
-    # Reassemble results in the same order as input_csv
-    ordered_results = [results_dict.get(oid, {}) for oid in original_order]
+    print(f"Collected {len(results_dict)} results out of {len(records)} records")
 
-    pd.DataFrame(ordered_results).to_csv(args.out_csv, index=False)
+    # Reassemble results in the same order as input_csv, removing blank results
+    ordered_results = [results_dict.get(oid, {}) for oid in original_order]
+    filtered_results = [res for res in ordered_results if res]  # remove blank dicts
+
+    pd.DataFrame(filtered_results).to_csv(args.out_csv, index=False)
     print(f"[OK] Saved results to {args.out_csv}")
 if __name__ == "__main__":
     main()
