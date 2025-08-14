@@ -1044,11 +1044,8 @@ def plot_predicted_L2500_vs_sigmahat(flat_samples, df_agn, cosmo_model, z_agn_pi
         for s in flat_samples:
             sample_params = {
                 'M0_agn': s[param_indices['M0_agn']],
-                'log_sigma0_break': s[param_indices['log_sigma0_break']],
-                'eta_A1': s[param_indices['eta_A1_agn']],
-                'eta_A2': s[param_indices['eta_A2_agn']],
-                'eta_break': s[param_indices['eta_break_agn']],
-                'beta': s[param_indices['beta_agn']],
+                'alpha_agn': s[param_indices['alpha_agn']],
+                'beta_agn': s[param_indices['beta_agn']],
             }
 
             predicted_M2500 = M_model_agn(

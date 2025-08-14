@@ -123,21 +123,32 @@ def compute_apparent_mag_2500_colin(df):
     #colin_df = pd.read_csv("data/sdss_qso_mag_2500_colin.csv")
     #colin_df = pd.read_csv("data/july19_goodsources_chisq5and10_mean1_N20w4000s500_merged_magscorrected_fittedm2500.csv")
     
-    #colin_df = pd.read_csv("data/aug4_sample_chisqg10_ebv005sn3_magsmean_fittedm2500.csv")
+    #colin_df = pd.read_csv("data/csv/aug4_sample_chisqg10_ebv005sn3_magsmean_fittedm2500.csv")
     #colin_df = pd.read_csv("data/aug8_stone_merged_fittedm2500.csv")
-    colin_df = pd.read_csv('data/aug10_stone_merged_fittedm2500.csv')
+    #colin_df = pd.read_csv('data/aug10_stone_merged_fittedm2500.csv')
+    #colin_df = pd.read_csv('data/csv/aug11_sample_chisqg10_ebv005sn3_magsmean_fittedm2500.csv')
+    fields = ['f_host_4200', 'apparent_mag_2500', 'apparent_mag_2500_err', 'alpha_lambda', 'redchi']
+    with open('data/csv/aug11_sample_fittedm2500.csv') as f:
+        for i, line in enumerate(f):
+            if line.count(',') != 7:  # Your file should have 8 columns → 7 commas
+                print(f"Bad line {i + 1}: {line.strip()}")
+    colin_df = pd.read_csv(
+        'data/csv/aug11_sample_fittedm2500.csv',
+        dtype={'object_id': str, 'sdss_name': str}    
+        )
+    # Ensure all fields except object_id are float
+    for field in fields:
+        colin_df[field] = colin_df[field].astype(float)
 
-    # Ensure SDSS_NAME is string for matching
-    colin_df['object_id'] = colin_df['object_id'].astype(str)
+
     print("Length of colin_df:", len(colin_df))
     print("Number with apparent_mag_2500 > 0:", np.sum(colin_df['apparent_mag_2500'] > 0))
-    df['sdss_name'] = df['sdss_name'].astype(str)
     # Merge on SDSS_NAME, bring in apparent_mag_2500
     merged = df.merge(colin_df, on='object_id', how='left', suffixes=('', '_colin'))
     print("Length of merged DataFrame:", len(merged))
     missing_ids = set(df['object_id']) - set(colin_df['object_id'])
     print("object_id not in merged:", list(missing_ids))
-    for col in ['f_host_4200', 'apparent_mag_2500', 'apparent_mag_2500_err', 'alpha_lambda', 'redchi']:
+    for col in fields:
         df[col] = merged[col]
     return df
 
@@ -401,10 +412,11 @@ def populate_sdss_fields(objs, progress_bar=True):
         else:
             d['log_lbol'] = fits_data['LOGLBOL'][i]  # Extract log Lbol values
             d["log_lbol_err"] = fits_data['LOGLBOL_ERR'][i]  # Extract log Lbol error values
-        d['log_mbh'] = fits_data['LOGMBH'][i]  # Extract log MBH values
-        d['log_mbh_err'] = fits_data['LOGMBH_ERR'][i]  # Extract log MBH error values
-        d['log_ledd_ratio'] = fits_data['LOGLEDD_RATIO'][i]  # Extract log L/edd values
-        d['log_ledd_ratio_err'] = fits_data['LOGLEDD_RATIO_ERR'][i]  # Extract log L/edd error values
+        d['LOGLBOL'] = d['log_lbol']
+        d['LOGMBH'] = fits_data['LOGMBH'][i]  # Extract log MBH values
+        d['LOGMBH_ERR'] = fits_data['LOGMBH_ERR'][i]  # Extract log MBH error values
+        d['LOGLEDD_RATIO'] = fits_data['LOGLEDD_RATIO'][i]  # Extract log L/edd values
+        d['LOGLEDD_RATIO_ERR'] = fits_data['LOGLEDD_RATIO_ERR'][i]  # Extract log L/edd error values
         d['ebv'] = fits_data['EBV'][i]
         d['sn_median_all'] = fits_data['SN_MEDIAN_ALL'][i]
         d['M_i'] = fits_data_2['M_I'][i]
@@ -611,16 +623,25 @@ def load_quasar_data(file_path, populate_sdss=False, apply_cut=True):
     
     df = df.reset_index(drop=True)
 
-    df = df[
-        #(df['z'] > 1) &
-        (df['f_host'] < 0.6) &
-        (df['alpha_lambda'] < 0) &
-        (df['redchi'] < 10) &
-        (df['apparent_mag_2500'].between(1, 40)) #& #
-        
-        #(df['z'] < 3.2) &
-        #(df['ebv'] < 0.05) # 0 &
+    # Define cuts as a list of (key, lower, upper) tuples
+    print(df['alpha_lambda'].values)
+    cuts = [
+        ('alpha_lambda', None, 0),
+        ('redchi', None, 10),
+        ('apparent_mag_2500', 1, 40),
+        # Add more cuts here as needed, e.g. ('z', 1, None), ('f_host', None, 0.6)
     ]
+
+    for key, lower, upper in cuts:
+        before = len(df)
+        mask = pd.Series([True] * len(df), index=df.index)
+        if lower is not None:
+            mask &= df[key] >= lower
+        if upper is not None:
+            mask &= df[key] < upper
+        df = df[mask]
+        after = len(df)
+        print(f"Cut on {key}: {before - after} objects removed (remaining: {after})")
 
     df = df.reset_index(drop=True)
     

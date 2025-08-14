@@ -17,11 +17,19 @@ from astropy.cosmology import FlatLambdaCDM
 import astropy.units as u
 
 from astroquery.sdss import SDSS
-warnings.filterwarnings("ignore")
-
+#warnings.filterwarnings("ignore")
 
 
 # --------------------------- Utility ---------------------------------
+def _safe_float(x):
+    try:
+        # unwrap numpy scalars/arrays/masked values
+        x = np.asarray(x).squeeze()
+        if isinstance(x, (bytes, bytearray)):
+            x = x.decode("ascii", "ignore")
+        return float(x)
+    except Exception:
+        return np.nan
 def compute_apparent_mag_2500_astropy(conti_table, logL_col='L2500', logL_err_col='L2500_err',
                                       z_col='z', H0=70, Om0=0.3):
     cosmo = FlatLambdaCDM(H0=H0, Om0=Om0)
@@ -138,6 +146,7 @@ def run_qsofit_record(rec, cache_dir="data/spectra_cache", path_ex="."):
 
     # default result (so we always return a complete row even on error)
     result = dict(
+        __object_id__=rec.get("__object_id__", rec.get("object_id")),
         object_id=rec["object_id"],
         sdss_name=rec["sdss_name"],
         apparent_mag_2500=-1e9,
@@ -250,12 +259,16 @@ def run_qsofit_record(rec, cache_dir="data/spectra_cache", path_ex="."):
             kwargs_conti_emcee={},
             kwargs_line_emcee={}
         )
-        conti_dict = {name: (float(val) if not isinstance(val, str) else np.nan)
-                      for name, val in zip(q_mle.conti_result_name, q_mle.conti_result)}
+        conti_dict = {
+            name: _safe_float(val)
+            for name, val in zip(q_mle.conti_result_name, q_mle.conti_result)
+        }
         conti_dict['z'] = rec["z"]
 
-        m_2500, m_2500_err = compute_apparent_mag_2500_astropy(conti_dict)
-
+        if np.isfinite(conti_dict.get('L2500', np.nan)) and np.isfinite(conti_dict.get('L2500_err', np.nan)):
+            m_2500, m_2500_err = compute_apparent_mag_2500_astropy(conti_dict)
+        else:
+            m_2500, m_2500_err = -1e9, -1e9
         result.update(
             apparent_mag_2500=m_2500,
             apparent_mag_2500_err=m_2500_err,
@@ -279,7 +292,7 @@ def parse_args():
                    help="Path to DR16Q FITS catalog.")
     p.add_argument("--cache-dir", default="data/spectra_cache",
                    help="Directory for cached spectra FITS.")
-    p.add_argument("--max-sep", type=float, default=2.0,
+    p.add_argument("--max-sep", type=float, default=1.0,
                    help="Max match separation in arcsec.")
     p.add_argument("--limit", type=int, default=None,
                    help="Optional limit on number of rows from input CSV to consider before matching.")
