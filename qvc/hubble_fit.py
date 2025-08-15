@@ -23,6 +23,7 @@ plt.style.use('style.mplstyle')
 from hubble_utils import *
 from hubble_plotting import *
 from hubble_model import *
+from hubble_completeness import *
 import os
 import yaml
 
@@ -32,7 +33,7 @@ _pantheon_data = None
 
 _sna_LogdetCov, _sna_L, _sna_Lower = None, None, None
 
-z_agn_pivot = 1.2
+z_agn_pivot = 1.5
 
 def completeness_loglike(m_model, mu_err, z, completeness2d, m_grid, tiny=1e-300):
     """
@@ -160,33 +161,6 @@ def log_likelihood(theta, cosmo_model,
             completeness2d=completeness2d, m_grid=mag_centers
         )
 
-
-    # ll_completeness = 0.0
-    # # selection bias correction during inference
-    # if completeness_params is not None:
-    #     completeness2d, mag_centers, _, dm, _ = completeness_params
-
-    #     m_grid = mag_centers
-    #     N_obj = len(z)
-
-    #     # Shape: (N_obj, N_grid)
-    #     m_grid_broadcasted = np.tile(m_grid, (N_obj, 1))
-    #     z_broadcasted = np.tile(z[:, None], (1, len(m_grid)))
-
-    #     # Gaussian weights: P(m | model)
-    #     gauss_weights = stats.norm.pdf(m_grid_broadcasted, loc=m_model[:, None], scale=mu_err[:, None])
-    #     gauss_weights /= np.trapezoid(gauss_weights, m_grid, axis=1)[:, None] + 1e-12
-
-    #     # Evaluate p(detect | m, z)
-    #     p_detect = completeness2d(m_grid_broadcasted, z_broadcasted)
-    #     p_detect = soft_clip(p_detect, floor=1e-12, sharpness=10)
-
-    #     # Marginalized likelihood: ∫ P(m | model) × p_detect(m, z) dm
-    #     integrals = np.trapezoid(gauss_weights * p_detect, m_grid, axis=1)
-    #     integrals = np.maximum(integrals, 1e-12)
-
-    #     ll_completeness = np.sum(np.log(integrals))
-
     # print(f"Log-likelihood components: ll_snia={ll_snia:.2f}, ll_agn={ll_agn:.2f}, ll_completeness={ll_completeness:.2f}")
     return ll_snia + ll_agn - ll_completeness, np.log(integrals)
 
@@ -235,7 +209,7 @@ def run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model='Flatw0waCDM',
                               ]].copy()
 
     if completeness:
-        completeness_params = get_completeness_function_2d(df_agn_filtered)
+        completeness_params = get_completeness_function_2d(df_agn_filtered, plot=True)
     else:
         completeness_params = None
 
@@ -304,7 +278,7 @@ def run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model='Flatw0waCDM',
             dlogz_init=dlogz_init,
             n_effective=10,               
             nlive_init=20 * ndim,         
-            nlive_batch=10 * ndim  # 2 * ndim is low, but seems to work
+            nlive_batch=5 * ndim  # 2 * ndim is low, but seems to work
         )
 
     results = sampler.results
@@ -398,53 +372,10 @@ def run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model='Flatw0waCDM',
     np.save(f"data/flat_samples_{cosmo_model}_{'sna' if only_sna else 'agn'}.npy", flat_samples)
     return sampler, flat_samples, model_labels, mag_corr, logZ, logZerr
 
-def compare_models():
-    priors, model_labels = get_model_params('Flatw0waCDM')
-    ndim = len(priors.keys())
-    nlive = 25 * ndim # basic
-    # nlive = 50 * ndim # modeerate precision
-    # nlive = 100 * ndim # high precision
-    #maxiter = 2000 # TESTING
-    maxiter = None # full run
-    #n_effective = 100 # Testing
-    n_effective = 2000 # moderate quality
-    #n_effective = 5000 # high quality
-    #n_effective = 10000 # publication quality
-    
-    use_full_cov = True
-    completeness = True
-
-    global _sna_LogdetCov, _sna_L, _sna_Lower
-    df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/N20_w500_grace/may21_joint_fits_N20_merged.h5")
-
-    # Run MCMC pipeline for FlatLambdaCDM model
-    sampler_FlatwCDM, _, _, logZ_FlatwCDM, logZerr_FlatwCDM = run_mcmc_pipeline(
-                                        df_agn, df_pantheon, cosmo_model='FlatwCDM', 
-                                        only_sna=False, completeness=completeness, use_full_cov=use_full_cov,
-                                        use_dynesty=True, nlive=nlive, maxiter=maxiter, n_effective=n_effective)
-    #plot_posterior_corner(sampler_FlatwCDM, cosmo_model='FlatwCDM', only_sna=False, dynasty=True)
-    plot_traces(sampler_FlatwCDM, cosmo_model='FlatwCDM', only_sna=False, dynasty=True)
-
-    # Run MCMC pipeline for Flatw0waCDM model
-    sampler_Flatw0waCDM, _, _, logZ_Flatw0waCDM, logZerr_Flatw0waCDM = run_mcmc_pipeline(
-                                        df_agn, df_pantheon, cosmo_model='Flatw0waCDM', 
-                                        only_sna=False, completeness=completeness, use_full_cov=use_full_cov,
-                                        use_dynesty=True, nlive=nlive, maxiter=maxiter, n_effective=n_effective)
-
-    #plot_posterior_corner(sampler_Flatw0waCDM, cosmo_model='Flatw0waCDM', only_sna=False, dynasty=True)
-    plot_traces(sampler_Flatw0waCDM, cosmo_model='Flatw0waCDM', only_sna=False, dynasty=True)
-    
-    compare_models_by_log_evidence(logZ_FlatwCDM, logZerr_FlatwCDM, logZ_Flatw0waCDM, logZerr_Flatw0waCDM,
-                                    model_1_name="FlatwCDM", model_2_name="Flatw0waCDM")
-
 def main():
     # Load data
     global _sna_LogdetCov, _sna_L, _sna_Lower
-    #df_agn, df_pantheon, Cov_inv, logdetCov, L = load_data("data/may23_all_merged.h5", populate_sdss=True)
-    #df_agn, df_pantheon, Cov_inv, logdetCov, L = load_data("data/N20_w500_grace/may21_joint_fits_N20_merged.h5", False)
     df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("results/aug10_stonebwb_N20w2000s1000t6c4.h5", populate_sdss=False)
- 
-    print(len(df_pantheon))
     
     results = []
 
@@ -489,95 +420,31 @@ def test():
     #cosmo_model = 'Flatw0waCDM'
     cosmo_model = 'FlatwCDM'
     # cosmo_model = 'FlatLambdaCDM'
-    only_sna = False
 
     # Load data
     global _sna_LogdetCov, _sna_L, _sna_Lower
 
-    #df_agn, df_pantheon, Cov_inv, logdetCov, L = load_data("data/N20_w500_grace/may21_joint_fits_N20_merged.h5")
-    #df_agn, df_pantheon, Cov_inv, logdetCov, L = load_data("data/may23_all_merged.h5", populate_sdss=False)
-    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/june1_joint_N20w2000s1000_fits_merged.h5")
-    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/june30_joint_allebv005_N20w500s250_merged.h5")
-    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/july5_joint_chisq_lcrf2500_mean1_N20w2000s1000_merged.h5")
 
-    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/july12_joint_mean1_zsort_N20w2000s500_merged.h5")
-    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/july14_chi10_extinction04_ebv005_N20w500s250_merged.h5")
-    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/july8_joint_chisq_lcrf_exactly2000_N20w500s250_merged.h5")
-    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/july15_chi2_otherfilters_N30w500s250_merged.h5")
-    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/july15_nochi2_filters_N30w250s100_merged.h5")
-    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/july16_nochi2_filters_N30w500s250_merged.h5")
-    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/july17_goodsources_chisq5and10_N30w250s100_merged.h5")
-    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/july17_goodsources_chisq5and10_mean01_N30w250s100_merged.h5")
-    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/july17_goodsources_chisq5and10_mean01_N20w4000s500_merged.h5")
-    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/july18_goodsources_chisq5and10_mean1_N20w4000s500_merged.h5")
-    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/july19_goodsources_chisq2_otherfilters_mean1_N20w4000s500_merged.h5")
-    
-    
-    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/july19_goodsources_chisq10_otherfilters_mean1_N20w4000s500_merged.h5")
-    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/july19_goodsources_chisq5and10_mean1_N20w4000s500_merged.h5", populate_sdss=True)
-    
-    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/july20_goodsources_chisq5and10_hostpl_N20w4000s500_merged.h5")
-    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/july21_chisq2_hostpl_N20w4000s200_merged.h5")
-    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/july27_chisq2_preview_tree8_N20w4000s500_merged.h5", populate_sdss=True)
-    
-    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/july31_chisq2_preview_tree8_N10w1000s250_merged.h5", populate_sdss=False)
-    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/july31_chisq2_preview_grae_tree8_N10w1000s250_grace_merged.h5", populate_sdss=False)
-    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/aug1_fhostshen_wred_N10t8w2000s500_merged.h5", populate_sdss=False)
-    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/aug1_wored_N10t8w2000s500_merged.h5", populate_sdss=False)
-    
-    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/aug4_fhostshen11_N10t6w1000s500_merged.h5", populate_sdss=False)
-    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/aug4_fhostzero_N10t6w1000s500_merged.h5", populate_sdss=False)
-    
-    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/aug5_fshen11_N20t6w4000s500_merged.h5", populate_sdss=False)
-    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/aug5_fshen11_fhostnocap_N10t6w1000s500_merged.h5", populate_sdss=False)
-
-    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/aug6_fshen11_fhostnocap_bplzero_N10t6w1000s500_merged.h5", populate_sdss=False)
-    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/aug6_fshen11_fhostnocap_bplzero_N10t6w2000s500_merged.h5", populate_sdss=False)
-    
-    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("results/aug9_stone_N10w1000s500t6c4_merged.h5", populate_sdss=True)
-    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("results/aug9_stone_bwb_N10w1000s500t6c4_merged.h5", populate_sdss=True)
-    
-    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("results/aug10_stonebwb_N20w2000s1000t6c4.h5", populate_sdss=False)
-    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("results/aug10_stonebwb_N30w2000s1000t6c4.h5", populate_sdss=False)
-
-    df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("results/data/aug12_chisq_qscpu_N20w4000s1000t8c4.h5", populate_sdss=False)
-    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("results/data/aug13_stone_N10w2000s1000t6c4.h5", populate_sdss=False)
+    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("results/data/aug14_stone_qs_cpu_N20w2000s500t8c2.h5", populate_sdss=False)
     #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("results/data/aug13_stone_qs_cpu_N20w4000s1000t8c4.h5", populate_sdss=False)
-
-
-    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/july19_goodsources_chisq5and10_mean1_N20w4000s500_merged.h5", populate_sdss=True)
-    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/june1_joint_N20w2000s1000_fits_merged.h5")
-    #df_agn = df_agn[:400]
-    #df_agn = df_agn[df_agn['z'] > 1]  # Filter AGN data to z < 2.5
+    df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("results/data/aug12_chisq_qscpu_N20w4000s1000t8c4.h5", populate_sdss=False)
 
     sampler_joint, flat_samples, model_labels, mag_corr, logZ, logZerr = run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model=cosmo_model, 
-                                        only_sna=only_sna, completeness=True, use_full_cov=True,
-                                        resume=False)
+                                                        only_sna=False, completeness=True, use_full_cov=True,
+                                                         resume=False)
     if cosmo_model == 'Flatw0waCDM':
         zp = compute_pivot_redshift(flat_samples, cosmo_model)
         print("Pivot redshift: ", zp)
-    # try:
-    #     plot_posterior_corner(flat_samples, cosmo_model=cosmo_model, only_sna=False, show=False)
-    # except Exception as e:
-    #     print(f"Could not plot posterior corner: {e}")
-    
-    #plot_traces(sampler_joint, only_sna=False, cosmo_model=cosmo_model, show=False, use_dynesty=use_dynesty)
-    #print("Plotting AGN predicted sigma hat vs luminosity...")
-    #plot_Mi_vs_log_sigma0(flat_samples, df_agn, cosmo_model=cosmo_model, show=False)
-    
-    #print("Plotting AGN M_i predictions vs actual...")
+        
     plot_predicted_vs_actual_M2500(flat_samples, df_agn, cosmo_model=cosmo_model, z_agn_pivot=z_agn_pivot, show=False)
-    #plot_predicted_vs_actual_Mi(flat_samples, df_agn, cosmo_model=cosmo_model, show=False)
     
     print("Plotting Hubble diagram...")
     residuals, mu_pred_median, mu_pred_std = plot_hubble(flat_samples, df_agn, df_pantheon, 
                                                          cosmo_model=cosmo_model, z_agn_pivot=z_agn_pivot, show_true=False, show=False)
     
-    #plot_Mi_vs_sigmahat(df_agn, cosmo_model=cosmo_model, show=False)
-    #plot_predicted_M2500_vs_sigmahat(flat_samples, df_agn, cosmo_model=cosmo_model, show=False)
     plot_predicted_L2500_vs_sigmahat(flat_samples, df_agn, cosmo_model=cosmo_model, z_agn_pivot=z_agn_pivot, show=False)
-    #plot_inverted_sigmahat_vs_l2500_pl(flat_samples, df_agn, cosmo_model=cosmo_model, show=False)
-    #print("Plotting cosmological posteriors corner plot...")
+    
+    print("Plotting cosmological posteriors corner plot...")
     plot_cosmo_corner(None, flat_samples, cosmo_model, z_agn_pivot, show=False)
 
     

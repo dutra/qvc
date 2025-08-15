@@ -619,9 +619,9 @@ def plot_predicted_vs_actual_M2500(flat_samples, df_agn, cosmo_model, z_agn_pivo
     fig, axes = plt.subplots(num_rows, num_cols, figsize=(5 * num_cols, 4 * num_rows), sharey=True, sharex=True)
     axes = axes.flatten()
 
-    f_host = df_agn['f_host'].values
-    vmin = np.nanmin(f_host)
-    vmax = np.nanmax(f_host)
+    apparent_mag_2500 = df_agn['apparent_mag_2500'].values
+    vmin = np.nanmin(apparent_mag_2500)
+    vmax = np.nanmax(apparent_mag_2500)
 
     for i, ax in enumerate(axes):
         ax.set_xlim(-25.8, -18.2)
@@ -631,12 +631,12 @@ def plot_predicted_vs_actual_M2500(flat_samples, df_agn, cosmo_model, z_agn_pivo
             bin_mask = z_bin_indices == (i + 1)
             predicted_M_2500_bin = M_2500_pred[bin_mask]
             actual_M_2500_bin = actual_M_2500[bin_mask]
-            f_host_bin = f_host[bin_mask]
+            apparent_mag_2500_bin = apparent_mag_2500[bin_mask]
             M_i_axis = np.linspace(actual_M_2500.min(), actual_M_2500.max(), 100)
             ax.plot(M_i_axis, M_i_axis, color='m', alpha=0.7, label='y = x (Perfect Prediction)', lw=3, linestyle='--')
             sc = ax.scatter(
                 actual_M_2500_bin, predicted_M_2500_bin, 
-                c=f_host_bin, cmap='viridis', s=20, alpha=0.7, edgecolor='k', lw=0.5, vmin=vmin, vmax=vmax
+                c=apparent_mag_2500_bin, cmap='viridis', s=20, alpha=0.7, edgecolor='k', lw=0.5, vmin=vmin, vmax=vmax
             )
             ax.invert_xaxis()
             ax.invert_yaxis()
@@ -656,7 +656,7 @@ def plot_predicted_vs_actual_M2500(flat_samples, df_agn, cosmo_model, z_agn_pivo
 
     # Add a colorbar for f_host
     cbar = fig.colorbar(sc, ax=axes, orientation='vertical', fraction=0.02, pad=0.02)
-    cbar.set_label(r'$f_{\rm host}$', fontsize=14)
+    cbar.set_label(r'm$_{2500}$', fontsize=14)
 
     os.makedirs("plots/hubble", exist_ok=True)
     plt.savefig(f"plots/hubble/predicted_vs_actual_M2500_{cosmo_model}.png", dpi=300)
