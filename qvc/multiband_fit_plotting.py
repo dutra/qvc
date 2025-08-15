@@ -320,6 +320,7 @@ def plot_mcmc_traces(samples_dict, data):
     os.makedirs(output_dir, exist_ok=True)
     save_path = os.path.join(output_dir, f"{data['z']:.1f}_{data['object_id']}_mcmc_traces_{suffix}.png")
     plt.savefig(save_path, dpi=100)
+    plt.close(fig)
     logging.info(f"Saved trace plot to {save_path}")
 
     """

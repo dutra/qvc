@@ -123,22 +123,41 @@ def compute_apparent_mag_2500_colin(df):
     #colin_df = pd.read_csv("data/sdss_qso_mag_2500_colin.csv")
     #colin_df = pd.read_csv("data/july19_goodsources_chisq5and10_mean1_N20w4000s500_merged_magscorrected_fittedm2500.csv")
     
-    #colin_df = pd.read_csv("data/csv/aug4_sample_chisqg10_ebv005sn3_magsmean_fittedm2500.csv")
-    #colin_df = pd.read_csv("data/aug8_stone_merged_fittedm2500.csv")
-    #colin_df = pd.read_csv('data/aug10_stone_merged_fittedm2500.csv')
-    #colin_df = pd.read_csv('data/csv/aug11_sample_chisqg10_ebv005sn3_magsmean_fittedm2500.csv')
-    fields = ['f_host_4200', 'apparent_mag_2500', 'apparent_mag_2500_err', 'alpha_lambda', 'redchi']
-    with open('data/csv/aug11_sample_fittedm2500.csv') as f:
-        for i, line in enumerate(f):
-            if line.count(',') != 7:  # Your file should have 8 columns → 7 commas
-                print(f"Bad line {i + 1}: {line.strip()}")
-    colin_df = pd.read_csv(
-        'data/csv/aug11_sample_fittedm2500.csv',
-        dtype={'object_id': str, 'sdss_name': str}    
-        )
-    # Ensure all fields except object_id are float
-    for field in fields:
-        colin_df[field] = colin_df[field].astype(float)
+    #colin_df = pd.read_csv("data/aug4_sample_chisqg10_ebv005sn3_magsmean_fittedm2500.csv")
+    #colin_df = pd.read_csv("data/csv/aug10_stone_merged_fittedm2500.csv")
+    # Load and concatenate two CSV files
+    colin_df1 = pd.read_csv(
+        'data/sample_stone_fittedm2500.csv',
+        dtype={'object_id': str},
+        converters={
+            'f_host_4200': float,
+            'apparent_mag_2500': float,
+            'apparent_mag_2500_err': float,
+            'alpha_lambda': float,
+            'redchi': float
+        }
+    )
+    colin_df2 = pd.read_csv(
+        'data/sample_chisqg10_ebv005sn3_fittedm2500.csv',
+        dtype={'object_id': str},
+        converters={
+            'f_host_4200': float,
+            'apparent_mag_2500': float,
+            'apparent_mag_2500_err': float,
+            'alpha_lambda': float,
+            'redchi': float
+        }
+    )
+    colin_df = pd.concat([colin_df1, colin_df2], ignore_index=True)
+    
+    # Discard rows with apparent_mag_2500_err <= 0
+    #colin_df = colin_df[colin_df['apparent_mag_2500_err'] > 0].reset_index(drop=True)
+    
+    # Fill apparent_mag_2500_err == 0 with mean of nonzero errors
+    mean_err = colin_df.loc[colin_df['apparent_mag_2500_err'] > 0, 'apparent_mag_2500_err'].mean()
+    colin_df.loc[colin_df['apparent_mag_2500_err'] == 0, 'apparent_mag_2500_err'] = mean_err
+
+
 
 
     print("Length of colin_df:", len(colin_df))
@@ -169,8 +188,8 @@ def compute_apparent_mag_2500(df, logL_col='MY_LOGL2500', logL_err_col='MY_LOGL2
     m_ab = -2.5 * log_fnu - 48.60
     m_ab_err = 2.5 * logL_2500_err
 
-    df['apparent_mag_2500_old'] = m_ab
-    df['apparent_mag_2500_old_err'] = m_ab_err
+    df['apparent_mag_2500'] = m_ab
+    df['apparent_mag_2500_err'] = m_ab_err
     return df
 
 
@@ -452,8 +471,6 @@ def populate_sdss_fields(objs, progress_bar=True):
         d['fhost'] = fits_data['FHOST_5100'][i]
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
-            d['log_lbol'] = fits_data['LOGLBOL'][i]
-            d['log_lbol_err'] = fits_data['LOGLBOL_ERR'][i]
             for b in ['u', 'g', 'r', 'i', 'z']:
                 d[f'apparent_mag_{b}'] = -2.5 * np.log10(fits_data_2['PSFFLUX'][i, filters[b]]) + 22.5
                 d[f'apparent_mag_{b}_err'] = 2.5/np.log(10) * np.sqrt(1/fits_data_2['PSFFLUX_IVAR'][i, filters[b]])/fits_data_2['PSFFLUX'][i, filters[b]]
@@ -474,9 +491,10 @@ def populate_sdss_fields(objs, progress_bar=True):
             # else:
             #     d['color_err'] = np.nan
         if any(issubclass(warning.category, RuntimeWarning) for warning in w):
-            print(f"RuntimeWarning occurred for z={d['z']:.2f} {d['sdss_name']} log_lbol={d['log_lbol']:.2f}")
-            print(fits_data_2['PSFFLUX'][i,:])
-            print(w)
+            pass
+            # print(f"RuntimeWarning occurred for z={d['z']:.2f} {d['sdss_name']} log_lbol={d['log_lbol']:.2f}")
+            # print(fits_data_2['PSFFLUX'][i,:])
+            # print(w)
 
     return objs
 
@@ -599,7 +617,9 @@ def load_quasar_data(file_path, populate_sdss=False, apply_cut=True):
     #df['MY_LOGL2500'], df['MY_LOGL2500_ERR'] = compute_MY_LOGL2500(df)
     
 
-    #df = compute_apparent_mag_2500(df, logL_col='LOGL2500', logL_err_col='LOGL2500_ERR')
+    # df = compute_apparent_mag_2500(df, logL_col='LOGL2500', logL_err_col='LOGL2500_ERR')
+    # df['alpha_lambda'] = -1.5
+    # df['redchi'] = 1.0
     df = compute_apparent_mag_2500_colin(df)
 
     num_quasars_z_0_1_before = len(df[(df['z'] > 0) & (df['z'] <= 1.0)])
@@ -623,25 +643,33 @@ def load_quasar_data(file_path, populate_sdss=False, apply_cut=True):
     
     df = df.reset_index(drop=True)
 
-    # Define cuts as a list of (key, lower, upper) tuples
-    print(df['alpha_lambda'].values)
+    # Define cuts as (column, lower_limit, upper_limit)
     cuts = [
+        #('f_host', None, 0.6),
         ('alpha_lambda', None, 0),
         ('redchi', None, 10),
         ('apparent_mag_2500', 1, 40),
-        # Add more cuts here as needed, e.g. ('z', 1, None), ('f_host', None, 0.6)
+        ('apparent_mag_i', 15, 25)
+        # Uncomment/add more cuts as needed
+        # ('z', 1, None),
+        # ('z', None, 3.2),
+        # ('ebv', None, 0.05),
     ]
 
-    for key, lower, upper in cuts:
-        before = len(df)
-        mask = pd.Series([True] * len(df), index=df.index)
+    initial_count = len(df)
+    mask = np.ones(len(df), dtype=bool)
+    for col, lower, upper in cuts:
+        col_mask = np.ones(len(df), dtype=bool)
         if lower is not None:
-            mask &= df[key] >= lower
+            col_mask &= df[col] >= lower
         if upper is not None:
-            mask &= df[key] < upper
-        df = df[mask]
-        after = len(df)
-        print(f"Cut on {key}: {before - after} objects removed (remaining: {after})")
+            col_mask &= df[col] < upper
+        cut_count = np.sum(~col_mask)
+        print(f"Cut on {col}: {cut_count} objects removed")
+        mask &= col_mask
+
+    df = df[mask]
+    print(f"Total objects removed by all cuts: {initial_count - len(df)}")
 
     df = df.reset_index(drop=True)
     
@@ -698,274 +726,6 @@ def load_data(file_path, populate_sdss=False):
     return df_agn, df_pantheon, sna_logdetCov, sna_L, sna_lower
 
 
-def completeness(m, center, mag_lim):
-    print("m shape:", np.shape(m))
-    print("center shape:", np.shape(center))
-    print("mag_lim shape:", np.shape(mag_lim))
-    return 1 - norm.cdf(m, loc=center, scale=mag_lim)
-def get_completeness_function_simple(mag_lim, center=20):
-    """
-    Simpler completeness function based on a normal CDF.
-    Returns p(I=1|m) = 1 - normal.cdf(m, center=mag_lim).
-    """
-    #raise NotImplementedError("This function is not implemented yet.")
-
-
-    mag_eval = np.linspace(14, 26, 500)
-    dm = mag_eval[1] - mag_eval[0]
-    p_detect = completeness(mag_eval, center, mag_lim)
-
-    plt.plot(mag_eval, p_detect, label=f"Center={center}, Mag Lim={mag_lim}")
-    plt.xlabel("i-band magnitude")
-    plt.ylabel("Completeness")
-    plt.title("Simplified completeness function")
-    plt.legend()
-    plt.savefig("plots/completeness_function_simple.png", dpi=200)
-    #plt.show()
-    plt.close()
-    return p_detect, mag_eval, dm
-
-
-# class Completeness2D:
-#     def __init__(self, mag_centers, z_centers, completeness_ratio):
-#         self.mag_centers = mag_centers
-#         self.z_centers = z_centers
-#         self.interp_fn = RegularGridInterpolator(
-#             (mag_centers, z_centers),
-#             completeness_ratio,
-#             bounds_error=False, fill_value=0.0
-#         )
-
-#     def __call__(self, mag, z):
-#         pts = np.column_stack([np.ravel(mag), np.ravel(z)])
-#         vals = self.interp_fn(pts)
-#         return vals.reshape(np.shape(mag))
-    
-class Completeness2D:
-    def __init__(self, mag_centers, z_centers, completeness_map):
-        self.mag_centers = mag_centers
-        self.z_centers = z_centers
-
-        # Clip NaNs and store minimum finite completeness
-        completeness_map_clean = np.nan_to_num(completeness_map, nan=0.0)
-        self.min_completeness_value = float(np.nanmin(completeness_map_clean))
-
-        self.mag_min = mag_centers[0]
-        self.mag_max = mag_centers[-1]
-        self.z_min = z_centers[0]
-        self.z_max = z_centers[-1]
-
-        self.interp_fn = RegularGridInterpolator(
-            (mag_centers, z_centers),
-            completeness_map_clean,
-            bounds_error=False,
-            fill_value=0.0
-        )
-
-    def __call__(self, mag, z):
-        mag = np.asarray(mag)
-        z = np.asarray(z)
-        mag_b, z_b = np.broadcast_arrays(mag, z)
-
-        mag_clipped = np.clip(mag_b, self.mag_min, self.mag_max)
-        z_clipped = np.clip(z_b, self.z_min, self.z_max)
-
-        pts = np.column_stack([mag_clipped.ravel(), z_clipped.ravel()])
-        vals = self.interp_fn(pts)
-        return vals.reshape(mag_b.shape)
-
-    def get_completeness_map(self):
-        return self.interp_fn.values
-
-
-def get_completeness_function_2d(df_agn,
-                                 sim_file="data/sampled_apparent_magnitudes_redshift_vol.h5",
-                                 n_mag_bins=20, n_z_bins=30,
-                                 mag_min=15, mag_max=24,
-                                 sigma_mag=1.0, sigma_z=0.7,
-                                 normalize=True,
-                                 plot=False):
-    # --- Load simulated (true) sample
-    mags_true_list, z_true_list = [], []
-    with h5py.File(sim_file, "r") as f:
-        for name in f["redshift_bin"]:
-            ds = f["redshift_bin"][name]
-            mags = ds[()]
-            z_bin = ds.attrs["redshift"]
-            mags_true_list.append(mags)
-            z_true_list.append(np.full_like(mags, z_bin, dtype=float))
-
-    mags_true = np.concatenate(mags_true_list)
-    z_true = np.concatenate(z_true_list)
-
-    # --- Load observed sample
-    mags_obs = df_agn['apparent_mag_2500'].values
-    z_obs = df_agn['z'].values
-
-    # --- Clean NaNs/Infs
-    mask_true = np.isfinite(mags_true) & np.isfinite(z_true)
-    mags_true = mags_true[mask_true]
-    z_true = z_true[mask_true]
-
-    mask_obs = np.isfinite(mags_obs) & np.isfinite(z_obs)
-    mags_obs = mags_obs[mask_obs]
-    z_obs = z_obs[mask_obs]
-
-    # --- Bin edges and centers
-    z_min, z_max = np.min(z_true), np.max(z_true)
-    if z_max - z_min < 1e-3:
-        z_min -= 0.01
-        z_max += 0.01
-
-    mag_edges = np.linspace(mag_min, mag_max, n_mag_bins + 1)
-    z_edges = np.linspace(z_min, z_max, n_z_bins + 1)
-    mag_centers = 0.5 * (mag_edges[:-1] + mag_edges[1:])
-    z_centers = 0.5 * (z_edges[:-1] + z_edges[1:])
-
-    # --- Histogram both samples
-    hist_true, _, _ = np.histogram2d(mags_true, z_true, bins=[mag_edges, z_edges])
-    hist_obs, _, _ = np.histogram2d(mags_obs, z_obs, bins=[mag_edges, z_edges])
-
-    # --- Compute completeness ratio
-    with np.errstate(divide='ignore', invalid='ignore'):
-        completeness = np.zeros_like(hist_true, dtype=float)
-        valid = hist_true > 0
-        completeness[valid] = hist_obs[valid] / hist_true[valid]
-
-    # --- Optional smoothing
-    completeness_smoothed = gaussian_filter(completeness, sigma=(sigma_mag, sigma_z), mode='nearest')
-
-    # --- Clip to [0, 1] and normalize if requested
-    completeness_smoothed = np.clip(completeness_smoothed, 0.0, 1.0)
-    if normalize and np.nanmax(completeness_smoothed) > 0:
-        completeness_smoothed /= np.nanmax(completeness_smoothed)
-
-    # --- Compute bin widths for completeness convolution
-    dm = mag_centers[1] - mag_centers[0]
-    dz = z_centers[1] - z_centers[0]
-
-    # --- Optional diagnostic plot
-    if plot:
-        import matplotlib.pyplot as plt
-        plt.imshow(completeness_smoothed.T, origin='lower', aspect='auto',
-                   extent=[mag_edges[0], mag_edges[-1], z_edges[0], z_edges[-1]])
-        plt.xlabel('Apparent Magnitude')
-        plt.ylabel('Redshift')
-        plt.title('Completeness Map (Smoothed)')
-        plt.colorbar(label='p(detect | m, z)')
-        plt.tight_layout()
-        plt.show()
-
-    return Completeness2D(mag_centers, z_centers, completeness_smoothed), mag_centers, z_centers, dm, dz
-
-
-def get_completeness_function_2d_(df_agn,
-                                 sim_file="data/sampled_apparent_magnitudes_redshift_vol.h5",
-                                 n_mag_bins=20, n_z_bins=30,
-                                 mag_min=15, mag_max=24,
-                                 sigma_mag=1.0, sigma_z=0.7,
-                                 normalize=True,
-                                 plot=False):
-    """
-    Build p(detect | m_2500, z) by:
-      1) Fitting a line m_2500 = a + b * m_i using observed AGN,
-      2) Converting simulated m_i -> m_2500 via that line,
-      3) Forming the 2D completeness histogram in (m_2500, z).
-
-    Expects df_agn to contain 'apparent_mag_2500', 'apparent_mag_i', and 'z'.
-    """
-    # --- Fit m_2500 = a + b * m_i from observed sample
-    print(df_agn.keys())
-    if ('apparent_mag_2500' not in df_agn.columns) or ('apparent_mag_i' not in df_agn.columns):
-        raise KeyError("df_agn must contain 'apparent_mag_2500' and 'apparent_mag_i' columns.")
-
-    m2500_obs_all = df_agn['apparent_mag_2500'].values
-    mi_obs_all    = df_agn['apparent_mag_i'].values
-    z_obs_all     = df_agn['z'].values
-
-    fit_mask = np.isfinite(m2500_obs_all) & np.isfinite(mi_obs_all)
-    if fit_mask.sum() < 2:
-        raise ValueError("Not enough finite points to fit m_2500 vs m_i.")
-
-    # y = a + b*x with x = m_i, y = m_2500
-    b, a = np.polyfit(mi_obs_all[fit_mask], m2500_obs_all[fit_mask], deg=1)  # returns [slope, intercept]
-
-    # --- Load simulated (true) sample: these mags are in band i
-    mi_true_list, z_true_list = [], []
-    with h5py.File(sim_file, "r") as f:
-        for name in f["redshift_bin"]:
-            ds = f["redshift_bin"][name]
-            mi = ds[()]  # simulated apparent m_i
-            z_bin = ds.attrs["redshift"]
-            mi_true_list.append(mi)
-            z_true_list.append(np.full_like(mi, z_bin, dtype=float))
-
-    mi_true = np.concatenate(mi_true_list)
-    z_true  = np.concatenate(z_true_list)
-
-    # --- Convert simulated m_i -> m_2500 via the fitted line
-    m2500_true = a + b * mi_true
-
-    # --- Observed sample for completeness map (already in m_2500)
-    m2500_obs = m2500_obs_all
-    z_obs     = z_obs_all
-
-    # --- Clean NaNs/Infs
-    mask_true = np.isfinite(m2500_true) & np.isfinite(z_true)
-    m2500_true = m2500_true[mask_true]
-    z_true = z_true[mask_true]
-
-    mask_obs = np.isfinite(m2500_obs) & np.isfinite(z_obs)
-    m2500_obs = m2500_obs[mask_obs]
-    z_obs = z_obs[mask_obs]
-
-    # --- Bin edges and centers
-    z_min, z_max = np.min(z_true), np.max(z_true)
-    if z_max - z_min < 1e-3:
-        z_min -= 0.01
-        z_max += 0.01
-
-    mag_edges = np.linspace(mag_min, mag_max, n_mag_bins + 1)
-    z_edges   = np.linspace(z_min, z_max, n_z_bins + 1)
-    mag_centers = 0.5 * (mag_edges[:-1] + mag_edges[1:])
-    z_centers   = 0.5 * (z_edges[:-1] + z_edges[1:])
-
-    # --- Histogram both samples in (m_2500, z)
-    hist_true, _, _ = np.histogram2d(m2500_true, z_true, bins=[mag_edges, z_edges])
-    hist_obs,  _, _ = np.histogram2d(m2500_obs,  z_obs,  bins=[mag_edges, z_edges])
-
-    # --- Compute completeness ratio
-    with np.errstate(divide='ignore', invalid='ignore'):
-        completeness = np.zeros_like(hist_true, dtype=float)
-        valid = hist_true > 0
-        completeness[valid] = hist_obs[valid] / hist_true[valid]
-
-    # --- Optional smoothing
-    completeness_smoothed = gaussian_filter(completeness, sigma=(sigma_mag, sigma_z), mode='nearest')
-
-    # --- Clip to [0, 1] and normalize if requested
-    completeness_smoothed = np.clip(completeness_smoothed, 0.0, 1.0)
-    if normalize and np.nanmax(completeness_smoothed) > 0:
-        completeness_smoothed /= np.nanmax(completeness_smoothed)
-
-    # --- Bin widths for later convolution/integration
-    dm = mag_centers[1] - mag_centers[0] if len(mag_centers) > 1 else np.nan
-    dz = z_centers[1] - z_centers[0]     if len(z_centers) > 1 else np.nan
-
-    # --- Optional diagnostic plot
-    if plot:
-        import matplotlib.pyplot as plt
-        plt.imshow(completeness_smoothed.T, origin='lower', aspect='auto',
-                   extent=[mag_edges[0], mag_edges[-1], z_edges[0], z_edges[-1]])
-        plt.xlabel(r'Apparent Magnitude $m_{2500}$')
-        plt.ylabel('Redshift z')
-        plt.title('Completeness Map (Smoothed)')
-        plt.colorbar(label='p(detect | m2500, z)')
-        plt.tight_layout()
-        plt.show()
-
-    # NB: Completeness2D assumed available in your environment
-    return Completeness2D(mag_centers, z_centers, completeness_smoothed), mag_centers, z_centers, dm, dz
 
 
 def soft_clip(x, floor=1e-5, sharpness=5):

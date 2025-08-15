@@ -1,3 +1,19 @@
+import os
+
+env_cores = os.environ.get("NUM_CORES")
+
+if env_cores is not None:
+        try:
+            num_cores = int(env_cores)
+            print(f"CPU Num Cores: {num_cores}")
+            os.environ["XLA_FLAGS"] = f"--xla_force_host_platform_device_count={num_cores}"
+            os.environ["JAX_PLATFORM_NAME"] = "cpu"
+        except ValueError:
+            print(f"Invalid NUM_CORES value '{env_cores}', ignoring.")
+else:
+    print("NUM_CORES not set, leaving defaults.")
+
+
 import jax
 jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
@@ -7,6 +23,13 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 import numpyro
+
+if env_cores is not None:
+    num_cores = int(env_cores)
+    numpyro.set_host_device_count(num_cores)  # Tell NumPyro how many to use
+
+numpyro.enable_x64()
+
 from numpyro import infer
 from numpyro.infer import MCMC, NUTS
 import numpyro.distributions as dist
@@ -51,16 +74,16 @@ def build_model(batch_data, zs, f_host_value, lam_rfs, log_jitter_mean, f_host_s
         # Global "universal" means for eta
         eta_A1_mean = numpyro.sample("eta_A1_mean", dist.TruncatedNormal(-0.5, 0.5, high=0.0))
         eta_A2_mean = numpyro.sample("eta_A2_mean", dist.TruncatedNormal(-0.5, 0.5, high=0.0))
-        eta_tau1_mean = numpyro.sample("eta_tau1_mean", dist.TruncatedNormal(0.0, 0.5, low=-0.1))
+        eta_tau1_mean = numpyro.sample("eta_tau1_mean", dist.TruncatedNormal(0.0, 0.5))
         eta_tau2_mean = numpyro.sample("eta_tau2_mean", dist.TruncatedNormal(0.2, 0.5, low=0.0))
         eta_break = numpyro.deterministic("eta_break", 0.1)
         lam_s = numpyro.deterministic("lam_s", 2500.0)
 
         # Population-level scatter (how much objects can deviate) 
-        log_sigma_eta_A1 = numpyro.sample("log_sigma_eta_A1", dist.Normal(jnp.log(0.1), 0.2))
-        log_sigma_eta_A2 = numpyro.sample("log_sigma_eta_A2", dist.Normal(jnp.log(0.1), 0.2))
-        log_sigma_eta_tau1 = numpyro.sample("log_sigma_eta_tau1", dist.Normal(jnp.log(0.1), 0.2))
-        log_sigma_eta_tau2 = numpyro.sample("log_sigma_eta_tau2", dist.Normal(jnp.log(0.1), 0.2))
+        log_sigma_eta_A1 = numpyro.sample("log_sigma_eta_A1", dist.Normal(jnp.log(1.0), 0.2))
+        log_sigma_eta_A2 = numpyro.sample("log_sigma_eta_A2", dist.Normal(jnp.log(1.0), 0.2))
+        log_sigma_eta_tau1 = numpyro.sample("log_sigma_eta_tau1", dist.Normal(jnp.log(1.0), 0.2))
+        log_sigma_eta_tau2 = numpyro.sample("log_sigma_eta_tau2", dist.Normal(jnp.log(1.0), 0.2))
 
         sigma_eta_A1 = numpyro.deterministic("sigma_eta_A1", jnp.exp(log_sigma_eta_A1))
         sigma_eta_A2 = numpyro.deterministic("sigma_eta_A2", jnp.exp(log_sigma_eta_A2))
@@ -83,8 +106,8 @@ def build_model(batch_data, zs, f_host_value, lam_rfs, log_jitter_mean, f_host_s
                 eta_tau2 = numpyro.deterministic("eta_tau2", jnp.full(batch_size, eta_tau2_mean))
 
             # Core kernel parameters
-            log_tau_drw0 = numpyro.sample("log_tau_drw0", dist.Normal(log_tau_drw0_c, 1.0))
-            log_sigma0 = numpyro.sample("log_sigma0", dist.Normal(-1.0, 1.0))
+            log_tau_drw0 = numpyro.sample("log_tau_drw0", dist.Normal(log_tau_drw0_c, 2.0))
+            log_sigma0 = numpyro.sample("log_sigma0", dist.Normal(-0.8, 1.0))
             log_sigma_hat0 = numpyro.deterministic("log_sigma_hat0", log_sigma0 - 0.5 * log_tau_drw0)
 
             # Host galaxy dilution
@@ -103,8 +126,8 @@ def build_model(batch_data, zs, f_host_value, lam_rfs, log_jitter_mean, f_host_s
 
             # Bluer when brighter (BWB) strength
             if bwb:
-                bwb_alpha = numpyro.sample("bwb_alpha", dist.Normal(0.2, 0.1))
-                bwb_beta = numpyro.sample("bwb_beta", dist.TruncatedNormal(0.2, 0.1, low=0))
+                bwb_alpha = numpyro.sample("bwb_alpha", dist.Normal(0.2, 0.2))
+                bwb_beta = numpyro.sample("bwb_beta", dist.TruncatedNormal(0.2, 0.4, low=0))
             else:
                 bwb_alpha = numpyro.deterministic("bwb_alpha", jnp.zeros(batch_size))
                 bwb_beta = numpyro.deterministic("bwb_beta", jnp.zeros(batch_size))
@@ -371,7 +394,7 @@ if __name__ == '__main__':
         obj |= result
         # Run bestP for each object
         n_bands = len(obj['clean_bands'])
-        lam_rf = np.zeros(n_bands)
+        lam_rf = np.full(5, 2500.0)
         lam_rf[:len(obj['clean_bands'])] = np.array([lambda_pivot[band] for band in obj['clean_bands']]) / (1 + obj['z'])
         lam_rf = jnp.array(lam_rf)
 
@@ -439,7 +462,7 @@ if __name__ == '__main__':
         num_samples=args.nsamp,
         num_chains=nchains,
         progress_bar=args.progress,
-        chain_method="vectorized",
+        chain_method="parallel",
     )
 
     if args.load_sample_file:

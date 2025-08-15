@@ -9,8 +9,8 @@ def K_corr(z, alpha_nu):
     #return -2.5 * (1 + alpha_nu) * np.log10(1 + z)
 
 # --- Reference constants and pivot values ---
-log_sigma0_pivot = -0.84 # TODO make this a parameter
-log_tau_UV_RF_pivot = 2.76  # TODO make this a parameter
+log_sigma0_pivot = -0.74 # TODO make this a parameter
+log_tau_UV_RF_pivot = 2.7  # TODO make this a parameter
 f_host_pivot = 0.2
 #M0_agn_offset = -5.179  # TODO make this a parameter
 #z_agn_pivot = 1.2 # TODO make this a parameter
@@ -57,7 +57,7 @@ def broken_power_law(x, x_break, d1, d2, ds):
 
 # # Linear model
 def M_model_agn(M0_agn, alpha_agn, beta_agn, log_sigma0, log_tau_UV_RF, f_host):
-    return M0_agn + alpha_agn * ( log_sigma0 - log_sigma0_pivot) + beta_agn * (log_tau_UV_RF - log_tau_UV_RF_pivot)# + eta_A2_agn * (f_host - f_host_pivot)
+    return M0_agn + alpha_agn * (log_sigma0 - log_sigma0_pivot) + beta_agn * (log_tau_UV_RF - log_tau_UV_RF_pivot)# + eta_A2_agn * (f_host - f_host_pivot)
     
 def M_model_agn_err(M0_agn, alpha_agn, beta_agn,
                     log_sigma0, log_sigma0_err, log_tau_UV_RF_err, f_host_err):
@@ -97,7 +97,7 @@ def get_model_params(cosmo_model):
     elif cosmo_model == 'Flatw0waCDM':
         priors |= OrderedDict([
             ("wp", (-20.0, 1.0)),   # covers phantom (<-1), Λ (-1), quintessence (> -1), and even w>0
-            ("wa", (-20.0, 5.0))    # symmetric variation
+            ("wa", (-20.0, 20.0))    # symmetric variation
         ])
 
     else:
