@@ -145,7 +145,7 @@ class ContiBLRQS(qs.Wrapper):
         h_base_total = h_cont + h_blr                        # yields the 4-term sum
 
         # BWB component on k^2 with weight sqrt(2)*q_b where q_b = s_b * A_b^2
-        q_b = self.s_b[b] * (self.amp_cont[b] ** 2)
+        q_b = self.s_b[b] #* (self.amp_cont[b] ** 2)
         h_sq = self._ensure_kernel_sq().observation_model(t) # shape [m2]
         h_bwb = jnp.sqrt(2.0) * q_b * h_sq                   # gives 2 q1 q2 k^2 in cov
 
