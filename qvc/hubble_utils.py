@@ -125,8 +125,20 @@ def compute_apparent_mag_2500_colin(df):
     
     #colin_df = pd.read_csv("data/aug4_sample_chisqg10_ebv005sn3_magsmean_fittedm2500.csv")
     #colin_df = pd.read_csv("data/csv/aug10_stone_merged_fittedm2500.csv")
-    colin_df = pd.read_csv(
-        #'data/csv/aug11_sample_fittedm2500.csv',
+    # Read both CSVs and concatenate
+    colin_df1 = pd.read_csv(
+        'data/sample_stone_fittedm2500.csv',
+        dtype={'object_id': str},
+        converters={
+            'f_host_4200': float,
+            'apparent_mag_2500': float,
+            'apparent_mag_2500_err': float,
+            'alpha_lambda': float,
+            'alpha_lambda_err': float,
+            'redchi': float
+        }
+    )
+    colin_df2 = pd.read_csv(
         'data/sample_chisqg10_ebv005sn3_fittedm2500.csv',
         dtype={'object_id': str},
         converters={
@@ -138,12 +150,13 @@ def compute_apparent_mag_2500_colin(df):
             'redchi': float
         }
     )
+    colin_df = pd.concat([colin_df1, colin_df2], ignore_index=True)
     # Discard rows with apparent_mag_2500_err <= 0
     colin_df = colin_df[colin_df['apparent_mag_2500_err'] > 0].reset_index(drop=True)
     
     # Fill apparent_mag_2500_err == 0 with mean of nonzero errors
-    # mean_err = colin_df.loc[colin_df['apparent_mag_2500_err'] > 0, 'apparent_mag_2500_err'].mean()
-    # colin_df.loc[colin_df['apparent_mag_2500_err'] == 0, 'apparent_mag_2500_err'] = mean_err
+    mean_err = colin_df.loc[colin_df['apparent_mag_2500_err'] > 0, 'apparent_mag_2500_err'].mean()
+    colin_df.loc[colin_df['apparent_mag_2500_err'] == 0, 'apparent_mag_2500_err'] = mean_err
 
 
 
