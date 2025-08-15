@@ -7,58 +7,54 @@ from scipy.interpolate import RegularGridInterpolator
 from scipy.ndimage import gaussian_filter1d, gaussian_filter
 from scipy.interpolate import interp1d
 
-class SimpleCompleteness2D:
-    """
-    Simple analytic completeness: sigmoid dropoff in apparent magnitude.
-    Completeness is 1 at bright mags, drops to 0 at faint mags.
-    Constant in redshift (z).
-    """
-    def __init__(self, mag_lim=24.0, width=0.2):
-        self.mag_lim = mag_lim
-        self.width = width
-
-    def __call__(self, mag, z=None):
-        mag = np.asarray(mag)
-        return 1.0 / (1.0 + np.exp((mag - self.mag_lim) / self.width))
-
-    @property
-    def grid(self):
-        return dict(mag_lim=self.mag_lim, width=self.width)
-
 class LogisticCompleteness2500:
     """
     Logistic completeness in apparent_mag_2500 with a z-dependent faint limit
-    derived from an observed-band depth. Can use per-object alpha_lambda.
+    derived from an observed-band depth.
+
+    You can set a per-object alpha_lambda ONCE at construction time
+    (array-like matching your objects). If not provided, falls back to alpha_nu.
     """
     def __init__(self,
                  mag_lim_obs=24.5,
                  width=1.0,
                  lam_obs=7480.0,
-                 alpha_nu=-0.4,     # used only if alpha_lambda is not supplied at call time
+                 alpha_nu=-0.4,     # used only if alpha_lambda is not set
                  delta_m=0.0,
-                 floor=1e-12):
+                 floor=1e-12,
+                 alpha_lambda=None):  # <— NEW: store once
         self.mag_lim_obs = float(mag_lim_obs)
         self.width       = float(width)
         self.lam_obs     = float(lam_obs)
         self.alpha_nu    = float(alpha_nu)
         self.delta_m     = float(delta_m)
         self.floor       = float(floor)
+        # store once (scalar or per-object array); None means "use alpha_nu"
+        self.alpha_lambda = None if alpha_lambda is None else np.asarray(alpha_lambda)
 
     @staticmethod
     def _lambda_to_nu(alpha_lambda):
         # alpha_nu = -(alpha_lambda + 2)
         return -(alpha_lambda + 2.0)
 
-    def mlim_2500(self, z, alpha_lambda):
+    def mlim_2500(self, z, alpha_lambda=None):
         """
-        Effective m_lim at 2500Å, optionally using per-object alpha_lambda.
+        Effective m_lim at 2500Å.
+
         z: array-like
-        alpha_lambda: None or array-like with same shape as z
+        alpha_lambda: optional override; if None, use self.alpha_lambda;
+                      if still None, fall back to self.alpha_nu.
         """
         z = np.asarray(z)
+
         if alpha_lambda is None:
+            alpha_lambda = self.alpha_lambda
+
+        if alpha_lambda is None:
+            # use the constant alpha_nu set on the instance
             alpha_nu = self.alpha_nu
         else:
+            # per-object (or scalar) alpha_lambda provided/stored
             alpha_lambda = np.asarray(alpha_lambda)
             alpha_nu = self._lambda_to_nu(alpha_lambda)
 
@@ -66,12 +62,15 @@ class LogisticCompleteness2500:
         mlim = self.mag_lim_obs - 2.5 * alpha_nu * np.log10(x) + self.delta_m
         return mlim
 
-    def __call__(self, mag_2500, z, alpha_lambda):
+    def __call__(self, mag_2500, z, alpha_lambda=None):
         """
-        p(detect | m_2500, z, alpha_lambda)
+        p(detect | m_2500, z)
+
+        You no longer need to pass alpha_lambda; the stored value is used.
+        Passing alpha_lambda here still works as an explicit override.
         """
         m = np.asarray(mag_2500)
-        mlim = self.mlim_2500(z, alpha_lambda=alpha_lambda)
+        mlim = self.mlim_2500(z, alpha_lambda=alpha_lambda)  # uses stored by default
         p = 1.0 / (1.0 + np.exp((m - mlim) / self.width))
         return np.clip(p, self.floor, 1.0)
 
@@ -88,17 +87,21 @@ def get_completeness_function_2d_simple(*args,
                                         lam_obs=7480.0,
                                         alpha_nu=-0.4,
                                         delta_m=-1,
-                                        alpha_lambda=None,   # <— NEW
+                                        alpha_lambda=None,   # <— set once here
                                         plot=False,
                                         **kwargs):
     """
     Returns a z-dependent completeness function that can use per-object alpha_lambda.
+
+    Pass alpha_lambda (scalar or array) ONCE here. Thereafter, call the returned
+    object as completeness(mag_2500, z) with no alpha_lambda argument.
     """
     completeness2d = LogisticCompleteness2500(mag_lim_obs=mag_lim_obs,
                                               width=width,
                                               lam_obs=lam_obs,
                                               delta_m=delta_m,
-                                              alpha_nu=alpha_nu)
+                                              alpha_nu=alpha_nu,
+                                              alpha_lambda=alpha_lambda)  # <— store once
 
     # dummies for backward-compatibility; fast path doesn't need grids
     mag_centers = np.array([0.0])
@@ -110,9 +113,15 @@ def get_completeness_function_2d_simple(*args,
         os.makedirs("plots/completeness", exist_ok=True)
 
         z_plot = np.linspace(0, 4, 200)
-        # use a representative slope for the plot
-        alpha_lambda_med = np.median(np.asarray(alpha_lambda))
-        mlim = completeness2d.mlim_2500(z_plot, alpha_lambda=np.full_like(z_plot, alpha_lambda_med))
+        # representative slope for the plot
+        if alpha_lambda is None:
+            # convert from alpha_nu if no alpha_lambda provided
+            alpha_lambda_med = -alpha_nu - 2.0
+        else:
+            alpha_lambda_med = np.median(np.asarray(alpha_lambda))
+
+        mlim = completeness2d.mlim_2500(z_plot,
+                                         alpha_lambda=np.full_like(z_plot, alpha_lambda_med))
 
         plt.figure(figsize=(8,5))
         plt.plot(z_plot, mlim)

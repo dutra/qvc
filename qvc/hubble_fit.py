@@ -130,7 +130,7 @@ def log_likelihood(theta, cosmo_model,
     m_model = M_pred + mu_cosmo  # model-predicted magnitude
 
     ll_completeness = 0.0
-    integrals = None
+    integrals = np.zeros_like(m_obs)  # shape (N,)
     if completeness_params is not None:
         completeness2d, *_ = completeness_params
 
@@ -138,7 +138,7 @@ def log_likelihood(theta, cosmo_model,
         sigma_sel = np.sqrt(m_err**2 + 0.15**2)
 
         # per-object logistic center and scale
-        mlim   = completeness2d.mlim_2500(z, alpha_lambda)       # shape (N,)
+        mlim   = completeness2d.mlim_2500(z)       # shape (N,)
         width  = completeness2d.width              # scalar
 
         x = ((1.0 + z) * completeness2d.lam_obs) / 2500.0
@@ -346,34 +346,37 @@ def run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model='Flatw0waCDM',
                         _agn_data['log_sigma0'], _agn_data['log_tau_UV_RF'], _agn_data['f_host'])
     m_model = M_pred + mu_cosmo
 
-    # Δ relative to the z-dependent limit
-    completeness2d, *_ = completeness_params
-    mlim = completeness2d.mlim_2500(z, _agn_data['alpha_lambda'])
-    delta = m_model - mlim  # negative = safely brighter than the limit
+    if completeness_params is not None:
 
-    print("Δ = m_model - m_lim,2500(z)  (p5, p50, p95):",
-        np.percentile(delta, [5, 50, 95]))
+        # Δ relative to the z-dependent limit
+        completeness2d, *_ = completeness_params
+        mlim = completeness2d.mlim_2500(z)
+        delta = m_model - mlim  # negative = safely brighter than the limit
 
-    # Plot integrals vs Δ
-    plt.figure(figsize=(7.2,5.0))
-    plt.scatter(delta, integrals, s=10, alpha=0.45, label="objects")
+        print("Δ = m_model - m_lim,2500(z)  (p5, p50, p95):",
+            np.percentile(delta, [5, 50, 95]))
 
-    # Overlay the ultra-fast expectation using median selection scatter
-    m_err = _agn_data['apparent_mag_2500_err']
-    sigma_sel = np.sqrt(m_err**2 + 0.15**2)
-    width = completeness2d.width
-    k2 = (np.pi**2) / 8.0
-    s_med = np.median(sigma_sel / width)
-    den_med = np.sqrt(1.0 + k2 * s_med**2)
-    d_grid = np.linspace(delta.min(), delta.max(), 300)
-    model_curve = expit(-d_grid / (width * den_med))   # since mu = (mlim - m_model)/width = -Δ/width
-    plt.plot(d_grid, model_curve, lw=2, label="fast approx (median σ)")
+        # Plot integrals vs Δ
+        plt.figure(figsize=(7.2,5.0))
+        plt.scatter(delta, integrals, s=10, alpha=0.45, label="objects")
 
-    plt.xlabel(r"$\Delta = m_{\rm model} - m_{\rm lim,2500}(z)$  [mag]")
-    plt.ylabel("selection integral")
-    plt.axvline(0.0, ls='--', lw=1, color='k')
-    plt.ylim(0, 1.02); plt.legend(); plt.tight_layout()
-    plt.savefig("plots/completeness/integral_vs_delta_highest_weight.png", dpi=150)
+        # Overlay the ultra-fast expectation using median selection scatter
+        m_err = _agn_data['apparent_mag_2500_err']
+        sigma_sel = np.sqrt(m_err**2 + 0.15**2)
+        width = completeness2d.width
+        k2 = (np.pi**2) / 8.0
+        s_med = np.median(sigma_sel / width)
+        den_med = np.sqrt(1.0 + k2 * s_med**2)
+        d_grid = np.linspace(delta.min(), delta.max(), 300)
+        model_curve = expit(-d_grid / (width * den_med))   # since mu = (mlim - m_model)/width = -Δ/width
+        plt.plot(d_grid, model_curve, lw=2, label="fast approx (median σ)")
+
+        plt.xlabel(r"$\Delta = m_{\rm model} - m_{\rm lim,2500}(z)$  [mag]")
+        plt.ylabel("selection integral")
+        plt.axvline(0.0, ls='--', lw=1, color='k')
+        plt.ylim(0, 1.02); plt.legend(); plt.tight_layout()
+        plt.savefig("plots/completeness/integral_vs_delta_highest_weight.png", dpi=150)
+    
     # ===== (Optional) keep your equal-weight resampling utilities =====
     idx = np.arange(weights.size)
     flat_idx = dyfunc.resample_equal(idx, weights)          # (nsamp,)
@@ -523,7 +526,8 @@ def test():
 
 
     #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("results/data/aug12_chisq_qscpu_N20w4000s1000t8c4.h5", populate_sdss=False)
-    df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("results/data/aug5_fshen11_N20t6w4000s500_merged.h5", populate_sdss=True)
+    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("results/data/aug14_stone_qs_cpu_N20w4000s1000t8c8.h5", populate_sdss=True)
+    df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("results/data/aug13_stone_N10w2000s1000t6c4.h5", populate_sdss=True)
     #df_agn = df_agn[:500]
     #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/july19_goodsources_chisq5and10_mean1_N20w4000s500_merged.h5", populate_sdss=True)
     #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/june1_joint_N20w2000s1000_fits_merged.h5")
@@ -531,7 +535,7 @@ def test():
     #df_agn = df_agn[df_agn['z'] > 1]  # Filter AGN data to z < 2.5
 
     sampler_joint, flat_samples, model_labels, mag_corr, logZ, logZerr = run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model=cosmo_model, 
-                                        only_sna=only_sna, completeness=True, use_full_cov=True,
+                                        only_sna=only_sna, completeness=False, use_full_cov=True,
                                         resume=False)
     if cosmo_model == 'Flatw0waCDM':
         zp = compute_pivot_redshift(flat_samples, cosmo_model)
@@ -563,9 +567,9 @@ def test():
 
     
     print("Plotting completeness vs magnitude at redshifts...")
-    p_detect, mag_centers, z_centers, dm, dz = get_completeness_function_2d_simple(df_agn)
-    plot_completeness_vs_mag_at_redshifts(p_detect, mag_centers, z_centers)
-    plot_completeness_diagnostics(df_agn, p_detect, mag_centers, z_centers)
+    # p_detect, mag_centers, z_centers, dm, dz = get_completeness_function_2d_simple(df_agn)
+    # plot_completeness_vs_mag_at_redshifts(p_detect, mag_centers, z_centers)
+    # plot_completeness_diagnostics(df_agn, p_detect, mag_centers, z_centers)
 
     print("Plotting residuals...")
     plot_full_residuals(df_agn, residuals, flat_samples, cosmo_model, z_agn_pivot, show=False)
