@@ -208,7 +208,7 @@ def run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model='Flatw0waCDM',
                               ]].copy()
 
     if completeness:
-        completeness_params = get_completeness_function_2d_simple(df_agn_filtered, plot=True)
+        completeness_params = get_completeness_function_2d_simple(df_agn_filtered, alpha_lambda=df_agn_filtered['alpha_lambda'].values, plot=True)
 
     else:
         completeness_params = None
@@ -522,7 +522,8 @@ def test():
     global _sna_LogdetCov, _sna_L, _sna_Lower
 
 
-    df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("results/data/aug12_chisq_qscpu_N20w4000s1000t8c4.h5", populate_sdss=False)
+    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("results/data/aug12_chisq_qscpu_N20w4000s1000t8c4.h5", populate_sdss=False)
+    df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("results/data/aug5_fshen11_N20t6w4000s500_merged.h5", populate_sdss=True)
     #df_agn = df_agn[:500]
     #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/july19_goodsources_chisq5and10_mean1_N20w4000s500_merged.h5", populate_sdss=True)
     #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/june1_joint_N20w2000s1000_fits_merged.h5")
@@ -555,6 +556,7 @@ def test():
     #plot_Mi_vs_sigmahat(df_agn, cosmo_model=cosmo_model, show=False)
     #plot_predicted_M2500_vs_sigmahat(flat_samples, df_agn, cosmo_model=cosmo_model, show=False)
     plot_predicted_L2500_vs_sigmahat(flat_samples, df_agn, cosmo_model=cosmo_model, z_agn_pivot=z_agn_pivot, show=False)
+    #plot_predicted_L2500_vs_combined(flat_samples, df_agn, cosmo_model=cosmo_model, z_agn_pivot=z_agn_pivot, show=False)
     #plot_inverted_sigmahat_vs_l2500_pl(flat_samples, df_agn, cosmo_model=cosmo_model, show=False)
     #print("Plotting cosmological posteriors corner plot...")
     plot_cosmo_corner(None, flat_samples, cosmo_model, z_agn_pivot, show=False)

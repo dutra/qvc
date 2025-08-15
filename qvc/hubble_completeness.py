@@ -49,7 +49,7 @@ class LogisticCompleteness2500:
         # alpha_nu = -(alpha_lambda + 2)
         return -(alpha_lambda + 2.0)
 
-    def mlim_2500(self, z, alpha_lambda=None):
+    def mlim_2500(self, z, alpha_lambda):
         """
         Effective m_lim at 2500Å, optionally using per-object alpha_lambda.
         z: array-like
@@ -66,7 +66,7 @@ class LogisticCompleteness2500:
         mlim = self.mag_lim_obs - 2.5 * alpha_nu * np.log10(x) + self.delta_m
         return mlim
 
-    def __call__(self, mag_2500, z, alpha_lambda=None):
+    def __call__(self, mag_2500, z, alpha_lambda):
         """
         p(detect | m_2500, z, alpha_lambda)
         """
@@ -84,10 +84,10 @@ class LogisticCompleteness2500:
 
 def get_completeness_function_2d_simple(*args,
                                         mag_lim_obs=24.5,
-                                        width=1.0,
+                                        width=0.9,
                                         lam_obs=7480.0,
                                         alpha_nu=-0.4,
-                                        delta_m=-1.33,
+                                        delta_m=-1,
                                         alpha_lambda=None,   # <— NEW
                                         plot=False,
                                         **kwargs):
@@ -110,12 +110,9 @@ def get_completeness_function_2d_simple(*args,
         os.makedirs("plots/completeness", exist_ok=True)
 
         z_plot = np.linspace(0, 4, 200)
-        if alpha_lambda is None:
-            mlim = completeness2d.mlim_2500(z_plot)  # uses scalar alpha_nu
-        else:
-            # use a representative slope for the plot
-            alpha_lambda_med = np.median(np.asarray(alpha_lambda))
-            mlim = completeness2d.mlim_2500(z_plot, alpha_lambda=np.full_like(z_plot, alpha_lambda_med))
+        # use a representative slope for the plot
+        alpha_lambda_med = np.median(np.asarray(alpha_lambda))
+        mlim = completeness2d.mlim_2500(z_plot, alpha_lambda=np.full_like(z_plot, alpha_lambda_med))
 
         plt.figure(figsize=(8,5))
         plt.plot(z_plot, mlim)
