@@ -120,33 +120,24 @@ def log_nuLnu_to_m2500(log_nuLnu, z):
 
 def compute_apparent_mag_2500_colin(df):
     # Load Colin's SDSS QSO 2500A magnitudes and merge with df on SDSS_NAME
-    #colin_df = pd.read_csv("data/sdss_qso_mag_2500_colin.csv")
-    #colin_df = pd.read_csv("data/july19_goodsources_chisq5and10_mean1_N20w4000s500_merged_magscorrected_fittedm2500.csv")
-    
-    #colin_df = pd.read_csv("data/aug4_sample_chisqg10_ebv005sn3_magsmean_fittedm2500.csv")
-    #colin_df = pd.read_csv("data/csv/aug10_stone_merged_fittedm2500.csv")
+    fields = {
+            'f_host_4200': float,
+            'apparent_mag_2500': float,
+            'apparent_mag_2500_err': float,
+            'alpha_lambda': float,
+            'alpha_lambda_err': float,
+            'redchi': float
+        }
     # Load and concatenate two CSV files
     colin_df1 = pd.read_csv(
         'data/sample_stone_fittedm2500.csv',
         dtype={'object_id': str},
-        converters={
-            'f_host_4200': float,
-            'apparent_mag_2500': float,
-            'apparent_mag_2500_err': float,
-            'alpha_lambda': float,
-            'redchi': float
-        }
+        converters=fields
     )
     colin_df2 = pd.read_csv(
         'data/sample_chisqg10_ebv005sn3_fittedm2500.csv',
         dtype={'object_id': str},
-        converters={
-            'f_host_4200': float,
-            'apparent_mag_2500': float,
-            'apparent_mag_2500_err': float,
-            'alpha_lambda': float,
-            'redchi': float
-        }
+        converters=fields
     )
     colin_df = pd.concat([colin_df1, colin_df2], ignore_index=True)
     
@@ -157,9 +148,6 @@ def compute_apparent_mag_2500_colin(df):
     mean_err = colin_df.loc[colin_df['apparent_mag_2500_err'] > 0, 'apparent_mag_2500_err'].mean()
     colin_df.loc[colin_df['apparent_mag_2500_err'] == 0, 'apparent_mag_2500_err'] = mean_err
 
-
-
-
     print("Length of colin_df:", len(colin_df))
     print("Number with apparent_mag_2500 > 0:", np.sum(colin_df['apparent_mag_2500'] > 0))
     # Merge on SDSS_NAME, bring in apparent_mag_2500
@@ -167,7 +155,7 @@ def compute_apparent_mag_2500_colin(df):
     print("Length of merged DataFrame:", len(merged))
     missing_ids = set(df['object_id']) - set(colin_df['object_id'])
     print("object_id not in merged:", list(missing_ids))
-    for col in fields:
+    for col in fields.keys():
         df[col] = merged[col]
     return df
 
