@@ -14,7 +14,8 @@ from dynesty.utils import resample_equal
 import pickle
 import multiprocessing
 from scipy.linalg import cho_solve
-
+from dynesty import utils as dyfunc
+from scipy.special import expit  # logistic σ(x) = 1/(1+e^{-x})
 import matplotlib.pyplot as plt
 
 plt.style.use('style.mplstyle')
@@ -22,6 +23,7 @@ plt.style.use('style.mplstyle')
 from hubble_utils import *
 from hubble_plotting import *
 from hubble_model import *
+from hubble_completeness import *
 import os
 import yaml
 
@@ -95,6 +97,8 @@ def log_likelihood(theta, cosmo_model,
     log_tau_UV_RF_err = _agn_data['log_tau_UV_RF_err']
     f_host = _agn_data['f_host']
     f_host_err = _agn_data['f_host_err']
+    alpha_lambda = _agn_data['alpha_lambda']
+    alpha_lambda_err = _agn_data['alpha_lambda_err']
 
     mu_cosmo = cosmo.distmod(z).value
     M_pred = M_model_agn(params['M0_agn'], 
@@ -126,34 +130,39 @@ def log_likelihood(theta, cosmo_model,
     m_model = M_pred + mu_cosmo  # model-predicted magnitude
 
     ll_completeness = 0.0
-    # selection bias correction during inference
+    integrals = None
     if completeness_params is not None:
-        completeness2d, mag_centers, _, dm, _ = completeness_params
+        completeness2d, *_ = completeness_params
 
-        m_grid = mag_centers
-        N_obj = len(z)
+        # selection-only scatter for the detection process (tune the +0.15 if needed)
+        sigma_sel = np.sqrt(m_err**2 + 0.15**2)
 
-        # Shape: (N_obj, N_grid)
-        m_grid_broadcasted = np.tile(m_grid, (N_obj, 1))
-        z_broadcasted = np.tile(z[:, None], (1, len(m_grid)))
+        # per-object logistic center and scale
+        mlim   = completeness2d.mlim_2500(z, alpha_lambda)       # shape (N,)
+        width  = completeness2d.width              # scalar
 
-        # Gaussian weights: P(m | model)
-        gauss_weights = stats.norm.pdf(m_grid_broadcasted, loc=m_model[:, None], scale=mu_err[:, None])
-        gauss_weights /= np.trapezoid(gauss_weights, m_grid, axis=1)[:, None] + 1e-12
+        x = ((1.0 + z) * completeness2d.lam_obs) / 2500.0
+        coeff = 2.5 * np.log10(x)                     # d mlim / d alpha_lambda
+        sigma_mlim = coeff * alpha_lambda_err
+        sigma_sel = np.sqrt(sigma_sel**2 + sigma_mlim**2)
 
-        # Evaluate p(detect | m, z)
-        p_detect = completeness2d(m_grid_broadcasted, z_broadcasted)
-        p_detect = soft_clip(p_detect, floor=1e-12, sharpness=10)
+        mu = (m_model - mlim) / width              # shape (N,)
+        s  = (sigma_sel / width)                   # shape (N,)
 
-        # Marginalized likelihood: ∫ P(m | model) × p_detect(m, z) dm
-        integrals = np.trapezoid(gauss_weights * p_detect, m_grid, axis=1)
-        integrals = np.maximum(integrals, 1e-12)
+        # probit–logit approximation: E[σ(mu + sX)]
+        k2 = (np.pi**2) / 8.0
+        denom = np.sqrt(1.0 + k2 * s**2)
+        integrals = expit(-mu / denom)              # in (0,1)
+
+        # small "leakage" so nothing goes exactly to 0
+        epsilon = 0.01                             # tune 0.01–0.05
+        integrals = epsilon + (1.0 - epsilon) * integrals
+
+        # numerical safety
+        integrals = np.clip(integrals, 1e-12, 1.0)
 
         ll_completeness = np.sum(np.log(integrals))
-
-    # print(f"Log-likelihood components: ll_snia={ll_snia:.2f}, ll_agn={ll_agn:.2f}, ll_completeness={ll_completeness:.2f}")
-    return ll_snia + ll_agn + ll_completeness
-
+    return ll_snia + ll_agn - ll_completeness, integrals
 # Globals used by dynesty
 _dynesty_config = {}
 
@@ -195,11 +204,12 @@ def run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model='Flatw0waCDM',
                                         'm_b_corr', 'x1', 'c', 'biasCor_m_b', 'HOST_LOGMASS']].copy()
     df_agn_filtered = df_agn[['z', 'apparent_mag_2500', 'apparent_mag_2500_err', 'apparent_mag_i',
                               'log_sigma0', 'log_sigma0_err', 'log_tau_UV_RF', 'log_tau_UV_RF_err',
-                              'f_host', 'f_host_err',
+                              'f_host', 'f_host_err', 'alpha_lambda', 'alpha_lambda_err'
                               ]].copy()
 
     if completeness:
-        completeness_params = get_completeness_function_2d(df_agn_filtered)
+        completeness_params = get_completeness_function_2d_simple(df_agn_filtered, plot=True)
+
     else:
         completeness_params = None
 
@@ -244,11 +254,11 @@ def run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model='Flatw0waCDM',
         if resume:
             sampler = DynamicNestedSampler.restore(f'data/dynesty_{cosmo_model}.save', pool=pool)
         else:
-            print("Testing likelihood and prior transform with random samples...")
-            u = np.random.rand(10, ndim)
-            v = pool.map(prior_transform_dynesty, u)
-            l = pool.map(loglike_dynesty, v)
-            print("Fraction of finite likelihoods:", np.sum(np.isfinite(l)) / len(l))
+            # print("Testing likelihood and prior transform with random samples...")
+            # u = np.random.rand(10, ndim)
+            # v = pool.map(prior_transform_dynesty, u)
+            # l = pool.map(loglike_dynesty, v)
+            # print("Fraction of finite likelihoods:", np.sum(np.isfinite(l)) / len(l))
 
             sampler = DynamicNestedSampler(
                 loglike_dynesty,
@@ -258,7 +268,8 @@ def run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model='Flatw0waCDM',
                 bound='multi',
                 sample='rwalk',
                 pool=pool,
-                queue_size=num_cpus
+                queue_size=num_cpus,
+                blob=True
             )
         sampler.run_nested(
             resume=resume,
@@ -271,21 +282,129 @@ def run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model='Flatw0waCDM',
         )
 
     results = sampler.results
+    plot_dynesty(results, cosmo_model)
     logZ, logZerr = results.logz[-1], results.logzerr[-1]
     print(f"\nBayesian evidence logZ = {logZ:.2f} ± {logZerr:.2f}")
     if logZerr > 1:
         print("Warning: logZ error is large, consider increasing nlive or maxiter.")
 
-    unweighted_samples, weights = results.samples, np.exp(results.logwt - results.logz[-1])
-    flat_samples = resample_equal(unweighted_samples, weights)
-    median_samples = np.median(flat_samples, axis=0)
+    # --- pull arrays from results ---
+    samples = results.samples                               # (nsamp, ndim)
+    logl    = results.logl                                  # (nsamp,)
+    weights = np.exp(results.logwt - results.logz[-1])      # (nsamp,)
+    blobs   = results.blob                                 # (nsamp, nobj) if blob=True
 
-    print("Dynesty results stats:")
-    print("  samples shape:", unweighted_samples.shape)
-    print("  weights max:", np.max(weights))
-    print("  effective samples:", np.sum(weights)**2 / np.sum(weights**2))
+    # --- safety checks ---
+    if blobs is None:
+        raise RuntimeError("results.blobs is None. Did you run with blob=True and return (logl, blob)?")
+
+    # grab redshifts (assumes your pipeline set _agn_data)
+    try:
+        z = _agn_data['z']
+    except Exception as e:
+        raise RuntimeError("Couldn't find AGN redshifts (_agn_data['z']). Make sure _agn_data is set.") from e
+
+    # ===== Highest posterior weight (MAP-ish) sample =====
+    idx_max_weight = np.argmax(weights)
+    theta_star     = samples[idx_max_weight]
+    integrals      = np.asarray(blobs[idx_max_weight])      # already probabilities
+    integrals      = np.clip(integrals, 1e-12, 1.0)
+    sel_penalty    = -np.log(integrals)
+
+    print("\nHighest-weight (posterior) sample:")
+    print("  idx:", idx_max_weight)
+    print("  logl:", float(logl[idx_max_weight]))
+    print("  weight:", float(weights[idx_max_weight]))
+    print("  integrals[:10]:", integrals[:10])
+
+    # ===== Plot: selection penalty vs redshift =====
+    plt.figure(figsize=(8,5))
+    plt.scatter(z, sel_penalty, s=16, alpha=0.75)
+    plt.xlabel("Redshift (z)")
+    plt.ylabel(r"$-\ln$ selection integral")
+    plt.title("Selection penalty vs z — highest posterior weight sample")
+    plt.grid(True); plt.tight_layout()
+    plt.savefig("plots/completeness/penalty_vs_z_highest_weight.png", dpi=150)
+
+    # ===== Δ diagnostic (how close each object is to the effective limit) =====
+    # Rebuild cosmology + m_model for the same theta_star
+    priors, model_labels, _ = get_model_params(cosmo_model)
+    params_star = dict(zip(model_labels, theta_star))
+
+    if cosmo_model == 'FlatwCDM':
+        cosmo = FlatwCDM(H0=params_star['H0'], Om0=params_star['Om0'], w0=params_star['w0'])
+    elif cosmo_model == 'Flatw0waCDM':
+        cosmo = FlatwpwaCDM(H0=params_star['H0'], Om0=params_star['Om0'],
+                            wp=params_star['wp'], wa=params_star['wa'], zp=z_agn_pivot)
+    elif cosmo_model == 'FlatLambdaCDM':
+        cosmo = FlatLambdaCDM(H0=params_star['H0'], Om0=params_star['Om0'])
+    else:
+        raise ValueError(f"Unknown cosmo_model={cosmo_model}")
+
+    mu_cosmo = cosmo.distmod(z).value
+    M_pred = M_model_agn(params_star['M0_agn'], params_star['alpha_agn'], params_star['beta_agn'],
+                        _agn_data['log_sigma0'], _agn_data['log_tau_UV_RF'], _agn_data['f_host'])
+    m_model = M_pred + mu_cosmo
+
+    # Δ relative to the z-dependent limit
+    completeness2d, *_ = completeness_params
+    mlim = completeness2d.mlim_2500(z, _agn_data['alpha_lambda'])
+    delta = m_model - mlim  # negative = safely brighter than the limit
+
+    print("Δ = m_model - m_lim,2500(z)  (p5, p50, p95):",
+        np.percentile(delta, [5, 50, 95]))
+
+    # Plot integrals vs Δ
+    plt.figure(figsize=(7.2,5.0))
+    plt.scatter(delta, integrals, s=10, alpha=0.45, label="objects")
+
+    # Overlay the ultra-fast expectation using median selection scatter
+    m_err = _agn_data['apparent_mag_2500_err']
+    sigma_sel = np.sqrt(m_err**2 + 0.15**2)
+    width = completeness2d.width
+    k2 = (np.pi**2) / 8.0
+    s_med = np.median(sigma_sel / width)
+    den_med = np.sqrt(1.0 + k2 * s_med**2)
+    d_grid = np.linspace(delta.min(), delta.max(), 300)
+    model_curve = expit(-d_grid / (width * den_med))   # since mu = (mlim - m_model)/width = -Δ/width
+    plt.plot(d_grid, model_curve, lw=2, label="fast approx (median σ)")
+
+    plt.xlabel(r"$\Delta = m_{\rm model} - m_{\rm lim,2500}(z)$  [mag]")
+    plt.ylabel("selection integral")
+    plt.axvline(0.0, ls='--', lw=1, color='k')
+    plt.ylim(0, 1.02); plt.legend(); plt.tight_layout()
+    plt.savefig("plots/completeness/integral_vs_delta_highest_weight.png", dpi=150)
+    # ===== (Optional) keep your equal-weight resampling utilities =====
+    idx = np.arange(weights.size)
+    flat_idx = dyfunc.resample_equal(idx, weights)          # (nsamp,)
+    flat_samples = samples[flat_idx]
+    flat_blobs   = blobs[flat_idx]
+
+    # Posterior summaries over resampled blobs (per-object)
+    posterior_mean_logint = np.mean(flat_blobs, axis=0)
+    posterior_med_logint  = np.median(flat_blobs, axis=0)
+
+    print("\nPosterior (equal-weight) blob summaries:")
+    print("  per-object mean (first 10):", posterior_mean_logint[:10])
+    print("  per-object median (first 10):", posterior_med_logint[:10])
+
+    # Stats
+    neff = (weights.sum()**2) / (weights**2).sum()
+    print("\nDynesty results stats:")
+    print("  samples shape:", samples.shape)
+    print("  blobs shape:", blobs.shape)
+    print("  weights max:", float(weights.max()))
+    print("  effective samples (ESS):", float(neff))
+    print("  resampled samples shape:", flat_samples.shape)
+    print("  resampled blobs shape:", flat_blobs.shape)
+
+    # Optional: median params from equal-weight posterior
+    median_samples = np.median(flat_samples, axis=0)
+    print("\nMedian parameters (equal-weight posterior):")
+    print(median_samples)
+
+    # If you want to keep your existing summary:
     display_results_summary(flat_samples, cosmo_model, z_agn_pivot)
-    plot_dynesty(results, cosmo_model)
 
     params = dict(zip(model_labels, median_samples))
 
@@ -394,62 +513,17 @@ def main():
 
 
 def test():
-    cosmo_model = 'Flatw0waCDM'
-    #cosmo_model = 'FlatwCDM'
+    #cosmo_model = 'Flatw0waCDM'
+    cosmo_model = 'FlatwCDM'
     # cosmo_model = 'FlatLambdaCDM'
     only_sna = False
 
     # Load data
     global _sna_LogdetCov, _sna_L, _sna_Lower
 
-    #df_agn, df_pantheon, Cov_inv, logdetCov, L = load_data("data/N20_w500_grace/may21_joint_fits_N20_merged.h5")
-    #df_agn, df_pantheon, Cov_inv, logdetCov, L = load_data("data/may23_all_merged.h5", populate_sdss=False)
-    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/june1_joint_N20w2000s1000_fits_merged.h5")
-    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/june30_joint_allebv005_N20w500s250_merged.h5")
-    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/july5_joint_chisq_lcrf2500_mean1_N20w2000s1000_merged.h5")
-
-    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/july12_joint_mean1_zsort_N20w2000s500_merged.h5")
-    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/july14_chi10_extinction04_ebv005_N20w500s250_merged.h5")
-    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/july8_joint_chisq_lcrf_exactly2000_N20w500s250_merged.h5")
-    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/july15_chi2_otherfilters_N30w500s250_merged.h5")
-    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/july15_nochi2_filters_N30w250s100_merged.h5")
-    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/july16_nochi2_filters_N30w500s250_merged.h5")
-    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/july17_goodsources_chisq5and10_N30w250s100_merged.h5")
-    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/july17_goodsources_chisq5and10_mean01_N30w250s100_merged.h5")
-    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/july17_goodsources_chisq5and10_mean01_N20w4000s500_merged.h5")
-    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/july18_goodsources_chisq5and10_mean1_N20w4000s500_merged.h5")
-    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/july19_goodsources_chisq2_otherfilters_mean1_N20w4000s500_merged.h5")
-    
-    
-    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/july19_goodsources_chisq10_otherfilters_mean1_N20w4000s500_merged.h5")
-    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/july19_goodsources_chisq5and10_mean1_N20w4000s500_merged.h5", populate_sdss=True)
-    
-    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/july20_goodsources_chisq5and10_hostpl_N20w4000s500_merged.h5")
-    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/july21_chisq2_hostpl_N20w4000s200_merged.h5")
-    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/july27_chisq2_preview_tree8_N20w4000s500_merged.h5", populate_sdss=True)
-    
-    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/july31_chisq2_preview_tree8_N10w1000s250_merged.h5", populate_sdss=False)
-    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/july31_chisq2_preview_grae_tree8_N10w1000s250_grace_merged.h5", populate_sdss=False)
-    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/aug1_fhostshen_wred_N10t8w2000s500_merged.h5", populate_sdss=False)
-    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/aug1_wored_N10t8w2000s500_merged.h5", populate_sdss=False)
-    
-    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/aug4_fhostshen11_N10t6w1000s500_merged.h5", populate_sdss=False)
-    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/aug4_fhostzero_N10t6w1000s500_merged.h5", populate_sdss=False)
-    
-    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/aug5_fshen11_N20t6w4000s500_merged.h5", populate_sdss=False)
-    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/aug5_fshen11_fhostnocap_N10t6w1000s500_merged.h5", populate_sdss=False)
-
-    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/aug6_fshen11_fhostnocap_bplzero_N10t6w1000s500_merged.h5", populate_sdss=False)
-    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/aug6_fshen11_fhostnocap_bplzero_N10t6w2000s500_merged.h5", populate_sdss=False)
-    
-    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("results/aug9_stone_N10w1000s500t6c4_merged.h5", populate_sdss=True)
-    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("results/aug9_stone_bwb_N10w1000s500t6c4_merged.h5", populate_sdss=True)
-    
-    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("results/aug10_stonebwb_N20w2000s1000t6c4.h5", populate_sdss=False)
-    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("results/aug10_stonebwb_N30w2000s1000t6c4.h5", populate_sdss=False)
 
     df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("results/data/aug12_chisq_qscpu_N20w4000s1000t8c4.h5", populate_sdss=False)
-
+    #df_agn = df_agn[:500]
     #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/july19_goodsources_chisq5and10_mean1_N20w4000s500_merged.h5", populate_sdss=True)
     #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("data/june1_joint_N20w2000s1000_fits_merged.h5")
     #df_agn = df_agn[:400]
@@ -487,9 +561,9 @@ def test():
 
     
     print("Plotting completeness vs magnitude at redshifts...")
-    #p_detect, mag_centers, z_centers, dm, dz = get_completeness_function_2d(df_agn)
-    #plot_completeness_vs_mag_at_redshifts(p_detect, mag_centers, z_centers)
-    #plot_completeness_diagnostics(df_agn, p_detect, mag_centers, z_centers)
+    p_detect, mag_centers, z_centers, dm, dz = get_completeness_function_2d_simple(df_agn)
+    plot_completeness_vs_mag_at_redshifts(p_detect, mag_centers, z_centers)
+    plot_completeness_diagnostics(df_agn, p_detect, mag_centers, z_centers)
 
     print("Plotting residuals...")
     plot_full_residuals(df_agn, residuals, flat_samples, cosmo_model, z_agn_pivot, show=False)
