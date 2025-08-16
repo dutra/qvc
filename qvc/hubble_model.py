@@ -9,19 +9,19 @@ def K_corr(z, alpha_nu):
     #return -2.5 * (1 + alpha_nu) * np.log10(1 + z)
 
 # --- Reference constants and pivot values ---
-log_sigma0_pivot = -0.74 # TODO make this a parameter
+log_sigma_UV_pivot = -0.74 # TODO make this a parameter
 log_tau_UV_RF_pivot = 2.7  # TODO make this a parameter
-f_host_pivot = 0.2
+bwb_beta_pivot = 0.082
 #M0_agn_offset = -5.179  # TODO make this a parameter
 #z_agn_pivot = 1.2 # TODO make this a parameter
 alpha_nu_pivot = -1
 
 # --- AGN model ---
-# def M_model_agn(M0_agn, alpha_agn, log_sigma0):
-#     return M0_agn - 26 + alpha_agn *  (log_sigma0 - log_sigma_hat_pivot)
+# def M_model_agn(M0_agn, alpha_agn, log_sigma_UV):
+#     return M0_agn - 26 + alpha_agn *  (log_sigma_UV - log_sigma_hat_pivot)
 
-# def M_model_agn(M0_sn, delta_M_agn, alpha_agn, beta_agn, log_sigma0, log_tau_UV_RF):
-#     return M0_sn - M0_agn_offset + alpha_agn *  (log_sigma0 - log_sigma_hat_pivot) + beta_agn * (log_tau_UV_RF - log_tau_UV_RF_pivot)
+# def M_model_agn(M0_sn, delta_M_agn, alpha_agn, beta_agn, log_sigma_UV, log_tau_UV_RF):
+#     return M0_sn - M0_agn_offset + alpha_agn *  (log_sigma_UV - log_sigma_hat_pivot) + beta_agn * (log_tau_UV_RF - log_tau_UV_RF_pivot)
 
 
 def broken_power_law_err(x, x_err, x_break, d1, d2, ds):
@@ -44,24 +44,24 @@ def broken_power_law(x, x_break, d1, d2, ds):
     return d1 * delta + term - offset
 
 # # Broken power law model
-# def M_model_agn(M0_agn, log_sigma0_break, eta_A1_agn, eta_A2_agn, eta_break_agn, beta_agn, log_sigma0, log_tau_UV_RF):
-#     """AGN model with broken power law in log_sigma0."""
-#     bpl = broken_power_law(log_sigma0, log_sigma0_break, eta_A1_agn, eta_A2_agn, ds=eta_break_agn)
+# def M_model_agn(M0_agn, log_sigma_UV_break, eta_A1_agn, eta_A2_agn, eta_break_agn, beta_agn, log_sigma_UV, log_tau_UV_RF):
+#     """AGN model with broken power law in log_sigma_UV."""
+#     bpl = broken_power_law(log_sigma_UV, log_sigma_UV_break, eta_A1_agn, eta_A2_agn, ds=eta_break_agn)
 #     return M0_agn + bpl + beta_agn * (log_tau_UV_RF - log_tau_UV_RF_pivot)
 
 # # keep this same(ish) signature as M_model_agn + x_err
-# def M_model_agn_err(M0_agn, log_sigma0_break, eta_A1_agn, eta_A2_agn, eta_break_agn, beta_agn,
-#                     log_sigma0, log_sigma0_err, log_tau_UV_RF_err):
-#     err_bpl = broken_power_law_err(log_sigma0, log_sigma0_err, log_sigma0_break, eta_A1_agn, eta_A2_agn, ds=eta_break_agn)    
+# def M_model_agn_err(M0_agn, log_sigma_UV_break, eta_A1_agn, eta_A2_agn, eta_break_agn, beta_agn,
+#                     log_sigma_UV, log_sigma_UV_err, log_tau_UV_RF_err):
+#     err_bpl = broken_power_law_err(log_sigma_UV, log_sigma_UV_err, log_sigma_UV_break, eta_A1_agn, eta_A2_agn, ds=eta_break_agn)    
 #     return np.sqrt(err_bpl**2 + (beta_agn * log_tau_UV_RF_err)**2)
 
 # # Linear model
-def M_model_agn(M0_agn, alpha_agn, beta_agn, log_sigma0, log_tau_UV_RF, f_host):
-    return M0_agn + alpha_agn * (log_sigma0 - log_sigma0_pivot) + beta_agn * (log_tau_UV_RF - log_tau_UV_RF_pivot)# + eta_A2_agn * (f_host - f_host_pivot)
+def M_model_agn(M0_agn, alpha_agn, beta_agn, gamma_agn, log_sigma_UV, log_tau_UV_RF, bwb_beta):
+    return M0_agn + alpha_agn * (log_sigma_UV - log_sigma_UV_pivot) + beta_agn * (log_tau_UV_RF - log_tau_UV_RF_pivot) + gamma_agn * (bwb_beta - bwb_beta_pivot)
     
-def M_model_agn_err(M0_agn, alpha_agn, beta_agn,
-                    log_sigma0, log_sigma0_err, log_tau_UV_RF_err, f_host_err):
-    return np.sqrt((alpha_agn * log_sigma0_err)**2 + (beta_agn * log_tau_UV_RF_err)**2)# + (eta_A2_agn * f_host_err)**2)
+def M_model_agn_err(M0_agn, alpha_agn, gamma_agn, beta_agn,
+                    log_sigma_UV, log_sigma_UV_err, log_tau_UV_RF_err, bwb_beta_err):
+    return np.sqrt((alpha_agn * log_sigma_UV_err)**2 + (beta_agn * log_tau_UV_RF_err)**2 + (gamma_agn * bwb_beta_err)**2)
 
 
 def M_model_SN(m_b_corr, host_logmass, M0_sn, gamma_sn, tau_Ms):
@@ -81,6 +81,7 @@ def get_model_params(cosmo_model):
         ("M0_agn", (-24, -17)),         # M0_agn
         ("alpha_agn",   (-10, 10)),         # AGN sigma correlation
         ("beta_agn",    (-10, 10)),         # AGN tau correlation
+        ("gamma_agn",    (-10, 10)),         
         ("log_f",       (-3, 0.5)),
         ("H0",          (65, 80)),
         #("Om0",         (0.32, 0.324)),
@@ -111,7 +112,7 @@ def get_model_params(cosmo_model):
         "tau_Ms": r"$\tau_{M_s}$",
         "M0_sn": r"$M^0_{\rm SN}$",
         "M0_agn": r"$M^0_{\rm AGN}$",
-        "log_sigma0_break": r"$\log_{10}\sigma_{\rm 0,break}$",
+        "log_sigma_UV_break": r"$\log_{10}\sigma_{\rm 0,break}$",
         "eta_A1_agn": r"$\eta_{A1, \rm AGN}$",
         "eta_A2_agn": r"$\eta_{A2, \rm AGN}$",
         "eta_break_agn": r"$\eta_{\rm break, AGN}$",

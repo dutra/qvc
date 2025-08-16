@@ -10,7 +10,7 @@ from astropy.io import fits
 from astropy.table import Table
 from astropy.coordinates import SkyCoord, match_coordinates_sky
 from astropy import units as u
-from astroquery.vizier import Vizier
+#from astroquery.vizier import Vizier
 from tqdm import tqdm
 import warnings
 from scipy import stats
@@ -41,7 +41,7 @@ def find_optimal_pivot(flat_samples,
     param_indices : dict
         Dictionary mapping parameter names to column indices in flat_samples.
     df_agn : DataFrame
-        AGN data with columns: 'z', 'alpha_nu', 'log_sigma0', 'log_tau_UV_RF'.
+        AGN data with columns: 'z', 'alpha_nu', 'log_sigma_UV', 'log_tau_UV_RF'.
     apparent_mag : array-like
         Observed apparent magnitude at 2500 Å for each AGN.
     z_grid : array-like
@@ -77,12 +77,12 @@ def find_optimal_pivot(flat_samples,
         M_pred_samples = np.array([
             apparent_mag_2500 - delta_K - M_model_agn(
                 s[param_indices['M0_agn']],
-                s[param_indices['log_sigma0_break']],
+                s[param_indices['log_sigma_UV_break']],
                 s[param_indices['eta_A1_agn']],
                 s[param_indices['eta_A2_agn']],
                 s[param_indices['eta_break_agn']],
                 s[param_indices['beta_agn']],
-                df_agn['log_sigma0'].values,
+                df_agn['log_sigma_UV'].values,
                 df_agn['log_tau_UV_RF'].values
             )
             for s in flat_samples
@@ -1207,11 +1207,11 @@ def apply_forward_completeness_correction(df_agn, params, cosmo_model, completen
     # Compute model-predicted absolute magnitude
     M_model = M_model_agn(
         params['M0_agn'],
-        params['log_sigma0_break'],
+        params['log_sigma_UV_break'],
         params['eta_A1_agn'], params['eta_A2_agn'],
         params['eta_break_agn'],
         params['beta_agn'],
-        df_agn['log_sigma0'].values,
+        df_agn['log_sigma_UV'].values,
         df_agn['log_tau_UV_RF'].values
     )
 
@@ -1224,12 +1224,12 @@ def apply_forward_completeness_correction(df_agn, params, cosmo_model, completen
         df_agn['apparent_mag_2500_err'].values**2 +
         M_model_agn_err(
             params['M0_agn'],
-            params['log_sigma0_break'],
+            params['log_sigma_UV_break'],
             params['eta_A1_agn'], params['eta_A2_agn'],
             params['eta_break_agn'],
             params['beta_agn'],
-            df_agn['log_sigma0'].values,
-            df_agn['log_sigma0_err'].values,
+            df_agn['log_sigma_UV'].values,
+            df_agn['log_sigma_UV_err'].values,
             df_agn['log_tau_UV_RF'].values
         )**2 +
         (2.5 * 0.3 * np.log10(1 + df_agn['z'].values))**2 +

@@ -117,26 +117,30 @@ def log_likelihood(theta, cosmo_model,
     z = _agn_data['z']
     m_obs = _agn_data['apparent_mag_2500']
     m_err = _agn_data['apparent_mag_2500_err']
-    log_sigma0 = _agn_data['log_sigma0']
-    log_sigma0_err = _agn_data['log_sigma0_err']
+    log_sigma_UV = _agn_data['log_sigma_UV']
+    log_sigma_UV_err = _agn_data['log_sigma_UV_err']
     log_tau_UV_RF = _agn_data['log_tau_UV_RF']
     log_tau_UV_RF_err = _agn_data['log_tau_UV_RF_err']
-    f_host = _agn_data['f_host']
-    f_host_err = _agn_data['f_host_err']
+    bwb_beta = _agn_data['bwb_beta']
+    bwb_beta_err = _agn_data['bwb_beta_err']
 
     mu_cosmo = cosmo.distmod(z).value
     M_pred = M_model_agn(params['M0_agn'], 
-                         params['alpha_agn'], params['beta_agn'],
-                         log_sigma0, log_tau_UV_RF,
-                         f_host)
+                         params['alpha_agn'],
+                         params['beta_agn'],
+                         params['gamma_agn'],
+                         log_sigma_UV, log_tau_UV_RF,
+                         bwb_beta)
     
 
     mu_pred = m_obs - M_pred 
     M_i_pred_err = M_model_agn_err(params['M0_agn'],
-                         params['alpha_agn'], params['beta_agn'],
-                        log_sigma0, log_sigma0_err,
+                         params['alpha_agn'], \
+                        params['beta_agn'],
+                        params['gamma_agn'],
+                        log_sigma_UV, log_sigma_UV_err,
                         log_tau_UV_RF_err,
-                        f_host_err)
+                        bwb_beta_err)
     
     mu_err = np.sqrt(
         m_err**2 +
@@ -205,8 +209,8 @@ def run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model='Flatw0waCDM',
     df_pantheon_filtered = df_pantheon[['zHD', 'MU_SH0ES', 'MU_SH0ES_ERR_DIAG', 'CEPH_DIST', 'IS_CALIBRATOR',
                                         'm_b_corr', 'x1', 'c', 'biasCor_m_b', 'HOST_LOGMASS']].copy()
     df_agn_filtered = df_agn[['z', 'apparent_mag_2500', 'apparent_mag_2500_err', 'apparent_mag_i',
-                              'log_sigma0', 'log_sigma0_err', 'log_tau_UV_RF', 'log_tau_UV_RF_err',
-                              'f_host', 'f_host_err',
+                              'log_sigma_UV', 'log_sigma_UV_err', 'log_tau_UV_RF', 'log_tau_UV_RF_err',
+                              'bwb_beta', 'bwb_beta_err',
                               ]].copy()
 
     if completeness:
@@ -215,13 +219,16 @@ def run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model='Flatw0waCDM',
         completeness_params = None
 
     z_pivot = (1 / np.exp(np.mean(np.log(1 / (1 + df_agn_filtered['z']))))) - 1
-    #print(f"Log sigma hat pivot: {log_sigma0_pivot:.3f}, log tau UV RF pivot: {df_agn_filtered['log_tau_UV_RF'].median():.3f}")
+    #print(f"Log sigma hat pivot: {log_sigma_UV_pivot:.3f}, log tau UV RF pivot: {df_agn_filtered['log_tau_UV_RF'].median():.3f}")
     print("log tau UV RF mean: ", np.average(df_agn_filtered['log_tau_UV_RF']))
     print("log tau UV RF pivot: ", np.average(df_agn_filtered['log_tau_UV_RF'], weights=1 / df_agn_filtered['log_tau_UV_RF_err']**2))
     
-    print("log sigma0 mean: ", np.average(df_agn_filtered['log_sigma0']))
-    print("log sigma0 pivot: ", np.average(df_agn_filtered['log_sigma0'], weights=1 / (df_agn_filtered['log_sigma0_err'])**2))
+    print("log sigma0 mean: ", np.average(df_agn_filtered['log_sigma_UV']))
+    print("log sigma0 pivot: ", np.average(df_agn_filtered['log_sigma_UV'], weights=1 / (df_agn_filtered['log_sigma_UV_err'])**2))
     
+    print("bwb_beta pivot: ", np.average(df_agn_filtered['bwb_beta'], weights=1 / (df_agn_filtered['bwb_beta_err'])**2))
+    
+
     print(f"z mean: {df_agn_filtered['z'].mean():.3f},  z_agn_pivot: {z_pivot:.3f}")
 
     #print(f"Mean AGN M: {df_agn_filtered['M_2500'].mean()}, delta_M_agn ~ {df_agn_filtered['M_2500'].mean()-(-19.3):.3f}")
@@ -428,7 +435,9 @@ def test():
 
     #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("results/data/aug14_stone_qs_cpu_N20w2000s500t8c2.h5", populate_sdss=False)
     #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("results/data/aug13_stone_qs_cpu_N20w4000s1000t8c4.h5", populate_sdss=False)
-    df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("results/data/aug15_chisq_nobwb_qscpu_N20w4000s1000t8c4.h5", populate_sdss=False)
+    
+    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("results/data/aug15_chisq_nobwb_qscpu_N20w4000s1000t8c4.h5", populate_sdss=False)
+    df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("results/data/aug15b_stone_nobwb_widerpriors_qscpu_N20w4000s1000t8c4.h5", populate_sdss=False)
 
     sampler_joint, flat_samples, model_labels, mag_corr, logZ, logZerr = run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model=cosmo_model, 
                                                         only_sna=False, completeness=True, use_full_cov=True,
