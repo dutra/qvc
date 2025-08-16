@@ -154,6 +154,7 @@ def log_likelihood(theta, cosmo_model,
     m_model = M_pred + mu_cosmo  # model-predicted magnitude
 
     ll_completeness = 0.0
+    integrals = np.zeros_like(z)  # shape (N_obj,)
     if completeness_params is not None:
         completeness2d, mag_centers, _, _, _ = completeness_params
         ll_completeness, integrals = completeness_loglike(
@@ -162,7 +163,7 @@ def log_likelihood(theta, cosmo_model,
         )
 
     # print(f"Log-likelihood components: ll_snia={ll_snia:.2f}, ll_agn={ll_agn:.2f}, ll_completeness={ll_completeness:.2f}")
-    return ll_snia + ll_agn - ll_completeness, np.log(integrals)
+    return ll_snia + ll_agn - ll_completeness, integrals
 
 # Globals used by dynesty
 _dynesty_config = {}
@@ -278,7 +279,7 @@ def run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model='Flatw0waCDM',
             dlogz_init=dlogz_init,
             n_effective=10,               
             nlive_init=20 * ndim,         
-            nlive_batch=5 * ndim  # 2 * ndim is low, but seems to work
+            nlive_batch=10 * ndim  # 2 * ndim is low, but seems to work
         )
 
     results = sampler.results
@@ -307,24 +308,24 @@ def run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model='Flatw0waCDM',
 
     # ===== Highest posterior weight (MAP-ish) sample =====
     idx_max_weight = np.argmax(weights)
-    logint_max_w   = blobs[idx_max_weight]  # this is np.log(integrals) for that sample, shape: (nobj,)
+    integrals_max_w   = blobs[idx_max_weight]  # this is integrals for that sample, shape: (nobj,)
 
     print("\nHighest-weight (posterior) sample:")
     print("  idx:", idx_max_weight)
     print("  logl:", float(logl[idx_max_weight]))
     print("  weight:", float(weights[idx_max_weight]))
-    print("  (preview) log(integrals)[:10]:", logint_max_w[:10])
+    print("  (preview) integrals[:10]:", integrals_max_w[:10])
 
     # ===== Plot: log(integrals) vs redshift for highest-weight sample =====
     plt.figure(figsize=(8, 5))
-    plt.scatter(z, np.exp(logint_max_w), s=16, alpha=0.75)
+    plt.scatter(z, integrals_max_w, s=16, alpha=0.75)
     plt.xlabel("Redshift (z)")
     plt.ylabel("integral  (completeness)")
     plt.title("Completeness integrals vs z — highest posterior weight sample")
     plt.grid(True)
     plt.tight_layout()
     # Optional: save to disk
-    plt.savefig("plots/completeness/log_integrals_vs_z_highest_weight.png", dpi=150)
+    plt.savefig("plots/completeness/integrals_vs_z_highest_weight.png", dpi=150)
     #plt.show()
 
     # ===== (Optional) keep your equal-weight resampling utilities =====
@@ -427,7 +428,7 @@ def test():
 
     #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("results/data/aug14_stone_qs_cpu_N20w2000s500t8c2.h5", populate_sdss=False)
     #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("results/data/aug13_stone_qs_cpu_N20w4000s1000t8c4.h5", populate_sdss=False)
-    df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("results/data/aug12_chisq_qscpu_N20w4000s1000t8c4.h5", populate_sdss=False)
+    df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("results/data/aug15_chisq_nobwb_qscpu_N20w4000s1000t8c4.h5", populate_sdss=False)
 
     sampler_joint, flat_samples, model_labels, mag_corr, logZ, logZerr = run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model=cosmo_model, 
                                                         only_sna=False, completeness=True, use_full_cov=True,

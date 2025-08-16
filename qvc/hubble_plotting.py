@@ -18,7 +18,7 @@ from dynesty.utils import resample_equal
 from tqdm import tqdm
 from dynesty import plotting as dyplot
 
-def plot_dynesty(results, cosmo_model, basename="plots/hubble/dynesty", show=False):
+def plot_dynesty(results, cosmo_model, basename="plots/hubble/", show=False):
     """
     Plot dynesty diagnostics: runplot, traceplot, and cornerpoints using dyplot.
     Saves figures to files with the given basename.

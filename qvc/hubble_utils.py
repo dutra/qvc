@@ -139,7 +139,18 @@ def compute_apparent_mag_2500_colin(df):
         dtype={'object_id': str},
         converters=fields
     )
-    colin_df = pd.concat([colin_df1, colin_df2], ignore_index=True)
+    # Merge on object_id, giving priority to colin_df2 values where available
+    colin_df = pd.merge(
+        colin_df1, colin_df2, 
+        on='object_id', 
+        how='outer', 
+        suffixes=('', '_2')
+    )
+    # For each field, prefer colin_df2 value if present, else colin_df1
+    for col in fields.keys():
+        colin_df[col] = colin_df[f"{col}_2"].combine_first(colin_df[col])
+        if f"{col}_2" in colin_df:
+            colin_df.drop(columns=[f"{col}_2"], inplace=True)
     
     # Discard rows with apparent_mag_2500_err <= 0
     #colin_df = colin_df[colin_df['apparent_mag_2500_err'] > 0].reset_index(drop=True)
