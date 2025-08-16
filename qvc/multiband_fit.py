@@ -73,8 +73,8 @@ def build_model(batch_data, zs, f_host_value, lam_rfs, log_jitter_mean, f_host_s
         # Initialize parameters
         # Global "universal" means for eta
         eta_A1_mean = numpyro.sample("eta_A1_mean", dist.TruncatedNormal(-0.5, 0.5, high=0.0))
-        eta_A2_mean = numpyro.sample("eta_A2_mean", dist.TruncatedNormal(-1.0, 0.5, high=0.0))
-        eta_tau1_mean = numpyro.sample("eta_tau1_mean", dist.TruncatedNormal(0.0, 0.5))
+        eta_A2_mean = numpyro.sample("eta_A2_mean", dist.TruncatedNormal(0.0, 0.5, high=0.0))
+        eta_tau1_mean = numpyro.sample("eta_tau1_mean", dist.TruncatedNormal(-0.5, 0.5))
         eta_tau2_mean = numpyro.sample("eta_tau2_mean", dist.TruncatedNormal(0.5, 0.5, low=0.0))
         eta_break = numpyro.deterministic("eta_break", 0.1)
         lam_s = numpyro.sample("lam_s", dist.Normal(2500.0, 100.0))
