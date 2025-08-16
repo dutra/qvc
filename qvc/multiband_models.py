@@ -298,7 +298,7 @@ class MyMultiVarModel(MultiVarModel):
             tau_drw=jnp.exp(log_tau_band),
             lag_blr=jnp.exp(params["log_lag_blr"]),
             s_b=s_b,
-            gamma=gamma
+            gamma=params["gamma"]
         )
 
         # Check if kernel covariance is symmetric

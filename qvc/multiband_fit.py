@@ -164,6 +164,7 @@ def build_model(batch_data, zs, f_host_value, lam_rfs, log_jitter_mean, f_host_s
                 "lag_beta": lag_beta[i],
                 "bwb_alpha": bwb_alpha[i],
                 "bwb_beta": bwb_beta[i],
+                "gamma": gamma[i],
                 # power law
                 "eta_A1": eta_A1[i],
                 "eta_A2": eta_A2[i],
