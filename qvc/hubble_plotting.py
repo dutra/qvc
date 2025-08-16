@@ -535,7 +535,6 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_agn_pivot, sho
     # Use median values for the other parameters, but evaluate at z_grid
     log_sigma0_med = np.median(df_agn['log_sigma0'].values)
     log_tau_UV_RF_med = np.median(df_agn['log_tau_UV_RF'].values)
-    f_host_med = np.median(df_agn['f_host'].values)
     bwb_med = np.median(df_agn['bwb_beta'].values)
 
     M_med_grid = np.median([
@@ -543,18 +542,17 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_agn_pivot, sho
             s[param_indices['M0_agn']],
             s[param_indices['alpha_agn']],
             s[param_indices['beta_agn']],
+            s[param_indices['gamma_agn']],
             log_sigma0_med * np.ones_like(z_grid),
             log_tau_UV_RF_med * np.ones_like(z_grid),
-            f_host_med * np.ones_like(z_grid),
             bwb_med * np.ones_like(z_grid)
         )
         for s in flat_samples
     ], axis=0)
 
-    print(M_med_grid)
     mu_med = 24.0 - M_med_grid
     ax.fill_between(z_grid, np.full_like(mu_med, 55), mu_med, color="k", lw=0, alpha=0.25)
-    ax.plot(z_grid, mu_med, color="k", lw=2, ls="dotted", label=r"50\% completeness limit")
+    ax.plot(z_grid, mu_med, color="k", lw=2, alpha=0.25, ls="dotted", label=r"50% completeness limit")
 
     # Plot concordance FlatLambdaCDM as dashed line
     concordance_cosmo = FlatLambdaCDM(H0=70, Om0=0.3)

@@ -130,6 +130,11 @@ def get_completeness_function_2d(
     calculated_mags_true_2500 = (mags_true_i-x_pivot)*slope + intercept
 
     mags_true = calculated_mags_true_2500
+
+    # Estimate scatter as std of residuals
+    residuals = y - y_fit
+    scatter = np.std(residuals)
+    print(f"Scatter in m_2500 - m_i fit (std of residuals): {scatter:.2f}")
     
     # --- Observed sample
     mags_obs = np.asarray(df_agn["apparent_mag_2500"].values)
@@ -239,4 +244,4 @@ def get_completeness_function_2d(
     dm = float(mag_centers[1] - mag_centers[0]) if len(mag_centers) > 1 else float(mag_edges[-1] - mag_edges[0])
     dz = float(z_centers[1] - z_centers[0])     if len(z_centers)   > 1 else float(z_edges[-1] - z_edges[0])
 
-    return Completeness2D(mag_centers, z_centers, C), mag_centers, z_centers, dm, dz
+    return Completeness2D(mag_centers, z_centers, C), mag_centers, z_centers, dm, dz, scatter

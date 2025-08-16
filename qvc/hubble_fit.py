@@ -35,7 +35,7 @@ _sna_LogdetCov, _sna_L, _sna_Lower = None, None, None
 
 z_agn_pivot = 1.5
 
-def completeness_loglike(m_model, mu_err, z, completeness2d, m_grid, tiny=1e-300):
+def completeness_loglike(m_model, mu_err, z, completeness2d, m_grid, sigma_completeness, tiny=1e-300):
     """
     m_model : array (N_obj,) model-predicted apparent magnitudes
     mu_err  : array (N_obj,) Gaussian sigma for each magnitude
@@ -50,7 +50,7 @@ def completeness_loglike(m_model, mu_err, z, completeness2d, m_grid, tiny=1e-300
     # Gaussian *pdf* over the real line, evaluated on m_grid
     # Do NOT renormalize row-wise over m_grid.
     sigma = np.maximum(mu_err, 1e-9)  # avoid zero-sigma
-    pdf = stats.norm.pdf(m_grid[None, :], loc=m_model[:, None], scale=sigma[:, None])
+    pdf = stats.norm.pdf(m_grid[None, :], loc=m_model[:, None], scale=sigma[:, None] + sigma_completeness)
 
     # p_detect(m, z)
     p_det = completeness2d(m_grid[None, :], z[:, None])  # shape (N_obj, N_grid)
@@ -160,10 +160,11 @@ def log_likelihood(theta, cosmo_model,
     ll_completeness = 0.0
     integrals = np.zeros_like(z)  # shape (N_obj,)
     if completeness_params is not None:
-        completeness2d, mag_centers, _, _, _ = completeness_params
+        completeness2d, mag_centers, _, _, _, completeness_scatter = completeness_params
         ll_completeness, integrals = completeness_loglike(
             m_model=m_model, mu_err=mu_err, z=z,
-            completeness2d=completeness2d, m_grid=mag_centers
+            completeness2d=completeness2d, m_grid=mag_centers,
+            sigma_completeness=completeness_scatter
         )
 
     # print(f"Log-likelihood components: ll_snia={ll_snia:.2f}, ll_agn={ll_agn:.2f}, ll_completeness={ll_completeness:.2f}")
@@ -283,7 +284,7 @@ def run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model='Flatw0waCDM',
             resume=resume,
             checkpoint_file=f'data/dynesty_{cosmo_model}.save',
             print_progress=True,
-            dlogz_init=100,
+            dlogz_init=10,
             n_effective=10,               
             nlive_init=20 ,         
             nlive_batch=10  # 2 * ndim is low, but seems to work
@@ -459,7 +460,7 @@ def test():
 
     
     print("Plotting completeness vs magnitude at redshifts...")
-    p_detect, mag_centers, z_centers, dm, dz = get_completeness_function_2d(df_agn, plot=True)
+    p_detect, mag_centers, z_centers, dm, dz, completeness_scatter = get_completeness_function_2d(df_agn, plot=True)
     plot_completeness_vs_mag_at_redshifts(p_detect, mag_centers, z_centers)
     plot_completeness_diagnostics(df_agn, p_detect, mag_centers, z_centers)
 
