@@ -98,8 +98,8 @@ class Completeness2D:
 
 def get_completeness_function_2d(
     df_agn,
-    sim_file="data/sampled_apparent_magnitudes_redshift_vol3.h5",
-    n_mag_bins=20, n_z_bins=20,
+    sim_file="data/mock_mag_z.h5",
+    n_mag_bins=20, n_z_bins=60,
     #mag_min=15, mag_max=24,
     sigma_mag=1.0, sigma_z=0.7,
     smooth_counts=True,
@@ -114,16 +114,9 @@ def get_completeness_function_2d(
       • Use fill_value=0 outside grid (no pre-clipping).
     """
     # --- Load simulated (true) sample
-    mags_true_list, z_true_list = [], []
-    with h5py.File(sim_file, "r") as f:
-        #print(f['redshift_bin'].keys())
-        for name in f["redshift_bin"]:
-            ds = f["redshift_bin"][name]
-            mags = ds[()]
-            z_bin = ds.attrs["redshift"]
-            #print(f"{name}: shape of z_bin: {np.shape(z_bin)}, shape of mags: {np.shape(mags)}", end=', ')
-            mags_true_list.append(mags)
-            z_true_list.append(np.full_like(mags, z_bin, dtype=float))
+    with h5py.File(sim_file, 'r') as f:
+        mags_true_i = f['apparent_mag_i'][:]
+        z_true = f['z'][:]
 
     y = df_agn['apparent_mag_2500'].values
     x = df_agn['apparent_mag_i'].values
@@ -134,20 +127,15 @@ def get_completeness_function_2d(
     slope, intercept = np.polyfit(x-x_pivot, y, 1)
     y_fit = slope * (x-x_pivot) + intercept
 
-    z_true    = np.concatenate(z_true_list)
-
-    mags_true_i = np.concatenate(mags_true_list)
     calculated_mags_true_2500 = (mags_true_i-x_pivot)*slope + intercept
 
     mags_true = calculated_mags_true_2500
-    
     
     # --- Observed sample
     mags_obs = np.asarray(df_agn["apparent_mag_2500"].values)
 
     #mags_obs = calculated_mag_i
     z_obs    = np.asarray(df_agn["z"].values)
-
 
     if plot:
         from matplotlib import pyplot as plt
@@ -171,7 +159,7 @@ def get_completeness_function_2d(
     mags_obs, z_obs = mags_obs[mask_obs], z_obs[mask_obs]
 
     # --- Bin edges and centers
-    z_min, z_max = float(np.min(z_true)), float(np.max(z_true))
+    z_min, z_max = float(np.min(z_true)), 4.0
     if z_max - z_min < 1e-3:
         z_min -= 0.01
         z_max += 0.01
@@ -220,6 +208,32 @@ def get_completeness_function_2d(
         plt.tight_layout()
         plt.savefig("plots/completeness/completeness_map.png", dpi=200)
         #plt.show()
+        plt.close()
+
+        plt.imshow(
+            H_true_s.T, origin="lower", aspect="auto",
+            extent=[mag_edges[0], mag_edges[-1], z_edges[0], z_edges[-1]]
+        )
+        plt.xlabel("Apparent Magnitude")
+        plt.ylabel("Redshift")
+        plt.title("Completeness Map p(detect | m, z)")
+        cbar = plt.colorbar()
+        cbar.set_label("p(detect)")
+        plt.tight_layout()
+        plt.savefig("plots/completeness/H_true_s.png", dpi=200)
+        plt.close()
+
+        plt.imshow(
+            H_obs_s.T, origin="lower", aspect="auto",
+            extent=[mag_edges[0], mag_edges[-1], z_edges[0], z_edges[-1]]
+        )
+        plt.xlabel("Apparent Magnitude")
+        plt.ylabel("Redshift")
+        plt.title("Completeness Map p(detect | m, z)")
+        cbar = plt.colorbar()
+        cbar.set_label("p(detect)")
+        plt.tight_layout()
+        plt.savefig("plots/completeness/H_obs_s.png", dpi=200)
 
     # bin widths (uniform by construction)
     dm = float(mag_centers[1] - mag_centers[0]) if len(mag_centers) > 1 else float(mag_edges[-1] - mag_edges[0])
