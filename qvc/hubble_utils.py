@@ -420,7 +420,7 @@ def populate_sdss_fields(objs, progress_bar=True):
         i = i[0]  # Get the first index if there are multiple matches
         d['ra'] = obj['RA']
         d['dec'] = obj['DEC']
-        d['z'] = obj['Z_DR16Q']
+        d['z'] = obj['Z_SYS']
         d['sdss_name'] = fits_data['SDSS_NAME'][i]  # Extract SDSS_NAME
         d['log_lbol'] = -999.0
         if d['z'] < 0.7:
