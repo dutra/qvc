@@ -331,11 +331,11 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_agn_pivot, sho
     """Plot Hubble diagram + residuals, classic Pantheon+ style."""
     # Define cosmological parameter labels
     if cosmo_model == 'FlatwCDM':
-        label = r"Flat$w$CDM Model"
+        label = r"Flat$w$CDM model"
     elif cosmo_model == 'Flatw0waCDM':
-        label = r"Flat$w_0w_a$CDM Model"
+        label = r"Flat$w_0w_a$CDM model"
     elif cosmo_model == 'FlatLambdaCDM':
-        label = r"Flat$\Lambda$CDM Model"
+        label = r"Flat$\Lambda$CDM model"
     else:
         raise ValueError("Invalid cosmology model.")
 
@@ -487,7 +487,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_agn_pivot, sho
     # --- Inset plot ---
     inset_ax.scatter(df_agn["z"], mu_pred_median, s=2, label="AGN", alpha=0.5, color="black",zorder=1)
     inset_ax.scatter(df_pantheon["zHD"], df_pantheon["MU_SH0ES"], color="dodgerblue", s=2, label="SN Ia", alpha=0.5, zorder=-10)
-    inset_ax.plot(z_grid, mu_model_median, alpha=0.9, color="purple", zorder=10, lw=0.5, label="ΛCDM Model")
+    inset_ax.plot(z_grid, mu_model_median, alpha=0.9, color="purple", zorder=10, lw=0.5, label="ΛCDM model")
     inset_ax.fill_between(z_grid, mu_model_16th, mu_model_84th, color="purple", alpha=0.9, zorder=9)
     inset_ax.set_xscale('log')
     inset_ax.set_xlim(0.02, 5.2)
