@@ -91,7 +91,7 @@ class ContiBLRQS(qs.Wrapper):
 
     # ---- Helper: k^2 kernel (block 1) ----
     def _ensure_kernel_sq(self):
-        return qs.Exp(scale=self.tau_drw / self.gamma)
+        return qs.Exp(scale=self.tau_drw / self.gamma, sigma=1.0)
 
     def _A1(self):
         return self._ensure_kernel_sq().design_matrix()
