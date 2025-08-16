@@ -211,7 +211,7 @@ def run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model='Flatw0waCDM',
                                         'm_b_corr', 'x1', 'c', 'biasCor_m_b', 'HOST_LOGMASS']].copy()
     df_agn_filtered = df_agn[['z', 'apparent_mag_2500', 'apparent_mag_2500_err', 'apparent_mag_i',
                               'log_sigma_UV', 'log_sigma_UV_err', 'log_tau_UV_RF', 'log_tau_UV_RF_err',
-                              'bwb_beta', 'bwb_beta_err',
+                              'bwb_beta', 'bwb_beta_err', 'ra', 'dec'
                               ]].copy()
 
     if completeness:

@@ -580,6 +580,17 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_agn_pivot, sho
     ax.set_xlim(-0.2, 4.2)
     # plt.savefig(f"plots/hubble/hubble_diagram_{cosmo_model}_ylog.png")
 
+    # Print coordinates for points with residuals > 2
+    outlier_mask = np.abs(residuals) > 2
+    if np.any(outlier_mask):
+        print("Outliers with residuals > 2:")
+        for idx in np.where(outlier_mask)[0]:
+            ra = df_agn.iloc[idx].get('ra', np.nan)
+            dec = df_agn.iloc[idx].get('dec', np.nan)
+            z = df_agn.iloc[idx]['z']
+            mu_resid = residuals[idx]
+            print(f"RA: {ra:.5f} | DEC: {dec:.5f} | z: {z:.3f} | Residual: {mu_resid:.2f}")
+
     if show:
         plt.show()
     plt.close()
