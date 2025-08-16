@@ -65,13 +65,15 @@ class ContiBLRQS(qs.Wrapper):
     amp_blr: jnp.ndarray
     lag_blr: jnp.ndarray
     s_b: jnp.ndarray
+    gamma: jnp.ndarray
 
-    def __init__(self, amp_cont, amp_blr, lag_blr, tau_drw, s_b) -> None:
+    def __init__(self, amp_cont, amp_blr, lag_blr, tau_drw, s_b, gamma) -> None:
         self.amp_cont = amp_cont
         self.amp_blr = amp_blr
         self.lag_blr = lag_blr
         self.tau_drw = tau_drw
         self.s_b = s_b
+        self.gamma = gamma
         self.kernel = qs.Exp(scale=self.tau_drw, sigma=1.0)
 
     def coord_to_sortable(self, X) -> JAXArray:
@@ -89,7 +91,7 @@ class ContiBLRQS(qs.Wrapper):
 
     # ---- Helper: k^2 kernel (block 1) ----
     def _ensure_kernel_sq(self):
-        return qs.Exp(scale=self.tau_drw / 2.0)
+        return qs.Exp(scale=self.tau_drw / self.gamma)
 
     def _A1(self):
         return self._ensure_kernel_sq().design_matrix()
@@ -295,7 +297,8 @@ class MyMultiVarModel(MultiVarModel):
             amp_blr=jnp.exp(log_sigma_band_blr),
             tau_drw=jnp.exp(log_tau_band),
             lag_blr=jnp.exp(params["log_lag_blr"]),
-            s_b=s_b
+            s_b=s_b,
+            gamma=gamma
         )
 
         # Check if kernel covariance is symmetric

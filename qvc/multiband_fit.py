@@ -128,9 +128,11 @@ def build_model(batch_data, zs, f_host_value, lam_rfs, log_jitter_mean, f_host_s
             if bwb:
                 bwb_alpha = numpyro.sample("bwb_alpha", dist.Normal(0.2, 0.2))
                 bwb_beta = numpyro.sample("bwb_beta", dist.TruncatedNormal(0.2, 0.4, low=0))
+                gamma = numpyro.sample("gamma", dist.Normal(2.0, 1.0))
             else:
                 bwb_alpha = numpyro.deterministic("bwb_alpha", jnp.zeros(batch_size))
                 bwb_beta = numpyro.deterministic("bwb_beta", jnp.zeros(batch_size))
+                gamma = numpyro.deterministic("gamma", jnp.ones(batch_size) * 2.0)
 
         with numpyro.plate("objects", batch_size, dim=-2):
             with numpyro.plate("band", nBands, dim=-1):
