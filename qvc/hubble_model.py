@@ -11,14 +11,6 @@ bwb_beta_pivot = 0.082
 #z_agn_pivot = 1.2 # TODO make this a parameter
 alpha_nu_pivot = -1
 
-# --- AGN model ---
-# def M_model_agn(M0_agn, alpha_agn, log_sigma_UV):
-#     return M0_agn - 26 + alpha_agn *  (log_sigma_UV - log_sigma_hat_pivot)
-
-# def M_model_agn(M0_sn, delta_M_agn, alpha_agn, beta_agn, log_sigma_UV, log_tau_UV_RF):
-#     return M0_sn - M0_agn_offset + alpha_agn *  (log_sigma_UV - log_sigma_hat_pivot) + beta_agn * (log_tau_UV_RF - log_tau_UV_RF_pivot)
-
-
 def broken_power_law_err(x, x_err, x_break, d1, d2, ds):
     u = ds * (x - x_break)
     with np.errstate(over='ignore', under='ignore'):

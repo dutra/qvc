@@ -529,11 +529,14 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_agn_pivot, sho
     # Cosmo model band
     ax.plot(z_grid, mu_model_median, alpha=0.9, color="m", zorder=-5, lw=2, label=label)
     ax.fill_between(z_grid, mu_model_16th, mu_model_84th, color="purple", alpha=0.9, zorder=-5)
+    scat = np.median(np.exp(2*flat_samples[param_indices['log_f']]))
+    ax.fill_between(z_grid, mu_model_16th - scat, mu_model_84th + scat, color="purple", alpha=0.1, lw=0, zorder=-6, label=r'$1\sigma$ scatter')
 
     # Use median values for the other parameters, but evaluate at z_grid
     log_sigma0_med = np.median(df_agn['log_sigma0'].values)
     log_tau_UV_RF_med = np.median(df_agn['log_tau_UV_RF'].values)
     f_host_med = np.median(df_agn['f_host'].values)
+    bwb_med = np.median(df_agn['bwb_beta'].values)
 
     M_med_grid = np.median([
         M_model_agn(
@@ -542,13 +545,16 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_agn_pivot, sho
             s[param_indices['beta_agn']],
             log_sigma0_med * np.ones_like(z_grid),
             log_tau_UV_RF_med * np.ones_like(z_grid),
-            f_host_med * np.ones_like(z_grid)
+            f_host_med * np.ones_like(z_grid),
+            bwb_med * np.ones_like(z_grid)
         )
         for s in flat_samples
     ], axis=0)
 
+    print(M_med_grid)
     mu_med = 24.0 - M_med_grid
     ax.fill_between(z_grid, np.full_like(mu_med, 55), mu_med, color="k", lw=0, alpha=0.25)
+    ax.plot(z_grid, mu_med, color="k", lw=2, ls="dotted", label=r"50\% completeness limit")
 
     # Plot concordance FlatLambdaCDM as dashed line
     concordance_cosmo = FlatLambdaCDM(H0=70, Om0=0.3)
@@ -559,7 +565,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_agn_pivot, sho
     ax.set_xlabel(r"$z$")
     ax.set_xlim(-0.2, 4.2)
     ax.set_ylim(26, 51)
-    ax.legend(frameon=False, loc="lower center", bbox_to_anchor=(0.3, 0.05), fontsize=16)
+    ax.legend(frameon=False, loc="lower center", bbox_to_anchor=(0.3, 0.05), fontsize=12)
 
     # Ticks styling
     for axi in [ax, inset_ax]:
@@ -726,8 +732,7 @@ def plot_predicted_vs_actual_Mi(flat_samples, df_agn, cosmo_model, z_agn_pivot, 
         df_agn['log_sigma_UV'].values,
         df_agn['log_tau_UV_RF'].values,
         df_agn['bwb_beta'].values,
-    ) #- (K_corr(df_agn['z'], df_agn['alpha_nu'].values) - K_corr(2.0, df_agn['alpha_nu'].values)) # TODO: check this
-    #) + K_corr(2.0, df_agn['alpha_nu'].values)
+    )
 
     # Calculate prediction errors
     M_2500_pred_err = np.sqrt(
