@@ -18,7 +18,7 @@ from scipy.stats import norm, sigmaclip, multivariate_normal
 from scipy.interpolate import RegularGridInterpolator
 import arviz as az
 from dynesty.utils import resample_equal
-from hubble_model import get_model_params, M_model_agn, M_model_agn_err, M_model_SN, K_corr
+from hubble_model import get_model_params, M_model_agn, M_model_agn_err, M_model_SN
 from scipy.linalg import cho_factor, cho_solve, eigh
 from scipy.stats import linregress
 from scipy.stats import pearsonr
@@ -72,10 +72,9 @@ def find_optimal_pivot(flat_samples,
     corrs = []
 
     for z_pivot in z_grid:
-        delta_K = K_corr(z_data, alpha_nu) - K_corr(z_pivot, alpha_nu)
 
         M_pred_samples = np.array([
-            apparent_mag_2500 - delta_K - M_model_agn(
+            apparent_mag_2500 - M_model_agn(
                 s[param_indices['M0_agn']],
                 s[param_indices['log_sigma0_break']],
                 s[param_indices['eta_A1_agn']],
@@ -1217,7 +1216,7 @@ def apply_forward_completeness_correction(df_agn, params, cosmo_model, completen
 
     # Cosmological distance modulus + K-correction
     mu_cosmo = cosmo.distmod(df_agn['z'].values).value
-    m_model = mu_cosmo + (K_corr(df_agn['z'].values) - K_corr(2)) + M_model
+    m_model = mu_cosmo + M_model
 
     # Total uncertainty on m_model
     mu_err = np.sqrt(

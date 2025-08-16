@@ -10,7 +10,7 @@ import matplotlib.pyplot as plt
 import os
 import copy
 
-from hubble_model import K_corr, M_model_agn, M_model_agn_err, M_model_SN, get_model_params, log_tau_UV_RF_pivot
+from hubble_model import M_model_agn, M_model_agn_err, M_model_SN, get_model_params, log_tau_UV_RF_pivot
 from hubble_utils import calc_Mi_from_M2500
 from numpy.polynomial.polynomial import Polynomial
 from scipy.interpolate import interp1d
@@ -419,7 +419,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_agn_pivot, sho
 
     # Then re-compute the distance modulus       
     mu_pred = np.array([
-        apparent_mag - (K_corr(df_agn['z'].values, df_agn['alpha_nu'].values) - K_corr(2, df_agn['alpha_nu'].values)) -
+        apparent_mag -
             (M_model_agn(
                 s[param_indices['M0_agn']], 
                         s[param_indices['alpha_agn']],
@@ -431,7 +431,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_agn_pivot, sho
     ])
     if fake_params is not None:
         mu_pred = np.array([
-            apparent_mag - (K_corr(df_agn['z'].values, df_agn['alpha_nu'].values) - K_corr(2, df_agn['alpha_nu'].values)) -
+            apparent_mag -
             (M_model_agn(
                 fake_params['M0_agn'], 
                 fake_params['alpha_agn'],
@@ -527,6 +527,26 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_agn_pivot, sho
     # Cosmo model band
     ax.plot(z_grid, mu_model_median, alpha=0.9, color="m", zorder=-5, lw=2, label=label)
     ax.fill_between(z_grid, mu_model_16th, mu_model_84th, color="purple", alpha=0.9, zorder=-5)
+
+    # Use median values for the other parameters, but evaluate at z_grid
+    log_sigma0_med = np.median(df_agn['log_sigma0'].values)
+    log_tau_UV_RF_med = np.median(df_agn['log_tau_UV_RF'].values)
+    f_host_med = np.median(df_agn['f_host'].values)
+
+    M_med_grid = np.median([
+        M_model_agn(
+            s[param_indices['M0_agn']],
+            s[param_indices['alpha_agn']],
+            s[param_indices['beta_agn']],
+            log_sigma0_med * np.ones_like(z_grid),
+            log_tau_UV_RF_med * np.ones_like(z_grid),
+            f_host_med * np.ones_like(z_grid)
+        )
+        for s in flat_samples
+    ], axis=0)
+
+    mu_med = 24.0 - M_med_grid
+    ax.fill_between(z_grid, np.full_like(mu_med, 55), mu_med, color="k", lw=0, alpha=0.25)
 
     # Plot concordance FlatLambdaCDM as dashed line
     concordance_cosmo = FlatLambdaCDM(H0=70, Om0=0.3)

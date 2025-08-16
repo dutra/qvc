@@ -3,11 +3,6 @@ from scipy.special import expit
 from collections import OrderedDict
 
 
-def K_corr(z, alpha_nu):
-    """K-correction for magnitude (assuming f_ν ~ ν^{alpha_nu})."""
-    return np.zeros_like(z)
-    #return -2.5 * (1 + alpha_nu) * np.log10(1 + z)
-
 # --- Reference constants and pivot values ---
 log_sigma0_pivot = -0.74 # TODO make this a parameter
 log_tau_UV_RF_pivot = 2.7  # TODO make this a parameter

@@ -276,10 +276,10 @@ def run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model='Flatw0waCDM',
             resume=resume,
             checkpoint_file=f'data/dynesty_{cosmo_model}.save',
             print_progress=True,
-            dlogz_init=dlogz_init,
+            dlogz_init=100,
             n_effective=10,               
-            nlive_init=20 * ndim,         
-            nlive_batch=10 * ndim  # 2 * ndim is low, but seems to work
+            nlive_init=20 ,         
+            nlive_batch=10  # 2 * ndim is low, but seems to work
         )
 
     results = sampler.results
@@ -428,7 +428,7 @@ def test():
 
     #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("results/data/aug14_stone_qs_cpu_N20w2000s500t8c2.h5", populate_sdss=False)
     #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("results/data/aug13_stone_qs_cpu_N20w4000s1000t8c4.h5", populate_sdss=False)
-    df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("results/data/aug15_chisq_nobwb_qscpu_N20w4000s1000t8c4.h5", populate_sdss=False)
+    df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("results/data/aug12_chisq_qscpu_N20w4000s1000t8c4.h5", populate_sdss=False)
 
     sampler_joint, flat_samples, model_labels, mag_corr, logZ, logZerr = run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model=cosmo_model, 
                                                         only_sna=False, completeness=True, use_full_cov=True,
