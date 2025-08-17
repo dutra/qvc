@@ -67,17 +67,18 @@ def build_model(batch_data, zs, f_host_value, lam_rfs, log_jitter_mean, f_host_s
     nBands = 5  # or use from config
 
     log_tau_drw0_c = jnp.log(10**2.5 * (1 + zs))
-    log_lab_blr_c = jnp.log(10**2.0 * (1 + zs))
+    log_lab_blr_c = jnp.log(10**1.5 * (1 + zs))
 
     def numpyro_joint_model():
         # Initialize parameters
         # Global "universal" means for eta
         eta_A1_mean = numpyro.sample("eta_A1_mean", dist.TruncatedNormal(-0.5, 0.2, high=0.0))
-        eta_A2_mean = numpyro.sample("eta_A2_mean", dist.TruncatedNormal(0.0, 0.2, high=0.0))
+        eta_A2_mean = numpyro.sample("eta_A2_mean", dist.TruncatedNormal(-0.5, 0.2, high=0.0))
         eta_tau1_mean = numpyro.sample("eta_tau1_mean", dist.TruncatedNormal(-0.5, 0.2))
         eta_tau2_mean = numpyro.sample("eta_tau2_mean", dist.TruncatedNormal(0.1, 0.2, low=0.0))
         eta_break = numpyro.deterministic("eta_break", 0.1)
-        lam_s = numpyro.sample("lam_s", dist.Normal(2500.0, 100.0))
+        #lam_s = numpyro.sample("lam_s", dist.Normal(2500.0, 100.0)) # Hard to constrain
+        lam_s = numpyro.deterministic("lam_s", 2500.0)
 
         # Population-level scatter (how much objects can deviate) 
         log_sigma_eta_A1 = numpyro.sample("log_sigma_eta_A1", dist.Normal(jnp.log(0.1), 0.1))
@@ -142,7 +143,7 @@ def build_model(batch_data, zs, f_host_value, lam_rfs, log_jitter_mean, f_host_s
 
                 # BLR amplitudes and lags
                 log_amp_delta_blr = numpyro.sample("log_amp_delta_blr", dist.Normal(jnp.full(nBands, -1.0), 1.0))
-                log_lag_blr = numpyro.sample("log_lag_blr", dist.Normal(log_lab_blr_c[..., None], 1.0))
+                log_lag_blr = numpyro.sample("log_lag_blr", dist.Normal(log_lab_blr_c[..., None], 3.0))
                 #log_lag_blr = numpyro.deterministic("log_lag_blr", jnp.zeros_like(mean))
 
                 # Jitter
