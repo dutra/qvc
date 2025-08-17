@@ -26,6 +26,8 @@ from hubble_model import *
 from hubble_completeness import *
 import os
 import yaml
+import sys
+import argparse
 
 # Placeholders for global data (improves speed?)
 _agn_data = None
@@ -286,8 +288,8 @@ def run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model='Flatw0waCDM',
             print_progress=True,
             dlogz_init=10,
             n_effective=10,               
-            nlive_init=20 ,         
-            nlive_batch=10  # 2 * ndim is low, but seems to work
+            nlive_init=20 * ndim,         
+            nlive_batch=10 * ndim  # 2 * ndim is low, but seems to work
         )
 
     results = sampler.results
@@ -425,23 +427,15 @@ def main():
 
 
 
-def test():
-    #cosmo_model = 'Flatw0waCDM'
-    cosmo_model = 'FlatwCDM'
-    # cosmo_model = 'FlatLambdaCDM'
+def test(agn_data_filepath, cosmo_model, populate_sdss_fields=False, completeness=True, use_full_cov=True, resume=False):
 
     # Load data
     global _sna_LogdetCov, _sna_L, _sna_Lower
 
-
-    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("results/data/aug14_stone_qs_cpu_N20w2000s500t8c2.h5", populate_sdss=False)
-    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("results/data/aug13_stone_qs_cpu_N20w4000s1000t8c4.h5", populate_sdss=False)
-    
-    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("results/data/aug15_chisq_nobwb_qscpu_N20w4000s1000t8c4.h5", populate_sdss=False)
-    df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data("results/data/aug15b_stone_nobwb_diffpriors_qscpu_N20w4000s1000t8c4.h5", populate_sdss=False)
+    df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data(agn_data_filepath, populate_sdss=populate_sdss_fields)
 
     sampler_joint, flat_samples, model_labels, mag_corr, logZ, logZerr = run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model=cosmo_model, 
-                                                        only_sna=False, completeness=True, use_full_cov=True,
+                                                        only_sna=False, completeness=completeness, use_full_cov=use_full_cov,
                                                          resume=False)
     if cosmo_model == 'Flatw0waCDM':
         zp = compute_pivot_redshift(flat_samples, cosmo_model)
@@ -476,6 +470,24 @@ def test():
 
     #plot_predicted_sigma_hat_vs_luminosity(sampler_joint, df_agn, cosmo_model=cosmo_model, show=False)
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Run Hubble fit pipeline.")
+    parser.add_argument("agn_data_filepath", type=str, help="Path to AGN data file")
+    parser.add_argument("--force_populate_fields", action="store_true", help="Force populate fields")
+    parser.add_argument("--cosmo_model", type=str, default="FlatwCDM", help="Cosmological model (default: FlatwCDM)")
+    parser.add_argument("--disable_completeness", action="store_true", default=False, help="Enable completeness correction (default: True)")
+    parser.add_argument("--disable_full_covariance", action="store_true", default=False, help="Use full covariance matrix for SNIa likelihood (default: False)")
+    parser.add_argument("--resume", action="store_true", default=False, help="Resume previous MCMC run (default: False)")
+    args = parser.parse_args()
+
+    if args.disable_full_covariance:
+        print("Warning: Running without full covariance may lead to underestimated uncertainties.")
+    if args.disable_completeness:
+        print("Warning: Running without completeness correction may lead to biased results.")
+    if args.resume:
+        print("Warning: Resuming previous MCMC run.")
+
+    test(agn_data_filepath=args.agn_data_filepath, populate_sdss_fields=args.force_populate_fields, cosmo_model=args.cosmo_model,
+         completeness=not args.disable_completeness, use_full_cov=not args.disable_full_covariance, resume=args.resume)
+
     #main()
-    test()
     #compare_models()

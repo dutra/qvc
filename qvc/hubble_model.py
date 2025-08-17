@@ -4,9 +4,9 @@ from collections import OrderedDict
 
 
 # --- Reference constants and pivot values ---
-log_sigma_UV_pivot = -0.74 # TODO make this a parameter
-log_tau_UV_RF_pivot = 2.7  # TODO make this a parameter
-bwb_beta_pivot = 0.082
+log_sigma_UV_pivot = -0.8 # TODO make this a parameter
+log_tau_UV_RF_pivot = 2.9  # TODO make this a parameter
+bwb_beta_pivot = 0.14
 #M0_agn_offset = -5.179  # TODO make this a parameter
 #z_agn_pivot = 1.2 # TODO make this a parameter
 alpha_nu_pivot = -1
