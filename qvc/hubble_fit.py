@@ -52,7 +52,9 @@ def completeness_loglike(m_model, mu_err, z, completeness2d, m_grid, sigma_compl
     # Gaussian *pdf* over the real line, evaluated on m_grid
     # Do NOT renormalize row-wise over m_grid.
     sigma = np.maximum(mu_err, 1e-9)  # avoid zero-sigma
-    pdf = stats.norm.pdf(m_grid[None, :], loc=m_model[:, None], scale=sigma[:, None] + sigma_completeness)
+    pdf = stats.norm.pdf(m_grid[None, :],
+        loc=m_model[:, None],
+        scale=np.sqrt(sigma[:, None]**2 + sigma_completeness**2))
 
     # p_detect(m, z)
     p_det = completeness2d(m_grid[None, :], z[:, None])  # shape (N_obj, N_grid)
