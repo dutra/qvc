@@ -55,8 +55,8 @@ def completeness_loglike(m_model, mu_err, z, completeness2d, m_grid, sigma_compl
     sigma = np.maximum(mu_err, 1e-9)  # avoid zero-sigma
     pdf = stats.norm.pdf(m_grid[None, :],
         loc=m_model[:, None],
-        #scale=np.sqrt(sigma[:, None]**2 + sigma_completeness**2)) # If not adding scatter to mags_true
-        scale=sigma[:, None])
+        scale=np.sqrt(sigma[:, None]**2 + sigma_completeness**2)) # If not adding scatter to mags_true
+        #scale=sigma[:, None])
 
     # p_detect(m, z)
     p_det = completeness2d(m_grid[None, :], z[:, None])  # shape (N_obj, N_grid)
@@ -265,7 +265,7 @@ def run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model='Flatw0waCDM',
     checkpoint_file = os.path.join(checkpoint_folder, 
                                    f'dynesty_checkpoint_{cosmo_model}_{'sna' if only_sna else 'joint'}_{speed}.save')
     print(f"Checkpoint file: {checkpoint_file}")
-    num_cpus = multiprocessing.cpu_count()
+    num_cpus = multiprocessing.cpu_count() - 1
     with multiprocessing.get_context("spawn").Pool(
         processes=num_cpus,
         initializer=dynesty_initializer,
@@ -305,7 +305,7 @@ def run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model='Flatw0waCDM',
                     resume=resume,
                     checkpoint_file=checkpoint_file,
                     print_progress=True,
-                    dlogz_init=500,                 
+                    dlogz_init=10,                 
                     n_effective=50,                # 300–1000 typical for model comparison
                     nlive_init=10,   # bump live points
                     nlive_batch=10   # reasonable batch size for dynamic allocation

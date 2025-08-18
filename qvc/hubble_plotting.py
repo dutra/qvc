@@ -486,7 +486,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_agn_pivot, plo
     #     inset_ax.plot(z_grid, mu_model_median + sigma_int, color="m", ls=":", lw=1.2, alpha=0.9, label=r"Intrinsic scatter")
     #     inset_ax.plot(z_grid, mu_model_median - sigma_int, color="m", ls=":", lw=1.2, alpha=0.9)
     # Survey magnitude limit (shade above)
-    if completeness:
+    if completeness and not debias:
         log_sigma0_med    = float(np.median(df_agn['log_sigma0'].values))
         log_tau_UV_RF_med = float(np.median(df_agn['log_tau_UV_RF'].values))
         bwb_med           = float(np.median(df_agn['bwb_beta'].values))
@@ -543,7 +543,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_agn_pivot, plo
     #     ax.plot(z_grid, mu_model_median - sigma_int, color="m", ls=":", lw=2.0, alpha=0.9)
 
     # Survey magnitude limit (shade above)
-    if completeness:
+    if completeness and not debias:
         # (Reuse mu_lim from inset block if desired; recompute for clarity)
         log_sigma0_med    = float(np.median(df_agn['log_sigma0'].values))
         log_tau_UV_RF_med = float(np.median(df_agn['log_tau_UV_RF'].values))

@@ -98,10 +98,10 @@ class Completeness2D:
 
 def get_completeness_function_2d(
     df_agn,
-    sim_file="data/mock_mag_z2.h5",
+    sim_file="data/mock_mag_z.h5",
     n_mag_bins=20, n_z_bins=60,
     #mag_min=15, mag_max=24,
-    sigma_mag=1.0, sigma_z=0.7,
+    sigma_mag=0.5, sigma_z=0.5,
     smooth_counts=True,
     plot=False,
 ):
@@ -182,7 +182,6 @@ def get_completeness_function_2d(
     print(f"Using z range: {z_centers[0]:.2f} to {z_centers[-1]:.2f}")
 
     # --- 2D histograms
-    mags_true = mags_true + np.random.normal(0, scatter, size=len(mags_true))
     H_true, _, _ = np.histogram2d(mags_true, z_true, bins=[mag_edges, z_edges])
     H_obs,  _, _ = np.histogram2d(mags_obs,  z_obs,  bins=[mag_edges, z_edges])
 
