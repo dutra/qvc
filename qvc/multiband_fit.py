@@ -107,7 +107,7 @@ def build_model(batch_data, zs, f_host_value, lam_rfs, log_jitter_mean, f_host_s
                 eta_tau2 = numpyro.deterministic("eta_tau2", jnp.full(batch_size, eta_tau2_mean))
 
             # Core kernel parameters
-            log_tau_drw0 = numpyro.sample("log_tau_drw0", dist.Normal(log_tau_drw0_c, 2.0))
+            log_tau_drw0 = numpyro.sample("log_tau_drw0", dist.TruncatedNormal(log_tau_drw0_c, 2.0, low=jnp.log(10**1.5)))
             log_sigma0 = numpyro.sample("log_sigma0", dist.Normal(-0.8, 1.0))
             log_sigma_hat0 = numpyro.deterministic("log_sigma_hat0", log_sigma0 - 0.5 * log_tau_drw0)
 
