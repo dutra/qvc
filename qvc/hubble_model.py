@@ -5,7 +5,7 @@ from collections import OrderedDict
 
 # --- Reference constants and pivot values ---
 log_sigma_UV_pivot = -0.8 # TODO make this a parameter
-log_tau_UV_RF_pivot = 2.9  # TODO make this a parameter
+log_tau_UV_RF_pivot = 2.6  # TODO make this a parameter
 bwb_beta_pivot = 0.14
 #M0_agn_offset = -5.179  # TODO make this a parameter
 #z_agn_pivot = 1.2 # TODO make this a parameter
@@ -44,11 +44,16 @@ def broken_power_law(x, x_break, d1, d2, ds):
 
 # # Linear model
 def M_model_agn(M0_agn, alpha_agn, beta_agn, gamma_agn, log_sigma_UV, log_tau_UV_RF, bwb_beta):
-    return M0_agn + alpha_agn * (log_sigma_UV - log_sigma_UV_pivot) + beta_agn * (log_tau_UV_RF - log_tau_UV_RF_pivot) + gamma_agn * (bwb_beta - bwb_beta_pivot)
+    return M0_agn + alpha_agn * (log_sigma_UV - log_sigma_UV_pivot) + beta_agn * (log_tau_UV_RF - log_tau_UV_RF_pivot)# + gamma_agn * (bwb_beta - bwb_beta_pivot)
     
-def M_model_agn_err(M0_agn, alpha_agn, gamma_agn, beta_agn,
+def M_model_agn_err(M0_agn, alpha_agn, beta_agn, gamma_agn,
                     log_sigma_UV, log_sigma_UV_err, log_tau_UV_RF_err, bwb_beta_err):
-    return np.sqrt((alpha_agn * log_sigma_UV_err)**2 + (beta_agn * log_tau_UV_RF_err)**2 + (gamma_agn * bwb_beta_err)**2)
+    err = np.sqrt((alpha_agn * log_sigma_UV_err)**2 + (beta_agn * log_tau_UV_RF_err)**2)# + (gamma_agn * bwb_beta_err)**2)
+    #mask = err > 5
+    #print(f"Errors associated with log_sigma_UV_err > 5 mag: ", (alpha_agn * log_sigma_UV_err)[mask])
+    #print(f"Errors associated with log_tau_UV_RF_err > 5 mag: ",  (beta_agn * log_tau_UV_RF_err)[mask])
+    #print(f"Errors associated with bwb_beta_err > 5 mag: ", (gamma_agn * bwb_beta_err)[mask])
+    return err
 
 
 def M_model_SN(m_b_corr, host_logmass, M0_sn, gamma_sn, tau_Ms):
@@ -72,7 +77,7 @@ def get_model_params(cosmo_model):
         ("log_f",       (-3, 0.5)),
         ("H0",          (65, 80)),
         #("Om0",         (0.32, 0.324)),
-        ("Om0",         (0.2, 0.7)),
+        ("Om0",         (0, 0.7)),
     ])
 
     # Select cosmological parameters based on model
@@ -84,8 +89,8 @@ def get_model_params(cosmo_model):
         ])
     elif cosmo_model == 'Flatw0waCDM':
         priors |= OrderedDict([
-            ("wp", (-20.0, 1.0)),   # covers phantom (<-1), Λ (-1), quintessence (> -1), and even w>0
-            ("wa", (-20.0, 20.0))    # symmetric variation
+            ("wp", (-10.0, 0.0)),   # covers phantom (<-1), Λ (-1), quintessence (> -1), and even w>0
+            ("wa", (-20.0, 0.0))    # symmetric variation
         ])
 
     else:
@@ -95,19 +100,17 @@ def get_model_params(cosmo_model):
     
     # Map model_labels to LaTeX-compatible labels
     latex_labels = {
-        "gamma_sn": r"$\gamma_{\rm SN}$",
+        "gamma_sn": r"$\gamma_{\rm SN}$ (mag)",
         "tau_Ms": r"$\tau_{M_s}$",
-        "M0_sn": r"$M^0_{\rm SN}$",
-        "M0_agn": r"$M^0_{\rm AGN}$",
-        "log_sigma_UV_break": r"$\log_{10}\sigma_{\rm 0,break}$",
-        "eta_A1_agn": r"$\eta_{A1, \rm AGN}$",
-        "eta_A2_agn": r"$\eta_{A2, \rm AGN}$",
-        "eta_break_agn": r"$\eta_{\rm break, AGN}$",
-        "beta_agn": r"$\beta_{\rm AGN}$",
-        "gamma_agn": r"$\gamma_{\rm AGN}$",
+        "M0_sn": r"$M^0_{\rm SN}$ (mag)",
+        "M0_agn": r"$M^0_{\rm AGN}$ (mag)",
+        "alpha_agn": r"$\alpha_{\rm AGN}$ (mag/dex)",
+        "beta_agn": r"$\beta_{\rm AGN}$ (mag/dex)",
+        "gamma_agn": r"$\gamma_{\rm AGN}$ (mag/dex)",
         "log_f": r"$\log f$",
-        "H0": r"$H_0$",
+        "H0": r"$H_0$ (km\,s$^{-1}$\,{\rm Mpc}^{-1})",
         "Om0": r"$\Omega_{m,0}$",
+        "w0": r"$w_0$",
         "wp": r"$w_p$",
         "wa": r"$w_a$"
     }

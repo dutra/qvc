@@ -730,56 +730,131 @@ def soft_clip(x, floor=1e-5, sharpness=5):
     # Smoother logistic-like clipping
     return floor + (1 - floor) * (1 / (1 + np.exp(-sharpness * (x - floor))))
 
-def compare_models_by_log_evidence(logZ_1, logZerr_1, logZ_2, logZerr_2, model_1_name="Model 1", model_2_name="Model 2"):
+import numpy as np
+from statistics import NormalDist
+
+import os
+import math
+import numpy as np
+from statistics import NormalDist
+
+def compare_models_by_log_evidence(
+    logZ_1, logZerr_1, logZ_2, logZerr_2,
+    model_1_name="Model 1", model_2_name="Model 2",
+    jeffreys_thresholds=(1.0, 2.5, 5.0),  # |Δln Z| bands
+    z_decisive=2.0,
+    plot_path="plots/hubble/"
+):
     """
-    Compare two models based on their log-evidence (logZ) and uncertainties.
-
-    Parameters:
-        logZ_1 (float): Log-evidence of model 1
-        logZerr_1 (float): Uncertainty in logZ_1
-        logZ_2 (float): Log-evidence of model 2
-        logZerr_2 (float): Uncertainty in logZ_2
-        model_1_name (str): Name of model 1
-        model_2_name (str): Name of model 2
-
-    Returns:
-        dict: A dictionary containing Bayes factor, delta_logZ, sigma_equivalent, and evidence strength.
+    Bayesian comparison using log-evidences, with sigma-style significance.
+    Headline follows astronomy/cosmology convention: report **two-sided σ**.
     """
-    delta_logZ = logZ_1 - logZ_2
-    delta_logZ_err = np.sqrt(logZerr_1**2 + logZerr_2**2)
-    bayes_factor = np.exp(delta_logZ)
-    sigma_equiv = np.sqrt(2 * abs(delta_logZ))
 
-    # Interpret strength using Jeffreys' scale
-    abs_delta = abs(delta_logZ)
-    if abs_delta < 1:
-        strength = "Not worth more than a bare mention"
-    elif abs_delta < 2.5:
-        strength = "Substantial evidence"
-    elif abs_delta < 5:
-        strength = "Strong evidence"
+    # --- Basic deltas and MC reliability ---
+    delta_logZ = float(logZ_1) - float(logZ_2)
+    delta_logZ_err = float(np.hypot(logZerr_1, logZerr_2))
+    z_mc = np.inf if delta_logZ_err == 0 else delta_logZ / delta_logZ_err
+
+    # --- Bayes factor and 1σ interval from Δ ± σΔ ---
+    B12 = math.exp(delta_logZ)
+    B12_lo = math.exp(delta_logZ - delta_logZ_err)
+    B12_hi = math.exp(delta_logZ + delta_logZ_err)
+
+    # --- Jeffreys-style strength ---
+    t1, t2, t3 = jeffreys_thresholds
+    a = abs(delta_logZ)
+    if a < t1:
+        strength = "Barely worth mentioning"
+    elif a < t2:
+        strength = "Substantial"
+    elif a < t3:
+        strength = "Strong"
     else:
-        strength = "Very strong evidence"
+        strength = "Very strong"
 
     preferred_model = model_1_name if delta_logZ > 0 else model_2_name
+    decisive = abs(z_mc) >= z_decisive
 
-    result = {
+    # --- Posterior probabilities under equal priors ---
+    p_M1_equal_priors = 1.0 / (1.0 + math.exp(-delta_logZ))
+    absD = abs(delta_logZ)
+    eps_err = 1.0 / (1.0 + math.exp(absD))  # error prob if choosing the favored model
+
+    # --- Sigma equivalents from odds ---
+    Phi = NormalDist()
+    sigma_one = Phi.inv_cdf(1.0 - eps_err)
+    sigma_two = Phi.inv_cdf(1.0 - eps_err / 2.0)
+
+    # Propagate Δ uncertainty
+    def odds_sigma_from_delta(d):
+        eps = 1.0 / (1.0 + math.exp(abs(d)))
+        return Phi.inv_cdf(1.0 - eps), Phi.inv_cdf(1.0 - eps / 2.0)
+
+    sigma_one_lo, sigma_two_lo = odds_sigma_from_delta(delta_logZ - delta_logZ_err)
+    sigma_one_hi, sigma_two_hi = odds_sigma_from_delta(delta_logZ + delta_logZ_err)
+
+    # --- Wilks-like number (orientation only; not valid for evidences) ---
+    sigma_wilks_like = math.sqrt(2.0 * absD)
+
+    # --- ApJ-style sentence ---
+    apj_sentence = (
+        f"Adopting equal model priors, we obtain Δln Z = {delta_logZ:.2f} ± {delta_logZ_err:.2f} "
+        f"({model_1_name}−{model_2_name}), implying a Bayes factor B₁₂ = {B12:.1f} "
+        f"[{B12_lo:.1f}, {B12_hi:.1f}] and a two-sided Gaussian significance of "
+        f"Z = {sigma_two:.2f}σ (odds-based mapping), which constitutes {strength.lower()} "
+        f"evidence in favor of {preferred_model}."
+    )
+
+    # --- Compose shared lines ---
+    lines = [
+        "Bayesian Model Comparison\n",
+        f"Models: {model_1_name} vs {model_2_name}\n",
+        f"Δln Z = {delta_logZ:.3f} ± {delta_logZ_err:.3f}  (z_mc = {z_mc:.2f})\n",
+        f"Bayes factor B12 = {B12:.3f}  [ {B12_lo:.3f}, {B12_hi:.3f} ]  (≈ ×e^±{delta_logZ_err:.3f})\n",
+        f"Preferred model: {preferred_model}\n",
+        f"Jeffreys strength: {strength}; decisive (|z_mc|≥{z_decisive:.1f})? {'yes' if decisive else 'no'}\n",
+        f"P({model_1_name} | data, equal priors) ≈ {p_M1_equal_priors:.3f}\n",
+        "Significance from odds (astro/cosmology convention):\n",
+        f"  two-sided Z = {sigma_two:.2f}σ  [{sigma_two_lo:.2f}, {sigma_two_hi:.2f}]\n",
+        f"  one-sided Z = {sigma_one:.2f}σ  [{sigma_one_lo:.2f}, {sigma_one_hi:.2f}]\n",
+        f"Wilks-like sigma (orientation only) = {sigma_wilks_like:.2f}σ\n",
+        "\nApJ-style sentence (paste-ready):\n",
+        apj_sentence + "\n",
+    ]
+
+    # --- Print and save same lines ---
+    for line in lines:
+        print(line, end="")
+
+    os.makedirs(plot_path, exist_ok=True)
+    safe_m1 = "".join(c if c.isalnum() or c in "-_." else "_" for c in model_1_name)
+    safe_m2 = "".join(c if c.isalnum() or c in "-_." else "_" for c in model_2_name)
+    text_path = os.path.join(plot_path, f"compare_{safe_m1}_vs_{safe_m2}.txt")
+
+    with open(text_path, "w", encoding="utf-8") as f:
+        f.writelines(lines)
+
+    # --- Return result dict ---
+    return {
         "delta_logZ": delta_logZ,
         "delta_logZ_err": delta_logZ_err,
-        "Bayes_factor": bayes_factor,
+        "z_mc": z_mc,
+        "Bayes_factor": B12,
+        "Bayes_factor_ci_1sigma": (B12_lo, B12_hi),
         "preferred_model": preferred_model,
         "strength": strength,
-        "sigma_equivalent": sigma_equiv
+        "decisive": decisive,
+        "p_M1_equal_priors": p_M1_equal_priors,
+        "sigma_from_odds_one_sided": sigma_one,
+        "sigma_from_odds_two_sided": sigma_two,
+        "sigma_from_odds_one_sided_ci_1sigma": (sigma_one_lo, sigma_one_hi),
+        "sigma_from_odds_two_sided_ci_1sigma": (sigma_two_lo, sigma_two_hi),
+        "sigma_wilks_like": sigma_wilks_like,
+        "apj_sentence": apj_sentence,
+        "text_path": text_path,
     }
 
-    print(f"\nBayesian Model Comparison:")
-    print(f"  ΔlogZ = {delta_logZ:.2f} ± {delta_logZ_err:.2f}")
-    print(f"  Bayes factor (B_12) = {bayes_factor:.2f}")
-    print(f"  Sigma-equivalent ≈ {sigma_equiv:.2f}σ")
-    print(f"  Preferred model: {preferred_model}")
-    print(f"  Evidence strength: {strength}")
 
-    return result
 
 def write_hdf5_file(quasar_list, file_path):
     print(f"Writing {len(quasar_list)} quasars to {file_path}", flush=True)
@@ -992,92 +1067,112 @@ def display_diagnostics(sampler, cosmo_model, fitting_method=False):
     print(ess)
     print(az.summary(idata, round_to=3))
 
+# --- Super-simple CMB likelihood: Gaussian on 100*theta_* ---
 
-def approximate_sound_horizon(Om0, h, Omega_b=0.049):
+import numpy as np
+from scipy import stats
+from scipy.integrate import quad
+import astropy.units as u
+from astropy import constants as const
+
+# --- DESI (Planck) prior on 100*theta_* ---
+CMB_100THETA_MEAN = 1.04110
+CMB_100THETA_SIGMA = 0.00053
+
+# --- Defaults ---
+STD_T_CMB = 2.7255
+STD_NEFF  = 3.046
+BBN_OMEGABH2_MEAN = 0.02218   # standard Neff BBN mean
+
+# ---------- helpers ----------
+def _safe_omegabh2(cosmo, fallback=BBN_OMEGABH2_MEAN):
+    h = cosmo.H0.value / 100.0
+    Ob0 = getattr(cosmo, "Ob0", None)
+    if (Ob0 is None) or (float(Ob0) <= 0.0) or (not np.isfinite(Ob0)):
+        return float(fallback)
+    return float(Ob0) * h * h
+
+def _omega_gamma_h2(Tcmb=STD_T_CMB):
+    return 2.469e-5 * (Tcmb / 2.7255)**4
+
+def _omega_r(cosmo, Tcmb=STD_T_CMB):
+    """Total radiation density Ω_r = Ω_γ + Ω_ν,rel using Neff (massless approx)."""
+    h = cosmo.H0.value / 100.0
+    Om_gamma = _omega_gamma_h2(Tcmb=Tcmb) / (h*h)
+    Neff = getattr(cosmo, "Neff", STD_NEFF)
+    f_nu = 7.0/8.0 * (4.0/11.0)**(4.0/3.0) * float(Neff)  # ≈ 0.2271 * Neff
+    return Om_gamma * (1.0 + f_nu)
+
+def _z_star_hu_sugiyama(omega_b_h2, omega_m_h2):
+    """Robust Hu–Sugiyama / Eisenstein–Hu z* fit with safe lower bounds."""
+    wb = float(np.maximum(omega_b_h2, 1e-6))
+    wm = float(np.maximum(omega_m_h2, 1e-6))
+    g1 = 0.0783 * wb**(-0.238) / (1.0 + 39.5 * wb**0.763)
+    g2 = 0.560 / (1.0 + 21.1 * wb**1.81)
+    return 1048.0 * (1.0 + 0.00124 * wb**(-0.738)) * (1.0 + g1 * wm**g2)
+
+def _r_s_comoving_robust(cosmo, zstar, omega_b_h2, Tcmb=STD_T_CMB, z_switch=1.0e4):
     """
-    Eisenstein & Hu (1998) approximation to sound horizon at drag epoch (in Mpc).
+    r_s(z*) in Mpc: numeric ∫ from z* to z_switch + analytic radiation-era tail above z_switch.
+    This avoids endpoint issues and quad's extrapolation problems.
     """
-    omega_m = Om0 * h**2
-    omega_b = Omega_b * h**2
-    b1 = 0.313 * omega_m**(-0.419) * (1 + 0.607 * omega_m**0.674)
-    b2 = 0.238 * omega_m**0.223
-    z_drag = 1291 * omega_m**0.251 / (1 + 0.659 * omega_m**0.828) * (1 + b1 * omega_b**b2)
-    R_drag = 31.5 * omega_b * 1e3 / (z_drag * omega_m * 1e3)
-    return 44.5 * np.log(9.83 / omega_m) / np.sqrt(1 + 10 * R_drag)
+    h = cosmo.H0.value / 100.0
+    Om_b     = float(omega_b_h2) / (h*h)
+    Om_gamma = _omega_gamma_h2(Tcmb=Tcmb) / (h*h)
+    Om_r     = _omega_r(cosmo, Tcmb=Tcmb)
 
-def make_psd(matrix, epsilon=1e-10):
+    # Numeric piece: z* -> z_switch
+    c_si = const.c.to_value(u.m/u.s)
+    pref_R = 0.75 * (Om_b / Om_gamma)  # R(z) = pref_R / (1+z)
+
+    def integrand(z):
+        a = 1.0 / (1.0 + z)
+        R = pref_R * a
+        c_s = c_si / np.sqrt(3.0 * (1.0 + R))
+        Hz = cosmo.H(z).to_value(u.s**-1)
+        return c_s / Hz  # [m]
+
+    z_lo = float(zstar)
+    z_hi = float(max(z_switch, z_lo * 1.01))  # ensure upper > lower
+    rs_num_m, _ = quad(integrand, z_lo, z_hi, epsabs=0.0, epsrel=1e-6, limit=400)
+
+    # Analytic tail: z_switch -> ∞ in pure radiation era with c_s ≈ c/sqrt(3), H ≈ H0 sqrt(Ω_r) (1+z)^2
+    H0_SI = cosmo.H0.to_value(u.s**-1)
+    rs_tail_m = (c_si / np.sqrt(3.0)) / (H0_SI * np.sqrt(Om_r)) * (1.0 / (1.0 + z_hi))
+
+    rs_mpc = ((rs_num_m + rs_tail_m) * u.m).to_value(u.Mpc)
+    return rs_mpc
+
+# ---------- simple, stable CMB likelihood ----------
+def loglike_cmb_theta_simple(cosmo,
+                             omega_b_h2=None,
+                             Tcmb=STD_T_CMB,
+                             mean_100theta=CMB_100THETA_MEAN,
+                             sigma_100theta=CMB_100THETA_SIGMA):
     """
-    Enforce symmetric positive semi-definiteness.
+    Gaussian likelihood on 100*theta_* with robust r_s and safe baryon fallback.
+    Returns (lnL, diagnostics).
     """
-    matrix = (matrix + matrix.T) / 2
-    eigvals, eigvecs = eigh(matrix)
-    eigvals[eigvals < epsilon] = epsilon
-    return eigvecs @ np.diag(eigvals) @ eigvecs.T
+    # baryons
+    omega_b_h2 = _safe_omegabh2(cosmo) if (omega_b_h2 is None) else float(omega_b_h2)
 
-def log_likelihood_planck2018_cmb(cosmo, Omega_b=0.049):
-    """
-    Log-likelihood from Planck 2018 compressed CMB distance priors:
-    (ℓ_A, R, z_*) for flat w0waCDM.
-    
-    Parameters
-    ----------
-    cosmo : astropy.cosmology.FRW
-        Cosmology instance (Flatw0waCDM or similar).
-    Omega_b : float
-        Baryon density (default from Planck 2018 best-fit).
+    # z*, r_s, D_M
+    h = cosmo.H0.value / 100.0
+    omega_m_h2 = float(cosmo.Om0) * h * h
+    zstar = _z_star_hu_sugiyama(omega_b_h2, omega_m_h2)
 
-    Returns
-    -------
-    float
-        Log-likelihood contribution from Planck 2018 CMB data.
-    """
-    h = cosmo.H0.value / 100
-    Om0 = cosmo.Om0
-    z_star = 1089.92  # Planck best-fit decoupling redshift
+    D_A = cosmo.angular_diameter_distance(zstar).to_value(u.Mpc)
+    if not np.isfinite(D_A) or D_A <= 0.0:
+        # If the user feeds a pathological cosmology, bail out gracefully.
+        return -np.inf, {"reason": "DA_nonfinite", "z_star": zstar}
 
-    # Comoving distance to z_star
-    D_M = cosmo.comoving_distance(z_star).value  # in Mpc
+    D_M = (1.0 + zstar) * D_A
+    r_s = _r_s_comoving_robust(cosmo, zstar, omega_b_h2, Tcmb=Tcmb)
 
-    # Sound horizon
-    r_s = approximate_sound_horizon(Om0, h, Omega_b)
+    hundred_theta = 100.0 * (r_s / D_M)
+    ll = stats.norm.logpdf(hundred_theta, loc=mean_100theta, scale=sigma_100theta)
 
-    # Acoustic scale and shift parameter
-    l_A = np.pi * D_M / r_s
-    R = np.sqrt(Om0) * D_M * cosmo.H0.value / 299792.458  # c in km/s
-
-    # Planck 2018 compressed parameters
-    PLANCK_MEAN = np.array([301.77, 1.7492, z_star])
-    PLANCK_COV = np.array([
-        [0.090**2,  0.00045,  0.057],
-        [0.00045,   0.0042**2, 0.0036],
-        [0.057,     0.0036,    0.25**2]
-    ])
-    PLANCK_COV = make_psd(PLANCK_COV)
-
-    data = np.array([l_A, R, z_star])
-    return multivariate_normal.logpdf(data, mean=PLANCK_MEAN, cov=PLANCK_COV)
-
-
-
-def log_likelihood_cmb_distance_priors_simpler(cosmo):
-    z_star = 1089 # # Last scattering surface
-    h = cosmo.H0.value / 100
-
-    # Planck values in h^-1 Mpc
-    D_M_CMB_hinv = 1394.4
-    sigma_D_M_hinv = 61.0
-
-    # Convert to Mpc using model H0
-    D_M_CMB = D_M_CMB_hinv / h
-    sigma_D_M = sigma_D_M_hinv / h
-
-    # model's prediction
-    D_M_model = (1 + z_star) * cosmo.angular_diameter_distance(z_star).value
-
-    # Log-likelihood
-    ll_cmb = norm.logpdf(D_M_model, loc=D_M_CMB, scale=sigma_D_M)
-    return ll_cmb
-
+    return float(ll), {"100theta": hundred_theta, "z_star": zstar, "r_s_Mpc": r_s, "D_M_Mpc": D_M}
 
 
 def predict_uncensored_magnitudes_from_observed(df_agn, completeness_params, nsig=4, n_grid=500):
