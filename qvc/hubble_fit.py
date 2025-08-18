@@ -28,6 +28,7 @@ import os
 import yaml
 import sys
 import argparse
+from scipy.interpolate import interp1d
 
 # Placeholders for global data (improves speed?)
 _agn_data = None
@@ -58,12 +59,17 @@ def completeness_loglike(m_model, mu_err, z, completeness2d, m_grid, sigma_compl
 
     # p_detect(m, z)
     p_det = completeness2d(m_grid[None, :], z[:, None])  # shape (N_obj, N_grid)
+    wpdf = pdf * p_det
 
     # ∫ pdf(m) * p_det(m, z) dm  (outside-grid p_det=0 by construction)
-    integrals = np.trapz(pdf * p_det, m_grid, axis=1)
+    integrals = np.trapz(wpdf, m_grid, axis=1)
     integrals = np.clip(integrals, tiny, 1.0)            # numerical guard
 
-    return np.sum(np.log(integrals)), integrals
+    # Average
+    m_integrals = np.trapz(wpdf * m_grid[None, :], m_grid, axis=1)
+    dmi = m_integrals / integrals - m_model
+
+    return np.sum(np.log(integrals)), (integrals, dmi)
 
 # --- Log-likelihood ---
 def log_likelihood(theta, cosmo_model,
@@ -156,15 +162,13 @@ def log_likelihood(theta, cosmo_model,
 
     ll_agn = np.sum(stats.norm.logpdf(mu_pred - mu_cosmo, scale=mu_err))
 
-    # Corrected? AGN completeness correction 2D
-    # Optional AGN completeness correction 2D
     m_model = M_pred + mu_cosmo  # model-predicted magnitude
 
     ll_completeness = 0.0
     integrals = np.zeros_like(z)  # shape (N_obj,)
     if completeness_params is not None:
         completeness2d, mag_centers, _, _, _, completeness_scatter = completeness_params
-        ll_completeness, integrals = completeness_loglike(
+        ll_completeness, blobs = completeness_loglike(
             m_model=m_model, mu_err=mu_err, z=z,
             completeness2d=completeness2d, m_grid=mag_centers,
             sigma_completeness=completeness_scatter
@@ -173,7 +177,7 @@ def log_likelihood(theta, cosmo_model,
     #ll_theta, _cmb = loglike_cmb_theta_simple(cosmo)  # or pass omega_b_h2 if you prefer
     
     # print(f"Log-likelihood components: ll_snia={ll_snia:.2f}, ll_agn={ll_agn:.2f}, ll_completeness={ll_completeness:.2f}")
-    return ll_snia + ll_agn - ll_completeness, integrals
+    return ll_snia + ll_agn - ll_completeness, np.array(blobs)
 
 # Globals used by dynesty
 _dynesty_config = {}
@@ -301,8 +305,8 @@ def run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model='Flatw0waCDM',
                 print_progress=True,
                 dlogz_init=500,                 
                 n_effective=50,                # 300–1000 typical for model comparison
-                nlive_init=5*ndim,   # bump live points
-                nlive_batch=2*ndim   # reasonable batch size for dynamic allocation
+                nlive_init=10,   # bump live points
+                nlive_batch=10   # reasonable batch size for dynamic allocation
             )
         elif speed == "production":
             print("Starting production run...")
@@ -355,7 +359,26 @@ def run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model='Flatw0waCDM',
 
     # ===== Highest posterior weight (MAP-ish) sample =====
     idx_max_weight = np.argmax(weights)
-    integrals_max_w   = blobs[idx_max_weight]  # this is integrals for that sample, shape: (nobj,)
+    print(blobs.shape)
+    integrals_max_w = blobs[idx_max_weight,:][0]  # this is integrals for that sample, shape: (nobj,)
+    dmi_max_w = blobs[idx_max_weight,:][1]  # this is dmi for that sample, shape: (nobj,)
+
+    # Bin dmi in redshift
+    # Interpolate dmi vs redshift for smooth plotting or further analysis (no binning)
+    print(len(dmi_max_w), len(z))
+    dmi_interp = interp1d(z, dmi_max_w, kind='linear', bounds_error=False, fill_value='extrapolate')
+    
+    # Plot dmi_interp vs z for the highest-weight sample
+    z_plot = np.linspace(z.min(), z.max(), 200)
+    plt.figure(figsize=(8, 5))
+    plt.plot(z_plot, dmi_interp(z_plot), label="dmi_interp(z)")
+    plt.xlabel("Redshift (z)")
+    plt.ylabel("dmi (mag)")
+    plt.title("Interpolated dmi vs z — highest posterior weight sample")
+    plt.grid(True)
+    plt.tight_layout()
+    plt.savefig("plots/completeness/dmi_interp_vs_z_highest_weight.png", dpi=150)
+    plt.close()
 
     print("\nHighest-weight (posterior) sample:")
     print("  idx:", idx_max_weight)
@@ -363,7 +386,7 @@ def run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model='Flatw0waCDM',
     print("  weight:", float(weights[idx_max_weight]))
     print("  (preview) integrals[:10]:", integrals_max_w[:10])
 
-    # ===== Plot: log(integrals) vs redshift for highest-weight sample =====
+    # Plot log(integrals) vs redshift for highest-weight sample
     plt.figure(figsize=(8, 5))
     plt.scatter(z, integrals_max_w, s=16, alpha=0.75)
     plt.xlabel("Redshift (z)")
@@ -375,7 +398,8 @@ def run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model='Flatw0waCDM',
     plt.savefig("plots/completeness/integrals_vs_z_highest_weight.png", dpi=150)
     #plt.show()
     plt.close()
-    # ===== (Optional) keep your equal-weight resampling utilities =====
+
+    # Keep equal-weight resampling
     idx = np.arange(weights.size)
     flat_idx = dyfunc.resample_equal(idx, weights)          # (nsamp,)
     flat_samples = samples[flat_idx]
@@ -407,18 +431,13 @@ def run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model='Flatw0waCDM',
     # If you want to keep your existing summary:
     display_results_summary(flat_samples, cosmo_model, z_agn_pivot)
 
-
-    #completeness_params = get_completeness_function_2d(df_agn_filtered)
-    #mag_corr = apply_forward_completeness_correction(df_agn_filtered, params, cosmo_model, completeness_params)
-    #df_agn.loc[df_agn_filtered.index, 'apparent_mag_2500_corr'] = mag_corr.astype(np.float32)
-    mag_corr = None
-
     #z_pivot_best, _, _ = find_optimal_pivot(flat_samples, cosmo_model, df_agn_filtered)
     #print(f"Optimal z pivot for {cosmo_model}: {z_pivot_best:.3f}")
 
     #display_diagnostics(sampler, cosmo_model, fitting_method=fitting_method)
     #np.save(f"results/hubble/flat_samples_{cosmo_model}_{'sna' if only_sna else 'agn'}.npy", flat_samples)
-    return sampler, flat_samples, model_labels, mag_corr, logZ, logZerr
+
+    return sampler, flat_samples, model_labels, dmi_max_w, logZ, logZerr
 
 
 
@@ -431,7 +450,7 @@ def run_single(agn_data_filepath, cosmo_model, populate_sdss_fields=False, compl
 
     df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data(agn_data_filepath, populate_sdss=populate_sdss_fields)
 
-    sampler, flat_samples, model_labels, mag_corr, logZ, logZerr = run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model=cosmo_model, 
+    sampler, flat_samples, model_labels, dmag_corr, logZ, logZerr = run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model=cosmo_model, 
                                                          only_sna=only_sna, completeness=completeness, use_full_cov=use_full_cov,
                                                          resume=False, speed=speed)
     if cosmo_model == 'Flatw0waCDM':
@@ -443,8 +462,9 @@ def run_single(agn_data_filepath, cosmo_model, populate_sdss_fields=False, compl
         
     plot_dynesty(sampler.results, cosmo_model, plot_path)
 
-    plot_predicted_vs_actual_M2500(flat_samples, df_agn, cosmo_model=cosmo_model, z_agn_pivot=z_agn_pivot, show=False, plot_path=plot_path)
-    
+    plot_predicted_vs_actual_M2500(flat_samples, df_agn, cosmo_model=cosmo_model, z_agn_pivot=z_agn_pivot, debias=False, show=False, plot_path=plot_path)
+    plot_predicted_vs_actual_M2500(flat_samples, df_agn, cosmo_model=cosmo_model, z_agn_pivot=z_agn_pivot, debias=True, show=False, dms=dmag_corr, plot_path=plot_path)
+
     print("Plotting Hubble diagram...")
     residuals, mu_pred_median, mu_pred_std = plot_hubble(flat_samples, df_agn, df_pantheon, 
                                                          cosmo_model=cosmo_model, z_agn_pivot=z_agn_pivot, 
@@ -470,7 +490,7 @@ def run_single(agn_data_filepath, cosmo_model, populate_sdss_fields=False, compl
         rho_w0_wa = posterior_corr(flat_samples, cosmo_model, z_agn_pivot)
         print(f"Posterior correlation coefficient (w0, wa) at z_p={z_agn_pivot}: {rho_w0_wa:.3f}")
 
-    return sampler, flat_samples, model_labels, mag_corr, logZ, logZerr
+    return sampler, flat_samples, model_labels, dmag_corr, logZ, logZerr
 
 
 def run_all(agn_data_filepath, cosmo_model, speed="production"):

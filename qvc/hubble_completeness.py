@@ -245,3 +245,40 @@ def get_completeness_function_2d(
     dz = float(z_centers[1] - z_centers[0])     if len(z_centers)   > 1 else float(z_edges[-1] - z_edges[0])
 
     return Completeness2D(mag_centers, z_centers, C), mag_centers, z_centers, dm, dz, scatter
+
+def make_dm_function(m, z, dm, m_bins=40, z_bins=40):
+    """
+    Build a 2D interpolator dm(m,z).
+    m,z,dm : arrays (N,)
+    m_bins,z_bins : int or sequence
+    """
+    # Remove non-finite values
+    m = np.asarray(m)
+    z = np.asarray(z)
+    dm = np.asarray(dm)
+    mask = np.isfinite(m) & np.isfinite(z) & np.isfinite(dm)
+    m = m[mask]
+    z = z[mask]
+    dm = dm[mask]
+
+    if np.isscalar(m_bins):
+        m_edges = np.linspace(m.min(), m.max(), m_bins)
+    else:
+        m_edges = np.asarray(m_bins)
+    if np.isscalar(z_bins):
+        z_edges = np.linspace(z.min(), z.max(), z_bins)
+    else:
+        z_edges = np.asarray(z_bins)
+
+    # binning
+    counts, _, _ = np.histogram2d(z, m, bins=[z_edges, m_edges])
+    sums, _, _   = np.histogram2d(z, m, bins=[z_edges, m_edges], weights=dm)
+    mean = np.divide(sums, counts, out=np.zeros_like(sums), where=counts>0)
+
+    z_mid = 0.5*(z_edges[:-1] + z_edges[1:])
+    m_mid = 0.5*(m_edges[:-1] + m_edges[1:])
+
+    interp = RegularGridInterpolator((z_mid, m_mid), mean,
+                                     bounds_error=False, fill_value=np.nan)
+
+    return interp  # call as interp([[z,m]]) or vectorized

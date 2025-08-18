@@ -13,6 +13,7 @@ import matplotlib.transforms as mtransforms
 
 from hubble_model import M_model_agn, M_model_agn_err, M_model_SN, get_model_params, log_tau_UV_RF_pivot
 from hubble_utils import calc_Mi_from_M2500
+from hubble_completeness import make_dm_function
 from numpy.polynomial.polynomial import Polynomial
 from scipy.interpolate import interp1d
 from dynesty.utils import resample_equal
@@ -591,7 +592,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_agn_pivot, plo
     return residuals, mu_pred_median, mu_pred_std
 
 
-def plot_predicted_vs_actual_M2500(flat_samples, df_agn, cosmo_model, z_agn_pivot, plot_path='plots/hubble', show=False):
+def plot_predicted_vs_actual_M2500(flat_samples, df_agn, cosmo_model, z_agn_pivot, plot_path='plots/hubble', debias=False, dms=None, show=False):
     priors, model_labels, model_labels_latex = get_model_params(cosmo_model)
     results = {key: np.percentile(flat_samples[:, i], [16, 50, 84]) for i, key in enumerate(model_labels)}
     # compute M_actual
@@ -656,6 +657,9 @@ def plot_predicted_vs_actual_M2500(flat_samples, df_agn, cosmo_model, z_agn_pivo
     vmin = np.nanmin(apparent_mag_2500)
     vmax = np.nanmax(apparent_mag_2500)
 
+    if debias:
+        dm_interp = make_dm_function(apparent_mag_2500, df_agn['z'], dms)
+
     for i, ax in enumerate(axes):
         ax.set_xlim(-25.8, -18.2)
         ax.set_ylim(-25.8, -18.2)
@@ -666,6 +670,14 @@ def plot_predicted_vs_actual_M2500(flat_samples, df_agn, cosmo_model, z_agn_pivo
             actual_M_2500_bin = actual_M_2500[bin_mask]
             apparent_mag_2500_bin = apparent_mag_2500[bin_mask]
             M_i_axis = np.linspace(actual_M_2500.min(), actual_M_2500.max(), 100)
+
+            # De-bias
+            if debias:
+                pts = np.column_stack([df_agn['z'][bin_mask], apparent_mag_2500_bin])
+                print(dm_interp(pts))
+                actual_M_2500_bin -= dm_interp(pts)
+
+            # Plot
             ax.plot(M_i_axis, M_i_axis, color='m', alpha=0.7, label='y = x (Perfect Prediction)', lw=3, linestyle='--')
             sc = ax.scatter(
                 actual_M_2500_bin, predicted_M_2500_bin, 
@@ -692,7 +704,10 @@ def plot_predicted_vs_actual_M2500(flat_samples, df_agn, cosmo_model, z_agn_pivo
     cbar.set_label(r'm$_{2500}$', fontsize=14)
 
     os.makedirs(plot_path, exist_ok=True)
-    plt.savefig(os.path.join(plot_path, "predicted_vs_actual_M2500.png"), dpi=300)
+    filename = "predicted_vs_actual_M2500.png"
+    if debias:
+        filename = "predicted_vs_actual_M2500_debiased.png"
+    plt.savefig(os.path.join(plot_path, filename), dpi=300)
     if show:
         plt.show()
     plt.close()
