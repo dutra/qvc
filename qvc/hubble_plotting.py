@@ -328,7 +328,7 @@ def plot_cosmo_corner(
 
 
 def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_agn_pivot, plot_path="plots/hubble/",
-                show=False, completeness=True, show_true=False, verbose=True):
+                debias=False, dms=None, show=False, completeness=True, show_true=False, verbose=True):
     """
     Hubble diagram (Pantheon+-style), vivid colors inlined:
       • Model line + 68% band in magenta ('m')
@@ -401,6 +401,12 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_agn_pivot, plo
             df_agn['bwb_beta'].values
         ) for s in flat_samples
     ])
+
+    # De-bias
+    if debias:
+        dm_interp = make_dm_function(m_obs, df_agn['z'], dms)
+        pts = np.column_stack([df_agn['z'].values, m_obs])
+        mu_pred_samples -= dm_interp(pts)
 
     mu_pred_median = np.percentile(mu_pred_samples, 50, axis=0)
     mu_pred_16th   = np.percentile(mu_pred_samples, 16, axis=0)
@@ -574,7 +580,10 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_agn_pivot, plo
     # Save/show
     fig.tight_layout()
     os.makedirs(plot_path, exist_ok=True)
-    plt.savefig(os.path.join(plot_path, "hubble_diagram.png"))
+    filename = "hubble_diagram.png"
+    if debias:
+        filename = "hubble_diagram_debiased.png"
+    plt.savefig(os.path.join(plot_path, filename))
     if show:
         plt.show()
     plt.close(fig)
@@ -674,7 +683,6 @@ def plot_predicted_vs_actual_M2500(flat_samples, df_agn, cosmo_model, z_agn_pivo
             # De-bias
             if debias:
                 pts = np.column_stack([df_agn['z'][bin_mask], apparent_mag_2500_bin])
-                print(dm_interp(pts))
                 actual_M_2500_bin -= dm_interp(pts)
 
             # Plot

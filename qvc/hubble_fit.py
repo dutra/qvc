@@ -298,42 +298,42 @@ def run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model='Flatw0waCDM',
                 queue_size=num_cpus,
                 blob=True
             )
-        if speed == 'fast':
-            print("[Warning] Starting fast run...")
-            sampler.run_nested(
-                resume=resume,
-                checkpoint_file=checkpoint_file,
-                print_progress=True,
-                dlogz_init=500,                 
-                n_effective=50,                # 300–1000 typical for model comparison
-                nlive_init=10,   # bump live points
-                nlive_batch=10   # reasonable batch size for dynamic allocation
-            )
-        elif speed == "production":
-            print("Starting production run...")
-            # Production run?
-            sampler.run_nested(
-                resume=resume,
-                checkpoint_file=checkpoint_file,
-                print_progress=True,
-                dlogz_init=0.01,                 
-                n_effective=500,                # 300–1000 typical for model comparison
-                nlive_init=max(500, 50*ndim),   # bump live points
-                nlive_batch=max(250, 25*ndim)   # reasonable batch size for dynamic allocation
-                # optional: sample='rwalk', walks=50, bound='multi' if you expect multi-modality
-            )
-        elif speed == "test":
-            print("[Warning] Starting TEST run...")
-            # "Fast" test run?
-            sampler.run_nested(
-                resume=resume,
-                checkpoint_file=checkpoint_file,
-                print_progress=True,
-                dlogz_init=10,                 
-                n_effective=200,                # 300–1000 typical for model comparison
-                nlive_init=max(200, 20*ndim),   # bump live points
-                nlive_batch=max(100, 10*ndim)   # reasonable batch size for dynamic allocation
-            )
+            if speed == 'fast':
+                print("[Warning] Starting fast run...")
+                sampler.run_nested(
+                    resume=resume,
+                    checkpoint_file=checkpoint_file,
+                    print_progress=True,
+                    dlogz_init=500,                 
+                    n_effective=50,                # 300–1000 typical for model comparison
+                    nlive_init=10,   # bump live points
+                    nlive_batch=10   # reasonable batch size for dynamic allocation
+                )
+            elif speed == "production":
+                print("Starting production run...")
+                # Production run?
+                sampler.run_nested(
+                    resume=resume,
+                    checkpoint_file=checkpoint_file,
+                    print_progress=True,
+                    dlogz_init=0.01,                 
+                    n_effective=500,                # 300–1000 typical for model comparison
+                    nlive_init=max(500, 50*ndim),   # bump live points
+                    nlive_batch=max(250, 25*ndim)   # reasonable batch size for dynamic allocation
+                    # optional: sample='rwalk', walks=50, bound='multi' if you expect multi-modality
+                )
+            elif speed == "test":
+                print("[Warning] Starting TEST run...")
+                # "Fast" test run?
+                sampler.run_nested(
+                    resume=resume,
+                    checkpoint_file=checkpoint_file,
+                    print_progress=True,
+                    dlogz_init=10,                 
+                    n_effective=200,                # 300–1000 typical for model comparison
+                    nlive_init=max(200, 20*ndim),   # bump live points
+                    nlive_batch=max(100, 10*ndim)   # reasonable batch size for dynamic allocation
+                )
 
 
     results = sampler.results
@@ -453,37 +453,42 @@ def run_single(agn_data_filepath, cosmo_model, populate_sdss_fields=False, compl
 
     sampler, flat_samples, model_labels, dmag_corr, logZ, logZerr = run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model=cosmo_model, 
                                                          only_sna=only_sna, completeness=completeness, use_full_cov=use_full_cov,
-                                                         resume=False, speed=speed)
+                                                         resume=resume, speed=speed)
     if cosmo_model == 'Flatw0waCDM':
         zp = compute_pivot_redshift(flat_samples, cosmo_model)
         print("Pivot redshift: ", zp)
 
     plot_path = f"plots/hubble/{cosmo_model}_{'sna' if only_sna else 'joint'}_{speed}"
     os.makedirs(plot_path, exist_ok=True)
-        
+
+    print("Plotting full dynesty corner...")
     plot_dynesty(sampler.results, cosmo_model, plot_path)
 
+    print("Plotting predicted vs actual M2500...")
     plot_predicted_vs_actual_M2500(flat_samples, df_agn, cosmo_model=cosmo_model, z_agn_pivot=z_agn_pivot, debias=False, show=False, plot_path=plot_path)
     plot_predicted_vs_actual_M2500(flat_samples, df_agn, cosmo_model=cosmo_model, z_agn_pivot=z_agn_pivot, debias=True, show=False, dms=dmag_corr, plot_path=plot_path)
 
     print("Plotting Hubble diagram...")
     residuals, mu_pred_median, mu_pred_std = plot_hubble(flat_samples, df_agn, df_pantheon, 
                                                          cosmo_model=cosmo_model, z_agn_pivot=z_agn_pivot, 
-                                                         show_true=False, show=False, plot_path=plot_path)
-    
+                                                         show_true=False, show=False, debias=False, plot_path=plot_path)
+    debiased_residuals, _, _ = plot_hubble(flat_samples, df_agn, df_pantheon, 
+                                                         cosmo_model=cosmo_model, z_agn_pivot=z_agn_pivot, 
+                                                         show_true=False, show=False, debias=True, dms=dmag_corr, plot_path=plot_path)
+
+    print("Plotting predicted L2500 vs ...")
     plot_predicted_L2500_vs_sigmahat(flat_samples, df_agn, cosmo_model=cosmo_model, z_agn_pivot=z_agn_pivot, show=False, plot_path=plot_path)
     
     print("Plotting cosmological posteriors corner plot...")
     plot_cosmo_corner(None, flat_samples, cosmo_model, z_agn_pivot, show=False, plot_path=plot_path)
 
-    
     print("Plotting completeness vs magnitude at redshifts...")
     p_detect, mag_centers, z_centers, dm, dz, completeness_scatter = get_completeness_function_2d(df_agn, plot=True)
     plot_completeness_vs_mag_at_redshifts(p_detect, mag_centers, z_centers)
     plot_completeness_diagnostics(df_agn, p_detect, mag_centers, z_centers)
 
-    print("Plotting residuals...")
-    plot_full_residuals(df_agn, residuals, flat_samples, cosmo_model, z_agn_pivot, show=False, plot_path=plot_path)
+    print("Plotting debiased residuals...")
+    plot_full_residuals(df_agn, debiased_residuals, flat_samples, cosmo_model, z_agn_pivot, show=False, plot_path=plot_path)
 
     # Example usage:
     # Assuming `samples` is a dict from your MCMC run
