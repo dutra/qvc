@@ -131,9 +131,205 @@ def match_sample_to_dr16q(sample_csv, dr16q_fits, max_sep_arcsec=2.0, limit=None
 
     return data_cat, sample_df_matched
 
+def create_qsopar_fits(path_ex='data/', *, overwrite=True, author='Hengxiao Guo'):
+    """
+    Create the QSOFit parameter file 'qsopar.fits' with the following HDUs:
+      - PRIMARY        : header only (Author)
+      - line_priors    : emission-line priors (wavelengths, windows, Gaussian setup, ties)
+      - conti_windows  : continuum-fitting windows [Å]
+      - conti_priors   : continuum parameter priors (Fe UV/optical, PL, Balmer, poly)
+      - measure_info   : continuum luminosity wavelengths and Fe flux range(s)
+
+    Parameters
+    ----------
+    path_ex : str
+        Directory where 'qsopar.fits' will be written.
+    overwrite : bool
+        Overwrite an existing file if present.
+    author : str
+        Value placed in PRIMARY header.
+
+    Returns
+    -------
+    str
+        Absolute path to the written FITS file.
+    """
+    import os
+    import numpy as np
+    from astropy.io import fits
+    from astropy.table import Table
+
+    os.makedirs(path_ex, exist_ok=True)
+
+    # ------------------------ PRIMARY HDU ------------------------
+    hdr0 = fits.Header()
+    hdr0['Author'] = author
+    primary_hdu = fits.PrimaryHDU(header=hdr0)
+
+    # ------------------------ line_priors ------------------------
+    lp_dtype = np.dtype([
+        ('lambda',  'f4'),
+        ('compname','S20'),
+        ('minwav',  'f4'),
+        ('maxwav',  'f4'),
+        ('linename','S20'),
+        ('ngauss',  'i4'),
+        ('inisca',  'f4'),
+        ('minsca',  'f4'),
+        ('maxsca',  'f4'),
+        ('inisig',  'f4'),
+        ('minsig',  'f4'),
+        ('maxsig',  'f4'),
+        ('voff',    'f4'),
+        ('vindex',  'i4'),
+        ('windex',  'i4'),
+        ('findex',  'i4'),
+        ('fvalue',  'f4'),
+        ('vary',    'i4'),
+    ])
+
+    line_priors = np.rec.fromrecords([
+        #  lambda    comp  minwav maxwav  name         ngauss  inisca  minsca  maxsca  inisig   minsig   maxsig   voff    vindex windex findex fvalue vary
+        (6564.61,  'Ha',  6400,  6800,  'Ha_br',         2,    0.0,    0.0,   1e10,   5e-3,   0.004,    0.05,   0.015,     0,     0,     0,   0.05,   1),
+        (6564.61,  'Ha',  6400,  6800,  'Ha_na',         1,    0.0,    0.0,   1e10,   1e-3,   5e-4,   0.00169,  0.01,      1,     1,     0,   0.002,  1),
+        (6549.85,  'Ha',  6400,  6800,  'NII6549',       1,    0.0,    0.0,   1e10,   1e-3,  2.3e-4,  0.00169,  5e-3,      1,     1,     1,   0.001,  1),
+        (6585.28,  'Ha',  6400,  6800,  'NII6585',       1,    0.0,    0.0,   1e10,   1e-3,  2.3e-4,  0.00169,  5e-3,      1,     1,     1,   0.003,  1),
+        (6718.29,  'Ha',  6400,  6800,  'SII6718',       1,    0.0,    0.0,   1e10,   1e-3,  2.3e-4,  0.00169,  5e-3,      1,     1,     2,   0.001,  1),
+        (6732.67,  'Ha',  6400,  6800,  'SII6732',       1,    0.0,    0.0,   1e10,   1e-3,  2.3e-4,  0.00169,  5e-3,      1,     1,     2,   0.001,  1),
+
+        (4862.68,  'Hb',  4640,  5100,  'Hb_br',         2,    0.0,    0.0,   1e10,   5e-3,   0.004,    0.05,   0.01,      0,     0,     0,   0.01,   1),
+        (4862.68,  'Hb',  4640,  5100,  'Hb_na',         1,    0.0,    0.0,   1e10,   1e-3,  2.3e-4,  0.00169,  0.01,      1,     1,     0,   0.002,  1),
+        (4960.30,  'Hb',  4640,  5100,  'OIII4959c',     1,    0.0,    0.0,   1e10,   1e-3,  2.3e-4,  0.00169,  0.01,      1,     1,     0,   0.002,  1),
+        (5008.24,  'Hb',  4640,  5100,  'OIII5007c',     1,    0.0,    0.0,   1e10,   1e-3,  2.3e-4,  0.00169,  0.01,      1,     1,     0,   0.004,  1),
+        (4960.30,  'Hb',  4640,  5100,  'OIII4959w',     1,    0.0,    0.0,   1e10,   3e-3,  2.3e-4,   0.004,   0.01,      2,     2,     0,   0.001,  1),
+        (5008.24,  'Hb',  4640,  5100,  'OIII5007w',     1,    0.0,    0.0,   1e10,   3e-3,  2.3e-4,   0.004,   0.01,      2,     2,     0,   0.002,  1),
+
+        (4341.68,  'Hg',  4200,  4400,  'Hg_br',         1,    0.0,    0.0,   1e10,   5e-3,   0.004,    0.05,   0.01,      0,     0,     0,   0.01,   1),
+        (4341.68,  'Hg',  4200,  4400,  'Hg_na',         1,    0.0,    0.0,   1e10,   1e-3,  2.3e-4,  0.00169,  0.01,      1,     1,     0,   0.002,  1),
+        (4102.89,  'Hd',  4000,  4150,  'Hd_br',         1,    0.0,    0.0,   1e10,   5e-3,   0.004,    0.05,   0.01,      0,     0,     0,   0.01,   1),
+        (4102.89,  'Hd',  4000,  4150,  'Hd_na',         1,    0.0,    0.0,   1e10,   1e-3,  2.3e-4,  0.00169,  0.01,      1,     1,     0,   0.002,  1),
+
+        (2798.75, 'MgII', 2700,  2900,  'MgII_br',       2,    0.0,    0.0,   1e10,   5e-3,   0.004,    0.05,   0.015,     0,     0,     0,   0.05,   1),
+        (2798.75, 'MgII', 2700,  2900,  'MgII_na',       1,    0.0,    0.0,   1e10,   1e-3,   5e-4,   0.00169,  0.01,      1,     1,     0,   0.002,  1),
+
+        (1908.73, 'CIII', 1700,  1970,  'CIII_br',       2,    0.0,    0.0,   1e10,   5e-3,   0.004,    0.05,   0.015,    99,     0,     0,   0.01,   1),
+
+        (1549.06,  'CIV', 1500,  1700,  'CIV_br',        2,    0.0,    0.0,   1e10,   5e-3,   0.004,    0.05,   0.015,     0,     0,     0,   0.05,   1),
+
+        (1402.06, 'SiIV', 1290,  1450,  'SiIV_OIV1',     1,    0.0,    0.0,   1e10,   5e-3,   0.002,    0.05,   0.015,     1,     1,     0,   0.05,   1),
+
+        (1215.67,  'Lya', 1150,  1290,  'Lya_br',        3,    0.0,    0.0,   1e10,   5e-3,   0.002,    0.05,    0.02,     0,     0,     0,   0.05,   1),
+        (1240.14,  'Lya', 1150,  1290,  'NV1240',        1,    0.0,    0.0,   1e10,   2e-3,   0.001,    0.01,   0.005,     0,     0,     0,   0.002,  1),
+    ], dtype=lp_dtype)
+
+    hdr1 = fits.Header()
+    hdr1['lambda'] = 'Vacuum wavelength [Ang]'
+    hdr1['minwav'] = 'Lower complex fitting wavelength range [Ang]'
+    hdr1['maxwav'] = 'Upper complex fitting wavelength range [Ang]'
+    hdr1['ngauss'] = 'Number of Gaussians for the line'
+    hdr1['inisca'] = 'Initial guess of line scale [flux]'
+    hdr1['minsca'] = 'Lower range of line scale [flux]'
+    hdr1['maxsca'] = 'Upper range of line scale [flux]'
+    hdr1['inisig'] = 'Initial guess of line sigma [lnlambda]'
+    hdr1['minsig'] = 'Lower range of line sigma [lnlambda]'
+    hdr1['maxsig'] = 'Upper range of line sigma [lnlambda]'
+    hdr1['voff']   = 'Velocity offset from the central wavelength [lnlambda]'
+    hdr1['vindex'] = 'Same NONZERO vindex => same velocity'
+    hdr1['windex'] = 'Same NONZERO windex => same width'
+    hdr1['findex'] = 'Same NONZERO findex => constrained flux ratios'
+    hdr1['fvalue'] = 'Relative scale factor when tying via findex'
+    hdr1['vary']   = '0 = fixed; 1 = free'
+    hdu1 = fits.BinTableHDU(data=line_priors, header=hdr1, name='line_priors')
+
+    # ------------------------ conti_windows ------------------------
+    cw_dtype = np.dtype([('min','f4'), ('max','f4')])
+    conti_windows = np.rec.fromrecords([
+        # (1150., 1170.),  # often masked due to Lyα forest
+        (1275., 1290.),
+        (1350., 1360.),
+        (1445., 1465.),
+        (1690., 1705.),
+        (1770., 1810.),
+        (1970., 2400.),
+        (2480., 2675.),
+        (2925., 3400.),
+        (3775., 3832.),
+        (4000., 4050.),
+        (4200., 4230.),
+        (4435., 4640.),
+        (5100., 5535.),
+        (6005., 6035.),
+        (6110., 6250.),
+        (6800., 7000.),
+        (7160., 7180.),
+        (7500., 7800.),
+        (8050., 8150.),
+    ], dtype=cw_dtype)
+    hdu2 = fits.BinTableHDU(data=conti_windows, name='conti_windows')
+
+    # ------------------------ conti_priors ------------------------
+    cp_dtype = np.dtype([
+        ('parname','S20'),
+        ('initial','f4'),
+        ('min',    'f4'),
+        ('max',    'f4'),
+        ('vary',   'i4'),
+    ])
+    conti_priors = np.rec.fromrecords([
+        ('Fe_uv_norm',   0.0,   0.0,   1e10,  1),  # MgII Fe template normalization [flux]
+        ('Fe_uv_FWHM',   3000,  1200,  18000, 1),  # MgII Fe template FWHM [km/s or AA in template units]
+        ('Fe_uv_shift',  0.0,  -0.01,  0.01,  1),  # MgII Fe template shift [lnlambda]
+        ('Fe_op_norm',   0.0,   0.0,   1e10,  1),  # Hβ/Hα Fe template normalization [flux]
+        ('Fe_op_FWHM',   3000,  1200,  18000, 1),  # Hβ/Hα Fe template FWHM
+        ('Fe_op_shift',  0.0,  -0.01,  0.01,  1),  # Hβ/Hα Fe template shift [lnlambda]
+        ('PL_norm',      1.0,   0.0,   1e10,  1),  # Power-law normalization (f_λ ∝ (λ/3000)^-α)
+        ('PL_slope',    -1.5,  -5.0,   3.0,   1),  # Power-law slope α
+        ('Blamer_norm',  0.0,   0.0,   1e10,  1),  # Balmer continuum normalization (< 3646 Å)
+        ('Balmer_Te',  15000, 10000, 50000,  1),   # Balmer continuum Te
+        ('Balmer_Tau',   0.5,   0.1,   2.0,   1),  # Balmer continuum τ
+        ('conti_a_0',    0.0,   np.nan, np.nan, 0),# Polynomial terms (bounds unused by QSOFit)
+        ('conti_a_1',    0.0,   np.nan, np.nan, 0),
+        ('conti_a_2',    0.0,   np.nan, np.nan, 0),
+    ], dtype=cp_dtype)
+
+    hdr3 = fits.Header()
+    hdr3['vary'] = '0 = fixed; 1 = free'
+    hdu3 = fits.BinTableHDU(data=conti_priors, header=hdr3, name='conti_priors')
+
+    # ------------------------ measure_info ------------------------
+    # Use fixed-length array columns so FITS writes cleanly (no var-length arrays needed).
+    cont_loc = np.array([[1350, 1450, 1700, 2500, 3000, 3500, 4200, 5100]], dtype='f4')  # shape (1, 8)
+    fe_flux  = np.array([[4435, 4685]], dtype='f4')                                      # shape (1, 2)
+
+    measure_info = Table()
+    measure_info['cont_loc'] = cont_loc
+    measure_info['Fe_flux_range'] = fe_flux
+
+    hdu4 = fits.table_to_hdu(measure_info)
+    hdu4.name = 'measure_info'
+    hdr4 = fits.Header()
+    hdr4['cont_loc'] = 'Continuum luminosity wavelengths reported'
+    hdr4['Fe_flux_range'] = 'Fe emission wavelength range(s) reported'
+    # Merge custom header cards without clobbering standard FITS table cards
+    hdu4.header.extend(hdr4, update=True, end=True)
+
+    # ------------------------ Write file ------------------------
+    hdul = fits.HDUList([primary_hdu, hdu1, hdu2, hdu3, hdu4])
+    outpath = os.path.abspath(os.path.join(path_ex, 'qsopar.fits'))
+    hdul.writeto(outpath, overwrite=overwrite)
+
+    # Quick sanity: ensure expected HDUs exist
+    with fits.open(outpath, memmap=False) as chk:
+        names = {h.name for h in chk[1:]}
+        required = {'line_priors', 'conti_windows', 'conti_priors', 'measure_info'}
+        missing = required - names
+        if missing:
+            raise RuntimeError(f"qsopar.fits written but missing HDUs: {sorted(missing)}")
+
+    return outpath
 
 
-def run_qsofit_record(rec, cache_dir="data/spectra_cache", path_ex="."):
+def run_qsofit_record(rec, cache_dir="data/spectra_cache", path_ex="data/"):
     """
     Worker-safe version of QSOFit runner.
     `rec` is a plain dict containing only the fields needed for one object.
@@ -235,7 +431,7 @@ def run_qsofit_record(rec, cache_dir="data/spectra_cache", path_ex="."):
             nsamp=20,                 # number of MC trials or MCMC samples
 
             # advanced fitting parameters
-            param_file_name='qsopar.fits',  # qso fitting parameter FITS file
+            param_file_name=f'{path_ex}/qsopar.fits',  # qso fitting parameter FITS file
             nburn=20,                 # burn-in samples for MCMC
             nthin=10,                 # return every n-th MCMC sample
             epsilon_jitter=0.,        # initial jitter for Gaussians to avoid local minima
@@ -349,6 +545,7 @@ def main():
         return  # Exit after download-only path
 
     # 3) Otherwise, proceed to QSOFit processing (expects cached spectra)
+    #create_qsopar_fits(overwrite=True)
     # Build worker records so we don't try to pickle big astropy tables
     records = []
     colnames = set(data_cat.colnames)
