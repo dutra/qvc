@@ -55,7 +55,8 @@ def completeness_loglike(m_model, mu_err, z, completeness2d, m_grid, sigma_compl
     sigma = np.maximum(mu_err, 1e-9)  # avoid zero-sigma
     pdf = stats.norm.pdf(m_grid[None, :],
         loc=m_model[:, None],
-        scale=np.sqrt(sigma[:, None]**2 + sigma_completeness**2))
+        #scale=np.sqrt(sigma[:, None]**2 + sigma_completeness**2)) # If not adding scatter to mags_true
+        scale=sigma[:, None])
 
     # p_detect(m, z)
     p_det = completeness2d(m_grid[None, :], z[:, None])  # shape (N_obj, N_grid)
@@ -67,7 +68,7 @@ def completeness_loglike(m_model, mu_err, z, completeness2d, m_grid, sigma_compl
 
     # Average
     m_integrals = np.trapz(wpdf * m_grid[None, :], m_grid, axis=1)
-    m_integrals = np.clip(m_integrals, tiny, 1.0)        # numerical guard
+    m_integrals = np.clip(m_integrals, tiny, None)        # numerical guard (can be > 1; units=mag)
     dmi = m_integrals / integrals - m_model
 
     return np.sum(np.log(integrals)), (integrals, dmi)
@@ -485,7 +486,6 @@ def run_single(agn_data_filepath, cosmo_model, populate_sdss_fields=False, compl
     print("Plotting completeness vs magnitude at redshifts...")
     p_detect, mag_centers, z_centers, dm, dz, completeness_scatter = get_completeness_function_2d(df_agn, plot=True)
     plot_completeness_vs_mag_at_redshifts(p_detect, mag_centers, z_centers)
-    plot_completeness_diagnostics(df_agn, p_detect, mag_centers, z_centers)
 
     print("Plotting debiased residuals...")
     plot_full_residuals(df_agn, debiased_residuals, flat_samples, cosmo_model, z_agn_pivot, show=False, plot_path=plot_path)
