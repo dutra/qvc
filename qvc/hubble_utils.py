@@ -134,7 +134,8 @@ def compute_apparent_mag_2500_colin(df):
         converters=fields
     )
     colin_df2 = pd.read_csv(
-        'data/sample_chisqg10_ebv005sn3_fittedm2500.csv',
+        #'data/sample_chisqg10_ebv005sn3_fittedm2500.csv',
+        'data/csv/aug18_sample_chisqg10_ebv005sn3_fittedm2500.csv',
         dtype={'object_id': str},
         converters=fields
     )
@@ -818,7 +819,6 @@ def compare_models_by_log_evidence(
         f"  two-sided Z = {sigma_two:.2f}σ  [{sigma_two_lo:.2f}, {sigma_two_hi:.2f}]\n",
         f"  one-sided Z = {sigma_one:.2f}σ  [{sigma_one_lo:.2f}, {sigma_one_hi:.2f}]\n",
         f"Wilks-like sigma (orientation only) = {sigma_wilks_like:.2f}σ\n",
-        "\nApJ-style sentence (paste-ready):\n",
         apj_sentence + "\n",
     ]
 
@@ -874,104 +874,214 @@ def write_hdf5_file(quasar_list, file_path):
                 else:
                     group.attrs[key] = value
 
-def generate_cosmo_table_latex(results):
+def generate_cosmo_table_latex(results, filename="plots/hubble/table.tex"):
     """
-    Generate a LaTeX table for cosmological parameter results.
+    Generate a transposed LaTeX table with merged model headers (booktabs style),
+    and an H0 units footnote using tablefootnote (no threeparttable).
+    """
+    from collections import OrderedDict
+    import os
 
-    Parameters
-    ----------
-    results : list of dict
-        Each dictionary must contain:
-        - model (str)
-        - data (str): "SN~Ia" or "SN~Ia + AGN"
-        - Om0 (tuple): (mean, err)
-        - H0 (tuple): (mean, err)
-        - w0 (tuple): (mean, err)
-        - wa (tuple or None): (mean, err) or None
-        - logZ (tuple or None): (mean, err) or None
-    """
+    def fmt_pm(val, err, vfmt="{:.3f}", efmt="{:.3f}", signed=False):
+        v = vfmt.format(val)
+        e = efmt.format(err)
+        if signed:
+            v = "{:+}".format(float(v))
+        return f"${v} \\pm {e}$"
+
+    def fmt_pm_sig(val, err, vfmt, efmt, signed=False):
+        return fmt_pm(val, err, vfmt=vfmt, efmt=efmt, signed=signed)
+
+    def sanitize_dataset_label(ds):
+        s = ds.replace("SN Ia", "SN~Ia")
+        s = (s.replace("SN~Ia + AGN", "SN~Ia+AGN")
+               .replace("SN~Ia+ AGN", "SN~Ia+AGN")
+               .replace("SN~Ia +AGN", "SN~Ia+AGN"))
+        return s
+
+    # Group results by model, preserving input order
+    model_to_datasets = OrderedDict()
+    md_map = {}
+    for r in results:
+        model = r["model"]
+        data = sanitize_dataset_label(r["data"])
+        md_map[(model, data)] = r
+        model_to_datasets.setdefault(model, [])
+        if data not in model_to_datasets[model]:
+            model_to_datasets[model].append(data)
+
+    total_cols = 1 + sum(len(v) for v in model_to_datasets.values())
+    colspec = "l" + "c" * (total_cols - 1)
+
     lines = []
-    lines.append("\\begin{table*}")
+    lines.append("\\begin{table}")
     lines.append("\\centering")
+    lines.append("\\setlength{\\tabcolsep}{4pt} % reduce column spacing")
     lines.append("\\caption{Marginalized Cosmological Parameters and Bayesian Evidence}")
     lines.append("\\label{tab:cosmoparams}")
-    lines.append("\\begin{tabular}{lcccccc}")
-    lines.append("\\hline\\hline")
-    lines.append("Model & Data & $\\Omega_m$ & $H_0$ [km s$^{-1}$ Mpc$^{-1}$] & $w$ / $w_0$ & $w_a$ & $\\ln \\mathcal{Z}$ \\\\")
-    lines.append("\\hline")
+    lines.append(f"\\begin{{tabular}}{{{colspec}}}")
+    lines.append("\\toprule")
 
-    for res in results:
-        Om0 = f"${res['Om0'][0]:.3f} \\pm {res['Om0'][1]:.3f}$"
-        H0 = f"${res['H0'][0]:.1f} \\pm {res['H0'][1]:.1f}$"
-        w0 = f"${res['w0'][0]:+.2f} \\pm {res['w0'][1]:.2f}$"
-        wa = "--" if res['wa'] is None else f"${res['wa'][0]:+.1f} \\pm {res['wa'][1]:.1f}$"
-        logZ = "--" if res['logZ'] is None else f"${res['logZ'][0]:.1f} \\pm {res['logZ'][1]:.1f}$"
-        lines.append(f"{res['model']} & {res['data']} & {Om0} & {H0} & {w0} & {wa} & {logZ} \\\\")
+    # Header row 1: merged model names
+    header_row1 = [""]
+    for model, dsets in model_to_datasets.items():
+        header_row1.append(f"\\multicolumn{{{len(dsets)}}}{{c}}{{{model}}}")
+    lines.append(" & ".join(header_row1) + " \\\\")
+    # cmidrules
+    start_col = 2
+    cmr = []
+    for _, dsets in model_to_datasets.items():
+        end_col = start_col + len(dsets) - 1
+        cmr.append(f"\\cmidrule(lr){{{start_col}-{end_col}}}")
+        start_col = end_col + 1
+    lines.append("".join(cmr))
+    # Header row 2: dataset labels
+    header_row2 = [""]
+    for _, dsets in model_to_datasets.items():
+        header_row2.extend(dsets)
+    lines.append(" & ".join(header_row2) + " \\\\")
+    lines.append("\\midrule")
 
-    lines.append("\\hline")
+    # Row: H0 with table footnote marker
+    row = ["$H_0$\\tablefootnote{Units: km s$^{-1}$ Mpc$^{-1}$.}"]
+    for model, dsets in model_to_datasets.items():
+        for ds in dsets:
+            res = md_map.get((model, ds))
+            row.append(fmt_pm_sig(*res["H0"], vfmt="{:.1f}", efmt="{:.1f}") if res and res.get("H0") else "--")
+    lines.append(" & ".join(row) + " \\\\")
+
+    # Row: Omega_m
+    row = ["$\\Omega_m$"]
+    for model, dsets in model_to_datasets.items():
+        for ds in dsets:
+            res = md_map.get((model, ds))
+            row.append(fmt_pm_sig(*res["Om0"], vfmt="{:.3f}", efmt="{:.3f}") if res and res.get("Om0") else "--")
+    lines.append(" & ".join(row) + " \\\\")
+
+    # Row: w/w0
+    row = ["$w/w_0$"]
+    for model, dsets in model_to_datasets.items():
+        for ds in dsets:
+            res = md_map.get((model, ds))
+            row.append(fmt_pm_sig(*res["w0"], vfmt="{:+.2f}", efmt="{:.2f}") if res and res.get("w0") else "--")
+    lines.append(" & ".join(row) + " \\\\")
+
+    # Row: wa
+    row = ["$w_a$"]
+    for model, dsets in model_to_datasets.items():
+        for ds in dsets:
+            res = md_map.get((model, ds))
+            if res is None or res.get("wa") in (None,):
+                row.append("--")
+            else:
+                row.append(fmt_pm_sig(*res["wa"], vfmt="{:+.1f}", efmt="{:.1f}"))
+    lines.append(" & ".join(row) + " \\\\")
+
+    # Row: logZ
+    row = ["$\\ln \\mathcal{Z}$"]
+    for model, dsets in model_to_datasets.items():
+        for ds in dsets:
+            res = md_map.get((model, ds))
+            if res is None or res.get("logZ") in (None,):
+                row.append("--")
+            else:
+                row.append(fmt_pm_sig(*res["logZ"], vfmt="{:.1f}", efmt="{:.1f}"))
+    lines.append(" & ".join(row) + " \\\\")
+
+    lines.append("\\bottomrule")
     lines.append("\\end{tabular}")
-    lines.append("\\end{table*}")
+    lines.append("\\end{table}")
 
     latex_table = "\n".join(lines)
-    filename = "plots/hubble/table.tex"
+    os.makedirs(os.path.dirname(filename), exist_ok=True)
     with open(filename, "w") as f:
         f.write(latex_table)
-        print(f"LaTeX table written to: {filename}")
+    print(f"LaTeX table written to: {filename}")
 
 
-def extract_cosmo_results_from_sampler(sampler, cosmo_model, only_sna, dynasty=False, logZ_tuple=None):
+import numpy as np
+
+def extract_cosmo_results_from_samples(
+    samples,
+    cosmo_model,
+    only_sna,
+    logZ_tuple=None,
+    *,
+    format_for_latex=False,
+    value_fmt="{:.3f}",
+):
     """
-    Extract mean and stddev of cosmological parameters from a sampler.
+    Extract summary stats for all cosmological parameters from posterior samples.
 
     Parameters
     ----------
-    sampler : emcee.EnsembleSampler or dynesty.DynamicNestedSampler
-        The sampler object from your pipeline.
+    samples : (N, P) ndarray
+        Posterior samples. Columns must align with `model_labels` from get_model_params(cosmo_model).
     cosmo_model : str
         'FlatwCDM' or 'Flatw0waCDM'
     only_sna : bool
         True if SN Ia only; False if SN Ia + AGN.
-    dynasty : bool
-        True if using dynesty; False if using emcee.
-    logZ_tuple : tuple or None
-        (logZ, logZerr), only available from dynesty.
+    logZ_tuple : (float, float) or None
+        (logZ, logZerr) from dynesty; None for emcee.
+    format_for_latex : bool, optional
+        If True, values are strings like r"$x \pm y$". Otherwise tuples (mean, std).
+    value_fmt : str, optional
+        Format for numbers when format_for_latex=True (e.g., "{:.2f}").
 
     Returns
     -------
     dict
-        Result row for LaTeX table.
+        {
+          "model": "<latex model name>",
+          "data": "<latex data label>",
+          "params": { "<param_name>": (mean, std) or "$x \\pm y$", ... },
+          "param_order": [ "<param_name>", ... ],              # for consistent table columns
+          "param_labels_latex": { "<param_name>": "<latex>", ... },
+          "logZ": { "value": float, "err": float } or None
+        }
     """
     priors, model_labels, model_labels_latex = get_model_params(cosmo_model)
+
+    # Defensive checks
+    samples = np.asarray(samples)
+    if samples.ndim != 2:
+        raise ValueError("`samples` must be a 2D array of shape (n_samples, n_params).")
+    if samples.shape[1] != len(model_labels):
+        raise ValueError(
+            f"`samples` has {samples.shape[1]} columns but model expects {len(model_labels)} "
+            f"({model_labels}). Ensure column order matches `model_labels`."
+        )
+
     data_label = "SN~Ia" if only_sna else "SN~Ia + AGN"
+    model_name_latex = "Flat$w_0w_a$CDM" if cosmo_model == "Flatw0waCDM" else "Flat$w$CDM"
 
-    # Flatten or resample samples
-    if dynasty:
-        samples = sampler.results.samples
-        weights = np.exp(sampler.results.logwt - sampler.results.logz[-1])
-        samples = resample_equal(samples, weights)
-    else:
-        samples = sampler.get_chain(flat=True)
+    # Compute mean/std for every parameter in the model
+    means = np.mean(samples, axis=0)
+    stds  = np.std(samples, axis=0, ddof=0)
 
-    # Extract parameter stats
-    def mean_std(param_name):
-        idx = model_labels.index(param_name)
-        return np.mean(samples[:, idx]), np.std(samples[:, idx])
+    def pack(m, s):
+        if format_for_latex:
+            return rf"${value_fmt.format(m)} \pm {value_fmt.format(s)}$"
+        return (m, s)
 
-    param_stats = {
-        "Om0": mean_std("Om0"),
-        "H0": mean_std("H0"),
-        "w0": mean_std("w0"),
-        "wa": mean_std("wa") if cosmo_model == "Flatw0waCDM" else None
-    }
+    params = {name: pack(means[i], stds[i]) for i, name in enumerate(model_labels)}
+    param_labels_latex = {name: model_labels_latex[i] for i, name in enumerate(model_labels)}
+
+    logZ_out = None
+    if logZ_tuple is not None:
+        logZ_val, logZ_err = logZ_tuple
+        logZ_out = {
+            "value": float(logZ_val),
+            "err": float(logZ_err),
+        }
 
     return {
-        "model": "Flat$w_0w_a$CDM" if cosmo_model == "Flatw0waCDM" else "Flat$w$CDM",
+        "model": model_name_latex,
         "data": data_label,
-        "Om0": param_stats["Om0"],
-        "H0": param_stats["H0"],
-        "w0": param_stats["w0"],
-        "wa": param_stats["wa"],
-        "logZ": logZ_tuple
+        "params": params,                       # all params present
+        "param_order": list(model_labels),      # preserve column order for LaTeX
+        "param_labels_latex": param_labels_latex,
+        "logZ": logZ_out,
     }
 
 def display_results_summary(samples, cosmo_model, z_agn_pivot):

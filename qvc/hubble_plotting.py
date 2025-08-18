@@ -321,7 +321,7 @@ def plot_cosmo_corner(
                         wspace=0.05, hspace=0.05)
 
     os.makedirs(plot_path, exist_ok=True)
-    fig.savefig(os.path.join(plot_path, "corner_kde.png"), bbox_inches="tight", dpi=150)
+    fig.savefig(os.path.join(plot_path, f"cosmo_corner_{cosmo_model}.png"), bbox_inches="tight", dpi=150)
     if show:
         plt.show()
     plt.close(fig)
@@ -601,125 +601,285 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_agn_pivot, plo
     return residuals, mu_pred_median, mu_pred_std
 
 
-def plot_predicted_vs_actual_M2500(flat_samples, df_agn, cosmo_model, z_agn_pivot, plot_path='plots/hubble', debias=False, dms=None, show=False):
+def plot_predicted_vs_actual_M2500(
+    flat_samples,
+    df_agn,
+    cosmo_model,
+    z_agn_pivot,
+    plot_path="plots/hubble",
+    show=False,
+    cmap="bone_r",       # colormap for points
+    box_alpha=0.7,        # transparency of white annotation boxes
+    show_sigma_band=True,
+    completeness=True,    # add "<50% complete" red region
+    m_lim=24.0,           # survey apparent-magnitude limit for completeness shading
+    n_cosmo_draws=50,    # posterior draws to propagate cosmology errors (for xerr)
+    random_state=42,      # RNG seed for reproducibility of draws
+):
+    """
+    Predicted vs Actual M_2500 with:
+      • y-error bars from M_model_agn_err(...)
+      • x-error bars = sqrt(apparent_mag_2500_err^2 + sigma_mu_cosmo(z)^2)
+      • ±1σ band from intrinsic scatter sigma_int = exp(log_f) (magenta)
+      • Per-bin red shaded region "< 50% complete" using bin-center z; shaded area fills
+        the entire y-range to the LEFT of the vertical limit (with inverted x-axis).
+      • Points colored by m_2500 (no marker outlines), full-height colorbar,
+        white translucent annotation boxes.
+
+    Layout: 12 redshift bins arranged as 4 columns × 3 rows.
+    """
+    import os, math
+    import numpy as np
+    import matplotlib.pyplot as plt
+    from astropy.cosmology import FlatLambdaCDM, FlatwCDM, FlatwpwaCDM
+
+    # --- model parameters from samples ---
     priors, model_labels, model_labels_latex = get_model_params(cosmo_model)
-    results = {key: np.percentile(flat_samples[:, i], [16, 50, 84]) for i, key in enumerate(model_labels)}
-    # compute M_actual
-    if cosmo_model == 'FlatwCDM':
-        cosmo = FlatwCDM(
-            H0=results['H0'][1],
-            Om0=results['Om0'][1],
-            w0=results['w0'][1]
-        )
-    elif cosmo_model == 'Flatw0waCDM':
-        cosmo = FlatwpwaCDM(
-            H0=results['H0'][1],
-            Om0=results['Om0'][1],
-            wp=results['wp'][1],
-            wa=results['wa'][1],
-            zp=z_agn_pivot
-        )
-    elif cosmo_model == 'FlatLambdaCDM':
-        cosmo = FlatLambdaCDM(
-            H0=results['H0'][1],
-            Om0=results['Om0'][1]
-        )
+    results = {key: np.percentile(flat_samples[:, i], [16, 50, 84])
+               for i, key in enumerate(model_labels)}
+    label_to_idx = {k: i for i, k in enumerate(model_labels)}
+
+    # --- intrinsic scatter: sigma_int = exp(log_f) from posterior median ---
+    def _find_logf_key(keys):
+        lowers = {k.lower(): k for k in keys}
+        for cand in ("log_f", "logf", "lnf", "log_sigma_int", "ln_sigma_int"):
+            if cand in lowers:
+                return lowers[cand]
+        for k in keys:
+            if "log" in k.lower() and "f" in k.lower():
+                return k
+        return None
+    logf_key = _find_logf_key(results.keys())
+    if logf_key is None:
+        raise KeyError("Could not find 'log_f' (or variant) among model parameters.")
+    sigma_intrinsic = float(np.exp(results[logf_key][1]))
+
+    # --- helpers to build cosmology objects ---
+    def _cosmo_from_params(H0, Om0, **kw):
+        if cosmo_model == "FlatwCDM":
+            return FlatwCDM(H0=H0, Om0=Om0, w0=kw["w0"])
+        elif cosmo_model == "Flatw0waCDM":
+            return FlatwpwaCDM(H0=H0, Om0=Om0, wp=kw["wp"], wa=kw["wa"], zp=z_agn_pivot)
+        elif cosmo_model == "FlatLambdaCDM":
+            return FlatLambdaCDM(H0=H0, Om0=Om0)
+        else:
+            raise ValueError("Invalid cosmology model.")
+
+    # Median cosmology for best-estimate distances
+    if cosmo_model == "FlatwCDM":
+        cosmo_med = _cosmo_from_params(results["H0"][1], results["Om0"][1], w0=results["w0"][1])
+    elif cosmo_model == "Flatw0waCDM":
+        cosmo_med = _cosmo_from_params(results["H0"][1], results["Om0"][1],
+                                       wp=results["wp"][1], wa=results["wa"][1])
     else:
-        raise ValueError("Invalid cosmology model.")
-        
-    actual_M_2500 = df_agn['apparent_mag_2500'].values - np.array([cosmo.distmod(z).value for z in df_agn['z'].values])
+        cosmo_med = _cosmo_from_params(results["H0"][1], results["Om0"][1])
+
+    # --- data & predictions ---
+    z = df_agn["z"].values
+    m_app = df_agn["apparent_mag_2500"].values
+    if "apparent_mag_2500_err" not in df_agn.columns:
+        raise KeyError("df_agn must contain 'apparent_mag_2500_err' for x-error bars.")
+    m_app_err = df_agn["apparent_mag_2500_err"].values
+
+    distmod_med = np.array([cosmo_med.distmod(zi).value for zi in z])
+    actual_M_2500 = m_app - distmod_med
 
     M_2500_pred = M_model_agn(
-        results['M0_agn'][1], 
-        results['alpha_agn'][1],
-        results['beta_agn'][1], 
-        results['gamma_agn'][1], 
-        df_agn['log_sigma_UV'].values,
-        df_agn['log_tau_UV_RF'].values,
-        df_agn['bwb_beta'].values
+        results["M0_agn"][1],
+        results["alpha_agn"][1],
+        results["beta_agn"][1],
+        results["gamma_agn"][1],
+        df_agn["log_sigma_UV"].values,
+        df_agn["log_tau_UV_RF"].values,
+        df_agn["bwb_beta"].values,
     )
 
-    M_2500_pred_err = np.sqrt(
-        M_model_agn_err(
-            results['M0_agn'][1],
-            results['alpha_agn'][1], 
-            results['beta_agn'][1], 
-            results['gamma_agn'][1], 
-            df_agn['log_sigma_UV'].values, 
-            df_agn['log_sigma_UV_err'].values, 
-            df_agn['log_tau_UV_RF_err'].values,
-            df_agn['bwb_beta_err'].values
-        )**2
+    # --- y-errors from model error propagation ---
+    M_2500_pred_err = M_model_agn_err(
+        results["M0_agn"][1],
+        results["alpha_agn"][1],
+        results["beta_agn"][1],
+        results["gamma_agn"][1],
+        df_agn["log_sigma_UV"].values,
+        df_agn["log_sigma_UV_err"].values,
+        df_agn["log_tau_UV_RF_err"].values,
+        df_agn["bwb_beta_err"].values,
     )
+    M_2500_pred_err = np.asarray(M_2500_pred_err, dtype=float)
+    M_2500_pred_err[~np.isfinite(M_2500_pred_err) | (M_2500_pred_err < 0)] = np.nan
 
-    z_bins = np.linspace(0.5, 3.5, 10)
-    z_bin_indices = np.digitize(df_agn['z'], bins=z_bins)
-    num_bins = len(z_bins) - 1
+    # --- x-errors: propagate cosmology posterior into distance modulus ---
+    rng = np.random.default_rng(random_state)
+    n_samp = flat_samples.shape[0]
+    n_draws = min(n_cosmo_draws, n_samp)
+    draw_idxs = rng.choice(n_samp, size=n_draws, replace=False) if n_draws < n_samp else np.arange(n_samp)
+
+    def _cosmo_from_draw(row):
+        if cosmo_model == "FlatwCDM":
+            return FlatwCDM(H0=row[label_to_idx["H0"]], Om0=row[label_to_idx["Om0"]], w0=row[label_to_idx["w0"]])
+        elif cosmo_model == "Flatw0waCDM":
+            return FlatwpwaCDM(H0=row[label_to_idx["H0"]],
+                               Om0=row[label_to_idx["Om0"]],
+                               wp=row[label_to_idx["wp"]],
+                               wa=row[label_to_idx["wa"]],
+                               zp=z_agn_pivot)
+        else:
+            return FlatLambdaCDM(H0=row[label_to_idx["H0"]], Om0=row[label_to_idx["Om0"]])
+
+    mu_draws = np.empty((n_draws, z.size), dtype=float)
+    for j, idx in enumerate(draw_idxs):
+        row = flat_samples[idx, :]
+        cosmo_j = _cosmo_from_draw(row)
+        mu_draws[j, :] = np.array([cosmo_j.distmod(zi).value for zi in z])
+    sigma_mu_cosmo = np.nanstd(mu_draws, axis=0, ddof=1)  # per-object DM uncertainty
+    xerr = np.sqrt(m_app_err**2 + sigma_mu_cosmo**2)
+
+    # --- binning in redshift ---
+    num_cols = 4
+    num_rows = 4
+    z_bins = np.linspace(0, 3.5, num_cols*num_rows+1)
+    z_bin_indices = np.digitize(z, bins=z_bins)
+    num_bins = len(z_bins) - 1  # = 12
     bin_labels = [f"{z_bins[i]:.1f} < z < {z_bins[i+1]:.1f}" for i in range(num_bins)]
-    num_cols = 3
-    num_rows = math.ceil(num_bins / num_cols)
 
-    fig, axes = plt.subplots(num_rows, num_cols, figsize=(5 * num_cols, 4 * num_rows), sharey=True, sharex=True)
-    axes = axes.flatten()
+    # --- figure with full-height colorbar (dedicated column) ---
+    fig = plt.figure(figsize=(5 * num_cols + 1.4, 4 * num_rows))
+    gs = fig.add_gridspec(num_rows, num_cols + 1,
+                          width_ratios=[1]*num_cols + [0.06],
+                          wspace=0.0, hspace=0.0)
+    axes = np.array([[fig.add_subplot(gs[r, c]) for c in range(num_cols)] for r in range(num_rows)]).flatten()
+    cax = fig.add_subplot(gs[:, -1])
 
-    apparent_mag_2500 = df_agn['apparent_mag_2500'].values
-    vmin = np.nanmin(apparent_mag_2500)
-    vmax = np.nanmax(apparent_mag_2500)
+    # --- color scaling by m_2500 ---
+    vmin, vmax = np.nanmin(m_app), np.nanmax(m_app)
+
+    # --- axis helpers ---
+    xlo, xhi = -25.8, -18.2
+    ylo, yhi = -25.8, -18.2
+    xx = np.linspace(min(xlo, ylo), max(xhi, yhi), 400)
+
+    sc_for_cbar = None
 
     if debias:
         dm_interp = make_dm_function(apparent_mag_2500, df_agn['z'], dms)
 
     for i, ax in enumerate(axes):
-        ax.set_xlim(-25.8, -18.2)
-        ax.set_ylim(-25.8, -18.2)
+        ax.set_xlim(xlo, xhi)
+        ax.set_ylim(ylo, yhi)
 
-        if i < num_bins:
-            bin_mask = z_bin_indices == (i + 1)
-            predicted_M_2500_bin = M_2500_pred[bin_mask]
-            actual_M_2500_bin = actual_M_2500[bin_mask]
-            apparent_mag_2500_bin = apparent_mag_2500[bin_mask]
-            M_i_axis = np.linspace(actual_M_2500.min(), actual_M_2500.max(), 100)
+        if i >= num_bins:
+            ax.axis("off"); continue
 
-            # De-bias
-            if debias:
-                pts = np.column_stack([df_agn['z'][bin_mask], apparent_mag_2500_bin])
-                actual_M_2500_bin -= dm_interp(pts)
+        bin_mask = z_bin_indices == (i + 1)
+        if not np.any(bin_mask):
+            ax.axis("off"); continue
 
-            # Plot
-            ax.plot(M_i_axis, M_i_axis, color='m', alpha=0.7, label='y = x (Perfect Prediction)', lw=3, linestyle='--')
-            sc = ax.scatter(
-                actual_M_2500_bin, predicted_M_2500_bin, 
-                c=apparent_mag_2500_bin, cmap='viridis', s=20, alpha=0.7, edgecolor='k', lw=0.5, vmin=vmin, vmax=vmax
-            )
-            ax.invert_xaxis()
-            ax.invert_yaxis()
-            ax.annotate(bin_labels[i], xy=(0.05, 0.95), xycoords='axes fraction', 
-                        fontsize=18, color='k', alpha=0.7, ha='left', va='top')
-            n_in_bin = np.sum(bin_mask)
-            ax.annotate(f"N = {n_in_bin}", xy=(0.95, 0.05), xycoords='axes fraction',
-                        fontsize=14, color='gray', ha='right', va='bottom')
-            if i >= (num_rows - 1) * num_cols:
-                ax.set_xlabel('Actual $M_{2500}$')
-            if i % num_cols == 0:
-                ax.set_ylabel('Predicted $M_{2500}$')
+        x = actual_M_2500[bin_mask]
+        y = M_2500_pred[bin_mask]
+        xerr_bin = xerr[bin_mask]
+        yerr_bin = M_2500_pred_err[bin_mask]
+        cvals = m_app[bin_mask]
+
+        # residuals & coverage vs intrinsic sigma
+        resid = y - x
+        frac1 = 100.0 * np.mean(np.abs(resid) <= 1.0 * sigma_intrinsic)
+        frac2 = 100.0 * np.mean(np.abs(resid) <= 2.0 * sigma_intrinsic)
+        frac3 = 100.0 * np.mean(np.abs(resid) <= 3.0 * sigma_intrinsic)
+        rms_resid = float(np.sqrt(np.nanmean(resid**2))) if resid.size else np.nan
+
+        # error bars (lighter & more transparent for visibility)
+        ax.errorbar(
+            x, y, xerr=xerr_bin, yerr=yerr_bin,
+            fmt="none",
+            ecolor="#777777",          # lighter gray
+            elinewidth=0.7,            # thinner lines
+            alpha=0.4,                 # more transparent
+            zorder=2,
+        )
+
+        # colored points, no edge (label 'AGN' only once)
+        scatter_kwargs = dict(
+            c=cvals, cmap=cmap, vmin=vmin, vmax=vmax,
+            s=20, alpha=0.9, edgecolors="none", zorder=3,
+        )
+        if i == 0:
+            sc = ax.scatter(x, y, label="AGN", **scatter_kwargs)
         else:
-            ax.axis('off')
+            sc = ax.scatter(x, y, **scatter_kwargs)
+        sc_for_cbar = sc
 
-    plt.subplots_adjust(wspace=0, hspace=0)
+        # y = x reference and ±1σ intrinsic band (MAGENTA)
+        ax.plot(xx, xx, color="m", alpha=0.9, lw=2.2, linestyle="--", zorder=1)
+        if show_sigma_band:
+            ax.fill_between(xx, xx - sigma_intrinsic, xx + sigma_intrinsic,
+                            facecolor="m", alpha=0.12, edgecolor="m",
+                            lw=0.8, zorder=1, label=r"$\pm 1\sigma_{\rm int}$")
 
-    # Add a colorbar for bwb_beta
-    cbar = fig.colorbar(sc, ax=axes, orientation='vertical', fraction=0.02, pad=0.02)
-    cbar.set_label(r'm$_{2500}$', fontsize=14)
+        # "< 50% complete" region in RED — bin-center z; fill entire y-span to the LEFT
+        if completeness:
+            z_center = 0.5 * (z_bins[i] + z_bins[i+1])
+            mu_center = cosmo_med.distmod(z_center).value
+            M_lim = m_lim - mu_center
+            xmin = max(M_lim, xlo)
+            xmax = xhi
+            if xmin < xmax:
+                ax.axvspan(xmin, xmax, facecolor="red", alpha=0.15, zorder=0, label="< 50% complete")
+
+        # cosmetics
+        ax.invert_xaxis()
+        ax.invert_yaxis()
+
+        # annotations
+        boxprops = dict(boxstyle="round,pad=0.2", facecolor="white", alpha=box_alpha, edgecolor="none")
+        ax.annotate(
+            bin_labels[i], xy=(0.03, 0.97), xycoords="axes fraction",
+            fontsize=14, color="k", ha="left", va="top", bbox=boxprops,
+        )
+        stats_text = (
+            f"σ_int = {sigma_intrinsic:.2f} mag   |   RMS(resid) = {rms_resid:.2f}\n"
+            f"within ±σ_int: {frac1:4.1f}%  •  ±2σ_int: {frac2:4.1f}%  •  ±3σ_int: {frac3:4.1f}%"
+        )
+        ax.annotate(
+            stats_text, xy=(0.03, 0.03), xycoords="axes fraction",
+            fontsize=10.5, color="dimgray", ha="left", va="bottom", bbox=boxprops,
+        )
+
+        n_in_bin = int(np.sum(bin_mask))
+        ax.annotate(
+            f"N = {n_in_bin}", xy=(0.97, 0.03), xycoords="axes fraction",
+            fontsize=11, color="gray", ha="right", va="bottom", bbox=boxprops,
+        )
+
+        # labels only on bottom row / left col
+        if i >= (num_rows - 1) * num_cols:
+            ax.set_xlabel("Actual $M_{2500}$", fontsize=12)
+        if i % num_cols == 0:
+            ax.set_ylabel("Predicted $M_{2500}$", fontsize=12)
+        ax.tick_params(axis="both", labelsize=10, length=3)
+
+        # show legend once (will include AGN + <50% complete + band label)
+        if (show_sigma_band or completeness) and i == num_cols-1:
+            leg = ax.legend(loc="upper right", fontsize=14, frameon=True)
+            leg.get_frame().set_facecolor("white")
+            leg.get_frame().set_alpha(box_alpha)
+            leg.get_frame().set_edgecolor("none")
+
+    # full-height colorbar
+    if sc_for_cbar is not None:
+        cbar = fig.colorbar(sc_for_cbar, cax=cax, orientation="vertical")
+        cbar.set_label(r"m$_{2500}$", fontsize=12)
+        cbar.ax.tick_params(labelsize=10)
+
+    for ax in axes:
+        if ax.has_data():
+            ax.label_outer()
 
     os.makedirs(plot_path, exist_ok=True)
-    filename = "predicted_vs_actual_M2500.png"
-    if debias:
-        filename = "predicted_vs_actual_M2500_debiased.png"
-    plt.savefig(os.path.join(plot_path, filename), dpi=300)
+    out_path = os.path.join(plot_path, "predicted_vs_actual_M2500.png")
+    plt.savefig(out_path, dpi=300, bbox_inches="tight")
     if show:
         plt.show()
     plt.close()
-
 
 def plot_predicted_vs_actual_Mi(flat_samples, df_agn, cosmo_model, z_agn_pivot, show=False):
     priors, model_labels, model_labels_latex = get_model_params(cosmo_model)

@@ -4,8 +4,8 @@ from collections import OrderedDict
 
 
 # --- Reference constants and pivot values ---
-log_sigma_UV_pivot = -0.8 # TODO make this a parameter
-log_tau_UV_RF_pivot = 2.6  # TODO make this a parameter
+log_sigma_UV_pivot = -0.72 # TODO make this a parameter
+log_tau_UV_RF_pivot = 2.61  # TODO make this a parameter
 bwb_beta_pivot = 0.14
 #M0_agn_offset = -5.179  # TODO make this a parameter
 #z_agn_pivot = 1.2 # TODO make this a parameter
@@ -89,7 +89,7 @@ def get_model_params(cosmo_model):
         ])
     elif cosmo_model == 'Flatw0waCDM':
         priors |= OrderedDict([
-            ("wp", (-10.0, 0.0)),   # covers phantom (<-1), Λ (-1), quintessence (> -1), and even w>0
+            ("wp", (-20.0, 0.0)),   # covers phantom (<-1), Λ (-1), quintessence (> -1), and even w>0
             ("wa", (-20.0, 0.0))    # symmetric variation
         ])
 

@@ -36,7 +36,7 @@ _pantheon_data = None
 
 _sna_LogdetCov, _sna_L, _sna_Lower = None, None, None
 
-z_agn_pivot = 0.05
+z_agn_pivot = 1.5
 
 def completeness_loglike(m_model, mu_err, z, completeness2d, m_grid, sigma_completeness, tiny=1e-300):
     """
@@ -238,7 +238,7 @@ def run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model='Flatw0waCDM',
     print(f"log sigma0 mean: {np.average(df_agn_filtered['log_sigma_UV']):.4f}")
     print(f"log sigma0 pivot (weighted): {np.average(df_agn_filtered['log_sigma_UV'], weights=1 / df_agn_filtered['log_sigma_UV_err']**2):.4f}")
 
-    print(f"bwb_beta pivot (weighted): {np.average(df_agn_filtered['bwb_beta'], weights=1 / df_agn_filtered['bwb_beta_err']**2):.4f}")
+    #print(f"bwb_beta pivot (weighted): {np.average(df_agn_filtered['bwb_beta'], weights=1 / df_agn_filtered['bwb_beta_err']**2):.4f}")
 
     _z_pivot = (1 / np.exp(np.mean(np.log(1 / (1 + df_agn_filtered['z']))))) - 1
     print(f"z mean: {df_agn_filtered['z'].mean():.3f}, calculated z pivot: {_z_pivot:.3f}")
@@ -275,6 +275,7 @@ def run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model='Flatw0waCDM',
         # use NestedSampler for precise log-evidence estimates (e.g., model selection)
         # use DynamicNestSampler for Cosmological parameter inference
         if resume:
+            print("[WARNING] Resuming from checkpoint file...")
             if isinstance(resume, str):
                 checkpoint_file = resume
                 print(f"Resuming from checkpoint file: {checkpoint_file}")
@@ -499,19 +500,16 @@ def run_single(agn_data_filepath, cosmo_model, populate_sdss_fields=False, compl
     return sampler, flat_samples, model_labels, dmag_corr, logZ, logZerr
 
 
-def run_all(agn_data_filepath, cosmo_model, speed="production"):
+def run_all(agn_data_filepath, cosmo_model, speed="production", resume=False):
     cosmo_models = ['Flatw0waCDM', 'FlatwCDM']
     cosmo_models_latex = {'Flatw0waCDM': r'Flat$w_0w_a$CDM', 'FlatwCDM': r'Flat$w$CDM'}
     cosmo_models_dict = {k: {} for k in cosmo_models}
 
     for cosmo_model in cosmo_models:
-        _, samples_joint, _, _, logZ_joint, logZerr_joint = run_single(agn_data_filepath, cosmo_model=cosmo_model, only_sna=False, speed=speed)
-        _, samples_sna, _, _, logZ, logZerr = run_single(agn_data_filepath, cosmo_model=cosmo_model, only_sna=True, speed=speed)
+        _, samples_joint, _, _, logZ_joint, logZerr_joint = run_single(agn_data_filepath, cosmo_model=cosmo_model, only_sna=False, resume=resume, speed=speed)
+        _, samples_sna, _, _, logZ, logZerr = run_single(agn_data_filepath, cosmo_model=cosmo_model, only_sna=True, resume=resume, speed=speed)
 
-        plot_path = f"plots/hubble/{cosmo_model}_agnsna_{speed}"
-        os.makedirs(plot_path, exist_ok=True)
-
-        plot_cosmo_corner(samples_sna, samples_joint, cosmo_model, z_agn_pivot, plot_path=plot_path, show=False)
+        plot_cosmo_corner(samples_sna, samples_joint, cosmo_model, z_agn_pivot, show=False)
 
         cosmo_models_dict[cosmo_model]['logZ'] = logZ_joint
         cosmo_models_dict[cosmo_model]['logZerr'] = logZerr_joint
@@ -524,6 +522,8 @@ def run_all(agn_data_filepath, cosmo_model, speed="production"):
     logZerr_2 = cosmo_models_dict[cosmo_models[1]]['logZerr']
     model_2_name = cosmo_models_latex[cosmo_models[1]]
     print(f"Comparing models {cosmo_models[0]} and {cosmo_models[1]} by log-evidence:")
+    print(f"  {model_1_name}: logZ = {logZ_1:.2f} ± {logZerr_1:.2f}")
+    print(f"  {model_2_name}: logZ = {logZ_2:.2f} ± {logZerr_2:.2f}")
     compare_models_by_log_evidence(logZ_1=logZ_1, logZerr_1=logZerr_1, 
                                    logZ_2=logZ_2, logZerr_2=logZerr_2,
                                    model_1_name=model_1_name,
@@ -553,6 +553,6 @@ if __name__ == "__main__":
              completeness=not args.disable_completeness, use_full_cov=not args.disable_full_covariance, resume=args.resume,
              speed=args.speed)
     elif args.run == "full":
-        run_all(args.agn_data_filepath, cosmo_model=args.cosmo_model, speed=args.speed)
+        run_all(args.agn_data_filepath, cosmo_model=args.cosmo_model, speed=args.speed, resume=args.resume)
     
     print(f"Finished running Hubble fit pipeline for {args.cosmo_model} with only SNIa={args.run}.")
