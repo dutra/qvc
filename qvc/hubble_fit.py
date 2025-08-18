@@ -67,6 +67,7 @@ def completeness_loglike(m_model, mu_err, z, completeness2d, m_grid, sigma_compl
 
     # Average
     m_integrals = np.trapz(wpdf * m_grid[None, :], m_grid, axis=1)
+    m_integrals = np.clip(m_integrals, tiny, 1.0)        # numerical guard
     dmi = m_integrals / integrals - m_model
 
     return np.sum(np.log(integrals)), (integrals, dmi)
