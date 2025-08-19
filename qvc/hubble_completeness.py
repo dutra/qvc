@@ -115,7 +115,7 @@ def get_completeness_function_2d(
     """
     # --- Load simulated (true) sample
     with h5py.File(sim_file, 'r') as f:
-        mags_true_i = f['apparent_mag_i'][:]
+        mags_true_i = f['apparent_mag_i_rest'][:]
         z_true = f['z'][:]
 
     y = df_agn['apparent_mag_2500'].values # rest-frame
@@ -138,8 +138,6 @@ def get_completeness_function_2d(
     
     # --- Observed sample
     mags_obs = np.asarray(df_agn["apparent_mag_2500"].values)
-
-    #mags_obs = calculated_mag_i
     z_obs    = np.asarray(df_agn["z"].values)
 
     if plot:
