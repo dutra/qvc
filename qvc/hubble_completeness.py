@@ -118,8 +118,8 @@ def get_completeness_function_2d(
         mags_true_i = f['apparent_mag_i'][:]
         z_true = f['z'][:]
 
-    y = df_agn['apparent_mag_2500'].values
-    x = df_agn['apparent_mag_i'].values
+    y = df_agn['apparent_mag_2500'].values # rest-frame
+    x = df_agn['apparent_mag_i_rest'].values # from PyQSOFit synethic photometry (no host)
 
     # Fit line
     x_pivot = np.mean(x)

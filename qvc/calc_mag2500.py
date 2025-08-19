@@ -503,12 +503,17 @@ def get_alpha(i):
 
     conti_dict['z'] = z
 
+    # Get m_i conti rest (host-subtracted / QSO only)
+    filt = filters.load_filters('sdss2010-i')
+    apparent_mag_i_rest = filt.get_ab_magnitude(1e-17*q_mle.qso*u.erg/u.s/u.cm**2/u.AA, q_mle.wave*u.AA)
+
     # Compute m_2500_new using the dictionary
     m_2500, m_2500_err = compute_apparent_mag_2500_astropy(conti_dict)
 
     result = {
         'apparent_mag_2500': m_2500,
         'apparent_mag_2500_err': m_2500_err,
+        'apparent_mag_i_rest': apparent_mag_i_rest
         'f_host_4200': conti_dict.get('frac_host_4200', -99),
         'alpha_lambda': conti_dict.get('PL_slope', -99),
         'alpha_lambda_err': conti_dict.get('PL_slope_err', -99),
