@@ -64,7 +64,6 @@ class ContiBLRQS(qs.Wrapper):
     amp_cont: jnp.ndarray
     amp_blr: jnp.ndarray
     lag_blr: jnp.ndarray
-    s_b: jnp.ndarray
     bwb_alpha: jnp.ndarray
     bwb_beta: jnp.ndarray
 

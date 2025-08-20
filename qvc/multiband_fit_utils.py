@@ -740,3 +740,11 @@ def compute_psd_from_samples(samples, clean_bands, num_points=1000, time_range=(
         psd_results[band] = {"freqs": freqs, "psd": S_f}
 
     return psd_results
+
+def drw_equiv(amp_cont, tau_drw, bwb_alpha, bwb_beta):
+    A = amp_cont
+    q2 = (bwb_alpha * A**2)**2  # q_b^2
+
+    sigma2_eq = A**2 + 2.0 * q2
+    tau_eq = tau_drw * (A**2 + (2.0/bwb_beta)*q2) / (A**2 + 2.0*q2)
+    return tau_eq, sigma2_eq
