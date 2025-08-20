@@ -65,15 +65,16 @@ class ContiBLRQS(qs.Wrapper):
     amp_blr: jnp.ndarray
     lag_blr: jnp.ndarray
     s_b: jnp.ndarray
-    gamma: jnp.ndarray
+    bwb_alpha: jnp.ndarray
+    bwb_beta: jnp.ndarray
 
-    def __init__(self, amp_cont, amp_blr, lag_blr, tau_drw, s_b, gamma) -> None:
+    def __init__(self, amp_cont, amp_blr, lag_blr, tau_drw, bwb_alpha, bwb_beta) -> None:
         self.amp_cont = amp_cont
         self.amp_blr = amp_blr
         self.lag_blr = lag_blr
         self.tau_drw = tau_drw
-        self.s_b = s_b
-        self.gamma = gamma
+        self.bwb_alpha = bwb_alpha
+        self.bwb_beta = bwb_beta
         self.kernel = qs.Exp(scale=self.tau_drw, sigma=1.0)
 
     def coord_to_sortable(self, X) -> JAXArray:
@@ -91,7 +92,7 @@ class ContiBLRQS(qs.Wrapper):
 
     # ---- Helper: k^2 kernel (block 1) ----
     def _ensure_kernel_sq(self):
-        return qs.Exp(scale=self.tau_drw / self.gamma, sigma=1.0)
+        return qs.Exp(scale=self.tau_drw / self.bwb_beta, sigma=1.0)
 
     def _A1(self):
         return self._ensure_kernel_sq().design_matrix()
@@ -146,8 +147,8 @@ class ContiBLRQS(qs.Wrapper):
         h_blr  = self.amp_blr[b] * (Phi_delay_T @ h)
         h_base_total = h_cont + h_blr                        # yields the 4-term sum
 
-        # BWB component on k^2 with weight sqrt(2)*q_b where q_b = s_b * A_b^2
-        q_b = self.s_b[b] #* (self.amp_cont[b] ** 2)
+        # BWB component on k^2 with weight sqrt(2)*q_b where q_b = bwb_alpha * A_b^2
+        q_b = self.bwb_alpha * (self.amp_cont[b] ** 2)
         h_sq = self._ensure_kernel_sq().observation_model(t) # shape [m2]
         h_bwb = jnp.sqrt(2.0) * q_b * h_sq                   # gives 2 q1 q2 k^2 in cov
 
@@ -288,17 +289,14 @@ class MyMultiVarModel(MultiVarModel):
         else:
             diags = self.diag[inds]
 
-        # BWB
-        x_bwb = jnp.log10(self.lam_rf / 2500.0)
-        s_b = params["bwb_alpha"] + params["bwb_beta"] * x_bwb  # shape (n_band,)
-
+        # Kernel
         kernel = ContiBLRQS(
             amp_cont=jnp.exp(log_sigma_band),
             amp_blr=jnp.exp(log_sigma_band_blr),
             tau_drw=jnp.exp(log_tau_band),
             lag_blr=jnp.exp(params["log_lag_blr"]),
-            s_b=s_b,
-            gamma=params["gamma"]
+            bwb_alpha=params["bwb_alpha"],
+            bwb_beta=params["bwb_beta"],
         )
 
         # Check if kernel covariance is symmetric

@@ -127,13 +127,13 @@ def build_model(batch_data, zs, f_host_value, lam_rfs, log_jitter_mean, f_host_s
 
             # Bluer when brighter (BWB) strength
             if bwb:
-                bwb_alpha = numpyro.sample("bwb_alpha", dist.Normal(0.2, 0.2))
-                bwb_beta = numpyro.sample("bwb_beta", dist.TruncatedNormal(0.2, 0.4, low=0))
-                gamma = numpyro.sample("gamma", dist.Normal(2.0, 1.0))
+                bwb_log_alpha = numpyro.sample("bwb_log_alpha", dist.Normal(0.5, 0.2))
+                bwb_log_beta = numpyro.sample("bwb_log_beta", dist.Normal(2.0, 1.0))
+                bwb_alpha = numpyro.deterministic("bwb_alpha", jnp.exp(bwb_log_alpha))
+                bwb_beta = numpyro.deterministic("bwb_beta", jnp.exp(bwb_log_beta))
             else:
                 bwb_alpha = numpyro.deterministic("bwb_alpha", jnp.zeros(batch_size))
-                bwb_beta = numpyro.deterministic("bwb_beta", jnp.zeros(batch_size))
-                gamma = numpyro.deterministic("gamma", jnp.ones(batch_size) * 2.0)
+                bwb_beta = numpyro.deterministic("bwb_beta", jnp.ones(batch_size))
 
         with numpyro.plate("objects", batch_size, dim=-2):
             with numpyro.plate("band", nBands, dim=-1):
@@ -165,7 +165,6 @@ def build_model(batch_data, zs, f_host_value, lam_rfs, log_jitter_mean, f_host_s
                 "lag_beta": lag_beta[i],
                 "bwb_alpha": bwb_alpha[i],
                 "bwb_beta": bwb_beta[i],
-                "gamma": gamma[i],
                 # power law
                 "eta_A1": eta_A1[i],
                 "eta_A2": eta_A2[i],
