@@ -497,7 +497,7 @@ def populate_sdss_fields(objs, progress_bar=True):
 
     return objs
 
-def read_quasars_from_hdf5(file_path):
+def read_quasars_from_hdf5(file_path, first=None):
     quasar_list = []
 
     with h5py.File(file_path, "r") as hdf:
@@ -510,6 +510,8 @@ def read_quasars_from_hdf5(file_path):
                 sub_group = group[sub_group_name]
                 quasar[sub_group_name] = {sub_key: sub_group[sub_key][...] for sub_key in sub_group.keys()}
             quasar_list.append(quasar)
+            if first is not None and len(quasar_list) >= first:
+                break
     return quasar_list
 
 def filter_unresolved_quasars(df):
@@ -589,8 +591,8 @@ def populate_chi_sq_from_csv(df, csv_path="data/aug4_sample_chisqg10_ebv005sn3.c
     df['chi_sq_all'] = merged['chi_sq_all']
     return df
 
-def load_quasar_data(file_path, populate_sdss=False, apply_cut=True):
-    quasar_list = read_quasars_from_hdf5(file_path)
+def load_quasar_data(file_path, populate_sdss=False, apply_cut=True, first=None):
+    quasar_list = read_quasars_from_hdf5(file_path, first=first)
     print("Number of quasars loaded:", len(quasar_list))
 
     if populate_sdss:
