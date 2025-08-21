@@ -245,39 +245,51 @@ def get_completeness_function_2d(
 
     return Completeness2D(mag_centers, z_centers, C), mag_centers, z_centers, dm, dz, scatter
 
-def make_dm_function(m, z, dm, m_bins=40, z_bins=40):
+import numpy as np
+from scipy.interpolate import RegularGridInterpolator
+
+def make_dm_function(m, z, dm, m_bins=40, z_bins=40, *, method='linear'):
     """
-    Build a 2D interpolator dm(m,z).
-    m,z,dm : arrays (N,)
-    m_bins,z_bins : int or sequence
+    Build a 2D interpolator dm(m,z) defined on bin midpoints.
+    Queries are always clipped to the grid range (no extrapolation).
     """
     # Remove non-finite values
     m = np.asarray(m)
     z = np.asarray(z)
     dm = np.asarray(dm)
     mask = np.isfinite(m) & np.isfinite(z) & np.isfinite(dm)
-    m = m[mask]
-    z = z[mask]
-    dm = dm[mask]
+    m, z, dm = m[mask], z[mask], dm[mask]
 
-    if np.isscalar(m_bins):
-        m_edges = np.linspace(m.min(), m.max(), m_bins)
-    else:
-        m_edges = np.asarray(m_bins)
-    if np.isscalar(z_bins):
-        z_edges = np.linspace(z.min(), z.max(), z_bins)
-    else:
-        z_edges = np.asarray(z_bins)
+    # Build bin edges
+    m_edges = np.linspace(m.min(), m.max(), m_bins) if np.isscalar(m_bins) else np.asarray(m_bins)
+    z_edges = np.linspace(z.min(), z.max(), z_bins) if np.isscalar(z_bins) else np.asarray(z_bins)
 
-    # binning
+    # 2D binning: means per cell
     counts, _, _ = np.histogram2d(z, m, bins=[z_edges, m_edges])
-    sums, _, _   = np.histogram2d(z, m, bins=[z_edges, m_edges], weights=dm)
-    mean = np.divide(sums, counts, out=np.zeros_like(sums), where=counts>0)
+    sums,   _, _ = np.histogram2d(z, m, bins=[z_edges, m_edges], weights=dm)
+    mean = np.divide(sums, counts, out=np.zeros_like(sums), where=counts > 0)
 
-    z_mid = 0.5*(z_edges[:-1] + z_edges[1:])
-    m_mid = 0.5*(m_edges[:-1] + m_edges[1:])
+    # Grid points are the bin midpoints
+    z_mid = 0.5 * (z_edges[:-1] + z_edges[1:])
+    m_mid = 0.5 * (m_edges[:-1] + m_edges[1:])
 
-    interp = RegularGridInterpolator((z_mid, m_mid), mean,
-                                     bounds_error=False, fill_value=np.nan)
+    # Core interpolator (will return NaN outside, we’ll clip inputs before calling it)
+    interp_core = RegularGridInterpolator(
+        (z_mid, m_mid), mean,
+        method=method, bounds_error=False, fill_value=np.nan
+    )
 
-    return interp  # call as interp([[z,m]]) or vectorized
+    # Clipping wrapper
+    z_lo, z_hi = z_mid.min(), z_mid.max()
+    m_lo, m_hi = m_mid.min(), m_mid.max()
+
+    def interp_clipped(pts):
+        pts = np.asarray(pts)
+        arr = np.atleast_2d(pts).astype(float)
+        arr[:, 0] = np.clip(arr[:, 0], z_lo, z_hi)
+        arr[:, 1] = np.clip(arr[:, 1], m_lo, m_hi)
+        out = interp_core(arr)
+        return out if np.ndim(pts) > 1 else out[0]
+
+    return interp_clipped
+
