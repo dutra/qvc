@@ -15,6 +15,7 @@ from astropy.table import Table
 from astropy.coordinates import SkyCoord
 from astropy.cosmology import FlatLambdaCDM
 import astropy.units as u
+from hubble_utils import load_quasar_data, write_hdf5_file, read_quasars_from_hdf5
 
 from astroquery.sdss import SDSS
 #warnings.filterwarnings("ignore")
@@ -79,13 +80,20 @@ def load_spec_from_cache(sdss_name, cache_dir="data/spectra_cache"):
     return None
 
 
-def match_sample_to_dr16q(sample_csv, dr16q_fits, max_sep_arcsec=2.0, limit=None):
+def match_sample_to_dr16q(sample_h5, dr16q_fits, max_sep_arcsec=2.0, limit=None, filter_object_id=None):
     """Load sample CSV and DR16Q, crossmatch within max_sep_arcsec, return (data_cat_table, sample_df_matched).
     Ensures 1–to–1 matches by keeping the closest pair per AGN (and per SDSS if needed)."""
-    sample_df = pd.read_csv(sample_csv)
-    if limit is not None:
-        sample_df = sample_df.iloc[:limit].copy()
+    #sample_df = pd.read_csv(sample_csv)
+    sample_df = load_quasar_data(sample_h5, apply_cut=False)
     sample_df['object_id'] = sample_df['object_id'].astype(str).str.strip()
+
+    if filter_object_id is not None:
+        filter_set = set(str(x).strip() for x in filter_object_id)
+        sample_df = sample_df[sample_df['object_id'].astype(str).str.strip().isin(filter_set)].copy()
+
+    if limit is not None:
+        sample_df = sample_df[sample_df['z'].between(1.5, 1.55)]
+        sample_df = sample_df.iloc[:limit].copy()
 
     with fits.open(dr16q_fits) as hdul:
         data_cat_full = hdul[1].data
@@ -123,13 +131,19 @@ def match_sample_to_dr16q(sample_csv, dr16q_fits, max_sep_arcsec=2.0, limit=None
 
     # Add photometry columns (now lengths match)
     for b in ['u', 'g', 'r', 'i', 'z']:
-        col = f'mags_mean_{b}'
-        if col in sample_df_matched.columns:
-            data_cat[f'mean_corrected_{b}'] = sample_df_matched[col].to_numpy()
+        mags_mean_col = f'mags_mean_{b}'
+        mean_col = f'mean_{b}'
+        if mags_mean_col in sample_df_matched.columns:
+            # If mean_col is not >= 0, assign 0
+            mean_vals = sample_df_matched[mean_col].to_numpy()
+            mean_vals = np.where(mean_vals >= 0, mean_vals, 0)
+            data_cat[f'mean_corrected_{b}'] = sample_df_matched[mags_mean_col].to_numpy() + mean_vals
 
     data_cat['object_id'] = sample_df_matched['object_id'].to_numpy()
 
     return data_cat, sample_df_matched
+
+
 
 def create_qsopar_fits(path_ex='data/', *, overwrite=True, author='Hengxiao Guo'):
     """
@@ -320,7 +334,7 @@ def create_qsopar_fits(path_ex='data/', *, overwrite=True, author='Hengxiao Guo'
 
     # Quick sanity: ensure expected HDUs exist
     with fits.open(outpath, memmap=False) as chk:
-        names = {h.name for h in chk[1:]}
+        names = {(h.header.get('EXTNAME', '') or '').strip().lower() for h in chk[1:]}
         required = {'line_priors', 'conti_windows', 'conti_priors', 'measure_info'}
         missing = required - names
         if missing:
@@ -342,9 +356,9 @@ def run_qsofit_record(rec, cache_dir="data/spectra_cache", path_ex="data/"):
 
     # default result (so we always return a complete row even on error)
     result = dict(
-        __object_id__=rec.get("__object_id__", rec.get("object_id")),
         object_id=rec["object_id"],
         sdss_name=rec["sdss_name"],
+        apparent_mag_i_rest=-1e9,
         apparent_mag_2500=-1e9,
         apparent_mag_2500_err=-1e9,
         f_host_4200=-1e9,
@@ -370,15 +384,19 @@ def run_qsofit_record(rec, cache_dir="data/spectra_cache", path_ex="data/"):
         delta_mags, weights = [], []
 
         for b, filt in zip(bands, sdss_filters):
-            mag_fiber = rec["mags"].get(b, np.nan)
-            if not np.isfinite(mag_fiber) or mag_fiber < 0:
+            try:
+                mag_fiber = rec["mags"].get(b, np.nan)
+                if not np.isfinite(mag_fiber) or mag_fiber < 0:
+                    continue
+                mag_synth = filt.get_ab_magnitude(
+                    1e-17 * flux * u.erg / u.s / u.cm**2 / u.AA,
+                    lam * u.AA
+                )
+                delta_mags.append(mag_fiber - mag_synth)
+                weights.append(1.0)
+            except Exception as e:
+                #print(f"[WARNING] Error processing band {b} for {rec['sdss_name']}: {e}")
                 continue
-            mag_synth = filt.get_ab_magnitude(
-                1e-17 * flux * u.erg / u.s / u.cm**2 / u.AA,
-                lam * u.AA
-            )
-            delta_mags.append(mag_fiber - mag_synth)
-            weights.append(1.0)
 
         delta_mags = np.array(delta_mags) if delta_mags else np.array([0.0])
         weights    = np.array(weights)    if weights    else np.array([1.0])
@@ -472,12 +490,29 @@ def run_qsofit_record(rec, cache_dir="data/spectra_cache", path_ex="data/"):
         conti_dict['z'] = rec["z"]
 
         L_ok = np.isfinite(conti_dict.get('L2500', np.nan)) and np.isfinite(conti_dict.get('L2500_err', np.nan))
+                
         if L_ok:
             m_2500, m_2500_err = compute_apparent_mag_2500_astropy(conti_dict)
         else:
             m_2500, m_2500_err = -1e9, -1e9
 
+        try:
+            alpha_lambda = conti_dict.get('PL_slope', -99)
+            z = conti_dict['z']
+
+            filt_i = filters.load_filter('sdss2010-i')
+            host_contr = q_mle.host if q_mle.decompose_host else 0.0
+            lam = q_mle.wave * (1 + z)
+            apparent_mag_i_obs = filt_i.get_ab_magnitude(1e-17*(q_mle.flux - host_contr)*u.erg/u.s/u.cm**2/u.AA, lam*u.AA)
+            K_i = 2.5*(alpha_lambda + 1.0)*np.log10(1.0 + z)
+            apparent_mag_i_rest = apparent_mag_i_obs - K_i
+        except Exception as e:
+            print(f"[ERROR] apparent_mag_i_rest {rec.get('object_id','?')} ({rec.get('sdss_name','?')}): {e}")
+            apparent_mag_i_rest, apparent_mag_i_obs = -1e9, -1e9
+
         result.update(
+            apparent_mag_i_rest=apparent_mag_i_rest,
+            apparent_mag_i_obs=apparent_mag_i_obs,
             apparent_mag_2500=m_2500,
             apparent_mag_2500_err=m_2500_err,
             f_host_4200=conti_dict.get('frac_host_4200', -99),
@@ -487,15 +522,19 @@ def run_qsofit_record(rec, cache_dir="data/spectra_cache", path_ex="data/"):
         )
         return result
 
-    except Exception:
+    except Exception as e:
         # swallow errors per object; keep defaults
+        print(f"[ERROR] Object {rec.get('object_id','?')} ({rec.get('sdss_name','?')}): {e}")
         return result
 
 # --------------------------- CLI & Main ---------------------------------
 def parse_args():
     p = argparse.ArgumentParser(description="DR16Q crossmatch, optional SDSS spectrum download, and QSOFit processing.")
-    p.add_argument("--input-csv", default="data/csv/aug4_sample_chisqg10_ebv005sn3_magsmean.csv",
-                   help="Path to sample CSV.")
+    # p.add_argument("--input-csv", default="data/csv/aug4_sample_chisqg10_ebv005sn3_magsmean.csv",
+    #                help="Path to sample CSV.")
+    p.add_argument("fpath_in", help="Path to h5 fits with mag means.")
+    p.add_argument("fpath_out", help="Output file for QSOFit results.")
+
     p.add_argument("--dr16q-fits", default="data/dr16q_prop_May01_2024.fits",
                    help="Path to DR16Q FITS catalog.")
     p.add_argument("--cache-dir", default="data/spectra_cache",
@@ -506,10 +545,9 @@ def parse_args():
                    help="Optional limit on number of rows from input CSV to consider before matching.")
     p.add_argument("--download", action="store_true",
                    help="If set, download (and cache) all matched spectra and exit.")
-    p.add_argument("--out-csv", default="data/csv/aug11_sample_chisqg10_ebv005sn3_fittedm2500.csv",
-                   help="Output CSV for QSOFit results.")
     p.add_argument("--nproc", type=int, default=max(1, (os.cpu_count() or 2) - 1),
                help="Number of parallel worker processes for QSOFit.")
+    p.add_argument("--filter_object_id", nargs="+", help="List of object IDs to filter.")
     return p.parse_args()
 
 
@@ -518,10 +556,11 @@ def main():
 
     # 1) Match sample to DR16Q
     data_cat, sample_df_matched = match_sample_to_dr16q(
-        sample_csv=args.input_csv,
+        sample_h5=args.fpath_in,
         dr16q_fits=args.dr16q_fits,
         max_sep_arcsec=args.max_sep,
-        limit=args.limit
+        limit=args.limit,
+        filter_object_id=args.filter_object_id
     )
 
     # 2) If --download, fetch all spectra and exit
@@ -545,7 +584,7 @@ def main():
         return  # Exit after download-only path
 
     # 3) Otherwise, proceed to QSOFit processing (expects cached spectra)
-    #create_qsopar_fits(overwrite=True)
+    create_qsopar_fits(overwrite=True)
     # Build worker records so we don't try to pickle big astropy tables
     records = []
     colnames = set(data_cat.colnames)
@@ -563,34 +602,45 @@ def main():
                 b: (float(row[f'mean_corrected_{b}']) if f'mean_corrected_{b}' in colnames else np.nan)
                 for b in ['g', 'r', 'i']
             },
+            ra=float(row['RA']),
+            dec=float(row['DEC'])
         )
         records.append(rec)
 
     # Build a quick lookup of original order from the input CSV
-    input_df = pd.read_csv(args.input_csv)
+    #input_df = pd.read_csv(args.input_csv)
     #original_order = list(input_df["object_id"].astype(str))
-    original_order = list(sample_df_matched["object_id"].astype(str))
+    #original_order = list(sample_df_matched["object_id"].astype(str))
 
-    worker = partial(run_qsofit_record, cache_dir=args.cache_dir, path_ex=".")
+    worker = partial(run_qsofit_record, cache_dir=args.cache_dir, path_ex="./")
 
     chunksize = 1  # small so progress bar updates frequently
-    results_dict = {}
+    results = {}
 
     with Pool(processes=args.nproc) as pool:
         with tqdm(total=len(records), desc="Processing objects", dynamic_ncols=True, smoothing=0.0) as pbar:
             for res in pool.imap_unordered(worker, records, chunksize=chunksize):
                 obj_id = res.get("object_id", None)
                 if obj_id is not None:
-                    results_dict[obj_id] = res
+                    results[obj_id] = res
                 pbar.update(1)
 
-    print(f"Collected {len(results_dict)} results out of {len(records)} records")
+    print(f"Collected {len(results)} results out of {len(records)} records")
 
-    # Reassemble results in the same order as input_csv, removing blank results
-    ordered_results = [results_dict.get(oid, {}) for oid in original_order]
-    filtered_results = [res for res in ordered_results if res]  # remove blank dicts
+    #pd.DataFrame(results).to_csv(args.out_csv, index=False)
 
-    pd.DataFrame(filtered_results).to_csv(args.out_csv, index=False)
-    print(f"[OK] Saved results to {args.out_csv}")
+    quasar_dict_list = read_quasars_from_hdf5(args.fpath_in)
+
+    # Build a lookup by object_id from results
+    #results_by_id = {str(res['object_id']): res for res in results}
+
+    # Update each quasar dict with fields from results
+    for quasar in quasar_dict_list:
+        obj_id = str(quasar.get('object_id'))
+        quasar.update(results[obj_id])
+
+    write_hdf5_file(quasar_dict_list, args.fpath_out)
+
+    print(f"[OK] Saved results to {args.fpath_out}")
 if __name__ == "__main__":
     main()
