@@ -5,7 +5,7 @@ from collections import OrderedDict
 
 # --- Reference constants and pivot values ---
 log_sigma_UV_pivot = -0.72 # TODO make this a parameter
-log_tau_UV_RF_pivot = 2.61  # TODO make this a parameter
+log_tau_UV_RF_pivot = 2.65  # TODO make this a parameter
 bwb_beta_pivot = 0.14
 #M0_agn_offset = -5.179  # TODO make this a parameter
 #z_agn_pivot = 1.2 # TODO make this a parameter
@@ -64,7 +64,7 @@ def M_model_SN(m_b_corr, host_logmass, M0_sn, gamma_sn, tau_Ms):
     delta_host = gamma_sn * expit(-(host_logmass - 10) / tau_Ms) - gamma_sn / 2
     return m_b_corr - M0_sn + delta_host
 
-def get_model_params(cosmo_model):
+def get_model_params(cosmo_model, only_sna=False):
 
     priors = OrderedDict([
         ("gamma_sn",    (-0.1, 0.1)),     # Host mass step usually ~0.05
@@ -89,8 +89,8 @@ def get_model_params(cosmo_model):
         ])
     elif cosmo_model == 'Flatw0waCDM':
         priors |= OrderedDict([
-            ("wp", (-20.0, 0.0)),   # covers phantom (<-1), Λ (-1), quintessence (> -1), and even w>0
-            ("wa", (-20.0, 0.0))    # symmetric variation
+            ("wp", (-20.0, 20.0)),   # covers phantom (<-1), Λ (-1), quintessence (> -1), and even w>0
+            ("wa", (-20.0, 20.0))    # symmetric variation
         ])
 
     else:

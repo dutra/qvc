@@ -36,7 +36,9 @@ _pantheon_data = None
 
 _sna_LogdetCov, _sna_L, _sna_Lower = None, None, None
 
-z_agn_pivot = 1.5
+z_pivot_sna = 0.0
+z_pivot_agn = 1.5
+
 
 def completeness_loglike(m_model, mu_err, z, completeness2d, m_grid, sigma_completeness, tiny=1e-300):
     """
@@ -79,7 +81,7 @@ def log_likelihood(theta, cosmo_model,
                    only_sna=False, use_full_cov=False,
                    return_params=False):
     
-    priors, model_labels, model_labels_latex = get_model_params(cosmo_model)
+    priors, model_labels, model_labels_latex = get_model_params(cosmo_model, only_sna=only_sna)
     model_priors = {key: priors[key] for key in model_labels}
     params = dict(zip(model_labels, theta))
 
@@ -88,15 +90,16 @@ def log_likelihood(theta, cosmo_model,
             raise ValueError(f"For key {key} prior: Low {low} > high {high}")
         # Check if parameter is within prior bounds 
         if not (low < params[key] < high):
-            return -np.inf
+            return -np.inf, np.array([])  # Return -inf log-likelihood and zero blobs
 
     # Cosmology
     if cosmo_model == 'FlatwCDM':
         cosmo = FlatwCDM(H0=params['H0'], Om0=params['Om0'], w0=params['w0'])
     elif cosmo_model == 'Flatw0waCDM':
-        #a_pivot = 1 / (1 + z_agn_pivot)
+        #a_pivot = 1 / (1 + z_pivot_agn)
         #wp = params['w0'] + (1 - a_pivot) * params['wa']
-        cosmo = FlatwpwaCDM(H0=params['H0'], Om0=params['Om0'], wp=params['wp'], wa=params['wa'], zp=z_agn_pivot)
+        z_pivot = z_pivot_sna if only_sna else z_pivot_agn
+        cosmo = FlatwpwaCDM(H0=params['H0'], Om0=params['Om0'], wp=params['wp'], wa=params['wa'], zp=z_pivot)
         #cosmo = Flatw0waCDM(H0=params['H0'], Om0=params['Om0'], w0=params['w0'], wa=params['wa'])
     elif cosmo_model == 'FlatLambdaCDM':
         cosmo = FlatLambdaCDM(H0=params['H0'], Om0=params['Om0'])
@@ -125,7 +128,7 @@ def log_likelihood(theta, cosmo_model,
     z = _agn_data['z']
     
     if only_sna:
-        return ll_snia, np.zeros_like(z)
+        return ll_snia, np.array([])
 
     # AGN model
     m_obs = _agn_data['apparent_mag_2500']
@@ -167,7 +170,6 @@ def log_likelihood(theta, cosmo_model,
     m_model = M_pred + mu_cosmo  # model-predicted magnitude
 
     ll_completeness = 0.0
-    integrals = np.zeros_like(z)  # shape (N_obj,)
     if completeness_params is not None:
         completeness2d, mag_centers, _, _, _, completeness_scatter = completeness_params
         ll_completeness, blobs = completeness_loglike(
@@ -214,7 +216,7 @@ def run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model='Flatw0waCDM',
                       only_sna=False, completeness=True, use_full_cov=True,
                       resume=False, speed="production"):
 
-    priors, model_labels, model_labels_latex = get_model_params(cosmo_model)
+    priors, model_labels, model_labels_latex = get_model_params(cosmo_model, only_sna=only_sna)
     ndim = len(model_labels)
     print(f"Running sampling with {ndim} parameters for cosmological model: {cosmo_model}")
 
@@ -258,7 +260,6 @@ def run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model='Flatw0waCDM',
         'only_sna': only_sna,
         'use_full_cov': use_full_cov,
     })
-
     checkpoint_folder = 'results/hubble'
     if not os.path.exists(checkpoint_folder):
         os.makedirs(checkpoint_folder)
@@ -343,32 +344,35 @@ def run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model='Flatw0waCDM',
     print(f"\nBayesian evidence logZ = {logZ:.2f} ± {logZerr:.2f}")
     if logZerr > 1:
         print("Warning: logZ error is large, consider increasing nlive or maxiter.")
-
+    
     # --- pull arrays from results ---
     samples = results.samples                               # (nsamp, ndim)
     logl    = results.logl                                  # (nsamp,)
     weights = np.exp(results.logwt - results.logz[-1])      # (nsamp,)
     blobs   = results.blob                                 # (nsamp, nobj) if blob=True
 
+    # Keep equal-weight resampling
+    idx = np.arange(weights.size)
+    flat_idx = dyfunc.resample_equal(idx, weights)          # (nsamp,)
+    flat_samples = samples[flat_idx]
+    flat_blobs   = blobs[flat_idx]
+
+    if only_sna:
+        return sampler, flat_samples, model_labels, None, logZ, logZerr
+
     # --- safety checks ---
     if blobs is None:
         raise RuntimeError("results.blobs is None. Did you run with blob=True and return (logl, blob)?")
 
-    # grab redshifts (assumes your pipeline set _agn_data)
-    try:
-        z = _agn_data['z']
-    except Exception as e:
-        raise RuntimeError("Couldn't find AGN redshifts (_agn_data['z']). Make sure _agn_data is set.") from e
+    z = _agn_data['z']
 
     # ===== Highest posterior weight (MAP-ish) sample =====
     idx_max_weight = np.argmax(weights)
-    print(blobs.shape)
     integrals_max_w = blobs[idx_max_weight,:][0]  # this is integrals for that sample, shape: (nobj,)
     dmi_max_w = blobs[idx_max_weight,:][1]  # this is dmi for that sample, shape: (nobj,)
-
+    
     # Bin dmi in redshift
     # Interpolate dmi vs redshift for smooth plotting or further analysis (no binning)
-    print(len(dmi_max_w), len(z))
     dmi_interp = interp1d(z, dmi_max_w, kind='linear', bounds_error=False, fill_value='extrapolate')
     
     # Plot dmi_interp vs z for the highest-weight sample
@@ -402,19 +406,14 @@ def run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model='Flatw0waCDM',
     #plt.show()
     plt.close()
 
-    # Keep equal-weight resampling
-    idx = np.arange(weights.size)
-    flat_idx = dyfunc.resample_equal(idx, weights)          # (nsamp,)
-    flat_samples = samples[flat_idx]
-    flat_blobs   = blobs[flat_idx]
 
     # Posterior summaries over resampled blobs (per-object)
     posterior_mean_logint = np.mean(flat_blobs, axis=0)
     posterior_med_logint  = np.median(flat_blobs, axis=0)
 
-    print("\nPosterior (equal-weight) blob summaries:")
-    print("  per-object mean (first 10):", posterior_mean_logint[:10])
-    print("  per-object median (first 10):", posterior_med_logint[:10])
+    # print("\nPosterior (equal-weight) blob summaries:")
+    # print("  per-object mean (first 10):", posterior_mean_logint[:10])
+    # print("  per-object median (first 10):", posterior_med_logint[:10])
 
     # Stats
     neff = (weights.sum()**2) / (weights**2).sum()
@@ -432,7 +431,7 @@ def run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model='Flatw0waCDM',
     print(median_samples)
 
     # If you want to keep your existing summary:
-    display_results_summary(flat_samples, cosmo_model, z_agn_pivot)
+    display_results_summary(flat_samples, cosmo_model, z_pivot_agn)
 
     #z_pivot_best, _, _ = find_optimal_pivot(flat_samples, cosmo_model, df_agn_filtered)
     #print(f"Optimal z pivot for {cosmo_model}: {z_pivot_best:.3f}")
@@ -445,20 +444,21 @@ def run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model='Flatw0waCDM',
 
 
 
-def run_single(agn_data_filepath, cosmo_model, populate_sdss_fields=False, completeness=True, use_full_cov=True, 
-               resume=False, only_sna=False, speed="production"):
+def run_single(df_agn, cosmo_model, completeness=True, use_full_cov=True, 
+               N=None, resume=False, only_sna=False, speed="production"):
 
     # Load data
-    global _sna_LogdetCov, _sna_L, _sna_Lower
+    #global _sna_LogdetCov, _sna_L, _sna_Lower
+    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data(agn_data_filepath, populate_sdss=populate_sdss_fields)
 
-    df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data(agn_data_filepath, populate_sdss=populate_sdss_fields)
+    if N is not None:
+        print(f"Limiting AGN data to first {N} entries for speed...")
+        df_agn = df_agn.head(N)
+        #df_pantheon = df_pantheon.head(N)
 
     sampler, flat_samples, model_labels, dmag_corr, logZ, logZerr = run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model=cosmo_model, 
                                                          only_sna=only_sna, completeness=completeness, use_full_cov=use_full_cov,
                                                          resume=resume, speed=speed)
-    if cosmo_model == 'Flatw0waCDM':
-        zp = compute_pivot_redshift(flat_samples, cosmo_model)
-        print("Pivot redshift: ", zp)
 
     plot_path = f"plots/hubble/{cosmo_model}_{'sna' if only_sna else 'joint'}_{speed}"
     os.makedirs(plot_path, exist_ok=True)
@@ -466,53 +466,72 @@ def run_single(agn_data_filepath, cosmo_model, populate_sdss_fields=False, compl
     print("Plotting full dynesty corner...")
     plot_dynesty(sampler.results, cosmo_model, plot_path)
 
+    if only_sna:
+        print("Skipping AGN-specific plots for SNe-only run.")
+        return sampler, flat_samples, model_labels, dmag_corr, logZ, logZerr
+
     print("Plotting predicted vs actual M2500...")
-    plot_predicted_vs_actual_M2500(flat_samples, df_agn, cosmo_model=cosmo_model, z_agn_pivot=z_agn_pivot, debias=False, show=False, plot_path=plot_path)
-    plot_predicted_vs_actual_M2500(flat_samples, df_agn, cosmo_model=cosmo_model, z_agn_pivot=z_agn_pivot, debias=True, show=False, dms=dmag_corr, plot_path=plot_path)
+    plot_predicted_vs_actual_M2500(flat_samples, df_agn, cosmo_model=cosmo_model, z_pivot_agn=z_pivot_agn, debias=False, show=False, plot_path=plot_path)
+    plot_predicted_vs_actual_M2500(flat_samples, df_agn, cosmo_model=cosmo_model, z_pivot_agn=z_pivot_agn, debias=True, show=False, dms=dmag_corr, plot_path=plot_path)
 
     print("Plotting Hubble diagram...")
     residuals, mu_pred_median, mu_pred_std = plot_hubble(flat_samples, df_agn, df_pantheon, 
-                                                         cosmo_model=cosmo_model, z_agn_pivot=z_agn_pivot, 
+                                                         cosmo_model=cosmo_model, z_pivot_agn=z_pivot_agn, 
                                                          show_true=False, show=False, debias=False, plot_path=plot_path)
     debiased_residuals, _, _ = plot_hubble(flat_samples, df_agn, df_pantheon, 
-                                                         cosmo_model=cosmo_model, z_agn_pivot=z_agn_pivot, 
+                                                         cosmo_model=cosmo_model, z_pivot_agn=z_pivot_agn, 
                                                          show_true=False, show=False, debias=True, dms=dmag_corr, plot_path=plot_path)
 
     print("Plotting predicted L2500 vs ...")
-    plot_predicted_L2500_vs_sigmahat(flat_samples, df_agn, cosmo_model=cosmo_model, z_agn_pivot=z_agn_pivot, show=False, plot_path=plot_path)
+    plot_predicted_L2500_vs_sigmahat(flat_samples, df_agn, cosmo_model=cosmo_model, z_pivot_agn=z_pivot_agn, show=False, plot_path=plot_path)
     
     print("Plotting cosmological posteriors corner plot...")
-    plot_cosmo_corner(None, flat_samples, cosmo_model, z_agn_pivot, show=False, plot_path=plot_path)
+    plot_cosmo_corner(None, flat_samples, cosmo_model, z_pivot_sna, z_pivot_agn, show=False, plot_path=plot_path)
 
     print("Plotting completeness vs magnitude at redshifts...")
     p_detect, mag_centers, z_centers, dm, dz, completeness_scatter = get_completeness_function_2d(df_agn, plot=True)
     plot_completeness_vs_mag_at_redshifts(p_detect, mag_centers, z_centers)
 
     print("Plotting debiased residuals...")
-    plot_full_residuals(df_agn, debiased_residuals, flat_samples, cosmo_model, z_agn_pivot, show=False, plot_path=plot_path)
+    plot_full_residuals(df_agn, debiased_residuals, flat_samples, cosmo_model, z_pivot_agn, show=False, plot_path=plot_path)
 
     # Example usage:
     # Assuming `samples` is a dict from your MCMC run
     if cosmo_model == 'Flatw0waCDM':
-        rho_w0_wa = posterior_corr(flat_samples, cosmo_model, z_agn_pivot)
-        print(f"Posterior correlation coefficient (w0, wa) at z_p={z_agn_pivot}: {rho_w0_wa:.3f}")
+        rho_w0_wa = posterior_corr(flat_samples, cosmo_model, z_pivot_agn)
+        print(f"Posterior correlation coefficient (w0, wa) at z_p={z_pivot_agn}: {rho_w0_wa:.3f}")
+
+    if cosmo_model == 'Flatw0waCDM':
+        zp = compute_pivot_redshift(flat_samples, cosmo_model)
+        print("Computed pivot redshift: ", zp)
 
     return sampler, flat_samples, model_labels, dmag_corr, logZ, logZerr
 
 
-def run_all(agn_data_filepath, cosmo_model, speed="production", resume=False):
+def run_all(df_agn, cosmo_model, speed="production", resume=False, N=None):
     cosmo_models = ['Flatw0waCDM', 'FlatwCDM']
     cosmo_models_latex = {'Flatw0waCDM': r'Flat$w_0w_a$CDM', 'FlatwCDM': r'Flat$w$CDM'}
     cosmo_models_dict = {k: {} for k in cosmo_models}
-
+    results_latex = []
     for cosmo_model in cosmo_models:
-        _, samples_joint, _, _, logZ_joint, logZerr_joint = run_single(agn_data_filepath, cosmo_model=cosmo_model, only_sna=False, resume=resume, speed=speed)
-        _, samples_sna, _, _, logZ, logZerr = run_single(agn_data_filepath, cosmo_model=cosmo_model, only_sna=True, resume=resume, speed=speed)
+        _, samples_joint, _, _, logZ_joint, logZerr_joint = run_single(df_agn, cosmo_model=cosmo_model, 
+                                                                       only_sna=False, 
+                                                                       resume=resume, 
+                                                                       speed=speed, N=N)
+        _, samples_sna, _, _, logZ_sna, logZerr_sna = run_single(df_agn, cosmo_model=cosmo_model, 
+                                                         only_sna=True, resume=resume, speed=speed, N=N)
 
-        plot_cosmo_corner(samples_sna, samples_joint, cosmo_model, z_agn_pivot, show=False)
+        plot_cosmo_corner(samples_sna, samples_joint, cosmo_model, z_pivot_sna, z_pivot_agn, show=False)
 
         cosmo_models_dict[cosmo_model]['logZ'] = logZ_joint
         cosmo_models_dict[cosmo_model]['logZerr'] = logZerr_joint
+        r_sna   = extract_cosmo_results_from_samples(samples_sna, cosmo_model, True,  
+                                                    logZ_tuple=(logZ_sna, logZerr_sna), format_for_latex=True, value_fmt="{:.2f}")
+        r_joint   = extract_cosmo_results_from_samples(samples_joint, cosmo_model, False,  
+                                                    logZ_tuple=(logZ_joint, logZerr_joint), format_for_latex=True, value_fmt="{:.2f}")
+        results_latex.extend([r_sna, r_joint])
+    print(results_latex)
+    make_cosmo_table_latex(results_latex)
 
 
     logZ_1 = cosmo_models_dict[cosmo_models[0]]['logZ']
@@ -530,6 +549,8 @@ def run_all(agn_data_filepath, cosmo_model, speed="production", resume=False):
                                    model_2_name=model_2_name)
 
 if __name__ == "__main__":
+    #global _sna_LogdetCov, _sna_L, _sna_Lower
+
     parser = argparse.ArgumentParser(description="Run Hubble fit pipeline.", allow_abbrev=True)
     parser.add_argument("agn_data_filepath", type=str, help="Path to AGN data file")
     parser.add_argument("--force_populate_fields", action="store_true", help="Force populate fields")
@@ -539,6 +560,7 @@ if __name__ == "__main__":
     parser.add_argument("--resume", action="store_true", default=False, help="Resume previous MCMC run (default: False)")
     parser.add_argument("--run", type=str, choices=["full", "single"], default="single", help="Run mode: compare_models, compare_sna, full, or single (default: single)")
     parser.add_argument("--speed", type=str, choices=["production", "test", "fast"], default="production", help="Sampling speed: production, test, or fast (default: production)")
+    parser.add_argument("--N", type=int, default=None, help="Number of AGNs to run (default: all)")
     args = parser.parse_args()
 
     if args.disable_full_covariance:
@@ -548,11 +570,14 @@ if __name__ == "__main__":
     if args.resume:
         print("Warning: Resuming previous MCMC run.")
 
+
+    df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data(args.agn_data_filepath, populate_sdss=args.force_populate_fields)
+
     if args.run == "single": # default
-        run_single(agn_data_filepath=args.agn_data_filepath, populate_sdss_fields=args.force_populate_fields, cosmo_model=args.cosmo_model,
+        run_single(df_agn=df_agn, cosmo_model=args.cosmo_model,
              completeness=not args.disable_completeness, use_full_cov=not args.disable_full_covariance, resume=args.resume,
-             speed=args.speed)
+             speed=args.speed, N=args.N, only_sna=True)
     elif args.run == "full":
-        run_all(args.agn_data_filepath, cosmo_model=args.cosmo_model, speed=args.speed, resume=args.resume)
+        run_all(df_agn=df_agn, cosmo_model=args.cosmo_model, speed=args.speed, resume=args.resume, N=args.N)
     
     print(f"Finished running Hubble fit pipeline for {args.cosmo_model} with only SNIa={args.run}.")

@@ -16,7 +16,7 @@ import warnings
 from scipy import stats
 from scipy.stats import norm, sigmaclip, multivariate_normal
 from scipy.interpolate import RegularGridInterpolator
-import arviz as az
+
 from dynesty.utils import resample_equal
 from hubble_model import get_model_params, M_model_agn, M_model_agn_err, M_model_SN
 from scipy.linalg import cho_factor, cho_solve, eigh
@@ -606,22 +606,20 @@ def load_quasar_data(file_path, populate_sdss=False, apply_cut=True, first=None)
             populate_sdss_fields(quasar_list)
             write_hdf5_file(quasar_list, file_path)
             break
+    for q in quasar_list:
+        for i, b in enumerate(['u', 'g', 'r', 'i', 'z']):
+            q[f'mags_mean_{b}'] = q['mags_means'][i]
+        del q['mags_means']
 
     df = pd.DataFrame(quasar_list)
 
     
     df = populate_chi_sq_from_csv(df)
 
-    #df = calculate_all_alpha_nu(df)
     df['alpha_nu'] = -0.5  # Default value
     df['alpha_nu_err'] = 0.1  # Default error
-    #df['MY_LOGL2500'], df['MY_LOGL2500_ERR'] = compute_MY_LOGL2500(df)
-    
 
-    # df = compute_apparent_mag_2500(df, logL_col='LOGL2500', logL_err_col='LOGL2500_ERR')
-    # df['alpha_lambda'] = -1.5
-    # df['redchi'] = 1.0
-    df = compute_apparent_mag_2500_colin(df)
+    #df = compute_apparent_mag_2500_colin(df)
 
     num_quasars_z_0_1_before = len(df[(df['z'] > 0) & (df['z'] <= 1.0)])
     num_quasars_z_gt_3_before = len(df[df['z'] > 3])
@@ -647,6 +645,8 @@ def load_quasar_data(file_path, populate_sdss=False, apply_cut=True, first=None)
     # Define cuts as (column, lower_limit, upper_limit)
     cuts = [
         #('f_host', None, 0.6),
+        ('z', None, 3.0),
+        ('log_tau_UV_RF', 1.5, None),
         ('alpha_lambda', None, 0),
         ('redchi', None, 10),
         ('apparent_mag_2500', 1, 40),
@@ -682,10 +682,10 @@ def load_quasar_data(file_path, populate_sdss=False, apply_cut=True, first=None)
     print("Final number of quasars:", len(df))
     return df
 
-def load_data(file_path, populate_sdss=False):
+def load_data(file_path, populate_sdss=False, apply_cut=True):
     print("Loading quasar data...")
     #df_agn = load_quasar_data("data/may12_objs_tauwavelength_taublr_redbands_ds4_merged.h5")
-    df_agn = load_quasar_data(file_path=file_path, populate_sdss=populate_sdss)
+    df_agn = load_quasar_data(file_path=file_path, populate_sdss=populate_sdss, apply_cut=apply_cut)
     # Return 200 randomly sampled AGNs for speed
     #df_agn = df_agn.sample(n=500, random_state=42).reset_index(drop=True)
 
@@ -876,129 +876,199 @@ def write_hdf5_file(quasar_list, file_path):
                 else:
                     group.attrs[key] = value
 
-def generate_cosmo_table_latex(results, filename="plots/hubble/table.tex"):
+from collections import defaultdict
+import os
+
+def make_cosmo_table_latex(
+    results,
+    *,
+    include_threeparttable=True,
+    include_lnZ=True,
+    caption="Marginalized Cosmological Parameters and Bayesian Evidence",
+    label="tab:cosmoparams",
+    value_fmt="{:.3f}",
+    write_path="plots/hubble/table.tex"
+):
     """
-    Generate a transposed LaTeX table with merged model headers (booktabs style),
-    and an H0 units footnote using tablefootnote (no threeparttable).
+    Build the LaTeX table string using exact keys: H0, Om0, w0, wa.
+    results: list[dict] with keys: 'model', 'data', 'params', 'logZ'.
     """
-    from collections import OrderedDict
-    import os
 
-    def fmt_pm(val, err, vfmt="{:.3f}", efmt="{:.3f}", signed=False):
-        v = vfmt.format(val)
-        e = efmt.format(err)
-        if signed:
-            v = "{:+}".format(float(v))
-        return f"${v} \\pm {e}$"
+    # ---------- local helpers (simple formatting only) ----------
+    def _fmt_val(v):
+        """Format v which can be a LaTeX string, a (mean,std) tuple, or None."""
+        if v is None:
+            return r"--"
+        if isinstance(v, str):
+            return v
+        if isinstance(v, (tuple, list)) and len(v) == 2:
+            m, s = v
+            return rf"${value_fmt.format(m)} \pm {value_fmt.format(s)}$"
+        return str(v)
 
-    def fmt_pm_sig(val, err, vfmt, efmt, signed=False):
-        return fmt_pm(val, err, vfmt=vfmt, efmt=efmt, signed=signed)
+    def _fmt_logZ(d):
+        if not d:
+            return r"--"
+        return rf"${d['value']:.1f} \pm {d['err']:.1f}$"
 
-    def sanitize_dataset_label(ds):
-        s = ds.replace("SN Ia", "SN~Ia")
-        s = (s.replace("SN~Ia + AGN", "SN~Ia+AGN")
-               .replace("SN~Ia+ AGN", "SN~Ia+AGN")
-               .replace("SN~Ia +AGN", "SN~Ia+AGN"))
-        return s
+    # ---------- columns (fixed) ----------
+    col_keys   = ["H0", "Om0", "w0", "wa"]
+    col_labels = {
+        "H0":  r"$H_0$\tnote{a}",
+        "Om0": r"$\Omega_m$",
+        "w0":  r"$w_0$",
+        "wa":  r"$w_a$",
+    }
 
-    # Group results by model, preserving input order
-    model_to_datasets = OrderedDict()
-    md_map = {}
+    # ---------- model order ----------
+    model_order = [r"Flat $\Lambda$CDM", r"Flat$w$CDM", r"Flat$w_0w_a$CDM"]
+
+    # ---------- external rows (use w0, not w) ----------
+    external_rows = {
+        r"Flat $\Lambda$CDM": [
+            {
+                "data": r"Pantheon+ \& SH0ES",
+                "params": {
+                    "H0": r"$73.6 \pm 1.1$",
+                    "Om0": r"$0.334 \pm 0.018$",
+                    "w0": r"$-1$ (fixed)",
+                    "wa": r"--",
+                },
+                "logZ": None,
+            },
+            {
+                "data": r"DES-SN5YR",
+                "params": {
+                    "H0": r"--",
+                    "Om0": r"$0.352 \pm 0.017$",
+                    "w0": r"$-1$ (fixed)",
+                    "wa": r"--",
+                },
+                "logZ": None,
+            },
+        ],
+        r"Flat$w$CDM": [
+            {
+                "data": r"Pantheon+ \& SH0ES",
+                "params": {
+                    "H0": r"$73.5 \pm 1.1$",
+                    "Om0": r"$0.309^{+0.063}_{-0.069}$",
+                    "w0": r"$-0.90 \pm 0.14$",
+                    "wa": r"--",
+                },
+                "logZ": None,
+            },
+            {
+                "data": r"DES-SN5YR",
+                "params": {
+                    "H0": r"--",
+                    "Om0": r"$0.264^{+0.074}_{-0.096}$",
+                    "w0": r"$-0.80^{+0.14}_{-0.16}$",
+                    "wa": r"--",
+                },
+                "logZ": None,
+            },
+        ],
+        r"Flat$w_0w_a$CDM": [
+            {
+                "data": r"Pantheon+ \& SH0ES",
+                "params": {
+                    "H0": r"$73.3 \pm 1.1$",
+                    "Om0": r"$0.403^{+0.054}_{-0.098}$",
+                    "w0": r"$-0.93 \pm 0.15$",
+                    "wa": r"$-0.1^{+0.9}_{-2.0}$",
+                },
+                "logZ": None,
+            },
+            {
+                "data": r"DES-SN5YR",
+                "params": {
+                    "H0": r"--",
+                    "Om0": r"$0.495^{+0.033}_{-0.043}$",
+                    "w0": r"$-0.36^{+0.36}_{-0.30}$",
+                    "wa": r"$-8.8^{+3.7}_{-4.5}$",
+                },
+                "logZ": None,
+            },
+        ],
+    }
+
+    # ---------- group results by model and prepend external rows ----------
+    by_model = defaultdict(list)
     for r in results:
-        model = r["model"]
-        data = sanitize_dataset_label(r["data"])
-        md_map[(model, data)] = r
-        model_to_datasets.setdefault(model, [])
-        if data not in model_to_datasets[model]:
-            model_to_datasets[model].append(data)
+        by_model[r["model"]].append(r)
 
-    total_cols = 1 + sum(len(v) for v in model_to_datasets.values())
-    colspec = "l" + "c" * (total_cols - 1)
+    for m in model_order:
+        if m not in by_model:
+            by_model[m] = []
+        for row in external_rows.get(m, []):
+            by_model[m].insert(0, {
+                "model": m,
+                "data": row["data"],
+                "params": row["params"],
+                "logZ": row.get("logZ"),
+            })
 
+    # ---------- build LaTeX ----------
     lines = []
-    lines.append("\\begin{table}")
-    lines.append("\\centering")
-    lines.append("\\setlength{\\tabcolsep}{4pt} % reduce column spacing")
-    lines.append("\\caption{Marginalized Cosmological Parameters and Bayesian Evidence}")
-    lines.append("\\label{tab:cosmoparams}")
-    lines.append(f"\\begin{{tabular}}{{{colspec}}}")
-    lines.append("\\toprule")
+    lines.append(r"\begin{table}")
+    lines.append(r"\centering")
+    lines.append(r"\setlength{\tabcolsep}{4pt} % compact spacing")
+    if include_threeparttable:
+        lines.append(r"\begin{threeparttable}")
+    lines.append(rf"\caption{{{caption}}}")
+    lines.append(rf"\label{{{label}}}")
 
-    # Header row 1: merged model names
-    header_row1 = [""]
-    for model, dsets in model_to_datasets.items():
-        header_row1.append(f"\\multicolumn{{{len(dsets)}}}{{c}}{{{model}}}")
-    lines.append(" & ".join(header_row1) + " \\\\")
-    # cmidrules
-    start_col = 2
-    cmr = []
-    for _, dsets in model_to_datasets.items():
-        end_col = start_col + len(dsets) - 1
-        cmr.append(f"\\cmidrule(lr){{{start_col}-{end_col}}}")
-        start_col = end_col + 1
-    lines.append("".join(cmr))
-    # Header row 2: dataset labels
-    header_row2 = [""]
-    for _, dsets in model_to_datasets.items():
-        header_row2.extend(dsets)
-    lines.append(" & ".join(header_row2) + " \\\\")
-    lines.append("\\midrule")
+    ncols = 1 + len(col_keys) + (1 if include_lnZ else 0)  # Dataset + params + optional lnZ
+    lines.append(r"\begin{tabular}{" + "l" + "c" * (ncols - 1) + "}")
+    lines.append(r"\toprule")
 
-    # Row: H0 with table footnote marker
-    row = ["$H_0$\\tablefootnote{Units: km s$^{-1}$ Mpc$^{-1}$.}"]
-    for model, dsets in model_to_datasets.items():
-        for ds in dsets:
-            res = md_map.get((model, ds))
-            row.append(fmt_pm_sig(*res["H0"], vfmt="{:.1f}", efmt="{:.1f}") if res and res.get("H0") else "--")
-    lines.append(" & ".join(row) + " \\\\")
+    header = ["Dataset"] + [col_labels[k] for k in col_keys]
+    if include_lnZ:
+        header.append(r"$\ln \mathcal{Z}$")
+    lines.append(" & ".join(header) + r" \\")
+    lines.append(r"\midrule")
 
-    # Row: Omega_m
-    row = ["$\\Omega_m$"]
-    for model, dsets in model_to_datasets.items():
-        for ds in dsets:
-            res = md_map.get((model, ds))
-            row.append(fmt_pm_sig(*res["Om0"], vfmt="{:.3f}", efmt="{:.3f}") if res and res.get("Om0") else "--")
-    lines.append(" & ".join(row) + " \\\\")
+    row_order = [r"Pantheon+ \& SH0ES", r"DES-SN5YR", r"SN~Ia", r"SN~Ia + AGN"]
 
-    # Row: w/w0
-    row = ["$w/w_0$"]
-    for model, dsets in model_to_datasets.items():
-        for ds in dsets:
-            res = md_map.get((model, ds))
-            row.append(fmt_pm_sig(*res["w0"], vfmt="{:+.2f}", efmt="{:.2f}") if res and res.get("w0") else "--")
-    lines.append(" & ".join(row) + " \\\\")
+    for model in model_order:
+        rows = by_model.get(model, [])
+        if not rows:
+            continue
+        lines.append(rf"\multicolumn{{{ncols}}}{{l}}{{\textbf{{{model}}}}} \\")
+        rows = sorted(rows, key=lambda d: row_order.index(d["data"]) if d["data"] in row_order else 999)
 
-    # Row: wa
-    row = ["$w_a$"]
-    for model, dsets in model_to_datasets.items():
-        for ds in dsets:
-            res = md_map.get((model, ds))
-            if res is None or res.get("wa") in (None,):
-                row.append("--")
-            else:
-                row.append(fmt_pm_sig(*res["wa"], vfmt="{:+.1f}", efmt="{:.1f}"))
-    lines.append(" & ".join(row) + " \\\\")
+        for r in rows:
+            ds = r["data"]
+            params = r.get("params", {})
+            cells = [ds] + [_fmt_val(params.get(k)) for k in col_keys]
+            if include_lnZ:
+                cells.append(_fmt_logZ(r.get("logZ")))
+            lines.append(" & ".join(cells) + r" \\")
+        lines.append(r"\midrule")
 
-    # Row: logZ
-    row = ["$\\ln \\mathcal{Z}$"]
-    for model, dsets in model_to_datasets.items():
-        for ds in dsets:
-            res = md_map.get((model, ds))
-            if res is None or res.get("logZ") in (None,):
-                row.append("--")
-            else:
-                row.append(fmt_pm_sig(*res["logZ"], vfmt="{:.1f}", efmt="{:.1f}"))
-    lines.append(" & ".join(row) + " \\\\")
+    if lines[-1] == r"\midrule":
+        lines.pop()
 
-    lines.append("\\bottomrule")
-    lines.append("\\end{tabular}")
-    lines.append("\\end{table}")
+    lines.append(r"\bottomrule")
+    lines.append(r"\end{tabular}")
 
-    latex_table = "\n".join(lines)
-    os.makedirs(os.path.dirname(filename), exist_ok=True)
-    with open(filename, "w") as f:
-        f.write(latex_table)
-    print(f"LaTeX table written to: {filename}")
+    if include_threeparttable:
+        lines.append(r"\begin{tablenotes}")
+        lines.append(r"\item[a] Units: km s$^{-1}$ Mpc$^{-1}$.")
+        lines.append(r"\end{tablenotes}")
+        lines.append(r"\end{threeparttable}")
+
+    lines.append(r"\end{table}")
+
+    latex_str = "\n".join(lines)
+
+    # write to file
+    os.makedirs(os.path.dirname(write_path), exist_ok=True)
+    with open(write_path, "w") as f:
+        f.write(latex_str)
+
+    return latex_str
 
 
 import numpy as np
@@ -1086,11 +1156,11 @@ def extract_cosmo_results_from_samples(
         "logZ": logZ_out,
     }
 
-def display_results_summary(samples, cosmo_model, z_agn_pivot):
+def display_results_summary(samples, cosmo_model, z_pivot_agn):
     """
     Print median and 16/84% intervals for sampled params, plus derived w0 (and wa)
     when applicable. If cosmo_model == 'Flatw0waCDM', w0 is computed from (wp, wa)
-    at the supplied z_agn_pivot.
+    at the supplied z_pivot_agn.
     """
     _, model_labels, _ = get_model_params(cosmo_model)
     samples = np.asarray(samples)
@@ -1117,7 +1187,7 @@ def display_results_summary(samples, cosmo_model, z_agn_pivot):
         if i_wp is None or i_wa is None:
             return  # nothing to do
 
-        a_p = 1.0 / (1.0 + float(z_agn_pivot))
+        a_p = 1.0 / (1.0 + float(z_pivot_agn))
         wp  = samples[:, i_wp]
         wa  = samples[:, i_wa]
         w0  = wp - (1.0 - a_p) * wa
@@ -1402,7 +1472,7 @@ def apply_forward_completeness_correction(df_agn, params, cosmo_model, completen
     
     if cosmo_model == 'Flatw0waCDM':
         #cosmo = Flatw0waCDM(H0=params['H0'], Om0=params['Om0'], w0=params['w0'], wa=params['wa'])
-        cosmo = FlatwpwaCDM(H0=params['H0'], Om0=params['Om0'], wp=params['wp'], wa=params['wa'], zp=z_agn_pivot)
+        cosmo = FlatwpwaCDM(H0=params['H0'], Om0=params['Om0'], wp=params['wp'], wa=params['wa'], zp=z_pivot_agn)
     elif cosmo_model == 'FlatwCDM':
         cosmo = FlatwCDM(H0=params['H0'], Om0=params['Om0'], w0=params['w0'])
     elif cosmo_model == 'FlatLambdaCDM':
@@ -1467,7 +1537,7 @@ def compute_pivot_redshift(flat_samples, cosmo_model, z_min=0.0, z_max=4.0):
 
     # Current pivot; default z_p=0 -> a_p=1
     z_p_current = None
-    for k in ('zp', 'z_p', 'z_agn_pivot', 'z_pivot'):
+    for k in ('zp', 'z_p', 'z_pivot_agn', 'z_pivot'):
         if k in priors:
             z_p_current = priors[k] if np.isscalar(priors[k]) else float(priors[k])
             break
@@ -1501,7 +1571,7 @@ def compute_pivot_redshift(flat_samples, cosmo_model, z_min=0.0, z_max=4.0):
 
 import numpy as np
 
-def posterior_corr(flat_samples, cosmo_model, z_agn_pivot):
+def posterior_corr(flat_samples, cosmo_model, z_pivot_agn):
     """
     Pearson correlation between posterior w0 and wa.
 
@@ -1514,7 +1584,7 @@ def posterior_corr(flat_samples, cosmo_model, z_agn_pivot):
         Flattened MCMC samples: N total draws by P parameters.
     cosmo_model : str
         Cosmological model string.
-    z_agn_pivot : float, optional
+    z_pivot_agn : float, optional
         Pivot redshift to compute w0 from wp, wa for Flatw0waCDM.
 
     Returns
@@ -1534,7 +1604,7 @@ def posterior_corr(flat_samples, cosmo_model, z_agn_pivot):
     if cosmo_model == "Flatw0waCDM":
         i_wp = _idx(model_labels, "wp", "w_p")
         i_wa = _idx(model_labels, "wa", "w_a")
-        a_p = 1.0 / (1.0 + float(z_agn_pivot))
+        a_p = 1.0 / (1.0 + float(z_pivot_agn))
         wp = flat_samples[:, i_wp]
         wa = flat_samples[:, i_wa]
         w0 = wp - (1.0 - a_p) * wa
