@@ -502,8 +502,9 @@ def run_qsofit_record(rec, cache_dir="data/spectra_cache", path_ex="data/"):
 
             filt_i = filters.load_filter('sdss2010-i')
             host_contr = q_mle.host if q_mle.decompose_host else 0.0
-            lam = q_mle.wave * (1 + z)
-            apparent_mag_i_obs = filt_i.get_ab_magnitude(1e-17*(q_mle.flux - host_contr)*u.erg/u.s/u.cm**2/u.AA, lam*u.AA)
+            lam_obs = q_mle.wave * (1 + z)
+            f_lam_obs = (q_mle.flux - host_contr) / (1.0 + z)
+            apparent_mag_i_obs = filt_i.get_ab_magnitude(1e-17*f_lam_obs*u.erg/u.s/u.cm**2/u.AA, lam_obs*u.AA)
             K_i = 2.5*(alpha_lambda + 1.0)*np.log10(1.0 + z)
             apparent_mag_i_rest = apparent_mag_i_obs - K_i
         except Exception as e:
