@@ -470,9 +470,9 @@ def populate_sdss_fields(objs, progress_bar=True):
         d['fhost'] = fits_data['FHOST_5100'][i]
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
-            for b in ['u', 'g', 'r', 'i', 'z']:
-                d[f'apparent_mag_{b}'] = -2.5 * np.log10(fits_data_2['PSFFLUX'][i, filters[b]]) + 22.5
-                d[f'apparent_mag_{b}_err'] = 2.5/np.log(10) * np.sqrt(1/fits_data_2['PSFFLUX_IVAR'][i, filters[b]])/fits_data_2['PSFFLUX'][i, filters[b]]
+            # for b in ['u', 'g', 'r', 'i', 'z']:
+            #     d[f'apparent_mag_{b}'] = -2.5 * np.log10(fits_data_2['PSFFLUX'][i, filters[b]]) + 22.5
+            #     d[f'apparent_mag_{b}_err'] = 2.5/np.log(10) * np.sqrt(1/fits_data_2['PSFFLUX_IVAR'][i, filters[b]])/fits_data_2['PSFFLUX'][i, filters[b]]
             # #     d[f'extinction_{b}'] = fits_data_2['EXTINCTION'][i, filters[b]]
             # d['color'] = -2.5 * np.log10(fits_data_2['PSFFLUX'][i, 0] / fits_data_2['PSFFLUX'][i, 3])
             # # Error propagation for color
