@@ -270,7 +270,7 @@ def run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model='Flatw0waCDM',
         'only_sna': only_sna,
         'use_full_cov': use_full_cov,
     })
-    checkpoint_folder = 'results/hubble'
+    checkpoint_folder = f'results/hubble/{prefix}'
     if not os.path.exists(checkpoint_folder):
         os.makedirs(checkpoint_folder)
     checkpoint_file = os.path.join(checkpoint_folder, 
