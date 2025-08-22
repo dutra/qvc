@@ -1,6 +1,6 @@
 import os
 
-env_cores = os.environ.get("NUM_CORES")
+#env_cores = 5
 
 if env_cores is not None:
         try:
@@ -144,7 +144,8 @@ def build_model(batch_data, zs, f_host_value, lam_rfs, log_jitter_mean, f_host_s
                 # BLR amplitudes and lags
                 log_amp_delta_blr = numpyro.sample("log_amp_delta_blr", dist.Normal(jnp.full(nBands, -1.0), 1.0))
                 log_lag_blr = numpyro.sample("log_lag_blr", dist.Normal(log_lab_blr_c[..., None], 3.0))
-                #log_lag_blr = numpyro.deterministic("log_lag_blr", jnp.zeros_like(mean))
+                #width_blr = numpyro.sample("width_blr", dist.TruncatedNormal(jnp.full(nBands, 10), 100.0, low=1.0))
+                width_blr = numpyro.deterministic("width_blr", jnp.zeros_like(mean))
 
                 # Jitter
                 log_jitter = numpyro.sample("log_jitter", dist.Normal(log_jitter_mean, 1.0))
@@ -165,6 +166,7 @@ def build_model(batch_data, zs, f_host_value, lam_rfs, log_jitter_mean, f_host_s
                 "lag_beta": lag_beta[i],
                 "bwb_alpha": bwb_alpha[i],
                 "bwb_beta": bwb_beta[i],
+                "width_blr": width_blr[i],
                 # power law
                 "eta_A1": eta_A1[i],
                 "eta_A2": eta_A2[i],
@@ -326,11 +328,9 @@ if __name__ == '__main__':
     parser.add_argument("--lc_file", type=str, help="Path to the light curve file.")
     parser.add_argument("--filter_file", type=str, help="Path to the file containing object IDs to filter.")
     parser.add_argument("--plot", action="store_true", help="Enable plotting of results.")
-    parser.add_argument("--svi", action="store_true", help="Use stochastic variation inference (SVI).")
     parser.add_argument("--ignore_existing", action="store_true", help="Ignore sources already in the HDF5 file.")
     parser.add_argument("--create_lc", action="store_true", help="Only create LC file and exit.")
     parser.add_argument("--progress", action="store_true", help="Show progress bar.")
-    parser.add_argument("--cpu", action="store_true", help="Use CPU.")
     parser.add_argument("--nwarm", type=int, default=500, help="Number of warmup steps for MCMC.")
     parser.add_argument("--nsamp", type=int, default=250, help="Number of samples for MCMC.")
     parser.add_argument("--nchains", type=int, default=-1, help="Number of chains for MCMC.")
@@ -349,8 +349,6 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
     print("Args: ", args)
-
-    check_64bit(gpu=not bool(args.cpu))
 
     if args.create_lc:
         objs = concat_light_curves(save_file_path=args.lc_file, progress_bar=args.progress)
@@ -518,14 +516,10 @@ if __name__ == '__main__':
         # Add the object-specific parameters
         result = process_samples(obj_flat_samples_flatten_per_band, obj)
 
-        #samples_grouped = mcmc.get_samples(group_by_chain=True)
-        #samples_grouped_cleaned = clean_grouped_samples(samples_grouped)
-        #rhat_ess = compute_rhat_ess_dict(samples_grouped_cleaned)
-
         # Plotting
         if args.plot:
             plot_mcmc_traces(obj_flat_samples_flatten_per_band, obj)
-            plot_posterior(obj_flat_samples_flatten_per_band, obj)
+            #plot_posterior(obj_flat_samples_flatten_per_band, obj)
 
             m = Model(
                 obj['X'], obj['y'], obj['yerr'], 

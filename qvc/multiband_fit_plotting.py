@@ -7,6 +7,8 @@ import os
 import re
 import jax.numpy as jnp
 
+from astropy.timeseries import LombScargle
+
 prefix = os.environ.get('PREFIX', "test")
 suffix = os.environ.get('SUFFIX', "test")
 
@@ -170,6 +172,118 @@ def plot_broken_power_law(samples, data):
     fig.savefig(fpath, dpi=200)
     plt.close(fig)
 
+import numpy as np
+
+def combined_lomb_scargle_from_model(
+    model,
+    params: dict,
+    omega: np.ndarray,
+    *,
+    bins_per_decade: int = 2,
+    min_per_bin: int = 1,
+    normalization: str = "psd",
+):
+    """
+    Compute Lomb–Scargle PSD from a MyMultiVarModel, using a provided
+    angular frequency grid (omega, in rad / time-unit).
+    
+    Steps:
+      - lag-subtract (my_lag_transform)
+      - mean-subtract (mean_func)
+      - normalize amplitudes to band 0 scale (my_amp_transform)
+      - Lomb–Scargle combining all bands
+      - log-bin in frequency space
+
+    Parameters
+    ----------
+    model : MyMultiVarModel
+    params : dict
+        Parameter dictionary.
+    omega : array
+        Angular frequencies [rad / time-unit].
+    bins_per_decade : int
+        Number of log-frequency bins per decade.
+    min_per_bin : int
+        Minimum raw samples per bin.
+    normalization : str
+        LS normalization (default "psd").
+
+    Returns
+    -------
+    dict with keys:
+      "omega" : input angular frequencies
+      "f_raw" : frequencies in cycles/time-unit
+      "P_raw" : raw LS power
+      "f_bin","P_bin","P_lo","P_hi","bin_counts"
+    """
+    # --- Convert omega -> frequency grid
+    omega = np.asarray(omega, float)
+    f_raw = omega / (2.0 * np.pi)
+
+    # --- Lag subtraction
+    (t_lag, band_idx), _ = model.my_lag_transform(model.X, model.has_lag, params)
+    t_lag = np.asarray(t_lag, float)
+    band_idx = np.asarray(band_idx, int)
+
+    # --- Mean subtraction via mean_func
+    t_center = float(np.mean(t_lag))
+    t_std = float(np.std(t_lag))
+    mean_vals = model.mean_func(
+        model.zero_mean,
+        int(np.max(band_idx)) + 1,
+        t_center,
+        t_std,
+        params,
+        (t_lag, band_idx),
+    )
+    y = np.asarray(model.y, float).copy() - np.asarray(mean_vals, float)
+    yerr = np.asarray(model.yerr, float).copy()
+
+    # --- Normalize amplitudes to band 0 scale
+    log_sigma_band = np.asarray(model.my_amp_transform(params))
+    s0 = float(np.exp(log_sigma_band[0]))
+    s_b = np.exp(log_sigma_band)
+    scale = s0 / s_b[band_idx]
+    y *= scale
+
+    # Sort by time (optional, not required for LS)
+    order = np.argsort(t_lag)
+    t_lag, y = t_lag[order], y[order]
+    yerr *= scale
+    yerr = yerr[order]
+
+    # --- Lomb–Scargle
+    ls = LombScargle(t_lag, y, yerr)
+    P_raw = ls.power(f_raw, normalization=normalization)
+
+    hf_sel = (f_raw > 1/20.0)
+    P_noise = np.nanmedian(P_raw[hf_sel])
+    print("P_noise:", P_noise)
+    P_raw = np.maximum(P_raw - P_noise, 0.0)  # keep non-negative
+
+    # --- Log-binning in f
+    fmin, fmax = np.min(f_raw), np.max(f_raw)
+    decades = np.log10(fmax) - np.log10(fmin)
+    n_bins = int(np.ceil(bins_per_decade * decades))
+    edges = np.logspace(np.log10(fmin), np.log10(fmax), n_bins + 1)
+
+    which = np.digitize(f_raw, edges) - 1
+    f_bin, P_bin, P_lo, P_hi, counts = [], [], [], [], []
+    for k in range(n_bins):
+        sel = (which == k)
+        if np.count_nonzero(sel) >= min_per_bin:
+            f_chunk = f_raw[sel]
+            P_chunk = P_raw[sel]
+            f_center = 10.0 ** (np.mean(np.log10(f_chunk)))
+            f_bin.append(f_center)
+            P_bin.append(np.median(P_chunk))
+            P_lo.append(np.percentile(P_chunk, 16))
+            P_hi.append(np.percentile(P_chunk, 84))
+            counts.append(np.count_nonzero(sel))
+
+    return np.array(f_bin), np.array(P_bin), np.array(P_lo), np.array(P_hi), np.array(counts)
+
+
 def save_combined_plot(samples, model, X, y, yerr, band_idx, data, psd_results=None):
     logging.info("Saving combined plot")
 
@@ -214,43 +328,39 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, data, psd_results=N
             ax_lc.fill_between(t_test, mu + offsets[n] - std, mu + offsets[n] + std, alpha=0.3,
                                lw=0.5, color=colors[band_idx_map[n]])
 
+    # Ensure all elements of posterior_median are jnp arrays
+    for k in posterior_median:
+        posterior_median[k] = jnp.array(posterior_median[k])
 
-        # --- PSD calculation and plotting ---
-        # Remove offset for PSD calculation
-        y_band = y[m]
-        t_band = t[m]
-        # Remove NaNs
-        mask = np.isfinite(y_band) & np.isfinite(t_band)
-        if np.sum(mask) > 5:
-            # Data PSD
-            from astropy.timeseries import LombScargle
-            freqs = np.logspace(-4, -1, 250)
-            psd = LombScargle(t_band[mask], y_band[mask]).power(freqs, normalization='psd')
-            # Estimate the noise level (mean of error bars squared)
-            noise_var = np.mean(yerr[m][mask] ** 2) #+ np.exp(2 * np.median(samples['log_jitter'], axis=0))[n]
-            # The Lomb-Scargle normalization is in mag^2/days, so subtract noise variance
-            psd = np.clip(psd - noise_var, a_min=1e-10, a_max=None)
-            # Bin the PSD in log-frequency space and plot it
-            num_bins = 15
-            log_freq_bins = np.logspace(np.log10(freqs.min()), np.log10(freqs.max()), num_bins + 1)
-            bin_centers = 10 ** (0.5 * (np.log10(log_freq_bins[:-1]) + np.log10(log_freq_bins[1:])))
-            psd_binned = np.zeros(num_bins)
-            for i in range(num_bins):
-                in_bin = (freqs >= log_freq_bins[i]) & (freqs < log_freq_bins[i + 1])
-                if np.any(in_bin):
-                    psd_binned[i] = np.median(psd[in_bin])
-                else:
-                    psd_binned[i] = np.nan
-            ax_psd.plot(bin_centers, psd_binned, marker='o', ls='', color=colors[band_idx_map[n]], label=f"{band_idx_map[n]}-band (binned)", markersize=6, alpha=0.8)
-            
-        
-        # Model PSD
-        if psd_results is not None:
-            band = band_idx_map[n]
-            result = psd_results[band].items()
-            freqs = psd_results[band]["freqs"]
-            psd = psd_results[band]["psd"]
-            ax_psd.plot(freqs, psd, label=f"{band}-band", color=colors.get(band, "black"), lw=2)
+    # PSD calculation and plotting
+    freqs = np.logspace(-6, -1, 250)
+
+    # Data PSD
+    f_bin, P_bin, P_lo, P_hi, cts = combined_lomb_scargle_from_model(model, posterior_median, 2*np.pi*freqs)
+    ax_psd.errorbar(f_bin, P_bin, yerr=[P_bin - P_lo, P_hi - P_bin], label="Lomb-Scargle PSD", lw=4, color='k')
+
+    # Plot a vertical line at the posterior median log_tau_drw0 (if present)
+    # TODO: log_tau_eff = model.my_tau_drw_transform(posterior_median)  # scalar
+    tau = jnp.exp(posterior_median['log_tau_drw0']) # obs frame
+    tau_lo = jnp.exp(jnp.percentile(samples['log_tau_drw0'], 16))
+    tau_hi = jnp.exp(jnp.percentile(samples['log_tau_drw0'], 84))
+    ax_psd.axvspan(1.0 / (2*np.pi*tau_hi), 1.0 / (2*np.pi*tau_lo), color='r', alpha=0.15)
+    ax_psd.axvline(1.0 / (2*np.pi*tau), color='r', linestyle='--', lw=1.5, alpha=0.7, label=r"$1/\tau_{\mathrm{DRW}}$")
+
+    # Model PSD
+    # Compute model PSD for each posterior sample and plot the median and 16/84 percentiles
+    psd_samples = []
+    for i in range(len(samples['log_tau_drw0'])):
+        sample_params = {k: jnp.array(v[i]) for k, v in samples.items()}
+        psd_i = model.psd(sample_params, 2 * np.pi * freqs, b=0, sigma_n2=0.0)
+        psd_samples.append(np.asarray(psd_i))
+    psd_samples = np.stack(psd_samples, axis=0)
+    psd_median = np.median(psd_samples, axis=0)
+    psd_lo = np.percentile(psd_samples, 16, axis=0)
+    psd_hi = np.percentile(psd_samples, 84, axis=0)
+
+    ax_psd.plot(freqs, psd_median, lw=2, color='m', alpha=0.8, label="Model PSD")
+    ax_psd.fill_between(freqs, psd_lo, psd_hi, color='m', alpha=0.2)
     
     ax_lc.set_xlabel('MJD')
     ax_lc.set_ylabel('Magnitude + arbitrary offset')
@@ -271,13 +381,13 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, data, psd_results=N
     ref_psd4 = ref_freqs**-4
     # Normalize the reference line to match the PSD at the median frequency
     median_freq = 1e-2
-    median_psd = np.interp(median_freq, freqs, psd)
+    median_psd = np.interp(median_freq, freqs, psd_median)
     ref_psd2 *= median_psd / np.interp(median_freq, ref_freqs, ref_psd2)
     ref_psd4 *= median_psd / np.interp(median_freq, ref_freqs, ref_psd4)
     ax_psd.plot(ref_freqs, 10*ref_psd2, 'k--', label="-2")
     ax_psd.plot(ref_freqs, 10*ref_psd4, 'k:', label="-4")
-    ax_psd.set_ylim(1e-5, 1e2)
-    ax_psd.set_xlim(1e-4, 1e-1)
+    ax_psd.set_ylim(1e-3, 1e4)
+    ax_psd.set_xlim(1e-6, 1e-1)
 
     plt.tight_layout()
 

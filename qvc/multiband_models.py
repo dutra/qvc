@@ -33,17 +33,15 @@ import jax.numpy as jnp
 from typing import Sequence
 import tinygp
 from tinygp.kernels import quasisep as qs
-from tinygp.solvers.quasisep.core import SymmQSM  # (only if you want to inspect QSMs)
 
 class ContiBLRQS(qs.Wrapper):
     """
     Quasi-separable implementation of:
-        cov = A_b1 A_b2 k(τ)
-            + A_b1 A_blr_b2 k(τ - Δ_b2)
-            + A_blr_b1 A_b2 k(τ + Δ_b1)
-            + A_blr_b1 A_blr_b2 k(τ - (Δ_b2 - Δ_b1))
+    cov = A_b1 A_b2 k(τ)
+            + A_b1 A_blr_b2 (k * TopHat_{Δ_b2,w_b2})(τ)
+            + A_blr_b1 A_b2 (k * TopHat_{Δ_b1,w_b1})(-τ)
+            + A_blr_b1 A_blr_b2 (k * TopHat_{Δ_b1,w_b1} * TopHat_{Δ_b2,w_b2})(τ)
             + 2 q_b1 q_b2 [k(τ)]^2,
-    with q_b = s_b[b] * (A_b)^2.
 
     Parameters
     ----------
@@ -61,19 +59,21 @@ class ContiBLRQS(qs.Wrapper):
     """
 
     tau_drw: float
+    width_blr: jnp.ndarray
     amp_cont: jnp.ndarray
     amp_blr: jnp.ndarray
     lag_blr: jnp.ndarray
     bwb_alpha: jnp.ndarray
     bwb_beta: jnp.ndarray
 
-    def __init__(self, amp_cont, amp_blr, lag_blr, tau_drw, bwb_alpha, bwb_beta) -> None:
+    def __init__(self, amp_cont, amp_blr, lag_blr, tau_drw, bwb_alpha, bwb_beta, width_blr) -> None:
         self.amp_cont = amp_cont
         self.amp_blr = amp_blr
         self.lag_blr = lag_blr
         self.tau_drw = tau_drw
         self.bwb_alpha = bwb_alpha
         self.bwb_beta = bwb_beta
+        self.width_blr = width_blr
         self.kernel = qs.Exp(scale=self.tau_drw, sigma=1.0)
 
     def coord_to_sortable(self, X) -> JAXArray:
@@ -130,6 +130,12 @@ class ContiBLRQS(qs.Wrapper):
         return jnp.block([[Phi0, z01],
                           [z10, Phi1]])
 
+    def _tophat_factor(self, b: int) -> JAXArray:
+        x = self.width_blr[b] / (2.0 * self.tau_drw)
+        # series for small x: 1 + x^2/6 + x^4/120
+        small = 1.0 + (x**2)/6.0 + (x**4)/120.0
+        return jnp.where(jnp.abs(x) < 1e-4, small, jnp.sinh(x) / (x + 1e-18))
+
     def observation_model(self, X: JAXArray) -> JAXArray:
         """
         Return a single observation vector h_tot for the *augmented* state:
@@ -139,11 +145,14 @@ class ContiBLRQS(qs.Wrapper):
         t, b = X
         b = jnp.asarray(b, dtype=int)
 
+        # Transfer function
+        fac = self._tophat_factor(b)
+
         # Base kernel observation vector and delayed version
         h = self.kernel.observation_model(t)                 # shape [m]
         Phi_delay_T = self._Phi0(self.lag_blr[b]).T          # apply delay on the left
         h_cont = self.amp_cont[b] * h
-        h_blr  = self.amp_blr[b] * (Phi_delay_T @ h)
+        h_blr  = self.amp_blr[b] * fac * (Phi_delay_T @ h)
         h_base_total = h_cont + h_blr                        # yields the 4-term sum
 
         # BWB component on k^2 with weight sqrt(2)*q_b where q_b = bwb_alpha * A_b^2
@@ -153,6 +162,41 @@ class ContiBLRQS(qs.Wrapper):
 
         # Concatenate into augmented-state observation
         return jnp.concatenate([h_base_total, h_bwb], axis=0)
+
+    def psd(self, omega: JAXArray, b: int, sigma_n2: float = 0.0) -> JAXArray:
+        """
+        Auto-PSD S_y^{(b)}(ω) via general state-space formula.
+
+        Parameters
+        ----------
+        omega : array
+            Angular frequencies [rad / time units].
+        b : int
+            Band index.
+        sigma_n2 : float, optional
+            White-noise level to add (default 0.0).
+
+        Returns
+        -------
+        PSD : array, shape = omega.shape
+            Real non-negative power spectral density.
+        """
+        # System matrices
+        A = self.design_matrix()
+        P = self.stationary_covariance()
+        Qc = -(A @ P + P @ A.T)
+
+        # Observation vector for band b (evaluate at t=0)
+        h = self.observation_model((jnp.array(0.0), jnp.array(int(b))))
+
+        I = jnp.eye(A.shape[0], dtype=A.dtype)
+
+        def one_w(w):
+            # v = ((-iωI - A^T)^(-1)) h
+            v = jnp.linalg.solve((-1j * w) * I - A.T, h)
+            return (v.conj().T @ (Qc @ v)).real + sigma_n2
+
+        return jax.vmap(one_w)(omega)
 
 class MyMultibandContiBLR(tinygp.kernels.Kernel):
     amplitudes: jnp.ndarray
@@ -296,6 +340,7 @@ class MyMultiVarModel(MultiVarModel):
             lag_blr=jnp.exp(params["log_lag_blr"]),
             bwb_alpha=params["bwb_alpha"],
             bwb_beta=params["bwb_beta"],
+            width_blr=params["width_blr"],
         )
 
         # Check if kernel covariance is symmetric
@@ -337,6 +382,9 @@ class MyMultiVarModel(MultiVarModel):
         return jnp.mean(log_tau_band)
 
     def my_amp_transform(self, params: dict[str, JAXArray]) -> JAXArray:
+        """
+        Transform the amplitude parameters for the model.
+        """
         eta_A1 = params["eta_A1"]
         eta_A2 = params["eta_A2"]
         lam_s = params["lam_s"]
@@ -392,3 +440,28 @@ class MyMultiVarModel(MultiVarModel):
         _, cond = gp.condition(self.y[inds], new_X)
 
         return cond.loc, jnp.sqrt(cond.variance)
+
+    def psd(
+        self, params: dict[str, JAXArray], omega: JAXArray, b: int, sigma_n2: float = 0.0
+    ) -> JAXArray:
+        """
+        Get the power spectral density (PSD) for a specific band.
+
+        Parameters
+        ----------
+        params : dict[str, JAXArray]
+            Model parameters.
+        omega : JAXArray
+            Angular frequencies [rad / time units].
+        b : int
+            Band index.
+        sigma_n2 : float, optional
+            White-noise level to add (default 0.0).
+
+        Returns
+        -------
+        JAXArray
+            Real non-negative power spectral density.
+        """
+        gp, inds = self._build_gp(params)
+        return gp.kernel.psd(omega, b, sigma_n2)
