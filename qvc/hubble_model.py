@@ -90,7 +90,7 @@ def get_model_params(cosmo_model, only_sna=False):
     elif cosmo_model == 'Flatw0waCDM':
         priors |= OrderedDict([
             ("wp", (-20.0, 20.0)),   # covers phantom (<-1), Λ (-1), quintessence (> -1), and even w>0
-            ("wa", (-20.0, 20.0))    # symmetric variation
+            ("wa", (-40.0, 40.0))    # symmetric variation
         ])
 
     else:

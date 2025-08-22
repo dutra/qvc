@@ -647,7 +647,7 @@ def load_quasar_data(file_path, populate_sdss=False, apply_cut=True, first=None)
     # Define cuts as (column, lower_limit, upper_limit)
     cuts = [
         #('f_host', None, 0.6),
-        ('z', None, 3.0),
+        #('z', None, 3.0),
         ('log_tau_UV_RF', 1.5, None),
         ('alpha_lambda', None, 0),
         ('redchi', None, 10),
