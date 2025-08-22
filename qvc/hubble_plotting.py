@@ -1115,8 +1115,8 @@ def plot_completeness_vs_mag_at_redshifts(p_detect, mag_centers, z_centers,
     plt.tight_layout()
     if show:
         plt.show()
-    os.makedirs("plots/hubble", exist_ok=True)
-    plt.savefig("plots/hubble/completeness_vs_mag_at_redshifts.png", dpi=300)
+    os.makedirs("plots/completeness", exist_ok=True)
+    plt.savefig("plots/completeness/completeness_vs_mag_at_redshifts.png", dpi=300)
     #plt.savefig("plots/hubble/completeness_vs_mag_at_redshifts.pdf", dpi=300)
     plt.close()
 

@@ -1,6 +1,6 @@
 import numpy as np
 import h5py
-
+import os
 from scipy import stats
 from scipy.stats import norm, sigmaclip, multivariate_normal
 from scipy.interpolate import RegularGridInterpolator
@@ -157,6 +157,7 @@ def get_completeness_function_2d(
         #plt.title('apparent_mag_i vs apparent_mag_2500')
         plt.grid(True)
         plt.legend()
+        os.makedirs("plots/completeness", exist_ok=True)
         plt.savefig("plots/completeness/mag2500_vs_magi_fit.png", dpi=200)
         plt.close()
     

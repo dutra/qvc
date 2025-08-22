@@ -652,7 +652,7 @@ def load_quasar_data(file_path, populate_sdss=False, apply_cut=True, first=None)
         ('alpha_lambda', None, 0),
         ('redchi', None, 10),
         ('apparent_mag_2500', 1, 40),
-        ('apparent_mag_i', 15, 25)
+        #('apparent_mag_i', 15, 25)
         # Uncomment/add more cuts as needed
         # ('z', 1, None),
         # ('z', None, 3.2),

@@ -233,7 +233,7 @@ def run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model='Flatw0waCDM',
     # Prepare data
     df_pantheon_filtered = df_pantheon[['zHD', 'MU_SH0ES', 'MU_SH0ES_ERR_DIAG', 'CEPH_DIST', 'IS_CALIBRATOR',
                                         'm_b_corr', 'x1', 'c', 'biasCor_m_b', 'HOST_LOGMASS']].copy()
-    df_agn_filtered = df_agn[['z', 'apparent_mag_2500', 'apparent_mag_2500_err', 'apparent_mag_i_rest', 'apparent_mag_i',
+    df_agn_filtered = df_agn[['z', 'apparent_mag_2500', 'apparent_mag_2500_err', 'apparent_mag_i_rest', #'apparent_mag_i',
                               'log_sigma_UV', 'log_sigma_UV_err', 'log_tau_UV_RF', 'log_tau_UV_RF_err',
                               'bwb_beta', 'bwb_beta_err', 'ra', 'dec'
                               ]].copy()
@@ -270,7 +270,7 @@ def run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model='Flatw0waCDM',
         'only_sna': only_sna,
         'use_full_cov': use_full_cov,
     })
-    checkpoint_folder = f'results/hubble/{prefix}'
+    checkpoint_folder = f'results/dynesty_checkpoint/{prefix}'
     if not os.path.exists(checkpoint_folder):
         os.makedirs(checkpoint_folder)
     checkpoint_file = os.path.join(checkpoint_folder, 
@@ -393,6 +393,7 @@ def run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model='Flatw0waCDM',
     plt.title("Interpolated dmi vs z — highest posterior weight sample")
     plt.grid(True)
     plt.tight_layout()
+    os.makedirs("plots/completeness", exist_ok=True)
     plt.savefig("plots/completeness/dmi_interp_vs_z_highest_weight.png", dpi=150)
     plt.close()
 
