@@ -513,8 +513,7 @@ def process_samples(flat_samples, data, percentiles=[16, 50, 84]):
         result[f"log_tau_band_{band}_RF"] = median
         result[f"log_tau_band_{band}_RF_err"] = err
 
-
-    # Other special params    
+    # Other special params
     host_frac = flat_samples["f_host"] * (lambda_ref / 5100.0) ** flat_samples["alpha_host"]
     dilution_factor = 1.0 / (1.0 + host_frac)
     log_dilution = jnp.log(dilution_factor)
@@ -533,58 +532,6 @@ def process_samples(flat_samples, data, percentiles=[16, 50, 84]):
 
     result["clean_bands"] = data['clean_bands']
     return result
-
-def compute_psd_from_samples(samples, clean_bands, num_points=1000, time_range=(1.0, 365*20)):
-    """
-    Compute the Power Spectral Density (PSD) for each band using the median of the posterior samples.
-
-    Args:
-        samples (dict): MCMC samples containing kernel and power-law parameters.
-        clean_bands (list): List of clean bands used in the model.
-        num_points (int): Number of frequency points.
-        time_range (tuple): Range of time lags (min_time, max_time) in days.
-
-    Returns:
-        dict: {band: {"freqs": ..., "psd": ...}} for each band in clean_bands.
-    """
-
-    # Reference wavelength (rest-frame)
-    lambda_ref = 2500.0
-
-    # Median parameters
-    log_sigma_hat0 = np.median(samples["log_sigma_hat0"])
-    log_tau_drw0 = np.median(samples["log_tau_drw0"])
-    eta_A1 = np.median(samples["eta_A1"])
-    eta_A2 = np.median(samples["eta_A2"])
-    eta_break = np.median(samples["eta_break"])
-    lam_s = np.median(samples["lam_s"])
-    eta_tau1 = np.median(samples["eta_tau1"])
-    eta_tau2 = np.median(samples["eta_tau2"])
-
-
-    # Frequency grid (cycles/day)
-    min_time, max_time = time_range
-    t_span = max_time - min_time
-    freqs = np.logspace(-4, 0, num_points)  # 1/10,000 to 1 cycles/day
-
-    psd_results = {}
-    for band in clean_bands:
-        # Get pivot wavelength for this band (rest-frame)
-        lam_eff = lambda_pivot[band]
-
-        # Compute log_sigma and log_tau for this band (rest-frame)
-        log_sigma = log_sigma_hat0 / np.log(10) + log_broken_pl(lam_eff, lam_s, eta_A1, eta_A2, eta_break)
-        log_tau = log_tau_drw0 / np.log(10) + log_broken_pl(lam_eff, lam_s, eta_tau1, eta_tau2, eta_break)
-
-        sigma = 10 ** log_sigma
-        tau = 10 ** log_tau
-
-        # DRW PSD: S(f) = 2 sigma^2 tau^2 / [1 + (2 pi tau f)^2]
-        S_f = 2 * sigma**2 * tau**2 / (1 + (2 * np.pi * tau * freqs) ** 2)
-
-        psd_results[band] = {"freqs": freqs, "psd": S_f}
-
-    return psd_results
 
 def drw_equiv(amp_cont, tau_drw, bwb_alpha, bwb_beta):
     A = amp_cont

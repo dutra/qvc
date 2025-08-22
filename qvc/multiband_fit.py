@@ -1,6 +1,6 @@
 import os
 
-env_cores = os.environ.get("NUM_CORES")
+env_cores = 5 #os.environ.get("NUM_CORES")
 
 if env_cores is not None:
         try:
@@ -527,8 +527,8 @@ if __name__ == '__main__':
                 zero_mean=zero_mean, has_jitter=has_jitter, has_lag=has_lag,
                 lam_rf=obj['lam_rf'], z=obj['z']
             )
-            psd_results = compute_psd_from_samples(obj_flat_samples, obj["clean_bands"])
-            save_combined_plot(obj_flat_samples, m, obj['X'], obj['y'], obj['yerr'], obj['band_idx'], result, psd_results=psd_results)
+
+            save_combined_plot(obj_flat_samples, m, obj['X'], obj['y'], obj['yerr'], obj['band_idx'], result)
             plot_broken_power_law(obj_flat_samples, obj)
             #dump_mcmc_diagnostics(mcmc, obj, i, len(batch_data))
             

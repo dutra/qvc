@@ -256,9 +256,11 @@ def combined_lomb_scargle_from_model(
     ls = LombScargle(t_lag, y, yerr)
     P_raw = ls.power(f_raw, normalization=normalization)
 
-    hf_sel = (f_raw > 1/20.0)
-    P_noise = np.nanmedian(P_raw[hf_sel])
-    print("P_noise:", P_noise)
+    # Noise
+    total_var_pts = yerr**2 + np.exp(params['log_jitter'][0])**2
+    sigma2_noise = np.mean(total_var_pts)
+    P_noise = 2.0 * sigma2_noise * np.median(np.diff(t_lag))
+
     P_raw = np.maximum(P_raw - P_noise, 0.0)  # keep non-negative
 
     # --- Log-binning in f
@@ -284,7 +286,7 @@ def combined_lomb_scargle_from_model(
     return np.array(f_bin), np.array(P_bin), np.array(P_lo), np.array(P_hi), np.array(counts)
 
 
-def save_combined_plot(samples, model, X, y, yerr, band_idx, data, psd_results=None):
+def save_combined_plot(samples, model, X, y, yerr, band_idx, data):
     logging.info("Saving combined plot")
 
     clean_bands = data['clean_bands']
@@ -386,7 +388,7 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, data, psd_results=N
     ref_psd4 *= median_psd / np.interp(median_freq, ref_freqs, ref_psd4)
     ax_psd.plot(ref_freqs, 10*ref_psd2, 'k--', label="-2")
     ax_psd.plot(ref_freqs, 10*ref_psd4, 'k:', label="-4")
-    ax_psd.set_ylim(1e-3, 1e4)
+    ax_psd.set_ylim(1e-2, 1e4)
     ax_psd.set_xlim(1e-6, 1e-1)
 
     plt.tight_layout()
