@@ -1,6 +1,6 @@
 import os
 
-#env_cores = 5
+env_cores = os.environ.get("NUM_CORES")
 
 if env_cores is not None:
         try:
