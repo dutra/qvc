@@ -1,5 +1,20 @@
+import os
+
+num_cores = os.environ.get("NUM_CORES", os.cpu_count()-2)
+
+try:
+    num_cores = int(num_cores)
+except ValueError:
+    print(f"Invalid NUM_CORES value '{num_cores}', ignoring.")
+    num_cores = os.cpu_count()-2
+
+print(f"CPU Num Cores: {num_cores}")
+os.environ["XLA_FLAGS"] = f"--xla_force_host_platform_device_count={num_cores}"
+os.environ["JAX_PLATFORM_NAME"] = "cpu"
+
+prefix = os.environ.get("PREFIX", "")
+
 import numpy as np
-import pandas as pd
 import matplotlib.pyplot as plt
 from astropy.cosmology import FlatwCDM, Flatw0waCDM, FlatLambdaCDM, FlatwpwaCDM
 from scipy import stats
@@ -7,11 +22,9 @@ from scipy.signal import fftconvolve
 import numpy as np
 import pandas as pd
 from scipy import stats
-import corner
 from tqdm import tqdm
 from dynesty import DynamicNestedSampler
 from dynesty.utils import resample_equal
-import pickle
 import multiprocessing
 from scipy.linalg import cho_solve
 from dynesty import utils as dyfunc
@@ -24,9 +37,6 @@ from hubble_utils import *
 from hubble_plotting import *
 from hubble_model import *
 from hubble_completeness import *
-import os
-import yaml
-import sys
 import argparse
 from scipy.interpolate import interp1d
 
@@ -223,7 +233,7 @@ def run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model='Flatw0waCDM',
     # Prepare data
     df_pantheon_filtered = df_pantheon[['zHD', 'MU_SH0ES', 'MU_SH0ES_ERR_DIAG', 'CEPH_DIST', 'IS_CALIBRATOR',
                                         'm_b_corr', 'x1', 'c', 'biasCor_m_b', 'HOST_LOGMASS']].copy()
-    df_agn_filtered = df_agn[['z', 'apparent_mag_2500', 'apparent_mag_2500_err', 'apparent_mag_i_rest',
+    df_agn_filtered = df_agn[['z', 'apparent_mag_2500', 'apparent_mag_2500_err', 'apparent_mag_i_rest', 'apparent_mag_i',
                               'log_sigma_UV', 'log_sigma_UV_err', 'log_tau_UV_RF', 'log_tau_UV_RF_err',
                               'bwb_beta', 'bwb_beta_err', 'ra', 'dec'
                               ]].copy()
@@ -266,9 +276,8 @@ def run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model='Flatw0waCDM',
     checkpoint_file = os.path.join(checkpoint_folder, 
                                    f'dynesty_checkpoint_{cosmo_model}_{'sna' if only_sna else 'joint'}_{speed}.save')
     print(f"Checkpoint file: {checkpoint_file}")
-    num_cpus = multiprocessing.cpu_count() - 1
     with multiprocessing.get_context("spawn").Pool(
-        processes=num_cpus,
+        processes=num_cores,
         initializer=dynesty_initializer,
         initargs=(_agn_data, _pantheon_data, _dynesty_config, 
                     _sna_LogdetCov, _sna_L, _sna_Lower)
@@ -298,7 +307,7 @@ def run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model='Flatw0waCDM',
                 bound='multi',
                 sample='rwalk',
                 pool=pool,
-                queue_size=num_cpus,
+                queue_size=num_cores,
                 blob=True
             )
             if speed == 'fast':
@@ -460,7 +469,7 @@ def run_single(df_agn, cosmo_model, completeness=True, use_full_cov=True,
                                                          only_sna=only_sna, completeness=completeness, use_full_cov=use_full_cov,
                                                          resume=resume, speed=speed)
 
-    plot_path = f"plots/hubble/{cosmo_model}_{'sna' if only_sna else 'joint'}_{speed}"
+    plot_path = f"plots/hubble/{prefix}/{cosmo_model}_{'sna' if only_sna else 'joint'}_{speed}"
     os.makedirs(plot_path, exist_ok=True)
 
     print("Plotting full dynesty corner...")
@@ -530,8 +539,8 @@ def run_all(df_agn, cosmo_model, speed="production", resume=False, N=None):
         r_joint   = extract_cosmo_results_from_samples(samples_joint, cosmo_model, False,  
                                                     logZ_tuple=(logZ_joint, logZerr_joint), format_for_latex=True, value_fmt="{:.2f}")
         results_latex.extend([r_sna, r_joint])
-    print(results_latex)
-    make_cosmo_table_latex(results_latex)
+
+    make_cosmo_table_latex(results_latex, write_path=f"plots/hubble/{prefix}/)
 
 
     logZ_1 = cosmo_models_dict[cosmo_models[0]]['logZ']

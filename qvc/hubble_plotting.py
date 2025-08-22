@@ -791,6 +791,9 @@ def plot_predicted_vs_actual_M2500(
     sigma_mu_cosmo = np.nanstd(mu_draws, axis=0, ddof=1)  # per-object DM uncertainty
     xerr = np.sqrt(m_app_err**2 + sigma_mu_cosmo**2)
 
+    if debias:
+        dm_interp = make_dm_function(df_agn["apparent_mag_2500"].values, df_agn['z'].values, dms)
+
     # --- binning in redshift ---
     num_cols = 4
     num_rows = 4
@@ -816,14 +819,7 @@ def plot_predicted_vs_actual_M2500(
     xx = np.linspace(min(xlo, ylo), max(xhi, yhi), 400)
 
     sc_for_cbar = None
-
-    if debias:
-        apparent_mag_2500 = df_agn['apparent_mag_2500'].values
-        dm_interp = make_dm_function(apparent_mag_2500, df_agn['z'].values, dms)
-        dm_interp = make_dm_function(apparent_mag_2500, df_agn['z'], dms, method='linear')
-        pts = np.column_stack([df_agn['z'].values, apparent_mag_2500])
-        M_2500_pred += dm_interp(pts)
-
+        
     for i, ax in enumerate(axes):
         ax.set_xlim(xlo, xhi)
         ax.set_ylim(ylo, yhi)
@@ -835,7 +831,13 @@ def plot_predicted_vs_actual_M2500(
         if not np.any(bin_mask):
             ax.axis("off"); continue
 
-        x = actual_M_2500[bin_mask]
+        actual_M_2500_bin = actual_M_2500[bin_mask].copy()
+        # De-bias
+        if debias:
+            pts = np.column_stack([df_agn['z'][bin_mask], df_agn['apparent_mag_2500'][bin_mask]])
+            actual_M_2500_bin -= dm_interp(pts)
+
+        x = actual_M_2500_bin
         y = M_2500_pred[bin_mask]
         xerr_bin = xerr[bin_mask]
         yerr_bin = M_2500_pred_err[bin_mask]
@@ -900,10 +902,10 @@ def plot_predicted_vs_actual_M2500(
             f"σ_int = {sigma_intrinsic:.2f} mag   |   RMS(resid) = {rms_resid:.2f}\n"
             f"within ±σ_int: {frac1:4.1f}%  •  ±2σ_int: {frac2:4.1f}%  •  ±3σ_int: {frac3:4.1f}%"
         )
-        ax.annotate(
-            stats_text, xy=(0.03, 0.03), xycoords="axes fraction",
-            fontsize=10.5, color="dimgray", ha="left", va="bottom", bbox=boxprops,
-        )
+        # ax.annotate(
+        #     stats_text, xy=(0.03, 0.03), xycoords="axes fraction",
+        #     fontsize=10.5, color="dimgray", ha="left", va="bottom", bbox=boxprops,
+        # )
 
         n_in_bin = int(np.sum(bin_mask))
         ax.annotate(

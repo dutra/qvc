@@ -470,9 +470,9 @@ def populate_sdss_fields(objs, progress_bar=True):
         d['fhost'] = fits_data['FHOST_5100'][i]
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
-            # for b in ['u', 'g', 'r', 'i', 'z']:
-            #     d[f'apparent_mag_{b}'] = -2.5 * np.log10(fits_data_2['PSFFLUX'][i, filters[b]]) + 22.5
-            #     d[f'apparent_mag_{b}_err'] = 2.5/np.log(10) * np.sqrt(1/fits_data_2['PSFFLUX_IVAR'][i, filters[b]])/fits_data_2['PSFFLUX'][i, filters[b]]
+            for b in ['u', 'g', 'r', 'i', 'z']:
+                d[f'apparent_mag_{b}'] = -2.5 * np.log10(fits_data_2['PSFFLUX'][i, filters[b]]) + 22.5
+                d[f'apparent_mag_{b}_err'] = 2.5/np.log(10) * np.sqrt(1/fits_data_2['PSFFLUX_IVAR'][i, filters[b]])/fits_data_2['PSFFLUX'][i, filters[b]]
             # #     d[f'extinction_{b}'] = fits_data_2['EXTINCTION'][i, filters[b]]
             # d['color'] = -2.5 * np.log10(fits_data_2['PSFFLUX'][i, 0] / fits_data_2['PSFFLUX'][i, 3])
             # # Error propagation for color
@@ -606,15 +606,17 @@ def load_quasar_data(file_path, populate_sdss=False, apply_cut=True, first=None)
             populate_sdss_fields(quasar_list)
             write_hdf5_file(quasar_list, file_path)
             break
+
     for q in quasar_list:
-        for i, b in enumerate(['u', 'g', 'r', 'i', 'z']):
+        for i, b in enumerate(q['clean_bands']):
             q[f'mags_mean_{b}'] = q['mags_means'][i]
+
         del q['mags_means']
 
     df = pd.DataFrame(quasar_list)
 
     
-    df = populate_chi_sq_from_csv(df)
+    #df = populate_chi_sq_from_csv(df)
 
     df['alpha_nu'] = -0.5  # Default value
     df['alpha_nu_err'] = 0.1  # Default error
@@ -887,7 +889,7 @@ def make_cosmo_table_latex(
     caption="Marginalized Cosmological Parameters and Bayesian Evidence",
     label="tab:cosmoparams",
     value_fmt="{:.3f}",
-    write_path="plots/hubble/table.tex"
+    write_path="plots/hubble/"
 ):
     """
     Build the LaTeX table string using exact keys: H0, Om0, w0, wa.
@@ -1065,6 +1067,7 @@ def make_cosmo_table_latex(
 
     # write to file
     os.makedirs(os.path.dirname(write_path), exist_ok=True)
+    write_path = os.path.join(write_path, "cosmo_table.tex")
     with open(write_path, "w") as f:
         f.write(latex_str)
 

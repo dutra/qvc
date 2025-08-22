@@ -121,8 +121,8 @@ def get_completeness_function_2d(
     mask = (
         np.isfinite(df_agn['apparent_mag_2500'].values) &
         np.isfinite(df_agn['apparent_mag_i_rest'].values) &
-        (df_agn['apparent_mag_2500'].values > 0) &
-        (df_agn['apparent_mag_i_rest'].values > 0)
+        (df_agn['apparent_mag_2500'].values > 18) & (df_agn['apparent_mag_2500'].values < 26) &
+        (df_agn['apparent_mag_i_rest'].values > 15) & (df_agn['apparent_mag_i_rest'].values < 25)
     )
     y = df_agn['apparent_mag_2500'].values[mask]
     x = df_agn['apparent_mag_i_rest'].values[mask]
@@ -299,3 +299,46 @@ def make_dm_function(m, z, dm, m_bins=40, z_bins=40, *, method='linear'):
 
     return interp_clipped
 
+def estimate_m50(bin_edges, true_counts, det_counts, ax=None):
+    """
+    Estimate the magnitude where completeness drops to 50%.
+    Parameters
+    ----------
+    bin_edges : array-like
+        Magnitude bin edges (len B+1).
+    true_counts : array-like
+        True/input counts per bin (len B).
+    det_counts : array-like
+        Detected counts per bin (len B).
+    ax : matplotlib Axes, optional
+        Axis to plot on. If None, a new figure is created.
+    Returns
+    -------
+    m50 : float
+        Magnitude at 50% completeness.
+    w : float
+        Width parameter of the logistic fit.
+    """
+    bin_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
+    completeness = det_counts / np.maximum(true_counts, 1)
+    # Logistic function
+    def logistic(m, m50, w):
+        return 1.0 / (1.0 + np.exp((m - m50) / w))
+    # Initial guess: halfway point
+    m_guess = bin_centers[np.argmin(np.abs(completeness - 0.5))]
+    w_guess = 0.3
+    popt, pcov = curve_fit(logistic, bin_centers, completeness, p0=[m_guess, w_guess], bounds=([bin_edges.min(), 0.01],[bin_edges.max(), 5.0]))
+    m50, w = popt
+    # Plot
+    if ax is None:
+        fig, ax = plt.subplots()
+    ax.scatter(bin_centers, completeness, label="Observed completeness", color="k")
+    m_fit = np.linspace(bin_edges.min(), bin_edges.max(), 200)
+    ax.plot(m_fit, logistic(m_fit, *popt), 'r-', label=f"Fit: m50={m50:.2f}")
+    ax.axhline(0.5, color="gray", ls="--")
+    ax.axvline(m50, color="red", ls="--")
+    ax.set_xlabel("Magnitude")
+    ax.set_ylabel("Completeness")
+    ax.set_ylim(0, 1.05)
+    ax.legend()
+    return m50, w

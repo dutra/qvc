@@ -1,17 +1,16 @@
 import os
 
-env_cores = 5 #os.environ.get("NUM_CORES")
+num_cores = os.environ.get("NUM_CORES", os.cpu_count()-2)
 
-if env_cores is not None:
-        try:
-            num_cores = int(env_cores)
-            print(f"CPU Num Cores: {num_cores}")
-            os.environ["XLA_FLAGS"] = f"--xla_force_host_platform_device_count={num_cores}"
-            os.environ["JAX_PLATFORM_NAME"] = "cpu"
-        except ValueError:
-            print(f"Invalid NUM_CORES value '{env_cores}', ignoring.")
-else:
-    print("NUM_CORES not set, leaving defaults.")
+try:
+    num_cores = int(num_cores)
+except ValueError:
+    print(f"Invalid NUM_CORES value '{num_cores}', ignoring.")
+    num_cores = os.cpu_count()-2
+
+print(f"CPU Num Cores: {num_cores}")
+os.environ["XLA_FLAGS"] = f"--xla_force_host_platform_device_count={num_cores}"
+os.environ["JAX_PLATFORM_NAME"] = "cpu"
 
 
 import jax
