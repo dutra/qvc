@@ -1,14 +1,15 @@
 import os
+import multiprocessing
 
 num_cores = os.environ.get("NUM_CORES", os.cpu_count()-2)
-
 try:
     num_cores = int(num_cores)
 except ValueError:
     print(f"Invalid NUM_CORES value '{num_cores}', ignoring.")
     num_cores = os.cpu_count()-2
 
-print(f"CPU Num Cores: {num_cores}")
+if multiprocessing.current_process().name == "MainProcess":
+    print(f"CPU Num Cores: {num_cores}")
 os.environ["XLA_FLAGS"] = f"--xla_force_host_platform_device_count={num_cores}"
 os.environ["JAX_PLATFORM_NAME"] = "cpu"
 
@@ -20,12 +21,9 @@ from astropy.cosmology import FlatwCDM, Flatw0waCDM, FlatLambdaCDM, FlatwpwaCDM
 from scipy import stats
 from scipy.signal import fftconvolve
 import numpy as np
-import pandas as pd
 from scipy import stats
-from tqdm import tqdm
 from dynesty import DynamicNestedSampler
 from dynesty.utils import resample_equal
-import multiprocessing
 from scipy.linalg import cho_solve
 from dynesty import utils as dyfunc
 
@@ -318,8 +316,8 @@ def run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model='Flatw0waCDM',
                     print_progress=True,
                     dlogz_init=10,                 
                     n_effective=50,                # 300–1000 typical for model comparison
-                    nlive_init=10,   # bump live points
-                    nlive_batch=10   # reasonable batch size for dynamic allocation
+                    nlive_init=20,   # bump live points
+                    nlive_batch=5   # reasonable batch size for dynamic allocation
                 )
             elif speed == "production":
                 print("Starting production run...")
