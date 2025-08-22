@@ -20,7 +20,7 @@ filters = {"u": 0, "g": 1, "r": 2, "i": 3, "z": 4, "y": 5} # harcoded filter ord
 bands = ['u', 'g', 'r', 'i', 'z']#, 'y']
 #bands = ['g', 'r', 'i']
 
-def cut_light_curve_restframe_window(lc_list, n_days=600, min_n_days=None):
+def cut_light_curve_restframe_window(lc_list, n_days=1800, same_length=False):
     """
     Applies a rest-frame time cut to a list of light curve objects.
     - Cuts to rest-frame window [0, n_days]
@@ -87,7 +87,8 @@ def cut_light_curve_restframe_window(lc_list, n_days=600, min_n_days=None):
 
         span_rf = np.max(cut_rest_flat) - np.min(cut_rest_flat)
 
-        if min_n_days and span_rf < min_n_days:
+        min_n_days = n_days * 0.9
+        if same_length and span_rf < min_n_days:
             print(f"Skipping {obj_id}: span = {span_rf:.1f} < {min_n_days:.1f} rest-frame days")
             continue
 

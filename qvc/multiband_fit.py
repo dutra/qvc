@@ -343,6 +343,7 @@ if __name__ == '__main__':
     parser.add_argument("--disable_poly1", action="store_true", help="Disable Mean function detrending.")
     parser.add_argument("--jax_trace", action="store_true", help="Enable jax tracing.")
     parser.add_argument("--rf_length_cut", type=int, default=-1, help="Cut light curves to same rest-frame length.")
+    parser.add_argument('--exact_same_length', action='store_true', help="Cut light curves to exact same rest-frame length.")
 
 
     args = parser.parse_args()
@@ -369,7 +370,7 @@ if __name__ == '__main__':
     print(f"Loaded {len(objs)} objects from concat_light_curves")
     
     if args.rf_length_cut > 0:
-        objs = cut_light_curve_restframe_window(objs, n_days=args.rf_length_cut)
+        objs = cut_light_curve_restframe_window(objs, n_days=args.rf_length_cut, same_length=args.exact_same_length)
         print(f"After restframe cut, {len(objs)} objects remain.")
 
 
