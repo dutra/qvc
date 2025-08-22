@@ -540,7 +540,7 @@ def run_all(df_agn, cosmo_model, speed="production", resume=False, N=None):
                                                     logZ_tuple=(logZ_joint, logZerr_joint), format_for_latex=True, value_fmt="{:.2f}")
         results_latex.extend([r_sna, r_joint])
 
-    make_cosmo_table_latex(results_latex, write_path=f"plots/hubble/{prefix}/)
+    make_cosmo_table_latex(results_latex, write_path=f"plots/hubble/{prefix}/")
 
 
     logZ_1 = cosmo_models_dict[cosmo_models[0]]['logZ']
