@@ -106,9 +106,9 @@ def log_likelihood(theta, cosmo_model,
     elif cosmo_model == 'Flatw0waCDM':
         #a_pivot = 1 / (1 + z_pivot_agn)
         #wp = params['w0'] + (1 - a_pivot) * params['wa']
-        z_pivot = z_pivot_sna if only_sna else z_pivot_agn
-        cosmo = FlatwpwaCDM(H0=params['H0'], Om0=params['Om0'], wp=params['wp'], wa=params['wa'], zp=z_pivot)
-        #cosmo = Flatw0waCDM(H0=params['H0'], Om0=params['Om0'], w0=params['w0'], wa=params['wa'])
+        #z_pivot = z_pivot_sna if only_sna else z_pivot_agn
+        #cosmo = FlatwpwaCDM(H0=params['H0'], Om0=params['Om0'], wp=params['wp'], wa=params['wa'], zp=z_pivot)
+        cosmo = Flatw0waCDM(H0=params['H0'], Om0=params['Om0'], w0=params['w0'], wa=params['wa'])
     elif cosmo_model == 'FlatLambdaCDM':
         cosmo = FlatLambdaCDM(H0=params['H0'], Om0=params['Om0'])
 
@@ -505,11 +505,11 @@ def run_single(df_agn, cosmo_model, completeness=True, use_full_cov=True,
 
     # Example usage:
     # Assuming `samples` is a dict from your MCMC run
-    if cosmo_model == 'Flatw0waCDM':
+    if cosmo_model in ['FlatwpwaCDM', 'Flatw0waCDM']:
         rho_w0_wa = posterior_corr(flat_samples, cosmo_model, z_pivot_agn)
         print(f"Posterior correlation coefficient (w0, wa) at z_p={z_pivot_agn}: {rho_w0_wa:.3f}")
 
-    if cosmo_model == 'Flatw0waCDM':
+    if cosmo_model == 'FlatwpwaCDM':
         zp = compute_pivot_redshift(flat_samples, cosmo_model)
         print("Computed pivot redshift: ", zp)
 

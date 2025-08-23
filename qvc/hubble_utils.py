@@ -738,10 +738,61 @@ def soft_clip(x, floor=1e-5, sharpness=5):
 import numpy as np
 from statistics import NormalDist
 
-import os
-import math
+import os, math
 import numpy as np
 from statistics import NormalDist
+
+LN10 = math.log(10.0)
+LN2  = math.log(2.0)
+TWOPI = 2.0 * math.pi
+HALF_LN_TWOPI = 0.5 * math.log(TWOPI)
+Phi = NormalDist()
+
+def _log1pexp_pos(x):
+    return x + math.log1p(math.exp(-x))
+
+def _stable_logistic(x):
+    return 0.5 * (1.0 + math.tanh(0.5 * x))
+
+def _log_eps_from_delta_abs(absD):
+    if absD < 40:
+        return -math.log1p(math.exp(absD))
+    return -(_log1pexp_pos(absD))
+
+def _norm_isf_from_logeps(log_eps, use_phi_cut=-36.0):
+    if log_eps > use_phi_cut:
+        eps = math.exp(log_eps)
+        return Phi.inv_cdf(1.0 - eps)
+    L = -log_eps
+    z = math.sqrt(2.0 * L)
+    for _ in range(5):
+        f = log_eps + 0.5 * z * z + math.log(z) + HALF_LN_TWOPI
+        fp = z + 1.0 / z
+        z -= f / fp
+        if z <= 0 or not math.isfinite(z):
+            z = max(1.0, math.sqrt(2.0 * L))
+    return z
+
+def _bayes_factor_repr_from_delta(delta, delta_err=None):
+    log10K = delta / LN10
+    s_main = f"10^{log10K:.2f}"
+    ci_tuple = None
+    if delta_err is not None:
+        lo = (delta - delta_err) / LN10
+        hi = (delta + delta_err) / LN10
+        s_ci = f"[10^{lo:.2f}, 10^{hi:.2f}]"
+        ci_tuple = (lo, hi, s_ci)
+    return log10K, s_main, ci_tuple
+
+def _latex_escape_text(s: str) -> str:
+    """Escape LaTeX special chars in plain text model names."""
+    repl = {
+        "\\": r"\textbackslash{}",
+        "&": r"\&", "%": r"\%", "$": r"\$", "#": r"\#",
+        "_": r"\_", "{": r"\{", "}": r"\}",
+        "~": r"\textasciitilde{}", "^": r"\textasciicircum{}",
+    }
+    return "".join(repl.get(ch, ch) for ch in str(s))
 
 def compare_models_by_log_evidence(
     logZ_1, logZerr_1, logZ_2, logZerr_2,
@@ -752,7 +803,7 @@ def compare_models_by_log_evidence(
 ):
     """
     Bayesian comparison using log-evidences, with sigma-style significance.
-    Headline follows astronomy/cosmology convention: report **two-sided σ**.
+    Stable for huge |Δln Z|. Outputs both plain-text and LaTeX ApJ sentences.
     """
 
     # --- Basic deltas and MC reliability ---
@@ -760,10 +811,13 @@ def compare_models_by_log_evidence(
     delta_logZ_err = float(np.hypot(logZerr_1, logZerr_2))
     z_mc = np.inf if delta_logZ_err == 0 else delta_logZ / delta_logZ_err
 
-    # --- Bayes factor and 1σ interval from Δ ± σΔ ---
-    B12 = math.exp(delta_logZ)
-    B12_lo = math.exp(delta_logZ - delta_logZ_err)
-    B12_hi = math.exp(delta_logZ + delta_logZ_err)
+    # --- Bayes factor (stay in log-space) ---
+    log10K, B12_str, B12_ci = _bayes_factor_repr_from_delta(delta_logZ, delta_logZ_err)
+    if B12_ci is not None:
+        log10K_lo, log10K_hi, B12_ci_str = B12_ci
+    else:
+        log10K_lo = log10K_hi = None
+        B12_ci_str = None
 
     # --- Jeffreys-style strength ---
     t1, t2, t3 = jeffreys_thresholds
@@ -780,71 +834,103 @@ def compare_models_by_log_evidence(
     preferred_model = model_1_name if delta_logZ > 0 else model_2_name
     decisive = abs(z_mc) >= z_decisive
 
-    # --- Posterior probabilities under equal priors ---
-    p_M1_equal_priors = 1.0 / (1.0 + math.exp(-delta_logZ))
-    absD = abs(delta_logZ)
-    eps_err = 1.0 / (1.0 + math.exp(absD))  # error prob if choosing the favored model
+    # --- Posterior probabilities under equal priors (stable) ---
+    p_M1_equal_priors = _stable_logistic(delta_logZ)
 
-    # --- Sigma equivalents from odds ---
-    Phi = NormalDist()
-    sigma_one = Phi.inv_cdf(1.0 - eps_err)
-    sigma_two = Phi.inv_cdf(1.0 - eps_err / 2.0)
+    # error prob for favored model
+    absD = abs(delta_logZ)
+    log_eps = _log_eps_from_delta_abs(absD)
+    log_eps_half = log_eps - LN2
+
+    # --- Sigma equivalents from odds (stable) ---
+    sigma_one = _norm_isf_from_logeps(log_eps)
+    sigma_two = _norm_isf_from_logeps(log_eps_half)
 
     # Propagate Δ uncertainty
-    def odds_sigma_from_delta(d):
-        eps = 1.0 / (1.0 + math.exp(abs(d)))
-        return Phi.inv_cdf(1.0 - eps), Phi.inv_cdf(1.0 - eps / 2.0)
+    def odds_sigmas_from_delta(d):
+        le = _log_eps_from_delta_abs(abs(d))
+        return (_norm_isf_from_logeps(le),
+                _norm_isf_from_logeps(le - LN2))
 
-    sigma_one_lo, sigma_two_lo = odds_sigma_from_delta(delta_logZ - delta_logZ_err)
-    sigma_one_hi, sigma_two_hi = odds_sigma_from_delta(delta_logZ + delta_logZ_err)
+    sigma_one_lo, sigma_two_lo = odds_sigmas_from_delta(delta_logZ - delta_logZ_err)
+    sigma_one_hi, sigma_two_hi = odds_sigmas_from_delta(delta_logZ + delta_logZ_err)
 
-    # --- Wilks-like number (orientation only; not valid for evidences) ---
+    # --- Wilks-like (orientation only) ---
     sigma_wilks_like = math.sqrt(2.0 * absD)
 
-    # --- ApJ-style sentence ---
+    # --- ApJ-style sentences (plain + LaTeX) ---
     apj_sentence = (
         f"Adopting equal model priors, we obtain Δln Z = {delta_logZ:.2f} ± {delta_logZ_err:.2f} "
-        f"({model_1_name}−{model_2_name}), implying a Bayes factor B₁₂ = {B12:.1f} "
-        f"[{B12_lo:.1f}, {B12_hi:.1f}] and a two-sided Gaussian significance of "
-        f"Z = {sigma_two:.2f}σ (odds-based mapping), which constitutes {strength.lower()} "
-        f"evidence in favor of {preferred_model}."
+        f"({model_1_name}−{model_2_name}), implying a Bayes factor B₁₂ ≈ {B12_str} "
+        + (f" {B12_ci_str} " if B12_ci_str else "")
+        + f"and a two-sided Gaussian significance of Z = {sigma_two:.2f}σ (odds-based mapping), "
+          "which constitutes "
+        f"{strength.lower()} evidence in favor of {preferred_model}."
     )
 
-    # --- Compose shared lines ---
+    m1_tex = _latex_escape_text(model_1_name)
+    m2_tex = _latex_escape_text(model_2_name)
+    preferred_tex = _latex_escape_text(preferred_model)
+    apj_sentence_tex = (
+        r"Adopting equal model priors, we obtain "
+        rf"$\Delta\ln Z = {delta_logZ:.2f} \pm {delta_logZ_err:.2f}$ "
+        rf"({m1_tex}--{m2_tex}), "
+        r"implying a Bayes factor "
+        rf"$B_{{12}}\approx 10^{{{log10K:.2f}}}$"
+        + (rf" $\left[10^{{{log10K_lo:.2f}}},\,10^{{{log10K_hi:.2f}}}\right]$ " if B12_ci_str else " ")
+        + r"and a two-sided Gaussian significance of "
+        rf"$Z={sigma_two:.2f}\,\sigma$ "
+        r"(odds-based mapping), which constitutes "
+        f"{strength.lower()} evidence in favor of {preferred_tex}."
+    )
+
+    # --- Compose shared lines (console/file) ---
     lines = [
         "Bayesian Model Comparison\n",
         f"Models: {model_1_name} vs {model_2_name}\n",
         f"Δln Z = {delta_logZ:.3f} ± {delta_logZ_err:.3f}  (z_mc = {z_mc:.2f})\n",
-        f"Bayes factor B12 = {B12:.3f}  [ {B12_lo:.3f}, {B12_hi:.3f} ]  (≈ ×e^±{delta_logZ_err:.3f})\n",
+        f"Bayes factor: log10 K = {log10K:.3f} "
+        + (f"[ {log10K_lo:.3f}, {log10K_hi:.3f} ] " if (log10K_lo is not None) else "")
+        + f"  ⇒  B12 ≈ {B12_str} "
+        + (f"{B12_ci_str} " if B12_ci_str else "")
+        + f"(≈ ×e^±{delta_logZ_err:.3f} in ln-space)\n",
         f"Preferred model: {preferred_model}\n",
         f"Jeffreys strength: {strength}; decisive (|z_mc|≥{z_decisive:.1f})? {'yes' if decisive else 'no'}\n",
-        f"P({model_1_name} | data, equal priors) ≈ {p_M1_equal_priors:.3f}\n",
+        f"P({model_1_name} | data, equal priors) ≈ {p_M1_equal_priors:.6f}\n",
         "Significance from odds (astro/cosmology convention):\n",
-        f"  two-sided Z = {sigma_two:.2f}σ  [{sigma_two_lo:.2f}, {sigma_two_hi:.2f}]\n",
-        f"  one-sided Z = {sigma_one:.2f}σ  [{sigma_one_lo:.2f}, {sigma_one_hi:.2f}]\n",
-        f"Wilks-like sigma (orientation only) = {sigma_wilks_like:.2f}σ\n",
+        f"  two-sided Z = {sigma_two:.4f}σ  [{sigma_two_lo:.4f}, {sigma_two_hi:.4f}]\n",
+        f"  one-sided Z = {sigma_one:.4f}σ  [{sigma_one_lo:.4f}, {sigma_one_hi:.4f}]\n",
+        f"Wilks-like sigma (orientation only) = {sigma_wilks_like:.4f}σ\n",
         apj_sentence + "\n",
+        "LaTeX (ApJ-ready):\n",
+        apj_sentence_tex + "\n",
     ]
 
-    # --- Print and save same lines ---
+    # --- Print and save ---
     for line in lines:
         print(line, end="")
 
     os.makedirs(plot_path, exist_ok=True)
     safe_m1 = "".join(c if c.isalnum() or c in "-_." else "_" for c in model_1_name)
     safe_m2 = "".join(c if c.isalnum() or c in "-_." else "_" for c in model_2_name)
-    text_path = os.path.join(plot_path, f"compare_{safe_m1}_vs_{safe_m2}.txt")
 
+    text_path = os.path.join(plot_path, f"compare_{safe_m1}_vs_{safe_m2}.txt")
     with open(text_path, "w", encoding="utf-8") as f:
         f.writelines(lines)
+
+    tex_path = os.path.join(plot_path, f"compare_{safe_m1}_vs_{safe_m2}.tex")
+    with open(tex_path, "w", encoding="utf-8") as f:
+        f.write(apj_sentence_tex + "\n")
 
     # --- Return result dict ---
     return {
         "delta_logZ": delta_logZ,
         "delta_logZ_err": delta_logZ_err,
         "z_mc": z_mc,
-        "Bayes_factor": B12,
-        "Bayes_factor_ci_1sigma": (B12_lo, B12_hi),
+        "log10_Bayes_factor": log10K,
+        "log10_Bayes_factor_ci_1sigma": (log10K_lo, log10K_hi) if (log10K_lo is not None) else None,
+        "Bayes_factor_str": B12_str,
+        "Bayes_factor_ci_1sigma_str": B12_ci_str,
         "preferred_model": preferred_model,
         "strength": strength,
         "decisive": decisive,
@@ -855,7 +941,9 @@ def compare_models_by_log_evidence(
         "sigma_from_odds_two_sided_ci_1sigma": (sigma_two_lo, sigma_two_hi),
         "sigma_wilks_like": sigma_wilks_like,
         "apj_sentence": apj_sentence,
+        "apj_sentence_tex": apj_sentence_tex,
         "text_path": text_path,
+        "tex_path": tex_path,
     }
 
 
@@ -1473,9 +1561,10 @@ def apply_forward_completeness_correction(df_agn, params, cosmo_model, completen
     
     #params = dict(zip(model_labels, params))
     
-    if cosmo_model == 'Flatw0waCDM':
-        #cosmo = Flatw0waCDM(H0=params['H0'], Om0=params['Om0'], w0=params['w0'], wa=params['wa'])
+    if cosmo_model == 'FlatwpwaCDM':
         cosmo = FlatwpwaCDM(H0=params['H0'], Om0=params['Om0'], wp=params['wp'], wa=params['wa'], zp=z_pivot_agn)
+    if cosmo_model == 'Flatw0waCDM':
+        cosmo = Flatw0waCDM(H0=params['H0'], Om0=params['Om0'], w0=params['w0'], wa=params['wa'])
     elif cosmo_model == 'FlatwCDM':
         cosmo = FlatwCDM(H0=params['H0'], Om0=params['Om0'], w0=params['w0'])
     elif cosmo_model == 'FlatLambdaCDM':
@@ -1605,6 +1694,11 @@ def posterior_corr(flat_samples, cosmo_model, z_pivot_agn):
         raise ValueError(f"Parameter {names} not found in model labels.")
 
     if cosmo_model == "Flatw0waCDM":
+        i_w0 = _idx(model_labels, "w0", "w_0")
+        i_wa = _idx(model_labels, "wa", "w_a")
+        w0 = flat_samples[:, i_w0]
+        wa = flat_samples[:, i_wa]
+    elif cosmo_model == "FlatwpwaCDM":
         i_wp = _idx(model_labels, "wp", "w_p")
         i_wa = _idx(model_labels, "wa", "w_a")
         a_p = 1.0 / (1.0 + float(z_pivot_agn))
