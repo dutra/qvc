@@ -1,17 +1,17 @@
 import os
+import multiprocessing
 
-env_cores = 5 #os.environ.get("NUM_CORES")
+num_cores = os.environ.get("NUM_CORES", os.cpu_count()-2)
+try:
+    num_cores = int(num_cores)
+except ValueError:
+    print(f"Invalid NUM_CORES value '{num_cores}', ignoring.")
+    num_cores = os.cpu_count()-2
 
-if env_cores is not None:
-        try:
-            num_cores = int(env_cores)
-            print(f"CPU Num Cores: {num_cores}")
-            os.environ["XLA_FLAGS"] = f"--xla_force_host_platform_device_count={num_cores}"
-            os.environ["JAX_PLATFORM_NAME"] = "cpu"
-        except ValueError:
-            print(f"Invalid NUM_CORES value '{env_cores}', ignoring.")
-else:
-    print("NUM_CORES not set, leaving defaults.")
+if multiprocessing.current_process().name == "MainProcess":
+    print(f"CPU Num Cores: {num_cores}")
+os.environ["XLA_FLAGS"] = f"--xla_force_host_platform_device_count={num_cores}"
+os.environ["JAX_PLATFORM_NAME"] = "cpu"
 
 
 import jax
@@ -24,9 +24,7 @@ import pandas as pd
 from tqdm import tqdm
 import numpyro
 
-if env_cores is not None:
-    num_cores = int(env_cores)
-    numpyro.set_host_device_count(num_cores)  # Tell NumPyro how many to use
+numpyro.set_host_device_count(num_cores)  # Tell NumPyro how many to use
 
 numpyro.enable_x64()
 
@@ -328,7 +326,6 @@ if __name__ == '__main__':
     parser.add_argument("--N", type=int, help="Number of objects to process.")
     parser.add_argument("--skip", type=int, help="Number of objects to skip.")
     parser.add_argument("--chunk_size", type=int, default=500, help="Chunk size for processing objects.")
-    parser.add_argument("--lc_file", type=str, help="Path to the light curve file.")
     parser.add_argument("--filter_file", type=str, help="Path to the file containing object IDs to filter.")
     parser.add_argument("--plot", action="store_true", help="Enable plotting of results.")
     parser.add_argument("--ignore_existing", action="store_true", help="Ignore sources already in the HDF5 file.")
@@ -348,14 +345,12 @@ if __name__ == '__main__':
     parser.add_argument("--load_sample_file", action="store_true", help="Load samples from previously ran job.")
     parser.add_argument("--disable_poly1", action="store_true", help="Disable Mean function detrending.")
     parser.add_argument("--jax_trace", action="store_true", help="Enable jax tracing.")
+    parser.add_argument("--rf_length_cut", type=int, default=-1, help="Cut light curves to same rest-frame length.")
+    parser.add_argument('--exact_same_length', action='store_true', help="Cut light curves to exact same rest-frame length.")
 
 
     args = parser.parse_args()
     print("Args: ", args)
-
-    if args.create_lc:
-        objs = concat_light_curves(save_file_path=args.lc_file, progress_bar=args.progress)
-        sys.exit("Created LC file. Exiting the program as requested.")
 
 
     filter_object_ids = args.filter_object_id if args.filter_object_id else []
@@ -374,10 +369,13 @@ if __name__ == '__main__':
     if len(filter_object_ids) > 0:
         print(f"Filtering object IDs: {len(filter_object_ids)}")
 
-    objs = concat_light_curves(filter_object_ids=filter_object_ids, N=args.N, skip=args.skip, save_file_path=args.lc_file, progress_bar=args.progress)
-    if args.create_lc:
-        sys.exit("Created LC file. Exiting the program as requested.")
+    objs = concat_light_curves(filter_object_ids=filter_object_ids, N=args.N, skip=args.skip, progress_bar=args.progress)
     print(f"Loaded {len(objs)} objects from concat_light_curves")
+    
+    if args.rf_length_cut > 0:
+        objs = cut_light_curve_restframe_window(objs, n_days=args.rf_length_cut, same_length=args.exact_same_length)
+        print(f"After restframe cut, {len(objs)} objects remain.")
+
 
     #objs = populate_sdss_fields(objs)
 

@@ -5,7 +5,7 @@ from tqdm import tqdm
 import math
 import corner
 from mpl_toolkits.axes_grid1.inset_locator import inset_axes
-from astropy.cosmology import FlatwCDM, FlatwpwaCDM, FlatLambdaCDM
+from astropy.cosmology import FlatwCDM, FlatwpwaCDM, FlatLambdaCDM, Flatw0waCDM
 import matplotlib.pyplot as plt
 import os
 import copy
@@ -197,12 +197,18 @@ def plot_cosmo_corner(
         i_H0  = _find(labels, "H0", "H_0")
         i_Om0 = _find(labels, "Om0", "OmegaM", "Omega_m")
 
-        if cosmo_model == "Flatw0waCDM":
+        if cosmo_model == "FlatwpwaCDM":
             i_wp = _find(labels, "wp", "w_p")
             i_wa = _find(labels, "wa", "w_a")
             a_p  = 1.0 / (1.0 + float(z_pivot))
             wp, wa = X[:, i_wp], X[:, i_wa]
             w0 = wp - (1.0 - a_p) * wa
+            Y = np.column_stack([X[:, i_H0], X[:, i_Om0], w0, wa])
+            lab_latex = [r"$H_0$", r"$\Omega_m$", r"$w_0$", r"$w_a$"]
+        if cosmo_model == "Flatw0waCDM":
+            i_w0 = _find(labels, "w0", "w_0")
+            i_wa = _find(labels, "wa", "w_a")
+            w0, wa = X[:, i_w0], X[:, i_wa]
             Y = np.column_stack([X[:, i_H0], X[:, i_Om0], w0, wa])
             lab_latex = [r"$H_0$", r"$\Omega_m$", r"$w_0$", r"$w_a$"]
         elif cosmo_model == "FlatwCDM":
@@ -373,10 +379,17 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
             FlatwCDM(H0=s[param_indices['H0']], Om0=s[param_indices['Om0']], w0=s[param_indices['w0']]).distmod(z_grid).value
             for s in flat_samples
         ])
-    elif cosmo_model == 'Flatw0waCDM':
+    elif cosmo_model == 'FlatwpwaCDM':
         mu_models = np.array([
             FlatwpwaCDM(H0=s[param_indices['H0']], Om0=s[param_indices['Om0']],
                         wp=s[param_indices['wp']], wa=s[param_indices['wa']], zp=z_pivot_agn
+                        ).distmod(z_grid).value
+            for s in flat_samples
+        ])
+    elif cosmo_model == 'Flatw0waCDM':
+        mu_models = np.array([
+            Flatw0waCDM(H0=s[param_indices['H0']], Om0=s[param_indices['Om0']],
+                        w0=s[param_indices['w0']], wa=s[param_indices['wa']]
                         ).distmod(z_grid).value
             for s in flat_samples
         ])
@@ -715,8 +728,10 @@ def plot_predicted_vs_actual_M2500(
     def _cosmo_from_params(H0, Om0, **kw):
         if cosmo_model == "FlatwCDM":
             return FlatwCDM(H0=H0, Om0=Om0, w0=kw["w0"])
-        elif cosmo_model == "Flatw0waCDM":
+        elif cosmo_model == "FlatwpwaCDM":
             return FlatwpwaCDM(H0=H0, Om0=Om0, wp=kw["wp"], wa=kw["wa"], zp=z_pivot_agn)
+        elif cosmo_model == "Flatw0waCDM":
+            return Flatw0waCDM(H0=H0, Om0=Om0, w0=kw["w0"], wa=kw["wa"])
         elif cosmo_model == "FlatLambdaCDM":
             return FlatLambdaCDM(H0=H0, Om0=Om0)
         else:
@@ -725,9 +740,12 @@ def plot_predicted_vs_actual_M2500(
     # Median cosmology for best-estimate distances
     if cosmo_model == "FlatwCDM":
         cosmo_med = _cosmo_from_params(results["H0"][1], results["Om0"][1], w0=results["w0"][1])
+    elif cosmo_model == "FlatwpwaCDM":
+        cosmo_med = _cosmo_from_params(results["H0"][1], results["Om0"][1],
+                                       wp=results["wp"][1], wa=results["wa"][1], zp=z_pivot_agn)
     elif cosmo_model == "Flatw0waCDM":
         cosmo_med = _cosmo_from_params(results["H0"][1], results["Om0"][1],
-                                       wp=results["wp"][1], wa=results["wa"][1])
+                                       w0=results["w0"][1], wa=results["wa"][1])
     else:
         cosmo_med = _cosmo_from_params(results["H0"][1], results["Om0"][1])
 
@@ -774,12 +792,17 @@ def plot_predicted_vs_actual_M2500(
     def _cosmo_from_draw(row):
         if cosmo_model == "FlatwCDM":
             return FlatwCDM(H0=row[label_to_idx["H0"]], Om0=row[label_to_idx["Om0"]], w0=row[label_to_idx["w0"]])
-        elif cosmo_model == "Flatw0waCDM":
+        elif cosmo_model == "FlatwpwaCDM":
             return FlatwpwaCDM(H0=row[label_to_idx["H0"]],
                                Om0=row[label_to_idx["Om0"]],
                                wp=row[label_to_idx["wp"]],
                                wa=row[label_to_idx["wa"]],
                                zp=z_pivot_agn)
+        elif cosmo_model == "Flatw0waCDM":
+            return Flatw0waCDM(H0=row[label_to_idx["H0"]],
+                               Om0=row[label_to_idx["Om0"]],
+                               w0=row[label_to_idx["w0"]],
+                               wa=row[label_to_idx["wa"]])
         else:
             return FlatLambdaCDM(H0=row[label_to_idx["H0"]], Om0=row[label_to_idx["Om0"]])
 
@@ -790,6 +813,9 @@ def plot_predicted_vs_actual_M2500(
         mu_draws[j, :] = np.array([cosmo_j.distmod(zi).value for zi in z])
     sigma_mu_cosmo = np.nanstd(mu_draws, axis=0, ddof=1)  # per-object DM uncertainty
     xerr = np.sqrt(m_app_err**2 + sigma_mu_cosmo**2)
+
+    if debias:
+        dm_interp = make_dm_function(df_agn["apparent_mag_2500"].values, df_agn['z'].values, dms)
 
     # --- binning in redshift ---
     num_cols = 4
@@ -816,14 +842,7 @@ def plot_predicted_vs_actual_M2500(
     xx = np.linspace(min(xlo, ylo), max(xhi, yhi), 400)
 
     sc_for_cbar = None
-
-    if debias:
-        apparent_mag_2500 = df_agn['apparent_mag_2500'].values
-        dm_interp = make_dm_function(apparent_mag_2500, df_agn['z'].values, dms)
-        dm_interp = make_dm_function(apparent_mag_2500, df_agn['z'], dms, method='linear')
-        pts = np.column_stack([df_agn['z'].values, apparent_mag_2500])
-        M_2500_pred += dm_interp(pts)
-
+        
     for i, ax in enumerate(axes):
         ax.set_xlim(xlo, xhi)
         ax.set_ylim(ylo, yhi)
@@ -835,7 +854,13 @@ def plot_predicted_vs_actual_M2500(
         if not np.any(bin_mask):
             ax.axis("off"); continue
 
-        x = actual_M_2500[bin_mask]
+        actual_M_2500_bin = actual_M_2500[bin_mask].copy()
+        # De-bias
+        if debias:
+            pts = np.column_stack([df_agn['z'][bin_mask], df_agn['apparent_mag_2500'][bin_mask]])
+            actual_M_2500_bin -= dm_interp(pts)
+
+        x = actual_M_2500_bin
         y = M_2500_pred[bin_mask]
         xerr_bin = xerr[bin_mask]
         yerr_bin = M_2500_pred_err[bin_mask]
@@ -900,10 +925,10 @@ def plot_predicted_vs_actual_M2500(
             f"σ_int = {sigma_intrinsic:.2f} mag   |   RMS(resid) = {rms_resid:.2f}\n"
             f"within ±σ_int: {frac1:4.1f}%  •  ±2σ_int: {frac2:4.1f}%  •  ±3σ_int: {frac3:4.1f}%"
         )
-        ax.annotate(
-            stats_text, xy=(0.03, 0.03), xycoords="axes fraction",
-            fontsize=10.5, color="dimgray", ha="left", va="bottom", bbox=boxprops,
-        )
+        # ax.annotate(
+        #     stats_text, xy=(0.03, 0.03), xycoords="axes fraction",
+        #     fontsize=10.5, color="dimgray", ha="left", va="bottom", bbox=boxprops,
+        # )
 
         n_in_bin = int(np.sum(bin_mask))
         ax.annotate(
@@ -952,13 +977,20 @@ def plot_predicted_vs_actual_Mi(flat_samples, df_agn, cosmo_model, z_pivot_agn, 
             Om0=results['Om0'][1],
             w0=results['w0'][1]
         )
-    elif cosmo_model == 'Flatw0waCDM':
+    elif cosmo_model == 'FlatwpwaCDM':
         cosmo = FlatwpwaCDM(
             H0=results['H0'][1],
             Om0=results['Om0'][1],
             wp=results['wp'][1],
             wa=results['wa'][1],
             zp=z_pivot_agn
+        )
+    elif cosmo_model == 'Flatw0waCDM':
+        cosmo = Flatw0waCDM(
+            H0=results['H0'][1],
+            Om0=results['Om0'][1],
+            w0=results['w0'][1],
+            wa=results['wa'][1],
         )
     elif cosmo_model == 'FlatLambdaCDM':
         cosmo = FlatLambdaCDM(
@@ -1113,8 +1145,8 @@ def plot_completeness_vs_mag_at_redshifts(p_detect, mag_centers, z_centers,
     plt.tight_layout()
     if show:
         plt.show()
-    os.makedirs("plots/hubble", exist_ok=True)
-    plt.savefig("plots/hubble/completeness_vs_mag_at_redshifts.png", dpi=300)
+    os.makedirs("plots/completeness", exist_ok=True)
+    plt.savefig("plots/completeness/completeness_vs_mag_at_redshifts.png", dpi=300)
     #plt.savefig("plots/hubble/completeness_vs_mag_at_redshifts.pdf", dpi=300)
     plt.close()
 
@@ -1150,7 +1182,7 @@ def plot_full_residuals(df_agn, residuals, flat_samples, cosmo_model, z_pivot_ag
             Om0=results['Om0'][1],
             w0=results['w0'][1]
         )
-    elif cosmo_model == 'Flatw0waCDM':
+    elif cosmo_model == 'FlatwpwaCDM':
         cosmo = FlatwpwaCDM(
             H0=results['H0'][1],
             Om0=results['Om0'][1],
@@ -1158,11 +1190,18 @@ def plot_full_residuals(df_agn, residuals, flat_samples, cosmo_model, z_pivot_ag
             wa=results['wa'][1],
             zp=z_pivot_agn,
         )
+    elif cosmo_model == 'Flatw0waCDM':
+        cosmo = Flatw0waCDM(
+            H0=results['H0'][1],
+            Om0=results['Om0'][1],
+            w0=results['w0'][1],
+            wa=results['wa'][1]
+        )
     else:
         raise ValueError("Invalid cosmology model.")
-
+    
+    df_agn = df_agn.copy().reset_index(drop=True)
     df_agn['MY_M_2500'] = df_agn['apparent_mag_2500'].values - np.array([cosmo.distmod(z).value for z in df_agn['z'].values])
-
 
     # Start with z < 10
     mask = df_agn['z'] < 10
@@ -1282,8 +1321,11 @@ def plot_predicted_L2500_vs_sigmahat(flat_samples, df_agn, cosmo_model, z_pivot_
     results = {key: np.percentile(flat_samples[:, i], [16, 50, 84]) for i, key in enumerate(model_labels)}
     if cosmo_model == 'FlatwCDM':
         cosmo = FlatwCDM(H0=results['H0'][1], Om0=results['Om0'][1], w0=results['w0'][1])
-    elif cosmo_model == 'Flatw0waCDM':
+    elif cosmo_model == 'FlatwpwaCDM':
         cosmo = FlatwpwaCDM(H0=results['H0'][1], Om0=results['Om0'][1], wp=results['wp'][1], wa=results['wa'][1], zp=z_pivot_agn)
+    elif cosmo_model == 'Flatw0waCDM':
+        cosmo = Flatw0waCDM(H0=results['H0'][1], Om0=results['Om0'][1], w0=results['w0'][1], wa=results['wa'][1])
+
     else:
         raise ValueError(f"Unknown cosmological model: {cosmo_model}")
 

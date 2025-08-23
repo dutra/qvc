@@ -1,18 +1,29 @@
+import os
+import multiprocessing
+
+num_cores = os.environ.get("NUM_CORES", os.cpu_count()-2)
+try:
+    num_cores = int(num_cores)
+except ValueError:
+    print(f"Invalid NUM_CORES value '{num_cores}', ignoring.")
+    num_cores = os.cpu_count()-2
+
+if multiprocessing.current_process().name == "MainProcess":
+    print(f"CPU Num Cores: {num_cores}")
+os.environ["XLA_FLAGS"] = f"--xla_force_host_platform_device_count={num_cores}"
+os.environ["JAX_PLATFORM_NAME"] = "cpu"
+
+prefix = os.environ.get("PREFIX", "")
+
 import numpy as np
-import pandas as pd
 import matplotlib.pyplot as plt
 from astropy.cosmology import FlatwCDM, Flatw0waCDM, FlatLambdaCDM, FlatwpwaCDM
 from scipy import stats
 from scipy.signal import fftconvolve
 import numpy as np
-import pandas as pd
 from scipy import stats
-import corner
-from tqdm import tqdm
 from dynesty import DynamicNestedSampler
 from dynesty.utils import resample_equal
-import pickle
-import multiprocessing
 from scipy.linalg import cho_solve
 from dynesty import utils as dyfunc
 
@@ -24,9 +35,6 @@ from hubble_utils import *
 from hubble_plotting import *
 from hubble_model import *
 from hubble_completeness import *
-import os
-import yaml
-import sys
 import argparse
 from scipy.interpolate import interp1d
 
@@ -73,9 +81,17 @@ def completeness_loglike(m_model, mu_err, z, completeness2d, m_grid, sigma_compl
     m_integrals = np.clip(m_integrals, tiny, None)        # numerical guard (can be > 1; units=mag)
     dmi = m_integrals / integrals - m_model
 
-    return np.sum(np.log(integrals)), (integrals, dmi)
+    # return a 2xN float blob (consistent shape)
+    blob = np.vstack([integrals.astype(float), dmi.astype(float)])
+    return np.sum(np.log(integrals)), blob
+    #return np.sum(np.log(integrals)), (integrals, dmi)
 
 # --- Log-likelihood ---
+def empty_blob(N_obj):
+    # FIX: always return (2, N_obj) float array
+    return np.zeros((2, N_obj), dtype=float)
+
+
 def log_likelihood(theta, cosmo_model,
                    completeness_params,
                    only_sna=False, use_full_cov=False,
@@ -85,12 +101,15 @@ def log_likelihood(theta, cosmo_model,
     model_priors = {key: priors[key] for key in model_labels}
     params = dict(zip(model_labels, theta))
 
+    # We'll need N_obj to create a fixed-shape blob for ALL branches
+    N_obj = len(_agn_data['z'])  # FIX: define once; used for consistent blobs
+
     for key, (low, high) in model_priors.items():
         if low > high:
             raise ValueError(f"For key {key} prior: Low {low} > high {high}")
         # Check if parameter is within prior bounds 
         if not (low < params[key] < high):
-            return -np.inf, np.array([])  # Return -inf log-likelihood and zero blobs
+            return -np.inf, empty_blob(N_obj)  # Return -inf log-likelihood and zero blobs
 
     # Cosmology
     if cosmo_model == 'FlatwCDM':
@@ -98,9 +117,11 @@ def log_likelihood(theta, cosmo_model,
     elif cosmo_model == 'Flatw0waCDM':
         #a_pivot = 1 / (1 + z_pivot_agn)
         #wp = params['w0'] + (1 - a_pivot) * params['wa']
-        z_pivot = z_pivot_sna if only_sna else z_pivot_agn
-        cosmo = FlatwpwaCDM(H0=params['H0'], Om0=params['Om0'], wp=params['wp'], wa=params['wa'], zp=z_pivot)
-        #cosmo = Flatw0waCDM(H0=params['H0'], Om0=params['Om0'], w0=params['w0'], wa=params['wa'])
+        #z_pivot = z_pivot_sna if only_sna else z_pivot_agn
+        #cosmo = FlatwpwaCDM(H0=params['H0'], Om0=params['Om0'], wp=params['wp'], wa=params['wa'], zp=z_pivot)
+        cosmo = Flatw0waCDM(H0=params['H0'], Om0=params['Om0'], w0=params['w0'], wa=params['wa'])
+        if params['w0'] + params['wa'] >= 0: # No early dark energy (EDE) prior: require dark energy to be negligible at high z
+            return -np.inf, empty_blob(N_obj)
     elif cosmo_model == 'FlatLambdaCDM':
         cosmo = FlatLambdaCDM(H0=params['H0'], Om0=params['Om0'])
 
@@ -128,8 +149,8 @@ def log_likelihood(theta, cosmo_model,
     z = _agn_data['z']
     
     if only_sna:
-        return ll_snia, np.array([])
-
+        return ll_snia, empty_blob(N_obj)
+    
     # AGN model
     m_obs = _agn_data['apparent_mag_2500']
     m_err = _agn_data['apparent_mag_2500_err']
@@ -170,9 +191,10 @@ def log_likelihood(theta, cosmo_model,
     m_model = M_pred + mu_cosmo  # model-predicted magnitude
 
     ll_completeness = 0.0
+    comp_blob = empty_blob(N_obj)
     if completeness_params is not None:
         completeness2d, mag_centers, _, _, _, completeness_scatter = completeness_params
-        ll_completeness, blobs = completeness_loglike(
+        ll_completeness, comp_blob = completeness_loglike(
             m_model=m_model, mu_err=mu_err, z=z,
             completeness2d=completeness2d, m_grid=mag_centers,
             sigma_completeness=completeness_scatter
@@ -181,7 +203,7 @@ def log_likelihood(theta, cosmo_model,
     #ll_theta, _cmb = loglike_cmb_theta_simple(cosmo)  # or pass omega_b_h2 if you prefer
     
     # print(f"Log-likelihood components: ll_snia={ll_snia:.2f}, ll_agn={ll_agn:.2f}, ll_completeness={ll_completeness:.2f}")
-    return ll_snia + ll_agn - ll_completeness, np.array(blobs)
+    return ll_snia + ll_agn - ll_completeness, comp_blob
 
 # Globals used by dynesty
 _dynesty_config = {}
@@ -223,7 +245,7 @@ def run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model='Flatw0waCDM',
     # Prepare data
     df_pantheon_filtered = df_pantheon[['zHD', 'MU_SH0ES', 'MU_SH0ES_ERR_DIAG', 'CEPH_DIST', 'IS_CALIBRATOR',
                                         'm_b_corr', 'x1', 'c', 'biasCor_m_b', 'HOST_LOGMASS']].copy()
-    df_agn_filtered = df_agn[['z', 'apparent_mag_2500', 'apparent_mag_2500_err', 'apparent_mag_i_rest',
+    df_agn_filtered = df_agn[['z', 'apparent_mag_2500', 'apparent_mag_2500_err', 'apparent_mag_i_rest', #'apparent_mag_i',
                               'log_sigma_UV', 'log_sigma_UV_err', 'log_tau_UV_RF', 'log_tau_UV_RF_err',
                               'bwb_beta', 'bwb_beta_err', 'ra', 'dec'
                               ]].copy()
@@ -260,15 +282,14 @@ def run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model='Flatw0waCDM',
         'only_sna': only_sna,
         'use_full_cov': use_full_cov,
     })
-    checkpoint_folder = 'results/hubble'
+    checkpoint_folder = f'results/dynesty_checkpoint/{prefix}'
     if not os.path.exists(checkpoint_folder):
         os.makedirs(checkpoint_folder)
     checkpoint_file = os.path.join(checkpoint_folder, 
                                    f'dynesty_checkpoint_{cosmo_model}_{'sna' if only_sna else 'joint'}_{speed}.save')
     print(f"Checkpoint file: {checkpoint_file}")
-    num_cpus = multiprocessing.cpu_count() - 1
     with multiprocessing.get_context("spawn").Pool(
-        processes=num_cpus,
+        processes=num_cores,
         initializer=dynesty_initializer,
         initargs=(_agn_data, _pantheon_data, _dynesty_config, 
                     _sna_LogdetCov, _sna_L, _sna_Lower)
@@ -298,7 +319,7 @@ def run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model='Flatw0waCDM',
                 bound='multi',
                 sample='rwalk',
                 pool=pool,
-                queue_size=num_cpus,
+                queue_size=num_cores,
                 blob=True
             )
             if speed == 'fast':
@@ -309,8 +330,8 @@ def run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model='Flatw0waCDM',
                     print_progress=True,
                     dlogz_init=10,                 
                     n_effective=50,                # 300–1000 typical for model comparison
-                    nlive_init=10,   # bump live points
-                    nlive_batch=10   # reasonable batch size for dynamic allocation
+                    nlive_init=20,   # bump live points
+                    nlive_batch=5   # reasonable batch size for dynamic allocation
                 )
             elif speed == "production":
                 print("Starting production run...")
@@ -384,6 +405,7 @@ def run_mcmc_pipeline(df_agn, df_pantheon, cosmo_model='Flatw0waCDM',
     plt.title("Interpolated dmi vs z — highest posterior weight sample")
     plt.grid(True)
     plt.tight_layout()
+    os.makedirs("plots/completeness", exist_ok=True)
     plt.savefig("plots/completeness/dmi_interp_vs_z_highest_weight.png", dpi=150)
     plt.close()
 
@@ -460,7 +482,7 @@ def run_single(df_agn, cosmo_model, completeness=True, use_full_cov=True,
                                                          only_sna=only_sna, completeness=completeness, use_full_cov=use_full_cov,
                                                          resume=resume, speed=speed)
 
-    plot_path = f"plots/hubble/{cosmo_model}_{'sna' if only_sna else 'joint'}_{speed}"
+    plot_path = f"plots/hubble/{prefix}/{cosmo_model}_{'sna' if only_sna else 'joint'}_{speed}"
     os.makedirs(plot_path, exist_ok=True)
 
     print("Plotting full dynesty corner...")
@@ -497,11 +519,11 @@ def run_single(df_agn, cosmo_model, completeness=True, use_full_cov=True,
 
     # Example usage:
     # Assuming `samples` is a dict from your MCMC run
-    if cosmo_model == 'Flatw0waCDM':
+    if cosmo_model in ['FlatwpwaCDM', 'Flatw0waCDM']:
         rho_w0_wa = posterior_corr(flat_samples, cosmo_model, z_pivot_agn)
         print(f"Posterior correlation coefficient (w0, wa) at z_p={z_pivot_agn}: {rho_w0_wa:.3f}")
 
-    if cosmo_model == 'Flatw0waCDM':
+    if cosmo_model == 'FlatwpwaCDM':
         zp = compute_pivot_redshift(flat_samples, cosmo_model)
         print("Computed pivot redshift: ", zp)
 
@@ -530,8 +552,8 @@ def run_all(df_agn, cosmo_model, speed="production", resume=False, N=None):
         r_joint   = extract_cosmo_results_from_samples(samples_joint, cosmo_model, False,  
                                                     logZ_tuple=(logZ_joint, logZerr_joint), format_for_latex=True, value_fmt="{:.2f}")
         results_latex.extend([r_sna, r_joint])
-    print(results_latex)
-    make_cosmo_table_latex(results_latex)
+
+    make_cosmo_table_latex(results_latex, write_path=f"plots/hubble/{prefix}/")
 
 
     logZ_1 = cosmo_models_dict[cosmo_models[0]]['logZ']

@@ -1,7 +1,22 @@
 #!/usr/bin/env python3
-import os
 from functools import partial
+import multiprocessing
 from multiprocessing import Pool, cpu_count
+import os
+
+num_cores = os.environ.get("NUM_CORES", os.cpu_count()-2)
+try:
+    num_cores = int(num_cores)
+except ValueError:
+    print(f"Invalid NUM_CORES value '{num_cores}', ignoring.")
+    num_cores = os.cpu_count()-2
+
+if multiprocessing.current_process().name == "MainProcess":
+    print(f"CPU Num Cores: {num_cores}")
+os.environ["XLA_FLAGS"] = f"--xla_force_host_platform_device_count={num_cores}"
+os.environ["JAX_PLATFORM_NAME"] = "cpu"
+
+
 import sys
 import timeit
 import argparse
@@ -9,6 +24,7 @@ import warnings
 import numpy as np
 import pandas as pd
 from tqdm import trange, tqdm
+import csv
 
 from astropy.io import fits
 from astropy.table import Table
@@ -546,8 +562,8 @@ def parse_args():
                    help="Optional limit on number of rows from input CSV to consider before matching.")
     p.add_argument("--download", action="store_true",
                    help="If set, download (and cache) all matched spectra and exit.")
-    p.add_argument("--nproc", type=int, default=max(1, (os.cpu_count() or 2) - 1),
-               help="Number of parallel worker processes for QSOFit.")
+    # p.add_argument("--nproc", type=int, default=max(1, (os.cpu_count() or 2) - 1),
+    #            help="Number of parallel worker processes for QSOFit.")
     p.add_argument("--filter_object_id", nargs="+", help="List of object IDs to filter.")
     return p.parse_args()
 
@@ -618,7 +634,7 @@ def main():
     chunksize = 1  # small so progress bar updates frequently
     results = {}
 
-    with Pool(processes=args.nproc) as pool:
+    with Pool(processes=num_cores) as pool:
         with tqdm(total=len(records), desc="Processing objects", dynamic_ncols=True, smoothing=0.0) as pbar:
             for res in pool.imap_unordered(worker, records, chunksize=chunksize):
                 obj_id = res.get("object_id", None)
@@ -641,6 +657,18 @@ def main():
         quasar.update(results[obj_id])
 
     write_hdf5_file(quasar_dict_list, args.fpath_out)
+    # Also write results to CSV
+
+    csv_out = args.fpath_out + ".csv"
+    fieldnames = list(results[next(iter(results))].keys()) if results else []
+
+    with open(csv_out, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for obj_id in results:
+            writer.writerow(results[obj_id])
+
+    print(f"[OK] Saved CSV results to {csv_out}")
 
     print(f"[OK] Saved results to {args.fpath_out}")
 if __name__ == "__main__":

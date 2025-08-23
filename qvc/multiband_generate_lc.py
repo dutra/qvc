@@ -20,10 +20,100 @@ filters = {"u": 0, "g": 1, "r": 2, "i": 3, "z": 4, "y": 5} # harcoded filter ord
 bands = ['u', 'g', 'r', 'i', 'z']#, 'y']
 #bands = ['g', 'r', 'i']
 
+def cut_light_curve_restframe_window(lc_list, n_days=1800, same_length=False):
+    """
+    Applies a rest-frame time cut to a list of light curve objects.
+    - Cuts to rest-frame window [0, n_days]
+    - Optional: Keeps object only if final rest-frame time span >= n_days - min_n_days
+
+    Parameters:
+    - lc: dict with keys 'mags', 'magerrs', 'times' (per band), and 'z'
+    - n_days: desired rest-frame duration
+    - delta_n_days: tolerance margin
+
+    Returns:
+    - new_lc: same structure with data cut in time, or None if rejected
+    """
+    bands = ['u', 'g', 'r', 'i', 'z']
+    max_cut_span = n_days
+    new_lc_list = []
+
+    for lc in lc_list:
+        z = lc['z']
+        obj_id = lc.get('object_id')
+
+        # --- Get object-specific t0 from all bands ---
+        t0_candidates = [
+            np.min(lc['times'][band])
+            for band in bands
+            if band in lc['times'] and len(lc['times'][band]) > 0
+        ]
+
+        if not t0_candidates:
+            print(f"Skipping {obj_id}: no valid times in any band")
+            continue
+
+        t0 = np.min(t0_candidates)
+        new_mags = {}
+        new_magerrs = {}
+        new_times = {}
+        cut_rest_times = []
+
+        for band in bands:
+            t_obs = np.asarray(lc['times'].get(band, []))
+            m_band = np.asarray(lc['mags'].get(band, []))
+            me_band = np.asarray(lc['magerrs'].get(band, []))
+
+            if len(t_obs) == 0:
+                new_times[band] = []
+                new_mags[band] = []
+                new_magerrs[band] = []
+                continue
+
+            # Convert to rest-frame
+            t_rest = (t_obs - t0) / (1 + z)
+            mask = (t_rest >= 0) & (t_rest <= max_cut_span)
+
+            new_times[band] = t_obs[mask]       # keep in observer frame
+            new_mags[band] = m_band[mask]
+            new_magerrs[band] = me_band[mask]
+            cut_rest_times.append(t_rest[mask])
+
+        # --- Final rest-frame span check ---
+        cut_rest_flat = np.concatenate(cut_rest_times) if cut_rest_times else np.array([])
+        if len(cut_rest_flat) == 0:
+            print(f"Skipping {obj_id}: no data in rest-frame cut window")
+            continue
+
+        span_rf = np.max(cut_rest_flat) - np.min(cut_rest_flat)
+
+        min_n_days = n_days * 0.9
+        if same_length and span_rf < min_n_days:
+            print(f"Skipping {obj_id}: span = {span_rf:.1f} < {min_n_days:.1f} rest-frame days")
+            continue
+
+        print(f"✅ Keeping {obj_id}: rest-frame span = {span_rf:.1f} days")
+        
+        mags_means = [np.nanmean(new_mags[band]) for band in new_mags.keys()]
+        mags_stds = [np.nanstd(new_mags[band]) for band in new_mags.keys()]
+        new_lc = lc.copy()
+        new_lc.update({
+            'object_id': obj_id,
+            'z': z,
+            'span_rf': span_rf,
+            'mags': new_mags,
+            'magerrs': new_magerrs,
+            'times': new_times,  # still in observer frame
+            'mags_mean': mags_means,
+            'mags_std': mags_stds,
+        })
+        new_lc_list.append(new_lc)
+        
+    return new_lc_list
 
 
-def concat_light_curves(N=None, skip=None, filter_object_ids=[], save_file_path=None, progress_bar=False):
-    print(f"DEBUG concat_light_curves args: {N=}, {skip=}, {len(filter_object_ids)=}, {save_file_path=}")
+def concat_light_curves(N=None, skip=None, filter_object_ids=[], progress_bar=False):
+    print(f"DEBUG concat_light_curves args: {N=}, {skip=}, {len(filter_object_ids)=}")
 
     if skip:
         filter_object_ids = filter_object_ids[skip:]
@@ -32,14 +122,7 @@ def concat_light_curves(N=None, skip=None, filter_object_ids=[], save_file_path=
 
     filter_object_ids = set(filter_object_ids)
 
-    if save_file_path and os.path.exists(save_file_path):
-        print(f"DEBUG concat_light_curves Loading LC data from {save_file_path}")
-        s82_objs = load_s82_from_hdf5(save_file_path)
-        print(f"DEBUG Loaded {len(s82_objs)} objs from {save_file_path}")
-        s82_objs = [obj for obj in s82_objs if obj['object_id'] in filter_object_ids]
-        return s82_objs
-    else: 
-        s82_objs = []
+    s82_objs = []
 
     # Load the S82 data from the FITS file
     hdul = fits.open('data/dr16q_prop_May01_2024.fits')
@@ -146,22 +229,6 @@ def concat_light_curves(N=None, skip=None, filter_object_ids=[], save_file_path=
     print(f"Found {len(s82_objs)} objects in concat_light_curves after time cut", len(s82_objs))
 
     s82_objs = populate_sdss_fields(s82_objs, progress_bar=progress_bar)
-
-    if save_file_path:
-        with h5py.File(save_file_path, "w") as hdf:
-            for obj in s82_objs:
-                object_id = obj["object_id"]
-                group = hdf.create_group(object_id)
-
-                # Save all attributes
-                for key, value in obj.items():
-                    if isinstance(value, dict):
-                        sub_group = group.create_group(key)
-                        for sub_key, sub_value in value.items():
-                            sub_group.create_dataset(sub_key, data=sub_value)
-                    else:
-                        group.attrs[key] = value
-        print(f"Saved {len(s82_objs)} LCs to {save_file_path}")
 
     return s82_objs
 
