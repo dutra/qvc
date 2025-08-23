@@ -35,7 +35,7 @@ import tinygp
 from tinygp.kernels import quasisep as qs
 
 class ContiBLRQS(qs.Wrapper):
-"""
+    """
     Quasi-separable Gaussian process kernel for multiband AGN light curves, 
     combining continuum, BLR, and bluer-when-brighter (BWB) contributions.
 
