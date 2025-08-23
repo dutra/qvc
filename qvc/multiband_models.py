@@ -66,6 +66,7 @@ class ContiBLRQS(qs.Wrapper):
     lag_blr: jnp.ndarray
     bwb_alpha: jnp.ndarray
     bwb_beta: jnp.ndarray
+    kernel2: qs.Kernel
 
     def __init__(self, amp_cont, amp_blr, lag_blr, tau_drw, bwb_alpha, bwb_beta, width_cont, width_blr) -> None:
         self.amp_cont = amp_cont
@@ -77,11 +78,12 @@ class ContiBLRQS(qs.Wrapper):
         self.width_cont = width_cont
         self.width_blr = width_blr
         self.kernel = qs.Exp(scale=self.tau_drw, sigma=1.0)
+        self.kernel2 = qs.Exp(scale=self.tau_drw / self.bwb_beta, sigma=1.0)
 
     def coord_to_sortable(self, X) -> JAXArray:
         return X[0]
 
-    # ---- Helper: base matrices (block 0) ----
+    # Base matrices (block 0)
     def _A0(self):
         return self.kernel.design_matrix()
 
@@ -91,18 +93,15 @@ class ContiBLRQS(qs.Wrapper):
     def _Phi0(self, dt):
         return self.kernel.transition_matrix(0.0, dt)  # QS kernels ignore absolute times
 
-    # ---- Helper: k^2 kernel (block 1) ----
-    def _ensure_kernel_sq(self):
-        return qs.Exp(scale=self.tau_drw / self.bwb_beta, sigma=1.0)
-
+    # Base matrices (block 1)
     def _A1(self):
-        return self._ensure_kernel_sq().design_matrix()
+        return self.kernel2.design_matrix()
 
     def _P1(self):
-        return self._ensure_kernel_sq().stationary_covariance()
+        return self.kernel2.stationary_covariance()
 
     def _Phi1(self, dt):
-        return self._ensure_kernel_sq().transition_matrix(0.0, dt)
+        return self.kernel2.transition_matrix(0.0, dt)
 
     def design_matrix(self) -> JAXArray:
         # Block-diagonal of base and k^2 generators
@@ -134,36 +133,39 @@ class ContiBLRQS(qs.Wrapper):
 
     def _tophat_factor(self, width: int) -> JAXArray:
         x = width / (2.0 * self.tau_drw)
-        # series for small x: 1 + x^2/6 + x^4/120
-        small = 1.0 + (x**2)/6.0 + (x**4)/120.0
+        small = 1.0 + (x**2)/6.0 + (x**4)/120.0 # Series for small x
         return jnp.where(jnp.abs(x) < 1e-4, small, jnp.sinh(x) / (x + 1e-18))
 
     def observation_model(self, X: JAXArray) -> JAXArray:
         """
-        Return a single observation vector h_tot for the *augmented* state:
-            h_tot = [ h_base_total ,
-                      h_bwb        ].
+        Return a single observation vector h_tot for the augmented state:
+            h_tot = [ h_base_total , h_bwb ].
         """
         t, b = X
         b = jnp.asarray(b, dtype=int)
 
-        # Transfer function
-        fac_blr = self._tophat_factor(self.width_blr[b])
+        # Transfer factors from top-hat smoothing (single tophat per component)
+        fac_blr  = self._tophat_factor(self.width_blr[b])
         fac_cont = self._tophat_factor(self.width_cont[b])
 
-        # Base kernel observation vector and delayed version
-        h = self.kernel.observation_model(t)                 # shape [m]
-        Phi_delay_T = self._Phi0(self.lag_blr[b]).T          # apply delay on the left
-        h_cont = self.amp_cont[b] * fac_cont * h
-        h_blr  = self.amp_blr[b] * fac_blr * (Phi_delay_T @ h)
-        h_base_total = h_cont + h_blr                  # yields the 4-term sum
+        # Base kernel observation vectors
+        # Continuum evaluated at time t
+        h_cont0 = self.kernel.observation_model(t)                   # shape [m]
+        # BLR is the same latent, but evaluated at shifted time (t - Δ_b)
+        h_blr0  = self.kernel.observation_model(t - self.lag_blr[b]) # shape [m]
 
-        # BWB component on k^2 with weight sqrt(2)*q_b where q_b = bwb_alpha * A_b^2
-        q_b = self.bwb_alpha * (self.amp_cont[b] * fac_cont) ** 2
-        h_sq = self._ensure_kernel_sq().observation_model(t) # shape [m2]
-        h_bwb = jnp.sqrt(2.0) * q_b * h_sq                   # gives 2 q1 q2 k^2 in cov
+        # Amplitude-weighted components
+        h_cont = self.amp_cont[b] * fac_cont * h_cont0
+        h_blr  = self.amp_blr[b]  * fac_blr  * h_blr0
 
-        # Concatenate into augmented-state observation
+        # Sum gives the 4-term expansion in the covariance
+        h_base_total = h_cont + h_blr
+
+        # BWB piece ~ k^2(τ); choose tau_drw/2 for exact square by default
+        h_sq = self.kernel2.observation_model(t)  # if you keep bwb_beta free, this is τ/β
+        q_b  = self.bwb_alpha * (self.amp_cont[b] * fac_cont) ** 2
+        h_bwb = jnp.sqrt(2.0) * q_b * h_sq
+
         return jnp.concatenate([h_base_total, h_bwb], axis=0)
 
     def psd(self, omega: JAXArray, b: int, sigma_n2: float = 0.0) -> JAXArray:
