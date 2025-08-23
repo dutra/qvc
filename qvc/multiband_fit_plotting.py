@@ -253,13 +253,10 @@ def combined_lomb_scargle_from_model(
     yerr = yerr[order]
 
     # Lomb–Scargle
-    ls = LombScargle(t_lag, y, yerr)
+    ls = LombScargle(t_lag, y, yerr, fit_mean=False)
     P_raw = ls.power(f_raw, normalization=normalization)
 
-    # Noise
-    total_var_pts = yerr**2 + np.exp(np.mean(params['log_jitter']))**2
-    sigma2_noise = np.mean(total_var_pts)
-    P_noise = 2.0 * sigma2_noise * np.mean(np.diff(t_lag))
+    P_noise = np.median(P_raw[f_raw > 1/20])
 
     P_raw = np.maximum(P_raw - P_noise, 0.0)  # keep non-negative
 
@@ -354,7 +351,7 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, data):
     psd_samples = []
     for i in range(len(samples['log_tau_drw0'])):
         sample_params = {k: jnp.array(v[i]) for k, v in samples.items()}
-        psd_i = model.psd(sample_params, 2 * np.pi * freqs, b=0, sigma_n2=0.0)
+        psd_i = (2.0 * jnp.pi) * model.psd(sample_params, 2 * np.pi * freqs, b=0, sigma_n2=0.0)
         psd_samples.append(np.asarray(psd_i))
     psd_samples = np.stack(psd_samples, axis=0)
     psd_median = np.median(psd_samples, axis=0)
@@ -365,7 +362,7 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, data):
     ax_psd.fill_between(freqs, psd_lo, psd_hi, color='m', alpha=0.2)
 
     # Plot the noise level
-    ax_psd.axhline(P_noise, color='gray', linestyle='--', lw=1.5, label="Noise Level")
+    ax_psd.axhline(np.median(P_noise), color='gray', linestyle='--', lw=1.5, label="Noise Level")
 
     ax_lc.set_xlabel('MJD')
     ax_lc.set_ylabel('Magnitude + arbitrary offset')

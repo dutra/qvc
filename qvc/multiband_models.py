@@ -199,7 +199,7 @@ class ContiBLRQS(qs.Wrapper):
             v = jnp.linalg.solve((-1j * w) * I - A.T, h)
             return (v.conj().T @ (Qc @ v)).real + sigma_n2
 
-        return jax.vmap(one_w)(omega)
+        return 2.0 * jax.vmap(one_w)(omega)
 
 class MyMultibandContiBLR(tinygp.kernels.Kernel):
     amplitudes: jnp.ndarray
