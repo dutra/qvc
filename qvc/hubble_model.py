@@ -85,7 +85,7 @@ def get_model_params(cosmo_model, only_sna=False):
         pass
     elif cosmo_model == 'FlatwCDM':
         priors |= OrderedDict([
-            ("w0",          (-10, 10))
+            ("w0",          (-20, 20))
         ])
     elif cosmo_model == 'Flatw0waCDM':
         priors |= OrderedDict([
