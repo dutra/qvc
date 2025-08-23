@@ -35,27 +35,53 @@ import tinygp
 from tinygp.kernels import quasisep as qs
 
 class ContiBLRQS(qs.Wrapper):
-    """
-    Quasi-separable implementation of:
-    cov = A_b1 A_b2 k(τ)
+"""
+    Quasi-separable Gaussian process kernel for multiband AGN light curves, 
+    combining continuum, BLR, and bluer-when-brighter (BWB) contributions.
+
+    The covariance between band b1 at time t1 and band b2 at time t2 is
+
+        cov = A_b1 A_b2 k(τ)
             + A_b1 A_blr_b2 (k * TopHat_{Δ_b2,w_b2})(τ)
             + A_blr_b1 A_b2 (k * TopHat_{Δ_b1,w_b1})(-τ)
             + A_blr_b1 A_blr_b2 (k * TopHat_{Δ_b1,w_b1} * TopHat_{Δ_b2,w_b2})(τ)
             + 2 q_b1 q_b2 [k(τ)]^2,
 
+    where τ = t2 - t1, k(τ) is an OU/DRW kernel with timescale τ_drw, and 
+    TopHat_{Δ,w} denotes convolution with a top-hat transfer function centered 
+    at lag Δ and width w. The last term models the BWB effect as a squared-kernel 
+    contribution with amplitude weights q_b.
+
+    Implementation details
+    ----------------------
+    - Continuum contribution: direct OU process evaluated at time t.
+    - BLR contribution: same latent OU, but evaluated at (t - Δ_b), ensuring 
+      that a positive lag Δ_b corresponds to the BLR light curve lagging behind 
+      the continuum.
+    - Top-hat smoothing: each component is rescaled by a factor 
+      sinh(w / 2τ_drw) / (w / 2τ_drw), or its series expansion for small width.
+    - BWB term: implemented as a second OU kernel with effective timescale 
+      τ_drw / bwb_beta (exact square if bwb_beta = 2), and observation weights 
+      √2 · q_b with q_b = bwb_alpha · (A_cont · fac_cont)^2.
+
     Parameters
     ----------
-    tau_cont : float
-        DRW/OU timescale for the latent continuum.
-    amp_cont : array [B]
+    tau_drw : float
+        DRW/OU timescale for the latent continuum kernel.
+    width_cont : array_like [B]
+        Per-band top-hat width for the continuum component.
+    width_blr : array_like [B]
+        Per-band top-hat width for the BLR component.
+    amp_cont : array_like [B]
         Per-band continuum amplitudes.
-    amp_blr : array [B]
+    amp_blr : array_like [B]
         Per-band BLR amplitudes.
-    lag_b : array [B]
-        Per-band BLR lags (days, same units as times).
-    alphas : array [K]
-        Decay rates for the exponential basis (1/time units).
-        Choose them to span the plausible lag range.
+    lag_blr : array_like [B]
+        Per-band BLR lags (positive values imply BLR lags behind the continuum).
+    bwb_alpha : array_like [B]
+        Scaling coefficient for the BWB squared-kernel term.
+    bwb_beta : array_like [B]
+        Timescale modifier for the BWB kernel (default ~2 for exact squaring).
     """
 
     tau_drw: float
