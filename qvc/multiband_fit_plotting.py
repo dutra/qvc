@@ -216,16 +216,16 @@ def combined_lomb_scargle_from_model(
       "P_raw" : raw LS power
       "f_bin","P_bin","P_lo","P_hi","bin_counts"
     """
-    # --- Convert omega -> frequency grid
+    # Convert omega -> frequency grid
     omega = np.asarray(omega, float)
     f_raw = omega / (2.0 * np.pi)
 
-    # --- Lag subtraction
+    # Lag subtraction
     (t_lag, band_idx), _ = model.my_lag_transform(model.X, model.has_lag, params)
     t_lag = np.asarray(t_lag, float)
     band_idx = np.asarray(band_idx, int)
 
-    # --- Mean subtraction via mean_func
+    # Mean subtraction via mean_func
     t_center = float(np.mean(t_lag))
     t_std = float(np.std(t_lag))
     mean_vals = model.mean_func(
@@ -239,7 +239,7 @@ def combined_lomb_scargle_from_model(
     y = np.asarray(model.y, float).copy() - np.asarray(mean_vals, float)
     yerr = np.asarray(model.yerr, float).copy()
 
-    # --- Normalize amplitudes to band 0 scale
+    # Normalize amplitudes to band 0 scale
     log_sigma_band = np.asarray(model.my_amp_transform(params))
     s0 = float(np.exp(log_sigma_band[0]))
     s_b = np.exp(log_sigma_band)
@@ -252,18 +252,18 @@ def combined_lomb_scargle_from_model(
     yerr *= scale
     yerr = yerr[order]
 
-    # --- Lomb–Scargle
+    # Lomb–Scargle
     ls = LombScargle(t_lag, y, yerr)
     P_raw = ls.power(f_raw, normalization=normalization)
 
     # Noise
-    total_var_pts = yerr**2 + np.exp(params['log_jitter'][0])**2
+    total_var_pts = yerr**2 + np.exp(np.mean(params['log_jitter']))**2
     sigma2_noise = np.mean(total_var_pts)
-    P_noise = 2.0 * sigma2_noise * np.median(np.diff(t_lag))
+    P_noise = 2.0 * sigma2_noise * np.mean(np.diff(t_lag))
 
     P_raw = np.maximum(P_raw - P_noise, 0.0)  # keep non-negative
 
-    # --- Log-binning in f
+    # Log-binning in f
     fmin, fmax = np.min(f_raw), np.max(f_raw)
     decades = np.log10(fmax) - np.log10(fmin)
     n_bins = int(np.ceil(bins_per_decade * decades))
@@ -283,7 +283,7 @@ def combined_lomb_scargle_from_model(
             P_hi.append(np.percentile(P_chunk, 84))
             counts.append(np.count_nonzero(sel))
 
-    return np.array(f_bin), np.array(P_bin), np.array(P_lo), np.array(P_hi), np.array(counts)
+    return np.array(f_bin), np.array(P_bin), np.array(P_lo), np.array(P_hi), np.array(counts), P_noise
 
 
 def save_combined_plot(samples, model, X, y, yerr, band_idx, data):
@@ -303,7 +303,7 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, data):
         ax_lc.errorbar(t[m], y[m]+offsets[n], yerr=yerr[m], fmt='o', 
                 label=f'{band_idx_map[n]}-band', alpha=0.7, color=colors[band_idx_map[n]], lw=1.0, capsize=1, markersize=1)
         # Generate test times for predictions
-        t_test = np.linspace(t.min(), t.max(), 1000)
+        t_test = np.linspace(t.min() - 400, t.max() + 400, 1000)
         # Compute predictions using the model
         posterior_median = {k: np.median(v, axis=0) for k, v in samples.items()}
         result = model.pred(posterior_median, (t_test, jnp.full_like(t_test, n, dtype=int)))
@@ -335,10 +335,10 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, data):
         posterior_median[k] = jnp.array(posterior_median[k])
 
     # PSD calculation and plotting
-    freqs = np.logspace(-6, -1, 250)
+    freqs = np.logspace(-6, 2, 500)
 
     # Data PSD
-    f_bin, P_bin, P_lo, P_hi, cts = combined_lomb_scargle_from_model(model, posterior_median, 2*np.pi*freqs)
+    f_bin, P_bin, P_lo, P_hi, cts, P_noise = combined_lomb_scargle_from_model(model, posterior_median, 2*np.pi*freqs)
     ax_psd.errorbar(f_bin, P_bin, yerr=[P_bin - P_lo, P_hi - P_bin], label="Lomb-Scargle PSD", lw=4, color='k')
 
     # Plot a vertical line at the posterior median log_tau_drw0 (if present)
@@ -363,10 +363,14 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, data):
 
     ax_psd.plot(freqs, psd_median, lw=2, color='m', alpha=0.8, label="Model PSD")
     ax_psd.fill_between(freqs, psd_lo, psd_hi, color='m', alpha=0.2)
-    
+
+    # Plot the noise level
+    ax_psd.axhline(P_noise, color='gray', linestyle='--', lw=1.5, label="Noise Level")
+
     ax_lc.set_xlabel('MJD')
     ax_lc.set_ylabel('Magnitude + arbitrary offset')
     ax_lc.invert_yaxis()
+    ax_lc.set_xlim(np.min(t_test), np.max(t_test))
     #ax_lc.legend(loc='best')
 
     # PSD axis formatting
@@ -388,8 +392,8 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, data):
     ref_psd4 *= median_psd / np.interp(median_freq, ref_freqs, ref_psd4)
     ax_psd.plot(ref_freqs, 10*ref_psd2, 'k--', label="-2")
     ax_psd.plot(ref_freqs, 10*ref_psd4, 'k:', label="-4")
-    ax_psd.set_ylim(1e-2, 1e4)
-    ax_psd.set_xlim(1e-6, 1e-1)
+    ax_psd.set_ylim(1e-3, 1e4)
+    ax_psd.set_xlim(1e-6, 1e1)
 
     plt.tight_layout()
 

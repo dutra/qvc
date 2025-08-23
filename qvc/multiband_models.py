@@ -59,6 +59,7 @@ class ContiBLRQS(qs.Wrapper):
     """
 
     tau_drw: float
+    width_cont: jnp.ndarray
     width_blr: jnp.ndarray
     amp_cont: jnp.ndarray
     amp_blr: jnp.ndarray
@@ -66,13 +67,14 @@ class ContiBLRQS(qs.Wrapper):
     bwb_alpha: jnp.ndarray
     bwb_beta: jnp.ndarray
 
-    def __init__(self, amp_cont, amp_blr, lag_blr, tau_drw, bwb_alpha, bwb_beta, width_blr) -> None:
+    def __init__(self, amp_cont, amp_blr, lag_blr, tau_drw, bwb_alpha, bwb_beta, width_cont, width_blr) -> None:
         self.amp_cont = amp_cont
         self.amp_blr = amp_blr
         self.lag_blr = lag_blr
         self.tau_drw = tau_drw
         self.bwb_alpha = bwb_alpha
         self.bwb_beta = bwb_beta
+        self.width_cont = width_cont
         self.width_blr = width_blr
         self.kernel = qs.Exp(scale=self.tau_drw, sigma=1.0)
 
@@ -130,8 +132,8 @@ class ContiBLRQS(qs.Wrapper):
         return jnp.block([[Phi0, z01],
                           [z10, Phi1]])
 
-    def _tophat_factor(self, b: int) -> JAXArray:
-        x = self.width_blr[b] / (2.0 * self.tau_drw)
+    def _tophat_factor(self, width: int) -> JAXArray:
+        x = width / (2.0 * self.tau_drw)
         # series for small x: 1 + x^2/6 + x^4/120
         small = 1.0 + (x**2)/6.0 + (x**4)/120.0
         return jnp.where(jnp.abs(x) < 1e-4, small, jnp.sinh(x) / (x + 1e-18))
@@ -146,17 +148,18 @@ class ContiBLRQS(qs.Wrapper):
         b = jnp.asarray(b, dtype=int)
 
         # Transfer function
-        fac = self._tophat_factor(b)
+        fac_blr = self._tophat_factor(self.width_blr[b])
+        fac_cont = self._tophat_factor(self.width_cont[b])
 
         # Base kernel observation vector and delayed version
         h = self.kernel.observation_model(t)                 # shape [m]
         Phi_delay_T = self._Phi0(self.lag_blr[b]).T          # apply delay on the left
-        h_cont = self.amp_cont[b] * h
-        h_blr  = self.amp_blr[b] * fac * (Phi_delay_T @ h)
-        h_base_total = h_cont + h_blr                        # yields the 4-term sum
+        h_cont = self.amp_cont[b] * fac_cont * h
+        h_blr  = self.amp_blr[b] * fac_blr * (Phi_delay_T @ h)
+        h_base_total = h_cont + h_blr                  # yields the 4-term sum
 
         # BWB component on k^2 with weight sqrt(2)*q_b where q_b = bwb_alpha * A_b^2
-        q_b = self.bwb_alpha * (self.amp_cont[b] ** 2)
+        q_b = self.bwb_alpha * (self.amp_cont[b] * fac_cont) ** 2
         h_sq = self._ensure_kernel_sq().observation_model(t) # shape [m2]
         h_bwb = jnp.sqrt(2.0) * q_b * h_sq                   # gives 2 q1 q2 k^2 in cov
 
@@ -340,6 +343,7 @@ class MyMultiVarModel(MultiVarModel):
             lag_blr=jnp.exp(params["log_lag_blr"]),
             bwb_alpha=params["bwb_alpha"],
             bwb_beta=params["bwb_beta"],
+            width_cont=params["width_cont"],
             width_blr=params["width_blr"],
         )
 

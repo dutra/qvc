@@ -128,7 +128,7 @@ def build_model(batch_data, zs, f_host_value, lam_rfs, log_jitter_mean, f_host_s
             # Bluer when brighter (BWB) strength
             if bwb:
                 bwb_log_alpha = numpyro.sample("bwb_log_alpha", dist.Normal(0.5, 0.2))
-                bwb_log_beta = numpyro.sample("bwb_log_beta", dist.Normal(2.0, 1.0))
+                bwb_log_beta = numpyro.sample("bwb_log_beta", dist.Normal(4.0, 1.0))
                 bwb_alpha = numpyro.deterministic("bwb_alpha", jnp.exp(bwb_log_alpha))
                 bwb_beta = numpyro.deterministic("bwb_beta", jnp.exp(bwb_log_beta))
             else:
@@ -144,8 +144,10 @@ def build_model(batch_data, zs, f_host_value, lam_rfs, log_jitter_mean, f_host_s
                 # BLR amplitudes and lags
                 log_amp_delta_blr = numpyro.sample("log_amp_delta_blr", dist.Normal(jnp.full(nBands, -1.0), 1.0))
                 log_lag_blr = numpyro.sample("log_lag_blr", dist.Normal(log_lab_blr_c[..., None], 3.0))
-                #width_blr = numpyro.sample("width_blr", dist.TruncatedNormal(jnp.full(nBands, 10), 100.0, low=1.0))
+                #width_blr = numpyro.sample("width_blr", dist.TruncatedNormal(jnp.full(nBands, 10), 1000.0, low=1.0))
+                #width_cont = numpyro.sample("width_cont", dist.TruncatedNormal(jnp.full(nBands, 10), 1000.0, low=1.0))
                 width_blr = numpyro.deterministic("width_blr", jnp.zeros_like(mean))
+                width_cont = numpyro.deterministic("width_cont", jnp.zeros_like(mean))
 
                 # Jitter
                 log_jitter = numpyro.sample("log_jitter", dist.Normal(log_jitter_mean, 1.0))
@@ -167,6 +169,7 @@ def build_model(batch_data, zs, f_host_value, lam_rfs, log_jitter_mean, f_host_s
                 "bwb_alpha": bwb_alpha[i],
                 "bwb_beta": bwb_beta[i],
                 "width_blr": width_blr[i],
+                "width_cont": width_cont[i],
                 # power law
                 "eta_A1": eta_A1[i],
                 "eta_A2": eta_A2[i],
