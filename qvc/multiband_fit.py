@@ -65,7 +65,7 @@ def build_model(batch_data, zs, f_host_value, lam_rfs, log_jitter_mean, f_host_s
     nBands = 5  # or use from config
 
     log_tau_drw0_c = jnp.log(10**2.5 * (1 + zs))
-    log_lab_blr_c = jnp.log(10**1.5 * (1 + zs))
+    log_lag_blr_c = jnp.log(10**1.5 * (1 + zs))
 
     def numpyro_joint_model():
         # Initialize parameters
@@ -141,11 +141,11 @@ def build_model(batch_data, zs, f_host_value, lam_rfs, log_jitter_mean, f_host_s
 
                 # BLR amplitudes and lags
                 log_amp_delta_blr = numpyro.sample("log_amp_delta_blr", dist.Normal(jnp.full(nBands, -1.0), 1.0))
-                log_lag_blr = numpyro.sample("log_lag_blr", dist.Normal(log_lab_blr_c[..., None], 3.0))
-                width_blr = numpyro.sample("width_blr", dist.TruncatedNormal(jnp.expand_dims(0.2 * jnp.exp(log_tau_drw0), -1).repeat(nBands, axis=-1), 20.0, low=1.0))
-                width_cont = numpyro.sample("width_cont", dist.TruncatedNormal(0.2*jnp.exp(log_lag_blr), 20.0, low=1.0))
-                #width_blr = numpyro.deterministic("width_blr", jnp.zeros_like(mean))
-                #width_cont = numpyro.deterministic("width_cont", jnp.zeros_like(mean))
+                log_lag_blr = numpyro.sample("log_lag_blr", dist.Normal(log_lag_blr_c[..., None], 3.0))
+                width_blr = numpyro.sample("width_blr", dist.TruncatedNormal(0.2 * jnp.exp(log_tau_drw0_c[..., None]), 20.0, low=10.0))
+                width_cont = numpyro.sample("width_cont", dist.TruncatedNormal(0.2 * jnp.exp(log_tau_drw0_c[..., None]), 20.0, low=10.0))
+                #width_blr = numpyro.deterministic("width_blr", 0.2 * jnp.exp(log_tau_drw0[..., None]))
+                #width_cont = numpyro.deterministic("width_cont", 0.2 * jnp.exp(log_tau_drw0[..., None]))
 
                 # Jitter
                 log_jitter = numpyro.sample("log_jitter", dist.Normal(log_jitter_mean, 1.0))
