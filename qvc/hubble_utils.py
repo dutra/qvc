@@ -497,10 +497,11 @@ def populate_sdss_fields(objs, progress_bar=True):
 
     return objs
 
-def read_quasars_from_hdf5(file_path, first=None):
+def read_quasars_from_hdf5(file_path, N=None):
     quasar_list = []
 
     with h5py.File(file_path, "r") as hdf:
+        N = 100
         for group_name in tqdm(list(hdf.keys()), desc="Reading quasars from HDF5"):
             group = hdf[group_name]
             quasar = {"object_id": group_name}
@@ -510,7 +511,7 @@ def read_quasars_from_hdf5(file_path, first=None):
                 sub_group = group[sub_group_name]
                 quasar[sub_group_name] = {sub_key: sub_group[sub_key][...] for sub_key in sub_group.keys()}
             quasar_list.append(quasar)
-            if first is not None and len(quasar_list) >= first:
+            if (N is not None) and (N >= 0) and (len(quasar_list) >= N):
                 break
     return quasar_list
 
@@ -591,8 +592,8 @@ def populate_chi_sq_from_csv(df, csv_path="data/aug4_sample_chisqg10_ebv005sn3.c
     df['chi_sq_all'] = merged['chi_sq_all']
     return df
 
-def load_quasar_data(file_path, populate_sdss=False, apply_cut=True, first=None):
-    quasar_list = read_quasars_from_hdf5(file_path, first=first)
+def load_quasar_data(file_path, populate_sdss=False, apply_cut=True):
+    quasar_list = read_quasars_from_hdf5(file_path)
     print("Number of quasars loaded:", len(quasar_list))
 
     if populate_sdss:
@@ -684,12 +685,15 @@ def load_quasar_data(file_path, populate_sdss=False, apply_cut=True, first=None)
     print("Final number of quasars:", len(df))
     return df
 
-def load_data(file_path, populate_sdss=False, apply_cut=True):
+def load_agn_data(file_path, populate_sdss=False, apply_cut=True):
     print("Loading quasar data...")
     #df_agn = load_quasar_data("data/may12_objs_tauwavelength_taublr_redbands_ds4_merged.h5")
     df_agn = load_quasar_data(file_path=file_path, populate_sdss=populate_sdss, apply_cut=apply_cut)
     # Return 200 randomly sampled AGNs for speed
     #df_agn = df_agn.sample(n=500, random_state=42).reset_index(drop=True)
+    return df_agn
+
+def load_pantheon_data():
 
     # Load Pantheon+ SN metadata
     print("Loading Pantheon+ supernova data...")
@@ -726,8 +730,7 @@ def load_data(file_path, populate_sdss=False, apply_cut=True):
 
     print("Cholesky factorization successful. Data loaded. ")
 
-    return df_agn, df_pantheon, sna_logdetCov, sna_L, sna_lower
-
+    return df_pantheon, sna_logdetCov, sna_L, sna_lower
 
 
 

@@ -65,19 +65,18 @@ def M_model_SN(m_b_corr, host_logmass, M0_sn, gamma_sn, tau_Ms):
     return m_b_corr - M0_sn + delta_host
 
 def get_model_params(cosmo_model, only_sna=False):
-
+    
     priors = OrderedDict([
-        ("gamma_sn",    (-0.1, 0.1)),     # Host mass step usually ~0.05
-        ("tau_Ms",      (0.01, 0.2)),     # LOG Width of sigmoid transition usually ~0.043
         ("M0_sn",       (-20, -19)),    # SN absolute magnitude, MLE: ~-19.3
-        ("M0_agn", (-24, -17)),         # M0_agn
-        ("alpha_agn",   (-10, 10)),         # AGN sigma correlation
-        ("beta_agn",    (-10, 10)),         # AGN tau correlation
-        ("gamma_agn",    (-10, 10)),         
-        ("log_f",       (-3, 0.5)),
-        ("H0",          (65, 80)),
-        #("Om0",         (0.32, 0.324)),
-        ("Om0",         (0.1, 0.9)),
+
+        ("M0_agn",   (-26.0, -16.0)),
+        ("alpha_agn", (-5.0,  5.0)),
+        ("beta_agn",  (-5.0,  5.0)),
+        ("gamma_agn", (-5.0,  5.0)),
+        ("log_f",     (-5.0,  0.3)),
+
+        ("H0",       (60.0, 85.0)),
+        ("Om0",      (0.05, 0.60)),
     ])
 
     # Select cosmological parameters based on model
@@ -85,12 +84,12 @@ def get_model_params(cosmo_model, only_sna=False):
         pass
     elif cosmo_model == 'FlatwCDM':
         priors |= OrderedDict([
-            ("w0",          (-100, 100))
+            ("w0",          (-2, 0))
         ])
     elif cosmo_model == 'Flatw0waCDM':
         priors |= OrderedDict([
-            ("w0", (-100.0, 100.0)),   # covers phantom (<-1), Λ (-1), quintessence (> -1), and even w>0
-            ("wa", (-100.0, 100.0))    # symmetric variation
+            ("w0", (-10.0, 5.0)),   # covers phantom (<-1), Λ (-1), quintessence (> -1), and even w>0
+            ("wa", (-20, 10))    # symmetric variation
         ])
 
     else:

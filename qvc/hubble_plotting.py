@@ -30,7 +30,7 @@ def plot_dynesty(results, cosmo_model, plot_path="plots/hubble", show=False):
     priors, model_labels, model_labels_latex = get_model_params(cosmo_model)
 
     # Cornerplot
-    fig_corner, axes_corner = dyplot.cornerplot(results, labels=model_labels_latex, quantiles=[0.16, 0.5, 0.84],
+    fig_corner, axes_corner = dyplot.cornerplot(results, labels=model_labels, quantiles=[0.16, 0.5, 0.84],
                                                  quantiles_2d = [0.393, 0.865, 0.989],
                                                  show_titles=True, title_quantiles=[0.16, 0.5, 0.84],
                                                  color='blue',
@@ -44,7 +44,7 @@ def plot_dynesty(results, cosmo_model, plot_path="plots/hubble", show=False):
     # Traceplot
     fig_trace, axes_trace = dyplot.traceplot(
         results,
-        labels=model_labels_latex,
+        labels=model_labels,
         quantiles=[0.16, 0.5, 0.84],
         show_titles=True,
         title_quantiles=[0.16, 0.5, 0.84],
