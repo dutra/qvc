@@ -96,12 +96,11 @@ def load_spec_from_cache(sdss_name, cache_dir="data/spectra_cache"):
     return None
 
 
-def match_sample_to_dr16q(sample_h5, dr16q_fits, max_sep_arcsec=2.0, limit=None, filter_object_id=None):
+def match_sample_to_dr16q(sample_df, dr16q_fits, max_sep_arcsec=2.0, limit=None, filter_object_id=None):
     """Load sample CSV and DR16Q, crossmatch within max_sep_arcsec, return (data_cat_table, sample_df_matched).
     Ensures 1–to–1 matches by keeping the closest pair per AGN (and per SDSS if needed)."""
     #sample_df = pd.read_csv(sample_csv)
-    sample_df = load_quasar_data(sample_h5, apply_cut=False)
-    sample_df['object_id'] = sample_df['object_id'].astype(str).str.strip()
+
 
     if filter_object_id is not None:
         filter_set = set(str(x).strip() for x in filter_object_id)
@@ -152,12 +151,12 @@ def match_sample_to_dr16q(sample_h5, dr16q_fits, max_sep_arcsec=2.0, limit=None,
         if mags_mean_col in sample_df_matched.columns:
             # If mean_col is not >= 0, assign 0
             mean_vals = sample_df_matched[mean_col].to_numpy()
-            mean_vals = np.where(mean_vals >= 0, mean_vals, 0)
             data_cat[f'mean_corrected_{b}'] = sample_df_matched[mags_mean_col].to_numpy() + mean_vals
 
     data_cat['object_id'] = sample_df_matched['object_id'].to_numpy()
+    data_cat['clean_bands'] = sample_df_matched['clean_bands'].to_numpy()
 
-    return data_cat, sample_df_matched
+    return data_cat
 
 
 
@@ -372,6 +371,8 @@ def run_qsofit_record(rec, cache_dir="data/spectra_cache", path_ex="data/"):
 
     # default result (so we always return a complete row even on error)
     result = dict(
+        delta_mags=np.array([]),
+        delta_m_avg=-1e9,
         object_id=rec["object_id"],
         sdss_name=rec["sdss_name"],
         apparent_mag_i_rest=-1e9,
@@ -395,11 +396,14 @@ def run_qsofit_record(rec, cache_dir="data/spectra_cache", path_ex="data/"):
         err  = 1.0 / np.sqrt(hdul[1].data['ivar'])           # 1-sigma
 
         # Absolute flux calibration (g,r,i)
-        bands = ['g', 'r', 'i']
+        bands = ['u', 'g', 'r', 'i', 'z']
+        clean_bands = rec['clean_bands']
         sdss_filters = filters.load_filters(*[f'sdss2010-{b}' for b in bands])
         delta_mags, weights = [], []
 
         for b, filt in zip(bands, sdss_filters):
+            if b not in clean_bands:
+                continue
             try:
                 mag_fiber = rec["mags"].get(b, np.nan)
                 if not np.isfinite(mag_fiber) or mag_fiber < 0:
@@ -513,6 +517,8 @@ def run_qsofit_record(rec, cache_dir="data/spectra_cache", path_ex="data/"):
             m_2500, m_2500_err = -1e9, -1e9
 
         try:
+            if 'i' not in clean_bands:
+                raise ValueError("i band not in clean_bands")
             alpha_lambda = conti_dict.get('PL_slope', -99)
             z = conti_dict['z']
 
@@ -526,8 +532,12 @@ def run_qsofit_record(rec, cache_dir="data/spectra_cache", path_ex="data/"):
         except Exception as e:
             print(f"[ERROR] apparent_mag_i_rest {rec.get('object_id','?')} ({rec.get('sdss_name','?')}): {e}")
             apparent_mag_i_rest, apparent_mag_i_obs = -1e9, -1e9
+            delta_m_avg = -1e9
+            delta_mags = np.array([])
 
         result.update(
+            delta_m_avg=delta_m_avg,
+            delta_mags=delta_mags,
             apparent_mag_i_rest=apparent_mag_i_rest,
             apparent_mag_i_obs=apparent_mag_i_obs,
             apparent_mag_2500=m_2500,
@@ -558,7 +568,7 @@ def parse_args():
                    help="Directory for cached spectra FITS.")
     p.add_argument("--max-sep", type=float, default=1.0,
                    help="Max match separation in arcsec.")
-    p.add_argument("--limit", type=int, default=None,
+    p.add_argument("--N", type=int, default=None,
                    help="Optional limit on number of rows from input CSV to consider before matching.")
     p.add_argument("--download", action="store_true",
                    help="If set, download (and cache) all matched spectra and exit.")
@@ -571,12 +581,17 @@ def parse_args():
 def main():
     args = parse_args()
 
+    sample_df = load_quasar_data(args.fpath_in, apply_cut=False)
+    sample_df = sample_df[:args.N] if args.N is not None else sample_df
+    sample_df['object_id'] = sample_df['object_id'].astype(str).str.strip()
+    #quasar_dict_list = read_quasars_from_hdf5(args.fpath_in, N=args.N)
+    quasar_dict_list = sample_df.to_dict(orient="records")
+
     # 1) Match sample to DR16Q
-    data_cat, sample_df_matched = match_sample_to_dr16q(
-        sample_h5=args.fpath_in,
+    data_cat = match_sample_to_dr16q(
+        sample_df=sample_df,
         dr16q_fits=args.dr16q_fits,
         max_sep_arcsec=args.max_sep,
-        limit=args.limit,
         filter_object_id=args.filter_object_id
     )
 
@@ -620,14 +635,10 @@ def main():
                 for b in ['g', 'r', 'i']
             },
             ra=float(row['RA']),
-            dec=float(row['DEC'])
+            dec=float(row['DEC']),
+            clean_bands=row['clean_bands'],
         )
         records.append(rec)
-
-    # Build a quick lookup of original order from the input CSV
-    #input_df = pd.read_csv(args.input_csv)
-    #original_order = list(input_df["object_id"].astype(str))
-    #original_order = list(sample_df_matched["object_id"].astype(str))
 
     worker = partial(run_qsofit_record, cache_dir=args.cache_dir, path_ex="./")
 
@@ -644,21 +655,14 @@ def main():
 
     print(f"Collected {len(results)} results out of {len(records)} records")
 
-    #pd.DataFrame(results).to_csv(args.out_csv, index=False)
-
-    quasar_dict_list = read_quasars_from_hdf5(args.fpath_in)
-
-    # Build a lookup by object_id from results
-    #results_by_id = {str(res['object_id']): res for res in results}
-
     # Update each quasar dict with fields from results
     for quasar in quasar_dict_list:
         obj_id = str(quasar.get('object_id'))
         quasar.update(results[obj_id])
 
     write_hdf5_file(quasar_dict_list, args.fpath_out)
+    
     # Also write results to CSV
-
     csv_out = args.fpath_out + ".csv"
     fieldnames = list(results[next(iter(results))].keys()) if results else []
 
