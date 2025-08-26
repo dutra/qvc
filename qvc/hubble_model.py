@@ -67,7 +67,7 @@ def M_model_SN(m_b_corr, host_logmass, M0_sn, gamma_sn, tau_Ms):
 def get_model_params(cosmo_model, only_sna=False):
     
     priors = OrderedDict([
-        ("M0_sn",       (-20, -19)),    # SN absolute magnitude, MLE: ~-19.3
+        ("M0_sn",       (-22, -17)),    # SN absolute magnitude, MLE: ~-19.3
 
         ("M0_agn",   (-26.0, -16.0)),
         ("alpha_agn", (-5.0,  5.0)),
@@ -76,7 +76,7 @@ def get_model_params(cosmo_model, only_sna=False):
         ("log_f",     (-5.0,  0.3)),
 
         ("H0",       (60.0, 85.0)),
-        ("Om0",      (0.05, 0.60)),
+        ("Om0",      (0.05, 0.90)),
     ])
 
     # Select cosmological parameters based on model
@@ -84,12 +84,12 @@ def get_model_params(cosmo_model, only_sna=False):
         pass
     elif cosmo_model == 'FlatwCDM':
         priors |= OrderedDict([
-            ("w0",          (-2, 0))
+            ("w0",          (-10, 0))
         ])
     elif cosmo_model == 'Flatw0waCDM':
         priors |= OrderedDict([
             ("w0", (-10.0, 5.0)),   # covers phantom (<-1), Λ (-1), quintessence (> -1), and even w>0
-            ("wa", (-20, 10))    # symmetric variation
+            ("wa", (-100, 10))    # symmetric variation
         ])
 
     else:

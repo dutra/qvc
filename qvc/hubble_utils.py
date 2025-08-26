@@ -802,7 +802,7 @@ def compare_models_by_log_evidence(
     model_1_name="Model 1", model_2_name="Model 2",
     jeffreys_thresholds=(1.0, 2.5, 5.0),  # |Δln Z| bands
     z_decisive=2.0,
-    plot_path="plots/hubble/"
+    write_path="plots/hubble/"
 ):
     """
     Bayesian comparison using log-evidences, with sigma-style significance.
@@ -913,15 +913,15 @@ def compare_models_by_log_evidence(
     for line in lines:
         print(line, end="")
 
-    os.makedirs(plot_path, exist_ok=True)
+    os.makedirs(write_path, exist_ok=True)
     safe_m1 = "".join(c if c.isalnum() or c in "-_." else "_" for c in model_1_name)
     safe_m2 = "".join(c if c.isalnum() or c in "-_." else "_" for c in model_2_name)
 
-    text_path = os.path.join(plot_path, f"compare_{safe_m1}_vs_{safe_m2}.txt")
+    text_path = os.path.join(write_path, f"compare_{safe_m1}_vs_{safe_m2}.txt")
     with open(text_path, "w", encoding="utf-8") as f:
         f.writelines(lines)
 
-    tex_path = os.path.join(plot_path, f"compare_{safe_m1}_vs_{safe_m2}.tex")
+    tex_path = os.path.join(write_path, f"compare_{safe_m1}_vs_{safe_m2}.tex")
     with open(tex_path, "w", encoding="utf-8") as f:
         f.write(apj_sentence_tex + "\n")
 

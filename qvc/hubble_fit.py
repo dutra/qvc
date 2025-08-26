@@ -361,7 +361,8 @@ def run_all(df_agn, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, cosmo_model
     compare_models_by_log_evidence(logZ_1=logZ_1, logZerr_1=logZerr_1, 
                                    logZ_2=logZ_2, logZerr_2=logZerr_2,
                                    model_1_name=model_1_name,
-                                   model_2_name=model_2_name)
+                                   model_2_name=model_2_name,
+                                   write_path=f"plots/hubble/{prefix}/")
 
 if __name__ == "__main__":
     #global _sna_LogdetCov, _sna_L, _sna_Lower
