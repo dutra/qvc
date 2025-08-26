@@ -608,10 +608,11 @@ def load_quasar_data(file_path, populate_sdss=False, apply_cut=True):
             break
 
     for q in quasar_list:
-        for i, b in enumerate(q['clean_bands']):
-            q[f'mags_mean_{b}'] = q['mags_means'][i]
+        if 'mags_means' in q:
+            for i, b in enumerate(q['clean_bands']):
+                q[f'mags_mean_{b}'] = q['mags_means'][i]
 
-        del q['mags_means']
+        # del q['mags_means']
 
     df = pd.DataFrame(quasar_list)
 
