@@ -501,7 +501,6 @@ def read_quasars_from_hdf5(file_path, N=None):
     quasar_list = []
 
     with h5py.File(file_path, "r") as hdf:
-        N = 100
         for group_name in tqdm(list(hdf.keys()), desc="Reading quasars from HDF5"):
             group = hdf[group_name]
             quasar = {"object_id": group_name}
