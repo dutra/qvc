@@ -100,7 +100,6 @@ def get_completeness_function_2d(
     df_agn,
     sim_file="data/mock_mag_z.h5",
     n_mag_bins=20, n_z_bins=60,
-    #mag_min=15, mag_max=24,
     sigma_mag=0.5, sigma_z=0.5,
     smooth_counts=True,
     plot=False,
@@ -108,59 +107,144 @@ def get_completeness_function_2d(
     """
     Build p(detect | m, z) from a simulated 'true' set and an observed set.
 
-    Key changes:
-      • Smooth counts, not the ratio.
-      • No normalization by max; result already in [0,1].
-      • Use fill_value=0 outside grid (no pre-clipping).
+    - Fits mag_2500 = a*mag_i + b*alpha + c on the observed sample (centered).
+    - Predicts 'true' mag_2500 for the sim using alpha fixed to <alpha> (alpha0).
+    - Smooths counts (not ratios).
+    - Returns completeness C in [0,1] plus grid info and regression scatter (σ).
     """
+    import numpy as np
+    import h5py, os
+    from scipy.ndimage import gaussian_filter
+
     # --- Load simulated (true) sample
     with h5py.File(sim_file, 'r') as f:
-        mags_true_i = f['apparent_mag_i_rest'][:]
-        z_true = f['z'][:]
+        mags_true_i = np.asarray(f['apparent_mag_i_rest'][:])
+        z_true      = np.asarray(f['z'][:])
+
+    # --- Build a consistent boolean mask on the observed df (use pandas throughout, then .values)
+    m2500 = df_agn['apparent_mag_2500']
+    mi    = df_agn['apparent_mag_i_rest']
+
+    # alpha: support either column name
+    if 'alpha_lambda' in df_agn.columns:
+        acol = 'alpha_lambda'
+    elif 'alpha_lam' in df_agn.columns:
+        acol = 'alpha_lam'
+    else:
+        raise KeyError("alpha column not found (expected 'alpha_lambda' or 'alpha_lam').")
 
     mask = (
-        np.isfinite(df_agn['apparent_mag_2500'].values) &
-        np.isfinite(df_agn['apparent_mag_i_rest'].values) &
-        (df_agn['apparent_mag_2500'].values > 18) & (df_agn['apparent_mag_2500'].values < 26) &
-        (df_agn['apparent_mag_i_rest'].values > 15) & (df_agn['apparent_mag_i_rest'].values < 25)
-    )
-    y = df_agn['apparent_mag_2500'].values[mask]
-    x = df_agn['apparent_mag_i_rest'].values[mask]
+        m2500.notna() & mi.notna() & df_agn[acol].notna() &
+        m2500.between(1, 30) & mi.between(1, 30)
+    ).values  # <- now it's a NumPy boolean array
 
-    # Fit line
-    x_pivot = np.mean(x)
-    print(f"Pivot point for x: {x_pivot}")
-    slope, intercept = np.polyfit(x-x_pivot, y, 1)
-    y_fit = slope * (x-x_pivot) + intercept
+    # --- Observed arrays (masked)
+    y     = m2500.values[mask]
+    mag_i = mi.values[mask]
+    alpha = df_agn[acol].values[mask]
+    z_obs = df_agn['z'].values[mask]
 
-    calculated_mags_true_2500 = (mags_true_i-x_pivot)*slope + intercept
+    # --- Center (pivots)
+    mag_i0 = float(np.mean(mag_i))
+    alpha0 = float(np.mean(alpha))
 
-    mags_true = calculated_mags_true_2500
+    # --- OLS fit of y = a*(mag_i - mag_i0) + b*(alpha - alpha0) + d*(mag_i - mag_i0)^2 + c_pivot
+    X = np.column_stack([
+        mag_i - mag_i0,
+        alpha - alpha0,
+        (mag_i - mag_i0)**2,  # quadratic term
+        np.ones_like(mag_i)
+    ])
+    beta, *_ = np.linalg.lstsq(X, y, rcond=None)
+    a, b, d, c_pivot = beta
+    c = c_pivot - a*mag_i0 - b*alpha0 - d*(mag_i0**2)
 
-    # Estimate scatter as std of residuals
-    residuals = y - y_fit
-    scatter = np.std(residuals)
-    print(f"Scatter in m_2500 - m_i fit (std of residuals): {scatter:.2f}")
-    
-    # --- Observed sample
-    mags_obs = np.asarray(df_agn["apparent_mag_2500"].values)
-    z_obs    = np.asarray(df_agn["z"].values)
+    # Diagnostics on observed sample
+    y_fit = X @ beta
+    n, p = X.shape
+    rss = float(np.sum((y - y_fit)**2))
+    tss = float(np.sum((y - y.mean())**2))
+    r2  = 1.0 - rss/tss if tss > 0 else np.nan
+    sigma = float(np.sqrt(rss / max(n - p, 1)))
 
+    # Optional parameter uncertainties
+    cov = (sigma**2) * np.linalg.inv(X.T @ X)
+    se_a, se_b, se_d, se_cpivot = np.sqrt(np.diag(cov))
+
+    # --- Logging
+    print(f"a (slope on mag_i)      = {a:.6f} ± {se_a:.6f}")
+    print(f"b (slope on alpha)      = {b:.6f} ± {se_b:.6f}")
+    print(f"d (quad term on mag_i)  = {d:.6f} ± {se_d:.6f}")
+    print(f"c_pivot (at pivots)     = {c_pivot:.6f} ± {se_cpivot:.6f}")
+    print(f"c (intercept)           = {c:.6f}")
+    print(f"R^2                     = {r2:.4f}")
+    print(f"Scatter (σ)             = {sigma:.3f} mag")
+
+    # --- Slice plots
     if plot:
-        from matplotlib import pyplot as plt
-        # Observed
-        plt.figure(figsize=(8, 6))
-        plt.scatter(x, y, alpha=0.7, label='Data')
-        plt.plot(x, y_fit, color='red', label=f'Best fit: y={slope:.2f}x+{intercept:.2f}')
+        import matplotlib.pyplot as plt
+        os.makedirs("plots/completeness", exist_ok=True)
+
+        # 1) y vs mag_i at fixed alpha = alpha0
+        x_grid = np.linspace(mag_i.min(), mag_i.max(), 400)
+        y_line_alpha_fixed = (
+            a * (x_grid - mag_i0)
+            + d * (x_grid - mag_i0)**2
+            + c_pivot
+        )
+        plt.figure(figsize=(8,6))
+        plt.scatter(mag_i, y, s=14, alpha=0.7, label='Data')
+        plt.plot(x_grid, y_line_alpha_fixed, lw=2, color='red',
+                 label=f'Slice @ α={alpha0:.3f}: y = a(x-⟨m_i⟩)+c₀')
+        plt.axvline(mag_i0, ls='--', lw=1, color='k', alpha=0.3)
         plt.xlabel('apparent_mag_i (total AGN, host-subtracted, rest)')
         plt.ylabel('apparent_mag_2500 (continuum-only, rest)')
-        #plt.title('apparent_mag_i vs apparent_mag_2500')
-        plt.grid(True)
-        plt.legend()
-        os.makedirs("plots/completeness", exist_ok=True)
-        plt.savefig("plots/completeness/mag2500_vs_magi_fit.png", dpi=200)
+        plt.grid(True, alpha=0.4); plt.legend(); plt.tight_layout()
+        plt.savefig("plots/completeness/mag2500_vs_magi_fixed_alpha.png", dpi=200)
         plt.close()
-    
+
+        # 2) y vs alpha at fixed mag_i = mag_i0
+        a_grid = np.linspace(alpha.min(), alpha.max(), 400)
+        y_line_magi_fixed = b*(a_grid - alpha0) + c_pivot  # (a term cancels)
+        plt.figure(figsize=(8,6))
+        plt.scatter(alpha, y, s=14, alpha=0.7, label='Data')
+        plt.plot(a_grid, y_line_magi_fixed, lw=2, color='red',
+                 label=f'Slice @ m_i={mag_i0:.3f}: y = b(α-⟨α⟩)+c₀')
+        plt.axvline(alpha0, ls='--', lw=1, color='k', alpha=0.3)
+        plt.xlabel('alpha_lambda (continuum slope)')
+        plt.ylabel('apparent_mag_2500 (continuum-only, rest)')
+        plt.grid(True, alpha=0.4); plt.legend(); plt.tight_layout()
+        plt.savefig("plots/completeness/mag2500_vs_alpha_fixed_magi.png", dpi=200)
+        plt.close()
+
+        os.makedirs("plots/completeness", exist_ok=True)
+        plt.figure(figsize=(7, 6))
+        plt.scatter(y, y_fit, s=16, alpha=0.7, label="Data")
+        plt.plot([y.min(), y.max()], [y.min(), y.max()], 'r--', label="y = y_fit")
+        plt.xlabel("Observed mag_2500")
+        plt.ylabel("Predicted mag_2500 (y_fit)")
+        plt.title("Observed vs Predicted mag_2500")
+        plt.grid(True, alpha=0.4)
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig("plots/completeness/y_vs_yfit.png", dpi=200)
+        plt.close()
+
+    # --- Predict "true" mag_2500 for the sim (alpha fixed to alpha0 unless you have it per-object)
+    calculated_mags_true_2500 = (
+        a * (mags_true_i - mag_i0)
+        + d * (mags_true_i - mag_i0)**2
+        + b * alpha0
+        + c_pivot
+    )
+    mags_true = calculated_mags_true_2500
+
+    # --- Observed mags (same mask as fit)
+    mags_obs = y  # df_agn['apparent_mag_2500'].values[mask]
+
+    # Use the *fit* scatter; don't compare observed and simulated arrays directly
+    scatter = sigma
+
     # --- Clean NaNs/Infs
     mask_true = np.isfinite(mags_true) & np.isfinite(z_true)
     mags_true, z_true = mags_true[mask_true], z_true[mask_true]
@@ -171,13 +255,9 @@ def get_completeness_function_2d(
     # --- Bin edges and centers
     z_min, z_max = float(np.min(z_true)), 4.0
     if z_max - z_min < 1e-3:
-        z_min -= 0.01
-        z_max += 0.01
+        z_min -= 0.01; z_max += 0.01
 
-    #mag_min = np.min(mags_true) - 0.5
-    #mag_max = np.max(mags_true) + 0.5
-    mag_min = 16
-    mag_max = 26
+    mag_min, mag_max = 16.0, 26.0
     print(f"Using mag range: {mag_min:.2f} to {mag_max:.2f}")
 
     mag_edges = np.linspace(mag_min, mag_max, n_mag_bins + 1)
@@ -186,13 +266,12 @@ def get_completeness_function_2d(
     z_centers   = 0.5 * (z_edges[:-1]   + z_edges[1:])
     print(f"Using z range: {z_centers[0]:.2f} to {z_centers[-1]:.2f}")
 
-    # --- 2D histograms
+    # --- 2D histograms (note: axes are [mag, z])
     H_true, _, _ = np.histogram2d(mags_true, z_true, bins=[mag_edges, z_edges])
     H_obs,  _, _ = np.histogram2d(mags_obs,  z_obs,  bins=[mag_edges, z_edges])
 
     # --- Smooth COUNTS (not the ratio)
     if smooth_counts:
-        # 'constant' with cval=0 avoids propagating edge values outward
         H_true_s = gaussian_filter(H_true, sigma=(sigma_mag, sigma_z), mode="constant", cval=0.0)
         H_obs_s  = gaussian_filter(H_obs,  sigma=(sigma_mag, sigma_z), mode="constant", cval=0.0)
     else:
@@ -201,55 +280,46 @@ def get_completeness_function_2d(
     # --- Completeness ratio with small epsilon
     eps = 1e-12
     C = H_obs_s / (H_true_s + eps)
-    C[H_true_s < eps] = 0.0                     # no true support -> undefined -> 0
+    C[H_true_s < eps] = 0.0
     C = np.clip(C, 0.0, 1.0)
 
-    # --- Optional diagnostic plot
+    # --- Optional diagnostic plots (linear scale to avoid log(0) = -inf)
     if plot:
         import matplotlib.pyplot as plt
-        plt.imshow(
-            np.log10(C.T), origin="lower", aspect="auto",
-            extent=[mag_edges[0], mag_edges[-1], z_edges[0], z_edges[-1]]
+
+        plt.figure(figsize=(7,5))
+        im = plt.imshow(
+            C.T, origin="lower", aspect="auto",
+            extent=[mag_edges[0], mag_edges[-1], z_edges[0], z_edges[-1]],
+            vmin=0.0, vmax=1.0
         )
         plt.xlabel("Apparent Magnitude")
         plt.ylabel("Redshift")
-        plt.title("Completeness Map p(detect | m, z)")
-        cbar = plt.colorbar()
-        cbar.set_label("p(detect)")
+        plt.title("Completeness p(detect | m, z)")
+        cbar = plt.colorbar(im); cbar.set_label("p(detect)")
         plt.tight_layout()
         plt.savefig("plots/completeness/completeness_map.png", dpi=200)
-        #plt.show()
         plt.close()
 
-        plt.imshow(
-            np.log10(H_true_s.T), origin="lower", aspect="auto",
-            extent=[mag_edges[0], mag_edges[-1], z_edges[0], z_edges[-1]]
-        )
-        plt.xlabel("Apparent Magnitude")
-        plt.ylabel("Redshift")
-        plt.title("Completeness Map p(detect | m, z)")
-        cbar = plt.colorbar()
-        cbar.set_label("p(detect)")
-        plt.tight_layout()
-        plt.savefig("plots/completeness/H_true_s.png", dpi=200)
-        plt.close()
-
-        plt.imshow(
-            np.log10(H_obs_s.T), origin="lower", aspect="auto",
-            extent=[mag_edges[0], mag_edges[-1], z_edges[0], z_edges[-1]]
-        )
-        plt.xlabel("Apparent Magnitude")
-        plt.ylabel("Redshift")
-        plt.title("Completeness Map p(detect | m, z)")
-        cbar = plt.colorbar()
-        cbar.set_label("p(detect)")
-        plt.tight_layout()
-        plt.savefig("plots/completeness/H_obs_s.png", dpi=200)
+        for name, Hs in [("H_true_s", H_true_s), ("H_obs_s", H_obs_s)]:
+            plt.figure(figsize=(7,5))
+            im = plt.imshow(
+                np.log10(np.clip(Hs.T, 1e-12, None)), origin="lower", aspect="auto",
+                extent=[mag_edges[0], mag_edges[-1], z_edges[0], z_edges[-1]]
+            )
+            plt.xlabel("Apparent Magnitude")
+            plt.ylabel("Redshift")
+            plt.title(name + " (log10 counts)")
+            cbar = plt.colorbar(im); cbar.set_label("log10 counts")
+            plt.tight_layout()
+            plt.savefig(f"plots/completeness/{name}.png", dpi=200)
+            plt.close()
 
     # bin widths (uniform by construction)
     dm = float(mag_centers[1] - mag_centers[0]) if len(mag_centers) > 1 else float(mag_edges[-1] - mag_edges[0])
     dz = float(z_centers[1] - z_centers[0])     if len(z_centers)   > 1 else float(z_edges[-1] - z_edges[0])
 
+    # Completeness2D must be defined elsewhere
     return Completeness2D(mag_centers, z_centers, C), mag_centers, z_centers, dm, dz, scatter
 
 import numpy as np

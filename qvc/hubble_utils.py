@@ -18,7 +18,7 @@ from scipy.stats import norm, sigmaclip, multivariate_normal
 from scipy.interpolate import RegularGridInterpolator
 
 from dynesty.utils import resample_equal
-from hubble_model import get_model_params, M_model_agn, M_model_agn_err, M_model_SN
+from hubble_model import get_model_params, M_model_agn, M_model_agn_err
 from scipy.linalg import cho_factor, cho_solve, eigh
 from scipy.stats import linregress
 from scipy.stats import pearsonr
@@ -644,13 +644,20 @@ def load_quasar_data(file_path, populate_sdss=False, apply_cut=True):
         return df
     
     df = df.reset_index(drop=True)
-
+    
+    # Exclude objects whose object_id is in an exclusion list/array (if provided)
+    # these objects are all part of job48
+    exclusion_ids = ['1395668', '1405091', '1408386', '1424501', '1430988',
+                     '1443851', '1447424', '1451560', '1452213', '1464246']
+    mask_exclude = ~df['object_id'].astype(str).isin(exclusion_ids)
+    print(f"Excluding {np.sum(~mask_exclude)} objects by object_id exclusion list")
+    df = df[mask_exclude].reset_index(drop=True)
     # Define cuts as (column, lower_limit, upper_limit)
     cuts = [
         #('f_host', None, 0.6),
         #('z', None, 3.0),
         ('log_tau_UV_RF', 1.5, None),
-        ('alpha_lambda', None, 0),
+        #('alpha_lambda', None, 0),
         ('redchi', None, 10),
         ('apparent_mag_2500', 1, 40),
         #('apparent_mag_i', 15, 25)
@@ -671,6 +678,8 @@ def load_quasar_data(file_path, populate_sdss=False, apply_cut=True):
         cut_count = np.sum(~col_mask)
         print(f"Cut on {col}: {cut_count} objects removed")
         mask &= col_mask
+    
+
 
     df = df[mask]
     print(f"Total objects removed by all cuts: {initial_count - len(df)}")
@@ -1307,6 +1316,23 @@ def display_results_summary(samples, cosmo_model, z_pivot_agn):
             arr = samples[:, i_wa]
             m = np.median(arr); l = np.percentile(arr, 16); h = np.percentile(arr, 84)
             print(f"{'wa':>15}: {m:.4f} (+{h - m:.4f}, -{m - l:.4f})")
+    
+    priors, model_labels, _ = get_model_params(cosmo_model)
+    params = {name: np.median(samples[:, i]) for i, name in enumerate(model_labels)}
+
+    if cosmo_model == "Flatw0waCDM":
+        cosmo = Flatw0waCDM(H0=params['H0'], Om0=params['Om0'], w0=params['w0'], wa=params['wa'])
+    elif cosmo_model == "FlatwCDM":
+        cosmo = FlatwCDM(H0=params['H0'], Om0=params['Om0'], w0=params['w0'])
+    elif cosmo_model == "FlatLambdaCDM":
+        cosmo = FlatLambdaCDM(H0=params['H0'], Om0=params['Om0'])
+    elif cosmo_model == "FlatwpwaCDM":
+        cosmo = FlatwpwaCDM(H0=params['H0'], Om0=params['Om0'], wp=params['wp'], wa=params['wa'], zp=priors.get('zp', 0.0))
+    else:
+        raise ValueError(f"Unknown cosmology model: {cosmo_model}")
+
+    age = cosmo.age(0).to("Gyr").value
+    print(f"Age of universe: {age:.3f} Gyr")
 
 def display_diagnostics(sampler, cosmo_model, fitting_method=False):
     priors, model_labels, _ = get_model_params(cosmo_model)
@@ -1663,8 +1689,6 @@ def compute_pivot_redshift(flat_samples, cosmo_model, z_min=0.0, z_max=4.0):
     a_p_star = max(a_p_star, np.finfo(float).eps)
     z_p_star = 1.0 / a_p_star - 1.0
     return z_p_star
-
-import numpy as np
 
 def posterior_corr(flat_samples, cosmo_model, z_pivot_agn):
     """

@@ -89,8 +89,7 @@ def run_mcmc_pipeline(df_agn, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, c
                 print(f"Resuming from default checkpoint file: {checkpoint_file}")
             sampler = DynamicNestedSampler.restore(checkpoint_file, pool=pool)
         else:
-            frozen_loglikelihood = partial(
-                log_likelihood,
+            logl_kwargs = dict(
                 agn_data=agn_data,
                 pantheon_data=pantheon_data,
                 _sna_L=_sna_L,
@@ -102,11 +101,13 @@ def run_mcmc_pipeline(df_agn, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, c
                 use_full_cov=use_full_cov,
                 use_ceph_dist=use_ceph_dist
             )
-            frozen_prior_transform_dynesty = partial(prior_transform_dynesty, priors=priors, model_labels=model_labels)
+            ptform_kwargs = dict(priors=priors, model_labels=model_labels)
             sampler = DynamicNestedSampler(
-                frozen_loglikelihood,
-                frozen_prior_transform_dynesty,
+                log_likelihood,
+                prior_transform_dynesty,
                 ndim,
+                logl_kwargs=logl_kwargs,
+                ptform_kwargs=ptform_kwargs,
                 update_interval=10*ndim,
                 bound='multi',
                 sample='rwalk',
@@ -244,15 +245,6 @@ def run_mcmc_pipeline(df_agn, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, c
     print("\nMedian parameters (equal-weight posterior):")
     print(median_samples)
 
-    # If you want to keep your existing summary:
-    display_results_summary(flat_samples, cosmo_model, z_pivot_agn)
-
-    #z_pivot_best, _, _ = find_optimal_pivot(flat_samples, cosmo_model, df_agn)
-    #print(f"Optimal z pivot for {cosmo_model}: {z_pivot_best:.3f}")
-
-    #display_diagnostics(sampler, cosmo_model, fitting_method=fitting_method)
-    #np.save(f"results/hubble/flat_samples_{cosmo_model}_{'sna' if only_sna else 'agn'}.npy", flat_samples)
-
     return sampler, flat_samples, model_labels, dmi_max_w, logZ, logZerr
 
 
@@ -320,6 +312,8 @@ def run_single(df_agn, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, cosmo_mo
         zp = compute_pivot_redshift(flat_samples, cosmo_model)
         print("Computed pivot redshift: ", zp)
 
+    display_results_summary(flat_samples, cosmo_model, z_pivot_agn)
+
     return sampler, flat_samples, model_labels, dmag_corr, logZ, logZerr
 
 
@@ -345,7 +339,7 @@ def run_all(df_agn, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, cosmo_model
         r_joint   = extract_cosmo_results_from_samples(samples_joint, cosmo_model, False,  
                                                     logZ_tuple=(logZ_joint, logZerr_joint), format_for_latex=True, value_fmt="{:.2f}")
         results_latex.extend([r_sna, r_joint])
-
+    
     make_cosmo_table_latex(results_latex, write_path=f"plots/hubble/{prefix}/")
 
 
@@ -370,7 +364,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run Hubble fit pipeline.", allow_abbrev=True)
     parser.add_argument("agn_data_filepath", type=str, help="Path to AGN data file")
     parser.add_argument("--force_populate_fields", action="store_true", help="Force populate fields")
-    parser.add_argument("--cosmo_model", type=str,  default="FlatwCDM", choices=["FlatwCDM", "Flatw0waCDM"], help="Cosmological model (default: FlatwCDM)")
+    parser.add_argument("--cosmo_model", type=str,  default="FlatwCDM", choices=["FlatwCDM", "Flatw0waCDM", "FlatLambdaCDM"],
+                         help="Cosmological model (default: FlatwCDM)")
     parser.add_argument("--disable_completeness", action="store_true", default=False, help="Enable completeness correction (default: True)")
     parser.add_argument("--disable_full_covariance", action="store_true", default=False, help="Use full covariance matrix for SNIa likelihood (default: False)")
     parser.add_argument("--resume", action="store_true", default=False, help="Resume previous MCMC run (default: False)")

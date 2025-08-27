@@ -11,7 +11,7 @@ import os
 import copy
 import matplotlib.transforms as mtransforms
 
-from hubble_model import M_model_agn, M_model_agn_err, M_model_SN, get_model_params, log_tau_UV_RF_pivot
+from hubble_model import M_model_agn, M_model_agn_err, get_model_params
 from hubble_utils import calc_Mi_from_M2500
 from hubble_completeness import make_dm_function
 from numpy.polynomial.polynomial import Polynomial
@@ -653,9 +653,10 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
         plt.show()
     plt.close(fig)
 
-    # Outlier report
+    # Residual Outlier report
     outlier_mask = np.abs(residuals) > 4
     if np.any(outlier_mask) and verbose:
+        print("++++++++++++++++++++++++++++++++++++++++++++++++++++++++++")
         print("Outliers with residuals > 4:")
         for idx in np.where(outlier_mask)[0]:
             sdss_name = df_agn.iloc[idx].get('sdss_name', 'Unknown')
@@ -663,7 +664,20 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
             ra  = df_agn.iloc[idx].get('ra',  np.nan)
             dec = df_agn.iloc[idx].get('dec', np.nan)
             z   = df_agn.iloc[idx]['z']
-            print(f"z: {z:.2f} | object_id: {object_id} | SDSS: {sdss_name} | RA: {ra:.5f} | DEC: {dec:.5f} | Residual: {residuals[idx]:.1f}")
+            print(f"\tz: {z:.2f} | object_id: {object_id} | SDSS: {sdss_name} | RA: {ra:.5f} | DEC: {dec:.5f} | Residual: {residuals[idx]:.1f}")
+
+    # Standard deviation Outlier report
+    outlier_mask = mu_pred_std > 4
+    if np.any(outlier_mask) and verbose:
+        print("++++++++++++++++++++++++++++++++++++++++++++++++++++++++++")
+        print("Outliers with mu_pred_std > 4:")
+        for idx in np.where(outlier_mask)[0]:
+            sdss_name = df_agn.iloc[idx].get('sdss_name', 'Unknown')
+            object_id = df_agn.iloc[idx].get('object_id', 'Unknown')
+            ra  = df_agn.iloc[idx].get('ra',  np.nan)
+            dec = df_agn.iloc[idx].get('dec', np.nan)
+            z   = df_agn.iloc[idx]['z']
+            print(f"\tz: {z:.2f} | object_id: {object_id} | SDSS: {sdss_name} | RA: {ra:.5f} | DEC: {dec:.5f} | Residual: {residuals[idx]:.1f}")
 
     return residuals, mu_pred_median, mu_pred_std
 
@@ -803,6 +817,8 @@ def plot_predicted_vs_actual_M2500(
                                Om0=row[label_to_idx["Om0"]],
                                w0=row[label_to_idx["w0"]],
                                wa=row[label_to_idx["wa"]])
+        elif cosmo_model == "FlatLambdaCDM":
+            return FlatLambdaCDM(H0=row[label_to_idx["H0"]], Om0=row[label_to_idx["Om0"]])
         else:
             return FlatLambdaCDM(H0=row[label_to_idx["H0"]], Om0=row[label_to_idx["Om0"]])
 
@@ -1197,6 +1213,11 @@ def plot_full_residuals(df_agn, residuals, flat_samples, cosmo_model, z_pivot_ag
             w0=results['w0'][1],
             wa=results['wa'][1]
         )
+    elif cosmo_model == 'FlatLambdaCDM':
+        cosmo = FlatLambdaCDM(
+            H0=results['H0'][1],
+            Om0=results['Om0'][1]
+        )
     else:
         raise ValueError("Invalid cosmology model.")
     
@@ -1325,7 +1346,8 @@ def plot_predicted_L2500_vs_sigmahat(flat_samples, df_agn, cosmo_model, z_pivot_
         cosmo = FlatwpwaCDM(H0=results['H0'][1], Om0=results['Om0'][1], wp=results['wp'][1], wa=results['wa'][1], zp=z_pivot_agn)
     elif cosmo_model == 'Flatw0waCDM':
         cosmo = Flatw0waCDM(H0=results['H0'][1], Om0=results['Om0'][1], w0=results['w0'][1], wa=results['wa'][1])
-
+    elif cosmo_model == 'FlatLambdaCDM':
+        cosmo = FlatLambdaCDM(H0=results['H0'][1], Om0=results['Om0'][1])
     else:
         raise ValueError(f"Unknown cosmological model: {cosmo_model}")
 

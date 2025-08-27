@@ -56,27 +56,19 @@ def M_model_agn_err(M0_agn, alpha_agn, beta_agn, gamma_agn,
     return err
 
 
-def M_model_SN(m_b_corr, host_logmass, M0_sn, gamma_sn, tau_Ms):
-    """
-    Brout+2022 SN model using standardized m_b_corr from Pantheon+SH0ES.
-    """
-    # Stable logistic correction in log-space, zero at logM = 10
-    delta_host = gamma_sn * expit(-(host_logmass - 10) / tau_Ms) - gamma_sn / 2
-    return m_b_corr - M0_sn + delta_host
-
 def get_model_params(cosmo_model, only_sna=False):
     
     priors = OrderedDict([
-        ("M0_sn",       (-22, -17)),    # SN absolute magnitude, MLE: ~-19.3
+        ("M0_sn",       (-21, -18)),    # SN absolute magnitude, MLE: ~-19.3
 
-        ("M0_agn",   (-26.0, -16.0)),
-        ("alpha_agn", (-5.0,  5.0)),
+        ("M0_agn",   (-24.0, -19.0)),
+        ("alpha_agn", (-10.0,  10.0)),
         ("beta_agn",  (-5.0,  5.0)),
         ("gamma_agn", (-5.0,  5.0)),
         ("log_f",     (-5.0,  0.3)),
 
-        ("H0",       (60.0, 85.0)),
-        ("Om0",      (0.05, 0.90)),
+        ("H0",       (60.0, 80.0)),
+        ("Om0",      (0.1, 0.9)),
     ])
 
     # Select cosmological parameters based on model
