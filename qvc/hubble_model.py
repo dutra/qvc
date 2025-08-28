@@ -9,7 +9,8 @@ log_tau_UV_RF_pivot = 2.65  # TODO make this a parameter
 bwb_beta_pivot = 0.14
 #M0_agn_offset = -5.179  # TODO make this a parameter
 #z_agn_pivot = 1.2 # TODO make this a parameter
-alpha_nu_pivot = -1
+#alpha_nu_pivot = -0.86
+alpha_nu_pivot = 0
 
 def broken_power_law_err(x, x_err, x_break, d1, d2, ds):
     u = ds * (x - x_break)
@@ -43,12 +44,26 @@ def broken_power_law(x, x_break, d1, d2, ds):
 #     return np.sqrt(err_bpl**2 + (beta_agn * log_tau_UV_RF_err)**2)
 
 # # Linear model
-def M_model_agn(M0_agn, alpha_agn, beta_agn, gamma_agn, log_sigma_UV, log_tau_UV_RF, bwb_beta):
-    return M0_agn + alpha_agn * (log_sigma_UV - log_sigma_UV_pivot) + beta_agn * (log_tau_UV_RF - log_tau_UV_RF_pivot)# + gamma_agn * (bwb_beta - bwb_beta_pivot)
+k_logistic = 1.0  # steepness of the logistic function
+def M_model_agn(M0_agn, alpha_agn, beta_agn, gamma_agn, log_sigma_UV, log_tau_UV_RF, alpha_nu):
+    logistic_alpha_nu = expit(k_logistic * (alpha_nu - alpha_nu_pivot)) - 0.5
+    return (M0_agn + alpha_agn * (log_sigma_UV - log_sigma_UV_pivot)
+            + beta_agn * (log_tau_UV_RF - log_tau_UV_RF_pivot)
+            + gamma_agn * logistic_alpha_nu
+    )
+            # gamma_agn * (alpha_nu - alpha_nu_pivot)
     
 def M_model_agn_err(M0_agn, alpha_agn, beta_agn, gamma_agn,
-                    log_sigma_UV, log_sigma_UV_err, log_tau_UV_RF_err, bwb_beta_err):
-    err = np.sqrt((alpha_agn * log_sigma_UV_err)**2 + (beta_agn * log_tau_UV_RF_err)**2)# + (gamma_agn * bwb_beta_err)**2)
+                    log_sigma_UV, log_sigma_UV_err, log_tau_UV_RF_err, alpha_nu, alpha_nu_err):
+    # Derivative of expit(x) = expit(x) * (1 - expit(x))
+    x = k_logistic * (alpha_nu - alpha_nu_pivot)
+    logistic_alpha_nu = expit(x)
+    logistic_derivative = k_logistic * logistic_alpha_nu * (1 - logistic_alpha_nu)
+    d_alpha_nu_term = gamma_agn * logistic_derivative
+    err = np.sqrt((alpha_agn * log_sigma_UV_err)**2 + (beta_agn * log_tau_UV_RF_err)**2 
+                  + (d_alpha_nu_term * alpha_nu_err)**2
+    )
+                  #+ (gamma_agn * alpha_nu_err)**2)
     #mask = err > 5
     #print(f"Errors associated with log_sigma_UV_err > 5 mag: ", (alpha_agn * log_sigma_UV_err)[mask])
     #print(f"Errors associated with log_tau_UV_RF_err > 5 mag: ",  (beta_agn * log_tau_UV_RF_err)[mask])
@@ -61,10 +76,10 @@ def get_model_params(cosmo_model, only_sna=False):
     priors = OrderedDict([
         ("M0_sn",       (-21, -18)),    # SN absolute magnitude, MLE: ~-19.3
 
-        ("M0_agn",   (-24.0, -19.0)),
+        ("M0_agn",   (-24.0, -17.0)),
         ("alpha_agn", (-10.0,  10.0)),
         ("beta_agn",  (-5.0,  5.0)),
-        ("gamma_agn", (-5.0,  5.0)),
+        ("gamma_agn", (-10.0,  10.0)),
         ("log_f",     (-5.0,  0.3)),
 
         ("H0",       (60.0, 80.0)),

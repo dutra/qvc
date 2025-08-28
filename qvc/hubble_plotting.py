@@ -417,7 +417,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
             s[param_indices['gamma_agn']],
             df_agn['log_sigma_UV'].values,
             df_agn['log_tau_UV_RF'].values,
-            df_agn['bwb_beta'].values
+            df_agn['alpha_nu'].values
         ) for s in flat_samples
     ])
 
@@ -443,7 +443,8 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
             df_agn['log_sigma_UV'].values,
             df_agn['log_sigma_UV_err'].values,
             df_agn['log_tau_UV_RF_err'].values,
-            df_agn['bwb_beta_err'].values
+            df_agn['alpha_nu'].values,
+            df_agn['alpha_nu_err'].values
         )**2
     )
 
@@ -535,7 +536,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     # SN Ia
     inset_ax.errorbar(
         df_pantheon["zHD"], df_pantheon["MU_SH0ES"], yerr=df_pantheon["MU_SH0ES_ERR_DIAG"],
-        fmt='s', markersize=2, color="#0A84FF", linestyle='none', lw=0.8, alpha=0.95, zorder=0, label="SN Ia"
+        fmt='s', markersize=2, color="#0A84FF", linestyle='none', lw=0.8, alpha=0.7, zorder=1, label="SN Ia"
     )
 
     # Model + band
@@ -546,7 +547,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     if completeness and not debias:
         log_sigma0_med    = float(np.median(df_agn['log_sigma0'].values))
         log_tau_UV_RF_med = float(np.median(df_agn['log_tau_UV_RF'].values))
-        bwb_med           = float(np.median(df_agn['bwb_beta'].values))
+        alpha_nu_med           = float(np.median(df_agn['alpha_nu'].values))
         M_med_grid = np.median([
             M_model_agn(
                 s[param_indices['M0_agn']],
@@ -555,7 +556,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
                 s[param_indices['gamma_agn']],
                 log_sigma0_med * np.ones_like(z_grid),
                 log_tau_UV_RF_med * np.ones_like(z_grid),
-                bwb_med * np.ones_like(z_grid)
+                alpha_nu_med * np.ones_like(z_grid)
             ) for s in flat_samples
         ], axis=0)
         m_lim = 24.0
@@ -579,13 +580,13 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
         fmt='o', linestyle='none', markersize=3,
         mfc="black", mec="black",
         ecolor="#666666", elinewidth=1.1,
-        alpha=0.3, zorder=1, label="AGN"
+        alpha=0.3, zorder=0, label="AGN"
     )
     # AGN (outside, open)
     ax.errorbar(
         df_agn["z"][mask_out], mu_pred_median[mask_out], yerr=mu_pred_std[mask_out],
         fmt='o', linestyle='none', markersize=3, mfc='none', mec="k", alpha=0.3,
-        ecolor="#666666", elinewidth=1.1, zorder=1
+        ecolor="#666666", elinewidth=1.1, zorder=0
     )
 
     # MAIN: linear-binned AGN
@@ -601,7 +602,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     # SN Ia
     ax.errorbar(
         df_pantheon["zHD"], df_pantheon["MU_SH0ES"], yerr=df_pantheon["MU_SH0ES_ERR_DIAG"],
-        fmt='s', markersize=3, color="#0A84FF", linestyle='none', lw=1, alpha=0.95, zorder=0, label="SN Ia"
+        fmt='s', markersize=2, color="#0A84FF", linestyle='none', lw=0.8, alpha=0.7, zorder=1, label="SN Ia"
     )
 
     # Model + 68% band
@@ -612,7 +613,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     if completeness and not debias:
         log_sigma0_med    = float(np.median(df_agn['log_sigma0'].values))
         log_tau_UV_RF_med = float(np.median(df_agn['log_tau_UV_RF'].values))
-        bwb_med           = float(np.median(df_agn['bwb_beta'].values))
+        alpha_nu_med           = float(np.median(df_agn['alpha_nu'].values))
         M_med_grid = np.median([
             M_model_agn(
                 s[param_indices['M0_agn']],
@@ -621,7 +622,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
                 s[param_indices['gamma_agn']],
                 log_sigma0_med * np.ones_like(z_grid),
                 log_tau_UV_RF_med * np.ones_like(z_grid),
-                bwb_med * np.ones_like(z_grid)
+                alpha_nu_med * np.ones_like(z_grid)
             ) for s in flat_samples
         ], axis=0)
         m_lim = 24.0
@@ -780,7 +781,7 @@ def plot_predicted_vs_actual_M2500(
         results["gamma_agn"][1],
         df_agn["log_sigma_UV"].values,
         df_agn["log_tau_UV_RF"].values,
-        df_agn["bwb_beta"].values,
+        df_agn["alpha_nu"].values,
     )
 
     # --- y-errors from model error propagation ---
@@ -792,7 +793,8 @@ def plot_predicted_vs_actual_M2500(
         df_agn["log_sigma_UV"].values,
         df_agn["log_sigma_UV_err"].values,
         df_agn["log_tau_UV_RF_err"].values,
-        df_agn["bwb_beta_err"].values,
+        df_agn["alpha_nu"].values,
+        df_agn["alpha_nu_err"].values,
     )
     M_2500_pred_err = np.asarray(M_2500_pred_err, dtype=float)
     M_2500_pred_err[~np.isfinite(M_2500_pred_err) | (M_2500_pred_err < 0)] = np.nan
@@ -1025,7 +1027,7 @@ def plot_predicted_vs_actual_Mi(flat_samples, df_agn, cosmo_model, z_pivot_agn, 
         results['gamma_agn'][1], 
         df_agn['log_sigma_UV'].values,
         df_agn['log_tau_UV_RF'].values,
-        df_agn['bwb_beta'].values,
+        df_agn['alpha_nu'].values,
     )
 
     # Calculate prediction errors
@@ -1038,7 +1040,8 @@ def plot_predicted_vs_actual_Mi(flat_samples, df_agn, cosmo_model, z_pivot_agn, 
             df_agn['log_sigma_UV'].values, 
             df_agn['log_sigma_UV_err'].values, 
             df_agn['log_tau_UV_RF_err'].values,
-            df_agn['bwb_beta_err'].values,
+            df_agn['alpha_nu'].values,
+            df_agn['alpha_nu_err'].values,
         )**2
     )
 
@@ -1186,6 +1189,25 @@ def plot_Mi_vs_sigmahat(df_agn, cosmo_model, show=False):
 
 def plot_full_residuals(df_agn, residuals, flat_samples, cosmo_model, z_pivot_agn, plot_path='plots/hubble', show=False):
     import math
+    from scipy.optimize import curve_fit
+    from scipy.special import expit
+
+    # --- Centered logistic model ---
+    def logistic_model(alpha_nu, gamma, k, pivot=0.0):
+        """Centered logistic contribution to residuals"""
+        return gamma * (expit(k * (alpha_nu - pivot)) - 0.5)
+
+    # Initial guesses: gamma ~ amplitude of residuals, k ~ 1
+    p0 = [2.0, 1.0]  # (gamma, k)
+    # Fit curve
+    params, cov = curve_fit(lambda x, gamma, k: logistic_model(x, gamma, k, pivot=0.0),
+                            df_agn['alpha_nu'], residuals, p0=p0)
+
+    gamma_fit, k_fit = params
+    gamma_err, k_err = np.sqrt(np.diag(cov))
+
+    print(f"Best-fit gamma = {gamma_fit:.3f} ± {gamma_err:.3f}")
+    print(f"Best-fit k_logistic = {k_fit:.3f} ± {k_err:.3f}")
 
     priors, model_labels, model_labels_latex = get_model_params(cosmo_model)
     param_indices = {name: model_labels.index(name) for name in model_labels}
@@ -1236,7 +1258,7 @@ def plot_full_residuals(df_agn, residuals, flat_samples, cosmo_model, z_pivot_ag
         'apparent_mag_2500', 'MY_M_2500', 'z', 'log_lbol', 'log_ledd_ratio', 
         'log_sigma_UV', 'log_sigma_hat_UV', 'log_tau_UV_RF', 'chi_sq_g',
         'bwb_beta', 'sn_median_all', 'bwb_alpha', 'bwb_beta',
-        'redchi', 'bwb_beta_4200', 'alpha_lambda', 'f_host_4200',
+        'redchi', 'bwb_beta_4200', 'alpha_lambda', 'alpha_nu', 'f_host_4200',
         'eta_A1', 'eta_A2', 'eta_tau1', 'eta_tau2'
     ]) if col in df_agn.columns]
 
@@ -1316,7 +1338,7 @@ def plot_predicted_L2500_vs_sigmahat(flat_samples, df_agn, cosmo_model, z_pivot_
                 sample_params['beta_agn'],
                 sample_params['gamma_agn'],
                 log_sigma_UV, d['log_tau_UV_RF'].mean(),
-                d['bwb_beta'].mean()
+                d['alpha_nu'].mean()
             )
             predicted_logL2500 = -0.4 * (predicted_M2500 - 90) #* np.log10(np.e)  # log10(L)
             predicted_logL2500_samples.append(predicted_logL2500)
@@ -1327,7 +1349,7 @@ def plot_predicted_L2500_vs_sigmahat(flat_samples, df_agn, cosmo_model, z_pivot_
                 sample_params['beta_agn'],
                 sample_params['gamma_agn'],
                 log_sigma_UV, d['log_tau_UV_RF_err'].mean(), d['log_sigma_UV_err'].mean(),
-                d['bwb_beta_err'].mean()
+                d['alpha_nu'].mean(), d['alpha_nu_err'].mean()
             )
             predicted_logL2500_err = -0.4 * predicted_M2500_err #* np.log10(np.e)  # log10(L)
             predicted_logL2500_err_samples.append(predicted_logL2500_err)

@@ -618,9 +618,8 @@ def load_quasar_data(file_path, populate_sdss=False, apply_cut=True):
 
     
     #df = populate_chi_sq_from_csv(df)
-
-    df['alpha_nu'] = -0.5  # Default value
-    df['alpha_nu_err'] = 0.1  # Default error
+    df['alpha_nu'] = -df['alpha_lambda'] - 2
+    df['alpha_nu_err'] = df['alpha_lambda_err']
 
     #df = compute_apparent_mag_2500_colin(df)
 
@@ -679,7 +678,12 @@ def load_quasar_data(file_path, populate_sdss=False, apply_cut=True):
         print(f"Cut on {col}: {cut_count} objects removed")
         mask &= col_mask
     
-
+    remove_nans_columns = ['alpha_lambda', 'alpha_lambda_err']
+    for col in remove_nans_columns:
+        nan_mask = ~df[col].isna()
+        num_nans = (~nan_mask).sum()
+        print(f"Removing {num_nans} objects with NaN in column '{col}'")
+        mask &= nan_mask
 
     df = df[mask]
     print(f"Total objects removed by all cuts: {initial_count - len(df)}")

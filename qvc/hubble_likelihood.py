@@ -107,7 +107,7 @@ def log_likelihood_pantheon_mush0es(params, pantheon_data, _sna_L, _sna_Lower, _
 def log_likelihood(theta, *, agn_data, pantheon_data, 
                    _sna_L, _sna_Lower, _sna_LogdetCov,
                    cosmo_model, completeness_params,
-                   only_sna=False, use_full_cov=False, use_ceph_dist=False):
+                   only_sna=False, use_full_cov=False, use_mu_sh0es=False):
     priors, model_labels, model_labels_latex = get_model_params(cosmo_model, only_sna=only_sna)
     model_priors = {key: priors[key] for key in model_labels}
     params = dict(zip(model_labels, theta))
@@ -134,14 +134,14 @@ def log_likelihood(theta, *, agn_data, pantheon_data,
     elif cosmo_model == 'FlatLambdaCDM':
         cosmo = FlatLambdaCDM(H0=params['H0'], Om0=params['Om0'])
 
-    if use_ceph_dist:
-        ll_snia = log_likelihood_pantheon_cephdist(params, pantheon_data, 
-                                                   _sna_L, _sna_Lower, _sna_LogdetCov,
-                                                    cosmo, use_full_cov)
-    else:
+    if use_mu_sh0es:
         ll_snia = log_likelihood_pantheon_mush0es(params, pantheon_data, 
                                                   _sna_L, _sna_Lower, _sna_LogdetCov,
                                                   cosmo, use_full_cov)
+    else:
+        ll_snia = log_likelihood_pantheon_cephdist(params, pantheon_data, 
+                                                   _sna_L, _sna_Lower, _sna_LogdetCov,
+                                                    cosmo, use_full_cov)
     
     if only_sna:
         return ll_snia, empty_blob(N_obj)
@@ -158,6 +158,8 @@ def log_likelihood(theta, *, agn_data, pantheon_data,
     log_tau_UV_RF_err = agn_data['log_tau_UV_RF_err']
     bwb_beta = agn_data['bwb_beta']
     bwb_beta_err = agn_data['bwb_beta_err']
+    alpha_nu = agn_data['alpha_nu']
+    alpha_nu_err = agn_data['alpha_nu_err']
 
     mu_cosmo = cosmo.distmod(z).value  # replace with the same μ(z) backbone if you go fully cosmology-free
     M_pred = M_model_agn(params['M0_agn'], 
@@ -165,7 +167,7 @@ def log_likelihood(theta, *, agn_data, pantheon_data,
                          params['beta_agn'],
                          params['gamma_agn'],
                          log_sigma_UV, log_tau_UV_RF,
-                         bwb_beta)
+                         alpha_nu)
 
     mu_pred = m_obs - M_pred 
     M_i_pred_err = M_model_agn_err(params['M0_agn'],
@@ -174,7 +176,7 @@ def log_likelihood(theta, *, agn_data, pantheon_data,
                                    params['gamma_agn'],
                                    log_sigma_UV, log_sigma_UV_err,
                                    log_tau_UV_RF_err,
-                                   bwb_beta_err)
+                                   alpha_nu, alpha_nu_err)
     
     mu_err = np.sqrt(
         m_err**2 +

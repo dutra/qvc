@@ -96,6 +96,8 @@ class Completeness2D:
     def grid(self):
         return dict(mag_centers=self.mag_centers, z_centers=self.z_centers)
 
+from sklearn.linear_model import Ridge, RidgeCV
+
 def get_completeness_function_2d(
     df_agn,
     sim_file="data/mock_mag_z.h5",
@@ -112,9 +114,6 @@ def get_completeness_function_2d(
     - Smooths counts (not ratios).
     - Returns completeness C in [0,1] plus grid info and regression scatter (σ).
     """
-    import numpy as np
-    import h5py, os
-    from scipy.ndimage import gaussian_filter
 
     # --- Load simulated (true) sample
     with h5py.File(sim_file, 'r') as f:
@@ -144,6 +143,10 @@ def get_completeness_function_2d(
     alpha = df_agn[acol].values[mask]
     z_obs = df_agn['z'].values[mask]
 
+    # Print object_id for m2500 > 25 (after mask)
+    object_ids = df_agn.loc[mask & (m2500 > 25), 'sdss_name']
+    print("object_id for m2500 > 25:", object_ids.values)
+
     # --- Center (pivots)
     mag_i0 = float(np.mean(mag_i))
     alpha0 = float(np.mean(alpha))
@@ -152,12 +155,20 @@ def get_completeness_function_2d(
     X = np.column_stack([
         mag_i - mag_i0,
         alpha - alpha0,
-        (mag_i - mag_i0)**2,  # quadratic term
+        (mag_i - mag_i0)**2, # quadratic term
         np.ones_like(mag_i)
     ])
-    beta, *_ = np.linalg.lstsq(X, y, rcond=None)
+
+    alphas = np.logspace(-4, 2, 100)  # from 0.0001 to 1.0
+    ridge = RidgeCV(alphas=alphas, fit_intercept=False, store_cv_results=True)
+    ridge.fit(X, y)
+    beta = ridge.coef_
+    print(f"Best alpha selected by CV: {ridge.alpha_}")    
+
+    # beta, *_ = np.linalg.lstsq(X, y, rcond=None)
+    
     a, b, d, c_pivot = beta
-    c = c_pivot - a*mag_i0 - b*alpha0 - d*(mag_i0**2)
+    c = c_pivot - a*mag_i0 - d*(mag_i0**2) - b*alpha0 
 
     # Diagnostics on observed sample
     y_fit = X @ beta
@@ -203,19 +214,19 @@ def get_completeness_function_2d(
         plt.savefig("plots/completeness/mag2500_vs_magi_fixed_alpha.png", dpi=200)
         plt.close()
 
-        # 2) y vs alpha at fixed mag_i = mag_i0
-        a_grid = np.linspace(alpha.min(), alpha.max(), 400)
-        y_line_magi_fixed = b*(a_grid - alpha0) + c_pivot  # (a term cancels)
-        plt.figure(figsize=(8,6))
-        plt.scatter(alpha, y, s=14, alpha=0.7, label='Data')
-        plt.plot(a_grid, y_line_magi_fixed, lw=2, color='red',
-                 label=f'Slice @ m_i={mag_i0:.3f}: y = b(α-⟨α⟩)+c₀')
-        plt.axvline(alpha0, ls='--', lw=1, color='k', alpha=0.3)
-        plt.xlabel('alpha_lambda (continuum slope)')
-        plt.ylabel('apparent_mag_2500 (continuum-only, rest)')
-        plt.grid(True, alpha=0.4); plt.legend(); plt.tight_layout()
-        plt.savefig("plots/completeness/mag2500_vs_alpha_fixed_magi.png", dpi=200)
-        plt.close()
+        # # 2) y vs alpha at fixed mag_i = mag_i0
+        # a_grid = np.linspace(alpha.min(), alpha.max(), 400)
+        # y_line_magi_fixed = b*(a_grid - alpha0) + c_pivot  # (a term cancels)
+        # plt.figure(figsize=(8,6))
+        # plt.scatter(alpha, y, s=14, alpha=0.7, label='Data')
+        # plt.plot(a_grid, y_line_magi_fixed, lw=2, color='red',
+        #          label=f'Slice @ m_i={mag_i0:.3f}: y = b(α-⟨α⟩)+c₀')
+        # plt.axvline(alpha0, ls='--', lw=1, color='k', alpha=0.3)
+        # plt.xlabel('alpha_lambda (continuum slope)')
+        # plt.ylabel('apparent_mag_2500 (continuum-only, rest)')
+        # plt.grid(True, alpha=0.4); plt.legend(); plt.tight_layout()
+        # plt.savefig("plots/completeness/mag2500_vs_alpha_fixed_magi.png", dpi=200)
+        # plt.close()
 
         os.makedirs("plots/completeness", exist_ok=True)
         plt.figure(figsize=(7, 6))
@@ -230,14 +241,37 @@ def get_completeness_function_2d(
         plt.savefig("plots/completeness/y_vs_yfit.png", dpi=200)
         plt.close()
 
+        plt.figure(figsize=(8, 5))
+        plt.scatter(z_obs, y, s=14, alpha=0.7)
+        plt.xlabel("Redshift (z)")
+        plt.ylabel("apparent_mag_2500")
+        plt.title("Observed apparent_mag_2500 vs Redshift")
+        plt.grid(True, alpha=0.4)
+        plt.tight_layout()
+        plt.savefig("plots/completeness/mag2500_vs_z.png", dpi=200)
+        plt.close()
+
     # --- Predict "true" mag_2500 for the sim (alpha fixed to alpha0 unless you have it per-object)
+    true_alpha0 = -1.5
     calculated_mags_true_2500 = (
         a * (mags_true_i - mag_i0)
         + d * (mags_true_i - mag_i0)**2
-        + b * alpha0
+        + b * true_alpha0
         + c_pivot
     )
     mags_true = calculated_mags_true_2500
+
+    import matplotlib.pyplot as plt
+    os.makedirs("plots/completeness", exist_ok=True)
+    plt.figure(figsize=(8, 5))
+    plt.scatter(z_true, calculated_mags_true_2500, s=10, alpha=0.6)
+    plt.xlabel("Redshift (z)")
+    plt.ylabel("Predicted mag_2500 (simulated)")
+    plt.title("Simulated mag_2500 vs Redshift")
+    plt.grid(True, alpha=0.4)
+    plt.tight_layout()
+    plt.savefig("plots/completeness/mag2500true_vs_z_true.png", dpi=200)
+    plt.close()
 
     # --- Observed mags (same mask as fit)
     mags_obs = y  # df_agn['apparent_mag_2500'].values[mask]
@@ -253,7 +287,7 @@ def get_completeness_function_2d(
     mags_obs, z_obs = mags_obs[mask_obs], z_obs[mask_obs]
 
     # --- Bin edges and centers
-    z_min, z_max = float(np.min(z_true)), 4.0
+    z_min, z_max = float(np.min(z_true)), 5.0
     if z_max - z_min < 1e-3:
         z_min -= 0.01; z_max += 0.01
 
