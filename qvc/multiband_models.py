@@ -162,6 +162,35 @@ class ContiBLRQS(qs.Wrapper):
         small = 1.0 + (x**2)/6.0 + (x**4)/120.0 # Series for small x
         return jnp.where(jnp.abs(x) < 1e-4, small, jnp.sinh(x) / (x + 1e-18))
 
+
+    def _quadrature_nodes_weights(self, width: JAXArray):
+        """
+        Return offsets u_k in [0, width] and mean-weights γ_k (sum=1) for the
+        causal average (1/width) ∫_0^{width} f(u) du ≈ Σ γ_k f(u_k).
+        """
+        nodes = jnp.array([0.1127016653792583, 0.5, 0.8872983346207417])
+        weights = jnp.array([5/18, 8/18, 5/18])  # sums to 1
+        u = width * nodes
+        gamma = weights  # already normalized to sum=1 for the mean
+        return u, gamma
+
+    def conv_observation_model(self, t: JAXArray, lag: JAXArray, width: JAXArray) -> JAXArray:
+        """
+        Approximate causal window average of the latent OU at time t:
+            (1/width)∫_0^{width} h(t - lag - u) du
+        ≈ Σ_k γ_k h(t - lag - u_k).
+        Returns a vector in the base-state space (same shape as kernel.observation_model).
+        """
+        u_k, gamma_k = self._quadrature_nodes_weights(width)
+        # Broadcast over taps and sum
+        # shape: (K, m) -> (m,)
+        def tap(u, g):
+            return g * self.kernel.observation_model(t - lag - u)
+        # vmap over taps
+        taps = jax.vmap(tap, in_axes=(0, 0))(u_k, gamma_k)
+        return taps.sum(axis=0)
+
+
     def observation_model(self, X: JAXArray) -> JAXArray:
         """
         Return a single observation vector h_tot for the augmented state:
@@ -170,26 +199,22 @@ class ContiBLRQS(qs.Wrapper):
         t, b = X
         b = jnp.asarray(b, dtype=int)
 
-        # Transfer factors from top-hat smoothing (single tophat per component)
-        fac_blr  = self._tophat_factor(self.width_blr[b])
-        fac_cont = self._tophat_factor(self.width_cont[b])
-
         # Base kernel observation vectors
         # Continuum evaluated at time t
-        h_cont0 = self.kernel.observation_model(t)                   # shape [m]
+        h_cont0 = self.conv_observation_model(t, 0.0, self.width_cont[b])
         # BLR is the same latent, but evaluated at shifted time (t - Δ_b)
-        h_blr0  = self.kernel.observation_model(t - self.lag_blr[b]) # shape [m]
+        h_blr0  = self.conv_observation_model(t, self.lag_blr[b], self.width_blr[b])
 
         # Amplitude-weighted components
-        h_cont = self.amp_cont[b] * fac_cont * h_cont0
-        h_blr  = self.amp_blr[b]  * fac_blr  * h_blr0
+        h_cont = self.amp_cont[b] * h_cont0
+        h_blr  = self.amp_blr[b]  * h_blr0
 
         # Sum gives the 4-term expansion in the covariance
         h_base_total = h_cont + h_blr
 
         # BWB piece ~ k^2(τ); choose tau_drw/2 for exact square by default
         h_sq = self.kernel2.observation_model(t)  # if you keep bwb_beta free, this is τ/β
-        q_b  = self.bwb_alpha * (self.amp_cont[b] * fac_cont) ** 2
+        q_b  = self.bwb_alpha * (self.amp_cont[b]) ** 2
         h_bwb = jnp.sqrt(2.0) * q_b * h_sq
 
         return jnp.concatenate([h_base_total, h_bwb], axis=0)
@@ -411,7 +436,12 @@ class MyMultiVarModel(MultiVarModel):
         lam_s = params["lam_s"]
         eta_break = params["eta_break"]
         log_tau_band = params["log_tau_drw0"] + jnp.log(10) * log_broken_pl(self.lam_rf, lam_s, eta_tau1, eta_tau2, eta_break)
-        return jnp.mean(log_tau_band)
+        # Masked average
+        mask = self.lam_rf > 0.0  # fixed-shape mask
+        w = mask.astype(log_tau_band.dtype)
+        count = jnp.sum(w)
+        log_tau_band_mean = jnp.where(count > 0, jnp.sum(log_tau_band * w) / count, jnp.nan)
+        return log_tau_band_mean
 
     def my_amp_transform(self, params: dict[str, JAXArray]) -> JAXArray:
         """

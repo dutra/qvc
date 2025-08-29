@@ -141,11 +141,12 @@ def build_model(batch_data, zs, f_host_value, lam_rfs, log_jitter_mean, f_host_s
 
                 # BLR amplitudes and lags
                 log_amp_delta_blr = numpyro.sample("log_amp_delta_blr", dist.Normal(jnp.full(nBands, -1.0), 1.0))
-                log_lag_blr = numpyro.sample("log_lag_blr", dist.Normal(log_lag_blr_c[..., None], 3.0))
+                #log_lag_blr = numpyro.sample("log_lag_blr", dist.Normal(log_lag_blr_c[..., None], 3.0))
+                log_lag_blr = numpyro.sample("log_lag_blr", dist.Uniform(0.2, 4.0))
                 width_blr = numpyro.sample("width_blr", dist.TruncatedNormal(0.2 * jnp.exp(log_tau_drw0_c[..., None]), 20.0, low=10.0))
                 width_cont = numpyro.sample("width_cont", dist.TruncatedNormal(0.2 * jnp.exp(log_tau_drw0_c[..., None]), 20.0, low=10.0))
                 #width_blr = numpyro.deterministic("width_blr", 0.2 * jnp.exp(log_tau_drw0[..., None]))
-                #width_cont = numpyro.deterministic("width_cont", 0.2 * jnp.exp(log_tau_drw0[..., None]))
+                #width_cont = numpyro.deterministic("width_cont", 0.0 * jnp.exp(log_tau_drw0_c[..., None]))
 
                 # Jitter
                 log_jitter = numpyro.sample("log_jitter", dist.Normal(log_jitter_mean, 1.0))
@@ -396,7 +397,7 @@ if __name__ == '__main__':
         obj |= result
         # Run bestP for each object
         n_bands = len(obj['clean_bands'])
-        lam_rf = np.full(5, 2500.0)
+        lam_rf = np.full(5, 0.0)
         lam_rf[:len(obj['clean_bands'])] = np.array([lambda_pivot[band] for band in obj['clean_bands']]) / (1 + obj['z'])
         lam_rf = jnp.array(lam_rf)
 
@@ -520,7 +521,7 @@ if __name__ == '__main__':
         # Plotting
         if args.plot:
             plot_mcmc_traces(obj_flat_samples_flatten_per_band, obj)
-            #plot_posterior(obj_flat_samples_flatten_per_band, obj)
+            plot_posterior(obj_flat_samples_flatten_per_band, obj)
 
             m = Model(
                 obj['X'], obj['y'], obj['yerr'], 
