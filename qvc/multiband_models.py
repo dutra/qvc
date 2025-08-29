@@ -381,8 +381,7 @@ class MyMultiVarModel(MultiVarModel):
 
         # Host dilution: apply per-band correction
         # Host galaxy contribution modeled as a power-law in wavelength
-        alpha_AGN = -1.5 # alpha_lam
-        host_frac = params["f_host"] * (self.lam_rf / 5100.0) ** (params["alpha_host"] - alpha_AGN)
+        host_frac = params["f_host"] * (self.lam_rf / 5100.0) ** (params["alpha_host"] - params["alpha_agn"])
         dilution_factor = 1.0 / (1.0 + host_frac)
         log_dilution = jnp.log(dilution_factor)
 

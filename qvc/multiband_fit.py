@@ -110,7 +110,8 @@ def build_model(batch_data, zs, f_host_value, lam_rfs, log_jitter_mean, f_host_s
             log_sigma_hat0 = numpyro.deterministic("log_sigma_hat0", log_sigma0 - 0.5 * log_tau_drw0)
 
             # Host galaxy dilution
-            alpha_host = numpyro.sample("alpha_host", dist.Normal(1.0, 0.1))
+            alpha_host = numpyro.sample("alpha_host", dist.Normal(1.0, 0.1)) # alpha_lam
+            alpha_AGN = numpyro.deterministic("alpha_agn", jnp.full(batch_size, -1.5)) # alpha_lam
             f_host = numpyro.deterministic("f_host", f_host_value)
 
             # Mean function detrending
@@ -157,6 +158,7 @@ def build_model(batch_data, zs, f_host_value, lam_rfs, log_jitter_mean, f_host_s
                 "log_tau_drw0": log_tau_drw0[i],
                 "log_sigma0": log_sigma0[i],
                 "alpha_host": alpha_host[i],
+                "alpha_agn": alpha_AGN[i],
                 "f_host": f_host[i],
                 "poly1": poly1[i],
                 "mean": mean[i],
