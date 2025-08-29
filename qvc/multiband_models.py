@@ -157,12 +157,6 @@ class ContiBLRQS(qs.Wrapper):
         return jnp.block([[Phi0, z01],
                           [z10, Phi1]])
 
-    def _tophat_factor(self, width: int) -> JAXArray:
-        x = width / (2.0 * self.tau_drw)
-        small = 1.0 + (x**2)/6.0 + (x**4)/120.0 # Series for small x
-        return jnp.where(jnp.abs(x) < 1e-4, small, jnp.sinh(x) / (x + 1e-18))
-
-
     def _quadrature_nodes_weights(self, width: JAXArray):
         """
         Return offsets u_k in [0, width] and mean-weights γ_k (sum=1) for the
@@ -253,73 +247,6 @@ class ContiBLRQS(qs.Wrapper):
             return (v.conj().T @ (Qc @ v)).real + sigma_n2
 
         return 2.0 * jax.vmap(one_w)(omega)
-
-class MyMultibandContiBLR(tinygp.kernels.Kernel):
-    amplitudes: jnp.ndarray
-    amplitudes_blr: jnp.ndarray
-    lag_blr: jnp.ndarray
-    tau_drw: float
-    w: jnp.ndarray
-    s_b: jnp.ndarray
-
-    def __init__(self, amplitudes, amplitudes_blr, lag_blr, taus, log_w, s_b) -> None:
-        self.amplitudes = amplitudes
-        self.amplitudes_blr = amplitudes_blr
-        self.lag_blr = lag_blr
-        self.tau_drw = taus
-        self.w = jnp.exp(log_w)
-        self.s_b = s_b
-
-    def coord_to_sortable(self, X) -> JAXArray:
-        return X[0]
-
-    def k(self, t1, t2, tau_drw) -> JAXArray:
-        tau = jnp.abs(t1 - t2)
-        drw = jnp.exp(-tau / tau_drw)
-        return drw
-
-    def evaluate(self, X1, X2) -> JAXArray:
-        t1, b1 = X1
-        t2, b2 = X2
-
-        amplitudes_b1 = self.amplitudes[b1]
-        amplitudes_b2 = self.amplitudes[b2]
-        amplitudes_blr_b1 = self.amplitudes_blr[b1]
-        amplitudes_blr_b2 = self.amplitudes_blr[b2]
-
-        k_ac = self.k(t1, t2, self.tau_drw)
-
-        # a is cont at t1
-        # b is blr at t1
-        # c is cont at t2
-        # d is blr at t2
-        cov_ac = (
-            amplitudes_b1
-            * amplitudes_b2
-            * k_ac
-        )
-        cov_ad = (
-            amplitudes_b1
-            * amplitudes_blr_b2
-            * self.k(t1, t2 - self.lag_blr[b2], self.tau_drw)
-        )
-        cov_bc = (
-            amplitudes_blr_b1
-            * amplitudes_b2
-            * self.k(t1 - self.lag_blr[b1], t2, self.tau_drw)
-        )
-        cov_bd = (
-            amplitudes_blr_b1
-            * amplitudes_blr_b2
-            * self.k(t1 - self.lag_blr[b1], t2 - self.lag_blr[b2], self.tau_drw)
-        )
-
-        # BWB
-        q1 = self.s_b[b1] * amplitudes_b1**2
-        q2 = self.s_b[b2] * amplitudes_b2**2
-        cov_ac = cov_ac + 2.0 * q1 * q2 * k_ac * k_ac
-
-        return cov_ac + cov_ad + cov_bc + cov_bd
 
 
 # Override MultiVarModel
