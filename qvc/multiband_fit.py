@@ -391,7 +391,8 @@ if __name__ == '__main__':
             else:
                 obj["f_host_5100"] = 0.0  # Default if not found or invalid
     else:
-        obj["f_host_5100"] = 0.0  # Default if not found or invalid
+        for obj in objs:
+            obj["f_host_5100"] = 0.0  # Default if not found or invalid
 
     #objs = populate_sdss_fields(objs)
 
