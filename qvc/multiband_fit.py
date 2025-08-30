@@ -385,20 +385,11 @@ if __name__ == '__main__':
         alpha_map = alpha_df.set_index("object_id")[["alpha_lambda", "f_host_5100"]].to_dict(orient="index")
         # Populate objs with alpha_lambda and f_host_5100 by object_id
         for obj in objs:
-            # Host flux empirical relation
-            #logl5100 = jnp.array([obj['LOGL5100'] for obj in batch_data])
-            logl5100 = obj['LOGLBOL'] - jnp.log10(9.26)
-
-            x = logl5100 - 44.0
-            f_host = 0.8052 - 1.5502 * x + 0.9121 * jnp.power(x, 2) - 0.1577 * jnp.power(x, 3)
-            f_host = jnp.clip(f_host, 0.0, None)
-            f_host_shen11_value = f_host if logl5100 < 45.053 else 0.0
-
             oid = str(obj["object_id"])
-            if oid in alpha_map and alpha_map[oid]["f_host_5100"] > -90:
+            if oid in alpha_map and alpha_map[oid]["f_host_5100"] >= 0:
                 obj["f_host_5100"] = alpha_map[oid]["f_host_5100"]
             else:
-                obj["f_host_5100"] = f_host_shen11_value
+                obj["f_host_5100"] = 0.0  # Default if not found or invalid
 
     #objs = populate_sdss_fields(objs)
 
