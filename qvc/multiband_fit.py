@@ -57,7 +57,7 @@ has_lag = True
 
 universal_params = ['eta_A1_mean', 'eta_A2_mean', 'eta_tau1_mean', 'eta_tau2_mean', 'eta_break', 'lam_s', 'sigma_eta_A1', 'sigma_eta_A2', 'sigma_eta_tau1', 'sigma_eta_tau2', 'log_sigma_eta_A1', 'log_sigma_eta_A2', 'log_sigma_eta_tau1', 'log_sigma_eta_tau2']
 
-def build_model(batch_data, zs, f_host_value, lam_rfs, log_jitter_mean, f_host_shen11=True, latent=False, bwb=True, disable_poly1=False, d_eta=True):
+def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, latent=False, bwb=True, disable_poly1=False, d_eta=True):
     # Precompute and capture constants in the closure so they are treated as
     # static by JAX/NumPyro. This prevents unnecessary retracing/recompilation
     # when running MCMC, as these values do not change between runs.
@@ -350,7 +350,7 @@ if __name__ == '__main__':
     parser.add_argument("--jax_trace", action="store_true", help="Enable jax tracing.")
     parser.add_argument("--rf_length_cut", type=int, default=-1, help="Cut light curves to same rest-frame length.")
     parser.add_argument('--exact_same_length', action='store_true', help="Cut light curves to exact same rest-frame length.")
-
+    parser.add_argument("--alpha_lam_csv", type=str, default=None, help="Path to CSV file containing alpha_lam values per object.")
 
     args = parser.parse_args()
     print("Args: ", args)
@@ -378,7 +378,27 @@ if __name__ == '__main__':
     if args.rf_length_cut > 0:
         objs = cut_light_curve_restframe_window(objs, n_days=args.rf_length_cut, same_length=args.exact_same_length)
         print(f"After restframe cut, {len(objs)} objects remain.")
+    
+    if args.alpha_lam_csv is not None:
+        # Load CSV with columns: object_id, alpha_lambda, f_host_5100
+        alpha_df = pd.read_csv(args.alpha_lam_csv, dtype={"object_id": str})
+        alpha_map = alpha_df.set_index("object_id")[["alpha_lambda", "f_host_5100"]].to_dict(orient="index")
+        # Populate objs with alpha_lambda and f_host_5100 by object_id
+        for obj in objs:
+            # Host flux empirical relation
+            #logl5100 = jnp.array([obj['LOGL5100'] for obj in batch_data])
+            logl5100 = obj['LOGLBOL'] - jnp.log10(9.26)
 
+            x = logl5100 - 44.0
+            f_host = 0.8052 - 1.5502 * x + 0.9121 * jnp.power(x, 2) - 0.1577 * jnp.power(x, 3)
+            f_host = jnp.clip(f_host, 0.0, None)
+            f_host_shen11_value = f_host if logl5100 < 45.053 else 0.0
+
+            oid = str(obj["object_id"])
+            if oid in alpha_map and alpha_map[oid]["f_host_5100"] > -90:
+                obj["f_host_5100"] = alpha_map[oid]["f_host_5100"]
+            else:
+                obj["f_host_5100"] = f_host_shen11_value
 
     #objs = populate_sdss_fields(objs)
 
@@ -415,7 +435,8 @@ if __name__ == '__main__':
             'LOGLBOL': obj['LOGLBOL'],
             'mags_means': obj['mags_means'],
             'mags_stds': obj['mags_stds'],
-            'lam_rf': lam_rf
+            'lam_rf': lam_rf,
+            'f_host_5100': obj['f_host_5100']
         })
 
     num_objects = len(batch_data)
@@ -443,21 +464,23 @@ if __name__ == '__main__':
         jnp.array(jnp.full(5, 1e-6) + jnp.log(jnp.mean(jnp.array(obj[:,3][obj[:,3] < 10])))) for obj in padded_batch_data
     ])  # shape (B, nBands)
 
-    # --- Precompute f_host_shen11 prior means ---
-    if args.f_host_shen11:
-        # Host flux empirical relation
-        #logl5100 = jnp.array([obj['LOGL5100'] for obj in batch_data])
-        logl5100 = jnp.array([obj['LOGLBOL'] - jnp.log10(9.26) for obj in batch_data])
+    f_host_value = jnp.array([obj["f_host_5100"] for obj in batch_data])
 
-        x = logl5100 - 44.0
-        f_host = 0.8052 - 1.5502 * x + 0.9121 * jnp.power(x, 2) - 0.1577 * jnp.power(x, 3)
-        f_host = jnp.clip(f_host, 0.0, None)
-        f_host_value = jnp.where(logl5100 < 45.053, f_host, 0.0)
-    else:
-        batch_size = len(batch_data)
-        f_host_value = jnp.zeros(batch_size)
+    # # --- Precompute f_host_shen11 prior means ---
+    # if args.f_host_shen11:
+    #     # Host flux empirical relation
+    #     #logl5100 = jnp.array([obj['LOGL5100'] for obj in batch_data])
+    #     logl5100 = jnp.array([obj['LOGLBOL'] - jnp.log10(9.26) for obj in batch_data])
 
-    numpyro_joint_model = build_model(padded_batch_data, zs, f_host_value, lam_rfs, log_jitter_mean, args.f_host_shen11, args.latent, args.bwb, args.disable_poly1, args.d_eta)
+    #     x = logl5100 - 44.0
+    #     f_host = 0.8052 - 1.5502 * x + 0.9121 * jnp.power(x, 2) - 0.1577 * jnp.power(x, 3)
+    #     f_host = jnp.clip(f_host, 0.0, None)
+    #     f_host_value = jnp.where(logl5100 < 45.053, f_host, 0.0)
+    # else:
+    #     batch_size = len(batch_data)
+    #     f_host_value = jnp.zeros(batch_size)
+
+    numpyro_joint_model = build_model(padded_batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, args.latent, args.bwb, args.disable_poly1, args.d_eta)
 
 
     nuts_kernel = NUTS(numpyro_joint_model, init_strategy=init_strategy, dense_mass=True, max_tree_depth=args.max_tree_depth)
