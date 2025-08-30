@@ -828,7 +828,7 @@ def plot_predicted_vs_actual_M2500(
         actual_M_2500_bin = actual_M_2500[bin_mask].copy()
         if debias:
             pts = np.column_stack([df_agn['z'][bin_mask], df_agn['apparent_mag_2500'][bin_mask]])
-            M_2500_pred[bin_mask] -= dm_interp(pts)
+            #M_2500_pred[bin_mask] -= dm_interp(pts)
             actual_M_2500_bin -= dm_interp(pts)
 
         x = actual_M_2500_bin
@@ -983,28 +983,9 @@ def plot_completeness_vs_mag_at_redshifts(p_detect, mag_centers, z_centers,
 
 
 
-def plot_full_residuals(df_agn, residuals, flat_samples, cosmo_model, z_pivot_agn, debiased=False, plot_path='plots/hubble', show=False):
+def plot_full_residuals(df_agn, residuals, flat_samples, cosmo_model, z_pivot_agn, debias=False, dms=None, plot_path='plots/hubble', show=False):
     import math
-    from scipy.optimize import curve_fit
-    from scipy.special import expit
-
-    # --- Centered logistic model ---
-    def logistic_model(alpha_nu, gamma, k, pivot=0.0):
-        """Centered logistic contribution to residuals"""
-        return gamma * (expit(k * (alpha_nu - pivot)) - 0.5)
-
-    # Initial guesses: gamma ~ amplitude of residuals, k ~ 1
-    p0 = [2.0, 1.0]  # (gamma, k)
-    # Fit curve
-    params, cov = curve_fit(lambda x, gamma, k: logistic_model(x, gamma, k, pivot=0.0),
-                            df_agn['alpha_nu'], residuals, p0=p0)
-
-    gamma_fit, k_fit = params
-    gamma_err, k_err = np.sqrt(np.diag(cov))
-
-    print(f"Best-fit gamma = {gamma_fit:.3f} ± {gamma_err:.3f}")
-    print(f"Best-fit k_logistic = {k_fit:.3f} ± {k_err:.3f}")
-
+    df_agn = df_agn.copy()
     priors, model_labels, model_labels_latex = get_model_params(cosmo_model)
     param_indices = {name: model_labels.index(name) for name in model_labels}
 
@@ -1040,7 +1021,14 @@ def plot_full_residuals(df_agn, residuals, flat_samples, cosmo_model, z_pivot_ag
         raise ValueError("Invalid cosmology model.")
     
     df_agn = df_agn.copy().reset_index(drop=True)
+
     df_agn['MY_M_2500'] = df_agn['apparent_mag_2500'].values - np.array([cosmo.distmod(z).value for z in df_agn['z'].values])
+
+    if debias:
+        dm_interp = make_dm_function(df_agn["apparent_mag_2500"].values, df_agn['z'].values, dms)
+        pts = np.column_stack([df_agn['z'], df_agn['apparent_mag_2500']])
+        df_agn['MY_M_2500'] -= dm_interp(pts)
+        df_agn['apparent_mag_2500'] += dm_interp(pts)
 
 
     # Select only the keys in your specified list (order preserved by np.flip)
@@ -1104,7 +1092,7 @@ def plot_full_residuals(df_agn, residuals, flat_samples, cosmo_model, z_pivot_ag
         plt.show()
 
     os.makedirs(plot_path, exist_ok=True)
-    plt.savefig(os.path.join(plot_path, f"full_residuals_{'debiased' if debiased else 'biased'}.png"), dpi=300)
+    plt.savefig(os.path.join(plot_path, f"full_residuals_{'debiased' if debias else 'biased'}.png"), dpi=300)
     plt.close()
 
 
