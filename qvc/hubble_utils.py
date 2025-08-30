@@ -618,8 +618,9 @@ def load_quasar_data(file_path, populate_sdss=False, apply_cut=True):
 
     
     #df = populate_chi_sq_from_csv(df)
-    df['alpha_nu'] = -df['alpha_lambda'] - 2
-    df['alpha_nu_err'] = df['alpha_lambda_err']
+    if 'alpha_lambda' in df.columns:
+        df['alpha_nu'] = -df['alpha_lambda'] - 2
+        df['alpha_nu_err'] = df['alpha_lambda_err']
 
     #df = compute_apparent_mag_2500_colin(df)
 

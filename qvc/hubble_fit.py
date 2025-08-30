@@ -294,7 +294,9 @@ def run_single(df_agn, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, cosmo_mo
                                                          show_true=False, show=False, debias=True, dms=dmag_corr, plot_path=plot_path)
 
     print("Plotting predicted L2500 vs ...")
-    plot_predicted_L2500_vs_sigmahat(flat_samples, df_agn, cosmo_model=cosmo_model, z_pivot_agn=z_pivot_agn, show=False, plot_path=plot_path)
+    plot_predicted_L2500_vs_sigmahat(flat_samples, df_agn, cosmo_model=cosmo_model, z_pivot_agn=z_pivot_agn, 
+                                     debias=True, dms=dmag_corr, show_residuals=False,
+                                     show=False, plot_path=plot_path)
     
     print("Plotting cosmological posteriors corner plot...")
     plot_cosmo_corner(None, flat_samples, cosmo_model, z_pivot_sna, z_pivot_agn, show=False, plot_path=plot_path)
@@ -304,7 +306,8 @@ def run_single(df_agn, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, cosmo_mo
     plot_completeness_vs_mag_at_redshifts(p_detect, mag_centers, z_centers)
 
     print("Plotting debiased residuals...")
-    plot_full_residuals(df_agn, debiased_residuals, flat_samples, cosmo_model, z_pivot_agn, show=False, plot_path=plot_path)
+    plot_full_residuals(df_agn, debiased_residuals, flat_samples, cosmo_model, z_pivot_agn, debiased=True, show=False, plot_path=plot_path)
+    plot_full_residuals(df_agn, residuals, flat_samples, cosmo_model, z_pivot_agn, debiased=False, show=False, plot_path=plot_path)
 
     # Example usage:
     # Assuming `samples` is a dict from your MCMC run
@@ -395,8 +398,8 @@ if __name__ == "__main__":
     df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_pantheon_data()
     df_agn = load_agn_data(args.agn_data_filepath, populate_sdss=args.force_populate_fields)
 
-    # if args.speed == 'fast':
-    #     df_agn = df_agn.sample(n=4000, random_state=42)
+    if args.N > 0:
+        df_agn = df_agn.sample(n=args.N, random_state=42)
 
     if args.run == "single": # default
         run_single(df_agn=df_agn, df_pantheon=df_pantheon, _sna_L=_sna_L, _sna_Lower=_sna_Lower, _sna_LogdetCov=_sna_LogdetCov, cosmo_model=args.cosmo_model,

@@ -6,7 +6,7 @@ from scipy import stats
 from scipy.signal import fftconvolve
 import numpy as np
 
-from hubble_model import get_model_params, M_model_agn, M_model_agn_err
+from hubble_model import get_model_params, M_model_agn, M_model_agn_err, agn_model_pack_params, agn_model_pack_obs
 
 def completeness_loglike(m_model, mu_err, z, completeness2d, m_grid, sigma_completeness, tiny=1e-300):
     """
@@ -152,38 +152,22 @@ def log_likelihood(theta, *, agn_data, pantheon_data,
     z = agn_data['z']
     m_obs = agn_data['apparent_mag_2500']
     m_err = agn_data['apparent_mag_2500_err']
-    log_sigma_UV = agn_data['log_sigma_UV']
-    log_sigma_UV_err = agn_data['log_sigma_UV_err']
-    log_tau_UV_RF = agn_data['log_tau_UV_RF']
-    log_tau_UV_RF_err = agn_data['log_tau_UV_RF_err']
-    bwb_beta = agn_data['bwb_beta']
-    bwb_beta_err = agn_data['bwb_beta_err']
-    alpha_nu = agn_data['alpha_nu']
-    alpha_nu_err = agn_data['alpha_nu_err']
 
-    mu_cosmo = cosmo.distmod(z).value  # replace with the same μ(z) backbone if you go fully cosmology-free
-    M_pred = M_model_agn(params['M0_agn'], 
-                         params['alpha_agn'],
-                         params['beta_agn'],
-                         params['gamma_agn'],
-                         log_sigma_UV, log_tau_UV_RF,
-                         alpha_nu)
+    agn_params_arr = agn_model_pack_params(params)
+    agn_obs_arr, agn_err_arr, agn_pivot_arr = agn_model_pack_obs(agn_data)
 
-    mu_pred = m_obs - M_pred 
-    M_i_pred_err = M_model_agn_err(params['M0_agn'],
-                                   params['alpha_agn'],
-                                   params['beta_agn'],
-                                   params['gamma_agn'],
-                                   log_sigma_UV, log_sigma_UV_err,
-                                   log_tau_UV_RF_err,
-                                   alpha_nu, alpha_nu_err)
+    M_pred = M_model_agn(agn_params_arr, agn_obs_arr, agn_pivot_arr)
+    M_pred_err = M_model_agn_err(agn_params_arr, agn_obs_arr, agn_err_arr, agn_pivot_arr)
     
     mu_err = np.sqrt(
         m_err**2 +
-        M_i_pred_err**2 +
+        M_pred_err**2 +
         (0.055 * z)**2 +
         np.exp(params['log_f'])**2
     )
+    mu_pred = m_obs - M_pred 
+
+    mu_cosmo = cosmo.distmod(z).value
 
     ll_agn = np.sum(stats.norm.logpdf(mu_pred - mu_cosmo, scale=mu_err))
 
