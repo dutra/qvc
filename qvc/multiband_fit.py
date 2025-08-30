@@ -390,6 +390,8 @@ if __name__ == '__main__':
                 obj["f_host_5100"] = alpha_map[oid]["f_host_5100"]
             else:
                 obj["f_host_5100"] = 0.0  # Default if not found or invalid
+    else:
+        obj["f_host_5100"] = 0.0  # Default if not found or invalid
 
     #objs = populate_sdss_fields(objs)
 
