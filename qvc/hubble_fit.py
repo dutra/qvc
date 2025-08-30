@@ -398,7 +398,7 @@ if __name__ == "__main__":
     df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_pantheon_data()
     df_agn = load_agn_data(args.agn_data_filepath, populate_sdss=args.force_populate_fields)
 
-    if args.N > 0:
+    if args.N and args.N > 0:
         df_agn = df_agn.sample(n=args.N, random_state=42)
 
     if args.run == "single": # default
