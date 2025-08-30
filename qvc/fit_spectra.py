@@ -378,7 +378,9 @@ def run_qsofit_record(rec, cache_dir="data/spectra_cache", path_ex="data/"):
         apparent_mag_i_rest=-1e9,
         apparent_mag_2500=-1e9,
         apparent_mag_2500_err=-1e9,
+        f_host_2500=-1e9,
         f_host_4200=-1e9,
+        f_host_5100=-1e9,
         alpha_lambda=-1e9,
         alpha_lambda_err=-1e9,
         redchi=-1e9,
@@ -447,9 +449,14 @@ def run_qsofit_record(rec, cache_dir="data/spectra_cache", path_ex="data/"):
             host_line_mask=True,      # mask galaxy line region when subtracting from original spectra
             decomp_na_mask=True,      # mask narrow line region during decomposition
             qso_type='global',        # PCA template name for quasar
-            npca_qso=10,              # number of quasar templates
+
+            # npca_qso=10,              # number of quasar templates
+            # host_type='BC03',         # PCA template name for galaxy
+            # npca_gal=5,               # number of galaxy templates
+
+            npca_qso=1,              # number of quasar templates
             host_type='BC03',         # PCA template name for galaxy
-            npca_gal=5,               # number of galaxy templates
+            npca_gal=10,               # number of galaxy templates
             
             # continuum model fit parameters
             Fe_uv_op=True,            # If True, fit continuum with UV and optical FeII template
@@ -543,7 +550,9 @@ def run_qsofit_record(rec, cache_dir="data/spectra_cache", path_ex="data/"):
             apparent_mag_i_obs=apparent_mag_i_obs,
             apparent_mag_2500=m_2500,
             apparent_mag_2500_err=m_2500_err,
+            f_host_2500=conti_dict.get('frac_host_2500', -99),
             f_host_4200=conti_dict.get('frac_host_4200', -99),
+            f_host_5100=conti_dict.get('frac_host_5100', -99),
             alpha_lambda=conti_dict.get('PL_slope', -99),
             alpha_lambda_err=conti_dict.get('PL_slope_err', -99),
             redchi=q_mle.conti_fit.redchi
@@ -562,7 +571,8 @@ def parse_args():
     #                help="Path to sample CSV.")
     p.add_argument("fpath_in", help="Path to h5 fits with mag means.")
     p.add_argument("fpath_out", help="Output file for QSOFit results.")
-
+    p.add_argument("--filter_csv", default=None,
+                   help="Optional CSV file with object_id column to filter input.")
     p.add_argument("--dr16q-fits", default="data/dr16q_prop_May01_2024.fits",
                    help="Path to DR16Q FITS catalog.")
     p.add_argument("--cache-dir", default="data/spectra_cache",
@@ -583,6 +593,13 @@ def main():
     args = parse_args()
 
     sample_df = load_quasar_data(args.fpath_in, apply_cut=False)
+    if args.filter_csv is not None:
+        filter_df = pd.read_csv(args.filter_csv)
+        if 'object_id' not in filter_df.columns:
+            raise ValueError(f"Filter CSV {args.filter_csv} missing object_id column")
+        filter_ids = set(str(oid).strip() for oid in filter_df['object_id'].values if str(oid).strip())
+        sample_df = sample_df[sample_df['object_id'].astype(str).str.strip().isin(filter_ids)]
+        print(f"[INFO] After filtering with {args.filter_csv}, {len(sample_df)} rows remain")
     sample_df = sample_df[:args.N] if args.N is not None else sample_df
     sample_df['object_id'] = sample_df['object_id'].astype(str).str.strip()
     #quasar_dict_list = read_quasars_from_hdf5(args.fpath_in, N=args.N)
