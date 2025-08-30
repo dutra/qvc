@@ -59,3 +59,26 @@ Also under tutorials/data, upload the parquet files from https://www.dropbox.com
 #### Running a batch of N
 ``JAX_ENABLE_X64=True PREFIX=test SUFFIX=joint python multiband_fit.py  --progress --plot --filter_file data/aug4_sample_chisqg10_ebv005sn3.csv --nwarm 1000 --nsamp 500 --nchains 2 --max_tree_depth 6 --f_host_shen11 --bwb --job_N 20 --job_id 0
 ``
+
+# PyQSOFit
+```
+def _L_conti(self, wave, pp, waves=np.array([1350, 3000, 5100])):
+        """
+        Calculate continuum Luminoisity at given waves
+        """
+        waves = np.array(waves)
+
+        # Add these lines:
+        minw = np.min([np.min(wave), 2300])
+        maxw = np.max([np.max(wave), 2700])
+        wave = np.linspace(minw, maxw, 2000)  # ensure the waves are within the range of the spectrum
+
+        L = np.full(len(waves), -1.0)  # to save the luminosity results
+        valid_idx = np.where((waves < np.max(wave)) & (waves > np.min(wave)), True, False)
+        conti_flux = self.PL(waves[valid_idx], pp) + self.F_poly_conti(waves[valid_idx], pp[11:])
+        Llam = waves[valid_idx] * self.flux2L(conti_flux, self.z)
+        Llam[Llam <= 0] = 1e-1  # to make the log of these invalid values to be -1.
+        L[valid_idx] = np.log10(Llam)
+
+        return L
+```
