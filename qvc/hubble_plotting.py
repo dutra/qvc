@@ -1028,7 +1028,7 @@ def plot_full_residuals(df_agn, residuals, flat_samples, cosmo_model, z_pivot_ag
         dm_interp = make_dm_function(df_agn["apparent_mag_2500"].values, df_agn['z'].values, dms)
         pts = np.column_stack([df_agn['z'], df_agn['apparent_mag_2500']])
         df_agn['MY_M_2500'] -= dm_interp(pts)
-        df_agn['apparent_mag_2500'] += dm_interp(pts)
+        df_agn['apparent_mag_2500'] -= dm_interp(pts)
 
 
     # Select only the keys in your specified list (order preserved by np.flip)
