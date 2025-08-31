@@ -91,7 +91,7 @@ def plot_posterior(samples_flat, data, bins=20):
             corner_data[:, i] = corner_data[:, i] / np.log(10)
 
     fig = corner.corner(corner_data, labels=flat_labels, show_titles=True, 
-                        quantiles=[0.16, 0.5, 0.84], bins=bins)
+                        quantiles=[0.16, 0.5, 0.84], bins=bins, plot_datapoints=False, plot_contours=False)
 
     # Save plot
     output_dir = f"results/posterior_plots/{prefix}"

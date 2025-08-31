@@ -8,43 +8,47 @@ import numpy as np
 
 from hubble_model import get_model_params, M_model_agn, M_model_agn_err, agn_model_pack_params, agn_model_pack_obs
 
-def completeness_loglike(m_model, mu_err, z, completeness2d, m_grid, sigma_completeness, tiny=1e-300):
+def completeness_loglike(m_obs, m_obs_err, m_model, mu_err, z, completeness2d, m_grid, sigma_completeness, tiny=1e-300):
     """
+    Compute log-likelihood contribution from magnitude-limited sample selection.
+
+    m_obs   : array (N_obj,) observed apparent magnitudes
     m_model : array (N_obj,) model-predicted apparent magnitudes
     mu_err  : array (N_obj,) Gaussian sigma for each magnitude
     z       : array (N_obj,) redshifts
     m_grid  : array (N_grid,) magnitude grid (e.g., the map's mag_centers)
+    sigma_completeness : float, additional uncertainty in completeness
     """
     m_grid = np.asarray(m_grid)
     z      = np.asarray(z)
     m_model = np.asarray(m_model)
     mu_err  = np.asarray(mu_err)
 
-    # Gaussian *pdf* over the real line, evaluated on m_grid
-    # Do NOT renormalize row-wise over m_grid.
-    sigma = np.maximum(mu_err, 1e-9)  # avoid zero-sigma
-    pdf = stats.norm.pdf(m_grid[None, :],
-        loc=m_model[:, None],
-        scale=np.sqrt(sigma[:, None]**2 + sigma_completeness**2)) # If not adding scatter to mags_true
-        #scale=sigma[:, None])
+    # shared pieces
+    sig = np.sqrt(mu_err[:, None]**2 + float(sigma_completeness)**2)   # (N,1)
 
-    # p_detect(m, z)
-    p_det = completeness2d(m_grid[None, :], z[:, None])  # shape (N_obj, N_grid)
-    wpdf = pdf * p_det
+    # completeness on grid for each object
+    p_det = completeness2d(m_grid[None, :], z[:, None])                 # (N,G)
 
-    # ∫ pdf(m) * p_det(m, z) dm  (outside-grid p_det=0 by construction)
-    integrals = np.trapz(wpdf, m_grid, axis=1)
-    integrals = np.clip(integrals, tiny, 1.0)            # numerical guard
+    # Model-centered selection factor: Z_i
+    pdf_model = stats.norm.pdf(m_grid[None, :], loc=m_model[:, None], scale=sig)  # (N,G)
+    wpdf_model = pdf_model * p_det
+    Z = np.trapz(wpdf_model, m_grid, axis=1)                            # (N,)
+    Z = np.clip(Z, tiny, None)                                          # guard denom
 
-    # Average
-    m_integrals = np.trapz(wpdf * m_grid[None, :], m_grid, axis=1)
-    m_integrals = np.clip(m_integrals, tiny, None)        # numerical guard (can be > 1; units=mag)
-    dmi = m_integrals / integrals - m_model
+    # Debias for plotting: Δm_obs
+    # p(m* | m_obs, det) ∝ N(m_obs | m*, σ) * p_det(m*, z)
+    # equivalently: N(m* | m_obs, σ) * p_det(m*, z) since Gaussian is symmetric in args
+    sig = np.sqrt(m_obs_err[:, None]**2 + float(sigma_completeness)**2)   # (N,1)
+    pdf_obs = stats.norm.pdf(m_grid[None, :], loc=m_obs[:, None], scale=sig)      # (N,G)
+    wpdf_obs = pdf_obs * p_det
+    Z_obs = np.trapz(wpdf_obs, m_grid, axis=1)
+    Z_obs = np.clip(Z_obs, tiny, None)
+    E_obs = np.trapz(wpdf_obs * m_grid[None, :], m_grid, axis=1) / Z_obs
+    dmi_obs = E_obs - m_obs                                                        # (N,)
 
-    # return a 2xN float blob (consistent shape)
-    blob = np.vstack([integrals.astype(float), dmi.astype(float)])
-    return np.sum(np.log(integrals)), blob
-    #return np.sum(np.log(integrals)), (integrals, dmi)
+    blob = np.vstack([Z.astype(float), dmi_obs.astype(float)])
+    return np.sum(np.log(Z)), blob
 
 # --- Log-likelihood ---
 def empty_blob(N_obj):
@@ -178,6 +182,8 @@ def log_likelihood(theta, *, agn_data, pantheon_data,
     if completeness_params is not None:
         completeness2d, mag_centers, _, _, _, completeness_scatter = completeness_params
         ll_completeness, comp_blob = completeness_loglike(
+            m_obs=m_obs,
+            m_obs_err=m_err,
             m_model=m_model, mu_err=mu_err, z=z,
             completeness2d=completeness2d, m_grid=mag_centers,
             sigma_completeness=completeness_scatter
