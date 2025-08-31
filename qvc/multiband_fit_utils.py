@@ -91,16 +91,16 @@ def select_samples_for_object(samples_flat, obj_index, universal_params):
 
     return obj_samples
 
-def flatten_flat_samples_per_band(samples_flat, clean_bands):
+def flatten_flat_samples_per_band(samples_flat, bands=['u', 'g', 'r', 'i', 'z']):
     """
-    Flatten flat samples for each band in clean_bands.
+    Flatten flat samples for each band.
     
     Parameters
     ----------
     samples_flat : dict
         Dictionary of flat samples with keys as parameter names.
-    clean_bands : list
-        List of clean bands to flatten.
+    bands : list
+        List of bands to flatten.
 
     Returns
     -------
@@ -113,7 +113,7 @@ def flatten_flat_samples_per_band(samples_flat, clean_bands):
             flattened_samples[k] = v
         elif v.ndim == 2:
             # Flatten over bands
-            for i, band in enumerate(clean_bands):
+            for i, band in enumerate(bands):
                 flattened_samples[f"{k}_{band}"] = v[:, i]
         else:
             raise ValueError(f"Unexpected shape for {k}: {v.shape}") 
@@ -447,7 +447,7 @@ def log_broken_pl(lam, lam_s, d1, d2, ds=0.1):
 
     return log_f
 
-def process_samples(flat_samples, data, percentiles=[16, 50, 84]):
+def process_samples(flat_samples, data, percentiles=[16, 50, 84], bands=['u', 'g', 'r', 'i', 'z']):
     """
     Generalized processing of MCMC samples for arbitrary parameters and bands.
 
@@ -492,20 +492,20 @@ def process_samples(flat_samples, data, percentiles=[16, 50, 84]):
     lam_s = np.asarray(flat_samples["lam_s"])
 
     log_sigma_band = []
-    for band in data['clean_bands']:
+    for band in bands:
         lam_eff = lambda_pivot[band] / (1 + data['z'])
         val = log_sigma0 / np.log(10) + log_broken_pl(lam_eff, lam_s, eta_A1, eta_A2, eta_break)
         log_sigma_band.append(val)
     log_sigma_band = np.array(log_sigma_band).T
 
     log_tau_band = []
-    for band in data['clean_bands']:
+    for band in bands:
         lam_eff = lambda_pivot[band] / (1 + data['z'])
         val = log_tau_drw0 / np.log(10) - np.log10(1 + data['z']) + log_broken_pl(lam_eff, lam_s, eta_A1, eta_A2, eta_break)
         log_tau_band.append(val)
     log_tau_band = np.array(log_tau_band).T
 
-    for i, band in enumerate(data['clean_bands']):
+    for i, band in enumerate(bands):
         median, err = sym_percentile(log_sigma_band[:, i])
         result[f"log_sigma_band_{band}"] = median
         result[f"log_sigma_band_{band}_err"] = err
@@ -530,7 +530,6 @@ def process_samples(flat_samples, data, percentiles=[16, 50, 84]):
     samples_log_tau_UV_RF = flat_samples["log_tau_drw0"] / np.log(10) - np.log10(1 + data['z']) + log_broken_pl(lambda_ref, lam_s, eta_tau1, eta_tau2, eta_break)
     result['log_tau_UV_RF'], result['log_tau_UV_RF_err'] = sym_percentile(samples_log_tau_UV_RF)
 
-    result["clean_bands"] = data['clean_bands']
     return result
 
 def drw_equiv(amp_cont, tau_drw, bwb_alpha, bwb_beta):

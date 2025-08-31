@@ -196,40 +196,29 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, latent=F
     return numpyro_joint_model
 
 
-def make_lc(Model, data, filter_red_bands=False):
+def make_lc(Model, data, bands=['u', 'g', 'r', 'i', 'z']):
     times = data['times']
     mags = data['mags']
     magerrs = data['magerrs']
 
-    blue_bands = bands_bluer_than_lyman_alpha(data['z'])
+    dropped_bands = bands_bluer_than_lyman_alpha(data['z'])
+    logging.info(
+        f"Excluding only blue bands {dropped_bands} "
+        f"for quasar {data['object_id']} at z={data['z']}"
+    )
 
-    if filter_red_bands:
-        red_bands = bands_redder_than(data['z'], threshold=4000)
-        clean_bands = list(set(bands) - set(blue_bands) - set(red_bands))
-        logging.info(
-            f"Filtering out red bands (wavelength > 4000 Å) {red_bands} "
-            f"for quasar {data['object_id']} at z={data['z']}"
-        )
-    else:
-        logging.info(
-            f"Excluding only blue bands {blue_bands} "
-            f"for quasar {data['object_id']} at z={data['z']}"
-        )
-        clean_bands = list(set(bands) - set(blue_bands))
+    # Sort bands
+    bands = list(sorted(bands, key=lambda b: ['u', 'g', 'r', 'i', 'z', 'y'].index(b)))
 
-    # Sort clean_bands in desired photometric order
-    clean_bands = list(sorted(clean_bands, key=lambda b: ['u', 'g', 'r', 'i', 'z', 'y'].index(b)))
-    data['clean_bands'] = clean_bands
-
-    if len(clean_bands) == 0:
-        print(f"No clean bands for quasar {data['object_id']}, skipping.", flush=True)
+    if len(bands) == 0:
+        print(f"No bands for quasar {data['object_id']}, skipping.", flush=True)
         return None
 
     # Combine data across bands
-    all_times = np.concatenate([times[b] for b in clean_bands])
-    all_mags = np.concatenate([mags[b] for b in clean_bands])
-    all_magerrs = np.concatenate([magerrs[b] for b in clean_bands])
-    band_idx = np.concatenate([np.full(len(times[b]), i) for i, b in enumerate(clean_bands)])
+    all_times = np.concatenate([times[b] for b in bands])
+    all_mags = np.concatenate([mags[b] for b in bands])
+    all_magerrs = np.concatenate([magerrs[b] for b in bands])
+    band_idx = np.concatenate([np.full(len(times[b]), i) for i, b in enumerate(bands)])
 
     if len(all_times) == 0:
         print(f"No magnitudes for quasar {data['object_id']}, skipping.", flush=True)
@@ -288,15 +277,18 @@ def make_lc(Model, data, filter_red_bands=False):
 
     # --- Center magnitudes per band AFTER outlier rejection ---
     mags_means = np.array([
-        np.nanmean(all_mags[band_idx == i]) for i in range(len(clean_bands))
+        np.nanmean(all_mags[band_idx == i]) for i in range(len(bands))
     ])
     mags_stds = np.array([
-        np.nanstd(all_mags[band_idx == i]) for i in range(len(clean_bands))
+        np.nanstd(all_mags[band_idx == i]) for i in range(len(bands))
     ])
-    
-    for i in range(len(clean_bands)):
+
+    for i in range(len(bands)):
         band_mask = band_idx == i
         all_mags[band_mask] -= np.nanmean(all_mags[band_mask])
+        # Mask dropped bands
+        if bands[i] in dropped_bands:
+            all_magerrs[band_mask] = 999.0
 
     # Define arrays for model
     X = (
@@ -311,7 +303,6 @@ def make_lc(Model, data, filter_red_bands=False):
         'X': X,
         'y': y,
         'yerr': yerr,
-        'clean_bands': clean_bands,
         'z': data['z'],
         'band_idx': band_idx,
         'mags_means': mags_means,
@@ -344,7 +335,6 @@ if __name__ == '__main__':
     parser.add_argument("--job_id", type=int, default=-1, help="Job Index for parallel processing.")
     parser.add_argument("--job_N", type=int, default=-1, help="Number of objects to divide.")
     parser.add_argument("--max_tree_depth", type=int, default=8, help="Max tree depth param for NUTS sampler.")
-    parser.add_argument("--f_host_shen11", action="store_true", help="Use host flux empirical relation from Shen et al. 2011.")
     parser.add_argument("--load_sample_file", action="store_true", help="Load samples from previously ran job.")
     parser.add_argument("--disable_poly1", action="store_true", help="Disable Mean function detrending.")
     parser.add_argument("--jax_trace", action="store_true", help="Enable jax tracing.")
@@ -406,23 +396,19 @@ if __name__ == '__main__':
     batch_data = []
     for i, obj in enumerate(objs):
         # Prepare each object's data for the joint model
-        result = make_lc(Model, obj, filter_red_bands=(not args.f_host_shen11))
+        result = make_lc(Model, obj)
         if result is None:
             continue
         obj['i'] = i
         obj |= result
         # Run bestP for each object
-        n_bands = len(obj['clean_bands'])
-        lam_rf = np.full(5, 0.0)
-        lam_rf[:len(obj['clean_bands'])] = np.array([lambda_pivot[band] for band in obj['clean_bands']]) / (1 + obj['z'])
-        lam_rf = jnp.array(lam_rf)
+        lam_rf = jnp.array([lambda_pivot[band] for band in ['u', 'g', 'r', 'i', 'z']]) / (1 + obj['z'])
 
         batch_data.append({
             'object_id': obj['object_id'],
             'X': obj['X'],
             'y': obj['y'],
             'yerr': obj['yerr'],
-            'clean_bands': obj['clean_bands'],
             'band_idx': obj['band_idx'],
             'z': obj['z'],
             # add any other fields needed by your model
@@ -530,7 +516,7 @@ if __name__ == '__main__':
         logging.info(f"Quasar {i+1}/{len(batch_data)} Object ID: {obj['object_id']}")
 
         obj_flat_samples = select_samples_for_object(samples_flat, i, universal_params=universal_params)
-        obj_flat_samples_flatten_per_band = flatten_flat_samples_per_band(obj_flat_samples, obj['clean_bands'])
+        obj_flat_samples_flatten_per_band = flatten_flat_samples_per_band(obj_flat_samples)
 
         save_obj_samples_to_hdf5(obj_flat_samples_flatten_per_band, obj['object_id'])
         

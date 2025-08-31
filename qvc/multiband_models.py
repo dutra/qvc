@@ -363,12 +363,7 @@ class MyMultiVarModel(MultiVarModel):
         lam_s = params["lam_s"]
         eta_break = params["eta_break"]
         log_tau_band = params["log_tau_drw0"] + jnp.log(10) * log_broken_pl(self.lam_rf, lam_s, eta_tau1, eta_tau2, eta_break)
-        # Masked average
-        mask = self.lam_rf > 0.0  # fixed-shape mask
-        w = mask.astype(log_tau_band.dtype)
-        count = jnp.sum(w)
-        log_tau_band_mean = jnp.where(count > 0, jnp.sum(log_tau_band * w) / count, jnp.nan)
-        return log_tau_band_mean
+        return jnp.mean(log_tau_band)
 
     def my_amp_transform(self, params: dict[str, JAXArray]) -> JAXArray:
         """

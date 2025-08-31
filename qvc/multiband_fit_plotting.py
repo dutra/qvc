@@ -283,21 +283,20 @@ def combined_lomb_scargle_from_model(
     return np.array(f_bin), np.array(P_bin), np.array(P_lo), np.array(P_hi), np.array(counts), P_noise
 
 
-def save_combined_plot(samples, model, X, y, yerr, band_idx, data):
+def save_combined_plot(samples, model, X, y, yerr, band_idx, data, bands=['u', 'g', 'r', 'i', 'z']):
     logging.info("Saving combined plot")
 
-    clean_bands = data['clean_bands']
     object_id = data['object_id']
-    band_idx_map = {i: b for i, b in enumerate(clean_bands)}
+    band_idx_map = {i: b for i, b in enumerate(bands)}
 
     fig, (ax_lc, ax_psd) = plt.subplots(2, 1, figsize=(10, 10), sharex=False, gridspec_kw={'height_ratios': [1.5, 1]})
-    offsets = np.arange(len(clean_bands)) * 0.25
+    offsets = np.arange(len(bands)) * 0.25
 
     t = X[0]
     for n in np.unique(band_idx):
-        m = band_idx == n
+        mask = (band_idx == n) & (yerr < 10.0)
         # Plot the observed data
-        ax_lc.errorbar(t[m], y[m]+offsets[n], yerr=yerr[m], fmt='o', 
+        ax_lc.errorbar(t[mask], y[mask]+offsets[n], yerr=yerr[mask], fmt='o', 
                 label=f'{band_idx_map[n]}-band', alpha=0.7, color=colors[band_idx_map[n]], lw=1.0, capsize=1, markersize=1)
         # Generate test times for predictions
         t_test = np.linspace(t.min() - 400, t.max() + 400, 1000)
