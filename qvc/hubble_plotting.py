@@ -1386,3 +1386,148 @@ def dmi_corr(m_obs, z_obs, m_obs_err,
     plt.savefig("plots/completeness/dmi_vs_redshift.png", dpi=300)
     plt.close()
     return dmi
+
+
+from scipy.special import logsumexp
+from hubble_likelihood import log_likelihood
+def _highest_weight_theta(results):
+    """
+    Dynesty utils: pick the sample with the largest posterior weight.
+    """
+    w = np.exp(results.logwt - logsumexp(results.logwt))
+    idx = int(np.argmax(w))
+    return results.samples[idx]
+def _blob_for_theta(theta, *, df_agn, df_pantheon, cosmo_model,
+                    completeness_params, _sna_L, _sna_Lower, _sna_LogdetCov,
+                    use_full_cov=True, use_mu_sh0es=False):
+    """
+    Re-evaluate the likelihood exactly once at 'theta' to get the selection blob.
+    Returns: blob (2, N) and the AGN arrays z, m_obs needed for plotting.
+    """
+    ll, blob = log_likelihood(
+        theta,
+        agn_data=df_agn,
+        pantheon_data=df_pantheon,
+        _sna_L=_sna_L, _sna_Lower=_sna_Lower, _sna_LogdetCov=_sna_LogdetCov,
+        cosmo_model=cosmo_model,
+        completeness_params=completeness_params,
+        only_sna=False, use_full_cov=use_full_cov,
+        use_mu_sh0es=use_mu_sh0es,
+    )
+    z = df_agn['z'].values
+    m_obs = df_agn['apparent_mag_2500'].values
+    return blob, z, m_obs
+
+
+def plot_Z_vs_z(z, Z, outdir, title_suffix=""):
+    os.makedirs(outdir, exist_ok=True)
+    plt.figure(figsize=(8,5.2))
+    plt.scatter(z, Z, s=12, alpha=0.55)
+    plt.xlabel("Redshift (z)")
+    plt.ylabel("integral (completeness)  Z = Φ(...) or ∫N×C")
+    plt.title(f"Completeness integrals vs z {title_suffix}")
+    plt.grid(True, alpha=0.35)
+    plt.tight_layout()
+    plt.savefig(os.path.join(outdir, "completeness_integrals_vs_z.png"), dpi=200)
+    plt.close()
+
+def plot_dmi_vs_z(z, dmi, outdir, title_suffix=""):
+    os.makedirs(outdir, exist_ok=True)
+    plt.figure(figsize=(8,5.2))
+    # scatter shows multiplicity; line shows structure when sorted
+    order = np.argsort(z)
+    plt.plot(z[order], dmi[order], lw=1.4, alpha=0.9)
+    plt.xlabel("Redshift (z)")
+    plt.ylabel("dmi (mag)  = E[m|det] - m_obs")
+    plt.title(f"Interpolated dmi vs z {title_suffix}")
+    plt.grid(True, alpha=0.35)
+    plt.tight_layout()
+    plt.savefig(os.path.join(outdir, "dmi_vs_z.png"), dpi=200)
+    plt.close()
+
+def _hard_limit_m50_per_object(completeness2d, mag_centers, z):
+    """
+    Robust m50(z) (hard limit) for plotting:
+    - clip z into the map's valid range,
+    - find the first crossing of C=0.5 and linearly interpolate.
+    """
+    mgrid = np.asarray(mag_centers)
+    z_in  = np.asarray(z, dtype=float)
+    # Clip z to map bounds (avoids all-zero rows from the interpolator)
+    zc = np.clip(z_in, getattr(completeness2d, "z_min", z_in.min()),
+                        getattr(completeness2d, "z_max", z_in.max()))
+    C = completeness2d(mgrid[None, :], zc[:, None])   # (N, G)
+
+    m50 = np.empty(len(zc), dtype=float)
+    for i, row in enumerate(C):
+        target = 0.5
+        if np.all(row <= target):
+            m50[i] = mgrid[-1]
+            continue
+        if np.all(row >= target):
+            m50[i] = mgrid[0]
+            continue
+        j = np.where((row[:-1] - target) * (row[1:] - target) <= 0)[0]
+        j = j[0] if j.size else int(np.argmin(np.abs(row - target)))
+        x0, x1 = mgrid[j], mgrid[j+1]
+        y0, y1 = row[j], row[j+1]
+        m50[i] = x0 + (target - y0) * (x1 - x0) / (y1 - y0) if y1 != y0 else x0
+    return m50
+
+def plot_completeness_map_with_m50(completeness2d, mag_centers, z_centers,
+                                   df_agn, outdir, title="Completeness map with hard m50(z)"):
+    os.makedirs(outdir, exist_ok=True)
+    # sample the map
+    C = completeness2d(mag_centers[None, :], z_centers[:, None])  # (Z, M)
+    # overlay m50(z) evaluated at the object's z, then rebin to z_centers for a smooth curve
+    z_obj = df_agn['z'].values
+    m50_obj = _hard_limit_m50_per_object(completeness2d, mag_centers, z_obj)
+    # Bin m50(z) onto the z_centers grid for a single curve
+    z_bins = np.r_[z_centers[0] - (z_centers[1]-z_centers[0])/2,
+                   0.5*(z_centers[1:]+z_centers[:-1]),
+                   z_centers[-1] + (z_centers[-1]-z_centers[-2])/2]
+    inds = np.digitize(z_obj, z_bins) - 1
+    m50_curve = np.array([np.median(m50_obj[inds==i]) if np.any(inds==i) else np.nan
+                          for i in range(len(z_centers))])
+
+    plt.figure(figsize=(7.6,5.6))
+    im = plt.imshow(C.T, origin="lower", aspect="auto",
+                    extent=[mag_centers[0], mag_centers[-1], z_centers[0], z_centers[-1]],
+                    vmin=0.0, vmax=1.0)
+    plt.xlabel("Apparent Magnitude")
+    plt.ylabel("Redshift")
+    plt.title(title)
+    cbar = plt.colorbar(im); cbar.set_label("p(detect)")
+    # overlay m50 curve
+    ok = np.isfinite(m50_curve)
+    if np.any(ok):
+        plt.plot(m50_curve[ok], z_centers[ok], lw=2.2)
+    plt.tight_layout()
+    plt.savefig(os.path.join(outdir, "completeness_map_with_m50.png"), dpi=200)
+    plt.close()
+
+def run_completeness_diagnostics(sampler_results, df_agn, df_pantheon,
+                                 completeness_params, cosmo_model,
+                                 _sna_L, _sna_Lower, _sna_LogdetCov,
+                                 outdir="plots/completeness",
+                                 use_full_cov=True, use_mu_sh0es=False,
+                                 title_note="— highest posterior weight sample"):
+    """
+    One-call orchestration:
+      - choose highest-posterior θ,
+      - recompute selection blob via the SAME likelihood path (IMR or grid),
+      - make Z(z), dmi(z), and map+m50 plots.
+    """
+    theta_star = _highest_weight_theta(sampler_results)
+    blob, z, _ = _blob_for_theta(theta_star,
+                                 df_agn=df_agn, df_pantheon=df_pantheon, cosmo_model=cosmo_model,
+                                 completeness_params=completeness_params,
+                                 _sna_L=_sna_L, _sna_Lower=_sna_Lower, _sna_LogdetCov=_sna_LogdetCov,
+                                 use_full_cov=use_full_cov, use_mu_sh0es=use_mu_sh0es)
+    Z   = np.asarray(blob[0], dtype=float)
+    dmi = np.asarray(blob[1], dtype=float)
+    plot_Z_vs_z(z, Z, outdir, title_suffix=title_note)
+    plot_dmi_vs_z(z, dmi, outdir, title_suffix=title_note)
+
+    completeness2d, mag_centers, z_centers, *_ = completeness_params
+    plot_completeness_map_with_m50(completeness2d, mag_centers, z_centers, df_agn, outdir)
