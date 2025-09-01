@@ -101,7 +101,7 @@ from sklearn.linear_model import Ridge, RidgeCV
 def get_completeness_function_2d(
     df_agn,
     sim_file="data/mock_mag_z.h5",
-    n_mag_bins=20, n_z_bins=60,
+    n_mag_bins=50, n_z_bins=20,
     sigma_mag=0.5, sigma_z=0.5,
     smooth_counts=True,
     plot=False,
@@ -306,8 +306,8 @@ def get_completeness_function_2d(
 
     # --- Smooth COUNTS (not the ratio)
     if smooth_counts:
-        H_true_s = gaussian_filter(H_true, sigma=(sigma_mag, sigma_z), mode="constant", cval=0.0)
-        H_obs_s  = gaussian_filter(H_obs,  sigma=(sigma_mag, sigma_z), mode="constant", cval=0.0)
+        H_true_s = gaussian_filter(H_true, sigma=(scatter, sigma_z), mode="constant", cval=0.0)
+        H_obs_s  = gaussian_filter(H_obs,  sigma=(scatter, sigma_z), mode="constant", cval=0.0)
     else:
         H_true_s, H_obs_s = H_true, H_obs
 
@@ -323,9 +323,8 @@ def get_completeness_function_2d(
 
         plt.figure(figsize=(7,5))
         im = plt.imshow(
-            C.T, origin="lower", aspect="auto",
+            np.log10(np.clip(C.T, 1e-12, None)), origin="lower", aspect="auto",
             extent=[mag_edges[0], mag_edges[-1], z_edges[0], z_edges[-1]],
-            vmin=0.0, vmax=1.0
         )
         plt.xlabel("Apparent Magnitude")
         plt.ylabel("Redshift")
@@ -354,7 +353,8 @@ def get_completeness_function_2d(
     dz = float(z_centers[1] - z_centers[0])     if len(z_centers)   > 1 else float(z_edges[-1] - z_edges[0])
 
     # Completeness2D must be defined elsewhere
-    return Completeness2D(mag_centers, z_centers, C), mag_centers, z_centers, dm, dz, scatter, H_obs_s
+    print("mag centers:", mag_centers)
+    return Completeness2D(mag_centers, z_centers, C), mag_centers, z_centers, dm, dz, 0.0
 
 import numpy as np
 from scipy.interpolate import RegularGridInterpolator
