@@ -295,6 +295,9 @@ def run_single(df_agn, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, cosmo_mo
 
     print("Plotting predicted L2500 vs ...")
     plot_predicted_L2500_vs_sigmahat(flat_samples, df_agn, cosmo_model=cosmo_model, z_pivot_agn=z_pivot_agn, 
+                                     debias=False, show_residuals=False,
+                                     show=False, plot_path=plot_path)
+    plot_predicted_L2500_vs_sigmahat(flat_samples, df_agn, cosmo_model=cosmo_model, z_pivot_agn=z_pivot_agn, 
                                      debias=True, dms=dmag_corr, show_residuals=False,
                                      show=False, plot_path=plot_path)
     
@@ -306,8 +309,8 @@ def run_single(df_agn, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, cosmo_mo
     plot_completeness_vs_mag_at_redshifts(p_detect, mag_centers, z_centers)
 
     print("Plotting debiased residuals...")
-    plot_full_residuals(df_agn, debiased_residuals, flat_samples, cosmo_model, z_pivot_agn, debiased=True, show=False, plot_path=plot_path)
-    plot_full_residuals(df_agn, residuals, flat_samples, cosmo_model, z_pivot_agn, debiased=False, show=False, plot_path=plot_path)
+    plot_full_residuals(df_agn, debiased_residuals, flat_samples, cosmo_model, z_pivot_agn, debias=True, show=False, plot_path=plot_path)
+    plot_full_residuals(df_agn, residuals, flat_samples, cosmo_model, z_pivot_agn, debias=False, show=False, plot_path=plot_path)
 
     # Example usage:
     # Assuming `samples` is a dict from your MCMC run

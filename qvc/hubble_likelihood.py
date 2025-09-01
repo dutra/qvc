@@ -8,7 +8,7 @@ import numpy as np
 
 from hubble_model import get_model_params, M_model_agn, M_model_agn_err, agn_model_pack_params, agn_model_pack_obs
 
-def completeness_loglike(m_obs, m_obs_err, m_model, mu_err, z, completeness2d, m_grid, sigma_completeness, tiny=1e-300):
+def completeness_loglike(m_obs, m_obs_err, m_model, mu_err, z, completeness2d, m_grid, sigma_completeness=0.0, tiny=1e-300):
     """
     Compute log-likelihood contribution from magnitude-limited sample selection.
 
@@ -36,18 +36,10 @@ def completeness_loglike(m_obs, m_obs_err, m_model, mu_err, z, completeness2d, m
     Z = np.trapz(wpdf_model, m_grid, axis=1)                            # (N,)
     Z = np.clip(Z, tiny, None)                                          # guard denom
 
-    # Debias for plotting: Δm_obs
-    # p(m* | m_obs, det) ∝ N(m_obs | m*, σ) * p_det(m*, z)
-    # equivalently: N(m* | m_obs, σ) * p_det(m*, z) since Gaussian is symmetric in args
-    sig = np.sqrt(m_obs_err[:, None]**2 + float(sigma_completeness)**2)   # (N,1)
-    pdf_obs = stats.norm.pdf(m_grid[None, :], loc=m_obs[:, None], scale=sig)      # (N,G)
-    wpdf_obs = pdf_obs * p_det
-    Z_obs = np.trapz(wpdf_obs, m_grid, axis=1)
-    Z_obs = np.clip(Z_obs, tiny, None)
-    E_obs = np.trapz(wpdf_obs * m_grid[None, :], m_grid, axis=1) / Z_obs
-    dmi_obs = E_obs - m_obs                                                        # (N,)
+    # Debias for plotting
+    dmi_obs = m_model - m_obs
 
-    blob = np.vstack([Z.astype(float), dmi_obs.astype(float)])
+    blob = np.vstack([Z.astype(float), -dmi_obs.astype(float)])
     return np.sum(np.log(Z)), blob
 
 # --- Log-likelihood ---
@@ -180,7 +172,7 @@ def log_likelihood(theta, *, agn_data, pantheon_data,
     ll_completeness = 0.0
     comp_blob = empty_blob(N_obj)
     if completeness_params is not None:
-        completeness2d, mag_centers, _, _, _, completeness_scatter, _ = completeness_params
+        completeness2d, mag_centers, _, _, _, completeness_scatter = completeness_params
         ll_completeness, comp_blob = completeness_loglike(
             m_obs=m_obs,
             m_obs_err=m_err,

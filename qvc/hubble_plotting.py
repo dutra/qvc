@@ -508,7 +508,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     inset_ax.errorbar(
         df_agn["z"][mask_in], mu_pred_median[mask_in], yerr=mu_pred_std[mask_in],
         fmt='o', linestyle='none', markersize=2,
-        mfc="black", mec="black",
+        mfc="black", mec="none",
         ecolor="#666666", elinewidth=0.8,
         alpha=0.7, zorder=1, label="AGN"
     )
@@ -524,7 +524,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
         inset_ax.errorbar(
             z_log, mu_log_mean, yerr=mu_log_sem,
             fmt='o', linestyle='none',
-            markersize=3, mfc='red', mec='red',
+            markersize=3, mfc='red', mec='none',
             ecolor='red', elinewidth=2.2, capsize=3.5,
             alpha=0.98, zorder=14, label="AGN (z-binned, log)"
         )
@@ -554,7 +554,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     ax.errorbar(
         df_agn["z"][mask_in], mu_pred_median[mask_in], yerr=mu_pred_std[mask_in],
         fmt='o', linestyle='none', markersize=3,
-        mfc="black", mec="black",
+        mfc="black", mec="none",
         ecolor="#666666", elinewidth=1.1,
         alpha=0.3, zorder=0, label="AGN"
     )
@@ -570,7 +570,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
         ax.errorbar(
             z_lin, mu_lin_mean, yerr=mu_lin_sem,
             fmt='o', linestyle='none',
-            markersize=5, mfc='red', mec='red',
+            markersize=5, mfc='red', mec='none',
             ecolor='red', elinewidth=2.2, capsize=3.5,
             alpha=0.98, zorder=14, label="AGN (z-binned)"
         )
@@ -778,7 +778,7 @@ def plot_predicted_vs_actual_M2500(
     xerr = np.sqrt(m_app_err**2 + sigma_mu_cosmo**2)
 
     if debias:
-        dm_interp = make_dm_function(df_agn["apparent_mag_2500"].values, df_agn['z'].values, dms)
+        dm_interp = make_dm_function(np.array(df_agn["apparent_mag_2500"].values), np.array(df_agn['z'].values), dms)
 
     # --- binning in redshift ---
     num_cols = 4
@@ -826,7 +826,6 @@ def plot_predicted_vs_actual_M2500(
         actual_M_2500_bin = actual_M_2500[bin_mask].copy()
         if debias:
             pts = np.column_stack([df_agn['z'][bin_mask], df_agn['apparent_mag_2500'][bin_mask]])
-            #M_2500_pred[bin_mask] -= dm_interp(pts)
             actual_M_2500_bin -= dm_interp(pts)
 
         x = actual_M_2500_bin
@@ -847,12 +846,13 @@ def plot_predicted_vs_actual_M2500(
         # error bars
         ax.errorbar(
             x, y, xerr=xerr_bin, yerr=yerr_bin,
-            fmt="none", ecolor="#777777", elinewidth=0.7, alpha=0.4, zorder=2,
+            fmt="none", ecolor="#666666", elinewidth=0.7, alpha=0.4, zorder=2,
         )
 
         # colored points (same vmin/vmax across all panels)
         scatter_kwargs = dict(
-            c=cvals, cmap=cmap, vmin=vmin, vmax=vmax,
+            #c=cvals, cmap=cmap, vmin=vmin, vmax=vmax,
+            c='k',
             s=20, alpha=0.9, edgecolors="none", zorder=3,
         )
         if i == 0:
@@ -1271,6 +1271,8 @@ def plot_predicted_L2500_vs_sigmahat(
 
     os.makedirs(plot_path, exist_ok=True)
     plt.savefig(os.path.join(plot_path, "predicted_L2500_vs_fullcorr_band.png"), dpi=300)
+    if debias:
+        plt.savefig(os.path.join(plot_path, "predicted_L2500_vs_fullcorr_band_debiased.png"), dpi=300)
     if show:
         plt.show()
     plt.close()
