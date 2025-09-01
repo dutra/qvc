@@ -152,8 +152,8 @@ def run_mcmc_pipeline(df_agn, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, c
                     print_progress=True,
                     dlogz_init=10,                 
                     n_effective=200,                # 300–1000 typical for model comparison
-                    nlive_init=max(200, 20*ndim),   # bump live points
-                    nlive_batch=max(100, 10*ndim)   # reasonable batch size for dynamic allocation
+                    nlive_init=max(100, 25*ndim),   # bump live points
+                    nlive_batch=max(50, 15*ndim)   # reasonable batch size for dynamic allocation
                 )
 
 

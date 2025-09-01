@@ -30,12 +30,12 @@ def get_completeness_function_2d_simple(*args, mag_lim=24.0, width=0.2, plot=Fal
     Drop-in replacement that returns a simple analytic completeness function:
         p(detect | mag, z) = 1 / (1 + exp((mag - mag_lim) / width))
 
-    Ignores all data inputs. Hard-coded mag grid: 16 to 26.
+    Ignores all data inputs. Hard-coded mag grid: 16 to 30.
     """
     completeness2d = SimpleCompleteness2D(mag_lim=mag_lim, width=width)
 
-    # Fixed mag grid: 16 to 26
-    mag_min, mag_max = 16.0, 26.0
+    # Fixed mag grid: 16 to 30
+    mag_min, mag_max = 16.0, 30.0
     mag_centers = np.linspace(mag_min, mag_max, 300)
     z_centers = np.linspace(0.0, 3.0, 30)  # dummy grid for API compatibility
     dm = mag_centers[1] - mag_centers[0]
