@@ -1,10 +1,11 @@
 import numpy as np
 from matplotlib.lines import Line2D
 from scipy.stats import gaussian_kde
-from scipy.special import expit
 from tqdm import tqdm
 import math
 import corner
+from scipy.interpolate import RegularGridInterpolator
+
 from mpl_toolkits.axes_grid1.inset_locator import inset_axes
 from astropy.cosmology import FlatwCDM, FlatwpwaCDM, FlatLambdaCDM, Flatw0waCDM
 import matplotlib.pyplot as plt
@@ -14,10 +15,7 @@ import matplotlib.transforms as mtransforms
 
 from hubble_model import (M_model_agn, M_model_agn_err, get_model_params, agn_model_pack_params,
     agn_model_pack_obs, agn_model_eidx, agn_model_oidx, agn_model_pidx)
-from hubble_utils import calc_Mi_from_M2500
 from hubble_completeness import make_dm_function
-from numpy.polynomial.polynomial import Polynomial
-from scipy.interpolate import interp1d
 from dynesty.utils import resample_equal
 from tqdm import tqdm
 from dynesty import plotting as dyplot
@@ -1036,7 +1034,8 @@ def plot_full_residuals(df_agn, residuals, flat_samples, cosmo_model, z_pivot_ag
         'apparent_mag_2500', 'MY_M_2500', 'z', 'log_lbol', 'log_ledd_ratio', 
         'log_sigma_UV', 'log_sigma_hat_UV', 'log_tau_UV_RF', 'chi_sq_g',
         'bwb_beta', 'sn_median_all', 'bwb_alpha', 'bwb_beta',
-        'redchi', 'bwb_beta_4200', 'alpha_lambda', 'alpha_nu', 'f_host_5100',
+        'redchi', 'bwb_beta_4200', 'alpha_lambda', 'alpha_nu', 
+        'f_host_5100', 'f_host_4200',
         'eta_A1', 'eta_A2', 'eta_tau1', 'eta_tau2'
     ]) if col in df_agn.columns]
 
@@ -1059,7 +1058,9 @@ def plot_full_residuals(df_agn, residuals, flat_samples, cosmo_model, z_pivot_ag
             else:
                 mask = np.ones(len(df_agn), dtype=bool)
             if key == 'f_host_5100':
-                mask &= df_agn[key].between(0, 2)
+                mask &= df_agn[key] > 0
+            if key == 'f_host_4200':
+                mask &= df_agn[key] > 0
             y = df_agn.loc[mask, key]
             if np.issubdtype(y.dtype, np.number) and len(y) == np.sum(mask):
                 sc = ax.scatter(y, residuals[mask], c=df_agn.loc[mask, 'z'], cmap='viridis', s=10, alpha=0.5)
@@ -1249,6 +1250,8 @@ def plot_predicted_L2500_vs_sigmahat(
     ax.set_ylabel(r'$L_{2500}$ (erg s$^{-1})$')
     ax.set_xscale('log')
     ax.set_yscale('log')
+    ax.set_xlim((7e-7, 2e5))
+    ax.set_ylim((2e42, 6e46))
     ax.legend()
 
     if show_residuals and ax_res is not None:
@@ -1271,3 +1274,115 @@ def plot_predicted_L2500_vs_sigmahat(
     if show:
         plt.show()
     plt.close()
+
+
+def dmi_from_pdet_only(m_obs, m_obs_err, p_det, m_grid, sigma_completeness, z, tiny=1e-12):
+    """
+    m_obs: (N,)
+    m_obs_err: (N,)
+    p_det: (N, G) completeness vs magnitude for each object
+    m_grid: (G,)
+    """
+    # variance term
+    sigma2 = m_obs_err**2 + float(sigma_completeness)**2  # (N,)
+    # safe log p_det and its slope w.r.t. magnitude
+    logp = np.log(np.clip(p_det, tiny, 1.0))              # (N,G)
+    dlogp_dm = np.gradient(logp, m_grid, axis=1)          # (N,G)
+    # interpolate slope at m_obs
+    idx = np.searchsorted(m_grid, m_obs) - 1
+    idx = np.clip(idx, 0, len(m_grid) - 2)
+    t = (m_obs - m_grid[idx]) / (m_grid[idx+1] - m_grid[idx])
+    slope = (1 - t) * dlogp_dm[np.arange(len(m_obs)), idx] + t * dlogp_dm[np.arange(len(m_obs)), idx+1]
+    # Δm ≈ σ² * d ln p_det / dm
+
+    plt.figure(figsize=(7, 5))
+    plt.scatter(m_obs, sigma2 * slope, c=m_obs_err, cmap='viridis', s=20, alpha=0.7, label='Objects')
+    plt.xlabel('Observed Magnitude (m_obs)')
+    plt.ylabel(r'$\Delta m = \sigma^2 \, \frac{d \ln p_{\rm det}}{dm}$')
+    plt.title('Completeness Correction vs Observed Magnitude')
+    plt.colorbar(label='Magnitude Error (m_obs_err)')
+    plt.tight_layout()
+    plt.ylim(-1, 0.5)
+    os.makedirs("plots/completeness", exist_ok=True)
+    plt.savefig("plots/completeness/dmi_vs_mag.png", dpi=300)
+    plt.close()
+
+
+    # Plot vs redshift (assuming you have z array)
+    plt.figure(figsize=(7, 5))
+    plt.scatter(z, sigma2 * slope, c=m_obs_err, cmap='viridis', s=20, alpha=0.7)
+    plt.xlabel('Redshift (z)')
+    plt.ylabel(r'$\Delta m = \sigma^2 \, \frac{d \ln p_{\rm det}}{dm}$')
+    plt.title('Completeness Correction vs Redshift')
+    plt.colorbar(label='Magnitude Error (m_obs_err)')
+    plt.tight_layout()
+    plt.ylim(-1, 0.5)
+    plt.savefig("plots/completeness/dmi_vs_redshift.png", dpi=300)
+    plt.close()
+    return sigma2 * slope
+
+
+def dmi_corr(m_obs, z_obs, m_obs_err,
+                   H_obs_s, mag_centers, z_centers,
+                   sigma_completeness, tiny=1e-12):
+    """
+    Δm ≈ σ^2 * ∂/∂m [ln n_obs(m|z)] evaluated at (m_obs, z_obs),
+    where n_obs ∝ H_obs_s (smoothed counts per (mag,z) bin).
+
+    Inputs
+    ------
+    m_obs, z_obs : (N,) arrays
+    m_obs_err    : (N,) array (per-object photometric σ in mag)
+    H_obs_s      : (Gm, Gz) smoothed 2D counts on (mag_centers, z_centers)
+                   NOTE: H_obs_s axis 0 = mag, axis 1 = z
+    mag_centers, z_centers : 1D grid centers used for H_obs_s
+    sigma_completeness : extra magnitude scatter to include in σ (default 0)
+    tiny : floor to avoid log(0)
+
+    Returns
+    -------
+    dmi : (N,) array of magnitude shifts
+    """
+    # variance term
+    sigma2 = m_obs_err**2 + float(sigma_completeness)**2
+
+    # derivative of log counts along magnitude axis (units: 1/mag)
+    dm = float(mag_centers[1] - mag_centers[0])
+    logH = np.log(np.clip(H_obs_s, tiny, None))
+    dlog_dm_grid = np.gradient(logH, dm, axis=0)  # axis 0 = mag
+
+    # interpolate slope to object positions
+    interp = RegularGridInterpolator(
+        (mag_centers, z_centers), dlog_dm_grid,
+        bounds_error=False, fill_value=0.0
+    )
+    slope = interp(np.column_stack([m_obs, z_obs]))
+
+    # Teerikorpi-style first-order shift
+    dmi = sigma2 * slope      # use "-sigma2 * slope" if following the minus-sign convention
+
+    plt.figure(figsize=(7, 5))
+    plt.scatter(m_obs, sigma2 * slope, c=m_obs_err, cmap='viridis', s=20, alpha=0.7, label='Objects')
+    plt.xlabel('Observed Magnitude (m_obs)')
+    plt.ylabel(r'$\Delta m = \sigma^2 \, \frac{d \ln p_{\rm det}}{dm}$')
+    plt.title('Completeness Correction vs Observed Magnitude')
+    plt.colorbar(label='Magnitude Error (m_obs_err)')
+    plt.tight_layout()
+    plt.ylim(-1, 0.5)
+    os.makedirs("plots/completeness", exist_ok=True)
+    plt.savefig("plots/completeness/dmi_vs_mag.png", dpi=300)
+    plt.close()
+
+
+    # Plot vs redshift (assuming you have z array)
+    plt.figure(figsize=(7, 5))
+    plt.scatter(z_obs, sigma2 * slope, c=m_obs_err, cmap='viridis', s=20, alpha=0.7)
+    plt.xlabel('Redshift (z)')
+    plt.ylabel(r'$\Delta m = \sigma^2 \, \frac{d \ln p_{\rm det}}{dm}$')
+    plt.title('Completeness Correction vs Redshift')
+    plt.colorbar(label='Magnitude Error (m_obs_err)')
+    plt.tight_layout()
+    plt.ylim(-1, 0.5)
+    plt.savefig("plots/completeness/dmi_vs_redshift.png", dpi=300)
+    plt.close()
+    return dmi

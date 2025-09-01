@@ -150,10 +150,10 @@ def run_mcmc_pipeline(df_agn, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, c
                     resume=resume,
                     checkpoint_file=checkpoint_file,
                     print_progress=True,
-                    dlogz_init=10,                 
+                    dlogz_init=1,                 
                     n_effective=200,                # 300–1000 typical for model comparison
-                    nlive_init=max(200, 20*ndim),   # bump live points
-                    nlive_batch=max(100, 10*ndim)   # reasonable batch size for dynamic allocation
+                    nlive_init=max(250, 25*ndim),   # bump live points
+                    nlive_batch=max(125, 15*ndim)   # reasonable batch size for dynamic allocation
                 )
 
 
@@ -294,16 +294,30 @@ def run_single(df_agn, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, cosmo_mo
                                                          show_true=False, show=False, debias=True, dms=dmag_corr, plot_path=plot_path)
 
     print("Plotting predicted L2500 vs ...")
-    plot_predicted_L2500_vs_sigmahat(flat_samples, df_agn, cosmo_model=cosmo_model, z_pivot_agn=z_pivot_agn, 
-                                     debias=True, dms=dmag_corr, show_residuals=False,
-                                     show=False, plot_path=plot_path)
+    plot_predicted_L2500_vs_sigmahat(flat_samples, df_agn, debias=True, dms=dmag_corr, show_residuals=False,
+                                     cosmo_model=cosmo_model, z_pivot_agn=1.5, show=False, plot_path=plot_path)
     
     print("Plotting cosmological posteriors corner plot...")
     plot_cosmo_corner(None, flat_samples, cosmo_model, z_pivot_sna, z_pivot_agn, show=False, plot_path=plot_path)
 
     print("Plotting completeness vs magnitude at redshifts...")
-    p_detect, mag_centers, z_centers, dm, dz, completeness_scatter = get_completeness_function_2d(df_agn, plot=True)
-    plot_completeness_vs_mag_at_redshifts(p_detect, mag_centers, z_centers)
+    p_detect, mag_centers, z_centers, dm, dz, completeness_scatter, H_obs_s = get_completeness_function_2d(df_agn, plot=True)
+
+    #plot_completeness_vs_mag_at_redshifts(p_detect, mag_centers, z_centers,H_obs_s)
+
+
+
+    completeness2d, mag_centers, z_centers, _, _, completeness_scatter, H_obs_s = get_completeness_function_2d(df_agn, plot=True)
+
+    m_obs = df_agn['apparent_mag_2500'].values
+    m_err = df_agn['apparent_mag_2500_err'].values
+    z = df_agn['z'].values
+    p_det = completeness2d(mag_centers[None, :], z[:, None])
+
+    dmi_corr(m_obs=m_obs,z_obs=z, m_obs_err=m_err,
+                       H_obs_s=H_obs_s,
+                    mag_centers=mag_centers, 
+                       sigma_completeness=completeness_scatter, z_centers=z_centers)
 
     print("Plotting debiased residuals...")
     plot_full_residuals(df_agn, debiased_residuals, flat_samples, cosmo_model, z_pivot_agn, debias=True, dms=dmag_corr, show=False, plot_path=plot_path)
@@ -375,7 +389,7 @@ if __name__ == "__main__":
                          help="Cosmological model (default: FlatwCDM)")
     parser.add_argument("--disable_completeness", action="store_true", default=False, help="Enable completeness correction (default: True)")
     parser.add_argument("--disable_full_covariance", action="store_true", default=False, help="Use full covariance matrix for SNIa likelihood (default: False)")
-    parser.add_argument("--resume", action="store_true", default=False, help="Resume previous MCMC run (default: False)")
+    parser.add_argument("--resume", type=str, default=False, help="Resume previous MCMC run (default: False)")
     parser.add_argument("--run", type=str, choices=["full", "single"], default="single", help="Run mode: compare_models, compare_sna, full, or single (default: single)")
     parser.add_argument("--speed", type=str, choices=["production", "test", "fast"], default="production", help="Sampling speed: production, test, or fast (default: production)")
     parser.add_argument("--N", type=int, default=None, help="Number of AGNs to run (default: all)")

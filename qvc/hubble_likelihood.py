@@ -180,7 +180,7 @@ def log_likelihood(theta, *, agn_data, pantheon_data,
     ll_completeness = 0.0
     comp_blob = empty_blob(N_obj)
     if completeness_params is not None:
-        completeness2d, mag_centers, _, _, _, completeness_scatter = completeness_params
+        completeness2d, mag_centers, _, _, _, completeness_scatter, _ = completeness_params
         ll_completeness, comp_blob = completeness_loglike(
             m_obs=m_obs,
             m_obs_err=m_err,

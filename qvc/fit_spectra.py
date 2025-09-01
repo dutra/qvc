@@ -36,6 +36,7 @@ from hubble_utils import load_quasar_data, write_hdf5_file, read_quasars_from_hd
 from astroquery.sdss import SDSS
 #warnings.filterwarnings("ignore")
 
+bands = ['u', 'g', 'r', 'i', 'z']
 
 # --------------------------- Utility ---------------------------------
 def _safe_float(x):
@@ -154,7 +155,7 @@ def match_sample_to_dr16q(sample_df, dr16q_fits, max_sep_arcsec=2.0, limit=None,
             data_cat[f'mean_corrected_{b}'] = sample_df_matched[mags_mean_col].to_numpy() + mean_vals
 
     data_cat['object_id'] = sample_df_matched['object_id'].to_numpy()
-    data_cat['clean_bands'] = sample_df_matched['clean_bands'].to_numpy()
+    #data_cat['clean_bands'] = sample_df_matched['clean_bands'].to_numpy()
 
     return data_cat
 
@@ -398,14 +399,11 @@ def run_qsofit_record(rec, cache_dir="data/spectra_cache", path_ex="data/"):
         err  = 1.0 / np.sqrt(hdul[1].data['ivar'])           # 1-sigma
 
         # Absolute flux calibration (g,r,i)
-        bands = ['u', 'g', 'r', 'i', 'z']
-        clean_bands = rec['clean_bands']
+        #clean_bands = rec['clean_bands']
         sdss_filters = filters.load_filters(*[f'sdss2010-{b}' for b in bands])
         delta_mags, weights = [], []
 
         for b, filt in zip(bands, sdss_filters):
-            if b not in clean_bands:
-                continue
             try:
                 mag_fiber = rec["mags"].get(b, np.nan)
                 if not np.isfinite(mag_fiber) or mag_fiber < 0:
@@ -524,8 +522,6 @@ def run_qsofit_record(rec, cache_dir="data/spectra_cache", path_ex="data/"):
             m_2500, m_2500_err = -1e9, -1e9
 
         try:
-            if 'i' not in clean_bands:
-                raise ValueError("i band not in clean_bands")
             alpha_lambda = conti_dict.get('PL_slope', -99)
             z = conti_dict['z']
 
@@ -567,8 +563,7 @@ def run_qsofit_record(rec, cache_dir="data/spectra_cache", path_ex="data/"):
 # --------------------------- CLI & Main ---------------------------------
 def parse_args():
     p = argparse.ArgumentParser(description="DR16Q crossmatch, optional SDSS spectrum download, and QSOFit processing.")
-    # p.add_argument("--input-csv", default="data/csv/aug4_sample_chisqg10_ebv005sn3_magsmean.csv",
-    #                help="Path to sample CSV.")
+    # p.add_argument("--input-csv",help="Path to sample CSV.")
     p.add_argument("fpath_in", help="Path to h5 fits with mag means.")
     p.add_argument("fpath_out", help="Output file for QSOFit results.")
     p.add_argument("--filter_csv", default=None,
@@ -654,7 +649,7 @@ def main():
             },
             ra=float(row['RA']),
             dec=float(row['DEC']),
-            clean_bands=row['clean_bands'],
+            #clean_bands=row['clean_bands'],
         )
         records.append(rec)
 

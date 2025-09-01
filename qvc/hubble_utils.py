@@ -192,77 +192,6 @@ def compute_apparent_mag_2500(df, logL_col='MY_LOGL2500', logL_err_col='MY_LOGL2
     return df
 
 
-def calculate_all_alpha_nu(df):
-    """
-    Estimate alpha_nu from total monochromatic luminosities L (in erg/s),
-    propagating errors from LOGLxxxx_ERR columns.
-
-    Assumes columns LOGLxxxx contain log10(lambda * L_lambda) and their corresponding errors LOGLxxxx_ERR.
-
-    Fits:
-        log10(L_lambda) ∝ -(alpha_nu + 2) * log10(lambda)
-
-    So:
-        alpha_nu = -slope - 2
-
-    Error propagation based on linear fit uncertainty.
-    """
-    # Wavelengths in Angstroms
-    band_waves = {
-        'LOGL1350': 1350,
-        'LOGL1700': 1700,
-        'LOGL2500': 2500,
-        'LOGL3000': 3000,
-        'LOGL5100': 5100,
-    }
-
-    valid_bands = [k for k, v in band_waves.items() if 1216 <= v <= 5200]
-    waves = np.array([band_waves[k] for k in valid_bands])  # in Å
-    log_lambda = np.log10(waves)
-
-    alpha_nu_list = []
-    alpha_nu_err_list = []
-
-    for _, row in df.iterrows():
-        logL_total = np.array([row[k] for k in valid_bands])
-        logL_err = np.array([row[f'{k}_ERR'] for k in valid_bands])
-
-        mask = np.isfinite(logL_total) & (logL_total > 0) & np.isfinite(logL_err) & (logL_err > 0)
-
-        if mask.sum() >= 3:
-            logL_lambda = logL_total[mask] - log_lambda[mask]
-            logL_lambda_err = logL_err[mask]
-
-            p, cov = np.polyfit(log_lambda[mask], logL_lambda, 1, w=1/logL_lambda_err, cov=True)
-            slope_err = np.sqrt(np.diag(cov))[0]
-
-            alpha_nu = -p[0] - 2
-            alpha_nu_err = slope_err
-
-        elif mask.sum() == 2:
-            logL_lambda = logL_total[mask] - log_lambda[mask]
-            logL_lambda_err = logL_err[mask]
-
-            # Simple two-point fit without covariance
-            slope = (logL_lambda[1] - logL_lambda[0]) / (log_lambda[1] - log_lambda[0])
-            slope_err = np.sqrt(logL_lambda_err[0]**2 + logL_lambda_err[1]**2) / abs(log_lambda[1] - log_lambda[0])
-
-            alpha_nu = -slope - 2
-            alpha_nu_err = slope_err
-
-        else:
-            alpha_nu = np.nan
-            alpha_nu_err = np.nan
-
-        alpha_nu_list.append(alpha_nu)
-        alpha_nu_err_list.append(alpha_nu_err)
-    df['alpha_nu'] = alpha_nu_list
-    df['alpha_nu_err'] = alpha_nu_err_list
-    df['alpha_nu'] = -0.5
-    df['alpha_nu_err'] = 0.1  # Default values if no valid data
-
-    return df
-
 def compute_MY_LOGL2500(df):
     """
     Compute MY_LOGL2500 and its propagated uncertainty from available LOGLxxxx bands and alpha_nu.
@@ -334,72 +263,6 @@ def compute_MY_LOGL2500(df):
 # Constants
 c = 2.99792458e18  # speed of light in Angstrom/s
 
-
-def calc_Mi_from_M2500(M_2500, alpha_nu, z):
-    """
-    Compute SDSS i-band absolute magnitude at observed frame (z) from M_2500.
-    Assumes f_nu ∝ ν^alpha_nu.
-    
-    Parameters
-    ----------
-    M_2500 : array-like
-        Absolute magnitude at rest-frame 2500 Å (AB system)
-    alpha_nu : array-like
-        Power-law slope of the quasar spectrum (f_nu ∝ ν^alpha)
-    z : array-like
-        Redshift of each source
-
-    Returns
-    -------
-    M_i_z : ndarray
-        Absolute magnitude in observed-frame SDSS i-band
-    """
-
-    # Load SDSS i-band filter curve
-    df_filter = pd.read_csv("data/sdss_i.dat", sep=r'\s+', skiprows=6, header=None,
-                            names=['wavelength', 'throughput_1', 'throughput_2', 'throughput_3', 'atm_trans'])
-
-    wavelengths = df_filter['wavelength'].values  # Angstrom
-    transmission = df_filter['throughput_1'].values
-
-    lambda_2500 = 2500.0  # Angstrom
-
-    # Convert inputs to arrays
-    M_2500 = np.atleast_1d(M_2500).astype(float)
-    alpha_nu = np.atleast_1d(alpha_nu).astype(float)
-    z = np.atleast_1d(z).astype(float)
-
-    # Check that all arrays are the same shape
-    if not (M_2500.shape == alpha_nu.shape == z.shape):
-        raise ValueError("M_2500, alpha_nu, and z must have the same shape")
-
-    M_i_z = np.full_like(M_2500, np.nan, dtype=float)
-
-    for i in range(len(M_2500)):
-        λ_obs = wavelengths
-        T = transmission
-        α = alpha_nu[i]
-        z_i = z[i]
-
-        # observed λ corresponds to rest-frame λ_rest = λ_obs / (1 + z)
-        λ_rest = λ_obs / (1 + z_i)
-
-        # Monochromatic correction: 2500 → λ_eff
-        λ_eff = np.average(λ_rest, weights=T)
-        mono_corr = -2.5 * (α + 2) * np.log10(λ_eff / lambda_2500)
-
-        # Broadband correction using power-law weighting
-        integrand = T * λ_obs**(-(α + 2))
-        numerator = np.trapezoid(integrand, λ_obs)
-        denominator = np.trapezoid(T, λ_obs)
-        broadband_weighted = numerator / denominator
-
-        broadband_corr = -2.5 * np.log10(broadband_weighted / λ_eff**(-(α + 2)))
-
-        delta_M = mono_corr + broadband_corr
-        M_i_z[i] = M_2500[i] + delta_M
-
-    return M_i_z
 
 def populate_sdss_fields(objs, progress_bar=True):
     print(f"Populating SDSS fields: {len(objs)}", flush=True)
@@ -514,55 +377,6 @@ def read_quasars_from_hdf5(file_path, N=None):
                 break
     return quasar_list
 
-def filter_unresolved_quasars(df):
-    print("Filtering unresolved quasars...")
-
-    # Set Vizier to return all columns and a reasonable row limit
-    Vizier.columns = ['*']
-    Vizier.ROW_LIMIT = -1
-
-    # Prepare coordinates for the query
-    coords = SkyCoord(ra=df['ra'].values * u.deg, dec=df['dec'].values * u.deg)
-
-    # Query Vizier catalog V/154/sdss16 for matches within 2 arcsec
-    result = Vizier.query_region(coords, radius=2 * u.arcsec, catalog='V/154/sdss16')
-
-    # If matches are found, extract the class for each source
-    if len(result) > 0:
-        sdss_table = result[0]
-        # Build a DataFrame for easy merging
-        sdss_df = sdss_table.to_pandas()
-        # Merge on coordinates (within 2 arcsec)
-        idx, d2d, _ = match_coordinates_sky(coords, SkyCoord(ra=sdss_df['RA_ICRS'].values*u.deg, dec=sdss_df['DE_ICRS'].values*u.deg))
-        matched = d2d.arcsec < 2
-        df['sdss16_class'] = None
-        df.loc[matched, 'sdss16_class'] = sdss_df.iloc[idx[matched]]['class'].values
-        df = df[matched]
-        df['sdss16_class'] = df['sdss16_class'].fillna(0)
-        # Filter out unresolved quasars
-        df = df[df['sdss16_class'] == 6]
-        df = df.drop(columns=['sdss16_class'])
-        df = df.reset_index(drop=True)
-    else:
-        raise ValueError("No matches found in the SDSS catalog.")
-
-    return df
-
-def sigma_clip_in_bins(df, bin_width=0.1, sigma=2):
-    df_clean = []
-    z_min, z_max = df['z'].min(), df['z'].max()
-    bins = np.arange(z_min, z_max + bin_width, bin_width)
-
-    for i in range(len(bins) - 1):
-        bin_df = df[(df['z'] >= bins[i]) & (df['z'] < bins[i+1])]
-        if len(bin_df) < 5:
-            continue
-        y = bin_df['apparent_mag_2500'] - bin_df['M_i']
-        clipped, _, _ = sigmaclip(y, low=sigma, high=sigma)
-        df_clean.append(bin_df[y.isin(clipped)])
-
-    return pd.concat(df_clean)
-
 def populate_chi_sq_from_csv(df, csv_path="data/aug4_sample_chisqg10_ebv005sn3.csv"):
     """
     Populate the 'chi_sq' field in df by matching 'object_id' with the CSV file.
@@ -606,10 +420,14 @@ def load_quasar_data(file_path, populate_sdss=False, apply_cut=True):
             populate_sdss_fields(quasar_list)
             write_hdf5_file(quasar_list, file_path)
             break
-
+    bands = ['u', 'g', 'r', 'i', 'z']
     for q in quasar_list:
         if 'mags_means' in q:
-            for i, b in enumerate(q['clean_bands']):
+            if 'clean_bands' in q.keys():
+                clean_bands = q['clean_bands']
+            else:
+                clean_bands = bands
+            for i, b in enumerate(clean_bands):
                 q[f'mags_mean_{b}'] = q['mags_means'][i]
 
         # del q['mags_means']
@@ -659,7 +477,8 @@ def load_quasar_data(file_path, populate_sdss=False, apply_cut=True):
         ('log_tau_UV_RF', 1.5, None),
         #('alpha_lambda', None, 0),
         ('redchi', None, 10),
-        ('apparent_mag_2500', 1, 40),
+        ('apparent_mag_2500', 16, 26),
+        ('apparent_mag_i', 15, 26)
         #('apparent_mag_i', 15, 25)
         # Uncomment/add more cuts as needed
         # ('z', 1, None),

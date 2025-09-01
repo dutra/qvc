@@ -354,7 +354,7 @@ def get_completeness_function_2d(
     dz = float(z_centers[1] - z_centers[0])     if len(z_centers)   > 1 else float(z_edges[-1] - z_edges[0])
 
     # Completeness2D must be defined elsewhere
-    return Completeness2D(mag_centers, z_centers, C), mag_centers, z_centers, dm, dz, scatter
+    return Completeness2D(mag_centers, z_centers, C), mag_centers, z_centers, dm, dz, scatter, H_obs_s
 
 import numpy as np
 from scipy.interpolate import RegularGridInterpolator
