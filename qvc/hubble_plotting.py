@@ -1036,7 +1036,7 @@ def plot_full_residuals(df_agn, residuals, flat_samples, cosmo_model, z_pivot_ag
         'log_sigma_UV', 'log_sigma_hat_UV', 'log_tau_UV_RF', 'chi_sq_g',
         'bwb_beta', 'sn_median_all', 'bwb_alpha', 'bwb_beta',
         'redchi', 'bwb_beta_4200', 'alpha_lambda', 'alpha_nu', 
-        'f_host_5100', 'f_host_4200',
+        'f_host_5100', 'f_host_2500',
         'eta_A1', 'eta_A2', 'eta_tau1', 'eta_tau2'
     ]) if col in df_agn.columns]
 
@@ -1060,7 +1060,7 @@ def plot_full_residuals(df_agn, residuals, flat_samples, cosmo_model, z_pivot_ag
                 mask = np.ones(len(df_agn), dtype=bool)
             if key == 'f_host_5100':
                 mask &= df_agn[key] > 0
-            if key == 'f_host_4200':
+            if key == 'f_host_2500':
                 mask &= df_agn[key] > 0
             y = df_agn.loc[mask, key]
             if np.issubdtype(y.dtype, np.number) and len(y) == np.sum(mask):
@@ -1271,9 +1271,11 @@ def plot_predicted_L2500_vs_sigmahat(
         ax.set_xlabel(r'$x = (\sigma/\sigma_{\mathrm{p}})^{\alpha}(\tau/\tau_{\mathrm{p}})^{\beta}$')
 
     os.makedirs(plot_path, exist_ok=True)
-    plt.savefig(os.path.join(plot_path, "predicted_L2500_vs_fullcorr_band.png"), dpi=300)
     if debias:
         plt.savefig(os.path.join(plot_path, "predicted_L2500_vs_fullcorr_band_debiased.png"), dpi=300)
+    else:
+        plt.savefig(os.path.join(plot_path, "predicted_L2500_vs_fullcorr_band.png"), dpi=300)
+
     if show:
         plt.show()
     plt.close()
