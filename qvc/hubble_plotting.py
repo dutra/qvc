@@ -356,9 +356,9 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     # from your_module import FlatwpwaCDM, M_model_agn, M_model_agn_err, get_model_params, make_dm_function
 
     # --- Labels ---
-    if   cosmo_model == 'FlatwCDM':      label = r"flat $w$CDM model"
-    elif cosmo_model == 'Flatw0waCDM':   label = r"flat $w_0w_a$CDM model"
-    elif cosmo_model == 'FlatLambdaCDM': label = r"flat $\Lambda$CDM model"
+    if   cosmo_model == 'FlatwCDM':      label = r"Flat$w$CDM model"
+    elif cosmo_model == 'Flatw0waCDM':   label = r"Flat$w_0w_a$CDM model"
+    elif cosmo_model == 'FlatLambdaCDM': label = r"Flat$\Lambda$CDM model"
     else:
         raise ValueError("Invalid cosmology model.")
 
