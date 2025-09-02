@@ -1245,7 +1245,7 @@ def plot_predicted_L2500_vs_sigmahat(
     )
     # --- Model: one line (median) + 68% band ---
     ax.fill_between(x_grid, 10**ylog_low, 10**ylog_high, color=color, alpha=0.18, zorder=9,)
-    ax.plot(x_grid, 10**ylog_med, color=color, lw=2.0, zorder=10, label='Best fit model')
+    ax.plot(x_grid, 10**ylog_med, color=color, lw=2.0, zorder=10, label='best-fit model')
 
     # --- Axes & labels ---
     ax.set_ylabel(r'$L_{2500}$ (erg s$^{-1})$')
@@ -1268,7 +1268,7 @@ def plot_predicted_L2500_vs_sigmahat(
         ax_res.set_ylim(-2.2, 2.2)
         plt.setp(ax.get_xticklabels(), visible=False)
     else:
-        ax.set_xlabel(r'$x = (\sigma/\sigma_{\mathrm{p}})^{\alpha}(\tau/\tau_{\mathrm{p}})^{\beta}$')
+        ax.set_xlabel(r'$(\sigma/\sigma_{\mathrm{p}})^{\alpha}(\tau/\tau_{\mathrm{p}})^{\beta}$')
 
     os.makedirs(plot_path, exist_ok=True)
     if debias:
