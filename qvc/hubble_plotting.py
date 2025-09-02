@@ -1036,7 +1036,7 @@ def plot_full_residuals(df_agn, residuals, flat_samples, cosmo_model, z_pivot_ag
         'log_sigma_UV', 'log_sigma_hat_UV', 'log_tau_UV_RF', 'chi_sq_g',
         'bwb_beta', 'sn_median_all', 'bwb_alpha', 'bwb_beta',
         'redchi', 'bwb_beta_4200', 'alpha_lambda', 'alpha_nu', 
-        'f_host_5100', 'f_host_2500',
+        'f_host_5100', 'f_host_2500', 'f_host_4200',
         'eta_A1', 'eta_A2', 'eta_tau1', 'eta_tau2'
     ]) if col in df_agn.columns]
 
@@ -1062,6 +1062,8 @@ def plot_full_residuals(df_agn, residuals, flat_samples, cosmo_model, z_pivot_ag
                 mask &= df_agn[key] > 0
             if key == 'f_host_2500':
                 mask &= df_agn[key] > 0
+            if key == 'f_host_4200':
+                mask &= df_agn[key].between(0, 2)
             y = df_agn.loc[mask, key]
             if np.issubdtype(y.dtype, np.number) and len(y) == np.sum(mask):
                 sc = ax.scatter(y, residuals[mask], c=df_agn.loc[mask, 'z'], cmap='viridis', s=10, alpha=0.5)
@@ -1164,8 +1166,7 @@ def plot_predicted_L2500_vs_sigmahat(
     if debias:
         dm_interp = make_dm_function(d["apparent_mag_2500"].values, d['z'].values, dms)
         pts = np.column_stack([d['z'], d['apparent_mag_2500']])
-        actual_M2500 = d['apparent_mag_2500'] - cosmo.distmod(d['z']).value
-        actual_M2500 -= dm_interp(pts)
+        actual_M2500 = (d['apparent_mag_2500'] - dm_interp(pts)) - cosmo.distmod(d['z']).value
     else:
         actual_M2500 = d['apparent_mag_2500'] - cosmo.distmod(d['z']).value
     actual_logL2500 = -0.4 * (actual_M2500 - 90.0)
