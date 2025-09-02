@@ -143,7 +143,7 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, latent=F
                 # BLR amplitudes and lags
                 log_amp_delta_blr = numpyro.sample("log_amp_delta_blr", dist.Normal(jnp.full(nBands, -1.0), 1.0))
                 #log_lag_blr = numpyro.sample("log_lag_blr", dist.Normal(log_lag_blr_c[..., None], 3.0))
-                log_lag_blr = numpyro.sample("log_lag_blr", dist.Uniform(0.2, 4.0))
+                log_lag_blr = numpyro.sample("log_lag_blr", dist.Uniform(2.3*0.2, 2.3*4.0))
                 width_blr = numpyro.sample("width_blr", dist.TruncatedNormal(0.2 * jnp.exp(log_tau_drw0_c[..., None]), 20.0, low=10.0))
                 width_cont = numpyro.sample("width_cont", dist.TruncatedNormal(0.2 * jnp.exp(log_tau_drw0_c[..., None]), 20.0, low=10.0))
                 #width_blr = numpyro.deterministic("width_blr", 0.2 * jnp.exp(log_tau_drw0[..., None]))
