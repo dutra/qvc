@@ -249,6 +249,10 @@ def run_mcmc_pipeline(df_agn, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, c
     print("\nMedian parameters (equal-weight posterior):")
     print(median_samples)
 
+    print("1 sigma scatter on HD (magnitudes)")
+    sigma_intrinsic = float(np.exp(median_samples[model_labels.index('log_f')]))
+    print("  sigma_intrinsic:", sigma_intrinsic)
+
     return sampler, flat_samples, model_labels, dmi_max_w, logZ, logZerr
 
 
@@ -323,6 +327,9 @@ def run_single(df_agn, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, cosmo_mo
         print("Computed pivot redshift: ", zp)
 
     display_results_summary(flat_samples, cosmo_model, z_pivot_agn)
+
+    print('std debiased residuals:', np.std(debiased_residuals))
+    # TODO: Subtract typical mu error in quadrature
 
     return sampler, flat_samples, model_labels, dmag_corr, logZ, logZerr
 
