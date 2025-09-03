@@ -68,6 +68,7 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, bwb=True
     log_lag_blr_c = jnp.log(10**1.5 * (1 + zs))
 
     def numpyro_joint_model():
+
         # Initialize parameters
         # Global "universal" means for eta
         eta_A1_mean = numpyro.sample("eta_A1_mean", dist.TruncatedNormal(-0.5, 0.2, high=0.0))
@@ -91,6 +92,11 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, bwb=True
 
         with numpyro.plate("objects", batch_size):
             # Object-level parameters (shape: [B])
+
+            # Fake
+            log_tau_fake = numpyro.deterministic("log_tau_fake", batch_data['log_tau_fake'])
+            log_sigma_fake = numpyro.deterministic("log_sigma_fake", batch_data['log_sigma_fake'])
+
             # Variability k-corrections
             if d_eta:
                 eta_A1 = numpyro.sample("eta_A1", dist.Normal(eta_A1_mean, sigma_eta_A1))
@@ -171,6 +177,9 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, bwb=True
                 "bwb_beta": bwb_beta[i],
                 "width_blr": width_blr[i],
                 "width_cont": width_cont[i],
+                # Fake
+                "log_tau_fake": log_tau_fake[i],
+                "log_sigma_fake": log_sigma_fake[i],
                 # power law
                 "eta_A1": eta_A1[i],
                 "eta_A2": eta_A2[i],
@@ -319,8 +328,13 @@ def make_lc(Model, data, bands=['u', 'g', 'r', 'i', 'z'], inject_fake=False):
         'z': data['z'],
         'band_idx': band_idx,
         'mags_means': mags_means,
-        'mags_stds': mags_stds
+        'mags_stds': mags_stds,
+        'log_tau_fake': -99.0,
+        'log_sigma_fake': -99.0
     }
+    if inject_fake:
+        batch_dict['log_tau_fake'] = np.log(10**log_tau0)
+        batch_dict['log_sigma_fake'] = np.log(10**log_sigma0)
     return batch_dict
 
                     
@@ -443,7 +457,8 @@ if __name__ == '__main__':
             'mags_means': obj['mags_means'],
             'mags_stds': obj['mags_stds'],
             'lam_rf': lam_rf,
-            'f_host_5100': obj['f_host_5100']
+            'log_tau_fake': obj['log_tau_fake'],
+            'log_sigma_fake': obj['log_sigma_fake']
         })
 
     num_objects = len(batch_data)
