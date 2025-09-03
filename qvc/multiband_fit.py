@@ -24,6 +24,9 @@ import pandas as pd
 from tqdm import tqdm
 import numpyro
 
+from numpy.lib.stride_tricks import sliding_window_view
+from scipy.stats import median_abs_deviation
+
 numpyro.set_host_device_count(num_cores)  # Tell NumPyro how many to use
 
 numpyro.enable_x64()
@@ -271,9 +274,6 @@ def make_lc(Model, data, bands=['u', 'g', 'r', 'i', 'z'], inject_fake=False):
     # --- Outlier rejection ---
     window_size = 6
     mask_outlier = np.ones(len(all_times), dtype=bool)
-
-    from numpy.lib.stride_tricks import sliding_window_view
-    from scipy.stats import median_abs_deviation
 
     for band in np.unique(band_idx):
         band_mask = band_idx == band
