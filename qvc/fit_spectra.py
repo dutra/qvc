@@ -147,8 +147,8 @@ def match_sample_to_dr16q(sample_df, dr16q_fits, max_sep_arcsec=2.0, limit=None,
 
     # Add photometry columns (now lengths match)
     for b in ['u', 'g', 'r', 'i', 'z']:
-        mags_mean_col = f'mags_mean_{b}'
-        mean_col = f'mean_{b}'
+        mags_mean_col = f'mags_mean_{b}' # direct mean from LC
+        mean_col = f'mean_{b}' # LC fitting mean (dm)
         if mags_mean_col in sample_df_matched.columns:
             # If mean_col is not >= 0, assign 0
             mean_vals = sample_df_matched[mean_col].to_numpy()
