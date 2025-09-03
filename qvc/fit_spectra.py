@@ -474,7 +474,7 @@ def run_qsofit_record(rec, cache_dir="data/spectra_cache", path_ex="data/"):
             nsamp=20,                 # number of MC trials or MCMC samples
 
             # advanced fitting parameters
-            param_file_name=f'{path_ex}/qsopar.fits',  # qso fitting parameter FITS file
+            param_file_name=f'qsopar.fits',  # qso fitting parameter FITS file
             nburn=20,                 # burn-in samples for MCMC
             nthin=10,                 # return every n-th MCMC sample
             epsilon_jitter=0.,        # initial jitter for Gaussians to avoid local minima
@@ -588,6 +588,8 @@ def main():
     args = parse_args()
 
     sample_df = load_quasar_data(args.fpath_in, apply_cut=False)
+    #sample_df = sample_df[sample_df['sdss_name'] == '020929.83-005602.6']
+
     if args.filter_csv is not None:
         filter_df = pd.read_csv(args.filter_csv)
         if 'object_id' not in filter_df.columns:
@@ -653,7 +655,7 @@ def main():
         )
         records.append(rec)
 
-    worker = partial(run_qsofit_record, cache_dir=args.cache_dir, path_ex="./")
+    worker = partial(run_qsofit_record, cache_dir=args.cache_dir, path_ex="data")
 
     chunksize = 1  # small so progress bar updates frequently
     results = {}
