@@ -6,6 +6,8 @@ from astropy.io import fits
 from astropy.coordinates import SkyCoord
 from astropy import units as u
 from tqdm import tqdm
+from collections import OrderedDict
+
 
 lambda_pivot = {
     'u': 3543,  # SDSS u-band
@@ -112,7 +114,7 @@ def cut_light_curve_restframe_window(lc_list, n_days=1800, same_length=False):
     return new_lc_list
 
 
-def concat_light_curves(N=None, skip=None, filter_object_ids=[], progress_bar=False):
+def concat_light_curves(filter_object_ids=[], progress_bar=False):
     print(f"DEBUG concat_light_curves args: {N=}, {skip=}, {len(filter_object_ids)=}")
 
     if skip:
@@ -139,8 +141,6 @@ def concat_light_curves(N=None, skip=None, filter_object_ids=[], progress_bar=Fa
     matching_indices = cat[cat.objectId.isin(match_object_ids)].index
 
     cat = cat.loc[matching_indices]
-    cat = cat[skip:] if skip else cat
-    cat = cat[:N] if N else cat
 
     print(f"Found {len(cat)} matching objects in concat_light_curves", len(cat))
 
@@ -228,9 +228,83 @@ def concat_light_curves(N=None, skip=None, filter_object_ids=[], progress_bar=Fa
 
     print(f"Found {len(s82_objs)} objects in concat_light_curves after time cut", len(s82_objs))
 
-    s82_objs = populate_sdss_fields(s82_objs, progress_bar=progress_bar)
-
     return s82_objs
+
+def load_stone_lcs():
+    # Load Stone et al. (2022) data
+    fits_file = 'data/stone_TotalDat_v2.fits'
+    hdul = fits.open(fits_file)
+    data = hdul[1].data
+    hdul.close()
+    bands = ['g', 'r', 'i']
+    fields = [
+        'MAG', 'MAG_ERR', 'MJD',
+        'log_SIGMA', 
+        'log_TAU_REST',
+    ]
+    stone_lcs = OrderedDict()
+
+    for i in range(len(data)):
+        dbid = data['DBID'][i]
+        stone_lcs[dbid] = {
+            'stone_DBID': dbid,
+            'z': data['Z'][i],
+            'stone_Z': data['Z'][i],
+            'stone_RA': data['RA'][i],
+            'stone_DEC': data['DEC'][i],
+            'stone_LOG_M_BH': data['LOG_M_BH'][i],
+            'stone_LOG_M_BH_ERR': data['LOG_M_BH_ERR'][i],
+            'stone_LOG_LBOL': data['LOG_LBOL'][i],
+            'stone_LOG_LBOL_ERR': data['LOG_LBOL_ERR'][i],        
+            'mags': {},
+            'magerrs': {},
+            'times': {},
+        }
+        for band in bands:
+            # Mask NaNs for MJD, MAG, and MAG_ERR fields
+            mjd = data[f'MJD_{band}'][i]
+            mag = data[f'MAG_{band}'][i]
+            mag_err = data[f'MAG_ERR_{band}'][i]
+            mask = ~np.isnan(mjd) & ~np.isnan(mag) & ~np.isnan(mag_err)
+
+            stone_lcs[dbid]['mags'][band] = mag[mask]
+            stone_lcs[dbid]['magerrs'][band] = mag_err[mask]
+            stone_lcs[dbid]['times'][band] = mjd[mask]
+
+            stone_lcs[dbid] |= {
+                # f'MJD_{band}': mjd[mask],
+                # f'MAG_{band}': mag[mask],
+                # f'MAG_{band}_ERR': mag_err[mask],
+
+                f'stone_log_SIGMA_{band}': data[f'log_SIGMA_{band}'][i],
+                f'stone_log_SIGMA_{band}_ERR_L': data[f'log_SIGMA_{band}_ERR_L'][i],
+                f'stone_log_SIGMA_{band}_ERR_U': data[f'log_SIGMA_{band}_ERR_U'][i],
+                f'stone_log_TAU_REST_{band}': data[f'log_TAU_REST_{band}'][i],
+                f'stone_log_TAU_REST_{band}_ERR_L': data[f'log_TAU_REST_{band}_ERR_L'][i],
+                f'stone_log_TAU_REST_{band}_ERR_U': data[f'log_TAU_REST_{band}_ERR_U'][i],
+                f'stone_log_SIGMA_{band}_ERR': (data[f'log_SIGMA_{band}_ERR_L'][i] + data[f'log_SIGMA_{band}_ERR_U'][i]) / 2,
+                f'stone_log_TAU_REST_{band}_ERR': (data[f'log_TAU_REST_{band}_ERR_L'][i] + data[f'log_TAU_REST_{band}_ERR_U'][i]) / 2,
+            }
+
+    stone_coords = SkyCoord(ra=data['RA']*u.deg, dec=data['DEC']*u.deg)
+    stone_ids = data['DBID']
+
+    # S82 Catalog
+    cat = pd.read_parquet("data/S82/Catalog.parquet").reset_index()
+    cat_coords = SkyCoord(ra=cat['RA'].values*u.deg, dec=cat['DEC'].values*u.deg)
+    cat_objids = cat['objectId'].values
+
+    # Match lcs within 1 arcsec
+    idx, d2d, _ = stone_coords.match_to_catalog_sky(cat_coords)
+    match_mask = d2d < 1 * u.arcsec
+
+    for i, matched in enumerate(match_mask):
+        if matched:
+            stone_lcs[stone_ids[i]]['object_id'] = cat_objids[idx[i]]
+        else:
+            print(f"Stone DBID {stone_ids[i]} has no match in S82 catalog, removing.")
+            del stone_lcs[stone_ids[i]]
+    return stone_lcs.values()
 
 def load_s82_from_hdf5(file_path="s82_objs.h5"):
     s82_objs = []
@@ -264,7 +338,11 @@ def populate_sdss_fields(s82_objs, progress_bar=False):
     fits_data = hdul[1].data  # Assuming the data is in the first extension    
     fits_data_2 = hdul[2].data  # Assuming the data is in the first extension    
     for d in tqdm(s82_objs, desc="Populating SDSS fields", disable=(not progress_bar)):
-        obj = cat.loc[cat['objectId'] == d['object_id']].iloc[0]
+        obj_selection = cat.loc[cat['objectId'] == d['object_id']]
+        if obj_selection.empty:
+            print(f"Skipping entry {d['object_id']} as it does not exist in the catalog.")
+            continue
+        obj = obj_selection.iloc[0]
         c1 = SkyCoord(fits_data['RA'], fits_data['DEC'], unit='deg')
         c2 = SkyCoord(obj['RA'], obj['DEC'], unit='deg')
         sep = c1.separation(c2).to(u.arcsec)

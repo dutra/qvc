@@ -354,7 +354,7 @@ if __name__ == '__main__':
     parser.add_argument("--rf_length_cut", type=int, default=-1, help="Cut light curves to same rest-frame length.")
     parser.add_argument('--exact_same_length', action='store_true', help="Cut light curves to exact same rest-frame length.")
     parser.add_argument("--alpha_lam_csv", type=str, default=None, help="Path to CSV file containing alpha_lam values per object.")
-
+    parser.add_argument("--load_stone_lcs", action="store_true", default=False, help="Load Stone light curves instead of default.")
     args = parser.parse_args()
     print("Args: ", args)
 
@@ -375,8 +375,21 @@ if __name__ == '__main__':
     if len(filter_object_ids) > 0:
         print(f"Filtering object IDs: {len(filter_object_ids)}")
 
-    objs = concat_light_curves(filter_object_ids=filter_object_ids, N=args.N, skip=args.skip, progress_bar=args.progress)
+    if args.load_stone_lcs:
+        objs = load_stone_lcs()
+        print(f"Loaded {len(objs)} Stone light curves.")
+    else:
+        objs = concat_light_curves(filter_object_ids=filter_object_ids, N=args.N, skip=args.skip, progress_bar=args.progress)
     print(f"Loaded {len(objs)} objects from concat_light_curves")
+
+    if args.skip:
+        objs = objs[args.skip:]
+        print(f"After applying skip, {len(objs)} objects remain.")
+    if args.N:
+        objs = objs[:args.N]
+        print(f"After applying N, {len(objs)} objects remain.")
+
+    objs = populate_sdss_fields(objs, progress_bar=args.progress)
     
     if args.rf_length_cut > 0:
         objs = cut_light_curve_restframe_window(objs, n_days=args.rf_length_cut, same_length=args.exact_same_length)
@@ -395,7 +408,7 @@ if __name__ == '__main__':
                 obj["f_host_5100"] = 0.0  # Default if not found or invalid
     else:
         for obj in objs:
-            obj["f_host_5100"] = 0.0  # Default if not found or invalid
+            obj["f_host_5100"] = 0.0 
 
     #objs = populate_sdss_fields(objs)
 
@@ -404,9 +417,13 @@ if __name__ == '__main__':
     # After loading objs
     logging.info("--- Joint fitting ---")
     batch_data = []
+    if args.load_stone_lcs:
+        bands = ['g', 'r', 'i']
+    else:
+        bands = ['u', 'g', 'r', 'i', 'z']
     for i, obj in enumerate(objs):
         # Prepare each object's data for the joint model
-        result = make_lc(Model, obj, inject_fake=args.inject_fake)
+        result = make_lc(Model, obj, bands=bands, inject_fake=args.inject_fake)
         if result is None:
             continue
         obj['i'] = i
