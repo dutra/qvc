@@ -60,7 +60,7 @@ has_lag = True
 
 universal_params = ['eta_A1_mean', 'eta_A2_mean', 'eta_tau1_mean', 'eta_tau2_mean', 'eta_break', 'lam_s', 'sigma_eta_A1', 'sigma_eta_A2', 'sigma_eta_tau1', 'sigma_eta_tau2', 'log_sigma_eta_A1', 'log_sigma_eta_A2', 'log_sigma_eta_tau1', 'log_sigma_eta_tau2']
 
-def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, bwb=True, disable_poly1=False, d_eta=True):
+def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_fake_in, log_sigma_fake_in, bwb=True, disable_poly1=False, d_eta=True):
     # Precompute and capture constants in the closure so they are treated as
     # static by JAX/NumPyro. This prevents unnecessary retracing/recompilation
     # when running MCMC, as these values do not change between runs.
@@ -97,8 +97,8 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, bwb=True
             # Object-level parameters (shape: [B])
 
             # Fake
-            log_tau_fake = numpyro.deterministic("log_tau_fake", batch_data['log_tau_fake'])
-            log_sigma_fake = numpyro.deterministic("log_sigma_fake", batch_data['log_sigma_fake'])
+            log_tau_fake = numpyro.deterministic("log_tau_fake", log_tau_fake_in)
+            log_sigma_fake = numpyro.deterministic("log_sigma_fake", log_sigma_fake_in)
 
             # Variability k-corrections
             if d_eta:
@@ -457,6 +457,7 @@ if __name__ == '__main__':
             'mags_means': obj['mags_means'],
             'mags_stds': obj['mags_stds'],
             'lam_rf': lam_rf,
+            'f_host_5100': obj['f_host_5100'],
             'log_tau_fake': obj['log_tau_fake'],
             'log_sigma_fake': obj['log_sigma_fake']
         })
@@ -482,11 +483,15 @@ if __name__ == '__main__':
     # --- Precompute log_jitter prior means ---
     zs = jnp.array([obj['z'] for obj in batch_data])
     lam_rfs = jnp.array([obj['lam_rf'] for obj in batch_data])
+
     log_jitter_mean = jnp.stack([
         jnp.array(jnp.full(5, 1e-6) + jnp.log(jnp.mean(jnp.array(obj[:,3][obj[:,3] < 10])))) for obj in padded_batch_data
     ])  # shape (B, nBands)
 
     f_host_value = jnp.array([obj["f_host_5100"] for obj in batch_data])
+
+    log_tau_fake = jnp.array([obj['log_tau_fake'] for obj in batch_data])
+    log_sigma_fake = jnp.array([obj['log_sigma_fake'] for obj in batch_data])
 
     # # --- Precompute f_host_shen11 prior means ---
     # if args.f_host_shen11:
@@ -502,7 +507,7 @@ if __name__ == '__main__':
     #     batch_size = len(batch_data)
     #     f_host_value = jnp.zeros(batch_size)
 
-    numpyro_joint_model = build_model(padded_batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, args.bwb, args.disable_poly1, args.d_eta)
+    numpyro_joint_model = build_model(padded_batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_fake, log_sigma_fake, args.bwb, args.disable_poly1, args.d_eta)
 
     nuts_kernel = NUTS(numpyro_joint_model, init_strategy=init_strategy, dense_mass=True, max_tree_depth=args.max_tree_depth)
     mcmc = MCMC(
