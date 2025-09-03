@@ -150,7 +150,7 @@ def run_mcmc_pipeline(df_agn, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, c
                     resume=resume,
                     checkpoint_file=checkpoint_file,
                     print_progress=True,
-                    dlogz_init=10,                 
+                    dlogz_init=1,                 
                     n_effective=200,                # 300–1000 typical for model comparison
                     nlive_init=max(100, 25*ndim),   # bump live points
                     nlive_batch=max(50, 15*ndim)   # reasonable batch size for dynamic allocation
@@ -385,7 +385,7 @@ if __name__ == "__main__":
                          help="Cosmological model (default: FlatwCDM)")
     parser.add_argument("--disable_completeness", action="store_true", default=False, help="Enable completeness correction (default: True)")
     parser.add_argument("--disable_full_covariance", action="store_true", default=False, help="Use full covariance matrix for SNIa likelihood (default: False)")
-    parser.add_argument("--resume", action="store_true", default=False, help="Resume previous MCMC run (default: False)")
+    parser.add_argument("--resume", nargs="?", const=True, default=False, help="Resume previous MCMC run (default: False). If a string is provided, it is used as the checkpoint file.")
     parser.add_argument("--run", type=str, choices=["full", "single"], default="single", help="Run mode: compare_models, compare_sna, full, or single (default: single)")
     parser.add_argument("--speed", type=str, choices=["production", "test", "fast"], default="production", help="Sampling speed: production, test, or fast (default: production)")
     parser.add_argument("--N", type=int, default=None, help="Number of AGNs to run (default: all)")

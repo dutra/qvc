@@ -808,7 +808,6 @@ import os
 def make_cosmo_table_latex(
     results,
     *,
-    include_threeparttable=True,
     include_lnZ=True,
     caption="Marginalized Cosmological Parameters and Bayesian Evidence",
     label="tab:cosmoparams",
@@ -940,8 +939,7 @@ def make_cosmo_table_latex(
     lines.append(r"\begin{table}")
     lines.append(r"\centering")
     lines.append(r"\setlength{\tabcolsep}{4pt} % compact spacing")
-    if include_threeparttable:
-        lines.append(r"\begin{threeparttable}")
+    #lines.append(r"\begin{threeparttable}")
     lines.append(rf"\caption{{{caption}}}")
     lines.append(rf"\label{{{label}}}")
 
@@ -979,11 +977,10 @@ def make_cosmo_table_latex(
     lines.append(r"\bottomrule")
     lines.append(r"\end{tabular}")
 
-    if include_threeparttable:
-        lines.append(r"\begin{tablenotes}")
-        lines.append(r"\item[a] Units: km s$^{-1}$ Mpc$^{-1}$.")
-        lines.append(r"\end{tablenotes}")
-        lines.append(r"\end{threeparttable}")
+    lines.append(r"\begin{tablenotes}")
+    lines.append(r"\item[a] Units: km s$^{-1}$ Mpc$^{-1}$.")
+    lines.append(r"\end{tablenotes}")
+    #lines.append(r"\end{threeparttable}")
 
     lines.append(r"\end{table}")
 
