@@ -359,7 +359,7 @@ def create_qsopar_fits(path_ex='data/', *, overwrite=True, author='Hengxiao Guo'
     return outpath
 
 
-def run_qsofit_record(rec, cache_dir="data/spectra_cache", path_ex="data/"):
+def run_qsofit_record(rec, npca_qso, cache_dir="data/spectra_cache", path_ex="data/"):
     """
     Worker-safe version of QSOFit runner.
     `rec` is a plain dict containing only the fields needed for one object.
@@ -434,7 +434,7 @@ def run_qsofit_record(rec, cache_dir="data/spectra_cache", path_ex="data/"):
             nsmooth=1,              # do n-pixel smoothing to the raw input flux and err spectra
             and_mask=False,         # delete the and masked pixels
             or_mask=False,          # delete the or masked pixels
-            reject_badpix=False,    # reject 10 most possible outliers by the test of pointDistGESD
+            reject_badpix=True,    # reject 10 most possible outliers by the test of pointDistGESD
             deredden=True,          # correct the Galactic extinction
             wave_range=[1150, 1e9], # trim input wavelength
             wave_mask=None,         # 2-D array, mask the given range(s)
@@ -452,7 +452,7 @@ def run_qsofit_record(rec, cache_dir="data/spectra_cache", path_ex="data/"):
             # host_type='BC03',         # PCA template name for galaxy
             # npca_gal=5,               # number of galaxy templates
 
-            npca_qso=2,              # number of quasar templates
+            npca_qso=npca_qso,              # number of quasar templates
             host_type='BC03',         # PCA template name for galaxy
             npca_gal=10,               # number of galaxy templates
             
@@ -655,20 +655,31 @@ def main():
         )
         records.append(rec)
 
-    worker = partial(run_qsofit_record, cache_dir=args.cache_dir, path_ex="data")
+    # Run QSOFit twice: once with npca_qso=0, once with npca_qso=2
+    results_0 = {}
+    results_2 = {}
 
-    chunksize = 1  # small so progress bar updates frequently
+    for npca_qso, results_dict in [(0, results_0), (2, results_2)]:
+        worker = partial(run_qsofit_record, npca_qso=npca_qso, cache_dir=args.cache_dir, path_ex="data")
+        chunksize = 1
+        with Pool(processes=num_cores) as pool:
+            with tqdm(total=len(records), desc=f"Processing npca_qso={npca_qso}", dynamic_ncols=True, smoothing=0.0) as pbar:
+                for res in pool.imap_unordered(worker, records, chunksize=chunksize):
+                    obj_id = res.get("object_id", None)
+                    if obj_id is not None:
+                        results_dict[obj_id] = res
+                    pbar.update(1)
+        print(f"Collected {len(results_dict)} results for npca_qso={npca_qso}")
+
+    # Select best result (lowest redchi) for each object
     results = {}
-
-    with Pool(processes=num_cores) as pool:
-        with tqdm(total=len(records), desc="Processing objects", dynamic_ncols=True, smoothing=0.0) as pbar:
-            for res in pool.imap_unordered(worker, records, chunksize=chunksize):
-                obj_id = res.get("object_id", None)
-                if obj_id is not None:
-                    results[obj_id] = res
-                pbar.update(1)
-
-    print(f"Collected {len(results)} results out of {len(records)} records")
+    for obj_id in results_0.keys():
+        res0 = results_0[obj_id]
+        res2 = results_2[obj_id]
+        if res2["redchi"] < res0["redchi"]:
+            results[obj_id] = res2
+        else:
+            results[obj_id] = res0
 
     # Update each quasar dict with fields from results
     for quasar in quasar_dict_list:
