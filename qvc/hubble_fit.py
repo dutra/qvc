@@ -79,6 +79,7 @@ def run_mcmc_pipeline(df_agn, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, c
     checkpoint_file = os.path.join(checkpoint_folder,
                                    f"dynesty_checkpoint_{cosmo_model}_{'sna' if only_sna else 'joint'}_{speed}.save")
     print(f"Checkpoint file: {checkpoint_file}")
+    print(f"Starting Hubble Fit with {len(agn_data['z'])} AGNs and {len(pantheon_data['zHD'])} SNes...")
     with multiprocessing.get_context("spawn").Pool(
         processes=num_cores
     ) as pool:            
@@ -391,7 +392,8 @@ if __name__ == "__main__":
     parser.add_argument("--N", type=int, default=None, help="Number of AGNs to run (default: all)")
     parser.add_argument("--only_sna", action="store_true", default=False, help="Run SNIa-only fit (default: False)")
     parser.add_argument("--use_mu_sh0es", action="store_true", default=False, help="Use MU_SH0ES for SNIa fit (default: False)")
-        
+    parser.add_argument("--spectra_fit_csv", type=str, help="Path to spectra fit CSV file")
+
     args = parser.parse_args()
 
     print("Running Hubble fit with the following settings:")
@@ -406,7 +408,7 @@ if __name__ == "__main__":
         print("Warning: Resuming previous MCMC run.")
 
     df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_pantheon_data()
-    df_agn = load_agn_data(args.agn_data_filepath, populate_sdss=args.force_populate_fields)
+    df_agn = load_agn_data(args.agn_data_filepath, populate_sdss=args.force_populate_fields, spectra_fit_csv=args.spectra_fit_csv)
 
     if args.N and args.N > 0:
         df_agn = df_agn.sample(n=args.N, random_state=42)

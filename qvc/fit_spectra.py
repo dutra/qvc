@@ -31,7 +31,7 @@ from astropy.table import Table
 from astropy.coordinates import SkyCoord
 from astropy.cosmology import FlatLambdaCDM
 import astropy.units as u
-from hubble_utils import load_quasar_data, write_hdf5_file, read_quasars_from_hdf5
+from hubble_utils import load_agn_data, write_hdf5_file
 
 from astroquery.sdss import SDSS
 #warnings.filterwarnings("ignore")
@@ -518,6 +518,9 @@ def run_qsofit_record(rec, npca_qso, cache_dir="data/spectra_cache", path_ex="da
                 
         if L_ok:
             m_2500, m_2500_err = compute_apparent_mag_2500_astropy(conti_dict)
+            mag_errs = np.array([mag_err if (np.isfinite(mag_err) and mag_err >=0) else 0.0 
+                                         for mag_err in rec["mags_err"].values()])
+            m_2500_err = np.sqrt(m_2500_err**2 + np.mean(mag_errs)**2)
         else:
             m_2500, m_2500_err = -1e9, -1e9
 
@@ -587,7 +590,7 @@ def parse_args():
 def main():
     args = parse_args()
 
-    sample_df = load_quasar_data(args.fpath_in, apply_cut=False)
+    sample_df = load_agn_data(args.fpath_in, apply_cut=False)
     #sample_df = sample_df[sample_df['sdss_name'] == '020929.83-005602.6']
 
     if args.filter_csv is not None:
@@ -647,6 +650,10 @@ def main():
             loglbol=float(row['LOGLBOL']),
             mags={
                 b: (float(row[f'mean_corrected_{b}']) if f'mean_corrected_{b}' in colnames else np.nan)
+                for b in ['g', 'r', 'i']
+            },
+            mags_err={
+                b: float(row[f"mean_{b}_err"]) if f"mean_{b}_err" in colnames else np.nan
                 for b in ['g', 'r', 'i']
             },
             ra=float(row['RA']),

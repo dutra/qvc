@@ -1064,6 +1064,8 @@ def plot_full_residuals(df_agn, residuals, flat_samples, cosmo_model, z_pivot_ag
                 mask &= df_agn[key] > 0
             if key == 'f_host_4200':
                 mask &= df_agn[key].between(0, 2)
+            if key == 'log_lbol':
+                mask &= df_agn[key] > 1
             y = df_agn.loc[mask, key]
             if np.issubdtype(y.dtype, np.number) and len(y) == np.sum(mask):
                 sc = ax.scatter(y, residuals[mask], c=df_agn.loc[mask, 'z'], cmap='viridis', s=10, alpha=0.5)

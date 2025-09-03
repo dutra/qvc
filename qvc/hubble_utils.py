@@ -117,54 +117,40 @@ def log_nuLnu_to_m2500(log_nuLnu, z):
     )
     return m_AB
 
-def compute_apparent_mag_2500_colin(df):
+def populate_spectra_fit(df, spectra_fit_csv):
     # Load Colin's SDSS QSO 2500A magnitudes and merge with df on SDSS_NAME
     fields = {
             'f_host_4200': float,
+            'f_host_2500': float,
+            'f_host_5100': float,
             'apparent_mag_2500': float,
             'apparent_mag_2500_err': float,
+            'apparent_mag_i_rest': float,
+            'delta_m_avg': float,
             'alpha_lambda': float,
             'alpha_lambda_err': float,
             'redchi': float
         }
     # Load and concatenate two CSV files
-    colin_df1 = pd.read_csv(
-        'data/sample_stone_fittedm2500.csv',
+    df_spectra = pd.read_csv(
+        spectra_fit_csv,
         dtype={'object_id': str},
         converters=fields
     )
-    colin_df2 = pd.read_csv(
-        #'data/sample_chisqg10_ebv005sn3_fittedm2500.csv',
-        'data/csv/aug18_sample_chisqg10_ebv005sn3_fittedm2500.csv',
-        dtype={'object_id': str},
-        converters=fields
-    )
-    # Merge on object_id, giving priority to colin_df2 values where available
-    colin_df = pd.merge(
-        colin_df1, colin_df2, 
-        on='object_id', 
-        how='outer', 
-        suffixes=('', '_2')
-    )
-    # For each field, prefer colin_df2 value if present, else colin_df1
-    for col in fields.keys():
-        colin_df[col] = colin_df[f"{col}_2"].combine_first(colin_df[col])
-        if f"{col}_2" in colin_df:
-            colin_df.drop(columns=[f"{col}_2"], inplace=True)
-    
+
     # Discard rows with apparent_mag_2500_err <= 0
     #colin_df = colin_df[colin_df['apparent_mag_2500_err'] > 0].reset_index(drop=True)
     
     # Fill apparent_mag_2500_err == 0 with mean of nonzero errors
-    mean_err = colin_df.loc[colin_df['apparent_mag_2500_err'] > 0, 'apparent_mag_2500_err'].mean()
-    colin_df.loc[colin_df['apparent_mag_2500_err'] == 0, 'apparent_mag_2500_err'] = mean_err
+    mean_err = df_spectra.loc[df_spectra['apparent_mag_2500_err'] > 0, 'apparent_mag_2500_err'].mean()
+    df_spectra.loc[df_spectra['apparent_mag_2500_err'] == 0, 'apparent_mag_2500_err'] = mean_err
 
-    print("Length of colin_df:", len(colin_df))
-    print("Number with apparent_mag_2500 > 0:", np.sum(colin_df['apparent_mag_2500'] > 0))
+    print("Length of colin_df:", len(df_spectra))
+    print("Number with apparent_mag_2500 > 0:", np.sum(df_spectra['apparent_mag_2500'] > 0))
     # Merge on SDSS_NAME, bring in apparent_mag_2500
-    merged = df.merge(colin_df, on='object_id', how='left', suffixes=('', '_colin'))
+    merged = df.merge(df_spectra, on='object_id', how='left', suffixes=('', '_spectralfit'))
     print("Length of merged DataFrame:", len(merged))
-    missing_ids = set(df['object_id']) - set(colin_df['object_id'])
+    missing_ids = set(df['object_id']) - set(df_spectra['object_id'])
     print("object_id not in merged:", list(missing_ids))
     for col in fields.keys():
         df[col] = merged[col]
@@ -405,7 +391,7 @@ def populate_chi_sq_from_csv(df, csv_path="data/aug4_sample_chisqg10_ebv005sn3.c
     df['chi_sq_all'] = merged['chi_sq_all']
     return df
 
-def load_quasar_data(file_path, populate_sdss=False, apply_cut=True):
+def load_agn_data(file_path, populate_sdss=False, apply_cut=True, spectra_fit_csv=None):
     quasar_list = read_quasars_from_hdf5(file_path)
     print("Number of quasars loaded:", len(quasar_list))
 
@@ -420,27 +406,43 @@ def load_quasar_data(file_path, populate_sdss=False, apply_cut=True):
             populate_sdss_fields(quasar_list)
             write_hdf5_file(quasar_list, file_path)
             break
-    bands = ['u', 'g', 'r', 'i', 'z']
+        
+    #bands = ['u', 'g', 'r', 'i', 'z']
+    if len(quasar_list[0]['mags_means']) == 5:
+        bands = ['u', 'g', 'r', 'i', 'z']
+    elif len(quasar_list[0]['mags_means']) == 3:
+        bands = ['g', 'r', 'i']
+    else:
+        raise ValueError("Unexpected number of bands in mags_means")
+    
     for q in quasar_list:
-        if 'mags_means' in q:
-            if 'clean_bands' in q.keys():
-                clean_bands = q['clean_bands']
-            else:
-                clean_bands = bands
-            for i, b in enumerate(clean_bands):
-                q[f'mags_mean_{b}'] = q['mags_means'][i]
+        if 'clean_bands' in q:
+            bands = q['clean_bands']
+        elif len(q['mags_means']) == 5:
+            bands = ['u', 'g', 'r', 'i', 'z']
+        elif len(q['mags_means']) == 3:
+            bands = ['g', 'r', 'i']
+        else:
+            raise ValueError("No clean bands and unexpected number of bands in mags_means")
+
+        for i, b in enumerate(bands):
+            q[f'mags_mean_{b}'] = q['mags_means'][i]
 
         # del q['mags_means']
 
     df = pd.DataFrame(quasar_list)
 
     
-    #df = populate_chi_sq_from_csv(df)
-    if 'alpha_lambda' in df.columns:
-        df['alpha_nu'] = -df['alpha_lambda'] - 2
-        df['alpha_nu_err'] = df['alpha_lambda_err']
-
-    #df = compute_apparent_mag_2500_colin(df)
+    if spectra_fit_csv is not None:
+        print("Populating spectra fit data from:", spectra_fit_csv)
+        df = populate_spectra_fit(df, spectra_fit_csv)
+    else:
+        print("spectra_fit_csv not provided, assuming alpha_lambda is in agn h5 file")
+        if 'alpha_lambda' not in df.columns:
+            raise ValueError("spectra_fit_csv must be provided if alpha_lambda not in agn h5 file")
+    
+    df['alpha_nu'] = -df['alpha_lambda'] - 2
+    df['alpha_nu_err'] = df['alpha_lambda_err']
 
     num_quasars_z_0_1_before = len(df[(df['z'] > 0) & (df['z'] <= 1.0)])
     num_quasars_z_gt_3_before = len(df[df['z'] > 3])
@@ -465,9 +467,12 @@ def load_quasar_data(file_path, populate_sdss=False, apply_cut=True):
     
     # Exclude objects whose object_id is in an exclusion list/array (if provided)
     # these objects are all part of job48
-    exclusion_ids = ['1395668', '1405091', '1408386', '1424501', '1430988',
-                     '1443851', '1447424', '1451560', '1452213', '1464246']
-    mask_exclude = ~df['object_id'].astype(str).isin(exclusion_ids)
+    exclusion_object_ids = []
+    mask_exclude = ~df['object_id'].astype(str).isin(exclusion_object_ids)
+    exclusion_sdss_names = [
+        '221120.38+010905.6', # removed because wrong redshift
+                            ]
+    mask_exclude = ~df['sdss_name'].astype(str).isin(exclusion_sdss_names)
     print(f"Excluding {np.sum(~mask_exclude)} objects by object_id exclusion list")
     df = df[mask_exclude].reset_index(drop=True)
     # Define cuts as (column, lower_limit, upper_limit)
@@ -476,7 +481,7 @@ def load_quasar_data(file_path, populate_sdss=False, apply_cut=True):
         #('z', None, 3.0),
         ('log_tau_UV_RF', 1.5, None),
         #('alpha_lambda', None, 0),
-        ('redchi', None, 10),
+        ('redchi', None, 5),
         ('apparent_mag_2500', 16, 26),
         ('apparent_mag_i', 15, 26)
         #('apparent_mag_i', 15, 25)
@@ -517,14 +522,6 @@ def load_quasar_data(file_path, populate_sdss=False, apply_cut=True):
     print("Number of quasars with z > 3:", num_quasars_z_gt_3)
     print("Final number of quasars:", len(df))
     return df
-
-def load_agn_data(file_path, populate_sdss=False, apply_cut=True):
-    print("Loading quasar data...")
-    #df_agn = load_quasar_data("data/may12_objs_tauwavelength_taublr_redbands_ds4_merged.h5")
-    df_agn = load_quasar_data(file_path=file_path, populate_sdss=populate_sdss, apply_cut=apply_cut)
-    # Return 200 randomly sampled AGNs for speed
-    #df_agn = df_agn.sample(n=500, random_state=42).reset_index(drop=True)
-    return df_agn
 
 def load_pantheon_data():
 
