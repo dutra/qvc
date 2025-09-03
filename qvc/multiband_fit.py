@@ -57,7 +57,7 @@ has_lag = True
 
 universal_params = ['eta_A1_mean', 'eta_A2_mean', 'eta_tau1_mean', 'eta_tau2_mean', 'eta_break', 'lam_s', 'sigma_eta_A1', 'sigma_eta_A2', 'sigma_eta_tau1', 'sigma_eta_tau2', 'log_sigma_eta_A1', 'log_sigma_eta_A2', 'log_sigma_eta_tau1', 'log_sigma_eta_tau2']
 
-def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, latent=False, bwb=True, disable_poly1=False, d_eta=True):
+def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, bwb=True, disable_poly1=False, d_eta=True):
     # Precompute and capture constants in the closure so they are treated as
     # static by JAX/NumPyro. This prevents unnecessary retracing/recompilation
     # when running MCMC, as these values do not change between runs.
@@ -196,7 +196,7 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, latent=F
     return numpyro_joint_model
 
 
-def make_lc(Model, data, bands=['u', 'g', 'r', 'i', 'z']):
+def make_lc(Model, data, bands=['u', 'g', 'r', 'i', 'z'], inject_fake=False):
     times = data['times']
     mags = data['mags']
     magerrs = data['magerrs']
@@ -232,6 +232,19 @@ def make_lc(Model, data, bands=['u', 'g', 'r', 'i', 'z']):
         all_magerrs[sort_idx],
         band_idx[sort_idx]
     )
+
+    # Inject fake DRW
+    if inject_fake:
+        key = jax.random.PRNGKey(0)
+        log_tau0 = jax.random.uniform(key, minval=0.2, maxval=6.0) + np.log10(1 + data['z'])
+        log_sigma0 = jax.random.uniform(key, minval=-1.0, maxval=0.0)
+        all_mags = sample_drw_tinygp(jax.random.PRNGKey(0),
+                                    all_times,
+                                    10**log_tau0,
+                                    10**log_sigma0,
+                                    noise=all_magerrs,
+                                    mean=0.0)[0]
+        all_mags = np.array(all_mags)
 
     # Remove NaNs
     mask = np.isfinite(all_mags) & np.isfinite(all_magerrs) & np.isfinite(all_times)
@@ -328,7 +341,7 @@ if __name__ == '__main__':
     parser.add_argument("--nwarm", type=int, default=500, help="Number of warmup steps for MCMC.")
     parser.add_argument("--nsamp", type=int, default=250, help="Number of samples for MCMC.")
     parser.add_argument("--nchains", type=int, default=-1, help="Number of chains for MCMC.")
-    parser.add_argument("--latent", action="store_true", help="Use latent variable model.")
+    parser.add_argument("--inject_fake", action="store_true", help="Use randomly sampled light curves with no correlation.")
     parser.add_argument("--bwb", action="store_true", help="Use BWB model.")
     parser.add_argument("--d_eta", action="store_true", help="Vary eta for each quasar with prior.")
     parser.add_argument("--choose_N", type=int, default=-1, help="Sample choose_N objects.")
@@ -387,16 +400,13 @@ if __name__ == '__main__':
     #objs = populate_sdss_fields(objs)
 
     Model = MyMultiVarModel
-    if args.latent:
-        print("Using latent model (with BLR contribution)")
-        Model = MyMultiVarModelLatent
 
     # After loading objs
     logging.info("--- Joint fitting ---")
     batch_data = []
     for i, obj in enumerate(objs):
         # Prepare each object's data for the joint model
-        result = make_lc(Model, obj)
+        result = make_lc(Model, obj, inject_fake=args.inject_fake)
         if result is None:
             continue
         obj['i'] = i
@@ -460,8 +470,7 @@ if __name__ == '__main__':
     #     batch_size = len(batch_data)
     #     f_host_value = jnp.zeros(batch_size)
 
-    numpyro_joint_model = build_model(padded_batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, args.latent, args.bwb, args.disable_poly1, args.d_eta)
-
+    numpyro_joint_model = build_model(padded_batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, args.bwb, args.disable_poly1, args.d_eta)
 
     nuts_kernel = NUTS(numpyro_joint_model, init_strategy=init_strategy, dense_mass=True, max_tree_depth=args.max_tree_depth)
     mcmc = MCMC(

@@ -448,3 +448,12 @@ class MyMultiVarModel(MultiVarModel):
         """
         gp, inds = self._build_gp(params)
         return gp.kernel.psd(omega, b, sigma_n2)
+
+def sample_drw_tinygp(key, t, tau, sigma, noise=0.0, mean=0.0):
+    """
+    Draw y ~ GP(mean, k), k(Δt) = sigma^2 * exp(-|Δt|/tau)
+    t: (N,) times (irregular OK); tau>0; sigma is the long-term std (k(0)^{1/2})
+    """
+    k = (sigma**2) * kernels.Exp(scale=tau) 
+    gp = GaussianProcess(k, t, diag=(noise**2), mean=mean)
+    return gp.sample(key, shape=(len(t),))
