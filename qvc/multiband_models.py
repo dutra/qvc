@@ -174,12 +174,18 @@ class ContiBLRQS(qs.Wrapper):
             (1/width)∫_0^{width} h(t - lag - u) du
         ≈ Σ_k γ_k h(t - lag - u_k).
         Returns a vector in the base-state space (same shape as kernel.observation_model).
+        # h_eff(t; lag, width) = ∫ h(t - lag - u) Φ(-(lag+u)) du
         """
         u_k, gamma_k = self._quadrature_nodes_weights(width)
         # Broadcast over taps and sum
         # shape: (K, m) -> (m,)
         def tap(u, g):
-            return g * self.kernel.observation_model(t - lag - u)
+            # Row vector at earlier time
+            C = self.kernel.observation_model(t - lag - u)
+            # Backward transition from t to (t - lag - u)
+            Phi = self.kernel.transition_matrix(0.0, -(lag + u))
+            # Effective row vector acting on x(t)
+            return g * (C @ Phi)
         # vmap over taps
         taps = jax.vmap(tap, in_axes=(0, 0))(u_k, gamma_k)
         return taps.sum(axis=0)
