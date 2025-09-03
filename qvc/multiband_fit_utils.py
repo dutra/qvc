@@ -530,6 +530,11 @@ def process_samples(flat_samples, data, percentiles=[16, 50, 84], bands=['u', 'g
     samples_log_tau_UV_RF = flat_samples["log_tau_drw0"] / np.log(10) - np.log10(1 + data['z']) + log_broken_pl(lambda_ref, lam_s, eta_tau1, eta_tau2, eta_break)
     result['log_tau_UV_RF'], result['log_tau_UV_RF_err'] = sym_percentile(samples_log_tau_UV_RF)
 
+    # Compute covariance between log_sigma_UV and log_tau_UV_RF
+    cov_matrix = np.cov(samples_log_sigma_UV, samples_log_tau_UV_RF)
+    cov_log_sigma_tau = cov_matrix[0, 1]
+    result['cov_log_sigma_UV_log_tau_UV_RF'] = cov_log_sigma_tau
+
     return result
 
 def drw_equiv(amp_cont, tau_drw, bwb_alpha, bwb_beta):
