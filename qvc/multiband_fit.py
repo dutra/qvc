@@ -393,7 +393,7 @@ if __name__ == '__main__':
         objs = load_stone_lcs()
         print(f"Loaded {len(objs)} Stone light curves.")
     else:
-        objs = concat_light_curves(filter_object_ids=filter_object_ids, N=args.N, skip=args.skip, progress_bar=args.progress)
+        objs = concat_light_curves(filter_object_ids=filter_object_ids, progress_bar=args.progress)
     print(f"Loaded {len(objs)} objects from concat_light_curves")
 
     if args.skip:
@@ -443,7 +443,7 @@ if __name__ == '__main__':
         obj['i'] = i
         obj |= result
         # Run bestP for each object
-        lam_rf = jnp.array([lambda_pivot[band] for band in ['u', 'g', 'r', 'i', 'z']]) / (1 + obj['z'])
+        lam_rf = jnp.array([lambda_pivot[band] for band in bands]) / (1 + obj['z'])
 
         batch_data.append({
             'object_id': obj['object_id'],
@@ -576,7 +576,7 @@ if __name__ == '__main__':
                 lam_rf=obj['lam_rf'], z=obj['z']
             )
 
-            save_combined_plot(obj_flat_samples, m, obj['X'], obj['y'], obj['yerr'], obj['band_idx'], result)
+            save_combined_plot(obj_flat_samples, m, obj['X'], obj['y'], obj['yerr'], obj['band_idx'], result, bands=bands)
             plot_broken_power_law(obj_flat_samples, obj)
             #dump_mcmc_diagnostics(mcmc, obj, i, len(batch_data))
             

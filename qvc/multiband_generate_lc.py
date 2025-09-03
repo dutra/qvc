@@ -115,12 +115,7 @@ def cut_light_curve_restframe_window(lc_list, n_days=1800, same_length=False):
 
 
 def concat_light_curves(filter_object_ids=[], progress_bar=False):
-    print(f"DEBUG concat_light_curves args: {N=}, {skip=}, {len(filter_object_ids)=}")
-
-    if skip:
-        filter_object_ids = filter_object_ids[skip:]
-    if N:
-        filter_object_ids = filter_object_ids[:N]
+    print(f"DEBUG concat_light_curves args: {len(filter_object_ids)=}")
 
     filter_object_ids = set(filter_object_ids)
 
@@ -304,7 +299,7 @@ def load_stone_lcs():
         else:
             print(f"Stone DBID {stone_ids[i]} has no match in S82 catalog, removing.")
             del stone_lcs[stone_ids[i]]
-    return stone_lcs.values()
+    return list(stone_lcs.values())
 
 def load_s82_from_hdf5(file_path="s82_objs.h5"):
     s82_objs = []
