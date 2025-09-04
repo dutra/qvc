@@ -332,23 +332,27 @@ def run_single(df_agn, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, cosmo_mo
     print('std debiased residuals:', np.std(debiased_residuals))
     # TODO: Subtract typical mu error in quadrature
 
-    return sampler, flat_samples, model_labels, dmag_corr, logZ, logZerr
+    return sampler, flat_samples, model_labels, dmag_corr, logZ, logZerr, debiased_residuals
 
 
 def run_all(df_agn, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, cosmo_model, speed="production", resume=False, N=None, use_mu_sh0es=False):
-    cosmo_models = ['Flatw0waCDM', 'FlatwCDM']
-    cosmo_models_latex = {'Flatw0waCDM': r'Flat$w_0w_a$CDM', 'FlatwCDM': r'Flat$w$CDM'}
+    #cosmo_models = ['Flatw0waCDM', 'FlatwCDM']
+    cosmo_models = ['Flatw0waCDM', 'FlatwCDM', 'FlatLambdaCDM']
+
+    cosmo_models_latex = {'Flatw0waCDM': r'Flat$w_0w_a$CDM', 'FlatwCDM': r'Flat$w$CDM', 'FlatLambdaCDM': r'Flat$\Lambda$CDM'}
     cosmo_models_dict = {k: {} for k in cosmo_models}
     results_latex = []
     for cosmo_model in cosmo_models:
-        _, samples_joint, _, _, logZ_joint, logZerr_joint = run_single(df_agn, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, cosmo_model=cosmo_model, 
-                                                                       only_sna=False, 
-                                                                       resume=resume, 
-                                                                       speed=speed, N=N)
-        _, samples_sna, _, _, logZ_sna, logZerr_sna = run_single(df_agn, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, cosmo_model=cosmo_model, 
-                                                         only_sna=True, resume=resume, speed=speed, N=N, use_mu_sh0es=use_mu_sh0es)
-        plot_path = f"plots/hubble/{prefix}/{cosmo_model}_{speed}"
-        plot_cosmo_corner(samples_sna, samples_joint, cosmo_model, z_pivot_sna, z_pivot_agn, show=False, plot_path=plot_path)
+        r = run_single(df_agn, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, 
+                       cosmo_model=cosmo_model, only_sna=False, 
+                       resume=resume, speed=speed, N=N)
+        _, samples_joint, _, _, logZ_joint, logZerr_joint, debiased_residuals = r
+        r = run_single(df_agn, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, 
+                       cosmo_model=cosmo_model, only_sna=True, 
+                       resume=resume, speed=speed, N=N, use_mu_sh0es=use_mu_sh0es)
+        _, samples_sna, _, _, logZ_sna, logZerr_sna = r
+        
+        plot_cosmo_corner(samples_sna, samples_joint, cosmo_model, z_pivot_sna, z_pivot_agn, show=False, plot_path=f"plots/hubble/{prefix}")
 
         cosmo_models_dict[cosmo_model]['logZ'] = logZ_joint
         cosmo_models_dict[cosmo_model]['logZerr'] = logZerr_joint

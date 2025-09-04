@@ -205,7 +205,7 @@ def plot_cosmo_corner(
             w0 = wp - (1.0 - a_p) * wa
             Y = np.column_stack([X[:, i_H0], X[:, i_Om0], w0, wa])
             lab_latex = [r"$H_0$", r"$\Omega_m$", r"$w_0$", r"$w_a$"]
-        if cosmo_model == "Flatw0waCDM":
+        elif cosmo_model == "Flatw0waCDM":
             i_w0 = _find(labels, "w0", "w_0")
             i_wa = _find(labels, "wa", "w_a")
             w0, wa = X[:, i_w0], X[:, i_wa]
@@ -215,6 +215,9 @@ def plot_cosmo_corner(
             i_w0 = _find(labels, "w0", "w_0", "w")
             Y = np.column_stack([X[:, i_H0], X[:, i_Om0], X[:, i_w0]])
             lab_latex = [r"$H_0$", r"$\Omega_m$", r"$w_0$"]
+        elif cosmo_model == 'FlatLambdaCDM':
+            Y = np.column_stack([X[:, i_H0], X[:, i_Om0]])
+            lab_latex = [r"$H_0$", r"$\Omega_m$"]
         else:
             raise ValueError(f"Unsupported cosmo_model '{cosmo_model}' for this plot.")
         return Y, lab_latex
@@ -594,7 +597,8 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
             log_tau_UV_RF = float(np.median(df_agn['log_tau_UV_RF'].values)) * np.ones_like(z_grid),
             log_tau_UV_RF_err = float(np.median(df_agn['log_tau_UV_RF_err'].values)) * np.ones_like(z_grid),
             alpha_nu     = float(np.median(df_agn['alpha_nu'].values)) * np.ones_like(z_grid),
-            alpha_nu_err = float(np.median(df_agn['alpha_nu_err'].values)) * np.ones_like(z_grid)
+            alpha_nu_err = float(np.median(df_agn['alpha_nu_err'].values)) * np.ones_like(z_grid),
+            cov_log_sigma_UV_log_tau_UV_RF = float(np.median(df_agn['cov_log_sigma_UV_log_tau_UV_RF'].values)) * np.ones_like(z_grid),
         )
         agn_obs_arr, agn_err_arr, agn_pivot_arr = agn_model_pack_obs(agn_obs_med)
 
@@ -1040,6 +1044,15 @@ def plot_full_residuals(df_agn, residuals, flat_samples, cosmo_model, z_pivot_ag
         'eta_A1', 'eta_A2', 'eta_tau1', 'eta_tau2'
     ]) if col in df_agn.columns]
 
+    keys_masks = {
+        'f_host_5100': (0, np.inf),
+        'f_host_2500': (0, np.inf),
+        'f_host_4200': (0, 2),
+        'log_lbol': (1, np.inf),
+    }
+
+    keys_yx_line = ['MY_M_2500', 'apparent_mag_2500']
+
     n_keys = len(keys)
     n_cols = 4
     n_rows = math.ceil(n_keys / n_cols)
@@ -1058,18 +1071,15 @@ def plot_full_residuals(df_agn, residuals, flat_samples, cosmo_model, z_pivot_ag
                 mask = df_agn[key] > -1e9
             else:
                 mask = np.ones(len(df_agn), dtype=bool)
-            if key == 'f_host_5100':
-                mask &= df_agn[key] > 0
-            if key == 'f_host_2500':
-                mask &= df_agn[key] > 0
-            if key == 'f_host_4200':
-                mask &= df_agn[key].between(0, 2)
-            if key == 'log_lbol':
-                mask &= df_agn[key] > 1
+            if key in keys_masks:
+                low, high = keys_masks[key]
+                mask &= df_agn[key].between(low, high)
             y = df_agn.loc[mask, key]
             if np.issubdtype(y.dtype, np.number) and len(y) == np.sum(mask):
                 sc = ax.scatter(y, residuals[mask], c=df_agn.loc[mask, 'z'], cmap='viridis', s=10, alpha=0.5)
                 scatters.append(sc)
+                if key in keys_yx_line:
+                    ax.plot([np.nanmin(y), np.nanmax(y)], [np.nanmin(y)-np.nanmean(y), np.nanmax(y)-np.nanmean(y)], color='red', linestyle='--', lw=1)
                 ax.axhline(0, color='red', linestyle='--', lw=1)
                 ax.set_xlabel(key)
                 ax.set_ylabel('Residuals')
