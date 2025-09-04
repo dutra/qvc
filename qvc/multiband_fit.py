@@ -60,7 +60,8 @@ has_lag = True
 
 universal_params = ['eta_A1_mean', 'eta_A2_mean', 'eta_tau1_mean', 'eta_tau2_mean', 'eta_break', 'lam_s', 'sigma_eta_A1', 'sigma_eta_A2', 'sigma_eta_tau1', 'sigma_eta_tau2', 'log_sigma_eta_A1', 'log_sigma_eta_A2', 'log_sigma_eta_tau1', 'log_sigma_eta_tau2']
 
-def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_fake_in, log_sigma_fake_in, bwb=True, disable_poly1=False, d_eta=True):
+def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_fake_in, log_sigma_fake_in, 
+                bwb=True, disable_poly1=False, d_eta=True, disable_lag_blr=False):
     # Precompute and capture constants in the closure so they are treated as
     # static by JAX/NumPyro. This prevents unnecessary retracing/recompilation
     # when running MCMC, as these values do not change between runs.
@@ -150,9 +151,13 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_
                 mean = numpyro.sample("mean", dist.Normal(jnp.full(nBands, 0.0), 0.2))
 
                 # BLR amplitudes and lags
-                log_amp_delta_blr = numpyro.sample("log_amp_delta_blr", dist.Normal(jnp.full(nBands, -1.0), 1.0))
+                if disable_lag_blr:
+                    log_amp_delta_blr = numpyro.deterministic("log_amp_delta_blr", jnp.full((batch_size, nBands), -1e9))
+                else:
+                    log_amp_delta_blr = numpyro.sample("log_amp_delta_blr", dist.Normal(jnp.full(nBands, -1.0), 1.0))
+
                 #log_lag_blr = numpyro.sample("log_lag_blr", dist.Normal(log_lag_blr_c[..., None], 3.0))
-                log_lag_blr = numpyro.sample("log_lag_blr", dist.Uniform(2.3*0.2, 2.3*4.0))
+
                 width_blr = numpyro.sample("width_blr", dist.TruncatedNormal(0.2 * jnp.exp(log_tau_drw0_c[..., None]), 20.0, low=10.0))
                 width_cont = numpyro.sample("width_cont", dist.TruncatedNormal(0.2 * jnp.exp(log_tau_drw0_c[..., None]), 20.0, low=10.0))
                 #width_blr = numpyro.deterministic("width_blr", 0.2 * jnp.exp(log_tau_drw0[..., None]))
@@ -369,6 +374,7 @@ if __name__ == '__main__':
     parser.add_argument('--exact_same_length', action='store_true', help="Cut light curves to exact same rest-frame length.")
     parser.add_argument("--alpha_lam_csv", type=str, default=None, help="Path to CSV file containing alpha_lam values per object.")
     parser.add_argument("--load_stone_lcs", action="store_true", default=False, help="Load Stone light curves instead of default.")
+
     args = parser.parse_args()
     print("Args: ", args)
 
@@ -409,6 +415,20 @@ if __name__ == '__main__':
         objs = cut_light_curve_restframe_window(objs, n_days=args.rf_length_cut, same_length=args.exact_same_length)
         print(f"After restframe cut, {len(objs)} objects remain.")
     
+    # # --- Precompute f_host_shen11 prior means ---
+    # if args.f_host_shen11:
+    #     # Host flux empirical relation
+    #     #logl5100 = jnp.array([obj['LOGL5100'] for obj in batch_data])
+    #     logl5100 = jnp.array([obj['LOGLBOL'] - jnp.log10(9.26) for obj in batch_data])
+
+    #     x = logl5100 - 44.0
+    #     f_host = 0.8052 - 1.5502 * x + 0.9121 * jnp.power(x, 2) - 0.1577 * jnp.power(x, 3)
+    #     f_host = jnp.clip(f_host, 0.0, None)
+    #     f_host_value = jnp.where(logl5100 < 45.053, f_host, 0.0)
+    # else:
+    #     batch_size = len(batch_data)
+    #     f_host_value = jnp.zeros(batch_size)
+
     if args.alpha_lam_csv is not None:
         # Load CSV with columns: object_id, alpha_lambda, f_host_5100
         alpha_df = pd.read_csv(args.alpha_lam_csv, dtype={"object_id": str})
@@ -493,21 +513,11 @@ if __name__ == '__main__':
     log_tau_fake = jnp.array([obj['log_tau_fake'] for obj in batch_data])
     log_sigma_fake = jnp.array([obj['log_sigma_fake'] for obj in batch_data])
 
-    # # --- Precompute f_host_shen11 prior means ---
-    # if args.f_host_shen11:
-    #     # Host flux empirical relation
-    #     #logl5100 = jnp.array([obj['LOGL5100'] for obj in batch_data])
-    #     logl5100 = jnp.array([obj['LOGLBOL'] - jnp.log10(9.26) for obj in batch_data])
 
-    #     x = logl5100 - 44.0
-    #     f_host = 0.8052 - 1.5502 * x + 0.9121 * jnp.power(x, 2) - 0.1577 * jnp.power(x, 3)
-    #     f_host = jnp.clip(f_host, 0.0, None)
-    #     f_host_value = jnp.where(logl5100 < 45.053, f_host, 0.0)
-    # else:
-    #     batch_size = len(batch_data)
-    #     f_host_value = jnp.zeros(batch_size)
 
-    numpyro_joint_model = build_model(padded_batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_fake, log_sigma_fake, args.bwb, args.disable_poly1, args.d_eta)
+    numpyro_joint_model = build_model(padded_batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_fake, log_sigma_fake, 
+                                      bwb=args.bwb, disable_poly1=args.disable_poly1, d_eta=args.d_eta,
+                                      disable_lag_blr=args.load_stone_lcs)
 
     nuts_kernel = NUTS(numpyro_joint_model, init_strategy=init_strategy, dense_mass=True, max_tree_depth=args.max_tree_depth)
     mcmc = MCMC(
