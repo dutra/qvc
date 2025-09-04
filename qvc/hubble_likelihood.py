@@ -51,23 +51,48 @@ def empty_blob(N_obj):
 
 def log_likelihood_pantheon_cephdist(params, pantheon_data, _sna_L, _sna_Lower, _sna_LogdetCov,
                                      cosmo, use_full_cov):
-    # Start with cosmological prediction
-    sn_mu_model = cosmo.distmod(pantheon_data['zHD']).value
+    """
+    Uses only SNe with (zHD > 0.01) OR IS_CALIBRATOR == True.
+    For calibrators, replaces cosmological μ with Cepheid host distances.
+    """
+    # --- selection mask ---
+    # also applied when loading pantheon data in hubble_utils.py
+    is_calib_bool = np.asarray(pantheon_data['IS_CALIBRATOR'], dtype=bool)
+    mask = (pantheon_data['zHD'] > 0.01) | is_calib_bool
 
-    # Apply Cepheid distances for calibrator hosts
-    mask_calib = pantheon_data['IS_CALIBRATOR'] == 1
-    sn_mu_model[mask_calib] = pantheon_data['CEPH_DIST'][mask_calib]
+    # --- subset data ---
+    zHD = pantheon_data['zHD'][mask]
+    m_b_corr = pantheon_data['m_b_corr'][mask]
+    is_calib_sel = is_calib_bool[mask]
 
-    # Residuals: observed standardized SN magnitude minus theoretical prediction
-    res_snia = pantheon_data['m_b_corr'] - (sn_mu_model + params['M0_sn'])
-    # Compute main SN likelihood (with or without covariance)
+    # --- cosmological / Cepheid μ ---
+    sn_mu_model = cosmo.distmod(zHD).value
+    if np.any(is_calib_sel):
+        sn_mu_model[is_calib_sel] = pantheon_data['CEPH_DIST'][mask][is_calib_sel]
+
+    # --- residuals ---
+    res_snia = m_b_corr - (sn_mu_model + params['M0_sn'])
+
+    # --- likelihood ---
     if use_full_cov:
+        # Expect Cholesky & logdet for the *masked* subset
+        n = res_snia.size
+        if _sna_L is None or _sna_LogdetCov is None:
+            raise ValueError("Full-cov mode requires _sna_L and _sna_LogdetCov for the masked subset.")
+        # basic dimension check to catch mismatches early
+        if _sna_L.shape[0] != n or _sna_L.shape[1] != n:
+            raise ValueError(
+                f"Covariance Cholesky shape {_sna_L.shape} does not match masked data length {n}. "
+                "Pass the covariance for the same mask."
+            )
         quad_form = res_snia.T @ cho_solve((_sna_L, _sna_Lower), res_snia)
-        ll_snia = -0.5 * quad_form - 0.5 * _sna_LogdetCov - 0.5 * len(res_snia) * np.log(2 * np.pi)
+        ll_snia = -0.5 * quad_form - 0.5 * _sna_LogdetCov - 0.5 * n * np.log(2 * np.pi)
     else:
-        sigma = pantheon_data['MU_SH0ES_ERR_DIAG']
+        sigma = pantheon_data['MU_SH0ES_ERR_DIAG'][mask]
         ll_snia = np.sum(stats.norm.logpdf(res_snia, scale=sigma))
+
     return ll_snia
+
 
 def log_likelihood(theta, *, agn_data, pantheon_data, 
                    _sna_L, _sna_Lower, _sna_LogdetCov,

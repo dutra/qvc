@@ -440,9 +440,13 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, spectra_fit_cs
         print("spectra_fit_csv not provided, assuming alpha_lambda is in agn h5 file")
         if 'alpha_lambda' not in df.columns:
             raise ValueError("spectra_fit_csv must be provided if alpha_lambda not in agn h5 file")
-    
     df['alpha_nu'] = -df['alpha_lambda'] - 2
     df['alpha_nu_err'] = df['alpha_lambda_err']
+
+    if 'cov_log_sigma_UV_log_tau_UV_RF' not in df.columns:
+        print("[WARNING] cov_log_sigma_UV_log_tau_UV_RF not in data, setting to 0.0")
+        df['cov_log_sigma_UV_log_tau_UV_RF'] = 0.0
+    
 
     num_quasars_z_0_1_before = len(df[(df['z'] > 0) & (df['z'] <= 1.0)])
     num_quasars_z_gt_3_before = len(df[df['z'] > 3])
@@ -478,7 +482,7 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, spectra_fit_cs
     # Define cuts as (column, lower_limit, upper_limit)
     cuts = [
         #('f_host', None, 0.6),
-        #('z', None, 3.0),
+        #('z', None, 0.5),
         ('log_tau_UV_RF', 1.5, None),
         #('alpha_lambda', None, 0),
         ('redchi', None, 5),
@@ -524,43 +528,60 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, spectra_fit_cs
     return df
 
 def load_pantheon_data():
+    """
+    Load Pantheon+SH0ES data and build the covariance *for the selected subset*:
+      selection = (zHD > 0.01) OR (IS_CALIBRATOR == True)
 
-    # Load Pantheon+ SN metadata
+    Returns:
+        df_pantheon_sel : pandas.DataFrame (filtered to the selection)
+        sna_logdetCov   : float, log|C_sel|
+        sna_L           : ndarray, Cholesky factor of C_sel (lower)
+        sna_lower       : bool (True) for cho_solve
+    """
+
+    # --- Load catalog ---
     print("Loading Pantheon+ supernova data...")
     df_pantheon = pd.read_csv(
-        #"https://raw.githubusercontent.com/PantheonPlusSH0ES/DataRelease/main/Pantheon%2B_Data/4_DISTANCES_AND_COVAR/Pantheon%2BSH0ES.dat",
+        # "https://raw.githubusercontent.com/PantheonPlusSH0ES/DataRelease/main/Pantheon%2B_Data/4_DISTANCES_AND_COVAR/Pantheon%2BSH0ES.dat",
         "data/Pantheon+SH0ES.dat",
         sep=r"\s+"
     )
 
+    # --- Selection mask: use only (zHD > 0.01) OR calibrators ---
+    is_calib = np.asarray(df_pantheon["IS_CALIBRATOR"], dtype=bool)
+    sel_mask = (df_pantheon["zHD"].values > 0.01) | is_calib
+
+    # --- Load full covariance (stat+sys), then subset with the same mask ---
     print("Loading SN covariance matrix...")
     n_sn = len(df_pantheon)
-
-    # Load .cov file with NumPy, skipping the first line (which contains just "1701")
     cov_flat = np.loadtxt(
-        #"https://raw.githubusercontent.com/PantheonPlusSH0ES/DataRelease/main/Pantheon%2B_Data/4_DISTANCES_AND_COVAR/Pantheon%2BSH0ES_STAT%2BSYS.cov",
+        # "https://raw.githubusercontent.com/PantheonPlusSH0ES/DataRelease/main/Pantheon%2B_Data/4_DISTANCES_AND_COVAR/Pantheon%2BSH0ES_STAT%2BSYS.cov",
         "data/Pantheon+SH0ES_STAT+SYS.cov",
         skiprows=1
     )
-
-    # Reshape into square matrix
     cov_matrix = cov_flat.reshape((n_sn, n_sn))
-
-    # Confirm shape is correct
     assert cov_matrix.shape == (n_sn, n_sn), f"Expected ({n_sn},{n_sn}), got {cov_matrix.shape}"
 
-    # Pre-compute Cholesky decomposition and log-determinant for SN likelihood
-    try:
-        sna_L, sna_lower = cho_factor(cov_matrix, lower=True)
-    except np.linalg.LinAlgError:
-        raise ValueError("Covariance matrix is not positive-definite!")
+    # --- Apply the SAME selection to covariance and dataframe ---
+    cov_sel = cov_matrix[sel_mask][:, sel_mask]
+    df_pantheon_sel = df_pantheon.loc[sel_mask].reset_index(drop=True)
 
-    # Compute log-determinant: log|C| = 2 * sum(log(diagonal of Cholesky factor))
+    # --- Cholesky on the selected submatrix ---
+    try:
+        sna_L, sna_lower = cho_factor(cov_sel, lower=True)
+    except np.linalg.LinAlgError:
+        raise ValueError("Selected covariance submatrix is not positive-definite!")
+
+    # log|C| = 2 * sum(log(diag(L))) for lower-triangular L from Cholesky
     sna_logdetCov = 2.0 * np.sum(np.log(np.diag(sna_L)))
 
-    print("Cholesky factorization successful. Data loaded. ")
+    n_sel = cov_sel.shape[0]
+    print(f"Cholesky factorization successful. "
+          f"Selected SNe: {n_sel} / {n_sn} "
+          f"(kept {(sel_mask).sum()}; dropped {n_sn - (sel_mask).sum()}).")
 
-    return df_pantheon, sna_logdetCov, sna_L, sna_lower
+    return df_pantheon_sel, sna_logdetCov, sna_L, sna_lower
+
 
 
 
