@@ -61,7 +61,7 @@ has_lag = True
 universal_params = ['eta_A1_mean', 'eta_A2_mean', 'eta_tau1_mean', 'eta_tau2_mean', 'eta_break', 'lam_s', 'sigma_eta_A1', 'sigma_eta_A2', 'sigma_eta_tau1', 'sigma_eta_tau2', 'log_sigma_eta_A1', 'log_sigma_eta_A2', 'log_sigma_eta_tau1', 'log_sigma_eta_tau2']
 
 def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_fake_in, log_sigma_fake_in, 
-                bwb=True, disable_poly1=False, d_eta=True, disable_lag_blr=False):
+                bwb=True, disable_poly1=False, d_eta=True, disable_lag_blr=False, wide_eta_priors=False, free_eta_break=False):
     # Precompute and capture constants in the closure so they are treated as
     # static by JAX/NumPyro. This prevents unnecessary retracing/recompilation
     # when running MCMC, as these values do not change between runs.
@@ -75,11 +75,20 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_
 
         # Initialize parameters
         # Global "universal" means for eta
-        eta_A1_mean = numpyro.sample("eta_A1_mean", dist.TruncatedNormal(-0.5, 0.2, high=0.0))
-        eta_A2_mean = numpyro.sample("eta_A2_mean", dist.TruncatedNormal(-0.5, 0.2, high=0.0))
-        eta_tau1_mean = numpyro.sample("eta_tau1_mean", dist.TruncatedNormal(-0.5, 0.2))
-        eta_tau2_mean = numpyro.sample("eta_tau2_mean", dist.TruncatedNormal(0.1, 0.2, low=0.0))
-        eta_break = numpyro.deterministic("eta_break", 0.1)
+        if wide_eta_priors:
+            eta_A1_mean = numpyro.sample("eta_A1_mean", dist.TruncatedNormal(-0.5, 1.0, high=0.0))
+            eta_A2_mean = numpyro.sample("eta_A2_mean", dist.TruncatedNormal(-0.5, 1.0, high=0.0))
+            eta_tau1_mean = numpyro.sample("eta_tau1_mean", dist.TruncatedNormal(-0.5, 1.0))
+            eta_tau2_mean = numpyro.sample("eta_tau2_mean", dist.TruncatedNormal(0.1, 1.0, low=0.0))
+        else:
+            eta_A1_mean = numpyro.sample("eta_A1_mean", dist.TruncatedNormal(-0.5, 0.2, high=0.0))
+            eta_A2_mean = numpyro.sample("eta_A2_mean", dist.TruncatedNormal(-0.5, 0.2, high=0.0))
+            eta_tau1_mean = numpyro.sample("eta_tau1_mean", dist.TruncatedNormal(-0.5, 0.2))
+            eta_tau2_mean = numpyro.sample("eta_tau2_mean", dist.TruncatedNormal(0.1, 0.2, low=0.0))
+        if free_eta_break:
+            eta_break = numpyro.sample("eta_break", dist.TruncatedNormal(0.1, 0.1, low=0.0))
+        else:
+            eta_break = numpyro.deterministic("eta_break", 0.1)
         #lam_s = numpyro.sample("lam_s", dist.Normal(2500.0, 100.0)) # Hard to constrain
         lam_s = numpyro.deterministic("lam_s", 2500.0)
 
@@ -375,7 +384,8 @@ if __name__ == '__main__':
     parser.add_argument('--exact_same_length', action='store_true', help="Cut light curves to exact same rest-frame length.")
     parser.add_argument("--alpha_lam_csv", type=str, default=None, help="Path to CSV file containing alpha_lam values per object.")
     parser.add_argument("--load_stone_lcs", action="store_true", default=False, help="Load Stone light curves instead of default.")
-
+    parser.add_argument("--free_eta_break", action="store_true", default=False, help="Allow eta_break to be a free parameter.")
+    parser.add_argument("--wide_eta_priors", action="store_true", default=False, help="Use wide priors for eta parameters.")
     args = parser.parse_args()
     print("Args: ", args)
 
@@ -518,7 +528,8 @@ if __name__ == '__main__':
 
     numpyro_joint_model = build_model(padded_batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_fake, log_sigma_fake, 
                                       bwb=args.bwb, disable_poly1=args.disable_poly1, d_eta=args.d_eta,
-                                      disable_lag_blr=args.load_stone_lcs)
+                                      disable_lag_blr=args.load_stone_lcs, 
+                                      free_eta_break=args.free_eta_break, wide_eta_priors=args.wide_eta_priors)
 
     nuts_kernel = NUTS(numpyro_joint_model, init_strategy=init_strategy, dense_mass=True, max_tree_depth=args.max_tree_depth)
     mcmc = MCMC(
