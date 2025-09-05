@@ -667,6 +667,7 @@ def main():
                 print(f"  - {i}:{name} -> {msg}")
         return  # Exit after download-only path
 
+    os.makedirs('results/pysqo_fits', exist_ok=True)
     # 3) Otherwise, proceed to QSOFit processing (expects cached spectra)
     create_qsopar_fits(overwrite=True)
     # Build worker records so we don't try to pickle big astropy tables
