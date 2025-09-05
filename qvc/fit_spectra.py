@@ -607,6 +607,7 @@ def parse_args():
                    help="Max match separation in arcsec.")
     p.add_argument("--N", type=int, default=None,
                    help="Optional limit on number of rows from input CSV to consider before matching.")
+    p.add_argument("--skip", type=int, default=None, help="Optional number of rows to skip at start of input CSV.")
     p.add_argument("--download", action="store_true",
                    help="If set, download (and cache) all matched spectra and exit.")
     # p.add_argument("--nproc", type=int, default=max(1, (os.cpu_count() or 2) - 1),
@@ -633,6 +634,7 @@ def main():
         filter_ids = set(str(oid).strip() for oid in filter_df['object_id'].values if str(oid).strip())
         sample_df = sample_df[sample_df['object_id'].astype(str).str.strip().isin(filter_ids)]
         print(f"[INFO] After filtering with {args.filter_csv}, {len(sample_df)} rows remain")
+    sample_df = sample_df[args.skip:] if args.skip is not None else sample_df
     sample_df = sample_df[:args.N] if args.N is not None else sample_df
     sample_df['object_id'] = sample_df['object_id'].astype(str).str.strip()
     #quasar_dict_list = read_quasars_from_hdf5(args.fpath_in, N=args.N)
