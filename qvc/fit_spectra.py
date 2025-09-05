@@ -9,7 +9,7 @@ try:
     num_cores = int(num_cores)
 except ValueError:
     print(f"Invalid NUM_CORES value '{num_cores}', ignoring.")
-    num_cores = os.cpu_count()-2
+    num_cores = os.cpu_count()
 
 if multiprocessing.current_process().name == "MainProcess":
     print(f"CPU Num Cores: {num_cores}")
@@ -564,7 +564,7 @@ def run_qsofit_record(rec, npca_qso, cache_dir="data/spectra_cache", path_ex="da
             K_i = 2.5*(alpha_lambda + 1.0)*np.log10(1.0 + z)
             apparent_mag_i_rest = apparent_mag_i_obs - K_i
         except Exception as e:
-            print(f"[ERROR] apparent_mag_i_rest {rec.get('object_id','?')} ({rec.get('sdss_name','?')}): {e}")
+            print(f"[ERROR] apparent_mag_i_rest {rec.get('object_id','?')} ({rec.get('sdss_name','?')}) (z {rec.get('z','?')}): {e}")
             apparent_mag_i_rest, apparent_mag_i_obs = -1e9, -1e9
             delta_m_avg = -1e9
             delta_mags = np.array([])
@@ -588,7 +588,7 @@ def run_qsofit_record(rec, npca_qso, cache_dir="data/spectra_cache", path_ex="da
 
     except Exception as e:
         # swallow errors per object; keep defaults
-        print(f"[ERROR] Object {rec.get('object_id','?')} ({rec.get('sdss_name','?')}): {e}")
+        print(f"[ERROR] z {rec.get('z','?')} Object {rec.get('object_id','?')} ({rec.get('sdss_name','?')}): {e}")
         return result
 
 # --------------------------- CLI & Main ---------------------------------
@@ -676,7 +676,8 @@ def main():
     for i in range(len(data_cat)):
         row = data_cat[i]
         z = float(row['Z_SYS'])
-        dropped_bands = bands_bluer_than_lyman_alpha(z)
+        #dropped_bands = bands_bluer_than_lyman_alpha(z)
+        dropped_bands = row['dropped_bands']
         # TEMPORARY: skip objects without any dropped bands
         # if len(dropped_bands) == 0:
         #     continue 
