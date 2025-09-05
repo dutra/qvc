@@ -331,7 +331,9 @@ def plot_cosmo_corner(
                         wspace=0.05, hspace=0.05)
 
     os.makedirs(plot_path, exist_ok=True)
+
     fig.savefig(os.path.join(plot_path, f"cosmo_corner_{cosmo_model}.png"), bbox_inches="tight", dpi=150)
+    fig.savefig(os.path.join(plot_path, f"cosmo_corner_{cosmo_model}.pdf"), bbox_inches="tight", dpi=600)
     if show:
         plt.show()
     plt.close(fig)
@@ -339,7 +341,8 @@ def plot_cosmo_corner(
 
 def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plot_path="plots/hubble/",
                 show_binned_agn=True,
-                debias=False, dms=None, show=False, completeness=True, show_true=False, verbose=True):
+                debias=False, dms=None, show=False, completeness=True, show_true=False, verbose=True,
+                cosmo_model_residual=None):
     """
     Hubble diagram (Pantheon+-style):
       • Model line + 68% band in magenta
@@ -348,24 +351,28 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
       • AGN points + error bars (solid if 0.44<=z<=3.16 else open)
       • Main: AGN binned in linear z
       • Inset: AGN binned in log z (matches inset x-scale)
+    If residuals_2 is provided, the residuals panel overlays a solid line of (residuals - residuals_2).
     Returns: residuals, mu_pred_median, mu_pred_std
     """
     import os
     import numpy as np
     import matplotlib.pyplot as plt
     from mpl_toolkits.axes_grid1.inset_locator import inset_axes
-    from astropy.cosmology import FlatLambdaCDM, FlatwCDM
+    from astropy.cosmology import FlatLambdaCDM, FlatwCDM, Flatw0waCDM
+    from scipy.ndimage import uniform_filter1d
     # Ensure your project provides these:
     # from your_module import FlatwpwaCDM, M_model_agn, M_model_agn_err, get_model_params, make_dm_function
+    # (FlatwpwaCDM expected if using 'FlatwpwaCDM')
 
     # --- Labels ---
     if   cosmo_model == 'FlatwCDM':      label = r"Flat$w$CDM model"
     elif cosmo_model == 'Flatw0waCDM':   label = r"Flat$w_0w_a$CDM model"
     elif cosmo_model == 'FlatLambdaCDM': label = r"Flat$\Lambda$CDM model"
+    elif cosmo_model == 'FlatwpwaCDM':   label = r"Flat$w_p\!-\!w_a$CDM model"
     else:
         raise ValueError("Invalid cosmology model.")
 
-    # --- Thinning for speed ---
+    # --- Thinning for speed (cap to ~500 samples) ---
     n_samples = int(flat_samples.shape[0])
     thin_factor = max(1, n_samples // 500)
     flat_samples = flat_samples[::thin_factor]
@@ -376,39 +383,36 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     _, model_labels, _ = get_model_params(cosmo_model)
     param_indices = {name: model_labels.index(name) for name in model_labels}
 
-    # --- Cosmology band on grid ---
-    if cosmo_model == 'FlatwCDM':
-        mu_models = np.array([
-            FlatwCDM(H0=s[param_indices['H0']], Om0=s[param_indices['Om0']], w0=s[param_indices['w0']]).distmod(z_grid).value
-            for s in flat_samples
-        ])
-    elif cosmo_model == 'FlatwpwaCDM':
-        mu_models = np.array([
-            FlatwpwaCDM(H0=s[param_indices['H0']], Om0=s[param_indices['Om0']],
-                        wp=s[param_indices['wp']], wa=s[param_indices['wa']], zp=z_pivot_agn
-                        ).distmod(z_grid).value
-            for s in flat_samples
-        ])
-    elif cosmo_model == 'Flatw0waCDM':
-        mu_models = np.array([
-            Flatw0waCDM(H0=s[param_indices['H0']], Om0=s[param_indices['Om0']],
-                        w0=s[param_indices['w0']], wa=s[param_indices['wa']]
-                        ).distmod(z_grid).value
-            for s in flat_samples
-        ])
-    else:  # FlatLambdaCDM
-        mu_models = np.array([
-            FlatLambdaCDM(H0=s[param_indices['H0']], Om0=s[param_indices['Om0']]).distmod(z_grid).value
-            for s in flat_samples
-        ])
+    # --- Small helper: μ_model(z | params) ---
+    def _mu_model(model_name, params_dict, z, zp):
+        if model_name == 'FlatwCDM':
+            return FlatwCDM(H0=params_dict['H0'], Om0=params_dict['Om0'], w0=params_dict['w0']).distmod(z).value
+        elif model_name == 'Flatw0waCDM':
+            return Flatw0waCDM(H0=params_dict['H0'], Om0=params_dict['Om0'],
+                               w0=params_dict['w0'], wa=params_dict['wa']).distmod(z).value
+        elif model_name == 'FlatLambdaCDM':
+            return FlatLambdaCDM(H0=params_dict['H0'], Om0=params_dict['Om0']).distmod(z).value
+        elif model_name == 'FlatwpwaCDM':
+            return FlatwpwaCDM(H0=params_dict['H0'], Om0=params_dict['Om0'],
+                               wp=params_dict['wp'], wa=params_dict['wa'], zp=zp).distmod(z).value
+        else:
+            raise ValueError("Invalid cosmology model for _mu_model().")
 
+    # --- Cosmology band on grid from posterior samples ---
+    mu_models = np.array([
+        _mu_model(
+            cosmo_model,
+            {k: s[param_indices[k]] for k in model_labels},
+            z_grid, z_pivot_agn
+        )
+        for s in flat_samples
+    ])
     mu_model_16th   = np.percentile(mu_models, 16, axis=0)
     mu_model_median = np.percentile(mu_models, 50, axis=0)
     mu_model_84th   = np.percentile(mu_models, 84, axis=0)
 
-    # Median params for uncertainties
-    results = {key: np.median(flat_samples[:, i])
-               for i, key in enumerate(model_labels)}
+    # Median params (also used later)
+    results = {key: np.median(flat_samples[:, i]) for i, key in enumerate(model_labels)}
 
     # --- Predicted AGN μ per object ---
     m_obs = df_agn['apparent_mag_2500'].values
@@ -422,7 +426,6 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
         predicted_M2500_err = M_model_agn_err(agn_params_arr, agn_obs_arr, agn_err_arr, agn_pivot_arr)
         mu_pred_samples.append(m_obs - predicted_M2500)
     mu_pred_samples = np.array(mu_pred_samples)
-        
 
     # De-bias (assumes your make_dm_function clips to grid, no extrapolation)
     if debias:
@@ -437,7 +440,6 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     # Per-object uncertainty (for yerr)
     agn_params_arr = agn_model_pack_params(results)
     agn_obs_arr, agn_err_arr, agn_pivot_arr = agn_model_pack_obs(df_agn)
-
     predicted_M2500 = M_model_agn(agn_params_arr, agn_obs_arr, agn_pivot_arr)
     predicted_M2500_err = M_model_agn_err(agn_params_arr, agn_obs_arr, agn_err_arr, agn_pivot_arr)
 
@@ -447,7 +449,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
         predicted_M2500_err**2
     )
 
-    # Residuals (for outlier print only)
+    # Residuals (vs. median μ_model)
     mu_interp = np.interp(df_agn["z"].values, z_grid, mu_model_median)
     residuals = mu_pred_median - mu_interp
 
@@ -473,7 +475,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     # Weights for AGN
     w = 1.0 / np.square(mu_pred_std)
 
-    # Linear-z bins for MAIN panel
+    # Linear-z bins for MAIN & RESIDUALS panel
     dz   = 0.2
     zmax_main = 3.8
     bins_linear = np.arange(0.05, zmax_main + dz + 1e-9, dz)
@@ -481,13 +483,17 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
         df_agn["z"].values, mu_pred_median, w, bins_linear, min_count=3, center='weighted'
     )
 
+    # NEW: binned residuals (linear-z), used in residual panel
+    z_res_lin, resid_lin_mean, resid_lin_sem = _weighted_bin_stats(
+        df_agn["z"].values, residuals, w, bins_linear, min_count=3, center='weighted'
+    )
+
     # Log-z bins for INSET (match inset xscale='log')
-    zmin_pos = df_agn["z"].values[df_agn["z"].values > 0]
-    zmin_inset = max(0.02, float(np.min(zmin_pos))) if zmin_pos.size else 0.02
+    zpos = df_agn["z"].values[df_agn["z"].values > 0]
+    zmin_inset = max(0.02, float(np.min(zpos))) if zpos.size else 0.02
     zmax_inset = 3.8
-    bins_per_decade = 6  # tune resolution here
+    bins_per_decade = 6
     decades = np.log10(zmax_inset) - np.log10(zmin_inset)
-    
     n_bins_log = max(1, int(np.ceil(decades * bins_per_decade)))
     bins_log = np.logspace(np.log10(zmin_inset), np.log10(zmax_inset), n_bins_log + 1)
     z_log, mu_log_mean, mu_log_sem = _weighted_bin_stats(
@@ -495,16 +501,19 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     )
 
     # ======== Plot ========
-    fig, ax = plt.subplots(1, 1, figsize=(9, 6))
+    fig = plt.figure(figsize=(9, 7))
+    gs = fig.add_gridspec(nrows=2, ncols=1, height_ratios=[3, 1], hspace=0.06)
+    ax = fig.add_subplot(gs[0])
     ax.set_ylim(26, 51)
     ax.set_xlim(-0.2, 4.2)
     inset_ax = inset_axes(ax, width="40%", height="40%", loc="lower right", borderpad=1.5)
+    ax_resid = fig.add_subplot(gs[1], sharex=ax)
 
     # Solid vs open AGN markers by z (both main and inset)
     mask_in  = df_agn["z"].between(0.44, 3.16)
     mask_out = ~mask_in
 
-    # ---------- Inset (log-z) with ALL elements ----------
+    # ---------- Inset (log-z) ----------
     inset_ax.set_xscale('log')
 
     # AGN (inside)
@@ -542,7 +551,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     inset_ax.plot(z_grid, mu_model_median, color="m", lw=1.4, alpha=1.0, zorder=5, label=label)
     inset_ax.fill_between(z_grid, mu_model_16th, mu_model_84th, color="m", alpha=0.22, zorder=4)
 
-    # Concordance
+    # Concordance (compute once)
     mu_conc = FlatLambdaCDM(H0=70, Om0=0.3).distmod(z_grid).value
     inset_ax.plot(z_grid, mu_conc, color="#F0B000", lw=1.2, ls='--', alpha=0.9, label=r"Concordance $\Lambda$CDM")
 
@@ -552,7 +561,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     inset_ax.set_ylabel(r"$\mu$ (mag)", fontsize=12)
     inset_ax.tick_params(axis='both', which='major', labelsize=10)
 
-    # ---------- Main plot with ALL elements ----------
+    # ---------- Main plot ----------
     # AGN (inside)
     ax.errorbar(
         df_agn["z"][mask_in], mu_pred_median[mask_in], yerr=mu_pred_std[mask_in],
@@ -612,8 +621,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
         ax.fill_between(z_grid, mu_lim, 60, color="red", alpha=0.15, zorder=2, label="< 50% complete")
         inset_ax.fill_between(z_grid, mu_lim, 60, color="red", alpha=0.12, zorder=2, label="< 50% complete")
 
-    # Concordance ΛCDM
-    mu_conc = FlatLambdaCDM(H0=70, Om0=0.3).distmod(z_grid).value
+    # Concordance ΛCDM (reuse computed)
     ax.plot(z_grid, mu_conc, color="#F0B000", lw=1.6, ls='--', alpha=0.9, label=r"Concordance $\Lambda$CDM")
 
     # Labels, ticks, legend
@@ -621,17 +629,59 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     ax.set_xlabel(r"$z$")
     ax.legend(frameon=False, loc="lower center", bbox_to_anchor=(0.22, 0.06), fontsize=12)
 
-    for axi in (ax, inset_ax):
+    # ---------- Residuals panel ----------
+    # AGN residuals (inside)
+    ax_resid.plot(
+        df_agn["z"][mask_in], residuals[mask_in],
+        'o', markersize=3, mfc="black", mec="none", alpha=0.3, zorder=0
+    )
+    # AGN residuals (outside)
+    ax_resid.plot(
+        df_agn["z"][mask_out], residuals[mask_out],
+        'o', markersize=3, mfc='none', mec="k", alpha=0.3, zorder=0
+    )
+    # Zero line
+    ax_resid.axhline(0.0, color="#999999", lw=1.0, ls='--', zorder=1)
+
+    # NEW: binned residuals in red (points + thin connecting line)
+    if z_res_lin.size:
+        ax_resid.errorbar(
+            z_res_lin, resid_lin_mean, yerr=resid_lin_sem,
+            fmt='o', linestyle='none', markersize=5,
+            mfc='red', mec='none', ecolor='red', elinewidth=2.0, capsize=3.0,
+            alpha=0.98, zorder=15
+        )
+        #ax_resid.plot(z_res_lin, resid_lin_mean, lw=1.2, color='red', alpha=0.9, zorder=14)
+
+    # Optional: line for (residuals - residuals_2) using median params of each model
+    if cosmo_model_residual is not None:
+        z_grid_fine = np.linspace(1e-4, 5.2, 500)
+        cosmo_model_2, flat_samples_2 = cosmo_model_residual
+        _, model_labels_2, _ = get_model_params(cosmo_model_2)
+        results_2 = {key: np.median(flat_samples_2[:, i]) for i, key in enumerate(model_labels_2)}
+
+        mu_model_1 = _mu_model(cosmo_model, results,   z_grid_fine, z_pivot_agn)
+        mu_model_2 = _mu_model(cosmo_model_2, results_2, z_grid_fine, z_pivot_agn)
+        ax_resid.plot(z_grid_fine, mu_model_2 - mu_model_1, lw=2.2, color="m", alpha=0.95)
+
+    ax_resid.set_ylabel(r"$\Delta\mu$ (mag)")
+    ax_resid.set_xlabel(r"$z$")
+    ax_resid.set_ylim(-.5, .5)
+
+    for axi in (ax, inset_ax, ax_resid):
         axi.minorticks_on()
         axi.tick_params(axis='both', which='minor', direction='in', length=4, top=True, right=True, width=2)
         axi.tick_params(axis='both', which='major', direction='in', length=8, top=True, right=True)
 
+    # Hide the main panel's x-axis labels, numbers, and ticks (leave residuals' x-axis intact)
+    ax.set_xlabel("")  # remove main x-axis label
+    ax.tick_params(axis='x', which='both', labelbottom=False, bottom=False, top=False)
+    ax.xaxis.offsetText.set_visible(False)  # hide any scientific-notation offset text
+
     # Save/show
     fig.tight_layout()
     os.makedirs(plot_path, exist_ok=True)
-    filename = f"hubble_diagram.png"
-    if debias:
-        filename = "hubble_diagram_debiased.png"
+    filename = "hubble_diagram_debiased.png" if debias else "hubble_diagram.png"
     plt.savefig(os.path.join(plot_path, filename))
     if show:
         plt.show()
@@ -664,7 +714,6 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
             print(f"\tz: {z:.2f} | object_id: {object_id} | SDSS: {sdss_name} | RA: {ra:.5f} | DEC: {dec:.5f} | Residual: {residuals[idx]:.1f}")
 
     return residuals, mu_pred_median, mu_pred_std
-
 
 
 def plot_predicted_vs_actual_M2500(
@@ -924,8 +973,10 @@ def plot_predicted_vs_actual_M2500(
             ax.label_outer()
 
     os.makedirs(plot_path, exist_ok=True)
-    out_path = os.path.join(plot_path, f"predicted_vs_actual_M2500{'_debias' if debias else ''}.png")
-    plt.savefig(out_path, dpi=300, bbox_inches="tight")
+    os.makedirs(os.path.join(plot_path, "pdf"), exist_ok=True)
+
+    plt.savefig(os.path.join(plot_path, f"predicted_vs_actual_M2500{'_debias' if debias else ''}.png"), dpi=300, bbox_inches="tight")
+    plt.savefig(os.path.join(plot_path, "pdf", f"predicted_vs_actual_M2500{'_debias' if debias else ''}.pdf"), dpi=600, bbox_inches="tight")
     if show:
         plt.show()
     plt.close()
@@ -1284,10 +1335,13 @@ def plot_predicted_L2500_vs_sigmahat(
         ax.set_xlabel(r'$(\sigma/\sigma_{\mathrm{p}})^{\alpha}(\tau/\tau_{\mathrm{p}})^{\beta}$')
 
     os.makedirs(plot_path, exist_ok=True)
+    os.makedirs(os.path.join(plot_path, "pdf"), exist_ok=True)
     if debias:
         plt.savefig(os.path.join(plot_path, "predicted_L2500_vs_fullcorr_band_debiased.png"), dpi=300)
+        plt.savefig(os.path.join(plot_path, "pdf", "predicted_L2500_vs_fullcorr_band_debiased.pdf"), dpi=600)
     else:
         plt.savefig(os.path.join(plot_path, "predicted_L2500_vs_fullcorr_band.png"), dpi=300)
+        plt.savefig(os.path.join(plot_path, "pdf", "predicted_L2500_vs_fullcorr_band.pdf"), dpi=600)
 
     if show:
         plt.show()

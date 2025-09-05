@@ -144,6 +144,19 @@ def run_mcmc_pipeline(df_agn, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, c
                     nlive_batch=max(250, 25*ndim)   # reasonable batch size for dynamic allocation
                     # optional: sample='rwalk', walks=50, bound='multi' if you expect multi-modality
                 )
+            elif speed == "dev":
+                print("[Warning] Starting DEV run...")
+                # "Fast" test run?
+                sampler.run_nested(
+                    resume=resume,
+                    checkpoint_file=checkpoint_file,
+                    print_progress=True,
+                    dlogz_init=0.1,                 
+                    n_effective=200,                # 300–1000 typical for model comparison
+                    nlive_init=max(100, 25*ndim),   # bump live points
+                    nlive_batch=max(50, 15*ndim)   # reasonable batch size for dynamic allocation
+                )
+
             elif speed == "test":
                 print("[Warning] Starting TEST run...")
                 # "Fast" test run?
@@ -151,10 +164,10 @@ def run_mcmc_pipeline(df_agn, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, c
                     resume=resume,
                     checkpoint_file=checkpoint_file,
                     print_progress=True,
-                    dlogz_init=1,                 
+                    dlogz_init=0.1,                 
                     n_effective=200,                # 300–1000 typical for model comparison
-                    nlive_init=max(100, 25*ndim),   # bump live points
-                    nlive_batch=max(50, 15*ndim)   # reasonable batch size for dynamic allocation
+                    nlive_init=max(200, 30*ndim),   # bump live points
+                    nlive_batch=max(100, 20*ndim)   # reasonable batch size for dynamic allocation
                 )
 
 
@@ -260,7 +273,7 @@ def run_mcmc_pipeline(df_agn, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, c
 
 
 def run_single(df_agn, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, cosmo_model, completeness=True, use_full_cov=True, 
-               N=None, resume=False, only_sna=False, speed="production", use_mu_sh0es=False):
+               N=None, resume=False, only_sna=False, speed="production", use_mu_sh0es=False, cosmo_model_residual=None, verbose=True):
 
     # Load data
     #global _sna_LogdetCov, _sna_L, _sna_Lower
@@ -296,7 +309,8 @@ def run_single(df_agn, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, cosmo_mo
                                                          show_true=False, show=False, debias=False, plot_path=plot_path, verbose=False)
     debiased_residuals, _, _ = plot_hubble(flat_samples, df_agn, df_pantheon, 
                                                          cosmo_model=cosmo_model, z_pivot_agn=z_pivot_agn, 
-                                                         show_true=False, show=False, debias=True, dms=dmag_corr, plot_path=plot_path)
+                                                         show_true=False, show=False, debias=True, dms=dmag_corr, plot_path=plot_path,
+                                                         cosmo_model_residual=cosmo_model_residual, verbose=verbose)
 
     print("Plotting predicted L2500 vs ...")
     plot_predicted_L2500_vs_sigmahat(flat_samples, df_agn, cosmo_model=cosmo_model, z_pivot_agn=z_pivot_agn, 
@@ -342,10 +356,12 @@ def run_all(df_agn, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, cosmo_model
     cosmo_models_latex = {'Flatw0waCDM': r'Flat$w_0w_a$CDM', 'FlatwCDM': r'Flat$w$CDM', 'FlatLambdaCDM': r'Flat$\Lambda$CDM'}
     cosmo_models_dict = {k: {} for k in cosmo_models}
     results_latex = []
+    cosmo_model_residual = None
     for cosmo_model in cosmo_models:
         r = run_single(df_agn, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, 
                        cosmo_model=cosmo_model, only_sna=False, 
-                       resume=resume, speed=speed, N=N)
+                       resume=resume, speed=speed, N=N,
+                       cosmo_model_residual=cosmo_model_residual)
         _, samples_joint, _, _, logZ_joint, logZerr_joint, debiased_residuals = r
         r = run_single(df_agn, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, 
                        cosmo_model=cosmo_model, only_sna=True, 
@@ -360,6 +376,7 @@ def run_all(df_agn, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, cosmo_model
                                                     logZ_tuple=(logZ_sna, logZerr_sna), format_for_latex=True, value_fmt="{:.2f}")
         r_joint   = extract_cosmo_results_from_samples(samples_joint, cosmo_model, False,  
                                                     logZ_tuple=(logZ_joint, logZerr_joint), format_for_latex=True, value_fmt="{:.2f}")
+        cosmo_model_residual = (cosmo_model, samples_joint)
         results_latex.extend([r_sna, r_joint])
     
     make_cosmo_table_latex(results_latex, write_path=f"plots/hubble/{prefix}/")
@@ -392,7 +409,7 @@ if __name__ == "__main__":
     parser.add_argument("--disable_full_covariance", action="store_true", default=False, help="Use full covariance matrix for SNIa likelihood (default: False)")
     parser.add_argument("--resume", nargs="?", const=True, default=False, help="Resume previous MCMC run (default: False). If a string is provided, it is used as the checkpoint file.")
     parser.add_argument("--run", type=str, choices=["full", "single"], default="single", help="Run mode: compare_models, compare_sna, full, or single (default: single)")
-    parser.add_argument("--speed", type=str, choices=["production", "test", "fast"], default="production", help="Sampling speed: production, test, or fast (default: production)")
+    parser.add_argument("--speed", type=str, choices=["production", "test", "fast", "dev"], default="production", help="Sampling speed: production, test, or fast (default: production)")
     parser.add_argument("--N", type=int, default=None, help="Number of AGNs to run (default: all)")
     parser.add_argument("--only_sna", action="store_true", default=False, help="Run SNIa-only fit (default: False)")
     parser.add_argument("--use_mu_sh0es", action="store_true", default=False, help="Use MU_SH0ES for SNIa fit (default: False)")
