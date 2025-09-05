@@ -8,21 +8,8 @@ import h5py
 import numpy as np
 from tqdm import tqdm
 import csv
+from hubble_utils import populate_sdss_fields, read_quasars_from_hdf5, write_hdf5_file
 
-def read_quasars_from_hdf5(file_path):
-    quasar_list = []
-
-    with h5py.File(file_path, "r") as hdf:
-        for group_name in tqdm(list(hdf.keys()), desc="Reading quasars from HDF5"):
-            group = hdf[group_name]
-            quasar = {"object_id": group_name}
-            for key, value in group.attrs.items():
-                quasar[key] = value
-            for sub_group_name in group.keys():
-                sub_group = group[sub_group_name]
-                quasar[sub_group_name] = {sub_key: sub_group[sub_key][...] for sub_key in sub_group.keys()}
-            quasar_list.append(quasar)
-    return quasar_list
 
 def merge_hdf5_files(file_list, output_file, expected_n):
     """
@@ -62,7 +49,7 @@ def merge_hdf5_files(file_list, output_file, expected_n):
     print(f"Merged {len(file_list)} files into {output_file}")
     print(f"Unique object IDs: {len(object_ids)}")
 
-def export_quasars_to_csv(h5_file, csv_file, fields):
+def export_quasars_to_csv(quasars, csv_file, fields):
     """
     Reads quasars from an HDF5 file and writes selected fields to a CSV file.
 
@@ -72,7 +59,6 @@ def export_quasars_to_csv(h5_file, csv_file, fields):
         fields (list of str): List of field names to write as columns.
     """
 
-    quasars = read_quasars_from_hdf5(h5_file)
     with open(csv_file, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fields)
         writer.writeheader()
@@ -81,6 +67,11 @@ def export_quasars_to_csv(h5_file, csv_file, fields):
             writer.writerow(row)
     print(f"Wrote {len(quasars)} quasars to {csv_file}")
 
+def write_sdss_fields(h5_file):
+    quasars = read_quasars_from_hdf5(h5_file)
+    populate_sdss_fields(quasars)
+    write_hdf5_file(quasars, h5_file)
+    return quasars
 
 def parse_job_id_from_path(path):
     """Extract integer job id from filenames like 'job57.h5'. Returns None if no match."""
@@ -161,9 +152,10 @@ def main():
         expected_n=args.expected,
     )
 
+    quasars = write_sdss_fields(output_file)
 
     export_quasars_to_csv(
-        h5_file=output_file,
+        quasars=quasars,
         csv_file=output_file.replace(".h5", ".csv"),
         fields=[
             "object_id",
