@@ -462,7 +462,8 @@ def run_qsofit_record(rec, npca_qso, cache_dir="data/spectra_cache", path_ex="da
             or_mask=False,          # delete the or masked pixels
             reject_badpix=True,    # reject 10 most possible outliers by the test of pointDistGESD
             deredden=True,          # correct the Galactic extinction
-            wave_range=[1150, 1e9], # trim input wavelength
+            #wave_range=[1150, 1e9], # trim input wavelength
+            wave_range=None,
             wave_mask=None,         # 2-D array, mask the given range(s)
 
             # host decomposition parameters
@@ -576,7 +577,8 @@ def run_qsofit_record(rec, npca_qso, cache_dir="data/spectra_cache", path_ex="da
             apparent_mag_2500=m_2500,
             apparent_mag_2500_err=m_2500_err,
             f_host_2500=max(0, conti_dict.get('frac_host_2500', -99)),
-            f_host_4200=max(0, conti_dict.get('frac_host_4200', -99)),
+            #f_host_4200=max(0, conti_dict.get('frac_host_4200', -99)),
+            f_host_4200=conti_dict.get('frac_host_4200', -99),
             f_host_5100=max(0, conti_dict.get('frac_host_5100', -99)),
             alpha_lambda=conti_dict.get('PL_slope', -99),
             alpha_lambda_err=conti_dict.get('PL_slope_err', -99),
@@ -621,7 +623,10 @@ def main():
     args = parse_args()
 
     sample_df = load_agn_data(args.fpath_in, apply_cut=False, only_load=True)
-    #sample_df = sample_df[sample_df['sdss_name'] == '020929.83-005602.6']
+    if args.filter_sdss_name is not None:
+        sample_df = sample_df[sample_df['sdss_name'].astype(str).isin(args.filter_sdss_name)]
+
+
 
     if args.filter_csv is not None:
         filter_df = pd.read_csv(args.filter_csv)
@@ -640,8 +645,8 @@ def main():
         sample_df=sample_df,
         dr16q_fits=args.dr16q_fits,
         max_sep_arcsec=args.max_sep,
-        filter_sdss_name=args.filter_sdss_name
     )
+    print(data_cat[['object_id', 'SDSS_NAME', 'Z_SYS']])
 
     # 2) If --download, fetch all spectra and exit
     if args.download:
@@ -723,7 +728,7 @@ def main():
         res0 = results_0[obj_id]
         res1 = results_1[obj_id]
         res2 = results_2[obj_id]
-        best_res = min([res0, res1, res2], key=lambda r: r.get("redchi", float("inf")))
+        best_res = min([res0, res1, res2], key=lambda r: r["redchi"])
         results[obj_id] = best_res
 
     # Update each quasar dict with fields from results
