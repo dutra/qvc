@@ -229,6 +229,8 @@ def make_lc(Model, data, bands=['u', 'g', 'r', 'i', 'z'], inject_fake=False):
     magerrs = data['magerrs']
 
     dropped_bands = bands_bluer_than_lyman_alpha(data['z'])
+    data['dropped_bands'] = dropped_bands
+
     logging.info(
         f"Excluding only blue bands {dropped_bands} "
         f"for quasar {data['object_id']} at z={data['z']}"
@@ -490,7 +492,8 @@ if __name__ == '__main__':
             'lam_rf': lam_rf,
             'f_host_5100': obj['f_host_5100'],
             'log_tau_fake': obj['log_tau_fake'],
-            'log_sigma_fake': obj['log_sigma_fake']
+            'log_sigma_fake': obj['log_sigma_fake'],
+            'dropped_bands': obj['dropped_bands'],
         })
 
     num_objects = len(batch_data)
