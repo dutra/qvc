@@ -410,7 +410,7 @@ def run_qsofit_record(rec, npca_qso, cache_dir="data/spectra_cache", path_ex="da
         f_host_5100=0,
         alpha_lambda=-1e9,
         alpha_lambda_err=-1e9,
-        redchi=-1e9,
+        redchi=1e9,
     )
 
     try:
@@ -676,8 +676,8 @@ def main():
     for i in range(len(data_cat)):
         row = data_cat[i]
         z = float(row['Z_SYS'])
-        #dropped_bands = bands_bluer_than_lyman_alpha(z)
-        dropped_bands = row['dropped_bands']
+        dropped_bands = bands_bluer_than_lyman_alpha(z)
+        #dropped_bands = row['dropped_bands']
         # TEMPORARY: skip objects without any dropped bands
         # if len(dropped_bands) == 0:
         #     continue 
