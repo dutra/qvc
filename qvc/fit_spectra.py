@@ -739,16 +739,31 @@ def main():
     write_hdf5_file(quasar_dict_list, args.fpath_out)
     
     # Also write results to CSV
-    csv_out = args.fpath_out + ".csv"
-    fieldnames = list(results[next(iter(results))].keys()) if results else []
+    csv_file=args.fpath_out.replace(".h5", ".csv")
 
-    with open(csv_out, "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
+    field_names = [
+        "delta_m_avg",
+        "delta_mags",
+        "apparent_mag_i_rest",
+        "apparent_mag_i_obs",
+        "apparent_mag_2500",
+        "apparent_mag_2500_err",
+        "f_host_2500",
+        "f_host_4200",
+        "f_host_5100",
+        "alpha_lambda",
+        "alpha_lambda_err",
+        "redchi",
+        "npca_qso"
+    ]
+
+    with open(csv_file, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=field_names)
         writer.writeheader()
         for obj_id in results:
             writer.writerow(results[obj_id])
 
-    print(f"[OK] Saved CSV results to {csv_out}")
+    print(f"[OK] Saved CSV results to {csv_file}")
 
     print(f"[OK] Saved results to {args.fpath_out}")
 if __name__ == "__main__":
