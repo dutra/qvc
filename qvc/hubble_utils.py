@@ -132,6 +132,9 @@ def populate_spectra_fit(df, spectra_fit_csv):
             'redchi': float
         }
     # Load and concatenate two CSV files
+    for col in fields.keys():
+        if col in df.columns:
+            df = df.drop(columns=[col])
     df_spectra = pd.read_csv(
         spectra_fit_csv,
         dtype={'object_id': str},
@@ -391,7 +394,7 @@ def populate_chi_sq_from_csv(df, csv_path="data/aug4_sample_chisqg10_ebv005sn3.c
     df['chi_sq_all'] = merged['chi_sq_all']
     return df
 
-def load_agn_data(file_path, populate_sdss=False, apply_cut=True, spectra_fit_csv=None):
+def load_agn_data(file_path, populate_sdss=False, apply_cut=True, spectra_fit_csv=None, only_load=False):
     quasar_list = read_quasars_from_hdf5(file_path)
     print("Number of quasars loaded:", len(quasar_list))
 
@@ -431,15 +434,27 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, spectra_fit_cs
         # del q['mags_means']
 
     df = pd.DataFrame(quasar_list)
+    if only_load:
+        return df
 
     
     if spectra_fit_csv is not None:
         print("Populating spectra fit data from:", spectra_fit_csv)
         df = populate_spectra_fit(df, spectra_fit_csv)
     else:
-        print("spectra_fit_csv not provided, assuming alpha_lambda is in agn h5 file")
+        raise ValueError("spectra_fit_csv not provided")
+        print("[WARNING] spectra_fit_csv not provided, assuming spectral fit fields are in agn h5 file")
         if 'alpha_lambda' not in df.columns:
-            raise ValueError("spectra_fit_csv must be provided if alpha_lambda not in agn h5 file")
+            print("[WARNING] spectral fields not in data, setting everything to 0.0")
+            df['alpha_lambda'] = 0
+            df['alpha_lambda_err'] = 0
+            df['redchi'] = 0
+            df['f_host_2500'] = 0
+            df['f_host_4200'] = 0
+            df['f_host_5100'] = 0
+            df['apparent_mag_2500'] = 20
+            df['apparent_mag_2500_err'] = 0
+            #raise ValueError("spectra_fit_csv must be provided if alpha_lambda not in agn h5 file")
     df['alpha_nu'] = -df['alpha_lambda'] - 2
     df['alpha_nu_err'] = df['alpha_lambda_err']
 
@@ -481,7 +496,7 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, spectra_fit_cs
     df = df[mask_exclude].reset_index(drop=True)
     # Define cuts as (column, lower_limit, upper_limit)
     cuts = [
-        #('f_host', None, 0.6),
+        ('f_host_4200', None, 0.2),
         #('z', None, 0.5),
         ('log_tau_UV_RF', 1.5, None),
         #('alpha_lambda', None, 0),
