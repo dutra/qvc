@@ -626,8 +626,6 @@ def main():
     if args.filter_sdss_name is not None:
         sample_df = sample_df[sample_df['sdss_name'].astype(str).isin(args.filter_sdss_name)]
 
-
-
     if args.filter_csv is not None:
         filter_df = pd.read_csv(args.filter_csv)
         if 'object_id' not in filter_df.columns:
@@ -646,7 +644,6 @@ def main():
         dr16q_fits=args.dr16q_fits,
         max_sep_arcsec=args.max_sep,
     )
-    print(data_cat[['object_id', 'SDSS_NAME', 'Z_SYS']])
 
     # 2) If --download, fetch all spectra and exit
     if args.download:
