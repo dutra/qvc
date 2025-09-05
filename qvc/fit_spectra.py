@@ -37,7 +37,33 @@ from astroquery.sdss import SDSS
 #warnings.filterwarnings("ignore")
 
 bands = ['u', 'g', 'r', 'i', 'z']
+def bands_bluer_than_lyman_alpha(z, buffer=100):
+    """
+    Returns a list of bands with rest-frame effective wavelength < Lyman-alpha (1216 Å).
 
+    Args:
+        z (float): Redshift.
+
+    Returns:
+        list: Bands bluer than Lyman-alpha at rest frame.
+    """
+    lyman_alpha = 1216
+    bands = {
+        'u': {'lambda_eff': 3551},
+        'g': {'lambda_eff': 4686},
+        'r': {'lambda_eff': 6165},
+        'i': {'lambda_eff': 7481},
+        'z': {'lambda_eff': 8931},
+        'y': {'lambda_eff': 9700}
+    }
+
+    bluer_bands = []
+    for band, props in bands.items():
+        rest_lambda_eff = props['lambda_eff'] / (1 + z)
+        if rest_lambda_eff < (lyman_alpha - buffer):
+            bluer_bands.append(band)
+
+    return bluer_bands
 # --------------------------- Utility ---------------------------------
 def _safe_float(x):
     try:
@@ -97,15 +123,15 @@ def load_spec_from_cache(sdss_name, cache_dir="data/spectra_cache"):
     return None
 
 
-def match_sample_to_dr16q(sample_df, dr16q_fits, max_sep_arcsec=2.0, limit=None, filter_object_id=None):
+def match_sample_to_dr16q(sample_df, dr16q_fits, max_sep_arcsec=2.0, limit=None, filter_sdss_name=None):
     """Load sample CSV and DR16Q, crossmatch within max_sep_arcsec, return (data_cat_table, sample_df_matched).
     Ensures 1–to–1 matches by keeping the closest pair per AGN (and per SDSS if needed)."""
     #sample_df = pd.read_csv(sample_csv)
 
 
-    if filter_object_id is not None:
-        filter_set = set(str(x).strip() for x in filter_object_id)
-        sample_df = sample_df[sample_df['object_id'].astype(str).str.strip().isin(filter_set)].copy()
+    if filter_sdss_name is not None:
+        filter_set = set(str(x).strip() for x in filter_sdss_name)
+        sample_df = sample_df[sample_df['sdss_name'].astype(str).str.strip().isin(filter_set)].copy()
 
     if limit is not None:
         sample_df = sample_df[sample_df['z'].between(1.5, 1.55)]
@@ -359,7 +385,7 @@ def create_qsopar_fits(path_ex='data/', *, overwrite=True, author='Hengxiao Guo'
     return outpath
 
 
-def run_qsofit_record(rec, npca_qso, cache_dir="data/spectra_cache", path_ex="data/"):
+def run_qsofit_record(rec, npca_qso, cache_dir="data/spectra_cache", path_ex="data/", save_fig_path='./plots/pyqso'):
     """
     Worker-safe version of QSOFit runner.
     `rec` is a plain dict containing only the fields needed for one object.
@@ -492,7 +518,7 @@ def run_qsofit_record(rec, npca_qso, cache_dir="data/spectra_cache", path_ex="da
 
             # sublevel parameters for figure plot and emcee
             kwargs_plot={
-                'save_fig_path': './plots/pyqso',  # path to save figures
+                'save_fig_path': save_fig_path,  # path to save figures
                 'broad_fwhm': 1200                 # km/s, lower limit to classify as broad component
             },
             kwargs_conti_emcee={},
@@ -584,13 +610,17 @@ def parse_args():
     # p.add_argument("--nproc", type=int, default=max(1, (os.cpu_count() or 2) - 1),
     #            help="Number of parallel worker processes for QSOFit.")
     p.add_argument("--filter_object_id", nargs="+", help="List of object IDs to filter.")
+    p.add_argument("--filter_sdss_name", nargs="+", help="List of sdss_names to filter.")
+
+    p.add_argument("--spectral_fit_csv", default=None, type=str, 
+                   help="Optional CSV file with spectral fit results to merge into output.")
     return p.parse_args()
 
 
 def main():
     args = parse_args()
 
-    sample_df = load_agn_data(args.fpath_in, apply_cut=False)
+    sample_df = load_agn_data(args.fpath_in, apply_cut=False, only_load=True)
     #sample_df = sample_df[sample_df['sdss_name'] == '020929.83-005602.6']
 
     if args.filter_csv is not None:
@@ -610,7 +640,7 @@ def main():
         sample_df=sample_df,
         dr16q_fits=args.dr16q_fits,
         max_sep_arcsec=args.max_sep,
-        filter_object_id=args.filter_object_id
+        filter_sdss_name=args.filter_sdss_name
     )
 
     # 2) If --download, fetch all spectra and exit
@@ -640,6 +670,12 @@ def main():
     colnames = set(data_cat.colnames)
     for i in range(len(data_cat)):
         row = data_cat[i]
+        z = float(row['Z_SYS'])
+        dropped_bands = bands_bluer_than_lyman_alpha(z)
+        # TEMPORARY: skip objects without any dropped bands
+        # if len(dropped_bands) == 0:
+        #     continue 
+        bands = [b for b in ['g', 'r', 'i'] if b not in dropped_bands]
         rec = dict(
             object_id=str(row['object_id']),
             sdss_name=str(row['SDSS_NAME']),
@@ -650,30 +686,33 @@ def main():
             loglbol=float(row['LOGLBOL']),
             mags={
                 b: (float(row[f'mean_corrected_{b}']) if f'mean_corrected_{b}' in colnames else np.nan)
-                for b in ['g', 'r', 'i']
+                for b in bands
             },
             mags_err={
                 b: float(row[f"mean_{b}_err"]) if f"mean_{b}_err" in colnames else np.nan
-                for b in ['g', 'r', 'i']
+                for b in bands
             },
             ra=float(row['RA']),
             dec=float(row['DEC']),
-            #clean_bands=row['clean_bands'],
         )
         records.append(rec)
 
     # Run QSOFit twice: once with npca_qso=0, once with npca_qso=2
     results_0 = {}
+    results_1 = {}
     results_2 = {}
 
-    for npca_qso, results_dict in [(0, results_0), (2, results_2)]:
-        worker = partial(run_qsofit_record, npca_qso=npca_qso, cache_dir=args.cache_dir, path_ex="data")
+    for npca_qso, results_dict in [(0, results_0), (1, results_1), (2, results_2)]:
+        save_fig_path = os.path.join('plots', 'pyqsofit', f'npca_qso_{npca_qso}')
+        os.makedirs(save_fig_path, exist_ok=True)
+        worker = partial(run_qsofit_record, npca_qso=npca_qso, cache_dir=args.cache_dir, path_ex="data", save_fig_path=save_fig_path)
         chunksize = 1
         with Pool(processes=num_cores) as pool:
             with tqdm(total=len(records), desc=f"Processing npca_qso={npca_qso}", dynamic_ncols=True, smoothing=0.0) as pbar:
                 for res in pool.imap_unordered(worker, records, chunksize=chunksize):
                     obj_id = res.get("object_id", None)
                     if obj_id is not None:
+                        res['npca_qso'] = npca_qso
                         results_dict[obj_id] = res
                     pbar.update(1)
         print(f"Collected {len(results_dict)} results for npca_qso={npca_qso}")
@@ -682,11 +721,10 @@ def main():
     results = {}
     for obj_id in results_0.keys():
         res0 = results_0[obj_id]
+        res1 = results_1[obj_id]
         res2 = results_2[obj_id]
-        if res2["redchi"] < res0["redchi"]:
-            results[obj_id] = res2
-        else:
-            results[obj_id] = res0
+        best_res = min([res0, res1, res2], key=lambda r: r.get("redchi", float("inf")))
+        results[obj_id] = best_res
 
     # Update each quasar dict with fields from results
     for quasar in quasar_dict_list:
