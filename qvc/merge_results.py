@@ -162,6 +162,7 @@ def main():
             "ra",
             "dec",
             "z",
+            "dropped_bands",
             "apparent_mag_2500",
             "apparent_mag_2500_err",
             "apparent_mag_i_rest",
