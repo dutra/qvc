@@ -123,19 +123,11 @@ def load_spec_from_cache(sdss_name, cache_dir="data/spectra_cache"):
     return None
 
 
-def match_sample_to_dr16q(sample_df, dr16q_fits, max_sep_arcsec=2.0, limit=None, filter_sdss_name=None):
+def match_sample_to_dr16q(sample_df, dr16q_fits, max_sep_arcsec=2.0):
     """Load sample CSV and DR16Q, crossmatch within max_sep_arcsec, return (data_cat_table, sample_df_matched).
     Ensures 1–to–1 matches by keeping the closest pair per AGN (and per SDSS if needed)."""
     #sample_df = pd.read_csv(sample_csv)
 
-
-    if filter_sdss_name is not None:
-        filter_set = set(str(x).strip() for x in filter_sdss_name)
-        sample_df = sample_df[sample_df['sdss_name'].astype(str).str.strip().isin(filter_set)].copy()
-
-    if limit is not None:
-        sample_df = sample_df[sample_df['z'].between(1.5, 1.55)]
-        sample_df = sample_df.iloc[:limit].copy()
 
     with fits.open(dr16q_fits) as hdul:
         data_cat_full = hdul[1].data
