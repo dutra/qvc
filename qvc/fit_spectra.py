@@ -16,6 +16,8 @@ if multiprocessing.current_process().name == "MainProcess":
 os.environ["XLA_FLAGS"] = f"--xla_force_host_platform_device_count={num_cores}"
 os.environ["JAX_PLATFORM_NAME"] = "cpu"
 
+prefix = os.environ.get('PREFIX', "pyqsofit")
+suffix = os.environ.get('SUFFIX', "pyqsofit")
 
 import sys
 import timeit
@@ -179,7 +181,7 @@ def match_sample_to_dr16q(sample_df, dr16q_fits, max_sep_arcsec=2.0):
 
 
 
-def create_qsopar_fits(path_ex='data/', *, overwrite=True, author='Hengxiao Guo'):
+def create_qsopar_fits(path_ex='data/', parfilename='qsopar.fits', overwrite=True, author='Hengxiao Guo'):
     """
     Create the QSOFit parameter file 'qsopar.fits' with the following HDUs:
       - PRIMARY        : header only (Author)
@@ -363,7 +365,7 @@ def create_qsopar_fits(path_ex='data/', *, overwrite=True, author='Hengxiao Guo'
 
     # ------------------------ Write file ------------------------
     hdul = fits.HDUList([primary_hdu, hdu1, hdu2, hdu3, hdu4])
-    outpath = os.path.abspath(os.path.join(path_ex, 'qsopar.fits'))
+    outpath = os.path.abspath(os.path.join(path_ex, parfilename))
     hdul.writeto(outpath, overwrite=overwrite)
 
     # Quick sanity: ensure expected HDUs exist
@@ -377,7 +379,9 @@ def create_qsopar_fits(path_ex='data/', *, overwrite=True, author='Hengxiao Guo'
     return outpath
 
 
-def run_qsofit_record(rec, npca_qso, cache_dir="data/spectra_cache", path_ex="data/", save_fig_path='./plots/pyqso'):
+def run_qsofit_record(rec, npca_qso, cache_dir="data/spectra_cache", 
+                      path_ex=f'data/pyqsofit', parfilename=f'qsopar.fits',
+                      save_fig_path=f'./plots/pyqso/'):
     """
     Worker-safe version of QSOFit runner.
     `rec` is a plain dict containing only the fields needed for one object.
@@ -493,7 +497,7 @@ def run_qsofit_record(rec, npca_qso, cache_dir="data/spectra_cache", path_ex="da
             nsamp=20,                 # number of MC trials or MCMC samples
 
             # advanced fitting parameters
-            param_file_name=f'qsopar.fits',  # qso fitting parameter FITS file
+            param_file_name=parfilename,  # qso fitting parameter FITS file
             nburn=20,                 # burn-in samples for MCMC
             nthin=10,                 # return every n-th MCMC sample
             epsilon_jitter=0.,        # initial jitter for Gaussians to avoid local minima
@@ -568,12 +572,11 @@ def run_qsofit_record(rec, npca_qso, cache_dir="data/spectra_cache", path_ex="da
             apparent_mag_i_obs=apparent_mag_i_obs,
             apparent_mag_2500=m_2500,
             apparent_mag_2500_err=m_2500_err,
-            f_host_2500=max(0, conti_dict.get('frac_host_2500', -99)),
-            #f_host_4200=max(0, conti_dict.get('frac_host_4200', -99)),
-            f_host_4200=conti_dict.get('frac_host_4200', -99),
-            f_host_5100=max(0, conti_dict.get('frac_host_5100', -99)),
-            alpha_lambda=conti_dict.get('PL_slope', -99),
-            alpha_lambda_err=conti_dict.get('PL_slope_err', -99),
+            f_host_2500=conti_dict['frac_host_2500'],
+            f_host_4200=conti_dict['frac_host_4200'],
+            f_host_5100=conti_dict['frac_host_5100'],
+            alpha_lambda=conti_dict['PL_slope'],
+            alpha_lambda_err=conti_dict['PL_slope_err'],
             redchi=q_mle.conti_fit.redchi
         )
         return result
@@ -669,8 +672,9 @@ def main():
         return  # Exit after download-only path
 
     os.makedirs('results/pysqo_fits', exist_ok=True)
+    os.makedirs('data/pyqsofit', exist_ok=True)
     # 3) Otherwise, proceed to QSOFit processing (expects cached spectra)
-    create_qsopar_fits(overwrite=True)
+    create_qsopar_fits(path_ex=f'data/pyqsofit', parfilename=f'qsopar_{prefix}_{suffix}.fits', overwrite=True)
     # Build worker records so we don't try to pickle big astropy tables
     records = []
     colnames = set(data_cat.colnames)
@@ -710,9 +714,11 @@ def main():
     results_2 = {}
 
     for npca_qso, results_dict in [(0, results_0), (1, results_1), (2, results_2)]:
-        save_fig_path = os.path.join('plots', 'pyqsofit', f'npca_qso_{npca_qso}')
+        save_fig_path = os.path.join('plots', 'pyqsofit', f'prefix', f'npca_qso_{npca_qso}')
         os.makedirs(save_fig_path, exist_ok=True)
-        worker = partial(run_qsofit_record, npca_qso=npca_qso, cache_dir=args.cache_dir, path_ex="data", save_fig_path=save_fig_path)
+        worker = partial(run_qsofit_record, npca_qso=npca_qso, cache_dir=args.cache_dir, 
+                        path_ex=f'data/pyqsofit', parfilename=f'qsopar_{prefix}_{suffix}.fits',
+                        save_fig_path=save_fig_path)
         chunksize = 1
         with Pool(processes=num_cores) as pool:
             with tqdm(total=len(records), desc=f"Processing npca_qso={npca_qso}", dynamic_ncols=True, smoothing=0.0) as pbar:
