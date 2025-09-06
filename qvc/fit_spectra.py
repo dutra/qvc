@@ -622,7 +622,7 @@ def main():
         '024555.35+005332.6'  # weird spectra
     ]
     mask_exclude = ~sample_df['sdss_name'].astype(str).isin(exclusion_sdss_names)
-    print(f"Excluding {np.sum(~mask_exclude)} objects by object_id exclusion list")
+    print(f"Excluding {np.sum(~mask_exclude)} objects by sdss_name in exclusion list")
     sample_df = sample_df[mask_exclude].reset_index(drop=True)
 
     if args.filter_sdss_name is not None:
@@ -708,11 +708,8 @@ def main():
     results_0 = {}
     results_1 = {}
     results_2 = {}
-    results_3 = {}
-    results_4 = {}
-    results_5 = {}
 
-    for npca_qso, results_dict in [(0, results_0), (1, results_1), (2, results_2), (3, results_3), (4, results_4), (5, results_5)]:
+    for npca_qso, results_dict in [(0, results_0), (1, results_1), (2, results_2)]:
         save_fig_path = os.path.join('plots', 'pyqsofit', f'npca_qso_{npca_qso}')
         os.makedirs(save_fig_path, exist_ok=True)
         worker = partial(run_qsofit_record, npca_qso=npca_qso, cache_dir=args.cache_dir, path_ex="data", save_fig_path=save_fig_path)
@@ -733,11 +730,8 @@ def main():
         res0 = results_0[obj_id]
         res1 = results_1[obj_id]
         res2 = results_2[obj_id]
-        res3 = results_3[obj_id]
-        res4 = results_4[obj_id]
-        res5 = results_5[obj_id]
 
-        best_res = min([res0, res1, res2, res3, res4, res5], key=lambda r: r["redchi"])
+        best_res = min([res0, res1, res2], key=lambda r: r["redchi"])
         results[obj_id] = best_res
 
     # Update each quasar dict with fields from results
