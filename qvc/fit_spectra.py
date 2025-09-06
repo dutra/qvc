@@ -616,6 +616,15 @@ def main():
     args = parse_args()
 
     sample_df = load_agn_data(args.fpath_in, apply_cut=False, only_load=True)
+
+    exclusion_sdss_names = [
+        '221120.38+010905.6', # wrong redshift
+        '024555.35+005332.6'  # weird spectra
+    ]
+    mask_exclude = ~sample_df['sdss_name'].astype(str).isin(exclusion_sdss_names)
+    print(f"Excluding {np.sum(~mask_exclude)} objects by object_id exclusion list")
+    sample_df = sample_df[mask_exclude].reset_index(drop=True)
+
     if args.filter_sdss_name is not None:
         sample_df = sample_df[sample_df['sdss_name'].astype(str).isin(args.filter_sdss_name)]
 
@@ -699,8 +708,11 @@ def main():
     results_0 = {}
     results_1 = {}
     results_2 = {}
+    results_3 = {}
+    results_4 = {}
+    results_5 = {}
 
-    for npca_qso, results_dict in [(0, results_0), (1, results_1), (2, results_2)]:
+    for npca_qso, results_dict in [(0, results_0), (1, results_1), (2, results_2), (3, results_3), (4, results_4), (5, results_5)]:
         save_fig_path = os.path.join('plots', 'pyqsofit', f'npca_qso_{npca_qso}')
         os.makedirs(save_fig_path, exist_ok=True)
         worker = partial(run_qsofit_record, npca_qso=npca_qso, cache_dir=args.cache_dir, path_ex="data", save_fig_path=save_fig_path)
@@ -721,7 +733,11 @@ def main():
         res0 = results_0[obj_id]
         res1 = results_1[obj_id]
         res2 = results_2[obj_id]
-        best_res = min([res0, res1, res2], key=lambda r: r["redchi"])
+        res3 = results_3[obj_id]
+        res4 = results_4[obj_id]
+        res5 = results_5[obj_id]
+
+        best_res = min([res0, res1, res2, res3, res4, res5], key=lambda r: r["redchi"])
         results[obj_id] = best_res
 
     # Update each quasar dict with fields from results
@@ -735,6 +751,7 @@ def main():
     csv_file=args.fpath_out.replace(".h5", ".csv")
 
     field_names = [
+        'object_id',
         "delta_m_avg",
         "delta_mags",
         "apparent_mag_i_rest",
@@ -747,7 +764,8 @@ def main():
         "alpha_lambda",
         "alpha_lambda_err",
         "redchi",
-        "npca_qso"
+        "npca_qso",
+        'sdss_name',
     ]
 
     with open(csv_file, "w", newline="") as f:
