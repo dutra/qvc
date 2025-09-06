@@ -375,9 +375,6 @@ if __name__ == '__main__':
     parser.add_argument("--inject_fake", action="store_true", help="Use randomly sampled light curves with no correlation.")
     parser.add_argument("--bwb", action="store_true", help="Use BWB model.")
     parser.add_argument("--d_eta", action="store_true", help="Vary eta for each quasar with prior.")
-    parser.add_argument("--choose_N", type=int, default=-1, help="Sample choose_N objects.")
-    parser.add_argument("--job_id", type=int, default=-1, help="Job Index for parallel processing.")
-    parser.add_argument("--job_N", type=int, default=-1, help="Number of objects to divide.")
     parser.add_argument("--max_tree_depth", type=int, default=8, help="Max tree depth param for NUTS sampler.")
     parser.add_argument("--load_sample_file", action="store_true", help="Load samples from previously ran job.")
     parser.add_argument("--disable_poly1", action="store_true", help="Disable Mean function detrending.")
@@ -396,14 +393,6 @@ if __name__ == '__main__':
     print(f"filter_object_ids: {filter_object_ids}")
     filter_object_ids = pd.read_csv(args.filter_file, dtype={"object_id": str})["object_id"].values if (args.filter_file and (not args.filter_object_id)) else filter_object_ids
     print(f"Loaded {len(filter_object_ids)=}")
-    if args.choose_N > 0:
-        filter_object_ids = np.random.choice(filter_object_ids, size=args.choose_N, replace=False)
-        print(f"After choosing, total of {len(filter_object_ids)=}")
-
-    elif args.job_id > -1:
-        subarrays = [filter_object_ids[i:i + args.job_N] for i in range(0, len(filter_object_ids), args.job_N)]
-        filter_object_ids = subarrays[args.job_id]
-        print(f"Job ID {args.job_id} processing {filter_object_ids=}")
 
     if len(filter_object_ids) > 0:
         print(f"Filtering object IDs: {len(filter_object_ids)}")
@@ -454,6 +443,7 @@ if __name__ == '__main__':
             else:
                 obj["f_host_5100"] = 0.0  # Default if not found or invalid
     else:
+        print("[WARNING] Not using alpha_lam_csv, setting f_host_5100=0.0 for all objects.")
         for obj in objs:
             obj["f_host_5100"] = 0.0 
 
@@ -611,6 +601,7 @@ if __name__ == '__main__':
             #dump_mcmc_diagnostics(mcmc, obj, i, len(batch_data))
             
         final_result_obj = obj | result #| rhat_ess
+        print(final_result_obj.keys())
         results.append(final_result_obj)
         logging.info("--------------------------------------------------------------")
     
