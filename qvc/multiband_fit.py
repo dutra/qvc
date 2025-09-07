@@ -12,10 +12,13 @@ if multiprocessing.current_process().name == "MainProcess":
     print(f"CPU Num Cores: {num_cores}")
 os.environ["XLA_FLAGS"] = f"--xla_force_host_platform_device_count={num_cores}"
 os.environ["JAX_PLATFORM_NAME"] = "cpu"
-
+prefix = os.environ.get('PREFIX', "test")
+suffix = os.environ.get('SUFFIX', "test")
 
 import jax
 jax.config.update("jax_enable_x64", True)
+jax.config.update("jax_debug_nans", True)
+from jax import lax
 import jax.numpy as jnp
 
 import os
@@ -23,17 +26,19 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 import numpyro
+numpyro.set_host_device_count(num_cores)  # Tell NumPyro how many to use
+numpyro.enable_x64()
+numpyro.enable_validation(True)  # checks distribution params & support
 
 from numpy.lib.stride_tricks import sliding_window_view
 from scipy.stats import median_abs_deviation
 
-numpyro.set_host_device_count(num_cores)  # Tell NumPyro how many to use
-
-numpyro.enable_x64()
 
 from numpyro import infer
 from numpyro.infer import MCMC, NUTS
 import numpyro.distributions as dist
+from numpyro import handlers
+from numpyro.infer.reparam import LocScaleReparam
 
 from tinygp import kernels
 
@@ -70,7 +75,14 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_
 
     log_tau_drw0_c = jnp.log(10**2.5 * (1 + zs))
     log_lag_blr_c = jnp.log(10**1.5 * (1 + zs))
-
+    
+    # use a non‑centered parameterization to avoid Neal’s funnel
+    @handlers.reparam(config={
+        "eta_A1": LocScaleReparam(centered=0.0),
+        "eta_A2": LocScaleReparam(centered=0.0),
+        "eta_tau1": LocScaleReparam(centered=0.0),
+        "eta_tau2": LocScaleReparam(centered=0.0),
+    })
     def numpyro_joint_model():
 
         # Initialize parameters
@@ -140,8 +152,14 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_
                 poly1 = numpyro.sample("poly1", dist.Normal(0.0, 0.1))
 
             # Disk lags
-            lag0 = numpyro.sample("lag0", dist.TruncatedNormal(10.0, 5.0, low=0))
-            lag_beta = numpyro.sample("lag_beta", dist.TruncatedNormal(4/3, 0.2, low=0))
+            #lag0 = numpyro.sample("lag0", dist.TruncatedNormal(10.0, 5.0, low=0))
+            #lag_beta = numpyro.sample("lag_beta", dist.TruncatedNormal(4/3, 0.2, low=0))
+
+            lag0_tilde = numpyro.sample(
+                "lag0_tilde",
+                dist.LogNormal(jnp.log(0.2) + log_tau_drw0, 0.5)
+            )
+            lag_beta = numpyro.sample("lag_beta", dist.Normal(4/3, 0.2))
 
             # Bluer when brighter (BWB) strength
             if bwb:
@@ -165,18 +183,40 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_
                 else:
                     log_amp_delta_blr = numpyro.sample("log_amp_delta_blr", dist.Normal(jnp.full(nBands, -1.0), 1.0))
 
-                log_lag_blr = numpyro.sample("log_lag_blr", dist.Uniform(2.3*0.2, 2.3*4.0))
+                #log_lag_blr = numpyro.sample("log_lag_blr", dist.Uniform(2.3*0.2, 2.3*4.0))
+                #log_lag_blr = numpyro.sample("log_lag_blr", dist.Uniform(0.2, 4.0))
+                #log_lag_blr = numpyro.sample("log_lag_blr", dist.Uniform(0.2, 1.0))
+                #log_lag_blr = numpyro.sample("log_lag_blr", dist.Uniform(np.log(10), np.log(100)))
                 #log_lag_blr = numpyro.sample("log_lag_blr", dist.Normal(log_lag_blr_c[..., None], 3.0))
+                lag_center = jnp.log(0.2) + log_tau_drw0[..., None]
+                log_lag_blr = numpyro.sample(
+                    "log_lag_blr",
+                    dist.TruncatedNormal(lag_center, 0.5, low=jnp.log(0.5), high=jnp.log(300.0))
+                )
+                width_center = jnp.log(0.2) + log_tau_drw0[..., None]
+                width_blr  = numpyro.sample("width_blr",  dist.LogNormal(width_center, 0.5))
+                width_cont = numpyro.sample("width_cont", dist.LogNormal(width_center - jnp.log(2.0), 0.5))  # continuum a bit narrower
 
-                width_blr = numpyro.sample("width_blr", dist.TruncatedNormal(0.2 * jnp.exp(log_tau_drw0_c[..., None]), 20.0, low=10.0))
-                width_cont = numpyro.sample("width_cont", dist.TruncatedNormal(0.2 * jnp.exp(log_tau_drw0_c[..., None]), 20.0, low=10.0))
+                #width_blr = numpyro.sample("width_blr", dist.TruncatedNormal(0.2 * jnp.exp(log_tau_drw0_c[..., None]), 20.0, low=10.0))
+                #width_cont = numpyro.sample("width_cont", dist.TruncatedNormal(0.2 * jnp.exp(log_tau_drw0_c[..., None]), 20.0, low=10.0))
+
                 #width_blr = numpyro.deterministic("width_blr", 0.2 * jnp.exp(log_tau_drw0[..., None]))
                 #width_cont = numpyro.deterministic("width_cont", 0.0 * jnp.exp(log_tau_drw0_c[..., None]))
 
                 # Jitter
                 log_jitter = numpyro.sample("log_jitter", dist.Normal(log_jitter_mean, 1.0))
+                        
 
         def run_batch(obj, i):
+
+            # t = obj[:, 0]
+            # b = obj[:, 1].astype(t.dtype)
+            # tie_eps = 10.0 * jnp.finfo(t.dtype).eps  # same magnitude used in the kernel
+            # key = t + b * tie_eps
+            # sort_idx   = jnp.argsort(key)
+            # obj_sorted = obj[sort_idx]
+            obj_sorted = obj  # data already sorted
+
             # Collect params for object i
             params = {
                 "log_tau_drw0": log_tau_drw0[i],
@@ -189,7 +229,8 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_
                 "log_amp_delta_blr": log_amp_delta_blr[i],
                 "log_lag_blr": log_lag_blr[i],
                 "log_jitter": log_jitter[i],
-                "lag0": lag0[i],
+                #"lag0": lag0[i],
+                "lag0_tilde": lag0_tilde[i],
                 "lag_beta": lag_beta[i],
                 "bwb_alpha": bwb_alpha[i],
                 "bwb_beta": bwb_beta[i],
@@ -208,16 +249,31 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_
             }
 
             m = Model(
-                X=(obj[:,0], obj[:,1]), y=obj[:,2], yerr=obj[:,3],
+                X=(obj_sorted[:, 0], obj_sorted[:, 1]),
+                y=obj_sorted[:, 2],
+                yerr=obj_sorted[:, 3],
                 kernel=kernels.quasisep.Exp(jnp.array([1, 1])),
                 zero_mean=zero_mean, has_jitter=has_jitter, has_lag=has_lag,
-                lam_rf=lam_rfs[i], z=zs[i]
+                lam_rf=lam_rfs[i], z=zs[i],
             )
-
             return m.log_prob(params)
 
         log_probs = jax.vmap(run_batch, in_axes=(0, 0))(batch_data, jnp.arange(batch_size))
-        log_probs = jnp.where(jnp.isfinite(log_probs), log_probs, -1e20)
+        nan_mask = jnp.isnan(log_probs)
+        idx_all = jnp.arange(batch_size)               # static shape
+        idx_padded = jnp.where(nan_mask, idx_all, -1)  # -1 where not NaN
+        lax.cond(
+            jnp.any(nan_mask),
+            lambda _: jax.debug.print(
+                "NaNs at indices (=-1 means none): {}\nvalues: {}",
+                idx_padded, jnp.where(nan_mask, log_probs, 0.0)
+            ),
+            lambda _: None,
+            operand=None
+        )
+        # if jnp.any(jnp.isnan(log_probs)):
+        #     jax.debug.print("Warning: NaN detected in log_probs:", log_probs)
+        #log_probs = jnp.where(jnp.isfinite(log_probs), log_probs, -1e20)
         numpyro.factor("loglike", log_probs.sum())
     
     return numpyro_joint_model
@@ -248,19 +304,31 @@ def make_lc(Model, data, bands=['u', 'g', 'r', 'i', 'z'], inject_fake=False):
     all_mags = np.concatenate([mags[b] for b in bands])
     all_magerrs = np.concatenate([magerrs[b] for b in bands])
     band_idx = np.concatenate([np.full(len(times[b]), i) for i, b in enumerate(bands)])
-
+    band_idx = band_idx.astype(np.int64, copy=False)
+    
     if len(all_times) == 0:
         print(f"No magnitudes for quasar {data['object_id']}, skipping.", flush=True)
         return None
 
+    # --- stable pre-sort by the kernel's coord_to_sortable: t + eps * band ---
+    band_idx = band_idx.astype(np.int64, copy=False)
+    tie_eps  = 10.0 * np.finfo(all_times.dtype).eps
+    key      = all_times + band_idx.astype(all_times.dtype) * tie_eps
+    order    = np.argsort(key, kind="mergesort")   # stable
+
+    all_times   = all_times[order]
+    all_mags    = all_mags[order]
+    all_magerrs = all_magerrs[order]
+    band_idx    = band_idx[order]
+    # -------------------------------------------------------------------------
     # Sort by time
-    sort_idx = np.argsort(all_times)
-    all_times, all_mags, all_magerrs, band_idx = (
-        all_times[sort_idx],
-        all_mags[sort_idx],
-        all_magerrs[sort_idx],
-        band_idx[sort_idx]
-    )
+    # sort_idx = np.argsort(all_times)
+    # all_times, all_mags, all_magerrs, band_idx = (
+    #     all_times[sort_idx],
+    #     all_mags[sort_idx],
+    #     all_magerrs[sort_idx],
+    #     band_idx[sort_idx]
+    # )
 
     # Inject fake DRW
     if inject_fake:
@@ -303,7 +371,7 @@ def make_lc(Model, data, bands=['u', 'g', 'r', 'i', 'z'], inject_fake=False):
         windows = sliding_window_view(band_y, 2 * window_size + 1)
         centers = band_y[window_size:-window_size]
         medians = np.nanmean(windows, axis=1)
-        mads = median_abs_deviation(windows, axis=1)
+        mads = median_abs_deviation(windows, axis=1, nan_policy="omit")
 
         is_outlier = np.abs(centers - medians) > 2.5 * mads
         mask_outlier[idx_band[window_size:-window_size][is_outlier]] = False
@@ -447,6 +515,9 @@ if __name__ == '__main__':
         for obj in objs:
             obj["f_host_5100"] = 0.0 
 
+    for obj in objs:
+        print(f"Object {obj['object_id']}: f_host_5100 = {obj['f_host_5100']}")
+
     #objs = populate_sdss_fields(objs)
 
     Model = MyMultiVarModel
@@ -491,6 +562,13 @@ if __name__ == '__main__':
 
 
     padded_batch_data = pad_batch(batch_data, nBands=5)
+    # Re-sort *after* padding by the same key the kernel uses
+    padded_batch_data = [
+        jnp.array(resort_by_kernel_key(np.asarray(obj)))
+        for obj in padded_batch_data
+    ]
+    # NEW: stack into shape (B, Nmax, 4) so vmap sees a batch dimension
+    batch_array = jnp.stack(padded_batch_data, axis=0)
 
     # Set up
     estimated_nchains = 4
@@ -500,9 +578,9 @@ if __name__ == '__main__':
         nchains = args.nchains
     print(f"{args.max_tree_depth=}, {args.nwarm=}, {args.nsamp=}, {args.nchains=}, default num_chains: {estimated_nchains}")
     
-    init_strategy = numpyro.infer.init_to_sample()
-    #init_strategy = numpyro.infer.init_to_median()
-    logging.info("Done with numpyro.infer.init_to_sample")
+    #init_strategy = numpyro.infer.init_to_sample()
+    init_strategy = numpyro.infer.init_to_median()
+    logging.info("Done with numpyro.infer.init_to_median")
 
     # --- Precompute log_jitter prior means ---
     zs = jnp.array([obj['z'] for obj in batch_data])
@@ -511,6 +589,8 @@ if __name__ == '__main__':
     log_jitter_mean = jnp.stack([
         jnp.array(jnp.full(5, 1e-6) + jnp.log(jnp.mean(jnp.array(obj[:,3][obj[:,3] < 10])))) for obj in padded_batch_data
     ])  # shape (B, nBands)
+    # log_jitter_mean = jnp.stack([safe_log_jitter_mean(obj) for obj in padded_batch_data])
+    assert jnp.isfinite(log_jitter_mean).all(), "Non-finite log_jitter_mean"
 
     f_host_value = jnp.array([obj["f_host_5100"] for obj in batch_data])
 
@@ -519,7 +599,7 @@ if __name__ == '__main__':
 
 
 
-    numpyro_joint_model = build_model(padded_batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_fake, log_sigma_fake, 
+    numpyro_joint_model = build_model(batch_array, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_fake, log_sigma_fake, 
                                       bwb=args.bwb, disable_poly1=args.disable_poly1, d_eta=args.d_eta,
                                       disable_lag_blr=args.load_stone_lcs, 
                                       free_eta_break=args.free_eta_break, wide_eta_priors=args.wide_eta_priors)
@@ -562,6 +642,7 @@ if __name__ == '__main__':
             # Plain run, no tracing
             mcmc.run(jax.random.PRNGKey(0))
         samples_flat = mcmc.get_samples(group_by_chain=False)
+        samples_per_chain = mcmc.get_samples(group_by_chain=True)
         save_all_samples_to_hdf5(samples_flat)
     
     #ns = NestedSampler(numpyro_joint_model)
@@ -578,8 +659,11 @@ if __name__ == '__main__':
 
         obj_flat_samples = select_samples_for_object(samples_flat, i, universal_params=universal_params)
         obj_flat_samples_flatten_per_band = flatten_flat_samples_per_band(obj_flat_samples)
-
         save_obj_samples_to_hdf5(obj_flat_samples_flatten_per_band, obj['object_id'])
+
+        obj_samples_per_chain = select_samples_for_object_per_chain(samples_per_chain, i, universal_params=universal_params)
+        obj_samples_per_chain_flatten_per_band = flatten_per_chain_samples_per_band(obj_samples_per_chain)
+        diagnostics = diagnostics_for_per_chain_samples(obj_samples_per_chain_flatten_per_band)
         
         # Add the object-specific parameters
         result = process_samples(obj_flat_samples_flatten_per_band, obj)
@@ -600,7 +684,7 @@ if __name__ == '__main__':
             plot_broken_power_law(obj_flat_samples, obj)
             #dump_mcmc_diagnostics(mcmc, obj, i, len(batch_data))
             
-        final_result_obj = obj | result #| rhat_ess
+        final_result_obj = obj | result | diagnostics | dict(prefix=prefix, suffix=suffix)
         print(final_result_obj.keys())
         results.append(final_result_obj)
         logging.info("--------------------------------------------------------------")
