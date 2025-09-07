@@ -174,23 +174,36 @@ class ContiBLRQS(qs.Wrapper):
 
     def conv_observation_model(self, t: JAXArray, lag: JAXArray, width: JAXArray) -> JAXArray:
         """
-        Approximate causal window average of the latent OU at time t:
-            (1/width)∫_0^{width} h(t - lag - u) du
-        ≈ Σ_k γ_k h(t - lag - u_k).
-        Returns a vector in the base-state space (same shape as kernel.observation_model).
-        # h_eff(t; lag, width) = ∫ h(t - lag - u) Φ(-(lag+u)) du
+        Causal top-hat average of the latent OU/DRW observed at time t:
+
+            h_eff(t; lag, width)
+            = (1/width) ∫_{u=0}^{width} h(t - lag - u) du
+            ≈ Σ_k γ_k · h(t - lag - u_k) · Φ(+ (lag + u_k)),
+
+        where:
+        - h(·) = kernel.observation_model(·) is the row vector that maps the latent state
+                at that (earlier) time into an observation.
+        - Φ(+δ) = kernel.transition_matrix(0, δ) is the *forward* state transition over
+                δ = lag + u ≥ 0, which for an OU gives exp(-δ/τ) attenuation.
+        - {u_k, γ_k} are positive nodes/weights of a quadrature rule over [0, width].
+
+        Returns
+        -------
+        A row vector in the base-state space (same shape as kernel.observation_model(t)).
         """
+
+        # Quadrature nodes/weights over u ∈ [0, width]; both are ≥ 0 and Σ_k γ_k ≈ 1.
         u_k, gamma_k = self._quadrature_nodes_weights(width)
-        # Broadcast over taps and sum
-        # shape: (K, m) -> (m,)
+
         def tap(u, g):
-            # Row vector at earlier time
-            C = self.kernel.observation_model(t - lag - u)
-            # Backward transition from t to (t - lag - u)
-            Phi = self.kernel.transition_matrix(0.0, -(lag + u))
-            # Effective row vector acting on x(t)
+            # Row vector evaluated at the earlier time t - (lag + u)
+            C = self.kernel.observation_model(t - (lag + u))
+            # Forward transition over +δ so the contribution decays with delay (OU: e^{-δ/τ})
+            Phi = self.kernel.transition_matrix(0.0, (lag + u))
+            # Effective row at time t contributed by this tap
             return g * (C @ Phi)
-        # vmap over taps
+
+        # Sum contributions of all taps; shapes: (K, m) -> (m,)
         taps = jax.vmap(tap, in_axes=(0, 0))(u_k, gamma_k)
         return taps.sum(axis=0)
 

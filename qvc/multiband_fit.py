@@ -91,12 +91,13 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_
             eta_A1_mean = numpyro.sample("eta_A1_mean", dist.TruncatedNormal(-0.5, 1.0, high=0.0))
             eta_A2_mean = numpyro.sample("eta_A2_mean", dist.TruncatedNormal(-0.5, 1.0, high=0.0))
             eta_tau1_mean = numpyro.sample("eta_tau1_mean", dist.TruncatedNormal(-0.5, 1.0))
-            eta_tau2_mean = numpyro.sample("eta_tau2_mean", dist.TruncatedNormal(0.1, 1.0, low=0.0))
+            eta_tau2_mean = numpyro.sample("eta_tau2_mean", dist.LogNormal(jnp.log(0.15), 1.0))
         else:
             eta_A1_mean = numpyro.sample("eta_A1_mean", dist.TruncatedNormal(-0.5, 0.2, high=0.0))
             eta_A2_mean = numpyro.sample("eta_A2_mean", dist.TruncatedNormal(-0.5, 0.2, high=0.0))
             eta_tau1_mean = numpyro.sample("eta_tau1_mean", dist.TruncatedNormal(-0.5, 0.2))
-            eta_tau2_mean = numpyro.sample("eta_tau2_mean", dist.TruncatedNormal(0.1, 0.2, low=0.0))
+            #eta_tau2_mean = numpyro.sample("eta_tau2_mean", dist.TruncatedNormal(0.1, 0.2, low=0.0))
+            eta_tau2_mean = numpyro.sample("eta_tau2_mean", dist.LogNormal(jnp.log(0.15), 0.2))  # removes kink
         if free_eta_break:
             eta_break = numpyro.sample("eta_break", dist.TruncatedNormal(0.1, 0.1, low=0.0))
         else:
@@ -136,7 +137,12 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_
                 eta_tau2 = numpyro.deterministic("eta_tau2", jnp.full(batch_size, eta_tau2_mean))
 
             # Core kernel parameters
-            log_tau_drw0 = numpyro.sample("log_tau_drw0", dist.TruncatedNormal(log_tau_drw0_c, 2.0, low=jnp.log(10**1.5)))
+            #log_tau_drw0 = numpyro.sample("log_tau_drw0", dist.TruncatedNormal(log_tau_drw0_c, 2.0, low=jnp.log(10**1.5)))
+            log_tau_drw0 = numpyro.sample(
+                "log_tau_drw0",
+                dist.TruncatedNormal(log_tau_drw0_c, 0.7,
+                                    low=jnp.log(10**1.5), high=jnp.log(10**4.0))
+            )
             log_sigma0 = numpyro.sample("log_sigma0", dist.Normal(-0.8, 1.0))
             log_sigma_hat0 = numpyro.deterministic("log_sigma_hat0", log_sigma0 - 0.5 * log_tau_drw0)
 
@@ -155,10 +161,12 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_
             #lag0 = numpyro.sample("lag0", dist.TruncatedNormal(10.0, 5.0, low=0))
             #lag_beta = numpyro.sample("lag_beta", dist.TruncatedNormal(4/3, 0.2, low=0))
 
-            lag0_tilde = numpyro.sample(
-                "lag0_tilde",
-                dist.LogNormal(jnp.log(0.2) + log_tau_drw0, 0.5)
+            log_lag0 = numpyro.sample(
+                "log_lag0",
+                dist.TruncatedNormal(jnp.log(0.2) + log_tau_drw0, 0.5,
+                                    low=jnp.log(0.1), high=jnp.log(500.0))
             )
+            lag0_tilde = numpyro.deterministic("lag0_tilde", jnp.exp(log_lag0))
             lag_beta = numpyro.sample("lag_beta", dist.Normal(4/3, 0.2))
 
             # Bluer when brighter (BWB) strength
@@ -578,9 +586,9 @@ if __name__ == '__main__':
         nchains = args.nchains
     print(f"{args.max_tree_depth=}, {args.nwarm=}, {args.nsamp=}, {args.nchains=}, default num_chains: {estimated_nchains}")
     
-    init_strategy = numpyro.infer.init_to_sample()
-    #init_strategy = numpyro.infer.init_to_median()
-    logging.info("Done with numpyro.infer.init_to_sample")
+    #init_strategy = numpyro.infer.init_to_sample()
+    init_strategy = numpyro.infer.init_to_median()
+    logging.info("Done with numpyro.infer.init_to_median")
 
     # --- Precompute log_jitter prior means ---
     zs = jnp.array([obj['z'] for obj in batch_data])
@@ -671,21 +679,18 @@ if __name__ == '__main__':
         # Plotting
         if args.plot:
             plot_mcmc_traces(obj_flat_samples_flatten_per_band, obj)
-            plot_posterior(obj_flat_samples_flatten_per_band, obj)
-
             m = Model(
                 obj['X'], obj['y'], obj['yerr'], 
                 kernels.quasisep.Exp(jnp.array([1, 1])),
                 zero_mean=zero_mean, has_jitter=has_jitter, has_lag=has_lag,
                 lam_rf=obj['lam_rf'], z=obj['z']
             )
-
             save_combined_plot(obj_flat_samples, m, obj['X'], obj['y'], obj['yerr'], obj['band_idx'], result, bands=bands)
+            plot_posterior(obj_flat_samples_flatten_per_band, obj)
             plot_broken_power_law(obj_flat_samples, obj)
             #dump_mcmc_diagnostics(mcmc, obj, i, len(batch_data))
             
         final_result_obj = obj | result | diagnostics | dict(prefix=prefix, suffix=suffix)
-        print(final_result_obj.keys())
         results.append(final_result_obj)
         logging.info("--------------------------------------------------------------")
     
