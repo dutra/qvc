@@ -578,9 +578,9 @@ if __name__ == '__main__':
         nchains = args.nchains
     print(f"{args.max_tree_depth=}, {args.nwarm=}, {args.nsamp=}, {args.nchains=}, default num_chains: {estimated_nchains}")
     
-    #init_strategy = numpyro.infer.init_to_sample()
-    init_strategy = numpyro.infer.init_to_median()
-    logging.info("Done with numpyro.infer.init_to_median")
+    init_strategy = numpyro.infer.init_to_sample()
+    #init_strategy = numpyro.infer.init_to_median()
+    logging.info("Done with numpyro.infer.init_to_sample")
 
     # --- Precompute log_jitter prior means ---
     zs = jnp.array([obj['z'] for obj in batch_data])
