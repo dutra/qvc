@@ -225,7 +225,7 @@ def concat_light_curves(filter_object_ids=[], progress_bar=False):
 
     return s82_objs
 
-def load_stone_lcs():
+def load_stone_lcs(filter_object_ids=[]):
     # Load Stone et al. (2022) data
     fits_file = 'data/stone_TotalDat_v2.fits'
     hdul = fits.open(fits_file)
@@ -237,6 +237,7 @@ def load_stone_lcs():
         'log_SIGMA', 
         'log_TAU_REST',
     ]
+    
     stone_lcs = OrderedDict()
 
     for i in range(len(data)):
@@ -299,6 +300,10 @@ def load_stone_lcs():
         else:
             print(f"Stone DBID {stone_ids[i]} has no match in S82 catalog, removing.")
             del stone_lcs[stone_ids[i]]
+
+    if filter_object_ids:
+        stone_lcs = {k: v for k, v in stone_lcs.items() if v.get('object_id') in filter_object_ids}
+        print(f"After filtering, {len(stone_lcs)} Stone objects remain.")
     return list(stone_lcs.values())
 
 def load_s82_from_hdf5(file_path="s82_objs.h5"):
