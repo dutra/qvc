@@ -590,7 +590,7 @@ def process_samples(flat_samples, data, percentiles=[16, 50, 84], bands=['u', 'g
     result['log_sigma_UV_diluted'], result['log_sigma_UV_diluted_err'] = sym_percentile(samples_log_sigma_UV_diluted)
 
     # log_sigma_UV
-    samples_log_sigma_UV = flat_samples["log_sigma0"] / np.log(10) + log_broken_pl(lambda_ref, lam_s, eta_tau1, eta_tau2, eta_break)
+    samples_log_sigma_UV = flat_samples["log_sigma0"] / np.log(10) + log_broken_pl(lambda_ref, lam_s, eta_A1, eta_A2, eta_break)
     result['log_sigma_UV'], result['log_sigma_UV_err'] = sym_percentile(samples_log_sigma_UV)
 
     # log_tau_UV_RF
