@@ -568,7 +568,7 @@ def process_samples(flat_samples, data, percentiles=[16, 50, 84], bands=['u', 'g
     log_tau_band = []
     for band in bands:
         lam_eff = lambda_pivot[band] / (1 + data['z'])
-        val = log_tau_drw0 / np.log(10) - np.log10(1 + data['z']) + log_broken_pl(lam_eff, lam_s, eta_A1, eta_A2, eta_break)
+        val = log_tau_drw0 / np.log(10) - np.log10(1 + data['z']) + log_broken_pl(lam_eff, lam_s, eta_tau1, eta_tau2, eta_break)
         log_tau_band.append(val)
     log_tau_band = np.array(log_tau_band).T
 
