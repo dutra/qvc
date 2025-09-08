@@ -273,7 +273,8 @@ def populate_sdss_fields(objs, progress_bar=True):
         i = i[0]  # Get the first index if there are multiple matches
         d['ra'] = obj['RA']
         d['dec'] = obj['DEC']
-        d['z'] = obj['Z_SYS']
+        d['z'] = fits_data['Z_SYS'][i]
+        d['z_err'] = fits_data['Z_SYS_ERR'][i]
         d['sdss_name'] = fits_data['SDSS_NAME'][i]  # Extract SDSS_NAME
         d['log_lbol'] = -999.0
         if d['z'] < 0.7:
@@ -442,9 +443,9 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, spectra_fit_cs
         print("Populating spectra fit data from:", spectra_fit_csv)
         df = populate_spectra_fit(df, spectra_fit_csv)
     else:
-        raise ValueError("spectra_fit_csv not provided")
         print("[WARNING] spectra_fit_csv not provided, assuming spectral fit fields are in agn h5 file")
         if 'alpha_lambda' not in df.columns:
+            raise ValueError("spectra_fit_csv not provided and spectral fields not found in agn h5 file")
             print("[WARNING] spectral fields not in data, setting everything to 0.0")
             df['alpha_lambda'] = 0
             df['alpha_lambda_err'] = 0
@@ -459,8 +460,8 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, spectra_fit_cs
     df['alpha_nu_err'] = df['alpha_lambda_err']
 
     if 'cov_log_sigma_UV_log_tau_UV_RF' not in df.columns:
-        print("[WARNING] cov_log_sigma_UV_log_tau_UV_RF not in data, setting to 0.0")
-        df['cov_log_sigma_UV_log_tau_UV_RF'] = 0.0
+        print("[WARNING] cov_log_sigma_UV_log_tau_UV_RF not in data")
+        #df['cov_log_sigma_UV_log_tau_UV_RF'] = 0.0
     
 
     num_quasars_z_0_1_before = len(df[(df['z'] > 0) & (df['z'] <= 1.0)])
@@ -490,13 +491,14 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, spectra_fit_cs
     mask_exclude = ~df['object_id'].astype(str).isin(exclusion_object_ids)
     exclusion_sdss_names = [
         '221120.38+010905.6', # removed because wrong redshift
+        '024555.35+005332.6' # remove because weird spectra
                             ]
     mask_exclude = ~df['sdss_name'].astype(str).isin(exclusion_sdss_names)
     print(f"Excluding {np.sum(~mask_exclude)} objects by object_id exclusion list")
     df = df[mask_exclude].reset_index(drop=True)
     # Define cuts as (column, lower_limit, upper_limit)
     cuts = [
-        ('f_host_4200', None, 0.2),
+        #('f_host_4200', None, 0.2),
         #('z', None, 0.5),
         ('log_tau_UV_RF', 1.5, None),
         #('alpha_lambda', None, 0),

@@ -1190,7 +1190,6 @@ def plot_predicted_L2500_vs_sigmahat(
         # --- observables ---
         log_sigma   = obs_arr[agn_model_oidx["log_sigma_UV"]]
         log_tau     = obs_arr[agn_model_oidx["log_tau_UV_RF"]]
-        alpha_nu    = obs_arr[agn_model_oidx["alpha_nu"]]
 
         # --- pivots ---
         log_sigma_p = pivots_array[agn_model_oidx["log_sigma_UV"]]

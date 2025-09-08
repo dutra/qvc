@@ -135,6 +135,7 @@ def log_likelihood(theta, *, agn_data, pantheon_data,
     # AGN likelihood
     # ------------------------
     z = agn_data['z']
+    z_err = agn_data['z_err']
     m_obs = agn_data['apparent_mag_2500']
     m_err = agn_data['apparent_mag_2500_err']
 
@@ -143,10 +144,15 @@ def log_likelihood(theta, *, agn_data, pantheon_data,
 
     M_pred = M_model_agn(agn_params_arr, agn_obs_arr, agn_pivot_arr)
     M_pred_err = M_model_agn_err(agn_params_arr, agn_obs_arr, agn_err_arr, agn_pivot_arr)
+    # if np.any(M_pred_err < 0):
+    #     print(f"[WARNING] Invalid AGN model parameters at indices: {idx}. Returning -inf log-likelihood.")
+    #     print("For object_id: ", agn_data['object_id'][idx])
+    #     return -np.inf, empty_blob(N_obj)
     
     mu_err = np.sqrt(
         m_err**2 +
         M_pred_err**2 +
+        #z_err**2 +
         (0.055 * z)**2 +
         np.exp(params['log_f'])**2
     )
@@ -169,5 +175,6 @@ def log_likelihood(theta, *, agn_data, pantheon_data,
             completeness2d=completeness2d, m_grid=mag_centers,
             sigma_completeness=completeness_scatter
         )
+    ll = ll_snia + ll_agn - ll_completeness
 
-    return ll_snia + ll_agn - ll_completeness, comp_blob
+    return ll, comp_blob
