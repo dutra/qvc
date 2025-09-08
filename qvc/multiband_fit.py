@@ -340,15 +340,24 @@ def make_lc(Model, data, bands=['u', 'g', 'r', 'i', 'z'], inject_fake=False):
 
     # Inject fake DRW
     if inject_fake:
+        # one seed per LC (still deterministic)
         key = jax.random.PRNGKey(0)
-        log_tau0 = jax.random.uniform(key, minval=0.2, maxval=6.0) + np.log10(1 + data['z'])
-        log_sigma0 = jax.random.uniform(key, minval=-1.0, maxval=0.0)
-        all_mags = sample_drw_tinygp(jax.random.PRNGKey(0),
-                                    all_times,
-                                    10**log_tau0,
-                                    10**log_sigma0,
-                                    noise=all_magerrs,
-                                    mean=0.0)[0]
+        key, k_tau, k_sig, k_drw = jax.random.split(key, 4)
+
+        # draw base-10 logs, then add cosmological time-dilation term to tau
+        log_tau0_rf = jax.random.uniform(k_tau, minval=0.2, maxval=6.0)  # log10 tau_rest
+        log_tau0 = log_tau0_rf + np.log10(1.0 + data['z'])               # log10 tau_obs
+        log_sigma0 = jax.random.uniform(k_sig, minval=-1.0, maxval=0.0)  # log10 sigma
+
+        # use a fresh key for the DRW realization
+        all_mags = sample_drw_tinygp(
+            k_drw,
+            all_times,
+            10.0**log_tau0,      # tau in days (base-10 exponent)
+            10.0**log_sigma0,    # sigma in mag (base-10 exponent)
+            noise=all_magerrs,
+            mean=0.0
+        )[0]
         all_mags = np.array(all_mags)
 
     # Remove NaNs
