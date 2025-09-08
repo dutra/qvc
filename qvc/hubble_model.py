@@ -4,12 +4,12 @@ from collections import OrderedDict
 
 # --- ONE SOURCE OF TRUTH (orders) ---
 agn_model_req_params = ("M0_agn", "alpha_agn", "beta_agn")
-ag_model_req_obs     = ("log_sigma_UV", "log_tau_UV_RF")
+agn_model_req_obs     = ("log_sigma_UV", "log_tau_UV_RF")
 agn_model_req_errs   = ("log_sigma_UV_err", "log_tau_UV_RF_err", "cov_log_sigma_UV_log_tau_UV_RF")
 
 # Build index maps once (module import time)
 agn_model_pidx = {k:i for i,k in enumerate(agn_model_req_params)}
-agn_model_oidx = {k:i for i,k in enumerate(ag_model_req_obs)}
+agn_model_oidx = {k:i for i,k in enumerate(agn_model_req_obs)}
 agn_model_eidx = {k:i for i,k in enumerate(agn_model_req_errs)}
 
 def _require(keys, provided, where):
@@ -24,11 +24,11 @@ def agn_model_pack_params(params_dict):
 
 
 def agn_model_pack_obs(obs_dict):
-    _require(ag_model_req_obs,  obs_dict, "observables")
+    _require(agn_model_req_obs,  obs_dict, "observables")
     _require(agn_model_req_errs, obs_dict, "errors")
-    obs = np.array([obs_dict[k] for k in ag_model_req_obs],  dtype=float)
+    obs = np.array([obs_dict[k] for k in agn_model_req_obs],  dtype=float)
     err = np.array([obs_dict[k] for k in agn_model_req_errs], dtype=float)
-    pivots = np.array([np.mean(obs_dict[k]) for k in ag_model_req_obs], dtype=float)
+    pivots = np.array([np.mean(obs_dict[k]) for k in agn_model_req_obs], dtype=float)
     return obs, err, pivots
 
 # Linear model
@@ -50,26 +50,25 @@ def M_model_agn(params_arr, obs_arr, pivots_array):
     )
 
 
-def M_model_agn_err(params_arr, obs_arr, err_arr, pivots_array):
+def M_model_agn_err(params_arr, obs_arr, err_arr, pivots_array, check_negative=False):
     alpha_agn   = params_arr[agn_model_pidx["alpha_agn"]]
     beta_agn    = params_arr[agn_model_pidx["beta_agn"]]
 
     log_sigma_UV_err  = err_arr[agn_model_eidx["log_sigma_UV_err"]]
     log_tau_UV_RF_err = err_arr[agn_model_eidx["log_tau_UV_RF_err"]]
-    #cov_log_sigma_tau = err_arr[agn_model_eidx["cov_log_sigma_UV_log_tau_UV_RF"]]
+    cov_log_sigma_tau = err_arr[agn_model_eidx["cov_log_sigma_UV_log_tau_UV_RF"]]
 
-    # r = ((alpha_agn * log_sigma_UV_err)**2
-    #     + (beta_agn  * log_tau_UV_RF_err)**2
-    #     #+ 2 * alpha_agn * beta_agn * cov_log_sigma_tau
-    # )
-    # if np.any(r < 0):
-    #     idx = np.where(r < 0)
-    #     return np.full_like(r, -1), idx
-    return np.sqrt(
-        (alpha_agn * log_sigma_UV_err)**2
+    r = ((alpha_agn * log_sigma_UV_err)**2
         + (beta_agn  * log_tau_UV_RF_err)**2
         #+ 2 * alpha_agn * beta_agn * cov_log_sigma_tau
     )
+    if check_negative:
+        if np.any(r < 0):
+            idx = np.where(r < 0)
+            return np.full_like(r, -1), idx
+        return np.sqrt(r), None
+    else:
+        return np.sqrt(r)
 
 # def broken_power_law_err(x, x_err, x_break, d1, d2, ds):
 #     u = ds * (x - x_break)
@@ -109,10 +108,10 @@ def get_model_params(cosmo_model, only_sna=False):
         ("M0_sn",       (-20, -18)),    # SN absolute magnitude, MLE: ~-19.3
 
         ("M0_agn",   (-23.0, -18.0)),
-        ("alpha_agn", (0.0,  10.0)),
-        ("beta_agn",  (-5.0,  0.0)),
+        ("alpha_agn", (0.0,  20.0)),
+        ("beta_agn",  (-20.0,  0.0)),
 
-        ("log_f",     (-2.0,  0.3)),
+        ("log_f",     (-5.0,  0.3)),
 
         ("H0",       (70.0, 76.0)),
         ("Om0",      (0.2, 0.8)),
@@ -127,7 +126,7 @@ def get_model_params(cosmo_model, only_sna=False):
         ])
     elif cosmo_model == 'Flatw0waCDM':
         priors |= OrderedDict([
-            ("w0", (-3.0, 5.0)),   # covers phantom (<-1), Λ (-1), quintessence (> -1), and even w>0
+            ("w0", (-3.0, 1.0)),   # covers phantom (<-1), Λ (-1), quintessence (> -1), and even w>0
             ("wa", (-30, 10))    # symmetric variation
         ])
 

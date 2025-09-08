@@ -143,11 +143,12 @@ def log_likelihood(theta, *, agn_data, pantheon_data,
     agn_obs_arr, agn_err_arr, agn_pivot_arr = agn_model_pack_obs(agn_data)
 
     M_pred = M_model_agn(agn_params_arr, agn_obs_arr, agn_pivot_arr)
-    M_pred_err = M_model_agn_err(agn_params_arr, agn_obs_arr, agn_err_arr, agn_pivot_arr)
-    # if np.any(M_pred_err < 0):
-    #     print(f"[WARNING] Invalid AGN model parameters at indices: {idx}. Returning -inf log-likelihood.")
-    #     print("For object_id: ", agn_data['object_id'][idx])
-    #     return -np.inf, empty_blob(N_obj)
+    M_pred_err, idx = M_model_agn_err(agn_params_arr, agn_obs_arr, agn_err_arr, agn_pivot_arr, check_negative=True)
+    if np.any(M_pred_err < 0):
+        print(f"[ERROR] Negative AGN model error at indices: {idx}. Returning -inf log-likelihood.")
+        print("For object_id: ", agn_data['object_id'][idx])
+        raise ValueError("Negative AGN model error encountered.")
+        # return -np.inf, empty_blob(N_obj)
     
     mu_err = np.sqrt(
         m_err**2 +

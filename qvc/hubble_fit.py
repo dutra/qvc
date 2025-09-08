@@ -70,7 +70,12 @@ def run_mcmc_pipeline(df_agn, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, c
     _z_pivot = (1 / np.exp(np.mean(np.log(1 / (1 + df_agn['z']))))) - 1
     print(f"z mean: {df_agn['z'].mean():.3f}, calculated z pivot: {_z_pivot:.3f}")
 
-    agn_data = {col: df_agn[col].values for col in df_agn.columns}
+
+    agn_fields = agn_model_req_params + agn_model_req_obs + agn_model_req_errs
+    agn_fields += ('apparent_mag_2500', 'apparent_mag_2500_err', 'z', 'z_err', 'object_id')
+    agn_data = {col: df_agn[col].values for col in agn_fields if col in df_agn.columns}
+
+    pantheon_fields = ['zHD', 'm_b_corr', 'IS_CALIBRATOR']
     pantheon_data = {col: df_pantheon[col].values for col in df_pantheon.columns}
 
     checkpoint_folder = f'results/dynesty_checkpoint/{prefix}'
@@ -139,7 +144,7 @@ def run_mcmc_pipeline(df_agn, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, c
                     checkpoint_file=checkpoint_file,
                     print_progress=True,
                     dlogz_init=0.01,                 
-                    n_effective=500,                # 300–1000 typical for model comparison
+                    n_effective=2000,                # 300–1000 typical for model comparison
                     nlive_init=max(500, 50*ndim),   # bump live points
                     nlive_batch=max(250, 25*ndim)   # reasonable batch size for dynamic allocation
                     # optional: sample='rwalk', walks=50, bound='multi' if you expect multi-modality
@@ -432,8 +437,8 @@ if __name__ == "__main__":
     df_agn = load_agn_data(args.agn_data_filepath, populate_sdss=args.force_populate_fields, spectra_fit_csv=args.spectra_fit_csv)
 
     if args.N and args.N > 0:
-        df_agn = df_agn.sample(n=args.N, random_state=42)
-
+        # df_agn = df_agn.sample(n=args.N, random_state=42)
+        df_agn = df_agn[:args.N]
     if args.run == "single": # default
         run_single(df_agn=df_agn, df_pantheon=df_pantheon, _sna_L=_sna_L, _sna_Lower=_sna_Lower, _sna_LogdetCov=_sna_LogdetCov, cosmo_model=args.cosmo_model,
              completeness=not args.disable_completeness, use_full_cov=not args.disable_full_covariance, resume=args.resume,

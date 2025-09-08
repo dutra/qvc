@@ -54,6 +54,8 @@ Also under tutorials/data, upload the parquet files from https://www.dropbox.com
 ### Multiband fit
 #### Specifying objects per id
 
+pip install -U tfp-nightly
+
 ``JAX_ENABLE_X64=True PREFIX=test SUFFIX=joint python multiband_fit.py --progress --plot --nwarm 50 --nsamp 20 --f_host_shen11 --bwb --filter_object_id 1406548 1412797``
 
 #### Running a batch of N
