@@ -63,7 +63,13 @@ zero_mean = False
 has_jitter = True
 has_lag = True
 
-universal_params = ['eta_A1_mean', 'eta_A2_mean', 'eta_tau1_mean', 'eta_tau2_mean', 'eta_break', 'lam_s', 'sigma_eta_A1', 'sigma_eta_A2', 'sigma_eta_tau1', 'sigma_eta_tau2', 'log_sigma_eta_A1', 'log_sigma_eta_A2', 'log_sigma_eta_tau1', 'log_sigma_eta_tau2']
+universal_params = (
+    'eta_A1_mean','eta_A2_mean','eta_tau1_mean','eta_tau2_mean',
+    'eta_break','lam_s',
+    'sigma_eta_A1','sigma_eta_A2','sigma_eta_tau1','sigma_eta_tau2',
+    'log_sigma_eta_A1','log_sigma_eta_A2','log_sigma_eta_tau1','log_sigma_eta_tau2',
+    'mu_log_tau_rf','sigma_log_tau_rf','mu_log_sigma_hat0','sigma_log_sigma_hat0'
+)
 
 def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_fake_in, log_sigma_fake_in, 
                 bwb=True, disable_poly1=False, d_eta=True, disable_lag_blr=False, wide_eta_priors=False, free_eta_break=False):
@@ -93,28 +99,37 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_
             eta_tau1_mean = numpyro.sample("eta_tau1_mean", dist.TruncatedNormal(-0.5, 1.0))
             eta_tau2_mean = numpyro.sample("eta_tau2_mean", dist.LogNormal(jnp.log(0.15), 1.0))
         else:
-            eta_A1_mean = numpyro.sample("eta_A1_mean", dist.TruncatedNormal(-0.5, 0.2, high=0.0))
-            eta_A2_mean = numpyro.sample("eta_A2_mean", dist.TruncatedNormal(-0.5, 0.2, high=0.0))
-            eta_tau1_mean = numpyro.sample("eta_tau1_mean", dist.TruncatedNormal(-0.5, 0.2))
+            eta_A1_mean = numpyro.sample("eta_A1_mean", dist.TruncatedNormal(-0.5, 0.4, high=0.0))
+            eta_A2_mean = numpyro.sample("eta_A2_mean", dist.TruncatedNormal(-0.5, 0.4, high=0.0))
+            eta_tau1_mean = numpyro.sample("eta_tau1_mean", dist.TruncatedNormal(-0.5, 0.4))
             #eta_tau2_mean = numpyro.sample("eta_tau2_mean", dist.TruncatedNormal(0.1, 0.2, low=0.0))
-            eta_tau2_mean = numpyro.sample("eta_tau2_mean", dist.LogNormal(jnp.log(0.15), 0.2))  # removes kink
+            eta_tau2_mean = numpyro.sample("eta_tau2_mean", dist.LogNormal(jnp.log(0.15), 0.4))  # removes kink
         if free_eta_break:
             eta_break = numpyro.sample("eta_break", dist.TruncatedNormal(0.1, 0.1, low=0.0))
+            lam_s = numpyro.sample("lam_s", dist.Normal(2500.0, 50.0)) # Hard to constrain
         else:
             eta_break = numpyro.deterministic("eta_break", 0.1)
-        #lam_s = numpyro.sample("lam_s", dist.Normal(2500.0, 100.0)) # Hard to constrain
-        lam_s = numpyro.deterministic("lam_s", 2500.0)
+            lam_s = numpyro.deterministic("lam_s", 2500.0)
 
         # Population-level scatter (how much objects can deviate) 
-        log_sigma_eta_A1 = numpyro.sample("log_sigma_eta_A1", dist.Normal(jnp.log(0.1), 0.1))
-        log_sigma_eta_A2 = numpyro.sample("log_sigma_eta_A2", dist.Normal(jnp.log(0.1), 0.1))
-        log_sigma_eta_tau1 = numpyro.sample("log_sigma_eta_tau1", dist.Normal(jnp.log(0.1), 0.1))
-        log_sigma_eta_tau2 = numpyro.sample("log_sigma_eta_tau2", dist.Normal(jnp.log(0.1), 0.1))
+        log_sigma_eta_A1 = numpyro.sample("log_sigma_eta_A1", dist.Normal(jnp.log(0.1), 0.2))
+        log_sigma_eta_A2 = numpyro.sample("log_sigma_eta_A2", dist.Normal(jnp.log(0.1), 0.2))
+        log_sigma_eta_tau1 = numpyro.sample("log_sigma_eta_tau1", dist.Normal(jnp.log(0.1), 0.2))
+        log_sigma_eta_tau2 = numpyro.sample("log_sigma_eta_tau2", dist.Normal(jnp.log(0.1), 0.2))
 
         sigma_eta_A1 = numpyro.deterministic("sigma_eta_A1", jnp.exp(log_sigma_eta_A1))
         sigma_eta_A2 = numpyro.deterministic("sigma_eta_A2", jnp.exp(log_sigma_eta_A2))
         sigma_eta_tau1 = numpyro.deterministic("sigma_eta_tau1", jnp.exp(log_sigma_eta_tau1))
         sigma_eta_tau2 = numpyro.deterministic("sigma_eta_tau2", jnp.exp(log_sigma_eta_tau2))
+
+        # --- Population hyperpriors (rest-frame) ---
+        mu_log_tau_rf  = numpyro.sample("mu_log_tau_rf",  dist.Normal(jnp.log(10**2.5), 0.5))
+        sigma_log_tau_rf = numpyro.sample("sigma_log_tau_rf", dist.HalfNormal(0.75))
+
+        # Prior for standardized amplitude (dimensionless)
+        mu_log_sigma_hat0    = numpyro.sample("mu_log_sigma_hat0", dist.Normal(-1.0, 0.5))
+        sigma_log_sigma_hat0 = numpyro.sample("sigma_log_sigma_hat0", dist.HalfNormal(0.4))
+
 
         with numpyro.plate("objects", batch_size):
             # Object-level parameters (shape: [B])
@@ -136,15 +151,19 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_
                 eta_tau1 = numpyro.deterministic("eta_tau1", jnp.full(batch_size, eta_tau1_mean))
                 eta_tau2 = numpyro.deterministic("eta_tau2", jnp.full(batch_size, eta_tau2_mean))
 
-            # Core kernel parameters
+            # --- Core kernel parameters (hierarchical & identified) ---
             #log_tau_drw0 = numpyro.sample("log_tau_drw0", dist.TruncatedNormal(log_tau_drw0_c, 2.0, low=jnp.log(10**1.5)))
-            log_tau_drw0 = numpyro.sample(
-                "log_tau_drw0",
-                dist.TruncatedNormal(log_tau_drw0_c, 0.7,
-                                    low=jnp.log(10**1.5), high=jnp.log(10**4.0))
-            )
-            log_sigma0 = numpyro.sample("log_sigma0", dist.Normal(-0.8, 1.0))
-            log_sigma_hat0 = numpyro.deterministic("log_sigma_hat0", log_sigma0 - 0.5 * log_tau_drw0)
+            # log_tau_drw0 = numpyro.sample("log_tau_drw0", dist.TruncatedNormal(log_tau_drw0_c, 1.5, low=jnp.log(10**1.5)))
+            # log_sigma0 = numpyro.sample("log_sigma0", dist.Normal(-0.8, 1.0))
+            # log_sigma_hat0 = numpyro.deterministic("log_sigma_hat0", log_sigma0 - 0.5 * log_tau_drw0)
+
+            # Rest-frame tau prior with pooling; then add cosmological time dilation
+            log_tau_rf = numpyro.sample("log_tau_rf", dist.Normal(mu_log_tau_rf, sigma_log_tau_rf))
+            log_tau_drw0 = numpyro.deterministic("log_tau_drw0", log_tau_rf + jnp.log1p(zs))
+
+            # Put prior on standardized amplitude; derive log_sigma0 from it
+            log_sigma_hat0 = numpyro.sample("log_sigma_hat0", dist.StudentT(df=4, loc=mu_log_sigma_hat0, scale=sigma_log_sigma_hat0))
+            log_sigma0 = numpyro.deterministic("log_sigma0", log_sigma_hat0 + 0.5 * log_tau_drw0)
 
             # Host galaxy dilution
             alpha_host = numpyro.sample("alpha_host", dist.Normal(1.0, 0.1)) # alpha_lam
