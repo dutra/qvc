@@ -475,15 +475,11 @@ if __name__ == '__main__':
 
 
     filter_object_ids = args.filter_object_id if args.filter_object_id else []
-    print(f"filter_object_ids: {filter_object_ids}")
-    filter_object_ids = pd.read_csv(args.filter_file, dtype={"object_id": str})["object_id"].values if (args.filter_file and (not args.filter_object_id)) else filter_object_ids
-    print(f"Loaded {len(filter_object_ids)=}")
-
     if len(filter_object_ids) > 0:
         print(f"Filtering object IDs: {len(filter_object_ids)}")
 
     if args.load_stone_lcs:
-        objs = load_stone_lcs()
+        objs = load_stone_lcs(filter_object_ids=filter_object_ids)
         print(f"Loaded {len(objs)} Stone light curves.")
     else:
         objs = concat_light_curves(filter_object_ids=filter_object_ids, progress_bar=args.progress)
