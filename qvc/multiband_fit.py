@@ -74,7 +74,7 @@ universal_params = (
 
 def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_fake_in, log_sigma_fake_in, 
                 bwb=True, disable_poly1=False, d_eta=True, disable_lag_blr=False, wide_eta_priors=False, free_eta_break=False,
-                couple_sigma_tau=True):
+                couple_sigma_tau=True, sigma_tau_uniform=False):
     # Precompute and capture constants in the closure so they are treated as
     # static by JAX/NumPyro. This prevents unnecessary retracing/recompilation
     # when running MCMC, as these values do not change between runs.
@@ -126,27 +126,13 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_
         sigma_eta_tau2 = numpyro.deterministic("sigma_eta_tau2", jnp.exp(log_sigma_eta_tau2))
 
         # --- Population hyperpriors (rest-frame) ---
-        mu_log_tau_rf  = numpyro.sample(
-            "mu_log_tau_rf", dist.Normal(jnp.log(10**3.0), 1.0)
-        )
-        sigma_log_tau_rf = numpyro.sample(
-            "sigma_log_tau_rf", dist.HalfNormal(1.25)
-        )
+        # mu_log_tau_rf  = numpyro.sample(
+        #     "mu_log_tau_rf", dist.Normal(jnp.log(10**3.0), 1.0)
+        # )
+        # sigma_log_tau_rf = numpyro.sample(
+        #     "sigma_log_tau_rf", dist.HalfNormal(1.25)
+        # )
 
-        if couple_sigma_tau:
-            # Hyperpriors for standardized amplitude (dimensionless)
-            print("[INFO] Using coupled σ–τ prior: log_sigma0 = log_sigma_hat0 + 0.5·log_tau_drw0. "
-                  "This enforces the DRW scaling relation (σ ∝ τ^0.5), which reduces variance in the hierarchy "
-                  "but can bias recovery if the injected process does not follow that scaling.")            
-            mu_log_sigma_hat0 = numpyro.sample("mu_log_sigma_hat0", dist.Normal(-1.0, 0.8))
-            sigma_log_sigma_hat0 = numpyro.sample("sigma_log_sigma_hat0", dist.HalfNormal(0.7))
-        else:
-            print("[INFO] Using uncoupled σ–τ prior: log_sigma0 sampled independently of log_tau_drw0. "
-                  "This avoids embedding the DRW scaling relation and is safer for simulation tests "
-                  "or when σ and τ are expected to vary independently.")
-            # Hyperpriors for *direct* log_sigma0
-            mu_log_sigma0 = numpyro.sample("mu_log_sigma0", dist.Normal(-1.0, 0.8))
-            sigma_log_sigma0 = numpyro.sample("sigma_log_sigma0", dist.HalfNormal(0.7))
         with numpyro.plate("objects", batch_size):
             # Object-level parameters (shape: [B])
 
@@ -172,30 +158,31 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_
             # log_tau_drw0 = numpyro.sample("log_tau_drw0", dist.TruncatedNormal(log_tau_drw0_c, 1.5, low=jnp.log(10**1.5)))
             # log_sigma0 = numpyro.sample("log_sigma0", dist.Normal(-0.8, 1.0))
             # log_sigma_hat0 = numpyro.deterministic("log_sigma_hat0", log_sigma0 - 0.5 * log_tau_drw0)
-
-            # Rest-frame tau prior with pooling; then add cosmological time dilation
-            log_tau_rf = numpyro.sample("log_tau_rf", dist.Normal(mu_log_tau_rf, sigma_log_tau_rf))
-            log_tau_drw0 = numpyro.deterministic("log_tau_drw0", log_tau_rf + jnp.log1p(zs))
-
+            if sigma_tau_uniform:
+                print("[INFO] Using Uniform prior on log_sigma0 and log_tau_drw0.")
+                log_tau_drw0 = numpyro.sample("log_tau_drw0", dist.Uniform(1.5*jnp.log(10), 6.0*jnp.log(10)))
+            else:
+                print("[INFO] Using Normal prior on log_sigma0 and log_tau_drw0.")
+                log_tau_drw0 = numpyro.sample("log_tau_drw0",
+                    dist.TruncatedNormal(log_tau_drw0_c, 1.2*jnp.log(10), low=1.5*jnp.log(10), high=6.0*jnp.log(10)))
+            
             if couple_sigma_tau:
                 # Coupled prior: log_sigma depends on log_tau
                 # Put prior on standardized amplitude; derive log_sigma0 from it
-                log_sigma_hat0 = numpyro.sample(
-                    "log_sigma_hat0",
-                    dist.Normal(mu_log_sigma_hat0, sigma_log_sigma_hat0)   # << Normal is safer than StudentT(df=4)
-                )
-                log_sigma0 = numpyro.deterministic(
-                    "log_sigma0",
-                    log_sigma_hat0 + 0.5 * log_tau_drw0
-                )
+                print("[WARNING] couple_sigma_tau=True: log_sigma0 is coupled to log_tau_drw0 via log_sigma_hat0 prior.")
+                if sigma_tau_uniform:
+                    log_sigma_hat0 = numpyro.sample("log_sigma_hat0", dist.Uniform(jnp.log(0.01), jnp.log(1.4)))
+                else:
+                    log_sigma_hat0 = numpyro.sample("log_sigma_hat0", dist.Normal(jnp.log(0.2), 1.0*jnp.log(10)))
+                log_sigma0 = numpyro.deterministic("log_sigma0", log_sigma_hat0 + 0.5 * log_tau_drw0)
             else:
                 # Uncoupled prior: log_sigma independent of log_tau
-                log_sigma0 = numpyro.sample(
-                    "log_sigma0",
-                    dist.Normal(mu_log_sigma0, sigma_log_sigma0)   # << replaced StudentT with Normal
-                )
-                log_sigma_hat0 = numpyro.deterministic("log_sigma_hat0",
-                    log_sigma0 - 0.5 * log_tau_drw0)
+                print("[WARNING] couple_sigma_tau=False: log_sigma0 is independent of log_tau_drw0.")
+                if sigma_tau_uniform:
+                    log_sigma0 = numpyro.sample("log_sigma0", dist.Uniform(-2.0*jnp.log(10), 0.2*jnp.log(10)))
+                else:
+                    log_sigma0 = numpyro.sample("log_sigma0", dist.Normal(-0.6*jnp.log(10), 1.0*jnp.log(10)))
+                log_sigma_hat0 = numpyro.deterministic("log_sigma_hat0", log_sigma0 - 0.5 * log_tau_drw0)
 
             # Host galaxy dilution
             alpha_host = numpyro.sample("alpha_host", dist.Normal(1.0, 0.1)) # alpha_lam
@@ -399,7 +386,7 @@ def make_lc(Model, data, bands=['u', 'g', 'r', 'i', 'z'], inject_fake=False):
         key, k_tau, k_sig, k_drw = jax.random.split(key, 4)
 
         # draw base-10 logs, then add cosmological time-dilation term to tau
-        log_tau0_rf = jax.random.uniform(k_tau, minval=0.2, maxval=6.0)  # log10 tau_rest
+        log_tau0_rf = jax.random.uniform(k_tau, minval=0.2, maxval=5.0)  # log10 tau_rest
         log_tau0 = log_tau0_rf + np.log10(1.0 + data['z'])               # log10 tau_obs
         log_sigma0 = jax.random.uniform(k_sig, minval=-1.0, maxval=0.0)  # log10 sigma
 
@@ -455,6 +442,15 @@ def make_lc(Model, data, bands=['u', 'g', 'r', 'i', 'z'], inject_fake=False):
     all_magerrs = all_magerrs[mask_outlier]
     band_idx = band_idx[mask_outlier]
 
+    # Calculate time length in observed frame and rest frame
+    if len(all_times) > 0:
+        t_obs_length = np.max(all_times) - np.min(all_times)
+        t_rf_length = t_obs_length / (1.0 + data['z'])
+    else:
+        t_obs_length = 0.0
+        t_rf_length = 0.0
+    print(f"Observed-frame length: {t_obs_length:.2f} days, Rest-frame length: {t_rf_length:.2f} days")
+
     # --- Center magnitudes per band AFTER outlier rejection ---
     mags_means = np.array([
         np.nanmean(all_mags[band_idx == i]) for i in range(len(bands))
@@ -462,6 +458,8 @@ def make_lc(Model, data, bands=['u', 'g', 'r', 'i', 'z'], inject_fake=False):
     mags_stds = np.array([
         np.nanstd(all_mags[band_idx == i]) for i in range(len(bands))
     ])
+    for i, band in enumerate(bands):
+        print(f"Band {band}: mean = {mags_means[i]:.4f}, std = {mags_stds[i]:.4f}")
 
     for i in range(len(bands)):
         band_mask = band_idx == i
@@ -488,7 +486,9 @@ def make_lc(Model, data, bands=['u', 'g', 'r', 'i', 'z'], inject_fake=False):
         'mags_means': mags_means,
         'mags_stds': mags_stds,
         'log_tau_fake': -99.0,
-        'log_sigma_fake': -99.0
+        'log_sigma_fake': -99.0,
+        't_obs_length': t_obs_length,
+        't_rf_length': t_rf_length,
     }
     if inject_fake:
         batch_dict['log_tau_fake'] = np.log(10**log_tau0)
@@ -529,6 +529,7 @@ if __name__ == '__main__':
     parser.add_argument("--disable_corner_plot", action="store_true", default=False, help="Disable corner plot generation.")
     parser.add_argument("--couple_sigma_tau", action="store_true", default=False, help="Use coupled prior for sigma and tau.")
     parser.add_argument("--disable_lag_blr", action="store_true", default=False, help="Disable BLR lag model.")
+    parser.add_argument("--sigma_tau_uniform", action="store_true", default=False, help="Use uniform priors for sigma and tau.")
     args = parser.parse_args()
     print("Args: ", args)
 
@@ -627,6 +628,8 @@ if __name__ == '__main__':
             'log_tau_fake': obj['log_tau_fake'],
             'log_sigma_fake': obj['log_sigma_fake'],
             'dropped_bands': obj['dropped_bands'],
+            't_obs_length': obj['t_obs_length'],
+            't_rf_length': obj['t_rf_length'],
         })
 
     num_objects = len(batch_data)
@@ -675,7 +678,7 @@ if __name__ == '__main__':
                                       bwb=args.bwb, disable_poly1=args.disable_poly1, d_eta=args.d_eta,
                                       disable_lag_blr=args.disable_lag_blr, 
                                       free_eta_break=args.free_eta_break, wide_eta_priors=args.wide_eta_priors,
-                                      couple_sigma_tau=args.couple_sigma_tau)
+                                      couple_sigma_tau=args.couple_sigma_tau, sigma_tau_uniform=args.sigma_tau_uniform)
 
     nuts_kernel = NUTS(numpyro_joint_model, init_strategy=init_strategy, dense_mass=True, max_tree_depth=args.max_tree_depth)
     mcmc = MCMC(
@@ -758,7 +761,30 @@ if __name__ == '__main__':
                 plot_posterior_fast(obj_flat_samples_flatten_per_band, obj)
             plot_broken_power_law(obj_flat_samples, obj)
             #dump_mcmc_diagnostics(mcmc, obj, i, len(batch_data))
-            
+        # If inject_fake, compare injected vs recovered sigma and tau
+        if args.inject_fake:
+            injected_log_tau = obj['log_tau_fake']
+            injected_log_sigma = obj['log_sigma_fake']
+            # Use median of posterior for recovered values
+            recovered_log_tau = np.median(obj_flat_samples_flatten_per_band['log_tau_drw0'])
+            recovered_log_sigma = np.median(obj_flat_samples_flatten_per_band['log_sigma0'])
+
+            tau_p16, tau_p84 = np.percentile(obj_flat_samples_flatten_per_band['log_tau_drw0'], [16, 84])
+            sigma_p16, sigma_p84 = np.percentile(obj_flat_samples_flatten_per_band['log_sigma0'], [16, 84])
+            tau_in_bounds = tau_p16 <= injected_log_tau <= tau_p84
+            sigma_in_bounds = sigma_p16 <= injected_log_sigma <= sigma_p84
+
+            print(
+                f"[FAKE INJECT] Object {obj['object_id']}:\n"
+                f"  log10_tau:    injected = {injected_log_tau/np.log(10):.3f}, "
+                f"recovered = {recovered_log_tau/np.log(10):.3f} "
+                f"(median ± err = {recovered_log_tau/np.log(10):.3f} ± {(tau_p84-tau_p16)/2/np.log(10):.3f}, "
+                f"16th = {tau_p16/np.log(10):.3f}, 84th = {tau_p84/np.log(10):.3f}, in bounds: {tau_in_bounds})\n"
+                f"  log10_sigma:  injected = {injected_log_sigma/np.log(10):.3f}, "
+                f"recovered = {recovered_log_sigma/np.log(10):.3f} "
+                f"(median ± err = {recovered_log_sigma/np.log(10):.3f} ± {(sigma_p84-sigma_p16)/2/np.log(10):.3f}, "
+                f"16th = {sigma_p16/np.log(10):.3f}, 84th = {sigma_p84/np.log(10):.3f}, in bounds: {sigma_in_bounds})"
+            )
         final_result_obj = obj | result | diagnostics | dict(prefix=prefix, suffix=suffix)
         results.append(final_result_obj)
         logging.info("--------------------------------------------------------------")
