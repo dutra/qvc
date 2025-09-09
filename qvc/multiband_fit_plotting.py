@@ -102,6 +102,90 @@ def plot_posterior(samples_flat, data, bins=20):
     logging.info(f"Saved posterior corner plot to {save_path}")
     return fig
 
+def plot_posterior_fast(samples_flat, data, bins=15, max_points=50_000, p_lo=0.5, p_hi=99.5):
+    """
+    Faster corner plot for large MCMC draws.
+
+    Parameters
+    ----------
+    samples_flat : dict[str, array_like]
+        Dict of MCMC samples for each param; shape (n_samples, ...) per entry.
+    data : dict
+        Must contain 'object_id' and 'z'.
+    bins : int
+        Number of bins (1D) and base for 2D via hist2d_kwargs.
+    max_points : int
+        Cap the number of points used in the plot (random subsample).
+    p_lo, p_hi : float
+        Percentile clipping for plotting ranges (mitigates outliers → faster hist).
+    """
+    logging.info("Saving posterior plot (fast path)")
+    object_id = data["object_id"]
+    z = data["z"]
+
+    # Labels first to ensure stable column order
+    flat_labels = list(samples_flat.keys())
+
+    # Pre-transform & flatten in one pass; avoid transpose later; cast to float32
+    cols = []
+    for k in flat_labels:
+        arr = np.asarray(samples_flat[k]).ravel()
+        # If parameter is in natural log, convert to log10 once here
+        if k.startswith("log_"):  # adjust rule if your naming differs
+            arr = arr / np.log(10.0)
+        cols.append(arr.astype(np.float32, copy=False))
+
+    # Stack columns directly; avoids vstack().T extra full-size copy
+    corner_data = np.column_stack(cols)
+
+    # Subsample if too many points (random without replacement)
+    n = corner_data.shape[0]
+    if n > max_points:
+        idx = np.random.default_rng().choice(n, size=max_points, replace=False)
+        corner_data = corner_data[idx]
+
+    # Handle constant params in a vectorized way
+    ptp = np.ptp(corner_data, axis=0)
+    const_mask = (ptp == 0)
+    if np.any(const_mask):
+        for i in np.where(const_mask)[0]:
+            print("Corner Constant param:", flat_labels[i])
+            corner_data[:, i] += np.random.normal(0, 1e-6, size=corner_data.shape[0]).astype(np.float32)
+
+    # Compute per-dimension plotting ranges with percentile clipping
+    lo = np.percentile(corner_data, p_lo, axis=0)
+    hi = np.percentile(corner_data, p_hi, axis=0)
+    # Ensure strictly increasing (protect against zero-width after clipping)
+    eps = 1e-12
+    rng = [(float(l), float(h) if h > l + eps else float(l + eps)) for l, h in zip(lo, hi)]
+
+    # Corner kwargs tuned for speed
+    fig = corner.corner(
+        corner_data,
+        labels=flat_labels,
+        show_titles=True,           # leave on; cost is small vs hist
+        quantiles=[0.16, 0.5, 0.84],
+        bins=bins,
+        range=rng,
+        plot_datapoints=False,      # already False in your code
+        plot_contours=False,        # avoids KDE; keeps it to hist2d
+        hist2d_kwargs={"bins": bins},  # keep 2D bins modest
+        quiet=True                  # suppress per-panel ticks work
+    )
+
+    # Save plot
+    # NOTE: prefix/suffix were undefined in your snippet; keep them if defined globally.
+    prefix = data.get("prefix", "default")
+    suffix = data.get("suffix", "v1")
+    output_dir = f"results/posterior_plots/{prefix}"
+    os.makedirs(output_dir, exist_ok=True)
+    save_path = os.path.join(output_dir, f"{z:.1f}_{object_id}_posterior_{suffix}.png")
+    plt.savefig(save_path, dpi=100, bbox_inches="tight")
+    plt.close(fig)
+    logging.info(f"Saved posterior corner plot to {save_path}")
+    return fig
+
+
 def plot_broken_power_law(samples, data):
     """
     Plot two stacked panels of the smooth broken power law using posterior medians.
