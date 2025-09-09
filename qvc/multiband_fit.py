@@ -238,8 +238,10 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_
 
                 # BLR amplitudes and lags
                 if disable_lag_blr:
+                    print("[WARNING] BLR lag model disabled.")
                     log_amp_delta_blr = numpyro.deterministic("log_amp_delta_blr", jnp.full((batch_size, nBands), -1e9))
                 else:
+                    print("[WARNING] BLR lag model enabled.")
                     log_amp_delta_blr = numpyro.sample("log_amp_delta_blr", dist.Normal(jnp.full(nBands, -1.0), 1.0))
 
                 #log_lag_blr = numpyro.sample("log_lag_blr", dist.Uniform(2.3*0.2, 2.3*4.0))
@@ -526,6 +528,7 @@ if __name__ == '__main__':
     parser.add_argument("--wide_eta_priors", action="store_true", default=False, help="Use wide priors for eta parameters.")
     parser.add_argument("--disable_corner_plot", action="store_true", default=False, help="Disable corner plot generation.")
     parser.add_argument("--couple_sigma_tau", action="store_true", default=False, help="Use coupled prior for sigma and tau.")
+    parser.add_argument("--disable_lag_blr", action="store_true", default=False, help="Disable BLR lag model.")
     args = parser.parse_args()
     print("Args: ", args)
 
@@ -670,7 +673,7 @@ if __name__ == '__main__':
 
     numpyro_joint_model = build_model(batch_array, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_fake, log_sigma_fake, 
                                       bwb=args.bwb, disable_poly1=args.disable_poly1, d_eta=args.d_eta,
-                                      disable_lag_blr=args.load_stone_lcs, 
+                                      disable_lag_blr=args.disable_lag_blr, 
                                       free_eta_break=args.free_eta_break, wide_eta_priors=args.wide_eta_priors,
                                       couple_sigma_tau=args.couple_sigma_tau)
 
