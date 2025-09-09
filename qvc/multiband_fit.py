@@ -127,10 +127,10 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_
 
         # --- Population hyperpriors (rest-frame) ---
         mu_log_tau_rf  = numpyro.sample(
-            "mu_log_tau_rf", dist.Normal(jnp.log(10**2.5), 0.5)
+            "mu_log_tau_rf", dist.Normal(jnp.log(10**3.0), 1.0)
         )
         sigma_log_tau_rf = numpyro.sample(
-            "sigma_log_tau_rf", dist.HalfNormal(0.75)
+            "sigma_log_tau_rf", dist.HalfNormal(1.25)
         )
 
         if couple_sigma_tau:
@@ -138,23 +138,15 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_
             print("[INFO] Using coupled σ–τ prior: log_sigma0 = log_sigma_hat0 + 0.5·log_tau_drw0. "
                   "This enforces the DRW scaling relation (σ ∝ τ^0.5), which reduces variance in the hierarchy "
                   "but can bias recovery if the injected process does not follow that scaling.")            
-            mu_log_sigma_hat0 = numpyro.sample(
-                "mu_log_sigma_hat0", dist.Normal(-1.0, 0.5)
-            )
-            sigma_log_sigma_hat0 = numpyro.sample(
-                "sigma_log_sigma_hat0", dist.HalfNormal(0.4)
-            )
+            mu_log_sigma_hat0 = numpyro.sample("mu_log_sigma_hat0", dist.Normal(-1.0, 0.8))
+            sigma_log_sigma_hat0 = numpyro.sample("sigma_log_sigma_hat0", dist.HalfNormal(0.7))
         else:
             print("[INFO] Using uncoupled σ–τ prior: log_sigma0 sampled independently of log_tau_drw0. "
                   "This avoids embedding the DRW scaling relation and is safer for simulation tests "
                   "or when σ and τ are expected to vary independently.")
             # Hyperpriors for *direct* log_sigma0
-            mu_log_sigma0 = numpyro.sample(
-                "mu_log_sigma0", dist.Normal(-1.0, 0.5)
-            )
-            sigma_log_sigma0 = numpyro.sample(
-                "sigma_log_sigma0", dist.HalfNormal(0.4)
-            )
+            mu_log_sigma0 = numpyro.sample("mu_log_sigma0", dist.Normal(-1.0, 0.8))
+            sigma_log_sigma0 = numpyro.sample("sigma_log_sigma0", dist.HalfNormal(0.7))
         with numpyro.plate("objects", batch_size):
             # Object-level parameters (shape: [B])
 
@@ -190,7 +182,7 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_
                 # Put prior on standardized amplitude; derive log_sigma0 from it
                 log_sigma_hat0 = numpyro.sample(
                     "log_sigma_hat0",
-                    dist.StudentT(df=4, loc=mu_log_sigma_hat0, scale=sigma_log_sigma_hat0)
+                    dist.Normal(mu_log_sigma_hat0, sigma_log_sigma_hat0)   # << Normal is safer than StudentT(df=4)
                 )
                 log_sigma0 = numpyro.deterministic(
                     "log_sigma0",
@@ -198,8 +190,10 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_
                 )
             else:
                 # Uncoupled prior: log_sigma independent of log_tau
-                log_sigma0 = numpyro.sample("log_sigma0",
-                    dist.StudentT(df=4, loc=mu_log_sigma0, scale=sigma_log_sigma0))
+                log_sigma0 = numpyro.sample(
+                    "log_sigma0",
+                    dist.Normal(mu_log_sigma0, sigma_log_sigma0)   # << replaced StudentT with Normal
+                )
                 log_sigma_hat0 = numpyro.deterministic("log_sigma_hat0",
                     log_sigma0 - 0.5 * log_tau_drw0)
 
@@ -220,8 +214,8 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_
 
             log_lag0 = numpyro.sample(
                 "log_lag0",
-                dist.TruncatedNormal(jnp.log(0.2) + log_tau_drw0, 0.5,
-                                    low=jnp.log(0.1), high=jnp.log(500.0))
+                dist.TruncatedNormal(jnp.log(0.2) + log_tau_drw0, 1.0,
+                                    low=jnp.log(0.03), high=jnp.log(1_000.0))
             )
             lag0_tilde = numpyro.deterministic("lag0_tilde", jnp.exp(log_lag0))
             lag_beta = numpyro.sample("lag_beta", dist.Normal(4/3, 0.2))
@@ -253,14 +247,14 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_
                 #log_lag_blr = numpyro.sample("log_lag_blr", dist.Uniform(0.2, 1.0))
                 #log_lag_blr = numpyro.sample("log_lag_blr", dist.Uniform(np.log(10), np.log(100)))
                 #log_lag_blr = numpyro.sample("log_lag_blr", dist.Normal(log_lag_blr_c[..., None], 3.0))
-                lag_center = jnp.log(0.2) + log_tau_drw0[..., None]
-                log_lag_blr = numpyro.sample(
+                lag_center   = jnp.log(0.2) + log_tau_drw0[..., None]
+                log_lag_blr  = numpyro.sample(
                     "log_lag_blr",
-                    dist.TruncatedNormal(lag_center, 0.5, low=jnp.log(0.5), high=jnp.log(300.0))
+                    dist.TruncatedNormal(lag_center, 1.0, low=jnp.log(0.2), high=jnp.log(1_000.0))
                 )
                 width_center = jnp.log(0.2) + log_tau_drw0[..., None]
-                width_blr  = numpyro.sample("width_blr",  dist.LogNormal(width_center, 0.5))
-                width_cont = numpyro.sample("width_cont", dist.LogNormal(width_center - jnp.log(2.0), 0.5))  # continuum a bit narrower
+                width_blr  = numpyro.sample("width_blr",  dist.LogNormal(width_center, 1.0))
+                width_cont = numpyro.sample("width_cont", dist.LogNormal(width_center - jnp.log(2.0), 1.0))
 
                 #width_blr = numpyro.sample("width_blr", dist.TruncatedNormal(0.2 * jnp.exp(log_tau_drw0_c[..., None]), 20.0, low=10.0))
                 #width_cont = numpyro.sample("width_cont", dist.TruncatedNormal(0.2 * jnp.exp(log_tau_drw0_c[..., None]), 20.0, low=10.0))
