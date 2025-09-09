@@ -68,20 +68,23 @@ universal_params = (
     'eta_break','lam_s',
     'sigma_eta_A1','sigma_eta_A2','sigma_eta_tau1','sigma_eta_tau2',
     'log_sigma_eta_A1','log_sigma_eta_A2','log_sigma_eta_tau1','log_sigma_eta_tau2',
-    'mu_log_tau_rf','sigma_log_tau_rf','mu_log_sigma_hat0','sigma_log_sigma_hat0'
+    'mu_log_tau_rf','sigma_log_tau_rf','mu_log_sigma_hat0','sigma_log_sigma_hat0',
+    'mu_log_sigma0','sigma_log_sigma0',
 )
 
 def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_fake_in, log_sigma_fake_in, 
-                bwb=True, disable_poly1=False, d_eta=True, disable_lag_blr=False, wide_eta_priors=False, free_eta_break=False):
+                bwb=True, disable_poly1=False, d_eta=True, disable_lag_blr=False, wide_eta_priors=False, free_eta_break=False,
+                couple_sigma_tau=True):
     # Precompute and capture constants in the closure so they are treated as
     # static by JAX/NumPyro. This prevents unnecessary retracing/recompilation
     # when running MCMC, as these values do not change between runs.
     batch_size = len(batch_data)
     nBands = 5  # or use from config
 
+    # Reference centers for object-level priors
     log_tau_drw0_c = jnp.log(10**2.5 * (1 + zs))
-    log_lag_blr_c = jnp.log(10**1.5 * (1 + zs))
-    
+    log_lag_blr_c  = jnp.log(10**1.5 * (1 + zs))
+
     # use a non‑centered parameterization to avoid Neal’s funnel
     @handlers.reparam(config={
         "eta_A1": LocScaleReparam(centered=0.0),
@@ -123,14 +126,35 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_
         sigma_eta_tau2 = numpyro.deterministic("sigma_eta_tau2", jnp.exp(log_sigma_eta_tau2))
 
         # --- Population hyperpriors (rest-frame) ---
-        mu_log_tau_rf  = numpyro.sample("mu_log_tau_rf",  dist.Normal(jnp.log(10**2.5), 0.5))
-        sigma_log_tau_rf = numpyro.sample("sigma_log_tau_rf", dist.HalfNormal(0.75))
+        mu_log_tau_rf  = numpyro.sample(
+            "mu_log_tau_rf", dist.Normal(jnp.log(10**2.5), 0.5)
+        )
+        sigma_log_tau_rf = numpyro.sample(
+            "sigma_log_tau_rf", dist.HalfNormal(0.75)
+        )
 
-        # Prior for standardized amplitude (dimensionless)
-        mu_log_sigma_hat0    = numpyro.sample("mu_log_sigma_hat0", dist.Normal(-1.0, 0.5))
-        sigma_log_sigma_hat0 = numpyro.sample("sigma_log_sigma_hat0", dist.HalfNormal(0.4))
-
-
+        if couple_sigma_tau:
+            # Hyperpriors for standardized amplitude (dimensionless)
+            print("[INFO] Using coupled σ–τ prior: log_sigma0 = log_sigma_hat0 + 0.5·log_tau_drw0. "
+                  "This enforces the DRW scaling relation (σ ∝ τ^0.5), which reduces variance in the hierarchy "
+                  "but can bias recovery if the injected process does not follow that scaling.")            
+            mu_log_sigma_hat0 = numpyro.sample(
+                "mu_log_sigma_hat0", dist.Normal(-1.0, 0.5)
+            )
+            sigma_log_sigma_hat0 = numpyro.sample(
+                "sigma_log_sigma_hat0", dist.HalfNormal(0.4)
+            )
+        else:
+            print("[INFO] Using uncoupled σ–τ prior: log_sigma0 sampled independently of log_tau_drw0. "
+                  "This avoids embedding the DRW scaling relation and is safer for simulation tests "
+                  "or when σ and τ are expected to vary independently.")
+            # Hyperpriors for *direct* log_sigma0
+            mu_log_sigma0 = numpyro.sample(
+                "mu_log_sigma0", dist.Normal(-1.0, 0.5)
+            )
+            sigma_log_sigma0 = numpyro.sample(
+                "sigma_log_sigma0", dist.HalfNormal(0.4)
+            )
         with numpyro.plate("objects", batch_size):
             # Object-level parameters (shape: [B])
 
@@ -161,9 +185,23 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_
             log_tau_rf = numpyro.sample("log_tau_rf", dist.Normal(mu_log_tau_rf, sigma_log_tau_rf))
             log_tau_drw0 = numpyro.deterministic("log_tau_drw0", log_tau_rf + jnp.log1p(zs))
 
-            # Put prior on standardized amplitude; derive log_sigma0 from it
-            log_sigma_hat0 = numpyro.sample("log_sigma_hat0", dist.StudentT(df=4, loc=mu_log_sigma_hat0, scale=sigma_log_sigma_hat0))
-            log_sigma0 = numpyro.deterministic("log_sigma0", log_sigma_hat0 + 0.5 * log_tau_drw0)
+            if couple_sigma_tau:
+                # Coupled prior: log_sigma depends on log_tau
+                # Put prior on standardized amplitude; derive log_sigma0 from it
+                log_sigma_hat0 = numpyro.sample(
+                    "log_sigma_hat0",
+                    dist.StudentT(df=4, loc=mu_log_sigma_hat0, scale=sigma_log_sigma_hat0)
+                )
+                log_sigma0 = numpyro.deterministic(
+                    "log_sigma0",
+                    log_sigma_hat0 + 0.5 * log_tau_drw0
+                )
+            else:
+                # Uncoupled prior: log_sigma independent of log_tau
+                log_sigma0 = numpyro.sample("log_sigma0",
+                    dist.StudentT(df=4, loc=mu_log_sigma0, scale=sigma_log_sigma0))
+                log_sigma_hat0 = numpyro.deterministic("log_sigma_hat0",
+                    log_sigma0 - 0.5 * log_tau_drw0)
 
             # Host galaxy dilution
             alpha_host = numpyro.sample("alpha_host", dist.Normal(1.0, 0.1)) # alpha_lam
@@ -493,6 +531,7 @@ if __name__ == '__main__':
     parser.add_argument("--free_eta_break", action="store_true", default=False, help="Allow eta_break to be a free parameter.")
     parser.add_argument("--wide_eta_priors", action="store_true", default=False, help="Use wide priors for eta parameters.")
     parser.add_argument("--disable_corner_plot", action="store_true", default=False, help="Disable corner plot generation.")
+    parser.add_argument("--couple_sigma_tau", action="store_true", default=False, help="Use coupled prior for sigma and tau.")
     args = parser.parse_args()
     print("Args: ", args)
 
@@ -638,7 +677,8 @@ if __name__ == '__main__':
     numpyro_joint_model = build_model(batch_array, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_fake, log_sigma_fake, 
                                       bwb=args.bwb, disable_poly1=args.disable_poly1, d_eta=args.d_eta,
                                       disable_lag_blr=args.load_stone_lcs, 
-                                      free_eta_break=args.free_eta_break, wide_eta_priors=args.wide_eta_priors)
+                                      free_eta_break=args.free_eta_break, wide_eta_priors=args.wide_eta_priors,
+                                      couple_sigma_tau=args.couple_sigma_tau)
 
     nuts_kernel = NUTS(numpyro_joint_model, init_strategy=init_strategy, dense_mass=True, max_tree_depth=args.max_tree_depth)
     mcmc = MCMC(
