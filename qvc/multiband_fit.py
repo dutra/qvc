@@ -158,6 +158,7 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_
             # log_tau_drw0 = numpyro.sample("log_tau_drw0", dist.TruncatedNormal(log_tau_drw0_c, 1.5, low=jnp.log(10**1.5)))
             # log_sigma0 = numpyro.sample("log_sigma0", dist.Normal(-0.8, 1.0))
             # log_sigma_hat0 = numpyro.deterministic("log_sigma_hat0", log_sigma0 - 0.5 * log_tau_drw0)
+
             if sigma_tau_uniform:
                 print("[INFO] Using Uniform prior on log_sigma0 and log_tau_drw0.")
                 log_tau_drw0 = numpyro.sample("log_tau_drw0", dist.Uniform(1.5*jnp.log(10), 6.0*jnp.log(10)))
@@ -171,9 +172,9 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_
                 # Put prior on standardized amplitude; derive log_sigma0 from it
                 print("[WARNING] couple_sigma_tau=True: log_sigma0 is coupled to log_tau_drw0 via log_sigma_hat0 prior.")
                 if sigma_tau_uniform:
-                    log_sigma_hat0 = numpyro.sample("log_sigma_hat0", dist.Uniform(jnp.log(0.01), jnp.log(1.4)))
+                    log_sigma_hat0 = numpyro.sample("log_sigma_hat0", dist.Uniform(-5*jnp.log(10), -0.5*jnp.log(10)))
                 else:
-                    log_sigma_hat0 = numpyro.sample("log_sigma_hat0", dist.Normal(jnp.log(0.2), 1.0*jnp.log(10)))
+                    log_sigma_hat0 = numpyro.sample("log_sigma_hat0", dist.Normal(-0.6*jnp.log(10) - 0.5*log_tau_drw0_c, 2.0*jnp.log(10)))
                 log_sigma0 = numpyro.deterministic("log_sigma0", log_sigma_hat0 + 0.5 * log_tau_drw0)
             else:
                 # Uncoupled prior: log_sigma independent of log_tau
@@ -386,7 +387,7 @@ def make_lc(Model, data, bands=['u', 'g', 'r', 'i', 'z'], inject_fake=False):
         key, k_tau, k_sig, k_drw = jax.random.split(key, 4)
 
         # draw base-10 logs, then add cosmological time-dilation term to tau
-        log_tau0_rf = jax.random.uniform(k_tau, minval=0.2, maxval=5.0)  # log10 tau_rest
+        log_tau0_rf = jax.random.uniform(k_tau, minval=0.5, maxval=5.0)  # log10 tau_rest
         log_tau0 = log_tau0_rf + np.log10(1.0 + data['z'])               # log10 tau_obs
         log_sigma0 = jax.random.uniform(k_sig, minval=-1.0, maxval=0.0)  # log10 sigma
 
