@@ -21,8 +21,8 @@ jax.config.update("jax_debug_nans", True)
 from jax import lax
 import jax.numpy as jnp
 
-import os
 import numpy as np
+import math
 import pandas as pd
 from tqdm import tqdm
 import numpyro
@@ -361,12 +361,15 @@ def make_lc(Model, data, bands=['u', 'g', 'r', 'i', 'z'], inject_fake=False):
     if inject_fake:
         # one seed per LC (still deterministic)
         key = jax.random.PRNGKey(0)
+        key = jax.random.fold_in(key, int(data['object_id']))  # makes unique key per object
         key, k_tau, k_sig, k_drw = jax.random.split(key, 4)
 
         # draw base-10 logs, then add cosmological time-dilation term to tau
         log_tau0_rf = jax.random.uniform(k_tau, minval=0.2, maxval=6.0)  # log10 tau_rest
         log_tau0 = log_tau0_rf + np.log10(1.0 + data['z'])               # log10 tau_obs
         log_sigma0 = jax.random.uniform(k_sig, minval=-1.0, maxval=0.0)  # log10 sigma
+
+        print(f"Injecting fake DR for object {data['object_id']} with log_tau0={log_tau0:.3f}, log_sigma0={log_sigma0:.3f} ")
 
         # use a fresh key for the DRW realization
         all_mags = sample_drw_tinygp(
@@ -489,6 +492,7 @@ if __name__ == '__main__':
     parser.add_argument("--load_stone_lcs", action="store_true", default=False, help="Load Stone light curves instead of default.")
     parser.add_argument("--free_eta_break", action="store_true", default=False, help="Allow eta_break to be a free parameter.")
     parser.add_argument("--wide_eta_priors", action="store_true", default=False, help="Use wide priors for eta parameters.")
+    parser.add_argument("--disable_corner_plot", action="store_true", default=False, help="Disable corner plot generation.")
     args = parser.parse_args()
     print("Args: ", args)
 
@@ -710,8 +714,11 @@ if __name__ == '__main__':
                 lam_rf=obj['lam_rf'], z=obj['z']
             )
             save_combined_plot(obj_flat_samples, m, obj['X'], obj['y'], obj['yerr'], obj['band_idx'], result, bands=bands)
-            #plot_posterior(obj_flat_samples_flatten_per_band, obj)
-            plot_posterior_fast(obj_flat_samples_flatten_per_band, obj)
+            plot_correlation_matrix(obj_flat_samples_flatten_per_band, obj)
+            plot_all_histograms(obj_flat_samples_flatten_per_band, obj)
+            if not args.disable_corner_plot:
+                #plot_posterior(obj_flat_samples_flatten_per_band, obj)
+                plot_posterior_fast(obj_flat_samples_flatten_per_band, obj)
             plot_broken_power_law(obj_flat_samples, obj)
             #dump_mcmc_diagnostics(mcmc, obj, i, len(batch_data))
             

@@ -1,10 +1,12 @@
 import matplotlib.pyplot as plt
 from matplotlib.ticker import EngFormatter
+from matplotlib.ticker import ScalarFormatter
 plt.style.use("style.mplstyle")
 import corner
 import numpy as np
 import os
 import re
+import math
 import jax.numpy as jnp
 
 from astropy.timeseries import LombScargle
@@ -85,7 +87,7 @@ def plot_posterior(samples_flat, data, bins=20):
     for i in range(corner_data.shape[1]):
         lo, hi = corner_data[:, i].min(), corner_data[:, i].max()
         if lo == hi:  # constant parameter
-            print("Corner Constant param: ", flat_labels[i])
+            #print("Corner Constant param: ", flat_labels[i])
             corner_data[:, i] += np.random.normal(0, 1e-6, size=corner_data.shape[0])
         if 'log_' in flat_labels[i]:
             corner_data[:, i] = corner_data[:, i] / np.log(10)
@@ -94,96 +96,128 @@ def plot_posterior(samples_flat, data, bins=20):
                         quantiles=[0.16, 0.5, 0.84], bins=bins, plot_datapoints=False, plot_contours=False)
 
     # Save plot
-    output_dir = f"results/posterior_plots/{prefix}"
+    output_dir = f"plots/multiband/{prefix}/posterior/"
     os.makedirs(output_dir, exist_ok=True)
     save_path = os.path.join(output_dir, f"{z:.1f}_{object_id}_posterior_{suffix}.png")
     plt.savefig(save_path, dpi=100)
     plt.close(fig)
     logging.info(f"Saved posterior corner plot to {save_path}")
-    return fig
 
-def plot_posterior_fast(samples_flat, data, bins=15, max_points=50_000, p_lo=0.5, p_hi=99.5):
+def plot_posterior_fast(
+    samples_flat,
+    data,
+    bins=15,
+    max_points=50_000,
+    p_lo=0.5,
+    p_hi=99.5,
+    const_ptp=1e-12,         # threshold for "near-constant"
+    jitter_rel=1e-6,         # relative jitter scale (× |mean|)
+    jitter_abs=1e-8          # absolute floor for jitter
+):
     """
-    Faster corner plot for large MCMC draws.
+    Faster corner plot for large MCMC draws, keeps constant params by jittering.
 
     Parameters
     ----------
     samples_flat : dict[str, array_like]
         Dict of MCMC samples for each param; shape (n_samples, ...) per entry.
     data : dict
-        Must contain 'object_id' and 'z'.
+        Must contain 'object_id' and 'z'. Optional: 'prefix', 'suffix'.
     bins : int
         Number of bins (1D) and base for 2D via hist2d_kwargs.
     max_points : int
         Cap the number of points used in the plot (random subsample).
     p_lo, p_hi : float
         Percentile clipping for plotting ranges (mitigates outliers → faster hist).
+    const_ptp : float
+        If ptp (max-min) <= const_ptp, treat as near-constant and jitter.
+    jitter_rel : float
+        Jitter sigma = max(jitter_abs, jitter_rel * |mean|) for near-constant cols.
+    jitter_abs : float
+        Absolute minimum jitter sigma.
     """
     logging.info("Saving posterior plot (fast path)")
     object_id = data["object_id"]
     z = data["z"]
 
-    # Labels first to ensure stable column order
-    flat_labels = list(samples_flat.keys())
+    # Stable column order
+    labels = list(samples_flat.keys())
 
-    # Pre-transform & flatten in one pass; avoid transpose later; cast to float32
+    # Shared subsample index (do this BEFORE stacking to cut memory/compute)
+    first = np.asarray(samples_flat[labels[0]]).ravel()
+    n_total = first.shape[0]
+    if n_total > max_points:
+        rng = np.random.default_rng()
+        idx = rng.choice(n_total, size=max_points, replace=False)
+    else:
+        idx = None
+
+    # Build columns with shared subsampling; transform log_ → log10; cast to float32
     cols = []
-    for k in flat_labels:
-        arr = np.asarray(samples_flat[k]).ravel()
-        # If parameter is in natural log, convert to log10 once here
-        if k.startswith("log_"):  # adjust rule if your naming differs
-            arr = arr / np.log(10.0)
-        cols.append(arr.astype(np.float32, copy=False))
+    for k in labels:
+        a = np.asarray(samples_flat[k]).ravel()
+        if idx is not None:
+            a = a[idx]
+        if k.startswith("log_"):
+            a = a / np.log(10.0)  # ln → log10
+        cols.append(a.astype(np.float32, copy=False))
 
-    # Stack columns directly; avoids vstack().T extra full-size copy
-    corner_data = np.column_stack(cols)
+    X = np.column_stack(cols)
 
-    # Subsample if too many points (random without replacement)
-    n = corner_data.shape[0]
-    if n > max_points:
-        idx = np.random.default_rng().choice(n, size=max_points, replace=False)
-        corner_data = corner_data[idx]
+    # Drop any rows with NaN/Inf across columns (keeps alignment)
+    finite = np.all(np.isfinite(X), axis=1)
+    X = X[finite]
+    if X.shape[0] == 0:
+        raise ValueError("No finite samples to plot after cleaning.")
 
-    # Handle constant params in a vectorized way
-    ptp = np.ptp(corner_data, axis=0)
-    const_mask = (ptp == 0)
+    # Identify near-constant columns and jitter them (keep them in the plot)
+    ptp = np.ptp(X, axis=0)
+    const_mask = ptp <= const_ptp
     if np.any(const_mask):
-        for i in np.where(const_mask)[0]:
-            print("Corner Constant param:", flat_labels[i])
-            corner_data[:, i] += np.random.normal(0, 1e-6, size=corner_data.shape[0]).astype(np.float32)
+        for j in np.where(const_mask)[0]:
+            col = X[:, j]
+            mu = float(np.mean(col))
+            sigma = max(jitter_abs, abs(mu) * jitter_rel)
+            # Add zero-mean jitter; keep dtype float32
+            X[:, j] = (col + np.random.normal(0.0, sigma, size=col.shape)).astype(np.float32)
+            print("Corner Constant param (jittered):", labels[j])
 
-    # Compute per-dimension plotting ranges with percentile clipping
-    lo = np.percentile(corner_data, p_lo, axis=0)
-    hi = np.percentile(corner_data, p_hi, axis=0)
-    # Ensure strictly increasing (protect against zero-width after clipping)
+    # Robust ranges via percentiles; guarantee positive width even after jitter
+    lo = np.percentile(X, p_lo, axis=0)
+    hi = np.percentile(X, p_hi, axis=0)
     eps = 1e-12
-    rng = [(float(l), float(h) if h > l + eps else float(l + eps)) for l, h in zip(lo, hi)]
+    rng = []
+    for j, (l, h) in enumerate(zip(lo, hi)):
+        if not np.isfinite(l) or not np.isfinite(h):
+            col = X[:, j]
+            l, h = np.min(col), np.max(col)
+        if h <= l + eps:
+            c = float(l)
+            pad = max(const_ptp, abs(c) * 1e-6, jitter_abs)
+            l, h = c - pad, c + pad
+        rng.append((float(l), float(h)))
 
-    # Corner kwargs tuned for speed
+    # Corner kwargs tuned for speed (hist-only, modest bins)
     fig = corner.corner(
-        corner_data,
-        labels=flat_labels,
-        show_titles=True,           # leave on; cost is small vs hist
+        X,
+        labels=labels,
+        show_titles=True,
         quantiles=[0.16, 0.5, 0.84],
         bins=bins,
         range=rng,
-        plot_datapoints=False,      # already False in your code
-        plot_contours=False,        # avoids KDE; keeps it to hist2d
-        hist2d_kwargs={"bins": bins},  # keep 2D bins modest
-        quiet=True                  # suppress per-panel ticks work
+        plot_datapoints=False,
+        plot_contours=False,         # avoid KDE for speed
+        hist2d_kwargs={"bins": bins},
+        quiet=True
     )
 
-    # Save plot
-    # NOTE: prefix/suffix were undefined in your snippet; keep them if defined globally.
-    prefix = data.get("prefix", "default")
-    suffix = data.get("suffix", "v1")
-    output_dir = f"results/posterior_plots/{prefix}"
+    # Save
+    output_dir = f"plots/multiband/{prefix}/corner/"
     os.makedirs(output_dir, exist_ok=True)
     save_path = os.path.join(output_dir, f"{z:.1f}_{object_id}_posterior_{suffix}.png")
-    plt.savefig(save_path, dpi=100, bbox_inches="tight")
+    plt.savefig(save_path, dpi=100)
     plt.close(fig)
     logging.info(f"Saved posterior corner plot to {save_path}")
-    return fig
 
 
 def plot_broken_power_law(samples, data):
@@ -249,14 +283,12 @@ def plot_broken_power_law(samples, data):
     secax.xaxis.set_major_formatter(EngFormatter(unit="Å"))
 
     # --- save ---
-    output_dir = f"results/broken_power_law/{prefix}"
+    output_dir = f"plots/multiband/{prefix}/broken_power_law"
     os.makedirs(output_dir, exist_ok=True)
     fpath = os.path.join(output_dir, f'broken_power_law_{suffix}.png')
     logging.info(f"Saving figure to {fpath}")
     fig.savefig(fpath, dpi=200)
     plt.close(fig)
-
-import numpy as np
 
 def combined_lomb_scargle_from_model(
     model,
@@ -478,7 +510,7 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, data, bands=['u', '
     plt.tight_layout()
 
     # Save the plot as a PNG file
-    output_dir = f"results/light_curves_fits/{prefix}"
+    output_dir = f"plots/multiband/{prefix}/light_curves_fits"
     os.makedirs(output_dir, exist_ok=True)
     fpath = os.path.join(output_dir, f'{data["z"]:.1f}_{object_id}_light_curve_{suffix}.png')
     logging.info(f"Saving figure to {fpath}")
@@ -512,7 +544,7 @@ def plot_mcmc_traces(samples_dict, data):
     axes[-1].set_xlabel("Sample index")
     plt.tight_layout()
 
-    output_dir = f"results/mcmc_traces/{prefix}/"
+    output_dir = f"plots/multiband/{prefix}/mcmc_traces/"
     os.makedirs(output_dir, exist_ok=True)
     save_path = os.path.join(output_dir, f"{data['z']:.1f}_{data['object_id']}_mcmc_traces_{suffix}.png")
     plt.savefig(save_path, dpi=100)
@@ -562,3 +594,283 @@ def plot_mcmc_traces(samples_dict, data):
         plt.close(fig3)
         logging.info(f"Saved log_tau_drw0 vs. log_sigma_hat0 trace plot to {save_path3}")
     """
+    
+    
+import os, math, logging
+import numpy as np
+import matplotlib.pyplot as plt
+
+# ---------------------------
+# Shared data prep
+# ---------------------------
+def _prep_matrix(
+    samples_flat: dict,
+    max_points: int = 40_000,
+    const_ptp: float = 1e-12,
+    jitter_rel: float = 1e-6,
+    jitter_abs: float = 1e-8,
+    log10_if_startswith: str = "log_",
+):
+    """
+    Build an (N x D) float32 matrix for plotting, with:
+      - row subsampling (shared across all columns),
+      - ln->log10 conversion for names starting with `log10_if_startswith`,
+      - non-finite row drop (single pass),
+      - small jitter for near-constant columns to avoid singular axes.
+
+    Returns
+    -------
+    X : (n, d) float32
+    labels : list[str]
+    const_mask : (d,) bool (columns that were near-constant before jitter)
+    """
+    labels = list(samples_flat.keys())
+    if not labels:
+        raise ValueError("samples_flat is empty")
+
+    # shared row subsample (before stacking)
+    n_total = np.asarray(samples_flat[labels[0]]).ravel().shape[0]
+    idx = None
+    if n_total > max_points:
+        idx = np.random.default_rng().choice(n_total, size=max_points, replace=False)
+
+    cols = []
+    for k in labels:
+        a = np.asarray(samples_flat[k]).ravel()
+        if idx is not None:
+            a = a[idx]
+        if log10_if_startswith and k.startswith(log10_if_startswith):
+            a = a / np.log(10.0)  # ln -> log10
+        cols.append(a.astype(np.float32, copy=False))
+    X = np.column_stack(cols)
+
+    # drop rows with any NaN/Inf
+    finite = np.all(np.isfinite(X), axis=1)
+    X = X[finite]
+    if X.shape[0] == 0:
+        raise ValueError("No finite samples to plot after cleaning.")
+
+    # jitter near-constant columns (keep them visible)
+    ptp = np.ptp(X, axis=0)
+    const_mask = ptp <= const_ptp
+    if np.any(const_mask):
+        for j in np.where(const_mask)[0]:
+            col = X[:, j]
+            mu = float(np.mean(col))
+            sigma = max(jitter_abs, abs(mu) * jitter_rel)
+            X[:, j] = (col + np.random.normal(0.0, sigma, size=col.shape)).astype(np.float32)
+            print("Jittered near-constant param:", labels[j])
+
+    return X, labels, const_mask
+
+
+# ---------------------------
+# 1) All 1D histograms
+# ---------------------------
+def plot_all_histograms(
+    samples_flat: dict,
+    data: dict,
+    bins: int = 24,
+    p_lo: float = 0.5,
+    p_hi: float = 99.5,
+    max_points: int = 40_000,
+    base_cols: int = 6,
+    dpi: int = 140,
+):
+    """
+    Plot 1D marginals (histograms) for ALL parameters, rescaled to nice units.
+
+    - Shared subsample/clean/jitter via _prep_matrix (assumed available)
+    - Per-parameter autoscale to powers of 10^3 for readable axes
+    - Percentile-based x-lims (p_lo/p_hi)
+    - Median (50th) line + 16/84% band, with a numeric annotation
+
+    Returns
+    -------
+    fig, axes, save_path
+    """
+
+    # ---- helper: choose a unit scale (×10^{k}, k multiple of 3) based on IQR ----
+    def _autoscale_unit(x: np.ndarray):
+        # robust spread
+        q25, q75 = np.percentile(x, [25, 75])
+        iqr = max(1e-30, float(q75 - q25))
+        # exponent of the IQR
+        exp10 = int(np.floor(np.log10(iqr)))
+        # snap to steps of 3 (…,-9,-6,-3,0,3,6,9,…)
+        exp3 = 3 * int(np.floor(exp10 / 3))
+        # scale to apply to data for plotting (x_scaled = x * 10^{-exp3})
+        scale = 10.0 ** (-exp3)
+        return scale, exp3  # (multiply-by, original exponent)
+
+    # Prep matrix (rows=subsamples; cols=parameters)
+    X, labels, _ = _prep_matrix(samples_flat, max_points=max_points)
+    d = X.shape[1]
+    n_cols = min(base_cols, d) if d > 0 else 1
+    n_rows = math.ceil(d / n_cols)
+
+    # Figure sizing
+    fig_w = max(12, 2.2 * n_cols)
+    fig_h = max(4.0, 1.6 * n_rows)
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(fig_w, fig_h), dpi=dpi, squeeze=False)
+
+    # robust ranges on ORIGINAL scale (we'll rescale them per panel)
+    lo = np.percentile(X, p_lo, axis=0)
+    hi = np.percentile(X, p_hi, axis=0)
+    eps = 1e-12
+
+    # draw
+    panel = 0
+    for r in range(n_rows):
+        for c in range(n_cols):
+            ax = axes[r, c]
+            if panel >= d:
+                ax.axis("off")
+                continue
+
+            x = X[:, panel]
+            l, h = float(lo[panel]), float(hi[panel])
+            if not (np.isfinite(l) and np.isfinite(h)):
+                l, h = np.min(x), np.max(x)
+            if h <= l + eps:
+                center = l
+                pad = max(1e-12, abs(center) * 1e-6, 1e-8)
+                l, h = center - pad, center + pad
+
+            # --- autoscale to “nice” units ---
+            scale, exp3 = _autoscale_unit(x)
+            x_s   = x * scale
+            l_s   = l * scale
+            h_s   = h * scale
+
+            # density=True is fine after rescaling; values stay reasonable
+            ax.hist(x_s, bins=bins, range=(l_s, h_s), density=True, edgecolor="none")
+
+            # median + 68% interval (in scaled units)
+            q16, q50, q84 = np.percentile(x_s, [16, 50, 84])
+            err = 0.5 * (q84 - q16)
+            ax.axvline(q50, linestyle="--", linewidth=1)
+            ax.axvspan(q16, q84, alpha=0.12)
+
+            # formatted annotation: median ± error
+            txt = f"{q50:.3g} ± {err:.2g}"
+            ax.text(
+                0.98, 0.95, txt,
+                transform=ax.transAxes, ha="right", va="top",
+                fontsize=7, bbox=dict(facecolor="white", alpha=0.6, linewidth=0)
+            )
+
+            # title with unit scale suffix
+            unit_txt = f" ×10^{exp3}" if exp3 != 0 else ""
+            ax.set_title(f"{labels[panel]}{unit_txt}", fontsize=9, pad=2)
+
+            # no scientific offset text on ticks
+            ax.ticklabel_format(axis="both", style="plain", useOffset=False)
+            for axis in (ax.xaxis, ax.yaxis):
+                fmt = ScalarFormatter(useMathText=True)
+                fmt.set_scientific(False)
+                fmt.set_useOffset(False)
+                axis.set_major_formatter(fmt)
+
+            ax.tick_params(axis="both", labelsize=8)
+            ax.margins(x=0)
+
+            panel += 1
+
+    fig.tight_layout()
+
+    # Save
+    object_id = data["object_id"]
+    z = data["z"]
+    out_dir = f"plots/multiband/{prefix}/marginals"
+    os.makedirs(out_dir, exist_ok=True)
+    save_path = os.path.join(out_dir, f"{z:.1f}_{object_id}_marginals_all_{suffix}.png")
+    fig.savefig(save_path, dpi=dpi)  # no tight bbox (faster)
+    logging.info(f"Saved ALL histograms to {save_path}")
+    plt.close(fig)
+    return fig, axes, save_path
+
+
+# ---------------------------
+# 2) Full correlation matrix
+# ---------------------------
+def plot_correlation_matrix(
+    samples_flat: dict,
+    data: dict,
+    max_points: int = 40_000,
+    reorder: str = "spectral",  # 'none' | 'spectral'
+    heatmap_tick_cap: int = 60,
+    dpi: int = 140,
+    cmap: str = "coolwarm",
+):
+    """
+    Plot the full correlation matrix of ALL parameters.
+
+    - Row subsample, clean, jitter constants (shared helper).
+    - Optional **spectral reordering** (sort by leading eigenvector of |corr|),
+      which tends to cluster correlated blocks for readability without SciPy.
+    - Tick labels are sparsified to avoid clutter on large-D problems.
+
+    Returns: (fig, ax, save_path)
+    """
+    X, labels, _ = _prep_matrix(samples_flat, max_points=max_points)
+
+    # z-score for numerics; compute corr
+    std = X.std(axis=0, ddof=0)
+    std[std == 0] = 1.0
+    Xs = (X - X.mean(axis=0)) / std
+    C = np.corrcoef(Xs, rowvar=False)
+
+    # Optional spectral reordering (cheap, helps show blocks)
+    order = np.arange(C.shape[0])
+    if reorder == "spectral" and C.shape[0] > 2:
+        # use |corr| to emphasize structure, then top eigenvector of Laplacian
+        A = np.abs(C)
+        np.fill_diagonal(A, 0.0)
+        d = A.sum(axis=1)
+        L = np.diag(d) - A
+        # smallest non-zero eigenvector (Fiedler) by eigh (symmetric)
+        w, v = np.linalg.eigh(L)
+        # choose the 2nd smallest eigenvector if possible
+        if len(w) >= 2:
+            fiedler = v[:, 1]
+        else:
+            fiedler = v[:, 0]
+        order = np.argsort(fiedler)
+        C = C[order][:, order]
+        labels = [labels[i] for i in order]
+
+    # Figure
+    d = C.shape[0]
+    fig_w = max(10, min(22, 0.18 * d + 6))  # scale width with d, cap at 22"
+    fig_h = max(4.5, min(12, 0.12 * d + 3)) # scale height, cap at 12"
+    fig, ax = plt.subplots(figsize=(fig_w, fig_h), dpi=dpi)
+
+    im = ax.imshow(C, vmin=-1, vmax=1, interpolation="nearest", aspect="auto", cmap=cmap)
+    ax.set_title("Correlation matrix", fontsize=12, pad=6)
+
+    # sparsify tick labels for readability & speed
+    step = max(1, d // heatmap_tick_cap)
+    ticks = np.arange(0, d, step)
+    ax.set_xticks(ticks)
+    ax.set_yticks(ticks)
+    ax.set_xticklabels([labels[i] for i in ticks], rotation=90, fontsize=8)
+    ax.set_yticklabels([labels[i] for i in ticks], fontsize=8)
+
+    # light gridlines (optional)
+    ax.grid(False)
+
+    cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.02)
+    cbar.ax.set_ylabel("ρ", rotation=0, labelpad=10)
+
+    fig.tight_layout()
+
+    # Save
+    object_id = data["object_id"]
+    z = data["z"]
+    out_dir = f"plots/multiband/{prefix}/correlations/"
+    os.makedirs(out_dir, exist_ok=True)
+    save_path = os.path.join(out_dir, f"{z:.1f}_{object_id}_corr_all_{suffix}.png")
+    fig.savefig(save_path, dpi=dpi)
+    logging.info(f"Saved correlation matrix to {save_path}")
+    plt.close(fig)
