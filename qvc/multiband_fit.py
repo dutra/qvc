@@ -97,19 +97,24 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_
         # Initialize parameters
         # Global "universal" means for eta
         if wide_eta_priors:
-            eta_A1_mean = numpyro.sample("eta_A1_mean", dist.TruncatedNormal(-0.5, 1.0, high=0.0))
-            eta_A2_mean = numpyro.sample("eta_A2_mean", dist.TruncatedNormal(-0.5, 1.0, high=0.0))
-            eta_tau1_mean = numpyro.sample("eta_tau1_mean", dist.TruncatedNormal(-0.5, 1.0))
-            eta_tau2_mean = numpyro.sample("eta_tau2_mean", dist.LogNormal(jnp.log(0.15), 1.0))
+            print("[INFO] Using wide priors for eta means.")
+            eta_A1_mean = numpyro.sample("eta_A1_mean", dist.Normal(-0.5, 0.8))
+            eta_A2_mean = numpyro.sample("eta_A2_mean", dist.Normal(-0.5, 0.8))
+            eta_tau1_mean = numpyro.sample("eta_tau1_mean", dist.Normal(-0.5, 0.8))
+            eta_tau2_mean = numpyro.sample("eta_tau2_mean", dist.Normal(0.1, 0.8))
         else:
             eta_A1_mean = numpyro.sample("eta_A1_mean", dist.TruncatedNormal(-0.5, 0.4, high=0.0))
             eta_A2_mean = numpyro.sample("eta_A2_mean", dist.TruncatedNormal(-0.5, 0.4, high=0.0))
             eta_tau1_mean = numpyro.sample("eta_tau1_mean", dist.TruncatedNormal(-0.5, 0.4))
-            #eta_tau2_mean = numpyro.sample("eta_tau2_mean", dist.TruncatedNormal(0.1, 0.2, low=0.0))
-            eta_tau2_mean = numpyro.sample("eta_tau2_mean", dist.LogNormal(jnp.log(0.15), 0.4))  # removes kink
+            eta_tau2_mean = numpyro.sample("eta_tau2_mean", dist.TruncatedNormal(0.1, 0.4, low=0.0))
         if free_eta_break:
-            eta_break = numpyro.sample("eta_break", dist.TruncatedNormal(0.1, 0.1, low=0.0))
-            lam_s = numpyro.sample("lam_s", dist.Normal(2500.0, 50.0)) # Hard to constrain
+            print("[INFO] Free eta_break and lam_s.")
+            s = 0.4
+            median = 0.1
+            mu = jnp.log(median)
+            sigma = jnp.sqrt(jnp.log((1 + jnp.sqrt(1 + 4*(s/median)**2)) / 2))
+            eta_break = numpyro.sample("eta_break", dist.LogNormal(mu, sigma))
+            lam_s = numpyro.sample("lam_s", dist.Normal(2500.0, 100.0)) # Hard to constrain
         else:
             eta_break = numpyro.deterministic("eta_break", 0.1)
             lam_s = numpyro.deterministic("lam_s", 2500.0)
