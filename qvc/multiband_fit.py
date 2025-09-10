@@ -74,7 +74,7 @@ universal_params = (
 
 def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_fake_in, log_sigma_fake_in, 
                 bwb=True, disable_poly1=False, d_eta=True, disable_lag_blr=False, wide_eta_priors=False, free_eta_break=False,
-                couple_sigma_tau=True, sigma_tau_uniform=False):
+                couple_sigma_tau=True, sigma_tau_uniform=False, eta_tau2_lognormal=False):
     # Precompute and capture constants in the closure so they are treated as
     # static by JAX/NumPyro. This prevents unnecessary retracing/recompilation
     # when running MCMC, as these values do not change between runs.
@@ -106,7 +106,14 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_
             eta_A1_mean = numpyro.sample("eta_A1_mean", dist.TruncatedNormal(-0.5, 0.4, high=0.0))
             eta_A2_mean = numpyro.sample("eta_A2_mean", dist.TruncatedNormal(-0.5, 0.4, high=0.0))
             eta_tau1_mean = numpyro.sample("eta_tau1_mean", dist.TruncatedNormal(-0.5, 0.4))
+
+        if eta_tau2_lognormal:
+            print("[INFO] Using LogNormal prior for eta_tau2_mean.")
+            eta_tau2_mean = numpyro.sample("eta_tau2_mean", dist.LogNormal(jnp.log(0.15), 0.4))  # removes kink
+        else:
+            print("[INFO] Using TruncatedNormal prior for eta_tau2_mean.")
             eta_tau2_mean = numpyro.sample("eta_tau2_mean", dist.TruncatedNormal(0.1, 0.4, low=0.0))
+            
         if free_eta_break:
             print("[INFO] Free eta_break and lam_s.")
             s = 0.4
@@ -536,6 +543,7 @@ if __name__ == '__main__':
     parser.add_argument("--couple_sigma_tau", action="store_true", default=False, help="Use coupled prior for sigma and tau.")
     parser.add_argument("--disable_lag_blr", action="store_true", default=False, help="Disable BLR lag model.")
     parser.add_argument("--sigma_tau_uniform", action="store_true", default=False, help="Use uniform priors for sigma and tau.")
+    parser.add_argument("--eta_tau2_lognormal", action="store_true", default=False, help="Use lognormal prior for eta_tau2_mean.")
     args = parser.parse_args()
     print("Args: ", args)
 
@@ -684,7 +692,8 @@ if __name__ == '__main__':
                                       bwb=args.bwb, disable_poly1=args.disable_poly1, d_eta=args.d_eta,
                                       disable_lag_blr=args.disable_lag_blr, 
                                       free_eta_break=args.free_eta_break, wide_eta_priors=args.wide_eta_priors,
-                                      couple_sigma_tau=args.couple_sigma_tau, sigma_tau_uniform=args.sigma_tau_uniform)
+                                      couple_sigma_tau=args.couple_sigma_tau, sigma_tau_uniform=args.sigma_tau_uniform,
+                                      eta_tau2_lognormal=args.eta_tau2_lognormal)
 
     nuts_kernel = NUTS(numpyro_joint_model, init_strategy=init_strategy, dense_mass=True, max_tree_depth=args.max_tree_depth)
     mcmc = MCMC(
