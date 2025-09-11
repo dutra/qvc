@@ -34,7 +34,6 @@ from typing import Sequence
 import tinygp
 from tinygp.kernels import quasisep as qs
 
-
 class ContiBLRQS(qs.Wrapper):
     """
     Quasi-separable Gaussian process kernel for multiband AGN light curves, 
@@ -95,59 +94,19 @@ class ContiBLRQS(qs.Wrapper):
     bwb_alpha: jnp.ndarray
     bwb_beta: jnp.ndarray
     kernel2: qs.Kernel
-    kernels_resid: Sequence[qs.Kernel]
-    rho_resid: float
 
-    def __init__(
-        self,
-        amp_cont, amp_blr, lag_blr, lag_disk,
-        bwb_alpha, bwb_beta, width_cont, width_blr,
-        tau_shared: float,          # scalar (shared OU)
-        tau_bands: jnp.ndarray,     # shape [B] (per-band residual OU)
-        rho_resid: float = 0.30,    # fraction of continuum power routed to residual OU        
-        ) -> None:
-
-        # Store per-band arrays as-is
-        self.amp_cont   = amp_cont
-        self.amp_blr    = amp_blr
-        self.lag_blr    = lag_blr
-        self.lag_disk   = lag_disk
-        self.bwb_alpha  = bwb_alpha
-        self.bwb_beta   = bwb_beta
+    def __init__(self, amp_cont, amp_blr, lag_blr, lag_disk, tau_drw, bwb_alpha, bwb_beta, width_cont, width_blr) -> None:
+        self.amp_cont = amp_cont
+        self.amp_blr = amp_blr
+        self.lag_blr = lag_blr
+        self.lag_disk  = lag_disk
+        self.tau_drw = tau_drw
+        self.bwb_alpha = bwb_alpha
+        self.bwb_beta = bwb_beta
         self.width_cont = width_cont
-        self.width_blr  = width_blr
-
-        # Shared OU (used by continuum+BLR and as the base for BWB)
-        self.tau_drw = tau_shared
-        self.kernel  = qs.Exp(scale=self.tau_drw, sigma=1.0)                 # required by qs.Wrapper
-        self.kernel2 = qs.Exp(scale=self.tau_drw / self.bwb_beta, sigma=1.0) # BWB “squared” term
-
-        # Per-band residual OU blocks (QS), one per band
-        B = amp_cont.shape[0]
-        assert tau_bands.shape[0] == B
-        self.kernels_resid = tuple(qs.Exp(scale=tau_bands[i], sigma=1.0) for i in range(B))
-
-        # Split fraction of continuum amplitude between shared and residual parts
-        self.rho_resid =  jnp.clip(rho_resid, 0.0, 1.0)
-
-    def _block_diag(self, mats):
-        rows = []
-        for i, Mi in enumerate(mats):
-            row = []
-            for j, Mj in enumerate(mats):
-                row.append(Mi if i == j else jnp.zeros((Mi.shape[0], Mj.shape[1]), dtype=Mi.dtype))
-            rows.append(row)
-        return jnp.block(rows)
-
-    def _conv_obs(self, kernel: qs.Kernel, t: JAXArray, lag: JAXArray, width: JAXArray) -> JAXArray:
-        u_k, gamma_k = self._quadrature_nodes_weights(width)
-
-        def tap(u, g):
-            C   = kernel.observation_model(t - (lag + u))          # evaluate earlier time
-            Phi = kernel.transition_matrix(0.0, (lag + u))         # forward attenuation
-            return g * (C @ Phi)
-
-        return jax.vmap(tap, in_axes=(0, 0))(u_k, gamma_k).sum(axis=0)
+        self.width_blr = width_blr
+        self.kernel = qs.Exp(scale=self.tau_drw, sigma=1.0)
+        self.kernel2 = qs.Exp(scale=self.tau_drw / self.bwb_beta, sigma=1.0)
 
     def coord_to_sortable(self, X) -> JAXArray:
         t, b = X
@@ -175,19 +134,32 @@ class ContiBLRQS(qs.Wrapper):
         return self.kernel2.transition_matrix(0.0, dt)
 
     def design_matrix(self) -> JAXArray:
-        mats = [self._A0(), self._A1()] + [k.design_matrix() for k in self.kernels_resid]
-        return self._block_diag(mats)
+        # Block-diagonal of base and k^2 generators
+        A0 = self._A0()
+        A1 = self._A1()
+        z0 = jnp.zeros((A0.shape[0], A1.shape[1]))
+        z1 = jnp.zeros((A1.shape[0], A0.shape[1]))
+        return jnp.block([[A0, z0],
+                          [z1, A1]])
 
     def stationary_covariance(self) -> JAXArray:
-        mats = [self._P0(), self._P1()] + [k.stationary_covariance() for k in self.kernels_resid]
-        return self._block_diag(mats)
+        P0 = self._P0()
+        P1 = self._P1()
+        z01 = jnp.zeros((P0.shape[0], P1.shape[1]))
+        z10 = jnp.zeros((P1.shape[0], P0.shape[1]))
+        return jnp.block([[P0, z01],
+                          [z10, P1]])
 
     def transition_matrix(self, X1: JAXArray, X2: JAXArray) -> JAXArray:
         t1, _ = X1
         t2, _ = X2
         dt = t2 - t1
-        mats = [self._Phi0(dt), self._Phi1(dt)] + [k.transition_matrix(0.0, dt) for k in self.kernels_resid]
-        return self._block_diag(mats)
+        Phi0 = self._Phi0(dt)
+        Phi1 = self._Phi1(dt)
+        z01 = jnp.zeros((Phi0.shape[0], Phi1.shape[1]))
+        z10 = jnp.zeros((Phi1.shape[0], Phi0.shape[1]))
+        return jnp.block([[Phi0, z01],
+                          [z10, Phi1]])
 
     def _quadrature_nodes_weights(self, width: JAXArray):
         """
@@ -235,47 +207,29 @@ class ContiBLRQS(qs.Wrapper):
         taps = jax.vmap(tap, in_axes=(0, 0))(u_k, gamma_k)
         return taps.sum(axis=0)
 
-    def _conv_obs_with(self, kernel, t: JAXArray, lag: JAXArray, width: JAXArray) -> JAXArray:
-        u_k, gamma_k = self._quadrature_nodes_weights(width)
-        def tap(u, g):
-            C   = kernel.observation_model(t - (lag + u))
-            Phi = kernel.transition_matrix(0.0, (lag + u))
-            return g * (C @ Phi)
-        return jax.vmap(tap, in_axes=(0, 0))(u_k, gamma_k).sum(axis=0)
-
 
     def observation_model(self, X: JAXArray) -> JAXArray:
+        """
+        Return a single observation vector h_tot for the augmented state:
+            h_tot = [ h_base_total , h_bwb ].
+        """
         t, b = X
         b = jnp.asarray(b, dtype=int)
 
-        # --- SHARED OU: continuum + BLR (drives cross-band covariance) ---
-        h_cont_shared = self._conv_obs_with(self.kernel,  t, self.lag_disk[b],                      self.width_cont[b])
-        h_blr_shared  = self._conv_obs_with(self.kernel,  t, self.lag_disk[b] + self.lag_blr[b],    self.width_blr[b])
+        # Continuum at (t - lag_disk[b])
+        h_cont0 = self.conv_observation_model(t, self.lag_disk[b], self.width_cont[b])
+        # BLR lags behind continuum by lag_blr[b]  => total shift is lag_disk + lag_blr
+        h_blr0  = self.conv_observation_model(t, self.lag_disk[b] + self.lag_blr[b], self.width_blr[b])
 
-        # split continuum amplitude: shared vs residual
-        a_shared = jnp.sqrt(1.0 - self.rho_resid) * self.amp_cont[b]
-        h_shared_total = a_shared * h_cont_shared + self.amp_blr[b] * h_blr_shared
+        h_cont = self.amp_cont[b] * h_cont0
+        h_blr  = self.amp_blr[b]  * h_blr0
+        h_base_total = h_cont + h_blr
 
-        # --- BWB on the shared OU ---
-        h_bwb = self.kernel2.observation_model(t)
-        q_b   = self.bwb_alpha * (a_shared ** 2)          # keep your original scaling
-        h_bwb = jnp.sqrt(2.0) * q_b * h_bwb
+        h_sq = self.kernel2.observation_model(t)
+        q_b  = self.bwb_alpha * (self.amp_cont[b]) ** 2
+        h_bwb = jnp.sqrt(2.0) * q_b * h_sq
 
-        # --- RESIDUAL OU: band-specific τ(λ), continuum only ---
-        B = self.amp_cont.shape[0]
-
-        def resid_block(i):
-            # compute the residual contribution for block i
-            h_i = self._conv_obs_with(self.kernels_resid[i], t, self.lag_disk[b], self.width_cont[b])
-            # JAX-safe mask: only the block matching band b is kept
-            mask = jnp.where(b == i, 1.0, 0.0)
-            return (jnp.sqrt(self.rho_resid) * self.amp_cont[b]) * (mask * h_i)
-        
-        h_resid_blocks = [resid_block(i) for i in range(B)]
-
-        return jnp.concatenate([h_shared_total, h_bwb] + h_resid_blocks, axis=0)
-
-
+        return jnp.concatenate([h_base_total, h_bwb], axis=0)
 
     def psd(self, omega: JAXArray, b: int, sigma_n2: float = 0.0) -> JAXArray:
         """
@@ -352,12 +306,9 @@ class MyMultiVarModel(MultiVarModel):
         return mean_per_obs
     
     def _build_gp(self, params):
-        log_sigma_band     = self.my_amp_transform(params)
-        log_sigma_band_blr = self.my_amp_transform_blr(params)
-        log_tau_band       = self.my_tau_drw_transform(params)   # vector, shape [B]
-
-        tau_bands  = jnp.exp(log_tau_band)                       # per-band τ(λ)
-        tau_shared = jnp.exp(jnp.mean(log_tau_band))             # shared τ (mean across bands)
+        log_sigma_band      = self.my_amp_transform(params)
+        log_sigma_band_blr  = self.my_amp_transform_blr(params)
+        log_tau_band        = self.my_tau_drw_transform(params)
 
         # DO NOT sort or reindex
         t, band = self.X
@@ -391,15 +342,13 @@ class MyMultiVarModel(MultiVarModel):
         kernel = ContiBLRQS(
             amp_cont=jnp.exp(log_sigma_band),
             amp_blr=jnp.exp(log_sigma_band_blr),
+            tau_drw=jnp.exp(log_tau_band),
             lag_disk=lag_disk,                              # NEW
             lag_blr=jnp.exp(params["log_lag_blr"]),
             bwb_alpha=params["bwb_alpha"],
             bwb_beta=params["bwb_beta"],
             width_cont=params["width_cont"],
             width_blr=params["width_blr"],
-            tau_shared=tau_shared,
-            tau_bands=tau_bands,
-            rho_resid=params["rho_resid"],
         )
 
         gp = GaussianProcess(kernel, (t, band), diag=diags + 1e-6, mean=means)
@@ -430,7 +379,7 @@ class MyMultiVarModel(MultiVarModel):
         lam_s = params["lam_s"]
         eta_break = params["eta_break"]
         log_tau_band = params["log_tau_drw0"] + jnp.log(10) * log_broken_pl(self.lam_rf, lam_s, eta_tau1, eta_tau2, eta_break)
-        return log_tau_band
+        return jnp.mean(log_tau_band)
 
     def my_amp_transform(self, params: dict[str, JAXArray]) -> JAXArray:
         """
