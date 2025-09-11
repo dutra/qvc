@@ -253,7 +253,7 @@ class ContiBLRQS(qs.Wrapper):
         h_blr_shared  = self._conv_obs_with(self.kernel,  t, self.lag_disk[b] + self.lag_blr[b],    self.width_blr[b])
 
         # split continuum amplitude: shared vs residual
-        a_shared = (1.0 - self.rho_resid) * self.amp_cont[b]
+        a_shared = jnp.sqrt(1.0 - self.rho_resid) * self.amp_cont[b]
         h_shared_total = a_shared * h_cont_shared + self.amp_blr[b] * h_blr_shared
 
         # --- BWB on the shared OU ---
@@ -269,8 +269,8 @@ class ContiBLRQS(qs.Wrapper):
             h_i = self._conv_obs_with(self.kernels_resid[i], t, self.lag_disk[b], self.width_cont[b])
             # JAX-safe mask: only the block matching band b is kept
             mask = jnp.where(b == i, 1.0, 0.0)
-            return (self.rho_resid * self.amp_cont[b]) * (mask * h_i)
-
+            return (jnp.sqrt(self.rho_resid) * self.amp_cont[b]) * (mask * h_i)
+        
         h_resid_blocks = [resid_block(i) for i in range(B)]
 
         return jnp.concatenate([h_shared_total, h_bwb] + h_resid_blocks, axis=0)
