@@ -74,7 +74,7 @@ universal_params = (
 
 def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_fake_in, log_sigma_fake_in, 
                 bwb=True, disable_poly1=False, d_eta=True, disable_lag_blr=False, wide_eta_priors=False, free_eta_break=False,
-                couple_sigma_tau=True, sigma_tau_uniform=False, eta_tau2_lognormal=False):
+                couple_sigma_tau=True, sigma_tau_uniform=False, eta_tau2_lognormal=False, inject_fake=False):
     # Precompute and capture constants in the closure so they are treated as
     # static by JAX/NumPyro. This prevents unnecessary retracing/recompilation
     # when running MCMC, as these values do not change between runs.
@@ -165,13 +165,19 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_
             # log_sigma0 = numpyro.sample("log_sigma0", dist.Normal(-0.8, 1.0))
             # log_sigma_hat0 = numpyro.deterministic("log_sigma_hat0", log_sigma0 - 0.5 * log_tau_drw0)
 
+            log_tau_drw0_high = 10.0 * jnp.log(10)
+            if inject_fake:
+                log_tau_drw0_low = 0.0
+            else:
+                log_tau_drw0_low = 1.5 * jnp.log(10)
+
             if sigma_tau_uniform:
                 print("[INFO] Using Uniform prior on log_sigma0 and log_tau_drw0.")
-                log_tau_drw0 = numpyro.sample("log_tau_drw0", dist.Uniform(1.5*jnp.log(10), 6.0*jnp.log(10)))
+                log_tau_drw0 = numpyro.sample("log_tau_drw0", dist.Uniform(log_tau_drw0_low, log_tau_drw0_high))
             else:
                 print("[INFO] Using Normal prior on log_sigma0 and log_tau_drw0.")
                 log_tau_drw0 = numpyro.sample("log_tau_drw0",
-                    dist.TruncatedNormal(log_tau_drw0_c, 1.2*jnp.log(10), low=1.5*jnp.log(10), high=6.0*jnp.log(10)))
+                    dist.TruncatedNormal(log_tau_drw0_c, 1.2*jnp.log(10), low=log_tau_drw0_low, high=log_tau_drw0_high))
             
             if couple_sigma_tau:
                 # Coupled prior: log_sigma depends on log_tau
@@ -688,7 +694,7 @@ if __name__ == '__main__':
                                       disable_lag_blr=args.disable_lag_blr, 
                                       free_eta_break=args.free_eta_break, wide_eta_priors=args.wide_eta_priors,
                                       couple_sigma_tau=args.couple_sigma_tau, sigma_tau_uniform=args.sigma_tau_uniform,
-                                      eta_tau2_lognormal=args.eta_tau2_lognormal)
+                                      eta_tau2_lognormal=args.eta_tau2_lognormal, inject_fake=args.inject_fake)
 
     nuts_kernel = NUTS(numpyro_joint_model, init_strategy=init_strategy, dense_mass=True, max_tree_depth=args.max_tree_depth)
     mcmc = MCMC(
