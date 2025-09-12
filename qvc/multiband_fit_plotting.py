@@ -659,7 +659,7 @@ def _prep_matrix(
             mu = float(np.mean(col))
             sigma = max(jitter_abs, abs(mu) * jitter_rel)
             X[:, j] = (col + np.random.normal(0.0, sigma, size=col.shape)).astype(np.float32)
-            print("Jittered near-constant param:", labels[j])
+            #print("Jittered near-constant param:", labels[j])
 
     return X, labels, const_mask
 

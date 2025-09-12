@@ -57,6 +57,7 @@ from multiband_fit_utils import *
 from multiband_fit_plotting import *
 from multiband_generate_lc import *
 from multiband_models import *
+#from multiband_model_tausep import MyMultiVarModel_BLR_LMC
 
 # define params
 zero_mean = False
@@ -74,7 +75,7 @@ universal_params = (
 
 def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_fake_in, log_sigma_fake_in, 
                 bwb=True, disable_poly1=False, d_eta=True, disable_lag_blr=False, wide_eta_priors=False, free_eta_break=False,
-                couple_sigma_tau=True, sigma_tau_uniform=False, eta_tau2_lognormal=False, inject_fake=False):
+                couple_sigma_tau=True, sigma_tau_uniform=False, inject_fake=False):
     # Precompute and capture constants in the closure so they are treated as
     # static by JAX/NumPyro. This prevents unnecessary retracing/recompilation
     # when running MCMC, as these values do not change between runs.
@@ -134,13 +135,9 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_
         sigma_eta_tau1 = numpyro.deterministic("sigma_eta_tau1", jnp.exp(log_sigma_eta_tau1))
         sigma_eta_tau2 = numpyro.deterministic("sigma_eta_tau2", jnp.exp(log_sigma_eta_tau2))
 
-        # --- Population hyperpriors (rest-frame) ---
-        # mu_log_tau_rf  = numpyro.sample(
-        #     "mu_log_tau_rf", dist.Normal(jnp.log(10**3.0), 1.0)
-        # )
-        # sigma_log_tau_rf = numpyro.sample(
-        #     "sigma_log_tau_rf", dist.HalfNormal(1.25)
-        # )
+        # --- Population hyperpriors (rest frame) ---
+        mu_log_tau_rf  = numpyro.sample("mu_log_tau_rf", dist.Normal(jnp.log(10**3.0), 1.0))
+        sigma_log_tau_rf = numpyro.sample("sigma_log_tau_rf", dist.HalfNormal(1.25))
 
         with numpyro.plate("objects", batch_size):
             # Object-level parameters (shape: [B])
@@ -174,14 +171,16 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_
             else:
                 log_tau_drw0_low = 1.5 * jnp.log(10)
 
-            if sigma_tau_uniform:
+            if sigma_tau_uniform: # For testing inject fake recovery
                 print("[INFO] Using Uniform prior on log_sigma0 and log_tau_drw0.")
                 log_tau_drw0 = numpyro.sample("log_tau_drw0", dist.Uniform(log_tau_drw0_low, log_tau_drw0_high))
-            else:
-                print("[INFO] Using Normal prior on log_sigma0 and log_tau_drw0.")
-                log_tau_drw0 = numpyro.sample("log_tau_drw0",
-                    dist.TruncatedNormal(log_tau_drw0_c, 1.2*jnp.log(10), low=log_tau_drw0_low, high=log_tau_drw0_high))
-            
+            else: # DEFAULT
+                print("[INFO] Using hierarchical rest-frame prior for log_tau.")
+                # Sample rest-frame log tau for each object
+                log_tau_rf = numpyro.sample("log_tau_rf", dist.Normal(mu_log_tau_rf, sigma_log_tau_rf))
+                # Convert to observed-frame log tau used by the kernel
+                log_tau_drw0 = numpyro.deterministic("log_tau_drw0", log_tau_rf + jnp.log1p(zs))
+
             if couple_sigma_tau:
                 # Coupled prior: log_sigma depends on log_tau
                 # Put prior on standardized amplitude; derive log_sigma0 from it
@@ -189,14 +188,19 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_
                 if sigma_tau_uniform:
                     log_sigma_hat0 = numpyro.sample("log_sigma_hat0", dist.Uniform(-5*jnp.log(10), -0.5*jnp.log(10)))
                 else:
-                    log_sigma_hat0 = numpyro.sample("log_sigma_hat0", dist.Normal(-0.6*jnp.log(10) - 0.5*log_tau_drw0_c, 2.0*jnp.log(10)))
+                    # center on E[log_tau_obs] = mu_log_tau_rf + log(1+z_i)
+                    log_tau_drw0_center = mu_log_tau_rf + jnp.log1p(zs)
+                    log_sigma_hat0 = numpyro.sample(
+                        "log_sigma_hat0",
+                        dist.Normal(-0.6*jnp.log(10) - 0.5*log_tau_drw0_center, 2.0*jnp.log(10))
+                    )                
                 log_sigma0 = numpyro.deterministic("log_sigma0", log_sigma_hat0 + 0.5 * log_tau_drw0)
-            else:
+            else: # DEFAULT
                 # Uncoupled prior: log_sigma independent of log_tau
                 print("[WARNING] couple_sigma_tau=False: log_sigma0 is independent of log_tau_drw0.")
-                if sigma_tau_uniform:
+                if sigma_tau_uniform: # For testing inject fake recovery
                     log_sigma0 = numpyro.sample("log_sigma0", dist.Uniform(-2.0*jnp.log(10), 0.2*jnp.log(10)))
-                else:
+                else: # DEFAULT
                     log_sigma0 = numpyro.sample("log_sigma0", dist.Normal(-0.6*jnp.log(10), 1.0*jnp.log(10)))
                 log_sigma_hat0 = numpyro.deterministic("log_sigma_hat0", log_sigma0 - 0.5 * log_tau_drw0)
 
@@ -218,7 +222,7 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_
             log_lag0 = numpyro.sample(
                 "log_lag0",
                 dist.TruncatedNormal(jnp.log(0.2) + log_tau_drw0, 1.0,
-                                    low=jnp.log(0.03), high=jnp.log(1_000.0))
+                                    low=jnp.log(0.03), high=jnp.log(4_000.0))
             )
             lag0_tilde = numpyro.deterministic("lag0_tilde", jnp.exp(log_lag0))
             lag_beta = numpyro.sample("lag_beta", dist.Normal(4/3, 0.2))
@@ -546,28 +550,26 @@ if __name__ == '__main__':
     parser.add_argument("--couple_sigma_tau", action="store_true", default=False, help="Use coupled prior for sigma and tau.")
     parser.add_argument("--disable_lag_blr", action="store_true", default=False, help="Disable BLR lag model.")
     parser.add_argument("--sigma_tau_uniform", action="store_true", default=False, help="Use uniform priors for sigma and tau.")
-    parser.add_argument("--eta_tau2_lognormal", action="store_true", default=False, help="Use lognormal prior for eta_tau2_mean.")
+    #parser.add_argument("--model_lmc", action="store_true", default=False, help="Use LMC model instead of DRW.")
     args = parser.parse_args()
     print("Args: ", args)
 
-
-    filter_object_ids = args.filter_object_id if args.filter_object_id else []
-    if len(filter_object_ids) > 0:
-        print(f"Filtering object IDs: {len(filter_object_ids)}")
+    if args.filter_object_id is not None and len(args.filter_object_id) > 0:
+        print(f"Filtering object IDs: {len(args.filter_object_id)}")
 
     if args.load_stone_lcs:
-        objs = load_stone_lcs(filter_object_ids=filter_object_ids)
+        objs = load_stone_lcs(filter_object_ids=args.filter_object_id)
         print(f"Loaded {len(objs)} Stone light curves.")
     else:
-        objs = concat_light_curves(filter_object_ids=filter_object_ids, progress_bar=args.progress)
+        objs = concat_light_curves(filter_object_ids=args.filter_object_id, progress_bar=args.progress, N=args.N, skip=args.skip)
     print(f"Loaded {len(objs)} objects from concat_light_curves")
 
-    if args.skip:
-        objs = objs[args.skip:]
-        print(f"After applying skip, {len(objs)} objects remain.")
-    if args.N:
-        objs = objs[:args.N]
-        print(f"After applying N, {len(objs)} objects remain.")
+    # if args.skip:
+    #     objs = objs[args.skip:]
+    #     print(f"After applying skip, {len(objs)} objects remain.")
+    # if args.N:
+    #     objs = objs[:args.N]
+    #     print(f"After applying N, {len(objs)} objects remain.")
 
     objs = populate_sdss_fields(objs, progress_bar=args.progress)
     
@@ -609,7 +611,9 @@ if __name__ == '__main__':
         print(f"Object {obj['object_id']}: f_host_5100 = {obj['f_host_5100']}")
 
     #objs = populate_sdss_fields(objs)
-
+    # if args.model_lmc:
+    #     Model = MyMultiVarModel_BLR_LMC
+    # else:
     Model = MyMultiVarModel
 
     # After loading objs
@@ -696,7 +700,7 @@ if __name__ == '__main__':
                                       disable_lag_blr=args.disable_lag_blr, 
                                       free_eta_break=args.free_eta_break, wide_eta_priors=args.wide_eta_priors,
                                       couple_sigma_tau=args.couple_sigma_tau, sigma_tau_uniform=args.sigma_tau_uniform,
-                                      eta_tau2_lognormal=args.eta_tau2_lognormal, inject_fake=args.inject_fake)
+                                      inject_fake=args.inject_fake)
 
     nuts_kernel = NUTS(numpyro_joint_model, init_strategy=init_strategy, dense_mass=True, max_tree_depth=args.max_tree_depth)
     mcmc = MCMC(
