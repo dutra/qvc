@@ -114,10 +114,8 @@ def cut_light_curve_restframe_window(lc_list, n_days=1800, same_length=False):
     return new_lc_list
 
 
-def concat_light_curves(filter_object_ids=[], progress_bar=False):
-    print(f"DEBUG concat_light_curves args: {len(filter_object_ids)=}")
-
-    filter_object_ids = set(filter_object_ids)
+def concat_light_curves(filter_object_ids=None, progress_bar=False, skip=None, N=None):
+    print(f"[DEBUG] Loading concat_light_curves with filter_object_ids={filter_object_ids}, skip={skip}, N={N}")
 
     s82_objs = []
 
@@ -132,12 +130,20 @@ def concat_light_curves(filter_object_ids=[], progress_bar=False):
     ztf = pd.read_parquet(f"data/S82/dr16s82_ZuberLCRaw.parquet")
 
     # Find elements in cat where objectId exists in the list of objectId of sdss
-    match_object_ids = set(sdss.objectId) & set(filter_object_ids)
+    if filter_object_ids is not None:
+        match_object_ids = set(sdss.objectId) & set(filter_object_ids)
+    else:
+        match_object_ids = set(sdss.objectId)
     matching_indices = cat[cat.objectId.isin(match_object_ids)].index
 
     cat = cat.loc[matching_indices]
 
     print(f"Found {len(cat)} matching objects in concat_light_curves", len(cat))
+
+    if skip is not None:
+        cat = cat.iloc[skip:]
+    if N is not None:
+        cat = cat.iloc[:N]
 
     # Loop through the data and extract the relevant information        
     for idx, row in tqdm(cat.iterrows(), total=len(cat), desc="Processing quasars", disable=(not progress_bar)):
@@ -225,7 +231,7 @@ def concat_light_curves(filter_object_ids=[], progress_bar=False):
 
     return s82_objs
 
-def load_stone_lcs(filter_object_ids=[]):
+def load_stone_lcs(filter_object_ids=[], skip=None, N=None):
     # Load Stone et al. (2022) data
     fits_file = 'data/stone_TotalDat_v2.fits'
     hdul = fits.open(fits_file)
@@ -241,6 +247,10 @@ def load_stone_lcs(filter_object_ids=[]):
     stone_lcs = OrderedDict()
 
     for i in range(len(data)):
+        if skip is not None and i < skip:
+            continue
+        if N is not None and i >= skip + N:
+            break
         dbid = data['DBID'][i]
         stone_lcs[dbid] = {
             'stone_DBID': dbid,
