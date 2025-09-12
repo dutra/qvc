@@ -57,7 +57,7 @@ from multiband_fit_utils import *
 from multiband_fit_plotting import *
 from multiband_generate_lc import *
 from multiband_models import *
-#from multiband_model_tausep import MyMultiVarModel_BLR_LMC
+from multiband_model_lmc import MyMultiVarModel_BLR_LMC
 
 # define params
 zero_mean = False
@@ -550,7 +550,7 @@ if __name__ == '__main__':
     parser.add_argument("--couple_sigma_tau", action="store_true", default=False, help="Use coupled prior for sigma and tau.")
     parser.add_argument("--disable_lag_blr", action="store_true", default=False, help="Disable BLR lag model.")
     parser.add_argument("--sigma_tau_uniform", action="store_true", default=False, help="Use uniform priors for sigma and tau.")
-    #parser.add_argument("--model_lmc", action="store_true", default=False, help="Use LMC model instead of DRW.")
+    parser.add_argument("--lmc", action="store_true", default=False, help="Use LMC model instead of DRW.")
     args = parser.parse_args()
     print("Args: ", args)
 
@@ -611,10 +611,11 @@ if __name__ == '__main__':
         print(f"Object {obj['object_id']}: f_host_5100 = {obj['f_host_5100']}")
 
     #objs = populate_sdss_fields(objs)
-    # if args.model_lmc:
-    #     Model = MyMultiVarModel_BLR_LMC
-    # else:
-    Model = MyMultiVarModel
+    if args.lmc:
+        print("[WARNING] Using LMC model instead of DRW.")
+        Model = MyMultiVarModel_BLR_LMC
+    else:
+        Model = MyMultiVarModel
 
     # After loading objs
     logging.info("--- Joint fitting ---")
