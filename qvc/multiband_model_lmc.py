@@ -30,6 +30,7 @@ from multiband_generate_lc import *
 
 import jax
 import jax.numpy as jnp
+import jax.nn as jnn  # NEW: for one_hot
 from typing import Sequence
 import tinygp
 from tinygp.kernels import quasisep as qs
@@ -226,6 +227,11 @@ class MyMultiVarModel_BLR_LMC(MultiVarModel):
     yerr: JAXArray | NDArray
     z: float
     lam_rf: JAXArray
+    use_bwb: bool
+    q_groups: int
+    q_quantiles: Sequence[float] | None
+    q_min_sep_dex: float
+    q_min_group_frac: float
 
     def __init__(
         self,
@@ -233,12 +239,19 @@ class MyMultiVarModel_BLR_LMC(MultiVarModel):
         y: JAXArray | NDArray,
         yerr: JAXArray | NDArray,
         kernel: tinygp.kernels.quasisep.Quasisep,
+        
         **kwargs,
     ) -> None:
         super().__init__(X, y, yerr, kernel, **kwargs)
         self.yerr = yerr
-        self.z = kwargs.get("z", None)
-        self.lam_rf = kwargs.get("lam_rf", None)
+        self.z = kwargs["z"]
+        self.lam_rf = kwargs["lam_rf"]
+        self.use_bwb = kwargs["use_bwb"]
+        self.q_groups = kwargs["q_groups"] # 1, 2 or 3
+        self.q_quantiles       = kwargs.get("q_quantiles", None)         # e.g., (0.10,0.90) or (0.10,0.50,0.90)
+        self.q_min_sep_dex     = kwargs.get("q_min_sep_dex", 0.10)      # ~0.1 dex minimum separation
+        self.q_min_group_frac  = kwargs.get("q_min_group_frac", 0.20)  # ≥20% of weight per group
+
 
     @staticmethod
     def mean_func(
@@ -260,73 +273,55 @@ class MyMultiVarModel_BLR_LMC(MultiVarModel):
         return mean_per_obs
     
     def _build_gp(self, params):
-        log_sigma_band      = self.my_amp_transform(params)
-        log_sigma_band_blr  = self.my_amp_transform_blr(params)
-        log_tau_band        = self.my_tau_drw_transform(params)
+        log_sigma_band     = self.my_amp_transform(params)      # (B,)
+        log_sigma_band_blr = self.my_amp_transform_blr(params)  # (B,)
 
-        # DO NOT sort or reindex
+        # NEW: get centers (Q,) and gate (B,Q) from the transform
+        centers_log_tau, gate = self.my_tau_drw_transform(params)
+
+        # basic plumbing (unchanged)
         t, band = self.X
-        
-        s = ContiBLR_LMC_QS.coord_to_sortable(self, (t, band))  # or kernel.coord_to_sortable((t, band))
-        #jax.debug.print("sorted_by_kernel? {}", jnp.all(jnp.diff(s) >= 0))
+        t_center = jnp.mean(t); t_std = jnp.std(t)
+        means = partial(MyMultiVarModel_BLR_LMC.mean_func, self.zero_mean,
+                        log_sigma_band.shape[0], t_center, t_std, params)
+        diags = self.diag + (jnp.exp(params["log_jitter"]) ** 2)[band] if self.has_jitter else self.diag
 
-        t_center = jnp.mean(t)
-        t_std    = jnp.std(t)
-
-        means = partial(MyMultiVarModel_BLR_LMC.mean_func, self.zero_mean, log_sigma_band.shape[0],
-                        t_center, t_std, params)
-
-        # diagonal noise in original order
-        if self.has_jitter:
-            diags = self.diag + (jnp.exp(params["log_jitter"]) ** 2)[band]
-        else:
-            diags = self.diag
-
-        # per-band disk lags
-        #lag_disk = params["lag0"] * (self.lam_rf / 2500.0) ** params["lag_beta"]
-        # x_b and its mean are *data constants* per object
+        # per-band disk lags (unchanged)
         x_b   = jnp.log(self.lam_rf / 2500.0)
         x_bar = jnp.mean(x_b)
+        lag0  = params["lag0_tilde"] * jnp.exp(-params["lag_beta"] * x_bar)
+        lag_disk = lag0 * (self.lam_rf / 2500.0) ** params["lag_beta"]
 
-        # convert to the effective lag0 used at the fixed 2500 pivot
-        lag0   = params["lag0_tilde"] * jnp.exp(-params["lag_beta"] * x_bar)
+        B = log_sigma_band.size
+        Q = centers_log_tau.shape[0]
 
-        lag_disk = lag0 * (self.lam_rf / 2500.0) ** params["lag_beta"]              
+        # Loadings: diagonal per-band amplitude × gate
+        a_cont = jnp.exp(log_sigma_band)[:, None]     * gate   # (B,Q)
+        a_blr  = jnp.exp(log_sigma_band_blr)[:, None] * gate   # (B,Q)
 
-        # --- choose latent count (Q). Start with one shared DRW latent:
-        Q = 1
+        # Latent timescales
+        tau_latents = jnp.exp(centers_log_tau)                # (Q,)
 
-        B = log_sigma_band.size  # number of bands
-
-        # (B,Q) loadings for continuum & BLR (old per-band amps -> first latent)
-        a_cont = jnp.exp(log_sigma_band).reshape(B, 1)           # (B,1)
-        a_blr  = jnp.exp(log_sigma_band_blr).reshape(B, 1)       # (B,1)
-
-        # (Q,) latent timescales
-        tau_latents = jnp.atleast_1d(jnp.exp(log_tau_band))      # (1,)
-
-        # BWB weights q_bwb (B,Q): reproduce old behavior q_b = bwb_alpha * (A_cont)^2
-        use_bwb = bool(params.get("use_bwb", False))
+        # Optional BWB term (use same gate)
+        use_bwb = bool(self.use_bwb)
         if use_bwb:
-            q_bwb = (params["bwb_alpha"] * jnp.exp(2.0 * log_sigma_band)).reshape(B, 1)  # (B,1)
+            base  = params["bwb_alpha"] * jnp.exp(2.0 * log_sigma_band)  # (B,)
+            q_bwb = base[:, None] * gate                                 # (B,Q)  ← use the same gate
         else:
             q_bwb = None
 
         kernel = ContiBLR_LMC_QS(
-            tau_latents=tau_latents,      # (Q,)
-            a_cont=a_cont,                # (B,Q)
-            a_blr=a_blr,                  # (B,Q)
-            lag_disk=lag_disk,            # (B,)
-            lag_blr=jnp.exp(params["log_lag_blr"]),    # (B,)
-            width_cont=params["width_cont"],           # (B,)
-            width_blr=params["width_blr"],             # (B,)
-            use_bwb=use_bwb,
-            bwb_beta=params["bwb_beta"],        # scalar
-            q_bwb=q_bwb,                               # (B,Q) or None
+            tau_latents=tau_latents,
+            a_cont=a_cont, a_blr=a_blr,
+            lag_disk=lag_disk,
+            lag_blr=jnp.exp(params["log_lag_blr"]),
+            width_cont=params["width_cont"],
+            width_blr=params["width_blr"],
+            use_bwb=use_bwb, bwb_beta=params["bwb_beta"], q_bwb=q_bwb,
         )
+
         gp = GaussianProcess(kernel, (t, band), diag=diags + 1e-6, mean=means)
         return gp, jnp.arange(t.shape[0])
-
 
     def my_lag_transform(
         self, X: JAXArray, has_lag: bool, params: dict[str, JAXArray]
@@ -346,38 +341,212 @@ class MyMultiVarModel_BLR_LMC(MultiVarModel):
     def my_amp_transform_blr(self, params: dict[str, JAXArray]) -> JAXArray:
         return params["log_sigma0"] + jnp.atleast_1d(params["log_amp_delta_blr"])
     
+    # def my_tau_drw_transform(self, params):
+    #     """
+    #     Returns:
+    #     Q=1 -> scalar log_tau_center
+    #     Q=2 -> (2,) [q05, q95]
+    #     Q=3 -> (3,) [q05, q50, q95]
+    #     Centers are weighted by per-band inverse-variance (usable bands only).
+    #     """
+    #     # --- Per-band log tau from broken power law ---
+    #     eta_tau1  = params["eta_tau1"]
+    #     eta_tau2  = params["eta_tau2"]
+    #     lam_s     = params["lam_s"]
+    #     eta_break = params["eta_break"]
+
+    #     log_tau_band = (
+    #         params["log_tau_drw0"]
+    #         + jnp.log(10.0) * log_broken_pl(self.lam_rf, lam_s, eta_tau1, eta_tau2, eta_break)
+    #     )  # (B,)
+
+    #     # --- Build per-band weights from obs inverse-variance (no boolean indexing) ---
+    #     _, b = self.X
+    #     b = b.astype(jnp.int32)
+    #     iv = jnp.where((self.yerr > 0) & (self.yerr < 100.0) & jnp.isfinite(self.yerr),
+    #                 1.0 / (self.yerr ** 2), 0.0).astype(log_tau_band.dtype)
+    #     B = log_tau_band.shape[0]
+    #     band_w = jnp.zeros(B, dtype=log_tau_band.dtype).at[b].add(iv)  # (B,)
+
+    #     # Fallback: if everything unusable, use uniform weights
+    #     total_w = band_w.sum()
+    #     band_w = jnp.where(total_w > 0, band_w, jnp.ones_like(band_w) / B)
+
+    #     # --- Weighted quantiles (JAX-friendly) ---
+    #     def weighted_quantiles(x, w, qs):
+    #         # sort by x
+    #         idx = jnp.argsort(x)
+    #         xs = x[idx]
+    #         ws = w[idx]
+    #         cws = jnp.cumsum(ws)
+    #         tot = cws[-1]
+    #         # guard tiny tot
+    #         tot = jnp.where(tot > 0, tot, 1.0)
+    #         cdf = cws / tot
+
+    #         def one_q(q):
+    #             # index of first cdf >= q
+    #             k = jnp.searchsorted(cdf, jnp.clip(q, 0.0, 1.0), side="left")
+    #             k = jnp.clip(k, 0, xs.size - 1)
+    #             return xs[k]
+
+    #         return jnp.stack([one_q(q) for q in qs])
+
+    #     # --- Centers by q_groups ---
+    #     if self.q_groups == 1:
+    #         # weighted mean (single center)
+    #         w = band_w / band_w.sum()
+    #         return jnp.sum(w * log_tau_band)
+
+    #     elif self.q_groups == 2:
+    #         # 5th and 95th percentiles
+    #         return weighted_quantiles(log_tau_band, band_w, (0.05, 0.95))
+
+    #     else:
+    #         # Q=3: 5th, 50th, 95th percentiles
+    #         return weighted_quantiles(log_tau_band, band_w, (0.05, 0.50, 0.95))
+
     def my_tau_drw_transform(self, params):
-        # Per-band log tau from broken power law
+        """
+        Returns:
+        centers_log_tau : (Q,)   natural-log τ centers (observed-frame)
+        gate            : (B,Q)  one-hot band→latent assignment
+        Q is chosen via self.q_groups and shapes are kept fixed. If guardrails fail,
+        we 'collapse' by adjusting centers/gate without changing (B,Q).
+        """
+        # --- Per-band ln τ (observed frame) from the wavelength law ---
         eta_tau1  = params["eta_tau1"]
         eta_tau2  = params["eta_tau2"]
         lam_s     = params["lam_s"]
         eta_break = params["eta_break"]
 
-        log_tau_per_band = (
+        log_tau_band = (
             params["log_tau_drw0"]
             + jnp.log(10.0) * log_broken_pl(self.lam_rf, lam_s, eta_tau1, eta_tau2, eta_break)
         )  # (B,)
 
-        # Build weights from *usable* observations, WITHOUT boolean indexing
-        # ---------------------------------------------------------------
-        # obs -> band index vector
-        _, b = self.X  # b shape (N_obs,)
+        # --- Per-band inverse-variance weights (JAX-safe; dropped bands get ~0) ---
+        _, b = self.X
         b = b.astype(jnp.int32)
-        #  Weight by inverse variance instead of counts -- small error bands contribute more
-        # 1. Per-observation inverse-variance weights (0 for unusable)
         iv = jnp.where((self.yerr > 0) & (self.yerr < 100.0) & jnp.isfinite(self.yerr),
-                    1.0 / (self.yerr ** 2), 0.0).astype(log_tau_per_band.dtype)
+                    1.0 / (self.yerr**2), 0.0).astype(log_tau_band.dtype)
+        B = log_tau_band.shape[0]
+        band_w = jnp.zeros(B, dtype=log_tau_band.dtype).at[b].add(iv)
+        band_w = jnp.where(band_w.sum() > 0, band_w, jnp.ones_like(band_w) / B)
+        w_tot  = band_w.sum()
 
-        # 2. Scatter-add inverse variance into bands
-        B = log_tau_per_band.shape[0]
-        band_iv = jnp.zeros(B, dtype=log_tau_per_band.dtype).at[b].add(iv)
+        # --- Weighted quantiles (JAX-friendly) ---
+        def weighted_quantiles(x, w, qs):
+            idx = jnp.argsort(x)
+            xs, ws = x[idx], w[idx]
+            cws = jnp.cumsum(ws)
+            tot = jnp.where(cws[-1] > 0, cws[-1], 1.0)
+            cdf = cws / tot
+            def one_q(q):
+                k = jnp.searchsorted(cdf, jnp.clip(q, 0.0, 1.0), side="left")
+                k = jnp.clip(k, 0, xs.size - 1)
+                return xs[k]
+            return jnp.stack([one_q(q) for q in qs])
 
-        # 3. Normalize
-        total = band_iv.sum()
-        weights = jnp.where(total > 0, band_iv / total, jnp.ones_like(band_iv) / B)
+        # --- Guardrail thresholds ---
+        Q = int(self.q_groups)
+        min_sep_ln = self.q_min_sep_dex * jnp.log(10.0)    # e.g., 0.1 dex in ln
+        min_frac   = self.q_min_group_frac
 
-        # Weighted mean across *usable* bands only
-        return jnp.sum(weights * log_tau_per_band)
+        # Helper: nearest-center one-hot gate for a given centers vector
+        def nearest_gate(centers):
+            diffs  = jnp.abs(log_tau_band[:, None] - centers[None, :])   # (B,Q)
+            assign = jnp.argmin(diffs, axis=1)                           # (B,)
+            return jnn.one_hot(assign, centers.shape[0], dtype=log_tau_band.dtype), diffs
+
+        if Q == 1:
+            # Single center = overall weighted mean
+            center = (band_w * log_tau_band).sum() / (w_tot + 1e-12)
+            centers = jnp.array([center])
+            gate = jnp.ones((B, 1), dtype=log_tau_band.dtype)
+            return centers, gate
+
+        if Q == 2:
+            # Primary 16/84, fallback 10/90 if too close (or user-specified)
+            if (self.q_quantiles is not None) and (len(self.q_quantiles) == 2):
+                qs_primary = tuple(self.q_quantiles)
+                qs_fallback = qs_primary
+            else:
+                qs_primary  = (0.16, 0.84)
+                qs_fallback = (0.10, 0.90)
+
+            c_primary   = weighted_quantiles(log_tau_band, band_w, qs_primary)   # (2,)
+            sep_primary = jnp.abs(c_primary[1] - c_primary[0])
+            c_fallback  = weighted_quantiles(log_tau_band, band_w, qs_fallback)  # (2,)
+            centers     = jnp.where(sep_primary >= min_sep_ln, c_primary, c_fallback)
+
+            gate, _ = nearest_gate(centers)                     # (B,2)
+            w_g = (band_w[:, None] * gate).sum(axis=0)          # (2,)
+            ok_w   = jnp.all(w_g >= min_frac * w_tot)
+            sep_ok = jnp.abs(centers[1] - centers[0]) >= min_sep_ln
+            ok = ok_w & sep_ok
+
+            # Collapse to effective 1 group if guardrails fail (keep (B,2) shape)
+            overall = (band_w * log_tau_band).sum() / (w_tot + 1e-12)
+            centers = centers.at[0].set(jnp.where(ok, centers[0], overall))
+            centers = centers.at[1].set(jnp.where(ok, centers[1], overall))
+            gate = jnp.where(
+                ok,
+                gate,
+                jnp.concatenate([jnp.ones((B,1), gate.dtype), jnp.zeros((B,1), gate.dtype)], axis=1)
+            )
+            return centers, gate
+
+        # Q == 3: primary 16/50/84, fallback 10/50/90 if too close
+        if (self.q_quantiles is not None) and (len(self.q_quantiles) == 3):
+            qs_primary  = tuple(self.q_quantiles)
+            qs_fallback = qs_primary
+        else:
+            qs_primary  = (0.16, 0.50, 0.84)
+            qs_fallback = (0.10, 0.50, 0.90)
+
+        c_primary  = weighted_quantiles(log_tau_band, band_w, qs_primary)   # (3,)
+        c_fallback = weighted_quantiles(log_tau_band, band_w, qs_fallback)  # (3,)
+
+        # Require both adjacent gaps >= min_sep_ln; else use fallback
+        seps_p = jnp.diff(c_primary)             # (2,)
+        centers = jnp.where(jnp.all(seps_p >= min_sep_ln), c_primary, c_fallback)
+
+        gate, diffs = nearest_gate(centers)      # (B,3), (B,3)
+        w_g   = (band_w[:, None] * gate).sum(axis=0)     # (3,)
+        ok_w  = jnp.all(w_g >= min_frac * w_tot)
+        sep_ok_adj = jnp.all(jnp.diff(centers) >= min_sep_ln)
+
+        # If middle group is weak or adjacent gaps too small, drop it by reassigning to nearer of ends
+        diffs_02 = jnp.stack([diffs[:, 0], diffs[:, 2]], axis=1)   # (B,2)
+        assign_02 = jnp.argmin(diffs_02, axis=1)
+        gate_02 = jnn.one_hot(assign_02, 2, dtype=log_tau_band.dtype)  # (B,2)
+        gate_mid_dropped = jnp.concatenate(
+            [gate_02[:, 0:1], jnp.zeros((B,1), gate_02.dtype), gate_02[:, 1:2]],
+            axis=1
+        )
+
+        # Outer guardrail: ends must be separated and carry weight; else collapse to single
+        w0 = (band_w * gate[:, 0]).sum(); w2 = (band_w * gate[:, 2]).sum()
+        ok_outer = (w0 >= min_frac * w_tot) & (w2 >= min_frac * w_tot) & ((centers[2] - centers[0]) >= min_sep_ln)
+
+        # Compose final gate; keep (B,3) shape
+        gate = jnp.where(ok_w & sep_ok_adj, gate,
+                jnp.where(ok_outer, gate_mid_dropped,
+                        jnp.concatenate([jnp.ones((B,1), gate.dtype),
+                                        jnp.zeros((B,2), gate.dtype)], axis=1)))
+
+        # If fully collapsed, set all centers equal to overall mean
+        overall = (band_w * log_tau_band).sum() / (w_tot + 1e-12)
+        centers = jnp.where(
+            ok_w & sep_ok_adj,
+            centers,
+            jnp.where(ok_outer,
+                    centers,  # keep ends; mid unused by gate
+                    jnp.array([overall, overall, overall], dtype=centers.dtype))
+        )
+        return centers, gate
+
 
     def my_amp_transform(self, params: dict[str, JAXArray]) -> JAXArray:
         """
