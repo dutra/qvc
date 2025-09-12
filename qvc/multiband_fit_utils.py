@@ -756,7 +756,11 @@ def diagnostics_for_per_chain_samples(
     worst_stuck = (None, -np.inf, None, None)
     worst_pcess = (None,  np.inf, None)
 
+    ignore_keys = ('eta_break', 'lam_s', 'bwb_alpha', 'bwb_beta', 'f_host', 'log_tau_fake', 'log_sigma_fake')
+
     for k, v in flattened_per_chain.items():
+        if k in ignore_keys:
+            continue
         v = np.asarray(v)
         if v.ndim != 2:
             raise ValueError(f"{k}: expected (n_chains, n_draws), got {v.shape}")
