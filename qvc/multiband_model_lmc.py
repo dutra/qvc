@@ -406,147 +406,104 @@ class MyMultiVarModel_BLR_LMC(MultiVarModel):
     #         # Q=3: 5th, 50th, 95th percentiles
     #         return weighted_quantiles(log_tau_band, band_w, (0.05, 0.50, 0.95))
 
-    def my_tau_drw_transform(self, params):
+    def my_tau_drw_transform(self, params, cluster_in_rest_frame: bool = True):
         """
+        Build differentiable latent centers and soft band→latent responsibilities.
+
+        Args:
+        params : dict-like model params; expected keys include:
+            eta_tau1, eta_tau2, lam_s, eta_break, log_tau_drw0
+            gate_log_temp (optional; log temperature for soft gating)
+            Q=2: lmc_sep_raw (optional; sep = softplus(raw) + min_sep_ln)
+            Q=3: lmc_sep_left_raw, lmc_sep_right_raw (optional; per-side seps)
+            Q>3: lmc_span_raw (optional; total span for equal spacing)
+        cluster_in_rest_frame : if True, cluster τ in the object's rest frame (recommended).
+
         Returns:
-        centers_log_tau : (Q,)   natural-log τ centers (observed-frame)
-        gate            : (B,Q)  one-hot band→latent assignment
-        Q is chosen via self.q_groups and shapes are kept fixed. If guardrails fail,
-        we 'collapse' by adjusting centers/gate without changing (B,Q).
+        centers_log_tau : (Q,)   ln τ centers (observed-frame units if flag=False; RF if True)
+        gate            : (B,Q)  soft responsibilities; rows sum to 1
         """
+
         # --- Per-band ln τ (observed frame) from the wavelength law ---
         eta_tau1  = params["eta_tau1"]
         eta_tau2  = params["eta_tau2"]
         lam_s     = params["lam_s"]
         eta_break = params["eta_break"]
 
-        log_tau_band = (
+        log_tau_band_obs = (
             params["log_tau_drw0"]
             + jnp.log(10.0) * log_broken_pl(self.lam_rf, lam_s, eta_tau1, eta_tau2, eta_break)
         )  # (B,)
 
+        # Optionally convert to rest-frame for clustering
+        if cluster_in_rest_frame:
+            z = self.z    # scalar redshift per object
+            log_tau_band = log_tau_band_obs - jnp.log1p(z)
+        else:
+            log_tau_band = log_tau_band_obs
+
         # --- Per-band inverse-variance weights (JAX-safe; dropped bands get ~0) ---
         _, b = self.X
         b = b.astype(jnp.int32)
-        iv = jnp.where((self.yerr > 0) & (self.yerr < 100.0) & jnp.isfinite(self.yerr),
-                    1.0 / (self.yerr**2), 0.0).astype(log_tau_band.dtype)
+
+        iv = jnp.where(
+            (self.yerr > 0) & (self.yerr < 100.0) & jnp.isfinite(self.yerr),
+            1.0 / (self.yerr**2),
+            0.0,
+        ).astype(log_tau_band.dtype)
+
         B = log_tau_band.shape[0]
         band_w = jnp.zeros(B, dtype=log_tau_band.dtype).at[b].add(iv)
-        band_w = jnp.where(band_w.sum() > 0, band_w, jnp.ones_like(band_w) / B)
+        band_w = jnp.where(band_w.sum() > 0, band_w, jnp.ones_like(band_w) / B)  # fallback
         w_tot  = band_w.sum()
 
-        # --- Weighted quantiles (JAX-friendly) ---
-        def weighted_quantiles(x, w, qs):
-            idx = jnp.argsort(x)
-            xs, ws = x[idx], w[idx]
-            cws = jnp.cumsum(ws)
-            tot = jnp.where(cws[-1] > 0, cws[-1], 1.0)
-            cdf = cws / tot
-            def one_q(q):
-                k = jnp.searchsorted(cdf, jnp.clip(q, 0.0, 1.0), side="left")
-                k = jnp.clip(k, 0, xs.size - 1)
-                return xs[k]
-            return jnp.stack([one_q(q) for q in qs])
+        # --- Global weighted mean μ as smooth anchor for all Q ---
+        mu = (band_w * log_tau_band).sum() / (w_tot + 1e-12)
 
-        # --- Guardrail thresholds ---
+        # --- Hyperparameters & smooth constraints ---
         Q = int(self.q_groups)
-        min_sep_ln = self.q_min_sep_dex * jnp.log(10.0)    # e.g., 0.1 dex in ln
-        min_frac   = self.q_min_group_frac
+        min_sep_ln = self.q_min_sep_dex * jnp.log(10.0)  # e.g., 0.1 dex → ln
+        gate_log_temp = params["gate_log_temp"]
+        temp = jnp.exp(gate_log_temp)
 
-        # Helper: nearest-center one-hot gate for a given centers vector
-        def nearest_gate(centers):
-            diffs  = jnp.abs(log_tau_band[:, None] - centers[None, :])   # (B,Q)
-            assign = jnp.argmin(diffs, axis=1)                           # (B,)
-            return jnn.one_hot(assign, centers.shape[0], dtype=log_tau_band.dtype), diffs
-
+        # --- Construct ordered, differentiable centers per Q ---
+        dtype = log_tau_band.dtype
         if Q == 1:
-            # Single center = overall weighted mean
-            center = (band_w * log_tau_band).sum() / (w_tot + 1e-12)
-            centers = jnp.array([center])
-            gate = jnp.ones((B, 1), dtype=log_tau_band.dtype)
-            return centers, gate
+            centers = jnp.array([mu], dtype=dtype)
 
-        if Q == 2:
-            # Primary 16/84, fallback 10/90 if too close (or user-specified)
-            if (self.q_quantiles is not None) and (len(self.q_quantiles) == 2):
-                qs_primary = tuple(self.q_quantiles)
-                qs_fallback = qs_primary
-            else:
-                qs_primary  = (0.16, 0.84)
-                qs_fallback = (0.10, 0.90)
+        elif Q == 2:
+            # symmetric around μ; separation ≥ min_sep_ln
+            raw = params.get("lmc_sep_raw", jnp.array(0.0, dtype))
+            sep = jax.nn.softplus(raw) + min_sep_ln
+            centers = jnp.stack([mu - 0.5 * sep, mu + 0.5 * sep], axis=0)
 
-            c_primary   = weighted_quantiles(log_tau_band, band_w, qs_primary)   # (2,)
-            sep_primary = jnp.abs(c_primary[1] - c_primary[0])
-            c_fallback  = weighted_quantiles(log_tau_band, band_w, qs_fallback)  # (2,)
-            centers     = jnp.where(sep_primary >= min_sep_ln, c_primary, c_fallback)
+        elif Q == 3:
+            # asymmetric but ordered: [μ - a, μ, μ + b]; a,b ≥ min_sep_ln
+            raw_L = params["lmc_sep_left_raw"]
+            raw_R = params["lmc_sep_right_raw"]
+            a = jax.nn.softplus(raw_L) + min_sep_ln
+            b = jax.nn.softplus(raw_R) + min_sep_ln
+            centers = jnp.stack([mu - a, mu, mu + b], axis=0)
 
-            gate, _ = nearest_gate(centers)                     # (B,2)
-            w_g = (band_w[:, None] * gate).sum(axis=0)          # (2,)
-            ok_w   = jnp.all(w_g >= min_frac * w_tot)
-            sep_ok = jnp.abs(centers[1] - centers[0]) >= min_sep_ln
-            ok = ok_w & sep_ok
-
-            # Collapse to effective 1 group if guardrails fail (keep (B,2) shape)
-            overall = (band_w * log_tau_band).sum() / (w_tot + 1e-12)
-            centers = centers.at[0].set(jnp.where(ok, centers[0], overall))
-            centers = centers.at[1].set(jnp.where(ok, centers[1], overall))
-            gate = jnp.where(
-                ok,
-                gate,
-                jnp.concatenate([jnp.ones((B,1), gate.dtype), jnp.zeros((B,1), gate.dtype)], axis=1)
-            )
-            return centers, gate
-
-        # Q == 3: primary 16/50/84, fallback 10/50/90 if too close
-        if (self.q_quantiles is not None) and (len(self.q_quantiles) == 3):
-            qs_primary  = tuple(self.q_quantiles)
-            qs_fallback = qs_primary
         else:
-            qs_primary  = (0.16, 0.50, 0.84)
-            qs_fallback = (0.10, 0.50, 0.90)
+            # Generic, symmetric grid for Q>3 (still differentiable).
+            # Equal spacing with adjacent gaps ≥ min_sep_ln.
+            raw_span = params["lmc_span_raw"]
+            # ensure total span covers at least (Q-1)*min_sep_ln
+            span_min = (Q - 1) * min_sep_ln
+            span = jax.nn.softplus(raw_span) + span_min
+            base_sep = jnp.maximum(span / jnp.maximum(Q - 1, 1), min_sep_ln)
+            offsets = base_sep * (jnp.arange(Q, dtype=dtype) - 0.5 * (Q - 1))
+            centers = mu + offsets
 
-        c_primary  = weighted_quantiles(log_tau_band, band_w, qs_primary)   # (3,)
-        c_fallback = weighted_quantiles(log_tau_band, band_w, qs_fallback)  # (3,)
+        # --- Soft, temperature-controlled responsibilities (B, Q) ---
+        d = jnp.abs(log_tau_band[:, None] - centers[None, :])   # (B,Q)
+        gate = jnn.softmax(-d / (temp + 1e-12), axis=1)         # rows sum to 1
 
-        # Require both adjacent gaps >= min_sep_ln; else use fallback
-        seps_p = jnp.diff(c_primary)             # (2,)
-        centers = jnp.where(jnp.all(seps_p >= min_sep_ln), c_primary, c_fallback)
-
-        gate, diffs = nearest_gate(centers)      # (B,3), (B,3)
-        w_g   = (band_w[:, None] * gate).sum(axis=0)     # (3,)
-        ok_w  = jnp.all(w_g >= min_frac * w_tot)
-        sep_ok_adj = jnp.all(jnp.diff(centers) >= min_sep_ln)
-
-        # If middle group is weak or adjacent gaps too small, drop it by reassigning to nearer of ends
-        diffs_02 = jnp.stack([diffs[:, 0], diffs[:, 2]], axis=1)   # (B,2)
-        assign_02 = jnp.argmin(diffs_02, axis=1)
-        gate_02 = jnn.one_hot(assign_02, 2, dtype=log_tau_band.dtype)  # (B,2)
-        gate_mid_dropped = jnp.concatenate(
-            [gate_02[:, 0:1], jnp.zeros((B,1), gate_02.dtype), gate_02[:, 1:2]],
-            axis=1
-        )
-
-        # Outer guardrail: ends must be separated and carry weight; else collapse to single
-        w0 = (band_w * gate[:, 0]).sum(); w2 = (band_w * gate[:, 2]).sum()
-        ok_outer = (w0 >= min_frac * w_tot) & (w2 >= min_frac * w_tot) & ((centers[2] - centers[0]) >= min_sep_ln)
-
-        # Compose final gate; keep (B,3) shape
-        gate = jnp.where(ok_w & sep_ok_adj, gate,
-                jnp.where(ok_outer, gate_mid_dropped,
-                        jnp.concatenate([jnp.ones((B,1), gate.dtype),
-                                        jnp.zeros((B,2), gate.dtype)], axis=1)))
-
-        # If fully collapsed, set all centers equal to overall mean
-        overall = (band_w * log_tau_band).sum() / (w_tot + 1e-12)
-        centers = jnp.where(
-            ok_w & sep_ok_adj,
-            centers,
-            jnp.where(ok_outer,
-                    centers,  # keep ends; mid unused by gate
-                    jnp.array([overall, overall, overall], dtype=centers.dtype))
-        )
-        return centers, gate
-
+        # return centers in the *same frame used for clustering*
+        centers_obs = centers + (jnp.log1p(self.z) if cluster_in_rest_frame else 0.0)
+        return centers_obs, gate
+        
 
     def my_amp_transform(self, params: dict[str, JAXArray]) -> JAXArray:
         """

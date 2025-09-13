@@ -756,7 +756,8 @@ def diagnostics_for_per_chain_samples(
     worst_stuck = (None, -np.inf, None, None)
     worst_pcess = (None,  np.inf, None)
 
-    ignore_keys = ('eta_break', 'lam_s', 'bwb_alpha', 'bwb_beta', 'f_host', 'log_tau_fake', 'log_sigma_fake')
+    ignore_keys = ('eta_break', 'lam_s', 'bwb_alpha', 'bwb_beta', 'f_host', 'log_tau_fake', 'log_sigma_fake',
+                   'gate_log_temp', 'lmc_sep_raw', 'lmc_sep_left_raw', 'lmc_sep_right_raw', 'lmc_span_raw')
 
     for k, v in flattened_per_chain.items():
         if k in ignore_keys:

@@ -11,6 +11,23 @@ except ValueError:
 if multiprocessing.current_process().name == "MainProcess":
     print(f"CPU Num Cores: {num_cores}")
 os.environ["XLA_FLAGS"] = f"--xla_force_host_platform_device_count={num_cores}"
+# Make each XLA/Eigen CPU device single-threaded
+# => 2 devices (nchains=2, parallel) ≈ 2 total threads per job.
+os.environ["XLA_FLAGS"] = (
+    "--xla_cpu_multi_thread_eigen=true intra_op_parallelism_threads=1"
+)
+
+# Do NOT create lots of CPU devices; only as many as chains.
+# If you currently set this, keep it equal to nchains (2) or just remove it:
+# os.environ["XLA_FLAGS"] += " --xla_force_host_platform_device_count=2"
+
+# Avoid extra per-process threadpools from BLAS/OMP/NumExpr:
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ.pop("NUMEXPR_MAX_THREADS", None)
+os.environ["NUMEXPR_NUM_THREADS"] = "1"
+
 os.environ["JAX_PLATFORM_NAME"] = "cpu"
 prefix = os.environ.get('PREFIX', "test")
 suffix = os.environ.get('SUFFIX', "test")
@@ -70,11 +87,13 @@ universal_params = (
     'sigma_eta_A1','sigma_eta_A2','sigma_eta_tau1','sigma_eta_tau2',
     'log_sigma_eta_A1','log_sigma_eta_A2','log_sigma_eta_tau1','log_sigma_eta_tau2',
     'mu_log_tau_rf','sigma_log_tau_rf','mu_log_sigma_hat0','sigma_log_sigma_hat0',
+    # LMC hypers
+    'gate_log_temp', 'lmc_sep_raw', 'lmc_sep_left_raw', 'lmc_sep_right_raw', 'lmc_span_raw'
 )
 
 def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_fake_in, log_sigma_fake_in, 
                 bwb=True, disable_poly1=False, d_eta=True, disable_lag_blr=False, wide_eta_priors=False, free_eta_break=False,
-                couple_sigma_tau=True, sigma_tau_uniform=False, inject_fake=False, lmc_q_groups=None):
+                couple_sigma_tau=True, sigma_tau_uniform=False, inject_fake=False, lmc_q_groups=None, sample_lmc_hypers=False):
     # Precompute and capture constants in the closure so they are treated as
     # static by JAX/NumPyro. This prevents unnecessary retracing/recompilation
     # when running MCMC, as these values do not change between runs.
@@ -122,6 +141,46 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_
         else:
             eta_break = numpyro.deterministic("eta_break", 0.1)
             lam_s = numpyro.deterministic("lam_s", 2500.0)
+
+        # Recommended defaults:
+        # - gate_log_temp: Normal(log(0.25), 0.5)  → crisp but smooth responsibilities
+        # - separations are on a *raw* scale; effective sep = softplus(raw) + min_sep_ln (enforced in transform)
+        if sample_lmc_hypers:
+            gate_log_temp = numpyro.sample("gate_log_temp",
+                                           dist.Normal(jnp.log(0.25), 0.5))
+
+            if lmc_q_groups == 2:
+                lmc_sep_raw = numpyro.sample("lmc_sep_raw",
+                                             dist.Normal(0.0, 1.0))
+            elif lmc_q_groups == 3:
+                lmc_sep_left_raw  = numpyro.sample("lmc_sep_left_raw",
+                                                   dist.Normal(0.0, 1.0))
+                lmc_sep_right_raw = numpyro.sample("lmc_sep_right_raw",
+                                                   dist.Normal(0.0, 1.0))
+            elif (lmc_q_groups is not None) and (lmc_q_groups > 3):
+                lmc_span_raw = numpyro.sample("lmc_span_raw",
+                                              dist.Normal(0.0, 1.0))
+        else:
+            # Deterministic “priors” (fixed values). These are in RF ln-days logic, but
+            # only the raw values are set here; the transform applies min_sep_ln.
+            gate_log_temp = numpyro.deterministic("gate_log_temp", jnp.log(0.25))
+
+            # target RF separation factor ≈ 2.5 → Δ_target = ln(2.5) ≈ 0.916 ln-days
+            # In the transform: sep = softplus(raw) + min_sep_ln, so we pick raw so that
+            # softplus(raw) ≈ 0.7 (leaves room above min_sep to avoid hard edges).
+            sep_soft_target = jnp.array(0.70)
+            raw_from_soft = jnp.log(jnp.expm1(jnp.maximum(sep_soft_target, 1e-6)))
+
+            if lmc_q_groups == 2:
+                lmc_sep_raw = numpyro.deterministic("lmc_sep_raw", raw_from_soft)
+            elif lmc_q_groups == 3:
+                lmc_sep_left_raw  = numpyro.deterministic("lmc_sep_left_raw",  raw_from_soft)
+                lmc_sep_right_raw = numpyro.deterministic("lmc_sep_right_raw", raw_from_soft)
+            elif (lmc_q_groups is not None) and (lmc_q_groups > 3):
+                # modest total span; transform will ensure ≥ (Q−1)*min_sep_ln anyway
+                lmc_span_raw = numpyro.deterministic("lmc_span_raw", raw_from_soft)
+
+
 
         # Population-level scatter (how much objects can deviate) 
         log_sigma_eta_A1 = numpyro.sample("log_sigma_eta_A1", dist.Normal(jnp.log(0.1), 0.2))
@@ -301,7 +360,15 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_
                 "eta_tau1": eta_tau1[i],
                 "eta_tau2": eta_tau2[i],
                 "eta_break": eta_break,
-                "lam_s": lam_s
+                "lam_s": lam_s,
+
+                # ---- LMC hypers passed to the Model (used in my_tau_drw_transform) ----
+                "gate_log_temp": gate_log_temp,
+                **({"lmc_sep_raw": lmc_sep_raw} if lmc_q_groups == 2 else {}),
+                **({"lmc_sep_left_raw":  lmc_sep_left_raw,
+                    "lmc_sep_right_raw": lmc_sep_right_raw} if lmc_q_groups == 3 else {}),
+                **({"lmc_span_raw": lmc_span_raw} if (lmc_q_groups is not None and lmc_q_groups > 3) else {}),
+
             }
 
             m = Model(
