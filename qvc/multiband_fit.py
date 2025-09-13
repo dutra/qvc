@@ -10,17 +10,10 @@ except ValueError:
 
 if multiprocessing.current_process().name == "MainProcess":
     print(f"CPU Num Cores: {num_cores}")
-os.environ["XLA_FLAGS"] = f"--xla_force_host_platform_device_count={num_cores}"
 # Make each XLA/Eigen CPU device single-threaded
-# => 2 devices (nchains=2, parallel) ≈ 2 total threads per job.
 os.environ["XLA_FLAGS"] = (
-    "--xla_cpu_multi_thread_eigen=true intra_op_parallelism_threads=1"
+    f"--xla_force_host_platform_device_count={num_cores} --xla_cpu_multi_thread_eigen=true intra_op_parallelism_threads=1"
 )
-
-# Do NOT create lots of CPU devices; only as many as chains.
-# If you currently set this, keep it equal to nchains (2) or just remove it:
-# os.environ["XLA_FLAGS"] += " --xla_force_host_platform_device_count=2"
-
 # Avoid extra per-process threadpools from BLAS/OMP/NumExpr:
 os.environ["OPENBLAS_NUM_THREADS"] = "1"
 os.environ["MKL_NUM_THREADS"] = "1"
