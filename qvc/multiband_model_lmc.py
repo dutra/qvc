@@ -37,6 +37,24 @@ from tinygp.kernels import quasisep as qs
 
 JAXArray = jnp.ndarray
 
+def inv_softplus(y):
+    # numerically stable inverse softplus
+    return jnp.where(y > 20.0, y, jnp.log(jnp.expm1(y)))
+
+def softmin_logits(dist2, log_temp):
+    """
+    Convert squared distances to *soft* responsibilities with temperature.
+    We add a tiny epsilon floor to avoid one-hot collapse.
+    """
+    temp = jnp.exp(log_temp)              # temperature in distance space
+    logits = -dist2 / jnp.clip(temp, 1e-6, None)
+    # stable softmax with a small floor to reduce brittleness
+    resp = jax.nn.softmax(logits, axis=-1)
+    eps = 1e-3
+    resp = resp * (1.0 - resp.shape[-1] * eps) + eps
+    resp = resp / resp.sum(axis=-1, keepdims=True)
+    return resp
+
 class ContiBLR_LMC_QS(qs.Wrapper):
     """
     QS Linear Model of Coregionalization (LMC) for multiband AGN light curves.
@@ -498,7 +516,13 @@ class MyMultiVarModel_BLR_LMC(MultiVarModel):
 
         # --- Soft, temperature-controlled responsibilities (B, Q) ---
         d = jnp.abs(log_tau_band[:, None] - centers[None, :])   # (B,Q)
-        gate = jnn.softmax(-d / (temp + 1e-12), axis=1)         # rows sum to 1
+        #gate = jnn.softmax(-d / (temp + 1e-12), axis=1)         # rows sum to 1
+        # replace with a floored version (inline):
+        logits = -d / (temp + 1e-12)
+        gate = jnn.softmax(logits, axis=1)
+        eps = 1e-3
+        gate = gate * (1.0 - gate.shape[-1] * eps) + eps
+        gate = gate / gate.sum(axis=1, keepdims=True)
 
         # return centers in the *same frame used for clustering*
         centers_obs = centers + (jnp.log1p(self.z) if cluster_in_rest_frame else 0.0)

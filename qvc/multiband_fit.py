@@ -81,8 +81,13 @@ universal_params = (
     'log_sigma_eta_A1','log_sigma_eta_A2','log_sigma_eta_tau1','log_sigma_eta_tau2',
     'mu_log_tau_rf','sigma_log_tau_rf','mu_log_sigma_hat0','sigma_log_sigma_hat0',
     # LMC hypers
-    'gate_log_temp', 'lmc_sep_raw', 'lmc_sep_left_raw', 'lmc_sep_right_raw', 'lmc_span_raw'
+    'gate_log_temp', 'lmc_sep_raw', 'lmc_sep_left_raw', 'lmc_sep_right_raw', 'lmc_span_raw',
+    'lmc_mu_raw', 'lmc_delta_raw', 'lmc_sep', 'lmc_sep_left', 'lmc_sep_right', 'lmc_span',
 )
+
+def inv_softplus(y):
+    # numerically stable inverse softplus
+    return jnp.where(y > 20.0, y, jnp.log(jnp.expm1(y)))
 
 def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_fake_in, log_sigma_fake_in, 
                 bwb=True, disable_poly1=False, d_eta=True, disable_lag_blr=False, wide_eta_priors=False, free_eta_break=False,
@@ -121,7 +126,9 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_
         eta_A1_mean = numpyro.sample("eta_A1_mean", dist.Uniform(-1.0, 0.0))
         eta_A2_mean = numpyro.sample("eta_A2_mean", dist.Uniform(-1.0, 0.0))
         eta_tau1_mean = numpyro.sample("eta_tau1_mean", dist.Uniform(-1.0, 1.0))
-        eta_tau2_mean = numpyro.sample("eta_tau2_mean", dist.Uniform(-1.0, 1.0))
+        #eta_tau2_mean = numpyro.sample("eta_tau2_mean", dist.Uniform(-1.0, 1.0))
+        # Nudge to weakly-informative Normal centered slightly > 0:
+        eta_tau2_mean = numpyro.sample("eta_tau2_mean", dist.Normal(0.10, 0.35))
 
         if free_eta_break:
             print("[INFO] Free eta_break and lam_s.")
@@ -138,25 +145,54 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_
         # Recommended defaults:
         # - gate_log_temp: Normal(log(0.25), 0.5)  → crisp but smooth responsibilities
         # - separations are on a *raw* scale; effective sep = softplus(raw) + min_sep_ln (enforced in transform)
+
+        # keep warm default as prior center
+        gate_log_temp = numpyro.sample("gate_log_temp", dist.Normal(jnp.log(0.9), 0.35))
+        # gate_log_temp = numpyro.deterministic("gate_log_temp", 0.9)
+        # if too crisp, try
+        # dist.Normal(jnp.log(1.0), 0.4)  # a hair warmer / broader
+
         if sample_lmc_hypers:
-            gate_log_temp = numpyro.sample("gate_log_temp",
-                                           dist.Normal(jnp.log(0.25), 0.5))
 
             if lmc_q_groups == 2:
-                lmc_sep_raw = numpyro.sample("lmc_sep_raw",
-                                             dist.Normal(0.0, 1.0))
+                # sample a single separation DOF around your current target (~0.35)
+                sep_soft_target_q2 = 0.35
+                lmc_sep_raw = numpyro.sample("lmc_sep_raw", dist.Normal(inv_softplus(sep_soft_target_q2), 0.6))
+                lmc_sep = jax.nn.softplus(lmc_sep_raw)
+
+                numpyro.deterministic("lmc_sep", lmc_sep)
             elif lmc_q_groups == 3:
-                lmc_sep_left_raw  = numpyro.sample("lmc_sep_left_raw",
-                                                   dist.Normal(0.0, 1.0))
-                lmc_sep_right_raw = numpyro.sample("lmc_sep_right_raw",
-                                                   dist.Normal(0.0, 1.0))
+                # fix the mean separation (your warm defaults)
+                sep_left_target  = 0.30
+                sep_right_target = 0.42
+                mu_raw_left  = inv_softplus(sep_left_target)
+                mu_raw_right = inv_softplus(sep_right_target)
+                mu_raw = 0.5 * (mu_raw_left + mu_raw_right)   # fixed mean
+                numpyro.deterministic("lmc_mu_raw", mu_raw)
+
+                # sample only the contrast around zero
+                delta_raw = numpyro.sample("lmc_delta_raw", dist.Normal(0.0, 0.6))
+
+                lmc_sep_left_raw  = mu_raw - 0.5 * delta_raw
+                lmc_sep_right_raw = mu_raw + 0.5 * delta_raw
+
+                lmc_sep_left  = jax.nn.softplus(lmc_sep_left_raw)
+                lmc_sep_right = jax.nn.softplus(lmc_sep_right_raw)
+
+                numpyro.deterministic("lmc_sep_left_raw",  lmc_sep_left_raw)
+                numpyro.deterministic("lmc_sep_right_raw", lmc_sep_right_raw)
+                numpyro.deterministic("lmc_sep_left",  lmc_sep_left)
+                numpyro.deterministic("lmc_sep_right", lmc_sep_right)            
             elif (lmc_q_groups is not None) and (lmc_q_groups > 3):
                 lmc_span_raw = numpyro.sample("lmc_span_raw",
                                               dist.Normal(0.0, 1.0))
         else:
             # Deterministic “priors” (fixed values). These are in RF ln-days logic, but
             # only the raw values are set here; the transform applies min_sep_ln.
-            gate_log_temp = numpyro.deterministic("gate_log_temp", jnp.log(0.25))
+
+            # NEW (warm & smooth; between ~0.8 and 1.0 works well)
+            # gate_log_temp = jnp.log(0.9)
+            # numpyro.deterministic("gate_log_temp", gate_log_temp)
 
             # target RF separation factor ≈ 2.5 → Δ_target = ln(2.5) ≈ 0.916 ln-days
             # In the transform: sep = softplus(raw) + min_sep_ln, so we pick raw so that
@@ -165,10 +201,29 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_
             raw_from_soft = jnp.log(jnp.expm1(jnp.maximum(sep_soft_target, 1e-6)))
 
             if lmc_q_groups == 2:
-                lmc_sep_raw = numpyro.deterministic("lmc_sep_raw", raw_from_soft)
+                # OLD target was effectively ~0.7 (large, forces hard split)
+                # NEW: smaller, overlaps clusters -> connected posterior
+                sep_soft_target_q2 = 0.35
+                lmc_sep_raw = inv_softplus(sep_soft_target_q2)
+                lmc_sep = jax.nn.softplus(lmc_sep_raw)
+
+                numpyro.deterministic("lmc_sep_raw", lmc_sep_raw)
+                numpyro.deterministic("lmc_sep", lmc_sep)
             elif lmc_q_groups == 3:
-                lmc_sep_left_raw  = numpyro.deterministic("lmc_sep_left_raw",  raw_from_soft)
-                lmc_sep_right_raw = numpyro.deterministic("lmc_sep_right_raw", raw_from_soft)
+                # Slight asymmetry avoids global left↔right flips
+                sep_left_target  = 0.30
+                sep_right_target = 0.42
+
+                lmc_sep_left_raw  = inv_softplus(sep_left_target)
+                lmc_sep_right_raw = inv_softplus(sep_right_target)
+
+                lmc_sep_left  = jax.nn.softplus(lmc_sep_left_raw)
+                lmc_sep_right = jax.nn.softplus(lmc_sep_right_raw)
+
+                numpyro.deterministic("lmc_sep_left_raw",  lmc_sep_left_raw)
+                numpyro.deterministic("lmc_sep_right_raw", lmc_sep_right_raw)
+                numpyro.deterministic("lmc_sep_left",  lmc_sep_left)
+                numpyro.deterministic("lmc_sep_right", lmc_sep_right)
             elif (lmc_q_groups is not None) and (lmc_q_groups > 3):
                 # modest total span; transform will ensure ≥ (Q−1)*min_sep_ln anyway
                 lmc_span_raw = numpyro.deterministic("lmc_span_raw", raw_from_soft)
@@ -600,6 +655,7 @@ if __name__ == '__main__':
     parser.add_argument("--disable_lag_blr", action="store_true", default=False, help="Disable BLR lag model.")
     parser.add_argument("--sigma_tau_uniform", action="store_true", default=False, help="Use uniform priors for sigma and tau.")
     parser.add_argument("--lmc", type=int, default=0, choices=[0, 1, 2, 3], help="Number of LMC Q groups (0 disables LMC, 1/2/3 controls Q).")
+    parser.add_argument("--sample_lmc_hypers", action="store_true", default=False, help="Sample LMC hyperparameters instead of using fixed values.")
     args = parser.parse_args()
     print("Args: ", args)
 
@@ -750,9 +806,11 @@ if __name__ == '__main__':
                                       disable_lag_blr=args.disable_lag_blr, 
                                       free_eta_break=args.free_eta_break, wide_eta_priors=args.wide_eta_priors,
                                       couple_sigma_tau=args.couple_sigma_tau, sigma_tau_uniform=args.sigma_tau_uniform,
-                                      inject_fake=args.inject_fake, lmc_q_groups=args.lmc)
+                                      inject_fake=args.inject_fake, lmc_q_groups=args.lmc, sample_lmc_hypers=args.sample_lmc_hypers)
 
-    nuts_kernel = NUTS(numpyro_joint_model, init_strategy=init_strategy, dense_mass=True, max_tree_depth=args.max_tree_depth)
+    nuts_kernel = NUTS(numpyro_joint_model, init_strategy=init_strategy, dense_mass=True, 
+                       max_tree_depth=args.max_tree_depth,
+                       target_accept_prob=0.9)
     mcmc = MCMC(
         nuts_kernel,
         num_warmup=args.nwarm,
