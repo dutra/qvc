@@ -399,7 +399,7 @@ def combined_lomb_scargle_from_model(
     return np.array(f_bin), np.array(P_bin), np.array(P_lo), np.array(P_hi), np.array(counts), P_noise
 
 
-def save_combined_plot(samples, model, X, y, yerr, band_idx, data, bands=['u', 'g', 'r', 'i', 'z']):
+def save_combined_plot(samples, model, X, y, yerr, band_idx, data, bands=['u', 'g', 'r', 'i', 'z'], plot_psd=True):
     logging.info("Saving combined plot")
 
     object_id = data['object_id']
@@ -441,71 +441,73 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, data, bands=['u', '
             ax_lc.plot(t_test, mu + offsets[n], alpha=0.8, color=colors[band_idx_map[n]], lw=1.0)
             ax_lc.fill_between(t_test, mu + offsets[n] - std, mu + offsets[n] + std, alpha=0.3,
                                lw=0.5, color=colors[band_idx_map[n]])
+    
+    if plot_psd:
+        # Ensure all elements of posterior_median are jnp arrays
+        for k in posterior_median:
+            posterior_median[k] = jnp.array(posterior_median[k])
 
-    # Ensure all elements of posterior_median are jnp arrays
-    for k in posterior_median:
-        posterior_median[k] = jnp.array(posterior_median[k])
+        print("Plotting PSD...")
+        # PSD calculation and plotting
+        freqs = np.logspace(-6, 2, 500)
 
-    # PSD calculation and plotting
-    freqs = np.logspace(-6, 2, 500)
+        # Data PSD
+        f_bin, P_bin, P_lo, P_hi, cts, P_noise = combined_lomb_scargle_from_model(model, posterior_median, 2*np.pi*freqs)
+        ax_psd.errorbar(f_bin, P_bin, yerr=[P_bin - P_lo, P_hi - P_bin], label="Lomb-Scargle PSD", lw=4, color='k')
 
-    # Data PSD
-    f_bin, P_bin, P_lo, P_hi, cts, P_noise = combined_lomb_scargle_from_model(model, posterior_median, 2*np.pi*freqs)
-    ax_psd.errorbar(f_bin, P_bin, yerr=[P_bin - P_lo, P_hi - P_bin], label="Lomb-Scargle PSD", lw=4, color='k')
+        # Plot a vertical line at the posterior median log_tau_drw0 (if present)
+        # TODO: log_tau_eff = model.my_tau_drw_transform(posterior_median)  # scalar
+        tau = jnp.exp(posterior_median['log_tau_drw0']) # obs frame
+        tau_lo = jnp.exp(jnp.percentile(samples['log_tau_drw0'], 16))
+        tau_hi = jnp.exp(jnp.percentile(samples['log_tau_drw0'], 84))
+        ax_psd.axvspan(1.0 / (2*np.pi*tau_hi), 1.0 / (2*np.pi*tau_lo), color='r', alpha=0.15)
+        ax_psd.axvline(1.0 / (2*np.pi*tau), color='r', linestyle='--', lw=1.5, alpha=0.7, label=r"$1/\tau_{\mathrm{DRW}}$")
 
-    # Plot a vertical line at the posterior median log_tau_drw0 (if present)
-    # TODO: log_tau_eff = model.my_tau_drw_transform(posterior_median)  # scalar
-    tau = jnp.exp(posterior_median['log_tau_drw0']) # obs frame
-    tau_lo = jnp.exp(jnp.percentile(samples['log_tau_drw0'], 16))
-    tau_hi = jnp.exp(jnp.percentile(samples['log_tau_drw0'], 84))
-    ax_psd.axvspan(1.0 / (2*np.pi*tau_hi), 1.0 / (2*np.pi*tau_lo), color='r', alpha=0.15)
-    ax_psd.axvline(1.0 / (2*np.pi*tau), color='r', linestyle='--', lw=1.5, alpha=0.7, label=r"$1/\tau_{\mathrm{DRW}}$")
+        # Model PSD
+        # Compute model PSD for each posterior sample and plot the median and 16/84 percentiles
+        psd_samples = []
+        for i in range(len(samples['log_tau_drw0'])):
+            sample_params = {k: jnp.array(v[i]) for k, v in samples.items()}
+            psd_i = (2.0 * jnp.pi) * model.psd(sample_params, 2 * np.pi * freqs, b=0, sigma_n2=0.0)
+            psd_samples.append(np.asarray(psd_i))
+        psd_samples = np.stack(psd_samples, axis=0)
+        psd_median = np.median(psd_samples, axis=0)
+        psd_lo = np.percentile(psd_samples, 16, axis=0)
+        psd_hi = np.percentile(psd_samples, 84, axis=0)
 
-    # Model PSD
-    # Compute model PSD for each posterior sample and plot the median and 16/84 percentiles
-    psd_samples = []
-    for i in range(len(samples['log_tau_drw0'])):
-        sample_params = {k: jnp.array(v[i]) for k, v in samples.items()}
-        psd_i = (2.0 * jnp.pi) * model.psd(sample_params, 2 * np.pi * freqs, b=0, sigma_n2=0.0)
-        psd_samples.append(np.asarray(psd_i))
-    psd_samples = np.stack(psd_samples, axis=0)
-    psd_median = np.median(psd_samples, axis=0)
-    psd_lo = np.percentile(psd_samples, 16, axis=0)
-    psd_hi = np.percentile(psd_samples, 84, axis=0)
+        ax_psd.plot(freqs, psd_median, lw=2, color='m', alpha=0.8, label="Model PSD")
+        ax_psd.fill_between(freqs, psd_lo, psd_hi, color='m', alpha=0.2)
 
-    ax_psd.plot(freqs, psd_median, lw=2, color='m', alpha=0.8, label="Model PSD")
-    ax_psd.fill_between(freqs, psd_lo, psd_hi, color='m', alpha=0.2)
+        # Plot the noise level
+        ax_psd.axhline(np.median(P_noise), color='gray', linestyle='--', lw=1.5, label="Noise Level")
 
-    # Plot the noise level
-    ax_psd.axhline(np.median(P_noise), color='gray', linestyle='--', lw=1.5, label="Noise Level")
+        ax_lc.set_xlabel('MJD')
+        ax_lc.set_ylabel('Magnitude + arbitrary offset')
+        ax_lc.invert_yaxis()
+        ax_lc.set_xlim(np.min(t_test), np.max(t_test))
+        #ax_lc.legend(loc='best')
 
-    ax_lc.set_xlabel('MJD')
-    ax_lc.set_ylabel('Magnitude + arbitrary offset')
-    ax_lc.invert_yaxis()
-    ax_lc.set_xlim(np.min(t_test), np.max(t_test))
-    #ax_lc.legend(loc='best')
+        # PSD axis formatting
+        ax_psd.set_xlabel("Frequency (days$^{-1}$)")
+        ax_psd.set_ylabel(r"PSD ($\mathrm{mag}^2$ $\mathrm{days}$)")
+        ax_psd.set_xscale("log")
+        ax_psd.set_yscale("log")
+        ax_psd.grid(False)
 
-    # PSD axis formatting
-    ax_psd.set_xlabel("Frequency (days$^{-1}$)")
-    ax_psd.set_ylabel(r"PSD ($\mathrm{mag}^2$ $\mathrm{days}$)")
-    ax_psd.set_xscale("log")
-    ax_psd.set_yscale("log")
-    ax_psd.grid(False)
-
-    # DRW
-    # Plot a line with slope -2 for reference, normalized to match the PSD
-    ref_freqs = np.linspace(np.nanmin(freqs), np.nanmax(freqs), 100)
-    ref_psd2 = ref_freqs**-2
-    ref_psd4 = ref_freqs**-4
-    # Normalize the reference line to match the PSD at the median frequency
-    median_freq = 1e-2
-    median_psd = np.interp(median_freq, freqs, psd_median)
-    ref_psd2 *= median_psd / np.interp(median_freq, ref_freqs, ref_psd2)
-    ref_psd4 *= median_psd / np.interp(median_freq, ref_freqs, ref_psd4)
-    ax_psd.plot(ref_freqs, 10*ref_psd2, 'k--', label="-2")
-    ax_psd.plot(ref_freqs, 10*ref_psd4, 'k:', label="-4")
-    ax_psd.set_ylim(1e-3, 1e4)
-    ax_psd.set_xlim(1e-6, 1e1)
+        # DRW
+        # Plot a line with slope -2 for reference, normalized to match the PSD
+        ref_freqs = np.linspace(np.nanmin(freqs), np.nanmax(freqs), 100)
+        ref_psd2 = ref_freqs**-2
+        ref_psd4 = ref_freqs**-4
+        # Normalize the reference line to match the PSD at the median frequency
+        median_freq = 1e-2
+        median_psd = np.interp(median_freq, freqs, psd_median)
+        ref_psd2 *= median_psd / np.interp(median_freq, ref_freqs, ref_psd2)
+        ref_psd4 *= median_psd / np.interp(median_freq, ref_freqs, ref_psd4)
+        ax_psd.plot(ref_freqs, 10*ref_psd2, 'k--', label="-2")
+        ax_psd.plot(ref_freqs, 10*ref_psd4, 'k:', label="-4")
+        ax_psd.set_ylim(1e-3, 1e4)
+        ax_psd.set_xlim(1e-6, 1e1)
 
     plt.tight_layout()
 

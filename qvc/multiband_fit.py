@@ -725,6 +725,7 @@ if __name__ == '__main__':
     parser.add_argument("--sigma_tau_uniform", action="store_true", default=False, help="Use uniform priors for sigma and tau.")
     parser.add_argument("--lmc", type=int, default=0, choices=[0, 1, 2, 3], help="Number of LMC Q groups (0 disables LMC, 1/2/3 controls Q).")
     parser.add_argument("--sample_lmc_hypers", action="store_true", default=False, help="Sample LMC hyperparameters instead of using fixed values.")
+    parser.add_argument("--disable_plot_psd", action="store_true", default=False, help="Disable PSD plot generation.")
     args = parser.parse_args()
     print("Args: ", args)
 
@@ -937,7 +938,8 @@ if __name__ == '__main__':
                 zero_mean=zero_mean, has_jitter=has_jitter, has_lag=has_lag,
                 lam_rf=obj['lam_rf'], z=obj['z'], use_bwb=args.bwb, q_groups=args.lmc
             )
-            save_combined_plot(obj_flat_samples, m, obj['X'], obj['y'], obj['yerr'], obj['band_idx'], result, bands=bands)
+            save_combined_plot(obj_flat_samples, m, obj['X'], obj['y'], obj['yerr'], obj['band_idx'], result, 
+                               bands=bands, plot_psd=(not args.disable_plot_psd))
             plot_correlation_matrix(obj_flat_samples_flatten_per_band, obj)
             plot_all_histograms(obj_flat_samples_flatten_per_band, obj)
             if not args.disable_corner_plot:
