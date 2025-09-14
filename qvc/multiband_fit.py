@@ -347,25 +347,13 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_
                     print("[WARNING] BLR lag model enabled.")
                     log_amp_delta_blr = numpyro.sample("log_amp_delta_blr", dist.Normal(jnp.full(nBands, -1.0), 1.0))
 
-                #log_lag_blr = numpyro.sample("log_lag_blr", dist.Uniform(2.3*0.2, 2.3*4.0))
-                #log_lag_blr = numpyro.sample("log_lag_blr", dist.Uniform(0.2, 4.0))
-                #log_lag_blr = numpyro.sample("log_lag_blr", dist.Uniform(0.2, 1.0))
-                #log_lag_blr = numpyro.sample("log_lag_blr", dist.Uniform(np.log(10), np.log(100)))
-                #log_lag_blr = numpyro.sample("log_lag_blr", dist.Normal(log_lag_blr_c[..., None], 3.0))
-                lag_center   = jnp.log(0.2) + log_tau_drw0[..., None]
                 log_lag_blr  = numpyro.sample(
                     "log_lag_blr",
                     dist.Uniform(jnp.log(0.2), jnp.log(5000.0))
                 )
-                #width_center = jnp.log(0.2) + log_tau_drw0[..., None]
-                #width_blr  = numpyro.sample("width_blr",  dist.LogNormal(width_center, 1.0))
-                #width_cont = numpyro.sample("width_cont", dist.LogNormal(width_center - jnp.log(2.0), 1.0))
 
-                #width_blr = numpyro.sample("width_blr", dist.TruncatedNormal(0.2 * jnp.exp(log_tau_drw0_c[..., None]), 20.0, low=10.0))
-                #width_cont = numpyro.sample("width_cont", dist.TruncatedNormal(0.2 * jnp.exp(log_tau_drw0_c[..., None]), 20.0, low=10.0))
-
-                width_blr = numpyro.deterministic("width_blr", 0.2 * jnp.exp(log_tau_drw0_c[..., None]))
-                width_cont = numpyro.deterministic("width_cont", 0.0 * jnp.exp(log_tau_drw0_c[..., None]))
+                width_blr = numpyro.deterministic("width_blr", jnp.full((batch_size, nBands), 0.2 * jnp.exp(log_tau_drw0_c)))
+                width_cont = numpyro.deterministic("width_cont", jnp.full((batch_size, nBands), 0.2 * jnp.exp(log_tau_drw0_c)))
 
                 # Jitter
                 log_jitter = numpyro.sample("log_jitter", dist.Normal(log_jitter_mean, 1.0))
@@ -556,7 +544,7 @@ def make_lc(Model, data, bands=['u', 'g', 'r', 'i', 'z'], inject_fake=False):
             times_sorted,
             tau=tau_latent_obs,
             sigma=sigma_latent,
-            noise=1.e-6,     # keep the latent clean; add obs noise per band later
+            noise=1.0e-6,     # keep the latent clean; add obs noise per band later
             mean=0.0
         )[0]
         latent = np.array(latent)
