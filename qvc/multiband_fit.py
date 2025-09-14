@@ -127,15 +127,15 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_
         eta_A1_mean = numpyro.sample("eta_A1_mean", dist.Uniform(-1.0, 0.0))
         eta_A2_mean = numpyro.sample("eta_A2_mean", dist.Uniform(-1.0, 0.0))
         # # Nudge to weakly-informative Normal centered slightly > 0:
-        # eta_tau1_mean = numpyro.sample("eta_tau1_mean", dist.Normal(0.20, 0.35))
-        # eta_tau2_mean = numpyro.sample("eta_tau2_mean", dist.Normal(0.20, 0.35))
+        eta_tau1_mean = numpyro.sample("eta_tau1_mean", dist.Uniform(0.0, 1.0))
+        eta_tau2_mean = numpyro.sample("eta_tau2_mean", dist.Uniform(0.0, 1.0))
 
         # Symmetric, order-agnostic priors for global tau-slopes
-        mu_eta_tau = numpyro.sample("mu_eta_tau", dist.Normal(0.5, 0.30))   # broad center near what you expect
-        delta_eta_tau = numpyro.sample("delta_eta_tau", dist.Normal(0.0, 0.30))  # symmetric around 0
+        #mu_eta_tau = numpyro.sample("mu_eta_tau", dist.Normal(0.5, 0.30))   # broad center near what you expect
+        #delta_eta_tau = numpyro.sample("delta_eta_tau", dist.Normal(0.0, 0.30))  # symmetric around 0
 
-        eta_tau1_mean = numpyro.deterministic("eta_tau1_mean", mu_eta_tau + 0.5 * delta_eta_tau)
-        eta_tau2_mean = numpyro.deterministic("eta_tau2_mean", mu_eta_tau - 0.5 * delta_eta_tau)
+        #eta_tau1_mean = numpyro.deterministic("eta_tau1_mean", mu_eta_tau + 0.5 * delta_eta_tau)
+        #eta_tau2_mean = numpyro.deterministic("eta_tau2_mean", mu_eta_tau - 0.5 * delta_eta_tau)
 
 
         if free_eta_break:
@@ -513,6 +513,8 @@ def make_lc(Model, data, bands=['u', 'g', 'r', 'i', 'z'], inject_fake=False):
 
     # Inject fake DRW
     if inject_fake:
+        alpha_sigma = -0.5  # σ(λ) ∝ λ^α
+        beta_tau = 0.3      # τ(λ) ∝ λ^β
         lam_rf = jnp.array([lambda_pivot[band] for band in bands]) / (1 + obj['z'])
         lam_rf_per_band = lam_rf[band_idx]
 
@@ -529,6 +531,7 @@ def make_lc(Model, data, bands=['u', 'g', 'r', 'i', 'z'], inject_fake=False):
         one_plus_z = float(1.0 + data['z'])
 
         # Per-band target τ, σ from wavelength laws (rest-frame → observed τ)
+        lam_ref = 2500.0 # Å
         tau_rf_b  = tau0_rf * (lam_rf_per_band / lam_ref)**beta_tau
         tau_obs_b = tau_rf_b * one_plus_z
         sigma_b   = sigma0   * (lam_rf_per_band / lam_ref)**alpha_sigma
@@ -553,7 +556,7 @@ def make_lc(Model, data, bands=['u', 'g', 'r', 'i', 'z'], inject_fake=False):
             times_sorted,
             tau=tau_latent_obs,
             sigma=sigma_latent,
-            noise=None,     # keep the latent clean; add obs noise per band later
+            noise=1.e-6,     # keep the latent clean; add obs noise per band later
             mean=0.0
         )[0]
         latent = np.array(latent)
@@ -685,7 +688,7 @@ def make_lc(Model, data, bands=['u', 'g', 'r', 'i', 'z'], inject_fake=False):
         't_rf_length': t_rf_length,
     }
     if inject_fake:
-        batch_dict['log_tau_fake'] = np.log(10**log_tau0)
+        batch_dict['log_tau_fake'] = np.log(10**log_tau0_rf)
         batch_dict['log_sigma_fake'] = np.log(10**log_sigma0)
     return batch_dict
 
