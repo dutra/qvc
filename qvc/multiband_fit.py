@@ -91,7 +91,7 @@ def inv_softplus(y):
 
 def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_fake_in, log_sigma_fake_in, 
                 bwb=True, disable_poly1=False, d_eta=True, disable_lag_blr=False, wide_eta_priors=False, free_eta_break=False,
-                couple_sigma_tau=True, sigma_tau_uniform=False, inject_fake=False, lmc_q_groups=None, sample_lmc_hypers=False):
+                couple_sigma_tau=False, sigma_tau_uniform=False, inject_fake=False, lmc_q_groups=None, sample_lmc_hypers=False):
     # Precompute and capture constants in the closure so they are treated as
     # static by JAX/NumPyro. This prevents unnecessary retracing/recompilation
     # when running MCMC, as these values do not change between runs.
@@ -125,10 +125,9 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_
 
         eta_A1_mean = numpyro.sample("eta_A1_mean", dist.Uniform(-1.0, 0.0))
         eta_A2_mean = numpyro.sample("eta_A2_mean", dist.Uniform(-1.0, 0.0))
-        eta_tau1_mean = numpyro.sample("eta_tau1_mean", dist.Uniform(-1.0, 1.0))
-        #eta_tau2_mean = numpyro.sample("eta_tau2_mean", dist.Uniform(-1.0, 1.0))
         # Nudge to weakly-informative Normal centered slightly > 0:
-        eta_tau2_mean = numpyro.sample("eta_tau2_mean", dist.Normal(0.10, 0.35))
+        eta_tau1_mean = numpyro.sample("eta_tau1_mean", dist.Normal(0.20, 0.35))
+        eta_tau2_mean = numpyro.sample("eta_tau2_mean", dist.Normal(0.20, 0.35))
 
         if free_eta_break:
             print("[INFO] Free eta_break and lam_s.")
@@ -582,8 +581,10 @@ def make_lc(Model, data, bands=['u', 'g', 'r', 'i', 'z'], inject_fake=False):
     mags_stds = np.array([
         np.nanstd(all_mags[band_idx == i]) for i in range(len(bands))
     ])
-    for i, band in enumerate(bands):
-        print(f"Band {band}: mean = {mags_means[i]:.4f}, std = {mags_stds[i]:.4f}")
+    print("Band stats (μ±σ):", ",".join(
+        f"{band}:{mags_means[i]:.1f}±{mags_stds[i]:.2f}"
+        for i, band in enumerate(bands)
+    ))
 
     for i in range(len(bands)):
         band_mask = band_idx == i
@@ -668,13 +669,6 @@ if __name__ == '__main__':
     else:
         objs = concat_light_curves(filter_object_ids=args.filter_object_id, progress_bar=args.progress, N=args.N, skip=args.skip)
     print(f"Loaded {len(objs)} objects from concat_light_curves")
-
-    # if args.skip:
-    #     objs = objs[args.skip:]
-    #     print(f"After applying skip, {len(objs)} objects remain.")
-    # if args.N:
-    #     objs = objs[:args.N]
-    #     print(f"After applying N, {len(objs)} objects remain.")
 
     objs = populate_sdss_fields(objs, progress_bar=args.progress)
     
@@ -771,14 +765,6 @@ if __name__ == '__main__':
     ]
     # NEW: stack into shape (B, Nmax, 4) so vmap sees a batch dimension
     batch_array = jnp.stack(padded_batch_data, axis=0)
-
-    # Set up
-    estimated_nchains = 4
-    if args.nchains < 1:
-        nchains = estimated_nchains
-    else:
-        nchains = args.nchains
-    print(f"{args.max_tree_depth=}, {args.nwarm=}, {args.nsamp=}, {args.nchains=}, default num_chains: {estimated_nchains}")
     
     #init_strategy = numpyro.infer.init_to_sample()
     init_strategy = numpyro.infer.init_to_median()
@@ -815,7 +801,7 @@ if __name__ == '__main__':
         nuts_kernel,
         num_warmup=args.nwarm,
         num_samples=args.nsamp,
-        num_chains=nchains,
+        num_chains=args.nchains,
         progress_bar=args.progress,
         chain_method="parallel",
     )
