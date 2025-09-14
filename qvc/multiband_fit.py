@@ -494,22 +494,22 @@ def make_lc(Model, data, bands=['u', 'g', 'r', 'i', 'z'], inject_fake=False):
     all_magerrs = all_magerrs[order]
     band_idx    = band_idx[order]
 
-def exp_filter_to_tau(x, t, tau):
-    """
-    First-order exponential smoother that 'slows' the shared latent x(t)
-    toward an effective time constant ~ tau (days).
-    y[i] = (1 - a_i) * y[i-1] + a_i * x[i],  a_i = 1 - exp(-Δt_i / tau)
-    """
-    if x.size == 0:
-        return x
-    y = np.empty_like(x, dtype=float)
-    y[0] = x[0]
-    dt = np.diff(t)
-    # clip to avoid under/overflow
-    a = 1.0 - np.exp(-np.clip(dt / max(tau, 1e-9), 0.0, 1e6))
-    for i in range(1, x.size):
-        y[i] = (1.0 - a[i-1]) * y[i-1] + a[i-1] * x[i]
-    return y
+    def exp_filter_to_tau(x, t, tau):
+        """
+        First-order exponential smoother that 'slows' the shared latent x(t)
+        toward an effective time constant ~ tau (days).
+        y[i] = (1 - a_i) * y[i-1] + a_i * x[i],  a_i = 1 - exp(-Δt_i / tau)
+        """
+        if x.size == 0:
+            return x
+        y = np.empty_like(x, dtype=float)
+        y[0] = x[0]
+        dt = np.diff(t)
+        # clip to avoid under/overflow
+        a = 1.0 - np.exp(-np.clip(dt / max(tau, 1e-9), 0.0, 1e6))
+        for i in range(1, x.size):
+            y[i] = (1.0 - a[i-1]) * y[i-1] + a[i-1] * x[i]
+        return y
 
     # Inject fake DRW
     if inject_fake:
