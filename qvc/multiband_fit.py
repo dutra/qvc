@@ -493,40 +493,107 @@ def make_lc(Model, data, bands=['u', 'g', 'r', 'i', 'z'], inject_fake=False):
     all_mags    = all_mags[order]
     all_magerrs = all_magerrs[order]
     band_idx    = band_idx[order]
-    # -------------------------------------------------------------------------
-    # Sort by time
-    # sort_idx = np.argsort(all_times)
-    # all_times, all_mags, all_magerrs, band_idx = (
-    #     all_times[sort_idx],
-    #     all_mags[sort_idx],
-    #     all_magerrs[sort_idx],
-    #     band_idx[sort_idx]
-    # )
+
+def exp_filter_to_tau(x, t, tau):
+    """
+    First-order exponential smoother that 'slows' the shared latent x(t)
+    toward an effective time constant ~ tau (days).
+    y[i] = (1 - a_i) * y[i-1] + a_i * x[i],  a_i = 1 - exp(-Δt_i / tau)
+    """
+    if x.size == 0:
+        return x
+    y = np.empty_like(x, dtype=float)
+    y[0] = x[0]
+    dt = np.diff(t)
+    # clip to avoid under/overflow
+    a = 1.0 - np.exp(-np.clip(dt / max(tau, 1e-9), 0.0, 1e6))
+    for i in range(1, x.size):
+        y[i] = (1.0 - a[i-1]) * y[i-1] + a[i-1] * x[i]
+    return y
 
     # Inject fake DRW
     if inject_fake:
-        # one seed per LC (still deterministic)
+        lam_rf = jnp.array([lambda_pivot[band] for band in bands]) / (1 + obj['z'])
+        lam_rf_per_band = lam_rf[band_idx]
+
+        # deterministic seed per object
         key = jax.random.PRNGKey(0)
-        key = jax.random.fold_in(key, int(data['object_id']))  # makes unique key per object
-        key, k_tau, k_sig, k_drw = jax.random.split(key, 4)
+        key = jax.random.fold_in(key, int(data['object_id']))
+        key, k_tau0, k_sig0, k_latent, k_noise = jax.random.split(key, 5)
 
-        # draw base-10 logs, then add cosmological time-dilation term to tau
-        log_tau0_rf = jax.random.uniform(k_tau, minval=0.5, maxval=5.0)  # log10 tau_rest
-        log_tau0 = log_tau0_rf + np.log10(1.0 + data['z'])               # log10 tau_obs
-        log_sigma0 = jax.random.uniform(k_sig, minval=-1.0, maxval=0.0)  # log10 sigma
+        # Base logs
+        log_tau0_rf = jax.random.uniform(k_tau0, minval=0.5,  maxval=5.0)   # log10 tau_rest (d)
+        log_sigma0  = jax.random.uniform(k_sig0, minval=-1.0, maxval=0.0)   # log10 sigma (mag)
+        tau0_rf   = 10.0**float(log_tau0_rf)
+        sigma0    = 10.0**float(log_sigma0)
+        one_plus_z = float(1.0 + data['z'])
 
-        print(f"Injecting fake DR for object {data['object_id']} with log_tau0={log_tau0:.3f}, log_sigma0={log_sigma0:.3f} ")
+        # Per-band target τ, σ from wavelength laws (rest-frame → observed τ)
+        tau_rf_b  = tau0_rf * (lam_rf_per_band / lam_ref)**beta_tau
+        tau_obs_b = tau_rf_b * one_plus_z
+        sigma_b   = sigma0   * (lam_rf_per_band / lam_ref)**alpha_sigma
 
-        # use a fresh key for the DRW realization
-        all_mags = sample_drw_tinygp(
-            k_drw,
-            all_times,
-            10.0**log_tau0,      # tau in days (base-10 exponent)
-            10.0**log_sigma0,    # sigma in mag (base-10 exponent)
-            noise=all_magerrs,
+        # Choose a latent τ to drive everyone (e.g., geometric mean of band τ)
+        tau_latent_obs = float(np.exp(np.mean(np.log(np.clip(tau_obs_b, 1e-6, None)))))
+        sigma_latent   = 1.0  # unit scale; bands will rescale
+
+        print(f"Injecting SHARED latent for object {data['object_id']}: "
+            f"log_tau0_rf={float(log_tau0_rf):.3f}, log_sigma0={float(log_sigma0):.3f}, "
+            f"tau_latent_obs≈{tau_latent_obs:.3g} d")
+
+        # Work on a time-sorted view so filtering is causal
+        order = np.argsort(all_times)
+        times_sorted     = all_times[order]
+        mags_err_sorted  = all_magerrs[order]
+        bands_sorted     = band_idx[order]
+
+        # Sample ONE latent DRW on all timestamps (no measurement noise here)
+        latent = sample_drw_tinygp(
+            k_latent,
+            times_sorted,
+            tau=tau_latent_obs,
+            sigma=sigma_latent,
+            noise=None,     # keep the latent clean; add obs noise per band later
             mean=0.0
         )[0]
-        all_mags = np.array(all_mags)
+        latent = np.array(latent)
+
+        # Allocate output
+        mags_sorted = np.empty_like(times_sorted, dtype=float)
+
+        # Split keys for band-wise noise
+        uniq_bands = np.unique(np.asarray(bands_sorted))
+        noise_keys = jax.random.split(k_noise, len(uniq_bands))
+
+        for bk, b in zip(noise_keys, uniq_bands):
+            m = (bands_sorted == b)
+            t_b = np.asarray(times_sorted[m], dtype=float)
+            x_b = np.asarray(latent[m],       dtype=float)
+
+            # Filter the latent to impose target τ for this band
+            y_b = exp_filter_to_tau(x_b, t_b, tau=float(tau_obs_b[int(b)]))
+
+            # Standardize per-band and scale to target σ(λ)
+            y_b = y_b - np.mean(y_b)
+            std = np.std(y_b)
+            std = std if std > 1e-12 else 1.0
+            y_b = (y_b / std) * float(sigma_b[int(b)])
+
+            # Add observational noise
+            eps = jax.random.normal(bk, shape=(y_b.size,))
+            y_b = y_b + np.array(eps) * mags_err_sorted[m]
+
+            mags_sorted[m] = y_b
+
+            print(f"  band {int(b)}: λ_rf={lam_rf_per_band[int(b)]:.0f}Å, "
+                f"τ_rf={tau_rf_b[int(b)]:.3g} d, τ_obs={tau_obs_b[int(b)]:.3g} d, "
+                f"σ={sigma_b[int(b)]:.3g}")
+
+        # Undo sorting
+        inv = np.empty_like(order)
+        inv[order] = np.arange(order.size)
+        all_mags = mags_sorted[inv]
+        ###################################################
 
     # Remove NaNs
     mask = np.isfinite(all_mags) & np.isfinite(all_magerrs) & np.isfinite(all_times)
