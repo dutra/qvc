@@ -148,10 +148,16 @@ def select_samples_for_object(samples_flat, obj_index, universal_params):
     dict
         Dictionary with selected samples for the object.
     """
-    obj_samples = {
-            k: v[:, obj_index] if k not in universal_params else v
-            for k, v in samples_flat.items()
-        }    
+    obj_samples = {}
+    for k, v in samples_flat.items():
+            try:
+                if k in universal_params:
+                    obj_samples[k] = v
+                else:
+                    obj_samples[k] = v[:, obj_index]
+            except Exception as e:
+                logging.error(f"Error selecting samples for {k} with shape {getattr(v, 'shape', None)}: {e}")
+                raise
 
     # Print shapes for inspection
     logging.debug("Selected object samples: " + ", ".join(f"{k}={v.shape}" for k, v in obj_samples.items()))
