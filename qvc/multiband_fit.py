@@ -127,15 +127,6 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_
 
         eta_A1_mean = numpyro.sample("eta_A1_mean", dist.Uniform(-1.0, 0.0))
         eta_A2_mean = numpyro.sample("eta_A2_mean", dist.Uniform(-1.0, 0.0))
-        if eta_tau_normal:
-            # Nudge to weakly-informative Normal centered slightly > 0:
-            print("\033[93m[WARN] Using Normal priors for eta_tau means.\033[0m")
-            eta_tau1_mean = numpyro.sample("eta_tau1_mean", dist.Normal(0.2, 1.0))
-            eta_tau2_mean = numpyro.sample("eta_tau2_mean", dist.Normal(0.2, 1.0))
-        else:
-            print("[INFO] Using Uniform priors for eta_tau means.")
-            #eta_tau1_mean = numpyro.sample("eta_tau1_mean", dist.Uniform(0.0, 1.0))
-            #eta_tau2_mean = numpyro.sample("eta_tau2_mean", dist.Uniform(0.0, 1.0))
 
         # Symmetric, order-agnostic priors for global tau-slopes
         mu_eta_tau = numpyro.sample("mu_eta_tau", dist.Normal(0.5, 2.0))   # broad center near what you expect
@@ -697,6 +688,8 @@ def make_lc(Model, data, bands=['u', 'g', 'r', 'i', 'z'], inject_fake=False):
     if inject_fake:
         batch_dict['log_tau_fake'] = np.log(10**log_tau0_rf)
         batch_dict['log_sigma_fake'] = np.log(10**log_sigma0)
+        batch_dict['alpha_sigma'] = alpha_sigma
+        batch_dict['beta_tau'] = beta_tau
     return batch_dict
 
                     
@@ -828,6 +821,8 @@ if __name__ == '__main__':
             'f_host_5100': obj['f_host_5100'],
             'log_tau_fake': obj['log_tau_fake'],
             'log_sigma_fake': obj['log_sigma_fake'],
+            'alpha_sigma': obj.get('alpha_sigma', None),
+            'beta_tau': obj.get('beta_tau', None),
             'dropped_bands': obj['dropped_bands'],
             't_obs_length': obj['t_obs_length'],
             't_rf_length': obj['t_rf_length'],
@@ -972,16 +967,42 @@ if __name__ == '__main__':
             tau_in_bounds = tau_p16 <= injected_log_tau <= tau_p84
             sigma_in_bounds = sigma_p16 <= injected_log_sigma <= sigma_p84
 
+            alpha_sigma = obj['alpha_sigma']
+            beta_tau = obj['beta_tau']
+            eta_A1 = np.median(obj_flat_samples_flatten_per_band['eta_A1'])
+            eta_A2 = np.median(obj_flat_samples_flatten_per_band['eta_A2'])
+            eta_tau1 = np.median(obj_flat_samples_flatten_per_band['eta_tau1'])
+            eta_tau2 = np.median(obj_flat_samples_flatten_per_band['eta_tau2'])
+            eta_A1_p16, eta_A1_p84 = np.percentile(obj_flat_samples_flatten_per_band['eta_A1'], [16, 84])
+            eta_A2_p16, eta_A2_p84 = np.percentile(obj_flat_samples_flatten_per_band['eta_A2'], [16, 84])
+            eta_tau1_p16, eta_tau1_p84 = np.percentile(obj_flat_samples_flatten_per_band['eta_tau1'], [16, 84])
+            eta_tau2_p16, eta_tau2_p84 = np.percentile(obj_flat_samples_flatten_per_band['eta_tau2'], [16, 84])
+            eta_A1_in_bounds = eta_A1_p16 <= alpha_sigma <= eta_A1_p84
+            eta_A2_in_bounds = eta_A2_p16 <= alpha_sigma <= eta_A2_p84
+
+            eta_tau1_in_bounds = eta_tau1_p16 <= beta_tau <= eta_tau1_p84
+            eta_tau2_in_bounds = eta_tau2_p16 <= beta_tau <= eta_tau2_p84
+            # Determine color: green if all in bounds, else red
+            all_in_bounds = all([
+                tau_in_bounds, sigma_in_bounds,
+                eta_A1_in_bounds, eta_A2_in_bounds,
+                eta_tau1_in_bounds, eta_tau2_in_bounds
+            ])
+            color = "\033[92m" if all_in_bounds else "\033[91m"
             print(
-                f"[FAKE INJECT] Object {obj['object_id']}:\n"
+                f"{color}[FAKE INJECT] Object {obj['object_id']}:\n"
                 f"  log10_tau:    injected = {injected_log_tau/np.log(10):.3f}, "
-                f"recovered = {recovered_log_tau/np.log(10):.3f} "
-                f"(median ± err = {recovered_log_tau/np.log(10):.3f} ± {(tau_p84-tau_p16)/2/np.log(10):.3f}, "
-                f"16th = {tau_p16/np.log(10):.3f}, 84th = {tau_p84/np.log(10):.3f}, in bounds: {tau_in_bounds})\n"
+                f"recovered = {recovered_log_tau/np.log(10):.3f} ± {(tau_p84-tau_p16)/2/np.log(10):.3f} "
+                f"(16th = {tau_p16/np.log(10):.3f}, 84th = {tau_p84/np.log(10):.3f}, in bounds: {tau_in_bounds})\n"
                 f"  log10_sigma:  injected = {injected_log_sigma/np.log(10):.3f}, "
-                f"recovered = {recovered_log_sigma/np.log(10):.3f} "
-                f"(median ± err = {recovered_log_sigma/np.log(10):.3f} ± {(sigma_p84-sigma_p16)/2/np.log(10):.3f}, "
-                f"16th = {sigma_p16/np.log(10):.3f}, 84th = {sigma_p84/np.log(10):.3f}, in bounds: {sigma_in_bounds})"
+                f"recovered = {recovered_log_sigma/np.log(10):.3f} ± {(sigma_p84-sigma_p16)/2/np.log(10):.3f} "
+                f"(16th = {sigma_p16/np.log(10):.3f}, 84th = {sigma_p84/np.log(10):.3f}, in bounds: {sigma_in_bounds})\n"
+                f"  alpha_sigma: injected = {alpha_sigma:.3f}, "
+                f"eta_A1 = {eta_A1:.3f} ± {(eta_A1_p84-eta_A1_p16)/2:.3f} (in bounds: {eta_A1_in_bounds}), "
+                f"eta_A2 = {eta_A2:.3f} ± {(eta_A2_p84-eta_A2_p16)/2:.3f} (in bounds: {eta_A2_in_bounds})\n"
+                f"  beta_tau: injected = {beta_tau:.3f}, "
+                f"eta_tau1 = {eta_tau1:.3f} ± {(eta_tau1_p84-eta_tau1_p16)/2:.3f} (in bounds: {eta_tau1_in_bounds}), "
+                f"eta_tau2 = {eta_tau2:.3f} ± {(eta_tau2_p84-eta_tau2_p16)/2:.3f} (in bounds: {eta_tau2_in_bounds})\033[0m"
             )
         final_result_obj = obj | result | diagnostics | dict(prefix=prefix, suffix=suffix)
         results.append(final_result_obj)
