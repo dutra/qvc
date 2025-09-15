@@ -127,11 +127,6 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_
 
         eta_A1_mean = numpyro.sample("eta_A1_mean", dist.Uniform(-1.0, 0.0))
         eta_A2_mean = numpyro.sample("eta_A2_mean", dist.Uniform(-1.0, 0.0))
-<<<<<<< HEAD
-        # # Nudge to weakly-informative Normal centered slightly > 0:
-        #eta_tau1_mean = numpyro.sample("eta_tau1_mean", dist.Uniform(0.0, 1.0))
-        #eta_tau2_mean = numpyro.sample("eta_tau2_mean", dist.Uniform(0.0, 1.0))
-=======
         if eta_tau_normal:
             # Nudge to weakly-informative Normal centered slightly > 0:
             print("\033[93m[WARN] Using Normal priors for eta_tau means.\033[0m")
@@ -141,7 +136,6 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_
             print("[INFO] Using Uniform priors for eta_tau means.")
             eta_tau1_mean = numpyro.sample("eta_tau1_mean", dist.Uniform(0.0, 1.0))
             eta_tau2_mean = numpyro.sample("eta_tau2_mean", dist.Uniform(0.0, 1.0))
->>>>>>> 35f11b65238bd126af525d9a11d48a104727a0e7
 
         # Symmetric, order-agnostic priors for global tau-slopes
         mu_eta_tau = numpyro.sample("mu_eta_tau", dist.Normal(0.5, 0.30))   # broad center near what you expect
