@@ -892,3 +892,68 @@ def resort_by_kernel_key(obj_matrix_np: np.ndarray) -> np.ndarray:
     key = t + b * eps
     order = np.argsort(key, kind="mergesort")  # stable
     return obj_matrix_np[order]
+
+def summarize_fake_injected_vs_recovered(obj, samples, diagnostics):
+    injected_log_tau = obj['log_tau_fake']
+    injected_log_sigma = obj['log_sigma_fake']
+    recovered_log_tau = np.median(samples['log_tau_drw0'])
+    recovered_log_sigma = np.median(samples['log_sigma0'])
+
+    def get_bounds(arr):
+        p16, p84 = np.percentile(arr, [16, 84])
+        return p16, p84
+
+    def in_bounds(val, p16, p84):
+        center = 0.5 * (p16 + p84)
+        half_1sigma = 0.5 * (p84 - p16)
+        half_2sigma = 2 * half_1sigma
+        in_1sigma = (center - half_1sigma) <= val <= (center + half_1sigma)
+        in_2sigma = (center - half_2sigma) <= val <= (center + half_2sigma)
+        return in_1sigma, in_2sigma
+
+    def colorize(val, in_1sigma, in_2sigma):
+        if in_1sigma:
+            return f"\033[92m{val}\033[0m"
+        elif in_2sigma:
+            return f"\033[93m{val}\033[0m"
+        else:
+            return f"\033[91m{val}\033[0m"
+
+    tau_p16, tau_p84 = get_bounds(samples['log_tau_drw0'])
+    sigma_p16, sigma_p84 = get_bounds(samples['log_sigma0'])
+    tau_in_1sigma, tau_in_2sigma = in_bounds(injected_log_tau, tau_p16, tau_p84)
+    sigma_in_1sigma, sigma_in_2sigma = in_bounds(injected_log_sigma, sigma_p16, sigma_p84)
+
+    alpha_sigma = obj['alpha_sigma']
+    beta_tau = obj['beta_tau']
+
+    def summarize_param(param, injected, diagnostics):
+        median = np.median(samples[param])
+        p16, p84 = get_bounds(samples[param])
+        in_1sigma, in_2sigma = in_bounds(injected, p16, p84)
+        rhat = diagnostics.get(f"{param}_rhat", np.nan)
+        return median, p16, p84, in_1sigma, in_2sigma, rhat
+
+    eta_A1, eta_A1_p16, eta_A1_p84, eta_A1_in_1sigma, eta_A1_in_2sigma, eta_A1_rhat = summarize_param('eta_A1', alpha_sigma, diagnostics)
+    eta_A2, eta_A2_p16, eta_A2_p84, eta_A2_in_1sigma, eta_A2_in_2sigma, eta_A2_rhat = summarize_param('eta_A2', alpha_sigma, diagnostics)
+    eta_tau1, eta_tau1_p16, eta_tau1_p84, eta_tau1_in_1sigma, eta_tau1_in_2sigma, eta_tau1_rhat = summarize_param('eta_tau1', beta_tau, diagnostics)
+    eta_tau2, eta_tau2_p16, eta_tau2_p84, eta_tau2_in_1sigma, eta_tau2_in_2sigma, eta_tau2_rhat = summarize_param('eta_tau2', beta_tau, diagnostics)
+
+    print(
+        f"[FAKE INJECT] Object {obj['object_id']}:\n"
+        f"  log10_tau:    injected = {injected_log_tau/np.log(10):.3f}, "
+        f"recovered = {colorize(f'{recovered_log_tau/np.log(10):.3f}', tau_in_1sigma, tau_in_2sigma)} ± "
+        f"{(tau_p84-tau_p16)/2/np.log(10):.3f} "
+        f"(in 1σ: {tau_in_1sigma}, in 2σ: {tau_in_2sigma})\n"
+        f"  log10_sigma:  injected = {injected_log_sigma/np.log(10):.3f}, "
+        f"recovered = {colorize(f'{recovered_log_sigma/np.log(10):.3f}', sigma_in_1sigma, sigma_in_2sigma)} ± "
+        f"{(sigma_p84-sigma_p16)/2/np.log(10):.3f} "
+        f"(in 1σ: {sigma_in_1sigma}, in 2σ: {sigma_in_2sigma})\n"
+        f"  alpha_sigma: injected = {alpha_sigma:.3f}, "
+        f"eta_A1 = {colorize(f'{eta_A1:.3f}', eta_A1_in_1sigma, eta_A1_in_2sigma)} ± {(eta_A1_p84-eta_A1_p16)/2:.3f} (in 1σ: {eta_A1_in_1sigma}, in 2σ: {eta_A1_in_2sigma}, rhat={eta_A1_rhat:.3f}), "
+        f"eta_A2 = {colorize(f'{eta_A2:.3f}', eta_A2_in_1sigma, eta_A2_in_2sigma)} ± {(eta_A2_p84-eta_A2_p16)/2:.3f} (in 1σ: {eta_A2_in_1sigma}, in 2σ: {eta_A2_in_2sigma}, rhat={eta_A2_rhat:.3f})\n"
+        f"  beta_tau: injected = {beta_tau:.3f}, "
+        f"eta_tau1 = {colorize(f'{eta_tau1:.3f}', eta_tau1_in_1sigma, eta_tau1_in_2sigma)} ± {(eta_tau1_p84-eta_tau1_p16)/2:.3f} (in 1σ: {eta_tau1_in_1sigma}, in 2σ: {eta_tau1_in_2sigma}, rhat={eta_tau1_rhat:.3f}), "
+        f"eta_tau2 = {colorize(f'{eta_tau2:.3f}', eta_tau2_in_1sigma, eta_tau2_in_2sigma)} ± {(eta_tau2_p84-eta_tau2_p16)/2:.3f} (in 1σ: {eta_tau2_in_1sigma}, in 2σ: {eta_tau2_in_2sigma}, rhat={eta_tau2_rhat:.3f})"
+    )
+
