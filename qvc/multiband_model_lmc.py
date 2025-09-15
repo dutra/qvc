@@ -296,6 +296,7 @@ class MyMultiVarModel_BLR_LMC(MultiVarModel):
 
         # NEW: get centers (Q,) and gate (B,Q) from the transform
         centers_log_tau, gate = self.my_tau_drw_transform(params)
+        #jax.debug.print("centers_log_tau = {}", centers_log_tau)
 
         # basic plumbing (unchanged)
         t, band = self.X
@@ -344,18 +345,9 @@ class MyMultiVarModel_BLR_LMC(MultiVarModel):
     def my_lag_transform(
         self, X: JAXArray, has_lag: bool, params: dict[str, JAXArray]
     ) -> tuple[tuple[JAXArray, JAXArray], JAXArray]:
-        # if has_lag is True:
-        #     lags = params["lag0"] * (self.lam_rf / 2500.0) ** params["lag_beta"]
-        #     #lags = jnp.insert(lags, 0, 0.0)
-        # else:
-        #     nBand = params["log_amp_delta"].size + 1
-        #     lags = jnp.zeros(nBand)
-        # t, band = X
-        # # new_t = t - lags[band]
-        # # inds = jnp.argsort(new_t)
-        # # return (new_t, band), inds
         t, band = X
         return (t, band), jnp.arange(t.shape[0])
+
     def my_amp_transform_blr(self, params: dict[str, JAXArray]) -> JAXArray:
         return params["log_sigma0"] + jnp.atleast_1d(params["log_amp_delta_blr"])
     
@@ -424,25 +416,18 @@ class MyMultiVarModel_BLR_LMC(MultiVarModel):
     #         # Q=3: 5th, 50th, 95th percentiles
     #         return weighted_quantiles(log_tau_band, band_w, (0.05, 0.50, 0.95))
 
-    def my_tau_drw_transform(self, params, cluster_in_rest_frame: bool = True):
+    def my_tau_drw_transform(
+        self,
+        params,
+        cluster_in_rest_frame: bool = True,
+        gating_basis: str = "lambda",   # "tau" (current behavior) or "lambda"
+    ):
         """
-        Build differentiable latent centers and soft band→latent responsibilities.
-
-        Args:
-        params : dict-like model params; expected keys include:
-            eta_tau1, eta_tau2, lam_s, eta_break, log_tau_drw0
-            gate_log_temp (optional; log temperature for soft gating)
-            Q=2: lmc_sep_raw (optional; sep = softplus(raw) + min_sep_ln)
-            Q=3: lmc_sep_left_raw, lmc_sep_right_raw (optional; per-side seps)
-            Q>3: lmc_span_raw (optional; total span for equal spacing)
-        cluster_in_rest_frame : if True, cluster τ in the object's rest frame (recommended).
-
-        Returns:
-        centers_log_tau : (Q,)   ln τ centers (observed-frame units if flag=False; RF if True)
-        gate            : (B,Q)  soft responsibilities; rows sum to 1
+        Build differentiable latent centers (ln tau) + soft band→latent responsibilities.
+        If gating_basis="lambda", gate on log(lambda_rf/lam_s) instead of log tau.
         """
 
-        # --- Per-band ln τ (observed frame) from the wavelength law ---
+        # --- Per-band ln τ (observed frame) from wavelength law ---
         eta_tau1  = params["eta_tau1"]
         eta_tau2  = params["eta_tau2"]
         lam_s     = params["lam_s"]
@@ -453,80 +438,94 @@ class MyMultiVarModel_BLR_LMC(MultiVarModel):
             + jnp.log(10.0) * log_broken_pl(self.lam_rf, lam_s, eta_tau1, eta_tau2, eta_break)
         )  # (B,)
 
-        # Optionally convert to rest-frame for clustering
         if cluster_in_rest_frame:
-            z = self.z    # scalar redshift per object
-            log_tau_band = log_tau_band_obs - jnp.log1p(z)
+            log_tau_band = log_tau_band_obs - jnp.log1p(self.z)
         else:
             log_tau_band = log_tau_band_obs
 
-        # --- Per-band inverse-variance weights (JAX-safe; dropped bands get ~0) ---
+        # Weighted mean anchor μ in τ-space (unchanged)
         _, b = self.X
         b = b.astype(jnp.int32)
-
         iv = jnp.where(
             (self.yerr > 0) & (self.yerr < 100.0) & jnp.isfinite(self.yerr),
             1.0 / (self.yerr**2),
             0.0,
         ).astype(log_tau_band.dtype)
-
         B = log_tau_band.shape[0]
         band_w = jnp.zeros(B, dtype=log_tau_band.dtype).at[b].add(iv)
-        band_w = jnp.where(band_w.sum() > 0, band_w, jnp.ones_like(band_w) / B)  # fallback
+        band_w = jnp.where(band_w.sum() > 0, band_w, jnp.ones_like(band_w) / B)
         w_tot  = band_w.sum()
 
-        # --- Global weighted mean μ as smooth anchor for all Q ---
         mu = (band_w * log_tau_band).sum() / (w_tot + 1e-12)
 
-        # --- Hyperparameters & smooth constraints ---
+        # Centers in τ-space (same as before)
         Q = int(self.q_groups)
-        min_sep_ln = self.q_min_sep_dex * jnp.log(10.0)  # e.g., 0.1 dex → ln
+        min_sep_ln    = self.q_min_sep_dex * jnp.log(10.0)
         gate_log_temp = params["gate_log_temp"]
         temp = jnp.exp(gate_log_temp)
-
-        # --- Construct ordered, differentiable centers per Q ---
         dtype = log_tau_band.dtype
+
         if Q == 1:
             centers = jnp.array([mu], dtype=dtype)
-
         elif Q == 2:
-            # symmetric around μ; separation ≥ min_sep_ln
             raw = params.get("lmc_sep_raw", jnp.array(0.0, dtype))
             sep = jax.nn.softplus(raw) + min_sep_ln
             centers = jnp.stack([mu - 0.5 * sep, mu + 0.5 * sep], axis=0)
-
         elif Q == 3:
-            # asymmetric but ordered: [μ - a, μ, μ + b]; a,b ≥ min_sep_ln
             raw_L = params["lmc_sep_left_raw"]
             raw_R = params["lmc_sep_right_raw"]
             a = jax.nn.softplus(raw_L) + min_sep_ln
-            b = jax.nn.softplus(raw_R) + min_sep_ln
-            centers = jnp.stack([mu - a, mu, mu + b], axis=0)
-
+            b_ = jax.nn.softplus(raw_R) + min_sep_ln
+            centers = jnp.stack([mu - a, mu, mu + b_], axis=0)
         else:
-            # Generic, symmetric grid for Q>3 (still differentiable).
-            # Equal spacing with adjacent gaps ≥ min_sep_ln.
             raw_span = params["lmc_span_raw"]
-            # ensure total span covers at least (Q-1)*min_sep_ln
             span_min = (Q - 1) * min_sep_ln
             span = jax.nn.softplus(raw_span) + span_min
             base_sep = jnp.maximum(span / jnp.maximum(Q - 1, 1), min_sep_ln)
             offsets = base_sep * (jnp.arange(Q, dtype=dtype) - 0.5 * (Q - 1))
             centers = mu + offsets
 
-        # --- Soft, temperature-controlled responsibilities (B, Q) ---
-        # Switch to squared distance so the gradient is smooth at the center and far points are penalized more strongly
-        d2 = (log_tau_band[:, None] - centers[None, :]) ** 2
+        # --- Responsibilities ---
+        if gating_basis == "lambda":
+            # Gate by log-lambda distance (rest-frame), independent of eta_tau
+            zeta = jnp.log(self.lam_rf / lam_s)  # (B,)
+            zeta_mu = (band_w * zeta).sum() / (w_tot + 1e-12)
+
+            # Place centers at zeta_mu with the same sep logic
+            if Q == 1:
+                centers_z = jnp.array([zeta_mu], dtype=dtype)
+            elif Q == 2:
+                raw = params.get("lmc_sep_raw", jnp.array(0.0, dtype))
+                sep = jax.nn.softplus(raw) + min_sep_ln
+                centers_z = jnp.stack([zeta_mu - 0.5*sep, zeta_mu + 0.5*sep])
+            elif Q == 3:
+                raw_L = params["lmc_sep_left_raw"]
+                raw_R = params["lmc_sep_right_raw"]
+                a = jax.nn.softplus(raw_L) + min_sep_ln
+                b_ = jax.nn.softplus(raw_R) + min_sep_ln
+                centers_z = jnp.stack([zeta_mu - a, zeta_mu, zeta_mu + b_])
+            else:
+                raw_span = params["lmc_span_raw"]
+                span_min = (Q - 1) * min_sep_ln
+                span = jax.nn.softplus(raw_span) + span_min
+                base_sep = jnp.maximum(span / jnp.maximum(Q - 1, 1), min_sep_ln)
+                offsets = base_sep * (jnp.arange(Q, dtype=dtype) - 0.5 * (Q - 1))
+                centers_z = zeta_mu + offsets
+
+            d2 = (zeta[:, None] - centers_z[None, :]) ** 2
+        else:
+            # Current behavior: gate by τ-based distance
+            d2 = (log_tau_band[:, None] - centers[None, :]) ** 2
+
         logits = -d2 / (temp + 1e-12)
-        gate = jnn.softmax(logits, axis=1)
+        gate   = jnn.softmax(logits, axis=1)
         eps = 1e-3
         gate = gate * (1.0 - gate.shape[-1] * eps) + eps
         gate = gate / gate.sum(axis=1, keepdims=True)
 
-        # return centers in the *same frame used for clustering*
         centers_obs = centers + (jnp.log1p(self.z) if cluster_in_rest_frame else 0.0)
         return centers_obs, gate
-        
+
 
     def my_amp_transform(self, params: dict[str, JAXArray]) -> JAXArray:
         """

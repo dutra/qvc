@@ -134,8 +134,8 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_
             eta_tau2_mean = numpyro.sample("eta_tau2_mean", dist.Normal(0.2, 1.0))
         else:
             print("[INFO] Using Uniform priors for eta_tau means.")
-            eta_tau1_mean = numpyro.sample("eta_tau1_mean", dist.Uniform(0.0, 1.0))
-            eta_tau2_mean = numpyro.sample("eta_tau2_mean", dist.Uniform(0.0, 1.0))
+            #eta_tau1_mean = numpyro.sample("eta_tau1_mean", dist.Uniform(0.0, 1.0))
+            #eta_tau2_mean = numpyro.sample("eta_tau2_mean", dist.Uniform(0.0, 1.0))
 
         # Symmetric, order-agnostic priors for global tau-slopes
         mu_eta_tau = numpyro.sample("mu_eta_tau", dist.Normal(0.5, 0.30))   # broad center near what you expect
@@ -350,17 +350,23 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_
                 if disable_lag_blr:
                     print("[WARNING] BLR lag model disabled.")
                     log_amp_delta_blr = numpyro.deterministic("log_amp_delta_blr", jnp.full((batch_size, nBands), -1e9))
+                    log_lag_blr = numpyro.deterministic("log_lag_blr", jnp.full((batch_size, nBands), -9.0))
                 else:
                     print("[WARNING] BLR lag model enabled.")
                     log_amp_delta_blr = numpyro.sample("log_amp_delta_blr", dist.Normal(jnp.full(nBands, -1.0), 3.0))
+                    log_lag_blr = numpyro.sample(
+                        "log_lag_blr",
+                        dist.Uniform(jnp.log(0.2), jnp.log(5000.0))
+                    )
 
-                log_lag_blr  = numpyro.sample(
-                    "log_lag_blr",
-                    dist.Uniform(jnp.log(0.2), jnp.log(5000.0))
+                width_blr = numpyro.deterministic(
+                    "width_blr",
+                    0.2 * jnp.exp(log_tau_drw0_c)[:, None] * jnp.ones((batch_size, nBands))
                 )
-
-                width_blr = numpyro.deterministic("width_blr", jnp.full((batch_size, nBands), 0.2 * jnp.exp(log_tau_drw0_c)))
-                width_cont = numpyro.deterministic("width_cont", jnp.full((batch_size, nBands), 0.2 * jnp.exp(log_tau_drw0_c)))
+                width_cont = numpyro.deterministic(
+                    "width_cont",
+                    0.2 * jnp.exp(log_tau_drw0)[:, None] * jnp.ones((batch_size, nBands))
+                )
 
                 # Jitter
                 log_jitter = numpyro.sample("log_jitter", dist.Normal(log_jitter_mean, 1.0))
