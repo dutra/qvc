@@ -466,7 +466,8 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, data, bands=['u', '
         # Model PSD
         # Compute model PSD for each posterior sample and plot the median and 16/84 percentiles
         psd_samples = []
-        for i in range(len(samples['log_tau_drw0'])):
+        n_samp = np.min([50, len(samples['log_tau_drw0'])])
+        for i in range(n_samp):
             sample_params = {k: jnp.array(v[i]) for k, v in samples.items()}
             psd_i = (2.0 * jnp.pi) * model.psd(sample_params, 2 * np.pi * freqs, b=0, sigma_n2=0.0)
             psd_samples.append(np.asarray(psd_i))

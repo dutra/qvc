@@ -515,7 +515,7 @@ def make_lc(Model, data, bands=['u', 'g', 'r', 'i', 'z'], inject_fake=False):
     # Inject fake DRW
     if inject_fake:
         alpha_sigma = -0.5  # σ(λ) ∝ λ^α
-        beta_tau = 0.0      # τ(λ) ∝ λ^β
+        beta_tau = 3.0      # τ(λ) ∝ λ^β
 
         # ---- FIX 1: build per-band arrays (B,), not per-observation ----
         lam_rf_bands = np.asarray([lambda_pivot[band] for band in bands], dtype=float) / (1.0 + float(data['z']))
@@ -527,7 +527,7 @@ def make_lc(Model, data, bands=['u', 'g', 'r', 'i', 'z'], inject_fake=False):
         key, k_tau0, k_sig0, k_latent, k_noise = jax.random.split(key, 5)
 
         # Base logs
-        log_tau0_rf = jax.random.uniform(k_tau0, minval=0.5,  maxval=5.0)   # log10 tau_rest (d)
+        log_tau0_rf = jax.random.uniform(k_tau0, minval=0.5,  maxval=3.0)   # log10 tau_rest (d)
         log_sigma0  = jax.random.uniform(k_sig0, minval=-1.0, maxval=0.0)   # log10 sigma (mag)
         tau0_rf   = 10.0**float(log_tau0_rf)
         sigma0    = 10.0**float(log_sigma0)
