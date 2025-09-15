@@ -128,13 +128,8 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_
         eta_A1_mean = numpyro.sample("eta_A1_mean", dist.Uniform(-1.0, 0.0))
         eta_A2_mean = numpyro.sample("eta_A2_mean", dist.Uniform(-1.0, 0.0))
 
-        # Symmetric, order-agnostic priors for global tau-slopes
-        mu_eta_tau = numpyro.sample("mu_eta_tau", dist.Normal(0.5, 2.0))   # broad center near what you expect
-        delta_eta_tau = numpyro.sample("delta_eta_tau", dist.Normal(0.0, 2.0))  # symmetric around 0
-
-        eta_tau1_mean = numpyro.deterministic("eta_tau1_mean", mu_eta_tau + 0.5 * delta_eta_tau)
-        eta_tau2_mean = numpyro.deterministic("eta_tau2_mean", mu_eta_tau - 0.5 * delta_eta_tau)
-
+        eta_tau1_mean = numpyro.sample("eta_tau1_mean", dist.Uniform(-1.0, 5.0))
+        eta_tau2_mean = numpyro.sample("eta_tau2_mean", dist.Uniform(-1.0, 5.0))
 
         if free_eta_break:
             print("[INFO] Free eta_break and lam_s.")
@@ -989,6 +984,10 @@ if __name__ == '__main__':
                 eta_tau1_in_bounds, eta_tau2_in_bounds
             ])
             color = "\033[92m" if all_in_bounds else "\033[91m"
+            eta_A1_rhat = diagnostics.get('eta_A1_rhat', np.nan)
+            eta_A2_rhat = diagnostics.get('eta_A2_rhat', np.nan)
+            eta_tau1_rhat = diagnostics.get('eta_tau1_rhat', np.nan)
+            eta_tau2_rhat = diagnostics.get('eta_tau2_rhat', np.nan)
             print(
                 f"{color}[FAKE INJECT] Object {obj['object_id']}:\n"
                 f"  log10_tau:    injected = {injected_log_tau/np.log(10):.3f}, "
@@ -998,11 +997,11 @@ if __name__ == '__main__':
                 f"recovered = {recovered_log_sigma/np.log(10):.3f} ± {(sigma_p84-sigma_p16)/2/np.log(10):.3f} "
                 f"(16th = {sigma_p16/np.log(10):.3f}, 84th = {sigma_p84/np.log(10):.3f}, in bounds: {sigma_in_bounds})\n"
                 f"  alpha_sigma: injected = {alpha_sigma:.3f}, "
-                f"eta_A1 = {eta_A1:.3f} ± {(eta_A1_p84-eta_A1_p16)/2:.3f} (in bounds: {eta_A1_in_bounds}), "
-                f"eta_A2 = {eta_A2:.3f} ± {(eta_A2_p84-eta_A2_p16)/2:.3f} (in bounds: {eta_A2_in_bounds})\n"
+                f"eta_A1 = {eta_A1:.3f} ± {(eta_A1_p84-eta_A1_p16)/2:.3f} (in bounds: {eta_A1_in_bounds}, rhat={eta_A1_rhat:.3f}), "
+                f"eta_A2 = {eta_A2:.3f} ± {(eta_A2_p84-eta_A2_p16)/2:.3f} (in bounds: {eta_A2_in_bounds}, rhat={eta_A2_rhat:.3f})\n"
                 f"  beta_tau: injected = {beta_tau:.3f}, "
-                f"eta_tau1 = {eta_tau1:.3f} ± {(eta_tau1_p84-eta_tau1_p16)/2:.3f} (in bounds: {eta_tau1_in_bounds}), "
-                f"eta_tau2 = {eta_tau2:.3f} ± {(eta_tau2_p84-eta_tau2_p16)/2:.3f} (in bounds: {eta_tau2_in_bounds})\033[0m"
+                f"eta_tau1 = {eta_tau1:.3f} ± {(eta_tau1_p84-eta_tau1_p16)/2:.3f} (in bounds: {eta_tau1_in_bounds}, rhat={eta_tau1_rhat:.3f}), "
+                f"eta_tau2 = {eta_tau2:.3f} ± {(eta_tau2_p84-eta_tau2_p16)/2:.3f} (in bounds: {eta_tau2_in_bounds}, rhat={eta_tau2_rhat:.3f})\033[0m"
             )
         final_result_obj = obj | result | diagnostics | dict(prefix=prefix, suffix=suffix)
         results.append(final_result_obj)
