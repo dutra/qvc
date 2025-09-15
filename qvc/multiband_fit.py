@@ -127,15 +127,15 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_
         eta_A1_mean = numpyro.sample("eta_A1_mean", dist.Uniform(-1.0, 0.0))
         eta_A2_mean = numpyro.sample("eta_A2_mean", dist.Uniform(-1.0, 0.0))
         # # Nudge to weakly-informative Normal centered slightly > 0:
-        eta_tau1_mean = numpyro.sample("eta_tau1_mean", dist.Uniform(0.0, 1.0))
-        eta_tau2_mean = numpyro.sample("eta_tau2_mean", dist.Uniform(0.0, 1.0))
+        #eta_tau1_mean = numpyro.sample("eta_tau1_mean", dist.Uniform(0.0, 1.0))
+        #eta_tau2_mean = numpyro.sample("eta_tau2_mean", dist.Uniform(0.0, 1.0))
 
         # Symmetric, order-agnostic priors for global tau-slopes
-        #mu_eta_tau = numpyro.sample("mu_eta_tau", dist.Normal(0.5, 0.30))   # broad center near what you expect
-        #delta_eta_tau = numpyro.sample("delta_eta_tau", dist.Normal(0.0, 0.30))  # symmetric around 0
+        mu_eta_tau = numpyro.sample("mu_eta_tau", dist.Normal(0.5, 0.30))   # broad center near what you expect
+        delta_eta_tau = numpyro.sample("delta_eta_tau", dist.Normal(0.0, 2.0))  # symmetric around 0
 
-        #eta_tau1_mean = numpyro.deterministic("eta_tau1_mean", mu_eta_tau + 0.5 * delta_eta_tau)
-        #eta_tau2_mean = numpyro.deterministic("eta_tau2_mean", mu_eta_tau - 0.5 * delta_eta_tau)
+        eta_tau1_mean = numpyro.deterministic("eta_tau1_mean", mu_eta_tau + 0.5 * delta_eta_tau)
+        eta_tau2_mean = numpyro.deterministic("eta_tau2_mean", mu_eta_tau - 0.5 * delta_eta_tau)
 
 
         if free_eta_break:
@@ -502,9 +502,11 @@ def make_lc(Model, data, bands=['u', 'g', 'r', 'i', 'z'], inject_fake=False):
     # Inject fake DRW
     if inject_fake:
         alpha_sigma = -0.5  # σ(λ) ∝ λ^α
-        beta_tau = 0.3      # τ(λ) ∝ λ^β
-        lam_rf = jnp.array([lambda_pivot[band] for band in bands]) / (1 + obj['z'])
-        lam_rf_per_band = lam_rf[band_idx]
+        beta_tau = 0.0      # τ(λ) ∝ λ^β
+
+        # ---- FIX 1: build per-band arrays (B,), not per-observation ----
+        lam_rf_bands = np.asarray([lambda_pivot[band] for band in bands], dtype=float) / (1.0 + float(data['z']))
+        lam_ref = 2500.0  # Å
 
         # deterministic seed per object
         key = jax.random.PRNGKey(0)
@@ -519,24 +521,25 @@ def make_lc(Model, data, bands=['u', 'g', 'r', 'i', 'z'], inject_fake=False):
         one_plus_z = float(1.0 + data['z'])
 
         # Per-band target τ, σ from wavelength laws (rest-frame → observed τ)
-        lam_ref = 2500.0 # Å
-        tau_rf_b  = tau0_rf * (lam_rf_per_band / lam_ref)**beta_tau
-        tau_obs_b = tau_rf_b * one_plus_z
-        sigma_b   = sigma0   * (lam_rf_per_band / lam_ref)**alpha_sigma
+        tau_rf_band  = tau0_rf * (lam_rf_bands / lam_ref)**beta_tau        # (B,)
+        tau_obs_band = tau_rf_band * one_plus_z                            # (B,)
+        sigma_band   = sigma0   * (lam_rf_bands / lam_ref)**alpha_sigma    # (B,)
 
         # Choose a latent τ to drive everyone (e.g., geometric mean of band τ)
-        tau_latent_obs = float(np.exp(np.mean(np.log(np.clip(tau_obs_b, 1e-6, None)))))
+        tau_latent_obs = float(np.exp(np.mean(np.log(np.clip(tau_obs_band, 1e-6, None)))))
         sigma_latent   = 1.0  # unit scale; bands will rescale
 
-        print(f"Injecting SHARED latent for object {data['object_id']}: "
+        print(
+            f"Injecting SHARED latent for object {data['object_id']}: "
             f"log_tau0_rf={float(log_tau0_rf):.3f}, log_sigma0={float(log_sigma0):.3f}, "
-            f"tau_latent_obs≈{tau_latent_obs:.3g} d")
+            f"tau_latent_obs≈{tau_latent_obs:.3g} d"
+        )
 
         # Work on a time-sorted view so filtering is causal
         order = np.argsort(all_times)
         times_sorted     = all_times[order]
         mags_err_sorted  = all_magerrs[order]
-        bands_sorted     = band_idx[order]
+        bands_sorted     = band_idx[order]  # (N,) int indices into `bands`
 
         # Sample ONE latent DRW on all timestamps (no measurement noise here)
         latent = sample_drw_tinygp(
@@ -557,18 +560,19 @@ def make_lc(Model, data, bands=['u', 'g', 'r', 'i', 'z'], inject_fake=False):
         noise_keys = jax.random.split(k_noise, len(uniq_bands))
 
         for bk, b in zip(noise_keys, uniq_bands):
+            b = int(b)  # ---- FIX 2: use band index to index (B,) arrays ----
             m = (bands_sorted == b)
             t_b = np.asarray(times_sorted[m], dtype=float)
             x_b = np.asarray(latent[m],       dtype=float)
 
             # Filter the latent to impose target τ for this band
-            y_b = exp_filter_to_tau(x_b, t_b, tau=float(tau_obs_b[int(b)]))
+            y_b = exp_filter_to_tau(x_b, t_b, tau=float(tau_obs_band[b]))
 
             # Standardize per-band and scale to target σ(λ)
             y_b = y_b - np.mean(y_b)
             std = np.std(y_b)
             std = std if std > 1e-12 else 1.0
-            y_b = (y_b / std) * float(sigma_b[int(b)])
+            y_b = (y_b / std) * float(sigma_band[b])
 
             # Add observational noise
             eps = jax.random.normal(bk, shape=(y_b.size,))
@@ -576,9 +580,11 @@ def make_lc(Model, data, bands=['u', 'g', 'r', 'i', 'z'], inject_fake=False):
 
             mags_sorted[m] = y_b
 
-            print(f"  band {int(b)}: λ_rf={lam_rf_per_band[int(b)]:.0f}Å, "
-                f"τ_rf={tau_rf_b[int(b)]:.3g} d, τ_obs={tau_obs_b[int(b)]:.3g} d, "
-                f"σ={sigma_b[int(b)]:.3g}")
+            print(
+                f"  band {b}: λ_rf={lam_rf_bands[b]:.0f}Å, "
+                f"τ_rf={tau_rf_band[b]:.3g} d, τ_obs={tau_obs_band[b]:.3g} d, "
+                f"σ={sigma_band[b]:.3g}"
+            )
 
         # Undo sorting
         inv = np.empty_like(order)
