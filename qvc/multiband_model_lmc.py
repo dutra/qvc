@@ -267,7 +267,7 @@ class MyMultiVarModel_BLR_LMC(MultiVarModel):
         self.use_bwb = kwargs["use_bwb"]
         self.q_groups = kwargs["q_groups"] # 1, 2 or 3
         self.q_quantiles       = kwargs.get("q_quantiles", None)         # e.g., (0.10,0.90) or (0.10,0.50,0.90)
-        self.q_min_sep_dex     = kwargs.get("q_min_sep_dex", 0.05)      # ~0.05 dex minimum separation
+        self.q_min_sep_dex     = kwargs.get("q_min_sep_dex", 0.10)      # ~0.10 dex minimum separation
         self.q_min_group_frac  = kwargs.get("q_min_group_frac", 0.20)  # ≥20% of weight per group
 
 
