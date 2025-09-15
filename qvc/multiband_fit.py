@@ -138,7 +138,7 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_
             #eta_tau2_mean = numpyro.sample("eta_tau2_mean", dist.Uniform(0.0, 1.0))
 
         # Symmetric, order-agnostic priors for global tau-slopes
-        mu_eta_tau = numpyro.sample("mu_eta_tau", dist.Normal(0.5, 0.30))   # broad center near what you expect
+        mu_eta_tau = numpyro.sample("mu_eta_tau", dist.Normal(0.5, 2.0))   # broad center near what you expect
         delta_eta_tau = numpyro.sample("delta_eta_tau", dist.Normal(0.0, 2.0))  # symmetric around 0
 
         eta_tau1_mean = numpyro.deterministic("eta_tau1_mean", mu_eta_tau + 0.5 * delta_eta_tau)
@@ -365,7 +365,7 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_
                 )
                 width_cont = numpyro.deterministic(
                     "width_cont",
-                    0.2 * jnp.exp(log_tau_drw0)[:, None] * jnp.ones((batch_size, nBands))
+                    0.2 * jnp.exp(log_tau_drw0_c)[:, None] * jnp.ones((batch_size, nBands))
                 )
 
                 # Jitter
