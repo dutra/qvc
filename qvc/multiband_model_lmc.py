@@ -506,6 +506,7 @@ class MyMultiVarModel_BLR_LMC(MultiVarModel):
         """
         gp, _ = self._build_gp(params)
         return gp.log_probability(y=self.y)
+        
     @eqx.filter_jit
     def pred(
         self, params: dict[str, JAXArray], X: JAXArray

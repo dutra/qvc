@@ -127,13 +127,15 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_
 
         eta_A1_mean = numpyro.sample("eta_A1_mean", dist.Uniform(-1.0, 0.0))
         eta_A2_mean = numpyro.sample("eta_A2_mean", dist.Uniform(-1.0, 0.0))
+        eta_tau1_mean = numpyro.sample("eta_tau1_mean", dist.Uniform(-1.0, 5.0))
+        eta_tau2_mean = numpyro.sample("eta_tau2_mean", dist.Uniform(-1.0, 5.0))
 
         # Symmetric, order-agnostic priors for global tau-slopes
-        mu_eta_tau = numpyro.sample("mu_eta_tau", dist.Normal(0.5, 2.0))   # broad center near what you expect
-        delta_eta_tau = numpyro.sample("delta_eta_tau", dist.Normal(0.0, 2.0))  # symmetric around 0
+        #mu_eta_tau = numpyro.sample("mu_eta_tau", dist.Normal(0.5, 2.0))   # broad center near what you expect
+        #delta_eta_tau = numpyro.sample("delta_eta_tau", dist.Normal(0.0, 2.0))  # symmetric around 0
 
-        eta_tau1_mean = numpyro.deterministic("eta_tau1_mean", mu_eta_tau + 0.5 * delta_eta_tau)
-        eta_tau2_mean = numpyro.deterministic("eta_tau2_mean", mu_eta_tau - 0.5 * delta_eta_tau)
+        #eta_tau1_mean = numpyro.deterministic("eta_tau1_mean", mu_eta_tau + 0.5 * delta_eta_tau)
+        #eta_tau2_mean = numpyro.deterministic("eta_tau2_mean", mu_eta_tau - 0.5 * delta_eta_tau)
 
 
         if free_eta_break:
@@ -506,7 +508,7 @@ def make_lc(Model, data, bands=['u', 'g', 'r', 'i', 'z'], inject_fake=False):
     # Inject fake DRW
     if inject_fake:
         alpha_sigma = -0.5  # σ(λ) ∝ λ^α
-        beta_tau = 3.0      # τ(λ) ∝ λ^β
+        beta_tau = 0.0      # τ(λ) ∝ λ^β
 
         # ---- FIX 1: build per-band arrays (B,), not per-observation ----
         lam_rf_bands = np.asarray([lambda_pivot[band] for band in bands], dtype=float) / (1.0 + float(data['z']))
