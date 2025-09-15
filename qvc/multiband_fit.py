@@ -130,9 +130,6 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_
         eta_tau1_mean = numpyro.sample("eta_tau1_mean", dist.Uniform(-1.0, 5.0))
         eta_tau2_mean = numpyro.sample("eta_tau2_mean", dist.Uniform(-1.0, 5.0))
 
-        eta_tau1_mean = numpyro.sample("eta_tau1_mean", dist.Uniform(-1.0, 5.0))
-        eta_tau2_mean = numpyro.sample("eta_tau2_mean", dist.Uniform(-1.0, 5.0))
-
         if free_eta_break:
             print("[INFO] Free eta_break and lam_s.")
             s = 0.4
