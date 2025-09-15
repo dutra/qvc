@@ -92,7 +92,8 @@ def inv_softplus(y):
 
 def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_fake_in, log_sigma_fake_in, 
                 bwb=True, disable_poly1=False, d_eta=True, disable_lag_blr=False, free_eta_break=False,
-                couple_sigma_tau=False, sigma_tau_uniform=False, inject_fake=False, lmc_q_groups=None, sample_lmc_hypers=False):
+                couple_sigma_tau=False, sigma_tau_uniform=False, inject_fake=False, 
+                lmc_q_groups=None, sample_lmc_hypers=False, eta_tau_normal=False):
     # Precompute and capture constants in the closure so they are treated as
     # static by JAX/NumPyro. This prevents unnecessary retracing/recompilation
     # when running MCMC, as these values do not change between runs.
@@ -126,9 +127,21 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_
 
         eta_A1_mean = numpyro.sample("eta_A1_mean", dist.Uniform(-1.0, 0.0))
         eta_A2_mean = numpyro.sample("eta_A2_mean", dist.Uniform(-1.0, 0.0))
+<<<<<<< HEAD
         # # Nudge to weakly-informative Normal centered slightly > 0:
         #eta_tau1_mean = numpyro.sample("eta_tau1_mean", dist.Uniform(0.0, 1.0))
         #eta_tau2_mean = numpyro.sample("eta_tau2_mean", dist.Uniform(0.0, 1.0))
+=======
+        if eta_tau_normal:
+            # Nudge to weakly-informative Normal centered slightly > 0:
+            print("\033[93m[WARN] Using Normal priors for eta_tau means.\033[0m")
+            eta_tau1_mean = numpyro.sample("eta_tau1_mean", dist.Normal(0.2, 1.0))
+            eta_tau2_mean = numpyro.sample("eta_tau2_mean", dist.Normal(0.2, 1.0))
+        else:
+            print("[INFO] Using Uniform priors for eta_tau means.")
+            eta_tau1_mean = numpyro.sample("eta_tau1_mean", dist.Uniform(0.0, 1.0))
+            eta_tau2_mean = numpyro.sample("eta_tau2_mean", dist.Uniform(0.0, 1.0))
+>>>>>>> 35f11b65238bd126af525d9a11d48a104727a0e7
 
         # Symmetric, order-agnostic priors for global tau-slopes
         mu_eta_tau = numpyro.sample("mu_eta_tau", dist.Normal(0.5, 0.30))   # broad center near what you expect
@@ -723,6 +736,7 @@ if __name__ == '__main__':
     parser.add_argument("--lmc", type=int, default=0, choices=[0, 1, 2, 3], help="Number of LMC Q groups (0 disables LMC, 1/2/3 controls Q).")
     parser.add_argument("--sample_lmc_hypers", action="store_true", default=False, help="Sample LMC hyperparameters instead of using fixed values.")
     parser.add_argument("--disable_plot_psd", action="store_true", default=False, help="Disable PSD plot generation.")
+    parser.add_argument("--eta_tau_normal", action="store_true", default=False, help="Use uniform prior for eta_tau1 and eta_tau2.")
     args = parser.parse_args()
     print("Args: ", args)
 
@@ -858,7 +872,8 @@ if __name__ == '__main__':
                                       disable_lag_blr=args.disable_lag_blr, 
                                       free_eta_break=args.free_eta_break,
                                       couple_sigma_tau=args.couple_sigma_tau, sigma_tau_uniform=args.sigma_tau_uniform,
-                                      inject_fake=args.inject_fake, lmc_q_groups=args.lmc, sample_lmc_hypers=args.sample_lmc_hypers)
+                                      inject_fake=args.inject_fake, lmc_q_groups=args.lmc, sample_lmc_hypers=args.sample_lmc_hypers,
+                                      eta_tau_normal=args.eta_tau_normal)
 
     nuts_kernel = NUTS(numpyro_joint_model, init_strategy=init_strategy, dense_mass=True, 
                        max_tree_depth=args.max_tree_depth,
