@@ -81,8 +81,9 @@ universal_params = (
     'log_sigma_eta_A1','log_sigma_eta_A2','log_sigma_eta_tau1','log_sigma_eta_tau2',
     'mu_log_tau_rf','sigma_log_tau_rf','mu_log_sigma_hat0','sigma_log_sigma_hat0',
     'delta_eta_tau', 'mu_eta_tau',
-    # LMC hypers
-    'log_lam_s', 'raw_eta_break', 'lam_s', 'eta_break'
+    'log_lam_s', 'raw_eta_break', 'lam_s', 'eta_break',
+    'eta_tau_mean', 'log_sigma_beta_tau', 'sigma_beta_tau',
+    'log_sigma_eta_tau', 'sigma_eta_tau',
 )
 
 def inv_softplus(y):
@@ -107,8 +108,7 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_
     @handlers.reparam(config={
         "eta_A1": LocScaleReparam(centered=0.0),
         "eta_A2": LocScaleReparam(centered=0.0),
-        "eta_tau1": LocScaleReparam(centered=0.0),
-        "eta_tau2": LocScaleReparam(centered=0.0),
+        "eta_tau": LocScaleReparam(centered=0.0),
     })
     def numpyro_joint_model():
 
@@ -126,8 +126,10 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_
 
         eta_A1_mean = numpyro.sample("eta_A1_mean", dist.Uniform(-1.0, 0.0))
         eta_A2_mean = numpyro.sample("eta_A2_mean", dist.Uniform(-1.0, 0.0))
-        eta_tau1_mean = numpyro.sample("eta_tau1_mean", dist.Uniform(-1.0, 5.0))
-        eta_tau2_mean = numpyro.sample("eta_tau2_mean", dist.Uniform(-1.0, 5.0))
+        # --- Simple power-law slope for tau(λ):  tau ∝ (λ/λ_ref)^{beta_tau} ---
+        eta_tau_mean = numpyro.sample("eta_tau_mean", dist.Uniform(-1, 5))   # broad prior near thin-disk-like
+        log_sigma_eta_tau = numpyro.sample("log_sigma_eta_tau", dist.Normal(jnp.log(0.15), 0.5))
+        sigma_eta_tau = numpyro.deterministic("sigma_eta_tau", jnp.exp(log_sigma_eta_tau))
                 
         if sample_lams:
             # --- Set a global pivot wavelength lam_s (for τ(λ) and σ(λ) broken power laws) ---
@@ -160,13 +162,9 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_
         # Population-level scatter (how much objects can deviate) 
         log_sigma_eta_A1 = numpyro.sample("log_sigma_eta_A1", dist.Normal(jnp.log(0.1), 0.2))
         log_sigma_eta_A2 = numpyro.sample("log_sigma_eta_A2", dist.Normal(jnp.log(0.1), 0.2))
-        log_sigma_eta_tau1 = numpyro.sample("log_sigma_eta_tau1", dist.Normal(jnp.log(0.1), 0.2))
-        log_sigma_eta_tau2 = numpyro.sample("log_sigma_eta_tau2", dist.Normal(jnp.log(0.1), 0.2))
 
         sigma_eta_A1 = numpyro.deterministic("sigma_eta_A1", jnp.exp(log_sigma_eta_A1))
         sigma_eta_A2 = numpyro.deterministic("sigma_eta_A2", jnp.exp(log_sigma_eta_A2))
-        sigma_eta_tau1 = numpyro.deterministic("sigma_eta_tau1", jnp.exp(log_sigma_eta_tau1))
-        sigma_eta_tau2 = numpyro.deterministic("sigma_eta_tau2", jnp.exp(log_sigma_eta_tau2))
 
         with numpyro.plate("objects", batch_size):
             # Object-level parameters (shape: [B])
@@ -179,15 +177,13 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_
             if d_eta:
                 eta_A1 = numpyro.sample("eta_A1", dist.Normal(eta_A1_mean, sigma_eta_A1))
                 eta_A2 = numpyro.sample("eta_A2", dist.Normal(eta_A2_mean, sigma_eta_A2))
-                eta_tau1 = numpyro.sample("eta_tau1", dist.Normal(eta_tau1_mean, sigma_eta_tau1))
-                eta_tau2 = numpyro.sample("eta_tau2", dist.Normal(eta_tau2_mean, sigma_eta_tau2))
+                eta_tau = numpyro.sample("eta_tau", dist.Normal(eta_tau_mean, sigma_eta_tau))
             # Or, use deterministic to set them to the universal means
             else:
                 eta_A1 = numpyro.deterministic("eta_A1", jnp.full(batch_size, eta_A1_mean))
                 eta_A2 = numpyro.deterministic("eta_A2", jnp.full(batch_size, eta_A2_mean))
-                eta_tau1 = numpyro.deterministic("eta_tau1", jnp.full(batch_size, eta_tau1_mean))
-                eta_tau2 = numpyro.deterministic("eta_tau2", jnp.full(batch_size, eta_tau2_mean))
-
+                eta_tau = numpyro.deterministic("eta_tau", jnp.full(batch_size, eta_tau_mean))
+                
             # --- Core kernel parameters (hierarchical & identified) ---
             #log_tau_drw0 = numpyro.sample("log_tau_drw0", dist.TruncatedNormal(log_tau_drw0_c, 2.0, low=jnp.log(10**1.5)))
             # log_tau_drw0 = numpyro.sample("log_tau_drw0", dist.TruncatedNormal(log_tau_drw0_c, 1.5, low=jnp.log(10**1.5)))
@@ -195,18 +191,10 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_
             # log_sigma_hat0 = numpyro.deterministic("log_sigma_hat0", log_sigma0 - 0.5 * log_tau_drw0)
 
             log_tau_drw0_high = 10.0 * jnp.log(10)
-            if inject_fake:
-                log_tau_drw0_low = 0.0
-            else:
-                log_tau_drw0_low = 1.5 * jnp.log(10)
 
-            if sigma_tau_uniform:
-                print("[INFO] Using Uniform prior on log_sigma0 and log_tau_drw0.")
-                log_tau_drw0 = numpyro.sample("log_tau_drw0", dist.Uniform(log_tau_drw0_low, log_tau_drw0_high))
-            else:
-                print("[INFO] Using Normal prior on log_sigma0 and log_tau_drw0.")
-                log_tau_drw0 = numpyro.sample("log_tau_drw0",
-                    dist.TruncatedNormal(log_tau_drw0_c, 1.2*jnp.log(10), low=log_tau_drw0_low, high=log_tau_drw0_high))
+            print("[INFO] Using Normal prior on log_sigma0 and log_tau_drw0.")
+            log_tau_drw0 = numpyro.sample("log_tau_drw0",
+                dist.TruncatedNormal(log_tau_drw0_c, 1.2*jnp.log(10), low=0.0, high=log_tau_drw0_high))
             
             if couple_sigma_tau:
                 # Coupled prior: log_sigma depends on log_tau
@@ -326,8 +314,7 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_
                 # power law
                 "eta_A1": eta_A1[i],
                 "eta_A2": eta_A2[i],
-                "eta_tau1": eta_tau1[i],
-                "eta_tau2": eta_tau2[i],
+                "eta_tau": eta_tau[i],
                 "eta_break": eta_break,
                 "lam_s": lam_s,
             }
@@ -634,7 +621,7 @@ if __name__ == '__main__':
     parser.add_argument("--bwb", action="store_true", help="Use BWB model.")
     parser.add_argument("--d_eta", action="store_true", help="Vary eta for each quasar with prior.")
     parser.add_argument("--max_tree_depth", type=int, default=8, help="Max tree depth param for NUTS sampler.")
-    parser.add_argument("--load_sample_file", action="store_true", help="Load samples from previously ran job.")
+    parser.add_argument("--resume", action="store_true", help="Load samples from previously ran job.")
     parser.add_argument("--disable_poly1", action="store_true", help="Disable Mean function detrending.")
     parser.add_argument("--jax_trace", action="store_true", help="Enable jax tracing.")
     parser.add_argument("--rf_length_cut", type=int, default=-1, help="Cut light curves to same rest-frame length.")
@@ -648,6 +635,7 @@ if __name__ == '__main__':
     parser.add_argument("--disable_plot_psd", action="store_true", default=False, help="Disable PSD plot generation.")
     parser.add_argument("--inject_random_fake_etas", action="store_true", default=False, help="Inject random alpha_sigma and beta_tau for fake light curves.")
     parser.add_argument("--sample_lams", action="store_true", default=False, help="Sample lam_s and eta_break parameters.")
+    parser.add_argument("--drw", action="store_true", default=False, help="Use DRW model (default: False).")
     args = parser.parse_args()
     print("Args: ", args)
 
@@ -701,8 +689,12 @@ if __name__ == '__main__':
         print(f"Object {obj['object_id']}: f_host_5100 = {obj['f_host_5100']}")
 
     #objs = populate_sdss_fields(objs)
-    print(f"\033[93m[WARNING] Using LMC model.\033[0m")
-    Model = MyMultiVarModel_BLR_LMC
+
+    if args.drw:
+        Model = MyMultiVarModel
+    else:
+        print(f"\033[93m[WARNING] Using LMC model.\033[0m")
+        Model = MyMultiVarModel_BLR_LMC
 
     if args.inject_random_fake_etas:
         # Randomize alpha_sigma and beta_tau for each run
@@ -806,7 +798,7 @@ if __name__ == '__main__':
         chain_method="parallel",
     )
 
-    if args.load_sample_file:
+    if args.resume:
         logging.warning(f"Loading samples from saved file")
         samples_flat = load_all_samples_from_hdf5()
     else: # run MCMC sampler
@@ -876,7 +868,7 @@ if __name__ == '__main__':
             if not args.disable_corner_plot:
                 #plot_posterior(obj_flat_samples_flatten_per_band, obj)
                 plot_posterior_fast(obj_flat_samples_flatten_per_band, obj)
-            plot_broken_power_law(obj_flat_samples, obj)
+            #plot_broken_power_law(obj_flat_samples, obj)
             #dump_mcmc_diagnostics(mcmc, obj, i, len(batch_data))
         # If inject_fake, compare injected vs recovered sigma and tau
         if args.inject_fake:

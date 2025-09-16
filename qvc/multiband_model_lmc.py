@@ -283,44 +283,54 @@ class MyMultiVarModel_BLR_LMC(MultiVarModel):
         return mean_per_obs
     
     def _build_gp(self, params):
+        # Amplitudes (per band)
         log_sigma_band     = self.my_amp_transform(params)      # (B,)
         log_sigma_band_blr = self.my_amp_transform_blr(params)  # (B,)
 
-        # NEW: get centers (Q,) and gate (B,Q) from the transform
-        centers_log_tau, gate = self.my_tau_drw_transform(params)
-        #jax.debug.print("centers_log_tau = {}", centers_log_tau)
+        # --- Per-band ln τ (observed-frame) from the simple power law ---
+        # my_tau_drw_transform now returns (B,) = ln τ_band
+        log_tau_band = self.my_tau_drw_transform(params)        # (B,)
 
-        # basic plumbing (unchanged)
+        # Basic plumbing (unchanged)
         t, band = self.X
         t_center = jnp.mean(t); t_std = jnp.std(t)
-        means = partial(MyMultiVarModel_BLR_LMC.mean_func, self.zero_mean,
-                        log_sigma_band.shape[0], t_center, t_std, params)
+        means = partial(
+            MyMultiVarModel_BLR_LMC.mean_func,
+            self.zero_mean,
+            log_sigma_band.shape[0],   # nBand
+            t_center,
+            t_std,
+            params
+        )
         diags = self.diag + (jnp.exp(params["log_jitter"]) ** 2)[band] if self.has_jitter else self.diag
 
-        # per-band disk lags (unchanged)
+        # Per-band disk lags (unchanged)
         x_b   = jnp.log(self.lam_rf / 2500.0)
         x_bar = jnp.mean(x_b)
         lag0  = params["lag0_tilde"] * jnp.exp(-params["lag_beta"] * x_bar)
-        lag_disk = lag0 * (self.lam_rf / 2500.0) ** params["lag_beta"]
+        lag_disk = lag0 * (self.lam_rf / 2500.0) ** params["lag_beta"]   # (B,)
 
+        # ----- LMC with Q = B (identity gate) -----
         B = log_sigma_band.size
-        Q = centers_log_tau.shape[0]
+        Q = B
+        gate = jax.nn.one_hot(jnp.arange(B), Q, dtype=log_sigma_band.dtype)  # (B,Q) = identity
 
         # Loadings: diagonal per-band amplitude × gate
         a_cont = jnp.exp(log_sigma_band)[:, None]     * gate   # (B,Q)
         a_blr  = jnp.exp(log_sigma_band_blr)[:, None] * gate   # (B,Q)
 
-        # Latent timescales
-        tau_latents = jnp.exp(centers_log_tau)                # (Q,)
+        # Latent timescales (Q,)
+        tau_latents = jnp.exp(log_tau_band)  # (Q,)
 
-        # Optional BWB term (use same gate)
+        # Optional BWB term (reuse same gate)
         use_bwb = bool(self.use_bwb)
         if use_bwb:
-            base  = params["bwb_alpha"] * jnp.exp(2.0 * log_sigma_band)  # (B,)
-            q_bwb = base[:, None] * gate                                 # (B,Q)  ← use the same gate
+            base  = params["bwb_alpha"] * jnp.exp(2.0 * log_sigma_band)    # (B,)
+            q_bwb = base[:, None] * gate                                   # (B,Q)
         else:
             q_bwb = None
 
+        # Build QS-LMC kernel
         kernel = ContiBLR_LMC_QS(
             tau_latents=tau_latents,
             a_cont=a_cont, a_blr=a_blr,
@@ -465,33 +475,18 @@ class MyMultiVarModel_BLR_LMC(MultiVarModel):
 
     #     return centers_log_tau, gate
 
-    def my_tau_drw_transform(self, params):  # Q=B, identity gating
+    def my_tau_drw_transform(self, params: dict[str, JAXArray]) -> JAXArray:
         """
-        Q = B with identity gating (each band gets its own latent).
-        Returns
-        -------
-        centers_log_tau : (B,)   per-band ln τ (observed-frame pivot, RF λ-dependence)
-        gate            : (B,B)  identity responsibilities (band b ↔ latent q=b)
+        Returns:
+        centers_log_tau : (Q,)   natural-log τ centers (observed-frame)
+        gate            : (B,Q)  band→latent responsibilities
         """
-        lam_rf = self.lam_rf                      # (B,)
-        B = lam_rf.shape[0]
+        # ----- Build per-band log τ in NATURAL log -----
+        lam_ref = 2500.0  # Å (rest frame)
+        x = jnp.log(self.lam_rf / lam_ref)  # natural-log wavelength ratio
 
-        # --- parameters for τ(λ) law (already constrained in your model) ---
-        eta_tau1  = params["eta_tau1"]
-        eta_tau2  = params["eta_tau2"]
-        lam_s     = params["lam_s"]
-        eta_break = params["eta_break"]
-        log_tau0  = params["log_tau_drw0"]       # observed-frame pivot (ln)
-
-        # --- per-band centers (shape: B,) ---
-        centers_log_tau = (
-            log_tau0 + jnp.log(10.0) * log_broken_pl(lam_rf, lam_s, eta_tau1, eta_tau2, eta_break)
-        )
-
-        # --- identity gate (shape: B,B), constant w.r.t. params ---
-        gate = jnp.eye(B, dtype=centers_log_tau.dtype)
-
-        return centers_log_tau, gate
+        # observed-frame baseline log_tau_drw0 already ~centered at (1+z)
+        return params["log_tau_drw0"] + params["eta_tau"] * x   # (B,)
 
     def my_amp_transform(self, params: dict[str, JAXArray]) -> JAXArray:
         """

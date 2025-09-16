@@ -200,7 +200,7 @@ def clean_grouped_samples(samples_grouped, obj_index, batch_data_len):
     - Universal params kept as-is (flattened over chains)
     - Object-specific params indexed [:, :, i]
     """
-    universal_keys = ['eta_A1', 'eta_A2', 'eta_tau1', 'eta_tau2', 'eta_break', 'lam_s']
+    universal_keys = ['eta_A1', 'eta_A2', 'eta_tau', 'eta_tau2', 'eta_break', 'lam_s']
 
     # Print shapes for inspection
     for k, v in samples_grouped.items():
@@ -559,8 +559,7 @@ def process_samples(flat_samples, data, percentiles=[16, 50, 84], bands=['u', 'g
     log_tau_drw0 = np.asarray(flat_samples["log_tau_drw0"])
     eta_A1 = np.asarray(flat_samples["eta_A1"])
     eta_A2 = np.asarray(flat_samples["eta_A2"])
-    eta_tau1 = np.asarray(flat_samples["eta_tau1"])
-    eta_tau2 = np.asarray(flat_samples["eta_tau2"])
+    eta_tau = np.asarray(flat_samples["eta_tau"])
     eta_break = np.asarray(flat_samples["eta_break"])
     lambda_ref = 2500
     lam_s = np.asarray(flat_samples["lam_s"])
@@ -574,8 +573,10 @@ def process_samples(flat_samples, data, percentiles=[16, 50, 84], bands=['u', 'g
 
     log_tau_band = []
     for band in bands:
-        lam_eff = lambda_pivot[band] / (1 + data['z'])
-        val = log_tau_drw0 / np.log(10) - np.log10(1 + data['z']) + log_broken_pl(lam_eff, lam_s, eta_tau1, eta_tau2, eta_break)
+        lam_eff = lambda_pivot[band] / (1 + data['z'])   # rest-frame effective λ (Å)
+        # log10 τ_RF = log10 τ0_obs - log10(1+z) + eta_tau * log10(λ_RF / λ_ref)
+        val = (log_tau_drw0 / np.log(10)) - np.log10(1 + data['z']) \
+            + flat_samples["eta_tau"] * np.log10(lam_eff / lambda_ref)
         log_tau_band.append(val)
     log_tau_band = np.array(log_tau_band).T
 
@@ -601,7 +602,8 @@ def process_samples(flat_samples, data, percentiles=[16, 50, 84], bands=['u', 'g
     result['log_sigma_UV'], result['log_sigma_UV_err'] = sym_percentile(samples_log_sigma_UV)
 
     # log_tau_UV_RF
-    samples_log_tau_UV_RF = flat_samples["log_tau_drw0"] / np.log(10) - np.log10(1 + data['z']) + log_broken_pl(lambda_ref, lam_s, eta_tau1, eta_tau2, eta_break)
+    samples_log_tau_UV_RF = (flat_samples["log_tau_drw0"] / np.log(10)) - np.log10(1 + data['z']) \
+                                + flat_samples["eta_tau"] * 0.0  # since λ=λ_ref
     result['log_tau_UV_RF'], result['log_tau_UV_RF_err'] = sym_percentile(samples_log_tau_UV_RF)
 
     # Compute covariance between log_sigma_UV and log_tau_UV_RF
@@ -937,8 +939,7 @@ def summarize_fake_injected_vs_recovered(obj, samples, diagnostics):
 
     eta_A1, eta_A1_p16, eta_A1_p84, eta_A1_in_1sigma, eta_A1_in_2sigma, eta_A1_rhat = summarize_param('eta_A1', alpha_sigma, diagnostics)
     eta_A2, eta_A2_p16, eta_A2_p84, eta_A2_in_1sigma, eta_A2_in_2sigma, eta_A2_rhat = summarize_param('eta_A2', alpha_sigma, diagnostics)
-    eta_tau1, eta_tau1_p16, eta_tau1_p84, eta_tau1_in_1sigma, eta_tau1_in_2sigma, eta_tau1_rhat = summarize_param('eta_tau1', beta_tau, diagnostics)
-    eta_tau2, eta_tau2_p16, eta_tau2_p84, eta_tau2_in_1sigma, eta_tau2_in_2sigma, eta_tau2_rhat = summarize_param('eta_tau2', beta_tau, diagnostics)
+    eta_tau, eta_tau_p16, eta_tau_p84, eta_tau_in_1sigma, eta_tau_in_2sigma, eta_tau_rhat = summarize_param('eta_tau', beta_tau, diagnostics)
 
     print(
         f"[FAKE INJECT] Object {obj['object_id']}:\n"
@@ -953,8 +954,7 @@ def summarize_fake_injected_vs_recovered(obj, samples, diagnostics):
         f"  alpha_sigma: injected = {alpha_sigma:.3f}, "
         f"eta_A1 = {colorize(f'{eta_A1:.3f}', eta_A1_in_1sigma, eta_A1_in_2sigma)} ± {(eta_A1_p84-eta_A1_p16)/2:.3f} (in 1σ: {eta_A1_in_1sigma}, in 2σ: {eta_A1_in_2sigma}, rhat={eta_A1_rhat:.3f}), "
         f"eta_A2 = {colorize(f'{eta_A2:.3f}', eta_A2_in_1sigma, eta_A2_in_2sigma)} ± {(eta_A2_p84-eta_A2_p16)/2:.3f} (in 1σ: {eta_A2_in_1sigma}, in 2σ: {eta_A2_in_2sigma}, rhat={eta_A2_rhat:.3f})\n"
-        f"  beta_tau: injected = {beta_tau:.3f}, "
-        f"eta_tau1 = {colorize(f'{eta_tau1:.3f}', eta_tau1_in_1sigma, eta_tau1_in_2sigma)} ± {(eta_tau1_p84-eta_tau1_p16)/2:.3f} (in 1σ: {eta_tau1_in_1sigma}, in 2σ: {eta_tau1_in_2sigma}, rhat={eta_tau1_rhat:.3f}), "
-        f"eta_tau2 = {colorize(f'{eta_tau2:.3f}', eta_tau2_in_1sigma, eta_tau2_in_2sigma)} ± {(eta_tau2_p84-eta_tau2_p16)/2:.3f} (in 1σ: {eta_tau2_in_1sigma}, in 2σ: {eta_tau2_in_2sigma}, rhat={eta_tau2_rhat:.3f})"
+        f"  eta_tau: injected = {beta_tau:.3f}, "
+        f"eta_tau = {colorize(f'{eta_tau:.3f}', eta_tau_in_1sigma, eta_tau_in_2sigma)} ± {(eta_tau_p84-eta_tau_p16)/2:.3f} (in 1σ: {eta_tau_in_1sigma}, in 2σ: {eta_tau_in_2sigma}, rhat={eta_tau_rhat:.3f}), "
     )
 
