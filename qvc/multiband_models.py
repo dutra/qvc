@@ -375,21 +375,18 @@ class MyMultiVarModel(MultiVarModel):
     
     def my_tau_drw_transform(self, params: dict[str, JAXArray]) -> JAXArray:
         #log_tau_band = params["log_tau_drw0"] + jnp.log(10) * log_broken_pl(self.lam_rf, lam_s, eta_tau1, eta_tau2, eta_break)
-        lam_ref = 2500.0  # Å (rest frame)
-        x = jnp.log(self.lam_rf / lam_ref)  # natural-log wavelength ratio
-
+        eta_tau = params["eta_tau"]
+        lam_s = params["lam_s"]
         # observed-frame baseline log_tau_drw0 already ~centered at (1+z)
-        log_tau_band = params["log_tau_drw0"] + params["eta_tau"] * x   # (B,)
+        log_tau_band = params["log_tau_drw0"] + jnp.log(10) * log_single_pl(self.lam_rf, lam_s, eta_tau)
         return jnp.mean(log_tau_band)
 
     def my_amp_transform(self, params: dict[str, JAXArray]) -> JAXArray:
         """
         Transform the amplitude parameters for the model.
         """
-        eta_A1 = params["eta_A1"]
-        eta_A2 = params["eta_A2"]
+        eta_A = params["eta_A"]
         lam_s = params["lam_s"]
-        eta_break = params["eta_break"]
 
         # Host dilution: apply per-band correction
         # Host galaxy contribution modeled as a power-law in wavelength
@@ -398,7 +395,7 @@ class MyMultiVarModel(MultiVarModel):
         log_dilution = jnp.log(dilution_factor)
 
         # Power-law scaling across rest-frame wavelength
-        log_sigma_band = params["log_sigma0"] + log_dilution + jnp.log(10) * log_broken_pl(self.lam_rf, lam_s, eta_A1, eta_A2, eta_break)
+        log_sigma_band = params["log_sigma0"] + log_dilution + jnp.log(10) * log_single_pl(self.lam_rf, lam_s, eta_A)
 
         return log_sigma_band
     

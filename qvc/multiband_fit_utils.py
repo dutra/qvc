@@ -200,7 +200,7 @@ def clean_grouped_samples(samples_grouped, obj_index, batch_data_len):
     - Universal params kept as-is (flattened over chains)
     - Object-specific params indexed [:, :, i]
     """
-    universal_keys = ['eta_A1', 'eta_A2', 'eta_tau', 'eta_tau2', 'eta_break', 'lam_s']
+    universal_keys = ['eta_A', 'eta_A2', 'eta_tau', 'eta_tau2', 'eta_break', 'lam_s']
 
     # Print shapes for inspection
     for k, v in samples_grouped.items():
@@ -499,6 +499,15 @@ def save_quasar_list_hdf5(quasars, ignored_keys=None, size_threshold=1024):
 
     logging.info("All quasars saved successfully.")
     
+def log_single_pl(lam, lam_s, d):
+    """
+    Simple power-law, *pivot-normalized*:
+      returns log10 f(λ) - log10 f(λ_piv).
+    This decouples the intercept from lam_s.
+    """
+    lam = jnp.asarray(lam)
+    lam_s = jnp.asarray(lam_s)
+    return d * (jnp.log10(lam) - jnp.log10(lam_s))
 
 def log_broken_pl(lam, lam_s, d1, d2, ds=0.1, lam_piv=2500.0):
     """
@@ -508,7 +517,6 @@ def log_broken_pl(lam, lam_s, d1, d2, ds=0.1, lam_piv=2500.0):
     """
     lam = jnp.asarray(lam)
     lam_piv = jnp.asarray(lam_piv)
-
     def _core(l):
         x = l / lam_s
         delta = d2 - d1
@@ -519,6 +527,8 @@ def log_broken_pl(lam, lam_s, d1, d2, ds=0.1, lam_piv=2500.0):
         return log_f
 
     return _core(lam) - _core(lam_piv)
+
+
 
 
 def process_samples(flat_samples, data, percentiles=[16, 50, 84], bands=['u', 'g', 'r', 'i', 'z']):
@@ -557,26 +567,24 @@ def process_samples(flat_samples, data, percentiles=[16, 50, 84], bands=['u', 'g
     log_sigma_hat0 = np.asarray(flat_samples["log_sigma_hat0"])
     log_sigma0 = np.asarray(flat_samples["log_sigma0"])
     log_tau_drw0 = np.asarray(flat_samples["log_tau_drw0"])
-    eta_A1 = np.asarray(flat_samples["eta_A1"])
-    eta_A2 = np.asarray(flat_samples["eta_A2"])
+    eta_A = np.asarray(flat_samples["eta_A"])
     eta_tau = np.asarray(flat_samples["eta_tau"])
-    eta_break = np.asarray(flat_samples["eta_break"])
-    lambda_ref = 2500
+    lambda_ref = 2500.0
+
     lam_s = np.asarray(flat_samples["lam_s"])
 
     log_sigma_band = []
     for band in bands:
         lam_eff = lambda_pivot[band] / (1 + data['z'])
-        val = log_sigma0 / np.log(10) + log_broken_pl(lam_eff, lam_s, eta_A1, eta_A2, eta_break)
+        val = log_sigma0 / np.log(10) + log_single_pl(lam_eff, lam_s, eta_A)
         log_sigma_band.append(val)
     log_sigma_band = np.array(log_sigma_band).T
 
     log_tau_band = []
     for band in bands:
         lam_eff = lambda_pivot[band] / (1 + data['z'])   # rest-frame effective λ (Å)
-        # log10 τ_RF = log10 τ0_obs - log10(1+z) + eta_tau * log10(λ_RF / λ_ref)
-        val = (log_tau_drw0 / np.log(10)) - np.log10(1 + data['z']) \
-            + flat_samples["eta_tau"] * np.log10(lam_eff / lambda_ref)
+        # log10 τ_RF = log10 τ0_obs - log10(1+z) + eta_tau * (log10(λ_RF) - log10(λ_ref))
+        val = (log_tau_drw0 / np.log(10)) - np.log10(1 + data['z']) + log_single_pl(lam_eff, lam_s, eta_tau)
         log_tau_band.append(val)
     log_tau_band = np.array(log_tau_band).T
 
@@ -593,23 +601,22 @@ def process_samples(flat_samples, data, percentiles=[16, 50, 84], bands=['u', 'g
     dilution_factor = 1.0 / (1.0 + host_frac)
     log_dilution = jnp.log(dilution_factor)
 
-    # log_sigma_UV_diluted
-    samples_log_sigma_UV_diluted = (flat_samples["log_sigma0"] - log_dilution) / np.log(10) + log_broken_pl(lambda_ref, lam_s, eta_A1, eta_A2, eta_break)
-    result['log_sigma_UV_diluted'], result['log_sigma_UV_diluted_err'] = sym_percentile(samples_log_sigma_UV_diluted)
+    # # log_sigma_UV_diluted
+    # samples_log_sigma_UV_diluted = (flat_samples["log_sigma0"] - log_dilution) / np.log(10) + log_single_pl(lambda_ref, lam_s, eta_A, eta_A2, eta_break)
+    # result['log_sigma_UV_diluted'], result['log_sigma_UV_diluted_err'] = sym_percentile(samples_log_sigma_UV_diluted)
 
-    # log_sigma_UV
-    samples_log_sigma_UV = flat_samples["log_sigma0"] / np.log(10) + log_broken_pl(lambda_ref, lam_s, eta_A1, eta_A2, eta_break)
-    result['log_sigma_UV'], result['log_sigma_UV_err'] = sym_percentile(samples_log_sigma_UV)
+    # # log_sigma_UV
+    # samples_log_sigma_UV = flat_samples["log_sigma0"] / np.log(10) + log_broken_pl(lambda_ref, lam_s, eta_A, eta_A2, eta_break)
+    # result['log_sigma_UV'], result['log_sigma_UV_err'] = sym_percentile(samples_log_sigma_UV)
 
     # log_tau_UV_RF
-    samples_log_tau_UV_RF = (flat_samples["log_tau_drw0"] / np.log(10)) - np.log10(1 + data['z']) \
-                                + flat_samples["eta_tau"] * 0.0  # since λ=λ_ref
-    result['log_tau_UV_RF'], result['log_tau_UV_RF_err'] = sym_percentile(samples_log_tau_UV_RF)
+    # samples_log_tau_UV_RF = (log_tau_drw0 / ln 10) - log10(1+z) + log_single_pl(lambda_ref, lam_s, eta_tau)
+    # result['log_tau_UV_RF'], result['log_tau_UV_RF_err'] = sym_percentile(samples_log_tau_UV_RF)
 
     # Compute covariance between log_sigma_UV and log_tau_UV_RF
-    cov_matrix = np.cov(samples_log_sigma_UV, samples_log_tau_UV_RF)
-    cov_log_sigma_tau = cov_matrix[0, 1]
-    result['cov_log_sigma_UV_log_tau_UV_RF'] = cov_log_sigma_tau
+    #cov_matrix = np.cov(samples_log_sigma_UV, samples_log_tau_UV_RF)
+    #cov_log_sigma_tau = cov_matrix[0, 1]
+    #result['cov_log_sigma_UV_log_tau_UV_RF'] = cov_log_sigma_tau
 
     return result
 
@@ -937,8 +944,7 @@ def summarize_fake_injected_vs_recovered(obj, samples, diagnostics):
         rhat = diagnostics.get(f"{param}_rhat", np.nan)
         return median, p16, p84, in_1sigma, in_2sigma, rhat
 
-    eta_A1, eta_A1_p16, eta_A1_p84, eta_A1_in_1sigma, eta_A1_in_2sigma, eta_A1_rhat = summarize_param('eta_A1', alpha_sigma, diagnostics)
-    eta_A2, eta_A2_p16, eta_A2_p84, eta_A2_in_1sigma, eta_A2_in_2sigma, eta_A2_rhat = summarize_param('eta_A2', alpha_sigma, diagnostics)
+    eta_A, eta_A_p16, eta_A_p84, eta_A_in_1sigma, eta_A_in_2sigma, eta_A_rhat = summarize_param('eta_A', alpha_sigma, diagnostics)
     eta_tau, eta_tau_p16, eta_tau_p84, eta_tau_in_1sigma, eta_tau_in_2sigma, eta_tau_rhat = summarize_param('eta_tau', beta_tau, diagnostics)
 
     print(
@@ -952,9 +958,8 @@ def summarize_fake_injected_vs_recovered(obj, samples, diagnostics):
         f"{(sigma_p84-sigma_p16)/2/np.log(10):.3f} "
         f"(in 1σ: {sigma_in_1sigma}, in 2σ: {sigma_in_2sigma})\n"
         f"  alpha_sigma: injected = {alpha_sigma:.3f}, "
-        f"eta_A1 = {colorize(f'{eta_A1:.3f}', eta_A1_in_1sigma, eta_A1_in_2sigma)} ± {(eta_A1_p84-eta_A1_p16)/2:.3f} (in 1σ: {eta_A1_in_1sigma}, in 2σ: {eta_A1_in_2sigma}, rhat={eta_A1_rhat:.3f}), "
-        f"eta_A2 = {colorize(f'{eta_A2:.3f}', eta_A2_in_1sigma, eta_A2_in_2sigma)} ± {(eta_A2_p84-eta_A2_p16)/2:.3f} (in 1σ: {eta_A2_in_1sigma}, in 2σ: {eta_A2_in_2sigma}, rhat={eta_A2_rhat:.3f})\n"
-        f"  eta_tau: injected = {beta_tau:.3f}, "
+        f"eta_A = {colorize(f'{eta_A:.3f}', eta_A_in_1sigma, eta_A_in_2sigma)} ± {(eta_A_p84-eta_A_p16)/2:.3f} (in 1σ: {eta_A_in_1sigma}, in 2σ: {eta_A_in_2sigma}, rhat={eta_A_rhat:.3f}),\n"
+        f"  beta_tau: injected = {beta_tau:.3f}, "
         f"eta_tau = {colorize(f'{eta_tau:.3f}', eta_tau_in_1sigma, eta_tau_in_2sigma)} ± {(eta_tau_p84-eta_tau_p16)/2:.3f} (in 1σ: {eta_tau_in_1sigma}, in 2σ: {eta_tau_in_2sigma}, rhat={eta_tau_rhat:.3f}), "
     )
 
