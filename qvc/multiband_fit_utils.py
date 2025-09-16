@@ -500,25 +500,26 @@ def save_quasar_list_hdf5(quasars, ignored_keys=None, size_threshold=1024):
     logging.info("All quasars saved successfully.")
     
 
-def log_broken_pl(lam, lam_s, d1, d2, ds=0.1):
+def log_broken_pl(lam, lam_s, d1, d2, ds=0.1, lam_piv=2500.0):
     """
-    Log10 of a smooth broken power-law, normalized to 0 at lam_s.
-    Slopes approach d1 for lam << lam_s and d2 for lam >> lam_s.
-    
-    ds: smoothness control — larger ds = smoother transition,
-        smaller ds = sharper transition.
+    Log10 smooth broken power-law, *pivot-normalized*:
+      returns log10 f(λ) - log10 f(λ_piv).
+    This decouples the intercept from lam_s.
     """
-    x = lam / lam_s
-    delta = d2 - d1
+    lam = jnp.asarray(lam)
+    lam_piv = jnp.asarray(lam_piv)
 
-    # Use exponent 1/ds so larger ds => smoother
-    smooth_exp = 1.0 / ds
-    log10_1px = jnp.log1p(x**smooth_exp) / jnp.log(10.0)
+    def _core(l):
+        x = l / lam_s
+        delta = d2 - d1
+        smooth_exp = 1.0 / ds
+        log10_1px = jnp.log1p(x**smooth_exp) / jnp.log(10.0)
+        # 0 at λ = λ_s:
+        log_f = d1 * jnp.log10(x) + (delta / smooth_exp) * (log10_1px - jnp.log10(2.0))
+        return log_f
 
-    log_f = d1 * jnp.log10(x) + (delta / smooth_exp) * log10_1px
-    log_f -= (delta / smooth_exp) * jnp.log10(2.0)  # normalize to 0 at lam_s
+    return _core(lam) - _core(lam_piv)
 
-    return log_f
 
 def process_samples(flat_samples, data, percentiles=[16, 50, 84], bands=['u', 'g', 'r', 'i', 'z']):
     """

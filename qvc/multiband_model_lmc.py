@@ -246,10 +246,6 @@ class MyMultiVarModel_BLR_LMC(MultiVarModel):
     z: float
     lam_rf: JAXArray
     use_bwb: bool
-    q_groups: int
-    q_quantiles: Sequence[float] | None
-    q_min_sep_dex: float
-    q_min_group_frac: float
 
     def __init__(
         self,
@@ -265,10 +261,6 @@ class MyMultiVarModel_BLR_LMC(MultiVarModel):
         self.z = kwargs["z"]
         self.lam_rf = kwargs["lam_rf"]
         self.use_bwb = kwargs["use_bwb"]
-        self.q_groups = kwargs["q_groups"] # 1, 2 or 3
-        self.q_quantiles       = kwargs.get("q_quantiles", None)         # e.g., (0.10,0.90) or (0.10,0.50,0.90)
-        self.q_min_sep_dex     = kwargs.get("q_min_sep_dex", 0.10)      # ~0.10 dex minimum separation
-        self.q_min_group_frac  = kwargs.get("q_min_group_frac", 0.20)  # ≥20% of weight per group
 
 
     @staticmethod
@@ -416,63 +408,90 @@ class MyMultiVarModel_BLR_LMC(MultiVarModel):
     #         # Q=3: 5th, 50th, 95th percentiles
     #         return weighted_quantiles(log_tau_band, band_w, (0.05, 0.50, 0.95))
 
-    def my_tau_drw_transform(
-        self,
-        params,
-        cluster_in_rest_frame: bool = True,
-        gating_basis: str = "lambda",   # "tau" (current behavior) or "lambda"
-    ):
+    # def my_tau_drw_transform(
+    #     self,
+    #     params,
+    #     cluster_in_rest_frame: bool = True,
+    #     gating_basis: str = "lambda",   # "tau" (current behavior) or "lambda"
+    # ):
+    #     """
+    #     Hard-percentile gating that's stable for NUTS:
+    #     - Gate bands by *fixed* wavelength quantile bins (parameter-independent).
+    #     - Set centers by evaluating the τ(λ) law at the mid-quantile wavelengths.
+    #     Returns:
+    #     centers_log_tau : (Q,)   ln τ at fixed λ-quantile midpoints (observed frame)
+    #     gate            : (B,Q)  one-hot responsibilities (fixed by λ)
+    #     """
+    #     assert gating_basis == "lambda", "This hard-gating variant supports 'lambda' only."
+
+    #     # --- Inputs & sizes ---
+    #     lam_rf = self.lam_rf                  # (B,) rest-frame wavelengths (constant)
+    #     B      = lam_rf.shape[0]
+    #     Q      = int(self.q_groups) if hasattr(self, "q_groups") and self.q_groups else 1
+    #     dtype  = lam_rf.dtype
+
+    #     # Degenerate cases
+    #     if (B == 0) or (Q <= 1):
+    #         # Single latent: center at overall midpoint wavelength
+    #         lam_mid = jnp.quantile(lam_rf, jnp.array([0.5], dtype=dtype), interpolation="linear")[0]
+    #         eta_tau1  = params["eta_tau1"];  eta_tau2  = params["eta_tau2"]
+    #         lam_s     = params["lam_s"];     eta_break = params["eta_break"]
+    #         log_tau0  = params["log_tau_drw0"]  # observed-frame pivot (ln)
+    #         center = log_tau0 + jnp.log(10.0) * log_broken_pl(lam_mid, lam_s, eta_tau1, eta_tau2, eta_break)
+    #         gate   = jnp.ones((B, 1), dtype=dtype)
+    #         return jnp.array([center], dtype=dtype), gate
+
+    #     # --- FIXED hard bins by wavelength (parameter-independent) ---
+    #     # Use a tiny monotone jitter to break potential ties deterministically.
+    #     zeta = jnp.log(lam_rf) + 1e-9 * (jnp.arange(B, dtype=dtype) - B / 2.0)
+
+    #     # Quantile edges and bin midpoints in wavelength space
+    #     q_edges = jnp.linspace(0.0, 1.0, Q + 1, dtype=dtype)           # (Q+1,)
+    #     lam_edges = jnp.quantile(zeta, q_edges, interpolation="linear")# (Q+1,)
+    #     q_mids  = (jnp.arange(Q, dtype=dtype) + 0.5) / Q               # (Q,)
+    #     lam_mids = jnp.quantile(lam_rf, q_mids, interpolation="linear")# (Q,) fixed reps
+
+    #     # Hard one-hot gate: assign bands to bins by wavelength
+    #     bin_idx = jnp.searchsorted(lam_edges[1:-1], zeta, side="right") # (B,)
+    #     bin_idx = jnp.clip(bin_idx, 0, Q - 1)
+    #     gate    = jax.nn.one_hot(bin_idx, Q, dtype=dtype)               # (B,Q) constant wrt params
+
+    #     # --- Centers: evaluate τ(λ) law at the fixed mid-quantile wavelengths ---
+    #     eta_tau1  = params["eta_tau1"];  eta_tau2  = params["eta_tau2"]
+    #     lam_s     = params["lam_s"];     eta_break = params["eta_break"]
+    #     log_tau0  = params["log_tau_drw0"]   # observed-frame (ln)
+
+    #     centers_log_tau = log_tau0 + jnp.log(10.0) * log_broken_pl(lam_mids, lam_s, eta_tau1, eta_tau2, eta_break)  # (Q,)
+
+    #     return centers_log_tau, gate
+
+    def my_tau_drw_transform(self, params):  # Q=B, identity gating
         """
-        Hard-percentile gating that's stable for NUTS:
-        - Gate bands by *fixed* wavelength quantile bins (parameter-independent).
-        - Set centers by evaluating the τ(λ) law at the mid-quantile wavelengths.
-        Returns:
-        centers_log_tau : (Q,)   ln τ at fixed λ-quantile midpoints (observed frame)
-        gate            : (B,Q)  one-hot responsibilities (fixed by λ)
+        Q = B with identity gating (each band gets its own latent).
+        Returns
+        -------
+        centers_log_tau : (B,)   per-band ln τ (observed-frame pivot, RF λ-dependence)
+        gate            : (B,B)  identity responsibilities (band b ↔ latent q=b)
         """
-        assert gating_basis == "lambda", "This hard-gating variant supports 'lambda' only."
+        lam_rf = self.lam_rf                      # (B,)
+        B = lam_rf.shape[0]
 
-        # --- Inputs & sizes ---
-        lam_rf = self.lam_rf                  # (B,) rest-frame wavelengths (constant)
-        B      = lam_rf.shape[0]
-        Q      = int(self.q_groups) if hasattr(self, "q_groups") and self.q_groups else 1
-        dtype  = lam_rf.dtype
+        # --- parameters for τ(λ) law (already constrained in your model) ---
+        eta_tau1  = params["eta_tau1"]
+        eta_tau2  = params["eta_tau2"]
+        lam_s     = params["lam_s"]
+        eta_break = params["eta_break"]
+        log_tau0  = params["log_tau_drw0"]       # observed-frame pivot (ln)
 
-        # Degenerate cases
-        if (B == 0) or (Q <= 1):
-            # Single latent: center at overall midpoint wavelength
-            lam_mid = jnp.quantile(lam_rf, jnp.array([0.5], dtype=dtype), interpolation="linear")[0]
-            eta_tau1  = params["eta_tau1"];  eta_tau2  = params["eta_tau2"]
-            lam_s     = params["lam_s"];     eta_break = params["eta_break"]
-            log_tau0  = params["log_tau_drw0"]  # observed-frame pivot (ln)
-            center = log_tau0 + jnp.log(10.0) * log_broken_pl(lam_mid, lam_s, eta_tau1, eta_tau2, eta_break)
-            gate   = jnp.ones((B, 1), dtype=dtype)
-            return jnp.array([center], dtype=dtype), gate
+        # --- per-band centers (shape: B,) ---
+        centers_log_tau = (
+            log_tau0 + jnp.log(10.0) * log_broken_pl(lam_rf, lam_s, eta_tau1, eta_tau2, eta_break)
+        )
 
-        # --- FIXED hard bins by wavelength (parameter-independent) ---
-        # Use a tiny monotone jitter to break potential ties deterministically.
-        zeta = jnp.log(lam_rf) + 1e-9 * (jnp.arange(B, dtype=dtype) - B / 2.0)
-
-        # Quantile edges and bin midpoints in wavelength space
-        q_edges = jnp.linspace(0.0, 1.0, Q + 1, dtype=dtype)           # (Q+1,)
-        lam_edges = jnp.quantile(zeta, q_edges, interpolation="linear")# (Q+1,)
-        q_mids  = (jnp.arange(Q, dtype=dtype) + 0.5) / Q               # (Q,)
-        lam_mids = jnp.quantile(lam_rf, q_mids, interpolation="linear")# (Q,) fixed reps
-
-        # Hard one-hot gate: assign bands to bins by wavelength
-        bin_idx = jnp.searchsorted(lam_edges[1:-1], zeta, side="right") # (B,)
-        bin_idx = jnp.clip(bin_idx, 0, Q - 1)
-        gate    = jax.nn.one_hot(bin_idx, Q, dtype=dtype)               # (B,Q) constant wrt params
-
-        # --- Centers: evaluate τ(λ) law at the fixed mid-quantile wavelengths ---
-        eta_tau1  = params["eta_tau1"];  eta_tau2  = params["eta_tau2"]
-        lam_s     = params["lam_s"];     eta_break = params["eta_break"]
-        log_tau0  = params["log_tau_drw0"]   # observed-frame (ln)
-
-        centers_log_tau = log_tau0 + jnp.log(10.0) * log_broken_pl(lam_mids, lam_s, eta_tau1, eta_tau2, eta_break)  # (Q,)
+        # --- identity gate (shape: B,B), constant w.r.t. params ---
+        gate = jnp.eye(B, dtype=centers_log_tau.dtype)
 
         return centers_log_tau, gate
-
 
     def my_amp_transform(self, params: dict[str, JAXArray]) -> JAXArray:
         """
