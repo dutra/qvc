@@ -173,12 +173,13 @@ class ContiBLR_LMC_QS(qs.Wrapper):
             return g * (C @ Phi)
         return jax.vmap(tap, in_axes=(0, 0))(u_k, gamma_k).sum(axis=0)
 
-        # ---- QS state-space pieces (concat over latent blocks) ----
+    # ---- QS state-space pieces (concat over latent blocks) ----
     def design_matrix(self) -> JAXArray:
         mats = [k.design_matrix() for k in self.kernels_q]
         if self.kernels_bwb is not None:
             mats += [k.design_matrix() for k in self.kernels_bwb]
         return self._block_diag(mats)  # <- was _hstack
+
     def stationary_covariance(self) -> JAXArray:
         mats = [k.stationary_covariance() for k in self.kernels_q]
         if self.kernels_bwb is not None:
@@ -350,71 +351,6 @@ class MyMultiVarModel_BLR_LMC(MultiVarModel):
 
     def my_amp_transform_blr(self, params: dict[str, JAXArray]) -> JAXArray:
         return params["log_sigma0"] + jnp.atleast_1d(params["log_amp_delta_blr"])
-    
-    # def my_tau_drw_transform(self, params):
-    #     """
-    #     Returns:
-    #     Q=1 -> scalar log_tau_center
-    #     Q=2 -> (2,) [q05, q95]
-    #     Q=3 -> (3,) [q05, q50, q95]
-    #     Centers are weighted by per-band inverse-variance (usable bands only).
-    #     """
-    #     # --- Per-band log tau from broken power law ---
-    #     eta_tau1  = params["eta_tau1"]
-    #     eta_tau2  = params["eta_tau2"]
-    #     lam_s     = params["lam_s"]
-    #     eta_break = params["eta_break"]
-
-    #     log_tau_band = (
-    #         params["log_tau_drw0"]
-    #         + jnp.log(10.0) * log_broken_pl(self.lam_rf, lam_s, eta_tau1, eta_tau2, eta_break)
-    #     )  # (B,)
-
-    #     # --- Build per-band weights from obs inverse-variance (no boolean indexing) ---
-    #     _, b = self.X
-    #     b = b.astype(jnp.int32)
-    #     iv = jnp.where((self.yerr > 0) & (self.yerr < 100.0) & jnp.isfinite(self.yerr),
-    #                 1.0 / (self.yerr ** 2), 0.0).astype(log_tau_band.dtype)
-    #     B = log_tau_band.shape[0]
-    #     band_w = jnp.zeros(B, dtype=log_tau_band.dtype).at[b].add(iv)  # (B,)
-
-    #     # Fallback: if everything unusable, use uniform weights
-    #     total_w = band_w.sum()
-    #     band_w = jnp.where(total_w > 0, band_w, jnp.ones_like(band_w) / B)
-
-    #     # --- Weighted quantiles (JAX-friendly) ---
-    #     def weighted_quantiles(x, w, qs):
-    #         # sort by x
-    #         idx = jnp.argsort(x)
-    #         xs = x[idx]
-    #         ws = w[idx]
-    #         cws = jnp.cumsum(ws)
-    #         tot = cws[-1]
-    #         # guard tiny tot
-    #         tot = jnp.where(tot > 0, tot, 1.0)
-    #         cdf = cws / tot
-
-    #         def one_q(q):
-    #             # index of first cdf >= q
-    #             k = jnp.searchsorted(cdf, jnp.clip(q, 0.0, 1.0), side="left")
-    #             k = jnp.clip(k, 0, xs.size - 1)
-    #             return xs[k]
-
-    #         return jnp.stack([one_q(q) for q in qs])
-
-    #     # --- Centers by q_groups ---
-    #     if self.q_groups == 1:
-    #         # weighted mean (single center)
-    #         w = band_w / band_w.sum()
-    #         return jnp.sum(w * log_tau_band)
-
-    #     elif self.q_groups == 2:
-    #         # 5th and 95th percentiles
-    #         return weighted_quantiles(log_tau_band, band_w, (0.05, 0.95))
-
-    #     else:
-    #         # Q=3: 5th, 50th, 95th percentiles
-    #         return weighted_quantiles(log_tau_band, band_w, (0.05, 0.50, 0.95))
 
     def my_tau_drw_transform(
         self,
@@ -506,7 +442,7 @@ class MyMultiVarModel_BLR_LMC(MultiVarModel):
         """
         gp, _ = self._build_gp(params)
         return gp.log_probability(y=self.y)
-        
+
     @eqx.filter_jit
     def pred(
         self, params: dict[str, JAXArray], X: JAXArray

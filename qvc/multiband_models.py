@@ -337,7 +337,7 @@ class MyMultiVarModel(MultiVarModel):
         # convert to the effective lag0 used at the fixed 2500 pivot
         lag0   = params["lag0_tilde"] * jnp.exp(-params["lag_beta"] * x_bar)
 
-        lag_disk = lag0 * (self.lam_rf / 2500.0) ** params["lag_beta"]              # 【:contentReference[oaicite:2]{index=2}】
+        lag_disk = lag0 * (self.lam_rf / 2500.0) ** params["lag_beta"]
 
         kernel = ContiBLRQS(
             amp_cont=jnp.exp(log_sigma_band),
@@ -354,65 +354,23 @@ class MyMultiVarModel(MultiVarModel):
         gp = GaussianProcess(kernel, (t, band), diag=diags + 1e-6, mean=means)
         return gp, jnp.arange(t.shape[0])
 
-
     def my_lag_transform(
         self, X: JAXArray, has_lag: bool, params: dict[str, JAXArray]
     ) -> tuple[tuple[JAXArray, JAXArray], JAXArray]:
-        # if has_lag is True:
-        #     lags = params["lag0"] * (self.lam_rf / 2500.0) ** params["lag_beta"]
-        #     #lags = jnp.insert(lags, 0, 0.0)
-        # else:
-        #     nBand = params["log_amp_delta"].size + 1
-        #     lags = jnp.zeros(nBand)
-        # t, band = X
-        # # new_t = t - lags[band]
-        # # inds = jnp.argsort(new_t)
-        # # return (new_t, band), inds
         t, band = X
         return (t, band), jnp.arange(t.shape[0])
+
     def my_amp_transform_blr(self, params: dict[str, JAXArray]) -> JAXArray:
         return params["log_sigma0"] + jnp.atleast_1d(params["log_amp_delta_blr"])
     
-    # def my_tau_drw_transform(self, params: dict[str, JAXArray]) -> JAXArray:
-    #     eta_tau1 = params["eta_tau1"]
-    #     eta_tau2 = params["eta_tau2"]
-    #     lam_s = params["lam_s"]
-    #     eta_break = params["eta_break"]
-    #     log_tau_band = params["log_tau_drw0"] + jnp.log(10) * log_broken_pl(self.lam_rf, lam_s, eta_tau1, eta_tau2, eta_break)
-    #     return jnp.mean(log_tau_band)
-
-    def my_tau_drw_transform(self, params):
-        # Per-band log tau from broken power law
-        eta_tau1  = params["eta_tau1"]
-        eta_tau2  = params["eta_tau2"]
-        lam_s     = params["lam_s"]
-        eta_break = params["eta_break"]
-
-        log_tau_per_band = (
-            params["log_tau_drw0"]
-            + jnp.log(10.0) * log_broken_pl(self.lam_rf, lam_s, eta_tau1, eta_tau2, eta_break)
-        )  # (B,)
-
-        # Build weights from *usable* observations, WITHOUT boolean indexing
-        # ---------------------------------------------------------------
-        # obs -> band index vector
-        _, b = self.X  # b shape (N_obs,)
-        b = b.astype(jnp.int32)
-        #  Weight by inverse variance instead of counts -- small error bands contribute more
-        # 1. Per-observation inverse-variance weights (0 for unusable)
-        iv = jnp.where((self.yerr > 0) & (self.yerr < 100.0) & jnp.isfinite(self.yerr),
-                    1.0 / (self.yerr ** 2), 0.0).astype(log_tau_per_band.dtype)
-
-        # 2. Scatter-add inverse variance into bands
-        B = log_tau_per_band.shape[0]
-        band_iv = jnp.zeros(B, dtype=log_tau_per_band.dtype).at[b].add(iv)
-
-        # 3. Normalize
-        total = band_iv.sum()
-        weights = jnp.where(total > 0, band_iv / total, jnp.ones_like(band_iv) / B)
-
-        # Weighted mean across *usable* bands only
-        return jnp.sum(weights * log_tau_per_band)
+    def my_tau_drw_transform(self, params: dict[str, JAXArray]) -> JAXArray:
+         eta_tau1 = params["eta_tau1"]
+         eta_tau2 = params["eta_tau2"]
+         lam_s = params["lam_s"]
+         eta_break = params["eta_break"]
+         lam_rf_mean = jnp.mean(self.lam_rf)
+         log_tau_band_mean = params["log_tau_drw0"] + jnp.log(10) * log_broken_pl(lam_rf_mean, lam_s, eta_tau1, eta_tau2, eta_break)
+         return log_tau_band_mean
 
 
     def my_amp_transform(self, params: dict[str, JAXArray]) -> JAXArray:
@@ -447,6 +405,7 @@ class MyMultiVarModel(MultiVarModel):
         """
         gp, _ = self._build_gp(params)
         return gp.log_probability(y=self.y)
+
     @eqx.filter_jit
     def pred(
         self, params: dict[str, JAXArray], X: JAXArray

@@ -78,17 +78,8 @@ universal_params = (
     'eta_A1_mean','eta_A2_mean','eta_tau1_mean','eta_tau2_mean',
     'eta_break','lam_s',
     'sigma_eta_A1','sigma_eta_A2','sigma_eta_tau1','sigma_eta_tau2',
-    'log_sigma_eta_A1','log_sigma_eta_A2','log_sigma_eta_tau1','log_sigma_eta_tau2',
-    'mu_log_tau_rf','sigma_log_tau_rf','mu_log_sigma_hat0','sigma_log_sigma_hat0',
-    'delta_eta_tau', 'mu_eta_tau',
-    # LMC hypers
-    'gate_log_temp', 'lmc_sep_raw', 'lmc_sep_left_raw', 'lmc_sep_right_raw', 'lmc_span_raw',
-    'lmc_mu_raw', 'lmc_delta_raw', 'lmc_sep', 'lmc_sep_left', 'lmc_sep_right', 'lmc_span',
+    'log_sigma_eta_A1','log_sigma_eta_A2','log_sigma_eta_tau1','log_sigma_eta_tau2'
 )
-
-def inv_softplus(y):
-    # numerically stable inverse softplus
-    return jnp.where(y > 20.0, y, jnp.log(jnp.expm1(y)))
 
 def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_fake_in, log_sigma_fake_in, 
                 bwb=True, disable_poly1=False, d_eta=True, disable_lag_blr=False, free_eta_break=False,
@@ -104,31 +95,14 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_
     log_tau_drw0_c = jnp.log(10**2.5 * (1 + zs))
     log_lag_blr_c  = jnp.log(10**1.5 * (1 + zs))
 
-    # use a non‑centered parameterization to avoid Neal’s funnel
-    @handlers.reparam(config={
-        "eta_A1": LocScaleReparam(centered=0.0),
-        "eta_A2": LocScaleReparam(centered=0.0),
-        "eta_tau1": LocScaleReparam(centered=0.0),
-        "eta_tau2": LocScaleReparam(centered=0.0),
-    })
     def numpyro_joint_model():
 
         # Initialize parameters
         # Global "universal" means for eta
-        # eta_A1_mean = numpyro.sample("eta_A1_mean", dist.TruncatedNormal(-0.5, 0.4, high=0.0))
-        # eta_A2_mean = numpyro.sample("eta_A2_mean", dist.TruncatedNormal(-0.5, 0.4, high=0.0))
-        # eta_tau1_mean = numpyro.sample("eta_tau1_mean", dist.TruncatedNormal(-0.5, 0.4))
-        # eta_tau2_mean = numpyro.sample("eta_tau2_mean", dist.TruncatedNormal(0.1, 0.4, low=0.0))
-
-        # eta_A1_mean = numpyro.sample("eta_A1_mean", dist.Normal(-0.5, 0.4))
-        # eta_A2_mean = numpyro.sample("eta_A2_mean", dist.Normal(-0.5, 0.4))
-        # eta_tau1_mean = numpyro.sample("eta_tau1_mean", dist.Normal(-0.5, 0.4))
-        # eta_tau2_mean = numpyro.sample("eta_tau2_mean", dist.Normal(0.1, 0.4))
-
-        eta_A1_mean = numpyro.sample("eta_A1_mean", dist.Uniform(-1.0, 0.0))
-        eta_A2_mean = numpyro.sample("eta_A2_mean", dist.Uniform(-1.0, 0.0))
+        eta_A1_mean = numpyro.sample("eta_A1_mean", dist.Uniform(-5.0, 0.0))
+        eta_A2_mean = numpyro.deterministic("eta_A2_mean", 0.0)
         eta_tau1_mean = numpyro.sample("eta_tau1_mean", dist.Uniform(-1.0, 5.0))
-        eta_tau2_mean = numpyro.sample("eta_tau2_mean", dist.Uniform(-1.0, 5.0))
+        eta_tau2_mean = numpyro.deterministic("eta_tau2_mean", 0.0)
 
         if free_eta_break:
             print("[INFO] Free eta_break and lam_s.")
@@ -141,87 +115,6 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_
         else:
             eta_break = numpyro.deterministic("eta_break", 0.1)
             lam_s = numpyro.deterministic("lam_s", 2500.0)
-
-        # Recommended defaults:
-        # - separations are on a *raw* scale; effective sep = softplus(raw) + min_sep_ln (enforced in transform)
-        # keep warm default as prior center
-        gate_log_temp = numpyro.sample("gate_log_temp", dist.Normal(jnp.log(0.9), 0.35))
-
-        if sample_lmc_hypers:
-
-            if lmc_q_groups == 2:
-                # sample a single separation DOF around your current target (~0.35)
-                sep_soft_target_q2 = 0.35
-                lmc_sep_raw = numpyro.sample("lmc_sep_raw", dist.Normal(inv_softplus(sep_soft_target_q2), 0.6))
-                lmc_sep = jax.nn.softplus(lmc_sep_raw)
-
-                numpyro.deterministic("lmc_sep", lmc_sep)
-            elif lmc_q_groups == 3:
-                sep_left_target  = 0.30   # in ln-days (post-softplus space)
-                sep_right_target = 0.42
-
-                raw_left0  = inv_softplus(sep_left_target)
-                raw_right0 = inv_softplus(sep_right_target)
-                mu_raw0    = 0.5 * (raw_left0 + raw_right0)
-                delta0_raw = (raw_right0 - raw_left0)
-
-                numpyro.deterministic("lmc_mu_raw", mu_raw0)
-
-                # Sample ONLY the contrast, centered on the desired asymmetry
-                delta_raw = numpyro.sample("lmc_delta_raw", dist.Normal(delta0_raw, 0.5))  # 0.4–0.6 is a good range
-
-                lmc_sep_left_raw  = mu_raw0 - 0.5 * delta_raw
-                lmc_sep_right_raw = mu_raw0 + 0.5 * delta_raw
-                numpyro.deterministic("lmc_sep_left_raw",  lmc_sep_left_raw)
-                numpyro.deterministic("lmc_sep_right_raw", lmc_sep_right_raw)
-
-                # Monitor in separation space (post-softplus) for plots/debug
-                lmc_sep_left  = jax.nn.softplus(lmc_sep_left_raw)
-                lmc_sep_right = jax.nn.softplus(lmc_sep_right_raw)
-                numpyro.deterministic("lmc_sep_left",  lmc_sep_left)
-                numpyro.deterministic("lmc_sep_right", lmc_sep_right)        
-            elif (lmc_q_groups is not None) and (lmc_q_groups > 3):
-                lmc_span_raw = numpyro.sample("lmc_span_raw",
-                                              dist.Normal(0.0, 1.0))
-        else:
-            # Deterministic “priors” (fixed values). These are in RF ln-days logic, but
-            # only the raw values are set here; the transform applies min_sep_ln.
-
-            # target RF separation factor ≈ 2.5 → Δ_target = ln(2.5) ≈ 0.916 ln-days
-            # In the transform: sep = softplus(raw) + min_sep_ln, so we pick raw so that
-            # softplus(raw) ≈ 0.7 (leaves room above min_sep to avoid hard edges).
-            sep_soft_target = jnp.array(0.70)
-            raw_from_soft = jnp.log(jnp.expm1(jnp.maximum(sep_soft_target, 1e-6)))
-
-            if lmc_q_groups == 2:
-                # OLD target was effectively ~0.7 (large, forces hard split)
-                # NEW: smaller, overlaps clusters -> connected posterior
-                sep_soft_target_q2 = 0.35
-                lmc_sep_raw = inv_softplus(sep_soft_target_q2)
-                lmc_sep = jax.nn.softplus(lmc_sep_raw)
-
-                numpyro.deterministic("lmc_sep_raw", lmc_sep_raw)
-                numpyro.deterministic("lmc_sep", lmc_sep)
-            elif lmc_q_groups == 3:
-                # Slight asymmetry avoids global left↔right flips
-                sep_left_target  = 0.30
-                sep_right_target = 0.42
-
-                lmc_sep_left_raw  = inv_softplus(sep_left_target)
-                lmc_sep_right_raw = inv_softplus(sep_right_target)
-
-                lmc_sep_left  = jax.nn.softplus(lmc_sep_left_raw)
-                lmc_sep_right = jax.nn.softplus(lmc_sep_right_raw)
-
-                numpyro.deterministic("lmc_sep_left_raw",  lmc_sep_left_raw)
-                numpyro.deterministic("lmc_sep_right_raw", lmc_sep_right_raw)
-                numpyro.deterministic("lmc_sep_left",  lmc_sep_left)
-                numpyro.deterministic("lmc_sep_right", lmc_sep_right)
-            elif (lmc_q_groups is not None) and (lmc_q_groups > 3):
-                # modest total span; transform will ensure ≥ (Q−1)*min_sep_ln anyway
-                lmc_span_raw = numpyro.deterministic("lmc_span_raw", raw_from_soft)
-
-
 
         # Population-level scatter (how much objects can deviate) 
         log_sigma_eta_A1 = numpyro.sample("log_sigma_eta_A1", dist.Normal(jnp.log(0.1), 0.2))
@@ -254,12 +147,7 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_
                 eta_tau1 = numpyro.deterministic("eta_tau1", jnp.full(batch_size, eta_tau1_mean))
                 eta_tau2 = numpyro.deterministic("eta_tau2", jnp.full(batch_size, eta_tau2_mean))
 
-            # --- Core kernel parameters (hierarchical & identified) ---
-            #log_tau_drw0 = numpyro.sample("log_tau_drw0", dist.TruncatedNormal(log_tau_drw0_c, 2.0, low=jnp.log(10**1.5)))
-            # log_tau_drw0 = numpyro.sample("log_tau_drw0", dist.TruncatedNormal(log_tau_drw0_c, 1.5, low=jnp.log(10**1.5)))
-            # log_sigma0 = numpyro.sample("log_sigma0", dist.Normal(-0.8, 1.0))
-            # log_sigma_hat0 = numpyro.deterministic("log_sigma_hat0", log_sigma0 - 0.5 * log_tau_drw0)
-
+            # Core kernel parameters (hierarchical & identified)
             log_tau_drw0_high = 10.0 * jnp.log(10)
             if inject_fake:
                 log_tau_drw0_low = 0.0
@@ -344,6 +232,7 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_
                         dist.Uniform(jnp.log(0.2), jnp.log(5000.0))
                     )
 
+                # Convolution parameters (hard to constrain)
                 width_blr = numpyro.deterministic(
                     "width_blr",
                     0.2 * jnp.exp(log_tau_drw0_c)[:, None] * jnp.ones((batch_size, nBands))
@@ -395,15 +284,7 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_
                 "eta_tau1": eta_tau1[i],
                 "eta_tau2": eta_tau2[i],
                 "eta_break": eta_break,
-                "lam_s": lam_s,
-
-                # ---- LMC hypers passed to the Model (used in my_tau_drw_transform) ----
-                "gate_log_temp": gate_log_temp,
-                **({"lmc_sep_raw": lmc_sep_raw} if lmc_q_groups == 2 else {}),
-                **({"lmc_sep_left_raw":  lmc_sep_left_raw,
-                    "lmc_sep_right_raw": lmc_sep_right_raw} if lmc_q_groups == 3 else {}),
-                **({"lmc_span_raw": lmc_span_raw} if (lmc_q_groups is not None and lmc_q_groups > 3) else {}),
-
+                "lam_s": lam_s
             }
 
             m = Model(
@@ -499,84 +380,80 @@ def make_lc(Model, data, bands=['u', 'g', 'r', 'i', 'z'], inject_fake=False):
 
     # Inject fake DRW
     if inject_fake:
-        alpha_sigma = -0.5  # σ(λ) ∝ λ^α
-        beta_tau = 0.0      # τ(λ) ∝ λ^β
+        alpha_sigma = -3   # σ(λ) ∝ λ^α
+        beta_tau    = 2.0    # τ(λ) ∝ λ^β
 
-        # ---- FIX 1: build per-band arrays (B,), not per-observation ----
+        # ---- Per-band rest-frame λ (B,) and reference ----
         lam_rf_bands = np.asarray([lambda_pivot[band] for band in bands], dtype=float) / (1.0 + float(data['z']))
         lam_ref = 2500.0  # Å
 
-        # deterministic seed per object
+        # Deterministic per-object seed
         key = jax.random.PRNGKey(0)
         key = jax.random.fold_in(key, int(data['object_id']))
-        key, k_tau0, k_sig0, k_latent, k_noise = jax.random.split(key, 5)
+        key, k_tau0, k_sig0, k_eps, k_y0, k_noise = jax.random.split(key, 6)
 
         # Base logs
-        log_tau0_rf = jax.random.uniform(k_tau0, minval=0.5,  maxval=3.0)   # log10 tau_rest (d)
-        log_sigma0  = jax.random.uniform(k_sig0, minval=-1.0, maxval=0.0)   # log10 sigma (mag)
+        log_tau0_rf = jax.random.uniform(k_tau0, minval=1.5,  maxval=3.0)   # log10 τ_rest (days)
+        log_sigma0  = jax.random.uniform(k_sig0, minval=-0.5, maxval=0.0)   # log10 σ (mag)
         tau0_rf   = 10.0**float(log_tau0_rf)
         sigma0    = 10.0**float(log_sigma0)
         one_plus_z = float(1.0 + data['z'])
 
-        # Per-band target τ, σ from wavelength laws (rest-frame → observed τ)
-        tau_rf_band  = tau0_rf * (lam_rf_bands / lam_ref)**beta_tau        # (B,)
-        tau_obs_band = tau_rf_band * one_plus_z                            # (B,)
-        sigma_band   = sigma0   * (lam_rf_bands / lam_ref)**alpha_sigma    # (B,)
-
-        # Choose a latent τ to drive everyone (e.g., geometric mean of band τ)
-        tau_latent_obs = float(np.exp(np.mean(np.log(np.clip(tau_obs_band, 1e-6, None)))))
-        sigma_latent   = 1.0  # unit scale; bands will rescale
+        # Per-band target τ, σ (convert τ to observed frame)
+        tau_rf_band  = tau0_rf * (lam_rf_bands / lam_ref)**beta_tau             # (B,)
+        tau_obs_band = tau_rf_band * one_plus_z                                 # (B,)
+        sigma_band   = sigma0   * (lam_rf_bands / lam_ref)**alpha_sigma         # (B,)
 
         print(
-            f"Injecting SHARED latent for object {data['object_id']}: "
-            f"log_tau0_rf={float(log_tau0_rf):.3f}, log_sigma0={float(log_sigma0):.3f}, "
-            f"tau_latent_obs≈{tau_latent_obs:.3g} d"
+            f"Injecting OU per band for object {data['object_id']}: "
+            f"log_tau0_rf={float(log_tau0_rf):.3f}, log_sigma0={float(log_sigma0):.3f}"
         )
 
-        # Work on a time-sorted view so filtering is causal
+        # ---- Work on time-sorted view ----
         order = np.argsort(all_times)
-        times_sorted     = all_times[order]
-        mags_err_sorted  = all_magerrs[order]
-        bands_sorted     = band_idx[order]  # (N,) int indices into `bands`
+        times_sorted    = np.asarray(all_times[order], dtype=float)        # (N,)
+        magerr_sorted   = np.asarray(all_magerrs[order], dtype=float)      # (N,)
+        bands_sorted    = np.asarray(band_idx[order], dtype=int)           # (N,)
+        dt = np.diff(times_sorted, prepend=times_sorted[0])                # (N,) with dt[0]=0
 
-        # Sample ONE latent DRW on all timestamps (no measurement noise here)
-        latent = sample_drw_tinygp(
-            k_latent,
-            times_sorted,
-            tau=tau_latent_obs,
-            sigma=sigma_latent,
-            noise=1.0e-6,     # keep the latent clean; add obs noise per band later
-            mean=0.0
-        )[0]
-        latent = np.array(latent)
+        # ---- Shared Gaussian innovations ε_k ~ N(0,1) for all bands ----
+        eps = np.array(jax.random.normal(k_eps, shape=(times_sorted.size,)))  # (N,)
 
         # Allocate output
         mags_sorted = np.empty_like(times_sorted, dtype=float)
 
-        # Split keys for band-wise noise
-        uniq_bands = np.unique(np.asarray(bands_sorted))
+        # One key per band for measurement noise & initial draw
+        uniq_bands = np.unique(bands_sorted)
         noise_keys = jax.random.split(k_noise, len(uniq_bands))
+        init_keys  = jax.random.split(k_y0,    len(uniq_bands))
 
-        for bk, b in zip(noise_keys, uniq_bands):
-            b = int(b)  # ---- FIX 2: use band index to index (B,) arrays ----
-            m = (bands_sorted == b)
-            t_b = np.asarray(times_sorted[m], dtype=float)
-            x_b = np.asarray(latent[m],       dtype=float)
+        for bk, ik, b in zip(noise_keys, init_keys, uniq_bands):
+            b = int(b)
+            mask = (bands_sorted == b)
+            idx  = np.nonzero(mask)[0]
+            t_b  = times_sorted[mask]
+            e_b  = magerr_sorted[mask]
 
-            # Filter the latent to impose target τ for this band
-            y_b = exp_filter_to_tau(x_b, t_b, tau=float(tau_obs_band[b]))
+            # Exact OU recursion parameters on irregular grid for band b
+            tau_b   = float(tau_obs_band[b])
+            sigma_b = float(sigma_band[b])
 
-            # Standardize per-band and scale to target σ(λ)
-            y_b = y_b - np.mean(y_b)
-            std = np.std(y_b)
-            std = std if std > 1e-12 else 1.0
-            y_b = (y_b / std) * float(sigma_band[b])
+            dt_b = np.diff(t_b, prepend=t_b[0])           # (Nb,)
+            a_b  = np.exp(-dt_b / tau_b)                  # (Nb,)
+            q_b  = (sigma_b**2) * (1.0 - np.exp(-2.0*dt_b / tau_b))  # (Nb,)
 
-            # Add observational noise
-            eps = jax.random.normal(bk, shape=(y_b.size,))
-            y_b = y_b + np.array(eps) * mags_err_sorted[m]
+            # Initialize from stationary distribution
+            y_b = np.empty_like(t_b)
+            y_b[0] = float(jax.random.normal(ik)) * sigma_b
+            # Use the SAME eps[idx] to share the driver across bands
+            for k in range(1, y_b.size):
+                y_b[k] = a_b[k] * y_b[k-1] + np.sqrt(q_b[k]) * eps[idx[k]]
 
-            mags_sorted[m] = y_b
+            # Add per-epoch observational noise
+            eta = np.array(jax.random.normal(bk, shape=y_b.shape))
+            y_b = y_b + eta * e_b
+
+            mags_sorted[mask] = y_b
 
             print(
                 f"  band {b}: λ_rf={lam_rf_bands[b]:.0f}Å, "
@@ -680,7 +557,7 @@ def make_lc(Model, data, bands=['u', 'g', 'r', 'i', 'z'], inject_fake=False):
         't_rf_length': t_rf_length,
     }
     if inject_fake:
-        batch_dict['log_tau_fake'] = np.log(10**log_tau0_rf)
+        batch_dict['log_tau_fake'] = np.log(10**log_tau0_rf * (1 + data['z']))
         batch_dict['log_sigma_fake'] = np.log(10**log_sigma0)
         batch_dict['alpha_sigma'] = alpha_sigma
         batch_dict['beta_tau'] = beta_tau
@@ -720,7 +597,7 @@ if __name__ == '__main__':
     parser.add_argument("--couple_sigma_tau", action="store_true", default=False, help="Use coupled prior for sigma and tau.")
     parser.add_argument("--disable_lag_blr", action="store_true", default=False, help="Disable BLR lag model.")
     parser.add_argument("--sigma_tau_uniform", action="store_true", default=False, help="Use uniform priors for sigma and tau.")
-    parser.add_argument("--lmc", type=int, default=0, choices=[0, 1, 2, 3], help="Number of LMC Q groups (0 disables LMC, 1/2/3 controls Q).")
+    parser.add_argument("--lmc", type=int, default=0, help="Number of LMC Q groups (0 disables LMC, 1/2/3 controls Q).")
     parser.add_argument("--sample_lmc_hypers", action="store_true", default=False, help="Sample LMC hyperparameters instead of using fixed values.")
     parser.add_argument("--disable_plot_psd", action="store_true", default=False, help="Disable PSD plot generation.")
     parser.add_argument("--eta_tau_normal", action="store_true", default=False, help="Use uniform prior for eta_tau1 and eta_tau2.")
@@ -944,7 +821,7 @@ if __name__ == '__main__':
             plot_correlation_matrix(obj_flat_samples_flatten_per_band, obj)
             plot_all_histograms(obj_flat_samples_flatten_per_band, obj)
             if not args.disable_corner_plot:
-                #plot_posterior(obj_flat_samples_flatten_per_band, obj)
+                plot_posterior(obj_flat_samples_flatten_per_band, obj)
                 plot_posterior_fast(obj_flat_samples_flatten_per_band, obj)
             plot_broken_power_law(obj_flat_samples, obj)
             #dump_mcmc_diagnostics(mcmc, obj, i, len(batch_data))
