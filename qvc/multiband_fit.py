@@ -339,51 +339,34 @@ def make_lc(Model, data, bands=['u', 'g', 'r', 'i', 'z'], inject_fake=False, alp
         print(f"No bands for quasar {data['object_id']}, skipping.", flush=True)
         return None
 
-    # Combine data across bands
+    # --- Combine data across bands (your code) ---
     all_times = np.concatenate([times[b] for b in bands])
     all_mags = np.concatenate([mags[b] for b in bands])
     all_magerrs = np.concatenate([magerrs[b] for b in bands])
     band_idx = np.concatenate([np.full(len(times[b]), i) for i, b in enumerate(bands)])
     band_idx = band_idx.astype(np.int64, copy=False)
-    
+
     if len(all_times) == 0:
         print(f"No magnitudes for quasar {data['object_id']}, skipping.", flush=True)
         return None
 
-    # --- stable pre-sort by the kernel's coord_to_sortable: t + eps * band ---
-    band_idx = band_idx.astype(np.int64, copy=False)
+    # --- Stable pre-sort (your approach) ---
     tie_eps  = 10.0 * np.finfo(all_times.dtype).eps
     key      = all_times + band_idx.astype(all_times.dtype) * tie_eps
-    order    = np.argsort(key, kind="mergesort")   # stable
+    order    = np.argsort(key, kind="mergesort")  # stable
 
     all_times   = all_times[order]
     all_mags    = all_mags[order]
     all_magerrs = all_magerrs[order]
     band_idx    = band_idx[order]
 
-    def exp_filter_to_tau(x, t, tau):
-        """
-        First-order exponential smoother that 'slows' the shared latent x(t)
-        toward an effective time constant ~ tau (days).
-        y[i] = (1 - a_i) * y[i-1] + a_i * x[i],  a_i = 1 - exp(-Δt_i / tau)
-        """
-        if x.size == 0:
-            return x
-        y = np.empty_like(x, dtype=float)
-        y[0] = x[0]
-        dt = np.diff(t)
-        # clip to avoid under/overflow
-        a = 1.0 - np.exp(-np.clip(dt / max(tau, 1e-9), 0.0, 1e6))
-        for i in range(1, x.size):
-            y[i] = (1.0 - a[i-1]) * y[i-1] + a[i-1] * x[i]
-        return y
-
-    # Inject fake DRW
+    # --- Inject fake DRW with synchronized global driver ---
     if inject_fake:
+        # wavelength scalings
         alpha_sigma = alpha_sigma  # σ(λ) ∝ λ^α
-        beta_tau = beta_tau      # τ(λ) ∝ λ^β
+        beta_tau    = beta_tau     # τ(λ) ∝ λ^β
 
-        # ---- Per-band rest-frame λ (B,) and reference ----
+        # per-band rest-frame λ and reference
         lam_rf_bands = np.asarray([lambda_pivot[band] for band in bands], dtype=float) / (1.0 + float(data['z']))
         lam_ref = 2500.0  # Å
 
@@ -399,72 +382,67 @@ def make_lc(Model, data, bands=['u', 'g', 'r', 'i', 'z'], inject_fake=False, alp
         sigma0    = 10.0**float(log_sigma0)
         one_plus_z = float(1.0 + data['z'])
 
-        # Per-band target τ, σ (convert τ to observed frame)
-        tau_rf_band  = tau0_rf * (lam_rf_bands / lam_ref)**beta_tau             # (B,)
-        tau_obs_band = tau_rf_band * one_plus_z                                 # (B,)
-        sigma_band   = sigma0   * (lam_rf_bands / lam_ref)**alpha_sigma         # (B,)
+        # Per-band τ, σ (convert τ to observed frame)
+        tau_rf_band  = tau0_rf * (lam_rf_bands / lam_ref)**beta_tau              # (B,)
+        tau_obs_band = tau_rf_band * one_plus_z                                  # (B,)
+        sigma_band   = sigma0   * (lam_rf_bands / lam_ref)**alpha_sigma          # (B,)
 
         print(
             f"Injecting OU per band for object {data['object_id']}: "
             f"log_tau0_rf={float(log_tau0_rf):.3f}, log_sigma0={float(log_sigma0):.3f}"
         )
 
-        # ---- Work on time-sorted view ----
-        order = np.argsort(all_times)
-        times_sorted    = np.asarray(all_times[order], dtype=float)        # (N,)
-        magerr_sorted   = np.asarray(all_magerrs[order], dtype=float)      # (N,)
-        bands_sorted    = np.asarray(band_idx[order], dtype=int)           # (N,)
-        dt = np.diff(times_sorted, prepend=times_sorted[0])                # (N,) with dt[0]=0
+        # ---- Global time grid and shared driver ----
+        # all_times is already sorted by the stable key above
+        global_times = np.unique(np.asarray(all_times, dtype=float))             # (G,)
+        dt_g = np.diff(global_times, prepend=global_times[0])                    # (G,), dt_g[0]=0
 
-        # ---- Shared Gaussian innovations ε_k ~ N(0,1) for all bands ----
-        eps = np.array(jax.random.normal(k_eps, shape=(times_sorted.size,)))  # (N,)
+        # Shared Gaussian innovations for EACH global step (synchronized driver)
+        eps_g = np.array(jax.random.normal(k_eps, shape=(global_times.size,)))   # (G,)
 
-        # Allocate output
-        mags_sorted = np.empty_like(times_sorted, dtype=float)
+        # Map each sample time to its index on the global grid (exact match by construction)
+        pos_on_global = np.searchsorted(global_times, np.asarray(all_times, dtype=float))
 
-        # One key per band for measurement noise & initial draw
-        uniq_bands = np.unique(bands_sorted)
+        # Output buffer (already aligned with sorted arrays)
+        # We'll overwrite all_mags in-place
+        uniq_bands = np.unique(band_idx)
         noise_keys = jax.random.split(k_noise, len(uniq_bands))
         init_keys  = jax.random.split(k_y0,    len(uniq_bands))
 
         for bk, ik, b in zip(noise_keys, init_keys, uniq_bands):
             b = int(b)
-            mask = (bands_sorted == b)
-            idx  = np.nonzero(mask)[0]
-            t_b  = times_sorted[mask]
-            e_b  = magerr_sorted[mask]
+            mask = (band_idx == b)
+            idx_band = np.nonzero(mask)[0]                 # indices into the sorted arrays
+            pos_b = pos_on_global[mask]                    # positions on global grid for this band's obs
 
-            # Exact OU recursion parameters on irregular grid for band b
+            # OU params for this band
             tau_b   = float(tau_obs_band[b])
             sigma_b = float(sigma_band[b])
 
-            dt_b = np.diff(t_b, prepend=t_b[0])           # (Nb,)
-            a_b  = np.exp(-dt_b / tau_b)                  # (Nb,)
-            q_b  = (sigma_b**2) * (1.0 - np.exp(-2.0*dt_b / tau_b))  # (Nb,)
+            # Propagate band b on the FULL global grid using the SAME eps_g
+            y_g = np.empty_like(global_times)
+            y_g[0] = float(jax.random.normal(ik)) * sigma_b  # stationary init
 
-            # Initialize from stationary distribution
-            y_b = np.empty_like(t_b)
-            y_b[0] = float(jax.random.normal(ik)) * sigma_b
-            # Use the SAME eps[idx] to share the driver across bands
-            for k in range(1, y_b.size):
-                y_b[k] = a_b[k] * y_b[k-1] + np.sqrt(q_b[k]) * eps[idx[k]]
+            for k in range(1, global_times.size):
+                a = np.exp(-dt_g[k] / tau_b)
+                q = (sigma_b**2) * (1.0 - np.exp(-2.0 * dt_g[k] / tau_b))
+                y_g[k] = a * y_g[k-1] + np.sqrt(q) * eps_g[k]
 
-            # Add per-epoch observational noise
-            eta = np.array(jax.random.normal(bk, shape=y_b.shape))
-            y_b = y_b + eta * e_b
+            # Read out only where this band has data; add per-epoch noise
+            e_b  = np.asarray(all_magerrs[idx_band], dtype=float)
+            eta  = np.array(jax.random.normal(bk, shape=(pos_b.size,)))
+            y_b  = y_g[pos_b] + eta * e_b
 
-            mags_sorted[mask] = y_b
+            # Write back into the sorted buffer
+            all_mags[idx_band] = y_b
 
             print(
                 f"  band {b}: λ_rf={lam_rf_bands[b]:.0f}Å, "
                 f"τ_rf={tau_rf_band[b]:.3g} d, τ_obs={tau_obs_band[b]:.3g} d, "
-                f"σ={sigma_band[b]:.3g}"
+                f"σ={sigma_band[b]:.3g}, Nobs={pos_b.size}"
             )
 
-        # Undo sorting
-        inv = np.empty_like(order)
-        inv[order] = np.arange(order.size)
-        all_mags = mags_sorted[inv]
+        # NOTE: No "undo sorting" here. all_mags now matches your current sorted arrays.
         ###################################################
 
     # Remove NaNs
