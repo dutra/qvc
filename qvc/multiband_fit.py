@@ -72,7 +72,7 @@ from multiband_model_lmc import MyMultiVarModel_BLR_LMC
 # define params
 zero_mean = False
 has_jitter = True
-has_lag = True
+has_lag = False
 
 universal_params = (
     'eta_A_mean','eta_tau1_mean','eta_tau2_mean',
@@ -115,7 +115,7 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_
         # Initialize parameters
         eta_A_mean = numpyro.sample("eta_A_mean", dist.Uniform(-1.0, 0.0))
         # --- Simple power-law slope for tau(λ):  tau ∝ (λ/λ_ref)^{beta_tau} ---
-        eta_tau_mean = numpyro.sample("eta_tau_mean", dist.Uniform(-1, 5))   # broad prior near thin-disk-like
+        eta_tau_mean = numpyro.sample("eta_tau_mean", dist.Uniform(-1.0, 2.0))   # broad prior near thin-disk-like
 
         if sample_lams:
             # --- Set a global pivot wavelength lam_s (for τ(λ) and σ(λ) broken power laws) ---
@@ -141,6 +141,9 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_
         else:
             lam_s = numpyro.deterministic("lam_s", 2500.0)
                 
+        # Per-object geometric-mean pivot in Å (REST frame)
+        lam_s_obj = 10.0 ** jnp.mean(jnp.log10(lam_rfs), axis=1)   # shape (B,)
+        numpyro.deterministic("lam_s_obj", lam_s_obj)
         # Population-level scatter (how much objects can deviate) 
         log_sigma_eta_A = numpyro.sample("log_sigma_eta_A", dist.Normal(jnp.log(0.1), 0.2))
         sigma_eta_A = numpyro.deterministic("sigma_eta_A", jnp.exp(log_sigma_eta_A))
@@ -402,7 +405,7 @@ def make_lc(Model, data, bands=['u', 'g', 'r', 'i', 'z'], inject_fake=False, alp
         key, k_tau0, k_sig0, k_latent, k_noise = jax.random.split(key, 5)
 
         # Base logs
-        log_tau0_rf = jax.random.uniform(k_tau0, minval=0.5,  maxval=3.0)   # log10 tau_rest (d)
+        log_tau0_rf = jax.random.uniform(k_tau0, minval=1.5,  maxval=2.5)   # log10 tau_rest (d)
         log_sigma0  = jax.random.uniform(k_sig0, minval=-1.0, maxval=0.0)   # log10 sigma (mag)
         tau0_rf   = 10.0**float(log_tau0_rf)
         sigma0    = 10.0**float(log_sigma0)
@@ -413,10 +416,13 @@ def make_lc(Model, data, bands=['u', 'g', 'r', 'i', 'z'], inject_fake=False, alp
         tau_obs_band = tau_rf_band * one_plus_z                            # (B,)
         sigma_band   = sigma0   * (lam_rf_bands / lam_ref)**alpha_sigma    # (B,)
 
-        # Choose a latent τ to drive everyone (e.g., geometric mean of band τ)
-        tau_latent_obs = float(np.exp(np.mean(np.log(np.clip(tau_obs_band, 1e-6, None)))))
-        sigma_latent   = 1.0  # unit scale; bands will rescale
+        # Choose a latent τ at the fixed pivot λ_s = 2500 Å (rest).
+        # Observed-frame pivot τ is simply τ_rest(2500 Å) × (1+z).
+        tau_pivot_obs  = tau0_rf * (1.0 + data['z'])
 
+        # Use THIS for the single latent DRW and store THIS for comparison:
+        tau_latent_obs = tau_pivot_obs
+        sigma_latent   = 1.0  # unit scale; bands will rescale
         print(
             f"Injecting SHARED latent for object {data['object_id']}: "
             f"log_tau0_rf={float(log_tau0_rf):.3f}, log_sigma0={float(log_sigma0):.3f}, "
@@ -454,8 +460,10 @@ def make_lc(Model, data, bands=['u', 'g', 'r', 'i', 'z'], inject_fake=False, alp
             x_b = np.asarray(latent[m],       dtype=float)
 
             # Filter the latent to impose target τ for this band
-            y_b = exp_filter_to_tau(x_b, t_b, tau=float(tau_obs_band[b]))
-
+            if not np.isclose(tau_obs_band[b], tau_latent_obs, rtol=1e-3, atol=0.0):
+                y_b = exp_filter_to_tau(x_b, t_b, tau=float(tau_obs_band[b]))
+            else:
+                y_b = x_b  # avoid double-smoothing when βτ=0
             # Standardize per-band and scale to target σ(λ)
             y_b = y_b - np.mean(y_b)
             std = np.std(y_b)
@@ -570,10 +578,10 @@ def make_lc(Model, data, bands=['u', 'g', 'r', 'i', 'z'], inject_fake=False, alp
         't_rf_length': t_rf_length,
     }
     if inject_fake:
-        batch_dict['log_tau_fake'] = np.log(10**log_tau0_rf)
+        batch_dict['log_tau_fake']   = np.log(tau_latent_obs)  # natural log of observed τ at λ_s=2500 Å
         batch_dict['log_sigma_fake'] = np.log(10**log_sigma0)
-        batch_dict['alpha_sigma'] = alpha_sigma
-        batch_dict['beta_tau'] = beta_tau
+        batch_dict['alpha_sigma']    = alpha_sigma
+        batch_dict['beta_tau']       = beta_tau
     return batch_dict
 
                     
@@ -661,7 +669,9 @@ if __name__ == '__main__':
         print("[WARNING] Not using alpha_lam_csv, setting f_host_5100=0.0 for all objects.")
         for obj in objs:
             obj["f_host_5100"] = 0.0 
-
+    if args.inject_fake:
+        for obj in objs:
+            obj['f_host_5100'] = 0.0
     for obj in objs:
         print(f"Object {obj['object_id']}: f_host_5100 = {obj['f_host_5100']}")
 
@@ -680,7 +690,7 @@ if __name__ == '__main__':
         print(f"Randomized alpha_sigma={alpha_sigma:.3f}, beta_tau={beta_tau:.3f}")
     else:
         alpha_sigma = -0.5
-        beta_tau = 1.0
+        beta_tau = 0.0
         print(f"Using fixed alpha_sigma={alpha_sigma:.3f}, beta_tau={beta_tau:.3f}")
 
     # After loading objs

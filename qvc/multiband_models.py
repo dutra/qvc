@@ -85,6 +85,7 @@ class ContiBLRQS(qs.Wrapper):
     """
 
     tau_drw: float
+    tau_scale: jnp.ndarray
     width_cont: jnp.ndarray
     width_blr: jnp.ndarray
     amp_cont: jnp.ndarray
@@ -95,12 +96,13 @@ class ContiBLRQS(qs.Wrapper):
     bwb_beta: jnp.ndarray
     kernel2: qs.Kernel
 
-    def __init__(self, amp_cont, amp_blr, lag_blr, lag_disk, tau_drw, bwb_alpha, bwb_beta, width_cont, width_blr) -> None:
+    def __init__(self, amp_cont, amp_blr, lag_blr, lag_disk, tau_drw, tau_scale, bwb_alpha, bwb_beta, width_cont, width_blr) -> None:
         self.amp_cont = amp_cont
         self.amp_blr = amp_blr
         self.lag_blr = lag_blr
         self.lag_disk  = lag_disk
         self.tau_drw = tau_drw
+        self.tau_scale = tau_scale
         self.bwb_alpha = bwb_alpha
         self.bwb_beta = bwb_beta
         self.width_cont = width_cont
@@ -150,16 +152,26 @@ class ContiBLRQS(qs.Wrapper):
         return jnp.block([[P0, z01],
                           [z10, P1]])
 
-    def transition_matrix(self, X1: JAXArray, X2: JAXArray) -> JAXArray:
-        t1, _ = X1
-        t2, _ = X2
+    def transition_matrix(self, X1, X2):
+        t1, b1 = X1
+        t2, b2 = X2
         dt = t2 - t1
-        Phi0 = self._Phi0(dt)
-        Phi1 = self._Phi1(dt)
+        b1 = jnp.asarray(b1, dtype=int)
+        b2 = jnp.asarray(b2, dtype=int)
+
+        # Per-band time-scale factors from eta_tau:
+        # tau_scale[b] = 10**(eta_tau * (log10(lam_rf[b]) - log10(lam_s)))
+        s_eff = jnp.sqrt(self.tau_scale[b1] * self.tau_scale[b2])
+
+        # Use dt / s_eff in both base and squared kernels
+        Phi0 = self._Phi0(dt / s_eff)
+        Phi1 = self._Phi1(dt / s_eff)
+
         z01 = jnp.zeros((Phi0.shape[0], Phi1.shape[1]))
         z10 = jnp.zeros((Phi1.shape[0], Phi0.shape[1]))
         return jnp.block([[Phi0, z01],
-                          [z10, Phi1]])
+                        [z10, Phi1]])
+
 
     def _quadrature_nodes_weights(self, width: JAXArray):
         """
@@ -172,7 +184,7 @@ class ContiBLRQS(qs.Wrapper):
         gamma = weights  # already normalized to sum=1 for the mean
         return u, gamma
 
-    def conv_observation_model(self, t: JAXArray, lag: JAXArray, width: JAXArray) -> JAXArray:
+    def conv_observation_model(self, t: JAXArray, lag: JAXArray, width: JAXArray, b) -> JAXArray:
         """
         Causal top-hat average of the latent OU/DRW observed at time t:
 
@@ -195,17 +207,22 @@ class ContiBLRQS(qs.Wrapper):
         # Quadrature nodes/weights over u ∈ [0, width]; both are ≥ 0 and Σ_k γ_k ≈ 1.
         u_k, gamma_k = self._quadrature_nodes_weights(width)
 
+        # Per-band time-dilation factor (slows the effective decay / stretches time)
+        s = self.tau_scale[b]
+
         def tap(u, g):
             # Row vector evaluated at the earlier time t - (lag + u)
             C = self.kernel.observation_model(t - (lag + u))
             # Forward transition over +δ so the contribution decays with delay (OU: e^{-δ/τ})
-            Phi = self.kernel.transition_matrix(0.0, (lag + u))
+            # Slow down the decay by dividing the elapsed time by s.
+            Phi = self.kernel.transition_matrix(0.0, (lag + u) / s)  # <— slow down decay
             # Effective row at time t contributed by this tap
             return g * (C @ Phi)
 
         # Sum contributions of all taps; shapes: (K, m) -> (m,)
         taps = jax.vmap(tap, in_axes=(0, 0))(u_k, gamma_k)
         return taps.sum(axis=0)
+
 
 
     def observation_model(self, X: JAXArray) -> JAXArray:
@@ -217,9 +234,9 @@ class ContiBLRQS(qs.Wrapper):
         b = jnp.asarray(b, dtype=int)
 
         # Continuum at (t - lag_disk[b])
-        h_cont0 = self.conv_observation_model(t, self.lag_disk[b], self.width_cont[b])
+        h_cont0 = self.conv_observation_model(t, self.lag_disk[b], self.width_cont[b], b)
         # BLR lags behind continuum by lag_blr[b]  => total shift is lag_disk + lag_blr
-        h_blr0  = self.conv_observation_model(t, self.lag_disk[b] + self.lag_blr[b], self.width_blr[b])
+        h_blr0  = self.conv_observation_model(t, self.lag_disk[b] + self.lag_blr[b], self.width_blr[b], b)
 
         h_cont = self.amp_cont[b] * h_cont0
         h_blr  = self.amp_blr[b]  * h_blr0
@@ -338,7 +355,14 @@ class MyMultiVarModel(MultiVarModel):
         lag0   = params["lag0_tilde"] * jnp.exp(-params["lag_beta"] * x_bar)
 
         lag_disk = lag0 * (self.lam_rf / 2500.0) ** params["lag_beta"]              # 【:contentReference[oaicite:2]{index=2}】
+        # --- REST-FRAME pivot: fix lam_s to the geometric mean of the object's bands
+        lam_s_det = 10.0 ** jnp.mean(jnp.log10(self.lam_rf))   # scalar
 
+        # --- Per-band time-dilation from eta_tau using the fixed pivot
+        tau_scale = 10.0 ** (
+            params['eta_tau'] * (jnp.log10(self.lam_rf) - jnp.log10(lam_s_det))
+        )  # shape (nBands,)
+        
         kernel = ContiBLRQS(
             amp_cont=jnp.exp(log_sigma_band),
             amp_blr=jnp.exp(log_sigma_band_blr),
@@ -349,6 +373,7 @@ class MyMultiVarModel(MultiVarModel):
             bwb_beta=params["bwb_beta"],
             width_cont=params["width_cont"],
             width_blr=params["width_blr"],
+             tau_scale=tau_scale
         )
 
         gp = GaussianProcess(kernel, (t, band), diag=diags + 1e-6, mean=means)
@@ -373,13 +398,10 @@ class MyMultiVarModel(MultiVarModel):
     def my_amp_transform_blr(self, params: dict[str, JAXArray]) -> JAXArray:
         return params["log_sigma0"] + jnp.atleast_1d(params["log_amp_delta_blr"])
     
-    def my_tau_drw_transform(self, params: dict[str, JAXArray]) -> JAXArray:
-        #log_tau_band = params["log_tau_drw0"] + jnp.log(10) * log_broken_pl(self.lam_rf, lam_s, eta_tau1, eta_tau2, eta_break)
-        eta_tau = params["eta_tau"]
-        lam_s = params["lam_s"]
-        # observed-frame baseline log_tau_drw0 already ~centered at (1+z)
-        log_tau_band = params["log_tau_drw0"] + jnp.log(10) * log_single_pl(self.lam_rf, lam_s, eta_tau)
-        return jnp.mean(log_tau_band)
+    def my_tau_drw_transform(self, params):
+        # log_tau_drw0 is NATURAL log of observed-frame tau at the pivot lam_s
+        return params["log_tau_drw0"]
+
 
     def my_amp_transform(self, params: dict[str, JAXArray]) -> JAXArray:
         """
