@@ -319,7 +319,7 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_
     return numpyro_joint_model
 
 
-def make_lc(Model, data, bands=['u', 'g', 'r', 'i', 'z'], inject_fake=False):
+def make_lc(Model, data, bands=['u', 'g', 'r', 'i', 'z'], inject_fake=False, alpha_sigma=-0.5, beta_tau=0.5):
     times = data['times']
     mags = data['mags']
     magerrs = data['magerrs']
@@ -380,8 +380,8 @@ def make_lc(Model, data, bands=['u', 'g', 'r', 'i', 'z'], inject_fake=False):
 
     # Inject fake DRW
     if inject_fake:
-        alpha_sigma = -3   # σ(λ) ∝ λ^α
-        beta_tau    = 2.0    # τ(λ) ∝ λ^β
+        alpha_sigma = alpha_sigma  # σ(λ) ∝ λ^α
+        beta_tau = beta_tau      # τ(λ) ∝ λ^β
 
         # ---- Per-band rest-frame λ (B,) and reference ----
         lam_rf_bands = np.asarray([lambda_pivot[band] for band in bands], dtype=float) / (1.0 + float(data['z']))
@@ -601,6 +601,7 @@ if __name__ == '__main__':
     parser.add_argument("--sample_lmc_hypers", action="store_true", default=False, help="Sample LMC hyperparameters instead of using fixed values.")
     parser.add_argument("--disable_plot_psd", action="store_true", default=False, help="Disable PSD plot generation.")
     parser.add_argument("--eta_tau_normal", action="store_true", default=False, help="Use uniform prior for eta_tau1 and eta_tau2.")
+    parser.add_argument("--inject_random_fake_etas", action="store_true", default=False, help="Inject random alpha_sigma and beta_tau for fake light curves.")
     args = parser.parse_args()
     print("Args: ", args)
 
@@ -660,6 +661,17 @@ if __name__ == '__main__':
     else:
         Model = MyMultiVarModel
 
+    if args.inject_random_fake_etas:
+        # Randomize alpha_sigma and beta_tau for each run
+        rng = np.random.default_rng()
+        alpha_sigma = rng.uniform(-1.0, 0.0)
+        beta_tau = rng.uniform(0.0, 1.0)
+        print(f"Randomized alpha_sigma={alpha_sigma:.3f}, beta_tau={beta_tau:.3f}")
+    else:
+        alpha_sigma = -0.5
+        beta_tau = 1.0
+        print(f"Using fixed alpha_sigma={alpha_sigma:.3f}, beta_tau={beta_tau:.3f}")
+
     # After loading objs
     logging.info("--- Joint fitting ---")
     batch_data = []
@@ -669,7 +681,7 @@ if __name__ == '__main__':
         bands = ['u', 'g', 'r', 'i', 'z']
     for i, obj in enumerate(objs):
         # Prepare each object's data for the joint model
-        result = make_lc(Model, obj, bands=bands, inject_fake=args.inject_fake)
+        result = make_lc(Model, obj, bands=bands, inject_fake=args.inject_fake, alpha_sigma=alpha_sigma, beta_tau=beta_tau)
         if result is None:
             continue
         obj['i'] = i
@@ -827,58 +839,7 @@ if __name__ == '__main__':
             #dump_mcmc_diagnostics(mcmc, obj, i, len(batch_data))
         # If inject_fake, compare injected vs recovered sigma and tau
         if args.inject_fake:
-            injected_log_tau = obj['log_tau_fake']
-            injected_log_sigma = obj['log_sigma_fake']
-            # Use median of posterior for recovered values
-            recovered_log_tau = np.median(obj_flat_samples_flatten_per_band['log_tau_drw0'])
-            recovered_log_sigma = np.median(obj_flat_samples_flatten_per_band['log_sigma0'])
-
-            tau_p16, tau_p84 = np.percentile(obj_flat_samples_flatten_per_band['log_tau_drw0'], [16, 84])
-            sigma_p16, sigma_p84 = np.percentile(obj_flat_samples_flatten_per_band['log_sigma0'], [16, 84])
-            tau_in_bounds = tau_p16 <= injected_log_tau <= tau_p84
-            sigma_in_bounds = sigma_p16 <= injected_log_sigma <= sigma_p84
-
-            alpha_sigma = obj['alpha_sigma']
-            beta_tau = obj['beta_tau']
-            eta_A1 = np.median(obj_flat_samples_flatten_per_band['eta_A1'])
-            eta_A2 = np.median(obj_flat_samples_flatten_per_band['eta_A2'])
-            eta_tau1 = np.median(obj_flat_samples_flatten_per_band['eta_tau1'])
-            eta_tau2 = np.median(obj_flat_samples_flatten_per_band['eta_tau2'])
-            eta_A1_p16, eta_A1_p84 = np.percentile(obj_flat_samples_flatten_per_band['eta_A1'], [16, 84])
-            eta_A2_p16, eta_A2_p84 = np.percentile(obj_flat_samples_flatten_per_band['eta_A2'], [16, 84])
-            eta_tau1_p16, eta_tau1_p84 = np.percentile(obj_flat_samples_flatten_per_band['eta_tau1'], [16, 84])
-            eta_tau2_p16, eta_tau2_p84 = np.percentile(obj_flat_samples_flatten_per_band['eta_tau2'], [16, 84])
-            eta_A1_in_bounds = eta_A1_p16 <= alpha_sigma <= eta_A1_p84
-            eta_A2_in_bounds = eta_A2_p16 <= alpha_sigma <= eta_A2_p84
-
-            eta_tau1_in_bounds = eta_tau1_p16 <= beta_tau <= eta_tau1_p84
-            eta_tau2_in_bounds = eta_tau2_p16 <= beta_tau <= eta_tau2_p84
-            # Determine color: green if all in bounds, else red
-            all_in_bounds = all([
-                tau_in_bounds, sigma_in_bounds,
-                eta_A1_in_bounds, eta_A2_in_bounds,
-                eta_tau1_in_bounds, eta_tau2_in_bounds
-            ])
-            color = "\033[92m" if all_in_bounds else "\033[91m"
-            eta_A1_rhat = diagnostics.get('eta_A1_rhat', np.nan)
-            eta_A2_rhat = diagnostics.get('eta_A2_rhat', np.nan)
-            eta_tau1_rhat = diagnostics.get('eta_tau1_rhat', np.nan)
-            eta_tau2_rhat = diagnostics.get('eta_tau2_rhat', np.nan)
-            print(
-                f"{color}[FAKE INJECT] Object {obj['object_id']}:\n"
-                f"  log10_tau:    injected = {injected_log_tau/np.log(10):.3f}, "
-                f"recovered = {recovered_log_tau/np.log(10):.3f} ± {(tau_p84-tau_p16)/2/np.log(10):.3f} "
-                f"(16th = {tau_p16/np.log(10):.3f}, 84th = {tau_p84/np.log(10):.3f}, in bounds: {tau_in_bounds})\n"
-                f"  log10_sigma:  injected = {injected_log_sigma/np.log(10):.3f}, "
-                f"recovered = {recovered_log_sigma/np.log(10):.3f} ± {(sigma_p84-sigma_p16)/2/np.log(10):.3f} "
-                f"(16th = {sigma_p16/np.log(10):.3f}, 84th = {sigma_p84/np.log(10):.3f}, in bounds: {sigma_in_bounds})\n"
-                f"  alpha_sigma: injected = {alpha_sigma:.3f}, "
-                f"eta_A1 = {eta_A1:.3f} ± {(eta_A1_p84-eta_A1_p16)/2:.3f} (in bounds: {eta_A1_in_bounds}, rhat={eta_A1_rhat:.3f}), "
-                f"eta_A2 = {eta_A2:.3f} ± {(eta_A2_p84-eta_A2_p16)/2:.3f} (in bounds: {eta_A2_in_bounds}, rhat={eta_A2_rhat:.3f})\n"
-                f"  beta_tau: injected = {beta_tau:.3f}, "
-                f"eta_tau1 = {eta_tau1:.3f} ± {(eta_tau1_p84-eta_tau1_p16)/2:.3f} (in bounds: {eta_tau1_in_bounds}, rhat={eta_tau1_rhat:.3f}), "
-                f"eta_tau2 = {eta_tau2:.3f} ± {(eta_tau2_p84-eta_tau2_p16)/2:.3f} (in bounds: {eta_tau2_in_bounds}, rhat={eta_tau2_rhat:.3f})\033[0m"
-            )
+            summarize_fake_injected_vs_recovered(obj, obj_flat_samples_flatten_per_band, diagnostics)
         final_result_obj = obj | result | diagnostics | dict(prefix=prefix, suffix=suffix)
         results.append(final_result_obj)
         logging.info("--------------------------------------------------------------")
