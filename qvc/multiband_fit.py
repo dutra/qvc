@@ -113,9 +113,9 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_
     })
     def numpyro_joint_model():
         # Initialize parameters
-        eta_A_mean = numpyro.sample("eta_A_mean", dist.Uniform(-1.0, 0.0))
+        eta_A_mean = numpyro.sample("eta_A_mean", dist.Uniform(-5.0, 5.0))
         # --- Simple power-law slope for tau(λ):  tau ∝ (λ/λ_ref)^{beta_tau} ---
-        eta_tau_mean = numpyro.sample("eta_tau_mean", dist.Uniform(-1.0, 2.0))   # broad prior near thin-disk-like
+        eta_tau_mean = numpyro.sample("eta_tau_mean", dist.Uniform(-5.0, 5.0))   # broad prior near thin-disk-like
 
         if sample_lams:
             # --- Set a global pivot wavelength lam_s (for τ(λ) and σ(λ) broken power laws) ---
