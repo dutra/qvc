@@ -103,10 +103,15 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_
             eta_tau2_mean = numpyro.deterministic("eta_tau2_mean", 0.0)
         else:
             # Fix Yu's priors
-            eta_A1_mean = numpyro.deterministic("eta_A1_mean", -0.746)
-            eta_A2_mean = numpyro.deterministic("eta_A2_mean", -0.746)
-            eta_tau1_mean = numpyro.deterministic("eta_tau1_mean", 0.388)
-            eta_tau2_mean = numpyro.deterministic("eta_tau2_mean", 0.388)
+            #eta_A1_mean = numpyro.deterministic("eta_A1_mean", -0.746)
+            #eta_A2_mean = numpyro.deterministic("eta_A2_mean", -0.746)
+            #eta_tau1_mean = numpyro.deterministic("eta_tau1_mean", 0.388)
+            #eta_tau2_mean = numpyro.deterministic("eta_tau2_mean", 0.388)
+
+            eta_A1_mean = numpyro.sample("eta_A1_mean", dist.Normal(-0.746, 0.030))
+            eta_A2_mean = numpyro.sample("eta_A2_mean", dist.Normal(-0.746, 0.030))
+            eta_tau1_mean = numpyro.sample("eta_tau1_mean", dist.Normal(0.388, 0.083))
+            eta_tau2_mean = numpyro.sample("eta_tau2_mean", dist.Normal(0.388, 0.083))
 
         eta_break = numpyro.deterministic("eta_break", 0.1)
         lam_s = numpyro.deterministic("lam_s", 2500.0)
