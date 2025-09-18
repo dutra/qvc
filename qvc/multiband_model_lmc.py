@@ -248,9 +248,6 @@ class MyMultiVarModel_BLR_LMC(MultiVarModel):
     lam_rf: JAXArray
     use_bwb: bool
     q_groups: int
-    q_quantiles: Sequence[float] | None
-    q_min_sep_dex: float
-    q_min_group_frac: float
 
     def __init__(
         self,
@@ -267,10 +264,6 @@ class MyMultiVarModel_BLR_LMC(MultiVarModel):
         self.lam_rf = kwargs["lam_rf"]
         self.use_bwb = kwargs["use_bwb"]
         self.q_groups = kwargs["q_groups"] # 1, 2 or 3
-        self.q_quantiles       = kwargs.get("q_quantiles", None)         # e.g., (0.10,0.90) or (0.10,0.50,0.90)
-        self.q_min_sep_dex     = kwargs.get("q_min_sep_dex", 0.10)      # ~0.10 dex minimum separation
-        self.q_min_group_frac  = kwargs.get("q_min_group_frac", 0.20)  # ≥20% of weight per group
-
 
     @staticmethod
     def mean_func(
@@ -307,10 +300,7 @@ class MyMultiVarModel_BLR_LMC(MultiVarModel):
         diags = self.diag + (jnp.exp(params["log_jitter"]) ** 2)[band] if self.has_jitter else self.diag
 
         # per-band disk lags (unchanged)
-        x_b   = jnp.log(self.lam_rf / 2500.0)
-        x_bar = jnp.mean(x_b)
-        lag0  = params["lag0_tilde"] * jnp.exp(-params["lag_beta"] * x_bar)
-        lag_disk = lag0 * (self.lam_rf / 2500.0) ** params["lag_beta"]
+        lag_disk = params["lag0"] * (self.lam_rf / 2500.0) ** params["lag_beta"]
 
         B = log_sigma_band.size
         Q = centers_log_tau.shape[0]

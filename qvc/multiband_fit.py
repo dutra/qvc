@@ -192,16 +192,8 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_
                 poly1 = numpyro.sample("poly1", dist.Normal(0.0, 0.1))
 
             # Disk lags
-            #lag0 = numpyro.sample("lag0", dist.TruncatedNormal(10.0, 5.0, low=0))
-            #lag_beta = numpyro.sample("lag_beta", dist.TruncatedNormal(4/3, 0.2, low=0))
-
-            log_lag0 = numpyro.sample(
-                "log_lag0",
-                dist.TruncatedNormal(jnp.log(0.2) + log_tau_drw0, 1.0,
-                                    low=jnp.log(0.03), high=jnp.log(4_000.0))
-            )
-            lag0_tilde = numpyro.deterministic("lag0_tilde", jnp.exp(log_lag0))
-            lag_beta = numpyro.sample("lag_beta", dist.Normal(4/3, 0.2))
+            lag0 = numpyro.sample("lag0", dist.TruncatedNormal(10.0, 5.0, low=0))
+            lag_beta = numpyro.sample("lag_beta", dist.TruncatedNormal(4/3, 0.2, low=0))
 
             # Bluer when brighter (BWB) strength
             if bwb:
@@ -214,6 +206,15 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_
                 bwb_beta = numpyro.deterministic("bwb_beta", jnp.ones(batch_size))
 
         with numpyro.plate("objects", batch_size, dim=-2):
+            _log_lag_blr = numpyro.sample(
+                        "_log_lag_blr",
+                        dist.Uniform(jnp.log(2.0), jnp.log(5000.0))
+                    )
+            _log_lag_blr = jnp.reshape(_log_lag_blr, (batch_size,))
+            log_lag_blr = numpyro.deterministic(
+                "log_lag_blr",
+                jnp.broadcast_to(_log_lag_blr[..., None], (batch_size, nBands))
+            )
             with numpyro.plate("band", nBands, dim=-1):
                 # Parameters with shape [B, nBands]
                 # Means in each band
@@ -227,10 +228,6 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_
                 else:
                     print("[WARNING] BLR lag model enabled.")
                     log_amp_delta_blr = numpyro.sample("log_amp_delta_blr", dist.Normal(jnp.full(nBands, -1.0), 3.0))
-                    log_lag_blr = numpyro.sample(
-                        "log_lag_blr",
-                        dist.Uniform(jnp.log(0.2), jnp.log(5000.0))
-                    )
 
                 # Convolution parameters (hard to constrain)
                 width_blr = numpyro.deterministic(
@@ -268,8 +265,7 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_
                 "log_amp_delta_blr": log_amp_delta_blr[i],
                 "log_lag_blr": log_lag_blr[i],
                 "log_jitter": log_jitter[i],
-                #"lag0": lag0[i],
-                "lag0_tilde": lag0_tilde[i],
+                "lag0": lag0[i],
                 "lag_beta": lag_beta[i],
                 "bwb_alpha": bwb_alpha[i],
                 "bwb_beta": bwb_beta[i],
