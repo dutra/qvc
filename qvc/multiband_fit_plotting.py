@@ -932,5 +932,5 @@ def plot_recovery(results):
     save_path = os.path.join(out_dir, f"{suffix}.png")
     fig.savefig(save_path, dpi=300)
     print(f"Saved injected vs recovery sigma and tau plot to {save_path}")
-    plt.show()
+    #plt.show()
     plt.close(fig)

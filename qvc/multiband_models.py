@@ -377,9 +377,18 @@ class MyMultiVarModel(MultiVarModel):
         eta_tau1 = params["eta_tau1"]
         eta_tau2 = params["eta_tau2"]
         lam_s = params["lam_s"]
+        lam_rf_mean = jnp.mean(self.lam_rf)
         eta_break = params["eta_break"]
-        log_tau_band = params["log_tau_drw0"] + jnp.log(10) * log_broken_pl(self.lam_rf, lam_s, eta_tau1, eta_tau2, eta_break)
-        return jnp.mean(log_tau_band)
+        log_tau_band_mean = params["log_tau_drw0"] + jnp.log(10) * log_broken_pl(lam_rf_mean, lam_s, eta_tau1, eta_tau2, eta_break)
+        return log_tau_band_mean
+    
+    # def my_tau_drw_transform(self, params: dict[str, JAXArray]) -> JAXArray:
+    #     eta_tau1 = params["eta_tau1"]
+    #     eta_tau2 = params["eta_tau2"]
+    #     lam_s = params["lam_s"]
+    #     eta_break = params["eta_break"]
+    #     log_tau_band = params["log_tau_drw0"] + jnp.log(10) * log_broken_pl(self.lam_rf, lam_s, eta_tau1, eta_tau2, eta_break)
+    #     return jnp.mean(log_tau_band)
 
     def my_amp_transform(self, params: dict[str, JAXArray]) -> JAXArray:
         """
