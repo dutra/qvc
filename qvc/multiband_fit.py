@@ -61,7 +61,6 @@ from multiband_models import *
 # define params
 zero_mean = False
 has_jitter = True
-has_lag = True
 
 universal_params = (
     'eta_A1_mean','eta_A2_mean','eta_tau1_mean','eta_tau2_mean',
@@ -73,8 +72,8 @@ universal_params = (
 )
 
 def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_fake_in, log_sigma_fake_in, 
-                bwb=True, disable_poly1=False, d_eta=True, disable_lag_blr=False, wide_eta_priors=False, free_eta_break=False,
-                couple_sigma_tau=True, inject_fake=False, sigma_tau_uniform=True):
+                bwb=True, disable_poly1=False, d_eta=True, disable_lag=False, disable_lag_blr=False,
+                inject_fake=False, sigma_tau_uniform=True):
     # Precompute and capture constants in the closure so they are treated as
     # static by JAX/NumPyro. This prevents unnecessary retracing/recompilation
     # when running MCMC, as these values do not change between runs.
@@ -281,7 +280,7 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_
                 y=obj_sorted[:, 2],
                 yerr=obj_sorted[:, 3],
                 kernel=kernels.quasisep.Exp(jnp.array([1, 1])),
-                zero_mean=zero_mean, has_jitter=has_jitter, has_lag=has_lag,
+                zero_mean=zero_mean, has_jitter=has_jitter, has_lag=(not disable_lag),
                 lam_rf=lam_rfs[i], z=zs[i],
             )
             return m.log_prob(params)
@@ -506,11 +505,9 @@ if __name__ == '__main__':
     parser.add_argument('--exact_same_length', action='store_true', help="Cut light curves to exact same rest-frame length.")
     parser.add_argument("--alpha_lam_csv", type=str, default=None, help="Path to CSV file containing alpha_lam values per object.")
     parser.add_argument("--load_stone_lcs", action="store_true", default=False, help="Load Stone light curves instead of default.")
-    parser.add_argument("--free_eta_break", action="store_true", default=False, help="Allow eta_break to be a free parameter.")
-    parser.add_argument("--wide_eta_priors", action="store_true", default=False, help="Use wide priors for eta parameters.")
     parser.add_argument("--disable_corner_plot", action="store_true", default=False, help="Disable corner plot generation.")
-    parser.add_argument("--couple_sigma_tau", action="store_true", default=False, help="Use coupled prior for sigma and tau.")
     parser.add_argument("--disable_lag_blr", action="store_true", default=False, help="Disable BLR lag model.")
+    parser.add_argument("--disable_lag", action="store_true", default=False, help="Disable lag model.")
     args = parser.parse_args()
     print("Args: ", args)
 
@@ -657,9 +654,8 @@ if __name__ == '__main__':
 
     numpyro_joint_model = build_model(batch_array, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_fake, log_sigma_fake, 
                                       bwb=args.bwb, disable_poly1=args.disable_poly1, d_eta=args.d_eta,
-                                      disable_lag_blr=args.disable_lag_blr, 
-                                      free_eta_break=args.free_eta_break, wide_eta_priors=args.wide_eta_priors,
-                                      couple_sigma_tau=args.couple_sigma_tau, inject_fake=args.inject_fake, sigma_tau_uniform=True)
+                                      disable_lag_blr=args.disable_lag_blr, disable_lag=args.disable_lag,
+                                      inject_fake=args.inject_fake)
 
     nuts_kernel = NUTS(numpyro_joint_model, init_strategy=init_strategy, dense_mass=True, max_tree_depth=args.max_tree_depth)
     mcmc = MCMC(
@@ -731,7 +727,7 @@ if __name__ == '__main__':
             m = Model(
                 obj['X'], obj['y'], obj['yerr'], 
                 kernels.quasisep.Exp(jnp.array([1, 1])),
-                zero_mean=zero_mean, has_jitter=has_jitter, has_lag=has_lag,
+                zero_mean=zero_mean, has_jitter=has_jitter, has_lag=(not args.disable_lag),
                 lam_rf=obj['lam_rf'], z=obj['z']
             )
             save_combined_plot(obj_flat_samples, m, obj['X'], obj['y'], obj['yerr'], obj['band_idx'], result, bands=bands)
