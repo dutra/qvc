@@ -882,67 +882,85 @@ def resort_by_kernel_key(obj_matrix_np: np.ndarray) -> np.ndarray:
     order = np.argsort(key, kind="mergesort")  # stable
     return obj_matrix_np[order]
 
-def summarize_fake_injected_vs_recovered(obj, samples, diagnostics):
-    injected_log_tau = obj['log_tau_fake']
-    injected_log_sigma = obj['log_sigma_fake']
-    recovered_log_tau = np.median(samples['log_tau_drw0'])
-    recovered_log_sigma = np.median(samples['log_sigma0'])
+def summarize_fake_true_vs_recovered(
+    obj,
+    diagnostics,
+    compare_pairs=None,
+):
+    """
+    Parameters
+    ----------
+    obj : dict
+        Holds true (ground-truth) values, e.g. obj['alpha_sigma'], obj['log_tau_fake'] (natural log), etc.
+    samples : Mapping[str, array_like]
+        Posterior draws for recovered params, e.g. samples['eta_A1'], samples['log_tau_drw0'], ...
+    diagnostics : Mapping[str, float]
+        Diagnostics such as rhat stored under f"{param}_rhat".
+    compare_pairs : list of tuples, optional
+        Each tuple is (inj_key, rec_key) or (inj_key, rec_key, transform, label).
+        - inj_key: key in obj for true value.
+        - rec_key: key in samples for posterior draws.
+        - transform: optional function to apply to both true and recovered values for display.
+        - label: optional label for display (defaults to inj_key if not provided).
+    """
+    # ANSI colors
+    _GREEN = "\033[92m"
+    _YELLOW = "\033[93m"
+    _RED = "\033[91m"
+    _RESET = "\033[0m"
 
-    def get_bounds(arr):
-        p16, p84 = np.percentile(arr, [16, 84])
-        return p16, p84
 
-    def in_bounds(val, p16, p84):
+    def _in_bounds(val, p16, p84):
         center = 0.5 * (p16 + p84)
         half_1sigma = 0.5 * (p84 - p16)
-        half_2sigma = 2 * half_1sigma
+        half_2sigma = 2.0 * half_1sigma
         in_1sigma = (center - half_1sigma) <= val <= (center + half_1sigma)
         in_2sigma = (center - half_2sigma) <= val <= (center + half_2sigma)
-        return in_1sigma, in_2sigma
+        return in_1sigma, in_2sigma, center, half_1sigma
 
-    def colorize(val, in_1sigma, in_2sigma):
+    def _colorize(text, in_1sigma, in_2sigma):
         if in_1sigma:
-            return f"\033[92m{val}\033[0m"
+            return f"{_GREEN}{text}{_RESET}"
         elif in_2sigma:
-            return f"\033[93m{val}\033[0m"
+            return f"{_YELLOW}{text}{_RESET}"
         else:
-            return f"\033[91m{val}\033[0m"
+            return f"{_RED}{text}{_RESET}"
 
-    tau_p16, tau_p84 = get_bounds(samples['log_tau_drw0'])
-    sigma_p16, sigma_p84 = get_bounds(samples['log_sigma0'])
-    tau_in_1sigma, tau_in_2sigma = in_bounds(injected_log_tau, tau_p16, tau_p84)
-    sigma_in_1sigma, sigma_in_2sigma = in_bounds(injected_log_sigma, sigma_p16, sigma_p84)
+    # Header
+    print(f"[INJECT FAKE] Object {obj.get('object_id', '<?>')}:")
+    # One line per requested comparison
+    for r in compare_pairs:
+        if len(r) == 2:
+            inj_key, rec_key = r
+            transform = lambda x: x  # identity
+            label = rec_key
+        elif len(r) == 3:
+            inj_key, rec_key, label = r
+        else:
+            raise ValueError("compare_pairs entries must be (inj_key, rec_key) or (inj_key, rec_key, label)")
+            
+        # true value (from obj)
+        if inj_key not in obj:
+            print(f"  {label}: true=<?> (missing '{inj_key}'), recovered=<?> (key '{rec_key}')")
+            continue
+        true_val = obj[inj_key]
 
-    alpha_sigma = obj['alpha_sigma']
-    beta_tau = obj['beta_tau']
+        # recovered: posterior draws in samples[rec_key]
+        if rec_key not in obj:
+            print(f"  {label}: true=<?> (key '{inj_key}'), recovered=<?> (missing '{rec_key}')")
+            continue
+            
+        # optional transform for *display* (applies to true, median, bounds, and ±)
+        median = obj[rec_key]
+        half_1sigma_disp = obj[rec_key + "_err"]
+        p16_disp, p84_disp = median - half_1sigma_disp, median + half_1sigma_disp
 
-    def summarize_param(param, injected, diagnostics):
-        median = np.median(samples[param])
-        p16, p84 = get_bounds(samples[param])
-        in_1sigma, in_2sigma = in_bounds(injected, p16, p84)
-        rhat = diagnostics.get(f"{param}_rhat", np.nan)
-        return median, p16, p84, in_1sigma, in_2sigma, rhat
+        in_1sigma, in_2sigma, _, _ = _in_bounds(true_val, p16_disp, p84_disp)
+        colored_med = _colorize(f"{median:.3f}", in_1sigma, in_2sigma)
 
-    eta_A1, eta_A1_p16, eta_A1_p84, eta_A1_in_1sigma, eta_A1_in_2sigma, eta_A1_rhat = summarize_param('eta_A1', alpha_sigma, diagnostics)
-    eta_A2, eta_A2_p16, eta_A2_p84, eta_A2_in_1sigma, eta_A2_in_2sigma, eta_A2_rhat = summarize_param('eta_A2', alpha_sigma, diagnostics)
-    eta_tau1, eta_tau1_p16, eta_tau1_p84, eta_tau1_in_1sigma, eta_tau1_in_2sigma, eta_tau1_rhat = summarize_param('eta_tau1', beta_tau, diagnostics)
-    eta_tau2, eta_tau2_p16, eta_tau2_p84, eta_tau2_in_1sigma, eta_tau2_in_2sigma, eta_tau2_rhat = summarize_param('eta_tau2', beta_tau, diagnostics)
-
-    print(
-        f"[FAKE INJECT] Object {obj['object_id']}:\n"
-        f"  log10_tau:    injected = {injected_log_tau/np.log(10):.3f}, "
-        f"recovered = {colorize(f'{recovered_log_tau/np.log(10):.3f}', tau_in_1sigma, tau_in_2sigma)} ± "
-        f"{(tau_p84-tau_p16)/2/np.log(10):.3f} "
-        f"(in 1σ: {tau_in_1sigma}, in 2σ: {tau_in_2sigma})\n"
-        f"  log10_sigma:  injected = {injected_log_sigma/np.log(10):.3f}, "
-        f"recovered = {colorize(f'{recovered_log_sigma/np.log(10):.3f}', sigma_in_1sigma, sigma_in_2sigma)} ± "
-        f"{(sigma_p84-sigma_p16)/2/np.log(10):.3f} "
-        f"(in 1σ: {sigma_in_1sigma}, in 2σ: {sigma_in_2sigma})\n"
-        f"  alpha_sigma: injected = {alpha_sigma:.3f}, "
-        f"eta_A1 = {colorize(f'{eta_A1:.3f}', eta_A1_in_1sigma, eta_A1_in_2sigma)} ± {(eta_A1_p84-eta_A1_p16)/2:.3f} (in 1σ: {eta_A1_in_1sigma}, in 2σ: {eta_A1_in_2sigma}, rhat={eta_A1_rhat:.3f}), "
-        f"eta_A2 = {colorize(f'{eta_A2:.3f}', eta_A2_in_1sigma, eta_A2_in_2sigma)} ± {(eta_A2_p84-eta_A2_p16)/2:.3f} (in 1σ: {eta_A2_in_1sigma}, in 2σ: {eta_A2_in_2sigma}, rhat={eta_A2_rhat:.3f})\n"
-        f"  beta_tau: injected = {beta_tau:.3f}, "
-        f"eta_tau1 = {colorize(f'{eta_tau1:.3f}', eta_tau1_in_1sigma, eta_tau1_in_2sigma)} ± {(eta_tau1_p84-eta_tau1_p16)/2:.3f} (in 1σ: {eta_tau1_in_1sigma}, in 2σ: {eta_tau1_in_2sigma}, rhat={eta_tau1_rhat:.3f}), "
-        f"eta_tau2 = {colorize(f'{eta_tau2:.3f}', eta_tau2_in_1sigma, eta_tau2_in_2sigma)} ± {(eta_tau2_p84-eta_tau2_p16)/2:.3f} (in 1σ: {eta_tau2_in_1sigma}, in 2σ: {eta_tau2_in_2sigma}, rhat={eta_tau2_rhat:.3f})"
-    )
-
+        rhat = diagnostics.get(f"{rec_key}_rhat", np.nan)
+        print(
+            f"   {label}: true = {true_val:.3f}, "
+            f"recovered = {colored_med} ± {half_1sigma_disp:.3f} "
+            f"(in 1σ: {in_1sigma}, in 2σ: {in_2sigma}, rhat={rhat:.3f})"
+        )

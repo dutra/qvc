@@ -816,12 +816,25 @@ if __name__ == '__main__':
             plot_broken_power_law(obj_flat_samples, obj)
             #dump_mcmc_diagnostics(mcmc, obj, i, len(batch_data))
         # If inject_fake, compare injected vs recovered sigma and tau
-        if args.inject_fake:
-            summarize_fake_injected_vs_recovered(obj, obj_flat_samples_flatten_per_band, diagnostics)
         final_result_obj = obj | result | diagnostics | dict(prefix=prefix, suffix=suffix)
         results.append(final_result_obj)
         logging.info("--------------------------------------------------------------")
     
     save_quasar_list_hdf5(results, ignored_keys=['X', 'y', 'yerr', 'band_idx'])
-        
+    
+    if args.inject_fake:
+        plot_recovery(results)
+    for result in results:
+            compare_pairs = [('log_tau_fake', 'log_tau_drw0', 'log10_tau'), 
+                             ('log_sigma_fake', 'log_sigma0', 'log10_sigma')]
+            if 'alpha_sigma' in result and 'eta_A1' in obj_flat_samples and 'eta_A2' in obj_flat_samples:
+                compare_pairs.extend([('alpha_sigma', 'eta_A1'), ('alpha_sigma', 'eta_A2')])
+            if 'beta_tau' in result and 'eta_tau1' in obj_flat_samples and 'eta_tau2' in obj_flat_samples:
+                compare_pairs.extend([('beta_tau', 'eta_tau1'), ('beta_tau', 'eta_tau2')])
+            if 'alpha_sigma' in result and 'eta_A' in obj_flat_samples:
+                compare_pairs.append(('alpha_sigma', 'eta_A'))
+            if 'beta_tau' in result and 'eta_tau' in obj_flat_samples:
+                compare_pairs.append(('beta_tau', 'eta_tau'))
+            summarize_fake_true_vs_recovered(result, diagnostics, compare_pairs=compare_pairs)
+            
     sys.exit("Exiting the program as requested.")
