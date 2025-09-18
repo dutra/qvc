@@ -880,3 +880,88 @@ def resort_by_kernel_key(obj_matrix_np: np.ndarray) -> np.ndarray:
     key = t + b * eps
     order = np.argsort(key, kind="mergesort")  # stable
     return obj_matrix_np[order]
+
+
+
+def summarize_fake_true_vs_recovered(
+    obj,
+    diagnostics,
+    compare_pairs=None,
+):
+    """
+    Parameters
+    ----------
+    obj : dict
+        Holds true (ground-truth) values, e.g. obj['alpha_sigma'], obj['log_tau_fake'] (natural log), etc.
+    samples : Mapping[str, array_like]
+        Posterior draws for recovered params, e.g. samples['eta_A1'], samples['log_tau_drw0'], ...
+    diagnostics : Mapping[str, float]
+        Diagnostics such as rhat stored under f"{param}_rhat".
+    compare_pairs : list of tuples, optional
+        Each tuple is (inj_key, rec_key) or (inj_key, rec_key, transform, label).
+        - inj_key: key in obj for true value.
+        - rec_key: key in samples for posterior draws.
+        - transform: optional function to apply to both true and recovered values for display.
+        - label: optional label for display (defaults to inj_key if not provided).
+    """
+    # ANSI colors
+    _GREEN = "\033[92m"
+    _YELLOW = "\033[93m"
+    _RED = "\033[91m"
+    _RESET = "\033[0m"
+
+
+    def _in_bounds(val, p16, p84):
+        center = 0.5 * (p16 + p84)
+        half_1sigma = 0.5 * (p84 - p16)
+        half_2sigma = 2.0 * half_1sigma
+        in_1sigma = (center - half_1sigma) <= val <= (center + half_1sigma)
+        in_2sigma = (center - half_2sigma) <= val <= (center + half_2sigma)
+        return in_1sigma, in_2sigma, center, half_1sigma
+
+    def _colorize(text, in_1sigma, in_2sigma):
+        if in_1sigma:
+            return f"{_GREEN}{text}{_RESET}"
+        elif in_2sigma:
+            return f"{_YELLOW}{text}{_RESET}"
+        else:
+            return f"{_RED}{text}{_RESET}"
+
+    # Header
+    print(f"[COMPARE RECOVERY] Object {obj.get('object_id', '<?>')}:")
+    # One line per requested comparison
+    for r in compare_pairs:
+        if len(r) == 2:
+            inj_key, rec_key = r
+            transform = lambda x: x  # identity
+            label = inj_key
+        elif len(r) == 3:
+            inj_key, rec_key, label = r
+        else:
+            raise ValueError("compare_pairs entries must be (inj_key, rec_key) or (inj_key, rec_key, label)")
+            
+        # true value (from obj)
+        if inj_key not in obj:
+            print(f"  {label}: true=<?> (missing '{inj_key}'), recovered=<?> (key '{rec_key}')")
+            continue
+        true_val = obj[inj_key]
+
+        # recovered: posterior draws in samples[rec_key]
+        if rec_key not in obj:
+            print(f"  {label}: true=<?> (key '{inj_key}'), recovered=<?> (missing '{rec_key}')")
+            continue
+            
+        # optional transform for *display* (applies to true, median, bounds, and ±)
+        median = obj[rec_key]
+        half_1sigma_disp = obj[rec_key + "_err"]
+        p16_disp, p84_disp = median - half_1sigma_disp, median + half_1sigma_disp
+
+        in_1sigma, in_2sigma, _, _ = _in_bounds(true_val, p16_disp, p84_disp)
+        colored_med = _colorize(f"{median:.3f}", in_1sigma, in_2sigma)
+
+        rhat = diagnostics.get(f"{rec_key}_rhat", np.nan)
+        print(
+            f"   {label}: true = {true_val:.3f}, "
+            f"recovered = {colored_med} ± {half_1sigma_disp:.3f} "
+            f"(in 1σ: {in_1sigma}, in 2σ: {in_2sigma}, rhat={rhat:.3f})"
+        )

@@ -874,3 +874,63 @@ def plot_correlation_matrix(
     fig.savefig(save_path, dpi=dpi)
     logging.info(f"Saved correlation matrix to {save_path}")
     plt.close(fig)
+
+def plot_recovery(results):
+    # Collect all fields from each result into arrays for plotting
+    log_sigma_fake = np.array([r['log_sigma_fake'] for r in results])
+    log_sigma0 = np.array([r['log_sigma0'] for r in results])
+    log_sigma0_err = np.array([r['log_sigma0_err'] for r in results])
+    log_tau_fake = np.array([r['log_tau_fake'] for r in results])
+    log_tau_drw0 = np.array([r['log_tau_drw0'] for r in results])
+    log_tau_drw0_err = np.array([r['log_tau_drw0_err'] for r in results])
+    t_obs_length = np.array([r['t_obs_length'] for r in results])
+    t_rf_length = np.array([r['t_rf_length'] for r in results])
+
+    rho = 10**log_tau_drw0 / t_rf_length
+
+    fig, axes = plt.subplots(1, 2, figsize=(10, 4))
+
+    # Panel 1: log_sigma_fake vs log_sigma0, color by rho
+    x1 = log_sigma_fake
+    y1 = log_sigma0
+    y1err = log_sigma0_err
+    c1 = rho
+    xmin1, xmax1 = -2, 0.5
+    sc1 = axes[0].scatter(x1, y1, c=c1, cmap='plasma', s=40, edgecolor='k', alpha=0.8)
+    axes[0].errorbar(x1, y1, yerr=y1err, fmt='none', ecolor='gray', alpha=0.4, elinewidth=1, capsize=2)
+    axes[0].plot([xmin1, xmax1], [xmin1, xmax1], 'm--', lw=2)
+    axes[0].set_xlabel(r'$\log_{10}\,\sigma_\mathrm{fake}$')
+    axes[0].set_ylabel(r'$\log_{10}\,\sigma_0$')
+    axes[0].set_aspect('equal', adjustable='box')
+    axes[0].set_xlim(xmin1, xmax1)
+    axes[0].set_ylim(xmin1, xmax1)
+
+    # Panel 2: log_tau_fake vs log_tau_drw0 (swapped x and y), color by rho
+    x2 = log_tau_fake
+    y2 = log_tau_drw0
+    y2err = log_tau_drw0_err
+    c2 = rho
+    xmin2, xmax2 = 0, 6
+    sc2 = axes[1].scatter(x2, y2, c=c2, cmap='plasma', s=40, edgecolor='k', alpha=0.8)
+    axes[1].errorbar(x2, y2, yerr=y2err, fmt='none', ecolor='gray', alpha=0.4, elinewidth=1, capsize=2)
+    axes[1].plot([xmin2, xmax2], [xmin2, xmax2], 'm--', lw=2)
+    axes[1].set_xlabel(r'$\log_{10}\,\tau_\mathrm{fake}$')
+    axes[1].set_ylabel(r'$\log_{10}\,\tau_\mathrm{DRW,0}$')
+    axes[1].set_aspect('equal', adjustable='box')
+    axes[1].set_xlim(xmin2, xmax2)
+    axes[1].set_ylim(xmin2, xmax2)
+
+
+    # Add colorbar for the second panel (rho)
+    cax = fig.add_axes([axes[1].get_position().x1 + 0.01, axes[1].get_position().y0, 0.015, axes[1].get_position().height])
+    cbar2 = plt.colorbar(sc2, cax=cax)
+    cbar2.set_label(r'$\rho = \tau_\mathrm{DRW,0} / t_\mathrm{RF}$')
+
+    # Save
+    out_dir = f"plots/multiband/{prefix}/sigmatau/"
+    os.makedirs(out_dir, exist_ok=True)
+    save_path = os.path.join(out_dir, f"{suffix}.png")
+    fig.savefig(save_path, dpi=300)
+    print(f"Saved injected vs recovery sigma and tau plot to {save_path}")
+    plt.show()
+    plt.close(fig)
