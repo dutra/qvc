@@ -98,12 +98,12 @@ def plot_posterior(samples_flat, data, bins=20):
     # Save plot
     output_dir = f"plots/multiband/{prefix}/posterior/"
     os.makedirs(output_dir, exist_ok=True)
-    save_path = os.path.join(output_dir, f"{z:.1f}_{object_id}_posterior_{suffix}.png")
+    save_path = os.path.join(output_dir, f"{z:.1f}_{object_id}_posterior_{suffix}.pdf")
     plt.savefig(save_path, dpi=100)
     plt.close(fig)
     logging.info(f"Saved posterior corner plot to {save_path}")
 
-def plot_posterior_fast(
+def plot_posterior_fast_OLD(
     samples_flat,
     data,
     bins=15,
@@ -140,8 +140,13 @@ def plot_posterior_fast(
     object_id = data["object_id"]
     z = data["z"]
 
+    print(samples_flat)
+
     # Stable column order
     labels = list(samples_flat.keys())
+    labels = np.array(labels)
+
+    print('1')
 
     # Shared subsample index (do this BEFORE stacking to cut memory/compute)
     first = np.asarray(samples_flat[labels[0]]).ravel()
@@ -151,6 +156,8 @@ def plot_posterior_fast(
         idx = rng.choice(n_total, size=max_points, replace=False)
     else:
         idx = None
+
+    print('2')
 
     # Build columns with shared subsampling; transform log_ → log10; cast to float32
     cols = []
@@ -164,11 +171,15 @@ def plot_posterior_fast(
 
     X = np.column_stack(cols)
 
+    print('3')
+
     # Drop any rows with NaN/Inf across columns (keeps alignment)
     finite = np.all(np.isfinite(X), axis=1)
     X = X[finite]
     if X.shape[0] == 0:
         raise ValueError("No finite samples to plot after cleaning.")
+
+    print('4')
 
     # Identify near-constant columns and jitter them (keep them in the plot)
     ptp = np.ptp(X, axis=0)
@@ -181,6 +192,8 @@ def plot_posterior_fast(
             # Add zero-mean jitter; keep dtype float32
             X[:, j] = (col + np.random.normal(0.0, sigma, size=col.shape)).astype(np.float32)
             print("Corner Constant param (jittered):", labels[j])
+
+    print('5')
 
     # Robust ranges via percentiles; guarantee positive width even after jitter
     lo = np.percentile(X, p_lo, axis=0)
@@ -196,15 +209,16 @@ def plot_posterior_fast(
             pad = max(const_ptp, abs(c) * 1e-6, jitter_abs)
             l, h = c - pad, c + pad
         rng.append((float(l), float(h)))
+    rng = np.array(rng)
 
     # Corner kwargs tuned for speed (hist-only, modest bins)
     fig = corner.corner(
-        X,
-        labels=labels,
+        X[:, ~const_mask],
+        labels=labels[~const_mask],
         show_titles=True,
         quantiles=[0.16, 0.5, 0.84],
         bins=bins,
-        range=rng,
+        range=rng[~const_mask],
         plot_datapoints=False,
         plot_contours=False,         # avoid KDE for speed
         hist2d_kwargs={"bins": bins},
@@ -218,6 +232,148 @@ def plot_posterior_fast(
     plt.savefig(save_path, dpi=100)
     plt.close(fig)
     logging.info(f"Saved posterior corner plot to {save_path}")
+
+def plot_posterior_fast(
+    samples_flat,
+    data,
+    bins=15,
+    max_points=50_000,
+    p_lo=0.5,
+    p_hi=99.5,
+    const_ptp=1e-12,         # threshold for "near-constant"
+    jitter_rel=1e-6,         # relative jitter scale (× |mean|)
+    jitter_abs=1e-8          # absolute floor for jitter
+):
+    """
+    Faster corner plot for large MCMC draws, keeps constant params by jittering.
+    - Minimizes Python loops and array copies
+    - Vectorized jitter for near-constant cols
+    - Avoids printing; uses logging
+    - Conservative corner settings for speed
+    """
+
+    logging.info("Saving posterior plot (fast path)")
+    object_id = data["object_id"]
+    z = data["z"]
+    prefix = data.get("prefix", "test")
+    suffix = data.get("suffix", "test")
+
+    # Stable column order
+    labels = np.array(list(samples_flat.keys()))
+
+    # Subsample index decided from the first column (before stacking)
+    first = np.asarray(samples_flat[labels[0]])
+    first = first.reshape(first.shape[0], -1)[:, 0]  # fast ravel of first dim
+    n_total = first.shape[0]
+    rng = np.random.default_rng()
+    if n_total > max_points:
+        idx = rng.choice(n_total, size=max_points, replace=False)
+        n_use = max_points
+    else:
+        idx = None
+        n_use = n_total
+
+    # Build matrix X (N, D) with shared subsample; transform log_* → log10 (from natural log)
+    D = len(labels)
+    X = np.empty((n_use, D), dtype=np.float32)
+    ln10 = np.log(10.0)
+
+    for j, k in enumerate(labels):
+        a = np.asarray(samples_flat[k]).reshape(n_total, -1)[:, 0]  # take the leading element per draw
+        if idx is not None:
+            a = a[idx]
+        # Convert ln to log10 for "log_*" parameters
+        if k.startswith("log_"):
+            a = a / ln10
+        X[:, j] = a.astype(np.float32, copy=False)
+
+    # Drop rows with any NaN/Inf once (keeps alignment)
+    finite = np.isfinite(X).all(axis=1)
+    if not finite.any():
+        raise ValueError("No finite samples to plot after cleaning.")
+    X = X[finite]
+
+    # Identify near-constant columns; prefer ptp but fall back to std if needed
+    ptp = np.ptp(X, axis=0)
+    const_mask = ptp <= const_ptp
+
+    # Vectorized jitter for the near-constant columns (keeps them in the plot)
+    if np.any(const_mask):
+        const_idx = np.where(const_mask)[0]
+        mu = X[:, const_idx].mean(axis=0, dtype=np.float64)
+        sig = np.maximum(jitter_abs, np.abs(mu) * jitter_rel).astype(np.float32)
+        # Generate noise for all constant columns at once
+        noise = rng.normal(0.0, 1.0, size=(X.shape[0], const_idx.size)).astype(np.float32)
+        X[:, const_idx] += noise * sig  # broadcast scale
+        for j in const_idx:
+            logging.debug(f"Corner constant param (jittered): {labels[j]}")
+
+    # Robust ranges via percentiles; ensure positive width after jitter
+    # (Use float32 inputs; returns float64 bounds—cast to float)
+    lo = np.percentile(X, p_lo, axis=0)
+    hi = np.percentile(X, p_hi, axis=0)
+    eps = 1e-12
+    l_out = np.minimum(lo, hi)
+    h_out = np.maximum(lo, hi)
+    # Fix any degenerate ranges
+    bad = (h_out <= l_out + eps) | ~np.isfinite(l_out) | ~np.isfinite(h_out)
+    if np.any(bad):
+        # fallback to min/max per column
+        cmin = X.min(axis=0)
+        cmax = X.max(axis=0)
+        l_out[bad] = cmin[bad]
+        h_out[bad] = cmax[bad]
+        # pad if still degenerate
+        still = h_out <= l_out + eps
+        if np.any(still):
+            c = 0.5 * (l_out[still] + h_out[still])
+            pad = np.maximum.reduce([np.full_like(c, const_ptp), np.abs(c) * 1e-6, np.full_like(c, jitter_abs)])
+            l_out[still] = c - pad
+            h_out[still] = c + pad
+    rng_bounds = np.stack([l_out.astype(float), h_out.astype(float)], axis=1)
+
+    # Prepare data for corner: hide constants on the grid (still jittered above)
+    # This avoids tiny plot panels that can be slow & visually unhelpful
+    sel = ~const_mask
+    X_plot = X[:, sel]
+    labels_plot = labels[sel]
+    ranges_plot = rng_bounds[sel]
+
+    if X_plot.shape[1] == 0:
+        logging.warning("All parameters are near-constant; plotting them anyway as 1D hists.")
+        # If everything is constant, pick all, but corner will be fast with 1D hists
+        X_plot = X
+        labels_plot = labels
+        ranges_plot = rng_bounds
+
+    # Corner tuned for speed
+    fig = corner.corner(
+        X_plot,
+        labels=labels_plot,
+        show_titles=True,
+        quantiles=[0.16, 0.5, 0.84],
+        bins=int(bins),
+        range=[tuple(r) for r in ranges_plot],
+        plot_datapoints=False,
+        plot_contours=False,        # no KDE
+        hist2d_kwargs={"bins": int(bins)},
+        max_n_ticks=3,
+        quiet=True,
+        use_math_text=False,
+        labelpad=0.3,
+        title_fmt=".3g",
+        title_kwargs={"fontsize": 9},
+        label_kwargs={"fontsize": 9},
+    )
+
+    # Save
+    output_dir = f"plots/multiband/{prefix}/corner/"
+    os.makedirs(output_dir, exist_ok=True)
+    save_path = os.path.join(output_dir, f"{z:.1f}_{object_id}_posterior_{suffix}.pdf")
+    fig.savefig(save_path, dpi=100, bbox_inches="tight")
+    plt.close(fig)
+    logging.info(f"Saved posterior corner plot to {save_path}")
+
 
 
 def plot_broken_power_law(samples, data):

@@ -811,7 +811,7 @@ if __name__ == '__main__':
             plot_correlation_matrix(obj_flat_samples_flatten_per_band, obj)
             plot_all_histograms(obj_flat_samples_flatten_per_band, obj)
             if not args.disable_corner_plot:
-                plot_posterior(obj_flat_samples_flatten_per_band, obj)
+                #plot_posterior(obj_flat_samples_flatten_per_band, obj)
                 plot_posterior_fast(obj_flat_samples_flatten_per_band, obj)
             plot_broken_power_law(obj_flat_samples, obj)
             #dump_mcmc_diagnostics(mcmc, obj, i, len(batch_data))
