@@ -86,7 +86,7 @@ def select_samples_for_object_per_chain(samples_per_chain, obj_index, universal_
         Dictionary with selected samples for the object, preserving chain structure.
     """
     obj_samples = {
-        k: v[:, :, obj_index] if (k not in universal_params and v.ndim > 2) else v
+        k: v[:, :, obj_index] if (k not in universal_params and v.ndim > 2 and not k.startswith('_')) else v
         for k, v in samples_per_chain.items()
     }
 
@@ -118,6 +118,8 @@ def flatten_per_chain_samples_per_band(samples_per_chain, bands=['u', 'g', 'r', 
     """
     flattened_samples = {}
     for k, v in samples_per_chain.items():
+        if k.startswith('_'):
+            continue  # Skip metadata keys
         logging.debug(f"flatten_per_chain: {k} shape={getattr(v, 'shape', None)}")
         if v.ndim == 2:
             flattened_samples[k] = v
@@ -150,14 +152,16 @@ def select_samples_for_object(samples_flat, obj_index, universal_params):
     """
     obj_samples = {}
     for k, v in samples_flat.items():
-            try:
-                if k in universal_params:
-                    obj_samples[k] = v
-                else:
-                    obj_samples[k] = v[:, obj_index]
-            except Exception as e:
-                logging.error(f"Error selecting samples for {k} with shape {getattr(v, 'shape', None)}: {e}")
-                raise
+        if k.startswith('_'):
+            continue  # Skip metadata keys
+        try:
+            if k in universal_params:
+                obj_samples[k] = v
+            else:
+                obj_samples[k] = v[:, obj_index]
+        except Exception as e:
+            logging.error(f"Error selecting samples for {k} with shape {getattr(v, 'shape', None)}: {e}")
+            raise
 
     # Print shapes for inspection
     logging.debug("Selected object samples: " + ", ".join(f"{k}={v.shape}" for k, v in obj_samples.items()))
@@ -182,6 +186,8 @@ def flatten_flat_samples_per_band(samples_flat, bands=['u', 'g', 'r', 'i', 'z'])
     """
     flattened_samples = {}
     for k, v in samples_flat.items():
+        if k.startswith('_'):
+            continue  # Skip metadata keys
         if v.ndim == 1:
             flattened_samples[k] = v
         elif v.ndim == 2:
@@ -208,6 +214,8 @@ def clean_grouped_samples(samples_grouped, obj_index, batch_data_len):
 
     obj_samples_clean = dict()
     for k, v in samples_grouped.items():
+        if k.startswith('_'):
+            continue  # Skip metadata keys
         arr = np.asarray(v)  # shape: (n_chains, n_samples[, ...])
 
         # Flatten chains into single axis first: (n_samples_total, ...)

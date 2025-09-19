@@ -210,10 +210,10 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_
                         "_log_lag_blr",
                         dist.Uniform(jnp.log(2.0), jnp.log(5000.0))
                     )
-            _log_lag_blr = jnp.reshape(_log_lag_blr, (batch_size,))
+            _log_lag_blr = jnp.squeeze(_log_lag_blr) 
             log_lag_blr = numpyro.deterministic(
                 "log_lag_blr",
-                jnp.broadcast_to(_log_lag_blr[..., None], (batch_size, nBands))
+                jnp.repeat(_log_lag_blr[:, None], nBands, axis=1)
             )
             with numpyro.plate("band", nBands, dim=-1):
                 # Parameters with shape [B, nBands]
