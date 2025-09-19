@@ -719,9 +719,12 @@ if __name__ == '__main__':
         obj_flat_samples_flatten_per_band = flatten_flat_samples_per_band(obj_flat_samples)
         save_obj_samples_to_hdf5(obj_flat_samples_flatten_per_band, obj['object_id'])
 
-        obj_samples_per_chain = select_samples_for_object_per_chain(samples_per_chain, i, universal_params=universal_params)
-        obj_samples_per_chain_flatten_per_band = flatten_per_chain_samples_per_band(obj_samples_per_chain)
-        diagnostics = diagnostics_for_per_chain_samples(obj_samples_per_chain_flatten_per_band)
+        if not args.load_sample_file:
+            obj_samples_per_chain = select_samples_for_object_per_chain(samples_per_chain, i, universal_params=universal_params)
+            obj_samples_per_chain_flatten_per_band = flatten_per_chain_samples_per_band(obj_samples_per_chain)
+            diagnostics = diagnostics_for_per_chain_samples(obj_samples_per_chain_flatten_per_band)
+        else:
+            diagnostics = {}
         
         # Add the object-specific parameters
         result = process_samples(obj_flat_samples_flatten_per_band, obj)
