@@ -68,6 +68,7 @@ from multiband_fit_plotting import *
 from multiband_generate_lc import *
 from multiband_models import *
 from multiband_model_lmc import MyMultiVarModel_BLR_LMC
+from multiband_model_tauscale import MyMultiVarModel_TauScale
 
 # define params
 zero_mean = False
@@ -78,7 +79,8 @@ universal_params = (
     'eta_A1_mean','eta_A2_mean','eta_tau1_mean','eta_tau2_mean',
     'eta_break','lam_s',
     'sigma_eta_A1','sigma_eta_A2','sigma_eta_tau1','sigma_eta_tau2',
-    'log_sigma_eta_A1','log_sigma_eta_A2','log_sigma_eta_tau1','log_sigma_eta_tau2'
+    'log_sigma_eta_A1','log_sigma_eta_A2','log_sigma_eta_tau1','log_sigma_eta_tau2',
+    '_log_lag_blr'
 )
 
 def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_fake_in, log_sigma_fake_in, 
@@ -632,12 +634,15 @@ if __name__ == '__main__':
     for obj in objs:
         print(f"Object {obj['object_id']}: f_host_5100 = {obj['f_host_5100']}")
 
-    #objs = populate_sdss_fields(objs)
     if args.lmc > 0:
-        print(f"\033[93m[WARNING] Using LMC model (Q={args.lmc}) instead of DRW.\033[0m")
+        print(f"\033[93m[WARNING] Using LMC model (Q={args.lmc}).\033[0m")
         Model = MyMultiVarModel_BLR_LMC
-    else:
+    elif args.lmc == -1:
+        print(f"\033[93m[WARNING] Using Old (Sep8) Model (LMC = -1).\033[0m")
         Model = MyMultiVarModel
+    elif args.lmc == -2:
+        print(f"\033[93m[WARNING] Using Tau Model (LMC = -2).\033[0m")
+        Model = MyMultiVarModel_TauScale
 
     if args.inject_random_fake_etas:
         # Randomize alpha_sigma and beta_tau for each run

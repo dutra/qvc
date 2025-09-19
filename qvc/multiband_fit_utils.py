@@ -500,7 +500,15 @@ def save_quasar_list_hdf5(quasars, ignored_keys=None, size_threshold=1024):
                         continue
                     if arr.dtype.kind in {'U', 'S', 'O'}:
                         arr = arr.astype(string_dt)
-                    group.attrs[key] = arr
+                    try:
+                        group.attrs[key] = arr
+                    except Exception as e:
+                        logging.error(f"Error saving attribute '{key}' for object_id {object_id}: {e}")
+                        if isinstance(arr, np.ndarray):
+                            logging.error(f"  (type: {type(arr)}, shape: {arr.shape})")
+                        else:
+                            logging.error(f"  (type: {type(arr)})")
+                        raise e
             
             # Print progress
             logging.info(f"{i+1}/{total}: Saved quasar {object_id}")
@@ -516,6 +524,40 @@ def log_broken_pl(lam, lam_s, d1, d2, ds=0.1):
     x = lam / lam_s
     log_f = d1 * jnp.log10(x)
     return log_f
+
+def log_single_pl(lam, lam_s, d):
+    """
+    Log10 of a simple power-law, normalized to 0 at lam_s.
+    Slope is d everywhere.
+    """
+    x = lam / lam_s
+    log_f = d * jnp.log10(x)
+    return log_f
+
+def regularize_cov_from_percentiles(x16, x84, y16, y84, cov_xy, eps=1e-8):
+    # 1) variance estimates from central 68% interval
+    sx = 0.5 * (x84 - x16)
+    sy = 0.5 * (y84 - y16)
+    vx, vy = max(sx*sx, 0.0), max(sy*sy, 0.0)
+    # early exit if any variance is ~0: set cov to 0
+    if vx <= 0 or vy <= 0:
+        return max(vx, eps), max(vy, eps), 0.0
+    # 2) clip covariance to be within [-sqrt(vx*vy), +sqrt(vx*vy)]
+    rho_raw = cov_xy / (sx * sy)
+    rho = max(min(rho_raw, 1.0 - eps), -1.0 + eps)
+    cov_xy_reg = rho * sx * sy
+    return vx, vy, cov_xy_reg
+
+def psd_cov_from_samples(X, Y, eps=1e-12, shrink_rho=0.0):
+    X = np.asarray(X); Y = np.asarray(Y)
+    C = np.cov(np.vstack([X, Y]), bias=False)  # moments in the correct units
+    # shrink correlation if desired
+    sx = np.sqrt(max(C[0,0], eps)); sy = np.sqrt(max(C[1,1], eps))
+    rho = C[0,1] / max(sx*sy, eps)
+    rho = (1.0 - shrink_rho) * rho
+    rho = np.clip(rho, -1.0 + eps, 1.0 - eps)
+    C = np.array([[sx*sx, rho*sx*sy],[rho*sx*sy, sy*sy]])
+    return C
 
 def process_samples(flat_samples, data, percentiles=[16, 50, 84], bands=['u', 'g', 'r', 'i', 'z']):
     """
@@ -602,8 +644,23 @@ def process_samples(flat_samples, data, percentiles=[16, 50, 84], bands=['u', 'g
     # Compute covariance between log_sigma_UV and log_tau_UV_RF
     cov_matrix = np.cov(samples_log_sigma_UV, samples_log_tau_UV_RF)
     cov_log_sigma_tau = cov_matrix[0, 1]
-    result['cov_log_sigma_UV_log_tau_UV_RF'] = cov_log_sigma_tau
-    print(f"Covariance between log_sigma_UV and log_tau_UV_RF: {cov_log_sigma_tau}")
+    
+    vx, vy, cov_log_sigma_tau_reg = regularize_cov_from_percentiles(
+        np.percentile(samples_log_sigma_UV, 16),
+        np.percentile(samples_log_sigma_UV, 84),
+        np.percentile(samples_log_tau_UV_RF, 16),
+        np.percentile(samples_log_tau_UV_RF, 84),
+        cov_log_sigma_tau
+    )
+    result['cov_log_sigma_UV_log_tau_UV_RF'] = cov_log_sigma_tau_reg
+    print("Regularized covariance: ", cov_log_sigma_tau_reg)
+
+    C = psd_cov_from_samples(samples_log_sigma_UV, samples_log_tau_UV_RF, shrink_rho=0.05)
+    sx2, sy2, sxy = C[0,0], C[1,1], C[0,1]
+    result['log_sigma_UV_log_tau_UV_RF_cov_psd'] = sxy
+    result['log_sigma_UV_std_psd'] = np.sqrt(sx2)
+    result['log_tau_UV_RF_std_psd'] = np.sqrt(sy2)
+    print("PSD covariance: ", sxy)
 
     return result
 
