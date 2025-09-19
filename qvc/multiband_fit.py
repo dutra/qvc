@@ -206,15 +206,20 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_
                 bwb_beta = numpyro.deterministic("bwb_beta", jnp.ones(batch_size))
 
         with numpyro.plate("objects", batch_size, dim=-2):
-            _log_lag_blr = numpyro.sample(
-                        "_log_lag_blr",
-                        dist.Uniform(jnp.log(2.0), jnp.log(5000.0))
-                    )
-            _log_lag_blr = jnp.squeeze(_log_lag_blr) 
-            log_lag_blr = numpyro.deterministic(
-                "log_lag_blr",
-                jnp.repeat(_log_lag_blr[:, None], nBands, axis=1)
-            )
+
+            if disable_lag_blr:
+                log_lag_blr = numpyro.deterministic("log_lag_blr", jnp.full((batch_size, nBands), -9.0))
+            else:
+                _log_lag_blr = numpyro.sample(
+                            "_log_lag_blr",
+                            dist.Uniform(jnp.log(2.0), jnp.log(5000.0))
+                        )
+                _log_lag_blr = jnp.squeeze(_log_lag_blr) 
+                log_lag_blr = numpyro.deterministic(
+                    "log_lag_blr",
+                    jnp.repeat(_log_lag_blr[:, None], nBands, axis=1)
+                )
+
             with numpyro.plate("band", nBands, dim=-1):
                 # Parameters with shape [B, nBands]
                 # Means in each band
@@ -224,7 +229,6 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_
                 if disable_lag_blr:
                     print("[WARNING] BLR lag model disabled.")
                     log_amp_delta_blr = numpyro.deterministic("log_amp_delta_blr", jnp.full((batch_size, nBands), -1e9))
-                    log_lag_blr = numpyro.deterministic("log_lag_blr", jnp.full((batch_size, nBands), -9.0))
                 else:
                     print("[WARNING] BLR lag model enabled.")
                     log_amp_delta_blr = numpyro.sample("log_amp_delta_blr", dist.Normal(jnp.full(nBands, -1.0), 3.0))
