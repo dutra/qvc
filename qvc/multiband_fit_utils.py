@@ -604,6 +604,7 @@ def process_samples(flat_samples, data, percentiles=[16, 50, 84], bands=['u', 'g
     cov_matrix = np.cov(samples_log_sigma_UV, samples_log_tau_UV_RF)
     cov_log_sigma_tau = cov_matrix[0, 1]
     result['cov_log_sigma_UV_log_tau_UV_RF'] = cov_log_sigma_tau
+    print(f"Covariance between log_sigma_UV and log_tau_UV_RF: {cov_log_sigma_tau}")
 
     return result
 

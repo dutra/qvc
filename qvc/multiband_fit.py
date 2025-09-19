@@ -376,8 +376,8 @@ def make_lc(Model, data, bands=['u', 'g', 'r', 'i', 'z'], inject_fake=False, alp
         key, k_tau0, k_sig0, k_eps, k_y0, k_noise = jax.random.split(key, 6)
 
         # Base logs
-        log_tau0_rf = jax.random.uniform(k_tau0, minval=1.5,  maxval=3.0)   # log10 τ_rest (days)
-        log_sigma0  = jax.random.uniform(k_sig0, minval=-0.5, maxval=0.0)   # log10 σ (mag)
+        log_tau0_rf = jax.random.uniform(k_tau0, minval=0.5,  maxval=3.0)   # log10 τ_rest (days)
+        log_sigma0  = jax.random.uniform(k_sig0, minval=-1.5, maxval=0.0)   # log10 σ (mag)
         tau0_rf   = 10.0**float(log_tau0_rf)
         sigma0    = 10.0**float(log_sigma0)
         one_plus_z = float(1.0 + data['z'])
