@@ -494,7 +494,10 @@ def save_quasar_list_hdf5(quasars, ignored_keys=None, size_threshold=1024):
                         sub_group.create_dataset(sub_key, data=arr)
                 else:
                     # Attributes for simple values
-                    arr = np.asarray(value)
+                    if value is None:
+                        arr = np.array([])
+                    else:
+                        arr = np.asarray(value)
                     if arr.size > size_threshold:
                         logging.warning(f"Warning: Skipping key '{key}' (too large: {arr.size})")
                         continue
@@ -504,6 +507,8 @@ def save_quasar_list_hdf5(quasars, ignored_keys=None, size_threshold=1024):
                         group.attrs[key] = arr
                     except Exception as e:
                         logging.error(f"Error saving attribute '{key}' for object_id {object_id}: {e}")
+                        print("Value:", value)
+                        print("Converted Array:", arr)
                         if isinstance(arr, np.ndarray):
                             logging.error(f"  (type: {type(arr)}, shape: {arr.shape})")
                         else:

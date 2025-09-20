@@ -687,8 +687,8 @@ if __name__ == '__main__':
             'f_host_5100': obj['f_host_5100'],
             'log_tau_fake': obj['log_tau_fake'],
             'log_sigma_fake': obj['log_sigma_fake'],
-            'alpha_sigma': obj.get('alpha_sigma', None),
-            'beta_tau': obj.get('beta_tau', None),
+            'alpha_sigma': obj.get('alpha_sigma', -99),
+            'beta_tau': obj.get('beta_tau', -99),
             'dropped_bands': obj['dropped_bands'],
             't_obs_length': obj['t_obs_length'],
             't_rf_length': obj['t_rf_length'],
@@ -829,7 +829,7 @@ if __name__ == '__main__':
     
     if args.inject_fake:
         plot_recovery(results)
-    for result in results:
+        for result in results:
             compare_pairs = [('log_tau_fake', 'log_tau_drw0', 'log10_tau'), 
                              ('log_sigma_fake', 'log_sigma0', 'log10_sigma')]
             if 'alpha_sigma' in result and 'eta_A1' in obj_flat_samples and 'eta_A2' in obj_flat_samples:
