@@ -387,13 +387,15 @@ def run_all(df_agn, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, cosmo_model
     make_cosmo_table_latex(results_latex, write_path=f"plots/hubble/{prefix}/")
 
 
-    logZ_1 = cosmo_models_dict[cosmo_models[0]]['logZ']
-    logZerr_1 = cosmo_models_dict[cosmo_models[0]]['logZerr']
-    model_1_name = cosmo_models_latex[cosmo_models[0]]
-    logZ_2 = cosmo_models_dict[cosmo_models[1]]['logZ']
-    logZerr_2 = cosmo_models_dict[cosmo_models[1]]['logZerr']
-    model_2_name = cosmo_models_latex[cosmo_models[1]]
-    print(f"Comparing models {cosmo_models[0]} and {cosmo_models[1]} by log-evidence:")
+    model_1 = 'Flatw0waCDM'
+    model_2 = 'FlatwCDM'
+    logZ_1 = cosmo_models_dict[model_1]['logZ']
+    logZerr_1 = cosmo_models_dict[model_1]['logZerr']
+    model_1_name = cosmo_models_latex[model_1]
+    logZ_2 = cosmo_models_dict[model_2]['logZ']
+    logZerr_2 = cosmo_models_dict[model_2]['logZerr']
+    model_2_name = cosmo_models_latex[model_2]
+    print(f"Comparing models {model_1} and {model_2} by log-evidence:")
     print(f"  {model_1_name}: logZ = {logZ_1:.2f} ± {logZerr_1:.2f}")
     print(f"  {model_2_name}: logZ = {logZ_2:.2f} ± {logZerr_2:.2f}")
     compare_models_by_log_evidence(logZ_1=logZ_1, logZerr_1=logZerr_1, 
@@ -419,6 +421,7 @@ if __name__ == "__main__":
     parser.add_argument("--only_sna", action="store_true", default=False, help="Run SNIa-only fit (default: False)")
     parser.add_argument("--use_mu_sh0es", action="store_true", default=False, help="Use MU_SH0ES for SNIa fit (default: False)")
     parser.add_argument("--spectra_fit_csv", type=str, help="Path to spectra fit CSV file")
+    parser.add_argument("--zquery_csv", type=str, help="Path to zquery CSV file")
 
     args = parser.parse_args()
 
@@ -434,7 +437,8 @@ if __name__ == "__main__":
         print("Warning: Resuming previous MCMC run.")
 
     df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_pantheon_data()
-    df_agn = load_agn_data(args.agn_data_filepath, populate_sdss=args.force_populate_fields, spectra_fit_csv=args.spectra_fit_csv)
+    df_agn = load_agn_data(args.agn_data_filepath, populate_sdss=args.force_populate_fields, 
+                           spectra_fit_csv=args.spectra_fit_csv, zquery_csv=args.zquery_csv)
 
     if args.N and args.N > 0:
         # df_agn = df_agn.sample(n=args.N, random_state=42)

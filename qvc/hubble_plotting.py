@@ -608,6 +608,10 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
             alpha_nu     = float(np.median(df_agn['alpha_nu'].values)) * np.ones_like(z_grid),
             alpha_nu_err = float(np.median(df_agn['alpha_nu_err'].values)) * np.ones_like(z_grid),
             cov_log_sigma_UV_log_tau_UV_RF = float(np.median(df_agn['cov_log_sigma_UV_log_tau_UV_RF'].values)) * np.ones_like(z_grid),
+
+            log_tau_UV_RF_std_psd = float(np.median(df_agn['log_tau_UV_RF_std_psd'].values)) * np.ones_like(z_grid),
+            log_sigma_UV_std_psd = float(np.median(df_agn['log_sigma_UV_std_psd'].values)) * np.ones_like(z_grid),
+            log_sigma_UV_log_tau_UV_RF_cov_psd = float(np.median(df_agn['log_sigma_UV_log_tau_UV_RF_cov_psd'].values)) * np.ones_like(z_grid),
         )
         agn_obs_arr, agn_err_arr, agn_pivot_arr = agn_model_pack_obs(agn_obs_med)
 
@@ -641,7 +645,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
         'o', markersize=3, mfc='none', mec="k", alpha=0.3, zorder=0
     )
     # Zero line
-    ax_resid.axhline(0.0, color="#999999", lw=1.0, ls='--', zorder=1)
+    ax_resid.axhline(0.0, color="m", lw=1.0, ls='--', zorder=1)
 
     # NEW: binned residuals in red (points + thin connecting line)
     if z_res_lin.size:
@@ -662,7 +666,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
 
         mu_model_1 = _mu_model(cosmo_model, results,   z_grid_fine, z_pivot_agn)
         mu_model_2 = _mu_model(cosmo_model_2, results_2, z_grid_fine, z_pivot_agn)
-        ax_resid.plot(z_grid_fine, mu_model_2 - mu_model_1, lw=2.2, color="m", alpha=0.95)
+        ax_resid.plot(z_grid_fine, mu_model_2 - mu_model_1, lw=2.2, color="tab:blue", alpha=0.95)
 
     ax_resid.set_ylabel(r"$\Delta\mu$ (mag)")
     ax_resid.set_xlabel(r"$z$")
@@ -834,15 +838,15 @@ def plot_predicted_vs_actual_M2500(
         dm_interp = make_dm_function(np.array(df_agn["apparent_mag_2500"].values), np.array(df_agn['z'].values), dms)
 
     # --- binning in redshift ---
-    num_cols = 4
-    num_rows = 4
+    num_cols = 5
+    num_rows = 6
     z_bins = np.linspace(0, 3.5, num_cols*num_rows+1)
     z_bin_indices = np.digitize(z, bins=z_bins)
     num_bins = len(z_bins) - 1
     bin_labels = [f"{z_bins[i]:.1f} < z < {z_bins[i+1]:.1f}" for i in range(num_bins)]
 
     # --- figure with full-height colorbar (dedicated column) ---
-    fig = plt.figure(figsize=(5 * num_cols + 1.4, 4 * num_rows))
+    fig = plt.figure(figsize=(5 * num_cols, 4 * num_rows))
     gs = fig.add_gridspec(num_rows, num_cols + 1,
                           width_ratios=[1]*num_cols + [0.06],
                           wspace=0.0, hspace=0.0)
@@ -963,10 +967,10 @@ def plot_predicted_vs_actual_M2500(
             leg.get_frame().set_edgecolor("none")
 
     # full-height colorbar (global scale)
-    if sc_for_cbar is not None:
-        cbar = fig.colorbar(sc_for_cbar, cax=cax, orientation="vertical")
-        cbar.set_label(r"$\alpha_{\nu}$", fontsize=12)
-        cbar.ax.tick_params(labelsize=10)
+    # if sc_for_cbar is not None:
+    #     cbar = fig.colorbar(sc_for_cbar, cax=cax, orientation="vertical")
+    #     cbar.set_label(r"$\alpha_{\nu}$", fontsize=12)
+    #     cbar.ax.tick_params(labelsize=10)
 
     for ax in axes:
         if ax.has_data():
@@ -1088,11 +1092,13 @@ def plot_full_residuals(df_agn, residuals, flat_samples, cosmo_model, z_pivot_ag
     # Select only the keys in your specified list (order preserved by np.flip)
     keys = [col for col in np.flip([
         'apparent_mag_2500', 'MY_M_2500', 'z', 'log_lbol', 'log_ledd_ratio', 
-        'log_sigma_UV', 'log_sigma_hat_UV', 'log_tau_UV_RF', 'chi_sq_g',
+        'log_sigma_UV', 'log_sigma_hat0', 'log_sigma_hat_UV', 'log_tau_UV_RF', 'chi_sq_g',
         'bwb_beta', 'sn_median_all', 'bwb_alpha', 'bwb_beta',
         'redchi', 'bwb_beta_4200', 'alpha_lambda', 'alpha_nu', 
         'f_host_5100', 'f_host_2500', 'f_host_4200',
-        'eta_A1', 'eta_A2', 'eta_tau1', 'eta_tau2'
+        'eta_A1', 'eta_A2', 'eta_tau1', 'eta_tau2',
+        'zWarning', 'sameZ', 'class_code', 'subClass_code',
+        'log_rho', 't_rf_length', 'tau_band_RF_mean'
     ]) if col in df_agn.columns]
 
     keys_masks = {

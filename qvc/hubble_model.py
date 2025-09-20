@@ -5,7 +5,10 @@ from collections import OrderedDict
 # --- ONE SOURCE OF TRUTH (orders) ---
 agn_model_req_params = ("M0_agn", "alpha_agn", "beta_agn")
 agn_model_req_obs     = ("log_sigma_UV", "log_tau_UV_RF")
-agn_model_req_errs   = ("log_sigma_UV_err", "log_tau_UV_RF_err", "cov_log_sigma_UV_log_tau_UV_RF")
+agn_model_req_errs   = (
+                        #"log_sigma_UV_err", "log_tau_UV_RF_err", "cov_log_sigma_UV_log_tau_UV_RF",
+                        "log_sigma_UV_std_psd", "log_tau_UV_RF_std_psd", "log_sigma_UV_log_tau_UV_RF_cov_psd"
+                        )
 
 # Build index maps once (module import time)
 agn_model_pidx = {k:i for i,k in enumerate(agn_model_req_params)}
@@ -54,13 +57,17 @@ def M_model_agn_err(params_arr, obs_arr, err_arr, pivots_array, check_negative=F
     alpha_agn   = params_arr[agn_model_pidx["alpha_agn"]]
     beta_agn    = params_arr[agn_model_pidx["beta_agn"]]
 
-    log_sigma_UV_err  = err_arr[agn_model_eidx["log_sigma_UV_err"]]
-    log_tau_UV_RF_err = err_arr[agn_model_eidx["log_tau_UV_RF_err"]]
-    cov_log_sigma_tau = err_arr[agn_model_eidx["cov_log_sigma_UV_log_tau_UV_RF"]]
+    # log_sigma_UV_err  = err_arr[agn_model_eidx["log_sigma_UV_err"]]
+    # log_tau_UV_RF_err = err_arr[agn_model_eidx["log_tau_UV_RF_err"]]
+    # cov_log_sigma_tau = err_arr[agn_model_eidx["cov_log_sigma_UV_log_tau_UV_RF"]]
+
+    log_sigma_UV_err  = err_arr[agn_model_eidx["log_sigma_UV_std_psd"]]
+    log_tau_UV_RF_err = err_arr[agn_model_eidx["log_tau_UV_RF_std_psd"]]
+    cov_log_sigma_tau = err_arr[agn_model_eidx["log_sigma_UV_log_tau_UV_RF_cov_psd"]]
 
     r = ((alpha_agn * log_sigma_UV_err)**2
         + (beta_agn  * log_tau_UV_RF_err)**2
-        #+ 2 * alpha_agn * beta_agn * cov_log_sigma_tau
+        + 2 * alpha_agn * beta_agn * cov_log_sigma_tau
     )
     if check_negative:
         if np.any(r < 0):
@@ -111,7 +118,7 @@ def get_model_params(cosmo_model, only_sna=False):
         ("alpha_agn", (0.0,  20.0)),
         ("beta_agn",  (-20.0,  0.0)),
 
-        ("log_f",     (-5.0,  0.3)),
+        ("log_f",     (-5.0,  3.0)),
 
         ("H0",       (70.0, 76.0)),
         ("Om0",      (0.2, 0.8)),
