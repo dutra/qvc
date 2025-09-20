@@ -116,6 +116,50 @@ def fetch_spectrum_fits(sdss_name, plate, fiber, mjd, cache_dir="data/spectra_ca
     # reopen without memory mapping to unify return type
     return fits.open(cache_file, memmap=False), False
 
+from astroquery.sdss import SDSS
+from astropy.table import Table
+from astropy.io.ascii.core import InconsistentTableError
+
+def zquery(plate, mjd, fiberid, dr=16, timeout=60):
+    """
+    Query SDSS for redshift and classification by (plate, mjd, fiberid).
+
+    Returns:
+        astropy.table.Table row (length-1) or None if no match / error.
+    """
+    # Make sure these are ints to avoid odd SQL formatting
+    plate   = int(plate)
+    mjd     = int(mjd)
+    fiberid = int(fiberid)
+
+    q = f"""
+    SELECT TOP 1
+        specObjID, plate, mjd, fiberID,
+        z, zErr, zWarning, class, subClass
+    FROM SpecObjAll
+    WHERE plate={plate} AND mjd={mjd} AND fiberID={fiberid}
+    """
+
+    try:
+        res = SDSS.query_sql(q, data_release=dr, timeout=timeout, cache=False)
+    except InconsistentTableError as e:
+        # This usually means the server returned HTML instead of CSV (e.g., error page)
+        print("SDSS returned a non-CSV response (likely an error page).")
+        print("Offending SQL:\n", q)
+        print("Astropy parsing error:", e)
+        raise e
+    except Exception as e:
+        print("SDSS query failed:", e)
+        print("Offending SQL:\n", q)
+        raise e
+
+    if res is None or len(res) == 0:
+        print("No rows returned for:", (plate, mjd, fiberid))
+        return None
+
+    # Print and return the single row
+    return dict(res[0])
+
 
 def load_spec_from_cache(sdss_name, cache_dir="data/spectra_cache"):
     """Return cached FITS HDUList if available, else None."""
@@ -591,7 +635,7 @@ def run_qsofit_record(rec, npca_qso, cache_dir="data/spectra_cache",
 def parse_args():
     p = argparse.ArgumentParser(description="DR16Q crossmatch, optional SDSS spectrum download, and QSOFit processing.")
     # p.add_argument("--input-csv",help="Path to sample CSV.")
-    p.add_argument("fpath_in", help="Path to h5 fits with mag means.")
+    p.add_argument("fpath_in", help="Path to either csv or h5 fits with mag means.")
     p.add_argument("fpath_out", help="Output file for QSOFit results.")
     p.add_argument("--filter_csv", default=None,
                    help="Optional CSV file with object_id column to filter input.")
@@ -613,13 +657,18 @@ def parse_args():
 
     p.add_argument("--spectral_fit_csv", default=None, type=str, 
                    help="Optional CSV file with spectral fit results to merge into output.")
+    p.add_argument("--zquery", action="store_true", help="If set, perform zquery on all matched spectra and exit.")
     return p.parse_args()
 
 
 def main():
     args = parse_args()
-
-    sample_df = load_agn_data(args.fpath_in, apply_cut=False, only_load=True)
+    if args.fpath_in.endswith(".h5"):
+        sample_df = load_agn_data(args.fpath_in, apply_cut=False, only_load=True)
+    elif args.fpath_in.endswith(".csv"):
+        sample_df = pd.read_csv(args.fpath_in, dtype={"object_id": str})
+    else:
+        raise ValueError(f"Unknown input file type: {args.fpath_in}")
 
     exclusion_sdss_names = [
         '221120.38+010905.6', # wrong redshift
@@ -671,6 +720,40 @@ def main():
             for i, name, msg in errors[:10]:
                 print(f"  - {i}:{name} -> {msg}")
         return  # Exit after download-only path
+    
+    if args.zquery:
+        SDSS.clear_cache()
+        N = len(data_cat)
+        results = []
+        errors = []
+        for i in tqdm(range(N), desc="Downloading spectra"):
+            row = data_cat[i]
+            plate, fiber, mjd = int(row['PLATE']), int(row['FIBERID']), int(row['MJD'])
+            sdss_name = str(row['SDSS_NAME'])
+            try:
+                res = zquery(plate, mjd, fiber)
+                res |= dict(object_id=str(row['object_id']), sdss_name=sdss_name, ra=float(row['RA']), dec=float(row['DEC']))
+                if res is not None:
+                    results.append(res)
+                else:
+                    errors.append((i, sdss_name, "zquery returned None"))
+            except Exception as e:
+                errors.append((i, sdss_name, str(e)))
+            #break  # TEMPORARY: only do one for testing
+        print(f"[DONE] Attempted {N} zquery. Errors: {len(errors)}")
+        if errors:
+            for i, name, msg in errors[:10]:
+                print(f"  - {i}:{name} -> {msg}")
+        if results:
+            csv_file = args.fpath_out
+            field_names = list(results[0].keys())
+            with open(csv_file, "w", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=field_names)
+                writer.writeheader()
+                for row in results:
+                    writer.writerow(row)
+            print(f"[OK] Saved zquery results to {csv_file}")
+        return  # Exit after zquery path
 
     os.makedirs('results/pysqo_fits', exist_ok=True)
     os.makedirs('data/pyqsofit', exist_ok=True)
@@ -715,7 +798,7 @@ def main():
     results_2 = {}
 
     for npca_qso, results_dict in [(0, results_0), (1, results_1), (2, results_2)]:
-        save_fig_path = os.path.join('plots', 'pyqsofit', f'prefix', f'npca_qso_{npca_qso}')
+        save_fig_path = os.path.join('plots', 'pyqsofit', prefix, f'npca_qso_{npca_qso}')
         os.makedirs(save_fig_path, exist_ok=True)
         worker = partial(run_qsofit_record, npca_qso=npca_qso, cache_dir=args.cache_dir, 
                         path_ex=f'data/pyqsofit', parfilename=f'qsopar_{prefix}_{suffix}.fits',
@@ -763,7 +846,7 @@ def main():
     write_hdf5_file(quasar_dict_list, args.fpath_out)
     
     # Also write results to CSV
-    csv_file=args.fpath_out.replace(".h5", ".csv")
+    csv_file=args.fpath_out.replace(".h5", "_specfitted.csv")
 
     field_names = [
         'object_id',
