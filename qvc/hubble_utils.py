@@ -117,6 +117,69 @@ def log_nuLnu_to_m2500(log_nuLnu, z):
     )
     return m_AB
 
+def populate_zquery(df, zquery_csv):
+    fields = {
+        'specObjID': str,
+        'plate': str,
+        'mjd': str,
+        'fiberID': str,
+        'z': float,
+        'zErr': float,
+        'zWarning': str,
+        'class': str,
+        'subClass': str,
+    }
+    # Load and concatenate two CSV files
+    df_zquery = pd.read_csv(
+        zquery_csv,
+        dtype={'object_id': str},
+        converters=fields
+    )
+
+    print("-------------------------- Z query report --------------------------")
+    print("Length of zquery csv file:", len(df_zquery))
+
+    merged = df.merge(df_zquery, on='object_id', how='left', suffixes=('', '_zquery'))
+
+    print("Length of zquery merged DataFrame:", len(merged))
+    missing_ids = set(df['object_id']) - set(df_zquery['object_id'])
+    print("object_id not in merged:", list(missing_ids))
+
+    df['sameZ'] = np.isclose(merged['z'], merged['z_zquery'], atol=1e-1, equal_nan=True)
+    not_sameZ = ~df['sameZ'].fillna(False)
+    print("Objects with differing z:", np.sum(not_sameZ))
+    for obj_id, sdss_name in zip(df.loc[not_sameZ, 'object_id'], df.loc[not_sameZ, 'sdss_name']):
+        print(f"\033[93m  object_id: {obj_id}, sdss_name: {sdss_name}, z: {merged.loc[merged['object_id'] == obj_id, 'z'].values}, z_zquery: {merged.loc[merged['object_id'] == obj_id, 'z_zquery'].values} zWarning: {merged.loc[merged['object_id'] == obj_id, 'zWarning'].values}\033[0m")
+
+    # Print in yellow all object_id and sdss_name with zWarning not 0
+    warn_mask = (merged['zWarning'].astype(str) != '0') & (~merged['zWarning'].isna())
+    print("Objects with zWarning:", np.sum(warn_mask))
+    for obj_id, sdss_name, zwarn in zip(
+            merged.loc[warn_mask, 'object_id'],
+            merged.loc[warn_mask, 'sdss_name'],
+            merged.loc[warn_mask, 'zWarning']):
+        print(f"\033[93m  object_id: {obj_id}, sdss_name: {sdss_name}, zWarning: {zwarn}\033[0m")
+
+    for col in fields.keys():
+        if f'{col}_zquery' in merged.columns:
+            df[f'{col}_zquery'] = merged[f'{col}_zquery']
+        else:
+            df[col] = merged[col]
+
+    # Convert zWarning and sameZ to int, fill missing or NaN with -99
+    for col in ['zWarning', 'sameZ']:
+        df[col] = pd.to_numeric(df[col], errors='coerce').fillna(-99).astype(int)
+
+    # Convert 'class' and 'subClass' columns to numeric codes
+    for col in ['class', 'subClass']:
+        df[f'{col}_code'] = df[col].astype('category').cat.codes
+        print(f"Column '{col}' code conversion:")
+        print(dict(enumerate(df[col].astype('category').cat.categories)))
+
+
+    return df
+#'results/data/sep19_chisq_zquery.csv'
+
 def populate_spectra_fit(df, spectra_fit_csv):
     # Load Colin's SDSS QSO 2500A magnitudes and merge with df on SDSS_NAME
     fields = {
@@ -148,7 +211,7 @@ def populate_spectra_fit(df, spectra_fit_csv):
     mean_err = df_spectra.loc[df_spectra['apparent_mag_2500_err'] > 0, 'apparent_mag_2500_err'].mean()
     df_spectra.loc[df_spectra['apparent_mag_2500_err'] == 0, 'apparent_mag_2500_err'] = mean_err
 
-    print("Length of colin_df:", len(df_spectra))
+    print("Length of spectral fit file:", len(df_spectra))
     print("Number with apparent_mag_2500 > 0:", np.sum(df_spectra['apparent_mag_2500'] > 0))
     # Merge on SDSS_NAME, bring in apparent_mag_2500
     merged = df.merge(df_spectra, on='object_id', how='left', suffixes=('', '_spectralfit'))
@@ -395,7 +458,7 @@ def populate_chi_sq_from_csv(df, csv_path="data/aug4_sample_chisqg10_ebv005sn3.c
     df['chi_sq_all'] = merged['chi_sq_all']
     return df
 
-def load_agn_data(file_path, populate_sdss=False, apply_cut=True, spectra_fit_csv=None, only_load=False):
+def load_agn_data(file_path, populate_sdss=False, apply_cut=True, spectra_fit_csv=None, zquery_csv=None, only_load=False):
     quasar_list = read_quasars_from_hdf5(file_path)
     print("Number of quasars loaded:", len(quasar_list))
 
@@ -459,11 +522,21 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, spectra_fit_cs
     df['alpha_nu'] = -df['alpha_lambda'] - 2
     df['alpha_nu_err'] = df['alpha_lambda_err']
 
-    if 'cov_log_sigma_UV_log_tau_UV_RF' not in df.columns:
-        print("[WARNING] cov_log_sigma_UV_log_tau_UV_RF not in data")
-        #df['cov_log_sigma_UV_log_tau_UV_RF'] = 0.0
-    
+    if zquery_csv is not None:
+        print("Populating zquery data from:", zquery_csv)
+        df = populate_zquery(df, zquery_csv)
+    else:
+        print("[WARNING] zquery_csv not provided, assuming zquery fields are in agn h5 file")
+        if 'zWarning' not in df.columns:
+            print("[WARNING] zquery fields not in data, setting zWarning and sameZ to -99")
+            df['zWarning'] = -99
+            df['sameZ'] = -99
 
+
+    # if 'cov_log_sigma_UV_log_tau_UV_RF' not in df.columns:
+    #     print("[WARNING] cov_log_sigma_UV_log_tau_UV_RF not in data")
+    #     #df['cov_log_sigma_UV_log_tau_UV_RF'] = 0.0
+    
     num_quasars_z_0_1_before = len(df[(df['z'] > 0) & (df['z'] <= 1.0)])
     num_quasars_z_gt_3_before = len(df[df['z'] > 3])
     print("Number of quasars with 0 < z <= 1.0:", num_quasars_z_0_1_before)
@@ -475,6 +548,11 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, spectra_fit_cs
     numeric_cols = df.select_dtypes(include=[np.number]).columns
     df[numeric_cols] = df[numeric_cols].where(~np.isinf(df[numeric_cols]), np.nan)
 
+    log_tau_band_RF = np.array([df[f'log_tau_band_{b}_RF' ] for b in ['u', 'g', 'r', 'i', 'z']])
+    tau_band_RF = np.power(10, log_tau_band_RF)
+    tau_band_RF_mean = np.mean(tau_band_RF, axis=0)
+    df['tau_band_RF_mean'] = tau_band_RF_mean
+    df['log_rho'] = np.log10(tau_band_RF_mean / df['t_rf_length'])
 
     # Replace NaNs with 0 in all columns
     #df = df.fillna(0)
@@ -498,13 +576,15 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, spectra_fit_cs
     df = df[mask_exclude].reset_index(drop=True)
     # Define cuts as (column, lower_limit, upper_limit)
     cuts = [
-        #('f_host_4200', None, 0.2),
+        ('f_host_4200', None, 0.2),
         #('z', None, 0.5),
         ('log_tau_UV_RF', 1.5, None),
         #('alpha_lambda', None, 0),
         ('redchi', None, 5),
         ('apparent_mag_2500', 16, 26),
-        ('apparent_mag_i', 15, 26)
+        ('apparent_mag_i', 15, 26),
+        # ('sameZ', 0.9, 1.1),
+        # ('zWarning', -0.1, 0.1),
         #('apparent_mag_i', 15, 25)
         # Uncomment/add more cuts as needed
         # ('z', 1, None),
@@ -1232,6 +1312,7 @@ from scipy import stats
 from scipy.integrate import quad
 import astropy.units as u
 from astropy import constants as const
+from astropy.table import Table as AstroTable
 
 # --- DESI (Planck) prior on 100*theta_* ---
 CMB_100THETA_MEAN = 1.04110

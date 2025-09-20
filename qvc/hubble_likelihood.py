@@ -117,8 +117,8 @@ def log_likelihood(theta, *, agn_data, pantheon_data,
         cosmo = FlatwCDM(H0=params['H0'], Om0=params['Om0'], w0=params['w0'])
     elif cosmo_model == 'Flatw0waCDM':
         cosmo = Flatw0waCDM(H0=params['H0'], Om0=params['Om0'], w0=params['w0'], wa=params['wa'])
-        if params['w0'] + params['wa'] >= 0:  # "no early DE" guard
-            return -np.inf, empty_blob(N_obj)
+        # if params['w0'] + params['wa'] >= 0:  # "no early DE" guard
+        #     return -np.inf, empty_blob(N_obj)
     elif cosmo_model == 'FlatwpwaCDM':
         cosmo = FlatwpwaCDM(H0=params['H0'], Om0=params['Om0'], wp=params['wp'], wa=params['wa'], zp=z_pivot_agn)
     elif cosmo_model == 'FlatLambdaCDM':
