@@ -738,7 +738,21 @@ def main():
         res1 = results_1[obj_id]
         res2 = results_2[obj_id]
 
-        best_res = min([res0, res1, res2], key=lambda r: r["redchi"])
+        #best_res = min([res0, res1, res2], key=lambda r: r["redchi"])
+
+        # Start with the simplest model
+        best_res = res0
+
+        # Only accept npca_qso=1 if it improves redchi by at least 20%
+        if res1["redchi"] <= 0.8 * res0["redchi"]:
+            best_res = res1
+
+        # Only accept npca_qso=2 if it improves redchi by at least 20% over the current best
+        if res2["redchi"] <= 0.8 * best_res["redchi"]:
+            best_res = res2
+
+        # TODO: If chi2 is still bad, use BC=True models
+
         results[obj_id] = best_res
 
     # Update each quasar dict with fields from results
