@@ -337,9 +337,10 @@ def create_qsopar_fits(path_ex='data/', parfilename='qsopar.fits', overwrite=Tru
         ('Blamer_norm',  0.0,   0.0,   1e10,  1),  # Balmer continuum normalization (< 3646 Å)
         ('Balmer_Te',  15000, 10000, 50000,  1),   # Balmer continuum Te
         ('Balmer_Tau',   0.5,   0.1,   2.0,   1),  # Balmer continuum τ
-        ('conti_a_0',    0.0,   np.nan, np.nan, 0),# Polynomial terms (bounds unused by QSOFit)
-        ('conti_a_1',    0.0,   np.nan, np.nan, 0),
-        ('conti_a_2',    0.0,   np.nan, np.nan, 0),
+        ('Balmer_vel',  3000, 12000, 18000,  1), # Velocity broadening of the Balmer continuum at < 3646 AA [lnlambda]
+        ('conti_a_0',    0.0,   -100.0,  100.0,  1),# Polynomial terms
+        ('conti_a_1',    0.0,   -100.0,  100.0,  1),
+        ('conti_a_2',    0.0,   -100.0,  100.0,  1),
     ], dtype=cp_dtype)
 
     hdr3 = fits.Header()
