@@ -333,7 +333,7 @@ def create_qsopar_fits(path_ex='data/', parfilename='qsopar.fits', overwrite=Tru
         ('Fe_op_FWHM',   3000,  1200,  18000, 1),  # Hβ/Hα Fe template FWHM
         ('Fe_op_shift',  0.0,  -0.01,  0.01,  1),  # Hβ/Hα Fe template shift [lnlambda]
         ('PL_norm',      1.0,   0.0,   1e10,  1),  # Power-law normalization (f_λ ∝ (λ/3000)^-α)
-        ('PL_slope',    -1.5,  -5.0,   0.5,   1),  # Power-law slope α
+        ('PL_slope',    -1.5,  -5.0,   -0.2,   1),  # Power-law slope α
         ('Blamer_norm',  0.0,   0.0,   1e10,  1),  # Balmer continuum normalization (< 3646 Å)
         ('Balmer_Te',  15000, 10000, 50000,  1),   # Balmer continuum Te
         ('Balmer_Tau',   0.5,   0.1,   2.0,   1),  # Balmer continuum τ
