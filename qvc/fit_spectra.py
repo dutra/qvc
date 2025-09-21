@@ -460,7 +460,7 @@ def run_qsofit_record(rec, npca_qso, cache_dir="data/spectra_cache",
             reject_badpix=True,    # reject 10 most possible outliers by the test of pointDistGESD
             deredden=True,          # correct the Galactic extinction
             #wave_range=[1150, 1e9], # trim input wavelength
-            wave_range=None,
+            wave_range=[1200, None], # trim input wavelength
             wave_mask=None,         # 2-D array, mask the given range(s)
 
             # host decomposition parameters
