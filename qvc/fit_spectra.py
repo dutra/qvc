@@ -19,6 +19,8 @@ os.environ["JAX_PLATFORM_NAME"] = "cpu"
 prefix = os.environ.get('PREFIX', "test")
 suffix = os.environ.get('SUFFIX', "test")
 
+print(f"PREFIX: {prefix}, SUFFIX: {suffix}")
+
 import sys
 import timeit
 import argparse
@@ -489,6 +491,9 @@ def run_qsofit_record(rec, npca_qso, cache_dir="data/spectra_cache",
         weights    = np.array(weights)    if weights    else np.array([1.0])
         mask = np.isfinite(delta_mags)
         delta_m_avg = np.average(delta_mags[mask], weights=weights[mask]) if np.any(mask) else 0.0
+        print(f"Applying flux correction of {delta_m_avg:.3f} mag for {rec['sdss_name']} using bands {bands}")
+        print(f"  (individual band deltas: {delta_mags})")
+        print("clean bands:", rec.get('clean_bands', 'N/A'))
 
         scale = 10 ** (-0.4 * delta_m_avg)
         flux_scaled = flux * scale
@@ -504,7 +509,7 @@ def run_qsofit_record(rec, npca_qso, cache_dir="data/spectra_cache",
             reject_badpix=True,    # reject 10 most possible outliers by the test of pointDistGESD
             deredden=True,          # correct the Galactic extinction
             #wave_range=[1150, 1e9], # trim input wavelength
-            wave_range=[1200, None], # trim input wavelength
+            wave_range=[1200, 1e9], # trim input wavelength
             wave_mask=None,         # 2-D array, mask the given range(s)
 
             # host decomposition parameters
@@ -566,6 +571,8 @@ def run_qsofit_record(rec, npca_qso, cache_dir="data/spectra_cache",
             kwargs_conti_emcee={},
             kwargs_line_emcee={}
         )
+        print("REDCHI: ", q_mle.conti_fit.redchi)
+        
         def _safe_float(x):
             try:
                 # unwrap numpy scalars/arrays/masked values
@@ -624,6 +631,8 @@ def run_qsofit_record(rec, npca_qso, cache_dir="data/spectra_cache",
             alpha_lambda_err=conti_dict['PL_slope_err'],
             redchi=q_mle.conti_fit.redchi
         )
+
+        print(f"[INFO] ({rec.get('sdss_name','?')}): redchi={result['redchi']:.3f}, npca_qso={npca_qso}, delta_m_avg={result['delta_m_avg']:.3f}, m_i_rest={result['apparent_mag_i_rest']:.3f}, m_2500={result['apparent_mag_2500']:.3f}±{result['apparent_mag_2500_err']:.3f}, f_host_5100={result['f_host_5100']:.3f}, alpha_lambda={result['alpha_lambda']:.3f}±{result['alpha_lambda_err']:.3f}")
         return result
 
     except Exception as e:
@@ -654,6 +663,8 @@ def parse_args():
     #            help="Number of parallel worker processes for QSOFit.")
     p.add_argument("--filter_object_id", nargs="+", help="List of object IDs to filter.")
     p.add_argument("--filter_sdss_name", nargs="+", help="List of sdss_names to filter.")
+    p.add_argument("--sequential", action="store_true",
+                   help="If set, use sequential (non-parallel) QSOFit processing.")
 
     p.add_argument("--spectral_fit_csv", default=None, type=str, 
                    help="Optional CSV file with spectral fit results to merge into output.")
@@ -678,9 +689,6 @@ def main():
     print(f"Excluding {np.sum(~mask_exclude)} objects by sdss_name in exclusion list")
     sample_df = sample_df[mask_exclude].reset_index(drop=True)
 
-    if args.filter_sdss_name is not None:
-        sample_df = sample_df[sample_df['sdss_name'].astype(str).isin(args.filter_sdss_name)]
-
     if args.filter_csv is not None:
         filter_df = pd.read_csv(args.filter_csv)
         if 'object_id' not in filter_df.columns:
@@ -688,6 +696,13 @@ def main():
         filter_ids = set(str(oid).strip() for oid in filter_df['object_id'].values if str(oid).strip())
         sample_df = sample_df[sample_df['object_id'].astype(str).str.strip().isin(filter_ids)]
         print(f"[INFO] After filtering with {args.filter_csv}, {len(sample_df)} rows remain")
+
+    if args.filter_sdss_name is not None:
+        sample_df = sample_df[sample_df['sdss_name'].astype(str).isin(args.filter_sdss_name)]
+        print(f"[INFO] After filtering with {len(args.filter_sdss_name)} sdss_names, {len(sample_df)} rows remain")
+
+
+
     sample_df = sample_df[args.skip:] if args.skip is not None else sample_df
     sample_df = sample_df[:args.N] if args.N is not None else sample_df
     sample_df['object_id'] = sample_df['object_id'].astype(str).str.strip()
@@ -804,15 +819,26 @@ def main():
                         path_ex=f'data/pyqsofit', parfilename=f'qsopar_{prefix}_{suffix}.fits',
                         save_fig_path=save_fig_path)
         chunksize = 1
-        with Pool(processes=num_cores) as pool:
-            with tqdm(total=len(records), desc=f"Processing npca_qso={npca_qso}", dynamic_ncols=True, smoothing=0.0) as pbar:
-                for res in pool.imap_unordered(worker, records, chunksize=chunksize):
-                    obj_id = res.get("object_id", None)
-                    if obj_id is not None:
-                        res['npca_qso'] = npca_qso
-                        results_dict[obj_id] = res
-                    pbar.update(1)
-        print(f"Collected {len(results_dict)} results for npca_qso={npca_qso}")
+        if args.sequential:
+            # Sequential processing
+            for rec in tqdm(records, desc=f"Processing npca_qso={npca_qso} (sequential)"):
+                res = worker(rec)
+                obj_id = res.get("object_id", None)
+                if obj_id is not None:
+                    res['npca_qso'] = npca_qso
+                    results_dict[obj_id] = res
+            print(f"Collected {len(results_dict)} results for npca_qso={npca_qso} (sequential)")
+        else:
+            # Parallel processing
+            with Pool(processes=num_cores) as pool:
+                with tqdm(total=len(records), desc=f"Processing npca_qso={npca_qso}", dynamic_ncols=True, smoothing=0.0) as pbar:
+                    for res in pool.imap_unordered(worker, records, chunksize=chunksize):
+                        obj_id = res.get("object_id", None)
+                        if obj_id is not None:
+                            res['npca_qso'] = npca_qso
+                            results_dict[obj_id] = res
+                        pbar.update(1)
+            print(f"Collected {len(results_dict)} results for npca_qso={npca_qso}")
 
     # Select best result (lowest redchi) for each object
     results = {}
@@ -842,6 +868,7 @@ def main():
         best_res["redchi_npca_qso2"] = res2.get("redchi", np.nan)
 
         results[obj_id] = best_res
+        print(f"Object {obj_id}: selected npca_qso={best_res['npca_qso']} with redchi={best_res['redchi']:.3f} (0:{res0['redchi']:.3f}, 1:{res1['redchi']:.3f}, 2:{res2['redchi']:.3f})")
 
     # Update each quasar dict with fields from results
     for quasar in quasar_dict_list:
