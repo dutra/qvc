@@ -634,7 +634,7 @@ if __name__ == '__main__':
     for obj in objs:
         print(f"Object {obj['object_id']}: f_host_5100 = {obj['f_host_5100']}")
 
-    if args.lmc > 0:
+    if args.lmc >= 0:
         print(f"\033[93m[WARNING] Using LMC model (Q={args.lmc}).\033[0m")
         Model = MyMultiVarModel_BLR_LMC
     elif args.lmc == -1:
