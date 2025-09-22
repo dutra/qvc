@@ -1782,6 +1782,119 @@ def get_w0_wa_from_pivot(flat_samples, cosmo_model, z_p):
 
     return w0, wa
 
+import math
+from typing import Tuple, Optional
+
+def _round_sig(x: float, sig: int) -> float:
+    if x == 0 or not math.isfinite(x):
+        return x
+    return round(x, -int(math.floor(math.log10(abs(x)))) + (sig - 1))
+
+def format_value_uncertainty(
+    median: float,
+    err: Optional[float] = None,
+    *,
+    twosig_when=(1, 2, 3),
+    sci: bool = True,
+    latex: bool = True,
+    unit: Optional[str] = None,
+    max_decimals_no_sci: int = 2,          # <- cap decimals in non-sci mode
+    prefer_fewer_decimals: bool = True     # <- use 1 sig fig if 2 would exceed the cap
+) -> Tuple[float, Optional[float], int, str]:
+    """
+    Returns (value_rounded, err_rounded, exponent, formatted_string).
+    - Uncertainty: 1 sig fig, except 2 when leading digit in twosig_when,
+      but if that would exceed `max_decimals_no_sci` in non-sci mode, fall back to 1.
+    - Value rounded to same decimal place as the (rounded) uncertainty.
+    - No '±' when err is None.
+    - Avoid sci for 0.1 <= |value| < 10 (plain decimals).
+    - Special-case: fold 1×10^{-1} or 1×10^{-2} into 0.1 / 0.01.
+    """
+    # choose exponent (initial)
+    if median == 0 or not math.isfinite(median):
+        exponent = 0
+    else:
+        exponent = int(math.floor(math.log10(abs(median)))) if sci else 0
+
+    # avoid sci in [0.1, 10)
+    if sci and 0.1 <= abs(median) < 10:
+        exponent = 0
+
+    scale = 10.0 ** exponent if exponent != 0 else 1.0
+    v = median / scale
+
+    def decimals_needed(x: float) -> int:
+        if x == 0: return 0
+        return max(0, -int(math.floor(math.log10(abs(x)))))  # e.g. 0.02 -> 2
+
+    if err is None:
+        v_rounded = _round_sig(v, 3) if exponent != 0 else _round_sig(v, 3)
+        e_rounded = None
+    else:
+        if err < 0 or not math.isfinite(err):
+            raise ValueError("err must be finite and non-negative.")
+        e = err / scale
+
+        if e == 0:
+            e_rounded = 0.0
+            v_rounded = round(v, 6)
+        else:
+            # candidate with 2 sig figs?
+            e1 = _round_sig(e, 1)
+            lead = int(abs(e1) / (10 ** math.floor(math.log10(abs(e1)))))
+            use_two = lead in twosig_when
+
+            # if non-sci and two sig figs would exceed decimal cap, fall back to 1
+            if use_two:
+                e_two = _round_sig(e, 2)
+                if exponent == 0 and prefer_fewer_decimals and decimals_needed(e_two) > max_decimals_no_sci:
+                    use_two = False
+
+            sig_unc = 2 if use_two else 1
+            e_rounded = _round_sig(e, sig_unc)
+
+            # round value to same decimal place as e_rounded
+            digits = decimals_needed(e_rounded)
+            v_rounded = round(v, digits)
+
+            # re-enforce after potential order change
+            e_rounded = _round_sig(e, sig_unc)
+            digits = decimals_needed(e_rounded)
+            v_rounded = round(v, digits)
+
+    # special-case: (±)1×10^{-1 or -2} -> fold to decimal
+    if sci and exponent in (-1, -2) and (abs(v_rounded) == 1.0):
+        v_rounded *= 10 ** exponent
+        if err is not None:
+            e_rounded *= 10 ** exponent
+        exponent = 0
+        scale = 1.0
+
+    # build string
+    if latex:
+        if exponent != 0:
+            s = (f"{v_rounded}\\times 10^{{{exponent}}}"
+                 if err is None else f"({v_rounded} \\pm {e_rounded})\\times 10^{{{exponent}}}")
+        else:
+            s = (f"{v_rounded}" if err is None else f"{v_rounded} \\pm {e_rounded}")
+        if unit:
+            s += f"\\,\\mathrm{{{unit}}}"
+    else:
+        if exponent != 0:
+            s = (f"{v_rounded}×10^{exponent}"
+                 if err is None else f"({v_rounded} ± {e_rounded})×10^{exponent}")
+        else:
+            s = (f"{v_rounded}" if err is None else f"{v_rounded} ± {e_rounded}")
+        if unit:
+            s += f" {unit}"
+
+    val_out = v_rounded * (10 ** exponent if exponent != 0 else 1.0)
+    err_out = (e_rounded * (10 ** exponent) if (err is not None and exponent != 0) else (e_rounded if err is not None else None))
+    
+    return s
+    return val_out, err_out, exponent, s
+
+
 def write_results_tex_variables(df_agn, flat_samples, cosmo_model, compare_r, z_pivot_agn, write_path):
     """
     Write key cosmological parameters to a LaTeX file as \newcommand definitions.
@@ -1814,27 +1927,53 @@ def write_results_tex_variables(df_agn, flat_samples, cosmo_model, compare_r, z_
     lines = []
     lines.append(r"% Auto-generated cosmological parameters from MCMC samples")
     lines.append(r"% Do not edit by hand; regenerate with write_results_tex_variables()")
-    lines.append(r"\newcommand{\resultSigma}{\ensuremath{%.2f}}" % compare_r["sigma_from_odds_two_sided"])
+    lines.append(r"\newcommand{\resultNumAGN}{%d}" % len(df_agn))
+    lines.append(r"\newcommand{\resultSigma}{\ensuremath{%s}}" % format_value_uncertainty(compare_r["sigma_from_odds_two_sided"], None))
 
-    lines.append(r"\newcommand{\resultAlphaAGN}{\ensuremath{%.1f \pm %.2f}}" % (results['alpha_agn'][0], results['alpha_agn'][1]))
-    lines.append(r"\newcommand{\resultBetaAGN}{\ensuremath{%.1f \pm %.2f}}" % (results['beta_agn'][0], results['beta_agn'][1]))
+    lines.append(r"\newcommand{\resultAlphaAGN}{\ensuremath{%s}}" % format_value_uncertainty(results['alpha_agn'][0], results['alpha_agn'][1]))
+    lines.append(r"\newcommand{\resultBetaAGN}{\ensuremath{%s}}" % format_value_uncertainty(results['beta_agn'][0], results['beta_agn'][1]))
 
-    lines.append(r"\newcommand{\resultlogSigmaUVPivot}{\ensuremath{%.1f}}" % (log_sigma_UV_pivot))
-    lines.append(r"\newcommand{\resultlogTauUVRFPivot}{\ensuremath{%.1f}}" % (log_tau_UV_RF_pivot))
+    lines.append(r"\newcommand{\resultSigmaUVPivot}{\ensuremath{%s}}" % format_value_uncertainty(10**log_sigma_UV_pivot, None))
+    lines.append(r"\newcommand{\resultTauUVRFPivot}{\ensuremath{%s}}" % format_value_uncertainty(10**log_tau_UV_RF_pivot, None))
+
 
 
     M0_agn_samples = flat_samples[:, model_labels.index('M0_agn')]
-    L2500, L2500_err = sym_percentile(-0.4 * (M0_agn_samples - 90.0))
-    lines.append(r"\newcommand{\resultL}{\ensuremath{%.1f \pm %.2f}}" % (0, 0))
+    alpha_agn_samples = flat_samples[:, model_labels.index('alpha_agn')]
+    beta_agn_samples = flat_samples[:, model_labels.index('beta_agn')]
 
-    hd_scatter = np.exp(flat_samples[:, model_labels.index('log_f')])
-    lines.append(r"\newcommand{\resultScatterHD}{\ensuremath{%.2f \pm %.2f}}" % sym_percentile(hd_scatter))
+    alpha_AGN_L_samples = alpha_agn_samples * (-1/2.5)
+    beta_AGN_L_samples  = beta_agn_samples * (-1/2.5)
+    L_intercept_samples = np.power(10, (90-M0_agn_samples)/2.5)
 
-    lines.append(r"\newcommand{\resultScatterL}{\ensuremath{%.2f \pm %.2f}}" % (0, 0))
+    L_intercept, L_intercept_err = sym_percentile(L_intercept_samples)
+    val, err = L_intercept, L_intercept_err
+
+    # --- Extract exponent from the value ---
+    exp = int(np.floor(np.log10(abs(val)))) if val != 0 else 0
+    scale = 10.0**exp
+
+    mant_val = val / scale
+    mant_err = err / scale
+
+    lines.append(
+        r"\newcommand{\resultLIntercept}{\ensuremath{%s}}" %
+        format_value_uncertainty(*sym_percentile(L_intercept_samples), unit=r"erg\,s^{-1}")
+    )
+
+    lines.append(r"\newcommand{\resultAlphaAGNL}{\ensuremath{%s}}" % format_value_uncertainty(*sym_percentile(alpha_AGN_L_samples)))
+    lines.append(r"\newcommand{\resultBetaAGNL}{\ensuremath{%s}}" % format_value_uncertainty(*sym_percentile(beta_AGN_L_samples)))
+
+    hd_scatter_samples = np.exp(flat_samples[:, model_labels.index('log_f')])
+    lines.append(r"\newcommand{\resultScatterHD}{\ensuremath{%s}}" % format_value_uncertainty(*sym_percentile(hd_scatter_samples), unit=r"mag"))
+
+    l_scatter_samples = hd_scatter_samples / 2.5
+    lines.append(r"\newcommand{\resultScatterL}{\ensuremath{%s}}" % format_value_uncertainty(*sym_percentile(l_scatter_samples), unit=r"dex"))
 
 
     tex_path = os.path.join(write_path, "param_results.tex")
     with open(tex_path, "w") as f:
         for line in lines:
+            print(line)
             f.write(line + "\n")
     print(f"Wrote result parameters LaTeX commands to {tex_path}")
