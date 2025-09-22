@@ -18,7 +18,11 @@ but if you just want to test small things, you can request a100 or even a5000
 
 ## Create new conda env
 ``module load miniconda``
+## CPU env (suggested)
+`conda create --name jaxcpu python=3.13.5 jax jaxopt jupyter jupyterlab numpyro tinygp matplotlib astropy jaxopt h5py tqdm ipykernel pandas corner scipy`
+`conda activate jaxcpu`
 
+## GPU env
 ``conda create -n jaxgpu python=3.12.11 jupyter jupyterlab "jax[cuda12]" numpyro tinygp matplotlib astropy jaxopt h5py tqdm ipykernel pandas corner scipy ``
 
 ``conda activate jaxgpu``
@@ -28,7 +32,7 @@ delete the dependencies in dependencies array in eztaox/pyproject.toml
 
 in eztaox folder, run
 
-``pip install -e .``
+``pip install .``
 
 you may need to install other packages with pip, make a note of them:
 
@@ -84,3 +88,14 @@ def _L_conti(self, wave, pp, waves=np.array([1350, 3000, 5100])):
 
         return L
 ```
+
+# Yale HPC Notes
+## Show your jobs status:
+`squeue -u <netid>`
+
+## Show a specific job status:
+`squeue -j <jobid>`
+
+## Hold a job(set priority to 0):
+`scontrol hold <jobid>`
+Undo with `scontrol release <joid>`
