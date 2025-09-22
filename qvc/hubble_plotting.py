@@ -729,7 +729,8 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
 
     # Hide the main panel's x-axis labels, numbers, and ticks (leave residuals' x-axis intact)
     ax.set_xlabel("")  # remove main x-axis label
-    ax.tick_params(axis='x', which='both', labelbottom=False, bottom=False, top=False)
+    ax.tick_params(axis='x', which='minor', direction='in', labelbottom=False, length=4, top=True, right=True, width=2)
+    ax.tick_params(axis='x', which='major', direction='in', labelbottom=False, length=8, top=True, right=True)
     ax.xaxis.offsetText.set_visible(False)  # hide any scientific-notation offset text
 
     # Legend
