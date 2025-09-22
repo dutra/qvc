@@ -16,8 +16,8 @@ if multiprocessing.current_process().name == "MainProcess":
 os.environ["XLA_FLAGS"] = f"--xla_force_host_platform_device_count={num_cores}"
 os.environ["JAX_PLATFORM_NAME"] = "cpu"
 
-prefix = os.environ.get('PREFIX', "pyqsofit")
-suffix = os.environ.get('SUFFIX', "pyqsofit")
+prefix = os.environ.get('PREFIX', "test")
+suffix = os.environ.get('SUFFIX', "test")
 
 import sys
 import timeit
@@ -827,7 +827,7 @@ def main():
         best_res = res0
 
         # Only accept npca_qso=1 if it improves redchi by at least 20%
-        if res1["redchi"] <= 0.8 * res0["redchi"]:
+        if res1["redchi"] <= 0.8 * best_res["redchi"]:
             best_res = res1
 
         # Only accept npca_qso=2 if it improves redchi by at least 20% over the current best
@@ -835,6 +835,11 @@ def main():
             best_res = res2
 
         # TODO: If chi2 is still bad, use BC=True models
+
+        # Add redchi for each npca_qso to the best result
+        best_res["redchi_npca_qso0"] = res0.get("redchi", np.nan)
+        best_res["redchi_npca_qso1"] = res1.get("redchi", np.nan)
+        best_res["redchi_npca_qso2"] = res2.get("redchi", np.nan)
 
         results[obj_id] = best_res
 
@@ -850,6 +855,10 @@ def main():
 
     field_names = [
         'object_id',
+        'plate',
+        'mjd',
+        'fiber',
+        'Z_SYS',
         "delta_m_avg",
         "delta_mags",
         "apparent_mag_i_rest",
@@ -861,9 +870,12 @@ def main():
         "f_host_5100",
         "alpha_lambda",
         "alpha_lambda_err",
+        'redchi_npca_qso0',
+        'redchi_npca_qso1',
+        'redchi_npca_qso2',
         "redchi",
         "npca_qso",
-        'sdss_name',
+        'sdss_name',               
     ]
 
     with open(csv_file, "w", newline="") as f:
