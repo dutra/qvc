@@ -278,7 +278,7 @@ def run_mcmc_pipeline(df_agn, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, c
 
 
 def run_single(df_agn, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, cosmo_model, completeness=True, use_full_cov=True, 
-               N=None, resume=False, only_sna=False, speed="production", use_mu_sh0es=False, cosmo_model_residual=None, verbose=True):
+               N=None, resume=False, only_sna=False, speed="production", use_mu_sh0es=False, cosmo_model_samples={}, verbose=True):
 
     # Load data
     #global _sna_LogdetCov, _sna_L, _sna_Lower
@@ -315,7 +315,7 @@ def run_single(df_agn, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, cosmo_mo
     debiased_residuals, _, _ = plot_hubble(flat_samples, df_agn, df_pantheon, 
                                                          cosmo_model=cosmo_model, z_pivot_agn=z_pivot_agn, 
                                                          show_true=False, show=False, debias=True, dms=dmag_corr, plot_path=plot_path,
-                                                         cosmo_model_residual=cosmo_model_residual, verbose=verbose)
+                                                         cosmo_model_samples=cosmo_model_samples, verbose=verbose)
 
     print("Plotting predicted L2500 vs ...")
     plot_predicted_L2500_vs_sigmahat(flat_samples, df_agn, cosmo_model=cosmo_model, z_pivot_agn=z_pivot_agn, 
@@ -345,7 +345,7 @@ def run_single(df_agn, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, cosmo_mo
     if cosmo_model == 'FlatwpwaCDM':
         zp = compute_pivot_redshift(flat_samples, cosmo_model)
         print("Computed pivot redshift: ", zp)
-
+    
     display_results_summary(flat_samples, cosmo_model, z_pivot_agn)
 
     print('std debiased residuals:', np.std(debiased_residuals))
@@ -355,18 +355,18 @@ def run_single(df_agn, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, cosmo_mo
 
 
 def run_all(df_agn, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, cosmo_model, speed="production", resume=False, N=None, use_mu_sh0es=False):
-    #cosmo_models = ['Flatw0waCDM', 'FlatwCDM']
-    cosmo_models = ['Flatw0waCDM', 'FlatwCDM', 'FlatLambdaCDM']
+    cosmo_models = ['Flatw0waCDM', 'FlatLambdaCDM', 'FlatwCDM']
 
     cosmo_models_latex = {'Flatw0waCDM': r'Flat$w_0w_a$CDM', 'FlatwCDM': r'Flat$w$CDM', 'FlatLambdaCDM': r'Flat$\Lambda$CDM'}
     cosmo_models_dict = {k: {} for k in cosmo_models}
     results_latex = []
-    cosmo_model_residual = None
+    cosmo_model_samples = {}
+
     for cosmo_model in cosmo_models:
         r = run_single(df_agn, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, 
                        cosmo_model=cosmo_model, only_sna=False, 
                        resume=resume, speed=speed, N=N,
-                       cosmo_model_residual=cosmo_model_residual)
+                       cosmo_model_samples=cosmo_model_samples)
         _, samples_joint, _, _, logZ_joint, logZerr_joint, debiased_residuals = r
         r = run_single(df_agn, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, 
                        cosmo_model=cosmo_model, only_sna=True, 
@@ -381,7 +381,7 @@ def run_all(df_agn, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, cosmo_model
                                                     logZ_tuple=(logZ_sna, logZerr_sna), format_for_latex=True, value_fmt="{:.2f}")
         r_joint   = extract_cosmo_results_from_samples(samples_joint, cosmo_model, False,  
                                                     logZ_tuple=(logZ_joint, logZerr_joint), format_for_latex=True, value_fmt="{:.2f}")
-        cosmo_model_residual = (cosmo_model, samples_joint)
+        cosmo_model_samples[cosmo_model] = samples_joint
         results_latex.extend([r_sna, r_joint])
     
     make_cosmo_table_latex(results_latex, write_path=f"plots/hubble/{prefix}/")
@@ -398,11 +398,15 @@ def run_all(df_agn, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, cosmo_model
     print(f"Comparing models {model_1} and {model_2} by log-evidence:")
     print(f"  {model_1_name}: logZ = {logZ_1:.2f} ± {logZerr_1:.2f}")
     print(f"  {model_2_name}: logZ = {logZ_2:.2f} ± {logZerr_2:.2f}")
-    compare_models_by_log_evidence(logZ_1=logZ_1, logZerr_1=logZerr_1, 
+    compare_r = compare_models_by_log_evidence(logZ_1=logZ_1, logZerr_1=logZerr_1, 
                                    logZ_2=logZ_2, logZerr_2=logZerr_2,
                                    model_1_name=model_1_name,
                                    model_2_name=model_2_name,
                                    write_path=f"plots/hubble/{prefix}/")
+    
+    write_results_tex_variables(df_agn, cosmo_model_samples['Flatw0waCDM'], 'Flatw0waCDM', compare_r, z_pivot_agn,
+                                f"plots/hubble/{prefix}")
+
 
 if __name__ == "__main__":
     #global _sna_LogdetCov, _sna_L, _sna_Lower

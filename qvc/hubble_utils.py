@@ -18,7 +18,7 @@ from scipy.stats import norm, sigmaclip, multivariate_normal
 from scipy.interpolate import RegularGridInterpolator
 
 from dynesty.utils import resample_equal
-from hubble_model import get_model_params, M_model_agn, M_model_agn_err
+from hubble_model import get_model_params, M_model_agn, M_model_agn_err, agn_model_pack_obs, agn_model_pack_params, agn_model_oidx
 from scipy.linalg import cho_factor, cho_solve, eigh
 from scipy.stats import linregress
 from scipy.stats import pearsonr
@@ -26,6 +26,15 @@ from scipy.stats import pearsonr
 bands = ['u', 'g', 'r', 'i', 'z']#, 'y']
 bands_idx = {b: i for i, b in enumerate(bands)}
 filters = {"u": 0, "g": 1, "r": 2, "i": 3, "z": 4, "y": 5} # harcoded filter order for SDSS
+
+def convert_M2500_to_logL2500(M2500):
+    return -1/2.5 * (M2500 - 90.0)
+def convert_logL2500_to_M2500(logL2500):
+    return -2.5 * logL2500 + 90.0
+
+def sym_percentile(x, p=[16, 50, 84], axis=0):
+    lower, median, upper = np.percentile(x, p, axis=axis)
+    return median, 0.5 * (upper - lower)
 
 def find_optimal_pivot(flat_samples,
                        cosmo_model,
@@ -117,6 +126,79 @@ def log_nuLnu_to_m2500(log_nuLnu, z):
     )
     return m_AB
 
+def match_radec(df_a, df_b, populate_cols=[], ra_col_a='ra', dec_col_a='dec', ra_col_b='ra', dec_col_b='dec', max_sep_arcsec=1.0):
+    """
+    Match objects in df_a to df_b by sky coordinates within max_sep_arcsec.
+    Returns a DataFrame with indices and separation for matches.
+    """
+    coords_a = SkyCoord(ra=df_a[ra_col_a].values * u.deg, dec=df_a[dec_col_a].values * u.deg)
+    coords_b = SkyCoord(ra=df_b[ra_col_b].values * u.deg, dec=df_b[dec_col_b].values * u.deg)
+
+    idx, d2d, _ = coords_a.match_to_catalog_sky(coords_b)
+    match_mask = d2d < max_sep_arcsec * u.arcsec
+
+    # Prepare result DataFrame
+    result = df_a.copy()
+    result['matched_idx_b'] = np.where(match_mask, idx, -1)
+    result['matched_sep_arcsec'] = d2d.arcsec
+    # Optionally, add matched object_id or similar column if present in df_b
+    for col in populate_cols:
+        matched_values = np.where(match_mask, df_b.iloc[idx][col].values, None)
+        result[f'matched_{col}'] = matched_values
+            
+
+    # Print warnings for unmatched
+    for i, matched in enumerate(match_mask):
+        if not matched:
+            print(f"Warning: No match found for index {i} (RA={df_a.iloc[i][ra_col_a]}, DEC={df_a.iloc[i][dec_col_a]})")
+    return result
+
+def populate_xray(df, table='data/table_csc.xml'):
+    """
+    Populate X-ray data from a table (CSV or XML) into the DataFrame df by matching on 'object_id'.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        DataFrame with at least an 'object_id' column.
+    table : str
+        Path to the table file (CSV or XML) containing X-ray data.
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame with new/updated X-ray columns merged in.
+    """
+    # Try to load as CSV first, fallback to XML if needed
+    if table.endswith('.csv'):
+        df_xray = pd.read_csv(table, dtype={'object_id': str})
+    elif table.endswith('.xml'):
+        # Try to read as a VOTable (astropy)
+        try:
+            t = AstroTable.read(table, format='votable')
+            df_xray = t.to_pandas()
+        except Exception as e:
+            print(f"Failed to read XML table: {e}")
+            return df
+        if 'object_id' not in df_xray.columns:
+            # Try to find a column that matches object_id
+            for col in df_xray.columns:
+                if col.lower() == 'object_id':
+                    df_xray.rename(columns={col: 'object_id'}, inplace=True)
+                    break
+    else:
+        raise ValueError("Unsupported table format: must be .csv or .xml")
+
+    print(f"Loaded X-ray table: {table} with {len(df_xray)} rows")
+    merged = df.merge(df_xray, on='object_id', how='left', suffixes=('', '_xray'))
+
+    # Add all columns from df_xray (except object_id) to df
+    for col in df_xray.columns:
+        if col != 'object_id':
+            df[col] = merged[col]
+
+    return df
+
 def populate_zquery(df, zquery_csv):
     fields = {
         'specObjID': str,
@@ -192,7 +274,8 @@ def populate_spectra_fit(df, spectra_fit_csv):
             'delta_m_avg': float,
             'alpha_lambda': float,
             'alpha_lambda_err': float,
-            'redchi': float
+            'redchi': float,
+            'npca_qso': int
         }
     # Load and concatenate two CSV files
     for col in fields.keys():
@@ -220,6 +303,7 @@ def populate_spectra_fit(df, spectra_fit_csv):
     print("object_id not in merged:", list(missing_ids))
     for col in fields.keys():
         df[col] = merged[col]
+    df['log_redchi'] = np.log10(df['redchi'].replace(0, np.nan))
     return df
 
 
@@ -548,12 +632,18 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, spectra_fit_cs
     numeric_cols = df.select_dtypes(include=[np.number]).columns
     df[numeric_cols] = df[numeric_cols].where(~np.isinf(df[numeric_cols]), np.nan)
 
-    log_tau_band_RF = np.array([df[f'log_tau_band_{b}_RF' ] for b in ['u', 'g', 'r', 'i', 'z']])
-    tau_band_RF = np.power(10, log_tau_band_RF)
-    tau_band_RF_mean = np.mean(tau_band_RF, axis=0)
+    log_tau_band_RF = np.array([df[f'log_tau_band_{b}_RF'] for b in ['u', 'g', 'r', 'i', 'z']])
+    # Mask values <= 0
+    masked_tau = np.where(log_tau_band_RF > 0, np.power(10, log_tau_band_RF), np.nan)
+    tau_band_RF_mean = np.nanmean(masked_tau, axis=0)
+
+    df['log_tau_band_RF_mean'] = np.log10(tau_band_RF_mean)
+    df['log_t_rf_length'] = np.log10(df['t_rf_length'])
     df['tau_band_RF_mean'] = tau_band_RF_mean
     df['log_rho'] = np.log10(tau_band_RF_mean / df['t_rf_length'])
 
+    df['log_f_host_4200'] = np.where(df['f_host_4200'] > 0, np.log10(df['f_host_4200']), np.nan)
+    df['log_f_host_5100'] = np.where(df['f_host_5100'] > 0, np.log10(df['f_host_5100']), np.nan)
     # Replace NaNs with 0 in all columns
     #df = df.fillna(0)
 
@@ -577,12 +667,14 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, spectra_fit_cs
     # Define cuts as (column, lower_limit, upper_limit)
     cuts = [
         ('f_host_4200', None, 0.2),
-        #('z', None, 0.5),
         ('log_tau_UV_RF', 1.5, None),
+        #('redchi', None, 5),
+        #('apparent_mag_2500', 16, 26),
+        #('apparent_mag_i', 15, 26),
+        ('apparent_mag_2500', 12, 30),
+        ('apparent_mag_i', 12, 30),
+        #('z', None, 0.5),
         #('alpha_lambda', None, 0),
-        ('redchi', None, 5),
-        ('apparent_mag_2500', 16, 26),
-        ('apparent_mag_i', 15, 26),
         # ('sameZ', 0.9, 1.1),
         # ('zWarning', -0.1, 0.1),
         #('apparent_mag_i', 15, 25)
@@ -754,7 +846,7 @@ def compare_models_by_log_evidence(
 ):
     """
     Bayesian comparison using log-evidences, with sigma-style significance.
-    Stable for huge |Δln Z|. Outputs both plain-text and LaTeX ApJ sentences.
+    Stable for huge |Δln Z|.
     """
 
     # --- Basic deltas and MC reliability ---
@@ -809,31 +901,6 @@ def compare_models_by_log_evidence(
     # --- Wilks-like (orientation only) ---
     sigma_wilks_like = math.sqrt(2.0 * absD)
 
-    # --- ApJ-style sentences (plain + LaTeX) ---
-    apj_sentence = (
-        f"Adopting equal model priors, we obtain Δln Z = {delta_logZ:.2f} ± {delta_logZ_err:.2f} "
-        f"({model_1_name}−{model_2_name}), implying a Bayes factor B₁₂ ≈ {B12_str} "
-        + (f" {B12_ci_str} " if B12_ci_str else "")
-        + f"and a two-sided Gaussian significance of Z = {sigma_two:.2f}σ (odds-based mapping), "
-          "which constitutes "
-        f"{strength.lower()} evidence in favor of {preferred_model}."
-    )
-
-    m1_tex = _latex_escape_text(model_1_name)
-    m2_tex = _latex_escape_text(model_2_name)
-    preferred_tex = _latex_escape_text(preferred_model)
-    apj_sentence_tex = (
-        r"Adopting equal model priors, we obtain "
-        rf"$\Delta\ln Z = {delta_logZ:.2f} \pm {delta_logZ_err:.2f}$ "
-        rf"({m1_tex}--{m2_tex}), "
-        r"implying a Bayes factor "
-        rf"$B_{{12}}\approx 10^{{{log10K:.2f}}}$"
-        + (rf" $\left[10^{{{log10K_lo:.2f}}},\,10^{{{log10K_hi:.2f}}}\right]$ " if B12_ci_str else " ")
-        + r"and a two-sided Gaussian significance of "
-        rf"$Z={sigma_two:.2f}\,\sigma$ "
-        r"(odds-based mapping), which constitutes "
-        f"{strength.lower()} evidence in favor of {preferred_tex}."
-    )
 
     # --- Compose shared lines (console/file) ---
     lines = [
@@ -851,10 +918,7 @@ def compare_models_by_log_evidence(
         "Significance from odds (astro/cosmology convention):\n",
         f"  two-sided Z = {sigma_two:.4f}σ  [{sigma_two_lo:.4f}, {sigma_two_hi:.4f}]\n",
         f"  one-sided Z = {sigma_one:.4f}σ  [{sigma_one_lo:.4f}, {sigma_one_hi:.4f}]\n",
-        f"Wilks-like sigma (orientation only) = {sigma_wilks_like:.4f}σ\n",
-        apj_sentence + "\n",
-        "LaTeX (ApJ-ready):\n",
-        apj_sentence_tex + "\n",
+        f"Wilks-like sigma (orientation only) = {sigma_wilks_like:.4f}σ\n"
     ]
 
     # --- Print and save ---
@@ -868,10 +932,6 @@ def compare_models_by_log_evidence(
     text_path = os.path.join(write_path, f"compare_{safe_m1}_vs_{safe_m2}.txt")
     with open(text_path, "w", encoding="utf-8") as f:
         f.writelines(lines)
-
-    tex_path = os.path.join(write_path, f"compare_{safe_m1}_vs_{safe_m2}.tex")
-    with open(tex_path, "w", encoding="utf-8") as f:
-        f.write(apj_sentence_tex + "\n")
 
     # --- Return result dict ---
     return {
@@ -891,10 +951,7 @@ def compare_models_by_log_evidence(
         "sigma_from_odds_one_sided_ci_1sigma": (sigma_one_lo, sigma_one_hi),
         "sigma_from_odds_two_sided_ci_1sigma": (sigma_two_lo, sigma_two_hi),
         "sigma_wilks_like": sigma_wilks_like,
-        "apj_sentence": apj_sentence,
-        "apj_sentence_tex": apj_sentence_tex,
         "text_path": text_path,
-        "tex_path": tex_path,
     }
 
 
@@ -961,11 +1018,11 @@ def make_cosmo_table_latex(
     }
 
     # ---------- model order ----------
-    model_order = [r"Flat $\Lambda$CDM", r"Flat$w$CDM", r"Flat$w_0w_a$CDM"]
+    model_order = [r"Flat$\Lambda$CDM", r"Flat$w$CDM", r"Flat$w_0w_a$CDM"]
 
     # ---------- external rows (use w0, not w) ----------
     external_rows = {
-        r"Flat $\Lambda$CDM": [
+        r"Flat$\Lambda$CDM": [
             {
                 "data": r"Pantheon+ \& SH0ES",
                 "params": {
@@ -1164,7 +1221,14 @@ def extract_cosmo_results_from_samples(
         )
 
     data_label = "SN~Ia" if only_sna else "SN~Ia + AGN"
-    model_name_latex = "Flat$w_0w_a$CDM" if cosmo_model == "Flatw0waCDM" else "Flat$w$CDM"
+    if cosmo_model == "Flatw0waCDM":
+        model_name_latex = "Flat$w_0w_a$CDM"
+    elif cosmo_model == "FlatwCDM":
+        model_name_latex = "Flat$w$CDM"
+    elif cosmo_model == "FlatLambdaCDM":
+        model_name_latex = "Flat$\Lambda$CDM"
+    else:
+        model_name_latex = cosmo_model
 
     # Compute mean/std for every parameter in the model
     means = np.mean(samples, axis=0)
@@ -1718,4 +1782,59 @@ def get_w0_wa_from_pivot(flat_samples, cosmo_model, z_p):
 
     return w0, wa
 
+def write_results_tex_variables(df_agn, flat_samples, cosmo_model, compare_r, z_pivot_agn, write_path):
+    """
+    Write key cosmological parameters to a LaTeX file as \newcommand definitions.
 
+    Parameters
+    ----------
+    flat_samples : (N, P) array
+        Flattened MCMC samples: N total draws by P parameters.
+    cosmo_model : str
+        Cosmological model string.
+    z_pivot_agn : float
+        Pivot redshift for w0/wa conversion if applicable.
+    write_path : str
+        Directory path to write the LaTeX file (filename is 'cosmo_params.tex').
+    """
+
+    obs_arr, err_arr, pivots_arr = agn_model_pack_obs(df_agn)
+
+    log_sigma_UV_pivot  = pivots_arr[agn_model_oidx["log_sigma_UV"]]
+    log_tau_UV_RF_pivot = pivots_arr[agn_model_oidx["log_tau_UV_RF"]]
+
+
+    priors, model_labels, _ = get_model_params(cosmo_model)
+    flat_samples = np.asarray(flat_samples)
+
+    results = {key: sym_percentile(flat_samples[:, i])
+               for i, key in enumerate(model_labels)}
+
+    # Write to LaTeX file
+    lines = []
+    lines.append(r"% Auto-generated cosmological parameters from MCMC samples")
+    lines.append(r"% Do not edit by hand; regenerate with write_results_tex_variables()")
+    lines.append(r"\newcommand{\resultSigma}{\ensuremath{%.2f}}" % compare_r["sigma_from_odds_two_sided"])
+
+    lines.append(r"\newcommand{\resultAlphaAGN}{\ensuremath{%.1f \pm %.2f}}" % (results['alpha_agn'][0], results['alpha_agn'][1]))
+    lines.append(r"\newcommand{\resultBetaAGN}{\ensuremath{%.1f \pm %.2f}}" % (results['beta_agn'][0], results['beta_agn'][1]))
+
+    lines.append(r"\newcommand{\resultlogSigmaUVPivot}{\ensuremath{%.1f}}" % (log_sigma_UV_pivot))
+    lines.append(r"\newcommand{\resultlogTauUVRFPivot}{\ensuremath{%.1f}}" % (log_tau_UV_RF_pivot))
+
+
+    M0_agn_samples = flat_samples[:, model_labels.index('M0_agn')]
+    L2500, L2500_err = sym_percentile(-0.4 * (M0_agn_samples - 90.0))
+    lines.append(r"\newcommand{\resultL}{\ensuremath{%.1f \pm %.2f}}" % (0, 0))
+
+    hd_scatter = np.exp(flat_samples[:, model_labels.index('log_f')])
+    lines.append(r"\newcommand{\resultScatterHD}{\ensuremath{%.2f \pm %.2f}}" % sym_percentile(hd_scatter))
+
+    lines.append(r"\newcommand{\resultScatterL}{\ensuremath{%.2f \pm %.2f}}" % (0, 0))
+
+
+    tex_path = os.path.join(write_path, "param_results.tex")
+    with open(tex_path, "w") as f:
+        for line in lines:
+            f.write(line + "\n")
+    print(f"Wrote result parameters LaTeX commands to {tex_path}")

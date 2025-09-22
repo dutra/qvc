@@ -124,23 +124,15 @@ def get_completeness_function_2d(
     m2500 = df_agn['apparent_mag_2500']
     mi    = df_agn['apparent_mag_i_rest']
 
-    # alpha: support either column name
-    if 'alpha_lambda' in df_agn.columns:
-        acol = 'alpha_lambda'
-    elif 'alpha_lam' in df_agn.columns:
-        acol = 'alpha_lam'
-    else:
-        raise KeyError("alpha column not found (expected 'alpha_lambda' or 'alpha_lam').")
-
     mask = (
-        m2500.notna() & mi.notna() & df_agn[acol].notna() &
+        m2500.notna() & mi.notna() & df_agn['alpha_lambda'].notna() &
         m2500.between(1, 30) & mi.between(1, 30)
     ).values  # <- now it's a NumPy boolean array
 
     # --- Observed arrays (masked)
     y     = m2500.values[mask]
     mag_i = mi.values[mask]
-    alpha = df_agn[acol].values[mask]
+    alpha = df_agn['alpha_lambda'].values[mask]
     z_obs = df_agn['z'].values[mask]
 
     # Print object_id for m2500 > 25 (after mask)
@@ -291,7 +283,7 @@ def get_completeness_function_2d(
     if z_max - z_min < 1e-3:
         z_min -= 0.01; z_max += 0.01
 
-    mag_min, mag_max = 16.0, 30.0
+    mag_min, mag_max = 16.0, 26.0
     print(f"Using mag range: {mag_min:.2f} to {mag_max:.2f}")
 
     mag_edges = np.linspace(mag_min, mag_max, n_mag_bins + 1)
@@ -325,13 +317,15 @@ def get_completeness_function_2d(
         im = plt.imshow(
             np.log10(np.clip(C.T, 1e-12, None)), origin="lower", aspect="auto",
             extent=[mag_edges[0], mag_edges[-1], z_edges[0], z_edges[-1]],
+            cmap='viridis'
         )
-        plt.xlabel("Apparent Magnitude")
-        plt.ylabel("Redshift")
-        plt.title("Completeness p(detect | m, z)")
-        cbar = plt.colorbar(im); cbar.set_label("p(detect)")
+        plt.ylabel("z")
+        plt.xlabel(r"$m$ ($2500$ mag)")
+        #plt.title("Completeness p(detect | m, z)")
+        cbar = plt.colorbar(im); cbar.set_label("Completeness $p(I{=}1|m, z)$")
         plt.tight_layout()
         plt.savefig("plots/completeness/completeness_map.png", dpi=200)
+        plt.savefig("plots/completeness/completeness_map.pdf", dpi=600)
         plt.close()
 
         for name, Hs in [("H_true_s", H_true_s), ("H_obs_s", H_obs_s)]:
@@ -341,7 +335,7 @@ def get_completeness_function_2d(
                 extent=[mag_edges[0], mag_edges[-1], z_edges[0], z_edges[-1]]
             )
             plt.xlabel("Apparent Magnitude")
-            plt.ylabel("Redshift")
+            plt.ylabel("z")
             plt.title(name + " (log10 counts)")
             cbar = plt.colorbar(im); cbar.set_label("log10 counts")
             plt.tight_layout()
@@ -353,7 +347,6 @@ def get_completeness_function_2d(
     dz = float(z_centers[1] - z_centers[0])     if len(z_centers)   > 1 else float(z_edges[-1] - z_edges[0])
 
     # Completeness2D must be defined elsewhere
-    print("mag centers:", mag_centers)
     return Completeness2D(mag_centers, z_centers, C), mag_centers, z_centers, dm, dz, 0.0
 
 import numpy as np

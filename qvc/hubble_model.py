@@ -134,7 +134,7 @@ def get_model_params(cosmo_model, only_sna=False):
     elif cosmo_model == 'Flatw0waCDM':
         priors |= OrderedDict([
             ("w0", (-3.0, 1.0)),   # covers phantom (<-1), Λ (-1), quintessence (> -1), and even w>0
-            ("wa", (-30, 10))    # symmetric variation
+            ("wa", (-50, 10))    # symmetric variation
         ])
 
     else:
