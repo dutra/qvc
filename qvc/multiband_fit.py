@@ -70,6 +70,7 @@ from multiband_models import *
 from multiband_model_lmc import MyMultiVarModel_BLR_LMC
 from multiband_model_tauscale import MyMultiVarModel_TauScale
 from multiband_model_s import MyMultiVarModel_S
+from multiband_model_blr_mag import MyMultiVarModel_SMAG
 
 # define params
 zero_mean = False
@@ -647,7 +648,11 @@ if __name__ == '__main__':
         print(f"\033[93m[WARNING] Using Tau Model (LMC = -2).\033[0m")
         Model = MyMultiVarModel_TauScale
     elif args.lmc == -3:
+        print(f"\033[93m[WARNING] Using Colin's Scale Model (LMC = -3).\033[0m")
         Model = MyMultiVarModel_S
+    elif args.lmc == -4:
+        print(f"\033[93m[WARNING] Using Colin's Scale+Tau Model (LMC = -4).\033[0m")
+        Model = MyMultiVarModel_SMAG
 
     if args.inject_random_fake_etas:
         # Randomize alpha_sigma and beta_tau for each run
