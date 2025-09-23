@@ -3,6 +3,7 @@ from functools import partial
 import multiprocessing
 from multiprocessing import Pool, cpu_count
 import os
+import matplotlib.pyplot as plt
 
 num_cores = os.environ.get("NUM_CORES", os.cpu_count()-2)
 try:
@@ -41,6 +42,119 @@ from astroquery.sdss import SDSS
 #warnings.filterwarnings("ignore")
 
 bands = ['u', 'g', 'r', 'i', 'z']
+
+colors = {'u': 'tab:blue',
+          'g': 'tab:green',
+          'r': 'tab:orange',
+          'i': 'tab:red',
+          'z': 'tab:brown',
+          'y': 'tab:gray'}
+
+def plot_f_host_4200_vs_z(quasar_dict_list):
+    """
+    Plot log10(f_host_4200) vs redshift for all objects and save the figure.
+    """
+    zs = []
+    f_host_4200s = []
+    for q in quasar_dict_list:
+        z = q.get("z", np.nan)
+        f_host_4200 = q.get("f_host_4200", np.nan)
+        if np.isfinite(z) and np.isfinite(f_host_4200) and f_host_4200 > 0:
+            zs.append(z)
+            f_host_4200s.append(f_host_4200)
+    if zs and f_host_4200s:
+        plt.figure(figsize=(7,5))
+        plt.scatter(zs, np.log10(f_host_4200s), s=15, alpha=0.7)
+        plt.xlabel("Redshift (z)")
+        plt.ylabel("log$_{10}$(f$_{host,4200}$)")
+        plt.title("log$_{10}$(f$_{host,4200}$) vs Redshift")
+        plt.tight_layout()
+        os.makedirs(f"plots/pyqsofit/{prefix}", exist_ok=True)
+        plt.savefig(f"plots/pyqsofit/{prefix}/f_host_4200_vs_z.png")
+        plt.close()
+
+def plot_delta_mags_vs_z_single_quasar(quasar):
+    """
+    Plot delta_m_avg and delta_mags for a single quasar as a function of its redshift.
+    Each delta_mags point is colored by its band.
+    """
+    z = quasar.get("z", np.nan)
+    delta_m_avg = quasar.get("delta_m_avg", np.nan)
+    delta_mags = quasar.get("delta_mags", {})
+    obj_id = str(quasar.get("object_id", ""))
+
+    # Plot delta_m_avg vs z (single point)
+    plt.figure(figsize=(8,6))
+    if np.isfinite(z) and np.isfinite(delta_m_avg):
+        plt.scatter([z], [delta_m_avg], color='red', s=60, marker='*', label=f"object_id={obj_id}")
+    plt.xlabel("z")
+    plt.ylabel("delta_m_avg")
+    plt.title(f"delta_m_avg vs z (object_id={obj_id})")
+    plt.legend()
+    plt.tight_layout()
+    os.makedirs(f"plots/pyqsofit/{prefix}/delta_m_avg_single", exist_ok=True)
+    plt.savefig(f"plots/pyqsofit/{prefix}/delta_m_avg_single/delta_mags_vs_z_avg_{obj_id}.png")
+    plt.close()
+
+    # Plot all delta_mags vs z (colored by band)
+    if np.isfinite(z) and isinstance(delta_mags, dict) and len(delta_mags) > 0:
+        plt.figure(figsize=(8,6))
+        for band, dm in delta_mags.items():
+            if np.isfinite(dm):
+                color = colors.get(band, 'gray')
+                plt.scatter([z], [dm], color=color, s=40, alpha=0.7, label=band)
+        plt.scatter([z], [delta_m_avg], color='red', s=60, marker='*', label="delta_m_avg")
+        plt.xlabel("z")
+        plt.ylabel("delta_mags (all bands)")
+        plt.title(f"delta_mags (all bands) vs z (object_id={obj_id})")
+        plt.legend()
+        plt.tight_layout()
+        os.makedirs(f"plots/pyqsofit/{prefix}/delta_mags_single", exist_ok=True)
+        plt.savefig(f"plots/pyqsofit/{prefix}/delta_mags_single/delta_mags_all_vs_z_{obj_id}.png")
+        plt.close()
+        
+def plot_delta_mags_vs_z(quasar_dict_list):
+    zs = []
+    delta_m_avgs = []
+    delta_mags_by_band = {b: ([], []) for b in bands}
+    for q in quasar_dict_list:
+        z = q.get("z", np.nan)
+        delta_m_avg = q.get("delta_m_avg", np.nan)
+        delta_mags = q.get("delta_mags", {})
+        if np.isfinite(z) and np.isfinite(delta_m_avg) and delta_m_avg > -1e8:
+            zs.append(z)
+            delta_m_avgs.append(delta_m_avg)
+        if np.isfinite(z) and isinstance(delta_mags, dict) and len(delta_mags) > 0:
+            for band, dm in delta_mags.items():
+                if np.isfinite(dm) and band in delta_mags_by_band:
+                    delta_mags_by_band[band][0].append(z)
+                    delta_mags_by_band[band][1].append(dm)
+
+    # Plot delta_m_avg vs z
+    plt.figure(figsize=(6,4))
+    plt.scatter(zs, delta_m_avgs, s=10, alpha=0.7)
+    plt.xlabel("z")
+    plt.ylabel("delta_m_avg")
+    plt.title("delta_m_avg vs z")
+    plt.tight_layout()
+    os.makedirs(f"plots/pyqsofit/{prefix}", exist_ok=True)
+    plt.savefig(f"plots/pyqsofit/{prefix}/delta_m_avg.png")
+    plt.close()
+
+    # Plot all delta_mags vs z, colored by band
+    plt.figure(figsize=(8,6))
+    for band in bands:
+        z_arr, dm_arr = delta_mags_by_band[band]
+        if len(z_arr) > 0:
+            plt.scatter(z_arr, dm_arr, s=10, alpha=0.7, color=colors.get(band, 'gray'), label=band)
+    plt.xlabel("z")
+    plt.ylabel("delta_mags (all bands)")
+    plt.title("delta_mags (all bands) vs z")
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(f"plots/pyqsofit/{prefix}/delta_mags_all.png")
+    plt.close()
+
 def bands_bluer_than_lyman_alpha(z, buffer=100):
     """
     Returns a list of bands with rest-frame effective wavelength < Lyman-alpha (1216 Å).
@@ -441,7 +555,8 @@ def run_qsofit_record(rec, npca_qso, cache_dir="data/spectra_cache",
 
     # default result (so we always return a complete row even on error)
     result = dict(
-        delta_mags=np.array([]),
+        z=rec["z"],
+        delta_mags={},
         delta_m_avg=-1e9,
         object_id=rec["object_id"],
         sdss_name=rec["sdss_name"],
@@ -454,6 +569,12 @@ def run_qsofit_record(rec, npca_qso, cache_dir="data/spectra_cache",
         alpha_lambda=-1e9,
         alpha_lambda_err=-1e9,
         redchi=1e9,
+        L2500=-1e9,
+        L2500_err=-1e9,
+        L2500_int=-1e9,
+        L2500_int_err=-1e9,
+        EBV=-1e9,
+        EBV_quick=-1e9,
     )
 
     try:
@@ -469,8 +590,9 @@ def run_qsofit_record(rec, npca_qso, cache_dir="data/spectra_cache",
 
         # Absolute flux calibration (g,r,i)
         #clean_bands = rec['clean_bands']
+        global bands
         sdss_filters = filters.load_filters(*[f'sdss2010-{b}' for b in bands])
-        delta_mags, weights = [], []
+        delta_mags, weights = {}, []
 
         for b, filt in zip(bands, sdss_filters):
             try:
@@ -481,19 +603,27 @@ def run_qsofit_record(rec, npca_qso, cache_dir="data/spectra_cache",
                     1e-17 * flux * u.erg / u.s / u.cm**2 / u.AA,
                     lam * u.AA
                 )
-                delta_mags.append(mag_fiber - mag_synth)
+                delta_mags[b] = (mag_fiber - mag_synth)
                 weights.append(1.0)
             except Exception as e:
                 #print(f"[WARNING] Error processing band {b} for {rec['sdss_name']}: {e}")
                 continue
 
-        delta_mags = np.array(delta_mags) if delta_mags else np.array([0.0])
-        weights    = np.array(weights)    if weights    else np.array([1.0])
-        mask = np.isfinite(delta_mags)
-        delta_m_avg = np.average(delta_mags[mask], weights=weights[mask]) if np.any(mask) else 0.0
-        print(f"Applying flux correction of {delta_m_avg:.3f} mag for {rec['sdss_name']} using bands {bands}")
-        print(f"  (individual band deltas: {delta_mags})")
-        print("clean bands:", rec.get('clean_bands', 'N/A'))
+        # Convert delta_mags dict to arrays for averaging
+        if delta_mags:
+            bands_used = list(delta_mags.keys())
+            delta_mags_arr = np.array([delta_mags[b] for b in bands_used])
+            weights_arr = np.array([1.0 for _ in bands_used])
+        else:
+            bands_used = []
+            delta_mags_arr = np.array([0.0])
+            weights_arr = np.array([1.0])
+        mask = np.isfinite(delta_mags_arr)
+        delta_m_avg = np.average(delta_mags_arr[mask], weights=weights_arr[mask]) if np.any(mask) else 0.0
+        # print(f"Applying flux correction of {delta_m_avg:.3f} mag for {rec['sdss_name']} using bands {bands_used}")
+        # print(f"  (individual band deltas: {delta_mags})")
+        # print("clean bands:", rec.get('clean_bands', bands_used))
+        bands = bands_used
 
         scale = 10 ** (-0.4 * delta_m_avg)
         flux_scaled = flux * scale
@@ -571,8 +701,7 @@ def run_qsofit_record(rec, npca_qso, cache_dir="data/spectra_cache",
             kwargs_conti_emcee={},
             kwargs_line_emcee={}
         )
-        print("REDCHI: ", q_mle.conti_fit.redchi)
-        
+
         def _safe_float(x):
             try:
                 # unwrap numpy scalars/arrays/masked values
@@ -589,12 +718,12 @@ def run_qsofit_record(rec, npca_qso, cache_dir="data/spectra_cache",
         }
         conti_dict['z'] = rec["z"]
 
-        L_ok = np.isfinite(conti_dict.get('L2500', np.nan)) and np.isfinite(conti_dict.get('L2500_err', np.nan))
+        L_ok = np.isfinite(conti_dict.get('L2500_int', np.nan)) and np.isfinite(conti_dict.get('L2500_int_err', np.nan))
                 
         if L_ok:
-            m_2500, m_2500_err = compute_apparent_mag_2500_astropy(conti_dict)
+            m_2500, m_2500_err = compute_apparent_mag_2500_astropy(conti_dict, logL_col='L2500_int', logL_err_col='L2500_int_err')
             mag_errs = np.array([mag_err if (np.isfinite(mag_err) and mag_err >=0) else 0.0 
-                                         for mag_err in rec["mags_err"].values()])
+                                            for mag_err in rec["mags_err"].values()])
             m_2500_err = np.sqrt(m_2500_err**2 + np.mean(mag_errs)**2)
         else:
             m_2500, m_2500_err = -1e9, -1e9
@@ -615,7 +744,7 @@ def run_qsofit_record(rec, npca_qso, cache_dir="data/spectra_cache",
             print(f"[ERROR] apparent_mag_i_rest {rec.get('object_id','?')} ({rec.get('sdss_name','?')}) (z {rec.get('z','?')}): {e}")
             apparent_mag_i_rest, apparent_mag_i_obs = -1e9, -1e9
             delta_m_avg = -1e9
-            delta_mags = np.array([])
+            delta_mags = {}
 
         result.update(
             delta_m_avg=delta_m_avg,
@@ -629,10 +758,18 @@ def run_qsofit_record(rec, npca_qso, cache_dir="data/spectra_cache",
             f_host_5100=conti_dict.get('frac_host_5100', 0),
             alpha_lambda=conti_dict['PL_slope'],
             alpha_lambda_err=conti_dict['PL_slope_err'],
-            redchi=q_mle.conti_fit.redchi
+            redchi=q_mle.conti_fit.redchi,
+            L2500=conti_dict['L2500'],
+            L2500_err=conti_dict['L2500_err'],
+            L2500_int=conti_dict['L2500_int'],
+            L2500_int_err=conti_dict['L2500_int_err'],
+            EBV=conti_dict['EBV'],
+            EBV_quick=conti_dict['EBV_quick'],
         )
 
         print(f"[INFO] ({rec.get('sdss_name','?')}): redchi={result['redchi']:.3f}, npca_qso={npca_qso}, delta_m_avg={result['delta_m_avg']:.3f}, m_i_rest={result['apparent_mag_i_rest']:.3f}, m_2500={result['apparent_mag_2500']:.3f}±{result['apparent_mag_2500_err']:.3f}, f_host_5100={result['f_host_5100']:.3f}, alpha_lambda={result['alpha_lambda']:.3f}±{result['alpha_lambda_err']:.3f}")
+        print(f"  EBV={result['EBV']:.3f}, EBV_quick={result['EBV_quick']:.3f}")
+
         return result
 
     except Exception as e:
@@ -787,6 +924,8 @@ def main():
         #     continue 
         bands = [b for b in ['g', 'r', 'i'] if b not in dropped_bands]
         rec = dict(
+            bands=bands,
+            dropped_bands=dropped_bands,
             object_id=str(row['object_id']),
             sdss_name=str(row['SDSS_NAME']),
             plate=int(row['PLATE']),
@@ -804,6 +943,7 @@ def main():
             },
             ra=float(row['RA']),
             dec=float(row['DEC']),
+            EBV=float(row['EBV']),
         )
         records.append(rec)
 
@@ -875,6 +1015,13 @@ def main():
         obj_id = str(quasar.get('object_id'))
         quasar.update(results[obj_id])
 
+    # Call for each object
+    for q in quasar_dict_list:
+        plot_delta_mags_vs_z_single_quasar(q)
+
+    plot_delta_mags_vs_z(quasar_dict_list)
+    plot_f_host_4200_vs_z(quasar_dict_list)
+
     write_hdf5_file(quasar_dict_list, args.fpath_out)
     
     # Also write results to CSV
@@ -885,7 +1032,7 @@ def main():
         'plate',
         'mjd',
         'fiber',
-        'Z_SYS',
+        'z',
         "delta_m_avg",
         "delta_mags",
         "apparent_mag_i_rest",
@@ -903,6 +1050,12 @@ def main():
         "redchi",
         "npca_qso",
         'sdss_name',               
+        'EBV',
+        'EBV_quick',
+        'L2500_int',
+        'L2500_int_err',
+        'L2500',
+        'L2500_err',
     ]
 
     with open(csv_file, "w", newline="") as f:
