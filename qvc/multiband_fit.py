@@ -195,10 +195,10 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_
                 poly1 = numpyro.sample("poly1", dist.Normal(0.0, 0.1))
 
             # Disk lags
-            #lag0 = numpyro.sample("lag0", dist.TruncatedNormal(10.0, 5.0, low=0))
-            #lag_beta = numpyro.sample("lag_beta", dist.TruncatedNormal(4/3, 0.2, low=0))
-            lag0 = numpyro.deterministic("lag0", jnp.full(batch_size, 10.0))
-            lag_beta = numpyro.deterministic("lag_beta", jnp.full(batch_size, 4/3))
+            lag0 = numpyro.sample("lag0", dist.TruncatedNormal(10.0, 5.0, low=0))
+            lag_beta = numpyro.sample("lag_beta", dist.TruncatedNormal(4/3, 0.2, low=0))
+            #lag0 = numpyro.deterministic("lag0", jnp.full(batch_size, 10.0))
+            #lag_beta = numpyro.deterministic("lag_beta", jnp.full(batch_size, 4/3))
 
             # Bluer when brighter (BWB) strength
             if bwb:
