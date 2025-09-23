@@ -424,7 +424,7 @@ if __name__ == "__main__":
     parser.add_argument("--N", type=int, default=None, help="Number of AGNs to run (default: all)")
     parser.add_argument("--only_sna", action="store_true", default=False, help="Run SNIa-only fit (default: False)")
     parser.add_argument("--use_mu_sh0es", action="store_true", default=False, help="Use MU_SH0ES for SNIa fit (default: False)")
-    parser.add_argument("--spectra_fit_csv", type=str, help="Path to spectra fit CSV file")
+    parser.add_argument("--spectra_fit_csv", type=str, nargs='+', help="Path(s) to spectra fit CSV file(s)")
     parser.add_argument("--zquery_csv", type=str, help="Path to zquery CSV file")
 
     args = parser.parse_args()

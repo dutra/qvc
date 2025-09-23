@@ -78,6 +78,8 @@ def parse_args() -> argparse.Namespace:
 
 def load_and_filter(csv_path: Path, threshold: float, sort_by: str, key: str) -> pd.DataFrame:
     df = pd.read_csv(csv_path)
+    if "z" not in df.columns and "Z_SYS" in df.columns:
+        df["z"] = df["Z_SYS"]
     required_cols = {"sdss_name", "npca_qso", "z", key}
     missing = required_cols - set(df.columns)
     if missing:
@@ -257,7 +259,7 @@ def main() -> int:
     missing_rows = 0
 
     for _, rec in df.iterrows():
-        residual = float(rec["residuals"])
+        residual = float(rec.get("residuals", np.nan))
         npca = int(rec["npca_qso"])
         z = float(rec["z"])
         sdss_name = str(rec["sdss_name"])

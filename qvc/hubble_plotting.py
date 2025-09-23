@@ -771,16 +771,26 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
             npca_qso = df_agn.iloc[idx].get('npca_qso', 'N/A')
             print(f"\tz: {z:.2f} | object_id: {object_id} | npca_qso: {npca_qso} | SDSS: {sdss_name} | RA: {ra:.5f} | DEC: {dec:.5f} | Residual: {residuals[idx]:.1f}")
     # Save residuals to CSV under plot_path
-    residuals_df = df_agn.copy()
-    residuals_df["residuals"] = residuals
-    residuals_df["mu_pred_median"] = mu_pred_median
-    residuals_df["mu_pred_std"] = mu_pred_std
-    fields = ['object_id', 'ra', 'dec', 'mu_pred_median', 'mu_pred_std', 'z', 'redchi', 'sdss_name', 'npca_qso', 'residuals']
-    residuals_df = residuals_df[fields]
-    residuals_df = residuals_df.sort_values(by="residuals", ascending=False)
-    csv_path = os.path.join(plot_path, "residuals.csv")
-    residuals_df.to_csv(csv_path, index=False)
-    print(f"Residuals saved to {csv_path}")
+    if debias:
+        residuals_df = df_agn.copy()
+        residuals_df["residuals"] = residuals
+        residuals_df["mu_pred_median"] = mu_pred_median
+        residuals_df["mu_pred_std"] = mu_pred_std
+        fields = ['object_id', 'apparent_mag_2500', 'f_host_4200', 'ra', 'dec', 'mu_pred_median', 'mu_pred_std', 'z', 'redchi', 'sdss_name', 'npca_qso', 'residuals']
+        residuals_df = residuals_df[fields]
+        residuals_df = residuals_df.sort_values(by="residuals", ascending=False)
+        csv_path = os.path.join(plot_path, "residuals.csv")
+        residuals_df.to_csv(csv_path, index=False)
+        print(f"Residuals saved to {csv_path}")
+
+        # Save outliers with residuals > 4 to outliers.csv
+        outlier_mask = np.abs(residuals_df["residuals"]) > 4
+        if np.any(outlier_mask):
+            outliers_df = residuals_df[outlier_mask]
+            outliers_csv_path = os.path.join(plot_path, "outliers.csv")
+            outliers_df.to_csv(outliers_csv_path, index=False)
+            print(f"Outliers (|residuals| > 4) saved to {outliers_csv_path}")
+
 
     # Standard deviation Outlier report
     outlier_mask = mu_pred_std > 4

@@ -1,5 +1,6 @@
 import matplotlib.pyplot as plt
 import os
+prefix = os.environ['PREFIX']
 import numpy as np
 import h5py
 from astropy.cosmology import FlatwCDM, Flatw0waCDM, FlatLambdaCDM, FlatwpwaCDM
@@ -262,7 +263,7 @@ def populate_zquery(df, zquery_csv):
     return df
 #'results/data/sep19_chisq_zquery.csv'
 
-def populate_spectra_fit(df, spectra_fit_csv):
+def populate_spectra_fit(df, spectra_fit_csvs):
     # Load Colin's SDSS QSO 2500A magnitudes and merge with df on SDSS_NAME
     fields = {
             'f_host_4200': float,
@@ -277,33 +278,55 @@ def populate_spectra_fit(df, spectra_fit_csv):
             'redchi': float,
             'npca_qso': int
         }
-    # Load and concatenate two CSV files
+    # Drop any existing columns to avoid duplicates
     for col in fields.keys():
         if col in df.columns:
             df = df.drop(columns=[col])
-    df_spectra = pd.read_csv(
-        spectra_fit_csv,
-        dtype={'object_id': str},
-        converters=fields
-    )
 
-    # Discard rows with apparent_mag_2500_err <= 0
-    #colin_df = colin_df[colin_df['apparent_mag_2500_err'] > 0].reset_index(drop=True)
-    
-    # Fill apparent_mag_2500_err == 0 with mean of nonzero errors
-    mean_err = df_spectra.loc[df_spectra['apparent_mag_2500_err'] > 0, 'apparent_mag_2500_err'].mean()
-    df_spectra.loc[df_spectra['apparent_mag_2500_err'] == 0, 'apparent_mag_2500_err'] = mean_err
+    # For each CSV, load and merge, keeping the fields from the latter CSV
+    for i, csv_path in enumerate(spectra_fit_csvs):
+        print(f"\033[96mLoading spectra fit CSV ({i}/{len(spectra_fit_csvs)}): {csv_path}\033[0m")
 
-    print("Length of spectral fit file:", len(df_spectra))
-    print("Number with apparent_mag_2500 > 0:", np.sum(df_spectra['apparent_mag_2500'] > 0))
-    # Merge on SDSS_NAME, bring in apparent_mag_2500
-    merged = df.merge(df_spectra, on='object_id', how='left', suffixes=('', '_spectralfit'))
-    print("Length of merged DataFrame:", len(merged))
-    missing_ids = set(df['object_id']) - set(df_spectra['object_id'])
-    print("object_id not in merged:", list(missing_ids))
-    for col in fields.keys():
-        df[col] = merged[col]
+        df_spectra = pd.read_csv(
+            csv_path,
+            dtype={'object_id': str},
+            converters=fields
+        )
+
+        # Fill apparent_mag_2500_err == 0 with mean of nonzero errors
+        mean_err = df_spectra.loc[df_spectra['apparent_mag_2500_err'] > 0, 'apparent_mag_2500_err'].mean()
+        df_spectra.loc[df_spectra['apparent_mag_2500_err'] == 0, 'apparent_mag_2500_err'] = mean_err
+
+        print(f"Length of spectral fit file {csv_path}:", len(df_spectra))
+        print("Number with apparent_mag_2500 > 0:", np.sum(df_spectra['apparent_mag_2500'] > 0))
+        # Merge on object_id, keep fields from the latter CSV
+        merged = df.merge(df_spectra, on='object_id', how='left', suffixes=('_old', '_spectralfit'))
+        print("Length of merged DataFrame:", len(merged))
+        # Only update rows in df that have a match in df_spectra
+        matched_mask = df['object_id'].isin(df_spectra['object_id'])
+        for col in fields.keys():
+            if col in df.columns:
+                print(f"Warning: Column {col} already exists in df, overwriting with spectralfit data for matched objects")
+                df.loc[matched_mask, col] = merged.loc[matched_mask, f"{col}_spectralfit"].values
+            else:
+                df.loc[matched_mask, col] = merged.loc[matched_mask, col].values
+
     df['log_redchi'] = np.log10(df['redchi'].replace(0, np.nan))
+    # Save DataFrame to CSV with a prefix if desired
+    if isinstance(spectra_fit_csvs, (list, tuple)) and len(spectra_fit_csvs) > 0:
+        out_csv = f"plots/hubble/{prefix}/merged.csv"
+        os.makedirs(os.path.dirname(out_csv), exist_ok=True)
+        # Only write specified columns
+        cols_to_save = ['object_id', 'sdss_name', 'apparent_mag_2500', 'f_host_2500'] + list(fields.keys())
+        # Remove duplicates while preserving order
+        seen = set()
+        cols_to_save_unique = []
+        for col in cols_to_save:
+            if col not in seen and col in df.columns:
+                cols_to_save_unique.append(col)
+                seen.add(col)
+        df[cols_to_save_unique].to_csv(out_csv, index=False)
+        print(f"Saved merged DataFrame to {out_csv} with columns: {cols_to_save_unique}")
     return df
 
 
