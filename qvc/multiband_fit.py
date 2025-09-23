@@ -69,6 +69,7 @@ from multiband_generate_lc import *
 from multiband_models import *
 from multiband_model_lmc import MyMultiVarModel_BLR_LMC
 from multiband_model_tauscale import MyMultiVarModel_TauScale
+from multiband_model_s import MyMultiVarModel_S
 
 # define params
 zero_mean = False
@@ -194,8 +195,10 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_
                 poly1 = numpyro.sample("poly1", dist.Normal(0.0, 0.1))
 
             # Disk lags
-            lag0 = numpyro.sample("lag0", dist.TruncatedNormal(10.0, 5.0, low=0))
-            lag_beta = numpyro.sample("lag_beta", dist.TruncatedNormal(4/3, 0.2, low=0))
+            #lag0 = numpyro.sample("lag0", dist.TruncatedNormal(10.0, 5.0, low=0))
+            #lag_beta = numpyro.sample("lag_beta", dist.TruncatedNormal(4/3, 0.2, low=0))
+            lag0 = numpyro.deterministic("lag0", jnp.full(batch_size, 10.0))
+            lag_beta = numpyro.deterministic("lag_beta", jnp.full(batch_size, 4/3))
 
             # Bluer when brighter (BWB) strength
             if bwb:
@@ -233,7 +236,7 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_
                     log_amp_delta_blr = numpyro.deterministic("log_amp_delta_blr", jnp.full((batch_size, nBands), -1e9))
                 else:
                     print("[WARNING] BLR lag model enabled.")
-                    log_amp_delta_blr = numpyro.sample("log_amp_delta_blr", dist.Normal(jnp.full(nBands, -1.0), 3.0))
+                    log_amp_delta_blr = numpyro.sample("log_amp_delta_blr", dist.Uniform(jnp.log(1e-4), jnp.log(5.0)))
 
                 # Convolution parameters (hard to constrain)
                 width_blr = numpyro.deterministic(
@@ -643,6 +646,8 @@ if __name__ == '__main__':
     elif args.lmc == -2:
         print(f"\033[93m[WARNING] Using Tau Model (LMC = -2).\033[0m")
         Model = MyMultiVarModel_TauScale
+    elif args.lmc == -3:
+        Model = MyMultiVarModel_S
 
     if args.inject_random_fake_etas:
         # Randomize alpha_sigma and beta_tau for each run
