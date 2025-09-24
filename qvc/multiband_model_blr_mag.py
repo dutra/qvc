@@ -126,6 +126,41 @@ class ContiBLRQS_Mag(qs.Wrapper):
 
         return jnp.concatenate([h_base, h_bwb], axis=0)
 
+    def psd(self, omega: JAXArray, b: int, sigma_n2: float = 0.0) -> JAXArray:
+        """
+        Auto-PSD S_y^{(b)}(ω) via general state-space formula.
+
+        Parameters
+        ----------
+        omega : array
+            Angular frequencies [rad / time units].
+        b : int
+            Band index.
+        sigma_n2 : float, optional
+            White-noise level to add (default 0.0).
+
+        Returns
+        -------
+        PSD : array, shape = omega.shape
+            Real non-negative power spectral density.
+        """
+        # System matrices
+        A = self.design_matrix()
+        P = self.stationary_covariance()
+        Qc = -(A @ P + P @ A.T)
+
+        # Observation vector for band b (evaluate at t=0)
+        h = self.observation_model((jnp.array(0.0), jnp.array(int(b))))
+
+        I = jnp.eye(A.shape[0], dtype=A.dtype)
+
+        def one_w(w):
+            # v = ((-iωI - A^T)^(-1)) h
+            v = jnp.linalg.solve((-1j * w) * I - A.T, h)
+            return (v.conj().T @ (Qc @ v)).real + sigma_n2
+
+        return 2.0 * jax.vmap(one_w)(omega)
+
 # Override MultiVarModel
 class MyMultiVarModel_SMAG(MultiVarModel):
     yerr: JAXArray | NDArray
