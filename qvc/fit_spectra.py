@@ -126,7 +126,7 @@ def plot_delta_mags_vs_z(quasar_dict_list):
             delta_m_avgs.append(delta_m_avg)
         if np.isfinite(z) and isinstance(delta_mags, dict) and len(delta_mags) > 0:
             for band, dm in delta_mags.items():
-                if np.isfinite(dm) and band in delta_mags_by_band:
+                if np.isfinite(dm):
                     delta_mags_by_band[band][0].append(z)
                     delta_mags_by_band[band][1].append(dm)
 
@@ -192,7 +192,7 @@ def _safe_float(x):
         return float(x)
     except Exception:
         return np.nan
-def compute_apparent_mag_2500_astropy(conti_table, logL_col='L2500', logL_err_col='L2500_err',
+def compute_apparent_mag_2500_astropy(conti_table, logL_col, logL_err_col,
                                       z_col='z', H0=70, Om0=0.3):
     cosmo = FlatLambdaCDM(H0=H0, Om0=Om0)
     c = 2.99792458e10  # cm/s
@@ -563,6 +563,8 @@ def run_qsofit_record(rec, npca_qso, cache_dir="data/spectra_cache",
         apparent_mag_i_rest=-1e9,
         apparent_mag_2500=-1e9,
         apparent_mag_2500_err=-1e9,
+        apparent_mag_2500_reddened=-1e9,
+        apparent_mag_2500_reddened_err=-1e9,
         f_host_2500=-99,
         f_host_4200=-99,
         f_host_5100=-99,
@@ -573,8 +575,11 @@ def run_qsofit_record(rec, npca_qso, cache_dir="data/spectra_cache",
         L2500_err=-1e9,
         L2500_int=-1e9,
         L2500_int_err=-1e9,
+        EBV_ccm89=-1e9,
         EBV=-1e9,
-        EBV_quick=-1e9,
+        bands_obj=[],
+        bands_used=[],
+        bands_dropped=[]
     )
 
     try:
@@ -584,51 +589,76 @@ def run_qsofit_record(rec, npca_qso, cache_dir="data/spectra_cache",
             # keep default values; return early
             return result
 
-        lam  = 10 ** hdul[1].data['loglam']                  # [Å]
-        flux = hdul[1].data['flux']                          # [erg/s/cm^2/Å]
-        err  = 1.0 / np.sqrt(hdul[1].data['ivar'])           # 1-sigma
+        lam  = 10.0 ** hdul[1].data['loglam']                 # [Å]
+        flux = hdul[1].data['flux']                           # [1e-17 erg/s/cm^2/Å in SDSS]
+        ivar = hdul[1].data['ivar']
+        err  = np.where(ivar > 0, 1.0 / np.sqrt(ivar), np.inf)
 
-        # Absolute flux calibration (g,r,i)
-        #clean_bands = rec['clean_bands']
-        global bands
-        sdss_filters = filters.load_filters(*[f'sdss2010-{b}' for b in bands])
-        delta_mags, weights = {}, []
+        # --- Choose bands per object (NO globals) ---
+        bands_obj = rec.get('bands', ['g', 'r', 'i'])
+        bands_dropped = rec['bands_dropped']
+        bands_obj = [b for b in bands_obj if b not in bands_dropped]
+        if len(bands_obj) == 0:
+            sdss_filters = []
+        else:
+            sdss_filters = filters.load_filters(*[f'sdss2010-{b}' for b in bands_obj])
 
-        for b, filt in zip(bands, sdss_filters):
-            try:
-                mag_fiber = rec["mags"].get(b, np.nan)
-                if not np.isfinite(mag_fiber) or mag_fiber < 0:
-                    continue
-                mag_synth = filt.get_ab_magnitude(
-                    1e-17 * flux * u.erg / u.s / u.cm**2 / u.AA,
-                    lam * u.AA
-                )
-                delta_mags[b] = (mag_fiber - mag_synth)
-                weights.append(1.0)
-            except Exception as e:
-                #print(f"[WARNING] Error processing band {b} for {rec['sdss_name']}: {e}")
+        # --- Per-band delta magnitudes and weights ---
+        delta_mags = {}
+        weights = []
+
+        for b, filt in zip(bands_obj, sdss_filters):
+            mag_fiber = rec['mags'].get(b, np.nan)
+            if not np.isfinite(mag_fiber) or mag_fiber < 0:
                 continue
 
-        # Convert delta_mags dict to arrays for averaging
-        if delta_mags:
-            bands_used = list(delta_mags.keys())
-            delta_mags_arr = np.array([delta_mags[b] for b in bands_used])
-            weights_arr = np.array([1.0 for _ in bands_used])
+            try:
+                # synthetic magnitude from the (unscaled) spectrum
+                mag_synth = filt.get_ab_magnitude(
+                    1e-17 * flux * u.erg / u.s / u.cm**2 / u.AA,  # SDSS flux units
+                    lam * u.AA
+                )
+            except Exception as e:
+                print(f"Error computing synthetic mag for {rec['sdss_name']} band {b}: {e}")
+                continue
+            dm = mag_fiber - mag_synth
+            delta_mags[b] = dm
+
+            # weight by photometric mag uncertainty if available; else equal weight
+            sig_m = rec.get('mags_err', {}).get(b, np.nan)
+            w = 1.0 / (sig_m**2) if np.isfinite(sig_m) and sig_m > 0 else 1.0
+            weights.append(w)
+
+        bands_used = list(delta_mags.keys())
+        dm_arr = np.array([delta_mags[b] for b in bands_used], dtype=float)
+        w_arr  = np.array(weights[:len(bands_used)], dtype=float)
+        mask   = np.isfinite(dm_arr) & np.isfinite(w_arr) & (w_arr > 0)
+
+        if np.any(mask):
+            w = w_arr[mask]
+            dm = dm_arr[mask]
+            delta_m_avg = np.sum(w * dm) / np.sum(w)
+            # standard error of weighted mean (for optional calibration inflation)
+            sigma_dm = np.sqrt(1.0 / np.sum(w))
         else:
-            bands_used = []
-            delta_mags_arr = np.array([0.0])
-            weights_arr = np.array([1.0])
-        mask = np.isfinite(delta_mags_arr)
-        delta_m_avg = np.average(delta_mags_arr[mask], weights=weights_arr[mask]) if np.any(mask) else 0.0
-        # print(f"Applying flux correction of {delta_m_avg:.3f} mag for {rec['sdss_name']} using bands {bands_used}")
-        # print(f"  (individual band deltas: {delta_mags})")
-        # print("clean bands:", rec.get('clean_bands', bands_used))
-        bands = bands_used
+            print(f"[WARN] No usable bands after drops for {rec['sdss_name']} (z={rec['z']:.2f}); scale=1.")
+            delta_m_avg = 0.0
+            sigma_dm = 0.0
 
-        scale = 10 ** (-0.4 * delta_m_avg)
+        # --- Apply absolute flux scale ---
+        scale = 10.0 ** (-0.4 * delta_m_avg)
         flux_scaled = flux * scale
+        err_scaled  = err  * scale      # IMPORTANT: scale the uncertainties too
+        # (If you keep ivar anywhere: ivar_scaled = ivar / scale**2)
 
-        q_mle = QSOFit(lam, flux_scaled, err, rec["z"], path=path_ex)
+        # --- Optional: include calibration (zeropoint) uncertainty in quadrature ---
+        # This treats a fully correlated term as if it were per-pixel (conservative).
+        if sigma_dm > 0:
+            frac_s = np.log(10.0) / 2.5 * sigma_dm   # σ_s / s from mag error
+            err_scaled = np.sqrt(err_scaled**2 + (flux_scaled * frac_s)**2)
+
+        # Proceed to fitting
+        q_mle = QSOFit(lam, flux_scaled, err_scaled, rec["z"], path=path_ex)
         q_mle.Fit(
             name=f"{rec['z']:.2f}_{rec['sdss_name']}_{rec['plate']}-{rec['mjd']}-{rec['fiber']}",  # customize the name of given targets. Default: plate-mjd-fiber
             
@@ -718,6 +748,7 @@ def run_qsofit_record(rec, npca_qso, cache_dir="data/spectra_cache",
         }
         conti_dict['z'] = rec["z"]
 
+        # L2500_int
         L_ok = np.isfinite(conti_dict.get('L2500_int', np.nan)) and np.isfinite(conti_dict.get('L2500_int_err', np.nan))
                 
         if L_ok:
@@ -727,6 +758,17 @@ def run_qsofit_record(rec, npca_qso, cache_dir="data/spectra_cache",
             m_2500_err = np.sqrt(m_2500_err**2 + np.mean(mag_errs)**2)
         else:
             m_2500, m_2500_err = -1e9, -1e9
+
+        # L2500
+        L_ok = np.isfinite(conti_dict.get('L2500', np.nan)) and np.isfinite(conti_dict.get('L2500_err', np.nan))
+        if L_ok:
+            m_2500_reddened, m_2500_reddened_err = compute_apparent_mag_2500_astropy(conti_dict, logL_col='L2500', logL_err_col='L2500_err')
+            mag_errs = np.array([mag_err if (np.isfinite(mag_err) and mag_err >=0) else 0.0 
+                                for mag_err in rec["mags_err"].values()])
+            m_2500_reddened_err = np.sqrt(m_2500_reddened_err**2 + np.mean(mag_errs)**2)
+        else:
+            m_2500_reddened, m_2500_reddened_err = -1e9, -1e9
+
 
         try:
             alpha_lambda = conti_dict.get('PL_slope', -99)
@@ -753,6 +795,8 @@ def run_qsofit_record(rec, npca_qso, cache_dir="data/spectra_cache",
             apparent_mag_i_obs=apparent_mag_i_obs,
             apparent_mag_2500=m_2500,
             apparent_mag_2500_err=m_2500_err,
+            apparent_mag_2500_reddened=m_2500_reddened,
+            apparent_mag_2500_reddened_err=m_2500_reddened_err,
             f_host_2500=conti_dict.get('frac_host_2500', 0),
             f_host_4200=conti_dict.get('frac_host_4200', 0),
             f_host_5100=conti_dict.get('frac_host_5100', 0),
@@ -764,11 +808,14 @@ def run_qsofit_record(rec, npca_qso, cache_dir="data/spectra_cache",
             L2500_int=conti_dict['L2500_int'],
             L2500_int_err=conti_dict['L2500_int_err'],
             EBV=conti_dict['EBV'],
-            EBV_quick=conti_dict['EBV_quick'],
+            EBV_ccm89=conti_dict['EBV_ccm89'],
+            bands_obj=bands_obj,
+            bands_used=bands_used,
+            bands_dropped=bands_dropped,
         )
 
         print(f"[INFO] ({rec.get('sdss_name','?')}): redchi={result['redchi']:.3f}, npca_qso={npca_qso}, delta_m_avg={result['delta_m_avg']:.3f}, m_i_rest={result['apparent_mag_i_rest']:.3f}, m_2500={result['apparent_mag_2500']:.3f}±{result['apparent_mag_2500_err']:.3f}, f_host_5100={result['f_host_5100']:.3f}, alpha_lambda={result['alpha_lambda']:.3f}±{result['alpha_lambda_err']:.3f}")
-        print(f"  EBV={result['EBV']:.3f}, EBV_quick={result['EBV_quick']:.3f}")
+        print(f"  EBV={result['EBV']:.3f}, EBV_ccm89={result['EBV_ccm89']:.3f}")
 
         return result
 
@@ -917,15 +964,15 @@ def main():
     for i in range(len(data_cat)):
         row = data_cat[i]
         z = float(row['Z_SYS'])
-        dropped_bands = bands_bluer_than_lyman_alpha(z)
-        #dropped_bands = row['dropped_bands']
+        bands_dropped = bands_bluer_than_lyman_alpha(z)
+        #bands_dropped = row['bands_dropped']
         # TEMPORARY: skip objects without any dropped bands
-        # if len(dropped_bands) == 0:
+        # if len(bands_dropped) == 0:
         #     continue 
-        bands = [b for b in ['g', 'r', 'i'] if b not in dropped_bands]
+        bands_obj = [b for b in ['g', 'r', 'i'] if b not in bands_dropped]
         rec = dict(
-            bands=bands,
-            dropped_bands=dropped_bands,
+            bands=bands_obj,
+            bands_dropped=bands_dropped,
             object_id=str(row['object_id']),
             sdss_name=str(row['SDSS_NAME']),
             plate=int(row['PLATE']),
@@ -935,15 +982,14 @@ def main():
             loglbol=float(row['LOGLBOL']),
             mags={
                 b: (float(row[f'mean_corrected_{b}']) if f'mean_corrected_{b}' in colnames else np.nan)
-                for b in bands
+                for b in bands_obj
             },
             mags_err={
                 b: float(row[f"mean_{b}_err"]) if f"mean_{b}_err" in colnames else np.nan
-                for b in bands
+                for b in bands_obj
             },
             ra=float(row['RA']),
             dec=float(row['DEC']),
-            EBV=float(row['EBV']),
         )
         records.append(rec)
 
@@ -1039,6 +1085,8 @@ def main():
         "apparent_mag_i_obs",
         "apparent_mag_2500",
         "apparent_mag_2500_err",
+        "apparent_mag_2500_reddened",
+        "apparent_mag_2500_reddened_err",
         "f_host_2500",
         "f_host_4200",
         "f_host_5100",
@@ -1051,11 +1099,14 @@ def main():
         "npca_qso",
         'sdss_name',               
         'EBV',
-        'EBV_quick',
+        'EBV_ccm89',
         'L2500_int',
         'L2500_int_err',
         'L2500',
         'L2500_err',
+        'bands_obj',
+        'bands_used',
+        'bands_dropped',
     ]
 
     with open(csv_file, "w", newline="") as f:
