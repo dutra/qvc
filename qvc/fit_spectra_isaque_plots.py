@@ -3,6 +3,7 @@ from functools import partial
 import multiprocessing
 from multiprocessing import Pool, cpu_count
 import os
+import matplotlib.pyplot as plt
 
 num_cores = os.environ.get("NUM_CORES", os.cpu_count()-2)
 try:
@@ -16,8 +17,10 @@ if multiprocessing.current_process().name == "MainProcess":
 os.environ["XLA_FLAGS"] = f"--xla_force_host_platform_device_count={num_cores}"
 os.environ["JAX_PLATFORM_NAME"] = "cpu"
 
-prefix = os.environ.get('PREFIX', "pyqsofit")
-suffix = os.environ.get('SUFFIX', "pyqsofit")
+prefix = os.environ.get('PREFIX', "test")
+suffix = os.environ.get('SUFFIX', "test")
+
+print(f"PREFIX: {prefix}, SUFFIX: {suffix}")
 
 import sys
 import timeit
@@ -39,6 +42,119 @@ from astroquery.sdss import SDSS
 #warnings.filterwarnings("ignore")
 
 bands = ['u', 'g', 'r', 'i', 'z']
+
+colors = {'u': 'tab:blue',
+          'g': 'tab:green',
+          'r': 'tab:orange',
+          'i': 'tab:red',
+          'z': 'tab:brown',
+          'y': 'tab:gray'}
+
+def plot_f_host_4200_vs_z(quasar_dict_list):
+    """
+    Plot log10(f_host_4200) vs redshift for all objects and save the figure.
+    """
+    zs = []
+    f_host_4200s = []
+    for q in quasar_dict_list:
+        z = q.get("z", np.nan)
+        f_host_4200 = q.get("f_host_4200", np.nan)
+        if np.isfinite(z) and np.isfinite(f_host_4200) and f_host_4200 > 0:
+            zs.append(z)
+            f_host_4200s.append(f_host_4200)
+    if zs and f_host_4200s:
+        plt.figure(figsize=(7,5))
+        plt.scatter(zs, np.log10(f_host_4200s), s=15, alpha=0.7)
+        plt.xlabel("Redshift (z)")
+        plt.ylabel("log$_{10}$(f$_{host,4200}$)")
+        plt.title("log$_{10}$(f$_{host,4200}$) vs Redshift")
+        plt.tight_layout()
+        os.makedirs(f"plots/pyqsofit/{prefix}", exist_ok=True)
+        plt.savefig(f"plots/pyqsofit/{prefix}/f_host_4200_vs_z.png")
+        plt.close()
+
+def plot_delta_mags_vs_z_single_quasar(quasar):
+    """
+    Plot delta_m_avg and delta_mags for a single quasar as a function of its redshift.
+    Each delta_mags point is colored by its band.
+    """
+    z = quasar.get("z", np.nan)
+    delta_m_avg = quasar.get("delta_m_avg", np.nan)
+    delta_mags = quasar.get("delta_mags", {})
+    obj_id = str(quasar.get("object_id", ""))
+
+    # Plot delta_m_avg vs z (single point)
+    plt.figure(figsize=(8,6))
+    if np.isfinite(z) and np.isfinite(delta_m_avg):
+        plt.scatter([z], [delta_m_avg], color='red', s=60, marker='*', label=f"object_id={obj_id}")
+    plt.xlabel("z")
+    plt.ylabel("delta_m_avg")
+    plt.title(f"delta_m_avg vs z (object_id={obj_id})")
+    plt.legend()
+    plt.tight_layout()
+    os.makedirs(f"plots/pyqsofit/{prefix}/delta_m_avg_single", exist_ok=True)
+    plt.savefig(f"plots/pyqsofit/{prefix}/delta_m_avg_single/delta_mags_vs_z_avg_{obj_id}.png")
+    plt.close()
+
+    # Plot all delta_mags vs z (colored by band)
+    if np.isfinite(z) and isinstance(delta_mags, dict) and len(delta_mags) > 0:
+        plt.figure(figsize=(8,6))
+        for band, dm in delta_mags.items():
+            if np.isfinite(dm):
+                color = colors.get(band, 'gray')
+                plt.scatter([z], [dm], color=color, s=40, alpha=0.7, label=band)
+        plt.scatter([z], [delta_m_avg], color='red', s=60, marker='*', label="delta_m_avg")
+        plt.xlabel("z")
+        plt.ylabel("delta_mags (all bands)")
+        plt.title(f"delta_mags (all bands) vs z (object_id={obj_id})")
+        plt.legend()
+        plt.tight_layout()
+        os.makedirs(f"plots/pyqsofit/{prefix}/delta_mags_single", exist_ok=True)
+        plt.savefig(f"plots/pyqsofit/{prefix}/delta_mags_single/delta_mags_all_vs_z_{obj_id}.png")
+        plt.close()
+        
+def plot_delta_mags_vs_z(quasar_dict_list):
+    zs = []
+    delta_m_avgs = []
+    delta_mags_by_band = {b: ([], []) for b in bands}
+    for q in quasar_dict_list:
+        z = q.get("z", np.nan)
+        delta_m_avg = q.get("delta_m_avg", np.nan)
+        delta_mags = q.get("delta_mags", {})
+        if np.isfinite(z) and np.isfinite(delta_m_avg) and delta_m_avg > -1e8:
+            zs.append(z)
+            delta_m_avgs.append(delta_m_avg)
+        if np.isfinite(z) and isinstance(delta_mags, dict) and len(delta_mags) > 0:
+            for band, dm in delta_mags.items():
+                if np.isfinite(dm):
+                    delta_mags_by_band[band][0].append(z)
+                    delta_mags_by_band[band][1].append(dm)
+
+    # Plot delta_m_avg vs z
+    plt.figure(figsize=(6,4))
+    plt.scatter(zs, delta_m_avgs, s=10, alpha=0.7)
+    plt.xlabel("z")
+    plt.ylabel("delta_m_avg")
+    plt.title("delta_m_avg vs z")
+    plt.tight_layout()
+    os.makedirs(f"plots/pyqsofit/{prefix}", exist_ok=True)
+    plt.savefig(f"plots/pyqsofit/{prefix}/delta_m_avg.png")
+    plt.close()
+
+    # Plot all delta_mags vs z, colored by band
+    plt.figure(figsize=(8,6))
+    for band in bands:
+        z_arr, dm_arr = delta_mags_by_band[band]
+        if len(z_arr) > 0:
+            plt.scatter(z_arr, dm_arr, s=10, alpha=0.7, color=colors.get(band, 'gray'), label=band)
+    plt.xlabel("z")
+    plt.ylabel("delta_mags (all bands)")
+    plt.title("delta_mags (all bands) vs z")
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(f"plots/pyqsofit/{prefix}/delta_mags_all.png")
+    plt.close()
+
 def bands_bluer_than_lyman_alpha(z, buffer=100):
     """
     Returns a list of bands with rest-frame effective wavelength < Lyman-alpha (1216 Å).
@@ -76,7 +192,7 @@ def _safe_float(x):
         return float(x)
     except Exception:
         return np.nan
-def compute_apparent_mag_2500_astropy(conti_table, logL_col='L2500', logL_err_col='L2500_err',
+def compute_apparent_mag_2500_astropy(conti_table, logL_col, logL_err_col,
                                       z_col='z', H0=70, Om0=0.3):
     cosmo = FlatLambdaCDM(H0=H0, Om0=Om0)
     c = 2.99792458e10  # cm/s
@@ -115,6 +231,50 @@ def fetch_spectrum_fits(sdss_name, plate, fiber, mjd, cache_dir="data/spectra_ca
     hdul.writeto(cache_file, overwrite=True)
     # reopen without memory mapping to unify return type
     return fits.open(cache_file, memmap=False), False
+
+from astroquery.sdss import SDSS
+from astropy.table import Table
+from astropy.io.ascii.core import InconsistentTableError
+
+def zquery(plate, mjd, fiberid, dr=16, timeout=60):
+    """
+    Query SDSS for redshift and classification by (plate, mjd, fiberid).
+
+    Returns:
+        astropy.table.Table row (length-1) or None if no match / error.
+    """
+    # Make sure these are ints to avoid odd SQL formatting
+    plate   = int(plate)
+    mjd     = int(mjd)
+    fiberid = int(fiberid)
+
+    q = f"""
+    SELECT TOP 1
+        specObjID, plate, mjd, fiberID,
+        z, zErr, zWarning, class, subClass
+    FROM SpecObjAll
+    WHERE plate={plate} AND mjd={mjd} AND fiberID={fiberid}
+    """
+
+    try:
+        res = SDSS.query_sql(q, data_release=dr, timeout=timeout, cache=False)
+    except InconsistentTableError as e:
+        # This usually means the server returned HTML instead of CSV (e.g., error page)
+        print("SDSS returned a non-CSV response (likely an error page).")
+        print("Offending SQL:\n", q)
+        print("Astropy parsing error:", e)
+        raise e
+    except Exception as e:
+        print("SDSS query failed:", e)
+        print("Offending SQL:\n", q)
+        raise e
+
+    if res is None or len(res) == 0:
+        print("No rows returned for:", (plate, mjd, fiberid))
+        return None
+
+    # Print and return the single row
+    return dict(res[0])
 
 
 def load_spec_from_cache(sdss_name, cache_dir="data/spectra_cache"):
@@ -395,21 +555,31 @@ def run_qsofit_record(rec, npca_qso, cache_dir="data/spectra_cache",
 
     # default result (so we always return a complete row even on error)
     result = dict(
-        delta_mags=np.array([]),
+        z=rec["z"],
+        delta_mags={},
         delta_m_avg=-1e9,
         object_id=rec["object_id"],
         sdss_name=rec["sdss_name"],
         apparent_mag_i_rest=-1e9,
         apparent_mag_2500=-1e9,
         apparent_mag_2500_err=-1e9,
+        apparent_mag_2500_reddened=-1e9,
+        apparent_mag_2500_reddened_err=-1e9,
         f_host_2500=-99,
         f_host_4200=-99,
         f_host_5100=-99,
         alpha_lambda=-1e9,
         alpha_lambda_err=-1e9,
         redchi=1e9,
-        ebv=-1e9,
-        ebv_ccm89=-1e9,
+        L2500=-1e9,
+        L2500_err=-1e9,
+        L2500_int=-1e9,
+        L2500_int_err=-1e9,
+        EBV_ccm89=-1e9,
+        EBV=-1e9,
+        bands_obj=[],
+        bands_used=[],
+        bands_dropped=[]
     )
 
     try:
@@ -419,39 +589,76 @@ def run_qsofit_record(rec, npca_qso, cache_dir="data/spectra_cache",
             # keep default values; return early
             return result
 
-        lam  = 10 ** hdul[1].data['loglam']                  # [Å]
-        flux = hdul[1].data['flux']                          # [erg/s/cm^2/Å]
-        err  = 1.0 / np.sqrt(hdul[1].data['ivar'])           # 1-sigma
+        lam  = 10.0 ** hdul[1].data['loglam']                 # [Å]
+        flux = hdul[1].data['flux']                           # [1e-17 erg/s/cm^2/Å in SDSS]
+        ivar = hdul[1].data['ivar']
+        err  = np.where(ivar > 0, 1.0 / np.sqrt(ivar), np.inf)
 
-        # Absolute flux calibration (g,r,i)
-        #clean_bands = rec['clean_bands']
-        sdss_filters = filters.load_filters(*[f'sdss2010-{b}' for b in bands])
-        delta_mags, weights = [], []
+        # --- Choose bands per object (NO globals) ---
+        bands_obj = rec.get('bands', ['g', 'r', 'i'])
+        bands_dropped = rec['bands_dropped']
+        bands_obj = [b for b in bands_obj if b not in bands_dropped]
+        if len(bands_obj) == 0:
+            sdss_filters = []
+        else:
+            sdss_filters = filters.load_filters(*[f'sdss2010-{b}' for b in bands_obj])
 
-        for b, filt in zip(bands, sdss_filters):
-            try:
-                mag_fiber = rec["mags"].get(b, np.nan)
-                if not np.isfinite(mag_fiber) or mag_fiber < 0:
-                    continue
-                mag_synth = filt.get_ab_magnitude(
-                    1e-17 * flux * u.erg / u.s / u.cm**2 / u.AA,
-                    lam * u.AA
-                )
-                delta_mags.append(mag_fiber - mag_synth)
-                weights.append(1.0)
-            except Exception as e:
-                #print(f"[WARNING] Error processing band {b} for {rec['sdss_name']}: {e}")
+        # --- Per-band delta magnitudes and weights ---
+        delta_mags = {}
+        weights = []
+
+        for b, filt in zip(bands_obj, sdss_filters):
+            mag_fiber = rec['mags'].get(b, np.nan)
+            if not np.isfinite(mag_fiber) or mag_fiber < 0:
                 continue
 
-        delta_mags = np.array(delta_mags) if delta_mags else np.array([0.0])
-        weights    = np.array(weights)    if weights    else np.array([1.0])
-        mask = np.isfinite(delta_mags)
-        delta_m_avg = np.average(delta_mags[mask], weights=weights[mask]) if np.any(mask) else 0.0
+            try:
+                # synthetic magnitude from the (unscaled) spectrum
+                mag_synth = filt.get_ab_magnitude(
+                    1e-17 * flux * u.erg / u.s / u.cm**2 / u.AA,  # SDSS flux units
+                    lam * u.AA
+                )
+            except Exception as e:
+                print(f"Error computing synthetic mag for {rec['sdss_name']} band {b}: {e}")
+                continue
+            dm = mag_fiber - mag_synth
+            delta_mags[b] = dm
 
-        scale = 10 ** (-0.4 * delta_m_avg)
+            # weight by photometric mag uncertainty if available; else equal weight
+            sig_m = rec.get('mags_err', {}).get(b, np.nan)
+            w = 1.0 / (sig_m**2) if np.isfinite(sig_m) and sig_m > 0 else 1.0
+            weights.append(w)
+
+        bands_used = list(delta_mags.keys())
+        dm_arr = np.array([delta_mags[b] for b in bands_used], dtype=float)
+        w_arr  = np.array(weights[:len(bands_used)], dtype=float)
+        mask   = np.isfinite(dm_arr) & np.isfinite(w_arr) & (w_arr > 0)
+
+        if np.any(mask):
+            w = w_arr[mask]
+            dm = dm_arr[mask]
+            delta_m_avg = np.sum(w * dm) / np.sum(w)
+            # standard error of weighted mean (for optional calibration inflation)
+            sigma_dm = np.sqrt(1.0 / np.sum(w))
+        else:
+            print(f"[WARN] No usable bands after drops for {rec['sdss_name']} (z={rec['z']:.2f}); scale=1.")
+            delta_m_avg = 0.0
+            sigma_dm = 0.0
+
+        # --- Apply absolute flux scale ---
+        scale = 10.0 ** (-0.4 * delta_m_avg)
         flux_scaled = flux * scale
+        err_scaled  = err  * scale      # IMPORTANT: scale the uncertainties too
+        # (If you keep ivar anywhere: ivar_scaled = ivar / scale**2)
 
-        q_mle = QSOFit(lam, flux_scaled, err, rec["z"], path=path_ex)
+        # --- Optional: include calibration (zeropoint) uncertainty in quadrature ---
+        # This treats a fully correlated term as if it were per-pixel (conservative).
+        if sigma_dm > 0:
+            frac_s = np.log(10.0) / 2.5 * sigma_dm   # σ_s / s from mag error
+            err_scaled = np.sqrt(err_scaled**2 + (flux_scaled * frac_s)**2)
+
+        # Proceed to fitting
+        q_mle = QSOFit(lam, flux_scaled, err_scaled, rec["z"], path=path_ex)
         q_mle.Fit(
             name=f"{rec['z']:.2f}_{rec['sdss_name']}_{rec['plate']}-{rec['mjd']}-{rec['fiber']}",  # customize the name of given targets. Default: plate-mjd-fiber
             
@@ -462,7 +669,7 @@ def run_qsofit_record(rec, npca_qso, cache_dir="data/spectra_cache",
             reject_badpix=True,    # reject 10 most possible outliers by the test of pointDistGESD
             deredden=True,          # correct the Galactic extinction
             #wave_range=[1150, 1e9], # trim input wavelength
-            wave_range=[1200, 1e9],  # trim input wavelength
+            wave_range=[1200, 1e9], # trim input wavelength
             wave_mask=None,         # 2-D array, mask the given range(s)
 
             # host decomposition parameters
@@ -524,6 +731,7 @@ def run_qsofit_record(rec, npca_qso, cache_dir="data/spectra_cache",
             kwargs_conti_emcee={},
             kwargs_line_emcee={}
         )
+
         def _safe_float(x):
             try:
                 # unwrap numpy scalars/arrays/masked values
@@ -540,15 +748,27 @@ def run_qsofit_record(rec, npca_qso, cache_dir="data/spectra_cache",
         }
         conti_dict['z'] = rec["z"]
 
+        # L2500_int
         L_ok = np.isfinite(conti_dict.get('L2500_int', np.nan)) and np.isfinite(conti_dict.get('L2500_int_err', np.nan))
                 
         if L_ok:
             m_2500, m_2500_err = compute_apparent_mag_2500_astropy(conti_dict, logL_col='L2500_int', logL_err_col='L2500_int_err')
             mag_errs = np.array([mag_err if (np.isfinite(mag_err) and mag_err >=0) else 0.0 
-                                         for mag_err in rec["mags_err"].values()])
+                                            for mag_err in rec["mags_err"].values()])
             m_2500_err = np.sqrt(m_2500_err**2 + np.mean(mag_errs)**2)
         else:
             m_2500, m_2500_err = -1e9, -1e9
+
+        # L2500
+        L_ok = np.isfinite(conti_dict.get('L2500', np.nan)) and np.isfinite(conti_dict.get('L2500_err', np.nan))
+        if L_ok:
+            m_2500_reddened, m_2500_reddened_err = compute_apparent_mag_2500_astropy(conti_dict, logL_col='L2500', logL_err_col='L2500_err')
+            mag_errs = np.array([mag_err if (np.isfinite(mag_err) and mag_err >=0) else 0.0 
+                                for mag_err in rec["mags_err"].values()])
+            m_2500_reddened_err = np.sqrt(m_2500_reddened_err**2 + np.mean(mag_errs)**2)
+        else:
+            m_2500_reddened, m_2500_reddened_err = -1e9, -1e9
+
 
         try:
             alpha_lambda = conti_dict.get('PL_slope', -99)
@@ -566,7 +786,7 @@ def run_qsofit_record(rec, npca_qso, cache_dir="data/spectra_cache",
             print(f"[ERROR] apparent_mag_i_rest {rec.get('object_id','?')} ({rec.get('sdss_name','?')}) (z {rec.get('z','?')}): {e}")
             apparent_mag_i_rest, apparent_mag_i_obs = -1e9, -1e9
             delta_m_avg = -1e9
-            delta_mags = np.array([])
+            delta_mags = {}
 
         result.update(
             delta_m_avg=delta_m_avg,
@@ -575,15 +795,28 @@ def run_qsofit_record(rec, npca_qso, cache_dir="data/spectra_cache",
             apparent_mag_i_obs=apparent_mag_i_obs,
             apparent_mag_2500=m_2500,
             apparent_mag_2500_err=m_2500_err,
+            apparent_mag_2500_reddened=m_2500_reddened,
+            apparent_mag_2500_reddened_err=m_2500_reddened_err,
             f_host_2500=conti_dict.get('frac_host_2500', 0),
             f_host_4200=conti_dict.get('frac_host_4200', 0),
             f_host_5100=conti_dict.get('frac_host_5100', 0),
             alpha_lambda=conti_dict['PL_slope'],
             alpha_lambda_err=conti_dict['PL_slope_err'],
             redchi=q_mle.conti_fit.redchi,
-            ebv=conti_dict.get('EBV', -99),
-            ebv_ccm89=conti_dict.get('EBV_CCM89', -99)
+            L2500=conti_dict['L2500'],
+            L2500_err=conti_dict['L2500_err'],
+            L2500_int=conti_dict['L2500_int'],
+            L2500_int_err=conti_dict['L2500_int_err'],
+            EBV=conti_dict['EBV'],
+            EBV_ccm89=conti_dict['EBV_ccm89'],
+            bands_obj=bands_obj,
+            bands_used=bands_used,
+            bands_dropped=bands_dropped,
         )
+
+        print(f"[INFO] ({rec.get('sdss_name','?')}): redchi={result['redchi']:.3f}, npca_qso={npca_qso}, delta_m_avg={result['delta_m_avg']:.3f}, m_i_rest={result['apparent_mag_i_rest']:.3f}, m_2500={result['apparent_mag_2500']:.3f}±{result['apparent_mag_2500_err']:.3f}, f_host_5100={result['f_host_5100']:.3f}, alpha_lambda={result['alpha_lambda']:.3f}±{result['alpha_lambda_err']:.3f}")
+        print(f"  EBV={result['EBV']:.3f}, EBV_ccm89={result['EBV_ccm89']:.3f}")
+
         return result
 
     except Exception as e:
@@ -595,7 +828,7 @@ def run_qsofit_record(rec, npca_qso, cache_dir="data/spectra_cache",
 def parse_args():
     p = argparse.ArgumentParser(description="DR16Q crossmatch, optional SDSS spectrum download, and QSOFit processing.")
     # p.add_argument("--input-csv",help="Path to sample CSV.")
-    p.add_argument("fpath_in", help="Path to h5 fits with mag means.")
+    p.add_argument("fpath_in", help="Path to either csv or h5 fits with mag means.")
     p.add_argument("fpath_out", help="Output file for QSOFit results.")
     p.add_argument("--filter_csv", default=None,
                    help="Optional CSV file with object_id column to filter input.")
@@ -614,16 +847,23 @@ def parse_args():
     #            help="Number of parallel worker processes for QSOFit.")
     p.add_argument("--filter_object_id", nargs="+", help="List of object IDs to filter.")
     p.add_argument("--filter_sdss_name", nargs="+", help="List of sdss_names to filter.")
+    p.add_argument("--sequential", action="store_true",
+                   help="If set, use sequential (non-parallel) QSOFit processing.")
 
     p.add_argument("--spectral_fit_csv", default=None, type=str, 
                    help="Optional CSV file with spectral fit results to merge into output.")
+    p.add_argument("--zquery", action="store_true", help="If set, perform zquery on all matched spectra and exit.")
     return p.parse_args()
 
 
 def main():
     args = parse_args()
-
-    sample_df = load_agn_data(args.fpath_in, apply_cut=False, only_load=True)
+    if args.fpath_in.endswith(".h5"):
+        sample_df = load_agn_data(args.fpath_in, apply_cut=False, only_load=True)
+    elif args.fpath_in.endswith(".csv"):
+        sample_df = pd.read_csv(args.fpath_in, dtype={"object_id": str})
+    else:
+        raise ValueError(f"Unknown input file type: {args.fpath_in}")
 
     exclusion_sdss_names = [
         '221120.38+010905.6', # wrong redshift
@@ -633,9 +873,6 @@ def main():
     print(f"Excluding {np.sum(~mask_exclude)} objects by sdss_name in exclusion list")
     sample_df = sample_df[mask_exclude].reset_index(drop=True)
 
-    if args.filter_sdss_name is not None:
-        sample_df = sample_df[sample_df['sdss_name'].astype(str).isin(args.filter_sdss_name)]
-
     if args.filter_csv is not None:
         filter_df = pd.read_csv(args.filter_csv)
         if 'object_id' not in filter_df.columns:
@@ -643,6 +880,13 @@ def main():
         filter_ids = set(str(oid).strip() for oid in filter_df['object_id'].values if str(oid).strip())
         sample_df = sample_df[sample_df['object_id'].astype(str).str.strip().isin(filter_ids)]
         print(f"[INFO] After filtering with {args.filter_csv}, {len(sample_df)} rows remain")
+
+    if args.filter_sdss_name is not None:
+        sample_df = sample_df[sample_df['sdss_name'].astype(str).isin(args.filter_sdss_name)]
+        print(f"[INFO] After filtering with {len(args.filter_sdss_name)} sdss_names, {len(sample_df)} rows remain")
+
+
+
     sample_df = sample_df[args.skip:] if args.skip is not None else sample_df
     sample_df = sample_df[:args.N] if args.N is not None else sample_df
     sample_df['object_id'] = sample_df['object_id'].astype(str).str.strip()
@@ -675,6 +919,40 @@ def main():
             for i, name, msg in errors[:10]:
                 print(f"  - {i}:{name} -> {msg}")
         return  # Exit after download-only path
+    
+    if args.zquery:
+        SDSS.clear_cache()
+        N = len(data_cat)
+        results = []
+        errors = []
+        for i in tqdm(range(N), desc="Downloading spectra"):
+            row = data_cat[i]
+            plate, fiber, mjd = int(row['PLATE']), int(row['FIBERID']), int(row['MJD'])
+            sdss_name = str(row['SDSS_NAME'])
+            try:
+                res = zquery(plate, mjd, fiber)
+                res |= dict(object_id=str(row['object_id']), sdss_name=sdss_name, ra=float(row['RA']), dec=float(row['DEC']))
+                if res is not None:
+                    results.append(res)
+                else:
+                    errors.append((i, sdss_name, "zquery returned None"))
+            except Exception as e:
+                errors.append((i, sdss_name, str(e)))
+            #break  # TEMPORARY: only do one for testing
+        print(f"[DONE] Attempted {N} zquery. Errors: {len(errors)}")
+        if errors:
+            for i, name, msg in errors[:10]:
+                print(f"  - {i}:{name} -> {msg}")
+        if results:
+            csv_file = args.fpath_out
+            field_names = list(results[0].keys())
+            with open(csv_file, "w", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=field_names)
+                writer.writeheader()
+                for row in results:
+                    writer.writerow(row)
+            print(f"[OK] Saved zquery results to {csv_file}")
+        return  # Exit after zquery path
 
     os.makedirs('results/pysqo_fits', exist_ok=True)
     os.makedirs('data/pyqsofit', exist_ok=True)
@@ -686,13 +964,15 @@ def main():
     for i in range(len(data_cat)):
         row = data_cat[i]
         z = float(row['Z_SYS'])
-        dropped_bands = bands_bluer_than_lyman_alpha(z)
-        #dropped_bands = row['dropped_bands']
+        bands_dropped = bands_bluer_than_lyman_alpha(z)
+        #bands_dropped = row['bands_dropped']
         # TEMPORARY: skip objects without any dropped bands
-        # if len(dropped_bands) == 0:
+        # if len(bands_dropped) == 0:
         #     continue 
-        bands = [b for b in ['g', 'r', 'i'] if b not in dropped_bands]
+        bands_obj = [b for b in ['g', 'r', 'i'] if b not in bands_dropped]
         rec = dict(
+            bands=bands_obj,
+            bands_dropped=bands_dropped,
             object_id=str(row['object_id']),
             sdss_name=str(row['SDSS_NAME']),
             plate=int(row['PLATE']),
@@ -702,11 +982,11 @@ def main():
             loglbol=float(row['LOGLBOL']),
             mags={
                 b: (float(row[f'mean_corrected_{b}']) if f'mean_corrected_{b}' in colnames else np.nan)
-                for b in bands
+                for b in bands_obj
             },
             mags_err={
                 b: float(row[f"mean_{b}_err"]) if f"mean_{b}_err" in colnames else np.nan
-                for b in bands
+                for b in bands_obj
             },
             ra=float(row['RA']),
             dec=float(row['DEC']),
@@ -719,21 +999,32 @@ def main():
     results_2 = {}
 
     for npca_qso, results_dict in [(0, results_0), (1, results_1), (2, results_2)]:
-        save_fig_path = os.path.join('plots', 'pyqsofit', f'prefix', f'npca_qso_{npca_qso}')
+        save_fig_path = os.path.join('plots', 'pyqsofit', prefix, f'npca_qso_{npca_qso}')
         os.makedirs(save_fig_path, exist_ok=True)
         worker = partial(run_qsofit_record, npca_qso=npca_qso, cache_dir=args.cache_dir, 
                         path_ex=f'data/pyqsofit', parfilename=f'qsopar_{prefix}_{suffix}.fits',
                         save_fig_path=save_fig_path)
         chunksize = 1
-        with Pool(processes=num_cores) as pool:
-            with tqdm(total=len(records), desc=f"Processing npca_qso={npca_qso}", dynamic_ncols=True, smoothing=0.0) as pbar:
-                for res in pool.imap_unordered(worker, records, chunksize=chunksize):
-                    obj_id = res.get("object_id", None)
-                    if obj_id is not None:
-                        res['npca_qso'] = npca_qso
-                        results_dict[obj_id] = res
-                    pbar.update(1)
-        print(f"Collected {len(results_dict)} results for npca_qso={npca_qso}")
+        if args.sequential:
+            # Sequential processing
+            for rec in tqdm(records, desc=f"Processing npca_qso={npca_qso} (sequential)"):
+                res = worker(rec)
+                obj_id = res.get("object_id", None)
+                if obj_id is not None:
+                    res['npca_qso'] = npca_qso
+                    results_dict[obj_id] = res
+            print(f"Collected {len(results_dict)} results for npca_qso={npca_qso} (sequential)")
+        else:
+            # Parallel processing
+            with Pool(processes=num_cores) as pool:
+                with tqdm(total=len(records), desc=f"Processing npca_qso={npca_qso}", dynamic_ncols=True, smoothing=0.0) as pbar:
+                    for res in pool.imap_unordered(worker, records, chunksize=chunksize):
+                        obj_id = res.get("object_id", None)
+                        if obj_id is not None:
+                            res['npca_qso'] = npca_qso
+                            results_dict[obj_id] = res
+                        pbar.update(1)
+            print(f"Collected {len(results_dict)} results for npca_qso={npca_qso}")
 
     # Select best result (lowest redchi) for each object
     results = {}
@@ -748,7 +1039,7 @@ def main():
         best_res = res0
 
         # Only accept npca_qso=1 if it improves redchi by at least 20%
-        if res1["redchi"] <= 0.8 * res0["redchi"]:
+        if res1["redchi"] <= 0.8 * best_res["redchi"]:
             best_res = res1
 
         # Only accept npca_qso=2 if it improves redchi by at least 20% over the current best
@@ -757,36 +1048,65 @@ def main():
 
         # TODO: If chi2 is still bad, use BC=True models
 
+        # Add redchi for each npca_qso to the best result
+        best_res["redchi_npca_qso0"] = res0.get("redchi", np.nan)
+        best_res["redchi_npca_qso1"] = res1.get("redchi", np.nan)
+        best_res["redchi_npca_qso2"] = res2.get("redchi", np.nan)
+
         results[obj_id] = best_res
+        print(f"Object {obj_id}: selected npca_qso={best_res['npca_qso']} with redchi={best_res['redchi']:.3f} (0:{res0['redchi']:.3f}, 1:{res1['redchi']:.3f}, 2:{res2['redchi']:.3f})")
 
     # Update each quasar dict with fields from results
     for quasar in quasar_dict_list:
         obj_id = str(quasar.get('object_id'))
         quasar.update(results[obj_id])
 
+    # Call for each object
+    for q in quasar_dict_list:
+        plot_delta_mags_vs_z_single_quasar(q)
+
+    plot_delta_mags_vs_z(quasar_dict_list)
+    plot_f_host_4200_vs_z(quasar_dict_list)
+
     write_hdf5_file(quasar_dict_list, args.fpath_out)
     
     # Also write results to CSV
-    csv_file=args.fpath_out.replace(".h5", ".csv")
+    csv_file=args.fpath_out.replace(".h5", "_specfitted.csv")
 
     field_names = [
         'object_id',
+        'plate',
+        'mjd',
+        'fiber',
+        'z',
         "delta_m_avg",
         "delta_mags",
         "apparent_mag_i_rest",
         "apparent_mag_i_obs",
         "apparent_mag_2500",
         "apparent_mag_2500_err",
+        "apparent_mag_2500_reddened",
+        "apparent_mag_2500_reddened_err",
         "f_host_2500",
         "f_host_4200",
         "f_host_5100",
         "alpha_lambda",
         "alpha_lambda_err",
+        'redchi_npca_qso0',
+        'redchi_npca_qso1',
+        'redchi_npca_qso2',
         "redchi",
         "npca_qso",
-        'sdss_name',
-        'ebv',
-        'ebv_ccm89',
+        'sdss_name',               
+        'EBV',
+        'EBV_ccm89',
+        'L2500_int',
+        'L2500_int_err',
+        'L2500',
+        'L2500_err',
+        'bands_obj',
+        'bands_used',
+        'bands_dropped',
     ]
 
     with open(csv_file, "w", newline="") as f:
