@@ -281,9 +281,32 @@ class MyMultiVarModel_SMAG(MultiVarModel):
         Returns:
             tuple[JAXArray, JAXArray]: A tuple of the mean GP prediction and
         """
-        gp, _ = self._build_gp(params)
-        _, cond = gp.condition(self.y, X)   # no sorting
-        return cond.loc, jnp.sqrt(cond.variance)
+        # 1) Build GP; _build_gp should return the training sort order it used.
+        gp, order = self._build_gp(params)
+        y_sorted = self.y[order]
+
+        # 2) Sort test inputs by tie-broken key (time + tiny band offset)
+        t_test, b_test = X
+        b_test = jnp.asarray(b_test, dtype=jnp.int32)
+
+        tie_eps  = 10.0 * jnp.finfo(t_test.dtype).eps
+        key_test = t_test + b_test.astype(t_test.dtype) * tie_eps
+        otest    = jnp.argsort(key_test)
+
+        t_pred = t_test[otest]
+        b_pred = b_test[otest]
+
+        # 3) Condition on sorted test inputs; add tiny jitter for numerical PD
+        _, cond = gp.condition(y_sorted, (t_pred, b_pred), diag=1e-10)
+
+        # 4) Map predictions back to the original test order
+        inv = jnp.empty_like(otest)
+        inv = inv.at[otest].set(jnp.arange(otest.shape[0]))
+
+        mean = cond.loc[inv]
+        var  = cond.variance[inv]
+        std  = jnp.sqrt(jnp.clip(var, 0.0, jnp.inf))
+        return mean, std
 
     def psd(
         self, params: dict[str, JAXArray], omega: JAXArray, b: int, sigma_n2: float = 0.0
