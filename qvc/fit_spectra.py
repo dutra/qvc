@@ -402,6 +402,8 @@ def run_qsofit_record(rec, npca_qso, cache_dir="data/spectra_cache",
         apparent_mag_i_rest=-1e9,
         apparent_mag_2500=-1e9,
         apparent_mag_2500_err=-1e9,
+        apparent_mag_2500_reddened=-1e9,
+        apparent_mag_2500_reddened_err=-1e9,
         f_host_2500=-99,
         f_host_4200=-99,
         f_host_5100=-99,
@@ -450,8 +452,9 @@ def run_qsofit_record(rec, npca_qso, cache_dir="data/spectra_cache",
 
         scale = 10 ** (-0.4 * delta_m_avg)
         flux_scaled = flux * scale
+        err_scaled  = err  * scale
 
-        q_mle = QSOFit(lam, flux_scaled, err, rec["z"], path=path_ex)
+        q_mle = QSOFit(lam, flux_scaled, err_scaled, rec["z"], path=path_ex)
         q_mle.Fit(
             name=f"{rec['z']:.2f}_{rec['sdss_name']}_{rec['plate']}-{rec['mjd']}-{rec['fiber']}",  # customize the name of given targets. Default: plate-mjd-fiber
             
@@ -550,6 +553,17 @@ def run_qsofit_record(rec, npca_qso, cache_dir="data/spectra_cache",
         else:
             m_2500, m_2500_err = -1e9, -1e9
 
+        # L2500 reddened
+        L_ok = np.isfinite(conti_dict.get('L2500', np.nan)) and np.isfinite(conti_dict.get('L2500_err', np.nan))
+        if L_ok:
+            m_2500_reddened, m_2500_reddened_err = compute_apparent_mag_2500_astropy(conti_dict, logL_col='L2500', logL_err_col='L2500_err')
+            mag_errs = np.array([mag_err if (np.isfinite(mag_err) and mag_err >=0) else 0.0 
+                                for mag_err in rec["mags_err"].values()])
+            m_2500_reddened_err = np.sqrt(m_2500_reddened_err**2 + np.mean(mag_errs)**2)
+        else:
+            m_2500_reddened, m_2500_reddened_err = -1e9, -1e9
+
+
         try:
             alpha_lambda = conti_dict.get('PL_slope', -99)
             z = conti_dict['z']
@@ -575,6 +589,8 @@ def run_qsofit_record(rec, npca_qso, cache_dir="data/spectra_cache",
             apparent_mag_i_obs=apparent_mag_i_obs,
             apparent_mag_2500=m_2500,
             apparent_mag_2500_err=m_2500_err,
+            apparent_mag_2500_reddened=m_2500_reddened,
+            apparent_mag_2500_reddened_err=m_2500_reddened_err,
             f_host_2500=conti_dict.get('frac_host_2500', 0),
             f_host_4200=conti_dict.get('frac_host_4200', 0),
             f_host_5100=conti_dict.get('frac_host_5100', 0),
@@ -719,7 +735,7 @@ def main():
     results_2 = {}
 
     for npca_qso, results_dict in [(0, results_0), (1, results_1), (2, results_2)]:
-        save_fig_path = os.path.join('plots', 'pyqsofit', f'prefix', f'npca_qso_{npca_qso}')
+        save_fig_path = os.path.join('plots', 'pyqsofit', prefix, f'npca_qso_{npca_qso}')
         os.makedirs(save_fig_path, exist_ok=True)
         worker = partial(run_qsofit_record, npca_qso=npca_qso, cache_dir=args.cache_dir, 
                         path_ex=f'data/pyqsofit', parfilename=f'qsopar_{prefix}_{suffix}.fits',
@@ -757,7 +773,13 @@ def main():
 
         # TODO: If chi2 is still bad, use BC=True models
 
+        # Add redchi for each npca_qso to the best result
+        best_res["redchi_npca_qso0"] = res0.get("redchi", np.nan)
+        best_res["redchi_npca_qso1"] = res1.get("redchi", np.nan)
+        best_res["redchi_npca_qso2"] = res2.get("redchi", np.nan)
+
         results[obj_id] = best_res
+        print(f"Object {obj_id}: selected npca_qso={best_res['npca_qso']} with redchi={best_res['redchi']:.3f} (0:{res0['redchi']:.3f}, 1:{res1['redchi']:.3f}, 2:{res2['redchi']:.3f})")
 
     # Update each quasar dict with fields from results
     for quasar in quasar_dict_list:
@@ -777,6 +799,8 @@ def main():
         "apparent_mag_i_obs",
         "apparent_mag_2500",
         "apparent_mag_2500_err",
+        "apparent_mag_2500_reddened",
+        "apparent_mag_2500_reddened_err",
         "f_host_2500",
         "f_host_4200",
         "f_host_5100",
@@ -784,6 +808,13 @@ def main():
         "alpha_lambda_err",
         "redchi",
         "npca_qso",
+        "redchi_npca_qso0",
+        "redchi_npca_qso1",
+        "redchi_npca_qso2",
+        'plate',
+        'mjd',
+        'fiber',
+        'z',
         'sdss_name',
         'ebv',
         'ebv_ccm89',
