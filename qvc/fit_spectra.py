@@ -77,13 +77,12 @@ def _safe_float(x):
     except Exception:
         return np.nan
 
-def compute_apparent_mag_2500_astropy(conti_table, logL_col='L2500', logL_err_col='L2500_err',
-                                      z_col='z', H0=70, Om0=0.3):
-    cosmo = FlatLambdaCDM(H0=H0, Om0=Om0)
+def compute_apparent_mag_2500_astropy(conti_table, logL_col, logL_err_col):
+    cosmo = FlatLambdaCDM(H0=70, Om0=0.3)
     c = 2.99792458e10  # cm/s
     lambda_ = 2500e-8  # cm
 
-    z = conti_table[z_col]
+    z = conti_table['z']
     logL_2500 = conti_table[logL_col]
     logL_2500_err = conti_table[logL_err_col]
 
@@ -396,7 +395,9 @@ def run_qsofit_record(rec, npca_qso, cache_dir="data/spectra_cache",
 
     # default result (so we always return a complete row even on error)
     result = dict(
-        delta_mags=np.array([]),
+        delta_mag_r=-1e9,
+        delta_mag_g=-1e9,
+        delta_mag_i=-1e9,
         delta_m_avg=-1e9,
         object_id=rec["object_id"],
         sdss_name=rec["sdss_name"],
@@ -411,11 +412,11 @@ def run_qsofit_record(rec, npca_qso, cache_dir="data/spectra_cache",
         alpha_lambda=-1e9,
         alpha_lambda_err=-1e9,
         redchi=1e9,
-        my_ebv=-1e9,
-        L2500=-1e9,
-        L2500_err=-1e9,
-        L2500_int=-1e9,
-        L2500_int_err=-1e9,
+        ebv_fs=-1e9,
+        L2500_fs=-1e9,
+        L2500_fs_err=-1e9,
+        L2500_int_fs=-1e9,
+        L2500_int_fs_err=-1e9,
     )
 
     try:
@@ -572,10 +573,10 @@ def run_qsofit_record(rec, npca_qso, cache_dir="data/spectra_cache",
         }
         conti_dict['z'] = rec["z"]
 
-        L_ok = np.isfinite(conti_dict.get('L2500_int', np.nan)) and np.isfinite(conti_dict.get('L2500_int_err', np.nan))
+        L_ok = np.isfinite(conti_dict.get('L2500_int_fs', np.nan)) and np.isfinite(conti_dict.get('L2500_int_fs_err', np.nan))
                 
         if L_ok:
-            m_2500, m_2500_err = compute_apparent_mag_2500_astropy(conti_dict, logL_col='L2500_int', logL_err_col='L2500_int_err')
+            m_2500, m_2500_err = compute_apparent_mag_2500_astropy(conti_dict, logL_col='L2500_int_fs', logL_err_col='L2500_int_fs_err')
             mag_errs = np.array([mag_err if (np.isfinite(mag_err) and mag_err >=0) else 0.0 
                                          for mag_err in rec["mags_err"].values()])
             m_2500_err = np.sqrt(m_2500_err**2 + np.mean(mag_errs)**2)
@@ -583,9 +584,9 @@ def run_qsofit_record(rec, npca_qso, cache_dir="data/spectra_cache",
             m_2500, m_2500_err = -1e9, -1e9
 
         # L2500 reddened
-        L_ok = np.isfinite(conti_dict.get('L2500', np.nan)) and np.isfinite(conti_dict.get('L2500_err', np.nan))
+        L_ok = np.isfinite(conti_dict.get('L2500_fs', np.nan)) and np.isfinite(conti_dict.get('L2500_fs_err', np.nan))
         if L_ok:
-            m_2500_reddened, m_2500_reddened_err = compute_apparent_mag_2500_astropy(conti_dict, logL_col='L2500', logL_err_col='L2500_err')
+            m_2500_reddened, m_2500_reddened_err = compute_apparent_mag_2500_astropy(conti_dict, logL_col='L2500_fs', logL_err_col='L2500_fs_err')
             mag_errs = np.array([mag_err if (np.isfinite(mag_err) and mag_err >=0) else 0.0 
                                 for mag_err in rec["mags_err"].values()])
             m_2500_reddened_err = np.sqrt(m_2500_reddened_err**2 + np.mean(mag_errs)**2)
@@ -613,7 +614,9 @@ def run_qsofit_record(rec, npca_qso, cache_dir="data/spectra_cache",
 
         result.update(
             delta_m_avg=delta_m_avg,
-            delta_mags=delta_mags,
+            delta_mag_r=delta_mags.get('r', -1e9),
+            delta_mag_g=delta_mags.get('g', -1e9),
+            delta_mag_i=delta_mags.get('i', -1e9),
             apparent_mag_i_rest=apparent_mag_i_rest,
             apparent_mag_i_obs=apparent_mag_i_obs,
             apparent_mag_2500=m_2500,
@@ -626,11 +629,11 @@ def run_qsofit_record(rec, npca_qso, cache_dir="data/spectra_cache",
             alpha_lambda=conti_dict['PL_slope'],
             alpha_lambda_err=conti_dict['PL_slope_err'],
             redchi=q_mle.conti_fit.redchi,
-            my_ebv=conti_dict.get('my_EBV', -99),
-            L2500=conti_dict.get('L2500', -1e9),
-            L2500_err=conti_dict.get('L2500_err', -1e9),
-            L2500_int=conti_dict.get('L2500_int', -1e9),
-            L2500_int_err=conti_dict.get('L2500_int_err', -1e9)
+            ebv_fs=conti_dict.get('EBV', -99),
+            L2500_fs=conti_dict.get('L2500', -1e9),
+            L2500_fs_err=conti_dict.get('L2500_err', -1e9),
+            L2500_int_fs=conti_dict.get('L2500_int', -1e9),
+            L2500_int_fs_err=conti_dict.get('L2500_int_err', -1e9)
         )
         return result
 
@@ -672,6 +675,12 @@ def main():
     args = parse_args()
 
     sample_df = load_agn_data(args.fpath_in, apply_cut=False, only_load=True)
+    # agn_fields = ['sdss_name', 'object_id', 'ra', 'dec', 'z']
+    # for b in ['u', 'g', 'r', 'i', 'z']:
+    #     agn_fields.append(f'mean_corrected_{b}')
+    #     agn_fields.append(f'mean_{b}_err')
+    # sample_df = sample_df[agn_fields]
+    # sample_df = sample_df.reset_index(drop=True)
 
     exclusion_sdss_names = [
         '221120.38+010905.6', # wrong redshift
@@ -814,11 +823,11 @@ def main():
         print(f"Object {obj_id}: selected npca_qso={best_res['npca_qso']} with redchi={best_res['redchi']:.3f} (0:{res0['redchi']:.3f}, 1:{res1['redchi']:.3f}, 2:{res2['redchi']:.3f})")
 
     # Update each quasar dict with fields from results
-    for quasar in quasar_dict_list:
-        obj_id = str(quasar.get('object_id'))
-        quasar.update(results[obj_id])
+    # for quasar in quasar_dict_list:
+    #     obj_id = str(quasar.get('object_id'))
+    #     quasar.update(results[obj_id])
 
-    write_hdf5_file(quasar_dict_list, args.fpath_out)
+    write_hdf5_file(results.values(), args.fpath_out)
     
     # Also write results to CSV
     csv_file=args.fpath_out.replace(".h5", ".csv")
@@ -826,7 +835,9 @@ def main():
     field_names = [
         'object_id',
         "delta_m_avg",
-        "delta_mags",
+        "delta_mag_r",
+        "delta_mag_g",
+        "delta_mag_i",
         "apparent_mag_i_rest",
         "apparent_mag_i_obs",
         "apparent_mag_2500",
@@ -848,11 +859,11 @@ def main():
         'fiber',
         'z',
         'sdss_name',
-        'my_ebv',
-        'L2500',
-        'L2500_err',
-        'L2500_int',
-        'L2500_int_err',
+        'ebv_fs',
+        'L2500_fs',
+        'L2500_fs_err',
+        'L2500_int_fs',
+        'L2500_int_fs_err',
     ]
 
     with open(csv_file, "w", newline="") as f:
