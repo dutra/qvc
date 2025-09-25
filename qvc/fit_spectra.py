@@ -76,6 +76,7 @@ def _safe_float(x):
         return float(x)
     except Exception:
         return np.nan
+
 def compute_apparent_mag_2500_astropy(conti_table, logL_col='L2500', logL_err_col='L2500_err',
                                       z_col='z', H0=70, Om0=0.3):
     cosmo = FlatLambdaCDM(H0=H0, Om0=Om0)
@@ -412,6 +413,10 @@ def run_qsofit_record(rec, npca_qso, cache_dir="data/spectra_cache",
         redchi=1e9,
         ebv=-1e9,
         ebv_ccm89=-1e9,
+        L2500=-1e9,
+        L2500_err=-1e9,
+        L2500_int=-1e9,
+        L2500_int_err=-1e9,
     )
 
     try:
@@ -428,7 +433,7 @@ def run_qsofit_record(rec, npca_qso, cache_dir="data/spectra_cache",
         # Absolute flux calibration (g,r,i)
         #clean_bands = rec['clean_bands']
         sdss_filters = filters.load_filters(*[f'sdss2010-{b}' for b in bands])
-        delta_mags, weights = [], []
+        delta_mags, weights = {}, []
 
         for b, filt in zip(bands, sdss_filters):
             try:
@@ -439,20 +444,45 @@ def run_qsofit_record(rec, npca_qso, cache_dir="data/spectra_cache",
                     1e-17 * flux * u.erg / u.s / u.cm**2 / u.AA,
                     lam * u.AA
                 )
-                delta_mags.append(mag_fiber - mag_synth)
-                weights.append(1.0)
+                dm = mag_fiber - mag_synth
+                delta_mags[b] = dm
+
+                # weight by photometric mag uncertainty if available; else equal weight
+                sig_m = rec.get('mags_err', {}).get(b, np.nan)
+                w = 1.0 / (sig_m**2) if np.isfinite(sig_m) and sig_m > 0 else 1.0
+                weights.append(w)
             except Exception as e:
                 #print(f"[WARNING] Error processing band {b} for {rec['sdss_name']}: {e}")
                 continue
 
-        delta_mags = np.array(delta_mags) if delta_mags else np.array([0.0])
-        weights    = np.array(weights)    if weights    else np.array([1.0])
-        mask = np.isfinite(delta_mags)
-        delta_m_avg = np.average(delta_mags[mask], weights=weights[mask]) if np.any(mask) else 0.0
+
+        bands_used = list(delta_mags.keys())
+        dm_arr = np.array([delta_mags[b] for b in bands_used], dtype=float)
+        w_arr  = np.array(weights[:len(bands_used)], dtype=float)
+        mask   = np.isfinite(dm_arr) & np.isfinite(w_arr) & (w_arr > 0)
+
+        if np.any(mask):
+            w = w_arr[mask]
+            dm = dm_arr[mask]
+            delta_m_avg = np.sum(w * dm) / np.sum(w)
+            # standard error of weighted mean (for optional calibration inflation)
+            sigma_dm = np.sqrt(1.0 / np.sum(w))
+        else:
+            print(f"[WARN] No usable bands after drops for {rec['sdss_name']} (z={rec['z']:.2f}); scale=1.")
+            delta_m_avg = 0.0
+            sigma_dm = 0.0
 
         scale = 10 ** (-0.4 * delta_m_avg)
         flux_scaled = flux * scale
-        err_scaled  = err  * scale
+
+        err_scaled  = err  * scale      # IMPORTANT: scale the uncertainties too
+        # (If you keep ivar anywhere: ivar_scaled = ivar / scale**2)
+
+        # --- Optional: include calibration (zeropoint) uncertainty in quadrature ---
+        # This treats a fully correlated term as if it were per-pixel (conservative).
+        if sigma_dm > 0:
+            frac_s = np.log(10.0) / 2.5 * sigma_dm   # σ_s / s from mag error
+            err_scaled = np.sqrt(err_scaled**2 + (flux_scaled * frac_s)**2)
 
         q_mle = QSOFit(lam, flux_scaled, err_scaled, rec["z"], path=path_ex)
         q_mle.Fit(
@@ -598,7 +628,11 @@ def run_qsofit_record(rec, npca_qso, cache_dir="data/spectra_cache",
             alpha_lambda_err=conti_dict['PL_slope_err'],
             redchi=q_mle.conti_fit.redchi,
             ebv=conti_dict.get('EBV', -99),
-            ebv_ccm89=conti_dict.get('EBV_CCM89', -99)
+            ebv_ccm89=conti_dict.get('EBV_CCM89', -99),
+            L2500=conti_dict.get('L2500', -1e9),
+            L2500_err=conti_dict.get('L2500_err', -1e9),
+            L2500_int=conti_dict.get('L2500_int', -1e9),
+            L2500_int_err=conti_dict.get('L2500_int_err', -1e9)
         )
         return result
 
@@ -818,6 +852,10 @@ def main():
         'sdss_name',
         'ebv',
         'ebv_ccm89',
+        'L2500',
+        'L2500_err',
+        'L2500_int',
+        'L2500_int_err',
     ]
 
     with open(csv_file, "w", newline="") as f:
