@@ -77,21 +77,19 @@ def _safe_float(x):
     except Exception:
         return np.nan
 
-def compute_apparent_mag_2500_astropy(conti_table, logL_col, logL_err_col):
+
+def compute_apparent_mag_2500_astropy(logL2500, logL2500_err, z):
+    print(f"Computing apparent_mag_2500 for logL2500={logL2500}, z={z}")
     cosmo = FlatLambdaCDM(H0=70, Om0=0.3)
     c = 2.99792458e10  # cm/s
     lambda_ = 2500e-8  # cm
 
-    z = conti_table['z']
-    logL_2500 = conti_table[logL_col]
-    logL_2500_err = conti_table[logL_err_col]
-
     DL = cosmo.luminosity_distance(z).to(u.cm).value  # cm
 
-    log_Lnu = logL_2500 + np.log10(lambda_ / c)
+    log_Lnu = logL2500 + np.log10(lambda_ / c)
     log_fnu = log_Lnu - np.log10(4 * np.pi * DL**2 * (1 + z))
     m_ab = -2.5 * log_fnu - 48.60
-    m_ab_err = 2.5 * logL_2500_err
+    m_ab_err = 2.5 * logL2500_err
 
     return m_ab, m_ab_err
 
@@ -413,10 +411,10 @@ def run_qsofit_record(rec, npca_qso, cache_dir="data/spectra_cache",
         alpha_lambda_err=-1e9,
         redchi=1e9,
         ebv_fs=-1e9,
-        L2500_fs=-1e9,
-        L2500_fs_err=-1e9,
-        L2500_int_fs=-1e9,
-        L2500_int_fs_err=-1e9,
+        log_L2500_fs=-1e9,
+        log_L2500_fs_err=-1e9,
+        log_L2500_int_fs=-1e9,
+        log_L2500_int_fs_err=-1e9,
     )
 
     try:
@@ -573,24 +571,26 @@ def run_qsofit_record(rec, npca_qso, cache_dir="data/spectra_cache",
         }
         conti_dict['z'] = rec["z"]
 
-        L_ok = np.isfinite(conti_dict.get('L2500_int_fs', np.nan)) and np.isfinite(conti_dict.get('L2500_int_fs_err', np.nan))
+        L_ok = np.isfinite(conti_dict['L2500_int']) and np.isfinite(conti_dict['L2500_int_err'])
                 
         if L_ok:
-            m_2500, m_2500_err = compute_apparent_mag_2500_astropy(conti_dict, logL_col='L2500_int_fs', logL_err_col='L2500_int_fs_err')
+            m_2500, m_2500_err = compute_apparent_mag_2500_astropy(conti_dict['L2500_int'], conti_dict['L2500_int_err'], z=rec['z'])
             mag_errs = np.array([mag_err if (np.isfinite(mag_err) and mag_err >=0) else 0.0 
                                          for mag_err in rec["mags_err"].values()])
             m_2500_err = np.sqrt(m_2500_err**2 + np.mean(mag_errs)**2)
         else:
+            print(f"[WARN] L2500_int not finite for {rec['sdss_name']} (z={rec['z']:.2f})")
             m_2500, m_2500_err = -1e9, -1e9
 
         # L2500 reddened
-        L_ok = np.isfinite(conti_dict.get('L2500_fs', np.nan)) and np.isfinite(conti_dict.get('L2500_fs_err', np.nan))
+        L_ok = np.isfinite(conti_dict['L2500']) and np.isfinite(conti_dict['L2500_err'])
         if L_ok:
-            m_2500_reddened, m_2500_reddened_err = compute_apparent_mag_2500_astropy(conti_dict, logL_col='L2500_fs', logL_err_col='L2500_fs_err')
+            m_2500_reddened, m_2500_reddened_err = compute_apparent_mag_2500_astropy(conti_dict['L2500'], conti_dict['L2500_err'], z=rec['z'])
             mag_errs = np.array([mag_err if (np.isfinite(mag_err) and mag_err >=0) else 0.0 
                                 for mag_err in rec["mags_err"].values()])
             m_2500_reddened_err = np.sqrt(m_2500_reddened_err**2 + np.mean(mag_errs)**2)
         else:
+            print(f"[WARN] L2500 not finite for {rec['sdss_name']} (z={rec['z']:.2f})")
             m_2500_reddened, m_2500_reddened_err = -1e9, -1e9
 
 
@@ -630,10 +630,10 @@ def run_qsofit_record(rec, npca_qso, cache_dir="data/spectra_cache",
             alpha_lambda_err=conti_dict['PL_slope_err'],
             redchi=q_mle.conti_fit.redchi,
             ebv_fs=conti_dict.get('EBV', -99),
-            L2500_fs=conti_dict.get('L2500', -1e9),
-            L2500_fs_err=conti_dict.get('L2500_err', -1e9),
-            L2500_int_fs=conti_dict.get('L2500_int', -1e9),
-            L2500_int_fs_err=conti_dict.get('L2500_int_err', -1e9)
+            log_L2500_fs=conti_dict.get('L2500', -1e9),
+            log_L2500_fs_err=conti_dict.get('L2500_err', -1e9),
+            log_L2500_int_fs=conti_dict.get('L2500_int', -1e9),
+            log_L2500_int_fs_err=conti_dict.get('L2500_int_err', -1e9)
         )
         return result
 
@@ -860,10 +860,10 @@ def main():
         'z',
         'sdss_name',
         'ebv_fs',
-        'L2500_fs',
-        'L2500_fs_err',
-        'L2500_int_fs',
-        'L2500_int_fs_err',
+        'log_L2500_fs',
+        'log_L2500_fs_err',
+        'log_L2500_int_fs',
+        'log_L2500_int_fs_err',
     ]
 
     with open(csv_file, "w", newline="") as f:
