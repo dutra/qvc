@@ -156,7 +156,7 @@ def run_mcmc_pipeline(df_agn, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, c
                     resume=resume,
                     checkpoint_file=checkpoint_file,
                     print_progress=True,
-                    dlogz_init=0.1,                 
+                    dlogz_init=1,                 
                     n_effective=200,                # 300–1000 typical for model comparison
                     nlive_init=max(100, 25*ndim),   # bump live points
                     nlive_batch=max(50, 15*ndim)   # reasonable batch size for dynamic allocation
@@ -306,27 +306,34 @@ def run_single(df_agn, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, cosmo_mo
 
     print("Plotting predicted vs actual M2500...")
     plot_predicted_vs_actual_M2500(flat_samples, df_agn, cosmo_model=cosmo_model, z_pivot_agn=z_pivot_agn, debias=False, show=False, plot_path=plot_path)
-    plot_predicted_vs_actual_M2500(flat_samples, df_agn, cosmo_model=cosmo_model, z_pivot_agn=z_pivot_agn, debias=True, show=False, dms=dmag_corr, plot_path=plot_path)
+    M2500_residuals_debiased, M2500_std_debiased = plot_predicted_vs_actual_M2500(flat_samples, df_agn, cosmo_model=cosmo_model, 
+                                                                                  z_pivot_agn=z_pivot_agn, debias=True, show=False, dms=dmag_corr,
+                                                                                  plot_path=plot_path)
+    chisq_red_M2500_debiased, _ = reduced_chi_squared(M2500_residuals_debiased, M2500_std_debiased, n_params=len(model_labels)-1)
 
     print("Plotting Hubble diagram...")
     residuals, mu_pred_median, mu_pred_std = plot_hubble(flat_samples, df_agn, df_pantheon, 
                                                          cosmo_model=cosmo_model, z_pivot_agn=z_pivot_agn, 
                                                          show_true=False, show=False, debias=False, plot_path=plot_path, verbose=False)
-    debiased_residuals, _, _ = plot_hubble(flat_samples, df_agn, df_pantheon, 
+    debiased_residuals, _, mu_pred_std_debiased = plot_hubble(flat_samples, df_agn, df_pantheon, 
                                                          cosmo_model=cosmo_model, z_pivot_agn=z_pivot_agn, 
                                                          show_true=False, show=False, debias=True, dms=dmag_corr, plot_path=plot_path,
                                                          cosmo_model_samples=cosmo_model_samples, verbose=verbose)
+    chisq_red_hubble_debiased, _ = reduced_chi_squared(debiased_residuals, mu_pred_std_debiased, n_params=len(model_labels)-1)
 
     print("Plotting predicted L2500 vs ...")
     plot_predicted_L2500_vs_sigmahat(flat_samples, df_agn, cosmo_model=cosmo_model, z_pivot_agn=z_pivot_agn, 
                                      debias=False, show_residuals=False,
                                      show=False, plot_path=plot_path)
-    plot_predicted_L2500_vs_sigmahat(flat_samples, df_agn, cosmo_model=cosmo_model, z_pivot_agn=z_pivot_agn, 
-                                     debias=True, dms=dmag_corr, show_residuals=False,
-                                     show=False, plot_path=plot_path)
+    L_residuals_debiased, L_pred_std_debiased = plot_predicted_L2500_vs_sigmahat(flat_samples, df_agn, cosmo_model=cosmo_model, z_pivot_agn=z_pivot_agn, 
+                                                            debias=True, dms=dmag_corr, show_residuals=False,
+                                                            show=False, plot_path=plot_path)
+    
+    chisq_red_L2500, _ = reduced_chi_squared(L_residuals_debiased, L_pred_std_debiased, n_params=len(model_labels)-1)
     
     print("Plotting cosmological posteriors corner plot...")
-    plot_cosmo_corner(None, flat_samples, cosmo_model, z_pivot_sna, z_pivot_agn, show=False, plot_path=plot_path)
+    plot_cosmo_corner(None, flat_samples, cosmo_model, z_pivot_sna, z_pivot_agn, show=False, 
+                      plot_path=plot_path, speed=speed)
 
     print("Plotting completeness vs magnitude at redshifts...")
     p_detect, mag_centers, z_centers, dm, dz, completeness_scatter = get_completeness_function_2d(df_agn, plot=True)
@@ -350,6 +357,16 @@ def run_single(df_agn, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, cosmo_mo
 
     print('std debiased residuals:', np.std(debiased_residuals))
     # TODO: Subtract typical mu error in quadrature
+    
+    print(f"\033[94mReduced chi-squared (debiased) M2500: {chisq_red_M2500_debiased:.3f}\033[0m")
+    print(f"\033[94mReduced chi-squared (debiased) Hubble: {chisq_red_hubble_debiased:.3f}\033[0m")
+    print(f"\033[94mReduced chi-squared (debiased) L2500: {chisq_red_L2500:.3f}\033[0m")
+    chisq_dict = {
+        'M2500': chisq_red_M2500_debiased,
+        'Hubble': chisq_red_hubble_debiased,
+        'L2500': chisq_red_L2500
+    }
+    write_results_tex_variables(df_agn, flat_samples, cosmo_model, None, z_pivot_agn, plot_path, chisq_dict=chisq_dict)
 
     return sampler, flat_samples, model_labels, dmag_corr, logZ, logZerr, debiased_residuals
 
@@ -373,7 +390,8 @@ def run_all(df_agn, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, cosmo_model
                        resume=resume, speed=speed, N=N, use_mu_sh0es=use_mu_sh0es)
         _, samples_sna, _, _, logZ_sna, logZerr_sna = r
         
-        plot_cosmo_corner(samples_sna, samples_joint, cosmo_model, z_pivot_sna, z_pivot_agn, show=False, plot_path=f"plots/hubble/{prefix}")
+        plot_cosmo_corner(samples_sna, samples_joint, cosmo_model, z_pivot_sna, z_pivot_agn, show=False, 
+                          plot_path=f"plots/hubble/{prefix}", speed=speed)
 
         cosmo_models_dict[cosmo_model]['logZ'] = logZ_joint
         cosmo_models_dict[cosmo_model]['logZerr'] = logZerr_joint
@@ -386,24 +404,7 @@ def run_all(df_agn, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, cosmo_model
     
     make_cosmo_table_latex(results_latex, write_path=f"plots/hubble/{prefix}/")
 
-
-    model_1 = 'Flatw0waCDM'
-    model_2 = 'FlatwCDM'
-    logZ_1 = cosmo_models_dict[model_1]['logZ']
-    logZerr_1 = cosmo_models_dict[model_1]['logZerr']
-    model_1_name = cosmo_models_latex[model_1]
-    logZ_2 = cosmo_models_dict[model_2]['logZ']
-    logZerr_2 = cosmo_models_dict[model_2]['logZerr']
-    model_2_name = cosmo_models_latex[model_2]
-    print(f"Comparing models {model_1} and {model_2} by log-evidence:")
-    print(f"  {model_1_name}: logZ = {logZ_1:.2f} ± {logZerr_1:.2f}")
-    print(f"  {model_2_name}: logZ = {logZ_2:.2f} ± {logZerr_2:.2f}")
-    compare_r = compare_models_by_log_evidence(logZ_1=logZ_1, logZerr_1=logZerr_1, 
-                                   logZ_2=logZ_2, logZerr_2=logZerr_2,
-                                   model_1_name=model_1_name,
-                                   model_2_name=model_2_name,
-                                   write_path=f"plots/hubble/{prefix}/")
-    
+    compare_r = compare_models_by_log_evidence_all(cosmo_models_dict, write_path=f"plots/hubble/{prefix}/")
     write_results_tex_variables(df_agn, cosmo_model_samples['Flatw0waCDM'], 'Flatw0waCDM', compare_r, z_pivot_agn,
                                 f"plots/hubble/{prefix}")
 

@@ -176,6 +176,7 @@ def plot_cosmo_corner(
     z_pivot_agn,
     plot_path='plots/hubble',
     show=False,
+    speed=''
 ):
     """
     Corner-style plot (custom) of key cosmology params with diagonal stats labels.
@@ -335,8 +336,8 @@ def plot_cosmo_corner(
 
     os.makedirs(plot_path, exist_ok=True)
 
-    fig.savefig(os.path.join(plot_path, f"cosmo_corner_{cosmo_model}.png"), bbox_inches="tight", dpi=150)
-    fig.savefig(os.path.join(plot_path, f"cosmo_corner_{cosmo_model}.pdf"), bbox_inches="tight", dpi=600)
+    fig.savefig(os.path.join(plot_path, f"cosmo_corner_{cosmo_model}_{speed}.png"), bbox_inches="tight", dpi=150)
+    fig.savefig(os.path.join(plot_path, f"cosmo_corner_{cosmo_model}_{speed}.pdf"), bbox_inches="tight", dpi=600)
     if show:
         plt.show()
     plt.close(fig)
@@ -925,6 +926,22 @@ def plot_predicted_vs_actual_M2500(
     if debias:
         dm_interp = make_dm_function(np.array(df_agn["apparent_mag_2500"].values), np.array(df_agn['z'].values), dms)
 
+    # --- build global residuals & uncertainties (before binning) ---
+    # if debias: subtract the same dm_interp applied in panels
+    if debias:
+        pts_all = np.column_stack([df_agn['z'].values, df_agn['apparent_mag_2500'].values])
+        actual_M_2500_eff = actual_M_2500 - dm_interp(pts_all)
+    else:
+        actual_M_2500_eff = actual_M_2500
+
+    residuals_all = M_2500_pred - actual_M_2500_eff               # mag
+    sigma_all     = np.sqrt(M_2500_pred_err**2 + xerr**2)          # mag
+
+    # Safety mask for nan/inf
+    m = np.isfinite(residuals_all) & np.isfinite(sigma_all) & (sigma_all > 0)
+    residuals_all = residuals_all[m]
+    sigma_all     = sigma_all[m]
+
     # --- binning in redshift ---
     num_cols = 5
     num_rows = 7
@@ -993,7 +1010,6 @@ def plot_predicted_vs_actual_M2500(
         y = M_2500_pred[bin_mask]
         xerr_bin = xerr[bin_mask]
         yerr_bin = M_2500_pred_err[bin_mask]
-
 
         # residuals & coverage vs intrinsic sigma
         resid = y - x
@@ -1086,6 +1102,8 @@ def plot_predicted_vs_actual_M2500(
     if show:
         plt.show()
     plt.close()
+
+    return residuals_all, sigma_all
 
 def plot_completeness_vs_mag_at_redshifts(p_detect, mag_centers, z_centers, 
                                           redshifts=[0.5, 1.0, 2.0, 3.0, 4.0], show=False):
@@ -1199,7 +1217,8 @@ def plot_full_residuals(df_agn, residuals, flat_samples, cosmo_model, z_pivot_ag
         'log_f_host_5100', 'log_f_host_4200',
         'zWarning', 'sameZ', 'class_code', 'subClass_code',
         'log_rho', 't_rf_length', 'tau_band_RF_mean',
-        'log_tau_band_RF_mean', 'log_t_rf_length',
+        'log_tau_band_RF_mean', 'log_t_rf_length', 
+        'alphaOX', 'alphaOX_int', 'ebv_fs', 'log_ebv_fs', 'ebv_wu',
         'eta_A1', 'eta_A2', 'eta_tau1', 'eta_tau2',
     ]) if col in df_agn.columns]
 
@@ -1412,10 +1431,6 @@ def plot_predicted_L2500_vs_sigmahat(
     model_logL_at_data = f_med(x_log_ref)
     residuals = actual_logL2500 - model_logL_at_data
 
-    # Error budget in log space for residuals: model spread + x-prop + mag error
-    obs_err = 0.5 * (f_high(x_log_ref) - f_low(x_log_ref))
-    propagated_err = 0.4 * np.abs(pred_M_err_med)
-    total_err = np.sqrt(obs_err**2 + propagated_err**2 + y_log_meas_err**2)
 
     # --- Figure scaffold ---
     color = 'm'
@@ -1485,8 +1500,7 @@ def plot_predicted_L2500_vs_sigmahat(
     L_suberlak = L_scale * x_grid**(-2.5*C) * (2.5*C) 
     ax.plot(x_grid, L_suberlak, color='c', lw=2.0, zorder=10, label='Suberlak+2021 relation', linestyle='--')
  
- 
- 
+
     # --- Axes & labels ---
     ax.set_ylabel(r'$L_{2500}$ (erg s$^{-1})$')
     ax.set_xscale('log')
@@ -1499,11 +1513,40 @@ def plot_predicted_L2500_vs_sigmahat(
     ax.xaxis.set_minor_locator(LogLocator(base=10.0, subs=np.arange(2, 10) * 0.1, numticks=100))
     ax.legend(loc='upper right')
 
+    # --- Residuals vs median line (log space) ---
+    f_med  = interp1d(x_log_grid, ylog_med,  bounds_error=False, fill_value='extrapolate')
+    model_logL_at_data = f_med(x_log_ref)
+    residuals = actual_logL2500 - model_logL_at_data  # (log10 L)
+
+    # --- Build per-point 1σ for reduced-chi^2 (EXCLUDES posterior ribbon) ---
+    # Measurement term in log10 L (from mag errors)
+    sigma_meas = np.asarray(y_log_meas_err, dtype=float)
+
+    # Local slope dy/dx of median relation on the grid, then interpolate to data x
+    slope_grid = np.gradient(ylog_med, x_log_grid)  # dy/dx
+    f_slope = interp1d(x_log_grid, slope_grid, bounds_error=False, fill_value='extrapolate')
+    slope_at_data = f_slope(x_log_ref)
+
+    # Horizontal uncertainty in x (mag) at median params -> vertical via slope
+    sigma_x = np.asarray(pred_M_err_med, dtype=float)      # (mag)
+    sigma_xy = np.abs(slope_at_data) * np.abs(sigma_x)     # (log10 L)
+
+    # Optional: add cosmology distance-modulus uncertainty if you computed it
+    sigma_mu_log = 0.0   # set to 0.4 * sigma_mu if available
+
+    sigma_chi = np.sqrt(sigma_meas**2 + sigma_xy**2 + sigma_mu_log**2)
+
+    # Clean
+    good = np.isfinite(residuals) & np.isfinite(sigma_chi) & (sigma_chi > 0)
+    resid_clean = residuals[good]
+    sigma_clean = sigma_chi[good]
+
+    # (Optional) residual panel uses sigma_clean
     if show_residuals and ax_res is not None:
-        sc = ax_res.scatter(x_data, residuals, s=10, alpha=0.7, c=color_key, cmap='bwr',
+        sc = ax_res.scatter(x_data[good], resid_clean, s=10, alpha=0.7, c=color_key, cmap='bwr',
                             edgecolor='k', lw=0.5, zorder=5)
         cbar = plt.colorbar(sc, ax=ax_res, orientation='vertical'); cbar.set_label(key)
-        ax_res.errorbar(x_data, residuals, yerr=total_err,
+        ax_res.errorbar(x_data[good], resid_clean, yerr=sigma_clean,
                         fmt='none', alpha=0.25, lw=1.2, capsize=2.5, capthick=1, color='k', zorder=4)
         ax_res.axhline(0, color=color, linestyle='--', zorder=3)
         ax_res.set_ylabel('Residuals (log)')
@@ -1515,18 +1558,18 @@ def plot_predicted_L2500_vs_sigmahat(
         ax.set_xlabel(r'$(\sigma/\sigma_{\mathrm{p}})^{\alpha}(\tau/\tau_{\mathrm{p}})^{\beta}$')
         plt.setp(ax.get_xticklabels(), visible=True)
 
+    # Save & return
     os.makedirs(plot_path, exist_ok=True)
     os.makedirs(os.path.join(plot_path, "pdf"), exist_ok=True)
-    if debias:
-        plt.savefig(os.path.join(plot_path, "predicted_L2500_vs_fullcorr_band_debiased.png"), dpi=300)
-        plt.savefig(os.path.join(plot_path, "pdf", "predicted_L2500_vs_fullcorr_band_debiased.pdf"), dpi=600)
-    else:
-        plt.savefig(os.path.join(plot_path, "predicted_L2500_vs_fullcorr_band.png"), dpi=300)
-        plt.savefig(os.path.join(plot_path, "pdf", "predicted_L2500_vs_fullcorr_band.pdf"), dpi=600)
-
+    out_png = "predicted_L2500_vs_fullcorr_band_debiased.png" if debias else "predicted_L2500_vs_fullcorr_band.png"
+    out_pdf = os.path.splitext(out_png)[0] + ".pdf"
+    plt.savefig(os.path.join(plot_path, out_png), dpi=300, bbox_inches="tight")
+    plt.savefig(os.path.join(plot_path, "pdf", out_pdf), dpi=600, bbox_inches="tight")
     if show:
         plt.show()
     plt.close()
+
+    return resid_clean, sigma_clean
 
 def dmi_from_pdet_only(m_obs, m_obs_err, p_det, m_grid, sigma_completeness, z, tiny=1e-12):
     """

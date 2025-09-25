@@ -153,7 +153,7 @@ def log_likelihood(theta, *, agn_data, pantheon_data,
     mu_err = np.sqrt(
         m_err**2 +
         M_pred_err**2 +
-        #z_err**2 +
+        z_err**2 +
         (0.055 * z)**2 +
         np.exp(params['log_f'])**2
     )
