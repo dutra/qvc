@@ -283,7 +283,8 @@ def get_completeness_function_2d(
     if z_max - z_min < 1e-3:
         z_min -= 0.01; z_max += 0.01
 
-    mag_min, mag_max = 16.0, 26.0
+    #mag_min, mag_max = 16.0, 26.0
+    mag_min, mag_max = 16.0, 32.0
     print(f"Using mag range: {mag_min:.2f} to {mag_max:.2f}")
 
     mag_edges = np.linspace(mag_min, mag_max, n_mag_bins + 1)

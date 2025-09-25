@@ -427,6 +427,7 @@ if __name__ == "__main__":
     parser.add_argument("--use_mu_sh0es", action="store_true", default=False, help="Use MU_SH0ES for SNIa fit (default: False)")
     parser.add_argument("--spectra_fit_csv", type=str, nargs='+', help="Path(s) to spectra fit CSV file(s)")
     parser.add_argument("--zquery_csv", type=str, help="Path to zquery CSV file")
+    parser.add_argument("--no_cuts", action="store_true", default=False, help="Disable AGN data cuts (default: False)")
 
     args = parser.parse_args()
 
@@ -443,6 +444,7 @@ if __name__ == "__main__":
 
     df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_pantheon_data()
     df_agn = load_agn_data(args.agn_data_filepath, populate_sdss=args.force_populate_fields, 
+                           apply_cut=not args.no_cuts,
                            spectra_fit_csv=args.spectra_fit_csv, zquery_csv=args.zquery_csv)
 
     if args.N and args.N > 0:
@@ -451,7 +453,7 @@ if __name__ == "__main__":
     if args.run == "single": # default
         run_single(df_agn=df_agn, df_pantheon=df_pantheon, _sna_L=_sna_L, _sna_Lower=_sna_Lower, _sna_LogdetCov=_sna_LogdetCov, cosmo_model=args.cosmo_model,
              completeness=not args.disable_completeness, use_full_cov=not args.disable_full_covariance, resume=args.resume,
-             speed=args.speed, N=args.N, only_sna=args.only_sna, use_mu_sh0es=args.use_mu_sh0es)
+             speed=args.speed, N=args.N, only_sna=args.only_sna, use_mu_sh0es=args.use_mu_sh0es, disable_cuts=args.no_cuts)
     elif args.run == "full":
         run_all(df_agn=df_agn, df_pantheon=df_pantheon, _sna_L=_sna_L, _sna_Lower=_sna_Lower, _sna_LogdetCov=_sna_LogdetCov, 
                 cosmo_model=args.cosmo_model, speed=args.speed, resume=args.resume, N=args.N, use_mu_sh0es=args.use_mu_sh0es)

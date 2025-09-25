@@ -702,10 +702,6 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, spectra_fit_cs
     df['log_f_host_5100'] = np.where(df['f_host_5100'] > 0, np.log10(df['f_host_5100']), np.nan)
     # Replace NaNs with 0 in all columns
     #df = df.fillna(0)
-
-    if apply_cut is False:
-        print("Skipping data cuts as apply_cut is False.")
-        return df
     
     df = df.reset_index(drop=True)
     
@@ -720,47 +716,47 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, spectra_fit_cs
     mask_exclude = ~df['sdss_name'].astype(str).isin(exclusion_sdss_names)
     print(f"Excluding {np.sum(~mask_exclude)} objects by object_id exclusion list")
     df = df[mask_exclude].reset_index(drop=True)
+
+    # ALWAYS Remove objects with apparent_mag_2500 or apparent_mag_i too bright or too faint
+    mag_mask = (df['apparent_mag_2500'] >= 1) & (df['apparent_mag_2500'] < 50) & \
+               (df['apparent_mag_i'] >= 1) & (df['apparent_mag_i'] < 50)
+    num_removed = np.sum(~mag_mask)
+    print(f"Cut on apparent_mag_2500 and apparent_mag_i: {num_removed} objects removed")
+    df = df[mag_mask].reset_index(drop=True)
+
     # Define cuts as (column, lower_limit, upper_limit)
     cuts = [
         ('f_host_4200', None, 0.2),
         ('log_tau_UV_RF', 1.5, None),
         #('redchi', None, 5),
-        #('apparent_mag_2500', 16, 26),
-        #('apparent_mag_i', 15, 26),
-        ('apparent_mag_2500', 12, 30),
-        ('apparent_mag_i', 12, 30),
+        ('apparent_mag_2500', 12, 40),
+        ('apparent_mag_i', 12, 40),
         #('z', None, 0.5),
         #('alpha_lambda', None, 0),
         # ('sameZ', 0.9, 1.1),
-        # ('zWarning', -0.1, 0.1),
-        #('apparent_mag_i', 15, 25)
-        # Uncomment/add more cuts as needed
-        # ('z', 1, None),
-        # ('z', None, 3.2),
-        # ('ebv', None, 0.05),
     ]
+    if apply_cut:
+        initial_count = len(df)
+        mask = np.ones(len(df), dtype=bool)
+        for col, lower, upper in cuts:
+            col_mask = np.ones(len(df), dtype=bool)
+            if lower is not None:
+                col_mask &= df[col] >= lower
+            if upper is not None:
+                col_mask &= df[col] < upper
+            cut_count = np.sum(~col_mask)
+            print(f"Cut on {col}: {cut_count} objects removed")
+            mask &= col_mask
+        
+        remove_nans_columns = ['alpha_lambda', 'alpha_lambda_err']
+        for col in remove_nans_columns:
+            nan_mask = ~df[col].isna()
+            num_nans = (~nan_mask).sum()
+            print(f"Removing {num_nans} objects with NaN in column '{col}'")
+            mask &= nan_mask
 
-    initial_count = len(df)
-    mask = np.ones(len(df), dtype=bool)
-    for col, lower, upper in cuts:
-        col_mask = np.ones(len(df), dtype=bool)
-        if lower is not None:
-            col_mask &= df[col] >= lower
-        if upper is not None:
-            col_mask &= df[col] < upper
-        cut_count = np.sum(~col_mask)
-        print(f"Cut on {col}: {cut_count} objects removed")
-        mask &= col_mask
-    
-    remove_nans_columns = ['alpha_lambda', 'alpha_lambda_err']
-    for col in remove_nans_columns:
-        nan_mask = ~df[col].isna()
-        num_nans = (~nan_mask).sum()
-        print(f"Removing {num_nans} objects with NaN in column '{col}'")
-        mask &= nan_mask
-
-    df = df[mask]
-    print(f"Total objects removed by all cuts: {initial_count - len(df)}")
+        df = df[mask]
+        print(f"Total objects removed by all cuts: {initial_count - len(df)}")
 
     df = df.reset_index(drop=True)
     
