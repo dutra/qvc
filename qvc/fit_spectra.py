@@ -410,6 +410,7 @@ def run_qsofit_record(rec, npca_qso, cache_dir="data/spectra_cache",
         alpha_lambda_err=-1e9,
         redchi=1e9,
         ebv_fs=-1e9,
+        euv_fs=-1e9,
         log_L2500_fs=-1e9,
         log_L2500_fs_err=-1e9,
         log_L2500_int_fs=-1e9,
@@ -629,6 +630,7 @@ def run_qsofit_record(rec, npca_qso, cache_dir="data/spectra_cache",
             alpha_lambda_err=conti_dict['PL_slope_err'],
             redchi=q_mle.conti_fit.redchi,
             ebv_fs=conti_dict.get('EBV', -99),
+            euv_fs=conti_dict.get('EUV', -99),
             log_L2500_fs=conti_dict.get('L2500', -1e9),
             log_L2500_fs_err=conti_dict.get('L2500_err', -1e9),
             log_L2500_int_fs=conti_dict.get('L2500_int', -1e9),
@@ -819,9 +821,11 @@ def main():
         best_res["redchi_npca_qso2"] = res2.get("redchi", np.nan)
 
         results[obj_id] = best_res
-        print(f"Object {obj_id}: selected npca_qso={best_res['npca_qso']} with redchi={best_res['redchi']:.3f} (0:{res0['redchi']:.3f}, 1:{res1['redchi']:.3f}, 2:{res2['redchi']:.3f})")
+        # print(f"Object {obj_id}: selected npca_qso={best_res['npca_qso']} with redchi={best_res['redchi']:.3f} (0:{res0['redchi']:.3f}, 1:{res1['redchi']:.3f}, 2:{res2['redchi']:.3f})")
+        # print(f"f_host_4200: {best_res['f_host_4200']}, EBV: {best_res['ebv_fs']}, EUV: {best_res['euv_fs']}, alpha_lambda: {best_res['alpha_lambda']}")
 
     # Update each quasar dict with fields from results
+    # This may overwrite ebv and other existing fields
     # for quasar in quasar_dict_list:
     #     obj_id = str(quasar.get('object_id'))
     #     quasar.update(results[obj_id])
@@ -859,6 +863,7 @@ def main():
         'z',
         'sdss_name',
         'ebv_fs',
+        'euv_fs',
         'log_L2500_fs',
         'log_L2500_fs_err',
         'log_L2500_int_fs',
