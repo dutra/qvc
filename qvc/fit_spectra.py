@@ -79,7 +79,6 @@ def _safe_float(x):
 
 
 def compute_apparent_mag_2500_astropy(logL2500, logL2500_err, z):
-    print(f"Computing apparent_mag_2500 for logL2500={logL2500}, z={z}")
     cosmo = FlatLambdaCDM(H0=70, Om0=0.3)
     c = 2.99792458e10  # cm/s
     lambda_ = 2500e-8  # cm
