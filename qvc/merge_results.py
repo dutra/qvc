@@ -67,7 +67,7 @@ def export_quasars_to_csv(quasars, csv_file, fields):
             writer.writerow(row)
     print(f"Wrote {len(quasars)} quasars to {csv_file}")
 
-def write_sdss_fields(quasars, h5_file):
+def write_sdss_fields(quasars, h5_file, skip_populate_sdss=False):
     populate_sdss_fields(quasars)
     write_hdf5_file(quasars, h5_file)
     return quasars
@@ -120,6 +120,12 @@ def main():
         default=False,
         help="If set, export merged quasars to CSV file.",
     )
+    parser.add_argument(
+        "--skip_populate_sdss",
+        action="store_true",
+        default=False,
+        help="If set, skip populating SDSS fields.",
+    )
 
     args = parser.parse_args()
 
@@ -166,34 +172,18 @@ def main():
     quasars = filter_quasars(quasars)
     print(f"After filtering, {len(quasars)} quasars remain.")
 
-    quasars = write_sdss_fields(quasars, output_file)
-    print(f"Wrote SDSS fields to {output_file}")
+    if not args.skip_populate_sdss:
+        print("Populating SDSS fields...")
+        quasars = write_sdss_fields(quasars, output_file)
+        print(f"Wrote SDSS fields to {output_file}")
 
     if args.csv:
         export_quasars_to_csv(
             quasars=quasars,
             csv_file=output_file.replace(".h5", ".csv"),
-            fields=[
-                "object_id",
-                "ra",
-                "dec",
-                "z",
-                "dropped_bands",
-                "apparent_mag_2500",
-                "apparent_mag_2500_err",
-                "apparent_mag_i_rest",
-                "delta_m_avg",
-                "f_host_2500",
-                "f_host_4200",
-                "f_host_5100",
-                "alpha_lambda",
-                "alpha_lambda_err",
-                "sdss_name",
-                "npca_qso",
-                "redchi",
-
-            ],
+            fields=quasars[0].keys()
         )
-
+        print(f"Wrote CSV file to {output_file.replace('.h5', '.csv')}")
+    
 if __name__ == "__main__":
     main()

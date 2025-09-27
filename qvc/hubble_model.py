@@ -120,8 +120,8 @@ def get_model_params(cosmo_model, only_sna=False):
 
         ("log_f",     (-5.0,  3.0)),
 
-        ("H0",       (70.0, 76.0)),
-        ("Om0",      (0.2, 0.8)),
+        ("H0",       (60.0, 80.0)),
+        ("Om0",      (0.0, 1.0)),
     ])
 
     # Select cosmological parameters based on model
@@ -129,12 +129,17 @@ def get_model_params(cosmo_model, only_sna=False):
         pass
     elif cosmo_model == 'FlatwCDM':
         priors |= OrderedDict([
-            ("w0",          (-2, 0))
+            ("w0",          (-10.0, 1.0))
         ])
     elif cosmo_model == 'Flatw0waCDM':
         priors |= OrderedDict([
-            ("w0", (-3.0, 1.0)),   # covers phantom (<-1), Λ (-1), quintessence (> -1), and even w>0
-            ("wa", (-50, 10))    # symmetric variation
+            ("w0", (-10.0, 1.0)),   # covers phantom (<-1), Λ (-1), quintessence (> -1), and even w>0
+            ("wa", (-50, 20))    # symmetric variation
+        ])
+    elif cosmo_model == 'FlatwpwaCDM':
+        priors |= OrderedDict([
+            ("wp", (-10.0, 1.0)),   # covers phantom (<-1), Λ (-1), quintessence (> -1), and even w>0
+            ("wa", (-50, 20))    # symmetric variation
         ])
 
     else:

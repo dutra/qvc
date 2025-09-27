@@ -1,6 +1,8 @@
-import matplotlib.pyplot as plt
 import os
-prefix = os.environ['PREFIX']
+prefix = os.environ.get('PREFIX', 'test')
+
+
+import matplotlib.pyplot as plt
 import numpy as np
 import h5py
 from astropy.cosmology import FlatwCDM, Flatw0waCDM, FlatLambdaCDM, FlatwpwaCDM
@@ -146,59 +148,52 @@ def match_radec(df_a, df_b, populate_cols=[], ra_col_a='ra', dec_col_a='dec', ra
     for col in populate_cols:
         matched_values = np.where(match_mask, df_b.iloc[idx][col].values, None)
         result[f'matched_{col}'] = matched_values
-            
 
     # Print warnings for unmatched
+    unmatched_object_ids = []
     for i, matched in enumerate(match_mask):
         if not matched:
-            print(f"Warning: No match found for index {i} (RA={df_a.iloc[i][ra_col_a]}, DEC={df_a.iloc[i][dec_col_a]})")
-    return result
+            #print(f"Warning: No match found for index {i} (RA={df_a.iloc[i][ra_col_a]}, DEC={df_a.iloc[i][dec_col_a]})")
+            unmatched_object_ids.append(df_a.iloc[i]['object_id'])
+    return result, unmatched_object_ids
 
-def populate_xray(df, table='data/table_csc.xml'):
-    """
-    Populate X-ray data from a table (CSV or XML) into the DataFrame df by matching on 'object_id'.
+from astropy.table import Table
+from astropy.io.votable import parse
 
-    Parameters
-    ----------
-    df : pd.DataFrame
-        DataFrame with at least an 'object_id' column.
-    table : str
-        Path to the table file (CSV or XML) containing X-ray data.
+def populate_xray(df, table_fpath="data/cscresults.vot"):
+    # Parse the VOTable
+    vo = parse(table_fpath)
+    table = vo.get_first_table().to_table()
 
-    Returns
-    -------
-    pd.DataFrame
-        DataFrame with new/updated X-ray columns merged in.
-    """
-    # Try to load as CSV first, fallback to XML if needed
-    if table.endswith('.csv'):
-        df_xray = pd.read_csv(table, dtype={'object_id': str})
-    elif table.endswith('.xml'):
-        # Try to read as a VOTable (astropy)
-        try:
-            t = AstroTable.read(table, format='votable')
-            df_xray = t.to_pandas()
-        except Exception as e:
-            print(f"Failed to read XML table: {e}")
-            return df
-        if 'object_id' not in df_xray.columns:
-            # Try to find a column that matches object_id
-            for col in df_xray.columns:
-                if col.lower() == 'object_id':
-                    df_xray.rename(columns={col: 'object_id'}, inplace=True)
-                    break
-    else:
-        raise ValueError("Unsupported table format: must be .csv or .xml")
+    # If you see col0, col1, ..., fix column names using FIELD 'name' attributes
+    fields = vo.get_first_table().fields
+    new_names = [f.name for f in fields]
 
-    print(f"Loaded X-ray table: {table} with {len(df_xray)} rows")
-    merged = df.merge(df_xray, on='object_id', how='left', suffixes=('', '_xray'))
+    # Rename columns in-place
+    table.colnames  # ['col0', 'col1', ...]
+    for old, new in zip(table.colnames, new_names):
+        table.rename_column(old, new)
 
-    # Add all columns from df_xray (except object_id) to df
-    for col in df_xray.columns:
-        if col != 'object_id':
-            df[col] = merged[col]
+        df_csc = table.to_pandas()
 
-    return df
+    df_matched, unmatched_object_ids = match_radec(df, df_csc, populate_cols=['flux_aper_b'], max_sep_arcsec=1.0)
+    print(f"Matched {len(df_matched) - len(unmatched_object_ids)} out of {len(df)} objects to CSC3 catalog.")
+    df_matched['xray_flux'] = df_matched['matched_flux_aper_b']
+    # Compute L_xray from xray_flux and redshift
+    # Assume xray_flux is in erg/cm^2/s and z is in df['z']
+
+    cosmo = FlatLambdaCDM(H0=70, Om0=0.3)
+    z = df_matched['z'].values
+    DL_cm = cosmo.luminosity_distance(z).to('cm').value
+    # L_xray = 4 * pi * DL^2 * flux * (1+z)^{-1}
+    xray_flux = df_matched['xray_flux'].replace(0, np.nan)
+    L_xray = 4 * np.pi * DL_cm**2 * xray_flux / (1 + z)
+    df_matched['log_Lxray'] = np.log10(L_xray)
+    # Avoid division by zero in L_xray
+    df_matched['alphaOX'] = -(df_matched['log_Lxray'] - df_matched['log_L2500_fs'])/2.605
+    df_matched['alphaOX_int'] = -(df_matched['log_Lxray'] - df_matched['log_L2500_int_fs'])/2.605
+
+    return df_matched
 
 def populate_zquery(df, zquery_csv):
     fields = {
@@ -230,18 +225,18 @@ def populate_zquery(df, zquery_csv):
 
     df['sameZ'] = np.isclose(merged['z'], merged['z_zquery'], atol=1e-1, equal_nan=True)
     not_sameZ = ~df['sameZ'].fillna(False)
-    print("Objects with differing z:", np.sum(not_sameZ))
-    for obj_id, sdss_name in zip(df.loc[not_sameZ, 'object_id'], df.loc[not_sameZ, 'sdss_name']):
-        print(f"\033[93m  object_id: {obj_id}, sdss_name: {sdss_name}, z: {merged.loc[merged['object_id'] == obj_id, 'z'].values}, z_zquery: {merged.loc[merged['object_id'] == obj_id, 'z_zquery'].values} zWarning: {merged.loc[merged['object_id'] == obj_id, 'zWarning'].values}\033[0m")
+    # print("Objects with differing z:", np.sum(not_sameZ))
+    # for obj_id, sdss_name in zip(df.loc[not_sameZ, 'object_id'], df.loc[not_sameZ, 'sdss_name']):
+    #     print(f"\033[93m  object_id: {obj_id}, sdss_name: {sdss_name}, z: {merged.loc[merged['object_id'] == obj_id, 'z'].values}, z_zquery: {merged.loc[merged['object_id'] == obj_id, 'z_zquery'].values} zWarning: {merged.loc[merged['object_id'] == obj_id, 'zWarning'].values}\033[0m")
 
     # Print in yellow all object_id and sdss_name with zWarning not 0
-    warn_mask = (merged['zWarning'].astype(str) != '0') & (~merged['zWarning'].isna())
-    print("Objects with zWarning:", np.sum(warn_mask))
-    for obj_id, sdss_name, zwarn in zip(
-            merged.loc[warn_mask, 'object_id'],
-            merged.loc[warn_mask, 'sdss_name'],
-            merged.loc[warn_mask, 'zWarning']):
-        print(f"\033[93m  object_id: {obj_id}, sdss_name: {sdss_name}, zWarning: {zwarn}\033[0m")
+    # warn_mask = (merged['zWarning'].astype(str) != '0') & (~merged['zWarning'].isna())
+    # print("Objects with zWarning:", np.sum(warn_mask))
+    # for obj_id, sdss_name, zwarn in zip(
+    #         merged.loc[warn_mask, 'object_id'],
+    #         merged.loc[warn_mask, 'sdss_name'],
+    #         merged.loc[warn_mask, 'zWarning']):
+    #     print(f"\033[93m  object_id: {obj_id}, sdss_name: {sdss_name}, zWarning: {zwarn}\033[0m")
 
     for col in fields.keys():
         if f'{col}_zquery' in merged.columns:
@@ -261,7 +256,28 @@ def populate_zquery(df, zquery_csv):
 
 
     return df
-#'results/data/sep19_chisq_zquery.csv'
+
+# def compute_L2500_from_mag(m_ab, m_ab_err, z, H0=70, Om0=0.3):
+#     cosmo = FlatLambdaCDM(H0=H0, Om0=Om0)
+#     c = 2.99792458e10   # cm/s
+#     lambda_ = 2500e-8   # cm
+
+#     DL = cosmo.luminosity_distance(z).to(u.cm).value  # cm
+
+#     # --- invert m_AB relation ---
+#     log_fnu = -(m_ab + 48.60) / 2.5
+#     fnu = 10**log_fnu  # erg/s/cm^2/Hz
+
+#     # --- convert to luminosity ---
+#     Lnu = fnu * 4 * np.pi * DL**2 * (1 + z)
+#     logL_2500 = np.log10(Lnu * c / lambda_)  # erg/s/Å @ 2500Å
+
+#     if m_ab_err is not None:
+#         # propagate error: d(log fnu)/dm = -0.4
+#         logL_err = 0.4 * m_ab_err
+#         return logL_2500, logL_err
+#     else:
+#         return logL_2500
 
 def populate_spectra_fit(df, spectra_fit_csvs):
     # Load Colin's SDSS QSO 2500A magnitudes and merge with df on SDSS_NAME
@@ -269,6 +285,10 @@ def populate_spectra_fit(df, spectra_fit_csvs):
             'f_host_4200': float,
             'f_host_2500': float,
             'f_host_5100': float,
+            'ebv_fs': float,
+            'euv_fs': float,
+            'apparent_mag_2500_reddened': float,
+            'apparent_mag_2500_reddened_err': float,
             'apparent_mag_2500': float,
             'apparent_mag_2500_err': float,
             'apparent_mag_i_rest': float,
@@ -276,7 +296,11 @@ def populate_spectra_fit(df, spectra_fit_csvs):
             'alpha_lambda': float,
             'alpha_lambda_err': float,
             'redchi': float,
-            'npca_qso': int
+            'npca_qso': int,
+            'log_L2500_fs': float,
+            'log_L2500_fs_err': float,
+            'log_L2500_int_fs': float,
+            'log_L2500_int_fs_err': float,
         }
     # Drop any existing columns to avoid duplicates
     for col in fields.keys():
@@ -305,10 +329,12 @@ def populate_spectra_fit(df, spectra_fit_csvs):
         # Only update rows in df that have a match in df_spectra
         matched_mask = df['object_id'].isin(df_spectra['object_id'])
         for col in fields.keys():
+            print(f"Populating column: {col}")
             if col in df.columns:
                 print(f"Warning: Column {col} already exists in df, overwriting with spectralfit data for matched objects")
                 df.loc[matched_mask, col] = merged.loc[matched_mask, f"{col}_spectralfit"].values
             else:
+                print(f"Adding new column {col} from spectralfit data")
                 df.loc[matched_mask, col] = merged.loc[matched_mask, col].values
 
     df['log_redchi'] = np.log10(df['redchi'].replace(0, np.nan))
@@ -327,96 +353,104 @@ def populate_spectra_fit(df, spectra_fit_csvs):
                 seen.add(col)
         df[cols_to_save_unique].to_csv(out_csv, index=False)
         print(f"Saved merged DataFrame to {out_csv} with columns: {cols_to_save_unique}")
+    df['log_ebv_fs'] = np.log10(df['ebv_fs'].replace(0, np.nan))
+    df['log_euv_fs'] = np.log10(df['euv_fs'].replace(0, np.nan))
+
+    # logL, logL_err = compute_L2500_from_mag(df['apparent_mag_2500'], df['apparent_mag_2500_err'], df['z'])
+    # df['L2500'] = 10**logL
+    # df['L2500_err'] = df['L2500'] * (np.log(10) * logL_err)
+    # df['logL2500'] = logL
+    # df['logL2500_err'] = logL_err
     return df
 
 
-def compute_apparent_mag_2500(df, logL_col='MY_LOGL2500', logL_err_col='MY_LOGL2500_ERR', z_col='z', H0=70, Om0=0.3):
-    cosmo = FlatLambdaCDM(H0=H0, Om0=Om0)
-    c = 2.99792458e10  # cm/s
-    lambda_ = 2500e-8  # cm
+# def compute_apparent_mag_2500(df, logL_col='MY_LOGL2500', logL_err_col='MY_LOGL2500_ERR', z_col='z', H0=70, Om0=0.3):
+#     cosmo = FlatLambdaCDM(H0=H0, Om0=Om0)
+#     c = 2.99792458e10  # cm/s
+#     lambda_ = 2500e-8  # cm
 
-    z = df[z_col].values
-    logL_2500 = df[logL_col].values
-    logL_2500_err = df[logL_err_col].values
+#     z = df[z_col].values
+#     logL_2500 = df[logL_col].values
+#     logL_2500_err = df[logL_err_col].values
 
-    DL = cosmo.luminosity_distance(z).to(u.cm).value  # cm
+#     DL = cosmo.luminosity_distance(z).to(u.cm).value  # cm
 
-    log_Lnu = logL_2500 + np.log10(lambda_ / c)
-    log_fnu = log_Lnu - np.log10(4 * np.pi * DL**2 * (1 + z))
-    m_ab = -2.5 * log_fnu - 48.60
-    m_ab_err = 2.5 * logL_2500_err
+#     log_Lnu = logL_2500 + np.log10(lambda_ / c)
+#     log_fnu = log_Lnu - np.log10(4 * np.pi * DL**2 * (1 + z))
+#     m_ab = -2.5 * log_fnu - 48.60
+#     m_ab_err = 2.5 * logL_2500_err
 
-    df['apparent_mag_2500'] = m_ab
-    df['apparent_mag_2500_err'] = m_ab_err
-    return df
+#     df['apparent_mag_2500'] = m_ab
+#     df['apparent_mag_2500_err'] = m_ab_err
+#     return df
 
 
-def compute_MY_LOGL2500(df):
-    """
-    Compute MY_LOGL2500 and its propagated uncertainty from available LOGLxxxx bands and alpha_nu.
+# def compute_MY_LOGL2500(df):
+#     """
+#     Compute MY_LOGL2500 and its propagated uncertainty from available LOGLxxxx bands and alpha_nu.
 
-    Parameters:
-    - df: DataFrame with columns LOGLxxxx, LOGLxxxx_ERR, and alpha_nu
+#     Parameters:
+#     - df: DataFrame with columns LOGLxxxx, LOGLxxxx_ERR, and alpha_nu
 
-    Returns:
-    - Two pandas Series:
-        MY_LOGL2500      : mean log10 L_2500 in erg/s
-        MY_LOGL2500_ERR  : propagated uncertainty [dex]
-    """
-    lambda_target = 2500  # Å
-    log_lambda_target = np.log10(lambda_target)
+#     Returns:
+#     - Two pandas Series:
+#         MY_LOGL2500      : mean log10 L_2500 in erg/s
+#         MY_LOGL2500_ERR  : propagated uncertainty [dex]
+#     """
+#     lambda_target = 2500  # Å
+#     log_lambda_target = np.log10(lambda_target)
 
-    bands = {
-        'LOGL1350': 1350,
-        'LOGL1700': 1700,
-        'LOGL2500': 2500,  # included directly
-        'LOGL3000': 3000,
-        'LOGL5100': 5100,
-    }
+#     bands = {
+#         'LOGL1350': 1350,
+#         'LOGL1700': 1700,
+#         'LOGL2500': 2500,  # included directly
+#         'LOGL3000': 3000,
+#         'LOGL5100': 5100,
+#     }
 
-    log_lambda_bands = {band: np.log10(lam) for band, lam in bands.items()}
+#     log_lambda_bands = {band: np.log10(lam) for band, lam in bands.items()}
 
-    logL_vals = []
-    logL_errs = []
+#     logL_vals = []
+#     logL_errs = []
 
-    for _, row in df.iterrows():
-        alpha = row.get('alpha_nu', np.nan)
-        if not np.isfinite(alpha):
-            logL_vals.append(np.nan)
-            logL_errs.append(np.nan)
-            continue
+#     for _, row in df.iterrows():
+#         alpha = row.get('alpha_nu', np.nan)
+#         if not np.isfinite(alpha):
+#             logL_vals.append(np.nan)
+#             logL_errs.append(np.nan)
+#             continue
 
-        est_list = []
-        var_list = []
+#         est_list = []
+#         var_list = []
 
-        for band, lam in bands.items():
-            logL = row.get(band, np.nan)
-            logL_err = row.get(f"{band}_ERR", np.nan)
+#         for band, lam in bands.items():
+#             logL = row.get(band, np.nan)
+#             logL_err = row.get(f"{band}_ERR", np.nan)
 
-            if np.isfinite(logL) and logL > 0 and np.isfinite(logL_err) and logL_err > 0:
-                delta = log_lambda_target - log_lambda_bands[band]
-                logL2500 = logL + (-(alpha + 1)) * delta
-                logL2500_err = logL_err  # Only propagate observational error
+#             if np.isfinite(logL) and logL > 0 and np.isfinite(logL_err) and logL_err > 0:
+#                 delta = log_lambda_target - log_lambda_bands[band]
+#                 logL2500 = logL + (-(alpha + 1)) * delta
+#                 logL2500_err = logL_err  # Only propagate observational error
 
-                est_list.append(logL2500)
-                var_list.append(logL2500_err**2)
+#                 est_list.append(logL2500)
+#                 var_list.append(logL2500_err**2)
 
-        if len(est_list) == 0:
-            logL_vals.append(np.nan)
-            logL_errs.append(np.nan)
-        else:
-            # Inverse-variance weighted average
-            weights = 1.0 / np.array(var_list)
-            avg = np.sum(weights * est_list) / np.sum(weights)
-            err = np.sqrt(1.0 / np.sum(weights))
+#         if len(est_list) == 0:
+#             logL_vals.append(np.nan)
+#             logL_errs.append(np.nan)
+#         else:
+#             # Inverse-variance weighted average
+#             weights = 1.0 / np.array(var_list)
+#             avg = np.sum(weights * est_list) / np.sum(weights)
+#             err = np.sqrt(1.0 / np.sum(weights))
 
-            logL_vals.append(avg)
-            logL_errs.append(err)
+#             logL_vals.append(avg)
+#             logL_errs.append(err)
 
-    return (
-        pd.Series(logL_vals, index=df.index, name='MY_LOGL2500'),
-        pd.Series(logL_errs, index=df.index, name='MY_LOGL2500_ERR')
-    )
+#     return (
+#         pd.Series(logL_vals, index=df.index, name='MY_LOGL2500'),
+#         pd.Series(logL_errs, index=df.index, name='MY_LOGL2500_ERR')
+#     )
 
 
 # Constants
@@ -458,7 +492,7 @@ def populate_sdss_fields(objs, progress_bar=True):
         d['LOGMBH_ERR'] = fits_data['LOGMBH_ERR'][i]  # Extract log MBH error values
         d['LOGLEDD_RATIO'] = fits_data['LOGLEDD_RATIO'][i]  # Extract log L/edd values
         d['LOGLEDD_RATIO_ERR'] = fits_data['LOGLEDD_RATIO_ERR'][i]  # Extract log L/edd error values
-        d['ebv'] = fits_data['EBV'][i]
+        d['ebv_wu'] = fits_data['EBV'][i]
         d['sn_median_all'] = fits_data['SN_MEDIAN_ALL'][i]
         d['M_i'] = fits_data_2['M_I'][i]
         # d['CIV'] = fits_data['CIV'][i, 0]
@@ -470,12 +504,12 @@ def populate_sdss_fields(objs, progress_bar=True):
         d['LOGLBOL'] = fits_data['LOGLBOL'][i]
         d['LOGL1350'] = fits_data['LOGL1350'][i]
         d['LOGL1700'] = fits_data['LOGL1700'][i]
-        d['LOGL2500'] = fits_data['LOGL2500'][i]
+        d['LOGL2500_wu'] = fits_data['LOGL2500'][i]
         d['LOGL3000'] = fits_data['LOGL3000'][i]
         d['LOGL5100'] = fits_data['LOGL5100'][i]
         d['LOGL1350_ERR'] = fits_data['LOGL1350_ERR'][i]
         d['LOGL1700_ERR'] = fits_data['LOGL1700_ERR'][i]
-        d['LOGL2500_ERR'] = fits_data['LOGL2500_ERR'][i]
+        d['LOGL2500_ERR_wu'] = fits_data['LOGL2500_ERR'][i]
         d['LOGL3000_ERR'] = fits_data['LOGL3000_ERR'][i]
         d['LOGL5100_ERR'] = fits_data['LOGL5100_ERR'][i]
 
@@ -537,7 +571,7 @@ def read_quasars_from_hdf5(file_path, N=None):
                 break
     return quasar_list
 
-def populate_chi_sq_from_csv(df, csv_path="data/aug4_sample_chisqg10_ebv005sn3.csv"):
+def populate_chi_sq_from_csv(df, csv_path):
     """
     Populate the 'chi_sq' field in df by matching 'object_id' with the CSV file.
 
@@ -575,7 +609,7 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, spectra_fit_cs
         write_hdf5_file(quasar_list, file_path)
 
     for quasar in quasar_list:
-        if 'ebv' not in quasar.keys():
+        if 'ebv_wu' not in quasar.keys():
             print("Populating SDSS fields...")
             populate_sdss_fields(quasar_list)
             write_hdf5_file(quasar_list, file_path)
@@ -639,6 +673,7 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, spectra_fit_cs
             df['zWarning'] = -99
             df['sameZ'] = -99
 
+    df = populate_xray(df)
 
     # if 'cov_log_sigma_UV_log_tau_UV_RF' not in df.columns:
     #     print("[WARNING] cov_log_sigma_UV_log_tau_UV_RF not in data")
@@ -669,10 +704,6 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, spectra_fit_cs
     df['log_f_host_5100'] = np.where(df['f_host_5100'] > 0, np.log10(df['f_host_5100']), np.nan)
     # Replace NaNs with 0 in all columns
     #df = df.fillna(0)
-
-    if apply_cut is False:
-        print("Skipping data cuts as apply_cut is False.")
-        return df
     
     df = df.reset_index(drop=True)
     
@@ -687,47 +718,47 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, spectra_fit_cs
     mask_exclude = ~df['sdss_name'].astype(str).isin(exclusion_sdss_names)
     print(f"Excluding {np.sum(~mask_exclude)} objects by object_id exclusion list")
     df = df[mask_exclude].reset_index(drop=True)
+
+    # ALWAYS Remove objects with apparent_mag_2500 or apparent_mag_i too bright or too faint
+    mag_mask = (df['apparent_mag_2500'] >= 1) & (df['apparent_mag_2500'] < 50) & \
+               (df['apparent_mag_i'] >= 1) & (df['apparent_mag_i'] < 50)
+    num_removed = np.sum(~mag_mask)
+    print(f"Cut on apparent_mag_2500 and apparent_mag_i: {num_removed} objects removed")
+    df = df[mag_mask].reset_index(drop=True)
+
     # Define cuts as (column, lower_limit, upper_limit)
     cuts = [
-        ('f_host_4200', None, 0.2),
+        ('f_host_4200', -0.1, 10.0),
         ('log_tau_UV_RF', 1.5, None),
         #('redchi', None, 5),
-        #('apparent_mag_2500', 16, 26),
-        #('apparent_mag_i', 15, 26),
-        ('apparent_mag_2500', 12, 30),
-        ('apparent_mag_i', 12, 30),
+        ('apparent_mag_2500', 12, 40),
+        ('apparent_mag_i', 12, 40),
         #('z', None, 0.5),
         #('alpha_lambda', None, 0),
         # ('sameZ', 0.9, 1.1),
-        # ('zWarning', -0.1, 0.1),
-        #('apparent_mag_i', 15, 25)
-        # Uncomment/add more cuts as needed
-        # ('z', 1, None),
-        # ('z', None, 3.2),
-        # ('ebv', None, 0.05),
     ]
+    if apply_cut:
+        initial_count = len(df)
+        mask = np.ones(len(df), dtype=bool)
+        for col, lower, upper in cuts:
+            col_mask = np.ones(len(df), dtype=bool)
+            if lower is not None:
+                col_mask &= df[col] >= lower
+            if upper is not None:
+                col_mask &= df[col] < upper
+            cut_count = np.sum(~col_mask)
+            print(f"Cut on {col}: {cut_count} objects removed")
+            mask &= col_mask
+        
+        remove_nans_columns = ['alpha_lambda', 'alpha_lambda_err']
+        for col in remove_nans_columns:
+            nan_mask = ~df[col].isna()
+            num_nans = (~nan_mask).sum()
+            print(f"Removing {num_nans} objects with NaN in column '{col}'")
+            mask &= nan_mask
 
-    initial_count = len(df)
-    mask = np.ones(len(df), dtype=bool)
-    for col, lower, upper in cuts:
-        col_mask = np.ones(len(df), dtype=bool)
-        if lower is not None:
-            col_mask &= df[col] >= lower
-        if upper is not None:
-            col_mask &= df[col] < upper
-        cut_count = np.sum(~col_mask)
-        print(f"Cut on {col}: {cut_count} objects removed")
-        mask &= col_mask
-    
-    remove_nans_columns = ['alpha_lambda', 'alpha_lambda_err']
-    for col in remove_nans_columns:
-        nan_mask = ~df[col].isna()
-        num_nans = (~nan_mask).sum()
-        print(f"Removing {num_nans} objects with NaN in column '{col}'")
-        mask &= nan_mask
-
-    df = df[mask]
-    print(f"Total objects removed by all cuts: {initial_count - len(df)}")
+        df = df[mask]
+        print(f"Total objects removed by all cuts: {initial_count - len(df)}")
 
     df = df.reset_index(drop=True)
     
@@ -860,120 +891,223 @@ def _latex_escape_text(s: str) -> str:
     }
     return "".join(repl.get(ch, ch) for ch in str(s))
 
-def compare_models_by_log_evidence(
-    logZ_1, logZerr_1, logZ_2, logZerr_2,
-    model_1_name="Model 1", model_2_name="Model 2",
-    jeffreys_thresholds=(1.0, 2.5, 5.0),  # |Δln Z| bands
+import os, math
+import numpy as np
+
+# Assumed available in your codebase (same helpers you already use):
+#   _bayes_factor_repr_from_delta(delta_logZ, delta_logZ_err)
+#   _stable_logistic(delta)
+#   _log_eps_from_delta_abs(abs_delta)
+#   _norm_isf_from_logeps(log_eps)
+#   LN2  (= math.log(2.0))
+
+def _jeffreys_strength(abs_delta, thresholds):
+    t1, t2, t3 = thresholds
+    if abs_delta < t1:
+        return "barely worth mentioning"
+    elif abs_delta < t2:
+        return "substantial"
+    elif abs_delta < t3:
+        return "Strong"
+    else:
+        return "very strong"
+
+def _odds_sigmas_from_delta(delta):
+    """Return (one-sided Z, two-sided Z) from |Δln Z| odds, stably."""
+    absD = abs(float(delta))
+    log_eps = _log_eps_from_delta_abs(absD)
+    log_eps_half = log_eps - LN2
+    return (_norm_isf_from_logeps(log_eps),
+            _norm_isf_from_logeps(log_eps_half))
+
+def compare_models_by_log_evidence_all(
+    cosmo_models_dict,
+    jeffreys_thresholds=(1.0, 2.5, 5.0),   # |Δln Z| bands
     z_decisive=2.0,
     write_path="plots/hubble/"
 ):
     """
-    Bayesian comparison using log-evidences, with sigma-style significance.
-    Stable for huge |Δln Z|.
+    Compare MANY models by log-evidence.
+    Inputs
+    ------
+    cosmo_models_dict : dict
+        { model_label: {"logZ": float, "logZerr": float}, ... }
+
+    Returns
+    -------
+    result : dict with:
+      - 'ranking': list of per-model dicts sorted by logZ (desc)
+      - 'preferred_model': label of top model
+      - 'top_vs_runnerup': dict with ΔlnZ, Δerr, z_mc, odds-based Z (1- & 2-sided),
+                           Jeffreys strength, Bayes-factor strings
+      - 'pairwise': dict of dicts with pairwise deltas and Z’s
+      - 'text_path': path to saved human-readable summary
     """
+    # ---- Collect & validate ----
+    items = []
+    for label, vals in cosmo_models_dict.items():
+        try:
+            z = float(vals["logZ"])
+            e = float(vals["logZerr"])
+        except Exception as exc:
+            raise ValueError(f"Model '{label}' missing numeric 'logZ'/'logZerr'") from exc
+        items.append((label, z, e))
+    if len(items) < 2:
+        raise ValueError("Need at least two models to compare.")
 
-    # --- Basic deltas and MC reliability ---
-    delta_logZ = float(logZ_1) - float(logZ_2)
-    delta_logZ_err = float(np.hypot(logZerr_1, logZerr_2))
-    z_mc = np.inf if delta_logZ_err == 0 else delta_logZ / delta_logZ_err
+    # ---- Sort by ln Z (desc) ----
+    items.sort(key=lambda t: t[1], reverse=True)
+    labels = [t[0] for t in items]
+    logZs  = np.array([t[1] for t in items], dtype=float)
+    errs   = np.array([t[2] for t in items], dtype=float)
 
-    # --- Bayes factor (stay in log-space) ---
-    log10K, B12_str, B12_ci = _bayes_factor_repr_from_delta(delta_logZ, delta_logZ_err)
-    if B12_ci is not None:
-        log10K_lo, log10K_hi, B12_ci_str = B12_ci
+    top_label, top_logZ, top_err = items[0]
+    preferred_model = top_label
+
+    # ---- Per-model stats relative to TOP ----
+    ranking = []
+    for (label, z, e) in items:
+        d = z - top_logZ   # <= 0 for all except top (0)
+        de = float(np.hypot(e, top_err))
+        z_mc = np.inf if de == 0 else d / de
+        # odds-based sigma (one-/two-sided)
+        z1, z2 = _odds_sigmas_from_delta(d)
+        # Bayes factor repr and Jeffreys strength
+        log10K, B_str, B_ci = _bayes_factor_repr_from_delta(d, de)
+        strength = _jeffreys_strength(abs(d), jeffreys_thresholds)
+        ranking.append({
+            "model": label,
+            "logZ": z,
+            "logZerr": e,
+            "delta_logZ_vs_top": d,
+            "delta_logZ_err_vs_top": de,
+            "z_mc_vs_top": z_mc,
+            "sigma_one_sided_vs_top": z1,
+            "sigma_two_sided_vs_top": z2,
+            "jeffreys_strength_vs_top": strength,
+            "log10_Bayes_factor_vs_top": log10K,
+            "Bayes_factor_str_vs_top": B_str,
+            "Bayes_factor_ci_1sigma_vs_top": B_ci,
+        })
+
+    # ---- Top vs Runner-up headline ----
+    if len(items) >= 2:
+        ru_label, ru_logZ, ru_err = items[1]
+        delta = top_logZ - ru_logZ
+        delta_err = float(np.hypot(top_err, ru_err))
+        z_mc_head = np.inf if delta_err == 0 else delta / delta_err
+        # odds to Z
+        absD = abs(delta)
+        log_eps = _log_eps_from_delta_abs(absD)
+        log_eps_half = log_eps - LN2
+        sigma_one = _norm_isf_from_logeps(log_eps)
+        sigma_two = _norm_isf_from_logeps(log_eps_half)
+        # CI via ±1σ on Δ
+        def _odds_sigmas_at(d):
+            return _odds_sigmas_from_delta(d)
+        s1_lo, s2_lo = _odds_sigmas_at(delta - delta_err)
+        s1_hi, s2_hi = _odds_sigmas_at(delta + delta_err)
+
+        # Bayes factor & Jeffreys strength
+        log10K, B_str, B_ci = _bayes_factor_repr_from_delta(delta, delta_err)
+        strength = _jeffreys_strength(abs(delta), jeffreys_thresholds)
+        decisive = abs(z_mc_head) >= z_decisive
+
+        top_vs_runnerup = {
+            "preferred_model": top_label,
+            "runner_up": ru_label,
+            "delta_logZ": delta,
+            "delta_logZ_err": delta_err,
+            "z_mc": z_mc_head,
+            "sigma_from_odds_one_sided": sigma_one,
+            "sigma_from_odds_two_sided": sigma_two,
+            "sigma_from_odds_one_sided_ci_1sigma": (s1_lo, s1_hi),
+            "sigma_from_odds_two_sided_ci_1sigma": (s2_lo, s2_hi),
+            "log10_Bayes_factor": log10K,
+            "Bayes_factor_str": B_str,
+            "Bayes_factor_ci_1sigma": B_ci,
+            "jeffreys_strength": strength,
+            "decisive_zmc_ge_thresh": decisive,
+        }
     else:
-        log10K_lo = log10K_hi = None
-        B12_ci_str = None
+        top_vs_runnerup = None
 
-    # --- Jeffreys-style strength ---
-    t1, t2, t3 = jeffreys_thresholds
-    a = abs(delta_logZ)
-    if a < t1:
-        strength = "Barely worth mentioning"
-    elif a < t2:
-        strength = "Substantial"
-    elif a < t3:
-        strength = "Strong"
-    else:
-        strength = "Very strong"
+    # ---- Full pairwise matrix ----
+    pairwise = {}
+    for i, (li, zi, ei) in enumerate(items):
+        pairwise[li] = {}
+        for j, (lj, zj, ej) in enumerate(items):
+            if i == j:
+                pairwise[li][lj] = {
+                    "delta_logZ": 0.0,
+                    "delta_logZ_err": float(np.hypot(ei, ej)),
+                    "z_mc": np.nan,
+                    "sigma_one_sided": np.nan,
+                    "sigma_two_sided": np.nan,
+                    "jeffreys_strength": "—",
+                    "log10_Bayes_factor": 0.0,
+                    "Bayes_factor_str": "1:1",
+                    "Bayes_factor_ci_1sigma": None,
+                }
+            else:
+                d = zi - zj
+                de = float(np.hypot(ei, ej))
+                zmc = np.inf if de == 0 else d / de
+                z1, z2 = _odds_sigmas_from_delta(d)
+                log10K, B_str, B_ci = _bayes_factor_repr_from_delta(d, de)
+                strength = _jeffreys_strength(abs(d), jeffreys_thresholds)
+                pairwise[li][lj] = {
+                    "delta_logZ": d,
+                    "delta_logZ_err": de,
+                    "z_mc": zmc,
+                    "sigma_one_sided": z1,
+                    "sigma_two_sided": z2,
+                    "jeffreys_strength": strength,
+                    "log10_Bayes_factor": log10K,
+                    "Bayes_factor_str": B_str,
+                    "Bayes_factor_ci_1sigma": B_ci,
+                }
 
-    preferred_model = model_1_name if delta_logZ > 0 else model_2_name
-    decisive = abs(z_mc) >= z_decisive
+    # ---- Human-readable summary ----
+    lines = []
+    lines.append("Bayesian Model Comparison (multi-model)\n\n")
+    lines.append("Models (sorted by ln Z):\n")
+    for r in ranking:
+        star = "  *" if r["model"] == preferred_model else "   "
+        lines.append(
+            f"{star} {r['model']}: ln Z = {r['logZ']:.3f} ± {r['logZerr']:.3f} ; "
+            f"ΔlnZ(top) = {r['delta_logZ_vs_top']:.3f} ± {r['delta_logZ_err_vs_top']:.3f} ; "
+            f"Z_two = {r['sigma_two_sided_vs_top']:.3f}σ ; "
+            f"{r['jeffreys_strength_vs_top']}\n"
+        )
+    lines.append("\nPreferred model: " + preferred_model + "\n")
 
-    # --- Posterior probabilities under equal priors (stable) ---
-    p_M1_equal_priors = _stable_logistic(delta_logZ)
+    if top_vs_runnerup is not None:
+        t = top_vs_runnerup
+        lines.append(
+            f"\nTop vs runner-up ({t['preferred_model']} vs {t['runner_up']}):\n"
+            f"Δln Z = {t['delta_logZ']:.3f} ± {t['delta_logZ_err']:.3f}  "
+            f"(z_mc = {t['z_mc']:.2f})\n"
+            f"Two-sided Z (from odds): {t['sigma_from_odds_two_sided']:.4f}σ  "
+            f"[{t['sigma_from_odds_two_sided_ci_1sigma'][0]:.4f}, "
+            f"{t['sigma_from_odds_two_sided_ci_1sigma'][1]:.4f}]\n"
+            f"Jeffreys strength: {t['jeffreys_strength']}; "
+            f"decisive (|z_mc|≥{z_decisive:.1f})? {'yes' if t['decisive_zmc_ge_thresh'] else 'no'}\n"
+        )
 
-    # error prob for favored model
-    absD = abs(delta_logZ)
-    log_eps = _log_eps_from_delta_abs(absD)
-    log_eps_half = log_eps - LN2
-
-    # --- Sigma equivalents from odds (stable) ---
-    sigma_one = _norm_isf_from_logeps(log_eps)
-    sigma_two = _norm_isf_from_logeps(log_eps_half)
-
-    # Propagate Δ uncertainty
-    def odds_sigmas_from_delta(d):
-        le = _log_eps_from_delta_abs(abs(d))
-        return (_norm_isf_from_logeps(le),
-                _norm_isf_from_logeps(le - LN2))
-
-    sigma_one_lo, sigma_two_lo = odds_sigmas_from_delta(delta_logZ - delta_logZ_err)
-    sigma_one_hi, sigma_two_hi = odds_sigmas_from_delta(delta_logZ + delta_logZ_err)
-
-    # --- Wilks-like (orientation only) ---
-    sigma_wilks_like = math.sqrt(2.0 * absD)
-
-
-    # --- Compose shared lines (console/file) ---
-    lines = [
-        "Bayesian Model Comparison\n",
-        f"Models: {model_1_name} vs {model_2_name}\n",
-        f"Δln Z = {delta_logZ:.3f} ± {delta_logZ_err:.3f}  (z_mc = {z_mc:.2f})\n",
-        f"Bayes factor: log10 K = {log10K:.3f} "
-        + (f"[ {log10K_lo:.3f}, {log10K_hi:.3f} ] " if (log10K_lo is not None) else "")
-        + f"  ⇒  B12 ≈ {B12_str} "
-        + (f"{B12_ci_str} " if B12_ci_str else "")
-        + f"(≈ ×e^±{delta_logZ_err:.3f} in ln-space)\n",
-        f"Preferred model: {preferred_model}\n",
-        f"Jeffreys strength: {strength}; decisive (|z_mc|≥{z_decisive:.1f})? {'yes' if decisive else 'no'}\n",
-        f"P({model_1_name} | data, equal priors) ≈ {p_M1_equal_priors:.6f}\n",
-        "Significance from odds (astro/cosmology convention):\n",
-        f"  two-sided Z = {sigma_two:.4f}σ  [{sigma_two_lo:.4f}, {sigma_two_hi:.4f}]\n",
-        f"  one-sided Z = {sigma_one:.4f}σ  [{sigma_one_lo:.4f}, {sigma_one_hi:.4f}]\n",
-        f"Wilks-like sigma (orientation only) = {sigma_wilks_like:.4f}σ\n"
-    ]
-
-    # --- Print and save ---
+    # Print & save
     for line in lines:
         print(line, end="")
-
     os.makedirs(write_path, exist_ok=True)
-    safe_m1 = "".join(c if c.isalnum() or c in "-_." else "_" for c in model_1_name)
-    safe_m2 = "".join(c if c.isalnum() or c in "-_." else "_" for c in model_2_name)
-
-    text_path = os.path.join(write_path, f"compare_{safe_m1}_vs_{safe_m2}.txt")
+    text_path = os.path.join(write_path, "compare_all_models.txt")
     with open(text_path, "w", encoding="utf-8") as f:
         f.writelines(lines)
 
-    # --- Return result dict ---
     return {
-        "delta_logZ": delta_logZ,
-        "delta_logZ_err": delta_logZ_err,
-        "z_mc": z_mc,
-        "log10_Bayes_factor": log10K,
-        "log10_Bayes_factor_ci_1sigma": (log10K_lo, log10K_hi) if (log10K_lo is not None) else None,
-        "Bayes_factor_str": B12_str,
-        "Bayes_factor_ci_1sigma_str": B12_ci_str,
+        "ranking": ranking,
         "preferred_model": preferred_model,
-        "strength": strength,
-        "decisive": decisive,
-        "p_M1_equal_priors": p_M1_equal_priors,
-        "sigma_from_odds_one_sided": sigma_one,
-        "sigma_from_odds_two_sided": sigma_two,
-        "sigma_from_odds_one_sided_ci_1sigma": (sigma_one_lo, sigma_one_hi),
-        "sigma_from_odds_two_sided_ci_1sigma": (sigma_two_lo, sigma_two_hi),
-        "sigma_wilks_like": sigma_wilks_like,
+        "top_vs_runnerup": top_vs_runnerup,
+        "pairwise": pairwise,
         "text_path": text_path,
     }
 
@@ -1131,12 +1265,12 @@ def make_cosmo_table_latex(
 
     # ---------- build LaTeX ----------
     lines = []
-    lines.append(r"\begin{table}")
-    lines.append(r"\centering")
-    lines.append(r"\setlength{\tabcolsep}{4pt} % compact spacing")
-    #lines.append(r"\begin{threeparttable}")
-    lines.append(rf"\caption{{{caption}}}")
-    lines.append(rf"\label{{{label}}}")
+    # lines.append(r"\begin{table}")
+    # lines.append(r"\centering")
+    # lines.append(r"\setlength{\tabcolsep}{4pt} % compact spacing")
+    # #lines.append(r"\begin{threeparttable}")
+    # lines.append(rf"\caption{{{caption}}}")
+    # lines.append(rf"\label{{{label}}}")
 
     ncols = 1 + len(col_keys) + (1 if include_lnZ else 0)  # Dataset + params + optional lnZ
     lines.append(r"\begin{tabular}{" + "l" + "c" * (ncols - 1) + "}")
@@ -1177,7 +1311,7 @@ def make_cosmo_table_latex(
     lines.append(r"\end{tablenotes}")
     #lines.append(r"\end{threeparttable}")
 
-    lines.append(r"\end{table}")
+    # lines.append(r"\end{table}")
 
     latex_str = "\n".join(lines)
 
@@ -1339,7 +1473,9 @@ def display_results_summary(samples, cosmo_model, z_pivot_agn):
             arr = samples[:, i_wa]
             m = np.median(arr); l = np.percentile(arr, 16); h = np.percentile(arr, 84)
             print(f"{'wa':>15}: {m:.4f} (+{h - m:.4f}, -{m - l:.4f})")
-    
+    return
+
+def compute_age_universe(samples, cosmo_model):
     priors, model_labels, _ = get_model_params(cosmo_model)
     params = {name: np.median(samples[:, i]) for i, name in enumerate(model_labels)}
 
@@ -1356,6 +1492,7 @@ def display_results_summary(samples, cosmo_model, z_pivot_agn):
 
     age = cosmo.age(0).to("Gyr").value
     print(f"Age of universe: {age:.3f} Gyr")
+    return age
 
 def display_diagnostics(sampler, cosmo_model, fitting_method=False):
     priors, model_labels, _ = get_model_params(cosmo_model)
@@ -1807,6 +1944,7 @@ def get_w0_wa_from_pivot(flat_samples, cosmo_model, z_p):
 
 import math
 from typing import Tuple, Optional
+from astropy.cosmology import FlatLambdaCDM
 
 def _round_sig(x: float, sig: int) -> float:
     if x == 0 or not math.isfinite(x):
@@ -1917,86 +2055,210 @@ def format_value_uncertainty(
     return s
     return val_out, err_out, exponent, s
 
-
-def write_results_tex_variables(df_agn, flat_samples, cosmo_model, compare_r, z_pivot_agn, write_path):
+def write_results_tex_variables(
+    df_agn, flat_samples, cosmo_model, compare_r, z_pivot_agn,
+    write_path, chisq_dict=None, age=None
+):
     """
-    Write key cosmological parameters to a LaTeX file as \newcommand definitions.
-
-    Parameters
-    ----------
-    flat_samples : (N, P) array
-        Flattened MCMC samples: N total draws by P parameters.
-    cosmo_model : str
-        Cosmological model string.
-    z_pivot_agn : float
-        Pivot redshift for w0/wa conversion if applicable.
-    write_path : str
-        Directory path to write the LaTeX file (filename is 'cosmo_params.tex').
+    Write key cosmological parameters AND model comparison results
+    to a LaTeX file as \newcommand definitions.
     """
+    import os
+    import numpy as np
+    from itertools import combinations
 
+    flat_samples = np.asarray(flat_samples)
+
+    # --- AGN pivots
     obs_arr, err_arr, pivots_arr = agn_model_pack_obs(df_agn)
-
     log_sigma_UV_pivot  = pivots_arr[agn_model_oidx["log_sigma_UV"]]
     log_tau_UV_RF_pivot = pivots_arr[agn_model_oidx["log_tau_UV_RF"]]
 
-
     priors, model_labels, _ = get_model_params(cosmo_model)
-    flat_samples = np.asarray(flat_samples)
-
     results = {key: sym_percentile(flat_samples[:, i])
                for i, key in enumerate(model_labels)}
 
-    # Write to LaTeX file
     lines = []
-    lines.append(r"% Auto-generated cosmological parameters from MCMC samples")
-    lines.append(r"% Do not edit by hand; regenerate with write_results_tex_variables()")
+    lines.append(r"% Auto-generated cosmological and evidence results")
+    lines.append(r"% Do not edit manually; regenerated by write_results_tex_variables()")
     lines.append(r"\newcommand{\resultNumAGN}{%d}" % len(df_agn))
-    lines.append(r"\newcommand{\resultSigma}{\ensuremath{%s}}" % format_value_uncertainty(compare_r["sigma_from_odds_two_sided"], None))
+    lines.append(r"\newcommand{\resultAgeUniverse}{\ensuremath{%.2f\,\mathrm{Gyr}}}" % (age if age is not None else np.nan))
 
-    lines.append(r"\newcommand{\resultAlphaAGN}{\ensuremath{%s}}" % format_value_uncertainty(results['alpha_agn'][0], results['alpha_agn'][1]))
-    lines.append(r"\newcommand{\resultBetaAGN}{\ensuremath{%s}}" % format_value_uncertainty(results['beta_agn'][0], results['beta_agn'][1]))
+    # ===============================
+    # --- Model comparison results ---
+    # ===============================
+    if compare_r is not None:
+        # Preferred model overall
+        preferred = compare_r["preferred_model"]
+        lines.append(r"\newcommand{\resultPreferredModelOverall}{%s}" % preferred)
 
-    lines.append(r"\newcommand{\resultSigmaUVPivot}{\ensuremath{%s}}" % format_value_uncertainty(10**log_sigma_UV_pivot, None))
-    lines.append(r"\newcommand{\resultTauUVRFPivot}{\ensuremath{%s}}" % format_value_uncertainty(10**log_tau_UV_RF_pivot, None))
+        # Per-model stats relative to TOP
+        for r in compare_r["ranking"]:
+            model = r["model"]
+            safe = model.replace("0", "Zero").replace("Λ", "Lambda")  # latex-safe key
+            lines.append(r"\newcommand{\resultLogZ%s}{%.3f}" %
+                         (safe, r["logZ"]))
+            lines.append(r"\newcommand{\resultLogZerr%s}{%.3f}" %
+                         (safe, r["logZerr"]))
+            lines.append(r"\newcommand{\resultDeltaLogZ%s}{%.3f}" %
+                         (safe, r["delta_logZ_vs_top"]))
+            lines.append(r"\newcommand{\resultSigma%s}{%.3f}" %
+                         (safe, r["sigma_two_sided_vs_top"]))
+            lines.append(r"\newcommand{\resultJeffreysStrength%s}{%s}" %
+                         (safe, r["jeffreys_strength_vs_top"]))
+
+        # ---------- Helpers ----------
+        def _latex_model_token(name: str) -> str:
+            return {
+                "Flatw0waCDM": "FlatwZeroWaCDM",
+                "FlatwCDM": "FlatwCDM",
+                "FlatLambdaCDM": "FlatLambdaCDM",
+            }.get(name, name.replace("0", "Zero").replace("Λ", "Lambda"))
+
+        def _get_pair(a: str, b: str):
+            """Fetch pair dict for (a,b) regardless of direction."""
+            pw = compare_r.get("pairwise", {})
+            return pw.get(a, {}).get(b) or pw.get(b, {}).get(a)
+
+        def _emit_pair(lines_list, a: str, b: str):
+            pair = _get_pair(a, b)
+            base = f"{_latex_model_token(a)}{_latex_model_token(b)}"
+            if pair:
+                lines_list.append(
+                    r"\newcommand{\resultDeltaLogZ%s}{\ensuremath{%.2f \pm %.2f}}" %
+                    (base, pair["delta_logZ"], pair["delta_logZ_err"])
+                )
+                lines_list.append(
+                    r"\newcommand{\resultSigma%s}{%.3f}" %
+                    (base, pair["sigma_two_sided"])
+                )
+                lines_list.append(
+                    r"\newcommand{\resultJeffreysStrength%s}{%s}" %
+                    (base, pair["jeffreys_strength"])
+                )
+                lines_list.append(
+                    r"\newcommand{\resultZmc%s}{%.2f}" %
+                    (base, pair["z_mc"])
+                )
+            else:
+                lines_list.append(r"\newcommand{\resultDeltaLogZ%s}{N/A}" % base)
+                lines_list.append(r"\newcommand{\resultSigma%s}{N/A}" % base)
+                lines_list.append(r"\newcommand{\resultJeffreysStrength%s}{N/A}" % base)
+                lines_list.append(r"\newcommand{\resultZmc%s}{N/A}" % base)
+
+        # ---------- Iterate over all model pairs (no hardcoding) ----------
+        models = [r["model"] for r in compare_r.get("ranking", [])]
+        for a, b in combinations(models, 2):
+            _emit_pair(lines, a, b)
+
+    else:
+        lines.append(r"\newcommand{\resultPreferredModelOverall}{N/A}")
+
+    # ===============================
+    # --- AGN relation results ---
+    # ===============================
+    lines.append(r"\newcommand{\resultAlphaAGN}{\ensuremath{%s}}" %
+                 format_value_uncertainty(results['alpha_agn'][0], results['alpha_agn'][1]))
+    lines.append(r"\newcommand{\resultBetaAGN}{\ensuremath{%s}}" %
+                 format_value_uncertainty(results['beta_agn'][0], results['beta_agn'][1]))
+    lines.append(r"\newcommand{\resultSigmaUVPivot}{\ensuremath{%s}}" %
+                 format_value_uncertainty(10**log_sigma_UV_pivot, None))
+    lines.append(r"\newcommand{\resultTauUVRFPivot}{\ensuremath{%s}}" %
+                 format_value_uncertainty(10**log_tau_UV_RF_pivot, None))
+
+    # Cosmological parameters
+    lines.append(r"\newcommand{\resultOmZero}{\ensuremath{%s}}" %
+                 format_value_uncertainty(results['Om0'][0], results['Om0'][1]))
+    lines.append(r"\newcommand{\resultwZero}{\ensuremath{%s}}" %
+                 format_value_uncertainty(results['w0'][0], results['w0'][1]))
+    lines.append(r"\newcommand{\resultwa}{\ensuremath{%s}}" %
+                 format_value_uncertainty(results['wa'][0], results['wa'][1]))
 
 
-
+    # Derived intercepts
     M0_agn_samples = flat_samples[:, model_labels.index('M0_agn')]
     alpha_agn_samples = flat_samples[:, model_labels.index('alpha_agn')]
-    beta_agn_samples = flat_samples[:, model_labels.index('beta_agn')]
-
+    beta_agn_samples  = flat_samples[:, model_labels.index('beta_agn')]
     alpha_AGN_L_samples = alpha_agn_samples * (-1/2.5)
-    beta_AGN_L_samples  = beta_agn_samples * (-1/2.5)
-    L_intercept_samples = np.power(10, (90-M0_agn_samples)/2.5)
+    beta_AGN_L_samples  = beta_agn_samples  * (-1/2.5)
+    L_intercept_samples = np.power(10, (90 - M0_agn_samples) / 2.5)
 
-    L_intercept, L_intercept_err = sym_percentile(L_intercept_samples)
-    val, err = L_intercept, L_intercept_err
-
-    # --- Extract exponent from the value ---
-    exp = int(np.floor(np.log10(abs(val)))) if val != 0 else 0
-    scale = 10.0**exp
-
-    mant_val = val / scale
-    mant_err = err / scale
-
-    lines.append(
-        r"\newcommand{\resultLIntercept}{\ensuremath{%s}}" %
-        format_value_uncertainty(*sym_percentile(L_intercept_samples), unit=r"erg\,s^{-1}")
-    )
-
-    lines.append(r"\newcommand{\resultAlphaAGNL}{\ensuremath{%s}}" % format_value_uncertainty(*sym_percentile(alpha_AGN_L_samples)))
-    lines.append(r"\newcommand{\resultBetaAGNL}{\ensuremath{%s}}" % format_value_uncertainty(*sym_percentile(beta_AGN_L_samples)))
+    lines.append(r"\newcommand{\resultLIntercept}{\ensuremath{%s}}" %
+                 format_value_uncertainty(*sym_percentile(L_intercept_samples), unit=r"erg\,s^{-1}"))
+    lines.append(r"\newcommand{\resultAlphaAGNL}{\ensuremath{%s}}" %
+                 format_value_uncertainty(*sym_percentile(alpha_AGN_L_samples)))
+    lines.append(r"\newcommand{\resultBetaAGNL}{\ensuremath{%s}}" %
+                 format_value_uncertainty(*sym_percentile(beta_AGN_L_samples)))
 
     hd_scatter_samples = np.exp(flat_samples[:, model_labels.index('log_f')])
-    lines.append(r"\newcommand{\resultScatterHD}{\ensuremath{%s}}" % format_value_uncertainty(*sym_percentile(hd_scatter_samples), unit=r"mag"))
-
+    lines.append(r"\newcommand{\resultScatterHD}{\ensuremath{%s}}" %
+                 format_value_uncertainty(*sym_percentile(hd_scatter_samples), unit=r"mag"))
     l_scatter_samples = hd_scatter_samples / 2.5
-    lines.append(r"\newcommand{\resultScatterL}{\ensuremath{%s}}" % format_value_uncertainty(*sym_percentile(l_scatter_samples), unit=r"dex"))
+    lines.append(r"\newcommand{\resultScatterL}{\ensuremath{%s}}" %
+                 format_value_uncertainty(*sym_percentile(l_scatter_samples), unit=r"dex"))
 
+    if chisq_dict is not None:
+        for key, val in chisq_dict.items():
+            lines.append(r"\newcommand{\result%sChiSqRed}{\ensuremath{%s}}" %
+                         (key, format_value_uncertainty(val, None)))
 
+    # --- Save file ---
     tex_path = os.path.join(write_path, "param_results.tex")
+    os.makedirs(write_path, exist_ok=True)
     with open(tex_path, "w") as f:
         for line in lines:
             print(line)
             f.write(line + "\n")
     print(f"Wrote result parameters LaTeX commands to {tex_path}")
+
+
+
+def reduced_chi_squared(residuals,
+                        model_err,
+                        extra_err=None,
+                        n_params=0,
+                        min_err=1e-12):
+    """
+    Compute reduced chi^2 from residuals and per-point uncertainties.
+
+    Parameters
+    ----------
+    residuals : array-like
+        Data minus model, in the SAME units as the uncertainties
+        (here: log10 L_2500).
+    model_err : array-like
+        1σ model spread at each data point (e.g., 0.5*(hi-lo) of the ribbon),
+        in log10 units.
+    extra_err : None or array-like, optional
+        Optional additional 1σ errors per point to add in quadrature
+        (e.g., measurement error in log10 L, propagated x-error in log space).
+    n_params : int, optional
+        Number of fitted parameters used to define the model (for DoF).
+    min_err : float, optional
+        Floor to avoid division by ~0.
+
+    Returns
+    -------
+    chi2_red : float
+        Reduced chi-squared.
+    meta : dict
+        {'chi2': float, 'dof': int, 'N_eff': int, 'n_params': int}
+    """
+    r = np.asarray(residuals, dtype=float)
+    s = np.asarray(model_err,  dtype=float)
+
+    if extra_err is not None:
+        s = np.sqrt(s**2 + np.asarray(extra_err, dtype=float)**2)
+
+    # Guard against non-finite/zero sigmas
+    finite = np.isfinite(r) & np.isfinite(s) & (s > 0)
+    r = r[finite]
+    s = np.maximum(s[finite], min_err)
+
+    N = r.size
+    dof = max(1, N - int(n_params))
+
+    chi2 = np.sum((r / s)**2)
+    chi2_red = chi2 / dof
+
+    return chi2_red, {'chi2': chi2, 'dof': dof, 'N_eff': N, 'n_params': int(n_params)}

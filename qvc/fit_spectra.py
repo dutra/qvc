@@ -76,22 +76,19 @@ def _safe_float(x):
         return float(x)
     except Exception:
         return np.nan
-def compute_apparent_mag_2500_astropy(conti_table, logL_col='L2500', logL_err_col='L2500_err',
-                                      z_col='z', H0=70, Om0=0.3):
-    cosmo = FlatLambdaCDM(H0=H0, Om0=Om0)
+
+
+def compute_apparent_mag_2500_astropy(logL2500, logL2500_err, z):
+    cosmo = FlatLambdaCDM(H0=70, Om0=0.3)
     c = 2.99792458e10  # cm/s
     lambda_ = 2500e-8  # cm
 
-    z = conti_table[z_col]
-    logL_2500 = conti_table[logL_col]
-    logL_2500_err = conti_table[logL_err_col]
-
     DL = cosmo.luminosity_distance(z).to(u.cm).value  # cm
 
-    log_Lnu = logL_2500 + np.log10(lambda_ / c)
+    log_Lnu = logL2500 + np.log10(lambda_ / c)
     log_fnu = log_Lnu - np.log10(4 * np.pi * DL**2 * (1 + z))
     m_ab = -2.5 * log_fnu - 48.60
-    m_ab_err = 2.5 * logL_2500_err
+    m_ab_err = 2.5 * logL2500_err
 
     return m_ab, m_ab_err
 
@@ -395,21 +392,29 @@ def run_qsofit_record(rec, npca_qso, cache_dir="data/spectra_cache",
 
     # default result (so we always return a complete row even on error)
     result = dict(
-        delta_mags=np.array([]),
+        delta_mag_r=-1e9,
+        delta_mag_g=-1e9,
+        delta_mag_i=-1e9,
         delta_m_avg=-1e9,
         object_id=rec["object_id"],
         sdss_name=rec["sdss_name"],
         apparent_mag_i_rest=-1e9,
         apparent_mag_2500=-1e9,
         apparent_mag_2500_err=-1e9,
+        apparent_mag_2500_reddened=-1e9,
+        apparent_mag_2500_reddened_err=-1e9,
         f_host_2500=-99,
         f_host_4200=-99,
         f_host_5100=-99,
         alpha_lambda=-1e9,
         alpha_lambda_err=-1e9,
         redchi=1e9,
-        ebv=-1e9,
-        ebv_ccm89=-1e9,
+        ebv_fs=-1e9,
+        euv_fs=-1e9,
+        log_L2500_fs=-1e9,
+        log_L2500_fs_err=-1e9,
+        log_L2500_int_fs=-1e9,
+        log_L2500_int_fs_err=-1e9,
     )
 
     try:
@@ -426,7 +431,7 @@ def run_qsofit_record(rec, npca_qso, cache_dir="data/spectra_cache",
         # Absolute flux calibration (g,r,i)
         #clean_bands = rec['clean_bands']
         sdss_filters = filters.load_filters(*[f'sdss2010-{b}' for b in bands])
-        delta_mags, weights = [], []
+        delta_mags, weights = {}, []
 
         for b, filt in zip(bands, sdss_filters):
             try:
@@ -437,21 +442,47 @@ def run_qsofit_record(rec, npca_qso, cache_dir="data/spectra_cache",
                     1e-17 * flux * u.erg / u.s / u.cm**2 / u.AA,
                     lam * u.AA
                 )
-                delta_mags.append(mag_fiber - mag_synth)
-                weights.append(1.0)
+                dm = mag_fiber - mag_synth
+                delta_mags[b] = dm
+
+                # weight by photometric mag uncertainty if available; else equal weight
+                sig_m = rec.get('mags_err', {}).get(b, np.nan)
+                w = 1.0 / (sig_m**2) if np.isfinite(sig_m) and sig_m > 0 else 1.0
+                weights.append(w)
             except Exception as e:
                 #print(f"[WARNING] Error processing band {b} for {rec['sdss_name']}: {e}")
                 continue
 
-        delta_mags = np.array(delta_mags) if delta_mags else np.array([0.0])
-        weights    = np.array(weights)    if weights    else np.array([1.0])
-        mask = np.isfinite(delta_mags)
-        delta_m_avg = np.average(delta_mags[mask], weights=weights[mask]) if np.any(mask) else 0.0
+
+        bands_used = list(delta_mags.keys())
+        dm_arr = np.array([delta_mags[b] for b in bands_used], dtype=float)
+        w_arr  = np.array(weights[:len(bands_used)], dtype=float)
+        mask   = np.isfinite(dm_arr) & np.isfinite(w_arr) & (w_arr > 0)
+
+        if np.any(mask):
+            w = w_arr[mask]
+            dm = dm_arr[mask]
+            delta_m_avg = np.sum(w * dm) / np.sum(w)
+            # standard error of weighted mean (for optional calibration inflation)
+            sigma_dm = np.sqrt(1.0 / np.sum(w))
+        else:
+            print(f"[WARN] No usable bands after drops for {rec['sdss_name']} (z={rec['z']:.2f}); scale=1.")
+            delta_m_avg = 0.0
+            sigma_dm = 0.0
 
         scale = 10 ** (-0.4 * delta_m_avg)
         flux_scaled = flux * scale
 
-        q_mle = QSOFit(lam, flux_scaled, err, rec["z"], path=path_ex)
+        err_scaled  = err  * scale      # IMPORTANT: scale the uncertainties too
+        # (If you keep ivar anywhere: ivar_scaled = ivar / scale**2)
+
+        # --- Optional: include calibration (zeropoint) uncertainty in quadrature ---
+        # This treats a fully correlated term as if it were per-pixel (conservative).
+        if sigma_dm > 0:
+            frac_s = np.log(10.0) / 2.5 * sigma_dm   # σ_s / s from mag error
+            err_scaled = np.sqrt(err_scaled**2 + (flux_scaled * frac_s)**2)
+
+        q_mle = QSOFit(lam, flux_scaled, err_scaled, rec["z"], path=path_ex)
         q_mle.Fit(
             name=f"{rec['z']:.2f}_{rec['sdss_name']}_{rec['plate']}-{rec['mjd']}-{rec['fiber']}",  # customize the name of given targets. Default: plate-mjd-fiber
             
@@ -540,15 +571,28 @@ def run_qsofit_record(rec, npca_qso, cache_dir="data/spectra_cache",
         }
         conti_dict['z'] = rec["z"]
 
-        L_ok = np.isfinite(conti_dict.get('L2500_int', np.nan)) and np.isfinite(conti_dict.get('L2500_int_err', np.nan))
+        L_ok = np.isfinite(conti_dict['L2500_int']) and np.isfinite(conti_dict['L2500_int_err'])
                 
         if L_ok:
-            m_2500, m_2500_err = compute_apparent_mag_2500_astropy(conti_dict, logL_col='L2500_int', logL_err_col='L2500_int_err')
+            m_2500, m_2500_err = compute_apparent_mag_2500_astropy(conti_dict['L2500_int'], conti_dict['L2500_int_err'], z=rec['z'])
             mag_errs = np.array([mag_err if (np.isfinite(mag_err) and mag_err >=0) else 0.0 
                                          for mag_err in rec["mags_err"].values()])
             m_2500_err = np.sqrt(m_2500_err**2 + np.mean(mag_errs)**2)
         else:
+            print(f"[WARN] L2500_int not finite for {rec['sdss_name']} (z={rec['z']:.2f})")
             m_2500, m_2500_err = -1e9, -1e9
+
+        # L2500 reddened
+        L_ok = np.isfinite(conti_dict['L2500']) and np.isfinite(conti_dict['L2500_err'])
+        if L_ok:
+            m_2500_reddened, m_2500_reddened_err = compute_apparent_mag_2500_astropy(conti_dict['L2500'], conti_dict['L2500_err'], z=rec['z'])
+            mag_errs = np.array([mag_err if (np.isfinite(mag_err) and mag_err >=0) else 0.0 
+                                for mag_err in rec["mags_err"].values()])
+            m_2500_reddened_err = np.sqrt(m_2500_reddened_err**2 + np.mean(mag_errs)**2)
+        else:
+            print(f"[WARN] L2500 not finite for {rec['sdss_name']} (z={rec['z']:.2f})")
+            m_2500_reddened, m_2500_reddened_err = -1e9, -1e9
+
 
         try:
             alpha_lambda = conti_dict.get('PL_slope', -99)
@@ -570,19 +614,27 @@ def run_qsofit_record(rec, npca_qso, cache_dir="data/spectra_cache",
 
         result.update(
             delta_m_avg=delta_m_avg,
-            delta_mags=delta_mags,
+            delta_mag_r=delta_mags.get('r', -1e9),
+            delta_mag_g=delta_mags.get('g', -1e9),
+            delta_mag_i=delta_mags.get('i', -1e9),
             apparent_mag_i_rest=apparent_mag_i_rest,
             apparent_mag_i_obs=apparent_mag_i_obs,
             apparent_mag_2500=m_2500,
             apparent_mag_2500_err=m_2500_err,
+            apparent_mag_2500_reddened=m_2500_reddened,
+            apparent_mag_2500_reddened_err=m_2500_reddened_err,
             f_host_2500=conti_dict.get('frac_host_2500', 0),
             f_host_4200=conti_dict.get('frac_host_4200', 0),
             f_host_5100=conti_dict.get('frac_host_5100', 0),
             alpha_lambda=conti_dict['PL_slope'],
             alpha_lambda_err=conti_dict['PL_slope_err'],
             redchi=q_mle.conti_fit.redchi,
-            ebv=conti_dict.get('EBV', -99),
-            ebv_ccm89=conti_dict.get('EBV_CCM89', -99)
+            ebv_fs=conti_dict.get('EBV', -99),
+            euv_fs=conti_dict.get('EUV', -99),
+            log_L2500_fs=conti_dict.get('L2500', -1e9),
+            log_L2500_fs_err=conti_dict.get('L2500_err', -1e9),
+            log_L2500_int_fs=conti_dict.get('L2500_int', -1e9),
+            log_L2500_int_fs_err=conti_dict.get('L2500_int_err', -1e9)
         )
         return result
 
@@ -624,6 +676,12 @@ def main():
     args = parse_args()
 
     sample_df = load_agn_data(args.fpath_in, apply_cut=False, only_load=True)
+    # agn_fields = ['sdss_name', 'object_id', 'ra', 'dec', 'z']
+    # for b in ['u', 'g', 'r', 'i', 'z']:
+    #     agn_fields.append(f'mean_corrected_{b}')
+    #     agn_fields.append(f'mean_{b}_err')
+    # sample_df = sample_df[agn_fields]
+    # sample_df = sample_df.reset_index(drop=True)
 
     exclusion_sdss_names = [
         '221120.38+010905.6', # wrong redshift
@@ -719,7 +777,7 @@ def main():
     results_2 = {}
 
     for npca_qso, results_dict in [(0, results_0), (1, results_1), (2, results_2)]:
-        save_fig_path = os.path.join('plots', 'pyqsofit', f'prefix', f'npca_qso_{npca_qso}')
+        save_fig_path = os.path.join('plots', 'pyqsofit', prefix, f'npca_qso_{npca_qso}')
         os.makedirs(save_fig_path, exist_ok=True)
         worker = partial(run_qsofit_record, npca_qso=npca_qso, cache_dir=args.cache_dir, 
                         path_ex=f'data/pyqsofit', parfilename=f'qsopar_{prefix}_{suffix}.fits',
@@ -757,14 +815,22 @@ def main():
 
         # TODO: If chi2 is still bad, use BC=True models
 
+        # Add redchi for each npca_qso to the best result
+        best_res["redchi_npca_qso0"] = res0.get("redchi", np.nan)
+        best_res["redchi_npca_qso1"] = res1.get("redchi", np.nan)
+        best_res["redchi_npca_qso2"] = res2.get("redchi", np.nan)
+
         results[obj_id] = best_res
+        # print(f"Object {obj_id}: selected npca_qso={best_res['npca_qso']} with redchi={best_res['redchi']:.3f} (0:{res0['redchi']:.3f}, 1:{res1['redchi']:.3f}, 2:{res2['redchi']:.3f})")
+        # print(f"f_host_4200: {best_res['f_host_4200']}, EBV: {best_res['ebv_fs']}, EUV: {best_res['euv_fs']}, alpha_lambda: {best_res['alpha_lambda']}")
 
     # Update each quasar dict with fields from results
-    for quasar in quasar_dict_list:
-        obj_id = str(quasar.get('object_id'))
-        quasar.update(results[obj_id])
+    # This may overwrite ebv and other existing fields
+    # for quasar in quasar_dict_list:
+    #     obj_id = str(quasar.get('object_id'))
+    #     quasar.update(results[obj_id])
 
-    write_hdf5_file(quasar_dict_list, args.fpath_out)
+    write_hdf5_file(results.values(), args.fpath_out)
     
     # Also write results to CSV
     csv_file=args.fpath_out.replace(".h5", ".csv")
@@ -772,11 +838,15 @@ def main():
     field_names = [
         'object_id',
         "delta_m_avg",
-        "delta_mags",
+        "delta_mag_r",
+        "delta_mag_g",
+        "delta_mag_i",
         "apparent_mag_i_rest",
         "apparent_mag_i_obs",
         "apparent_mag_2500",
         "apparent_mag_2500_err",
+        "apparent_mag_2500_reddened",
+        "apparent_mag_2500_reddened_err",
         "f_host_2500",
         "f_host_4200",
         "f_host_5100",
@@ -784,9 +854,20 @@ def main():
         "alpha_lambda_err",
         "redchi",
         "npca_qso",
+        "redchi_npca_qso0",
+        "redchi_npca_qso1",
+        "redchi_npca_qso2",
+        'plate',
+        'mjd',
+        'fiber',
+        'z',
         'sdss_name',
-        'ebv',
-        'ebv_ccm89',
+        'ebv_fs',
+        'euv_fs',
+        'log_L2500_fs',
+        'log_L2500_fs_err',
+        'log_L2500_int_fs',
+        'log_L2500_int_fs_err',
     ]
 
     with open(csv_file, "w", newline="") as f:
