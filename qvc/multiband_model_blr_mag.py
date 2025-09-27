@@ -64,7 +64,7 @@ class ContiBLRQS_Mag(qs.Wrapper):
 
         # OU in magnitudes for c(t); "squared" OU is exact OU with tau/2
         self.kernel  = qs.Exp(scale=self.tau_drw,     sigma=1.0)
-        self.kernel2 = qs.Exp(scale=self.tau_drw / 2, sigma=1.0) # TODO: beta
+        self.kernel2 = qs.Exp(scale=self.tau_drw / self.bwb_beta, sigma=1.0)
 
     def coord_to_sortable(self, X):
         t, b = X
@@ -98,9 +98,10 @@ class ContiBLRQS_Mag(qs.Wrapper):
         return jnp.block([[P0, z01],[z10, P1]])
 
     def transition_matrix(self, X1, X2):
-        t1, _ = X1
+        t1, b1 = X1
         t2, b2 = X2
-        dt = self.s[b2] * (t2 - t1)
+        s_eff = 0.5 * (self.s[b1] + self.s[b2]) 
+        dt = s_eff * (t2 - t1)
         Phi0 = self.kernel.transition_matrix(0.0, dt)
         Phi1 = self.kernel2.transition_matrix(0.0, dt)
         z01 = jnp.zeros((Phi0.shape[0], Phi1.shape[1]))
@@ -160,6 +161,113 @@ class ContiBLRQS_Mag(qs.Wrapper):
             return (v.conj().T @ (Qc @ v)).real + sigma_n2
 
         return 2.0 * jax.vmap(one_w)(omega)
+
+
+class ContiBLR_Mag(tinygp.kernels.Kernel):
+    # keep your familiar names / field layout
+    tau_drw: float
+    width_cont: jnp.ndarray
+    width_blr: jnp.ndarray
+    amp_cont: jnp.ndarray
+    amp_blr: jnp.ndarray
+    lag_blr: jnp.ndarray
+    lag_disk: jnp.ndarray
+    bwb_alpha: jnp.ndarray
+    bwb_beta: jnp.ndarray
+    s: jnp.ndarray
+
+    def __init__(self, amp_cont, amp_blr, lag_blr, lag_disk, tau_drw,
+                 bwb_alpha, bwb_beta, width_cont, width_blr, s):
+        self.amp_cont   = jnp.asarray(amp_cont)
+        self.amp_blr    = jnp.asarray(amp_blr)
+        self.lag_blr    = jnp.asarray(lag_blr)
+        self.lag_disk   = jnp.asarray(lag_disk)
+        self.tau_drw    = tau_drw
+        self.bwb_alpha  = jnp.asarray(bwb_alpha)
+        self.bwb_beta   = jnp.asarray(bwb_beta)
+        self.width_cont = jnp.asarray(width_cont)
+        self.width_blr  = jnp.asarray(width_blr)
+        self.s          = jnp.asarray(s)
+
+    # --- helpers -------------------------------------------------------------
+    @staticmethod
+    def _abs(x):
+        return jnp.abs(x)
+
+    def _k_ou(self, tau):
+        """OU kernel with unit variance and timescale tau_drw (magnitudes)."""
+        return jnp.exp(-self._abs(tau) / self.tau_drw)
+
+    def _k_ou_half(self, tau):
+        """Squared-OU ≡ OU with half-timescale."""
+        return jnp.exp(-self._abs(tau) / self.tau_drw / self.bwb_beta)
+
+    def _gain_top_hat(self, width):
+        """
+        Mean filter gain for convolving an OU by a (causal) top-hat of width 'width'.
+        Matches your QS helper:
+            x = w/tau, G = (1 - e^{-x}) / x, with numerics for small x.
+        """
+        x = width / jnp.maximum(self.tau_drw, 1e-12)
+        # series-safe form
+        return jnp.where(x < 1e-8, 1.0 - 0.5 * x + x**2 / 6.0,
+                         -jnp.expm1(-x) / jnp.maximum(x, 1e-12))
+
+    # --- TinyGP API ----------------------------------------------------------
+    def evaluate(self, X1, X2):
+        """
+        X = (t, b) with t scalar (or same-shaped) and b integer band index.
+        Returns cov[y_b1(t1), y_b2(t2)] in magnitudes.
+        """
+        t1, b1 = X1
+        t2, b2 = X2
+
+        # Ensure integer indices
+        b1 = jnp.asarray(b1, dtype=jnp.int32)
+        b2 = jnp.asarray(b2, dtype=jnp.int32)
+
+        # Symmetric time-dilation to keep covariance symmetric/PD
+        s_eff = 0.5 * (self.s[b1] + self.s[b2])
+        tau = s_eff * (t2 - t1)  # effective time separation
+
+        # Per-arm lags (apply the band's own dilation, matching your QS construction)
+        Lc1 = self.s[b1] * self.lag_disk[b1]
+        Lc2 = self.s[b2] * self.lag_disk[b2]
+        Lb1 = self.s[b1] * (self.lag_disk[b1] + self.lag_blr[b1])
+        Lb2 = self.s[b2] * (self.lag_disk[b2] + self.lag_blr[b2])
+
+        # Top-hat gains for each arm (both arms use smoothing in your QS code)
+        Gc1 = self._gain_top_hat(self.width_cont[b1])
+        Gc2 = self._gain_top_hat(self.width_cont[b2])
+        Gb1 = self._gain_top_hat(self.width_blr[b1])
+        Gb2 = self._gain_top_hat(self.width_blr[b2])
+
+        # Per-arm magnitude gains
+        A1 = self.amp_cont[b1]
+        A2 = self.amp_cont[b2]
+        B1 = self.amp_blr[b1]
+        B2 = self.amp_blr[b2]
+
+        # Base terms: continuum/BLR arms with lags + smoothing (multiplicative gain)
+        # cc: c_b1 @ (t - Lc1)  vs  c_b2 @ (t - Lc2)
+        cc = (A1 * Gc1) * (A2 * Gc2) * self._k_ou(tau - (Lc2 - Lc1))
+        # cb: cont arm (b1) vs BLR arm (b2)
+        cb = (A1 * Gc1) * (B2 * Gb2) * self._k_ou(tau - (Lb2 - Lc1))
+        # bc: BLR arm (b1) vs cont arm (b2)
+        bc = (B1 * Gb1) * (A2 * Gc2) * self._k_ou(tau - (Lc2 - Lb1))
+        # bb: BLR arm (b1) vs BLR arm (b2)
+        bb = (B1 * Gb1) * (B2 * Gb2) * self._k_ou(tau - (Lb2 - Lb1))
+
+        base = cc + cb + bc + bb
+
+        # BWB term: 2 q_b1 q_b2 [k(τ)]^2  with  q_b = bwb_alpha * (A_b)^2
+        # (Same phenomenology as your QS version; bwb_beta left for future use)
+        q1 = self.bwb_alpha * (A1 ** 2)
+        q2 = self.bwb_alpha * (A2 ** 2)
+        bwb = 2.0 * q1 * q2 * self._k_ou_half(tau)
+
+        return base + bwb
+
 
 # Override MultiVarModel
 class MyMultiVarModel_SMAG(MultiVarModel):
