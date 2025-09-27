@@ -152,11 +152,11 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_
                 eta_tau2 = numpyro.deterministic("eta_tau2", jnp.full(batch_size, eta_tau2_mean))
 
             # Core kernel parameters (hierarchical & identified)
-            log_tau_drw0_high = 10.0 * jnp.log(10)
+            log_tau_drw0_high = jnp.log(10**10 * (1 + zs))
             if inject_fake:
                 log_tau_drw0_low = 0.0
             else:
-                log_tau_drw0_low = 1.5 * jnp.log(10)
+                log_tau_drw0_low = jnp.log(10**1.5 * (1 + zs))
 
             if sigma_tau_uniform:
                 print("[INFO] Using Uniform prior on log_sigma0 and log_tau_drw0.")
@@ -574,7 +574,6 @@ if __name__ == '__main__':
     parser.add_argument("--jax_trace", action="store_true", help="Enable jax tracing.")
     parser.add_argument("--rf_length_cut", type=int, default=-1, help="Cut light curves to same rest-frame length.")
     parser.add_argument('--exact_same_length', action='store_true', help="Cut light curves to exact same rest-frame length.")
-    parser.add_argument("--alpha_lam_csv", type=str, default=None, help="Path to CSV file containing alpha_lam values per object.")
     parser.add_argument("--load_stone_lcs", action="store_true", default=False, help="Load Stone light curves instead of default.")
     parser.add_argument("--free_eta_break", action="store_true", default=False, help="Allow eta_break to be a free parameter.")
     parser.add_argument("--disable_corner_plot", action="store_true", default=False, help="Disable corner plot generation.")
@@ -586,6 +585,9 @@ if __name__ == '__main__':
     parser.add_argument("--disable_plot_psd", action="store_true", default=False, help="Disable PSD plot generation.")
     parser.add_argument("--eta_tau_normal", action="store_true", default=False, help="Use uniform prior for eta_tau1 and eta_tau2.")
     parser.add_argument("--inject_random_fake_etas", action="store_true", default=False, help="Inject random alpha_sigma and beta_tau for fake light curves.")
+    parser.add_argument("--fhost_csv", type=str, default=None, help="Path to CSV file containing fhost values per object.")
+    parser.add_argument("--disable_fhost", action="store_true", default=False, help="Disable fhost values, set all to 0.")
+    #parser.add_argument("--broken_pl", action="store_true", default=False, help="Use broken power law for eta instead of single power law.")
     args = parser.parse_args()
     print("Args: ", args)
 
@@ -619,24 +621,26 @@ if __name__ == '__main__':
     #     batch_size = len(batch_data)
     #     f_host_value = jnp.zeros(batch_size)
 
-    if args.alpha_lam_csv is not None:
-        # Load CSV with columns: object_id, alpha_lambda, f_host_5100
-        alpha_df = pd.read_csv(args.alpha_lam_csv, dtype={"object_id": str})
-        alpha_map = alpha_df.set_index("object_id")[["alpha_lambda", "f_host_5100"]].to_dict(orient="index")
-        # Populate objs with alpha_lambda and f_host_5100 by object_id
+    if args.fhost_csv is None and not args.disable_fhost:
+        raise ValueError("Must provide fhost_csv if not disabling fhost.") 
+    if args.disable_fhost:
+        print("[WARNING] Disabling f_host, setting f_host_2500=0.0 for all objects.")
+        for obj in objs:
+            obj["f_host_2500"] = 0.0
+    else:
+        # Load CSV with columns: object_id, alpha_lambda, f_host_2500
+        fhost_df = pd.read_csv(args.fhost_csv, dtype={"object_id": str})
+        fhost_map = fhost_df.set_index("object_id")[["f_host_2500"]].to_dict(orient="index")
+        # Populate objs with alpha_lambda and f_host_2500 by object_id
         for obj in objs:
             oid = str(obj["object_id"])
-            if oid in alpha_map and alpha_map[oid]["f_host_5100"] >= 0:
-                obj["f_host_5100"] = alpha_map[oid]["f_host_5100"]
+            if oid in fhost_map and fhost_map[oid]["f_host_2500"] >= 0:
+                obj["f_host_2500"] = fhost_map[oid]["f_host_2500"]
             else:
-                obj["f_host_5100"] = 0.0  # Default if not found or invalid
-    else:
-        print("[WARNING] Not using alpha_lam_csv, setting f_host_5100=0.0 for all objects.")
-        for obj in objs:
-            obj["f_host_5100"] = 0.0 
+                raise ValueError(f"Object ID {oid} not found in fhost CSV or has invalid f_host_2500.")
 
     for obj in objs:
-        print(f"Object {obj['object_id']}: f_host_5100 = {obj['f_host_5100']}")
+        print(f"Object {obj['object_id']}: f_host_2500 = {obj['f_host_2500']}")
 
     if args.lmc >= 0:
         print(f"\033[93m[WARNING] Using LMC model (Q={args.lmc}).\033[0m")
@@ -694,7 +698,7 @@ if __name__ == '__main__':
             'mags_means': obj['mags_means'],
             'mags_stds': obj['mags_stds'],
             'lam_rf': lam_rf,
-            'f_host_5100': obj['f_host_5100'],
+            'f_host_2500': obj['f_host_2500'],
             'log_tau_fake': obj['log_tau_fake'],
             'log_sigma_fake': obj['log_sigma_fake'],
             'alpha_sigma': obj.get('alpha_sigma', -99),
@@ -731,7 +735,7 @@ if __name__ == '__main__':
     # log_jitter_mean = jnp.stack([safe_log_jitter_mean(obj) for obj in padded_batch_data])
     assert jnp.isfinite(log_jitter_mean).all(), "Non-finite log_jitter_mean"
 
-    f_host_value = jnp.array([obj["f_host_5100"] for obj in batch_data])
+    f_host_value = jnp.array([obj["f_host_2500"] for obj in batch_data])
 
     log_tau_fake = jnp.array([obj['log_tau_fake'] for obj in batch_data])
     log_sigma_fake = jnp.array([obj['log_sigma_fake'] for obj in batch_data])
@@ -814,22 +818,25 @@ if __name__ == '__main__':
 
         # Plotting
         if args.plot:
-            plot_mcmc_traces(obj_flat_samples_flatten_per_band, obj)
-            m = Model(
-                obj['X'], obj['y'], obj['yerr'], 
-                kernels.quasisep.Exp(jnp.array([1, 1])),
-                zero_mean=zero_mean, has_jitter=has_jitter, has_lag=has_lag,
-                lam_rf=obj['lam_rf'], z=obj['z'], use_bwb=args.bwb, q_groups=args.lmc
-            )
-            save_combined_plot(obj_flat_samples, m, obj['X'], obj['y'], obj['yerr'], obj['band_idx'], result, 
-                               bands=bands, plot_psd=(not args.disable_plot_psd))
-            plot_correlation_matrix(obj_flat_samples_flatten_per_band, obj)
-            plot_all_histograms(obj_flat_samples_flatten_per_band, obj)
-            if not args.disable_corner_plot:
-                #plot_posterior(obj_flat_samples_flatten_per_band, obj)
-                plot_posterior_fast(obj_flat_samples_flatten_per_band, obj)
-            plot_broken_power_law(obj_flat_samples, obj)
-            #dump_mcmc_diagnostics(mcmc, obj, i, len(batch_data))
+            try: # do not crash everything if plotting one object fails
+                plot_mcmc_traces(obj_flat_samples_flatten_per_band, obj)
+                m = Model(
+                    obj['X'], obj['y'], obj['yerr'], 
+                    kernels.quasisep.Exp(jnp.array([1, 1])),
+                    zero_mean=zero_mean, has_jitter=has_jitter, has_lag=has_lag,
+                    lam_rf=obj['lam_rf'], z=obj['z'], use_bwb=args.bwb, q_groups=args.lmc
+                )
+                save_combined_plot(obj_flat_samples, m, obj['X'], obj['y'], obj['yerr'], obj['band_idx'], result, 
+                                bands=bands, plot_psd=(not args.disable_plot_psd))
+                plot_correlation_matrix(obj_flat_samples_flatten_per_band, obj)
+                plot_all_histograms(obj_flat_samples_flatten_per_band, obj)
+                if not args.disable_corner_plot:
+                    #plot_posterior(obj_flat_samples_flatten_per_band, obj)
+                    plot_posterior_fast(obj_flat_samples_flatten_per_band, obj)
+                plot_broken_power_law(obj_flat_samples, obj)
+                #dump_mcmc_diagnostics(mcmc, obj, i, len(batch_data))
+            except Exception as e:
+                logging.error(f"Error during plotting for object {obj['object_id']}: {e}")
         # If inject_fake, compare injected vs recovered sigma and tau
         final_result_obj = obj | result | diagnostics | dict(prefix=prefix, suffix=suffix)
         results.append(final_result_obj)

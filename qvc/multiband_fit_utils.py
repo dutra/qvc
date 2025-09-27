@@ -520,6 +520,26 @@ def save_quasar_list_hdf5(quasars, ignored_keys=None, size_threshold=1024):
 
     logging.info("All quasars saved successfully.")
     
+# def log_broken_pl(lam, lam_s, d1, d2, ds=0.1):
+#     """
+#     Log10 of a smooth broken power-law, normalized to 0 at lam_s.
+#     Slopes approach d1 for lam << lam_s and d2 for lam >> lam_s.
+    
+#     ds: smoothness control — larger ds = smoother transition,
+#         smaller ds = sharper transition.
+#     """
+#     x = lam / lam_s
+#     delta = d2 - d1
+
+#     # Use exponent 1/ds so larger ds => smoother
+#     smooth_exp = 1.0 / ds
+#     log10_1px = jnp.log1p(x**smooth_exp) / jnp.log(10.0)
+
+#     log_f = d1 * jnp.log10(x) + (delta / smooth_exp) * log10_1px
+#     log_f -= (delta / smooth_exp) * jnp.log10(2.0)  # normalize to 0 at lam_s
+
+#     return log_f
+
 
 def log_broken_pl(lam, lam_s, d1, d2, ds=0.1):
     """
