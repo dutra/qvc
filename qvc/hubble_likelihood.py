@@ -97,6 +97,7 @@ def log_likelihood_pantheon_cephdist(params, pantheon_data, _sna_L, _sna_Lower, 
 def log_likelihood(theta, *, agn_data, pantheon_data, 
                    _sna_L, _sna_Lower, _sna_LogdetCov,
                    cosmo_model, completeness_params,
+                   z_pivot_agn,
                    only_sna=False, use_full_cov=False, use_mu_sh0es=False):
     priors, model_labels, model_labels_latex = get_model_params(cosmo_model, only_sna=only_sna)
     model_priors = {key: priors[key] for key in model_labels}

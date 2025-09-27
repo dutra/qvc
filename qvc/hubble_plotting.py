@@ -1071,9 +1071,9 @@ def plot_predicted_vs_actual_M2500(
         # labels only on bottom row / left col
         num_panels = num_rows * num_cols
         if i >= (num_rows - 1) * num_cols:
-            ax.set_xlabel("Actual $M_{2500}$", fontsize=12)
+            ax.set_xlabel("Actual $M_{2500}$")
         if i % num_cols == 0:
-            ax.set_ylabel("Predicted $M_{2500}$", fontsize=12)
+            ax.set_ylabel("Predicted $M_{2500}$")
         ax.tick_params(axis="both", labelsize=10, length=3)
 
         # show legend once
@@ -1218,7 +1218,8 @@ def plot_full_residuals(df_agn, residuals, flat_samples, cosmo_model, z_pivot_ag
         'zWarning', 'sameZ', 'class_code', 'subClass_code',
         'log_rho', 't_rf_length', 'tau_band_RF_mean',
         'log_tau_band_RF_mean', 'log_t_rf_length', 
-        'alphaOX', 'alphaOX_int', 'ebv_fs', 'log_ebv_fs', 'ebv_wu',
+        'alphaOX', 'alphaOX_int',
+        'euv_fs', 'log_euv_fs', 'ebv_fs', 'log_ebv_fs', 'ebv_wu',
         'eta_A1', 'eta_A2', 'eta_tau1', 'eta_tau2',
     ]) if col in df_agn.columns]
 

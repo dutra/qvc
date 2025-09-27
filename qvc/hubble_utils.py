@@ -286,6 +286,7 @@ def populate_spectra_fit(df, spectra_fit_csvs):
             'f_host_2500': float,
             'f_host_5100': float,
             'ebv_fs': float,
+            'euv_fs': float,
             'apparent_mag_2500_reddened': float,
             'apparent_mag_2500_reddened_err': float,
             'apparent_mag_2500': float,
@@ -353,6 +354,7 @@ def populate_spectra_fit(df, spectra_fit_csvs):
         df[cols_to_save_unique].to_csv(out_csv, index=False)
         print(f"Saved merged DataFrame to {out_csv} with columns: {cols_to_save_unique}")
     df['log_ebv_fs'] = np.log10(df['ebv_fs'].replace(0, np.nan))
+    df['log_euv_fs'] = np.log10(df['euv_fs'].replace(0, np.nan))
 
     # logL, logL_err = compute_L2500_from_mag(df['apparent_mag_2500'], df['apparent_mag_2500_err'], df['z'])
     # df['L2500'] = 10**logL
@@ -726,7 +728,7 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, spectra_fit_cs
 
     # Define cuts as (column, lower_limit, upper_limit)
     cuts = [
-        ('f_host_4200', None, 0.2),
+        ('f_host_4200', -0.1, 10.0),
         ('log_tau_UV_RF', 1.5, None),
         #('redchi', None, 5),
         ('apparent_mag_2500', 12, 40),
@@ -902,13 +904,13 @@ import numpy as np
 def _jeffreys_strength(abs_delta, thresholds):
     t1, t2, t3 = thresholds
     if abs_delta < t1:
-        return "Barely worth mentioning"
+        return "barely worth mentioning"
     elif abs_delta < t2:
-        return "Substantial"
+        return "substantial"
     elif abs_delta < t3:
         return "Strong"
     else:
-        return "Very strong"
+        return "very strong"
 
 def _odds_sigmas_from_delta(delta):
     """Return (one-sided Z, two-sided Z) from |Δln Z| odds, stably."""
@@ -1263,12 +1265,12 @@ def make_cosmo_table_latex(
 
     # ---------- build LaTeX ----------
     lines = []
-    lines.append(r"\begin{table}")
-    lines.append(r"\centering")
-    lines.append(r"\setlength{\tabcolsep}{4pt} % compact spacing")
-    #lines.append(r"\begin{threeparttable}")
-    lines.append(rf"\caption{{{caption}}}")
-    lines.append(rf"\label{{{label}}}")
+    # lines.append(r"\begin{table}")
+    # lines.append(r"\centering")
+    # lines.append(r"\setlength{\tabcolsep}{4pt} % compact spacing")
+    # #lines.append(r"\begin{threeparttable}")
+    # lines.append(rf"\caption{{{caption}}}")
+    # lines.append(rf"\label{{{label}}}")
 
     ncols = 1 + len(col_keys) + (1 if include_lnZ else 0)  # Dataset + params + optional lnZ
     lines.append(r"\begin{tabular}{" + "l" + "c" * (ncols - 1) + "}")
@@ -1309,7 +1311,7 @@ def make_cosmo_table_latex(
     lines.append(r"\end{tablenotes}")
     #lines.append(r"\end{threeparttable}")
 
-    lines.append(r"\end{table}")
+    # lines.append(r"\end{table}")
 
     latex_str = "\n".join(lines)
 
@@ -1471,7 +1473,9 @@ def display_results_summary(samples, cosmo_model, z_pivot_agn):
             arr = samples[:, i_wa]
             m = np.median(arr); l = np.percentile(arr, 16); h = np.percentile(arr, 84)
             print(f"{'wa':>15}: {m:.4f} (+{h - m:.4f}, -{m - l:.4f})")
-    
+    return
+
+def compute_age_universe(samples, cosmo_model):
     priors, model_labels, _ = get_model_params(cosmo_model)
     params = {name: np.median(samples[:, i]) for i, name in enumerate(model_labels)}
 
@@ -1488,6 +1492,7 @@ def display_results_summary(samples, cosmo_model, z_pivot_agn):
 
     age = cosmo.age(0).to("Gyr").value
     print(f"Age of universe: {age:.3f} Gyr")
+    return age
 
 def display_diagnostics(sampler, cosmo_model, fitting_method=False):
     priors, model_labels, _ = get_model_params(cosmo_model)
@@ -2050,113 +2055,163 @@ def format_value_uncertainty(
     return s
     return val_out, err_out, exponent, s
 
-
-def write_results_tex_variables(df_agn, flat_samples, cosmo_model, compare_r, z_pivot_agn, write_path, chisq_dict=None):
+def write_results_tex_variables(
+    df_agn, flat_samples, cosmo_model, compare_r, z_pivot_agn,
+    write_path, chisq_dict=None, age=None
+):
     """
-    Write key cosmological parameters to a LaTeX file as \newcommand definitions.
-
-    Parameters
-    ----------
-    flat_samples : (N, P) array
-        Flattened MCMC samples: N total draws by P parameters.
-    cosmo_model : str
-        Cosmological model string.
-    z_pivot_agn : float
-        Pivot redshift for w0/wa conversion if applicable.
-    write_path : str
-        Directory path to write the LaTeX file (filename is 'cosmo_params.tex').
+    Write key cosmological parameters AND model comparison results
+    to a LaTeX file as \newcommand definitions.
     """
+    import os
+    import numpy as np
+    from itertools import combinations
 
+    flat_samples = np.asarray(flat_samples)
+
+    # --- AGN pivots
     obs_arr, err_arr, pivots_arr = agn_model_pack_obs(df_agn)
-
     log_sigma_UV_pivot  = pivots_arr[agn_model_oidx["log_sigma_UV"]]
     log_tau_UV_RF_pivot = pivots_arr[agn_model_oidx["log_tau_UV_RF"]]
 
-
     priors, model_labels, _ = get_model_params(cosmo_model)
-    flat_samples = np.asarray(flat_samples)
-
     results = {key: sym_percentile(flat_samples[:, i])
                for i, key in enumerate(model_labels)}
 
-    # Write to LaTeX file
     lines = []
-    lines.append(r"% Auto-generated cosmological parameters from MCMC samples")
-    lines.append(r"% Do not edit by hand; regenerate with write_results_tex_variables()")
+    lines.append(r"% Auto-generated cosmological and evidence results")
+    lines.append(r"% Do not edit manually; regenerated by write_results_tex_variables()")
     lines.append(r"\newcommand{\resultNumAGN}{%d}" % len(df_agn))
+    lines.append(r"\newcommand{\resultAgeUniverse}{\ensuremath{%.2f\,\mathrm{Gyr}}}" % (age if age is not None else np.nan))
 
+    # ===============================
+    # --- Model comparison results ---
+    # ===============================
     if compare_r is not None:
-        # Direct headline: which one is preferred overall
-        print("Compare_r keys: ", compare_r.keys())
-        print("Preferred model overall:", compare_r["preferred_model"])
+        # Preferred model overall
+        preferred = compare_r["preferred_model"]
+        lines.append(r"\newcommand{\resultPreferredModelOverall}{%s}" % preferred)
 
-        # Pairwise: Flatw0waCDM vs FlatwCDM
-        pair = compare_r["pairwise"]["Flatw0waCDM"]["FlatwCDM"]
-        print("Comparing Flatw0waCDM vs FlatwCDM")
-        print("Δln Z =", pair["delta_logZ"], "±", pair["delta_logZ_err"])
-        print("Preferred model:", 
-            "Flatw0waCDM" if pair["delta_logZ"] > 0 else "FlatwCDM")
-        print("Two-sided Z ≈ %.3f σ" % pair["sigma_two_sided"])
-        lines.append(r"\newcommand{\resultDeltaLogZFlatw0waCDMFlatwCDM}{\ensuremath{%.2f \pm %.2f}}" % (pair["delta_logZ"], pair["delta_logZ_err"]))
-        lines.append(r"\newcommand{\resultPreferredModelFlatw0waCDMFlatwCDM}{%s}" % ("Flatw0waCDM" if pair["delta_logZ"] > 0 else "FlatwCDM"))
-        lines.append(r"\newcommand{\resultSigmaFlatw0waCDMFlatwCDM}{\ensuremath{%.3f}}" %  pair["sigma_two_sided"])
-        lines.append(r"\newcommand{\resultPreferredModelOverall}{%s}" % compare_r["preferred_model"])
+        # Per-model stats relative to TOP
+        for r in compare_r["ranking"]:
+            model = r["model"]
+            safe = model.replace("0", "Zero").replace("Λ", "Lambda")  # latex-safe key
+            lines.append(r"\newcommand{\resultLogZ%s}{%.3f}" %
+                         (safe, r["logZ"]))
+            lines.append(r"\newcommand{\resultLogZerr%s}{%.3f}" %
+                         (safe, r["logZerr"]))
+            lines.append(r"\newcommand{\resultDeltaLogZ%s}{%.3f}" %
+                         (safe, r["delta_logZ_vs_top"]))
+            lines.append(r"\newcommand{\resultSigma%s}{%.3f}" %
+                         (safe, r["sigma_two_sided_vs_top"]))
+            lines.append(r"\newcommand{\resultJeffreysStrength%s}{%s}" %
+                         (safe, r["jeffreys_strength_vs_top"]))
+
+        # ---------- Helpers ----------
+        def _latex_model_token(name: str) -> str:
+            return {
+                "Flatw0waCDM": "FlatwZeroWaCDM",
+                "FlatwCDM": "FlatwCDM",
+                "FlatLambdaCDM": "FlatLambdaCDM",
+            }.get(name, name.replace("0", "Zero").replace("Λ", "Lambda"))
+
+        def _get_pair(a: str, b: str):
+            """Fetch pair dict for (a,b) regardless of direction."""
+            pw = compare_r.get("pairwise", {})
+            return pw.get(a, {}).get(b) or pw.get(b, {}).get(a)
+
+        def _emit_pair(lines_list, a: str, b: str):
+            pair = _get_pair(a, b)
+            base = f"{_latex_model_token(a)}{_latex_model_token(b)}"
+            if pair:
+                lines_list.append(
+                    r"\newcommand{\resultDeltaLogZ%s}{\ensuremath{%.2f \pm %.2f}}" %
+                    (base, pair["delta_logZ"], pair["delta_logZ_err"])
+                )
+                lines_list.append(
+                    r"\newcommand{\resultSigma%s}{%.3f}" %
+                    (base, pair["sigma_two_sided"])
+                )
+                lines_list.append(
+                    r"\newcommand{\resultJeffreysStrength%s}{%s}" %
+                    (base, pair["jeffreys_strength"])
+                )
+                lines_list.append(
+                    r"\newcommand{\resultZmc%s}{%.2f}" %
+                    (base, pair["z_mc"])
+                )
+            else:
+                lines_list.append(r"\newcommand{\resultDeltaLogZ%s}{N/A}" % base)
+                lines_list.append(r"\newcommand{\resultSigma%s}{N/A}" % base)
+                lines_list.append(r"\newcommand{\resultJeffreysStrength%s}{N/A}" % base)
+                lines_list.append(r"\newcommand{\resultZmc%s}{N/A}" % base)
+
+        # ---------- Iterate over all model pairs (no hardcoding) ----------
+        models = [r["model"] for r in compare_r.get("ranking", [])]
+        for a, b in combinations(models, 2):
+            _emit_pair(lines, a, b)
+
     else:
-        lines.append(r"\newcommand{\resultDeltaLogZFlatw0waCDMFlatwCDM}{N/A}")
-        lines.append(r"\newcommand{\resultPreferredModelFlatw0waCDMFlatwCDM}{N/A}")
-        lines.append(r"\newcommand{\resultSigmaFlatw0waCDMFlatwCDM}{N/A}")
         lines.append(r"\newcommand{\resultPreferredModelOverall}{N/A}")
 
-    lines.append(r"\newcommand{\resultAlphaAGN}{\ensuremath{%s}}" % format_value_uncertainty(results['alpha_agn'][0], results['alpha_agn'][1]))
-    lines.append(r"\newcommand{\resultBetaAGN}{\ensuremath{%s}}" % format_value_uncertainty(results['beta_agn'][0], results['beta_agn'][1]))
+    # ===============================
+    # --- AGN relation results ---
+    # ===============================
+    lines.append(r"\newcommand{\resultAlphaAGN}{\ensuremath{%s}}" %
+                 format_value_uncertainty(results['alpha_agn'][0], results['alpha_agn'][1]))
+    lines.append(r"\newcommand{\resultBetaAGN}{\ensuremath{%s}}" %
+                 format_value_uncertainty(results['beta_agn'][0], results['beta_agn'][1]))
+    lines.append(r"\newcommand{\resultSigmaUVPivot}{\ensuremath{%s}}" %
+                 format_value_uncertainty(10**log_sigma_UV_pivot, None))
+    lines.append(r"\newcommand{\resultTauUVRFPivot}{\ensuremath{%s}}" %
+                 format_value_uncertainty(10**log_tau_UV_RF_pivot, None))
 
-    lines.append(r"\newcommand{\resultSigmaUVPivot}{\ensuremath{%s}}" % format_value_uncertainty(10**log_sigma_UV_pivot, None))
-    lines.append(r"\newcommand{\resultTauUVRFPivot}{\ensuremath{%s}}" % format_value_uncertainty(10**log_tau_UV_RF_pivot, None))
+    # Cosmological parameters
+    lines.append(r"\newcommand{\resultOmZero}{\ensuremath{%s}}" %
+                 format_value_uncertainty(results['Om0'][0], results['Om0'][1]))
+    lines.append(r"\newcommand{\resultwZero}{\ensuremath{%s}}" %
+                 format_value_uncertainty(results['w0'][0], results['w0'][1]))
+    lines.append(r"\newcommand{\resultwa}{\ensuremath{%s}}" %
+                 format_value_uncertainty(results['wa'][0], results['wa'][1]))
 
 
-
+    # Derived intercepts
     M0_agn_samples = flat_samples[:, model_labels.index('M0_agn')]
     alpha_agn_samples = flat_samples[:, model_labels.index('alpha_agn')]
-    beta_agn_samples = flat_samples[:, model_labels.index('beta_agn')]
-
+    beta_agn_samples  = flat_samples[:, model_labels.index('beta_agn')]
     alpha_AGN_L_samples = alpha_agn_samples * (-1/2.5)
-    beta_AGN_L_samples  = beta_agn_samples * (-1/2.5)
-    L_intercept_samples = np.power(10, (90-M0_agn_samples)/2.5)
+    beta_AGN_L_samples  = beta_agn_samples  * (-1/2.5)
+    L_intercept_samples = np.power(10, (90 - M0_agn_samples) / 2.5)
 
-    L_intercept, L_intercept_err = sym_percentile(L_intercept_samples)
-    val, err = L_intercept, L_intercept_err
-
-    # --- Extract exponent from the value ---
-    exp = int(np.floor(np.log10(abs(val)))) if val != 0 else 0
-    scale = 10.0**exp
-
-    mant_val = val / scale
-    mant_err = err / scale
-
-    lines.append(
-        r"\newcommand{\resultLIntercept}{\ensuremath{%s}}" %
-        format_value_uncertainty(*sym_percentile(L_intercept_samples), unit=r"erg\,s^{-1}")
-    )
-
-    lines.append(r"\newcommand{\resultAlphaAGNL}{\ensuremath{%s}}" % format_value_uncertainty(*sym_percentile(alpha_AGN_L_samples)))
-    lines.append(r"\newcommand{\resultBetaAGNL}{\ensuremath{%s}}" % format_value_uncertainty(*sym_percentile(beta_AGN_L_samples)))
+    lines.append(r"\newcommand{\resultLIntercept}{\ensuremath{%s}}" %
+                 format_value_uncertainty(*sym_percentile(L_intercept_samples), unit=r"erg\,s^{-1}"))
+    lines.append(r"\newcommand{\resultAlphaAGNL}{\ensuremath{%s}}" %
+                 format_value_uncertainty(*sym_percentile(alpha_AGN_L_samples)))
+    lines.append(r"\newcommand{\resultBetaAGNL}{\ensuremath{%s}}" %
+                 format_value_uncertainty(*sym_percentile(beta_AGN_L_samples)))
 
     hd_scatter_samples = np.exp(flat_samples[:, model_labels.index('log_f')])
-    lines.append(r"\newcommand{\resultScatterHD}{\ensuremath{%s}}" % format_value_uncertainty(*sym_percentile(hd_scatter_samples), unit=r"mag"))
-
+    lines.append(r"\newcommand{\resultScatterHD}{\ensuremath{%s}}" %
+                 format_value_uncertainty(*sym_percentile(hd_scatter_samples), unit=r"mag"))
     l_scatter_samples = hd_scatter_samples / 2.5
-    lines.append(r"\newcommand{\resultScatterL}{\ensuremath{%s}}" % format_value_uncertainty(*sym_percentile(l_scatter_samples), unit=r"dex"))
+    lines.append(r"\newcommand{\resultScatterL}{\ensuremath{%s}}" %
+                 format_value_uncertainty(*sym_percentile(l_scatter_samples), unit=r"dex"))
 
     if chisq_dict is not None:
         for key, val in chisq_dict.items():
-            lines.append(r"\newcommand{\result%sChiSqRed}{\ensuremath{%s}}" % (key, format_value_uncertainty(val, None)))
+            lines.append(r"\newcommand{\result%sChiSqRed}{\ensuremath{%s}}" %
+                         (key, format_value_uncertainty(val, None)))
 
+    # --- Save file ---
     tex_path = os.path.join(write_path, "param_results.tex")
+    os.makedirs(write_path, exist_ok=True)
     with open(tex_path, "w") as f:
         for line in lines:
             print(line)
             f.write(line + "\n")
     print(f"Wrote result parameters LaTeX commands to {tex_path}")
+
+
 
 def reduced_chi_squared(residuals,
                         model_err,
