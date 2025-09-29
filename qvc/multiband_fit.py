@@ -104,9 +104,11 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_
         # Initialize parameters
         # Global "universal" means for eta
         eta_A1_mean = numpyro.sample("eta_A1_mean", dist.Uniform(-5.0, 0.0))
-        eta_A2_mean = numpyro.deterministic("eta_A2_mean", 0.0)
+        # eta_A2_mean = numpyro.deterministic("eta_A2_mean", 0.0)
+        eta_A2_mean = numpyro.sample("eta_A2_mean", dist.Uniform(-5.0, 0.0))
         eta_tau1_mean = numpyro.sample("eta_tau1_mean", dist.Uniform(-1.0, 5.0))
-        eta_tau2_mean = numpyro.deterministic("eta_tau2_mean", 0.0)
+        eta_tau2_mean = numpyro.sample("eta_tau2_mean", dist.Uniform(-1.0, 5.0))
+        # eta_tau2_mean = numpyro.deterministic("eta_tau2_mean", 0.0)
 
         if free_eta_break:
             print("[INFO] Free eta_break and lam_s.")
