@@ -88,7 +88,7 @@ universal_params = (
 def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_fake_in, log_sigma_fake_in, 
                 bwb=True, disable_poly1=False, d_eta=True, disable_lag_blr=False, free_eta_break=False,
                 couple_sigma_tau=False, sigma_tau_uniform=False, inject_fake=False, 
-                broken_pl=False, sigma_tau_plane_cut=True,
+                broken_pl=False, sigma_tau_plane_cut=True, log_sigma_eta_tau_sigma=0.2,
                 lmc_q_groups=None, sample_lmc_hypers=False, eta_tau_normal=False):
     # Precompute and capture constants in the closure so they are treated as
     # static by JAX/NumPyro. This prevents unnecessary retracing/recompilation
@@ -139,8 +139,8 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_
         # Population-level scatter (how much objects can deviate) 
         log_sigma_eta_A1 = numpyro.sample("log_sigma_eta_A1", dist.Normal(jnp.log(0.1), 0.2))
         log_sigma_eta_A2 = numpyro.sample("log_sigma_eta_A2", dist.Normal(jnp.log(0.1), 0.2))
-        log_sigma_eta_tau1 = numpyro.sample("log_sigma_eta_tau1", dist.Normal(jnp.log(0.1), 0.2))
-        log_sigma_eta_tau2 = numpyro.sample("log_sigma_eta_tau2", dist.Normal(jnp.log(0.1), 0.2))
+        log_sigma_eta_tau1 = numpyro.sample("log_sigma_eta_tau1", dist.Normal(jnp.log(0.1), log_sigma_eta_tau_sigma))
+        log_sigma_eta_tau2 = numpyro.sample("log_sigma_eta_tau2", dist.Normal(jnp.log(0.1), log_sigma_eta_tau_sigma))
 
         sigma_eta_A1 = numpyro.deterministic("sigma_eta_A1", jnp.exp(log_sigma_eta_A1))
         sigma_eta_A2 = numpyro.deterministic("sigma_eta_A2", jnp.exp(log_sigma_eta_A2))
@@ -609,7 +609,8 @@ if __name__ == '__main__':
     parser.add_argument("--disable_fhost", action="store_true", default=False, help="Disable fhost values, set all to 0.")
     parser.add_argument("--broken_pl", action="store_true", default=False, help="Use broken power law for eta instead of single power law.")
     parser.add_argument("--disable_sigma_tau_plane_cut", action="store_true", default=False, help="Disable sigma-tau plane cut.")
-
+    parser.add_argument("--log_sigma_eta_tau_sigma", type=float, default=0.2, help="Stddev for log_sigma_eta_tau1/2 prior.")
+    
     args = parser.parse_args()
     print("Args: ", args)
 
@@ -770,7 +771,7 @@ if __name__ == '__main__':
                                       free_eta_break=args.free_eta_break,
                                       couple_sigma_tau=args.couple_sigma_tau, sigma_tau_uniform=args.sigma_tau_uniform,
                                       inject_fake=args.inject_fake, lmc_q_groups=args.lmc, sample_lmc_hypers=args.sample_lmc_hypers,
-                                      eta_tau_normal=args.eta_tau_normal,
+                                      eta_tau_normal=args.eta_tau_normal, log_sigma_eta_tau_sigma=args.log_sigma_eta_tau_sigma,
                                       broken_pl=args.broken_pl, sigma_tau_plane_cut=(not args.disable_sigma_tau_plane_cut))
 
     nuts_kernel = NUTS(numpyro_joint_model, init_strategy=init_strategy, dense_mass=True, 
