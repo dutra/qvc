@@ -382,9 +382,6 @@ def make_lc(Model, data, bands=['u', 'g', 'r', 'i', 'z'], inject_fake=False, alp
 
     # --- Inject fake DRW with synchronized global driver ---
     if inject_fake:
-        # wavelength scalings
-        alpha_sigma = alpha_sigma  # σ(λ) ∝ λ^α
-        beta_tau    = beta_tau     # τ(λ) ∝ λ^β
 
         # per-band rest-frame λ and reference
         lam_rf_bands = np.asarray([lambda_pivot[band] for band in bands], dtype=float) / (1.0 + float(data['z']))
@@ -397,7 +394,7 @@ def make_lc(Model, data, bands=['u', 'g', 'r', 'i', 'z'], inject_fake=False, alp
 
         # Base logs
         log_tau0_rf = jax.random.uniform(k_tau0, minval=0.5,  maxval=3.0)   # log10 τ_rest (days)
-        log_sigma0  = jax.random.uniform(k_sig0, minval=-1.5, maxval=0.0)   # log10 σ (mag)
+        log_sigma0  = jax.random.uniform(k_sig0, minval=-0.5, maxval=1.0)   # log10 σ (mag)
         tau0_rf   = 10.0**float(log_tau0_rf)
         sigma0    = 10.0**float(log_sigma0)
         one_plus_z = float(1.0 + data['z'])
