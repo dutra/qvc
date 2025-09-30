@@ -88,6 +88,7 @@ universal_params = (
 def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_fake_in, log_sigma_fake_in, 
                 bwb=True, disable_poly1=False, d_eta=True, disable_lag_blr=False, free_eta_break=False,
                 couple_sigma_tau=False, sigma_tau_uniform=False, inject_fake=False, 
+                broken_pl=False,
                 lmc_q_groups=None, sample_lmc_hypers=False, eta_tau_normal=False):
     # Precompute and capture constants in the closure so they are treated as
     # static by JAX/NumPyro. This prevents unnecessary retracing/recompilation
@@ -104,11 +105,16 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_
         # Initialize parameters
         # Global "universal" means for eta
         eta_A1_mean = numpyro.sample("eta_A1_mean", dist.Uniform(-5.0, 0.0))
-        # eta_A2_mean = numpyro.deterministic("eta_A2_mean", 0.0)
-        eta_A2_mean = numpyro.sample("eta_A2_mean", dist.Uniform(-5.0, 0.0))
         eta_tau1_mean = numpyro.sample("eta_tau1_mean", dist.Uniform(-1.0, 5.0))
-        eta_tau2_mean = numpyro.sample("eta_tau2_mean", dist.Uniform(-1.0, 5.0))
-        # eta_tau2_mean = numpyro.deterministic("eta_tau2_mean", 0.0)
+
+        if broken_pl:
+            print("[INFO] Using broken power-law for eta.")
+            eta_A2_mean = numpyro.sample("eta_A2_mean", dist.Uniform(-5.0, 0.0))
+            eta_tau2_mean = numpyro.sample("eta_tau2_mean", dist.Uniform(-1.0, 5.0))
+        else:
+            print("[INFO] Using single power-law for eta (eta_A2_mean=0, eta_tau2_mean=0).")
+            eta_A2_mean = numpyro.deterministic("eta_A2_mean", 0.0)
+            eta_tau2_mean = numpyro.deterministic("eta_tau2_mean", 0.0)
 
         if free_eta_break:
             print("[INFO] Free eta_break and lam_s.")
@@ -306,7 +312,8 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_
                 kernel=kernels.quasisep.Exp(jnp.array([1, 1])),
                 zero_mean=zero_mean, has_jitter=has_jitter, has_lag=has_lag,
                 lam_rf=lam_rfs[i], z=zs[i], q_groups=lmc_q_groups,
-                use_bwb=bwb
+                use_bwb=bwb,
+                broken_pl=broken_pl
             )
             
             return m.log_prob(params)
@@ -594,7 +601,8 @@ if __name__ == '__main__':
     parser.add_argument("--inject_random_fake_etas", action="store_true", default=False, help="Inject random alpha_sigma and beta_tau for fake light curves.")
     parser.add_argument("--fhost_csv", type=str, default=None, help="Path to CSV file containing fhost values per object.")
     parser.add_argument("--disable_fhost", action="store_true", default=False, help="Disable fhost values, set all to 0.")
-    #parser.add_argument("--broken_pl", action="store_true", default=False, help="Use broken power law for eta instead of single power law.")
+    parser.add_argument("--broken_pl", action="store_true", default=False, help="Use broken power law for eta instead of single power law.")
+
     args = parser.parse_args()
     print("Args: ", args)
 
@@ -755,7 +763,8 @@ if __name__ == '__main__':
                                       free_eta_break=args.free_eta_break,
                                       couple_sigma_tau=args.couple_sigma_tau, sigma_tau_uniform=args.sigma_tau_uniform,
                                       inject_fake=args.inject_fake, lmc_q_groups=args.lmc, sample_lmc_hypers=args.sample_lmc_hypers,
-                                      eta_tau_normal=args.eta_tau_normal)
+                                      eta_tau_normal=args.eta_tau_normal,
+                                      broken_pl=args.broken_pl)
 
     nuts_kernel = NUTS(numpyro_joint_model, init_strategy=init_strategy, dense_mass=True, 
                        max_tree_depth=args.max_tree_depth,
@@ -821,7 +830,7 @@ if __name__ == '__main__':
         diagnostics = diagnostics_for_per_chain_samples(obj_samples_per_chain_flatten_per_band)
         
         # Add the object-specific parameters
-        result = process_samples(obj_flat_samples_flatten_per_band, obj)
+        result = process_samples(obj_flat_samples_flatten_per_band, obj, broken_pl=args.broken_pl)
 
         # Plotting
         if args.plot:

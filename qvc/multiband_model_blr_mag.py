@@ -127,6 +127,7 @@ class MyMultiVarModel_SMAG(MultiVarModel):
     yerr: JAXArray | NDArray
     z: float
     lam_rf: JAXArray
+    broken_pl: bool
 
     def __init__(
         self,
@@ -140,6 +141,7 @@ class MyMultiVarModel_SMAG(MultiVarModel):
         self.yerr = yerr
         self.z = kwargs.get("z", None)
         self.lam_rf = kwargs.get("lam_rf", None)
+        self.broken_pl =kwargs["broken_pl"]
 
     @staticmethod
     def mean_func(
@@ -209,21 +211,24 @@ class MyMultiVarModel_SMAG(MultiVarModel):
 
     def my_amp_transform_blr(self, params: dict[str, JAXArray]) -> JAXArray:
         return params["log_sigma0"] + jnp.atleast_1d(params["log_amp_delta_blr"])
-
+    
     def my_tau_drw_transform(self, params: dict[str, JAXArray]) -> JAXArray:
+        log_pl = log_broken_pl if self.broken_pl else log_single_pl
         eta_tau1 = params["eta_tau1"]
         eta_tau2 = params["eta_tau2"]
         lam_s = params["lam_s"]
         lam_rf_mean = jnp.mean(self.lam_rf)
         eta_break = params["eta_break"]
-        log_tau_band_mean = params["log_tau_drw0"] + jnp.log(10) * log_broken_pl(lam_rf_mean, lam_s, eta_tau1, eta_tau2, eta_break)
-        log_tau_band = params["log_tau_drw0"] + jnp.log(10) * log_broken_pl(self.lam_rf, lam_s, eta_tau1, eta_tau2, eta_break)
+        log_tau_band_mean = params["log_tau_drw0"] + jnp.log(10) * log_pl(lam_rf_mean, lam_s, eta_tau1, eta_tau2, eta_break)
+        log_tau_band = params["log_tau_drw0"] + jnp.log(10) * log_pl(self.lam_rf, lam_s, eta_tau1, eta_tau2, eta_break)
         return log_tau_band_mean, jnp.exp(log_tau_band_mean)/jnp.exp(log_tau_band)
 
     def my_amp_transform(self, params: dict[str, JAXArray]) -> JAXArray:
         """
         Transform the amplitude parameters for the model.
         """
+        log_pl = log_broken_pl if self.broken_pl else log_single_pl
+        
         eta_A1 = params["eta_A1"]
         eta_A2 = params["eta_A2"]
         lam_s = params["lam_s"]
@@ -236,7 +241,7 @@ class MyMultiVarModel_SMAG(MultiVarModel):
         log_dilution = jnp.log(dilution_factor)
 
         # Power-law scaling across rest-frame wavelength
-        log_sigma_band = params["log_sigma0"] + log_dilution + jnp.log(10) * log_broken_pl(self.lam_rf, lam_s, eta_A1, eta_A2, eta_break)
+        log_sigma_band = params["log_sigma0"] + log_dilution + jnp.log(10) * log_pl(self.lam_rf, lam_s, eta_A1, eta_A2, eta_break)
 
         return log_sigma_band
     

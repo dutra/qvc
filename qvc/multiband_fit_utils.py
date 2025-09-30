@@ -550,12 +550,11 @@ def log_broken_pl(lam, lam_s, d1, d2, ds=0.1):
 #     log_f = d1 * jnp.log10(x)
 #     return log_f
 
-def log_single_pl(lam, lam_s, d):
+def log_single_pl(lam, lam_s, d, d2=None, ds=None):
     """
     Log10 of a simple power-law, normalized to 0 at lam_s.
     Slope is d everywhere.
     """
-    raise NotImplementedError("log_single_pl is not implemented yet.")
     x = lam / lam_s
     log_f = d * jnp.log10(x)
     return log_f
@@ -585,7 +584,7 @@ def psd_cov_from_samples(X, Y, eps=1e-12, shrink_rho=0.0):
     C = np.array([[sx*sx, rho*sx*sy],[rho*sx*sy, sy*sy]])
     return C
 
-def process_samples(flat_samples, data, percentiles=[16, 50, 84], bands=['u', 'g', 'r', 'i', 'z']):
+def process_samples(flat_samples, data, percentiles=[16, 50, 84], bands=['u', 'g', 'r', 'i', 'z'], broken_pl=False):
     """
     Generalized processing of MCMC samples for arbitrary parameters and bands.
 
@@ -601,6 +600,8 @@ def process_samples(flat_samples, data, percentiles=[16, 50, 84], bands=['u', 'g
     def sym_percentile(x, p=percentiles, axis=0):
         lower, median, upper = np.percentile(x, p, axis=axis)
         return median, 0.5 * (upper - lower)
+
+    log_pl = log_broken_pl if broken_pl else log_single_pl
 
     result = dict(object_id=data['object_id'], z=data['z'])
 
@@ -631,14 +632,14 @@ def process_samples(flat_samples, data, percentiles=[16, 50, 84], bands=['u', 'g
     log_sigma_band = []
     for band in bands:
         lam_eff = lambda_pivot[band] / (1 + data['z'])
-        val = log_sigma0 / np.log(10) + log_broken_pl(lam_eff, lam_s, eta_A1, eta_A2, eta_break)
+        val = log_sigma0 / np.log(10) + log_pl(lam_eff, lam_s, eta_A1, eta_A2, eta_break)
         log_sigma_band.append(val)
     log_sigma_band = np.array(log_sigma_band).T
 
     log_tau_band = []
     for band in bands:
         lam_eff = lambda_pivot[band] / (1 + data['z'])
-        val = log_tau_drw0 / np.log(10) - np.log10(1 + data['z']) + log_broken_pl(lam_eff, lam_s, eta_tau1, eta_tau2, eta_break)
+        val = log_tau_drw0 / np.log(10) - np.log10(1 + data['z']) + log_pl(lam_eff, lam_s, eta_tau1, eta_tau2, eta_break)
         log_tau_band.append(val)
     log_tau_band = np.array(log_tau_band).T
 
@@ -656,15 +657,15 @@ def process_samples(flat_samples, data, percentiles=[16, 50, 84], bands=['u', 'g
     log_dilution = jnp.log(dilution_factor)
 
     # log_sigma_UV_diluted
-    samples_log_sigma_UV_diluted = (flat_samples["log_sigma0"] - log_dilution) / np.log(10) + log_broken_pl(lambda_ref, lam_s, eta_A1, eta_A2, eta_break)
+    samples_log_sigma_UV_diluted = (flat_samples["log_sigma0"] - log_dilution) / np.log(10) + log_pl(lambda_ref, lam_s, eta_A1, eta_A2, eta_break)
     result['log_sigma_UV_diluted'], result['log_sigma_UV_diluted_err'] = sym_percentile(samples_log_sigma_UV_diluted)
 
     # log_sigma_UV
-    samples_log_sigma_UV = flat_samples["log_sigma0"] / np.log(10) + log_broken_pl(lambda_ref, lam_s, eta_A1, eta_A2, eta_break)
+    samples_log_sigma_UV = flat_samples["log_sigma0"] / np.log(10) + log_pl(lambda_ref, lam_s, eta_A1, eta_A2, eta_break)
     result['log_sigma_UV'], result['log_sigma_UV_err'] = sym_percentile(samples_log_sigma_UV)
 
     # log_tau_UV_RF
-    samples_log_tau_UV_RF = flat_samples["log_tau_drw0"] / np.log(10) - np.log10(1 + data['z']) + log_broken_pl(lambda_ref, lam_s, eta_tau1, eta_tau2, eta_break)
+    samples_log_tau_UV_RF = flat_samples["log_tau_drw0"] / np.log(10) - np.log10(1 + data['z']) + log_pl(lambda_ref, lam_s, eta_tau1, eta_tau2, eta_break)
     result['log_tau_UV_RF'], result['log_tau_UV_RF_err'] = sym_percentile(samples_log_tau_UV_RF)
 
     # Compute covariance between log_sigma_UV and log_tau_UV_RF

@@ -14,7 +14,7 @@ from astropy.timeseries import LombScargle
 prefix = os.environ.get('PREFIX', "test")
 suffix = os.environ.get('SUFFIX', "test")
 
-from multiband_fit_utils import log_broken_pl
+from multiband_fit_utils import log_broken_pl, log_single_pl
 
 import logging
 
@@ -376,7 +376,7 @@ def plot_posterior_fast(
 
 
 
-def plot_broken_power_law(samples, data):
+def plot_broken_power_law(samples, data, broken_pl):
     """
     Plot two stacked panels of the smooth broken power law using posterior medians.
       Top:    (eta_A1, eta_A2)
@@ -390,7 +390,7 @@ def plot_broken_power_law(samples, data):
         eta_A1, eta_A2, eta_tau1, eta_tau2, eta_break, lam_s
     data : unused (placeholder for future use)
     """
-
+    log_pl = log_broken_pl if broken_pl else log_single_pl
     # --- posterior medians ---
     pm = {k: np.median(np.asarray(samples[k])) for k in
           ["eta_A1","eta_A2","eta_tau1","eta_tau2","eta_break","lam_s"]}
@@ -401,8 +401,8 @@ def plot_broken_power_law(samples, data):
     # --- wavelength grid ---
     xlog = np.linspace(2.9, 3.9, 600)
     lam = 10.0**xlog
-    y_amp = log_broken_pl(lam, lam_s, eta_A1, eta_A2, eta_break)
-    y_tau = log_broken_pl(lam, lam_s, eta_tau1, eta_tau2, eta_break)
+    y_amp = log_pl(lam, lam_s, eta_A1, eta_A2, eta_break)
+    y_tau = log_pl(lam, lam_s, eta_tau1, eta_tau2, eta_break)
 
     fig, (ax1, ax2) = plt.subplots(
         2, 1, figsize=(8, 4*2), sharex=True, constrained_layout=True
