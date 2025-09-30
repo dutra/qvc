@@ -50,7 +50,7 @@ import jax.numpy as jnp
 from tinygp.kernels import quasisep as qs
 from tinygp.helpers import JAXArray
 
-class ContiBLRQS_Mag(qs.Wrapper):
+class ContiBLR_QS(qs.Wrapper):
     """
     PSD-safe multiband OU/DRW kernel in magnitudes.
 
@@ -126,19 +126,92 @@ class ContiBLRQS_Mag(qs.Wrapper):
 
         return h_cont + h_blr
 
-    # Optional PSD helper (non-negative by construction)
-    def psd(self, omega: JAXArray, b: int, sigma_n2: float = 0.0) -> JAXArray:
-        A  = self.design_matrix()
-        P  = self.stationary_covariance()
-        Qc = -(A @ P + P @ A.T)
-        I  = jnp.eye(A.shape[0], dtype=A.dtype)
-        h  = self.observation_model((jnp.array(0.0), jnp.array(int(b))))
+class BWB_QS(qs.Wrapper):
+    """
+    BWB-only QS kernel: OU with exponent exp_bwb, no lag, with per-band width.
 
-        def one_w(w):
-            v = jnp.linalg.solve((-1j * w) * I - A.T, h)
-            return (v.conj().T @ (Qc @ v)).real + sigma_n2
+      Cov_{b1,b2}(τ) =
+        sigma_bwb[b1] * sigma_bwb[b2] * exp(-|τ| / (tau_drw / exp_bwb)),
+      then each band's observation is top-hat smoothed by width_bwb[b].
 
-        return 2.0 * jax.vmap(one_w)(omega)
+    Parameters
+    ----------
+    sigma_bwb : array_like [B]
+        Per-band amplitude for the BWB latent.
+    width_bwb : array_like [B]
+        Per-band top-hat width (same time units as t). Must be >= 0.
+    tau_drw : float
+        Base OU timescale; BWB latent uses tau_bwb = tau_drw / exp_bwb.
+    exp_bwb : float, default 2.0
+        Exponent for the BWB term: k_bwb(τ) = k_ou(τ) ** exp_bwb.
+    s : array_like [B] or None, default None
+        Optional per-band time scaling applied to *width only* (no lag here).
+        If None, uses ones.
+    """
+
+    sigma_bwb: jnp.ndarray
+    width_bwb: jnp.ndarray
+    exp_bwb:   float
+    s:         jnp.ndarray
+    kernel:    qs.Kernel  # OU with scale = tau_drw / exp_bwb
+
+    def __init__(self, sigma_bwb, width_bwb, tau_drw, exp_bwb: float = 2.0, s=None):
+        eps = 1e-12
+        tau0 = jnp.maximum(jnp.asarray(tau_drw), eps)
+        exp  = jnp.maximum(jnp.asarray(exp_bwb, dtype=tau0.dtype), eps)
+
+        self.sigma_bwb = jnp.asarray(sigma_bwb)
+        self.width_bwb = jnp.maximum(jnp.asarray(width_bwb), 0.0)
+        self.exp_bwb   = exp
+
+        if s is None:
+            self.s = jnp.ones_like(self.sigma_bwb, dtype=tau0.dtype)
+        else:
+            self.s = jnp.maximum(jnp.asarray(s, dtype=tau0.dtype), eps)
+
+        # OU kernel realizing k(τ)**exp_bwb
+        self.kernel = qs.Exp(scale=tau0 / exp, sigma=1.0)
+
+    # Sorting axis: shared time + tiny band tiebreaker
+    def coord_to_sortable(self, X):
+        t, b = X
+        return t + 1e-9 * jnp.asarray(b, jnp.int32)
+
+    # Stable top-hat gain for OU smoothing over width 'w' (no lag)
+    @staticmethod
+    def _gain_top_hat(width_u, tau):
+        tau   = jnp.maximum(tau, 1e-12)
+        x     = width_u / tau
+        small = 1.0 - 0.5*x + (x*x)/6.0           # series for x<<1
+        full  = -jnp.expm1(-x) / jnp.maximum(x, 1e-12)
+        return jnp.where(x < 1e-8, small, full)
+
+    def observation_model(self, X):
+        _, b = X
+        b    = jnp.asarray(b, dtype=jnp.int32)
+        h0   = self.kernel.observation_model(jnp.array(0.0))  # (1,)
+        w_u  = self.s[b] * self.width_bwb[b]                   # scaled width
+        G    = self._gain_top_hat(w_u, self.kernel.scale)      # scalar
+        return self.sigma_bwb * (h0 * G)                    # (1,)
+
+def qs_psd(kernel, omega, b: int, sigma_n2: float = 0.0):
+    """
+    One-sided PSD for any tinygp.quasisep kernel (including qs.Sum).
+    Assumes your kernel's observation_model accepts X=(t, band).
+    """
+    A  = kernel.design_matrix()
+    P  = kernel.stationary_covariance()
+    Qc = -(A @ P + P @ A.T)
+    I  = jnp.eye(A.shape[0], dtype=A.dtype)
+
+    # observation vector for band b at t=0 (no loss of generality for stationary kernels)
+    h  = kernel.observation_model((jnp.array(0.0), jnp.array(int(b))))
+
+    def one_w(w):
+        v = jnp.linalg.solve((-1j * w) * I - A.T, h)
+        return (v.conj().T @ (Qc @ v)).real + sigma_n2
+
+    return 2.0 * jax.vmap(one_w)(omega)
 
 
 # Override MultiVarModel
@@ -201,7 +274,7 @@ class MyMultiVarModel_SMAG(MultiVarModel):
 
         lag_disk = params["lag0"] * (self.lam_rf / 2500.0) ** params["lag_beta"]
 
-        kernel = ContiBLRQS_Mag(
+        kernel_contBLR = ContiBLR_QS(
             amp_cont=jnp.exp(log_sigma_band),
             amp_blr=jnp.exp(log_sigma_band_blr),
             tau_drw=jnp.exp(log_tau_center),
@@ -213,6 +286,16 @@ class MyMultiVarModel_SMAG(MultiVarModel):
             width_blr=params["width_blr"],
             s=s
         )
+
+        kernel_bwb = BWB_QS(
+            sigma_bwb=params["bwb_alpha"],
+            width_bwb=params["width_cont"],
+            tau_drw=jnp.exp(log_tau_center),
+            exp_bwb=params["bwb_beta"],
+            s=s
+        )
+
+        kernel = kernel_contBLR + kernel_bwb
 
         u = kernel.coord_to_sortable((t, band))
         order = jnp.argsort(u)
@@ -327,7 +410,7 @@ class MyMultiVarModel_SMAG(MultiVarModel):
             Real non-negative power spectral density.
         """
         gp, _ = self._build_gp(params)
-        return gp.kernel.psd(omega, b, sigma_n2)
+        return qs_psd(kernel=gp.kernel, omega=omega, b=b, sigma_n2=sigma_n2)
 
 def sample_drw_tinygp(key, t, tau, sigma, noise=0.0, mean=0.0):
     """
