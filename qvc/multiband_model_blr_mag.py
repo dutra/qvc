@@ -35,91 +35,122 @@ import tinygp
 from tinygp.kernels import quasisep as qs
 
 
+import jax
+import jax.numpy as jnp
+from tinygp.kernels import quasisep as qs
+from tinygp.helpers import JAXArray
+
 class ContiBLRQS_Mag(qs.Wrapper):
-    amp_cont: jnp.ndarray
-    amp_blr:  jnp.ndarray
-    lag_blr:  jnp.ndarray
-    lag_disk: jnp.ndarray
-    width_cont: jnp.ndarray
-    width_blr:  jnp.ndarray
-    s: jnp.ndarray           # per-band stretch (positive)
-    kernel: qs.Kernel        # qs.Exp(scale=tau_drw, sigma=1.0)
+    """
+    Multiband OU/DRW kernel in *magnitudes* with band-dependent correlation
+    timescales τ_b = tau0 / s[b], per-band continuum/BLR gains, lags, and
+    rectangular smoothing. Designed to keep bands coherent.
+
+    - No global time warp for sorting (shared clock).
+    - Band dependence enters via *dt* scaling:
+        within-band: dt <- s[b] * dt         (τ_b effect)
+        cross-band:  dt <- sqrt(s[b1]*s[b2]) * (t2 - t1)
+    """
+
+    amp_cont:  jnp.ndarray
+    amp_blr:   jnp.ndarray
+    lag_blr:   jnp.ndarray
+    lag_disk:  jnp.ndarray
+    width_cont:jnp.ndarray
+    width_blr: jnp.ndarray
+    s:         jnp.ndarray        # >0, encodes τ_b = tau0 / s[b]
+    kernel:    qs.Kernel          # base OU with scale=tau0, sigma=1
 
     def __init__(self, amp_cont, amp_blr, lag_blr, lag_disk,
                  width_cont, width_blr, s, tau_drw):
+        # Safety floors
         eps = 1e-12
+
         self.amp_cont   = jnp.asarray(amp_cont)
         self.amp_blr    = jnp.asarray(amp_blr)
         self.lag_blr    = jnp.asarray(lag_blr)
         self.lag_disk   = jnp.asarray(lag_disk)
+
+        # Clamp widths to >= 0
         self.width_cont = jnp.maximum(jnp.asarray(width_cont), 0.0)
         self.width_blr  = jnp.maximum(jnp.asarray(width_blr),  0.0)
-        self.s          = jnp.maximum(jnp.asarray(s), eps)
-        self.kernel     = qs.Exp(scale=jnp.maximum(jnp.asarray(tau_drw), eps), sigma=1.0)
 
+        # Positive stretch factors (encode band τ)
+        self.s          = jnp.maximum(jnp.asarray(s), eps)
+
+        # One latent OU with "center" τ = tau_drw; unit variance
+        self.kernel     = qs.Exp(scale=jnp.maximum(jnp.asarray(tau_drw), eps),
+                                 sigma=1.0)
+
+    # ---------- Sorting on a shared clock ----------
     def coord_to_sortable(self, X):
         t, b = X
-        b = jnp.asarray(b, dtype=jnp.int32)
-        u = self.s[b] * t  # main axis
-        return u 
+        # shared clock; tiny tie-break on band to avoid equal keys
+        return t + 1e-9 * (jnp.asarray(b, jnp.int32))
 
-    def _gain_top_hat_u(self, width_u, tau):
-        tau = jnp.maximum(tau, 1e-12)
-        x = width_u / tau
-        return jnp.where(x < 1e-8, 1.0 - 0.5*x + x*x/6.0, -jnp.expm1(-x) / jnp.maximum(x, 1e-12))
+    # ---------- Stable top-hat gain in u (scaled) units ----------
+    @staticmethod
+    def _gain_top_hat_u(width_u, tau0):
+        tau0 = jnp.maximum(tau0, 1e-12)
+        x = width_u / tau0
+        small = 1.0 - 0.5 * x + (x * x) / 6.0
+        full  = -jnp.expm1(-x) / jnp.maximum(x, 1e-12)
+        return jnp.where(x < 1e-8, small, full)
 
-    def _conv_obs(self, lag_t, width_t, s_b):
-        # convert to u-axis
+    # ---------- Within-band convolution/lag (uses band s[b]) ----------
+    def _conv_obs_band(self, lag_t, width_t, s_b):
+        # Map to the latent's "u" units so τ_b = tau0 / s_b
         lag_u   = s_b * lag_t
         width_u = s_b * width_t
-        h0  = self.kernel.observation_model(jnp.array(0.0))           # (1,)
-        Phi = self.kernel.transition_matrix(0.0, lag_u)                # (1,1)
-        G   = self._gain_top_hat_u(width_u, self.kernel.scale)         # scalar
-        return (h0 @ Phi) * G                                          # (1,)
 
+        h0  = self.kernel.observation_model(jnp.array(0.0))       # (1,)
+        Phi = self.kernel.transition_matrix(0.0, lag_u)           # (1,1)
+        G   = self._gain_top_hat_u(width_u, self.kernel.scale)    # scalar in [0,1]
+        return (h0 @ Phi) * G                                     # (1,)
+
+    # ---------- Band-specific observation vector ----------
     def observation_model(self, X):
         _, b = X
         b = jnp.asarray(b, dtype=jnp.int32)
-        h_cont = self.amp_cont[b] * self._conv_obs(self.lag_disk[b],
-                                                   self.width_cont[b], self.s[b])
-        h_blr  = self.amp_blr[b]  * self._conv_obs(self.lag_disk[b] + self.lag_blr[b],
-                                                   self.width_blr[b],  self.s[b])
-        return h_cont + h_blr  
 
+        h_cont = self.amp_cont[b] * self._conv_obs_band(
+            self.lag_disk[b], self.width_cont[b], self.s[b]
+        )
+        h_blr  = self.amp_blr[b] * self._conv_obs_band(
+            self.lag_disk[b] + self.lag_blr[b], self.width_blr[b], self.s[b]
+        )
+        return h_cont + h_blr
+
+    # ---------- Cross-/within-band state propagation with symmetric stretch ----------
+    def transition_matrix(self, X1, X2):
+        """
+        Coherent clock between any two observations:
+          dt_eff = sqrt(s[b1] * s[b2]) * (t2 - t1)
+        This yields τ_b effects while avoiding cross-band dephasing.
+        """
+        t1, b1 = X1
+        t2, b2 = X2
+        b1 = jnp.asarray(b1, dtype=jnp.int32)
+        b2 = jnp.asarray(b2, dtype=jnp.int32)
+
+        s_eff = jnp.sqrt(self.s[b1] * self.s[b2])
+        dt    = s_eff * (t2 - t1)
+        return self.kernel.transition_matrix(0.0, dt)
+
+    # ---------- Optional PSD helper (guaranteed ≥ 0) ----------
     def psd(self, omega: JAXArray, b: int, sigma_n2: float = 0.0) -> JAXArray:
-        """
-        Auto-PSD S_y^{(b)}(ω) via general state-space formula.
-
-        Parameters
-        ----------
-        omega : array
-            Angular frequencies [rad / time units].
-        b : int
-            Band index.
-        sigma_n2 : float, optional
-            White-noise level to add (default 0.0).
-
-        Returns
-        -------
-        PSD : array, shape = omega.shape
-            Real non-negative power spectral density.
-        """
-        # System matrices
-        A = self.design_matrix()
-        P = self.stationary_covariance()
+        A  = self.design_matrix()
+        P  = self.stationary_covariance()
         Qc = -(A @ P + P @ A.T)
-
-        # Observation vector for band b (evaluate at t=0)
-        h = self.observation_model((jnp.array(0.0), jnp.array(int(b))))
-
-        I = jnp.eye(A.shape[0], dtype=A.dtype)
+        I  = jnp.eye(A.shape[0], dtype=A.dtype)
+        h  = self.observation_model((jnp.array(0.0), jnp.array(int(b))))
 
         def one_w(w):
-            # v = ((-iωI - A^T)^(-1)) h
             v = jnp.linalg.solve((-1j * w) * I - A.T, h)
             return (v.conj().T @ (Qc @ v)).real + sigma_n2
 
         return 2.0 * jax.vmap(one_w)(omega)
+
 
 
 # Override MultiVarModel
