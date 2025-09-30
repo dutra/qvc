@@ -88,7 +88,7 @@ universal_params = (
 def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_fake_in, log_sigma_fake_in, 
                 bwb=True, disable_poly1=False, d_eta=True, disable_lag_blr=False, free_eta_break=False,
                 couple_sigma_tau=False, sigma_tau_uniform=False, inject_fake=False, 
-                broken_pl=False,
+                broken_pl=False, sigma_tau_plane_cut=True,
                 lmc_q_groups=None, sample_lmc_hypers=False, eta_tau_normal=False):
     # Precompute and capture constants in the closure so they are treated as
     # static by JAX/NumPyro. This prevents unnecessary retracing/recompilation
@@ -201,8 +201,9 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_
                 log_sigma_hat0 = numpyro.deterministic("log_sigma_hat0", log_sigma0 - 0.5 * log_tau_drw0)
 
             # Emperical prior for bad light curves
-            tau_drw0_RF = jnp.exp(log_tau_drw0) / (1 + zs)
-            numpyro.factor("hard", jnp.where(tau_drw0_RF > 2*log_sigma0 + 2.5*jnp.log(10), 0.0, -1e9))
+            if sigma_tau_plane_cut:
+                tau_drw0_RF = jnp.exp(log_tau_drw0) / (1 + zs)
+                numpyro.factor("hard", jnp.where(tau_drw0_RF > 2*log_sigma0 + 2.5*jnp.log(10), 0.0, -1e9))
 
             # Host galaxy dilution
             alpha_host = numpyro.sample("alpha_host", dist.Normal(1.0, 0.1)) # alpha_lam
@@ -607,6 +608,7 @@ if __name__ == '__main__':
     parser.add_argument("--fhost_csv", type=str, default=None, help="Path to CSV file containing fhost values per object.")
     parser.add_argument("--disable_fhost", action="store_true", default=False, help="Disable fhost values, set all to 0.")
     parser.add_argument("--broken_pl", action="store_true", default=False, help="Use broken power law for eta instead of single power law.")
+    parser.add_argument("--disable_sigma_tau_plane_cut", action="store_true", default=False, help="Disable sigma-tau plane cut.")
 
     args = parser.parse_args()
     print("Args: ", args)
@@ -769,7 +771,7 @@ if __name__ == '__main__':
                                       couple_sigma_tau=args.couple_sigma_tau, sigma_tau_uniform=args.sigma_tau_uniform,
                                       inject_fake=args.inject_fake, lmc_q_groups=args.lmc, sample_lmc_hypers=args.sample_lmc_hypers,
                                       eta_tau_normal=args.eta_tau_normal,
-                                      broken_pl=args.broken_pl)
+                                      broken_pl=args.broken_pl, sigma_tau_plane_cut=(not args.disable_sigma_tau_plane_cut))
 
     nuts_kernel = NUTS(numpyro_joint_model, init_strategy=init_strategy, dense_mass=True, 
                        max_tree_depth=args.max_tree_depth,
