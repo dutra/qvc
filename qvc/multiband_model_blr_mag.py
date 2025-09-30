@@ -34,98 +34,57 @@ from typing import Sequence
 import tinygp
 from tinygp.kernels import quasisep as qs
 
+
 class ContiBLRQS_Mag(qs.Wrapper):
-    # keep your familiar names
-    tau_drw: float
-    width_cont: jnp.ndarray
-    width_blr: jnp.ndarray
-    amp_cont: jnp.ndarray     # <- now equals A_b (mag gain)
-    amp_blr: jnp.ndarray      # <- now equals B_b (mag gain)
-    lag_blr: jnp.ndarray
+    amp_cont: jnp.ndarray
+    amp_blr:  jnp.ndarray
+    lag_blr:  jnp.ndarray
     lag_disk: jnp.ndarray
-    bwb_alpha: jnp.ndarray
-    bwb_beta: jnp.ndarray
-    s: jnp.ndarray
-    kernel: qs.Kernel
-    kernel2: qs.Kernel
+    width_cont: jnp.ndarray
+    width_blr:  jnp.ndarray
+    s: jnp.ndarray           # per-band stretch (positive)
+    kernel: qs.Kernel        # qs.Exp(scale=tau_drw, sigma=1.0)
 
-    def __init__(self, amp_cont, amp_blr, lag_blr, lag_disk, tau_drw,
-                 bwb_alpha, bwb_beta, width_cont, width_blr, s):
-        self.amp_cont = amp_cont   # interpret as A_b (mag)
-        self.amp_blr  = amp_blr    # interpret as B_b (mag)
-        self.lag_blr  = lag_blr
-        self.lag_disk = lag_disk
-        self.tau_drw  = tau_drw
-        self.bwb_alpha = bwb_alpha
-        self.bwb_beta  = bwb_beta
-        self.width_cont = width_cont
-        self.width_blr  = width_blr
-        self.s = s
-
-        # OU in magnitudes for c(t); "squared" OU is exact OU with tau/2
-        self.kernel  = qs.Exp(scale=self.tau_drw,     sigma=1.0)
-        self.kernel2 = qs.Exp(scale=self.tau_drw / self.bwb_beta, sigma=1.0)
+    def __init__(self, amp_cont, amp_blr, lag_blr, lag_disk,
+                 width_cont, width_blr, s, tau_drw):
+        eps = 1e-12
+        self.amp_cont   = jnp.asarray(amp_cont)
+        self.amp_blr    = jnp.asarray(amp_blr)
+        self.lag_blr    = jnp.asarray(lag_blr)
+        self.lag_disk   = jnp.asarray(lag_disk)
+        self.width_cont = jnp.maximum(jnp.asarray(width_cont), 0.0)
+        self.width_blr  = jnp.maximum(jnp.asarray(width_blr),  0.0)
+        self.s          = jnp.maximum(jnp.asarray(s), eps)
+        self.kernel     = qs.Exp(scale=jnp.maximum(jnp.asarray(tau_drw), eps), sigma=1.0)
 
     def coord_to_sortable(self, X):
         t, b = X
-        return t + jnp.asarray(b, t.dtype) * (10.0 * jnp.finfo(t.dtype).eps)
+        b = jnp.asarray(b, dtype=jnp.int32)
+        u = self.s[b] * t  # main axis
+        return u 
 
-    def _gain_top_hat(self, width, tau):
-        x = width / jnp.maximum(tau, 1e-12)
-        return jnp.where(x < 1e-8, 1.0 - 0.5*x + x**2/6.0,
-                         -jnp.expm1(-x) / jnp.maximum(x, 1e-12))
+    def _gain_top_hat_u(self, width_u, tau):
+        tau = jnp.maximum(tau, 1e-12)
+        x = width_u / tau
+        return jnp.where(x < 1e-8, 1.0 - 0.5*x + x*x/6.0, -jnp.expm1(-x) / jnp.maximum(x, 1e-12))
 
-    def _obs0(self):
-        return self.kernel.observation_model(jnp.array(0.0))
-
-    def _conv_obs(self, lag, width, s):
-        h0  = self._obs0()
-        Phi = self.kernel.transition_matrix(0.0, s * lag)
-        G   = self._gain_top_hat(width, self.tau_drw)
-        return (h0 @ Phi) * G
-
-    # block matrices (same pattern as before)
-    def design_matrix(self):
-        A0, A1 = self.kernel.design_matrix(), self.kernel2.design_matrix()
-        z0 = jnp.zeros((A0.shape[0], A1.shape[1]))
-        z1 = jnp.zeros((A1.shape[0], A0.shape[1]))
-        return jnp.block([[A0, z0],[z1, A1]])
-
-    def stationary_covariance(self):
-        P0, P1 = self.kernel.stationary_covariance(), self.kernel2.stationary_covariance()
-        z01 = jnp.zeros((P0.shape[0], P1.shape[1]))
-        z10 = jnp.zeros((P1.shape[0], P0.shape[1]))
-        return jnp.block([[P0, z01],[z10, P1]])
-
-    def transition_matrix(self, X1, X2):
-        t1, b1 = X1
-        t2, b2 = X2
-        s_eff = 0.5 * (self.s[b1] + self.s[b2]) 
-        dt = s_eff * (t2 - t1)
-        Phi0 = self.kernel.transition_matrix(0.0, dt)
-        Phi1 = self.kernel2.transition_matrix(0.0, dt)
-        z01 = jnp.zeros((Phi0.shape[0], Phi1.shape[1]))
-        z10 = jnp.zeros((Phi1.shape[0], Phi0.shape[1]))
-        return jnp.block([[Phi0, z01],[z10, Phi1]])
+    def _conv_obs(self, lag_t, width_t, s_b):
+        # convert to u-axis
+        lag_u   = s_b * lag_t
+        width_u = s_b * width_t
+        h0  = self.kernel.observation_model(jnp.array(0.0))           # (1,)
+        Phi = self.kernel.transition_matrix(0.0, lag_u)                # (1,1)
+        G   = self._gain_top_hat_u(width_u, self.kernel.scale)         # scalar
+        return (h0 @ Phi) * G                                          # (1,)
 
     def observation_model(self, X):
         _, b = X
-        b = jnp.asarray(b, dtype=int)
-
-        # both arms apply to the SAME latent magnitude process c(t)
+        b = jnp.asarray(b, dtype=jnp.int32)
         h_cont = self.amp_cont[b] * self._conv_obs(self.lag_disk[b],
                                                    self.width_cont[b], self.s[b])
         h_blr  = self.amp_blr[b]  * self._conv_obs(self.lag_disk[b] + self.lag_blr[b],
                                                    self.width_blr[b],  self.s[b])
-
-        h_base = h_cont + h_blr
-
-        # BWB phenomenology (squared OU -> OU with tau/2)
-        h_sq  = self.kernel2.observation_model(jnp.array(0.0))
-        q_b   = self.bwb_alpha * (self.amp_cont[b] ** 2) # TODO: self.bwb_alpha[b]?
-        h_bwb = jnp.sqrt(2.0) * q_b * h_sq
-
-        return jnp.concatenate([h_base, h_bwb], axis=0)
+        return h_cont + h_blr  
 
     def psd(self, omega: JAXArray, b: int, sigma_n2: float = 0.0) -> JAXArray:
         """
@@ -161,112 +120,6 @@ class ContiBLRQS_Mag(qs.Wrapper):
             return (v.conj().T @ (Qc @ v)).real + sigma_n2
 
         return 2.0 * jax.vmap(one_w)(omega)
-
-
-class ContiBLR_Mag(tinygp.kernels.Kernel):
-    # keep your familiar names / field layout
-    tau_drw: float
-    width_cont: jnp.ndarray
-    width_blr: jnp.ndarray
-    amp_cont: jnp.ndarray
-    amp_blr: jnp.ndarray
-    lag_blr: jnp.ndarray
-    lag_disk: jnp.ndarray
-    bwb_alpha: jnp.ndarray
-    bwb_beta: jnp.ndarray
-    s: jnp.ndarray
-
-    def __init__(self, amp_cont, amp_blr, lag_blr, lag_disk, tau_drw,
-                 bwb_alpha, bwb_beta, width_cont, width_blr, s):
-        self.amp_cont   = jnp.asarray(amp_cont)
-        self.amp_blr    = jnp.asarray(amp_blr)
-        self.lag_blr    = jnp.asarray(lag_blr)
-        self.lag_disk   = jnp.asarray(lag_disk)
-        self.tau_drw    = tau_drw
-        self.bwb_alpha  = jnp.asarray(bwb_alpha)
-        self.bwb_beta   = jnp.asarray(bwb_beta)
-        self.width_cont = jnp.asarray(width_cont)
-        self.width_blr  = jnp.asarray(width_blr)
-        self.s          = jnp.asarray(s)
-
-    # --- helpers -------------------------------------------------------------
-    @staticmethod
-    def _abs(x):
-        return jnp.abs(x)
-
-    def _k_ou(self, tau):
-        """OU kernel with unit variance and timescale tau_drw (magnitudes)."""
-        return jnp.exp(-self._abs(tau) / self.tau_drw)
-
-    def _k_ou_half(self, tau):
-        """Squared-OU ≡ OU with half-timescale."""
-        return jnp.exp(-self._abs(tau) / self.tau_drw / self.bwb_beta)
-
-    def _gain_top_hat(self, width):
-        """
-        Mean filter gain for convolving an OU by a (causal) top-hat of width 'width'.
-        Matches your QS helper:
-            x = w/tau, G = (1 - e^{-x}) / x, with numerics for small x.
-        """
-        x = width / jnp.maximum(self.tau_drw, 1e-12)
-        # series-safe form
-        return jnp.where(x < 1e-8, 1.0 - 0.5 * x + x**2 / 6.0,
-                         -jnp.expm1(-x) / jnp.maximum(x, 1e-12))
-
-    # --- TinyGP API ----------------------------------------------------------
-    def evaluate(self, X1, X2):
-        """
-        X = (t, b) with t scalar (or same-shaped) and b integer band index.
-        Returns cov[y_b1(t1), y_b2(t2)] in magnitudes.
-        """
-        t1, b1 = X1
-        t2, b2 = X2
-
-        # Ensure integer indices
-        b1 = jnp.asarray(b1, dtype=jnp.int32)
-        b2 = jnp.asarray(b2, dtype=jnp.int32)
-
-        # Symmetric time-dilation to keep covariance symmetric/PD
-        s_eff = 0.5 * (self.s[b1] + self.s[b2])
-        tau = s_eff * (t2 - t1)  # effective time separation
-
-        # Per-arm lags (apply the band's own dilation, matching your QS construction)
-        Lc1 = self.s[b1] * self.lag_disk[b1]
-        Lc2 = self.s[b2] * self.lag_disk[b2]
-        Lb1 = self.s[b1] * (self.lag_disk[b1] + self.lag_blr[b1])
-        Lb2 = self.s[b2] * (self.lag_disk[b2] + self.lag_blr[b2])
-
-        # Top-hat gains for each arm (both arms use smoothing in your QS code)
-        Gc1 = self._gain_top_hat(self.width_cont[b1])
-        Gc2 = self._gain_top_hat(self.width_cont[b2])
-        Gb1 = self._gain_top_hat(self.width_blr[b1])
-        Gb2 = self._gain_top_hat(self.width_blr[b2])
-
-        # Per-arm magnitude gains
-        A1 = self.amp_cont[b1]
-        A2 = self.amp_cont[b2]
-        B1 = self.amp_blr[b1]
-        B2 = self.amp_blr[b2]
-
-        # Base terms: continuum/BLR arms with lags + smoothing (multiplicative gain)
-        # cc: c_b1 @ (t - Lc1)  vs  c_b2 @ (t - Lc2)
-        cc = (A1 * Gc1) * (A2 * Gc2) * self._k_ou(tau - (Lc2 - Lc1))
-        # cb: cont arm (b1) vs BLR arm (b2)
-        cb = (A1 * Gc1) * (B2 * Gb2) * self._k_ou(tau - (Lb2 - Lc1))
-        # bc: BLR arm (b1) vs cont arm (b2)
-        bc = (B1 * Gb1) * (A2 * Gc2) * self._k_ou(tau - (Lc2 - Lb1))
-        # bb: BLR arm (b1) vs BLR arm (b2)
-        bb = (B1 * Gb1) * (B2 * Gb2) * self._k_ou(tau - (Lb2 - Lb1))
-
-        base = cc + cb + bc + bb
-
-        # BWB term: 2 q_b1 q_b2 [k(τ)]^2  with  q_b = bwb_alpha * (A_b)^2
-        # (Same phenomenology as your QS version; bwb_beta left for future use)
-        q1 = self.bwb_alpha * (A1 ** 2)
-        q2 = self.bwb_alpha * (A2 ** 2)
-        bwb = 2.0 * q1 * q2 * self._k_ou_half(tau)
-
-        return base + bwb
 
 
 # Override MultiVarModel
@@ -310,14 +163,9 @@ class MyMultiVarModel_SMAG(MultiVarModel):
     def _build_gp(self, params):
         log_sigma_band      = self.my_amp_transform(params)
         log_sigma_band_blr  = self.my_amp_transform_blr(params)
-        log_tau_band, s     = self.my_tau_drw_transform(params)
+        log_tau_center, s     = self.my_tau_drw_transform(params)
 
-        # DO NOT sort or reindex
         t, band = self.X
-        
-        #s = ContiBLRQS.coord_to_sortable(self, (t, band))  # or kernel.coord_to_sortable((t, band))
-        #jax.debug.print("sorted_by_kernel? {}", jnp.all(jnp.diff(s) >= 0))
-
         t_center = jnp.mean(t)
         t_std    = jnp.std(t)
 
@@ -335,18 +183,23 @@ class MyMultiVarModel_SMAG(MultiVarModel):
         kernel = ContiBLRQS_Mag(
             amp_cont=jnp.exp(log_sigma_band),
             amp_blr=jnp.exp(log_sigma_band_blr),
-            tau_drw=jnp.exp(log_tau_band),
+            tau_drw=jnp.exp(log_tau_center),
             lag_disk=lag_disk, 
             lag_blr=jnp.exp(params["log_lag_blr"]),
-            bwb_alpha=params["bwb_alpha"],
-            bwb_beta=params["bwb_beta"],
+            #bwb_alpha=params["bwb_alpha"],
+            #bwb_beta=params["bwb_beta"],
             width_cont=params["width_cont"],
             width_blr=params["width_blr"],
             s=s
         )
 
+        u = kernel.coord_to_sortable((t, band))
+        order = jnp.argsort(u)
+        t, band = t[order], band[order]
+        diags = diags[order]
+
         gp = GaussianProcess(kernel, (t, band), diag=diags + 1e-6, mean=means)
-        return gp, jnp.arange(t.shape[0])
+        return gp, order
 
     def my_lag_transform(
         self, X: JAXArray, has_lag: bool, params: dict[str, JAXArray]
@@ -356,15 +209,6 @@ class MyMultiVarModel_SMAG(MultiVarModel):
 
     def my_amp_transform_blr(self, params: dict[str, JAXArray]) -> JAXArray:
         return params["log_sigma0"] + jnp.atleast_1d(params["log_amp_delta_blr"])
-    
-    # def my_tau_drw_transform(self, params: dict[str, JAXArray]) -> JAXArray:
-    #      eta_tau1 = params["eta_tau1"]
-    #      eta_tau2 = params["eta_tau2"]
-    #      lam_s = params["lam_s"]
-    #      eta_break = params["eta_break"]
-    #      lam_rf_mean = jnp.mean(self.lam_rf)
-    #      log_tau_band_mean = params["log_tau_drw0"] + jnp.log(10) * log_broken_pl(lam_rf_mean, lam_s, eta_tau1, eta_tau2, eta_break)
-    #      return log_tau_band_mean
 
     def my_tau_drw_transform(self, params: dict[str, JAXArray]) -> JAXArray:
         eta_tau1 = params["eta_tau1"]
@@ -398,16 +242,9 @@ class MyMultiVarModel_SMAG(MultiVarModel):
     
     @eqx.filter_jit
     def log_prob(self, params: dict[str, JAXArray]) -> JAXArray:
-        """Calculate the log probability of the input parameters.
-
-        Args:
-            params (dict[str, JAXArray]): Model parameters.
-
-        Returns:
-            JAXArray: Log probability of the input parameters.
-        """
-        gp, _ = self._build_gp(params)
-        return gp.log_probability(y=self.y)
+        gp, order = self._build_gp(params)
+        y_sorted = self.y[order]
+        return gp.log_probability(y=y_sorted)
 
     @eqx.filter_jit
     def pred(
@@ -426,29 +263,21 @@ class MyMultiVarModel_SMAG(MultiVarModel):
         """
         # 1) Build GP; _build_gp should return the training sort order it used.
         gp, order = self._build_gp(params)
-        y_sorted = self.y[order]
+        y_test = self.y[order]
 
         # 2) Sort test inputs by tie-broken key (time + tiny band offset)
         t_test, b_test = X
         b_test = jnp.asarray(b_test, dtype=jnp.int32)
 
-        tie_eps  = 10.0 * jnp.finfo(t_test.dtype).eps
-        key_test = t_test + b_test.astype(t_test.dtype) * tie_eps
-        otest    = jnp.argsort(key_test)
-
-        t_pred = t_test[otest]
-        b_pred = b_test[otest]
-
         # 3) Condition on sorted test inputs; add tiny jitter for numerical PD
-        _, cond = gp.condition(y_sorted, (t_pred, b_pred), diag=1e-10)
+        _, cond = gp.condition(y_test, (t_test, b_test), diag=1e-10)
 
-        # 4) Map predictions back to the original test order
-        inv = jnp.empty_like(otest)
-        inv = inv.at[otest].set(jnp.arange(otest.shape[0]))
-
-        mean = cond.loc[inv]
-        var  = cond.variance[inv]
-        std  = jnp.sqrt(jnp.clip(var, 0.0, jnp.inf))
+        mean = cond.loc
+        var  = cond.variance
+        jax.debug.print(" var: {}", var)
+        jax.debug.print("var min/max: {}/{}", jnp.min(var), jnp.max(var))
+        jax.debug.print("mean min/max: {}/{}", jnp.min(mean), jnp.max(mean))
+        std  = jnp.sqrt(var)    
         return mean, std
 
     def psd(

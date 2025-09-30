@@ -186,6 +186,10 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_
                     log_sigma0 = numpyro.sample("log_sigma0", dist.Normal(-0.6*jnp.log(10), 1.0*jnp.log(10)))
                 log_sigma_hat0 = numpyro.deterministic("log_sigma_hat0", log_sigma0 - 0.5 * log_tau_drw0)
 
+            # Emperical prior for bad light curves
+            tau_drw0_RF = jnp.exp(log_tau_drw0) / (1 + zs)
+            numpyro.factor("hard", jnp.where(tau_drw0_RF > 2*log_sigma0 + 2.5*jnp.log(10), 0.0, -1e9))
+
             # Host galaxy dilution
             alpha_host = numpyro.sample("alpha_host", dist.Normal(1.0, 0.1)) # alpha_lam
             alpha_agn = numpyro.sample("alpha_agn", dist.Normal(-1.5, 0.3)) # alpha_lam
@@ -304,6 +308,7 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_
                 lam_rf=lam_rfs[i], z=zs[i], q_groups=lmc_q_groups,
                 use_bwb=bwb
             )
+            
             return m.log_prob(params)
 
         log_probs = jax.vmap(run_batch, in_axes=(0, 0))(batch_data, jnp.arange(batch_size))
