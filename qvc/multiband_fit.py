@@ -51,7 +51,7 @@ from numpyro import handlers
 from numpyro.infer.reparam import LocScaleReparam
 
 from tinygp import kernels
-
+import traceback
 import warnings
 #warnings.filterwarnings("ignore", category=RuntimeWarning)
 
@@ -840,7 +840,8 @@ if __name__ == '__main__':
                     obj['X'], obj['y'], obj['yerr'], 
                     kernels.quasisep.Exp(jnp.array([1, 1])),
                     zero_mean=zero_mean, has_jitter=has_jitter, has_lag=has_lag,
-                    lam_rf=obj['lam_rf'], z=obj['z'], use_bwb=args.bwb, q_groups=args.lmc
+                    lam_rf=obj['lam_rf'], z=obj['z'], use_bwb=args.bwb, q_groups=args.lmc,
+                    broken_pl=args.broken_pl
                 )
                 save_combined_plot(obj_flat_samples, m, obj['X'], obj['y'], obj['yerr'], obj['band_idx'], result, 
                                 bands=bands, plot_psd=(not args.disable_plot_psd))
@@ -849,10 +850,11 @@ if __name__ == '__main__':
                 if not args.disable_corner_plot:
                     #plot_posterior(obj_flat_samples_flatten_per_band, obj)
                     plot_posterior_fast(obj_flat_samples_flatten_per_band, obj)
-                plot_broken_power_law(obj_flat_samples, obj)
+                plot_broken_power_law(obj_flat_samples, obj, broken_pl=args.broken_pl)
                 #dump_mcmc_diagnostics(mcmc, obj, i, len(batch_data))
             except Exception as e:
-                logging.error(f"Error during plotting for object {obj['object_id']}: {e}")
+                logging.error(f"\033[91mError during plotting for object {obj['object_id']}: {e}\033[0m")
+                logging.error(traceback.format_exc())
         # If inject_fake, compare injected vs recovered sigma and tau
         final_result_obj = obj | result | diagnostics | dict(prefix=prefix, suffix=suffix)
         results.append(final_result_obj)
