@@ -40,104 +40,93 @@ import jax.numpy as jnp
 from tinygp.kernels import quasisep as qs
 from tinygp.helpers import JAXArray
 
+import jax
+import jax.numpy as jnp
+from tinygp.kernels import quasisep as qs
+from tinygp.helpers import JAXArray
+
+import jax
+import jax.numpy as jnp
+from tinygp.kernels import quasisep as qs
+from tinygp.helpers import JAXArray
+
 class ContiBLRQS_Mag(qs.Wrapper):
     """
-    Multiband OU/DRW kernel in *magnitudes* with band-dependent correlation
-    timescales τ_b = tau0 / s[b], per-band continuum/BLR gains, lags, and
-    rectangular smoothing. Designed to keep bands coherent.
+    PSD-safe multiband OU/DRW kernel in magnitudes.
 
-    - No global time warp for sorting (shared clock).
-    - Band dependence enters via *dt* scaling:
-        within-band: dt <- s[b] * dt         (τ_b effect)
-        cross-band:  dt <- sqrt(s[b1]*s[b2]) * (t2 - t1)
+    - One latent OU process with timescale tau0, unit variance.
+    - Each band sees a linear combination of:
+        * Continuum: lag_disk[b], width_cont[b]
+        * BLR: lag_disk[b] + lag_blr[b], width_blr[b]
+    - Band-dependent tau scaling via s[b]:
+        we scale *lags/widths* by s[b], not the latent clock.
+    - This preserves PSD because all operations are linear on the same latent.
     """
 
-    amp_cont:  jnp.ndarray
-    amp_blr:   jnp.ndarray
-    lag_blr:   jnp.ndarray
-    lag_disk:  jnp.ndarray
-    width_cont:jnp.ndarray
-    width_blr: jnp.ndarray
-    s:         jnp.ndarray        # >0, encodes τ_b = tau0 / s[b]
-    kernel:    qs.Kernel          # base OU with scale=tau0, sigma=1
+    amp_cont:   jnp.ndarray
+    amp_blr:    jnp.ndarray
+    lag_blr:    jnp.ndarray
+    lag_disk:   jnp.ndarray
+    width_cont: jnp.ndarray
+    width_blr:  jnp.ndarray
+    s:          jnp.ndarray
+    kernel:     qs.Kernel   # qs.Exp(scale=tau0, sigma=1.0)
 
     def __init__(self, amp_cont, amp_blr, lag_blr, lag_disk,
                  width_cont, width_blr, s, tau_drw):
-        # Safety floors
         eps = 1e-12
-
         self.amp_cont   = jnp.asarray(amp_cont)
         self.amp_blr    = jnp.asarray(amp_blr)
         self.lag_blr    = jnp.asarray(lag_blr)
         self.lag_disk   = jnp.asarray(lag_disk)
-
-        # Clamp widths to >= 0
         self.width_cont = jnp.maximum(jnp.asarray(width_cont), 0.0)
         self.width_blr  = jnp.maximum(jnp.asarray(width_blr),  0.0)
-
-        # Positive stretch factors (encode band τ)
         self.s          = jnp.maximum(jnp.asarray(s), eps)
 
-        # One latent OU with "center" τ = tau_drw; unit variance
+        # Latent OU/DRW kernel with unit variance
         self.kernel     = qs.Exp(scale=jnp.maximum(jnp.asarray(tau_drw), eps),
                                  sigma=1.0)
 
-    # ---------- Sorting on a shared clock ----------
+    # -------- Sorting axis --------
     def coord_to_sortable(self, X):
         t, b = X
-        # shared clock; tiny tie-break on band to avoid equal keys
-        return t + 1e-9 * (jnp.asarray(b, jnp.int32))
+        # Shared clock + tiny band offset to break ties
+        return t + 1e-9 * jnp.asarray(b, jnp.int32)
 
-    # ---------- Stable top-hat gain in u (scaled) units ----------
+    # -------- Stable top-hat gain --------
     @staticmethod
-    def _gain_top_hat_u(width_u, tau0):
-        tau0 = jnp.maximum(tau0, 1e-12)
-        x = width_u / tau0
-        small = 1.0 - 0.5 * x + (x * x) / 6.0
+    def _gain_top_hat(width_u, tau):
+        tau = jnp.maximum(tau, 1e-12)
+        x   = width_u / tau
+        small = 1.0 - 0.5*x + (x*x)/6.0
         full  = -jnp.expm1(-x) / jnp.maximum(x, 1e-12)
         return jnp.where(x < 1e-8, small, full)
 
-    # ---------- Within-band convolution/lag (uses band s[b]) ----------
-    def _conv_obs_band(self, lag_t, width_t, s_b):
-        # Map to the latent's "u" units so τ_b = tau0 / s_b
+    # -------- Band-specific observation vector --------
+    def _conv_obs(self, lag_t, width_t, s_b):
+        # Effective band τ enters here: scale lag/width by s_b
         lag_u   = s_b * lag_t
         width_u = s_b * width_t
 
-        h0  = self.kernel.observation_model(jnp.array(0.0))       # (1,)
-        Phi = self.kernel.transition_matrix(0.0, lag_u)           # (1,1)
-        G   = self._gain_top_hat_u(width_u, self.kernel.scale)    # scalar in [0,1]
-        return (h0 @ Phi) * G                                     # (1,)
+        h0  = self.kernel.observation_model(jnp.array(0.0))   # (1,)
+        Phi = self.kernel.transition_matrix(0.0, lag_u)       # (1,1)
+        G   = self._gain_top_hat(width_u, self.kernel.scale)  # scalar
+        return (h0 @ Phi) * G
 
-    # ---------- Band-specific observation vector ----------
     def observation_model(self, X):
         _, b = X
         b = jnp.asarray(b, dtype=jnp.int32)
 
-        h_cont = self.amp_cont[b] * self._conv_obs_band(
+        h_cont = self.amp_cont[b] * self._conv_obs(
             self.lag_disk[b], self.width_cont[b], self.s[b]
         )
-        h_blr  = self.amp_blr[b] * self._conv_obs_band(
+        h_blr  = self.amp_blr[b] * self._conv_obs(
             self.lag_disk[b] + self.lag_blr[b], self.width_blr[b], self.s[b]
         )
+
         return h_cont + h_blr
 
-    # ---------- Cross-/within-band state propagation with symmetric stretch ----------
-    def transition_matrix(self, X1, X2):
-        """
-        Coherent clock between any two observations:
-          dt_eff = sqrt(s[b1] * s[b2]) * (t2 - t1)
-        This yields τ_b effects while avoiding cross-band dephasing.
-        """
-        t1, b1 = X1
-        t2, b2 = X2
-        b1 = jnp.asarray(b1, dtype=jnp.int32)
-        b2 = jnp.asarray(b2, dtype=jnp.int32)
-
-        s_eff = jnp.sqrt(self.s[b1] * self.s[b2])
-        dt    = s_eff * (t2 - t1)
-        return self.kernel.transition_matrix(0.0, dt)
-
-    # ---------- Optional PSD helper (guaranteed ≥ 0) ----------
+    # Optional PSD helper (non-negative by construction)
     def psd(self, omega: JAXArray, b: int, sigma_n2: float = 0.0) -> JAXArray:
         A  = self.design_matrix()
         P  = self.stationary_covariance()
@@ -150,7 +139,6 @@ class ContiBLRQS_Mag(qs.Wrapper):
             return (v.conj().T @ (Qc @ v)).real + sigma_n2
 
         return 2.0 * jax.vmap(one_w)(omega)
-
 
 
 # Override MultiVarModel
