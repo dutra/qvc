@@ -255,8 +255,6 @@ def plot_posterior_fast(
     logging.info("Saving posterior plot (fast path)")
     object_id = data["object_id"]
     z = data["z"]
-    prefix = data.get("prefix", "test")
-    suffix = data.get("suffix", "test")
 
     # Stable column order
     labels = np.array(list(samples_flat.keys()))
