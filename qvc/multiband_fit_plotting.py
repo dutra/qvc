@@ -237,20 +237,29 @@ def plot_posterior_fast(
     samples_flat,
     data,
     bins=15,
-    max_points=50_000,
+    max_points=20_000,
     p_lo=0.5,
     p_hi=99.5,
     const_ptp=1e-12,         # threshold for "near-constant"
     jitter_rel=1e-6,         # relative jitter scale (× |mean|)
-    jitter_abs=1e-8          # absolute floor for jitter
+    jitter_abs=1e-8,         # absolute floor for jitter
+    panel_budget=1_000_000,  # ~constant-cost target: keep N so N*D^2 <= panel_budget
+    trim_percentiles=True,   # TRIM: drop rows outside [p_lo, p_hi] in *all* dims
+    rng_seed=None
 ):
     """
-    Faster corner plot for large MCMC draws, keeps constant params by jittering.
-    - Minimizes Python loops and array copies
-    - Vectorized jitter for near-constant cols
-    - Avoids printing; uses logging
-    - Conservative corner settings for speed
+    Faster corner plot for large MCMC draws.
+
+    Speed tactics:
+      - Subsample to meet a compute budget ~ O(N * D^2)
+      - Trim rows outside the central [p_lo, p_hi] percentile box across all dims
+      - Keep "constant" params by applying tiny jitter (so titles render)
+      - Avoid redundant copies; use float32
     """
+    import os, logging
+    import numpy as np
+    import matplotlib.pyplot as plt
+    import corner
 
     logging.info("Saving posterior plot (fast path)")
     object_id = data["object_id"]
@@ -258,91 +267,97 @@ def plot_posterior_fast(
 
     # Stable column order
     labels = np.array(list(samples_flat.keys()))
+    D = len(labels)
 
-    # Subsample index decided from the first column (before stacking)
+    # Determine a target N that respects both `max_points` and the D^2 cost
+    # (ensure at least a modest minimum so 1D histograms look sane)
+    rng = np.random.default_rng(rng_seed)
     first = np.asarray(samples_flat[labels[0]])
-    first = first.reshape(first.shape[0], -1)[:, 0]  # fast ravel of first dim
+    first = first.reshape(first.shape[0], -1)[:, 0]
     n_total = first.shape[0]
-    rng = np.random.default_rng()
-    if n_total > max_points:
-        idx = rng.choice(n_total, size=max_points, replace=False)
-        n_use = max_points
+    n_by_budget = max(2_000, int(panel_budget // max(D * D, 1)))
+    n_target = min(n_total, max_points, n_by_budget)
+
+    if n_target < n_total:
+        idx = rng.choice(n_total, size=n_target, replace=False)
+        n_use = n_target
     else:
         idx = None
         n_use = n_total
 
-    # Build matrix X (N, D) with shared subsample; transform log_* → log10 (from natural log)
-    D = len(labels)
+    # Build matrix X (N, D) with shared subsample; convert ln(*) -> log10(*) for "log_*"
     X = np.empty((n_use, D), dtype=np.float32)
     ln10 = np.log(10.0)
-
     for j, k in enumerate(labels):
-        a = np.asarray(samples_flat[k]).reshape(n_total, -1)[:, 0]  # take the leading element per draw
+        a = np.asarray(samples_flat[k]).reshape(n_total, -1)[:, 0]
         if idx is not None:
             a = a[idx]
-        # Convert ln to log10 for "log_*" parameters
         if k.startswith("log_"):
-            a = a / ln10
+            a = a / ln10  # natural log -> log10
         X[:, j] = a.astype(np.float32, copy=False)
 
-    # Drop rows with any NaN/Inf once (keeps alignment)
+    # Drop rows with any NaN/Inf
     finite = np.isfinite(X).all(axis=1)
     if not finite.any():
         raise ValueError("No finite samples to plot after cleaning.")
-    X = X[finite]
+    if not finite.all():
+        X = X[finite]
 
-    # Identify near-constant columns; prefer ptp but fall back to std if needed
+    # Identify near-constant columns via ptp
     ptp = np.ptp(X, axis=0)
     const_mask = ptp <= const_ptp
 
-    # Vectorized jitter for the near-constant columns (keeps them in the plot)
+    # Jitter constant columns so they render
     if np.any(const_mask):
         const_idx = np.where(const_mask)[0]
         mu = X[:, const_idx].mean(axis=0, dtype=np.float64)
         sig = np.maximum(jitter_abs, np.abs(mu) * jitter_rel).astype(np.float32)
-        # Generate noise for all constant columns at once
         noise = rng.normal(0.0, 1.0, size=(X.shape[0], const_idx.size)).astype(np.float32)
-        X[:, const_idx] += noise * sig  # broadcast scale
+        X[:, const_idx] += noise * sig
         for j in const_idx:
             logging.debug(f"Corner constant param (jittered): {labels[j]}")
 
-    # Robust ranges via percentiles; ensure positive width after jitter
-    # (Use float32 inputs; returns float64 bounds—cast to float)
+    # Percentile ranges
     lo = np.percentile(X, p_lo, axis=0)
     hi = np.percentile(X, p_hi, axis=0)
     eps = 1e-12
     l_out = np.minimum(lo, hi)
     h_out = np.maximum(lo, hi)
-    # Fix any degenerate ranges
+
+    # Fix degenerate ranges
     bad = (h_out <= l_out + eps) | ~np.isfinite(l_out) | ~np.isfinite(h_out)
     if np.any(bad):
-        # fallback to min/max per column
         cmin = X.min(axis=0)
         cmax = X.max(axis=0)
         l_out[bad] = cmin[bad]
         h_out[bad] = cmax[bad]
-        # pad if still degenerate
         still = h_out <= l_out + eps
         if np.any(still):
             c = 0.5 * (l_out[still] + h_out[still])
-            pad = np.maximum.reduce([np.full_like(c, const_ptp), np.abs(c) * 1e-6, np.full_like(c, jitter_abs)])
+            pad = np.maximum.reduce([
+                np.full_like(c, const_ptp),
+                np.abs(c) * 1e-6,
+                np.full_like(c, jitter_abs)
+            ])
             l_out[still] = c - pad
             h_out[still] = c + pad
     rng_bounds = np.stack([l_out.astype(float), h_out.astype(float)], axis=1)
 
-    # Prepare data for corner: hide constants on the grid (still jittered above)
-    # This avoids tiny plot panels that can be slow & visually unhelpful
-    sel = ~const_mask
-    X_plot = X[:, sel]
-    labels_plot = labels[sel]
-    ranges_plot = rng_bounds[sel]
+    # === TRIM SAMPLES ===
+    if trim_percentiles:
+        # Keep only rows inside the central percentile box across *all* dims
+        m = (X >= l_out) & (X <= h_out)
+        keep = m.all(axis=1)
+        kept = int(keep.sum())
+        if kept >= max(500, 0.05 * X.shape[0]):  # avoid pathological over-trimming
+            X = X[keep]
+        # If too few remain, fall back to untrimmed (still subsampled above)
 
-    if X_plot.shape[1] == 0:
-        logging.warning("All parameters are near-constant; plotting them anyway as 1D hists.")
-        # If everything is constant, pick all, but corner will be fast with 1D hists
-        X_plot = X
-        labels_plot = labels
-        ranges_plot = rng_bounds
+    # Hide near-constant columns on the grid (they were jittered so titles etc. still OK)
+    sel = ~const_mask
+    X_plot = X[:, sel] if np.any(sel) else X
+    labels_plot = labels[sel] if np.any(sel) else labels
+    ranges_plot = (rng_bounds[sel] if np.any(sel) else rng_bounds)
 
     # Corner tuned for speed
     fig = corner.corner(
