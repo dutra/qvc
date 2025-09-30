@@ -606,7 +606,7 @@ def process_samples(flat_samples, data, percentiles=[16, 50, 84], bands=['u', 'g
         result[f"log_tau_band_{band}_RF_err"] = err
 
     # Other special params
-    host_frac = flat_samples["f_host"] * (lambda_ref / 5100.0) ** flat_samples["alpha_host"]
+    host_frac = flat_samples["f_host"] * (lambda_ref / 2500.0) ** flat_samples["alpha_host"]
     dilution_factor = 1.0 / (1.0 + host_frac)
     log_dilution = jnp.log(dilution_factor)
 

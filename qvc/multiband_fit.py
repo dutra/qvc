@@ -556,23 +556,23 @@ if __name__ == '__main__':
     #     f_host_value = jnp.zeros(batch_size)
 
     if args.alpha_lam_csv is not None:
-        # Load CSV with columns: object_id, alpha_lambda, f_host_5100
+        # Load CSV with columns: object_id, alpha_lambda, f_host_2500
         alpha_df = pd.read_csv(args.alpha_lam_csv, dtype={"object_id": str})
-        alpha_map = alpha_df.set_index("object_id")[["alpha_lambda", "f_host_5100"]].to_dict(orient="index")
-        # Populate objs with alpha_lambda and f_host_5100 by object_id
+        alpha_map = alpha_df.set_index("object_id")[["alpha_lambda", "f_host_2500"]].to_dict(orient="index")
+        # Populate objs with alpha_lambda and f_host_2500 by object_id
         for obj in objs:
             oid = str(obj["object_id"])
-            if oid in alpha_map and alpha_map[oid]["f_host_5100"] >= 0:
-                obj["f_host_5100"] = alpha_map[oid]["f_host_5100"]
+            if oid in alpha_map and alpha_map[oid]["f_host_2500"] >= 0:
+                obj["f_host_2500"] = alpha_map[oid]["f_host_2500"]
             else:
-                obj["f_host_5100"] = 0.0  # Default if not found or invalid
+                obj["f_host_2500"] = 0.0  # Default if not found or invalid
     else:
-        print("[WARNING] Not using alpha_lam_csv, setting f_host_5100=0.0 for all objects.")
+        print("[WARNING] Not using alpha_lam_csv, setting f_host_2500=0.0 for all objects.")
         for obj in objs:
-            obj["f_host_5100"] = 0.0 
+            obj["f_host_2500"] = 0.0 
 
     for obj in objs:
-        print(f"Object {obj['object_id']}: f_host_5100 = {obj['f_host_5100']}")
+        print(f"Object {obj['object_id']}: f_host_2500 = {obj['f_host_2500']}")
 
     #objs = populate_sdss_fields(objs)
 
@@ -607,7 +607,7 @@ if __name__ == '__main__':
             'mags_means': obj['mags_means'],
             'mags_stds': obj['mags_stds'],
             'lam_rf': lam_rf,
-            'f_host_5100': obj['f_host_5100'],
+            'f_host_2500': obj['f_host_2500'],
             'log_tau_fake': obj['log_tau_fake'],
             'log_sigma_fake': obj['log_sigma_fake'],
             'dropped_bands': obj['dropped_bands'],
@@ -650,7 +650,7 @@ if __name__ == '__main__':
     # log_jitter_mean = jnp.stack([safe_log_jitter_mean(obj) for obj in padded_batch_data])
     assert jnp.isfinite(log_jitter_mean).all(), "Non-finite log_jitter_mean"
 
-    f_host_value = jnp.array([obj["f_host_5100"] for obj in batch_data])
+    f_host_value = jnp.array([obj["f_host_2500"] for obj in batch_data])
 
     log_tau_fake = jnp.array([obj['log_tau_fake'] for obj in batch_data])
     log_sigma_fake = jnp.array([obj['log_sigma_fake'] for obj in batch_data])
