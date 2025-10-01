@@ -113,12 +113,12 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_
         # Initialize parameters
         # Global "universal" means for eta
         eta_A1_mean = numpyro.sample("eta_A1_mean", dist.Uniform(-5.0, 0.0))
-        eta_tau1_mean = numpyro.sample("eta_tau1_mean", dist.Uniform(-1.0, 5.0))
+        eta_tau1_mean = numpyro.sample("eta_tau1_mean", dist.Uniform(-15.0, 15.0))
 
         if broken_pl:
             print("[INFO] Using broken power-law for eta.")
             eta_A2_mean = numpyro.sample("eta_A2_mean", dist.Uniform(-5.0, 0.0))
-            eta_tau2_mean = numpyro.sample("eta_tau2_mean", dist.Uniform(-1.0, 5.0))
+            eta_tau2_mean = numpyro.sample("eta_tau2_mean", dist.Uniform(-15.0, 15.0))
         else:
             print("[INFO] Using single power-law for eta (eta_A2_mean=0, eta_tau2_mean=0).")
             eta_A2_mean = numpyro.deterministic("eta_A2_mean", 0.0)
@@ -169,10 +169,7 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_
 
             # Core kernel parameters (hierarchical & identified)
             log_tau_drw0_high = jnp.log(10**10 * (1 + zs))
-            if inject_fake:
-                log_tau_drw0_low = 0.0
-            else:
-                log_tau_drw0_low = jnp.log(10**1.5 * (1 + zs))
+            log_tau_drw0_low = jnp.log(10**1.5 * (1 + zs))
 
             if sigma_tau_uniform:
                 print("[INFO] Using Uniform prior on log_sigma0 and log_tau_drw0.")
@@ -349,7 +346,7 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_
     return numpyro_joint_model
 
 
-def make_lc(Model, data, bands=['u', 'g', 'r', 'i', 'z'], inject_fake=False, alpha_sigma=-0.5, beta_tau=0.5):
+def make_lc(Model, data, bands=['u', 'g', 'r', 'i', 'z'], inject_fake=False, alpha_sigma=-0.5, beta_tau=0.2):
     times = data['times']
     mags = data['mags']
     magerrs = data['magerrs']
@@ -403,11 +400,13 @@ def make_lc(Model, data, bands=['u', 'g', 'r', 'i', 'z'], inject_fake=False, alp
         key, k_tau0, k_sig0, k_eps, k_y0, k_noise = jax.random.split(key, 6)
 
         # Base logs
-        log_tau0_rf = jax.random.uniform(k_tau0, minval=0.5,  maxval=3.0)   # log10 τ_rest (days)
+        one_plus_z = float(1.0 + data['z'])
+        log_tau0_obs_min = 1.8
+        log_tau0_rf_min = log_tau0_obs_min - np.log10(one_plus_z)
+        log_tau0_rf = jax.random.uniform(k_tau0, minval=log_tau0_rf_min,  maxval=3.0)   # log10 τ_rest (days)
         log_sigma0  = jax.random.uniform(k_sig0, minval=-0.5, maxval=1.0)   # log10 σ (mag)
         tau0_rf   = 10.0**float(log_tau0_rf)
         sigma0    = 10.0**float(log_sigma0)
-        one_plus_z = float(1.0 + data['z'])
 
         # Per-band τ, σ (convert τ to observed frame)
         tau_rf_band  = tau0_rf * (lam_rf_bands / lam_ref)**beta_tau              # (B,)
@@ -611,7 +610,8 @@ if __name__ == '__main__':
     parser.add_argument("--broken_pl", action="store_true", default=False, help="Use broken power law for eta instead of single power law.")
     parser.add_argument("--disable_sigma_tau_plane_cut", action="store_true", default=False, help="Disable sigma-tau plane cut.")
     parser.add_argument("--log_sigma_eta_tau_sigma", type=float, default=0.2, help="Stddev for log_sigma_eta_tau1/2 prior.")
-    
+    parser.add_argument("--beta_tau", type=float, default=0.2, help="Beta_tau value for fake light curves.")
+
     args = parser.parse_args()
     print("Args: ", args)
 
@@ -686,11 +686,11 @@ if __name__ == '__main__':
         # Randomize alpha_sigma and beta_tau for each run
         rng = np.random.default_rng()
         alpha_sigma = rng.uniform(-1.0, 0.0)
-        beta_tau = rng.uniform(0.0, 1.0)
+        beta_tau = rng.uniform(-0.2, 0.8)
         print(f"Randomized alpha_sigma={alpha_sigma:.3f}, beta_tau={beta_tau:.3f}")
     else:
         alpha_sigma = -0.5
-        beta_tau = 1.0
+        beta_tau = args.beta_tau
         print(f"Using fixed alpha_sigma={alpha_sigma:.3f}, beta_tau={beta_tau:.3f}")
 
     # After loading objs
