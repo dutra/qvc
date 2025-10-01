@@ -317,7 +317,7 @@ class MyMultiVarModel_SMAG(MultiVarModel):
     def my_amp_transform_blr(self, params: dict[str, JAXArray]) -> JAXArray:
         return params["log_sigma0"] + jnp.atleast_1d(params["log_amp_delta_blr"])
     
-    def my_tau_drw_transform(self, params: dict[str, JAXArray]) -> JAXArray:
+    def my_tau_drw_transform(self, params: dict[str, JAXArray]) -> tuple[JAXArray, JAXArray]:
         log_pl = log_broken_pl if self.broken_pl else log_single_pl
         eta_tau1 = params["eta_tau1"]
         eta_tau2 = params["eta_tau2"]
