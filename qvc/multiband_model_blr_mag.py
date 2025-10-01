@@ -149,17 +149,19 @@ class BWB_QS(qs.Wrapper):
         If None, uses ones.
     """
 
+    amp_cont:  jnp.ndarray
     sigma_bwb: jnp.ndarray
     width_bwb: jnp.ndarray
     exp_bwb:   float
     s:         jnp.ndarray
     kernel:    qs.Kernel  # OU with scale = tau_drw / exp_bwb
 
-    def __init__(self, sigma_bwb, width_bwb, tau_drw, exp_bwb: float = 2.0, s=None):
+    def __init__(self, amp_cont, sigma_bwb, width_bwb, tau_drw, exp_bwb: float = 2.0, s=None):
         eps = 1e-12
         tau0 = jnp.maximum(jnp.asarray(tau_drw), eps)
         exp  = jnp.maximum(jnp.asarray(exp_bwb, dtype=tau0.dtype), eps)
 
+        self.amp_cont  = jnp.asarray(amp_cont)
         self.sigma_bwb = jnp.asarray(sigma_bwb)
         self.width_bwb = jnp.maximum(jnp.asarray(width_bwb), 0.0)
         self.exp_bwb   = exp
@@ -189,10 +191,10 @@ class BWB_QS(qs.Wrapper):
     def observation_model(self, X):
         _, b = X
         b    = jnp.asarray(b, dtype=jnp.int32)
-        h0   = self.kernel.observation_model(jnp.array(0.0))  # (1,)
+        h0   = self.kernel.observation_model(jnp.array(0.0))   # (1,)
         w_u  = self.s[b] * self.width_bwb[b]                   # scaled width
         G    = self._gain_top_hat(w_u, self.kernel.scale)      # scalar
-        return self.sigma_bwb * (h0 * G)                    # (1,)
+        return self.sigma_bwb * self.amp_cont[b] * (h0 * G)    # (1,)
 
 def qs_psd(kernel, omega, b: int, sigma_n2: float = 0.0):
     """
@@ -288,6 +290,7 @@ class MyMultiVarModel_SMAG(MultiVarModel):
         )
 
         kernel_bwb = BWB_QS(
+            amp_cont=jnp.exp(log_sigma_band),
             sigma_bwb=params["bwb_alpha"],
             width_bwb=params["width_cont"],
             tau_drw=jnp.exp(log_tau_center),
