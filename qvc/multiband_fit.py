@@ -684,7 +684,7 @@ if __name__ == '__main__':
         # Randomize alpha_sigma and beta_tau for each run
         rng = np.random.default_rng()
         alpha_sigma = rng.uniform(-1.0, 0.0)
-        beta_tau = rng.uniform(-0.2, 0.8)
+        beta_tau = rng.uniform(-0.5, 2.0)
         print(f"Randomized alpha_sigma={alpha_sigma:.3f}, beta_tau={beta_tau:.3f}")
     else:
         alpha_sigma = -0.5
