@@ -258,7 +258,8 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_
                     log_amp_delta_blr = numpyro.deterministic("log_amp_delta_blr", jnp.full((batch_size, nBands), -1e9))
                 else:
                     print("[WARNING] BLR lag model enabled.")
-                    log_amp_delta_blr = numpyro.sample("log_amp_delta_blr", dist.Uniform(jnp.log(1e-4), jnp.log(5.0)))
+                    #log_amp_delta_blr = numpyro.sample("log_amp_delta_blr", dist.Uniform(jnp.log(1e-4), jnp.log(5.0)))
+                    log_amp_delta_blr = numpyro.sample("log_amp_delta_blr", dist.Normal(jnp.full(nBands, -1.0), 1.0))
 
                 # Convolution parameters (hard to constrain)
                 width_blr = numpyro.deterministic(
