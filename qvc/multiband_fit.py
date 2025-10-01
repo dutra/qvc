@@ -113,12 +113,12 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_
         # Initialize parameters
         # Global "universal" means for eta
         eta_A1_mean = numpyro.sample("eta_A1_mean", dist.Uniform(-5.0, 0.0))
-        eta_tau1_mean = numpyro.sample("eta_tau1_mean", dist.Uniform(-15.0, 15.0))
+        eta_tau1_mean = numpyro.sample("eta_tau1_mean", dist.Uniform(-10.0, 10.0))
 
         if broken_pl:
             print("[INFO] Using broken power-law for eta.")
             eta_A2_mean = numpyro.sample("eta_A2_mean", dist.Uniform(-5.0, 0.0))
-            eta_tau2_mean = numpyro.sample("eta_tau2_mean", dist.Uniform(-15.0, 15.0))
+            eta_tau2_mean = numpyro.sample("eta_tau2_mean", dist.Uniform(-10.0, 10.0))
         else:
             print("[INFO] Using single power-law for eta (eta_A2_mean=0, eta_tau2_mean=0).")
             eta_A2_mean = numpyro.deterministic("eta_A2_mean", 0.0)
@@ -228,9 +228,7 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_
             else:
                 bwb_alpha = numpyro.deterministic("bwb_alpha", jnp.zeros(batch_size))
                 bwb_beta = numpyro.deterministic("bwb_beta", jnp.ones(batch_size))
-
         with numpyro.plate("objects", batch_size, dim=-2):
-
             if disable_lag_blr:
                 log_lag_blr = numpyro.deterministic("log_lag_blr", jnp.full((batch_size, nBands), -9.0))
             else:
@@ -238,7 +236,8 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_
                             "_log_lag_blr",
                             dist.Uniform(jnp.log(2.0), jnp.log(5000.0))
                         )
-                _log_lag_blr = jnp.squeeze(_log_lag_blr) 
+                # FIX: keep as (batch_size,) even when batch_size==1
+                _log_lag_blr = jnp.reshape(_log_lag_blr, (batch_size,))
                 log_lag_blr = numpyro.deterministic(
                     "log_lag_blr",
                     jnp.repeat(_log_lag_blr[:, None], nBands, axis=1)
@@ -273,7 +272,7 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_
                         
 
         def run_batch(obj, i):
-
+            
             # t = obj[:, 0]
             # b = obj[:, 1].astype(t.dtype)
             # tie_eps = 10.0 * jnp.finfo(t.dtype).eps  # same magnitude used in the kernel
@@ -281,7 +280,6 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_
             # sort_idx   = jnp.argsort(key)
             # obj_sorted = obj[sort_idx]
             obj_sorted = obj  # data already sorted
-
             # Collect params for object i
             params = {
                 "log_tau_drw0": log_tau_drw0[i],
