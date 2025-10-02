@@ -373,7 +373,7 @@ def bands_bluer_than_lyman_alpha(z, buffer=100):
     return bluer_bands
 
 
-def load_all_samples_from_hdf5():
+def load_all_samples_from_hdf5(file_path=None):
     """
     Load all samples from an HDF5 file.
     
@@ -384,10 +384,10 @@ def load_all_samples_from_hdf5():
     Returns:
         dict: Dictionary containing all loaded samples.
     """
-
-    output_dir=f"results/samples/{prefix}/"
-    os.makedirs(output_dir, exist_ok=True)
-    file_path = os.path.join(output_dir, f"all_{suffix}.h5")
+    if file_path is None:
+        output_dir=f"results/samples/{prefix}/"
+        os.makedirs(output_dir, exist_ok=True)
+        file_path = os.path.join(output_dir, f"all_{suffix}.h5")
 
     if not os.path.exists(file_path):
         raise FileNotFoundError(f"HDF5 file not found: {file_path}")
