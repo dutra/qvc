@@ -1,6 +1,8 @@
 import matplotlib.pyplot as plt
 from matplotlib.ticker import EngFormatter
 from matplotlib.ticker import ScalarFormatter
+from matplotlib.lines import Line2D
+
 plt.style.use("style.mplstyle")
 import corner
 import numpy as np
@@ -1105,3 +1107,243 @@ def plot_recovery(results):
     fig.savefig(save_path, dpi=300)
     print(f"Saved injected vs recovery sigma and tau plot to {save_path}")
     plt.close(fig)
+
+def plot_sigma_tau_vs_lambda_with_model(
+    rows,                 # list of dicts (each dict = one object)
+    bands=('u', 'g', 'r', 'i', 'z'),
+    *,
+    residual=True,       # subtract UV from BOTH σ and τ
+    show=False,
+    debug=True,
+):
+    """
+    Plot log10 σ_band and log10 τ_band,RF vs log10 λ_RF with population ribbons.
+
+    Each item in `rows` must provide:
+      lam_s, eta_A1, eta_A2, eta_tau1, eta_tau2, eta_break, log_sigma0, log_tau_drw0, z,
+      and per-band: log_sigma_band_{b}, log_tau_band_{b}_RF.
+
+    If residual=True, also requires per-row UV references:
+      'log_tau_UV_RF' and 'log_sigma_UV' (these names are fixed by design).
+
+    NEW: the model ribbons (both σ and τ) come from analytical propagation of the
+         η-slope 1σ uncertainties using the per-row *_err fields:
+           eta_A1_err, eta_A2_err, eta_tau1_err, eta_tau2_err.
+         We build median curves and an envelope from the 4 corner combos (±1σ each).
+    """
+    if not rows:
+        raise ValueError("`rows` is empty.")
+
+    import numpy as np
+    import matplotlib.pyplot as plt
+    from matplotlib.lines import Line2D
+    from scipy.stats import linregress
+
+    # ---- helpers (list-of-dicts → arrays) ----
+    def arr(key):
+        return np.asarray([row[key] for row in rows], dtype=float)
+
+    def med(key):
+        a = arr(key)
+        return float(np.nanmedian(a))
+
+    def med_err(key):  # median of per-row 1σ uncertainties
+        a = arr(key)
+        return float(np.nanmedian(a))
+
+    z       = arr('z')
+    tau_uv  = arr('log_tau_UV_RF')   if residual else np.zeros(len(rows))
+    sig_uv  = arr('log_sigma_UV')    if residual else np.zeros(len(rows))
+
+    # ---- figure ----
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(6.2, 6.2),
+                                   sharex=True, constrained_layout=True)
+    fig.set_constrained_layout_pads(w_pad=0.01, h_pad=0.01, wspace=0.01, hspace=0.02)
+
+    def inward(ax):
+        ax.tick_params(direction='in', which='both', top=True, right=True, length=3, pad=2)
+        for s in ax.spines.values():
+            s.set_linewidth(1.0)
+
+    # ---- scatter ----
+    x_all, x_all_tau, y_all_tau = [], [], []
+    plotted_bands = []
+
+    for b in bands:
+        lam_rf = (lambda_pivot[b]) / (1.0 + z)      # Å, rest-frame per row
+        x = np.log10(lam_rf)
+
+        y_sigma = arr(f'log_sigma_band_{b}')
+        y_tau_abs = arr(f'log_tau_band_{b}_RF')
+
+        y_sigma = y_sigma - sig_uv if residual else y_sigma
+        y_tau   = y_tau_abs - tau_uv if residual else y_tau_abs
+
+        m1 = np.isfinite(x) & np.isfinite(y_sigma)
+        m2 = np.isfinite(x) & np.isfinite(y_tau)
+        if m1.any() or m2.any():
+            plotted_bands.append(b)
+
+        ax1.scatter(x[m1], y_sigma[m1], s=30, alpha=0.8, color=colors.get(b),
+                    edgecolor='none', zorder=7)
+        ax2.scatter(x[m2], y_tau[m2],   s=30, alpha=0.8, color=colors.get(b),
+                    edgecolor='none', zorder=7)
+
+        if m1.any(): x_all.append(x[m1])
+        if m2.any(): x_all_tau.append(x[m2]); y_all_tau.append(y_tau[m2])
+
+    x_all     = np.concatenate(x_all)     if x_all     else np.array([])
+    x_all_tau = np.concatenate(x_all_tau) if x_all_tau else np.array([])
+    y_all_tau = np.concatenate(y_all_tau) if y_all_tau else np.array([])
+
+    if x_all.size:
+        xmin, xmax = float(np.nanmin(x_all))-0.1, float(np.nanmax(x_all))+0.1
+        ax2.set_xlim(xmin, xmax)
+    else:
+        xmin, xmax = 3.3, 4.2
+
+    # ---- model ribbons from η ± 1σ (no Monte Carlo) ----
+    lam_grid    = np.linspace(10**xmin, 10**xmax, 400).astype(float)
+    loglam_grid = np.log10(lam_grid)
+
+    # Center (population medians)
+    lam_s_med = med('lam_s')
+    ds_med    = med('eta_break')
+
+    eta_A1_med,   eta_A2_med   = med('eta_A1'),   med('eta_A2')
+    eta_tau1_med, eta_tau2_med = med('eta_tau1'), med('eta_tau2')
+
+    # Median 1σ (per-object errors summarized by median)
+    sig_eta_A1 = med_err('eta_A1_err')
+    sig_eta_A2 = med_err('eta_A2_err')
+    sig_eta_t1 = med_err('eta_tau1_err')
+    sig_eta_t2 = med_err('eta_tau2_err')
+
+    # Median intercepts (already log10). For τ, convert to RF first then median.
+    sig0_all = arr('log_sigma0') - (arr('log_sigma_UV') if residual else 0.0)
+    tau0_rf_all = arr('log_tau_drw0') - np.log10(1.0 + arr('z'))
+    if residual:
+        tau0_rf_all = tau0_rf_all - arr('log_tau_UV_RF')
+
+    sig0_med  = float(np.nanmedian(sig0_all))
+    tau0_med  = float(np.nanmedian(tau0_rf_all))
+
+    # Shape function
+    def shp_sigma(e1, e2):
+        return log_broken_pl(lam_grid, lam_s_med, e1, e2, ds_med)
+
+    def shp_tau(e1, e2):
+        return log_broken_pl(lam_grid, lam_s_med, e1, e2, ds_med)
+
+    # Central curves
+    center_sigma = sig0_med + shp_sigma(eta_A1_med,   eta_A2_med)
+    center_tau   = tau0_med + shp_tau(eta_tau1_med, eta_tau2_med)
+
+    # Four-corner envelopes (η1±σ1, η2±σ2)
+    A1_lo, A1_hi = eta_A1_med - sig_eta_A1, eta_A1_med + sig_eta_A1
+    A2_lo, A2_hi = eta_A2_med - sig_eta_A2, eta_A2_med + sig_eta_A2
+
+    T1_lo, T1_hi = eta_tau1_med - sig_eta_t1, eta_tau1_med + sig_eta_t1
+    T2_lo, T2_hi = eta_tau2_med - sig_eta_t2, eta_tau2_med + sig_eta_t2
+
+    sigma_corners = np.vstack([
+        sig0_med + shp_sigma(A1_lo, A2_lo),
+        sig0_med + shp_sigma(A1_lo, A2_hi),
+        sig0_med + shp_sigma(A1_hi, A2_lo),
+        sig0_med + shp_sigma(A1_hi, A2_hi),
+    ])
+    tau_corners = np.vstack([
+        tau0_med + shp_tau(T1_lo, T2_lo),
+        tau0_med + shp_tau(T1_lo, T2_hi),
+        tau0_med + shp_tau(T1_hi, T2_lo),
+        tau0_med + shp_tau(T1_hi, T2_hi),
+    ])
+
+    sigma_lo = np.nanmin(sigma_corners, axis=0)
+    sigma_hi = np.nanmax(sigma_corners, axis=0)
+    tau_lo   = np.nanmin(tau_corners,   axis=0)
+    tau_hi   = np.nanmax(tau_corners,   axis=0)
+
+    # Plot population-median curve + η-error ribbon
+    ax1.plot(loglam_grid, center_sigma, lw=1.6, color='m', zorder=3)
+    ax1.fill_between(loglam_grid, sigma_lo, sigma_hi, color='m', alpha=0.2, zorder=2)
+    ax2.plot(loglam_grid, center_tau,   lw=1.6, color='m', zorder=3)
+    ax2.fill_between(loglam_grid, tau_lo,   tau_hi,   color='m', alpha=0.2, zorder=2)
+
+    # ---- labels & axes ----
+    if residual:
+        sig_lab = r'$\log(\sigma_{\mathrm{band}}/\sigma_{\mathrm{UV}})$'
+        tau_lab = r'$\log(\tau_{\mathrm{band,RF}}/\tau_{\mathrm{UV,RF}})$'
+    else:
+        sig_lab = r'$\log\!\,\sigma_{\mathrm{band}}$'
+        tau_lab = r'$\log\!\,\tau_{\mathrm{band,RF}}$'
+
+    ax1.set_ylabel(sig_lab)
+    ax2.set_ylabel(tau_lab)
+    ax2.set_xlabel(r'$\log(\lambda_{\mathrm{RF}}/\mathrm{\AA})$')
+
+    inward(ax1); inward(ax2)
+
+    # top linear-Å axis
+    def loglam_to_A(x): return np.power(10.0, x)
+    def A_to_loglam(x): return np.log10(x)
+    secax = ax1.secondary_xaxis('top', functions=(loglam_to_A, A_to_loglam))
+    secax.set_xlabel(r'$\lambda_{\mathrm{RF}}\;(\mathrm{\AA})$')
+    secax.tick_params(direction='in', which='both', top=True)
+
+    lam_min, lam_max = 10**xmin, 10**xmax
+    rng = lam_max - lam_min
+    steps = np.array([100, 200, 500, 1000, 2000, 4000], dtype=float)
+    step = steps[np.argmin(np.abs(rng / steps - 5.0))]
+    ticks = np.arange(np.floor(lam_min / step) * step,
+                      np.ceil(lam_max / step) * step + step, step)
+    secax.set_xticks(np.union1d(ticks, [1000.0]))
+
+    # ---- legend (bands + model) ----
+    band_handles = [
+        Line2D([0], [0], linestyle='none', marker='o', markersize=6,
+               markerfacecolor=colors.get(b), markeredgecolor='none',
+               label=f'Band {b}')
+        for b in plotted_bands
+    ]
+    model_handles = [Line2D([0], [0], color='m', lw=1.6, label='Median model (η ± 1σ)')]
+    handles = band_handles + model_handles
+    if handles:
+        ax1.legend(handles=handles, loc='best', frameon=False, ncol=2, fontsize=9)
+
+    # ---- median-slope annotations ----
+    eta_A1_med_ann   = eta_A1_med
+    eta_A2_med_ann   = eta_A2_med
+    eta_tau1_med_ann = eta_tau1_med
+    eta_tau2_med_ann = eta_tau2_med
+
+    txt_sigma = (rf'$\eta_{{A,1}} = {eta_A1_med_ann:+.3f}\,\pm\,{sig_eta_A1:.3f}$' '\n'
+                 rf'$\eta_{{A,2}} = {eta_A2_med_ann:+.3f}\,\pm\,{sig_eta_A2:.3f}$')
+    ax1.text(0.02, 0.96, txt_sigma, transform=ax1.transAxes, va='top', ha='left', alpha=1.0,
+             fontsize=10, bbox=dict(boxstyle='round,pad=0.25', fc='white', lw=0.8), zorder=10)
+
+    txt_tau = (rf'$\eta_{{\tau,1}} = {eta_tau1_med_ann:+.3f}\,\pm\,{sig_eta_t1:.3f}$' '\n'
+               rf'$\eta_{{\tau,2}} = {eta_tau2_med_ann:+.3f}\,\pm\,{sig_eta_t2:.3f}$')
+    ax2.text(0.02, 0.96, txt_tau, transform=ax2.transAxes, va='top', ha='left', alpha=1.0,
+             fontsize=10, bbox=dict(boxstyle='round,pad=0.25', fc='white', lw=0.8), zorder=10)
+
+    # ---- quick diag ----
+    if debug and x_all_tau.size:
+        slope_pts = linregress(x_all_tau, y_all_tau).slope
+        slope_model = np.gradient(center_tau, loglam_grid).mean()
+        print(f"[diag] slope(points) d logτ / d logλ ≈ {slope_pts:+.3f}")
+        print(f"[diag] slope(model ) d logτ / d logλ ≈ {slope_model:+.3f}")
+        print(f"[diag] medians: ηA1={eta_A1_med:+.3f}±{sig_eta_A1:.3f}, "
+              f"ηA2={eta_A2_med:+.3f}±{sig_eta_A2:.3f}, "
+              f"ητ1={eta_tau1_med:+.3f}±{sig_eta_t1:.3f}, "
+              f"ητ2={eta_tau2_med:+.3f}±{sig_eta_t2:.3f}")
+
+    out_dir = f"plots/multiband/{prefix}/powerlaw/"
+    os.makedirs(out_dir, exist_ok=True)
+    save_path = os.path.join(out_dir, f"{suffix}.png")
+    fig.savefig(save_path, dpi=300)
+    print(f"Saved power law plot to {save_path}")
+
+    if show:
+        plt.show()
+    plt.close()

@@ -26,6 +26,7 @@ prefix = os.environ.get('PREFIX', "test")
 suffix = os.environ.get('SUFFIX', "test")
 
 import jax
+from jax.experimental import checkify
 jax.config.update("jax_enable_x64", True)
 jax.config.update("jax_debug_nans", True)
 from jax import lax
@@ -71,6 +72,8 @@ from multiband_model_lmc import MyMultiVarModel_BLR_LMC
 from multiband_model_tauscale import MyMultiVarModel_TauScale
 from multiband_model_s import MyMultiVarModel_S
 from multiband_model_blr_mag import MyMultiVarModel_SMAG
+from multiband_model_blr_mag_multiexp import MyMultiVarModel_SMAG_MultiExp
+from multiband_model_blr_mag_new import MyMultiVarModel_SMAG_New
 
 # define params
 zero_mean = False
@@ -84,6 +87,7 @@ universal_params = (
     'log_sigma_eta_A1','log_sigma_eta_A2','log_sigma_eta_tau1','log_sigma_eta_tau2',
     '_log_lag_blr'
 )
+
 
 def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_fake_in, log_sigma_fake_in, 
                 bwb=True, disable_poly1=False, d_eta=True, disable_lag_blr=False, free_eta_break=False,
@@ -112,12 +116,12 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_
 
         # Initialize parameters
         # Global "universal" means for eta
-        eta_A1_mean = numpyro.sample("eta_A1_mean", dist.Uniform(-5.0, 0.0))
+        eta_A1_mean = numpyro.sample("eta_A1_mean", dist.Uniform(-5.0, 5.0))
         eta_tau1_mean = numpyro.sample("eta_tau1_mean", dist.Uniform(-10.0, 10.0))
 
         if broken_pl:
             print("[INFO] Using broken power-law for eta.")
-            eta_A2_mean = numpyro.sample("eta_A2_mean", dist.Uniform(-5.0, 0.0))
+            eta_A2_mean = numpyro.sample("eta_A2_mean", dist.Uniform(-5.0, 5.0))
             eta_tau2_mean = numpyro.sample("eta_tau2_mean", dist.Uniform(-10.0, 10.0))
         else:
             print("[INFO] Using single power-law for eta (eta_A2_mean=0, eta_tau2_mean=0).")
@@ -168,7 +172,7 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_
                 eta_tau2 = numpyro.deterministic("eta_tau2", jnp.full(batch_size, eta_tau2_mean))
 
             # Core kernel parameters (hierarchical & identified)
-            log_tau_drw0_high = jnp.log(10**10 * (1 + zs))
+            log_tau_drw0_high = jnp.log(10**10.0 * (1 + zs))
             log_tau_drw0_low = jnp.log(10**1.5 * (1 + zs))
 
             if sigma_tau_uniform:
@@ -198,9 +202,9 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_
                 log_sigma_hat0 = numpyro.deterministic("log_sigma_hat0", log_sigma0 - 0.5 * log_tau_drw0)
 
             # Emperical prior for bad light curves
-            if sigma_tau_plane_cut:
-                tau_drw0_RF = jnp.exp(log_tau_drw0) / (1 + zs)
-                numpyro.factor("hard", jnp.where(tau_drw0_RF > 2*log_sigma0 + 2.5*jnp.log(10), 0.0, -1e9))
+            # if sigma_tau_plane_cut:
+            #     tau_drw0_RF = jnp.exp(log_tau_drw0) / (1 + zs)
+            #     numpyro.factor("hard", jnp.where(tau_drw0_RF > 2*log_sigma0 + 2.5*jnp.log(10), 0.0, -1e9))
 
             # Host galaxy dilution
             alpha_host = numpyro.sample("alpha_host", dist.Normal(1.0, 0.1)) # alpha_lam
@@ -679,6 +683,12 @@ if __name__ == '__main__':
     elif args.lmc == -4:
         print(f"\033[93m[WARNING] Using Colin's Scale+Tau Model (LMC = -4).\033[0m")
         Model = MyMultiVarModel_SMAG
+    elif args.lmc == -5:
+        print(f"\033[93m[WARNING] Using Scale+Tau Model MultiExp (LMC = -5).\033[0m")
+        Model = MyMultiVarModel_SMAG_MultiExp
+    elif args.lmc == -6:
+        print(f"\033[93m[WARNING] Using Scale+Tau Model Colin New (LMC = -6).\033[0m")
+        Model = MyMultiVarModel_SMAG_New
 
     if args.inject_random_fake_etas:
         # Randomize alpha_sigma and beta_tau for each run
@@ -812,6 +822,7 @@ if __name__ == '__main__':
         else:
             # Plain run, no tracing
             mcmc.run(jax.random.PRNGKey(0))
+            
         samples_flat = mcmc.get_samples(group_by_chain=False)
         samples_per_chain = mcmc.get_samples(group_by_chain=True)
         save_all_samples_to_hdf5(samples_flat)
@@ -858,7 +869,7 @@ if __name__ == '__main__':
             if not args.disable_corner_plot:
                 #plot_posterior(obj_flat_samples_flatten_per_band, obj)
                 plot_posterior_fast(obj_flat_samples_flatten_per_band, obj)
-            plot_broken_power_law(obj_flat_samples, obj, broken_pl=args.broken_pl)
+            #plot_broken_power_law(obj_flat_samples, obj, broken_pl=args.broken_pl)
             #dump_mcmc_diagnostics(mcmc, obj, i, len(batch_data))
             # except Exception as e:
             #     logging.error(f"\033[91mError during plotting for object {obj['object_id']}: {e}\033[0m")
@@ -869,7 +880,13 @@ if __name__ == '__main__':
         logging.info("--------------------------------------------------------------")
     
     save_quasar_list_hdf5(results, ignored_keys=['X', 'y', 'yerr', 'band_idx'])
-    
+
+    try:
+        plot_sigma_tau_vs_lambda_with_model(results)
+    except Exception as e:
+        logging.error(f"\033[91mError during plot_sigma_tau_vs_lambda_with_model: {e}\033[0m")
+        logging.error(traceback.format_exc())
+
     if args.inject_fake:
         plot_recovery(results)
         for result in results:
