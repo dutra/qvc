@@ -116,13 +116,13 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_
 
         # Initialize parameters
         # Global "universal" means for eta
-        eta_A1_mean = numpyro.sample("eta_A1_mean", dist.Normal(-0.5, 4))
-        eta_tau1_mean = numpyro.sample("eta_tau1_mean", dist.Normal(0.5, 4))
+        eta_A1_mean = numpyro.sample("eta_A1_mean", dist.Normal(-1, 2))
+        eta_tau1_mean = numpyro.sample("eta_tau1_mean", dist.Normal(1, 2))
 
         if broken_pl:
             print("[INFO] Using broken power-law for eta.")
-            eta_A2_mean = numpyro.sample("eta_A2_mean", dist.Normal(-0.5, 4))
-            eta_tau2_mean = numpyro.sample("eta_tau2_mean", dist.Normal(-0.5, 4))
+            eta_A2_mean = numpyro.sample("eta_A2_mean", dist.Normal(0, 2))
+            eta_tau2_mean = numpyro.sample("eta_tau2_mean", dist.Normal(0, 2))
         else:
             print("[INFO] Using single power-law for eta (eta_A2_mean=0, eta_tau2_mean=0).")
             eta_A2_mean = numpyro.deterministic("eta_A2_mean", 0.0)
