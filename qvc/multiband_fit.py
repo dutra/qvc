@@ -28,7 +28,7 @@ suffix = os.environ.get('SUFFIX', "test")
 import jax
 from jax.experimental import checkify
 jax.config.update("jax_enable_x64", True)
-jax.config.update("jax_debug_nans", True)
+jax.config.update("jax_debug_nans", False)
 from jax import lax
 import jax.numpy as jnp
 
