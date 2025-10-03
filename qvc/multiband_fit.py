@@ -104,14 +104,6 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_
     log_tau_drw0_c = jnp.log(10**2.5 * (1 + zs))
     log_lag_blr_c  = jnp.log(10**1.5 * (1 + zs))
 
-
-    # use a non‑centered parameterization to avoid Neal’s funnel
-    @handlers.reparam(config={
-        "eta_A1": LocScaleReparam(centered=0.0),
-        "eta_A2": LocScaleReparam(centered=0.0),
-        "eta_tau1": LocScaleReparam(centered=0.0),
-        "eta_tau2": LocScaleReparam(centered=0.0),
-    })
     def numpyro_joint_model():
 
         # Initialize parameters
