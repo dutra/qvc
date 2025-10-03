@@ -384,7 +384,7 @@ class MyMultiVarModel_SMAG(MultiVarModel):
 
         mean = cond.loc
         var  = cond.variance
-        jax.debug.print(" var: {}", var)
+        # jax.debug.print(" var: {}", var)
         jax.debug.print("var min/max: {}/{}", jnp.min(var), jnp.max(var))
         jax.debug.print("mean min/max: {}/{}", jnp.min(mean), jnp.max(mean))
         std  = jnp.sqrt(var)    

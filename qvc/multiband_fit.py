@@ -882,7 +882,7 @@ if __name__ == '__main__':
     save_quasar_list_hdf5(results, ignored_keys=['X', 'y', 'yerr', 'band_idx'])
 
     try:
-        plot_sigma_tau_vs_lambda_with_model(results)
+        plot_sigma_tau_vs_lambda_with_model(results, inject_fake=args.inject_fake, broken_pl=args.broken_pl)
     except Exception as e:
         logging.error(f"\033[91mError during plot_sigma_tau_vs_lambda_with_model: {e}\033[0m")
         logging.error(traceback.format_exc())

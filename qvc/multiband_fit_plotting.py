@@ -1112,6 +1112,8 @@ def plot_sigma_tau_vs_lambda_with_model(
     rows,                 # list of dicts (each dict = one object)
     bands=('u', 'g', 'r', 'i', 'z'),
     *,
+    broken_pl=False,  # if False, use single PL instead of broken PL for model ribbon
+    inject_fake=False,
     residual=True,       # subtract UV from BOTH σ and τ
     show=False,
     debug=True,
@@ -1130,6 +1132,9 @@ def plot_sigma_tau_vs_lambda_with_model(
          η-slope 1σ uncertainties using the per-row *_err fields:
            eta_A1_err, eta_A2_err, eta_tau1_err, eta_tau2_err.
          We build median curves and an envelope from the 4 corner combos (±1σ each).
+
+    NEW (inject_fake=True): also plot the injected single-slope models using
+         alpha_sigma (for σ) and beta_tau (for τ) and include them in the annotations.
     """
     if not rows:
         raise ValueError("`rows` is empty.")
@@ -1184,9 +1189,9 @@ def plot_sigma_tau_vs_lambda_with_model(
         if m1.any() or m2.any():
             plotted_bands.append(b)
 
-        ax1.scatter(x[m1], y_sigma[m1], s=30, alpha=0.8, color=colors.get(b),
+        ax1.scatter(x[m1], y_sigma[m1], s=40, alpha=0.8, color=colors.get(b),
                     edgecolor='none', zorder=7)
-        ax2.scatter(x[m2], y_tau[m2],   s=30, alpha=0.8, color=colors.get(b),
+        ax2.scatter(x[m2], y_tau[m2],   s=40, alpha=0.8, color=colors.get(b),
                     edgecolor='none', zorder=7)
 
         if m1.any(): x_all.append(x[m1])
@@ -1197,7 +1202,7 @@ def plot_sigma_tau_vs_lambda_with_model(
     y_all_tau = np.concatenate(y_all_tau) if y_all_tau else np.array([])
 
     if x_all.size:
-        xmin, xmax = float(np.nanmin(x_all))-0.1, float(np.nanmax(x_all))+0.1
+        xmin, xmax = float(np.nanmin(x_all)) - 0.1, float(np.nanmax(x_all)) + 0.1
         ax2.set_xlim(xmin, xmax)
     else:
         xmin, xmax = 3.3, 4.2
@@ -1228,16 +1233,16 @@ def plot_sigma_tau_vs_lambda_with_model(
     sig0_med  = float(np.nanmedian(sig0_all))
     tau0_med  = float(np.nanmedian(tau0_rf_all))
 
-    # Shape function
-    def shp_sigma(e1, e2):
-        return log_broken_pl(lam_grid, lam_s_med, e1, e2, ds_med)
-
-    def shp_tau(e1, e2):
-        return log_broken_pl(lam_grid, lam_s_med, e1, e2, ds_med)
+    # Shape function (broken power-law; same for σ and τ)
+    def shp(e1, e2):
+        if broken_pl:
+            return log_broken_pl(lam_grid, lam_s_med, e1, e2, ds_med)
+        else:
+            return log_single_pl(lam_grid, lam_s_med, e1)
 
     # Central curves
-    center_sigma = sig0_med + shp_sigma(eta_A1_med,   eta_A2_med)
-    center_tau   = tau0_med + shp_tau(eta_tau1_med, eta_tau2_med)
+    center_sigma = sig0_med + shp(eta_A1_med,   eta_A2_med)
+    center_tau   = tau0_med + shp(eta_tau1_med, eta_tau2_med)
 
     # Four-corner envelopes (η1±σ1, η2±σ2)
     A1_lo, A1_hi = eta_A1_med - sig_eta_A1, eta_A1_med + sig_eta_A1
@@ -1247,16 +1252,16 @@ def plot_sigma_tau_vs_lambda_with_model(
     T2_lo, T2_hi = eta_tau2_med - sig_eta_t2, eta_tau2_med + sig_eta_t2
 
     sigma_corners = np.vstack([
-        sig0_med + shp_sigma(A1_lo, A2_lo),
-        sig0_med + shp_sigma(A1_lo, A2_hi),
-        sig0_med + shp_sigma(A1_hi, A2_lo),
-        sig0_med + shp_sigma(A1_hi, A2_hi),
+        sig0_med + shp(A1_lo, A2_lo),
+        sig0_med + shp(A1_lo, A2_hi),
+        sig0_med + shp(A1_hi, A2_lo),
+        sig0_med + shp(A1_hi, A2_hi),
     ])
     tau_corners = np.vstack([
-        tau0_med + shp_tau(T1_lo, T2_lo),
-        tau0_med + shp_tau(T1_lo, T2_hi),
-        tau0_med + shp_tau(T1_hi, T2_lo),
-        tau0_med + shp_tau(T1_hi, T2_hi),
+        tau0_med + shp(T1_lo, T2_lo),
+        tau0_med + shp(T1_lo, T2_hi),
+        tau0_med + shp(T1_hi, T2_lo),
+        tau0_med + shp(T1_hi, T2_hi),
     ])
 
     sigma_lo = np.nanmin(sigma_corners, axis=0)
@@ -1266,9 +1271,28 @@ def plot_sigma_tau_vs_lambda_with_model(
 
     # Plot population-median curve + η-error ribbon
     ax1.plot(loglam_grid, center_sigma, lw=1.6, color='m', zorder=3)
-    ax1.fill_between(loglam_grid, sigma_lo, sigma_hi, color='m', alpha=0.2, zorder=2)
+    ax1.fill_between(loglam_grid, sigma_lo, sigma_hi, color='m', alpha=0.28, zorder=2)
     ax2.plot(loglam_grid, center_tau,   lw=1.6, color='m', zorder=3)
-    ax2.fill_between(loglam_grid, tau_lo,   tau_hi,   color='m', alpha=0.2, zorder=2)
+    ax2.fill_between(loglam_grid, tau_lo,   tau_hi,   color='m', alpha=0.28, zorder=2)
+
+    # ---- injected ("fake") slope overlays & comparisons ----
+    have_fake_fields = all(k in rows[0] for k in ('alpha_sigma', 'beta_tau'))
+    alpha_sigma_med = beta_tau_med = None
+
+    if inject_fake and have_fake_fields:
+        # Median injected slopes across objects
+        alpha_sigma_med = med('alpha_sigma')
+        beta_tau_med    = med('beta_tau')
+
+        # Use single-slope shapes (same slope on both sides of the break)
+        fake_sigma_curve = sig0_med + shp(alpha_sigma_med, alpha_sigma_med)
+        fake_tau_curve   = tau0_med + shp(beta_tau_med,    beta_tau_med)
+
+        # Plot as dashed gray overlays
+        ax1.plot(loglam_grid, fake_sigma_curve, ls='--', lw=1.2, color='0.25',
+                 zorder=4, label='Injected σ-slope')
+        ax2.plot(loglam_grid, fake_tau_curve,   ls='--', lw=1.2, color='0.25',
+                 zorder=4, label='Injected τ-slope')
 
     # ---- labels & axes ----
     if residual:
@@ -1299,7 +1323,7 @@ def plot_sigma_tau_vs_lambda_with_model(
                       np.ceil(lam_max / step) * step + step, step)
     secax.set_xticks(np.union1d(ticks, [1000.0]))
 
-    # ---- legend (bands + model) ----
+    # ---- legend (bands + model + injected) ----
     band_handles = [
         Line2D([0], [0], linestyle='none', marker='o', markersize=6,
                markerfacecolor=colors.get(b), markeredgecolor='none',
@@ -1307,23 +1331,37 @@ def plot_sigma_tau_vs_lambda_with_model(
         for b in plotted_bands
     ]
     model_handles = [Line2D([0], [0], color='m', lw=1.6, label='Median model (η ± 1σ)')]
-    handles = band_handles + model_handles
+    inj_handles = []
+    if inject_fake and have_fake_fields:
+        inj_handles.append(Line2D([0], [0], color='0.25', lw=1.2, ls='--',
+                                  label='Injected slope'))
+
+    handles = band_handles + model_handles + inj_handles
     if handles:
         ax1.legend(handles=handles, loc='best', frameon=False, ncol=2, fontsize=9)
 
-    # ---- median-slope annotations ----
-    eta_A1_med_ann   = eta_A1_med
-    eta_A2_med_ann   = eta_A2_med
-    eta_tau1_med_ann = eta_tau1_med
-    eta_tau2_med_ann = eta_tau2_med
+    # ---- annotations (medians; include injected if requested) ----
+    txt_sigma = (rf'$\eta_{{A,1}} = {eta_A1_med:+.3f}\,\pm\,{sig_eta_A1:.3f}$' '\n'
+                 rf'$\eta_{{A,2}} = {eta_A2_med:+.3f}\,\pm\,{sig_eta_A2:.3f}$')
+    if inject_fake and have_fake_fields:
+        d1 = eta_A1_med - alpha_sigma_med
+        d2 = eta_A2_med - alpha_sigma_med
+        txt_sigma += ('\n' +
+                      rf'$\alpha_\sigma^\mathrm{{(inj)}} = {alpha_sigma_med:+.3f}$' '\n' +
+                      rf'$\Delta\eta_{{A,1}} = {d1:+.3f},\;\Delta\eta_{{A,2}} = {d2:+.3f}$')
 
-    txt_sigma = (rf'$\eta_{{A,1}} = {eta_A1_med_ann:+.3f}\,\pm\,{sig_eta_A1:.3f}$' '\n'
-                 rf'$\eta_{{A,2}} = {eta_A2_med_ann:+.3f}\,\pm\,{sig_eta_A2:.3f}$')
     ax1.text(0.02, 0.96, txt_sigma, transform=ax1.transAxes, va='top', ha='left', alpha=1.0,
              fontsize=10, bbox=dict(boxstyle='round,pad=0.25', fc='white', lw=0.8), zorder=10)
 
-    txt_tau = (rf'$\eta_{{\tau,1}} = {eta_tau1_med_ann:+.3f}\,\pm\,{sig_eta_t1:.3f}$' '\n'
-               rf'$\eta_{{\tau,2}} = {eta_tau2_med_ann:+.3f}\,\pm\,{sig_eta_t2:.3f}$')
+    txt_tau = (rf'$\eta_{{\tau,1}} = {eta_tau1_med:+.3f}\,\pm\,{sig_eta_t1:.3f}$' '\n'
+               rf'$\eta_{{\tau,2}} = {eta_tau2_med:+.3f}\,\pm\,{sig_eta_t2:.3f}$')
+    if inject_fake and have_fake_fields:
+        d1t = eta_tau1_med - beta_tau_med
+        d2t = eta_tau2_med - beta_tau_med
+        txt_tau += ('\n' +
+                    rf'$\beta_\tau^\mathrm{{(inj)}} = {beta_tau_med:+.3f}$' '\n' +
+                    rf'$\Delta\eta_{{\tau,1}} = {d1t:+.3f},\;\Delta\eta_{{\tau,2}} = {d2t:+.3f}$')
+
     ax2.text(0.02, 0.96, txt_tau, transform=ax2.transAxes, va='top', ha='left', alpha=1.0,
              fontsize=10, bbox=dict(boxstyle='round,pad=0.25', fc='white', lw=0.8), zorder=10)
 
@@ -1337,6 +1375,12 @@ def plot_sigma_tau_vs_lambda_with_model(
               f"ηA2={eta_A2_med:+.3f}±{sig_eta_A2:.3f}, "
               f"ητ1={eta_tau1_med:+.3f}±{sig_eta_t1:.3f}, "
               f"ητ2={eta_tau2_med:+.3f}±{sig_eta_t2:.3f}")
+        if inject_fake and have_fake_fields:
+            print(f"[diag] injected: α_σ={alpha_sigma_med:+.3f}, β_τ={beta_tau_med:+.3f}")
+            print(f"[diag] deltas: ΔηA1={eta_A1_med-alpha_sigma_med:+.3f}, "
+                  f"ΔηA2={eta_A2_med-alpha_sigma_med:+.3f}, "
+                  f"Δητ1={eta_tau1_med-beta_tau_med:+.3f}, "
+                  f"Δητ2={eta_tau2_med-beta_tau_med:+.3f}")
 
     out_dir = f"plots/multiband/{prefix}/powerlaw/"
     os.makedirs(out_dir, exist_ok=True)

@@ -520,25 +520,25 @@ def save_quasar_list_hdf5(quasars, ignored_keys=None, size_threshold=1024):
 
     logging.info("All quasars saved successfully.")
     
-def log_broken_pl(lam, lam_s, d1, d2, ds=0.1):
-    """
-    Log10 of a smooth broken power-law, normalized to 0 at lam_s.
-    Slopes approach d1 for lam << lam_s and d2 for lam >> lam_s.
+# def log_broken_pl(lam, lam_s, d1, d2, ds=0.1):
+#     """
+#     Log10 of a smooth broken power-law, normalized to 0 at lam_s.
+#     Slopes approach d1 for lam << lam_s and d2 for lam >> lam_s.
     
-    ds: smoothness control — larger ds = smoother transition,
-        smaller ds = sharper transition.
-    """
-    x = lam / lam_s
-    delta = d2 - d1
+#     ds: smoothness control — larger ds = smoother transition,
+#         smaller ds = sharper transition.
+#     """
+#     x = lam / lam_s
+#     delta = d2 - d1
 
-    # Use exponent 1/ds so larger ds => smoother
-    smooth_exp = 1.0 / ds
-    log10_1px = jnp.log1p(x**smooth_exp) / jnp.log(10.0)
+#     # Use exponent 1/ds so larger ds => smoother
+#     smooth_exp = 1.0 / ds
+#     log10_1px = jnp.log1p(x**smooth_exp) / jnp.log(10.0)
 
-    log_f = d1 * jnp.log10(x) + (delta / smooth_exp) * log10_1px
-    log_f -= (delta / smooth_exp) * jnp.log10(2.0)  # normalize to 0 at lam_s
+#     log_f = d1 * jnp.log10(x) + (delta / smooth_exp) * log10_1px
+#     log_f -= (delta / smooth_exp) * jnp.log10(2.0)  # normalize to 0 at lam_s
 
-    return log_f
+#     return log_f
 
 
 # def log_broken_pl(lam, lam_s, d1, d2, ds=0.1):
@@ -550,14 +550,51 @@ def log_broken_pl(lam, lam_s, d1, d2, ds=0.1):
 #     log_f = d1 * jnp.log10(x)
 #     return log_f
 
-def log_single_pl(lam, lam_s, d, d2=None, ds=None):
+def log_broken_pl(lam, lam_s, d1, d2, ds):
+    """
+    Log10 of a smooth broken power-law, normalized to 0 at lam_s.
+    ds is a smoothness (larger ds => smoother transition).
+    This version is numerically stable and AD-friendly.
+    """
+    # Preconditions: lam>0, lam_s>0, ds>0 (enforce in your priors/transforms)
+    ln10 = jnp.log(10.0)
+
+    # Work in log-space: log10(x) with x=lam/lam_s
+    log10x = (jnp.log(lam) - jnp.log(lam_s)) / ln10
+    # a = log10(x)/ds; we need log10(1 + 10^a) stably
+    a = log10x / ds
+    # log10(1 + 10^a) = log(1 + exp(a*ln 10)) / ln 10, computed stably:
+    log10_1p10a = jnp.logaddexp(0.0, a * ln10) / ln10
+
+    delta = d2 - d1
+    # Your original: d1*log10(x) + (delta/smooth_exp)*log10_1px - (delta/smooth_exp)*log10(2)
+    # with smooth_exp=1/ds  => (delta*ds)*(...)
+    log_f = d1 * log10x + (delta * ds) * (log10_1p10a - jnp.log10(2.0))
+    return log_f
+
+def log_single_pl(lam, lam_s, d, *_, **__):
     """
     Log10 of a simple power-law, normalized to 0 at lam_s.
     Slope is d everywhere.
+
+    Notes:
+    - Works for array lam/lam_s; requires lam>0, lam_s>0 (enforce upstream).
+    - Uses log-space to avoid overflow in lam/lam_s.
+    - Swallows extra args (*_, **__) so you can call it with the same
+      signature as your broken-PL without recompiles.
     """
-    x = lam / lam_s
-    log_f = d * jnp.log10(x)
-    return log_f
+    ln10 = jnp.log(jnp.array(10.0, dtype=jnp.result_type(lam, lam_s, d)))
+    # log10(lam/lam_s) = (log(lam) - log(lam_s)) / ln(10)
+    return d * (jnp.log(lam) - jnp.log(lam_s)) / ln10
+
+# def log_single_pl(lam, lam_s, d, d2=None, ds=None):
+#     """
+#     Log10 of a simple power-law, normalized to 0 at lam_s.
+#     Slope is d everywhere.
+#     """
+#     x = lam / lam_s
+#     log_f = d * jnp.log10(x)
+#     return log_f
 
 def regularize_cov_from_percentiles(x16, x84, y16, y84, cov_xy, eps=1e-8):
     # 1) variance estimates from central 68% interval
