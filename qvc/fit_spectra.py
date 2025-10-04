@@ -392,6 +392,10 @@ def run_qsofit_record(rec, npca_qso, cache_dir="data/spectra_cache",
 
     # default result (so we always return a complete row even on error)
     result = dict(
+        z=rec["z"],
+        plate=rec["plate"],
+        fiber=rec["fiber"],
+        mjd=rec["mjd"],
         delta_mag_r=-1e9,
         delta_mag_g=-1e9,
         delta_mag_i=-1e9,
