@@ -478,14 +478,7 @@ def run_qsofit_record(rec, npca_qso, cache_dir="data/spectra_cache",
         flux_scaled = flux * scale
 
         err_scaled  = err  * scale      # IMPORTANT: scale the uncertainties too
-        # (If you keep ivar anywhere: ivar_scaled = ivar / scale**2)
-
-        # --- Optional: include calibration (zeropoint) uncertainty in quadrature ---
-        # This treats a fully correlated term as if it were per-pixel (conservative).
-        if sigma_dm > 0:
-            frac_s = np.log(10.0) / 2.5 * sigma_dm   # σ_s / s from mag error
-            err_scaled = np.sqrt(err_scaled**2 + (flux_scaled * frac_s)**2)
-
+        
         q_mle = QSOFit(lam, flux_scaled, err_scaled, rec["z"], path=path_ex)
         q_mle.Fit(
             name=f"{rec['z']:.2f}_{rec['sdss_name']}_{rec['plate']}-{rec['mjd']}-{rec['fiber']}",  # customize the name of given targets. Default: plate-mjd-fiber
@@ -825,8 +818,7 @@ def main():
         best_res["redchi_npca_qso2"] = res2.get("redchi", np.nan)
 
         results[obj_id] = best_res
-        # print(f"Object {obj_id}: selected npca_qso={best_res['npca_qso']} with redchi={best_res['redchi']:.3f} (0:{res0['redchi']:.3f}, 1:{res1['redchi']:.3f}, 2:{res2['redchi']:.3f})")
-        # print(f"f_host_4200: {best_res['f_host_4200']}, EBV: {best_res['ebv_fs']}, EUV: {best_res['euv_fs']}, alpha_lambda: {best_res['alpha_lambda']}")
+        #print(f"Object {obj_id}: selected npca_qso={best_res['npca_qso']} with redchi={best_res['redchi']:.3f} (0:{res0['redchi']:.3f}, 1:{res1['redchi']:.3f}, 2:{res2['redchi']:.3f})")
 
     # Update each quasar dict with fields from results
     # This may overwrite ebv and other existing fields
