@@ -9,6 +9,7 @@ from scipy.interpolate import RegularGridInterpolator
 
 from mpl_toolkits.axes_grid1.inset_locator import inset_axes
 from astropy.cosmology import FlatwCDM, FlatwpwaCDM, FlatLambdaCDM, Flatw0waCDM
+from astropy.cosmology.realizations import Planck18
 import matplotlib.pyplot as plt
 import os
 import copy
@@ -176,14 +177,21 @@ def plot_cosmo_corner(
     z_pivot_agn,
     plot_path='plots/hubble',
     show=False,
-    speed=''
+    speed='',
+    smooth=160,
+    gauss_sigma=1.2,
+    kde_bw_scale=1.0,
+    grid_q=(0.0005, 0.9995),
+    pad_frac=0.25
 ):
-    """
-    Corner-style plot (custom) of key cosmology params with diagonal stats labels.
-      - Flatw0waCDM: H0, Om0, w0(= w(a=1) derived from wp,wa at z_pivot_agn), wa
-      - FlatwCDM:    H0, Om0, w0
-    If flat_samples_sn is None or empty, only the SN+AGN (red) set is plotted.
-    """
+    import os
+    import numpy as np
+    import matplotlib.pyplot as plt
+    import matplotlib.transforms as mtransforms
+    from matplotlib.lines import Line2D
+    from scipy.stats import gaussian_kde
+    from scipy.ndimage import gaussian_filter
+
     # --- pull model labels from your config ---
     _, model_labels, _ = get_model_params(cosmo_model)
 
@@ -195,7 +203,6 @@ def plot_cosmo_corner(
         raise KeyError(f"Could not find any of {cands} in labels {labels}")
 
     def _subset(samples, labels, z_pivot):
-        """Return reduced samples (N,k) and latex labels for the chosen model."""
         X = np.asarray(samples)
         i_H0  = _find(labels, "H0", "H_0")
         i_Om0 = _find(labels, "Om0", "OmegaM", "Omega_m")
@@ -234,26 +241,68 @@ def plot_cosmo_corner(
     def _get_density_levels(values, probs=[0.393, 0.865]):
         z = values.ravel()
         z_sorted = np.sort(z)
-        cdf = np.cumsum(z_sorted); cdf /= max(cdf[-1], 1e-300)
+        cdf = np.cumsum(z_sorted)
+        cdf /= max(cdf[-1], 1e-300)
         levels = [z_sorted[np.searchsorted(cdf, 1 - p)] for p in probs]
         return np.unique(np.sort(levels))
 
-    def _filled_kde(ax, x, y, color, base_alpha=0.4):
-        kde = gaussian_kde(np.vstack([x, y]))
-        xmin, xmax = np.percentile(x, [0.5, 99.5])
-        ymin, ymax = np.percentile(y, [0.5, 99.5])
-        xgrid = np.linspace(xmin, xmax, 120)
-        ygrid = np.linspace(ymin, ymax, 120)
+    def _kde2d(x, y):
+        data = np.vstack([x, y])
+        kde = gaussian_kde(data) if kde_bw_scale == 1.0 else gaussian_kde(
+            data, bw_method=gaussian_kde(data).scotts_factor() * float(kde_bw_scale)
+        )
+        return kde
+
+    def _grid_limits(x, q, pad):
+        qlo, qhi = np.clip(q[0], 0, 1), np.clip(q[1], 0, 1)
+        xmin, xmax = np.quantile(x, [qlo, qhi])
+        if not np.isfinite(xmin) or not np.isfinite(xmax) or xmax <= xmin:
+            xmin, xmax = np.min(x), np.max(x)
+        rng = xmax - xmin
+        pad_abs = pad * (rng if rng > 0 else (abs(xmax) + 1.0))
+        return xmin - pad_abs, xmax + pad_abs
+
+    def _kde2d_grid(x, y, ngrid, q=grid_q, pad=pad_frac):
+        kde = _kde2d(x, y)
+        xmin, xmax = _grid_limits(x, q, pad)
+        ymin, ymax = _grid_limits(y, q, pad)
+        xgrid = np.linspace(xmin, xmax, ngrid)
+        ygrid = np.linspace(ymin, ymax, ngrid)
         xx, yy = np.meshgrid(xgrid, ygrid)
         zz = kde(np.vstack([xx.ravel(), yy.ravel()])).reshape(xx.shape)
-        levels = _get_density_levels(zz, [0.393, 0.865])
-        for i in range(len(levels)-1, -1, -1):
-            ax.contourf(xx, yy, zz,
-                        levels=[levels[i], zz.max()],
-                        colors=[color], alpha=base_alpha*(i+1)/len(levels))
-        ax.contour(xx, yy, zz, levels=levels, colors=[color], linewidths=1.2)
+        return xx, yy, zz, (xmin, xmax, ymin, ymax)
 
-    # --- reduce to the parameters we actually plot ---
+    def _kde1d_grid(x, n=400, q=grid_q, pad=pad_frac):
+        xmin, xmax = _grid_limits(x, q, pad)
+        xs = np.linspace(xmin, xmax, n)
+        kde = gaussian_kde(x) if kde_bw_scale == 1.0 else gaussian_kde(
+            x, bw_method=gaussian_kde(x).scotts_factor() * float(kde_bw_scale)
+        )
+        return xs, kde(xs), (xmin, xmax)
+
+    def _filled_kde_with_3sigma(ax, x, y, color, base_alpha=0.4, *, set_limits=True):
+        xx, yy, zz, (xmin, xmax, ymin, ymax) = _kde2d_grid(x, y, smooth)
+        if gauss_sigma and gauss_sigma > 0:
+            zz = gaussian_filter(zz, sigma=float(gauss_sigma), mode='reflect')
+
+        levels_12 = _get_density_levels(zz, [0.393, 0.865])
+        for i in range(len(levels_12)-1, -1, -1):
+            ax.contourf(
+                xx, yy, zz,
+                levels=[levels_12[i], zz.max()],
+                colors=[color],
+                alpha=base_alpha * (i+1) / len(levels_12)
+            )
+        ax.contour(xx, yy, zz, levels=levels_12, colors=[color], linewidths=1.2)
+        level_3 = _get_density_levels(zz, [0.989])[0]
+        ax.contour(xx, yy, zz, levels=[level_3], colors=[color], linewidths=1.4, linestyles='--')
+
+        if set_limits:
+            ax.set_xlim(xmin, xmax)
+            ax.set_ylim(ymin, ymax)
+        return xmin, xmax, ymin, ymax
+
+    # --- reduce to plotted params ---
     agn_data, labels_latex = _subset(flat_samples_agn, model_labels, z_pivot_agn)
     sna_data = None
     if flat_samples_sn is not None and len(flat_samples_sn) > 0:
@@ -262,57 +311,57 @@ def plot_cosmo_corner(
     n_params = agn_data.shape[1]
     fig, axes = plt.subplots(n_params, n_params, figsize=(2.3*n_params, 2.3*n_params))
 
-    # --- build the grid ---
     for i in range(n_params):
         for j in range(n_params):
             ax = axes[i, j]
             ax.tick_params(direction='in')
 
             if i < j:
-                ax.axis("off")
-                continue
+                ax.axis("off"); continue
 
             if i == j:
-                # 1D KDEs
-                xs = np.linspace(np.min(agn_data[:, i]), np.max(agn_data[:, i]), 400)
-                kde_r = gaussian_kde(agn_data[:, i])
-                ax.plot(xs, kde_r(xs), color="k", lw=1.8)
-
+                xs, ys, (xmin, xmax) = _kde1d_grid(agn_data[:, i])
+                ax.plot(xs, ys, color="k", lw=1.8)
                 if sna_data is not None:
-                    xs_b = np.linspace(np.min(sna_data[:, i]), np.max(sna_data[:, i]), 400)
-                    kde_b = gaussian_kde(sna_data[:, i])
-                    ax.plot(xs_b, kde_b(xs_b), color="dodgerblue", lw=1.8)
+                    xs_b, ys_b, (xmin_b, xmax_b) = _kde1d_grid(sna_data[:, i])
+                    ax.plot(xs_b, ys_b, color="dodgerblue", lw=1.8)
+                    ax.set_xlim(min(xmin, xmin_b), max(xmax, xmax_b))
+                else:
+                    ax.set_xlim(xmin, xmax)
 
-                # diagonal titles: AGN (red) on top; SN (blue) below if present
                 m, lo, hi = np.median(agn_data[:, i]), np.percentile(agn_data[:, i],16), np.percentile(agn_data[:, i],84)
                 ms, ps, ns = _fmt_err(m, lo, hi, latex_label=labels_latex[i])
-                txt_red = rf"{labels_latex[i]} = {ms}" + rf"$^{{+{ps}}}_{{-{ns}}}$"
-                # draw both labels inside the axes so layout/tight_layout won't move/clip them
-                # place text ABOVE the axes, offset in points (device-independent)
-                fig = ax.figure
-                off_blue = mtransforms.ScaledTranslation(0,  2/72., fig.dpi_scale_trans)   # ~2 pt above top edge
-                off_red  = mtransforms.ScaledTranslation(0, 15/72., fig.dpi_scale_trans)   # red line above blue
-
-                ax.text(0.02, 1.0, txt_red,
-                        transform=ax.transAxes + off_red,
-                        ha="left", va="bottom", color="k", fontsize=11, clip_on=False)                # ax.set_title(rf"{labels_latex[i]} = {ms}" + rf"$^{{+{ps}}}_{{-{ns}}}$",
-                #              color="red", fontsize=11, loc="left", pad=2)
+                txt_black = rf"{labels_latex[i]} = {ms}" + rf"$^{{+{ps}}}_{{-{ns}}}$"
+                figt = ax.figure
+                off_blue = mtransforms.ScaledTranslation(0,  2/72., figt.dpi_scale_trans)
+                off_blk  = mtransforms.ScaledTranslation(0, 15/72., figt.dpi_scale_trans)
+                ax.text(0.02, 1.0, txt_black,
+                        transform=ax.transAxes + off_blk,
+                        ha="left", va="bottom", color="k", fontsize=11, clip_on=False)
 
                 if sna_data is not None:
                     mb, lob, hib = np.median(sna_data[:, i]), np.percentile(sna_data[:, i],16), np.percentile(sna_data[:, i],84)
                     msb, psb, nsb = _fmt_err(mb, lob, hib, latex_label=labels_latex[i])
                     txt_blue = rf"{labels_latex[i]} = {msb}" + rf"$^{{+{psb}}}_{{-{nsb}}}$"
                     ax.text(0.02, 1.0, txt_blue,
-                                transform=ax.transAxes + off_blue,
-                                ha="left", va="bottom", color="dodgerblue", fontsize=11, clip_on=False)
-
+                            transform=ax.transAxes + off_blue,
+                            ha="left", va="bottom", color="dodgerblue", fontsize=11, clip_on=False)
             else:
-                # 2D KDEs
+                # -------- FIX: draw both without setting limits, then union of ranges --------
+                lims = []
                 if sna_data is not None:
-                    _filled_kde(ax, sna_data[:, j], sna_data[:, i], "dodgerblue", base_alpha=0.4)
-                _filled_kde(ax, agn_data[:, j], agn_data[:, i], "k", base_alpha=0.4)
+                    lims.append(_filled_kde_with_3sigma(
+                        ax, sna_data[:, j], sna_data[:, i], "dodgerblue", base_alpha=0.4, set_limits=False
+                    ))
+                lims.append(_filled_kde_with_3sigma(
+                    ax, agn_data[:, j], agn_data[:, i], "k", base_alpha=0.4, set_limits=False
+                ))
+                xmin = min(l[0] for l in lims); xmax = max(l[1] for l in lims)
+                ymin = min(l[2] for l in lims); ymax = max(l[3] for l in lims)
+                ax.set_xlim(xmin, xmax)
+                ax.set_ylim(ymin, ymax)
+                # ---------------------------------------------------------------------------
 
-            # tidy labels
             if j == 0:
                 ax.set_ylabel(labels_latex[i])
             else:
@@ -323,7 +372,6 @@ def plot_cosmo_corner(
             else:
                 ax.set_xticklabels([])
 
-    # legend
     legend = []
     if sna_data is not None:
         legend.append(Line2D([0],[0], color="dodgerblue", lw=4, label="SN Ia"))
@@ -335,16 +383,19 @@ def plot_cosmo_corner(
                         wspace=0.05, hspace=0.05)
 
     os.makedirs(plot_path, exist_ok=True)
-
-    fig.savefig(os.path.join(plot_path, f"cosmo_corner_{cosmo_model}_{speed}.png"), bbox_inches="tight", dpi=150)
-    fig.savefig(os.path.join(plot_path, f"cosmo_corner_{cosmo_model}_{speed}.pdf"), bbox_inches="tight", dpi=600)
+    fig.savefig(os.path.join(plot_path, f"cosmo_corner_{cosmo_model}_{speed}.png"),
+                bbox_inches="tight", dpi=150)
+    fig.savefig(os.path.join(plot_path, f"cosmo_corner_{cosmo_model}_{speed}.pdf"),
+                bbox_inches="tight", dpi=600)
     if show:
         plt.show()
     plt.close(fig)
 
 
+
+
 def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plot_path="plots/hubble/",
-                show_binned_agn=True,
+                show_binned_agn=True, show_residuals=True,
                 debias=False, dms=None, show=False, completeness=True, show_true=False, verbose=True,
                 cosmo_model_samples={}):
     """
@@ -369,10 +420,10 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     # (FlatwpwaCDM expected if using 'FlatwpwaCDM')
 
     # --- Labels ---
-    if   cosmo_model == 'FlatwCDM':      label = r"Flat$w$CDM model"
-    elif cosmo_model == 'Flatw0waCDM':   label = r"Flat$w_0w_a$CDM model"
-    elif cosmo_model == 'FlatLambdaCDM': label = r"Flat$\Lambda$CDM model"
-    elif cosmo_model == 'FlatwpwaCDM':   label = r"Flat$w_p\!-\!w_a$CDM model"
+    if   cosmo_model == 'FlatwCDM':      label = r"flat $w$CDM model"
+    elif cosmo_model == 'Flatw0waCDM':   label = r"flat $w_0w_a$CDM model"
+    elif cosmo_model == 'FlatLambdaCDM': label = r"flat $\Lambda$CDM model"
+    elif cosmo_model == 'FlatwpwaCDM':   label = r"flat $w_p\!-\!w_a$CDM model"
     else:
         raise ValueError("Invalid cosmology model.")
 
@@ -511,7 +562,10 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     ax.set_ylim(26, 51)
     ax.set_xlim(-0.2, np.max(df_agn["z"].values) + 0.3)
     inset_ax = inset_axes(ax, width="40%", height="40%", loc="lower right", borderpad=1.5)
-    ax_resid = fig.add_subplot(gs[1], sharex=ax)
+    if show_residuals:
+        ax_resid = fig.add_subplot(gs[1], sharex=ax)
+    else:
+        ax_resid = ax  # dummy, not used
 
     # Solid vs open AGN markers by z (both main and inset)
     mask_in  = df_agn["z"].between(0.44, 3.16)
@@ -631,26 +685,29 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
         inset_ax.fill_between(z_grid, mu_lim, 60, color="red", alpha=0.12, zorder=2, label="< 50% complete")
 
     # Flat ΛCDM
-    if 'FlatLambdaCDM' in cosmo_model_samples:
-        flat_samples_lambda = cosmo_model_samples['FlatLambdaCDM']
-        flat_samples_lambda = flat_samples_lambda[::thin_factor]
+    mu_conc = Planck18.distmod(z_grid).value
+    ax.plot(z_grid, mu_conc, color="#F0B000", lw=1.2, ls='--', zorder=5, alpha=1.0, label="flat $\Lambda$CDM (Planck 2018)")
 
-        _, model_labels_lambda, _ = get_model_params('FlatLambdaCDM')
-        param_indices_lambda = {name: model_labels_lambda.index(name) for name in model_labels_lambda}
-        mu_model_lambda = np.array([
-            _mu_model(
-                'FlatLambdaCDM',
-                {k: s[param_indices_lambda[k]] for k in model_labels_lambda},
-                z_grid, z_pivot_agn)
-        for s in flat_samples_lambda
-        ])
-        mu_model_16th_lambda   = np.percentile(mu_model_lambda, 16, axis=0)
-        mu_model_median_lambda = np.percentile(mu_model_lambda, 50, axis=0)
-        mu_model_84th_lambda   = np.percentile(mu_model_lambda, 84, axis=0)
+    # if 'FlatLambdaCDM' in cosmo_model_samples:
+    #     flat_samples_lambda = cosmo_model_samples['FlatLambdaCDM']
+    #     flat_samples_lambda = flat_samples_lambda[::thin_factor]
 
-        ax.plot(z_grid, mu_model_median_lambda, color="#F0B000", lw=1.6, ls='--', alpha=1.0, zorder=5, label=r"Flat $\Lambda$CDM")
-        #ax.fill_between(z_grid, mu_model_16th_lambda, mu_model_84th_lambda, color="#F0B000", alpha=0.25, zorder=4)
-        inset_ax.plot(z_grid, mu_model_median_lambda, color="#F0B000", lw=1.2, ls='--', alpha=1.0, zorder=5)
+    #     _, model_labels_lambda, _ = get_model_params('FlatLambdaCDM')
+    #     param_indices_lambda = {name: model_labels_lambda.index(name) for name in model_labels_lambda}
+    #     mu_model_lambda = np.array([
+    #         _mu_model(
+    #             'FlatLambdaCDM',
+    #             {k: s[param_indices_lambda[k]] for k in model_labels_lambda},
+    #             z_grid, z_pivot_agn)
+    #     for s in flat_samples_lambda
+    #     ])
+    #     mu_model_16th_lambda   = np.percentile(mu_model_lambda, 16, axis=0)
+    #     mu_model_median_lambda = np.percentile(mu_model_lambda, 50, axis=0)
+    #     mu_model_84th_lambda   = np.percentile(mu_model_lambda, 84, axis=0)
+
+    #     ax.plot(z_grid, mu_model_median_lambda, color="#F0B000", lw=1.6, ls='--', alpha=1.0, zorder=5, label=r"Flat $\Lambda$CDM")
+    #     #ax.fill_between(z_grid, mu_model_16th_lambda, mu_model_84th_lambda, color="#F0B000", alpha=0.25, zorder=4)
+    #     inset_ax.plot(z_grid, mu_model_median_lambda, color="#F0B000", lw=1.2, ls='--', alpha=1.0, zorder=5)
 
     # Flatw0waCDM
     if 'Flatw0waCDM' in cosmo_model_samples:
@@ -679,68 +736,72 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     ax.set_xlabel(r"$z$")
 
     # ---------- Residuals panel ----------
-    # AGN residuals (inside)
-    ax_resid.plot(
-        df_agn["z"][mask_in], residuals[mask_in],
-        'o', markersize=3, mfc="black", mec="none", alpha=0.3, zorder=0, label="AGN residuals"
-    )
-    # AGN residuals (outside)
-    ax_resid.plot(
-        df_agn["z"][mask_out], residuals[mask_out],
-        'o', markersize=3, mfc='none', mec="k", alpha=0.3, zorder=0, label="AGN residuals (out)"
-    )
-    # Zero line
-    ax_resid.axhline(0.0, color="m", lw=2.2, zorder=1)
-
-    # NEW: binned residuals in red (points + thin connecting line)
-    if z_res_lin.size:
-        ax_resid.errorbar(
-            z_res_lin, resid_lin_mean, yerr=resid_lin_sem,
-            fmt='o', linestyle='none', markersize=5,
-            mfc='red', mec='none', ecolor='red', elinewidth=2.0, capsize=3.0,
-            alpha=0.98, zorder=15, label="Binned AGN residuals"
+    if show_residuals:
+        # AGN residuals (inside)
+        ax_resid.plot(
+            df_agn["z"][mask_in], residuals[mask_in],
+            'o', markersize=3, mfc="black", mec="none", alpha=0.3, zorder=0, label="AGN residuals"
         )
-        #ax_resid.plot(z_res_lin, resid_lin_mean, lw=1.2, color='red', alpha=0.9, zorder=14)
+        # AGN residuals (outside)
+        ax_resid.plot(
+            df_agn["z"][mask_out], residuals[mask_out],
+            'o', markersize=3, mfc='none', mec="k", alpha=0.3, zorder=0, label="AGN residuals (out)"
+        )
+        # Zero line
+        ax_resid.axhline(0.0, color="m", lw=2.2, zorder=1)
 
-    # Optional: line for (residuals - residuals_2) using median params of each model
-    if 'Flatw0waCDM' in cosmo_model_samples:
+        # NEW: binned residuals in red (points + thin connecting line)
+        if z_res_lin.size:
+            ax_resid.errorbar(
+                z_res_lin, resid_lin_mean, yerr=resid_lin_sem,
+                fmt='o', linestyle='none', markersize=5,
+                mfc='red', mec='none', ecolor='red', elinewidth=2.0, capsize=3.0,
+                alpha=0.98, zorder=15, label="Binned AGN residuals"
+            )
+            #ax_resid.plot(z_res_lin, resid_lin_mean, lw=1.2, color='red', alpha=0.9, zorder=14)
+
+        # Optional: line for (residuals - residuals_2) using median params of each model
+        if 'Flatw0waCDM' in cosmo_model_samples:
+            z_grid_fine = np.linspace(1e-4, 5.2, 500)
+            results_w0wa = {key: np.median(flat_samples_w0wa[:, i]) for i, key in enumerate(model_labels_w0wa)}
+
+            mu_model_1 = _mu_model(cosmo_model, results,   z_grid_fine, z_pivot_agn)
+            mu_model_w0wa = _mu_model('Flatw0waCDM', results_w0wa, z_grid_fine, z_pivot_agn)
+            ax_resid.plot(z_grid_fine, mu_model_w0wa - mu_model_1, lw=2.2, color="c", ls='dotted', alpha=1.0, label=r"Flatw$_0$w$_a$CDM $\Delta$μ")
+        
+        # if 'FlatLambdaCDM' in cosmo_model_samples:
+        #     z_grid_fine = np.linspace(1e-4, 5.2, 500)
+        #     results_lambda = {key: np.median(flat_samples_lambda[:, i]) for i, key in enumerate(model_labels_lambda)}
+
+        #     mu_model_1 = _mu_model(cosmo_model, results,   z_grid_fine, z_pivot_agn)
+        #     mu_model_lambda = _mu_model('FlatLambdaCDM', results_lambda, z_grid_fine, z_pivot_agn)
+        #     ax_resid.plot(z_grid_fine, mu_model_lambda - mu_model_1, lw=2.2, color="#F0B000", ls='--', alpha=1.0,)
+        # Planck 2018 ΛCDM
+
         z_grid_fine = np.linspace(1e-4, 5.2, 500)
-        results_w0wa = {key: np.median(flat_samples_w0wa[:, i]) for i, key in enumerate(model_labels_w0wa)}
+        mu_conc = Planck18.distmod(z_grid_fine).value
+        mu_model_1 = _mu_model(cosmo_model, results, z_grid_fine, z_pivot_agn)
+        #ax.plot(z_grid, mu_conc, color="#F0B000", lw=1.2, ls='--', zorder=5, alpha=1.0, label="flat $\Lambda$CDM (Planck 2018)")
+        ax_resid.plot(z_grid_fine, mu_conc - mu_model_1, lw=2.2, color="#F0B000", ls='--', alpha=1.0,)
 
-        mu_model_1 = _mu_model(cosmo_model, results,   z_grid_fine, z_pivot_agn)
-        mu_model_w0wa = _mu_model('Flatw0waCDM', results_w0wa, z_grid_fine, z_pivot_agn)
-        ax_resid.plot(z_grid_fine, mu_model_w0wa - mu_model_1, lw=2.2, color="c", ls='dotted', alpha=1.0, label=r"Flatw$_0$w$_a$CDM $\Delta$μ")
-    if 'FlatLambdaCDM' in cosmo_model_samples:
-        z_grid_fine = np.linspace(1e-4, 5.2, 500)
-        results_lambda = {key: np.median(flat_samples_lambda[:, i]) for i, key in enumerate(model_labels_lambda)}
 
-        mu_model_1 = _mu_model(cosmo_model, results,   z_grid_fine, z_pivot_agn)
-        mu_model_lambda = _mu_model('FlatLambdaCDM', results_lambda, z_grid_fine, z_pivot_agn)
-        ax_resid.plot(z_grid_fine, mu_model_lambda - mu_model_1, lw=2.2, color="#F0B000", ls='--', alpha=1.0,)
-
-    ax_resid.set_ylabel(r"$\Delta\mu$ (mag)")
-    ax_resid.set_xlabel(r"$z$")
-    ax_resid.set_ylim(-.5, .5)
-    #ax_resid.legend(frameon=True, loc="upper left", fontsize=10)
+        ax_resid.set_ylabel(r"$\Delta\mu$ (mag)")
+        ax_resid.set_xlabel(r"$z$")
+        ax_resid.set_ylim(-.5, .5)
+        #ax_resid.legend(frameon=True, loc="upper left", fontsize=10)
 
     for axi in (ax, inset_ax, ax_resid):
         axi.minorticks_on()
         axi.tick_params(axis='both', which='minor', direction='in', length=4, top=True, right=True, width=2)
         axi.tick_params(axis='both', which='major', direction='in', length=8, top=True, right=True)
 
-    # Hide the main panel's x-axis labels, numbers, and ticks (leave residuals' x-axis intact)
-    ax.set_xlabel("")  # remove main x-axis label
-    ax.tick_params(axis='x', which='minor', direction='in', labelbottom=False, length=4, top=True, right=True, width=2)
-    ax.tick_params(axis='x', which='major', direction='in', labelbottom=False, length=8, top=True, right=True)
-    ax.xaxis.offsetText.set_visible(False)  # hide any scientific-notation offset text
+    if show_residuals:
+        # Hide the main panel's x-axis labels, numbers, and ticks (leave residuals' x-axis intact)
+        ax.set_xlabel("")  # remove main x-axis label
+        ax.tick_params(axis='x', which='minor', direction='in', labelbottom=False, length=4, top=True, right=True, width=2)
+        ax.tick_params(axis='x', which='major', direction='in', labelbottom=False, length=8, top=True, right=True)
+        ax.xaxis.offsetText.set_visible(False)  # hide any scientific-notation offset text
 
-    # Legend
-    # Combine legends from ax and ax_resid
-    # handles_main, labels_main = ax.get_legend_handles_labels()
-    # handles_resid, labels_resid = ax_resid.get_legend_handles_labels()
-    # handles = handles_main + handles_resid
-    # labels = labels_main + labels_resid
-    # ax.legend(handles, labels, frameon=False, loc="lower center", bbox_to_anchor=(0.22, 0.06), fontsize=12)
     ax.legend(frameon=False, loc="lower center", bbox_to_anchor=(0.22, 0.06), fontsize=12)
 
     # Save/show
@@ -777,7 +838,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
         residuals_df["residuals"] = residuals
         residuals_df["mu_pred_median"] = mu_pred_median
         residuals_df["mu_pred_std"] = mu_pred_std
-        fields = ['object_id', 'apparent_mag_2500', 'f_host_4200', 'ra', 'dec', 'mu_pred_median', 'mu_pred_std', 'z', 'redchi', 'sdss_name', 'npca_qso', 'residuals']
+        fields = ['object_id', 'apparent_mag_2500', 'f_host_2500', 'ra', 'dec', 'mu_pred_median', 'mu_pred_std', 'z', 'redchi', 'sdss_name', 'npca_qso', 'residuals']
         residuals_df = residuals_df[fields]
         residuals_df = residuals_df.sort_values(by="residuals", ascending=False)
         csv_path = os.path.join(plot_path, "residuals.csv")
@@ -785,12 +846,12 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
         print(f"Residuals saved to {csv_path}")
 
         # Save outliers with residuals > 4 to outliers.csv
-        outlier_mask = np.abs(residuals_df["residuals"]) > 4
+        outlier_mask = np.abs(residuals_df["residuals"]) > 5
         if np.any(outlier_mask):
             outliers_df = residuals_df[outlier_mask]
             outliers_csv_path = os.path.join(plot_path, "outliers.csv")
             outliers_df.to_csv(outliers_csv_path, index=False)
-            print(f"Outliers (|residuals| > 4) saved to {outliers_csv_path}")
+            print(f"Outliers (|residuals| > 5) saved to {outliers_csv_path}")
 
 
     # Standard deviation Outlier report
@@ -1212,10 +1273,9 @@ def plot_full_residuals(df_agn, residuals, flat_samples, cosmo_model, z_pivot_ag
     keys = [col for col in np.flip([
         'apparent_mag_2500', 'MY_M_2500', 'z', 'log_lbol', 'log_ledd_ratio', 
         'log_sigma_UV', 'log_sigma_hat0', 'log_sigma_hat_UV', 'log_tau_UV_RF', 'chi_sq_g',
-        'bwb_beta', 'sn_median_all', 'bwb_alpha', 'bwb_beta',
-        'redchi', 'bwb_beta_4200', 'alpha_lambda', 'alpha_nu', 
-        'log_f_host_5100', 'log_f_host_4200',
-        'zWarning', 'sameZ', 'class_code', 'subClass_code',
+        'sn_median_all', 'redchi', 'alpha_lambda', #'alpha_nu', 'bwb_alpha', 'bwb_beta', 'bwb_beta_4200', 
+        'log_f_host_5100','f_host_5100', 'log_f_host_2500', 'f_host_2500',
+        #'zWarning', 'sameZ', 'class_code', 'subClass_code',
         'log_rho', 't_rf_length', 'tau_band_RF_mean',
         'log_tau_band_RF_mean', 'log_t_rf_length', 
         'alphaOX', 'alphaOX_int',
@@ -1224,10 +1284,10 @@ def plot_full_residuals(df_agn, residuals, flat_samples, cosmo_model, z_pivot_ag
     ]) if col in df_agn.columns]
 
     keys_masks = {
-        'f_host_5100': (0, np.inf),
-        'f_host_2500': (0, np.inf),
-        'f_host_4200': (0, 2),
-        'log_lbol': (1, np.inf),
+        #'f_host_5100': (-5, 10),
+        #'f_host_2500': (-5, 10),
+        #'f_host_2500': (0, 2),
+        #'log_lbol': (1, np.inf),
     }
 
     keys_yx_line = ['MY_M_2500', 'apparent_mag_2500']
@@ -1287,7 +1347,7 @@ def plot_full_residuals(df_agn, residuals, flat_samples, cosmo_model, z_pivot_ag
         plt.show()
 
     os.makedirs(plot_path, exist_ok=True)
-    plt.savefig(os.path.join(plot_path, f"full_residuals_{'debiased' if debias else 'biased'}.png"), dpi=300)
+    plt.savefig(os.path.join(plot_path, f"full_residuals_{'debiased' if debias else 'biased'}.png"), dpi=200)
     plt.close()
 
 

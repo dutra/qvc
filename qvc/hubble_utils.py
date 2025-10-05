@@ -129,7 +129,7 @@ def log_nuLnu_to_m2500(log_nuLnu, z):
     )
     return m_AB
 
-def match_radec(df_a, df_b, populate_cols=[], ra_col_a='ra', dec_col_a='dec', ra_col_b='ra', dec_col_b='dec', max_sep_arcsec=1.0):
+def match_radec(df_a, df_b, populate_cols=[], ra_col_a='ra', dec_col_a='dec', ra_col_b='ra', dec_col_b='dec', max_sep_arcsec=1.0, add_prefix=False):
     """
     Match objects in df_a to df_b by sky coordinates within max_sep_arcsec.
     Returns a DataFrame with indices and separation for matches.
@@ -147,7 +147,10 @@ def match_radec(df_a, df_b, populate_cols=[], ra_col_a='ra', dec_col_a='dec', ra
     # Optionally, add matched object_id or similar column if present in df_b
     for col in populate_cols:
         matched_values = np.where(match_mask, df_b.iloc[idx][col].values, None)
-        result[f'matched_{col}'] = matched_values
+        if add_prefix:
+            result[f'matched_{col}'] = matched_values
+        else:
+            result[col] = matched_values
 
     # Print warnings for unmatched
     unmatched_object_ids = []
@@ -282,7 +285,7 @@ def populate_zquery(df, zquery_csv):
 def populate_spectra_fit(df, spectra_fit_csvs):
     # Load Colin's SDSS QSO 2500A magnitudes and merge with df on SDSS_NAME
     fields = {
-            'f_host_4200': float,
+            #'f_host_2500': float,
             'f_host_2500': float,
             'f_host_5100': float,
             'ebv_fs': float,
@@ -343,7 +346,7 @@ def populate_spectra_fit(df, spectra_fit_csvs):
         out_csv = f"plots/hubble/{prefix}/merged.csv"
         os.makedirs(os.path.dirname(out_csv), exist_ok=True)
         # Only write specified columns
-        cols_to_save = ['object_id', 'sdss_name', 'apparent_mag_2500', 'f_host_2500'] + list(fields.keys())
+        cols_to_save = ['object_id', 'sdss_name', 'apparent_mag_2500', 'f_host_2500', 'z'] + list(fields.keys())
         # Remove duplicates while preserving order
         seen = set()
         cols_to_save_unique = []
@@ -361,6 +364,9 @@ def populate_spectra_fit(df, spectra_fit_csvs):
     # df['L2500_err'] = df['L2500'] * (np.log(10) * logL_err)
     # df['logL2500'] = logL
     # df['logL2500_err'] = logL_err
+
+    # df['apparent_mag_2500'] = df['apparent_mag_2500_reddened']
+    # df['apparent_mag_2500_err'] = df['apparent_mag_2500_reddened_err']
     return df
 
 
@@ -599,7 +605,10 @@ def populate_chi_sq_from_csv(df, csv_path):
     df['chi_sq_all'] = merged['chi_sq_all']
     return df
 
-def load_agn_data(file_path, populate_sdss=False, apply_cut=True, spectra_fit_csv=None, zquery_csv=None, only_load=False):
+def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=10,
+                  exclude_object_ids_csv=[],
+                  residuals_cut=None, residuals_csv=None,
+                  spectra_fit_csv=None, zquery_csv=None, only_load=False):
     quasar_list = read_quasars_from_hdf5(file_path)
     print("Number of quasars loaded:", len(quasar_list))
 
@@ -642,7 +651,7 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, spectra_fit_cs
     if only_load:
         return df
 
-    
+
     if spectra_fit_csv is not None:
         print("Populating spectra fit data from:", spectra_fit_csv)
         df = populate_spectra_fit(df, spectra_fit_csv)
@@ -655,7 +664,7 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, spectra_fit_cs
             df['alpha_lambda_err'] = 0
             df['redchi'] = 0
             df['f_host_2500'] = 0
-            df['f_host_4200'] = 0
+            df['f_host_2500'] = 0
             df['f_host_5100'] = 0
             df['apparent_mag_2500'] = 20
             df['apparent_mag_2500_err'] = 0
@@ -673,7 +682,7 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, spectra_fit_cs
             df['zWarning'] = -99
             df['sameZ'] = -99
 
-    df = populate_xray(df)
+    #df = populate_xray(df)
 
     # if 'cov_log_sigma_UV_log_tau_UV_RF' not in df.columns:
     #     print("[WARNING] cov_log_sigma_UV_log_tau_UV_RF not in data")
@@ -700,7 +709,7 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, spectra_fit_cs
     df['tau_band_RF_mean'] = tau_band_RF_mean
     df['log_rho'] = np.log10(tau_band_RF_mean / df['t_rf_length'])
 
-    df['log_f_host_4200'] = np.where(df['f_host_4200'] > 0, np.log10(df['f_host_4200']), np.nan)
+    df['log_f_host_2500'] = np.where(df['f_host_2500'] > 0, np.log10(df['f_host_2500']), np.nan)
     df['log_f_host_5100'] = np.where(df['f_host_5100'] > 0, np.log10(df['f_host_5100']), np.nan)
     # Replace NaNs with 0 in all columns
     #df = df.fillna(0)
@@ -708,15 +717,15 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, spectra_fit_cs
     df = df.reset_index(drop=True)
     
     # Exclude objects whose object_id is in an exclusion list/array (if provided)
-    # these objects are all part of job48
     exclusion_object_ids = []
     mask_exclude = ~df['object_id'].astype(str).isin(exclusion_object_ids)
+
     exclusion_sdss_names = [
         '221120.38+010905.6', # removed because wrong redshift
         '024555.35+005332.6' # remove because weird spectra
                             ]
-    mask_exclude = ~df['sdss_name'].astype(str).isin(exclusion_sdss_names)
-    print(f"Excluding {np.sum(~mask_exclude)} objects by object_id exclusion list")
+    mask_exclude &= (~df['sdss_name'].astype(str).isin(exclusion_sdss_names))
+    print(f"Excluding {np.sum(~mask_exclude)} objects by exclusion list")
     df = df[mask_exclude].reset_index(drop=True)
 
     # ALWAYS Remove objects with apparent_mag_2500 or apparent_mag_i too bright or too faint
@@ -726,9 +735,45 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, spectra_fit_cs
     print(f"Cut on apparent_mag_2500 and apparent_mag_i: {num_removed} objects removed")
     df = df[mag_mask].reset_index(drop=True)
 
+    mask_valid = (df['log_tau_UV_RF'] > 2*df['log_sigma_UV'] + 2.5)
+    num_removed = np.sum(~mask_valid)
+    print(f"Cut on tau vs sigma diagram: {num_removed} objects removed")
+    df = df[mask_valid].reset_index(drop=True)
+    # mask_in  = df_agn["z"].between(0.44, 3.16)
+
+    # Remove outliers by excluding object_ids listed in the outlier CSV
+    for exclude_csv in exclude_object_ids_csv:
+        if os.path.exists(exclude_csv):
+            exclude_df = pd.read_csv(exclude_csv)
+            exclude_ids = set(exclude_df['object_id'].astype(str))
+            mask_exclude = ~df['object_id'].astype(str).isin(exclude_ids)
+            num_excluded = np.sum(~mask_exclude)
+            print(f"Excluding {num_excluded} objects from DataFrame based on {exclude_csv}")
+            df = df[mask_exclude].reset_index(drop=True)
+        else:
+            print(f"[WARNING] Exclusion CSV not found: {exclude_csv}")
+
+    if residuals_cut is not None and residuals_csv is not None:
+        if os.path.exists(residuals_csv):
+            residual_df = pd.read_csv(residuals_csv)
+            if 'residuals' not in residual_df.columns:
+                raise ValueError(f"'residuals' column not found in {residuals_csv}")
+            residuals = dict(zip(residual_df['object_id'].astype(str), residual_df['residuals']))
+            df['residuals'] = df['object_id'].astype(str).map(residuals)
+            mask_residual = df['residuals'].abs() < residuals_cut
+            num_removed = np.sum(~mask_residual)
+            print(f"Cut on residual < {residuals_cut}: {num_removed} objects removed")
+            df = df.drop(columns=['residuals'])
+            df = df[mask_residual].reset_index(drop=True)
+        else:
+            print(f"[WARNING] Residual CSV not found: {residuals_csv}")
+            raise ValueError(f"Residual CSV not found: {residuals_csv}")
+
+
     # Define cuts as (column, lower_limit, upper_limit)
     cuts = [
-        ('f_host_4200', -0.1, 10.0),
+        #('z', 0.44, 3.16),
+        ('f_host_2500', 0.0, fhost_cut),
         ('log_tau_UV_RF', 1.5, None),
         #('redchi', None, 5),
         ('apparent_mag_2500', 12, 40),
@@ -737,6 +782,7 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, spectra_fit_cs
         #('alpha_lambda', None, 0),
         # ('sameZ', 0.9, 1.1),
     ]
+
     if apply_cut:
         initial_count = len(df)
         mask = np.ones(len(df), dtype=bool)
@@ -768,6 +814,8 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, spectra_fit_cs
     print("Number of dropped quasars with 0 < z <= 1.0:", num_quasars_z_0_1_before - num_quasars_z_0_1)
     print("Number of quasars with z > 3:", num_quasars_z_gt_3)
     print("Final number of quasars:", len(df))
+
+
     return df
 
 def load_pantheon_data():
@@ -2171,8 +2219,9 @@ def write_results_tex_variables(
                  format_value_uncertainty(results['Om0'][0], results['Om0'][1]))
     lines.append(r"\newcommand{\resultwZero}{\ensuremath{%s}}" %
                  format_value_uncertainty(results['w0'][0], results['w0'][1]))
-    lines.append(r"\newcommand{\resultwa}{\ensuremath{%s}}" %
-                 format_value_uncertainty(results['wa'][0], results['wa'][1]))
+    if cosmo_model in ('Flatw0waCDM', 'FlatwpwaCDM'):
+        lines.append(r"\newcommand{\resultwa}{\ensuremath{%s}}" %
+                    format_value_uncertainty(results['wa'][0], results['wa'][1]))
 
 
     # Derived intercepts

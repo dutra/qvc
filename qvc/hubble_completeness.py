@@ -101,7 +101,7 @@ from sklearn.linear_model import Ridge, RidgeCV
 def get_completeness_function_2d(
     df_agn,
     sim_file="data/mock_mag_z.h5",
-    n_mag_bins=50, n_z_bins=20,
+    n_mag_bins=40, n_z_bins=20,
     sigma_mag=0.5, sigma_z=0.5,
     smooth_counts=True,
     plot=False,
@@ -283,8 +283,7 @@ def get_completeness_function_2d(
     if z_max - z_min < 1e-3:
         z_min -= 0.01; z_max += 0.01
 
-    #mag_min, mag_max = 16.0, 26.0
-    mag_min, mag_max = 16.0, 32.0
+    mag_min, mag_max = 16.0, 28.0
     print(f"Using mag range: {mag_min:.2f} to {mag_max:.2f}")
 
     mag_edges = np.linspace(mag_min, mag_max, n_mag_bins + 1)
@@ -321,7 +320,7 @@ def get_completeness_function_2d(
             cmap='viridis'
         )
         plt.ylabel("z")
-        plt.xlabel(r"$m$ ($2500$ mag)")
+        plt.xlabel(r"$m_{2500,\,\mathrm{\AA}} \; (\mathrm{mag})$")
         #plt.title("Completeness p(detect | m, z)")
         cbar = plt.colorbar(im); cbar.set_label("Completeness $p(I{=}1|m, z)$")
         plt.tight_layout()

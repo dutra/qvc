@@ -121,7 +121,7 @@ def get_model_params(cosmo_model, only_sna=False):
         ("log_f",     (-5.0,  3.0)),
 
         ("H0",       (60.0, 80.0)),
-        ("Om0",      (0.0, 1.0)),
+        ("Om0",      (0.2, 0.8)),
     ])
 
     # Select cosmological parameters based on model

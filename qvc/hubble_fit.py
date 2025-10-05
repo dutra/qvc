@@ -158,10 +158,10 @@ def run_mcmc_pipeline(df_agn, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
                     resume=resume,
                     checkpoint_file=checkpoint_file,
                     print_progress=True,
-                    dlogz_init=1,                 
+                    dlogz_init=0.01,                 
                     n_effective=200,                # 300–1000 typical for model comparison
-                    nlive_init=40,   # bump live points
-                    nlive_batch=10   # reasonable batch size for dynamic allocation
+                    nlive_init=50,   # bump live points
+                    nlive_batch=25   # reasonable batch size for dynamic allocation
                 )
 
             elif speed == "test":
@@ -171,10 +171,10 @@ def run_mcmc_pipeline(df_agn, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
                     resume=resume,
                     checkpoint_file=checkpoint_file,
                     print_progress=True,
-                    dlogz_init=0.1,                 
+                    dlogz_init=0.01,                 
                     n_effective=200,                # 300–1000 typical for model comparison
-                    nlive_init=max(200, 30*ndim),   # bump live points
-                    nlive_batch=max(100, 20*ndim)   # reasonable batch size for dynamic allocation
+                    nlive_init=min(100, 30*ndim),   # bump live points
+                    nlive_batch=min(50, 20*ndim)   # reasonable batch size for dynamic allocation
                 )
 
 
@@ -300,7 +300,7 @@ def run_single(df_agn, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, cosmo_mo
     display_results_summary(flat_samples, cosmo_model, z_pivot_agn)
     age = compute_age_universe(flat_samples, cosmo_model)
     print(f"Age of universe: {age:.3f} Gyr")
-    
+
     if skip_plots:
         return sampler, flat_samples, model_labels, dmag_corr, logZ, logZerr, None, age
 
@@ -323,8 +323,8 @@ def run_single(df_agn, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, cosmo_mo
     chisq_red_M2500_debiased, _ = reduced_chi_squared(M2500_residuals_debiased, M2500_std_debiased, n_params=len(model_labels)-1)
 
     print("Plotting Hubble diagram...")
-    residuals, mu_pred_median, mu_pred_std = plot_hubble(flat_samples, df_agn, df_pantheon, 
-                                                         cosmo_model=cosmo_model, z_pivot_agn=z_pivot_agn, 
+    residuals, _, _ = plot_hubble(flat_samples, df_agn, df_pantheon, 
+                                                         cosmo_model=cosmo_model, z_pivot_agn=z_pivot_agn, show_residuals=False,
                                                          show_true=False, show=False, debias=False, plot_path=plot_path, verbose=False)
     debiased_residuals, _, mu_pred_std_debiased = plot_hubble(flat_samples, df_agn, df_pantheon, 
                                                          cosmo_model=cosmo_model, z_pivot_agn=z_pivot_agn, 
@@ -344,7 +344,8 @@ def run_single(df_agn, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, cosmo_mo
     
     print("Plotting cosmological posteriors corner plot...")
     plot_cosmo_corner(None, flat_samples, cosmo_model, z_pivot_sna, z_pivot_agn, show=False, 
-                      plot_path=plot_path, speed=speed)
+                      plot_path=plot_path, speed=speed,
+                      gauss_sigma=1.5, kde_bw_scale=1.5)
 
     print("Plotting completeness vs magnitude at redshifts...")
     p_detect, mag_centers, z_centers, dm, dz, completeness_scatter = get_completeness_function_2d(df_agn, plot=True)
@@ -375,7 +376,10 @@ def run_single(df_agn, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, cosmo_mo
         'Hubble': chisq_red_hubble_debiased,
         'L2500': chisq_red_L2500
     }
-    write_results_tex_variables(df_agn, flat_samples, cosmo_model, None, z_pivot_agn, plot_path, chisq_dict=chisq_dict, age=age)
+    try:
+        write_results_tex_variables(df_agn, flat_samples, cosmo_model, None, z_pivot_agn, plot_path, chisq_dict=chisq_dict, age=age)
+    except Exception as e:
+        print("Error writing TeX variables:", e)
 
     return sampler, flat_samples, model_labels, dmag_corr, logZ, logZerr, debiased_residuals, age
 
@@ -406,7 +410,8 @@ def run_all(df_agn, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
         _, samples_sna, _, _, logZ_sna, logZerr_sna, _, _ = r
         
         plot_cosmo_corner(samples_sna, samples_joint, cosmo_model, z_pivot_sna, z_pivot_agn, show=False, 
-                          plot_path=f"plots/hubble/{prefix}", speed=speed)
+                          plot_path=f"plots/hubble/{prefix}", speed=speed,
+                          gauss_sigma=1.5, kde_bw_scale=1.5)
 
         cosmo_models_dict[cosmo_model]['logZ'] = logZ_joint
         cosmo_models_dict[cosmo_model]['logZerr'] = logZerr_joint
@@ -449,6 +454,10 @@ if __name__ == "__main__":
     parser.add_argument("--no_cuts", action="store_true", default=False, help="Disable AGN data cuts (default: False)")
     parser.add_argument("--z_pivot_agn", type=float, default=1.5, help="Pivot redshift for AGN standardization (default: 1.5)")
     parser.add_argument("--skip_plots", action="store_true", default=False, help="Skip plotting steps (default: False)")
+    parser.add_argument("--fhost_cut", type=float, default=10, help="Optional fhost cut value (default: 10)")
+    parser.add_argument("--exclude_object_ids_csv", type=str, nargs='+', default=[], help="Path(s) to CSV file(s) containing object IDs to exclude")
+    parser.add_argument("--residuals_cut", type=float, default=None, help="Optional residual cut value to exclude outliers (default: None)")
+    parser.add_argument("--residuals_csv", type=str, default=None, help="Path to CSV file containing residuals for outlier exclusion (default: None)")
 
     args = parser.parse_args()
 
@@ -465,12 +474,15 @@ if __name__ == "__main__":
 
     df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_pantheon_data()
     df_agn = load_agn_data(args.agn_data_filepath, populate_sdss=args.force_populate_fields, 
-                           apply_cut=not args.no_cuts,
+                           apply_cut=not args.no_cuts, fhost_cut=args.fhost_cut,
+                           residuals_cut=args.residuals_cut, residuals_csv=args.residuals_csv,
+                           exclude_object_ids_csv=args.exclude_object_ids_csv,
                            spectra_fit_csv=args.spectra_fit_csv, zquery_csv=args.zquery_csv)
 
-    if args.N and args.N > 0:
-        # df_agn = df_agn.sample(n=args.N, random_state=42)
-        df_agn = df_agn[:args.N]
+    # if args.N and args.N > 0:
+    #     # df_agn = df_agn.sample(n=args.N, random_state=42)
+    #     df_fit = df_fit[:args.N]
+
     if args.run == "single": # default
         run_single(df_agn=df_agn, df_pantheon=df_pantheon, _sna_L=_sna_L, _sna_Lower=_sna_Lower, _sna_LogdetCov=_sna_LogdetCov, cosmo_model=args.cosmo_model,
              completeness=not args.disable_completeness, use_full_cov=not args.disable_full_covariance, resume=args.resume,

@@ -85,7 +85,10 @@ def load_and_filter(csv_path: Path, threshold: float, sort_by: str, key: str) ->
     if missing:
         raise ValueError(f"CSV is missing required columns: {sorted(missing)}")
 
-    mask = np.abs(df[key]) > threshold
+    mask = np.ones(len(df), dtype=bool)
+    #mask = np.abs(df[key]) > threshold
+    #mask = df[key].between(0.5, 1.0)
+    #mask = df['sdss_name'] == '230022.05+004300.2'
     df_f = df.loc[mask].copy()
 
     if sort_by == "desc":
@@ -103,12 +106,13 @@ def iter_pdf_matches(row: pd.Series, plots_root: Path, recursive: bool) -> Itera
     Preferred pattern: "{z:.2f}_{sdss_name}_*.pdf"
     Fallback pattern: "*{sdss_name}*.pdf"
     """
-    npca = row["npca_qso"]
+    npca = int(row["npca_qso"])
     z = float(row["z"])
     sdss_name = str(row["sdss_name"])
 
     base_dir = plots_root / f"npca_qso_{npca}"
     if not base_dir.exists():
+        print(f"WARNING: Directory does not exist: {base_dir}", file=sys.stderr)
         return
 
     preferred = f"{z:.2f}_{sdss_name}_*.pdf"
@@ -265,7 +269,7 @@ def main() -> int:
         sdss_name = str(rec["sdss_name"])
         key = float(rec[args.key])
         redchi = float(rec["redchi"])
-
+        print(f"Row: sdss_name={sdss_name}  npca_qso={npca}  z={z:.3f}  {args.key}={key:.3f}  redchi={redchi:.2f}")
         hits = list(iter_pdf_matches(rec, args.plots_root, args.recursive))
         if not hits:
             missing_rows += 1

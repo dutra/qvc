@@ -169,8 +169,8 @@ def main():
     def filter_quasars(quasars):
         return [q for q in quasars if q.get("f_host_5100", -99) > -90]
 
-    quasars = filter_quasars(quasars)
-    print(f"After filtering, {len(quasars)} quasars remain.")
+    #quasars = filter_quasars(quasars)
+    #print(f"After filtering, {len(quasars)} quasars remain.")
 
     if not args.skip_populate_sdss:
         print("Populating SDSS fields...")

@@ -31,6 +31,7 @@ def completeness_loglike(m_obs, m_obs_err, m_model, mu_err, z, completeness2d, m
     # Model-centered selection factor: Z_i
     pdf_model = stats.norm.pdf(m_grid[None, :], loc=m_model[:, None], scale=sig)  # (N,G)
     wpdf_model = pdf_model * p_det
+
     Z = np.trapz(wpdf_model, m_grid, axis=1)                            # (N,)
     Z = np.clip(Z, tiny, None)                                          # guard denom
 
@@ -42,7 +43,14 @@ def completeness_loglike(m_obs, m_obs_err, m_model, mu_err, z, completeness2d, m
     dmi_obs[z<0.2] = 0.0
 
     blob = np.vstack([Z.astype(float), dmi_obs.astype(float)])
-    return np.sum(np.log(Z)), blob
+ 
+    # ---- NEW: mask out the specified redshift range ----
+    mask_in = (0.44 < z) & (z < 3.16)
+    #mask_in = z < 100
+    loglike_terms = np.log(Z)
+    loglike_terms[~mask_in] = 0.0  # zero out the contribution
+
+    return np.sum(loglike_terms), blob
 
 # --- Log-likelihood ---
 def empty_blob(N_obj):
@@ -162,7 +170,11 @@ def log_likelihood(theta, *, agn_data, pantheon_data,
 
     mu_cosmo = cosmo.distmod(z).value
 
-    ll_agn = np.sum(stats.norm.logpdf(mu_pred - mu_cosmo, scale=mu_err))
+    ll_agn_terms = stats.norm.logpdf(mu_pred - mu_cosmo, scale=mu_err)
+    mask_in = (0.44 < z) & (z < 3.16)
+    #mask_in = z < 100
+    ll_agn_terms[~mask_in] = 0.0  # zero out the contribution
+    ll_agn = np.sum(ll_agn_terms)
 
     m_model = M_pred + mu_cosmo  # model-predicted magnitude
 
