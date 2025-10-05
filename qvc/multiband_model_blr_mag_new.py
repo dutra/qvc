@@ -144,75 +144,74 @@ def _top_hat_gain(width, tau):
     full  = -jnp.expm1(-x) / jnp.maximum(x, 1e-16)
     return jnp.where(x < 1e-8, small, full)
 
-class BWB_QS(qs.Wrapper):
+class BWB_QS(qs.Quasisep):
     """
-    BWB-only QS kernel: OU with exponent exp_bwb, no lag, with per-band width.
+    Bluer-When-Brighter (BWB) additive kernel with per-band modification.
 
-      Cov_{b1,b2}(τ) =
-        sigma_bwb[b1] * sigma_bwb[b2] * exp(-|τ| / (tau_drw / exp_bwb)),
-      then each band's observation is top-hat smoothed by width_bwb[b].
+    Args
+    ----
+    amp_cont:   (B,)  continuum amplitude proxy per band (unitless scale factor)
+    sigma_bwb:  (B,) or () overall BWB strength per band (or shared scalar)
+    exp_bwb:    ()    exponent controlling how BWB scales with amp_cont
+    width_bwb:  (B,)  boxcar width (same units as tau), no lag
+    tau:        (B,)  OU timescale per band
 
-    Parameters
-    ----------
-    sigma_bwb : array_like [B]
-        Per-band amplitude for the BWB latent.
-    width_bwb : array_like [B]
-        Per-band top-hat width (same time units as t). Must be >= 0.
-    tau_drw : float
-        Base OU timescale; BWB latent uses tau_bwb = tau_drw / exp_bwb.
-    exp_bwb : float, default 2.0
-        Exponent for the BWB term: k_bwb(τ) = k_ou(τ) ** exp_bwb.
-    s : array_like [B] or None, default None
-        Optional per-band time scaling applied to *width only* (no lag here).
-        If None, uses ones.
+    Notes
+    -----
+    * No additional lag (pure chromatic amplitude modulation).
+    * PSD-safe via shared-state OU system:
+        A = diag(-1/tau)
+        P_ij = 2*sqrt(tau_i*tau_j)/(tau_i + tau_j)
+    * Observation for band b:
+        h_b = sigma_bwb[b] * (amp_cont[b]**exp_bwb) * G(width_bwb[b], tau[b]) * e_b
     """
 
-    amp_cont:  jnp.ndarray
-    sigma_bwb: jnp.ndarray
-    width_bwb: jnp.ndarray
-    exp_bwb:   float
-    s:         jnp.ndarray
-    kernel:    qs.Kernel  # OU with scale = tau_drw / exp_bwb
+    amp_cont:   jnp.ndarray  # (B,)
+    sigma_bwb:  jnp.ndarray  # (B,) or ()
+    exp_bwb:    float        # ()
+    width_bwb:  jnp.ndarray  # (B,)
+    tau:        jnp.ndarray  # (B,)
 
-    def __init__(self, amp_cont, sigma_bwb, width_bwb, tau_drw, exp_bwb: float = 2.0, s=None):
-        eps = 1e-12
-        tau0 = jnp.maximum(jnp.asarray(tau_drw), eps)
-        exp  = jnp.maximum(jnp.asarray(exp_bwb, dtype=tau0.dtype), eps)
-
-        self.amp_cont  = jnp.asarray(amp_cont)
-        self.sigma_bwb = jnp.asarray(sigma_bwb)
-        self.width_bwb = jnp.maximum(jnp.asarray(width_bwb), 0.0)
-        self.exp_bwb   = exp
-
-        if s is None:
-            self.s = jnp.ones_like(self.sigma_bwb, dtype=tau0.dtype)
-        else:
-            self.s = jnp.maximum(jnp.asarray(s, dtype=tau0.dtype), eps)
-
-        # OU kernel realizing k(τ)**exp_bwb
-        self.kernel = qs.Exp(scale=tau0 / exp, sigma=1.0)
-
-    # Sorting axis: shared time + tiny band tiebreaker
+    # ---------- tinygp hooks ----------
     def coord_to_sortable(self, X):
         t, b = X
+        # tiny band nudge to keep deterministic ordering when times tie
         return t + 1e-9 * jnp.asarray(b, jnp.int32)
 
-    # Stable top-hat gain for OU smoothing over width 'w' (no lag)
-    @staticmethod
-    def _gain_top_hat(width_u, tau):
-        tau   = jnp.maximum(tau, 1e-12)
-        x     = width_u / tau
-        small = 1.0 - 0.5*x + (x*x)/6.0           # series for x<<1
-        full  = -jnp.expm1(-x) / jnp.maximum(x, 1e-12)
-        return jnp.where(x < 1e-8, small, full)
+    def design_matrix(self) -> JAXArray:
+        lam = 1.0 / jnp.maximum(self.tau, 1e-12)
+        return -jnp.diag(lam)
 
-    def observation_model(self, X):
-        _, b = X
-        b    = jnp.asarray(b, dtype=jnp.int32)
-        h0   = self.kernel.observation_model(jnp.array(0.0))   # (1,)
-        w_u  = self.s[b] * self.width_bwb[b]                   # scaled width
-        G    = self._gain_top_hat(w_u, self.kernel.scale)      # scalar
-        return self.sigma_bwb * self.amp_cont[b] * (h0 * G)    # (1,)
+    def stationary_covariance(self) -> JAXArray:
+        # P_ij = 2 sqrt(tau_i tau_j) / (tau_i + tau_j)
+        tau = jnp.maximum(self.tau, 1e-12)
+        ti = tau[:, None]
+        tj = tau[None, :]
+        P  = 2.0 * jnp.sqrt(ti * tj) / jnp.maximum(ti + tj, 1e-12)
+        return 0.5 * (P + P.T)  # symmetrize
+
+    def transition_matrix(self, X1: JAXArray, X2: JAXArray) -> JAXArray:
+        t1, _ = X1
+        t2, _ = X2
+        dt  = t2 - t1
+        lam = 1.0 / jnp.maximum(self.tau, 1e-12)
+        return jnp.diag(jnp.exp(-lam * dt))
+
+    def observation_model(self, X: JAXArray) -> JAXArray:
+        _t, b = X
+        b = jnp.asarray(b, dtype=jnp.int32)
+
+        # per-band scale: sigma_bwb * (amp_cont**exp_bwb) * top-hat gain
+        amp = self.amp_cont[b]
+        tau_b = jnp.maximum(self.tau[b], 1e-12)
+        G  = _top_hat_gain(self.width_bwb[b], tau_b)
+
+        # TODO: allow sigma_bwb to be scalar or per-band?
+        alpha_b = self.sigma_bwb * (amp ** self.exp_bwb) * G
+
+        B   = self.tau.shape[0]
+        e_b = jnp.zeros(B, dtype=self.tau.dtype).at[b].set(1.0)
+        return alpha_b * e_b
 
 def qs_psd(kernel, omega, b: int, sigma_n2: float = 0.0):
     """
@@ -303,18 +302,16 @@ class MyMultiVarModel_SMAG_New(MultiVarModel):
             width_blr=params["width_blr"],
             tau=jnp.exp(log_tau_band)
         )
-        """
+        
         kernel_bwb = BWB_QS(
             amp_cont=jnp.exp(log_sigma_band),
             sigma_bwb=params["bwb_alpha"],
-            width_bwb=params["width_cont"],
-            tau_drw=jnp.exp(log_tau_center),
             exp_bwb=params["bwb_beta"],
-            s=s
+            width_bwb=params["width_cont"],
+            tau=jnp.exp(log_tau_band),
         )
-        """
 
-        kernel = kernel_contBLR #+ kernel_bwb
+        kernel = kernel_contBLR + kernel_bwb
 
         u = kernel.coord_to_sortable((t, band))
         order = jnp.argsort(u)
