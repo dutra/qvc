@@ -594,7 +594,7 @@ def run_qsofit_record(rec, npca_qso, cache_dir="data/spectra_cache",
 
 
         try:
-            alpha_lambda = conti_dict.get('PL_slope', -99)
+            alpha_lambda = conti_dict.get('PL_slope_blue', -99)
             z = conti_dict['z']
 
             filt_i = filters.load_filter('sdss2010-i')
@@ -625,8 +625,8 @@ def run_qsofit_record(rec, npca_qso, cache_dir="data/spectra_cache",
             f_host_2500=conti_dict.get('frac_host_4200', 0), # in pyqsofit, frac_host_4200 is actually at 2500A
             #f_host_4200=conti_dict.get('frac_host_4200', 0),
             f_host_5100=conti_dict.get('frac_host_5100', 0),
-            alpha_lambda=conti_dict['PL_slope'],
-            alpha_lambda_err=conti_dict['PL_slope_err'],
+            alpha_lambda=conti_dict['PL_slope_blue'],
+            alpha_lambda_err=conti_dict['PL_slope_blue_err'],
             redchi=q_mle.conti_fit.redchi,
             ebv_fs=conti_dict.get('EBV', -99),
             euv_fs=conti_dict.get('EUV', -99),
