@@ -74,7 +74,7 @@ from multiband_model_s import MyMultiVarModel_S
 from multiband_model_blr_mag import MyMultiVarModel_SMAG
 from multiband_model_blr_mag_multiexp import MyMultiVarModel_SMAG_MultiExp
 from multiband_model_blr_mag_new import MyMultiVarModel_SMAG_New
-from multiband_model_blr_mag_new_physical import MyMultiVarModel_SMAG_New_Physical
+
 # define params
 zero_mean = False
 has_jitter = True
@@ -681,9 +681,6 @@ if __name__ == '__main__':
     elif args.lmc == -6:
         print(f"\033[93m[WARNING] Using Scale+Tau Model Colin New (LMC = -6).\033[0m")
         Model = MyMultiVarModel_SMAG_New
-    elif args.lmc == -7:
-        print(f"\033[93m[WARNING] Using Scale+Tau Model Colin New MultiExp with Physical params (LMC = -7).\033[0m")
-        Model = MyMultiVarModel_SMAG_New_Physical
 
     if args.inject_random_fake_etas:
         # Randomize alpha_sigma and beta_tau for each run
