@@ -331,7 +331,7 @@ def create_qsopar_fits(path_ex='data/', parfilename='qsopar.fits', overwrite=Tru
         ('Fe_op_FWHM',   3000,  1200,  18000, 1),  # Hβ/Hα Fe template FWHM
         ('Fe_op_shift',  0.0,  -0.01,  0.01,  1),  # Hβ/Hα Fe template shift [lnlambda]
         ('PL_norm',      1.0,   0.0,   1e10,  1),  # Power-law normalization (f_λ ∝ (λ/3000)^-α)
-        ('PL_slope_blue',    -1.5,  -5.0,  -0.2,   1), # Blue slope of the power-law (PL) continuum
+        ('PL_slope_blue',    -1.5,  -5.0,  0.0,   1), # Blue slope of the power-law (PL) continuum
         ('PL_slope_red',     -0.5,  -5.0,  0.0,   1), # Red slope of the power-law (PL) continuum
         ('PL_break_wave',    4000,  3000,  5000,  0), # Break wavelength of the power-law (PL) continuum
         ('Balmer_norm',  0.0,   0.0,   1e10,  1),  # Balmer continuum normalization (< 3646 Å)
