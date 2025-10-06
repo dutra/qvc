@@ -27,6 +27,7 @@ import numpy as np
 import pandas as pd
 from tqdm import trange, tqdm
 import csv
+import traceback
 
 from astropy.io import fits
 from astropy.table import Table
@@ -421,10 +422,12 @@ def run_qsofit_record(rec, npca_qso, cache_dir="data/spectra_cache",
         log_L2500_fs_err=-1e9,
         log_L2500_int_fs=-1e9,
         log_L2500_int_fs_err=-1e9,
+        reddening_integral=-1e9,
+        reddening_proxy=-1e9,
     )
 
     try:
-        # cached spectrum
+    # cached spectrum
         hdul = load_spec_from_cache(rec["sdss_name"], cache_dir=cache_dir)
         if hdul is None:
             # keep default values; return early
@@ -575,7 +578,7 @@ def run_qsofit_record(rec, npca_qso, cache_dir="data/spectra_cache",
         if L_ok:
             m_2500, m_2500_err = compute_apparent_mag_2500_astropy(conti_dict['L2500_int'], conti_dict['L2500_int_err'], z=rec['z'])
             mag_errs = np.array([mag_err if (np.isfinite(mag_err) and mag_err >=0) else 0.0 
-                                         for mag_err in rec["mags_err"].values()])
+                                            for mag_err in rec["mags_err"].values()])
             m_2500_err = np.sqrt(m_2500_err**2 + np.mean(mag_errs)**2)
         else:
             print(f"[WARN] L2500_int not finite for {rec['sdss_name']} (z={rec['z']:.2f})")
@@ -611,6 +614,33 @@ def run_qsofit_record(rec, npca_qso, cache_dir="data/spectra_cache",
             delta_m_avg = -1e9
             delta_mags = np.array([])
 
+
+        try:
+            # compute reddened integral
+            wave_eval = np.linspace(2500-1500, 2500+1500, 5000)
+            poly = q_mle.F_poly_conti(wave_eval, q_mle.conti_fit.params.valuesdict())
+            reddening_integral = -np.trapz(poly, wave_eval)
+            #print(f"[INFO] reddening_integral {rec.get('object_id','?')} ({rec.get('sdss_name','?')}) (z {rec.get('z','?')}): {reddening_integral:.3f}")
+        except Exception as e:
+            print(f"[ERROR] reddening_integral {rec.get('object_id','?')} ({rec.get('sdss_name','?')}) (z {rec.get('z','?')}): {e}")
+            traceback.print_exc()
+            reddening_integral = -1e9
+
+        try:
+            wave_eval = np.linspace(2500-1500, 2500+1500, 5000)
+            lam = wave_eval
+            poly = q_mle.F_poly_conti(wave_eval, q_mle.conti_fit.params.valuesdict())
+            df = poly                         # PL-subtracted in linear units
+            f_pl = q_mle.PL(lam, q_mle.conti_fit.params.valuesdict())        # reconstruct your PL continuum used in the subtraction
+            r = np.clip(df / np.maximum(f_pl, 1e-300), -1e6, 1e6)  # fractional residual
+            x = np.log(lam)
+            reddening_proxy = - np.trapz(r, x) / (x.max() - x.min())      # dimensionless
+            #print(f"[INFO] reddening_proxy {rec.get('object_id','?')} ({rec.get('sdss_name','?')}) (z {rec.get('z','?')}): {reddening_proxy:.3f}")
+        except Exception as e:
+            print(f"[ERROR] reddening_proxy {rec.get('object_id','?')} ({rec.get('sdss_name','?')}) (z {rec.get('z','?')}): {e}")
+            traceback.print_exc()
+            reddening_proxy = -1e9
+
         result.update(
             delta_m_avg=delta_m_avg,
             delta_mag_r=delta_mags.get('r', -1e9),
@@ -633,7 +663,9 @@ def run_qsofit_record(rec, npca_qso, cache_dir="data/spectra_cache",
             log_L2500_fs=conti_dict.get('L2500', -1e9),
             log_L2500_fs_err=conti_dict.get('L2500_err', -1e9),
             log_L2500_int_fs=conti_dict.get('L2500_int', -1e9),
-            log_L2500_int_fs_err=conti_dict.get('L2500_int_err', -1e9)
+            log_L2500_int_fs_err=conti_dict.get('L2500_int_err', -1e9),
+            reddening_integral=reddening_integral,
+            reddening_proxy=reddening_proxy,
         )
         return result
 
@@ -866,6 +898,8 @@ def main():
         'log_L2500_fs_err',
         'log_L2500_int_fs',
         'log_L2500_int_fs_err',
+        'reddening_integral',
+        'reddening_proxy'
     ]
 
     with open(csv_file, "w", newline="") as f:
