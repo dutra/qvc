@@ -40,33 +40,34 @@ from astroquery.sdss import SDSS
 #warnings.filterwarnings("ignore")
 
 bands = ['u', 'g', 'r', 'i', 'z']
-def bands_bluer_than_lyman_alpha(z, buffer=100):
+def sdss_bands_affected_by_lya(z, buffer=100.0):
     """
-    Returns a list of bands with rest-frame effective wavelength < Lyman-alpha (1216 Å).
+    SDSS ugriz bands whose *rest-frame blue edge* falls below 1216+buffer Å,
+    i.e., likely contaminated by Lyα line/forest.
 
     Args:
-        z (float): Redshift.
+        z (float): source redshift
+        buffer (float): safety margin in Å (typ. 50–200)
 
     Returns:
-        list: Bands bluer than Lyman-alpha at rest frame.
+        list[str]: bands to drop (contaminated)
     """
-    lyman_alpha = 1216
-    bands = {
-        'u': {'lambda_eff': 3551},
-        'g': {'lambda_eff': 4686},
-        'r': {'lambda_eff': 6165},
-        'i': {'lambda_eff': 7481},
-        'z': {'lambda_eff': 8931},
-        'y': {'lambda_eff': 9700}
+    # SDSS (full transmission) edges in observed Å (λ_min, λ_max)
+    edges_obs = {
+        "u": (3055.11, 4030.64),
+        "g": (3797.64, 5553.04),
+        "r": (5418.23, 6994.42),
+        "i": (6692.41, 8400.32),
+        "z": (7964.70, 10873.33),
     }
 
-    bluer_bands = []
-    for band, props in bands.items():
-        rest_lambda_eff = props['lambda_eff'] / (1 + z)
-        if rest_lambda_eff < (lyman_alpha - buffer):
-            bluer_bands.append(band)
-
-    return bluer_bands
+    cutoff = 1216.0 + buffer
+    affected = []
+    for b, (lo_obs, _hi_obs) in edges_obs.items():
+        lo_rest = lo_obs / (1.0 + z)
+        if lo_rest < cutoff:
+            affected.append(b)
+    return affected
 # --------------------------- Utility ---------------------------------
 def _safe_float(x):
     try:
@@ -775,7 +776,7 @@ def main():
     for i in range(len(data_cat)):
         row = data_cat[i]
         z = float(row['Z_SYS'])
-        dropped_bands = bands_bluer_than_lyman_alpha(z)
+        dropped_bands = sdss_bands_affected_by_lya(z)
         #dropped_bands = row['dropped_bands']
         # TEMPORARY: skip objects without any dropped bands
         # if len(dropped_bands) == 0:

@@ -317,60 +317,102 @@ def modify_h5_file(save_file_path, s82_objs):
                     del group[key]
 
 
-def bands_redder_than(z, threshold=4000):
+# def bands_redder_than(z, threshold=4000):
+#     """
+#     Returns a list of bands with rest-frame effective wavelength > 4000 Å.
+
+#     Args:
+#         z (float): Redshift.
+
+#     Returns:
+#         list: Bands redder than 4000 Å at rest frame.
+#     """
+#     bands = {
+#         'u': {'lambda_eff': 3551},
+#         'g': {'lambda_eff': 4686},
+#         'r': {'lambda_eff': 6165},
+#         'i': {'lambda_eff': 7481},
+#         'z': {'lambda_eff': 8931},
+#         'y': {'lambda_eff': 9700}
+#     }
+
+#     redder_bands = []
+#     for band, props in bands.items():
+#         rest_lambda_eff = props['lambda_eff'] / (1 + z)
+#         if rest_lambda_eff > threshold:
+#             redder_bands.append(band)
+
+#     return redder_bands
+
+# def bands_bluer_than_lyman_alpha(z, buffer=100):
+#     """
+#     Returns a list of bands with rest-frame effective wavelength < Lyman-alpha (1216 Å).
+
+#     Args:
+#         z (float): Redshift.
+
+#     Returns:
+#         list: Bands bluer than Lyman-alpha at rest frame.
+#     """
+#     lyman_alpha = 1216
+#     bands = {
+#         'u': {'lambda_eff': 3551},
+#         'g': {'lambda_eff': 4686},
+#         'r': {'lambda_eff': 6165},
+#         'i': {'lambda_eff': 7481},
+#         'z': {'lambda_eff': 8931},
+#         'y': {'lambda_eff': 9700}
+#     }
+
+#     bluer_bands = []
+#     for band, props in bands.items():
+#         rest_lambda_eff = props['lambda_eff'] / (1 + z)
+#         if rest_lambda_eff < (lyman_alpha - buffer):
+#             bluer_bands.append(band)
+
+#     return bluer_bands
+
+def sdss_bands_affected_by_lya(z, buffer=100.0):
     """
-    Returns a list of bands with rest-frame effective wavelength > 4000 Å.
+    SDSS ugriz bands whose *rest-frame blue edge* falls below 1216+buffer Å,
+    i.e., likely contaminated by Lyα line/forest.
 
     Args:
-        z (float): Redshift.
+        z (float): source redshift
+        buffer (float): safety margin in Å (typ. 50–200)
 
     Returns:
-        list: Bands redder than 4000 Å at rest frame.
+        list[str]: bands to drop (contaminated)
     """
-    bands = {
-        'u': {'lambda_eff': 3551},
-        'g': {'lambda_eff': 4686},
-        'r': {'lambda_eff': 6165},
-        'i': {'lambda_eff': 7481},
-        'z': {'lambda_eff': 8931},
-        'y': {'lambda_eff': 9700}
+    # SDSS (full transmission) edges in observed Å (λ_min, λ_max)
+    edges_obs = {
+        "u": (3055.11, 4030.64),
+        "g": (3797.64, 5553.04),
+        "r": (5418.23, 6994.42),
+        "i": (6692.41, 8400.32),
+        "z": (7964.70, 10873.33),
     }
 
-    redder_bands = []
-    for band, props in bands.items():
-        rest_lambda_eff = props['lambda_eff'] / (1 + z)
-        if rest_lambda_eff > threshold:
-            redder_bands.append(band)
+    cutoff = 1216.0 + buffer
+    affected = []
+    for b, (lo_obs, _hi_obs) in edges_obs.items():
+        lo_rest = lo_obs / (1.0 + z)
+        if lo_rest < cutoff:
+            affected.append(b)
+    return affected
 
-    return redder_bands
 
-def bands_bluer_than_lyman_alpha(z, buffer=100):
-    """
-    Returns a list of bands with rest-frame effective wavelength < Lyman-alpha (1216 Å).
-
-    Args:
-        z (float): Redshift.
-
-    Returns:
-        list: Bands bluer than Lyman-alpha at rest frame.
-    """
-    lyman_alpha = 1216
-    bands = {
-        'u': {'lambda_eff': 3551},
-        'g': {'lambda_eff': 4686},
-        'r': {'lambda_eff': 6165},
-        'i': {'lambda_eff': 7481},
-        'z': {'lambda_eff': 8931},
-        'y': {'lambda_eff': 9700}
+def sdss_bands_safe_from_lya(z, buffer=100.0):
+    """Complement: bands whose rest-frame blue edge is ≥ 1216+buffer Å."""
+    cutoff = 1216.0 + buffer
+    edges_obs = {
+        "u": (3055.11, 4030.64),
+        "g": (3797.64, 5553.04),
+        "r": (5418.23, 6994.42),
+        "i": (6692.41, 8400.32),
+        "z": (7964.70, 10873.33),
     }
-
-    bluer_bands = []
-    for band, props in bands.items():
-        rest_lambda_eff = props['lambda_eff'] / (1 + z)
-        if rest_lambda_eff < (lyman_alpha - buffer):
-            bluer_bands.append(band)
-
-    return bluer_bands
+    return [b for b, (lo_obs, _) in edges_obs.items() if (lo_obs / (1.0 + z)) >= cutoff]
 
 
 def load_all_samples_from_hdf5(file_path=None):

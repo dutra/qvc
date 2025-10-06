@@ -74,7 +74,7 @@ from multiband_model_s import MyMultiVarModel_S
 from multiband_model_blr_mag import MyMultiVarModel_SMAG
 from multiband_model_blr_mag_multiexp import MyMultiVarModel_SMAG_MultiExp
 from multiband_model_blr_mag_new import MyMultiVarModel_SMAG_New
-
+from multiband_model_blr_mag_new_physical import MyMultiVarModel_SMAG_New_Physical
 # define params
 zero_mean = False
 has_jitter = True
@@ -108,13 +108,13 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_
 
         # Initialize parameters
         # Global "universal" means for eta
-        eta_A1_mean = numpyro.sample("eta_A1_mean", dist.Normal(-1, 2))
-        eta_tau1_mean = numpyro.sample("eta_tau1_mean", dist.Normal(1, 2))
+        eta_A1_mean = numpyro.sample("eta_A1_mean", dist.Normal(0, 1))
+        eta_tau1_mean = numpyro.sample("eta_tau1_mean", dist.Normal(0, 1))
 
         if broken_pl:
             print("[INFO] Using broken power-law for eta.")
-            eta_A2_mean = numpyro.sample("eta_A2_mean", dist.Normal(0, 2))
-            eta_tau2_mean = numpyro.sample("eta_tau2_mean", dist.Normal(0, 2))
+            eta_A2_mean = numpyro.sample("eta_A2_mean", dist.Normal(0, 1))
+            eta_tau2_mean = numpyro.sample("eta_tau2_mean", dist.Normal(0, 1))
         else:
             print("[INFO] Using single power-law for eta (eta_A2_mean=0, eta_tau2_mean=0).")
             eta_A2_mean = numpyro.deterministic("eta_A2_mean", 0.0)
@@ -345,7 +345,7 @@ def make_lc(Model, data, bands=['u', 'g', 'r', 'i', 'z'], inject_fake=False, alp
     mags = data['mags']
     magerrs = data['magerrs']
 
-    dropped_bands = bands_bluer_than_lyman_alpha(data['z'])
+    dropped_bands = sdss_bands_affected_by_lya(data['z'])
     data['dropped_bands'] = dropped_bands
 
     logging.info(
@@ -681,6 +681,9 @@ if __name__ == '__main__':
     elif args.lmc == -6:
         print(f"\033[93m[WARNING] Using Scale+Tau Model Colin New (LMC = -6).\033[0m")
         Model = MyMultiVarModel_SMAG_New
+    elif args.lmc == -7:
+        print(f"\033[93m[WARNING] Using Scale+Tau Model Colin New MultiExp with Physical params (LMC = -7).\033[0m")
+        Model = MyMultiVarModel_SMAG_New_Physical
 
     if args.inject_random_fake_etas:
         # Randomize alpha_sigma and beta_tau for each run
