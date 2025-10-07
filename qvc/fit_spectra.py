@@ -332,7 +332,7 @@ def create_qsopar_fits(path_ex='data/', parfilename='qsopar.fits', overwrite=Tru
         ('Fe_op_FWHM',   3000,  1200,  18000, 1),  # Hβ/Hα Fe template FWHM
         ('Fe_op_shift',  0.0,  -0.01,  0.01,  1),  # Hβ/Hα Fe template shift [lnlambda]
         ('PL_norm',      1.0,   0.0,   1e10,  1),  # Power-law normalization (f_λ ∝ (λ/3000)^-α)
-        ('PL_slope_blue',    -1.5,  -5.0,  0.0,   1), # Blue slope of the power-law (PL) continuum
+        ('PL_slope_blue',    -0.2,  -5.0,  0.0,   1), # Blue slope of the power-law (PL) continuum
         ('PL_slope_red',     -0.5,  -5.0,  0.0,   1), # Red slope of the power-law (PL) continuum
         ('PL_break_wave',    4000,  3000,  5000, 1), # Break wavelength of the power-law (PL) continuum
         ('Balmer_norm',  0.0,   0.0,   1e10,  1),  # Balmer continuum normalization (< 3646 Å)
@@ -404,6 +404,7 @@ def run_qsofit_record(rec, npca_qso, cache_dir="data/spectra_cache",
         delta_mag_g=-1e9,
         delta_mag_i=-1e9,
         delta_m_avg=-1e9,
+        loglbol=rec["loglbol"],
         object_id=rec["object_id"],
         sdss_name=rec["sdss_name"],
         apparent_mag_i_rest=-1e9,
@@ -500,7 +501,7 @@ def run_qsofit_record(rec, npca_qso, cache_dir="data/spectra_cache",
             wave_mask=None,         # 2-D array, mask the given range(s)
 
             # host decomposition parameters
-            decompose_host=(rec["loglbol"] < 46),  # If True, the host galaxy-QSO decomposition will be applied
+            decompose_host=(rec["loglbol"] < 47),  # If True, the host galaxy-QSO decomposition will be applied
             host_prior=False,         # If True, adopt prior-informed method to assist decomposition (PCA only)
             host_prior_scale=0.2,     # scale of prior penalty; smaller if prior affects fitting too much
 
@@ -853,7 +854,7 @@ def main():
         best_res["redchi_npca_qso2"] = res2.get("redchi", np.nan)
 
         results[obj_id] = best_res
-        #print(f"Object {obj_id}: selected npca_qso={best_res['npca_qso']} with redchi={best_res['redchi']:.3f} (0:{res0['redchi']:.3f}, 1:{res1['redchi']:.3f}, 2:{res2['redchi']:.3f})")
+        print(f"Object {obj_id}: selected npca_qso={best_res['npca_qso']} with redchi={best_res['redchi']:.3f} (0:{res0['redchi']:.3f}, 1:{res1['redchi']:.3f}, 2:{res2['redchi']:.3f})")
 
     # Update each quasar dict with fields from results
     # This may overwrite ebv and other existing fields
@@ -900,7 +901,8 @@ def main():
         'log_L2500_int_fs',
         'log_L2500_int_fs_err',
         'reddening_integral',
-        'reddening_proxy'
+        'reddening_proxy',
+        'loglbol',
     ]
 
     with open(csv_file, "w", newline="") as f:
