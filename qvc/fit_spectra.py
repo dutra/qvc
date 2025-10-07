@@ -501,7 +501,7 @@ def run_qsofit_record(rec, npca_qso, cache_dir="data/spectra_cache",
             wave_mask=None,         # 2-D array, mask the given range(s)
 
             # host decomposition parameters
-            decompose_host=(rec["loglbol"] < 47),  # If True, the host galaxy-QSO decomposition will be applied
+            decompose_host=(rec["loglbol"] < 46),  # If True, the host galaxy-QSO decomposition will be applied
             host_prior=False,         # If True, adopt prior-informed method to assist decomposition (PCA only)
             host_prior_scale=0.2,     # scale of prior penalty; smaller if prior affects fitting too much
 
