@@ -342,12 +342,20 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_
     return numpyro_joint_model
 
 
-def make_lc(Model, data, bands=['u', 'g', 'r', 'i', 'z'], inject_fake=False, alpha_sigma=-0.5, beta_tau=0.2):
+def make_lc(Model, data, bands=['u', 'g', 'r', 'i', 'z'], 
+            inject_fake=False, alpha_sigma=-0.5, beta_tau=0.2,
+            disable_band_drop=False):
     times = data['times']
     mags = data['mags']
     magerrs = data['magerrs']
 
-    dropped_bands = sdss_bands_affected_by_lya(data['z'])
+    if disable_band_drop:
+        print("[INFO] disable_band_drop=True: Using all bands.")
+        dropped_bands = []
+    else:
+        print("[INFO] disable_band_drop=False: Dropping bands affected by Lyman-alpha.")
+        dropped_bands = sdss_bands_affected_by_lya(data['z'])
+    
     data['dropped_bands'] = dropped_bands
 
     logging.info(
@@ -607,6 +615,7 @@ if __name__ == '__main__':
     parser.add_argument("--disable_sigma_tau_plane_cut", action="store_true", default=False, help="Disable sigma-tau plane cut.")
     parser.add_argument("--log_sigma_eta_tau_sigma", type=float, default=0.2, help="Stddev for log_sigma_eta_tau1/2 prior.")
     parser.add_argument("--beta_tau", type=float, default=0.2, help="Beta_tau value for fake light curves.")
+    parser.add_argument("--disable_band_drop", action="store_true", default=False, help="Disable dropping bands affected by Lyman-alpha.")
 
     args = parser.parse_args()
     print("Args: ", args)
@@ -704,11 +713,14 @@ if __name__ == '__main__':
         bands = ['u', 'g', 'r', 'i', 'z']
     for i, obj in enumerate(objs):
         # Prepare each object's data for the joint model
-        result = make_lc(Model, obj, bands=bands, inject_fake=args.inject_fake, alpha_sigma=alpha_sigma, beta_tau=beta_tau)
+        result = make_lc(Model, obj, bands=bands, 
+                         inject_fake=args.inject_fake, alpha_sigma=alpha_sigma, beta_tau=beta_tau,
+                         disable_band_drop=args.disable_band_drop)
         if result is None:
             continue
         obj['i'] = i
         obj |= result
+        
         # Run bestP for each object
         lam_rf = jnp.array([lambda_pivot[band] for band in bands]) / (1 + obj['z'])
 
