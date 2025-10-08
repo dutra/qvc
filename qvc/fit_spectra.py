@@ -418,6 +418,8 @@ def run_qsofit_record(rec, npca_qso, cache_dir="data/spectra_cache",
         alpha_lambda=-1e9,
         alpha_lambda_err=-1e9,
         redchi=1e9,
+        aic=1e9,
+        bic=1e9,
         ebv_fs=-1e9,
         euv_fs=-1e9,
         log_L2500_fs=-1e9,
@@ -427,6 +429,9 @@ def run_qsofit_record(rec, npca_qso, cache_dir="data/spectra_cache",
         reddening_integral=-1e9,
         reddening_proxy=-1e9,
     )
+
+    # if (rec["loglbol"] > 46) and (npca_qso != 0):
+    #     return result
 
     try:
     # cached spectrum
@@ -501,7 +506,7 @@ def run_qsofit_record(rec, npca_qso, cache_dir="data/spectra_cache",
             wave_mask=None,         # 2-D array, mask the given range(s)
 
             # host decomposition parameters
-            decompose_host=(rec["loglbol"] < 46),  # If True, the host galaxy-QSO decomposition will be applied
+            decompose_host=True,      # If True, the host galaxy-QSO decomposition will be applied
             host_prior=False,         # If True, adopt prior-informed method to assist decomposition (PCA only)
             host_prior_scale=0.2,     # scale of prior penalty; smaller if prior affects fitting too much
 
@@ -520,7 +525,7 @@ def run_qsofit_record(rec, npca_qso, cache_dir="data/spectra_cache",
             # continuum model fit parameters
             Fe_uv_op=True,            # If True, fit continuum with UV and optical FeII template
             poly=True,                # If True, include polynomial component to account for dust reddening
-            BC=(rec["z"] < 1),                 # If True, fit continuum with Balmer continua from 1000 to 3646A
+            BC=False,                 # If True, fit continuum with Balmer continua from 1000 to 3646A
             initial_guess=None,       # initial parameters for continuum model
             rej_abs_conti=False,      # iteratively reject 3σ outlier absorption pixels in continuum
             n_pix_min_conti=100,      # minimum negative pixels for host continuum fit rejection
@@ -532,7 +537,7 @@ def run_qsofit_record(rec, npca_qso, cache_dir="data/spectra_cache",
             # fitting method selection
             MC=True,                  # Monte Carlo resampling for error array
             MCMC=False,               # Markov Chain Monte Carlo sampling
-            nsamp=20,                 # number of MC trials or MCMC samples
+            nsamp=50,                 # number of MC trials or MCMC samples
 
             # advanced fitting parameters
             param_file_name=parfilename,  # qso fitting parameter FITS file
@@ -644,6 +649,10 @@ def run_qsofit_record(rec, npca_qso, cache_dir="data/spectra_cache",
             traceback.print_exc()
             reddening_proxy = -1e9
 
+        # print("redchi: ", q_mle.conti_fit.redchi)
+        # print("aic: ", q_mle.conti_fit.aic)
+        # print("bic: ", q_mle.conti_fit.bic)
+
         result.update(
             delta_m_avg=delta_m_avg,
             delta_mag_r=delta_mags.get('r', -1e9),
@@ -661,6 +670,8 @@ def run_qsofit_record(rec, npca_qso, cache_dir="data/spectra_cache",
             alpha_lambda=conti_dict['PL_slope_blue'],
             alpha_lambda_err=conti_dict['PL_slope_blue_err'],
             redchi=q_mle.conti_fit.redchi,
+            aic=q_mle.conti_fit.aic,
+            bic=q_mle.conti_fit.bic,
             ebv_fs=conti_dict.get('EBV', -99),
             euv_fs=conti_dict.get('EUV', -99),
             log_L2500_fs=conti_dict.get('L2500', -1e9),
@@ -806,11 +817,10 @@ def main():
         records.append(rec)
 
     # Run QSOFit twice: once with npca_qso=0, once with npca_qso=2
-    results_0 = {}
-    results_1 = {}
-    results_2 = {}
+    results_all = {}
 
-    for npca_qso, results_dict in [(0, results_0), (1, results_1), (2, results_2)]:
+
+    for npca_qso in [0, 1, 2]:
 
         save_fig_path = os.path.join('plots', 'pyqsofit', prefix, f'npca_qso_{npca_qso}')
         os.makedirs(save_fig_path, exist_ok=True)
@@ -824,47 +834,44 @@ def main():
                     obj_id = res.get("object_id", None)
                     if obj_id is not None:
                         res['npca_qso'] = npca_qso
-                        results_dict[obj_id] = res
+                        if obj_id not in results_all:
+                            results_all[obj_id] = []
+                        results_all[obj_id].append(res)
                     pbar.update(1)
-        print(f"Collected {len(results_dict)} results for npca_qso={npca_qso}")
+        print(f"Collected {len(results_all)} results for npca_qso={npca_qso}")
 
     # Select best result (lowest redchi) for each object
-    results = {}
-    for obj_id in results_0.keys():
-        res0 = results_0[obj_id]
-        res1 = results_1[obj_id]
-        res2 = results_2[obj_id]
 
-        #best_res = min([res0, res1, res2], key=lambda r: r["redchi"])
+    def pick_best_fit(models, delta=2.0, redchi_ok=(0.7, 1.5)):
+        # Step 1: AIC primary
+        min_aic = min(m['aic'] for m in models)
+        close = [(i, m) for i, m in enumerate(models) if m['aic'] - min_aic <= delta]
+        i_best, best = min(close, key=lambda t: (t[1]['bic'], t[0]))
 
-        # Start with the simplest model
-        best_res = res0
+        # Step 2: redchi screen (optional)
+        lo, hi = redchi_ok
+        if not (lo <= best['redchi'] <= hi):
+            # try the next-best by BIC that passes the screen; otherwise keep best
+            for i, m in sorted(close, key=lambda t: (t[1]['bic'], t[0])):
+                if lo <= m.get('redchi', 1.0) <= hi:
+                    return m
+        if not (lo <= best['redchi'] <= hi):
+            best['flag_redchi'] = True
+            print(f"[WARN] Object {best.get('object_id','?')}: best fit npca_qso={best.get('npca_qso','?')} has redchi={best.get('redchi',1.0):.3f} outside expected range [{lo},{hi}]")
+        else:
+            best['flag_redchi'] = False
+        return best
+    
+    results_best = {}
 
-        # Only accept npca_qso=1 if it improves redchi by at least 20%
-        if res1["redchi"] <= 0.8 * res0["redchi"]:
-            best_res = res1
+    for obj_id, result_obj_list in results_all.items():
 
-        # Only accept npca_qso=2 if it improves redchi by at least 20% over the current best
-        if res2["redchi"] <= 0.8 * best_res["redchi"]:
-            best_res = res2
+        best_res = pick_best_fit(result_obj_list)
+        results_best[obj_id] = best_res
+        print(f"Object {obj_id}: selected npca_qso={best_res['npca_qso']} with aic={best_res['aic']:.1f}, bic={best_res['bic']:.1f}, redchi={best_res['redchi']:.3f}, flag_redchi={best_res['flag_redchi']}")
 
-        # TODO: If chi2 is still bad, use BC=True models
 
-        # Add redchi for each npca_qso to the best result
-        best_res["redchi_npca_qso0"] = res0.get("redchi", np.nan)
-        best_res["redchi_npca_qso1"] = res1.get("redchi", np.nan)
-        best_res["redchi_npca_qso2"] = res2.get("redchi", np.nan)
-
-        results[obj_id] = best_res
-        #print(f"Object {obj_id}: selected npca_qso={best_res['npca_qso']} with redchi={best_res['redchi']:.3f} (0:{res0['redchi']:.3f}, 1:{res1['redchi']:.3f}, 2:{res2['redchi']:.3f})")
-
-    # Update each quasar dict with fields from results
-    # This may overwrite ebv and other existing fields
-    # for quasar in quasar_dict_list:
-    #     obj_id = str(quasar.get('object_id'))
-    #     quasar.update(results[obj_id])
-
-    write_hdf5_file(results.values(), args.fpath_out)
+    write_hdf5_file(results_best.values(), args.fpath_out)
     
     # Also write results to CSV
     csv_file=args.fpath_out.replace(".h5", ".csv")
@@ -887,10 +894,10 @@ def main():
         "alpha_lambda",
         "alpha_lambda_err",
         "redchi",
+        "aic",
+        "bic",
+        "flag_redchi",
         "npca_qso",
-        "redchi_npca_qso0",
-        "redchi_npca_qso1",
-        "redchi_npca_qso2",
         'plate',
         'mjd',
         'fiber',
@@ -910,8 +917,8 @@ def main():
     with open(csv_file, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=field_names)
         writer.writeheader()
-        for obj_id in results:
-            writer.writerow(results[obj_id])
+        for obj_id in results_best:
+            writer.writerow(results_best[obj_id])
 
     print(f"[OK] Saved CSV results to {csv_file}")
 
