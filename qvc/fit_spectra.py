@@ -520,7 +520,7 @@ def run_qsofit_record(rec, npca_qso, cache_dir="data/spectra_cache",
             # continuum model fit parameters
             Fe_uv_op=True,            # If True, fit continuum with UV and optical FeII template
             poly=True,                # If True, include polynomial component to account for dust reddening
-            BC=False,                 # If True, fit continuum with Balmer continua from 1000 to 3646A
+            BC=(rec["z"] < 1),                 # If True, fit continuum with Balmer continua from 1000 to 3646A
             initial_guess=None,       # initial parameters for continuum model
             rej_abs_conti=False,      # iteratively reject 3σ outlier absorption pixels in continuum
             n_pix_min_conti=100,      # minimum negative pixels for host continuum fit rejection
