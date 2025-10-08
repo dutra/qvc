@@ -381,9 +381,9 @@ def create_qsopar_fits(path_ex='data/', parfilename='qsopar.fits', overwrite=Tru
     return outpath
 
 
-def run_qsofit_record(rec, npca_qso, cache_dir="data/spectra_cache", 
+def run_qsofit_record(rec, npca_qso, decomp_host, cache_dir="data/spectra_cache", 
                       path_ex=f'data/pyqsofit', parfilename=f'qsopar.fits',
-                      save_fig_path=f'./plots/pyqso/'):
+                      save_fig_path=f'./plots/pyqso/', save_fits_path=f'./results/pyqso_fits/'):
     """
     Worker-safe version of QSOFit runner.
     `rec` is a plain dict containing only the fields needed for one object.
@@ -506,7 +506,7 @@ def run_qsofit_record(rec, npca_qso, cache_dir="data/spectra_cache",
             wave_mask=None,         # 2-D array, mask the given range(s)
 
             # host decomposition parameters
-            decompose_host=True,      # If True, the host galaxy-QSO decomposition will be applied
+            decompose_host=decomp_host,      # If True, the host galaxy-QSO decomposition will be applied
             host_prior=False,         # If True, adopt prior-informed method to assist decomposition (PCA only)
             host_prior_scale=0.2,     # scale of prior penalty; smaller if prior affects fitting too much
 
@@ -548,7 +548,7 @@ def run_qsofit_record(rec, npca_qso, cache_dir="data/spectra_cache",
             # customize the results
             save_result=True,         # save fitting results to a FITS file
             save_fits_name=None,      # output name for result FITS
-            save_fits_path='./results/pysqo_fits',       # output path for result FITS
+            save_fits_path=save_fits_path,       # output path for result FITS
             plot_fig=True,            # plot fitting results
             save_fig=True,            # save fitting figures
             plot_corner=True,         # plot corner plot if MCMC=True
@@ -819,13 +819,14 @@ def main():
     # Run QSOFit twice: once with npca_qso=0, once with npca_qso=2
     results_all = {}
 
-
-    for npca_qso in [0, 1, 2]:
-
-        save_fig_path = os.path.join('plots', 'pyqsofit', prefix, f'npca_qso_{npca_qso}')
+    def run_parallel(npca_qso, decomp_host):
+        save_fig_path = os.path.join('plots', 'pyqsofit', prefix, f'npca_qso_{npca_qso}_decomp_host_{decomp_host}')
         os.makedirs(save_fig_path, exist_ok=True)
-        worker = partial(run_qsofit_record, npca_qso=npca_qso, cache_dir=args.cache_dir, 
+        save_fits_path = os.path.join('results', 'pysqo_fits', prefix, f'npca_qso_{npca_qso}_decomp_host_{decomp_host}')
+        os.makedirs(save_fits_path, exist_ok=True)
+        worker = partial(run_qsofit_record, npca_qso=npca_qso, decomp_host=decomp_host, cache_dir=args.cache_dir, 
                         path_ex=f'data/pyqsofit', parfilename=f'qsopar_{prefix}_{suffix}.fits',
+                        save_fits_path=save_fits_path,
                         save_fig_path=save_fig_path)
         chunksize = 1
         with Pool(processes=num_cores) as pool:
@@ -834,11 +835,20 @@ def main():
                     obj_id = res.get("object_id", None)
                     if obj_id is not None:
                         res['npca_qso'] = npca_qso
+                        res['decomp_host'] = decomp_host
                         if obj_id not in results_all:
                             results_all[obj_id] = []
                         results_all[obj_id].append(res)
                     pbar.update(1)
-        print(f"Collected {len(results_all)} results for npca_qso={npca_qso}")
+        print(f"Collected {len(results_all)} results for npca_qso={npca_qso} and decomp_host={decomp_host}")
+
+    # decomp_host False
+    decomp_host = False
+    run_parallel(npca_qso=0, decomp_host=decomp_host)
+    # decomp_host True
+    decomp_host = True
+    for npca_qso in [0, 1, 2]:
+        run_parallel(npca_qso=npca_qso, decomp_host=decomp_host)
 
     # Select best result (lowest redchi) for each object
 
@@ -855,11 +865,7 @@ def main():
             for i, m in sorted(close, key=lambda t: (t[1]['bic'], t[0])):
                 if lo <= m.get('redchi', 1.0) <= hi:
                     return m
-        if not (lo <= best['redchi'] <= hi):
-            best['flag_redchi'] = True
-            print(f"[WARN] Object {best.get('object_id','?')}: best fit npca_qso={best.get('npca_qso','?')} has redchi={best.get('redchi',1.0):.3f} outside expected range [{lo},{hi}]")
-        else:
-            best['flag_redchi'] = False
+
         return best
     
     results_best = {}
@@ -868,7 +874,7 @@ def main():
 
         best_res = pick_best_fit(result_obj_list)
         results_best[obj_id] = best_res
-        print(f"Object {obj_id}: selected npca_qso={best_res['npca_qso']} with aic={best_res['aic']:.1f}, bic={best_res['bic']:.1f}, redchi={best_res['redchi']:.3f}, flag_redchi={best_res['flag_redchi']}")
+        print(f"Object {obj_id}: selected npca_qso={best_res['npca_qso']} decomp_host={best_res['decomp_host']} with aic={best_res['aic']:.1f}, bic={best_res['bic']:.1f}, redchi={best_res['redchi']:.3f}")
 
 
     write_hdf5_file(results_best.values(), args.fpath_out)
@@ -896,8 +902,8 @@ def main():
         "redchi",
         "aic",
         "bic",
-        "flag_redchi",
         "npca_qso",
+        "decomp_host",
         'plate',
         'mjd',
         'fiber',
