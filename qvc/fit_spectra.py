@@ -554,7 +554,8 @@ def run_qsofit_record(rec, npca_qso, cache_dir="data/spectra_cache",
             # sublevel parameters for figure plot and emcee
             kwargs_plot={
                 'save_fig_path': save_fig_path,  # path to save figures
-                'broad_fwhm': 1200                 # km/s, lower limit to classify as broad component
+                'broad_fwhm': 1200,                 # km/s, lower limit to classify as broad component
+                'disable_secondary_plot': True,  # if True, disable the secondary plot with masked regions
             },
             kwargs_conti_emcee={},
             kwargs_line_emcee={}
@@ -810,6 +811,7 @@ def main():
     results_2 = {}
 
     for npca_qso, results_dict in [(0, results_0), (1, results_1), (2, results_2)]:
+
         save_fig_path = os.path.join('plots', 'pyqsofit', prefix, f'npca_qso_{npca_qso}')
         os.makedirs(save_fig_path, exist_ok=True)
         worker = partial(run_qsofit_record, npca_qso=npca_qso, cache_dir=args.cache_dir, 
@@ -854,7 +856,7 @@ def main():
         best_res["redchi_npca_qso2"] = res2.get("redchi", np.nan)
 
         results[obj_id] = best_res
-        print(f"Object {obj_id}: selected npca_qso={best_res['npca_qso']} with redchi={best_res['redchi']:.3f} (0:{res0['redchi']:.3f}, 1:{res1['redchi']:.3f}, 2:{res2['redchi']:.3f})")
+        #print(f"Object {obj_id}: selected npca_qso={best_res['npca_qso']} with redchi={best_res['redchi']:.3f} (0:{res0['redchi']:.3f}, 1:{res1['redchi']:.3f}, 2:{res2['redchi']:.3f})")
 
     # Update each quasar dict with fields from results
     # This may overwrite ebv and other existing fields
