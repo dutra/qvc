@@ -18,7 +18,8 @@ os.environ["JAX_PLATFORM_NAME"] = "cpu"
 
 prefix = os.environ.get('PREFIX', "pyqsofit")
 suffix = os.environ.get('SUFFIX', "pyqsofit")
-
+import shutil
+import glob
 import sys
 import timeit
 import argparse
@@ -302,6 +303,7 @@ def create_qsopar_fits(path_ex='data/', parfilename='qsopar.fits', overwrite=Tru
         (1970., 2400.),
         (2480., 2675.),
         (2925., 3400.),
+        (3450., 3700.), # BC bump
         (3775., 3832.),
         (4000., 4050.),
         (4200., 4230.),
@@ -381,7 +383,7 @@ def create_qsopar_fits(path_ex='data/', parfilename='qsopar.fits', overwrite=Tru
     return outpath
 
 
-def run_qsofit_record(rec, npca_qso, decomp_host, cache_dir="data/spectra_cache", 
+def run_qsofit_record(rec, npca_qso, decomp_host, BC, cache_dir="data/spectra_cache", 
                       path_ex=f'data/pyqsofit', parfilename=f'qsopar.fits',
                       save_fig_path=f'./plots/pyqso/', save_fits_path=f'./results/pyqso_fits/'):
     """
@@ -390,6 +392,7 @@ def run_qsofit_record(rec, npca_qso, decomp_host, cache_dir="data/spectra_cache"
     """
     from speclite import filters
     from pyqsofit.PyQSOFit import QSOFit
+
 
     QSOFit.set_mpl_style()
 
@@ -420,6 +423,7 @@ def run_qsofit_record(rec, npca_qso, decomp_host, cache_dir="data/spectra_cache"
         redchi=1e9,
         aic=1e9,
         bic=1e9,
+        redchi2_conti_full=1e9,
         ebv_fs=-1e9,
         euv_fs=-1e9,
         log_L2500_fs=-1e9,
@@ -525,7 +529,7 @@ def run_qsofit_record(rec, npca_qso, decomp_host, cache_dir="data/spectra_cache"
             # continuum model fit parameters
             Fe_uv_op=True,            # If True, fit continuum with UV and optical FeII template
             poly=True,                # If True, include polynomial component to account for dust reddening
-            BC=False,                 # If True, fit continuum with Balmer continua from 1000 to 3646A
+            BC=BC,                 # If True, fit continuum with Balmer continua from 1000 to 3646A
             initial_guess=None,       # initial parameters for continuum model
             rej_abs_conti=False,      # iteratively reject 3σ outlier absorption pixels in continuum
             n_pix_min_conti=100,      # minimum negative pixels for host continuum fit rejection
@@ -672,6 +676,7 @@ def run_qsofit_record(rec, npca_qso, decomp_host, cache_dir="data/spectra_cache"
             redchi=q_mle.conti_fit.redchi,
             aic=q_mle.conti_fit.aic,
             bic=q_mle.conti_fit.bic,
+            redchi2_conti_full=q_mle.redchi2_conti_full,
             ebv_fs=conti_dict.get('EBV', -99),
             euv_fs=conti_dict.get('EUV', -99),
             log_L2500_fs=conti_dict.get('L2500', -1e9),
@@ -819,54 +824,59 @@ def main():
     # Run QSOFit twice: once with npca_qso=0, once with npca_qso=2
     results_all = {}
 
-    def run_parallel(npca_qso, decomp_host):
-        save_fig_path = os.path.join('plots', 'pyqsofit', prefix, f'npca_qso_{npca_qso}_decomp_host_{decomp_host}')
+    def run_parallel(npca_qso, decomp_host, BC):
+        save_fig_path = os.path.join('plots', 'pyqsofit', prefix, f'npca_qso_{npca_qso}_decomp_host_{decomp_host}_BC_{BC}')
         os.makedirs(save_fig_path, exist_ok=True)
-        save_fits_path = os.path.join('results', 'pysqo_fits', prefix, f'npca_qso_{npca_qso}_decomp_host_{decomp_host}')
+        save_fits_path = os.path.join('results', 'pysqo_fits', prefix, f'npca_qso_{npca_qso}_decomp_host_{decomp_host}_BC')
         os.makedirs(save_fits_path, exist_ok=True)
-        worker = partial(run_qsofit_record, npca_qso=npca_qso, decomp_host=decomp_host, cache_dir=args.cache_dir, 
+        worker = partial(run_qsofit_record, npca_qso=npca_qso, decomp_host=decomp_host, BC=BC, cache_dir=args.cache_dir, 
                         path_ex=f'data/pyqsofit', parfilename=f'qsopar_{prefix}_{suffix}.fits',
                         save_fits_path=save_fits_path,
                         save_fig_path=save_fig_path)
         chunksize = 1
         with Pool(processes=num_cores) as pool:
-            with tqdm(total=len(records), desc=f"Processing npca_qso={npca_qso}", dynamic_ncols=True, smoothing=0.0) as pbar:
+            with tqdm(total=len(records), desc=f"Processing {npca_qso=} {decomp_host=} {BC=}", dynamic_ncols=True, smoothing=0.0) as pbar:
                 for res in pool.imap_unordered(worker, records, chunksize=chunksize):
                     obj_id = res.get("object_id", None)
                     if obj_id is not None:
                         res['npca_qso'] = npca_qso
                         res['decomp_host'] = decomp_host
+                        res['BC'] = BC
                         if obj_id not in results_all:
                             results_all[obj_id] = []
                         results_all[obj_id].append(res)
                     pbar.update(1)
-        print(f"Collected {len(results_all)} results for npca_qso={npca_qso} and decomp_host={decomp_host}")
+        print(f"Collected {len(results_all)} results for {npca_qso=} {decomp_host=} {BC=}")
 
-    # decomp_host False
-    decomp_host = False
-    run_parallel(npca_qso=0, decomp_host=decomp_host)
-    # decomp_host True
-    decomp_host = True
-    for npca_qso in [0, 1, 2]:
-        run_parallel(npca_qso=npca_qso, decomp_host=decomp_host)
+    for BC in [False, True]:
+        # decomp_host False
+        decomp_host = False
+        run_parallel(npca_qso=0, decomp_host=decomp_host, BC=BC)
+        # decomp_host True
+        decomp_host = True
+        for npca_qso in [0, 1, 2]:
+            run_parallel(npca_qso=npca_qso, decomp_host=decomp_host, BC=BC)
 
     # Select best result (lowest redchi) for each object
 
-    def pick_best_fit(models, delta=2.0, redchi_ok=(0.7, 1.5)):
-        # Step 1: AIC primary
-        min_aic = min(m['aic'] for m in models)
-        close = [(i, m) for i, m in enumerate(models) if m['aic'] - min_aic <= delta]
-        i_best, best = min(close, key=lambda t: (t[1]['bic'], t[0]))
+    def pick_best_fit(models, redchi_ok=(0.7, 1.5), target=1.0):
+        # Rank by |redchi2_conti_full - 1|, then AIC, then BIC, then index
+        ranked = sorted(
+            enumerate(models),
+            key=lambda t: (abs(t[1]['redchi2_conti_full'] - target), t[1]['aic'], t[1]['bic'], t[0])
+        )
+        i_best, best = ranked[0]
 
-        # Step 2: redchi screen (optional)
         lo, hi = redchi_ok
-        if not (lo <= best['redchi'] <= hi):
-            # try the next-best by BIC that passes the screen; otherwise keep best
-            for i, m in sorted(close, key=lambda t: (t[1]['bic'], t[0])):
-                if lo <= m.get('redchi', 1.0) <= hi:
+        if not (lo <= best['redchi2_conti_full'] <= hi):
+            # Try the best candidate within the acceptable range, preserving the same tiebreakers
+            for i, m in ranked:
+                if lo <= m['redchi2_conti_full'] <= hi:
                     return m
 
         return best
+
+    
     
     results_best = {}
 
@@ -874,7 +884,90 @@ def main():
 
         best_res = pick_best_fit(result_obj_list)
         results_best[obj_id] = best_res
-        print(f"Object {obj_id}: selected npca_qso={best_res['npca_qso']} decomp_host={best_res['decomp_host']} with aic={best_res['aic']:.1f}, bic={best_res['bic']:.1f}, redchi={best_res['redchi']:.3f}")
+
+        # Copy plot into best folder
+        try:
+            # Find the plot file(s) for this object and best fit
+            plot_pattern = os.path.join(
+                'plots', 'pyqsofit', prefix,
+                f'npca_qso_{best_res["npca_qso"]}_decomp_host_{best_res["decomp_host"]}_BC_{best_res["BC"]}',
+                f'*{best_res["sdss_name"]}*'
+            )
+            plot_files = glob.glob(plot_pattern + ".pdf")
+            if plot_files:
+                best_plot_dir = os.path.join('plots', 'pyqsofit', prefix, 'best')
+                os.makedirs(best_plot_dir, exist_ok=True)
+                for plot_file in plot_files:
+                    # Add npca_qso, decomp_host, and BC to the filename
+                    base, ext = os.path.splitext(os.path.basename(plot_file))
+                    dest_file = os.path.join(
+                        best_plot_dir,
+                        f"{base}_npca_qso_{best_res['npca_qso']}_decomp_host_{best_res['decomp_host']}_BC_{best_res['BC']}{ext}"
+                    )
+                    shutil.copy2(plot_file, dest_file)
+        except Exception as e:
+            print(f"[WARN] Could not copy plot for {best_res['sdss_name']}: {e}")
+        #print(f"SDSS {best_res['sdss_name']}: selected npca_qso={best_res['npca_qso']} decomp_host={best_res['decomp_host']} BC={best_res['BC']} with aic={best_res['aic']:.1f}, bic={best_res['bic']:.1f}, redchi={best_res['redchi']:.3f}")
+
+
+
+    def _option_label(m):
+        return f"npca_qso={m['npca_qso']}, BC={m['BC']}, decomp_host={m['decomp_host']}"
+
+    def build_fit_table(models):
+        """
+        Return a DataFrame indexed by (sdss_name, option) with columns redchi, aic, bic.
+        Rows correspond to combinations of (npca_qso, BC, decomp_host).
+        """
+        rows = []
+        for m in models:
+            rows.append({
+                'sdss_name': m['sdss_name'],
+                'option': _option_label(m),
+                'redchi': m['redchi'],
+                'aic': m['aic'],
+                'bic': m['bic'],
+                'm_2500': m['apparent_mag_2500'],
+                'm_2500_err': m['apparent_mag_2500_err'],
+                'redchi2_conti_full': m['redchi2_conti_full']
+            })
+        df = pd.DataFrame(rows)
+        df = (
+            df.sort_values(['sdss_name', 'redchi2_conti_full', 'aic', 'bic'])
+            .set_index(['sdss_name', 'option'])[['redchi', 'aic', 'bic', 'm_2500', 'm_2500_err', 'redchi2_conti_full']]
+        )
+        return df
+
+    def print_fit_tables(models, pick_best_fn):
+        """
+        Pretty-print one table per sdss_name, with the best row (by pick_best_fn)
+        marked with a star.
+        """
+        df = build_fit_table(models)
+        for sdss_name, df_one in df.groupby(level=0):
+            subset = [m for m in models if m['sdss_name'] == sdss_name]
+            best = pick_best_fn(subset)
+            best_label = _option_label(best)
+
+            # add star to the best option's index label
+            df_show = df_one.copy()
+            new_index = []
+            for opt in df_show.index.get_level_values(1):
+                if opt == best_label:
+                    new_index.append(f"★ {opt}")
+                else:
+                    new_index.append(f"  {opt}")
+            df_show.index = pd.MultiIndex.from_arrays(
+                [[sdss_name]*len(new_index), new_index],
+                names=['sdss_name','option']
+            )
+
+            print(f"\n=== {sdss_name} ===")
+            print(df_show.to_string(float_format=lambda x: f"{x:.3f}"))
+
+    # Example usage:
+    for obj_id, result_obj_list in results_all.items():
+        print_fit_tables(result_obj_list, pick_best_fit)
 
 
     write_hdf5_file(results_best.values(), args.fpath_out)
@@ -904,6 +997,8 @@ def main():
         "bic",
         "npca_qso",
         "decomp_host",
+        "BC",
+        "redchi2_conti_full",
         'plate',
         'mjd',
         'fiber',
