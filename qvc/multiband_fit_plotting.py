@@ -666,20 +666,8 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, data, bands=['u', '
         ax_psd.set_yscale("log")
         ax_psd.grid(False)
 
-        # DRW
-        # Plot a line with slope -2 for reference, normalized to match the PSD
-        ref_freqs = np.linspace(np.nanmin(freqs), np.nanmax(freqs), 100)
-        ref_psd2 = ref_freqs**-2
-        ref_psd4 = ref_freqs**-4
-        # Normalize the reference line to match the PSD at the median frequency
-        median_freq = 1e-2
-        median_psd = np.interp(median_freq, freqs, psd_median)
-        ref_psd2 *= median_psd / np.interp(median_freq, ref_freqs, ref_psd2)
-        ref_psd4 *= median_psd / np.interp(median_freq, ref_freqs, ref_psd4)
-        ax_psd.plot(ref_freqs, 10*ref_psd2, 'k--', label="-2")
-        ax_psd.plot(ref_freqs, 10*ref_psd4, 'k:', label="-4")
         ax_psd.set_ylim(1e-3, 1e4)
-        ax_psd.set_xlim(1e-6, 1e1)
+        ax_psd.set_xlim(1e-6, 1e-1)
 
     plt.tight_layout()
 
