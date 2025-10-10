@@ -144,74 +144,163 @@ def _top_hat_gain(width, tau):
     full  = -jnp.expm1(-x) / jnp.maximum(x, 1e-16)
     return jnp.where(x < 1e-8, small, full)
 
-class BWB_QS(qs.Quasisep):
+
+
+class ContiBLR_BWB_QS(qs.Quasisep):
     """
-    Bluer-When-Brighter (BWB) additive kernel with per-band modification.
+    Continuum+BLR kernel in magnitudes, with per-band τ and built-in BWB.
+
+    State size = 2B: [u_0..u_{B-1}, v_0..v_{B-1}]
+      u_b ~ OU(τ_u[b]), v_b ~ OU(τ_v[b]) with τ_u[b] = tau_band[b],
+                                        and τ_v[b] = beta * tau_band[b].
+
+    Continuum (band b, after disk lag & smoothing):
+        weights on [u_b, v_b] = [ a_b * G(width_cont[b], τ_ref[b]),
+                                  c_b * G(width_cont[b], τ_ref[b]) ]
+        with c_b = sigma_bwb * (amp_cont[b]**exp_bwb) * G(width_bwb[b], τ_ref[b])
+
+    BLR (band b, after disk+BLR lag & smoothing):
+        amp_blr[b] * [ a_b, (kappa_blr_bwb * c_b) ] with G(width_blr[b], τ_ref[b])
 
     Args
     ----
-    amp_cont:   (B,)  continuum amplitude proxy per band (unitless scale factor)
-    sigma_bwb:  (B,) or () overall BWB strength per band (or shared scalar)
-    exp_bwb:    ()    exponent controlling how BWB scales with amp_cont
-    width_bwb:  (B,)  boxcar width (same units as tau), no lag
-    tau:        (B,)  OU timescale per band
-
-    Notes
-    -----
-    * No additional lag (pure chromatic amplitude modulation).
-    * PSD-safe via shared-state OU system:
-        A = diag(-1/tau)
-        P_ij = 2*sqrt(tau_i*tau_j)/(tau_i + tau_j)
-    * Observation for band b:
-        h_b = sigma_bwb[b] * (amp_cont[b]**exp_bwb) * G(width_bwb[b], tau[b]) * e_b
+    tau_band        : (B,)   per-band base OU timescale (sets τ_u)
+    beta            : (B,) or ()  factor so τ_v = beta * tau_band
+    rho             : ()     global u-v correlation (-1<rho<1) at stationarity
+    amp_cont        : (B,)   per-band continuum loading (== your old amp_cont)
+    sigma_bwb       : (B,) or ()  BWB scale
+    exp_bwb         : ()     exponent for amp_cont in c_b
+    width_bwb       : (B,)   top-hat width for BWB smoothing
+    tau_ref         : (B,)   reference τ for gains (often tau_band)
+    amp_blr         : (B,)   BLR amplitude scaling
+    kappa_blr_bwb   : (B,) or ()  relative BWB strength inside BLR (1 = inherit)
+    lag_disk        : (B,)   disk lag (>=0)
+    lag_blr         : (B,)   extra BLR lag (>=0)
+    width_cont      : (B,)   continuum top-hat width
+    width_blr       : (B,)   BLR top-hat width
     """
 
-    amp_cont:   jnp.ndarray  # (B,)
-    sigma_bwb:  jnp.ndarray  # (B,) or ()
-    exp_bwb:    float        # ()
-    width_bwb:  jnp.ndarray  # (B,)
-    tau:        jnp.ndarray  # (B,)
+    # --- timescales ---
+    tau_band: jnp.ndarray     # (B,)
+    beta: jnp.ndarray | float # () or (B,)
+    rho: float
+
+    # --- continuum + BWB ---
+    amp_cont: jnp.ndarray     # (B,)
+    sigma_bwb: jnp.ndarray    # (B,) or ()
+    exp_bwb: float
+    width_bwb: jnp.ndarray    # (B,)
+    tau_ref: jnp.ndarray      # (B,) #TODO, remove
+
+    # --- BLR ---
+    amp_blr: jnp.ndarray       # (B,)
+    kappa_blr_bwb: jnp.ndarray # (B,) or ()
+    lag_disk: jnp.ndarray      # (B,)
+    lag_blr: jnp.ndarray       # (B,)
+    width_cont: jnp.ndarray    # (B,)
+    width_blr: jnp.ndarray     # (B,)
 
     # ---------- tinygp hooks ----------
     def coord_to_sortable(self, X):
         t, b = X
-        # tiny band nudge to keep deterministic ordering when times tie
         return t + 1e-9 * jnp.asarray(b, jnp.int32)
 
+    # A = diag(-1/τ_u, ..., -1/τ_u, -1/τ_v, ..., -1/τ_v)
     def design_matrix(self) -> JAXArray:
-        lam = 1.0 / jnp.maximum(self.tau, 1e-12)
-        return -jnp.diag(lam)
+        tau_u = jnp.maximum(self.tau_band, 1e-12)
+        beta  = self.beta if jnp.ndim(self.beta) > 0 else jnp.full_like(tau_u, self.beta)
+        tau_v = jnp.maximum(beta, 1e-12) * tau_u
+        lam_u = 1.0 / tau_u
+        lam_v = 1.0 / tau_v
+        return -jnp.diag(jnp.concatenate([lam_u, lam_v], axis=0))
 
+    # Stationary covariance with OU cross-band coupling and u-v correlation ρ
     def stationary_covariance(self) -> JAXArray:
-        # P_ij = 2 sqrt(tau_i tau_j) / (tau_i + tau_j)
-        tau = jnp.maximum(self.tau, 1e-12)
-        ti = tau[:, None]
-        tj = tau[None, :]
-        P  = 2.0 * jnp.sqrt(ti * tj) / jnp.maximum(ti + tj, 1e-12)
-        return 0.5 * (P + P.T)  # symmetrize
+        def _P_from_tau(ti, tj):
+            ti = jnp.maximum(ti, 1e-12)
+            tj = jnp.maximum(tj, 1e-12)
+            return 2.0 * jnp.sqrt(ti[:, None] * tj[None, :]) / jnp.maximum(ti[:, None] + tj[None, :], 1e-12)
 
+        tau_u = jnp.maximum(self.tau_band, 1e-12)
+        beta  = self.beta if jnp.ndim(self.beta) > 0 else jnp.full_like(tau_u, self.beta)
+        tau_v = jnp.maximum(beta, 1e-12) * tau_u
+
+        Puu = _P_from_tau(tau_u, tau_u)  # (B,B)
+        Pvv = _P_from_tau(tau_v, tau_v)  # (B,B)
+
+        r   = jnp.clip(self.rho, -0.999, 0.999)
+        Puv = r * _P_from_tau(tau_u, tau_v)  # (B,B)
+        Pvu = Puv.T
+
+        P = jnp.block([[Puu, Puv],
+                       [Pvu, Pvv]])
+        return 0.5 * (P + P.T)
+
+    # Φ = diag(exp(-Δt/τ_u...), exp(-Δt/τ_v...))
     def transition_matrix(self, X1: JAXArray, X2: JAXArray) -> JAXArray:
         t1, _ = X1
         t2, _ = X2
-        dt  = t2 - t1
-        lam = 1.0 / jnp.maximum(self.tau, 1e-12)
-        return jnp.diag(jnp.exp(-lam * dt))
+        dt = t2 - t1
+        tau_u = jnp.maximum(self.tau_band, 1e-12)
+        beta  = self.beta if jnp.ndim(self.beta) > 0 else jnp.full_like(tau_u, self.beta)
+        tau_v = jnp.maximum(beta, 1e-12) * tau_u
+        phi_u = jnp.exp(-dt / tau_u)
+        phi_v = jnp.exp(-dt / tau_v)
+        return jnp.diag(jnp.concatenate([phi_u, phi_v], axis=0))
 
+    # h(X) row: only band b's u_b and v_b are observed (plus BLR-delayed copies)
     def observation_model(self, X: JAXArray) -> JAXArray:
         _t, b = X
         b = jnp.asarray(b, dtype=jnp.int32)
+        B = self.amp_cont.shape[0]
 
-        # per-band scale: sigma_bwb * (amp_cont**exp_bwb) * top-hat gain
-        amp = self.amp_cont[b]
-        tau_b = jnp.maximum(self.tau[b], 1e-12)
-        G  = _top_hat_gain(self.width_bwb[b], tau_b)
+        # reference τ for gains (often tau_band)
+        tau_ref_b = jnp.maximum(self.tau_band[b], 1e-12)
 
-        # TODO: allow sigma_bwb to be scalar or per-band?
-        alpha_b = self.sigma_bwb * (amp ** self.exp_bwb) * G
+        # smoothing gains
+        Gc = _top_hat_gain(self.width_cont[b], tau_ref_b)
+        Gr = _top_hat_gain(self.width_blr[b],  tau_ref_b)
+        Gb = _top_hat_gain(self.width_bwb[b],  tau_ref_b)
 
-        B   = self.tau.shape[0]
-        e_b = jnp.zeros(B, dtype=self.tau.dtype).at[b].set(1.0)
-        return alpha_b * e_b
+        # continuum weights (pre-lag)
+        a_b = self.amp_cont[b]
+        c_b = self.sigma_bwb * (jnp.abs(a_b) ** self.exp_bwb) * Gb  # BWB term
+
+        # BLR scaling (same chromatic structure as continuum)
+        amp   = self.amp_blr[b]
+        kap   = self.kappa_blr_bwb
+        kap_b = kap if jnp.ndim(kap) == 0 else kap[b]
+
+        # indices in the 2B state
+        idx_u = b
+        idx_v = B + b
+
+        # compute per-band lags and decay factors
+        tau_u_b = jnp.maximum(self.tau_band[b], 1e-12)
+        beta_b  = self.beta if jnp.ndim(self.beta) == 0 else self.beta[b]
+        tau_v_b = jnp.maximum(beta_b, 1e-12) * tau_u_b
+
+        lag_d  = jnp.maximum(self.lag_disk[b], 0.0)
+        lag_rb = jnp.maximum(self.lag_blr[b],  0.0)
+
+        phi_u_d  = jnp.exp(-lag_d  / tau_u_b)
+        phi_v_d  = jnp.exp(-lag_d  / tau_v_b)
+        phi_u_dr = jnp.exp(-(lag_d + lag_rb) / tau_u_b)
+        phi_v_dr = jnp.exp(-(lag_d + lag_rb) / tau_v_b)
+
+        # assemble observation row
+        h = jnp.zeros(2 * B, dtype=self.amp_cont.dtype)
+
+        # continuum contribution (delayed by disk lag)
+        h = h.at[idx_u].set(h[idx_u] + (a_b * Gc) * phi_u_d)
+        h = h.at[idx_v].set(h[idx_v] + (c_b * Gc) * phi_v_d)
+
+        # BLR contribution (disk+BLR lag, BLR width)
+        h = h.at[idx_u].set(h[idx_u] + amp * (a_b * Gr)            * phi_u_dr)
+        h = h.at[idx_v].set(h[idx_v] + amp * (kap_b * c_b * Gr)    * phi_v_dr)
+
+        return h
+
 
 def qs_psd(kernel, omega, b: int, sigma_n2: float = 0.0):
     """
@@ -293,25 +382,35 @@ class MyMultiVarModel_SMAG_New(MultiVarModel):
 
         lag_disk = params["lag0"] * (self.lam_rf / 2500.0) ** params["lag_beta"]
 
-        kernel_contBLR = ContiBLR_QS(
-            amp_cont=jnp.exp(log_sigma_band),
-            amp_blr=jnp.exp(log_sigma_band_blr),
-            lag_disk=lag_disk,
-            lag_blr=jnp.exp(params["log_lag_blr"]),
-            width_cont=params["width_cont"],
-            width_blr=params["width_blr"],
-            tau=jnp.exp(log_tau_band)
-        )
+        #kernel_contBLR = ContiBLR_QS(
+        #    amp_cont=jnp.exp(log_sigma_band),
+        #    amp_blr=jnp.exp(log_sigma_band_blr),
+        #    lag_disk=lag_disk,
+        #    lag_blr=jnp.exp(params["log_lag_blr"]),
+        #    width_cont=params["width_cont"],
+        #    width_blr=params["width_blr"],
+        #    tau=jnp.exp(log_tau_band)
+        #)
         
-        kernel_bwb = BWB_QS(
+        kernel_bwb = ContiBLR_BWB_QS(
+            tau_band=jnp.exp(log_tau_band),
+            beta=params["bwb_beta"],
+            rho=1.0,
             amp_cont=jnp.exp(log_sigma_band),
             sigma_bwb=params["bwb_alpha"],
-            exp_bwb=params["bwb_beta"],
+            exp_bwb=1.0,
             width_bwb=params["width_cont"],
-            tau=jnp.exp(log_tau_band),
+            tau_ref=jnp.exp(log_tau_center),
+            lag_disk=lag_disk,
+            # BLR parameters
+            amp_blr=jnp.exp(log_sigma_band_blr),
+            kappa_blr_bwb=1.0,
+            lag_blr=jnp.exp(params["log_lag_blr"]),
+            width_cont=params["width_cont"],
+            width_blr=params["width_blr"]
         )
 
-        kernel = kernel_contBLR + kernel_bwb
+        kernel = kernel_bwb #kernel_contBLR + kernel_bwb
 
         u = kernel.coord_to_sortable((t, band))
         order = jnp.argsort(u)

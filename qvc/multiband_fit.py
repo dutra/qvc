@@ -217,10 +217,8 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_
 
             # Bluer when brighter (BWB) strength
             if bwb:
-                bwb_log_alpha = numpyro.sample("bwb_log_alpha", dist.Normal(0.5, 0.2))
-                bwb_log_beta = numpyro.sample("bwb_log_beta", dist.Normal(4.0, 1.0))
-                bwb_alpha = numpyro.deterministic("bwb_alpha", jnp.exp(bwb_log_alpha))
-                bwb_beta = numpyro.deterministic("bwb_beta", jnp.exp(bwb_log_beta))
+                bwb_alpha = numpyro.sample("bwb_alpha", dist.TruncatedNormal(0.1, 0.3, low=0.0, high=1.0))
+                bwb_beta = numpyro.sample("bwb_beta", dist.TruncatedNormal(0.8, 0.3, low=0.0))
             else:
                 bwb_alpha = numpyro.deterministic("bwb_alpha", jnp.zeros(batch_size))
                 bwb_beta = numpyro.deterministic("bwb_beta", jnp.ones(batch_size))
