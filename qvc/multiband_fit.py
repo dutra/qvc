@@ -868,7 +868,7 @@ if __name__ == '__main__':
                 lam_rf=obj['lam_rf'], z=obj['z'], use_bwb=args.bwb, q_groups=args.lmc,
                 broken_pl=args.broken_pl
             )
-            save_combined_plot(obj_flat_samples, m, obj['X'], obj['y'], obj['yerr'], obj['band_idx'], result, 
+            save_combined_plot(obj_flat_samples, m, obj['X'], obj['y'], obj['yerr'], obj['band_idx'], obj['mags_means'], result, 
                             bands=bands, plot_psd=(not args.disable_plot_psd))
             plot_correlation_matrix(obj_flat_samples_flatten_per_band, obj)
             plot_all_histograms(obj_flat_samples_flatten_per_band, obj)

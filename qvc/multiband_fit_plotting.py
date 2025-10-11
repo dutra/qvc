@@ -570,14 +570,15 @@ def combined_lomb_scargle_from_model(
     return np.array(f_bin), np.array(P_bin), np.array(P_lo), np.array(P_hi), np.array(counts), P_noise
 
 
-def save_combined_plot(samples, model, X, y, yerr, band_idx, data, bands=['u', 'g', 'r', 'i', 'z'], plot_psd=True):
+def save_combined_plot(samples, model, X, y, yerr, band_idx, mags_means, data, bands=['u', 'g', 'r', 'i', 'z'], plot_psd=True):
     logging.info("Saving combined plot")
 
     object_id = data['object_id']
     band_idx_map = {i: b for i, b in enumerate(bands)}
 
     fig, (ax_lc, ax_psd) = plt.subplots(2, 1, figsize=(10, 10), sharex=False, gridspec_kw={'height_ratios': [1.5, 1]})
-    offsets = np.arange(len(bands)) * 0.25
+    offsets = np.arange(len(bands)) * 0.25 + mags_means[bands.index('r')]
+
 
     t = X[0]
     for n in np.unique(band_idx):
@@ -654,10 +655,10 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, data, bands=['u', '
         ax_psd.axhline(np.median(P_noise), color='gray', linestyle='--', lw=1.5, label="Noise Level")
 
         ax_lc.set_xlabel('MJD')
-        ax_lc.set_ylabel('Magnitude + arbitrary offset')
+        ax_lc.set_ylabel('r-band mag + offset')
         ax_lc.invert_yaxis()
         ax_lc.set_xlim(np.min(t_test), np.max(t_test))
-        #ax_lc.legend(loc='best')
+        ax_lc.legend(loc='upper left')
 
         # PSD axis formatting
         ax_psd.set_xlabel("Frequency (days$^{-1}$)")
@@ -675,8 +676,10 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, data, bands=['u', '
     output_dir = f"plots/multiband/{prefix}/light_curves_fits"
     os.makedirs(output_dir, exist_ok=True)
     fpath = os.path.join(output_dir, f'{data["z"]:.1f}_{object_id}_light_curve_{suffix}.png')
-    logging.info(f"Saving figure to {fpath}")
     plt.savefig(fpath, dpi=120)
+    fpath = os.path.join(output_dir, f'{data["z"]:.1f}_{object_id}_light_curve_{suffix}.pdf')
+    plt.savefig(fpath, dpi=600)
+    logging.info(f"Saving figure to {fpath}")
     plt.close(fig)
     
 
