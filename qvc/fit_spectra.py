@@ -20,27 +20,132 @@ prefix = os.environ.get('PREFIX', "pyqsofit")
 suffix = os.environ.get('SUFFIX', "pyqsofit")
 import shutil
 import glob
-import sys
-import timeit
 import argparse
-import warnings
 import numpy as np
-import pandas as pd
+import fitsio, pandas as pd
 from tqdm import trange, tqdm
 import csv
 import traceback
-
+from speclite.filters import FilterResponse
 from astropy.io import fits
 from astropy.table import Table
 from astropy.coordinates import SkyCoord
 from astropy.cosmology import FlatLambdaCDM
 import astropy.units as u
-from hubble_utils import read_quasars_from_hdf5, write_hdf5_file
+from hubble_utils import read_quasars_from_hdf5, write_hdf5_file, match_radec
 
 from astroquery.sdss import SDSS
 #warnings.filterwarnings("ignore")
 
 bands = ['u', 'g', 'r', 'i', 'z']
+
+
+def _as_value(x, unit=None):
+    """Return float array from Quantity or ndarray. If ndarray and a unit is
+    provided, just assume that unit (no conversion)."""
+    if hasattr(x, "to"):  # Astropy Quantity
+        return np.asarray(x.to(unit).value if unit is not None else x.value, dtype=float)
+    return np.asarray(x, dtype=float)
+
+def synth_ab_mag_overlap(
+    filt,
+    lam,                # Quantity [Å] or ndarray (assumed Å)
+    f_lambda,           # Quantity [erg s^-1 cm^-2 Å^-1] or ndarray in those units
+    tmin_rel=0.01,
+    min_overlap_frac=0.85,
+    min_pts=30,
+    debug=False,
+):
+    """
+    Match speclite FilterResponse.get_ab_magnitude exactly, but allow partial
+    spectral coverage by trimming the filter to the spectrum–filter overlap.
+    """
+
+    # --- Filter grid (robust to ndarray or Quantity) ---
+    w_attr = getattr(filt, "wavelength", None)
+    if w_attr is None:
+        w_attr = getattr(filt, "waves", None)
+    if w_attr is None:
+        raise ValueError("Filter has no wavelength grid (expected .wavelength or .waves).")
+
+    w = _as_value(w_attr, u.AA)                    # Å
+    t = _as_value(getattr(filt, "response"), None) # dimensionless throughput
+
+    if not np.any(np.isfinite(t)):
+        raise ValueError("Filter response has no finite values.")
+    tmax = np.nanmax(t)
+    if not np.isfinite(tmax) or tmax <= 0:
+        raise ValueError("Filter maximum throughput is not positive/finite.")
+
+    # Effective passband threshold (avoid tiny tails)
+    in_eff = t >= (tmin_rel * tmax)
+    if not np.any(in_eff):
+        raise ValueError("No effective band found under tmin_rel threshold.")
+    w_eff = w[in_eff]
+    wmin_eff, wmax_eff = w_eff[0], w_eff[-1]
+    band_width_eff = wmax_eff - wmin_eff
+
+    # --- Spectrum (robust to ndarray or Quantity) ---
+    lam_A = _as_value(lam, u.AA)                               # Å
+    fl_A  = _as_value(f_lambda, u.erg/u.s/u.cm**2/u.AA)        # erg s^-1 cm^-2 Å^-1
+
+    m = np.isfinite(lam_A) & np.isfinite(fl_A)
+    if not np.any(m):
+        raise ValueError("Spectrum has no finite wavelength/flux values.")
+    lam_A = lam_A[m]; fl_A = fl_A[m]
+    if lam_A.ndim != 1: lam_A = lam_A.ravel()
+    if fl_A.ndim  != 1: fl_A  = fl_A.ravel()
+    if not np.all(np.diff(lam_A) > 0):
+        idx = np.argsort(lam_A)
+        lam_A, fl_A = lam_A[idx], fl_A[idx]
+
+    # Overlap with effective passband
+    spec_min, spec_max = lam_A[0], lam_A[-1]
+    ov_min = max(wmin_eff, spec_min)
+    ov_max = min(wmax_eff, spec_max)
+    if ov_max <= ov_min:
+        raise ValueError(f"No overlap with effective band [{wmin_eff:.1f}, {wmax_eff:.1f}] Å.")
+
+    overlap_frac = float((ov_max - ov_min) / band_width_eff)
+    if overlap_frac < min_overlap_frac:
+        raise ValueError(f"Insufficient overlap: {overlap_frac:.2f} < {min_overlap_frac:.2f}.")
+
+    # If full coverage, defer to speclite (bit-for-bit match).
+    if (spec_min <= w[0]) and (spec_max >= w[-1]):
+        lam_q = lam if hasattr(lam, "to") else (lam * u.AA)
+        f_q   = f_lambda if hasattr(f_lambda, "to") else (f_lambda * u.erg/u.s/u.cm**2/u.AA)
+        mag = filt.get_ab_magnitude(f_q, lam_q)
+        if debug:
+            print(f"[synth_ab_mag_overlap] full coverage; overlap=1.00 mag={float(mag):.4f}")
+        return float(mag), 1.0
+
+    # Build a trimmed filter on a dense grid strictly within the overlap
+    n_grid = max(min_pts, 3)
+    w_trim = np.linspace(ov_min, ov_max, n_grid)
+
+    # Evaluate throughput on this grid; prefer speclite's callable interpolation if present
+    if callable(getattr(filt, "__call__", None)):
+        t_trim = np.asarray(filt(w_trim * u.AA), dtype=float)
+    else:
+        t_trim = np.interp(w_trim, w, t)
+
+    # Construct a temporary FilterResponse; this recomputes the AB zeropoint
+    # with speclite's photon weighting on the *trimmed* band.
+    tmp_meta = getattr(filt, "meta", None)
+    tmp = FilterResponse(w_trim * u.AA, t_trim, meta=tmp_meta)
+
+    lam_q = lam if hasattr(lam, "to") else (lam * u.AA)
+    f_q   = f_lambda if hasattr(f_lambda, "to") else (f_lambda * u.erg/u.s/u.cm**2/u.AA)
+
+    mag = tmp.get_ab_magnitude(f_q, lam_q)
+
+    if debug:
+        print(f"[synth_ab_mag_overlap] eff=[{wmin_eff:.1f},{wmax_eff:.1f}]Å "
+              f"spec=[{spec_min:.1f},{spec_max:.1f}]Å overlap={overlap_frac:.3f} "
+              f"n_grid={n_grid} mag={float(mag):.4f}")
+
+    return float(mag), overlap_frac
+
 
 def sdss_bands_affected_by_lya(z, buffer=100.0):
     """
@@ -402,7 +507,8 @@ def create_qsopar_fits(path_ex='data/', parfilename='qsopar.fits', overwrite=Tru
 
 def run_qsofit_record(rec, npca_qso, decomp_host, BC, cache_dir="data/spectra_cache", 
                       path_ex=f'data/pyqsofit', parfilename=f'qsopar.fits',
-                      save_fig_path=f'./plots/pyqso/', save_fits_path=f'./results/pyqso_fits/'):
+                      save_fig_path=f'./plots/pyqso/', save_fits_path=f'./results/pyqso_fits/',
+                      allow_partial_band_overlap=False):
     """
     Worker-safe version of QSOFit runner.
     `rec` is a plain dict containing only the fields needed for one object.
@@ -485,17 +591,27 @@ def run_qsofit_record(rec, npca_qso, decomp_host, BC, cache_dir="data/spectra_ca
                 if not np.isfinite(mag_fiber) or mag_fiber < 0:
                     print(f"[WARN] Invalid mag_fiber for band {b} for {rec['sdss_name']}: {mag_fiber}")
                     continue
-                mag_synth = filt.get_ab_magnitude(
-                    1e-17 * flux * u.erg / u.s / u.cm**2 / u.AA,
-                    lam * u.AA
-                )
+                if allow_partial_band_overlap:
+                    # Compute synthetic mag robustly over the overlap only
+                    mag_synth, overlap_frac = synth_ab_mag_overlap(
+                        filt, lam * u.AA, 1e-17 * flux * u.erg / u.s / u.cm**2 / u.AA,
+                        tmin_rel=0.01,          # 1% throughput threshold
+                        min_overlap_frac=0.85,  # accept slightly partial coverage
+                        min_pts=30
+                    )
+                else:
+                    mag_synth = filt.get_ab_magnitude(
+                        1e-17 * flux * u.erg / u.s / u.cm**2 / u.AA,
+                        lam * u.AA
+                    )
+                    overlap_frac = 1.0
                 dm = mag_fiber - mag_synth
                 delta_mags[b] = dm
-                print(f"[INFO] Band {b}: mag_fiber={mag_fiber:.3f}, mag_synth={mag_synth:.3f}, delta_m={dm:.3f}")
-
+                print(f"[INFO] Band {b}: mag_fiber={mag_fiber:.3f}, mag_synth={mag_synth:.3f}, Δm={dm:.3f} (overlap={overlap_frac:.2f})")
+                
                 # weight by photometric mag uncertainty if available; else equal weight
-                sig_m = rec.get(f'mean_{b}_err', np.nan)
-                w = 1.0 / (sig_m**2) if np.isfinite(sig_m) and sig_m > 0 else 1.0
+                sig_m = rec[f'mean_{b}_err']
+                w = (1.0 / (sig_m**2) if np.isfinite(sig_m) and sig_m > 0 else 1.0) * overlap_frac
                 weights.append(w)
                 bands_used.append(b)
             except Exception as e:
@@ -738,6 +854,10 @@ def parse_args():
 
     p.add_argument("--spectral_fit_csv", default=None, type=str, 
                    help="Optional CSV file with spectral fit results to merge into output.")
+    p.add_argument("--allow_partial_band_overlap", action="store_true",
+                   help="If set, allow bands with partial wavelength overlap when computing synthetic mags.")
+    p.add_argument("--enable_BC", action="store_true",
+                   help="If set, enable Balmer continuum run in QSOFit.")
     return p.parse_args()
 
 
@@ -785,19 +905,42 @@ def main():
     quasar_dict_list = sample_df.to_dict(orient="records")
 
     # 1) Match sample to DR16Q
-    data_cat = match_sample_to_dr16q(
-        sample_df=sample_df,
-        dr16q_fits=args.dr16q_fits,
-        max_sep_arcsec=args.max_sep,
+    # data_cat = match_sample_to_dr16q(
+    #     sample_df=sample_df,
+    #     dr16q_fits=args.dr16q_fits,
+    #     max_sep_arcsec=args.max_sep,
+    # )
+
+    #     data_cat_full = pd.DataFrame({c: data_cat_full.field(c) for c in cols})
+    cols = ["RA", "DEC", "SDSS_NAME", "PLATE", "FIBERID", "MJD", "Z_SYS", "LOGLBOL"]
+    # Load using astropy Table, then convert to DataFrame
+    data_cat_table = Table.read(args.dr16q_fits, hdu=1)
+    data_cat_full = data_cat_table[cols].to_pandas()
+
+    print(f"[INFO] Loaded DR16Q catalog with {len(data_cat_full)} rows from {args.dr16q_fits}")
+
+    df_matched, unmatched_object_ids = match_radec(
+        sample_df, data_cat_full,
+        populate_cols=['SDSS_NAME', 'PLATE', 'FIBERID', 'MJD', 'Z_SYS', 'LOGLBOL', 'RA', 'DEC'],
+        ra_col_a='ra', dec_col_a='dec', ra_col_b='RA', dec_col_b='DEC',
+        max_sep_arcsec=1.0, add_prefix=False
     )
+    df_matched['plate'] = df_matched['PLATE']
+    df_matched['fiber'] = df_matched['FIBERID']
+    df_matched['mjd'] = df_matched['MJD']
+    df_matched['z'] = df_matched['Z_SYS']
+    df_matched['loglbol'] = df_matched['LOGLBOL']
+    df_matched['sdss_name'] = df_matched['SDSS_NAME'].astype(str).str.strip()
+    print(f"[INFO] After matching to DR16Q, {len(df_matched)} objects matched, {len(unmatched_object_ids)} unmatched.")
+    records = df_matched.to_dict(orient='records')
 
     # 2) If --download, fetch all spectra and exit
     if args.download:
         SDSS.clear_cache()
-        N = len(data_cat)
+        N = len(records)
         errors = []
         for i in tqdm(range(N), desc="Downloading spectra"):
-            row = data_cat[i]
+            row = records[i]
             plate, fiber, mjd = int(row['PLATE']), int(row['FIBERID']), int(row['MJD'])
             sdss_name = str(row['SDSS_NAME'])
             try:
@@ -816,36 +959,6 @@ def main():
     # 3) Otherwise, proceed to QSOFit processing (expects cached spectra)
     create_qsopar_fits(path_ex=f'data/pyqsofit', parfilename=f'qsopar_{prefix}_{suffix}.fits', overwrite=True)
     # Build worker records so we don't try to pickle big astropy tables
-    records = []
-    for i in range(len(data_cat)):
-        row = data_cat[i]
-        
-
-        rec = dict(
-            object_id=str(row['object_id']),
-            sdss_name=str(row['SDSS_NAME']),
-            plate=int(row['PLATE']),
-            fiber=int(row['FIBERID']),
-            mjd=int(row['MJD']),
-            z=float(row['z']),
-            loglbol=float(row['LOGLBOL']),
-            # mags={
-            #     b: (float(row[f'mean_corrected_{b}']) if f'mean_corrected_{b}' in colnames else np.nan)
-            #     for b in bands
-            # },
-            # mags_err={
-            #     b: float(row[f"mean_{b}_err"]) if f"mean_{b}_err" in colnames else np.nan
-            #     for b in bands
-            # },
-            ra=float(row['RA']),
-            dec=float(row['DEC']),
-        )
-        for b in bands:
-            print(f"Setting band {b} for record {rec['object_id']} (z={rec['z']}) ({rec['sdss_name']})")
-            rec[f'mean_corrected_{b}'] = float(row[f'mean_corrected_{b}'])
-            rec[f'mean_{b}_err'] = float(row[f'mean_{b}_err'])
-            #print(f"  - mean_corrected_{b}: {rec[f'mean_corrected_{b}']}, mean_{b}_err: {rec[f'mean_{b}_err']}")
-        records.append(rec)
 
     # Run QSOFit twice: once with npca_qso=0, once with npca_qso=2
     results_all = {}
@@ -858,6 +971,7 @@ def main():
         worker = partial(run_qsofit_record, npca_qso=npca_qso, decomp_host=decomp_host, BC=BC, cache_dir=args.cache_dir, 
                         path_ex=f'data/pyqsofit', parfilename=f'qsopar_{prefix}_{suffix}.fits',
                         save_fits_path=save_fits_path,
+                        allow_partial_band_overlap=args.allow_partial_band_overlap,
                         save_fig_path=save_fig_path)
         chunksize = 1
         with Pool(processes=num_cores) as pool:
@@ -874,14 +988,15 @@ def main():
                     pbar.update(1)
         print(f"Collected {len(results_all)} results for {npca_qso=} {decomp_host=} {BC=}")
 
-    BC = False
-    # decomp_host False
-    decomp_host = False
-    run_parallel(npca_qso=0, decomp_host=decomp_host, BC=BC)
-    # decomp_host True
-    decomp_host = True
-    for npca_qso in [0, 1, 2]:
-        run_parallel(npca_qso=npca_qso, decomp_host=decomp_host, BC=BC)
+    BC_list = [False, True] if args.enable_BC else [False]
+    for BC in BC_list:
+        # decomp_host False
+        decomp_host = False
+        run_parallel(npca_qso=0, decomp_host=decomp_host, BC=BC)
+        # decomp_host True
+        decomp_host = True
+        for npca_qso in [0, 1, 2]:
+            run_parallel(npca_qso=npca_qso, decomp_host=decomp_host, BC=BC)
 
     # Select best result (lowest redchi) for each object
 
