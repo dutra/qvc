@@ -259,6 +259,9 @@ def create_qsopar_fits(path_ex='data/', parfilename='qsopar.fits', overwrite=Tru
         (4102.89,  'Hd',  4000,  4150,  'Hd_br',         1,    0.0,    0.0,   1e10,   5e-3,   0.004,    0.05,   0.01,      0,     0,     0,   0.01,   1),
         (4102.89,  'Hd',  4000,  4150,  'Hd_na',         1,    0.0,    0.0,   1e10,   1e-3,  2.3e-4,  0.00169,  0.01,      1,     1,     0,   0.002,  1),
 
+        (3728.48, 'OII', 3650, 3800, 'OII3728',          1,    0.0, 0.0, 1e10, 1e-3, 3.333e-4, 0.00169, 0.01, 1, 1, 0, 0.001, 1),
+        (3426.84, 'NeV', 3380, 3480, 'NeV3426',          1,    0.0, 0.0, 1e10, 1e-3, 3.333e-4, 0.00169, 0.01, 0, 0, 0, 0.001, 1),
+
         (2798.75, 'MgII', 2700,  2900,  'MgII_br',       2,    0.0,    0.0,   1e10,   5e-3,   0.004,    0.05,   0.015,     0,     0,     0,   0.05,   1),
         (2798.75, 'MgII', 2700,  2900,  'MgII_na',       1,    0.0,    0.0,   1e10,   1e-3,   5e-4,   0.00169,  0.01,      1,     1,     0,   0.002,  1),
 
@@ -341,9 +344,9 @@ def create_qsopar_fits(path_ex='data/', parfilename='qsopar.fits', overwrite=Tru
         ('Balmer_Te',  15000, 10000, 50000,  1),   # Balmer continuum Te
         ('Balmer_Tau',   0.5,   0.1,   2.0,   1),  # Balmer continuum τ
         ('Balmer_vel',  3000, 12000, 18000,  1), # Velocity broadening of the Balmer continuum at < 3646 AA [lnlambda]
-        ('conti_a_0',    -2.0,   -100.0,  100.0,  1),# Polynomial terms
-        ('conti_a_1',    -2.0,   -100.0,  100.0,  1),
-        ('conti_a_2',    -2.0,   -100.0,  100.0,  1),
+        ('conti_a_0',    0.01,   0.0,  .1,  1), # Polynomial terms
+        ('conti_a_1',    -2.0,   -100.0,  100.0,  0),
+        ('conti_a_2',    -2.0,   -100.0,  100.0,  0),
     ], dtype=cp_dtype)
 
     hdr3 = fits.Header()
