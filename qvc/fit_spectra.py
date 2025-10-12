@@ -22,7 +22,7 @@ import shutil
 import glob
 import argparse
 import numpy as np
-import fitsio, pandas as pd
+import pandas as pd
 from tqdm import trange, tqdm
 import csv
 import traceback
