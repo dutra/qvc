@@ -677,8 +677,8 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, mags_means, data, b
     os.makedirs(output_dir, exist_ok=True)
     fpath = os.path.join(output_dir, f'{data["z"]:.1f}_{object_id}_light_curve_{suffix}.png')
     plt.savefig(fpath, dpi=120)
-    fpath = os.path.join(output_dir, f'{data["z"]:.1f}_{object_id}_light_curve_{suffix}.pdf')
-    plt.savefig(fpath, dpi=600)
+    #fpath = os.path.join(output_dir, f'{data["z"]:.1f}_{object_id}_light_curve_{suffix}.pdf')
+    #plt.savefig(fpath, dpi=600)
     logging.info(f"Saving figure to {fpath}")
     plt.close(fig)
     

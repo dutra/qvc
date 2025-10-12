@@ -616,6 +616,7 @@ if __name__ == '__main__':
     parser.add_argument("--log_sigma_eta_tau_sigma", type=float, default=0.2, help="Stddev for log_sigma_eta_tau1/2 prior.")
     parser.add_argument("--beta_tau", type=float, default=0.2, help="Beta_tau value for fake light curves.")
     parser.add_argument("--disable_band_drop", action="store_true", default=False, help="Disable dropping bands affected by Lyman-alpha.")
+    parser.add_argument("--load_nearby_lc_csv", type=str, default=None, help="Path to CSV file containing nearby light curves to load.")
 
     args = parser.parse_args()
     print("Args: ", args)
@@ -626,6 +627,9 @@ if __name__ == '__main__':
     if args.load_stone_lcs:
         objs = load_stone_lcs(filter_object_ids=args.filter_object_id)
         print(f"Loaded {len(objs)} Stone light curves.")
+    elif args.load_nearby_lc_csv is not None:
+        objs = load_nearby_lcs(args.load_nearby_lc_csv)
+        print(f"Loaded {len(objs)} nearby light curves from {args.load_nearby_lc_csv}.")
     else:
         objs = concat_light_curves(filter_object_ids=args.filter_object_id, progress_bar=args.progress, N=args.N, skip=args.skip)
     print(f"Loaded {len(objs)} objects from concat_light_curves")
