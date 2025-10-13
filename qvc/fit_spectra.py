@@ -1027,12 +1027,6 @@ def run_collect(args):
         save_fits_path = os.path.join('results', 'pysqo_fits', prefix, f'npca_qso_{npca_qso}_decomp_host_{decomp_host}_BC')
         os.makedirs(save_fits_path, exist_ok=True)
 
-        # For host decomposition runs, only run z<1 objects
-        if decomp_host:
-            filtered_records = [r for r in records if (r.get("z") or r.get("Z_SYS")) < 1]
-        else:
-            filtered_records = records
-
         worker = partial(
             run_qsofit_record,
             npca_qso=npca_qso, decomp_host=decomp_host, BC=BC,
@@ -1045,8 +1039,8 @@ def run_collect(args):
 
         chunksize = 1
         with Pool(processes=num_cores) as pool:
-            with tqdm(total=len(filtered_records), desc=f"Processing npca_qso={npca_qso} decomp_host={decomp_host} BC={BC}", dynamic_ncols=True, smoothing=0.0) as pbar:
-                for res in pool.imap_unordered(worker, filtered_records, chunksize=chunksize):
+            with tqdm(total=len(records), desc=f"Processing npca_qso={npca_qso} decomp_host={decomp_host} BC={BC}", dynamic_ncols=True, smoothing=0.0) as pbar:
+                for res in pool.imap_unordered(worker, records, chunksize=chunksize):
                     # Build a flat row for CSV
                     obj_id = str(res.get("object_id", ""))
 
@@ -1100,8 +1094,6 @@ def run_collect(args):
 # SELECT → mark best per object_id in SAME CSV
 # ------------------------------
 def run_select(args):
-    import numpy as np
-    import pandas as pd
 
     csv_path = args.fpath_out
     if not os.path.exists(csv_path):
@@ -1109,7 +1101,9 @@ def run_select(args):
 
     df = pd.read_csv(csv_path)
     print(f"[INFO] Loaded CSV with {len(df)} rows from {csv_path}")
-
+    df = df[~((df["z"] > 1) & (df["decomp_host"]))].copy()
+    print(f"[INFO] After removing z>1 with decomp_host=True, {len(df)} rows remain")
+    
     # Required columns
     req_cols = ["object_id", "redchi2_conti_full", "aic", "bic",
                 "npca_qso", "decomp_host", "BC",
