@@ -956,6 +956,9 @@ def match_to_dr16q(sample_df, dr16q_fits, max_sep_arcsec=1.0):
     df_matched['z'] = df_matched['Z_SYS']
     df_matched['loglbol'] = df_matched['LOGLBOL']
     df_matched['sdss_name'] = df_matched['SDSS_NAME'].astype(str).str.strip()
+    df_matched['object_id'] = df_matched['object_id'].astype(str).str.strip()
+    df_matched['ra'] = df_matched['RA']
+    df_matched['dec'] = df_matched['DEC']
     print(f"[INFO] After matching to DR16Q, {len(df_matched)} objects matched, {len(unmatched_object_ids)} unmatched.")
     return df_matched, unmatched_object_ids
 
@@ -1052,16 +1055,8 @@ def run_collect(args):
                         "npca_qso": npca_qso,
                         "decomp_host": bool(decomp_host),
                         "BC": bool(BC),
-                        "conti_a_0": res.get("conti_a_0", np.nan),
-                        "run_label": option_label(npca_qso, decomp_host, BC),
-                        # metrics (extend as needed)
-                        "redchi2_conti_full": res.get("redchi2_conti_full", np.nan),
-                        "redchi": res.get("redchi", np.nan),
-                        "aic": res.get("aic", np.nan),
-                        "bic": res.get("bic", np.nan),
-                        "apparent_mag_2500": res.get("apparent_mag_2500", np.nan),
-                        "apparent_mag_2500_err": res.get("apparent_mag_2500_err", np.nan),
-                    }
+                        "run_label": option_label(npca_qso, decomp_host, BC),                    
+                    } | res  # merge all result keys
                     rows.append(row)
                     pbar.update(1)
 
@@ -1103,12 +1098,14 @@ def run_select(args):
 
     csv_path = args.fpath_out
     if not os.path.exists(csv_path):
-        raise FileNotFoundError(f"CSV not found: {csv_path}")
+        raise FileNotFoundError(f"CSV path not found: {csv_path}")
 
     df = pd.read_csv(csv_path)
 
     # Required columns
-    for col in ["object_id", "redchi2_conti_full", "aic", "bic"]:
+    for col in ["object_id", "redchi2_conti_full", "aic", "bic",
+                "f_host_2500", "apparent_mag_2500", "apparent_mag_2500_err", "conti_a_0",
+                "npca_qso", "decomp_host", "BC", "sdss_name", "plate", "mjd", "fiber"]:
         if col not in df.columns:
             raise ValueError(f"CSV missing required column: {col}")
 
@@ -1116,7 +1113,6 @@ def run_select(args):
     df["object_id"] = df["object_id"].astype(str)
 
     # ---------- Selection (best=True) ----------
-    # Build scalar rank components per object_id (NaNs ranked last)
     r1 = (df["redchi2_conti_full"] - 1.0).abs()
     r2 = df["aic"]
     r3 = df["bic"]
@@ -1140,24 +1136,22 @@ def run_select(args):
     print(f"[OK] Updated CSV with best=True per object_id: {csv_path}")
 
     # ---------- Pretty print tables ----------
-    # Config: change these if you want different behavior
     GROUP_BY = "sdss_name" if "sdss_name" in df.columns else "object_id"
     SHOW_COLS = [
         "redchi2_conti_full", "aic", "bic",
         "apparent_mag_2500", "apparent_mag_2500_err",
+        "f_host_2500",
         "conti_a_0"
     ]
     MAX_GROUPS = 10   # set to None to print all groups
 
-    # Helpers
     def _option_label_row(row):
-        npca = int(row["npca_qso"]) if "npca_qso" in row and pd.notna(row["npca_qso"]) else row.get("npca_qso", "NA")
-        BC = bool(row["BC"]) if "BC" in row and pd.notna(row["BC"]) else row.get("BC", "NA")
-        decomp = bool(row["decomp_host"]) if "decomp_host" in row and pd.notna(row["decomp_host"]) else row.get("decomp_host", "NA")
-        return f"npca_qso={npca}, BC={BC}, decomp_host={decomp}"
+        npca = int(row["npca_qso"]) if pd.notna(row["npca_qso"]) else row.get("npca_qso", "NA")
+        BCv = bool(row["BC"]) if pd.notna(row["BC"]) else row.get("BC", "NA")
+        decomp = bool(row["decomp_host"]) if pd.notna(row["decomp_host"]) else row.get("decomp_host", "NA")
+        return f"npca_qso={npca}, BC={BCv}, decomp_host={decomp}"
 
     def _rank_with_fallback(sub):
-        """Return index of best row in sub using |chi2-1| -> AIC -> BIC (NaNs lose)."""
         r1 = (sub["redchi2_conti_full"] - 1.0).abs()
         r2 = sub["aic"]
         r3 = sub["bic"]
@@ -1200,7 +1194,7 @@ def run_select(args):
             return str(x)
 
         print(f"\n=== {GROUP_BY}: {key} ===")
-        df_print = df_show.set_index("option").map(_fmt)
+        df_print = df_show.set_index("option").applymap(_fmt)
         print(df_print.to_string())
 
         printed += 1
@@ -1208,6 +1202,69 @@ def run_select(args):
     if MAX_GROUPS is not None:
         print(f"\n[INFO] Printed {printed} group(s). Set MAX_GROUPS=None in run_select() to print all.")
 
+    # ---------- Copy best plots to plots/pyqsofit/<prefix>/best ----------
+    def _copy_best_plots(df_all, best_indices, prefix_str):
+        """
+        Copy plot files for the best row of each object to plots/pyqsofit/<prefix>/best/.
+        We look under:
+          plots/pyqsofit/<prefix>/npca_qso_{npca}_decomp_host_{decomp}_BC_{BC}/
+        and match filenames by either sdss_name or plate-mjd-fiber.
+        """
+        dest_dir = os.path.join("plots", "pyqsofit", prefix_str, "best")
+        os.makedirs(dest_dir, exist_ok=True)
+
+        n_found = 0
+        for idx in best_indices:
+            row = df_all.loc[idx]
+
+            # Normalize fields
+            npca = int(row["npca_qso"])
+            decomp = bool(row["decomp_host"])
+            BCv = bool(row["BC"])
+            sdss = str(row.get("sdss_name", "") or "")
+            plate = row.get("plate", np.nan)
+            mjd   = row.get("mjd", np.nan)
+            fiber = row.get("fiber", np.nan)
+
+            src_dir = os.path.join("plots", "pyqsofit", prefix_str,
+                                   f"npca_qso_{npca}_decomp_host_{decomp}_BC_{BCv}")
+            if not os.path.isdir(src_dir):
+                # Nothing to copy for this config
+                continue
+
+            # Build patterns to try
+            patterns = []
+            if sdss and sdss.lower() != "nan":
+                patterns.append(os.path.join(src_dir, f"*{sdss}*"))
+            # fallback to plate-mjd-fiber tokens if present
+            try:
+                if pd.notna(plate) and pd.notna(mjd) and pd.notna(fiber):
+                    patterns.append(os.path.join(src_dir, f"*{int(plate)}-{int(mjd)}-{int(fiber)}*"))
+            except Exception:
+                pass
+
+            # Try common image extensions
+            exts = [".pdf", ".png", ".jpg", ".jpeg"]
+            matched = []
+            for base in patterns:
+                for ext in exts:
+                    matched.extend(glob.glob(base + ext))
+
+            # Copy with informative filename suffix
+            for src in matched:
+                base = os.path.basename(src)
+                name, ext = os.path.splitext(base)
+                dest = os.path.join(dest_dir, f"{name}_npca_qso_{npca}_decomp_host_{decomp}_BC_{BCv}{ext}")
+                try:
+                    shutil.copy2(src, dest)
+                    n_found += 1
+                except Exception as e:
+                    print(f"[WARN] Could not copy plot for {sdss or row.get('object_id','?')}: {e}")
+
+        print(f"[OK] Copied {n_found} plot file(s) to {dest_dir}")
+
+    # Use the global `prefix` (already defined near top of your file)
+    _copy_best_plots(df, idx_best, prefix)
 
 # ------------------------------
 # Main
