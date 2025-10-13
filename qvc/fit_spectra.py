@@ -654,7 +654,8 @@ def run_qsofit_record(rec, npca_qso, decomp_host, BC, cache_dir="data/spectra_ca
             reject_badpix=True,    # reject 10 most possible outliers by the test of pointDistGESD
             deredden=True,          # correct the Galactic extinction
             #wave_range=[1150, 1e9], # trim input wavelength
-            wave_range=[1200, 1e9],  # trim input wavelength
+            #wave_range=[1200, 1e9],  # trim input wavelength
+            wave_range=[1200, 7997.75],  # trim input wavelength to avoid edge effects in host decomposition
             wave_mask=None,         # 2-D array, mask the given range(s)
 
             # host decomposition parameters
@@ -1101,47 +1102,58 @@ def run_select(args):
         raise FileNotFoundError(f"CSV path not found: {csv_path}")
 
     df = pd.read_csv(csv_path)
+    print(f"[INFO] Loaded CSV with {len(df)} rows from {csv_path}")
 
     # Required columns
-    for col in ["object_id", "redchi2_conti_full", "aic", "bic",
-                "f_host_2500", "apparent_mag_2500", "apparent_mag_2500_err", "conti_a_0",
-                "npca_qso", "decomp_host", "BC", "sdss_name", "plate", "mjd", "fiber"]:
-        if col not in df.columns:
-            raise ValueError(f"CSV missing required column: {col}")
+    req_cols = ["object_id", "redchi2_conti_full", "aic", "bic",
+                "npca_qso", "decomp_host", "BC",
+                "sdss_name", "plate", "mjd", "fiber"]
+    missing = [c for c in req_cols if c not in df.columns]
+    if missing:
+        raise ValueError(f"CSV missing required column(s): {missing}")
 
-    # Ensure object_id is string-like for clean grouping
+    # Ensure string grouping key
     df["object_id"] = df["object_id"].astype(str)
 
-    # ---------- Selection (best=True) ----------
+    # ---- CLEAR all best flags first (create if absent) ----
+    if "best" not in df.columns:
+        df["best"] = False
+    else:
+        df["best"] = False
+
+    # ---- Build ranks per object_id (NaNs lose) ----
+    # Ranking key = (|chi2-1|, AIC, BIC), implemented via within-group ranks
     r1 = (df["redchi2_conti_full"] - 1.0).abs()
     r2 = df["aic"]
     r3 = df["bic"]
 
-    # Rank within each object_id; NaNs go to the bottom (worst)
     k1 = r1.groupby(df["object_id"]).rank(method="first", na_option="bottom")
     k2 = r2.groupby(df["object_id"]).rank(method="first", na_option="bottom")
     k3 = r3.groupby(df["object_id"]).rank(method="first", na_option="bottom")
 
-    # Combine into a single sortable key (lexicographic proxy)
     df["__rank"] = (k1 * 1_000_000) + (k2 * 1_000) + k3
 
-    # Pick best index per object_id
+    # Some groups might be all-NaN → their ranks become NaN; skip those safely
+    # idxmin ignores NaNs; for all-NaN groups, result is NaN and we won’t set any True
     idx_best = df.groupby("object_id")["__rank"].idxmin()
 
-    # Mark best and overwrite CSV
-    df["best"] = False
+    # Mark winners True; everyone else remains False
+    # (drop NaN indices that can appear for all-NaN groups)
+    idx_best = idx_best.dropna().astype(int)
     df.loc[idx_best, "best"] = True
-    df = df.drop(columns=["__rank"])
+
+    # Persist & clean temp
+    #df = df.drop(columns=["__rank"])
     df.to_csv(csv_path, index=False)
-    print(f"[OK] Updated CSV with best=True per object_id: {csv_path}")
+    print(f"[OK] Wrote {len(df)} rows to CSV: {csv_path}")
+    print(f"[OK] Updated CSV with exactly one best=True per object_id (when determinable): {csv_path}")
 
     # ---------- Pretty print tables ----------
     GROUP_BY = "sdss_name" if "sdss_name" in df.columns else "object_id"
     SHOW_COLS = [
         "redchi2_conti_full", "aic", "bic",
         "apparent_mag_2500", "apparent_mag_2500_err",
-        "f_host_2500",
-        "conti_a_0"
+        "f_host_2500", "conti_a_0"
     ]
     MAX_GROUPS = 10   # set to None to print all groups
 
@@ -1172,11 +1184,11 @@ def run_select(args):
 
         sub = sub.copy()
 
-        # Use explicit best if present; otherwise fallback to ranking
-        if "best" in sub.columns and sub["best"].any():
-            idx_best_sub = sub.index[sub["best"]].tolist()
-            best_idx = idx_best_sub[0] if idx_best_sub else _rank_with_fallback(sub)
+        # If exactly one best, use it; otherwise fall back to ranking
+        if "best" in sub.columns and sub["best"].sum() == 1:
+            best_idx = sub.index[sub["best"]].tolist()[0]
         else:
+            # Covers zero/invalid or multiple True (unexpected): re-rank locally
             best_idx = _rank_with_fallback(sub)
 
         # Build display frame
@@ -1185,7 +1197,8 @@ def run_select(args):
         df_show = sub[cols_show].copy()
 
         # Star the best
-        df_show.loc[best_idx, "option"] = "★ " + df_show.loc[best_idx, "option"]
+        if best_idx in df_show.index:
+            df_show.loc[best_idx, "option"] = "★ " + df_show.loc[best_idx, "option"]
 
         # Formatting
         def _fmt(x):
@@ -1193,9 +1206,9 @@ def run_select(args):
                 return f"{x:.3f}" if np.isfinite(x) else "nan"
             return str(x)
 
-        print(f"\n=== {GROUP_BY}: {key} ===")
-        df_print = df_show.set_index("option").applymap(_fmt)
-        print(df_print.to_string())
+        # print(f"\n=== {GROUP_BY}: {key} ===")
+        # df_print = df_show.set_index("option").applymap(_fmt)
+        # print(df_print.to_string())
 
         printed += 1
 
@@ -1203,21 +1216,13 @@ def run_select(args):
         print(f"\n[INFO] Printed {printed} group(s). Set MAX_GROUPS=None in run_select() to print all.")
 
     # ---------- Copy best plots to plots/pyqsofit/<prefix>/best ----------
-    def _copy_best_plots(df_all, best_indices, prefix_str):
-        """
-        Copy plot files for the best row of each object to plots/pyqsofit/<prefix>/best/.
-        We look under:
-          plots/pyqsofit/<prefix>/npca_qso_{npca}_decomp_host_{decomp}_BC_{BC}/
-        and match filenames by either sdss_name or plate-mjd-fiber.
-        """
+    def _copy_best_plots(df_all, winners, prefix_str):
         dest_dir = os.path.join("plots", "pyqsofit", prefix_str, "best")
         os.makedirs(dest_dir, exist_ok=True)
 
         n_found = 0
-        for idx in best_indices:
+        for idx in winners:
             row = df_all.loc[idx]
-
-            # Normalize fields
             npca = int(row["npca_qso"])
             decomp = bool(row["decomp_host"])
             BCv = bool(row["BC"])
@@ -1229,28 +1234,23 @@ def run_select(args):
             src_dir = os.path.join("plots", "pyqsofit", prefix_str,
                                    f"npca_qso_{npca}_decomp_host_{decomp}_BC_{BCv}")
             if not os.path.isdir(src_dir):
-                # Nothing to copy for this config
                 continue
 
-            # Build patterns to try
             patterns = []
             if sdss and sdss.lower() != "nan":
                 patterns.append(os.path.join(src_dir, f"*{sdss}*"))
-            # fallback to plate-mjd-fiber tokens if present
             try:
                 if pd.notna(plate) and pd.notna(mjd) and pd.notna(fiber):
                     patterns.append(os.path.join(src_dir, f"*{int(plate)}-{int(mjd)}-{int(fiber)}*"))
             except Exception:
                 pass
 
-            # Try common image extensions
             exts = [".pdf", ".png", ".jpg", ".jpeg"]
             matched = []
             for base in patterns:
                 for ext in exts:
                     matched.extend(glob.glob(base + ext))
 
-            # Copy with informative filename suffix
             for src in matched:
                 base = os.path.basename(src)
                 name, ext = os.path.splitext(base)
@@ -1263,8 +1263,9 @@ def run_select(args):
 
         print(f"[OK] Copied {n_found} plot file(s) to {dest_dir}")
 
-    # Use the global `prefix` (already defined near top of your file)
-    _copy_best_plots(df, idx_best, prefix)
+    # winners are exactly those we set to best=True
+    _copy_best_plots(df, df.index[df["best"]], prefix)
+
 
 # ------------------------------
 # Main
