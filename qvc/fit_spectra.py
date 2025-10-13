@@ -2,7 +2,7 @@
 from functools import partial
 import multiprocessing
 from multiprocessing import Pool, cpu_count
-import os
+import os, csv, glob, shutil, argparse
 
 num_cores = os.environ.get("NUM_CORES", os.cpu_count()-2)
 try:
@@ -18,9 +18,6 @@ os.environ["JAX_PLATFORM_NAME"] = "cpu"
 
 prefix = os.environ.get('PREFIX', "pyqsofit")
 suffix = os.environ.get('SUFFIX', "pyqsofit")
-import shutil
-import glob
-import argparse
 import numpy as np
 import pandas as pd
 from tqdm import trange, tqdm
@@ -33,6 +30,8 @@ from astropy.coordinates import SkyCoord
 from astropy.cosmology import FlatLambdaCDM
 import astropy.units as u
 from hubble_utils import read_quasars_from_hdf5, write_hdf5_file, match_radec
+import warnings
+import h5py
 
 from astroquery.sdss import SDSS
 #warnings.filterwarnings("ignore")
@@ -561,6 +560,7 @@ def run_qsofit_record(rec, npca_qso, decomp_host, BC, cache_dir="data/spectra_ca
         log_L2500_int_fs_err=-1e9,
         reddening_integral=-1e9,
         reddening_proxy=-1e9,
+        conti_a_0=-1e9,
         bands_used=[]
     )
 
@@ -807,6 +807,7 @@ def run_qsofit_record(rec, npca_qso, decomp_host, BC, cache_dir="data/spectra_ca
             f_host_2500=conti_dict.get('frac_host_4200', 0), # in pyqsofit, frac_host_4200 is actually at 2500A
             #f_host_4200=conti_dict.get('frac_host_4200', 0),
             f_host_5100=conti_dict.get('frac_host_5100', 0),
+            conti_a_0=conti_dict['conti_a_0'],
             alpha_lambda=conti_dict['PL_slope_blue'],
             alpha_lambda_err=conti_dict['PL_slope_blue_err'],
             redchi=q_mle.conti_fit.redchi,
@@ -832,13 +833,41 @@ def run_qsofit_record(rec, npca_qso, decomp_host, BC, cache_dir="data/spectra_ca
         return result
 
 # --------------------------- CLI & Main ---------------------------------
+# ------------------------------
+# Provided writer: DO NOT CHANGE
+# ------------------------------
+def write_hdf5_file(quasar_list, file_path):
+    print(f"Writing {len(quasar_list)} quasars to {file_path}", flush=True)
+    directory = os.path.dirname(file_path)
+    os.makedirs(directory, exist_ok=True)
+    with h5py.File(file_path, "w") as hdf:
+        for quasar in quasar_list:
+            object_id = quasar["object_id"]
+            group = hdf.create_group(object_id)
+            for key, value in quasar.items():
+                if isinstance(value, dict):
+                    sub_group = group.create_group(key)
+                    for sub_key, sub_value in value.items():
+                        sub_group.create_dataset(sub_key, data=sub_value)
+                else:
+                    group.attrs[key] = value
+
+# ------------------------------
+# Argparse
+# ------------------------------
+
+
+# ------------------------------
+# argparse (minor tweak to wording)
+# ------------------------------
 def parse_args():
-    p = argparse.ArgumentParser(description="DR16Q crossmatch, optional SDSS spectrum download, and QSOFit processing.")
-    # p.add_argument("--input-csv",help="Path to sample CSV.")
-    p.add_argument("fpath_in", help="Path to h5 fits with mag means.")
-    p.add_argument("fpath_out", help="Output file for QSOFit results.")
+    p = argparse.ArgumentParser(description="DR16Q crossmatch, optional SDSS spectrum download, QSOFit processing → CSV (collect/select).")
+    p.add_argument("fpath_in", help="Path to HDF5 with mag means (input to build the sample).")
+    p.add_argument("fpath_out", help="Output CSV file for all QSOFit runs (collect) / Input CSV (select).")
+    p.add_argument("--mode", choices=["collect", "select"], required=True,
+                   help="collect: run all configs, write one CSV; select: read CSV, mark best=True per object_id.")
     p.add_argument("--filter_csv", default=None,
-                   help="Optional CSV file with object_id column to filter input.")
+                   help="Optional CSV with an object_id column to filter input rows.")
     p.add_argument("--dr16q-fits", default="data/dr16q_prop_May01_2024.fits",
                    help="Path to DR16Q FITS catalog.")
     p.add_argument("--cache-dir", default="data/spectra_cache",
@@ -846,41 +875,43 @@ def parse_args():
     p.add_argument("--max-sep", type=float, default=1.0,
                    help="Max match separation in arcsec.")
     p.add_argument("--N", type=int, default=None,
-                   help="Optional limit on number of rows from input CSV to consider before matching.")
-    p.add_argument("--skip", type=int, default=None, help="Optional number of rows to skip at start of input CSV.")
+                   help="Optional limit on number of rows before matching.")
+    p.add_argument("--skip", type=int, default=None, help="Optional number of rows to skip at start.")
     p.add_argument("--download", action="store_true",
                    help="If set, download (and cache) all matched spectra and exit.")
-    # p.add_argument("--nproc", type=int, default=max(1, (os.cpu_count() or 2) - 1),
-    #            help="Number of parallel worker processes for QSOFit.")
     p.add_argument("--filter_object_id", nargs="+", help="List of object IDs to filter.")
     p.add_argument("--filter_sdss_name", nargs="+", help="List of sdss_names to filter.")
-
-    p.add_argument("--spectral_fit_csv", default=None, type=str, 
-                   help="Optional CSV file with spectral fit results to merge into output.")
+    p.add_argument("--spectral_fit_csv", default=None, type=str,
+                   help="Optional CSV of external spectral-fit results to merge into output (by object_id if present, else sdss_name).")
     p.add_argument("--allow_partial_band_overlap", action="store_true",
-                   help="If set, allow bands with partial wavelength overlap when computing synthetic mags.")
+                   help="Allow bands with partial wavelength overlap when computing synthetic mags.")
     p.add_argument("--enable_BC", action="store_true",
-                   help="If set, enable Balmer continuum run in QSOFit.")
+                   help="Include BC=True runs (otherwise only BC=False).")
+    p.add_argument("--nproc", type=int, default=max(1, (os.cpu_count() or 2) - 1),
+                   help="Parallel worker processes for QSOFit.")
+
     return p.parse_args()
 
+# ------------------------------
+# Utilities you already have
+# ------------------------------
+def option_label(npca_qso, decomp_host, BC):
+    return f"npca_qso={npca_qso}|decomp_host={decomp_host}|BC={BC}"
 
-def main():
-    args = parse_args()
+def load_quasar_core_list(fpath_in):
+    return read_quasars_from_hdf5(fpath_in)
 
-    quasar_list = read_quasars_from_hdf5(args.fpath_in)
+def prepare_sample_df(quasar_list, filter_sdss_name, filter_csv, N, skip):
     for q in quasar_list:
         for i, b in enumerate(['u', 'g', 'r', 'i', 'z']):
             if len(q['mags_means']) != 5:
                 raise ValueError(f"Expected 5 mags_means, got {len(q['mags_means'])} for object_id {q.get('object_id','?')}")
             q[f'mags_mean_{b}'] = q['mags_means'][i]
-            #q[f'mags_mean_err_{b}'] = q['mags_means_err'][i]
             if f'mean_{b}' in q:
                 q[f'mean_corrected_{b}'] = q[f'mags_mean_{b}'] + q[f'mean_{b}']
             else:
                 q[f'mean_corrected_{b}'] = q[f'mags_mean_{b}']
             print(f"[DEBUG] object_id {q.get('object_id','?')} band {b}: mags_mean {q[f'mags_mean_{b}']}, mean_{b} {q.get(f'mean_{b}','?')} -> mean_corrected_{b} {q[f'mean_corrected_{b}']}")
-
-
     sample_df = pd.DataFrame.from_records(quasar_list)
 
     exclusion_sdss_names = [
@@ -891,42 +922,33 @@ def main():
     print(f"Excluding {np.sum(~mask_exclude)} objects by sdss_name in exclusion list")
     sample_df = sample_df[mask_exclude].reset_index(drop=True)
 
-    if args.filter_sdss_name is not None:
-        sample_df = sample_df[sample_df['sdss_name'].astype(str).isin(args.filter_sdss_name)]
+    if filter_sdss_name is not None:
+        sample_df = sample_df[sample_df['sdss_name'].astype(str).isin(filter_sdss_name)]
 
-    if args.filter_csv is not None:
-        filter_df = pd.read_csv(args.filter_csv)
+    if filter_csv is not None:
+        filter_df = pd.read_csv(filter_csv)
         if 'object_id' not in filter_df.columns:
-            raise ValueError(f"Filter CSV {args.filter_csv} missing object_id column")
+            raise ValueError(f"Filter CSV {filter_csv} missing object_id column")
         filter_ids = set(str(oid).strip() for oid in filter_df['object_id'].values if str(oid).strip())
         sample_df = sample_df[sample_df['object_id'].astype(str).str.strip().isin(filter_ids)]
-        print(f"[INFO] After filtering with {args.filter_csv}, {len(sample_df)} rows remain")
-    sample_df = sample_df[args.skip:] if args.skip is not None else sample_df
-    sample_df = sample_df[:args.N] if args.N is not None else sample_df
+        print(f"[INFO] After filtering with {filter_csv}, {len(sample_df)} rows remain")
+
+    sample_df = sample_df[skip:] if skip is not None else sample_df
+    sample_df = sample_df[:N] if N is not None else sample_df
     sample_df['object_id'] = sample_df['object_id'].astype(str).str.strip()
-    #quasar_dict_list = read_quasars_from_hdf5(args.fpath_in, N=args.N)
-    quasar_dict_list = sample_df.to_dict(orient="records")
+    return sample_df
 
-    # 1) Match sample to DR16Q
-    # data_cat = match_sample_to_dr16q(
-    #     sample_df=sample_df,
-    #     dr16q_fits=args.dr16q_fits,
-    #     max_sep_arcsec=args.max_sep,
-    # )
-
-    #     data_cat_full = pd.DataFrame({c: data_cat_full.field(c) for c in cols})
+def match_to_dr16q(sample_df, dr16q_fits, max_sep_arcsec=1.0):
     cols = ["RA", "DEC", "SDSS_NAME", "PLATE", "FIBERID", "MJD", "Z_SYS", "LOGLBOL"]
-    # Load using astropy Table, then convert to DataFrame
-    data_cat_table = Table.read(args.dr16q_fits, hdu=1)
+    data_cat_table = Table.read(dr16q_fits, hdu=1)
     data_cat_full = data_cat_table[cols].to_pandas()
-
-    print(f"[INFO] Loaded DR16Q catalog with {len(data_cat_full)} rows from {args.dr16q_fits}")
+    print(f"[INFO] Loaded DR16Q catalog with {len(data_cat_full)} rows from {dr16q_fits}")
 
     df_matched, unmatched_object_ids = match_radec(
         sample_df, data_cat_full,
         populate_cols=['SDSS_NAME', 'PLATE', 'FIBERID', 'MJD', 'Z_SYS', 'LOGLBOL', 'RA', 'DEC'],
         ra_col_a='ra', dec_col_a='dec', ra_col_b='RA', dec_col_b='DEC',
-        max_sep_arcsec=1.0, add_prefix=False
+        max_sep_arcsec=max_sep_arcsec, add_prefix=False
     )
     df_matched['plate'] = df_matched['PLATE']
     df_matched['fiber'] = df_matched['FIBERID']
@@ -935,9 +957,42 @@ def main():
     df_matched['loglbol'] = df_matched['LOGLBOL']
     df_matched['sdss_name'] = df_matched['SDSS_NAME'].astype(str).str.strip()
     print(f"[INFO] After matching to DR16Q, {len(df_matched)} objects matched, {len(unmatched_object_ids)} unmatched.")
+    return df_matched, unmatched_object_ids
+
+# ------------------------------
+# Ranking helper (same logic as before)
+# ------------------------------
+def pick_best_fit(models, redchi_ok=(0.7, 1.5), target=1.0):
+    ranked = sorted(
+        enumerate(models),
+        key=lambda t: (abs(t[1].get('redchi2_conti_full', np.inf) - target),
+                       t[1].get('aic', np.inf),
+                       t[1].get('bic', np.inf),
+                       t[0])
+    )
+    i_best, best = ranked[0]
+    lo, hi = redchi_ok
+    if not (lo <= best.get('redchi2_conti_full', np.inf) <= hi):
+        for _, m in ranked:
+            if lo <= m.get('redchi2_conti_full', np.inf) <= hi:
+                return m
+    return best
+
+# ------------------------------
+# COLLECT → write ALL runs to ONE CSV
+# ------------------------------
+def run_collect(args):
+    num_cores = args.nproc
+
+    quasar_list = load_quasar_core_list(args.fpath_in)
+    sample_df = prepare_sample_df(
+        quasar_list, args.filter_sdss_name, args.filter_csv, args.N, args.skip
+    )
+
+    df_matched, _ = match_to_dr16q(sample_df, args.dr16q_fits, args.max_sep)
     records = df_matched.to_dict(orient='records')
 
-    # 2) If --download, fetch all spectra and exit
+    # Optional download-only branch
     if args.download:
         SDSS.clear_cache()
         N = len(records)
@@ -947,229 +1002,222 @@ def main():
             plate, fiber, mjd = int(row['PLATE']), int(row['FIBERID']), int(row['MJD'])
             sdss_name = str(row['SDSS_NAME'])
             try:
-                _, from_cache = fetch_spectrum_fits(sdss_name, plate, fiber, mjd, cache_dir=args.cache_dir)
-                # you can log from_cache if you want
+                _, _ = fetch_spectrum_fits(sdss_name, plate, fiber, mjd, cache_dir=args.cache_dir)
             except Exception as e:
                 errors.append((i, sdss_name, str(e)))
         print(f"[DONE] Attempted {N} downloads. Errors: {len(errors)}")
         if errors:
             for i, name, msg in errors[:10]:
                 print(f"  - {i}:{name} -> {msg}")
-        return  # Exit after download-only path
+        return
 
     os.makedirs('results/pysqo_fits', exist_ok=True)
     os.makedirs('data/pyqsofit', exist_ok=True)
-    # 3) Otherwise, proceed to QSOFit processing (expects cached spectra)
-    create_qsopar_fits(path_ex=f'data/pyqsofit', parfilename=f'qsopar_{prefix}_{suffix}.fits', overwrite=True)
-    # Build worker records so we don't try to pickle big astropy tables
+    create_qsopar_fits(path_ex='data/pyqsofit', parfilename=f'qsopar_{prefix}_{suffix}.fits', overwrite=True)
 
-    # Run QSOFit twice: once with npca_qso=0, once with npca_qso=2
-    results_all = {}
+    rows = []  # accumulate CSV rows
 
     def run_parallel(npca_qso, decomp_host, BC):
         save_fig_path = os.path.join('plots', 'pyqsofit', prefix, f'npca_qso_{npca_qso}_decomp_host_{decomp_host}_BC_{BC}')
         os.makedirs(save_fig_path, exist_ok=True)
         save_fits_path = os.path.join('results', 'pysqo_fits', prefix, f'npca_qso_{npca_qso}_decomp_host_{decomp_host}_BC')
         os.makedirs(save_fits_path, exist_ok=True)
-        worker = partial(run_qsofit_record, npca_qso=npca_qso, decomp_host=decomp_host, BC=BC, cache_dir=args.cache_dir, 
-                        path_ex=f'data/pyqsofit', parfilename=f'qsopar_{prefix}_{suffix}.fits',
-                        save_fits_path=save_fits_path,
-                        allow_partial_band_overlap=args.allow_partial_band_overlap,
-                        save_fig_path=save_fig_path)
+
+        worker = partial(
+            run_qsofit_record,
+            npca_qso=npca_qso, decomp_host=decomp_host, BC=BC,
+            cache_dir=args.cache_dir, path_ex='data/pyqsofit',
+            parfilename=f'qsopar_{prefix}_{suffix}.fits',
+            save_fits_path=save_fits_path,
+            allow_partial_band_overlap=args.allow_partial_band_overlap,
+            save_fig_path=save_fig_path
+        )
+
         chunksize = 1
         with Pool(processes=num_cores) as pool:
-            with tqdm(total=len(records), desc=f"Processing {npca_qso=} {decomp_host=} {BC=}", dynamic_ncols=True, smoothing=0.0) as pbar:
+            with tqdm(total=len(records), desc=f"Processing npca_qso={npca_qso} decomp_host={decomp_host} BC={BC}", dynamic_ncols=True, smoothing=0.0) as pbar:
                 for res in pool.imap_unordered(worker, records, chunksize=chunksize):
-                    obj_id = res.get("object_id", None)
-                    if obj_id is not None:
-                        res['npca_qso'] = npca_qso
-                        res['decomp_host'] = decomp_host
-                        res['BC'] = BC
-                        if obj_id not in results_all:
-                            results_all[obj_id] = []
-                        results_all[obj_id].append(res)
+                    # Build a flat row for CSV
+                    obj_id = str(res.get("object_id", ""))
+                    row = {
+                        "object_id": obj_id,
+                        "sdss_name": res.get("sdss_name", ""),
+                        "plate": res.get("plate", res.get("PLATE")),
+                        "fiber": res.get("fiber", res.get("FIBERID")),
+                        "mjd": res.get("mjd", res.get("MJD")),
+                        "z": res.get("z", res.get("Z_SYS")),
+                        "loglbol": res.get("loglbol", res.get("LOGLBOL")),
+                        "ra": res.get("ra", res.get("RA")),
+                        "dec": res.get("dec", res.get("DEC")),
+                        "npca_qso": npca_qso,
+                        "decomp_host": bool(decomp_host),
+                        "BC": bool(BC),
+                        "conti_a_0": res.get("conti_a_0", np.nan),
+                        "run_label": option_label(npca_qso, decomp_host, BC),
+                        # metrics (extend as needed)
+                        "redchi2_conti_full": res.get("redchi2_conti_full", np.nan),
+                        "redchi": res.get("redchi", np.nan),
+                        "aic": res.get("aic", np.nan),
+                        "bic": res.get("bic", np.nan),
+                        "apparent_mag_2500": res.get("apparent_mag_2500", np.nan),
+                        "apparent_mag_2500_err": res.get("apparent_mag_2500_err", np.nan),
+                    }
+                    rows.append(row)
                     pbar.update(1)
-        print(f"Collected {len(results_all)} results for {npca_qso=} {decomp_host=} {BC=}")
 
     BC_list = [False, True] if args.enable_BC else [False]
     for BC in BC_list:
-        # decomp_host False
-        decomp_host = False
-        run_parallel(npca_qso=0, decomp_host=decomp_host, BC=BC)
-        # decomp_host True
-        decomp_host = True
-        for npca_qso in [0, 1, 2]:
-            run_parallel(npca_qso=npca_qso, decomp_host=decomp_host, BC=BC)
+        run_parallel(npca_qso=0, decomp_host=False, BC=BC)
+        for npca in [0, 1, 2]:
+            run_parallel(npca_qso=npca, decomp_host=True, BC=BC)
+    # BC = False
+    # npca_qso = 0
+    # decomp_host = True
+    # run_parallel(npca_qso=npca_qso, decomp_host=decomp_host, BC=BC)
 
-    # Select best result (lowest redchi) for each object
+    # Optional merge of external spectral-fit CSV (row-wise add columns)
+    if args.spectral_fit_csv and os.path.exists(args.spectral_fit_csv):
+        df_out = pd.DataFrame(rows)
+        df_spec = pd.read_csv(args.spectral_fit_csv)
 
-    def pick_best_fit(models, redchi_ok=(0.7, 1.5), target=1.0):
-        # Rank by |redchi2_conti_full - 1|, then AIC, then BIC, then index
-        ranked = sorted(
-            enumerate(models),
-            key=lambda t: (abs(t[1]['redchi2_conti_full'] - target), t[1]['aic'], t[1]['bic'], t[0])
-        )
-        i_best, best = ranked[0]
+        join_key = "object_id" if "object_id" in df_spec.columns else ("sdss_name" if "sdss_name" in df_spec.columns else None)
+        if join_key is None:
+            print(f"[WARN] spectral_fit_csv has neither object_id nor sdss_name; skipping merge.")
+        else:
+            df_out = df_out.merge(df_spec, on=join_key, how="left", suffixes=("", "_spec"))
+        df_out["best"] = False  # not selected yet
+        df_out.to_csv(args.fpath_out, index=False)
+    else:
+        df_out = pd.DataFrame(rows)
+        df_out["best"] = False
+        df_out.to_csv(args.fpath_out, index=False)
 
-        lo, hi = redchi_ok
-        if not (lo <= best['redchi2_conti_full'] <= hi):
-            # Try the best candidate within the acceptable range, preserving the same tiebreakers
-            for i, m in ranked:
-                if lo <= m['redchi2_conti_full'] <= hi:
-                    return m
+    print(f"[OK] Wrote all runs to CSV: {args.fpath_out}")
 
-        return best
+# ------------------------------
+# SELECT → mark best per object_id in SAME CSV
+# ------------------------------
+def run_select(args):
+    import numpy as np
+    import pandas as pd
 
-    
-    
-    results_best = {}
+    csv_path = args.fpath_out
+    if not os.path.exists(csv_path):
+        raise FileNotFoundError(f"CSV not found: {csv_path}")
 
-    for obj_id, result_obj_list in results_all.items():
+    df = pd.read_csv(csv_path)
 
-        best_res = pick_best_fit(result_obj_list)
-        results_best[obj_id] = best_res
+    # Required columns
+    for col in ["object_id", "redchi2_conti_full", "aic", "bic"]:
+        if col not in df.columns:
+            raise ValueError(f"CSV missing required column: {col}")
 
-        # Copy plot into best folder
-        try:
-            # Find the plot file(s) for this object and best fit
-            plot_pattern = os.path.join(
-                'plots', 'pyqsofit', prefix,
-                f'npca_qso_{best_res["npca_qso"]}_decomp_host_{best_res["decomp_host"]}_BC_{best_res["BC"]}',
-                f'*{best_res["sdss_name"]}*'
-            )
-            plot_files = glob.glob(plot_pattern + ".pdf")
-            if plot_files:
-                best_plot_dir = os.path.join('plots', 'pyqsofit', prefix, 'best')
-                os.makedirs(best_plot_dir, exist_ok=True)
-                for plot_file in plot_files:
-                    # Add npca_qso, decomp_host, and BC to the filename
-                    base, ext = os.path.splitext(os.path.basename(plot_file))
-                    dest_file = os.path.join(
-                        best_plot_dir,
-                        f"{base}_npca_qso_{best_res['npca_qso']}_decomp_host_{best_res['decomp_host']}_BC_{best_res['BC']}{ext}"
-                    )
-                    shutil.copy2(plot_file, dest_file)
-        except Exception as e:
-            print(f"[WARN] Could not copy plot for {best_res['sdss_name']}: {e}")
-        #print(f"SDSS {best_res['sdss_name']}: selected npca_qso={best_res['npca_qso']} decomp_host={best_res['decomp_host']} BC={best_res['BC']} with aic={best_res['aic']:.1f}, bic={best_res['bic']:.1f}, redchi={best_res['redchi']:.3f}")
+    # Ensure object_id is string-like for clean grouping
+    df["object_id"] = df["object_id"].astype(str)
 
+    # ---------- Selection (best=True) ----------
+    # Build scalar rank components per object_id (NaNs ranked last)
+    r1 = (df["redchi2_conti_full"] - 1.0).abs()
+    r2 = df["aic"]
+    r3 = df["bic"]
 
+    # Rank within each object_id; NaNs go to the bottom (worst)
+    k1 = r1.groupby(df["object_id"]).rank(method="first", na_option="bottom")
+    k2 = r2.groupby(df["object_id"]).rank(method="first", na_option="bottom")
+    k3 = r3.groupby(df["object_id"]).rank(method="first", na_option="bottom")
 
-    def _option_label(m):
-        return f"npca_qso={m['npca_qso']}, BC={m['BC']}, decomp_host={m['decomp_host']}"
+    # Combine into a single sortable key (lexicographic proxy)
+    df["__rank"] = (k1 * 1_000_000) + (k2 * 1_000) + k3
 
-    def build_fit_table(models):
-        """
-        Return a DataFrame indexed by (sdss_name, option) with columns redchi, aic, bic.
-        Rows correspond to combinations of (npca_qso, BC, decomp_host).
-        """
-        rows = []
-        for m in models:
-            rows.append({
-                'sdss_name': m['sdss_name'],
-                'option': _option_label(m),
-                'redchi': m['redchi'],
-                'aic': m['aic'],
-                'bic': m['bic'],
-                'm_2500': m['apparent_mag_2500'],
-                'm_2500_err': m['apparent_mag_2500_err'],
-                'redchi2_conti_full': m['redchi2_conti_full']
-            })
-        df = pd.DataFrame(rows)
-        df = (
-            df.sort_values(['sdss_name', 'redchi2_conti_full', 'aic', 'bic'])
-            .set_index(['sdss_name', 'option'])[['redchi', 'aic', 'bic', 'm_2500', 'm_2500_err', 'redchi2_conti_full']]
-        )
-        return df
+    # Pick best index per object_id
+    idx_best = df.groupby("object_id")["__rank"].idxmin()
 
-    def print_fit_tables(models, pick_best_fn):
-        """
-        Pretty-print one table per sdss_name, with the best row (by pick_best_fn)
-        marked with a star.
-        """
-        df = build_fit_table(models)
-        for sdss_name, df_one in df.groupby(level=0):
-            subset = [m for m in models if m['sdss_name'] == sdss_name]
-            best = pick_best_fn(subset)
-            best_label = _option_label(best)
+    # Mark best and overwrite CSV
+    df["best"] = False
+    df.loc[idx_best, "best"] = True
+    df = df.drop(columns=["__rank"])
+    df.to_csv(csv_path, index=False)
+    print(f"[OK] Updated CSV with best=True per object_id: {csv_path}")
 
-            # add star to the best option's index label
-            df_show = df_one.copy()
-            new_index = []
-            for opt in df_show.index.get_level_values(1):
-                if opt == best_label:
-                    new_index.append(f"★ {opt}")
-                else:
-                    new_index.append(f"  {opt}")
-            df_show.index = pd.MultiIndex.from_arrays(
-                [[sdss_name]*len(new_index), new_index],
-                names=['sdss_name','option']
-            )
-
-            print(f"\n=== {sdss_name} ===")
-            print(df_show.to_string(float_format=lambda x: f"{x:.3f}"))
-
-    # Example usage:
-    for obj_id, result_obj_list in results_all.items():
-        print_fit_tables(result_obj_list, pick_best_fit)
-
-
-    write_hdf5_file(results_best.values(), args.fpath_out)
-    
-    # Also write results to CSV
-    csv_file=args.fpath_out.replace(".h5", ".csv")
-
-    field_names = [
-        'object_id',
-        "delta_m_avg",
-        "delta_mag_u",
-        "delta_mag_r",
-        "delta_mag_g",
-        "delta_mag_i",
-        "delta_mag_z",
-        "apparent_mag_i_rest",
-        "apparent_mag_i_obs",
-        "apparent_mag_2500",
-        "apparent_mag_2500_err",
-        "apparent_mag_2500_reddened",
-        "apparent_mag_2500_reddened_err",
-        "f_host_2500",
-        #"f_host_4200",
-        "f_host_5100",
-        "alpha_lambda",
-        "alpha_lambda_err",
-        "redchi",
-        "aic",
-        "bic",
-        "npca_qso",
-        "decomp_host",
-        "BC",
-        "redchi2_conti_full",
-        'plate',
-        'mjd',
-        'fiber',
-        'z',
-        'sdss_name',
-        'ebv_fs',
-        'euv_fs',
-        'log_L2500_fs',
-        'log_L2500_fs_err',
-        'log_L2500_int_fs',
-        'log_L2500_int_fs_err',
-        'reddening_integral',
-        'reddening_proxy',
-        'loglbol',
-        'bands_used'
+    # ---------- Pretty print tables ----------
+    # Config: change these if you want different behavior
+    GROUP_BY = "sdss_name" if "sdss_name" in df.columns else "object_id"
+    SHOW_COLS = [
+        "redchi2_conti_full", "aic", "bic",
+        "apparent_mag_2500", "apparent_mag_2500_err",
+        "conti_a_0"
     ]
+    MAX_GROUPS = 10   # set to None to print all groups
 
-    with open(csv_file, "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=field_names)
-        writer.writeheader()
-        for obj_id in results_best:
-            writer.writerow(results_best[obj_id])
+    # Helpers
+    def _option_label_row(row):
+        npca = int(row["npca_qso"]) if "npca_qso" in row and pd.notna(row["npca_qso"]) else row.get("npca_qso", "NA")
+        BC = bool(row["BC"]) if "BC" in row and pd.notna(row["BC"]) else row.get("BC", "NA")
+        decomp = bool(row["decomp_host"]) if "decomp_host" in row and pd.notna(row["decomp_host"]) else row.get("decomp_host", "NA")
+        return f"npca_qso={npca}, BC={BC}, decomp_host={decomp}"
 
-    print(f"[OK] Saved CSV results to {csv_file}")
+    def _rank_with_fallback(sub):
+        """Return index of best row in sub using |chi2-1| -> AIC -> BIC (NaNs lose)."""
+        r1 = (sub["redchi2_conti_full"] - 1.0).abs()
+        r2 = sub["aic"]
+        r3 = sub["bic"]
+        k = r1.rank(method="first", na_option="bottom")*1_000_000 \
+            + r2.rank(method="first", na_option="bottom")*1_000 \
+            + r3.rank(method="first", na_option="bottom")
+        return k.idxmin()
 
-    print(f"[OK] Saved results to {args.fpath_out}")
+    keep_cols = [c for c in SHOW_COLS if c in df.columns]
+    for col in ["npca_qso", "decomp_host", "BC"]:
+        if col not in df.columns:
+            raise ValueError(f"CSV missing required column '{col}' needed for option labels.")
+
+    printed = 0
+    for key, sub in df.groupby(GROUP_BY):
+        if MAX_GROUPS is not None and printed >= MAX_GROUPS:
+            break
+
+        sub = sub.copy()
+
+        # Use explicit best if present; otherwise fallback to ranking
+        if "best" in sub.columns and sub["best"].any():
+            idx_best_sub = sub.index[sub["best"]].tolist()
+            best_idx = idx_best_sub[0] if idx_best_sub else _rank_with_fallback(sub)
+        else:
+            best_idx = _rank_with_fallback(sub)
+
+        # Build display frame
+        sub["option"] = sub.apply(_option_label_row, axis=1)
+        cols_show = ["option"] + keep_cols
+        df_show = sub[cols_show].copy()
+
+        # Star the best
+        df_show.loc[best_idx, "option"] = "★ " + df_show.loc[best_idx, "option"]
+
+        # Formatting
+        def _fmt(x):
+            if isinstance(x, (float, np.floating)):
+                return f"{x:.3f}" if np.isfinite(x) else "nan"
+            return str(x)
+
+        print(f"\n=== {GROUP_BY}: {key} ===")
+        df_print = df_show.set_index("option").map(_fmt)
+        print(df_print.to_string())
+
+        printed += 1
+
+    if MAX_GROUPS is not None:
+        print(f"\n[INFO] Printed {printed} group(s). Set MAX_GROUPS=None in run_select() to print all.")
+
+
+# ------------------------------
+# Main
+# ------------------------------
+def main():
+    args = parse_args()
+    if args.mode == "collect":
+        run_collect(args)
+    else:
+        run_select(args)
+
 if __name__ == "__main__":
     main()
