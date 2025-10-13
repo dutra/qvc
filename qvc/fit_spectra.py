@@ -1027,6 +1027,12 @@ def run_collect(args):
         save_fits_path = os.path.join('results', 'pysqo_fits', prefix, f'npca_qso_{npca_qso}_decomp_host_{decomp_host}_BC')
         os.makedirs(save_fits_path, exist_ok=True)
 
+        # For host decomposition runs, only run z<1 objects
+        if decomp_host:
+            filtered_records = [r for r in records if (r.get("z") or r.get("Z_SYS")) < 1]
+        else:
+            filtered_records = records
+
         worker = partial(
             run_qsofit_record,
             npca_qso=npca_qso, decomp_host=decomp_host, BC=BC,
@@ -1039,10 +1045,11 @@ def run_collect(args):
 
         chunksize = 1
         with Pool(processes=num_cores) as pool:
-            with tqdm(total=len(records), desc=f"Processing npca_qso={npca_qso} decomp_host={decomp_host} BC={BC}", dynamic_ncols=True, smoothing=0.0) as pbar:
-                for res in pool.imap_unordered(worker, records, chunksize=chunksize):
+            with tqdm(total=len(filtered_records), desc=f"Processing npca_qso={npca_qso} decomp_host={decomp_host} BC={BC}", dynamic_ncols=True, smoothing=0.0) as pbar:
+                for res in pool.imap_unordered(worker, filtered_records, chunksize=chunksize):
                     # Build a flat row for CSV
                     obj_id = str(res.get("object_id", ""))
+
                     row = {
                         "object_id": obj_id,
                         "sdss_name": res.get("sdss_name", ""),
@@ -1060,7 +1067,6 @@ def run_collect(args):
                     } | res  # merge all result keys
                     rows.append(row)
                     pbar.update(1)
-
     BC_list = [False, True] if args.enable_BC else [False]
     for BC in BC_list:
         run_parallel(npca_qso=0, decomp_host=False, BC=BC)
