@@ -247,10 +247,6 @@ def load_nearby_lcs(name):
         mags[band] = df.loc[mask, 'mag'].values
         magerrs[band] = df.loc[mask, 'magerr'].values
 
-    for band in ['u', 'z']:  # add empty bands for u and z
-        mags[band] = np.ones(len(mags['g']))
-        magerrs[band] = np.ones(len(magerrs['g'])) * 9999.0
-        times[band] = times['g'] + 1e-2  # dummy times
     for band in bands:
         print(f"{band}: {len(mags[band])} mag points")
     return [{
@@ -322,11 +318,6 @@ def load_stone_lcs(filter_object_ids=[], skip=None, N=None):
                 f'stone_log_SIGMA_{band}_ERR': (data[f'log_SIGMA_{band}_ERR_L'][i] + data[f'log_SIGMA_{band}_ERR_U'][i]) / 2,
                 f'stone_log_TAU_REST_{band}_ERR': (data[f'log_TAU_REST_{band}_ERR_L'][i] + data[f'log_TAU_REST_{band}_ERR_U'][i]) / 2,
             }
-
-        for band in ['u', 'z']:  # add empty bands for u and z
-            stone_lcs[dbid]['mags'][band] = np.ones(len(stone_lcs[dbid]['mags']['g']))
-            stone_lcs[dbid]['magerrs'][band] = np.ones(len(stone_lcs[dbid]['magerrs']['g'])) * 9999.0
-            stone_lcs[dbid]['times'][band] = stone_lcs[dbid]['times']['g'] + 1e-2  # dummy times
 
     stone_coords = SkyCoord(ra=data['RA']*u.deg, dec=data['DEC']*u.deg)
     stone_ids = data['DBID']

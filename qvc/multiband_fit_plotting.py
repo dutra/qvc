@@ -1100,58 +1100,66 @@ def plot_recovery(results):
     plt.close(fig)
 
 def plot_sigma_tau_vs_lambda_with_model(
-    rows,                 # list of dicts (each dict = one object)
+    rows,                 # list[dict], each dict = one object
     bands=('u', 'g', 'r', 'i', 'z'),
     *,
-    broken_pl=False,  # if False, use single PL instead of broken PL for model ribbon
+    broken_pl=False,      # if False, use single PL instead of broken PL for model ribbon
     inject_fake=False,
-    residual=True,       # subtract UV from BOTH σ and τ
+    residual=True,        # subtract UV from BOTH σ and τ
     show=False,
     debug=True,
 ):
     """
     Plot log10 σ_band and log10 τ_band,RF vs log10 λ_RF with population ribbons.
 
-    Each item in `rows` must provide:
-      lam_s, eta_A1, eta_A2, eta_tau1, eta_tau2, eta_break, log_sigma0, log_tau_drw0, z,
-      and per-band: log_sigma_band_{b}, log_tau_band_{b}_RF.
+    This version is robust to missing bands/fields on a per-object basis:
+    - If a row lacks a given band or parameter, it is treated as NaN and ignored.
+    - The model ribbon uses medians over available rows/fields.
 
-    If residual=True, also requires per-row UV references:
-      'log_tau_UV_RF' and 'log_sigma_UV' (these names are fixed by design).
-
-    NEW: the model ribbons (both σ and τ) come from analytical propagation of the
-         η-slope 1σ uncertainties using the per-row *_err fields:
-           eta_A1_err, eta_A2_err, eta_tau1_err, eta_tau2_err.
-         We build median curves and an envelope from the 4 corner combos (±1σ each).
-
-    NEW (inject_fake=True): also plot the injected single-slope models using
-         alpha_sigma (for σ) and beta_tau (for τ) and include them in the annotations.
+    Requires external: lambda_pivot (dict band->Å), colors (dict band->color),
+                       log_broken_pl, log_single_pl, prefix, suffix.
     """
     if not rows:
         raise ValueError("`rows` is empty.")
 
+    import os
     import numpy as np
     import matplotlib.pyplot as plt
     from matplotlib.lines import Line2D
     from scipy.stats import linregress
 
-    # ---- helpers (list-of-dicts → arrays) ----
+    # ---------- helpers ----------
+    def getf(row, key, default=np.nan):
+        """Fetch row[key] if present and finite-castable; else default."""
+        v = row.get(key, default)
+        try:
+            return float(v)
+        except Exception:
+            return default
+
     def arr(key):
-        return np.asarray([row[key] for row in rows], dtype=float)
+        """Array over rows; missing keys -> NaN."""
+        return np.asarray([getf(r, key) for r in rows], dtype=float)
+
+    def arr_band(prefix_key, b):
+        """Array over rows for per-band fields; missing -> NaN."""
+        key = f"{prefix_key}_{b}"
+        return np.asarray([getf(r, key) for r in rows], dtype=float)
 
     def med(key):
         a = arr(key)
         return float(np.nanmedian(a))
 
-    def med_err(key):  # median of per-row 1σ uncertainties
-        a = arr(key)
-        return float(np.nanmedian(a))
+    def med_err(key):
+        # Median of per-row 1σ uncertainties (missing -> NaN)
+        return float(np.nanmedian(arr(key)))
 
-    z       = arr('z')
-    tau_uv  = arr('log_tau_UV_RF')   if residual else np.zeros(len(rows))
-    sig_uv  = arr('log_sigma_UV')    if residual else np.zeros(len(rows))
+    # UV refs (may be missing per-row)
+    z      = arr('z')
+    tau_uv = arr('log_tau_UV_RF') if residual else np.zeros(len(rows))
+    sig_uv = arr('log_sigma_UV')  if residual else np.zeros(len(rows))
 
-    # ---- figure ----
+    # ---------- figure ----------
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(6.2, 6.2),
                                    sharex=True, constrained_layout=True)
     fig.set_constrained_layout_pads(w_pad=0.01, h_pad=0.01, wspace=0.01, hspace=0.02)
@@ -1161,32 +1169,41 @@ def plot_sigma_tau_vs_lambda_with_model(
         for s in ax.spines.values():
             s.set_linewidth(1.0)
 
-    # ---- scatter ----
+    # ---------- scatter (robust per-band/per-row) ----------
     x_all, x_all_tau, y_all_tau = [], [], []
     plotted_bands = []
 
     for b in bands:
-        lam_rf = (lambda_pivot[b]) / (1.0 + z)      # Å, rest-frame per row
+        # If pivot lambda for this band is unknown, skip the band entirely
+        if b not in lambda_pivot:
+            continue
+
+        lam_rf = lambda_pivot[b] / (1.0 + z)  # Å; z may contain NaNs -> handled below
         x = np.log10(lam_rf)
 
-        y_sigma = arr(f'log_sigma_band_{b}')
-        y_tau_abs = arr(f'log_tau_band_{b}_RF')
+        y_sigma_raw = arr_band('log_sigma_band', b)          # log σ_band
+        y_tau_abs   = arr_band('log_tau_band', b + '_RF')    # log τ_band,RF
 
-        y_sigma = y_sigma - sig_uv if residual else y_sigma
-        y_tau   = y_tau_abs - tau_uv if residual else y_tau_abs
+        # residualization (handles NaNs naturally)
+        y_sigma = y_sigma_raw - sig_uv if residual else y_sigma_raw
+        y_tau   = y_tau_abs   - tau_uv if residual else y_tau_abs
 
         m1 = np.isfinite(x) & np.isfinite(y_sigma)
         m2 = np.isfinite(x) & np.isfinite(y_tau)
+
         if m1.any() or m2.any():
             plotted_bands.append(b)
 
-        ax1.scatter(x[m1], y_sigma[m1], s=40, alpha=0.8, color=colors.get(b),
-                    edgecolor='none', zorder=7)
-        ax2.scatter(x[m2], y_tau[m2],   s=40, alpha=0.8, color=colors.get(b),
-                    edgecolor='none', zorder=7)
+        if m1.any():
+            ax1.scatter(x[m1], y_sigma[m1], s=40, alpha=0.8, color=colors.get(b, None),
+                        edgecolor='none', zorder=7)
+            x_all.append(x[m1])
 
-        if m1.any(): x_all.append(x[m1])
-        if m2.any(): x_all_tau.append(x[m2]); y_all_tau.append(y_tau[m2])
+        if m2.any():
+            ax2.scatter(x[m2], y_tau[m2], s=40, alpha=0.8, color=colors.get(b, None),
+                        edgecolor='none', zorder=7)
+            x_all_tau.append(x[m2])
+            y_all_tau.append(y_tau[m2])
 
     x_all     = np.concatenate(x_all)     if x_all     else np.array([])
     x_all_tau = np.concatenate(x_all_tau) if x_all_tau else np.array([])
@@ -1196,13 +1213,15 @@ def plot_sigma_tau_vs_lambda_with_model(
         xmin, xmax = float(np.nanmin(x_all)) - 0.1, float(np.nanmax(x_all)) + 0.1
         ax2.set_xlim(xmin, xmax)
     else:
+        # fallback window (Å: ~2e3–1.6e4)
         xmin, xmax = 3.3, 4.2
+        ax2.set_xlim(xmin, xmax)
 
-    # ---- model ribbons from η ± 1σ (no Monte Carlo) ----
+    # ---------- model ribbons from η ± 1σ (no MC) ----------
     lam_grid    = np.linspace(10**xmin, 10**xmax, 400).astype(float)
     loglam_grid = np.log10(lam_grid)
 
-    # Center (population medians)
+    # Population medians (robust to missing values)
     lam_s_med = med('lam_s')
     ds_med    = med('eta_break')
 
@@ -1215,16 +1234,15 @@ def plot_sigma_tau_vs_lambda_with_model(
     sig_eta_t1 = med_err('eta_tau1_err')
     sig_eta_t2 = med_err('eta_tau2_err')
 
-    # Median intercepts (already log10). For τ, convert to RF first then median.
-    sig0_all = arr('log_sigma0') - (arr('log_sigma_UV') if residual else 0.0)
-    tau0_rf_all = arr('log_tau_drw0') - np.log10(1.0 + arr('z'))
+    # Intercepts (already log10). For τ, convert to RF then median; residualize if requested.
+    sig0_all = arr('log_sigma0') - (sig_uv if residual else 0.0)
+    tau0_rf_all = arr('log_tau_drw0') - np.log10(1.0 + z)
     if residual:
-        tau0_rf_all = tau0_rf_all - arr('log_tau_UV_RF')
+        tau0_rf_all = tau0_rf_all - tau_uv
 
-    sig0_med  = float(np.nanmedian(sig0_all))
-    tau0_med  = float(np.nanmedian(tau0_rf_all))
+    sig0_med = float(np.nanmedian(sig0_all))
+    tau0_med = float(np.nanmedian(tau0_rf_all))
 
-    # Shape function (broken power-law; same for σ and τ)
     def shp(e1, e2):
         if broken_pl:
             return log_broken_pl(lam_grid, lam_s_med, e1, e2, ds_med)
@@ -1235,12 +1253,16 @@ def plot_sigma_tau_vs_lambda_with_model(
     center_sigma = sig0_med + shp(eta_A1_med,   eta_A2_med)
     center_tau   = tau0_med + shp(eta_tau1_med, eta_tau2_med)
 
-    # Four-corner envelopes (η1±σ1, η2±σ2)
-    A1_lo, A1_hi = eta_A1_med - sig_eta_A1, eta_A1_med + sig_eta_A1
-    A2_lo, A2_hi = eta_A2_med - sig_eta_A2, eta_A2_med + sig_eta_A2
+    # Four-corner envelopes (η1±σ1, η2±σ2); handle NaN sigmas gracefully
+    def _nan_safe(v, dv):
+        lo = v - dv if np.isfinite(dv) else v
+        hi = v + dv if np.isfinite(dv) else v
+        return lo, hi
 
-    T1_lo, T1_hi = eta_tau1_med - sig_eta_t1, eta_tau1_med + sig_eta_t1
-    T2_lo, T2_hi = eta_tau2_med - sig_eta_t2, eta_tau2_med + sig_eta_t2
+    A1_lo, A1_hi = _nan_safe(eta_A1_med, sig_eta_A1)
+    A2_lo, A2_hi = _nan_safe(eta_A2_med, sig_eta_A2)
+    T1_lo, T1_hi = _nan_safe(eta_tau1_med, sig_eta_t1)
+    T2_lo, T2_hi = _nan_safe(eta_tau2_med, sig_eta_t2)
 
     sigma_corners = np.vstack([
         sig0_med + shp(A1_lo, A2_lo),
@@ -1266,26 +1288,23 @@ def plot_sigma_tau_vs_lambda_with_model(
     ax2.plot(loglam_grid, center_tau,   lw=1.6, color='m', zorder=3)
     ax2.fill_between(loglam_grid, tau_lo,   tau_hi,   color='m', alpha=0.28, zorder=2)
 
-    # ---- injected ("fake") slope overlays & comparisons ----
+    # ---------- injected ("fake") single-slope overlays (optional) ----------
     have_fake_fields = all(k in rows[0] for k in ('alpha_sigma', 'beta_tau'))
     alpha_sigma_med = beta_tau_med = None
 
     if inject_fake and have_fake_fields:
-        # Median injected slopes across objects
         alpha_sigma_med = med('alpha_sigma')
         beta_tau_med    = med('beta_tau')
 
-        # Use single-slope shapes (same slope on both sides of the break)
         fake_sigma_curve = sig0_med + shp(alpha_sigma_med, alpha_sigma_med)
         fake_tau_curve   = tau0_med + shp(beta_tau_med,    beta_tau_med)
 
-        # Plot as dashed gray overlays
         ax1.plot(loglam_grid, fake_sigma_curve, ls='--', lw=1.2, color='0.25',
                  zorder=4, label='Injected σ-slope')
         ax2.plot(loglam_grid, fake_tau_curve,   ls='--', lw=1.2, color='0.25',
                  zorder=4, label='Injected τ-slope')
 
-    # ---- labels & axes ----
+    # ---------- labels & axes ----------
     if residual:
         sig_lab = r'$\log(\sigma_{\mathrm{band}}/\sigma_{\mathrm{UV}})$'
         tau_lab = r'$\log(\tau_{\mathrm{band,RF}}/\tau_{\mathrm{UV,RF}})$'
@@ -1314,10 +1333,10 @@ def plot_sigma_tau_vs_lambda_with_model(
                       np.ceil(lam_max / step) * step + step, step)
     secax.set_xticks(np.union1d(ticks, [1000.0]))
 
-    # ---- legend (bands + model + injected) ----
+    # ---------- legend (only bands that actually plotted) ----------
     band_handles = [
         Line2D([0], [0], linestyle='none', marker='o', markersize=6,
-               markerfacecolor=colors.get(b), markeredgecolor='none',
+               markerfacecolor=colors.get(b, None), markeredgecolor='none',
                label=f'Band {b}')
         for b in plotted_bands
     ]
@@ -1331,32 +1350,30 @@ def plot_sigma_tau_vs_lambda_with_model(
     if handles:
         ax1.legend(handles=handles, loc='best', frameon=False, ncol=2, fontsize=9)
 
-    # ---- annotations (medians; include injected if requested) ----
+    # ---------- annotations (median params; robust to NaNs) ----------
     txt_sigma = (rf'$\eta_{{A,1}} = {eta_A1_med:+.3f}\,\pm\,{sig_eta_A1:.3f}$' '\n'
                  rf'$\eta_{{A,2}} = {eta_A2_med:+.3f}\,\pm\,{sig_eta_A2:.3f}$')
-    if inject_fake and have_fake_fields:
+    if inject_fake and have_fake_fields and np.isfinite(alpha_sigma_med):
         d1 = eta_A1_med - alpha_sigma_med
         d2 = eta_A2_med - alpha_sigma_med
         txt_sigma += ('\n' +
                       rf'$\alpha_\sigma^\mathrm{{(inj)}} = {alpha_sigma_med:+.3f}$' '\n' +
                       rf'$\Delta\eta_{{A,1}} = {d1:+.3f},\;\Delta\eta_{{A,2}} = {d2:+.3f}$')
-
     ax1.text(0.02, 0.96, txt_sigma, transform=ax1.transAxes, va='top', ha='left', alpha=1.0,
              fontsize=10, bbox=dict(boxstyle='round,pad=0.25', fc='white', lw=0.8), zorder=10)
 
     txt_tau = (rf'$\eta_{{\tau,1}} = {eta_tau1_med:+.3f}\,\pm\,{sig_eta_t1:.3f}$' '\n'
                rf'$\eta_{{\tau,2}} = {eta_tau2_med:+.3f}\,\pm\,{sig_eta_t2:.3f}$')
-    if inject_fake and have_fake_fields:
+    if inject_fake and have_fake_fields and np.isfinite(beta_tau_med):
         d1t = eta_tau1_med - beta_tau_med
         d2t = eta_tau2_med - beta_tau_med
         txt_tau += ('\n' +
                     rf'$\beta_\tau^\mathrm{{(inj)}} = {beta_tau_med:+.3f}$' '\n' +
                     rf'$\Delta\eta_{{\tau,1}} = {d1t:+.3f},\;\Delta\eta_{{\tau,2}} = {d2t:+.3f}$')
-
     ax2.text(0.02, 0.96, txt_tau, transform=ax2.transAxes, va='top', ha='left', alpha=1.0,
              fontsize=10, bbox=dict(boxstyle='round,pad=0.25', fc='white', lw=0.8), zorder=10)
 
-    # ---- quick diag ----
+    # ---------- diagnostics ----------
     if debug and x_all_tau.size:
         slope_pts = linregress(x_all_tau, y_all_tau).slope
         slope_model = np.gradient(center_tau, loglam_grid).mean()
@@ -1366,13 +1383,8 @@ def plot_sigma_tau_vs_lambda_with_model(
               f"ηA2={eta_A2_med:+.3f}±{sig_eta_A2:.3f}, "
               f"ητ1={eta_tau1_med:+.3f}±{sig_eta_t1:.3f}, "
               f"ητ2={eta_tau2_med:+.3f}±{sig_eta_t2:.3f}")
-        if inject_fake and have_fake_fields:
-            print(f"[diag] injected: α_σ={alpha_sigma_med:+.3f}, β_τ={beta_tau_med:+.3f}")
-            print(f"[diag] deltas: ΔηA1={eta_A1_med-alpha_sigma_med:+.3f}, "
-                  f"ΔηA2={eta_A2_med-alpha_sigma_med:+.3f}, "
-                  f"Δητ1={eta_tau1_med-beta_tau_med:+.3f}, "
-                  f"Δητ2={eta_tau2_med-beta_tau_med:+.3f}")
 
+    # ---------- save ----------
     out_dir = f"plots/multiband/{prefix}/powerlaw/"
     os.makedirs(out_dir, exist_ok=True)
     save_path = os.path.join(out_dir, f"{suffix}.png")
