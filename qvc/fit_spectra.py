@@ -510,7 +510,7 @@ def create_qsopar_fits(path_ex='data/', parfilename='qsopar.fits', overwrite=Tru
 def run_qsofit_record(rec, npca_qso, decomp_host, BC, cache_dir="data/spectra_cache", 
                       path_ex=f'data/pyqsofit', parfilename=f'qsopar.fits',
                       save_fig_path=f'./plots/pyqso/', save_fits_path=f'./results/pyqso_fits/',
-                      allow_partial_band_overlap=False):
+                      allow_partial_band_overlap=False, MC_samples=50):
     """
     Worker-safe version of QSOFit runner.
     `rec` is a plain dict containing only the fields needed for one object.
@@ -688,9 +688,9 @@ def run_qsofit_record(rec, npca_qso, decomp_host, BC, cache_dir="data/spectra_ca
             rej_abs_line=False,       # If True, iteratively reject 3σ outlier absorption pixels in lines
 
             # fitting method selection
-            MC=True,                  # Monte Carlo resampling for error array
+            MC=(MC_samples>0),                  # Monte Carlo resampling for error array
             MCMC=False,               # Markov Chain Monte Carlo sampling
-            nsamp=50,                 # number of MC trials or MCMC samples
+            nsamp=MC_samples,                 # number of MC trials or MCMC samples
 
             # advanced fitting parameters
             param_file_name=parfilename,  # qso fitting parameter FITS file
@@ -725,18 +725,18 @@ def run_qsofit_record(rec, npca_qso, decomp_host, BC, cache_dir="data/spectra_ca
         }
         conti_dict['z'] = rec["z"]
 
-        L_ok = np.isfinite(conti_dict['L2500_int']) and np.isfinite(conti_dict['L2500_int_err'])
+        L_ok = np.isfinite(conti_dict['L2500_int']) and np.isfinite(conti_dict.get('L2500_int_err', -1e9))
         if L_ok:
-            m_2500, m_2500_err = compute_apparent_mag_2500_astropy(conti_dict['L2500_int'], conti_dict['L2500_int_err'], z=rec['z'])
+            m_2500, m_2500_err = compute_apparent_mag_2500_astropy(conti_dict['L2500_int'], conti_dict.get('L2500_int_err', -1e9), z=rec['z'])
             m_2500_err = np.sqrt(m_2500_err**2 + np.mean(mag_errs)**2)
         else:
             print(f"[WARN] L2500_int not finite for {rec['sdss_name']} (z={rec['z']:.2f})")
             m_2500, m_2500_err = -1e9, -1e9
 
         # L2500 reddened
-        L_ok = np.isfinite(conti_dict['L2500']) and np.isfinite(conti_dict['L2500_err'])
+        L_ok = np.isfinite(conti_dict['L2500']) and np.isfinite(conti_dict.get('L2500_err', -1e9))
         if L_ok:
-            m_2500_reddened, m_2500_reddened_err = compute_apparent_mag_2500_astropy(conti_dict['L2500'], conti_dict['L2500_err'], z=rec['z'])
+            m_2500_reddened, m_2500_reddened_err = compute_apparent_mag_2500_astropy(conti_dict['L2500'], conti_dict.get('L2500_err', -1e9), z=rec['z'])
             m_2500_reddened_err = np.sqrt(m_2500_reddened_err**2 + np.mean(mag_errs)**2)
         else:
             print(f"[WARN] L2500 not finite for {rec['sdss_name']} (z={rec['z']:.2f})")
@@ -810,7 +810,7 @@ def run_qsofit_record(rec, npca_qso, decomp_host, BC, cache_dir="data/spectra_ca
             f_host_5100=conti_dict.get('frac_host_5100', -1),
             conti_a_0=conti_dict['conti_a_0'],
             alpha_lambda=conti_dict['PL_slope_blue'],
-            alpha_lambda_err=conti_dict['PL_slope_blue_err'],
+            alpha_lambda_err=conti_dict.get('PL_slope_blue_err', -1e9),
             redchi=q_mle.conti_fit.redchi,
             aic=q_mle.conti_fit.aic,
             bic=q_mle.conti_fit.bic,
@@ -890,6 +890,8 @@ def parse_args():
                    help="Include BC=True runs (otherwise only BC=False).")
     p.add_argument("--nproc", type=int, default=max(1, (os.cpu_count() or 2) - 1),
                    help="Parallel worker processes for QSOFit.")
+    p.add_argument("--MC_samples", type=int, default=50,
+                   help="Number of Monte Carlo samples per object (0 to disable MC).")
 
     return p.parse_args()
 
@@ -1034,7 +1036,8 @@ def run_collect(args):
             parfilename=f'qsopar_{prefix}_{suffix}.fits',
             save_fits_path=save_fits_path,
             allow_partial_band_overlap=args.allow_partial_band_overlap,
-            save_fig_path=save_fig_path
+            save_fig_path=save_fig_path,
+            MC_samples=args.MC_samples
         )
 
         chunksize = 1
@@ -1163,41 +1166,58 @@ def run_select(args):
 
         if lowL:
             # Split piles
-            T = cand[(cand["decomp_host"] == True) & (cand["npca_qso"].isin([1, 2]))]
+            T = cand[(cand["decomp_host"] == True) & (cand["npca_qso"].isin([1, 2, 5, 10]))]
             F = cand[(cand["decomp_host"] == False) & (cand["npca_qso"] == -1)]
 
-            # Build T candidate: prefer q1; allow q2 only if ≤ 0.8× best q1
+            # ---- Build T candidate:
+            # prefer {2,5,10} ONLY if they are ≤ 0.8× the best q1; else use best q1.
+            # If no q1 exists, pick the best among {2,5,10}.
             r2_T = np.inf
             T_sel = pd.DataFrame(columns=cand.columns)
+
             if not T.empty:
                 q1 = T[T["npca_qso"] == 1]
+                hi = T[T["npca_qso"].isin([0, 2, 5, 10])]
+
                 if not q1.empty:
                     best_q1 = q1["redchi2_conti_full"].min()
-                    q2_better = T[(T["npca_qso"] == 2) & (T["redchi2_conti_full"] <= 0.8 * best_q1)]
-                    T_sel = q2_better if not q2_better.empty else q1
+                    improved_hi = hi[hi["redchi2_conti_full"] <= 0.8 * best_q1]  # ≥20% better
+                    if not improved_hi.empty:
+                        # Take the best among improved {2,5,10}
+                        T_sel = improved_hi.loc[[improved_hi["redchi2_conti_full"].idxmin()]]
+                    else:
+                        # Fall back to best q1
+                        T_sel = q1.loc[[q1["redchi2_conti_full"].idxmin()]]
                 else:
-                    T_sel = T[T["npca_qso"] == 2]
+                    # No q1 available: choose best among {2,5,10}
+                    if not hi.empty:
+                        T_sel = hi.loc[[hi["redchi2_conti_full"].idxmin()]]
+
                 if not T_sel.empty:
                     r2_T = T_sel["redchi2_conti_full"].min()
 
-            # F pile best (npca == -1)
+            # ---- F pile best (npca == -1)
             r2_F = np.inf
+            F_sel = pd.DataFrame(columns=cand.columns)
             if not F.empty:
-                r2_F = F["redchi2_conti_full"].min()
+                idxF = F["redchi2_conti_full"].idxmin()
+                F_sel = F.loc[[idxF]]
+                r2_F = F_sel["redchi2_conti_full"].iloc[0]
 
-            # Allow F only if 100% better → ≥2× better → ≤ 1/2 of T
+            # ---- Decision between T and F
+            # Allow F only if 100% better → ≤ 1/2 of T
             if r2_T < np.inf:
-                if r2_F <= (1.0 / 2.0) * r2_T:
-                    chosen_pool = F
+                if r2_F <= 0.5 * r2_T:
+                    chosen_pool = F_sel
                 else:
-                    chosen_pool = T_sel if not T_sel.empty else F
+                    chosen_pool = T_sel if not T_sel.empty else F_sel
             else:
-                chosen_pool = F  # no viable T
+                # No viable T → take F if present, else empty
+                chosen_pool = F_sel if not F_sel.empty else cand.iloc[0:0]
 
         else:
-            # High-L: choose best among {-1,1,2} (never 0), after BC gate already applied
-            chosen_pool = cand[cand["npca_qso"].isin([-1, 1, 2])]
-
+            # High-L: choose best among {-1,1,2,5,10} (never 0), after BC gate already applied
+            chosen_pool = cand[cand["npca_qso"].isin([-1, 1, 2, 5, 10])]
         if chosen_pool.empty:
             continue
 
