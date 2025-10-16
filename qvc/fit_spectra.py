@@ -421,7 +421,7 @@ def create_qsopar_fits(path_ex='data/', parfilename='qsopar.fits', overwrite=Tru
         # (1150., 1170.),  # often masked due to Lyα forest
         (1275., 1290.),
         (1350., 1360.),
-        (1445., 1465.),
+        # (1445., 1465.), # often affected by absorption
         (1690., 1705.),
         (1770., 1810.),
         (1970., 2400.),
@@ -805,9 +805,9 @@ def run_qsofit_record(rec, npca_qso, decomp_host, BC, cache_dir="data/spectra_ca
             apparent_mag_2500_err=m_2500_err,
             apparent_mag_2500_reddened=m_2500_reddened,
             apparent_mag_2500_reddened_err=m_2500_reddened_err,
-            f_host_2500=conti_dict.get('frac_host_4200', 0), # in pyqsofit, frac_host_4200 is actually at 2500A
+            f_host_2500=conti_dict.get('frac_host_4200', -1), # in pyqsofit, frac_host_4200 is actually at 2500A
             #f_host_4200=conti_dict.get('frac_host_4200', 0),
-            f_host_5100=conti_dict.get('frac_host_5100', 0),
+            f_host_5100=conti_dict.get('frac_host_5100', -1),
             conti_a_0=conti_dict['conti_a_0'],
             alpha_lambda=conti_dict['PL_slope_blue'],
             alpha_lambda_err=conti_dict['PL_slope_blue_err'],
@@ -1061,11 +1061,14 @@ def run_collect(args):
                     } | res  # merge all result keys
                     rows.append(row)
                     pbar.update(1)
+
     BC_list = [False, True] if args.enable_BC else [False]
     for BC in BC_list:
-        run_parallel(npca_qso=0, decomp_host=False, BC=BC)
-        for npca in [0, 1, 2]:
+        run_parallel(npca_qso=-1, decomp_host=False, BC=BC)
+        for npca in [0, 1, 2, 5, 10]:
             run_parallel(npca_qso=npca, decomp_host=True, BC=BC)
+
+
     # BC = False
     # npca_qso = 0
     # decomp_host = True
@@ -1095,176 +1098,127 @@ def run_collect(args):
 # ------------------------------
 def run_select(args):
 
+    # ---- Load
     csv_path = args.fpath_out
     if not os.path.exists(csv_path):
-        raise FileNotFoundError(f"CSV path not found: {csv_path}")
-
+        raise FileNotFoundError(csv_path)
     df = pd.read_csv(csv_path)
-    print(f"[INFO] Loaded CSV with {len(df)} rows from {csv_path}")
-    df = df[~((df["z"] > 1) & (df["decomp_host"]))].copy()
-    print(f"[INFO] After removing z>1 with decomp_host=True, {len(df)} rows remain")
-    
-    # Required columns
-    req_cols = ["object_id", "redchi2_conti_full", "aic", "bic",
-                "npca_qso", "decomp_host", "BC",
-                "sdss_name", "plate", "mjd", "fiber"]
-    missing = [c for c in req_cols if c not in df.columns]
-    if missing:
-        raise ValueError(f"CSV missing required column(s): {missing}")
 
-    # Ensure string grouping key
+    # ---- Minimal coercions
     df["object_id"] = df["object_id"].astype(str)
+    for c in ["redchi2_conti_full", "aic", "bic", "loglbol"]:
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+    # Coerce booleans simply
+    for c in ["decomp_host", "BC"]:
+        if df[c].dtype != bool:
+            df[c] = df[c].astype(str).str.strip().str.lower().isin(["true", "1", "t", "yes"])
+    # Coerce npca; fill unknowns with 0 (we will forbid 0 later)
+    df["npca_qso"] = pd.to_numeric(df["npca_qso"], errors="coerce").fillna(0).astype(int)
 
-    # ---- CLEAR all best flags first (create if absent) ----
-    if "best" not in df.columns:
-        df["best"] = False
-    else:
-        df["best"] = False
+    # If decomp_host == False, npca is irrelevant → set to -1
+    df.loc[~df["decomp_host"], "npca_qso"] = -1
 
-    # ---- Build ranks per object_id (NaNs lose) ----
-    # Ranking key = (|chi2-1|, AIC, BIC), implemented via within-group ranks
-    r1 = (df["redchi2_conti_full"] - 1.0).abs()
-    r2 = df["aic"]
-    r3 = df["bic"]
+    # Init best flags
+    df["best"] = False
 
-    k1 = r1.groupby(df["object_id"]).rank(method="first", na_option="bottom")
-    k2 = r2.groupby(df["object_id"]).rank(method="first", na_option="bottom")
-    k3 = r3.groupby(df["object_id"]).rank(method="first", na_option="bottom")
+    winners = []
 
-    df["__rank"] = (k1 * 1_000_000) + (k2 * 1_000) + k3
+    # ---- Per object selection
+    for oid, g in df.groupby("object_id", sort=False):
+        g = g[np.isfinite(g["redchi2_conti_full"])].copy()
+        if g.empty:
+            continue
 
-    # Some groups might be all-NaN → their ranks become NaN; skip those safely
-    # idxmin ignores NaNs; for all-NaN groups, result is NaN and we won’t set any True
-    idx_best = df.groupby("object_id")["__rank"].idxmin()
+        # Never allow npca_qso == 0
+        g = g[(g["npca_qso"] != 0)]
 
-    # Mark winners True; everyone else remains False
-    # (drop NaN indices that can appear for all-NaN groups)
-    idx_best = idx_best.dropna().astype(int)
-    df.loc[idx_best, "best"] = True
+        # Never allow failed solutions when decomposing host
+        mask_failed = (g["decomp_host"] == True) & (g["f_host_2500"] < 1e-3)
+        g.loc[mask_failed, "redchi2_conti_full"] = 1e9
 
-    # Persist & clean temp
-    #df = df.drop(columns=["__rank"])
-    df.to_csv(csv_path, index=False)
-    print(f"[OK] Wrote {len(df)} rows to CSV: {csv_path}")
-    print(f"[OK] Updated CSV with exactly one best=True per object_id (when determinable): {csv_path}")
+        if g.empty:
+            continue
 
-    # ---------- Pretty print tables ----------
-    GROUP_BY = "sdss_name" if "sdss_name" in df.columns else "object_id"
-    SHOW_COLS = [
-        "redchi2_conti_full", "aic", "bic",
-        "apparent_mag_2500", "apparent_mag_2500_err",
-        "f_host_2500", "conti_a_0"
-    ]
-    MAX_GROUPS = 10   # set to None to print all groups
+        # 1) Prefer BC=True only if it improves redchi2 by >=20% (≤ 0.8× best BC=False)
+        have_bc0 = (g["BC"] == False).any()
+        have_bc1 = (g["BC"] == True).any()
 
-    def _option_label_row(row):
-        npca = int(row["npca_qso"]) if pd.notna(row["npca_qso"]) else row.get("npca_qso", "NA")
-        BCv = bool(row["BC"]) if pd.notna(row["BC"]) else row.get("BC", "NA")
-        decomp = bool(row["decomp_host"]) if pd.notna(row["decomp_host"]) else row.get("decomp_host", "NA")
-        return f"npca_qso={npca}, BC={BCv}, decomp_host={decomp}"
-
-    def _rank_with_fallback(sub):
-        r1 = (sub["redchi2_conti_full"] - 1.0).abs()
-        r2 = sub["aic"]
-        r3 = sub["bic"]
-        k = r1.rank(method="first", na_option="bottom")*1_000_000 \
-            + r2.rank(method="first", na_option="bottom")*1_000 \
-            + r3.rank(method="first", na_option="bottom")
-        return k.idxmin()
-
-    keep_cols = [c for c in SHOW_COLS if c in df.columns]
-    for col in ["npca_qso", "decomp_host", "BC"]:
-        if col not in df.columns:
-            raise ValueError(f"CSV missing required column '{col}' needed for option labels.")
-
-    printed = 0
-    for key, sub in df.groupby(GROUP_BY):
-        if MAX_GROUPS is not None and printed >= MAX_GROUPS:
-            break
-
-        sub = sub.copy()
-
-        # If exactly one best, use it; otherwise fall back to ranking
-        if "best" in sub.columns and sub["best"].sum() == 1:
-            best_idx = sub.index[sub["best"]].tolist()[0]
+        if have_bc0 and have_bc1:
+            best0 = g.loc[g["BC"] == False, "redchi2_conti_full"].min()
+            best1 = g.loc[g["BC"] == True,  "redchi2_conti_full"].min()
+            if best1 <= 0.8 * best0:
+                cand = g[g["BC"] == True]
+            else:
+                cand = g[g["BC"] == False]
+        elif have_bc1:
+            cand = g[g["BC"] == True]
         else:
-            # Covers zero/invalid or multiple True (unexpected): re-rank locally
-            best_idx = _rank_with_fallback(sub)
+            cand = g[g["BC"] == False]
 
-        # Build display frame
-        sub["option"] = sub.apply(_option_label_row, axis=1)
-        cols_show = ["option"] + keep_cols
-        df_show = sub[cols_show].copy()
+        if cand.empty:
+            continue
 
-        # Star the best
-        if best_idx in df_show.index:
-            df_show.loc[best_idx, "option"] = "★ " + df_show.loc[best_idx, "option"]
+        # 2) Low-L vs High-L logic
+        lowL = float(g["loglbol"].iloc[0]) < 46.5
 
-        # Formatting
-        def _fmt(x):
-            if isinstance(x, (float, np.floating)):
-                return f"{x:.3f}" if np.isfinite(x) else "nan"
-            return str(x)
+        if lowL:
+            # Split piles
+            T = cand[(cand["decomp_host"] == True) & (cand["npca_qso"].isin([1, 2]))]
+            F = cand[(cand["decomp_host"] == False) & (cand["npca_qso"] == -1)]
 
-        # print(f"\n=== {GROUP_BY}: {key} ===")
-        # df_print = df_show.set_index("option").applymap(_fmt)
-        # print(df_print.to_string())
+            # Build T candidate: prefer q1; allow q2 only if ≤ 0.8× best q1
+            r2_T = np.inf
+            T_sel = pd.DataFrame(columns=cand.columns)
+            if not T.empty:
+                q1 = T[T["npca_qso"] == 1]
+                if not q1.empty:
+                    best_q1 = q1["redchi2_conti_full"].min()
+                    q2_better = T[(T["npca_qso"] == 2) & (T["redchi2_conti_full"] <= 0.8 * best_q1)]
+                    T_sel = q2_better if not q2_better.empty else q1
+                else:
+                    T_sel = T[T["npca_qso"] == 2]
+                if not T_sel.empty:
+                    r2_T = T_sel["redchi2_conti_full"].min()
 
-        printed += 1
+            # F pile best (npca == -1)
+            r2_F = np.inf
+            if not F.empty:
+                r2_F = F["redchi2_conti_full"].min()
 
-    if MAX_GROUPS is not None:
-        print(f"\n[INFO] Printed {printed} group(s). Set MAX_GROUPS=None in run_select() to print all.")
+            # Allow F only if 100% better → ≥2× better → ≤ 1/2 of T
+            if r2_T < np.inf:
+                if r2_F <= (1.0 / 2.0) * r2_T:
+                    chosen_pool = F
+                else:
+                    chosen_pool = T_sel if not T_sel.empty else F
+            else:
+                chosen_pool = F  # no viable T
 
-    # ---------- Copy best plots to plots/pyqsofit/<prefix>/best ----------
-    def _copy_best_plots(df_all, winners, prefix_str):
-        dest_dir = os.path.join("plots", "pyqsofit", prefix_str, "best")
-        os.makedirs(dest_dir, exist_ok=True)
+        else:
+            # High-L: choose best among {-1,1,2} (never 0), after BC gate already applied
+            chosen_pool = cand[cand["npca_qso"].isin([-1, 1, 2])]
 
-        n_found = 0
-        for idx in winners:
-            row = df_all.loc[idx]
-            npca = int(row["npca_qso"])
-            decomp = bool(row["decomp_host"])
-            BCv = bool(row["BC"])
-            sdss = str(row.get("sdss_name", "") or "")
-            plate = row.get("plate", np.nan)
-            mjd   = row.get("mjd", np.nan)
-            fiber = row.get("fiber", np.nan)
+        if chosen_pool.empty:
+            continue
 
-            src_dir = os.path.join("plots", "pyqsofit", prefix_str,
-                                   f"npca_qso_{npca}_decomp_host_{decomp}_BC_{BCv}")
-            if not os.path.isdir(src_dir):
-                continue
+        # 3) Pick overall best row with simple tie-breakers
+        #    primary: redchi2; secondary: aic; tertiary: bic
+        idx = chosen_pool.sort_values(
+            ["redchi2_conti_full", "aic", "bic"],
+            ascending=[True, True, True]
+        ).index[0]
+        winners.append(idx)
 
-            patterns = []
-            if sdss and sdss.lower() != "nan":
-                patterns.append(os.path.join(src_dir, f"*{sdss}*"))
-            try:
-                if pd.notna(plate) and pd.notna(mjd) and pd.notna(fiber):
-                    patterns.append(os.path.join(src_dir, f"*{int(plate)}-{int(mjd)}-{int(fiber)}*"))
-            except Exception:
-                pass
+    if winners:
+        df.loc[winners, "best"] = True
 
-            exts = [".pdf", ".png", ".jpg", ".jpeg"]
-            matched = []
-            for base in patterns:
-                for ext in exts:
-                    matched.extend(glob.glob(base + ext))
+    df.to_csv(csv_path, index=False)
+    print(f"[OK] Wrote best selections to: {csv_path}")
+    print(f"[INFO] Winners: {df['best'].sum()} / objects: {df['object_id'].nunique()}")
 
-            for src in matched:
-                base = os.path.basename(src)
-                name, ext = os.path.splitext(base)
-                dest = os.path.join(dest_dir, f"{name}_npca_qso_{npca}_decomp_host_{decomp}_BC_{BCv}{ext}")
-                try:
-                    shutil.copy2(src, dest)
-                    n_found += 1
-                except Exception as e:
-                    print(f"[WARN] Could not copy plot for {sdss or row.get('object_id','?')}: {e}")
-
-        print(f"[OK] Copied {n_found} plot file(s) to {dest_dir}")
 
     # winners are exactly those we set to best=True
-    _copy_best_plots(df, df.index[df["best"]], prefix)
+    #_copy_best_plots(df, df.index[df["best"]], prefix)
 
 
 # ------------------------------
