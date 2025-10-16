@@ -16,6 +16,7 @@ from astropy import units as u
 #from astroquery.vizier import Vizier
 from tqdm import tqdm
 import warnings
+import re
 from scipy import stats
 from scipy.stats import norm, sigmaclip, multivariate_normal
 from scipy.interpolate import RegularGridInterpolator
@@ -171,7 +172,7 @@ def populate_xray(df, table_fpath="data/cscresults.vot"):
     # If you see col0, col1, ..., fix column names using FIELD 'name' attributes
     fields = vo.get_first_table().fields
     new_names = [f.name for f in fields]
-
+    print(new_names)
     # Rename columns in-place
     table.colnames  # ['col0', 'col1', ...]
     for old, new in zip(table.colnames, new_names):
@@ -179,9 +180,30 @@ def populate_xray(df, table_fpath="data/cscresults.vot"):
 
         df_csc = table.to_pandas()
 
-    df_matched, unmatched_object_ids = match_radec(df, df_csc, populate_cols=['flux_aper_b'], max_sep_arcsec=1.0)
+    df_matched, unmatched_object_ids = match_radec(df, df_csc, 
+                                                   populate_cols=['flux_aper_b', 'flux_aper_hilim_b', 'flux_aper_lolim_b'], 
+                                                   max_sep_arcsec=1.0)
     print(f"Matched {len(df_matched) - len(unmatched_object_ids)} out of {len(df)} objects to CSC3 catalog.")
-    df_matched['xray_flux'] = df_matched['matched_flux_aper_b']
+    # Ensure numeric (in case some columns came in as strings)
+    for c in ["flux_aper_b", "flux_aper_hilim_b", "flux_aper_lolim_b"]:
+        df_matched[c] = pd.to_numeric(df_matched[c], errors="coerce")
+
+    best = df_matched["flux_aper_b"]
+    hi   = df_matched["flux_aper_hilim_b"]
+    lo   = df_matched["flux_aper_lolim_b"]
+
+    # Symmetric 1σ error: half-width of the 68% interval when both bounds exist.
+    # If only one bound is present, fall back to that one-sided distance.
+    err = np.where(~hi.isna() & ~lo.isna(),
+                0.5 * (hi - lo),
+                np.where(~hi.isna(),
+                            (hi - best),
+                            np.where(~lo.isna(),
+                                    (best - lo),
+                                    np.nan)))
+    # Guard against tiny negatives from rounding
+    df_matched["flux_aper_err_b"] = np.clip(err, a_min=0.0, a_max=None)
+
     # Compute L_xray from xray_flux and redshift
     # Assume xray_flux is in erg/cm^2/s and z is in df['z']
 
@@ -189,12 +211,38 @@ def populate_xray(df, table_fpath="data/cscresults.vot"):
     z = df_matched['z'].values
     DL_cm = cosmo.luminosity_distance(z).to('cm').value
     # L_xray = 4 * pi * DL^2 * flux * (1+z)^{-1}
-    xray_flux = df_matched['xray_flux'].replace(0, np.nan)
-    L_xray = 4 * np.pi * DL_cm**2 * xray_flux / (1 + z)
-    df_matched['log_Lxray'] = np.log10(L_xray)
-    # Avoid division by zero in L_xray
-    df_matched['alphaOX'] = -(df_matched['log_Lxray'] - df_matched['log_L2500_fs'])/2.605
-    df_matched['alphaOX_int'] = -(df_matched['log_Lxray'] - df_matched['log_L2500_int_fs'])/2.605
+    
+
+    # ---- Config: photon index for X-ray power-law ----
+    GAMMA_X = 1.8  # typical AGN value; adjust if you have spectral fits per source
+
+    # Pull columns
+    z = pd.to_numeric(df_matched["z"], errors="coerce")
+    xray_flux     = df_matched["flux_aper_b"].replace(0, np.nan)
+    xray_flux_err = df_matched["flux_aper_err_b"].replace(0, np.nan)
+
+    # K-correction factor for energy flux in a band:
+    # L_band,rest = 4π DL^2 * F_band,obs * (1+z)^(Γ-2)
+    Kcorr = np.power(1.0 + z, GAMMA_X - 2.0)
+
+    L_xray = 4 * np.pi * (DL_cm**2) * xray_flux * Kcorr
+    df_matched["log_Lxray"] = np.log10(L_xray)
+
+    # Error on log L_xray (unchanged by multiplicative constants including Kcorr):
+    # σ_log10L = (1/ln 10) * (σ_F / F)
+    df_matched["log_Lxray_err"] = (1.0 / np.log(10.0)) * (xray_flux_err / xray_flux)
+
+    # alpha_OX and errors (unchanged form)
+    df_matched["alphaOX"] = -(df_matched["log_Lxray"] - df_matched["log_L2500_fs"]) / 2.605
+    df_matched["alphaOX_int"] = -(df_matched["log_Lxray"] - df_matched["log_L2500_int_fs"]) / 2.605
+
+    df_matched["alphaOX_err"] = np.sqrt(
+        df_matched["log_Lxray_err"]**2 + df_matched["log_L2500_fs_err"]**2
+    ) / 2.605
+
+    df_matched["alphaOX_int_err"] = np.sqrt(
+        df_matched["log_Lxray_err"]**2 + df_matched["log_L2500_int_fs_err"]**2
+    ) / 2.605
 
     return df_matched
 
@@ -282,91 +330,151 @@ def populate_zquery(df, zquery_csv):
 #     else:
 #         return logL_2500
 
+def _norm_name(s):
+    s = (s or "").replace("\ufeff", "").strip()
+    return s
+
+def _wrap_converters(fields):
+    """Wrap converters to report column+value; do NOT include 'object_id' here."""
+    wrapped = {}
+    for col, fn in fields.items():
+        if col == "object_id":
+            continue
+        def make(fn, col):
+            def _conv(x):
+                x = None if x == "" else x
+                if x is None or (isinstance(x, float) and np.isnan(x)):
+                    return np.nan
+                try:
+                    return fn(x)
+                except Exception as e:
+                    raise ValueError(f"Converter failed for column {col!r} with value {x!r}") from e
+            return _conv
+        wrapped[col] = make(fn, col)
+    return wrapped
+
+def _ensure_object_id(df):
+    # rescue an index named object_id
+    if df.index.name and _norm_name(df.index.name).lower() == "object_id" and "object_id" not in df.columns:
+        df = df.reset_index()
+    if "object_id" not in df.columns:
+        raise KeyError("DataFrame lacks 'object_id' column after normalization.")
+    df["object_id"] = df["object_id"].astype(str)
+    return df
+
 def populate_spectra_fit(df, spectra_fit_csvs):
-    # Load Colin's SDSS QSO 2500A magnitudes and merge with df on SDSS_NAME
+    # Columns expected from spectral-fit CSVs (exclude 'object_id' from the drop list!)
     fields = {
-            #'f_host_2500': float,
-            'f_host_2500': float,
-            'f_host_5100': float,
-            'ebv_fs': float,
-            'euv_fs': float,
-            'apparent_mag_2500_reddened': float,
-            'apparent_mag_2500_reddened_err': float,
-            'apparent_mag_2500': float,
-            'apparent_mag_2500_err': float,
-            'apparent_mag_i_rest': float,
-            'delta_m_avg': float,
-            'alpha_lambda': float,
-            'alpha_lambda_err': float,
-            'redchi': float,
-            'npca_qso': int,
-            'log_L2500_fs': float,
-            'log_L2500_fs_err': float,
-            'log_L2500_int_fs': float,
-            'log_L2500_int_fs_err': float,
-        }
-    # Drop any existing columns to avoid duplicates
-    for col in fields.keys():
-        if col in df.columns:
-            df = df.drop(columns=[col])
+        'object_id': str,                   # merge key (do not drop from df)
+        'f_host_2500': float,
+        'f_host_5100': float,
+        'ebv_fs': float,
+        'euv_fs': float,
+        'conti_a_0': float,
+        'apparent_mag_2500_reddened': float,
+        'apparent_mag_2500_reddened_err': float,
+        'apparent_mag_2500': float,
+        'apparent_mag_2500_err': float,
+        'apparent_mag_i_rest': float,
+        'delta_m_avg': float,
+        'alpha_lambda': float,
+        'alpha_lambda_err': float,
+        'redchi': float,
+        'redchi2_conti_full': float,
+        'npca_qso': int,
+        'decomp_host': bool,
+        'BC': bool,
+        'best': bool,
+        'log_L2500_fs': float,
+        'log_L2500_fs_err': float,
+        'log_L2500_int_fs': float,
+        'log_L2500_int_fs_err': float,
+        'reddening_integral': float,
+        'reddening_proxy': float,
+    }
 
-    # For each CSV, load and merge, keeping the fields from the latter CSV
+    # Never drop the merge key
+    drop_targets = [c for c in fields.keys() if c != "object_id"]
+    existing_to_drop = [c for c in drop_targets if c in df.columns]
+    if existing_to_drop:
+        df = df.drop(columns=existing_to_drop)
+
+    # Ensure left DF has the key and is string-typed
+    df = _ensure_object_id(df)
+
     for i, csv_path in enumerate(spectra_fit_csvs):
-        print(f"\033[96mLoading spectra fit CSV ({i}/{len(spectra_fit_csvs)}): {csv_path}\033[0m")
+        print(f"\033[96mLoading spectra fit CSV ({i+1}/{len(spectra_fit_csvs)}): {csv_path}\033[0m")
 
+        wanted = set(fields.keys()) | {"object_id"}  # 'object_id' already included; harmless
+        # Build converters that exclude 'object_id' to avoid the ParserWarning
+        #conv = _wrap_converters(fields)
+        conv = _wrap_converters({k: v for k, v in fields.items() if k not in {"best", "BC", "decomp_host"}})
+        # Robust read: strip BOM, tolerate spaces, don’t specify dtype for object_id
         df_spectra = pd.read_csv(
             csv_path,
-            dtype={'object_id': str},
-            converters=fields
+            usecols=lambda c: _norm_name(c) in wanted,
+            #converters=conv,
+            encoding="utf-8-sig",
+            skipinitialspace=True,
         )
 
-        # Fill apparent_mag_2500_err == 0 with mean of nonzero errors
-        mean_err = df_spectra.loc[df_spectra['apparent_mag_2500_err'] > 0, 'apparent_mag_2500_err'].mean()
-        df_spectra.loc[df_spectra['apparent_mag_2500_err'] == 0, 'apparent_mag_2500_err'] = mean_err
+        # Normalize headers and ensure key
+        df_spectra.columns = [_norm_name(c) for c in df_spectra.columns]
+        df_spectra = _ensure_object_id(df_spectra)
 
-        print(f"Length of spectral fit file {csv_path}:", len(df_spectra))
-        print("Number with apparent_mag_2500 > 0:", np.sum(df_spectra['apparent_mag_2500'] > 0))
-        # Merge on object_id, keep fields from the latter CSV
-        merged = df.merge(df_spectra, on='object_id', how='left', suffixes=('_old', '_spectralfit'))
+
+        # --- now keep only best fits (after computing delta/log on the full table) ---
+        df_spectra = df_spectra[df_spectra["best"] == True].reset_index(drop=True)
+        print(f"Length after best==True: {len(df_spectra)}")
+        if "apparent_mag_2500" in df_spectra.columns:
+            print("Number with apparent_mag_2500 > 0:", int((df_spectra["apparent_mag_2500"] > 0).sum()))
+
+
+        # Merge (many AGN rows can map to at most one best-fit row)
+        merged = df.merge(df_spectra, on="object_id", how="left", suffixes=("_old", "_spectralfit"), validate="one_to_one")
         print("Length of merged DataFrame:", len(merged))
-        # Only update rows in df that have a match in df_spectra
-        matched_mask = df['object_id'].isin(df_spectra['object_id'])
-        for col in fields.keys():
-            print(f"Populating column: {col}")
-            if col in df.columns:
-                print(f"Warning: Column {col} already exists in df, overwriting with spectralfit data for matched objects")
-                df.loc[matched_mask, col] = merged.loc[matched_mask, f"{col}_spectralfit"].values
-            else:
-                print(f"Adding new column {col} from spectralfit data")
-                df.loc[matched_mask, col] = merged.loc[matched_mask, col].values
 
-    df['log_redchi'] = np.log10(df['redchi'].replace(0, np.nan))
-    # Save DataFrame to CSV with a prefix if desired
-    if isinstance(spectra_fit_csvs, (list, tuple)) and len(spectra_fit_csvs) > 0:
+        # Update/insert columns for matched rows only
+        matched_mask = df["object_id"].isin(df_spectra["object_id"])
+        for col in list(fields.keys()):
+            if col == "object_id":
+                continue
+            src_col = f"{col}_spectralfit" if f"{col}_spectralfit" in merged.columns else col
+            if src_col not in merged.columns:
+                continue
+            if col in df.columns:
+                print(f"Populating column (overwrite): {col}")
+                df.loc[matched_mask, col] = merged.loc[matched_mask, src_col].values
+            else:
+                print(f"Adding new column: {col}")
+                df.loc[matched_mask, col] = merged.loc[matched_mask, src_col].values
+
+    # Derived columns (guarded)
+    if "redchi" in df.columns:
+        df["log_redchi"] = np.log10(df["redchi"].replace(0, np.nan))
+    if "ebv_fs" in df.columns:
+        df["log_ebv_fs"] = np.log10(df["ebv_fs"].replace(0, np.nan))
+    if "euv_fs" in df.columns:
+        df["log_euv_fs"] = np.log10(df["euv_fs"].replace(0, np.nan))
+    if {"apparent_mag_2500_reddened", "apparent_mag_2500"}.issubset(df.columns):
+        df["dm_red"] = df["apparent_mag_2500_reddened"] - df["apparent_mag_2500"]
+    if "reddening_integral" in df.columns:
+        df["log_reddening_integral"] = np.log10(df["reddening_integral"].replace(0, np.nan))
+    if "delta_qso01_redchi2" in df.columns:
+        df["log_delta_qso01_redchi2"] = np.log10(np.abs(df["delta_qso01_redchi2"].replace(0, np.nan)))
+
+    # Optional save
+    if prefix:
         out_csv = f"plots/hubble/{prefix}/merged.csv"
         os.makedirs(os.path.dirname(out_csv), exist_ok=True)
-        # Only write specified columns
-        cols_to_save = ['object_id', 'sdss_name', 'apparent_mag_2500', 'f_host_2500', 'z'] + list(fields.keys())
-        # Remove duplicates while preserving order
-        seen = set()
-        cols_to_save_unique = []
-        for col in cols_to_save:
-            if col not in seen and col in df.columns:
-                cols_to_save_unique.append(col)
-                seen.add(col)
+        cols_to_save = ['object_id', 'sdss_name', 'apparent_mag_2500', 'f_host_2500', 'z'] + [c for c in fields if c != "object_id"]
+        cols_to_save_unique = [c for c in cols_to_save if c in df.columns]
         df[cols_to_save_unique].to_csv(out_csv, index=False)
         print(f"Saved merged DataFrame to {out_csv} with columns: {cols_to_save_unique}")
-    df['log_ebv_fs'] = np.log10(df['ebv_fs'].replace(0, np.nan))
-    df['log_euv_fs'] = np.log10(df['euv_fs'].replace(0, np.nan))
-
-    # logL, logL_err = compute_L2500_from_mag(df['apparent_mag_2500'], df['apparent_mag_2500_err'], df['z'])
-    # df['L2500'] = 10**logL
-    # df['L2500_err'] = df['L2500'] * (np.log(10) * logL_err)
-    # df['logL2500'] = logL
-    # df['logL2500_err'] = logL_err
 
     # df['apparent_mag_2500'] = df['apparent_mag_2500_reddened']
     # df['apparent_mag_2500_err'] = df['apparent_mag_2500_reddened_err']
+
     return df
 
 
@@ -577,6 +685,72 @@ def read_quasars_from_hdf5(file_path, N=None):
                 break
     return quasar_list
 
+def plot_redshift_histogram(df_before, df_after, bins=30, cut_info="", save_path=f"plots/hubble/{prefix}/cuts/"):
+    """
+    Plot a histogram of object counts vs redshift and save the figure.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        DataFrame containing a 'z' column for redshift.
+    bins : int or sequence, optional
+        Number of bins or bin edges for the histogram.
+    save_path : str, optional
+        Path to save the output figure.
+    """
+    import matplotlib.gridspec as gridspec
+    
+    if len(df_before) == len(df_after):
+        return
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+
+    # Prepare data
+    before_ids = set(df_before['object_id'].astype(str))
+    after_ids = set(df_after['object_id'].astype(str))
+    removed_ids = before_ids - after_ids
+    df_removed = df_before[df_before['object_id'].astype(str).isin(removed_ids)]
+
+    hist_before, bin_edges = np.histogram(df_before['z'].dropna(), bins=bins)
+    hist_after, _ = np.histogram(df_after['z'].dropna(), bins=bin_edges)
+    hist_removed, _ = np.histogram(df_removed['z'].dropna(), bins=bin_edges)
+    bin_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
+
+    # Create a figure with two panels side by side
+    fig = plt.figure(figsize=(13, 5))
+    gs = gridspec.GridSpec(1, 2, width_ratios=[1, 1])
+
+    # Panel 1: Histogram of all vs kept
+    ax1 = fig.add_subplot(gs[0])
+    ax1.hist(df_before['z'].dropna(), bins=bin_edges, color='tab:blue', alpha=0.7, edgecolor='k', label='All')
+    ax1.hist(df_after['z'].dropna(), bins=bin_edges, color='tab:orange', alpha=0.7, edgecolor='k', label='Kept')
+    ax1.set_xlabel("Redshift (z)")
+    ax1.set_ylabel("Number of objects")
+    ax1.set_title("Histogram of Objects vs Redshift")
+    ax1.legend()
+
+    # Panel 2: Histogram of removed objects
+    ax2 = fig.add_subplot(gs[1])
+    ax2.hist(df_before['z'].dropna(), bins=bin_edges, color='tab:blue', alpha=0.7, edgecolor='k', label='All')
+    ax2.bar(bin_centers, hist_removed, width=np.diff(bin_edges), color='tab:red', alpha=0.7, edgecolor='k', label='Removed')
+    ax2.set_xlabel("Redshift (z)")
+    ax2.set_ylabel("Number removed")
+    ax2.set_title("Removed Objects by Redshift")
+    ax2.legend()
+
+    # Annotate the cut_info as text on the figure
+    if cut_info:
+        fig.text(0.5, 0.01, f"Cut info: {cut_info}", ha='center', va='bottom', fontsize=12, color='k')
+
+    plt.tight_layout()
+
+    # Build the output file path using cut_info
+    # Make cut_info safe for filenames (replace spaces and special chars)
+    safe_cut_info = re.sub(r'[^A-Za-z0-9._-]+', '_', str(cut_info)) if cut_info else ""
+    filename = f"redshift_histogram_{safe_cut_info}.png" if safe_cut_info else "redshift_histogram.png"
+    plot_path = os.path.join(os.path.dirname(save_path), filename)
+    plt.savefig(plot_path, dpi=150)
+    plt.close()
+
 def populate_chi_sq_from_csv(df, csv_path):
     """
     Populate the 'chi_sq' field in df by matching 'object_id' with the CSV file.
@@ -607,8 +781,9 @@ def populate_chi_sq_from_csv(df, csv_path):
 
 def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=10,
                   exclude_object_ids_csv=[],
-                  residuals_cut=None, residuals_csv=None,
-                  spectra_fit_csv=None, zquery_csv=None, only_load=False):
+                  residuals_sigma_clip=None, residuals_csv=None,
+                  spectra_fit_csv=None, zquery_csv=None, only_load=False,
+                  dm_red_cut=None):
     quasar_list = read_quasars_from_hdf5(file_path)
     print("Number of quasars loaded:", len(quasar_list))
 
@@ -647,10 +822,15 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=10,
 
         # del q['mags_means']
 
-    df = pd.DataFrame(quasar_list)
-    if only_load:
-        return df
+    for q in quasar_list:
+        q['len_dropped_bands'] = len(q['dropped_bands'])
 
+    df = pd.DataFrame(quasar_list)
+
+    df_sample = pd.read_csv("data/aug4_sample_chisqg10_ebv005sn3.csv", dtype={'object_id': str})
+    print("Entire Sample file length:", len(df_sample))
+    # TODO: populate z
+    #plot_redshift_histogram(df_sample.copy(), df.copy(), bins=30, cut_info="Chisq sample vs fitted LCs")
 
     if spectra_fit_csv is not None:
         print("Populating spectra fit data from:", spectra_fit_csv)
@@ -682,7 +862,7 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=10,
             df['zWarning'] = -99
             df['sameZ'] = -99
 
-    #df = populate_xray(df)
+    df = populate_xray(df)
 
     # if 'cov_log_sigma_UV_log_tau_UV_RF' not in df.columns:
     #     print("[WARNING] cov_log_sigma_UV_log_tau_UV_RF not in data")
@@ -693,11 +873,22 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=10,
     print("Number of quasars with 0 < z <= 1.0:", num_quasars_z_0_1_before)
     print("Number of quasars with z > 3:", num_quasars_z_gt_3_before)
     print("Highest redshift quasar:", df['z'].max())
-    # Remove infinite values from numeric columns
-    columns_with_nans = df.columns[df.isna().any()].tolist()
-    print("Columns with NaNs:", columns_with_nans)
-    numeric_cols = df.select_dtypes(include=[np.number]).columns
-    df[numeric_cols] = df[numeric_cols].where(~np.isinf(df[numeric_cols]), np.nan)
+
+    df_all = df.copy()
+
+    if only_load:
+        return df
+
+    # Remove infinite values from numeric columns using a mask
+    # numeric_cols = df.select_dtypes(include=[np.number]).columns
+    # mask_finite = np.isfinite(df[numeric_cols]).all(axis=1)
+    # num_removed = (~mask_finite).sum()
+    # if num_removed > 0:
+    #     print(f"Removing {num_removed} rows with inf/-inf in numeric columns")
+    # df = df[mask_finite].reset_index(drop=True)
+
+    # plot_redshift_histogram(df_all, df_all[mask_finite], bins=30, cut_info="remove_inf")
+
 
     log_tau_band_RF = np.array([df[f'log_tau_band_{b}_RF'] for b in ['u', 'g', 'r', 'i', 'z']])
     # Mask values <= 0
@@ -733,11 +924,16 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=10,
                (df['apparent_mag_i'] >= 1) & (df['apparent_mag_i'] < 50)
     num_removed = np.sum(~mag_mask)
     print(f"Cut on apparent_mag_2500 and apparent_mag_i: {num_removed} objects removed")
+    plot_redshift_histogram(df.copy(), df[mag_mask], bins=30, cut_info="1 < apparent_mag_2500 < 50 and 1 < apparent_mag_i < 50")
+
     df = df[mag_mask].reset_index(drop=True)
+
 
     mask_valid = (df['log_tau_UV_RF'] > 2*df['log_sigma_UV'] + 2.5)
     num_removed = np.sum(~mask_valid)
     print(f"Cut on tau vs sigma diagram: {num_removed} objects removed")
+    plot_redshift_histogram(df.copy(), df[mask_valid], bins=30, cut_info="tau > 2*sigma + 2.5")
+
     df = df[mask_valid].reset_index(drop=True)
     # mask_in  = df_agn["z"].between(0.44, 3.16)
 
@@ -749,35 +945,33 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=10,
             mask_exclude = ~df['object_id'].astype(str).isin(exclude_ids)
             num_excluded = np.sum(~mask_exclude)
             print(f"Excluding {num_excluded} objects from DataFrame based on {exclude_csv}")
+            plot_redshift_histogram(df.copy(), df[mask_exclude], bins=30, cut_info="exclude csv")
             df = df[mask_exclude].reset_index(drop=True)
         else:
             print(f"[WARNING] Exclusion CSV not found: {exclude_csv}")
 
-    if residuals_cut is not None and residuals_csv is not None:
-        if os.path.exists(residuals_csv):
-            residual_df = pd.read_csv(residuals_csv)
-            if 'residuals' not in residual_df.columns:
-                raise ValueError(f"'residuals' column not found in {residuals_csv}")
-            residuals = dict(zip(residual_df['object_id'].astype(str), residual_df['residuals']))
-            df['residuals'] = df['object_id'].astype(str).map(residuals)
-            mask_residual = df['residuals'].abs() < residuals_cut
-            num_removed = np.sum(~mask_residual)
-            print(f"Cut on residual < {residuals_cut}: {num_removed} objects removed")
-            df = df.drop(columns=['residuals'])
-            df = df[mask_residual].reset_index(drop=True)
-        else:
-            print(f"[WARNING] Residual CSV not found: {residuals_csv}")
-            raise ValueError(f"Residual CSV not found: {residuals_csv}")
 
+    # Remove objects with len_dropped_bands == 4 or 5
+    mask_dropped = ~df['len_dropped_bands'].isin([4, 5])
+    num_removed_dropped = np.sum(~mask_dropped)
+    print(f"Removed {num_removed_dropped} objects with len_dropped_bands == 4 or 5")
+    plot_redshift_histogram(df.copy(), df[mask_dropped], bins=30, cut_info="dropped bands 4 or 5")
+
+    df = df[mask_dropped].reset_index(drop=True)
 
     # Define cuts as (column, lower_limit, upper_limit)
     cuts = [
-        #('z', 0.44, 3.16),
-        ('f_host_2500', 0.0, fhost_cut),
+        #('z', 1, None),
+        #('log_lbol', 45, None),
+        ('dm_red', None, dm_red_cut),
+        ('f_host_2500', -2, fhost_cut),
         ('log_tau_UV_RF', 1.5, None),
-        #('redchi', None, 5),
+        ('redchi', None, 5),
+        ('redchi2_conti_full', None, 5),
         ('apparent_mag_2500', 12, 40),
         ('apparent_mag_i', 12, 40),
+        ('t_rf_length', 1700, None),
+        ('apparent_mag_2500_err', 0, 1),
         #('z', None, 0.5),
         #('alpha_lambda', None, 0),
         # ('sameZ', 0.9, 1.1),
@@ -794,20 +988,66 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=10,
                 col_mask &= df[col] < upper
             cut_count = np.sum(~col_mask)
             print(f"Cut on {col}: {cut_count} objects removed")
+            plot_redshift_histogram(df.copy(), df[col_mask], bins=30, cut_info=f"{lower}<{col}<{upper}")
             mask &= col_mask
-        
-        remove_nans_columns = ['alpha_lambda', 'alpha_lambda_err']
-        for col in remove_nans_columns:
-            nan_mask = ~df[col].isna()
-            num_nans = (~nan_mask).sum()
-            print(f"Removing {num_nans} objects with NaN in column '{col}'")
-            mask &= nan_mask
-
         df = df[mask]
+
         print(f"Total objects removed by all cuts: {initial_count - len(df)}")
+    remove_nans_columns = ['alpha_lambda', 'alpha_lambda_err']
+    for col in remove_nans_columns:
+        nan_mask = ~df[col].isna()
+        num_nans = (~nan_mask).sum()
+        print(f"Removing {num_nans} objects with NaN in column '{col}'")
+        df = df[nan_mask]
+        plot_redshift_histogram(df.copy(), df[mask], bins=30, cut_info=f"{col} not NaN")
 
     df = df.reset_index(drop=True)
-    
+
+    if residuals_sigma_clip is not None and residuals_csv is not None:
+        if os.path.exists(residuals_csv):
+            residual_df = pd.read_csv(residuals_csv)
+            if 'residuals' not in residual_df.columns:
+                raise ValueError(f"'residuals' column not found in {residuals_csv}")
+            mu_zscore = dict(zip(residual_df['object_id'].astype(str), residual_df['mu_zscore']))
+            df['mu_zscore'] = df['object_id'].astype(str).map(mu_zscore)
+            mask_residual = df['mu_zscore'].abs() < residuals_sigma_clip
+            num_removed = np.sum(~mask_residual)
+            print(f"Cut on sigma clip with mu_score < {residuals_sigma_clip}: {num_removed} objects removed")
+            df = df.drop(columns=['mu_zscore'])
+            plot_redshift_histogram(df.copy(), df[mask_residual], bins=30, cut_info=f"|mu_zscore|<{residuals_sigma_clip}")
+
+            df = df[mask_residual].reset_index(drop=True)
+        else:
+            print(f"[WARNING] Residual CSV not found: {residuals_csv}")
+            raise ValueError(f"Residual CSV not found: {residuals_csv}")
+
+    # Drop rows where apparent_mag_2500_err is exactly zero or not finite
+    num_before = len(df)
+    mask = (df['apparent_mag_2500_err'] > 0) & np.isfinite(df['apparent_mag_2500_err'])
+    plot_redshift_histogram(df.copy(), df[mask], bins=30, cut_info=f"0<apparent_mag_2500_err<inf")
+
+    df = df[mask].reset_index(drop=True)
+    num_after = len(df)
+    print(f"Dropped {num_before - num_after} objects with apparent_mag_2500_err <= 0 or not finite")
+
+    cosmo = FlatLambdaCDM(H0=70, Om0=0.3)
+    y_log_meas_err = 0.4 * np.asarray(df['apparent_mag_2500_err'].fillna(1e9))
+    actual_M2500 = df['apparent_mag_2500'] - cosmo.distmod(df['z']).value
+    actual_logL2500 = convert_M2500_to_logL2500(actual_M2500)
+    yerr_linear = 10**actual_logL2500 * np.log(10) * y_log_meas_err
+    mask = yerr_linear/(10**actual_logL2500) < 0.5
+    plot_redshift_histogram(df.copy(), df[mask], bins=30, cut_info=f"frac_err_logL2500<1")
+
+    num_removed = np.sum(~mask)
+    print(f"\033[93mRemoved {num_removed} objects with fractional logL2500 error >= 1\033[0m")
+    df = df[mask]
+
+    mask = df['log_L2500_fs_err'] < 1
+    num_removed = np.sum(~mask)
+    print(f"\033[93mRemoved {num_removed} objects with log_L2500_fs_err error >= 1\033[0m")
+    df = df[mask]
+
+
     num_quasars_z_0_1 = len(df[(df['z'] > 0) & (df['z'] <= 1.0)])
     num_quasars_z_gt_3 = len(df[df['z'] > 3])
     print("Number of quasars with 0 < z <= 1.0:", num_quasars_z_0_1)
@@ -815,8 +1055,11 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=10,
     print("Number of quasars with z > 3:", num_quasars_z_gt_3)
     print("Final number of quasars:", len(df))
 
+    plot_redshift_histogram(df_all.copy(), df.copy(), bins=30, cut_info=f"all cuts")
 
-    return df
+
+
+    return df, df_all
 
 def load_pantheon_data():
     """
@@ -2311,3 +2554,13 @@ def reduced_chi_squared(residuals,
     chi2_red = chi2 / dof
 
     return chi2_red, {'chi2': chi2, 'dof': dof, 'N_eff': N, 'n_params': int(n_params)}
+
+def cosmo_model_label_latex(cosmo_model):
+    if   cosmo_model == 'FlatwCDM':      label = r"flat $w$CDM model"
+    elif cosmo_model == 'Flatw0waCDM':   label = r"flat $w_0w_a$CDM model"
+    elif cosmo_model == 'FlatLambdaCDM': label = r"flat $\Lambda$CDM model"
+    elif cosmo_model == 'FlatwpwaCDM':   label = r"flat $w_p\!-\!w_a$CDM model"
+    else:
+        raise ValueError("Invalid cosmology model.")
+    
+    return label

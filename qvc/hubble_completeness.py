@@ -7,6 +7,8 @@ from scipy.interpolate import RegularGridInterpolator
 from scipy.ndimage import gaussian_filter1d, gaussian_filter
 from scipy.interpolate import interp1d
 
+prefix = os.environ.get("PREFIX", "")
+
 class SimpleCompleteness2D:
     """
     Simple analytic completeness: sigmoid dropoff in apparent magnitude.
@@ -43,7 +45,7 @@ def get_completeness_function_2d_simple(*args, mag_lim=24.0, width=0.2, plot=Fal
 
     if plot:
         completeness_vals = completeness2d(mag_centers)
-        os.makedirs("plots/completeness", exist_ok=True)
+        os.makedirs(f"plots/hubble/{prefix}/completeness", exist_ok=True)
 
         plt.figure(figsize=(8, 5))
         plt.plot(mag_centers, completeness_vals, label="Completeness")
@@ -55,7 +57,7 @@ def get_completeness_function_2d_simple(*args, mag_lim=24.0, width=0.2, plot=Fal
         plt.grid(True)
         plt.legend()
         plt.tight_layout()
-        plt.savefig("plots/completeness/simple_completeness_function.png", dpi=200)
+        plt.savefig(f"plots/hubble/{prefix}/completeness/simple_completeness_function.png", dpi=200)
         plt.close()
 
     return completeness2d, mag_centers, z_centers, dm, dz
@@ -186,7 +188,7 @@ def get_completeness_function_2d(
     # --- Slice plots
     if plot:
         import matplotlib.pyplot as plt
-        os.makedirs("plots/completeness", exist_ok=True)
+        os.makedirs(f"plots/hubble/{prefix}/completeness", exist_ok=True)
 
         # 1) y vs mag_i at fixed alpha = alpha0
         x_grid = np.linspace(mag_i.min(), mag_i.max(), 400)
@@ -203,7 +205,7 @@ def get_completeness_function_2d(
         plt.xlabel('apparent_mag_i (total AGN, host-subtracted, rest)')
         plt.ylabel('apparent_mag_2500 (continuum-only, rest)')
         plt.grid(True, alpha=0.4); plt.legend(); plt.tight_layout()
-        plt.savefig("plots/completeness/mag2500_vs_magi_fixed_alpha.png", dpi=200)
+        plt.savefig(f"plots/hubble/{prefix}/completeness/mag2500_vs_magi_fixed_alpha.png", dpi=200)
         plt.close()
 
         # # 2) y vs alpha at fixed mag_i = mag_i0
@@ -217,12 +219,12 @@ def get_completeness_function_2d(
         # plt.xlabel('alpha_lambda (continuum slope)')
         # plt.ylabel('apparent_mag_2500 (continuum-only, rest)')
         # plt.grid(True, alpha=0.4); plt.legend(); plt.tight_layout()
-        # plt.savefig("plots/completeness/mag2500_vs_alpha_fixed_magi.png", dpi=200)
+        # plt.savefig(f"plots/hubble/{prefix}/completeness/mag2500_vs_alpha_fixed_magi.png", dpi=200)
         # plt.close()
 
-        os.makedirs("plots/completeness", exist_ok=True)
+        os.makedirs(f"plots/hubble/{prefix}/completeness", exist_ok=True)
         plt.figure(figsize=(7, 6))
-        plt.scatter(y, y_fit, s=16, alpha=0.7, label="Data")
+        plt.scatter(y, y_fit, s=4, alpha=0.4, label="Data")
         plt.plot([y.min(), y.max()], [y.min(), y.max()], 'r--', label="y = y_fit")
         plt.xlabel("Observed mag_2500")
         plt.ylabel("Predicted mag_2500 (y_fit)")
@@ -230,7 +232,7 @@ def get_completeness_function_2d(
         plt.grid(True, alpha=0.4)
         plt.legend()
         plt.tight_layout()
-        plt.savefig("plots/completeness/y_vs_yfit.png", dpi=200)
+        plt.savefig(f"plots/hubble/{prefix}/completeness/y_vs_yfit.png", dpi=200)
         plt.close()
 
         plt.figure(figsize=(8, 5))
@@ -240,7 +242,7 @@ def get_completeness_function_2d(
         plt.title("Observed apparent_mag_2500 vs Redshift")
         plt.grid(True, alpha=0.4)
         plt.tight_layout()
-        plt.savefig("plots/completeness/mag2500_vs_z.png", dpi=200)
+        plt.savefig(f"plots/hubble/{prefix}/completeness/mag2500_vs_z.png", dpi=200)
         plt.close()
 
     # --- Predict "true" mag_2500 for the sim (alpha fixed to alpha0 unless you have it per-object)
@@ -254,7 +256,7 @@ def get_completeness_function_2d(
     mags_true = calculated_mags_true_2500
 
     import matplotlib.pyplot as plt
-    os.makedirs("plots/completeness", exist_ok=True)
+    os.makedirs(f"plots/hubble/{prefix}/completeness", exist_ok=True)
     plt.figure(figsize=(8, 5))
     plt.scatter(z_true, calculated_mags_true_2500, s=10, alpha=0.6)
     plt.xlabel("Redshift (z)")
@@ -262,7 +264,7 @@ def get_completeness_function_2d(
     plt.title("Simulated mag_2500 vs Redshift")
     plt.grid(True, alpha=0.4)
     plt.tight_layout()
-    plt.savefig("plots/completeness/mag2500true_vs_z_true.png", dpi=200)
+    plt.savefig(f"plots/hubble/{prefix}/completeness/mag2500true_vs_z_true.png", dpi=200)
     plt.close()
 
     # --- Observed mags (same mask as fit)
@@ -324,8 +326,9 @@ def get_completeness_function_2d(
         #plt.title("Completeness p(detect | m, z)")
         cbar = plt.colorbar(im); cbar.set_label("Completeness $p(I{=}1|m, z)$")
         plt.tight_layout()
-        plt.savefig("plots/completeness/completeness_map.png", dpi=200)
-        plt.savefig("plots/completeness/completeness_map.pdf", dpi=600)
+        os.makedirs(f"plots/hubble/{prefix}/completeness", exist_ok=True)
+        plt.savefig(f"plots/hubble/{prefix}/completeness/completeness_map.png", dpi=200)
+        plt.savefig(f"plots/hubble/{prefix}/completeness/completeness_map.pdf", dpi=600)
         plt.close()
 
         for name, Hs in [("H_true_s", H_true_s), ("H_obs_s", H_obs_s)]:
@@ -339,7 +342,7 @@ def get_completeness_function_2d(
             plt.title(name + " (log10 counts)")
             cbar = plt.colorbar(im); cbar.set_label("log10 counts")
             plt.tight_layout()
-            plt.savefig(f"plots/completeness/{name}.png", dpi=200)
+            plt.savefig(f"plots/hubble/{prefix}/completeness/{name}.png", dpi=200)
             plt.close()
 
     # bin widths (uniform by construction)
@@ -347,8 +350,10 @@ def get_completeness_function_2d(
     dz = float(z_centers[1] - z_centers[0])     if len(z_centers)   > 1 else float(z_edges[-1] - z_edges[0])
 
     # Completeness2D must be defined elsewhere
-    return Completeness2D(mag_centers, z_centers, C), mag_centers, z_centers, dm, dz, 0.0
+    #return y, y_fit
 
+    return Completeness2D(mag_centers, z_centers, C), mag_centers, z_centers, dm, dz, 0.0
+    
 import numpy as np
 from scipy.interpolate import RegularGridInterpolator
 

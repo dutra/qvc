@@ -3,8 +3,9 @@ from scipy.special import expit
 from collections import OrderedDict
 
 # --- ONE SOURCE OF TRUTH (orders) ---
-agn_model_req_params = ("M0_agn", "alpha_agn", "beta_agn")
-agn_model_req_obs     = ("log_sigma_UV", "log_tau_UV_RF")
+agn_model_req_params = ("M0_agn", "alpha_agn", "beta_agn", "gamma_agn",
+                        )
+agn_model_req_obs     = ("log_sigma_UV", "log_tau_UV_RF", "conti_a_0",)
 agn_model_req_errs   = (
                         #"log_sigma_UV_err", "log_tau_UV_RF_err", "cov_log_sigma_UV_log_tau_UV_RF",
                         "log_sigma_UV_std_psd", "log_tau_UV_RF_std_psd", "log_sigma_UV_log_tau_UV_RF_cov_psd"
@@ -34,24 +35,30 @@ def agn_model_pack_obs(obs_dict):
     pivots = np.array([np.mean(obs_dict[k]) for k in agn_model_req_obs], dtype=float)
     return obs, err, pivots
 
-# Linear model
-def M_model_agn(params_arr, obs_arr, pivots_array):
-    M0_agn      = params_arr[agn_model_pidx["M0_agn"]]
-    alpha_agn   = params_arr[agn_model_pidx["alpha_agn"]]
-    beta_agn    = params_arr[agn_model_pidx["beta_agn"]]
 
-    log_sigma_UV   = obs_arr[agn_model_oidx["log_sigma_UV"]]
-    log_tau_UV_RF  = obs_arr[agn_model_oidx["log_tau_UV_RF"]]
+
+def M_model_agn(params_arr, obs_arr, pivots_array):
+    M0_agn    = params_arr[agn_model_pidx["M0_agn"]]
+    alpha_agn = params_arr[agn_model_pidx["alpha_agn"]]
+    beta_agn  = params_arr[agn_model_pidx["beta_agn"]]
+
+    log_sigma_UV  = obs_arr[agn_model_oidx["log_sigma_UV"]]
+    log_tau_UV_RF = obs_arr[agn_model_oidx["log_tau_UV_RF"]]
 
     log_sigma_UV_pivot  = pivots_array[agn_model_oidx["log_sigma_UV"]]
     log_tau_UV_RF_pivot = pivots_array[agn_model_oidx["log_tau_UV_RF"]]
+
+    # --- new ebv correction params ---
+    gamma_agn = params_arr[agn_model_pidx["gamma_agn"]]
+    conti_a_0 = obs_arr[agn_model_oidx["conti_a_0"]]
+    conti_a_0_pivot = pivots_array[agn_model_oidx["conti_a_0"]]
 
     return (
         M0_agn
         + alpha_agn * (log_sigma_UV - log_sigma_UV_pivot)
         + beta_agn  * (log_tau_UV_RF - log_tau_UV_RF_pivot)
+        + gamma_agn * (conti_a_0 - conti_a_0_pivot)
     )
-
 
 def M_model_agn_err(params_arr, obs_arr, err_arr, pivots_array, check_negative=False):
     alpha_agn   = params_arr[agn_model_pidx["alpha_agn"]]
@@ -76,6 +83,46 @@ def M_model_agn_err(params_arr, obs_arr, err_arr, pivots_array, check_negative=F
         return np.sqrt(r), None
     else:
         return np.sqrt(r)
+
+# def _sigmoid(x, A, k, x0):
+#     return A / (1.0 + np.exp(-k * (x - x0)))
+
+# def _anchored_sigmoid(x, A, k, x0, x_piv):
+#     # anchored so effect is exactly zero at x_piv
+#     s  = 1.0 / (1.0 + np.exp(-k * (x      - x0)))
+#     sp = 1.0 / (1.0 + np.exp(-k * (x_piv  - x0)))
+#     return A * (s - sp)
+
+# def M_model_agn(params_arr, obs_arr, pivots_array):
+#     M0_agn    = params_arr[agn_model_pidx["M0_agn"]]
+#     alpha_agn = params_arr[agn_model_pidx["alpha_agn"]]
+#     beta_agn  = params_arr[agn_model_pidx["beta_agn"]]
+
+#     # --- new reddening correction params ---
+#     A_red  = params_arr[agn_model_pidx["A_red"]]   # expect negative (e.g. ~ -2)
+#     k_red  = params_arr[agn_model_pidx["k_red"]]   # >0 (e.g. ~ 1–3 per dex)
+#     x0_red = params_arr[agn_model_pidx["x0_red"]]  # bend near where trend starts
+
+#     log_sigma_UV  = obs_arr[agn_model_oidx["log_sigma_UV"]]
+#     log_tau_UV_RF = obs_arr[agn_model_oidx["log_tau_UV_RF"]]
+#     x_red         = obs_arr[agn_model_oidx["log_reddening_integral"]]  # NEW
+
+#     log_sigma_UV_pivot  = pivots_array[agn_model_oidx["log_sigma_UV"]]
+#     log_tau_UV_RF_pivot = pivots_array[agn_model_oidx["log_tau_UV_RF"]]
+#     x_red_pivot         = pivots_array[agn_model_oidx["log_reddening_integral"]]  # NEW
+
+#     # anchored sigmoid term (zero at small-reddening pivot)
+#     red_term = _anchored_sigmoid(x_red, A_red, np.abs(k_red) + 1e-6, x0_red, x_red_pivot)
+
+#     return (
+#         M0_agn
+#         + alpha_agn * (log_sigma_UV - log_sigma_UV_pivot)
+#         + beta_agn  * (log_tau_UV_RF - log_tau_UV_RF_pivot)
+#         + red_term
+#     )
+
+
+
 
 # def broken_power_law_err(x, x_err, x_break, d1, d2, ds):
 #     u = ds * (x - x_break)
@@ -114,14 +161,19 @@ def get_model_params(cosmo_model, only_sna=False):
     priors = OrderedDict([
         ("M0_sn",       (-20, -18)),    # SN absolute magnitude, MLE: ~-19.3
 
-        ("M0_agn",   (-23.0, -18.0)),
+        ("M0_agn",   (-26.0, -18.0)),
         ("alpha_agn", (0.0,  20.0)),
         ("beta_agn",  (-20.0,  0.0)),
+        
+        ("gamma_agn", (-50.0, 50.0)),
+        # ("A_red",    (-5.0,  0.0)),   # expect negative (e.g. ~ -2)
+        # ("k_red",    (0.1,  5.0)),    # >0 (e.g. ~ 1–3 per dex)
+        # ("x0_red",   (-5.0,  5.0)),    # bend near where trend starts
 
         ("log_f",     (-5.0,  3.0)),
 
         ("H0",       (60.0, 80.0)),
-        ("Om0",      (0.2, 0.8)),
+        ("Om0",      (0.0, 1.0)),
     ])
 
     # Select cosmological parameters based on model
@@ -155,6 +207,7 @@ def get_model_params(cosmo_model, only_sna=False):
         "M0_agn": r"$M^0_{\rm AGN}$",
         "alpha_agn": r"$\alpha_{\rm AGN}$",
         "beta_agn": r"$\beta_{\rm AGN}$",
+        "gamma_agn": r"$\gamma_{\rm AGN}$",
         "log_f": r"$\log f$",
         "H0": r"$H_0$",
         "Om0": r"$\Omega_{m,0}$",

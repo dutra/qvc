@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Iterable, List, Set, Tuple
 import numpy as np
 import pandas as pd
+from tqdm import tqdm
 
 try:
     from PyPDF2 import PdfMerger, PdfReader, PdfWriter
@@ -55,8 +56,11 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Concatenate and annotate PDFs for high-residual rows.")
     p.add_argument("csv", type=Path, help="Input CSV path.")
     p.add_argument("output", type=Path, help="Output concatenated PDF path.")
-    p.add_argument("--threshold", type=float, default=4.0,
-                   help="Filter rows with residuals > THRESHOLD (default: 4.0).")
+    p.add_argument("--low", type=float, default=0.0, 
+                     help="Minimum absolute value of the key column to include (default: 0.0).")
+    p.add_argument("--high", type=float, default=np.inf,
+                     help="Maximum absolute value of the key column to include (default: no upper limit).")
+    #p.add_argument("--threshold", type=float, default=3.0,
     p.add_argument("--plots-root", type=Path, default=Path("plots/pyqsofit"),
                    help="Root folder where npca_qso_* folders live (default: plots/pyqsofit).")
     p.add_argument("--recursive", action="store_true",
@@ -73,10 +77,12 @@ def parse_args() -> argparse.Namespace:
                    help="Font size for the stamp text. Default: 9.")
     p.add_argument("--key", type=str, default="residuals",
                    help="Column name to use for filtering and sorting (default: residuals).")
+    p.add_argument("--N", type=int, default=None,
+                   help="Only process the first N matched PDFs (default: all).")
     return p.parse_args()
 
 
-def load_and_filter(csv_path: Path, threshold: float, sort_by: str, key: str) -> pd.DataFrame:
+def load_and_filter(csv_path: Path, low: float, high: float, sort_by: str, key: str) -> pd.DataFrame:
     df = pd.read_csv(csv_path)
     if "z" not in df.columns and "Z_SYS" in df.columns:
         df["z"] = df["Z_SYS"]
@@ -86,8 +92,8 @@ def load_and_filter(csv_path: Path, threshold: float, sort_by: str, key: str) ->
         raise ValueError(f"CSV is missing required columns: {sorted(missing)}")
 
     mask = np.ones(len(df), dtype=bool)
-    #mask = np.abs(df[key]) > threshold
-    #mask = df[key].between(0.5, 1.0)
+    mask = (low <= np.abs(df[key])) & (np.abs(df[key]) < high)
+    #mask = df[key].between(0, 1)
     #mask = df['sdss_name'] == '230022.05+004300.2'
     df_f = df.loc[mask].copy()
 
@@ -139,10 +145,11 @@ def iter_pdf_matches(row: pd.Series, plots_root: Path, recursive: bool) -> Itera
             yield p
 
 
-def dedup_preserve_order(records: Iterable[Tuple[Path, float, int, float, str]]) -> List[Tuple[Path, float, int, float, str]]:
+def dedup_preserve_order(records: Iterable[Tuple[Path, float, int, float, str, str, float, float]]) -> \
+    List[Tuple[Path, float, int, float, str, str, float]]:
     """Deduplicate by path; preserve first occurrence’s metadata."""
     seen: Set[Path] = set()
-    out: List[Tuple[Path, float, int, float, str]] = []
+    out: List[Tuple[Path, float, int, float, str, str, float]] = []
     for rec in records:
         p = rec[0]
         if p not in seen:
@@ -191,7 +198,7 @@ def _make_overlay(page_width: float,
         y = margin_pts
 
     # Draw a subtle white "knockout" box behind text for legibility
-    pad = 3
+    pad = 1
     c.setFillGray(1.0)
     c.rect(x - pad, y - pad, text_width + 2 * pad, font_size + 2 * pad, fill=1, stroke=0)
 
@@ -249,13 +256,13 @@ def main() -> int:
     args = parse_args()
 
     try:
-        df = load_and_filter(args.csv, args.threshold, args.sort_by, args.key)
+        df = load_and_filter(args.csv, args.low, args.high, args.sort_by, args.key)
     except Exception as e:
         print(f"ERROR reading/filtering CSV: {e}", file=sys.stderr)
         return 2
 
     if df.empty:
-        print(f"No rows with residuals > {args.threshold}. Nothing to do.")
+        print(f"No rows. Nothing to do.")
         return 0
 
     # Collect (path, residual, npca_qso, z, sdss_name, redchi) tuples in chosen row order.
@@ -269,20 +276,26 @@ def main() -> int:
         sdss_name = str(rec["sdss_name"])
         key = float(rec[args.key])
         redchi = float(rec["redchi"])
-        print(f"Row: sdss_name={sdss_name}  npca_qso={npca}  z={z:.3f}  {args.key}={key:.3f}  redchi={redchi:.2f}")
+        object_id = str(rec.get("object_id", "?"))
+        loglbol = float(rec.get("loglbol", np.nan))
+        m_2500_err = float(rec.get("apparent_mag_2500_err", np.nan))
+        f_host_2500 = float(rec.get("f_host_2500", np.nan))
+        print(f"Row: sdss_name={sdss_name}  npca_qso={npca}  z={z:.3f}  {args.key}={key:.3f}  redchi={redchi:.2f} object_id:{object_id}")
         hits = list(iter_pdf_matches(rec, args.plots_root, args.recursive))
         if not hits:
             missing_rows += 1
         for p in hits:
-            collected.append((p, residual, npca, z, sdss_name, redchi))
+            collected.append((p, residual, npca, z, sdss_name, redchi, object_id, loglbol, m_2500_err, f_host_2500))
 
     merged_list = dedup_preserve_order(collected)
+    if args.N is not None:
+        merged_list = merged_list[:args.N]
 
     # Report
     print(f"Filtered rows: {len(df)}  |  Rows with no matches: {missing_rows}")
     print(f"Unique PDFs matched: {len(merged_list)}")
-    for p, r, n, z, s, redchi in merged_list:
-        print(f"  + {p}  |  residual={r:.3f}  npca_qso={n}  z={z:.2f}  SDSS={s} redchi={redchi}")
+    for p, r, n, z, s, redchi, object_id, loglbol, m_2500_err, f_host_2500 in merged_list:
+        print(f"  + residual={r:.2f}  | npca_qso={n}  z={z:.2f}  SDSS={s} redchi={redchi:.3f} object_id:{object_id} loglbol={loglbol}")
 
     if args.dry_run:
         print("\nDry-run: not writing output.")
@@ -298,14 +311,14 @@ def main() -> int:
     # Stamp each matched PDF, then append stamped bytes to merger
     try:
         merger = PdfMerger()
-        for pdf_path, residual, npca, z, sdss, redchi in merged_list:
-            stamp_text = f"residual={residual:.3f}  |  npca_qso={npca} | redchi={redchi:.2f} |  z={z:.2f}  |  SDSS={sdss}"
+        for pdf_path, residual, npca, z, sdss, redchi, object_id, loglbol, m2500_err, f_host_2500 in tqdm(merged_list, desc="Stamping PDFs"):
+            stamp_text = f"residual={residual:.1f}  |  npca_qso={npca} | redchi={redchi:.1f} |  z={z:.1f}  |  SDSS={sdss} | object_id:{object_id} | loglbol={loglbol:.1f} | m2500_err={m2500_err:.1f} |f_host_2500={f_host_2500:.1f}"
             stamped = _stamp_pdf_bytes(
-                pdf_path,
-                stamp_text=stamp_text,
-                pos=args.stamp_pos,
-                margin_mm=args.stamp_margin_mm,
-                font_size=args.stamp_font_size,
+            pdf_path,
+            stamp_text=stamp_text,
+            pos=args.stamp_pos,
+            margin_mm=args.stamp_margin_mm,
+            font_size=args.stamp_font_size,
             )
             merger.append(stamped)  # fileobj (BytesIO) is accepted
         with open(args.output, "wb") as f:

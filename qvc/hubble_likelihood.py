@@ -174,6 +174,7 @@ def log_likelihood(theta, *, agn_data, pantheon_data,
     mask_in = (0.44 < z) & (z < 3.16)
     #mask_in = z < 100
     ll_agn_terms[~mask_in] = 0.0  # zero out the contribution
+    
     ll_agn = np.sum(ll_agn_terms)
 
     m_model = M_pred + mu_cosmo  # model-predicted magnitude
