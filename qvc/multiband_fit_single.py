@@ -90,7 +90,7 @@ has_lag = True
 def make_lc(
     ModelClass,
     data,
-    bands=None,
+    bands,
     inject_fake=False,
     alpha_sigma=-0.5,
     beta_tau=0.2,
@@ -104,18 +104,6 @@ def make_lc(
       optionally log_tau_fake/log_sigma_fake/alpha_sigma/beta_tau.
     """
     # If bands not specified, infer from present keys and keep SDSS order if possible
-    if bands is None:
-        present = [b for b in ["u", "g", "r", "i", "z", "y"] if b in data["times"]]
-        if not present:
-            present = sorted(list(data["times"].keys()))
-        bands = present
-    else:
-        # keep only bands that exist in this object
-        bands = [b for b in bands if b in data["times"]]
-
-    times = data["times"]
-    mags = data["mags"]
-    magerrs = data["magerrs"]
 
     if disable_band_drop:
         dropped_bands = []
@@ -125,6 +113,12 @@ def make_lc(
     logging.info(
         f"Excluding blue bands {dropped_bands} for object {data['object_id']} at z={data['z']}"
     )
+
+    bands = [b for b in bands if b not in dropped_bands]
+
+    times = data["times"]
+    mags = data["mags"]
+    magerrs = data["magerrs"]
 
     if len(bands) == 0:
         print(f"No usable bands for {data['object_id']}, skipping.", flush=True)
@@ -262,8 +256,6 @@ def make_lc(
         mags_stds[i] = sd
         if np.any(m):
             all_mags[m] = all_mags[m] - mu
-        if bands[i] in dropped_bands and np.any(m):
-            all_magerrs[m] = 999.0
 
     # Build arrays
     X = (jnp.array(all_times) - jnp.min(all_times), jnp.array(band_idx))
@@ -306,18 +298,13 @@ def build_single_object_model(
     *,
     bwb=True,
     disable_poly1=False,
-    d_eta=True,
     disable_lag_blr=False,
     free_eta_break=False,
-    couple_sigma_tau=False,
     sigma_tau_uniform=False,
-    inject_fake=False,
     broken_pl=False,
     sigma_tau_plane_cut=True,
-    log_sigma_eta_tau_sigma=0.2,
     lmc_q_groups=None,
-    sample_lmc_hypers=False,
-    eta_tau_normal=False,
+    yupriors=False,
 ):
     """
     Returns a NumPyro model function for ONE object with B bands.
@@ -334,15 +321,21 @@ def build_single_object_model(
 
     def model():
         # ---- Global-ish means (these can be kept per-object to retain your prior structure)
-        eta_A1 = numpyro.sample("eta_A1", dist.Normal(-0.5, 1.0))
-        eta_tau1 = numpyro.sample("eta_tau1", dist.Normal(0.5, 0.5))
 
-        if broken_pl:
-            eta_A2 = numpyro.sample("eta_A2", dist.Normal(0.0, 1.0))
-            eta_tau2 = numpyro.sample("eta_tau2", dist.Normal(0.0, 1.0))
+        if yupriors:
+            eta_A1 = numpyro.sample("eta_A1", dist.Normal(-0.746, 0.030))
+            eta_A2 = numpyro.sample("eta_A2", dist.Normal(-0.746, 0.030))
+            eta_tau1 = numpyro.sample("eta_tau1", dist.Normal(0.388, 0.083))
+            eta_tau2 = numpyro.sample("eta_tau2", dist.Normal(0.388, 0.083))
         else:
-            eta_A2 = numpyro.deterministic("eta_A2", 0.0)
-            eta_tau2 = numpyro.deterministic("eta_tau2", 0.0)
+            eta_A1 = numpyro.sample("eta_A1", dist.Normal(-0.5, 1.0))
+            eta_tau1 = numpyro.sample("eta_tau1", dist.Normal(0.5, 0.5))
+            if broken_pl:
+                eta_A2 = numpyro.sample("eta_A2", dist.Normal(-0.5, 1.0))
+                eta_tau2 = numpyro.sample("eta_tau2", dist.Normal(0.5, 0.5))
+            else:
+                eta_A2 = numpyro.deterministic("eta_A2", 0.0)
+                eta_tau2 = numpyro.deterministic("eta_tau2", 0.0)
 
         if free_eta_break:
             s = 0.4
@@ -389,15 +382,20 @@ def build_single_object_model(
 
         # BWB scalings
         if bwb:
-            bwb_alpha = numpyro.sample("bwb_alpha", dist.TruncatedNormal(0.1, 0.3, low=0.0, high=1.0))
-            bwb_beta = numpyro.sample("bwb_beta", dist.TruncatedNormal(0.8, 0.3, low=0.0))
+            bwb_beta = numpyro.sample("bwb_beta", dist.TruncatedNormal(50, 10, low=0.0))
         else:
-            bwb_alpha = numpyro.deterministic("bwb_alpha", 0.0)
             bwb_beta = numpyro.deterministic("bwb_beta", 1.0)
 
         # Per-band plate
         with numpyro.plate("band", B):
             mean = numpyro.sample("mean", dist.Normal(jnp.zeros(B), 0.2))
+
+            # per band bwb scaling
+            if bwb:
+                bwb_alpha = numpyro.sample("bwb_alpha", dist.Uniform(0.0, 1.0))
+            else:
+                bwb_alpha = numpyro.deterministic("bwb_alpha", 1.0)
+
 
             if disable_lag_blr:
                 log_amp_delta_blr = numpyro.deterministic("log_amp_delta_blr", jnp.full(B, -1e9))
@@ -431,6 +429,7 @@ def build_single_object_model(
             q_groups=lmc_q_groups,
             use_bwb=bwb,
             broken_pl=broken_pl,
+            bwb=bwb
         )
 
         params = dict(
@@ -483,7 +482,6 @@ def main():
     parser.add_argument("--nchains", type=int, default=2, help="Number of chains (>=1).")
     parser.add_argument("--inject_fake", action="store_true", help="Inject fake light curves.")
     parser.add_argument("--bwb", action="store_true", help="Enable BWB model.")
-    parser.add_argument("--d_eta", action="store_true", help="Sample per-object eta parameters.")
     parser.add_argument("--max_tree_depth", type=int, default=8, help="NUTS max tree depth.")
     parser.add_argument("--load_sample_file", action="store_true", help="Load saved samples (debug).")
     parser.add_argument("--disable_poly1", action="store_true", help="Disable trend.")
@@ -497,18 +495,17 @@ def main():
     parser.add_argument("--disable_lag_blr", action="store_true", default=False, help="Disable BLR lag model.")
     parser.add_argument("--sigma_tau_uniform", action="store_true", default=False, help="Uniform priors for sigma/tau.")
     parser.add_argument("--lmc", type=int, default=0, help="LMC Q groups (0/1/2/3).")
-    parser.add_argument("--sample_lmc_hypers", action="store_true", default=False, help="Sample LMC hypers.")
     parser.add_argument("--disable_plot_psd", action="store_true", default=False, help="Disable PSD sub-plot.")
-    parser.add_argument("--eta_tau_normal", action="store_true", default=False, help="Use Normal for eta_tau1/2.")
     parser.add_argument("--inject_random_fake_etas", action="store_true", default=False, help="Randomize fake etas.")
     parser.add_argument("--fhost_csv", type=str, default=None, help="CSV with columns: object_id,f_host_2500")
     parser.add_argument("--disable_fhost", action="store_true", default=False, help="Set all f_host_2500=0.")
     parser.add_argument("--broken_pl", action="store_true", default=False, help="Use broken power law.")
-    parser.add_argument("--disable_sigma_tau_plane_cut", action="store_true", default=False, help="(Unused placeholder)")
     parser.add_argument("--log_sigma_eta_tau_sigma", type=float, default=0.2, help="Stddev for log_sigma_eta_tau priors.")
     parser.add_argument("--beta_tau", type=float, default=0.2, help="beta_tau for fake curves.")
     parser.add_argument("--disable_band_drop", action="store_true", default=False, help="Disable Lya band drop.")
     parser.add_argument("--load_nearby_lc_csv", type=str, default=None, help="CSV listing nearby LCs to load.")
+    parser.add_argument("--load_yu_priors", action="store_true", default=False, help="Use Yu+2023 priors.")
+    parser.add_argument("--disable_sigma_tau_plane_cut", action="store_true", default=False, help="Disable sigma–tau plane cut.")
     args = parser.parse_args()
     print("Args:", args)
 
@@ -632,18 +629,13 @@ def main():
                 log_jitter_mean=log_jitter_mean,
                 bwb=args.bwb,
                 disable_poly1=args.disable_poly1,
-                d_eta=args.d_eta,
                 disable_lag_blr=args.disable_lag_blr,
                 free_eta_break=args.free_eta_break,
-                couple_sigma_tau=args.couple_sigma_tau,
                 sigma_tau_uniform=args.sigma_tau_uniform,
-                inject_fake=args.inject_fake,
                 lmc_q_groups=args.lmc,
-                sample_lmc_hypers=args.sample_lmc_hypers,
-                eta_tau_normal=args.eta_tau_normal,
-                log_sigma_eta_tau_sigma=args.log_sigma_eta_tau_sigma,
                 broken_pl=args.broken_pl,
                 sigma_tau_plane_cut=(not args.disable_sigma_tau_plane_cut),
+                yupriors=args.load_yu_priors,
             )
 
             init_strategy = numpyro.infer.init_to_median()
@@ -704,6 +696,7 @@ def main():
                         use_bwb=args.bwb,
                         q_groups=args.lmc,
                         broken_pl=args.broken_pl,
+                        bwb=args.bwb,
                     )
                     save_combined_plot(
                         obj_flat_samples,
