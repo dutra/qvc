@@ -681,7 +681,7 @@ def run_qsofit_record(rec, npca_qso, decomp_host, BC, cache_dir="data/spectra_ca
             poly=poly,                # If True, include polynomial component to account for dust reddening
             BC=BC,                 # If True, fit continuum with Balmer continua from 1000 to 3646A
             initial_guess=None,       # initial parameters for continuum model
-            rej_abs_conti=False,      # iteratively reject 3σ outlier absorption pixels in continuum
+            rej_abs_conti=True,      # iteratively reject 3σ outlier absorption pixels in continuum
             n_pix_min_conti=100,      # minimum negative pixels for host continuum fit rejection
 
             # emission line fit parameters
@@ -1116,23 +1116,95 @@ def run_select(args):
         raise FileNotFoundError(csv_path)
     df = pd.read_csv(csv_path)
 
+    # ---- Coerce essentials
     # ---- Minimal coercions
     df["object_id"] = df["object_id"].astype(str)
     for c in ["redchi2_conti_full", "aic", "bic", "loglbol"]:
         df[c] = pd.to_numeric(df[c], errors="coerce")
+
     # Coerce booleans simply
-    for c in ["decomp_host", "BC"]:
-        if df[c].dtype != bool:
+    for c in ["decomp_host", "BC", "poly"]:
+        if c in df.columns and df[c].dtype != bool:
             df[c] = df[c].astype(str).str.strip().str.lower().isin(["true", "1", "t", "yes"])
-    # Coerce npca; fill unknowns with 0 (we will forbid 0 later)
+
+    # set npca_qso to -1 when there is no host decomposition
+    df.loc[~df["decomp_host"], "npca_qso"] = -1
+
+
+    # ---- Drop unusable rows
+    df = df[np.isfinite(df["redchi2_conti_full"])].copy()
+    if df.empty:
+        return  # nothing to do
+
+    # ---- Define the proxy: start with redchi2, then penalize
+    df["redchip"] = df["redchi2_conti_full"]
+
+    # do not consider failed host decompositions
+    mask_failed = (df["decomp_host"] == True) & (df.get("f_host_2500", 1.0) < 1e-3)
+    if mask_failed.any():
+        df.loc[mask_failed, "redchip"] = 1e9
+
+    # do not consider polynomial fits
+    df.loc[df["poly"] == True, "redchip"] *= 1e9
+
+    # 20% penalty if BC=True
+    df.loc[df["BC"] == True, "redchip"] *= 1.2
+
+    # low lbol
+    # 50% penalty if decomp_host == False
+    df.loc[(df["loglbol"] < 46.5) & (df["decomp_host"] == False), "redchip"] *= 1.5
+    # 20% penalty if npca_qso != 0
+    df.loc[(df["loglbol"] < 46.5) & (df["decomp_host"] == True) & (df["npca_qso"] != 0), "redchip"] *= 1.2
+    
+    # high lbol
+    # 50% penalty if npca_qso == 0
+    df.loc[(df["loglbol"] >= 46.5) & (df["decomp_host"] == True) & (df["npca_qso"] == 0), "redchip"] *= 1.5
+
+    # ---- Pick the minimum redchip per object
+    idx_best = df.groupby("object_id", sort=False)["redchip"].idxmin()
+
+    # ---- Mark winners
+    df["best"] = False
+    df.loc[idx_best, "best"] = True
+
+    # ---- Save back (overwrite input for simplicity)
+    df.to_csv(csv_path, index=False)
+
+
+
+def run_select_(args):
+    import numpy as np
+    import pandas as pd
+    import os
+
+    # ---- Load
+    csv_path = args.fpath_out
+    if not os.path.exists(csv_path):
+        raise FileNotFoundError(csv_path)
+    df = pd.read_csv(csv_path)
+
+    # ---- Minimal coercions
+    df["object_id"] = df["object_id"].astype(str)
+    for c in ["redchi2_conti_full", "aic", "bic", "loglbol"]:
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+
+    # Coerce booleans simply
+    for c in ["decomp_host", "BC", "poly"]:
+        if c in df.columns and df[c].dtype != bool:
+            df[c] = df[c].astype(str).str.strip().str.lower().isin(["true", "1", "t", "yes"])
+
+    # Coerce npca; fill unknowns with 0 (allowed only if ≥50% better per our rule)
     df["npca_qso"] = pd.to_numeric(df["npca_qso"], errors="coerce").fillna(0).astype(int)
 
     # If decomp_host == False, npca is irrelevant → set to -1
     df.loc[~df["decomp_host"], "npca_qso"] = -1
 
+    # Consider only poly=False fits for selection (as in your original)
+    if "poly" in df.columns:
+        df = df[df["poly"] == False]
+
     # Init best flags
     df["best"] = False
-
     winners = []
 
     # ---- Per object selection
@@ -1141,97 +1213,114 @@ def run_select(args):
         if g.empty:
             continue
 
-        # Never allow npca_qso == 0
-        g = g[(g["npca_qso"] != 0)]
-
-        # Never allow failed solutions when decomposing host
-        mask_failed = (g["decomp_host"] == True) & (g["f_host_2500"] < 1e-3)
-        g.loc[mask_failed, "redchi2_conti_full"] = 1e9
+        # Guard against failed host decompositions
+        mask_failed = (g["decomp_host"] == True) & (g.get("f_host_2500", 1.0) < 1e-3)
+        if mask_failed.any():
+            g.loc[mask_failed, "redchi2_conti_full"] = 1e9
 
         if g.empty:
             continue
 
-        # 1) Prefer BC=True only if it improves redchi2 by >=20% (≤ 0.8× best BC=False)
-        have_bc0 = (g["BC"] == False).any()
-        have_bc1 = (g["BC"] == True).any()
-
-        if have_bc0 and have_bc1:
-            best0 = g.loc[g["BC"] == False, "redchi2_conti_full"].min()
-            best1 = g.loc[g["BC"] == True,  "redchi2_conti_full"].min()
-            if best1 <= 0.8 * best0:
-                cand = g[g["BC"] == True]
+        # ----- (1) BC gate: prefer BC=True only if ≥20% better (≤ 0.8× best BC=False)
+        if "BC" in g.columns:
+            g0 = g[g["BC"] == False]
+            g1 = g[g["BC"] == True]
+            if not g0.empty and not g1.empty:
+                best0 = g0["redchi2_conti_full"].min()
+                best1 = g1["redchi2_conti_full"].min()
+                cand = g1 if best1 <= 0.8 * best0 else g0
+            elif not g1.empty:
+                cand = g1
+            elif not g0.empty:
+                cand = g0
             else:
-                cand = g[g["BC"] == False]
-        elif have_bc1:
-            cand = g[g["BC"] == True]
+                cand = g
         else:
-            cand = g[g["BC"] == False]
+            cand = g
 
-        if cand.empty:
-            continue
 
-        # 2) Low-L vs High-L logic
+        # ----- (2) Low-L vs High-L logic, with the new "q0 if 50% better" rule
         lowL = float(g["loglbol"].iloc[0]) < 46.5
 
         if lowL:
-            # Split piles
-            T = cand[(cand["decomp_host"] == True) & (cand["npca_qso"].isin([1, 2, 5, 10]))]
+            # Only decomp_host=True can have meaningful npca in {0,1,2,5,10}
+            T = cand[(cand["decomp_host"] == True) & (cand["npca_qso"].isin([0, 1, 2, 5, 10]))]
             F = cand[(cand["decomp_host"] == False) & (cand["npca_qso"] == -1)]
 
-            # ---- Build T candidate:
-            # prefer {2,5,10} ONLY if they are ≤ 0.8× the best q1; else use best q1.
-            # If no q1 exists, pick the best among {2,5,10}.
             r2_T = np.inf
             T_sel = pd.DataFrame(columns=cand.columns)
 
             if not T.empty:
                 q1 = T[T["npca_qso"] == 1]
-                hi = T[T["npca_qso"].isin([0, 2, 5, 10])]
+                hi = T[T["npca_qso"].isin([2, 5, 10])]
+                q0 = T[T["npca_qso"] == 0]
 
-                if not q1.empty:
-                    best_q1 = q1["redchi2_conti_full"].min()
-                    improved_hi = hi[hi["redchi2_conti_full"] <= 0.8 * best_q1]  # ≥20% better
-                    if not improved_hi.empty:
-                        # Take the best among improved {2,5,10}
-                        T_sel = improved_hi.loc[[improved_hi["redchi2_conti_full"].idxmin()]]
-                    else:
-                        # Fall back to best q1
-                        T_sel = q1.loc[[q1["redchi2_conti_full"].idxmin()]]
+                best_q1 = q1["redchi2_conti_full"].min() if not q1.empty else np.inf
+                best_hi = hi["redchi2_conti_full"].min() if not hi.empty else np.inf
+                best_q0 = q0["redchi2_conti_full"].min() if not q0.empty else np.inf
+
+                # Comparator for the 50% rule: prefer q1 if available, else the best hi
+                comp = best_q1 if np.isfinite(best_q1) else best_hi
+
+                # --- NEW RULE: choose q0 only if it is ≥50% better than the comparator
+                if np.isfinite(best_q0) and np.isfinite(comp) and (best_q0 <= 0.5 * comp):
+                    T_sel = q0.loc[[q0["redchi2_conti_full"].idxmin()]]
                 else:
-                    # No q1 available: choose best among {2,5,10}
-                    if not hi.empty:
-                        T_sel = hi.loc[[hi["redchi2_conti_full"].idxmin()]]
+                    # Old logic: prefer {2,5,10} if ≤ 0.8× best q1; else best q1; if no q1, best hi
+                    if np.isfinite(best_q1):
+                        improved_hi = hi[hi["redchi2_conti_full"] <= 0.8 * best_q1]
+                        if not improved_hi.empty:
+                            T_sel = improved_hi.loc[[improved_hi["redchi2_conti_full"].idxmin()]]
+                        else:
+                            T_sel = q1.loc[[q1["redchi2_conti_full"].idxmin()]]
+                    else:
+                        if not hi.empty:
+                            T_sel = hi.loc[[hi["redchi2_conti_full"].idxmin()]]
+                        elif not q0.empty:
+                            # No q1/hi; allow q0 even without 50% improvement because nothing else exists
+                            T_sel = q0.loc[[q0["redchi2_conti_full"].idxmin()]]
 
                 if not T_sel.empty:
                     r2_T = T_sel["redchi2_conti_full"].min()
 
-            # ---- F pile best (npca == -1)
+            # F pile: best npca == -1
             r2_F = np.inf
             F_sel = pd.DataFrame(columns=cand.columns)
             if not F.empty:
-                idxF = F["redchi2_conti_full"].idxmin()
-                F_sel = F.loc[[idxF]]
+                F_sel = F.loc[[F["redchi2_conti_full"].idxmin()]]
                 r2_F = F_sel["redchi2_conti_full"].iloc[0]
 
-            # ---- Decision between T and F
-            # Allow F only if 100% better → ≤ 1/2 of T
+            # Decision between T and F: allow F only if 100% better (≤ 0.5× T)
             if r2_T < np.inf:
-                if r2_F <= 0.5 * r2_T:
-                    chosen_pool = F_sel
-                else:
-                    chosen_pool = T_sel if not T_sel.empty else F_sel
+                chosen_pool = F_sel if (r2_F <= 0.5 * r2_T) else (T_sel if not T_sel.empty else F_sel)
             else:
-                # No viable T → take F if present, else empty
                 chosen_pool = F_sel if not F_sel.empty else cand.iloc[0:0]
 
         else:
-            # High-L: choose best among {-1,1,2,5,10} (never 0), after BC gate already applied
-            chosen_pool = cand[cand["npca_qso"].isin([-1, 1, 2, 5, 10])]
+            # High-L: start from best among {-1,1,2,5,10} (exclude q0 initially)
+            pool_nonzero = cand[cand["npca_qso"].isin([-1, 1, 2, 5, 10])]
+            if pool_nonzero.empty:
+                # Nothing but maybe q0? Fall back to cand.
+                pool_nonzero = cand
+
+            idx_best_nz = pool_nonzero["redchi2_conti_full"].idxmin()
+            best_nz_val = pool_nonzero.loc[idx_best_nz, "redchi2_conti_full"]
+
+            # If a q0 exists (decomp_host=True & npca_qso==0), allow it ONLY if ≥50% better than best_nz
+            q0 = cand[(cand["decomp_host"] == True) & (cand["npca_qso"] == 0)]
+            if not q0.empty:
+                best_q0 = q0["redchi2_conti_full"].min()
+                if best_q0 <= 0.5 * best_nz_val:
+                    chosen_pool = q0.loc[[q0["redchi2_conti_full"].idxmin()]]
+                else:
+                    chosen_pool = pool_nonzero.loc[[idx_best_nz]]
+            else:
+                chosen_pool = pool_nonzero.loc[[idx_best_nz]]
+
         if chosen_pool.empty:
             continue
 
-        # 3) Pick overall best row with simple tie-breakers
-        #    primary: redchi2; secondary: aic; tertiary: bic
+        # ----- (3) Final tie-breakers: redchi2, then AIC, then BIC
         idx = chosen_pool.sort_values(
             ["redchi2_conti_full", "aic", "bic"],
             ascending=[True, True, True]
@@ -1240,6 +1329,17 @@ def run_select(args):
 
     if winners:
         df.loc[winners, "best"] = True
+
+    # REQUIRED_COLS = {
+    #     "object_id", "sdss_name", "z",
+    #     "alpha_lambda", "apparent_mag_2500",
+    #     "f_host_2500", "delta_m_avg",
+    #     "npca_qso", "decomp_host", "BC", "aic", "bic", "poly",
+    #     "apparent_mag_2500_err", "redchi2_conti_full",
+    #     "best"
+    # }
+    # keep = [c for c in df.columns if c in REQUIRED_COLS]
+    # df = df[keep].copy()
 
     df.to_csv(csv_path, index=False)
     print(f"[OK] Wrote best selections to: {csv_path}")
