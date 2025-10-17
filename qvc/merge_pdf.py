@@ -103,7 +103,7 @@ def load_csv(csv_path):
     df["object_id"] = df["object_id"].astype(str)
     df["sdss_name"] = df["sdss_name"].astype(str)
     # Coerce booleans for consistency
-    for b in ["decomp_host", "BC", "best"]:
+    for b in ["decomp_host", "BC", "poly", "best"]:
         if df[b].dtype != bool:
             df[b] = df[b].astype(str).str.lower().isin(["1", "true", "t", "yes", "y"])
     return df
@@ -153,7 +153,7 @@ def find_pdf_for_row(row, root, prefix, debug=False):
     preferred = f"{z:.2f}_{sdss}_*.pdf" if np.isfinite(z) else None
     fallback  = f"*{sdss}*.pdf"
 
-    npca = int(row["npca_qso"]) if pd.notna(row["npca_qso"]) else 0
+    npca = int(row["npca_qso"])
     decomp = _bool_token(row["decomp_host"])
     BCtok  = _bool_token(row["BC"])
     poly = _bool_token(row["poly"])
@@ -237,8 +237,8 @@ def format_stamp(row, star_best):
     npca = row.get("npca_qso", None)
     parts.append(f"npca_qso={int(npca) if pd.notna(npca) else 'NA'}")
 
-    poly = row.get("poly_order", None)
-    parts.append(f"poly_order={int(poly) if pd.notna(poly) else 'NA'}")
+    poly = row.get("poly", None)
+    parts.append(f"poly={int(poly) if pd.notna(poly) else 'NA'}")
 
     ame = row.get("apparent_mag_2500_err", np.nan)
     try:
