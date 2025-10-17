@@ -510,7 +510,7 @@ def create_qsopar_fits(path_ex='data/', parfilename='qsopar.fits', overwrite=Tru
 def run_qsofit_record(rec, npca_qso, decomp_host, BC, cache_dir="data/spectra_cache", 
                       path_ex=f'data/pyqsofit', parfilename=f'qsopar.fits',
                       save_fig_path=f'./plots/pyqso/', save_fits_path=f'./results/pyqso_fits/',
-                      allow_partial_band_overlap=False, MC_samples=50):
+                      allow_partial_band_overlap=False, MC_samples=50, poly=False):
     """
     Worker-safe version of QSOFit runner.
     `rec` is a plain dict containing only the fields needed for one object.
@@ -561,6 +561,7 @@ def run_qsofit_record(rec, npca_qso, decomp_host, BC, cache_dir="data/spectra_ca
         reddening_integral=-1e9,
         reddening_proxy=-1e9,
         conti_a_0=-1e9,
+        conti_a_0_err=-1e9,
         bands_used=[]
     )
 
@@ -677,7 +678,7 @@ def run_qsofit_record(rec, npca_qso, decomp_host, BC, cache_dir="data/spectra_ca
             
             # continuum model fit parameters
             Fe_uv_op=True,            # If True, fit continuum with UV and optical FeII template
-            poly=True,                # If True, include polynomial component to account for dust reddening
+            poly=poly,                # If True, include polynomial component to account for dust reddening
             BC=BC,                 # If True, fit continuum with Balmer continua from 1000 to 3646A
             initial_guess=None,       # initial parameters for continuum model
             rej_abs_conti=False,      # iteratively reject 3σ outlier absorption pixels in continuum
@@ -809,6 +810,7 @@ def run_qsofit_record(rec, npca_qso, decomp_host, BC, cache_dir="data/spectra_ca
             #f_host_4200=conti_dict.get('frac_host_4200', 0),
             f_host_5100=conti_dict.get('frac_host_5100', -1),
             conti_a_0=conti_dict['conti_a_0'],
+            conti_a_0_err=conti_dict.get('conti_a_0_err', -1e9),
             alpha_lambda=conti_dict['PL_slope_blue'],
             alpha_lambda_err=conti_dict.get('PL_slope_blue_err', -1e9),
             redchi=q_mle.conti_fit.redchi,
@@ -825,7 +827,8 @@ def run_qsofit_record(rec, npca_qso, decomp_host, BC, cache_dir="data/spectra_ca
             reddening_proxy=reddening_proxy,
             bands_used=bands_used,
         )
-        return result
+        print(f"[INFO] Result for {rec['sdss_name']} (z={rec['z']:.2f}): {result}")
+        return result | conti_dict
 
     except Exception as e:
         # swallow errors per object; keep defaults but print traceback
@@ -892,14 +895,16 @@ def parse_args():
                    help="Parallel worker processes for QSOFit.")
     p.add_argument("--MC_samples", type=int, default=50,
                    help="Number of Monte Carlo samples per object (0 to disable MC).")
+    p.add_argument("--enable_poly", action="store_true",
+                   help="Include polynomial component in continuum fit to account for dust reddening.")
 
     return p.parse_args()
 
 # ------------------------------
 # Utilities you already have
 # ------------------------------
-def option_label(npca_qso, decomp_host, BC):
-    return f"npca_qso={npca_qso}|decomp_host={decomp_host}|BC={BC}"
+def option_label(npca_qso, decomp_host, BC, poly):
+    return f"npca_qso={npca_qso}|decomp_host={decomp_host}|BC={BC}|poly={poly}"
 
 def load_quasar_core_list(fpath_in):
     return read_quasars_from_hdf5(fpath_in)
@@ -1023,26 +1028,27 @@ def run_collect(args):
 
     rows = []  # accumulate CSV rows
 
-    def run_parallel(npca_qso, decomp_host, BC):
-        save_fig_path = os.path.join('plots', 'pyqsofit', prefix, f'npca_qso_{npca_qso}_decomp_host_{decomp_host}_BC_{BC}')
+    def run_parallel(npca_qso, decomp_host, BC, poly):
+        save_fig_path = os.path.join('plots', 'pyqsofit', prefix, f'npca_qso_{npca_qso}_decomp_host_{decomp_host}_BC_{BC}_poly_{poly}')
         os.makedirs(save_fig_path, exist_ok=True)
-        save_fits_path = os.path.join('results', 'pysqo_fits', prefix, f'npca_qso_{npca_qso}_decomp_host_{decomp_host}_BC')
+        save_fits_path = os.path.join('results', 'pysqo_fits', prefix, f'npca_qso_{npca_qso}_decomp_host_{decomp_host}_BC_{BC}_poly_{poly}')
         os.makedirs(save_fits_path, exist_ok=True)
 
         worker = partial(
             run_qsofit_record,
-            npca_qso=npca_qso, decomp_host=decomp_host, BC=BC,
+            npca_qso=npca_qso, decomp_host=decomp_host, BC=BC, poly=poly,
             cache_dir=args.cache_dir, path_ex='data/pyqsofit',
             parfilename=f'qsopar_{prefix}_{suffix}.fits',
             save_fits_path=save_fits_path,
             allow_partial_band_overlap=args.allow_partial_band_overlap,
             save_fig_path=save_fig_path,
-            MC_samples=args.MC_samples
+            MC_samples=args.MC_samples,
         )
 
         chunksize = 1
         with Pool(processes=num_cores) as pool:
-            with tqdm(total=len(records), desc=f"Processing npca_qso={npca_qso} decomp_host={decomp_host} BC={BC}", dynamic_ncols=True, smoothing=0.0) as pbar:
+            with tqdm(total=len(records), desc=f"Processing npca_qso={npca_qso} decomp_host={decomp_host} BC={BC} poly={poly}",
+                       dynamic_ncols=True, smoothing=0.0) as pbar:
                 for res in pool.imap_unordered(worker, records, chunksize=chunksize):
                     # Build a flat row for CSV
                     obj_id = str(res.get("object_id", ""))
@@ -1060,39 +1066,42 @@ def run_collect(args):
                         "npca_qso": npca_qso,
                         "decomp_host": bool(decomp_host),
                         "BC": bool(BC),
-                        "run_label": option_label(npca_qso, decomp_host, BC),                    
+                        "poly": bool(poly),
+                        "run_label": option_label(npca_qso, decomp_host, BC, poly),                    
                     } | res  # merge all result keys
                     rows.append(row)
                     pbar.update(1)
 
+    poly_list = [False, True] if args.enable_poly else [False]
     BC_list = [False, True] if args.enable_BC else [False]
-    for BC in BC_list:
-        run_parallel(npca_qso=-1, decomp_host=False, BC=BC)
-        for npca in [0, 1, 2, 5, 10]:
-            run_parallel(npca_qso=npca, decomp_host=True, BC=BC)
+    for poly in poly_list:
+        for BC in BC_list:
+            run_parallel(npca_qso=-1, decomp_host=False, BC=BC, poly=poly)  # no host decomposition
+            for npca in [0, 1, 2, 5, 10]:
+                run_parallel(npca_qso=npca, decomp_host=True, BC=BC, poly=poly)
 
-
+    # poly = False
     # BC = False
-    # npca_qso = 0
-    # decomp_host = True
-    # run_parallel(npca_qso=npca_qso, decomp_host=decomp_host, BC=BC)
+    # npca_qso = -1
+    # decomp_host = False
+    # run_parallel(npca_qso=npca_qso, decomp_host=decomp_host, BC=BC, poly=poly)
 
     # Optional merge of external spectral-fit CSV (row-wise add columns)
-    if args.spectral_fit_csv and os.path.exists(args.spectral_fit_csv):
-        df_out = pd.DataFrame(rows)
-        df_spec = pd.read_csv(args.spectral_fit_csv)
+    # if args.spectral_fit_csv and os.path.exists(args.spectral_fit_csv):
+    #     df_out = pd.DataFrame(rows)
+    #     df_spec = pd.read_csv(args.spectral_fit_csv)
 
-        join_key = "object_id" if "object_id" in df_spec.columns else ("sdss_name" if "sdss_name" in df_spec.columns else None)
-        if join_key is None:
-            print(f"[WARN] spectral_fit_csv has neither object_id nor sdss_name; skipping merge.")
-        else:
-            df_out = df_out.merge(df_spec, on=join_key, how="left", suffixes=("", "_spec"))
-        df_out["best"] = False  # not selected yet
-        df_out.to_csv(args.fpath_out, index=False)
-    else:
-        df_out = pd.DataFrame(rows)
-        df_out["best"] = False
-        df_out.to_csv(args.fpath_out, index=False)
+    #     join_key = "object_id" if "object_id" in df_spec.columns else ("sdss_name" if "sdss_name" in df_spec.columns else None)
+    #     if join_key is None:
+    #         print(f"[WARN] spectral_fit_csv has neither object_id nor sdss_name; skipping merge.")
+    #     else:
+    #         df_out = df_out.merge(df_spec, on=join_key, how="left", suffixes=("", "_spec"))
+    #     df_out["best"] = False  # not selected yet
+    #     df_out.to_csv(args.fpath_out, index=False)
+    # else:
+    df_out = pd.DataFrame(rows)
+    df_out["best"] = False
+    df_out.to_csv(args.fpath_out, index=False)
 
     print(f"[OK] Wrote all runs to CSV: {args.fpath_out}")
 
