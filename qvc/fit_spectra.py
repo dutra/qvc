@@ -458,8 +458,8 @@ def create_qsopar_fits(path_ex='data/', parfilename='qsopar.fits', overwrite=Tru
         ('Fe_op_FWHM',   3000,  1200,  18000, 1),  # Hβ/Hα Fe template FWHM
         ('Fe_op_shift',  0.0,  -0.01,  0.01,  1),  # Hβ/Hα Fe template shift [lnlambda]
         ('PL_norm',      1.0,   0.0,   1e10,  1),  # Power-law normalization (f_λ ∝ (λ/3000)^-α)
-        ('PL_slope_blue',    -0.2,  -5.0,  0.0,   1), # Blue slope of the power-law (PL) continuum
-        ('PL_slope_red',     -0.5,  -5.0,  0.0,   1), # Red slope of the power-law (PL) continuum
+        ('PL_slope_blue',    -0.5,  -5.0,  0.0,   1), # Blue slope of the power-law (PL) continuum
+        ('PL_slope_red',     -0.1,  -5.0,  0.0,   1), # Red slope of the power-law (PL) continuum
         ('PL_break_wave',    4000,  3000,  5000, 1), # Break wavelength of the power-law (PL) continuum
         ('Balmer_norm',  0.0,   0.0,   1e10,  1),  # Balmer continuum normalization (< 3646 Å)
         ('Balmer_Te',  15000, 10000, 50000,  1),   # Balmer continuum Te
@@ -1152,7 +1152,7 @@ def run_select(args):
     df.loc[df["poly"] == True, "redchip"] *= 1e9
 
     # 20% penalty if BC=True
-    df.loc[df["BC"] == True, "redchip"] *= 1.2
+    df.loc[df["BC"] == True, "redchip"] *= 1
 
     # 100% penalty if npca_qso == 0
     df.loc[(df["npca_qso"].isin([0])), "redchip"] *= 1e9
@@ -1162,7 +1162,7 @@ def run_select(args):
     # 50% penalty if decomp_host == False
     df.loc[(df["loglbol"] < 46.5) & (df["decomp_host"] == False), "redchip"] *= 1.5
     # 20% penalty if npca_qso 2
-    df.loc[(df["loglbol"] < 46.5) & (df["decomp_host"] == True) & (df["npca_qso"].isin([2])), "redchip"] *= 1
+    df.loc[(df["loglbol"] < 46.5) & (df["decomp_host"] == True) & (df["npca_qso"].isin([1,2])), "redchip"] *= 1
     # 20% penalty if npca_qso != 0 and 5, 10
     df.loc[(df["loglbol"] < 46.5) & (df["decomp_host"] == True) & (df["npca_qso"].isin([5, 10])), "redchip"] *= 1.5
 
