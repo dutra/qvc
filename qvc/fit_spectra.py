@@ -270,7 +270,7 @@ def match_sample_to_dr16q(sample_df, dr16q_fits, max_sep_arcsec=2.0):
 
     sample_df_matched = sample_df.iloc[agn_keep].reset_index(drop=True)
     
-    print(sample_df[['object_id', 'sdss_name']])
+    #print(sample_df[['object_id', 'sdss_name']])
     data_cat['object_id'] = sample_df_matched['object_id'].to_numpy()
     if 'z' in sample_df_matched.columns:
         data_cat['z'] = sample_df_matched['z'].to_numpy()
@@ -297,7 +297,7 @@ def match_sample_to_dr16q(sample_df, dr16q_fits, max_sep_arcsec=2.0):
         data_cat[f'mean_corrected_{b}'] = sample_df_matched[mags_mean_col].to_numpy() + mean_vals
         data_cat[f'{mean_col}_err'] = sample_df_matched[f'{mean_col}_err'].to_numpy()
 
-    print(data_cat['z'])
+    #print(data_cat['z'])
     return data_cat
 
 
@@ -518,7 +518,7 @@ def run_qsofit_record(rec, npca_qso, decomp_host, BC, cache_dir="data/spectra_ca
     from speclite import filters
     from pyqsofit.PyQSOFit import QSOFit
 
-    print("\n\n====================== Working on SDSS_NAME={} (z={:.2f}) =================".format(rec["sdss_name"], rec["z"]))            
+    #print("\n\n====================== Working on SDSS_NAME={} (z={:.2f}) =================".format(rec["sdss_name"], rec["z"]))            
 
     QSOFit.set_mpl_style()
 
@@ -588,8 +588,8 @@ def run_qsofit_record(rec, npca_qso, decomp_host, BC, cache_dir="data/spectra_ca
             if b in dropped_bands:
                 print(f"[INFO] Dropping band {b} for {rec['sdss_name']} (z={rec['z']:.2f}) due to Lyα forest contamination.")
                 continue
-            print(f"[INFO] Processing band {b} for {rec['sdss_name']} (z={rec['z']:.2f})")
-            print(f"[DEBUG] lam range: {lam.min():.1f} - {lam.max():.1f} Å")
+            #print(f"[INFO] Processing band {b} for {rec['sdss_name']} (z={rec['z']:.2f})")
+            #print(f"[DEBUG] lam range: {lam.min():.1f} - {lam.max():.1f} Å")
             try:
                 mag_fiber = rec[f"mean_corrected_{b}"]
                 if not np.isfinite(mag_fiber) or mag_fiber < 0:
@@ -611,7 +611,7 @@ def run_qsofit_record(rec, npca_qso, decomp_host, BC, cache_dir="data/spectra_ca
                     overlap_frac = 1.0
                 dm = mag_fiber - mag_synth
                 delta_mags[b] = dm
-                print(f"[INFO] Band {b}: mag_fiber={mag_fiber:.3f}, mag_synth={mag_synth:.3f}, Δm={dm:.3f} (overlap={overlap_frac:.2f})")
+                #print(f"[INFO] Band {b}: mag_fiber={mag_fiber:.3f}, mag_synth={mag_synth:.3f}, Δm={dm:.3f} (overlap={overlap_frac:.2f})")
                 
                 # weight by photometric mag uncertainty if available; else equal weight
                 sig_m = rec[f'mean_{b}_err']
@@ -638,7 +638,7 @@ def run_qsofit_record(rec, npca_qso, decomp_host, BC, cache_dir="data/spectra_ca
             print(f"[WARN] No usable bands after drops for {rec['sdss_name']} (z={rec['z']:.2f}); scale=1.")
             delta_m_avg = 0.0
             sigma_dm = 0.0
-        print(f"[INFO] Using bands {bands_used} for {rec['sdss_name']}: delta_m_avg={delta_m_avg:.3f} ± {sigma_dm:.3f} mag")
+        # print(f"[INFO] Using bands {bands_used} for {rec['sdss_name']}: delta_m_avg={delta_m_avg:.3f} ± {sigma_dm:.3f} mag")
         scale = 10 ** (-0.4 * delta_m_avg)
 
         scale = 1.0  # TEMPORARY OVERRIDE: disable absolute flux rescaling
@@ -830,7 +830,7 @@ def run_qsofit_record(rec, npca_qso, decomp_host, BC, cache_dir="data/spectra_ca
             reddening_proxy=reddening_proxy,
             bands_used=bands_used,
         )
-        print(f"[INFO] Result for {rec['sdss_name']} (z={rec['z']:.2f}): {result}")
+        #print(f"[INFO] Result for {rec['sdss_name']} (z={rec['z']:.2f}): {result}")
         return result | conti_dict
 
     except Exception as e:
@@ -922,7 +922,7 @@ def prepare_sample_df(quasar_list, filter_sdss_name, filter_csv, N, skip):
                 q[f'mean_corrected_{b}'] = q[f'mags_mean_{b}'] + q[f'mean_{b}']
             else:
                 q[f'mean_corrected_{b}'] = q[f'mags_mean_{b}']
-            print(f"[DEBUG] object_id {q.get('object_id','?')} band {b}: mags_mean {q[f'mags_mean_{b}']}, mean_{b} {q.get(f'mean_{b}','?')} -> mean_corrected_{b} {q[f'mean_corrected_{b}']}")
+            #print(f"[DEBUG] object_id {q.get('object_id','?')} band {b}: mags_mean {q[f'mags_mean_{b}']}, mean_{b} {q.get(f'mean_{b}','?')} -> mean_corrected_{b} {q[f'mean_corrected_{b}']}")
     sample_df = pd.DataFrame.from_records(quasar_list)
 
     exclusion_sdss_names = [
