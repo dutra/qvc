@@ -246,6 +246,12 @@ def format_stamp(row, star_best):
     except Exception:
         parts.append("apparent_mag_2500_err=?")
 
+    ame = row.get("apparent_mag_2500", np.nan)
+    try:
+        parts.append(f"apparent_mag_2500={float(ame):.2f}")
+    except Exception:
+        parts.append("apparent_mag_2500=?")
+
     try:
         log_lbol = row.get("log_lbol", np.nan)
         if pd.notna(log_lbol):
