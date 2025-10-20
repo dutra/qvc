@@ -2,7 +2,9 @@
 from functools import partial
 import multiprocessing
 from multiprocessing import Pool, cpu_count
-import os, csv, glob, shutil, argparse
+import os, csv, glob, shutil, argparse, sys
+import zipfile
+from pathlib import Path
 
 num_cores = os.environ.get("NUM_CORES", os.cpu_count()-2)
 try:
@@ -458,7 +460,7 @@ def create_qsopar_fits(path_ex='data/', parfilename='qsopar.fits', overwrite=Tru
         ('Fe_op_FWHM',   3000,  1200,  18000, 1),  # Hβ/Hα Fe template FWHM
         ('Fe_op_shift',  0.0,  -0.01,  0.01,  1),  # Hβ/Hα Fe template shift [lnlambda]
         ('PL_norm',      1.0,   0.0,   1e10,  1),  # Power-law normalization (f_λ ∝ (λ/3000)^-α)
-        ('PL_slope_blue',    -0.5,  -5.0,  0.0,   1), # Blue slope of the power-law (PL) continuum
+        ('PL_slope_blue',    -0.5,  -3.0,  0.0,   1), # Blue slope of the power-law (PL) continuum
         ('PL_slope_red',     -0.1,  -5.0,  0.0,   1), # Red slope of the power-law (PL) continuum
         ('PL_break_wave',    4000,  2000,  6000, 1), # Break wavelength of the power-law (PL) continuum
         ('Balmer_norm',  0.0,   0.0,   1e10,  1),  # Balmer continuum normalization (< 3646 Å)
@@ -659,7 +661,7 @@ def run_qsofit_record(rec, npca_qso, decomp_host, BC, cache_dir="data/spectra_ca
             deredden=True,          # correct the Galactic extinction
             #wave_range=[1150, 1e9], # trim input wavelength
             #wave_range=[1200, 1e9],  # trim input wavelength
-            wave_range=[1200, 7997.75],  # trim input wavelength to avoid edge effects in host decomposition
+            wave_range=[1250, 7997.75],  # trim input wavelength to avoid edge effects in host decomposition
             wave_mask=None,         # 2-D array, mask the given range(s)
 
             # host decomposition parameters
@@ -761,9 +763,12 @@ def run_qsofit_record(rec, npca_qso, decomp_host, BC, cache_dir="data/spectra_ca
             apparent_mag_i_rest = apparent_mag_i_obs - K_i
         except Exception as e:
             print(f"[ERROR] apparent_mag_i_rest {rec.get('object_id','?')} ({rec.get('sdss_name','?')}) (z {rec.get('z','?')}): {e}")
+            print(f"[INFO] Wavelength range (RF): {q_mle.wave.min():.1f} - {q_mle.wave.max():.1f} Å")
+            print(f"[INFO] Wavelength range (OBS): {lam_obs.min():.1f} - {lam_obs.max():.1f} Å")
+            #traceback.print_exc()
             apparent_mag_i_rest, apparent_mag_i_obs = -1e9, -1e9
-            delta_m_avg = -1e9
-            delta_mags = np.array([])
+            #delta_m_avg = -1e9
+            #delta_mags = {}
 
 
         try:
@@ -1108,6 +1113,20 @@ def run_collect(args):
 
     print(f"[OK] Wrote all runs to CSV: {args.fpath_out}")
 
+
+def zip_file(output):
+    # Optionally, create a zip file containing the output PDF with maximum compression
+    output = Path(output)
+    zip_path = output.with_suffix('.zip')
+    try:
+        if zip_path.exists():
+            zip_path.unlink()
+        with zipfile.ZipFile(zip_path, 'w', compression=zipfile.ZIP_DEFLATED, compresslevel=9) as zipf:
+            zipf.write(output, arcname=output.name)
+        print(f"[OK] Wrote zip archive → {zip_path}")
+    except Exception as e:
+        print(f"[WARN] Failed to write zip {zip_path}: {e}", file=sys.stderr)
+
 # ------------------------------
 # SELECT → mark best per object_id in SAME CSV
 # ------------------------------
@@ -1148,23 +1167,25 @@ def run_select(args):
     if mask_failed.any():
         df.loc[mask_failed, "redchip"] = 1e9
 
-    # do not consider polynomial fits
-    df.loc[df["poly"] == True, "redchip"] *= 1e9
+    df.loc[df["poly"] == True, "redchip"] *= 1.1
 
     # 20% penalty if BC=True
-    df.loc[df["BC"] == True, "redchip"] *= 1
+    df.loc[df["BC"] == True, "redchip"] *= 1.2
+    df.loc[(df["BC"] == True) & (df["z"] > 1.4), "redchip"] *= 1e9  # disallow BC=True at high z
+    
 
     # 100% penalty if npca_qso == 0
     df.loc[(df["npca_qso"].isin([0])), "redchip"] *= 1e9
 
+    lbol_cut = 45
 
     # low lbol
     # 50% penalty if decomp_host == False
-    df.loc[(df["loglbol"] < 46.5) & (df["decomp_host"] == False), "redchip"] *= 1.5
+    df.loc[(df["loglbol"] < lbol_cut) & (df["decomp_host"] == False), "redchip"] *= 1.5
     # 20% penalty if npca_qso 2
-    df.loc[(df["loglbol"] < 46.5) & (df["decomp_host"] == True) & (df["npca_qso"].isin([1,2])), "redchip"] *= 1
+    df.loc[(df["loglbol"] < lbol_cut) & (df["decomp_host"] == True) & (df["npca_qso"].isin([1,2])), "redchip"] *= 1
     # 20% penalty if npca_qso != 0 and 5, 10
-    df.loc[(df["loglbol"] < 46.5) & (df["decomp_host"] == True) & (df["npca_qso"].isin([5, 10])), "redchip"] *= 1.5
+    df.loc[(df["loglbol"] < lbol_cut) & (df["decomp_host"] == True) & (df["npca_qso"].isin([5, 10])), "redchip"] *= 1.5
 
     
     # high lbol
@@ -1181,7 +1202,7 @@ def run_select(args):
 
     # ---- Save back (overwrite input for simplicity)
     df.to_csv(csv_path, index=False)
-
+    zip_file(csv_path)
     print(f"[OK] Selected best fits and updated CSV: {csv_path}")
 
 # ------------------------------
