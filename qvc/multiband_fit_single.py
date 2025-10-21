@@ -305,6 +305,7 @@ def build_single_object_model(
     sigma_tau_plane_cut=True,
     lmc_q_groups=None,
     yupriors=False,
+    nearby_lc=False
 ):
     """
     Returns a NumPyro model function for ONE object with B bands.
@@ -328,8 +329,13 @@ def build_single_object_model(
             eta_tau1 = numpyro.sample("eta_tau1", dist.Normal(0.388, 0.083))
             eta_tau2 = numpyro.sample("eta_tau2", dist.Normal(0.388, 0.083))
         else:
-            eta_A1 = numpyro.sample("eta_A1", dist.Normal(-0.5, 1.0))
-            eta_tau1 = numpyro.sample("eta_tau1", dist.Normal(0.5, 0.5))
+            if nearby_lc:
+                eta_A1 = numpyro.sample("eta_A1", dist.Normal(-0.8, 0.3))
+                eta_tau1 = numpyro.sample("eta_tau1", dist.Normal(0.4, 0.2))
+            else:
+                eta_A1 = numpyro.sample("eta_A1", dist.Normal(-0.5, 1.0))
+                eta_tau1 = numpyro.sample("eta_tau1", dist.Normal(0.5, 0.5))
+
             if broken_pl:
                 eta_A2 = numpyro.sample("eta_A2", dist.Normal(-0.5, 1.0))
                 eta_tau2 = numpyro.sample("eta_tau2", dist.Normal(0.5, 0.5))
@@ -374,7 +380,10 @@ def build_single_object_model(
         if disable_poly1:
             poly1 = numpyro.deterministic("poly1", 0.0)
         else:
-            poly1 = numpyro.sample("poly1", dist.Normal(0.0, 0.1))
+            if nearby_lc:
+                poly1 = numpyro.sample("poly1", dist.Normal(0.0, 0.2))
+            else:
+                poly1 = numpyro.sample("poly1", dist.Normal(0.0, 0.1))
 
         # Disk lags
         lag0 = numpyro.sample("lag0", dist.TruncatedNormal(10.0, 5.0, low=0.0))
@@ -636,6 +645,7 @@ def main():
                 broken_pl=args.broken_pl,
                 sigma_tau_plane_cut=(not args.disable_sigma_tau_plane_cut),
                 yupriors=args.load_yu_priors,
+                nearby_lc=(args.load_nearby_lc_csv is not None)
             )
 
             init_strategy = numpyro.infer.init_to_median()
