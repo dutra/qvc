@@ -462,7 +462,7 @@ def create_qsopar_fits(path_ex='data/', parfilename='qsopar.fits', overwrite=Tru
         ('PL_norm',      1.0,   0.0,   1e10,  1),  # Power-law normalization (f_λ ∝ (λ/3000)^-α)
         ('PL_slope_blue',    -0.5,  -3.0,  0.0,   1), # Blue slope of the power-law (PL) continuum
         ('PL_slope_red',     -0.1,  -5.0,  0.0,   1), # Red slope of the power-law (PL) continuum
-        ('PL_break_wave',    4000,  2000,  6000, 1), # Break wavelength of the power-law (PL) continuum
+        ('PL_break_wave',    5000,  4000,  6000, 1), # Break wavelength of the power-law (PL) continuum
         ('Balmer_norm',  0.0,   0.0,   1e10,  1),  # Balmer continuum normalization (< 3646 Å)
         ('Balmer_Te',  15000, 10000, 50000,  1),   # Balmer continuum Te
         ('Balmer_Tau',   0.5,   0.1,   2.0,   1),  # Balmer continuum τ
@@ -567,6 +567,11 @@ def run_qsofit_record(rec, npca_qso, decomp_host, BC, cache_dir="data/spectra_ca
         bands_used=[]
     )
 
+    if rec["z"] > 1.4:
+        if BC:
+            return result  # skip high-z with BC
+        if decomp_host:
+            return result  # skip high-z with host decomposition
 
     try:
     # cached spectrum
@@ -932,6 +937,7 @@ def prepare_sample_df(quasar_list, filter_sdss_name, filter_csv, N, skip):
 
     exclusion_sdss_names = [
         '221120.38+010905.6', # wrong redshift
+        '235133.07+005537.0', # wrong redshift
         '024555.35+005332.6'  # weird spectra
     ]
     mask_exclude = ~sample_df['sdss_name'].astype(str).isin(exclusion_sdss_names)
@@ -1167,25 +1173,26 @@ def run_select(args):
     if mask_failed.any():
         df.loc[mask_failed, "redchip"] = 1e9
 
-    df.loc[df["poly"] == True, "redchip"] *= 1.1
+    df.loc[df["poly"] == True, "redchip"] *= 1.05
 
     # 20% penalty if BC=True
     df.loc[df["BC"] == True, "redchip"] *= 1.2
     df.loc[(df["BC"] == True) & (df["z"] > 1.4), "redchip"] *= 1e9  # disallow BC=True at high z
     
 
-    # 100% penalty if npca_qso == 0
-    df.loc[(df["npca_qso"].isin([0])), "redchip"] *= 1e9
+    df.loc[~(df["npca_qso"].isin([-1, 0, 10])), "redchip"] *= 1e9
+    df.loc[~((df["npca_qso"].isin([-1])) & (df["z"] > 1.4)), "redchip"] *= 1e9
 
     lbol_cut = 45
 
     # low lbol
     # 50% penalty if decomp_host == False
-    df.loc[(df["loglbol"] < lbol_cut) & (df["decomp_host"] == False), "redchip"] *= 1.5
-    # 20% penalty if npca_qso 2
-    df.loc[(df["loglbol"] < lbol_cut) & (df["decomp_host"] == True) & (df["npca_qso"].isin([1,2])), "redchip"] *= 1
-    # 20% penalty if npca_qso != 0 and 5, 10
-    df.loc[(df["loglbol"] < lbol_cut) & (df["decomp_host"] == True) & (df["npca_qso"].isin([5, 10])), "redchip"] *= 1.5
+    # df.loc[(df["loglbol"] < lbol_cut) & (df["decomp_host"] == False), "redchip"] *= 1.5
+    # # 20% penalty if npca_qso 2
+    # df.loc[(df["loglbol"] < lbol_cut) & (df["decomp_host"] == True) & (df["npca_qso"].isin([1,2])), "redchip"] *= 1
+    # # 20% penalty if npca_qso != 0 and 5, 10
+    # df.loc[(df["loglbol"] < lbol_cut) & (df["decomp_host"] == True) & (df["npca_qso"].isin([5, 10])), "redchip"] *= 1.5
+
 
     
     # high lbol
