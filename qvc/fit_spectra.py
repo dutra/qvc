@@ -512,7 +512,7 @@ def create_qsopar_fits(path_ex='data/', parfilename='qsopar.fits', overwrite=Tru
 def run_qsofit_record(rec, npca_qso, decomp_host, BC, cache_dir="data/spectra_cache", 
                       path_ex=f'data/pyqsofit', parfilename=f'qsopar.fits',
                       save_fig_path=f'./plots/pyqso/', save_fits_path=f'./results/pyqso_fits/',
-                      allow_partial_band_overlap=False, MC_samples=50, poly=False):
+                      allow_partial_band_overlap=False, MC_samples=50, poly=False, disable_rescale_flux=False):
     """
     Worker-safe version of QSOFit runner.
     `rec` is a plain dict containing only the fields needed for one object.
@@ -646,9 +646,11 @@ def run_qsofit_record(rec, npca_qso, decomp_host, BC, cache_dir="data/spectra_ca
             delta_m_avg = 0.0
             sigma_dm = 0.0
         # print(f"[INFO] Using bands {bands_used} for {rec['sdss_name']}: delta_m_avg={delta_m_avg:.3f} ± {sigma_dm:.3f} mag")
-        scale = 10 ** (-0.4 * delta_m_avg)
-
-        scale = 1.0  # TEMPORARY OVERRIDE: disable absolute flux rescaling
+    
+        if disable_rescale_flux:
+            scale = 1.0  # OVERRIDE: disable absolute flux rescaling
+        else:
+            scale = 10 ** (-0.4 * delta_m_avg)
 
         flux_scaled = flux * scale
 
@@ -910,6 +912,8 @@ def parse_args():
                    help="Number of Monte Carlo samples per object (0 to disable MC).")
     p.add_argument("--enable_poly", action="store_true",
                    help="Include polynomial component in continuum fit to account for dust reddening.")
+    p.add_argument("--disable_rescale_flux", action="store_true",
+                   help="Disable absolute flux rescaling based on photometric mags.")
 
     return p.parse_args()
 
@@ -1057,6 +1061,7 @@ def run_collect(args):
             allow_partial_band_overlap=args.allow_partial_band_overlap,
             save_fig_path=save_fig_path,
             MC_samples=args.MC_samples,
+            disable_rescale_flux=args.disable_rescale_flux,
         )
 
         chunksize = 1
@@ -1081,6 +1086,8 @@ def run_collect(args):
                         "decomp_host": bool(decomp_host),
                         "BC": bool(BC),
                         "poly": bool(poly),
+                        "disable_rescale_flux": bool(args.disable_rescale_flux),
+                        "MC_samples": int(args.MC_samples),
                         "run_label": option_label(npca_qso, decomp_host, BC, poly),                    
                     } | res  # merge all result keys
                     rows.append(row)
@@ -1180,7 +1187,7 @@ def run_select(args):
     df.loc[(df["BC"] == True) & (df["z"] > 1.4), "redchip"] *= 1e9  # disallow BC=True at high z
     
 
-    df.loc[~(df["npca_qso"].isin([-1, 0, 10])), "redchip"] *= 1e9
+    df.loc[~(df["npca_qso"].isin([-1, 0, 1, 10])), "redchip"] *= 1e9
     df.loc[~((df["npca_qso"].isin([-1])) & (df["z"] > 1.4)), "redchip"] *= 1e9
 
     lbol_cut = 45
