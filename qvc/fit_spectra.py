@@ -462,7 +462,7 @@ def create_qsopar_fits(path_ex='data/', parfilename='qsopar.fits', overwrite=Tru
         ('PL_norm',      1.0,   0.0,   1e10,  1),  # Power-law normalization (f_λ ∝ (λ/3000)^-α)
         ('PL_slope_blue',    -0.5,  -3.0,  0.0,   1), # Blue slope of the power-law (PL) continuum
         ('PL_slope_red',     -0.1,  -5.0,  0.0,   1), # Red slope of the power-law (PL) continuum
-        ('PL_break_wave',    5000,  4000,  6000, 1), # Break wavelength of the power-law (PL) continuum
+        ('PL_break_wave',    5000,  4000,  6000, 0), # Break wavelength of the power-law (PL) continuum
         ('Balmer_norm',  0.0,   0.0,   1e10,  1),  # Balmer continuum normalization (< 3646 Å)
         ('Balmer_Te',  15000, 10000, 50000,  1),   # Balmer continuum Te
         ('Balmer_Tau',   0.5,   0.1,   2.0,   1),  # Balmer continuum τ
