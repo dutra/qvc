@@ -229,6 +229,7 @@ def fetch_spectrum_fits(sdss_name, plate, fiber, mjd, cache_dir="data/spectra_ca
 def load_spec_from_cache(sdss_name, cache_dir="data/spectra_cache"):
     """Return cached FITS HDUList if available, else None."""
     cache_file = os.path.join(cache_dir, f"{sdss_name}.fits")
+    print(f"[DEBUG] Checking for cached spectrum at {cache_file}")
     if os.path.exists(cache_file):
         return fits.open(cache_file, memmap=False)
     return None
@@ -511,14 +512,23 @@ def create_qsopar_fits(path_ex='data/', parfilename='qsopar.fits', overwrite=Tru
     return outpath
 
 
-def run_qsofit_record(rec, npca_qso, decomp_host, BC, cache_dir="data/spectra_cache", 
+def run_qsofit_record(rec, cache_dir="data/spectra_cache", 
                       path_ex=f'data/pyqsofit', parfilename=f'qsopar.fits',
                       save_fig_path=f'./plots/pyqso/', save_fits_path=f'./results/pyqso_fits/',
-                      allow_partial_band_overlap=False, MC_samples=50, poly=False, disable_rescale_flux=False):
+                      allow_partial_band_overlap=False, MC_samples=50, disable_rescale_flux=False):
     """
     Worker-safe version of QSOFit runner.
     `rec` is a plain dict containing only the fields needed for one object.
     """
+
+    npca_qso = rec["npca_qso"]
+    decomp_host = rec["decomp_host"]
+    BC = rec["BC"]
+    poly = rec["poly"]
+
+    print(f"[INFO] Running QSOFit for {rec['sdss_name']} (z={rec['z']:.3f})")
+    print(f"[DEBUG] npca_qso={npca_qso}, decomp_host={decomp_host}, BC={BC}, poly={poly}")
+
     # default result (so we always return a complete row even on error)
     result = dict(
         z=rec["z"],
@@ -558,19 +568,13 @@ def run_qsofit_record(rec, npca_qso, decomp_host, BC, cache_dir="data/spectra_ca
         reddening_proxy=-1e9,
         conti_a_0=-1e9,
         conti_a_0_err=-1e9,
-        bands_used=[]
+        bands_used=''
     )
-
-    if rec["z"] > 1.4:
-        if BC:
-            return result  # skip high-z with BC
-        if decomp_host:
-            return result  # skip high-z with host decomposition
-
     try:
     # cached spectrum
         hdul = load_spec_from_cache(rec["sdss_name"], cache_dir=cache_dir)
         if hdul is None:
+            print(f"[ERROR] Spectrum for {rec['sdss_name']} not found in cache; skipping.")
             # keep default values; return early
             return result
 
@@ -612,7 +616,7 @@ def run_qsofit_record(rec, npca_qso, decomp_host, BC, cache_dir="data/spectra_ca
                     overlap_frac = 1.0
                 dm = mag_fiber - mag_synth
                 delta_mags[b] = dm
-                #print(f"[INFO] Band {b}: mag_fiber={mag_fiber:.3f}, mag_synth={mag_synth:.3f}, Δm={dm:.3f} (overlap={overlap_frac:.2f})")
+                print(f"[INFO] Band {b}: mag_fiber={mag_fiber:.3f}, mag_synth={mag_synth:.3f}, Δm={dm:.3f} (overlap={overlap_frac:.2f})")
                 
                 # weight by photometric mag uncertainty if available; else equal weight
                 sig_m = rec[f'mean_{b}_err']
@@ -622,6 +626,8 @@ def run_qsofit_record(rec, npca_qso, decomp_host, BC, cache_dir="data/spectra_ca
             except Exception as e:
                 print(f"[ERROR mag_fiber] Error processing band {b} for {rec['sdss_name']}: {e}")
                 continue
+        
+        print(f"[INFO] Bands used for {rec['sdss_name']}: {bands_used}")
 
         mag_errs = np.array([rec[f'mean_{b}_err'] if (np.isfinite(rec[f'mean_{b}_err']) and rec[f'mean_{b}_err'] >=0) else 0.0 
                                     for b in bands_used])  # only for used bands
@@ -640,7 +646,7 @@ def run_qsofit_record(rec, npca_qso, decomp_host, BC, cache_dir="data/spectra_ca
             delta_m_avg = 0.0
             sigma_dm = 0.0
         # print(f"[INFO] Using bands {bands_used} for {rec['sdss_name']}: delta_m_avg={delta_m_avg:.3f} ± {sigma_dm:.3f} mag")
-
+        print(f"[INFO] Final Δm_avg for {rec['sdss_name']}: {delta_m_avg:.3f} mag (σ_dm={sigma_dm:.3f} mag)")
         result.update(
             delta_mag_u=delta_mags.get('u', -1e9),
             delta_mag_g=delta_mags.get('g', -1e9),
@@ -648,13 +654,13 @@ def run_qsofit_record(rec, npca_qso, decomp_host, BC, cache_dir="data/spectra_ca
             delta_mag_i=delta_mags.get('i', -1e9),
             delta_mag_z=delta_mags.get('z', -1e9),
             delta_m_avg=delta_m_avg,
-            bands_used=bands_used
+            bands_used=''.join(bands_used)
         )
         
         result_list = []
 
         rng = np.random.default_rng(42)
-
+        print("Before for loop")
         for i in range(MC_samples if MC_samples > 0 else 1):
             delta_m_avg_i = rng.normal(delta_m_avg, sigma_dm)
             scale = 10.0 ** (-0.4 * delta_m_avg_i)
@@ -826,13 +832,13 @@ def run_qsofit_record(rec, npca_qso, decomp_host, BC, cache_dir="data/spectra_ca
             median, err = sym_percentile(np.array(values))
             result[key] = median
             result[f"{key}_err"] = err
-        return result
 
     except Exception as e:
         # swallow errors per object; keep defaults but print traceback
-        print(f"[ERROR] z {rec.get('z','?')} Object {rec.get('object_id','?')} ({rec.get('sdss_name','?')}): {e}")
+        print(f"[ERROR] z {rec.get('z','?')} Object {rec.get('object_id','?')} ({rec.get('sdss_name','?')}): {e}", flush=True)
         traceback.print_exc()
-        return result
+    
+    return result
 
 # --------------------------- CLI & Main ---------------------------------
 # ------------------------------
@@ -855,21 +861,16 @@ def write_hdf5_file(quasar_list, file_path):
                     group.attrs[key] = value
 
 # ------------------------------
-# Argparse
-# ------------------------------
-
-
-# ------------------------------
 # argparse (minor tweak to wording)
 # ------------------------------
 def parse_args():
     p = argparse.ArgumentParser(description="DR16Q crossmatch, optional SDSS spectrum download, QSOFit processing → CSV (collect/select).")
     p.add_argument("fpath_in", help="Path to HDF5 with mag means (input to build the sample).")
     p.add_argument("fpath_out", help="Output CSV file for all QSOFit runs (collect) / Input CSV (select).")
-    p.add_argument("--mode", choices=["collect", "select"], required=True,
+    p.add_argument("--mode", choices=["collect", "single", "select", "download"], required=True,
                    help="collect: run all configs, write one CSV; select: read CSV, mark best=True per object_id.")
-    p.add_argument("--filter_csv", default=None,
-                   help="Optional CSV with an object_id column to filter input rows.")
+    p.add_argument("--single_csv", default=None,
+                   help="Optional CSV with the run configuration for single mode.")
     p.add_argument("--dr16q-fits", default="data/dr16q_prop_May01_2024.fits",
                    help="Path to DR16Q FITS catalog.")
     p.add_argument("--cache-dir", default="data/spectra_cache",
@@ -879,8 +880,6 @@ def parse_args():
     p.add_argument("--N", type=int, default=None,
                    help="Optional limit on number of rows before matching.")
     p.add_argument("--skip", type=int, default=None, help="Optional number of rows to skip at start.")
-    p.add_argument("--download", action="store_true",
-                   help="If set, download (and cache) all matched spectra and exit.")
     p.add_argument("--filter_object_id", nargs="+", help="List of object IDs to filter.")
     p.add_argument("--filter_sdss_name", nargs="+", help="List of sdss_names to filter.")
     p.add_argument("--spectral_fit_csv", default=None, type=str,
@@ -909,7 +908,7 @@ def option_label(npca_qso, decomp_host, BC, poly):
 def load_quasar_core_list(fpath_in):
     return read_quasars_from_hdf5(fpath_in)
 
-def prepare_sample_df(quasar_list, filter_sdss_name, filter_csv, N, skip):
+def prepare_sample_df(quasar_list, filter_sdss_name, N, skip):
     for q in quasar_list:
         for i, b in enumerate(['u', 'g', 'r', 'i', 'z']):
             if len(q['mags_means']) != 5:
@@ -919,7 +918,7 @@ def prepare_sample_df(quasar_list, filter_sdss_name, filter_csv, N, skip):
                 q[f'mean_corrected_{b}'] = q[f'mags_mean_{b}'] + q[f'mean_{b}']
             else:
                 q[f'mean_corrected_{b}'] = q[f'mags_mean_{b}']
-            #print(f"[DEBUG] object_id {q.get('object_id','?')} band {b}: mags_mean {q[f'mags_mean_{b}']}, mean_{b} {q.get(f'mean_{b}','?')} -> mean_corrected_{b} {q[f'mean_corrected_{b}']}")
+            print(f"[DEBUG] object_id {q.get('object_id','?')} band {b}: mags_mean {q[f'mags_mean_{b}']}, mean_{b} {q.get(f'mean_{b}','?')} -> mean_corrected_{b} {q[f'mean_corrected_{b}']}")
     sample_df = pd.DataFrame.from_records(quasar_list)
 
     exclusion_sdss_names = [
@@ -933,14 +932,6 @@ def prepare_sample_df(quasar_list, filter_sdss_name, filter_csv, N, skip):
 
     if filter_sdss_name is not None:
         sample_df = sample_df[sample_df['sdss_name'].astype(str).isin(filter_sdss_name)]
-
-    if filter_csv is not None:
-        filter_df = pd.read_csv(filter_csv)
-        if 'object_id' not in filter_df.columns:
-            raise ValueError(f"Filter CSV {filter_csv} missing object_id column")
-        filter_ids = set(str(oid).strip() for oid in filter_df['object_id'].values if str(oid).strip())
-        sample_df = sample_df[sample_df['object_id'].astype(str).str.strip().isin(filter_ids)]
-        print(f"[INFO] After filtering with {filter_csv}, {len(sample_df)} rows remain")
 
     sample_df = sample_df[skip:] if skip is not None else sample_df
     sample_df = sample_df[:N] if N is not None else sample_df
@@ -971,145 +962,6 @@ def match_to_dr16q(sample_df, dr16q_fits, max_sep_arcsec=1.0):
     print(f"[INFO] After matching to DR16Q, {len(df_matched)} objects matched, {len(unmatched_object_ids)} unmatched.")
     return df_matched, unmatched_object_ids
 
-# ------------------------------
-# Ranking helper (same logic as before)
-# ------------------------------
-def pick_best_fit(models, redchi_ok=(0.7, 1.5), target=1.0):
-    ranked = sorted(
-        enumerate(models),
-        key=lambda t: (abs(t[1].get('redchi2_conti_full', np.inf) - target),
-                       t[1].get('aic', np.inf),
-                       t[1].get('bic', np.inf),
-                       t[0])
-    )
-    i_best, best = ranked[0]
-    lo, hi = redchi_ok
-    if not (lo <= best.get('redchi2_conti_full', np.inf) <= hi):
-        for _, m in ranked:
-            if lo <= m.get('redchi2_conti_full', np.inf) <= hi:
-                return m
-    return best
-
-# ------------------------------
-# COLLECT → write ALL runs to ONE CSV
-# ------------------------------
-def run_collect(args):
-    num_cores = args.nproc
-
-    quasar_list = load_quasar_core_list(args.fpath_in)
-    sample_df = prepare_sample_df(
-        quasar_list, args.filter_sdss_name, args.filter_csv, args.N, args.skip
-    )
-
-    df_matched, _ = match_to_dr16q(sample_df, args.dr16q_fits, args.max_sep)
-    records = df_matched.to_dict(orient='records')
-
-    # Optional download-only branch
-    if args.download:
-        SDSS.clear_cache()
-        N = len(records)
-        errors = []
-        for i in tqdm(range(N), desc="Downloading spectra"):
-            row = records[i]
-            plate, fiber, mjd = int(row['PLATE']), int(row['FIBERID']), int(row['MJD'])
-            sdss_name = str(row['SDSS_NAME'])
-            try:
-                _, _ = fetch_spectrum_fits(sdss_name, plate, fiber, mjd, cache_dir=args.cache_dir)
-            except Exception as e:
-                errors.append((i, sdss_name, str(e)))
-        print(f"[DONE] Attempted {N} downloads. Errors: {len(errors)}")
-        if errors:
-            for i, name, msg in errors[:10]:
-                print(f"  - {i}:{name} -> {msg}")
-        return
-
-    os.makedirs('results/pysqo_fits', exist_ok=True)
-    os.makedirs('data/pyqsofit', exist_ok=True)
-    create_qsopar_fits(path_ex='data/pyqsofit', parfilename=f'qsopar_{prefix}_{suffix}.fits', overwrite=True)
-
-    rows = []  # accumulate CSV rows
-
-    def run_parallel(npca_qso, decomp_host, BC, poly):
-        save_fig_path = os.path.join('plots', 'pyqsofit', prefix, f'npca_qso_{npca_qso}_decomp_host_{decomp_host}_BC_{BC}_poly_{poly}')
-        os.makedirs(save_fig_path, exist_ok=True)
-        save_fits_path = os.path.join('results', 'pysqo_fits', prefix, f'npca_qso_{npca_qso}_decomp_host_{decomp_host}_BC_{BC}_poly_{poly}')
-        os.makedirs(save_fits_path, exist_ok=True)
-
-        worker = partial(
-            run_qsofit_record,
-            npca_qso=npca_qso, decomp_host=decomp_host, BC=BC, poly=poly,
-            cache_dir=args.cache_dir, path_ex='data/pyqsofit',
-            parfilename=f'qsopar_{prefix}_{suffix}.fits',
-            save_fits_path=save_fits_path,
-            allow_partial_band_overlap=args.allow_partial_band_overlap,
-            save_fig_path=save_fig_path,
-            MC_samples=args.MC_samples,
-            disable_rescale_flux=args.disable_rescale_flux,
-        )
-
-        chunksize = 1
-        with Pool(processes=num_cores) as pool:
-            with tqdm(total=len(records), desc=f"Processing npca_qso={npca_qso} decomp_host={decomp_host} BC={BC} poly={poly}",
-                       dynamic_ncols=True, smoothing=0.0) as pbar:
-                for res in pool.imap_unordered(worker, records, chunksize=chunksize):
-                    # Build a flat row for CSV
-                    obj_id = str(res.get("object_id", ""))
-
-                    row = {
-                        "object_id": obj_id,
-                        "sdss_name": res.get("sdss_name", ""),
-                        "plate": res.get("plate", res.get("PLATE")),
-                        "fiber": res.get("fiber", res.get("FIBERID")),
-                        "mjd": res.get("mjd", res.get("MJD")),
-                        "z": res.get("z", res.get("Z_SYS")),
-                        "loglbol": res.get("loglbol", res.get("LOGLBOL")),
-                        "ra": res.get("ra", res.get("RA")),
-                        "dec": res.get("dec", res.get("DEC")),
-                        "npca_qso": npca_qso,
-                        "decomp_host": bool(decomp_host),
-                        "BC": bool(BC),
-                        "poly": bool(poly),
-                        "disable_rescale_flux": bool(args.disable_rescale_flux),
-                        "MC_samples": int(args.MC_samples),
-                        "run_label": option_label(npca_qso, decomp_host, BC, poly),                    
-                    } | res  # merge all result keys
-                    # print(f"[DEBUG] Completed object_id {obj_id} with npca_qso={npca_qso} decomp_host={decomp_host} BC={BC} poly={poly}")
-                    # print(f"[DEBUG] Results: {res}")
-                    rows.append(row)
-                    pbar.update(1)
-
-    poly_list = [False, True] if args.enable_poly else [False]
-    BC_list = [False, True] if args.enable_BC else [False]
-    for poly in poly_list:
-        for BC in BC_list:
-            run_parallel(npca_qso=-1, decomp_host=False, BC=BC, poly=poly)  # no host decomposition
-            for npca in [0, 1, 2, 5, 10]:
-                run_parallel(npca_qso=npca, decomp_host=True, BC=BC, poly=poly)
-
-    # poly = False
-    # BC = False
-    # npca_qso = -1
-    # decomp_host = False
-    # run_parallel(npca_qso=npca_qso, decomp_host=decomp_host, BC=BC, poly=poly)
-
-    # Optional merge of external spectral-fit CSV (row-wise add columns)
-    # if args.spectral_fit_csv and os.path.exists(args.spectral_fit_csv):
-    #     df_out = pd.DataFrame(rows)
-    #     df_spec = pd.read_csv(args.spectral_fit_csv)
-
-    #     join_key = "object_id" if "object_id" in df_spec.columns else ("sdss_name" if "sdss_name" in df_spec.columns else None)
-    #     if join_key is None:
-    #         print(f"[WARN] spectral_fit_csv has neither object_id nor sdss_name; skipping merge.")
-    #     else:
-    #         df_out = df_out.merge(df_spec, on=join_key, how="left", suffixes=("", "_spec"))
-    #     df_out["best"] = False  # not selected yet
-    #     df_out.to_csv(args.fpath_out, index=False)
-    # else:
-    df_out = pd.DataFrame(rows)
-    df_out["best"] = False
-    df_out.to_csv(args.fpath_out, index=False)
-
-    print(f"[OK] Wrote all runs to CSV: {args.fpath_out}")
 
 
 def zip_file(output):
@@ -1175,21 +1027,6 @@ def run_select(args):
     df.loc[~(df["npca_qso"].isin([-1, 0, 1, 10])), "redchip"] *= 1e9
     df.loc[~((df["npca_qso"].isin([-1])) & (df["z"] > 1.4)), "redchip"] *= 1e9
 
-    lbol_cut = 45
-
-    # low lbol
-    # 50% penalty if decomp_host == False
-    # df.loc[(df["loglbol"] < lbol_cut) & (df["decomp_host"] == False), "redchip"] *= 1.5
-    # # 20% penalty if npca_qso 2
-    # df.loc[(df["loglbol"] < lbol_cut) & (df["decomp_host"] == True) & (df["npca_qso"].isin([1,2])), "redchip"] *= 1
-    # # 20% penalty if npca_qso != 0 and 5, 10
-    # df.loc[(df["loglbol"] < lbol_cut) & (df["decomp_host"] == True) & (df["npca_qso"].isin([5, 10])), "redchip"] *= 1.5
-
-
-    
-    # high lbol
-    # 50% penalty if npca_qso == 0
-    #df.loc[(df["loglbol"] >= 46.5) & (df["decomp_host"] == True), "redchip"] *= 1.5
 
     # ---- Pick the minimum redchip per object
     idx_best = df.groupby("object_id", sort=False)["redchip"].idxmin()
@@ -1204,6 +1041,227 @@ def run_select(args):
     zip_file(csv_path)
     print(f"[OK] Selected best fits and updated CSV: {csv_path}")
 
+
+# ---------- helpers ----------
+
+def _build_base_records(args):
+    """Load → prep → DR16Q match → normalize to lowercase keys required downstream."""
+    quasar_list = load_quasar_core_list(args.fpath_in)
+    sample_df = prepare_sample_df(quasar_list, args.filter_sdss_name, args.N, args.skip)
+    df_matched, _ = match_to_dr16q(sample_df, args.dr16q_fits, args.max_sep)
+    base = []
+    for _, row in df_matched.iterrows():
+        base.append(row.to_dict())
+    return base
+
+def _config_grid(args, rec):
+    """
+    Yield (npca_qso, decomp_host, BC, poly) combos for COLLECT mode.
+    If z > 1.4: disallow BC and host decomposition (only npca_qso = -1, decomp_host=False, BC=False).
+    """
+    poly_list = [False, True] if args.enable_poly else [False]
+    z = float(rec["z"])
+
+    if False and z > 1.4:
+        for poly in poly_list:
+            yield (-1, False, False, poly)
+    else:
+        BC_list = [False, True] if args.enable_BC else [False]
+        for poly in poly_list:
+            for BC in BC_list:
+                # no host decomposition
+                yield (-1, False, BC, poly)
+                # host decomposition variants
+                for npca in [0, 1, 2, 5, 10]:
+                    yield (npca, True, BC, poly)
+
+def _make_paths_from_rec(rec):
+    """Derive save paths from the record's run configuration and ensure dirs."""
+    npca_qso = rec["npca_qso"]; decomp_host = rec["decomp_host"]; BC = rec["BC"]; poly = rec["poly"]
+    save_fig_path = os.path.join(
+        'plots', 'pyqsofit', prefix,
+        f'npca_qso_{npca_qso}_decomp_host_{decomp_host}_BC_{BC}_poly_{poly}'
+    )
+    save_fits_path = os.path.join(
+        'results', 'pysqo_fits', prefix,
+        f'npca_qso_{npca_qso}_decomp_host_{decomp_host}_BC_{BC}_poly_{poly}'
+    )
+    os.makedirs(save_fig_path, exist_ok=True)
+    os.makedirs(save_fits_path, exist_ok=True)
+    return save_fig_path, save_fits_path
+
+def _write_row(res, rec, args):
+    """Flatten result + rec (which includes config) into one CSV row."""
+    cfg = {
+        "npca_qso": int(rec["npca_qso"]),
+        "decomp_host": bool(rec["decomp_host"]),
+        "BC": bool(rec["BC"]),
+        "poly": bool(rec["poly"]),
+    }
+    base = {
+        "object_id": str(res.get("object_id", rec.get("object_id", ""))),
+        "sdss_name": res.get("sdss_name", rec.get("sdss_name", "")),
+        "plate": res.get("plate", rec.get("plate")),
+        "fiber": res.get("fiber", rec.get("fiber")),
+        "mjd": res.get("mjd", rec.get("mjd")),
+        "z": res.get("z", rec.get("z")),
+        "loglbol": res.get("loglbol", rec.get("loglbol")),
+        "ra": res.get("ra", rec.get("ra")),
+        "dec": res.get("dec", rec.get("dec")),
+        "disable_rescale_flux": bool(args.disable_rescale_flux),
+        "MC_samples": int(args.MC_samples),
+        "run_label": option_label(cfg["npca_qso"], cfg["decomp_host"], cfg["BC"], cfg["poly"]),
+    } | cfg
+    return base | res
+
+# TOP-LEVEL helper (must not be nested) -------------------------------
+def _worker_run_rec(
+    rec,
+    cache_dir,
+    path_ex,
+    parfilename,
+    allow_partial_band_overlap,
+    MC_samples,
+    disable_rescale_flux,
+):
+    # build per-config paths from the record
+    save_fig_path, save_fits_path = _make_paths_from_rec(rec)
+    res = run_qsofit_record(
+        rec=rec,
+        cache_dir=cache_dir,
+        path_ex=path_ex,
+        parfilename=parfilename,
+        save_fig_path=save_fig_path,
+        save_fits_path=save_fits_path,
+        allow_partial_band_overlap=allow_partial_band_overlap,
+        MC_samples=MC_samples,
+        disable_rescale_flux=disable_rescale_flux,
+    )
+    # return both so caller can write row with original rec
+    return res, rec
+
+# ---------- core runner over a prepared list of records ----------
+def run_records(args, records):
+    """
+    Run run_qsofit_record over a prepared `records` list.
+    Each `rec` must already include the config: npca_qso, decomp_host, BC, poly.
+    Writes args.fpath_out CSV.
+    """
+    # Ensure parameter + output dirs exist once
+    os.makedirs('results/pysqo_fits', exist_ok=True)
+    os.makedirs('data/pyqsofit', exist_ok=True)
+    parfilename = f'qsopar_{prefix}_{suffix}.fits'
+    create_qsopar_fits(path_ex='data/pyqsofit',
+                       parfilename=parfilename,
+                       overwrite=True)
+
+    # Build a picklable worker via partial (no lambdas, no inner defs)
+    from functools import partial
+    worker = partial(
+        _worker_run_rec,
+        cache_dir=args.cache_dir,
+        path_ex='data/pyqsofit',
+        parfilename=parfilename,
+        allow_partial_band_overlap=args.allow_partial_band_overlap,
+        MC_samples=args.MC_samples,
+        disable_rescale_flux=args.disable_rescale_flux,
+    )
+
+    rows = []
+    chunksize = 1
+    with Pool(processes=args.nproc) as pool:
+        desc = f"Processing {len(records)} record(s)"
+        with tqdm(total=len(records), desc=desc, dynamic_ncols=True, smoothing=100.0/len(records)) as pbar:
+            for res, rec in pool.imap_unordered(worker, records, chunksize=chunksize):
+                print(res)
+                row = _write_row(res, rec, args)
+                rows.append(row)
+                pbar.update(1)
+
+    df_out = pd.DataFrame(rows)
+    df_out["best"] = False
+    df_out.to_csv(args.fpath_out, index=False)
+    print(f"[OK] Wrote runs to CSV: {args.fpath_out}")
+
+# ---------- run_download: keep as-is ----------
+def run_download(args):
+    records = _build_base_records(args)
+    SDSS.clear_cache()
+    N = len(records)
+    errors = []
+    for i in tqdm(range(N), desc="Downloading spectra"):
+        row = records[i]
+        plate, fiber, mjd = int(row['plate']), int(row['fiber']), int(row['mjd'])
+        sdss_name = str(row['sdss_name'])
+        try:
+            _, _ = fetch_spectrum_fits(sdss_name, plate, fiber, mjd, cache_dir=args.cache_dir)
+        except Exception as e:
+            errors.append((i, sdss_name, str(e)))
+    print(f"[DONE] Attempted {N} downloads. Errors: {len(errors)}")
+    if errors:
+        for i, name, msg in errors[:10]:
+            print(f"  - {i}:{name} -> {msg}")
+
+# ---------- run_collect: build list of all records, then call run_records ----------
+def run_collect(args):
+    base = _build_base_records(args)
+    records = []
+    for b in base:
+        for npca_qso, decomp_host, BC, poly in _config_grid(args, b):
+            r = b.copy()
+            r.update({
+                "npca_qso": npca_qso,
+                "decomp_host": decomp_host,
+                "BC": BC,
+                "poly": poly,
+            })
+            records.append(r)
+    run_records(args, records)
+
+# ---------- run_single: configs from CSV, base records for everything else ----------
+def run_single(args):
+    if args.single_csv is None or not os.path.exists(args.single_csv):
+        raise ValueError("In single mode, --single_csv must be provided and exist.")
+
+    # Build base records from your catalog match
+    base = _build_base_records(args)
+    print(f"[INFO] Built {len(base)} base records from DR16Q match")
+
+    # Simple in-place indexes for lookup (keep it minimal)
+    by_oid = {str(b.get("object_id", "")).strip(): b for b in base}
+
+    # Load configs
+    df_single = pd.read_csv(args.single_csv)  # EXACT columns assumed
+    print(f"[INFO] Loaded single-run CSV with {len(df_single)} rows from {args.single_csv}")
+    df_single = df_single[df_single["best"] == True]
+    print(f"[INFO] After filtering best=True, {len(df_single)} rows remain.")
+
+    # Build records by merging base + config from CSV
+    records = []
+    misses = 0
+    for _, row in df_single.iterrows():
+        # Prefer object_id match when present; else match on (sdss_name, plate, mjd, fiber)
+        rec_base = None
+        oid = str(row.get("object_id", "")).strip()
+        rec_base = by_oid[oid]
+
+        if rec_base is None:
+            misses += 1
+            # Keep it simple: just log and skip
+            print(f"[WARN] Could not match row to base: object_id={row.get('object_id')}")
+            continue
+        r = rec_base.copy()
+        r.update({
+            "npca_qso": int(row["npca_qso"]),
+            "decomp_host": bool(row["decomp_host"]),
+            "BC": bool(row["BC"]),
+            "poly": bool(row["poly"]),
+        })
+        records.append(r)
+    print(f"[INFO] Built {len(records)} records for single-run from CSV; misses: {misses}")
+    run_records(args, records)
+
+
 # ------------------------------
 # Main
 # ------------------------------
@@ -1211,8 +1269,14 @@ def main():
     args = parse_args()
     if args.mode == "collect":
         run_collect(args)
-    else:
+    elif args.mode == "single":
+        run_single(args)
+    elif args.mode == "download":
+        run_download(args)
+    elif args.mode == "select":
         run_select(args)
+    else:
+        raise ValueError(f"Unknown mode: {args.mode}")
 
 if __name__ == "__main__":
     main()
