@@ -1171,7 +1171,7 @@ def run_records(args, records):
     chunksize = 1
     with Pool(processes=args.nproc) as pool:
         desc = f"Processing {len(records)} record(s)"
-        with tqdm(total=len(records), desc=desc, dynamic_ncols=True, smoothing=100.0/len(records)) as pbar:
+        with tqdm(total=len(records), desc=desc, dynamic_ncols=True, smoothing=0.2) as pbar:
             for res, rec in pool.imap_unordered(worker, records, chunksize=chunksize):
                 print(res)
                 row = _write_row(res, rec, args)
