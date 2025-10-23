@@ -34,6 +34,9 @@ import astropy.units as u
 from hubble_utils import read_quasars_from_hdf5, write_hdf5_file, match_radec
 import warnings
 import h5py
+from speclite import filters
+from pyqsofit.PyQSOFit import QSOFit
+QSOFit.set_mpl_style()
 
 from astroquery.sdss import SDSS
 #warnings.filterwarnings("ignore")
@@ -188,7 +191,7 @@ def _safe_float(x):
         return np.nan
 
 
-def compute_apparent_mag_2500_astropy(logL2500, logL2500_err, z):
+def compute_apparent_mag_2500_astropy(logL2500, z):
     cosmo = FlatLambdaCDM(H0=70, Om0=0.3)
     c = 2.99792458e10  # cm/s
     lambda_ = 2500e-8  # cm
@@ -198,9 +201,8 @@ def compute_apparent_mag_2500_astropy(logL2500, logL2500_err, z):
     log_Lnu = logL2500 + np.log10(lambda_ / c)
     log_fnu = log_Lnu - np.log10(4 * np.pi * DL**2 * (1 + z))
     m_ab = -2.5 * log_fnu - 48.60
-    m_ab_err = 2.5 * logL2500_err
 
-    return m_ab, m_ab_err
+    return m_ab
 
 
 def fetch_spectrum_fits(sdss_name, plate, fiber, mjd, cache_dir="data/spectra_cache"):
@@ -517,14 +519,6 @@ def run_qsofit_record(rec, npca_qso, decomp_host, BC, cache_dir="data/spectra_ca
     Worker-safe version of QSOFit runner.
     `rec` is a plain dict containing only the fields needed for one object.
     """
-    from speclite import filters
-    from pyqsofit.PyQSOFit import QSOFit
-
-    #print("\n\n====================== Working on SDSS_NAME={} (z={:.2f}) =================".format(rec["sdss_name"], rec["z"]))            
-
-    QSOFit.set_mpl_style()
-
-
     # default result (so we always return a complete row even on error)
     result = dict(
         z=rec["z"],
@@ -582,7 +576,7 @@ def run_qsofit_record(rec, npca_qso, decomp_host, BC, cache_dir="data/spectra_ca
 
         lam  = 10 ** hdul[1].data['loglam']                  # [Å]
         flux = hdul[1].data['flux']                          # [erg/s/cm^2/Å]
-        err  = 1.0 / np.sqrt(hdul[1].data['ivar'])           # 1-sigma
+        flux_err  = 1.0 / np.sqrt(hdul[1].data['ivar'])           # 1-sigma
 
         # Absolute flux calibration (g,r,i)
         sdss_filters = filters.load_filters(*[f'sdss2010-{b}' for b in bands])
@@ -646,204 +640,193 @@ def run_qsofit_record(rec, npca_qso, decomp_host, BC, cache_dir="data/spectra_ca
             delta_m_avg = 0.0
             sigma_dm = 0.0
         # print(f"[INFO] Using bands {bands_used} for {rec['sdss_name']}: delta_m_avg={delta_m_avg:.3f} ± {sigma_dm:.3f} mag")
-    
-        if disable_rescale_flux:
-            scale = 1.0  # OVERRIDE: disable absolute flux rescaling
-        else:
-            scale = 10 ** (-0.4 * delta_m_avg)
-
-        flux_scaled = flux * scale
-
-        err_scaled  = err  * scale      # IMPORTANT: scale the uncertainties too
-        
-        q_mle = QSOFit(lam, flux_scaled, err_scaled, rec["z"], path=path_ex)
-        q_mle.Fit(
-            name=f"{rec['z']:.2f}_{rec['sdss_name']}_{rec['plate']}-{rec['mjd']}-{rec['fiber']}",  # customize the name of given targets. Default: plate-mjd-fiber
-            
-            # preprocessing parameters
-            nsmooth=1,              # do n-pixel smoothing to the raw input flux and err spectra
-            and_mask=False,         # delete the and masked pixels
-            or_mask=False,          # delete the or masked pixels
-            reject_badpix=True,    # reject 10 most possible outliers by the test of pointDistGESD
-            deredden=True,          # correct the Galactic extinction
-            #wave_range=[1150, 1e9], # trim input wavelength
-            #wave_range=[1200, 1e9],  # trim input wavelength
-            wave_range=[1250, 7997.75],  # trim input wavelength to avoid edge effects in host decomposition
-            wave_mask=None,         # 2-D array, mask the given range(s)
-
-            # host decomposition parameters
-            decompose_host=decomp_host,      # If True, the host galaxy-QSO decomposition will be applied
-            host_prior=False,         # If True, adopt prior-informed method to assist decomposition (PCA only)
-            host_prior_scale=0.2,     # scale of prior penalty; smaller if prior affects fitting too much
-
-            host_line_mask=True,      # mask galaxy line region when subtracting from original spectra
-            decomp_na_mask=True,      # mask narrow line region during decomposition
-            qso_type='global',        # PCA template name for quasar
-
-            # npca_qso=10,              # number of quasar templates
-            # host_type='BC03',         # PCA template name for galaxy
-            # npca_gal=5,               # number of galaxy templates
-
-            npca_qso=npca_qso,              # number of quasar templates
-            host_type='BC03',         # PCA template name for galaxy
-            npca_gal=10,               # number of galaxy templates
-            
-            # continuum model fit parameters
-            Fe_uv_op=True,            # If True, fit continuum with UV and optical FeII template
-            poly=poly,                # If True, include polynomial component to account for dust reddening
-            BC=BC,                 # If True, fit continuum with Balmer continua from 1000 to 3646A
-            initial_guess=None,       # initial parameters for continuum model
-            rej_abs_conti=True,      # iteratively reject 3σ outlier absorption pixels in continuum
-            n_pix_min_conti=100,      # minimum negative pixels for host continuum fit rejection
-
-            # emission line fit parameters
-            linefit=True,             # If True, fit emission lines
-            rej_abs_line=False,       # If True, iteratively reject 3σ outlier absorption pixels in lines
-
-            # fitting method selection
-            MC=(MC_samples>0),                  # Monte Carlo resampling for error array
-            MCMC=False,               # Markov Chain Monte Carlo sampling
-            nsamp=MC_samples,                 # number of MC trials or MCMC samples
-
-            # advanced fitting parameters
-            param_file_name=parfilename,  # qso fitting parameter FITS file
-            nburn=20,                 # burn-in samples for MCMC
-            nthin=10,                 # return every n-th MCMC sample
-            epsilon_jitter=0.,        # initial jitter for Gaussians to avoid local minima
-
-            # customize the results
-            save_result=True,         # save fitting results to a FITS file
-            save_fits_name=None,      # output name for result FITS
-            save_fits_path=save_fits_path,       # output path for result FITS
-            plot_fig=True,            # plot fitting results
-            save_fig=True,            # save fitting figures
-            plot_corner=True,         # plot corner plot if MCMC=True
-
-            # debugging mode
-            verbose=False,            # turn debugging output on/off
-
-            # sublevel parameters for figure plot and emcee
-            kwargs_plot={
-                'save_fig_path': save_fig_path,  # path to save figures
-                'broad_fwhm': 1200,                 # km/s, lower limit to classify as broad component
-                'disable_secondary_plot': True,  # if True, disable the secondary plot with masked regions
-            },
-            kwargs_conti_emcee={},
-            kwargs_line_emcee={}
-        )
-
-        conti_dict = {
-            name: _safe_float(val)
-            for name, val in zip(q_mle.conti_result_name, q_mle.conti_result)
-        }
-        conti_dict['z'] = rec["z"]
-
-        L_ok = np.isfinite(conti_dict['L2500_int']) and np.isfinite(conti_dict.get('L2500_int_err', -1e9))
-        if L_ok:
-            m_2500, m_2500_err = compute_apparent_mag_2500_astropy(conti_dict['L2500_int'], conti_dict.get('L2500_int_err', -1e9), z=rec['z'])
-            m_2500_err = np.sqrt(m_2500_err**2 + np.mean(mag_errs)**2)
-        else:
-            print(f"[WARN] L2500_int not finite for {rec['sdss_name']} (z={rec['z']:.2f})")
-            m_2500, m_2500_err = -1e9, -1e9
-
-        # L2500 reddened
-        L_ok = np.isfinite(conti_dict['L2500']) and np.isfinite(conti_dict.get('L2500_err', -1e9))
-        if L_ok:
-            m_2500_reddened, m_2500_reddened_err = compute_apparent_mag_2500_astropy(conti_dict['L2500'], conti_dict.get('L2500_err', -1e9), z=rec['z'])
-            m_2500_reddened_err = np.sqrt(m_2500_reddened_err**2 + np.mean(mag_errs)**2)
-        else:
-            print(f"[WARN] L2500 not finite for {rec['sdss_name']} (z={rec['z']:.2f})")
-            m_2500_reddened, m_2500_reddened_err = -1e9, -1e9
-
-
-        try:
-            alpha_lambda = conti_dict.get('PL_slope_blue', -99)
-            z = conti_dict['z']
-
-            filt_i = filters.load_filter('sdss2010-i')
-            host_contr = q_mle.host if q_mle.decompose_host else 0.0
-            lam_obs = q_mle.wave * (1 + z)
-            #f_lam_obs = (q_mle.flux - host_contr) / (1.0 + z)
-            f_lam_obs = q_mle.f_conti_model / (1.0 + z)
-            apparent_mag_i_obs = filt_i.get_ab_magnitude(1e-17*f_lam_obs*u.erg/u.s/u.cm**2/u.AA, lam_obs*u.AA)
-            K_i = 2.5*(alpha_lambda + 1.0)*np.log10(1.0 + z)
-            apparent_mag_i_rest = apparent_mag_i_obs - K_i
-        except Exception as e:
-            print(f"[ERROR] apparent_mag_i_rest {rec.get('object_id','?')} ({rec.get('sdss_name','?')}) (z {rec.get('z','?')}): {e}")
-            print(f"[INFO] Wavelength range (RF): {q_mle.wave.min():.1f} - {q_mle.wave.max():.1f} Å")
-            print(f"[INFO] Wavelength range (OBS): {lam_obs.min():.1f} - {lam_obs.max():.1f} Å")
-            #traceback.print_exc()
-            apparent_mag_i_rest, apparent_mag_i_obs = -1e9, -1e9
-            #delta_m_avg = -1e9
-            #delta_mags = {}
-
-
-        try:
-            # compute reddened integral
-            wave_eval = np.linspace(2500-1500, 2500+1500, 5000)
-            poly = q_mle.F_poly_conti(wave_eval, q_mle.conti_fit.params.valuesdict())
-            reddening_integral = -np.trapz(poly, wave_eval)
-            #print(f"[INFO] reddening_integral {rec.get('object_id','?')} ({rec.get('sdss_name','?')}) (z {rec.get('z','?')}): {reddening_integral:.3f}")
-        except Exception as e:
-            print(f"[ERROR] reddening_integral {rec.get('object_id','?')} ({rec.get('sdss_name','?')}) (z {rec.get('z','?')}): {e}")
-            traceback.print_exc()
-            reddening_integral = -1e9
-
-        try:
-            wave_eval = np.linspace(2500-1500, 2500+1500, 5000)
-            lam = wave_eval
-            poly = q_mle.F_poly_conti(wave_eval, q_mle.conti_fit.params.valuesdict())
-            df = poly                         # PL-subtracted in linear units
-            f_pl = q_mle.PL(lam, q_mle.conti_fit.params.valuesdict())        # reconstruct your PL continuum used in the subtraction
-            r = np.clip(df / np.maximum(f_pl, 1e-300), -1e6, 1e6)  # fractional residual
-            x = np.log(lam)
-            reddening_proxy = - np.trapz(r, x) / (x.max() - x.min())      # dimensionless
-            #print(f"[INFO] reddening_proxy {rec.get('object_id','?')} ({rec.get('sdss_name','?')}) (z {rec.get('z','?')}): {reddening_proxy:.3f}")
-        except Exception as e:
-            print(f"[ERROR] reddening_proxy {rec.get('object_id','?')} ({rec.get('sdss_name','?')}) (z {rec.get('z','?')}): {e}")
-            traceback.print_exc()
-            reddening_proxy = -1e9
-
-        # print("redchi: ", q_mle.conti_fit.redchi)
-        # print("aic: ", q_mle.conti_fit.aic)
-        # print("bic: ", q_mle.conti_fit.bic)
 
         result.update(
-            delta_m_avg=delta_m_avg,
             delta_mag_u=delta_mags.get('u', -1e9),
-            delta_mag_r=delta_mags.get('r', -1e9),
             delta_mag_g=delta_mags.get('g', -1e9),
+            delta_mag_r=delta_mags.get('r', -1e9),
             delta_mag_i=delta_mags.get('i', -1e9),
             delta_mag_z=delta_mags.get('z', -1e9),
-            apparent_mag_i_rest=apparent_mag_i_rest,
-            apparent_mag_i_obs=apparent_mag_i_obs,
-            apparent_mag_2500=m_2500,
-            apparent_mag_2500_err=m_2500_err,
-            apparent_mag_2500_reddened=m_2500_reddened,
-            apparent_mag_2500_reddened_err=m_2500_reddened_err,
-            f_host_2500=conti_dict.get('frac_host_4200', -1), # in pyqsofit, frac_host_4200 is actually at 2500A
-            #f_host_4200=conti_dict.get('frac_host_4200', 0),
-            f_host_5100=conti_dict.get('frac_host_5100', -1),
-            conti_a_0=conti_dict['conti_a_0'],
-            conti_a_0_err=conti_dict.get('conti_a_0_err', -1e9),
-            alpha_lambda=conti_dict['PL_slope_blue'],
-            alpha_lambda_err=conti_dict.get('PL_slope_blue_err', -1e9),
-            redchi=q_mle.conti_fit.redchi,
-            aic=q_mle.conti_fit.aic,
-            bic=q_mle.conti_fit.bic,
-            redchi2_conti_full=q_mle.redchi2_conti_full,
-            ebv_fs=conti_dict.get('EBV', -99),
-            euv_fs=conti_dict.get('EUV', -99),
-            log_L2500_fs=conti_dict.get('L2500', -1e9),
-            log_L2500_fs_err=conti_dict.get('L2500_err', -1e9),
-            log_L2500_int_fs=conti_dict.get('L2500_int', -1e9),
-            log_L2500_int_fs_err=conti_dict.get('L2500_int_err', -1e9),
-            reddening_integral=reddening_integral,
-            reddening_proxy=reddening_proxy,
-            bands_used=bands_used,
+            delta_m_avg=delta_m_avg,
+            bands_used=bands_used
         )
-        #print(f"[INFO] Result for {rec['sdss_name']} (z={rec['z']:.2f}): {result}")
-        return result | conti_dict
+        
+        result_list = []
+
+        rng = np.random.default_rng(42)
+
+        for i in range(MC_samples if MC_samples > 0 else 1):
+            delta_m_avg_i = rng.normal(delta_m_avg, sigma_dm)
+            scale = 10.0 ** (-0.4 * delta_m_avg_i)
+            flux_err_scaled_i = flux_err * scale
+            flux_scaled_i = flux * scale + rng.normal(0.0, 1.0, size=flux.size) * flux_err_scaled_i
+
+            q_mle = QSOFit(lam, np.copy(flux_scaled_i), np.copy(flux_err_scaled_i), rec["z"], path=path_ex)
+            q_mle.Fit(
+                name=f"{rec['z']:.2f}_{rec['sdss_name']}_{rec['plate']}-{rec['mjd']}-{rec['fiber']}",  # customize the name of given targets. Default: plate-mjd-fiber
+                
+                # preprocessing parameters
+                nsmooth=1,              # do n-pixel smoothing to the raw input flux and err spectra
+                and_mask=False,         # delete the and masked pixels
+                or_mask=False,          # delete the or masked pixels
+                reject_badpix=True,    # reject 10 most possible outliers by the test of pointDistGESD
+                deredden=True,          # correct the Galactic extinction
+                #wave_range=[1150, 1e9], # trim input wavelength
+                #wave_range=[1200, 1e9],  # trim input wavelength
+                wave_range=[1250, 7997.75],  # trim input wavelength to avoid edge effects in host decomposition
+                wave_mask=None,         # 2-D array, mask the given range(s)
+
+                # host decomposition parameters
+                decompose_host=decomp_host,      # If True, the host galaxy-QSO decomposition will be applied
+                host_prior=False,         # If True, adopt prior-informed method to assist decomposition (PCA only)
+                host_prior_scale=0.2,     # scale of prior penalty; smaller if prior affects fitting too much
+
+                host_line_mask=True,      # mask galaxy line region when subtracting from original spectra
+                decomp_na_mask=True,      # mask narrow line region during decomposition
+                qso_type='global',        # PCA template name for quasar
+
+                npca_qso=npca_qso,              # number of quasar templates
+                host_type='BC03',         # PCA template name for galaxy
+                npca_gal=10,               # number of galaxy templates
+                
+                # continuum model fit parameters
+                Fe_uv_op=True,            # If True, fit continuum with UV and optical FeII template
+                poly=poly,                # If True, include polynomial component to account for dust reddening
+                BC=BC,                 # If True, fit continuum with Balmer continua from 1000 to 3646A
+                initial_guess=None,       # initial parameters for continuum model
+                rej_abs_conti=True,      # iteratively reject 3σ outlier absorption pixels in continuum
+                n_pix_min_conti=100,      # minimum negative pixels for host continuum fit rejection
+
+                # emission line fit parameters
+                linefit=True,             # If True, fit emission lines
+                rej_abs_line=False,       # If True, iteratively reject 3σ outlier absorption pixels in lines
+
+                # fitting method selection
+                MC=False,                  # Monte Carlo resampling for error array
+                MCMC=False,               # Markov Chain Monte Carlo sampling
+                nsamp=0,                 # number of MC trials or MCMC samples
+
+                # advanced fitting parameters
+                param_file_name=parfilename,  # qso fitting parameter FITS file
+                nburn=20,                 # burn-in samples for MCMC
+                nthin=10,                 # return every n-th MCMC sample
+                epsilon_jitter=0.,        # initial jitter for Gaussians to avoid local minima
+
+                # customize the results
+                save_result=True,         # save fitting results to a FITS file
+                save_fits_name=None,      # output name for result FITS
+                save_fits_path=save_fits_path,       # output path for result FITS
+                plot_fig=True,            # plot fitting results
+                save_fig=True,            # save fitting figures
+                plot_corner=True,         # plot corner plot if MCMC=True
+
+                # debugging mode
+                verbose=False,            # turn debugging output on/off
+
+                # sublevel parameters for figure plot and emcee
+                kwargs_plot={
+                    'save_fig_path': save_fig_path,  # path to save figures
+                    'broad_fwhm': 1200,                 # km/s, lower limit to classify as broad component
+                    'disable_secondary_plot': True,  # if True, disable the secondary plot with masked regions
+                },
+                kwargs_conti_emcee={},
+                kwargs_line_emcee={}
+            )
+
+            conti_dict = {
+                name: _safe_float(val)
+                for name, val in zip(q_mle.conti_result_name, q_mle.conti_result)
+            }
+            conti_dict['z'] = rec["z"]
+
+            L_ok = np.isfinite(conti_dict['L2500_int'])
+            if L_ok:
+                m_2500 = compute_apparent_mag_2500_astropy(conti_dict['L2500_int'], z=rec['z'])            
+            else:
+                print(f"[WARN] L2500_int not finite for {rec['sdss_name']} (z={rec['z']:.2f})")
+                m_2500 = np.nan
+
+            # L2500 reddened
+            L_ok = np.isfinite(conti_dict['L2500'])
+            if L_ok:
+                m_2500_reddened = compute_apparent_mag_2500_astropy(conti_dict['L2500'], z=rec['z'])
+            else:
+                print(f"[WARN] L2500 not finite for {rec['sdss_name']} (z={rec['z']:.2f})")
+                m_2500_reddened = np.nan
+
+            try:
+                alpha_lambda = conti_dict.get('PL_slope_blue', np.nan)
+                z = conti_dict['z']
+
+                filt_i = filters.load_filter('sdss2010-i')
+                host_contr = q_mle.host if q_mle.decompose_host else 0.0
+                lam_obs = q_mle.wave * (1 + z)
+                #f_lam_obs = (q_mle.flux - host_contr) / (1.0 + z)
+                f_lam_obs = q_mle.f_conti_model / (1.0 + z)
+                apparent_mag_i_obs = filt_i.get_ab_magnitude(1e-17*f_lam_obs*u.erg/u.s/u.cm**2/u.AA, lam_obs*u.AA)
+                K_i = 2.5*(alpha_lambda + 1.0)*np.log10(1.0 + z)
+                apparent_mag_i_rest = apparent_mag_i_obs - K_i
+            except Exception as e:
+                print(f"[ERROR] apparent_mag_i_rest {rec.get('object_id','?')} ({rec.get('sdss_name','?')}) (z {rec.get('z','?')}): {e}")
+                print(f"[INFO] Wavelength range (RF): {q_mle.wave.min():.1f} - {q_mle.wave.max():.1f} Å")
+                print(f"[INFO] Wavelength range (OBS): {lam_obs.min():.1f} - {lam_obs.max():.1f} Å")
+                #traceback.print_exc()
+                apparent_mag_i_rest, apparent_mag_i_obs = np.nan, np.nan
+
+            try:
+                # compute reddened integral
+                wave_eval = np.linspace(2500-1500, 2500+1500, 5000)
+                poly_curve = q_mle.F_poly_conti(wave_eval, q_mle.conti_fit.params.valuesdict())
+                reddening_integral = -np.trapz(poly_curve, wave_eval)
+                #print(f"[INFO] reddening_integral {rec.get('object_id','?')} ({rec.get('sdss_name','?')}) (z {rec.get('z','?')}): {reddening_integral:.3f}")
+            except Exception as e:
+                print(f"[ERROR] reddening_integral {rec.get('object_id','?')} ({rec.get('sdss_name','?')}) (z {rec.get('z','?')}): {e}")
+                traceback.print_exc()
+                reddening_integral = np.nan
+
+            result_i = dict(
+                apparent_mag_i_rest=apparent_mag_i_rest,
+                apparent_mag_i_obs=apparent_mag_i_obs,
+                apparent_mag_2500=m_2500,
+                apparent_mag_2500_reddened=m_2500_reddened,
+                f_host_2500=conti_dict.get('frac_host_4200', -1), # in pyqsofit, frac_host_4200 is actually at 2500A
+                f_host_5100=conti_dict.get('frac_host_5100', -1),
+                conti_a_0=conti_dict['conti_a_0'],
+                alpha_lambda=conti_dict['PL_slope_blue'],
+                redchi=q_mle.conti_fit.redchi,
+                aic=q_mle.conti_fit.aic,
+                bic=q_mle.conti_fit.bic,
+                redchi2_conti_full=q_mle.redchi2_conti_full,
+                ebv_fs=conti_dict.get('EBV', np.nan),
+                euv_fs=conti_dict.get('EUV', np.nan),
+                log_L2500_fs=conti_dict.get('L2500', np.nan),
+                log_L2500_int_fs=conti_dict.get('L2500_int', np.nan),
+                reddening_integral=reddening_integral,
+            )
+            result_list.append(result_i)
+
+        def sym_percentile(x, p=[50, 16, 84], axis=0):
+            x = np.asarray(x)
+            x = x[~np.isnan(x)]  # Remove NaN values
+            if x.size == 0:
+                return np.nan, np.nan  # Return NaN if all values are NaN
+            elif x.size == 1:
+                return x[0], 1e9
+            else:
+                lower, median, upper = np.percentile(x, p, axis=axis)
+                return median, 0.5 * (upper - lower)
+        
+        # Reshape result_list and compute median and err for each entry
+        reshaped_results = {key: [] for key in result_list[0].keys()}
+        for entry in result_list:
+            for key, value in entry.items():
+                reshaped_results[key].append(value)
+
+        for key, values in reshaped_results.items():
+            median, err = sym_percentile(np.array(values))
+            result[key] = median
+            result[f"{key}_err"] = err
+        return result
 
     except Exception as e:
         # swallow errors per object; keep defaults but print traceback
@@ -1090,6 +1073,8 @@ def run_collect(args):
                         "MC_samples": int(args.MC_samples),
                         "run_label": option_label(npca_qso, decomp_host, BC, poly),                    
                     } | res  # merge all result keys
+                    # print(f"[DEBUG] Completed object_id {obj_id} with npca_qso={npca_qso} decomp_host={decomp_host} BC={BC} poly={poly}")
+                    # print(f"[DEBUG] Results: {res}")
                     rows.append(row)
                     pbar.update(1)
 
