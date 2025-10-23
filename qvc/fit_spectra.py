@@ -1220,45 +1220,91 @@ def run_collect(args):
 
 # ---------- run_single: configs from CSV, base records for everything else ----------
 def run_single(args):
-    if args.single_csv is None or not os.path.exists(args.single_csv):
-        raise ValueError("In single mode, --single_csv must be provided and exist.")
 
-    # Build base records from your catalog match
-    base = _build_base_records(args)
-    print(f"[INFO] Built {len(base)} base records from DR16Q match")
+    if args.single_csv is None:
+        raise ValueError("In single mode, --single_csv must be provided.")
+    if not os.path.exists(args.single_csv):
+        raise ValueError("In single mode, --single_csv must exist.")
 
-    # Simple in-place indexes for lookup (keep it minimal)
-    by_oid = {str(b.get("object_id", "")).strip(): b for b in base}
-
-    # Load configs
-    df_single = pd.read_csv(args.single_csv)  # EXACT columns assumed
+    # ---------- Load configs (EXACT columns assumed) ----------
+    df_single = pd.read_csv(args.single_csv)
     print(f"[INFO] Loaded single-run CSV with {len(df_single)} rows from {args.single_csv}")
+
+    # Keep best=True only
+    if "best" not in df_single.columns:
+        raise ValueError("single_csv must contain a 'best' column.")
     df_single = df_single[df_single["best"] == True]
     print(f"[INFO] After filtering best=True, {len(df_single)} rows remain.")
 
-    # Build records by merging base + config from CSV
-    records = []
-    misses = 0
-    for _, row in df_single.iterrows():
-        # Prefer object_id match when present; else match on (sdss_name, plate, mjd, fiber)
-        rec_base = None
-        oid = str(row.get("object_id", "")).strip()
-        rec_base = by_oid[oid]
+    # Sanity check necessary columns
+    required_cols = {"object_id", "npca_qso", "decomp_host", "BC", "poly"}
+    missing = required_cols - set(df_single.columns)
+    if missing:
+        raise ValueError(f"single_csv missing required columns: {sorted(missing)}")
 
-        if rec_base is None:
+    # ---------- Coercion helpers ----------
+    def _coerce_bool(x):
+        # Accept True/False, 1/0, 'true'/'false' (case-insensitive)
+        if isinstance(x, (bool, np.bool_)):
+            return bool(x)
+        if isinstance(x, (int, np.integer)):
+            return bool(int(x))
+        if isinstance(x, str):
+            s = x.strip().lower()
+            if s in {"true", "t", "1", "yes", "y"}:
+                return True
+            if s in {"false", "f", "0", "no", "n"}:
+                return False
+        # Fallback: treat NaN/None as False to be safe
+        return False
+
+    def _coerce_int(x):
+        try:
+            return int(x)
+        except Exception:
+            return int(0)
+
+    # ---------- Build by_oid from df_single with *run config only* ----------
+    # Normalize object_id as stripped string key
+    df_single = df_single.copy()
+    df_single["object_id"] = df_single["object_id"].astype(str).str.strip()
+
+    by_oid = {}
+    for _, row in df_single.iterrows():
+        oid = row["object_id"]
+        cfg = {
+            "npca_qso": _coerce_int(row["npca_qso"]),
+            "decomp_host": _coerce_bool(row["decomp_host"]),
+            "BC": _coerce_bool(row["BC"]),
+            "poly": _coerce_bool(row["poly"]),
+        }
+        # If duplicates exist after best=True, last one wins (explicit choice)
+        by_oid[oid] = cfg
+
+    print(f"[INFO] Built config index by object_id with {len(by_oid)} entries")
+
+    # ---------- Build base records from your catalog match ----------
+    base = _build_base_records(args)
+    print(f"[INFO] Built {len(base)} base records from DR16Q match")
+
+    # ---------- Merge base + config by object_id ----------
+    records, misses = [], 0
+    for b in base:
+        oid = str(b.get("object_id", "")).strip()
+        cfg = by_oid.get(oid, None)
+        if cfg is None:
             misses += 1
-            # Keep it simple: just log and skip
-            print(f"[WARN] Could not match row to base: object_id={row.get('object_id')}")
+            # Keep it simple: just log and skip if no matching config
+            print(f"[WARN] No config for object_id={oid!r}; skipping.")
             continue
-        r = rec_base.copy()
-        r.update({
-            "npca_qso": int(row["npca_qso"]),
-            "decomp_host": bool(row["decomp_host"]),
-            "BC": bool(row["BC"]),
-            "poly": bool(row["poly"]),
-        })
+
+        r = b.copy()
+        r.update(cfg)
         records.append(r)
+
     print(f"[INFO] Built {len(records)} records for single-run from CSV; misses: {misses}")
+
+    # ---------- Execute ----------
     run_records(args, records)
 
 
