@@ -391,7 +391,7 @@ def build_single_object_model(
 
         # BWB scalings
         if bwb:
-            bwb_beta = numpyro.sample("bwb_beta", dist.TruncatedNormal(50, 10, low=0.0))
+            bwb_beta = numpyro.sample("bwb_beta", dist.TruncatedNormal(50, 10, low=50.0))
         else:
             bwb_beta = numpyro.deterministic("bwb_beta", 1.0)
 
