@@ -305,7 +305,8 @@ def build_single_object_model(
     sigma_tau_plane_cut=True,
     lmc_q_groups=None,
     yupriors=False,
-    nearby_lc=False
+    nearby_lc=False,
+    tau_fast_truncated=False
 ):
     """
     Returns a NumPyro model function for ONE object with B bands.
@@ -364,6 +365,10 @@ def build_single_object_model(
                 "log_tau_drw0",
                 dist.TruncatedNormal(log_tau_drw0_c, 1.2 * jnp.log(10), low=log_tau_drw0_low, high=log_tau_drw0_high),
             )
+        if tau_fast_truncated:
+            log_tau_fast0 = numpyro.sample("log_tau_fast0", dist.TruncatedNormal(jnp.log(5), jnp.log(5), high=jnp.log(10)))
+        else:
+            log_tau_fast0 = numpyro.sample("log_tau_fast0", dist.Normal(0, jnp.log(7)))
 
         if sigma_tau_uniform:
             log_sigma0 = numpyro.sample("log_sigma0", dist.Uniform(-2.0 * jnp.log(10), 0.2 * jnp.log(10)))
@@ -390,10 +395,10 @@ def build_single_object_model(
         lag_beta = numpyro.sample("lag_beta", dist.TruncatedNormal(4.0 / 3.0, 0.2, low=0.0))
 
         # BWB scalings
-        if bwb:
-            bwb_beta = numpyro.sample("bwb_beta", dist.TruncatedNormal(50, 10, low=50.0))
-        else:
-            bwb_beta = numpyro.deterministic("bwb_beta", 1.0)
+        # if bwb:
+        #     bwb_beta = numpyro.sample("bwb_beta", dist.TruncatedNormal(50, 10, low=50.0))
+        # else:
+        #     bwb_beta = numpyro.deterministic("bwb_beta", 1.0)
 
         # Per-band plate
         with numpyro.plate("band", B):
@@ -443,6 +448,7 @@ def build_single_object_model(
 
         params = dict(
             log_tau_drw0=log_tau_drw0,
+            log_tau_fast0=log_tau_fast0,
             log_sigma0=log_sigma0,
             alpha_host=alpha_host,
             alpha_agn=alpha_agn,
@@ -455,7 +461,7 @@ def build_single_object_model(
             lag0=lag0,
             lag_beta=lag_beta,
             bwb_alpha=bwb_alpha,
-            bwb_beta=bwb_beta,
+            #bwb_beta=bwb_beta,
             width_blr=width_blr,
             width_cont=width_cont,
             eta_A1=eta_A1,
@@ -515,6 +521,7 @@ def main():
     parser.add_argument("--load_nearby_lc_csv", type=str, default=None, help="CSV listing nearby LCs to load.")
     parser.add_argument("--load_yu_priors", action="store_true", default=False, help="Use Yu+2023 priors.")
     parser.add_argument("--disable_sigma_tau_plane_cut", action="store_true", default=False, help="Disable sigma–tau plane cut.")
+    parser.add_argument("--tau_fast_truncated", action="store_true", default=False, help="Truncated prior for tau_fast0.")
     args = parser.parse_args()
     print("Args:", args)
 
@@ -645,7 +652,8 @@ def main():
                 broken_pl=args.broken_pl,
                 sigma_tau_plane_cut=(not args.disable_sigma_tau_plane_cut),
                 yupriors=args.load_yu_priors,
-                nearby_lc=(args.load_nearby_lc_csv is not None)
+                nearby_lc=(args.load_nearby_lc_csv is not None),
+                tau_fast_truncated=args.tau_fast_truncated,
             )
 
             init_strategy = numpyro.infer.init_to_median()

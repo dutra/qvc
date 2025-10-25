@@ -321,7 +321,8 @@ class MyMultiVarModel_SMAG_New(MultiVarModel):
     def _build_gp(self, params):
         log_sigma_band      = self.my_amp_transform(params)
         log_sigma_band_blr  = self.my_amp_transform_blr(params)
-        log_tau_center, log_tau_band     = self.my_tau_drw_transform(params)
+        log_tau_center, log_tau_band     = self.my_tau_drw_transform(params, "log_tau_drw0")
+        log_tau_fast_center, log_tau_fast_band     = self.my_tau_drw_transform(params, "log_tau_fast0")
 
         t, band = self.X
         t_center = jnp.mean(t)
@@ -350,7 +351,7 @@ class MyMultiVarModel_SMAG_New(MultiVarModel):
         
         kernel_bwb = ContiBLR_CARMA2_QS(
             tau1=jnp.exp(log_tau_band),
-            tau2=jnp.exp(log_tau_band)/params["bwb_beta"],
+            tau2=jnp.exp(log_tau_fast_band),
             mix=params["bwb_alpha"],
             amp_cont=jnp.exp(log_sigma_band),
             amp_blr=jnp.exp(log_sigma_band_blr),
@@ -382,15 +383,15 @@ class MyMultiVarModel_SMAG_New(MultiVarModel):
     def my_amp_transform_blr(self, params: dict[str, JAXArray]) -> JAXArray:
         return params["log_sigma0"] + jnp.atleast_1d(params["log_amp_delta_blr"])
     
-    def my_tau_drw_transform(self, params: dict[str, JAXArray]) -> tuple[JAXArray, JAXArray]:
+    def my_tau_drw_transform(self, params: dict[str, JAXArray], key: str) -> tuple[JAXArray, JAXArray]:
         log_pl = log_broken_pl if self.broken_pl else log_single_pl
         eta_tau1 = params["eta_tau1"]
         eta_tau2 = params["eta_tau2"]
         lam_s = params["lam_s"]
         lam_rf_mean = jnp.mean(self.lam_rf)
         eta_break = params["eta_break"]
-        log_tau_band_mean = params["log_tau_drw0"] + jnp.log(10) * log_pl(lam_rf_mean, lam_s, eta_tau1, eta_tau2, eta_break)
-        log_tau_band = params["log_tau_drw0"] + jnp.log(10) * log_pl(self.lam_rf, lam_s, eta_tau1, eta_tau2, eta_break)
+        log_tau_band_mean = params[key] + jnp.log(10) * log_pl(lam_rf_mean, lam_s, eta_tau1, eta_tau2, eta_break)
+        log_tau_band = params[key] + jnp.log(10) * log_pl(self.lam_rf, lam_s, eta_tau1, eta_tau2, eta_break)
         return log_tau_band_mean, log_tau_band
 
     def my_amp_transform(self, params: dict[str, JAXArray]) -> JAXArray:
