@@ -229,7 +229,7 @@ def fetch_spectrum_fits(sdss_name, plate, fiber, mjd, cache_dir="data/spectra_ca
 def load_spec_from_cache(sdss_name, cache_dir="data/spectra_cache"):
     """Return cached FITS HDUList if available, else None."""
     cache_file = os.path.join(cache_dir, f"{sdss_name}.fits")
-    print(f"[DEBUG] Checking for cached spectrum at {cache_file}")
+    #print(f"[DEBUG] Checking for cached spectrum at {cache_file}")
     if os.path.exists(cache_file):
         return fits.open(cache_file, memmap=False)
     return None
@@ -526,8 +526,8 @@ def run_qsofit_record(rec, cache_dir="data/spectra_cache",
     BC = rec["BC"]
     poly = rec["poly"]
 
-    print(f"[INFO] Running QSOFit for {rec['sdss_name']} (z={rec['z']:.3f})")
-    print(f"[DEBUG] npca_qso={npca_qso}, decomp_host={decomp_host}, BC={BC}, poly={poly}")
+    # print(f"[INFO] Running QSOFit for {rec['sdss_name']} (z={rec['z']:.3f})")
+    # print(f"[DEBUG] npca_qso={npca_qso}, decomp_host={decomp_host}, BC={BC}, poly={poly}")
 
     # default result (so we always return a complete row even on error)
     result = dict(
@@ -616,7 +616,7 @@ def run_qsofit_record(rec, cache_dir="data/spectra_cache",
                     overlap_frac = 1.0
                 dm = mag_fiber - mag_synth
                 delta_mags[b] = dm
-                print(f"[INFO] Band {b}: mag_fiber={mag_fiber:.3f}, mag_synth={mag_synth:.3f}, Δm={dm:.3f} (overlap={overlap_frac:.2f})")
+                #print(f"[INFO] Band {b}: mag_fiber={mag_fiber:.3f}, mag_synth={mag_synth:.3f}, Δm={dm:.3f} (overlap={overlap_frac:.2f})")
                 
                 # weight by photometric mag uncertainty if available; else equal weight
                 sig_m = rec[f'mean_{b}_err']
@@ -627,8 +627,6 @@ def run_qsofit_record(rec, cache_dir="data/spectra_cache",
                 print(f"[ERROR mag_fiber] Error processing band {b} for {rec['sdss_name']}: {e}")
                 continue
         
-        print(f"[INFO] Bands used for {rec['sdss_name']}: {bands_used}")
-
         mag_errs = np.array([rec[f'mean_{b}_err'] if (np.isfinite(rec[f'mean_{b}_err']) and rec[f'mean_{b}_err'] >=0) else 0.0 
                                     for b in bands_used])  # only for used bands
         dm_arr = np.array([delta_mags[b] for b in bands_used], dtype=float)
@@ -646,7 +644,8 @@ def run_qsofit_record(rec, cache_dir="data/spectra_cache",
             delta_m_avg = 0.0
             sigma_dm = 0.0
         # print(f"[INFO] Using bands {bands_used} for {rec['sdss_name']}: delta_m_avg={delta_m_avg:.3f} ± {sigma_dm:.3f} mag")
-        print(f"[INFO] Final Δm_avg for {rec['sdss_name']}: {delta_m_avg:.3f} mag (σ_dm={sigma_dm:.3f} mag)")
+        # print(f"[INFO] Final Δm_avg for {rec['sdss_name']}: {delta_m_avg:.3f} mag (σ_dm={sigma_dm:.3f} mag)")
+
         result.update(
             delta_mag_u=delta_mags.get('u', -1e9),
             delta_mag_g=delta_mags.get('g', -1e9),
@@ -660,12 +659,15 @@ def run_qsofit_record(rec, cache_dir="data/spectra_cache",
         result_list = []
 
         rng = np.random.default_rng(42)
-        print("Before for loop")
         for i in range(MC_samples if MC_samples > 0 else 1):
-            delta_m_avg_i = rng.normal(delta_m_avg, sigma_dm)
-            scale = 10.0 ** (-0.4 * delta_m_avg_i)
-            flux_err_scaled_i = flux_err * scale
-            flux_scaled_i = flux * scale + rng.normal(0.0, 1.0, size=flux.size) * flux_err_scaled_i
+            dm_i = rng.normal(delta_m_avg, sigma_dm)
+            s = 10.0 ** (-0.4 * dm_i)
+
+            flux_scaled_i = s * flux + rng.normal(0.0, s * flux_err, size=flux.shape)
+            flux_err_scaled_i = s * flux_err * np.sqrt(2.0)
+
+            # flux_scaled_i = flux
+            # flux_err_scaled_i = flux_err
 
             q_mle = QSOFit(lam, np.copy(flux_scaled_i), np.copy(flux_err_scaled_i), rec["z"], path=path_ex)
             q_mle.Fit(
@@ -1059,21 +1061,19 @@ def _config_grid(args, rec):
     Yield (npca_qso, decomp_host, BC, poly) combos for COLLECT mode.
     If z > 1.4: disallow BC and host decomposition (only npca_qso = -1, decomp_host=False, BC=False).
     """
-    poly_list = [False, True] if args.enable_poly else [False]
     z = float(rec["z"])
 
-    if False and z > 1.4:
-        for poly in poly_list:
-            yield (-1, False, False, poly)
-    else:
-        BC_list = [False, True] if args.enable_BC else [False]
-        for poly in poly_list:
-            for BC in BC_list:
-                # no host decomposition
-                yield (-1, False, BC, poly)
-                # host decomposition variants
-                for npca in [0, 1, 2, 5, 10]:
-                    yield (npca, True, BC, poly)
+    #yield (-1, False, False, False)
+    
+    poly_list = [False, True] if args.enable_poly else [False]
+    BC_list = [False, True] if args.enable_BC else [False]
+    for poly in poly_list:
+        for BC in BC_list:
+            # no host decomposition
+            yield (-1, False, BC, poly)
+            # host decomposition variants
+            for npca in [0, 1, 2, 5, 10]:
+                yield (npca, True, BC, poly)
 
 def _make_paths_from_rec(rec):
     """Derive save paths from the record's run configuration and ensure dirs."""
@@ -1173,7 +1173,7 @@ def run_records(args, records):
         desc = f"Processing {len(records)} record(s)"
         with tqdm(total=len(records), desc=desc, dynamic_ncols=True, smoothing=0.2) as pbar:
             for res, rec in pool.imap_unordered(worker, records, chunksize=chunksize):
-                print(res)
+                #print(res)
                 row = _write_row(res, rec, args)
                 rows.append(row)
                 pbar.update(1)
