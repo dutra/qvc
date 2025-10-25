@@ -911,9 +911,9 @@ def load_quasar_core_list(fpath_in):
 def prepare_sample_df(quasar_list, filter_sdss_name, N, skip):
     for q in quasar_list:
         for i, b in enumerate(['u', 'g', 'r', 'i', 'z']):
-            if len(q['mags_means']) != 5:
-                raise ValueError(f"Expected 5 mags_means, got {len(q['mags_means'])} for object_id {q.get('object_id','?')}")
-            q[f'mags_mean_{b}'] = q['mags_means'][i]
+            if len(q['mags_mean']) != 5:
+                raise ValueError(f"Expected 5 mags_mean, got {len(q['mags_mean'])} for object_id {q.get('object_id','?')}")
+            q[f'mags_mean_{b}'] = q['mags_mean'][i]
             if f'mean_{b}' in q:
                 q[f'mean_corrected_{b}'] = q[f'mags_mean_{b}'] + q[f'mean_{b}']
             else:
