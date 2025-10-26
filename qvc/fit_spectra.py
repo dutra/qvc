@@ -660,14 +660,15 @@ def run_qsofit_record(rec, cache_dir="data/spectra_cache",
 
         rng = np.random.default_rng(42)
         for i in range(MC_samples if MC_samples > 0 else 1):
-            dm_i = rng.normal(delta_m_avg, sigma_dm)
-            s = 10.0 ** (-0.4 * dm_i)
+            if MC_samples > 0:
+                dm_i = rng.normal(delta_m_avg, sigma_dm)
+                s = 10.0 ** (-0.4 * dm_i)
 
-            flux_scaled_i = s * flux + rng.normal(0.0, s * flux_err, size=flux.shape)
-            flux_err_scaled_i = s * flux_err * np.sqrt(2.0)
-
-            # flux_scaled_i = flux
-            # flux_err_scaled_i = flux_err
+                flux_scaled_i = s * flux + rng.normal(0.0, s * flux_err, size=flux.shape)
+                flux_err_scaled_i = s * flux_err * np.sqrt(2.0)
+            else:
+                flux_scaled_i = flux
+                flux_err_scaled_i = flux_err
 
             q_mle = QSOFit(lam, np.copy(flux_scaled_i), np.copy(flux_err_scaled_i), rec["z"], path=path_ex)
             q_mle.Fit(
