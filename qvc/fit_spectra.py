@@ -660,15 +660,19 @@ def run_qsofit_record(rec, cache_dir="data/spectra_cache",
 
         rng = np.random.default_rng(42)
         for i in range(MC_samples if MC_samples > 0 else 1):
-            if MC_samples > 0:
+            if MC_samples > 1:
                 dm_i = rng.normal(delta_m_avg, sigma_dm)
                 s = 10.0 ** (-0.4 * dm_i)
 
                 flux_scaled_i = s * flux + rng.normal(0.0, s * flux_err, size=flux.shape)
                 flux_err_scaled_i = s * flux_err * np.sqrt(2.0)
             else:
-                flux_scaled_i = flux
-                flux_err_scaled_i = flux_err
+                sigma_dm = 0
+                dm_i = rng.normal(delta_m_avg, sigma_dm)
+                s = 10.0 ** (-0.4 * dm_i)
+
+                flux_scaled_i = s * flux
+                flux_err_scaled_i = s * flux_err
 
             q_mle = QSOFit(lam, np.copy(flux_scaled_i), np.copy(flux_err_scaled_i), rec["z"], path=path_ex)
             q_mle.Fit(
@@ -1020,7 +1024,7 @@ def run_select(args):
     if mask_failed.any():
         df.loc[mask_failed, "redchip"] = 1e9
 
-    df.loc[df["poly"] == True, "redchip"] *= 1.05
+    df.loc[df["poly"] == True, "redchip"] *= 1.1
 
     # 20% penalty if BC=True
     df.loc[df["BC"] == True, "redchip"] *= 1.2
