@@ -372,7 +372,7 @@ def modify_h5_file(save_file_path, s82_objs):
 
 #     return bluer_bands
 
-def sdss_bands_affected_by_lya(z, buffer=100.0):
+def sdss_bands_affected_by_lya(z, buffer=0.0):
     """
     SDSS ugriz bands whose *rest-frame blue edge* falls below 1216+buffer Å,
     i.e., likely contaminated by Lyα line/forest.

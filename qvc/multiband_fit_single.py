@@ -365,10 +365,7 @@ def build_single_object_model(
                 "log_tau_drw0",
                 dist.TruncatedNormal(log_tau_drw0_c, 1.2 * jnp.log(10), low=log_tau_drw0_low, high=log_tau_drw0_high),
             )
-        if tau_fast_truncated:
-            log_tau_fast0 = numpyro.sample("log_tau_fast0", dist.TruncatedNormal(jnp.log(5), jnp.log(5), high=jnp.log(10)))
-        else:
-            log_tau_fast0 = numpyro.sample("log_tau_fast0", dist.Normal(0, jnp.log(7)))
+        log_tau_fast0 = numpyro.sample("log_tau_fast0", dist.TruncatedNormal(jnp.log(5), jnp.log(5), high=jnp.log(10)))
 
         if sigma_tau_uniform:
             log_sigma0 = numpyro.sample("log_sigma0", dist.Uniform(-2.0 * jnp.log(10), 0.2 * jnp.log(10)))
@@ -393,12 +390,6 @@ def build_single_object_model(
         # Disk lags
         lag0 = numpyro.sample("lag0", dist.TruncatedNormal(10.0, 5.0, low=0.0))
         lag_beta = numpyro.sample("lag_beta", dist.TruncatedNormal(4.0 / 3.0, 0.2, low=0.0))
-
-        # BWB scalings
-        # if bwb:
-        #     bwb_beta = numpyro.sample("bwb_beta", dist.TruncatedNormal(50, 10, low=50.0))
-        # else:
-        #     bwb_beta = numpyro.deterministic("bwb_beta", 1.0)
 
         # Per-band plate
         with numpyro.plate("band", B):

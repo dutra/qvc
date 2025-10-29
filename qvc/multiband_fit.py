@@ -165,7 +165,8 @@ def build_model(batch_data, zs, lam_rfs, f_host_value, log_jitter_mean, log_tau_
 
             # Core kernel parameters (hierarchical & identified)
             log_tau_drw0_high = jnp.log(10**10.0 * (1 + zs))
-            log_tau_drw0_low = jnp.log(10**1.5 * (1 + zs))
+            #log_tau_drw0_low = jnp.log(10**1.5 * (1 + zs))
+            log_tau_drw0_low = 0.0
 
             if sigma_tau_uniform:
                 print("[INFO] Using Uniform prior on log_sigma0 and log_tau_drw0.")
@@ -884,6 +885,12 @@ if __name__ == '__main__':
             #     logging.error(traceback.format_exc())
         # If inject_fake, compare injected vs recovered sigma and tau
         final_result_obj = obj | result | diagnostics | dict(prefix=prefix, suffix=suffix)
+        log_sigma_UV = final_result_obj.get('log_sigma_UV')
+        log_sigma_UV_err = final_result_obj.get('log_sigma_UV_err')
+        log_tau_UV_RF = final_result_obj.get('log_tau_UV_RF')
+        log_tau_UV_RF_err = final_result_obj.get('log_tau_UV_RF_err')
+        print(f"Result log_sigma_UV: {log_sigma_UV} ± {log_sigma_UV_err}")
+        print(f"Result log_tau_UV_RF: {log_tau_UV_RF} ± {log_tau_UV_RF_err}")
         results.append(final_result_obj)
         logging.info("--------------------------------------------------------------")
     

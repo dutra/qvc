@@ -151,7 +151,7 @@ def synth_ab_mag_overlap(
     return float(mag), overlap_frac
 
 
-def sdss_bands_affected_by_lya(z, buffer=100.0):
+def sdss_bands_affected_by_lya(z, buffer=0.0):
     """
     SDSS ugriz bands whose *rest-frame blue edge* falls below 1216+buffer Å,
     i.e., likely contaminated by Lyα line/forest.
@@ -1024,7 +1024,7 @@ def run_select(args):
     if mask_failed.any():
         df.loc[mask_failed, "redchip"] = 1e9
 
-    df.loc[df["poly"] == True, "redchip"] *= 1.1
+    df.loc[df["poly"] == True, "redchip"] *= 1.50
 
     # 20% penalty if BC=True
     df.loc[df["BC"] == True, "redchip"] *= 1.2
