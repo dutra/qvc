@@ -627,24 +627,39 @@ def run_qsofit_record(rec, cache_dir="data/spectra_cache",
                 print(f"[ERROR mag_fiber] Error processing band {b} for {rec['sdss_name']}: {e}")
                 continue
         
-        mag_errs = np.array([rec[f'mean_{b}_err'] if (np.isfinite(rec[f'mean_{b}_err']) and rec[f'mean_{b}_err'] >=0) else 0.0 
-                                    for b in bands_used])  # only for used bands
-        dm_arr = np.array([delta_mags[b] for b in bands_used], dtype=float)
-        w_arr  = np.array(weights, dtype=float)
-        mask   = np.isfinite(dm_arr) & np.isfinite(w_arr) & (w_arr > 0)
+        # --- PICK ONLY THE SINGLE BEST-MATCHING BAND TO 2500(1+z) ---
+        # Effective wavelengths (Å) for SDSS2010 bands
+        lam_eff = {'u': 3551.0, 'g': 4686.0, 'r': 6166.0, 'i': 7480.0, 'z': 8932.0}
+        lam_target = 2500.0 * (1.0 + rec['z'])
+        sigma_A = 1200.0  # width of Gaussian weight in Å (tune 800–1500 if needed)
 
-        if np.any(mask):
-            w = w_arr[mask]
-            dm = dm_arr[mask]
-            delta_m_avg = np.sum(w * dm) / np.sum(w)
-            # standard error of weighted mean (for optional calibration inflation)
-            sigma_dm = np.sqrt(1.0 / np.sum(w))
+        # Build arrays over bands we actually used
+        dm_arr = np.array([delta_mags.get(b, np.nan) for b in bands_used], dtype=float)
+        valid = np.isfinite(dm_arr)
+        if np.any(valid):
+            # color weight per band (bigger = closer to 2500(1+z))
+            w_color = np.array(
+                [np.exp(-0.5 * ((lam_eff[b] - lam_target) / sigma_A) ** 2) for b in bands_used],
+                dtype=float
+            )[valid]
+
+            # index of the valid band with maximum w_color
+            idx_in_valid = int(np.argmax(w_color))
+            idx_best = np.flatnonzero(valid)[idx_in_valid]
+            best_band = bands_used[idx_best]
+
+            # Use ONLY this band's Δm and its photometric σ as sigma_dm
+            delta_m_avg = float(dm_arr[idx_best])
+            sig_m = rec.get(f'mean_{best_band}_err', 0.0)
+            sigma_dm = float(sig_m if (np.isfinite(sig_m) and sig_m > 0) else 0.0)
+            print(f"[INFO] Rescaling using best band {best_band} with delta_m_avg={delta_m_avg} (z={rec['z']:.2f})")
+
         else:
-            print(f"[WARN] No usable bands after drops for {rec['sdss_name']} (z={rec['z']:.2f}); scale=1.")
+            print(f"[WARN] No usable bands for {rec['sdss_name']} (z={rec['z']:.2f}); using Δm=0.")
+            best_band = None
             delta_m_avg = 0.0
             sigma_dm = 0.0
-        # print(f"[INFO] Using bands {bands_used} for {rec['sdss_name']}: delta_m_avg={delta_m_avg:.3f} ± {sigma_dm:.3f} mag")
-        # print(f"[INFO] Final Δm_avg for {rec['sdss_name']}: {delta_m_avg:.3f} mag (σ_dm={sigma_dm:.3f} mag)")
+        result.update(rescale_band=(best_band or ''))
 
         result.update(
             delta_mag_u=delta_mags.get('u', -1e9),
@@ -673,6 +688,10 @@ def run_qsofit_record(rec, cache_dir="data/spectra_cache",
 
                 flux_scaled_i = s * flux
                 flux_err_scaled_i = s * flux_err
+
+            if disable_rescale_flux:
+                flux_scaled_i = flux
+                flux_err_scaled_i = flux_err
 
             q_mle = QSOFit(lam, np.copy(flux_scaled_i), np.copy(flux_err_scaled_i), rec["z"], path=path_ex)
             q_mle.Fit(
@@ -1024,7 +1043,10 @@ def run_select(args):
     if mask_failed.any():
         df.loc[mask_failed, "redchip"] = 1e9
 
-    df.loc[df["poly"] == True, "redchip"] *= 1.50
+    #df.loc[df["poly"] == True, "redchip"] *= 1.05
+    df.loc[(df["z"] < 1.0) & (df["poly"] == True), "redchip"] *= 0.8   # reward de-reddening
+    df.loc[(df["z"] >= 1.0) & (df["poly"] == True), "redchip"] *= 1.05 
+
 
     # 20% penalty if BC=True
     df.loc[df["BC"] == True, "redchip"] *= 1.2
