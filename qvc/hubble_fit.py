@@ -45,6 +45,7 @@ def prior_transform_dynesty(unit_cube, priors, model_labels):
             for x, key in zip(unit_cube, model_labels)]
 
 def run_mcmc_pipeline(df_agn, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, 
+                      df_calibrators=None,
                       cosmo_model='Flatw0waCDM', z_pivot_agn=1.5,
                       only_sna=False, completeness=True, use_full_cov=True,
                       resume=False, speed="production", use_mu_sh0es=False):
@@ -79,6 +80,12 @@ def run_mcmc_pipeline(df_agn, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
     pantheon_fields = ['zHD', 'm_b_corr', 'IS_CALIBRATOR']
     pantheon_data = {col: df_pantheon[col].values for col in df_pantheon.columns}
 
+    agn_calibrators_fields = ('MU_CAL', 'MU_CAL_ERR', 'AGN_IS_CALIBRATOR') + agn_fields
+    if df_calibrators is None:
+        agn_calibrators_data = None
+    else:
+        agn_calibrators_data = {col: df_calibrators[col].values for col in agn_calibrators_fields if col in df_calibrators.columns}
+
     checkpoint_folder = f'results/dynesty_checkpoint/{prefix}'
     if not os.path.exists(checkpoint_folder):
         os.makedirs(checkpoint_folder)
@@ -102,11 +109,12 @@ def run_mcmc_pipeline(df_agn, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
                 sampler = DynamicNestedSampler.restore(checkpoint_file, pool=pool)
             else:
                 print(f"Checkpoint file {checkpoint_file} does not exist. Starting fresh run.")
-                raise RuntimeError("Checkpoint file does not exist.")
-                #resume = False  # Start fresh if checkpoint doesn't exist
+                #raise RuntimeError("Checkpoint file does not exist.")
+                resume = False  # Start fresh if checkpoint doesn't exist
         if not resume:
             logl_kwargs = dict(
                 agn_data=agn_data,
+                agn_calibrators_data=agn_calibrators_data,
                 pantheon_data=pantheon_data,
                 _sna_L=_sna_L,
                 _sna_Lower=_sna_Lower,
@@ -120,7 +128,7 @@ def run_mcmc_pipeline(df_agn, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
             )
             ptform_kwargs = dict(priors=priors, model_labels=model_labels)
             sampler = DynamicNestedSampler(
-                log_likelihood,
+                log_likelihood_nearbylcs if agn_calibrators_data is not None else log_likelihood,
                 prior_transform_dynesty,
                 ndim,
                 logl_kwargs=logl_kwargs,
@@ -152,8 +160,8 @@ def run_mcmc_pipeline(df_agn, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
                     print_progress=True,
                     dlogz_init=0.01,                 
                     n_effective=2000,                # 300–1000 typical for model comparison
-                    nlive_init=max(500, 50*ndim),   # bump live points
-                    nlive_batch=max(250, 25*ndim)   # reasonable batch size for dynamic allocation
+                    nlive_init=max(1000, 50*ndim),   # bump live points
+                    nlive_batch=max(500, 25*ndim)   # reasonable batch size for dynamic allocation
                     # optional: sample='rwalk', walks=50, bound='multi' if you expect multi-modality
                 )
             elif speed == "dev":
@@ -164,9 +172,9 @@ def run_mcmc_pipeline(df_agn, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
                     checkpoint_file=checkpoint_file,
                     print_progress=True,
                     dlogz_init=0.01,                 
-                    n_effective=200,                # 300–1000 typical for model comparison
+                    n_effective=500,                # 300–1000 typical for model comparison
                     nlive_init=50,   # bump live points
-                    nlive_batch=25   # reasonable batch size for dynamic allocation
+                    nlive_batch=20   # reasonable batch size for dynamic allocation
                 )
 
             elif speed == "test":
@@ -176,10 +184,10 @@ def run_mcmc_pipeline(df_agn, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
                     resume=resume,
                     checkpoint_file=checkpoint_file,
                     print_progress=True,
-                    dlogz_init=0.01,                 
-                    n_effective=200,                # 300–1000 typical for model comparison
-                    nlive_init=min(100, 30*ndim),   # bump live points
-                    nlive_batch=min(50, 20*ndim)   # reasonable batch size for dynamic allocation
+                    dlogz_init=0.001,                 
+                    n_effective=2000,                # 300–1000 typical for model comparison
+                    nlive_init=250,   # bump live points
+                    nlive_batch=100   # reasonable batch size for dynamic allocation
                 )
 
 
@@ -286,7 +294,7 @@ def run_mcmc_pipeline(df_agn, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
 
 def run_single(df_agn, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, cosmo_model, completeness=True, use_full_cov=True, 
                N=None, resume=False, only_sna=False, speed="production", use_mu_sh0es=False, cosmo_model_samples={}, verbose=True,
-               z_pivot_agn=1.5, skip_plots=False, residuals_sigma_clip=None):
+               z_pivot_agn=1.5, skip_plots=False, residuals_sigma_clip=None, df_calibrators=None):
 
     # Load data
     #global _sna_LogdetCov, _sna_L, _sna_Lower
@@ -298,16 +306,16 @@ def run_single(df_agn, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, cosmo_mo
         #df_pantheon = df_pantheon.head(N)
 
     sampler, flat_samples, model_labels, dmag_corr, logZ, logZerr = run_mcmc_pipeline(df_agn, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
+                                                        df_calibrators=df_calibrators,
                                                         cosmo_model=cosmo_model, z_pivot_agn=z_pivot_agn,
                                                         only_sna=only_sna, completeness=completeness, use_full_cov=use_full_cov,
                                                         resume=resume, speed=speed, use_mu_sh0es=use_mu_sh0es)
     
     display_results_summary(flat_samples, cosmo_model, z_pivot_agn)
-    age = compute_age_universe(flat_samples, cosmo_model)
-    print(f"Age of universe: {age:.3f} Gyr")
+    age, age_err = compute_age_universe_with_error(flat_samples, cosmo_model)
 
     if skip_plots:
-        return sampler, flat_samples, model_labels, dmag_corr, logZ, logZerr, None, age
+        return sampler, flat_samples, model_labels, dmag_corr, logZ, logZerr, None, (age, age_err)
 
     plot_path = f"plots/hubble/{prefix}/{cosmo_model}_{'sna' if only_sna else 'joint'}_{speed}"
     print(f"Saving plots to ", plot_path)
@@ -322,14 +330,17 @@ def run_single(df_agn, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, cosmo_mo
 
 
     print("Plotting Hubble diagram...")
-    # residuals, _, _, _ = plot_hubble(flat_samples, df_agn, df_pantheon, 
-    #                                                      cosmo_model=cosmo_model, z_pivot_agn=z_pivot_agn, show_residuals=False,
-    #                                                      show_true=False, show=False, debias=False, plot_path=plot_path, verbose=False)
+    plot_hubble(flat_samples, df_agn, df_pantheon, 
+                cosmo_model=cosmo_model, z_pivot_agn=z_pivot_agn, show_residuals=False,
+                show_true=False, show=False, debias=False, plot_path=plot_path, verbose=False)
     r = plot_hubble(flat_samples, df_agn, df_pantheon, 
                     cosmo_model=cosmo_model, z_pivot_agn=z_pivot_agn, 
                     show_true=False, show=False, debias=True, dms=dmag_corr, plot_path=plot_path,
-                    cosmo_model_samples=cosmo_model_samples, verbose=verbose, residuals_sigma_clip=residuals_sigma_clip)
-    debiased_residuals, _, mu_pred_std_debiased, mu_pred_std_debiased_with_scatter = r
+                    cosmo_model_samples=cosmo_model_samples, verbose=verbose, residuals_sigma_clip=residuals_sigma_clip,
+                    df_calibrators=df_calibrators)
+    debiased_residuals, debiased_residuals_err, mu_pred_median_debiased, mu_pred_std_debiased, mu_pred_std_debiased_with_scatter = r
+    
+    make_agn_latex_table(df_agn, mu_pred_median_debiased, mu_pred_std_debiased_with_scatter, dms=dmag_corr, max_rows=30)
 
     chisq_red_hubble_debiased, _ = reduced_chi_squared(debiased_residuals, mu_pred_std_debiased, n_params=len(model_labels)-1)
 
@@ -343,16 +354,16 @@ def run_single(df_agn, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, cosmo_mo
     chisq_red_M2500_debiased, _ = reduced_chi_squared(M2500_residuals_debiased, M2500_std_debiased, n_params=len(model_labels)-1)
 
     print("Plotting debiased residuals...")
-    plot_full_residuals(df_agn, debiased_residuals, flat_samples, cosmo_model, z_pivot_agn, debias=True, dms=dmag_corr, show=False, plot_path=plot_path)
+    plot_full_residuals(df_agn, debiased_residuals, debiased_residuals_err, flat_samples, cosmo_model, z_pivot_agn, debias=True, dms=dmag_corr, show=False, plot_path=plot_path)
     #plot_full_residuals(df_agn, residuals, flat_samples, cosmo_model, z_pivot_agn, debias=False, show=False, plot_path=plot_path)
 
     print("Plotting predicted L2500 vs ...")
-    plot_predicted_L2500_vs_sigmahat(flat_samples, df_agn, cosmo_model=cosmo_model, z_pivot_agn=z_pivot_agn, 
-                                     debias=False, show_residuals=False,
-                                     show=False, plot_path=plot_path)
+    # plot_predicted_L2500_vs_sigmahat(flat_samples, df_agn, cosmo_model=cosmo_model, z_pivot_agn=z_pivot_agn, 
+    #                                  debias=False, show_residuals=False,
+    #                                  show=False, plot_path=plot_path)
     L_residuals_debiased, L_pred_std_debiased = plot_predicted_L2500_vs_sigmahat(flat_samples, df_agn, cosmo_model=cosmo_model, z_pivot_agn=z_pivot_agn, 
-                                                            debias=True, dms=dmag_corr, show_residuals=True,
-                                                            show=False, plot_path=plot_path)
+                                                            debias=True, dms=dmag_corr, show_residuals=False,
+                                                            show=False, plot_path=plot_path, df_calibrators=df_calibrators)
     
     chisq_red_L2500, _ = reduced_chi_squared(L_residuals_debiased, L_pred_std_debiased, n_params=len(model_labels)-1)
     
@@ -392,9 +403,9 @@ def run_single(df_agn, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, cosmo_mo
     except Exception as e:
         print("Error writing TeX variables:", e)
 
-    plot_residuals_vs_alphaOX(df_agn, debiased_residuals, show=False)
+    plot_residuals_vs_alphaOX(df_agn, debiased_residuals, debiased_residuals_err, show=False, plot_path=plot_path)
 
-    return sampler, flat_samples, model_labels, dmag_corr, logZ, logZerr, debiased_residuals, age
+    return sampler, flat_samples, model_labels, dmag_corr, logZ, logZerr, debiased_residuals, (age, age_err)
 
 
 def run_all(df_agn, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, 
@@ -417,7 +428,7 @@ def run_all(df_agn, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
                        cosmo_model_samples=cosmo_model_samples)
         
         _, samples_joint, _, _, logZ_joint, logZerr_joint, _, age = r
-        print(f"For model {cosmo_model}, universe age: {age:.3f} Gyr")
+        #print(f"For model {cosmo_model}, universe age: {age:.3f} Gyr")
         r = run_single(df_agn, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, 
                        cosmo_model=cosmo_model, only_sna=True, 
                        z_pivot_agn=z_pivot_agn, skip_plots=skip_plots,
@@ -475,7 +486,8 @@ if __name__ == "__main__":
     parser.add_argument("--exclude_object_ids_csv", type=str, nargs='+', default=[], help="Path(s) to CSV file(s) containing object IDs to exclude")
     parser.add_argument("--residuals_sigma_clip", type=float, default=None, help="Optional residual cut value to exclude outliers (default: None)")
     parser.add_argument("--residuals_csv", type=str, default=None, help="Path to CSV file containing residuals for outlier exclusion (default: None)")
-    parser.add_argument("--dm_red_cut", type=float, default=None, help="Optional cut on delta m_red (default: None)")
+    parser.add_argument("--agn_calibrators", type=str, default=None, help="Path to H5 or CSV file containing AGN data to use as calibrators (default: None)")
+    parser.add_argument("--redchi2_cut", type=float, default=None, help="Optional reduced chi-squared cut value to exclude outliers (default: None)")
 
     args = parser.parse_args()
 
@@ -496,18 +508,38 @@ if __name__ == "__main__":
                            residuals_sigma_clip=args.residuals_sigma_clip, residuals_csv=args.residuals_csv,
                            exclude_object_ids_csv=args.exclude_object_ids_csv,
                            spectra_fit_csv=args.spectra_fit_csv, zquery_csv=args.zquery_csv,
-                           dm_red_cut=args.dm_red_cut)
+                           args=args)
+    
+    if args.agn_calibrators:
+        if args.agn_calibrators.endswith('.h5'):
+            df_calibrators = read_quasars_from_hdf5(args.agn_data_show)
+            df_calibrators = pd.DataFrame(df_calibrators)
+        elif args.agn_calibrators.endswith('.csv'):
+            df_calibrators = pd.read_csv(args.agn_calibrators)
+        else:
+            raise ValueError("Unsupported file format for agn_calibrators. Use .h5 or .csv")
+    else:
+        df_calibrators = None
+
 
     # if args.N and args.N > 0:
     #     # df_agn = df_agn.sample(n=args.N, random_state=42)
     #     df_fit = df_fit[:args.N]
 
     if args.run == "single": # default
-        run_single(df_agn=df_agn, df_pantheon=df_pantheon, _sna_L=_sna_L, _sna_Lower=_sna_Lower, _sna_LogdetCov=_sna_LogdetCov, cosmo_model=args.cosmo_models[0],
-             completeness=not args.disable_completeness, use_full_cov=not args.disable_full_covariance, resume=args.resume,
-             speed=args.speed, N=args.N, only_sna=args.only_sna, use_mu_sh0es=args.use_mu_sh0es,
-             skip_plots=args.skip_plots, residuals_sigma_clip=args.residuals_sigma_clip,
-             z_pivot_agn=args.z_pivot_agn)
+        cosmo_models_dict = {k: {} for k in args.cosmo_models}
+        for cosmo_model in args.cosmo_models:
+            r = run_single(df_agn=df_agn, df_pantheon=df_pantheon, _sna_L=_sna_L, _sna_Lower=_sna_Lower, _sna_LogdetCov=_sna_LogdetCov, 
+                           cosmo_model=cosmo_model,
+                completeness=not args.disable_completeness, use_full_cov=not args.disable_full_covariance, resume=args.resume,
+                speed=args.speed, N=args.N, only_sna=args.only_sna, use_mu_sh0es=args.use_mu_sh0es,
+                skip_plots=args.skip_plots, residuals_sigma_clip=args.residuals_sigma_clip,
+                z_pivot_agn=args.z_pivot_agn, df_calibrators=df_calibrators)
+            _, samples_joint, _, _, logZ_joint, logZerr_joint, _, age = r
+            cosmo_models_dict[cosmo_model]['logZ'] = logZ_joint
+            cosmo_models_dict[cosmo_model]['logZerr'] = logZerr_joint
+            cosmo_models_dict[cosmo_model]['age'] = age
+        compare_r = compare_models_by_log_evidence_all(cosmo_models_dict, write_path=f"plots/hubble/{prefix}/")
     elif args.run == "full":
         run_all(df_agn=df_agn, df_pantheon=df_pantheon, _sna_L=_sna_L, _sna_Lower=_sna_Lower, _sna_LogdetCov=_sna_LogdetCov, 
                 cosmo_models=args.cosmo_models, z_pivot_agn=args.z_pivot_agn, skip_plots=args.skip_plots,

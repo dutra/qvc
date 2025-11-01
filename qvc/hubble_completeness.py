@@ -351,6 +351,7 @@ def get_completeness_function_2d(
 
     # Completeness2D must be defined elsewhere
     #return y, y_fit
+    
 
     return Completeness2D(mag_centers, z_centers, C), mag_centers, z_centers, dm, dz, 0.0
     
@@ -366,8 +367,8 @@ def make_dm_function(m, z, dm, m_bins=40, z_bins=40, *, method='linear'):
     m = np.asarray(m)
     z = np.asarray(z)
     dm = np.asarray(dm)
-    mask = np.isfinite(m) & np.isfinite(z) & np.isfinite(dm)
-    m, z, dm = m[mask], z[mask], dm[mask]
+    #mask = np.isfinite(m) & np.isfinite(z) & np.isfinite(dm)
+    m, z, dm = m[np.isfinite(m)], z[np.isfinite(z)], dm[np.isfinite(dm)]
 
     # Build bin edges
     m_edges = np.linspace(m.min(), m.max(), m_bins) if np.isscalar(m_bins) else np.asarray(m_bins)

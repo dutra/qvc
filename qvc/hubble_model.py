@@ -3,9 +3,9 @@ from scipy.special import expit
 from collections import OrderedDict
 
 # --- ONE SOURCE OF TRUTH (orders) ---
-agn_model_req_params = ("M0_agn", "alpha_agn", "beta_agn", "gamma_agn",
+agn_model_req_params = ("M0_agn", "alpha_agn", "beta_agn", #"gamma_agn",
                         )
-agn_model_req_obs     = ("log_sigma_UV", "log_tau_UV_RF", "conti_a_0",)
+agn_model_req_obs     = ("log_sigma_UV", "log_tau_UV_RF",) #"log_conti_a_0",)
 agn_model_req_errs   = (
                         #"log_sigma_UV_err", "log_tau_UV_RF_err", "cov_log_sigma_UV_log_tau_UV_RF",
                         "log_sigma_UV_std_psd", "log_tau_UV_RF_std_psd", "log_sigma_UV_log_tau_UV_RF_cov_psd"
@@ -32,7 +32,10 @@ def agn_model_pack_obs(obs_dict):
     _require(agn_model_req_errs, obs_dict, "errors")
     obs = np.array([obs_dict[k] for k in agn_model_req_obs],  dtype=float)
     err = np.array([obs_dict[k] for k in agn_model_req_errs], dtype=float)
-    pivots = np.array([np.mean(obs_dict[k]) for k in agn_model_req_obs], dtype=float)
+    pivots = {k: float(np.mean(obs_dict[k])) for k in agn_model_req_obs}
+    pivots["log_tau_UV_RF"] = np.log10(500)
+    pivots["log_sigma_UV"]  = np.log10(0.3)
+    pivots = np.array([pivots[k] for k in agn_model_req_obs], dtype=float)
     return obs, err, pivots
 
 
@@ -49,15 +52,15 @@ def M_model_agn(params_arr, obs_arr, pivots_array):
     log_tau_UV_RF_pivot = pivots_array[agn_model_oidx["log_tau_UV_RF"]]
 
     # --- new ebv correction params ---
-    gamma_agn = params_arr[agn_model_pidx["gamma_agn"]]
-    conti_a_0 = obs_arr[agn_model_oidx["conti_a_0"]]
-    conti_a_0_pivot = pivots_array[agn_model_oidx["conti_a_0"]]
+    # gamma_agn = params_arr[agn_model_pidx["gamma_agn"]]
+    # log_conti_a_0 = obs_arr[agn_model_oidx["log_conti_a_0"]]
+    # log_conti_a_0_pivot = pivots_array[agn_model_oidx["log_conti_a_0"]]
 
     return (
         M0_agn
         + alpha_agn * (log_sigma_UV - log_sigma_UV_pivot)
         + beta_agn  * (log_tau_UV_RF - log_tau_UV_RF_pivot)
-        + gamma_agn * (conti_a_0 - conti_a_0_pivot)
+        #+ gamma_agn * (log_conti_a_0 - log_conti_a_0_pivot)
     )
 
 def M_model_agn_err(params_arr, obs_arr, err_arr, pivots_array, check_negative=False):
@@ -165,7 +168,7 @@ def get_model_params(cosmo_model, only_sna=False):
         ("alpha_agn", (0.0,  20.0)),
         ("beta_agn",  (-20.0,  0.0)),
         
-        ("gamma_agn", (-50.0, 50.0)),
+        #("gamma_agn", (-50.0, 50.0)),
         # ("A_red",    (-5.0,  0.0)),   # expect negative (e.g. ~ -2)
         # ("k_red",    (0.1,  5.0)),    # >0 (e.g. ~ 1–3 per dex)
         # ("x0_red",   (-5.0,  5.0)),    # bend near where trend starts

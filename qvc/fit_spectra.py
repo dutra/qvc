@@ -674,10 +674,6 @@ def run_qsofit_record(rec, cache_dir="data/spectra_cache",
                 flux_scaled_i = s * flux
                 flux_err_scaled_i = s * flux_err
 
-            if disable_rescale_flux:
-                flux_scaled_i = flux
-                flux_err_scaled_i = flux_err
-
             q_mle = QSOFit(lam, np.copy(flux_scaled_i), np.copy(flux_err_scaled_i), rec["z"], path=path_ex)
             q_mle.Fit(
                 name=f"{rec['z']:.2f}_{rec['sdss_name']}_{rec['plate']}-{rec['mjd']}-{rec['fiber']}",  # customize the name of given targets. Default: plate-mjd-fiber
@@ -1028,11 +1024,9 @@ def run_select(args):
     if mask_failed.any():
         df.loc[mask_failed, "redchip"] = 1e9
 
-    #df.loc[df["poly"] == True, "redchip"] *= 1.05
-
-
-    df.loc[(df["z"] < 1.0) & (df["poly"] == True), "redchip"] *= 1.0 
-    df.loc[(df["z"] >= 1.0) & (df["poly"] == True), "redchip"] *= 1.05 
+    #df.loc[df["poly"] == True, "redchip"] *= 1.50
+    df.loc[(df["z"] < 1.0) & (df["poly"] == True), "redchip"] *= 1.05
+    df.loc[(df["z"] >= 1.0) & (df["poly"] == True), "redchip"] *= 1.5 
 
 
     # 20% penalty if BC=True
@@ -1043,7 +1037,6 @@ def run_select(args):
     df.loc[~(df["npca_qso"].isin([-1, 0, 1, 10])), "redchip"] *= 1e9
     df.loc[~((df["npca_qso"].isin([-1])) & (df["z"] > 1.4)), "redchip"] *= 1e9
 
-    # df.loc[(df["z"] < 1.0) & (df["decomp_host"] == True), "redchip"] *= 1.10
 
     # ---- Pick the minimum redchip per object
     idx_best = df.groupby("object_id", sort=False)["redchip"].idxmin()
