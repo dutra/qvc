@@ -568,7 +568,13 @@ def run_qsofit_record(rec, cache_dir="data/spectra_cache",
         reddening_proxy=-1e9,
         conti_a_0=-1e9,
         conti_a_0_err=-1e9,
-        bands_used=''
+        bands_used='',
+        PL_slope_blue=-1e9,
+        PL_slope_blue_err=-1e9,
+        PL_slope_red=-1e9,
+        PL_slope_red_err=-1e9,
+        PL_break_wave=-1e9,
+        PL_break_wave_err=-1e9,
     )
     try:
     # cached spectrum
@@ -815,7 +821,10 @@ def run_qsofit_record(rec, cache_dir="data/spectra_cache",
                 log_L2500_fs=conti_dict.get('L2500', np.nan),
                 log_L2500_int_fs=conti_dict.get('L2500_int', np.nan),
                 reddening_integral=reddening_integral,
-            )
+                PL_slope_blue=conti_dict.get('PL_slope_blue', np.nan),
+                PL_slope_red=conti_dict.get('PL_slope_red', np.nan),
+                PL_break_wave=conti_dict.get('PL_break_wave', np.nan),
+            ) 
             result_list.append(result_i)
 
         def sym_percentile(x, p=[50, 16, 84], axis=0):
@@ -1024,9 +1033,10 @@ def run_select(args):
     if mask_failed.any():
         df.loc[mask_failed, "redchip"] = 1e9
 
-    #df.loc[df["poly"] == True, "redchip"] *= 1.50
-    df.loc[(df["z"] < 1.0) & (df["poly"] == True), "redchip"] *= 1.05
-    df.loc[(df["z"] >= 1.0) & (df["poly"] == True), "redchip"] *= 1.5 
+    df.loc[df["poly"] == True, "redchip"] *= 1.50
+
+    # df.loc[(df["z"] < 1.0) & (df["poly"] == True), "redchip"] *= 1.05
+    # df.loc[(df["z"] >= 1.0) & (df["poly"] == True), "redchip"] *= 1.5 
 
 
     # 20% penalty if BC=True
