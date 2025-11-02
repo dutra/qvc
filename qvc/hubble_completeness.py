@@ -98,8 +98,6 @@ class Completeness2D:
     def grid(self):
         return dict(mag_centers=self.mag_centers, z_centers=self.z_centers)
 
-from sklearn.linear_model import Ridge, RidgeCV
-
 def get_completeness_function_2d(
     df_agn,
     sim_file="data/mock_mag_z.h5",
@@ -116,6 +114,7 @@ def get_completeness_function_2d(
     - Smooths counts (not ratios).
     - Returns completeness C in [0,1] plus grid info and regression scatter (σ).
     """
+    from sklearn.linear_model import Ridge, RidgeCV
 
     # --- Load simulated (true) sample
     with h5py.File(sim_file, 'r') as f:
@@ -321,9 +320,8 @@ def get_completeness_function_2d(
             extent=[mag_edges[0], mag_edges[-1], z_edges[0], z_edges[-1]],
             cmap='viridis'
         )
-        plt.ylabel("z")
+        plt.ylabel(r"$z$")
         plt.xlabel(r"$m_{2500,\,\mathrm{\AA}} \; (\mathrm{mag})$")
-        #plt.title("Completeness p(detect | m, z)")
         cbar = plt.colorbar(im); cbar.set_label("Completeness $p(I{=}1|m, z)$")
         plt.tight_layout()
         os.makedirs(f"plots/hubble/{prefix}/completeness", exist_ok=True)
@@ -350,7 +348,7 @@ def get_completeness_function_2d(
     dz = float(z_centers[1] - z_centers[0])     if len(z_centers)   > 1 else float(z_edges[-1] - z_edges[0])
 
     # Completeness2D must be defined elsewhere
-    #return y, y_fit
+    return y, y_fit
     
 
     return Completeness2D(mag_centers, z_centers, C), mag_centers, z_centers, dm, dz, 0.0
