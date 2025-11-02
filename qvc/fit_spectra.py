@@ -575,6 +575,7 @@ def run_qsofit_record(rec, cache_dir="data/spectra_cache",
         PL_slope_red_err=-1e9,
         PL_break_wave=-1e9,
         PL_break_wave_err=-1e9,
+        iron_frac=1e9,
     )
     try:
     # cached spectrum
@@ -824,7 +825,9 @@ def run_qsofit_record(rec, cache_dir="data/spectra_cache",
                 PL_slope_blue=conti_dict.get('PL_slope_blue', np.nan),
                 PL_slope_red=conti_dict.get('PL_slope_red', np.nan),
                 PL_break_wave=conti_dict.get('PL_break_wave', np.nan),
+                iron_frac=q_mle.iron_frac,
             ) 
+            print(f"Iron Fraction for {rec['sdss_name']} (z={rec['z']:.2f}): {q_mle.iron_frac:.3f}")
             result_list.append(result_i)
 
         def sym_percentile(x, p=[50, 16, 84], axis=0):
