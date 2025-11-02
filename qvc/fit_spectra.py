@@ -575,7 +575,24 @@ def run_qsofit_record(rec, cache_dir="data/spectra_cache",
         PL_slope_red_err=-1e9,
         PL_break_wave=-1e9,
         PL_break_wave_err=-1e9,
+        PL_break_wave_inbounds=-1e9,
+        wave_min=-1e9,
+        wave_max=-1e9,
+        lam_min=-1e9,
+        lam_max=-1e9,
+        lam_rf_min=-1e9,
+        lam_rf_max=-1e9,
         iron_frac=1e9,
+        mag_synth_u=-1e9,
+        mag_synth_g=-1e9,
+        mag_synth_r=-1e9,
+        mag_synth_i=-1e9,
+        mag_synth_z=-1e9,
+        mean_corrected_u=-1e9,
+        mean_corrected_g=-1e9,
+        mean_corrected_r=-1e9,
+        mean_corrected_i=-1e9,
+        mean_corrected_z=-1e9,
     )
     try:
     # cached spectrum
@@ -588,6 +605,7 @@ def run_qsofit_record(rec, cache_dir="data/spectra_cache",
         lam  = 10 ** hdul[1].data['loglam']                  # [Å]
         flux = hdul[1].data['flux']                          # [erg/s/cm^2/Å]
         flux_err  = 1.0 / np.sqrt(hdul[1].data['ivar'])           # 1-sigma
+        lam_rf = lam / (1 + rec['z'])
 
         # Absolute flux calibration (g,r,i)
         sdss_filters = filters.load_filters(*[f'sdss2010-{b}' for b in bands])
@@ -621,6 +639,8 @@ def run_qsofit_record(rec, cache_dir="data/spectra_cache",
                         lam * u.AA
                     )
                     overlap_frac = 1.0
+                result.update({f'mag_synth_{b}': mag_synth})
+                result.update({f'mean_corrected_{b}': rec[f"mean_corrected_{b}"]})
                 dm = mag_fiber - mag_synth
                 delta_mags[b] = dm
                 #print(f"[INFO] Band {b}: mag_fiber={mag_fiber:.3f}, mag_synth={mag_synth:.3f}, Δm={dm:.3f} (overlap={overlap_frac:.2f})")
@@ -825,6 +845,13 @@ def run_qsofit_record(rec, cache_dir="data/spectra_cache",
                 PL_slope_blue=conti_dict.get('PL_slope_blue', np.nan),
                 PL_slope_red=conti_dict.get('PL_slope_red', np.nan),
                 PL_break_wave=conti_dict.get('PL_break_wave', np.nan),
+                PL_break_wave_inbounds=1 if lam_rf.min() <= conti_dict.get('PL_break_wave', np.nan) <= lam_rf.max() else 0,
+                wave_min=np.min(q_mle.wave),
+                wave_max=np.max(q_mle.wave),
+                lam_min=np.min(lam),
+                lam_max=np.max(lam),
+                lam_rf_min=np.min(lam_rf),
+                lam_rf_max=np.max(lam_rf),
                 iron_frac=q_mle.iron_frac,
             ) 
             print(f"Iron Fraction for {rec['sdss_name']} (z={rec['z']:.2f}): {q_mle.iron_frac:.3f}")
