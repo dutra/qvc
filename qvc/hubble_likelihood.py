@@ -76,8 +76,7 @@ def log_likelihood_pantheon_cephdist(params, pantheon_data, _sna_L, _sna_Lower, 
 
     # --- cosmological / Cepheid μ ---
     sn_mu_model = cosmo.distmod(zHD).value
-    if np.any(is_calib_sel):
-        sn_mu_model[is_calib_sel] = pantheon_data['CEPH_DIST'][mask][is_calib_sel]
+    sn_mu_model[is_calib_sel] = pantheon_data['CEPH_DIST'][mask][is_calib_sel]
 
     # --- residuals ---
     res_snia = m_b_corr - (sn_mu_model + params['M0_sn'])

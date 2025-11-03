@@ -217,23 +217,27 @@ def plot_cosmo_corner(
             wp, wa = X[:, i_wp], X[:, i_wa]
             w0 = wp - (1.0 - a_p) * wa
             Y = np.column_stack([X[:, i_H0], X[:, i_Om0], w0, wa])
-            lab_latex = [r"$H_0$ (km s$^{-1}$ Mpc$^{-1}$)", r"$\Omega_m$", r"$w_0$", r"$w_a$"]
+            lab_latex = [r"$H_0$", r"$\Omega_m$", r"$w_0$", r"$w_a$"]
+            units_latex = ["(km s$^{-1}$ Mpc$^{-1}$)", "", "", ""]
         elif cosmo_model == "Flatw0waCDM":
             i_w0 = _find(labels, "w0", "w_0")
             i_wa = _find(labels, "wa", "w_a")
             w0, wa = X[:, i_w0], X[:, i_wa]
             Y = np.column_stack([X[:, i_H0], X[:, i_Om0], w0, wa])
-            lab_latex = [r"$H_0$ (km s$^{-1}$ Mpc$^{-1}$)", r"$\Omega_m$", r"$w_0$", r"$w_a$"]
+            lab_latex = [r"$H_0$", r"$\Omega_m$", r"$w_0$", r"$w_a$"]
+            units_latex = ["(km s$^{-1}$ Mpc$^{-1}$)", "", "", ""]
         elif cosmo_model == "FlatwCDM":
             i_w0 = _find(labels, "w0", "w_0", "w")
             Y = np.column_stack([X[:, i_H0], X[:, i_Om0], X[:, i_w0]])
-            lab_latex = [r"$H_0$ (km s$^{-1}$ Mpc$^{-1}$)", r"$\Omega_m$", r"$w_0$"]
+            lab_latex = [r"$H_0$", r"$\Omega_m$", r"$w_0$"]
+            units_latex = ["(km s$^{-1}$ Mpc$^{-1}$)", "", ""]
         elif cosmo_model == 'FlatLambdaCDM':
             Y = np.column_stack([X[:, i_H0], X[:, i_Om0]])
-            lab_latex = [r"$H_0$ (km s$^{-1}$ Mpc$^{-1}$)", r"$\Omega_m$"]
+            lab_latex = [r"$H_0$", r"$\Omega_m$"]
+            units_latex = ["(km s$^{-1}$ Mpc$^{-1}$)", ""]
         else:
             raise ValueError(f"Unsupported cosmo_model '{cosmo_model}' for this plot.")
-        return Y, lab_latex
+        return Y, lab_latex, units_latex
 
     def _fmt_err(m, lo, hi, latex_label=""):
         nd = 2
@@ -306,10 +310,10 @@ def plot_cosmo_corner(
         return xmin, xmax, ymin, ymax
 
     # --- reduce to plotted params ---
-    agn_data, labels_latex = _subset(flat_samples_agn, model_labels, z_pivot_agn)
+    agn_data, labels_latex, units_latex = _subset(flat_samples_agn, model_labels, z_pivot_agn)
     sna_data = None
     if flat_samples_sn is not None and len(flat_samples_sn) > 0:
-        sna_data, _ = _subset(flat_samples_sn, model_labels, z_pivot_sna)
+        sna_data, _, _ = _subset(flat_samples_sn, model_labels, z_pivot_sna)
 
     n_params = agn_data.shape[1]
     fig, axes = plt.subplots(n_params, n_params, figsize=(2.3*n_params, 2.3*n_params))
@@ -334,7 +338,7 @@ def plot_cosmo_corner(
 
                 m, lo, hi = np.median(agn_data[:, i]), np.percentile(agn_data[:, i],16), np.percentile(agn_data[:, i],84)
                 ms, ps, ns = _fmt_err(m, lo, hi, latex_label=labels_latex[i])
-                txt_black = rf"{labels_latex[i]} = {ms}" + rf"$^{{+{ps}}}_{{-{ns}}}$"
+                txt_black = rf"{labels_latex[i]} = {ms}" + rf"$^{{+{ps}}}_{{-{ns}}}$" + f" {units_latex[i]}"
                 figt = ax.figure
                 off_blue = mtransforms.ScaledTranslation(0,  2/72., figt.dpi_scale_trans)
                 off_blk  = mtransforms.ScaledTranslation(0, 15/72., figt.dpi_scale_trans)
@@ -345,7 +349,7 @@ def plot_cosmo_corner(
                 if sna_data is not None:
                     mb, lob, hib = np.median(sna_data[:, i]), np.percentile(sna_data[:, i],16), np.percentile(sna_data[:, i],84)
                     msb, psb, nsb = _fmt_err(mb, lob, hib, latex_label=labels_latex[i])
-                    txt_blue = rf"{labels_latex[i]} = {msb}" + rf"$^{{+{psb}}}_{{-{nsb}}}$"
+                    txt_blue = rf"{labels_latex[i]} = {msb}" + rf"$^{{+{psb}}}_{{-{nsb}}}$" + f" {units_latex[i]}"
                     ax.text(0.02, 1.0, txt_blue,
                             transform=ax.transAxes + off_blue,
                             ha="left", va="bottom", color="dodgerblue", fontsize=11, clip_on=False)
@@ -366,12 +370,12 @@ def plot_cosmo_corner(
                 # ---------------------------------------------------------------------------
 
             if j == 0:
-                ax.set_ylabel(labels_latex[i])
+                ax.set_ylabel(f"{labels_latex[i]} {units_latex[i]}")
             else:
                 ax.set_yticklabels([])
 
             if i == n_params - 1:
-                ax.set_xlabel(labels_latex[j])
+                ax.set_xlabel(f"{labels_latex[j]} {units_latex[j]}")
             else:
                 ax.set_xticklabels([])
 
@@ -732,10 +736,15 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
         )
 
     # SN Ia
+    if debias:
+        sna_mu = df_pantheon["MU_SH0ES"]
+    else:
+        sna_mu = df_pantheon["MU_SH0ES"] + df_pantheon['biasCor_m_b']
     ax.errorbar(
-        df_pantheon["zHD"], df_pantheon["MU_SH0ES"], yerr=df_pantheon["MU_SH0ES_ERR_DIAG"],
+        df_pantheon["zHD"], sna_mu, yerr=df_pantheon["MU_SH0ES_ERR_DIAG"],
         fmt='s', markersize=2, color="#0A84FF", linestyle='none', lw=0.8, alpha=0.7, zorder=1, label="SN Ia"
     )
+
 
     # Model + 68% band
     ax.plot(z_grid, mu_model_median, color="m", lw=2.4, alpha=1.0, zorder=5, label=label)
@@ -1390,7 +1399,7 @@ def plot_completeness_vs_mag_at_redshifts(p_detect, mag_centers, z_centers,
 def plot_full_residuals(
     df_agn, residuals, residuals_err, flat_samples, cosmo_model, z_pivot_agn,
     debias=False, dms=None, plot_path='plots/hubble', show=False,
-    *, nbins=10, min_count=5
+    *, nbins=10, min_count=5, z_cut=None
 ):
 
     # --- Cosmology from posterior summaries ---
@@ -1438,6 +1447,8 @@ def plot_full_residuals(
     if 'apparent_mag_2500_err' in df_agn: df_agn['log_apparent_mag_2500_err'] = _safelog(df_agn['apparent_mag_2500_err'])
     if 'log_sigma_UV_err' in df_agn: df_agn['log_log_sigma_UV_err'] = _safelog(df_agn['log_sigma_UV_err'])
     if 'log_tau_UV_RF_err' in df_agn: df_agn['log_log_tau_UV_RF_err'] = _safelog(df_agn['log_tau_UV_RF_err'])
+    if 'psf_minus_fiber_i' in df_agn: df_agn['log_psf_minus_fiber_i'] = _safelog(df_agn['psf_minus_fiber_i'])
+    if 'petroRad_i' in df_agn: df_agn['log_petroRad_i'] = _safelog(df_agn['petroRad_i'])
 
     for col in ['BC', 'decomp_host', 'poly']:
         if col in df_agn:
@@ -1453,22 +1464,22 @@ def plot_full_residuals(
         'apparent_mag_2500', 'apparent_mag_2500_reddened', 'dm_red', 'log_dm_red', 
         'reddening_integral', 'log_reddening_integral',
         'ebv_wu',  'BC', 'decomp_host', 'poly', 'npca_qso',
-        'log_delta_qso01_redchi2', 'delta_qso01_redchi2',
-        'conti_a_0', 
+        'conti_a_0', 'PL_slope_red', 'PL_slope_blue', 'iron_frac',
         'MY_M_2500', 'z', 'log_lbol', 'log_ledd_ratio', 
         'log_sigma_UV', 'log_sigma_hat0', 'log_sigma_hat_UV', 'log_tau_UV_RF',
         'log_tau_fast0',
         'chi_sq_g',
         'sn_median_all', 'redchi', 'log_redchi', 'alpha_lambda',
         'redchi2_conti_full', 'log_redchi2_conti_full',
-        'bwb_alpha', 'bwb_beta', 'bwb_beta_4200', 
+        'bwb_alpha', 'bwb_beta', 
         'log_f_host_5100','f_host_5100', 'log_f_host_2500', 'f_host_2500',
         'log_rho', 't_rf_length', 'tau_band_RF_mean',
         'log_tau_band_RF_mean', 'log_t_rf_length', 
         'alphaOX', 'alphaOX_int',
-        'mag_psffiber_diff_g', 'mag_psffiber_diff_r', 'mag_psffiber_diff_i',
-        'PL_slope_blue', 'PL_slope_red', 'PL_break_wave_inbounds', 'lam_min', 'lam_max', 'lam_range',
+        
         'eta_A1', 'eta_tau1',
+        'PL_slope_blue', 'PL_slope_red', 'PL_break_wave_inbounds', 'lam_min', 'lam_max', 'lam_range', 
+        'psf_minus_fiber_i', 'log_psf_minus_fiber_i', 'petroRad_i', 'log_petroRad_i',
     ]) if col in df_agn.columns]
 
     keys_masks = {
@@ -1496,7 +1507,8 @@ def plot_full_residuals(
                 mask = (df_agn[key] > -1e9) & np.isfinite(df_agn[key])
             else:
                 mask = np.ones(len(df_agn), dtype=bool)
-            #mask &= df_agn['z'] < 1
+            if z_cut is not None:
+                mask &= df_agn['z'] < z_cut
 
             if key in keys_masks:
                 low, high = keys_masks[key]
@@ -1572,7 +1584,7 @@ def plot_full_residuals(
         plt.show()
 
     os.makedirs(plot_path, exist_ok=True)
-    plt.savefig(os.path.join(plot_path, f"full_residuals_{'debiased' if debias else 'biased'}.png"), dpi=200)
+    plt.savefig(os.path.join(plot_path, f"full_residuals_{'debiased' if debias else 'biased'}_zcut{z_cut}.png"), dpi=200)
     plt.close()
 
 from scipy.interpolate import interp1d
@@ -1812,7 +1824,7 @@ def plot_predicted_L2500_vs_sigmahat(
             )
 
     # --- Axes & labels ---
-    ax.set_ylabel(r'$L_{2500}$ (erg s$^{-1}$)')
+    ax.set_ylabel(r'$L_{2500\,\mathrm{\AA}}$ (erg s$^{-1}$)')
     ax.set_xscale('log'); ax.set_yscale('log')
     if df_calibrators is not None and len(df_calibrators) > 0:
         # ax.set_xlim((2e-9, 6e13))
@@ -2254,7 +2266,7 @@ def plot_residuals_vs_alphaOX(
         bx.append(x_bar); by.append(y_bar); by_sem.append(y_sem); bN.append(sel.sum())
 
     if len(bx):
-        ax.errorbar(
+        bm = ax.errorbar(
             np.array(bx), np.array(by), yerr=np.array(by_sem),
             fmt='o', ms=6, lw=1.5, color='red', mfc='red', mew=1.2,
             zorder=3, label="Binned mean"
@@ -2266,10 +2278,16 @@ def plot_residuals_vs_alphaOX(
     # ax.grid(alpha=0.15)
 
     cbar = fig.colorbar(sm, ax=ax)
-    cbar.set_label('z')
+    cbar.set_label(r'$z$')
 
-    if len(bx):
-        ax.legend(frameon=False, loc='best')
+    # Single legend handle for all AGN points
+    agn_handle = Line2D([0], [0],
+                        marker='o', linestyle='none',
+                        mfc='k', mec='k', markersize=6,
+                        label='AGN')
+
+    
+    ax.legend(handles=[agn_handle, bm], frameon=False, loc='best')
 
     plt.tight_layout()
     os.makedirs(plot_path, exist_ok=True)

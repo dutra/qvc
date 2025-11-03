@@ -843,7 +843,7 @@ def run_qsofit_record(rec, cache_dir="data/spectra_cache",
                 log_L2500_int_fs=conti_dict.get('L2500_int', np.nan),
                 reddening_integral=reddening_integral,
                 PL_slope_blue=conti_dict.get('PL_slope_blue', np.nan),
-                PL_slope_red=conti_dict.get('PL_slope_red', np.nan),
+                PL_slope_red=conti_dict['PL_slope_red'],
                 PL_break_wave=conti_dict.get('PL_break_wave', np.nan),
                 PL_break_wave_inbounds=1 if lam_rf.min() <= conti_dict.get('PL_break_wave', np.nan) <= lam_rf.max() else 0,
                 wave_min=np.min(q_mle.wave),
@@ -855,6 +855,7 @@ def run_qsofit_record(rec, cache_dir="data/spectra_cache",
                 iron_frac=q_mle.iron_frac,
             ) 
             print(f"Iron Fraction for {rec['sdss_name']} (z={rec['z']:.2f}): {q_mle.iron_frac:.3f}")
+            print(f"PL_slope_red for {rec['sdss_name']} (z={rec['z']:.2f}): {conti_dict['PL_slope_red']:.3f}")
             result_list.append(result_i)
 
         def sym_percentile(x, p=[50, 16, 84], axis=0):

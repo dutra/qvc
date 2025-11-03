@@ -171,8 +171,8 @@ def run_mcmc_pipeline(df_agn, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
                     resume=resume,
                     checkpoint_file=checkpoint_file,
                     print_progress=True,
-                    dlogz_init=0.01,                 
-                    n_effective=500,                # 300–1000 typical for model comparison
+                    dlogz_init=10,                 
+                    n_effective=200,                # 300–1000 typical for model comparison
                     nlive_init=50,   # bump live points
                     nlive_batch=20   # reasonable batch size for dynamic allocation
                 )
@@ -330,9 +330,9 @@ def run_single(df_agn, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, cosmo_mo
 
 
     print("Plotting Hubble diagram...")
-    plot_hubble(flat_samples, df_agn, df_pantheon, 
-                cosmo_model=cosmo_model, z_pivot_agn=z_pivot_agn, show_residuals=False,
-                show_true=False, show=False, debias=False, plot_path=plot_path, verbose=False)
+    # plot_hubble(flat_samples, df_agn, df_pantheon, 
+    #             cosmo_model=cosmo_model, z_pivot_agn=z_pivot_agn, show_residuals=False,
+    #             show_true=False, show=False, debias=False, plot_path=plot_path, verbose=False)
     r = plot_hubble(flat_samples, df_agn, df_pantheon, 
                     cosmo_model=cosmo_model, z_pivot_agn=z_pivot_agn, 
                     show_true=False, show=False, debias=True, dms=dmag_corr, plot_path=plot_path,
@@ -340,7 +340,8 @@ def run_single(df_agn, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, cosmo_mo
                     df_calibrators=df_calibrators)
     debiased_residuals, debiased_residuals_err, mu_pred_median_debiased, mu_pred_std_debiased, mu_pred_std_debiased_with_scatter = r
     
-    make_agn_latex_table(df_agn, mu_pred_median_debiased, mu_pred_std_debiased_with_scatter, dms=dmag_corr, max_rows=30)
+    if cosmo_model == 'Flatw0waCDM':
+        make_agn_latex_table(df_agn, mu_pred_median_debiased, mu_pred_std_debiased_with_scatter, dms=dmag_corr, max_rows=30, sort_by='z')
 
     chisq_red_hubble_debiased, _ = reduced_chi_squared(debiased_residuals, mu_pred_std_debiased, n_params=len(model_labels)-1)
 
@@ -355,6 +356,9 @@ def run_single(df_agn, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, cosmo_mo
 
     print("Plotting debiased residuals...")
     plot_full_residuals(df_agn, debiased_residuals, debiased_residuals_err, flat_samples, cosmo_model, z_pivot_agn, debias=True, dms=dmag_corr, show=False, plot_path=plot_path)
+    plot_full_residuals(df_agn, debiased_residuals, debiased_residuals_err, flat_samples, cosmo_model, z_pivot_agn, debias=True, dms=dmag_corr, 
+                        show=False, plot_path=plot_path, z_cut=1.0)
+
     #plot_full_residuals(df_agn, residuals, flat_samples, cosmo_model, z_pivot_agn, debias=False, show=False, plot_path=plot_path)
 
     print("Plotting predicted L2500 vs ...")
@@ -414,7 +418,6 @@ def run_all(df_agn, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
             speed="production", resume=False, N=None, use_mu_sh0es=False):
     #cosmo_models = ['Flatw0waCDM', 'FlatLambdaCDM', 'FlatwCDM']
 
-    cosmo_models_latex = {'Flatw0waCDM': r'Flat$w_0w_a$CDM', 'FlatwCDM': r'Flat$w$CDM', 'FlatLambdaCDM': r'Flat$\Lambda$CDM'}
     cosmo_models_dict = {k: {} for k in cosmo_models}
     results_latex = []
     cosmo_model_samples = {}
@@ -454,7 +457,7 @@ def run_all(df_agn, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
     make_cosmo_table_latex(results_latex, write_path=f"plots/hubble/{prefix}/")
 
     compare_r = compare_models_by_log_evidence_all(cosmo_models_dict, write_path=f"plots/hubble/{prefix}/")
-    write_results_tex_variables(df_agn, cosmo_model_samples['Flatw0waCDM'], 'Flatw0waCDM', compare_r, z_pivot_agn,
+    write_results_tex_variables(df_agn, cosmo_model_samples['Flatw0waCDM'], 'Flatw0waCDM', compare_r,
                                 f"plots/hubble/{prefix}", age=cosmo_models_dict['Flatw0waCDM']['age'])
     
     print("================================================================\n\n")
@@ -488,6 +491,8 @@ if __name__ == "__main__":
     parser.add_argument("--residuals_csv", type=str, default=None, help="Path to CSV file containing residuals for outlier exclusion (default: None)")
     parser.add_argument("--agn_calibrators", type=str, default=None, help="Path to H5 or CSV file containing AGN data to use as calibrators (default: None)")
     parser.add_argument("--redchi2_cut", type=float, default=None, help="Optional reduced chi-squared cut value to exclude outliers (default: None)")
+    parser.add_argument("--iron_frac_cut", type=float, default=None, help="Optional iron fraction cut value to exclude outliers (default: None)")
+    parser.add_argument("--sdss_mags_csv", type=str, default=None, help="Path to CSV file containing SDSS magnitudes (default: None)")
 
     args = parser.parse_args()
 
@@ -508,7 +513,8 @@ if __name__ == "__main__":
                            residuals_sigma_clip=args.residuals_sigma_clip, residuals_csv=args.residuals_csv,
                            exclude_object_ids_csv=args.exclude_object_ids_csv,
                            spectra_fit_csv=args.spectra_fit_csv, zquery_csv=args.zquery_csv,
-                           args=args)
+                           redchi2_cut=args.redchi2_cut, iron_frac_cut=args.iron_frac_cut,
+                           sdss_mags_csv=args.sdss_mags_csv)
     
     if args.agn_calibrators:
         if args.agn_calibrators.endswith('.h5'):

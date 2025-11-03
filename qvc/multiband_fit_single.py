@@ -319,7 +319,7 @@ def build_single_object_model(
     B = int(len(lam_rf))  # number of bands (static Python int for plate size)
 
     # Reference centers
-    log_tau_drw0_c = jnp.log(10 ** 2.5 * (1.0 + z))
+    log_tau_drw0_c = jnp.log(10 ** (2.5 * (1.0 + z)))
 
     def model():
         # ---- Global-ish means (these can be kept per-object to retain your prior structure)
@@ -356,7 +356,7 @@ def build_single_object_model(
             lam_s = numpyro.deterministic("lam_s", 2500.0)
 
         # Core OU params
-        log_tau_drw0_high = jnp.log(10 ** 10.0 * (1.0 + z))
+        log_tau_drw0_high = jnp.log(10 ** (10.0 * (1.0 + z)))
         log_tau_drw0_low = 0.0
         if sigma_tau_uniform:
             log_tau_drw0 = numpyro.sample("log_tau_drw0", dist.Uniform(log_tau_drw0_low, log_tau_drw0_high))

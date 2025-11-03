@@ -274,18 +274,6 @@ def populate_zquery(df, zquery_csv):
 
     df['sameZ'] = np.isclose(merged['z'], merged['z_zquery'], atol=1e-1, equal_nan=True)
     not_sameZ = ~df['sameZ'].fillna(False)
-    # print("Objects with differing z:", np.sum(not_sameZ))
-    # for obj_id, sdss_name in zip(df.loc[not_sameZ, 'object_id'], df.loc[not_sameZ, 'sdss_name']):
-    #     print(f"\033[93m  object_id: {obj_id}, sdss_name: {sdss_name}, z: {merged.loc[merged['object_id'] == obj_id, 'z'].values}, z_zquery: {merged.loc[merged['object_id'] == obj_id, 'z_zquery'].values} zWarning: {merged.loc[merged['object_id'] == obj_id, 'zWarning'].values}\033[0m")
-
-    # Print in yellow all object_id and sdss_name with zWarning not 0
-    # warn_mask = (merged['zWarning'].astype(str) != '0') & (~merged['zWarning'].isna())
-    # print("Objects with zWarning:", np.sum(warn_mask))
-    # for obj_id, sdss_name, zwarn in zip(
-    #         merged.loc[warn_mask, 'object_id'],
-    #         merged.loc[warn_mask, 'sdss_name'],
-    #         merged.loc[warn_mask, 'zWarning']):
-    #     print(f"\033[93m  object_id: {obj_id}, sdss_name: {sdss_name}, zWarning: {zwarn}\033[0m")
 
     for col in fields.keys():
         if f'{col}_zquery' in merged.columns:
@@ -303,30 +291,39 @@ def populate_zquery(df, zquery_csv):
         print(f"Column '{col}' code conversion:")
         print(dict(enumerate(df[col].astype('category').cat.categories)))
 
+    return df
+
+def populate_sdss_mags(df, sdss_mags_csv):
+    fields = {
+        'psfMag_i': float,
+        'fiberMag_i': float,
+        'petroRad_i': float,
+    }
+    # Load and concatenate two CSV files
+    df_zquery = pd.read_csv(
+        sdss_mags_csv,
+        dtype={'object_id': str},
+        converters=fields
+    )
+
+
+    merged = df.merge(df_zquery, on='object_id', how='left', suffixes=('', '_sdss_mags'))
+
+    print("Length of sdss mags merged DataFrame:", len(merged))
+    missing_ids = set(df['object_id']) - set(df_zquery['object_id'])
+    print("object_id not in merged:", list(missing_ids))
+
+    for col in fields.keys():
+        if f'{col}_sdss_mags' in merged.columns:
+            df[f'{col}'] = merged[f'{col}_sdss_mags']
+        else:
+            df[col] = merged[col]
+
+    df['psf_minus_fiber_i'] = df['psfMag_i'] - df['fiberMag_i']
 
     return df
 
-# def compute_L2500_from_mag(m_ab, m_ab_err, z, H0=70, Om0=0.3):
-#     cosmo = FlatLambdaCDM(H0=H0, Om0=Om0)
-#     c = 2.99792458e10   # cm/s
-#     lambda_ = 2500e-8   # cm
 
-#     DL = cosmo.luminosity_distance(z).to(u.cm).value  # cm
-
-#     # --- invert m_AB relation ---
-#     log_fnu = -(m_ab + 48.60) / 2.5
-#     fnu = 10**log_fnu  # erg/s/cm^2/Hz
-
-#     # --- convert to luminosity ---
-#     Lnu = fnu * 4 * np.pi * DL**2 * (1 + z)
-#     logL_2500 = np.log10(Lnu * c / lambda_)  # erg/s/Å @ 2500Å
-
-#     if m_ab_err is not None:
-#         # propagate error: d(log fnu)/dm = -0.4
-#         logL_err = 0.4 * m_ab_err
-#         return logL_2500, logL_err
-#     else:
-#         return logL_2500
 
 def _norm_name(s):
     s = (s or "").replace("\ufeff", "").strip()
@@ -420,6 +417,7 @@ def populate_spectra_fit(df, spectra_fit_csvs, best=True):
         'PL_slope_blue': float,
         'PL_slope_red': float,
         'PL_break_wave': float,
+        'iron_frac': float,
     }
 
     # Never drop the merge key
@@ -532,9 +530,12 @@ def populate_spectra_fit(df, spectra_fit_csvs, best=True):
     # cols_to_save_unique = [c for c in cols_to_save if c in out.columns]
     # out[cols_to_save_unique].to_csv(out_csv, index=False)
     # print(f"Saved merged DataFrame to {out_csv} with columns: {cols_to_save_unique}")
+    
+    df['alpha_nu'] = -df['alpha_lambda'] - 2
+    df['alpha_nu_err'] = df['alpha_lambda_err']
 
     # Keep a default error if needed
-    #out['apparent_mag_2500_err'] = 0.1 * np.ones(len(out))
+    # out['apparent_mag_2500_err'] = 0.1 * np.ones(len(out))
 
     return out
 
@@ -904,7 +905,8 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=10,
                   exclude_object_ids_csv=[],
                   residuals_sigma_clip=None, residuals_csv=None,
                   spectra_fit_csv=None, zquery_csv=None, only_load=False,
-                  args=None):
+                  iron_frac_cut=None, redchi2_cut=None,
+                  sdss_mags_csv=None):
     quasar_list = read_quasars_from_hdf5(file_path)
     print("Number of quasars loaded:", len(quasar_list))
 
@@ -952,18 +954,7 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=10,
         print("[WARNING] spectra_fit_csv not provided, assuming spectral fit fields are in agn h5 file")
         if 'alpha_lambda' not in df.columns:
             raise ValueError("spectra_fit_csv not provided and spectral fields not found in agn h5 file")
-            print("[WARNING] spectral fields not in data, setting everything to 0.0")
-            df['alpha_lambda'] = 0
-            df['alpha_lambda_err'] = 0
-            df['redchi'] = 0
-            df['f_host_2500'] = 0
-            df['f_host_2500'] = 0
-            df['f_host_5100'] = 0
-            df['apparent_mag_2500'] = 20
-            df['apparent_mag_2500_err'] = 0
             #raise ValueError("spectra_fit_csv must be provided if alpha_lambda not in agn h5 file")
-    df['alpha_nu'] = -df['alpha_lambda'] - 2
-    df['alpha_nu_err'] = df['alpha_lambda_err']
 
     if zquery_csv is not None:
         print("Populating zquery data from:", zquery_csv)
@@ -977,9 +968,10 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=10,
 
     df = populate_xray(df)
 
-    # if 'cov_log_sigma_UV_log_tau_UV_RF' not in df.columns:
-    #     print("[WARNING] cov_log_sigma_UV_log_tau_UV_RF not in data")
-    #     #df['cov_log_sigma_UV_log_tau_UV_RF'] = 0.0
+    if sdss_mags_csv is not None:
+        df = populate_sdss_mags(df, sdss_mags_csv)
+    else:
+        print("[WARNING] sdss_mags_csv not provided")
     
     num_quasars_z_0_1_before = len(df[(df['z'] > 0) & (df['z'] <= 1.0)])
     num_quasars_z_gt_3_before = len(df[df['z'] > 3])
@@ -1081,25 +1073,23 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=10,
     n_dropped = int(n_before - n_kept)
     print(f"Selecting BC==False: {n_dropped} objects removed (kept {n_kept} of {n_before})")
     df = df[keep_mask].reset_index(drop=True)
-    if args is not None:
-        redchi2_cut = args.redchi2_cut
-    else:
-        redchi2_cut = None
+
     # Define cuts as (column, lower_limit, upper_limit)
     cuts = [
         #('z', 1, None),
         #('log_lbol', 45, None),
         #('dm_red', None, dm_red_cut),
         ('log_tau_UV_RF', 1.5, 4),
-        #('conti_a_0', None, 0),
-        ('redchi', None, 5),
+        ('conti_a_0', None, 0),
+        #('redchi', None, 5),
         ('redchi2_conti_full', None, redchi2_cut),
         ('apparent_mag_2500', 12, 40),
         ('apparent_mag_i', 12, 40),
         #('t_rf_length', 1700, None),
-        ('f_host_2500', -1, 0),
-        ('f_host_5100', -1, 0),
+        ('f_host_2500', -5, -1),
+        ('f_host_5100', -5, -1),
         ('alpha_lambda', None, -0.01),
+        ('iron_frac', None, iron_frac_cut),
         #('apparent_mag_2500_err', 0, 1),
         #('z', None, 0.5),
         #('alpha_lambda', None, 0),
@@ -1612,130 +1602,73 @@ def make_cosmo_table_latex(
     }
 
     # ---------- model order ----------
-    model_order = [r"Flat$\Lambda$CDM", r"Flat$w$CDM", r"Flat$w_0w_a$CDM"]
+    model_order = [r"flat $\Lambda$CDM", r"flat $w$CDM", r"flat $w_0w_a$CDM"]
 
-    # ---------- external rows (use w0, not w) ----------
+    # ---------- external rows (fully combined; no extend/append) ----------
     external_rows = {
-        r"Flat$\Lambda$CDM": [
+        r"flat $\Lambda$CDM": [
             {
                 "data": r"Pantheon+ \& SH0ES",
-                "params": {
-                    "H0": r"$73.6 \pm 1.1$",
-                    "Om0": r"$0.334 \pm 0.018$",
-                    "w0": r"$-1$",
-                    "wa": r"--",
-                },
+                "params": {"H0": r"$73.6 \pm 1.1$", "Om0": r"$0.334 \pm 0.018$", "w0": r"$-1$", "wa": r"--"},
                 "logZ": None,
             },
             {
                 "data": r"DES-SN5YR",
-                "params": {
-                    "H0": r"--",
-                    "Om0": r"$0.352 \pm 0.017$",
-                    "w0": r"$-1$",
-                    "wa": r"--",
-                },
+                "params": {"H0": r"--", "Om0": r"$0.352 \pm 0.017$", "w0": r"$-1$", "wa": r"--"},
+                "logZ": None,
+            },
+            {
+                "data": r"Planck 2018",
+                "params": {"H0": r"$67.66 \pm 0.42$", "Om0": r"$0.3111 \pm 0.0056$", "w0": r"$-1$", "wa": r"--"},
+                "logZ": None,
+            },
+            {
+                "data": r"DESI DR2",
+                "params": {"H0": r"--", "Om0": r"$0.2975 \pm 0.0086$", "w0": r"$-1$", "wa": r"--"},
                 "logZ": None,
             },
         ],
-        r"Flat$w$CDM": [
+        r"flat $w$CDM": [
             {
                 "data": r"Pantheon+ \& SH0ES",
-                "params": {
-                    "H0": r"$73.5 \pm 1.1$",
-                    "Om0": r"$0.309^{+0.063}_{-0.069}$",
-                    "w0": r"$-0.90 \pm 0.14$",
-                    "wa": r"--",
-                },
+                "params": {"H0": r"$73.5 \pm 1.1$", "Om0": r"$0.309^{+0.063}_{-0.069}$", "w0": r"$-0.90 \pm 0.14$", "wa": r"--"},
                 "logZ": None,
             },
             {
                 "data": r"DES-SN5YR",
-                "params": {
-                    "H0": r"--",
-                    "Om0": r"$0.264^{+0.074}_{-0.096}$",
-                    "w0": r"$-0.80^{+0.14}_{-0.16}$",
-                    "wa": r"--",
-                },
+                "params": {"H0": r"--", "Om0": r"$0.264^{+0.074}_{-0.096}$", "w0": r"$-0.80^{+0.14}_{-0.16}$", "wa": r"--"},
+                "logZ": None,
+            },
+            {
+                "data": r"DESI DR2",
+                "params": {"H0": r"--", "Om0": r"$0.2969 \pm 0.0089$", "w0": r"$-0.916 \pm 0.078$", "wa": r"--"},
                 "logZ": None,
             },
         ],
-        r"Flat$w_0w_a$CDM": [
+        r"flat $w_0w_a$CDM": [
             {
                 "data": r"Pantheon+ \& SH0ES",
-                "params": {
-                    "H0": r"$73.3 \pm 1.1$",
-                    "Om0": r"$0.403^{+0.054}_{-0.098}$",
-                    "w0": r"$-0.93 \pm 0.15$",
-                    "wa": r"$-0.1^{+0.9}_{-2.0}$",
-                },
+                "params": {"H0": r"$73.3 \pm 1.1$", "Om0": r"$0.403^{+0.054}_{-0.098}$", "w0": r"$-0.93 \pm 0.15$", "wa": r"$-0.1^{+0.9}_{-2.0}$"},
                 "logZ": None,
             },
             {
                 "data": r"DES-SN5YR",
-                "params": {
-                    "H0": r"--",
-                    "Om0": r"$0.495^{+0.033}_{-0.043}$",
-                    "w0": r"$-0.36^{+0.36}_{-0.30}$",
-                    "wa": r"$-8.8^{+3.7}_{-4.5}$",
-                },
+                "params": {"H0": r"--", "Om0": r"$0.495^{+0.033}_{-0.043}$", "w0": r"$-0.36^{+0.36}_{-0.30}$", "wa": r"$-8.8^{+3.7}_{-4.5}$"},
+                "logZ": None,
+            },
+            {
+                "data": r"DESI DR2",
+                "params": {"H0": r"--", "Om0": r"$0.352^{+0.041}_{-0.018}$", "w0": r"$-0.48^{+0.35}_{-0.17}$", "wa": r"$< -1.34$"},
                 "logZ": None,
             },
         ],
     }
-    # Planck 2018 (Paper VI, Table 2: TT,TE,EE+lowE+lensing+BAO)
-    external_rows[r"Flat$\Lambda$CDM"].extend([
-        {
-            "data": r"Planck 2018",
-            "params": {
-                "H0":  r"$67.66 \pm 0.42$",
-                "Om0": r"$0.3111 \pm 0.0056$",
-                "w0":  r"$-1$",
-                "wa":  r"--",
-            },
-            "logZ": None,
-        },
-        # DESI DR2 — DESI-only (BAO-only)
-        {
-            "data": r"DESI DR2",
-            "params": {
-                "H0":  r"--",
-                "Om0": r"$0.2975 \pm 0.0086$",
-                "w0":  r"$-1$",
-                "wa":  r"--",
-            },
-            "logZ": None,
-        },
-    ])
 
-    # DESI DR2 — DESI-only (BAO-only)
-    external_rows[r"Flat$w$CDM"].append({
-        "data": r"DESI DR2",
-        "params": {
-            "H0":  r"--",
-            "Om0": r"$0.2969 \pm 0.0089$",
-            "w0":  r"$-0.916 \pm 0.078$",
-            "wa":  r"--",
-        },
-        "logZ": None,
-    })
-
-    external_rows[r"Flat$w_0w_a$CDM"].append({
-        "data": r"DESI DR2",
-        "params": {
-            "H0":  r"--",
-            "Om0": r"$0.352^{+0.041}_{-0.018}$",
-            "w0":  r"$-0.48^{+0.35}_{-0.17}$",
-            "wa":  r"$< -1.34$",
-        },
-        "logZ": None,
-    })
 
     # ---------- group results by model and prepend external rows ----------
     by_model = defaultdict(list)
     for r in results:
         by_model[r["model"]].append(r)
-
     for m in model_order:
         if m not in by_model:
             by_model[m] = []
@@ -1769,7 +1702,7 @@ def make_cosmo_table_latex(
         rows = by_model.get(model, [])
         if not rows:
             continue
-        lines.append(rf"\multicolumn{{{ncols}}}{{l}}{{\textbf{{{model}}}}} \\")
+        lines.append(rf"\multicolumn{{{ncols}}}{{l}}{{\underline{{\textbf{{{model}}}}}}} \\")
         rows = sorted(rows, key=lambda d: row_order.index(d["data"]) if d["data"] in row_order else 999)
 
         for r in rows:
@@ -1860,11 +1793,11 @@ def extract_cosmo_results_from_samples(
 
     data_label = "SN~Ia" if only_sna else "SN~Ia + AGN"
     if cosmo_model == "Flatw0waCDM":
-        model_name_latex = "Flat$w_0w_a$CDM"
+        model_name_latex = "flat $w_0w_a$CDM"
     elif cosmo_model == "FlatwCDM":
-        model_name_latex = "Flat$w$CDM"
+        model_name_latex = "flat $w$CDM"
     elif cosmo_model == "FlatLambdaCDM":
-        model_name_latex = "Flat$\Lambda$CDM"
+        model_name_latex = "flat $\Lambda$CDM"
     else:
         model_name_latex = cosmo_model
 
@@ -2638,7 +2571,7 @@ def format_value_uncertainty(
     return val_out, err_out, exponent, s
 
 def write_results_tex_variables(
-    df_agn, flat_samples, cosmo_model, compare_r, z_pivot_agn,
+    df_agn, flat_samples, cosmo_model, compare_r,
     write_path, chisq_dict=None, age=None
 ):
     """
@@ -2682,11 +2615,11 @@ def write_results_tex_variables(
         for r in compare_r["ranking"]:
             model = r["model"]
             safe = model.replace("0", "Zero").replace("Λ", "Lambda")  # latex-safe key
-            lines.append(r"\newcommand{\resultLogZ%s}{%.2f}" %
+            lines.append(r"\newcommand{\resultLogZ%s}{%.1f}" %
                          (safe, r["logZ"]))
-            lines.append(r"\newcommand{\resultLogZerr%s}{%.3f}" %
+            lines.append(r"\newcommand{\resultLogZerr%s}{%.1f}" %
                          (safe, r["logZerr"]))
-            lines.append(r"\newcommand{\resultDeltaLogZ%s}{%.2f}" %
+            lines.append(r"\newcommand{\resultDeltaLogZ%s}{%.1f}" %
                          (safe, r["delta_logZ_vs_top"]))
             lines.append(r"\newcommand{\resultSigma%s}{%.1f}" %
                          (safe, r["sigma_two_sided_vs_top"]))
@@ -2753,13 +2686,10 @@ def write_results_tex_variables(
                  10**log_tau_UV_RF_pivot)
 
     # Cosmological parameters
-    lines.append(r"\newcommand{\resultOmZero}{\ensuremath{%s}}" %
-                 format_value_uncertainty(results['Om0'][0], results['Om0'][1]))
-    lines.append(r"\newcommand{\resultwZero}{\ensuremath{%s}}" %
-                 format_value_uncertainty(results['w0'][0], results['w0'][1]))
+    lines.append(r"\newcommand{\resultOmZero}{\ensuremath{%s}}" % f"{results['Om0'][0]:.2f} \pm {results['Om0'][1]:.2f}")
+    lines.append(r"\newcommand{\resultwZero}{\ensuremath{%s}}" % f"{results['w0'][0]:.2f} \pm {results['w0'][1]:.2f}")
     if cosmo_model in ('Flatw0waCDM', 'FlatwpwaCDM'):
-        lines.append(r"\newcommand{\resultwa}{\ensuremath{%s}}" %
-                    format_value_uncertainty(results['wa'][0], results['wa'][1]))
+        lines.append(r"\newcommand{\resultwa}{%s}" % f"{results['wa'][0]:.2f} \pm {results['wa'][1]:.2f}")
 
 
     # Derived intercepts
@@ -2885,11 +2815,10 @@ def load_df_nearby():
     return df_show
 
 def make_agn_latex_table(
-    df_agn,
+    agn_df,
     mu,
     mu_err,
     dms,
-    precision = None,   # keys: ra, dec, z, m2500, tau, sigma, mu
     sort_by = None, ascending = True,
     max_rows = None,
     write_path = f"plots/hubble/{prefix}"
@@ -2899,7 +2828,7 @@ def make_agn_latex_table(
         return x is None or (isinstance(x, float) and (math.isnan(x) or math.isinf(x)))
 
     def fmt_num(x, nd):
-        return r"\dots" if _is_bad(x) else f"{float(x):.{nd}f}"
+        return r"$\dots$" if _is_bad(x) else rf"${float(x):.{nd}f}$"
 
     def fmt_signed_dec(x, nd):
         return r"$\dots$" if _is_bad(x) else f"${float(x):+.{nd}f}$"
@@ -2908,22 +2837,19 @@ def make_agn_latex_table(
         s = str(nm).replace("-", "$-$")
         return rf"\textbf{{J{s}}}"
 
-    def fmt_with_sym_err(row, base_col, nd_val, nd_err):
+    def fmt_with_sym_err(row, base_col, nd_val, nd_err, err_col=None):
         v = row[base_col]
         if _is_bad(v):
             return r"$\dots$"
         v = float(v)
-        err_col = f"{base_col}_err"
+        if err_col is None:
+            err_col = f"{base_col}_err"
         if err_col in row and not _is_bad(row[err_col]):
             e = abs(float(row[err_col]))
             return rf"${v:.{nd_val}f} \pm {e:.{nd_err}f}$"
         return rf"${v:.{nd_val}f}$"
 
-    prec = {'ra':4, 'dec':4, 'z':3, 'm2500':2, 'tau':1, 'sigma':2, 'mu':2}
-    if precision:
-        prec.update(precision)
-
-    df = df_agn.copy()
+    df = agn_df.copy()
 
     df['mu'] = mu
     df['mu_err'] = mu_err
@@ -2940,29 +2866,30 @@ def make_agn_latex_table(
         df = df.sort_values(sort_by, ascending=ascending)
 
     lines = [
-        r"% Landscape + font + adaptive fit (adjustbox)",
         #r"\begin{adjustbox}{max width=\textwidth, max totalheight=\textheight, keepaspectratio}",
-        r"\begin{tabular}{@{}lcccccccc@{}}",
+        r"\begin{tabular}{@{}lccccccccc@{}}",
         r"\hline\hline",
-        r"\textbf{SDSS Name} & RA & Dec & $z$ & $m_{2500}$ & $m_{2500}^{\mathrm{uncorr}}$ & $\log\tau_{\mathrm{UV,RF}}$ & $\log\sigma_{\mathrm{UV}}$ & $\mu$ \\",
-        r"& (deg) & (deg) &  & (mag) & (mag) & (days) & (mag) & (mag)  \\",
+        r"\textbf{SDSS Name} & RA & Dec & $z$ & $m_{2500}$ & $m_{2500}^{\mathrm{uncorr}}$ & $\mu$ & $\log\tau_{\mathrm{UV,RF}}$ & $\log\sigma_{\mathrm{UV}}$ & $\mathrm{Cov}(\log\sigma_{\mathrm{UV}},\,\log\tau_{\mathrm{UV,RF}})$ \\",
+        r"& (deg) & (deg) &  & (mag) & (mag) & (mag) & (days) & (mag) &  \\"
         r"\hline",
     ]
 
     for _, row in df.iterrows():
         nm   = name_to_bold(row['sdss_name'])
-        ra   = fmt_num(row['ra'], prec['ra'])
-        dec  = fmt_signed_dec(row['dec'], prec['dec'])
-        zz   = fmt_with_sym_err(row, 'z', prec['z'], prec['z'])
-        m25v_corr = fmt_with_sym_err(row, 'apparent_mag_2500_corr', prec['m2500'], prec['m2500'])
-        m25v_uncorr = fmt_with_sym_err(row, 'apparent_mag_2500', prec['m2500'], prec['m2500'])
+        ra   = fmt_num(row['ra'], 4)
+        dec  = fmt_signed_dec(row['dec'], 4)
 
-        tau_str = fmt_with_sym_err(row, 'log_tau_UV_RF', prec['tau'], prec['tau'])
-        sig_str = fmt_with_sym_err(row, 'log_sigma_UV',  prec['sigma'], prec['sigma'])
-        mu_str  = fmt_with_sym_err(row, 'mu',            prec['mu'],    prec['mu'])
+        zz   = fmt_with_sym_err(row, 'z', 4, 4)
+        m25v_corr = fmt_with_sym_err(row, 'apparent_mag_2500_corr', 2, 2)
+        m25v_uncorr = fmt_with_sym_err(row, 'apparent_mag_2500', 2, 2)
+        mu_str  = fmt_with_sym_err(row, 'mu',            2,    2)
+
+        tau_str = fmt_with_sym_err(row, 'log_tau_UV_RF', 2, 2, err_col='log_tau_UV_RF_std_psd')
+        sig_str = fmt_with_sym_err(row, 'log_sigma_UV',  2, 2, err_col='log_sigma_UV_std_psd')
+        tau_sig_cov = fmt_num(row['log_sigma_UV_log_tau_UV_RF_cov_psd'], 3)
 
         lines.append(
-            f"{nm} & {ra} & {dec} & {zz} & {m25v_corr} & {m25v_uncorr} & {tau_str} & {sig_str} & {mu_str} \\\\"
+            f"{nm} & {ra} & {dec} & {zz} & {m25v_corr} & {m25v_uncorr} & {mu_str} & {tau_str} & {sig_str} & {tau_sig_cov} \\\\"
         )
 
     lines += [
