@@ -356,7 +356,7 @@ def build_single_object_model(
             lam_s = numpyro.deterministic("lam_s", 2500.0)
 
         # Core OU params
-        log_tau_drw0_high = jnp.log(10 ** (10.0 * (1.0 + z)))
+        log_tau_drw0_high = jnp.log(10 ** (4.0 * (1.0 + z)))
         log_tau_drw0_low = 0.0
         if sigma_tau_uniform:
             log_tau_drw0 = numpyro.sample("log_tau_drw0", dist.Uniform(log_tau_drw0_low, log_tau_drw0_high))
@@ -365,6 +365,7 @@ def build_single_object_model(
                 "log_tau_drw0",
                 dist.TruncatedNormal(log_tau_drw0_c, 1.2 * jnp.log(10), low=log_tau_drw0_low, high=log_tau_drw0_high),
             )
+            
         log_tau_fast0 = numpyro.sample("log_tau_fast0", dist.TruncatedNormal(jnp.log(5), jnp.log(5), high=jnp.log(10)))
 
         if sigma_tau_uniform:
@@ -391,15 +392,15 @@ def build_single_object_model(
         lag0 = numpyro.sample("lag0", dist.TruncatedNormal(10.0, 5.0, low=0.0))
         lag_beta = numpyro.sample("lag_beta", dist.TruncatedNormal(4.0 / 3.0, 0.2, low=0.0))
 
+        # per band bwb scaling
+        if bwb:
+            bwb_alpha = numpyro.sample("bwb_alpha", dist.Uniform(0.0, 1.0))
+        else:
+            bwb_alpha = numpyro.deterministic("bwb_alpha", 1.0)
+
         # Per-band plate
         with numpyro.plate("band", B):
             mean = numpyro.sample("mean", dist.Normal(jnp.zeros(B), 0.2))
-
-            # per band bwb scaling
-            if bwb:
-                bwb_alpha = numpyro.sample("bwb_alpha", dist.Uniform(0.0, 1.0))
-            else:
-                bwb_alpha = numpyro.deterministic("bwb_alpha", 1.0)
 
 
             if disable_lag_blr:

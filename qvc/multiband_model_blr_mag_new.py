@@ -235,7 +235,8 @@ class ContiBLR_CARMA2_QS(qs.Quasisep):
         lag_r = jnp.maximum(self.lag_blr[b],  0.0)
         w_c   = jnp.maximum(self.width_cont[b], 0.0)
         w_r   = jnp.maximum(self.width_blr[b],  0.0)
-        mixb  = jnp.clip(self.mix[b], 0.0, 1.0)
+        #mixb  = jnp.clip(self.mix[b], 0.0, 1.0)
+        mixb  = jnp.clip(self.mix, 0.0, 1.0)
 
         # Basis for fast/slow blocks, then apply lags
         e_fast, e_slow = self._basis_vectors(b)
