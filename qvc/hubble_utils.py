@@ -298,6 +298,9 @@ def populate_sdss_mags(df, sdss_mags_csv):
         'psfMag_i': float,
         'fiberMag_i': float,
         'petroRad_i': float,
+        'psfMag_r': float,
+        'fiberMag_r': float,
+        'petroRad_r': float,
     }
     # Load and concatenate two CSV files
     df_zquery = pd.read_csv(
@@ -320,6 +323,7 @@ def populate_sdss_mags(df, sdss_mags_csv):
             df[col] = merged[col]
 
     df['psf_minus_fiber_i'] = df['psfMag_i'] - df['fiberMag_i']
+    df['psf_minus_fiber_r'] = df['psfMag_r'] - df['fiberMag_r']
 
     return df
 
@@ -395,6 +399,9 @@ def populate_spectra_fit(df, spectra_fit_csvs, best=True):
         'apparent_mag_2500': float,
         'apparent_mag_2500_err': float,
         'apparent_mag_i_rest': float,
+        'apparent_mag_i_rest_err': float,
+        'apparent_mag_i_obs': float,
+        'apparent_mag_i_obs_err': float,
         'delta_m_avg': float,
         'alpha_lambda': float,
         'alpha_lambda_err': float,
@@ -418,6 +425,9 @@ def populate_spectra_fit(df, spectra_fit_csvs, best=True):
         'PL_slope_red': float,
         'PL_break_wave': float,
         'iron_frac': float,
+        'PL_break_wave_inbounds': bool,
+        'lam_rf_min': float,
+        'lam_rf_max': float,
     }
 
     # Never drop the merge key
@@ -907,7 +917,10 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=10,
                   spectra_fit_csv=None, zquery_csv=None, only_load=False,
                   iron_frac_cut=None, redchi2_cut=None,
                   sdss_mags_csv=None):
-    quasar_list = read_quasars_from_hdf5(file_path)
+    #quasar_list = read_quasars_from_hdf5(file_path)
+    import pickle
+    with open(file_path + ".pkl", "rb") as f: 
+        quasar_list = pickle.load(f)
     print("Number of quasars loaded:", len(quasar_list))
 
     if populate_sdss:
@@ -1077,7 +1090,7 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=10,
     # Define cuts as (column, lower_limit, upper_limit)
     cuts = [
         #('z', 1, None),
-        #('log_lbol', 45, None),
+        #('log_lbol', 45.4, None),
         #('dm_red', None, dm_red_cut),
         ('log_tau_UV_RF', 1.5, 4),
         ('conti_a_0', None, 0),
@@ -1088,11 +1101,14 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=10,
         #('t_rf_length', 1700, None),
         ('f_host_2500', -5, -1),
         ('f_host_5100', -5, -1),
-        ('alpha_lambda', None, -0.01),
-        ('iron_frac', None, iron_frac_cut),
+        #('alpha_lambda', -2, -1),
+        #('iron_frac', None, 1.2),
+        #('petroRad_r', None, 2),
+        #('npca_qso', None, -1),
+        
         #('apparent_mag_2500_err', 0, 1),
         #('z', None, 0.5),
-        #('alpha_lambda', None, 0),
+        #('alpha_lambda', None, -1),
         # ('sameZ', 0.9, 1.1),
         #('log_tau_fast0', None, 0.5),
 

@@ -38,7 +38,8 @@ from hubble_utils import *
 from hubble_likelihood import *
 from hubble_plotting import *
 from hubble_model import *
-from hubble_completeness import *
+#from hubble_completeness import *
+from hubble_completeness_refactored import *
 
 def prior_transform_dynesty(unit_cube, priors, model_labels):
     return [priors[key][0] + (priors[key][1] - priors[key][0]) * x
@@ -59,15 +60,8 @@ def run_mcmc_pipeline(df_agn, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
     else:
         completeness_params = None
 
-    print(f"log tau UV RF mean: {np.average(df_agn['log_tau_UV_RF']):.4f}")
-    print(f"log tau UV RF pivot (weighted): {np.average(df_agn['log_tau_UV_RF'], weights=1 / df_agn['log_tau_UV_RF_err']**2):.4f}")
-
-    print(f"log sigma0 mean: {np.average(df_agn['log_sigma_UV']):.4f}")
-    print(f"log sigma0 pivot (weighted): {np.average(df_agn['log_sigma_UV'], weights=1 / df_agn['log_sigma_UV_err']**2):.4f}")
-
-    print(f"alpha_nu mean: {np.average(df_agn['alpha_nu']):.4f}")
-    print(f"alpha_nu pivot (weighted): {np.average(df_agn['alpha_nu'], weights=1 / df_agn['alpha_nu_err']**2):.4f}")
-
+    print(f"tau UV RF mean: {np.mean(10**df_agn['log_tau_UV_RF']):.4f}")
+    print(f"sigma0 mean: {np.mean(10**df_agn['log_sigma_UV']):.4f}")
 
     _z_pivot = (1 / np.exp(np.mean(np.log(1 / (1 + df_agn['z']))))) - 1
     print(f"z mean: {df_agn['z'].mean():.3f}, calculated z pivot: {_z_pivot:.3f}")
@@ -377,7 +371,7 @@ def run_single(df_agn, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, cosmo_mo
                       gauss_sigma=1.5, kde_bw_scale=1.5)
 
     print("Plotting completeness vs magnitude at redshifts...")
-    p_detect, mag_centers, z_centers, dm, dz, completeness_scatter = get_completeness_function_2d(df_agn, plot=True)
+    p_detect, mag_centers, z_centers, dm, dz, completeness_scatter, _, _, _ = get_completeness_function_2d(df_agn, plot=True)
     plot_completeness_vs_mag_at_redshifts(p_detect, mag_centers, z_centers)
 
 

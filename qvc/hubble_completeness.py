@@ -98,7 +98,7 @@ class Completeness2D:
     def grid(self):
         return dict(mag_centers=self.mag_centers, z_centers=self.z_centers)
 
-def get_completeness_function_2d(
+def get_completeness_function_2d_(
     df_agn,
     sim_file="data/mock_mag_z.h5",
     n_mag_bins=40, n_z_bins=20,
@@ -123,6 +123,20 @@ def get_completeness_function_2d(
 
     # --- Build a consistent boolean mask on the observed df (use pandas throughout, then .values)
     m2500 = df_agn['apparent_mag_2500']
+    
+    z    = df_agn["z"].astype(float)    
+    mi_rest   = df_agn['apparent_mag_i_rest'].astype(float)
+    mi_obs   = df_agn['apparent_mag_i_obs'].astype(float)
+    alpha_lam_red = df_agn['PL_slope_red'].astype(float)
+    alpha_lam_blue = df_agn['PL_slope_blue'].astype(float)
+    lambda_break = df_agn['PL_break_wave'].astype(float)
+
+    lambda_i_eff=7480.0  # Å (SDSS i)
+    lambda_i_eff_obs = float(lambda_i_eff)
+    alpha_i = np.where(lambda_i_eff_obs/(1.0+z) <= lambda_break, alpha_lam_blue, alpha_lam_red)
+    mi_rest = mi_obs - 2.5 * (alpha_i + 1.0) * np.log10(1.0 + z)
+    mi = mi_rest
+
     mi    = df_agn['apparent_mag_i_rest']
 
     mask = (
@@ -249,7 +263,7 @@ def get_completeness_function_2d(
     calculated_mags_true_2500 = (
         a * (mags_true_i - mag_i0)
         + d * (mags_true_i - mag_i0)**2
-        + b * true_alpha0
+        + b * (true_alpha0 - alpha0)
         + c_pivot
     )
     mags_true = calculated_mags_true_2500
@@ -349,7 +363,7 @@ def get_completeness_function_2d(
 
     # Completeness2D must be defined elsewhere
     # return y, y_fit
-    return Completeness2D(mag_centers, z_centers, C), mag_centers, z_centers, dm, dz, 0.0
+    return Completeness2D(mag_centers, z_centers, C), mag_centers, z_centers, dm, dz, 0.0, y, y_fit, mask
 
 def m2500_from_mi_broken(mi, z,
                          alpha_lam_blue, alpha_lam_red,

@@ -183,7 +183,7 @@ def log_likelihood(theta, *, agn_data, pantheon_data,
     ll_completeness = 0.0
     comp_blob = empty_blob(N_obj)
     if completeness_params is not None:
-        completeness2d, mag_centers, _, _, _, completeness_scatter = completeness_params
+        completeness2d, mag_centers, _, _, _, completeness_scatter, _, _, _ = completeness_params
         ll_completeness, comp_blob = completeness_loglike(
             m_obs=m_obs,
             m_obs_err=m_err,
@@ -331,7 +331,7 @@ def log_likelihood_nearbylcs(
     ll_completeness = 0.0
     comp_blob = empty_blob(N_obj)
     if completeness_params is not None and np.any(mask_noncal):
-        completeness2d, mag_centers, _, _, _, completeness_scatter = completeness_params
+        completeness2d, mag_centers, _, _, _, completeness_scatter, _, _ = completeness_params
         # model-predicted magnitude for non-calibrators (cosmo-anchored for selection)
         m_model_nc = M_pred_nc + mu_cosmo_nc
         ll_completeness, comp_blob = completeness_loglike(

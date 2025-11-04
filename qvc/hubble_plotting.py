@@ -1447,8 +1447,8 @@ def plot_full_residuals(
     if 'apparent_mag_2500_err' in df_agn: df_agn['log_apparent_mag_2500_err'] = _safelog(df_agn['apparent_mag_2500_err'])
     if 'log_sigma_UV_err' in df_agn: df_agn['log_log_sigma_UV_err'] = _safelog(df_agn['log_sigma_UV_err'])
     if 'log_tau_UV_RF_err' in df_agn: df_agn['log_log_tau_UV_RF_err'] = _safelog(df_agn['log_tau_UV_RF_err'])
-    if 'psf_minus_fiber_i' in df_agn: df_agn['log_psf_minus_fiber_i'] = _safelog(df_agn['psf_minus_fiber_i'])
-    if 'petroRad_i' in df_agn: df_agn['log_petroRad_i'] = _safelog(df_agn['petroRad_i'])
+    if 'psf_minus_fiber_r' in df_agn: df_agn['log_psf_minus_fiber_r'] = _safelog(df_agn['psf_minus_fiber_r'])
+    if 'petroRad_r' in df_agn: df_agn['log_petroRad_r'] = _safelog(df_agn['petroRad_r'])
 
     for col in ['BC', 'decomp_host', 'poly']:
         if col in df_agn:
@@ -1479,7 +1479,7 @@ def plot_full_residuals(
         
         'eta_A1', 'eta_tau1',
         'PL_slope_blue', 'PL_slope_red', 'PL_break_wave_inbounds', 'lam_min', 'lam_max', 'lam_range', 
-        'psf_minus_fiber_i', 'log_psf_minus_fiber_i', 'petroRad_i', 'log_petroRad_i',
+        'psf_minus_fiber_r', 'log_psf_minus_fiber_r', 'petroRad_r', 'log_petroRad_r',
     ]) if col in df_agn.columns]
 
     keys_masks = {
@@ -1584,7 +1584,7 @@ def plot_full_residuals(
         plt.show()
 
     os.makedirs(plot_path, exist_ok=True)
-    plt.savefig(os.path.join(plot_path, f"full_residuals_{'debiased' if debias else 'biased'}_zcut{z_cut}.png"), dpi=200)
+    plt.savefig(os.path.join(plot_path, f"full_residuals_{'debiased' if debias else 'biased'}_zcut{z_cut}.png"), dpi=150)
     plt.close()
 
 from scipy.interpolate import interp1d

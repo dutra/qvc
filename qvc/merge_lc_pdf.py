@@ -51,6 +51,7 @@ def parse_args():
     p.add_argument("--box-pad", type=int, default=8, help="Padding for overlay box (default: 8).")
     p.add_argument("--skip-missing", action="store_true",
                    help="Skip rows whose PNG is missing (instead of failing).")
+    p.add_argument("--sort-by", default=None, help="Column name to sort the CSV by (default: None).")
     return p.parse_args()
 
 
@@ -181,18 +182,15 @@ def main():
         if args.high is not None:
             df = df[df[key] <= args.high]
 
-    df = df[df["z"] < 1]
-    df = df[np.abs(df["m2500_residuals"]) > 3]
-    df = df.sort_values(by=args.z_col)
+
+    df = df.sort_values(by=args.sort_by)
 
     if df.empty:
         print("[WARN] No rows after filtering. Nothing to do.", file=sys.stderr)
         return 1
 
     # Derive default output if needed
-    out_pdf = Path(args.output) if args.output else (
-        Path("plots") / "multiband" / args.prefix / "light_curve_fits" / f"lightcurves_{args.prefix}.pdf"
-    )
+    out_pdf = Path(args.output)
     out_pdf.parent.mkdir(parents=True, exist_ok=True)
 
     overlay_fields = [s.strip() for s in args.overlay.split(",")] if args.overlay else []
@@ -254,7 +252,7 @@ def main():
     first = images_for_pdf[0]
     rest = images_for_pdf[1:]
     try:
-        first.save(out_pdf, "PDF", resolution=300.0, save_all=True, append_images=rest)
+        first.save(out_pdf, "PDF", resolution=150.0, save_all=True, append_images=rest)
     except Exception as e:
         print(f"[ERROR] Failed to write PDF {out_pdf}: {e}", file=sys.stderr)
         return 2
