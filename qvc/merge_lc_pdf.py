@@ -38,15 +38,13 @@ def parse_args():
                    help="Output PDF path. Defaults to plots/multiband/{prefix}/light_curve_fits/lightcurves_{prefix}.pdf")
     p.add_argument("--object-id-col", default="object_id", help="Column name for object id (default: object_id).")
     p.add_argument("--z-col", default="z", help="Column name for redshift z (default: z).")
-    p.add_argument("--image-id", default=1443082, type=int,
-                   help="Trailing numeric image id in filename (default: 1443082).")
     p.add_argument("--overlay", default="redchi2_conti_full,m2500_residuals",
                    help="Comma-separated list of CSV fields to overlay on images (e.g., 'z,sdss_name,redchi2_conti_full').")
     p.add_argument("--key", default=None, help="Numeric CSV column to filter by (inclusive).")
     p.add_argument("--low", type=float, default=None, help="Low bound for --key (inclusive).")
     p.add_argument("--high", type=float, default=None, help="High bound for --key (inclusive).")
     p.add_argument("--max", type=int, default=None, help="Maximum number of images to include.")
-    p.add_argument("--font-size", type=int, default=80, help="Overlay font size (default: 24).")
+    p.add_argument("--font-size", type=int, default=24, help="Overlay font size (default: 24).")
     p.add_argument("--box-alpha", type=float, default=0.8, help="Overlay box opacity in [0,1] (default: 0.6).")
     p.add_argument("--box-pad", type=int, default=8, help="Padding for overlay box (default: 8).")
     p.add_argument("--skip-missing", action="store_true",
@@ -63,8 +61,7 @@ def build_image_path(prefix: str, z_val: float, object_id: str) -> Optional[Path
       2) '*{object_id}*.png'
     Returns None if no file is found.
     """
-    base = Path("plots") / "multiband" / prefix / "light_curve_fits"
-    print
+    base = Path("plots") / "multiband" / prefix / "light_curves_fits"
     z_str = f"{float(z_val):.1f}"
 
     # Prefer exact z-prefixed matches if present
@@ -116,7 +113,7 @@ def draw_overlay(im: Image.Image, lines: list, font_size: int = 24, box_alpha: f
 
     # Try default PIL font; fallback sizing
     try:
-        font = ImageFont.truetype(font="DejaVuSans.ttf", size=font_size)  # none uses default
+        font = ImageFont.truetype(font="DejaVuSansMono.ttf", size=font_size)  # none uses default
     except Exception:
         print("[WARN] Failed to load truetype font; using default.", file=sys.stderr)
         font = ImageFont.load_default()
@@ -183,7 +180,7 @@ def main():
             df = df[df[key] <= args.high]
 
 
-    df = df.sort_values(by=args.sort_by)
+    df = df.sort_values(by=args.sort_by, ascending=False)
 
     if df.empty:
         print("[WARN] No rows after filtering. Nothing to do.", file=sys.stderr)
