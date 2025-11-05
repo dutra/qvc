@@ -366,7 +366,7 @@ def build_single_object_model(
                 dist.TruncatedNormal(log_tau_drw0_c, 1.2 * jnp.log(10), low=log_tau_drw0_low, high=log_tau_drw0_high),
             )
             
-        log_tau_fast0 = numpyro.sample("log_tau_fast0", dist.TruncatedNormal(jnp.log(5), jnp.log(5), high=jnp.log(100)))
+        log_tau_fast0 = numpyro.sample("log_tau_fast0", dist.TruncatedNormal(jnp.log(5), jnp.log(5), high=jnp.log(10)))
 
         if sigma_tau_uniform:
             log_sigma0 = numpyro.sample("log_sigma0", dist.Uniform(-2.0 * jnp.log(10), 0.2 * jnp.log(10)))
