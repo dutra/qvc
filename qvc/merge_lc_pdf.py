@@ -44,7 +44,7 @@ def parse_args():
     p.add_argument("--low", type=float, default=None, help="Low bound for --key (inclusive).")
     p.add_argument("--high", type=float, default=None, help="High bound for --key (inclusive).")
     p.add_argument("--max", type=int, default=None, help="Maximum number of images to include.")
-    p.add_argument("--font-size", type=int, default=24, help="Overlay font size (default: 24).")
+    p.add_argument("--font-size", type=int, default=24, help="Overlay font size (default: 16).")
     p.add_argument("--box-alpha", type=float, default=0.8, help="Overlay box opacity in [0,1] (default: 0.6).")
     p.add_argument("--box-pad", type=int, default=8, help="Padding for overlay box (default: 8).")
     p.add_argument("--skip-missing", action="store_true",
@@ -131,13 +131,24 @@ def draw_overlay(im: Image.Image, lines: list, font_size: int = 24, box_alpha: f
     box_w = line_w + 2 * box_pad
     box_h = line_h_total + (len(lines) - 1) * 2 + 2 * box_pad  # small inter-line gap
 
+    img_w, img_h = im_rgba.size
+
     # Position top-left
-    x0, y0 = box_pad, box_pad
-    x1, y1 = x0 + box_w, y0 + box_h
+    #x0, y0 = box_pad, box_pad
+    #x1, y1 = x0 + box_w, y0 + box_h
+
+    # --- bottom-left
+    x0 = box_pad
+    y0 = img_h - box_h - box_pad
+
+    # (Optionally) bottom-center or bottom-right:
+    # x0 = (img_w - box_w) // 2         # bottom-center
+    # x0 = img_w - box_w - box_pad      # bottom-right
+    # y0 = img_h - box_h - box_pad
 
     # Semi-transparent rectangle
     overlay = Image.new("RGBA", im_rgba.size, (0, 0, 0, 0))
-    rect = Image.new("RGBA", (int(box_w), int(box_h)), (0, 0, 0, int(255 * box_alpha)))
+    rect = Image.new("RGBA", (int(box_w), int(box_h)), (255, 255, 255, int(255 * box_alpha)))
     overlay.paste(rect, (int(x0), int(y0)))
     im_rgba = Image.alpha_composite(im_rgba, overlay)
     draw = ImageDraw.Draw(im_rgba)
@@ -145,7 +156,7 @@ def draw_overlay(im: Image.Image, lines: list, font_size: int = 24, box_alpha: f
     # Draw text (white)
     y = y0 + box_pad
     for i, line in enumerate(lines):
-        draw.text((x0 + box_pad, y), line, fill=(255, 255, 255, 255), font=font)
+        draw.text((x0 + box_pad, y), line, fill=(0, 0, 0, 255), font=font)
         y += line_heights[i] + 2
 
     return im_rgba
