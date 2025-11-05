@@ -339,33 +339,29 @@ class MyMultiVarModel_SMAG_New(MultiVarModel):
             diags = self.diag
 
         lag_disk = params["lag0"] * (self.lam_rf / 2500.0) ** params["lag_beta"]
-
-        kernel_contBLR = ContiBLR_QS(
-           amp_cont=jnp.exp(log_sigma_band),
-           amp_blr=jnp.exp(log_sigma_band_blr),
-           lag_disk=lag_disk,
-           lag_blr=jnp.exp(params["log_lag_blr"]),
-           width_cont=params["width_cont"],
-           width_blr=params["width_blr"],
-           tau=jnp.exp(log_tau_band)
-        )
         
-        kernel_bwb = ContiBLR_CARMA2_QS(
-            tau1=jnp.exp(log_tau_band),
-            tau2=jnp.exp(log_tau_fast_band),
-            mix=params["bwb_alpha"],
+        if self.bwb:
+            kernel = ContiBLR_CARMA2_QS(
+                tau1=jnp.exp(log_tau_band),
+                tau2=jnp.exp(log_tau_fast_band),
+                mix=params["bwb_alpha"],
+                amp_cont=jnp.exp(log_sigma_band),
+                amp_blr=jnp.exp(log_sigma_band_blr),
+                lag_disk=lag_disk,
+                lag_blr=jnp.exp(params["log_lag_blr"]),
+                width_cont=params["width_cont"],
+                width_blr=params["width_blr"]
+            )
+        else:
+            kernel = ContiBLR_QS(
             amp_cont=jnp.exp(log_sigma_band),
             amp_blr=jnp.exp(log_sigma_band_blr),
             lag_disk=lag_disk,
             lag_blr=jnp.exp(params["log_lag_blr"]),
             width_cont=params["width_cont"],
-            width_blr=params["width_blr"]
-        )
-
-        if self.bwb:
-            kernel = kernel_bwb 
-        else:
-            kernel = kernel_contBLR
+            width_blr=params["width_blr"],
+            tau=jnp.exp(log_tau_band)
+            )
         
         u = kernel.coord_to_sortable((t, band))
         order = jnp.argsort(u)
@@ -411,7 +407,7 @@ class MyMultiVarModel_SMAG_New(MultiVarModel):
         host_frac = params["f_host"] * (self.lam_rf / 2500.0) ** (params["alpha_host"] - params["alpha_agn"])
         dilution_factor = 1.0 / (1.0 + host_frac)
         log_dilution = jnp.log(dilution_factor)
-
+        
         # Power-law scaling across rest-frame wavelength
         log_sigma_band = params["log_sigma0"] + log_dilution + jnp.log(10) * log_pl(self.lam_rf, lam_s, eta_A1, eta_A2, eta_break)
 
