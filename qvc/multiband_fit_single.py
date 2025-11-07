@@ -108,7 +108,7 @@ def make_lc(
     if disable_band_drop:
         dropped_bands = []
     else:
-        dropped_bands = sdss_bands_affected_by_lya(data["z"])
+        dropped_bands = sdss_bands_affected_by_lya(data["z"]) + ["z"]
 
     logging.info(
         f"Excluding blue bands {dropped_bands} for object {data['object_id']} at z={data['z']}"
