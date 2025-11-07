@@ -334,11 +334,11 @@ def build_single_object_model(
                 eta_A1 = numpyro.sample("eta_A1", dist.Normal(-0.8, 0.3))
                 eta_tau1 = numpyro.sample("eta_tau1", dist.Normal(0.4, 0.2))
             else:
-                eta_A1 = numpyro.sample("eta_A1", dist.Normal(-0.5, 1.0))
+                eta_A1 = numpyro.sample("eta_A1", dist.TruncatedNormal(-0.5, 1.0, high=0.0))
                 eta_tau1 = numpyro.sample("eta_tau1", dist.Normal(0.5, 0.5))
 
             if broken_pl:
-                eta_A2 = numpyro.sample("eta_A2", dist.Normal(-0.5, 1.0))
+                eta_A2 = numpyro.sample("eta_A2", dist.TruncatedNormal(-0.5, 1.0, high=0.0))
                 eta_tau2 = numpyro.sample("eta_tau2", dist.Normal(0.5, 0.5))
             else:
                 eta_A2 = numpyro.deterministic("eta_A2", 0.0)
