@@ -274,6 +274,9 @@ def make_lc(
         "t_obs_length": t_obs_length,
         "t_rf_length": t_rf_length,
         "bands": bands,
+        'cadence': data['cadence'],
+        'cadence_err': data['cadence_err'],
+        'number_points': data['number_points'],
     }
 
     if inject_fake:
@@ -315,6 +318,8 @@ def build_single_object_model(
     (t, bidx) = obj_dict["X"]
     y = obj_dict["y"]
     yerr = obj_dict["yerr"]
+    cadence = obj_dict['cadence']
+    cadence_err = obj_dict['cadence_err']
     z = float(obj_dict["z"])
     B = int(len(lam_rf))  # number of bands (static Python int for plate size)
 
@@ -365,8 +370,14 @@ def build_single_object_model(
                 "log_tau_drw0",
                 dist.TruncatedNormal(log_tau_drw0_c, 1.2 * jnp.log(10), low=log_tau_drw0_low, high=log_tau_drw0_high),
             )
-            
-        log_tau_fast0 = numpyro.sample("log_tau_fast0", dist.TruncatedNormal(jnp.log(5), jnp.log(5), high=jnp.log(10)))
+        
+        log_tau_fast0_low = 0.0
+        log_tau_fast0_high = jnp.log(100.0 * (1.0 + z))
+        log_tau_fast0_c = jnp.log(25.0 * (1.0 + z))
+        log_tau_fast0 = numpyro.sample("log_tau_fast0", 
+                                       dist.TruncatedNormal(log_tau_fast0_c, jnp.log(25), 
+                                                            low=log_tau_fast0_low, high=log_tau_fast0_high))
+
 
         if sigma_tau_uniform:
             log_sigma0 = numpyro.sample("log_sigma0", dist.Uniform(-2.0 * jnp.log(10), 0.2 * jnp.log(10)))
@@ -753,7 +764,8 @@ def main():
             continue
 
     # Save list (excluding heavy arrays)
-    save_quasar_list_hdf5(results, ignored_keys=["X", "y", "yerr", "band_idx", "mags_means", "mags_stds"])
+    print(results)
+    save_quasar_list_hdf5(results, ignored_keys=["X", "y", "yerr", "band_idx"])
 
     # Aggregate sigma–tau vs lambda plot (optional)
     try:

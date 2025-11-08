@@ -209,6 +209,27 @@ def concat_light_curves(filter_object_ids=None, progress_bar=False, skip=None, N
             mags[band] = mags[band][sort_idx]
             magerrs[band] = magerrs[band][sort_idx]
 
+        # 1) gather epochs
+        all_times = np.concatenate([times[band] for band in bands])
+        all_times = np.sort(np.concatenate([np.asarray(times[b], float) for b in bands]))
+        all_times = all_times[np.isfinite(all_times)]
+
+        # 2) collapse near-simultaneous visits (e.g., multi-filter sequence)
+        tol_min=30
+        tol = tol_min / 1440.0  # days
+        keep = np.ones_like(all_times, dtype=bool)
+        keep[1:] = np.diff(all_times) > tol
+        all_times = all_times[keep]
+
+        # 3) nearest-neighbour spacings; drop huge seasonal gaps
+        gap_days=30
+        dt = np.diff(all_times)
+        dt = dt[(dt > 0) & (dt < gap_days)]
+        cadence = np.median(dt)
+        cadence_err = np.percentile(dt, 84) - np.percentile(dt, 16)
+
+        number_points = sum(len(mags[band]) for band in bands)
+
         # Skip if no data is available for the object
         if all((len(times[band]) == 0 or len(mags[band]) == 0 or len(magerrs[band]) == 0) for band in bands):
             print(f"No data available for object {object_id}, skipping.", flush=True)
@@ -221,6 +242,9 @@ def concat_light_curves(filter_object_ids=None, progress_bar=False, skip=None, N
             'mags': mags,
             'mags_mean': mags_means,
             'magerrs': magerrs,
+            'cadence': cadence,
+            'cadence_err': cadence_err,
+            'number_points': number_points,
         })
 
         #save_lc_plot(times, mags, magerrs, object_id, bands=bands)
