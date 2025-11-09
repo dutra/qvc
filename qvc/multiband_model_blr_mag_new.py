@@ -153,8 +153,8 @@ class ContiBLR_CARMA2_QS(qs.Quasisep):
 
     Args
     ----
-    tau1:         (B,) fast OU timescale per band
-    tau2:         (B,) slow OU timescale per band
+    tau_fast:         (B,) fast OU timescale per band
+    tau_slow:         (B,) slow OU timescale per band
     amp_cont:     (B,) continuum gain per band
     amp_blr:      (B,) BLR gain per band
     mix:          (B,) in (0,1): fraction from fast block (1-mix from slow) for BOTH cont & BLR
@@ -164,8 +164,8 @@ class ContiBLR_CARMA2_QS(qs.Quasisep):
     width_blr:    (B,) top-hat width for BLR per band
     """
 
-    tau1:        jnp.ndarray
-    tau2:        jnp.ndarray
+    tau_fast:        jnp.ndarray
+    tau_slow:        jnp.ndarray
     amp_cont:    jnp.ndarray
     amp_blr:     jnp.ndarray
     mix:         jnp.ndarray
@@ -180,12 +180,12 @@ class ContiBLR_CARMA2_QS(qs.Quasisep):
         return t + 1e-9 * jnp.asarray(b, jnp.int32)
 
     def _B(self):
-        return self.tau1.shape[0]
+        return self.tau_fast.shape[0]
 
     def design_matrix(self):
         # Two independent OU blocks (fast/slow)
-        lam1 = 1.0 / _safe_pos(self.tau1)
-        lam2 = 1.0 / _safe_pos(self.tau2)
+        lam1 = 1.0 / _safe_pos(self.tau_fast)
+        lam2 = 1.0 / _safe_pos(self.tau_slow)
         A1 = -jnp.diag(lam1)
         A2 = -jnp.diag(lam2)
         return jax.scipy.linalg.block_diag(A1, A2)
@@ -198,8 +198,8 @@ class ContiBLR_CARMA2_QS(qs.Quasisep):
             P = 2.0 * jnp.sqrt(ti * tj) / _safe_pos(ti + tj)
             return 0.5 * (P + P.T)
 
-        P1 = _P(self.tau1)
-        P2 = _P(self.tau2)
+        P1 = _P(self.tau_fast)
+        P2 = _P(self.tau_slow)
         Z  = jnp.zeros_like(P1)
         return jnp.block([[P1, Z],
                           [Z,  P2]])
@@ -208,16 +208,16 @@ class ContiBLR_CARMA2_QS(qs.Quasisep):
         t1, _ = X1
         t2, _ = X2
         dt = t2 - t1
-        lam1 = 1.0 / _safe_pos(self.tau1)
-        lam2 = 1.0 / _safe_pos(self.tau2)
+        lam1 = 1.0 / _safe_pos(self.tau_fast)
+        lam2 = 1.0 / _safe_pos(self.tau_slow)
         Phi1 = jnp.diag(jnp.exp(-lam1 * dt))
         Phi2 = jnp.diag(jnp.exp(-lam2 * dt))
         return jax.scipy.linalg.block_diag(Phi1, Phi2)
 
     def _basis_vectors(self, b: jnp.ndarray):
         B = self._B()
-        e_fast = jnp.zeros(2 * B, dtype=self.tau1.dtype).at[b].set(1.0)
-        e_slow = jnp.zeros(2 * B, dtype=self.tau1.dtype).at[B + b].set(1.0)
+        e_fast = jnp.zeros(2 * B, dtype=self.tau_fast.dtype).at[b].set(1.0)
+        e_slow = jnp.zeros(2 * B, dtype=self.tau_fast.dtype).at[B + b].set(1.0)
         return e_fast, e_slow
 
     def _lagged_obs(self, e_vec, lag):
@@ -246,14 +246,14 @@ class ContiBLR_CARMA2_QS(qs.Quasisep):
         h_slow_blr  = self._lagged_obs(e_slow, lag_d + lag_r)
 
         # Top-hat gains using the band's τ in each block
-        Gc_fast = _top_hat_gain(w_c, _safe_pos(self.tau1[b]))
-        Gc_slow = _top_hat_gain(w_c, _safe_pos(self.tau2[b]))
-        Gr_fast = _top_hat_gain(w_r, _safe_pos(self.tau1[b]))
-        Gr_slow = _top_hat_gain(w_r, _safe_pos(self.tau2[b]))
+        Gc_fast = _top_hat_gain(w_c, _safe_pos(self.tau_fast[b]))
+        Gc_slow = _top_hat_gain(w_c, _safe_pos(self.tau_slow[b]))
+        Gr_fast = _top_hat_gain(w_r, _safe_pos(self.tau_fast[b]))
+        Gr_slow = _top_hat_gain(w_r, _safe_pos(self.tau_slow[b]))
 
         # Same fast/slow mixture for both cont and BLR (BLR is a lagged copy)
-        cont = amp_c * ( mixb * (Gc_fast * h_fast_cont) + (1.0 - mixb) * (Gc_slow * h_slow_cont) )
-        blr  = amp_r * ( mixb * (Gr_fast * h_fast_blr)  + (1.0 - mixb) * (Gr_slow * h_slow_blr) )
+        cont = amp_c * ( mixb * (Gc_fast * h_fast_cont) + (Gc_slow * h_slow_cont) )
+        blr  = amp_r * ( mixb * (Gr_fast * h_fast_blr)  + (Gr_slow * h_slow_blr) )
 
         return cont + blr
 
@@ -342,8 +342,8 @@ class MyMultiVarModel_SMAG_New(MultiVarModel):
         
         if self.bwb:
             kernel = ContiBLR_CARMA2_QS(
-                tau1=jnp.exp(log_tau_band),
-                tau2=jnp.exp(log_tau_fast_band),
+                tau_fast=jnp.exp(log_tau_fast_band),
+                tau_slow=jnp.exp(log_tau_band),
                 mix=params["bwb_alpha"],
                 amp_cont=jnp.exp(log_sigma_band),
                 amp_blr=jnp.exp(log_sigma_band_blr),

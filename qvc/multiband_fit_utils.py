@@ -700,6 +700,7 @@ def process_samples(flat_samples, data, percentiles=[16, 50, 84], bands=['u', 'g
     # Power Law Params
     log_sigma0 = np.asarray(flat_samples["log_sigma0"])
     log_tau_drw0 = np.asarray(flat_samples["log_tau_drw0"])
+    log_tau_fast0 = np.asarray(flat_samples["log_tau_fast0"])
     eta_A1 = np.asarray(flat_samples["eta_A1"])
     eta_A2 = np.asarray(flat_samples["eta_A2"])
     eta_tau1 = np.asarray(flat_samples["eta_tau1"])
@@ -722,6 +723,13 @@ def process_samples(flat_samples, data, percentiles=[16, 50, 84], bands=['u', 'g
         log_tau_band.append(val)
     log_tau_band = np.array(log_tau_band).T
 
+    log_tau_fast_band = []
+    for band in bands:
+        lam_eff = lambda_pivot[band] / (1 + data['z'])
+        val = log_tau_fast0 / np.log(10) - np.log10(1 + data['z']) + log_pl(lam_eff, lam_s, eta_tau1, eta_tau2, eta_break)
+        log_tau_fast_band.append(val)
+    log_tau_fast_band = np.array(log_tau_fast_band).T
+
     for i, band in enumerate(bands):
         median, err = sym_percentile(log_sigma_band[:, i])
         result[f"log_sigma_band_{band}"] = median
@@ -729,6 +737,10 @@ def process_samples(flat_samples, data, percentiles=[16, 50, 84], bands=['u', 'g
         median, err = sym_percentile(log_tau_band[:, i])
         result[f"log_tau_band_{band}_RF"] = median
         result[f"log_tau_band_{band}_RF_err"] = err
+        median, err = sym_percentile(log_tau_fast_band[:, i])
+        result[f"log_tau_fast_band_{band}_RF"] = median
+        result[f"log_tau_fast_band_{band}_RF_err"] = err
+
 
     # Other special params
     host_frac = flat_samples["f_host"] * (lambda_ref / 5100.0) ** flat_samples["alpha_host"]

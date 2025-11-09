@@ -373,7 +373,7 @@ def build_single_object_model(
         
         log_tau_fast0_low = 0.0
         log_tau_fast0_high = jnp.log(100.0 * (1.0 + z))
-        log_tau_fast0_c = jnp.log(25.0 * (1.0 + z))
+        log_tau_fast0_c = jnp.log(10 * (1.0 + z))
         log_tau_fast0 = numpyro.sample("log_tau_fast0", 
                                        dist.TruncatedNormal(log_tau_fast0_c, jnp.log(25), 
                                                             low=log_tau_fast0_low, high=log_tau_fast0_high))
