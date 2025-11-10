@@ -56,7 +56,8 @@ jax.config.update("jax_enable_x64", True)
 jax.config.update("jax_debug_nans", False)
 import jax.numpy as jnp
 from jax import random
-
+from jax import random, device_get
+from jax.tree_util import tree_map
 import numpyro
 numpyro.set_host_device_count(num_cores)
 numpyro.enable_x64()
@@ -627,6 +628,8 @@ def main():
             # Per-object lam_rf for *actual* bands used
             bands = obj["bands"]
             lam_rf = jnp.array([lambda_pivot[b] for b in bands], dtype=float) / (1.0 + float(obj["z"]))
+            print(f"[{oid}] Using bands: {bands}")
+            print(f"[{oid}] lam_rf = {lam_rf}")
 
             # Per-band log_jitter mean from yerr per band
             bidx = obj["band_idx"]
@@ -686,10 +689,11 @@ def main():
                 mcmc.run(key)
                 samples_flat = mcmc.get_samples(group_by_chain=False)
                 samples_per_chain = mcmc.get_samples(group_by_chain=True)
-
+            samples_flat = tree_map(lambda x: np.asarray(device_get(x)), samples_flat)
+            samples_per_chain = tree_map(lambda x: np.asarray(device_get(x)), samples_per_chain)
             # Save/diagnostics for this object
             obj_flat_samples = samples_flat  # already single-object
-            obj_flat_samples_flatten_per_band = flatten_flat_samples_per_band(obj_flat_samples)
+            obj_flat_samples_flatten_per_band = flatten_flat_samples_per_band(obj_flat_samples, bands=bands)
             save_obj_samples_to_hdf5(obj_flat_samples_flatten_per_band, oid)
 
             diagnostics = {}
@@ -739,7 +743,7 @@ def main():
                     logging.error(f"[{oid}] Plotting error: {e}")
                     logging.error(traceback.format_exc())
 
-            final_result = obj | result | diagnostics | dict(prefix=prefix, suffix=suffix)
+            final_result = obj | diagnostics | result | dict(prefix=prefix, suffix=suffix)
             log_sigma_UV = final_result.get("log_sigma_UV")
             log_sigma_UV_err = final_result.get("log_sigma_UV_err")
             log_tau_UV_RF = final_result.get("log_tau_UV_RF")
@@ -748,6 +752,7 @@ def main():
                 f"[{oid}] log_sigma_UV = {log_sigma_UV} ± {log_sigma_UV_err} ; "
                 f"log_tau_UV_RF = {log_tau_UV_RF} ± {log_tau_UV_RF_err}"
             )
+            
             results.append(final_result)
 
             # Optional fake recovery summary
@@ -757,14 +762,13 @@ def main():
                     ("log_sigma_fake", "log_sigma0", "log10_sigma"),
                 ]
                 summarize_fake_true_vs_recovered(final_result, diagnostics, compare_pairs=compare_pairs)
-
+            
         except Exception as e:
             logging.error(f"[{oid}] Error during fit: {e}")
             logging.error(traceback.format_exc())
             continue
 
     # Save list (excluding heavy arrays)
-    print(results)
     save_quasar_list_hdf5(results, ignored_keys=["X", "y", "yerr", "band_idx"])
 
     # Aggregate sigma–tau vs lambda plot (optional)

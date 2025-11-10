@@ -99,7 +99,7 @@ def select_samples_for_object_per_chain(samples_per_chain, obj_index, universal_
     return obj_samples
 
 
-def flatten_per_chain_samples_per_band(samples_per_chain, bands=['u', 'g', 'r', 'i', 'z']):
+def flatten_per_chain_samples_per_band(samples_per_chain, bands):
     """
     Flatten per-chain samples for each band.
     
@@ -168,7 +168,7 @@ def select_samples_for_object(samples_flat, obj_index, universal_params):
 
     return obj_samples
 
-def flatten_flat_samples_per_band(samples_flat, bands=['u', 'g', 'r', 'i', 'z']):
+def flatten_flat_samples_per_band(samples_flat, bands):
     """
     Flatten flat samples for each band.
     
@@ -192,6 +192,8 @@ def flatten_flat_samples_per_band(samples_flat, bands=['u', 'g', 'r', 'i', 'z'])
             flattened_samples[k] = v
         elif v.ndim == 2:
             # Flatten over bands
+            if v.shape[-1] != len(bands):
+                raise ValueError(f"Unexpected band dimension for {k}: {v.shape} vs bands={len(bands)}")
             for i, band in enumerate(bands):
                 flattened_samples[f"{k}_{band}"] = v[:, i]
         else:
@@ -663,7 +665,7 @@ def psd_cov_from_samples(X, Y, eps=1e-12, shrink_rho=0.0):
     C = np.array([[sx*sx, rho*sx*sy],[rho*sx*sy, sy*sy]])
     return C
 
-def process_samples(flat_samples, data, percentiles=[16, 50, 84], bands=['u', 'g', 'r', 'i', 'z'], broken_pl=False):
+def process_samples(flat_samples, data,  bands, percentiles=[16, 50, 84], broken_pl=False):
     """
     Generalized processing of MCMC samples for arbitrary parameters and bands.
 
