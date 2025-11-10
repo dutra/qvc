@@ -41,8 +41,7 @@ QSOFit.set_mpl_style()
 from astroquery.sdss import SDSS
 #warnings.filterwarnings("ignore")
 
-bands = ['u', 'g', 'r', 'i', 'z']
-
+bands = ['u', 'g', 'r', 'i']
 
 def _as_value(x, unit=None):
     """Return float array from Quantity or ndarray. If ndarray and a unit is
@@ -199,7 +198,7 @@ def compute_apparent_mag_2500_astropy(logL2500, z):
     DL = cosmo.luminosity_distance(z).to(u.cm).value  # cm
 
     log_Lnu = logL2500 + np.log10(lambda_ / c)
-    log_fnu = log_Lnu - np.log10(4 * np.pi * DL**2 * (1 + z))
+    log_fnu = log_Lnu - np.log10(4 * np.pi * DL**2)
     m_ab = -2.5 * log_fnu - 48.60
 
     return m_ab
