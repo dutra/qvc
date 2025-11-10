@@ -107,7 +107,7 @@ def make_lc(
     # If bands not specified, infer from present keys and keep SDSS order if possible
 
     if disable_band_drop:
-        dropped_bands = []
+        dropped_bands = ["z"]
     else:
         dropped_bands = sdss_bands_affected_by_lya(data["z"]) + ["z"]
 
