@@ -45,11 +45,17 @@ def prior_transform_dynesty(unit_cube, priors, model_labels):
     return [priors[key][0] + (priors[key][1] - priors[key][0]) * x
             for x, key in zip(unit_cube, model_labels)]
 
-def run_mcmc_pipeline(df_agn, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, 
+def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, 
                       df_calibrators=None,
                       cosmo_model='Flatw0waCDM', z_pivot_agn=1.5,
                       only_sna=False, completeness=True, use_full_cov=True,
-                      resume=False, speed="production", use_mu_sh0es=False):
+                      resume=False, speed="production", use_mu_sh0es=False,
+                      z_range=(1.0, 3.16)):
+
+
+    # Restrict AGN data to redshift range in
+    df_agn = df_agn.copy()
+    df_agn = df_agn[df_agn['z'].between(z_range[0], z_range[1])].reset_index(drop=True)
 
     priors, model_labels, model_labels_latex = get_model_params(cosmo_model, only_sna=only_sna)
     ndim = len(model_labels)
@@ -60,8 +66,10 @@ def run_mcmc_pipeline(df_agn, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
     else:
         completeness_params = None
 
-    print(f"tau UV RF mean: {np.mean(10**df_agn['log_tau_UV_RF']):.4f}")
-    print(f"sigma0 mean: {np.mean(10**df_agn['log_sigma_UV']):.4f}")
+    print(f"log_sigma mean: {np.mean(df_agn['log_sigma_UV']):.2f}")
+    print(f"sigma mean: {np.mean(10**df_agn['log_sigma_UV']):.2f}")
+    print(f"log_tau UV RF mean: {np.mean(df_agn['log_tau_UV_RF']):.2f}")
+    print(f"tau UV RF mean: {np.mean(10**df_agn['log_tau_UV_RF']):.2f}")
 
     _z_pivot = (1 / np.exp(np.mean(np.log(1 / (1 + df_agn['z']))))) - 1
     print(f"z mean: {df_agn['z'].mean():.3f}, calculated z pivot: {_z_pivot:.3f}")
@@ -165,12 +173,24 @@ def run_mcmc_pipeline(df_agn, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
                     resume=resume,
                     checkpoint_file=checkpoint_file,
                     print_progress=True,
-                    dlogz_init=10,                 
-                    n_effective=200,                # 300–1000 typical for model comparison
+                    dlogz_init=0.01,                 
+                    n_effective=500,                # 300–1000 typical for model comparison
                     nlive_init=50,   # bump live points
-                    nlive_batch=20   # reasonable batch size for dynamic allocation
+                    nlive_batch=30   # reasonable batch size for dynamic allocation
                 )
 
+            # elif speed == "test":
+            #     print("[Warning] Starting TEST run...")
+            #     # "Fast" test run?
+            #     sampler.run_nested(
+            #         resume=resume,
+            #         checkpoint_file=checkpoint_file,
+            #         print_progress=True,
+            #         dlogz_init=0.01,                 
+            #         n_effective=2000,                # 300–1000 typical for model comparison
+            #         nlive_init=250,   # bump live points
+            #         nlive_batch=100   # reasonable batch size for dynamic allocation
+            #     )
             elif speed == "test":
                 print("[Warning] Starting TEST run...")
                 # "Fast" test run?
@@ -178,8 +198,8 @@ def run_mcmc_pipeline(df_agn, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
                     resume=resume,
                     checkpoint_file=checkpoint_file,
                     print_progress=True,
-                    dlogz_init=0.001,                 
-                    n_effective=2000,                # 300–1000 typical for model comparison
+                    dlogz_init=0.01,                 
+                    n_effective=1000,                # 300–1000 typical for model comparison
                     nlive_init=250,   # bump live points
                     nlive_batch=100   # reasonable batch size for dynamic allocation
                 )
@@ -217,51 +237,16 @@ def run_mcmc_pipeline(df_agn, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
     integrals_max_w = blobs[idx_max_weight,:][0]  # this is integrals for that sample, shape: (nobj,)
     dmi_max_w = blobs[idx_max_weight,:][1]  # this is dmi for that sample, shape: (nobj,)
     
-    # Bin dmi in redshift
-    # Interpolate dmi vs redshift for smooth plotting or further analysis (no binning)
-    dmi_interp = interp1d(z, dmi_max_w, kind='linear', bounds_error=False, fill_value='extrapolate')
-    
-    # Plot dmi_interp vs z for the highest-weight sample
-    z_plot = np.linspace(z.min(), z.max(), 200)
-    plt.figure(figsize=(8, 5))
-    plt.plot(z_plot, dmi_interp(z_plot), label="dmi_interp(z)")
-    plt.xlabel("Redshift (z)")
-    plt.ylabel("dmi (mag)")
-    plt.title("Interpolated dmi vs z — highest posterior weight sample")
-    plt.grid(True)
-    plt.tight_layout()
-    os.makedirs("plots/completeness", exist_ok=True)
-    plt.savefig("plots/completeness/dmi_interp_vs_z_highest_weight.png", dpi=150)
-    plt.close()
-
     print("\nHighest-weight (posterior) sample:")
     print("  idx:", idx_max_weight)
     print("  logl:", float(logl[idx_max_weight]))
     print("  weight:", float(weights[idx_max_weight]))
     print("  (preview) integrals[:10]:", integrals_max_w[:10])
 
-    # Plot log(integrals) vs redshift for highest-weight sample
-    plt.figure(figsize=(8, 5))
-    plt.scatter(z, integrals_max_w, s=16, alpha=0.3)
-    plt.xlabel("Redshift (z)")
-    plt.ylabel("integral  (completeness)")
-    plt.title("Completeness integrals vs z — highest posterior weight sample")
-    plt.grid(True)
-    plt.tight_layout()
-    # Optional: save to disk
-    plt.savefig("plots/completeness/integrals_vs_z_highest_weight.png", dpi=150)
-    #plt.show()
-    plt.close()
-
-
-    # Posterior summaries over resampled blobs (per-object)
-    posterior_mean_logint = np.mean(flat_blobs, axis=0)
-    posterior_med_logint  = np.median(flat_blobs, axis=0)
-
-    # print("\nPosterior (equal-weight) blob summaries:")
-    # print("  per-object mean (first 10):", posterior_mean_logint[:10])
-    # print("  per-object median (first 10):", posterior_med_logint[:10])
-
+    # Optional: median params from equal-weight posterior
+    median_samples = np.median(flat_samples, axis=0)
+    print("\nMedian parameters (equal-weight posterior):")
+    print(median_samples)
     # Stats
     neff = (weights.sum()**2) / (weights**2).sum()
     print("\nDynesty results stats:")
@@ -271,22 +256,25 @@ def run_mcmc_pipeline(df_agn, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
     print("  effective samples (ESS):", float(neff))
     print("  resampled samples shape:", flat_samples.shape)
     print("  resampled blobs shape:", flat_blobs.shape)
-
-    # Optional: median params from equal-weight posterior
-    median_samples = np.median(flat_samples, axis=0)
-    print("\nMedian parameters (equal-weight posterior):")
-    print(median_samples)
-
+    
     print("1 sigma scatter on HD (magnitudes)")
     sigma_intrinsic = float(np.exp(median_samples[model_labels.index('log_f')]))
     print("  sigma_intrinsic:", sigma_intrinsic)
 
-    return sampler, flat_samples, model_labels, dmi_max_w, logZ, logZerr
+    # Bin dmi in redshift
+    # Interpolate dmi vs redshift for smooth plotting or further analysis (no binning)
+    #dmi_interp = interp1d(z, dmi_max_w)
+    dm_interp = make_dm_function(df_agn['apparent_mag_2500'].values, df_agn['z'].values, dmi_max_w)
+    
+    plot_completeness_diagnostics(dmi_max_w, z, integrals_max_w)
+
+    return sampler, flat_samples, model_labels, dm_interp, logZ, logZerr
 
 
 
 
-def run_single(df_agn, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, cosmo_model, completeness=True, use_full_cov=True, 
+def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, 
+               cosmo_model, completeness=True, use_full_cov=True, 
                N=None, resume=False, only_sna=False, speed="production", use_mu_sh0es=False, cosmo_model_samples={}, verbose=True,
                z_pivot_agn=1.5, skip_plots=False, residuals_sigma_clip=None, df_calibrators=None):
 
@@ -298,8 +286,9 @@ def run_single(df_agn, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, cosmo_mo
         print(f"Limiting AGN data to first {N} entries for speed...")
         df_agn = df_agn.head(N)
         #df_pantheon = df_pantheon.head(N)
-
-    sampler, flat_samples, model_labels, dmag_corr, logZ, logZerr = run_mcmc_pipeline(df_agn, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
+    sampler, flat_samples, model_labels, dm_interp, logZ, logZerr = run_mcmc_pipeline(
+                                                        df_agn, df_agn_all,
+                                                        df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
                                                         df_calibrators=df_calibrators,
                                                         cosmo_model=cosmo_model, z_pivot_agn=z_pivot_agn,
                                                         only_sna=only_sna, completeness=completeness, use_full_cov=use_full_cov,
@@ -309,7 +298,7 @@ def run_single(df_agn, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, cosmo_mo
     age, age_err = compute_age_universe_with_error(flat_samples, cosmo_model)
 
     if skip_plots:
-        return sampler, flat_samples, model_labels, dmag_corr, logZ, logZerr, None, (age, age_err)
+        return sampler, flat_samples, model_labels, dm_interp, logZ, logZerr, None, (age, age_err)
 
     plot_path = f"plots/hubble/{prefix}/{cosmo_model}_{'sna' if only_sna else 'joint'}_{speed}"
     print(f"Saving plots to ", plot_path)
@@ -320,22 +309,22 @@ def run_single(df_agn, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, cosmo_mo
 
     if only_sna:
         print("Skipping AGN-specific plots for SNe-only run.")
-        return sampler, flat_samples, model_labels, dmag_corr, logZ, logZerr, None, None
+        return sampler, flat_samples, model_labels, dm_interp, logZ, logZerr, None, None
 
 
     print("Plotting Hubble diagram...")
-    # plot_hubble(flat_samples, df_agn, df_pantheon, 
-    #             cosmo_model=cosmo_model, z_pivot_agn=z_pivot_agn, show_residuals=False,
-    #             show_true=False, show=False, debias=False, plot_path=plot_path, verbose=False)
+
     r = plot_hubble(flat_samples, df_agn, df_pantheon, 
                     cosmo_model=cosmo_model, z_pivot_agn=z_pivot_agn, 
-                    show_true=False, show=False, debias=True, dms=dmag_corr, plot_path=plot_path,
+                    show_true=False, show=False, debias=True, dm_interp=dm_interp, plot_path=plot_path,
                     cosmo_model_samples=cosmo_model_samples, verbose=verbose, residuals_sigma_clip=residuals_sigma_clip,
                     df_calibrators=df_calibrators)
     debiased_residuals, debiased_residuals_err, mu_pred_median_debiased, mu_pred_std_debiased, mu_pred_std_debiased_with_scatter = r
-    
+    plot_hubble(flat_samples, df_agn, df_pantheon, 
+                cosmo_model=cosmo_model, z_pivot_agn=z_pivot_agn, show_residuals=True,
+                show_true=False, show=False, debias=False, plot_path=plot_path, verbose=False)    
     if cosmo_model == 'Flatw0waCDM':
-        make_agn_latex_table(df_agn, mu_pred_median_debiased, mu_pred_std_debiased_with_scatter, dms=dmag_corr, max_rows=30, sort_by='z')
+        make_agn_latex_table(df_agn, mu_pred_median_debiased, mu_pred_std_debiased_with_scatter, dm_interp=dm_interp, max_rows=30, sort_by='z')
 
     chisq_red_hubble_debiased, _ = reduced_chi_squared(debiased_residuals, mu_pred_std_debiased, n_params=len(model_labels)-1)
 
@@ -344,23 +333,28 @@ def run_single(df_agn, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, cosmo_mo
     print("Plotting predicted vs actual M2500...")
     plot_predicted_vs_actual_M2500(flat_samples, df_agn, cosmo_model=cosmo_model, z_pivot_agn=z_pivot_agn, debias=False, show=False, plot_path=plot_path)
     M2500_residuals_debiased, M2500_std_debiased, M2500_binned_residuals_debiased, _ = plot_predicted_vs_actual_M2500(flat_samples, df_agn, cosmo_model=cosmo_model, 
-                                                                                  z_pivot_agn=z_pivot_agn, debias=True, show=False, dms=dmag_corr,
+                                                                                  z_pivot_agn=z_pivot_agn, debias=True, show=False, dm_interp=dm_interp,
                                                                                   plot_path=plot_path)
     chisq_red_M2500_debiased, _ = reduced_chi_squared(M2500_residuals_debiased, M2500_std_debiased, n_params=len(model_labels)-1)
+    if cosmo_model == 'Flatw0waCDM':
+        print("Plotting debiased residuals...")
+        plot_full_residuals(df_agn, debiased_residuals, debiased_residuals_err, flat_samples, cosmo_model, z_pivot_agn, debias=True, dm_interp=dm_interp, show=False, plot_path=plot_path)
+        plot_full_residuals(df_agn, debiased_residuals, debiased_residuals_err, flat_samples, cosmo_model, z_pivot_agn, debias=True, dm_interp=dm_interp, 
+                            show=False, plot_path=plot_path, z_cut=1.0)
 
-    print("Plotting debiased residuals...")
-    plot_full_residuals(df_agn, debiased_residuals, debiased_residuals_err, flat_samples, cosmo_model, z_pivot_agn, debias=True, dms=dmag_corr, show=False, plot_path=plot_path)
-    plot_full_residuals(df_agn, debiased_residuals, debiased_residuals_err, flat_samples, cosmo_model, z_pivot_agn, debias=True, dms=dmag_corr, 
-                        show=False, plot_path=plot_path, z_cut=1.0)
+        plot_full_residuals(df_agn, debiased_residuals, debiased_residuals_err, flat_samples, cosmo_model, z_pivot_agn, debias=True, dm_interp=dm_interp, 
+                            show=False, plot_path=plot_path, key_y='z', key_color='residuals')
+        plot_full_residuals(df_agn, debiased_residuals, debiased_residuals_err, flat_samples, cosmo_model, z_pivot_agn, debias=True, dm_interp=dm_interp, 
+                            show=False, plot_path=plot_path, z_cut=1.0, key_y='z', key_color='residuals')
 
-    #plot_full_residuals(df_agn, residuals, flat_samples, cosmo_model, z_pivot_agn, debias=False, show=False, plot_path=plot_path)
+        #plot_full_residuals(df_agn, residuals, flat_samples, cosmo_model, z_pivot_agn, debias=False, show=False, plot_path=plot_path)
 
     print("Plotting predicted L2500 vs ...")
     # plot_predicted_L2500_vs_sigmahat(flat_samples, df_agn, cosmo_model=cosmo_model, z_pivot_agn=z_pivot_agn, 
     #                                  debias=False, show_residuals=False,
     #                                  show=False, plot_path=plot_path)
     L_residuals_debiased, L_pred_std_debiased = plot_predicted_L2500_vs_sigmahat(flat_samples, df_agn, cosmo_model=cosmo_model, z_pivot_agn=z_pivot_agn, 
-                                                            debias=True, dms=dmag_corr, show_residuals=False,
+                                                            debias=True, dm_interp=dm_interp, show_residuals=False,
                                                             show=False, plot_path=plot_path, df_calibrators=df_calibrators)
     
     chisq_red_L2500, _ = reduced_chi_squared(L_residuals_debiased, L_pred_std_debiased, n_params=len(model_labels)-1)
@@ -371,7 +365,7 @@ def run_single(df_agn, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, cosmo_mo
                       gauss_sigma=1.5, kde_bw_scale=1.5)
 
     print("Plotting completeness vs magnitude at redshifts...")
-    p_detect, mag_centers, z_centers, dm, dz, completeness_scatter, _, _, _ = get_completeness_function_2d(df_agn, plot=True)
+    p_detect, mag_centers, z_centers, dm, dz, completeness_scatter = get_completeness_function_2d(df_agn, plot=True)
     plot_completeness_vs_mag_at_redshifts(p_detect, mag_centers, z_centers)
 
 
@@ -403,10 +397,10 @@ def run_single(df_agn, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, cosmo_mo
 
     plot_residuals_vs_alphaOX(df_agn, debiased_residuals, debiased_residuals_err, show=False, plot_path=plot_path)
 
-    return sampler, flat_samples, model_labels, dmag_corr, logZ, logZerr, debiased_residuals, (age, age_err)
+    return sampler, flat_samples, model_labels, dm_interp, logZ, logZerr, debiased_residuals, (age, age_err)
 
 
-def run_all(df_agn, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, 
+def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, 
             cosmo_models, z_pivot_agn=1.5, skip_plots=False,
             residuals_sigma_clip=None,
             speed="production", resume=False, N=None, use_mu_sh0es=False):
@@ -417,7 +411,7 @@ def run_all(df_agn, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
     cosmo_model_samples = {}
 
     for cosmo_model in cosmo_models:
-        r = run_single(df_agn, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, 
+        r = run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, 
                        cosmo_model=cosmo_model, only_sna=False, 
                        resume=resume, speed=speed, N=N,
                        z_pivot_agn=z_pivot_agn, skip_plots=skip_plots,
@@ -426,7 +420,7 @@ def run_all(df_agn, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
         
         _, samples_joint, _, _, logZ_joint, logZerr_joint, _, age = r
         #print(f"For model {cosmo_model}, universe age: {age:.3f} Gyr")
-        r = run_single(df_agn, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, 
+        r = run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, 
                        cosmo_model=cosmo_model, only_sna=True, 
                        z_pivot_agn=z_pivot_agn, skip_plots=skip_plots,
                        residuals_sigma_clip=residuals_sigma_clip,
@@ -510,6 +504,8 @@ if __name__ == "__main__":
                            redchi2_cut=args.redchi2_cut, iron_frac_cut=args.iron_frac_cut,
                            sdss_mags_csv=args.sdss_mags_csv)
     
+    plot_Mi_relation(df_agn)
+    
     if args.agn_calibrators:
         if args.agn_calibrators.endswith('.h5'):
             df_calibrators = read_quasars_from_hdf5(args.agn_data_show)
@@ -529,7 +525,7 @@ if __name__ == "__main__":
     if args.run == "single": # default
         cosmo_models_dict = {k: {} for k in args.cosmo_models}
         for cosmo_model in args.cosmo_models:
-            r = run_single(df_agn=df_agn, df_pantheon=df_pantheon, _sna_L=_sna_L, _sna_Lower=_sna_Lower, _sna_LogdetCov=_sna_LogdetCov, 
+            r = run_single(df_agn=df_agn, df_agn_all=df_agn_all, df_pantheon=df_pantheon, _sna_L=_sna_L, _sna_Lower=_sna_Lower, _sna_LogdetCov=_sna_LogdetCov, 
                            cosmo_model=cosmo_model,
                 completeness=not args.disable_completeness, use_full_cov=not args.disable_full_covariance, resume=args.resume,
                 speed=args.speed, N=args.N, only_sna=args.only_sna, use_mu_sh0es=args.use_mu_sh0es,
@@ -541,7 +537,7 @@ if __name__ == "__main__":
             cosmo_models_dict[cosmo_model]['age'] = age
         compare_r = compare_models_by_log_evidence_all(cosmo_models_dict, write_path=f"plots/hubble/{prefix}/")
     elif args.run == "full":
-        run_all(df_agn=df_agn, df_pantheon=df_pantheon, _sna_L=_sna_L, _sna_Lower=_sna_Lower, _sna_LogdetCov=_sna_LogdetCov, 
+        run_all(df_agn=df_agn, df_agn_all=df_agn_all, df_pantheon=df_pantheon, _sna_L=_sna_L, _sna_Lower=_sna_Lower, _sna_LogdetCov=_sna_LogdetCov, 
                 cosmo_models=args.cosmo_models, z_pivot_agn=args.z_pivot_agn, skip_plots=args.skip_plots,
                 residuals_sigma_clip=args.residuals_sigma_clip,
                 speed=args.speed, resume=args.resume, N=args.N, use_mu_sh0es=args.use_mu_sh0es)

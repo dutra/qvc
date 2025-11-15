@@ -21,6 +21,7 @@ os.environ["JAX_PLATFORM_NAME"] = "cpu"
 prefix = os.environ.get('PREFIX', "pyqsofit")
 suffix = os.environ.get('SUFFIX', "pyqsofit")
 import numpy as np
+from scipy.special import expit
 import pandas as pd
 from tqdm import trange, tqdm
 import csv
@@ -1026,6 +1027,9 @@ def zip_file(output):
 # ------------------------------
 # SELECT → mark best per object_id in SAME CSV
 # ------------------------------
+def logistic(x, A, k, x0):
+     return A * expit(k*(x - x0))
+
 def run_select(args):
 
     # ---- Load
@@ -1072,10 +1076,20 @@ def run_select(args):
     # 20% penalty if BC=True
     df.loc[df["BC"] == True, "redchip"] *= 1.2
     df.loc[(df["BC"] == True) & (df["z"] > 1.4), "redchip"] *= 1e9  # disallow BC=True at high z
-    
+    #df.loc[df["BC"] == True, "redchip"] *= 1e9
+
 
     df.loc[~(df["npca_qso"].isin([-1, 0, 1, 10])), "redchip"] *= 1e9
-    df.loc[~((df["npca_qso"].isin([-1])) & (df["z"] > 1.4)), "redchip"] *= 1e9
+    #df.loc[~(df["npca_qso"].isin([-1, 0, 1, 2, 5, 10])), "redchip"] *= 1e9
+    
+    #df.loc[~((df["npca_qso"].isin([-1])) & (df["z"] < 0.6)), "redchip"] *= 1e9
+
+    #df.loc[~((df["npca_qso"].isin([-1])) & (df["z"] > 1.4) & (df['loglbol'] > 46)), "redchip"] *= 1e9
+
+
+    # Penalize decomp_host solutions with a logistic function
+    penalty = logistic(df['loglbol'], A=0.5, k=10, x0=46.4) + 1
+    df.loc[df["decomp_host"], "redchip"] *= penalty
 
 
     # ---- Pick the minimum redchip per object

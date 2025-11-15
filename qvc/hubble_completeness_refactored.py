@@ -6,6 +6,7 @@ from scipy.stats import norm, sigmaclip, multivariate_normal
 from scipy.interpolate import RegularGridInterpolator
 from scipy.ndimage import gaussian_filter1d, gaussian_filter
 from scipy.interpolate import interp1d
+from functools import partial
 
 prefix = os.environ.get("PREFIX", "")
 
@@ -98,337 +99,39 @@ class Completeness2D:
     def grid(self):
         return dict(mag_centers=self.mag_centers, z_centers=self.z_centers)
 
-import numpy as np
+def predicted_new_loglbol(df_agn, loglbol):
 
-def m2500_from_mi_broken(
-    mi_obs, z,
-    alpha_lam_blue, alpha_lam_red,
-    lambda_i_eff_obs=7480.0,   # Å, SDSS i effective wavelength (observer-frame)
-    lambda_break=5000.0        # Å, rest-frame break
-):
-    raise NotImplementedError("This function has been moved to qvc/hubble_utils.py")
+    # Data
+    x = np.asarray(df_agn['LOGLBOL'], dtype=float)   # predictor
+    y = np.asarray(df_agn['log_lbol'], dtype=float)  # response
 
-    """
-    Convert OBSERVER-frame i-band AB magnitude (mi_obs) to REST-frame m_2500 (AB)
-    assuming a broken power law in f_lambda with a rest-frame break.
-    """
-    mi_obs         = np.asarray(mi_obs, dtype=float)
-    z              = np.asarray(z, dtype=float)
-    alpha_lam_blue = np.asarray(alpha_lam_blue, dtype=float)
-    alpha_lam_red  = np.asarray(alpha_lam_red,  dtype=float)
-    lambda_break   = np.asarray(lambda_break,   dtype=float)
+    # Drop NaNs/Infs
+    m = np.isfinite(x) & np.isfinite(y)
+    x_fit, y_fit = x[m], y[m]
 
-    lam_i_rest = float(lambda_i_eff_obs) / (1.0 + z)
+    # Quadratic fit: y ≈ c2*x^2 + c1*x + c0
+    c2, c1, c0 = np.polyfit(x_fit, y_fit, deg=2)
 
-    ratio_blue = (2500.0 / lam_i_rest) ** (2.0 + alpha_lam_blue)
-    ratio_red  = ((2500.0 / lam_i_rest) ** (2.0 + alpha_lam_red) *
-                  (2500.0 / lambda_break) ** (alpha_lam_blue - alpha_lam_red))
+    def predict_log_lbol(LOGLBOL):
+        """
+        Vectorized predictor: given LOGLBOL, return predicted log_lbol.
+        """
+        X = np.asarray(LOGLBOL, dtype=float)
+        return c2 * X**2 + c1 * X + c0
 
-    use_blue = lam_i_rest <= lambda_break
-    ratio = np.where(use_blue, ratio_blue, ratio_red)
-
-    m2500_rest = mi_obs - 2.5 * np.log10((1.0 + z) * ratio)
-    return m2500_rest
-
-
-
-import numpy as np
-from types import SimpleNamespace
-
-def fit_m2500_predictor(
-    df_agn,
-    lambda_i_eff=7480.0,              # Å, REST-frame i effective wavelength
-    valid_mag_range=(1.0, 30.0),
-    method="huber",                   # 'ridge' | 'elasticnet' | 'huber' | 'wls' | 'gp_resid'
-    sample_weight=None,               # optional 1/var weights for WLS (same length as df_agn)
-    verbose=True,
-):
-    """
-    Physics-aware predictor with selectable calibration back-end.
-
-    Returns
-    -------
-    predictor : SimpleNamespace with fields
-        lambda_i_eff, A,B,D,C_pivot, y0, alpha0, sigma, r2, backend, and .predict(...)
-        If method == 'gp_resid', also includes gp_ (sklearn GP) and scaler_.
-    info : dict with arrays and diagnostics
-    """
-
-    # ---- Pull columns
-    z    = df_agn["z"].astype(float)
-    
-    # old
-    mi_rest   = df_agn['apparent_mag_i_rest'].astype(float)
-
-    # mew
-    # mi_obs   = df_agn['apparent_mag_i_obs'].astype(float)
-    # alpha_lam_red = df_agn['PL_slope_red'].astype(float)
-    # alpha_lam_blue = df_agn['PL_slope_blue'].astype(float)
-    # lambda_break = df_agn['PL_break_wave'].astype(float)
-
-    # lambda_i_eff_obs = float(lambda_i_eff)
-    # alpha_i = np.where(lambda_i_eff_obs/(1.0+z) <= lambda_break, alpha_lam_blue, alpha_lam_red)
-
-    #mi_rest = mi_obs - 2.5 * (alpha_i + 1.0) * np.log10(1.0 + z)
-    
-    mi = mi_rest
-    mi_err = df_agn['apparent_mag_i_rest_err'].astype(float)
-    y    = df_agn["apparent_mag_2500"].astype(float)
-    y_err = df_agn["apparent_mag_2500_err"].astype(float)
-    abl  = df_agn["PL_slope_blue"].astype(float)
-    ard  = df_agn["PL_slope_red"].astype(float)
-    lbrk = df_agn["PL_break_wave"].astype(float)
-
-    # ---- Mask
-    lo, hi = valid_mag_range
-    mask = (
-        y.notna() & mi.notna() & z.notna() &
-        abl.notna() & ard.notna() & lbrk.notna() &
-        y.between(lo, hi) & mi.between(lo, hi)
-    ).to_numpy()
-    if mask.sum() < 6:
-        raise ValueError("Not enough valid objects (need >= 6).")
-
-    mi_arr   = mi.to_numpy()[mask]
-    y_arr    = y.to_numpy()[mask]
-    z_arr    = z.to_numpy()[mask]
-    abl_arr  = abl.to_numpy()[mask]
-    ard_arr  = ard.to_numpy()[mask]
-    lbrk_arr = lbrk.to_numpy()[mask]
-
-    w = None
-
-    # ---- Physics prediction
-    # y_phys = m2500_from_mi_broken(
-    #     mi_arr, z_arr, abl_arr, ard_arr,
-    #     lambda_i_eff_obs=float(lambda_i_eff),
-    #     lambda_break=lbrk_arr
-    # )
-    y_phys = mi_arr
-
-    # ---- Pivots and design matrix
-    y0     = float(np.mean(y_phys))
-    alpha0 = float(np.mean(abl_arr))
-    dyp    = (y_phys - y0)
-    dblue  = (abl_arr - alpha0)
-    X_lin  = np.column_stack([dyp, dalph, dyp**2])   # no constant here
-    ones   = np.ones_like(dyp)
-
-    # Helper to compute diagnostics
-    def _diagnostics(y_true, y_pred, p):
-        resid = y_true - y_pred
-        rss = float(np.sum(resid**2 if w is None else (w * resid**2)))
-        tss = float(np.sum((y_true - np.average(y_true, weights=None if w is None else w))**2 if w is None else (w * (y_true - np.average(y_true, weights=w))**2)))
-        r2  = 1.0 - rss / tss if tss > 0 else np.nan
-        dof = max(len(y_true) - p, 1)
-        # If weighted, σ is approximate RMS of residuals (weights ignored in denom for simplicity)
-        sigma = float(np.sqrt(np.sum(resid**2) / dof))
-        return resid, r2, sigma
-
-    # ---- Backends
-    backend = method.lower()
-
-    if backend == "ridge":
-        from sklearn.linear_model import RidgeCV
-        alphas = np.logspace(-4, 2, 100)
-        # add constant explicitly, keep fit_intercept=False
-        X = np.column_stack([X_lin, ones])
-        ridge = RidgeCV(alphas=alphas, fit_intercept=False, store_cv_results=True)
-        ridge.fit(X, y_arr, sample_weight=w)
-        A, B, D, C_pivot = ridge.coef_.astype(float)
-        y_fit = X @ ridge.coef_.astype(float)
-        resid, r2, sigma = _diagnostics(y_arr, y_fit, p=X.shape[1])
-        alpha_cv = float(ridge.alpha_)
-        se = None  # (optional) could compute from (X^T X)^{-1} if desired
-
-
-    elif backend == "huber":
-        from sklearn.linear_model import HuberRegressor
-        # let Huber learn an intercept; do NOT add 'ones' column
-        huber = HuberRegressor(alpha=0.0, fit_intercept=True)  # alpha=0.0 ~ no L2 shrink
-        huber.fit(X_lin, y_arr, sample_weight=w)
-        A, B, D = huber.coef_.astype(float)
-        C_pivot = float(huber.intercept_)
-        y_fit = huber.predict(X_lin)
-        resid, r2, sigma = _diagnostics(y_arr, y_fit, p=X_lin.shape[1] + 1)
-        alpha_cv = None
-        se = None
-
-    else:
-        raise ValueError("method must be one of: 'ridge', 'elasticnet', 'huber', 'wls', 'gp_resid'.")
-
-    # ---- Build predictor wrapper
-    pred = SimpleNamespace(
-        backend=backend,
-        lambda_i_eff=float(lambda_i_eff),
-        A=float(A), B=float(B), D=float(D), C_pivot=float(C_pivot),
-        y0=float(y0), alpha0=float(alpha0),
-        sigma=float(sigma), r2=float(r2),
-        alpha_cv=alpha_cv, se=se
-    )
-
-    def _predict(mi_in, z_in, alpha_lam_blue, alpha_lam_red, lambda_break,
-                 *, A=A, B=B, D=D, C_pivot=C_pivot, y0=y0, alpha0=alpha0,
-                 lambda_i_eff=float(lambda_i_eff), backend=backend, pred_ns=pred):
-
-        dyp_   = (np.asarray(mi_in, dtype=float) - y0)
-        dalph_ = (np.asarray(alpha_lam_blue, dtype=float) - alpha0)
-        y_lin  = A * dyp_ + B * dalph_ + D * (dyp_ ** 2) + C_pivot
-        return y_lin
-
-    pred.predict = _predict
-    if verbose:
-        print(f"Coefficients: A={A:.4f}, B={B:.4f}, D={D:.4f}, C_pivot={C_pivot:.4f}")
-        print(f"Sigma: {sigma:.4f}")
-
-    info = dict(
-        mask=mask, y=y_arr, mi=mi_arr, z=z_arr,
-        alpha_lam_blue=abl_arr, alpha_lam_red=ard_arr, lambda_break=lbrk_arr,
-        y_phys=y_phys,
-        pivots=dict(y0=y0, alpha0=alpha0),
-        coefs=dict(A=float(A), B=float(B), D=float(D), C_pivot=float(C_pivot)),
-        backend=backend,
-        y_fit=y_fit,
-        residuals=(y_arr - y_fit),
-        resid=resid,
-        r2=float(r2),
-        sigma=float(sigma),
-        alpha_cv=alpha_cv,
-        se=se,
-    )
-    return pred, info
-
-
-def get_completeness_function_2d_old(
-    df_agn,
-    sim_file="data/mock_mag_z.h5",
-    n_mag_bins=40, n_z_bins=20,
-    sigma_z=0.5,                  # smoothing in BIN units along z
-    smooth_counts=True,
-    plot=False,
-    method="ridge"
-):
-    """
-    Build p(detect | m, z) using the *ridge-calibrated broken-law* predictor.
-
-    Steps:
-      1) Fit calibrated predictor (physics -> ridge y ≈ A*y_phys + B).
-      2) Predict 'true' m_2500 for the simulation using MEDIANS of (PL_slope_blue, PL_slope_red, PL_break_wave)
-         from the fitted mask, apply the same calibration A,B.
-      3) Smooth raw counts (not the ratio) with Gaussian sigma=(sigma_fit, sigma_z),
-         where sigma_fit is the fitted RMS scatter (mag).
-      4) Return Completeness2D and grid info.
-    """
-    import os, h5py
-    import matplotlib.pyplot as plt
-    from scipy.ndimage import gaussian_filter
-
-    predictor, info = fit_m2500_predictor(
-        df_agn,
-        lambda_i_eff=7480.0,
-        valid_mag_range=(1.0, 30.0),
-        method=method,
-        verbose=True,
-    )
-
-    y_obs  = np.asarray(info["y"], dtype=float)
-    z_obs  = np.asarray(info["z"], dtype=float)
-    y_fit  = np.asarray(info["y_fit"], dtype=float)
-    sigma_fit = float(predictor.sigma)
-
-    # Simulation inputs: rest-frame mi and z
-    with h5py.File(sim_file, "r") as f:
-        mi_true = np.asarray(f["apparent_mag_i_rest"][:], dtype=float)
-        z_true  = np.asarray(f["z"][:], dtype=float)
-
-    # Use medians of PL parameters from training mask
-    msk = info["mask"]
-
-    y_true = predictor.predict(
-        mi_in=mi_true, 
-        z_in=z_true,
-        alpha_lam_blue=-1.5,
-        alpha_lam_red=-1.5,
-        lambda_break=5000.0
-    )
-
-    # Filter finite
-    ok_obs  = np.isfinite(y_obs) & np.isfinite(z_obs)
-    ok_true = np.isfinite(y_true) & np.isfinite(z_true)
-    m_obs,  z_obs  = y_obs[ok_obs],  z_obs[ok_obs]
-    m_true, z_true = y_true[ok_true], z_true[ok_true]
-
-    # Grid
-    mag_min, mag_max = 16.0, 28.0
-    z_min,   z_max   = float(np.min(z_true)), 5.0
-    mag_edges = np.linspace(mag_min, mag_max, n_mag_bins + 1)
-    z_edges   = np.linspace(z_min,  z_max,    n_z_bins   + 1)
-    mag_centers = 0.5 * (mag_edges[:-1] + mag_edges[1:])
-    z_centers   = 0.5 * (z_edges[:-1]   + z_edges[1:])
-    dm = float(mag_centers[1] - mag_centers[0]) if len(mag_centers) > 1 else float(mag_edges[-1] - mag_edges[0])
-    dz = float(z_centers[1] - z_centers[0])     if len(z_centers)   > 1 else float(z_edges[-1] - z_edges[0])
-
-    # 2D histograms on [mag, z]
-    H_true, _, _ = np.histogram2d(m_true, z_true, bins=[mag_edges, z_edges])
-    H_obs,  _, _ = np.histogram2d(m_obs,  z_obs,  bins=[mag_edges, z_edges])
-
-    # Smooth COUNTS (not ratio); mag smoothing uses sigma_fit (mag)
-    if smooth_counts:
-        sig_mag_pix = max(sigma_fit / dm, 1e-6)      # scatter is in mag
-        H_true_s = gaussian_filter(H_true, sigma=(float(sig_mag_pix), float(sigma_z)),
-                                   mode="constant", cval=0.0)
-        H_obs_s  = gaussian_filter(H_obs,  sigma=(float(sig_mag_pix), float(sigma_z)),
-                                   mode="constant", cval=0.0)
-    else:
-        H_true_s, H_obs_s = H_true, H_obs
-
-    eps = 1e-12
-    C = H_obs_s / (H_true_s + eps)
-    C[H_true_s < eps] = 0.0
-    C = np.clip(C, 0.0, 1.0)
-
-    if plot:
-        try:
-            plot_dir = f"plots/hubble/{prefix}/completeness"
-        except NameError:
-            plot_dir = "plots/hubble/completeness"
-        os.makedirs(plot_dir, exist_ok=True)
-
-        plt.figure(figsize=(7, 6))
-        lo, hi = float(np.min(y_obs)), float(np.max(y_obs))
-        plt.scatter(y_obs, y_fit, s=4, alpha=0.4, label="Data")
-        plt.plot([lo, hi], [lo, hi], "r--", label="y = y_fit")
-        plt.xlabel("Observed $m_{2500}$")
-        plt.ylabel("Predicted $m_{2500}$")
-        plt.title("Observed vs Predicted $m_{2500}$")
-        plt.grid(True, alpha=0.4)
-        plt.legend()
-        plt.tight_layout()
-        plt.savefig(os.path.join(plot_dir, "y_vs_yfit.png"), dpi=200)
-        plt.close()
-
-        plt.figure(figsize=(7, 5))
-        im = plt.imshow(
-            np.log10(np.clip(C.T, 1e-12, None)), origin="lower", aspect="auto",
-            extent=[mag_edges[0], mag_edges[-1], z_edges[0], z_edges[-1]], cmap="viridis"
-        )
-        plt.ylabel(r"$z$")
-        plt.xlabel(r"$m_{2500\,\text{\AA}} \; (\mathrm{mag})$")
-        cbar = plt.colorbar(im); cbar.set_label(r"Completeness $p(I{=}1\,|\,m,z)$")
-        plt.tight_layout()
-        plt.savefig(os.path.join(plot_dir, "completeness_map.png"), dpi=200)
-        plt.savefig(os.path.join(plot_dir, "completeness_map.pdf"), dpi=600)
-        plt.close()
-
-    return Completeness2D(mag_centers, z_centers, C), mag_centers, z_centers, dm, dz, sigma_fit, info, None, None
+    predicted_loglbol = predict_log_lbol(loglbol)
+    return predicted_loglbol
 
 def get_completeness_function_2d(
     df_agn,
-    sim_file="data/mock_mag_z.h5",
-    n_mag_bins=40, n_z_bins=20,
-    sigma_z=0.5,                  # smoothing in BIN units along z
+    sim_file="data/nov9_mock_mag_z_moresources.h5",
+    #sim_file="data/mock_mag_z_nov9_magoffsetcorr.h5",
+    #sim_file="data/mock_mag_z_nov7night.h5",
+    n_mag_bins=30, n_z_bins=40,
     smooth_counts=True,
     plot=False,
+    fill_along_mag=False,
+    fill_along_z=False,
 ):
     """
     Build p(detect | m, z)
@@ -436,7 +139,8 @@ def get_completeness_function_2d(
     import os, h5py
     import matplotlib.pyplot as plt
     from scipy.ndimage import gaussian_filter
-
+    import pandas as pd
+    from astropy.cosmology import FlatLambdaCDM
     # Simulation inputs: rest-frame mi and z
     with h5py.File(sim_file, "r") as f:
         m_true = np.asarray(f["apparent_mag_i_rest"][:], dtype=float)
@@ -445,69 +149,121 @@ def get_completeness_function_2d(
     # Filter finite
     z_obs = df_agn["z"].to_numpy(dtype=float)
     m_obs = df_agn["apparent_mag_2500"].to_numpy(dtype=float)
-
     ok_obs  = np.isfinite(m_obs) & np.isfinite(z_obs)
     ok_true = np.isfinite(m_true) & np.isfinite(z_true)
     m_obs,  z_obs  = m_obs[ok_obs],  z_obs[ok_obs]
     m_true, z_true = m_true[ok_true], z_true[ok_true]
-
     # Grid
-    mag_min, mag_max = 16.0, 28.0
-    z_min,   z_max   = float(np.min(z_true)), 5.0
+    mag_min, mag_max = 18.5, 24.0
+    z_min,   z_max   = 0.0, 4.0
     mag_edges = np.linspace(mag_min, mag_max, n_mag_bins + 1)
     z_edges   = np.linspace(z_min,  z_max,    n_z_bins   + 1)
     mag_centers = 0.5 * (mag_edges[:-1] + mag_edges[1:])
     z_centers   = 0.5 * (z_edges[:-1]   + z_edges[1:])
     dm = float(mag_centers[1] - mag_centers[0]) if len(mag_centers) > 1 else float(mag_edges[-1] - mag_edges[0])
     dz = float(z_centers[1] - z_centers[0])     if len(z_centers)   > 1 else float(z_edges[-1] - z_edges[0])
-
     # 2D histograms on [mag, z]
     H_true, _, _ = np.histogram2d(m_true, z_true, bins=[mag_edges, z_edges])
     H_obs,  _, _ = np.histogram2d(m_obs,  z_obs,  bins=[mag_edges, z_edges])
-
-    # Smooth COUNTS (not ratio); mag smoothing uses sigma_fit (mag)
     if smooth_counts:
-        sigma_fit = 0.1  # fixed smoothing value
-        sig_mag_pix = max(sigma_fit / dm, 1e-6)      # scatter is in mag
-        H_true_s = gaussian_filter(H_true, sigma=(float(sig_mag_pix), float(sigma_z)),
-                                   mode="constant", cval=0.0)
-        H_obs_s  = gaussian_filter(H_obs,  sigma=(float(sig_mag_pix), float(sigma_z)),
-                                   mode="constant", cval=0.0)
+        # --- Choose physical smoothing widths (recommended) ---
+        sigma_mag = 0.2    # mag, for completeness-map smoothing along magnitude
+        sigma_z_abs = 0.5  # absolute redshift, for smoothing along z
+        print(f"Smoothing counts with sigma_mag={sigma_mag} mag (sigma_mag/dm={sigma_mag/dm}), sigma_z={sigma_z_abs} absolute z")
+        # Convert physical -> pixel for the Gaussian filter
+        sig_mag_pix = max(float(sigma_mag/dm), 1e-6)
+        sig_z_pix   = max(float(sigma_z_abs/dz), 1e-6)
+        H_true_s = gaussian_filter(H_true, sigma=(sig_mag_pix, sig_z_pix),
+                                mode="constant", cval=0.0)
+        H_obs_s  = gaussian_filter(H_obs,  sigma=(sig_mag_pix, sig_z_pix),
+                                mode="constant", cval=0.0)
     else:
+        sigma_mag = 0.0
         H_true_s, H_obs_s = H_true, H_obs
-
     eps = 1e-12
     C = H_obs_s / (H_true_s + eps)
     C[H_true_s < eps] = 0.0
     C = np.clip(C, 0.0, 1.0)
 
+    if fill_along_mag:
+    # fill non-decreasing completeness along mag (for each z)
+        tol = 1e-12
+        for j in range(C.shape[1]):              # each z-column
+            vmax = C[:, j].max()
+            i = C.shape[0] - 1 - np.argmax(C[::-1, j] >= vmax - tol)  # rightmost max
+            C[:i+1, j] = vmax
+
+    if fill_along_z:
+        # fill high z
+        C = np.maximum.accumulate(C[:, ::-1], axis=1)[:, ::-1]
+        C = np.clip(C, 0.0, 1.0)
+
+    # --- Gentle boost for faint, low-z objects ---
+    # Controls (tune if needed):
+    # faint_mag_start = 20.0   # start boosting at m >= this (fainter than this)
+    # z_boost_max     = 1.0    # only z < this gets boosted
+    # boost_strength  = 1.0  # 0.0–0.5 is a mild nudge; 0.2 ~ "slightly more complete"
+
+    # # Build smooth 1D ramps on the bin centers
+    # wm = np.clip((mag_centers - faint_mag_start) / (mag_max - faint_mag_start), 0.0, 1.0)
+    # wz = np.clip((z_boost_max - z_centers) / z_boost_max, 0.0, 1.0)
+    # W  = np.outer(wm, wz)  # shape (n_mag_bins, n_z_bins)
+
+    # # Nudge completeness upward only where there's room (1 - C)
+    # C = C + boost_strength * W * (1.0 - C)
+    # C = np.clip(C, 0.0, 1.0)
+
     if plot:
-        try:
-            plot_dir = f"plots/hubble/{prefix}/completeness"
-        except NameError:
-            plot_dir = "plots/hubble/completeness"
+        plot_dir = f"plots/hubble/{prefix}/completeness"
         os.makedirs(plot_dir, exist_ok=True)
-
-
+        # Plot completeness map
         plt.figure(figsize=(7, 5))
         im = plt.imshow(
             np.log10(np.clip(C.T, 1e-12, None)), origin="lower", aspect="auto",
-            extent=[mag_edges[0], mag_edges[-1], z_edges[0], z_edges[-1]], cmap="viridis"
+            extent=[mag_edges[0], mag_edges[-1], z_edges[0], z_edges[-1]], cmap="viridis",
+            vmin=-4, vmax=0
         )
         plt.ylabel(r"$z$")
         plt.xlabel(r"$m_{2500\,\text{\AA}} \; (\mathrm{mag})$")
-        cbar = plt.colorbar(im); cbar.set_label(r"Completeness $p(I{=}1\,|\,m,z)$")
+        cbar = plt.colorbar(im); 
+        cbar.set_label(r"Completeness $\log\,p(I{=}1\,|\,m,z)$")
         plt.tight_layout()
         plt.savefig(os.path.join(plot_dir, "completeness_map.png"), dpi=200)
         plt.savefig(os.path.join(plot_dir, "completeness_map.pdf"), dpi=600)
         plt.close()
+        # Plot H_obs
+        plt.figure(figsize=(7, 5))
+        im = plt.imshow(
+            np.log10(np.clip(H_obs.T, 1e-12, None)), origin="lower", aspect="auto",
+            extent=[mag_edges[0], mag_edges[-1], z_edges[0], z_edges[-1]], cmap="plasma"
+        )
+        plt.ylabel(r"$z$")
+        plt.xlabel(r"$m_{2500\,\text{\AA}} \; (\mathrm{mag})$")
+        cbar = plt.colorbar(im); cbar.set_label(r"$\log\,H_{\rm obs}$")
+        plt.tight_layout()
+        plt.savefig(os.path.join(plot_dir, "H_obs_map.png"), dpi=200)
+        #plt.savefig(os.path.join(plot_dir, "H_obs_map.pdf"), dpi=600)
+        plt.close()
+        # Plot H_true
+        plt.figure(figsize=(7, 5))
+        im = plt.imshow(
+            np.log10(np.clip(H_true.T, 1e-12, None)), origin="lower", aspect="auto",
+            extent=[mag_edges[0], mag_edges[-1], z_edges[0], z_edges[-1]], cmap="cividis"
+        )
+        plt.ylabel(r"$z$")
+        plt.xlabel(r"Apparent Magnitude $m_{i,\mathrm{rest}} \; (\mathrm{mag})$")
+        cbar = plt.colorbar(im); cbar.set_label(r"$\log\,H_{\rm true}$")
+        plt.tight_layout()
+        plt.savefig(os.path.join(plot_dir, "H_true_map.png"), dpi=200)
+        #plt.savefig(os.path.join(plot_dir, "H_true_map.pdf"), dpi=600)
+        plt.close()
+    return Completeness2D(mag_centers, z_centers, C), mag_centers, z_centers, dm, dz, sigma_mag
 
-    return Completeness2D(mag_centers, z_centers, C), mag_centers, z_centers, dm, dz, sigma_fit, None, None, None
 
 import numpy as np
 from scipy.interpolate import RegularGridInterpolator
 
-def make_dm_function(m, z, dm, m_bins=40, z_bins=40, *, method='linear'):
+def make_dm_function(m, z, dm, m_bins=40, z_bins=40):
     """
     Build a 2D interpolator dm(m,z) defined on bin midpoints.
     Queries are always clipped to the grid range (no extrapolation).
@@ -532,25 +288,24 @@ def make_dm_function(m, z, dm, m_bins=40, z_bins=40, *, method='linear'):
     z_mid = 0.5 * (z_edges[:-1] + z_edges[1:])
     m_mid = 0.5 * (m_edges[:-1] + m_edges[1:])
 
-    # Core interpolator (will return NaN outside, we’ll clip inputs before calling it)
     interp_core = RegularGridInterpolator(
         (z_mid, m_mid), mean,
-        method=method, bounds_error=False, fill_value=np.nan
+        method='nearest', bounds_error=False, fill_value=None
     )
 
     # Clipping wrapper
-    z_lo, z_hi = z_mid.min(), z_mid.max()
-    m_lo, m_hi = m_mid.min(), m_mid.max()
+    # z_lo, z_hi = z_mid.min(), z_mid.max()
+    # m_lo, m_hi = m_mid.min(), m_mid.max()
 
-    def interp_clipped(pts):
-        pts = np.asarray(pts)
-        arr = np.atleast_2d(pts).astype(float)
-        arr[:, 0] = np.clip(arr[:, 0], z_lo, z_hi)
-        arr[:, 1] = np.clip(arr[:, 1], m_lo, m_hi)
-        out = interp_core(arr)
-        return out if np.ndim(pts) > 1 else out[0]
+    # def interp_clipped(pts):
+    #     pts = np.asarray(pts)
+    #     arr = np.atleast_2d(pts).astype(float)
+    #     arr[:, 0] = np.clip(arr[:, 0], z_lo, z_hi)
+    #     arr[:, 1] = np.clip(arr[:, 1], m_lo, m_hi)
+    #     out = interp_core(arr)
+    #     return out if np.ndim(pts) > 1 else out[0]
 
-    return interp_clipped
+    return interp_core
 
 def estimate_m50(bin_edges, true_counts, det_counts, ax=None):
     """

@@ -6,6 +6,7 @@ import re
 import sys
 import csv
 from tqdm import tqdm
+import pickle
 
 # External deps
 import h5py  # required only if reading .h5 directly via hubble_utils
@@ -269,6 +270,9 @@ def main():
         write_quasars_to_csv(all_quasars, out_path, fields=seen)
     elif out_format == "h5":
         write_quasars_to_h5(all_quasars, out_path)
+        with open(out_path+".pkl", "wb") as f:
+            pickle.dump(all_quasars, f)
+        print(f"Wrote {len(all_quasars)} objects to pickle file {out_path}.pkl")
     else:
         print(f"ERROR: Unsupported out-format: {out_format}")
         sys.exit(1)
