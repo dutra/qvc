@@ -4,7 +4,7 @@ from astropy.cosmology import FlatwCDM, Flatw0waCDM, FlatLambdaCDM, FlatwpwaCDM
 from scipy import stats
 import numpy as np
 
-from hubble_utils import loglike_cmb_theta_simple
+#from hubble_utils import loglike_cmb_theta_simple
 from hubble_model import get_model_params, M_model_agn, M_model_agn_err, agn_model_pack_params, agn_model_pack_obs
 
 def completeness_loglike(m_obs, m_obs_err, m_model, mu_err, z, completeness2d, m_grid, sigma_completeness=0.0, tiny=1e-300):
@@ -44,14 +44,11 @@ def completeness_loglike(m_obs, m_obs_err, m_model, mu_err, z, completeness2d, m
     dmi_obs[z<0.2] = 0.0
 
     blob = np.vstack([Z.astype(float), dmi_obs.astype(float)])
- 
-    # ---- NEW: mask out the specified redshift range ----
-    mask_in = (0.44 < z) & (z < 3.16)
-    #mask_in = z < 100
     loglike_terms = np.log(Z)
-    loglike_terms[~mask_in] = 0.0  # zero out the contribution
 
     return np.sum(loglike_terms), blob
+
+
 
 # --- Log-likelihood ---
 def empty_blob(N_obj):
@@ -101,6 +98,17 @@ def log_likelihood_pantheon_cephdist(params, pantheon_data, _sna_L, _sna_Lower, 
 
     return ll_snia
 
+# --- Weak-lensing scatter from comoving distance (Shah+2022 arxiv:2203.09865) ---
+def sigma_lens_from_dc(z, cosmo, amp=0.06, z_ref=1.0, power=3/2):
+    """
+    Return sigma_lens (mag) = amp * [dC(z)/dC(z_ref)]**power
+    using comoving distances from the provided cosmology.
+    """
+    z = np.atleast_1d(z)
+    dc   = cosmo.comoving_distance(z).value        # Mpc (units cancel in the ratio)
+    dc_1 = float(cosmo.comoving_distance(z_ref).value)
+    ratio = np.clip(dc / dc_1, 0.0, None)
+    return amp * ratio**power
 
 def log_likelihood(theta, *, agn_data, pantheon_data, 
                    _sna_L, _sna_Lower, _sna_LogdetCov,
@@ -129,8 +137,6 @@ def log_likelihood(theta, *, agn_data, pantheon_data,
         cosmo = Flatw0waCDM(H0=params['H0'], Om0=params['Om0'], w0=params['w0'], wa=params['wa'])
         # if params['w0'] + params['wa'] >= 0:  # "no early DE" guard
         #     return -np.inf, empty_blob(N_obj)
-    elif cosmo_model == 'FlatwpwaCDM':
-        cosmo = FlatwpwaCDM(H0=params['H0'], Om0=params['Om0'], wp=params['wp'], wa=params['wa'], zp=z_pivot_agn)
     elif cosmo_model == 'FlatLambdaCDM':
         cosmo = FlatLambdaCDM(H0=params['H0'], Om0=params['Om0'])
 
@@ -160,22 +166,24 @@ def log_likelihood(theta, *, agn_data, pantheon_data,
         raise ValueError("Negative AGN model error encountered.")
         # return -np.inf, empty_blob(N_obj)
     
-    mu_err = np.sqrt(
+    sigma_lens = sigma_lens_from_dc(z, cosmo)   # vector (same shape as z)
+
+    mu_err_sq = (
         m_err**2 +
         M_pred_err**2 +
         z_err**2 +
-        (0.055 * z)**2 +
+        #(0.055 * z)**2 +
+        sigma_lens**2 +
+        #(np.exp(params['log_f']) + params['sigma_b'] * (1+z))**2
         np.exp(params['log_f'])**2
-    )
+    )    
+
+    mu_err = np.sqrt(mu_err_sq)
     mu_pred = m_obs - M_pred 
 
     mu_cosmo = cosmo.distmod(z).value
 
-    ll_agn_terms = stats.norm.logpdf(mu_pred - mu_cosmo, scale=mu_err)
-    mask_in = (0.44 < z) & (z < 3.16)
-    #mask_in = z < 100
-    ll_agn_terms[~mask_in] = 0.0  # zero out the contribution
-    
+    ll_agn_terms = stats.norm.logpdf(mu_pred - mu_cosmo, scale=mu_err)    
     ll_agn = np.sum(ll_agn_terms)
 
     m_model = M_pred + mu_cosmo  # model-predicted magnitude
@@ -183,7 +191,7 @@ def log_likelihood(theta, *, agn_data, pantheon_data,
     ll_completeness = 0.0
     comp_blob = empty_blob(N_obj)
     if completeness_params is not None:
-        completeness2d, mag_centers, _, _, _, completeness_scatter, _, _, _ = completeness_params
+        completeness2d, mag_centers, _, _, _, completeness_scatter = completeness_params
         ll_completeness, comp_blob = completeness_loglike(
             m_obs=m_obs,
             m_obs_err=m_err,
@@ -272,17 +280,18 @@ def log_likelihood_nearbylcs(
     mu_pred_nc  = m_obs_nc - M_pred_nc
     mu_cosmo_nc = cosmo.distmod(z_nc).value
 
+    sigma_lens = sigma_lens_from_dc(z_nc, cosmo)   # vector (same shape as z)
+
     mu_err_nc = np.sqrt(
         m_err_nc**2 +
         M_pred_err_nc**2 +
         z_err_nc**2 +
-        (0.055 * z_nc)**2 +
+        sigma_lens**2 +
+        #(0.055 * z_nc)**2 +
         np.exp(params['log_f'])**2
     )
 
-    mask_in_nc = (0.44 < z_nc) & (z_nc < 3.16)
     ll_agn_terms_nc = stats.norm.logpdf(mu_pred_nc - mu_cosmo_nc, scale=mu_err_nc)
-    ll_agn_terms_nc[~mask_in_nc] = 0.0
     ll_agn_noncal = np.sum(ll_agn_terms_nc)
 
     # ========================

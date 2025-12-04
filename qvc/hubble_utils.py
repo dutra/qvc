@@ -123,6 +123,7 @@ def sn_completeness_function(m_b, z, mlim=24.1, sigma=0.5):
     return 1.0 - norm.cdf(m_b, loc=mlim, scale=sigma)
 
 def log_nuLnu_to_m2500(log_nuLnu, z):
+    raise NotImplementedError("Use apparent_mag_2500_from_mi_rest in hubble_completeness_refactored.py instead.")
     cosmo = FlatLambdaCDM(H0=70, Om0=0.3)
     DL_cm = cosmo.luminosity_distance(z).to('cm').value
     m_AB = (
@@ -264,13 +265,13 @@ def populate_zquery(df, zquery_csv):
     )
 
     print("-------------------------- Z query report --------------------------")
-    print("Length of zquery csv file:", len(df_zquery))
+    #print("Length of zquery csv file:", len(df_zquery))
 
     merged = df.merge(df_zquery, on='object_id', how='left', suffixes=('', '_zquery'))
 
-    print("Length of zquery merged DataFrame:", len(merged))
+    #print("Length of zquery merged DataFrame:", len(merged))
     missing_ids = set(df['object_id']) - set(df_zquery['object_id'])
-    print("object_id not in merged:", list(missing_ids))
+    #print("object_id not in merged:", list(missing_ids))
 
     df['sameZ'] = np.isclose(merged['z'], merged['z_zquery'], atol=1e-1, equal_nan=True)
     not_sameZ = ~df['sameZ'].fillna(False)
@@ -288,46 +289,115 @@ def populate_zquery(df, zquery_csv):
     # Convert 'class' and 'subClass' columns to numeric codes
     for col in ['class', 'subClass']:
         df[f'{col}_code'] = df[col].astype('category').cat.codes
-        print(f"Column '{col}' code conversion:")
-        print(dict(enumerate(df[col].astype('category').cat.categories)))
+        #print(f"Column '{col}' code conversion:")
+        #print(dict(enumerate(df[col].astype('category').cat.categories)))
 
     return df
 
-def populate_sdss_mags(df, sdss_mags_csv):
-    fields = {
+def populate_sdss_mags(df, 
+                       sdss_mags_csv='results/data/nov2_sdss_mags.csv',
+                       ps1_mags_csv='results/data/nov12_ps1_mags.csv'):
+    fields_sdss = {
+        'psfMag_u': float,
+        'fiberMag_u': float,
+        'petroRad_u': float,
+        'psfMag_g': float,
+        'fiberMag_g': float,
+        'petroRad_g': float,        
         'psfMag_i': float,
         'fiberMag_i': float,
         'petroRad_i': float,
         'psfMag_r': float,
         'fiberMag_r': float,
         'petroRad_r': float,
+        'psfMag_z': float,
+        'fiberMag_z': float,
+        'petroRad_z': float,
+    }
+    # SDSS magnitudes
+    df_mags = pd.read_csv(
+        sdss_mags_csv,
+        dtype={'object_id': str},
+        converters=fields_sdss
+    )
+    merged = df.merge(df_mags, on='object_id', how='left', suffixes=('', '_sdss'))
+
+    print("Length of sdss mags merged DataFrame:", len(merged))
+    missing_ids = set(df['object_id']) - set(df_mags['object_id'])
+    print("object_id not in merged:", list(missing_ids))
+
+    for col in fields_sdss.keys():
+        if f'{col}_sdss' in merged.columns:
+            df[f'{col}_sdss'] = merged[f'{col}_sdss']
+        else:
+            df[f'{col}_sdss'] = merged[col]
+
+    for b in ['u', 'g', 'r', 'i', 'z']:
+        df[f'psf_sdss_minus_fiber_sdss_{b}'] = df[f'psfMag_{b}_sdss'] - df[f'fiberMag_{b}_sdss']
+    # df['log_psf_minus_fiber_r'] = np.log10(df['psf_minus_fiber_r'])
+    # df['log_petroRad_r'] = np.log10(df['petroRad_r'])
+
+
+    # PS1 magnitudes
+
+    fields_ps1 = {
+        'psfMag_g': float,
+        'psfMag_i': float,
+        'psfMag_r': float,
+        'psfMag_z': float,
+    }
+
+
+    df_mags = pd.read_csv(
+        ps1_mags_csv,
+        dtype={'object_id': str},
+        #converters=fields_ps1
+    )
+    merged = df.merge(df_mags, on='object_id', how='left', suffixes=('', '_ps1'))
+
+    print("Length of sdss mags merged DataFrame:", len(merged))
+    missing_ids = set(df['object_id']) - set(df_mags['object_id'])
+    print("object_id not in merged:", list(missing_ids))
+
+    for col in fields_ps1.keys():
+        if f'{col}_ps1' in merged.columns:
+            df[f'{col}_ps1'] = merged[f'{col}_ps1']
+        else:
+            df[f'{col}_ps1'] = merged[col]
+
+    for b in ['g', 'r', 'i', 'z']:
+        df[f'psf_ps1_minus_fiber_sdss_{b}'] = df[f'psfMag_{b}_ps1'] - df[f'fiberMag_{b}_sdss']
+
+    return df
+
+def populate_lc_info(df, lc_info_csv):
+    fields = {
+        'number_points': int,
+        'cadence': float,
+        'cadence_err': float,
+        't_std': float,
     }
     # Load and concatenate two CSV files
-    df_zquery = pd.read_csv(
-        sdss_mags_csv,
+    df_lcinfo = pd.read_csv(
+        lc_info_csv,
         dtype={'object_id': str},
         converters=fields
     )
 
 
-    merged = df.merge(df_zquery, on='object_id', how='left', suffixes=('', '_sdss_mags'))
+    merged = df.merge(df_lcinfo, on='object_id', how='left', suffixes=('', '_lcinfo'))
 
-    print("Length of sdss mags merged DataFrame:", len(merged))
-    missing_ids = set(df['object_id']) - set(df_zquery['object_id'])
+    print("Length of lc info merged DataFrame:", len(merged))
+    missing_ids = set(df['object_id']) - set(df_lcinfo['object_id'])
     print("object_id not in merged:", list(missing_ids))
 
     for col in fields.keys():
-        if f'{col}_sdss_mags' in merged.columns:
-            df[f'{col}'] = merged[f'{col}_sdss_mags']
+        if f'{col}_lcinfo' in merged.columns:
+            df[f'{col}'] = merged[f'{col}_lcinfo']
         else:
             df[col] = merged[col]
 
-    df['psf_minus_fiber_i'] = df['psfMag_i'] - df['fiberMag_i']
-    df['psf_minus_fiber_r'] = df['psfMag_r'] - df['fiberMag_r']
-
     return df
-
-
 
 def _norm_name(s):
     s = (s or "").replace("\ufeff", "").strip()
@@ -385,6 +455,33 @@ def parse_list(x):
     # Fallback: comma-separated string (e.g., "g,r,i")
     return [t.strip() for t in s.split(",") if t.strip()]
 
+def compute_apparent_mag_2500_astropy(
+    logL2500,                 # log10(ν Lν) at 2500 Å (erg s^-1)
+    logL2500_err,        # 1-σ uncertainty in log10(ν Lν), in dex
+    z,
+):
+    cosmo   = FlatLambdaCDM(H0=70, Om0=0.3)
+    c_cms   = 2.99792458e10     # cm/s
+    lambda_cm = 2500e-8         # 2500 Å in cm
+
+    logL2500 = np.asarray(logL2500, dtype=float)
+    z = np.asarray(z, dtype=float)
+
+    # Luminosity distance in cm
+    DL_cm = cosmo.luminosity_distance(z).to(u.cm).value
+
+    # Convert log10(ν Lν) -> log10 Lν (dex), then to log10 fν(obs)
+    log_Lnu = logL2500 + np.log10(lambda_cm / c_cms)
+    log_fnu = log_Lnu - np.log10(4 * np.pi * DL_cm**2)# * (1 + z))
+    # AB magnitude
+    m_ab = -2.5 * log_fnu - 48.60
+
+    # Since m_ab = -2.5 * log_fnu and log_fnu depends linearly on log_Lnu,
+    # σ_m from logL2500_err (dex) is simply:
+    m_ab_err = 2.5 * np.abs(logL2500_err)
+
+    return m_ab, m_ab_err
+
 def populate_spectra_fit(df, spectra_fit_csvs, best=True):
     # Columns expected from spectral-fit CSVs (exclude 'object_id' from the drop list!)
     fields = {
@@ -422,6 +519,7 @@ def populate_spectra_fit(df, spectra_fit_csvs, best=True):
         'reddening_proxy': float,
         'bands_used': parse_list,
         'PL_slope_blue': float,
+        'PL_slope_blue_err': float,
         'PL_slope_red': float,
         'PL_break_wave': float,
         'iron_frac': float,
@@ -541,104 +639,23 @@ def populate_spectra_fit(df, spectra_fit_csvs, best=True):
     # out[cols_to_save_unique].to_csv(out_csv, index=False)
     # print(f"Saved merged DataFrame to {out_csv} with columns: {cols_to_save_unique}")
     
-    df['alpha_nu'] = -df['alpha_lambda'] - 2
-    df['alpha_nu_err'] = df['alpha_lambda_err']
+    out['alpha_nu'] = -out['alpha_lambda'] - 2
+    out['alpha_nu_err'] = out['alpha_lambda_err']
+
+    # out = out.drop(columns=['apparent_mag_2500', 'apparent_mag_2500_err'], errors='ignore')
+
+    # m_2500, m_2500_err = compute_apparent_mag_2500_astropy(
+    #     out['log_L2500_int_fs'],
+    #     out['log_L2500_int_fs_err'],
+    #     out['z'])
+    # out['apparent_mag_2500'] = m_2500
+    # out['apparent_mag_2500_err'] = m_2500_err
+
 
     # Keep a default error if needed
     # out['apparent_mag_2500_err'] = 0.1 * np.ones(len(out))
 
     return out
-
-
-
-# def compute_apparent_mag_2500(df, logL_col='MY_LOGL2500', logL_err_col='MY_LOGL2500_ERR', z_col='z', H0=70, Om0=0.3):
-#     cosmo = FlatLambdaCDM(H0=H0, Om0=Om0)
-#     c = 2.99792458e10  # cm/s
-#     lambda_ = 2500e-8  # cm
-
-#     z = df[z_col].values
-#     logL_2500 = df[logL_col].values
-#     logL_2500_err = df[logL_err_col].values
-
-#     DL = cosmo.luminosity_distance(z).to(u.cm).value  # cm
-
-#     log_Lnu = logL_2500 + np.log10(lambda_ / c)
-#     log_fnu = log_Lnu - np.log10(4 * np.pi * DL**2 * (1 + z))
-#     m_ab = -2.5 * log_fnu - 48.60
-#     m_ab_err = 2.5 * logL_2500_err
-
-#     df['apparent_mag_2500'] = m_ab
-#     df['apparent_mag_2500_err'] = m_ab_err
-#     return df
-
-
-# def compute_MY_LOGL2500(df):
-#     """
-#     Compute MY_LOGL2500 and its propagated uncertainty from available LOGLxxxx bands and alpha_nu.
-
-#     Parameters:
-#     - df: DataFrame with columns LOGLxxxx, LOGLxxxx_ERR, and alpha_nu
-
-#     Returns:
-#     - Two pandas Series:
-#         MY_LOGL2500      : mean log10 L_2500 in erg/s
-#         MY_LOGL2500_ERR  : propagated uncertainty [dex]
-#     """
-#     lambda_target = 2500  # Å
-#     log_lambda_target = np.log10(lambda_target)
-
-#     bands = {
-#         'LOGL1350': 1350,
-#         'LOGL1700': 1700,
-#         'LOGL2500': 2500,  # included directly
-#         'LOGL3000': 3000,
-#         'LOGL5100': 5100,
-#     }
-
-#     log_lambda_bands = {band: np.log10(lam) for band, lam in bands.items()}
-
-#     logL_vals = []
-#     logL_errs = []
-
-#     for _, row in df.iterrows():
-#         alpha = row.get('alpha_nu', np.nan)
-#         if not np.isfinite(alpha):
-#             logL_vals.append(np.nan)
-#             logL_errs.append(np.nan)
-#             continue
-
-#         est_list = []
-#         var_list = []
-
-#         for band, lam in bands.items():
-#             logL = row.get(band, np.nan)
-#             logL_err = row.get(f"{band}_ERR", np.nan)
-
-#             if np.isfinite(logL) and logL > 0 and np.isfinite(logL_err) and logL_err > 0:
-#                 delta = log_lambda_target - log_lambda_bands[band]
-#                 logL2500 = logL + (-(alpha + 1)) * delta
-#                 logL2500_err = logL_err  # Only propagate observational error
-
-#                 est_list.append(logL2500)
-#                 var_list.append(logL2500_err**2)
-
-#         if len(est_list) == 0:
-#             logL_vals.append(np.nan)
-#             logL_errs.append(np.nan)
-#         else:
-#             # Inverse-variance weighted average
-#             weights = 1.0 / np.array(var_list)
-#             avg = np.sum(weights * est_list) / np.sum(weights)
-#             err = np.sqrt(1.0 / np.sum(weights))
-
-#             logL_vals.append(avg)
-#             logL_errs.append(err)
-
-#     return (
-#         pd.Series(logL_vals, index=df.index, name='MY_LOGL2500'),
-#         pd.Series(logL_errs, index=df.index, name='MY_LOGL2500_ERR')
-#     )
-
 
 # Constants
 c = 2.99792458e18  # speed of light in Angstrom/s
@@ -674,7 +691,7 @@ def populate_sdss_fields(objs, progress_bar=True):
         else:
             d['log_lbol'] = fits_data['LOGLBOL'][i]  # Extract log Lbol values
             d["log_lbol_err"] = fits_data['LOGLBOL_ERR'][i]  # Extract log Lbol error values
-        d['LOGLBOL'] = d['log_lbol']
+
         d['LOGMBH'] = fits_data['LOGMBH'][i]  # Extract log MBH values
         d['LOGMBH_ERR'] = fits_data['LOGMBH_ERR'][i]  # Extract log MBH error values
         d['LOGLEDD_RATIO'] = fits_data['LOGLEDD_RATIO'][i]  # Extract log L/edd values
@@ -760,6 +777,103 @@ def read_quasars_from_hdf5(file_path, N=None):
             if (N is not None) and (N >= 0) and (len(quasar_list) >= N):
                 break
     return quasar_list
+
+def plot_m_vs_redshift(
+    df_before, df_after, cut_info="", save_path=f"plots/hubble/{prefix}/cuts/"
+):
+    """
+    Plot apparent_mag_2500 (AB) vs redshift in two panels:
+      - Left: All (before) vs Kept (after)
+      - Right: All (before) vs Removed (before - after)
+
+    Notes
+    -----
+    * `bins` kept for backward compatibility (unused).
+    * Expects columns: 'object_id', 'z', 'apparent_mag_2500'.
+    """
+    import os, re
+    import numpy as np
+    import matplotlib.pyplot as plt
+    import matplotlib.gridspec as gridspec
+
+    if len(df_before) == len(df_after):
+        return
+
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+
+    # Identify removed rows by object_id
+    before_ids  = set(df_before['object_id'].astype(str))
+    after_ids   = set(df_after['object_id'].astype(str))
+    removed_ids = before_ids - after_ids
+    df_removed  = df_before[df_before['object_id'].astype(str).isin(removed_ids)]
+
+    # Extract finite data
+    def _finite(df):
+        z  = df['z'].to_numpy(dtype=float)
+        m  = df['apparent_mag_2500'].to_numpy(dtype=float)
+        ok = np.isfinite(z) & np.isfinite(m)
+        return z[ok], m[ok]
+
+    z_all,    m_all    = _finite(df_before)
+    z_kept,   m_kept   = _finite(df_after)
+    z_removed, m_removed = _finite(df_removed)
+
+    # Axis limits shared across panels
+    if z_all.size:
+        x_min, x_max = np.nanmin(z_all), np.nanmax(z_all)
+    else:
+        x_min, x_max = 0.0, 1.0
+    m_concat = np.concatenate([m_all, m_kept, m_removed]) if m_all.size else np.array([])
+    if m_concat.size:
+        y_min, y_max = np.nanmin(m_concat), np.nanmax(m_concat)
+    else:
+        y_min, y_max = 16.0, 28.0
+
+    # Figure with two panels
+    fig = plt.figure(figsize=(13, 6))
+    gs = gridspec.GridSpec(1, 2, width_ratios=[1, 1], wspace=0.15)
+
+    # Panel 1: All vs Kept
+    ax1 = fig.add_subplot(gs[0])
+    if z_all.size:
+        ax1.scatter(z_all, m_all, s=6, alpha=0.8, c='blue', linewidths=0, label='All', rasterized=True)
+    if z_kept.size:
+        ax1.scatter(z_kept, m_kept, s=8, alpha=0.8, c='orange', linewidths=0, label='Kept', rasterized=True)
+    ax1.set_xlabel("Redshift $z$")
+    ax1.set_ylabel(r"$m_{2500}$ (AB)")
+    ax1.set_xlim(x_min, x_max)
+    ax1.set_ylim(18, 30)
+    ax1.grid(True, alpha=0.3)
+    ax1.set_title("All vs Kept")
+    ax1.legend(loc="best", frameon=False)
+
+    # Panel 2: All vs Removed
+    ax2 = fig.add_subplot(gs[1])
+    if z_all.size:
+        ax2.scatter(z_all, m_all, s=6, alpha=0.8, c='blue', linewidths=0, label='All', rasterized=True)
+    if z_removed.size:
+        ax2.scatter(z_removed, m_removed, s=8, alpha=0.8, c='red', linewidths=0, label='Removed', rasterized=True)
+    ax2.set_xlabel("Redshift $z$")
+    ax2.set_ylabel(r"$m_{2500}$ (AB)")
+    ax2.set_xlim(x_min, x_max)
+    ax2.set_ylim(18, 30)
+    ax2.grid(True, alpha=0.3)
+
+    ax2.set_title("All vs Removed")
+    ax2.legend(loc="best", frameon=False)
+
+    # Annotate cut info
+    if cut_info:
+        fig.text(0.5, 0.01, f"Cut info: {cut_info}", ha='center', va='bottom', fontsize=11, color='k')
+
+    # Save
+    safe_cut_info = re.sub(r'[^A-Za-z0-9._-]+', '_', str(cut_info)) if cut_info else ""
+    filename = f"m2500_vs_z_cuts_{safe_cut_info}.png" if safe_cut_info else "m2500_vs_z_cuts.png"
+    plot_path = os.path.join(os.path.dirname(save_path), filename)
+    plt.tight_layout(rect=(0, 0.03, 1, 1))
+    plt.savefig(plot_path, dpi=150)
+    plt.close()
+
 
 def plot_redshift_histogram(df_before, df_after, bins=30, cut_info="", save_path=f"plots/hubble/{prefix}/cuts/"):
     """
@@ -911,12 +1025,207 @@ def populate_magdiff(df):
 
     return df
 
+
+import numpy as np
+import pandas as pd
+
+def make_psf_minus_fiber_correction_fn(z, psf_minus_fiber_i, z_window=0.5):
+    """
+    Given arrays of z and psf_minus_fiber_i, returns two callables:
+
+        dm_of_z(zq)      -> interpolated median(psf_minus_fiber_i) vs z
+        dm_err_of_z(zq)  -> interpolated SEM of psf_minus_fiber_i vs z
+
+    The medians and SEMs are computed in redshift bins using
+    scipy.stats.binned_statistic. Interpolation is linear in z with
+    flat extrapolation at the edges (conservative).
+    """
+    from scipy.stats import binned_statistic
+    from scipy.interpolate import interp1d
+
+    # Clean and sort
+    d = (
+        pd.DataFrame({'z': z, 'psf_minus_fiber_i': psf_minus_fiber_i})
+        .dropna()
+        .sort_values('z')
+    )
+
+    if len(d) < 5:
+        raise ValueError("Not enough data points to build correction.")
+
+    z_min = d['z'].min()
+    z_max = d['z'].max()
+    z_span = z_max - z_min
+
+    if z_span <= 0:
+        raise ValueError("z must span a non-zero range.")
+
+    # Choose number of bins so that z_window ~ bin width
+    nbins = max(5, int(np.ceil(z_span / z_window)))
+
+    z_vals = d['z'].to_numpy()
+    dm_vals = d['psf_minus_fiber_i'].to_numpy()
+
+    # 1) Median in bins
+    dm_binned, edges, _ = binned_statistic(
+        z_vals,
+        dm_vals,
+        statistic='median',
+        bins=nbins,
+        range=(z_min, z_max),
+    )
+
+    # Bin centers
+    z_centers = 0.5 * (edges[:-1] + edges[1:])
+
+    # 2) Counts per bin (for SEM)
+    counts, _, _ = binned_statistic(
+        z_vals,
+        dm_vals,
+        statistic='count',
+        bins=nbins,
+        range=(z_min, z_max),
+    )
+
+    # 3) Standard deviation per bin
+    std_binned, _, _ = binned_statistic(
+        z_vals,
+        dm_vals,
+        statistic='std',
+        bins=nbins,
+        range=(z_min, z_max),
+    )
+
+    # SEM = std / sqrt(N) where N > 1; otherwise NaN
+    sem_binned = np.where(counts > 1, std_binned / np.sqrt(counts), np.nan)
+
+    # Mask out empty median bins
+    mask_dm = np.isfinite(dm_binned)
+    z_fit = z_centers[mask_dm]
+    dm_fit = dm_binned[mask_dm]
+    sem_fit = sem_binned[mask_dm]
+
+    if len(z_fit) < 2:
+        raise ValueError("Not enough non-empty bins to build correction function.")
+
+    # Interpolator for the meditian correction (flat extrapolation at edges)
+    from scipy.interpolate import interp1d
+    dm_interp = interp1d(
+        z_fit, dm_fit,
+        kind="linear",
+        bounds_error=False,
+        fill_value=(dm_fit[0], dm_fit[-1]),
+    )
+
+    # For the error, drop NaN SEM bins (e.g. bins with only 1 object)
+    mask_sem = np.isfinite(sem_fit)
+    if np.sum(mask_sem) >= 2:
+        z_fit_err = z_fit[mask_sem]
+        sem_fit_err = sem_fit[mask_sem]
+
+        dm_err_interp = interp1d(
+            z_fit_err, sem_fit_err,
+            kind="linear",
+            bounds_error=False,
+            fill_value=(sem_fit_err[0], sem_fit_err[-1]),
+        )
+
+        def dm_err_of_z(zq):
+            """Interpolated SEM of psf_minus_fiber_i at given zq."""
+            return dm_err_interp(np.asarray(zq, float))
+
+    else:
+        raise ValueError("Not enough non-empty SEM bins to build error function.")
+
+    def dm_of_z(zq):
+        """Interpolated psf_minus_fiber_i correction at given zq."""
+        return dm_interp(np.asarray(zq, float))
+
+    return dm_of_z, dm_err_of_z
+
+
+def plot_m2500_correction(dm_of_z, z, m2500_uncorrected,
+                          title="m2500 vs redshift (correction comparison)",
+                          show=False, alpha=0.5, s=5):
+
+    # Mask out m2500_uncorrected values outside the range [1, 30]
+    valid_mask = (m2500_uncorrected >= 1) & (m2500_uncorrected <= 30)
+    z = z[valid_mask]
+    m2500_uncorrected = m2500_uncorrected[valid_mask]
+
+    dm_values = dm_of_z(z)
+
+    # Plot dm_of_z vs z
+    plt.figure(figsize=(8, 6))
+    plt.scatter(z, dm_values, label='dm_of_z', color='blue', s=0.5)
+    plt.xlabel('Redshift (z)')
+    plt.ylabel('dm_of_z')
+    plt.title('dm_of_z vs Redshift')
+    plt.grid(alpha=0.3)
+    plt.legend()
+    plt.tight_layout()
+    os.makedirs(f"plots/hubble/{prefix}/diagnostics/", exist_ok=True)
+    plt.savefig(f"plots/hubble/{prefix}/diagnostics/dm_of_z_vs_redshift.png", dpi=200)
+    if show:
+        plt.show()
+    plt.close()
+
+    m2500_corrected = m2500_uncorrected - dm_values
+    mc = np.asarray(m2500_corrected, dtype=float)
+    mu = np.asarray(m2500_uncorrected, dtype=float)
+
+    # Basic validation
+    if not (z.shape == mc.shape == mu.shape):
+        raise ValueError("z, m2500_corrected, and m2500_uncorrected must have the same shape.")
+    mask = np.isfinite(z) & np.isfinite(mc) & np.isfinite(mu)
+    if mask.sum() < 3:
+        raise ValueError("Not enough finite points to plot.")
+
+    z, mc, mu = z[mask], mc[mask], mu[mask]
+    dmag = mc - mu
+
+    # Sort by redshift for optional line joins (keeps scatter as-is)
+    idx = np.argsort(z)
+    z_s, mc_s, mu_s, dmag_s = z[idx], mc[idx], mu[idx], dmag[idx]
+
+    fig = plt.figure(figsize=(7.5, 7.5))
+    gs = fig.add_gridspec(nrows=2, ncols=1, height_ratios=[2.0, 1.0], hspace=0.08)
+
+    # Top: m vs z
+    ax1 = fig.add_subplot(gs[0])
+    ax1.scatter(z, mu, s=s, alpha=alpha, label="m2500 (uncorrected)")
+    ax1.scatter(z, mc, s=s, alpha=alpha, label="m2500 (corrected)")
+
+    ax1.set_ylabel(r"$m_{2500}$")
+    ax1.set_title(title)
+    ax1.legend(loc="best", frameon=False)
+    ax1.grid(True, ls=":", alpha=0.3)
+
+    # Bottom: residuals Δm
+    ax2 = fig.add_subplot(gs[1], sharex=ax1)
+    ax2.axhline(0.0, lw=1.0, color="k", alpha=0.6)
+    ax2.scatter(z, dmag, s=s, alpha=alpha, label=r"$\Delta m = m_{2500}^{\rm corr} - m_{2500}^{\rm uncorr}$")
+    ax2.plot(z_s, dmag_s, lw=0.8, alpha=0.5)
+
+    ax2.set_xlabel("redshift z")
+    ax2.set_ylabel(r"$\Delta m$")
+    ax2.grid(True, ls=":", alpha=0.3)
+    ax2.legend(loc="best", frameon=False)
+
+    plot_path = f"plots/hubble/{prefix}/diagnostics/"
+    os.makedirs(plot_path, exist_ok=True)
+    fig.savefig(f"{plot_path}/m2500_correction_comparison.png", dpi=200, bbox_inches="tight")
+    if show:
+        plt.show()
+    plt.close()
+
+
 def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=10,
                   exclude_object_ids_csv=[],
                   residuals_sigma_clip=None, residuals_csv=None,
                   spectra_fit_csv=None, zquery_csv=None, only_load=False,
                   iron_frac_cut=None, redchi2_cut=None,
-                  sdss_mags_csv=None):
+                  sdss_mags_csv=None, lc_info_csv="data/aug4_sample_chisqg10_ebv005sn3_lcdata.csv"):
     #quasar_list = read_quasars_from_hdf5(file_path)
     import pickle
     with open(file_path + ".pkl", "rb") as f: 
@@ -955,6 +1264,29 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=10,
 
     df = pd.DataFrame(quasar_list)
 
+    dropped_bands = df['dropped_bands']
+    jitter_total_sq = np.zeros(len(df))
+    amp_delta_blr_total_sq = np.zeros(len(df))
+
+    for b in ['u', 'g', 'r', 'i']:
+        #df.loc[dropped_bands.apply(lambda s: b in s), f'log_jitter_{b}'] = np.nan
+        jitter = 10**df[f'log_jitter_{b}'].values
+        jitter[dropped_bands.apply(lambda s: b in s)] = 0.0
+        df[f'jitter_{b}'] = jitter
+        jitter_total_sq = jitter_total_sq + jitter**2
+
+        #df.loc[dropped_bands.apply(lambda s: b in s), f'log_amp_delta_blr_{b}'] = np.nan
+        amp_delta_blr = 10**df[f'log_amp_delta_blr_{b}'].values
+        amp_delta_blr[dropped_bands.apply(lambda s: b in s)] = 0.0
+        amp_delta_blr_total_sq = amp_delta_blr_total_sq + amp_delta_blr**2
+        df[f'amp_delta_blr_{b}'] = amp_delta_blr
+
+    df['log_jitter_total'] = np.log10(np.sqrt(jitter_total_sq))
+    df['log_amp_delta_blr_total'] = np.log10(np.sqrt(amp_delta_blr_total_sq))
+
+    # df['log_sigma_UV'] = df['log_sigma_UV'] + 1/2 * np.log10(1 + df['z'])
+
+
     df_sample = pd.read_csv("data/aug4_sample_chisqg10_ebv005sn3.csv", dtype={'object_id': str})
     print("Entire Sample file length:", len(df_sample))
     # TODO: populate z
@@ -969,6 +1301,14 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=10,
             raise ValueError("spectra_fit_csv not provided and spectral fields not found in agn h5 file")
             #raise ValueError("spectra_fit_csv must be provided if alpha_lambda not in agn h5 file")
 
+    # ALWAYS Remove objects with apparent_mag_2500 or apparent_mag_i too bright or too faint
+    mag_mask = ((df['apparent_mag_2500'] >= 16) & (df['apparent_mag_2500'] < 24))
+    num_removed = np.sum(~mag_mask)
+    print(f"Cut on apparent_mag_2500 : {num_removed} objects removed")
+    plot_redshift_histogram(df.copy(), df[mag_mask], bins=30, cut_info="16 < apparent_mag_2500 < 24")
+    plot_m_vs_redshift(df.copy(), df[mag_mask], cut_info="16 < apparent_mag_2500 < 24")
+    df = df[mag_mask].reset_index(drop=True)
+
     if zquery_csv is not None:
         print("Populating zquery data from:", zquery_csv)
         df = populate_zquery(df, zquery_csv)
@@ -981,16 +1321,35 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=10,
 
     df = populate_xray(df)
 
-    if sdss_mags_csv is not None:
-        df = populate_sdss_mags(df, sdss_mags_csv)
-    else:
-        print("[WARNING] sdss_mags_csv not provided")
+    df = populate_sdss_mags(df)
     
+    if lc_info_csv is not None:
+        print("Populating LC info from:", lc_info_csv)
+        df = populate_lc_info(df, lc_info_csv)
+    else:
+        print("[WARNING] lc_info_csv not provided")
+
     num_quasars_z_0_1_before = len(df[(df['z'] > 0) & (df['z'] <= 1.0)])
     num_quasars_z_gt_3_before = len(df[df['z'] > 3])
     print("Number of quasars with 0 < z <= 1.0:", num_quasars_z_0_1_before)
     print("Number of quasars with z > 3:", num_quasars_z_gt_3_before)
     print("Highest redshift quasar:", df['z'].max())
+
+    # Correct for psf - fiber magnitude differences using rolling median
+    #dm_of_z = df["psf_sdss_minus_fiber_sdss_i"].values
+    dm_of_z, dm_of_z_err = make_psf_minus_fiber_correction_fn(
+    df["z"].values,
+    df["psf_sdss_minus_fiber_sdss_i"].values,
+    z_window=0.1,
+    )
+    plot_m2500_correction(dm_of_z, df["z"].values, df["apparent_mag_2500"].values, show=False)
+    dm = dm_of_z(df["z"].values)
+    df['dm_psf_correction'] = dm
+    df['dm_psf_correction_err'] = dm_of_z_err(df["z"].values)
+    #dm = df["psf_sdss_minus_fiber_sdss_r"].values
+    
+    df['apparent_mag_2500_uncorrectedpsf'] = df['apparent_mag_2500'].values
+    df['apparent_mag_2500'] = df['apparent_mag_2500'].values - dm
 
     df_all = df.copy()
 
@@ -1008,15 +1367,15 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=10,
     # plot_redshift_histogram(df_all, df_all[mask_finite], bins=30, cut_info="remove_inf")
 
 
-    log_tau_band_RF = np.array([df[f'log_tau_band_{b}_RF'] for b in ['u', 'g', 'r', 'i', 'z']])
+    #log_tau_band_RF = np.array([df[f'log_tau_band_{b}_RF'] for b in ['u', 'g', 'r', 'i', 'z']])
     # Mask values <= 0
-    masked_tau = np.where(log_tau_band_RF > 0, np.power(10, log_tau_band_RF), np.nan)
-    tau_band_RF_mean = np.nanmean(masked_tau, axis=0)
+    #masked_tau = np.where(log_tau_band_RF > 0, np.power(10, log_tau_band_RF), np.nan)
+    #tau_band_RF_mean = np.nanmean(masked_tau, axis=0)
 
-    df['log_tau_band_RF_mean'] = np.log10(tau_band_RF_mean)
+    #df['log_tau_band_RF_mean'] = np.log10(tau_band_RF_mean)
     df['log_t_rf_length'] = np.log10(df['t_rf_length'])
-    df['tau_band_RF_mean'] = tau_band_RF_mean
-    df['log_rho'] = np.log10(tau_band_RF_mean / df['t_rf_length'])
+    #df['tau_band_RF_mean'] = tau_band_RF_mean
+    #df['log_rho'] = np.log10(tau_band_RF_mean / df['t_rf_length'])
 
     df['log_f_host_2500'] = np.where(df['f_host_2500'] > 0, np.log10(df['f_host_2500']), np.nan)
     df['log_f_host_5100'] = np.where(df['f_host_5100'] > 0, np.log10(df['f_host_5100']), np.nan)
@@ -1032,25 +1391,18 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=10,
     exclusion_sdss_names = [
         '221120.38+010905.6', # removed because wrong redshift
         '024555.35+005332.6' # remove because weird spectra
+        '015802.36+002917.3' # next to star
                             ]
     mask_exclude &= (~df['sdss_name'].astype(str).isin(exclusion_sdss_names))
     print(f"Excluding {np.sum(~mask_exclude)} objects by exclusion list")
     df = df[mask_exclude].reset_index(drop=True)
-
-    # ALWAYS Remove objects with apparent_mag_2500 or apparent_mag_i too bright or too faint
-    mag_mask = (df['apparent_mag_2500'] >= 1) & (df['apparent_mag_2500'] < 50) & \
-               (df['apparent_mag_i'] >= 1) & (df['apparent_mag_i'] < 50)
-    num_removed = np.sum(~mag_mask)
-    print(f"Cut on apparent_mag_2500 and apparent_mag_i: {num_removed} objects removed")
-    plot_redshift_histogram(df.copy(), df[mag_mask], bins=30, cut_info="1 < apparent_mag_2500 < 50 and 1 < apparent_mag_i < 50")
-
-    df = df[mag_mask].reset_index(drop=True)
 
 
     mask_valid = (df['log_tau_UV_RF'] > 2*df['log_sigma_UV'] + 2.5)
     num_removed = np.sum(~mask_valid)
     print(f"Cut on tau vs sigma diagram: {num_removed} objects removed")
     plot_redshift_histogram(df.copy(), df[mask_valid], bins=30, cut_info="tau > 2*sigma + 2.5")
+    plot_m_vs_redshift(df.copy(), df[mask_valid], cut_info="tau > 2*sigma + 2.5")
 
     df = df[mask_valid].reset_index(drop=True)
     # mask_in  = df_agn["z"].between(0.44, 3.16)
@@ -1076,8 +1428,15 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=10,
     num_removed_dropped = np.sum(~mask_dropped)
     print(f"Removed {num_removed_dropped} objects with len_dropped_bands == 4 or 5")
     plot_redshift_histogram(df.copy(), df[mask_dropped], bins=30, cut_info="dropped bands 4 or 5")
-
+    plot_m_vs_redshift(df.copy(), df[mask_dropped], cut_info="dropped bands 4 or 5")
     df = df[mask_dropped].reset_index(drop=True)
+
+    mask = ~df['npca_qso'].isin([0])
+    num_removed_dropped = np.sum(~mask)
+    print(f"Removed {num_removed_dropped} objects with npca_qso = 0")
+    plot_redshift_histogram(df.copy(), df[mask], bins=30, cut_info="npca_qso 0")
+    plot_m_vs_redshift(df.copy(), df[mask], cut_info="npca_qso 0")
+    df = df[mask].reset_index(drop=True)
 
     # Select objects with BC == False (if column exists) and report how many were dropped
     n_before = len(df)
@@ -1085,7 +1444,82 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=10,
     n_kept = int(np.sum(keep_mask))
     n_dropped = int(n_before - n_kept)
     print(f"Selecting BC==False: {n_dropped} objects removed (kept {n_kept} of {n_before})")
+    plot_redshift_histogram(df.copy(), df[keep_mask], bins=30, cut_info=f"BCFalse")
+    plot_m_vs_redshift(df.copy(), df[keep_mask], cut_info=f"BCFalse")
     df = df[keep_mask].reset_index(drop=True)
+
+    n_before = len(df)
+    keep_mask = df['poly'] == False
+    n_kept = int(np.sum(keep_mask))
+    n_dropped = int(n_before - n_kept)
+    print(f"Selecting poly==False: {n_dropped} objects removed (kept {n_kept} of {n_before})")
+    plot_redshift_histogram(df.copy(), df[keep_mask], bins=30, cut_info=f"polyFalse")
+    plot_m_vs_redshift(df.copy(), df[keep_mask], cut_info=f"polyFalse")
+    df = df[keep_mask].reset_index(drop=True)
+
+    n_before = len(df)
+    keep_mask = df['decomp_host'] == False
+    n_kept = int(np.sum(keep_mask))
+    n_dropped = int(n_before - n_kept)
+    print(f"Selecting decomp_host==False: {n_dropped} objects removed (kept {n_kept} of {n_before})")
+    plot_redshift_histogram(df.copy(), df[keep_mask], bins=30, cut_info=f"decomp_hostFalse")
+    plot_m_vs_redshift(df.copy(), df[keep_mask], cut_info=f"polyFalse")
+    df = df[keep_mask].reset_index(drop=True)
+
+    # Convenience logs / coercions
+    # def _safelog(a):
+    #     return np.log10(np.abs(a + 1e-10)
+    # if 'dm_red' in df_agn: df_agn['log_dm_red'] = _safelog(df_agn['dm_red'])
+    # if 'reddening_integral' in df_agn: df_agn['log_reddening_integral'] = _safelog(df_agn['reddening_integral'])
+    # if 'reddening_proxy' in df_agn: df_agn['log_reddening_proxy'] = _safelog(df_agn['reddening_proxy'])
+    # if 'redchi' in df_agn: df_agn['log_redchi'] = _safelog(df_agn['redchi'])
+    # if 'redchi2_conti_full' in df_agn: df_agn['log_redchi2_conti_full'] = _safelog(df_agn['redchi2_conti_full'])
+    # if 'apparent_mag_2500_err' in df_agn: df_agn['log_apparent_mag_2500_err'] = _safelog(df_agn['apparent_mag_2500_err'])
+    # if 'log_sigma_UV_err' in df_agn: df_agn['log_log_sigma_UV_err'] = _safelog(df_agn['log_sigma_UV_err'])
+    # if 'log_tau_UV_RF_err' in df_agn: df_agn['log_log_tau_UV_RF_err'] = _safelog(df_agn['log_tau_UV_RF_err'])
+    # if 'psf_minus_fiber_r' in df_agn: df_agn['log_psf_minus_fiber_r'] = _safelog(df_agn['psf_minus_fiber_r'])
+    # if 'petroRad_r' in df_agn: df_agn['log_petroRad_r'] = _safelog(df_agn['petroRad_r'])
+    # if 'log_tau_drw0_rhat' in df_agn: df_agn['log_log_tau_drw0_rhat'] = _safelog(df_agn['tau_drw0_rhat'])
+    # for col in ['BC', 'decomp_host', 'poly']:
+    #     if col in df_agn:
+    #         df_agn[col] = df_agn[col].replace(
+    #             {True: 1, False: 0, 'True': 1, 'False': 0, 'true': 1, 'false': 0}
+    #         )
+
+
+    # mask = ~((df['z'] < 0.6) & (df['decomp_host'] == False))
+    # num_removed = np.sum(~mask)
+    # print(f"Cut on z < 0.6 and decomp_host False: {num_removed} objects removed")
+    # plot_redshift_histogram(df.copy(), df[mask], bins=30, cut_info="z < 2 and m_2500 > 23")
+    # plot_m_vs_redshift(df.copy(), df[mask], cut_info="z < 2 and m_2500 > 23")
+    # df = df[mask].reset_index(drop=True)
+    # mask = ~((df['z'] < 0.6) & (df['psf_minus_fiber_r'] < -0.3))
+    # num_removed = np.sum(~mask)
+    # print(f"Cut on z < 0.6 and psf_minus_fiber_r > -0.3: {num_removed} objects removed")
+    # df = df[mask].reset_index(drop=True)
+
+    # mask = ~((df['z'] < 0.6) & (df['iron_frac'] > 1.19))
+    # num_removed = np.sum(~mask)
+    # print(f"Cut on z < 0.6 and psf_minus_fiber_r > -0.3: {num_removed} objects removed")
+    # df = df[mask].reset_index(drop=True)
+
+    # mask = ~((df['z'] < 0.6) & (df['petroRad_r'] > 1.5))
+    # num_removed = np.sum(~mask)
+    # print(f"Cut on z < 0.6 and psf_minus_fiber_r > -0.3: {num_removed} objects removed")
+    # df = df[mask].reset_index(drop=True)
+
+    # mask = ~((df['z'] < 0.6) & (df['sn_median_all'] > 6))
+    # num_removed = np.sum(~mask)
+    # print(f"Cut on z < 0.6 and psf_minus_fiber_r > -0.3: {num_removed} objects removed")
+    # df = df[mask].reset_index(drop=True)
+
+    for b in ['u', 'g', 'r', 'i']:
+        mask = (df[f'log_amp_delta_blr_{b}'] < 0) | df[f'log_amp_delta_blr_{b}'].isna()
+        num_removed = np.sum(~mask)
+        print(f"Removed {num_removed} objects with log_amp_delta_blr_{b} >= 0")
+        plot_redshift_histogram(df.copy(), df[mask], bins=30, cut_info=f"log_amp_delta_blr_{b} < 0 or NaN")
+        plot_m_vs_redshift(df.copy(), df[mask], cut_info=f"log_amp_delta_blr_{b} < 0 or NaN")
+        df = df[mask].reset_index(drop=True)
 
     # Define cuts as (column, lower_limit, upper_limit)
     cuts = [
@@ -1093,17 +1527,57 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=10,
         #('log_lbol', 45.4, None),
         #('dm_red', None, dm_red_cut),
         ('log_tau_UV_RF', 1.5, 4),
-        ('conti_a_0', None, 0),
         #('redchi', None, 5),
-        ('redchi2_conti_full', None, redchi2_cut),
-        ('apparent_mag_2500', 12, 40),
-        ('apparent_mag_i', 12, 40),
-        #('t_rf_length', 1700, None),
-        ('f_host_2500', -5, -1),
-        ('f_host_5100', -5, -1),
-        #('alpha_lambda', -2, -1),
-        #('iron_frac', None, 1.2),
-        #('petroRad_r', None, 2),
+        ('redchi2_conti_full', None, 1.2),
+        #('apparent_mag_i', 12, 40),
+        ('t_rf_length', 1700, None),
+        # ('f_host_2500', -1, -1),
+        # ('f_host_5100', -1, -1),
+        ('alpha_lambda', None, -0.01),
+        ('iron_frac', None, 10),
+        #('log_amp_delta_blr_total', None, 0),
+        #('eta_tau2', None, 1),
+        ('log_tau_UV_RF_err', 0, 1.0),
+        ('log_sigma_UV_err', 0, 0.3),
+
+        #('eta_A1_rhat', None, 1.1),
+        # ('apparent_mag_2500_err', None, 0.04),
+        # ('npca_qso', -1, -1),
+        # ('iron_frac', None, 1.2),
+        #('PL_slope_blue', None, -1),
+        # ('log_tau_fast0', None, 0.5),
+        # ('bwb_alpha', 0.45, None),
+
+        # ('eta_A1', -1, -0.5),
+        # ('eta_tau1', 0, 1),
+        # ('PL_slope_blue', -2, 1)
+
+
+
+
+        #('conti_a_0', 0.0001, None),
+ 
+        #('psf_minus_fiber_r', -0.3, None)
+        # new cuts
+        
+        # ('eta_A1', -0.8, -0.5),
+
+        # ('psf_minus_fiber_r', -0.35, -0.16),
+        # ('log_petroRad_r', None, 0.4),
+        # ('log_redchi', None, 0.3),
+        
+
+
+
+        # ('PL_slope_blue', None, -1),
+
+        # ('bwb_alpha_z', 0.52, None),
+        # ('bwb_alpha_i', 0.52, None),
+        # ('bwb_alpha_r', 0.52, None),
+        # ('bwb_alpha_u', 0.52, None),
+        # ('redchi2_conti_full', 1.05, None),
+        
+        
         #('npca_qso', None, -1),
         
         #('apparent_mag_2500_err', 0, 1),
@@ -1111,7 +1585,6 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=10,
         #('alpha_lambda', None, -1),
         # ('sameZ', 0.9, 1.1),
         #('log_tau_fast0', None, 0.5),
-
     ]
 
     if apply_cut:
@@ -1126,6 +1599,7 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=10,
             cut_count = np.sum(~col_mask)
             print(f"Cut on {col}: {cut_count} objects removed")
             plot_redshift_histogram(df.copy(), df[col_mask], bins=30, cut_info=f"{lower}<{col}<{upper}")
+            plot_m_vs_redshift(df.copy(), df[col_mask], cut_info=f"{lower}<{col}<{upper}")
             mask &= col_mask
         df = df[mask]
 
@@ -1207,10 +1681,12 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=10,
     print("Number of quasars with 0 < z <= 1.0:", num_quasars_z_0_1)
     print("Number of dropped quasars with 0 < z <= 1.0:", num_quasars_z_0_1_before - num_quasars_z_0_1)
     print("Number of quasars with z > 3:", num_quasars_z_gt_3)
+    print(f"\nTotal number of objects removed by all cuts: {len(df_all) - len(df)}")
     print("Final number of quasars:", len(df))
-
     plot_redshift_histogram(df_all.copy(), df.copy(), bins=30, cut_info=f"all cuts")
+    plot_m_vs_redshift(df_all.copy(), df.copy(), cut_info=f"all cuts")
 
+    
     return df, df_all
 
 def load_pantheon_data():
@@ -1232,7 +1708,7 @@ def load_pantheon_data():
         "data/Pantheon+SH0ES.dat",
         sep=r"\s+"
     )
-
+    
     # --- Selection mask: use only (zHD > 0.01) OR calibrators ---
     is_calib = np.asarray(df_pantheon["IS_CALIBRATOR"], dtype=bool)
     sel_mask = (df_pantheon["zHD"].values > 0.01) | is_calib
@@ -2169,166 +2645,6 @@ def loglike_cmb_theta_simple(cosmo,
     return float(ll), {"100theta": hundred_theta, "z_star": zstar, "r_s_Mpc": r_s, "D_M_Mpc": D_M}
 
 
-def predict_uncensored_magnitudes_from_observed(df_agn, completeness_params, nsig=4, n_grid=500):
-    """
-    Computes bias-corrected apparent magnitudes using a log-space stabilized posterior.
-
-    Parameters
-    ----------
-    df_agn : pd.DataFrame
-        Must contain 'apparent_mag_2500', 'apparent_mag_2500_err', 'z'.
-    completeness_params : tuple
-        Output from get_completeness_function_2d.
-    nsig : float
-        Number of sigmas for grid range.
-    n_grid : int
-        Number of magnitude samples.
-
-    Returns
-    -------
-    np.ndarray
-        Posterior-mean corrected magnitudes.
-    """
-    completeness2d, *_ = completeness_params
-
-    m_obs = df_agn['apparent_mag_2500'].values.astype(np.float64)
-    m_err = df_agn['apparent_mag_2500_err'].values.astype(np.float64)
-    z = df_agn['z'].values.astype(np.float64)
-    N = len(m_obs)
-
-    # Build expanded mag grid
-    m_offsets = np.linspace(-nsig, nsig, n_grid)
-    m_grid = m_obs[:, None] + m_err[:, None] * m_offsets  # shape (N, n_grid)
-
-    # Gaussian log-prior
-    log_prior = norm.logpdf(m_grid, loc=m_obs[:, None], scale=m_err[:, None])
-
-    # Evaluate completeness and soft-clip in log-space
-    z_grid = np.tile(z[:, None], (1, n_grid))
-    p_det = completeness2d(m_grid, z_grid)
-
-    # Estimate more adaptive floor (5th percentile of nonzero completeness)
-    finite_p = p_det[np.isfinite(p_det) & (p_det > 0)]
-    min_c = np.percentile(finite_p, 5) if len(finite_p) > 0 else 1e-4
-    p_det = soft_clip(p_det, floor=min_c, sharpness=20)
-
-    log_p_det = np.log(p_det + 1e-300)
-
-    # Log posterior (unnormalized)
-    log_post = log_prior + log_p_det
-    log_post -= np.max(log_post, axis=1, keepdims=True)  # for stability
-
-    post = np.exp(log_post)
-    post /= np.trapz(post, m_grid, axis=1)[:, None] + 1e-12
-
-    m_corr = np.trapz(m_grid * post, m_grid, axis=1)
-
-    return m_corr
-
-def predict_uncensored_magnitudes(df_agn, m_model, mu_err, completeness_params, nsig=4, n_grid=300):
-    z = df_agn['z'].values
-    p_detect_fn, *_ = completeness_params
-
-    uncensored_samples = []
-    min_c = p_detect_fn.min_completeness_value
-
-    for i in range(len(df_agn)):
-        m = m_model[i]
-        sigma = mu_err[i]
-        zval = z[i]
-
-        m_offsets = np.linspace(-nsig, nsig, n_grid)
-        m_grid = m + sigma * m_offsets
-        prior = stats.norm.pdf(m_grid, loc=m, scale=sigma)
-
-        p_det = p_detect_fn(m_grid, np.full_like(m_grid, zval))
-        p_det = soft_clip(p_det, floor=min_c, sharpness=20)
-
-        if np.sum(p_det) < 1e-6:
-            uncensored_samples.append(m)
-            continue
-
-        posterior = prior * p_det
-        posterior /= np.trapezoid(posterior, m_grid)
-
-        mean_m = np.trapezoid(m_grid * posterior, m_grid)
-        uncensored_samples.append(mean_m)
-
-    return np.array(uncensored_samples)
-
-def apply_forward_completeness_correction(df_agn, params, cosmo_model, completeness_params):
-    """
-    Apply completeness-aware correction to model-predicted apparent magnitudes.
-
-    Parameters
-    ----------
-    df_agn : pd.DataFrame
-        AGN data including redshift, apparent magnitude error, and variability features.
-    params : dict
-        Dictionary of model parameters.
-    cosmo : astropy cosmology instance
-        Cosmology model used to compute distance moduli.
-    completeness_params : tuple
-        Output from get_completeness_function_2d.
-
-    Returns
-    -------
-    np.ndarray
-        Completeness-corrected apparent magnitudes (posterior means).
-    """
-
-    priors, model_labels, _ = get_model_params(cosmo_model)
-    # Common post-processing
-    
-    #params = dict(zip(model_labels, params))
-    
-    if cosmo_model == 'FlatwpwaCDM':
-        cosmo = FlatwpwaCDM(H0=params['H0'], Om0=params['Om0'], wp=params['wp'], wa=params['wa'], zp=z_pivot_agn)
-    if cosmo_model == 'Flatw0waCDM':
-        cosmo = Flatw0waCDM(H0=params['H0'], Om0=params['Om0'], w0=params['w0'], wa=params['wa'])
-    elif cosmo_model == 'FlatwCDM':
-        cosmo = FlatwCDM(H0=params['H0'], Om0=params['Om0'], w0=params['w0'])
-    elif cosmo_model == 'FlatLambdaCDM':
-        cosmo = FlatLambdaCDM(H0=params['H0'], Om0=params['Om0'])
-    else:
-        raise ValueError("cosmo_model must be 'FlatwCDM', 'Flatw0waCDM' or 'FlatLambdaCDM'")
-
-    # Compute model-predicted absolute magnitude
-    M_model = M_model_agn(
-        params['M0_agn'],
-        params['log_sigma_UV_break'],
-        params['eta_A1_agn'], params['eta_A2_agn'],
-        params['eta_break_agn'],
-        params['beta_agn'],
-        df_agn['log_sigma_UV'].values,
-        df_agn['log_tau_UV_RF'].values
-    )
-
-    # Cosmological distance modulus + K-correction
-    mu_cosmo = cosmo.distmod(df_agn['z'].values).value
-    m_model = mu_cosmo + M_model
-
-    # Total uncertainty on m_model
-    mu_err = np.sqrt(
-        df_agn['apparent_mag_2500_err'].values**2 +
-        M_model_agn_err(
-            params['M0_agn'],
-            params['log_sigma_UV_break'],
-            params['eta_A1_agn'], params['eta_A2_agn'],
-            params['eta_break_agn'],
-            params['beta_agn'],
-            df_agn['log_sigma_UV'].values,
-            df_agn['log_sigma_UV_err'].values,
-            df_agn['log_tau_UV_RF'].values
-        )**2 +
-        (2.5 * 0.3 * np.log10(1 + df_agn['z'].values))**2 +
-        (0.055 * df_agn['z'].values)**2 +
-        np.exp(2 * params['log_f'])
-    )
-
-    # Apply marginalization over completeness
-    m_corr = predict_uncensored_magnitudes(df_agn, m_model, mu_err, completeness_params)
-    return m_corr
 
 def compute_pivot_redshift(flat_samples, cosmo_model, z_min=0.0, z_max=4.0):
     """
@@ -2834,7 +3150,7 @@ def make_agn_latex_table(
     agn_df,
     mu,
     mu_err,
-    dms,
+    dm_interp,
     sort_by = None, ascending = True,
     max_rows = None,
     write_path = f"plots/hubble/{prefix}"
@@ -2870,7 +3186,7 @@ def make_agn_latex_table(
     df['mu'] = mu
     df['mu_err'] = mu_err
 
-    dm_interp = make_dm_function(np.array(df["apparent_mag_2500"].values), np.array(df['z'].values), dms)
+    #dm_interp = make_dm_function(np.array(df["apparent_mag_2500"].values), np.array(df['z'].values), dms)
     pts = np.column_stack([df['z'], df['apparent_mag_2500']])
     m_2500_corr = (df['apparent_mag_2500'] - dm_interp(pts))
     df['apparent_mag_2500_corr'] = m_2500_corr

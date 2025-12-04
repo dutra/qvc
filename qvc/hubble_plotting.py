@@ -7,6 +7,7 @@ import corner
 import pandas as pd
 from scipy.interpolate import RegularGridInterpolator
 
+import matplotlib as mpl
 from mpl_toolkits.axes_grid1.inset_locator import inset_axes
 from astropy.cosmology import FlatwCDM, FlatwpwaCDM, FlatLambdaCDM, Flatw0waCDM
 from astropy.cosmology.realizations import Planck18
@@ -20,7 +21,9 @@ import matplotlib.transforms as mtransforms
 
 from hubble_model import (M_model_agn, M_model_agn_err, get_model_params, agn_model_pack_params,
     agn_model_pack_obs, agn_model_eidx, agn_model_oidx, agn_model_pidx)
+from hubble_likelihood import sigma_lens_from_dc
 from hubble_utils import *
+from hubble_model import agn_model_req_obs, agn_model_req_errs
 from hubble_completeness import make_dm_function
 from dynesty.utils import resample_equal
 from tqdm import tqdm
@@ -399,7 +402,7 @@ def plot_cosmo_corner(
     plt.close(fig)
 
 
-def _weighted_bin_stats(z, y, yerr, bins, *, min_count=7, center='mid'):
+def _weighted_bin_stats(z, y, yerr, bins, *, min_count=3, center='weighted'):
     """
     Simplest weighted binning:
     - weights w = 1 / yerr^2
@@ -449,7 +452,7 @@ def _weighted_bin_stats(z, y, yerr, bins, *, min_count=7, center='mid'):
 
 def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plot_path="plots/hubble/",
                 show_binned_agn=True, show_residuals=True,
-                debias=False, dms=None, show=False, completeness=True, show_true=False, verbose=True,
+                debias=False, dm_interp=None, show=False, completeness=True, show_true=False, verbose=True,
                 cosmo_model_samples={}, residuals_sigma_clip=None, df_calibrators=None,):
     """
     Hubble diagram (Pantheon+-style):
@@ -487,19 +490,21 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     param_indices = {name: model_labels.index(name) for name in model_labels}
 
     # --- Small helper: μ_model(z | params) ---
-    def _mu_model(model_name, params_dict, z, zp):
+    def get_cosmo(model_name, params_dict, zp):
         if model_name == 'FlatwCDM':
-            return FlatwCDM(H0=params_dict['H0'], Om0=params_dict['Om0'], w0=params_dict['w0']).distmod(z).value
+            return FlatwCDM(H0=params_dict['H0'], Om0=params_dict['Om0'], w0=params_dict['w0'])
         elif model_name == 'Flatw0waCDM':
             return Flatw0waCDM(H0=params_dict['H0'], Om0=params_dict['Om0'],
-                               w0=params_dict['w0'], wa=params_dict['wa']).distmod(z).value
+                               w0=params_dict['w0'], wa=params_dict['wa'])
         elif model_name == 'FlatLambdaCDM':
-            return FlatLambdaCDM(H0=params_dict['H0'], Om0=params_dict['Om0']).distmod(z).value
+            return FlatLambdaCDM(H0=params_dict['H0'], Om0=params_dict['Om0'])
         elif model_name == 'FlatwpwaCDM':
             return FlatwpwaCDM(H0=params_dict['H0'], Om0=params_dict['Om0'],
-                               wp=params_dict['wp'], wa=params_dict['wa'], zp=zp).distmod(z).value
+                               wp=params_dict['wp'], wa=params_dict['wa'], zp=zp)
         else:
             raise ValueError("Invalid cosmology model for _mu_model().")
+    def _mu_model(model_name, params_dict, z, zp):
+        return get_cosmo(model_name, params_dict, zp).distmod(z).value
 
     # --- Cosmology band on grid from posterior samples ---
     mu_models = np.array([
@@ -532,7 +537,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
 
     # De-bias (assumes your make_dm_function clips to grid, no extrapolation)
     if debias:
-        dm_interp = make_dm_function(m_obs, df_agn['z'], dms, method='linear')
+        #dm_interp = make_dm_function(m_obs, df_agn['z'], dms, method='linear')
         pts = np.column_stack([df_agn['z'].values, m_obs])
         mu_pred_samples -= dm_interp(pts)
 
@@ -546,9 +551,13 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     predicted_M2500 = M_model_agn(agn_params_arr, agn_obs_arr, agn_pivot_arr)
     predicted_M2500_err = M_model_agn_err(agn_params_arr, agn_obs_arr, agn_err_arr, agn_pivot_arr)
 
+    cosmo = get_cosmo(cosmo_model, results, z_pivot_agn)
+    sigma_lens = sigma_lens_from_dc(df_agn['z'].values, cosmo)
+
     mu_pred_std = np.sqrt(
         df_agn['apparent_mag_2500_err'].values**2 +
-        (0.055 * df_agn["z"].values)**2 +
+        #(0.055 * df_agn["z"].values)**2 +
+        sigma_lens**2 +
         df_agn['z_err'].values**2 +
         predicted_M2500_err**2
     )
@@ -556,6 +565,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     mu_pred_std_with_scatter = np.sqrt(
         mu_pred_std**2 +
         np.exp(results['log_f'])**2
+        #(np.exp(results['log_f']) + results['sigma_b'] * (1+df_agn["z"].values))**2
     )
     
     # Residuals (vs. median μ_model)
@@ -753,23 +763,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     # Survey magnitude limit (shade above)
     if completeness and not debias:
         agn_params_arr = agn_model_pack_params(results)
-        agn_obs_med = dict(
-            log_sigma_UV    = float(np.median(df_agn['log_sigma_UV'].values)) * np.ones_like(z_grid),
-            log_sigma_UV_err = float(np.median(df_agn['log_sigma_UV_err'].values)) * np.ones_like(z_grid),
-            log_tau_UV_RF = float(np.median(df_agn['log_tau_UV_RF'].values)) * np.ones_like(z_grid),
-            log_tau_UV_RF_err = float(np.median(df_agn['log_tau_UV_RF_err'].values)) * np.ones_like(z_grid),
-            alpha_nu     = float(np.median(df_agn['alpha_nu'].values)) * np.ones_like(z_grid),
-            alpha_nu_err = float(np.median(df_agn['alpha_nu_err'].values)) * np.ones_like(z_grid),
-            
-            cov_log_sigma_UV_log_tau_UV_RF = float(np.median(df_agn['cov_log_sigma_UV_log_tau_UV_RF'].values)) * np.ones_like(z_grid),
-
-            log_tau_UV_RF_std_psd = float(np.median(df_agn['log_tau_UV_RF_std_psd'].values)) * np.ones_like(z_grid),
-            log_sigma_UV_std_psd = float(np.median(df_agn['log_sigma_UV_std_psd'].values)) * np.ones_like(z_grid),
-            log_sigma_UV_log_tau_UV_RF_cov_psd = float(np.median(df_agn['log_sigma_UV_log_tau_UV_RF_cov_psd'].values)) * np.ones_like(z_grid),
-
-            alpha_lambda = float(np.median(df_agn['alpha_lambda'].values)) * np.ones_like(z_grid),
-            alpha_lambda_err = float(np.median(df_agn['alpha_lambda_err'].values)) * np.ones_like(z_grid),
-        )
+        agn_obs_med = {key: float(np.median(df_agn[key].values)) * np.ones_like(z_grid) for key in agn_model_req_obs + agn_model_req_errs}
         agn_obs_arr, agn_err_arr, agn_pivot_arr = agn_model_pack_obs(agn_obs_med)
 
         M_med_grid = np.median([
@@ -1006,7 +1000,7 @@ def plot_predicted_vs_actual_M2500(
     cosmo_model,
     z_pivot_agn,
     plot_path="plots/hubble",
-    dms=None,  # de-biasing function (optional)
+    dm_interp=None,  # de-biasing function (optional)
     debias=False,
     show=False,
     cmap="inferno",       # (unused for discrete bins now, kept for API compatibility)
@@ -1116,8 +1110,8 @@ def plot_predicted_vs_actual_M2500(
     sigma_mu_cosmo = np.nanstd(mu_draws, axis=0, ddof=1)  # per-object DM uncertainty
     xerr = np.sqrt(m_app_err**2 + sigma_mu_cosmo**2)
 
-    if debias:
-        dm_interp = make_dm_function(np.array(df_agn["apparent_mag_2500"].values), np.array(df_agn['z'].values), dms)
+   # if debias:
+        #dm_interp = make_dm_function(np.array(df_agn["apparent_mag_2500"].values), np.array(df_agn['z'].values), dms)
 
     # --- actual minus optional debias ---
     if debias:
@@ -1398,12 +1392,14 @@ def plot_completeness_vs_mag_at_redshifts(p_detect, mag_centers, z_centers,
 
 def plot_full_residuals(
     df_agn, residuals, residuals_err, flat_samples, cosmo_model, z_pivot_agn,
-    debias=False, dms=None, plot_path='plots/hubble', show=False,
-    *, nbins=10, min_count=5, z_cut=None
+    debias=False, dm_interp=None, plot_path='plots/hubble', show=False,
+    *, nbins=10, min_count=5, z_cut=None, key_y='residuals', key_color='z',
 ):
 
     # --- Cosmology from posterior summaries ---
     df_agn = df_agn.copy()
+    df_agn['residuals'] = residuals
+
     priors, model_labels, model_labels_latex = get_model_params(cosmo_model)
     param_indices = {name: model_labels.index(name) for name in model_labels}
     results = {key: np.percentile(flat_samples[:, i], [16, 50, 84]) for i, key in enumerate(model_labels)}
@@ -1428,7 +1424,7 @@ def plot_full_residuals(
 
     # Optional de-biasing via your dm surface
     if debias:
-        dm_interp = make_dm_function(df_agn["apparent_mag_2500"].values, df_agn['z'].values, dms)
+        #dm_interp = make_dm_function(df_agn["apparent_mag_2500"].values, df_agn['z'].values, dms)
         pts = np.column_stack([df_agn['z'].values, df_agn['apparent_mag_2500'].values])
         delta = dm_interp(pts)
         df_agn['MY_M_2500'] -= delta
@@ -1436,7 +1432,6 @@ def plot_full_residuals(
         if 'apparent_mag_2500_reddened' in df_agn.columns:
             df_agn['apparent_mag_2500_reddened'] -= delta
 
-    # Convenience logs / coercions
     def _safelog(a):
         return np.log10(np.abs(a) + 1e-10)
     if 'dm_red' in df_agn: df_agn['log_dm_red'] = _safelog(df_agn['dm_red'])
@@ -1449,7 +1444,7 @@ def plot_full_residuals(
     if 'log_tau_UV_RF_err' in df_agn: df_agn['log_log_tau_UV_RF_err'] = _safelog(df_agn['log_tau_UV_RF_err'])
     if 'psf_minus_fiber_r' in df_agn: df_agn['log_psf_minus_fiber_r'] = _safelog(df_agn['psf_minus_fiber_r'])
     if 'petroRad_r' in df_agn: df_agn['log_petroRad_r'] = _safelog(df_agn['petroRad_r'])
-
+    if 'log_tau_drw0_rhat' in df_agn: df_agn['log_log_tau_drw0_rhat'] = _safelog(df_agn['log_tau_drw0_rhat'])
     for col in ['BC', 'decomp_host', 'poly']:
         if col in df_agn:
             df_agn[col] = df_agn[col].replace(
@@ -1476,10 +1471,17 @@ def plot_full_residuals(
         'log_rho', 't_rf_length', 'tau_band_RF_mean',
         'log_tau_band_RF_mean', 'log_t_rf_length', 
         'alphaOX', 'alphaOX_int',
+        'bwb_alpha_u', 'bwb_alpha_g', 'bwb_alpha_r', 'bwb_alpha_i', 'bwb_alpha_z',
         
-        'eta_A1', 'eta_tau1',
+        'eta_A1', 'eta_A2', 'eta_tau1', 'eta_tau2',
         'PL_slope_blue', 'PL_slope_red', 'PL_break_wave_inbounds', 'lam_min', 'lam_max', 'lam_range', 
-        'psf_minus_fiber_r', 'log_psf_minus_fiber_r', 'petroRad_r', 'log_petroRad_r',
+        'poly1', 'psf_minus_fiber_r', 'log_psf_minus_fiber_r', 'petroRad_r', 'log_petroRad_r',
+        'eta_A1_rhat', 'eta_A1_ess', 'eta_A1_acf', 'eta_A1_stuck_any', 
+        'cadence', 'cadence_err', 'number_points', 'dm_psf_correction',
+        'log_jitter_total', 'log_amp_delta_blr_total',
+        'log_amp_delta_blr_u', 'log_amp_delta_blr_g', 'log_amp_delta_blr_r', 'log_amp_delta_blr_i', 'log_amp_delta_blr_z',
+        'log_jitter_u', 'log_jitter_g', 'log_jitter_r', 'log_jitter_i', 'log_jitter_z',
+
     ]) if col in df_agn.columns]
 
     keys_masks = {
@@ -1517,25 +1519,39 @@ def plot_full_residuals(
             # Also require finite residuals (+ err for the overlay later)
             mask &= np.isfinite(residuals)
 
-            x = df_agn.loc[mask, key].to_numpy()
-            y = residuals[mask]
-            sc = ax.scatter(x, y, c=df_agn.loc[mask, 'z'], cmap='viridis', s=10, alpha=0.5)
+            
+            if key_y == 'residuals':
+                y = residuals[mask]
+                x = df_agn.loc[mask, key].to_numpy()
+                ax.set_xlabel(key)
+                ax.set_ylabel(key_y)
+                norm = mpl.colors.Normalize(vmin=np.nanmin(df_agn.loc[mask, key_color]), vmax=np.nanmax(df_agn.loc[mask, key_color]))
+                cmap = 'viridis'
+            else:
+                x = df_agn.loc[mask, key_y].to_numpy()
+                y = df_agn.loc[mask, key].to_numpy()
+                ax.set_ylabel(key)
+                ax.set_xlabel(key_y)
+                norm = mpl.colors.Normalize(vmin=-4, vmax=4)
+                cmap = 'bwr_r'
+
+
+            sc = ax.scatter(x, y, c=df_agn.loc[mask, key_color].to_numpy(), cmap=cmap, norm=norm, s=10, alpha=0.5)
 
             # Optional diagonal guide for a couple of variables
             if key in keys_yx_line:
                 xmin, xmax = np.nanmin(x), np.nanmax(x)
                 xm = np.nanmean(x)
-                ax.plot([xmin, xmax], [xmin - xm, xmax - xm], color='red', linestyle='--', lw=1)
+                if key_y == 'residuals':
+                    ax.plot([xmin, xmax], [xmin - xm, xmax - xm], color='red', linestyle='--', lw=1)
 
             # Zero line
-            ax.axhline(0, color='red', linestyle='--', lw=1)
-
-            ax.set_xlabel(key)
-            ax.set_ylabel('Residuals')
+            if key_y == 'residuals':
+                ax.axhline(0, color='red', linestyle='--', lw=1)
 
             # Per-panel colorbar
             cbar = fig.colorbar(sc, ax=ax, orientation='vertical', fraction=0.046, pad=0.04)
-            cbar.set_label('Redshift', fontsize=12)
+            cbar.set_label(key_color, fontsize=12)
 
             # ===========================
             # Binned overlay (weighted)
@@ -1584,16 +1600,45 @@ def plot_full_residuals(
         plt.show()
 
     os.makedirs(plot_path, exist_ok=True)
-    plt.savefig(os.path.join(plot_path, f"full_residuals_{'debiased' if debias else 'biased'}_zcut{z_cut}.png"), dpi=150)
+    plt.savefig(os.path.join(plot_path, f"full_residuals_{'debiased' if debias else 'biased'}_y{key_y}_c{key_color}_zcut{z_cut}.png"), dpi=150)
     plt.close()
 
 from scipy.interpolate import interp1d
 from matplotlib.ticker import LogLocator, FormatStrFormatter
 import matplotlib.gridspec as gridspec
 
+from scipy.stats import gaussian_kde
+
+def _kde_conf_levels(Z, conf=(0.954, 0.683)):
+    """
+    Return strictly-increasing density thresholds so that regions Z >= level
+    enclose each conf fraction. Uses ascending order (95% then 68%).
+    """
+    Zflat = Z.ravel()
+    Zsort = np.sort(Zflat)             # ascending densities
+    cdf   = np.cumsum(Zsort)
+    cdf  /= cdf[-1]
+
+    # threshold density so that mass above it is 'conf'
+    thr = [Zsort[np.searchsorted(cdf, 1.0 - c)] for c in conf]
+    levels = np.array(thr, dtype=float)
+    levels.sort()                      # ensure increasing for contour()
+
+    # nudge if any ties remain (can happen on coarse grids)
+    for i in range(1, len(levels)):
+        if levels[i] <= levels[i-1]:
+            levels[i] = np.nextafter(levels[i-1], np.inf)
+
+    # also clamp inside (min,max) just in case
+    zmin, zmax = float(np.min(Z)), float(np.max(Z))
+    eps = np.finfo(float).eps * (zmax - zmin + 1.0)
+    levels = np.clip(levels, zmin + eps, zmax - eps)
+    return levels
+
+
 def plot_predicted_L2500_vs_sigmahat(
     flat_samples, df_agn, cosmo_model, z_pivot_agn,
-    plot_path='plots/hubble', show=False, debias=True, dms=None,
+    plot_path='plots/hubble', show=False, debias=True, dm_interp=None,
     show_residuals=False, df_calibrators=None
 ):
     d = df_agn.copy()
@@ -1629,7 +1674,7 @@ def plot_predicted_L2500_vs_sigmahat(
 
     # --- y-data for MAIN: log10 L_2500 ---
     if debias:
-        dm_interp = make_dm_function(d["apparent_mag_2500"].values, d['z'].values, dms)
+        #dm_interp = make_dm_function(d["apparent_mag_2500"].values, d['z'].values, dms)
         pts = np.column_stack([d['z'], d['apparent_mag_2500']])
         actual_M2500 = (d['apparent_mag_2500'] - dm_interp(pts)) - cosmo.distmod(d['z']).value
     else:
@@ -1742,6 +1787,48 @@ def plot_predicted_L2500_vs_sigmahat(
         ecolor=(0.2, 0.2, 0.2, 0.1), elinewidth=0.8, capsize=2, capthick=0.8,
         zorder=1
     )
+
+    # --- 68% / 95% KDE contours (outlines only) ---
+    try:
+        finite  = np.isfinite(x_log_ref) & np.isfinite(actual_logL2500)
+        in_use  = finite & mask_in.values
+        xlog    = x_log_ref[in_use]
+        ylog    = actual_logL2500[in_use]
+
+        if xlog.size > 50:
+            kde = gaussian_kde(np.vstack([xlog, ylog]), bw_method='scott')
+
+            xq = np.quantile(xlog, [0.01, 0.99]); rx = xq[1] - xq[0]
+            yq = np.quantile(ylog, [0.01, 0.99]); ry = yq[1] - yq[0]
+            Xg, Yg = np.meshgrid(
+                np.linspace(xq[0] - 0.10*rx, xq[1] + 0.10*rx, 220),
+                np.linspace(yq[0] - 0.10*ry, yq[1] + 0.10*ry, 220),
+            )
+            Z = kde(np.vstack([Xg.ravel(), Yg.ravel()])).reshape(Xg.shape)
+
+            # Ascending levels: [95%, 68%]
+            levels = _kde_conf_levels(Z, conf=(0.954, 0.683))
+
+            CS = ax.contour(10.0**Xg, 10.0**Yg, Z,
+                            levels=levels,
+                            colors='yellow',
+                            alpha=1.0,
+                            linestyles=('solid', 'solid'),   # 95% dashed, 68% solid
+                            linewidths=(1.6, 2.0),
+                            zorder=4)
+
+            from matplotlib.lines import Line2D
+            _extra_contour_handles = [
+                Line2D([0],[0], color='k', lw=1.2, ls='--', label='95% contour'),
+                Line2D([0],[0], color='k', lw=1.8, ls='-',  label='68% contour'),
+            ]
+        else:
+            _extra_contour_handles = []
+    except Exception as e:
+        print(f"[KDE contours] skipped: {e}")
+        _extra_contour_handles = []
+
+
 
     # --- Model ribbon + median ---
     ax.fill_between(x_grid, 10**ylog_low, 10**ylog_high, color=color, alpha=0.5, zorder=9)
@@ -2298,4 +2385,57 @@ def plot_residuals_vs_alphaOX(
 
     if show:
         plt.show()
+    plt.close()
+
+def plot_Mi_relation(df_agn):
+    cosmo   = FlatLambdaCDM(H0=70, Om0=0.3)
+
+    DL = cosmo.luminosity_distance(df_agn['z'].values).to(u.parsec).value
+    M_i_my = df_agn['apparent_mag_2500'].values - 5.0 * (np.log10(DL) - 1)
+    M_i_Wu_z2 = 91 - 2.5 * df_agn['log_lbol']
+
+    plt.figure(figsize=(8, 6))
+    scatter = plt.scatter(M_i_my, M_i_Wu_z2, c=df_agn['z'], cmap='viridis', alpha=0.6, s=10)
+    plt.plot([min(M_i_my), max(M_i_my)], [min(M_i_my), max(M_i_my)], color='red', linestyle='--', label='y=x')
+    plt.xlabel('M_i_my')
+    plt.ylabel('M_i_Wu_z2')
+    plt.title('M_i_my vs M_i_Wu_z2')
+    plt.colorbar(scatter, label='Redshift (z)')
+    plt.legend()
+    plt.grid(alpha=0.3)
+    plt.tight_layout()
+    os.makedirs(f"plots/hubble/{prefix}/diagnostics", exist_ok=True)
+    plt.savefig(f"plots/hubble/{prefix}/diagnostics/Mi_relation_comparison.png", dpi=200)
+    plt.close()
+
+
+def plot_completeness_diagnostics(dmi_max_w, z, integrals_max_w):
+
+    # Plot dmi_interp vs z for the highest-weight sample
+    dmi_interp = interp1d(z, dmi_max_w, kind='nearest', bounds_error=False, fill_value='extrapolate')
+    
+    # Plot dmi_interp vs z for the highest-weight sample
+    z_plot = np.linspace(0, 4, 200)
+    plt.figure(figsize=(8, 5))
+    plt.plot(z_plot, dmi_interp(z_plot), label="dmi_interp(z)")
+    plt.xlabel("Redshift (z)")
+    plt.ylabel("dmi (mag)")
+    plt.title("Interpolated dmi vs z — highest posterior weight sample")
+    plt.grid(True)
+    plt.tight_layout()
+    os.makedirs(f"plots/hubble/{prefix}/completeness", exist_ok=True)
+    plt.savefig(f"plots/hubble/{prefix}/completeness/dmi_interp_vs_z_highest_weight.png", dpi=150)
+    plt.close()
+
+    # Plot log(integrals) vs redshift for highest-weight sample
+    plt.figure(figsize=(8, 5))
+    plt.scatter(z, integrals_max_w, s=16, alpha=0.3)
+    plt.xlabel("Redshift (z)")
+    plt.ylabel("integral  (completeness)")
+    plt.title("Completeness integrals vs z — highest posterior weight sample")
+    plt.grid(True)
+    plt.tight_layout()
+    # Optional: save to disk
+    plt.savefig(f"plots/hubble/{prefix}/completeness/integrals_vs_z_highest_weight.png", dpi=150)
+    #plt.show()
     plt.close()
