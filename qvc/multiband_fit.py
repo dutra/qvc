@@ -807,6 +807,7 @@ if __name__ == '__main__':
     if args.load_sample_file:
         logging.warning(f"Loading samples from saved file")
         samples_flat = load_all_samples_from_hdf5()
+        samples_per_chain = None  # Not needed when loading from file
     else: # run MCMC sampler
         if args.jax_trace:
             from jax.profiler import StepTraceAnnotation, start_trace, stop_trace
@@ -831,9 +832,10 @@ if __name__ == '__main__':
         else:
             # Plain run, no tracing
             mcmc.run(jax.random.PRNGKey(0))
-            
+        print("MCMC run complete.")
         samples_flat = mcmc.get_samples(group_by_chain=False)
         samples_per_chain = mcmc.get_samples(group_by_chain=True)
+        print("Saving all Samples to hdf5")
         save_all_samples_to_hdf5(samples_flat)
     
     #ns = NestedSampler(numpyro_joint_model)
@@ -852,9 +854,12 @@ if __name__ == '__main__':
         obj_flat_samples_flatten_per_band = flatten_flat_samples_per_band(obj_flat_samples)
         save_obj_samples_to_hdf5(obj_flat_samples_flatten_per_band, obj['object_id'])
 
-        obj_samples_per_chain = select_samples_for_object_per_chain(samples_per_chain, i, universal_params=universal_params)
-        obj_samples_per_chain_flatten_per_band = flatten_per_chain_samples_per_band(obj_samples_per_chain)
-        diagnostics = diagnostics_for_per_chain_samples(obj_samples_per_chain_flatten_per_band)
+        if samples_per_chain is not None:
+            obj_samples_per_chain = select_samples_for_object_per_chain(samples_per_chain, i, universal_params=universal_params)
+            obj_samples_per_chain_flatten_per_band = flatten_per_chain_samples_per_band(obj_samples_per_chain)
+            diagnostics = diagnostics_for_per_chain_samples(obj_samples_per_chain_flatten_per_band)
+        else:
+            diagnostics = {}
         
         # Add the object-specific parameters
         result = process_samples(obj_flat_samples_flatten_per_band, obj, broken_pl=args.broken_pl)

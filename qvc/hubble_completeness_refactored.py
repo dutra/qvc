@@ -125,8 +125,7 @@ def predicted_new_loglbol(df_agn, loglbol):
 def get_completeness_function_2d(
     df_agn,
     sim_file="data/nov9_mock_mag_z_moresources.h5",
-    #sim_file="data/mock_mag_z_nov9_magoffsetcorr.h5",
-    #sim_file="data/mock_mag_z_nov7night.h5",
+    #sim_file="data/dec4_mock_mag_z_ananna.h5",
     n_mag_bins=30, n_z_bins=40,
     smooth_counts=True,
     plot=False,
@@ -223,8 +222,11 @@ def get_completeness_function_2d(
             extent=[mag_edges[0], mag_edges[-1], z_edges[0], z_edges[-1]], cmap="viridis",
             vmin=-4, vmax=0
         )
-        plt.ylabel(r"$z$")
-        plt.xlabel(r"$m_{2500\,\text{\AA}} \; (\mathrm{mag})$")
+        plt.ylabel(r'$z$')
+        # plt.xlabel(r'$L_{2500\,\mathrm{\AA}}$ (erg s$^{-1}$)')
+        #plt.xlabel(r"$m_{2500\,\mathrm{\AA}} \; (\mathrm{mag})$")
+        plt.xlabel(r'$m_{2500\,\mathrm{\AA}}$ (mag)')
+
         cbar = plt.colorbar(im); 
         cbar.set_label(r"Completeness $\log\,p(I{=}1\,|\,m,z)$")
         plt.tight_layout()

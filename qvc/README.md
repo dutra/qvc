@@ -1,31 +1,32 @@
-## Start Visual Studio Code in Grace
-Start a gpu_devel partition with
-Additional modules (optional): miniconda
-Additional job options (optional):
--C=a100-80g
---gpus=1
+# README
 
-a100-80g are required to joint fit 20 sources,
-but if you just want to test small things, you can request a100 or even a5000
+This project is divided into two main components:
+a. Light curve fitting
+b. Hubble diagram fitting
 
-## Clone eztaox
+## Setting up eztaox
+### Cloning the project:
+
 ``git clone git@github.com:dutra/eztaox.git``
 
 ``cd eztaox``
 
 ``git checkout preview``
 
-
-## Create new conda env
+### Create new conda env
+Assuming conda is installed, load it in your system. On Yale's HPC, you will need to use
 ``module load miniconda``
-## CPU env (suggested)
+
+## Set up a CPU environment (suggested)
 `conda create --name jaxcpu python=3.13.5 jax jaxopt jupyter jupyterlab numpyro tinygp matplotlib astropy jaxopt h5py tqdm ipykernel pandas corner scipy`
 `conda activate jaxcpu`
 
-## GPU env
+
+## [Deprecated] Set up a GPU environment
 ``conda create -n jaxgpu python=3.12.11 jupyter jupyterlab "jax[cuda12]" numpyro tinygp matplotlib astropy jaxopt h5py tqdm ipykernel pandas corner scipy ``
 
 ``conda activate jaxgpu``
+
 
 ## Install eztaox for dev
 delete the dependencies in dependencies array in eztaox/pyproject.toml
@@ -50,12 +51,12 @@ Also under tutorials/data, upload the parquet files from https://www.dropbox.com
 
 ``module load miniconda``
 
-``conda activate jaxgpu``
+``conda activate jaxcpu``
 
 
 ## Running
 
-### Multiband fit
+### Light Multiband fitting
 #### Specifying objects per id
 
 pip install -U tfp-nightly

@@ -50,7 +50,9 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                       cosmo_model='Flatw0waCDM', z_pivot_agn=1.5,
                       only_sna=False, completeness=True, use_full_cov=True,
                       resume=False, speed="production", use_mu_sh0es=False,
-                      z_range=(1.0, 3.16)):
+                      z_range=(0.44, 3.16),
+                      #z_range=(1.0, 3.16),
+                      ):
 
 
     # Restrict AGN data to redshift range in
@@ -276,6 +278,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
 def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, 
                cosmo_model, completeness=True, use_full_cov=True, 
                N=None, resume=False, only_sna=False, speed="production", use_mu_sh0es=False, cosmo_model_samples={}, verbose=True,
+               z_range=(0.44, 3.16),
                z_pivot_agn=1.5, skip_plots=False, residuals_sigma_clip=None, df_calibrators=None):
 
     # Load data
@@ -292,6 +295,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                                                         df_calibrators=df_calibrators,
                                                         cosmo_model=cosmo_model, z_pivot_agn=z_pivot_agn,
                                                         only_sna=only_sna, completeness=completeness, use_full_cov=use_full_cov,
+                                                        z_range=z_range,
                                                         resume=resume, speed=speed, use_mu_sh0es=use_mu_sh0es)
     
     display_results_summary(flat_samples, cosmo_model, z_pivot_agn)
@@ -311,6 +315,15 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         print("Skipping AGN-specific plots for SNe-only run.")
         return sampler, flat_samples, model_labels, dm_interp, logZ, logZerr, None, None
 
+    print("Plotting predicted L2500 vs ...")
+    # plot_predicted_L2500_vs_sigmahat(flat_samples, df_agn, cosmo_model=cosmo_model, z_pivot_agn=z_pivot_agn, 
+    #                                  debias=False, show_residuals=False,
+    #                                  show=False, plot_path=plot_path)
+    L_residuals_debiased, L_pred_std_debiased = plot_predicted_L2500_vs_sigmahat(flat_samples, df_agn, cosmo_model=cosmo_model, z_pivot_agn=z_pivot_agn, 
+                                                            debias=True, dm_interp=dm_interp, show_residuals=False,
+                                                            show=False, plot_path=plot_path, df_calibrators=df_calibrators)
+    
+    chisq_red_L2500, _ = reduced_chi_squared(L_residuals_debiased, L_pred_std_debiased, n_params=len(model_labels)-1)
 
     print("Plotting Hubble diagram...")
 
@@ -349,15 +362,6 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
 
         #plot_full_residuals(df_agn, residuals, flat_samples, cosmo_model, z_pivot_agn, debias=False, show=False, plot_path=plot_path)
 
-    print("Plotting predicted L2500 vs ...")
-    # plot_predicted_L2500_vs_sigmahat(flat_samples, df_agn, cosmo_model=cosmo_model, z_pivot_agn=z_pivot_agn, 
-    #                                  debias=False, show_residuals=False,
-    #                                  show=False, plot_path=plot_path)
-    L_residuals_debiased, L_pred_std_debiased = plot_predicted_L2500_vs_sigmahat(flat_samples, df_agn, cosmo_model=cosmo_model, z_pivot_agn=z_pivot_agn, 
-                                                            debias=True, dm_interp=dm_interp, show_residuals=False,
-                                                            show=False, plot_path=plot_path, df_calibrators=df_calibrators)
-    
-    chisq_red_L2500, _ = reduced_chi_squared(L_residuals_debiased, L_pred_std_debiased, n_params=len(model_labels)-1)
     
     print("Plotting cosmological posteriors corner plot...")
     plot_cosmo_corner(None, flat_samples, cosmo_model, z_pivot_sna, z_pivot_agn, show=False, 
@@ -390,10 +394,13 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         'Hubble': chisq_red_hubble_debiased,
         'L2500': chisq_red_L2500
     }
-    try:
-        write_results_tex_variables(df_agn, flat_samples, cosmo_model, None, z_pivot_agn, plot_path, chisq_dict=chisq_dict, age=age)
-    except Exception as e:
-        print("Error writing TeX variables:", e)
+    # try:
+    #     write_results_tex_variables(df_agn, flat_samples, cosmo_model, None, 
+    #                                 z_pivot_agn, plot_path, 
+    #                                 result_prefix=result_prefix,
+    #                                 chisq_dict=chisq_dict, age=age)
+    # except Exception as e:
+    #     print("Error writing TeX variables:", e)
 
     plot_residuals_vs_alphaOX(df_agn, debiased_residuals, debiased_residuals_err, show=False, plot_path=plot_path)
 
@@ -403,6 +410,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
 def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, 
             cosmo_models, z_pivot_agn=1.5, skip_plots=False,
             residuals_sigma_clip=None,
+            result_prefix="", z_range=(0.44, 3.16),
             speed="production", resume=False, N=None, use_mu_sh0es=False):
     #cosmo_models = ['Flatw0waCDM', 'FlatLambdaCDM', 'FlatwCDM']
 
@@ -416,6 +424,7 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
                        resume=resume, speed=speed, N=N,
                        z_pivot_agn=z_pivot_agn, skip_plots=skip_plots,
                        residuals_sigma_clip=residuals_sigma_clip,
+                       z_range=z_range,
                        cosmo_model_samples=cosmo_model_samples)
         
         _, samples_joint, _, _, logZ_joint, logZerr_joint, _, age = r
@@ -424,6 +433,7 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
                        cosmo_model=cosmo_model, only_sna=True, 
                        z_pivot_agn=z_pivot_agn, skip_plots=skip_plots,
                        residuals_sigma_clip=residuals_sigma_clip,
+                       z_range=z_range,
                        resume=resume, speed=speed, N=N, use_mu_sh0es=use_mu_sh0es)
         _, samples_sna, _, _, logZ_sna, logZerr_sna, _, _ = r
         
@@ -445,8 +455,8 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
     make_cosmo_table_latex(results_latex, write_path=f"plots/hubble/{prefix}/")
 
     compare_r = compare_models_by_log_evidence_all(cosmo_models_dict, write_path=f"plots/hubble/{prefix}/")
-    write_results_tex_variables(df_agn, cosmo_model_samples['Flatw0waCDM'], 'Flatw0waCDM', compare_r,
-                                f"plots/hubble/{prefix}", age=cosmo_models_dict['Flatw0waCDM']['age'])
+    write_results_tex_variables(df_agn, z_range, cosmo_model_samples['Flatw0waCDM'], 'Flatw0waCDM', compare_r,
+                                f"plots/hubble/{prefix}", result_prefix=result_prefix, age=cosmo_models_dict['Flatw0waCDM']['age'])
     
     print("================================================================\n\n")
 
@@ -481,6 +491,9 @@ if __name__ == "__main__":
     parser.add_argument("--redchi2_cut", type=float, default=None, help="Optional reduced chi-squared cut value to exclude outliers (default: None)")
     parser.add_argument("--iron_frac_cut", type=float, default=None, help="Optional iron fraction cut value to exclude outliers (default: None)")
     parser.add_argument("--sdss_mags_csv", type=str, default=None, help="Path to CSV file containing SDSS magnitudes (default: None)")
+    parser.add_argument("--result_prefix", type=str, default="", help="Prefix for result files (default: empty)")
+    parser.add_argument("--z_range", type=float, nargs=2, default=[0.44, 3.16], 
+                        help="Redshift range for AGN data (default: [0.44, 3.16])")
 
     args = parser.parse_args()
 
@@ -540,6 +553,7 @@ if __name__ == "__main__":
         run_all(df_agn=df_agn, df_agn_all=df_agn_all, df_pantheon=df_pantheon, _sna_L=_sna_L, _sna_Lower=_sna_Lower, _sna_LogdetCov=_sna_LogdetCov, 
                 cosmo_models=args.cosmo_models, z_pivot_agn=args.z_pivot_agn, skip_plots=args.skip_plots,
                 residuals_sigma_clip=args.residuals_sigma_clip,
+                result_prefix=args.result_prefix, z_range=args.z_range,
                 speed=args.speed, resume=args.resume, N=args.N, use_mu_sh0es=args.use_mu_sh0es)
     
     print(f"Finished running Hubble fit pipeline for {args.cosmo_models}")

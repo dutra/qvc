@@ -225,6 +225,8 @@ def get_model_params(cosmo_model, only_sna=False):
 
         ("H0",       (60.0, 80.0)),
         ("Om0",      (0.0, 1.0)),
+        #("Om0",      (0.32, 0.34)),
+        
     ])
 
     # Select cosmological parameters based on model
@@ -232,7 +234,7 @@ def get_model_params(cosmo_model, only_sna=False):
         pass
     elif cosmo_model == 'FlatwCDM':
         priors |= OrderedDict([
-            ("w0",          (-10.0, 1.0))
+            ("w0",          (-3.0, 1.0))
         ])
     elif cosmo_model == 'Flatw0waCDM':
         priors |= OrderedDict([

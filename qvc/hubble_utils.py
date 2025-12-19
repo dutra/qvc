@@ -180,7 +180,6 @@ def populate_xray(df, table_fpath="data/cscresults.vot"):
     for old, new in zip(table.colnames, new_names):
         table.rename_column(old, new)
 
-    # <-- this must be outside the loop
     df_csc = table.to_pandas()
 
     # Match to CSC and bring over flux + bounds
@@ -218,29 +217,68 @@ def populate_xray(df, table_fpath="data/cscresults.vot"):
     GAMMA_X = 1.9  # requested
     # For energy flux in a fixed observed band: Kcorr = (1+z)^(Gamma - 2)
     Kcorr = np.power(1.0 + z.values, GAMMA_X - 2.0)  # = (1+z)^(-0.1) for Gamma=1.9
+    # However we do not apply a K-correction for consistency with previous works
+    Kcorr = np.ones_like(Kcorr)
 
     # Pull flux and error
     xray_flux     = df_matched["flux_aper_b"].replace(0, np.nan).values
     xray_flux_err = df_matched["flux_aper_err_b"].replace(0, np.nan).values
 
     # Luminosity with K-correction (no absorption correction)
-    L_xray = 4.0 * np.pi * (DL_cm**2) * xray_flux * Kcorr
-    df_matched["log_Lxray"] = np.log10(L_xray)
+    L_xray_210kev = 4.0 * np.pi * (DL_cm**2) * xray_flux * Kcorr
+
+    # L_2 = L_2and10 * (2-Gamma)/(10**(2-Gamma) - 2**(2-Gamma)) * 2**(1-Gamma)
+    L_xray_2 = L_xray_210kev * (2.0 - GAMMA_X) / (10.0**(2.0 - GAMMA_X) - 2.0**(2.0 - GAMMA_X)) * 2.0**(1.0 - GAMMA_X)
+
+    df_matched["log_Lxray"] = np.log10(L_xray_2)
 
     # Error on log L_xray (treat z as exact, so Kcorr & constants drop out)
     df_matched["log_Lxray_err"] = (1.0 / np.log(10.0)) * (xray_flux_err / xray_flux)
 
-    # alpha_OX (using your existing 2500 Å columns)
-    df_matched["alphaOX"] = -(df_matched["log_Lxray"] - df_matched["log_L2500_fs"]) / 2.605
-    df_matched["alphaOX_int"] = -(df_matched["log_Lxray"] - df_matched["log_L2500_int_fs"]) / 2.605
+    # reddened
+    #df_matched["alphaOX"] = -(df_matched["log_Lxray"] - df_matched["log_L2500_fs"]) / 2.605
+    # df_matched["alphaOX_err"] = np.sqrt(
+    #     df_matched["log_Lxray_err"]**2 + df_matched["log_L2500_fs_err"]**2
+    # ) / 2.605
 
+    # de-reddened (L_int)
+    df_matched["alphaOX"] = -(df_matched["log_Lxray"] - df_matched["log_L2500_int_fs"]) / 2.605
     df_matched["alphaOX_err"] = np.sqrt(
-        df_matched["log_Lxray_err"]**2 + df_matched["log_L2500_fs_err"]**2
-    ) / 2.605
-
-    df_matched["alphaOX_int_err"] = np.sqrt(
         df_matched["log_Lxray_err"]**2 + df_matched["log_L2500_int_fs_err"]**2
     ) / 2.605
+
+    # --- Expected alpha_OX from Just+07 Eq. (3) ---
+    # alpha_ox_exp = a * logL2500 + b
+    a = -0.140
+    sigma_a = 0.007
+    b = 2.705
+    sigma_b = 0.212
+
+    # Expected alpha_OX at the *observed* UV luminosity
+    alphaOx_expected = a *  df_matched["log_L2500_int_fs"] + b
+
+    # Error on expected alpha_OX:
+    # var(alphaExp) = (x^2 * sigma_a^2) + (sigma_b^2) + (a^2 * sigma_x^2)
+    x =  df_matched["log_L2500_int_fs"]
+    sigma_x =  df_matched["log_L2500_int_fs_err"]
+
+    alphaOx_expected_err = np.sqrt(
+        (x**2) * (sigma_a**2) +
+        (sigma_b**2) +
+        (a**2) * (sigma_x**2)
+    )
+
+    # Store in the dataframe
+    df_matched["alphaOX_exp"] = alphaOx_expected
+    df_matched["alphaOX_exp_err"] = alphaOx_expected_err
+
+    # --- Delta alpha_OX = observed - expected ---
+    df_matched["delta_alphaOX"] = df_matched["alphaOX"] - df_matched["alphaOX_exp"]
+
+    # Propagate errors: var(Δα) = var(α_obs) + var(α_exp)
+    df_matched["delta_alphaOX_err"] = np.sqrt(
+        df_matched["alphaOX_err"]**2 + df_matched["alphaOX_exp_err"]**2
+    )
 
     return df_matched
 
@@ -1832,12 +1870,18 @@ def _jeffreys_strength(abs_delta, thresholds):
         return "very strong"
 
 def _odds_sigmas_from_delta(delta):
-    """Return (one-sided Z, two-sided Z) from |Δln Z| odds, stably."""
+    """Return Kass&Raftery 1995 sigma Z from |Δln Z| odds, stably."""
     absD = abs(float(delta))
-    log_eps = _log_eps_from_delta_abs(absD)
-    log_eps_half = log_eps - LN2
-    return (_norm_isf_from_logeps(log_eps),
-            _norm_isf_from_logeps(log_eps_half))
+    sigma = np.sqrt(2.0 * absD)
+    return 0.0, sigma
+
+# def _odds_sigmas_from_delta(delta):
+#     """Return (one-sided Z, two-sided Z) from |Δln Z| odds, stably."""
+#     absD = abs(float(delta))
+#     log_eps = _log_eps_from_delta_abs(absD)
+#     log_eps_half = log_eps - LN2
+#     return (_norm_isf_from_logeps(log_eps),
+#             _norm_isf_from_logeps(log_eps_half))
 
 def compare_models_by_log_evidence_all(
     cosmo_models_dict,
@@ -2903,8 +2947,8 @@ def format_value_uncertainty(
     return val_out, err_out, exponent, s
 
 def write_results_tex_variables(
-    df_agn, flat_samples, cosmo_model, compare_r,
-    write_path, chisq_dict=None, age=None
+    df_agn, z_range, flat_samples, cosmo_model, compare_r,
+    write_path, result_prefix="", chisq_dict=None, age=None
 ):
     """
     Write key cosmological parameters AND model comparison results
@@ -2928,12 +2972,13 @@ def write_results_tex_variables(
     lines = []
     lines.append(r"% Auto-generated cosmological and evidence results")
     lines.append(r"% Do not edit manually; regenerated by write_results_tex_variables()")
-    lines.append(r"\newcommand{\resultNumAGN}{%d}" % len(df_agn))
+    lines.append(r"\newcommand{\result%sNumAGNPlotted}{%d}" % (result_prefix, len(df_agn)))
+    lines.append(r"\newcommand{\result%sNumAGNFitted}{%d}" % (result_prefix, len(df_agn[df_agn['z'].between(z_range[0], z_range[1])])))
     if age is not None:
         age, age_err = age
     else:
         age, age_err = np.nan, np.nan
-    lines.append(r"\newcommand{\resultAgeUniverse}{\ensuremath{%.2f\pm%.2f\,\mathrm{Gyr}}}" % (age, age_err))
+    lines.append(r"\newcommand{\result%sAgeUniverse}{\ensuremath{%.2f\pm%.2f\,\mathrm{Gyr}}}" % (result_prefix, age, age_err))
 
     # ===============================
     # --- Model comparison results ---
@@ -2941,22 +2986,22 @@ def write_results_tex_variables(
     if compare_r is not None:
         # Preferred model overall
         preferred = compare_r["preferred_model"]
-        lines.append(r"\newcommand{\resultPreferredModelOverall}{%s}" % preferred)
+        lines.append(r"\newcommand{\result%sPreferredModelOverall}{%s}" % (result_prefix, preferred))
 
         # Per-model stats relative to TOP
         for r in compare_r["ranking"]:
             model = r["model"]
             safe = model.replace("0", "Zero").replace("Λ", "Lambda")  # latex-safe key
-            lines.append(r"\newcommand{\resultLogZ%s}{%.1f}" %
-                         (safe, r["logZ"]))
-            lines.append(r"\newcommand{\resultLogZerr%s}{%.1f}" %
-                         (safe, r["logZerr"]))
-            lines.append(r"\newcommand{\resultDeltaLogZ%s}{%.1f}" %
-                         (safe, r["delta_logZ_vs_top"]))
-            lines.append(r"\newcommand{\resultSigma%s}{%.1f}" %
-                         (safe, r["sigma_two_sided_vs_top"]))
-            lines.append(r"\newcommand{\resultJeffreysStrength%s}{%s}" %
-                         (safe, r["jeffreys_strength_vs_top"]))
+            lines.append(r"\newcommand{\result%sLogZ%s}{%.1f}" %
+                         (result_prefix, safe, r["logZ"]))
+            lines.append(r"\newcommand{\result%sLogZerr%s}{%.1f}" %
+                         (result_prefix, safe, r["logZerr"]))
+            lines.append(r"\newcommand{\result%sDeltaLogZ%s}{%.1f}" %
+                         (result_prefix, safe, r["delta_logZ_vs_top"]))
+            lines.append(r"\newcommand{\result%sSigma%s}{%.1f}" %
+                         (result_prefix, safe, r["sigma_two_sided_vs_top"]))
+            lines.append(r"\newcommand{\result%sJeffreysStrength%s}{%s}" %
+                         (result_prefix, safe, r["jeffreys_strength_vs_top"]))
 
         # ---------- Helpers ----------
         def _latex_model_token(name: str) -> str:
@@ -2976,26 +3021,26 @@ def write_results_tex_variables(
             base = f"{_latex_model_token(a)}{_latex_model_token(b)}"
             if pair:
                 lines_list.append(
-                    r"\newcommand{\resultDeltaLogZ%s}{\ensuremath{%.1f \pm %.1f}}" %
-                    (base, pair["delta_logZ"], pair["delta_logZ_err"])
+                    r"\newcommand{\result%sDeltaLogZ%s}{\ensuremath{%.1f \pm %.1f}}" %
+                    (result_prefix, base, pair["delta_logZ"], pair["delta_logZ_err"])
                 )
                 lines_list.append(
-                    r"\newcommand{\resultSigma%s}{%.1f}" %
-                    (base, pair["sigma_two_sided"])
+                    r"\newcommand{\result%sSigma%s}{%.1f}" %
+                    (result_prefix, base, pair["sigma_two_sided"])
                 )
                 lines_list.append(
-                    r"\newcommand{\resultJeffreysStrength%s}{%s}" %
-                    (base, pair["jeffreys_strength"])
+                    r"\newcommand{\result%sJeffreysStrength%s}{%s}" %
+                    (result_prefix, base, pair["jeffreys_strength"])
                 )
                 lines_list.append(
-                    r"\newcommand{\resultZmc%s}{%.1f}" %
-                    (base, pair["z_mc"])
+                    r"\newcommand{\result%sZmc%s}{%.1f}" %
+                    (result_prefix, base, pair["z_mc"])
                 )
             else:
-                lines_list.append(r"\newcommand{\resultDeltaLogZ%s}{N/A}" % base)
-                lines_list.append(r"\newcommand{\resultSigma%s}{N/A}" % base)
-                lines_list.append(r"\newcommand{\resultJeffreysStrength%s}{N/A}" % base)
-                lines_list.append(r"\newcommand{\resultZmc%s}{N/A}" % base)
+                lines_list.append(r"\newcommand{\result%sDeltaLogZ%s}{N/A}" % (result_prefix, base))
+                lines_list.append(r"\newcommand{\result%sSigma%s}{N/A}" % (result_prefix, base))
+                lines_list.append(r"\newcommand{\result%sJeffreysStrength%s}{N/A}" % (result_prefix, base))
+                lines_list.append(r"\newcommand{\result%sZmc%s}{N/A}" % (result_prefix, base))
 
         # ---------- Iterate over all model pairs (no hardcoding) ----------
         models = [r["model"] for r in compare_r.get("ranking", [])]
@@ -3003,25 +3048,25 @@ def write_results_tex_variables(
             _emit_pair(lines, a, b)
 
     else:
-        lines.append(r"\newcommand{\resultPreferredModelOverall}{N/A}")
+        lines.append(r"\newcommand{\result%sPreferredModelOverall}{N/A}" % result_prefix)
 
     # ===============================
     # --- AGN relation results ---
     # ===============================
-    lines.append(r"\newcommand{\resultAlphaAGN}{\ensuremath{%s}}" %
-                 format_value_uncertainty(results['alpha_agn'][0], results['alpha_agn'][1]))
-    lines.append(r"\newcommand{\resultBetaAGN}{\ensuremath{%s}}" %
-                 format_value_uncertainty(results['beta_agn'][0], results['beta_agn'][1]))
-    lines.append(r"\newcommand{\resultSigmaUVPivot}{\ensuremath{%.1f}}" %
-                 10**log_sigma_UV_pivot)
-    lines.append(r"\newcommand{\resultTauUVRFPivot}{\ensuremath{%.0f}}" %
-                 10**log_tau_UV_RF_pivot)
+    lines.append(r"\newcommand{\result%sAlphaAGN}{\ensuremath{%s}}" %
+                 (result_prefix, format_value_uncertainty(results['alpha_agn'][0], results['alpha_agn'][1])))
+    lines.append(r"\newcommand{\result%sBetaAGN}{\ensuremath{%s}}" %
+                 (result_prefix, format_value_uncertainty(results['beta_agn'][0], results['beta_agn'][1])))
+    lines.append(r"\newcommand{\result%sSigmaUVPivot}{\ensuremath{%.1f}}" %
+                 (result_prefix, 10**log_sigma_UV_pivot))
+    lines.append(r"\newcommand{\result%sTauUVRFPivot}{\ensuremath{%.0f}}" %
+                 (result_prefix, 10**log_tau_UV_RF_pivot))
 
     # Cosmological parameters
-    lines.append(r"\newcommand{\resultOmZero}{\ensuremath{%s}}" % f"{results['Om0'][0]:.2f} \pm {results['Om0'][1]:.2f}")
-    lines.append(r"\newcommand{\resultwZero}{\ensuremath{%s}}" % f"{results['w0'][0]:.2f} \pm {results['w0'][1]:.2f}")
+    lines.append(r"\newcommand{\result%sOmZero}{\ensuremath{%s}}" % (result_prefix, f"{results['Om0'][0]:.2f} \pm {results['Om0'][1]:.2f}"))
+    lines.append(r"\newcommand{\result%swZero}{\ensuremath{%s}}" % (result_prefix, f"{results['w0'][0]:.2f} \pm {results['w0'][1]:.2f}"))
     if cosmo_model in ('Flatw0waCDM', 'FlatwpwaCDM'):
-        lines.append(r"\newcommand{\resultwa}{%s}" % f"{results['wa'][0]:.2f} \pm {results['wa'][1]:.2f}")
+        lines.append(r"\newcommand{\result%swa}{%s}" % (result_prefix, f"{results['wa'][0]:.2f} \pm {results['wa'][1]:.2f}"))
 
 
     # Derived intercepts
@@ -3032,27 +3077,30 @@ def write_results_tex_variables(
     beta_AGN_L_samples  = beta_agn_samples  * (-1/2.5)
     L_intercept_samples = np.power(10, (90 - M0_agn_samples) / 2.5)
 
-    lines.append(r"\newcommand{\resultLIntercept}{\ensuremath{%s}}" %
-                 format_value_uncertainty(*sym_percentile(L_intercept_samples), unit=r"erg\,s^{-1}"))
-    lines.append(r"\newcommand{\resultAlphaAGNL}{\ensuremath{%s}}" %
-                 format_value_uncertainty(*sym_percentile(alpha_AGN_L_samples)))
-    lines.append(r"\newcommand{\resultBetaAGNL}{\ensuremath{%s}}" %
-                 format_value_uncertainty(*sym_percentile(beta_AGN_L_samples)))
+    lines.append(r"\newcommand{\result%sLIntercept}{\ensuremath{%s}}" %
+                 (result_prefix, format_value_uncertainty(*sym_percentile(L_intercept_samples), unit=r"erg\,s^{-1}")))
+    lines.append(r"\newcommand{\result%sAlphaAGNL}{\ensuremath{%s}}" %
+                 (result_prefix, format_value_uncertainty(*sym_percentile(alpha_AGN_L_samples))))
+    lines.append(r"\newcommand{\result%sBetaAGNL}{\ensuremath{%s}}" %
+                 (result_prefix, format_value_uncertainty(*sym_percentile(beta_AGN_L_samples))))
 
     hd_scatter_samples = np.exp(flat_samples[:, model_labels.index('log_f')])
-    lines.append(r"\newcommand{\resultScatterHD}{\ensuremath{%s}}" %
-                 format_value_uncertainty(*sym_percentile(hd_scatter_samples), unit=r"mag"))
+    lines.append(r"\newcommand{\result%sScatterHD}{\ensuremath{%s}}" %
+                 (result_prefix, format_value_uncertainty(*sym_percentile(hd_scatter_samples), unit=r"mag")))
     l_scatter_samples = hd_scatter_samples / 2.5
-    lines.append(r"\newcommand{\resultScatterL}{\ensuremath{%s}}" %
-                 format_value_uncertainty(*sym_percentile(l_scatter_samples), unit=r"dex"))
+    lines.append(r"\newcommand{\result%sScatterL}{\ensuremath{%s}}" %
+                 (result_prefix, format_value_uncertainty(*sym_percentile(l_scatter_samples), unit=r"dex")))
 
     if chisq_dict is not None:
         for key, val in chisq_dict.items():
             lines.append(r"\newcommand{\result%sChiSqRed}{\ensuremath{%s}}" %
-                         (key, format_value_uncertainty(val, None)))
+                         (result_prefix, key, format_value_uncertainty(val, None)))
 
     # --- Save file ---
-    tex_path = os.path.join(write_path, "param_results.tex")
+    if result_prefix is not None and result_prefix != "":
+        tex_path = os.path.join(write_path, f"param_results_{result_prefix}.tex")
+    else:
+        tex_path = os.path.join(write_path, "param_results.tex")
     os.makedirs(write_path, exist_ok=True)
     with open(tex_path, "w") as f:
         for line in lines:

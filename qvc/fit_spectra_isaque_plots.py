@@ -759,7 +759,7 @@ def run_qsofit_record(rec, npca_qso, cache_dir="data/spectra_cache",
         else:
             m_2500, m_2500_err = -1e9, -1e9
 
-        # L2500
+        # L2500 reddened
         L_ok = np.isfinite(conti_dict.get('L2500', np.nan)) and np.isfinite(conti_dict.get('L2500_err', np.nan))
         if L_ok:
             m_2500_reddened, m_2500_reddened_err = compute_apparent_mag_2500_astropy(conti_dict, logL_col='L2500', logL_err_col='L2500_err')

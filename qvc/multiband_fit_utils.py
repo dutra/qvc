@@ -462,6 +462,28 @@ def save_all_samples_to_hdf5(samples):
         for key, value in samples.items():
             hdf.create_dataset(key, data=value)
     logging.info(f"Saved all samples to {file_path}")
+    print(f"Saved all samples to {file_path}")
+
+def load_obj_samples_from_hdf5(object_id=None, file_path=None):
+    """
+    """
+    if file_path is None:
+        output_dir=f"results/samples/{prefix}/"
+        os.makedirs(output_dir, exist_ok=True)
+        file_path = os.path.join(output_dir, f"{object_id}_{suffix}.h5")
+
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(f"HDF5 file not found: {file_path}")
+
+    logging.info(f"Loading all samples from {file_path}")
+
+    samples = {}
+    with h5py.File(file_path, "r") as hdf:
+        for key in hdf.keys():
+            samples[key] = np.array(hdf[key])
+
+    logging.info(f"Loaded {len(samples)} datasets from {file_path}")
+    return samples
 
 def save_obj_samples_to_hdf5(samples, object_id):
     """

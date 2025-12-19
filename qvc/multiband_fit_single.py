@@ -681,7 +681,7 @@ def main():
 
             if args.load_sample_file:
                 logging.warning("[DEBUG] Loading saved samples (flat) — developer mode.")
-                samples_flat = load_all_samples_from_hdf5()
+                obj_flat_samples = load_obj_samples_from_hdf5(oid)
                 samples_per_chain = None
             else:
                 key = random.PRNGKey(0)
@@ -689,12 +689,13 @@ def main():
                 mcmc.run(key)
                 samples_flat = mcmc.get_samples(group_by_chain=False)
                 samples_per_chain = mcmc.get_samples(group_by_chain=True)
-            samples_flat = tree_map(lambda x: np.asarray(device_get(x)), samples_flat)
-            samples_per_chain = tree_map(lambda x: np.asarray(device_get(x)), samples_per_chain)
-            # Save/diagnostics for this object
-            obj_flat_samples = samples_flat  # already single-object
+                samples_flat = tree_map(lambda x: np.asarray(device_get(x)), samples_flat)
+                samples_per_chain = tree_map(lambda x: np.asarray(device_get(x)), samples_per_chain)
+                # Save/diagnostics for this object
+                obj_flat_samples = samples_flat  # already single-object
+                save_obj_samples_to_hdf5(obj_flat_samples, oid)
             obj_flat_samples_flatten_per_band = flatten_flat_samples_per_band(obj_flat_samples, bands=bands)
-            save_obj_samples_to_hdf5(obj_flat_samples_flatten_per_band, oid)
+                
 
             diagnostics = {}
             if samples_per_chain is not None:
