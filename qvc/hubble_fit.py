@@ -38,8 +38,7 @@ from hubble_utils import *
 from hubble_likelihood import *
 from hubble_plotting import *
 from hubble_model import *
-#from hubble_completeness import *
-from hubble_completeness_refactored import *
+from hubble_completeness import *
 
 def prior_transform_dynesty(unit_cube, priors, model_labels):
     return [priors[key][0] + (priors[key][1] - priors[key][0]) * x
