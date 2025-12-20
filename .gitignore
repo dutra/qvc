@@ -3,10 +3,12 @@
 *.pdf
 *.h5
 *.hdf5
+*.pkl
 *.sh
 *.txt
 *.out
 *.zip
+*.cov
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
