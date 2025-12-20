@@ -32,7 +32,7 @@ These routines have been tested on:
 We recommend using a virtual environment manager such as **Conda**:
 - https://docs.conda.io/projects/conda/en/stable/user-guide/install/index.html
 
-The list of all python dependencies (installed in the next step) are listed under [environment.yml](environment.yml)
+The list of all python dependencies (installed in the next step) are listed under [environment.yml](environment.yml) for the main environment and [PyQSOFit/environment.yml](PyQSOFit/environment.yml) for PyQSOFit.
 
 ---
 
