@@ -283,6 +283,9 @@ The following notebooks reproduce appendix figures:
 * Appendix Figures **C4, C5, D6, D7**: `appendix_sigma_tau.ipynb`
 * Appendix Figure **E8**: `appendix_lags.ipynb`
 
+## Appendix Completeness
+The completeness catalogs are included in the data demo file (`qvc_data_demo`).  
+The notebook `completeness.ipynb` can generate the completeness catalogs if necessary.
 
 # Instructions for use
 ## `multiband_fit.py`
@@ -465,7 +468,7 @@ conda activate pyqsofit
 
 *Do not install speclite in your main environment*. It will downgrade numpy and may break several packages.
 
-Fitting an AGN spectra involves several steps. First, all spectra cache needs be downloaded with  
+Fitting an AGN spectra involves several steps. While a single spectra is included for the demo, all spectras can be downloaded with  
 ```bash
 python fit_spectra.py --download
 ```
