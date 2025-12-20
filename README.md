@@ -31,39 +31,21 @@ These routines have been tested on:
 We recommend using a virtual environment manager such as **Conda**:
 - https://docs.conda.io/projects/conda/en/stable/user-guide/install/index.html
 
+The list of all python dependencies (installed in the next step) are listed under [environment.yml](environment.yml)
+
 ---
 
 ## Installation
 
 Installation typically completes in **under one hour** on a modern machine. Downloading the demo data may take longer depending on network speed.
 
-### 1) Clone the repository
-```bash
-git clone https://github.com/dutra/qvc.git
-cd qvc
-git checkout preview
-```
-
-### 2) Install `eztaox`
-
-```bash
-cd eztaox
-pip install .
-```
-
-### 3) Create the main (JAX CPU) environment (recommended)
+### 1) Create the main (JAX CPU) environment (recommended)
 
 From the repository root:
 
 ```bash
-conda env create -n jaxcpu python=3.13.5 -f environment.yml
+conda env create -n jaxcpu -f environment.yml
 conda activate jaxcpu
-```
-
-If you do not use Conda (e.g., `venv`), install requirements via:
-
-```bash
-python -m pip install -r requirements.txt
 ```
 
 This **main environment** is used for:
@@ -71,22 +53,28 @@ This **main environment** is used for:
 * Multi-band light-curve fitting
 * Hubble-diagram fitting
 
+
+### 2) Clone the repository
+```bash
+git clone https://github.com/dutra/qvc.git
+cd qvc
+git checkout preview
+```
+
+### 3) Install `eztaox`
+
+```bash
+cd eztaox
+pip install .
+```
+
 ---
 
 ## PyQSOFit Environment (for Spectral Fitting)
 
 Spectral fitting relies on PyQSOFit and additional dependencies. We strongly recommend using a **separate environment**.
 
-### 1) Clone PyQSOFit
-
-From the `qvc` repository root:
-
-```bash
-git clone https://github.com/dutra/PyQSOFit.git
-cd PyQSOFit
-```
-
-### 2) Create a dedicated environment
+### 1) Create a dedicated environment
 
 **Important:** Installing `speclite` can downgrade NumPy and may break packages in your main environment. Keep PyQSOFit isolated.
 
@@ -97,11 +85,15 @@ conda env create -n pyqsofit python=3.12.9 -f environment.yml
 conda activate pyqsofit
 ```
 
-If you do not use Conda:
+### 2) Clone PyQSOFit
+
+From the `qvc` repository root:
 
 ```bash
-python -m pip install -r requirements.txt
+git clone https://github.com/dutra/PyQSOFit.git
+cd PyQSOFit
 ```
+
 
 ### 3) Install PyQSOFit
 

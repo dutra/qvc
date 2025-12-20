@@ -2,6 +2,7 @@ name: jaxcpu
 channels:
   - defaults
 dependencies:
+  - python=3.13.5
   - _libgcc_mutex=0.1
   - _openmp_mutex=5.1
   - anyio=4.7.0
@@ -277,7 +278,6 @@ dependencies:
       - dm-tree==0.1.9
       - dynesty==2.1.5
       - equinox==0.13.0
-      - eztaox==0.1.0
       - flatbuffers==25.2.10
       - gast==0.6.0
       - google-pasta==0.2.0
@@ -326,4 +326,3 @@ dependencies:
       - xarray==2025.8.0
       - xarray-einstats==0.9.1
       - xonsh==0.19.9
-prefix: /opt/miniconda3/envs/jaxcpu
