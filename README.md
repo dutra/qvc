@@ -14,19 +14,20 @@ A lightweight demo workflow is included to reproduce key figures and validate in
 
 ### Hardware
 - A modern laptop capable of running a Python environment is sufficient to run the demo workflow.
-- Disk space: **~44 GB** is required for the demo data.
+- Disk space: **~50 MB** is required for the demo fitting a single light curve and fitting a single spectra. For the hubble diagram fitting, all dynesty checkpoints must be downloaded and **~44 GB** is required.
+
 - For improved performance, we recommend **16+ GB RAM** and a modern multi-core CPU.
 
-> Note: Full-scale light-curve and Hubble-diagram production runs were executed on Yale HPC resources and required on the order of **~100,000 CPU-hours**.
+> Note: Full-scale light-curve and Hubble-diagram production runs were executed on Yale HPC and required on the order of **~100,000 CPU-hours**.
 
 ### Operating Systems
 These routines have been tested on:
 - **Linux**: Arch Linux (kernel `v6.12.62-1`)
-- **macOS**: _TBD (Colin: please fill in version and hardware details)_
+- **macOS**: Macbook Pro M1
 
 ### Software
 - A Python environment is required.
-- Tested with **Python `3.13.5`** (and **Python `<Colin>`** for macOS).
+- Tested with **Python `3.13.5`** and also `3.12.11`.
 
 We recommend using a virtual environment manager such as **Conda**:
 - https://docs.conda.io/projects/conda/en/stable/user-guide/install/index.html
@@ -74,18 +75,7 @@ pip install .
 
 Spectral fitting relies on PyQSOFit and additional dependencies. We strongly recommend using a **separate environment**.
 
-### 1) Create a dedicated environment
-
-**Important:** Installing `speclite` can downgrade NumPy and may break packages in your main environment. Keep PyQSOFit isolated.
-
-From inside the `PyQSOFit` directory:
-
-```bash
-conda env create -n pyqsofit python=3.12.9 -f environment.yml
-conda activate pyqsofit
-```
-
-### 2) Clone PyQSOFit
+### 1) Clone PyQSOFit
 
 From the `qvc` repository root:
 
@@ -94,6 +84,16 @@ git clone https://github.com/dutra/PyQSOFit.git
 cd PyQSOFit
 ```
 
+### 2) Create a dedicated environment
+
+**Important:** Installing `speclite` can downgrade NumPy and may break packages in your main environment. Keep PyQSOFit isolated.
+
+From inside the `PyQSOFit` directory:
+
+```bash
+conda env create -n pyqsofit -f environment.yml
+conda activate pyqsofit
+```
 
 ### 3) Install PyQSOFit
 
@@ -105,8 +105,14 @@ pip install .
 
 ## Download the Demo Data
 
-1. Download the demo data from: **`<url>`**
-2. Extract it into the `src/` directory.
+1. Download the demo data (21 MB) from: **`<url>`**
+2. Extract it into the `src/` directory. The folder `data` must be placed in the `src/` directory.
+
+This will allow you to run steps _1) Multi-band Light-Curve Fitting_ and _2) Spectral Fitting_ for a single AGN light curve.
+
+In order to run step _3) Hubble-Diagram Fitting_ in a reasonable amount of time in a laptop, the result of all light curve fits and dynesty checkpoint needs to be downloaded:
+1. Download the results file (24 GB, ~40 GB extracted) from **`<url>`**
+2. Extract and move the folders `data` and `results` into the `src/` directory, overwriting if necessary.
 
 ---
 
@@ -122,17 +128,26 @@ From the repository root:
 cd src
 ```
 
-Run:
+Activate the main conda environment `jaxcpu`:
+```bash
+conda activate jaxcpu
+```
+
+Run the multi-band light curve fitting with:
 
 ```bash
 export PREFIX=demo
+export SUFFIX=1465126
 python multiband_fit.py --plot \
-    --progress --nwarm 1000 --nsamp 500 --nchains 4 \
-    --max_tree_depth 14 \
+    --progress --nwarm 100 --nsamp 50 --nchains 4 \
+    --max_tree_depth 8 \
     --disable_fhost \
     --bwb \
     --filter_object_id 1465126
 ```
+
+For speed we run the demo with 100 warm up steps, 50 sampling steps, and a max tree depth of 8.
+Figure 1 in the manuscript was produced with 1000 warmup steps, 200 sample steps, and max tree depth of 14.
 
 Outputs:
 
@@ -163,25 +178,19 @@ conda activate pyqsofit
 
 **Do not install `speclite` in your main environment.** It can downgrade NumPy and destabilize other dependencies.
 
-### Download the spectral cache
-
-```bash
-python fit_spectra.py --download
-```
-
 ### Run the spectral fitting pipeline
 
 1. **Collect**: run multiple template/continuum configurations
 
 ```bash
-python fit_spectra.py results/data/demo/1465126.h5 results/data/demo/1465126_collect.csv \
+python fit_spectra.py results/data/demo/1465126.h5 results/data/demo/1465126.csv \
     --mode collect --MC_samples 1
 ```
 
-2. **Select**: choose best fits (via chi-squared) with penalties to avoid overfitting Balmer continuum and host components
+2. **Select**: choose best fits with penalties to avoid overfitting Balmer continuum and host components
 
 ```bash
-python fit_spectra.py results/data/demo/1465126_collect.csv results/data/demo/1465126_select.csv \
+python fit_spectra.py results/data/demo/1465126.h5 results/data/demo/1465126.csv \
     --mode select
 ```
 
@@ -189,7 +198,7 @@ python fit_spectra.py results/data/demo/1465126_collect.csv results/data/demo/14
 
 ```bash
 python fit_spectra.py results/data/demo/1465126.h5 results/data/demo/1465126.csv \
-    --single_csv results/data/demo/1465126_select.csv \
+    --single_csv results/data/demo/1465126.csv \
     --mode single --MC_samples 50
 ```
 
@@ -209,7 +218,7 @@ A subset of Hubble-diagram fitting and plotting can be run via:
 
 Expected outputs resemble **Figures 2, 3, and 7**.
 
-To reproduce all Hubble-diagram plots from the manuscript, use the saved **dynesty** checkpoints downloaded with the demo data. The full fitting procedure can be run with:
+To reproduce all Hubble-diagram plots from the manuscript, use the saved _dynesty checkpoints_ downloaded with the full data file. The full fitting procedure can be run with:
 
 ```bash
 PREFIX=demo \
