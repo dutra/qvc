@@ -1,78 +1,139 @@
 
-# System requirements
-## Hardware Requirements
-A modern laptop capable of running a python environment is enough to run all steps in this README.
+# QVC: Demo and Reproducibility Guide
 
-For the necessary data, 44 GB of disk space will be required.
+This repository provides end-to-end tooling for:
+1. Multi-band AGN light-curve fitting,
+2. Spectral fitting with PyQSOFit, and
+3. Hubble-diagram fitting and figure generation.
 
-In optimal performance, 16+ GB of RAM and a modern multi-core CPU is recomended.
+A lightweight demo workflow is included to reproduce key figures and validate installation.
 
-## OS Requirements
-These routines were tested on
-- Linux: Arch Linux with Kernel v6.12.62-1
-- Mac OSX: <Colin put your Mac info here>
+---
 
-## Software Requirements
-A python enviornment is necessary. This was tested with `python v3.13.5` and `python v<Colin>`.
+## System Requirements
 
-We highly recommend a python virtual environment such as [conda](https://docs.conda.io/projects/conda/en/stable/user-guide/install/index.html)
+### Hardware
+- A modern laptop capable of running a Python environment is sufficient to run the demo workflow.
+- Disk space: **~44 GB** is required for the demo data.
+- For improved performance, we recommend **16+ GB RAM** and a modern multi-core CPU.
 
-The demos should only take a couple hours to run. The full light curve and hubble diagram fitting were run in Yale's HPC clusters, consuming roughly ~100,000 CPU hours.
+> Note: Full-scale light-curve and Hubble-diagram production runs were executed on Yale HPC resources and required on the order of **~100,000 CPU-hours**.
 
+### Operating Systems
+These routines have been tested on:
+- **Linux**: Arch Linux (kernel `v6.12.62-1`)
+- **macOS**: _TBD (Colin: please fill in version and hardware details)_
 
-## Installation guide
-The installation step will typically take less than an hour in a modern machine. Downloading the necessary data (next step) may take longer depending on the user's network speed.
+### Software
+- A Python environment is required.
+- Tested with **Python `3.13.5`** (and **Python `<Colin>`** for macOS).
 
-### Clone the repository
-`git clone https://github.com/dutra/qvc.git`  
-`cd qvc`  
-`git checkout preview`  
+We recommend using a virtual environment manager such as **Conda**:
+- https://docs.conda.io/projects/conda/en/stable/user-guide/install/index.html
 
-### Installing eztaox
-`cd eztaox`  
-`pip install .`  
+---
 
-## Set up main conda jax CPU environment (suggested)
-From the root directory,  
-`conda env create -n jaxcpu python=3.13.5 -f environment.yml`
+## Installation
 
-`conda activate jaxcpu`
+Installation typically completes in **under one hour** on a modern machine. Downloading the demo data may take longer depending on network speed.
 
-If you are managing your environment through other means (e.g.: venv), you can use `pip` to install the requirements:  
-`python -m pip install -r requirements.txt`
+### 1) Clone the repository
+```bash
+git clone https://github.com/dutra/qvc.git
+cd qvc
+git checkout preview
+```
 
-This environment will be the main environment, used by the light curve multiband fitting and hubble diagram fitting procedures.
+### 2) Install `eztaox`
 
-### Installing PyQSOFit
-In the qvc root directory:  
-`git clone https://github.com/dutra/PyQSOFit.git`  
+```bash
+cd eztaox
+pip install .
+```
 
-`cd PyQSOFit`  
+### 3) Create the main (JAX CPU) environment (recommended)
 
-We highly suggest you create a separate conda virtual environment for PyQSOFit and the fit spectra procedure. When installing `speclite`, it will downgrade numpy and potentially break several packages. Make sure to be inside the `PyQSOFit` directory.  
-`conda env create -n pyqsofit python=3.12.9 -f environment.yml`
+From the repository root:
 
-If you are managing your environment through other means (e.g.: venv), you can use `pip` to install the requirements:  
-`python -m pip install -r requirements.txt`
+```bash
+conda env create -n jaxcpu python=3.13.5 -f environment.yml
+conda activate jaxcpu
+```
 
-Finally,  
-`pip install .`  
+If you do not use Conda (e.g., `venv`), install requirements via:
 
-## Download the data
-Download the demo data from <url>
-and extract it inside the `src` folder.
+```bash
+python -m pip install -r requirements.txt
+```
 
-# Demo
+This **main environment** is used for:
 
-## Light Curve Multiband fitting
-The Light Curve multiband fitting can be run by specifying an Object ID.  
-Included in the demo data is the light curve for the object 1465126, which will reproduce Figure 1.
+* Multi-band light-curve fitting
+* Hubble-diagram fitting
 
-First, `cd` into the `src` folder. Then run  
+---
+
+## PyQSOFit Environment (for Spectral Fitting)
+
+Spectral fitting relies on PyQSOFit and additional dependencies. We strongly recommend using a **separate environment**.
+
+### 1) Clone PyQSOFit
+
+From the `qvc` repository root:
+
+```bash
+git clone https://github.com/dutra/PyQSOFit.git
+cd PyQSOFit
+```
+
+### 2) Create a dedicated environment
+
+**Important:** Installing `speclite` can downgrade NumPy and may break packages in your main environment. Keep PyQSOFit isolated.
+
+From inside the `PyQSOFit` directory:
+
+```bash
+conda env create -n pyqsofit python=3.12.9 -f environment.yml
+conda activate pyqsofit
+```
+
+If you do not use Conda:
+
+```bash
+python -m pip install -r requirements.txt
+```
+
+### 3) Install PyQSOFit
+
+```bash
+pip install .
+```
+
+---
+
+## Download the Demo Data
+
+1. Download the demo data from: **`<url>`**
+2. Extract it into the `src/` directory.
+
+---
+
+# Demo Workflow
+
+## 1) Multi-band Light-Curve Fitting
+
+The multi-band fit can be run for a specific Object ID. The demo data includes Object ID **1465126**, which reproduces **Figure 1**.
+
+From the repository root:
+
+```bash
+cd src
+```
+
+Run:
 
 ```bash
 export PREFIX=demo
-export SUFFIX=1465126
 python multiband_fit.py --plot \
     --progress --nwarm 1000 --nsamp 500 --nchains 4 \
     --max_tree_depth 14 \
@@ -81,49 +142,82 @@ python multiband_fit.py --plot \
     --filter_object_id 1465126
 ```
 
-The results will be written under the folder `src/results/data/demo`, while plots will be under `src/plots/multiband/demo` and samples under `src/results/samples/demo`. 
-The expected output is Figure 1 under `src/plots/multiband/demo`.
+Outputs:
 
-The `multiband_fit.py` script accepts other options such as `--rf_length_cut <days>`.  
-For a list of all options supported, run `python multiband_fit.py --help`.  
+* Fit results: `src/results/data/demo/`
+* Plots: `src/plots/multiband/demo/`
+* Samples: `src/results/samples/demo/`
 
-## Spectra Fitting
-In this step, we will utilize the light curve from the previous step and fit its spectra.
+The expected output is **Figure 1** under `src/plots/multiband/demo/`.
 
-First, make sure you are in the `speclite` environment with  
+Additional options (example): `--rf_length_cut <days>`
+For the full list of options:
+
+```bash
+python multiband_fit.py --help
+```
+
+---
+
+## 2) Spectral Fitting
+
+This step uses the light-curve output from the previous section and fits the corresponding spectra.
+
+### Activate the PyQSOFit environment
+
 ```bash
 conda activate pyqsofit
 ```
 
-*Do not install speclite in your main environment*. It will downgrade numpy and may break several packages.
+**Do not install `speclite` in your main environment.** It can downgrade NumPy and destabilize other dependencies.
 
-Fitting an AGN spectra involves several steps. First, all spectra cache needs be downloaded with  
+### Download the spectral cache
+
 ```bash
 python fit_spectra.py --download
 ```
 
-Then, a run collection several different combinations of spectral fit (e.g.: balmer continuum, iron, host, quasar templates, etc) can be run with
- ```bash
-python fit_spectra.py results/data/demo/1465126.h5  results/data/demo/1465126_collect.csv --mode collect --MC_samples 1
-```
+### Run the spectral fitting pipeline
 
-Next, a run selecting the best fits (chi squared) and penalties to avoid overfitting balmer continuum and host:
+1. **Collect**: run multiple template/continuum configurations
+
 ```bash
-python fit_spectra.py results/data/demo/1465126_collect.csv results/data/demo/1465126_select.csv --mode select
+python fit_spectra.py results/data/demo/1465126.h5 results/data/demo/1465126_collect.csv \
+    --mode collect --MC_samples 1
 ```
 
-Finally, a run to use the selected fits to sample and compute errors:  
+2. **Select**: choose best fits (via chi-squared) with penalties to avoid overfitting Balmer continuum and host components
+
 ```bash
-python fit_spectra.py results/data/demo/1465126.h5 results/data/demo/1465126.csv --single_csv results/data/demo/1465126_select.csv --mode single --MC_samples 50
+python fit_spectra.py results/data/demo/1465126_collect.csv results/data/demo/1465126_select.csv \
+    --mode select
 ```
 
-The generated file `results/data/demo/1465126.csv` contains all the results from fitting the AGN spectra, including the apparent magnitude at the 2500 AA restframe wavelenght. It can be used by the Hubble Diagram fitting procedure in the argument `--spectra_fit_csv`.
+3. **Single**: sample the selected fit(s) to estimate uncertainties
 
+```bash
+python fit_spectra.py results/data/demo/1465126.h5 results/data/demo/1465126.csv \
+    --single_csv results/data/demo/1465126_select.csv \
+    --mode single --MC_samples 50
+```
 
-## Hubble diagram fitting
-A subset of the Hubble Diagram fitting and plots can be obtained in notebook `hubble_diagram_plots.ipynb`.  The expected output are figures similar to Figures 2, 3 and 7.
+The output file:
 
-In order to reproduce all hubble diagram plots found in the manuscript, we will use the saved full dynesty checkpoints downloaded in the step _Download the data_. The HD fitting procedure can be run with the command
+* `results/data/demo/1465126.csv`
+
+This contains spectral-fit results, including the apparent magnitude at **rest-frame 2500 Å**, and can be passed to the Hubble-diagram fitting step via `--spectra_fit_csv`.
+
+---
+
+## 3) Hubble-Diagram Fitting
+
+A subset of Hubble-diagram fitting and plotting can be run via:
+
+* `hubble_diagram_plots.ipynb`
+
+Expected outputs resemble **Figures 2, 3, and 7**.
+
+To reproduce all Hubble-diagram plots from the manuscript, use the saved **dynesty** checkpoints downloaded with the demo data. The full fitting procedure can be run with:
 
 ```bash
 PREFIX=demo \
@@ -132,15 +226,17 @@ python hubble_fit.py --resume \
     --run full \
     --speed production \
     --spectra_fit_csv "results/data/nov12a_11c_single_scratch_nov10a_carma_removemix_fixmeanband_no1pluszflux2L_freeiron_mc50_best.csv" \
-    --sdss_mags_csv "results/data/nov2_sdss_mags.csv"  \
+    --sdss_mags_csv "results/data/nov2_sdss_mags.csv" \
     --zquery_csv "results/data/sep19_chisq_zquery.csv" \
     --z_range 0.44 3.16 \
     "results/data/nov10a_single_chisq_carma_mixscalar_nozband_highertaufastlim_removemix_fixband_lagblrband_chisq_spl_nofhost_bwb_lmc-6_N1w1000s200t14ch4.h5"
 ```
 
-where the `--resume` flag will load the dynesty checkpoint.
+The `--resume` flag loads the dynesty checkpoint.
 
-The restricted redshift fit (z = 1 - 3.16) can be run with
+### Restricted redshift fit
+
+For the restricted redshift interval (**z = 1.0–3.16**):
 
 ```bash
 PREFIX=demo_zonecut \
@@ -149,29 +245,46 @@ python hubble_fit.py --resume \
     --run full \
     --speed production \
     --spectra_fit_csv "results/data/nov12a_11c_single_scratch_nov10a_carma_removemix_fixmeanband_no1pluszflux2L_freeiron_mc50_best.csv" \
-    --sdss_mags_csv "results/data/nov2_sdss_mags.csv"  \
+    --sdss_mags_csv "results/data/nov2_sdss_mags.csv" \
     --zquery_csv "results/data/sep19_chisq_zquery.csv" \
     --z_range 1.0 3.16 \
     "results/data/nov10a_single_chisq_carma_mixscalar_nozband_highertaufastlim_removemix_fixband_lagblrband_chisq_spl_nofhost_bwb_lmc-6_N1w1000s200t14ch4.h5"
 ```
 
-Similarly as `multiband_fit.py`, `hubble_fit.py` will use the environment variable `PREFIX`.  
-All hubble diagram relevant plots, tables, and results will be generate under `src/plots/hubble/`.
+As with `multiband_fit.py`, `hubble_fit.py` uses the `PREFIX` environment variable.
 
-The expected outputs are Figures 2, 3, 4, 5, 6, 7, 8, A1 and A2, under `src/plots/hubble/` for the cosmology models FlatLambdaCDM FlatwCDM Flatw0waCDM.
-It will also generated Table 4 and display a summary of the cosmological model with highest evidence (Flatw0waCDM).
+Outputs:
 
-The expected time to run is less than one hour.
+* All Hubble-diagram plots, tables, and results are generated under: `src/plots/hubble/`
 
-## Appendix figures
-- Appendix Figure B3 can be reproduced in the notebook `appendix_band_vs_wavelength.ipynb`  
-- Appendix Figures C4, C5, D6, D7 can be reproduced in notebook `appendix_sigma_tau.ipynb`  
-- Appendix Figure E8 can be reproduced in notebook `appendix_lags.ipynb`  
+Expected figures:
+
+* **Figures 2–8, A1, and A2** under `src/plots/hubble/` for:
+
+  * `FlatLambdaCDM`
+  * `FlatwCDM`
+  * `Flatw0waCDM`
+
+Additional outputs:
+
+* **Table 4**
+* A printed summary of the cosmological model with the highest evidence (expected: `Flatw0waCDM`)
+
+Typical runtime (demo checkpoints): **< 1 hour**.
+
+---
+
+## Appendix Figures
+
+The following notebooks reproduce appendix figures:
+
+* Appendix Figure **B3**: `appendix_band_vs_wavelength.ipynb`
+* Appendix Figures **C4, C5, D6, D7**: `appendix_sigma_tau.ipynb`
+* Appendix Figure **E8**: `appendix_lags.ipynb`
+
 
 # Instructions for use
 ## `multiband_fit.py`
-
-The `multiband_fit.py` script accepts other options such as `--rf_length_cut <days>`.  
 
 For help organizing the batch runs in Yale's HPC, `multiband_fit.py` can use the environment varibles `PREFIX` and `SUFFIX`, which default to `test`.  
 The results will be written under the folder `results/data/<prefix>`, while plots will be under `plots/multiband/<prefix>` and samples under `results/samples/<prefix>`.  
