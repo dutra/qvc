@@ -105,13 +105,13 @@ pip install .
 
 ## Download the Demo Data
 
-1. Download the demo data (21 MB) from: **`<url>`**
+1. Download the demo data file *qvc_data_demo.zip* (25 MB) from **`https://drive.google.com/drive/folders/16vBnl0Jnkn2k0y4gxQK9EMJm2tFTemYL?usp=sharing`**
 2. Extract it into the `src/` directory. The folder `data` must be placed in the `src/` directory.
 
 This will allow you to run steps _1) Multi-band Light-Curve Fitting_ and _2) Spectral Fitting_ for a single AGN light curve.
 
 In order to run step _3) Hubble-Diagram Fitting_ in a reasonable amount of time in a laptop, the result of all light curve fits and dynesty checkpoint needs to be downloaded:
-1. Download the results file (24 GB, ~40 GB extracted) from **`<url>`**
+1. Download the results file *qvc_data_full.zip* (24 GB, ~40 GB extracted) from **`https://drive.google.com/drive/folders/16vBnl0Jnkn2k0y4gxQK9EMJm2tFTemYL?usp=sharing`**
 2. Extract and move the folders `data` and `results` into the `src/` directory, overwriting if necessary.
 
 ---
