@@ -1257,17 +1257,20 @@ def plot_m2500_correction(dm_of_z, z, m2500_uncorrected,
         plt.show()
     plt.close()
 
-
+import pickle
 def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=10,
                   exclude_object_ids_csv=[],
                   residuals_sigma_clip=None, residuals_csv=None,
                   spectra_fit_csv=None, zquery_csv=None, only_load=False,
+                  pickled=False,
                   iron_frac_cut=None, redchi2_cut=None,
                   sdss_mags_csv=None, lc_info_csv="data/aug4_sample_chisqg10_ebv005sn3_lcdata.csv"):
-    #quasar_list = read_quasars_from_hdf5(file_path)
-    import pickle
-    with open(file_path + ".pkl", "rb") as f: 
-        quasar_list = pickle.load(f)
+    
+    if pickled:
+        with open(file_path + ".pkl", "rb") as f: 
+            quasar_list = pickle.load(f)
+    else:
+        quasar_list = read_quasars_from_hdf5(file_path)
     print("Number of quasars loaded:", len(quasar_list))
 
     if populate_sdss:

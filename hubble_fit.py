@@ -493,6 +493,7 @@ if __name__ == "__main__":
     parser.add_argument("--result_prefix", type=str, default="", help="Prefix for result files (default: empty)")
     parser.add_argument("--z_range", type=float, nargs=2, default=[0.44, 3.16], 
                         help="Redshift range for AGN data (default: [0.44, 3.16])")
+    parser.add_argument("--pickled", action="store_true", default=False, help="Use pickled data file (default: False)")
 
     args = parser.parse_args()
 
@@ -514,7 +515,7 @@ if __name__ == "__main__":
                            exclude_object_ids_csv=args.exclude_object_ids_csv,
                            spectra_fit_csv=args.spectra_fit_csv, zquery_csv=args.zquery_csv,
                            redchi2_cut=args.redchi2_cut, iron_frac_cut=args.iron_frac_cut,
-                           sdss_mags_csv=args.sdss_mags_csv)
+                           sdss_mags_csv=args.sdss_mags_csv, pickled=args.pickled)
     
     plot_Mi_relation(df_agn)
     
