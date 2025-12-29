@@ -62,7 +62,12 @@ cd qvc
 git checkout preview
 ```
 
-### 3) Install `eztaox`
+### 3) Install the requirements:
+```bash
+pip install -r requirements.txt
+```
+
+### 4) Install `eztaox`
 
 ```bash
 cd eztaox
