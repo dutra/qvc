@@ -65,6 +65,8 @@ if __name__ == "__main__":
         ("https://drive.google.com/file/d/1SOsMIjgxnPsS7OKtkTRDaAWy3bwlJhBr/view?usp=sharing", "results/data"),
         # other data
         ("https://drive.google.com/file/d/1sYr-N-DMpuWpbfdPg6zQ-IryP8InY5TK/view?usp=sharing", "./"),
+        # nov2_sdss_mags.csv
+        ("https://drive.google.com/file/d/1TbwmKDeBRDMPIGtQm8GcZhpRhcmsGUBO/view?usp=sharing", 'results/data')
     ]
 
     print(f"{Style.BRIGHT}{Fore.MAGENTA}=== Google Drive Batch Downloader ===\n")
