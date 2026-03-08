@@ -2996,6 +2996,8 @@ def write_results_tex_variables(
             lines.append(_cmd("AlphaAGN", format_value_uncertainty(*results['alpha_agn']), model_suffix=model_name))
         if 'beta_agn' in results:
             lines.append(_cmd("BetaAGN", format_value_uncertainty(*results['beta_agn']), model_suffix=model_name))
+        if 'M0_agn' in results:
+            lines.append(_cmd("MZeroAGN", format_value_uncertainty(*results['M0_agn']), model_suffix=model_name))
 
         # Derived Params
         try:

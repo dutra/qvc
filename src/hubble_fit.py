@@ -93,7 +93,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
     if not os.path.exists(checkpoint_folder):
         os.makedirs(checkpoint_folder)
     checkpoint_file = os.path.join(checkpoint_folder,
-                                   f"posteriors_{cosmo_model}_{'sna' if only_sna else 'joint'}_{speed}.hdf5")
+                                   f"posteriors_{cosmo_model}_{'sna' if only_sna else 'joint'}_{speed}.h5")
     print(f"Checkpoint file: {checkpoint_file}")
     print(f"Starting Hubble Fit with {len(agn_data['z'])} AGNs and {len(pantheon_data['zHD'])} SNes...")
 
@@ -298,7 +298,8 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                                                         resume=resume, speed=speed, use_mu_sh0es=use_mu_sh0es)
     
     display_results_summary(flat_samples, cosmo_model, z_pivot_agn)
-    age, age_err = compute_age_universe_with_error(flat_samples, cosmo_model)
+    print("Computing age of the universe with error propagation...")
+    age, age_err = compute_age_universe_with_error(flat_samples, cosmo_model, max_eval=200)
 
     if skip_plots:
         return flat_samples, model_labels, dm_interp, logZ, logZerr, None, (age, age_err)
@@ -423,7 +424,7 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
                        z_range=z_range,
                        cosmo_model_samples=cosmo_model_samples)
         
-        _, samples_joint, _, _, logZ_joint, logZerr_joint, _, age = r
+        samples_joint, _, _, logZ_joint, logZerr_joint, _, age = r
         #print(f"For model {cosmo_model}, universe age: {age:.3f} Gyr")
         r = run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, 
                        cosmo_model=cosmo_model, only_sna=True, 
@@ -431,7 +432,7 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
                        residuals_sigma_clip=residuals_sigma_clip,
                        z_range=z_range,
                        resume=resume, speed=speed, N=N, use_mu_sh0es=use_mu_sh0es)
-        _, samples_sna, _, _, logZ_sna, logZerr_sna, _, _ = r
+        samples_sna, _, _, logZ_sna, logZerr_sna, _, _ = r
         
         plot_cosmo_corner(samples_sna, samples_joint, cosmo_model, z_pivot_sna, z_pivot_agn, show=False, 
                           plot_path=f"plots/hubble/{prefix}", speed=speed,
