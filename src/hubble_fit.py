@@ -89,32 +89,41 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
     else:
         agn_calibrators_data = {col: df_calibrators[col].values for col in agn_calibrators_fields if col in df_calibrators.columns}
 
-    checkpoint_folder = f'results/dynesty_checkpoint/{prefix}'
+    checkpoint_folder = f'results/hubble_posteriors/{prefix}'
     if not os.path.exists(checkpoint_folder):
         os.makedirs(checkpoint_folder)
     checkpoint_file = os.path.join(checkpoint_folder,
-                                   f"dynesty_checkpoint_{cosmo_model}_{'sna' if only_sna else 'joint'}_{speed}.save")
+                                   f"posteriors_{cosmo_model}_{'sna' if only_sna else 'joint'}_{speed}.hdf5")
     print(f"Checkpoint file: {checkpoint_file}")
     print(f"Starting Hubble Fit with {len(agn_data['z'])} AGNs and {len(pantheon_data['zHD'])} SNes...")
-    with multiprocessing.get_context("spawn").Pool(
-        processes=num_cores
-    ) as pool:            
-        # use NestedSampler for precise log-evidence estimates (e.g., model selection)
-        # use DynamicNestSampler for Cosmological parameter inference
-        if resume:
-            print("[WARNING] Resuming from checkpoint file...")
-            if isinstance(resume, str):
-                checkpoint_file = resume
-                print(f"Resuming from checkpoint file: {checkpoint_file}")
-            elif resume is True:                
-                print(f"Resuming from default checkpoint file: {checkpoint_file}")
-            if os.path.exists(checkpoint_file):
-                sampler = DynamicNestedSampler.restore(checkpoint_file, pool=pool)
-            else:
-                print(f"Checkpoint file {checkpoint_file} does not exist. Starting fresh run.")
-                #raise RuntimeError("Checkpoint file does not exist.")
-                resume = False  # Start fresh if checkpoint doesn't exist
-        if not resume:
+
+    if resume:
+        print("[WARNING] Resuming from checkpoint file...")
+        if isinstance(resume, str):
+            checkpoint_file = resume
+            print(f"Resuming from checkpoint file: {checkpoint_file}")
+        elif resume is True:                
+            print(f"Resuming from default checkpoint file: {checkpoint_file}")
+        if os.path.exists(checkpoint_file):
+            #sampler = DynamicNestedSampler.restore(checkpoint_file, pool=pool)
+            r = load_chains(checkpoint_file)
+            flat_samples = r["flat_samples"]
+            dmi_max_w = r["dmi_max_w"]
+            logZ = r["logZ"]
+            logZerr = r["logZerr"]
+            integrals_max_w = r["integrals_max_w"]
+        else:
+            print(f"Checkpoint file {checkpoint_file} does not exist. Starting fresh run.")
+            #raise RuntimeError("Checkpoint file does not exist.")
+            resume = False  # Start fresh if checkpoint doesn't exist
+
+
+    if not resume:
+        with multiprocessing.get_context("spawn").Pool(
+            processes=num_cores
+        ) as pool:            
+            # use NestedSampler for precise log-evidence estimates (e.g., model selection)
+            # use DynamicNestSampler for Cosmological parameter inference
             logl_kwargs = dict(
                 agn_data=agn_data,
                 agn_calibrators_data=agn_calibrators_data,
@@ -147,7 +156,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                 print("[Warning] Starting fast run...")
                 sampler.run_nested(
                     resume=resume,
-                    checkpoint_file=checkpoint_file,
+                    checkpoint_file=checkpoint_file.replace('.hdf5', '.save'),
                     print_progress=True,
                     dlogz_init=10,                 
                     n_effective=50,                # 300–1000 typical for model comparison
@@ -159,7 +168,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                 # Production run?
                 sampler.run_nested(
                     resume=resume,
-                    checkpoint_file=checkpoint_file,
+                    checkpoint_file=checkpoint_file.replace('.hdf5', '.save'),
                     print_progress=True,
                     dlogz_init=0.01,                 
                     n_effective=2000,                # 300–1000 typical for model comparison
@@ -172,7 +181,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                 # "Fast" test run?
                 sampler.run_nested(
                     resume=resume,
-                    checkpoint_file=checkpoint_file,
+                    checkpoint_file=checkpoint_file.replace('.hdf5', '.save'),
                     print_progress=True,
                     dlogz_init=0.01,                 
                     n_effective=500,                # 300–1000 typical for model comparison
@@ -180,24 +189,12 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                     nlive_batch=30   # reasonable batch size for dynamic allocation
                 )
 
-            # elif speed == "test":
-            #     print("[Warning] Starting TEST run...")
-            #     # "Fast" test run?
-            #     sampler.run_nested(
-            #         resume=resume,
-            #         checkpoint_file=checkpoint_file,
-            #         print_progress=True,
-            #         dlogz_init=0.01,                 
-            #         n_effective=2000,                # 300–1000 typical for model comparison
-            #         nlive_init=250,   # bump live points
-            #         nlive_batch=100   # reasonable batch size for dynamic allocation
-            #     )
             elif speed == "test":
                 print("[Warning] Starting TEST run...")
                 # "Fast" test run?
                 sampler.run_nested(
                     resume=resume,
-                    checkpoint_file=checkpoint_file,
+                    checkpoint_file=checkpoint_file.replace('.hdf5', '.save'),
                     print_progress=True,
                     dlogz_init=0.01,                 
                     n_effective=1000,                # 300–1000 typical for model comparison
@@ -206,70 +203,73 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                 )
 
 
-    results = sampler.results
-    logZ, logZerr = results.logz[-1], results.logzerr[-1]
-    print(f"\nBayesian evidence logZ = {logZ:.2f} ± {logZerr:.2f}")
-    if logZerr > 1:
-        print("Warning: logZ error is large, consider increasing nlive or maxiter.")
+        results = sampler.results
+        print("Plotting full dynesty corner...")
+        plot_dynesty(sampler.results, cosmo_model, checkpoint_folder, only_sna=only_sna, speed=speed)
+        logZ, logZerr = results.logz[-1], results.logzerr[-1]
+        print(f"\nBayesian evidence logZ = {logZ:.2f} ± {logZerr:.2f}")
+        if logZerr > 1:
+            print("Warning: logZ error is large, consider increasing nlive or maxiter.")
+        
+        # --- pull arrays from results ---
+        samples = results.samples                               # (nsamp, ndim)
+        logl    = results.logl                                  # (nsamp,)
+        weights = np.exp(results.logwt - results.logz[-1])      # (nsamp,)
+        blobs   = results.blob                                 # (nsamp, nobj) if blob=True
+
+        # Keep equal-weight resampling
+        idx = np.arange(weights.size)
+        flat_idx = dyfunc.resample_equal(idx, weights)          # (nsamp,)
+        flat_samples = samples[flat_idx]
+        flat_blobs   = blobs[flat_idx]
+
+        # if only_sna:
+        #     return None, flat_samples, model_labels, None, logZ, logZerr
+
+        # --- safety checks ---
+        if blobs is None:
+            raise RuntimeError("results.blobs is None. Did you run with blob=True and return (logl, blob)?")
     
-    # --- pull arrays from results ---
-    samples = results.samples                               # (nsamp, ndim)
-    logl    = results.logl                                  # (nsamp,)
-    weights = np.exp(results.logwt - results.logz[-1])      # (nsamp,)
-    blobs   = results.blob                                 # (nsamp, nobj) if blob=True
+        # ===== Highest posterior weight (MAP-ish) sample =====
+        idx_max_weight = np.argmax(weights)
+        integrals_max_w = blobs[idx_max_weight,:][0]  # this is integrals for that sample, shape: (nobj,)
+        dmi_max_w = blobs[idx_max_weight,:][1]  # this is dmi for that sample, shape: (nobj,)
+        
+        print("\nHighest-weight (posterior) sample:")
+        print("  idx:", idx_max_weight)
+        print("  logl:", float(logl[idx_max_weight]))
+        print("  weight:", float(weights[idx_max_weight]))
+        print("  (preview) integrals[:10]:", integrals_max_w[:10])
 
-    # Keep equal-weight resampling
-    idx = np.arange(weights.size)
-    flat_idx = dyfunc.resample_equal(idx, weights)          # (nsamp,)
-    flat_samples = samples[flat_idx]
-    flat_blobs   = blobs[flat_idx]
+        # Optional: median params from equal-weight posterior
+        median_samples = np.median(flat_samples, axis=0)
+        print("\nMedian parameters (equal-weight posterior):")
+        print(median_samples)
+        # Stats
+        neff = (weights.sum()**2) / (weights**2).sum()
+        print("\nDynesty results stats:")
+        print("  samples shape:", samples.shape)
+        print("  blobs shape:", blobs.shape)
+        print("  weights max:", float(weights.max()))
+        print("  effective samples (ESS):", float(neff))
+        print("  resampled samples shape:", flat_samples.shape)
+        print("  resampled blobs shape:", flat_blobs.shape)
+        
+        print("1 sigma scatter on HD (magnitudes)")
+        sigma_intrinsic = float(np.exp(median_samples[model_labels.index('log_f')]))
+        print("  sigma_intrinsic:", sigma_intrinsic)
 
-    if only_sna:
-        return sampler, flat_samples, model_labels, None, logZ, logZerr
+        # we should save flat_samples, dmi_max_w, logZ, logZerr
+        save_chains(checkpoint_file, flat_samples=flat_samples, dmi_max_w=dmi_max_w, logZ=logZ, logZerr=logZerr, integrals_max_w=integrals_max_w)
 
-    # --- safety checks ---
-    if blobs is None:
-        raise RuntimeError("results.blobs is None. Did you run with blob=True and return (logl, blob)?")
-
-    z = agn_data['z']
-
-    # ===== Highest posterior weight (MAP-ish) sample =====
-    idx_max_weight = np.argmax(weights)
-    integrals_max_w = blobs[idx_max_weight,:][0]  # this is integrals for that sample, shape: (nobj,)
-    dmi_max_w = blobs[idx_max_weight,:][1]  # this is dmi for that sample, shape: (nobj,)
-    
-    print("\nHighest-weight (posterior) sample:")
-    print("  idx:", idx_max_weight)
-    print("  logl:", float(logl[idx_max_weight]))
-    print("  weight:", float(weights[idx_max_weight]))
-    print("  (preview) integrals[:10]:", integrals_max_w[:10])
-
-    # Optional: median params from equal-weight posterior
-    median_samples = np.median(flat_samples, axis=0)
-    print("\nMedian parameters (equal-weight posterior):")
-    print(median_samples)
-    # Stats
-    neff = (weights.sum()**2) / (weights**2).sum()
-    print("\nDynesty results stats:")
-    print("  samples shape:", samples.shape)
-    print("  blobs shape:", blobs.shape)
-    print("  weights max:", float(weights.max()))
-    print("  effective samples (ESS):", float(neff))
-    print("  resampled samples shape:", flat_samples.shape)
-    print("  resampled blobs shape:", flat_blobs.shape)
-    
-    print("1 sigma scatter on HD (magnitudes)")
-    sigma_intrinsic = float(np.exp(median_samples[model_labels.index('log_f')]))
-    print("  sigma_intrinsic:", sigma_intrinsic)
-
-    # Bin dmi in redshift
-    # Interpolate dmi vs redshift for smooth plotting or further analysis (no binning)
-    #dmi_interp = interp1d(z, dmi_max_w)
+        # Bin dmi in redshift
+        # Interpolate dmi vs redshift for smooth plotting or further analysis (no binning)
+        #dmi_interp = interp1d(z, dmi_max_w)
     dm_interp = make_dm_function(df_agn['apparent_mag_2500'].values, df_agn['z'].values, dmi_max_w)
     
-    plot_completeness_diagnostics(dmi_max_w, z, integrals_max_w)
+    plot_completeness_diagnostics(dmi_max_w, agn_data['z'], integrals_max_w)
 
-    return sampler, flat_samples, model_labels, dm_interp, logZ, logZerr
+    return flat_samples, model_labels, dm_interp, logZ, logZerr
 
 
 
@@ -288,7 +288,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         print(f"Limiting AGN data to first {N} entries for speed...")
         df_agn = df_agn.head(N)
         #df_pantheon = df_pantheon.head(N)
-    sampler, flat_samples, model_labels, dm_interp, logZ, logZerr = run_mcmc_pipeline(
+    flat_samples, model_labels, dm_interp, logZ, logZerr = run_mcmc_pipeline(
                                                         df_agn, df_agn_all,
                                                         df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
                                                         df_calibrators=df_calibrators,
@@ -301,18 +301,15 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
     age, age_err = compute_age_universe_with_error(flat_samples, cosmo_model)
 
     if skip_plots:
-        return sampler, flat_samples, model_labels, dm_interp, logZ, logZerr, None, (age, age_err)
+        return flat_samples, model_labels, dm_interp, logZ, logZerr, None, (age, age_err)
 
     plot_path = f"plots/hubble/{prefix}/{cosmo_model}_{'sna' if only_sna else 'joint'}_{speed}"
     print(f"Saving plots to ", plot_path)
     os.makedirs(plot_path, exist_ok=True)
 
-    print("Plotting full dynesty corner...")
-    plot_dynesty(sampler.results, cosmo_model, plot_path)
-
     if only_sna:
         print("Skipping AGN-specific plots for SNe-only run.")
-        return sampler, flat_samples, model_labels, dm_interp, logZ, logZerr, None, None
+        return flat_samples, model_labels, dm_interp, logZ, logZerr, None, None
 
     print("Plotting predicted L2500 vs ...")
     # plot_predicted_L2500_vs_sigmahat(flat_samples, df_agn, cosmo_model=cosmo_model, z_pivot_agn=z_pivot_agn, 
@@ -403,7 +400,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
 
     plot_residuals_vs_alphaOX(df_agn, debiased_residuals, debiased_residuals_err, show=False, plot_path=plot_path)
 
-    return sampler, flat_samples, model_labels, dm_interp, logZ, logZerr, debiased_residuals, (age, age_err)
+    return flat_samples, model_labels, dm_interp, logZ, logZerr, debiased_residuals, (age, age_err)
 
 
 def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, 
@@ -454,11 +451,11 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
     make_cosmo_table_latex(results_latex, write_path=f"plots/hubble/{prefix}/")
 
     compare_r = compare_models_by_log_evidence_all(cosmo_models_dict, write_path=f"plots/hubble/{prefix}/")
-    write_results_tex_variables(df_agn, z_range, cosmo_model_samples['Flatw0waCDM'], 'Flatw0waCDM', compare_r,
-                                f"plots/hubble/{prefix}", result_prefix=result_prefix, age=cosmo_models_dict['Flatw0waCDM']['age'])
+    write_results_tex_variables(df_agn, z_range, cosmo_model_samples, compare_r,
+                                f"plots/hubble/{prefix}", result_prefix=result_prefix, age_dict=cosmo_models_dict)
     
     print("================================================================\n\n")
-
+    return cosmo_models_dict, cosmo_model_samples, results_latex, compare_r
 
 if __name__ == "__main__":
     #global _sna_LogdetCov, _sna_L, _sna_Lower

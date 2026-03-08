@@ -29,7 +29,7 @@ from dynesty.utils import resample_equal
 from tqdm import tqdm
 from dynesty import plotting as dyplot
 
-def plot_dynesty(results, cosmo_model, plot_path="plots/hubble", show=False):
+def plot_dynesty(results, cosmo_model, plot_path="plots/hubble", only_sna="", speed="", show=False):
     """
     Plot dynesty diagnostics: runplot, traceplot, and cornerpoints using dyplot.
     Saves figures to files with the given basename.
@@ -45,7 +45,7 @@ def plot_dynesty(results, cosmo_model, plot_path="plots/hubble", show=False):
                                                  color='blue',
                                                  #fig=plt.subplots(1, 1, figsize=(10, 2.5 * len(model_labels))))
     )
-    fig_corner.savefig(f"{plot_path}/cornerplot.png", dpi=100)
+    fig_corner.savefig(f"{plot_path}/cornerplot_{cosmo_model}_{'sna' if only_sna else 'joint'}_{speed}.png", dpi=100)
     if show:
         plt.show()    
     plt.close(fig_corner)
@@ -60,7 +60,7 @@ def plot_dynesty(results, cosmo_model, plot_path="plots/hubble", show=False):
     )
     fig_trace.tight_layout(pad=2.0, h_pad=1)
 
-    fig_trace.savefig(f"{plot_path}/traceplot.png", dpi=100)
+    fig_trace.savefig(f"{plot_path}/traceplot_{cosmo_model}_{'sna' if only_sna else 'joint'}_{speed}.png", dpi=100)
     if show:
         plt.show()
     plt.close(fig_trace)

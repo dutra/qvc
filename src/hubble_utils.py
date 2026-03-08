@@ -1521,7 +1521,7 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=10,
     # if 'psf_minus_fiber_r' in df_agn: df_agn['log_psf_minus_fiber_r'] = _safelog(df_agn['psf_minus_fiber_r'])
     # if 'petroRad_r' in df_agn: df_agn['log_petroRad_r'] = _safelog(df_agn['petroRad_r'])
     # if 'log_tau_drw0_rhat' in df_agn: df_agn['log_log_tau_drw0_rhat'] = _safelog(df_agn['tau_drw0_rhat'])
-    # for col in ['BC', 'decomp_host', 'poly']:
+    # for col in ['BC', 'I', 'poly']:
     #     if col in df_agn:
     #         df_agn[col] = df_agn[col].replace(
     #             {True: 1, False: 0, 'True': 1, 'False': 0, 'true': 1, 'false': 0}
@@ -2840,278 +2840,230 @@ import math
 from typing import Tuple, Optional
 from astropy.cosmology import FlatLambdaCDM
 
-def _round_sig(x: float, sig: int) -> float:
-    if x == 0 or not math.isfinite(x):
-        return x
-    return round(x, -int(math.floor(math.log10(abs(x)))) + (sig - 1))
+import math
+import numpy as np
+import os
+from itertools import combinations
 
-def format_value_uncertainty(
-    median: float,
-    err: Optional[float] = None,
-    *,
-    twosig_when=(1, 2, 3),
-    sci: bool = True,
-    latex: bool = True,
-    unit: Optional[str] = None,
-    max_decimals_no_sci: int = 2,          # <- cap decimals in non-sci mode
-    prefer_fewer_decimals: bool = True     # <- use 1 sig fig if 2 would exceed the cap
-) -> Tuple[float, Optional[float], int, str]:
+def format_value_uncertainty(val, err=None, unit=None):
     """
-    Returns (value_rounded, err_rounded, exponent, formatted_string).
-    - Uncertainty: 1 sig fig, except 2 when leading digit in twosig_when,
-      but if that would exceed `max_decimals_no_sci` in non-sci mode, fall back to 1.
-    - Value rounded to same decimal place as the (rounded) uncertainty.
-    - No '±' when err is None.
-    - Avoid sci for 0.1 <= |value| < 10 (plain decimals).
-    - Special-case: fold 1×10^{-1} or 1×10^{-2} into 0.1 / 0.01.
+    Formats a (value, error) pair into a LaTeX string with scientific notation 
+    and appropriate significant figures.
     """
-    # choose exponent (initial)
-    if median == 0 or not math.isfinite(median):
+    # 1. Safety Checks (Handle N/A, Inf, NaN)
+    if val is None:
+        return "N/A"
+    try:
+        val_float = float(val)
+        if not math.isfinite(val_float):
+            return "N/A"
+    except (ValueError, TypeError):
+        # If val is a string (e.g., model name), return as is
+        return str(val)
+
+    # 2. Determine Exponent (Order of Magnitude)
+    if val_float == 0:
         exponent = 0
     else:
-        exponent = int(math.floor(math.log10(abs(median)))) if sci else 0
+        exponent = int(math.floor(math.log10(abs(val_float))))
 
-    # avoid sci in [0.1, 10)
-    if sci and 0.1 <= abs(median) < 10:
-        exponent = 0
-
-    scale = 10.0 ** exponent if exponent != 0 else 1.0
-    v = median / scale
-
-    def decimals_needed(x: float) -> int:
-        if x == 0: return 0
-        return max(0, -int(math.floor(math.log10(abs(x)))))  # e.g. 0.02 -> 2
-
-    if err is None:
-        v_rounded = _round_sig(v, 3) if exponent != 0 else _round_sig(v, 3)
-        e_rounded = None
+    # 3. Setup Scientific Notation
+    # Use sci notation if |exponent| >= 3 (e.g. 1000 or 0.001) or specific large values
+    if abs(exponent) >= 3:
+        scale = 10.0 ** exponent
+        is_sci = True
     else:
-        if err < 0 or not math.isfinite(err):
-            raise ValueError("err must be finite and non-negative.")
-        e = err / scale
-
-        if e == 0:
-            e_rounded = 0.0
-            v_rounded = round(v, 6)
-        else:
-            # candidate with 2 sig figs?
-            e1 = _round_sig(e, 1)
-            lead = int(abs(e1) / (10 ** math.floor(math.log10(abs(e1)))))
-            use_two = lead in twosig_when
-
-            # if non-sci and two sig figs would exceed decimal cap, fall back to 1
-            if use_two:
-                e_two = _round_sig(e, 2)
-                if exponent == 0 and prefer_fewer_decimals and decimals_needed(e_two) > max_decimals_no_sci:
-                    use_two = False
-
-            sig_unc = 2 if use_two else 1
-            e_rounded = _round_sig(e, sig_unc)
-
-            # round value to same decimal place as e_rounded
-            digits = decimals_needed(e_rounded)
-            v_rounded = round(v, digits)
-
-            # re-enforce after potential order change
-            e_rounded = _round_sig(e, sig_unc)
-            digits = decimals_needed(e_rounded)
-            v_rounded = round(v, digits)
-
-    # special-case: (±)1×10^{-1 or -2} -> fold to decimal
-    if sci and exponent in (-1, -2) and (abs(v_rounded) == 1.0):
-        v_rounded *= 10 ** exponent
-        if err is not None:
-            e_rounded *= 10 ** exponent
-        exponent = 0
         scale = 1.0
+        exponent = 0
+        is_sci = False
 
-    # build string
-    if latex:
-        if exponent != 0:
-            s = (f"{v_rounded}\\times 10^{{{exponent}}}"
-                 if err is None else f"({v_rounded} \\pm {e_rounded})\\times 10^{{{exponent}}}")
-        else:
-            s = (f"{v_rounded}" if err is None else f"{v_rounded} \\pm {e_rounded}")
-        if unit:
-            s += f"\\,\\mathrm{{{unit}}}"
-    else:
-        if exponent != 0:
-            s = (f"{v_rounded}×10^{exponent}"
-                 if err is None else f"({v_rounded} ± {e_rounded})×10^{exponent}")
-        else:
-            s = (f"{v_rounded}" if err is None else f"{v_rounded} ± {e_rounded}")
-        if unit:
-            s += f" {unit}"
-
-    val_out = v_rounded * (10 ** exponent if exponent != 0 else 1.0)
-    err_out = (e_rounded * (10 ** exponent) if (err is not None and exponent != 0) else (e_rounded if err is not None else None))
+    val_norm = val_float / scale
     
-    return s
-    return val_out, err_out, exponent, s
+    # 4. Determine Precision and Format
+    # Handle Error
+    err_float = None
+    if err is not None:
+        try:
+            err_float = float(err)
+            if not math.isfinite(err_float):
+                err_float = None
+        except (ValueError, TypeError):
+            err_float = None
+
+    if err_float is None:
+        # No error: Default to 2 decimal places
+        main_str = f"{val_norm:.2f}"
+    else:
+        err_norm = err_float / scale
+        
+        if err_norm == 0:
+            main_str = f"{val_norm:.2f} \\pm 0.00"
+        else:
+            # Find order of magnitude of the error
+            err_log = math.floor(math.log10(abs(err_norm)))
+            
+            # Rule: Keep 2 sig figs if leading digit is 1, else 1 sig fig
+            leading_digit = int(abs(err_norm) / (10**err_log))
+            
+            if leading_digit == 1:
+                decimals = -int(err_log) + 1
+            else:
+                decimals = -int(err_log)
+            
+            # Ensure we don't have negative decimals
+            decimals = max(0, decimals)
+            
+            # Format value and error to this precision
+            main_str = f"({val_norm:.{decimals}f} \\pm {err_norm:.{decimals}f})"
+
+    # 5. Construct Final LaTeX String
+    if is_sci:
+        final_str = f"{main_str} \\times 10^{{{exponent}}}"
+    else:
+        # If not scientific, remove parens if they exist (cleaner look)
+        final_str = main_str.replace("(", "").replace(")", "")
+
+    if unit:
+        final_str += f"\\,\\mathrm{{{unit}}}"
+        
+    return final_str
 
 def write_results_tex_variables(
-    df_agn, z_range, flat_samples, cosmo_model, compare_r,
-    write_path, result_prefix="", chisq_dict=None, age=None
+    df_agn, z_range, cosmo_model_samples, compare_r,
+    write_path, result_prefix="", chisq_dict=None, age_dict=None
 ):
     """
     Write key cosmological parameters AND model comparison results
-    to a LaTeX file as \newcommand definitions.
+    to a LaTeX file.
     """
-    import os
-    import numpy as np
-    from itertools import combinations
-
-    flat_samples = np.asarray(flat_samples)
-
-    # --- AGN pivots
-    obs_arr, err_arr, pivots_arr = agn_model_pack_obs(df_agn)
-    log_sigma_UV_pivot  = pivots_arr[agn_model_oidx["log_sigma_UV"]]
-    log_tau_UV_RF_pivot = pivots_arr[agn_model_oidx["log_tau_UV_RF"]]
-
-    priors, model_labels, _ = get_model_params(cosmo_model)
-    results = {key: sym_percentile(flat_samples[:, i])
-               for i, key in enumerate(model_labels)}
-
     lines = []
     lines.append(r"% Auto-generated cosmological and evidence results")
     lines.append(r"% Do not edit manually; regenerated by write_results_tex_variables()")
-    lines.append(r"\newcommand{\result%sNumAGNPlotted}{%d}" % (result_prefix, len(df_agn)))
-    lines.append(r"\newcommand{\result%sNumAGNFitted}{%d}" % (result_prefix, len(df_agn[df_agn['z'].between(z_range[0], z_range[1])])))
-    if age is not None:
-        age, age_err = age
-    else:
-        age, age_err = np.nan, np.nan
-    lines.append(r"\newcommand{\result%sAgeUniverse}{\ensuremath{%.2f\pm%.2f\,\mathrm{Gyr}}}" % (result_prefix, age, age_err))
+
+    # --- Helpers ---
+    def _clean(name):
+        return name.replace("0", "Zero").replace("Λ", "Lambda").replace("_", "")
+
+    def _cmd(name, content, model_suffix=""):
+        cmd_name = f"result{result_prefix}{_clean(model_suffix)}{name}"
+        return f"\\newcommand{{\\{cmd_name}}}{{\\ensuremath{{{content}}}}}"
+
+    def _sym_percentile(data, percentiles=[16, 50, 84]):
+        if len(data) == 0: return np.nan, np.nan
+        p = np.percentile(data, percentiles)
+        return p[1], (p[2] - p[0]) / 2.0
+
+    # --- Global AGN stats ---
+    obs_arr, err_arr, pivots_arr = agn_model_pack_obs(df_agn)
+    log_sigma_UV_pivot = pivots_arr[agn_model_oidx["log_sigma_UV"]]
+    log_tau_UV_RF_pivot = pivots_arr[agn_model_oidx["log_tau_UV_RF"]]
+    n_fitted = len(df_agn[df_agn['z'].between(z_range[0], z_range[1])])
+
+    lines.append(_cmd("NumAGNPlotted", len(df_agn)))
+    lines.append(_cmd("NumAGNFitted", n_fitted))
+    lines.append(_cmd("SigmaUVPivot", f"{10**log_sigma_UV_pivot:.1f}"))
+    lines.append(_cmd("TauUVRFPivot", f"{10**log_tau_UV_RF_pivot:.0f}"))
 
     # ===============================
-    # --- Model comparison results ---
+    # --- Per-Model Parameters ---
     # ===============================
-    if compare_r is not None:
-        # Preferred model overall
-        preferred = compare_r["preferred_model"]
-        lines.append(r"\newcommand{\result%sPreferredModelOverall}{%s}" % (result_prefix, preferred))
+    for model_name, flat_samples in cosmo_model_samples.items():
+        flat_samples = np.asarray(flat_samples)
+        priors, model_labels, _ = get_model_params(model_name)
+        results = {key: _sym_percentile(flat_samples[:, i]) for i, key in enumerate(model_labels)}
 
-        # Per-model stats relative to TOP
-        for r in compare_r["ranking"]:
-            model = r["model"]
-            safe = model.replace("0", "Zero").replace("Λ", "Lambda")  # latex-safe key
-            lines.append(r"\newcommand{\result%sLogZ%s}{%.1f}" %
-                         (result_prefix, safe, r["logZ"]))
-            lines.append(r"\newcommand{\result%sLogZerr%s}{%.1f}" %
-                         (result_prefix, safe, r["logZerr"]))
-            lines.append(r"\newcommand{\result%sDeltaLogZ%s}{%.1f}" %
-                         (result_prefix, safe, r["delta_logZ_vs_top"]))
-            lines.append(r"\newcommand{\result%sSigma%s}{%.1f}" %
-                         (result_prefix, safe, r["sigma_two_sided_vs_top"]))
-            lines.append(r"\newcommand{\result%sJeffreysStrength%s}{%s}" %
-                         (result_prefix, safe, r["jeffreys_strength_vs_top"]))
+        # Standard Params
+        if 'Om0' in results:
+            lines.append(_cmd("OmZero", format_value_uncertainty(*results['Om0']), model_suffix=model_name))
+        if 'w0' in results:
+            lines.append(_cmd("wZero", format_value_uncertainty(*results['w0']), model_suffix=model_name))
+        if 'wa' in results:
+            lines.append(_cmd("wa", format_value_uncertainty(*results['wa']), model_suffix=model_name))
+        if 'H0' in results:
+             lines.append(_cmd("HZero", format_value_uncertainty(*results['H0']), model_suffix=model_name))
 
-        # ---------- Helpers ----------
-        def _latex_model_token(name: str) -> str:
-            return {
-                "Flatw0waCDM": "FlatwZeroWaCDM",
-                "FlatwCDM": "FlatwCDM",
-                "FlatLambdaCDM": "FlatLambdaCDM",
-            }.get(name, name.replace("0", "Zero").replace("Λ", "Lambda"))
-
-        def _get_pair(a: str, b: str):
-            """Fetch pair dict for (a,b) regardless of direction."""
-            pw = compare_r.get("pairwise", {})
-            return pw.get(a, {}).get(b) or pw.get(b, {}).get(a)
-
-        def _emit_pair(lines_list, a: str, b: str):
-            pair = _get_pair(a, b)
-            base = f"{_latex_model_token(a)}{_latex_model_token(b)}"
-            if pair:
-                lines_list.append(
-                    r"\newcommand{\result%sDeltaLogZ%s}{\ensuremath{%.1f \pm %.1f}}" %
-                    (result_prefix, base, pair["delta_logZ"], pair["delta_logZ_err"])
-                )
-                lines_list.append(
-                    r"\newcommand{\result%sSigma%s}{%.1f}" %
-                    (result_prefix, base, pair["sigma_two_sided"])
-                )
-                lines_list.append(
-                    r"\newcommand{\result%sJeffreysStrength%s}{%s}" %
-                    (result_prefix, base, pair["jeffreys_strength"])
-                )
-                lines_list.append(
-                    r"\newcommand{\result%sZmc%s}{%.1f}" %
-                    (result_prefix, base, pair["z_mc"])
-                )
+        # Age
+        if age_dict and model_name in age_dict:
+            entry = age_dict[model_name]
+            if isinstance(entry, dict) and 'age' in entry:
+                val, err = entry['age']
+                lines.append(_cmd("AgeUniverse", format_value_uncertainty(val, err, unit=r"Gyr"), model_suffix=model_name))
             else:
-                lines_list.append(r"\newcommand{\result%sDeltaLogZ%s}{N/A}" % (result_prefix, base))
-                lines_list.append(r"\newcommand{\result%sSigma%s}{N/A}" % (result_prefix, base))
-                lines_list.append(r"\newcommand{\result%sJeffreysStrength%s}{N/A}" % (result_prefix, base))
-                lines_list.append(r"\newcommand{\result%sZmc%s}{N/A}" % (result_prefix, base))
+                lines.append(_cmd("AgeUniverse", "N/A", model_suffix=model_name))
 
-        # ---------- Iterate over all model pairs (no hardcoding) ----------
-        models = [r["model"] for r in compare_r.get("ranking", [])]
-        for a, b in combinations(models, 2):
-            _emit_pair(lines, a, b)
+        # AGN Params
+        if 'alpha_agn' in results:
+            lines.append(_cmd("AlphaAGN", format_value_uncertainty(*results['alpha_agn']), model_suffix=model_name))
+        if 'beta_agn' in results:
+            lines.append(_cmd("BetaAGN", format_value_uncertainty(*results['beta_agn']), model_suffix=model_name))
 
-    else:
-        lines.append(r"\newcommand{\result%sPreferredModelOverall}{N/A}" % result_prefix)
+        # Derived Params
+        try:
+            idx_M0 = model_labels.index('M0_agn')
+            idx_alpha = model_labels.index('alpha_agn')
+            idx_beta = model_labels.index('beta_agn')
+            idx_logf = model_labels.index('log_f')
+
+            L_intercept = np.power(10, (90 - flat_samples[:, idx_M0]) / 2.5)
+            alpha_L = flat_samples[:, idx_alpha] * (-1/2.5)
+            beta_L = flat_samples[:, idx_beta] * (-1/2.5)
+            hd_scatter = np.exp(flat_samples[:, idx_logf])
+            l_scatter = hd_scatter / 2.5
+
+            # THIS CALL NOW USES THE SCIENTIFIC FORMATTER
+            lines.append(_cmd("LIntercept", format_value_uncertainty(*_sym_percentile(L_intercept), unit=r"erg\,s^{-1}"), model_suffix=model_name))
+            lines.append(_cmd("AlphaAGNL", format_value_uncertainty(*_sym_percentile(alpha_L)), model_suffix=model_name))
+            lines.append(_cmd("BetaAGNL", format_value_uncertainty(*_sym_percentile(beta_L)), model_suffix=model_name))
+            lines.append(_cmd("ScatterHD", format_value_uncertainty(*_sym_percentile(hd_scatter), unit=r"mag"), model_suffix=model_name))
+            lines.append(_cmd("ScatterL", format_value_uncertainty(*_sym_percentile(l_scatter), unit=r"dex"), model_suffix=model_name))
+        except ValueError:
+            pass
+
+        if chisq_dict and model_name in chisq_dict:
+            lines.append(_cmd("ChiSqRed", format_value_uncertainty(chisq_dict[model_name]), model_suffix=model_name))
 
     # ===============================
-    # --- AGN relation results ---
+    # --- Model Comparisons ---
     # ===============================
-    lines.append(r"\newcommand{\result%sAlphaAGN}{\ensuremath{%s}}" %
-                 (result_prefix, format_value_uncertainty(results['alpha_agn'][0], results['alpha_agn'][1])))
-    lines.append(r"\newcommand{\result%sBetaAGN}{\ensuremath{%s}}" %
-                 (result_prefix, format_value_uncertainty(results['beta_agn'][0], results['beta_agn'][1])))
-    lines.append(r"\newcommand{\result%sSigmaUVPivot}{\ensuremath{%.1f}}" %
-                 (result_prefix, 10**log_sigma_UV_pivot))
-    lines.append(r"\newcommand{\result%sTauUVRFPivot}{\ensuremath{%.0f}}" %
-                 (result_prefix, 10**log_tau_UV_RF_pivot))
+    if compare_r:
+        lines.append(r"% --- Model Comparisons ---")
+        if "preferred_model" in compare_r:
+            lines.append(_cmd("PreferredModelOverall", compare_r["preferred_model"]))
 
-    # Cosmological parameters
-    lines.append(r"\newcommand{\result%sOmZero}{\ensuremath{%s}}" % (result_prefix, f"{results['Om0'][0]:.2f} \pm {results['Om0'][1]:.2f}"))
-    lines.append(r"\newcommand{\result%swZero}{\ensuremath{%s}}" % (result_prefix, f"{results['w0'][0]:.2f} \pm {results['w0'][1]:.2f}"))
-    if cosmo_model in ('Flatw0waCDM', 'FlatwpwaCDM'):
-        lines.append(r"\newcommand{\result%swa}{%s}" % (result_prefix, f"{results['wa'][0]:.2f} \pm {results['wa'][1]:.2f}"))
+        for r in compare_r.get("ranking", []):
+            m_name = r["model"]
+            lines.append(_cmd("LogZ", f"{r['logZ']:.1f}", model_suffix=m_name))
+            lines.append(_cmd("LogZerr", f"{r['logZerr']:.1f}", model_suffix=m_name))
+            lines.append(_cmd("DeltaLogZ", f"{r['delta_logZ_vs_top']:.1f}", model_suffix=m_name))
+            lines.append(_cmd("Sigma", f"{r['sigma_two_sided_vs_top']:.1f}", model_suffix=m_name))
+            lines.append(_cmd("JeffreysStrength", r['jeffreys_strength_vs_top'], model_suffix=m_name))
 
+        pw = compare_r.get("pairwise", {})
+        ranked_models = [r["model"] for r in compare_r.get("ranking", [])]
+        
+        for a, b in combinations(ranked_models, 2):
+            pair = pw.get(a, {}).get(b) or pw.get(b, {}).get(a)
+            pair_name = f"{_clean(a)}{_clean(b)}" 
 
-    # Derived intercepts
-    M0_agn_samples = flat_samples[:, model_labels.index('M0_agn')]
-    alpha_agn_samples = flat_samples[:, model_labels.index('alpha_agn')]
-    beta_agn_samples  = flat_samples[:, model_labels.index('beta_agn')]
-    alpha_AGN_L_samples = alpha_agn_samples * (-1/2.5)
-    beta_AGN_L_samples  = beta_agn_samples  * (-1/2.5)
-    L_intercept_samples = np.power(10, (90 - M0_agn_samples) / 2.5)
+            if pair:
+                lines.append(_cmd(f"DeltaLogZ{pair_name}", f"{pair['delta_logZ']:.1f} \\pm {pair['delta_logZ_err']:.1f}"))
+                lines.append(_cmd(f"Sigma{pair_name}", f"{pair['sigma_two_sided']:.1f}"))
+                lines.append(_cmd(f"JeffreysStrength{pair_name}", pair['jeffreys_strength']))
+            else:
+                lines.append(_cmd(f"DeltaLogZ{pair_name}", "N/A"))
 
-    lines.append(r"\newcommand{\result%sLIntercept}{\ensuremath{%s}}" %
-                 (result_prefix, format_value_uncertainty(*sym_percentile(L_intercept_samples), unit=r"erg\,s^{-1}")))
-    lines.append(r"\newcommand{\result%sAlphaAGNL}{\ensuremath{%s}}" %
-                 (result_prefix, format_value_uncertainty(*sym_percentile(alpha_AGN_L_samples))))
-    lines.append(r"\newcommand{\result%sBetaAGNL}{\ensuremath{%s}}" %
-                 (result_prefix, format_value_uncertainty(*sym_percentile(beta_AGN_L_samples))))
-
-    hd_scatter_samples = np.exp(flat_samples[:, model_labels.index('log_f')])
-    lines.append(r"\newcommand{\result%sScatterHD}{\ensuremath{%s}}" %
-                 (result_prefix, format_value_uncertainty(*sym_percentile(hd_scatter_samples), unit=r"mag")))
-    l_scatter_samples = hd_scatter_samples / 2.5
-    lines.append(r"\newcommand{\result%sScatterL}{\ensuremath{%s}}" %
-                 (result_prefix, format_value_uncertainty(*sym_percentile(l_scatter_samples), unit=r"dex")))
-
-    if chisq_dict is not None:
-        for key, val in chisq_dict.items():
-            lines.append(r"\newcommand{\result%sChiSqRed}{\ensuremath{%s}}" %
-                         (result_prefix, key, format_value_uncertainty(val, None)))
-
-    # --- Save file ---
-    if result_prefix is not None and result_prefix != "":
-        tex_path = os.path.join(write_path, f"param_results_{result_prefix}.tex")
-    else:
-        tex_path = os.path.join(write_path, "param_results.tex")
+    # ===============================
+    # --- Write File ---
+    # ===============================
+    filename = f"param_results_{result_prefix}.tex" if result_prefix else "param_results.tex"
+    tex_path = os.path.join(write_path, filename)
     os.makedirs(write_path, exist_ok=True)
+    
     with open(tex_path, "w") as f:
-        for line in lines:
-            print(line)
-            f.write(line + "\n")
+        f.write("\n".join(lines))
+        f.write("\n")
+    
     print(f"Wrote result parameters LaTeX commands to {tex_path}")
-
-
 
 def reduced_chi_squared(residuals,
                         model_err,
@@ -3287,3 +3239,33 @@ def make_agn_latex_table(
     with open(out_path, "w") as f:
         f.write(latex_str)
     return latex_str
+
+
+def save_chains(filename, **kwargs):
+    """
+    Saves arbitrary arrays and scalars to an HDF5 file.
+    Usage: save_chains('test.h5', flat_samples=samples, logZ=logZ)
+    """
+    with h5py.File(filename, 'w') as f:
+        for name, data in kwargs.items():
+            # Create a dataset for each item
+            # compression='gzip' is useful for the large arrays (flat_samples)
+            # but standard scalars don't need compression.
+            if isinstance(data, (np.ndarray, list)):
+                f.create_dataset(name, data=data, compression="gzip")
+            else:
+                # Scalars (floats/ints) don't support compression
+                f.create_dataset(name, data=data)
+    
+    print(f"Saved: {list(kwargs.keys())} to {filename}")
+
+def load_chains(filename):
+    """
+    Loads HDF5 data into a python dictionary.
+    """
+    results = {}
+    with h5py.File(filename, 'r') as f:
+        for key in f.keys():
+            # [()] loads the dataset into memory as a numpy array or scalar
+            results[key] = f[key][()]
+    return results
