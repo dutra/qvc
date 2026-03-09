@@ -65,6 +65,8 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
         if N > n_avail:
             raise ValueError(f"Requested N={N}, but only {n_avail} AGN available after cuts.")
 
+        subset_seed = 42  # fixed seed for reproducibility
+
         rng = np.random.default_rng(subset_seed)
         idx = rng.choice(n_avail, size=N, replace=False)
         df_agn = df_agn.iloc[np.sort(idx)].reset_index(drop=True)
