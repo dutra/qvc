@@ -643,7 +643,7 @@ def bootstrap_lomb_scargle(
     }
 
 
-def save_combined_plot(samples, model, X, y, yerr, band_idx, mags_means, data, bands=['u', 'g', 'r', 'i', 'z'], plot_psd=True):
+def save_combined_plot(samples, model, X, y, yerr, band_idx, mags_means, data, bands=['u', 'g', 'r', 'i', 'z'], plot_psd=True, time0=0.0):
     logging.info("Saving combined plot")
 
     object_id = data['object_id']
@@ -653,7 +653,7 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, mags_means, data, b
     offsets = np.arange(len(bands)) * 0.25 + mags_means[bands.index('r')]
 
 
-    t = X[0]
+    t = X[0] + time0
     for n in np.unique(band_idx):
         mask = (band_idx == n) & (yerr < 10.0)
 
@@ -668,7 +668,7 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, mags_means, data, b
         t_test = np.linspace(t.min() - 400, t.max() + 400, 1000)
         # Compute predictions using the model
         posterior_median = {k: np.median(v, axis=0) for k, v in samples.items()}
-        result = model.pred(posterior_median, (t_test, jnp.full_like(t_test, n, dtype=int)))
+        result = model.pred(posterior_median, (t_test - time0, jnp.full_like(t_test, n, dtype=int)))
 
         # Plot the predictions
         if len(result) == 2:
@@ -693,7 +693,7 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, mags_means, data, b
                                lw=0.5, color=colors[band_idx_map[n]])
     
     ax_lc.set_ylim(ax_lc.get_ylim()[0] - 0.24, ax_lc.get_ylim()[1])
-    ax_lc.set_xlabel('MJD')
+    ax_lc.set_xlabel('Time (modified Julian days)')
     ax_lc.set_ylabel('Apparent magnitude')
     ax_lc.invert_yaxis()
     ax_lc.set_xlim(np.min(t_test), np.max(t_test))

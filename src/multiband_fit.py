@@ -122,6 +122,7 @@ def make_lc(
 
     # Combine arrays
     all_times = np.concatenate([np.asarray(times[b]) for b in bands])
+    print("ALL times: ", all_times[0])
     all_mags = np.concatenate([np.asarray(mags[b]) for b in bands])
     all_magerrs = np.concatenate([np.asarray(magerrs[b]) for b in bands])
     band_idx = np.concatenate([np.full(len(times[b]), i) for i, b in enumerate(bands)]).astype(
@@ -254,12 +255,14 @@ def make_lc(
             all_mags[m] = all_mags[m] - mu
 
     # Build arrays
+    time0 = np.min(all_times)
     X = (jnp.array(all_times) - jnp.min(all_times), jnp.array(band_idx))
     y = jnp.array(all_mags)
     yerr = jnp.array(all_magerrs)
 
     out = {
         "X": X,
+        "time0": time0,
         "y": y,
         "yerr": yerr,
         "band_idx": band_idx,
@@ -707,12 +710,13 @@ def main():
                     save_combined_plot(
                         obj_flat_samples,
                         m,
-                        obj["X"],
+                        obj["X"],# + obj["time0"],
                         obj["y"],
                         obj["yerr"],
                         obj["band_idx"],
                         obj["mags_means"],
                         result,
+                        time0=obj["time0"],
                         bands=bands,
                         plot_psd=(not args.disable_plot_psd),
                     )
