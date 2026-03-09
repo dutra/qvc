@@ -107,8 +107,13 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
     checkpoint_folder = f'results/hubble_posteriors/{prefix}'
     if not os.path.exists(checkpoint_folder):
         os.makedirs(checkpoint_folder)
-    checkpoint_file = os.path.join(checkpoint_folder,
-                                   f"posteriors_{cosmo_model}_{'sna' if only_sna else 'joint'}_{speed}.h5")
+
+    zmin, zmax = z_range
+    n_tag = "all" if N is None else f"N{N}"
+    z_tag = f"z{zmin:.2f}_{zmax:.2f}".replace(".", "p")
+    run_tag = f"{cosmo_model}_{'sna' if only_sna else 'joint'}_{speed}_{n_tag}_{z_tag}"
+
+    checkpoint_file = os.path.join(checkpoint_folder, f"posteriors_{run_tag}.h5")
     print(f"Checkpoint file: {checkpoint_file}")
     print(f"Starting Hubble Fit with {len(agn_data['z'])} AGNs and {len(pantheon_data['zHD'])} SNes...")
 
@@ -312,7 +317,13 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
     if skip_plots:
         return flat_samples, model_labels, dm_interp, logZ, logZerr, None, (age, age_err)
 
-    plot_path = f"plots/hubble/{prefix}/{cosmo_model}_{'sna' if only_sna else 'joint'}_{speed}"
+    zmin, zmax = z_range
+    n_tag = "all" if N is None else f"N{N}"
+    z_tag = f"z{zmin:.2f}_{zmax:.2f}".replace(".", "p")
+    run_tag = f"{cosmo_model}_{'sna' if only_sna else 'joint'}_{speed}_{n_tag}_{z_tag}"
+
+    plot_path = f"plots/hubble/{prefix}/{run_tag}"
+
     print(f"Saving plots to ", plot_path)
     os.makedirs(plot_path, exist_ok=True)
 
@@ -546,7 +557,7 @@ if __name__ == "__main__":
         for cosmo_model in args.cosmo_models:
             r = run_single(df_agn=df_agn, df_agn_all=df_agn_all, df_pantheon=df_pantheon, _sna_L=_sna_L, _sna_Lower=_sna_Lower, _sna_LogdetCov=_sna_LogdetCov, 
                            cosmo_model=cosmo_model,
-                completeness=not args.disable_completeness, use_full_cov=not args.disable_full_covariance, resume=args.resume,
+                completeness=not args.disable_completeness, use_full_cov=not args.disable_full_covariance, resume=args.resume, z_range=args.z_range,
                 speed=args.speed, N=args.N, only_sna=args.only_sna, use_mu_sh0es=args.use_mu_sh0es,
                 skip_plots=args.skip_plots, residuals_sigma_clip=args.residuals_sigma_clip,
                 z_pivot_agn=args.z_pivot_agn, df_calibrators=df_calibrators)
