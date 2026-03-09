@@ -4,6 +4,11 @@ from astropy.cosmology import FlatwCDM, Flatw0waCDM, FlatLambdaCDM, FlatwpwaCDM
 from scipy import stats
 import numpy as np
 
+try:
+    from numpy import trapezoid as trapz
+except ImportError:
+    from numpy import trapz
+
 #from hubble_utils import loglike_cmb_theta_simple
 from hubble_model import get_model_params, M_model_agn, M_model_agn_err, agn_model_pack_params, agn_model_pack_obs
 
@@ -33,11 +38,11 @@ def completeness_loglike(m_obs, m_obs_err, m_model, mu_err, z, completeness2d, m
     pdf_model = stats.norm.pdf(m_grid[None, :], loc=m_model[:, None], scale=sig)  # (N,G)
     wpdf_model = pdf_model * p_det
 
-    Z = np.trapz(wpdf_model, m_grid, axis=1)                            # (N,)
+    Z = trapz(wpdf_model, m_grid, axis=1)                            # (N,)
     Z = np.clip(Z, tiny, None)                                          # guard denom
 
     # Debias for plotting (the scatter is mostly in M, not Malmquist)
-    m_Z = np.trapz(wpdf_model * m_grid[None, :], m_grid, axis=1)
+    m_Z = trapz(wpdf_model * m_grid[None, :], m_grid, axis=1)
     m_Z = np.clip(m_Z, tiny, None)
     E = m_Z / Z
     dmi_obs = E - m_model
