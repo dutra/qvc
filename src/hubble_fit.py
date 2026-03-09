@@ -561,7 +561,7 @@ if __name__ == "__main__":
                 speed=args.speed, N=args.N, only_sna=args.only_sna, use_mu_sh0es=args.use_mu_sh0es,
                 skip_plots=args.skip_plots, residuals_sigma_clip=args.residuals_sigma_clip,
                 z_pivot_agn=args.z_pivot_agn, df_calibrators=df_calibrators)
-            _, samples_joint, _, _, logZ_joint, logZerr_joint, _, age = r
+            samples_joint, model_labels, dm_interp, logZ_joint, logZerr_joint, debiased_residuals, age = r
             cosmo_models_dict[cosmo_model]['logZ'] = logZ_joint
             cosmo_models_dict[cosmo_model]['logZerr'] = logZerr_joint
             cosmo_models_dict[cosmo_model]['age'] = age
