@@ -121,9 +121,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
         print("[WARNING] Resuming from checkpoint file...")
         if isinstance(resume, str):
             checkpoint_file = resume
-            print(f"Resuming from checkpoint file: {checkpoint_file}")
-        elif resume is True:                
-            print(f"Resuming from default checkpoint file: {checkpoint_file}")
+        print(f"Resuming from default checkpoint file: {checkpoint_file}")
         if os.path.exists(checkpoint_file):
             #sampler = DynamicNestedSampler.restore(checkpoint_file, pool=pool)
             r = load_chains(checkpoint_file)
@@ -175,8 +173,6 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
             if speed == 'fast':
                 print("[Warning] Starting fast run...")
                 sampler.run_nested(
-                    resume=resume,
-                    checkpoint_file=checkpoint_file.replace('.hdf5', '.save'),
                     print_progress=True,
                     dlogz_init=10,                 
                     n_effective=50,                # 300–1000 typical for model comparison
@@ -185,10 +181,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                 )
             elif speed == "production":
                 print("Starting production run...")
-                # Production run?
                 sampler.run_nested(
-                    resume=resume,
-                    checkpoint_file=checkpoint_file.replace('.hdf5', '.save'),
                     print_progress=True,
                     dlogz_init=0.01,                 
                     n_effective=2000,                # 300–1000 typical for model comparison
@@ -198,10 +191,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                 )
             elif speed == "dev":
                 print("[Warning] Starting DEV run...")
-                # "Fast" test run?
                 sampler.run_nested(
-                    resume=resume,
-                    checkpoint_file=checkpoint_file.replace('.hdf5', '.save'),
                     print_progress=True,
                     dlogz_init=0.01,                 
                     n_effective=500,                # 300–1000 typical for model comparison
@@ -211,10 +201,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
 
             elif speed == "test":
                 print("[Warning] Starting TEST run...")
-                # "Fast" test run?
                 sampler.run_nested(
-                    resume=resume,
-                    checkpoint_file=checkpoint_file.replace('.hdf5', '.save'),
                     print_progress=True,
                     dlogz_init=0.01,                 
                     n_effective=1000,                # 300–1000 typical for model comparison
