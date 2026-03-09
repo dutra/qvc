@@ -66,7 +66,9 @@ if __name__ == "__main__":
         # other data
         ("https://drive.google.com/file/d/1sYr-N-DMpuWpbfdPg6zQ-IryP8InY5TK/view?usp=sharing", "./"),
         # nov2_sdss_mags.csv
-        ("https://drive.google.com/file/d/1TbwmKDeBRDMPIGtQm8GcZhpRhcmsGUBO/view?usp=sharing", 'results/data')
+        ("https://drive.google.com/file/d/1TbwmKDeBRDMPIGtQm8GcZhpRhcmsGUBO/view?usp=sharing", 'results/data'),
+        # spectra csv results
+        ("https://drive.google.com/file/d/1AqoIp_gBFk4cnVWg7748g3z9o6d9S7cJ/view?usp=sharing", "results/data"),
     ]
 
     print(f"{Style.BRIGHT}{Fore.MAGENTA}=== Google Drive Batch Downloader ===\n")
