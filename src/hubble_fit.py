@@ -50,13 +50,26 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                       only_sna=False, completeness=True, use_full_cov=True,
                       resume=False, speed="production", use_mu_sh0es=False,
                       z_range=(0.44, 3.16),
-                      #z_range=(1.0, 3.16),
+                      N=None,
                       ):
 
 
     # Restrict AGN data to redshift range in
     df_agn = df_agn.copy()
     df_agn = df_agn[df_agn['z'].between(z_range[0], z_range[1])].reset_index(drop=True)
+
+    n_avail = len(df_agn)
+    print(f"AGN available after cuts: {n_avail}")
+
+    if N is not None:
+        if N > n_avail:
+            raise ValueError(f"Requested N={N}, but only {n_avail} AGN available after cuts.")
+
+        rng = np.random.default_rng(subset_seed)
+        idx = rng.choice(n_avail, size=N, replace=False)
+        df_agn = df_agn.iloc[np.sort(idx)].reset_index(drop=True)
+
+        print(f"Randomly selected N={N} AGN with subset_seed={subset_seed}")
 
     priors, model_labels, model_labels_latex = get_model_params(cosmo_model, only_sna=only_sna)
     ndim = len(model_labels)
@@ -280,14 +293,6 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                z_range=(0.44, 3.16),
                z_pivot_agn=1.5, skip_plots=False, residuals_sigma_clip=None, df_calibrators=None):
 
-    # Load data
-    #global _sna_LogdetCov, _sna_L, _sna_Lower
-    #df_agn, df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_data(agn_data_filepath, populate_sdss=populate_sdss_fields)
-
-    if N is not None:
-        print(f"Limiting AGN data to first {N} entries for speed...")
-        df_agn = df_agn.head(N)
-        #df_pantheon = df_pantheon.head(N)
     flat_samples, model_labels, dm_interp, logZ, logZerr = run_mcmc_pipeline(
                                                         df_agn, df_agn_all,
                                                         df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
@@ -295,6 +300,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                                                         cosmo_model=cosmo_model, z_pivot_agn=z_pivot_agn,
                                                         only_sna=only_sna, completeness=completeness, use_full_cov=use_full_cov,
                                                         z_range=z_range,
+                                                        N=N,
                                                         resume=resume, speed=speed, use_mu_sh0es=use_mu_sh0es)
     
     display_results_summary(flat_samples, cosmo_model, z_pivot_agn)
