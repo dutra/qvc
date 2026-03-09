@@ -15,6 +15,7 @@ os.environ["JAX_PLATFORM_NAME"] = "cpu"
 
 prefix = os.environ.get("PREFIX", "")
 
+from hubble_utils import sym_percentile
 import numpy as np
 import matplotlib.pyplot as plt
 from astropy.cosmology import FlatwCDM, Flatw0waCDM, FlatLambdaCDM, FlatwpwaCDM
@@ -104,6 +105,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
     else:
         agn_calibrators_data = {col: df_calibrators[col].values for col in agn_calibrators_fields if col in df_calibrators.columns}
 
+    prefix = os.environ.get("PREFIX", "default")
     checkpoint_folder = f'results/hubble_posteriors/{prefix}'
     if not os.path.exists(checkpoint_folder):
         os.makedirs(checkpoint_folder)
@@ -195,8 +197,8 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                     print_progress=True,
                     dlogz_init=0.01,                 
                     n_effective=500,                # 300–1000 typical for model comparison
-                    nlive_init=50,   # bump live points
-                    nlive_batch=30   # reasonable batch size for dynamic allocation
+                    nlive_init=30,   # bump live points
+                    nlive_batch=15   # reasonable batch size for dynamic allocation
                 )
 
             elif speed == "test":
@@ -301,8 +303,9 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
     print("Computing age of the universe with error propagation...")
     age, age_err = compute_age_universe_with_error(flat_samples, cosmo_model, max_eval=200)
 
-    if skip_plots:
-        return flat_samples, model_labels, dm_interp, logZ, logZerr, None, (age, age_err)
+    if skip_plots or only_sna:
+        print("Skipping plots, returning results...")
+        return flat_samples, model_labels, dm_interp, logZ, logZerr, None, age, age_err
 
     zmin, zmax = z_range
     n_tag = "all" if N is None else f"N{N}"
@@ -314,9 +317,9 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
     print(f"Saving plots to ", plot_path)
     os.makedirs(plot_path, exist_ok=True)
 
-    if only_sna:
-        print("Skipping AGN-specific plots for SNe-only run.")
-        return flat_samples, model_labels, dm_interp, logZ, logZerr, None, None
+    # if only_sna:
+    #     print("Skipping AGN-specific plots for SNe-only run.")
+    #     return flat_samples, model_labels, dm_interp, logZ, logZerr, None, age, age_err
 
     print("Plotting predicted L2500 vs ...")
     # plot_predicted_L2500_vs_sigmahat(flat_samples, df_agn, cosmo_model=cosmo_model, z_pivot_agn=z_pivot_agn, 
@@ -397,17 +400,10 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         'Hubble': chisq_red_hubble_debiased,
         'L2500': chisq_red_L2500
     }
-    # try:
-    #     write_results_tex_variables(df_agn, flat_samples, cosmo_model, None, 
-    #                                 z_pivot_agn, plot_path, 
-    #                                 result_prefix=result_prefix,
-    #                                 chisq_dict=chisq_dict, age=age)
-    # except Exception as e:
-    #     print("Error writing TeX variables:", e)
 
     plot_residuals_vs_alphaOX(df_agn, debiased_residuals, debiased_residuals_err, show=False, plot_path=plot_path)
 
-    return flat_samples, model_labels, dm_interp, logZ, logZerr, debiased_residuals, (age, age_err)
+    return flat_samples, model_labels, dm_interp, logZ, logZerr, debiased_residuals, age, age_err
 
 
 def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, 
@@ -415,9 +411,12 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
             residuals_sigma_clip=None,
             result_prefix="", z_range=(0.44, 3.16),
             speed="production", resume=False, N=None, use_mu_sh0es=False):
-    #cosmo_models = ['Flatw0waCDM', 'FlatLambdaCDM', 'FlatwCDM']
 
-    cosmo_models_dict = {k: {} for k in cosmo_models}
+    zmin, zmax = z_range
+    n_tag = "all" if N is None else f"N{N}"
+    z_tag = f"z{zmin:.2f}_{zmax:.2f}".replace(".", "p")
+
+    cosmo_models_result_dict = {k: {} for k in cosmo_models}
     results_latex = []
     cosmo_model_samples = {}
 
@@ -430,7 +429,7 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
                        z_range=z_range,
                        cosmo_model_samples=cosmo_model_samples)
         
-        samples_joint, _, _, logZ_joint, logZerr_joint, _, age = r
+        samples_joint, model_labels_joint, dm_interp_joint, logZ_joint, logZerr_joint, debiased_residuals_joint, age_joint, age_err_joint = r
         #print(f"For model {cosmo_model}, universe age: {age:.3f} Gyr")
         r = run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, 
                        cosmo_model=cosmo_model, only_sna=True, 
@@ -438,15 +437,18 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
                        residuals_sigma_clip=residuals_sigma_clip,
                        z_range=z_range,
                        resume=resume, speed=speed, N=N, use_mu_sh0es=use_mu_sh0es)
-        samples_sna, _, _, logZ_sna, logZerr_sna, _, _ = r
+        samples_sna, model_labels_sna, dm_interp_sna, logZ_sna, logZerr_sna, debiased_residuals_sna, age_sna, age_sna_err = r
         
         plot_cosmo_corner(samples_sna, samples_joint, cosmo_model, z_pivot_sna, z_pivot_agn, show=False, 
                           plot_path=f"plots/hubble/{prefix}", speed=speed,
                           gauss_sigma=1.5, kde_bw_scale=1.5)
 
-        cosmo_models_dict[cosmo_model]['logZ'] = logZ_joint
-        cosmo_models_dict[cosmo_model]['logZerr'] = logZerr_joint
-        cosmo_models_dict[cosmo_model]['age'] = age
+        cosmo_models_result_dict[cosmo_model]['logZ'] = logZ_joint
+        cosmo_models_result_dict[cosmo_model]['logZerr'] = logZerr_joint
+        cosmo_models_result_dict[cosmo_model]['age'] = age_joint
+        cosmo_models_result_dict[cosmo_model]['age_err'] = age_err_joint
+
+
 
         r_sna   = extract_cosmo_results_from_samples(samples_sna, cosmo_model, True,  
                                                     logZ_tuple=(logZ_sna, logZerr_sna), format_for_latex=True, value_fmt="{:.2f}")
@@ -454,15 +456,23 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
                                                     logZ_tuple=(logZ_joint, logZerr_joint), format_for_latex=True, value_fmt="{:.2f}")
         cosmo_model_samples[cosmo_model] = samples_joint
         results_latex.extend([r_sna, r_joint])
+
+        for i, key in enumerate(model_labels_joint):
+            median, err = sym_percentile(samples_joint[:, i])
+            cosmo_models_result_dict[cosmo_model][key] = median
+            cosmo_models_result_dict[cosmo_model][f"{key}_err"] = err
     
     make_cosmo_table_latex(results_latex, write_path=f"plots/hubble/{prefix}/")
 
-    compare_r = compare_models_by_log_evidence_all(cosmo_models_dict, write_path=f"plots/hubble/{prefix}/")
+    compare_r = compare_models_by_log_evidence_all(cosmo_models_result_dict, write_path=f"plots/hubble/{prefix}/")
     write_results_tex_variables(df_agn, z_range, cosmo_model_samples, compare_r,
-                                f"plots/hubble/{prefix}", result_prefix=result_prefix, age_dict=cosmo_models_dict)
+                                f"plots/hubble/{prefix}", result_prefix=result_prefix, cosmo_models_result_dict=cosmo_models_result_dict)
+
+    os.makedirs(f"results/cosmo/{prefix}", exist_ok=True)
+    save_cosmo_results_hdf5(f"results/cosmo/{prefix}/cosmo_results_{n_tag}_{z_tag}.hdf5", cosmo_models_result_dict)
     
     print("================================================================\n\n")
-    return cosmo_models_dict, cosmo_model_samples, results_latex, compare_r
+    return cosmo_models_result_dict, cosmo_model_samples, results_latex, compare_r
 
 if __name__ == "__main__":
     #global _sna_LogdetCov, _sna_L, _sna_Lower
@@ -535,10 +545,6 @@ if __name__ == "__main__":
         df_calibrators = None
 
 
-    # if args.N and args.N > 0:
-    #     # df_agn = df_agn.sample(n=args.N, random_state=42)
-    #     df_fit = df_fit[:args.N]
-
     if args.run == "single": # default
         cosmo_models_dict = {k: {} for k in args.cosmo_models}
         for cosmo_model in args.cosmo_models:
@@ -548,10 +554,11 @@ if __name__ == "__main__":
                 speed=args.speed, N=args.N, only_sna=args.only_sna, use_mu_sh0es=args.use_mu_sh0es,
                 skip_plots=args.skip_plots, residuals_sigma_clip=args.residuals_sigma_clip,
                 z_pivot_agn=args.z_pivot_agn, df_calibrators=df_calibrators)
-            samples_joint, model_labels, dm_interp, logZ_joint, logZerr_joint, debiased_residuals, age = r
+            samples_joint, model_labels, dm_interp, logZ_joint, logZerr_joint, debiased_residuals, age, age_err = r
             cosmo_models_dict[cosmo_model]['logZ'] = logZ_joint
             cosmo_models_dict[cosmo_model]['logZerr'] = logZerr_joint
             cosmo_models_dict[cosmo_model]['age'] = age
+            cosmo_models_dict[cosmo_model]['age_err'] = age_err
         compare_r = compare_models_by_log_evidence_all(cosmo_models_dict, write_path=f"plots/hubble/{prefix}/")
     elif args.run == "full":
         run_all(df_agn=df_agn, df_agn_all=df_agn_all, df_pantheon=df_pantheon, _sna_L=_sna_L, _sna_Lower=_sna_Lower, _sna_LogdetCov=_sna_LogdetCov, 

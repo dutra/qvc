@@ -2930,7 +2930,7 @@ def format_value_uncertainty(val, err=None, unit=None):
 
 def write_results_tex_variables(
     df_agn, z_range, cosmo_model_samples, compare_r,
-    write_path, result_prefix="", chisq_dict=None, age_dict=None
+    write_path, result_prefix="", chisq_dict=None, cosmo_models_result_dict=None
 ):
     """
     Write key cosmological parameters AND model comparison results
@@ -2983,13 +2983,8 @@ def write_results_tex_variables(
              lines.append(_cmd("HZero", format_value_uncertainty(*results['H0']), model_suffix=model_name))
 
         # Age
-        if age_dict and model_name in age_dict:
-            entry = age_dict[model_name]
-            if isinstance(entry, dict) and 'age' in entry:
-                val, err = entry['age']
-                lines.append(_cmd("AgeUniverse", format_value_uncertainty(val, err, unit=r"Gyr"), model_suffix=model_name))
-            else:
-                lines.append(_cmd("AgeUniverse", "N/A", model_suffix=model_name))
+        result = cosmo_models_result_dict[model_name]
+        lines.append(_cmd("AgeUniverse", format_value_uncertainty(result["age"], result["age_err"], unit=r"Gyr"), model_suffix=model_name))
 
         # AGN Params
         if 'alpha_agn' in results:
@@ -3270,4 +3265,76 @@ def load_chains(filename):
         for key in f.keys():
             # [()] loads the dataset into memory as a numpy array or scalar
             results[key] = f[key][()]
+    return results
+
+def save_flat_hdf5(filename, **kwargs):
+    """
+    Saves arbitrary arrays and scalars to an HDF5 file.
+    Usage: save_chains('test.h5', flat_samples=samples, logZ=logZ)
+    """
+    with h5py.File(filename, 'w') as f:
+        for name, data in kwargs.items():
+            # Create a dataset for each item
+            # compression='gzip' is useful for the large arrays (flat_samples)
+            # but standard scalars don't need compression.
+            if isinstance(data, (np.ndarray, list)):
+                f.create_dataset(name, data=data, compression="gzip")
+            else:
+                # Scalars (floats/ints) don't support compression
+                f.create_dataset(name, data=data)
+    
+    print(f"Saved: {list(kwargs.keys())} to {filename}")
+
+def load_flat_hdf5(filename):
+    """
+    Loads HDF5 data into a python dictionary.
+    """
+    results = {}
+    with h5py.File(filename, 'r') as f:
+        for key in f.keys():
+            # [()] loads the dataset into memory as a numpy array or scalar
+            results[key] = f[key][()]
+    return results
+
+def sym_percentile(data, percentiles=[16, 50, 84]):
+    if len(data) == 0: return np.nan, np.nan
+    p = np.percentile(data, percentiles)
+    return p[1], (p[2] - p[0]) / 2.0
+
+
+import h5py
+import numpy as np
+
+def save_cosmo_results_hdf5(filename, models_dict):
+    """
+    Saves a dictionary of cosmological models to HDF5.
+    Input structure: {'ModelName': {'param': val, 'param_err': val, ...}}
+    """
+    with h5py.File(filename, 'w') as f:
+        for model_name, params in models_dict.items():
+            # Create a dedicated Group for each model (e.g., 'FlatLambdaCDM')
+            grp = f.create_group(model_name)
+            
+            for param_name, value in params.items():
+                # Save each scalar/array as a Dataset within that group
+                grp.create_dataset(param_name, data=value)
+    
+    print(f"Saved models: {list(models_dict.keys())} to {filename}")
+
+def load_cosmo_results_hdf5(filename):
+    """
+    Loads HDF5 data back into the nested dictionary structure.
+    """
+    results = {}
+    with h5py.File(filename, 'r') as f:
+        # Iterate over the Model Groups (keys of the root file)
+        for model_name in f.keys():
+            results[model_name] = {}
+            grp = f[model_name]
+            
+            # Iterate over the Parameters (keys of the group)
+            for param_name in grp.keys():
+                # [()] loads the data into memory (numpy scalar or array)
+                results[model_name][param_name] = grp[param_name][()]
+                
     return results
