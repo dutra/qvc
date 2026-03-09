@@ -2457,3 +2457,89 @@ def plot_completeness_diagnostics(dmi_max_w, z, integrals_max_w):
     plt.savefig(f"plots/hubble/{prefix}/completeness/integrals_vs_z_highest_weight.png", dpi=150)
     #plt.show()
     plt.close()
+
+def plot_redshift_histograms(df_pantheon, df_agn,
+                            plot_path="plots/hubble",
+                            z_col_sn="zHD",
+                            z_col_agn="z",
+                            bins=40):
+    """
+    Plot redshift histograms for SN (Pantheon) and AGN samples
+    using a logarithmic redshift axis.
+    """
+
+    # --- SN ---
+    z_sn = df_pantheon[z_col_sn].to_numpy()
+
+    # --- AGN ---
+    z_agn_all = df_agn[z_col_agn].to_numpy()
+    z_agn_fid = df_agn[df_agn[z_col_agn].between(0.44, 3.16)][z_col_agn].to_numpy()
+    z_agn_restricted = df_agn[df_agn[z_col_agn].between(1.0, 3.16)][z_col_agn].to_numpy()
+
+    # Remove non-positive values
+    z_all = np.concatenate([z_sn, z_agn_all])
+    z_all = z_all[z_all > 0.01]
+
+    # Log bins
+    zmin = z_all.min()
+    zmax = z_all.max()
+    log_bins = np.logspace(np.log10(zmin), np.log10(zmax), bins)
+
+    fig, ax = plt.subplots(figsize=(8,5))
+
+    # SN
+    ax.hist(
+        z_sn,
+        bins=log_bins,
+        histtype="step",
+        color="dodgerblue",
+        linewidth=2.5,
+        label="SN Ia (Pantheon+)"
+    )
+
+    # AGN full sample
+    ax.hist(
+        z_agn_all,
+        bins=log_bins,
+        histtype="step",
+        linestyle="dotted",
+        color="black",
+        linewidth=2.8,
+        label=r"AGN ($\mathit{plotted\ sample}$)"
+    )
+
+    # AGN fiducial sample
+    ax.hist(
+        z_agn_fid,
+        bins=log_bins,
+        histtype="step",
+        linestyle="solid",
+        color="0.4",
+        linewidth=2.8,
+        label=r"AGN ($\mathit{fiducial\ fitting\ sample};\ 0.44<z<3.16$)",
+        zorder=-1
+    )
+
+    # AGN restricted sample
+    ax.hist(
+        z_agn_restricted,
+        bins=log_bins,
+        histtype="step",
+        linestyle="--",
+        color="0.7",
+        linewidth=2.8,
+        label=r"AGN ($\mathit{restricted\ fitting\ sample};\ 1<z<3.16$)",
+        zorder=-2
+    )
+
+    ax.set_xscale("log")
+    ax.set_xlabel(r"$z$")
+    ax.set_ylabel("Number")
+
+    ax.legend(frameon=False, loc="upper left", fontsize=12)
+    fig.tight_layout()
+
+    fig.savefig(os.path.join(plot_path, f"redshift_histograms.pdf"),
+                bbox_inches="tight", dpi=600)
+
+    plt.show()
