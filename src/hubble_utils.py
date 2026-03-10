@@ -1872,11 +1872,11 @@ def _jeffreys_strength(abs_delta, thresholds):
     else:
         return "very strong"
 
-def _odds_sigmas_from_delta(delta):
+def odds_sigmas_from_delta(delta):
     """Return Kass&Raftery 1995 sigma Z from |Δln Z| odds, stably."""
     absD = abs(float(delta))
     sigma = np.sqrt(2.0 * absD)
-    return 0.0, sigma
+    return sigma
 
 # def _odds_sigmas_from_delta(delta):
 #     """Return (one-sided Z, two-sided Z) from |Δln Z| odds, stably."""
@@ -1937,7 +1937,7 @@ def compare_models_by_log_evidence_all(
         de = float(np.hypot(e, top_err))
         z_mc = np.inf if de == 0 else d / de
         # odds-based sigma (one-/two-sided)
-        z1, z2 = _odds_sigmas_from_delta(d)
+        z2 = odds_sigmas_from_delta(d)
         # Bayes factor repr and Jeffreys strength
         log10K, B_str, B_ci = _bayes_factor_repr_from_delta(d, de)
         strength = _jeffreys_strength(abs(d), jeffreys_thresholds)
@@ -1948,7 +1948,7 @@ def compare_models_by_log_evidence_all(
             "delta_logZ_vs_top": d,
             "delta_logZ_err_vs_top": de,
             "z_mc_vs_top": z_mc,
-            "sigma_one_sided_vs_top": z1,
+            #"sigma_one_sided_vs_top": z1,
             "sigma_two_sided_vs_top": z2,
             "jeffreys_strength_vs_top": strength,
             "log10_Bayes_factor_vs_top": log10K,
@@ -1970,7 +1970,7 @@ def compare_models_by_log_evidence_all(
         sigma_two = _norm_isf_from_logeps(log_eps_half)
         # CI via ±1σ on Δ
         def _odds_sigmas_at(d):
-            return _odds_sigmas_from_delta(d)
+            return odds_sigmas_from_delta(d)
         s1_lo, s2_lo = _odds_sigmas_at(delta - delta_err)
         s1_hi, s2_hi = _odds_sigmas_at(delta + delta_err)
 
