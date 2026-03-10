@@ -14,8 +14,6 @@ from astropy.cosmology.realizations import Planck18
 import matplotlib.pyplot as plt
 import os
 
-prefix = os.environ.get("PREFIX", "")
-
 import copy
 import matplotlib.transforms as mtransforms
 
@@ -88,7 +86,7 @@ def plot_dynesty(results, cosmo_model, plot_path="plots/hubble", only_sna="", sp
     # except Exception as e:
     #     print(f"Error in runplot: {e}")
         
-def plot_traces(sampler, only_sna=False, cosmo_model='Flatw0waCDM', show=False, use_dynesty=False):
+def plot_traces(sampler, only_sna=False, cosmo_model='Flatw0waCDM', show=False, use_dynesty=False, plot_path="plots/hubble"):
     """
     Plot parameter traces from dynesty nested sampling results.
     
@@ -131,15 +129,16 @@ def plot_traces(sampler, only_sna=False, cosmo_model='Flatw0waCDM', show=False, 
     plt.tight_layout()
     if show:
         plt.show()
+    os.makedirs(plot_path, exist_ok=True)
     if only_sna:
-        file_path = f"plots/hubble/traces_{cosmo_model}_sna.png"
+        file_path = os.path.join(plot_path, f"traces_{cosmo_model}_sna.png")
     else:
-        file_path = f"plots/hubble/traces_{cosmo_model}_agn.png"
+        file_path = os.path.join(plot_path, f"traces_{cosmo_model}_agn.png")
     plt.savefig(file_path, dpi=200)
 
     return fig
 
-def plot_posterior_corner(flat_samples, only_sna=False, cosmo_model='Flatw0waCDM', show=False):
+def plot_posterior_corner(flat_samples, only_sna=False, cosmo_model='Flatw0waCDM', show=False, plot_path="plots/hubble"):
     # Select cosmological parameters based on model
     if cosmo_model == 'FlatwCDM':
         cosmo_params = ['H0', 'Om0', 'w0']
@@ -162,13 +161,13 @@ def plot_posterior_corner(flat_samples, only_sna=False, cosmo_model='Flatw0waCDM
         title_kwargs={"fontsize": 12}
     )
 
-    os.makedirs("plots/hubble", exist_ok=True)
+    os.makedirs(plot_path, exist_ok=True)
     if only_sna:
         fig.suptitle("SNIa only", fontsize=16)
-        plt.savefig(f"plots/hubble/posterior_{cosmo_model}_sna.png", dpi=200)
+        plt.savefig(os.path.join(plot_path, f"posterior_{cosmo_model}_sna.png"), dpi=200)
     else:
         fig.suptitle("SNIa + AGN", fontsize=28)
-        plt.savefig(f"plots/hubble/posterior_{cosmo_model}_agn.png", dpi=200)
+        plt.savefig(os.path.join(plot_path, f"posterior_{cosmo_model}_agn.png"), dpi=200)
 
     if show:
         plt.show()
@@ -402,7 +401,7 @@ def plot_cosmo_corner(
     plt.close(fig)
 
 
-def _weighted_bin_stats(z, y, yerr, bins, *, min_count=3, center='mid'):
+def _weighted_bin_stats(z, y, yerr, bins, *, min_count=3, center='mid', plot_path=None):
     """
     Simplest weighted binning:
     - weights w = 1 / yerr^2
@@ -1361,8 +1360,10 @@ def plot_predicted_vs_actual_M2500(
 
     return residuals_all[m_global], sigma_all[m_global], resid_bybin_aligned, z_bin_indices
 
-def plot_completeness_vs_mag_at_redshifts(p_detect, mag_centers, z_centers, 
-                                          redshifts=[0.5, 1.0, 2.0, 3.0, 4.0], show=False):
+def plot_completeness_vs_mag_at_redshifts(
+    p_detect, mag_centers, z_centers,
+    redshifts=[0.5, 1.0, 2.0, 3.0, 4.0], show=False, plot_path=None
+):
     """
     Plot p(I=1 | m, z) vs apparent magnitude for several fixed redshifts.
 
@@ -1408,8 +1409,10 @@ def plot_completeness_vs_mag_at_redshifts(p_detect, mag_centers, z_centers,
     plt.tight_layout()
     if show:
         plt.show()
-    os.makedirs(f"plots/hubble/{prefix}/completeness", exist_ok=True)
-    plt.savefig(f"plots/hubble/{prefix}/completeness/completeness_vs_mag_at_redshifts.png", dpi=300)
+    base_plot_path = plot_path or "plots/hubble"
+    completeness_path = os.path.join(base_plot_path, "completeness")
+    os.makedirs(completeness_path, exist_ok=True)
+    plt.savefig(os.path.join(completeness_path, "completeness_vs_mag_at_redshifts.png"), dpi=300)
     #plt.savefig("plots/hubble/completeness_vs_mag_at_redshifts.pdf", dpi=300)
     plt.close()
 
@@ -1634,7 +1637,7 @@ import matplotlib.gridspec as gridspec
 
 from scipy.stats import gaussian_kde
 
-def _kde_conf_levels(Z, conf=(0.954, 0.683)):
+def _kde_conf_levels(Z, conf=(0.954, 0.683), plot_path=None):
     """
     Return strictly-increasing density thresholds so that regions Z >= level
     enclose each conf fraction. Uses ascending order (95% then 68%).
@@ -2003,7 +2006,7 @@ def plot_predicted_L2500_vs_sigmahat(
     # Return MAIN residuals; show residuals can be computed externally if needed
     return residuals, sigma_chi
 
-def dmi_from_pdet_only(m_obs, m_obs_err, p_det, m_grid, sigma_completeness, z, tiny=1e-12):
+def dmi_from_pdet_only(m_obs, m_obs_err, p_det, m_grid, sigma_completeness, z, tiny=1e-12, plot_path=None):
     """
     m_obs: (N,)
     m_obs_err: (N,)
@@ -2030,8 +2033,10 @@ def dmi_from_pdet_only(m_obs, m_obs_err, p_det, m_grid, sigma_completeness, z, t
     plt.colorbar(label='Magnitude Error (m_obs_err)')
     plt.tight_layout()
     plt.ylim(-1, 0.5)
-    os.makedirs(f"plots/hubble/{prefix}/completeness", exist_ok=True)
-    plt.savefig(f"plots/hubble/{prefix}/completeness/dmi_vs_mag.png", dpi=300)
+    base_plot_path = plot_path or "plots/hubble"
+    completeness_path = os.path.join(base_plot_path, "completeness")
+    os.makedirs(completeness_path, exist_ok=True)
+    plt.savefig(os.path.join(completeness_path, "dmi_vs_mag.pdf"), dpi=300)
     plt.close()
 
 
@@ -2044,14 +2049,16 @@ def dmi_from_pdet_only(m_obs, m_obs_err, p_det, m_grid, sigma_completeness, z, t
     plt.colorbar(label='Magnitude Error (m_obs_err)')
     plt.tight_layout()
     plt.ylim(-1, 0.5)
-    plt.savefig(f"plots/hubble/{prefix}/completeness/dmi_vs_redshift.png", dpi=300)
+    plt.savefig(os.path.join(completeness_path, "dmi_vs_redshift.png"), dpi=300)
     plt.close()
     return sigma2 * slope
 
 
-def dmi_corr(m_obs, z_obs, m_obs_err,
-                   H_obs_s, mag_centers, z_centers,
-                   sigma_completeness, tiny=1e-12):
+def dmi_corr(
+    m_obs, z_obs, m_obs_err,
+    H_obs_s, mag_centers, z_centers,
+    sigma_completeness, tiny=1e-12, plot_path=None
+):
     """
     Δm ≈ σ^2 * ∂/∂m [ln n_obs(m|z)] evaluated at (m_obs, z_obs),
     where n_obs ∝ H_obs_s (smoothed counts per (mag,z) bin).
@@ -2096,8 +2103,10 @@ def dmi_corr(m_obs, z_obs, m_obs_err,
     plt.colorbar(label='Magnitude Error (m_obs_err)')
     plt.tight_layout()
     plt.ylim(-1, 0.5)
-    os.makedirs(f"plots/hubble/{prefix}/completeness", exist_ok=True)
-    plt.savefig(f"plots/hubble/{prefix}/completeness/dmi_vs_mag.png", dpi=300)
+    base_plot_path = plot_path or "plots/hubble"
+    completeness_path = os.path.join(base_plot_path, "completeness")
+    os.makedirs(completeness_path, exist_ok=True)
+    plt.savefig(os.path.join(completeness_path, "dmi_vs_mag.png"), dpi=300)
     plt.close()
 
 
@@ -2110,7 +2119,7 @@ def dmi_corr(m_obs, z_obs, m_obs_err,
     plt.colorbar(label='Magnitude Error (m_obs_err)')
     plt.tight_layout()
     plt.ylim(-1, 0.5)
-    plt.savefig(f"plots/hubble/{prefix}/completeness/dmi_vs_redshift.png", dpi=300)
+    plt.savefig(os.path.join(completeness_path, "dmi_vs_redshift.png"), dpi=300)
     plt.close()
     return dmi
 
@@ -2118,7 +2127,7 @@ def dmi_corr(m_obs, z_obs, m_obs_err,
 from scipy.special import logsumexp
 from hubble_likelihood import log_likelihood
 from matplotlib.colors import SymLogNorm
-def _highest_weight_theta(results):
+def _highest_weight_theta(results, plot_path=None):
     """
     Dynesty utils: pick the sample with the largest posterior weight.
     """
@@ -2127,7 +2136,7 @@ def _highest_weight_theta(results):
     return results.samples[idx]
 def _blob_for_theta(theta, *, df_agn, df_pantheon, cosmo_model,
                     completeness_params, _sna_L, _sna_Lower, _sna_LogdetCov,
-                    use_full_cov=True, use_mu_sh0es=False):
+                    use_full_cov=True, use_mu_sh0es=False, plot_path=None):
     """
     Re-evaluate the likelihood exactly once at 'theta' to get the selection blob.
     Returns: blob (2, N) and the AGN arrays z, m_obs needed for plotting.
@@ -2147,7 +2156,7 @@ def _blob_for_theta(theta, *, df_agn, df_pantheon, cosmo_model,
     return blob, z, m_obs
 
 
-def plot_Z_vs_z(z, Z, outdir, title_suffix=""):
+def plot_Z_vs_z(z, Z, outdir=None, title_suffix="", plot_path=None):
     plt.figure(figsize=(8,5.2))
     plt.scatter(z, Z, s=12, alpha=0.55)
     plt.xlabel("Redshift (z)")
@@ -2155,11 +2164,13 @@ def plot_Z_vs_z(z, Z, outdir, title_suffix=""):
     plt.title(f"Completeness integrals vs z {title_suffix}")
     plt.grid(True, alpha=0.35)
     plt.tight_layout()
-    os.makedirs(f"plots/hubble/{prefix}/completeness", exist_ok=True)
-    plt.savefig(f"plots/hubble/{prefix}/completeness/completeness_integrals_vs_z.png", dpi=200)
+    base_plot_path = plot_path or outdir or "plots/hubble"
+    completeness_path = os.path.join(base_plot_path, "completeness")
+    os.makedirs(completeness_path, exist_ok=True)
+    plt.savefig(os.path.join(completeness_path, "completeness_integrals_vs_z.png"), dpi=200)
     plt.close()
 
-def plot_dmi_vs_z(z, dmi, outdir, title_suffix=""):
+def plot_dmi_vs_z(z, dmi, outdir=None, title_suffix="", plot_path=None):
     plt.figure(figsize=(8,5.2))
     # scatter shows multiplicity; line shows structure when sorted
     order = np.argsort(z)
@@ -2169,11 +2180,13 @@ def plot_dmi_vs_z(z, dmi, outdir, title_suffix=""):
     plt.title(f"Interpolated dmi vs z {title_suffix}")
     plt.grid(True, alpha=0.35)
     plt.tight_layout()
-    os.makedirs(f"plots/hubble/{prefix}/completeness", exist_ok=True)
-    plt.savefig(f"plots/hubble/{prefix}/completeness/dmi_vs_z.png", dpi=200)
+    base_plot_path = plot_path or outdir or "plots/hubble"
+    completeness_path = os.path.join(base_plot_path, "completeness")
+    os.makedirs(completeness_path, exist_ok=True)
+    plt.savefig(os.path.join(completeness_path, "dmi_vs_z.png"), dpi=200)
     plt.close()
 
-def _hard_limit_m50_per_object(completeness2d, mag_centers, z):
+def _hard_limit_m50_per_object(completeness2d, mag_centers, z, plot_path=None):
     """
     Robust m50(z) (hard limit) for plotting:
     - clip z into the map's valid range,
@@ -2202,9 +2215,13 @@ def _hard_limit_m50_per_object(completeness2d, mag_centers, z):
         m50[i] = x0 + (target - y0) * (x1 - x0) / (y1 - y0) if y1 != y0 else x0
     return m50
 
-def plot_completeness_map_with_m50(completeness2d, mag_centers, z_centers,
-                                   df_agn, outdir, title="Completeness map with hard m50(z)"):
-    os.makedirs(outdir, exist_ok=True)
+def plot_completeness_map_with_m50(
+    completeness2d, mag_centers, z_centers,
+    df_agn, outdir=None, title="Completeness map with hard m50(z)", plot_path=None
+):
+    base_plot_path = plot_path or outdir or "plots/hubble"
+    completeness_path = os.path.join(base_plot_path, "completeness")
+    os.makedirs(completeness_path, exist_ok=True)
     # sample the map
     C = completeness2d(mag_centers[None, :], z_centers[:, None])  # (Z, M)
     # overlay m50(z) evaluated at the object's z, then rebin to z_centers for a smooth curve
@@ -2231,14 +2248,13 @@ def plot_completeness_map_with_m50(completeness2d, mag_centers, z_centers,
     if np.any(ok):
         plt.plot(m50_curve[ok], z_centers[ok], lw=2.2)
     plt.tight_layout()
-    os.makedirs(f"plots/hubble/{prefix}/completeness", exist_ok=True)
-    plt.savefig(f"plots/hubble/{prefix}/completeness/completeness_map_with_m50.png", dpi=200)
+    plt.savefig(os.path.join(completeness_path, "completeness_map_with_m50.png"), dpi=200)
     plt.close()
 
 def run_completeness_diagnostics(sampler_results, df_agn, df_pantheon,
                                  completeness_params, cosmo_model,
                                  _sna_L, _sna_Lower, _sna_LogdetCov,
-                                 outdir="plots/completeness",
+                                 outdir="plots/completeness", plot_path=None,
                                  use_full_cov=True, use_mu_sh0es=False,
                                  title_note="— highest posterior weight sample"):
     """
@@ -2255,11 +2271,12 @@ def run_completeness_diagnostics(sampler_results, df_agn, df_pantheon,
                                  use_full_cov=use_full_cov, use_mu_sh0es=use_mu_sh0es)
     Z   = np.asarray(blob[0], dtype=float)
     dmi = np.asarray(blob[1], dtype=float)
-    plot_Z_vs_z(z, Z, outdir, title_suffix=title_note)
-    plot_dmi_vs_z(z, dmi, outdir, title_suffix=title_note)
+    _plot_path = plot_path or outdir
+    plot_Z_vs_z(z, Z, outdir, title_suffix=title_note, plot_path=_plot_path)
+    plot_dmi_vs_z(z, dmi, outdir, title_suffix=title_note, plot_path=_plot_path)
 
     completeness2d, mag_centers, z_centers, *_ = completeness_params
-    plot_completeness_map_with_m50(completeness2d, mag_centers, z_centers, df_agn, outdir)
+    plot_completeness_map_with_m50(completeness2d, mag_centers, z_centers, df_agn, outdir, plot_path=_plot_path)
 
 
 def plot_residuals_vs_alphaOX(
@@ -2267,7 +2284,7 @@ def plot_residuals_vs_alphaOX(
     residuals,
     residuals_err,
     show=False,
-    plot_path=f"plots/hubble/{prefix}/appendix/",
+    plot_path="plots/hubble/appendix",
     nbins=6,
     binning="uniform",     # "quantile", "uniform", or pass explicit edges via nbins=array_like
     min_per_bin=4           # hide bins with too few points
@@ -2394,6 +2411,7 @@ def plot_residuals_vs_alphaOX(
 
     plt.tight_layout()
     os.makedirs(plot_path, exist_ok=True)
+    os.makedirs(os.path.join(plot_path, "pdf"), exist_ok=True)
     out_pdf = os.path.join(plot_path, "pdf/alphaOx_int_residuals.pdf")
     out_png = os.path.join(plot_path, "alphaOx_int_residuals.png")
     plt.savefig(out_pdf)
@@ -2405,7 +2423,7 @@ def plot_residuals_vs_alphaOX(
         plt.show()
     plt.close()
 
-def plot_Mi_relation(df_agn):
+def plot_Mi_relation(df_agn, plot_path=None):
     cosmo   = FlatLambdaCDM(H0=70, Om0=0.3)
 
     DL = cosmo.luminosity_distance(df_agn['z'].values).to(u.parsec).value
@@ -2422,28 +2440,34 @@ def plot_Mi_relation(df_agn):
     plt.legend()
     plt.grid(alpha=0.3)
     plt.tight_layout()
-    os.makedirs(f"plots/hubble/{prefix}/diagnostics", exist_ok=True)
-    plt.savefig(f"plots/hubble/{prefix}/diagnostics/Mi_relation_comparison.png", dpi=200)
+    base_plot_path = plot_path or "plots/hubble"
+    diagnostics_path = os.path.join(base_plot_path, "diagnostics")
+    os.makedirs(diagnostics_path, exist_ok=True)
+    plt.savefig(os.path.join(diagnostics_path, "Mi_relation_comparison.png"), dpi=200)
     plt.close()
 
 
-def plot_completeness_diagnostics(dmi_max_w, z, integrals_max_w):
+def plot_completeness_diagnostics(dmi_max_w, z, integrals_max_w, plot_path="plots/hubble"):
 
     # Plot dmi_interp vs z for the highest-weight sample
     dmi_interp = interp1d(z, dmi_max_w, kind='nearest', bounds_error=False, fill_value='extrapolate')
     
     # Plot dmi_interp vs z for the highest-weight sample
-    z_plot = np.linspace(0, 4, 200)
-    plt.figure(figsize=(8, 5))
-    plt.plot(z_plot, dmi_interp(z_plot), label="dmi_interp(z)")
-    plt.xlabel("Redshift (z)")
-    plt.ylabel("dmi (mag)")
-    plt.title("Interpolated dmi vs z — highest posterior weight sample")
-    plt.grid(True)
-    plt.tight_layout()
-    os.makedirs(f"plots/hubble/{prefix}/completeness", exist_ok=True)
-    plt.savefig(f"plots/hubble/{prefix}/completeness/dmi_interp_vs_z_highest_weight.png", dpi=150)
-    plt.close()
+    fig, ax = plt.subplots(figsize=(8, 5))
+
+    ax.plot(z, dmi_max_w, marker="o", linestyle="none", label="AGN", color='k', alpha=0.5)
+
+    ax.set_xlabel(r"$z$")
+    ax.set_ylabel(r"$\Delta m$ (mag)")
+    
+    ax.legend(frameon=True, loc="upper right", fontsize=12)
+    fig.tight_layout()
+
+    outdir = os.path.join(plot_path, "completeness")
+    os.makedirs(outdir, exist_ok=True)
+
+    fig.savefig(f"{outdir}/dmi_vs_z_highest_weight.pdf", dpi=300)
+    plt.close(fig)
 
     # Plot log(integrals) vs redshift for highest-weight sample
     plt.figure(figsize=(8, 5))
@@ -2454,7 +2478,7 @@ def plot_completeness_diagnostics(dmi_max_w, z, integrals_max_w):
     plt.grid(True)
     plt.tight_layout()
     # Optional: save to disk
-    plt.savefig(f"plots/hubble/{prefix}/completeness/integrals_vs_z_highest_weight.png", dpi=150)
+    plt.savefig(os.path.join(outdir, "integrals_vs_z_highest_weight.png"), dpi=150)
     #plt.show()
     plt.close()
 

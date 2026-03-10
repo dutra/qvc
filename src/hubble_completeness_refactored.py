@@ -8,8 +8,6 @@ from scipy.ndimage import gaussian_filter1d, gaussian_filter
 from scipy.interpolate import interp1d
 from functools import partial
 
-prefix = os.environ.get("PREFIX", "")
-
 class SimpleCompleteness2D:
     """
     Simple analytic completeness: sigmoid dropoff in apparent magnitude.
@@ -28,7 +26,7 @@ class SimpleCompleteness2D:
     def grid(self):
         return dict(mag_lim=self.mag_lim, width=self.width)
 
-def get_completeness_function_2d_simple(*args, mag_lim=24.0, width=0.2, plot=False, **kwargs):
+def get_completeness_function_2d_simple(*args, mag_lim=24.0, width=0.2, plot=False, plot_path=None, **kwargs):
     """
     Drop-in replacement that returns a simple analytic completeness function:
         p(detect | mag, z) = 1 / (1 + exp((mag - mag_lim) / width))
@@ -46,7 +44,9 @@ def get_completeness_function_2d_simple(*args, mag_lim=24.0, width=0.2, plot=Fal
 
     if plot:
         completeness_vals = completeness2d(mag_centers)
-        os.makedirs(f"plots/hubble/{prefix}/completeness", exist_ok=True)
+        base_plot_path = plot_path or "plots/hubble"
+        completeness_path = os.path.join(base_plot_path, "completeness")
+        os.makedirs(completeness_path, exist_ok=True)
 
         plt.figure(figsize=(8, 5))
         plt.plot(mag_centers, completeness_vals, label="Completeness")
@@ -58,7 +58,7 @@ def get_completeness_function_2d_simple(*args, mag_lim=24.0, width=0.2, plot=Fal
         plt.grid(True)
         plt.legend()
         plt.tight_layout()
-        plt.savefig(f"plots/hubble/{prefix}/completeness/simple_completeness_function.png", dpi=200)
+        plt.savefig(os.path.join(completeness_path, "simple_completeness_function.png"), dpi=200)
         plt.close()
 
     return completeness2d, mag_centers, z_centers, dm, dz
@@ -129,6 +129,7 @@ def get_completeness_function_2d(
     n_mag_bins=30, n_z_bins=40,
     smooth_counts=True,
     plot=False,
+    plot_path=None,
     fill_along_mag=False,
     fill_along_z=False,
 ):
@@ -213,7 +214,8 @@ def get_completeness_function_2d(
     # C = np.clip(C, 0.0, 1.0)
 
     if plot:
-        plot_dir = f"plots/hubble/{prefix}/completeness"
+        base_plot_path = plot_path or "plots/hubble"
+        plot_dir = os.path.join(base_plot_path, "completeness")
         os.makedirs(plot_dir, exist_ok=True)
         # Plot completeness map
         plt.figure(figsize=(7, 5))

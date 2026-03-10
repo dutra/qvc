@@ -1,5 +1,4 @@
 import os
-prefix = os.environ.get('PREFIX', 'test')
 
 
 import matplotlib.pyplot as plt
@@ -817,7 +816,7 @@ def read_quasars_from_hdf5(file_path, N=None):
     return quasar_list
 
 def plot_m_vs_redshift(
-    df_before, df_after, cut_info="", save_path=f"plots/hubble/{prefix}/cuts/"
+    df_before, df_after, cut_info="", save_path="plots/hubble/cuts/"
 ):
     """
     Plot apparent_mag_2500 (AB) vs redshift in two panels:
@@ -913,7 +912,7 @@ def plot_m_vs_redshift(
     plt.close()
 
 
-def plot_redshift_histogram(df_before, df_after, bins=30, cut_info="", save_path=f"plots/hubble/{prefix}/cuts/"):
+def plot_redshift_histogram(df_before, df_after, bins=30, cut_info="", save_path="plots/hubble/cuts/"):
     """
     Plot a histogram of object counts vs redshift and save the figure.
 
@@ -1182,9 +1181,12 @@ def make_psf_minus_fiber_correction_fn(z, psf_minus_fiber_i, z_window=0.5):
     return dm_of_z, dm_err_of_z
 
 
-def plot_m2500_correction(dm_of_z, z, m2500_uncorrected,
-                          title="m2500 vs redshift (correction comparison)",
-                          show=False, alpha=0.5, s=5):
+def plot_m2500_correction(
+    dm_of_z, z, m2500_uncorrected,
+    title="m2500 vs redshift (correction comparison)",
+    show=False, alpha=0.5, s=5,
+    plot_path="plots/hubble/diagnostics",
+):
 
     # Mask out m2500_uncorrected values outside the range [1, 30]
     valid_mask = (m2500_uncorrected >= 1) & (m2500_uncorrected <= 30)
@@ -1197,13 +1199,12 @@ def plot_m2500_correction(dm_of_z, z, m2500_uncorrected,
     plt.figure(figsize=(8, 6))
     plt.scatter(z, dm_values, label='dm_of_z', color='blue', s=0.5)
     plt.xlabel('Redshift (z)')
-    plt.ylabel('dm_of_z')
-    plt.title('dm_of_z vs Redshift')
+    plt.ylabel('dm PSF-Fiber')
     plt.grid(alpha=0.3)
     plt.legend()
     plt.tight_layout()
-    os.makedirs(f"plots/hubble/{prefix}/diagnostics/", exist_ok=True)
-    plt.savefig(f"plots/hubble/{prefix}/diagnostics/dm_of_z_vs_redshift.png", dpi=200)
+    os.makedirs(plot_path, exist_ok=True)
+    plt.savefig(os.path.join(plot_path, "dm_psf_fiber_vs_redshift.png"), dpi=200)
     if show:
         plt.show()
     plt.close()
@@ -1250,9 +1251,8 @@ def plot_m2500_correction(dm_of_z, z, m2500_uncorrected,
     ax2.grid(True, ls=":", alpha=0.3)
     ax2.legend(loc="best", frameon=False)
 
-    plot_path = f"plots/hubble/{prefix}/diagnostics/"
     os.makedirs(plot_path, exist_ok=True)
-    fig.savefig(f"{plot_path}/m2500_correction_comparison.png", dpi=200, bbox_inches="tight")
+    fig.savefig(os.path.join(plot_path, "m2500_psf_fiber_correction_comparison.png"), dpi=200, bbox_inches="tight")
     if show:
         plt.show()
     plt.close()
@@ -3153,7 +3153,7 @@ def make_agn_latex_table(
     dm_interp,
     sort_by = None, ascending = True,
     max_rows = None,
-    write_path = f"plots/hubble/{prefix}"
+    write_path = "plots/hubble"
 ) -> str:
 
     def _is_bad(x):
