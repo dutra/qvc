@@ -2476,10 +2476,8 @@ def plot_completeness_diagnostics(dmi_max_w, z, m2500, integrals_max_w, plot_pat
 
     ax.set_xlabel(r"Apparent magnitude $m_{2500}$ (mag)")
     ax.set_ylabel(r"$\Delta m$ (mag)")
-    ax.set_title("Completeness correction vs apparent magnitude")
 
     ax.legend(frameon=True, loc="upper right", fontsize=12)
-    ax.grid(True, alpha=0.3)
     fig.tight_layout()
 
     fig.savefig(f"{outdir}/dmi_vs_m2500_highest_weight.pdf", dpi=300)
