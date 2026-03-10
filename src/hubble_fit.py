@@ -501,6 +501,7 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
                                 compare_plot_path, result_prefix=prefix, cosmo_models_result_dict=cosmo_models_result_dict)
 
     os.makedirs(f"results/cosmo/{prefix}", exist_ok=True)
+    cosmo_models_result_dict |= dict(N=N, z_i=z_range[0], z_f=z_range[1])
     save_cosmo_results_hdf5(
         f"results/cosmo/{prefix}/cosmo_results_{n_tag}_{z_tag}.hdf5",
         cosmo_models_result_dict
