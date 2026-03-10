@@ -3316,7 +3316,8 @@ def save_cosmo_results_hdf5(filename, models_dict):
             grp = f.create_group(model_name)
             
             for param_name, value in params.items():
-                # Save each scalar/array as a Dataset within that group
+                if value is None:
+                    value = np.nan  # HDF5 doesn't support None, use NaN for missing values
                 grp.create_dataset(param_name, data=value)
     
     print(f"Saved models: {list(models_dict.keys())} to {filename}")
