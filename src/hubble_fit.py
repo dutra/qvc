@@ -489,6 +489,8 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
         cosmo_model_samples[cosmo_model] = samples_joint
         results_latex.extend([r_sna, r_joint])
 
+        cosmo_models_result_dict[cosmo_model] |= dict(N=N, z_i=z_range[0], z_f=z_range[1])
+
         for i, key in enumerate(model_labels_joint):
             median, err = sym_percentile(samples_joint[:, i])
             cosmo_models_result_dict[cosmo_model][key] = median
@@ -501,7 +503,6 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
                                 compare_plot_path, result_prefix=prefix, cosmo_models_result_dict=cosmo_models_result_dict)
 
     os.makedirs(f"results/cosmo/{prefix}", exist_ok=True)
-    cosmo_models_result_dict |= dict(N=N, z_i=z_range[0], z_f=z_range[1])
     save_cosmo_results_hdf5(
         f"results/cosmo/{prefix}/cosmo_results_{n_tag}_{z_tag}.hdf5",
         cosmo_models_result_dict
