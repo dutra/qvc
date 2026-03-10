@@ -2447,7 +2447,7 @@ def plot_Mi_relation(df_agn, plot_path=None):
     plt.close()
 
 
-def plot_completeness_diagnostics(dmi_max_w, z, integrals_max_w, plot_path="plots/hubble"):
+def plot_completeness_diagnostics(dmi_max_w, z, m2500, integrals_max_w, plot_path="plots/hubble"):
 
     # Plot dmi_interp vs z for the highest-weight sample
     dmi_interp = interp1d(z, dmi_max_w, kind='nearest', bounds_error=False, fill_value='extrapolate')
@@ -2455,7 +2455,7 @@ def plot_completeness_diagnostics(dmi_max_w, z, integrals_max_w, plot_path="plot
     # Plot dmi_interp vs z for the highest-weight sample
     fig, ax = plt.subplots(figsize=(8, 5))
 
-    ax.plot(z, dmi_max_w, marker="o", linestyle="none", label="AGN", color='k', alpha=0.5)
+    ax.plot(z, -dmi_max_w, marker="o", linestyle="none", label="AGN", color='k', alpha=0.5)
 
     ax.set_xlabel(r"$z$")
     ax.set_ylabel(r"$\Delta m$ (mag)")
@@ -2467,6 +2467,22 @@ def plot_completeness_diagnostics(dmi_max_w, z, integrals_max_w, plot_path="plot
     os.makedirs(outdir, exist_ok=True)
 
     fig.savefig(f"{outdir}/dmi_vs_z_highest_weight.pdf", dpi=300)
+    plt.close(fig)
+
+    # Plot dmi vs m2500 (apparent magnitude)
+    fig, ax = plt.subplots(figsize=(8, 5))
+
+    ax.scatter(m2500, -dmi_max_w, alpha=0.5, s=20, color='k', label='AGN')
+
+    ax.set_xlabel(r"Apparent magnitude $m_{2500}$ (mag)")
+    ax.set_ylabel(r"$\Delta m$ (mag)")
+    ax.set_title("Completeness correction vs apparent magnitude")
+
+    ax.legend(frameon=True, loc="upper right", fontsize=12)
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+
+    fig.savefig(f"{outdir}/dmi_vs_m2500_highest_weight.pdf", dpi=300)
     plt.close(fig)
 
     # Plot log(integrals) vs redshift for highest-weight sample

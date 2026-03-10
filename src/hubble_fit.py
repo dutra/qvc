@@ -287,6 +287,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
     plot_completeness_diagnostics(
         dmi_max_w,
         agn_data['z'],
+        agn_data['apparent_mag_2500'],
         integrals_max_w,
         plot_path=plot_path,
     )
