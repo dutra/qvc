@@ -3344,21 +3344,9 @@ def load_cosmo_results_hdf5(filename):
                 
     return results
 
-import hashlib
 import numpy as np
 import pandas as pd
-
-
-def _stable_u01_from_id(x, seed=42):
-    """
-    Deterministic pseudo-random number in (0, 1) from an object id + seed.
-    Stable across runs and independent of dataframe row order.
-    """
-    s = f"{seed}_{x}".encode("utf-8")
-    h = hashlib.sha256(s).hexdigest()
-    # keep strictly away from 0 to avoid log(0)
-    u = int(h[:16], 16) / 16**16
-    return min(max(u, 1e-12), 1 - 1e-12)
+from scipy.stats import gaussian_kde
 
 
 def select_agn_subset(
@@ -3367,39 +3355,23 @@ def select_agn_subset(
     N=None,
     subset_seed=42,
     id_col="object_id",
-    z_uniform_min=0.5,
-    n_z_bins=10,
+    z_uniform_min=0.44,
+    kde_bw_method=None,
+    max_weight_ratio=20.0,
 ):
     """
-    Restrict to z_range, then select a deterministic subset of size N
-    with reweighting to make the selected redshift distribution roughly
-    uniform between z_uniform_min and z_range[1].
+    Deterministic weighted sampling WITH replacement, using continuous
+    inverse-density weights in redshift so the selected sample is
+    approximately uniform in z between z_uniform_min and z_range[1].
 
-    Parameters
-    ----------
-    df_agn : pandas.DataFrame
-    z_range : tuple
-        (zmin, zmax)
-    N : int or None
-        Number of AGN to keep. If None, keep all in range.
-    subset_seed : int
-        Changes the deterministic weighted selection.
-    id_col : str
-        Column with unique AGN identifier.
-    z_uniform_min : float
-        Lower bound of the target uniform-redshift weighting.
-    n_z_bins : int
-        Number of redshift bins used to estimate the parent density.
-
-    Returns
-    -------
-    df_sel : pandas.DataFrame
-        Selected AGN subset.
+    Same inputs -> same returned sample.
+    Duplicates are allowed.
     """
     zmin, zmax = z_range
+    z0 = max(zmin, z_uniform_min)
 
     df_sel = df_agn.copy()
-    df_sel = df_sel[df_sel["z"].between(zmin, zmax)].copy()
+    df_sel = df_sel[df_sel["z"].between(z0, zmax)].copy()
 
     n_avail = len(df_sel)
     print(f"AGN available after cuts: {n_avail}")
@@ -3408,50 +3380,43 @@ def select_agn_subset(
         raise ValueError("No AGN available after z_range cut.")
 
     if N is None:
-        df_sel = df_sel.reset_index(drop=True)
+        df_sel = df_sel.sort_values([id_col, "z"]).reset_index(drop=True)
         print("Using all AGN in range.")
         print(f"+++ Length of selected AGNs: {len(df_sel)}")
         print(f"+++ Redshift range of selected AGNs: {df_sel['z'].min()} to {df_sel['z'].max()}")
         return df_sel
 
-    if N > n_avail:
-        raise ValueError(f"Requested N={N}, but only {n_avail} AGN available after cuts.")
+    z = df_sel["z"].to_numpy()
 
-    # --- build inverse-density weights in redshift ---
-    z0 = max(z_uniform_min, zmin)
-    if zmax <= z0:
-        raise ValueError(f"Need z_range[1] > {z0} for uniform reweighting.")
+    # estimate parent density p(z)
+    kde = gaussian_kde(z, bw_method=kde_bw_method)
+    pz = kde(z)
 
-    edges = np.linspace(z0, zmax, n_z_bins + 1)
+    # target uniform in z => w(z) ∝ 1 / p(z)
+    w = 1.0 / np.clip(pz, 1e-12, None)
 
-    # Assign each AGN to a z-bin
-    bin_idx = np.clip(np.digitize(df_sel["z"].values, edges) - 1, 0, n_z_bins - 1)
+    # cap extreme weights for stability
+    w_med = np.median(w)
+    w = np.minimum(w, max_weight_ratio * w_med)
 
-    # Count how many AGN are in each bin
-    counts = np.bincount(bin_idx, minlength=n_z_bins)
+    # normalize after sorting so results do not depend on input row order
+    df_sel = df_sel.sort_values([id_col, "z"]).reset_index(drop=True)
+    z = df_sel["z"].to_numpy()
+    pz = kde(z)
+    w = 1.0 / np.clip(pz, 1e-12, None)
+    w_med = np.median(w)
+    w = np.minimum(w, max_weight_ratio * w_med)
+    probs = w / w.sum()
 
-    # Weight = inverse of parent density per bin
-    # bins with fewer objects get larger weight
-    weights = 1.0 / counts[bin_idx].astype(float)
+    rng = np.random.default_rng(subset_seed)
+    idx = rng.choice(len(df_sel), size=N, replace=True, p=probs)
 
-    # --- deterministic weighted sampling without replacement ---
-    # Efraimidis-Spirakis style: priority = -log(u) / w ; select smallest
-    u = np.array([_stable_u01_from_id(x, seed=subset_seed) for x in df_sel[id_col].values])
-    priority = -np.log(u) / weights
+    df_out = df_sel.iloc[idx].reset_index(drop=True)
 
-    df_sel = df_sel.copy()
-    df_sel["_priority"] = priority
-    df_sel["_w"] = weights
+    print(f"Selected N={len(df_out)} AGN with subset_seed={subset_seed} (with replacement)")
+    print(f"+++ Redshift range of selected AGNs: {df_out['z'].min()} to {df_out['z'].max()}")
 
-    df_sel = (
-        df_sel.sort_values("_priority")
-              .head(N)
-              .drop(columns=["_priority", "_w"])
-              .reset_index(drop=True)
-    )
+    n_unique = df_out[id_col].nunique()
+    print(f"+++ Unique AGNs in selected sample: {n_unique}/{len(df_out)}")
 
-    print(f"Deterministically selected N={N} AGN with subset_seed={subset_seed}")
-    print(f"+++ Length of selected AGNs: {len(df_sel)}")
-    print(f"+++ Redshift range of selected AGNs: {df_sel['z'].min()} to {df_sel['z'].max()}")
-
-    return df_sel
+    return df_out

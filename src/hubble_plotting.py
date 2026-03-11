@@ -2693,7 +2693,12 @@ def plot_redshift_histograms(df_pantheon, df_agn,
     # Log bins
     zmin = z_all.min()
     zmax = z_all.max()
-    log_bins = np.logspace(np.log10(zmin), np.log10(zmax), bins)
+    if xscale == "log":
+        log_bins = np.logspace(np.log10(zmin), np.log10(zmax), bins)
+    elif xscale == "linear":
+        log_bins = np.linspace(zmin, zmax, bins)
+    else:
+        raise ValueError("xscale must be 'log' or 'linear'")
 
     fig, ax = plt.subplots(figsize=(8,5))
 
@@ -2751,5 +2756,7 @@ def plot_redshift_histograms(df_pantheon, df_agn,
     os.makedirs(plot_path, exist_ok=True)
     fig.savefig(os.path.join(plot_path, f"redshift_histograms.pdf"),
                 bbox_inches="tight", dpi=600)
+    fig.savefig(os.path.join(plot_path, f"redshift_histograms.png"),
+                bbox_inches="tight", dpi=150)
     if show:
         plt.show()
