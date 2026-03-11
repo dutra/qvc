@@ -294,7 +294,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         N=N,
         subset_seed=42,
         id_col="object_id",
-        allow_replacement=True,
+        #allow_replacement=True,
     )
     plot_redshift_histograms(df_pantheon, df_agn_fit_selection, xscale="linear", plot_path=plot_path)
 
