@@ -1564,22 +1564,26 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=10,
 
     # Define cuts as (column, lower_limit, upper_limit)
     cuts = [
+        ('log_tau_UV_RF', 1.5, 4),
+        ('redchi2_conti_full', None, 1.2),
+        ('t_rf_length', 1700, None),
+        ('alpha_lambda', None, -0.01),
+        ('iron_frac', None, 10),
+        ('log_tau_UV_RF_err', 0, 1.0),
+        ('log_sigma_UV_err', 0, 0.3),
+
         #('z', 1, None),
         #('log_lbol', 45.4, None),
         #('dm_red', None, dm_red_cut),
-        ('log_tau_UV_RF', 1.5, 4),
+
         #('redchi', None, 5),
-        ('redchi2_conti_full', None, 1.2),
         #('apparent_mag_i', 12, 40),
-        ('t_rf_length', 1700, None),
+
         # ('f_host_2500', -1, -1),
         # ('f_host_5100', -1, -1),
-        ('alpha_lambda', None, -0.01),
-        ('iron_frac', None, 10),
+
         #('log_amp_delta_blr_total', None, 0),
         #('eta_tau2', None, 1),
-        ('log_tau_UV_RF_err', 0, 1.0),
-        ('log_sigma_UV_err', 0, 0.3),
 
         #('eta_A1_rhat', None, 1.1),
         # ('apparent_mag_2500_err', None, 0.04),
@@ -1971,8 +1975,8 @@ def compare_models_by_log_evidence_all(
         # CI via ±1σ on Δ
         def _odds_sigmas_at(d):
             return odds_sigmas_from_delta(d)
-        s1_lo, s2_lo = _odds_sigmas_at(delta - delta_err)
-        s1_hi, s2_hi = _odds_sigmas_at(delta + delta_err)
+        s2_lo = _odds_sigmas_at(delta - delta_err)
+        s2_hi = _odds_sigmas_at(delta + delta_err)
 
         # Bayes factor & Jeffreys strength
         log10K, B_str, B_ci = _bayes_factor_repr_from_delta(delta, delta_err)
@@ -1987,7 +1991,7 @@ def compare_models_by_log_evidence_all(
             "z_mc": z_mc_head,
             "sigma_from_odds_one_sided": sigma_one,
             "sigma_from_odds_two_sided": sigma_two,
-            "sigma_from_odds_one_sided_ci_1sigma": (s1_lo, s1_hi),
+            #"sigma_from_odds_one_sided_ci_1sigma": (s1_lo, s1_hi),
             "sigma_from_odds_two_sided_ci_1sigma": (s2_lo, s2_hi),
             "log10_Bayes_factor": log10K,
             "Bayes_factor_str": B_str,
@@ -2019,14 +2023,14 @@ def compare_models_by_log_evidence_all(
                 d = zi - zj
                 de = float(np.hypot(ei, ej))
                 zmc = np.inf if de == 0 else d / de
-                z1, z2 = _odds_sigmas_from_delta(d)
+                z2 = odds_sigmas_from_delta(d)
                 log10K, B_str, B_ci = _bayes_factor_repr_from_delta(d, de)
                 strength = _jeffreys_strength(abs(d), jeffreys_thresholds)
                 pairwise[li][lj] = {
                     "delta_logZ": d,
                     "delta_logZ_err": de,
                     "z_mc": zmc,
-                    "sigma_one_sided": z1,
+                    #"sigma_one_sided": z1,
                     "sigma_two_sided": z2,
                     "jeffreys_strength": strength,
                     "log10_Bayes_factor": log10K,
@@ -3339,3 +3343,115 @@ def load_cosmo_results_hdf5(filename):
                 results[model_name][param_name] = grp[param_name][()]
                 
     return results
+
+import hashlib
+import numpy as np
+import pandas as pd
+
+
+def _stable_u01_from_id(x, seed=42):
+    """
+    Deterministic pseudo-random number in (0, 1) from an object id + seed.
+    Stable across runs and independent of dataframe row order.
+    """
+    s = f"{seed}_{x}".encode("utf-8")
+    h = hashlib.sha256(s).hexdigest()
+    # keep strictly away from 0 to avoid log(0)
+    u = int(h[:16], 16) / 16**16
+    return min(max(u, 1e-12), 1 - 1e-12)
+
+
+def select_agn_subset(
+    df_agn,
+    z_range,
+    N=None,
+    subset_seed=42,
+    id_col="object_id",
+    z_uniform_min=0.5,
+    n_z_bins=10,
+):
+    """
+    Restrict to z_range, then select a deterministic subset of size N
+    with reweighting to make the selected redshift distribution roughly
+    uniform between z_uniform_min and z_range[1].
+
+    Parameters
+    ----------
+    df_agn : pandas.DataFrame
+    z_range : tuple
+        (zmin, zmax)
+    N : int or None
+        Number of AGN to keep. If None, keep all in range.
+    subset_seed : int
+        Changes the deterministic weighted selection.
+    id_col : str
+        Column with unique AGN identifier.
+    z_uniform_min : float
+        Lower bound of the target uniform-redshift weighting.
+    n_z_bins : int
+        Number of redshift bins used to estimate the parent density.
+
+    Returns
+    -------
+    df_sel : pandas.DataFrame
+        Selected AGN subset.
+    """
+    zmin, zmax = z_range
+
+    df_sel = df_agn.copy()
+    df_sel = df_sel[df_sel["z"].between(zmin, zmax)].copy()
+
+    n_avail = len(df_sel)
+    print(f"AGN available after cuts: {n_avail}")
+
+    if n_avail == 0:
+        raise ValueError("No AGN available after z_range cut.")
+
+    if N is None:
+        df_sel = df_sel.reset_index(drop=True)
+        print("Using all AGN in range.")
+        print(f"+++ Length of selected AGNs: {len(df_sel)}")
+        print(f"+++ Redshift range of selected AGNs: {df_sel['z'].min()} to {df_sel['z'].max()}")
+        return df_sel
+
+    if N > n_avail:
+        raise ValueError(f"Requested N={N}, but only {n_avail} AGN available after cuts.")
+
+    # --- build inverse-density weights in redshift ---
+    z0 = max(z_uniform_min, zmin)
+    if zmax <= z0:
+        raise ValueError(f"Need z_range[1] > {z0} for uniform reweighting.")
+
+    edges = np.linspace(z0, zmax, n_z_bins + 1)
+
+    # Assign each AGN to a z-bin
+    bin_idx = np.clip(np.digitize(df_sel["z"].values, edges) - 1, 0, n_z_bins - 1)
+
+    # Count how many AGN are in each bin
+    counts = np.bincount(bin_idx, minlength=n_z_bins)
+
+    # Weight = inverse of parent density per bin
+    # bins with fewer objects get larger weight
+    weights = 1.0 / counts[bin_idx].astype(float)
+
+    # --- deterministic weighted sampling without replacement ---
+    # Efraimidis-Spirakis style: priority = -log(u) / w ; select smallest
+    u = np.array([_stable_u01_from_id(x, seed=subset_seed) for x in df_sel[id_col].values])
+    priority = -np.log(u) / weights
+
+    df_sel = df_sel.copy()
+    df_sel["_priority"] = priority
+    df_sel["_w"] = weights
+
+    df_sel = (
+        df_sel.sort_values("_priority")
+              .head(N)
+              .drop(columns=["_priority", "_w"])
+              .reset_index(drop=True)
+    )
+
+    print(f"Deterministically selected N={N} AGN with subset_seed={subset_seed}")
+    print(f"+++ Length of selected AGNs: {len(df_sel)}")
+    print(f"+++ Redshift range of selected AGNs: {df_sel['z'].min()} to {df_sel['z'].max()}")
+
+    return df_sel

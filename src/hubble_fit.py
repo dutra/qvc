@@ -38,6 +38,7 @@ from hubble_likelihood import *
 from hubble_plotting import *
 from hubble_model import *
 from hubble_completeness_refactored import *
+import traceback
 
 def prior_transform_dynesty(unit_cube, priors, model_labels):
     return [priors[key][0] + (priors[key][1] - priors[key][0]) * x
@@ -59,25 +60,6 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                       N=None,
                       ):
 
-
-    # Restrict AGN data to redshift range in
-    df_agn = df_agn.copy()
-    df_agn = df_agn[df_agn['z'].between(z_range[0], z_range[1])].reset_index(drop=True)
-
-    n_avail = len(df_agn)
-    print(f"AGN available after cuts: {n_avail}")
-
-    if N is not None:
-        if N > n_avail:
-            raise ValueError(f"Requested N={N}, but only {n_avail} AGN available after cuts.")
-
-        subset_seed = 42  # fixed seed for reproducibility
-
-        rng = np.random.default_rng(subset_seed)
-        idx = rng.choice(n_avail, size=N, replace=False)
-        df_agn = df_agn.iloc[np.sort(idx)].reset_index(drop=True)
-
-        print(f"Randomly selected N={N} AGN with subset_seed={subset_seed}")
 
     run_tag = make_run_tag(cosmo_model, only_sna, speed, N, z_range)
     plot_path = f"plots/hubble/{prefix}/{run_tag}"
@@ -107,8 +89,8 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
     agn_fields += ('apparent_mag_2500', 'apparent_mag_2500_err', 'z', 'z_err', 'object_id')
     agn_data = {col: df_agn[col].values for col in agn_fields if col in df_agn.columns}
 
-    pantheon_fields = ['zHD', 'm_b_corr', 'IS_CALIBRATOR']
-    pantheon_data = {col: df_pantheon[col].values for col in df_pantheon.columns}
+    pantheon_fields = ['zHD', 'm_b_corr', 'IS_CALIBRATOR', 'CEPH_DIST']
+    pantheon_data = {col: df_pantheon[col].values for col in pantheon_fields if col in df_pantheon.columns}
 
     agn_calibrators_fields = ('MU_CAL', 'MU_CAL_ERR', 'AGN_IS_CALIBRATOR') + agn_fields
     if df_calibrators is None:
@@ -303,9 +285,20 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                z_range=(0.44, 3.16),
                z_pivot_agn=1.5, skip_plots=False, residuals_sigma_clip=None, df_calibrators=None,
                prefix="default"):
+    run_tag = make_run_tag(cosmo_model, only_sna, speed, N, z_range)
+    plot_path = f"plots/hubble/{prefix}/{run_tag}"
+
+    df_agn_fit_selection = select_agn_subset(
+        df_agn,
+        z_range=z_range,
+        N=N,
+        subset_seed=42,
+        id_col="object_id",
+    )
+    plot_redshift_histograms(df_pantheon, df_agn_fit_selection, xscale="linear", plot_path=plot_path)
 
     flat_samples, model_labels, dm_interp, logZ, logZerr = run_mcmc_pipeline(
-                                                        df_agn, df_agn_all,
+                                                        df_agn_fit_selection, df_agn_all,
                                                         df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
                                                         df_calibrators=df_calibrators,
                                                         cosmo_model=cosmo_model, z_pivot_agn=z_pivot_agn,
@@ -323,9 +316,6 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         print("Skipping plots, returning results...")
         return flat_samples, model_labels, dm_interp, logZ, logZerr, None, age, age_err
 
-    run_tag = make_run_tag(cosmo_model, only_sna, speed, N, z_range)
-
-    plot_path = f"plots/hubble/{prefix}/{run_tag}"
 
     print(f"Saving plots to ", plot_path)
     os.makedirs(plot_path, exist_ok=True)
@@ -336,9 +326,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
     #     return flat_samples, model_labels, dm_interp, logZ, logZerr, None, age, age_err
 
     print("Plotting predicted L2500 vs ...")
-    # plot_predicted_L2500_vs_sigmahat(flat_samples, df_agn, cosmo_model=cosmo_model, z_pivot_agn=z_pivot_agn, 
-    #                                  debias=False, show_residuals=False,
-    #                                  show=False, plot_path=plot_path)
+
     L_residuals_debiased, L_pred_std_debiased = plot_predicted_L2500_vs_sigmahat(flat_samples, df_agn, cosmo_model=cosmo_model, z_pivot_agn=z_pivot_agn, 
                                                             debias=True, dm_interp=dm_interp, show_residuals=False,
                                                             show=False, plot_path=plot_path, df_calibrators=df_calibrators)
@@ -473,8 +461,11 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
         
         plot_cosmo_corner(samples_sna, samples_joint, cosmo_model, z_pivot_sna, z_pivot_agn, show=False, 
                           plot_path=compare_plot_path, speed=speed,
-                          gauss_sigma=1.5, kde_bw_scale=1.5)
-
+                          gauss_sigma=1.5, kde_bw_scale=1.5, include_alpha_beta=False)
+        plot_cosmo_corner(samples_sna, samples_joint, cosmo_model, z_pivot_sna, z_pivot_agn, show=False, 
+                          plot_path=compare_plot_path, speed=speed,
+                          gauss_sigma=1.5, kde_bw_scale=1.5, include_alpha_beta=True)
+        
         cosmo_models_result_dict[cosmo_model]['logZ'] = logZ_joint
         cosmo_models_result_dict[cosmo_model]['logZerr'] = logZerr_joint
         cosmo_models_result_dict[cosmo_model]['age'] = age_joint

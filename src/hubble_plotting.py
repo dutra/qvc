@@ -187,7 +187,8 @@ def plot_cosmo_corner(
     gauss_sigma=1.2,
     kde_bw_scale=1.0,
     grid_q=(0.0005, 0.9995),
-    pad_frac=0.25
+    pad_frac=0.25,
+    include_alpha_beta=False,
 ):
     import os
     import numpy as np
@@ -198,53 +199,61 @@ def plot_cosmo_corner(
     from scipy.ndimage import gaussian_filter
 
     # --- pull model labels from your config ---
-    _, model_labels, _ = get_model_params(cosmo_model)
+    _, model_labels, model_labels_latex = get_model_params(cosmo_model)
+    idx = {k: i for i, k in enumerate(model_labels)}
+    latex = dict(zip(model_labels, model_labels_latex))
 
     # ---------- helpers ----------
-    def _find(labels, *cands):
-        for c in cands:
-            if c in labels:
-                return labels.index(c)
-        raise KeyError(f"Could not find any of {cands} in labels {labels}")
-
-    def _subset(samples, labels, z_pivot):
+    def _subset(samples, z_pivot, include_alpha_beta=False, include_m0_agn=False):
         X = np.asarray(samples)
-        i_H0  = _find(labels, "H0", "H_0")
-        i_Om0 = _find(labels, "Om0", "OmegaM", "Omega_m")
+        cols = []
+        lab_latex = []
+        units_latex = []
+
+        if include_m0_agn:
+            cols.append(X[:, idx["M0_agn"]])
+            lab_latex.append(latex["M0_agn"])
+            units_latex.append("")
+
+        if include_alpha_beta:
+            cols.append(X[:, idx["alpha_agn"]])
+            cols.append(X[:, idx["beta_agn"]])
+            lab_latex.append(latex["alpha_agn"])
+            lab_latex.append(latex["beta_agn"])
+            units_latex += ["", ""]
+
+        cols.append(X[:, idx["H0"]])
+        cols.append(X[:, idx["Om0"]])
+        lab_latex.append(latex["H0"])
+        lab_latex.append(latex["Om0"])
+        units_latex += ["(km s$^{-1}$ Mpc$^{-1}$)", ""]
 
         if cosmo_model == "FlatwpwaCDM":
-            i_wp = _find(labels, "wp", "w_p")
-            i_wa = _find(labels, "wa", "w_a")
-            a_p  = 1.0 / (1.0 + float(z_pivot))
-            wp, wa = X[:, i_wp], X[:, i_wa]
+            wp = X[:, idx["wp"]]
+            wa = X[:, idx["wa"]]
+            a_p = 1.0 / (1.0 + float(z_pivot))
             w0 = wp - (1.0 - a_p) * wa
-            Y = np.column_stack([X[:, i_H0], X[:, i_Om0], w0, wa])
-            lab_latex = [r"$H_0$", r"$\Omega_m$", r"$w_0$", r"$w_a$"]
-            units_latex = ["(km s$^{-1}$ Mpc$^{-1}$)", "", "", ""]
+            cols += [w0, wa]
+            lab_latex += [r"$w_0$", latex["wa"]]
+            units_latex += ["", ""]
         elif cosmo_model == "Flatw0waCDM":
-            i_w0 = _find(labels, "w0", "w_0")
-            i_wa = _find(labels, "wa", "w_a")
-            w0, wa = X[:, i_w0], X[:, i_wa]
-            Y = np.column_stack([X[:, i_H0], X[:, i_Om0], w0, wa])
-            lab_latex = [r"$H_0$", r"$\Omega_m$", r"$w_0$", r"$w_a$"]
-            units_latex = ["(km s$^{-1}$ Mpc$^{-1}$)", "", "", ""]
+            cols += [X[:, idx["w0"]], X[:, idx["wa"]]]
+            lab_latex += [latex["w0"], latex["wa"]]
+            units_latex += ["", ""]
         elif cosmo_model == "FlatwCDM":
-            i_w0 = _find(labels, "w0", "w_0", "w")
-            Y = np.column_stack([X[:, i_H0], X[:, i_Om0], X[:, i_w0]])
-            lab_latex = [r"$H_0$", r"$\Omega_m$", r"$w_0$"]
-            units_latex = ["(km s$^{-1}$ Mpc$^{-1}$)", "", ""]
-        elif cosmo_model == 'FlatLambdaCDM':
-            Y = np.column_stack([X[:, i_H0], X[:, i_Om0]])
-            lab_latex = [r"$H_0$", r"$\Omega_m$"]
-            units_latex = ["(km s$^{-1}$ Mpc$^{-1}$)", ""]
+            cols += [X[:, idx["w0"]]]
+            lab_latex += [latex["w0"]]
+            units_latex += [""]
+        elif cosmo_model == "FlatLambdaCDM":
+            pass
         else:
             raise ValueError(f"Unsupported cosmo_model '{cosmo_model}' for this plot.")
+
+        Y = np.column_stack(cols)
         return Y, lab_latex, units_latex
 
     def _fmt_err(m, lo, hi, latex_label=""):
-        nd = 2
-        if latex_label == r"$H_0$":
-            nd = 1
+        nd = 1 if latex_label == latex["H0"] else 2
         return f"{m:.{nd}f}", f"{hi - m:.{nd}f}", f"{m - lo:.{nd}f}"
 
     def _get_density_levels(values, probs=[0.393, 0.865]):
@@ -295,12 +304,12 @@ def plot_cosmo_corner(
             zz = gaussian_filter(zz, sigma=float(gauss_sigma), mode='reflect')
 
         levels_12 = _get_density_levels(zz, [0.393, 0.865])
-        for i in range(len(levels_12)-1, -1, -1):
+        for i in range(len(levels_12) - 1, -1, -1):
             ax.contourf(
                 xx, yy, zz,
                 levels=[levels_12[i], zz.max()],
                 colors=[color],
-                alpha=base_alpha * (i+1) / len(levels_12)
+                alpha=base_alpha * (i + 1) / len(levels_12)
             )
         ax.contour(xx, yy, zz, levels=levels_12, colors=[color], linewidths=1.2)
         level_3 = _get_density_levels(zz, [0.989])[0]
@@ -312,13 +321,27 @@ def plot_cosmo_corner(
         return xmin, xmax, ymin, ymax
 
     # --- reduce to plotted params ---
-    agn_data, labels_latex, units_latex = _subset(flat_samples_agn, model_labels, z_pivot_agn)
+    agn_data, labels_latex, units_latex = _subset(
+        flat_samples_agn,
+        z_pivot_agn,
+        include_alpha_beta=include_alpha_beta,
+        include_m0_agn=True,
+    )
+
     sna_data = None
     if flat_samples_sn is not None and len(flat_samples_sn) > 0:
-        sna_data, _, _ = _subset(flat_samples_sn, model_labels, z_pivot_sna)
+        sna_data, _, _ = _subset(
+            flat_samples_sn,
+            z_pivot_sna,
+            include_alpha_beta=False,
+            include_m0_agn=False,
+        )
 
+    n_extra = 1 + (2 if include_alpha_beta else 0)   # M0_agn + optional alpha,beta
     n_params = agn_data.shape[1]
-    fig, axes = plt.subplots(n_params, n_params, figsize=(2.3*n_params, 2.3*n_params))
+    fig, axes = plt.subplots(n_params, n_params, figsize=(2.3 * n_params, 2.3 * n_params))
+    if n_params == 1:
+        axes = np.array([[axes]])
 
     for i in range(n_params):
         for j in range(n_params):
@@ -326,50 +349,74 @@ def plot_cosmo_corner(
             ax.tick_params(direction='in')
 
             if i < j:
-                ax.axis("off"); continue
+                ax.axis("off")
+                continue
+
+            i_sn = i - n_extra
+            j_sn = j - n_extra
+            has_sn_here = (sna_data is not None) and (i_sn >= 0) and (j_sn >= 0)
 
             if i == j:
                 xs, ys, (xmin, xmax) = _kde1d_grid(agn_data[:, i])
                 ax.plot(xs, ys, color="k", lw=1.8)
-                if sna_data is not None:
-                    xs_b, ys_b, (xmin_b, xmax_b) = _kde1d_grid(sna_data[:, i])
+
+                if has_sn_here:
+                    xs_b, ys_b, (xmin_b, xmax_b) = _kde1d_grid(sna_data[:, i_sn])
                     ax.plot(xs_b, ys_b, color="dodgerblue", lw=1.8)
                     ax.set_xlim(min(xmin, xmin_b), max(xmax, xmax_b))
                 else:
                     ax.set_xlim(xmin, xmax)
 
-                m, lo, hi = np.median(agn_data[:, i]), np.percentile(agn_data[:, i],16), np.percentile(agn_data[:, i],84)
-                ms, ps, ns = _fmt_err(m, lo, hi, latex_label=labels_latex[i])
-                txt_black = rf"{labels_latex[i]} = {ms}" + rf"$^{{+{ps}}}_{{-{ns}}}$" + f" {units_latex[i]}"
                 figt = ax.figure
-                off_blue = mtransforms.ScaledTranslation(0,  2/72., figt.dpi_scale_trans)
-                off_blk  = mtransforms.ScaledTranslation(0, 15/72., figt.dpi_scale_trans)
-                ax.text(0.02, 1.0, txt_black,
-                        transform=ax.transAxes + off_blk,
-                        ha="left", va="bottom", color="k", fontsize=11, clip_on=False)
 
-                if sna_data is not None:
-                    mb, lob, hib = np.median(sna_data[:, i]), np.percentile(sna_data[:, i],16), np.percentile(sna_data[:, i],84)
+                # SN Ia on top
+                if has_sn_here:
+                    mb  = np.median(sna_data[:, i_sn])
+                    lob = np.percentile(sna_data[:, i_sn], 16)
+                    hib = np.percentile(sna_data[:, i_sn], 84)
                     msb, psb, nsb = _fmt_err(mb, lob, hib, latex_label=labels_latex[i])
                     txt_blue = rf"{labels_latex[i]} = {msb}" + rf"$^{{+{psb}}}_{{-{nsb}}}$" + f" {units_latex[i]}"
-                    ax.text(0.02, 1.0, txt_blue,
-                            transform=ax.transAxes + off_blue,
-                            ha="left", va="bottom", color="dodgerblue", fontsize=11, clip_on=False)
+                    off_blue = mtransforms.ScaledTranslation(0, 15 / 72., figt.dpi_scale_trans)
+                    ax.text(
+                        0.02, 1.0, txt_blue,
+                        transform=ax.transAxes + off_blue,
+                        ha="left", va="bottom", color="dodgerblue",
+                        fontsize=11, clip_on=False
+                    )
+
+                # SN Ia + AGN on bottom
+                m  = np.median(agn_data[:, i])
+                lo = np.percentile(agn_data[:, i], 16)
+                hi = np.percentile(agn_data[:, i], 84)
+                ms, ps, ns = _fmt_err(m, lo, hi, latex_label=labels_latex[i])
+                txt_black = rf"{labels_latex[i]} = {ms}" + rf"$^{{+{ps}}}_{{-{ns}}}$" + f" {units_latex[i]}"
+                off_blk = mtransforms.ScaledTranslation(0, 2 / 72., figt.dpi_scale_trans)
+                ax.text(
+                    0.02, 1.0, txt_black,
+                    transform=ax.transAxes + off_blk,
+                    ha="left", va="bottom", color="k",
+                    fontsize=11, clip_on=False
+                )
+
             else:
-                # -------- FIX: draw both without setting limits, then union of ranges --------
                 lims = []
-                if sna_data is not None:
+                if has_sn_here:
                     lims.append(_filled_kde_with_3sigma(
-                        ax, sna_data[:, j], sna_data[:, i], "dodgerblue", base_alpha=0.4, set_limits=False
+                        ax, sna_data[:, j_sn], sna_data[:, i_sn], "dodgerblue",
+                        base_alpha=0.4, set_limits=False
                     ))
+
                 lims.append(_filled_kde_with_3sigma(
-                    ax, agn_data[:, j], agn_data[:, i], "k", base_alpha=0.4, set_limits=False
+                    ax, agn_data[:, j], agn_data[:, i], "k",
+                    base_alpha=0.4, set_limits=False
                 ))
-                xmin = min(l[0] for l in lims); xmax = max(l[1] for l in lims)
-                ymin = min(l[2] for l in lims); ymax = max(l[3] for l in lims)
+
+                xmin = min(l[0] for l in lims)
+                xmax = max(l[1] for l in lims)
+                ymin = min(l[2] for l in lims)
+                ymax = max(l[3] for l in lims)
                 ax.set_xlim(xmin, xmax)
                 ax.set_ylim(ymin, ymax)
-                # ---------------------------------------------------------------------------
 
             if j == 0:
                 ax.set_ylabel(f"{labels_latex[i]} {units_latex[i]}")
@@ -383,23 +430,23 @@ def plot_cosmo_corner(
 
     legend = []
     if sna_data is not None:
-        legend.append(Line2D([0],[0], color="dodgerblue", lw=4, label="SN Ia"))
-    legend.append(Line2D([0],[0], color="k",  lw=4, label="SN Ia + AGN"))
-    fig.legend(handles=legend, bbox_to_anchor=(0.5, 0.92), loc="upper left",
-               fontsize=12, frameon=False, markerscale=1.5)
+        legend.append(Line2D([0], [0], color="dodgerblue", lw=6, label="SN Ia"))
+    legend.append(Line2D([0], [0], color="k", lw=6, label="SN Ia + AGN"))
+    fig.legend(handles=legend, bbox_to_anchor=(0.99, 0.92), loc="upper right",
+               fontsize=18, frameon=False, markerscale=1.5)
 
     fig.subplots_adjust(left=0.08, right=0.98, bottom=0.08, top=0.9,
                         wspace=0.05, hspace=0.05)
 
     os.makedirs(plot_path, exist_ok=True)
-    fig.savefig(os.path.join(plot_path, f"cosmo_corner_{cosmo_model}_{speed}.png"),
+    fig.savefig(os.path.join(plot_path, f"cosmo_corner_{cosmo_model}_{speed}_{'alphabeta' if include_alpha_beta else 'noalphabeta'}.png"),
                 bbox_inches="tight", dpi=150)
-    fig.savefig(os.path.join(plot_path, f"cosmo_corner_{cosmo_model}_{speed}.pdf"),
+    fig.savefig(os.path.join(plot_path, f"cosmo_corner_{cosmo_model}_{speed}_{'alphabeta' if include_alpha_beta else 'noalphabeta'}.pdf"),
                 bbox_inches="tight", dpi=600)
+
     if show:
         plt.show()
     plt.close(fig)
-
 
 def _weighted_bin_stats(z, y, yerr, bins, *, min_count=3, center='mid', plot_path=None):
     """
@@ -452,7 +499,7 @@ def _weighted_bin_stats(z, y, yerr, bins, *, min_count=3, center='mid', plot_pat
 def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plot_path="plots/hubble/",
                 show_binned_agn=True, show_residuals=True,
                 debias=False, dm_interp=None, show=False, completeness=True, show_true=False, verbose=True,
-                cosmo_model_samples={}, residuals_sigma_clip=None, df_calibrators=None,):
+                cosmo_model_samples={}, residuals_sigma_clip=None, df_calibrators=None, z_range=(0.44, 3.16)):
     """
     Hubble diagram (Pantheon+-style):
       • Model line + 68% band in magenta
@@ -625,7 +672,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     inset_ax.set_xscale('log')
 
     # Solid vs open AGN markers by z (both main and inset)
-    mask_in  = df_agn["z"].between(0.44, 3.16)
+    mask_in  = df_agn["z"].between(z_range[0], z_range[1])
     mask_out = ~mask_in
 
     # AGN (inside)
@@ -645,7 +692,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
 
     # INSET: log-binned AGN
     if show_binned_agn:
-        mask_in  = (0.44 < z_log) & (z_log < 3.16)
+        mask_in  = (z_range[0] < z_log) & (z_log < z_range[1])
         mask_out = ~mask_in
         # binned (inside)
         inset_ax.errorbar(
@@ -701,7 +748,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     if verbose:
         n_clipped = np.sum(clipped)
         print(f"Note: {n_clipped} / {len(df_agn)} AGN clipped in residuals panel (> 3σ)")
-    mask_in  = df_agn["z"].between(0.44, 3.16)
+    mask_in  = df_agn["z"].between(z_range[0], z_range[1])
     mask_out = ~mask_in
     # AGN (inside)
     for i in np.where(mask_in)[0]:
@@ -749,7 +796,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
 
     # MAIN: linear-binned AGN
     if show_binned_agn:
-        mask_in  = (0.44 < z_lin_scatter) & (z_lin_scatter < 3.16)
+        mask_in  = (z_range[0] < z_lin_scatter) & (z_lin_scatter < z_range[1])
         mask_out = ~mask_in
         # with scatter
         # binned (inside)
@@ -831,7 +878,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
 
         # NEW: binned residuals in red (points + thin connecting line)
         if z_res_lin_scatter.size:
-            mask_in  = (0.44 < z_res_lin_scatter) & (z_res_lin_scatter < 3.16)
+            mask_in  = (z_range[0] < z_res_lin_scatter) & (z_res_lin_scatter < z_range[1])
             mask_out = ~mask_in
             ax_resid.errorbar(
                 z_res_lin_scatter[mask_in], resid_lin_mean_scatter[mask_in], yerr=resid_lin_sem_scatter[mask_in],
@@ -1034,6 +1081,7 @@ def plot_predicted_vs_actual_M2500(
     m_lim=24.0,           # survey apparent-magnitude limit for completeness shading
     n_cosmo_draws=50,     # posterior draws to propagate cosmology errors (for xerr)
     random_state=42,      # RNG seed for reproducibility of draws
+    z_range=(0.44, 3.16)
 ):
     """
     Predicted vs Actual M_2500, with:
@@ -1255,7 +1303,7 @@ def plot_predicted_vs_actual_M2500(
 
         # scatter with discrete colors: closed if 0.44 < z < 3.16, open otherwise
         z_bin = z[bin_mask]
-        mask_closed = (z_bin > 0.44) & (z_bin < 3.16)
+        mask_closed = (z_bin > z_range[0]) & (z_bin < z_range[1])
         mask_open   = ~mask_closed
 
         # filled markers (keep black edges like before)
@@ -1667,7 +1715,7 @@ def _kde_conf_levels(Z, conf=(0.954, 0.683), plot_path=None):
 def plot_predicted_L2500_vs_sigmahat(
     flat_samples, df_agn, cosmo_model, z_pivot_agn,
     plot_path='plots/hubble', show=False, debias=True, dm_interp=None,
-    show_residuals=False, df_calibrators=None
+    show_residuals=False, df_calibrators=None, z_range=(0.44, 3.16)
 ):
     d = df_agn.copy()
 
@@ -1799,7 +1847,7 @@ def plot_predicted_L2500_vs_sigmahat(
 
     # --- Baseline data (MAIN) ---
     yerr_linear = 10**actual_logL2500 * np.log(10) * y_log_meas_err
-    mask_in  = d["z"].between(0.44, 3.16)
+    mask_in  = d["z"].between(z_range[0], z_range[1])
     mask_out = ~mask_in
 
     # inside redshift range: filled markers
@@ -2287,7 +2335,8 @@ def plot_residuals_vs_alphaOX(
     plot_path="plots/hubble/appendix",
     nbins=6,
     binning="uniform",     # "quantile", "uniform", or pass explicit edges via nbins=array_like
-    min_per_bin=4           # hide bins with too few points
+    min_per_bin=4,           # hide bins with too few points
+    z_range=(0.44, 3.16)
 ):
     """
     Plot residuals vs delta_alphaOX and alphaOX, colored by redshift, with binned means.
@@ -2324,7 +2373,7 @@ def plot_residuals_vs_alphaOX(
     sm = mpl.cm.ScalarMappable(norm=norm, cmap=cmap)
 
     # --- Masks for filled vs open ---
-    mask_in = (z > 0.44) & (z < 3.16)   # filled
+    mask_in = (z > z_range[0]) & (z < z_range[1])   # filled
     mask_out = ~mask_in                 # open (hollow)
 
     # --- Plot each point with its own error bar ---
@@ -2621,7 +2670,9 @@ def plot_redshift_histograms(df_pantheon, df_agn,
                             z_col_sn="zHD",
                             z_col_agn="z",
                             xscale="log",
-                            bins=40):
+                            bins=40,
+                            z_range=(0.44, 3.16),
+                            show=False):
     """
     Plot redshift histograms for SN (Pantheon) and AGN samples
     using a logarithmic redshift axis.
@@ -2632,8 +2683,8 @@ def plot_redshift_histograms(df_pantheon, df_agn,
 
     # --- AGN ---
     z_agn_all = df_agn[z_col_agn].to_numpy()
-    z_agn_fid = df_agn[df_agn[z_col_agn].between(0.44, 3.16)][z_col_agn].to_numpy()
-    z_agn_restricted = df_agn[df_agn[z_col_agn].between(1.0, 3.16)][z_col_agn].to_numpy()
+    z_agn_fid = df_agn[df_agn[z_col_agn].between(z_range[0], z_range[1])][z_col_agn].to_numpy()
+    z_agn_restricted = df_agn[df_agn[z_col_agn].between(1.0, z_range[1])][z_col_agn].to_numpy()
 
     # Remove non-positive values
     z_all = np.concatenate([z_sn, z_agn_all])
@@ -2675,7 +2726,7 @@ def plot_redshift_histograms(df_pantheon, df_agn,
         linestyle="solid",
         color="0.4",
         linewidth=2.8,
-        label=r"AGN ($\mathit{fiducial\ fitting\ sample};\ 0.44<z<3.16$)",
+        label=rf"AGN ($\mathit{{fiducial\ fitting\ sample}};\ {z_range[0]}<z<{z_range[1]}$)",
         zorder=-1
     )
 
@@ -2687,7 +2738,7 @@ def plot_redshift_histograms(df_pantheon, df_agn,
         linestyle="--",
         color="0.7",
         linewidth=2.8,
-        label=r"AGN ($\mathit{restricted\ fitting\ sample};\ 1<z<3.16$)",
+        label=rf"AGN ($\mathit{{restricted\ fitting\ sample}};\ {z_range[0]}<z<{z_range[1]}$)",
         zorder=-2
     )
 
@@ -2697,8 +2748,8 @@ def plot_redshift_histograms(df_pantheon, df_agn,
 
     ax.legend(frameon=False, loc="upper left", fontsize=12)
     fig.tight_layout()
-
+    os.makedirs(plot_path, exist_ok=True)
     fig.savefig(os.path.join(plot_path, f"redshift_histograms.pdf"),
                 bbox_inches="tight", dpi=600)
-
-    plt.show()
+    if show:
+        plt.show()
