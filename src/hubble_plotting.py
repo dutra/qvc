@@ -2290,7 +2290,7 @@ def plot_residuals_vs_alphaOX(
     min_per_bin=4           # hide bins with too few points
 ):
     """
-    Plot residuals vs delta_alphaOX, colored by redshift, with binned means.
+    Plot residuals vs delta_alphaOX and alphaOX, colored by redshift, with binned means.
 
     Binning:
       - binning="quantile": edges chosen by quantiles (equal counts)
@@ -2412,8 +2412,128 @@ def plot_residuals_vs_alphaOX(
     plt.tight_layout()
     os.makedirs(plot_path, exist_ok=True)
     os.makedirs(os.path.join(plot_path, "pdf"), exist_ok=True)
-    out_pdf = os.path.join(plot_path, "pdf/alphaOx_int_residuals.pdf")
-    out_png = os.path.join(plot_path, "alphaOx_int_residuals.png")
+    out_pdf = os.path.join(plot_path, "pdf/delta_alphaOX_residuals.pdf")
+    out_png = os.path.join(plot_path, "delta_alphaOX_residuals.png")
+    plt.savefig(out_pdf)
+    plt.savefig(out_png, dpi=220)
+
+    plt.ylim(-4.6, 3.9)
+
+    if show:
+        plt.show()
+    plt.close()
+
+    # --- Extract and sanitize inputs ---
+    x = np.asarray(df_agn["alphaOX"])
+    xerr = np.asarray(df_agn.get("alphaOX_err", np.full_like(x, np.nan)))
+    z = np.asarray(df_agn["z"])
+    y = np.asarray(residuals)
+    yerr = np.asarray(residuals_err)
+
+    m = np.isfinite(x) & np.isfinite(y) & np.isfinite(yerr)
+    if np.isfinite(xerr).any():
+        m &= np.isfinite(xerr) | np.isnan(xerr)
+    x, xerr, y, yerr, z = x[m], xerr[m], y[m], yerr[m], z[m]
+
+    # --- Figure/axes ---
+    fig, ax = plt.subplots(1, 1, figsize=(7.2, 5.2))
+
+    vmin, vmax = np.nanmin(z), np.nanmax(z)
+    norm = mpl.colors.Normalize(vmin=vmin, vmax=vmax)
+    cmap = mpl.cm.get_cmap('viridis')
+    sm = mpl.cm.ScalarMappable(norm=norm, cmap=cmap)
+
+    # --- Masks for filled vs open ---
+    mask_in = (z > 0.44) & (z < 3.16)   # filled
+    mask_out = ~mask_in                 # open (hollow)
+
+    # --- Plot each point with its own error bar ---
+    n_pts = len(x)
+    for i in range(n_pts):
+        zi = z[i]
+        ci = cmap(norm(zi))
+
+        # x-error for this point (None if not finite)
+        xi_err = xerr[i] if np.isfinite(xerr[i]) else None
+
+        # Filled vs hollow styling
+        if mask_in[i]:
+            mfc = ci
+            mec = 'none'
+        else:
+            mfc = 'none'
+            mec = ci
+
+        label = "AGN" if i == n_pts - 1 else None  # only last point gets the legend label
+
+        ax.errorbar(
+            x[i], y[i],
+            xerr=xi_err,
+            yerr=yerr[i],
+            fmt='o',
+            markersize=6,
+            mfc=mfc,
+            mec=mec,
+            mew=0.9,
+            ecolor=(0.5, 0.5, 0.5, 0.7), elinewidth=0.8, capsize=2, capthick=0.8,
+            zorder=2,
+            label=label,
+        )
+
+    # Zero reference
+    ax.axhline(0.0, color='magenta', linewidth=2, zorder=0)
+
+    # --- Binning setup ---
+    if np.ndim(nbins) > 0:  # explicit edges provided
+        edges = np.asarray(nbins, dtype=float)
+        if edges.ndim != 1 or edges.size < 2:
+            raise ValueError("Explicit 'nbins' must be a 1D array of bin edges with size >= 2.")
+    else:
+        if binning == "quantile":
+            qs = np.linspace(0, 1, nbins + 1)
+            edges = np.quantile(x, qs)
+            edges = np.unique(edges)
+            if edges.size < 2:
+                raise ValueError("Not enough unique quantile edges for binning.")
+        elif binning == "uniform":
+            edges = np.linspace(x.min(), x.max(), nbins + 1)
+        else:
+            raise ValueError("binning must be 'quantile', 'uniform', or provide explicit edges via nbins.")
+
+    # --- Compute binned stats using _weighted_bin_stats ---
+    bx, by, by_sem, bN = _weighted_bin_stats(
+        x, y, yerr,
+        bins=edges,
+        min_count=min_per_bin,
+        center='mid',  # display at bin midpoints; change to 'weighted' if preferred
+    )
+
+    if len(bx):
+        ax.errorbar(
+            bx, by, yerr=by_sem,
+            fmt='o', ms=6, lw=2, color='red', mfc='red', mew=1.2,
+            zorder=3, label="Binned mean"
+        )
+
+    # --- Labels, colorbar, cosmetics ---
+    ax.set_xlabel(r'$\alpha_{\mathrm{OX}}$')
+    ax.set_ylabel('Residuals (mag)')
+
+    cbar = fig.colorbar(sm, ax=ax)
+    cbar.set_label(r'$z$')
+
+    # Legend with frame; last AGN point + binned mean will be picked up by labels
+    ax.legend(
+        loc='lower right',
+        frameon=True,
+        framealpha=0.8,
+    )
+
+    plt.tight_layout()
+    os.makedirs(plot_path, exist_ok=True)
+    os.makedirs(os.path.join(plot_path, "pdf"), exist_ok=True)
+    out_pdf = os.path.join(plot_path, "pdf/alphaOX_residuals.pdf")
+    out_png = os.path.join(plot_path, "alphaOX_residuals.png")
     plt.savefig(out_pdf)
     plt.savefig(out_png, dpi=220)
 
@@ -2500,6 +2620,7 @@ def plot_redshift_histograms(df_pantheon, df_agn,
                             plot_path="plots/hubble",
                             z_col_sn="zHD",
                             z_col_agn="z",
+                            xscale="log",
                             bins=40):
     """
     Plot redshift histograms for SN (Pantheon) and AGN samples
@@ -2570,7 +2691,7 @@ def plot_redshift_histograms(df_pantheon, df_agn,
         zorder=-2
     )
 
-    ax.set_xscale("log")
+    ax.set_xscale(xscale)
     ax.set_xlabel(r"$z$")
     ax.set_ylabel("Number")
 
