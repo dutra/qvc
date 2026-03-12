@@ -114,26 +114,18 @@ def estimate_m2500_from_model(q):
     if not hasattr(q, "wave") or not hasattr(q, "f_conti_model"):
         return np.nan
 
-    wave_rf = np.asarray(q.wave, dtype=float)
-    cont_rf = np.asarray(q.f_conti_model, dtype=float)
-    if wave_rf.size < 2 or cont_rf.size < 2:
-        return np.nan
-    if not (np.nanmin(wave_rf) <= 2500.0 <= np.nanmax(wave_rf)):
-        return np.nan
+    s = q.numpyro_samples
+    pl_norm = np.asarray(s["PL_norm_eff"], dtype=float)
+    pl_slope = np.asarray(s["PL_slope"], dtype=float)
 
-    f2500_rf = np.interp(2500.0, wave_rf, cont_rf)
-    z = safe_float(getattr(q, "z", np.nan))
-    if not np.isfinite(f2500_rf) or f2500_rf <= 0 or not np.isfinite(z):
-        return np.nan
+    f_lambda_2500 = pl_norm * (2500.0 / 3000.0) ** pl_slope
 
-    # jaxqsofit uses SDSS-style 1e-17 flux units.
-    f_lambda_obs = (f2500_rf / (1.0 + z)) * 1e-17
-    lambda_obs_cm = 2500.0 * (1.0 + z) * 1e-8
-    c = 2.99792458e10
-    f_nu = f_lambda_obs * (lambda_obs_cm**2) / c
-    if not np.isfinite(f_nu) or f_nu <= 0:
-        return np.nan
-    return -2.5 * np.log10(f_nu) - 48.60
+    c_A_s = 2.99792458e18
+    f_nu = (f_lambda_2500 * 1e-17) * (2500.0**2) / c_A_s
+    m_2500_samples = -2.5 * np.log10(f_nu) - 48.60
+
+    m16, m50, m84 = np.nanpercentile(m_2500_samples, [16, 50, 84])
+    return m50, (m84 - m16) / 2.0
 
 
 def add_legacy_aliases(result, q, args):
@@ -165,11 +157,7 @@ def add_legacy_aliases(result, q, args):
     m2500_red = np.nan
     m2500_red_err = np.nan
 
-    m2500 = estimate_m2500_from_model(q)
-
-    sn = safe_float(result.get("SN_ratio_conti"))
-    if np.isfinite(sn) and sn > 0:
-        m2500_err = 1.0857 / sn
+    m2500, m2500_err = estimate_m2500_from_model(q)
 
     result["apparent_mag_2500"] = m2500
     result["apparent_mag_2500_err"] = m2500_err
@@ -458,7 +446,6 @@ def run_one_fit(rec, args):
             hdul.close()
         if len(lam) == 0:
             raise RuntimeError("Spectrum has no good pixels after ivar filtering.")
-
         q = QSOFit(
             lam=lam,
             flux=flux,
@@ -466,10 +453,8 @@ def run_one_fit(rec, args):
             z=float(rec["z"]),
             ra=float(rec["ra"]),
             dec=float(rec["dec"]),
-            plateid=int(rec["plate"]),
-            mjd=int(rec["mjd"]),
-            fiberid=int(rec["fiber"]),
-            path=str(outdir),
+            filename=f"{rec["plate"]:04d}-{rec["mjd"]}-{rec["fiber"]:04d}",
+            output_path=str(outdir),
         )
 
         prior_config = build_default_prior_config(flux)
