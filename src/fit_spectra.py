@@ -16,7 +16,6 @@ There is no grid of fits and no collect/select stage.
 from __future__ import annotations
 
 import argparse
-import json
 import multiprocessing as mp
 import os
 import pickle
@@ -53,6 +52,9 @@ COSMO = FlatLambdaCDM(H0=70, Om0=0.3)
 # -----------------------------------------------------------------------------
 # helpers
 # -----------------------------------------------------------------------------
+def sym_percentile(x, p=[16, 50, 84], axis=0):
+    lower, median, upper = np.percentile(x, p, axis=axis)
+    return median, 0.5 * (upper - lower), lower, upper
 
 def safe_float(x, default=np.nan):
     try:
@@ -124,11 +126,11 @@ def estimate_m2500_from_model(q):
     f_nu = (f_lambda_2500 * 1e-17) * (2500.0**2) / c_A_s
     m_2500_samples = -2.5 * np.log10(f_nu) - 48.60
 
-    m16, m50, m84 = np.nanpercentile(m_2500_samples, [16, 50, 84])
-    return m50, (m84 - m16) / 2.0
+    m50, m_err, m16, m84 = sym_percentile(m_2500_samples)
+    return m50, m_err
 
 
-def add_legacy_aliases(result, q, args):
+def compute_derived_results(result, q, args):
     """
     Populate old fit_spectra-compatible columns from jaxqsofit outputs when possible.
     """
@@ -151,11 +153,31 @@ def add_legacy_aliases(result, q, args):
     if "f_host_5100" not in result:
         result["f_host_5100"] = safe_float(result.get("frac_host_5100"))
 
+    samples = q.numpyro_samples
+
+    # Host/AGN fraction near spectrum center from posterior samples.
+    log_frac_host = np.asarray(samples["log_frac_host"], dtype=float).reshape(-1)
+    frac_host_samp = 1.0 / (1.0 + np.exp(-log_frac_host))
+    p16, p50, p84 = np.nanpercentile(frac_host_samp, [16.0, 50.0, 84.0])
+
+    m50, m_err, m16, m84 = sym_percentile(frac_host_samp)
+    result["frac_host_center"] = safe_float(m50)
+    result["frac_host_center_err"] = safe_float(m_err)
+
+    # BC fraction
+    i3000 = np.argmin(np.abs(np.asarray(q.wave) - 3000.0))
+
+    bc_draws = np.asarray(q.pred_out["f_bc_model"], dtype=float)[:, i3000]
+    pl_draws = np.asarray(q.pred_out["f_pl_model"], dtype=float)[:, i3000]
+
+    bc_over_pl_draws = bc_draws / pl_draws
+    m50, m_err, m16, m84 = sym_percentile(bc_over_pl_draws)
+    result["f_bc_over_pl_3000"] = safe_float(m50)
+    result["f_bc_over_pl_3000_err"] = safe_float(m_err)
+
     z = safe_float(result.get("z"))
     m2500 = np.nan
     m2500_err = np.nan
-    m2500_red = np.nan
-    m2500_red_err = np.nan
 
     m2500, m2500_err = estimate_m2500_from_model(q)
 
@@ -309,37 +331,6 @@ def get_spectrum_arrays(hdul):
 # saving
 # -----------------------------------------------------------------------------
 
-def make_object_dir(args, rec):
-    outdir = Path(args.output_dir) / str(rec["sdss_name"])
-    outdir.mkdir(parents=True, exist_ok=True)
-    return outdir
-
-
-
-def save_full_result_json(q, rec, outdir):
-    payload = {
-        "object_id": str(rec["object_id"]),
-        "sdss_name": str(rec["sdss_name"]),
-        "plate": int(rec["plate"]),
-        "fiber": int(rec["fiber"]),
-        "mjd": int(rec["mjd"]),
-        "z": float(rec["z"]),
-        "ra": float(rec["ra"]),
-        "dec": float(rec["dec"]),
-        "attrs": {},
-    }
-
-    for key, value in q.__dict__.items():
-        if key.startswith("_"):
-            continue
-        payload["attrs"][str(key)] = serialize_any(value)
-
-    fpath = outdir / "full_result.json"
-    with open(fpath, "w") as f:
-        json.dump(payload, f)
-    return fpath
-
-
 
 def extract_named_results(q):
     out = {}
@@ -380,29 +371,24 @@ def extract_fit_stats(q):
         "wave_max_rf": np.nan,
     }
 
-    if not hasattr(q, "model_total"):
-        return out
-
     resid = np.asarray(q.flux) - np.asarray(q.model_total)
     sigma = np.asarray(q.err)
 
-    if getattr(q, "numpyro_samples", None) is not None:
-        s = q.numpyro_samples
-        frac_j = safe_float(np.median(np.asarray(s.get("frac_jitter", 0.0))), 0.0)
-        add_j = safe_float(np.median(np.asarray(s.get("add_jitter", 0.0))), 0.0)
-        sigma = np.sqrt(sigma**2 + (frac_j * np.abs(np.asarray(q.model_total))) ** 2 + add_j**2)
+    s = q.numpyro_samples
+    frac_j = safe_float(np.median(np.asarray(s.get("frac_jitter", 0.0))), 0.0)
+    add_j = safe_float(np.median(np.asarray(s.get("add_jitter", 0.0))), 0.0)
+    sigma = np.sqrt(sigma**2 + (frac_j * np.abs(np.asarray(q.model_total))) ** 2 + add_j**2)
 
     good = np.isfinite(resid) & np.isfinite(sigma) & (sigma > 0)
-    if np.any(good):
-        z = resid[good] / sigma[good]
-        out["chi2"] = float(np.sum(z**2))
-        out["chi2_per_pixel"] = float(np.mean(z**2))
-        out["wrms"] = float(np.sqrt(np.mean(z**2)))
-        out["n_pixels"] = int(np.sum(good))
 
-    if hasattr(q, "wave"):
-        out["wave_min_rf"] = safe_float(np.min(q.wave))
-        out["wave_max_rf"] = safe_float(np.max(q.wave))
+    z = resid[good] / sigma[good]
+    out["chi2"] = float(np.sum(z**2))
+    out["chi2_per_pixel"] = float(np.mean(z**2))
+    out["wrms"] = float(np.sqrt(np.mean(z**2)))
+    out["n_pixels"] = int(np.sum(good))
+
+    out["wave_min_rf"] = safe_float(np.min(q.wave))
+    out["wave_max_rf"] = safe_float(np.max(q.wave))
 
     return out
 
@@ -426,8 +412,10 @@ def run_one_fit(rec, args):
         "error_message": "",
     }
 
-    outdir = make_object_dir(args, rec)
-    result["result_dir"] = str(outdir)
+    os.makedirs(args.output_dir, exist_ok=True)
+    result["result_dir"] = args.output_dir
+    os.makedirs(args.fig_dir, exist_ok=True)
+    result["fig_dir"] = args.fig_dir if args.save_fig else None
 
     try:
         hdul = load_spec_from_cache(rec["sdss_name"], cache_dir=args.cache_dir)
@@ -453,8 +441,8 @@ def run_one_fit(rec, args):
             z=float(rec["z"]),
             ra=float(rec["ra"]),
             dec=float(rec["dec"]),
-            filename=f"{rec["plate"]:04d}-{rec["mjd"]}-{rec["fiber"]:04d}",
-            output_path=str(outdir),
+            filename=f"{rec['plate']:04d}-{rec['mjd']}-{rec['fiber']:04d}",
+            output_path=str(args.output_dir),
         )
 
         prior_config = build_default_prior_config(flux)
@@ -481,20 +469,19 @@ def run_one_fit(rec, args):
             optax_lr=args.optax_lr,
             save_result=True,
             save_fits_name=str(rec["sdss_name"]),
-            plot_fig=args.plot_fig or args.save_fig,
+            show_plot=False,
+            plot_fig=args.save_fig,
             save_fig=args.save_fig,
             verbose=args.verbose,
+            kwargs_plot={"save_fig_path": args.fig_dir},
         )
 
         result.update(extract_named_results(q))
         result.update(extract_scalar_attrs(q))
         result.update(extract_fit_stats(q))
-        add_legacy_aliases(result, q, args)
+        compute_derived_results(result, q, args)
         result["fit_ok"] = True
 
-        if args.save_full_json:
-            json_path = save_full_result_json(q, rec, outdir)
-            result["full_result_json"] = str(json_path)
         return result
 
     except Exception as exc:
@@ -619,9 +606,10 @@ def parse_args():
     p.add_argument("--no-mask-lya-forest", dest="mask_lya_forest", action="store_false")
 
     p.add_argument("--nproc", type=int, default=1, help="Use spawn multiprocessing when nproc > 1.")
-    p.add_argument("--plot-fig", action="store_true")
-    p.add_argument("--save-fig", action="store_true")
-    p.add_argument("--save-full-json", action="store_true", help="Save full q.__dict__ JSON per object (large files).")
+    p.set_defaults(save_fig=True)
+    p.add_argument("--save-fig", dest="save_fig", action="store_true")
+    p.add_argument("--no-save-fig", dest="save_fig", action="store_false")
+    p.add_argument("--fig-dir", default="plots/jaxqsofit/", help="Path to save figures")
     p.add_argument("--verbose", action="store_true")
 
     p.add_argument("--dustmaps-data-dir", default="results/dustmaps", help="Directory to store dustmaps data (used for fetch-dustmaps mode)")
