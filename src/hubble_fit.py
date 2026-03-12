@@ -277,26 +277,26 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
     return flat_samples, model_labels, dm_interp, logZ, logZerr
 
 
-
-
 def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, 
                cosmo_model, completeness=True, use_full_cov=True, 
                N=None, resume=False, only_sna=False, speed="production", use_mu_sh0es=False, cosmo_model_samples={}, verbose=True,
                z_range=(0.44, 3.16),
                z_pivot_agn=1.5, skip_plots=False, residuals_sigma_clip=None, df_calibrators=None,
-               prefix="default"):
+               prefix="default", uniform_redshift_distribution=False):
     run_tag = make_run_tag(cosmo_model, only_sna, speed, N, z_range)
     plot_path = f"plots/hubble/{prefix}/{run_tag}"
 
-    df_agn_fit_selection = select_agn_subset(
-        df_agn,
-        z_range=z_range,
-        N=N,
-        subset_seed=42,
-        id_col="object_id",
-        #allow_replacement=True,
-    )
-    plot_redshift_histograms(df_pantheon, df_agn_fit_selection, xscale="linear", plot_path=plot_path)
+    if uniform_redshift_distribution:
+        df_agn_fit_selection = select_agn_subset_uniform_with_replacement(
+            df_agn,
+            z_range=z_range,
+            N=N,
+        )
+        plot_redshift_histograms(df_pantheon, df_agn_fit_selection, xscale="linear", plot_path=plot_path)
+    else:
+        df_agn_fit_selection = df_agn[df_agn["z"].between(z_range[0], z_range[1])].copy()
+        plot_redshift_histograms(df_pantheon, df_agn, xscale="linear", plot_path=plot_path)
+
 
     flat_samples, model_labels, dm_interp, logZ, logZerr = run_mcmc_pipeline(
                                                         df_agn_fit_selection, df_agn_all,
@@ -426,7 +426,7 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
             residuals_sigma_clip=None,
             z_range=(0.44, 3.16),
             speed="production", resume=False, N=None, use_mu_sh0es=False,
-            prefix="default"):
+            prefix="default", result_prefix="", uniform_redshift_distribution=False):
 
     zmin, zmax = z_range
     n_tag = "all" if N is None else f"N{N}"
@@ -447,7 +447,7 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
                        residuals_sigma_clip=residuals_sigma_clip,
                        z_range=z_range,
                        cosmo_model_samples=cosmo_model_samples,
-                       prefix=prefix)
+                       prefix=prefix, uniform_redshift_distribution=uniform_redshift_distribution)
         
         samples_joint, model_labels_joint, dm_interp_joint, logZ_joint, logZerr_joint, debiased_residuals_joint, age_joint, age_err_joint = r
         #print(f"For model {cosmo_model}, universe age: {age:.3f} Gyr")
@@ -457,7 +457,7 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
                        residuals_sigma_clip=residuals_sigma_clip,
                        z_range=z_range,
                        resume=resume, speed=speed, N=N, use_mu_sh0es=use_mu_sh0es,
-                       prefix=prefix)
+                       prefix=prefix, uniform_redshift_distribution=uniform_redshift_distribution)
         samples_sna, model_labels_sna, dm_interp_sna, logZ_sna, logZerr_sna, debiased_residuals_sna, age_sna, age_sna_err = r
         
         plot_cosmo_corner(samples_sna, samples_joint, cosmo_model, z_pivot_sna, z_pivot_agn, show=False, 
@@ -484,15 +484,17 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
         cosmo_models_result_dict[cosmo_model] |= dict(N=N, z_i=z_range[0], z_f=z_range[1])
 
         for i, key in enumerate(model_labels_joint):
-            median, err = sym_percentile(samples_joint[:, i])
+            median, err, lower, upper = sym_percentile(samples_joint[:, i])
             cosmo_models_result_dict[cosmo_model][key] = median
             cosmo_models_result_dict[cosmo_model][f"{key}_err"] = err
-    
+            cosmo_models_result_dict[cosmo_model][f"{key}_err_lower"] = lower
+            cosmo_models_result_dict[cosmo_model][f"{key}_err_upper"] = upper
+
     make_cosmo_table_latex(results_latex, write_path=f"{compare_plot_path}/")
 
     compare_r = compare_models_by_log_evidence_all(cosmo_models_result_dict, write_path=f"{compare_plot_path}/")
-    write_results_tex_variables(df_agn, z_range, cosmo_model_samples, compare_r,
-                                compare_plot_path, result_prefix=prefix, cosmo_models_result_dict=cosmo_models_result_dict)
+    write_results_tex_variables(df_agn, df_pantheon, z_range, cosmo_model_samples, compare_r,
+                                compare_plot_path, result_prefix=result_prefix, cosmo_models_result_dict=cosmo_models_result_dict)
 
     os.makedirs(f"results/cosmo/{prefix}", exist_ok=True)
     save_cosmo_results_hdf5(
@@ -534,9 +536,11 @@ if __name__ == "__main__":
     parser.add_argument("--iron_frac_cut", type=float, default=None, help="Optional iron fraction cut value to exclude outliers (default: None)")
     parser.add_argument("--sdss_mags_csv", type=str, default=None, help="Path to CSV file containing SDSS magnitudes (default: None)")
     parser.add_argument("--prefix", type=str, default="default", help="Prefix directory under plots/hubble/ and results/, and result variable prefix.")
+    parser.add_argument("--result_prefix", type=str, default="", help="Prefix for result variable names in LaTeX output (default: empty string)")
     parser.add_argument("--z_range", type=float, nargs=2, default=[0.44, 3.16], 
                         help="Redshift range for AGN data (default: [0.44, 3.16])")
     parser.add_argument("--pickled", action="store_true", default=False, help="Use pickled data file (default: False)")
+    parser.add_argument("--uniform_redshift_distribution", action="store_true", default=False, help="Select AGN subset with uniform redshift distribution (default: False)")
 
     args = parser.parse_args()
 
@@ -599,6 +603,6 @@ if __name__ == "__main__":
                 residuals_sigma_clip=args.residuals_sigma_clip,
                 z_range=args.z_range,
                 speed=args.speed, resume=args.resume, N=args.N, use_mu_sh0es=args.use_mu_sh0es,
-                prefix=args.prefix)
+                prefix=args.prefix, result_prefix=args.result_prefix, uniform_redshift_distribution=args.uniform_redshift_distribution)
     
     print(f"Finished running Hubble fit pipeline for {args.cosmo_models}")

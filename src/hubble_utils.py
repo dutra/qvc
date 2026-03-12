@@ -40,7 +40,7 @@ def convert_logL2500_to_M2500(logL2500):
 
 def sym_percentile(x, p=[16, 50, 84], axis=0):
     lower, median, upper = np.percentile(x, p, axis=axis)
-    return median, 0.5 * (upper - lower)
+    return median, 0.5 * (upper - lower), lower, upper
 
 def find_optimal_pivot(flat_samples,
                        cosmo_model,
@@ -2933,7 +2933,7 @@ def format_value_uncertainty(val, err=None, unit=None):
     return final_str
 
 def write_results_tex_variables(
-    df_agn, z_range, cosmo_model_samples, compare_r,
+    df_agn, df_pantheon, z_range, cosmo_model_samples, compare_r,
     write_path, result_prefix="", chisq_dict=None, cosmo_models_result_dict=None
 ):
     """
@@ -2962,9 +2962,13 @@ def write_results_tex_variables(
     log_sigma_UV_pivot = pivots_arr[agn_model_oidx["log_sigma_UV"]]
     log_tau_UV_RF_pivot = pivots_arr[agn_model_oidx["log_tau_UV_RF"]]
     n_fitted = len(df_agn[df_agn['z'].between(z_range[0], z_range[1])])
-
     lines.append(_cmd("NumAGNPlotted", len(df_agn)))
     lines.append(_cmd("NumAGNFitted", n_fitted))
+
+    is_calib_bool = np.asarray(df_pantheon['IS_CALIBRATOR'], dtype=bool)
+    mask = (df_pantheon['zHD'] > 0.01) | is_calib_bool
+    lines.append(_cmd("NumSNaPlotted", len(df_pantheon)))
+    lines.append(_cmd("NumSNaFitted", len(df_pantheon[mask])))
     lines.append(_cmd("SigmaUVPivot", f"{10**log_sigma_UV_pivot:.1f}"))
     lines.append(_cmd("TauUVRFPivot", f"{10**log_tau_UV_RF_pivot:.0f}"))
 
@@ -3300,11 +3304,6 @@ def load_flat_hdf5(filename):
             results[key] = f[key][()]
     return results
 
-def sym_percentile(data, percentiles=[16, 50, 84]):
-    if len(data) == 0: return np.nan, np.nan
-    p = np.percentile(data, percentiles)
-    return p[1], (p[2] - p[0]) / 2.0
-
 
 import h5py
 import numpy as np
@@ -3349,7 +3348,7 @@ import pandas as pd
 from scipy.stats import gaussian_kde
 
 
-def select_agn_subset(
+def select_agn_subset_uniform_with_replacement(
     df_agn,
     z_range,
     N=None,
