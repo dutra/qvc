@@ -161,8 +161,8 @@ def compute_derived_results(result, q, args):
     p16, p50, p84 = np.nanpercentile(frac_host_samp, [16.0, 50.0, 84.0])
 
     m50, m_err, m16, m84 = sym_percentile(frac_host_samp)
-    result["frac_host_center"] = safe_float(m50)
-    result["frac_host_center_err"] = safe_float(m_err)
+    result["f_host_center"] = safe_float(m50)
+    result["f_host_center_err"] = safe_float(m_err)
 
     # BC fraction
     i3000 = np.argmin(np.abs(np.asarray(q.wave) - 3000.0))
@@ -174,6 +174,14 @@ def compute_derived_results(result, q, args):
     m50, m_err, m16, m84 = sym_percentile(bc_over_pl_draws)
     result["f_bc_over_pl_3000"] = safe_float(m50)
     result["f_bc_over_pl_3000_err"] = safe_float(m_err)
+
+    # FeUV fraction (same definition style as BC fraction)
+    i2500 = np.argmin(np.abs(np.asarray(q.wave) - 2500.0))
+    fe_uv_draws = np.asarray(q.pred_out["f_fe_mgii_model"], dtype=float)[:, i2500]
+    fe_uv_over_pl_draws = fe_uv_draws / pl_draws
+    m50, m_err, m16, m84 = sym_percentile(fe_uv_over_pl_draws)
+    result["f_fe_uv_over_pl_2500"] = safe_float(m50)
+    result["f_fe_uv_over_pl_2500_err"] = safe_float(m_err)
 
     z = safe_float(result.get("z"))
     m2500 = np.nan
@@ -593,7 +601,7 @@ def parse_args():
     p.add_argument("--fit-fe", dest="fit_fe", action="store_true")
     p.add_argument("--no-fit-fe", dest="fit_fe", action="store_false")
 
-    p.set_defaults(fit_bc=False)
+    p.set_defaults(fit_bc=True)
     p.add_argument("--fit-bc", dest="fit_bc", action="store_true")
     p.add_argument("--no-fit-bc", dest="fit_bc", action="store_false")
 
