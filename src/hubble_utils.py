@@ -546,18 +546,20 @@ def populate_spectra_fit(df, spectra_fit_csvs, best=True):
         'redchi2_conti_full': float,
         'aic': float,
         'bic': float,
-        'npca_qso': int,
+        'npca_qso': float,
         'decomp_host': bool,
         'BC': bool,
         'poly': bool,
         'best': bool,
-        'log_L2500_fs': float,
-        'log_L2500_fs_err': float,
-        'log_L2500_int_fs': float,
-        'log_L2500_int_fs_err': float,
-        'reddening_integral': float,
-        'reddening_proxy': float,
+        # 'log_L2500_fs': float,
+        # 'log_L2500_fs_err': float,
+        # 'log_L2500_int_fs': float,
+        # 'log_L2500_int_fs_err': float,
+        # 'reddening_integral': float,
+        # 'reddening_proxy': float,
         'bands_used': parse_list,
+        'PL_slope': float,
+        'PL_slope_err': float,
         'PL_slope_blue': float,
         'PL_slope_blue_err': float,
         'PL_slope_red': float,
@@ -566,6 +568,9 @@ def populate_spectra_fit(df, spectra_fit_csvs, best=True):
         'PL_break_wave_inbounds': bool,
         'lam_rf_min': float,
         'lam_rf_max': float,
+        'f_fe_uv_over_pl_2500': float,
+        'f_bc_over_pl_3000': float,
+        'f_host_center': float,
     }
 
     # Never drop the merge key
@@ -671,6 +676,12 @@ def populate_spectra_fit(df, spectra_fit_csvs, best=True):
     if "conti_a_0" in out.columns:
         out["log_conti_a_0"] = np.log10(out["conti_a_0"].replace(0, 1e-9))  # avoid log(0)
 
+    # If 'alpha_lambda' is missing but 'PL_slope' exists, set alpha_lambda = PL_slope
+    if "alpha_lambda" not in out.columns and "PL_slope" in out.columns:
+        out["alpha_lambda"] = out["PL_slope"]
+    if "alpha_lambda_err" not in out.columns and "PL_slope_err" in out.columns:
+        out["alpha_lambda_err"] = out["PL_slope_err"]
+
     # Optional save
     # out_csv = f"plots/hubble/{prefix}/merged.csv"
     # os.makedirs(os.path.dirname(out_csv), exist_ok=True)
@@ -687,9 +698,18 @@ def populate_spectra_fit(df, spectra_fit_csvs, best=True):
     # m_2500, m_2500_err = compute_apparent_mag_2500_astropy(
     #     out['log_L2500_int_fs'],
     #     out['log_L2500_int_fs_err'],
+    # Compute log_L2500_int_fs and log_L2500_int_fs_err from apparent_mag_2500 and apparent_mag_2500_err
+    # logL2500 = -0.4 * (m_2500 - 90)
+    out['log_L2500_int_fs'] = -0.4 * (out['apparent_mag_2500'])
+    out['log_L2500_int_fs'] += 36.0  # 90 * 0.4 = 36
+
+    # Error propagation: σ_logL = 0.4 * σ_m
+    out['log_L2500_int_fs_err'] = 0.4 * out['apparent_mag_2500_err']
     #     out['z'])
     # out['apparent_mag_2500'] = m_2500
     # out['apparent_mag_2500_err'] = m_2500_err
+
+    out['iron_frac'] = out['f_fe_uv_over_pl_2500']
 
 
     # Keep a default error if needed
@@ -1475,40 +1495,40 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=10,
     plot_m_vs_redshift(df.copy(), df[mask_dropped], cut_info="dropped bands 4 or 5")
     df = df[mask_dropped].reset_index(drop=True)
 
-    mask = ~df['npca_qso'].isin([0])
-    num_removed_dropped = np.sum(~mask)
-    print(f"Removed {num_removed_dropped} objects with npca_qso = 0")
-    plot_redshift_histogram(df.copy(), df[mask], bins=30, cut_info="npca_qso 0")
-    plot_m_vs_redshift(df.copy(), df[mask], cut_info="npca_qso 0")
-    df = df[mask].reset_index(drop=True)
+    # mask = ~df['npca_qso'].isin([0])
+    # num_removed_dropped = np.sum(~mask)
+    # print(f"Removed {num_removed_dropped} objects with npca_qso = 0")
+    # plot_redshift_histogram(df.copy(), df[mask], bins=30, cut_info="npca_qso 0")
+    # plot_m_vs_redshift(df.copy(), df[mask], cut_info="npca_qso 0")
+    # df = df[mask].reset_index(drop=True)
 
     # Select objects with BC == False (if column exists) and report how many were dropped
-    n_before = len(df)
-    keep_mask = df['BC'] == False
-    n_kept = int(np.sum(keep_mask))
-    n_dropped = int(n_before - n_kept)
-    print(f"Selecting BC==False: {n_dropped} objects removed (kept {n_kept} of {n_before})")
-    plot_redshift_histogram(df.copy(), df[keep_mask], bins=30, cut_info=f"BCFalse")
-    plot_m_vs_redshift(df.copy(), df[keep_mask], cut_info=f"BCFalse")
-    df = df[keep_mask].reset_index(drop=True)
+    # n_before = len(df)
+    # keep_mask = df['BC'] == False
+    # n_kept = int(np.sum(keep_mask))
+    # n_dropped = int(n_before - n_kept)
+    # print(f"Selecting BC==False: {n_dropped} objects removed (kept {n_kept} of {n_before})")
+    # plot_redshift_histogram(df.copy(), df[keep_mask], bins=30, cut_info=f"BCFalse")
+    # plot_m_vs_redshift(df.copy(), df[keep_mask], cut_info=f"BCFalse")
+    # df = df[keep_mask].reset_index(drop=True)
 
-    n_before = len(df)
-    keep_mask = df['poly'] == False
-    n_kept = int(np.sum(keep_mask))
-    n_dropped = int(n_before - n_kept)
-    print(f"Selecting poly==False: {n_dropped} objects removed (kept {n_kept} of {n_before})")
-    plot_redshift_histogram(df.copy(), df[keep_mask], bins=30, cut_info=f"polyFalse")
-    plot_m_vs_redshift(df.copy(), df[keep_mask], cut_info=f"polyFalse")
-    df = df[keep_mask].reset_index(drop=True)
+    # n_before = len(df)
+    # keep_mask = df['poly'] == False
+    # n_kept = int(np.sum(keep_mask))
+    # n_dropped = int(n_before - n_kept)
+    # print(f"Selecting poly==False: {n_dropped} objects removed (kept {n_kept} of {n_before})")
+    # plot_redshift_histogram(df.copy(), df[keep_mask], bins=30, cut_info=f"polyFalse")
+    # plot_m_vs_redshift(df.copy(), df[keep_mask], cut_info=f"polyFalse")
+    # df = df[keep_mask].reset_index(drop=True)
 
-    n_before = len(df)
-    keep_mask = df['decomp_host'] == False
-    n_kept = int(np.sum(keep_mask))
-    n_dropped = int(n_before - n_kept)
-    print(f"Selecting decomp_host==False: {n_dropped} objects removed (kept {n_kept} of {n_before})")
-    plot_redshift_histogram(df.copy(), df[keep_mask], bins=30, cut_info=f"decomp_hostFalse")
-    plot_m_vs_redshift(df.copy(), df[keep_mask], cut_info=f"polyFalse")
-    df = df[keep_mask].reset_index(drop=True)
+    # n_before = len(df)
+    # keep_mask = df['decomp_host'] == False
+    # n_kept = int(np.sum(keep_mask))
+    # n_dropped = int(n_before - n_kept)
+    # print(f"Selecting decomp_host==False: {n_dropped} objects removed (kept {n_kept} of {n_before})")
+    # plot_redshift_histogram(df.copy(), df[keep_mask], bins=30, cut_info=f"decomp_hostFalse")
+    # plot_m_vs_redshift(df.copy(), df[keep_mask], cut_info=f"polyFalse")
+    # df = df[keep_mask].reset_index(drop=True)
 
     # Convenience logs / coercions
     # def _safelog(a):
@@ -1574,6 +1594,9 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=10,
         ('iron_frac', None, 10),
         ('log_tau_UV_RF_err', 0, 1.0),
         ('log_sigma_UV_err', 0, 0.3),
+
+        ('f_bc_over_pl_3000', -1, 0.2),
+        ('f_host_center', -1, 0.2),
 
         #('z', 1, None),
         #('log_lbol', 45.4, None),

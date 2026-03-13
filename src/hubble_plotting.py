@@ -1529,6 +1529,7 @@ def plot_full_residuals(
 
     # ---- Which x-keys to show (keep your order) ----
     keys = [col for col in np.flip([
+        'f_bc_over_pl_3000', 'f_fe_uv_over_pl_2500', 'f_host_center', 'f_host_2500',
         'apparent_mag_2500_err', 'log_apparent_mag_2500_err', 
         'log_sigma_UV_err', 'log_log_sigma_UV_err',
         'log_tau_UV_RF_err', 'log_log_tau_UV_RF_err',

@@ -4,10 +4,7 @@ from astropy.cosmology import FlatwCDM, Flatw0waCDM, FlatLambdaCDM, FlatwpwaCDM
 from scipy import stats
 import numpy as np
 
-try:
-    from numpy import trapezoid as trapz
-except ImportError:
-    from numpy import trapz
+from numpy import trapezoid as trapz
 
 #from hubble_utils import loglike_cmb_theta_simple
 from hubble_model import get_model_params, M_model_agn, M_model_agn_err, agn_model_pack_params, agn_model_pack_obs
