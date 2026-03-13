@@ -40,7 +40,10 @@ def convert_logL2500_to_M2500(logL2500):
 
 def sym_percentile(x, p=[16, 50, 84], axis=0):
     lower, median, upper = np.percentile(x, p, axis=axis)
-    return median, 0.5 * (upper - lower), lower, upper
+    err = 0.5 * (upper - lower)   # optional symmetric equivalent
+    err_lower = median - lower
+    err_upper = upper - median
+    return median, err, err_lower, err_upper
 
 def find_optimal_pivot(flat_samples,
                        cosmo_model,
