@@ -29,7 +29,6 @@ import astropy.units as u
 from astropy.io import fits
 from astropy.cosmology import FlatLambdaCDM
 from astropy.table import Table
-from astroquery.sdss import SDSS
 from tqdm import tqdm
 
 num_cores = os.environ.get("NUM_CORES", max((os.cpu_count() or 2) - 2, 1))
@@ -276,6 +275,7 @@ def match_to_dr16q(sample_df, dr16q_fits, max_sep_arcsec=1.0):
 
 def build_records(args):
     quasar_list = load_quasar_core_list(args.fpath_in, pickled=args.pickled)
+    print("build_records filtering on: ", args.filter_object_id)
     sample_df = prepare_sample_df(
         quasar_list,
         filter_sdss_name=args.filter_sdss_name,
@@ -283,6 +283,10 @@ def build_records(args):
         N=args.N,
         skip=args.skip,
     )
+    print(f"Sample size after filtering: {len(sample_df)}")
+    if len(sample_df) > 0:
+        print("First few filtered object_ids:", sample_df["object_id"].head().tolist())
+
     df_matched = match_to_dr16q(sample_df, args.dr16q_fits, args.max_sep)
     return [row.to_dict() for _, row in df_matched.iterrows()]
 
@@ -296,6 +300,8 @@ def fetch_dustmaps(args):
 # -----------------------------------------------------------------------------
 
 def fetch_spectrum_fits(sdss_name, plate, fiber, mjd, cache_dir="data/spectra_cache"):
+    from astroquery.sdss import SDSS
+
     cache_dir = Path(cache_dir)
     cache_dir.mkdir(parents=True, exist_ok=True)
     cache_file = cache_dir / f"{sdss_name}.fits"
