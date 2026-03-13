@@ -2760,3 +2760,98 @@ def plot_redshift_histograms(df_pantheon, df_agn,
                 bbox_inches="tight", dpi=150)
     if show:
         plt.show()
+
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib import colors
+
+def plot_m2500_vs_z_colorpanels(
+    df,
+    color_cols=("f_host_center", "f_fe_uv_over_pl_2500", "f_bc_over_pl_3000"),
+    xcol="z",
+    ycol="apparent_mag_2500",
+    cuts=None,
+    log_color=True,
+    color_clip=None,   # dict: {col: (vmin, vmax)} in displayed space (log space if log_color=True)
+    cmap="viridis",
+    figsize=(11, 12),
+    s=12,
+    alpha=0.7,
+    thin=1,
+):
+    cols = [xcol, ycol] + list(color_cols)
+    base = df[cols].copy().dropna(subset=[xcol, ycol])
+    cuts = {} if cuts is None else cuts
+    color_clip = {} if color_clip is None else color_clip
+
+    # Pretty colorbar labels
+    label_map = {
+        "f_host_center": r"f_{\mathrm{host}}",
+        "f_fe_uv_over_pl_2500": r"f_{\mathrm{Fe\, II}}",
+        "f_bc_over_pl_3000": r"f_{\mathrm{BC}}",
+    }
+
+    fig, axes = plt.subplots(len(color_cols), 1, figsize=figsize, sharex=True, sharey=True)
+    if len(color_cols) == 1:
+        axes = [axes]
+
+    for ax, ccol in zip(axes, color_cols):
+        d = base.dropna(subset=[ccol]).copy()
+        if thin and thin > 1:
+            d = d.iloc[::thin].copy()
+
+        if log_color:
+            d = d[d[ccol] > 0].copy()
+            c_all = np.log10(d[ccol].to_numpy(dtype=float))
+        else:
+            c_all = d[ccol].to_numpy(dtype=float)
+
+        keep = np.ones(len(d), dtype=bool)
+        if ccol in cuts and cuts[ccol] is not None:
+            lo, hi = cuts[ccol]
+            if lo is not None:
+                keep &= (d[ccol].to_numpy() >= lo)
+            if hi is not None:
+                keep &= (d[ccol].to_numpy() <= hi)
+
+        d_keep, d_cut = d.iloc[keep], d.iloc[~keep]
+        c_keep, c_cut = c_all[keep], c_all[~keep]
+
+        # Per-panel clipping
+        clip_lo, clip_hi = color_clip.get(ccol, (None, None))
+        c_keep_plot = c_keep.copy()
+        c_cut_plot = c_cut.copy()
+        if clip_lo is not None:
+            c_keep_plot = np.clip(c_keep_plot, clip_lo, None)
+            c_cut_plot = np.clip(c_cut_plot, clip_lo, None)
+        if clip_hi is not None:
+            c_keep_plot = np.clip(c_keep_plot, None, clip_hi)
+            c_cut_plot = np.clip(c_cut_plot, None, clip_hi)
+
+        # Colorbar limits from clipped all-points (keep+cut)
+        c_all_plot = c_all.copy()
+        if clip_lo is not None:
+            c_all_plot = np.clip(c_all_plot, clip_lo, None)
+        if clip_hi is not None:
+            c_all_plot = np.clip(c_all_plot, None, clip_hi)
+
+        vmin = clip_lo if clip_lo is not None else np.nanmin(c_all_plot)
+        vmax = clip_hi if clip_hi is not None else np.nanmax(c_all_plot)
+        norm = colors.Normalize(vmin=vmin, vmax=vmax)
+
+        ax.scatter(d_keep[xcol], d_keep[ycol], c=c_keep_plot, cmap=cmap, norm=norm, s=s, alpha=alpha, marker="o")
+        ax.scatter(d_cut[xcol], d_cut[ycol], c=c_cut_plot, cmap=cmap, norm=norm, s=s*2.0, alpha=alpha, marker="x")
+
+        sm = plt.cm.ScalarMappable(norm=norm, cmap=cmap)
+        sm.set_array([])
+        cbar = fig.colorbar(sm, ax=ax)
+
+        base_label = label_map.get(ccol, ccol)
+        cbar.set_label(rf"$\log_{{10}}({base_label})$" if log_color else base_label)
+
+        ax.set_ylabel(r"$m_{2500\,\mathrm{\AA}}$")
+
+    axes[-1].set_xlabel(xcol)
+    axes[0].invert_yaxis()
+    fig.tight_layout()
+    return fig, axes
