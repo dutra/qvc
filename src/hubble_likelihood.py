@@ -205,6 +205,7 @@ def log_likelihood(theta, *, agn_data, pantheon_data,
     # ll_cmb, _ = loglike_cmb_theta_simple(cosmo)
     
     ll = ll_snia + ll_agn - ll_completeness
+    
     return ll, comp_blob
 
 def log_likelihood_nearbylcs(

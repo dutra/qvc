@@ -1595,8 +1595,8 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=10,
         ('log_tau_UV_RF_err', 0, 1.0),
         ('log_sigma_UV_err', 0, 0.3),
 
-        ('f_bc_over_pl_3000', -1, 0.2),
-        ('f_host_center', -1, 0.2),
+        #('f_bc_over_pl_3000', -1, 1),
+        ('f_host_center', -1, 0.1),
 
         #('z', 1, None),
         #('log_lbol', 45.4, None),

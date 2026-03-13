@@ -224,6 +224,7 @@ def get_model_params(cosmo_model, only_sna=False):
         #("sigma_b",   (-1,  1)),
 
         ("H0",       (60.0, 80.0)),
+        #("H0",       (67.37-0.54, 67.37+0.54)),  # Planck 2018 TT,TE,EE+lowE+lensing
         ("Om0",      (0.0, 1.0)),
         #("Om0",      (0.32, 0.34)),
         
