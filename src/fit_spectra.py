@@ -449,7 +449,7 @@ def run_one_fit(rec, args):
             z=float(rec["z"]),
             ra=float(rec["ra"]),
             dec=float(rec["dec"]),
-            filename=f"{rec['plate']:04d}-{rec['mjd']}-{rec['fiber']:04d}",
+            filename=f"z{rec['z']:.3f}_{rec['sdss_name']}",
             output_path=str(args.output_dir),
         )
 
@@ -457,6 +457,7 @@ def run_one_fit(rec, args):
 
         q.fit(
             name=str(rec["sdss_name"]),
+            fit_poly_edge_flex=args.fit_poly_edge_flex,
             deredden=not args.no_deredden,
             wave_range=(args.wave_min, args.wave_max),
             fit_lines=args.fit_lines,
@@ -612,6 +613,10 @@ def parse_args():
     p.set_defaults(mask_lya_forest=True)
     p.add_argument("--mask-lya-forest", dest="mask_lya_forest", action="store_true")
     p.add_argument("--no-mask-lya-forest", dest="mask_lya_forest", action="store_false")
+
+    p.set_defaults(fit_poly_edge_flex=True)
+    p.add_argument("--fit-poly-edge-flex", dest="fit_poly_edge_flex", action="store_true")
+    p.add_argument("--no-fit-poly-edge-flex", dest="fit_poly_edge_flex", action="store_false")
 
     p.add_argument("--nproc", type=int, default=1, help="Use spawn multiprocessing when nproc > 1.")
     p.set_defaults(save_fig=True)
