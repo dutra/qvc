@@ -395,7 +395,7 @@ def populate_spectra_fit(df, spectra_fit_csvs, best=True):
         'apparent_mag_i_rest_err': float,
         'apparent_mag_i_obs': float,
         'apparent_mag_i_obs_err': float,
-        'delta_m_avg': float,
+        'delta_m_flux_recal': float,
         'alpha_lambda': float,
         'alpha_lambda_err': float,
         'aic': float,
@@ -752,6 +752,7 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
         plot_cut_diagnostics,
         plot_df_psf_fiber,
         plot_df_psf_fiber_vs_fhost,
+        plot_log_fhost_vs_petrorad_by_band,
         plot_m2500_vs_z_colorpanels,
     )
 
@@ -1038,6 +1039,7 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
     plot_cut_diagnostics(df_all.copy(), df.copy(), bins=30, cut_info="all cuts")
     plot_df_psf_fiber(df_all, df_keep=df, z_range=z_range, show=False)
     plot_df_psf_fiber_vs_fhost(df_all, df_keep=df, z_range=z_range, show=False)
+    plot_log_fhost_vs_petrorad_by_band(df_all, df_keep=df, z_range=z_range, show=False)
     colorpanel_cols = [
         col for col in ("f_host_center", "f_fe_uv_over_pl_2500", "f_bc_over_pl_3000", "wrms")
         if col in df_all.columns

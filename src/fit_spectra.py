@@ -135,7 +135,7 @@ def get_sdss_filters():
 
 def compute_photometric_flux_rescale(rec, lam, flux, disable_rescale_flux=False):
     """
-    Compute delta_m_avg and sigma_dm from synthetic-vs-fiber SDSS magnitudes.
+    Compute delta_m_flux_recal and sigma_dm from synthetic-vs-fiber SDSS magnitudes.
     """
     out = {
         "delta_mag_u": -1e9,
@@ -153,7 +153,7 @@ def compute_photometric_flux_rescale(rec, lam, flux, disable_rescale_flux=False)
         "mean_corrected_r": safe_float(rec.get("mean_corrected_r"), -1e9),
         "mean_corrected_i": safe_float(rec.get("mean_corrected_i"), -1e9),
         "mean_corrected_z": safe_float(rec.get("mean_corrected_z"), -1e9),
-        "delta_m_avg": 0.0,
+        "delta_m_flux_recal": 0.0,
         "sigma_dm": 0.0,
         "bands_used": "",
     }
@@ -203,7 +203,7 @@ def compute_photometric_flux_rescale(rec, lam, flux, disable_rescale_flux=False)
         if np.any(mask):
             w = w_arr[mask]
             dm = dm_arr[mask]
-            out["delta_m_avg"] = float(np.sum(w * dm) / np.sum(w))
+            out["delta_m_flux_recal"] = float(np.sum(w * dm) / np.sum(w))
             out["sigma_dm"] = float(np.sqrt(1.0 / np.sum(w)))
 
     for band in SDSS_BANDS:
@@ -213,15 +213,15 @@ def compute_photometric_flux_rescale(rec, lam, flux, disable_rescale_flux=False)
     return out
 
 
-def apply_mc_flux_scaling(flux, flux_err, delta_m_avg, sigma_dm, mc_samples):
+def apply_mc_flux_scaling(flux, flux_err, delta_m_flux_recal, sigma_dm, mc_samples):
     rng = np.random.default_rng(42)
     if mc_samples > 1:
-        dm_i = rng.normal(delta_m_avg, sigma_dm)
+        dm_i = rng.normal(delta_m_flux_recal, sigma_dm)
         s = 10.0 ** (-0.4 * dm_i)
         flux_scaled = s * flux + rng.normal(0.0, s * flux_err, size=flux.shape)
         flux_err_scaled = s * flux_err * np.sqrt(2.0)
     else:
-        dm_i = rng.normal(delta_m_avg, 0.0)
+        dm_i = rng.normal(delta_m_flux_recal, 0.0)
         s = 10.0 ** (-0.4 * dm_i)
         flux_scaled = s * flux
         flux_err_scaled = s * flux_err
@@ -574,7 +574,7 @@ def run_one_fit(rec, args):
         "mean_corrected_r": -1e9,
         "mean_corrected_i": -1e9,
         "mean_corrected_z": -1e9,
-        "delta_m_avg": 0.0,
+        "delta_m_flux_recal": 0.0,
         "sigma_dm": 0.0,
         "dm_i": 0.0,
         "flux_scale": 1.0,
@@ -620,7 +620,7 @@ def run_one_fit(rec, args):
         flux_scaled, err_scaled, dm_i, flux_scale = apply_mc_flux_scaling(
             flux,
             err,
-            delta_m_avg=float(flux_rescale["delta_m_avg"]),
+            delta_m_flux_recal=float(flux_rescale["delta_m_flux_recal"]),
             sigma_dm=float(flux_rescale["sigma_dm"]),
             mc_samples=int(numpyro_sample_count),
         )

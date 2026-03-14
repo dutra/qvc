@@ -375,6 +375,111 @@ def plot_df_psf_fiber_vs_fhost(
         plot_path=plot_path,
     )
 
+
+def plot_log_fhost_vs_petrorad_by_band(
+    df,
+    df_keep=None,
+    bands=("u", "g", "r", "i", "z"),
+    z_range=(0.44, 3.16),
+    show=False,
+    alpha=0.5,
+    s=6,
+    plot_path="plots/hubble/diagnostics",
+):
+    """Plot log10(f_host_center) against log10(Petrosian radius) in each band."""
+    if "f_host_center" not in df.columns:
+        return None
+
+    id_col = "object_id" if "object_id" in df.columns else None
+    keep_ids = None
+    if df_keep is not None:
+        if id_col is not None and id_col in df_keep.columns:
+            keep_ids = set(df_keep[id_col].astype(str))
+        else:
+            keep_ids = set(df_keep.index.tolist())
+
+    band_cols = [(band, f"petroRad_{band}_sdss") for band in bands if f"petroRad_{band}_sdss" in df.columns]
+    if not band_cols:
+        return None
+
+    n_panels = len(band_cols)
+    n_rows = min(4, n_panels)
+    n_cols = int(np.ceil(n_panels / n_rows))
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(9 * n_cols, 4.5 * n_rows), sharex=True, sharey=True)
+    axes = np.atleast_1d(axes).ravel()
+
+    z = np.asarray(df["z"], dtype=float)
+    log_fhost = np.where(
+        np.asarray(df["f_host_center"], dtype=float) > 0,
+        np.log10(np.asarray(df["f_host_center"], dtype=float)),
+        np.nan,
+    )
+
+    for ax, (band, petro_col) in zip(axes, band_cols):
+        petro = np.asarray(df[petro_col], dtype=float)
+        log_petro = np.where(petro > 0, np.log10(petro), np.nan)
+        mask = np.isfinite(z) & np.isfinite(log_fhost) & np.isfinite(log_petro)
+        idx = np.flatnonzero(mask)
+        if idx.size == 0:
+            ax.axis("off")
+            continue
+
+        if keep_ids is not None:
+            if id_col is not None and id_col in df.columns:
+                keep_mask = df.iloc[idx][id_col].astype(str).isin(keep_ids).to_numpy(dtype=bool)
+            else:
+                keep_mask = np.array([i in keep_ids for i in idx], dtype=bool)
+        else:
+            keep_mask = np.ones(len(idx), dtype=bool)
+
+        x = log_petro[mask]
+        y = log_fhost[mask]
+        z_masked = z[mask]
+        in_z = (z_masked >= z_range[0]) & (z_masked <= z_range[1])
+
+        keep_in_z = keep_mask & in_z
+        keep_out_z = keep_mask & (~in_z)
+        cut_in_z = (~keep_mask) & in_z
+        cut_out_z = (~keep_mask) & (~in_z)
+
+        ax.scatter(x[keep_in_z], y[keep_in_z], s=s, alpha=alpha, color="tab:blue", marker="o", rasterized=True, label=f"{band}-band")
+        ax.scatter(x[cut_in_z], y[cut_in_z], s=s, alpha=alpha, color="tab:orange", marker="D", rasterized=True)
+        ax.scatter(
+            x[keep_out_z],
+            y[keep_out_z],
+            s=s,
+            alpha=1.0,
+            edgecolors="tab:blue",
+            facecolors="none",
+            marker="o",
+            linewidths=1.5,
+            rasterized=True,
+        )
+        ax.scatter(
+            x[cut_out_z],
+            y[cut_out_z],
+            s=s,
+            alpha=1.0,
+            edgecolors="tab:orange",
+            facecolors="none",
+            marker="D",
+            linewidths=1.5,
+            rasterized=True,
+        )
+
+        ax.set_xlabel(r"$\log_{10}(\mathrm{petroRad})$")
+        ax.set_ylabel(r"$\log_{10}(f_{\mathrm{host,center}})$")
+        ax.legend(loc="upper right", frameon=False)
+
+    for ax in axes[n_panels:]:
+        ax.axis("off")
+
+    fig.tight_layout()
+    os.makedirs(plot_path, exist_ok=True)
+    _save_figure(fig, os.path.join(plot_path, "log_fhost_vs_petrorad_by_band.pdf"), dpi=200, show=show)
+    return fig
+
+
 def plot_dynesty(results, cosmo_model, plot_path="plots/hubble", only_sna="", speed="", show=False):
     """
     Plot dynesty diagnostics: runplot, traceplot, and cornerpoints using dyplot.
@@ -3067,6 +3172,52 @@ def plot_redshift_histograms(df_pantheon, df_agn,
     fig.tight_layout()
     os.makedirs(plot_path, exist_ok=True)
     _save_figure(fig, os.path.join(plot_path, "redshift_histograms.pdf"), dpi=600, show=show)
+
+
+def plot_delta_m_flux_recal_vs_redshift(df_agn, plot_path="plots/hubble", show=False):
+    """Plot the mean photometric flux-recalibration offset against redshift."""
+    if "z" not in df_agn.columns or "delta_m_flux_recal" not in df_agn.columns:
+        return None
+
+    z = np.asarray(df_agn["z"], dtype=float)
+    dm = np.asarray(df_agn["delta_m_flux_recal"], dtype=float)
+    mask = np.isfinite(z) & np.isfinite(dm)
+    if not np.any(mask):
+        return None
+
+    z = z[mask]
+    dm = dm[mask]
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+    ax.scatter(z, dm, s=10, alpha=0.35, color="tab:blue", linewidths=0, rasterized=True)
+
+    if z.size >= 11:
+        order = np.argsort(z)
+        z_sorted = z[order]
+        dm_sorted = dm[order]
+        window = min(201, len(z_sorted))
+        if window % 2 == 0:
+            window -= 1
+        window = max(11, window)
+        dm_med = (
+            pd.Series(dm_sorted)
+            .rolling(window=window, center=True, min_periods=max(5, window // 5))
+            .median()
+            .to_numpy()
+        )
+        med_mask = np.isfinite(dm_med)
+        ax.plot(z_sorted[med_mask], dm_med[med_mask], color="darkorange", lw=2.0, label="rolling median")
+        ax.legend(loc="best", frameon=False)
+
+    ax.axhline(0.0, color="k", lw=1.0, alpha=0.7)
+    ax.set_xlabel(r"$z$")
+    ax.set_ylabel(r"$\Delta m_{\mathrm{flux\ recal}}$")
+    ax.grid(True, alpha=0.3)
+
+    os.makedirs(plot_path, exist_ok=True)
+    _save_figure(fig, os.path.join(plot_path, "delta_m_flux_recal_vs_redshift.pdf"), dpi=300, show=show)
+    return fig
+
 
 def plot_m2500_vs_z_colorpanels(
     df,

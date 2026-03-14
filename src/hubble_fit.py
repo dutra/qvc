@@ -52,6 +52,7 @@ from hubble_plotting import (
     plot_completeness_diagnostics,
     plot_completeness_vs_mag_at_redshifts,
     plot_cosmo_corner,
+    plot_delta_m_flux_recal_vs_redshift,
     plot_dynesty,
     plot_full_residuals,
     plot_hubble,
@@ -378,6 +379,8 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
     else:
         df_agn_fit_selection = df_agn[df_agn["z"].between(z_range[0], z_range[1])].copy()
         plot_redshift_histograms(df_pantheon, df_agn, xscale="log", plot_path=plot_path)
+
+    plot_delta_m_flux_recal_vs_redshift(df_agn_fit_selection, plot_path=plot_path)
 
     flat_samples, model_labels, dm_interp, logZ, logZerr = run_mcmc_pipeline(
                                                         df_agn_fit_selection, df_agn_all,
