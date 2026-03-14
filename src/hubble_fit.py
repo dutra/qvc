@@ -51,7 +51,6 @@ from hubble_utils import (
 )
 from hubble_likelihood import log_likelihood, log_likelihood_nearbylcs
 from hubble_plotting import (
-    plot_Mi_relation,
     plot_completeness_diagnostics,
     plot_completeness_vs_mag_at_redshifts,
     plot_cosmo_corner,
@@ -363,6 +362,10 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
     run_tag = make_run_tag(cosmo_model, only_sna, speed, N, z_range)
     plot_path = f"plots/hubble/{prefix}/{run_tag}"
 
+    os.makedirs(plot_path, exist_ok=True)
+
+    print(f"Saving plots to ", plot_path)
+
     if uniform_redshift_distribution:
         df_agn_fit_selection = select_agn_subset_uniform_with_replacement(
             df_agn,
@@ -393,11 +396,6 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
     if skip_plots or only_sna:
         print("Skipping plots, returning results...")
         return flat_samples, model_labels, dm_interp, logZ, logZerr, None, age, age_err
-
-
-    print(f"Saving plots to ", plot_path)
-    os.makedirs(plot_path, exist_ok=True)
-    plot_Mi_relation(df_agn, plot_path=plot_path)
 
     # if only_sna:
     #     print("Skipping AGN-specific plots for SNe-only run.")

@@ -6,22 +6,24 @@ import warnings
 import h5py
 import numpy as np
 import pandas as pd
-from astropy.cosmology import FlatwCDM, Flatw0waCDM, FlatLambdaCDM, FlatwpwaCDM
-from astropy.io import fits
-from astropy.table import Table
-from astropy.coordinates import SkyCoord, match_coordinates_sky
 from astropy import units as u
-from scipy.ndimage import gaussian_filter1d, gaussian_filter
+from astropy.cosmology import FlatwCDM, Flatw0waCDM, FlatLambdaCDM, FlatwpwaCDM
+from astropy.coordinates import SkyCoord
+from astropy.io import fits
+from astropy.io.votable import parse
+from scipy.linalg import cho_factor
 from scipy.interpolate import interp1d
-from tqdm import tqdm
 from scipy import stats
-from scipy.stats import norm, sigmaclip, multivariate_normal
-from scipy.interpolate import RegularGridInterpolator
-from dynesty.utils import resample_equal
-from hubble_model import get_model_params, M_model_agn, M_model_agn_err, agn_model_pack_obs, agn_model_pack_params, agn_model_oidx
-from scipy.linalg import cho_factor, cho_solve, eigh
-from scipy.stats import linregress
-from scipy.stats import pearsonr
+from tqdm import tqdm
+
+from hubble_model import (
+    M_model_agn,
+    M_model_agn_err,
+    agn_model_oidx,
+    agn_model_pack_obs,
+    agn_model_pack_params,
+    get_model_params,
+)
 
 bands = ['u', 'g', 'r', 'i', 'z']#, 'y']
 bands_idx = {b: i for i, b in enumerate(bands)}
@@ -68,8 +70,6 @@ def match_radec(df_a, df_b, populate_cols=[], ra_col_a='ra', dec_col_a='dec', ra
             #print(f"Warning: No match found for index {i} (RA={df_a.iloc[i][ra_col_a]}, DEC={df_a.iloc[i][dec_col_a]})")
             unmatched_object_ids.append(df_a.iloc[i]['object_id'])
     return result, unmatched_object_ids
-
-from astropy.io.votable import parse
 
 def populate_xray(df, table_fpath="data/cscresults.vot"):
     # Parse the VOTable
@@ -862,7 +862,7 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=10,
                   pickled=False,
                   iron_frac_cut=None, redchi2_cut=None,
                   sdss_mags_csv=None, lc_info_csv="data/aug4_sample_chisqg10_ebv005sn3_lcdata.csv"):
-    from hubble_plotting import plot_m2500_correction, plot_m_vs_redshift, plot_redshift_histogram
+    from hubble_plotting import plot_m2500_correction, plot_m_vs_redshift, plot_redshift_histogram, plot_Mi_relation
     
     if pickled:
         with open(file_path + ".pkl", "rb") as f: 
@@ -1331,7 +1331,7 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=10,
     print("Final number of quasars:", len(df))
     plot_redshift_histogram(df_all.copy(), df.copy(), bins=30, cut_info=f"all cuts")
     plot_m_vs_redshift(df_all.copy(), df.copy(), cut_info=f"all cuts")
-
+    plot_Mi_relation(df_all.copy())
     
     return df, df_all
 

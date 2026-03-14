@@ -27,6 +27,25 @@ from dynesty.utils import resample_equal
 from dynesty import plotting as dyplot
 
 
+def _pdf_path(path):
+    """Normalize any requested output path to a PDF path."""
+    root, _ = os.path.splitext(path)
+    return f"{root}.pdf"
+
+
+def _save_figure(fig, path, *, dpi=300, bbox_inches="tight", show=False):
+    """Save a Matplotlib figure as PDF, then optionally show and close it."""
+    pdf_path = _pdf_path(path)
+    directory = os.path.dirname(pdf_path)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+    fig.savefig(pdf_path, dpi=dpi, bbox_inches=bbox_inches)
+    if show:
+        plt.show()
+    plt.close(fig)
+    return pdf_path
+
+
 def plot_m_vs_redshift(df_before, df_after, cut_info="", save_path="plots/hubble/cuts/"):
     """
     Plot apparent_mag_2500 (AB) vs redshift in two panels:
@@ -60,6 +79,7 @@ def plot_m_vs_redshift(df_before, df_after, cut_info="", save_path="plots/hubble
     else:
         x_min, x_max = 0.0, 1.0
 
+    # Use a two-panel layout so the kept and removed populations can be compared directly.
     fig = plt.figure(figsize=(13, 6))
     gs = gridspec.GridSpec(1, 2, width_ratios=[1, 1], wspace=0.15)
 
@@ -93,11 +113,10 @@ def plot_m_vs_redshift(df_before, df_after, cut_info="", save_path="plots/hubble
         fig.text(0.5, 0.01, f"Cut info: {cut_info}", ha="center", va="bottom", fontsize=11, color="k")
 
     safe_cut_info = re.sub(r"[^A-Za-z0-9._-]+", "_", str(cut_info)) if cut_info else ""
-    filename = f"m2500_vs_z_cuts_{safe_cut_info}.png" if safe_cut_info else "m2500_vs_z_cuts.png"
+    filename = f"m2500_vs_z_cuts_{safe_cut_info}.pdf" if safe_cut_info else "m2500_vs_z_cuts.pdf"
     plot_path = os.path.join(os.path.dirname(save_path), filename)
-    plt.tight_layout(rect=(0, 0.03, 1, 1))
-    plt.savefig(plot_path, dpi=150)
-    plt.close()
+    fig.tight_layout(rect=(0, 0.03, 1, 1))
+    _save_figure(fig, plot_path, dpi=150)
 
 
 def plot_redshift_histogram(df_before, df_after, bins=30, cut_info="", save_path="plots/hubble/cuts/"):
@@ -116,6 +135,7 @@ def plot_redshift_histogram(df_before, df_after, bins=30, cut_info="", save_path
     hist_removed, _ = np.histogram(df_removed["z"].dropna(), bins=bin_edges)
     bin_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
 
+    # Use mirrored panels so the removed population is easy to inspect.
     fig = plt.figure(figsize=(13, 5))
     gs = gridspec.GridSpec(1, 2, width_ratios=[1, 1])
 
@@ -138,12 +158,11 @@ def plot_redshift_histogram(df_before, df_after, bins=30, cut_info="", save_path
     if cut_info:
         fig.text(0.5, 0.01, f"Cut info: {cut_info}", ha="center", va="bottom", fontsize=12, color="k")
 
-    plt.tight_layout()
+    fig.tight_layout()
     safe_cut_info = re.sub(r"[^A-Za-z0-9._-]+", "_", str(cut_info)) if cut_info else ""
-    filename = f"redshift_histogram_{safe_cut_info}.png" if safe_cut_info else "redshift_histogram.png"
+    filename = f"redshift_histogram_{safe_cut_info}.pdf" if safe_cut_info else "redshift_histogram.pdf"
     plot_path = os.path.join(os.path.dirname(save_path), filename)
-    plt.savefig(plot_path, dpi=150)
-    plt.close()
+    _save_figure(fig, plot_path, dpi=150)
 
 
 def plot_m2500_correction(
@@ -162,18 +181,16 @@ def plot_m2500_correction(
 
     dm_values = dm_of_z(z)
 
-    plt.figure(figsize=(8, 6))
-    plt.scatter(z, dm_values, label="dm_of_z", color="blue", s=0.5)
-    plt.xlabel("Redshift (z)")
-    plt.ylabel("dm PSF-Fiber")
-    plt.grid(alpha=0.3)
-    plt.legend()
-    plt.tight_layout()
+    # First panel: inspect the applied PSF-fiber correction as a function of redshift.
+    fig_dm, ax_dm = plt.subplots(figsize=(8, 6))
+    ax_dm.scatter(z, dm_values, label="dm_of_z", color="blue", s=0.5)
+    ax_dm.set_xlabel("Redshift (z)")
+    ax_dm.set_ylabel("dm PSF-Fiber")
+    ax_dm.grid(alpha=0.3)
+    ax_dm.legend()
+    fig_dm.tight_layout()
     os.makedirs(plot_path, exist_ok=True)
-    plt.savefig(os.path.join(plot_path, "dm_psf_fiber_vs_redshift.png"), dpi=200)
-    if show:
-        plt.show()
-    plt.close()
+    _save_figure(fig_dm, os.path.join(plot_path, "dm_psf_fiber_vs_redshift.pdf"), dpi=200, show=show)
 
     m2500_corrected = m2500_uncorrected - dm_values
     mc = np.asarray(m2500_corrected, dtype=float)
@@ -212,10 +229,8 @@ def plot_m2500_correction(
     ax2.legend(loc="best", frameon=False)
 
     os.makedirs(plot_path, exist_ok=True)
-    fig.savefig(os.path.join(plot_path, "m2500_psf_fiber_correction_comparison.png"), dpi=200, bbox_inches="tight")
-    if show:
-        plt.show()
-    plt.close()
+    # Second panel: compare corrected and uncorrected magnitudes plus their residuals.
+    _save_figure(fig, os.path.join(plot_path, "m2500_psf_fiber_correction_comparison.pdf"), dpi=200, show=show)
 
 def plot_dynesty(results, cosmo_model, plot_path="plots/hubble", only_sna="", speed="", show=False):
     """
@@ -233,10 +248,7 @@ def plot_dynesty(results, cosmo_model, plot_path="plots/hubble", only_sna="", sp
                                                  color='blue',
                                                  #fig=plt.subplots(1, 1, figsize=(10, 2.5 * len(model_labels))))
     )
-    fig_corner.savefig(f"{plot_path}/cornerplot_{cosmo_model}_{'sna' if only_sna else 'joint'}_{speed}.png", dpi=100)
-    if show:
-        plt.show()    
-    plt.close(fig_corner)
+    _save_figure(fig_corner, f"{plot_path}/cornerplot_{cosmo_model}_{'sna' if only_sna else 'joint'}_{speed}.pdf", dpi=100, show=show)
 
     # Traceplot
     fig_trace, axes_trace = dyplot.traceplot(
@@ -248,10 +260,7 @@ def plot_dynesty(results, cosmo_model, plot_path="plots/hubble", only_sna="", sp
     )
     fig_trace.tight_layout(pad=2.0, h_pad=1)
 
-    fig_trace.savefig(f"{plot_path}/traceplot_{cosmo_model}_{'sna' if only_sna else 'joint'}_{speed}.png", dpi=100)
-    if show:
-        plt.show()
-    plt.close(fig_trace)
+    _save_figure(fig_trace, f"{plot_path}/traceplot_{cosmo_model}_{'sna' if only_sna else 'joint'}_{speed}.pdf", dpi=100, show=show)
 
 
     # # Cornerpoints
@@ -316,15 +325,13 @@ def plot_traces(sampler, only_sna=False, cosmo_model='Flatw0waCDM', show=False, 
         ax.grid(True, alpha=0.3)
 
     axes[-1].set_xlabel("Iteration")
-    plt.tight_layout()
-    if show:
-        plt.show()
+    fig.tight_layout()
     os.makedirs(plot_path, exist_ok=True)
     if only_sna:
-        file_path = os.path.join(plot_path, f"traces_{cosmo_model}_sna.png")
+        file_path = os.path.join(plot_path, f"traces_{cosmo_model}_sna.pdf")
     else:
-        file_path = os.path.join(plot_path, f"traces_{cosmo_model}_agn.png")
-    plt.savefig(file_path, dpi=200)
+        file_path = os.path.join(plot_path, f"traces_{cosmo_model}_agn.pdf")
+    _save_figure(fig, file_path, dpi=200, show=show)
 
     return fig
 
@@ -354,14 +361,10 @@ def plot_posterior_corner(flat_samples, only_sna=False, cosmo_model='Flatw0waCDM
     os.makedirs(plot_path, exist_ok=True)
     if only_sna:
         fig.suptitle("SNIa only", fontsize=16)
-        plt.savefig(os.path.join(plot_path, f"posterior_{cosmo_model}_sna.png"), dpi=200)
+        _save_figure(fig, os.path.join(plot_path, f"posterior_{cosmo_model}_sna.pdf"), dpi=200, show=show)
     else:
         fig.suptitle("SNIa + AGN", fontsize=28)
-        plt.savefig(os.path.join(plot_path, f"posterior_{cosmo_model}_agn.png"), dpi=200)
-
-    if show:
-        plt.show()
-    plt.close()
+        _save_figure(fig, os.path.join(plot_path, f"posterior_{cosmo_model}_agn.pdf"), dpi=200, show=show)
 
 
 def plot_cosmo_corner(
@@ -629,14 +632,12 @@ def plot_cosmo_corner(
                         wspace=0.05, hspace=0.05)
 
     os.makedirs(plot_path, exist_ok=True)
-    fig.savefig(os.path.join(plot_path, f"cosmo_corner_{cosmo_model}_{speed}_{'alphabeta' if include_alpha_beta else 'noalphabeta'}.png"),
-                bbox_inches="tight", dpi=150)
-    fig.savefig(os.path.join(plot_path, f"cosmo_corner_{cosmo_model}_{speed}_{'alphabeta' if include_alpha_beta else 'noalphabeta'}.pdf"),
-                bbox_inches="tight", dpi=600)
-
-    if show:
-        plt.show()
-    plt.close(fig)
+    _save_figure(
+        fig,
+        os.path.join(plot_path, f"cosmo_corner_{cosmo_model}_{speed}_{'alphabeta' if include_alpha_beta else 'noalphabeta'}.pdf"),
+        dpi=600,
+        show=show,
+    )
 
 def _weighted_bin_stats(z, y, yerr, bins, *, min_count=3, center='mid', plot_path=None):
     """
@@ -1190,14 +1191,8 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     # Save/show
     fig.tight_layout()
     os.makedirs(plot_path, exist_ok=True)
-    filename = "hubble_diagram_debiased.png" if debias else "hubble_diagram.png"
-    plt.savefig(os.path.join(plot_path, filename), dpi=300)
     filename = "hubble_diagram_debiased.pdf" if debias else "hubble_diagram.pdf"
-    os.makedirs(os.path.join(plot_path, "pdf"), exist_ok=True)
-    plt.savefig(os.path.join(plot_path, "pdf", filename), dpi=600)
-    if show:
-        plt.show()
-    plt.close(fig)
+    _save_figure(fig, os.path.join(plot_path, filename), dpi=600, show=show)
 
     # Residual Outlier report
     outlier_mask = np.abs(residuals) > 4
@@ -1583,18 +1578,18 @@ def plot_predicted_vs_actual_M2500(
             ax.label_outer()
 
     os.makedirs(plot_path, exist_ok=True)
-    os.makedirs(os.path.join(plot_path, "pdf"), exist_ok=True)
 
     # Save object_id, z, and resid_bybin_aligned to CSV
     m2500_residuals_df = df_agn.loc[:, ["object_id", "z"]].copy()
     m2500_residuals_df["residual"] = resid_bybin_aligned
     m2500_residuals_df.to_csv(os.path.join(plot_path, "m2500_residuals.csv"), index=False)
 
-    plt.savefig(os.path.join(plot_path, f"predicted_vs_actual_M2500{'_debias' if debias else ''}.png"), dpi=300, bbox_inches="tight")
-    plt.savefig(os.path.join(plot_path, "pdf", f"predicted_vs_actual_M2500{'_debias' if debias else ''}.pdf"), dpi=600, bbox_inches="tight")
-    if show:
-        plt.show()
-    plt.close()
+    _save_figure(
+        fig,
+        os.path.join(plot_path, f"predicted_vs_actual_M2500{'_debias' if debias else ''}.pdf"),
+        dpi=600,
+        show=show,
+    )
 
     return residuals_all[m_global], sigma_all[m_global], resid_bybin_aligned, z_bin_indices
 
@@ -1628,31 +1623,27 @@ def plot_completeness_vs_mag_at_redshifts(
     line_styles = ['-', '--', '-.', ':', (0, (3, 1, 1, 1)), (0, (5, 5))]
     style_cycle = iter(line_styles)
 
-    plt.figure(figsize=(7, 5))
+    # Draw the completeness curves in a single axes for a compact diagnostic view.
+    fig, ax = plt.subplots(figsize=(7, 5))
     for i, z in enumerate(redshifts):
         p_vals = p_detect(mag_eval, np.full_like(mag_eval, z))
         color = cmap(norm(z))
-        plt.plot(mag_eval, p_vals, label=fr"$z = {z}$", color=color, linestyle=line_styles[i % len(line_styles)])
+        ax.plot(mag_eval, p_vals, label=fr"$z = {z}$", color=color, linestyle=line_styles[i % len(line_styles)])
 
     #sm = cm.ScalarMappable(cmap=cmap, norm=norm)
     #sm.set_array([])
     #plt.colorbar(sm, label="Redshift", ticks=redshifts)
 
-    plt.xlabel(r"$m$ ($i$ mag)")
-    plt.ylabel(r"$p(I{=}1|m, z)$")
-    plt.legend(fontsize=16, loc="upper right", frameon=False)
-    #plt.ylim(0, .02)
-    plt.xlim(17, 25)
-    plt.grid(False)
-    plt.tight_layout()
-    if show:
-        plt.show()
+    ax.set_xlabel(r"$m$ ($i$ mag)")
+    ax.set_ylabel(r"$p(I{=}1|m, z)$")
+    ax.legend(fontsize=16, loc="upper right", frameon=False)
+    ax.set_xlim(17, 25)
+    ax.grid(False)
+    fig.tight_layout()
     base_plot_path = plot_path or "plots/hubble"
     completeness_path = os.path.join(base_plot_path, "completeness")
     os.makedirs(completeness_path, exist_ok=True)
-    plt.savefig(os.path.join(completeness_path, "completeness_vs_mag_at_redshifts.png"), dpi=300)
-    #plt.savefig("plots/hubble/completeness_vs_mag_at_redshifts.pdf", dpi=300)
-    plt.close()
+    _save_figure(fig, os.path.join(completeness_path, "completeness_vs_mag_at_redshifts.pdf"), dpi=300, show=show)
 
 
 
@@ -1862,13 +1853,14 @@ def plot_full_residuals(
     for j in range(n_keys, len(axes)):
         axes[j].axis('off')
 
-    plt.tight_layout()
-    if show:
-        plt.show()
-
     os.makedirs(plot_path, exist_ok=True)
-    plt.savefig(os.path.join(plot_path, f"full_residuals_{'debiased' if debias else 'biased'}_y{key_y}_c{key_color}_zcut{z_cut}.png"), dpi=150)
-    plt.close()
+    fig.tight_layout()
+    _save_figure(
+        fig,
+        os.path.join(plot_path, f"full_residuals_{'debiased' if debias else 'biased'}_y{key_y}_c{key_color}_zcut{z_cut}.pdf"),
+        dpi=150,
+        show=show,
+    )
 
 def _kde_conf_levels(Z, conf=(0.954, 0.683), plot_path=None):
     """
@@ -2216,7 +2208,7 @@ def plot_predicted_L2500_vs_sigmahat(
     if show_residuals and ax_res is not None:
         sc = ax_res.scatter(x_ref[good], residuals[good], s=5, alpha=0.4, c=np.zeros(np.sum(good)),
                             cmap='viridis', lw=0.5, zorder=5)
-        plt.colorbar(sc, ax=ax_res, orientation='vertical').set_label('alpha_lambda (main)')
+        fig.colorbar(sc, ax=ax_res, orientation='vertical').set_label('alpha_lambda (main)')
 
         ax_res.axhline(0, color='m', linestyle='--', zorder=3)
         ax_res.set_ylabel('Residuals (log)')
@@ -2227,14 +2219,8 @@ def plot_predicted_L2500_vs_sigmahat(
 
     # Save & return
     os.makedirs(plot_path, exist_ok=True)
-    os.makedirs(os.path.join(plot_path, "pdf"), exist_ok=True)
-    out_png = "predicted_L2500_vs_fullcorr_band_debiased.png" if debias else "predicted_L2500_vs_fullcorr_band.png"
-    out_pdf = os.path.splitext(out_png)[0] + ".pdf"
-    plt.savefig(os.path.join(plot_path, out_png), dpi=300, bbox_inches="tight")
-    plt.savefig(os.path.join(plot_path, "pdf", out_pdf), dpi=600, bbox_inches="tight")
-    if show:
-        plt.show()
-    plt.close()
+    out_pdf = "predicted_L2500_vs_fullcorr_band_debiased.pdf" if debias else "predicted_L2500_vs_fullcorr_band.pdf"
+    _save_figure(fig, os.path.join(plot_path, out_pdf), dpi=600, show=show)
 
     # Return MAIN residuals; show residuals can be computed externally if needed
     return residuals, sigma_chi
@@ -2258,32 +2244,30 @@ def dmi_from_pdet_only(m_obs, m_obs_err, p_det, m_grid, sigma_completeness, z, t
     slope = (1 - t) * dlogp_dm[np.arange(len(m_obs)), idx] + t * dlogp_dm[np.arange(len(m_obs)), idx+1]
     # Δm ≈ σ² * d ln p_det / dm
 
-    plt.figure(figsize=(7, 5))
-    plt.scatter(m_obs, sigma2 * slope, c=m_obs_err, cmap='viridis', s=20, alpha=0.7, label='Objects')
-    plt.xlabel('Observed Magnitude (m_obs)')
-    plt.ylabel(r'$\Delta m = \sigma^2 \, \frac{d \ln p_{\rm det}}{dm}$')
-    plt.title('Completeness Correction vs Observed Magnitude')
-    plt.colorbar(label='Magnitude Error (m_obs_err)')
-    plt.tight_layout()
-    plt.ylim(-1, 0.5)
+    fig_mag, ax_mag = plt.subplots(figsize=(7, 5))
+    sc_mag = ax_mag.scatter(m_obs, sigma2 * slope, c=m_obs_err, cmap='viridis', s=20, alpha=0.7, label='Objects')
+    ax_mag.set_xlabel('Observed Magnitude (m_obs)')
+    ax_mag.set_ylabel(r'$\Delta m = \sigma^2 \, \frac{d \ln p_{\rm det}}{dm}$')
+    ax_mag.set_title('Completeness Correction vs Observed Magnitude')
+    fig_mag.colorbar(sc_mag, ax=ax_mag, label='Magnitude Error (m_obs_err)')
+    ax_mag.set_ylim(-1, 0.5)
+    fig_mag.tight_layout()
     base_plot_path = plot_path or "plots/hubble"
     completeness_path = os.path.join(base_plot_path, "completeness")
     os.makedirs(completeness_path, exist_ok=True)
-    plt.savefig(os.path.join(completeness_path, "dmi_vs_mag.pdf"), dpi=300)
-    plt.close()
+    _save_figure(fig_mag, os.path.join(completeness_path, "dmi_vs_mag.pdf"), dpi=300)
 
 
     # Plot vs redshift (assuming you have z array)
-    plt.figure(figsize=(7, 5))
-    plt.scatter(z, sigma2 * slope, c=m_obs_err, cmap='viridis', s=20, alpha=0.7)
-    plt.xlabel('Redshift (z)')
-    plt.ylabel(r'$\Delta m = \sigma^2 \, \frac{d \ln p_{\rm det}}{dm}$')
-    plt.title('Completeness Correction vs Redshift')
-    plt.colorbar(label='Magnitude Error (m_obs_err)')
-    plt.tight_layout()
-    plt.ylim(-1, 0.5)
-    plt.savefig(os.path.join(completeness_path, "dmi_vs_redshift.png"), dpi=300)
-    plt.close()
+    fig_z, ax_z = plt.subplots(figsize=(7, 5))
+    sc_z = ax_z.scatter(z, sigma2 * slope, c=m_obs_err, cmap='viridis', s=20, alpha=0.7)
+    ax_z.set_xlabel('Redshift (z)')
+    ax_z.set_ylabel(r'$\Delta m = \sigma^2 \, \frac{d \ln p_{\rm det}}{dm}$')
+    ax_z.set_title('Completeness Correction vs Redshift')
+    fig_z.colorbar(sc_z, ax=ax_z, label='Magnitude Error (m_obs_err)')
+    ax_z.set_ylim(-1, 0.5)
+    fig_z.tight_layout()
+    _save_figure(fig_z, os.path.join(completeness_path, "dmi_vs_redshift.pdf"), dpi=300)
     return sigma2 * slope
 
 
@@ -2328,32 +2312,30 @@ def dmi_corr(
     # Teerikorpi-style first-order shift
     dmi = sigma2 * slope      # use "-sigma2 * slope" if following the minus-sign convention
 
-    plt.figure(figsize=(7, 5))
-    plt.scatter(m_obs, sigma2 * slope, c=m_obs_err, cmap='viridis', s=20, alpha=0.7, label='Objects')
-    plt.xlabel('Observed Magnitude (m_obs)')
-    plt.ylabel(r'$\Delta m = \sigma^2 \, \frac{d \ln p_{\rm det}}{dm}$')
-    plt.title('Completeness Correction vs Observed Magnitude')
-    plt.colorbar(label='Magnitude Error (m_obs_err)')
-    plt.tight_layout()
-    plt.ylim(-1, 0.5)
+    fig_mag, ax_mag = plt.subplots(figsize=(7, 5))
+    sc_mag = ax_mag.scatter(m_obs, sigma2 * slope, c=m_obs_err, cmap='viridis', s=20, alpha=0.7, label='Objects')
+    ax_mag.set_xlabel('Observed Magnitude (m_obs)')
+    ax_mag.set_ylabel(r'$\Delta m = \sigma^2 \, \frac{d \ln p_{\rm det}}{dm}$')
+    ax_mag.set_title('Completeness Correction vs Observed Magnitude')
+    fig_mag.colorbar(sc_mag, ax=ax_mag, label='Magnitude Error (m_obs_err)')
+    ax_mag.set_ylim(-1, 0.5)
+    fig_mag.tight_layout()
     base_plot_path = plot_path or "plots/hubble"
     completeness_path = os.path.join(base_plot_path, "completeness")
     os.makedirs(completeness_path, exist_ok=True)
-    plt.savefig(os.path.join(completeness_path, "dmi_vs_mag.png"), dpi=300)
-    plt.close()
+    _save_figure(fig_mag, os.path.join(completeness_path, "dmi_vs_mag.pdf"), dpi=300)
 
 
     # Plot vs redshift (assuming you have z array)
-    plt.figure(figsize=(7, 5))
-    plt.scatter(z_obs, sigma2 * slope, c=m_obs_err, cmap='viridis', s=20, alpha=0.7)
-    plt.xlabel('Redshift (z)')
-    plt.ylabel(r'$\Delta m = \sigma^2 \, \frac{d \ln p_{\rm det}}{dm}$')
-    plt.title('Completeness Correction vs Redshift')
-    plt.colorbar(label='Magnitude Error (m_obs_err)')
-    plt.tight_layout()
-    plt.ylim(-1, 0.5)
-    plt.savefig(os.path.join(completeness_path, "dmi_vs_redshift.png"), dpi=300)
-    plt.close()
+    fig_z, ax_z = plt.subplots(figsize=(7, 5))
+    sc_z = ax_z.scatter(z_obs, sigma2 * slope, c=m_obs_err, cmap='viridis', s=20, alpha=0.7)
+    ax_z.set_xlabel('Redshift (z)')
+    ax_z.set_ylabel(r'$\Delta m = \sigma^2 \, \frac{d \ln p_{\rm det}}{dm}$')
+    ax_z.set_title('Completeness Correction vs Redshift')
+    fig_z.colorbar(sc_z, ax=ax_z, label='Magnitude Error (m_obs_err)')
+    ax_z.set_ylim(-1, 0.5)
+    fig_z.tight_layout()
+    _save_figure(fig_z, os.path.join(completeness_path, "dmi_vs_redshift.pdf"), dpi=300)
     return dmi
 
 
@@ -2390,34 +2372,32 @@ def _blob_for_theta(theta, *, df_agn, df_pantheon, cosmo_model,
 
 
 def plot_Z_vs_z(z, Z, outdir=None, title_suffix="", plot_path=None):
-    plt.figure(figsize=(8,5.2))
-    plt.scatter(z, Z, s=12, alpha=0.55)
-    plt.xlabel("Redshift (z)")
-    plt.ylabel("integral (completeness)  Z = Φ(...) or ∫N×C")
-    plt.title(f"Completeness integrals vs z {title_suffix}")
-    plt.grid(True, alpha=0.35)
-    plt.tight_layout()
+    fig, ax = plt.subplots(figsize=(8, 5.2))
+    ax.scatter(z, Z, s=12, alpha=0.55)
+    ax.set_xlabel("Redshift (z)")
+    ax.set_ylabel("integral (completeness)  Z = Φ(...) or ∫N×C")
+    ax.set_title(f"Completeness integrals vs z {title_suffix}")
+    ax.grid(True, alpha=0.35)
+    fig.tight_layout()
     base_plot_path = plot_path or outdir or "plots/hubble"
     completeness_path = os.path.join(base_plot_path, "completeness")
     os.makedirs(completeness_path, exist_ok=True)
-    plt.savefig(os.path.join(completeness_path, "completeness_integrals_vs_z.png"), dpi=200)
-    plt.close()
+    _save_figure(fig, os.path.join(completeness_path, "completeness_integrals_vs_z.pdf"), dpi=200)
 
 def plot_dmi_vs_z(z, dmi, outdir=None, title_suffix="", plot_path=None):
-    plt.figure(figsize=(8,5.2))
-    # scatter shows multiplicity; line shows structure when sorted
+    fig, ax = plt.subplots(figsize=(8, 5.2))
+    # Plot the sorted line so the redshift trend is readable.
     order = np.argsort(z)
-    plt.plot(z[order], dmi[order], lw=1.4, alpha=0.9)
-    plt.xlabel("Redshift (z)")
-    plt.ylabel("dmi (mag)  = E[m|det] - m_obs")
-    plt.title(f"Interpolated dmi vs z {title_suffix}")
-    plt.grid(True, alpha=0.35)
-    plt.tight_layout()
+    ax.plot(z[order], dmi[order], lw=1.4, alpha=0.9)
+    ax.set_xlabel("Redshift (z)")
+    ax.set_ylabel("dmi (mag)  = E[m|det] - m_obs")
+    ax.set_title(f"Interpolated dmi vs z {title_suffix}")
+    ax.grid(True, alpha=0.35)
+    fig.tight_layout()
     base_plot_path = plot_path or outdir or "plots/hubble"
     completeness_path = os.path.join(base_plot_path, "completeness")
     os.makedirs(completeness_path, exist_ok=True)
-    plt.savefig(os.path.join(completeness_path, "dmi_vs_z.png"), dpi=200)
-    plt.close()
+    _save_figure(fig, os.path.join(completeness_path, "dmi_vs_z.pdf"), dpi=200)
 
 def _hard_limit_m50_per_object(completeness2d, mag_centers, z, plot_path=None):
     """
@@ -2468,21 +2448,21 @@ def plot_completeness_map_with_m50(
     m50_curve = np.array([np.median(m50_obj[inds==i]) if np.any(inds==i) else np.nan
                           for i in range(len(z_centers))])
 
-    plt.figure(figsize=(7.6,5.6))
-    im = plt.imshow(C.T, origin="lower", aspect="auto",
-                    extent=[mag_centers[0], mag_centers[-1], z_centers[0], z_centers[-1]],
-                    vmin=0.0, vmax=1.0)
-    plt.xlabel("Apparent Magnitude")
-    plt.ylabel("Redshift")
-    plt.title(title)
-    cbar = plt.colorbar(im); cbar.set_label("p(detect)")
+    fig, ax = plt.subplots(figsize=(7.6, 5.6))
+    im = ax.imshow(C.T, origin="lower", aspect="auto",
+                   extent=[mag_centers[0], mag_centers[-1], z_centers[0], z_centers[-1]],
+                   vmin=0.0, vmax=1.0)
+    ax.set_xlabel("Apparent Magnitude")
+    ax.set_ylabel("Redshift")
+    ax.set_title(title)
+    cbar = fig.colorbar(im, ax=ax)
+    cbar.set_label("p(detect)")
     # overlay m50 curve
     ok = np.isfinite(m50_curve)
     if np.any(ok):
-        plt.plot(m50_curve[ok], z_centers[ok], lw=2.2)
-    plt.tight_layout()
-    plt.savefig(os.path.join(completeness_path, "completeness_map_with_m50.png"), dpi=200)
-    plt.close()
+        ax.plot(m50_curve[ok], z_centers[ok], lw=2.2)
+    fig.tight_layout()
+    _save_figure(fig, os.path.join(completeness_path, "completeness_map_with_m50.pdf"), dpi=200)
 
 def run_completeness_diagnostics(sampler_results, df_agn, df_pantheon,
                                  completeness_params, cosmo_model,
@@ -2643,19 +2623,10 @@ def plot_residuals_vs_alphaOX(
         framealpha=0.8,
     )
 
-    plt.tight_layout()
+    ax.set_ylim(-4.6, 3.9)
+    fig.tight_layout()
     os.makedirs(plot_path, exist_ok=True)
-    os.makedirs(os.path.join(plot_path, "pdf"), exist_ok=True)
-    out_pdf = os.path.join(plot_path, "pdf/delta_alphaOX_residuals.pdf")
-    out_png = os.path.join(plot_path, "delta_alphaOX_residuals.png")
-    plt.savefig(out_pdf)
-    plt.savefig(out_png, dpi=220)
-
-    plt.ylim(-4.6, 3.9)
-
-    if show:
-        plt.show()
-    plt.close()
+    _save_figure(fig, os.path.join(plot_path, "delta_alphaOX_residuals.pdf"), show=show)
 
     # --- Extract and sanitize inputs ---
     x = np.asarray(df_agn["alphaOX"])
@@ -2763,42 +2734,33 @@ def plot_residuals_vs_alphaOX(
         framealpha=0.8,
     )
 
-    plt.tight_layout()
+    ax.set_ylim(-4.6, 3.9)
+    fig.tight_layout()
     os.makedirs(plot_path, exist_ok=True)
-    os.makedirs(os.path.join(plot_path, "pdf"), exist_ok=True)
-    out_pdf = os.path.join(plot_path, "pdf/alphaOX_residuals.pdf")
-    out_png = os.path.join(plot_path, "alphaOX_residuals.png")
-    plt.savefig(out_pdf)
-    plt.savefig(out_png, dpi=220)
-
-    plt.ylim(-4.6, 3.9)
-
-    if show:
-        plt.show()
-    plt.close()
+    _save_figure(fig, os.path.join(plot_path, "alphaOX_residuals.pdf"), show=show)
 
 def plot_Mi_relation(df_agn, plot_path=None):
+
     cosmo   = FlatLambdaCDM(H0=70, Om0=0.3)
 
     DL = cosmo.luminosity_distance(df_agn['z'].values).to(u.parsec).value
     M_i_my = df_agn['apparent_mag_2500'].values - 5.0 * (np.log10(DL) - 1)
     M_i_Wu_z2 = 91 - 2.5 * df_agn['log_lbol']
+    M_i_Wu_z2 = M_i_Wu_z2.mask(M_i_Wu_z2 > 0)
 
-    plt.figure(figsize=(8, 6))
-    scatter = plt.scatter(M_i_my, M_i_Wu_z2, c=df_agn['z'], cmap='viridis', alpha=0.6, s=10)
-    plt.plot([min(M_i_my), max(M_i_my)], [min(M_i_my), max(M_i_my)], color='red', linestyle='--', label='y=x')
-    plt.xlabel('M_i_my')
-    plt.ylabel('M_i_Wu_z2')
-    plt.title('M_i_my vs M_i_Wu_z2')
-    plt.colorbar(scatter, label='Redshift (z)')
-    plt.legend()
-    plt.grid(alpha=0.3)
-    plt.tight_layout()
+    fig, ax = plt.subplots(figsize=(8, 6))
+    scatter = ax.scatter(M_i_my, M_i_Wu_z2, c=df_agn['z'], cmap='viridis', alpha=0.6, s=10)
+    ax.plot([min(M_i_my), max(M_i_my)], [min(M_i_my), max(M_i_my)], color='red', linestyle='--', label='y=x')
+    ax.set_xlabel(r'$M_i = m_{2500} - 5 \log_{10}(D_L/10 \text{ pc})$')
+    ax.set_ylabel(r'$M_i$ (Wu & Shen 2022)')
+    fig.colorbar(scatter, ax=ax, label='Redshift (z)')
+    ax.legend()
+    ax.grid(alpha=0.3)
+    fig.tight_layout()
     base_plot_path = plot_path or "plots/hubble"
     diagnostics_path = os.path.join(base_plot_path, "diagnostics")
     os.makedirs(diagnostics_path, exist_ok=True)
-    plt.savefig(os.path.join(diagnostics_path, "Mi_relation_comparison.png"), dpi=200)
-    plt.close()
+    _save_figure(fig, os.path.join(diagnostics_path, "Mi_relation_comparison.pdf"), dpi=200)
 
 
 def plot_completeness_diagnostics(dmi_max_w, z, m2500, integrals_max_w, plot_path="plots/hubble"):
@@ -2838,17 +2800,14 @@ def plot_completeness_diagnostics(dmi_max_w, z, m2500, integrals_max_w, plot_pat
     plt.close(fig)
 
     # Plot log(integrals) vs redshift for highest-weight sample
-    plt.figure(figsize=(8, 5))
-    plt.scatter(z, integrals_max_w, s=16, alpha=0.3)
-    plt.xlabel("Redshift (z)")
-    plt.ylabel("integral  (completeness)")
-    plt.title("Completeness integrals vs z — highest posterior weight sample")
-    plt.grid(True)
-    plt.tight_layout()
-    # Optional: save to disk
-    plt.savefig(os.path.join(outdir, "integrals_vs_z_highest_weight.png"), dpi=150)
-    #plt.show()
-    plt.close()
+    fig, ax = plt.subplots(figsize=(8, 5))
+    ax.scatter(z, integrals_max_w, s=16, alpha=0.3)
+    ax.set_xlabel("Redshift (z)")
+    ax.set_ylabel("integral  (completeness)")
+    ax.set_title("Completeness integrals vs z — highest posterior weight sample")
+    ax.grid(True)
+    fig.tight_layout()
+    _save_figure(fig, os.path.join(outdir, "integrals_vs_z_highest_weight.pdf"), dpi=150)
 
 def plot_redshift_histograms(df_pantheon, df_agn,
                             plot_path="plots/hubble",
@@ -2939,16 +2898,7 @@ def plot_redshift_histograms(df_pantheon, df_agn,
     ax.legend(frameon=False, loc="upper left", fontsize=12)
     fig.tight_layout()
     os.makedirs(plot_path, exist_ok=True)
-    fig.savefig(os.path.join(plot_path, f"redshift_histograms.pdf"),
-                bbox_inches="tight", dpi=600)
-    fig.savefig(os.path.join(plot_path, f"redshift_histograms.png"),
-                bbox_inches="tight", dpi=150)
-    if show:
-        plt.show()
-
-import numpy as np
-import matplotlib.pyplot as plt
-from matplotlib import colors
+    _save_figure(fig, os.path.join(plot_path, "redshift_histograms.pdf"), dpi=600, show=show)
 
 def plot_m2500_vs_z_colorpanels(
     df,
@@ -3027,7 +2977,7 @@ def plot_m2500_vs_z_colorpanels(
         ax.scatter(d_keep[xcol], d_keep[ycol], c=c_keep_plot, cmap=cmap, norm=norm, s=s, alpha=alpha, marker="o")
         ax.scatter(d_cut[xcol], d_cut[ycol], c=c_cut_plot, cmap=cmap, norm=norm, s=s*2.0, alpha=alpha, marker="x")
 
-        sm = plt.cm.ScalarMappable(norm=norm, cmap=cmap)
+        sm = mpl.cm.ScalarMappable(norm=norm, cmap=cmap)
         sm.set_array([])
         cbar = fig.colorbar(sm, ax=ax)
 
