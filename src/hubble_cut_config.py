@@ -32,7 +32,7 @@ def build_agn_cuts(
 
     return [
         ("log_tau_UV_RF", 1.5, 4.0),
-        ("redchi2_conti_full", None, redchi2_cut),
+        ("wrms", None, redchi2_cut),
         ("t_rf_length", 1700, None),
         ("iron_frac", None, iron_frac_cut),
         ("log_tau_UV_RF_err", 0.0, 1.0),
