@@ -379,7 +379,6 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         df_agn_fit_selection = df_agn[df_agn["z"].between(z_range[0], z_range[1])].copy()
         plot_redshift_histograms(df_pantheon, df_agn, xscale="linear", plot_path=plot_path)
 
-
     flat_samples, model_labels, dm_interp, logZ, logZerr = run_mcmc_pipeline(
                                                         df_agn_fit_selection, df_agn_all,
                                                         df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
@@ -615,7 +614,8 @@ if __name__ == "__main__":
                            exclude_object_ids_csv=args.exclude_object_ids_csv,
                            spectra_fit_csv=args.spectra_fit_csv, zquery_csv=args.zquery_csv,
                            redchi2_cut=args.redchi2_cut, iron_frac_cut=args.iron_frac_cut,
-                           sdss_mags_csv=args.sdss_mags_csv, pickled=args.pickled)
+                           sdss_mags_csv=args.sdss_mags_csv, pickled=args.pickled,
+                           z_range=tuple(args.z_range))
     
     if args.agn_calibrators:
         if args.agn_calibrators.endswith('.h5'):

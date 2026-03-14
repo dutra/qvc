@@ -12,6 +12,7 @@ from statistics import NormalDist
 from typing import Optional, Tuple
 
 import h5py
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from astropy import units as u
@@ -744,8 +745,14 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
                   spectra_fit_csv=None, zquery_csv=None, only_load=False,
                   pickled=False,
                   iron_frac_cut=None, redchi2_cut=None,
-                  sdss_mags_csv=None, lc_info_csv="data/aug4_sample_chisqg10_ebv005sn3_lcdata.csv"):
-    from hubble_plotting import plot_cut_diagnostics, plot_df_psf_fiber, plot_Mi_relation
+                  sdss_mags_csv=None, lc_info_csv="data/aug4_sample_chisqg10_ebv005sn3_lcdata.csv",
+                  z_range=(0.44, 3.16)):
+    from hubble_plotting import (
+        plot_Mi_relation,
+        plot_cut_diagnostics,
+        plot_df_psf_fiber,
+        plot_m2500_vs_z_colorpanels,
+    )
 
     if exclude_object_ids_csv is None:
         exclude_object_ids_csv = []
@@ -1029,6 +1036,24 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
     print(f"\nTotal number of objects removed by all cuts: {len(df_all) - len(df)}")
     print("Final number of quasars:", len(df))
     plot_cut_diagnostics(df_all.copy(), df.copy(), bins=30, cut_info="all cuts")
+    colorpanel_cols = [
+        col for col in ("f_host_center", "f_fe_uv_over_pl_2500", "f_bc_over_pl_3000", "wrms")
+        if col in df_all.columns
+    ]
+    if len(colorpanel_cols) > 0 and "z" in df_all.columns and "apparent_mag_2500" in df_all.columns:
+        cuts_plot_dir = os.path.join("plots", "hubble", "cuts")
+        os.makedirs(cuts_plot_dir, exist_ok=True)
+        fig_colorpanels, _ = plot_m2500_vs_z_colorpanels(
+            df_all,
+            df_keep=df,
+            color_cols=tuple(colorpanel_cols),
+            z_range=z_range,
+        )
+        fig_colorpanels.savefig(
+            os.path.join(cuts_plot_dir, "m2500_vs_z_colorpanels.pdf"),
+            bbox_inches="tight",
+        )
+        plt.close(fig_colorpanels)
     plot_Mi_relation(df_all.copy())
     
     return df, df_all

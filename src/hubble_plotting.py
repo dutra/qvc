@@ -5,6 +5,7 @@ import re
 
 import corner
 import matplotlib as mpl
+import matplotlib.colors as colors
 import matplotlib.gridspec as gridspec
 import matplotlib.pyplot as plt
 import matplotlib.transforms as mtransforms
@@ -2875,9 +2876,11 @@ def plot_redshift_histograms(df_pantheon, df_agn,
 
 def plot_m2500_vs_z_colorpanels(
     df,
+    df_keep=None,
     color_cols=("f_host_center", "f_fe_uv_over_pl_2500", "f_bc_over_pl_3000", "wrms"),
     xcol="z",
     ycol="apparent_mag_2500",
+    z_range=None,
     cuts=None,
     log_color=True,
     color_clip=None,   # dict: {col: (vmin, vmax)} in displayed space (log space if log_color=True)
@@ -2885,24 +2888,58 @@ def plot_m2500_vs_z_colorpanels(
     figsize=(11, 12),
     s=12,
     alpha=0.7,
-    thin=1,
+    thin=4,
 ):
+    if thin and thin > 1:
+        print(f"[m2500_vs_z] Warning: thinning displayed points by factor {thin}")
+
     cols = [xcol, ycol] + list(color_cols)
+    id_col = "object_id" if "object_id" in df.columns else None
+    if id_col is not None:
+        cols = cols + [id_col]
+
     base = df[cols].copy().dropna(subset=[xcol, ycol])
     cuts = {} if cuts is None else cuts
     color_clip = {} if color_clip is None else color_clip
+
+    keep_ids = None
+    if df_keep is not None:
+        if id_col is not None and id_col in df_keep.columns:
+            keep_ids = set(df_keep[id_col].astype(str))
+            base["_is_kept"] = base[id_col].astype(str).isin(keep_ids)
+        else:
+            keep_index = set(df_keep.index.tolist())
+            base["_is_kept"] = base.index.isin(keep_index)
+    else:
+        base["_is_kept"] = True
+    if z_range is not None:
+        z_lo, z_hi = z_range
+        base["_in_z_range"] = base[xcol].between(z_lo, z_hi)
+    else:
+        base["_in_z_range"] = True
 
     # Pretty colorbar labels
     label_map = {
         "f_host_center": r"f_{\mathrm{host}}",
         "f_fe_uv_over_pl_2500": r"f_{\mathrm{Fe\, II}}",
         "f_bc_over_pl_3000": r"f_{\mathrm{BC}}",
-        "wrms": r"\Chi^2/\nu",
+        "wrms": r"\chi^2/\nu",
     }
 
     fig, axes = plt.subplots(len(color_cols), 1, figsize=figsize, sharex=True, sharey=True)
     if len(color_cols) == 1:
         axes = [axes]
+
+    legend_handles = [
+        Line2D([0], [0], marker="o", color="none", markerfacecolor="0.4", markeredgecolor="0.4",
+               markersize=6, linestyle="None", label="Kept in z-range"),
+        Line2D([0], [0], marker="D", color="none", markerfacecolor="0.4", markeredgecolor="0.4",
+               markersize=6, linestyle="None", label="Cut in z-range"),
+        Line2D([0], [0], marker="o", color="none", markerfacecolor="none", markeredgecolor="0.4",
+               markeredgewidth=1.3, markersize=6, linestyle="None", label="Kept outside z-range"),
+        Line2D([0], [0], marker="D", color="none", markerfacecolor="none", markeredgecolor="0.4",
+               markeredgewidth=1.3, markersize=6, linestyle="None", label="Cut outside z-range"),
+    ]
 
     for ax, ccol in zip(axes, color_cols):
         d = base.dropna(subset=[ccol]).copy()
@@ -2915,7 +2952,7 @@ def plot_m2500_vs_z_colorpanels(
         else:
             c_all = d[ccol].to_numpy(dtype=float)
 
-        keep = np.ones(len(d), dtype=bool)
+        keep = d["_is_kept"].to_numpy(dtype=bool)
         if ccol in cuts and cuts[ccol] is not None:
             lo, hi = cuts[ccol]
             if lo is not None:
@@ -2923,19 +2960,37 @@ def plot_m2500_vs_z_colorpanels(
             if hi is not None:
                 keep &= (d[ccol].to_numpy() <= hi)
 
-        d_keep, d_cut = d.iloc[keep], d.iloc[~keep]
-        c_keep, c_cut = c_all[keep], c_all[~keep]
+        in_z = d["_in_z_range"].to_numpy(dtype=bool)
+        keep_in_z = keep & in_z
+        keep_out_z = keep & (~in_z)
+        cut_in_z = (~keep) & in_z
+        cut_out_z = (~keep) & (~in_z)
+
+        d_keep_in_z = d.iloc[keep_in_z]
+        d_keep_out_z = d.iloc[keep_out_z]
+        d_cut_in_z = d.iloc[cut_in_z]
+        d_cut_out_z = d.iloc[cut_out_z]
+        c_keep_in_z = c_all[keep_in_z]
+        c_keep_out_z = c_all[keep_out_z]
+        c_cut_in_z = c_all[cut_in_z]
+        c_cut_out_z = c_all[cut_out_z]
 
         # Per-panel clipping
         clip_lo, clip_hi = color_clip.get(ccol, (None, None))
-        c_keep_plot = c_keep.copy()
-        c_cut_plot = c_cut.copy()
+        c_keep_in_z_plot = c_keep_in_z.copy()
+        c_keep_out_z_plot = c_keep_out_z.copy()
+        c_cut_in_z_plot = c_cut_in_z.copy()
+        c_cut_out_z_plot = c_cut_out_z.copy()
         if clip_lo is not None:
-            c_keep_plot = np.clip(c_keep_plot, clip_lo, None)
-            c_cut_plot = np.clip(c_cut_plot, clip_lo, None)
+            c_keep_in_z_plot = np.clip(c_keep_in_z_plot, clip_lo, None)
+            c_keep_out_z_plot = np.clip(c_keep_out_z_plot, clip_lo, None)
+            c_cut_in_z_plot = np.clip(c_cut_in_z_plot, clip_lo, None)
+            c_cut_out_z_plot = np.clip(c_cut_out_z_plot, clip_lo, None)
         if clip_hi is not None:
-            c_keep_plot = np.clip(c_keep_plot, None, clip_hi)
-            c_cut_plot = np.clip(c_cut_plot, None, clip_hi)
+            c_keep_in_z_plot = np.clip(c_keep_in_z_plot, None, clip_hi)
+            c_keep_out_z_plot = np.clip(c_keep_out_z_plot, None, clip_hi)
+            c_cut_in_z_plot = np.clip(c_cut_in_z_plot, None, clip_hi)
+            c_cut_out_z_plot = np.clip(c_cut_out_z_plot, None, clip_hi)
 
         # Colorbar limits from clipped all-points (keep+cut)
         c_all_plot = c_all.copy()
@@ -2947,9 +3002,46 @@ def plot_m2500_vs_z_colorpanels(
         vmin = clip_lo if clip_lo is not None else np.nanmin(c_all_plot)
         vmax = clip_hi if clip_hi is not None else np.nanmax(c_all_plot)
         norm = colors.Normalize(vmin=vmin, vmax=vmax)
+        edge_keep_out_z = mpl.cm.get_cmap(cmap)(norm(c_keep_out_z_plot)) if len(c_keep_out_z_plot) else None
+        edge_cut_out_z = mpl.cm.get_cmap(cmap)(norm(c_cut_out_z_plot)) if len(c_cut_out_z_plot) else None
 
-        ax.scatter(d_keep[xcol], d_keep[ycol], c=c_keep_plot, cmap=cmap, norm=norm, s=s, alpha=alpha, marker="o")
-        ax.scatter(d_cut[xcol], d_cut[ycol], c=c_cut_plot, cmap=cmap, norm=norm, s=s*2.0, alpha=alpha, marker="x")
+        print(
+            f"[m2500_vs_z:{ccol}] kept_in_z={len(d_keep_in_z)} "
+            f"cut_in_z={len(d_cut_in_z)} kept_out_z={len(d_keep_out_z)} cut_out_z={len(d_cut_out_z)}"
+        )
+
+        ax.scatter(
+            d_keep_in_z[xcol], d_keep_in_z[ycol],
+            c=c_keep_in_z_plot, cmap=cmap, norm=norm, s=s, alpha=alpha, marker="o", rasterized=True
+        )
+        ax.scatter(
+            d_cut_in_z[xcol], d_cut_in_z[ycol],
+            c=c_cut_in_z_plot, cmap=cmap, norm=norm, s=s, alpha=alpha, marker="D", rasterized=True
+        )
+        ax.scatter(
+            d_keep_out_z[xcol],
+            d_keep_out_z[ycol],
+            edgecolors=edge_keep_out_z,
+            s=s,
+            alpha=1.0,
+            marker="o",
+            facecolors="none",
+            linewidths=1.5,
+            zorder=5,
+            rasterized=True,
+        )
+        ax.scatter(
+            d_cut_out_z[xcol],
+            d_cut_out_z[ycol],
+            edgecolors=edge_cut_out_z,
+            facecolors="none",
+            s=s,
+            alpha=1.0,
+            marker="D",
+            linewidths=1.6,
+            zorder=5,
+            rasterized=True,
+        )
 
         sm = mpl.cm.ScalarMappable(norm=norm, cmap=cmap)
         sm.set_array([])
@@ -2959,6 +3051,8 @@ def plot_m2500_vs_z_colorpanels(
         cbar.set_label(rf"$\log_{{10}}({base_label})$" if log_color else base_label)
 
         ax.set_ylabel(r"$m_{2500\,\mathrm{\AA}}$")
+
+    axes[0].legend(handles=legend_handles, loc="upper right", frameon=True, fontsize=10)
 
     axes[-1].set_xlabel(xcol)
     axes[0].invert_yaxis()
