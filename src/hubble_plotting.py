@@ -46,13 +46,13 @@ def _save_figure(fig, path, *, dpi=300, bbox_inches="tight", show=False):
     return pdf_path
 
 
-def plot_m_vs_redshift(df_before, df_after, cut_info="", save_path="plots/hubble/cuts/"):
+def plot_cut_diagnostics(df_before, df_after, bins=30, cut_info="", save_path="plots/hubble/cuts/"):
     """
-    Plot apparent_mag_2500 (AB) vs redshift in two panels:
-      - Left: All (before) vs Kept (after)
-      - Right: All (before) vs Removed (before - after)
+    Plot a combined cut diagnostic with:
+      - top panel: m_2500 vs redshift
+      - bottom panel: redshift histogram
 
-    Expects columns: 'object_id', 'z', 'apparent_mag_2500'.
+    Both panels show the kept and removed populations against the full sample.
     """
     if len(df_before) == len(df_after):
         return
@@ -79,89 +79,44 @@ def plot_m_vs_redshift(df_before, df_after, cut_info="", save_path="plots/hubble
     else:
         x_min, x_max = 0.0, 1.0
 
-    # Use a two-panel layout so the kept and removed populations can be compared directly.
-    fig = plt.figure(figsize=(13, 6))
-    gs = gridspec.GridSpec(1, 2, width_ratios=[1, 1], wspace=0.15)
+    # Use a stacked layout so the photometry and redshift views stay aligned.
+    fig = plt.figure(figsize=(11, 9))
+    gs = gridspec.GridSpec(2, 1, height_ratios=[2.2, 1.0], hspace=0.12)
 
     ax1 = fig.add_subplot(gs[0])
     if z_all.size:
-        ax1.scatter(z_all, m_all, s=6, alpha=0.8, c="blue", linewidths=0, label="All", rasterized=True)
+        ax1.scatter(z_all, m_all, s=6, alpha=0.18, c="0.4", linewidths=0, label="All", rasterized=True)
     if z_kept.size:
-        ax1.scatter(z_kept, m_kept, s=8, alpha=0.8, c="orange", linewidths=0, label="Kept", rasterized=True)
+        ax1.scatter(z_kept, m_kept, s=10, alpha=0.8, c="tab:orange", linewidths=0, label="Kept", rasterized=True)
+    if z_removed.size:
+        ax1.scatter(z_removed, m_removed, s=12, alpha=0.75, c="tab:red", linewidths=0, label="Removed", rasterized=True)
     ax1.set_xlabel("Redshift $z$")
     ax1.set_ylabel(r"$m_{2500}$ (AB)")
     ax1.set_xlim(x_min, x_max)
-    ax1.set_ylim(18, 30)
     ax1.grid(True, alpha=0.3)
-    ax1.set_title("All vs Kept")
+    ax1.set_title(r"$m_{2500}$ vs redshift")
     ax1.legend(loc="best", frameon=False)
 
-    ax2 = fig.add_subplot(gs[1])
-    if z_all.size:
-        ax2.scatter(z_all, m_all, s=6, alpha=0.8, c="blue", linewidths=0, label="All", rasterized=True)
-    if z_removed.size:
-        ax2.scatter(z_removed, m_removed, s=8, alpha=0.8, c="red", linewidths=0, label="Removed", rasterized=True)
+    ax2 = fig.add_subplot(gs[1], sharex=ax1)
+    _, bin_edges = np.histogram(df_before["z"].dropna(), bins=bins)
+    ax2.hist(df_before["z"].dropna(), bins=bin_edges, histtype="step", linewidth=1.8, color="0.35", label="All")
+    ax2.hist(df_after["z"].dropna(), bins=bin_edges, color="tab:orange", alpha=0.55, edgecolor="none", label="Kept")
+    if len(df_removed) > 0:
+        ax2.hist(df_removed["z"].dropna(), bins=bin_edges, color="tab:red", alpha=0.45, edgecolor="none", label="Removed")
     ax2.set_xlabel("Redshift $z$")
-    ax2.set_ylabel(r"$m_{2500}$ (AB)")
+    ax2.set_ylabel("Count")
     ax2.set_xlim(x_min, x_max)
-    ax2.set_ylim(18, 30)
     ax2.grid(True, alpha=0.3)
-    ax2.set_title("All vs Removed")
+    ax2.set_title("Redshift histogram")
     ax2.legend(loc="best", frameon=False)
 
     if cut_info:
         fig.text(0.5, 0.01, f"Cut info: {cut_info}", ha="center", va="bottom", fontsize=11, color="k")
 
     safe_cut_info = re.sub(r"[^A-Za-z0-9._-]+", "_", str(cut_info)) if cut_info else ""
-    filename = f"m2500_vs_z_cuts_{safe_cut_info}.pdf" if safe_cut_info else "m2500_vs_z_cuts.pdf"
+    filename = f"cut_diagnostic_{safe_cut_info}.pdf" if safe_cut_info else "cut_diagnostic.pdf"
     plot_path = os.path.join(os.path.dirname(save_path), filename)
     fig.tight_layout(rect=(0, 0.03, 1, 1))
-    _save_figure(fig, plot_path, dpi=150)
-
-
-def plot_redshift_histogram(df_before, df_after, bins=30, cut_info="", save_path="plots/hubble/cuts/"):
-    """Plot before/after and removed-object redshift histograms."""
-    if len(df_before) == len(df_after):
-        return
-
-    os.makedirs(os.path.dirname(save_path), exist_ok=True)
-
-    before_ids = set(df_before["object_id"].astype(str))
-    after_ids = set(df_after["object_id"].astype(str))
-    removed_ids = before_ids - after_ids
-    df_removed = df_before[df_before["object_id"].astype(str).isin(removed_ids)]
-
-    _, bin_edges = np.histogram(df_before["z"].dropna(), bins=bins)
-    hist_removed, _ = np.histogram(df_removed["z"].dropna(), bins=bin_edges)
-    bin_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
-
-    # Use mirrored panels so the removed population is easy to inspect.
-    fig = plt.figure(figsize=(13, 5))
-    gs = gridspec.GridSpec(1, 2, width_ratios=[1, 1])
-
-    ax1 = fig.add_subplot(gs[0])
-    ax1.hist(df_before["z"].dropna(), bins=bin_edges, color="tab:blue", alpha=0.7, edgecolor="k", label="All")
-    ax1.hist(df_after["z"].dropna(), bins=bin_edges, color="tab:orange", alpha=0.7, edgecolor="k", label="Kept")
-    ax1.set_xlabel("Redshift (z)")
-    ax1.set_ylabel("Number of objects")
-    ax1.set_title("Histogram of Objects vs Redshift")
-    ax1.legend()
-
-    ax2 = fig.add_subplot(gs[1])
-    ax2.hist(df_before["z"].dropna(), bins=bin_edges, color="tab:blue", alpha=0.7, edgecolor="k", label="All")
-    ax2.bar(bin_centers, hist_removed, width=np.diff(bin_edges), color="tab:red", alpha=0.7, edgecolor="k", label="Removed")
-    ax2.set_xlabel("Redshift (z)")
-    ax2.set_ylabel("Number removed")
-    ax2.set_title("Removed Objects by Redshift")
-    ax2.legend()
-
-    if cut_info:
-        fig.text(0.5, 0.01, f"Cut info: {cut_info}", ha="center", va="bottom", fontsize=12, color="k")
-
-    fig.tight_layout()
-    safe_cut_info = re.sub(r"[^A-Za-z0-9._-]+", "_", str(cut_info)) if cut_info else ""
-    filename = f"redshift_histogram_{safe_cut_info}.pdf" if safe_cut_info else "redshift_histogram.pdf"
-    plot_path = os.path.join(os.path.dirname(save_path), filename)
     _save_figure(fig, plot_path, dpi=150)
 
 
@@ -1653,72 +1608,93 @@ def plot_full_residuals(
     debias=False, dm_interp=None, plot_path='plots/hubble', show=False,
     *, nbins=10, min_count=5, z_cut=None, key_y='residuals', key_color='z',
 ):
-
-    # --- Cosmology from posterior summaries ---
     df_agn = df_agn.copy()
     df_agn['residuals'] = residuals
 
-    priors, model_labels, model_labels_latex = get_model_params(cosmo_model)
-    param_indices = {name: model_labels.index(name) for name in model_labels}
-    results = {key: np.percentile(flat_samples[:, i], [16, 50, 84]) for i, key in enumerate(model_labels)}
-
-    if cosmo_model == 'FlatwCDM':
-        cosmo = FlatwCDM(H0=results['H0'][1], Om0=results['Om0'][1], w0=results['w0'][1])
-    elif cosmo_model == 'FlatwpwaCDM':
-        cosmo = FlatwpwaCDM(H0=results['H0'][1], Om0=results['Om0'][1],
-                            wp=results['wp'][1], wa=results['wa'][1], zp=z_pivot_agn)
-    elif cosmo_model == 'Flatw0waCDM':
-        cosmo = Flatw0waCDM(H0=results['H0'][1], Om0=results['Om0'][1],
-                            w0=results['w0'][1], wa=results['wa'][1])
-    elif cosmo_model == 'FlatLambdaCDM':
-        cosmo = FlatLambdaCDM(H0=results['H0'][1], Om0=results['Om0'][1])
-    else:
-        raise ValueError("Invalid cosmology model.")
-
     df_agn = df_agn.reset_index(drop=True)
 
-    # Absolute M_2500 estimate used in plots
-    df_agn['MY_M_2500'] = df_agn['apparent_mag_2500'].values - cosmo.distmod(df_agn['z'].values).value
+    def _median_param_dict(samples):
+        _, model_labels, _ = get_model_params(cosmo_model)
+        return {
+            key: np.percentile(samples[:, i], [16, 50, 84])
+            for i, key in enumerate(model_labels)
+        }
 
-    # Optional de-biasing via your dm surface
-    if debias:
-        #dm_interp = make_dm_function(df_agn["apparent_mag_2500"].values, df_agn['z'].values, dms)
-        pts = np.column_stack([df_agn['z'].values, df_agn['apparent_mag_2500'].values])
-        delta = dm_interp(pts)
-        df_agn['MY_M_2500'] -= delta
-        df_agn['apparent_mag_2500'] -= delta
-        if 'apparent_mag_2500_reddened' in df_agn.columns:
-            df_agn['apparent_mag_2500_reddened'] -= delta
+    def _build_cosmology(results):
+        if cosmo_model == 'FlatwCDM':
+            return FlatwCDM(H0=results['H0'][1], Om0=results['Om0'][1], w0=results['w0'][1])
+        if cosmo_model == 'FlatwpwaCDM':
+            return FlatwpwaCDM(
+                H0=results['H0'][1],
+                Om0=results['Om0'][1],
+                wp=results['wp'][1],
+                wa=results['wa'][1],
+                zp=z_pivot_agn,
+            )
+        if cosmo_model == 'Flatw0waCDM':
+            return Flatw0waCDM(
+                H0=results['H0'][1],
+                Om0=results['Om0'][1],
+                w0=results['w0'][1],
+                wa=results['wa'][1],
+            )
+        if cosmo_model == 'FlatLambdaCDM':
+            return FlatLambdaCDM(H0=results['H0'][1], Om0=results['Om0'][1])
+        raise ValueError("Invalid cosmology model.")
 
     def _safelog(a):
         return np.log10(np.abs(a) + 1e-10)
-    if 'dm_red' in df_agn: df_agn['log_dm_red'] = _safelog(df_agn['dm_red'])
-    if 'reddening_integral' in df_agn: df_agn['log_reddening_integral'] = _safelog(df_agn['reddening_integral'])
-    if 'reddening_proxy' in df_agn: df_agn['log_reddening_proxy'] = _safelog(df_agn['reddening_proxy'])
-    if 'redchi' in df_agn: df_agn['log_redchi'] = _safelog(df_agn['redchi'])
-    if 'redchi2_conti_full' in df_agn: df_agn['log_redchi2_conti_full'] = _safelog(df_agn['redchi2_conti_full'])
-    if 'apparent_mag_2500_err' in df_agn: df_agn['log_apparent_mag_2500_err'] = _safelog(df_agn['apparent_mag_2500_err'])
-    if 'log_sigma_UV_err' in df_agn: df_agn['log_log_sigma_UV_err'] = _safelog(df_agn['log_sigma_UV_err'])
-    if 'log_tau_UV_RF_err' in df_agn: df_agn['log_log_tau_UV_RF_err'] = _safelog(df_agn['log_tau_UV_RF_err'])
-    if 'psf_minus_fiber_r' in df_agn: df_agn['log_psf_minus_fiber_r'] = _safelog(df_agn['psf_minus_fiber_r'])
-    if 'petroRad_r' in df_agn: df_agn['log_petroRad_r'] = _safelog(df_agn['petroRad_r'])
-    if 'log_tau_drw0_rhat' in df_agn: df_agn['log_log_tau_drw0_rhat'] = _safelog(df_agn['log_tau_drw0_rhat'])
-    for col in ['BC', 'decomp_host', 'poly']:
-        if col in df_agn:
-            df_agn[col] = df_agn[col].replace(
-                {True: 1, False: 0, 'True': 1, 'False': 0, 'true': 1, 'false': 0}
-            )
+
+    def _augment_plot_columns(frame, cosmo):
+        frame['MY_M_2500'] = frame['apparent_mag_2500'].values - cosmo.distmod(frame['z'].values).value
+
+        if debias:
+            pts = np.column_stack([frame['z'].values, frame['apparent_mag_2500'].values])
+            delta = dm_interp(pts)
+            frame['MY_M_2500'] -= delta
+            frame['apparent_mag_2500'] -= delta
+            if 'apparent_mag_2500_reddened' in frame.columns:
+                frame['apparent_mag_2500_reddened'] -= delta
+
+        log_columns = {
+            'dm_red': 'log_dm_red',
+            'reddening_integral': 'log_reddening_integral',
+            'reddening_proxy': 'log_reddening_proxy',
+            'redchi': 'log_redchi',
+            'redchi2_conti_full': 'log_redchi2_conti_full',
+            'apparent_mag_2500_err': 'log_apparent_mag_2500_err',
+            'log_sigma_UV_err': 'log_log_sigma_UV_err',
+            'log_tau_UV_RF_err': 'log_log_tau_UV_RF_err',
+            'psf_minus_fiber_r': 'log_psf_minus_fiber_r',
+            'petroRad_r': 'log_petroRad_r',
+            'log_tau_drw0_rhat': 'log_log_tau_drw0_rhat',
+            'f_host_center': 'log_f_host_center',
+            'f_bc_over_pl_3000': 'log_f_bc_over_pl_3000',
+            'f_fe_uv_over_pl_2500': 'log_f_fe_uv_over_pl_2500',
+        }
+        for source_col, derived_col in log_columns.items():
+            if source_col in frame.columns:
+                frame[derived_col] = _safelog(frame[source_col])
+
+        for col in ['BC', 'decomp_host', 'poly']:
+            if col in frame.columns:
+                frame[col] = frame[col].replace(
+                    {True: 1, False: 0, 'True': 1, 'False': 0, 'true': 1, 'false': 0}
+                )
+
+    results = _median_param_dict(flat_samples)
+    cosmo = _build_cosmology(results)
+    _augment_plot_columns(df_agn, cosmo)
 
     # ---- Which x-keys to show (keep your order) ----
     keys = [col for col in np.flip([
-        'f_bc_over_pl_3000', 'f_fe_uv_over_pl_2500', 'f_host_center', 'f_host_2500',
+        'log_f_bc_over_pl_3000', 'log_f_fe_uv_over_pl_2500', 'log_f_host_center',
         'apparent_mag_2500_err', 'log_apparent_mag_2500_err', 
         'log_sigma_UV_err', 'log_log_sigma_UV_err',
         'log_tau_UV_RF_err', 'log_log_tau_UV_RF_err',
         'apparent_mag_2500', 'apparent_mag_2500_reddened', 'dm_red', 'log_dm_red', 
-        'reddening_integral', 'log_reddening_integral',
-        'ebv_wu',  'BC', 'decomp_host', 'poly', 'npca_qso',
-        'conti_a_0', 'PL_slope_red', 'PL_slope_blue', 'iron_frac',
+        'ebv_wu',
+        'conti_a_0', 'PL_slope_blue', 
         'MY_M_2500', 'z', 'log_lbol', 'log_ledd_ratio', 
         'log_sigma_UV', 'log_sigma_hat0', 'log_sigma_hat_UV', 'log_tau_UV_RF',
         'log_tau_fast0',
@@ -1726,16 +1702,14 @@ def plot_full_residuals(
         'sn_median_all', 'redchi', 'log_redchi', 'alpha_lambda',
         'redchi2_conti_full', 'log_redchi2_conti_full',
         'bwb_alpha', 'bwb_beta', 
-        'log_f_host_5100','f_host_5100', 'log_f_host_2500', 'f_host_2500',
         'log_rho', 't_rf_length', 'tau_band_RF_mean',
         'log_tau_band_RF_mean', 'log_t_rf_length', 
         'alphaOX', 'alphaOX_int',
         'bwb_alpha_u', 'bwb_alpha_g', 'bwb_alpha_r', 'bwb_alpha_i', 'bwb_alpha_z',
         
-        'eta_A1', 'eta_A2', 'eta_tau1', 'eta_tau2',
-        'PL_slope_blue', 'PL_slope_red', 'PL_break_wave_inbounds', 'lam_min', 'lam_max', 'lam_range', 
+        'eta_A1', 'eta_tau1', 
+        'PL_slope_blue', 'lam_min', 'lam_max', 'lam_range', 
         'poly1', 'psf_minus_fiber_r', 'log_psf_minus_fiber_r', 'petroRad_r', 'log_petroRad_r',
-        'eta_A1_rhat', 'eta_A1_ess', 'eta_A1_acf', 'eta_A1_stuck_any', 
         'cadence', 'cadence_err', 'number_points', 'dm_psf_correction',
         'log_jitter_total', 'log_amp_delta_blr_total',
         'log_amp_delta_blr_u', 'log_amp_delta_blr_g', 'log_amp_delta_blr_r', 'log_amp_delta_blr_i', 'log_amp_delta_blr_z',
@@ -1759,90 +1733,89 @@ def plot_full_residuals(
     fig, axes = plt.subplots(n_rows, n_cols, figsize=(5 * n_cols, 3.5 * n_rows))
     axes = axes.flatten()
 
-    # --- Panels ---
+    def _panel_mask(key):
+        if np.issubdtype(df_agn[key].dtype, np.number):
+            mask = (df_agn[key] > -1e9) & np.isfinite(df_agn[key])
+        else:
+            mask = np.ones(len(df_agn), dtype=bool)
+        if z_cut is not None:
+            mask &= df_agn['z'] < z_cut
+        if key in keys_masks:
+            low, high = keys_masks[key]
+            mask &= df_agn[key].between(low, high)
+        mask &= np.isfinite(residuals)
+        return mask
+
+    def _panel_xy_and_style(mask, key):
+        color_values = df_agn.loc[mask, key_color].to_numpy()
+        if key_y == 'residuals':
+            x = df_agn.loc[mask, key].to_numpy()
+            y = residuals[mask]
+            xlabel, ylabel = key, key_y
+            norm = mpl.colors.Normalize(vmin=np.nanmin(color_values), vmax=np.nanmax(color_values))
+            cmap = 'viridis'
+        else:
+            x = df_agn.loc[mask, key_y].to_numpy()
+            y = df_agn.loc[mask, key].to_numpy()
+            xlabel, ylabel = key_y, key
+            norm = mpl.colors.Normalize(vmin=-4, vmax=4)
+            cmap = 'bwr_r'
+        return x, y, color_values, xlabel, ylabel, cmap, norm
+
+    def _draw_reference_guides(ax, key, x):
+        if key_y == 'residuals':
+            ax.axhline(0, color='red', linestyle='--', lw=1)
+            if key in keys_yx_line and len(x):
+                xmin, xmax = np.nanmin(x), np.nanmax(x)
+                xmid = np.nanmean(x)
+                ax.plot([xmin, xmax], [xmin - xmid, xmax - xmid], color='red', linestyle='--', lw=1)
+
+    def _draw_binned_overlay(ax, x, y, err):
+        mfin = np.isfinite(x) & np.isfinite(y) & np.isfinite(err) & (err > 0)
+        if not np.any(mfin):
+            return
+
+        xb, yb, eb = x[mfin], y[mfin], err[mfin]
+        lo, hi = np.nanpercentile(xb, [1, 99])
+        if not (np.isfinite(lo) and np.isfinite(hi) and hi > lo):
+            lo, hi = np.nanmin(xb), np.nanmax(xb)
+        bins = np.linspace(lo, hi, nbins + 1)
+        zc, mean, sem, _ = _weighted_bin_stats(xb, yb, eb, bins, min_count=min_count, center='weighted')
+        if len(zc):
+            ax.errorbar(
+                zc, mean, yerr=sem,
+                fmt='o', color='red', markersize=4,
+                elinewidth=1.0, capsize=2,
+                alpha=0.9, zorder=10
+            )
+
     for idx, key in enumerate(keys):
         ax = axes[idx]
         try:
-            # Base mask (finite & optional clipping per-key)
-            if np.issubdtype(df_agn[key].dtype, np.number):
-                mask = (df_agn[key] > -1e9) & np.isfinite(df_agn[key])
-            else:
-                mask = np.ones(len(df_agn), dtype=bool)
-            if z_cut is not None:
-                mask &= df_agn['z'] < z_cut
+            mask = _panel_mask(key)
+            x, y, color_values, xlabel, ylabel, cmap, norm = _panel_xy_and_style(mask, key)
+            ax.set_xlabel(xlabel)
+            ax.set_ylabel(ylabel)
+            sc = ax.scatter(
+                x,
+                y,
+                c=color_values,
+                cmap=cmap,
+                norm=norm,
+                s=10,
+                alpha=0.5,
+                rasterized=True,
+            )
+            _draw_reference_guides(ax, key, x)
 
-            if key in keys_masks:
-                low, high = keys_masks[key]
-                mask &= df_agn[key].between(low, high)
-
-            # Also require finite residuals (+ err for the overlay later)
-            mask &= np.isfinite(residuals)
-
-            
-            if key_y == 'residuals':
-                y = residuals[mask]
-                x = df_agn.loc[mask, key].to_numpy()
-                ax.set_xlabel(key)
-                ax.set_ylabel(key_y)
-                norm = mpl.colors.Normalize(vmin=np.nanmin(df_agn.loc[mask, key_color]), vmax=np.nanmax(df_agn.loc[mask, key_color]))
-                cmap = 'viridis'
-            else:
-                x = df_agn.loc[mask, key_y].to_numpy()
-                y = df_agn.loc[mask, key].to_numpy()
-                ax.set_ylabel(key)
-                ax.set_xlabel(key_y)
-                norm = mpl.colors.Normalize(vmin=-4, vmax=4)
-                cmap = 'bwr_r'
-
-
-            sc = ax.scatter(x, y, c=df_agn.loc[mask, key_color].to_numpy(), cmap=cmap, norm=norm, s=10, alpha=0.5)
-
-            # Optional diagonal guide for a couple of variables
-            if key in keys_yx_line:
-                xmin, xmax = np.nanmin(x), np.nanmax(x)
-                xm = np.nanmean(x)
-                if key_y == 'residuals':
-                    ax.plot([xmin, xmax], [xmin - xm, xmax - xm], color='red', linestyle='--', lw=1)
-
-            # Zero line
-            if key_y == 'residuals':
-                ax.axhline(0, color='red', linestyle='--', lw=1)
-
-            # Per-panel colorbar
             cbar = fig.colorbar(sc, ax=ax, orientation='vertical', fraction=0.046, pad=0.04)
             cbar.set_label(key_color, fontsize=12)
 
-            # ===========================
-            # Binned overlay (weighted)
-            # ===========================
-            # Build residual errors for the masked points
             if residuals_err is None:
                 err = np.full_like(y, np.nan, dtype=float)
             else:
                 err = np.asarray(residuals_err)[mask]
-
-            mfin = np.isfinite(x) & np.isfinite(y) & np.isfinite(err) & (err > 0)
-            if np.any(mfin):
-                xb, yb, eb = x[mfin], y[mfin], err[mfin]
-
-                # Robust bin edges (linear in x). If you prefer log for positive x:
-                # use np.geomspace(lo, hi, nbins+1) when xb>0 and spans orders of magnitude.
-                lo, hi = np.nanpercentile(xb, [1, 99])
-                if not (np.isfinite(lo) and np.isfinite(hi) and hi > lo):
-                    lo, hi = np.nanmin(xb), np.nanmax(xb)
-                bins = np.linspace(lo, hi, nbins + 1)
-
-                # Use your provided binning function
-                zc, mean, sem, n = _weighted_bin_stats(xb, yb, eb, bins, min_count=min_count, center='weighted')
-
-                if len(zc):
-                    # trend + SEM error bars (no double-counting)
-                    ax.errorbar(
-                        zc, mean, yerr=sem,
-                        fmt='o', color='red', markersize=4,
-                        elinewidth=1.0, capsize=2,
-                        alpha=0.9, zorder=10
-                    )
+            _draw_binned_overlay(ax, x, y, err)
         except Exception as e:
             print(f"Error processing key {key}: {e}")
             ax.axis('off')
@@ -2352,7 +2325,7 @@ def _highest_weight_theta(results, plot_path=None):
     return results.samples[idx]
 def _blob_for_theta(theta, *, df_agn, df_pantheon, cosmo_model,
                     completeness_params, _sna_L, _sna_Lower, _sna_LogdetCov,
-                    use_full_cov=True, use_mu_sh0es=False, plot_path=None):
+                    use_full_cov=True, plot_path=None):
     """
     Re-evaluate the likelihood exactly once at 'theta' to get the selection blob.
     Returns: blob (2, N) and the AGN arrays z, m_obs needed for plotting.
@@ -2365,7 +2338,6 @@ def _blob_for_theta(theta, *, df_agn, df_pantheon, cosmo_model,
         cosmo_model=cosmo_model,
         completeness_params=completeness_params,
         only_sna=False, use_full_cov=use_full_cov,
-        use_mu_sh0es=use_mu_sh0es,
     )
     z = df_agn['z'].values
     m_obs = df_agn['apparent_mag_2500'].values
@@ -2469,7 +2441,7 @@ def run_completeness_diagnostics(sampler_results, df_agn, df_pantheon,
                                  completeness_params, cosmo_model,
                                  _sna_L, _sna_Lower, _sna_LogdetCov,
                                  outdir="plots/completeness", plot_path=None,
-                                 use_full_cov=True, use_mu_sh0es=False,
+                                 use_full_cov=True,
                                  title_note="— highest posterior weight sample"):
     """
     One-call orchestration:
@@ -2482,7 +2454,7 @@ def run_completeness_diagnostics(sampler_results, df_agn, df_pantheon,
                                  df_agn=df_agn, df_pantheon=df_pantheon, cosmo_model=cosmo_model,
                                  completeness_params=completeness_params,
                                  _sna_L=_sna_L, _sna_Lower=_sna_Lower, _sna_LogdetCov=_sna_LogdetCov,
-                                 use_full_cov=use_full_cov, use_mu_sh0es=use_mu_sh0es)
+                                 use_full_cov=use_full_cov)
     Z   = np.asarray(blob[0], dtype=float)
     dmi = np.asarray(blob[1], dtype=float)
     _plot_path = plot_path or outdir

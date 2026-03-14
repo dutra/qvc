@@ -117,7 +117,7 @@ def log_likelihood(theta, *, agn_data, pantheon_data,
                    cosmo_model, completeness_params,
                    z_pivot_agn,
                    agn_calibrators_data=None,
-                   only_sna=False, use_full_cov=False, use_mu_sh0es=False):
+                   only_sna=False, use_full_cov=False):
     priors, model_labels, model_labels_latex = get_model_params(cosmo_model, only_sna=only_sna)
     model_priors = {key: priors[key] for key in model_labels}
     params = dict(zip(model_labels, theta))
@@ -216,7 +216,7 @@ def log_likelihood_nearbylcs(
     _sna_L, _sna_Lower, _sna_LogdetCov,
     cosmo_model, completeness_params,
     z_pivot_agn,
-    only_sna=False, use_full_cov=False, use_mu_sh0es=False
+    only_sna=False, use_full_cov=False
 ):
     """
     AGN likelihood with separate calibrators table.

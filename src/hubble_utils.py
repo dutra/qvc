@@ -1,7 +1,15 @@
 """Shared utility functions for the QVC/Hubble fitting workflow."""
 
+import json
+import math
 import os
+import pickle
 import warnings
+from ast import literal_eval
+from collections import defaultdict
+from itertools import combinations
+from statistics import NormalDist
+from typing import Optional, Tuple
 
 import h5py
 import numpy as np
@@ -12,10 +20,14 @@ from astropy.coordinates import SkyCoord
 from astropy.io import fits
 from astropy.io.votable import parse
 from scipy.linalg import cho_factor
-from scipy.interpolate import interp1d
 from scipy import stats
 from tqdm import tqdm
 
+from hubble_cut_config import (
+    DEFAULT_F_HOST_CUT,
+    build_agn_cuts,
+    build_log_amp_delta_blr_cuts,
+)
 from hubble_model import (
     M_model_agn,
     M_model_agn_err,
@@ -24,10 +36,6 @@ from hubble_model import (
     agn_model_pack_params,
     get_model_params,
 )
-
-bands = ['u', 'g', 'r', 'i', 'z']#, 'y']
-bands_idx = {b: i for i, b in enumerate(bands)}
-filters = {"u": 0, "g": 1, "r": 2, "i": 3, "z": 4, "y": 5} # harcoded filter order for SDSS
 
 def convert_M2500_to_logL2500(M2500):
     return -1/2.5 * (M2500 - 90.0)
@@ -67,16 +75,14 @@ def match_radec(df_a, df_b, populate_cols=[], ra_col_a='ra', dec_col_a='dec', ra
     unmatched_object_ids = []
     for i, matched in enumerate(match_mask):
         if not matched:
-            #print(f"Warning: No match found for index {i} (RA={df_a.iloc[i][ra_col_a]}, DEC={df_a.iloc[i][dec_col_a]})")
             unmatched_object_ids.append(df_a.iloc[i]['object_id'])
     return result, unmatched_object_ids
 
 def populate_xray(df, table_fpath="data/cscresults.vot"):
-    # Parse the VOTable
+    # Read the CSC VOTable and normalize the column names.
     vo = parse(table_fpath)
     table = vo.get_first_table().to_table()
 
-    # Fix column names using FIELD 'name' attributes
     fields = vo.get_first_table().fields
     new_names = [f.name for f in fields]
     print(new_names)
@@ -85,7 +91,7 @@ def populate_xray(df, table_fpath="data/cscresults.vot"):
 
     df_csc = table.to_pandas()
 
-    # Match to CSC and bring over flux + bounds
+    # Match to the CSC catalog and copy the flux bounds.
     df_matched, unmatched_object_ids = match_radec(
         df, df_csc,
         populate_cols=['flux_aper_b', 'flux_aper_hilim_b', 'flux_aper_lolim_b'],
@@ -93,7 +99,7 @@ def populate_xray(df, table_fpath="data/cscresults.vot"):
     )
     print(f"Matched {len(df_matched) - len(unmatched_object_ids)} out of {len(df)} objects to CSC3 catalog.")
 
-    # Ensure numeric
+    # Ensure the matched flux columns are numeric.
     for c in ["flux_aper_b", "flux_aper_hilim_b", "flux_aper_lolim_b"]:
         df_matched[c] = pd.to_numeric(df_matched[c], errors="coerce")
 
@@ -101,7 +107,7 @@ def populate_xray(df, table_fpath="data/cscresults.vot"):
     hi   = df_matched["flux_aper_hilim_b"]
     lo   = df_matched["flux_aper_lolim_b"]
 
-    # Symmetric 1σ error from provided bounds (fallback to one-sided if needed)
+    # Use the provided bounds to estimate a symmetric 1σ error.
     err = np.where(~hi.isna() & ~lo.isna(),
                    0.5 * (hi - lo),
                    np.where(~hi.isna(),
@@ -111,57 +117,44 @@ def populate_xray(df, table_fpath="data/cscresults.vot"):
                                      np.nan)))
     df_matched["flux_aper_err_b"] = np.clip(err, a_min=0.0, a_max=None)
 
-    # --- Cosmology & redshift array ---
+    # Build the luminosity distance in cm.
     cosmo = FlatLambdaCDM(H0=70, Om0=0.3)
     z = pd.to_numeric(df_matched["z"], errors="coerce")
     DL_cm = cosmo.luminosity_distance(z.values).to('cm').value
 
-    # --- Adopt photon index and K-correction per Eq. (5) ---
-    GAMMA_X = 1.9  # requested
-    # For energy flux in a fixed observed band: Kcorr = (1+z)^(Gamma - 2)
+    # Adopt a fixed photon index and derive the nominal K-correction.
+    GAMMA_X = 1.9
     Kcorr = np.power(1.0 + z.values, GAMMA_X - 2.0)  # = (1+z)^(-0.1) for Gamma=1.9
-    # However we do not apply a K-correction for consistency with previous works
+    # Keep the no-K-correction convention used elsewhere in this workflow.
     Kcorr = np.ones_like(Kcorr)
 
-    # Pull flux and error
+    # Pull the measured flux and error arrays.
     xray_flux     = df_matched["flux_aper_b"].replace(0, np.nan).values
     xray_flux_err = df_matched["flux_aper_err_b"].replace(0, np.nan).values
 
-    # Luminosity with K-correction (no absorption correction)
+    # Compute 2-10 keV and monochromatic 2 keV luminosities.
     L_xray_210kev = 4.0 * np.pi * (DL_cm**2) * xray_flux * Kcorr
-
-    # L_2 = L_2and10 * (2-Gamma)/(10**(2-Gamma) - 2**(2-Gamma)) * 2**(1-Gamma)
     L_xray_2 = L_xray_210kev * (2.0 - GAMMA_X) / (10.0**(2.0 - GAMMA_X) - 2.0**(2.0 - GAMMA_X)) * 2.0**(1.0 - GAMMA_X)
 
     df_matched["log_Lxray"] = np.log10(L_xray_2)
 
-    # Error on log L_xray (treat z as exact, so Kcorr & constants drop out)
+    # Propagate the X-ray flux error into log luminosity.
     df_matched["log_Lxray_err"] = (1.0 / np.log(10.0)) * (xray_flux_err / xray_flux)
 
-    # reddened
-    #df_matched["alphaOX"] = -(df_matched["log_Lxray"] - df_matched["log_L2500_fs"]) / 2.605
-    # df_matched["alphaOX_err"] = np.sqrt(
-    #     df_matched["log_Lxray_err"]**2 + df_matched["log_L2500_fs_err"]**2
-    # ) / 2.605
-
-    # de-reddened (L_int)
+    # Use the de-reddened UV luminosity for alpha_OX.
     df_matched["alphaOX"] = -(df_matched["log_Lxray"] - df_matched["log_L2500_int_fs"]) / 2.605
     df_matched["alphaOX_err"] = np.sqrt(
         df_matched["log_Lxray_err"]**2 + df_matched["log_L2500_int_fs_err"]**2
     ) / 2.605
 
-    # --- Expected alpha_OX from Just+07 Eq. (3) ---
-    # alpha_ox_exp = a * logL2500 + b
+    # Expected alpha_OX from Just et al. (2007), Equation 3.
     a = -0.140
     sigma_a = 0.007
     b = 2.705
     sigma_b = 0.212
 
-    # Expected alpha_OX at the *observed* UV luminosity
     alphaOx_expected = a *  df_matched["log_L2500_int_fs"] + b
 
-    # Error on expected alpha_OX:
-    # var(alphaExp) = (x^2 * sigma_a^2) + (sigma_b^2) + (a^2 * sigma_x^2)
     x =  df_matched["log_L2500_int_fs"]
     sigma_x =  df_matched["log_L2500_int_fs_err"]
 
@@ -171,14 +164,11 @@ def populate_xray(df, table_fpath="data/cscresults.vot"):
         (a**2) * (sigma_x**2)
     )
 
-    # Store in the dataframe
     df_matched["alphaOX_exp"] = alphaOx_expected
     df_matched["alphaOX_exp_err"] = alphaOx_expected_err
 
-    # --- Delta alpha_OX = observed - expected ---
+    # Compare the observed and expected alpha_OX values.
     df_matched["delta_alphaOX"] = df_matched["alphaOX"] - df_matched["alphaOX_exp"]
-
-    # Propagate errors: var(Δα) = var(α_obs) + var(α_exp)
     df_matched["delta_alphaOX_err"] = np.sqrt(
         df_matched["alphaOX_err"]**2 + df_matched["alphaOX_exp_err"]**2
     )
@@ -206,13 +196,10 @@ def populate_zquery(df, zquery_csv):
     )
 
     print("-------------------------- Z query report --------------------------")
-    #print("Length of zquery csv file:", len(df_zquery))
 
     merged = df.merge(df_zquery, on='object_id', how='left', suffixes=('', '_zquery'))
 
-    #print("Length of zquery merged DataFrame:", len(merged))
     missing_ids = set(df['object_id']) - set(df_zquery['object_id'])
-    #print("object_id not in merged:", list(missing_ids))
 
     df['sameZ'] = np.isclose(merged['z'], merged['z_zquery'], atol=1e-1, equal_nan=True)
     not_sameZ = ~df['sameZ'].fillna(False)
@@ -223,15 +210,13 @@ def populate_zquery(df, zquery_csv):
         else:
             df[col] = merged[col]
 
-    # Convert zWarning and sameZ to int, fill missing or NaN with -99
+    # Convert flags to integer codes.
     for col in ['zWarning', 'sameZ']:
         df[col] = pd.to_numeric(df[col], errors='coerce').fillna(-99).astype(int)
 
-    # Convert 'class' and 'subClass' columns to numeric codes
+    # Convert string classes to categorical integer codes.
     for col in ['class', 'subClass']:
         df[f'{col}_code'] = df[col].astype('category').cat.codes
-        #print(f"Column '{col}' code conversion:")
-        #print(dict(enumerate(df[col].astype('category').cat.categories)))
 
     return df
 
@@ -255,7 +240,7 @@ def populate_sdss_mags(df,
         'fiberMag_z': float,
         'petroRad_z': float,
     }
-    # SDSS magnitudes
+    # Merge SDSS photometry.
     df_mags = pd.read_csv(
         sdss_mags_csv,
         dtype={'object_id': str},
@@ -275,11 +260,8 @@ def populate_sdss_mags(df,
 
     for b in ['u', 'g', 'r', 'i', 'z']:
         df[f'psf_sdss_minus_fiber_sdss_{b}'] = df[f'psfMag_{b}_sdss'] - df[f'fiberMag_{b}_sdss']
-    # df['log_psf_minus_fiber_r'] = np.log10(df['psf_minus_fiber_r'])
-    # df['log_petroRad_r'] = np.log10(df['petroRad_r'])
 
-
-    # PS1 magnitudes
+    # Merge PS1 photometry.
 
     fields_ps1 = {
         'psfMag_g': float,
@@ -372,61 +354,33 @@ def _ensure_object_id(df):
     df["object_id"] = df["object_id"].astype(str)
     return df
 
-from ast import literal_eval
 def parse_list(x):
     if x is None or (isinstance(x, float) and np.isnan(x)):
         return []
     s = str(x).strip()
     if not s:
         return []
-    # Try Python literal (e.g., "['g','r']") first (fast & permissive but safe)
+    # Try Python literal syntax first.
     try:
         v = literal_eval(s)
         if isinstance(v, (list, tuple)):
             return [str(t) for t in v]
     except Exception:
         pass
-    # Try JSON (e.g., '["g","r"]')
+    # Fall back to JSON.
     try:
         v = json.loads(s)
         if isinstance(v, (list, tuple)):
             return [str(t) for t in v]
     except Exception:
         pass
-    # Fallback: comma-separated string (e.g., "g,r,i")
+    # Finally, treat the value as a comma-separated string.
     return [t.strip() for t in s.split(",") if t.strip()]
 
-def compute_apparent_mag_2500_astropy(
-    logL2500,                 # log10(ν Lν) at 2500 Å (erg s^-1)
-    logL2500_err,        # 1-σ uncertainty in log10(ν Lν), in dex
-    z,
-):
-    cosmo   = FlatLambdaCDM(H0=70, Om0=0.3)
-    c_cms   = 2.99792458e10     # cm/s
-    lambda_cm = 2500e-8         # 2500 Å in cm
-
-    logL2500 = np.asarray(logL2500, dtype=float)
-    z = np.asarray(z, dtype=float)
-
-    # Luminosity distance in cm
-    DL_cm = cosmo.luminosity_distance(z).to(u.cm).value
-
-    # Convert log10(ν Lν) -> log10 Lν (dex), then to log10 fν(obs)
-    log_Lnu = logL2500 + np.log10(lambda_cm / c_cms)
-    log_fnu = log_Lnu - np.log10(4 * np.pi * DL_cm**2)# * (1 + z))
-    # AB magnitude
-    m_ab = -2.5 * log_fnu - 48.60
-
-    # Since m_ab = -2.5 * log_fnu and log_fnu depends linearly on log_Lnu,
-    # σ_m from logL2500_err (dex) is simply:
-    m_ab_err = 2.5 * np.abs(logL2500_err)
-
-    return m_ab, m_ab_err
-
 def populate_spectra_fit(df, spectra_fit_csvs, best=True):
-    # Columns expected from spectral-fit CSVs (exclude 'object_id' from the drop list!)
+    # Spectral-fit columns to merge into the AGN catalog.
     fields = {
-        'object_id': str,                   # merge key (do not drop from df)
+        'object_id': str,
         'f_host_2500': float,
         'f_host_5100': float,
         'ebv_fs': float,
@@ -452,12 +406,6 @@ def populate_spectra_fit(df, spectra_fit_csvs, best=True):
         'BC': bool,
         'poly': bool,
         'best': bool,
-        # 'log_L2500_fs': float,
-        # 'log_L2500_fs_err': float,
-        # 'log_L2500_int_fs': float,
-        # 'log_L2500_int_fs_err': float,
-        # 'reddening_integral': float,
-        # 'reddening_proxy': float,
         'bands_used': parse_list,
         'PL_slope': float,
         'PL_slope_err': float,
@@ -474,13 +422,13 @@ def populate_spectra_fit(df, spectra_fit_csvs, best=True):
         'f_host_center': float,
     }
 
-    # Never drop the merge key
+    # Drop existing derived columns before re-merging them from the fit tables.
     drop_targets = [c for c in fields.keys() if c != "object_id"]
     existing_to_drop = [c for c in drop_targets if c in df.columns]
     if existing_to_drop:
         df = df.drop(columns=existing_to_drop)
 
-    # Ensure left DF has the key and is string-typed
+    # Normalize the merge key on the left-hand table.
     df = _ensure_object_id(df)
 
     expanded_df = df  # will be replaced if best=False
@@ -499,11 +447,11 @@ def populate_spectra_fit(df, spectra_fit_csvs, best=True):
             skipinitialspace=True,
         )
 
-        # Normalize headers and ensure key
+        # Normalize headers and ensure the merge key is present.
         df_spectra.columns = [_norm_name(c) for c in df_spectra.columns]
         df_spectra = _ensure_object_id(df_spectra)
 
-        # Coerce booleans that may have come in as strings
+        # Normalize boolean columns that may have been serialized as strings.
         for bcol in ["best", "BC", "decomp_host", "poly"]:
             if bcol in df_spectra.columns:
                 df_spectra[bcol] = (
@@ -515,7 +463,7 @@ def populate_spectra_fit(df, spectra_fit_csvs, best=True):
                 )
 
         if best:
-            # Keep only best fits, then one-to-one merge and copy columns over
+            # Keep only the preferred fit for each object.
             if "best" in df_spectra.columns and df_spectra["best"].any():
                 df_spectra = df_spectra[df_spectra["best"] == True].reset_index(drop=True)
                 print(f"Length after best==True: {len(df_spectra)}")
@@ -528,7 +476,7 @@ def populate_spectra_fit(df, spectra_fit_csvs, best=True):
             )
             print("Length of merged DataFrame (best=True):", len(merged))
 
-            # Update/insert columns for matched rows only
+            # Copy spectral-fit columns onto matched rows only.
             matched_mask = df["object_id"].isin(df_spectra["object_id"])
             for col in list(fields.keys()):
                 if col == "object_id":
@@ -543,8 +491,7 @@ def populate_spectra_fit(df, spectra_fit_csvs, best=True):
                     df.loc[matched_mask, col] = merged.loc[matched_mask, src_col].values
 
         else:
-            # IMPORTANT: preserve EVERY spectra-fit row -> expand via one-to-many merge
-            # We already dropped overlapping 'fields' from df, so no suffix collisions.
+            # Preserve every fit row by expanding the table one-to-many.
             expanded_df = expanded_df.merge(
                 df_spectra,
                 on="object_id",
@@ -553,10 +500,10 @@ def populate_spectra_fit(df, spectra_fit_csvs, best=True):
             )
             print("Length after expanding with one-to-many merge:", len(expanded_df))
 
-    # Choose which frame to proceed with
+    # Continue with the selected output frame.
     out = df if best else expanded_df
 
-    # -------- Derived columns (guarded) on the chosen output --------
+    # Derive additional columns when the required inputs are present.
     if "redchi" in out.columns:
         out["log_redchi"] = np.log10(out["redchi"].replace(0, np.nan))
     if "ebv_fs" in out.columns:
@@ -582,46 +529,20 @@ def populate_spectra_fit(df, spectra_fit_csvs, best=True):
         out["alpha_lambda"] = out["PL_slope"]
     if "alpha_lambda_err" not in out.columns and "PL_slope_err" in out.columns:
         out["alpha_lambda_err"] = out["PL_slope_err"]
-
-    # Optional save
-    # out_csv = f"plots/hubble/{prefix}/merged.csv"
-    # os.makedirs(os.path.dirname(out_csv), exist_ok=True)
-    # cols_to_save = ['object_id', 'sdss_name', 'apparent_mag_2500', 'f_host_2500', 'z'] + [c for c in fields if c != "object_id"]
-    # cols_to_save_unique = [c for c in cols_to_save if c in out.columns]
-    # out[cols_to_save_unique].to_csv(out_csv, index=False)
-    # print(f"Saved merged DataFrame to {out_csv} with columns: {cols_to_save_unique}")
     
     out['alpha_nu'] = -out['alpha_lambda'] - 2
     out['alpha_nu_err'] = out['alpha_lambda_err']
 
-    # out = out.drop(columns=['apparent_mag_2500', 'apparent_mag_2500_err'], errors='ignore')
-
-    # m_2500, m_2500_err = compute_apparent_mag_2500_astropy(
-    #     out['log_L2500_int_fs'],
-    #     out['log_L2500_int_fs_err'],
-    # Compute log_L2500_int_fs and log_L2500_int_fs_err from apparent_mag_2500 and apparent_mag_2500_err
-    # logL2500 = -0.4 * (m_2500 - 90)
+    # Convert apparent magnitude at 2500 A into log luminosity.
     out['log_L2500_int_fs'] = -0.4 * (out['apparent_mag_2500'])
     out['log_L2500_int_fs'] += 36.0  # 90 * 0.4 = 36
 
-    # Error propagation: σ_logL = 0.4 * σ_m
+    # Propagate the magnitude error into log luminosity.
     out['log_L2500_int_fs_err'] = 0.4 * out['apparent_mag_2500_err']
-    #     out['z'])
-    # out['apparent_mag_2500'] = m_2500
-    # out['apparent_mag_2500_err'] = m_2500_err
 
     out['iron_frac'] = out['f_fe_uv_over_pl_2500']
 
-
-    # Keep a default error if needed
-    # out['apparent_mag_2500_err'] = 0.1 * np.ones(len(out))
-
     return out
-
-# Constants
-c = 2.99792458e18  # speed of light in Angstrom/s
-
-
 def populate_sdss_fields(objs, progress_bar=True):
     print(f"Populating SDSS fields: {len(objs)}", flush=True)
     cat = pd.read_parquet(f"data/S82/Catalog.parquet").set_index('idx')
@@ -644,31 +565,25 @@ def populate_sdss_fields(objs, progress_bar=True):
         d['dec'] = obj['DEC']
         d['z'] = fits_data['Z_SYS'][i]
         d['z_err'] = fits_data['Z_SYS_ERR'][i]
-        d['sdss_name'] = fits_data['SDSS_NAME'][i]  # Extract SDSS_NAME
+        d['sdss_name'] = fits_data['SDSS_NAME'][i]
         d['log_lbol'] = -999.0
         if d['z'] < 0.7:
             d['log_lbol'] = np.log10(5.15) + fits_data['LOGL3000'][i]
             d['log_lbol_err'] = fits_data['LOGL3000_ERR'][i]
         else:
-            d['log_lbol'] = fits_data['LOGLBOL'][i]  # Extract log Lbol values
-            d["log_lbol_err"] = fits_data['LOGLBOL_ERR'][i]  # Extract log Lbol error values
+            d['log_lbol'] = fits_data['LOGLBOL'][i]
+            d["log_lbol_err"] = fits_data['LOGLBOL_ERR'][i]
 
-        d['LOGMBH'] = fits_data['LOGMBH'][i]  # Extract log MBH values
-        d['LOGMBH_ERR'] = fits_data['LOGMBH_ERR'][i]  # Extract log MBH error values
-        d['LOGLEDD_RATIO'] = fits_data['LOGLEDD_RATIO'][i]  # Extract log L/edd values
-        d['LOGLEDD_RATIO_ERR'] = fits_data['LOGLEDD_RATIO_ERR'][i]  # Extract log L/edd error values
+        d['LOGMBH'] = fits_data['LOGMBH'][i]
+        d['LOGMBH_ERR'] = fits_data['LOGMBH_ERR'][i]
+        d['LOGLEDD_RATIO'] = fits_data['LOGLEDD_RATIO'][i]
+        d['LOGLEDD_RATIO_ERR'] = fits_data['LOGLEDD_RATIO_ERR'][i]
         d['ebv_wu'] = fits_data['EBV'][i]
         d['sn_median_all'] = fits_data['SN_MEDIAN_ALL'][i]
         d['M_i'] = fits_data_2['M_I'][i]
         for b in ['u', 'g', 'r', 'i', 'z']:
             filters = {'u':0, 'g':1, 'r':2, 'i':3, 'z':4}
             d[f'PSFMAG_{b}'] = fits_data_2['PSFMAG'][i, filters[b]]
-        # d['CIV'] = fits_data['CIV'][i, 0]
-        # d['FEII_UV_EW'] = fits_data['FEII_UV_EW'][i]
-        # d['FEII_OPT_EW'] = fits_data['FEII_OPT_EW'][i]
-        # d['HBETA'] = fits_data['HBETA'][i, 0]
-        # d['HALPHA'] = fits_data['HALPHA'][i, 0]
-
         d['LOGLBOL'] = fits_data['LOGLBOL'][i]
         d['LOGL1350'] = fits_data['LOGL1350'][i]
         d['LOGL1700'] = fits_data['LOGL1700'][i]
@@ -681,16 +596,8 @@ def populate_sdss_fields(objs, progress_bar=True):
         d['LOGL3000_ERR'] = fits_data['LOGL3000_ERR'][i]
         d['LOGL5100_ERR'] = fits_data['LOGL5100_ERR'][i]
 
-
-        # Other fields, not used
-        # d['IF_BOSS_SDSS'] = fits_data['IF_BOSS_SDSS'][i]
         d['FHOST_5100'] = fits_data['FHOST_5100'][i]
-        # d['BAL_PROB'] = fits_data_2['BAL_PROB'][i]
         d['EXTINCTION'] = fits_data_2['EXTINCTION'][i, filters['i']]
-        # d['XMM_TOTAL_FLUX'] = fits_data_2['XMM_TOTAL_FLUX'][i]
-        # d['XMM_HARD_FLUX'] = fits_data_2['XMM_HARD_FLUX'][i]
-        # d['XMM_SOFT_FLUX'] = fits_data_2['XMM_SOFT_FLUX'][i]
-
 
         d['fhost'] = fits_data['FHOST_5100'][i]
         with warnings.catch_warnings(record=True) as w:
@@ -698,27 +605,8 @@ def populate_sdss_fields(objs, progress_bar=True):
             for b in ['u', 'g', 'r', 'i', 'z']:
                 d[f'apparent_mag_{b}'] = -2.5 * np.log10(fits_data_2['PSFFLUX'][i, filters[b]]) + 22.5
                 d[f'apparent_mag_{b}_err'] = 2.5/np.log(10) * np.sqrt(1/fits_data_2['PSFFLUX_IVAR'][i, filters[b]])/fits_data_2['PSFFLUX'][i, filters[b]]
-            # #     d[f'extinction_{b}'] = fits_data_2['EXTINCTION'][i, filters[b]]
-            # d['color'] = -2.5 * np.log10(fits_data_2['PSFFLUX'][i, 0] / fits_data_2['PSFFLUX'][i, 3])
-            # # Error propagation for color
-            # flux_g = fits_data_2['PSFFLUX'][i, 0]
-            # flux_i = fits_data_2['PSFFLUX'][i, 3]
-            # ivar_g = fits_data_2['PSFFLUX_IVAR'][i, 0]
-            # ivar_i = fits_data_2['PSFFLUX_IVAR'][i, 3]
-            # # Convert inverse variance to variance, handle zero/negative ivar
-            # var_g = 1.0 / ivar_g if ivar_g > 0 else np.inf
-            # var_i = 1.0 / ivar_i if ivar_i > 0 else np.inf
-            # Error propagation formula for color = -2.5 * log10(flux_g / flux_i)
-            # σ_color^2 = (2.5/ln10)^2 * [ (σ_g/flux_g)^2 + (σ_i/flux_i)^2 ]
-            # if flux_g > 0 and flux_i > 0 and np.isfinite(var_g) and np.isfinite(var_i):
-            #     d['color_err'] = 2.5 / np.log(10) * np.sqrt(var_g / flux_g**2 + var_i / flux_i**2)
-            # else:
-            #     d['color_err'] = np.nan
         if any(issubclass(warning.category, RuntimeWarning) for warning in w):
             pass
-            # print(f"RuntimeWarning occurred for z={d['z']:.2f} {d['sdss_name']} log_lbol={d['log_lbol']:.2f}")
-            # print(fits_data_2['PSFFLUX'][i,:])
-            # print(w)
 
     return objs
 
@@ -753,7 +641,7 @@ def make_psf_minus_fiber_correction_fn(z, psf_minus_fiber_i, z_window=0.5):
     from scipy.stats import binned_statistic
     from scipy.interpolate import interp1d
 
-    # Clean and sort
+    # Clean and sort the input sample.
     d = (
         pd.DataFrame({'z': z, 'psf_minus_fiber_i': psf_minus_fiber_i})
         .dropna()
@@ -770,13 +658,13 @@ def make_psf_minus_fiber_correction_fn(z, psf_minus_fiber_i, z_window=0.5):
     if z_span <= 0:
         raise ValueError("z must span a non-zero range.")
 
-    # Choose number of bins so that z_window ~ bin width
+    # Choose the number of bins to match the requested window scale.
     nbins = max(5, int(np.ceil(z_span / z_window)))
 
     z_vals = d['z'].to_numpy()
     dm_vals = d['psf_minus_fiber_i'].to_numpy()
 
-    # 1) Median in bins
+    # Compute the median correction in bins.
     dm_binned, edges, _ = binned_statistic(
         z_vals,
         dm_vals,
@@ -785,10 +673,10 @@ def make_psf_minus_fiber_correction_fn(z, psf_minus_fiber_i, z_window=0.5):
         range=(z_min, z_max),
     )
 
-    # Bin centers
+    # Use bin centers for interpolation.
     z_centers = 0.5 * (edges[:-1] + edges[1:])
 
-    # 2) Counts per bin (for SEM)
+    # Count points per bin for the SEM calculation.
     counts, _, _ = binned_statistic(
         z_vals,
         dm_vals,
@@ -797,7 +685,7 @@ def make_psf_minus_fiber_correction_fn(z, psf_minus_fiber_i, z_window=0.5):
         range=(z_min, z_max),
     )
 
-    # 3) Standard deviation per bin
+    # Compute the standard deviation in each bin.
     std_binned, _, _ = binned_statistic(
         z_vals,
         dm_vals,
@@ -806,10 +694,10 @@ def make_psf_minus_fiber_correction_fn(z, psf_minus_fiber_i, z_window=0.5):
         range=(z_min, z_max),
     )
 
-    # SEM = std / sqrt(N) where N > 1; otherwise NaN
+    # Convert the binned scatter to a standard error of the mean.
     sem_binned = np.where(counts > 1, std_binned / np.sqrt(counts), np.nan)
 
-    # Mask out empty median bins
+    # Keep only bins with finite median corrections.
     mask_dm = np.isfinite(dm_binned)
     z_fit = z_centers[mask_dm]
     dm_fit = dm_binned[mask_dm]
@@ -818,7 +706,7 @@ def make_psf_minus_fiber_correction_fn(z, psf_minus_fiber_i, z_window=0.5):
     if len(z_fit) < 2:
         raise ValueError("Not enough non-empty bins to build correction function.")
 
-    # Interpolator for the meditian correction (flat extrapolation at edges)
+    # Interpolate the median correction with flat extrapolation.
     from scipy.interpolate import interp1d
     dm_interp = interp1d(
         z_fit, dm_fit,
@@ -827,7 +715,7 @@ def make_psf_minus_fiber_correction_fn(z, psf_minus_fiber_i, z_window=0.5):
         fill_value=(dm_fit[0], dm_fit[-1]),
     )
 
-    # For the error, drop NaN SEM bins (e.g. bins with only 1 object)
+    # Interpolate the SEM where enough bins are available.
     mask_sem = np.isfinite(sem_fit)
     if np.sum(mask_sem) >= 2:
         z_fit_err = z_fit[mask_sem]
@@ -853,16 +741,17 @@ def make_psf_minus_fiber_correction_fn(z, psf_minus_fiber_i, z_window=0.5):
 
     return dm_of_z, dm_err_of_z
 
-
-import pickle
-def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=10,
-                  exclude_object_ids_csv=[],
+def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFAULT_F_HOST_CUT,
+                  exclude_object_ids_csv=None,
                   residuals_sigma_clip=None, residuals_csv=None,
                   spectra_fit_csv=None, zquery_csv=None, only_load=False,
                   pickled=False,
                   iron_frac_cut=None, redchi2_cut=None,
                   sdss_mags_csv=None, lc_info_csv="data/aug4_sample_chisqg10_ebv005sn3_lcdata.csv"):
-    from hubble_plotting import plot_df_psf_fiber, plot_m_vs_redshift, plot_redshift_histogram, plot_Mi_relation
+    from hubble_plotting import plot_cut_diagnostics, plot_df_psf_fiber, plot_Mi_relation
+
+    if exclude_object_ids_csv is None:
+        exclude_object_ids_csv = []
     
     if pickled:
         with open(file_path + ".pkl", "rb") as f: 
@@ -940,12 +829,11 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=10,
             raise ValueError("spectra_fit_csv not provided and spectral fields not found in agn h5 file")
             #raise ValueError("spectra_fit_csv must be provided if alpha_lambda not in agn h5 file")
 
-    # ALWAYS Remove objects with apparent_mag_2500 or apparent_mag_i too bright or too faint
+    # Remove objects with implausibly bright or faint apparent magnitude at 2500 A.
     mag_mask = ((df['apparent_mag_2500'] >= 16) & (df['apparent_mag_2500'] < 24))
     num_removed = np.sum(~mag_mask)
     print(f"Cut on apparent_mag_2500 : {num_removed} objects removed")
-    plot_redshift_histogram(df.copy(), df[mag_mask], bins=30, cut_info="16 < apparent_mag_2500 < 24")
-    plot_m_vs_redshift(df.copy(), df[mag_mask], cut_info="16 < apparent_mag_2500 < 24")
+    plot_cut_diagnostics(df.copy(), df[mag_mask], bins=30, cut_info="16 < apparent_mag_2500 < 24")
     df = df[mag_mask].reset_index(drop=True)
 
     if zquery_csv is not None:
@@ -995,43 +883,22 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=10,
     if only_load:
         return df
 
-    # Remove infinite values from numeric columns using a mask
-    # numeric_cols = df.select_dtypes(include=[np.number]).columns
-    # mask_finite = np.isfinite(df[numeric_cols]).all(axis=1)
-    # num_removed = (~mask_finite).sum()
-    # if num_removed > 0:
-    #     print(f"Removing {num_removed} rows with inf/-inf in numeric columns")
-    # df = df[mask_finite].reset_index(drop=True)
-
-    # plot_redshift_histogram(df_all, df_all[mask_finite], bins=30, cut_info="remove_inf")
-
-
-    #log_tau_band_RF = np.array([df[f'log_tau_band_{b}_RF'] for b in ['u', 'g', 'r', 'i', 'z']])
-    # Mask values <= 0
-    #masked_tau = np.where(log_tau_band_RF > 0, np.power(10, log_tau_band_RF), np.nan)
-    #tau_band_RF_mean = np.nanmean(masked_tau, axis=0)
-
-    #df['log_tau_band_RF_mean'] = np.log10(tau_band_RF_mean)
     df['log_t_rf_length'] = np.log10(df['t_rf_length'])
-    #df['tau_band_RF_mean'] = tau_band_RF_mean
-    #df['log_rho'] = np.log10(tau_band_RF_mean / df['t_rf_length'])
 
     df['log_f_host_2500'] = np.where(df['f_host_2500'] > 0, np.log10(df['f_host_2500']), np.nan)
     df['log_f_host_5100'] = np.where(df['f_host_5100'] > 0, np.log10(df['f_host_5100']), np.nan)
-    # Replace NaNs with 0 in all columns
-    #df = df.fillna(0)
     
     df = df.reset_index(drop=True)
     
-    # Exclude objects whose object_id is in an exclusion list/array (if provided)
+    # Apply a small hand-maintained exclusion list.
     exclusion_object_ids = []
     mask_exclude = ~df['object_id'].astype(str).isin(exclusion_object_ids)
 
     exclusion_sdss_names = [
         '221120.38+010905.6', # removed because wrong redshift
-        '024555.35+005332.6' # remove because weird spectra
-        '015802.36+002917.3' # next to star
-                            ]
+        '024555.35+005332.6', # removed because the spectrum is anomalous
+        '015802.36+002917.3', # next to a star
+    ]
     mask_exclude &= (~df['sdss_name'].astype(str).isin(exclusion_sdss_names))
     print(f"Excluding {np.sum(~mask_exclude)} objects by exclusion list")
     df = df[mask_exclude].reset_index(drop=True)
@@ -1040,13 +907,12 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=10,
     mask_valid = (df['log_tau_UV_RF'] > 2*df['log_sigma_UV'] + 2.5)
     num_removed = np.sum(~mask_valid)
     print(f"Cut on tau vs sigma diagram: {num_removed} objects removed")
-    plot_redshift_histogram(df.copy(), df[mask_valid], bins=30, cut_info="tau > 2*sigma + 2.5")
-    plot_m_vs_redshift(df.copy(), df[mask_valid], cut_info="tau > 2*sigma + 2.5")
+    plot_cut_diagnostics(df.copy(), df[mask_valid], bins=30, cut_info="tau > 2*sigma + 2.5")
 
     df = df[mask_valid].reset_index(drop=True)
     # mask_in  = df_agn["z"].between(0.44, 3.16)
 
-    # Remove outliers by excluding object_ids listed in the outlier CSV
+    # Remove outliers listed in external CSV files.
     for exclude_csv in exclude_object_ids_csv:
         if os.path.exists(exclude_csv):
             exclude_df = pd.read_csv(exclude_csv)
@@ -1054,184 +920,43 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=10,
             mask_exclude = ~df['object_id'].astype(str).isin(exclude_ids)
             num_excluded = np.sum(~mask_exclude)
             print(f"Excluding {num_excluded} objects from DataFrame based on {exclude_csv}")
-            plot_redshift_histogram(df.copy(), df[mask_exclude], bins=30, cut_info="exclude csv")
+            plot_cut_diagnostics(df.copy(), df[mask_exclude], bins=30, cut_info="exclude csv")
             df = df[mask_exclude].reset_index(drop=True)
         else:
             print(f"[WARNING] Exclusion CSV not found: {exclude_csv}")
 
-
-
-
-    # Remove objects with len_dropped_bands == 4 or 5
+    # Remove objects with too many dropped bands.
     mask_dropped = ~df['len_dropped_bands'].isin([4, 5])
     num_removed_dropped = np.sum(~mask_dropped)
     print(f"Removed {num_removed_dropped} objects with len_dropped_bands == 4 or 5")
-    plot_redshift_histogram(df.copy(), df[mask_dropped], bins=30, cut_info="dropped bands 4 or 5")
-    plot_m_vs_redshift(df.copy(), df[mask_dropped], cut_info="dropped bands 4 or 5")
+    plot_cut_diagnostics(df.copy(), df[mask_dropped], bins=30, cut_info="dropped bands 4 or 5")
     df = df[mask_dropped].reset_index(drop=True)
+    blr_amp_cuts = build_log_amp_delta_blr_cuts()
+    print("Active per-band BLR amplitude cuts:")
+    for col, lower, upper in blr_amp_cuts:
+        print(f"  {col}: lower={lower}, upper={upper}, allow_missing=True")
 
-    # mask = ~df['npca_qso'].isin([0])
-    # num_removed_dropped = np.sum(~mask)
-    # print(f"Removed {num_removed_dropped} objects with npca_qso = 0")
-    # plot_redshift_histogram(df.copy(), df[mask], bins=30, cut_info="npca_qso 0")
-    # plot_m_vs_redshift(df.copy(), df[mask], cut_info="npca_qso 0")
-    # df = df[mask].reset_index(drop=True)
-
-    # Select objects with BC == False (if column exists) and report how many were dropped
-    # n_before = len(df)
-    # keep_mask = df['BC'] == False
-    # n_kept = int(np.sum(keep_mask))
-    # n_dropped = int(n_before - n_kept)
-    # print(f"Selecting BC==False: {n_dropped} objects removed (kept {n_kept} of {n_before})")
-    # plot_redshift_histogram(df.copy(), df[keep_mask], bins=30, cut_info=f"BCFalse")
-    # plot_m_vs_redshift(df.copy(), df[keep_mask], cut_info=f"BCFalse")
-    # df = df[keep_mask].reset_index(drop=True)
-
-    # n_before = len(df)
-    # keep_mask = df['poly'] == False
-    # n_kept = int(np.sum(keep_mask))
-    # n_dropped = int(n_before - n_kept)
-    # print(f"Selecting poly==False: {n_dropped} objects removed (kept {n_kept} of {n_before})")
-    # plot_redshift_histogram(df.copy(), df[keep_mask], bins=30, cut_info=f"polyFalse")
-    # plot_m_vs_redshift(df.copy(), df[keep_mask], cut_info=f"polyFalse")
-    # df = df[keep_mask].reset_index(drop=True)
-
-    # n_before = len(df)
-    # keep_mask = df['decomp_host'] == False
-    # n_kept = int(np.sum(keep_mask))
-    # n_dropped = int(n_before - n_kept)
-    # print(f"Selecting decomp_host==False: {n_dropped} objects removed (kept {n_kept} of {n_before})")
-    # plot_redshift_histogram(df.copy(), df[keep_mask], bins=30, cut_info=f"decomp_hostFalse")
-    # plot_m_vs_redshift(df.copy(), df[keep_mask], cut_info=f"polyFalse")
-    # df = df[keep_mask].reset_index(drop=True)
-
-    # Convenience logs / coercions
-    # def _safelog(a):
-    #     return np.log10(np.abs(a + 1e-10)
-    # if 'dm_red' in df_agn: df_agn['log_dm_red'] = _safelog(df_agn['dm_red'])
-    # if 'reddening_integral' in df_agn: df_agn['log_reddening_integral'] = _safelog(df_agn['reddening_integral'])
-    # if 'reddening_proxy' in df_agn: df_agn['log_reddening_proxy'] = _safelog(df_agn['reddening_proxy'])
-    # if 'redchi' in df_agn: df_agn['log_redchi'] = _safelog(df_agn['redchi'])
-    # if 'redchi2_conti_full' in df_agn: df_agn['log_redchi2_conti_full'] = _safelog(df_agn['redchi2_conti_full'])
-    # if 'apparent_mag_2500_err' in df_agn: df_agn['log_apparent_mag_2500_err'] = _safelog(df_agn['apparent_mag_2500_err'])
-    # if 'log_sigma_UV_err' in df_agn: df_agn['log_log_sigma_UV_err'] = _safelog(df_agn['log_sigma_UV_err'])
-    # if 'log_tau_UV_RF_err' in df_agn: df_agn['log_log_tau_UV_RF_err'] = _safelog(df_agn['log_tau_UV_RF_err'])
-    # if 'psf_minus_fiber_r' in df_agn: df_agn['log_psf_minus_fiber_r'] = _safelog(df_agn['psf_minus_fiber_r'])
-    # if 'petroRad_r' in df_agn: df_agn['log_petroRad_r'] = _safelog(df_agn['petroRad_r'])
-    # if 'log_tau_drw0_rhat' in df_agn: df_agn['log_log_tau_drw0_rhat'] = _safelog(df_agn['tau_drw0_rhat'])
-    # for col in ['BC', 'I', 'poly']:
-    #     if col in df_agn:
-    #         df_agn[col] = df_agn[col].replace(
-    #             {True: 1, False: 0, 'True': 1, 'False': 0, 'true': 1, 'false': 0}
-    #         )
-
-
-    # mask = ~((df['z'] < 0.6) & (df['decomp_host'] == False))
-    # num_removed = np.sum(~mask)
-    # print(f"Cut on z < 0.6 and decomp_host False: {num_removed} objects removed")
-    # plot_redshift_histogram(df.copy(), df[mask], bins=30, cut_info="z < 2 and m_2500 > 23")
-    # plot_m_vs_redshift(df.copy(), df[mask], cut_info="z < 2 and m_2500 > 23")
-    # df = df[mask].reset_index(drop=True)
-    # mask = ~((df['z'] < 0.6) & (df['psf_minus_fiber_r'] < -0.3))
-    # num_removed = np.sum(~mask)
-    # print(f"Cut on z < 0.6 and psf_minus_fiber_r > -0.3: {num_removed} objects removed")
-    # df = df[mask].reset_index(drop=True)
-
-    # mask = ~((df['z'] < 0.6) & (df['iron_frac'] > 1.19))
-    # num_removed = np.sum(~mask)
-    # print(f"Cut on z < 0.6 and psf_minus_fiber_r > -0.3: {num_removed} objects removed")
-    # df = df[mask].reset_index(drop=True)
-
-    # mask = ~((df['z'] < 0.6) & (df['petroRad_r'] > 1.5))
-    # num_removed = np.sum(~mask)
-    # print(f"Cut on z < 0.6 and psf_minus_fiber_r > -0.3: {num_removed} objects removed")
-    # df = df[mask].reset_index(drop=True)
-
-    # mask = ~((df['z'] < 0.6) & (df['sn_median_all'] > 6))
-    # num_removed = np.sum(~mask)
-    # print(f"Cut on z < 0.6 and psf_minus_fiber_r > -0.3: {num_removed} objects removed")
-    # df = df[mask].reset_index(drop=True)
-
-    for b in ['u', 'g', 'r', 'i']:
-        mask = (df[f'log_amp_delta_blr_{b}'] < 0) | df[f'log_amp_delta_blr_{b}'].isna()
+    for col, lower, upper in blr_amp_cuts:
+        mask = np.ones(len(df), dtype=bool)
+        if lower is not None:
+            mask &= df[col] >= lower
+        if upper is not None:
+            mask &= df[col] < upper
+        mask |= df[col].isna()
         num_removed = np.sum(~mask)
-        print(f"Removed {num_removed} objects with log_amp_delta_blr_{b} >= 0")
-        plot_redshift_histogram(df.copy(), df[mask], bins=30, cut_info=f"log_amp_delta_blr_{b} < 0 or NaN")
-        plot_m_vs_redshift(df.copy(), df[mask], cut_info=f"log_amp_delta_blr_{b} < 0 or NaN")
+        cut_desc = f"{lower}<{col}<{upper} or NaN"
+        print(f"Removed {num_removed} objects failing {cut_desc}")
+        plot_cut_diagnostics(df.copy(), df[mask], bins=30, cut_info=cut_desc)
         df = df[mask].reset_index(drop=True)
 
-    # Define cuts as (column, lower_limit, upper_limit)
-    cuts = [
-        ('log_tau_UV_RF', 1.5, 4),
-        ('redchi2_conti_full', None, 1.2),
-        ('t_rf_length', 1700, None),
-        ('alpha_lambda', None, -0.01),
-        ('iron_frac', None, 10),
-        ('log_tau_UV_RF_err', 0, 1.0),
-        ('log_sigma_UV_err', 0, 0.3),
-
-        #('f_bc_over_pl_3000', -1, 1),
-        ('f_host_center', -1, 0.1),
-
-        #('z', 1, None),
-        #('log_lbol', 45.4, None),
-        #('dm_red', None, dm_red_cut),
-
-        #('redchi', None, 5),
-        #('apparent_mag_i', 12, 40),
-
-        # ('f_host_2500', -1, -1),
-        # ('f_host_5100', -1, -1),
-
-        #('log_amp_delta_blr_total', None, 0),
-        #('eta_tau2', None, 1),
-
-        #('eta_A1_rhat', None, 1.1),
-        # ('apparent_mag_2500_err', None, 0.04),
-        # ('npca_qso', -1, -1),
-        # ('iron_frac', None, 1.2),
-        #('PL_slope_blue', None, -1),
-        # ('log_tau_fast0', None, 0.5),
-        # ('bwb_alpha', 0.45, None),
-
-        # ('eta_A1', -1, -0.5),
-        # ('eta_tau1', 0, 1),
-        # ('PL_slope_blue', -2, 1)
-
-
-
-
-        #('conti_a_0', 0.0001, None),
- 
-        #('psf_minus_fiber_r', -0.3, None)
-        # new cuts
-        
-        # ('eta_A1', -0.8, -0.5),
-
-        # ('psf_minus_fiber_r', -0.35, -0.16),
-        # ('log_petroRad_r', None, 0.4),
-        # ('log_redchi', None, 0.3),
-        
-
-
-
-        # ('PL_slope_blue', None, -1),
-
-        # ('bwb_alpha_z', 0.52, None),
-        # ('bwb_alpha_i', 0.52, None),
-        # ('bwb_alpha_r', 0.52, None),
-        # ('bwb_alpha_u', 0.52, None),
-        # ('redchi2_conti_full', 1.05, None),
-        
-        
-        #('npca_qso', None, -1),
-        
-        #('apparent_mag_2500_err', 0, 1),
-        #('z', None, 0.5),
-        #('alpha_lambda', None, -1),
-        # ('sameZ', 0.9, 1.1),
-        #('log_tau_fast0', None, 0.5),
-    ]
+    cuts = build_agn_cuts(
+        f_host_cut=fhost_cut,
+        iron_frac_cut=iron_frac_cut if iron_frac_cut is not None else None,
+        redchi2_cut=redchi2_cut if redchi2_cut is not None else None,
+    )
+    print("Active AGN scalar cuts:")
+    for col, lower, upper in cuts:
+        print(f"  {col}: lower={lower}, upper={upper}")
 
     if apply_cut:
         initial_count = len(df)
@@ -1244,19 +969,19 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=10,
                 col_mask &= df[col] <= upper
             cut_count = np.sum(~col_mask)
             print(f"Cut on {col}: {cut_count} objects removed")
-            plot_redshift_histogram(df.copy(), df[col_mask], bins=30, cut_info=f"{lower}<{col}<{upper}")
-            plot_m_vs_redshift(df.copy(), df[col_mask], cut_info=f"{lower}<{col}<{upper}")
+            plot_cut_diagnostics(df.copy(), df[col_mask], bins=30, cut_info=f"{lower}<{col}<{upper}")
             mask &= col_mask
         df = df[mask]
 
         print(f"Total objects removed by all cuts: {initial_count - len(df)}")
+    # Drop rows that still lack the core continuum fit parameters.
     remove_nans_columns = ['alpha_lambda', 'alpha_lambda_err']
     for col in remove_nans_columns:
         nan_mask = ~df[col].isna()
         num_nans = (~nan_mask).sum()
         print(f"Removing {num_nans} objects with NaN in column '{col}'")
         df = df[nan_mask]
-        plot_redshift_histogram(df.copy(), df[mask], bins=30, cut_info=f"{col} not NaN")
+        plot_cut_diagnostics(df.copy(), df[mask], bins=30, cut_info=f"{col} not NaN")
 
     df = df.reset_index(drop=True)
 
@@ -1271,17 +996,17 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=10,
             num_removed = np.sum(~mask_residual)
             print(f"Cut on sigma clip with mu_score < {residuals_sigma_clip}: {num_removed} objects removed")
             df = df.drop(columns=['mu_zscore'])
-            plot_redshift_histogram(df.copy(), df[mask_residual], bins=30, cut_info=f"|mu_zscore|<{residuals_sigma_clip}")
+            plot_cut_diagnostics(df.copy(), df[mask_residual], bins=30, cut_info=f"|mu_zscore|<{residuals_sigma_clip}")
 
             df = df[mask_residual].reset_index(drop=True)
         else:
             print(f"[WARNING] Residual CSV not found: {residuals_csv}")
             raise ValueError(f"Residual CSV not found: {residuals_csv}")
 
-    # Drop rows where apparent_mag_2500_err is exactly zero or not finite
+    # Require a positive finite magnitude uncertainty at 2500 A.
     num_before = len(df)
     mask = (df['apparent_mag_2500_err'] > 0) & np.isfinite(df['apparent_mag_2500_err'])
-    plot_redshift_histogram(df.copy(), df[mask], bins=30, cut_info=f"0<apparent_mag_2500_err<inf")
+    plot_cut_diagnostics(df.copy(), df[mask], bins=30, cut_info=f"0<apparent_mag_2500_err<inf")
 
     df = df[mask].reset_index(drop=True)
     num_after = len(df)
@@ -1293,34 +1018,11 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=10,
     actual_logL2500 = convert_M2500_to_logL2500(actual_M2500)
     yerr_linear = 10**actual_logL2500 * np.log(10) * y_log_meas_err
     mask = yerr_linear/(10**actual_logL2500) < 0.5
-    plot_redshift_histogram(df.copy(), df[mask], bins=30, cut_info=f"frac_err_logL2500<0.5")
+    plot_cut_diagnostics(df.copy(), df[mask], bins=30, cut_info=f"frac_err_logL2500<0.5")
 
     num_removed = np.sum(~mask)
     print(f"\033[93mRemoved {num_removed} objects with fractional logL2500 error >= 0.5\033[0m")
     df = df[mask]
-
-    # mask = df['log_L2500_fs_err'] < 1
-    # num_removed = np.sum(~mask)
-    # print(f"\033[93mRemoved {num_removed} objects with log_L2500_fs_err error >= 1\033[0m")
-    # df = df[mask]
-
-    # Remove objects whose object_id is listed in the specified CSV file
-    # remove_csv_path = "plots/hubble/oct27a_oct26a_oct28a_preview_fhost0_dev_redchi2.0cut_carma/Flatw0waCDM_joint_dev/remove.csv"
-    # if os.path.exists(remove_csv_path):
-    #     remove_df = pd.read_csv(remove_csv_path, dtype={'object_id': str})
-    #     remove_ids = set(remove_df['object_id'].astype(str))
-    #     mask_keep = ~df['object_id'].astype(str).isin(remove_ids)
-    #     num_removed = np.sum(~mask_keep)
-    #     print(f"Removed {num_removed} objects based on {remove_csv_path}")
-    #     plot_redshift_histogram(df.copy(), df[mask_keep], bins=30, cut_info="remove.csv")
-    #     df = df[mask_keep].reset_index(drop=True)
-    # else:
-    #     print(f"[WARNING] Remove CSV not found: {remove_csv_path}")
-
-    # dusty = (df.get("conti_a_0", 0.0) > 0.08)
-    # df = df[ ~((df["z"] < 1.0) & dusty & (df["poly"] == False)) ].copy()
-
-    #df = df[~((df["z"]<1) & (df['dm_red'] < 0.6))].copy()
 
     num_quasars_z_0_1 = len(df[(df['z'] > 0) & (df['z'] <= 1.0)])
     num_quasars_z_gt_3 = len(df[df['z'] > 3])
@@ -1329,8 +1031,7 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=10,
     print("Number of quasars with z > 3:", num_quasars_z_gt_3)
     print(f"\nTotal number of objects removed by all cuts: {len(df_all) - len(df)}")
     print("Final number of quasars:", len(df))
-    plot_redshift_histogram(df_all.copy(), df.copy(), bins=30, cut_info=f"all cuts")
-    plot_m_vs_redshift(df_all.copy(), df.copy(), cut_info=f"all cuts")
+    plot_cut_diagnostics(df_all.copy(), df.copy(), bins=30, cut_info="all cuts")
     plot_Mi_relation(df_all.copy())
     
     return df, df_all
@@ -1347,7 +1048,7 @@ def load_pantheon_data():
         sna_lower       : bool (True) for cho_solve
     """
 
-    # --- Load catalog ---
+    # Load the Pantheon+ catalog.
     print("Loading Pantheon+ supernova data...")
     df_pantheon = pd.read_csv(
         # "https://raw.githubusercontent.com/PantheonPlusSH0ES/DataRelease/main/Pantheon%2B_Data/4_DISTANCES_AND_COVAR/Pantheon%2BSH0ES.dat",
@@ -1355,11 +1056,11 @@ def load_pantheon_data():
         sep=r"\s+"
     )
     
-    # --- Selection mask: use only (zHD > 0.01) OR calibrators ---
+    # Select cosmological SNe plus calibrators.
     is_calib = np.asarray(df_pantheon["IS_CALIBRATOR"], dtype=bool)
     sel_mask = (df_pantheon["zHD"].values > 0.01) | is_calib
 
-    # --- Load full covariance (stat+sys), then subset with the same mask ---
+    # Load the full covariance and apply the same selection.
     print("Loading SN covariance matrix...")
     n_sn = len(df_pantheon)
     cov_flat = np.loadtxt(
@@ -1370,17 +1071,16 @@ def load_pantheon_data():
     cov_matrix = cov_flat.reshape((n_sn, n_sn))
     assert cov_matrix.shape == (n_sn, n_sn), f"Expected ({n_sn},{n_sn}), got {cov_matrix.shape}"
 
-    # --- Apply the SAME selection to covariance and dataframe ---
     cov_sel = cov_matrix[sel_mask][:, sel_mask]
     df_pantheon_sel = df_pantheon.loc[sel_mask].reset_index(drop=True)
 
-    # --- Cholesky on the selected submatrix ---
+    # Cholesky factorization of the selected covariance.
     try:
         sna_L, sna_lower = cho_factor(cov_sel, lower=True)
     except np.linalg.LinAlgError:
         raise ValueError("Selected covariance submatrix is not positive-definite!")
 
-    # log|C| = 2 * sum(log(diag(L))) for lower-triangular L from Cholesky
+    # Compute log|C| from the Cholesky factor.
     sna_logdetCov = 2.0 * np.sum(np.log(np.diag(sna_L)))
 
     n_sel = cov_sel.shape[0]
@@ -1389,9 +1089,6 @@ def load_pantheon_data():
           f"(kept {(sel_mask).sum()}; dropped {n_sn - (sel_mask).sum()}).")
 
     return df_pantheon_sel, sna_logdetCov, sna_L, sna_lower
-
-from statistics import NormalDist
-import math
 
 LN10 = math.log(10.0)
 LN2  = math.log(2.0)
@@ -1449,13 +1146,6 @@ def odds_sigmas_from_delta(delta):
     sigma = np.sqrt(2.0 * absD)
     return sigma
 
-# def _odds_sigmas_from_delta(delta):
-#     """Return (one-sided Z, two-sided Z) from |Δln Z| odds, stably."""
-#     absD = abs(float(delta))
-#     log_eps = _log_eps_from_delta_abs(absD)
-#     log_eps_half = log_eps - LN2
-#     return (_norm_isf_from_logeps(log_eps),
-#             _norm_isf_from_logeps(log_eps_half))
 
 def compare_models_by_log_evidence_all(
     cosmo_models_dict,
@@ -1480,7 +1170,7 @@ def compare_models_by_log_evidence_all(
       - 'pairwise': dict of dicts with pairwise deltas and Z’s
       - 'text_path': path to saved human-readable summary
     """
-    # ---- Collect & validate ----
+    # Collect and validate the model evidence inputs.
     items = []
     for label, vals in cosmo_models_dict.items():
         try:
@@ -1492,7 +1182,7 @@ def compare_models_by_log_evidence_all(
     if len(items) < 2:
         raise ValueError("Need at least two models to compare.")
 
-    # ---- Sort by ln Z (desc) ----
+    # Sort models by descending log evidence.
     items.sort(key=lambda t: t[1], reverse=True)
     labels = [t[0] for t in items]
     logZs  = np.array([t[1] for t in items], dtype=float)
@@ -1501,15 +1191,13 @@ def compare_models_by_log_evidence_all(
     top_label, top_logZ, top_err = items[0]
     preferred_model = top_label
 
-    # ---- Per-model stats relative to TOP ----
+    # Compute per-model comparisons relative to the top-ranked model.
     ranking = []
     for (label, z, e) in items:
         d = z - top_logZ   # <= 0 for all except top (0)
         de = float(np.hypot(e, top_err))
         z_mc = np.inf if de == 0 else d / de
-        # odds-based sigma (one-/two-sided)
         z2 = odds_sigmas_from_delta(d)
-        # Bayes factor repr and Jeffreys strength
         log10K, B_str, B_ci = _bayes_factor_repr_from_delta(d, de)
         strength = _jeffreys_strength(abs(d), jeffreys_thresholds)
         ranking.append({
@@ -1527,25 +1215,22 @@ def compare_models_by_log_evidence_all(
             "Bayes_factor_ci_1sigma_vs_top": B_ci,
         })
 
-    # ---- Top vs Runner-up headline ----
+    # Summarize the top-vs-runner-up comparison.
     if len(items) >= 2:
         ru_label, ru_logZ, ru_err = items[1]
         delta = top_logZ - ru_logZ
         delta_err = float(np.hypot(top_err, ru_err))
         z_mc_head = np.inf if delta_err == 0 else delta / delta_err
-        # odds to Z
         absD = abs(delta)
         log_eps = _log_eps_from_delta_abs(absD)
         log_eps_half = log_eps - LN2
         sigma_one = _norm_isf_from_logeps(log_eps)
         sigma_two = _norm_isf_from_logeps(log_eps_half)
-        # CI via ±1σ on Δ
         def _odds_sigmas_at(d):
             return odds_sigmas_from_delta(d)
         s2_lo = _odds_sigmas_at(delta - delta_err)
         s2_hi = _odds_sigmas_at(delta + delta_err)
 
-        # Bayes factor & Jeffreys strength
         log10K, B_str, B_ci = _bayes_factor_repr_from_delta(delta, delta_err)
         strength = _jeffreys_strength(abs(delta), jeffreys_thresholds)
         decisive = abs(z_mc_head) >= z_decisive
@@ -1569,7 +1254,7 @@ def compare_models_by_log_evidence_all(
     else:
         top_vs_runnerup = None
 
-    # ---- Full pairwise matrix ----
+    # Build the full pairwise comparison matrix.
     pairwise = {}
     for i, (li, zi, ei) in enumerate(items):
         pairwise[li] = {}
@@ -1605,7 +1290,7 @@ def compare_models_by_log_evidence_all(
                     "Bayes_factor_ci_1sigma": B_ci,
                 }
 
-    # ---- Human-readable summary ----
+    # Build a human-readable text summary.
     lines = []
     lines.append("Bayesian Model Comparison (multi-model)\n\n")
     lines.append("Models (sorted by ln Z):\n")
@@ -1632,7 +1317,7 @@ def compare_models_by_log_evidence_all(
             f"decisive (|z_mc|≥{z_decisive:.1f})? {'yes' if t['decisive_zmc_ge_thresh'] else 'no'}\n"
         )
 
-    # Print & save
+    # Print and save the text summary.
     for line in lines:
         print(line, end="")
     os.makedirs(write_path, exist_ok=True)
@@ -1652,7 +1337,6 @@ def compare_models_by_log_evidence_all(
 
 def write_hdf5_file(quasar_list, file_path):
     print(f"Writing {len(quasar_list)} quasars to {file_path}", flush=True)
-    # Create directory if it doesn't exist
     directory = os.path.dirname(file_path)
     os.makedirs(directory, exist_ok=True)
     with h5py.File(file_path, "w") as hdf:
@@ -1668,9 +1352,6 @@ def write_hdf5_file(quasar_list, file_path):
                 else:
                     group.attrs[key] = value
 
-from collections import defaultdict
-import os
-
 def make_cosmo_table_latex(
     results,
     *,
@@ -1685,7 +1366,7 @@ def make_cosmo_table_latex(
     results: list[dict] with keys: 'model', 'data', 'params', 'logZ'.
     """
 
-    # ---------- local helpers (simple formatting only) ----------
+    # Local formatting helpers.
     def _fmt_val(v):
         """Format v which can be a LaTeX string, a (mean,std) tuple, or None."""
         if v is None:
@@ -1702,7 +1383,7 @@ def make_cosmo_table_latex(
             return r"--"
         return rf"${d['value']:.1f} \pm {d['err']:.1f}$"
 
-    # ---------- columns ----------
+    # Column definitions.
     col_keys   = ["H0", "Om0", "w0", "wa"]
     col_labels = {
         "H0":  r"$H_0$\tnote{a}",
@@ -1711,10 +1392,10 @@ def make_cosmo_table_latex(
         "wa":  r"$w_a$",
     }
 
-    # ---------- model order ----------
+    # Model display order.
     model_order = [r"flat $\Lambda$CDM", r"flat $w$CDM", r"flat $w_0w_a$CDM"]
 
-    # ---------- external rows (fully combined; no extend/append) ----------
+    # External comparison rows to prepend to each model block.
     external_rows = {
         r"flat $\Lambda$CDM": [
             {
@@ -1775,7 +1456,7 @@ def make_cosmo_table_latex(
     }
 
 
-    # ---------- group results by model and prepend external rows ----------
+    # Group results by model and prepend the external rows.
     by_model = defaultdict(list)
     for r in results:
         by_model[r["model"]].append(r)
@@ -1790,7 +1471,7 @@ def make_cosmo_table_latex(
                 "logZ": row.get("logZ"),
             })
 
-    # ---------- build LaTeX ----------
+    # Build the LaTeX table body.
     lines = []
 
     ncols = 1 + len(col_keys) + (1 if include_lnZ else 0)  # Dataset + params + optional lnZ
@@ -1839,16 +1520,13 @@ def make_cosmo_table_latex(
 
     latex_str = "\n".join(lines)
 
-    # write to file
+    # Write the table to disk.
     os.makedirs(os.path.dirname(write_path), exist_ok=True)
     write_path = os.path.join(write_path, "cosmo_table.tex")
     with open(write_path, "w") as f:
         f.write(latex_str)
 
     return latex_str
-
-
-import numpy as np
 
 def extract_cosmo_results_from_samples(
     samples,
@@ -1891,7 +1569,7 @@ def extract_cosmo_results_from_samples(
     """
     priors, model_labels, model_labels_latex = get_model_params(cosmo_model)
 
-    # Defensive checks
+    # Validate the sample array shape.
     samples = np.asarray(samples)
     if samples.ndim != 2:
         raise ValueError("`samples` must be a 2D array of shape (n_samples, n_params).")
@@ -1911,7 +1589,7 @@ def extract_cosmo_results_from_samples(
     else:
         model_name_latex = cosmo_model
 
-    # Compute mean/std for every parameter in the model
+    # Compute mean and standard deviation for every sampled parameter.
     means = np.mean(samples, axis=0)
     stds  = np.std(samples, axis=0, ddof=0)
 
@@ -1949,22 +1627,21 @@ def display_results_summary(samples, cosmo_model, z_pivot_agn):
     _, model_labels, _ = get_model_params(cosmo_model)
     samples = np.asarray(samples)
 
-    # --- base params ---
+    # Print the sampled parameter summaries first.
     med = np.median(samples, axis=0)
     lo  = np.percentile(samples, 16, axis=0)
     hi  = np.percentile(samples, 84, axis=0)
     for name, m, l, h in zip(model_labels, med, lo, hi):
         print(f"{name:>15}: {m:.4f} (+{h - m:.4f}, -{m - l:.4f})")
 
-    # --- helpers ---
+    # Resolve parameter names across model variants.
     def _idx(labels, *cands):
         for c in cands:
             if c in labels:
                 return labels.index(c)
         return None  # not found
 
-    # --- derived summaries ---
-    # Case 1: Flatw0waCDM -> derive w0 from (wp, wa) at pivot; print w0 and wa
+    # Print derived summaries for the relevant cosmology.
     if cosmo_model == "Flatw0waCDM":
         i_wp = _idx(model_labels, "wp", "w_p")
         i_wa = _idx(model_labels, "wa", "w_a")
@@ -1982,16 +1659,13 @@ def display_results_summary(samples, cosmo_model, z_pivot_agn):
             h = np.percentile(arr, 84)
             print(f"{name:>15}: {m:.4f} (+{h - m:.4f}, -{m - l:.4f})")
 
-    # Case 2: FlatwCDM (or any model that directly has w0/wa in samples)
     else:
-        # Print w0 if present in samples
         i_w0 = _idx(model_labels, "w0", "w_0", "w")
         if i_w0 is not None:
             arr = samples[:, i_w0]
             m = np.median(arr); l = np.percentile(arr, 16); h = np.percentile(arr, 84)
             print(f"{'w0':>15}: {m:.4f} (+{h - m:.4f}, -{m - l:.4f})")
 
-        # Print wa if present in samples (some models may include it explicitly)
         i_wa = _idx(model_labels, "wa", "w_a")
         if i_wa is not None:
             arr = samples[:, i_wa]
@@ -2055,7 +1729,7 @@ def compute_age_universe_with_error(samples, cosmo_model, weights=None, ci=(0.68
     N = samples.shape[0]
     idx = np.arange(N)
 
-    # Optional thinning for speed
+    # Optionally subsample the posterior for speed.
     if (max_eval is not None) and (N > max_eval):
         rng = np.random.default_rng(random_seed)
         idx = rng.choice(idx, size=max_eval, replace=False)
@@ -2065,7 +1739,7 @@ def compute_age_universe_with_error(samples, cosmo_model, weights=None, ci=(0.68
 
     ages = np.full(samples.shape[0], np.nan, dtype=float)
 
-    # Compute ages sample-by-sample; skip pathological draws cleanly
+    # Evaluate the cosmological age sample by sample.
     for j in range(samples.shape[0]):
         params = {name: samples[j, i] for i, name in enumerate(model_labels)}
         try:
@@ -2082,11 +1756,10 @@ def compute_age_universe_with_error(samples, cosmo_model, weights=None, ci=(0.68
             else:
                 raise ValueError(f"Unknown cosmology model: {cosmo_model}")
 
-            age = cosmo.age(0).to(u.Gyr).value  # age today in Gyr
+            age = cosmo.age(0).to(u.Gyr).value
             if np.isfinite(age) and (age > 0):
                 ages[j] = age
         except Exception:
-            # Unphysical / numerically problematic draw; leave as NaN
             continue
 
     m = np.isfinite(ages)
@@ -2099,9 +1772,8 @@ def compute_age_universe_with_error(samples, cosmo_model, weights=None, ci=(0.68
     a = ages[m]
     w = None if weights is None else np.asarray(weights)[m]
 
-    # Summary stats
+    # Summarize the valid age samples.
     mean = np.average(a, weights=w) if w is not None else float(np.mean(a))
-    # For std, use weighted variance if weights are given
     if w is not None:
         w_norm = w / np.sum(w)
         var = np.average((a - mean) ** 2, weights=w_norm)
@@ -2109,11 +1781,9 @@ def compute_age_universe_with_error(samples, cosmo_model, weights=None, ci=(0.68
     else:
         std = float(np.std(a, ddof=1))
 
-    # Equal-tailed credible intervals
     q16, q50, q84 = _weighted_quantile(a, [0.16, 0.50, 0.84], w)
     q025, q975 = _weighted_quantile(a, [0.025, 0.975], w)
 
-    # Pretty print (68% CI by default)
     print(f"Age of universe: {q50:.3f} (+{q84 - q50:.3f}/-{q50 - q16:.3f}) Gyr  "
           f"[mean={mean:.3f}±{std:.3f} Gyr; valid {n_valid}/{n_total}, skipped {n_invalid}]")
 
@@ -2137,7 +1807,7 @@ def compute_pivot_redshift(flat_samples, cosmo_model, z_min=0.0, z_max=4.0):
     wp = flat_samples[:, idx['wp']]
     wa = flat_samples[:, idx['wa']]
 
-    # Current pivot; default z_p=0 -> a_p=1
+    # Read the current pivot from the priors if present.
     z_p_current = None
     for k in ('zp', 'z_p', 'z_pivot_agn', 'z_pivot'):
         if k in priors:
@@ -2148,25 +1818,24 @@ def compute_pivot_redshift(flat_samples, cosmo_model, z_min=0.0, z_max=4.0):
 
     a_p = 1.0 / (1.0 + z_p_current)
 
-    # Covariances
+    # Compute the covariance structure of the pivot parameters.
     C = np.cov(np.vstack([wp, wa]))
     cov_wp_wa = C[0, 1]
     var_wa    = C[1, 1]
 
-    # Unconstrained optimal pivot (in scale factor)
+    # Compute the unconstrained optimal pivot in scale factor.
     tiny = np.finfo(float).tiny
     a_p_star = a_p + cov_wp_wa / max(var_wa, tiny)
 
-    # Enforce z >= z_min  <=>  a <= 1/(1+z_min)
+    # Enforce the requested redshift bounds.
     a_max_allowed = 1.0 / (1.0 + z_min)  # for z_min=0, this is 1
-    # Enforce z <= z_max  <=>  a >= 1/(1+z_max)
     a_min_allowed = 1.0 / (1.0 + (z_max if z_max is not None else np.inf))
 
     if z_max is not None:
         a_p_star = max(a_p_star, a_min_allowed)
     a_p_star = min(a_p_star, a_max_allowed)
 
-    # Guard against <= 0
+    # Guard against non-physical scale factors.
     a_p_star = max(a_p_star, np.finfo(float).eps)
     z_p_star = 1.0 / a_p_star - 1.0
     return z_p_star
@@ -2214,7 +1883,6 @@ def posterior_corr(flat_samples, cosmo_model, z_pivot_agn):
         wa = flat_samples[:, i_wa]
         w0 = wp - (1.0 - a_p) * wa
     else:
-        # Directly take w0 from samples
         i_w0 = _idx(model_labels, "w0", "w_0", "w")
         i_wa = _idx(model_labels, "wa", "w_a")
         w0 = flat_samples[:, i_w0]
@@ -2226,21 +1894,12 @@ def posterior_corr(flat_samples, cosmo_model, z_pivot_agn):
 
     return np.corrcoef(w0[mask], wa[mask])[0, 1]
 
-import math
-from typing import Tuple, Optional
-from astropy.cosmology import FlatLambdaCDM
-
-import math
-import numpy as np
-import os
-from itertools import combinations
-
 def format_value_uncertainty(val, err=None, unit=None):
     """
     Formats a (value, error) pair into a LaTeX string with scientific notation 
     and appropriate significant figures.
     """
-    # 1. Safety Checks (Handle N/A, Inf, NaN)
+    # Handle missing or non-finite values first.
     if val is None:
         return "N/A"
     try:
@@ -2251,14 +1910,12 @@ def format_value_uncertainty(val, err=None, unit=None):
         # If val is a string (e.g., model name), return as is
         return str(val)
 
-    # 2. Determine Exponent (Order of Magnitude)
     if val_float == 0:
         exponent = 0
     else:
         exponent = int(math.floor(math.log10(abs(val_float))))
 
-    # 3. Setup Scientific Notation
-    # Use sci notation if |exponent| >= 3 (e.g. 1000 or 0.001) or specific large values
+    # Switch to scientific notation for large or very small values.
     if abs(exponent) >= 3:
         scale = 10.0 ** exponent
         is_sci = True
@@ -2269,8 +1926,7 @@ def format_value_uncertainty(val, err=None, unit=None):
 
     val_norm = val_float / scale
     
-    # 4. Determine Precision and Format
-    # Handle Error
+    # Determine the precision from the error term when available.
     err_float = None
     if err is not None:
         try:
@@ -2289,28 +1945,18 @@ def format_value_uncertainty(val, err=None, unit=None):
         if err_norm == 0:
             main_str = f"{val_norm:.2f} \\pm 0.00"
         else:
-            # Find order of magnitude of the error
             err_log = math.floor(math.log10(abs(err_norm)))
-            
-            # Rule: Keep 2 sig figs if leading digit is 1, else 1 sig fig
             leading_digit = int(abs(err_norm) / (10**err_log))
-            
             if leading_digit == 1:
                 decimals = -int(err_log) + 1
             else:
                 decimals = -int(err_log)
-            
-            # Ensure we don't have negative decimals
             decimals = max(0, decimals)
-            
-            # Format value and error to this precision
             main_str = f"({val_norm:.{decimals}f} \\pm {err_norm:.{decimals}f})"
 
-    # 5. Construct Final LaTeX String
     if is_sci:
         final_str = f"{main_str} \\times 10^{{{exponent}}}"
     else:
-        # If not scientific, remove parens if they exist (cleaner look)
         final_str = main_str.replace("(", "").replace(")", "")
 
     if unit:
@@ -2330,7 +1976,7 @@ def write_results_tex_variables(
     lines.append(r"% Auto-generated cosmological and evidence results")
     lines.append(r"% Do not edit manually; regenerated by write_results_tex_variables()")
 
-    # --- Helpers ---
+    # Local formatting helpers.
     def _clean(name):
         return name.replace("0", "Zero").replace("Λ", "Lambda").replace("_", "")
 
@@ -2343,7 +1989,7 @@ def write_results_tex_variables(
         p = np.percentile(data, percentiles)
         return p[1], (p[2] - p[0]) / 2.0
 
-    # --- Global AGN stats ---
+    # Global AGN and SN summary counts.
     obs_arr, err_arr, pivots_arr = agn_model_pack_obs(df_agn)
     log_sigma_UV_pivot = pivots_arr[agn_model_oidx["log_sigma_UV"]]
     log_tau_UV_RF_pivot = pivots_arr[agn_model_oidx["log_tau_UV_RF"]]
@@ -2358,15 +2004,12 @@ def write_results_tex_variables(
     lines.append(_cmd("SigmaUVPivot", f"{10**log_sigma_UV_pivot:.1f}"))
     lines.append(_cmd("TauUVRFPivot", f"{10**log_tau_UV_RF_pivot:.0f}"))
 
-    # ===============================
-    # --- Per-Model Parameters ---
-    # ===============================
+    # Per-model summary parameters.
     for model_name, flat_samples in cosmo_model_samples.items():
         flat_samples = np.asarray(flat_samples)
         priors, model_labels, _ = get_model_params(model_name)
         results = {key: _sym_percentile(flat_samples[:, i]) for i, key in enumerate(model_labels)}
 
-        # Standard Params
         if 'Om0' in results:
             lines.append(_cmd("OmZero", format_value_uncertainty(*results['Om0']), model_suffix=model_name))
         if 'w0' in results:
@@ -2376,11 +2019,9 @@ def write_results_tex_variables(
         if 'H0' in results:
              lines.append(_cmd("HZero", format_value_uncertainty(*results['H0']), model_suffix=model_name))
 
-        # Age
         result = cosmo_models_result_dict[model_name]
         lines.append(_cmd("AgeUniverse", format_value_uncertainty(result["age"], result["age_err"], unit=r"Gyr"), model_suffix=model_name))
 
-        # AGN Params
         if 'alpha_agn' in results:
             lines.append(_cmd("AlphaAGN", format_value_uncertainty(*results['alpha_agn']), model_suffix=model_name))
         if 'beta_agn' in results:
@@ -2388,7 +2029,6 @@ def write_results_tex_variables(
         if 'M0_agn' in results:
             lines.append(_cmd("MZeroAGN", format_value_uncertainty(*results['M0_agn']), model_suffix=model_name))
 
-        # Derived Params
         try:
             idx_M0 = model_labels.index('M0_agn')
             idx_alpha = model_labels.index('alpha_agn')
@@ -2401,7 +2041,6 @@ def write_results_tex_variables(
             hd_scatter = np.exp(flat_samples[:, idx_logf])
             l_scatter = hd_scatter / 2.5
 
-            # THIS CALL NOW USES THE SCIENTIFIC FORMATTER
             lines.append(_cmd("LIntercept", format_value_uncertainty(*_sym_percentile(L_intercept), unit=r"erg\,s^{-1}"), model_suffix=model_name))
             lines.append(_cmd("AlphaAGNL", format_value_uncertainty(*_sym_percentile(alpha_L)), model_suffix=model_name))
             lines.append(_cmd("BetaAGNL", format_value_uncertainty(*_sym_percentile(beta_L)), model_suffix=model_name))
@@ -2413,9 +2052,7 @@ def write_results_tex_variables(
         if chisq_dict and model_name in chisq_dict:
             lines.append(_cmd("ChiSqRed", format_value_uncertainty(chisq_dict[model_name]), model_suffix=model_name))
 
-    # ===============================
-    # --- Model Comparisons ---
-    # ===============================
+    # Model-comparison summaries.
     if compare_r:
         lines.append(r"% --- Model Comparisons ---")
         if "preferred_model" in compare_r:
@@ -2443,9 +2080,7 @@ def write_results_tex_variables(
             else:
                 lines.append(_cmd(f"DeltaLogZ{pair_name}", "N/A"))
 
-    # ===============================
-    # --- Write File ---
-    # ===============================
+    # Write the LaTeX command file.
     filename = f"param_results_{result_prefix}.tex" if result_prefix else "param_results.tex"
     tex_path = os.path.join(write_path, filename)
     os.makedirs(write_path, exist_ok=True)
