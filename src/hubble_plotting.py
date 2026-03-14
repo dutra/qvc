@@ -165,72 +165,73 @@ def plot_redshift_histogram(df_before, df_after, bins=30, cut_info="", save_path
     _save_figure(fig, plot_path, dpi=150)
 
 
-def plot_m2500_correction(
-    dm_of_z,
-    z,
-    m2500_uncorrected,
-    title="m2500 vs redshift (correction comparison)",
+def plot_df_psf_fiber(
+    df,
+    bands=("u", "g", "r", "i", "z"),
     show=False,
     alpha=0.5,
-    s=5,
+    s=6,
+    rolling_window=201,
     plot_path="plots/hubble/diagnostics",
 ):
-    valid_mask = (m2500_uncorrected >= 1) & (m2500_uncorrected <= 30)
-    z = z[valid_mask]
-    m2500_uncorrected = m2500_uncorrected[valid_mask]
+    """
+    Plot PS1 PSF minus SDSS fiber magnitude offsets versus redshift for each band.
 
-    dm_values = dm_of_z(z)
+    Each panel shows one band using the column
+    `psf_ps1_minus_fiber_sdss_{band}` if it is present in the dataframe.
+    """
+    band_cols = [(band, f"psf_ps1_minus_fiber_sdss_{band}") for band in bands if f"psf_ps1_minus_fiber_sdss_{band}" in df.columns]
+    if not band_cols:
+        raise KeyError("No psf_ps1_minus_fiber_sdss_{band} columns found in the dataframe.")
 
-    # First panel: inspect the applied PSF-fiber correction as a function of redshift.
-    fig_dm, ax_dm = plt.subplots(figsize=(8, 6))
-    ax_dm.scatter(z, dm_values, label="dm_of_z", color="blue", s=0.5)
-    ax_dm.set_xlabel("Redshift (z)")
-    ax_dm.set_ylabel("dm PSF-Fiber")
-    ax_dm.grid(alpha=0.3)
-    ax_dm.legend()
-    fig_dm.tight_layout()
+    n_panels = len(band_cols)
+    n_cols = min(2, n_panels)
+    n_rows = int(np.ceil(n_panels / n_cols))
+
+    # Lay out one panel per band so band-dependent PSF-fiber trends are easy to compare.
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(7 * n_cols, 4.5 * n_rows), sharex=True)
+    axes = np.atleast_1d(axes).ravel()
+
+    z = np.asarray(df["z"], dtype=float)
+    for ax, (band, col) in zip(axes, band_cols):
+        y = np.asarray(df[col], dtype=float)
+        mask = np.isfinite(z) & np.isfinite(y)
+
+        ax.scatter(z[mask], y[mask], s=s, alpha=alpha, color="tab:blue", rasterized=True)
+
+        # Overlay a rolling median in redshift to highlight broad trends by band.
+        if np.count_nonzero(mask) >= 5:
+            order = np.argsort(z[mask])
+            z_sorted = z[mask][order]
+            y_sorted = y[mask][order]
+
+            window = min(int(rolling_window), len(z_sorted))
+            if window % 2 == 0:
+                window = max(1, window - 1)
+            window = max(5, window)
+
+            y_med = (
+                pd.Series(y_sorted)
+                .rolling(window=window, center=True, min_periods=max(3, window // 5))
+                .median()
+                .to_numpy()
+            )
+            med_mask = np.isfinite(y_med)
+            ax.plot(z_sorted[med_mask], y_med[med_mask], color="darkorange", lw=2.0, zorder=3)
+
+        ax.axhline(0.0, lw=1.0, color="k", alpha=0.6)
+        ax.set_title(f"{band}-band")
+        ax.set_xlabel("Redshift (z)")
+        ax.set_ylabel(r"$m_{\rm PS1,PSF} - m_{\rm SDSS,fiber}$")
+        ax.set_ylim(-2, 1)
+
+    # Hide any unused subplot slots in the grid.
+    for ax in axes[n_panels:]:
+        ax.axis("off")
+
+    fig.tight_layout()
     os.makedirs(plot_path, exist_ok=True)
-    _save_figure(fig_dm, os.path.join(plot_path, "dm_psf_fiber_vs_redshift.pdf"), dpi=200, show=show)
-
-    m2500_corrected = m2500_uncorrected - dm_values
-    mc = np.asarray(m2500_corrected, dtype=float)
-    mu = np.asarray(m2500_uncorrected, dtype=float)
-
-    if not (z.shape == mc.shape == mu.shape):
-        raise ValueError("z, m2500_corrected, and m2500_uncorrected must have the same shape.")
-    mask = np.isfinite(z) & np.isfinite(mc) & np.isfinite(mu)
-    if mask.sum() < 3:
-        raise ValueError("Not enough finite points to plot.")
-
-    z, mc, mu = z[mask], mc[mask], mu[mask]
-    dmag = mc - mu
-
-    idx = np.argsort(z)
-    z_s, dmag_s = z[idx], dmag[idx]
-
-    fig = plt.figure(figsize=(7.5, 7.5))
-    gs = fig.add_gridspec(nrows=2, ncols=1, height_ratios=[2.0, 1.0], hspace=0.08)
-
-    ax1 = fig.add_subplot(gs[0])
-    ax1.scatter(z, mu, s=s, alpha=alpha, label="m2500 (uncorrected)")
-    ax1.scatter(z, mc, s=s, alpha=alpha, label="m2500 (corrected)")
-    ax1.set_ylabel(r"$m_{2500}$")
-    ax1.set_title(title)
-    ax1.legend(loc="best", frameon=False)
-    ax1.grid(True, ls=":", alpha=0.3)
-
-    ax2 = fig.add_subplot(gs[1], sharex=ax1)
-    ax2.axhline(0.0, lw=1.0, color="k", alpha=0.6)
-    ax2.scatter(z, dmag, s=s, alpha=alpha, label=r"$\Delta m = m_{2500}^{\rm corr} - m_{2500}^{\rm uncorr}$")
-    ax2.plot(z_s, dmag_s, lw=0.8, alpha=0.5)
-    ax2.set_xlabel("redshift z")
-    ax2.set_ylabel(r"$\Delta m$")
-    ax2.grid(True, ls=":", alpha=0.3)
-    ax2.legend(loc="best", frameon=False)
-
-    os.makedirs(plot_path, exist_ok=True)
-    # Second panel: compare corrected and uncorrected magnitudes plus their residuals.
-    _save_figure(fig, os.path.join(plot_path, "m2500_psf_fiber_correction_comparison.pdf"), dpi=200, show=show)
+    _save_figure(fig, os.path.join(plot_path, "psf_ps1_minus_fiber_sdss_by_band.pdf"), dpi=200, show=show)
 
 def plot_dynesty(results, cosmo_model, plot_path="plots/hubble", only_sna="", speed="", show=False):
     """

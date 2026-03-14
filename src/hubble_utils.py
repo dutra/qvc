@@ -862,7 +862,7 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=10,
                   pickled=False,
                   iron_frac_cut=None, redchi2_cut=None,
                   sdss_mags_csv=None, lc_info_csv="data/aug4_sample_chisqg10_ebv005sn3_lcdata.csv"):
-    from hubble_plotting import plot_m2500_correction, plot_m_vs_redshift, plot_redshift_histogram, plot_Mi_relation
+    from hubble_plotting import plot_df_psf_fiber, plot_m_vs_redshift, plot_redshift_histogram, plot_Mi_relation
     
     if pickled:
         with open(file_path + ".pkl", "rb") as f: 
@@ -981,7 +981,7 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=10,
     df["psf_sdss_minus_fiber_sdss_i"].values,
     z_window=0.1,
     )
-    plot_m2500_correction(dm_of_z, df["z"].values, df["apparent_mag_2500"].values, show=False)
+    plot_df_psf_fiber(df, show=False)
     dm = dm_of_z(df["z"].values)
     df['dm_psf_correction'] = dm
     df['dm_psf_correction_err'] = dm_of_z_err(df["z"].values)
