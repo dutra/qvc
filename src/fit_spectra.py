@@ -304,12 +304,12 @@ def compute_derived_results(result, q, args):
     result["f_bc_over_pl_3000_err"] = safe_float(m_err)
 
     # FeUV fraction (same definition style as BC fraction)
-    i2500 = np.argmin(np.abs(np.asarray(q.wave) - 2500.0))
-    fe_uv_draws = np.asarray(q.pred_out["f_fe_mgii_model"], dtype=float)[:, i2500]
+    i3000 = np.argmin(np.abs(np.asarray(q.wave) - 3000.0))
+    fe_uv_draws = np.asarray(q.pred_out["f_fe_mgii_model"], dtype=float)[:, i3000]
     fe_uv_over_pl_draws = fe_uv_draws / pl_draws
     m50, m_err, m16, m84 = sym_percentile(fe_uv_over_pl_draws)
-    result["f_fe_uv_over_pl_2500"] = safe_float(m50)
-    result["f_fe_uv_over_pl_2500_err"] = safe_float(m_err)
+    result["f_fe_uv_over_pl_3000"] = safe_float(m50)
+    result["f_fe_uv_over_pl_3000_err"] = safe_float(m_err)
 
     z = safe_float(result.get("z"))
     m2500 = np.nan
@@ -530,9 +530,10 @@ def extract_fit_stats(q):
     good = np.isfinite(resid) & np.isfinite(sigma) & (sigma > 0)
 
     z = resid[good] / sigma[good]
+    out["wrms"] = float(np.sqrt(np.mean(z**2)))
+
     out["chi2"] = float(np.sum(z**2))
     out["chi2_per_pixel"] = float(np.mean(z**2))
-    out["wrms"] = float(np.sqrt(np.mean(z**2)))
     out["n_pixels"] = int(np.sum(good))
 
     out["wave_min_rf"] = safe_float(np.min(q.wave))
