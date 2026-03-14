@@ -15,7 +15,7 @@ from astropy.cosmology import FlatwCDM, FlatwpwaCDM, FlatLambdaCDM, Flatw0waCDM
 from astropy.cosmology.realizations import Planck18
 from astropy import units as u
 from matplotlib.lines import Line2D
-from matplotlib.ticker import LogLocator
+from matplotlib.ticker import FuncFormatter, LogLocator
 from scipy.interpolate import RegularGridInterpolator, interp1d
 from scipy.stats import gaussian_kde
 from tqdm import tqdm
@@ -58,6 +58,17 @@ def plot_cut_diagnostics(df_before, df_after, bins=30, cut_info="", save_path="p
     if len(df_before) == len(df_after):
         return
 
+    def _cut_slug(text):
+        """Build a stable filename token from cut text without numeric thresholds."""
+        if not text:
+            return "generic"
+        tokens = re.findall(r"[A-Za-z_][A-Za-z0-9_]*", str(text))
+        stop = {"or", "and", "nan"}
+        tokens = [tok for tok in tokens if tok.lower() not in stop]
+        if not tokens:
+            return "generic"
+        return "_".join(tokens)
+
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
 
     before_ids = set(df_before["object_id"].astype(str))
@@ -95,7 +106,6 @@ def plot_cut_diagnostics(df_before, df_after, bins=30, cut_info="", save_path="p
     ax1.set_ylabel(r"$m_{2500}$ (AB)")
     ax1.set_xlim(x_min, x_max)
     ax1.grid(True, alpha=0.3)
-    ax1.set_title(r"$m_{2500}$ vs redshift")
     ax1.legend(loc="best", frameon=False)
 
     ax2 = fig.add_subplot(gs[1], sharex=ax1)
@@ -108,63 +118,151 @@ def plot_cut_diagnostics(df_before, df_after, bins=30, cut_info="", save_path="p
     ax2.set_ylabel("Count")
     ax2.set_xlim(x_min, x_max)
     ax2.grid(True, alpha=0.3)
-    ax2.set_title("Redshift histogram")
     ax2.legend(loc="best", frameon=False)
 
     if cut_info:
         fig.text(0.5, 0.01, f"Cut info: {cut_info}", ha="center", va="bottom", fontsize=11, color="k")
 
-    safe_cut_info = re.sub(r"[^A-Za-z0-9._-]+", "_", str(cut_info)) if cut_info else ""
-    filename = f"cut_diagnostic_{safe_cut_info}.pdf" if safe_cut_info else "cut_diagnostic.pdf"
+    filename = f"cut_diagnostic_{_cut_slug(cut_info)}.pdf"
     plot_path = os.path.join(os.path.dirname(save_path), filename)
     fig.tight_layout(rect=(0, 0.03, 1, 1))
     _save_figure(fig, plot_path, dpi=150)
 
 
-def plot_df_psf_fiber(
+def _plot_dm_by_band(
     df,
+    *,
+    x_getter,
+    x_label,
+    output_name,
+    df_keep=None,
     bands=("u", "g", "r", "i", "z"),
+    z_range=(0.44, 3.16),
     show=False,
     alpha=0.5,
     s=6,
-    rolling_window=201,
+    rolling_window=501,
     plot_path="plots/hubble/diagnostics",
 ):
-    """
-    Plot PS1 PSF minus SDSS fiber magnitude offsets versus redshift for each band.
-
-    Each panel shows one band using the column
-    `psf_ps1_minus_fiber_sdss_{band}` if it is present in the dataframe.
-    """
+    """Plot PSF-minus-fiber offsets by band against a chosen x-axis quantity."""
     band_cols = [(band, f"psf_ps1_minus_fiber_sdss_{band}") for band in bands if f"psf_ps1_minus_fiber_sdss_{band}" in df.columns]
     if not band_cols:
         raise KeyError("No psf_ps1_minus_fiber_sdss_{band} columns found in the dataframe.")
 
     n_panels = len(band_cols)
-    n_cols = min(2, n_panels)
-    n_rows = int(np.ceil(n_panels / n_cols))
+    n_rows = min(4, n_panels)
+    n_cols = int(np.ceil(n_panels / n_rows))
 
     # Lay out one panel per band so band-dependent PSF-fiber trends are easy to compare.
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=(7 * n_cols, 4.5 * n_rows), sharex=True)
+    id_col = "object_id" if "object_id" in df.columns else None
+    keep_ids = None
+    if df_keep is not None:
+        if id_col is not None and id_col in df_keep.columns:
+            keep_ids = set(df_keep[id_col].astype(str))
+        else:
+            keep_ids = set(df_keep.index.tolist())
+
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(9 * n_cols, 4.5 * n_rows), sharex=True)
     axes = np.atleast_1d(axes).ravel()
 
     z = np.asarray(df["z"], dtype=float)
     for ax, (band, col) in zip(axes, band_cols):
+        x = np.asarray(x_getter(df, band), dtype=float)
         y = np.asarray(df[col], dtype=float)
-        mask = np.isfinite(z) & np.isfinite(y)
+        petro_col = f"petroRad_{band}_sdss"
+        petro = np.asarray(df[petro_col], dtype=float) if petro_col in df.columns else np.full(len(df), np.nan)
+        mask = np.isfinite(x) & np.isfinite(z) & np.isfinite(y) & np.isfinite(petro) & (petro > 0)
+        petro_plot = np.log10(petro[mask])
+        if petro_plot.size > 0:
+            vmin, vmax = np.nanpercentile(petro_plot, [1, 99])
+            if not np.isfinite(vmin) or not np.isfinite(vmax) or vmax <= vmin:
+                vmin = np.nanmin(petro_plot)
+                vmax = np.nanmax(petro_plot)
+            petro_plot = np.clip(petro_plot, vmin, vmax)
+        else:
+            vmin, vmax = None, None
+        idx = np.flatnonzero(mask)
+        if keep_ids is not None:
+            if id_col is not None and id_col in df.columns:
+                keep_mask = df.iloc[idx][id_col].astype(str).isin(keep_ids).to_numpy(dtype=bool)
+            else:
+                keep_mask = np.array([i in keep_ids for i in idx], dtype=bool)
+        else:
+            keep_mask = np.ones(len(idx), dtype=bool)
+        x_masked = x[mask]
+        z_masked = z[mask]
+        y_masked = y[mask]
+        in_z = (z_masked >= z_range[0]) & (z_masked <= z_range[1])
 
-        ax.scatter(z[mask], y[mask], s=s, alpha=alpha, color="tab:blue", rasterized=True)
+        keep_in_z = keep_mask & in_z
+        keep_out_z = keep_mask & (~in_z)
+        cut_in_z = (~keep_mask) & in_z
+        cut_out_z = (~keep_mask) & (~in_z)
+
+        cmap_obj = mpl.cm.get_cmap("viridis")
+        norm = colors.Normalize(vmin=vmin, vmax=vmax)
+        edge_keep_out_z = cmap_obj(norm(petro_plot[keep_out_z])) if np.any(keep_out_z) else None
+        edge_cut_out_z = cmap_obj(norm(petro_plot[cut_out_z])) if np.any(cut_out_z) else None
+
+        sc = ax.scatter(
+            x_masked[keep_in_z],
+            y_masked[keep_in_z],
+            c=petro_plot[keep_in_z],
+            s=s,
+            alpha=alpha,
+            cmap="viridis",
+            vmin=vmin,
+            vmax=vmax,
+            rasterized=True,
+            label=f"{band}-band",
+        )
+        ax.scatter(
+            x_masked[cut_in_z],
+            y_masked[cut_in_z],
+            c=petro_plot[cut_in_z],
+            s=s,
+            alpha=alpha,
+            cmap="viridis",
+            vmin=vmin,
+            vmax=vmax,
+            rasterized=True,
+            marker="D",
+        )
+        ax.scatter(
+            x_masked[keep_out_z],
+            y_masked[keep_out_z],
+            edgecolors=edge_keep_out_z,
+            facecolors="none",
+            s=s,
+            alpha=1.0,
+            marker="o",
+            linewidths=1.5,
+            rasterized=True,
+        )
+        ax.scatter(
+            x_masked[cut_out_z],
+            y_masked[cut_out_z],
+            edgecolors=edge_cut_out_z,
+            facecolors="none",
+            s=s,
+            alpha=1.0,
+            marker="D",
+            linewidths=1.5,
+            rasterized=True,
+        )
+        cbar = fig.colorbar(sc, ax=ax)
+        cbar.set_label(rf"$\log_{{10}}(\mathrm{{petroRad}}_{{{band}}})$")
 
         # Overlay a rolling median in redshift to highlight broad trends by band.
         if np.count_nonzero(mask) >= 5:
-            order = np.argsort(z[mask])
-            z_sorted = z[mask][order]
+            order = np.argsort(x[mask])
+            x_sorted = x[mask][order]
             y_sorted = y[mask][order]
 
-            window = min(int(rolling_window), len(z_sorted))
+            window = min(int(rolling_window), len(x_sorted))
             if window % 2 == 0:
                 window = max(1, window - 1)
-            window = max(5, window)
+            window = max(21, window)
 
             y_med = (
                 pd.Series(y_sorted)
@@ -173,13 +271,13 @@ def plot_df_psf_fiber(
                 .to_numpy()
             )
             med_mask = np.isfinite(y_med)
-            ax.plot(z_sorted[med_mask], y_med[med_mask], color="darkorange", lw=2.0, zorder=3)
+            ax.plot(x_sorted[med_mask], y_med[med_mask], color="darkorange", lw=2.0, zorder=3, label="rolling median")
 
         ax.axhline(0.0, lw=1.0, color="k", alpha=0.6)
-        ax.set_title(f"{band}-band")
-        ax.set_xlabel("Redshift (z)")
+        ax.set_xlabel(x_label)
         ax.set_ylabel(r"$m_{\rm PS1,PSF} - m_{\rm SDSS,fiber}$")
         ax.set_ylim(-2, 1)
+        ax.legend(loc="upper right", frameon=False)
 
     # Hide any unused subplot slots in the grid.
     for ax in axes[n_panels:]:
@@ -187,7 +285,95 @@ def plot_df_psf_fiber(
 
     fig.tight_layout()
     os.makedirs(plot_path, exist_ok=True)
-    _save_figure(fig, os.path.join(plot_path, "psf_ps1_minus_fiber_sdss_by_band.pdf"), dpi=200, show=show)
+    _save_figure(fig, os.path.join(plot_path, output_name), dpi=200, show=show)
+
+
+def plot_df_psf_fiber(
+    df,
+    df_keep=None,
+    bands=("u", "g", "r", "i", "z"),
+    z_range=(0.44, 3.16),
+    show=False,
+    alpha=0.5,
+    s=6,
+    rolling_window=501,
+    plot_path="plots/hubble/diagnostics",
+):
+    """Plot PS1 PSF minus SDSS fiber magnitude offsets versus redshift for each band."""
+    return _plot_dm_by_band(
+        df,
+        x_getter=lambda frame, band: frame["z"].to_numpy(dtype=float),
+        x_label="Redshift (z)",
+        output_name="psf_ps1_minus_fiber_sdss_by_band.pdf",
+        df_keep=df_keep,
+        bands=bands,
+        z_range=z_range,
+        show=show,
+        alpha=alpha,
+        s=s,
+        rolling_window=rolling_window,
+        plot_path=plot_path,
+    )
+
+
+def plot_df_psf_fiber_vs_petro(
+    df,
+    df_keep=None,
+    bands=("u", "g", "r", "i", "z"),
+    z_range=(0.44, 3.16),
+    show=False,
+    alpha=0.5,
+    s=6,
+    rolling_window=501,
+    plot_path="plots/hubble/diagnostics",
+):
+    """Plot PS1 PSF minus SDSS fiber magnitude offsets versus Petrosian radius for each band."""
+    return _plot_dm_by_band(
+        df,
+        x_getter=lambda frame, band: np.log10(np.asarray(frame[f"petroRad_{band}_sdss"], dtype=float)),
+        x_label=r"$\log_{10}(\mathrm{petroRad})$",
+        output_name="psf_ps1_minus_fiber_sdss_vs_petrorad_by_band.pdf",
+        df_keep=df_keep,
+        bands=bands,
+        z_range=z_range,
+        show=show,
+        alpha=alpha,
+        s=s,
+        rolling_window=rolling_window,
+        plot_path=plot_path,
+    )
+
+
+def plot_df_psf_fiber_vs_fhost(
+    df,
+    df_keep=None,
+    bands=("u", "g", "r", "i", "z"),
+    z_range=(0.44, 3.16),
+    show=False,
+    alpha=0.5,
+    s=6,
+    rolling_window=501,
+    plot_path="plots/hubble/diagnostics",
+):
+    """Plot PS1 PSF minus SDSS fiber magnitude offsets versus log10(f_host_center) for each band."""
+    return _plot_dm_by_band(
+        df,
+        x_getter=lambda frame, band: np.where(
+            np.asarray(frame["f_host_center"], dtype=float) > 0,
+            np.log10(np.asarray(frame["f_host_center"], dtype=float)),
+            np.nan,
+        ),
+        x_label=r"$\log_{10}(f_{\mathrm{host,center}})$",
+        output_name="psf_ps1_minus_fiber_sdss_vs_fhost_by_band.pdf",
+        df_keep=df_keep,
+        bands=bands,
+        z_range=z_range,
+        show=show,
+        alpha=alpha,
+        s=s,
+        rolling_window=rolling_window,
+        plot_path=plot_path,
+    )
 
 def plot_dynesty(results, cosmo_model, plot_path="plots/hubble", only_sna="", speed="", show=False):
     """
@@ -2818,6 +3004,11 @@ def plot_redshift_histograms(df_pantheon, df_agn,
     else:
         raise ValueError("xscale must be 'log' or 'linear'")
 
+    def _decimal_log_tick(x, pos):
+        if x <= 0:
+            return ""
+        return f"{x:g}"
+
     fig, ax = plt.subplots(figsize=(8,5))
 
     # SN
@@ -2861,11 +3052,14 @@ def plot_redshift_histograms(df_pantheon, df_agn,
         linestyle="--",
         color="0.7",
         linewidth=2.8,
-        label=rf"AGN ($\mathit{{restricted\ fitting\ sample}};\ {z_range[0]}<z<{z_range[1]}$)",
+        label=rf"AGN ($\mathit{{restricted\ fitting\ sample}};\ 1.0<z<{z_range[1]}$)",
         zorder=-2
     )
 
     ax.set_xscale(xscale)
+    if xscale == "log":
+        ax.xaxis.set_major_locator(LogLocator(base=10.0))
+        ax.xaxis.set_major_formatter(FuncFormatter(_decimal_log_tick))
     ax.set_xlabel(r"$z$")
     ax.set_ylabel("Number")
 

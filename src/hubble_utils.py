@@ -751,6 +751,7 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
         plot_Mi_relation,
         plot_cut_diagnostics,
         plot_df_psf_fiber,
+        plot_df_psf_fiber_vs_fhost,
         plot_m2500_vs_z_colorpanels,
     )
 
@@ -873,14 +874,13 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
     df["psf_sdss_minus_fiber_sdss_i"].values,
     z_window=0.1,
     )
-    plot_df_psf_fiber(df, show=False)
     dm = dm_of_z(df["z"].values)
     df['dm_psf_correction'] = dm
     df['dm_psf_correction_err'] = dm_of_z_err(df["z"].values)
     #dm = df["psf_sdss_minus_fiber_sdss_r"].values
     
     df['apparent_mag_2500_uncorrectedpsf'] = df['apparent_mag_2500'].values
-    df['apparent_mag_2500'] = df['apparent_mag_2500'].values - dm
+    df['apparent_mag_2500'] = df['apparent_mag_2500'].values #- dm
 
     df_all = df.copy()
 
@@ -1036,6 +1036,8 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
     print(f"\nTotal number of objects removed by all cuts: {len(df_all) - len(df)}")
     print("Final number of quasars:", len(df))
     plot_cut_diagnostics(df_all.copy(), df.copy(), bins=30, cut_info="all cuts")
+    plot_df_psf_fiber(df_all, df_keep=df, z_range=z_range, show=False)
+    plot_df_psf_fiber_vs_fhost(df_all, df_keep=df, z_range=z_range, show=False)
     colorpanel_cols = [
         col for col in ("f_host_center", "f_fe_uv_over_pl_2500", "f_bc_over_pl_3000", "wrms")
         if col in df_all.columns
