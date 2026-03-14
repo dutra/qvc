@@ -1096,28 +1096,6 @@ TWOPI = 2.0 * math.pi
 HALF_LN_TWOPI = 0.5 * math.log(TWOPI)
 Phi = NormalDist()
 
-def _log1pexp_pos(x):
-    return x + math.log1p(math.exp(-x))
-
-def _log_eps_from_delta_abs(absD):
-    if absD < 40:
-        return -math.log1p(math.exp(absD))
-    return -(_log1pexp_pos(absD))
-
-def _norm_isf_from_logeps(log_eps, use_phi_cut=-36.0):
-    if log_eps > use_phi_cut:
-        eps = math.exp(log_eps)
-        return Phi.inv_cdf(1.0 - eps)
-    L = -log_eps
-    z = math.sqrt(2.0 * L)
-    for _ in range(5):
-        f = log_eps + 0.5 * z * z + math.log(z) + HALF_LN_TWOPI
-        fp = z + 1.0 / z
-        z -= f / fp
-        if z <= 0 or not math.isfinite(z):
-            z = max(1.0, math.sqrt(2.0 * L))
-    return z
-
 def _bayes_factor_repr_from_delta(delta, delta_err=None):
     log10K = delta / LN10
     s_main = f"10^{log10K:.2f}"
@@ -1222,10 +1200,9 @@ def compare_models_by_log_evidence_all(
         delta_err = float(np.hypot(top_err, ru_err))
         z_mc_head = np.inf if delta_err == 0 else delta / delta_err
         absD = abs(delta)
-        log_eps = _log_eps_from_delta_abs(absD)
-        log_eps_half = log_eps - LN2
-        sigma_one = _norm_isf_from_logeps(log_eps)
-        sigma_two = _norm_isf_from_logeps(log_eps_half)
+        sigma_one = 0
+        sigma_two = odds_sigmas_from_delta(delta)
+        # CI via ±1σ on Δ
         def _odds_sigmas_at(d):
             return odds_sigmas_from_delta(d)
         s2_lo = _odds_sigmas_at(delta - delta_err)
