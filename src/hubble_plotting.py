@@ -1176,7 +1176,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
         residuals_df["mu_zscore"] = mu_zscore
         fields = ['object_id', 'apparent_mag_2500', 'f_host_2500', 'ra', 'dec', 
                   'mu_pred_median', 'mu_pred_std', 'mu_pred_std_with_scatter',
-                    'z', 'redchi', 'sdss_name', 'npca_qso', 'poly', 'redchi2_conti_full', 'residuals', 'mu_zscore']
+                    'z', 'wrms', 'sdss_name', 'residuals', 'mu_zscore']
         residuals_df = residuals_df[fields]
         residuals_df = residuals_df.sort_values(by="residuals", ascending=False)
         csv_path = os.path.join(plot_path, "residuals.csv")
@@ -1688,7 +1688,7 @@ def plot_full_residuals(
 
     # ---- Which x-keys to show (keep your order) ----
     keys = [col for col in np.flip([
-        'log_f_bc_over_pl_3000', 'log_f_fe_uv_over_pl_2500', 'log_f_host_center',
+        'wrms', 'log_f_bc_over_pl_3000', 'log_f_fe_uv_over_pl_2500', 'log_f_host_center',
         'apparent_mag_2500_err', 'log_apparent_mag_2500_err', 
         'log_sigma_UV_err', 'log_log_sigma_UV_err',
         'log_tau_UV_RF_err', 'log_log_tau_UV_RF_err',
@@ -2875,7 +2875,7 @@ def plot_redshift_histograms(df_pantheon, df_agn,
 
 def plot_m2500_vs_z_colorpanels(
     df,
-    color_cols=("f_host_center", "f_fe_uv_over_pl_2500", "f_bc_over_pl_3000"),
+    color_cols=("f_host_center", "f_fe_uv_over_pl_2500", "f_bc_over_pl_3000", "wrms"),
     xcol="z",
     ycol="apparent_mag_2500",
     cuts=None,
@@ -2897,6 +2897,7 @@ def plot_m2500_vs_z_colorpanels(
         "f_host_center": r"f_{\mathrm{host}}",
         "f_fe_uv_over_pl_2500": r"f_{\mathrm{Fe\, II}}",
         "f_bc_over_pl_3000": r"f_{\mathrm{BC}}",
+        "wrms": r"\Chi^2/\nu",
     }
 
     fig, axes = plt.subplots(len(color_cols), 1, figsize=figsize, sharex=True, sharey=True)

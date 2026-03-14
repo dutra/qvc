@@ -39,8 +39,6 @@ from hubble_utils import (
     load_agn_data,
     load_chains,
     load_pantheon_data,
-    make_agn_latex_table,
-    make_cosmo_table_latex,
     posterior_corr,
     reduced_chi_squared,
     save_chains,
@@ -261,9 +259,9 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                 sampler.run_nested(
                     print_progress=True,
                     dlogz_init=0.01,                 
-                    n_effective=500,                # 300–1000 typical for model comparison
-                    nlive_init=100,   # bump live points
-                    nlive_batch=50   # reasonable batch size for dynamic allocation
+                    n_effective=200,                # 300–1000 typical for model comparison
+                    nlive_init=25,   # bump live points
+                    nlive_batch=15   # reasonable batch size for dynamic allocation
                 )
 
             elif speed == "test":
@@ -357,7 +355,9 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
 
 def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, 
                cosmo_model, completeness=True, use_full_cov=True, 
-               N=None, resume=False, only_sna=False, speed="production", cosmo_model_samples={}, verbose=True,
+               N=None, resume=False, only_sna=False, speed="production", 
+               cosmo_model_joint_samples={}, cosmo_model_sna_samples={},
+               verbose=True,
                z_range=(0.44, 3.16),
                skip_plots=False, residuals_sigma_clip=None, df_calibrators=None,
                prefix="default", uniform_redshift_distribution=False):
@@ -412,26 +412,17 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
     chisq_red_L2500, _ = reduced_chi_squared(L_residuals_debiased, L_pred_std_debiased, n_params=len(model_labels)-1)
 
     print("Plotting Hubble diagram...")
-
+    # Debiased (Bias corrected)
     r = plot_hubble(flat_samples, df_agn, df_pantheon, 
                     cosmo_model=cosmo_model, z_pivot_agn=z_pivot_agn, 
                     show_true=False, show=False, debias=True, dm_interp=dm_interp, plot_path=plot_path,
-                    cosmo_model_samples=cosmo_model_samples, verbose=verbose, residuals_sigma_clip=residuals_sigma_clip,
+                    cosmo_model_samples=cosmo_model_joint_samples, verbose=verbose, residuals_sigma_clip=residuals_sigma_clip,
                     df_calibrators=df_calibrators)
     debiased_residuals, debiased_residuals_err, mu_pred_median_debiased, mu_pred_std_debiased, mu_pred_std_debiased_with_scatter = r
+    # Biased
     plot_hubble(flat_samples, df_agn, df_pantheon, 
                 cosmo_model=cosmo_model, z_pivot_agn=z_pivot_agn, show_residuals=True,
                 show_true=False, show=False, debias=False, plot_path=plot_path, verbose=False)    
-    if cosmo_model == 'Flatw0waCDM':
-        make_agn_latex_table(
-            df_agn,
-            mu_pred_median_debiased,
-            mu_pred_std_debiased_with_scatter,
-            dm_interp=dm_interp,
-            max_rows=30,
-            sort_by='z',
-            write_path=plot_path,
-        )
 
     chisq_red_hubble_debiased, _ = reduced_chi_squared(debiased_residuals, mu_pred_std_debiased, n_params=len(model_labels)-1)
 
@@ -462,18 +453,6 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         p_detect, mag_centers, z_centers, plot_path=plot_path
     )
 
-
-    # Example usage:
-    # Assuming `samples` is a dict from your MCMC run
-    if cosmo_model in ['FlatwpwaCDM', 'Flatw0waCDM']:
-        rho_w0_wa = posterior_corr(flat_samples, cosmo_model, z_pivot_agn)
-        print(f"Posterior correlation coefficient (w0, wa) at z_p={z_pivot_agn}: {rho_w0_wa:.3f}")
-
-    if cosmo_model == 'FlatwpwaCDM':
-        zp = compute_pivot_redshift(flat_samples, cosmo_model)
-        print("Computed pivot redshift: ", zp)
-    
-    print('std debiased residuals:', np.std(debiased_residuals))
     # TODO: Subtract typical mu error in quadrature
     
     print(f"\033[94mReduced chi-squared (debiased) M2500: {chisq_red_M2500_debiased:.3f}\033[0m")
@@ -506,8 +485,8 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
 
     cosmo_models_result_dict = {k: {} for k in cosmo_models}
     results_latex = []
-    cosmo_model_samples = {}
-
+    cosmo_model_joint_samples = {}
+    cosmo_model_sna_samples = {}
     for cosmo_model in cosmo_models:
         r = run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, 
                        cosmo_model=cosmo_model, only_sna=False, 
@@ -515,7 +494,7 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
                        skip_plots=skip_plots,
                        residuals_sigma_clip=residuals_sigma_clip,
                        z_range=z_range,
-                       cosmo_model_samples=cosmo_model_samples,
+                       cosmo_model_joint_samples=cosmo_model_joint_samples,
                        prefix=prefix, uniform_redshift_distribution=uniform_redshift_distribution)
         
         samples_joint, model_labels_joint, dm_interp_joint, logZ_joint, logZerr_joint, debiased_residuals_joint, age_joint, age_err_joint = r
@@ -547,7 +526,9 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
                                                     logZ_tuple=(logZ_sna, logZerr_sna), format_for_latex=True, value_fmt="{:.2f}")
         r_joint   = extract_cosmo_results_from_samples(samples_joint, cosmo_model, False,  
                                                     logZ_tuple=(logZ_joint, logZerr_joint), format_for_latex=True, value_fmt="{:.2f}")
-        cosmo_model_samples[cosmo_model] = samples_joint
+
+        cosmo_model_joint_samples[cosmo_model] = samples_joint
+        cosmo_model_sna_samples[cosmo_model] = samples_sna
         results_latex.extend([r_sna, r_joint])
 
         cosmo_models_result_dict[cosmo_model] |= dict(N=N, z_i=z_range[0], z_f=z_range[1])
@@ -559,11 +540,11 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
             cosmo_models_result_dict[cosmo_model][f"{key}_err_lower"] = lower
             cosmo_models_result_dict[cosmo_model][f"{key}_err_upper"] = upper
 
-    make_cosmo_table_latex(results_latex, write_path=f"{compare_plot_path}/")
-
     compare_r = compare_models_by_log_evidence_all(cosmo_models_result_dict, write_path=f"{compare_plot_path}/")
-    write_results_tex_variables(df_agn, df_pantheon, z_range, cosmo_model_samples, compare_r,
-                                compare_plot_path, result_prefix=result_prefix, cosmo_models_result_dict=cosmo_models_result_dict)
+    write_results_tex_variables(df_agn, df_pantheon, z_range, 
+                                cosmo_model_joint_samples, cosmo_model_sna_samples, 
+                                compare_r, compare_plot_path, 
+                                result_prefix=result_prefix, cosmo_models_result_dict=cosmo_models_result_dict)
 
     os.makedirs(f"results/cosmo/{prefix}", exist_ok=True)
     save_cosmo_results_hdf5(
@@ -572,7 +553,7 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
     )
     
     print("================================================================\n\n")
-    return cosmo_models_result_dict, cosmo_model_samples, results_latex, compare_r
+    return cosmo_models_result_dict, cosmo_model_joint_samples, results_latex, compare_r
 
 if __name__ == "__main__":
     #global _sna_LogdetCov, _sna_L, _sna_Lower

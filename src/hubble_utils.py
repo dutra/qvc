@@ -397,14 +397,10 @@ def populate_spectra_fit(df, spectra_fit_csvs, best=True):
         'delta_m_avg': float,
         'alpha_lambda': float,
         'alpha_lambda_err': float,
-        'redchi': float,
-        'redchi2_conti_full': float,
         'aic': float,
         'bic': float,
-        'npca_qso': float,
         'decomp_host': bool,
         'BC': bool,
-        'poly': bool,
         'best': bool,
         'bands_used': parse_list,
         'PL_slope': float,
@@ -420,6 +416,7 @@ def populate_spectra_fit(df, spectra_fit_csvs, best=True):
         'f_fe_uv_over_pl_2500': float,
         'f_bc_over_pl_3000': float,
         'f_host_center': float,
+        'wrms': float,
     }
 
     # Drop existing derived columns before re-merging them from the fit tables.
@@ -1329,182 +1326,6 @@ def write_hdf5_file(quasar_list, file_path):
                 else:
                     group.attrs[key] = value
 
-def make_cosmo_table_latex(
-    results,
-    *,
-    include_lnZ=True,
-    caption="Marginalized Cosmological Parameters and Bayesian Evidence",
-    label="tab:cosmoparams",
-    value_fmt="{:.3f}",
-    write_path="plots/hubble/"
-):
-    """
-    Build the LaTeX table string using exact keys: H0, Om0, w0, wa.
-    results: list[dict] with keys: 'model', 'data', 'params', 'logZ'.
-    """
-
-    # Local formatting helpers.
-    def _fmt_val(v):
-        """Format v which can be a LaTeX string, a (mean,std) tuple, or None."""
-        if v is None:
-            return r"--"
-        if isinstance(v, str):
-            return v
-        if isinstance(v, (tuple, list)) and len(v) == 2:
-            m, s = v
-            return rf"${value_fmt.format(m)} \pm {value_fmt.format(s)}$"
-        return str(v)
-
-    def _fmt_logZ(d):
-        if not d:
-            return r"--"
-        return rf"${d['value']:.1f} \pm {d['err']:.1f}$"
-
-    # Column definitions.
-    col_keys   = ["H0", "Om0", "w0", "wa"]
-    col_labels = {
-        "H0":  r"$H_0$\tnote{a}",
-        "Om0": r"$\Omega_m$",
-        "w0":  r"$w_0$",
-        "wa":  r"$w_a$",
-    }
-
-    # Model display order.
-    model_order = [r"flat $\Lambda$CDM", r"flat $w$CDM", r"flat $w_0w_a$CDM"]
-
-    # External comparison rows to prepend to each model block.
-    external_rows = {
-        r"flat $\Lambda$CDM": [
-            {
-                "data": r"Pantheon+ \& SH0ES",
-                "params": {"H0": r"$73.6 \pm 1.1$", "Om0": r"$0.334 \pm 0.018$", "w0": r"$-1$", "wa": r"--"},
-                "logZ": None,
-            },
-            {
-                "data": r"DES-SN5YR",
-                "params": {"H0": r"--", "Om0": r"$0.352 \pm 0.017$", "w0": r"$-1$", "wa": r"--"},
-                "logZ": None,
-            },
-            {
-                "data": r"Planck 2018",
-                "params": {"H0": r"$67.66 \pm 0.42$", "Om0": r"$0.3111 \pm 0.0056$", "w0": r"$-1$", "wa": r"--"},
-                "logZ": None,
-            },
-            {
-                "data": r"DESI DR2",
-                "params": {"H0": r"--", "Om0": r"$0.2975 \pm 0.0086$", "w0": r"$-1$", "wa": r"--"},
-                "logZ": None,
-            },
-        ],
-        r"flat $w$CDM": [
-            {
-                "data": r"Pantheon+ \& SH0ES",
-                "params": {"H0": r"$73.5 \pm 1.1$", "Om0": r"$0.309^{+0.063}_{-0.069}$", "w0": r"$-0.90 \pm 0.14$", "wa": r"--"},
-                "logZ": None,
-            },
-            {
-                "data": r"DES-SN5YR",
-                "params": {"H0": r"--", "Om0": r"$0.264^{+0.074}_{-0.096}$", "w0": r"$-0.80^{+0.14}_{-0.16}$", "wa": r"--"},
-                "logZ": None,
-            },
-            {
-                "data": r"DESI DR2",
-                "params": {"H0": r"--", "Om0": r"$0.2969 \pm 0.0089$", "w0": r"$-0.916 \pm 0.078$", "wa": r"--"},
-                "logZ": None,
-            },
-        ],
-        r"flat $w_0w_a$CDM": [
-            {
-                "data": r"Pantheon+ \& SH0ES",
-                "params": {"H0": r"$73.3 \pm 1.1$", "Om0": r"$0.403^{+0.054}_{-0.098}$", "w0": r"$-0.93 \pm 0.15$", "wa": r"$-0.1^{+0.9}_{-2.0}$"},
-                "logZ": None,
-            },
-            {
-                "data": r"DES-SN5YR",
-                "params": {"H0": r"--", "Om0": r"$0.495^{+0.033}_{-0.043}$", "w0": r"$-0.36^{+0.36}_{-0.30}$", "wa": r"$-8.8^{+3.7}_{-4.5}$"},
-                "logZ": None,
-            },
-            {
-                "data": r"DESI DR2",
-                "params": {"H0": r"--", "Om0": r"$0.352^{+0.041}_{-0.018}$", "w0": r"$-0.48^{+0.35}_{-0.17}$", "wa": r"$< -1.34$"},
-                "logZ": None,
-            },
-        ],
-    }
-
-
-    # Group results by model and prepend the external rows.
-    by_model = defaultdict(list)
-    for r in results:
-        by_model[r["model"]].append(r)
-    for m in model_order:
-        if m not in by_model:
-            by_model[m] = []
-        for row in external_rows.get(m, []):
-            by_model[m].insert(0, {
-                "model": m,
-                "data": row["data"],
-                "params": row["params"],
-                "logZ": row.get("logZ"),
-            })
-
-    # Build the LaTeX table body.
-    lines = []
-
-    ncols = 1 + len(col_keys) + (1 if include_lnZ else 0)  # Dataset + params + optional lnZ
-    lines.append(r"\begin{tabular}{" + "l" + "c" * (ncols - 1) + "}")
-    lines.append(r"\toprule")
-
-    header = ["Dataset"] + [col_labels[k] for k in col_keys]
-    if include_lnZ:
-        header.append(r"$\ln \mathcal{Z}$")
-    lines.append(" & ".join(header) + r" \\")
-    lines.append(r"\midrule")
-
-    row_order = [r"Pantheon+ \& SH0ES", r"DES-SN5YR", 
-                 r"Planck 2018",
-                 r"DESI DR2",
-                 r"SN~Ia", r"SN~Ia + AGN"]
-
-    for model in model_order:
-        rows = by_model.get(model, [])
-        if not rows:
-            continue
-        lines.append(rf"\multicolumn{{{ncols}}}{{l}}{{\underline{{\textbf{{{model}}}}}}} \\")
-        rows = sorted(rows, key=lambda d: row_order.index(d["data"]) if d["data"] in row_order else 999)
-
-        for r in rows:
-            ds = r["data"]
-            params = r.get("params", {})
-            cells = [ds] + [_fmt_val(params.get(k)) for k in col_keys]
-            if include_lnZ:
-                cells.append(_fmt_logZ(r.get("logZ")))
-            # Bold entire row for SN-only or SN+AGN rows
-            if ds in (r"SN~Ia", r"SN~Ia + AGN"):
-                cells = [rf"\textbf{{{c}}}" for c in cells]
-            lines.append(" & ".join(cells) + r" \\")
-        lines.append(r"\midrule")
-
-    if lines[-1] == r"\midrule":
-        lines.pop()
-
-    lines.append(r"\bottomrule")
-    lines.append(r"\end{tabular}")
-
-    lines.append(r"\begin{tablenotes}")
-    lines.append(r"\item[a] Units: km s$^{-1}$ Mpc$^{-1}$.")
-    lines.append(r"\end{tablenotes}")
-
-    latex_str = "\n".join(lines)
-
-    # Write the table to disk.
-    os.makedirs(os.path.dirname(write_path), exist_ok=True)
-    write_path = os.path.join(write_path, "cosmo_table.tex")
-    with open(write_path, "w") as f:
-        f.write(latex_str)
-
-    return latex_str
-
 def extract_cosmo_results_from_samples(
     samples,
     cosmo_model,
@@ -1942,13 +1763,18 @@ def format_value_uncertainty(val, err=None, unit=None):
     return final_str
 
 def write_results_tex_variables(
-    df_agn, df_pantheon, z_range, cosmo_model_samples, compare_r,
+    df_agn, df_pantheon, z_range, cosmo_model_joint_samples, cosmo_model_sna_samples, compare_r,
     write_path, result_prefix="", chisq_dict=None, cosmo_models_result_dict=None
 ):
     """
     Write key cosmological parameters AND model comparison results
     to a LaTeX file.
     """
+
+    # Capitalize the first letter of result_prefix if present
+    if result_prefix:
+        result_prefix = result_prefix[0].upper() + result_prefix[1:]
+
     lines = []
     lines.append(r"% Auto-generated cosmological and evidence results")
     lines.append(r"% Do not edit manually; regenerated by write_results_tex_variables()")
@@ -1981,8 +1807,25 @@ def write_results_tex_variables(
     lines.append(_cmd("SigmaUVPivot", f"{10**log_sigma_UV_pivot:.1f}"))
     lines.append(_cmd("TauUVRFPivot", f"{10**log_tau_UV_RF_pivot:.0f}"))
 
+    for model_name, flat_samples in cosmo_model_sna_samples.items():
+        flat_samples = np.asarray(flat_samples)
+        priors, model_labels, _ = get_model_params(model_name)
+        results = {key: _sym_percentile(flat_samples[:, i]) for i, key in enumerate(model_labels)}
+
+        if 'M0_sn' in results:
+            lines.append(_cmd("SNMZero", format_value_uncertainty(*results['M0_sn']), model_suffix=model_name))
+        if 'Om0' in results:
+            lines.append(_cmd("SNOmZero", format_value_uncertainty(*results['Om0']), model_suffix=model_name))
+        if 'w0' in results:
+            lines.append(_cmd("SNwZero", format_value_uncertainty(*results['w0']), model_suffix=model_name))
+        if 'wa' in results:
+            lines.append(_cmd("SNwa", format_value_uncertainty(*results['wa']), model_suffix=model_name))
+        if 'H0' in results:
+             lines.append(_cmd("SNHZero", format_value_uncertainty(*results['H0']), model_suffix=model_name))
+
+
     # Per-model summary parameters.
-    for model_name, flat_samples in cosmo_model_samples.items():
+    for model_name, flat_samples in cosmo_model_joint_samples.items():
         flat_samples = np.asarray(flat_samples)
         priors, model_labels, _ = get_model_params(model_name)
         results = {key: _sym_percentile(flat_samples[:, i]) for i, key in enumerate(model_labels)}
@@ -1995,16 +1838,16 @@ def write_results_tex_variables(
             lines.append(_cmd("wa", format_value_uncertainty(*results['wa']), model_suffix=model_name))
         if 'H0' in results:
              lines.append(_cmd("HZero", format_value_uncertainty(*results['H0']), model_suffix=model_name))
-
-        result = cosmo_models_result_dict[model_name]
-        lines.append(_cmd("AgeUniverse", format_value_uncertainty(result["age"], result["age_err"], unit=r"Gyr"), model_suffix=model_name))
-
         if 'alpha_agn' in results:
             lines.append(_cmd("AlphaAGN", format_value_uncertainty(*results['alpha_agn']), model_suffix=model_name))
         if 'beta_agn' in results:
             lines.append(_cmd("BetaAGN", format_value_uncertainty(*results['beta_agn']), model_suffix=model_name))
         if 'M0_agn' in results:
             lines.append(_cmd("MZeroAGN", format_value_uncertainty(*results['M0_agn']), model_suffix=model_name))
+
+        result = cosmo_models_result_dict[model_name]
+        lines.append(_cmd("AgeUniverse", format_value_uncertainty(result["age"], result["age_err"], unit=r"Gyr"), model_suffix=model_name))
+
 
         try:
             idx_M0 = model_labels.index('M0_agn')
@@ -2127,97 +1970,6 @@ def cosmo_model_label_latex(cosmo_model):
         raise ValueError("Invalid cosmology model.")
     
     return label
-
-def make_agn_latex_table(
-    agn_df,
-    mu,
-    mu_err,
-    dm_interp,
-    sort_by = None, ascending = True,
-    max_rows = None,
-    write_path = "plots/hubble"
-) -> str:
-
-    def _is_bad(x):
-        return x is None or (isinstance(x, float) and (math.isnan(x) or math.isinf(x)))
-
-    def fmt_num(x, nd):
-        return r"$\dots$" if _is_bad(x) else rf"${float(x):.{nd}f}$"
-
-    def fmt_signed_dec(x, nd):
-        return r"$\dots$" if _is_bad(x) else f"${float(x):+.{nd}f}$"
-
-    def name_to_bold(nm):
-        s = str(nm).replace("-", "$-$")
-        return rf"\textbf{{J{s}}}"
-
-    def fmt_with_sym_err(row, base_col, nd_val, nd_err, err_col=None):
-        v = row[base_col]
-        if _is_bad(v):
-            return r"$\dots$"
-        v = float(v)
-        if err_col is None:
-            err_col = f"{base_col}_err"
-        if err_col in row and not _is_bad(row[err_col]):
-            e = abs(float(row[err_col]))
-            return rf"${v:.{nd_val}f} \pm {e:.{nd_err}f}$"
-        return rf"${v:.{nd_val}f}$"
-
-    df = agn_df.copy()
-
-    df['mu'] = mu
-    df['mu_err'] = mu_err
-
-    #dm_interp = make_dm_function(np.array(df["apparent_mag_2500"].values), np.array(df['z'].values), dms)
-    pts = np.column_stack([df['z'], df['apparent_mag_2500']])
-    m_2500_corr = (df['apparent_mag_2500'] - dm_interp(pts))
-    df['apparent_mag_2500_corr'] = m_2500_corr
-    df['apparent_mag_2500_corr_err'] = df['apparent_mag_2500_err']
-
-    if max_rows is not None:
-        df = df.sample(n=max_rows, random_state=42)
-    if sort_by is not None:
-        df = df.sort_values(sort_by, ascending=ascending)
-
-    lines = [
-        #r"\begin{adjustbox}{max width=\textwidth, max totalheight=\textheight, keepaspectratio}",
-        r"\begin{tabular}{@{}lccccccccc@{}}",
-        r"\hline\hline",
-        r"\textbf{SDSS Name} & RA & Dec & $z$ & $m_{2500}$ & $m_{2500}^{\mathrm{uncorr}}$ & $\mu$ & $\log\tau_{\mathrm{UV,RF}}$ & $\log\sigma_{\mathrm{UV}}$ & $\mathrm{Cov}(\log\sigma_{\mathrm{UV}},\,\log\tau_{\mathrm{UV,RF}})$ \\",
-        r"& (deg) & (deg) &  & (mag) & (mag) & (mag) & (days) & (mag) &  \\"
-        r"\hline",
-    ]
-
-    for _, row in df.iterrows():
-        nm   = name_to_bold(row['sdss_name'])
-        ra   = fmt_num(row['ra'], 4)
-        dec  = fmt_signed_dec(row['dec'], 4)
-
-        zz   = fmt_with_sym_err(row, 'z', 4, 4)
-        m25v_corr = fmt_with_sym_err(row, 'apparent_mag_2500_corr', 2, 2)
-        m25v_uncorr = fmt_with_sym_err(row, 'apparent_mag_2500', 2, 2)
-        mu_str  = fmt_with_sym_err(row, 'mu',            2,    2)
-
-        tau_str = fmt_with_sym_err(row, 'log_tau_UV_RF', 2, 2, err_col='log_tau_UV_RF_std_psd')
-        sig_str = fmt_with_sym_err(row, 'log_sigma_UV',  2, 2, err_col='log_sigma_UV_std_psd')
-        tau_sig_cov = fmt_num(row['log_sigma_UV_log_tau_UV_RF_cov_psd'], 3)
-
-        lines.append(
-            f"{nm} & {ra} & {dec} & {zz} & {m25v_corr} & {m25v_uncorr} & {mu_str} & {tau_str} & {sig_str} & {tau_sig_cov} \\\\"
-        )
-
-    lines += [
-        r"\hline",
-        r"\end{tabular}%",                   
-        #r"\end{adjustbox}"
-    ]
-
-    latex_str = "\n".join(lines)
-    os.makedirs(os.path.dirname(write_path), exist_ok=True)
-    out_path = os.path.join(write_path, "agn_table.tex")
-    with open(out_path, "w") as f:
-        f.write(latex_str)
-    return latex_str
 
 
 def _save_mapping_hdf5(filename, **kwargs):
