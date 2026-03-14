@@ -1721,75 +1721,91 @@ def posterior_corr(flat_samples, cosmo_model, z_pivot_agn):
 
     return np.corrcoef(w0[mask], wa[mask])[0, 1]
 
-def format_value_uncertainty(val, err=None, unit=None):
-    """
-    Formats a (value, error) pair into a LaTeX string with scientific notation 
-    and appropriate significant figures.
-    """
-    # Handle missing or non-finite values first.
-    if val is None:
-        return "N/A"
+import math
+
+
+def _to_finite_float(x):
+    if x is None:
+        return None
     try:
-        val_float = float(val)
-        if not math.isfinite(val_float):
-            return "N/A"
-    except (ValueError, TypeError):
-        # If val is a string (e.g., model name), return as is
-        return str(val)
+        x = float(x)
+    except (TypeError, ValueError):
+        return None
+    return x if math.isfinite(x) else None
 
-    if val_float == 0:
-        exponent = 0
+
+def format_result_errors(
+    val,
+    err=None,
+    err_lower=None,
+    err_upper=None,
+    unit=None,
+    nd=2,
+    sci_threshold=3,
+):
+    """
+    Return a LaTeX-ready string with fixed decimal places.
+
+    Examples
+    --------
+    12.35 \\pm 0.46
+    (1.23 \\pm 0.05) \\times 10^{5}
+    0.84^{+0.07}_{-0.05}
+    (3.21^{+0.11}_{-0.09}) \\times 10^{-4}
+
+    Notes
+    -----
+    - If either err_lower or err_upper is provided, asymmetric errors are used.
+    - `unit` should already be LaTeX-ready, e.g. r"\\Msun" or r"\\mathrm{km\\,s^{-1}}".
+    """
+
+    valf = _to_finite_float(val)
+    if valf is None:
+        return "N/A"
+
+    errf = _to_finite_float(err)
+    errlf = _to_finite_float(err_lower)
+    erruf = _to_finite_float(err_upper)
+
+    # Use asymmetric mode if either asymmetric error is provided
+    use_asym = (errlf is not None) or (erruf is not None)
+
+    mags = [abs(valf)]
+    if errf is not None:
+        mags.append(abs(errf))
+    if errlf is not None:
+        mags.append(abs(errlf))
+    if erruf is not None:
+        mags.append(abs(erruf))
+
+    max_mag = max(mags) if mags else 0.0
+    exponent = int(math.floor(math.log10(max_mag))) if max_mag > 0 else 0
+
+    use_sci = abs(exponent) >= sci_threshold
+    scale = 10.0 ** exponent if use_sci else 1.0
+
+    v = valf / scale
+    fmt = f"{{:.{nd}f}}"
+
+    if use_asym:
+        el = abs(errlf) / scale if errlf is not None else 0.0
+        eu = abs(erruf) / scale if erruf is not None else 0.0
+        core = rf"{fmt.format(v)}^{{+{fmt.format(eu)}}}_{{-{fmt.format(el)}}}"
+    elif errf is not None:
+        e = abs(errf) / scale
+        core = rf"{fmt.format(v)} \pm {fmt.format(e)}"
     else:
-        exponent = int(math.floor(math.log10(abs(val_float))))
+        core = fmt.format(v)
 
-    # Switch to scientific notation for large or very small values.
-    if abs(exponent) >= 3:
-        scale = 10.0 ** exponent
-        is_sci = True
+    if use_sci:
+        out = rf"({core}) \times 10^{{{exponent}}}"
     else:
-        scale = 1.0
-        exponent = 0
-        is_sci = False
-
-    val_norm = val_float / scale
-    
-    # Determine the precision from the error term when available.
-    err_float = None
-    if err is not None:
-        try:
-            err_float = float(err)
-            if not math.isfinite(err_float):
-                err_float = None
-        except (ValueError, TypeError):
-            err_float = None
-
-    if err_float is None:
-        # No error: Default to 2 decimal places
-        main_str = f"{val_norm:.2f}"
-    else:
-        err_norm = err_float / scale
-        
-        if err_norm == 0:
-            main_str = f"{val_norm:.2f} \\pm 0.00"
-        else:
-            err_log = math.floor(math.log10(abs(err_norm)))
-            leading_digit = int(abs(err_norm) / (10**err_log))
-            if leading_digit == 1:
-                decimals = -int(err_log) + 1
-            else:
-                decimals = -int(err_log)
-            decimals = max(0, decimals)
-            main_str = f"({val_norm:.{decimals}f} \\pm {err_norm:.{decimals}f})"
-
-    if is_sci:
-        final_str = f"{main_str} \\times 10^{{{exponent}}}"
-    else:
-        final_str = main_str.replace("(", "").replace(")", "")
+        out = core
 
     if unit:
-        final_str += f"\\,\\mathrm{{{unit}}}"
-        
-    return final_str
+        out += rf"\,{unit}"
+
+    return out
 
 def write_results_tex_variables(
     df_agn, df_pantheon, z_range, cosmo_model_joint_samples, cosmo_model_sna_samples, compare_r,
@@ -1839,43 +1855,59 @@ def write_results_tex_variables(
     for model_name, flat_samples in cosmo_model_sna_samples.items():
         flat_samples = np.asarray(flat_samples)
         priors, model_labels, _ = get_model_params(model_name)
-        results = {key: _sym_percentile(flat_samples[:, i]) for i, key in enumerate(model_labels)}
+        results = {}
+        for i, key in enumerate(model_labels):
+            median, err, err_lower, err_upper = sym_percentile(flat_samples[:, i])
+            results[key] = median
+            results[f"{key}_err"] = err
+            results[f"{key}_err_lower"] = err_lower
+            results[f"{key}_err_upper"] = err_upper
 
         if 'M0_sn' in results:
-            lines.append(_cmd("SNMZero", format_value_uncertainty(*results['M0_sn']), model_suffix=model_name))
+            lines.append(_cmd("SNMZero", format_result_errors(results['M0_sn'],results['M0_sn_err']), model_suffix=model_name))
         if 'Om0' in results:
-            lines.append(_cmd("SNOmZero", format_value_uncertainty(*results['Om0']), model_suffix=model_name))
+            lines.append(_cmd("SNOmZero", format_result_errors(results['Om0'],results['Om0_err']), model_suffix=model_name))
         if 'w0' in results:
-            lines.append(_cmd("SNwZero", format_value_uncertainty(*results['w0']), model_suffix=model_name))
+            lines.append(_cmd("SNwZero", format_result_errors(results['w0'],err_lower=results['w0_err_lower'], err_upper=results['w0_err_upper']), model_suffix=model_name))
         if 'wa' in results:
-            lines.append(_cmd("SNwa", format_value_uncertainty(*results['wa']), model_suffix=model_name))
+            lines.append(_cmd("SNwa", format_result_errors(results['wa'],err_lower=results['wa_err_lower'], err_upper=results['wa_err_upper'], nd=1), model_suffix=model_name))
         if 'H0' in results:
-             lines.append(_cmd("SNHZero", format_value_uncertainty(*results['H0']), model_suffix=model_name))
+             lines.append(_cmd("SNHZero", format_result_errors(results['H0'],results['H0_err']), model_suffix=model_name))
 
 
     # Per-model summary parameters.
     for model_name, flat_samples in cosmo_model_joint_samples.items():
         flat_samples = np.asarray(flat_samples)
         priors, model_labels, _ = get_model_params(model_name)
-        results = {key: _sym_percentile(flat_samples[:, i]) for i, key in enumerate(model_labels)}
+        results = {}
+        for i, key in enumerate(model_labels):
+            median, err, err_lower, err_upper = sym_percentile(flat_samples[:, i])
+            results[key] = median
+            results[f"{key}_err"] = err
+            results[f"{key}_err_lower"] = err_lower
+            results[f"{key}_err_upper"] = err_upper
 
         if 'Om0' in results:
-            lines.append(_cmd("OmZero", format_value_uncertainty(*results['Om0']), model_suffix=model_name))
+            lines.append(_cmd("OmZero", format_result_errors(results['Om0'],results['Om0_err']), model_suffix=model_name))
         if 'w0' in results:
-            lines.append(_cmd("wZero", format_value_uncertainty(*results['w0']), model_suffix=model_name))
+            lines.append(_cmd("wZero", 
+                            format_result_errors(results['w0'],err_lower=results['w0_err_lower'], err_upper=results['w0_err_upper']),
+                            model_suffix=model_name))
         if 'wa' in results:
-            lines.append(_cmd("wa", format_value_uncertainty(*results['wa']), model_suffix=model_name))
+            lines.append(_cmd("wa", 
+                              format_result_errors(results['wa'],err_lower=results['wa_err_lower'], err_upper=results['wa_err_upper'], nd=1),
+                              model_suffix=model_name))
         if 'H0' in results:
-             lines.append(_cmd("HZero", format_value_uncertainty(*results['H0']), model_suffix=model_name))
+             lines.append(_cmd("HZero", format_result_errors(results['H0'],results['H0_err']), model_suffix=model_name))
         if 'alpha_agn' in results:
-            lines.append(_cmd("AlphaAGN", format_value_uncertainty(*results['alpha_agn']), model_suffix=model_name))
+            lines.append(_cmd("AlphaAGN", format_result_errors(results['alpha_agn'],results['alpha_agn_err']), model_suffix=model_name))
         if 'beta_agn' in results:
-            lines.append(_cmd("BetaAGN", format_value_uncertainty(*results['beta_agn']), model_suffix=model_name))
+            lines.append(_cmd("BetaAGN", format_result_errors(results['beta_agn'],results['beta_agn_err']), model_suffix=model_name))
         if 'M0_agn' in results:
-            lines.append(_cmd("MZeroAGN", format_value_uncertainty(*results['M0_agn']), model_suffix=model_name))
+            lines.append(_cmd("MZeroAGN", format_result_errors(results['M0_agn'],results['M0_agn_err']), model_suffix=model_name))
 
         result = cosmo_models_result_dict[model_name]
-        lines.append(_cmd("AgeUniverse", format_value_uncertainty(result["age"], result["age_err"], unit=r"Gyr"), model_suffix=model_name))
+        lines.append(_cmd("AgeUniverse", format_result_errors(result["age"], result["age_err"], unit=r"Gyr"), model_suffix=model_name))
 
 
         try:
@@ -1890,16 +1922,16 @@ def write_results_tex_variables(
             hd_scatter = np.exp(flat_samples[:, idx_logf])
             l_scatter = hd_scatter / 2.5
 
-            lines.append(_cmd("LIntercept", format_value_uncertainty(*_sym_percentile(L_intercept), unit=r"erg\,s^{-1}"), model_suffix=model_name))
-            lines.append(_cmd("AlphaAGNL", format_value_uncertainty(*_sym_percentile(alpha_L)), model_suffix=model_name))
-            lines.append(_cmd("BetaAGNL", format_value_uncertainty(*_sym_percentile(beta_L)), model_suffix=model_name))
-            lines.append(_cmd("ScatterHD", format_value_uncertainty(*_sym_percentile(hd_scatter), unit=r"mag"), model_suffix=model_name))
-            lines.append(_cmd("ScatterL", format_value_uncertainty(*_sym_percentile(l_scatter), unit=r"dex"), model_suffix=model_name))
+            lines.append(_cmd("LIntercept", format_result_errors(*_sym_percentile(L_intercept), unit=r"erg\,s^{-1}"), model_suffix=model_name))
+            lines.append(_cmd("AlphaAGNL", format_result_errors(*_sym_percentile(alpha_L)), model_suffix=model_name))
+            lines.append(_cmd("BetaAGNL", format_result_errors(*_sym_percentile(beta_L)), model_suffix=model_name))
+            lines.append(_cmd("ScatterHD", format_result_errors(*_sym_percentile(hd_scatter), unit=r"mag"), model_suffix=model_name))
+            lines.append(_cmd("ScatterL", format_result_errors(*_sym_percentile(l_scatter), unit=r"dex"), model_suffix=model_name))
         except ValueError:
             pass
 
         if chisq_dict and model_name in chisq_dict:
-            lines.append(_cmd("ChiSqRed", format_value_uncertainty(chisq_dict[model_name]), model_suffix=model_name))
+            lines.append(_cmd("ChiSqRed", format_result_errors(chisq_dict[model_name]), model_suffix=model_name))
 
     # Model-comparison summaries.
     if compare_r:
@@ -1930,7 +1962,7 @@ def write_results_tex_variables(
                 lines.append(_cmd(f"DeltaLogZ{pair_name}", "N/A"))
 
     # Write the LaTeX command file.
-    filename = f"param_results_{result_prefix}.tex" if result_prefix else "param_results.tex"
+    filename = f"param_results_{result_prefix.lower()}.tex" if result_prefix else "param_results.tex"
     tex_path = os.path.join(write_path, filename)
     os.makedirs(write_path, exist_ok=True)
     
@@ -2118,3 +2150,25 @@ def select_agn_subset_uniform_with_replacement(
     print(f"+++ Unique AGNs in selected sample: {n_unique}/{len(df_out)}")
 
     return df_out
+
+
+def report_pivots(df_agn):
+    print("\nAGN pivot summary")
+    print("-" * 68)
+    print(f"{'Quantity':<15}{'Type':<18}{'log10 value':>14}{'linear value':>16}")
+
+    rows = [
+        ("sigma_UV", "computed mean", np.mean(df_agn["log_sigma_UV"])),
+        ("tau_UV_RF", "computed mean", np.mean(df_agn["log_tau_UV_RF"])),
+    ]
+
+    _, _, pivots_arr = agn_model_pack_obs(df_agn)
+
+    rows.extend([
+        ("sigma_UV", "fixed pivot", pivots_arr[agn_model_oidx["log_sigma_UV"]]),
+        ("tau_UV_RF", "fixed pivot", pivots_arr[agn_model_oidx["log_tau_UV_RF"]]),
+    ])
+
+    for name, kind, log_val in rows:
+        lin_val = 10**log_val
+        print(f"{name:<15}{kind:<18}{log_val:>14.4f}{lin_val:>16.4f}")

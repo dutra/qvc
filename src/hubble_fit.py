@@ -41,6 +41,7 @@ from hubble_utils import (
     load_pantheon_data,
     posterior_corr,
     reduced_chi_squared,
+    report_pivots,
     save_chains,
     save_cosmo_results_hdf5,
     select_agn_subset_uniform_with_replacement,
@@ -61,7 +62,7 @@ from hubble_plotting import (
     plot_redshift_histograms,
     plot_residuals_vs_alphaOX,
 )
-from hubble_model import agn_model_req_errs, agn_model_req_obs, agn_model_req_params, get_model_params
+from hubble_model import agn_model_pack_obs, agn_model_req_errs, agn_model_req_obs, agn_model_req_params, get_model_params
 from hubble_completeness_refactored import get_completeness_function_2d, make_dm_function
 from hubble_cut_config import DEFAULT_F_HOST_CUT
 
@@ -139,15 +140,6 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
         )
     else:
         completeness_params = None
-
-    print(f"log_sigma mean: {np.mean(df_agn['log_sigma_UV']):.2f}")
-    print(f"sigma mean: {np.mean(10**df_agn['log_sigma_UV']):.2f}")
-    print(f"log_tau UV RF mean: {np.mean(df_agn['log_tau_UV_RF']):.2f}")
-    print(f"tau UV RF mean: {np.mean(10**df_agn['log_tau_UV_RF']):.2f}")
-
-    _z_pivot = (1 / np.exp(np.mean(np.log(1 / (1 + df_agn['z']))))) - 1
-    print(f"z mean: {df_agn['z'].mean():.3f}, calculated z pivot: {_z_pivot:.3f}")
-
 
     agn_fields = agn_model_req_params + agn_model_req_obs + agn_model_req_errs
     agn_fields += ('apparent_mag_2500', 'apparent_mag_2500_err', 'z', 'z_err', 'object_id')
@@ -364,9 +356,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                prefix="default", uniform_redshift_distribution=False):
     run_tag = make_run_tag(cosmo_model, only_sna, speed, N, z_range)
     plot_path = f"plots/hubble/{prefix}/{run_tag}"
-
     os.makedirs(plot_path, exist_ok=True)
-
     print(f"Saving plots to ", plot_path)
 
     if uniform_redshift_distribution:
@@ -382,6 +372,8 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
 
     plot_delta_m_flux_recal_vs_redshift(df_agn_fit_selection, plot_path=plot_path)
 
+    report_pivots(df_agn_fit_selection)
+
     flat_samples, model_labels, dm_interp, logZ, logZerr = run_mcmc_pipeline(
                                                         df_agn_fit_selection, df_agn_all,
                                                         df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
@@ -392,7 +384,6 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                                                         N=N,
                                                         resume=resume, speed=speed,
                                                         prefix=prefix)
-    
     display_results_summary(flat_samples, cosmo_model, z_pivot_agn)
     print("Computing age of the universe with error propagation...")
     age, age_err = compute_age_universe_with_error(flat_samples, cosmo_model, max_eval=200)

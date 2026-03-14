@@ -23,7 +23,7 @@ from tqdm import tqdm
 from hubble_model import (M_model_agn, M_model_agn_err, get_model_params, agn_model_pack_params,
     agn_model_pack_obs, agn_model_oidx, agn_model_pidx, agn_model_req_obs, agn_model_req_errs)
 from hubble_likelihood import sigma_lens_from_dc
-from hubble_utils import convert_M2500_to_logL2500, cosmo_model_label_latex
+from hubble_utils import convert_M2500_to_logL2500, cosmo_model_label_latex, format_result_errors, sym_percentile
 from dynesty.utils import resample_equal
 from dynesty import plotting as dyplot
 
@@ -638,7 +638,6 @@ def plot_cosmo_corner(
     from matplotlib.lines import Line2D
     from scipy.stats import gaussian_kde
     from scipy.ndimage import gaussian_filter
-
     # --- pull model labels from your config ---
     _, model_labels, model_labels_latex = get_model_params(cosmo_model)
     idx = {k: i for i, k in enumerate(model_labels)}
@@ -648,25 +647,27 @@ def plot_cosmo_corner(
     def _subset(samples, z_pivot, include_alpha_beta=False, include_m0_agn=False):
         X = np.asarray(samples)
         cols = []
+        names = []
         lab_latex = []
         units_latex = []
 
         if include_m0_agn:
             cols.append(X[:, idx["M0_agn"]])
+            names.append("M0_agn")
             lab_latex.append(latex["M0_agn"])
             units_latex.append("")
 
         if include_alpha_beta:
             cols.append(X[:, idx["alpha_agn"]])
             cols.append(X[:, idx["beta_agn"]])
-            lab_latex.append(latex["alpha_agn"])
-            lab_latex.append(latex["beta_agn"])
+            names += ["alpha_agn", "beta_agn"]
+            lab_latex += [latex["alpha_agn"], latex["beta_agn"]]
             units_latex += ["", ""]
 
         cols.append(X[:, idx["H0"]])
         cols.append(X[:, idx["Om0"]])
-        lab_latex.append(latex["H0"])
-        lab_latex.append(latex["Om0"])
+        names += ["H0", "Om0"]
+        lab_latex += [latex["H0"], latex["Om0"]]
         units_latex += ["(km s$^{-1}$ Mpc$^{-1}$)", ""]
 
         if cosmo_model == "FlatwpwaCDM":
@@ -675,14 +676,17 @@ def plot_cosmo_corner(
             a_p = 1.0 / (1.0 + float(z_pivot))
             w0 = wp - (1.0 - a_p) * wa
             cols += [w0, wa]
+            names += ["w0", "wa"]
             lab_latex += [r"$w_0$", latex["wa"]]
             units_latex += ["", ""]
         elif cosmo_model == "Flatw0waCDM":
             cols += [X[:, idx["w0"]], X[:, idx["wa"]]]
+            names += ["w0", "wa"]
             lab_latex += [latex["w0"], latex["wa"]]
             units_latex += ["", ""]
         elif cosmo_model == "FlatwCDM":
             cols += [X[:, idx["w0"]]]
+            names += ["w0"]
             lab_latex += [latex["w0"]]
             units_latex += [""]
         elif cosmo_model == "FlatLambdaCDM":
@@ -691,8 +695,7 @@ def plot_cosmo_corner(
             raise ValueError(f"Unsupported cosmo_model '{cosmo_model}' for this plot.")
 
         Y = np.column_stack(cols)
-        return Y, lab_latex, units_latex
-
+        return Y, names, lab_latex, units_latex
     def _fmt_err(m, lo, hi, latex_label=""):
         nd = 1 if latex_label == latex["H0"] else 2
         return f"{m:.{nd}f}", f"{hi - m:.{nd}f}", f"{m - lo:.{nd}f}"
@@ -762,7 +765,7 @@ def plot_cosmo_corner(
         return xmin, xmax, ymin, ymax
 
     # --- reduce to plotted params ---
-    agn_data, labels_latex, units_latex = _subset(
+    agn_data, agn_names, labels_latex, units_latex = _subset(
         flat_samples_agn,
         z_pivot_agn,
         include_alpha_beta=include_alpha_beta,
@@ -770,8 +773,9 @@ def plot_cosmo_corner(
     )
 
     sna_data = None
+    sna_names = None
     if flat_samples_sn is not None and len(flat_samples_sn) > 0:
-        sna_data, _, _ = _subset(
+        sna_data, sna_names, _, _ = _subset(
             flat_samples_sn,
             z_pivot_sna,
             include_alpha_beta=False,
@@ -812,11 +816,19 @@ def plot_cosmo_corner(
 
                 # SN Ia on top
                 if has_sn_here:
-                    mb  = np.median(sna_data[:, i_sn])
-                    lob = np.percentile(sna_data[:, i_sn], 16)
-                    hib = np.percentile(sna_data[:, i_sn], 84)
-                    msb, psb, nsb = _fmt_err(mb, lob, hib, latex_label=labels_latex[i])
-                    txt_blue = rf"{labels_latex[i]} = {msb}" + rf"$^{{+{psb}}}_{{-{nsb}}}$" + f" {units_latex[i]}"
+                    median, err, err_lower, err_upper = sym_percentile(sna_data[:, i_sn])
+                    if sna_names[i_sn] in ['w0']:
+                        txt_value = format_result_errors(
+                            median, err_lower=err_lower, err_upper=err_upper, nd=2
+                        )
+                    if sna_names[i_sn] in ['wa']:
+                        txt_value = format_result_errors(
+                            median, err_lower=err_lower, err_upper=err_upper, nd=1
+                        )
+                    else:
+                        txt_value = format_result_errors(median, err=err)
+
+                    txt_blue = rf"{labels_latex[i]} = ${txt_value}$ {units_latex[i]}"
                     off_blue = mtransforms.ScaledTranslation(0, 15 / 72., figt.dpi_scale_trans)
                     ax.text(
                         0.02, 1.0, txt_blue,
@@ -826,11 +838,19 @@ def plot_cosmo_corner(
                     )
 
                 # SN Ia + AGN on bottom
-                m  = np.median(agn_data[:, i])
-                lo = np.percentile(agn_data[:, i], 16)
-                hi = np.percentile(agn_data[:, i], 84)
-                ms, ps, ns = _fmt_err(m, lo, hi, latex_label=labels_latex[i])
-                txt_black = rf"{labels_latex[i]} = {ms}" + rf"$^{{+{ps}}}_{{-{ns}}}$" + f" {units_latex[i]}"
+                median, err, err_lower, err_upper = sym_percentile(agn_data[:, i])
+                if agn_names[i] in ['w0']:
+                    txt_value = format_result_errors(
+                        median, err_lower=err_lower, err_upper=err_upper, nd=2
+                    )
+                elif agn_names[i] in ['wa']:
+                    txt_value = format_result_errors(
+                        median, err_lower=err_lower, err_upper=err_upper, nd=1
+                    )
+                else:
+                    txt_value = format_result_errors(median, err=err)
+
+                txt_black = rf"{labels_latex[i]} = ${txt_value}$ {units_latex[i]}"
                 off_blk = mtransforms.ScaledTranslation(0, 2 / 72., figt.dpi_scale_trans)
                 ax.text(
                     0.02, 1.0, txt_black,
@@ -858,7 +878,6 @@ def plot_cosmo_corner(
                 ymax = max(l[3] for l in lims)
                 ax.set_xlim(xmin, xmax)
                 ax.set_ylim(ymin, ymax)
-
             if j == 0:
                 ax.set_ylabel(f"{labels_latex[i]} {units_latex[i]}")
             else:
@@ -882,7 +901,7 @@ def plot_cosmo_corner(
     os.makedirs(plot_path, exist_ok=True)
     _save_figure(
         fig,
-        os.path.join(plot_path, f"cosmo_corner_{cosmo_model}_{speed}_{'alphabeta' if include_alpha_beta else 'noalphabeta'}.pdf"),
+        os.path.join(plot_path, f"cosmo_corner_{cosmo_model}_{'alphabeta' if include_alpha_beta else 'noalphabeta'}.pdf"),
         dpi=600,
         show=show,
     )
