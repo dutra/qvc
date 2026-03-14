@@ -1,11 +1,9 @@
 """Shared utility functions for the QVC/Hubble fitting workflow."""
 
 import os
-import re
 import warnings
 
 import h5py
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from astropy.cosmology import FlatwCDM, Flatw0waCDM, FlatLambdaCDM, FlatwpwaCDM
@@ -741,169 +739,6 @@ def read_quasars_from_hdf5(file_path, N=None):
                 break
     return quasar_list
 
-def plot_m_vs_redshift(
-    df_before, df_after, cut_info="", save_path="plots/hubble/cuts/"
-):
-    """
-    Plot apparent_mag_2500 (AB) vs redshift in two panels:
-      - Left: All (before) vs Kept (after)
-      - Right: All (before) vs Removed (before - after)
-
-    Notes
-    -----
-    * `bins` kept for backward compatibility (unused).
-    * Expects columns: 'object_id', 'z', 'apparent_mag_2500'.
-    """
-    import os, re
-    import numpy as np
-    import matplotlib.pyplot as plt
-    import matplotlib.gridspec as gridspec
-
-    if len(df_before) == len(df_after):
-        return
-
-    os.makedirs(os.path.dirname(save_path), exist_ok=True)
-
-    # Identify removed rows by object_id
-    before_ids  = set(df_before['object_id'].astype(str))
-    after_ids   = set(df_after['object_id'].astype(str))
-    removed_ids = before_ids - after_ids
-    df_removed  = df_before[df_before['object_id'].astype(str).isin(removed_ids)]
-
-    # Extract finite data
-    def _finite(df):
-        z  = df['z'].to_numpy(dtype=float)
-        m  = df['apparent_mag_2500'].to_numpy(dtype=float)
-        ok = np.isfinite(z) & np.isfinite(m)
-        return z[ok], m[ok]
-
-    z_all,    m_all    = _finite(df_before)
-    z_kept,   m_kept   = _finite(df_after)
-    z_removed, m_removed = _finite(df_removed)
-
-    # Axis limits shared across panels
-    if z_all.size:
-        x_min, x_max = np.nanmin(z_all), np.nanmax(z_all)
-    else:
-        x_min, x_max = 0.0, 1.0
-    m_concat = np.concatenate([m_all, m_kept, m_removed]) if m_all.size else np.array([])
-    if m_concat.size:
-        y_min, y_max = np.nanmin(m_concat), np.nanmax(m_concat)
-    else:
-        y_min, y_max = 16.0, 28.0
-
-    # Figure with two panels
-    fig = plt.figure(figsize=(13, 6))
-    gs = gridspec.GridSpec(1, 2, width_ratios=[1, 1], wspace=0.15)
-
-    # Panel 1: All vs Kept
-    ax1 = fig.add_subplot(gs[0])
-    if z_all.size:
-        ax1.scatter(z_all, m_all, s=6, alpha=0.8, c='blue', linewidths=0, label='All', rasterized=True)
-    if z_kept.size:
-        ax1.scatter(z_kept, m_kept, s=8, alpha=0.8, c='orange', linewidths=0, label='Kept', rasterized=True)
-    ax1.set_xlabel("Redshift $z$")
-    ax1.set_ylabel(r"$m_{2500}$ (AB)")
-    ax1.set_xlim(x_min, x_max)
-    ax1.set_ylim(18, 30)
-    ax1.grid(True, alpha=0.3)
-    ax1.set_title("All vs Kept")
-    ax1.legend(loc="best", frameon=False)
-
-    # Panel 2: All vs Removed
-    ax2 = fig.add_subplot(gs[1])
-    if z_all.size:
-        ax2.scatter(z_all, m_all, s=6, alpha=0.8, c='blue', linewidths=0, label='All', rasterized=True)
-    if z_removed.size:
-        ax2.scatter(z_removed, m_removed, s=8, alpha=0.8, c='red', linewidths=0, label='Removed', rasterized=True)
-    ax2.set_xlabel("Redshift $z$")
-    ax2.set_ylabel(r"$m_{2500}$ (AB)")
-    ax2.set_xlim(x_min, x_max)
-    ax2.set_ylim(18, 30)
-    ax2.grid(True, alpha=0.3)
-
-    ax2.set_title("All vs Removed")
-    ax2.legend(loc="best", frameon=False)
-
-    # Annotate cut info
-    if cut_info:
-        fig.text(0.5, 0.01, f"Cut info: {cut_info}", ha='center', va='bottom', fontsize=11, color='k')
-
-    # Save
-    safe_cut_info = re.sub(r'[^A-Za-z0-9._-]+', '_', str(cut_info)) if cut_info else ""
-    filename = f"m2500_vs_z_cuts_{safe_cut_info}.png" if safe_cut_info else "m2500_vs_z_cuts.png"
-    plot_path = os.path.join(os.path.dirname(save_path), filename)
-    plt.tight_layout(rect=(0, 0.03, 1, 1))
-    plt.savefig(plot_path, dpi=150)
-    plt.close()
-
-
-def plot_redshift_histogram(df_before, df_after, bins=30, cut_info="", save_path="plots/hubble/cuts/"):
-    """
-    Plot a histogram of object counts vs redshift and save the figure.
-
-    Parameters
-    ----------
-    df : pd.DataFrame
-        DataFrame containing a 'z' column for redshift.
-    bins : int or sequence, optional
-        Number of bins or bin edges for the histogram.
-    save_path : str, optional
-        Path to save the output figure.
-    """
-    import matplotlib.gridspec as gridspec
-    
-    if len(df_before) == len(df_after):
-        return
-    os.makedirs(os.path.dirname(save_path), exist_ok=True)
-
-    # Prepare data
-    before_ids = set(df_before['object_id'].astype(str))
-    after_ids = set(df_after['object_id'].astype(str))
-    removed_ids = before_ids - after_ids
-    df_removed = df_before[df_before['object_id'].astype(str).isin(removed_ids)]
-
-    hist_before, bin_edges = np.histogram(df_before['z'].dropna(), bins=bins)
-    hist_after, _ = np.histogram(df_after['z'].dropna(), bins=bin_edges)
-    hist_removed, _ = np.histogram(df_removed['z'].dropna(), bins=bin_edges)
-    bin_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
-
-    # Create a figure with two panels side by side
-    fig = plt.figure(figsize=(13, 5))
-    gs = gridspec.GridSpec(1, 2, width_ratios=[1, 1])
-
-    # Panel 1: Histogram of all vs kept
-    ax1 = fig.add_subplot(gs[0])
-    ax1.hist(df_before['z'].dropna(), bins=bin_edges, color='tab:blue', alpha=0.7, edgecolor='k', label='All')
-    ax1.hist(df_after['z'].dropna(), bins=bin_edges, color='tab:orange', alpha=0.7, edgecolor='k', label='Kept')
-    ax1.set_xlabel("Redshift (z)")
-    ax1.set_ylabel("Number of objects")
-    ax1.set_title("Histogram of Objects vs Redshift")
-    ax1.legend()
-
-    # Panel 2: Histogram of removed objects
-    ax2 = fig.add_subplot(gs[1])
-    ax2.hist(df_before['z'].dropna(), bins=bin_edges, color='tab:blue', alpha=0.7, edgecolor='k', label='All')
-    ax2.bar(bin_centers, hist_removed, width=np.diff(bin_edges), color='tab:red', alpha=0.7, edgecolor='k', label='Removed')
-    ax2.set_xlabel("Redshift (z)")
-    ax2.set_ylabel("Number removed")
-    ax2.set_title("Removed Objects by Redshift")
-    ax2.legend()
-
-    # Annotate the cut_info as text on the figure
-    if cut_info:
-        fig.text(0.5, 0.01, f"Cut info: {cut_info}", ha='center', va='bottom', fontsize=12, color='k')
-
-    plt.tight_layout()
-
-    # Build the output file path using cut_info
-    # Make cut_info safe for filenames (replace spaces and special chars)
-    safe_cut_info = re.sub(r'[^A-Za-z0-9._-]+', '_', str(cut_info)) if cut_info else ""
-    filename = f"redshift_histogram_{safe_cut_info}.png" if safe_cut_info else "redshift_histogram.png"
-    plot_path = os.path.join(os.path.dirname(save_path), filename)
-    plt.savefig(plot_path, dpi=150)
-    plt.close()
-
 def make_psf_minus_fiber_correction_fn(z, psf_minus_fiber_i, z_window=0.5):
     """
     Given arrays of z and psf_minus_fiber_i, returns two callables:
@@ -1019,82 +854,6 @@ def make_psf_minus_fiber_correction_fn(z, psf_minus_fiber_i, z_window=0.5):
     return dm_of_z, dm_err_of_z
 
 
-def plot_m2500_correction(
-    dm_of_z, z, m2500_uncorrected,
-    title="m2500 vs redshift (correction comparison)",
-    show=False, alpha=0.5, s=5,
-    plot_path="plots/hubble/diagnostics",
-):
-
-    # Mask out m2500_uncorrected values outside the range [1, 30]
-    valid_mask = (m2500_uncorrected >= 1) & (m2500_uncorrected <= 30)
-    z = z[valid_mask]
-    m2500_uncorrected = m2500_uncorrected[valid_mask]
-
-    dm_values = dm_of_z(z)
-
-    # Plot dm_of_z vs z
-    plt.figure(figsize=(8, 6))
-    plt.scatter(z, dm_values, label='dm_of_z', color='blue', s=0.5)
-    plt.xlabel('Redshift (z)')
-    plt.ylabel('dm PSF-Fiber')
-    plt.grid(alpha=0.3)
-    plt.legend()
-    plt.tight_layout()
-    os.makedirs(plot_path, exist_ok=True)
-    plt.savefig(os.path.join(plot_path, "dm_psf_fiber_vs_redshift.png"), dpi=200)
-    if show:
-        plt.show()
-    plt.close()
-
-    m2500_corrected = m2500_uncorrected - dm_values
-    mc = np.asarray(m2500_corrected, dtype=float)
-    mu = np.asarray(m2500_uncorrected, dtype=float)
-
-    # Basic validation
-    if not (z.shape == mc.shape == mu.shape):
-        raise ValueError("z, m2500_corrected, and m2500_uncorrected must have the same shape.")
-    mask = np.isfinite(z) & np.isfinite(mc) & np.isfinite(mu)
-    if mask.sum() < 3:
-        raise ValueError("Not enough finite points to plot.")
-
-    z, mc, mu = z[mask], mc[mask], mu[mask]
-    dmag = mc - mu
-
-    # Sort by redshift for optional line joins (keeps scatter as-is)
-    idx = np.argsort(z)
-    z_s, mc_s, mu_s, dmag_s = z[idx], mc[idx], mu[idx], dmag[idx]
-
-    fig = plt.figure(figsize=(7.5, 7.5))
-    gs = fig.add_gridspec(nrows=2, ncols=1, height_ratios=[2.0, 1.0], hspace=0.08)
-
-    # Top: m vs z
-    ax1 = fig.add_subplot(gs[0])
-    ax1.scatter(z, mu, s=s, alpha=alpha, label="m2500 (uncorrected)")
-    ax1.scatter(z, mc, s=s, alpha=alpha, label="m2500 (corrected)")
-
-    ax1.set_ylabel(r"$m_{2500}$")
-    ax1.set_title(title)
-    ax1.legend(loc="best", frameon=False)
-    ax1.grid(True, ls=":", alpha=0.3)
-
-    # Bottom: residuals Δm
-    ax2 = fig.add_subplot(gs[1], sharex=ax1)
-    ax2.axhline(0.0, lw=1.0, color="k", alpha=0.6)
-    ax2.scatter(z, dmag, s=s, alpha=alpha, label=r"$\Delta m = m_{2500}^{\rm corr} - m_{2500}^{\rm uncorr}$")
-    ax2.plot(z_s, dmag_s, lw=0.8, alpha=0.5)
-
-    ax2.set_xlabel("redshift z")
-    ax2.set_ylabel(r"$\Delta m$")
-    ax2.grid(True, ls=":", alpha=0.3)
-    ax2.legend(loc="best", frameon=False)
-
-    os.makedirs(plot_path, exist_ok=True)
-    fig.savefig(os.path.join(plot_path, "m2500_psf_fiber_correction_comparison.png"), dpi=200, bbox_inches="tight")
-    if show:
-        plt.show()
-    plt.close()
-
 import pickle
 def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=10,
                   exclude_object_ids_csv=[],
@@ -1103,6 +862,7 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=10,
                   pickled=False,
                   iron_frac_cut=None, redchi2_cut=None,
                   sdss_mags_csv=None, lc_info_csv="data/aug4_sample_chisqg10_ebv005sn3_lcdata.csv"):
+    from hubble_plotting import plot_m2500_correction, plot_m_vs_redshift, plot_redshift_histogram
     
     if pickled:
         with open(file_path + ".pkl", "rb") as f: 

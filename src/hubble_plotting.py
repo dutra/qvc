@@ -1,32 +1,221 @@
 import numpy as np
-from matplotlib.lines import Line2D
-from scipy.stats import gaussian_kde
-from tqdm import tqdm
+import os
 import math
-import corner
-import pandas as pd
-from scipy.interpolate import RegularGridInterpolator
+import re
 
+import corner
 import matplotlib as mpl
+import matplotlib.gridspec as gridspec
+import matplotlib.pyplot as plt
+import matplotlib.transforms as mtransforms
+import pandas as pd
 from mpl_toolkits.axes_grid1.inset_locator import inset_axes
 from astropy.cosmology import FlatwCDM, FlatwpwaCDM, FlatLambdaCDM, Flatw0waCDM
 from astropy.cosmology.realizations import Planck18
 from astropy import units as u
-import matplotlib.pyplot as plt
-import os
-
-import copy
-import matplotlib.transforms as mtransforms
+from matplotlib.lines import Line2D
+from matplotlib.ticker import LogLocator
+from scipy.interpolate import RegularGridInterpolator, interp1d
+from scipy.stats import gaussian_kde
+from tqdm import tqdm
 
 from hubble_model import (M_model_agn, M_model_agn_err, get_model_params, agn_model_pack_params,
-    agn_model_pack_obs, agn_model_eidx, agn_model_oidx, agn_model_pidx)
+    agn_model_pack_obs, agn_model_oidx, agn_model_pidx, agn_model_req_obs, agn_model_req_errs)
 from hubble_likelihood import sigma_lens_from_dc
 from hubble_utils import convert_M2500_to_logL2500, cosmo_model_label_latex
-from hubble_model import agn_model_req_obs, agn_model_req_errs
-#from hubble_completeness import make_dm_function
 from dynesty.utils import resample_equal
-from tqdm import tqdm
 from dynesty import plotting as dyplot
+
+
+def plot_m_vs_redshift(df_before, df_after, cut_info="", save_path="plots/hubble/cuts/"):
+    """
+    Plot apparent_mag_2500 (AB) vs redshift in two panels:
+      - Left: All (before) vs Kept (after)
+      - Right: All (before) vs Removed (before - after)
+
+    Expects columns: 'object_id', 'z', 'apparent_mag_2500'.
+    """
+    if len(df_before) == len(df_after):
+        return
+
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+
+    before_ids = set(df_before["object_id"].astype(str))
+    after_ids = set(df_after["object_id"].astype(str))
+    removed_ids = before_ids - after_ids
+    df_removed = df_before[df_before["object_id"].astype(str).isin(removed_ids)]
+
+    def _finite(df):
+        z = df["z"].to_numpy(dtype=float)
+        m = df["apparent_mag_2500"].to_numpy(dtype=float)
+        ok = np.isfinite(z) & np.isfinite(m)
+        return z[ok], m[ok]
+
+    z_all, m_all = _finite(df_before)
+    z_kept, m_kept = _finite(df_after)
+    z_removed, m_removed = _finite(df_removed)
+
+    if z_all.size:
+        x_min, x_max = np.nanmin(z_all), np.nanmax(z_all)
+    else:
+        x_min, x_max = 0.0, 1.0
+
+    fig = plt.figure(figsize=(13, 6))
+    gs = gridspec.GridSpec(1, 2, width_ratios=[1, 1], wspace=0.15)
+
+    ax1 = fig.add_subplot(gs[0])
+    if z_all.size:
+        ax1.scatter(z_all, m_all, s=6, alpha=0.8, c="blue", linewidths=0, label="All", rasterized=True)
+    if z_kept.size:
+        ax1.scatter(z_kept, m_kept, s=8, alpha=0.8, c="orange", linewidths=0, label="Kept", rasterized=True)
+    ax1.set_xlabel("Redshift $z$")
+    ax1.set_ylabel(r"$m_{2500}$ (AB)")
+    ax1.set_xlim(x_min, x_max)
+    ax1.set_ylim(18, 30)
+    ax1.grid(True, alpha=0.3)
+    ax1.set_title("All vs Kept")
+    ax1.legend(loc="best", frameon=False)
+
+    ax2 = fig.add_subplot(gs[1])
+    if z_all.size:
+        ax2.scatter(z_all, m_all, s=6, alpha=0.8, c="blue", linewidths=0, label="All", rasterized=True)
+    if z_removed.size:
+        ax2.scatter(z_removed, m_removed, s=8, alpha=0.8, c="red", linewidths=0, label="Removed", rasterized=True)
+    ax2.set_xlabel("Redshift $z$")
+    ax2.set_ylabel(r"$m_{2500}$ (AB)")
+    ax2.set_xlim(x_min, x_max)
+    ax2.set_ylim(18, 30)
+    ax2.grid(True, alpha=0.3)
+    ax2.set_title("All vs Removed")
+    ax2.legend(loc="best", frameon=False)
+
+    if cut_info:
+        fig.text(0.5, 0.01, f"Cut info: {cut_info}", ha="center", va="bottom", fontsize=11, color="k")
+
+    safe_cut_info = re.sub(r"[^A-Za-z0-9._-]+", "_", str(cut_info)) if cut_info else ""
+    filename = f"m2500_vs_z_cuts_{safe_cut_info}.png" if safe_cut_info else "m2500_vs_z_cuts.png"
+    plot_path = os.path.join(os.path.dirname(save_path), filename)
+    plt.tight_layout(rect=(0, 0.03, 1, 1))
+    plt.savefig(plot_path, dpi=150)
+    plt.close()
+
+
+def plot_redshift_histogram(df_before, df_after, bins=30, cut_info="", save_path="plots/hubble/cuts/"):
+    """Plot before/after and removed-object redshift histograms."""
+    if len(df_before) == len(df_after):
+        return
+
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+
+    before_ids = set(df_before["object_id"].astype(str))
+    after_ids = set(df_after["object_id"].astype(str))
+    removed_ids = before_ids - after_ids
+    df_removed = df_before[df_before["object_id"].astype(str).isin(removed_ids)]
+
+    _, bin_edges = np.histogram(df_before["z"].dropna(), bins=bins)
+    hist_removed, _ = np.histogram(df_removed["z"].dropna(), bins=bin_edges)
+    bin_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
+
+    fig = plt.figure(figsize=(13, 5))
+    gs = gridspec.GridSpec(1, 2, width_ratios=[1, 1])
+
+    ax1 = fig.add_subplot(gs[0])
+    ax1.hist(df_before["z"].dropna(), bins=bin_edges, color="tab:blue", alpha=0.7, edgecolor="k", label="All")
+    ax1.hist(df_after["z"].dropna(), bins=bin_edges, color="tab:orange", alpha=0.7, edgecolor="k", label="Kept")
+    ax1.set_xlabel("Redshift (z)")
+    ax1.set_ylabel("Number of objects")
+    ax1.set_title("Histogram of Objects vs Redshift")
+    ax1.legend()
+
+    ax2 = fig.add_subplot(gs[1])
+    ax2.hist(df_before["z"].dropna(), bins=bin_edges, color="tab:blue", alpha=0.7, edgecolor="k", label="All")
+    ax2.bar(bin_centers, hist_removed, width=np.diff(bin_edges), color="tab:red", alpha=0.7, edgecolor="k", label="Removed")
+    ax2.set_xlabel("Redshift (z)")
+    ax2.set_ylabel("Number removed")
+    ax2.set_title("Removed Objects by Redshift")
+    ax2.legend()
+
+    if cut_info:
+        fig.text(0.5, 0.01, f"Cut info: {cut_info}", ha="center", va="bottom", fontsize=12, color="k")
+
+    plt.tight_layout()
+    safe_cut_info = re.sub(r"[^A-Za-z0-9._-]+", "_", str(cut_info)) if cut_info else ""
+    filename = f"redshift_histogram_{safe_cut_info}.png" if safe_cut_info else "redshift_histogram.png"
+    plot_path = os.path.join(os.path.dirname(save_path), filename)
+    plt.savefig(plot_path, dpi=150)
+    plt.close()
+
+
+def plot_m2500_correction(
+    dm_of_z,
+    z,
+    m2500_uncorrected,
+    title="m2500 vs redshift (correction comparison)",
+    show=False,
+    alpha=0.5,
+    s=5,
+    plot_path="plots/hubble/diagnostics",
+):
+    valid_mask = (m2500_uncorrected >= 1) & (m2500_uncorrected <= 30)
+    z = z[valid_mask]
+    m2500_uncorrected = m2500_uncorrected[valid_mask]
+
+    dm_values = dm_of_z(z)
+
+    plt.figure(figsize=(8, 6))
+    plt.scatter(z, dm_values, label="dm_of_z", color="blue", s=0.5)
+    plt.xlabel("Redshift (z)")
+    plt.ylabel("dm PSF-Fiber")
+    plt.grid(alpha=0.3)
+    plt.legend()
+    plt.tight_layout()
+    os.makedirs(plot_path, exist_ok=True)
+    plt.savefig(os.path.join(plot_path, "dm_psf_fiber_vs_redshift.png"), dpi=200)
+    if show:
+        plt.show()
+    plt.close()
+
+    m2500_corrected = m2500_uncorrected - dm_values
+    mc = np.asarray(m2500_corrected, dtype=float)
+    mu = np.asarray(m2500_uncorrected, dtype=float)
+
+    if not (z.shape == mc.shape == mu.shape):
+        raise ValueError("z, m2500_corrected, and m2500_uncorrected must have the same shape.")
+    mask = np.isfinite(z) & np.isfinite(mc) & np.isfinite(mu)
+    if mask.sum() < 3:
+        raise ValueError("Not enough finite points to plot.")
+
+    z, mc, mu = z[mask], mc[mask], mu[mask]
+    dmag = mc - mu
+
+    idx = np.argsort(z)
+    z_s, dmag_s = z[idx], dmag[idx]
+
+    fig = plt.figure(figsize=(7.5, 7.5))
+    gs = fig.add_gridspec(nrows=2, ncols=1, height_ratios=[2.0, 1.0], hspace=0.08)
+
+    ax1 = fig.add_subplot(gs[0])
+    ax1.scatter(z, mu, s=s, alpha=alpha, label="m2500 (uncorrected)")
+    ax1.scatter(z, mc, s=s, alpha=alpha, label="m2500 (corrected)")
+    ax1.set_ylabel(r"$m_{2500}$")
+    ax1.set_title(title)
+    ax1.legend(loc="best", frameon=False)
+    ax1.grid(True, ls=":", alpha=0.3)
+
+    ax2 = fig.add_subplot(gs[1], sharex=ax1)
+    ax2.axhline(0.0, lw=1.0, color="k", alpha=0.6)
+    ax2.scatter(z, dmag, s=s, alpha=alpha, label=r"$\Delta m = m_{2500}^{\rm corr} - m_{2500}^{\rm uncorr}$")
+    ax2.plot(z_s, dmag_s, lw=0.8, alpha=0.5)
+    ax2.set_xlabel("redshift z")
+    ax2.set_ylabel(r"$\Delta m$")
+    ax2.grid(True, ls=":", alpha=0.3)
+    ax2.legend(loc="best", frameon=False)
+
+    os.makedirs(plot_path, exist_ok=True)
+    fig.savefig(os.path.join(plot_path, "m2500_psf_fiber_correction_comparison.png"), dpi=200, bbox_inches="tight")
+    if show:
+        plt.show()
+    plt.close()
 
 def plot_dynesty(results, cosmo_model, plot_path="plots/hubble", only_sna="", speed="", show=False):
     """
@@ -1680,12 +1869,6 @@ def plot_full_residuals(
     os.makedirs(plot_path, exist_ok=True)
     plt.savefig(os.path.join(plot_path, f"full_residuals_{'debiased' if debias else 'biased'}_y{key_y}_c{key_color}_zcut{z_cut}.png"), dpi=150)
     plt.close()
-
-from scipy.interpolate import interp1d
-from matplotlib.ticker import LogLocator, FormatStrFormatter
-import matplotlib.gridspec as gridspec
-
-from scipy.stats import gaussian_kde
 
 def _kde_conf_levels(Z, conf=(0.954, 0.683), plot_path=None):
     """
