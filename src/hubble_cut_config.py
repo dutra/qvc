@@ -1,14 +1,14 @@
 """Default AGN selection-cut configuration for the QVC pipeline."""
 
 DEFAULT_F_HOST_CUT = 0.1
-DEFAULT_IRON_FRAC_CUT = 10.0
 DEFAULT_REDCHI2_CONTI_FULL_CUT = 1.2
+DEFAULT_IRON_FRAC_CUT = 1.0 # Wide default cut that allows all values to pass
 DEFAULT_LOG_AMP_DELTA_BLR_UPPER_CUTS = {
-    "u": 0.0,
-    "g": 0.0,
-    "r": 0.0,
-    "i": 0.0,
-}
+    "u": 10.0,
+    "g": 10.0,
+    "r": 10.0,
+    "i": 10.0,
+} # Wide default cuts that allow all values to pass
 
 
 def build_agn_cuts(
@@ -37,7 +37,7 @@ def build_agn_cuts(
         ("iron_frac", None, iron_frac_cut),
         ("log_tau_UV_RF_err", 0.0, 1.0),
         ("log_sigma_UV_err", 0.0, 0.3),
-        ("f_host_center", -1.0, f_host_cut),
+        ("f_host_center", None, f_host_cut),
     ]
 
 
