@@ -2935,10 +2935,6 @@ def plot_m2500_vs_z_colorpanels(
                markersize=6, linestyle="None", label="Kept in z-range"),
         Line2D([0], [0], marker="D", color="none", markerfacecolor="0.4", markeredgecolor="0.4",
                markersize=6, linestyle="None", label="Cut in z-range"),
-        Line2D([0], [0], marker="o", color="none", markerfacecolor="none", markeredgecolor="0.4",
-               markeredgewidth=1.3, markersize=6, linestyle="None", label="Kept outside z-range"),
-        Line2D([0], [0], marker="D", color="none", markerfacecolor="none", markeredgecolor="0.4",
-               markeredgewidth=1.3, markersize=6, linestyle="None", label="Cut outside z-range"),
     ]
 
     for ax, ccol in zip(axes, color_cols):
