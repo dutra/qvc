@@ -710,11 +710,12 @@ def main():
                     save_combined_plot(
                         obj_flat_samples,
                         m,
-                        obj["X"],# + obj["time0"],
+                        obj["X"],
                         obj["y"],
                         obj["yerr"],
                         obj["band_idx"],
                         obj["mags_means"],
+                        obj["survey_times"],
                         result,
                         time0=obj["time0"],
                         bands=bands,

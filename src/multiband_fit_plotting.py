@@ -643,60 +643,131 @@ def bootstrap_lomb_scargle(
     }
 
 
-def save_combined_plot(samples, model, X, y, yerr, band_idx, mags_means, data, bands=['u', 'g', 'r', 'i', 'z'], plot_psd=True, time0=0.0):
+def save_combined_plot(samples, model, X, y, yerr, band_idx, mags_means, survey_times,
+                       data, bands=['u', 'g', 'r', 'i', 'z'], plot_psd=True, show=False, time0=0.0):
+    import os
+    import logging
+    import numpy as np
+    import matplotlib.pyplot as plt
+    import matplotlib.transforms as mtransforms
+
     logging.info("Saving combined plot")
 
     object_id = data['object_id']
     band_idx_map = {i: b for i, b in enumerate(bands)}
 
-    fig, (ax_lc, ax_psd) = plt.subplots(2, 1, figsize=(10, 10), sharex=False, gridspec_kw={'height_ratios': [1.5, 1]})
+    fig, (ax_lc, ax_psd) = plt.subplots(
+        2, 1, figsize=(10, 10), sharex=False,
+        gridspec_kw={'height_ratios': [1.5, 1]}
+    )
     offsets = np.arange(len(bands)) * 0.25 + mags_means[bands.index('r')]
 
-
     t = X[0] + time0
+    posterior_median = {k: np.median(v, axis=0) for k, v in samples.items()}
+
     for n in np.unique(band_idx):
         mask = (band_idx == n) & (yerr < 10.0)
 
         # Plot the observed data
         n_red = bands.index('r')
         offset = offsets[n] - offsets[n_red]
-        label = f'{band_idx_map[n]}-band {'$+$' if offset > 0 else "$-$"} {np.abs(offset):.2f} mag' if band_idx_map[n] != 'r' else f'{band_idx_map[n]}-band'
-        ax_lc.errorbar(t[mask], y[mask]+offsets[n], yerr=yerr[mask], fmt='o', 
-            label=label, alpha=0.7, color=colors[band_idx_map[n]], lw=1, capsize=2, markersize=3)
+        if band_idx_map[n] != 'r':
+            sign = '$+$' if offset > 0 else '$-$'
+            label = f"{band_idx_map[n]}-band {sign} {np.abs(offset):.2f} mag"
+        else:
+            label = f"{band_idx_map[n]}-band"
+
+        ax_lc.errorbar(
+            t[mask], y[mask] + offsets[n], yerr=yerr[mask], fmt='o',
+            label=label, alpha=0.7, color=colors[band_idx_map[n]],
+            lw=1, capsize=2, markersize=3
+        )
 
         # Generate test times for predictions
         t_test = np.linspace(t.min() - 400, t.max() + 400, 1000)
+
         # Compute predictions using the model
-        posterior_median = {k: np.median(v, axis=0) for k, v in samples.items()}
         result = model.pred(posterior_median, (t_test - time0, jnp.full_like(t_test, n, dtype=int)))
 
         # Plot the predictions
         if len(result) == 2:
             mu, std = result
-            ax_lc.plot(t_test, mu+offsets[n], alpha=0.8, color=colors[band_idx_map[n]], lw=1.5)
-            ax_lc.fill_between(t_test, mu+offsets[n]-std, mu+offsets[n]+std, alpha=0.3, 
-                lw=0.5, color=colors[band_idx_map[n]])
+            ax_lc.plot(t_test, mu + offsets[n], alpha=0.8, color=colors[band_idx_map[n]], lw=1.5)
+            ax_lc.fill_between(
+                t_test, mu + offsets[n] - std, mu + offsets[n] + std,
+                alpha=0.3, lw=0.5, color=colors[band_idx_map[n]]
+            )
         else:
             mu, std, mu_cont, std_cont, mu_blr, std_blr = result
-            # Plot the continuum and BLR components if available
-            ax_lc.plot(t_test, mu_cont + offsets[n], alpha=0.5
-                    , color=colors[band_idx_map[n]], lw=1.0, label=f'{band_idx_map[n]}-band continuum', linestyle='--')
-            ax_lc.fill_between(t_test, mu_cont + offsets[n] - std_cont,
-                               mu_cont + offsets[n] + std_cont, alpha=0.15, lw=0.5, color=colors[band_idx_map[n]])
-            ax_lc.plot(t_test, mu_blr + offsets[n], alpha=0.5,
-                    color=colors[band_idx_map[n]], lw=1.0, label=f'{band_idx_map[n]}-band BLR', linestyle=':')
-            ax_lc.fill_between(t_test, mu_blr + offsets[n] - std_blr,
-                               mu_blr + offsets[n] + std_blr, alpha=0.15, lw=0.5, color=colors[band_idx_map[n]])
-            # Total
+
+            ax_lc.plot(
+                t_test, mu_cont + offsets[n], alpha=0.5,
+                color=colors[band_idx_map[n]], lw=1.0,
+                label=f'{band_idx_map[n]}-band continuum', linestyle='--'
+            )
+            ax_lc.fill_between(
+                t_test, mu_cont + offsets[n] - std_cont,
+                mu_cont + offsets[n] + std_cont,
+                alpha=0.15, lw=0.5, color=colors[band_idx_map[n]]
+            )
+
+            ax_lc.plot(
+                t_test, mu_blr + offsets[n], alpha=0.5,
+                color=colors[band_idx_map[n]], lw=1.0,
+                label=f'{band_idx_map[n]}-band BLR', linestyle=':'
+            )
+            ax_lc.fill_between(
+                t_test, mu_blr + offsets[n] - std_blr,
+                mu_blr + offsets[n] + std_blr,
+                alpha=0.15, lw=0.5, color=colors[band_idx_map[n]]
+            )
+
             ax_lc.plot(t_test, mu + offsets[n], alpha=0.8, color=colors[band_idx_map[n]], lw=1.0)
-            ax_lc.fill_between(t_test, mu + offsets[n] - std, mu + offsets[n] + std, alpha=0.3,
-                               lw=0.5, color=colors[band_idx_map[n]])
-    
+            ax_lc.fill_between(
+                t_test, mu + offsets[n] - std, mu + offsets[n] + std,
+                alpha=0.3, lw=0.5, color=colors[band_idx_map[n]]
+            )
+
     ax_lc.set_ylim(ax_lc.get_ylim()[0] - 0.24, ax_lc.get_ylim()[1])
     ax_lc.set_xlabel('Time (modified Julian days)')
     ax_lc.set_ylabel('Apparent magnitude')
     ax_lc.invert_yaxis()
     ax_lc.set_xlim(np.min(t_test), np.max(t_test))
+
+    # ---------------------------------------------------------
+    # Survey span lines (using survey_times dict)
+    # ---------------------------------------------------------
+    trans = mtransforms.blended_transform_factory(ax_lc.transData, ax_lc.transAxes)
+
+    survey_order = ['sdss', 'ps1', 'ztf']
+    survey_y = 0.03
+
+    for survey in survey_order:
+        times_s = np.asarray(survey_times.get(survey, []), dtype=float)
+        times_s = times_s[np.isfinite(times_s)]
+
+        if len(times_s) == 0:
+            continue
+
+        t0, t1 = np.min(times_s), np.max(times_s)
+        yfrac = survey_y
+
+        ax_lc.plot(
+            [t0, t1], [yfrac, yfrac],
+            transform=trans,
+            color='0.5', lw=3, alpha=0.9, solid_capstyle='butt',
+            zorder=10
+        )
+
+        ax_lc.text(
+            0.5 * (t0 + t1), yfrac - 0.015, survey.upper(),
+            transform=trans,
+            color='0.35', fontsize=10,
+            ha='center', va='bottom',
+            bbox=dict(boxstyle='round,pad=0.15', fc='white', ec='none', alpha=1),
+            zorder=11
+        )
+
     ax_lc.legend(loc='upper right')
 
     if plot_psd:
@@ -705,11 +776,9 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, mags_means, data, b
             posterior_median[k] = jnp.array(posterior_median[k])
 
         print("Plotting PSD...")
-        # PSD calculation and plotting
         freqs = np.logspace(-6, 2, 500)
 
         # Model PSD
-        # Compute model PSD for each posterior sample and plot the median and 16/84 percentiles
         psd_samples = []
         n_samp = np.min([50, len(samples['log_tau_drw0'])])
         for i in range(n_samp):
@@ -717,13 +786,13 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, mags_means, data, b
             psd_i = (2.0 * jnp.pi) * model.psd(sample_params, 2 * np.pi * freqs, b=0, sigma_n2=0.0)
             psd_samples.append(np.asarray(psd_i))
         psd_samples = np.stack(psd_samples, axis=0)
+
         psd_median = np.median(psd_samples, axis=0)
         psd_lo = np.percentile(psd_samples, 16, axis=0)
         psd_hi = np.percentile(psd_samples, 84, axis=0)
 
         ax_psd.plot(freqs, psd_median, lw=2, color='m', alpha=0.8, label="Model PSD", zorder=4)
         ax_psd.fill_between(freqs, psd_lo, psd_hi, color='m', alpha=0.2, zorder=3)
-
 
         boot_results = bootstrap_lomb_scargle(
             model,
@@ -735,21 +804,17 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, mags_means, data, b
         )
 
         f_bin        = np.asarray(boot_results["f_bin"])
-        P_bin_med    = np.asarray(boot_results["P_bin_med"])   # (n_bins,)
-        P_lo         = np.asarray(boot_results["P_bin_lo"])    # (n_bins,)
-        P_hi         = np.asarray(boot_results["P_bin_hi"])    # (n_bins,)
+        P_bin_med    = np.asarray(boot_results["P_bin_med"])
+        P_lo         = np.asarray(boot_results["P_bin_lo"])
+        P_hi         = np.asarray(boot_results["P_bin_hi"])
         P_noise_med  = np.asarray(boot_results["P_noise_med"])
         P_noise_lo   = np.asarray(boot_results["P_noise_lo"])
         P_noise_hi   = np.asarray(boot_results["P_noise_hi"])
 
-        # --- Renormalize data PSD to match model PSD at first bin ---
-        # Model PSD evaluated at the first data-PSD bin center
+        # Renormalize data PSD to match model PSD at first bin
         model_at_f0 = np.interp(f_bin[0], freqs, psd_median)
-
-        # Scale factor so that P_bin_med[0] == model_at_f0
         scale = model_at_f0 / P_bin_med[0]
 
-        # Apply the same scale to all PSD-related quantities
         P_bin_med   = P_bin_med   * scale
         P_lo        = P_lo        * scale
         P_hi        = P_hi        * scale
@@ -757,64 +822,49 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, mags_means, data, b
         P_noise_lo  = P_noise_lo  * scale
         P_noise_hi  = P_noise_hi  * scale
 
-        # --- Data PSD: points + thin errorbars + solid black curve ---
-
-        # Thinner error bars with larger caps
         ax_psd.errorbar(
             f_bin,
             P_bin_med,
-            yerr=[P_bin_med - P_lo, P_hi - P_bin_med],  # each (n_bins,)
+            yerr=[P_bin_med - P_lo, P_hi - P_bin_med],
             markersize=4,
-            fmt="o",           # no extra markers
+            fmt="o",
             color='k',
             ecolor="k",
-            elinewidth=0.8,       # thinner than model line
-            capsize=4.0,          # larger caps
+            elinewidth=0.8,
+            capsize=4.0,
             capthick=0.8,
             alpha=0.9,
             zorder=5,
             label="Lomb–Scargle PSD",
         )
 
+        ax_psd.axhline(
+            np.median(P_noise_med),
+            color='gray', linestyle='solid', lw=3,
+            label="Noise floor", zorder=-10
+        )
 
-        # Plot the noise level
-        ax_psd.axhline(np.median(P_noise_med), color='gray', linestyle='solid', lw=3, label="Noise floor", zorder=-10)
-
-        # Plot a vertical line at the posterior median log_tau_drw0 (if present)
-        # TODO: log_tau_eff = model.my_tau_drw_transform(posterior_median)  # scalar
-        # tau = jnp.exp(posterior_median['log_tau_drw0']) # obs frame
-        # tau_lo = jnp.exp(jnp.percentile(samples['log_tau_drw0'], 16))
-        # tau_hi = jnp.exp(jnp.percentile(samples['log_tau_drw0'], 84))
-        # ax_psd.axvspan(1.0 / (2*np.pi*tau_hi), 1.0 / (2*np.pi*tau_lo), color='c', alpha=0.15)
-        # ax_psd.axvline(1.0 / (2*np.pi*tau), color='c', linestyle='dotted', lw=1.5, alpha=0.7, label=r"$1/(2\,\pi\,\tau_{\mathrm{UV}})$", zorder=2)
-
-        # Central, lower, and upper tau (already what you had)
-        tau    = jnp.exp(posterior_median['log_tau_drw0'])  # obs frame
+        tau    = jnp.exp(posterior_median['log_tau_drw0'])
         tau_lo = jnp.exp(jnp.percentile(samples['log_tau_drw0'], 16))
         tau_hi = jnp.exp(jnp.percentile(samples['log_tau_drw0'], 84))
 
-        # Convert to frequencies: nu = 1 / (2π τ)
-        # Note: larger tau => smaller frequency, so be careful with ordering
         nu    = 1.0 / (2 * np.pi * float(tau))
-        nu_lo = 1.0 / (2 * np.pi * float(tau_hi))  # lower freq edge
-        nu_hi = 1.0 / (2 * np.pi * float(tau_lo))  # upper freq edge
+        nu_lo = 1.0 / (2 * np.pi * float(tau_hi))
+        nu_hi = 1.0 / (2 * np.pi * float(tau_lo))
 
-        # Asymmetric horizontal errors in x
-        xerr = np.array([[nu - nu_lo],   # left error
-                        [nu_hi - nu]])  # right error
+        xerr = np.array([
+            [nu - nu_lo],
+            [nu_hi - nu]
+        ])
 
-        # Choose a y-level where you want the dot to live on the PSD panel.
-        # For example, the geometric mean of the current y-limits (nice on log scale):
-        ymin, ymax = ax_psd.get_ylim()
-        y = 10**(0.5 * (np.log10(ymin) + np.log10(ymax)))
-        print("Plotting vertical line at nu =", nu, "corresponding to tau =", tau, "at y =", y)
+        print("Plotting vertical line at nu =", nu, "corresponding to tau =", tau)
         ax_psd.errorbar(
             nu, 2e4,
             xerr=xerr,
             yerr=None,
-            fmt='o',                 # dot
+            fmt='o',
             color='m',
-            markersize=5,          # larger marker
+            markersize=5,
             capsize=4,
             elinewidth=2,
             alpha=0.8,
@@ -822,7 +872,6 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, mags_means, data, b
             zorder=6,
         )
 
-        # PSD axis formatting
         ax_psd.set_xlabel("Frequency (days$^{-1}$)")
         ax_psd.set_ylabel(r"PSD ($\mathrm{mag}^2$ $\mathrm{days}$)")
         ax_psd.set_xscale("log")
@@ -839,9 +888,10 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, mags_means, data, b
     os.makedirs(output_dir, exist_ok=True)
     fpath = os.path.join(output_dir, f'{data["z"]:.1f}_{object_id}_light_curve_{suffix}.pdf')
     plt.savefig(fpath, dpi=600)
-    #fpath = os.path.join(output_dir, f'{data["z"]:.1f}_{object_id}_light_curve_{suffix}.pdf')
-    #plt.savefig(fpath, dpi=600)
+
     logging.info(f"Saving figure to {fpath}")
+    if show:
+        plt.show()
     plt.close(fig)
     
 
