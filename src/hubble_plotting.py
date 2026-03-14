@@ -11,6 +11,7 @@ import matplotlib as mpl
 from mpl_toolkits.axes_grid1.inset_locator import inset_axes
 from astropy.cosmology import FlatwCDM, FlatwpwaCDM, FlatLambdaCDM, Flatw0waCDM
 from astropy.cosmology.realizations import Planck18
+from astropy import units as u
 import matplotlib.pyplot as plt
 import os
 
@@ -20,7 +21,7 @@ import matplotlib.transforms as mtransforms
 from hubble_model import (M_model_agn, M_model_agn_err, get_model_params, agn_model_pack_params,
     agn_model_pack_obs, agn_model_eidx, agn_model_oidx, agn_model_pidx)
 from hubble_likelihood import sigma_lens_from_dc
-from hubble_utils import *
+from hubble_utils import convert_M2500_to_logL2500, cosmo_model_label_latex
 from hubble_model import agn_model_req_obs, agn_model_req_errs
 #from hubble_completeness import make_dm_function
 from dynesty.utils import resample_equal

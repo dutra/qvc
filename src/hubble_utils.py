@@ -1,29 +1,26 @@
+"""Shared utility functions for the QVC/Hubble fitting workflow."""
+
 import os
+import re
+import warnings
 
-
+import h5py
 import matplotlib.pyplot as plt
 import numpy as np
-import h5py
-from astropy.cosmology import FlatwCDM, Flatw0waCDM, FlatLambdaCDM, FlatwpwaCDM
-from scipy.ndimage import gaussian_filter1d, gaussian_filter
-from scipy.interpolate import interp1d
 import pandas as pd
+from astropy.cosmology import FlatwCDM, Flatw0waCDM, FlatLambdaCDM, FlatwpwaCDM
 from astropy.io import fits
 from astropy.table import Table
 from astropy.coordinates import SkyCoord, match_coordinates_sky
 from astropy import units as u
-#from astroquery.vizier import Vizier
+from scipy.ndimage import gaussian_filter1d, gaussian_filter
+from scipy.interpolate import interp1d
 from tqdm import tqdm
-import warnings
-import re
 from scipy import stats
 from scipy.stats import norm, sigmaclip, multivariate_normal
 from scipy.interpolate import RegularGridInterpolator
-
 from dynesty.utils import resample_equal
 from hubble_model import get_model_params, M_model_agn, M_model_agn_err, agn_model_pack_obs, agn_model_pack_params, agn_model_oidx
-#from hubble_completeness import make_dm_function
-
 from scipy.linalg import cho_factor, cho_solve, eigh
 from scipy.stats import linregress
 from scipy.stats import pearsonr
@@ -35,9 +32,6 @@ filters = {"u": 0, "g": 1, "r": 2, "i": 3, "z": 4, "y": 5} # harcoded filter ord
 def convert_M2500_to_logL2500(M2500):
     return -1/2.5 * (M2500 - 90.0)
 
-def convert_logL2500_to_M2500(logL2500):
-    return -2.5 * logL2500 + 90.0
-
 def sym_percentile(x, p=[16, 50, 84], axis=0):
     lower, median, upper = np.percentile(x, p, axis=axis)
     err = 0.5 * (upper - lower)   # optional symmetric equivalent
@@ -45,96 +39,6 @@ def sym_percentile(x, p=[16, 50, 84], axis=0):
     err_upper = upper - median
     return median, err, err_lower, err_upper
 
-def find_optimal_pivot(flat_samples,
-                       cosmo_model,
-                       df_agn):
-    """
-    Find the pivot redshift z_pivot that minimizes the correlation between 
-    M_pred(z_pivot) and H0 using AGN samples and model.
-
-    Parameters
-    ----------
-    flat_samples : ndarray of shape (nsamples, nparams)
-        Posterior samples from MCMC or nested sampling.
-    param_indices : dict
-        Dictionary mapping parameter names to column indices in flat_samples.
-    df_agn : DataFrame
-        AGN data with columns: 'z', 'alpha_nu', 'log_sigma_UV', 'log_tau_UV_RF'.
-    apparent_mag : array-like
-        Observed apparent magnitude at 2500 Å for each AGN.
-    z_grid : array-like
-        Grid of redshifts to scan as possible pivot values.
-    alpha_nu_default : float
-        Default alpha_nu if not given in df_agn.
-
-    Returns
-    -------
-    z_best : float
-        Optimal pivot redshift where Corr(H0, M_pred(z)) ≈ 0.
-    z_grid : array
-        Array of pivot redshifts tested.
-    corrs : array
-        Pearson correlations between M_pred(z_pivot) and H0 for each pivot redshift.
-    """
-    priors, model_labels, model_labels_latex = get_model_params(cosmo_model)
-    param_indices = {name: model_labels.index(name) for name in model_labels}
-    # If alpha_nu not in df_agn, use constant
-    alpha_nu = df_agn['alpha_nu'].values
-
-    z_grid = np.linspace(0.1, 3.0, 1000)  # Grid of redshifts to test as pivot
-    # Precompute redshift-independent K-correction difference terms for each z_pivot
-    z_data = df_agn['z'].values
-
-    H0_samples = flat_samples[:, param_indices['H0']]
-    apparent_mag_2500 = df_agn['apparent_mag_2500'].values
-    corrs = []
-
-    for z_pivot in z_grid:
-
-        M_pred_samples = np.array([
-            apparent_mag_2500 - M_model_agn(
-                s[param_indices['M0_agn']],
-                s[param_indices['log_sigma_UV_break']],
-                s[param_indices['eta_A1_agn']],
-                s[param_indices['eta_A2_agn']],
-                s[param_indices['eta_break_agn']],
-                s[param_indices['beta_agn']],
-                df_agn['log_sigma_UV'].values,
-                df_agn['log_tau_UV_RF'].values
-            )
-            for s in flat_samples
-        ])  # shape: (nsamples, n_agn)
-
-        # Collapse across AGNs: average M_pred per sample
-        M_pred_mean = M_pred_samples.mean(axis=1)
-
-        r, _ = pearsonr(M_pred_mean, H0_samples)
-        corrs.append(r)
-
-    corrs = np.array(corrs)
-    z_best = z_grid[np.argmin(np.abs(corrs))]
-
-    return z_best, z_grid, corrs
-
-def sn_completeness_function(m_b, z, mlim=24.1, sigma=0.5):
-    """
-    Return probability of SN detection given apparent magnitude m_b and redshift z.
-    mlim: effective magnitude limit for SN survey.
-    sigma: sharpness of detection efficiency curve.
-    """
-    return 1.0 - norm.cdf(m_b, loc=mlim, scale=sigma)
-
-def log_nuLnu_to_m2500(log_nuLnu, z):
-    raise NotImplementedError("Use apparent_mag_2500_from_mi_rest in hubble_completeness_refactored.py instead.")
-    cosmo = FlatLambdaCDM(H0=70, Om0=0.3)
-    DL_cm = cosmo.luminosity_distance(z).to('cm').value
-    m_AB = (
-        -2.5 * log_nuLnu
-        + 5 * np.log10(DL_cm)
-        + 2.5 * np.log10(4 * np.pi)
-        - 48.6
-    )
-    return m_AB
 
 def match_radec(df_a, df_b, populate_cols=[], ra_col_a='ra', dec_col_a='dec', ra_col_b='ra', dec_col_b='dec', max_sep_arcsec=1.0, add_prefix=False):
     """
@@ -167,7 +71,6 @@ def match_radec(df_a, df_b, populate_cols=[], ra_col_a='ra', dec_col_a='dec', ra
             unmatched_object_ids.append(df_a.iloc[i]['object_id'])
     return result, unmatched_object_ids
 
-from astropy.table import Table
 from astropy.io.votable import parse
 
 def populate_xray(df, table_fpath="data/cscresults.vot"):
@@ -1001,94 +904,6 @@ def plot_redshift_histogram(df_before, df_after, bins=30, cut_info="", save_path
     plt.savefig(plot_path, dpi=150)
     plt.close()
 
-def populate_chi_sq_from_csv(df, csv_path):
-    """
-    Populate the 'chi_sq' field in df by matching 'object_id' with the CSV file.
-
-    Parameters
-    ----------
-    df : pd.DataFrame
-        DataFrame with at least an 'object_id' column.
-    csv_path : str
-        Path to the CSV file containing 'object_id' and 'chi_sq' columns.
-
-    Returns
-    -------
-    pd.DataFrame
-        DataFrame with a new/updated 'chi_sq' column.
-    """
-    chi_sq_df = pd.read_csv(csv_path)
-    #print(chi_sq_df.head())
-    # Ensure object_id is string for matching
-    df['object_id'] = df['object_id'].astype(str)
-    chi_sq_df['object_id'] = chi_sq_df['object_id'].astype(str)
-    # Merge on object_id
-    merged = pd.merge(df, chi_sq_df[['object_id', 'chi_sq_g', 'chi_sq_all']], on='object_id', how='left')
-    # If chi_sq already exists, overwrite; else, add
-    df['chi_sq_g'] = merged['chi_sq_g']
-    df['chi_sq_all'] = merged['chi_sq_all']
-    return df
-
-def populate_magdiff(df):
-        # Merge in PSF/fiber magnitude differences and overwrite chosen fields.
-    # Edit this list to include the exact column names from the CSV you want to overwrite.
-    fields_to_overwrite = ['PL_break_wave', 'lam_min', 'lam_max', 'PL_break_wave_inbounds']
-    for b in ['u', 'g', 'r', 'i', 'z']:
-        fields_to_overwrite.append(f'mag_psffiber_diff_{b}')
-
-    psf_csv = "results/data/psffiber_mag_diff.csv"
-    if os.path.exists(psf_csv):
-        df_psf = pd.read_csv(psf_csv, dtype={"object_id": str})
-        # normalize column names (trim whitespace)
-        df_psf.columns = [c.strip() for c in df_psf.columns]
-
-        # ensure both frames have object_id as str
-        df["object_id"] = df["object_id"].astype(str)
-        df_psf["object_id"] = df_psf["object_id"].astype(str)
-
-        # select only requested fields that actually exist in CSV
-        available = [f for f in fields_to_overwrite if f in df_psf.columns]
-        missing_in_csv = [f for f in fields_to_overwrite if f not in df_psf.columns]
-        if missing_in_csv:
-            print(f"[populate] These requested fields were not found in {psf_csv}: {missing_in_csv}")
-
-        if len(available) == 0:
-            print(f"[populate] No requested overwrite fields found in {psf_csv}; nothing to merge.")
-        else:
-            merged = df.merge(
-                df_psf[["object_id"] + available],
-                on="object_id",
-                how="left",
-                suffixes=("", "_psf")
-            )
-
-            # For each available field, overwrite df where CSV provided a non-NaN value.
-            for f in available:
-                psf_col = f  # from CSV
-                # use the merged column (will be present as psf_col since suffix only applies to conflicts)
-                new_vals = merged[psf_col]
-                mask_replace = new_vals.notna()
-                n_replaced = int(mask_replace.sum())
-                if f in df.columns:
-                    df.loc[mask_replace, f] = new_vals[mask_replace].values
-                else:
-                    # column didn't exist in df: add it using CSV values for matched rows, NaN otherwise
-                    df[f] = np.nan
-                    df.loc[mask_replace, f] = new_vals[mask_replace].values
-                print(f"[populate] Overwrote {n_replaced} values for column '{f}' from {psf_csv}.")
-
-            # report overall matching stats
-            n_matched = merged[available[0]].notna().sum() if len(available) else 0
-            print(f"[populate] PSF CSV merge complete. At least one column matched for {n_matched} objects.")
-    else:
-        print(f"[populate] PSF CSV not found: {psf_csv}; skipping PSF merge.")
-
-    return df
-
-
-import numpy as np
-import pandas as pd
-
 def make_psf_minus_fiber_correction_fn(z, psf_minus_fiber_i, z_window=0.5):
     """
     Given arrays of z and psf_minus_fiber_i, returns two callables:
@@ -1815,19 +1630,8 @@ def load_pantheon_data():
 
     return df_pantheon_sel, sna_logdetCov, sna_L, sna_lower
 
-
-
-
-def soft_clip(x, floor=1e-5, sharpness=5):
-    # Smoother logistic-like clipping
-    return floor + (1 - floor) * (1 / (1 + np.exp(-sharpness * (x - floor))))
-
-import numpy as np
 from statistics import NormalDist
-
-import os, math
-import numpy as np
-from statistics import NormalDist
+import math
 
 LN10 = math.log(10.0)
 LN2  = math.log(2.0)
@@ -1837,9 +1641,6 @@ Phi = NormalDist()
 
 def _log1pexp_pos(x):
     return x + math.log1p(math.exp(-x))
-
-def _stable_logistic(x):
-    return 0.5 * (1.0 + math.tanh(0.5 * x))
 
 def _log_eps_from_delta_abs(absD):
     if absD < 40:
@@ -1870,26 +1671,6 @@ def _bayes_factor_repr_from_delta(delta, delta_err=None):
         s_ci = f"[10^{lo:.2f}, 10^{hi:.2f}]"
         ci_tuple = (lo, hi, s_ci)
     return log10K, s_main, ci_tuple
-
-def _latex_escape_text(s: str) -> str:
-    """Escape LaTeX special chars in plain text model names."""
-    repl = {
-        "\\": r"\textbackslash{}",
-        "&": r"\&", "%": r"\%", "$": r"\$", "#": r"\#",
-        "_": r"\_", "{": r"\{", "}": r"\}",
-        "~": r"\textasciitilde{}", "^": r"\textasciicircum{}",
-    }
-    return "".join(repl.get(ch, ch) for ch in str(s))
-
-import os, math
-import numpy as np
-
-# Assumed available in your codebase (same helpers you already use):
-#   _bayes_factor_repr_from_delta(delta_logZ, delta_logZ_err)
-#   _stable_logistic(delta)
-#   _log_eps_from_delta_abs(abs_delta)
-#   _norm_isf_from_logeps(log_eps)
-#   LN2  (= math.log(2.0))
 
 def _jeffreys_strength(abs_delta, thresholds):
     t1, t2, t3 = thresholds
@@ -2578,151 +2359,6 @@ def compute_age_universe_with_error(samples, cosmo_model, weights=None, ci=(0.68
 
     return mean, std
 
-def display_diagnostics(sampler, cosmo_model, fitting_method=False):
-    priors, model_labels, _ = get_model_params(cosmo_model)
-    if fitting_method == 'dynesty':
-        # For dynesty, use weighted samples
-        samples = sampler.results.samples
-        weights = np.exp(sampler.results.logwt - sampler.results.logz[-1])
-        # Resample to equal weights for diagnostics
-        samples_equal = resample_equal(samples, weights)
-        # ArviZ expects (chain, draw, param), so fake a single chain
-        chain = samples_equal[np.newaxis, :, :]
-        # No log_prob for dynesty, so skip
-        idata = az.from_dict(posterior={name: chain[:, :, i] for i, name in enumerate(model_labels)})
-    elif fitting_method == 'emcee':
-        # --- Convergence diagnostics for emcee sampler ---
-        # Extract chains and log probabilities
-        chain = sampler.get_chain()  # shape: (nsteps, nwalkers, ndim)
-        log_prob = sampler.get_log_prob()  # shape: (nsteps, nwalkers)
-        # Transpose to match (chain, draw, dim) expected by ArviZ
-        chain = np.transpose(chain, (1, 0, 2))
-        log_prob = np.transpose(log_prob, (1, 0))
-        idata = az.from_dict(
-            posterior={name: chain[:, :, i] for i, name in enumerate(model_labels)},
-            log_likelihood={"log_likelihood": log_prob}
-        )
-    else:
-        raise ValueError("Unsupported fitting method. Use 'dynesty' or 'emcee'.")
-    # Compute Rhat and ESS
-    rhat = az.rhat(idata)
-    ess = az.ess(idata)
-    print("Gelman-Rubin Rhat diagnostic:")
-    print(rhat)
-    print("Effective Sample Size (ESS):")
-    print(ess)
-    print(az.summary(idata, round_to=3))
-
-# --- Super-simple CMB likelihood: Gaussian on 100*theta_* ---
-
-import numpy as np
-from scipy import stats
-from scipy.integrate import quad
-import astropy.units as u
-from astropy import constants as const
-from astropy.table import Table as AstroTable
-
-# --- DESI (Planck) prior on 100*theta_* ---
-CMB_100THETA_MEAN = 1.04110
-CMB_100THETA_SIGMA = 0.00053
-
-# --- Defaults ---
-STD_T_CMB = 2.7255
-STD_NEFF  = 3.046
-BBN_OMEGABH2_MEAN = 0.02218   # standard Neff BBN mean
-
-# ---------- helpers ----------
-def _safe_omegabh2(cosmo, fallback=BBN_OMEGABH2_MEAN):
-    h = cosmo.H0.value / 100.0
-    Ob0 = getattr(cosmo, "Ob0", None)
-    if (Ob0 is None) or (float(Ob0) <= 0.0) or (not np.isfinite(Ob0)):
-        return float(fallback)
-    return float(Ob0) * h * h
-
-def _omega_gamma_h2(Tcmb=STD_T_CMB):
-    return 2.469e-5 * (Tcmb / 2.7255)**4
-
-def _omega_r(cosmo, Tcmb=STD_T_CMB):
-    """Total radiation density Ω_r = Ω_γ + Ω_ν,rel using Neff (massless approx)."""
-    h = cosmo.H0.value / 100.0
-    Om_gamma = _omega_gamma_h2(Tcmb=Tcmb) / (h*h)
-    Neff = getattr(cosmo, "Neff", STD_NEFF)
-    f_nu = 7.0/8.0 * (4.0/11.0)**(4.0/3.0) * float(Neff)  # ≈ 0.2271 * Neff
-    return Om_gamma * (1.0 + f_nu)
-
-def _z_star_hu_sugiyama(omega_b_h2, omega_m_h2):
-    """Robust Hu–Sugiyama / Eisenstein–Hu z* fit with safe lower bounds."""
-    wb = float(np.maximum(omega_b_h2, 1e-6))
-    wm = float(np.maximum(omega_m_h2, 1e-6))
-    g1 = 0.0783 * wb**(-0.238) / (1.0 + 39.5 * wb**0.763)
-    g2 = 0.560 / (1.0 + 21.1 * wb**1.81)
-    return 1048.0 * (1.0 + 0.00124 * wb**(-0.738)) * (1.0 + g1 * wm**g2)
-
-def _r_s_comoving_robust(cosmo, zstar, omega_b_h2, Tcmb=STD_T_CMB, z_switch=1.0e4):
-    """
-    r_s(z*) in Mpc: numeric ∫ from z* to z_switch + analytic radiation-era tail above z_switch.
-    This avoids endpoint issues and quad's extrapolation problems.
-    """
-    h = cosmo.H0.value / 100.0
-    Om_b     = float(omega_b_h2) / (h*h)
-    Om_gamma = _omega_gamma_h2(Tcmb=Tcmb) / (h*h)
-    Om_r     = _omega_r(cosmo, Tcmb=Tcmb)
-
-    # Numeric piece: z* -> z_switch
-    c_si = const.c.to_value(u.m/u.s)
-    pref_R = 0.75 * (Om_b / Om_gamma)  # R(z) = pref_R / (1+z)
-
-    def integrand(z):
-        a = 1.0 / (1.0 + z)
-        R = pref_R * a
-        c_s = c_si / np.sqrt(3.0 * (1.0 + R))
-        Hz = cosmo.H(z).to_value(u.s**-1)
-        return c_s / Hz  # [m]
-
-    z_lo = float(zstar)
-    z_hi = float(max(z_switch, z_lo * 1.01))  # ensure upper > lower
-    rs_num_m, _ = quad(integrand, z_lo, z_hi, epsabs=0.0, epsrel=1e-6, limit=400)
-
-    # Analytic tail: z_switch -> ∞ in pure radiation era with c_s ≈ c/sqrt(3), H ≈ H0 sqrt(Ω_r) (1+z)^2
-    H0_SI = cosmo.H0.to_value(u.s**-1)
-    rs_tail_m = (c_si / np.sqrt(3.0)) / (H0_SI * np.sqrt(Om_r)) * (1.0 / (1.0 + z_hi))
-
-    rs_mpc = ((rs_num_m + rs_tail_m) * u.m).to_value(u.Mpc)
-    return rs_mpc
-
-# ---------- simple, stable CMB likelihood ----------
-def loglike_cmb_theta_simple(cosmo,
-                             omega_b_h2=None,
-                             Tcmb=STD_T_CMB,
-                             mean_100theta=CMB_100THETA_MEAN,
-                             sigma_100theta=CMB_100THETA_SIGMA):
-    """
-    Gaussian likelihood on 100*theta_* with robust r_s and safe baryon fallback.
-    Returns (lnL, diagnostics).
-    """
-    # baryons
-    omega_b_h2 = _safe_omegabh2(cosmo) if (omega_b_h2 is None) else float(omega_b_h2)
-
-    # z*, r_s, D_M
-    h = cosmo.H0.value / 100.0
-    omega_m_h2 = float(cosmo.Om0) * h * h
-    zstar = _z_star_hu_sugiyama(omega_b_h2, omega_m_h2)
-
-    D_A = cosmo.angular_diameter_distance(zstar).to_value(u.Mpc)
-    if not np.isfinite(D_A) or D_A <= 0.0:
-        # If the user feeds a pathological cosmology, bail out gracefully.
-        return -np.inf, {"reason": "DA_nonfinite", "z_star": zstar}
-
-    D_M = (1.0 + zstar) * D_A
-    r_s = _r_s_comoving_robust(cosmo, zstar, omega_b_h2, Tcmb=Tcmb)
-
-    hundred_theta = 100.0 * (r_s / D_M)
-    ll = stats.norm.logpdf(hundred_theta, loc=mean_100theta, scale=sigma_100theta)
-
-    return float(ll), {"100theta": hundred_theta, "z_star": zstar, "r_s_Mpc": r_s, "D_M_Mpc": D_M}
-
-
-
 def compute_pivot_redshift(flat_samples, cosmo_model, z_min=0.0, z_max=4.0):
     """
     Compute the optimal pivot redshift z_p* from MCMC samples of (wp, wa),
@@ -2829,42 +2465,6 @@ def posterior_corr(flat_samples, cosmo_model, z_pivot_agn):
         raise ValueError("No finite samples to compute correlation.")
 
     return np.corrcoef(w0[mask], wa[mask])[0, 1]
-
-def get_w0_wa_from_pivot(flat_samples, cosmo_model, z_p):
-    """
-    Convert posterior samples from (w_p, w_a) at a pivot redshift z_p
-    into (w_0, w_a).
-
-    Parameters
-    ----------
-    flat_samples : ndarray, shape (N, P)
-        Flattened MCMC samples: N total draws by P parameters.
-    cosmo_model : str
-        Cosmological model name, used by get_model_params().
-    z_p : float
-        Pivot redshift.
-
-    Returns
-    -------
-    w0 : ndarray, shape (N,)
-        Posterior samples of w_0.
-    wa : ndarray, shape (N,)
-        Posterior samples of w_a.
-    """
-    # Get parameter labels for this cosmological model
-    priors, model_labels, model_labels_latex = get_model_params(cosmo_model)
-
-    # Locate wp and wa indices
-    i_wp = model_labels.index("wp")
-    i_wa = model_labels.index("wa")
-
-    wp = flat_samples[:, i_wp]
-    wa = flat_samples[:, i_wa]
-
-    # Transform to w0 at the given pivot redshift
-    w0 = wp - wa * (z_p / (1.0 + z_p))
-
-    return w0, wa
 
 import math
 from typing import Tuple, Optional
@@ -3156,30 +2756,6 @@ def cosmo_model_label_latex(cosmo_model):
     
     return label
 
-def load_df_nearby():
-    f_show = read_quasars_from_hdf5("results/data/oct21a_nearbylcs_1w4000s500t14co4ch4.h5")
-    df_show = pd.DataFrame(df_show)
-
-    # Load the CSV file
-    df_nearby_csv = pd.read_csv("data/nearby_lcs/nearby_lcs_m2500.csv")
-
-    # Drop columns from df_show that are also present in df_nearby_csv except 'object_id'
-    columns_to_drop = [col for col in df_show.columns if col in df_nearby_csv.columns and col != 'object_id']
-    df_show = df_show.drop(columns=columns_to_drop)
-    # Merge with df_show on 'object_id'
-    df_show = df_show.merge(df_nearby_csv, on='object_id', how='left')
-
-    # Overwrite columns from df_nearby_csv to df_show
-    for col in df_nearby_csv.columns:
-        if col != 'object_id':  # Skip the 'object_id' column
-            df_show[col] = df_show[col].fillna(df_nearby_csv.set_index('object_id')[col])
-
-    #df_show = df_show[~df_show['object_id'].isin(['ngc4395', 'ucg06728', 'ngc4593'])]
-    bad_lcs = ['ngc4395', 'ucg06728', 'ngc4593']
-    df_show['bad'] = df_show['object_id'].isin(bad_lcs)
-
-    return df_show
-
 def make_agn_latex_table(
     agn_df,
     mu,
@@ -3272,67 +2848,34 @@ def make_agn_latex_table(
     return latex_str
 
 
-def save_chains(filename, **kwargs):
-    """
-    Saves arbitrary arrays and scalars to an HDF5 file.
-    Usage: save_chains('test.h5', flat_samples=samples, logZ=logZ)
-    """
+def _save_mapping_hdf5(filename, **kwargs):
+    """Save keyword arrays/scalars into a flat HDF5 file."""
     with h5py.File(filename, 'w') as f:
         for name, data in kwargs.items():
-            # Create a dataset for each item
-            # compression='gzip' is useful for the large arrays (flat_samples)
-            # but standard scalars don't need compression.
             if isinstance(data, (np.ndarray, list)):
                 f.create_dataset(name, data=data, compression="gzip")
             else:
-                # Scalars (floats/ints) don't support compression
                 f.create_dataset(name, data=data)
-    
     print(f"Saved: {list(kwargs.keys())} to {filename}")
+
+
+def _load_mapping_hdf5(filename):
+    """Load a flat HDF5 file into a dictionary."""
+    results = {}
+    with h5py.File(filename, 'r') as f:
+        for key in f.keys():
+            results[key] = f[key][()]
+    return results
+
+
+def save_chains(filename, **kwargs):
+    """Backward-compatible wrapper for saving posterior chains to HDF5."""
+    _save_mapping_hdf5(filename, **kwargs)
+
 
 def load_chains(filename):
-    """
-    Loads HDF5 data into a python dictionary.
-    """
-    results = {}
-    with h5py.File(filename, 'r') as f:
-        for key in f.keys():
-            # [()] loads the dataset into memory as a numpy array or scalar
-            results[key] = f[key][()]
-    return results
-
-def save_flat_hdf5(filename, **kwargs):
-    """
-    Saves arbitrary arrays and scalars to an HDF5 file.
-    Usage: save_chains('test.h5', flat_samples=samples, logZ=logZ)
-    """
-    with h5py.File(filename, 'w') as f:
-        for name, data in kwargs.items():
-            # Create a dataset for each item
-            # compression='gzip' is useful for the large arrays (flat_samples)
-            # but standard scalars don't need compression.
-            if isinstance(data, (np.ndarray, list)):
-                f.create_dataset(name, data=data, compression="gzip")
-            else:
-                # Scalars (floats/ints) don't support compression
-                f.create_dataset(name, data=data)
-    
-    print(f"Saved: {list(kwargs.keys())} to {filename}")
-
-def load_flat_hdf5(filename):
-    """
-    Loads HDF5 data into a python dictionary.
-    """
-    results = {}
-    with h5py.File(filename, 'r') as f:
-        for key in f.keys():
-            # [()] loads the dataset into memory as a numpy array or scalar
-            results[key] = f[key][()]
-    return results
-
-
-import h5py
-import numpy as np
+    """Backward-compatible wrapper for loading posterior chains from HDF5."""
+    return _load_mapping_hdf5(filename)
 
 def save_cosmo_results_hdf5(filename, models_dict):
     """
@@ -3350,29 +2893,6 @@ def save_cosmo_results_hdf5(filename, models_dict):
                 grp.create_dataset(param_name, data=value)
     
     print(f"Saved models: {list(models_dict.keys())} to {filename}")
-
-def load_cosmo_results_hdf5(filename):
-    """
-    Loads HDF5 data back into the nested dictionary structure.
-    """
-    results = {}
-    with h5py.File(filename, 'r') as f:
-        # Iterate over the Model Groups (keys of the root file)
-        for model_name in f.keys():
-            results[model_name] = {}
-            grp = f[model_name]
-            
-            # Iterate over the Parameters (keys of the group)
-            for param_name in grp.keys():
-                # [()] loads the data into memory (numpy scalar or array)
-                results[model_name][param_name] = grp[param_name][()]
-                
-    return results
-
-import numpy as np
-import pandas as pd
-from scipy.stats import gaussian_kde
-
 
 def select_agn_subset_uniform_with_replacement(
     df_agn,

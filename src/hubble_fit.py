@@ -1,5 +1,9 @@
 import os
 import multiprocessing
+import traceback
+
+import argparse
+from functools import partial
 
 num_cores = os.environ.get("NUM_CORES", os.cpu_count()-2)
 try:
@@ -13,32 +17,54 @@ if multiprocessing.current_process().name == "MainProcess":
 os.environ["XLA_FLAGS"] = f"--xla_force_host_platform_device_count={num_cores}"
 os.environ["JAX_PLATFORM_NAME"] = "cpu"
 
-from hubble_utils import sym_percentile
-import numpy as np
 import matplotlib.pyplot as plt
-from astropy.cosmology import FlatwCDM, Flatw0waCDM, FlatLambdaCDM, FlatwpwaCDM
-from scipy import stats
-from scipy.signal import fftconvolve
 import numpy as np
+from astropy.cosmology import FlatwCDM, Flatw0waCDM, FlatLambdaCDM, FlatwpwaCDM
+from scipy.interpolate import interp1d
+from scipy.signal import fftconvolve
 from scipy import stats
 from dynesty import DynamicNestedSampler
 from dynesty import utils as dyfunc
-import argparse
-from scipy.interpolate import interp1d
-from functools import partial
-
-import matplotlib.pyplot as plt
 
 plt.style.use('style.mplstyle')
 z_pivot_sna = 0.0
 z_pivot_agn = 1.5
 
-from hubble_utils import *
-from hubble_likelihood import *
-from hubble_plotting import *
-from hubble_model import *
-from hubble_completeness_refactored import *
-import traceback
+from hubble_utils import (
+    compare_models_by_log_evidence_all,
+    compute_age_universe_with_error,
+    compute_pivot_redshift,
+    display_results_summary,
+    extract_cosmo_results_from_samples,
+    load_agn_data,
+    load_chains,
+    load_pantheon_data,
+    make_agn_latex_table,
+    make_cosmo_table_latex,
+    posterior_corr,
+    reduced_chi_squared,
+    save_chains,
+    save_cosmo_results_hdf5,
+    select_agn_subset_uniform_with_replacement,
+    sym_percentile,
+    write_results_tex_variables,
+)
+from hubble_likelihood import log_likelihood, log_likelihood_nearbylcs
+from hubble_plotting import (
+    plot_Mi_relation,
+    plot_completeness_diagnostics,
+    plot_completeness_vs_mag_at_redshifts,
+    plot_cosmo_corner,
+    plot_dynesty,
+    plot_full_residuals,
+    plot_hubble,
+    plot_predicted_L2500_vs_sigmahat,
+    plot_predicted_vs_actual_M2500,
+    plot_redshift_histograms,
+    plot_residuals_vs_alphaOX,
+)
+from hubble_model import agn_model_req_errs, agn_model_req_obs, agn_model_req_params, get_model_params
+from hubble_completeness_refactored import get_completeness_function_2d, make_dm_function
 
 def prior_transform_dynesty(unit_cube, priors, model_labels):
     return [priors[key][0] + (priors[key][1] - priors[key][0]) * x
@@ -49,6 +75,43 @@ def make_run_tag(cosmo_model, only_sna, speed, N, z_range):
     n_tag = "all" if N is None else f"N{N}"
     z_tag = f"z{zmin:.2f}_{zmax:.2f}".replace(".", "p")
     return f"{cosmo_model}_{'sna' if only_sna else 'joint'}_{speed}_{n_tag}_{z_tag}"
+
+
+def validate_resume_checkpoint(results, checkpoint_file, ndim, n_agn):
+    required_keys = {"flat_samples", "dmi_max_w", "integrals_max_w", "logZ", "logZerr"}
+    missing_keys = sorted(required_keys - set(results.keys()))
+    if missing_keys:
+        raise RuntimeError(
+            f"Resume checkpoint '{checkpoint_file}' is missing required dataset(s): {missing_keys}. "
+            "This usually means the file is stale or was written by an older pipeline version. "
+            "Delete it or pass resume=False to start a fresh run."
+        )
+
+    flat_samples = np.asarray(results["flat_samples"])
+    if flat_samples.ndim != 2:
+        raise RuntimeError(
+            f"Resume checkpoint '{checkpoint_file}' has flat_samples with shape {flat_samples.shape}, "
+            "but a 2D array is required. The checkpoint is incompatible with the current pipeline."
+        )
+    if flat_samples.shape[1] != ndim:
+        raise RuntimeError(
+            f"Resume checkpoint '{checkpoint_file}' was created for a different parameterization: "
+            f"flat_samples has {flat_samples.shape[1]} columns, but the current model expects {ndim}. "
+            "This usually happens when resuming with a different cosmology model or code version. "
+            "Delete the checkpoint or use a fresh resume path."
+        )
+
+    for key in ("dmi_max_w", "integrals_max_w"):
+        value = np.asarray(results[key])
+        if value.ndim == 0:
+            continue
+        if value.shape[0] != n_agn:
+            raise RuntimeError(
+                f"Resume checkpoint '{checkpoint_file}' is incompatible with the current AGN selection: "
+                f"{key} has length {value.shape[0]}, but the current run has {n_agn} AGN objects. "
+                "This usually means the checkpoint was created with a different input sample or redshift cut. "
+                "Delete the checkpoint or use a new output filename."
+            )
 
 def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, 
                       df_calibrators=None,
@@ -113,7 +176,21 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
         print(f"Resuming from default checkpoint file: {checkpoint_file}")
         if os.path.exists(checkpoint_file):
             #sampler = DynamicNestedSampler.restore(checkpoint_file, pool=pool)
-            r = load_chains(checkpoint_file)
+            try:
+                r = load_chains(checkpoint_file)
+                validate_resume_checkpoint(
+                    r,
+                    checkpoint_file=checkpoint_file,
+                    ndim=ndim,
+                    n_agn=len(agn_data["z"]),
+                )
+            except Exception as exc:
+                raise RuntimeError(
+                    f"Failed to resume from checkpoint '{checkpoint_file}'. "
+                    "The checkpoint appears incompatible with the current run configuration "
+                    "(for example: different cosmology model, different selected AGN sample, "
+                    "or an older file format). Start a fresh run or remove the stale checkpoint."
+                ) from exc
             flat_samples = r["flat_samples"]
             dmi_max_w = r["dmi_max_w"]
             logZ = r["logZ"]
