@@ -166,18 +166,25 @@ def build_psf_photometry_inputs(rec):
 
 def estimate_m2500_from_model(q):
     """Fallback apparent mag estimate from model continuum at rest-frame 2500A."""
-    if not hasattr(q, "wave") or not hasattr(q, "f_conti_model"):
+    if not hasattr(q, "numpyro_samples") or q.numpyro_samples is None:
         return np.nan, np.nan
 
     s = q.numpyro_samples
     pl_norm = np.asarray(s["PL_norm_eff"], dtype=float)
     pl_slope = np.asarray(s["PL_slope"], dtype=float)
+    if "scale_psf" in s:
+        scale_psf = np.asarray(s["scale_psf"], dtype=float)
+    else:
+        scale_psf = np.full_like(pl_norm, float(getattr(q, "scale_psf", np.nan)), dtype=float)
 
-    f_lambda_2500 = q.scale_psf * pl_norm * (2500.0 / 3000.0) ** pl_slope
+    f_lambda_2500 = scale_psf * pl_norm * (2500.0 / 3000.0) ** pl_slope
 
     c_A_s = 2.99792458e18
     f_nu = (f_lambda_2500 * 1e-17) * (2500.0**2) / c_A_s
-    m_2500_samples = -2.5 * np.log10(f_nu) - 48.60
+    valid = np.isfinite(f_nu) & (f_nu > 0.0)
+    if not np.any(valid):
+        return np.nan, np.nan
+    m_2500_samples = -2.5 * np.log10(f_nu[valid]) - 48.60
 
     m50, m_err, m16, m84 = sym_percentile(m_2500_samples)
     return m50, m_err
