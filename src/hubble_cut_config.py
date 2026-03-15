@@ -5,6 +5,7 @@ DEFAULT_WRMS_CUT = 1.2
 DEFAULT_IRON_FRAC_CUT = 1.0 # Wide default cut that allows all values to pass
 DEFAULT_BC_FRAC_CUT = 1.0
 DEFAULT_LOG_AMP_DELTA_BLR_UPPER_CUT = -0.2
+DEFAULT_CHI_SQ_CUT = 10.0
 DEFAULT_LOG_AMP_DELTA_BLR_UPPER_CUTS = {
     "u": DEFAULT_LOG_AMP_DELTA_BLR_UPPER_CUT,
     "g": DEFAULT_LOG_AMP_DELTA_BLR_UPPER_CUT,
@@ -19,6 +20,7 @@ def build_agn_cuts(
     iron_frac_cut=DEFAULT_IRON_FRAC_CUT,
     bc_frac_cut=DEFAULT_BC_FRAC_CUT,
     wrms_cut=DEFAULT_WRMS_CUT,
+    chi_sq_g_cut=DEFAULT_CHI_SQ_CUT,
 ):
     """
     Return the default AGN quality cuts as (column, lower, upper) tuples.
@@ -32,17 +34,20 @@ def build_agn_cuts(
         iron_frac_cut = DEFAULT_IRON_FRAC_CUT
     if wrms_cut is None:
         wrms_cut = DEFAULT_WRMS_CUT
+    if bc_frac_cut is None:
+        bc_frac_cut = DEFAULT_BC_FRAC_CUT
 
     return [
         ("log_tau_UV_RF", 1.5, 4.0),
-        ("wrms", None, 1.2),
+        ("wrms", None, wrms_cut),
         ("t_rf_length", 1700, None),
         ("log_tau_UV_RF_err", 0.0, 1.0),
         ("log_sigma_UV_err", 0.0, 0.3),
-        ("f_host_center", None, 0.01),
-        #('f_fe_uv_over_pl_3000', None, 10**-2.5),
-        ('f_bc_over_pl_3000', None, 10**0),
-        ("chi_sq_g", 10, None),
+        ("f_host_center", None, f_host_cut),
+        ("frac_host_psf_2500", None, f_host_cut),
+        ('f_fe_uv_over_pl_3000', None, iron_frac_cut),
+        ('f_bc_over_pl_3000', None, bc_frac_cut),
+        ("chi_sq_g", chi_sq_g_cut, None),
     ]
 
 

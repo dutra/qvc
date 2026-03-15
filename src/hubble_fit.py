@@ -64,7 +64,7 @@ from hubble_plotting import (
 )
 from hubble_model import agn_model_pack_obs, agn_model_req_errs, agn_model_req_obs, agn_model_req_params, get_model_params
 from hubble_completeness_refactored import get_completeness_function_2d, make_dm_function
-from hubble_cut_config import (DEFAULT_F_HOST_CUT, DEFAULT_WRMS_CUT, DEFAULT_IRON_FRAC_CUT, DEFAULT_BC_FRAC_CUT)
+from hubble_cut_config import (DEFAULT_F_HOST_CUT, DEFAULT_WRMS_CUT, DEFAULT_IRON_FRAC_CUT, DEFAULT_BC_FRAC_CUT, DEFAULT_CHI_SQ_CUT)
 
 def prior_transform_dynesty(unit_cube, priors, model_labels):
     return [priors[key][0] + (priors[key][1] - priors[key][0]) * x
@@ -253,8 +253,8 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                     print_progress=True,
                     dlogz_init=0.01,                 
                     n_effective=200,                # 300–1000 typical for model comparison
-                    nlive_init=100,   # bump live points
-                    nlive_batch=50   # reasonable batch size for dynamic allocation
+                    nlive_init=25,   # bump live points
+                    nlive_batch=15   # reasonable batch size for dynamic allocation
                 )
 
             elif speed == "test":
@@ -581,6 +581,7 @@ if __name__ == "__main__":
     parser.add_argument("--wrms_cut", type=float, default=DEFAULT_WRMS_CUT, help="Optional reduced chi-squared cut value to exclude outliers (default: None)")
     parser.add_argument("--iron_frac_cut", type=float, default=DEFAULT_IRON_FRAC_CUT, help="Optional iron fraction cut value to exclude outliers (default: None)")
     parser.add_argument("--bc_frac_cut", type=float, default=DEFAULT_BC_FRAC_CUT, help="Optional BC cut value to exclude outliers (default: None)")
+    parser.add_argument("--chi_sq_cut", type=float, default=DEFAULT_CHI_SQ_CUT, help="Optional chi-squared cut value to exclude outliers (default: None)")
     parser.add_argument("--sdss_mags_csv", type=str, default=None, help="Path to CSV file containing SDSS magnitudes (default: None)")
     parser.add_argument("--prefix", type=str, default="default", help="Prefix directory under plots/hubble/ and results/, and result variable prefix.")
     parser.add_argument("--result_prefix", type=str, default="", help="Prefix for result variable names in LaTeX output (default: empty string)")
