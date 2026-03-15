@@ -42,7 +42,7 @@ def build_agn_cuts(
         ("f_host_center", None, 0.01),
         #('f_fe_uv_over_pl_3000', None, 10**-2.5),
         ('f_bc_over_pl_3000', None, 10**0),
-        ("chi_sq_g", 25, None),
+        ("chi_sq_g", 10, None),
     ]
 
 

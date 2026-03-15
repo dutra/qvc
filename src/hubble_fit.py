@@ -253,8 +253,8 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                     print_progress=True,
                     dlogz_init=0.01,                 
                     n_effective=200,                # 300–1000 typical for model comparison
-                    nlive_init=25,   # bump live points
-                    nlive_batch=15   # reasonable batch size for dynamic allocation
+                    nlive_init=100,   # bump live points
+                    nlive_batch=50   # reasonable batch size for dynamic allocation
                 )
 
             elif speed == "test":
