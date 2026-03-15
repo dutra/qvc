@@ -165,22 +165,39 @@ def build_psf_photometry_inputs(rec):
 
 
 def estimate_m2500_from_model(q):
-    """Fallback apparent mag estimate from model continuum at rest-frame 2500A."""
-    if not hasattr(q, "wave") or not hasattr(q, "f_conti_model"):
+    """Estimate apparent m2500 from PSF-scaled PL continuum at rest-frame 2500A."""
+    if not hasattr(q, "wave") or not hasattr(q, "f_pl_model") or not hasattr(q, "scale_psf"):
         return np.nan, np.nan
 
-    s = q.numpyro_samples
-    pl_norm = np.asarray(s["PL_norm_eff"], dtype=float)
-    pl_slope = np.asarray(s["PL_slope"], dtype=float)
+    wave = np.asarray(q.wave, dtype=float).reshape(-1)
+    f_pl_model_psf = np.asarray(q.scale_psf * q.f_pl_model, dtype=float).reshape(-1)
+    if wave.size == 0 or f_pl_model_psf.size != wave.size:
+        return np.nan, np.nan
 
-    f_lambda_2500 = pl_norm * (2500.0 / 3000.0) ** pl_slope
+    i2500 = int(np.argmin(np.abs(wave - 2500.0)))
+    f_lambda_2500 = safe_float(f_pl_model_psf[i2500], default=np.nan)
+    if not (np.isfinite(f_lambda_2500) and f_lambda_2500 > 0):
+        return np.nan, np.nan
 
+    # q.f_pl_model is in 1e-17 erg/s/cm^2/A units.
     c_A_s = 2.99792458e18
     f_nu = (f_lambda_2500 * 1e-17) * (2500.0**2) / c_A_s
-    m_2500_samples = -2.5 * np.log10(f_nu) - 48.60
+    m2500 = -2.5 * np.log10(f_nu) - 48.60
 
-    m50, m_err, m16, m84 = sym_percentile(m_2500_samples)
-    return m50, m_err
+    # Optional uncertainty from posterior PL draws at 2500A, scaled by scalar PSF factor.
+    m2500_err = np.nan
+    
+    pl_draws = np.asarray(q.pred_out["f_pl_model"], dtype=float)
+    if pl_draws.ndim == 2 and pl_draws.shape[1] == wave.size:
+        scale_psf = float(np.asarray(q.scale_psf, dtype=float))
+        f_draws_2500 = pl_draws[:, i2500] * scale_psf
+        good = np.isfinite(f_draws_2500) & (f_draws_2500 > 0)
+        if np.any(good):
+            f_nu_draws = (f_draws_2500[good] * 1e-17) * (2500.0**2) / c_A_s
+            m_draws = -2.5 * np.log10(f_nu_draws) - 48.60
+            _, m2500_err, _, _ = sym_percentile(m_draws)
+
+    return safe_float(m2500), safe_float(m2500_err)
 
 
 def compute_derived_results(result, q, args):
@@ -236,16 +253,11 @@ def compute_derived_results(result, q, args):
     result["f_fe_uv_over_pl_3000"] = safe_float(m50)
     result["f_fe_uv_over_pl_3000_err"] = safe_float(m_err)
 
-    z = safe_float(result.get("z"))
-    m2500 = np.nan
-    m2500_err = np.nan
-
+    #result["f_pl_model_psf"] = q.scale_psf * q.f_pl_model
     m2500, m2500_err = estimate_m2500_from_model(q)
-
+    print(f"Estimated m2500: {m2500} +/- {m2500_err}")
     result["apparent_mag_2500"] = m2500
     result["apparent_mag_2500_err"] = m2500_err
-
-    result["f_pl_model_psf"] = q.scale_psf * q.f_pl_model
 
 
 # -----------------------------------------------------------------------------
