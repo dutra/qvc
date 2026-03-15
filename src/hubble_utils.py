@@ -441,6 +441,7 @@ def populate_spectra_fit(df, spectra_fit_csvs, best=True):
         'f_bc_over_pl_3000': float,
         'f_host_center': float,
         'wrms': float,
+        'frac_host_psf_2500': float
     }
 
     # Drop existing derived columns before re-merging them from the fit tables.
