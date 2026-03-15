@@ -640,35 +640,43 @@ def run_one_fit(rec, args):
 
         prior_config = build_default_prior_config(flux_scaled)
 
-        q.fit(
-            name=str(rec["sdss_name"]),
-            fit_poly_edge_flex=args.fit_poly_edge_flex,
-            deredden=not args.no_deredden,
-            wave_range=(args.wave_min, args.wave_max),
-            fit_lines=args.fit_lines,
-            decompose_host=args.decompose_host,
-            fit_pl=args.fit_pl,
-            fit_fe=args.fit_fe,
-            fit_bc=args.fit_bc,
-            fit_poly=args.fit_poly,
-            mask_lya_forest=args.mask_lya_forest,
-            fit_method=args.fit_method,
-            prior_config=prior_config,
-            dsps_ssp_fn=args.dsps_ssp_fn,
-            nuts_warmup=args.nuts_warmup,
-            nuts_samples=args.nuts_samples,
-            nuts_chains=args.nuts_chains,
-            nuts_target_accept=args.nuts_target_accept,
-            optax_steps=args.optax_steps,
-            optax_lr=args.optax_lr,
-            save_result=True,
-            save_fits_name=str(rec["sdss_name"]),
-            show_plot=False,
-            plot_fig=args.save_fig,
-            save_fig=args.save_fig,
-            verbose=args.verbose,
-            kwargs_plot={"save_fig_path": args.fig_dir},
-        )
+        if args.resume:
+            q = QSOFit.load_from_samples(
+                filename=str(rec["sdss_name"]),  # important: matches fit(name=...)
+                output_path=str(args.output_dir),
+                kwargs_plot={"show_plot": False},
+                plot_diagnostics=False,
+            )
+        else:
+            q.fit(
+                name=str(rec["sdss_name"]),
+                fit_poly_edge_flex=args.fit_poly_edge_flex,
+                deredden=not args.no_deredden,
+                wave_range=(args.wave_min, args.wave_max),
+                fit_lines=args.fit_lines,
+                decompose_host=args.decompose_host,
+                fit_pl=args.fit_pl,
+                fit_fe=args.fit_fe,
+                fit_bc=args.fit_bc,
+                fit_poly=args.fit_poly,
+                mask_lya_forest=args.mask_lya_forest,
+                fit_method=args.fit_method,
+                prior_config=prior_config,
+                dsps_ssp_fn=args.dsps_ssp_fn,
+                nuts_warmup=args.nuts_warmup,
+                nuts_samples=args.nuts_samples,
+                nuts_chains=args.nuts_chains,
+                nuts_target_accept=args.nuts_target_accept,
+                optax_steps=args.optax_steps,
+                optax_lr=args.optax_lr,
+                save_result=True,
+                save_fits_name=str(rec["sdss_name"]),
+                show_plot=False,
+                plot_fig=args.save_fig,
+                save_fig=args.save_fig,
+                verbose=args.verbose,
+                kwargs_plot={"save_fig_path": args.fig_dir},
+            )
 
         result.update(extract_named_results(q))
         result.update(extract_scalar_attrs(q))
@@ -811,7 +819,7 @@ def parse_args():
     p.add_argument("--no-save-fig", dest="save_fig", action="store_false")
     p.add_argument("--fig-dir", default="plots/jaxqsofit/", help="Path to save figures")
     p.add_argument("--verbose", action="store_true")
-
+    p.add_argument("--resume", action="store_true", help="Resume mode: load the saved samples from jaxqsofit.")
     p.add_argument("--dustmaps-data-dir", default="results/dustmaps", help="Directory to store dustmaps data (used for fetch-dustmaps mode)")
     args = p.parse_args()
 
