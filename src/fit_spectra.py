@@ -642,14 +642,14 @@ def run_one_fit(rec, args):
 
         if args.resume:
             q = QSOFit.load_from_samples(
-                filename=str(rec["sdss_name"]),  # important: matches fit(name=...)
+                filename=f"z{rec['z']:.3f}_{rec['sdss_name']}",  # important: matches fit(name=...)
                 output_path=str(args.output_dir),
                 kwargs_plot={"show_plot": False},
                 plot_diagnostics=False,
             )
         else:
             q.fit(
-                name=str(rec["sdss_name"]),
+                name=f"z{rec['z']:.3f}_{rec['sdss_name']}",
                 fit_poly_edge_flex=args.fit_poly_edge_flex,
                 deredden=not args.no_deredden,
                 wave_range=(args.wave_min, args.wave_max),
@@ -670,12 +670,12 @@ def run_one_fit(rec, args):
                 optax_steps=args.optax_steps,
                 optax_lr=args.optax_lr,
                 save_result=True,
-                save_fits_name=str(rec["sdss_name"]),
+                save_fits_name=f"z{rec['z']:.3f}_{rec['sdss_name']}",
                 show_plot=False,
                 plot_fig=args.save_fig,
                 save_fig=args.save_fig,
                 verbose=args.verbose,
-                kwargs_plot={"save_fig_path": args.fig_dir},
+                kwargs_plot={"save_fig_path": args.fig_dir, 'plot_residual': args.plot_residual},
             )
 
         result.update(extract_named_results(q))
@@ -811,8 +811,10 @@ def parse_args():
     p.add_argument("--fit-poly-edge-flex", dest="fit_poly_edge_flex", action="store_true")
     p.add_argument("--no-fit-poly-edge-flex", dest="fit_poly_edge_flex", action="store_false")
 
+    
+
     p.add_argument("--nproc", type=int, default=1, help="Use spawn multiprocessing when nproc > 1.")
-    p.add_argument("--MC_samples", type=int, default=1, help="Deprecated and ignored. Flux-rescale sampling now follows numpyro sample count.")
+    p.add_argument("--plot-residual", dest="plot_residual", action="store_true", default=False, help="Plot residuals in fit figures.")
     p.add_argument("--disable_rescale_flux", "--disable-rescale-flux", dest="disable_rescale_flux", action="store_true", help="Disable magnitude-based flux rescaling.")
     p.set_defaults(save_fig=True)
     p.add_argument("--save-fig", dest="save_fig", action="store_true")
