@@ -64,7 +64,7 @@ from hubble_plotting import (
 )
 from hubble_model import agn_model_pack_obs, agn_model_req_errs, agn_model_req_obs, agn_model_req_params, get_model_params
 from hubble_completeness_refactored import get_completeness_function_2d, make_dm_function
-from hubble_cut_config import DEFAULT_F_HOST_CUT
+from hubble_cut_config import (DEFAULT_F_HOST_CUT, DEFAULT_WRMS_CUT, DEFAULT_IRON_FRAC_CUT, DEFAULT_BC_FRAC_CUT)
 
 def prior_transform_dynesty(unit_cube, priors, model_labels):
     return [priors[key][0] + (priors[key][1] - priors[key][0]) * x
@@ -534,7 +534,7 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
             cosmo_models_result_dict[cosmo_model][f"{key}_err_upper"] = upper
 
     compare_r = compare_models_by_log_evidence_all(cosmo_models_result_dict, write_path=f"{compare_plot_path}/")
-    write_results_tex_variables(df_agn, df_pantheon, z_range, 
+    write_results_tex_variables(df_agn, df_agn_all, df_pantheon, z_range, 
                                 cosmo_model_joint_samples, cosmo_model_sna_samples, 
                                 compare_r, compare_plot_path, 
                                 result_prefix=result_prefix, cosmo_models_result_dict=cosmo_models_result_dict)
@@ -578,8 +578,9 @@ if __name__ == "__main__":
     parser.add_argument("--residuals_sigma_clip", type=float, default=None, help="Optional residual cut value to exclude outliers (default: None)")
     parser.add_argument("--residuals_csv", type=str, default=None, help="Path to CSV file containing residuals for outlier exclusion (default: None)")
     parser.add_argument("--agn_calibrators", type=str, default=None, help="Path to H5 or CSV file containing AGN data to use as calibrators (default: None)")
-    parser.add_argument("--redchi2_cut", type=float, default=None, help="Optional reduced chi-squared cut value to exclude outliers (default: None)")
-    parser.add_argument("--iron_frac_cut", type=float, default=None, help="Optional iron fraction cut value to exclude outliers (default: None)")
+    parser.add_argument("--wrms_cut", type=float, default=DEFAULT_WRMS_CUT, help="Optional reduced chi-squared cut value to exclude outliers (default: None)")
+    parser.add_argument("--iron_frac_cut", type=float, default=DEFAULT_IRON_FRAC_CUT, help="Optional iron fraction cut value to exclude outliers (default: None)")
+    parser.add_argument("--bc_frac_cut", type=float, default=DEFAULT_BC_FRAC_CUT, help="Optional BC cut value to exclude outliers (default: None)")
     parser.add_argument("--sdss_mags_csv", type=str, default=None, help="Path to CSV file containing SDSS magnitudes (default: None)")
     parser.add_argument("--prefix", type=str, default="default", help="Prefix directory under plots/hubble/ and results/, and result variable prefix.")
     parser.add_argument("--result_prefix", type=str, default="", help="Prefix for result variable names in LaTeX output (default: empty string)")
@@ -607,7 +608,7 @@ if __name__ == "__main__":
                            residuals_sigma_clip=args.residuals_sigma_clip, residuals_csv=args.residuals_csv,
                            exclude_object_ids_csv=args.exclude_object_ids_csv,
                            spectra_fit_csv=args.spectra_fit_csv, zquery_csv=args.zquery_csv,
-                           redchi2_cut=args.redchi2_cut, iron_frac_cut=args.iron_frac_cut,
+                           wrms_cut=args.wrms_cut, iron_frac_cut=args.iron_frac_cut,
                            sdss_mags_csv=args.sdss_mags_csv, pickled=args.pickled,
                            z_range=tuple(args.z_range))
     

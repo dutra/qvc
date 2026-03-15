@@ -424,7 +424,7 @@ merge_results.py [-h] [--base-dir BASE_DIR] [--exclude-jobs [EXCLUDE_JOBS ...]] 
 hubble_fit.py [-h] [--force_populate_fields] [--cosmo_models {FlatwCDM,Flatw0waCDM,FlatLambdaCDM,FlatwpwaCDM} [{FlatwCDM,Flatw0waCDM,FlatLambdaCDM,FlatwpwaCDM} ...]] [--disable_completeness] [--disable_full_covariance] [--resume [RESUME]]
               [--run {full,single}] [--speed {production,test,fast,dev}] [--N N] [--only_sna] [--use_mu_sh0es] [--spectra_fit_csv SPECTRA_FIT_CSV [SPECTRA_FIT_CSV ...]] [--zquery_csv ZQUERY_CSV] [--no_cuts] [--z_pivot_agn Z_PIVOT_AGN]
               [--skip_plots] [--fhost_cut FHOST_CUT] [--exclude_object_ids_csv EXCLUDE_OBJECT_IDS_CSV [EXCLUDE_OBJECT_IDS_CSV ...]] [--residuals_sigma_clip RESIDUALS_SIGMA_CLIP] [--residuals_csv RESIDUALS_CSV] [--agn_calibrators AGN_CALIBRATORS]
-              [--redchi2_cut REDCHI2_CUT] [--iron_frac_cut IRON_FRAC_CUT] [--sdss_mags_csv SDSS_MAGS_CSV] [--result_prefix RESULT_PREFIX] [--z_range Z_RANGE Z_RANGE] [--pickled]
+              [--wrms_cut WRMS_CUT] [--iron_frac_cut IRON_FRAC_CUT] [--sdss_mags_csv SDSS_MAGS_CSV] [--result_prefix RESULT_PREFIX] [--z_range Z_RANGE Z_RANGE] [--pickled]
               agn_data_filepath
 ```
 
@@ -457,7 +457,7 @@ hubble_fit.py [-h] [--force_populate_fields] [--cosmo_models {FlatwCDM,Flatw0waC
 * `--residuals_sigma_clip RESIDUALS_SIGMA_CLIP` — Optional residual cut value to exclude outliers (default: `None`).
 * `--residuals_csv RESIDUALS_CSV` — Path to CSV file containing residuals for outlier exclusion (default: `None`).
 * `--agn_calibrators AGN_CALIBRATORS` — Path to H5 or CSV file containing AGN data to use as calibrators (default: `None`).
-* `--redchi2_cut REDCHI2_CUT` — Optional reduced chi-squared cut value to exclude outliers (default: `None`).
+* `--wrms_cut WRMS_CUT` — Optional reduced chi-squared cut value to exclude outliers (default: `None`).
 * `--iron_frac_cut IRON_FRAC_CUT` — Optional iron fraction cut value to exclude outliers (default: `None`).
 * `--sdss_mags_csv SDSS_MAGS_CSV` — Path to CSV file containing SDSS magnitudes (default: `None`).
 * `--result_prefix RESULT_PREFIX` — Prefix for result files (default: empty).

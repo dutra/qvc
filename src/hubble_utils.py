@@ -307,8 +307,6 @@ def populate_lc_info(df, lc_info_csv):
         dtype={'object_id': str},
         converters=fields
     )
-
-
     merged = df.merge(df_lcinfo, on='object_id', how='left', suffixes=('', '_lcinfo'))
 
     print("Length of lc info merged DataFrame:", len(merged))
@@ -318,6 +316,31 @@ def populate_lc_info(df, lc_info_csv):
     for col in fields.keys():
         if f'{col}_lcinfo' in merged.columns:
             df[f'{col}'] = merged[f'{col}_lcinfo']
+        else:
+            df[col] = merged[col]
+
+    return df
+
+def populate_chisq_info(df, chisq_info_csv):
+    fields = {
+        'chi_sq_g': float,
+        'chi_sq_all': float,
+    }
+    # Load and concatenate two CSV files
+    df_chisqinfo = pd.read_csv(
+        chisq_info_csv,
+        dtype={'object_id': str},
+        converters=fields
+    )
+    merged = df.merge(df_chisqinfo, on='object_id', how='left', suffixes=('', '_chisqinfo'))
+
+    print("Length of chisq info merged DataFrame:", len(merged))
+    missing_ids = set(df['object_id']) - set(df_chisqinfo['object_id'])
+    print("object_id not in merged:", list(missing_ids))
+
+    for col in fields.keys():
+        if f'{col}_chisqinfo' in merged.columns:
+            df[f'{col}'] = merged[f'{col}_chisqinfo']
         else:
             df[col] = merged[col]
 
@@ -744,8 +767,9 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
                   residuals_sigma_clip=None, residuals_csv=None,
                   spectra_fit_csv=None, zquery_csv=None, only_load=False,
                   pickled=False,
-                  iron_frac_cut=None, redchi2_cut=None,
+                  iron_frac_cut=None, wrms_cut=None,
                   sdss_mags_csv=None, lc_info_csv="data/aug4_sample_chisqg10_ebv005sn3_lcdata.csv",
+                  chisq_info_csv="data/aug4_sample_chisqg10_ebv005sn3.csv",
                   z_range=(0.44, 3.16)):
     from hubble_plotting import (
         plot_Mi_relation,
@@ -861,6 +885,12 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
         df = populate_lc_info(df, lc_info_csv)
     else:
         print("[WARNING] lc_info_csv not provided")
+    if chisq_info_csv is not None:
+        print("Populating LC info from:", chisq_info_csv)
+        df = populate_chisq_info(df, chisq_info_csv)
+    else:
+        print("[WARNING] chisq_info_csv not provided")
+    
 
     num_quasars_z_0_1_before = len(df[(df['z'] > 0) & (df['z'] <= 1.0)])
     num_quasars_z_gt_3_before = len(df[df['z'] > 3])
@@ -957,7 +987,7 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
     cuts = build_agn_cuts(
         f_host_cut=fhost_cut,
         iron_frac_cut=iron_frac_cut if iron_frac_cut is not None else None,
-        redchi2_cut=redchi2_cut if redchi2_cut is not None else None,
+        wrms_cut=wrms_cut if wrms_cut is not None else None,
     )
     print("Active AGN scalar cuts:")
     for col, lower, upper in cuts:
@@ -1803,12 +1833,12 @@ def format_result_errors(
         out = core
 
     if unit:
-        out += rf"\,{unit}"
+        out += rf"\,\textrf{{{unit}}}"
 
     return out
 
 def write_results_tex_variables(
-    df_agn, df_pantheon, z_range, cosmo_model_joint_samples, cosmo_model_sna_samples, compare_r,
+    df_agn, df_agn_all, df_pantheon, z_range, cosmo_model_joint_samples, cosmo_model_sna_samples, compare_r,
     write_path, result_prefix="", chisq_dict=None, cosmo_models_result_dict=None
 ):
     """
@@ -1842,6 +1872,9 @@ def write_results_tex_variables(
     log_sigma_UV_pivot = pivots_arr[agn_model_oidx["log_sigma_UV"]]
     log_tau_UV_RF_pivot = pivots_arr[agn_model_oidx["log_tau_UV_RF"]]
     n_fitted = len(df_agn[df_agn['z'].between(z_range[0], z_range[1])])
+    lines.append(_cmd("NumAGNInitial", len(df_agn_all)))
+    lines.append(_cmd("NumAGNCut", len(df_agn_all)-len(df_agn)))
+
     lines.append(_cmd("NumAGNPlotted", len(df_agn)))
     lines.append(_cmd("NumAGNFitted", n_fitted))
 
