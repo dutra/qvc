@@ -533,7 +533,7 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
             cosmo_models_result_dict[cosmo_model][f"{key}_err_lower"] = lower
             cosmo_models_result_dict[cosmo_model][f"{key}_err_upper"] = upper
 
-    compare_r = compare_models_by_log_evidence_all(cosmo_models_result_dict, write_path=f"{compare_plot_path}/")
+    compare_r = compare_models_by_log_evidence_all(df_agn, cosmo_models_result_dict, write_path=f"{compare_plot_path}/")
     write_results_tex_variables(df_agn, df_agn_all, df_pantheon, z_range, 
                                 cosmo_model_joint_samples, cosmo_model_sna_samples, 
                                 compare_r, compare_plot_path, 
@@ -644,7 +644,7 @@ if __name__ == "__main__":
         z_tag = f"z{zmin:.2f}_{zmax:.2f}".replace(".", "p")
         compare_path = f"plots/hubble/{args.prefix}/single_compare_{args.speed}_{n_tag}_{z_tag}"
         os.makedirs(compare_path, exist_ok=True)
-        compare_r = compare_models_by_log_evidence_all(cosmo_models_dict, write_path=f"{compare_path}/")
+        compare_r = compare_models_by_log_evidence_all(df_agn, cosmo_models_dict, write_path=f"{compare_path}/")
     elif args.run == "full":
         run_all(df_agn=df_agn, df_agn_all=df_agn_all, df_pantheon=df_pantheon, _sna_L=_sna_L, _sna_Lower=_sna_Lower, _sna_LogdetCov=_sna_LogdetCov, 
                 cosmo_models=args.cosmo_models, skip_plots=args.skip_plots,

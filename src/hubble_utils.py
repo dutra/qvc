@@ -437,7 +437,7 @@ def populate_spectra_fit(df, spectra_fit_csvs, best=True):
         'PL_break_wave_inbounds': bool,
         'lam_rf_min': float,
         'lam_rf_max': float,
-        'f_fe_uv_over_pl_2500': float,
+        'f_fe_uv_over_pl_3000': float,
         'f_bc_over_pl_3000': float,
         'f_host_center': float,
         'wrms': float,
@@ -561,7 +561,7 @@ def populate_spectra_fit(df, spectra_fit_csvs, best=True):
     # Propagate the magnitude error into log luminosity.
     out['log_L2500_int_fs_err'] = 0.4 * out['apparent_mag_2500_err']
 
-    out['iron_frac'] = out['f_fe_uv_over_pl_2500']
+    out['iron_frac'] = out['f_fe_uv_over_pl_3000']
 
     return out
 def populate_sdss_fields(objs, progress_bar=True):
@@ -1071,7 +1071,7 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
     plot_df_psf_fiber_vs_fhost(df_all, df_keep=df, z_range=z_range, show=False)
     plot_log_fhost_vs_petrorad_by_band(df_all, df_keep=df, z_range=z_range, show=False)
     colorpanel_cols = [
-        col for col in ("f_host_center", "f_fe_uv_over_pl_2500", "f_bc_over_pl_3000", "wrms")
+        col for col in ("f_host_center", "f_fe_uv_over_pl_3000", "f_bc_over_pl_3000", "wrms")
         if col in df_all.columns
     ]
     if len(colorpanel_cols) > 0 and "z" in df_all.columns and "apparent_mag_2500" in df_all.columns:
@@ -1182,10 +1182,11 @@ def odds_sigmas_from_delta(delta):
 
 
 def compare_models_by_log_evidence_all(
-    cosmo_models_dict,
-    jeffreys_thresholds=(1.0, 2.5, 5.0),   # |Δln Z| bands
-    z_decisive=2.0,
-    write_path="plots/hubble/"
+        df_agn,
+        cosmo_models_dict,
+        jeffreys_thresholds=(1.0, 2.5, 5.0),   # |Δln Z| bands
+        z_decisive=2.0,
+        write_path="plots/hubble/"
 ):
     """
     Compare MANY models by log-evidence.
@@ -1348,6 +1349,7 @@ def compare_models_by_log_evidence_all(
             f"{t['sigma_from_odds_two_sided_ci_1sigma'][1]:.4f}]\n"
             f"Jeffreys strength: {t['jeffreys_strength']}; "
             f"decisive (|z_mc|≥{z_decisive:.1f})? {'yes' if t['decisive_zmc_ge_thresh'] else 'no'}\n"
+            f"Number of AGNs: {len(df_agn)}\n"
         )
 
     # Print and save the text summary.

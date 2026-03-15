@@ -1981,7 +1981,7 @@ def plot_full_residuals(
             'log_tau_drw0_rhat': 'log_log_tau_drw0_rhat',
             'f_host_center': 'log_f_host_center',
             'f_bc_over_pl_3000': 'log_f_bc_over_pl_3000',
-            'f_fe_uv_over_pl_2500': 'log_f_fe_uv_over_pl_2500',
+            'f_fe_uv_over_pl_3000': 'log_f_fe_uv_over_pl_3000',
         }
         for source_col, derived_col in log_columns.items():
             if source_col in frame.columns:
@@ -1999,7 +1999,7 @@ def plot_full_residuals(
 
     # ---- Which x-keys to show (keep your order) ----
     keys = [col for col in np.flip([
-        'wrms', 'log_f_bc_over_pl_3000', 'log_f_fe_uv_over_pl_2500', 'log_f_host_center',
+        'wrms', 'log_f_bc_over_pl_3000', 'log_f_fe_uv_over_pl_3000', 'log_f_host_center',
         'apparent_mag_2500_err', 'log_apparent_mag_2500_err', 
         'log_sigma_UV_err', 'log_log_sigma_UV_err',
         'log_tau_UV_RF_err', 'log_log_tau_UV_RF_err',
@@ -3241,7 +3241,7 @@ def plot_delta_m_flux_recal_vs_redshift(df_agn, plot_path="plots/hubble", show=F
 def plot_m2500_vs_z_colorpanels(
     df,
     df_keep=None,
-    color_cols=("f_host_center", "f_fe_uv_over_pl_2500", "f_bc_over_pl_3000", "wrms"),
+    color_cols=("f_host_center", "f_fe_uv_over_pl_3000", "f_bc_over_pl_3000", "wrms"),
     xcol="z",
     ycol="apparent_mag_2500",
     z_range=None,
@@ -3285,7 +3285,7 @@ def plot_m2500_vs_z_colorpanels(
     # Pretty colorbar labels
     label_map = {
         "f_host_center": r"f_{\mathrm{host}}",
-        "f_fe_uv_over_pl_2500": r"f_{\mathrm{Fe\, II}}",
+        "f_fe_uv_over_pl_3000": r"f_{\mathrm{Fe\, II}}",
         "f_bc_over_pl_3000": r"f_{\mathrm{BC}}",
         "wrms": r"\chi^2/\nu",
     }
