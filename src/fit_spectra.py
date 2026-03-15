@@ -133,116 +133,41 @@ def get_sdss_filters():
     return _SDSS_FILTER_CACHE
 
 
-def compute_photometric_flux_rescale(rec, lam, flux, disable_rescale_flux=False):
+def build_psf_photometry_inputs(rec):
     """
-    Compute delta_m_flux_recal and sigma_dm from synthetic-vs-fiber SDSS magnitudes.
+    Build PSF-photometry inputs for jaxqsofit from mean-corrected multiband values.
     """
-    out = {
-        "delta_mag_u": -1e9,
-        "delta_mag_g": -1e9,
-        "delta_mag_r": -1e9,
-        "delta_mag_i": -1e9,
-        "delta_mag_z": -1e9,
-        "mag_synth_u": -1e9,
-        "mag_synth_g": -1e9,
-        "mag_synth_r": -1e9,
-        "mag_synth_i": -1e9,
-        "mag_synth_z": -1e9,
-        "mean_corrected_u": safe_float(rec.get("mean_corrected_u"), -1e9),
-        "mean_corrected_g": safe_float(rec.get("mean_corrected_g"), -1e9),
-        "mean_corrected_r": safe_float(rec.get("mean_corrected_r"), -1e9),
-        "mean_corrected_i": safe_float(rec.get("mean_corrected_i"), -1e9),
-        "mean_corrected_z": safe_float(rec.get("mean_corrected_z"), -1e9),
-        "delta_m_flux_recal": 0.0,
-        "sigma_dm": 0.0,
-        "bands_used": "",
-    }
-    if disable_rescale_flux:
-        return out
+    z = safe_float(rec.get("z"))
+    dropped_bands = set(sdss_bands_affected_by_lya(z)) if np.isfinite(z) else set()
 
-    dropped_bands = set(sdss_bands_affected_by_lya(rec["z"]))
-    delta_mags = {}
-    weights = []
-    bands_used = []
-    filters = get_sdss_filters()
+    psf_bands_all = []
+    psf_mags_all = []
+    psf_mag_errs_all = []
 
-    for band, filt in zip(SDSS_CAL_BANDS, filters):
+    for band in SDSS_CAL_BANDS:
         if band in dropped_bands:
             continue
 
-        mag_fiber = safe_float(rec.get(f"mean_corrected_{band}"))
-        if not np.isfinite(mag_fiber) or mag_fiber < 0:
+        mag = safe_float(rec.get(f"mean_corrected_{band}"))
+        if not np.isfinite(mag):
             continue
 
-        try:
-            mag_synth = float(
-                filt.get_ab_magnitude(
-                    1e-17 * flux * u.erg / u.s / u.cm**2 / u.AA,
-                    lam * u.AA,
-                )
-            )
-        except Exception:
-            continue
+        # Prefer posterior mean-band errors from multiband fitting; fall back to LC scatter.
+        mag_err = safe_float(rec.get(f"mean_{band}_err"))
 
-        out[f"mag_synth_{band}"] = mag_synth
-        out[f"mean_corrected_{band}"] = mag_fiber
+        print(f"Band: {band} -- Mags Mean: {rec.get(f'mags_mean_{band}')}, Mean: {rec.get(f'mean_{band}')}, Corrected Mag: {mag}")
 
-        dm = mag_fiber - mag_synth
-        delta_mags[band] = dm
+        psf_bands_all.append(band)
+        psf_mags_all.append(float(mag))
+        psf_mag_errs_all.append(float(mag_err))
 
-        sig_m = safe_float(rec.get(f"mean_{band}_err"))
-        w = 1.0 / (sig_m**2) if np.isfinite(sig_m) and sig_m > 0 else 1.0
-        if np.isfinite(w) and w > 0:
-            weights.append(w)
-            bands_used.append(band)
-
-    if bands_used:
-        dm_arr = np.array([delta_mags[b] for b in bands_used], dtype=float)
-        w_arr = np.array(weights, dtype=float)
-        mask = np.isfinite(dm_arr) & np.isfinite(w_arr) & (w_arr > 0)
-        if np.any(mask):
-            w = w_arr[mask]
-            dm = dm_arr[mask]
-            out["delta_m_flux_recal"] = float(np.sum(w * dm) / np.sum(w))
-            out["sigma_dm"] = float(np.sqrt(1.0 / np.sum(w)))
-
-    for band in SDSS_BANDS:
-        if band in delta_mags:
-            out[f"delta_mag_{band}"] = float(delta_mags[band])
-    out["bands_used"] = "".join(bands_used)
-    return out
-
-
-def apply_mc_flux_scaling(flux, flux_err, delta_m_flux_recal, sigma_dm, mc_samples):
-    rng = np.random.default_rng(42)
-    if mc_samples > 1:
-        dm_i = rng.normal(delta_m_flux_recal, sigma_dm)
-        s = 10.0 ** (-0.4 * dm_i)
-        flux_scaled = s * flux + rng.normal(0.0, s * flux_err, size=flux.shape)
-        flux_err_scaled = s * flux_err * np.sqrt(2.0)
-    else:
-        dm_i = rng.normal(delta_m_flux_recal, 0.0)
-        s = 10.0 ** (-0.4 * dm_i)
-        flux_scaled = s * flux
-        flux_err_scaled = s * flux_err
-    return flux_scaled, flux_err_scaled, float(dm_i), float(s)
-
-
-def compute_apparent_mag_2500_astropy(logL2500, z):
-    """Convert log10(lambda L_lambda at 2500A) to monochromatic AB magnitude."""
-    c = 2.99792458e10
-    lambda_cm = 2500e-8
-
-    dl_cm = COSMO.luminosity_distance(z).to(u.cm).value
-    log_lnu = logL2500 + np.log10(lambda_cm / c)
-    log_fnu = log_lnu - np.log10(4.0 * np.pi * dl_cm**2)
-    return -2.5 * log_fnu - 48.60
+    return psf_bands_all, psf_mags_all, psf_mag_errs_all
 
 
 def estimate_m2500_from_model(q):
     """Fallback apparent mag estimate from model continuum at rest-frame 2500A."""
     if not hasattr(q, "wave") or not hasattr(q, "f_conti_model"):
-        return np.nan
+        return np.nan, np.nan
 
     s = q.numpyro_samples
     pl_norm = np.asarray(s["PL_norm_eff"], dtype=float)
@@ -320,6 +245,8 @@ def compute_derived_results(result, q, args):
     result["apparent_mag_2500"] = m2500
     result["apparent_mag_2500_err"] = m2500_err
 
+    result["f_pl_model_psf"] = q.scale_psf * q.f_pl_model
+
 
 # -----------------------------------------------------------------------------
 # sample building and cross-match
@@ -336,7 +263,7 @@ def load_quasar_core_list(fpath_in, pickled=False):
 
 def prepare_sample_df(quasar_list, filter_sdss_name=None, filter_object_id=None, N=None, skip=None):
     for q in quasar_list:
-        mags_mean = q.get("mags_mean", [])
+        mags_mean = q["mags_mean"]
         if len(mags_mean) == 5:
             for i, band in enumerate(SDSS_BANDS):
                 q[f"mags_mean_{band}"] = mags_mean[i]
@@ -605,32 +532,10 @@ def run_one_fit(rec, args):
         if len(lam) == 0:
             raise RuntimeError("Spectrum has no good pixels after ivar filtering.")
 
-        flux_rescale = compute_photometric_flux_rescale(
-            rec,
-            lam,
-            flux,
-            disable_rescale_flux=args.disable_rescale_flux,
-        )
-        result.update(flux_rescale)
-
-        fit_method = str(args.fit_method).lower()
-        numpyro_sample_count = int(args.nuts_samples) if "nuts" in fit_method else 1
-        result["numpyro_sample_count"] = int(numpyro_sample_count)
-
-        flux_scaled, err_scaled, dm_i, flux_scale = apply_mc_flux_scaling(
-            flux,
-            err,
-            delta_m_flux_recal=float(flux_rescale["delta_m_flux_recal"]),
-            sigma_dm=float(flux_rescale["sigma_dm"]),
-            mc_samples=int(numpyro_sample_count),
-        )
-        result["dm_i"] = dm_i
-        result["flux_scale"] = flux_scale
-
         q = QSOFit(
             lam=lam,
-            flux=flux_scaled,
-            err=err_scaled,
+            flux=flux,
+            err=err,
             z=float(rec["z"]),
             ra=float(rec["ra"]),
             dec=float(rec["dec"]),
@@ -638,7 +543,13 @@ def run_one_fit(rec, args):
             output_path=str(args.output_dir),
         )
 
-        prior_config = build_default_prior_config(flux_scaled)
+        prior_config = build_default_prior_config(flux)
+        psf_bands_all, psf_mags_all, psf_mag_errs_all = build_psf_photometry_inputs(rec)
+        result["bands_used"] = "".join(psf_bands_all)
+        for band in SDSS_BANDS:
+            mag = safe_float(rec.get(f"mean_corrected_{band}"))
+            if np.isfinite(mag):
+                result[f"mean_corrected_{band}"] = float(mag)
 
         if args.resume:
             q = QSOFit.load_from_samples(
@@ -676,6 +587,10 @@ def run_one_fit(rec, args):
                 save_fig=args.save_fig,
                 verbose=args.verbose,
                 kwargs_plot={"save_fig_path": args.fig_dir, 'plot_residual': args.plot_residual},
+                psf_mags=psf_mags_all,
+                psf_mag_errs=psf_mag_errs_all,
+                psf_bands=psf_bands_all,
+                use_psf_phot=True,
             )
 
         result.update(extract_named_results(q))
