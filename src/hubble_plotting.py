@@ -1215,7 +1215,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
 
     # ----------------- BINNING -----------------
     # Linear-z bins for MAIN & RESIDUALS panel
-    bins_linear = np.arange(0.4, np.max(df_agn["z"].values)+0.05, 0.2)
+    bins_linear = np.arange(0.32, np.max(df_agn["z"].values), 0.2)
     print("Using linear-z bins:", bins_linear)
     z_lin_scatter, mu_lin_mean_scatter, mu_lin_sem_scatter, n_lin = _weighted_bin_stats(
         df_agn["z"].values, mu_pred_median, mu_pred_std_with_scatter, bins_linear
@@ -1389,6 +1389,8 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     # MAIN: linear-binned AGN
     if show_binned_agn:
         mask_in  = (z_range[0] < z_lin_scatter) & (z_lin_scatter < z_range[1])
+        print("Plotting binned AGN (linear z) at:", z_lin_scatter)
+        print("\tmask_in:", mask_in)
         mask_out = ~mask_in
         # with scatter
         # binned (inside)
@@ -2163,7 +2165,7 @@ def plot_full_residuals(
         'log_jitter_u', 'log_jitter_g', 'log_jitter_r', 'log_jitter_i', 'log_jitter_z',
 
     ]) if col in df_agn.columns]
-    
+
 
     keys_masks = {
         'dm_red': (-5, 5),
