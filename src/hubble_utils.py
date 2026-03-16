@@ -177,123 +177,6 @@ def populate_xray(df, table_fpath="data/cscresults.vot"):
     return df_matched
 
 
-def populate_zquery(df, zquery_csv):
-    fields = {
-        'specObjID': str,
-        'plate': str,
-        'mjd': str,
-        'fiberID': str,
-        'z': float,
-        'zErr': float,
-        'zWarning': str,
-        'class': str,
-        'subClass': str,
-    }
-    # Load and concatenate two CSV files
-    df_zquery = pd.read_csv(
-        zquery_csv,
-        dtype={'object_id': str},
-        converters=fields
-    )
-
-    print("-------------------------- Z query report --------------------------")
-
-    merged = df.merge(df_zquery, on='object_id', how='left', suffixes=('', '_zquery'))
-
-    missing_ids = set(df['object_id']) - set(df_zquery['object_id'])
-
-    df['sameZ'] = np.isclose(merged['z'], merged['z_zquery'], atol=1e-1, equal_nan=True)
-    not_sameZ = ~df['sameZ'].fillna(False)
-
-    for col in fields.keys():
-        if f'{col}_zquery' in merged.columns:
-            df[f'{col}_zquery'] = merged[f'{col}_zquery']
-        else:
-            df[col] = merged[col]
-
-    # Convert flags to integer codes.
-    for col in ['zWarning', 'sameZ']:
-        df[col] = pd.to_numeric(df[col], errors='coerce').fillna(-99).astype(int)
-
-    # Convert string classes to categorical integer codes.
-    for col in ['class', 'subClass']:
-        df[f'{col}_code'] = df[col].astype('category').cat.codes
-
-    return df
-
-def populate_sdss_mags(df, 
-                       sdss_mags_csv='results/data/nov2_sdss_mags.csv',
-                       ps1_mags_csv='results/data/nov12_ps1_mags.csv'):
-    fields_sdss = {
-        'psfMag_u': float,
-        'fiberMag_u': float,
-        'petroRad_u': float,
-        'psfMag_g': float,
-        'fiberMag_g': float,
-        'petroRad_g': float,        
-        'psfMag_i': float,
-        'fiberMag_i': float,
-        'petroRad_i': float,
-        'psfMag_r': float,
-        'fiberMag_r': float,
-        'petroRad_r': float,
-        'psfMag_z': float,
-        'fiberMag_z': float,
-        'petroRad_z': float,
-    }
-    # Merge SDSS photometry.
-    df_mags = pd.read_csv(
-        sdss_mags_csv,
-        dtype={'object_id': str},
-        converters=fields_sdss
-    )
-    merged = df.merge(df_mags, on='object_id', how='left', suffixes=('', '_sdss'))
-
-    print("Length of sdss mags merged DataFrame:", len(merged))
-    missing_ids = set(df['object_id']) - set(df_mags['object_id'])
-    print("object_id not in merged:", list(missing_ids))
-
-    for col in fields_sdss.keys():
-        if f'{col}_sdss' in merged.columns:
-            df[f'{col}_sdss'] = merged[f'{col}_sdss']
-        else:
-            df[f'{col}_sdss'] = merged[col]
-
-    for b in ['u', 'g', 'r', 'i', 'z']:
-        df[f'psf_sdss_minus_fiber_sdss_{b}'] = df[f'psfMag_{b}_sdss'] - df[f'fiberMag_{b}_sdss']
-
-    # Merge PS1 photometry.
-
-    fields_ps1 = {
-        'psfMag_g': float,
-        'psfMag_i': float,
-        'psfMag_r': float,
-        'psfMag_z': float,
-    }
-
-
-    df_mags = pd.read_csv(
-        ps1_mags_csv,
-        dtype={'object_id': str},
-        #converters=fields_ps1
-    )
-    merged = df.merge(df_mags, on='object_id', how='left', suffixes=('', '_ps1'))
-
-    print("Length of sdss mags merged DataFrame:", len(merged))
-    missing_ids = set(df['object_id']) - set(df_mags['object_id'])
-    print("object_id not in merged:", list(missing_ids))
-
-    for col in fields_ps1.keys():
-        if f'{col}_ps1' in merged.columns:
-            df[f'{col}_ps1'] = merged[f'{col}_ps1']
-        else:
-            df[f'{col}_ps1'] = merged[col]
-
-    for b in ['g', 'r', 'i', 'z']:
-        df[f'psf_ps1_minus_fiber_sdss_{b}'] = df[f'psfMag_{b}_ps1'] - df[f'fiberMag_{b}_sdss']
-
-    return df
-
 def populate_lc_info(df, lc_info_csv):
     fields = {
         'number_points': int,
@@ -649,136 +532,22 @@ def read_quasars_from_hdf5(file_path, N=None):
                 break
     return quasar_list
 
-def make_psf_minus_fiber_correction_fn(z, psf_minus_fiber_i, z_window=0.5):
-    """
-    Given arrays of z and psf_minus_fiber_i, returns two callables:
-
-        dm_of_z(zq)      -> interpolated median(psf_minus_fiber_i) vs z
-        dm_err_of_z(zq)  -> interpolated SEM of psf_minus_fiber_i vs z
-
-    The medians and SEMs are computed in redshift bins using
-    scipy.stats.binned_statistic. Interpolation is linear in z with
-    flat extrapolation at the edges (conservative).
-    """
-    from scipy.stats import binned_statistic
-    from scipy.interpolate import interp1d
-
-    # Clean and sort the input sample.
-    d = (
-        pd.DataFrame({'z': z, 'psf_minus_fiber_i': psf_minus_fiber_i})
-        .dropna()
-        .sort_values('z')
-    )
-
-    if len(d) < 5:
-        raise ValueError("Not enough data points to build correction.")
-
-    z_min = d['z'].min()
-    z_max = d['z'].max()
-    z_span = z_max - z_min
-
-    if z_span <= 0:
-        raise ValueError("z must span a non-zero range.")
-
-    # Choose the number of bins to match the requested window scale.
-    nbins = max(5, int(np.ceil(z_span / z_window)))
-
-    z_vals = d['z'].to_numpy()
-    dm_vals = d['psf_minus_fiber_i'].to_numpy()
-
-    # Compute the median correction in bins.
-    dm_binned, edges, _ = binned_statistic(
-        z_vals,
-        dm_vals,
-        statistic='median',
-        bins=nbins,
-        range=(z_min, z_max),
-    )
-
-    # Use bin centers for interpolation.
-    z_centers = 0.5 * (edges[:-1] + edges[1:])
-
-    # Count points per bin for the SEM calculation.
-    counts, _, _ = binned_statistic(
-        z_vals,
-        dm_vals,
-        statistic='count',
-        bins=nbins,
-        range=(z_min, z_max),
-    )
-
-    # Compute the standard deviation in each bin.
-    std_binned, _, _ = binned_statistic(
-        z_vals,
-        dm_vals,
-        statistic='std',
-        bins=nbins,
-        range=(z_min, z_max),
-    )
-
-    # Convert the binned scatter to a standard error of the mean.
-    sem_binned = np.where(counts > 1, std_binned / np.sqrt(counts), np.nan)
-
-    # Keep only bins with finite median corrections.
-    mask_dm = np.isfinite(dm_binned)
-    z_fit = z_centers[mask_dm]
-    dm_fit = dm_binned[mask_dm]
-    sem_fit = sem_binned[mask_dm]
-
-    if len(z_fit) < 2:
-        raise ValueError("Not enough non-empty bins to build correction function.")
-
-    # Interpolate the median correction with flat extrapolation.
-    from scipy.interpolate import interp1d
-    dm_interp = interp1d(
-        z_fit, dm_fit,
-        kind="linear",
-        bounds_error=False,
-        fill_value=(dm_fit[0], dm_fit[-1]),
-    )
-
-    # Interpolate the SEM where enough bins are available.
-    mask_sem = np.isfinite(sem_fit)
-    if np.sum(mask_sem) >= 2:
-        z_fit_err = z_fit[mask_sem]
-        sem_fit_err = sem_fit[mask_sem]
-
-        dm_err_interp = interp1d(
-            z_fit_err, sem_fit_err,
-            kind="linear",
-            bounds_error=False,
-            fill_value=(sem_fit_err[0], sem_fit_err[-1]),
-        )
-
-        def dm_err_of_z(zq):
-            """Interpolated SEM of psf_minus_fiber_i at given zq."""
-            return dm_err_interp(np.asarray(zq, float))
-
-    else:
-        raise ValueError("Not enough non-empty SEM bins to build error function.")
-
-    def dm_of_z(zq):
-        """Interpolated psf_minus_fiber_i correction at given zq."""
-        return dm_interp(np.asarray(zq, float))
-
-    return dm_of_z, dm_err_of_z
-
 def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFAULT_F_HOST_CUT,
                   exclude_object_ids_csv=None,
                   residuals_sigma_clip=None, residuals_csv=None,
-                  spectra_fit_csv=None, zquery_csv=None, only_load=False,
+                  spectra_fit_csv=None, only_load=False,
                   pickled=False,
+                  correct_sigma_uv_host=False,
                   iron_frac_cut=None, wrms_cut=None,
-                  sdss_mags_csv=None, lc_info_csv="data/aug4_sample_chisqg10_ebv005sn3_lcdata.csv",
+                  lc_info_csv="data/aug4_sample_chisqg10_ebv005sn3_lcdata.csv",
                   chisq_info_csv="data/aug4_sample_chisqg10_ebv005sn3.csv",
-                  z_range=(0.44, 3.16)):
+                  z_range=(0.44, 3.16),
+                  plot_path="plots/hubble"):
     from hubble_plotting import (
         plot_Mi_relation,
         plot_cut_diagnostics,
-        plot_df_psf_fiber,
-        plot_df_psf_fiber_vs_fhost,
-        plot_log_fhost_vs_petrorad_by_band,
         plot_m2500_vs_z_colorpanels,
+        plot_sigma_uv_host_correction,
     )
 
     if exclude_object_ids_csv is None:
@@ -845,7 +614,6 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
 
     # df['log_sigma_UV'] = df['log_sigma_UV'] + 1/2 * np.log10(1 + df['z'])
 
-
     df_sample = pd.read_csv("data/aug4_sample_chisqg10_ebv005sn3.csv", dtype={'object_id': str})
     print("Entire Sample file length:", len(df_sample))
     # TODO: populate z
@@ -860,6 +628,28 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
             raise ValueError("spectra_fit_csv not provided and spectral fields not found in agn h5 file")
             #raise ValueError("spectra_fit_csv must be provided if alpha_lambda not in agn h5 file")
 
+    if "log_sigma_UV" in df.columns:
+        df["log_sigma_UV_uncorrected"] = pd.to_numeric(df["log_sigma_UV"], errors="coerce")
+    if correct_sigma_uv_host:
+        if {"log_sigma_UV_uncorrected", "frac_host_psf_2500"}.issubset(df.columns):
+            frac_host_psf = pd.to_numeric(df["frac_host_psf_2500"], errors="coerce")
+            valid_frac_host = np.isfinite(frac_host_psf) & (frac_host_psf != -1.0)
+            agn_frac_psf = 1.0 - frac_host_psf
+            valid_hostcorr = valid_frac_host & np.isfinite(agn_frac_psf) & (agn_frac_psf > 0.0)
+            df["sigma_UV_hostcorr_factor"] = np.where(valid_hostcorr, 1.0 / agn_frac_psf, np.nan)
+            df["log_sigma_UV"] = np.where(
+                valid_hostcorr,
+                df["log_sigma_UV_uncorrected"] + np.log10(df["sigma_UV_hostcorr_factor"]),
+                df["log_sigma_UV_uncorrected"],
+            )
+            print(
+                "Applied sigma_UV host correction using frac_host_psf_2500: "
+                "sigma_UV_corrected = sigma_UV / (1 - frac_host_psf_2500)"
+            )
+            plot_sigma_uv_host_correction(df, plot_path=plot_path, show=False)
+        else:
+            raise KeyError("correct_sigma_uv_host=True requires 'log_sigma_UV' and 'frac_host_psf_2500'.")
+
     # Remove objects with implausibly bright or faint apparent magnitude at 2500 A.
     mag_mask = ((df['apparent_mag_2500'] >= 16) & (df['apparent_mag_2500'] < 24))
     num_removed = np.sum(~mag_mask)
@@ -867,19 +657,7 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
     plot_cut_diagnostics(df.copy(), df[mag_mask], bins=30, cut_info="16 < apparent_mag_2500 < 24")
     df = df[mag_mask].reset_index(drop=True)
 
-    if zquery_csv is not None:
-        print("Populating zquery data from:", zquery_csv)
-        df = populate_zquery(df, zquery_csv)
-    else:
-        print("[WARNING] zquery_csv not provided, assuming zquery fields are in agn h5 file")
-        if 'zWarning' not in df.columns:
-            print("[WARNING] zquery fields not in data, setting zWarning and sameZ to -99")
-            df['zWarning'] = -99
-            df['sameZ'] = -99
-
     df = populate_xray(df)
-
-    df = populate_sdss_mags(df)
     
     if lc_info_csv is not None:
         print("Populating LC info from:", lc_info_csv)
@@ -898,21 +676,6 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
     print("Number of quasars with 0 < z <= 1.0:", num_quasars_z_0_1_before)
     print("Number of quasars with z > 3:", num_quasars_z_gt_3_before)
     print("Highest redshift quasar:", df['z'].max())
-
-    # Correct for psf - fiber magnitude differences using rolling median
-    #dm_of_z = df["psf_sdss_minus_fiber_sdss_i"].values
-    dm_of_z, dm_of_z_err = make_psf_minus_fiber_correction_fn(
-    df["z"].values,
-    df["psf_sdss_minus_fiber_sdss_i"].values,
-    z_window=0.1,
-    )
-    dm = dm_of_z(df["z"].values)
-    df['dm_psf_correction'] = dm
-    df['dm_psf_correction_err'] = dm_of_z_err(df["z"].values)
-    #dm = df["psf_sdss_minus_fiber_sdss_r"].values
-    
-    df['apparent_mag_2500_uncorrectedpsf'] = df['apparent_mag_2500'].values
-    df['apparent_mag_2500'] = df['apparent_mag_2500'].values #- dm
 
     df_all = df.copy()
 
@@ -1068,9 +831,6 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
     print(f"\nTotal number of objects removed by all cuts: {len(df_all) - len(df)}")
     print("Final number of quasars:", len(df))
     plot_cut_diagnostics(df_all.copy(), df.copy(), bins=30, cut_info="all cuts")
-    plot_df_psf_fiber(df_all, df_keep=df, z_range=z_range, show=False)
-    plot_df_psf_fiber_vs_fhost(df_all, df_keep=df, z_range=z_range, show=False)
-    plot_log_fhost_vs_petrorad_by_band(df_all, df_keep=df, z_range=z_range, show=False)
     colorpanel_cols = [
         col for col in ("f_host_center", "f_fe_uv_over_pl_3000", "f_bc_over_pl_3000", "wrms")
         if col in df_all.columns

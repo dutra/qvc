@@ -129,6 +129,86 @@ def plot_cut_diagnostics(df_before, df_after, bins=30, cut_info="", save_path="p
     _save_figure(fig, plot_path, dpi=150)
 
 
+def plot_sigma_uv_host_correction(df, plot_path="plots/hubble", show=False):
+    """Compare corrected and uncorrected UV variability amplitudes, colored by redshift."""
+    required = {"log_sigma_UV", "log_sigma_UV_uncorrected", "z", "frac_host_psf_2500"}
+    if not required.issubset(df.columns):
+        missing = ", ".join(sorted(required - set(df.columns)))
+        raise KeyError(f"Missing required columns for sigma_UV host-correction plot: {missing}")
+
+    z = pd.to_numeric(df["z"], errors="coerce").to_numpy(dtype=float)
+    frac_host_psf = pd.to_numeric(df["frac_host_psf_2500"], errors="coerce").to_numpy(dtype=float)
+    delta_log_sigma = (
+        pd.to_numeric(df["log_sigma_UV"], errors="coerce").to_numpy(dtype=float)
+        - pd.to_numeric(df["log_sigma_UV_uncorrected"], errors="coerce").to_numpy(dtype=float)
+    )
+
+    mask_left = np.isfinite(delta_log_sigma) & np.isfinite(z)
+    if not np.any(mask_left):
+        raise ValueError("No finite rows available for sigma_UV host-correction diagnostics.")
+
+    x_left = z[mask_left]
+    y_left = delta_log_sigma[mask_left]
+    z_left = z[mask_left]
+
+    mask_right = (
+        np.isfinite(delta_log_sigma)
+        & np.isfinite(frac_host_psf)
+        & np.isfinite(z)
+        & (frac_host_psf != -1.0)
+        & (frac_host_psf > 0.0)
+    )
+    log_frac_host_psf = np.log10(frac_host_psf[mask_right]) if np.any(mask_right) else np.array([])
+    delta_right = delta_log_sigma[mask_right]
+    z_right = z[mask_right]
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 6.5))
+
+    sc_left = axes[0].scatter(
+        x_left,
+        y_left,
+        c=z_left,
+        cmap="viridis",
+        s=10,
+        alpha=0.65,
+        linewidths=0,
+        rasterized=True,
+    )
+    axes[0].axhline(0.0, color="k", ls="--", lw=1, alpha=0.8)
+    axes[0].set_xlabel("Redshift z")
+    axes[0].set_ylabel(r"$\Delta \log \sigma_{\rm UV}$")
+    axes[0].grid(True, alpha=0.25)
+
+    if np.any(mask_right):
+        sc_right = axes[1].scatter(
+            log_frac_host_psf,
+            delta_right,
+            c=z_right,
+            cmap="viridis",
+            s=10,
+            alpha=0.65,
+            linewidths=0,
+            rasterized=True,
+        )
+        cbar = fig.colorbar(sc_right, ax=axes.tolist())
+    else:
+        axes[1].text(0.5, 0.5, "No valid frac_host_psf_2500 values", ha="center", va="center", transform=axes[1].transAxes)
+        cbar = fig.colorbar(sc_left, ax=axes.tolist())
+    axes[1].axhline(0.0, color="k", ls="--", lw=1, alpha=0.8)
+    axes[1].set_xlabel(r"$\log_{10}(\mathrm{frac\_host\_psf\_2500})$")
+    axes[1].set_ylabel(r"$\Delta \log \sigma_{\rm UV}$")
+    axes[1].grid(True, alpha=0.25)
+    cbar.set_label("Redshift z")
+
+    diagnostics_path = os.path.join(plot_path or "plots/hubble", "diagnostics")
+    return _save_figure(
+        fig,
+        os.path.join(diagnostics_path, "sigma_uv_host_correction_comparison.pdf"),
+        dpi=200,
+        show=show,
+    )
+
+
 def _plot_dm_by_band(
     df,
     *,
@@ -2022,7 +2102,7 @@ def plot_full_residuals(
         'eta_A1', 'eta_tau1', 
         'PL_slope_blue', 'lam_min', 'lam_max', 'lam_range', 
         'poly1', 'psf_minus_fiber_r', 'log_psf_minus_fiber_r', 'petroRad_r', 'log_petroRad_r',
-        'cadence', 'cadence_err', 'number_points', 'dm_psf_correction',
+        'cadence', 'cadence_err', 'number_points',
         'log_jitter_total', 'log_amp_delta_blr_total',
         'log_amp_delta_blr_u', 'log_amp_delta_blr_g', 'log_amp_delta_blr_r', 'log_amp_delta_blr_i', 'log_amp_delta_blr_z',
         'log_jitter_u', 'log_jitter_g', 'log_jitter_r', 'log_jitter_i', 'log_jitter_z',

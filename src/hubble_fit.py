@@ -145,7 +145,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
     agn_fields += ('apparent_mag_2500', 'apparent_mag_2500_err', 'z', 'z_err', 'object_id')
     agn_data = {col: df_agn[col].values for col in agn_fields if col in df_agn.columns}
 
-    pantheon_fields = ['zHD', 'm_b_corr', 'IS_CALIBRATOR', 'CEPH_DIST']
+    pantheon_fields = ['zHD', 'm_b_corr', 'IS_CALIBRATOR', 'CEPH_DIST', 'MU_SH0ES_ERR_DIAG']
     pantheon_data = {col: df_pantheon[col].values for col in pantheon_fields if col in df_pantheon.columns}
 
     agn_calibrators_fields = ('MU_CAL', 'MU_CAL_ERR', 'AGN_IS_CALIBRATOR') + agn_fields
@@ -565,7 +565,6 @@ if __name__ == "__main__":
     parser.add_argument("--N", type=int, default=None, help="Number of AGNs to run (default: all)")
     parser.add_argument("--only_sna", action="store_true", default=False, help="Run SNIa-only fit (default: False)")
     parser.add_argument("--spectra_fit_csv", type=str, nargs='+', help="Path(s) to spectra fit CSV file(s)")
-    parser.add_argument("--zquery_csv", type=str, help="Path to zquery CSV file")
     parser.add_argument("--no_cuts", action="store_true", default=False, help="Disable AGN data cuts (default: False)")
     parser.add_argument("--skip_plots", action="store_true", default=False, help="Skip plotting steps (default: False)")
     parser.add_argument(
@@ -582,13 +581,18 @@ if __name__ == "__main__":
     parser.add_argument("--iron_frac_cut", type=float, default=DEFAULT_IRON_FRAC_CUT, help="Optional iron fraction cut value to exclude outliers (default: None)")
     parser.add_argument("--bc_frac_cut", type=float, default=DEFAULT_BC_FRAC_CUT, help="Optional BC cut value to exclude outliers (default: None)")
     parser.add_argument("--chi_sq_cut", type=float, default=DEFAULT_CHI_SQ_CUT, help="Optional chi-squared cut value to exclude outliers (default: None)")
-    parser.add_argument("--sdss_mags_csv", type=str, default=None, help="Path to CSV file containing SDSS magnitudes (default: None)")
     parser.add_argument("--prefix", type=str, default="default", help="Prefix directory under plots/hubble/ and results/, and result variable prefix.")
     parser.add_argument("--result_prefix", type=str, default="", help="Prefix for result variable names in LaTeX output (default: empty string)")
     parser.add_argument("--z_range", type=float, nargs=2, default=[0.44, 3.16], 
                         help="Redshift range for AGN data (default: [0.44, 3.16])")
     parser.add_argument("--pickled", action="store_true", default=False, help="Use pickled data file (default: False)")
     parser.add_argument("--uniform_redshift_distribution", action="store_true", default=False, help="Select AGN subset with uniform redshift distribution (default: False)")
+    parser.add_argument(
+        "--correct-sigma-uv-host",
+        action="store_true",
+        default=False,
+        help="Correct log_sigma_UV using frac_host_psf_2500 and save a diagnostics plot.",
+    )
 
     args = parser.parse_args()
 
@@ -604,14 +608,16 @@ if __name__ == "__main__":
         print("Warning: Resuming previous MCMC run.")
 
     df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_pantheon_data()
+    agn_plot_path = f"plots/hubble/{args.prefix}"
     df_agn, df_agn_all = load_agn_data(args.agn_data_filepath, populate_sdss=args.force_populate_fields, 
                            apply_cut=not args.no_cuts, fhost_cut=args.fhost_cut,
                            residuals_sigma_clip=args.residuals_sigma_clip, residuals_csv=args.residuals_csv,
                            exclude_object_ids_csv=args.exclude_object_ids_csv,
-                           spectra_fit_csv=args.spectra_fit_csv, zquery_csv=args.zquery_csv,
+                           spectra_fit_csv=args.spectra_fit_csv,
                            wrms_cut=args.wrms_cut, iron_frac_cut=args.iron_frac_cut,
-                           sdss_mags_csv=args.sdss_mags_csv, pickled=args.pickled,
-                           z_range=tuple(args.z_range))
+                           pickled=args.pickled,
+                           correct_sigma_uv_host=args.correct_sigma_uv_host,
+                           z_range=tuple(args.z_range), plot_path=agn_plot_path)
     
     if args.agn_calibrators:
         if args.agn_calibrators.endswith('.h5'):
