@@ -1,4 +1,5 @@
-jax==0.7.1
+jax<=0.4.31
+jaxlib<=0.4.31
 jaxopt==0.8.5
 dynesty==2.1.5
 eztaox
