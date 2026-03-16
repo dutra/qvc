@@ -726,12 +726,12 @@ def process_samples(flat_samples, data,  bands, percentiles=[16, 50, 84], broken
     log_tau_drw0 = np.asarray(flat_samples["log_tau_drw0"])
     log_tau_fast0 = np.asarray(flat_samples["log_tau_fast0"])
     eta_A1 = np.asarray(flat_samples["eta_A1"])
-    eta_A2 = np.asarray(flat_samples["eta_A2"])
     eta_tau1 = np.asarray(flat_samples["eta_tau1"])
-    eta_tau2 = np.asarray(flat_samples["eta_tau2"])
-    eta_break = np.asarray(flat_samples["eta_break"])
     lambda_ref = 2500
-    lam_s = np.asarray(flat_samples["lam_s"])
+    eta_A2 = np.asarray(flat_samples["eta_A2"]) if "eta_A2" in flat_samples else np.zeros_like(eta_A1)
+    eta_tau2 = np.asarray(flat_samples["eta_tau2"]) if "eta_tau2" in flat_samples else np.zeros_like(eta_tau1)
+    eta_break = np.asarray(flat_samples["eta_break"]) if "eta_break" in flat_samples else np.full_like(eta_A1, 0.1)
+    lam_s = np.asarray(flat_samples["lam_s"]) if "lam_s" in flat_samples else np.full_like(eta_A1, lambda_ref)
 
     log_sigma_band = []
     for band in bands:
@@ -766,18 +766,18 @@ def process_samples(flat_samples, data,  bands, percentiles=[16, 50, 84], broken
         result[f"log_tau_fast_band_{band}_RF_err"] = err
 
 
-    # Other special params
-    host_frac = flat_samples["f_host"] * (lambda_ref / 5100.0) ** flat_samples["alpha_host"]
-    dilution_factor = 1.0 / (1.0 + host_frac)
-    log_dilution = jnp.log(dilution_factor)
-
-    # log_sigma_UV_diluted
-    samples_log_sigma_UV_diluted = (flat_samples["log_sigma0"] - log_dilution) / np.log(10) + log_pl(lambda_ref, lam_s, eta_A1, eta_A2, eta_break)
-    result['log_sigma_UV_diluted'], result['log_sigma_UV_diluted_err'] = sym_percentile(samples_log_sigma_UV_diluted)
-
     # log_sigma_UV
     samples_log_sigma_UV = flat_samples["log_sigma0"] / np.log(10) + log_pl(lambda_ref, lam_s, eta_A1, eta_A2, eta_break)
     result['log_sigma_UV'], result['log_sigma_UV_err'] = sym_percentile(samples_log_sigma_UV)
+
+    if "f_host" in flat_samples and "alpha_host" in flat_samples:
+        host_frac = flat_samples["f_host"] * (lambda_ref / 5100.0) ** flat_samples["alpha_host"]
+        dilution_factor = 1.0 / (1.0 + host_frac)
+        log_dilution = jnp.log(dilution_factor)
+        samples_log_sigma_UV_diluted = (flat_samples["log_sigma0"] - log_dilution) / np.log(10) + log_pl(lambda_ref, lam_s, eta_A1, eta_A2, eta_break)
+    else:
+        samples_log_sigma_UV_diluted = samples_log_sigma_UV
+    result['log_sigma_UV_diluted'], result['log_sigma_UV_diluted_err'] = sym_percentile(samples_log_sigma_UV_diluted)
 
     # log_tau_UV_RF
     samples_log_tau_UV_RF = flat_samples["log_tau_drw0"] / np.log(10) - np.log10(1 + data['z']) + log_pl(lambda_ref, lam_s, eta_tau1, eta_tau2, eta_break)
@@ -805,14 +805,6 @@ def process_samples(flat_samples, data,  bands, percentiles=[16, 50, 84], broken
     print("PSD covariance: ", sxy)
 
     return result
-
-def drw_equiv(amp_cont, tau_drw, bwb_alpha, bwb_beta):
-    A = amp_cont
-    q2 = (bwb_alpha * A**2)**2  # q_b^2
-
-    sigma2_eq = A**2 + 2.0 * q2
-    tau_eq = tau_drw * (A**2 + (2.0/bwb_beta)*q2) / (A**2 + 2.0*q2)
-    return tau_eq, sigma2_eq
 
 
 import numpy as np
@@ -958,7 +950,7 @@ def diagnostics_for_per_chain_samples(
     worst_stuck = (None, -np.inf, None, None)
     worst_pcess = (None,  np.inf, None)
 
-    ignore_keys = ('eta_break', 'lam_s', 'bwb_alpha', 'bwb_beta', 'f_host', 'log_tau_fake', 'log_sigma_fake',
+    ignore_keys = ('eta_break', 'lam_s', 'bwb_beta', 'f_host', 'log_tau_fake', 'log_sigma_fake',
                    'gate_log_temp', 'lmc_sep_raw', 'lmc_sep_left_raw', 'lmc_sep_right_raw', 'lmc_span_raw',
                     'lmc_mu_raw', 'lmc_delta_raw', 'lmc_sep', 'lmc_sep_left', 'lmc_sep_right', 'lmc_span',)
 
