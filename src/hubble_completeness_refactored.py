@@ -58,7 +58,7 @@ def get_completeness_function_2d_simple(*args, mag_lim=24.0, width=0.2, plot=Fal
         plt.grid(True)
         plt.legend()
         plt.tight_layout()
-        plt.savefig(os.path.join(completeness_path, "simple_completeness_function.png"), dpi=200)
+        plt.savefig(os.path.join(completeness_path, "simple_completeness_function.pdf"), dpi=600)
         plt.close()
 
     return completeness2d, mag_centers, z_centers, dm, dz
@@ -141,9 +141,12 @@ def get_completeness_function_2d(
     from scipy.ndimage import gaussian_filter
     import pandas as pd
     from astropy.cosmology import FlatLambdaCDM
-    # Simulation inputs: rest-frame mi and z
+    # Simulation inputs: apparent-magnitude proxy at rest-frame 2500 A and z
     with h5py.File(sim_file, "r") as f:
-        m_true = np.asarray(f["apparent_mag_i_rest"][:], dtype=float)
+        if "apparent_mag_2500" in f:
+            m_true = np.asarray(f["apparent_mag_2500"][:], dtype=float)
+        else:
+            m_true = np.asarray(f["apparent_mag_i_rest"][:], dtype=float)
         z_true  = np.asarray(f["z"][:], dtype=float)
 
     # Filter finite
@@ -232,7 +235,6 @@ def get_completeness_function_2d(
         cbar = plt.colorbar(im); 
         cbar.set_label(r"Completeness $\log\,p(I{=}1\,|\,m,z)$")
         plt.tight_layout()
-        plt.savefig(os.path.join(plot_dir, "completeness_map.png"), dpi=200)
         plt.savefig(os.path.join(plot_dir, "completeness_map.pdf"), dpi=600)
         plt.close()
         # Plot H_obs
@@ -245,8 +247,7 @@ def get_completeness_function_2d(
         plt.xlabel(r"$m_{2500\,\text{\AA}} \; (\mathrm{mag})$")
         cbar = plt.colorbar(im); cbar.set_label(r"$\log\,H_{\rm obs}$")
         plt.tight_layout()
-        plt.savefig(os.path.join(plot_dir, "H_obs_map.png"), dpi=200)
-        #plt.savefig(os.path.join(plot_dir, "H_obs_map.pdf"), dpi=600)
+        plt.savefig(os.path.join(plot_dir, "H_obs_map.pdf"), dpi=600)
         plt.close()
         # Plot H_true
         plt.figure(figsize=(7, 5))
@@ -258,8 +259,7 @@ def get_completeness_function_2d(
         plt.xlabel(r"Apparent Magnitude $m_{i,\mathrm{rest}} \; (\mathrm{mag})$")
         cbar = plt.colorbar(im); cbar.set_label(r"$\log\,H_{\rm true}$")
         plt.tight_layout()
-        plt.savefig(os.path.join(plot_dir, "H_true_map.png"), dpi=200)
-        #plt.savefig(os.path.join(plot_dir, "H_true_map.pdf"), dpi=600)
+        plt.savefig(os.path.join(plot_dir, "H_true_map.pdf"), dpi=600)
         plt.close()
     return Completeness2D(mag_centers, z_centers, C), mag_centers, z_centers, dm, dz, sigma_mag
 

@@ -548,6 +548,7 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
         plot_cut_diagnostics,
         plot_m2500_vs_z_colorpanels,
         plot_sigma_uv_host_correction,
+        plot_tau_sigma_vs_redshift,
     )
 
     if exclude_object_ids_csv is None:
@@ -649,6 +650,9 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
             plot_sigma_uv_host_correction(df, plot_path=plot_path, show=False)
         else:
             raise KeyError("correct_sigma_uv_host=True requires 'log_sigma_UV' and 'frac_host_psf_2500'.")
+
+    if {"z", "log_tau_UV_RF", "log_sigma_UV"}.issubset(df.columns):
+        plot_tau_sigma_vs_redshift(df, plot_path=plot_path, show=False)
 
     # Remove objects with implausibly bright or faint apparent magnitude at 2500 A.
     mag_mask = ((df['apparent_mag_2500'] >= 16) & (df['apparent_mag_2500'] < 24))

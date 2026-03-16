@@ -29,6 +29,7 @@ from dynesty import utils as dyfunc
 plt.style.use('style.mplstyle')
 z_pivot_sna = 0.0
 z_pivot_agn = 1.5
+DEFAULT_COMPLETENESS_SIM_FILE = "data/nov9_mock_mag_z_moresources.h5"
 
 from hubble_utils import (
     compare_models_by_log_evidence_all,
@@ -120,6 +121,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                       resume=False, speed="production",
                       z_range=(0.44, 3.16),
                       prefix="default",
+                      completeness_sim_file=DEFAULT_COMPLETENESS_SIM_FILE,
                       N=None,
                       ):
 
@@ -135,8 +137,12 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
         print("[WARNING] use_full_cov=False: fitting with diagonal SN uncertainties instead of the full covariance matrix.")
 
     if completeness:
+        if completeness_sim_file is None:
+            print("Building completeness map using default mock catalog file.")
+        else:
+            print(f"Building completeness map using mock catalog: {completeness_sim_file}")
         completeness_params = get_completeness_function_2d(
-            df_agn, plot=True, plot_path=plot_path
+            df_agn, sim_file=completeness_sim_file, plot=True, plot_path=plot_path
         )
     else:
         completeness_params = None
@@ -353,11 +359,17 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                verbose=True,
                z_range=(0.44, 3.16),
                skip_plots=False, residuals_sigma_clip=None, df_calibrators=None,
-               prefix="default", uniform_redshift_distribution=False):
+               prefix="default", uniform_redshift_distribution=False,
+               completeness_sim_file=DEFAULT_COMPLETENESS_SIM_FILE):
     run_tag = make_run_tag(cosmo_model, only_sna, speed, N, z_range)
     plot_path = f"plots/hubble/{prefix}/{run_tag}"
     os.makedirs(plot_path, exist_ok=True)
     print(f"Saving plots to ", plot_path)
+    if completeness:
+        if completeness_sim_file is None:
+            print("Completeness enabled with default mock catalog file.")
+        else:
+            print(f"Completeness enabled with mock catalog file: {completeness_sim_file}")
 
     if uniform_redshift_distribution:
         df_agn_fit_selection = select_agn_subset_uniform_with_replacement(
@@ -383,7 +395,8 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                                                         z_range=z_range,
                                                         N=N,
                                                         resume=resume, speed=speed,
-                                                        prefix=prefix)
+                                                        prefix=prefix,
+                                                        completeness_sim_file=completeness_sim_file)
     display_results_summary(flat_samples, cosmo_model, z_pivot_agn)
     print("Computing age of the universe with error propagation...")
     age, age_err = compute_age_universe_with_error(flat_samples, cosmo_model, max_eval=200)
@@ -440,7 +453,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
 
     print("Plotting completeness vs magnitude at redshifts...")
     p_detect, mag_centers, z_centers, dm, dz, completeness_scatter = get_completeness_function_2d(
-        df_agn, plot=True, plot_path=plot_path
+        df_agn, sim_file=completeness_sim_file, plot=True, plot_path=plot_path
     )
     plot_completeness_vs_mag_at_redshifts(
         p_detect, mag_centers, z_centers, plot_path=plot_path
@@ -467,7 +480,8 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
             residuals_sigma_clip=None,
             z_range=(0.44, 3.16),
             speed="production", resume=False, N=None,
-            prefix="default", result_prefix="", uniform_redshift_distribution=False):
+            prefix="default", result_prefix="", uniform_redshift_distribution=False,
+            completeness_sim_file=DEFAULT_COMPLETENESS_SIM_FILE):
 
     zmin, zmax = z_range
     n_tag = "all" if N is None else f"N{N}"
@@ -488,7 +502,8 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
                        residuals_sigma_clip=residuals_sigma_clip,
                        z_range=z_range,
                        cosmo_model_joint_samples=cosmo_model_joint_samples,
-                       prefix=prefix, uniform_redshift_distribution=uniform_redshift_distribution)
+                       prefix=prefix, uniform_redshift_distribution=uniform_redshift_distribution,
+                       completeness_sim_file=completeness_sim_file)
         
         samples_joint, model_labels_joint, dm_interp_joint, logZ_joint, logZerr_joint, debiased_residuals_joint, age_joint, age_err_joint = r
         #print(f"For model {cosmo_model}, universe age: {age:.3f} Gyr")
@@ -498,7 +513,8 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
                        residuals_sigma_clip=residuals_sigma_clip,
                        z_range=z_range,
                        resume=resume, speed=speed, N=N,
-                       prefix=prefix, uniform_redshift_distribution=uniform_redshift_distribution)
+                       prefix=prefix, uniform_redshift_distribution=uniform_redshift_distribution,
+                       completeness_sim_file=completeness_sim_file)
         samples_sna, model_labels_sna, dm_interp_sna, logZ_sna, logZerr_sna, debiased_residuals_sna, age_sna, age_sna_err = r
         
         plot_cosmo_corner(samples_sna, samples_joint, cosmo_model, z_pivot_sna, z_pivot_agn, show=False, 
@@ -588,6 +604,12 @@ if __name__ == "__main__":
     parser.add_argument("--pickled", action="store_true", default=False, help="Use pickled data file (default: False)")
     parser.add_argument("--uniform_redshift_distribution", action="store_true", default=False, help="Select AGN subset with uniform redshift distribution (default: False)")
     parser.add_argument(
+        "--completeness_sim_file",
+        type=str,
+        default=DEFAULT_COMPLETENESS_SIM_FILE,
+        help="Mock catalog HDF5 file to use when building the completeness map.",
+    )
+    parser.add_argument(
         "--correct-sigma-uv-host",
         action="store_true",
         default=False,
@@ -640,7 +662,8 @@ if __name__ == "__main__":
                 speed=args.speed, N=args.N, only_sna=args.only_sna,
                 skip_plots=args.skip_plots, residuals_sigma_clip=args.residuals_sigma_clip,
                 df_calibrators=df_calibrators,
-                prefix=args.prefix)
+                prefix=args.prefix,
+                completeness_sim_file=args.completeness_sim_file)
             samples_joint, model_labels, dm_interp, logZ_joint, logZerr_joint, debiased_residuals, age, age_err = r
             cosmo_models_dict[cosmo_model]['logZ'] = logZ_joint
             cosmo_models_dict[cosmo_model]['logZerr'] = logZerr_joint
@@ -658,6 +681,7 @@ if __name__ == "__main__":
                 residuals_sigma_clip=args.residuals_sigma_clip,
                 z_range=args.z_range,
                 speed=args.speed, resume=args.resume, N=args.N,
-                prefix=args.prefix, result_prefix=args.result_prefix, uniform_redshift_distribution=args.uniform_redshift_distribution)
+                prefix=args.prefix, result_prefix=args.result_prefix, uniform_redshift_distribution=args.uniform_redshift_distribution,
+                completeness_sim_file=args.completeness_sim_file)
     
     print(f"Finished running Hubble fit pipeline for {args.cosmo_models}")

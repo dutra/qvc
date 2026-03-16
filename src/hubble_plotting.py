@@ -209,6 +209,60 @@ def plot_sigma_uv_host_correction(df, plot_path="plots/hubble", show=False):
     )
 
 
+def plot_tau_sigma_vs_redshift(df, plot_path="plots/hubble", show=False):
+    """Plot log tau_UV_RF and log sigma_UV against redshift for AGN diagnostics."""
+    required = {"z", "log_tau_UV_RF", "log_sigma_UV"}
+    if not required.issubset(df.columns):
+        missing = ", ".join(sorted(required - set(df.columns)))
+        raise KeyError(f"Missing required columns for tau/sigma vs redshift plot: {missing}")
+
+    z = pd.to_numeric(df["z"], errors="coerce").to_numpy(dtype=float)
+    log_tau = pd.to_numeric(df["log_tau_UV_RF"], errors="coerce").to_numpy(dtype=float)
+    log_sigma = pd.to_numeric(df["log_sigma_UV"], errors="coerce").to_numpy(dtype=float)
+
+    fig, axes = plt.subplots(2, 1, figsize=(8.5, 10.0), sharex=True)
+
+    mask_tau = np.isfinite(z) & np.isfinite(log_tau)
+    if np.any(mask_tau):
+        axes[0].scatter(
+            z[mask_tau],
+            log_tau[mask_tau],
+            s=5,
+            alpha=0.65,
+            linewidths=0,
+            rasterized=True,
+        )
+    else:
+        axes[0].text(0.5, 0.5, "No finite log_tau_UV_RF values", ha="center", va="center", transform=axes[0].transAxes)
+    axes[0].set_xlabel("Redshift z")
+    axes[0].set_ylabel(r"$\log \tau_{\rm UV,RF}$")
+    axes[0].grid(True, alpha=0.25)
+
+    mask_sigma = np.isfinite(z) & np.isfinite(log_sigma)
+    if np.any(mask_sigma):
+        axes[1].scatter(
+            z[mask_sigma],
+            log_sigma[mask_sigma],
+            s=5,
+            alpha=0.65,
+            linewidths=0,
+            rasterized=True,
+        )
+    else:
+        axes[1].text(0.5, 0.5, "No finite log_sigma_UV values", ha="center", va="center", transform=axes[1].transAxes)
+    axes[1].set_xlabel("Redshift z")
+    axes[1].set_ylabel(r"$\log \sigma_{\rm UV}$")
+    axes[1].grid(True, alpha=0.25)
+
+    diagnostics_path = os.path.join(plot_path or "plots/hubble", "diagnostics")
+    return _save_figure(
+        fig,
+        os.path.join(diagnostics_path, "tau_sigma_vs_redshift.pdf"),
+        dpi=200,
+        show=show,
+    )
+
+
 def _plot_dm_by_band(
     df,
     *,
