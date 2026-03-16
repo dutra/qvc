@@ -1,3 +1,4 @@
+import jax
 import jax.numpy as jnp
 from tinygp.helpers import JAXArray
 from tinygp.kernels import quasisep as qs
@@ -109,6 +110,38 @@ class ContiBLR_SHO_Wrapper(qs.Wrapper):
         return amp_cont * h_cont + amp_blr * h_blr
 
 
+def qs_psd(kernel, omega, b: int, sigma_n2: float = 0.0):
+    """One-sided PSD for a quasiseparable kernel with multiband observations."""
+
+    A = kernel.design_matrix()
+    P = kernel.stationary_covariance()
+    Qc = -(A @ P + P @ A.T)
+    I = jnp.eye(A.shape[0], dtype=A.dtype)
+    h = kernel.observation_model((jnp.array(0.0), jnp.array(int(b))))
+
+    def one_w(w):
+        v = jnp.linalg.solve((-1j * w) * I - A.T, h)
+        return (v.conj().T @ (Qc @ v)).real + sigma_n2
+
+    return 2.0 * jax.vmap(one_w)(omega)
+
+
+class ContiBLR_SHO_Model(MultiVarModel):
+    """MultiVarModel with a convenience PSD method for plotting."""
+
+    def my_lag_transform(
+        self, X: JAXArray, has_lag: bool, params: dict[str, JAXArray]
+    ) -> tuple[tuple[JAXArray, JAXArray], JAXArray]:
+        return self.lag_transform(has_lag, params, X)
+
+    def my_amp_transform(self, params: dict[str, JAXArray]) -> JAXArray:
+        return jnp.log(_safe_pos(jnp.asarray(params["amp_cont"])))
+
+    def psd(self, params, omega, b: int = 0, sigma_n2: float = 0.0):
+        gp, _ = self._build_gp(params)
+        return qs_psd(kernel=gp.kernel, omega=omega, b=b, sigma_n2=sigma_n2)
+
+
 def make_linear_mean_func(t_ref, zero_mean=False):
     """Return a simple per-band linear mean function."""
 
@@ -148,7 +181,7 @@ def make_multiband_dho_blr_model(
     def amp_scale_func(_params):
         return jnp.zeros(n_band)
 
-    return MultiVarModel(
+    return ContiBLR_SHO_Model(
         X,
         y,
         yerr,
@@ -167,8 +200,10 @@ def make_multiband_dho_blr_model(
 
 
 __all__ = [
+    "ContiBLR_SHO_Model",
     "ContiBLR_SHO_Wrapper",
     "OverdampedSHOBaseQS",
     "make_linear_mean_func",
     "make_multiband_dho_blr_model",
+    "qs_psd",
 ]

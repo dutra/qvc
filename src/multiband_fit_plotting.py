@@ -510,28 +510,37 @@ def combined_lomb_scargle_from_model(
     f_raw = omega / (2.0 * np.pi)
 
     # Lag subtraction
-    (t_lag, band_idx), _ = model.my_lag_transform(model.X, model.has_lag, params)
+    if hasattr(model, "my_lag_transform"):
+        (t_lag, band_idx), _ = model.my_lag_transform(model.X, model.has_lag, params)
+    else:
+        (t_lag, band_idx), _ = model.lag_transform(model.has_lag, params, model.X)
     t_lag = np.asarray(t_lag, float)
     band_idx = np.asarray(band_idx, int)
 
     # Mean subtraction via mean_func
     t_center = float(np.mean(t_lag))
     t_std = float(np.std(t_lag))
-    mean_vals = model.mean_func(
-        model.zero_mean,
-        int(np.max(band_idx)) + 1,
-        t_center,
-        t_std,
-        params,
-        (t_lag, band_idx),
-    )
+    try:
+        mean_vals = model.mean_func(params, (t_lag, band_idx))
+    except TypeError:
+        mean_vals = model.mean_func(
+            model.zero_mean,
+            int(np.max(band_idx)) + 1,
+            t_center,
+            t_std,
+            params,
+            (t_lag, band_idx),
+        )
     y = np.asarray(y, float).copy() - np.asarray(mean_vals, float)
     yerr = np.asarray(yerr, float).copy()
     # y = np.asarray(model.y, float).copy() - np.asarray(mean_vals, float)
     # yerr = np.asarray(model.yerr, float).copy()
 
     # Normalize amplitudes to band 0 scale
-    log_sigma_band = np.asarray(model.my_amp_transform(params))
+    if hasattr(model, "my_amp_transform"):
+        log_sigma_band = np.asarray(model.my_amp_transform(params))
+    else:
+        log_sigma_band = np.log(np.asarray(params["amp_cont"]))
     s0 = float(np.exp(log_sigma_band[0]))
     s_b = np.exp(log_sigma_band)
     scale = s0 / s_b[band_idx]

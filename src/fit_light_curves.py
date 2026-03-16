@@ -332,7 +332,7 @@ def main():
     parser.add_argument("--disable_corner_plot", action="store_true", default=False, help="Disable corner plot.")
     parser.add_argument("--disable_lag_blr", action="store_true", default=False, help="Disable BLR lag model.")
     parser.add_argument("--sigma_tau_uniform", action="store_true", default=False, help="Uniform priors for sigma/tau.")
-    parser.add_argument("--disable_plot_psd", action="store_true", default=False, help="Accepted for compatibility; PSD plotting is disabled for this model.")
+    parser.add_argument("--disable_plot_psd", action="store_true", default=False, help="Disable PSD sub-plot.")
     parser.add_argument("--inject_random_fake_etas", action="store_true", default=False, help="Randomize fake etas.")
     parser.add_argument("--beta_tau", type=float, default=0.2, help="beta_tau for fake curves.")
     parser.add_argument("--disable_band_drop", action="store_true", default=False, help="Disable Lya band drop.")
@@ -506,7 +506,7 @@ def main():
                         result,
                         time0=obj["time0"],
                         bands=bands,
-                        plot_psd=False,
+                        plot_psd=(not args.disable_plot_psd),
                     )
                     plot_correlation_matrix(obj_flat_samples_flatten_per_band, obj)
                     plot_all_histograms(obj_flat_samples_flatten_per_band, obj)
