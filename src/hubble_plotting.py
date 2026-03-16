@@ -2116,6 +2116,7 @@ def plot_full_residuals(
             'f_host_center': 'log_f_host_center',
             'f_bc_over_pl_3000': 'log_f_bc_over_pl_3000',
             'f_fe_uv_over_pl_3000': 'log_f_fe_uv_over_pl_3000',
+            'chi_sq_g': 'log_chi_sq_g',
         }
         for source_col, derived_col in log_columns.items():
             if source_col in frame.columns:
@@ -2144,7 +2145,7 @@ def plot_full_residuals(
         'MY_M_2500', 'z', 'log_lbol', 'log_ledd_ratio', 
         'log_sigma_UV', 'log_sigma_hat0', 'log_sigma_hat_UV', 'log_tau_UV_RF',
         'log_tau_fast0',
-        'chi_sq_g',
+        'chi_sq_g', 'log_chi_sq_g',
         'sn_median_all', 'redchi', 'log_redchi', 'alpha_lambda',
         'redchi2_conti_full', 'log_redchi2_conti_full',
         'bwb_alpha', 'bwb_beta', 
@@ -2162,6 +2163,7 @@ def plot_full_residuals(
         'log_jitter_u', 'log_jitter_g', 'log_jitter_r', 'log_jitter_i', 'log_jitter_z',
 
     ]) if col in df_agn.columns]
+    
 
     keys_masks = {
         'dm_red': (-5, 5),
