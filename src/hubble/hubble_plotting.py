@@ -25,6 +25,11 @@ from hubble.hubble_model import (M_model_agn, M_model_agn_err, get_model_params,
     agn_model_pack_obs, agn_model_oidx, agn_model_pidx, agn_model_req_obs, agn_model_req_errs)
 from hubble.hubble_likelihood import sigma_lens_from_dc
 from hubble.hubble_utils import convert_M2500_to_logL2500, cosmo_model_label_latex, format_result_errors, sym_percentile
+from hubble.hubble_completeness_refactored import (
+    apparent_mag_to_logL2500,
+    fit_fhost_center_l2500_model,
+    predict_fhost_center_from_logL2500,
+)
 from dynesty.utils import resample_equal
 from dynesty import plotting as dyplot
 
@@ -585,6 +590,129 @@ def plot_tau_sigma_vs_wu_catalog(df, plot_path="plots/hubble", show=False):
     return _save_figure(
         fig,
         os.path.join(diagnostics_path, "tau_sigma_vs_wu_catalog.pdf"),
+        dpi=200,
+        show=show,
+    )
+
+
+def plot_f_host_center_vs_l2500(
+    df,
+    plot_path="plots/hubble",
+    show=False,
+    nbins=15,
+    min_bin_count=5,
+    fit_logL_max=45.5,
+):
+    """Plot host fraction against AGN-only log L_2500 with median and sigmoid trends."""
+    required = {"z", "apparent_mag_2500", "f_host_center"}
+    if not required.issubset(df.columns):
+        return None
+
+    z = pd.to_numeric(df["z"], errors="coerce").to_numpy(dtype=float)
+    m2500 = pd.to_numeric(df["apparent_mag_2500"], errors="coerce").to_numpy(dtype=float)
+    f_host = pd.to_numeric(df["f_host_center"], errors="coerce").to_numpy(dtype=float)
+
+    cosmo = FlatLambdaCDM(H0=70.0, Om0=0.3)
+    logL2500 = apparent_mag_to_logL2500(m2500, z, cosmo)
+
+    mask = (
+        np.isfinite(logL2500)
+        & np.isfinite(f_host)
+        & np.isfinite(z)
+        & (z > 0.0)
+        & (f_host >= 0.0)
+        & (f_host <= 1.0)
+    )
+
+    fig, ax = plt.subplots(figsize=(6.0, 5.0))
+
+    if np.any(mask):
+        x = logL2500[mask]
+        y = f_host[mask]
+        ax.scatter(
+            x,
+            y,
+            s=10,
+            alpha=0.3,
+            color="tab:blue",
+            linewidths=0,
+            rasterized=True,
+            label="Objects",
+        )
+
+        if np.nanmax(x) > np.nanmin(x):
+            bin_edges = np.linspace(np.nanmin(x), np.nanmax(x), nbins + 1)
+            xmid = []
+            ymed = []
+            for i in range(len(bin_edges) - 1):
+                lo = bin_edges[i]
+                hi = bin_edges[i + 1]
+                in_bin = (x >= lo) & (x < hi)
+                if i == len(bin_edges) - 2:
+                    in_bin = (x >= lo) & (x <= hi)
+                if np.count_nonzero(in_bin) >= min_bin_count:
+                    xmid.append(np.nanmedian(x[in_bin]))
+                    ymed.append(np.nanmedian(y[in_bin]))
+            if xmid:
+                ax.plot(xmid, ymed, color="k", lw=2, label="Binned median")
+
+        fit_mask = np.isfinite(x) & np.isfinite(y) & (x <= fit_logL_max)
+        if np.count_nonzero(fit_mask) >= 8 and np.nanmax(x[fit_mask]) > np.nanmin(x[fit_mask]):
+            try:
+                fit_model = fit_fhost_center_l2500_model(
+                    df.loc[mask].copy(),
+                    fit_logL_max=fit_logL_max,
+                    cosmo=cosmo,
+                )
+                x_grid = np.linspace(np.nanmin(x), np.nanmax(x), 400)
+                y_grid = predict_fhost_center_from_logL2500(x_grid, fit_model)
+                ax.plot(
+                    x_grid,
+                    y_grid,
+                    color="tab:red",
+                    lw=2,
+                    label=rf"Generalized sigmoid fit ($f\to1$ low-$L$, $f\to0$ high-$L$)",
+                )
+                ax.text(
+                    0.03,
+                    0.03,
+                    (
+                        rf"$x_0={fit_model['x0']:.2f}$" "\n"
+                        rf"$k={fit_model['k']:.2f}$" "\n"
+                        rf"$\nu={fit_model['nu']:.2f}$" "\n"
+                        rf"$\sigma_{{\rm logit}}={fit_model['sigma_host_logit']:.2f}$"
+                    ),
+                    transform=ax.transAxes,
+                    ha="left",
+                    va="bottom",
+                    fontsize=10,
+                    bbox=dict(boxstyle="round", facecolor="white", alpha=0.75, edgecolor="none"),
+                )
+            except Exception:
+                pass
+    else:
+        ax.text(
+            0.5,
+            0.5,
+            "No finite log L_2500 / f_host_center values",
+            ha="center",
+            va="center",
+            transform=ax.transAxes,
+        )
+
+    ax.set_xlabel(r"$\log L_{2500}$")
+    ax.set_ylabel(r"$f_{\rm host,center}$")
+    ax.set_ylim(0.0, 1.0)
+    ax.grid(True, alpha=0.2)
+    handles, labels = ax.get_legend_handles_labels()
+    if handles:
+        ax.legend(frameon=False)
+    fig.tight_layout()
+
+    diagnostics_path = os.path.join(plot_path or "plots/hubble", "diagnostics")
+    return _save_figure(
+        fig,
+        os.path.join(diagnostics_path, "f_host_center_vs_l2500.pdf"),
         dpi=200,
         show=show,
     )
@@ -3454,8 +3582,10 @@ def run_completeness_diagnostics(sampler_results, df_agn, df_pantheon,
     plot_Z_vs_z(z, Z, outdir, title_suffix=title_note, plot_path=_plot_path)
     plot_dmi_vs_z(z, dmi, outdir, title_suffix=title_note, plot_path=_plot_path)
 
-    completeness2d, mag_centers, z_centers, *_ = completeness_params
-    plot_completeness_map_with_m50(completeness2d, mag_centers, z_centers, df_agn, outdir, plot_path=_plot_path)
+    completeness_model = completeness_params[0]
+    if getattr(completeness_model, "mode", "2d") == "2d":
+        completeness2d, mag_centers, z_centers, *_ = completeness_params
+        plot_completeness_map_with_m50(completeness2d, mag_centers, z_centers, df_agn, outdir, plot_path=_plot_path)
 
 
 def plot_residuals_vs_alphaOX(

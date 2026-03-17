@@ -9,7 +9,18 @@ from numpy import trapezoid as trapz
 #from hubble.hubble_utils import loglike_cmb_theta_simple
 from hubble.hubble_model import get_model_params, M_model_agn, M_model_agn_err, agn_model_pack_params, agn_model_pack_obs
 
-def completeness_loglike(m_obs, m_obs_err, m_model, mu_err, z, completeness2d, m_grid, sigma_completeness=0.0, tiny=1e-300):
+def completeness_loglike(
+    m_obs,
+    m_obs_err,
+    m_model,
+    mu_err,
+    z,
+    completeness_model,
+    m_grid,
+    sigma_completeness=0.0,
+    tiny=1e-300,
+    f_host_center=None,
+):
     """
     Compute log-likelihood contribution from magnitude-limited sample selection.
 
@@ -29,7 +40,13 @@ def completeness_loglike(m_obs, m_obs_err, m_model, mu_err, z, completeness2d, m
     sig = np.sqrt(mu_err[:, None]**2 + float(sigma_completeness)**2)   # (N,1)
 
     # completeness on grid for each object
-    p_det = completeness2d(m_grid[None, :], z[:, None])                 # (N,G)
+    if getattr(completeness_model, "mode", "2d") == "3d_fhost":
+        if f_host_center is None:
+            raise ValueError("f_host_center is required for 3D host-aware completeness.")
+        f_host_center = np.asarray(f_host_center)
+        p_det = completeness_model(m_grid[None, :], z[:, None], f_host_center[:, None])
+    else:
+        p_det = completeness_model(m_grid[None, :], z[:, None])                 # (N,G)
 
     # Model-centered selection factor: Z_i
     pdf_model = stats.norm.pdf(m_grid[None, :], loc=m_model[:, None], scale=sig)  # (N,G)
@@ -192,13 +209,16 @@ def log_likelihood(theta, *, agn_data, pantheon_data,
     ll_completeness = 0.0
     comp_blob = empty_blob(N_obj)
     if completeness_params is not None:
-        completeness2d, mag_centers, _, _, _, completeness_scatter = completeness_params
+        completeness_model = completeness_params[0]
+        mag_centers = completeness_params[1]
+        completeness_scatter = completeness_params[-2] if getattr(completeness_model, "mode", "2d") == "3d_fhost" else completeness_params[-1]
         ll_completeness, comp_blob = completeness_loglike(
             m_obs=m_obs,
             m_obs_err=m_err,
             m_model=m_model, mu_err=mu_err, z=z,
-            completeness2d=completeness2d, m_grid=mag_centers,
-            sigma_completeness=completeness_scatter
+            completeness_model=completeness_model, m_grid=mag_centers,
+            sigma_completeness=completeness_scatter,
+            f_host_center=agn_data.get("f_host_center"),
         )
 
     # ll_cmb, _ = loglike_cmb_theta_simple(cosmo)
@@ -342,15 +362,18 @@ def log_likelihood_nearbylcs(
     ll_completeness = 0.0
     comp_blob = empty_blob(N_obj)
     if completeness_params is not None and np.any(mask_noncal):
-        completeness2d, mag_centers, _, _, _, completeness_scatter, _, _ = completeness_params
+        completeness_model = completeness_params[0]
+        mag_centers = completeness_params[1]
+        completeness_scatter = completeness_params[-2] if getattr(completeness_model, "mode", "2d") == "3d_fhost" else completeness_params[-1]
         # model-predicted magnitude for non-calibrators (cosmo-anchored for selection)
         m_model_nc = M_pred_nc + mu_cosmo_nc
         ll_completeness, comp_blob = completeness_loglike(
             m_obs=m_obs_nc,
             m_obs_err=m_err_nc,
             m_model=m_model_nc, mu_err=mu_err_nc, z=z_nc,
-            completeness2d=completeness2d, m_grid=mag_centers,
-            sigma_completeness=completeness_scatter
+            completeness_model=completeness_model, m_grid=mag_centers,
+            sigma_completeness=completeness_scatter,
+            f_host_center=agn_data.get("f_host_center", None)[mask_noncal] if agn_data.get("f_host_center", None) is not None else None,
         )
 
     # ========================

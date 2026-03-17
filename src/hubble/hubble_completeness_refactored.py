@@ -1,12 +1,21 @@
+import json
 import numpy as np
 import h5py
 import os
+from astropy.cosmology import FlatLambdaCDM
 from scipy import stats
 from scipy.stats import norm, sigmaclip, multivariate_normal
 from scipy.interpolate import RegularGridInterpolator
 from scipy.ndimage import gaussian_filter1d, gaussian_filter
 from scipy.interpolate import interp1d
+from scipy.optimize import curve_fit
+from scipy.special import expit, logit
 from functools import partial
+
+from hubble.hubble_utils import convert_M2500_to_logL2500, resolve_qvc_data_path
+
+
+COSMO = FlatLambdaCDM(H0=70.0, Om0=0.3)
 
 class SimpleCompleteness2D:
     """
@@ -99,6 +108,151 @@ class Completeness2D:
     def grid(self):
         return dict(mag_centers=self.mag_centers, z_centers=self.z_centers)
 
+    @property
+    def mode(self):
+        return "2d"
+
+
+class Completeness3D:
+    """
+    Interpolates p(detect | m, z, f_host) on a (mag, z, f_host) grid.
+    - Outside the grid, returns 0.
+    """
+
+    def __init__(self, mag_centers, z_centers, fhost_centers, completeness_cube):
+        self.mag_centers = np.asarray(mag_centers)
+        self.z_centers = np.asarray(z_centers)
+        self.fhost_centers = np.asarray(fhost_centers)
+
+        C = np.nan_to_num(completeness_cube, nan=0.0, posinf=0.0, neginf=0.0)
+        C = np.clip(C, 0.0, 1.0).astype(float)
+
+        self.mag_min, self.mag_max = float(self.mag_centers[0]), float(self.mag_centers[-1])
+        self.z_min, self.z_max = float(self.z_centers[0]), float(self.z_centers[-1])
+        self.fhost_min, self.fhost_max = float(self.fhost_centers[0]), float(self.fhost_centers[-1])
+
+        self._interp = RegularGridInterpolator(
+            (self.mag_centers, self.z_centers, self.fhost_centers),
+            C,
+            bounds_error=False,
+            fill_value=0.0,
+        )
+
+    def __call__(self, mag, z, f_host):
+        mag = np.asarray(mag)
+        z = np.asarray(z)
+        f_host = np.asarray(f_host)
+        m_b, z_b, f_b = np.broadcast_arrays(mag, z, f_host)
+        pts = np.column_stack([m_b.ravel(), z_b.ravel(), f_b.ravel()])
+        vals = self._interp(pts)
+        return vals.reshape(m_b.shape)
+
+    @property
+    def grid(self):
+        return dict(
+            mag_centers=self.mag_centers,
+            z_centers=self.z_centers,
+            fhost_centers=self.fhost_centers,
+        )
+
+    @property
+    def mode(self):
+        return "3d_fhost"
+
+
+_FHOST_CLIP_EPS = 1e-3
+
+
+def generalized_sigmoid_fhost(logL2500, x0, k, nu):
+    arg = np.clip(k * (np.asarray(logL2500, dtype=float) - x0), -60.0, 60.0)
+    return 1.0 / np.power(1.0 + np.exp(arg), nu)
+
+
+def apparent_mag_to_logL2500(m2500, z, cosmo):
+    m2500 = np.asarray(m2500, dtype=float)
+    z = np.asarray(z, dtype=float)
+    M2500 = m2500 - cosmo.distmod(z).value
+    return convert_M2500_to_logL2500(M2500)
+
+
+def fit_fhost_center_l2500_model(
+    df_agn,
+    *,
+    fit_logL_max=45.5,
+    clip_eps=_FHOST_CLIP_EPS,
+    cosmo=COSMO,
+):
+    required = {"z", "apparent_mag_2500", "f_host_center"}
+    if not required.issubset(df_agn.columns):
+        missing = ", ".join(sorted(required - set(df_agn.columns)))
+        raise KeyError(f"Missing required columns for f_host model fit: {missing}")
+
+    z = np.asarray(df_agn["z"], dtype=float)
+    m2500 = np.asarray(df_agn["apparent_mag_2500"], dtype=float)
+    f_host = np.asarray(df_agn["f_host_center"], dtype=float)
+    logL2500 = apparent_mag_to_logL2500(m2500, z, cosmo)
+
+    fit_mask = (
+        np.isfinite(logL2500)
+        & np.isfinite(f_host)
+        & np.isfinite(z)
+        & (z > 0.0)
+        & (f_host >= 0.0)
+        & (f_host <= 1.0)
+        & (logL2500 <= fit_logL_max)
+    )
+    if np.count_nonzero(fit_mask) < 8:
+        raise ValueError("Need at least 8 finite rows to fit the f_host_center(log L_2500) model.")
+
+    x_fit = logL2500[fit_mask]
+    y_fit = np.clip(f_host[fit_mask], clip_eps, 1.0 - clip_eps)
+    p0 = (float(np.nanmedian(x_fit)), 2.0, 1.0)
+    bounds = (
+        [float(np.nanmin(x_fit)), 0.01, 0.1],
+        [float(np.nanmax(x_fit)), 20.0, 10.0],
+    )
+    popt, _ = curve_fit(
+        generalized_sigmoid_fhost,
+        x_fit,
+        y_fit,
+        p0=p0,
+        bounds=bounds,
+        maxfev=20000,
+    )
+
+    mean_fit = np.clip(generalized_sigmoid_fhost(x_fit, *popt), clip_eps, 1.0 - clip_eps)
+    residual_logit = logit(y_fit) - logit(mean_fit)
+    sigma_host_logit = float(np.nanstd(residual_logit, ddof=1))
+    if not np.isfinite(sigma_host_logit):
+        sigma_host_logit = 0.0
+    sigma_host_logit = max(sigma_host_logit, 1e-6)
+
+    return {
+        "x0": float(popt[0]),
+        "k": float(popt[1]),
+        "nu": float(popt[2]),
+        "sigma_host_logit": sigma_host_logit,
+        "fit_logL_max": float(fit_logL_max),
+        "clip_eps": float(clip_eps),
+        "n_fit": int(np.count_nonzero(fit_mask)),
+    }
+
+
+def predict_fhost_center_from_logL2500(logL2500, model):
+    clip_eps = float(model.get("clip_eps", _FHOST_CLIP_EPS))
+    mean = generalized_sigmoid_fhost(logL2500, model["x0"], model["k"], model["nu"])
+    return np.clip(mean, clip_eps, 1.0 - clip_eps)
+
+
+def sample_fhost_center_from_logL2500(logL2500, model, rng):
+    mean = predict_fhost_center_from_logL2500(logL2500, model)
+    sigma_host_logit = float(model.get("sigma_host_logit", 0.0))
+    if sigma_host_logit <= 0.0:
+        return mean
+    sampled_logit = logit(mean) + rng.normal(0.0, sigma_host_logit, size=np.shape(mean))
+    clip_eps = float(model.get("clip_eps", _FHOST_CLIP_EPS))
+    return np.clip(expit(sampled_logit), clip_eps, 1.0 - clip_eps)
+
 def predicted_new_loglbol(df_agn, loglbol):
 
     # Data
@@ -142,6 +296,7 @@ def get_completeness_function_2d(
     import pandas as pd
     from astropy.cosmology import FlatLambdaCDM
     # Simulation inputs: apparent-magnitude proxy at rest-frame 2500 A and z
+    sim_file = resolve_qvc_data_path(sim_file)
     with h5py.File(sim_file, "r") as f:
         if "apparent_mag_2500" in f:
             m_true = np.asarray(f["apparent_mag_2500"][:], dtype=float)
@@ -262,6 +417,166 @@ def get_completeness_function_2d(
         plt.savefig(os.path.join(plot_dir, "H_true_map.pdf"), dpi=600)
         plt.close()
     return Completeness2D(mag_centers, z_centers, C), mag_centers, z_centers, dm, dz, sigma_mag
+
+
+def _plot_completeness_vs_fhost_slices(
+    completeness3d,
+    mag_centers,
+    z_centers,
+    fhost_centers,
+    *,
+    plot_dir,
+    mag_slices=(19.5, 21.0, 22.5),
+    z_slices=(0.5, 1.5, 2.5),
+):
+    import matplotlib.pyplot as plt
+
+    fig, axes = plt.subplots(1, len(mag_slices), figsize=(5.0 * len(mag_slices), 4.5), sharey=True)
+    axes = np.atleast_1d(axes)
+    for ax, mag0 in zip(axes, mag_slices):
+        mag_eval = np.full_like(fhost_centers, np.clip(mag0, mag_centers[0], mag_centers[-1]), dtype=float)
+        for z0 in z_slices:
+            z_eval = np.full_like(fhost_centers, np.clip(z0, z_centers[0], z_centers[-1]), dtype=float)
+            p = completeness3d(mag_eval, z_eval, fhost_centers)
+            ax.plot(fhost_centers, p, lw=2, label=fr"$z={z0:.1f}$")
+        ax.set_title(fr"$m_{{2500}}={mag0:.1f}$")
+        ax.set_xlabel(r"$f_{\rm host,center}$")
+        ax.grid(True, alpha=0.25)
+    axes[0].set_ylabel(r"$p(\mathrm{detect}\mid m_{2500}, z, f_{\rm host})$")
+    axes[-1].legend(frameon=False, loc="best")
+    fig.tight_layout()
+    fig.savefig(os.path.join(plot_dir, "completeness_vs_fhost_slices.pdf"), dpi=300)
+    plt.close(fig)
+
+
+def get_completeness_function_3d_fhost(
+    df_agn,
+    sim_file="data/nov9_mock_mag_z_moresources.h5",
+    n_mag_bins=30,
+    n_z_bins=40,
+    n_fhost_bins=20,
+    smooth_counts=True,
+    plot=False,
+    plot_path=None,
+    fit_logL_max=45.5,
+    sigma_mag=0.2,
+    sigma_z_abs=0.2,
+    sigma_fhost=0.05,
+):
+    """
+    Build p(detect | m, z, f_host_center) using a one-shot host-fraction parent model.
+    """
+    import matplotlib.pyplot as plt
+
+    if "f_host_center" not in df_agn.columns:
+        raise KeyError("df_agn must contain 'f_host_center' for 3D host-aware completeness.")
+
+    sim_file = resolve_qvc_data_path(sim_file)
+    with h5py.File(sim_file, "r") as f:
+        if "apparent_mag_2500" in f:
+            m_true = np.asarray(f["apparent_mag_2500"][:], dtype=float)
+        else:
+            m_true = np.asarray(f["apparent_mag_i_rest"][:], dtype=float)
+        z_true = np.asarray(f["z"][:], dtype=float)
+
+    z_obs = df_agn["z"].to_numpy(dtype=float)
+    m_obs = df_agn["apparent_mag_2500"].to_numpy(dtype=float)
+    fhost_obs = df_agn["f_host_center"].to_numpy(dtype=float)
+
+    ok_obs = (
+        np.isfinite(m_obs)
+        & np.isfinite(z_obs)
+        & np.isfinite(fhost_obs)
+        & (fhost_obs >= 0.0)
+        & (fhost_obs <= 1.0)
+    )
+    ok_true = np.isfinite(m_true) & np.isfinite(z_true)
+    m_obs, z_obs, fhost_obs = m_obs[ok_obs], z_obs[ok_obs], fhost_obs[ok_obs]
+    m_true, z_true = m_true[ok_true], z_true[ok_true]
+
+    host_model = fit_fhost_center_l2500_model(df_agn.loc[ok_obs], fit_logL_max=fit_logL_max, cosmo=COSMO)
+    logL_true = apparent_mag_to_logL2500(m_true, z_true, COSMO)
+    rng = np.random.default_rng(12345)
+    fhost_true = sample_fhost_center_from_logL2500(logL_true, host_model, rng)
+
+    mag_min, mag_max = 18.5, 24.0
+    z_min, z_max = 0.0, 4.0
+    fhost_min, fhost_max = 0.0, 1.0
+    mag_edges = np.linspace(mag_min, mag_max, n_mag_bins + 1)
+    z_edges = np.linspace(z_min, z_max, n_z_bins + 1)
+    fhost_edges = np.linspace(fhost_min, fhost_max, n_fhost_bins + 1)
+    mag_centers = 0.5 * (mag_edges[:-1] + mag_edges[1:])
+    z_centers = 0.5 * (z_edges[:-1] + z_edges[1:])
+    fhost_centers = 0.5 * (fhost_edges[:-1] + fhost_edges[1:])
+    dm = float(mag_centers[1] - mag_centers[0]) if len(mag_centers) > 1 else float(mag_edges[-1] - mag_edges[0])
+    dz = float(z_centers[1] - z_centers[0]) if len(z_centers) > 1 else float(z_edges[-1] - z_edges[0])
+    dfh = float(fhost_centers[1] - fhost_centers[0]) if len(fhost_centers) > 1 else float(fhost_edges[-1] - fhost_edges[0])
+
+    H_true, _ = np.histogramdd((m_true, z_true, fhost_true), bins=[mag_edges, z_edges, fhost_edges])
+    H_obs, _ = np.histogramdd((m_obs, z_obs, fhost_obs), bins=[mag_edges, z_edges, fhost_edges])
+
+    if smooth_counts:
+        sig_mag_pix = max(float(sigma_mag / dm), 1e-6)
+        sig_z_pix = max(float(sigma_z_abs / dz), 1e-6)
+        sig_fhost_pix = max(float(sigma_fhost / dfh), 1e-6)
+        H_true_s = gaussian_filter(H_true, sigma=(sig_mag_pix, sig_z_pix, sig_fhost_pix), mode="nearest")
+        H_obs_s = gaussian_filter(H_obs, sigma=(sig_mag_pix, sig_z_pix, sig_fhost_pix), mode="nearest")
+    else:
+        H_true_s, H_obs_s = H_true, H_obs
+
+    eps = 1e-12
+    C = H_obs_s / (H_true_s + eps)
+    C[H_true_s < eps] = 0.0
+    C = np.clip(C, 0.0, 1.0)
+
+    completeness3d = Completeness3D(mag_centers, z_centers, fhost_centers, C)
+
+    if plot:
+        base_plot_path = plot_path or "plots/hubble"
+        plot_dir = os.path.join(base_plot_path, "completeness")
+        os.makedirs(plot_dir, exist_ok=True)
+
+        with open(os.path.join(plot_dir, "fhost_center_l2500_model.json"), "w") as handle:
+            json.dump(host_model, handle, indent=2)
+
+        _plot_completeness_vs_fhost_slices(
+            completeness3d,
+            mag_centers,
+            z_centers,
+            fhost_centers,
+            plot_dir=plot_dir,
+        )
+
+        fig, ax = plt.subplots(figsize=(7, 5))
+        c_slice = C.mean(axis=2)
+        im = ax.imshow(
+            np.log10(np.clip(c_slice.T, 1e-12, None)),
+            origin="lower",
+            aspect="auto",
+            extent=[mag_edges[0], mag_edges[-1], z_edges[0], z_edges[-1]],
+            cmap="viridis",
+            vmin=-4,
+            vmax=0,
+        )
+        ax.set_ylabel(r"$z$")
+        ax.set_xlabel(r"$m_{2500\,\mathrm{\AA}}$ (mag)")
+        cbar = plt.colorbar(im, ax=ax)
+        cbar.set_label(r"Mean over $f_{\rm host}$: $\log\,p(I{=}1\,|\,m,z,f_{\rm host})$")
+        fig.tight_layout()
+        fig.savefig(os.path.join(plot_dir, "completeness_map_mean_fhost.pdf"), dpi=600)
+        plt.close(fig)
+
+    return (
+        completeness3d,
+        mag_centers,
+        z_centers,
+        fhost_centers,
+        dm,
+        dz,
+        dfh,
+        sigma_mag,
+        host_model,
+    )
 
 
 import numpy as np
