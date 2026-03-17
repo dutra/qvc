@@ -1600,7 +1600,7 @@ def format_result_errors(
         out = core
 
     if unit:
-        out += rf"\,\textrf{{{unit}}}"
+        out += rf"\,\mathrm{{{unit}}}"
 
     return out
 
