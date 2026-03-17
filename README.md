@@ -74,6 +74,14 @@ cd eztaox
 pip install .
 ```
 
+### 5) Install `qvc`
+
+From the `qvc` repository root:
+
+```bash
+pip install -e .
+```
+
 ---
 
 ## PyQSOFit Environment (for Spectral Fitting)
@@ -143,7 +151,7 @@ Run the multi-band light curve fitting with:
 ```bash
 export PREFIX=demo
 export SUFFIX=1465126
-python multiband_fit.py --plot \
+python -m light_curve.fit_light_curves --plot \
     --progress --nwarm 100 --nsamp 50 --nchains 4 \
     --max_tree_depth 8 \
     --disable_fhost \
@@ -157,16 +165,16 @@ Figure 1 in the manuscript was produced with 1000 warmup steps, 200 sample steps
 Outputs:
 
 * Fit results: `src/results/data/demo/`
-* Plots: `src/plots/multiband/demo/`
+* Plots: `figures/multiband/demo/`
 * Samples: `src/results/samples/demo/`
 
-The expected output is **Figure 1** under `src/plots/multiband/demo/`.
+The expected output is **Figure 1** under `figures/multiband/demo/`.
 
 Additional options (example): `--rf_length_cut <days>`
 For the full list of options:
 
 ```bash
-python multiband_fit.py --help
+python -m light_curve.fit_light_curves --help
 ```
 
 ---
@@ -188,21 +196,21 @@ conda activate pyqsofit
 1. **Collect**: run multiple template/continuum configurations
 
 ```bash
-python fit_spectra.py results/data/demo/1465126.h5 results/data/demo/1465126.csv \
+python -m spectra.fit_spectra results/data/demo/1465126.h5 results/data/demo/1465126.csv \
     --mode collect --MC_samples 1
 ```
 
 2. **Select**: choose best fits with penalties to avoid overfitting Balmer continuum and host components
 
 ```bash
-python fit_spectra.py results/data/demo/1465126.h5 results/data/demo/1465126.csv \
+python -m spectra.fit_spectra results/data/demo/1465126.h5 results/data/demo/1465126.csv \
     --mode select
 ```
 
 3. **Single**: sample the selected fit(s) to estimate uncertainties
 
 ```bash
-python fit_spectra.py results/data/demo/1465126.h5 results/data/demo/1465126.csv \
+python -m spectra.fit_spectra results/data/demo/1465126.h5 results/data/demo/1465126.csv \
     --single_csv results/data/demo/1465126.csv \
     --mode single --MC_samples 50
 ```
@@ -219,7 +227,7 @@ This contains spectral-fit results, including the apparent magnitude at **rest-f
 
 A subset of Hubble-diagram fitting and plotting can be run via:
 
-* `hubble_diagram_plots.ipynb`
+* `notebooks/hubble_diagram_plots.ipynb`
 
 Expected outputs resemble **Figures 2, 3, and 7**.
 
@@ -227,7 +235,7 @@ To reproduce all Hubble-diagram plots from the manuscript, use the saved _dynest
 
 ```bash
 PREFIX=demo \
-python hubble_fit.py --resume \
+python -m hubble.hubble_fit --resume \
     --cosmo_models FlatLambdaCDM FlatwCDM Flatw0waCDM \
     --run full \
     --speed production \
@@ -246,7 +254,7 @@ For the restricted redshift interval (**z = 1.0–3.16**):
 
 ```bash
 PREFIX=demo_zonecut \
-python hubble_fit.py --resume \
+python -m hubble.hubble_fit --resume \
     --cosmo_models FlatLambdaCDM FlatwCDM Flatw0waCDM \
     --run full \
     --speed production \
@@ -257,15 +265,15 @@ python hubble_fit.py --resume \
     "results/data/nov10a_single_chisq_carma_mixscalar_nozband_highertaufastlim_removemix_fixband_lagblrband_chisq_spl_nofhost_bwb_lmc-6_N1w1000s200t14ch4.h5"
 ```
 
-As with `multiband_fit.py`, `hubble_fit.py` uses the `PREFIX` environment variable.
+As with `light_curve.fit_light_curves`, `hubble.hubble_fit` uses the `PREFIX` environment variable.
 
 Outputs:
 
-* All Hubble-diagram plots, tables, and results are generated under: `src/plots/hubble/`
+* All Hubble-diagram plots, tables, and results are generated under: `figures/hubble/`
 
 Expected figures:
 
-* **Figures 2–8, A1, and A2** under `src/plots/hubble/` for:
+* **Figures 2–8, A1, and A2** under `figures/hubble/` for:
 
   * `FlatLambdaCDM`
   * `FlatwCDM`
@@ -284,26 +292,26 @@ Typical runtime (demo checkpoints): **< 1 hour**.
 
 The following notebooks reproduce appendix figures:
 
-* Appendix Figure **B3**: `appendix_band_vs_wavelength.ipynb`
-* Appendix Figures **C4, C5, D6, D7**: `appendix_sigma_tau.ipynb`
-* Appendix Figure **E8**: `appendix_lags.ipynb`
+* Appendix Figure **B3**: `notebooks/appendix_band_vs_wavelength.ipynb`
+* Appendix Figures **C4, C5, D6, D7**: `notebooks/appendix_sigma_tau.ipynb`
+* Appendix Figure **E8**: `notebooks/appendix_lag.ipynb`
 
 ## Appendix Completeness
 The completeness catalogs are included in the data demo file (`qvc_data_demo`).  
-The notebook `completeness.ipynb` can generate the completeness catalogs if necessary.
+The completeness catalogs can be regenerated from the completeness tooling in `notebooks/hubble_diagram_colin.ipynb` if necessary.
 
 # Instructions for use
-## `multiband_fit.py`
+## `light_curve.fit_light_curves`
 
-For help organizing the batch runs in Yale's HPC, `multiband_fit.py` can use the environment varibles `PREFIX` and `SUFFIX`, which default to `test`.  
-The results will be written under the folder `results/data/<prefix>`, while plots will be under `plots/multiband/<prefix>` and samples under `results/samples/<prefix>`.  
+For help organizing the batch runs in Yale's HPC, `light_curve.fit_light_curves` can use the environment varibles `PREFIX` and `SUFFIX`, which default to `test`.  
+The results will be written under the folder `results/data/<prefix>`, while plots will be under `figures/multiband/<prefix>` and samples under `results/samples/<prefix>`.  
 
-For a list of all options supported, run `python multiband_fit.py --help`. 
+For a list of all options supported, run `python -m light_curve.fit_light_curves --help`. 
 
 ### Usage
 
 ```bash
-multiband_fit.py [-h]
+python -m light_curve.fit_light_curves [-h]
   [--filter_object_id FILTER_OBJECT_ID [FILTER_OBJECT_ID ...]]
   [--N N]
   [--skip SKIP]
@@ -385,13 +393,13 @@ multiband_fit.py [-h]
 
 
 ## Merging the results
-Each `multiband_fit.py` run will produce one `.h5` file per object under the folder `results/data/<prefix>`.  
+Each `light_curve.fit_light_curves` run will produce one `.h5` file per object under the folder `results/data/<prefix>`.  
 The hubble diagram script loads a single `.h5` with multiple light curve fit results.   
 You can merge multiple `.h5` files into one by using the utility
-`python merge_results.py <prefix>`.  
+`python -m light_curve.merge_results <prefix>`.  
 That will produce a file `results/data/<prefix>.h5` that can be loaded with the hubble diagram utility.  
 
-For a full list of options, run `python merge_results.py --help`.
+For a full list of options, run `python -m light_curve.merge_results --help`.
 
 ### Usage
 
@@ -421,7 +429,7 @@ merge_results.py [-h] [--base-dir BASE_DIR] [--exclude-jobs [EXCLUDE_JOBS ...]] 
 ### Usage
 
 ```bash
-hubble_fit.py [-h] [--force_populate_fields] [--cosmo_models {FlatwCDM,Flatw0waCDM,FlatLambdaCDM,FlatwpwaCDM} [{FlatwCDM,Flatw0waCDM,FlatLambdaCDM,FlatwpwaCDM} ...]] [--disable_completeness] [--disable_full_covariance] [--resume [RESUME]]
+python -m hubble.hubble_fit [-h] [--force_populate_fields] [--cosmo_models {FlatwCDM,Flatw0waCDM,FlatLambdaCDM,FlatwpwaCDM} [{FlatwCDM,Flatw0waCDM,FlatLambdaCDM,FlatwpwaCDM} ...]] [--disable_completeness] [--disable_full_covariance] [--resume [RESUME]]
               [--run {full,single}] [--speed {production,test,fast,dev}] [--N N] [--only_sna] [--use_mu_sh0es] [--spectra_fit_csv SPECTRA_FIT_CSV [SPECTRA_FIT_CSV ...]] [--zquery_csv ZQUERY_CSV] [--no_cuts] [--z_pivot_agn Z_PIVOT_AGN]
               [--skip_plots] [--fhost_cut FHOST_CUT] [--exclude_object_ids_csv EXCLUDE_OBJECT_IDS_CSV [EXCLUDE_OBJECT_IDS_CSV ...]] [--residuals_sigma_clip RESIDUALS_SIGMA_CLIP] [--residuals_csv RESIDUALS_CSV] [--agn_calibrators AGN_CALIBRATORS]
               [--wrms_cut WRMS_CUT] [--iron_frac_cut IRON_FRAC_CUT] [--sdss_mags_csv SDSS_MAGS_CSV] [--result_prefix RESULT_PREFIX] [--z_range Z_RANGE Z_RANGE] [--pickled]
@@ -475,24 +483,24 @@ conda activate pyqsofit
 
 Fitting an AGN spectra involves several steps. While a single spectra is included for the demo, all spectras can be downloaded with  
 ```bash
-python fit_spectra.py --download
+python -m spectra.fit_spectra --download
 ```
 
 Then, a run collection all different combinations of spectral fit (e.g.: balmer continuum, iron, host, quasar templates, etc) can be run with
  ```bash
-python fit_spectra.py <file_in_lightcurves>  <file_out_collect> --mode collect --MC_samples 1
+python -m spectra.fit_spectra <file_in_lightcurves>  <file_out_collect> --mode collect --MC_samples 1
 ```
 
-where `<file_in`> is a `.h5` file with light curve fits and `<file_out>` will be the generated csv. This is necessary since `fit_spectra.py` corrects for the mean variability amplitude when computing an apparent magnitude.
+where `<file_in`> is a `.h5` file with light curve fits and `<file_out>` will be the generated csv. This is necessary since `spectra.fit_spectra` corrects for the mean variability amplitude when computing an apparent magnitude.
 
 Next, a run selecting the best fits (chi squared) and penalties to avoid overfitting balmer continuum and host:
 ```bash
-python fit_spectra.py <file_out_collect> <file_out_select> --mode select
+python -m spectra.fit_spectra <file_out_collect> <file_out_select> --mode select
 ```
 
 Finally, a run to use the selected fits to sample and compute errors:  
 ```bash
-python fit_spectra.py <file_in_lightcurves> <spectra_file_out> --single_csv <file_out_select> --mode single --MC_samples 50
+python -m spectra.fit_spectra <file_in_lightcurves> <spectra_file_out> --single_csv <file_out_select> --mode single --MC_samples 50
 ```
 
 The generated `<spectra_file_out>` will be used by the Hubble Diagram fitting procedure in the argument `--spectra_fit_csv`.
@@ -500,7 +508,7 @@ The generated `<spectra_file_out>` will be used by the Hubble Diagram fitting pr
 ### Usage
 
 ```bash
-fit_spectra.py [-h] --mode {collect,single,select,download} [--single_csv SINGLE_CSV] [--dr16q-fits DR16Q_FITS] [--cache-dir CACHE_DIR] [--max-sep MAX_SEP] [--N N] [--skip SKIP] [--filter_object_id FILTER_OBJECT_ID [FILTER_OBJECT_ID ...]]
+python -m spectra.fit_spectra [-h] --mode {collect,single,select,download} [--single_csv SINGLE_CSV] [--dr16q-fits DR16Q_FITS] [--cache-dir CACHE_DIR] [--max-sep MAX_SEP] [--N N] [--skip SKIP] [--filter_object_id FILTER_OBJECT_ID [FILTER_OBJECT_ID ...]]
                [--filter_sdss_name FILTER_SDSS_NAME [FILTER_SDSS_NAME ...]] [--spectral_fit_csv SPECTRAL_FIT_CSV] [--allow_partial_band_overlap] [--enable_BC] [--nproc NPROC] [--MC_samples MC_SAMPLES] [--enable_poly] [--disable_rescale_flux]
                fpath_in fpath_out
 ```

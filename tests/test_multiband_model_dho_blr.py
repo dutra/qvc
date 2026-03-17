@@ -12,7 +12,7 @@ os.chdir(SRC)
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from multiband_model_dho_blr import (
+from light_curve.multiband_model_dho_blr import (
     ContiBLR_SHO_Wrapper,
     OverdampedSHOBaseQS,
     make_multiband_dho_blr_model,

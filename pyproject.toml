@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "qvc"
+version = "0.1.0"
+description = "Quasar variability cosmology workflows"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "astropy==7.1.0",
+    "corner==2.2.3",
+    "dynesty==2.1.5",
+    "h5py==3.14.0",
+    "jax<=0.4.31",
+    "jaxlib<=0.4.31",
+    "jaxopt==0.8.5",
+    "matplotlib==3.10.0",
+    "numpy==2.3.1",
+    "numpyro==0.19.0",
+    "pandas==2.3.1",
+    "pyarrow==19.0.0",
+    "scipy==1.16.0",
+    "tinygp==0.3.0",
+    "tqdm==4.67.1",
+]
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["hubble*", "light_curve*", "spectra*"]
+
+[tool.setuptools.package-data]
+hubble = ["style.mplstyle"]
+light_curve = ["style.mplstyle"]

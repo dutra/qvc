@@ -12,14 +12,14 @@ os.chdir(SRC)
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from fit_light_curves import (
+from light_curve.fit_light_curves import (
     build_explicit_model_params,
     compute_parameter_kls,
     compute_lambda_center_rf,
     lya_variability_weight,
     make_lc,
 )
-from multiband_fit_utils import lambda_pivot, log_single_pl, process_samples
+from light_curve.multiband_fit_utils import lambda_pivot, log_single_pl, process_samples
 
 
 def _make_raw_public(n_band):

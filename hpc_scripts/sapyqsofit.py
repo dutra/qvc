@@ -6,7 +6,7 @@ This converts the previous per-job submission into one array submission,
 mirroring the slice/array style used elsewhere.
 
 Each array task i runs:
-    python fit_spectra.py INPUT.h5 OUTPUT_DIR/job{i}.h5 --N N --skip i*N
+    python -m spectra.fit_spectra INPUT.h5 OUTPUT_DIR/job{i}.h5 --N N --skip i*N
 
 Edit the parameters in the "Parameters" section below.
 """
@@ -130,9 +130,9 @@ export SUFFIX="job${{TASK}}"
 OUTFILE="${{OUTDIR}}/${{SUFFIX}}.csv"
 mkdir -p "${{OUTDIR}}"
 
-echo "Running: fit_spectra.py $INPUT $OUTFILE --N $N --skip $START"
+echo "Running: python -m spectra.fit_spectra $INPUT $OUTFILE --N $N --skip $START"
 
-python fit_spectra.py "$INPUT" "$OUTFILE" --mode {mode} --N "$N" --skip "$START" {flags} 
+python -m spectra.fit_spectra "$INPUT" "$OUTFILE" --mode {mode} --N "$N" --skip "$START" {flags} 
 
 end=$(date +%s)
 echo "End time: $end"

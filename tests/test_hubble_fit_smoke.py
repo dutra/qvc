@@ -14,9 +14,7 @@ os.chdir(SRC)
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-import hubble_fit
-import hubble_likelihood
-import hubble_model
+from hubble import hubble_fit, hubble_likelihood, hubble_model
 
 
 def _make_fake_agn_sample(n_agn=24, seed=123):
