@@ -1,0 +1,220 @@
+import os
+import sys
+from pathlib import Path
+
+import jax.numpy as jnp
+import numpy as np
+
+
+ROOT = Path(__file__).resolve().parents[1]
+SRC = ROOT / "src"
+os.chdir(SRC)
+if str(SRC) not in sys.path:
+    sys.path.insert(0, str(SRC))
+
+from fit_light_curves import (
+    build_explicit_model_params,
+    compute_lambda_center_rf,
+    lya_variability_weight,
+    make_lc,
+)
+from multiband_fit_utils import lambda_pivot, log_single_pl, process_samples
+
+
+def _make_raw_public(n_band):
+    return {
+        "log_sigma_uv": jnp.array(np.log(0.2)),
+        "log_tau_uv": jnp.array(np.log(300.0)),
+        "log_tau_fast_uv": jnp.array(np.log(30.0)),
+        "eta_sigma": jnp.array(-0.55),
+        "eta_tau": jnp.array(0.25),
+        "log_amp_delta_lya": jnp.array(0.0),
+        "log_amp_delta_blr": jnp.full((n_band,), -1.0),
+        "log_lag_blr": jnp.full((n_band,), np.log(20.0)),
+        "lag0": jnp.array(5.0),
+        "lag_beta": jnp.array(4.0 / 3.0),
+    }
+
+
+def _make_object(z=1.6):
+    bands = ["u", "g", "r", "i", "z"]
+    return {
+        "object_id": "obj",
+        "z": z,
+        "times": {band: np.array([0.0, 50.0], dtype=float) for band in bands},
+        "mags": {band: np.array([20.0, 20.2], dtype=float) for band in bands},
+        "magerrs": {band: np.array([0.05, 0.05], dtype=float) for band in bands},
+        "cadence": {band: 5.0 for band in bands},
+        "cadence_err": {band: 0.5 for band in bands},
+        "number_points": {band: 2 for band in bands},
+    }
+
+
+def test_compute_lambda_center_rf_matches_geometric_mean():
+    lam_rf = jnp.array([1500.0, 2400.0, 3600.0])
+    expected = float(np.exp(np.mean(np.log(np.asarray(lam_rf)))))
+    got = float(compute_lambda_center_rf(lam_rf))
+    assert np.isclose(got, expected)
+
+
+def test_build_explicit_model_params_preserves_uv_intercepts_across_band_sets():
+    lam_full = jnp.array([1700.0, 2300.0, 3000.0, 3800.0])
+    lam_sub = jnp.array([2300.0, 3000.0, 3800.0])
+
+    explicit_full = build_explicit_model_params(_make_raw_public(len(lam_full)), lam_full)
+    explicit_sub = build_explicit_model_params(_make_raw_public(len(lam_sub)), lam_sub)
+
+    assert np.isclose(float(explicit_full["log_sigma_uv"]), np.log(0.2))
+    assert np.isclose(float(explicit_full["log_tau_uv"]), np.log(300.0))
+    assert np.isclose(float(explicit_full["log_tau_fast_uv"]), np.log(30.0))
+    assert np.isclose(float(explicit_sub["log_sigma_uv"]), np.log(0.2))
+    assert np.isclose(float(explicit_sub["log_tau_uv"]), np.log(300.0))
+    assert np.isclose(float(explicit_sub["log_tau_fast_uv"]), np.log(30.0))
+
+    assert np.allclose(
+        np.asarray(explicit_full["amp_cont"])[1:],
+        np.asarray(explicit_sub["amp_cont"]),
+    )
+    assert np.allclose(
+        np.asarray(explicit_full["tau_fast_band"])[1:],
+        np.asarray(explicit_sub["tau_fast_band"]),
+    )
+    assert np.allclose(
+        np.asarray(explicit_full["tau_slow_band"])[1:],
+        np.asarray(explicit_sub["tau_slow_band"]),
+    )
+
+
+def test_build_explicit_model_params_internal_and_public_forms_are_equivalent():
+    lam_rf = jnp.array([2100.0, 2900.0, 3600.0])
+    explicit_public = build_explicit_model_params(_make_raw_public(len(lam_rf)), lam_rf)
+
+    internal = {
+        "log_sigma_center0": explicit_public["log_sigma_center0"],
+        "log_tau_slow_center0": explicit_public["log_tau_slow_center0"],
+        "log_tau_fast_center0": explicit_public["log_tau_fast_center0"],
+        "lambda_center_rf": explicit_public["lambda_center_rf"],
+        "eta_sigma": jnp.array(-0.55),
+        "eta_tau": jnp.array(0.25),
+        "log_amp_delta_blr": jnp.full((len(lam_rf),), -1.0),
+        "log_lag_blr": jnp.full((len(lam_rf),), np.log(20.0)),
+        "lag0": jnp.array(5.0),
+        "lag_beta": jnp.array(4.0 / 3.0),
+    }
+    explicit_internal = build_explicit_model_params(internal, lam_rf)
+
+    assert np.isclose(float(explicit_internal["log_sigma_uv"]), float(explicit_public["log_sigma_uv"]))
+    assert np.isclose(float(explicit_internal["log_tau_uv"]), float(explicit_public["log_tau_uv"]))
+    assert np.isclose(float(explicit_internal["log_tau_fast_uv"]), float(explicit_public["log_tau_fast_uv"]))
+    assert np.allclose(np.asarray(explicit_internal["amp_cont"]), np.asarray(explicit_public["amp_cont"]))
+    assert np.allclose(np.asarray(explicit_internal["tau_fast_band"]), np.asarray(explicit_public["tau_fast_band"]))
+    assert np.allclose(np.asarray(explicit_internal["tau_slow_band"]), np.asarray(explicit_public["tau_slow_band"]))
+
+
+def test_build_explicit_model_params_centers_disk_lag_on_geometric_mean():
+    lam_rf = jnp.array([1800.0, 2500.0, 3472.222222222222])
+    raw = _make_raw_public(len(lam_rf))
+    explicit = build_explicit_model_params(raw, lam_rf)
+
+    lambda_center_rf = float(explicit["lambda_center_rf"])
+    lag_disk = np.asarray(explicit["lag_disk"])
+    expected_lag0 = float(raw["lag0"])
+
+    center_idx = int(np.argmin(np.abs(np.asarray(lam_rf) - lambda_center_rf)))
+    assert np.isclose(lambda_center_rf, np.exp(np.mean(np.log(np.asarray(lam_rf)))))
+    assert np.isclose(np.asarray(lam_rf)[center_idx], lambda_center_rf)
+    assert np.isclose(lag_disk[center_idx], expected_lag0)
+
+
+def test_lya_variability_weight_is_stronger_blueward_of_lya():
+    lam_rf = jnp.array([1050.0, 1216.0, 1600.0, 2500.0])
+    weight = np.asarray(lya_variability_weight(lam_rf))
+    assert weight[0] > weight[1] > weight[2] > weight[3]
+    assert weight[0] > 0.5
+    assert weight[-1] < 0.01
+
+
+def test_build_explicit_model_params_smoothly_suppresses_blue_variability():
+    lam_rf = jnp.array([1100.0, 1300.0, 2000.0])
+    raw = _make_raw_public(len(lam_rf))
+    raw["log_amp_delta_lya"] = jnp.array(-1.0)
+    explicit = build_explicit_model_params(raw, lam_rf)
+
+    baseline = build_explicit_model_params(_make_raw_public(len(lam_rf)), lam_rf)
+    ratio = np.asarray(explicit["amp_cont"]) / np.asarray(baseline["amp_cont"])
+
+    assert ratio[0] < ratio[1] < ratio[2]
+    assert ratio[0] < 0.55
+    assert ratio[2] > 0.9
+
+
+def test_make_lc_drops_z_by_default_but_keeps_lya_bands():
+    obj = _make_object(z=1.6)
+    lc = make_lc(obj, bands=["u", "g", "r", "i", "z"], drop_band_lyman_alpha=False)
+
+    assert lc is not None
+    assert lc["bands"] == ["u", "g", "r", "i"]
+    assert lc["dropped_bands"] == ["z"]
+
+
+def test_make_lc_can_hard_drop_lya_affected_bands():
+    obj = _make_object(z=1.6)
+    lc = make_lc(obj, bands=["u", "g", "r", "i", "z"], drop_band_lyman_alpha=True)
+
+    assert lc is not None
+    assert lc["bands"] == ["g", "r", "i"]
+    assert lc["dropped_bands"] == ["u", "z"]
+
+
+def test_process_samples_keeps_uv_outputs_at_2500_and_stores_band_metadata():
+    z = 1.5
+    bands = ["g", "r", "i"]
+    lam_rf_kept = np.asarray([lambda_pivot[b] / (1.0 + z) for b in bands], dtype=float)
+    lambda_center_rf = float(np.exp(np.mean(np.log(lam_rf_kept))))
+
+    eta_sigma = np.asarray([-0.6, -0.4, -0.5])
+    eta_tau = np.asarray([0.1, 0.3, 0.2])
+    log_sigma_center0 = np.asarray(np.log([0.18, 0.21, 0.24]))
+    log_tau_slow_center0 = np.asarray(np.log([250.0, 310.0, 400.0]))
+    log_tau_fast_center0 = np.asarray(np.log([25.0, 32.0, 40.0]))
+
+    flat_samples = {
+        "log_sigma_center0": log_sigma_center0,
+        "log_tau_slow_center0": log_tau_slow_center0,
+        "log_tau_fast_center0": log_tau_fast_center0,
+        "eta_sigma": eta_sigma,
+        "eta_tau": eta_tau,
+        "log_lag_blr_g": np.asarray(np.log([30.0, 40.0, 50.0])),
+        "log_lag_blr_r": np.asarray(np.log([35.0, 45.0, 55.0])),
+        "log_lag_blr_i": np.asarray(np.log([40.0, 50.0, 60.0])),
+    }
+
+    result = process_samples(
+        flat_samples,
+        {"object_id": "obj", "z": z},
+        bands=bands,
+        broken_pl=False,
+    )
+
+    sigma_shift_to_uv = np.log(10.0) * np.asarray(log_single_pl(2500.0, lambda_center_rf, eta_sigma))
+    tau_shift_to_uv = np.log(10.0) * np.asarray(log_single_pl(2500.0, lambda_center_rf, eta_tau))
+    public_log_sigma_uv = log_sigma_center0 + sigma_shift_to_uv
+    public_log_tau_uv = log_tau_slow_center0 + tau_shift_to_uv
+
+    expected_log_sigma_uv = np.percentile(public_log_sigma_uv / np.log(10), 50)
+    expected_log_tau_uv_rf = np.percentile(
+        public_log_tau_uv / np.log(10) - np.log10(1.0 + z),
+        50,
+    )
+
+    assert np.isclose(result["lambda_center_rf"], lambda_center_rf)
+    assert result["n_bands_kept"] == 3
+    assert result["bands_kept"] == "g,r,i"
+    assert np.isclose(result["log_sigma_uv"], expected_log_sigma_uv)
+    assert np.isclose(result["log_tau_uv"], np.percentile(public_log_tau_uv / np.log(10), 50))
+    assert np.isclose(result["log_sigma_UV"], expected_log_sigma_uv)
+    assert np.isclose(result["log_tau_UV_RF"], expected_log_tau_uv_rf)
+    assert np.isclose(
+        result["log_lag_blr_r_RF"],
+        np.percentile(np.log10([35.0, 45.0, 55.0]) - np.log10(1.0 + z), 50),
+    )

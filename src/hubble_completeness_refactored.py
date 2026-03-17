@@ -171,15 +171,15 @@ def get_completeness_function_2d(
     if smooth_counts:
         # --- Choose physical smoothing widths (recommended) ---
         sigma_mag = 0.2    # mag, for completeness-map smoothing along magnitude
-        sigma_z_abs = 0.5  # absolute redshift, for smoothing along z
+        sigma_z_abs = 0.2  # absolute redshift, for smoothing along z
         print(f"Smoothing counts with sigma_mag={sigma_mag} mag (sigma_mag/dm={sigma_mag/dm}), sigma_z={sigma_z_abs} absolute z")
         # Convert physical -> pixel for the Gaussian filter
         sig_mag_pix = max(float(sigma_mag/dm), 1e-6)
         sig_z_pix   = max(float(sigma_z_abs/dz), 1e-6)
         H_true_s = gaussian_filter(H_true, sigma=(sig_mag_pix, sig_z_pix),
-                                mode="constant", cval=0.0)
+                                mode="nearest")
         H_obs_s  = gaussian_filter(H_obs,  sigma=(sig_mag_pix, sig_z_pix),
-                                mode="constant", cval=0.0)
+                                mode="nearest")
     else:
         sigma_mag = 0.0
         H_true_s, H_obs_s = H_true, H_obs
@@ -265,51 +265,81 @@ def get_completeness_function_2d(
 
 
 import numpy as np
-from scipy.interpolate import RegularGridInterpolator
+from scipy.interpolate import NearestNDInterpolator, RegularGridInterpolator
 
 def make_dm_function(m, z, dm, m_bins=40, z_bins=40):
     """
     Build a 2D interpolator dm(m,z) defined on bin midpoints.
-    Queries are always clipped to the grid range (no extrapolation).
+    Queries are clipped to the populated grid range and empty cells are filled
+    from the nearest populated bin before interpolation.
     """
-    # Remove non-finite values
     m = np.asarray(m)
     z = np.asarray(z)
     dm = np.asarray(dm)
-    #mask = np.isfinite(m) & np.isfinite(z) & np.isfinite(dm)
-    m, z, dm = m[np.isfinite(m)], z[np.isfinite(z)], dm[np.isfinite(dm)]
+    mask = np.isfinite(m) & np.isfinite(z) & np.isfinite(dm)
+    m, z, dm = m[mask], z[mask], dm[mask]
+    if m.size == 0:
+        raise ValueError("make_dm_function requires at least one finite (m, z, dm) point.")
 
     # Build bin edges
-    m_edges = np.linspace(m.min(), m.max(), m_bins) if np.isscalar(m_bins) else np.asarray(m_bins)
-    z_edges = np.linspace(z.min(), z.max(), z_bins) if np.isscalar(z_bins) else np.asarray(z_bins)
+    m_edges = np.linspace(m.min(), m.max(), int(m_bins) + 1) if np.isscalar(m_bins) else np.asarray(m_bins)
+    z_edges = np.linspace(z.min(), z.max(), int(z_bins) + 1) if np.isscalar(z_bins) else np.asarray(z_bins)
 
     # 2D binning: means per cell
     counts, _, _ = np.histogram2d(z, m, bins=[z_edges, m_edges])
     sums,   _, _ = np.histogram2d(z, m, bins=[z_edges, m_edges], weights=dm)
-    mean = np.divide(sums, counts, out=np.zeros_like(sums), where=counts > 0)
+    mean = np.full_like(sums, np.nan, dtype=float)
+    mean[counts > 0] = sums[counts > 0] / counts[counts > 0]
 
     # Grid points are the bin midpoints
     z_mid = 0.5 * (z_edges[:-1] + z_edges[1:])
     m_mid = 0.5 * (m_edges[:-1] + m_edges[1:])
 
+    valid = np.isfinite(mean)
+    if not np.any(valid):
+        raise ValueError("make_dm_function could not populate any finite bias bins.")
+
+    if np.any(~valid):
+        zz, mm = np.meshgrid(z_mid, m_mid, indexing="ij")
+        nearest_fill = NearestNDInterpolator(
+            np.column_stack([zz[valid], mm[valid]]),
+            mean[valid],
+        )
+        filled = mean.copy()
+        filled[~valid] = nearest_fill(np.column_stack([zz[~valid], mm[~valid]]))
+    else:
+        filled = mean
+
+    if len(z_mid) < 2 or len(m_mid) < 2:
+        z0 = float(z_mid[0])
+        m0 = float(m_mid[0])
+        dm0 = float(filled[0, 0])
+
+        def interp_single_bin(pts):
+            pts = np.asarray(pts)
+            arr = np.atleast_2d(pts).astype(float)
+            out = np.full(arr.shape[0], dm0, dtype=float)
+            return out if np.ndim(pts) > 1 else out[0]
+
+        return interp_single_bin
+
     interp_core = RegularGridInterpolator(
-        (z_mid, m_mid), mean,
-        method='nearest', bounds_error=False, fill_value=None
+        (z_mid, m_mid), filled,
+        method="linear", bounds_error=False, fill_value=None
     )
 
-    # Clipping wrapper
-    # z_lo, z_hi = z_mid.min(), z_mid.max()
-    # m_lo, m_hi = m_mid.min(), m_mid.max()
+    z_lo, z_hi = float(z_mid.min()), float(z_mid.max())
+    m_lo, m_hi = float(m_mid.min()), float(m_mid.max())
 
-    # def interp_clipped(pts):
-    #     pts = np.asarray(pts)
-    #     arr = np.atleast_2d(pts).astype(float)
-    #     arr[:, 0] = np.clip(arr[:, 0], z_lo, z_hi)
-    #     arr[:, 1] = np.clip(arr[:, 1], m_lo, m_hi)
-    #     out = interp_core(arr)
-    #     return out if np.ndim(pts) > 1 else out[0]
+    def interp_clipped(pts):
+        pts = np.asarray(pts)
+        arr = np.atleast_2d(pts).astype(float)
+        arr[:, 0] = np.clip(arr[:, 0], z_lo, z_hi)
+        arr[:, 1] = np.clip(arr[:, 1], m_lo, m_hi)
+        out = interp_core(arr)
+        return out if np.ndim(pts) > 1 else out[0]
 
-    return interp_core
+    return interp_clipped
 
 def estimate_m50(bin_edges, true_counts, det_counts, ax=None):
     """

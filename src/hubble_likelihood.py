@@ -43,7 +43,6 @@ def completeness_loglike(m_obs, m_obs_err, m_model, mu_err, z, completeness2d, m
     m_Z = np.clip(m_Z, tiny, None)
     E = m_Z / Z
     dmi_obs = E - m_model
-    dmi_obs[z<0.2] = 0.0
 
     blob = np.vstack([Z.astype(float), dmi_obs.astype(float)])
     loglike_terms = np.log(Z)

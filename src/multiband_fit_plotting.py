@@ -43,6 +43,14 @@ colors = {'u': 'tab:blue',
           'y': 'tab:gray'}
 
 
+def _get_param(sample_dict, primary, fallback=None):
+    if primary in sample_dict:
+        return sample_dict[primary]
+    if fallback is not None and fallback in sample_dict:
+        return sample_dict[fallback]
+    raise KeyError(f"Missing parameter '{primary}'" + (f" (fallback '{fallback}')" if fallback else ""))
+
+
 def save_lc_plot(times, mags, magerrs, object_id):
     logging.info("Saving LC plot")
     # Plot and save the light curves
@@ -394,30 +402,36 @@ def plot_posterior_fast(
 def plot_broken_power_law(samples, data, broken_pl):
     """
     Plot two stacked panels of the smooth broken power law using posterior medians.
-      Top:    (eta_A1, eta_A2)
-      Bottom: (eta_tau1, eta_tau2)
+      Top:    (eta_sigma, eta_A2)
+      Bottom: (eta_tau, eta_tau2)
     Both share x = log10(lambda) and show a linear-lambda axis on top.
 
     Parameters
     ----------
     samples : dict
         Posterior samples with keys:
-        eta_A1, eta_A2, eta_tau1, eta_tau2, eta_break, lam_s
+        eta_sigma, eta_A2, eta_tau, eta_tau2, eta_break, lam_s
     data : unused (placeholder for future use)
     """
     log_pl = log_broken_pl if broken_pl else log_single_pl
     # --- posterior medians ---
-    pm = {k: np.median(np.asarray(samples[k])) for k in
-          ["eta_A1","eta_A2","eta_tau1","eta_tau2","eta_break","lam_s"]}
-    eta_A1, eta_A2   = pm["eta_A1"], pm["eta_A2"]
-    eta_tau1, eta_tau2 = pm["eta_tau1"], pm["eta_tau2"]
+    pm = {
+        "eta_sigma": np.median(np.asarray(samples["eta_sigma"])),
+        "eta_A2": np.median(np.asarray(samples["eta_A2"])),
+        "eta_tau": np.median(np.asarray(samples["eta_tau"])),
+        "eta_tau2": np.median(np.asarray(samples["eta_tau2"])),
+        "eta_break": np.median(np.asarray(samples["eta_break"])),
+        "lam_s": np.median(np.asarray(samples["lam_s"])),
+    }
+    eta_sigma, eta_A2 = pm["eta_sigma"], pm["eta_A2"]
+    eta_tau, eta_tau2 = pm["eta_tau"], pm["eta_tau2"]
     eta_break, lam_s = pm["eta_break"], pm["lam_s"]
 
     # --- wavelength grid ---
     xlog = np.linspace(2.9, 3.9, 600)
     lam = 10.0**xlog
-    y_amp = log_pl(lam, lam_s, eta_A1, eta_A2, eta_break)
-    y_tau = log_pl(lam, lam_s, eta_tau1, eta_tau2, eta_break)
+    y_amp = log_pl(lam, lam_s, eta_sigma, eta_A2, eta_break)
+    y_tau = log_pl(lam, lam_s, eta_tau, eta_tau2, eta_break)
 
     fig, (ax1, ax2) = plt.subplots(
         2, 1, figsize=(8, 4*2), sharex=True, constrained_layout=True
@@ -432,14 +446,14 @@ def plot_broken_power_law(samples, data, broken_pl):
 
     # --- top panel ---
     ax1.plot(xlog, y_amp, lw=2.0,
-             label=fr'$\eta_A=({eta_A1:.2f},{eta_A2:.2f}),\ s={eta_break:.2f}$')
+             label=fr'$\eta_\sigma=({eta_sigma:.2f},{eta_A2:.2f}),\ s={eta_break:.2f}$')
     prettify(ax1)
     ax1.set_ylabel(r'$\log_{10}\,f_A(\lambda)$')
     ax1.legend(frameon=False, loc="best")
 
     # --- bottom panel ---
     ax2.plot(xlog, y_tau, lw=2.0,
-             label=fr'$\eta_\tau=({eta_tau1:.2f},{eta_tau2:.2f}),\ s={eta_break:.2f}$')
+             label=fr'$\eta_\tau=({eta_tau:.2f},{eta_tau2:.2f}),\ s={eta_break:.2f}$')
     prettify(ax2)
     ax2.set_xlabel(r'$\log_{10}\,\lambda\ \mathrm{(\AA)}$')
     ax2.set_ylabel(r'$\log_{10}\,f_\tau(\lambda)$')
@@ -789,7 +803,8 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, mags_means, survey_
 
         # Model PSD
         psd_samples = []
-        n_samp = np.min([50, len(samples['log_tau_drw0'])])
+        tau_samples_for_psd = samples['log_tau_uv']
+        n_samp = np.min([50, len(tau_samples_for_psd)])
         for i in range(n_samp):
             sample_params = {k: jnp.array(v[i]) for k, v in samples.items()}
             psd_i = (2.0 * jnp.pi) * model.psd(sample_params, 2 * np.pi * freqs, b=0, sigma_n2=0.0)
@@ -853,9 +868,9 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, mags_means, survey_
             label="Noise floor", zorder=-10
         )
 
-        tau    = jnp.exp(posterior_median['log_tau_drw0'])
-        tau_lo = jnp.exp(jnp.percentile(samples['log_tau_drw0'], 16))
-        tau_hi = jnp.exp(jnp.percentile(samples['log_tau_drw0'], 84))
+        tau    = jnp.exp(posterior_median['log_tau_uv'])
+        tau_lo = jnp.exp(jnp.percentile(tau_samples_for_psd, 16))
+        tau_hi = jnp.exp(jnp.percentile(tau_samples_for_psd, 84))
 
         nu    = 1.0 / (2 * np.pi * float(tau))
         nu_lo = 1.0 / (2 * np.pi * float(tau_hi))
@@ -938,47 +953,47 @@ def plot_mcmc_traces(samples_dict, data):
     logging.info(f"Saved trace plot to {save_path}")
 
     """
-    # Plot eta_A1 vs. log_tau trace if both are present
-    if 'eta_A1' in samples_dict and 'log_tau_drw0' in samples_dict:
+    # Plot eta_sigma vs. log_tau trace if both are present
+    if 'eta_sigma' in samples_dict and 'log_tau_uv' in samples_dict:
         fig2, ax2 = plt.subplots(figsize=(6, 5))
-        ax2.scatter(samples_dict['log_tau_drw0'], samples_dict['eta_A1'], alpha=0.7, lw=0.7)
-        ax2.set_xlabel('log_tau_drw0')
-        ax2.set_ylabel('eta_A1')
-        ax2.set_title('Trace: eta_A1 vs. log_tau_drw0')
+        ax2.scatter(samples_dict['log_tau_uv'], samples_dict['eta_sigma'], alpha=0.7, lw=0.7)
+        ax2.set_xlabel('log_tau_uv')
+        ax2.set_ylabel('eta_sigma')
+        ax2.set_title('Trace: eta_sigma vs. log_tau_uv')
         ax2.grid(True)
-        save_path2 = os.path.join(output_dir, f"{data['z']:.1f}_{data['object_id']}_etaA1_vs_logtau.png")
+        save_path2 = os.path.join(output_dir, f"{data['z']:.1f}_{data['object_id']}_eta_sigma_vs_logtau.png")
         plt.tight_layout()
         plt.savefig(save_path2, dpi=100)
         plt.close(fig2)
-        print("Saved eta_A1 vs. log_tau trace plot to", save_path2)
+        print("Saved eta_sigma vs. log_tau trace plot to", save_path2)
 
-    # Plot eta_A1 vs. log_sigma_hat0 trace if both are present
-    if 'eta_A1' in samples_dict and 'log_sigma_hat0' in samples_dict:
+    # Plot eta_sigma vs. log_sigma_hat_uv trace if both are present
+    if 'eta_sigma' in samples_dict and 'log_sigma_hat_uv' in samples_dict:
         fig_eta_sigma, ax_eta_sigma = plt.subplots(figsize=(6, 5))
-        ax_eta_sigma.scatter(samples_dict['log_sigma_hat0'], samples_dict['eta_A1'], alpha=0.7, lw=0.7)
-        ax_eta_sigma.set_xlabel('log_sigma_hat0')
-        ax_eta_sigma.set_ylabel('eta_A1')
-        ax_eta_sigma.set_title('Trace: eta_A1 vs. log_sigma_hat0')
+        ax_eta_sigma.scatter(samples_dict['log_sigma_hat_uv'], samples_dict['eta_sigma'], alpha=0.7, lw=0.7)
+        ax_eta_sigma.set_xlabel('log_sigma_hat_uv')
+        ax_eta_sigma.set_ylabel('eta_sigma')
+        ax_eta_sigma.set_title('Trace: eta_sigma vs. log_sigma_hat_uv')
         ax_eta_sigma.grid(True)
-        save_path_eta_sigma = os.path.join(output_dir, f"{data['z']:.1f}_{data['object_id']}_etaA1_vs_logsigma.png")
+        save_path_eta_sigma = os.path.join(output_dir, f"{data['z']:.1f}_{data['object_id']}_eta_sigma_vs_logsigma.png")
         plt.tight_layout()
         plt.savefig(save_path_eta_sigma, dpi=100)
         plt.close(fig_eta_sigma)
-        logging.info(f"Saved eta_A1 vs. log_sigma_hat0 trace plot to {save_path_eta_sigma}")
+        logging.info(f"Saved eta_sigma vs. log_sigma_hat_uv trace plot to {save_path_eta_sigma}")
 
-    # Plot log_tau_drw0 vs. log_sigma_hat0 trace if both are present
-    if 'log_tau_drw0' in samples_dict and 'log_sigma_hat0' in samples_dict:
+    # Plot log_tau_uv vs. log_sigma_hat_uv trace if both are present
+    if 'log_tau_uv' in samples_dict and 'log_sigma_hat_uv' in samples_dict:
         fig3, ax3 = plt.subplots(figsize=(6, 5))
-        ax3.scatter(samples_dict['log_tau_drw0'], samples_dict['log_sigma_hat0'], alpha=0.7, lw=0.7)
-        ax3.set_xlabel('log_tau_drw0')
-        ax3.set_ylabel('log_sigma_hat0')
-        ax3.set_title('Trace: log_tau_drw0 vs. log_sigma_hat0')
+        ax3.scatter(samples_dict['log_tau_uv'], samples_dict['log_sigma_hat_uv'], alpha=0.7, lw=0.7)
+        ax3.set_xlabel('log_tau_uv')
+        ax3.set_ylabel('log_sigma_hat_uv')
+        ax3.set_title('Trace: log_tau_uv vs. log_sigma_hat_uv')
         ax3.grid(True)
         save_path3 = os.path.join(output_dir, f"{data['z']:.1f}_{data['object_id']}_logtau_vs_logsigma.png")
         plt.tight_layout()
         plt.savefig(save_path3, dpi=100)
         plt.close(fig3)
-        logging.info(f"Saved log_tau_drw0 vs. log_sigma_hat0 trace plot to {save_path3}")
+        logging.info(f"Saved log_tau_uv vs. log_sigma_hat_uv trace plot to {save_path3}")
     """
     
     
@@ -1264,44 +1279,44 @@ def plot_correlation_matrix(
 def plot_recovery(results):
     # Collect all fields from each result into arrays for plotting
     log_sigma_fake = np.array([r['log_sigma_fake'] for r in results])
-    log_sigma0 = np.array([r['log_sigma0'] for r in results])
-    log_sigma0_err = np.array([r['log_sigma0_err'] for r in results])
+    log_sigma_uv = np.array([r['log_sigma_uv'] for r in results])
+    log_sigma_uv_err = np.array([r['log_sigma_uv_err'] for r in results])
     log_tau_fake = np.array([r['log_tau_fake'] for r in results])
-    log_tau_drw0 = np.array([r['log_tau_drw0'] for r in results])
-    log_tau_drw0_err = np.array([r['log_tau_drw0_err'] for r in results])
+    log_tau_uv = np.array([r['log_tau_uv'] for r in results])
+    log_tau_uv_err = np.array([r['log_tau_uv_err'] for r in results])
     t_obs_length = np.array([r['t_obs_length'] for r in results])
     t_rf_length = np.array([r['t_rf_length'] for r in results])
 
-    rho = 10**log_tau_drw0 / t_rf_length
+    rho = 10**log_tau_uv / t_rf_length
 
     fig, axes = plt.subplots(1, 2, figsize=(10, 4))
 
-    # Panel 1: log_sigma_fake vs log_sigma0, color by rho
+    # Panel 1: log_sigma_fake vs log_sigma_uv, color by rho
     x1 = log_sigma_fake
-    y1 = log_sigma0
-    y1err = log_sigma0_err
+    y1 = log_sigma_uv
+    y1err = log_sigma_uv_err
     c1 = rho
     xmin1, xmax1 = -2, 0.5
     sc1 = axes[0].scatter(x1, y1, c=c1, cmap='plasma', s=40, edgecolor='k', alpha=0.8)
     axes[0].errorbar(x1, y1, yerr=y1err, fmt='none', ecolor='gray', alpha=0.4, elinewidth=1, capsize=2)
     axes[0].plot([xmin1, xmax1], [xmin1, xmax1], 'm--', lw=2)
     axes[0].set_xlabel(r'$\log_{10}\,\sigma_\mathrm{fake}$')
-    axes[0].set_ylabel(r'$\log_{10}\,\sigma_0$')
+    axes[0].set_ylabel(r'$\log_{10}\,\sigma_{\mathrm{UV}}$')
     axes[0].set_aspect('equal', adjustable='box')
     axes[0].set_xlim(xmin1, xmax1)
     axes[0].set_ylim(xmin1, xmax1)
 
-    # Panel 2: log_tau_fake vs log_tau_drw0 (swapped x and y), color by rho
+    # Panel 2: log_tau_fake vs log_tau_uv (swapped x and y), color by rho
     x2 = log_tau_fake
-    y2 = log_tau_drw0
-    y2err = log_tau_drw0_err
+    y2 = log_tau_uv
+    y2err = log_tau_uv_err
     c2 = rho
     xmin2, xmax2 = 0, 6
     sc2 = axes[1].scatter(x2, y2, c=c2, cmap='plasma', s=40, edgecolor='k', alpha=0.8)
     axes[1].errorbar(x2, y2, yerr=y2err, fmt='none', ecolor='gray', alpha=0.4, elinewidth=1, capsize=2)
     axes[1].plot([xmin2, xmax2], [xmin2, xmax2], 'm--', lw=2)
     axes[1].set_xlabel(r'$\log_{10}\,\tau_\mathrm{fake}$')
-    axes[1].set_ylabel(r'$\log_{10}\,\tau_\mathrm{DRW,0}$')
+    axes[1].set_ylabel(r'$\log_{10}\,\tau_\mathrm{UV}$')
     axes[1].set_aspect('equal', adjustable='box')
     axes[1].set_xlim(xmin2, xmax2)
     axes[1].set_ylim(xmin2, xmax2)
@@ -1446,18 +1461,20 @@ def plot_sigma_tau_vs_lambda_with_model(
     lam_s_med = med('lam_s')
     ds_med    = med('eta_break')
 
-    eta_A1_med,   eta_A2_med   = med('eta_A1'),   med('eta_A2')
-    eta_tau1_med, eta_tau2_med = med('eta_tau1'), med('eta_tau2')
+    eta_sigma_med = med('eta_sigma')
+    eta_A2_med = med('eta_A2')
+    eta_tau_med = med('eta_tau')
+    eta_tau2_med = med('eta_tau2')
 
     # Median 1σ (per-object errors summarized by median)
-    sig_eta_A1 = med_err('eta_A1_err')
+    sig_eta_sigma = med_err('eta_sigma_err')
     sig_eta_A2 = med_err('eta_A2_err')
-    sig_eta_t1 = med_err('eta_tau1_err')
+    sig_eta_t1 = med_err('eta_tau_err')
     sig_eta_t2 = med_err('eta_tau2_err')
 
     # Intercepts (already log10). For τ, convert to RF then median; residualize if requested.
-    sig0_all = arr('log_sigma0') - (sig_uv if residual else 0.0)
-    tau0_rf_all = arr('log_tau_drw0') - np.log10(1.0 + z)
+    sig0_all = arr('log_sigma_uv') - (sig_uv if residual else 0.0)
+    tau0_rf_all = arr('log_tau_uv') - np.log10(1.0 + z)
     if residual:
         tau0_rf_all = tau0_rf_all - tau_uv
 
@@ -1471,8 +1488,8 @@ def plot_sigma_tau_vs_lambda_with_model(
             return log_single_pl(lam_grid, lam_s_med, e1)
 
     # Central curves
-    center_sigma = sig0_med + shp(eta_A1_med,   eta_A2_med)
-    center_tau   = tau0_med + shp(eta_tau1_med, eta_tau2_med)
+    center_sigma = sig0_med + shp(eta_sigma_med, eta_A2_med)
+    center_tau   = tau0_med + shp(eta_tau_med, eta_tau2_med)
 
     # Four-corner envelopes (η1±σ1, η2±σ2); handle NaN sigmas gracefully
     def _nan_safe(v, dv):
@@ -1480,9 +1497,9 @@ def plot_sigma_tau_vs_lambda_with_model(
         hi = v + dv if np.isfinite(dv) else v
         return lo, hi
 
-    A1_lo, A1_hi = _nan_safe(eta_A1_med, sig_eta_A1)
+    A1_lo, A1_hi = _nan_safe(eta_sigma_med, sig_eta_sigma)
     A2_lo, A2_hi = _nan_safe(eta_A2_med, sig_eta_A2)
-    T1_lo, T1_hi = _nan_safe(eta_tau1_med, sig_eta_t1)
+    T1_lo, T1_hi = _nan_safe(eta_tau_med, sig_eta_t1)
     T2_lo, T2_hi = _nan_safe(eta_tau2_med, sig_eta_t2)
 
     sigma_corners = np.vstack([
@@ -1572,21 +1589,21 @@ def plot_sigma_tau_vs_lambda_with_model(
         ax1.legend(handles=handles, loc='best', frameon=False, ncol=2, fontsize=9)
 
     # ---------- annotations (median params; robust to NaNs) ----------
-    txt_sigma = (rf'$\eta_{{A,1}} = {eta_A1_med:+.3f}\,\pm\,{sig_eta_A1:.3f}$' '\n'
-                 rf'$\eta_{{A,2}} = {eta_A2_med:+.3f}\,\pm\,{sig_eta_A2:.3f}$')
+    txt_sigma = (rf'$\eta_{{\sigma,1}} = {eta_sigma_med:+.3f}\,\pm\,{sig_eta_sigma:.3f}$' '\n'
+                 rf'$\eta_{{\sigma,2}} = {eta_A2_med:+.3f}\,\pm\,{sig_eta_A2:.3f}$')
     if inject_fake and have_fake_fields and np.isfinite(alpha_sigma_med):
-        d1 = eta_A1_med - alpha_sigma_med
+        d1 = eta_sigma_med - alpha_sigma_med
         d2 = eta_A2_med - alpha_sigma_med
         txt_sigma += ('\n' +
                       rf'$\alpha_\sigma^\mathrm{{(inj)}} = {alpha_sigma_med:+.3f}$' '\n' +
-                      rf'$\Delta\eta_{{A,1}} = {d1:+.3f},\;\Delta\eta_{{A,2}} = {d2:+.3f}$')
+                      rf'$\Delta\eta_{{\sigma,1}} = {d1:+.3f},\;\Delta\eta_{{\sigma,2}} = {d2:+.3f}$')
     ax1.text(0.02, 0.96, txt_sigma, transform=ax1.transAxes, va='top', ha='left', alpha=1.0,
              fontsize=10, bbox=dict(boxstyle='round,pad=0.25', fc='white', lw=0.8), zorder=10)
 
-    txt_tau = (rf'$\eta_{{\tau,1}} = {eta_tau1_med:+.3f}\,\pm\,{sig_eta_t1:.3f}$' '\n'
+    txt_tau = (rf'$\eta_{{\tau,1}} = {eta_tau_med:+.3f}\,\pm\,{sig_eta_t1:.3f}$' '\n'
                rf'$\eta_{{\tau,2}} = {eta_tau2_med:+.3f}\,\pm\,{sig_eta_t2:.3f}$')
     if inject_fake and have_fake_fields and np.isfinite(beta_tau_med):
-        d1t = eta_tau1_med - beta_tau_med
+        d1t = eta_tau_med - beta_tau_med
         d2t = eta_tau2_med - beta_tau_med
         txt_tau += ('\n' +
                     rf'$\beta_\tau^\mathrm{{(inj)}} = {beta_tau_med:+.3f}$' '\n' +
@@ -1600,9 +1617,9 @@ def plot_sigma_tau_vs_lambda_with_model(
         slope_model = np.gradient(center_tau, loglam_grid).mean()
         print(f"[diag] slope(points) d logτ / d logλ ≈ {slope_pts:+.3f}")
         print(f"[diag] slope(model ) d logτ / d logλ ≈ {slope_model:+.3f}")
-        print(f"[diag] medians: ηA1={eta_A1_med:+.3f}±{sig_eta_A1:.3f}, "
+        print(f"[diag] medians: ησ={eta_sigma_med:+.3f}±{sig_eta_sigma:.3f}, "
               f"ηA2={eta_A2_med:+.3f}±{sig_eta_A2:.3f}, "
-              f"ητ1={eta_tau1_med:+.3f}±{sig_eta_t1:.3f}, "
+              f"ητ1={eta_tau_med:+.3f}±{sig_eta_t1:.3f}, "
               f"ητ2={eta_tau2_med:+.3f}±{sig_eta_t2:.3f}")
 
     # ---------- save ----------

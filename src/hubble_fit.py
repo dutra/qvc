@@ -124,8 +124,6 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                       completeness_sim_file=DEFAULT_COMPLETENESS_SIM_FILE,
                       N=None,
                       ):
-
-
     run_tag = make_run_tag(cosmo_model, only_sna, speed, N, z_range)
     plot_path = f"plots/hubble/{prefix}/{run_tag}"
     os.makedirs(plot_path, exist_ok=True)
