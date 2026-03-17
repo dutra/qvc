@@ -1708,6 +1708,22 @@ def format_result_errors(
 
     return out
 
+def sigma_distance_asym(x1, err1, x2, err2_lower, err2_upper):
+    if err1 < 0 or err2_lower < 0 or err2_upper < 0:
+        raise ValueError("Uncertainties must be non-negative.")
+
+    if x1 < x2:
+        err2 = err2_lower
+    else:
+        err2 = err2_upper
+
+    denom = math.sqrt(err1**2 + err2**2)
+    if denom == 0:
+        raise ValueError("Combined uncertainty is zero.")
+
+    return abs(x1 - x2) / denom
+
+
 def write_results_tex_variables(
     df_agn, df_agn_all, df_pantheon, z_range, cosmo_model_joint_samples, cosmo_model_sna_samples, compare_r,
     write_path, result_prefix="", chisq_dict=None, cosmo_models_result_dict=None
@@ -1790,9 +1806,10 @@ def write_results_tex_variables(
             results[f"{key}_err"] = err
             results[f"{key}_err_lower"] = err_lower
             results[f"{key}_err_upper"] = err_upper
-
+        sigma_distance = sigma_distance_asym(results['Om0'], results['Om0_err'],  0.495, 0.043, 0.033)
         if 'Om0' in results:
             lines.append(_cmd("OmZero", format_result_errors(results['Om0'],results['Om0_err']), model_suffix=model_name))
+            lines.append(_cmd("OmZeroSigmaDistanceDES", format_result_errors(sigma_distance, nd=1), model_suffix=model_name))
         if 'w0' in results:
             lines.append(_cmd("wZero", 
                             format_result_errors(results['w0'],err_lower=results['w0_err_lower'], err_upper=results['w0_err_upper']),
