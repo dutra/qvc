@@ -48,8 +48,10 @@ def test_make_multiband_dho_blr_model_random_data():
     params = {
         "amp_cont": jnp.asarray(rng.uniform(0.1, 0.4, size=n_band)),
         "amp_blr": jnp.asarray(rng.uniform(0.01, 0.08, size=n_band)),
+        "amp_blr2": jnp.asarray(rng.uniform(0.01, 0.08, size=n_band)),
         "lag_disk": jnp.asarray(rng.uniform(0.5, 5.0, size=n_band)),
         "lag_blr": jnp.asarray(rng.uniform(5.0, 30.0, size=n_band)),
+        "lag_blr2": jnp.asarray(rng.uniform(15.0, 60.0, size=n_band)),
     }
     wrapper = ContiBLR_SHO_Wrapper(kernel=base_kernel, params=params)
 

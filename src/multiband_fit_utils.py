@@ -717,11 +717,21 @@ def process_samples(flat_samples, data,  bands, percentiles=[16, 50, 84], broken
         bands_kept=",".join(bands),
     )
 
-    internal_center_keys = {"log_sigma_center0", "log_tau_slow_center0", "log_tau_fast_center0"}
+    internal_skip_keys = {
+        "log_sigma_center0",
+        "log_tau_slow_center0",
+        "log_tau_fast_center0",
+    }
+    internal_skip_prefixes = (
+        "log_amp_delta_blr_raw",
+        "log_amp_delta_blr2_raw",
+        "log_lag_blr_raw",
+        "log_lag_blr2_raw",
+    )
 
     # per flat param computation
     for k, v in flat_samples.items():
-        if k in internal_center_keys:
+        if k in internal_skip_keys or any(k.startswith(prefix) for prefix in internal_skip_prefixes):
             continue
         if v.ndim > 1:
             logging.warning(f"Warning: {k} has shape {v.shape}, expected flat samples")
@@ -799,14 +809,15 @@ def process_samples(flat_samples, data,  bands, percentiles=[16, 50, 84], broken
         median, err = sym_percentile(log_tau_fast_band[:, i])
         result[f"log_tau_fast_band_{band}_RF"] = median
         result[f"log_tau_fast_band_{band}_RF_err"] = err
-        log_lag_blr_key = f"log_lag_blr_{band}"
-        if log_lag_blr_key in flat_samples:
-            samples_log_lag_blr_rf = (
-                np.asarray(flat_samples[log_lag_blr_key]) / np.log(10) - np.log10(1 + data['z'])
-            )
-            median, err = sym_percentile(samples_log_lag_blr_rf)
-            result[f"log_lag_blr_{band}_RF"] = median
-            result[f"log_lag_blr_{band}_RF_err"] = err
+        for lag_suffix in ("", "2"):
+            log_lag_blr_key = f"log_lag_blr{lag_suffix}_{band}"
+            if log_lag_blr_key in flat_samples:
+                samples_log_lag_blr_rf = (
+                    np.asarray(flat_samples[log_lag_blr_key]) / np.log(10) - np.log10(1 + data['z'])
+                )
+                median, err = sym_percentile(samples_log_lag_blr_rf)
+                result[f"log_lag_blr{lag_suffix}_{band}_RF"] = median
+                result[f"log_lag_blr{lag_suffix}_{band}_RF_err"] = err
 
 
     # log_sigma_UV

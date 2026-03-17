@@ -548,6 +548,7 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
         plot_cut_diagnostics,
         plot_m2500_vs_z_colorpanels,
         plot_sigma_uv_host_correction,
+        plot_tau_sigma_vs_wu_catalog,
         plot_tau_sigma_vs_redshift,
     )
 
@@ -609,6 +610,12 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
         amp_delta_blr[dropped_bands.apply(lambda s: b in s)] = 0.0
         amp_delta_blr_total_sq = amp_delta_blr_total_sq + amp_delta_blr**2
         df[f'amp_delta_blr_{b}'] = amp_delta_blr
+        blr2_col = f'log_amp_delta_blr2_{b}'
+        if blr2_col in df.columns:
+            amp_delta_blr2 = 10**df[blr2_col].values
+            amp_delta_blr2[dropped_bands.apply(lambda s: b in s)] = 0.0
+            amp_delta_blr_total_sq = amp_delta_blr_total_sq + amp_delta_blr2**2
+            df[f'amp_delta_blr2_{b}'] = amp_delta_blr2
 
     df['log_jitter_total'] = np.log10(np.sqrt(jitter_total_sq))
     df['log_amp_delta_blr_total'] = np.log10(np.sqrt(amp_delta_blr_total_sq))
@@ -653,6 +660,8 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
 
     if {"z", "log_tau_UV_RF", "log_sigma_UV"}.issubset(df.columns):
         plot_tau_sigma_vs_redshift(df, plot_path=plot_path, show=False)
+    if {"log_tau_UV_RF", "log_sigma_UV", "LOGMBH", "LOGLEDD_RATIO"}.issubset(df.columns):
+        plot_tau_sigma_vs_wu_catalog(df, plot_path=plot_path, show=False)
 
     # Remove objects with implausibly bright or faint apparent magnitude at 2500 A.
     mag_mask = ((df['apparent_mag_2500'] >= 16) & (df['apparent_mag_2500'] < 24))

@@ -14,6 +14,7 @@ if str(SRC) not in sys.path:
 
 from fit_light_curves import (
     build_explicit_model_params,
+    compute_parameter_kls,
     compute_lambda_center_rf,
     lya_variability_weight,
     make_lc,
@@ -30,7 +31,9 @@ def _make_raw_public(n_band):
         "eta_tau": jnp.array(0.25),
         "log_amp_delta_lya": jnp.array(0.0),
         "log_amp_delta_blr": jnp.full((n_band,), -1.0),
+        "log_amp_delta_blr2": jnp.full((n_band,), -1.5),
         "log_lag_blr": jnp.full((n_band,), np.log(20.0)),
+        "log_lag_blr2": jnp.full((n_band,), np.log(60.0)),
         "lag0": jnp.array(5.0),
         "lag_beta": jnp.array(4.0 / 3.0),
     }
@@ -97,7 +100,9 @@ def test_build_explicit_model_params_internal_and_public_forms_are_equivalent():
         "eta_sigma": jnp.array(-0.55),
         "eta_tau": jnp.array(0.25),
         "log_amp_delta_blr": jnp.full((len(lam_rf),), -1.0),
+        "log_amp_delta_blr2": jnp.full((len(lam_rf),), -1.5),
         "log_lag_blr": jnp.full((len(lam_rf),), np.log(20.0)),
+        "log_lag_blr2": jnp.full((len(lam_rf),), np.log(60.0)),
         "lag0": jnp.array(5.0),
         "lag_beta": jnp.array(4.0 / 3.0),
     }
@@ -107,6 +112,10 @@ def test_build_explicit_model_params_internal_and_public_forms_are_equivalent():
     assert np.isclose(float(explicit_internal["log_tau_uv"]), float(explicit_public["log_tau_uv"]))
     assert np.isclose(float(explicit_internal["log_tau_fast_uv"]), float(explicit_public["log_tau_fast_uv"]))
     assert np.allclose(np.asarray(explicit_internal["amp_cont"]), np.asarray(explicit_public["amp_cont"]))
+    assert np.allclose(np.asarray(explicit_internal["amp_blr"]), np.asarray(explicit_public["amp_blr"]))
+    assert np.allclose(np.asarray(explicit_internal["amp_blr2"]), np.asarray(explicit_public["amp_blr2"]))
+    assert np.allclose(np.asarray(explicit_internal["lag_blr"]), np.asarray(explicit_public["lag_blr"]))
+    assert np.allclose(np.asarray(explicit_internal["lag_blr2"]), np.asarray(explicit_public["lag_blr2"]))
     assert np.allclose(np.asarray(explicit_internal["tau_fast_band"]), np.asarray(explicit_public["tau_fast_band"]))
     assert np.allclose(np.asarray(explicit_internal["tau_slow_band"]), np.asarray(explicit_public["tau_slow_band"]))
 
@@ -187,6 +196,9 @@ def test_process_samples_keeps_uv_outputs_at_2500_and_stores_band_metadata():
         "log_lag_blr_g": np.asarray(np.log([30.0, 40.0, 50.0])),
         "log_lag_blr_r": np.asarray(np.log([35.0, 45.0, 55.0])),
         "log_lag_blr_i": np.asarray(np.log([40.0, 50.0, 60.0])),
+        "log_lag_blr2_g": np.asarray(np.log([80.0, 90.0, 100.0])),
+        "log_lag_blr2_r": np.asarray(np.log([85.0, 95.0, 105.0])),
+        "log_lag_blr2_i": np.asarray(np.log([90.0, 100.0, 110.0])),
     }
 
     result = process_samples(
@@ -218,3 +230,70 @@ def test_process_samples_keeps_uv_outputs_at_2500_and_stores_band_metadata():
         result["log_lag_blr_r_RF"],
         np.percentile(np.log10([35.0, 45.0, 55.0]) - np.log10(1.0 + z), 50),
     )
+    assert np.isclose(
+        result["log_lag_blr2_r_RF"],
+        np.percentile(np.log10([85.0, 95.0, 105.0]) - np.log10(1.0 + z), 50),
+    )
+
+
+def test_compute_parameter_kls_returns_expected_keys():
+    rng = np.random.default_rng(123)
+    bands = ["g", "r"]
+    z = 1.2
+    lam_rf = np.asarray([lambda_pivot[b] / (1.0 + z) for b in bands], dtype=float)
+    lambda_center_rf = float(np.exp(np.mean(np.log(lam_rf))))
+    n = 64
+
+    flat_samples = {
+        "eta_sigma": rng.normal(-0.45, 0.08, size=n),
+        "eta_tau": rng.normal(0.55, 0.10, size=n),
+        "log_sigma_center0": rng.normal(np.log(0.2), 0.2, size=n),
+        "log_tau_slow_center0": rng.normal(np.log(300.0), 0.3, size=n),
+        "log_tau_fast_center0": rng.normal(np.log(30.0), 0.2, size=n),
+        "poly1": rng.normal(0.0, 0.05, size=n),
+        "lag0": np.abs(rng.normal(5.0, 1.0, size=n)),
+        "lag_beta": np.abs(rng.normal(4.0 / 3.0, 0.1, size=n)),
+        "log_amp_delta_lya": rng.normal(-0.5, 0.1, size=n),
+        "mean_g": rng.normal(0.0, 0.05, size=n),
+        "mean_r": rng.normal(0.0, 0.05, size=n),
+        "log_jitter_g": rng.normal(np.log(0.03), 0.1, size=n),
+        "log_jitter_r": rng.normal(np.log(0.03), 0.1, size=n),
+        "log_amp_delta_blr_g": rng.normal(-1.0, 0.2, size=n),
+        "log_amp_delta_blr_r": rng.normal(-1.0, 0.2, size=n),
+        "log_amp_delta_blr2_g": rng.normal(-1.2, 0.2, size=n),
+        "log_amp_delta_blr2_r": rng.normal(-1.2, 0.2, size=n),
+        "log_lag_blr_g": rng.normal(np.log(20.0), 0.2, size=n),
+        "log_lag_blr_r": rng.normal(np.log(25.0), 0.2, size=n),
+        "log_lag_blr2_g": rng.normal(np.log(70.0), 0.2, size=n),
+        "log_lag_blr2_r": rng.normal(np.log(80.0), 0.2, size=n),
+    }
+
+    kls = compute_parameter_kls(
+        flat_samples,
+        bands=bands,
+        z=z,
+        lambda_center_rf=lambda_center_rf,
+        log_jitter_mean=np.asarray([np.log(0.03), np.log(0.03)]),
+    )
+
+    expected_keys = {
+        "eta_sigma_kl",
+        "eta_tau_kl",
+        "log_sigma_center0_kl",
+        "log_tau_slow_center0_kl",
+        "log_tau_fast_center0_kl",
+        "lag0_kl",
+        "lag_beta_kl",
+        "log_amp_delta_lya_kl",
+        "mean_g_kl",
+        "mean_r_kl",
+        "log_jitter_g_kl",
+        "log_jitter_r_kl",
+        "log_amp_delta_blr_g_kl",
+        "log_amp_delta_blr2_g_kl",
+        "log_lag_blr_g_kl",
+        "log_lag_blr2_g_kl",
+        "kl_total",
+    }
+    assert expected_keys.issubset(kls.keys())
+    assert all(np.isfinite(kls[key]) for key in expected_keys)

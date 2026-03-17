@@ -263,6 +263,61 @@ def plot_tau_sigma_vs_redshift(df, plot_path="plots/hubble", show=False):
     )
 
 
+def plot_tau_sigma_vs_wu_catalog(df, plot_path="plots/hubble", show=False):
+    """Plot UV variability diagnostics against Wu-catalog BH mass and Eddington ratio."""
+    required = {"log_tau_UV_RF", "log_sigma_UV", "LOGMBH", "LOGLEDD_RATIO"}
+    if not required.issubset(df.columns):
+        missing = ", ".join(sorted(required - set(df.columns)))
+        raise KeyError(f"Missing required columns for Wu-catalog diagnostic plot: {missing}")
+
+    log_tau = pd.to_numeric(df["log_tau_UV_RF"], errors="coerce").to_numpy(dtype=float)
+    log_sigma = pd.to_numeric(df["log_sigma_UV"], errors="coerce").to_numpy(dtype=float)
+    log_mbh = pd.to_numeric(df["LOGMBH"], errors="coerce").to_numpy(dtype=float)
+    log_edd = pd.to_numeric(df["LOGLEDD_RATIO"], errors="coerce").to_numpy(dtype=float)
+
+    fig, axes = plt.subplots(1, 2, figsize=(13.0, 5.5), sharey=False)
+
+    mask_tau = np.isfinite(log_mbh) & np.isfinite(log_tau)
+    if np.any(mask_tau):
+        axes[0].scatter(
+            log_mbh[mask_tau],
+            log_tau[mask_tau],
+            s=5,
+            alpha=0.65,
+            linewidths=0,
+            rasterized=True,
+        )
+    else:
+        axes[0].text(0.5, 0.5, "No finite LOGMBH/log_tau_UV_RF values", ha="center", va="center", transform=axes[0].transAxes)
+    axes[0].set_xlabel(r"$\log M_{\rm BH}$ (Wu catalog)")
+    axes[0].set_ylabel(r"$\log \tau_{\rm UV,RF}$")
+    axes[0].grid(True, alpha=0.25)
+
+    mask_sigma = np.isfinite(log_edd) & np.isfinite(log_sigma)
+    if np.any(mask_sigma):
+        axes[1].scatter(
+            log_edd[mask_sigma],
+            log_sigma[mask_sigma],
+            s=5,
+            alpha=0.65,
+            linewidths=0,
+            rasterized=True,
+        )
+    else:
+        axes[1].text(0.5, 0.5, "No finite LOGLEDD_RATIO/log_sigma_UV values", ha="center", va="center", transform=axes[1].transAxes)
+    axes[1].set_xlabel(r"$\log (L/L_{\rm Edd})$ (Wu catalog)")
+    axes[1].set_ylabel(r"$\log \sigma_{\rm UV}$")
+    axes[1].grid(True, alpha=0.25)
+
+    diagnostics_path = os.path.join(plot_path or "plots/hubble", "diagnostics")
+    return _save_figure(
+        fig,
+        os.path.join(diagnostics_path, "tau_sigma_vs_wu_catalog.pdf"),
+        dpi=200,
+        show=show,
+    )
+
+
 def _plot_dm_by_band(
     df,
     *,

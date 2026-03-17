@@ -86,6 +86,236 @@ def lya_variability_weight(lam_rf, transition=LYA_REST_WAVELENGTH, width=LYA_ATT
     return 1.0 / (1.0 + jnp.exp((lam_rf - transition) / width))
 
 
+def _dist_log_prob_array(distribution, x):
+    return np.asarray(distribution.log_prob(jnp.asarray(x)))
+
+
+def kl_from_samples(x, log_prior_fn):
+    """Approximate KL(q||p) with q=N(sample mean, sample var) and user-provided log p."""
+
+    x = np.asarray(x).ravel()
+    x = x[np.isfinite(x)]
+    if x.size < 2:
+        return np.nan
+
+    mu = x.mean()
+    var = x.var(ddof=1) + 1e-12
+    log_q = -0.5 * np.log(2.0 * np.pi * var) - 0.5 * (x - mu) ** 2 / var
+    log_p = np.asarray(log_prior_fn(x), dtype=float)
+    good = np.isfinite(log_q) & np.isfinite(log_p)
+    if not np.any(good):
+        return np.nan
+    return float(np.mean(log_q[good] - log_p[good]))
+
+
+def sigma_shift_to_uv(eta_sigma, lambda_center_rf, lambda_uv=2500.0):
+    return jnp.log(10.0) * log_single_pl(lambda_uv, lambda_center_rf, eta_sigma)
+
+
+def tau_shift_to_uv(eta_tau, lambda_center_rf, lambda_uv=2500.0):
+    return jnp.log(10.0) * log_single_pl(lambda_uv, lambda_center_rf, eta_tau)
+
+
+def eta_sigma_prior():
+    return dist.TruncatedNormal(-0.5, 1.0, low=-jnp.inf, high=0.0)
+
+
+def eta_tau_prior():
+    return dist.Normal(0.5, 0.5)
+
+
+def log_sigma_center0_prior(eta_sigma, lambda_center_rf, *, sigma_tau_uniform=False):
+    sigma_shift = sigma_shift_to_uv(eta_sigma, lambda_center_rf)
+    if sigma_tau_uniform:
+        return dist.Uniform(-2.0 * jnp.log(10.0) - sigma_shift, 0.2 * jnp.log(10.0) - sigma_shift)
+    return dist.Normal(-0.6 * jnp.log(10.0) - sigma_shift, 1.0 * jnp.log(10.0))
+
+
+def log_tau_slow_center0_prior(eta_tau, z, lambda_center_rf, *, sigma_tau_uniform=False):
+    shift = tau_shift_to_uv(eta_tau, lambda_center_rf)
+    log_tau_uv_high = jnp.log(10**4.0 * (1.0 + z))
+    log_tau_uv_low = 0.0
+    if sigma_tau_uniform:
+        return dist.Uniform(log_tau_uv_low - shift, log_tau_uv_high - shift)
+    return dist.TruncatedNormal(
+        jnp.log(10**2.5 * (1.0 + z)) - shift,
+        1.2 * jnp.log(10.0),
+        low=log_tau_uv_low - shift,
+        high=log_tau_uv_high - shift,
+    )
+
+
+def log_tau_fast_center0_prior(eta_tau, z, lambda_center_rf, *, tau_fast_truncated=False):
+    shift = tau_shift_to_uv(eta_tau, lambda_center_rf)
+    log_tau_fast_uv_low = 0.0
+    log_tau_fast_uv_high = jnp.log(100.0 * (1.0 + z))
+    log_tau_fast_uv_c = jnp.log(10.0 * (1.0 + z))
+    if tau_fast_truncated:
+        return dist.TruncatedNormal(
+            log_tau_fast_uv_c - shift,
+            jnp.log(25.0),
+            low=log_tau_fast_uv_low - shift,
+            high=log_tau_fast_uv_high - shift,
+        )
+    return dist.Normal(log_tau_fast_uv_c - shift, jnp.log(25.0))
+
+
+def poly1_prior():
+    return dist.Normal(0.0, 0.1)
+
+
+def lag0_prior():
+    return dist.TruncatedNormal(5.0, 5.0, low=0.0, high=jnp.inf)
+
+
+def lag_beta_prior():
+    return dist.TruncatedNormal(4.0 / 3.0, 0.2, low=0.0, high=jnp.inf)
+
+
+def log_amp_delta_lya_prior():
+    return dist.TruncatedNormal(-0.5, 0.75, low=-jnp.inf, high=0.0)
+
+
+def mean_prior():
+    return dist.Normal(0.0, 0.2)
+
+
+def log_jitter_prior(log_jitter_mean):
+    return dist.Normal(log_jitter_mean, 1.0)
+
+
+def log_amp_delta_blr_prior():
+    return dist.Normal(-1.0, 1.0)
+
+
+def log_lag_blr_prior():
+    return dist.Uniform(jnp.log(2.0), jnp.log(5000.0))
+
+
+def compute_parameter_kls(
+    flat_samples,
+    *,
+    bands,
+    z,
+    lambda_center_rf,
+    log_jitter_mean,
+    disable_poly1=False,
+    disable_lag_blr=False,
+    drop_band_lyman_alpha=False,
+    sigma_tau_uniform=False,
+    tau_fast_truncated=False,
+):
+    """Return approximate KL(q||p) for sampled light-curve parameters."""
+
+    kls = {}
+    eta_sigma = np.asarray(flat_samples["eta_sigma"])
+    eta_tau = np.asarray(flat_samples["eta_tau"])
+
+    kls["eta_sigma_kl"] = kl_from_samples(
+        eta_sigma,
+        lambda x: _dist_log_prob_array(eta_sigma_prior(), x),
+    )
+    kls["eta_tau_kl"] = kl_from_samples(
+        eta_tau,
+        lambda x: _dist_log_prob_array(eta_tau_prior(), x),
+    )
+
+    if "log_sigma_center0" in flat_samples:
+        sigma_prior = log_sigma_center0_prior(
+            eta_sigma,
+            lambda_center_rf,
+            sigma_tau_uniform=sigma_tau_uniform,
+        )
+        kls["log_sigma_center0_kl"] = kl_from_samples(
+            flat_samples["log_sigma_center0"],
+            lambda x: _dist_log_prob_array(sigma_prior, x),
+        )
+
+    if "log_tau_slow_center0" in flat_samples:
+        tau_slow_prior = log_tau_slow_center0_prior(
+            eta_tau,
+            z,
+            lambda_center_rf,
+            sigma_tau_uniform=sigma_tau_uniform,
+        )
+        kls["log_tau_slow_center0_kl"] = kl_from_samples(
+            flat_samples["log_tau_slow_center0"],
+            lambda x: _dist_log_prob_array(tau_slow_prior, x),
+        )
+
+    if "log_tau_fast_center0" in flat_samples:
+        tau_fast_prior = log_tau_fast_center0_prior(
+            eta_tau,
+            z,
+            lambda_center_rf,
+            tau_fast_truncated=tau_fast_truncated,
+        )
+        kls["log_tau_fast_center0_kl"] = kl_from_samples(
+            flat_samples["log_tau_fast_center0"],
+            lambda x: _dist_log_prob_array(tau_fast_prior, x),
+        )
+
+    if not disable_poly1 and "poly1" in flat_samples:
+        kls["poly1_kl"] = kl_from_samples(
+            flat_samples["poly1"],
+            lambda x: _dist_log_prob_array(poly1_prior(), x),
+        )
+
+    if "lag0" in flat_samples:
+        kls["lag0_kl"] = kl_from_samples(
+            flat_samples["lag0"],
+            lambda x: _dist_log_prob_array(lag0_prior(), x),
+        )
+    if "lag_beta" in flat_samples:
+        kls["lag_beta_kl"] = kl_from_samples(
+            flat_samples["lag_beta"],
+            lambda x: _dist_log_prob_array(lag_beta_prior(), x),
+        )
+
+    if not drop_band_lyman_alpha and "log_amp_delta_lya" in flat_samples:
+        kls["log_amp_delta_lya_kl"] = kl_from_samples(
+            flat_samples["log_amp_delta_lya"],
+            lambda x: _dist_log_prob_array(log_amp_delta_lya_prior(), x),
+        )
+
+    for i, band in enumerate(bands):
+        mean_key = f"mean_{band}"
+        if mean_key in flat_samples:
+            kls[f"{mean_key}_kl"] = kl_from_samples(
+                flat_samples[mean_key],
+                lambda x: _dist_log_prob_array(mean_prior(), x),
+            )
+
+        jitter_key = f"log_jitter_{band}"
+        if jitter_key in flat_samples:
+            kls[f"{jitter_key}_kl"] = kl_from_samples(
+                flat_samples[jitter_key],
+                lambda x: _dist_log_prob_array(log_jitter_prior(float(log_jitter_mean[i])), x),
+            )
+
+        if disable_lag_blr:
+            continue
+
+        for amp_key in (f"log_amp_delta_blr_{band}", f"log_amp_delta_blr2_{band}"):
+            if amp_key in flat_samples:
+                kls[f"{amp_key}_kl"] = kl_from_samples(
+                    flat_samples[amp_key],
+                    lambda x: _dist_log_prob_array(log_amp_delta_blr_prior(), x),
+                )
+
+        for lag_key in (f"log_lag_blr_{band}", f"log_lag_blr2_{band}"):
+            if lag_key in flat_samples:
+                kls[f"{lag_key}_kl"] = kl_from_samples(
+                    flat_samples[lag_key],
+                    lambda x: _dist_log_prob_array(log_lag_blr_prior(), x),
+                )
+
+    finite_kls = [v for v in kls.values() if np.isfinite(v)]
+    if finite_kls:
+        kls["kl_total"] = float(np.sum(finite_kls))
+    return kls
+
+
 def make_lc(
     data,
     bands,
@@ -290,8 +520,15 @@ def build_explicit_model_params(raw_params, lam_rf):
     eta_sigma = jnp.asarray(raw_params["eta_sigma"])
     eta_tau = jnp.asarray(raw_params["eta_tau"])
     log_amp_delta_blr = jnp.asarray(raw_params["log_amp_delta_blr"])
+    log_amp_delta_blr2 = jnp.asarray(
+        raw_params.get(
+            "log_amp_delta_blr2",
+            jnp.full_like(log_amp_delta_blr, -1e9),
+        )
+    )
     log_amp_delta_lya = jnp.asarray(raw_params.get("log_amp_delta_lya", 0.0))
     log_lag_blr = jnp.asarray(raw_params["log_lag_blr"])
+    log_lag_blr2 = jnp.asarray(raw_params.get("log_lag_blr2", log_lag_blr))
     lag0 = jnp.asarray(raw_params["lag0"])
     lag_beta = jnp.asarray(raw_params["lag_beta"])
     sigma_shift_to_uv = jnp.log(10.0) * log_single_pl(lambda_uv, lambda_center_rf, eta_sigma)
@@ -338,8 +575,10 @@ def build_explicit_model_params(raw_params, lam_rf):
 
     amp_cont = jnp.exp(log_sigma_band + log_amp_delta_lya_band)
     amp_blr = jnp.exp(log_sigma_uv_exp + log_amp_delta_blr)
+    amp_blr2 = jnp.exp(log_sigma_uv_exp + log_amp_delta_blr2)
     lag_disk = lag0_exp * (lam_rf / lambda_center_rf_exp) ** lag_beta_exp
     lag_blr = jnp.exp(log_lag_blr)
+    lag_blr2 = jnp.exp(log_lag_blr2)
     log_tau_scale = jnp.log(10.0) * log_single_pl(
         lam_rf,
         lambda_center_rf_exp,
@@ -361,8 +600,10 @@ def build_explicit_model_params(raw_params, lam_rf):
     explicit["log_amp_delta_lya_band"] = log_amp_delta_lya_band
     explicit["amp_cont"] = amp_cont
     explicit["amp_blr"] = amp_blr
+    explicit["amp_blr2"] = amp_blr2
     explicit["lag_disk"] = lag_disk
     explicit["lag_blr"] = lag_blr
+    explicit["lag_blr2"] = lag_blr2
     explicit["tau_fast_band"] = jnp.exp(log_tau_fast_band)
     explicit["tau_slow_band"] = jnp.exp(log_tau_slow_band)
     explicit["log_kernel_param"] = log_kernel_param
@@ -379,8 +620,10 @@ def add_model_prediction_params(samples, lam_rf):
             "log_kernel_param",
             "amp_cont",
             "amp_blr",
+            "amp_blr2",
             "lag_disk",
             "lag_blr",
+            "lag_blr2",
             "tau_fast_band",
             "tau_slow_band",
             "log_sigma_uv",
@@ -399,8 +642,10 @@ def add_model_prediction_params(samples, lam_rf):
     out["log_kernel_param"] = np.asarray(explicit["log_kernel_param"])
     out["amp_cont"] = np.asarray(explicit["amp_cont"])
     out["amp_blr"] = np.asarray(explicit["amp_blr"])
+    out["amp_blr2"] = np.asarray(explicit["amp_blr2"])
     out["lag_disk"] = np.asarray(explicit["lag_disk"])
     out["lag_blr"] = np.asarray(explicit["lag_blr"])
+    out["lag_blr2"] = np.asarray(explicit["lag_blr2"])
     out["tau_fast_band"] = np.asarray(explicit["tau_fast_band"])
     out["tau_slow_band"] = np.asarray(explicit["tau_slow_band"])
     out["log_sigma_center0"] = np.asarray(explicit["log_sigma_center0"])
@@ -411,6 +656,10 @@ def add_model_prediction_params(samples, lam_rf):
     out["log_tau_fast_uv"] = np.asarray(explicit["log_tau_fast_uv"])
     out["log_amp_delta_lya"] = np.asarray(explicit["log_amp_delta_lya"])
     out["log_amp_delta_lya_band"] = np.asarray(explicit["log_amp_delta_lya_band"])
+    if "log_amp_delta_blr2" in explicit:
+        out["log_amp_delta_blr2"] = np.asarray(explicit["log_amp_delta_blr2"])
+    if "log_lag_blr2" in explicit:
+        out["log_lag_blr2"] = np.asarray(explicit["log_lag_blr2"])
     out["lambda_center_rf"] = np.asarray(explicit["lambda_center_rf"])
     return out
 
@@ -436,90 +685,55 @@ def build_single_object_model(
     lambda_center_rf = compute_lambda_center_rf(lam_rf)
     lambda_uv = jnp.array(2500.0, dtype=lam_rf.dtype)
 
-    log_tau_uv_c = jnp.log(10**2.5 * (1.0 + z))
-
     def model():
-        eta_sigma = numpyro.sample(
-            "eta_sigma",
-            dist.TruncatedNormal(-0.5, 1.0, high=0.0),
+        eta_sigma = numpyro.sample("eta_sigma", eta_sigma_prior())
+
+        eta_tau = numpyro.sample("eta_tau", eta_tau_prior())
+
+        log_tau_slow_center0 = numpyro.sample(
+            "log_tau_slow_center0",
+            log_tau_slow_center0_prior(
+                eta_tau,
+                z,
+                lambda_center_rf,
+                sigma_tau_uniform=sigma_tau_uniform,
+            ),
         )
 
-        eta_tau = numpyro.sample("eta_tau", dist.Normal(0.5, 0.5))
-        sigma_shift_to_uv = jnp.log(10.0) * log_single_pl(lambda_uv, lambda_center_rf, eta_sigma)
-        tau_shift_to_uv = jnp.log(10.0) * log_single_pl(lambda_uv, lambda_center_rf, eta_tau)
+        log_tau_fast_center0 = numpyro.sample(
+            "log_tau_fast_center0",
+            log_tau_fast_center0_prior(
+                eta_tau,
+                z,
+                lambda_center_rf,
+                tau_fast_truncated=tau_fast_truncated,
+            ),
+        )
 
-        log_tau_uv_high = jnp.log(10**4.0 * (1.0 + z))
-        log_tau_uv_low = 0.0
-        if sigma_tau_uniform:
-            log_tau_slow_center0 = numpyro.sample(
-                "log_tau_slow_center0",
-                dist.Uniform(log_tau_uv_low - tau_shift_to_uv, log_tau_uv_high - tau_shift_to_uv),
-            )
-        else:
-            log_tau_slow_center0 = numpyro.sample(
-                "log_tau_slow_center0",
-                dist.TruncatedNormal(
-                    log_tau_uv_c - tau_shift_to_uv,
-                    1.2 * jnp.log(10),
-                    low=log_tau_uv_low - tau_shift_to_uv,
-                    high=log_tau_uv_high - tau_shift_to_uv,
-                ),
-            )
-
-        log_tau_fast_uv_low = 0.0
-        log_tau_fast_uv_high = jnp.log(100.0 * (1.0 + z))
-        log_tau_fast_uv_c = jnp.log(10.0 * (1.0 + z))
-        if tau_fast_truncated:
-            log_tau_fast_center0 = numpyro.sample(
-                "log_tau_fast_center0",
-                dist.TruncatedNormal(
-                    log_tau_fast_uv_c - tau_shift_to_uv,
-                    jnp.log(25.0),
-                    low=log_tau_fast_uv_low - tau_shift_to_uv,
-                    high=log_tau_fast_uv_high - tau_shift_to_uv,
-                ),
-            )
-        else:
-            log_tau_fast_center0 = numpyro.sample(
-                "log_tau_fast_center0",
-                dist.Normal(log_tau_fast_uv_c - tau_shift_to_uv, jnp.log(25.0)),
-            )
-
-        if sigma_tau_uniform:
-            log_sigma_center0 = numpyro.sample(
-                "log_sigma_center0",
-                dist.Uniform(-2.0 * jnp.log(10) - sigma_shift_to_uv, 0.2 * jnp.log(10) - sigma_shift_to_uv),
-            )
-        else:
-            log_sigma_center0 = numpyro.sample(
-                "log_sigma_center0",
-                dist.Normal(-0.6 * jnp.log(10) - sigma_shift_to_uv, 1.0 * jnp.log(10)),
-            )
+        log_sigma_center0 = numpyro.sample(
+            "log_sigma_center0",
+            log_sigma_center0_prior(
+                eta_sigma,
+                lambda_center_rf,
+                sigma_tau_uniform=sigma_tau_uniform,
+            ),
+        )
 
         if disable_poly1:
             poly1 = numpyro.deterministic("poly1", 0.0)
         else:
-            poly1 = numpyro.sample(
-                "poly1",
-                dist.Normal(0.0, 0.1),
-            )
+            poly1 = numpyro.sample("poly1", poly1_prior())
 
-        lag0 = numpyro.sample("lag0", dist.TruncatedNormal(5.0, 5.0, low=0.0))
-        lag_beta = numpyro.sample(
-            "lag_beta",
-            dist.TruncatedNormal(4.0 / 3.0, 0.2, low=0.0),
-        )
+        lag0 = numpyro.sample("lag0", lag0_prior())
+        lag_beta = numpyro.sample("lag_beta", lag_beta_prior())
 
         if drop_band_lyman_alpha:
             log_amp_delta_lya = numpyro.deterministic("log_amp_delta_lya", 0.0)
         else:
-            log_amp_delta_lya = numpyro.sample(
-                "log_amp_delta_lya",
-                dist.TruncatedNormal(-0.5, 0.75, high=0.0),
-            )
+            log_amp_delta_lya = numpyro.sample("log_amp_delta_lya", log_amp_delta_lya_prior())
 
         with numpyro.plate("band", B):
-            mean = numpyro.sample("mean", dist.Normal(jnp.zeros(B), 0.2))
+            mean = numpyro.sample("mean", mean_prior())
 
             if disable_lag_blr:
                 log_amp_delta_blr = numpyro.deterministic(
@@ -530,20 +744,39 @@ def build_single_object_model(
                     "log_lag_blr",
                     jnp.full(B, -9.0),
                 )
-            else:
-                log_amp_delta_blr = numpyro.sample(
-                    "log_amp_delta_blr",
-                    dist.Normal(jnp.full(B, -1.0), 1.0),
+                log_amp_delta_blr2 = numpyro.deterministic(
+                    "log_amp_delta_blr2",
+                    jnp.full(B, -1e9),
                 )
-                log_lag_blr = numpyro.sample(
+                log_lag_blr2 = numpyro.deterministic(
+                    "log_lag_blr2",
+                    jnp.full(B, -9.0),
+                )
+            else:
+                log_amp_delta_blr_raw = numpyro.sample("log_amp_delta_blr_raw", log_amp_delta_blr_prior())
+                log_lag_blr_raw = numpyro.sample("log_lag_blr_raw", log_lag_blr_prior())
+                log_amp_delta_blr2_raw = numpyro.sample("log_amp_delta_blr2_raw", log_amp_delta_blr_prior())
+                log_lag_blr2_raw = numpyro.sample("log_lag_blr2_raw", log_lag_blr_prior())
+
+                first_is_short = log_lag_blr_raw <= log_lag_blr2_raw
+                log_lag_blr = numpyro.deterministic(
                     "log_lag_blr",
-                    dist.Uniform(jnp.log(2.0), jnp.log(5000.0)),
+                    jnp.where(first_is_short, log_lag_blr_raw, log_lag_blr2_raw),
+                )
+                log_lag_blr2 = numpyro.deterministic(
+                    "log_lag_blr2",
+                    jnp.where(first_is_short, log_lag_blr2_raw, log_lag_blr_raw),
+                )
+                log_amp_delta_blr = numpyro.deterministic(
+                    "log_amp_delta_blr",
+                    jnp.where(first_is_short, log_amp_delta_blr_raw, log_amp_delta_blr2_raw),
+                )
+                log_amp_delta_blr2 = numpyro.deterministic(
+                    "log_amp_delta_blr2",
+                    jnp.where(first_is_short, log_amp_delta_blr2_raw, log_amp_delta_blr_raw),
                 )
 
-            log_jitter = numpyro.sample(
-                "log_jitter",
-                dist.Normal(log_jitter_mean, 1.0),
-            )
+            log_jitter = numpyro.sample("log_jitter", log_jitter_prior(log_jitter_mean))
 
         _ = numpyro.deterministic("log_tau_fake", float(obj_dict.get("log_tau_fake", -99.0)))
         _ = numpyro.deterministic("log_sigma_fake", float(obj_dict.get("log_sigma_fake", -99.0)))
@@ -556,7 +789,9 @@ def build_single_object_model(
             poly1=poly1,
             mean=mean,
             log_amp_delta_blr=log_amp_delta_blr,
+            log_amp_delta_blr2=log_amp_delta_blr2,
             log_lag_blr=log_lag_blr,
+            log_lag_blr2=log_lag_blr2,
             log_jitter=log_jitter,
             lag0=lag0,
             lag_beta=lag_beta,
@@ -581,9 +816,11 @@ def build_single_object_model(
         numpyro.deterministic("tau_slow", params["tau_slow_band"])
         numpyro.deterministic("amp_cont", params["amp_cont"])
         numpyro.deterministic("amp_blr", params["amp_blr"])
+        numpyro.deterministic("amp_blr2", params["amp_blr2"])
         numpyro.deterministic("log_amp_delta_lya_band", params["log_amp_delta_lya_band"])
         numpyro.deterministic("lag_disk", params["lag_disk"])
         numpyro.deterministic("lag_blr", params["lag_blr"])
+        numpyro.deterministic("lag_blr2", params["lag_blr2"])
 
         m = make_multiband_dho_blr_model(
             X=(t, bidx),
@@ -784,6 +1021,18 @@ def main():
                 broken_pl=False,
                 bands=bands,
             )
+            kl_result = compute_parameter_kls(
+                obj_flat_samples_flatten_per_band,
+                bands=bands,
+                z=float(obj["z"]),
+                lambda_center_rf=float(lambda_center_rf),
+                log_jitter_mean=np.asarray(log_jitter_mean),
+                disable_poly1=args.disable_poly1,
+                disable_lag_blr=args.disable_lag_blr,
+                drop_band_lyman_alpha=args.drop_band_lyman_alpha,
+                sigma_tau_uniform=args.sigma_tau_uniform,
+                tau_fast_truncated=args.tau_fast_truncated,
+            )
 
             if args.plot:
                 try:
@@ -822,7 +1071,7 @@ def main():
                     logging.error(f"[{oid}] Plotting error: {e}")
                     logging.error(traceback.format_exc())
 
-            final_result = obj | diagnostics | result | dict(prefix=prefix, suffix=suffix)
+            final_result = obj | diagnostics | result | kl_result | dict(prefix=prefix, suffix=suffix)
             log_sigma_UV = final_result.get("log_sigma_UV")
             log_sigma_UV_err = final_result.get("log_sigma_UV_err")
             log_tau_UV_RF = final_result.get("log_tau_UV_RF")
