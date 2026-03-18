@@ -110,7 +110,7 @@ class ContiBLR_SHO_Wrapper(qs.Wrapper):
         h_cont = self._lagged_obs(b, lag_disk)
         h_blr = self._lagged_obs(b, lag_disk + lag_blr)
         h_blr2 = self._lagged_obs(b, lag_disk + lag_blr2)
-        return amp_cont * h_cont + amp_blr * h_blr #+ amp_blr2 * h_blr2
+        return amp_cont * h_cont + amp_blr * h_blr + amp_blr2 * h_blr2
 
 
 def qs_psd(kernel, omega, b: int, sigma_n2: float = 0.0):

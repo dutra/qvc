@@ -818,7 +818,17 @@ if __name__ == "__main__":
         z_tag = f"z{zmin:.2f}_{zmax:.2f}".replace(".", "p")
         compare_path = f"plots/hubble/{args.prefix}/single_compare_{args.speed}_{n_tag}_{z_tag}"
         os.makedirs(compare_path, exist_ok=True)
-        compare_r = compare_models_by_log_evidence_all(df_agn, cosmo_models_dict, write_path=f"{compare_path}/")
+        if len(cosmo_models_dict) >= 2:
+            compare_r = compare_models_by_log_evidence_all(
+                df_agn,
+                cosmo_models_dict,
+                write_path=f"{compare_path}/",
+            )
+        else:
+            print(
+                "Skipping evidence comparison because only one cosmology model was requested: "
+                f"{args.cosmo_models}"
+            )
     elif args.run == "full":
         run_all(df_agn=df_agn, df_agn_all=df_agn_all, df_pantheon=df_pantheon, _sna_L=_sna_L, _sna_Lower=_sna_Lower, _sna_LogdetCov=_sna_LogdetCov, 
                 cosmo_models=args.cosmo_models, skip_plots=args.skip_plots,

@@ -944,16 +944,30 @@ def plot_mcmc_traces(samples_dict, data):
         logging.warning("No trace parameters left to plot after exclusions.")
         return
 
+    def _trace_transform(key, values):
+        arr = np.asarray(values, dtype=float)
+        label = key
+
+        if key.startswith("log_"):
+            return arr / np.log(10), label
+
+        is_lag_like = ("lag" in key)
+        is_amp_like = key.startswith("amp_") or ("amp_" in key)
+        if is_lag_like or is_amp_like:
+            with np.errstate(divide="ignore", invalid="ignore"):
+                arr = np.log10(arr)
+            return arr, f"log10_{key}"
+
+        return arr, label
+
     fig, axes = plt.subplots(total_traces, 1, figsize=(12, 2.5 * total_traces), sharex=True)
     if total_traces == 1:
         axes = [axes]
 
     for idx, (key, values) in enumerate(trace_items):
-        if 'log_' in key:
-            axes[idx].plot(values / np.log(10), alpha=0.7)
-        else:
-            axes[idx].plot(values, alpha=0.7)
-        axes[idx].set_ylabel(key)
+        y, ylabel = _trace_transform(key, values)
+        axes[idx].plot(y, alpha=0.7)
+        axes[idx].set_ylabel(ylabel)
         axes[idx].grid(True)
 
     axes[-1].set_xlabel("Sample index")
