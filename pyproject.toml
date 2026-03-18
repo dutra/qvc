@@ -31,8 +31,8 @@ include-package-data = true
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["hubble*", "light_curve*", "spectra*"]
+include = ["qvc*"]
 
 [tool.setuptools.package-data]
-hubble = ["style.mplstyle"]
-light_curve = ["style.mplstyle"]
+"qvc.hubble" = ["style.mplstyle"]
+"qvc.light_curve" = ["style.mplstyle"]

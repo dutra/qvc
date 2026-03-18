@@ -12,7 +12,7 @@ from scipy.optimize import curve_fit
 from scipy.special import expit, logit
 from functools import partial
 
-from hubble.hubble_utils import convert_M2500_to_logL2500, resolve_qvc_data_path
+from qvc.hubble.hubble_utils import convert_M2500_to_logL2500, resolve_qvc_data_path
 
 
 COSMO = FlatLambdaCDM(H0=70.0, Om0=0.3)

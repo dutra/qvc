@@ -54,10 +54,10 @@ numpyro.enable_validation(True)
 import numpyro.distributions as dist
 from numpyro.infer import MCMC, NUTS
 
-from light_curve.multiband_fit_plotting import *
-from light_curve.multiband_fit_utils import *
-from light_curve.multiband_generate_lc import *
-from light_curve.multiband_model_dho_blr import make_multiband_dho_blr_model
+from qvc.light_curve.multiband_fit_plotting import *
+from qvc.light_curve.multiband_fit_utils import *
+from qvc.light_curve.multiband_generate_lc import *
+from qvc.light_curve.multiband_model_dho_blr import make_multiband_dho_blr_model
 
 
 zero_mean = False

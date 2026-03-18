@@ -6,8 +6,8 @@ import numpy as np
 
 from numpy import trapezoid as trapz
 
-#from hubble.hubble_utils import loglike_cmb_theta_simple
-from hubble.hubble_model import get_model_params, M_model_agn, M_model_agn_err, agn_model_pack_params, agn_model_pack_obs
+#from qvc.hubble.hubble_utils import loglike_cmb_theta_simple
+from qvc.hubble.hubble_model import get_model_params, M_model_agn, M_model_agn_err, agn_model_pack_params, agn_model_pack_obs
 
 def completeness_loglike(
     m_obs,

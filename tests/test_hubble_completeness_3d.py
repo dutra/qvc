@@ -14,8 +14,8 @@ os.chdir(SRC)
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from hubble import hubble_completeness_refactored as hcr
-from hubble import hubble_fit, hubble_likelihood, hubble_model
+from qvc.hubble import hubble_completeness_refactored as hcr
+from qvc.hubble import hubble_fit, hubble_likelihood, hubble_model
 
 
 def _make_fake_fhost_df(n=200, seed=123):

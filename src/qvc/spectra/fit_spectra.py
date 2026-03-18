@@ -42,7 +42,7 @@ except ValueError:
 os.environ["XLA_FLAGS"] = f"--xla_force_host_platform_device_count={num_cores}"
 os.environ["JAX_PLATFORM_NAME"] = "cpu"
 
-from hubble.hubble_utils import match_radec, read_quasars_from_hdf5
+from qvc.hubble.hubble_utils import match_radec, read_quasars_from_hdf5
 from jaxqsofit import QSOFit, build_default_prior_config
 
 

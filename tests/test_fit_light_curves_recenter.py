@@ -12,14 +12,14 @@ os.chdir(SRC)
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from light_curve.fit_light_curves import (
+from qvc.light_curve.fit_light_curves import (
     build_explicit_model_params,
     compute_parameter_kls,
     compute_lambda_center_rf,
     lya_variability_weight,
     make_lc,
 )
-from light_curve.multiband_fit_utils import lambda_pivot, log_single_pl, process_samples
+from qvc.light_curve.multiband_fit_utils import lambda_pivot, log_single_pl, process_samples
 
 
 def _make_raw_public(n_band):
@@ -51,6 +51,8 @@ def _make_object(z=1.6):
         "cadence_err": {band: 0.5 for band in bands},
         "number_points": {band: 2 for band in bands},
     }
+
+
 
 
 def test_compute_lambda_center_rf_matches_geometric_mean():

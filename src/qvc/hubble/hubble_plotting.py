@@ -21,11 +21,11 @@ from scipy.interpolate import RegularGridInterpolator, interp1d
 from scipy.stats import gaussian_kde
 from tqdm import tqdm
 
-from hubble.hubble_model import (M_model_agn, M_model_agn_err, get_model_params, agn_model_pack_params,
+from qvc.hubble.hubble_model import (M_model_agn, M_model_agn_err, get_model_params, agn_model_pack_params,
     agn_model_pack_obs, agn_model_oidx, agn_model_pidx, agn_model_req_obs, agn_model_req_errs)
-from hubble.hubble_likelihood import sigma_lens_from_dc
-from hubble.hubble_utils import convert_M2500_to_logL2500, cosmo_model_label_latex, format_result_errors, sym_percentile
-from hubble.hubble_completeness_refactored import (
+from qvc.hubble.hubble_likelihood import sigma_lens_from_dc
+from qvc.hubble.hubble_utils import convert_M2500_to_logL2500, cosmo_model_label_latex, format_result_errors, sym_percentile
+from qvc.hubble.hubble_completeness_refactored import (
     apparent_mag_to_logL2500,
     fit_fhost_center_l2500_model,
     predict_fhost_center_from_logL2500,
@@ -3597,7 +3597,7 @@ def dmi_corr(
 
 
 from scipy.special import logsumexp
-from hubble.hubble_likelihood import log_likelihood
+from qvc.hubble.hubble_likelihood import log_likelihood
 from matplotlib.colors import SymLogNorm
 def _highest_weight_theta(results, plot_path=None):
     """

@@ -25,12 +25,12 @@ from scipy.linalg import cho_factor
 from scipy import stats
 from tqdm import tqdm
 
-from hubble.hubble_cut_config import (
+from qvc.hubble.hubble_cut_config import (
     DEFAULT_F_HOST_CUT,
     build_agn_cuts,
     build_log_amp_delta_blr_cuts,
 )
-from hubble.hubble_model import (
+from qvc.hubble.hubble_model import (
     M_model_agn,
     M_model_agn_err,
     agn_model_oidx,
@@ -591,7 +591,7 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
         suffix = " or NaN" if allow_missing else ""
         return f"{left}{lower_text}, {upper_text}{right}{suffix}"
 
-    from hubble.hubble_plotting import (
+    from qvc.hubble.hubble_plotting import (
         plot_alpha_lambda_vs_l2500_by_redshift,
         plot_alpha_lambda_histogram,
         plot_blr_lag_vs_amp_by_band,

@@ -10,7 +10,7 @@ import pickle
 
 # External deps
 import h5py  # required only if reading .h5 directly via hubble_utils
-from hubble.hubble_utils import (
+from qvc.hubble.hubble_utils import (
     populate_sdss_fields,
     read_quasars_from_hdf5,
     write_hdf5_file,

@@ -32,7 +32,7 @@ z_pivot_sna = 0.0
 z_pivot_agn = 1.5
 DEFAULT_COMPLETENESS_SIM_FILE = "data/nov9_mock_mag_z_moresources.h5"
 
-from hubble.hubble_utils import (
+from qvc.hubble.hubble_utils import (
     compare_models_by_log_evidence_all,
     compute_age_universe_with_error,
     compute_pivot_redshift,
@@ -50,8 +50,8 @@ from hubble.hubble_utils import (
     sym_percentile,
     write_results_tex_variables,
 )
-from hubble.hubble_likelihood import log_likelihood, log_likelihood_nearbylcs
-from hubble.hubble_plotting import (
+from qvc.hubble.hubble_likelihood import log_likelihood, log_likelihood_nearbylcs
+from qvc.hubble.hubble_plotting import (
     plot_blr_line_lags_vs_l2500,
     plot_completeness_diagnostics,
     plot_completeness_vs_mag_at_redshifts,
@@ -65,14 +65,14 @@ from hubble.hubble_plotting import (
     plot_redshift_histograms,
     plot_residuals_vs_alphaOX,
 )
-from hubble.hubble_model import agn_model_pack_obs, agn_model_req_errs, agn_model_req_obs, agn_model_req_params, get_model_params
-from hubble.hubble_completeness_refactored import (
+from qvc.hubble.hubble_model import agn_model_pack_obs, agn_model_req_errs, agn_model_req_obs, agn_model_req_params, get_model_params
+from qvc.hubble.hubble_completeness_refactored import (
     get_completeness_function_2d,
     get_completeness_function_3d_fhost,
     get_completeness_function_4d_fhost_alpha,
     make_dm_function,
 )
-from hubble.hubble_cut_config import (DEFAULT_F_HOST_CUT, DEFAULT_WRMS_CUT, DEFAULT_IRON_FRAC_CUT, DEFAULT_BC_FRAC_CUT, DEFAULT_CHI_SQ_CUT)
+from qvc.hubble.hubble_cut_config import (DEFAULT_F_HOST_CUT, DEFAULT_WRMS_CUT, DEFAULT_IRON_FRAC_CUT, DEFAULT_BC_FRAC_CUT, DEFAULT_CHI_SQ_CUT)
 
 VALID_COMPLETENESS_MODES = ("2d", "3d_fhost", "4d_fhost_alpha")
 
@@ -775,7 +775,7 @@ if __name__ == "__main__":
             raise NotImplementedError("--use_jax does not support --resume yet.")
         if args.agn_calibrators is not None:
             raise NotImplementedError("--use_jax does not support --agn_calibrators yet.")
-        from hubble.hubble_fit_jax import run_single_jax
+        from qvc.hubble.hubble_fit_jax import run_single_jax
 
         for cosmo_model in args.cosmo_models:
             run_single_jax(

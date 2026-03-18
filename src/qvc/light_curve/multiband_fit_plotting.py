@@ -17,7 +17,7 @@ from astropy.timeseries import LombScargle
 prefix = os.environ.get('PREFIX', "test")
 suffix = os.environ.get('SUFFIX', "test")
 
-from light_curve.multiband_fit_utils import log_broken_pl, log_single_pl
+from qvc.light_curve.multiband_fit_utils import log_broken_pl, log_single_pl
 
 import logging
 
