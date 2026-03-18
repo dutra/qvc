@@ -592,6 +592,8 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
         return f"{left}{lower_text}, {upper_text}{right}{suffix}"
 
     from hubble.hubble_plotting import (
+        plot_alpha_lambda_vs_l2500_by_redshift,
+        plot_alpha_lambda_histogram,
         plot_blr_lag_vs_amp_by_band,
         plot_blr_lag_vs_redshift_by_band,
         plot_f_host_center_vs_l2500,
@@ -737,6 +739,10 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
 
     if {"z", "apparent_mag_2500", "f_host_center"}.issubset(df.columns):
         plot_f_host_center_vs_l2500(df, plot_path=plot_path, show=False)
+    if {"z", "apparent_mag_2500", "alpha_lambda"}.issubset(df.columns):
+        plot_alpha_lambda_vs_l2500_by_redshift(df, plot_path=plot_path, show=False)
+    if "alpha_lambda" in df.columns:
+        plot_alpha_lambda_histogram(df, plot_path=plot_path, show=False)
 
     if {"z", "log_tau_UV_RF", "log_sigma_UV"}.issubset(df.columns):
         plot_tau_sigma_vs_redshift(df, plot_path=plot_path, show=False)

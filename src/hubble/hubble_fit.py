@@ -69,9 +69,21 @@ from hubble.hubble_model import agn_model_pack_obs, agn_model_req_errs, agn_mode
 from hubble.hubble_completeness_refactored import (
     get_completeness_function_2d,
     get_completeness_function_3d_fhost,
+    get_completeness_function_4d_fhost_alpha,
     make_dm_function,
 )
 from hubble.hubble_cut_config import (DEFAULT_F_HOST_CUT, DEFAULT_WRMS_CUT, DEFAULT_IRON_FRAC_CUT, DEFAULT_BC_FRAC_CUT, DEFAULT_CHI_SQ_CUT)
+
+VALID_COMPLETENESS_MODES = ("2d", "3d_fhost", "4d_fhost_alpha")
+
+
+def validate_completeness_mode(completeness_mode):
+    if completeness_mode not in VALID_COMPLETENESS_MODES:
+        raise ValueError(
+            f"Invalid completeness_mode={completeness_mode!r}. "
+            f"Expected one of {VALID_COMPLETENESS_MODES}."
+        )
+
 
 def prior_transform_dynesty(unit_cube, priors, model_labels):
     return [priors[key][0] + (priors[key][1] - priors[key][0]) * x
@@ -119,6 +131,14 @@ def validate_resume_checkpoint(results, checkpoint_file, ndim, n_agn):
                 "This usually means the checkpoint was created with a different input sample or redshift cut. "
                 "Delete the checkpoint or use a new output filename."
             )
+    if "dmi_posterior_median" in results:
+        value = np.asarray(results["dmi_posterior_median"])
+        if value.ndim != 0 and value.shape[0] != n_agn:
+            raise RuntimeError(
+                f"Resume checkpoint '{checkpoint_file}' is incompatible with the current AGN selection: "
+                f"dmi_posterior_median has length {value.shape[0]}, but the current run has {n_agn} AGN objects. "
+                "Delete the checkpoint or use a new output filename."
+            )
 
 def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, 
                       df_calibrators=None,
@@ -131,6 +151,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                       completeness_mode="2d",
                       N=None,
                       ):
+    validate_completeness_mode(completeness_mode)
     run_tag = make_run_tag(cosmo_model, only_sna, speed, N, z_range)
     plot_path = f"plots/hubble/{prefix}/{run_tag}"
     os.makedirs(plot_path, exist_ok=True)
@@ -142,20 +163,33 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
         print("[WARNING] use_full_cov=False: fitting with diagonal SN uncertainties instead of the full covariance matrix.")
 
     if completeness:
-        if completeness_mode == "3d_fhost":
+        if completeness_mode in ("3d_fhost", "4d_fhost_alpha"):
             if "f_host_center" not in df_agn.columns:
-                raise KeyError("completeness_mode='3d_fhost' requires df_agn['f_host_center'].")
+                raise KeyError(f"completeness_mode={completeness_mode!r} requires df_agn['f_host_center'].")
             bad_fhost = ~np.isfinite(df_agn["f_host_center"].to_numpy(dtype=float))
             if np.any(bad_fhost):
                 raise ValueError(
-                    f"completeness_mode='3d_fhost' requires finite f_host_center for all AGN used in the fit; "
+                    f"completeness_mode={completeness_mode!r} requires finite f_host_center for all AGN used in the fit; "
                     f"found {np.count_nonzero(bad_fhost)} non-finite rows."
+                )
+        if completeness_mode == "4d_fhost_alpha":
+            if "alpha_lambda" not in df_agn.columns:
+                raise KeyError("completeness_mode='4d_fhost_alpha' requires df_agn['alpha_lambda'].")
+            bad_alpha = ~np.isfinite(df_agn["alpha_lambda"].to_numpy(dtype=float))
+            if np.any(bad_alpha):
+                raise ValueError(
+                    "completeness_mode='4d_fhost_alpha' requires finite alpha_lambda for all AGN used in the fit; "
+                    f"found {np.count_nonzero(bad_alpha)} non-finite rows."
                 )
         if completeness_sim_file is None:
             print(f"Building {completeness_mode} completeness map using default mock catalog file.")
         else:
             print(f"Building {completeness_mode} completeness map using mock catalog: {completeness_sim_file}")
-        if completeness_mode == "3d_fhost":
+        if completeness_mode == "4d_fhost_alpha":
+            completeness_params = get_completeness_function_4d_fhost_alpha(
+                df_agn, sim_file=completeness_sim_file, plot=True, plot_path=plot_path
+            )
+        elif completeness_mode == "3d_fhost":
             completeness_params = get_completeness_function_3d_fhost(
                 df_agn, sim_file=completeness_sim_file, plot=True, plot_path=plot_path
             )
@@ -170,6 +204,8 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
     agn_fields += ('apparent_mag_2500', 'apparent_mag_2500_err', 'z', 'z_err', 'object_id')
     if 'f_host_center' in df_agn.columns:
         agn_fields += ('f_host_center',)
+    if 'alpha_lambda' in df_agn.columns:
+        agn_fields += ('alpha_lambda',)
     agn_data = {col: df_agn[col].values for col in agn_fields if col in df_agn.columns}
 
     pantheon_fields = ['zHD', 'm_b_corr', 'IS_CALIBRATOR', 'CEPH_DIST', 'MU_SH0ES_ERR_DIAG']
@@ -213,6 +249,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                 ) from exc
             flat_samples = r["flat_samples"]
             dmi_max_w = r["dmi_max_w"]
+            dmi_posterior_median = r.get("dmi_posterior_median", dmi_max_w)
             logZ = r["logZ"]
             logZerr = r["logZerr"]
             integrals_max_w = r["integrals_max_w"]
@@ -326,6 +363,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
         idx_max_weight = np.argmax(weights)
         integrals_max_w = blobs[idx_max_weight,:][0]  # this is integrals for that sample, shape: (nobj,)
         dmi_max_w = blobs[idx_max_weight,:][1]  # this is dmi for that sample, shape: (nobj,)
+        dmi_posterior_median = np.median(flat_blobs[:, 1, :], axis=0)
         
         print("\nHighest-weight (posterior) sample:")
         print("  idx:", idx_max_weight)
@@ -351,19 +389,34 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
         sigma_intrinsic = float(np.exp(median_samples[model_labels.index('log_f')]))
         print("  sigma_intrinsic:", sigma_intrinsic)
 
-        # we should save flat_samples, dmi_max_w, logZ, logZerr
-        save_chains(checkpoint_file, flat_samples=flat_samples, dmi_max_w=dmi_max_w, logZ=logZ, logZerr=logZerr, integrals_max_w=integrals_max_w)
+        print("Debias correction summary:")
+        print("  median |dmi_max_w|:", float(np.nanmedian(np.abs(dmi_max_w))))
+        print("  median |dmi_posterior_median|:", float(np.nanmedian(np.abs(dmi_posterior_median))))
+
+        save_chains(
+            checkpoint_file,
+            flat_samples=flat_samples,
+            dmi_max_w=dmi_max_w,
+            dmi_posterior_median=dmi_posterior_median,
+            logZ=logZ,
+            logZerr=logZerr,
+            integrals_max_w=integrals_max_w,
+        )
 
         # Bin dmi in redshift
         # Interpolate dmi vs redshift for smooth plotting or further analysis (no binning)
         #dmi_interp = interp1d(z, dmi_max_w)
-    dm_interp = make_dm_function(df_agn['apparent_mag_2500'].values, df_agn['z'].values, dmi_max_w)
+    dm_interp = make_dm_function(
+        df_agn['apparent_mag_2500'].values,
+        df_agn['z'].values,
+        dmi_posterior_median,
+    )
 
     print("Plotting completeness diagnostics...")
 
     
     plot_completeness_diagnostics(
-        dmi_max_w,
+        dmi_posterior_median,
         agn_data['z'],
         agn_data['apparent_mag_2500'],
         integrals_max_w,
@@ -383,6 +436,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                prefix="default", uniform_redshift_distribution=False,
                completeness_sim_file=DEFAULT_COMPLETENESS_SIM_FILE,
                completeness_mode="2d"):
+    validate_completeness_mode(completeness_mode)
     run_tag = make_run_tag(cosmo_model, only_sna, speed, N, z_range)
     plot_path = f"plots/hubble/{prefix}/{run_tag}"
     os.makedirs(plot_path, exist_ok=True)
@@ -485,7 +539,12 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                       gauss_sigma=1.5, kde_bw_scale=1.5)
 
     if completeness:
-        if completeness_mode == "3d_fhost":
+        if completeness_mode == "4d_fhost_alpha":
+            print("Plotting host-aware/color-aware 4D completeness diagnostics...")
+            get_completeness_function_4d_fhost_alpha(
+                df_agn, sim_file=completeness_sim_file, plot=True, plot_path=plot_path
+            )
+        elif completeness_mode == "3d_fhost":
             print("Plotting host-aware 3D completeness diagnostics...")
             get_completeness_function_3d_fhost(
                 df_agn, sim_file=completeness_sim_file, plot=True, plot_path=plot_path
@@ -655,15 +714,21 @@ if __name__ == "__main__":
     parser.add_argument(
         "--completeness_mode",
         type=str,
-        choices=["2d", "3d_fhost"],
+        choices=list(VALID_COMPLETENESS_MODES),
         default="2d",
-        help="Completeness model to use: legacy 2D p(det|m,z) or host-aware 3D p(det|m,z,f_host_center).",
+        help="Completeness model to use: 2D p(det|m,z), 3D p(det|m,z,f_host_center), or 4D p(det|m,z,f_host_center,alpha_lambda).",
     )
     parser.add_argument(
         "--correct-sigma-uv-host",
         action="store_true",
         default=False,
         help="Correct log_sigma_UV using frac_host_psf_2500 and save a diagnostics plot.",
+    )
+    parser.add_argument(
+        "--use_jax",
+        action="store_true",
+        default=False,
+        help="Use the experimental JAX/NumPyro nested-sampling pipeline instead of the default Dynesty pipeline.",
     )
 
     args = parser.parse_args()
@@ -703,7 +768,35 @@ if __name__ == "__main__":
         df_calibrators = None
 
 
-    if args.run == "single": # default
+    if args.use_jax:
+        if args.run != "single":
+            raise NotImplementedError("--use_jax currently supports only --run single.")
+        if args.resume:
+            raise NotImplementedError("--use_jax does not support --resume yet.")
+        if args.agn_calibrators is not None:
+            raise NotImplementedError("--use_jax does not support --agn_calibrators yet.")
+        from hubble.hubble_fit_jax import run_single_jax
+
+        for cosmo_model in args.cosmo_models:
+            run_single_jax(
+                df_agn=df_agn,
+                df_agn_all=df_agn_all,
+                df_pantheon=df_pantheon,
+                _sna_L=_sna_L,
+                _sna_Lower=_sna_Lower,
+                _sna_LogdetCov=_sna_LogdetCov,
+                cosmo_model=cosmo_model,
+                completeness=not args.disable_completeness,
+                z_range=tuple(args.z_range),
+                speed=args.speed,
+                prefix=args.prefix,
+                completeness_sim_file=args.completeness_sim_file,
+                completeness_mode=args.completeness_mode,
+                only_sna=args.only_sna,
+                N=args.N,
+                uniform_redshift_distribution=args.uniform_redshift_distribution,
+            )
+    elif args.run == "single": # default
         cosmo_models_dict = {k: {} for k in args.cosmo_models}
         for cosmo_model in args.cosmo_models:
             r = run_single(df_agn=df_agn, df_agn_all=df_agn_all, df_pantheon=df_pantheon, _sna_L=_sna_L, _sna_Lower=_sna_Lower, _sna_LogdetCov=_sna_LogdetCov, 

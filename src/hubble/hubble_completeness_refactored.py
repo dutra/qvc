@@ -142,6 +142,11 @@ class Completeness3D:
         mag = np.asarray(mag)
         z = np.asarray(z)
         f_host = np.asarray(f_host)
+        # The completeness cube is defined on bin centers, but f_host is a
+        # bounded physical variable on [0, 1]. Clip to the nearest supported
+        # center so values very close to 0 or 1 do not spuriously get
+        # fill_value=0 from the interpolator.
+        f_host = np.clip(f_host, self.fhost_min, self.fhost_max)
         m_b, z_b, f_b = np.broadcast_arrays(mag, z, f_host)
         pts = np.column_stack([m_b.ravel(), z_b.ravel(), f_b.ravel()])
         vals = self._interp(pts)
@@ -160,7 +165,64 @@ class Completeness3D:
         return "3d_fhost"
 
 
+class Completeness4D:
+    """
+    Interpolates p(detect | m, z, f_host, alpha_lambda) on a regular grid.
+    - Outside the grid, returns 0.
+    """
+
+    def __init__(self, mag_centers, z_centers, fhost_centers, alpha_centers, completeness_hypercube):
+        self.mag_centers = np.asarray(mag_centers)
+        self.z_centers = np.asarray(z_centers)
+        self.fhost_centers = np.asarray(fhost_centers)
+        self.alpha_centers = np.asarray(alpha_centers)
+
+        C = np.nan_to_num(completeness_hypercube, nan=0.0, posinf=0.0, neginf=0.0)
+        C = np.clip(C, 0.0, 1.0).astype(float)
+
+        self.mag_min, self.mag_max = float(self.mag_centers[0]), float(self.mag_centers[-1])
+        self.z_min, self.z_max = float(self.z_centers[0]), float(self.z_centers[-1])
+        self.fhost_min, self.fhost_max = float(self.fhost_centers[0]), float(self.fhost_centers[-1])
+        self.alpha_min, self.alpha_max = float(self.alpha_centers[0]), float(self.alpha_centers[-1])
+
+        self._interp = RegularGridInterpolator(
+            (self.mag_centers, self.z_centers, self.fhost_centers, self.alpha_centers),
+            C,
+            bounds_error=False,
+            fill_value=0.0,
+        )
+
+    def __call__(self, mag, z, f_host, alpha_lambda):
+        mag = np.asarray(mag)
+        z = np.asarray(z)
+        f_host = np.asarray(f_host)
+        alpha_lambda = np.asarray(alpha_lambda)
+        f_host = np.clip(f_host, self.fhost_min, self.fhost_max)
+        alpha_lambda = np.clip(alpha_lambda, self.alpha_min, self.alpha_max)
+        m_b, z_b, f_b, a_b = np.broadcast_arrays(mag, z, f_host, alpha_lambda)
+        pts = np.column_stack([m_b.ravel(), z_b.ravel(), f_b.ravel(), a_b.ravel()])
+        vals = self._interp(pts)
+        return vals.reshape(m_b.shape)
+
+    @property
+    def grid(self):
+        return dict(
+            mag_centers=self.mag_centers,
+            z_centers=self.z_centers,
+            fhost_centers=self.fhost_centers,
+            alpha_centers=self.alpha_centers,
+        )
+
+    @property
+    def mode(self):
+        return "4d_fhost_alpha"
+
+
 _FHOST_CLIP_EPS = 1e-3
+_ALPHA_TRUE_MEAN = -1.5
+_ALPHA_TRUE_SIGMA = 0.5
+_ALPHA_MIN = -4.0
+_ALPHA_MAX = 0.5
 
 
 def generalized_sigmoid_fhost(logL2500, x0, k, nu):
@@ -449,6 +511,39 @@ def _plot_completeness_vs_fhost_slices(
     plt.close(fig)
 
 
+def _plot_completeness_vs_alpha_slices(
+    completeness4d,
+    mag_centers,
+    z_centers,
+    fhost_centers,
+    alpha_centers,
+    *,
+    plot_dir,
+    mag_slices=(19.5, 21.0, 22.5),
+    z_slices=(0.5, 1.5, 2.5),
+    fhost_slice=0.05,
+):
+    import matplotlib.pyplot as plt
+
+    fig, axes = plt.subplots(1, len(mag_slices), figsize=(5.0 * len(mag_slices), 4.5), sharey=True)
+    axes = np.atleast_1d(axes)
+    fhost_eval = np.full_like(alpha_centers, np.clip(fhost_slice, fhost_centers[0], fhost_centers[-1]), dtype=float)
+    for ax, mag0 in zip(axes, mag_slices):
+        mag_eval = np.full_like(alpha_centers, np.clip(mag0, mag_centers[0], mag_centers[-1]), dtype=float)
+        for z0 in z_slices:
+            z_eval = np.full_like(alpha_centers, np.clip(z0, z_centers[0], z_centers[-1]), dtype=float)
+            p = completeness4d(mag_eval, z_eval, fhost_eval, alpha_centers)
+            ax.plot(alpha_centers, p, lw=2, label=fr"$z={z0:.1f}$")
+        ax.set_title(fr"$m_{{2500}}={mag0:.1f}$, $f_{{\rm host}}={fhost_slice:.2f}$")
+        ax.set_xlabel(r"$\alpha_{\lambda}$")
+        ax.grid(True, alpha=0.25)
+    axes[0].set_ylabel(r"$p(\mathrm{detect}\mid m_{2500}, z, f_{\rm host}, \alpha_{\lambda})$")
+    axes[-1].legend(frameon=False, loc="best")
+    fig.tight_layout()
+    fig.savefig(os.path.join(plot_dir, "completeness_vs_alpha_slices.pdf"), dpi=300)
+    plt.close(fig)
+
+
 def get_completeness_function_3d_fhost(
     df_agn,
     sim_file="data/nov9_mock_mag_z_moresources.h5",
@@ -566,6 +661,25 @@ def get_completeness_function_3d_fhost(
         fig.savefig(os.path.join(plot_dir, "completeness_map_mean_fhost.pdf"), dpi=600)
         plt.close(fig)
 
+        fig, ax = plt.subplots(figsize=(7, 5))
+        c_slice_mf = C.mean(axis=1)
+        im = ax.imshow(
+            np.log10(np.clip(c_slice_mf.T, 1e-12, None)),
+            origin="lower",
+            aspect="auto",
+            extent=[mag_edges[0], mag_edges[-1], fhost_edges[0], fhost_edges[-1]],
+            cmap="viridis",
+            vmin=-4,
+            vmax=0,
+        )
+        ax.set_xlabel(r"$m_{2500\,\mathrm{\AA}}$ (mag)")
+        ax.set_ylabel(r"$f_{\rm host,center}$")
+        cbar = plt.colorbar(im, ax=ax)
+        cbar.set_label(r"Mean over $z$: $\log\,p(I{=}1\,|\,m,z,f_{\rm host})$")
+        fig.tight_layout()
+        fig.savefig(os.path.join(plot_dir, "completeness_map_m2500_fhost.pdf"), dpi=600)
+        plt.close(fig)
+
     return (
         completeness3d,
         mag_centers,
@@ -576,6 +690,181 @@ def get_completeness_function_3d_fhost(
         dfh,
         sigma_mag,
         host_model,
+    )
+
+
+def get_completeness_function_4d_fhost_alpha(
+    df_agn,
+    sim_file="data/nov9_mock_mag_z_moresources.h5",
+    n_mag_bins=30,
+    n_z_bins=40,
+    n_fhost_bins=20,
+    n_alpha_bins=20,
+    smooth_counts=True,
+    plot=False,
+    plot_path=None,
+    fit_logL_max=45.5,
+    sigma_mag=0.2,
+    sigma_z_abs=0.2,
+    sigma_fhost=0.05,
+    sigma_alpha=0.15,
+):
+    """
+    Build p(detect | m, z, f_host_center, alpha_lambda) using a one-shot host model
+    and a fixed mock alpha_lambda population.
+    """
+    import matplotlib.pyplot as plt
+
+    required = {"f_host_center", "alpha_lambda", "apparent_mag_2500", "z"}
+    if not required.issubset(df_agn.columns):
+        missing = ", ".join(sorted(required - set(df_agn.columns)))
+        raise KeyError(f"df_agn must contain columns for 4D completeness: {missing}")
+
+    sim_file = resolve_qvc_data_path(sim_file)
+    with h5py.File(sim_file, "r") as f:
+        if "apparent_mag_2500" in f:
+            m_true = np.asarray(f["apparent_mag_2500"][:], dtype=float)
+        else:
+            m_true = np.asarray(f["apparent_mag_i_rest"][:], dtype=float)
+        z_true = np.asarray(f["z"][:], dtype=float)
+
+    z_obs = df_agn["z"].to_numpy(dtype=float)
+    m_obs = df_agn["apparent_mag_2500"].to_numpy(dtype=float)
+    fhost_obs = df_agn["f_host_center"].to_numpy(dtype=float)
+    alpha_obs = df_agn["alpha_lambda"].to_numpy(dtype=float)
+
+    ok_obs = (
+        np.isfinite(m_obs)
+        & np.isfinite(z_obs)
+        & np.isfinite(fhost_obs)
+        & np.isfinite(alpha_obs)
+        & (fhost_obs >= 0.0)
+        & (fhost_obs <= 1.0)
+        & (alpha_obs >= _ALPHA_MIN)
+        & (alpha_obs <= _ALPHA_MAX)
+    )
+    ok_true = np.isfinite(m_true) & np.isfinite(z_true)
+    m_obs, z_obs, fhost_obs, alpha_obs = m_obs[ok_obs], z_obs[ok_obs], fhost_obs[ok_obs], alpha_obs[ok_obs]
+    m_true, z_true = m_true[ok_true], z_true[ok_true]
+
+    host_model = fit_fhost_center_l2500_model(df_agn.loc[ok_obs], fit_logL_max=fit_logL_max, cosmo=COSMO)
+    logL_true = apparent_mag_to_logL2500(m_true, z_true, COSMO)
+    rng = np.random.default_rng(12345)
+    fhost_true = sample_fhost_center_from_logL2500(logL_true, host_model, rng)
+    alpha_true = np.clip(rng.normal(_ALPHA_TRUE_MEAN, _ALPHA_TRUE_SIGMA, size=np.shape(m_true)), _ALPHA_MIN, _ALPHA_MAX)
+
+    mag_min, mag_max = 18.5, 24.0
+    z_min, z_max = 0.0, 4.0
+    fhost_min, fhost_max = 0.0, 1.0
+    alpha_min, alpha_max = _ALPHA_MIN, _ALPHA_MAX
+    mag_edges = np.linspace(mag_min, mag_max, n_mag_bins + 1)
+    z_edges = np.linspace(z_min, z_max, n_z_bins + 1)
+    fhost_edges = np.linspace(fhost_min, fhost_max, n_fhost_bins + 1)
+    alpha_edges = np.linspace(alpha_min, alpha_max, n_alpha_bins + 1)
+    mag_centers = 0.5 * (mag_edges[:-1] + mag_edges[1:])
+    z_centers = 0.5 * (z_edges[:-1] + z_edges[1:])
+    fhost_centers = 0.5 * (fhost_edges[:-1] + fhost_edges[1:])
+    alpha_centers = 0.5 * (alpha_edges[:-1] + alpha_edges[1:])
+    dm = float(mag_centers[1] - mag_centers[0]) if len(mag_centers) > 1 else float(mag_edges[-1] - mag_edges[0])
+    dz = float(z_centers[1] - z_centers[0]) if len(z_centers) > 1 else float(z_edges[-1] - z_edges[0])
+    dfh = float(fhost_centers[1] - fhost_centers[0]) if len(fhost_centers) > 1 else float(fhost_edges[-1] - fhost_edges[0])
+    da = float(alpha_centers[1] - alpha_centers[0]) if len(alpha_centers) > 1 else float(alpha_edges[-1] - alpha_edges[0])
+
+    H_true, _ = np.histogramdd((m_true, z_true, fhost_true, alpha_true), bins=[mag_edges, z_edges, fhost_edges, alpha_edges])
+    H_obs, _ = np.histogramdd((m_obs, z_obs, fhost_obs, alpha_obs), bins=[mag_edges, z_edges, fhost_edges, alpha_edges])
+
+    if smooth_counts:
+        sig_mag_pix = max(float(sigma_mag / dm), 1e-6)
+        sig_z_pix = max(float(sigma_z_abs / dz), 1e-6)
+        sig_fhost_pix = max(float(sigma_fhost / dfh), 1e-6)
+        sig_alpha_pix = max(float(sigma_alpha / da), 1e-6)
+        H_true_s = gaussian_filter(H_true, sigma=(sig_mag_pix, sig_z_pix, sig_fhost_pix, sig_alpha_pix), mode="nearest")
+        H_obs_s = gaussian_filter(H_obs, sigma=(sig_mag_pix, sig_z_pix, sig_fhost_pix, sig_alpha_pix), mode="nearest")
+    else:
+        H_true_s, H_obs_s = H_true, H_obs
+
+    eps = 1e-12
+    C = H_obs_s / (H_true_s + eps)
+    C[H_true_s < eps] = 0.0
+    C = np.clip(C, 0.0, 1.0)
+
+    completeness4d = Completeness4D(mag_centers, z_centers, fhost_centers, alpha_centers, C)
+
+    if plot:
+        base_plot_path = plot_path or "plots/hubble"
+        plot_dir = os.path.join(base_plot_path, "completeness")
+        os.makedirs(plot_dir, exist_ok=True)
+
+        with open(os.path.join(plot_dir, "fhost_center_l2500_model.json"), "w") as handle:
+            json.dump(host_model, handle, indent=2)
+
+        _plot_completeness_vs_fhost_slices(
+            lambda mag_eval, z_eval, f_eval: completeness4d(mag_eval, z_eval, f_eval, np.full_like(f_eval, _ALPHA_TRUE_MEAN)),
+            mag_centers,
+            z_centers,
+            fhost_centers,
+            plot_dir=plot_dir,
+        )
+        _plot_completeness_vs_alpha_slices(
+            completeness4d,
+            mag_centers,
+            z_centers,
+            fhost_centers,
+            alpha_centers,
+            plot_dir=plot_dir,
+        )
+
+        fig, ax = plt.subplots(figsize=(7, 5))
+        c_slice = C.mean(axis=(2, 3))
+        im = ax.imshow(
+            np.log10(np.clip(c_slice.T, 1e-12, None)),
+            origin="lower",
+            aspect="auto",
+            extent=[mag_edges[0], mag_edges[-1], z_edges[0], z_edges[-1]],
+            cmap="viridis",
+            vmin=-4,
+            vmax=0,
+        )
+        ax.set_ylabel(r"$z$")
+        ax.set_xlabel(r"$m_{2500\,\mathrm{\AA}}$ (mag)")
+        cbar = plt.colorbar(im, ax=ax)
+        cbar.set_label(r"Mean over $f_{\rm host}, \alpha_{\lambda}$: $\log\,p(I{=}1\,|\,m,z,f_{\rm host},\alpha_{\lambda})$")
+        fig.tight_layout()
+        fig.savefig(os.path.join(plot_dir, "completeness_map_mean_fhost_alpha.pdf"), dpi=600)
+        plt.close(fig)
+
+        fig, ax = plt.subplots(figsize=(7, 5))
+        c_slice_ma = C.mean(axis=(1, 2))
+        im = ax.imshow(
+            np.log10(np.clip(c_slice_ma.T, 1e-12, None)),
+            origin="lower",
+            aspect="auto",
+            extent=[mag_edges[0], mag_edges[-1], alpha_edges[0], alpha_edges[-1]],
+            cmap="viridis",
+            vmin=-4,
+            vmax=0,
+        )
+        ax.set_xlabel(r"$m_{2500\,\mathrm{\AA}}$ (mag)")
+        ax.set_ylabel(r"$\alpha_{\lambda}$")
+        cbar = plt.colorbar(im, ax=ax)
+        cbar.set_label(r"Mean over $z, f_{\rm host}$: $\log\,p(I{=}1\,|\,m,z,f_{\rm host},\alpha_{\lambda})$")
+        fig.tight_layout()
+        fig.savefig(os.path.join(plot_dir, "completeness_map_m2500_alpha_lambda.pdf"), dpi=600)
+        plt.close(fig)
+
+    return (
+        completeness4d,
+        mag_centers,
+        z_centers,
+        fhost_centers,
+        alpha_centers,
+        dm,
+        dz,
+        dfh,
+        da,
+        sigma_mag,
+        host_model,
+        dict(alpha_mean=_ALPHA_TRUE_MEAN, alpha_sigma=_ALPHA_TRUE_SIGMA, alpha_min=_ALPHA_MIN, alpha_max=_ALPHA_MAX),
     )
 
 

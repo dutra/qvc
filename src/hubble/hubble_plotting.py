@@ -718,6 +718,168 @@ def plot_f_host_center_vs_l2500(
     )
 
 
+def plot_alpha_lambda_vs_l2500_by_redshift(
+    df,
+    plot_path="plots/hubble",
+    show=False,
+    z_bin_width=0.5,
+    nbins_l2500=12,
+    min_bin_count=5,
+):
+    """Plot alpha_lambda against AGN-only log L_2500 in redshift bins."""
+    required = {"z", "apparent_mag_2500", "alpha_lambda"}
+    if not required.issubset(df.columns):
+        return None
+
+    z = pd.to_numeric(df["z"], errors="coerce").to_numpy(dtype=float)
+    m2500 = pd.to_numeric(df["apparent_mag_2500"], errors="coerce").to_numpy(dtype=float)
+    alpha_lambda = pd.to_numeric(df["alpha_lambda"], errors="coerce").to_numpy(dtype=float)
+    logL2500 = apparent_mag_to_logL2500(m2500, z, FlatLambdaCDM(H0=70.0, Om0=0.3))
+
+    mask = np.isfinite(z) & np.isfinite(m2500) & np.isfinite(alpha_lambda) & np.isfinite(logL2500) & (z > 0.0)
+    if not np.any(mask):
+        return None
+
+    z_use = z[mask]
+    logL_use = logL2500[mask]
+    alpha_use = alpha_lambda[mask]
+
+    z_lo = float(np.floor(np.nanmin(z_use) / z_bin_width) * z_bin_width)
+    z_hi = float(np.ceil(np.nanmax(z_use) / z_bin_width) * z_bin_width)
+    z_edges = np.arange(z_lo, z_hi + z_bin_width, z_bin_width)
+    if z_edges.size < 2:
+        z_edges = np.array([z_lo, z_lo + z_bin_width], dtype=float)
+
+    panel_masks = []
+    panel_labels = []
+    for i in range(len(z_edges) - 1):
+        lo = z_edges[i]
+        hi = z_edges[i + 1]
+        in_bin = (z_use >= lo) & (z_use < hi)
+        if i == len(z_edges) - 2:
+            in_bin = (z_use >= lo) & (z_use <= hi)
+        if np.count_nonzero(in_bin) == 0:
+            continue
+        panel_masks.append(in_bin)
+        panel_labels.append((lo, hi))
+
+    if not panel_masks:
+        return None
+
+    n_panels = len(panel_masks)
+    n_cols = 2 if n_panels > 1 else 1
+    n_rows = int(np.ceil(n_panels / n_cols))
+    fig, axes = plt.subplots(
+        n_rows,
+        n_cols,
+        figsize=(6.3 * n_cols, 4.8 * n_rows),
+        squeeze=False,
+        sharex=True,
+        sharey=True,
+    )
+    axes = axes.ravel()
+
+    x_min = float(np.nanmin(logL_use))
+    x_max = float(np.nanmax(logL_use))
+    y_min = float(np.nanmin(alpha_use))
+    y_max = float(np.nanmax(alpha_use))
+    y_pad = 0.08 * max(y_max - y_min, 1.0)
+
+    for ax, in_bin, (z0, z1) in zip(axes, panel_masks, panel_labels):
+        x = logL_use[in_bin]
+        y = alpha_use[in_bin]
+        ax.scatter(
+            x,
+            y,
+            s=10,
+            alpha=0.32,
+            color="tab:blue",
+            linewidths=0,
+            rasterized=True,
+        )
+
+        if np.nanmax(x) > np.nanmin(x):
+            l_edges = np.linspace(np.nanmin(x), np.nanmax(x), nbins_l2500 + 1)
+            xmid = []
+            ymed = []
+            for i in range(len(l_edges) - 1):
+                lo = l_edges[i]
+                hi = l_edges[i + 1]
+                keep = (x >= lo) & (x < hi)
+                if i == len(l_edges) - 2:
+                    keep = (x >= lo) & (x <= hi)
+                if np.count_nonzero(keep) >= min_bin_count:
+                    xmid.append(np.nanmedian(x[keep]))
+                    ymed.append(np.nanmedian(y[keep]))
+            if xmid:
+                ax.plot(xmid, ymed, color="k", lw=2)
+
+        if z1 < z_edges[-1]:
+            ax.set_title(f"{z0:.1f} <= z < {z1:.1f}")
+        else:
+            ax.set_title(f"{z0:.1f} <= z <= {z1:.1f}")
+        ax.grid(True, alpha=0.2)
+        ax.set_xlim(x_min, x_max)
+        ax.set_ylim(y_min - y_pad, y_max + y_pad)
+
+    for ax in axes[n_panels:]:
+        ax.set_visible(False)
+
+    for ax in axes[-n_cols:]:
+        if ax.get_visible():
+            ax.set_xlabel(r"$\log L_{2500}$")
+    for row in range(n_rows):
+        ax = axes[row * n_cols]
+        if ax.get_visible():
+            ax.set_ylabel(r"$\alpha_{\lambda}$")
+
+    fig.tight_layout()
+    diagnostics_path = os.path.join(plot_path or "plots/hubble", "diagnostics")
+    return _save_figure(
+        fig,
+        os.path.join(diagnostics_path, "alpha_lambda_vs_l2500_by_redshift.pdf"),
+        dpi=200,
+        show=show,
+    )
+
+
+def plot_alpha_lambda_histogram(df, plot_path="plots/hubble", show=False, nbins=40):
+    """Plot a simple alpha_lambda histogram and estimate its 1 sigma width."""
+    if "alpha_lambda" not in df.columns:
+        raise KeyError("Missing required column: 'alpha_lambda'.")
+
+    alpha = pd.to_numeric(df["alpha_lambda"], errors="coerce").to_numpy(dtype=float)
+    mask = np.isfinite(alpha)
+    alpha = alpha[mask]
+    if alpha.size == 0:
+        raise ValueError("No finite alpha_lambda values available for histogram.")
+
+    p16, p50, p84 = np.nanpercentile(alpha, [16, 50, 84])
+    sigma_1 = 0.5 * (p84 - p16)
+    std = float(np.nanstd(alpha))
+
+    fig, ax = plt.subplots(figsize=(6.0, 5.0))
+    ax.hist(alpha, bins=nbins, color="tab:blue", alpha=0.75, edgecolor="white")
+    ax.axvline(p50, color="k", lw=2, label=fr"median = {p50:.2f}")
+    ax.axvline(p16, color="k", lw=1.5, ls="--")
+    ax.axvline(p84, color="k", lw=1.5, ls="--", label=fr"$\sigma_{{68}}$ = {sigma_1:.2f}")
+    ax.set_xlabel(r"$\alpha_{\lambda}$")
+    ax.set_ylabel("Count")
+    ax.set_title(
+        f"alpha_lambda distribution\nN={alpha.size}, sigma_68={sigma_1:.2f}, std={std:.2f}"
+    )
+    ax.grid(True, alpha=0.2)
+    ax.legend(frameon=False, loc="best")
+
+    diagnostics_path = os.path.join(plot_path or "plots/hubble", "diagnostics")
+    return _save_figure(
+        fig,
+        os.path.join(diagnostics_path, "alpha_lambda_histogram.pdf"),
+        dpi=200,
+        show=show,
+    )
+
+
 def plot_blr_lag_vs_amp_by_band(df, plot_path="plots/hubble", show=False, lag_suffix=""):
     """Plot BLR lag against inferred BLR amplitude in each band.
 
@@ -3859,15 +4021,14 @@ def plot_Mi_relation(df_agn, plot_path=None):
     _save_figure(fig, os.path.join(diagnostics_path, "Mi_relation_comparison.pdf"), dpi=200)
 
 
-def plot_completeness_diagnostics(dmi_max_w, z, m2500, integrals_max_w, plot_path="plots/hubble"):
+def plot_completeness_diagnostics(dmi_plot, z, m2500, integrals_max_w, plot_path="plots/hubble"):
 
-    # Plot dmi_interp vs z for the highest-weight sample
-    dmi_interp = interp1d(z, dmi_max_w, kind='nearest', bounds_error=False, fill_value='extrapolate')
+    # Plot dmi vs z for the posterior-summary correction used in debiasing.
+    dmi_interp = interp1d(z, dmi_plot, kind='nearest', bounds_error=False, fill_value='extrapolate')
     
-    # Plot dmi_interp vs z for the highest-weight sample
     fig, ax = plt.subplots(figsize=(8, 5))
 
-    ax.plot(z, -dmi_max_w, marker="o", linestyle="none", label="AGN", color='k', alpha=0.5)
+    ax.plot(z, -dmi_plot, marker="o", linestyle="none", label="AGN", color='k', alpha=0.5)
 
     ax.set_xlabel(r"$z$")
     ax.set_ylabel(r"$\Delta m$ (mag)")
@@ -3878,13 +4039,13 @@ def plot_completeness_diagnostics(dmi_max_w, z, m2500, integrals_max_w, plot_pat
     outdir = os.path.join(plot_path, "completeness")
     os.makedirs(outdir, exist_ok=True)
 
-    fig.savefig(f"{outdir}/dmi_vs_z_highest_weight.pdf", dpi=300)
+    fig.savefig(f"{outdir}/dmi_vs_z_posterior_median.pdf", dpi=300)
     plt.close(fig)
 
     # Plot dmi vs m2500 (apparent magnitude)
     fig, ax = plt.subplots(figsize=(8, 5))
 
-    ax.scatter(m2500, -dmi_max_w, alpha=0.5, s=20, color='k', label='AGN')
+    ax.scatter(m2500, -dmi_plot, alpha=0.5, s=20, color='k', label='AGN')
 
     ax.set_xlabel(r"Apparent magnitude $m_{2500}$ (mag)")
     ax.set_ylabel(r"$\Delta m$ (mag)")
@@ -3892,7 +4053,7 @@ def plot_completeness_diagnostics(dmi_max_w, z, m2500, integrals_max_w, plot_pat
     ax.legend(frameon=True, loc="upper right", fontsize=12)
     fig.tight_layout()
 
-    fig.savefig(f"{outdir}/dmi_vs_m2500_highest_weight.pdf", dpi=300)
+    fig.savefig(f"{outdir}/dmi_vs_m2500_posterior_median.pdf", dpi=300)
     plt.close(fig)
 
     # Plot log(integrals) vs redshift for highest-weight sample

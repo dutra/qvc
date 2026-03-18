@@ -20,6 +20,7 @@ def completeness_loglike(
     sigma_completeness=0.0,
     tiny=1e-300,
     f_host_center=None,
+    alpha_lambda=None,
 ):
     """
     Compute log-likelihood contribution from magnitude-limited sample selection.
@@ -40,7 +41,14 @@ def completeness_loglike(
     sig = np.sqrt(mu_err[:, None]**2 + float(sigma_completeness)**2)   # (N,1)
 
     # completeness on grid for each object
-    if getattr(completeness_model, "mode", "2d") == "3d_fhost":
+    mode = getattr(completeness_model, "mode", "2d")
+    if mode == "4d_fhost_alpha":
+        if f_host_center is None or alpha_lambda is None:
+            raise ValueError("f_host_center and alpha_lambda are required for 4D host/color completeness.")
+        f_host_center = np.asarray(f_host_center)
+        alpha_lambda = np.asarray(alpha_lambda)
+        p_det = completeness_model(m_grid[None, :], z[:, None], f_host_center[:, None], alpha_lambda[:, None])
+    elif mode == "3d_fhost":
         if f_host_center is None:
             raise ValueError("f_host_center is required for 3D host-aware completeness.")
         f_host_center = np.asarray(f_host_center)
@@ -57,8 +65,11 @@ def completeness_loglike(
 
     # Debias for plotting (the scatter is mostly in M, not Malmquist)
     m_Z = trapz(wpdf_model * m_grid[None, :], m_grid, axis=1)
-    m_Z = np.clip(m_Z, tiny, None)
-    E = m_Z / Z
+    # If the selection integral is effectively zero, the conditional
+    # expectation is undefined. In that case keep the debias correction at
+    # zero instead of manufacturing huge magnitude shifts from tiny/tiny.
+    valid_Z = Z > (100.0 * tiny)
+    E = np.where(valid_Z, m_Z / Z, m_model)
     dmi_obs = E - m_model
 
     blob = np.vstack([Z.astype(float), dmi_obs.astype(float)])
@@ -211,7 +222,8 @@ def log_likelihood(theta, *, agn_data, pantheon_data,
     if completeness_params is not None:
         completeness_model = completeness_params[0]
         mag_centers = completeness_params[1]
-        completeness_scatter = completeness_params[-2] if getattr(completeness_model, "mode", "2d") == "3d_fhost" else completeness_params[-1]
+        mode = getattr(completeness_model, "mode", "2d")
+        completeness_scatter = completeness_params[-3] if mode == "4d_fhost_alpha" else (completeness_params[-2] if mode == "3d_fhost" else completeness_params[-1])
         ll_completeness, comp_blob = completeness_loglike(
             m_obs=m_obs,
             m_obs_err=m_err,
@@ -219,6 +231,7 @@ def log_likelihood(theta, *, agn_data, pantheon_data,
             completeness_model=completeness_model, m_grid=mag_centers,
             sigma_completeness=completeness_scatter,
             f_host_center=agn_data.get("f_host_center"),
+            alpha_lambda=agn_data.get("alpha_lambda"),
         )
 
     # ll_cmb, _ = loglike_cmb_theta_simple(cosmo)
@@ -364,7 +377,8 @@ def log_likelihood_nearbylcs(
     if completeness_params is not None and np.any(mask_noncal):
         completeness_model = completeness_params[0]
         mag_centers = completeness_params[1]
-        completeness_scatter = completeness_params[-2] if getattr(completeness_model, "mode", "2d") == "3d_fhost" else completeness_params[-1]
+        mode = getattr(completeness_model, "mode", "2d")
+        completeness_scatter = completeness_params[-3] if mode == "4d_fhost_alpha" else (completeness_params[-2] if mode == "3d_fhost" else completeness_params[-1])
         # model-predicted magnitude for non-calibrators (cosmo-anchored for selection)
         m_model_nc = M_pred_nc + mu_cosmo_nc
         ll_completeness, comp_blob = completeness_loglike(
@@ -374,6 +388,7 @@ def log_likelihood_nearbylcs(
             completeness_model=completeness_model, m_grid=mag_centers,
             sigma_completeness=completeness_scatter,
             f_host_center=agn_data.get("f_host_center", None)[mask_noncal] if agn_data.get("f_host_center", None) is not None else None,
+            alpha_lambda=agn_data.get("alpha_lambda", None)[mask_noncal] if agn_data.get("alpha_lambda", None) is not None else None,
         )
 
     # ========================
