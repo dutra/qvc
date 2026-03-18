@@ -24,6 +24,8 @@ dependencies = [
     "scipy==1.16.0",
     "tinygp==0.3.0",
     "tqdm==4.67.1",
+    "gdown==5.2.1",
+    "colorama==0.4.6"
 ]
 
 [tool.setuptools]
