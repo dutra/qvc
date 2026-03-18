@@ -1,6 +1,6 @@
 """Default AGN selection-cut configuration for the QVC pipeline."""
 
-DEFAULT_F_HOST_CUT = 0.1
+DEFAULT_F_HOST_CUT = 2
 DEFAULT_WRMS_CUT = 1.2
 DEFAULT_IRON_FRAC_CUT = 1.0 # Wide default cut that allows all values to pass
 DEFAULT_BC_FRAC_CUT = 1.0

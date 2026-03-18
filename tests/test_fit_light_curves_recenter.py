@@ -177,6 +177,52 @@ def test_make_lc_can_hard_drop_lya_affected_bands():
     assert lc["dropped_bands"] == ["u", "z"]
 
 
+def test_compute_parameter_kls_ignores_nonfinite_conditioning_samples():
+    flat_samples = {
+        "eta_sigma": np.array([-0.4, np.nan, -0.2, -0.3]),
+        "eta_tau": np.array([0.1, 0.2, np.nan, 0.25]),
+        "log_sigma_center0": np.array([-1.0, -0.9, -0.8, -0.85]),
+        "log_tau_slow_center0": np.array([5.0, 5.1, 5.2, 5.15]),
+        "log_tau_fast_center0": np.array([2.3, 2.4, 2.5, 2.45]),
+        "poly1": np.array([0.0, 0.01, -0.01, 0.02]),
+        "lag0": np.array([5.0, 5.5, 4.5, 5.2]),
+        "lag_beta": np.array([1.2, 1.4, 1.3, 1.35]),
+        "log_amp_delta_lya": np.array([-0.1, -0.2, -0.15, -0.05]),
+        "mean_g": np.array([0.0, 0.02, -0.01, 0.01]),
+        "mean_r": np.array([0.0, 0.01, -0.02, 0.02]),
+        "log_jitter_g": np.array([-3.0, -2.9, -3.1, -3.05]),
+        "log_jitter_r": np.array([-3.1, -3.0, -3.2, -3.05]),
+        "log_amp_delta_blr_g": np.array([-1.0, -0.9, -1.1, -1.05]),
+        "log_amp_delta_blr_r": np.array([-1.2, -1.1, -1.3, -1.25]),
+        "log_amp_delta_blr2_g": np.array([-1.5, -1.4, -1.6, -1.55]),
+        "log_amp_delta_blr2_r": np.array([-1.7, -1.6, -1.8, -1.75]),
+        "log_lag_blr_g": np.array([3.0, 3.1, 3.2, 3.15]),
+        "log_lag_blr_r": np.array([3.1, 3.2, 3.3, 3.25]),
+        "log_lag_blr2_g": np.array([4.0, 4.1, 4.2, 4.15]),
+        "log_lag_blr2_r": np.array([4.1, 4.2, 4.3, 4.25]),
+    }
+
+    kls = compute_parameter_kls(
+        flat_samples,
+        bands=["g", "r"],
+        z=1.5,
+        lambda_center_rf=2500.0,
+        log_jitter_mean=np.array([-3.0, -3.1]),
+        disable_poly1=False,
+        disable_lag_blr=False,
+        drop_band_lyman_alpha=False,
+        sigma_tau_uniform=False,
+        tau_fast_truncated=False,
+    )
+
+    assert "log_sigma_center0_kl" in kls
+    assert "log_tau_slow_center0_kl" in kls
+    assert "log_tau_fast_center0_kl" in kls
+    assert np.isfinite(kls["log_sigma_center0_kl"])
+    assert np.isfinite(kls["log_tau_slow_center0_kl"])
+    assert np.isfinite(kls["log_tau_fast_center0_kl"])
+
+
 def test_process_samples_keeps_uv_outputs_at_2500_and_stores_band_metadata():
     z = 1.5
     bands = ["g", "r", "i"]
@@ -207,7 +253,6 @@ def test_process_samples_keeps_uv_outputs_at_2500_and_stores_band_metadata():
         flat_samples,
         {"object_id": "obj", "z": z},
         bands=bands,
-        broken_pl=False,
     )
 
     sigma_shift_to_uv = np.log(10.0) * np.asarray(log_single_pl(2500.0, lambda_center_rf, eta_sigma))

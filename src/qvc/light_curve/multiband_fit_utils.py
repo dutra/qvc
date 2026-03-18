@@ -208,7 +208,7 @@ def clean_grouped_samples(samples_grouped, obj_index, batch_data_len):
     - Universal params kept as-is (flattened over chains)
     - Object-specific params indexed [:, :, i]
     """
-    universal_keys = ['eta_sigma', 'eta_A2', 'eta_tau', 'eta_tau2', 'eta_break', 'lam_s']
+    universal_keys = ['eta_sigma', 'eta_tau']
 
     # Print shapes for inspection
     for k, v in samples_grouped.items():
@@ -687,7 +687,7 @@ def psd_cov_from_samples(X, Y, eps=1e-12, shrink_rho=0.0):
     C = np.array([[sx*sx, rho*sx*sy],[rho*sx*sy, sy*sy]])
     return C
 
-def process_samples(flat_samples, data,  bands, percentiles=[16, 50, 84], broken_pl=False):
+def process_samples(flat_samples, data, bands, percentiles=[16, 50, 84]):
     """
     Generalized processing of MCMC samples for arbitrary parameters and bands.
 
@@ -703,8 +703,6 @@ def process_samples(flat_samples, data,  bands, percentiles=[16, 50, 84], broken
     def sym_percentile(x, p=percentiles, axis=0):
         lower, median, upper = np.percentile(x, p, axis=axis)
         return median, 0.5 * (upper - lower)
-
-    log_pl = log_broken_pl if broken_pl else log_single_pl
 
     lam_rf_kept = np.asarray([lambda_pivot[band] / (1.0 + data['z']) for band in bands], dtype=float)
     lambda_center_rf = float(np.exp(np.mean(np.log(lam_rf_kept)))) if len(lam_rf_kept) > 0 else np.nan
@@ -751,19 +749,16 @@ def process_samples(flat_samples, data,  bands, percentiles=[16, 50, 84], broken
     eta_sigma = np.asarray(flat_samples["eta_sigma"])
     eta_tau = np.asarray(flat_samples["eta_tau"])
     lambda_ref = 2500
-    eta_A2 = np.asarray(flat_samples["eta_A2"]) if "eta_A2" in flat_samples else np.zeros_like(eta_sigma)
-    eta_tau2 = np.asarray(flat_samples["eta_tau2"]) if "eta_tau2" in flat_samples else np.zeros_like(eta_tau)
-    eta_break = np.asarray(flat_samples["eta_break"]) if "eta_break" in flat_samples else np.full_like(eta_sigma, 0.1)
-    lam_s = np.asarray(flat_samples["lam_s"]) if "lam_s" in flat_samples else np.full_like(eta_sigma, lambda_ref)
+    lam_ref_arr = np.full_like(eta_sigma, lambda_ref, dtype=float)
 
     if log_sigma_uv is None and "log_sigma_center0" in flat_samples:
-        sigma_shift_to_uv = np.log(10.0) * np.asarray(log_pl(lambda_ref, lambda_center_rf, eta_sigma, eta_A2, eta_break))
+        sigma_shift_to_uv = np.log(10.0) * np.asarray(log_single_pl(lambda_ref, lambda_center_rf, eta_sigma))
         log_sigma_uv = np.asarray(flat_samples["log_sigma_center0"]) + sigma_shift_to_uv
     if log_tau_uv is None and "log_tau_slow_center0" in flat_samples:
-        tau_shift_to_uv = np.log(10.0) * np.asarray(log_pl(lambda_ref, lambda_center_rf, eta_tau, eta_tau2, eta_break))
+        tau_shift_to_uv = np.log(10.0) * np.asarray(log_single_pl(lambda_ref, lambda_center_rf, eta_tau))
         log_tau_uv = np.asarray(flat_samples["log_tau_slow_center0"]) + tau_shift_to_uv
     if log_tau_fast_uv is None and "log_tau_fast_center0" in flat_samples:
-        tau_shift_to_uv = np.log(10.0) * np.asarray(log_pl(lambda_ref, lambda_center_rf, eta_tau, eta_tau2, eta_break))
+        tau_shift_to_uv = np.log(10.0) * np.asarray(log_single_pl(lambda_ref, lambda_center_rf, eta_tau))
         log_tau_fast_uv = np.asarray(flat_samples["log_tau_fast_center0"]) + tau_shift_to_uv
 
     if "eta_sigma" not in result:
@@ -781,21 +776,21 @@ def process_samples(flat_samples, data,  bands, percentiles=[16, 50, 84], broken
     log_sigma_band = []
     for band in bands:
         lam_eff = lambda_pivot[band] / (1 + data['z'])
-        val = log_sigma_uv / np.log(10) + log_pl(lam_eff, lam_s, eta_sigma, eta_A2, eta_break)
+        val = log_sigma_uv / np.log(10) + log_single_pl(lam_eff, lam_ref_arr, eta_sigma)
         log_sigma_band.append(val)
     log_sigma_band = np.array(log_sigma_band).T
 
     log_tau_band = []
     for band in bands:
         lam_eff = lambda_pivot[band] / (1 + data['z'])
-        val = log_tau_uv / np.log(10) - np.log10(1 + data['z']) + log_pl(lam_eff, lam_s, eta_tau, eta_tau2, eta_break)
+        val = log_tau_uv / np.log(10) - np.log10(1 + data['z']) + log_single_pl(lam_eff, lam_ref_arr, eta_tau)
         log_tau_band.append(val)
     log_tau_band = np.array(log_tau_band).T
 
     log_tau_fast_band = []
     for band in bands:
         lam_eff = lambda_pivot[band] / (1 + data['z'])
-        val = log_tau_fast_uv / np.log(10) - np.log10(1 + data['z']) + log_pl(lam_eff, lam_s, eta_tau, eta_tau2, eta_break)
+        val = log_tau_fast_uv / np.log(10) - np.log10(1 + data['z']) + log_single_pl(lam_eff, lam_ref_arr, eta_tau)
         log_tau_fast_band.append(val)
     log_tau_fast_band = np.array(log_tau_fast_band).T
 
@@ -821,20 +816,20 @@ def process_samples(flat_samples, data,  bands, percentiles=[16, 50, 84], broken
 
 
     # log_sigma_UV
-    samples_log_sigma_UV = log_sigma_uv / np.log(10) + log_pl(lambda_ref, lam_s, eta_sigma, eta_A2, eta_break)
+    samples_log_sigma_UV = log_sigma_uv / np.log(10) + log_single_pl(lambda_ref, lam_ref_arr, eta_sigma)
     result['log_sigma_UV'], result['log_sigma_UV_err'] = sym_percentile(samples_log_sigma_UV)
 
     if "f_host" in flat_samples and "alpha_host" in flat_samples:
         host_frac = flat_samples["f_host"] * (lambda_ref / 5100.0) ** flat_samples["alpha_host"]
         dilution_factor = 1.0 / (1.0 + host_frac)
         log_dilution = jnp.log(dilution_factor)
-        samples_log_sigma_UV_diluted = (log_sigma_uv - log_dilution) / np.log(10) + log_pl(lambda_ref, lam_s, eta_sigma, eta_A2, eta_break)
+        samples_log_sigma_UV_diluted = (log_sigma_uv - log_dilution) / np.log(10) + log_single_pl(lambda_ref, lam_ref_arr, eta_sigma)
     else:
         samples_log_sigma_UV_diluted = samples_log_sigma_UV
     result['log_sigma_UV_diluted'], result['log_sigma_UV_diluted_err'] = sym_percentile(samples_log_sigma_UV_diluted)
 
     # log_tau_UV_RF
-    samples_log_tau_UV_RF = log_tau_uv / np.log(10) - np.log10(1 + data['z']) + log_pl(lambda_ref, lam_s, eta_tau, eta_tau2, eta_break)
+    samples_log_tau_UV_RF = log_tau_uv / np.log(10) - np.log10(1 + data['z']) + log_single_pl(lambda_ref, lam_ref_arr, eta_tau)
     result['log_tau_UV_RF'], result['log_tau_UV_RF_err'] = sym_percentile(samples_log_tau_UV_RF)
 
     # Compute covariance between log_sigma_UV and log_tau_UV_RF
@@ -1004,7 +999,7 @@ def diagnostics_for_per_chain_samples(
     worst_stuck = (None, -np.inf, None, None)
     worst_pcess = (None,  np.inf, None)
 
-    ignore_keys = ('eta_break', 'lam_s', 'bwb_beta', 'f_host', 'log_tau_fake', 'log_sigma_fake',
+    ignore_keys = ('bwb_beta', 'f_host', 'log_tau_fake', 'log_sigma_fake',
                    'gate_log_temp', 'lmc_sep_raw', 'lmc_sep_left_raw', 'lmc_sep_right_raw', 'lmc_span_raw',
                     'lmc_mu_raw', 'lmc_delta_raw', 'lmc_sep', 'lmc_sep_left', 'lmc_sep_right', 'lmc_span',)
 

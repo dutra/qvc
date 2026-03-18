@@ -64,6 +64,10 @@ zero_mean = False
 has_jitter = True
 LYA_REST_WAVELENGTH = 1216.0
 LYA_ATTENUATION_WIDTH = 150.0
+ETA_SIGMA_LOW = -5.0
+LOG_AMP_DELTA_LYA_LOW = -5.0
+LAG0_HIGH = 100.0
+LAG_BETA_HIGH = 5.0
 
 
 def compute_lambda_center_rf(lam_rf):
@@ -108,6 +112,62 @@ def kl_from_samples(x, log_prior_fn):
     return float(np.mean(log_q[good] - log_p[good]))
 
 
+def conditional_kl_from_samples(x, build_prior_log_prob_fn, *conditioners):
+    """Approximate KL(q||p) when the prior parameters depend on per-sample conditioners."""
+
+    x = np.asarray(x).ravel()
+    conds = [np.asarray(c).ravel() for c in conditioners]
+    if any(c.shape != x.shape for c in conds):
+        raise ValueError("Conditioner arrays must have the same shape as x.")
+
+    good = np.isfinite(x)
+    for c in conds:
+        good &= np.isfinite(c)
+    if np.sum(good) < 2:
+        return np.nan
+
+    x_good = x[good]
+    conds_good = [c[good] for c in conds]
+    var = x_good.var(ddof=1) + 1e-12
+    mu = x_good.mean()
+    log_q = -0.5 * np.log(2.0 * np.pi * var) - 0.5 * (x_good - mu) ** 2 / var
+    log_p = np.asarray(build_prior_log_prob_fn(x_good, *conds_good), dtype=float)
+    good_lp = np.isfinite(log_q) & np.isfinite(log_p)
+    if not np.any(good_lp):
+        return np.nan
+    return float(np.mean(log_q[good_lp] - log_p[good_lp]))
+
+
+def log_nonfinite_sample_summary(samples_dict, *, label, max_items=20):
+    """Log per-parameter non-finite fractions to diagnose pathological chains."""
+
+    bad = []
+    for key, value in samples_dict.items():
+        arr = np.asarray(value)
+        if arr.size == 0:
+            continue
+        finite_frac = float(np.mean(np.isfinite(arr)))
+        if finite_frac < 1.0:
+            bad.append((key, finite_frac, arr.shape))
+
+    if not bad:
+        logging.info("[%s] All sampled parameters are finite.", label)
+        return
+
+    bad.sort(key=lambda item: item[1])
+    preview = ", ".join(
+        f"{key}{shape}={finite_frac:.1%} finite"
+        for key, finite_frac, shape in bad[:max_items]
+    )
+    logging.warning(
+        "[%s] Non-finite samples detected in %d parameter(s): %s%s",
+        label,
+        len(bad),
+        preview,
+        " ..." if len(bad) > max_items else "",
+    )
+
+
 def sigma_shift_to_uv(eta_sigma, lambda_center_rf, lambda_uv=2500.0):
     return jnp.log(10.0) * log_single_pl(lambda_uv, lambda_center_rf, eta_sigma)
 
@@ -117,7 +177,7 @@ def tau_shift_to_uv(eta_tau, lambda_center_rf, lambda_uv=2500.0):
 
 
 def eta_sigma_prior():
-    return dist.TruncatedNormal(-0.5, 1.0, low=-jnp.inf, high=0.0)
+    return dist.TruncatedNormal(-0.5, 1.0) #, low=ETA_SIGMA_LOW, high=0.0)
 
 
 def eta_tau_prior():
@@ -165,15 +225,15 @@ def poly1_prior():
 
 
 def lag0_prior():
-    return dist.TruncatedNormal(5.0, 5.0, low=0.0, high=jnp.inf)
+    return dist.TruncatedNormal(5.0, 5.0, low=0.0, high=LAG0_HIGH)
 
 
 def lag_beta_prior():
-    return dist.TruncatedNormal(4.0 / 3.0, 0.2, low=0.0, high=jnp.inf)
+    return dist.TruncatedNormal(4.0 / 3.0, 0.2, low=0.0, high=LAG_BETA_HIGH)
 
 
 def log_amp_delta_lya_prior():
-    return dist.TruncatedNormal(-0.5, 0.75, low=-jnp.inf, high=0.0)
+    return dist.TruncatedNormal(-0.5, 0.75, low=LOG_AMP_DELTA_LYA_LOW, high=0.0)
 
 
 def mean_prior():
@@ -189,7 +249,7 @@ def log_amp_delta_blr_prior():
 
 
 def log_lag_blr_prior():
-    return dist.Uniform(jnp.log(2.0), jnp.log(5000.0))
+    return dist.Normal(jnp.log(1e2), jnp.log(50.0))
 
 
 def compute_parameter_kls(
@@ -221,38 +281,47 @@ def compute_parameter_kls(
     )
 
     if "log_sigma_center0" in flat_samples:
-        sigma_prior = log_sigma_center0_prior(
-            eta_sigma,
-            lambda_center_rf,
-            sigma_tau_uniform=sigma_tau_uniform,
-        )
-        kls["log_sigma_center0_kl"] = kl_from_samples(
+        kls["log_sigma_center0_kl"] = conditional_kl_from_samples(
             flat_samples["log_sigma_center0"],
-            lambda x: _dist_log_prob_array(sigma_prior, x),
+            lambda x, eta: _dist_log_prob_array(
+                log_sigma_center0_prior(
+                    eta,
+                    lambda_center_rf,
+                    sigma_tau_uniform=sigma_tau_uniform,
+                ),
+                x,
+            ),
+            eta_sigma,
         )
 
     if "log_tau_slow_center0" in flat_samples:
-        tau_slow_prior = log_tau_slow_center0_prior(
-            eta_tau,
-            z,
-            lambda_center_rf,
-            sigma_tau_uniform=sigma_tau_uniform,
-        )
-        kls["log_tau_slow_center0_kl"] = kl_from_samples(
+        kls["log_tau_slow_center0_kl"] = conditional_kl_from_samples(
             flat_samples["log_tau_slow_center0"],
-            lambda x: _dist_log_prob_array(tau_slow_prior, x),
+            lambda x, eta: _dist_log_prob_array(
+                log_tau_slow_center0_prior(
+                    eta,
+                    z,
+                    lambda_center_rf,
+                    sigma_tau_uniform=sigma_tau_uniform,
+                ),
+                x,
+            ),
+            eta_tau,
         )
 
     if "log_tau_fast_center0" in flat_samples:
-        tau_fast_prior = log_tau_fast_center0_prior(
-            eta_tau,
-            z,
-            lambda_center_rf,
-            tau_fast_truncated=tau_fast_truncated,
-        )
-        kls["log_tau_fast_center0_kl"] = kl_from_samples(
+        kls["log_tau_fast_center0_kl"] = conditional_kl_from_samples(
             flat_samples["log_tau_fast_center0"],
-            lambda x: _dist_log_prob_array(tau_fast_prior, x),
+            lambda x, eta: _dist_log_prob_array(
+                log_tau_fast_center0_prior(
+                    eta,
+                    z,
+                    lambda_center_rf,
+                    tau_fast_truncated=tau_fast_truncated,
+                ),
+                x,
+            ),
+            eta_tau,
         )
 
     if not disable_poly1 and "poly1" in flat_samples:
@@ -738,7 +807,7 @@ def build_single_object_model(
             if disable_lag_blr:
                 log_amp_delta_blr = numpyro.deterministic(
                     "log_amp_delta_blr",
-                    jnp.full(B, -1e9),
+                    jnp.full(B, -9.0),
                 )
                 log_lag_blr = numpyro.deterministic(
                     "log_lag_blr",
@@ -746,7 +815,7 @@ def build_single_object_model(
                 )
                 log_amp_delta_blr2 = numpyro.deterministic(
                     "log_amp_delta_blr2",
-                    jnp.full(B, -1e9),
+                    jnp.full(B, -9.0),
                 )
                 log_lag_blr2 = numpyro.deterministic(
                     "log_lag_blr2",
@@ -997,15 +1066,31 @@ def main():
                 obj_flat_samples = samples_flat
                 save_obj_samples_to_hdf5(obj_flat_samples, oid)
 
-            if not all(key in obj_flat_samples for key in ("log_sigma_uv", "log_tau_uv", "log_tau_fast_uv", "lambda_center_rf")):
-                explicit_scalar = build_explicit_model_params(obj_flat_samples, lam_rf)
-                for key in ("log_sigma_uv", "log_tau_uv", "log_tau_fast_uv", "lambda_center_rf"):
-                    obj_flat_samples[key] = np.asarray(explicit_scalar[key])
+            explicit_scalar = build_explicit_model_params(obj_flat_samples, lam_rf)
+            for key, explicit_key in (
+                ("log_sigma_uv", "log_sigma_uv"),
+                ("log_tau_uv", "log_tau_uv"),
+                ("log_tau_fast_uv", "log_tau_fast_uv"),
+                ("lambda_center_rf", "lambda_center_rf"),
+                ("amp_cont", "amp_cont"),
+                ("amp_blr", "amp_blr"),
+                ("amp_blr2", "amp_blr2"),
+                ("lag_disk", "lag_disk"),
+                ("lag_blr", "lag_blr"),
+                ("lag_blr2", "lag_blr2"),
+                ("tau_fast", "tau_fast_band"),
+                ("tau_slow", "tau_slow_band"),
+                ("log_amp_delta_lya_band", "log_amp_delta_lya_band"),
+            ):
+                obj_flat_samples[key] = np.asarray(explicit_scalar[explicit_key])
+
+            log_nonfinite_sample_summary(obj_flat_samples, label=oid)
 
             obj_flat_samples_flatten_per_band = flatten_flat_samples_per_band(
                 obj_flat_samples,
                 bands=bands,
             )
+            log_nonfinite_sample_summary(obj_flat_samples_flatten_per_band, label=f"{oid} per-band")
 
             diagnostics = {}
             if samples_per_chain is not None:
@@ -1018,7 +1103,6 @@ def main():
             result = process_samples(
                 obj_flat_samples_flatten_per_band,
                 obj,
-                broken_pl=False,
                 bands=bands,
             )
             kl_result = compute_parameter_kls(
@@ -1101,7 +1185,6 @@ def main():
         plot_sigma_tau_vs_lambda_with_model(
             results,
             inject_fake=args.inject_fake,
-            broken_pl=False,
         )
     except Exception as e:
         logging.error(f"plot_sigma_tau_vs_lambda_with_model error: {e}")

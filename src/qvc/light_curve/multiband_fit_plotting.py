@@ -17,7 +17,7 @@ from astropy.timeseries import LombScargle
 prefix = os.environ.get('PREFIX', "test")
 suffix = os.environ.get('SUFFIX', "test")
 
-from qvc.light_curve.multiband_fit_utils import log_broken_pl, log_single_pl
+from qvc.light_curve.multiband_fit_utils import log_single_pl
 
 import logging
 
@@ -277,13 +277,13 @@ def plot_posterior_fast(
     z = data["z"]
 
     # Stable column order
-    labels = np.array(list(samples_flat.keys()))
-    D = len(labels)
+    all_labels = np.array(list(samples_flat.keys()))
+    D = len(all_labels)
 
     # Determine a target N that respects both `max_points` and the D^2 cost
     # (ensure at least a modest minimum so 1D histograms look sane)
     rng = np.random.default_rng(rng_seed)
-    first = np.asarray(samples_flat[labels[0]])
+    first = np.asarray(samples_flat[all_labels[0]])
     first = first.reshape(first.shape[0], -1)[:, 0]
     n_total = first.shape[0]
     n_by_budget = max(2_000, int(panel_budget // max(D * D, 1)))
@@ -296,37 +296,22 @@ def plot_posterior_fast(
         idx = None
         n_use = n_total
 
-    # Build matrix X (N, D) with shared subsample; convert ln(*) -> log10(*) for "log_*"
-    X = np.empty((n_use, D), dtype=np.float32)
-    ln10 = np.log(10.0)
-    for j, k in enumerate(labels):
+    sampled = {}
+    for k in all_labels:
         a = np.asarray(samples_flat[k]).reshape(n_total, -1)[:, 0]
         if idx is not None:
             a = a[idx]
-        if k.startswith("log_"):
-            a = a / ln10  # natural log -> log10
-        X[:, j] = a.astype(np.float32, copy=False)
+        sampled[k] = a
 
-    # Drop rows with any NaN/Inf
-    finite = np.isfinite(X).all(axis=1)
-    if not finite.any():
-        raise ValueError("No finite samples to plot after cleaning.")
-    if not finite.all():
-        X = X[finite]
-
-    # Identify near-constant columns via ptp
-    ptp = np.ptp(X, axis=0)
-    const_mask = ptp <= const_ptp
-
-    # Jitter constant columns so they render
-    if np.any(const_mask):
-        const_idx = np.where(const_mask)[0]
-        mu = X[:, const_idx].mean(axis=0, dtype=np.float64)
-        sig = np.maximum(jitter_abs, np.abs(mu) * jitter_rel).astype(np.float32)
-        noise = rng.normal(0.0, 1.0, size=(X.shape[0], const_idx.size)).astype(np.float32)
-        X[:, const_idx] += noise * sig
-        for j in const_idx:
-            logging.debug(f"Corner constant param (jittered): {labels[j]}")
+    X, labels, const_mask = _prep_matrix(
+        sampled,
+        max_points=max_points,
+        const_ptp=const_ptp,
+        jitter_rel=jitter_rel,
+        jitter_abs=jitter_abs,
+        log10_if_startswith="log_",
+    )
+    labels = np.array(labels)
 
     # Percentile ranges
     lo = np.percentile(X, p_lo, axis=0)
@@ -370,6 +355,20 @@ def plot_posterior_fast(
     labels_plot = labels[sel] if np.any(sel) else labels
     ranges_plot = (rng_bounds[sel] if np.any(sel) else rng_bounds)
 
+    if X_plot.shape[1] > X_plot.shape[0]:
+        keep_dim = max(1, X_plot.shape[0])
+        logging.warning(
+            "Skipping %d posterior dimension(s) in corner plot because dims=%d > samples=%d. "
+            "Keeping the first %d dimensions.",
+            X_plot.shape[1] - keep_dim,
+            X_plot.shape[1],
+            X_plot.shape[0],
+            keep_dim,
+        )
+        X_plot = X_plot[:, :keep_dim]
+        labels_plot = labels_plot[:keep_dim]
+        ranges_plot = ranges_plot[:keep_dim]
+
     # Corner tuned for speed
     fig = corner.corner(
         X_plot,
@@ -400,39 +399,42 @@ def plot_posterior_fast(
 
 
 
-def plot_broken_power_law(samples, data, broken_pl):
+def plot_broken_power_law(samples, data):
     """
-    Plot two stacked panels of the smooth broken power law using posterior medians.
-      Top:    (eta_sigma, eta_A2)
-      Bottom: (eta_tau, eta_tau2)
+    Plot the single power-law wavelength scaling using posterior medians.
+      Top: sigma scaling
+      Bottom: tau scaling
     Both share x = log10(lambda) and show a linear-lambda axis on top.
 
     Parameters
     ----------
     samples : dict
         Posterior samples with keys:
-        eta_sigma, eta_A2, eta_tau, eta_tau2, eta_break, lam_s
+        eta_sigma, eta_tau
     data : unused (placeholder for future use)
     """
-    log_pl = log_broken_pl if broken_pl else log_single_pl
     # --- posterior medians ---
+    def _median_or_default(key, default):
+        if key not in samples:
+            return default
+        arr = np.asarray(samples[key], dtype=float)
+        if arr.size == 0 or not np.any(np.isfinite(arr)):
+            return default
+        return float(np.nanmedian(arr))
+
     pm = {
-        "eta_sigma": np.median(np.asarray(samples["eta_sigma"])),
-        "eta_A2": np.median(np.asarray(samples["eta_A2"])),
-        "eta_tau": np.median(np.asarray(samples["eta_tau"])),
-        "eta_tau2": np.median(np.asarray(samples["eta_tau2"])),
-        "eta_break": np.median(np.asarray(samples["eta_break"])),
-        "lam_s": np.median(np.asarray(samples["lam_s"])),
+        "eta_sigma": _median_or_default("eta_sigma", np.nan),
+        "eta_tau": _median_or_default("eta_tau", np.nan),
     }
-    eta_sigma, eta_A2 = pm["eta_sigma"], pm["eta_A2"]
-    eta_tau, eta_tau2 = pm["eta_tau"], pm["eta_tau2"]
-    eta_break, lam_s = pm["eta_break"], pm["lam_s"]
+    eta_sigma = pm["eta_sigma"]
+    eta_tau = pm["eta_tau"]
+    lam_s = 2500.0
 
     # --- wavelength grid ---
     xlog = np.linspace(2.9, 3.9, 600)
     lam = 10.0**xlog
-    y_amp = log_pl(lam, lam_s, eta_sigma, eta_A2, eta_break)
-    y_tau = log_pl(lam, lam_s, eta_tau, eta_tau2, eta_break)
+    y_amp = log_single_pl(lam, lam_s, eta_sigma)
+    y_tau = log_single_pl(lam, lam_s, eta_tau)
 
     fig, (ax1, ax2) = plt.subplots(
         2, 1, figsize=(8, 4*2), sharex=True, constrained_layout=True
@@ -447,14 +449,14 @@ def plot_broken_power_law(samples, data, broken_pl):
 
     # --- top panel ---
     ax1.plot(xlog, y_amp, lw=2.0,
-             label=fr'$\eta_\sigma=({eta_sigma:.2f},{eta_A2:.2f}),\ s={eta_break:.2f}$')
+             label=fr'$\eta_\sigma={eta_sigma:.2f}$')
     prettify(ax1)
     ax1.set_ylabel(r'$\log_{10}\,f_A(\lambda)$')
     ax1.legend(frameon=False, loc="best")
 
     # --- bottom panel ---
     ax2.plot(xlog, y_tau, lw=2.0,
-             label=fr'$\eta_\tau=({eta_tau:.2f},{eta_tau2:.2f}),\ s={eta_break:.2f}$')
+             label=fr'$\eta_\tau={eta_tau:.2f}$')
     prettify(ax2)
     ax2.set_xlabel(r'$\log_{10}\,\lambda\ \mathrm{(\AA)}$')
     ax2.set_ylabel(r'$\log_{10}\,f_\tau(\lambda)$')
@@ -930,16 +932,27 @@ def plot_mcmc_traces(samples_dict, data):
     """
     logging.info("Plotting MCMC Traces")
 
-    total_traces = len(samples_dict)
+    excluded_prefixes = ("tau_fast_", "tau_slow_")
+    trace_items = [
+        (key, value)
+        for key, value in samples_dict.items()
+        if not key.startswith(excluded_prefixes)
+    ]
+
+    total_traces = len(trace_items)
+    if total_traces == 0:
+        logging.warning("No trace parameters left to plot after exclusions.")
+        return
+
     fig, axes = plt.subplots(total_traces, 1, figsize=(12, 2.5 * total_traces), sharex=True)
     if total_traces == 1:
         axes = [axes]
 
-    for idx, key in enumerate(samples_dict.keys()):
+    for idx, (key, values) in enumerate(trace_items):
         if 'log_' in key:
-            axes[idx].plot(samples_dict[key] / np.log(10), alpha=0.7)
+            axes[idx].plot(values / np.log(10), alpha=0.7)
         else:
-            axes[idx].plot(samples_dict[key], alpha=0.7)
+            axes[idx].plot(values, alpha=0.7)
         axes[idx].set_ylabel(key)
         axes[idx].grid(True)
 
@@ -1037,20 +1050,44 @@ def _prep_matrix(
         idx = np.random.default_rng().choice(n_total, size=max_points, replace=False)
 
     cols = []
+    kept_labels = []
+    dropped_cols = []
     for k in labels:
         a = np.asarray(samples_flat[k]).ravel()
         if idx is not None:
             a = a[idx]
         if log10_if_startswith and k.startswith(log10_if_startswith):
             a = a / np.log(10.0)  # ln -> log10
+        finite_frac = float(np.mean(np.isfinite(a))) if a.size else 0.0
+        if finite_frac < 1.0:
+            dropped_cols.append((k, finite_frac))
+            continue
         cols.append(a.astype(np.float32, copy=False))
+        kept_labels.append(k)
+
+    if dropped_cols:
+        preview = ", ".join(f"{name}({frac:.1%} finite)" for name, frac in dropped_cols[:12])
+        logging.warning(
+            "Dropping %d non-finite parameter column(s) from plotting matrix: %s%s",
+            len(dropped_cols),
+            preview,
+            " ..." if len(dropped_cols) > 12 else "",
+        )
+
+    if not cols:
+        detail = ", ".join(f"{name}({frac:.1%})" for name, frac in dropped_cols[:20])
+        raise ValueError(f"No fully finite sample columns available for plotting. Offenders: {detail}")
+
     X = np.column_stack(cols)
+    labels = kept_labels
 
     # drop rows with any NaN/Inf
     finite = np.all(np.isfinite(X), axis=1)
     X = X[finite]
     if X.shape[0] == 0:
-        raise ValueError("No finite samples to plot after cleaning.")
+        raise ValueError(
+            f"No finite samples to plot after cleaning for columns: {labels}"
+        )
 
     # jitter near-constant columns (keep them visible)
     ptp = np.ptp(X, axis=0)
@@ -1340,7 +1377,6 @@ def plot_sigma_tau_vs_lambda_with_model(
     rows,                 # list[dict], each dict = one object
     bands=('u', 'g', 'r', 'i', 'z'),
     *,
-    broken_pl=False,      # if False, use single PL instead of broken PL for model ribbon
     inject_fake=False,
     residual=True,        # subtract UV from BOTH σ and τ
     show=False,
@@ -1354,7 +1390,7 @@ def plot_sigma_tau_vs_lambda_with_model(
     - The model ribbon uses medians over available rows/fields.
 
     Requires external: lambda_pivot (dict band->Å), colors (dict band->color),
-                       log_broken_pl, log_single_pl, prefix, suffix.
+                       log_single_pl, prefix, suffix.
     """
     if not rows:
         raise ValueError("`rows` is empty.")
@@ -1383,13 +1419,18 @@ def plot_sigma_tau_vs_lambda_with_model(
         key = f"{prefix_key}_{b}"
         return np.asarray([getf(r, key) for r in rows], dtype=float)
 
-    def med(key):
+    def med(key, default=np.nan):
         a = arr(key)
+        if a.size == 0 or not np.any(np.isfinite(a)):
+            return float(default)
         return float(np.nanmedian(a))
 
-    def med_err(key):
+    def med_err(key, default=np.nan):
         # Median of per-row 1σ uncertainties (missing -> NaN)
-        return float(np.nanmedian(arr(key)))
+        a = arr(key)
+        if a.size == 0 or not np.any(np.isfinite(a)):
+            return float(default)
+        return float(np.nanmedian(a))
 
     # UV refs (may be missing per-row)
     z      = arr('z')
@@ -1459,19 +1500,13 @@ def plot_sigma_tau_vs_lambda_with_model(
     loglam_grid = np.log10(lam_grid)
 
     # Population medians (robust to missing values)
-    lam_s_med = med('lam_s')
-    ds_med    = med('eta_break')
-
+    lam_s_med = 2500.0
     eta_sigma_med = med('eta_sigma')
-    eta_A2_med = med('eta_A2')
     eta_tau_med = med('eta_tau')
-    eta_tau2_med = med('eta_tau2')
 
     # Median 1σ (per-object errors summarized by median)
     sig_eta_sigma = med_err('eta_sigma_err')
-    sig_eta_A2 = med_err('eta_A2_err')
     sig_eta_t1 = med_err('eta_tau_err')
-    sig_eta_t2 = med_err('eta_tau2_err')
 
     # Intercepts (already log10). For τ, convert to RF then median; residualize if requested.
     sig0_all = arr('log_sigma_uv') - (sig_uv if residual else 0.0)
@@ -1482,15 +1517,12 @@ def plot_sigma_tau_vs_lambda_with_model(
     sig0_med = float(np.nanmedian(sig0_all))
     tau0_med = float(np.nanmedian(tau0_rf_all))
 
-    def shp(e1, e2):
-        if broken_pl:
-            return log_broken_pl(lam_grid, lam_s_med, e1, e2, ds_med)
-        else:
-            return log_single_pl(lam_grid, lam_s_med, e1)
+    def shp(e1):
+        return log_single_pl(lam_grid, lam_s_med, e1)
 
     # Central curves
-    center_sigma = sig0_med + shp(eta_sigma_med, eta_A2_med)
-    center_tau   = tau0_med + shp(eta_tau_med, eta_tau2_med)
+    center_sigma = sig0_med + shp(eta_sigma_med)
+    center_tau   = tau0_med + shp(eta_tau_med)
 
     # Four-corner envelopes (η1±σ1, η2±σ2); handle NaN sigmas gracefully
     def _nan_safe(v, dv):
@@ -1499,21 +1531,15 @@ def plot_sigma_tau_vs_lambda_with_model(
         return lo, hi
 
     A1_lo, A1_hi = _nan_safe(eta_sigma_med, sig_eta_sigma)
-    A2_lo, A2_hi = _nan_safe(eta_A2_med, sig_eta_A2)
     T1_lo, T1_hi = _nan_safe(eta_tau_med, sig_eta_t1)
-    T2_lo, T2_hi = _nan_safe(eta_tau2_med, sig_eta_t2)
 
     sigma_corners = np.vstack([
-        sig0_med + shp(A1_lo, A2_lo),
-        sig0_med + shp(A1_lo, A2_hi),
-        sig0_med + shp(A1_hi, A2_lo),
-        sig0_med + shp(A1_hi, A2_hi),
+        sig0_med + shp(A1_lo),
+        sig0_med + shp(A1_hi),
     ])
     tau_corners = np.vstack([
-        tau0_med + shp(T1_lo, T2_lo),
-        tau0_med + shp(T1_lo, T2_hi),
-        tau0_med + shp(T1_hi, T2_lo),
-        tau0_med + shp(T1_hi, T2_hi),
+        tau0_med + shp(T1_lo),
+        tau0_med + shp(T1_hi),
     ])
 
     sigma_lo = np.nanmin(sigma_corners, axis=0)
@@ -1535,8 +1561,8 @@ def plot_sigma_tau_vs_lambda_with_model(
         alpha_sigma_med = med('alpha_sigma')
         beta_tau_med    = med('beta_tau')
 
-        fake_sigma_curve = sig0_med + shp(alpha_sigma_med, alpha_sigma_med)
-        fake_tau_curve   = tau0_med + shp(beta_tau_med,    beta_tau_med)
+        fake_sigma_curve = sig0_med + shp(alpha_sigma_med)
+        fake_tau_curve   = tau0_med + shp(beta_tau_med)
 
         ax1.plot(loglam_grid, fake_sigma_curve, ls='--', lw=1.2, color='0.25',
                  zorder=4, label='Injected σ-slope')
@@ -1559,7 +1585,7 @@ def plot_sigma_tau_vs_lambda_with_model(
 
     # top linear-Å axis
     def loglam_to_A(x): return np.power(10.0, x)
-    def A_to_loglam(x): return np.log10(x)
+    def A_to_loglam(x): return np.log10(np.clip(x, 1e-12, None))
     secax = ax1.secondary_xaxis('top', functions=(loglam_to_A, A_to_loglam))
     secax.set_xlabel(r'$\lambda_{\mathrm{RF}}\;(\mathrm{\AA})$')
     secax.tick_params(direction='in', which='both', top=True)
@@ -1590,25 +1616,21 @@ def plot_sigma_tau_vs_lambda_with_model(
         ax1.legend(handles=handles, loc='best', frameon=False, ncol=2, fontsize=9)
 
     # ---------- annotations (median params; robust to NaNs) ----------
-    txt_sigma = (rf'$\eta_{{\sigma,1}} = {eta_sigma_med:+.3f}\,\pm\,{sig_eta_sigma:.3f}$' '\n'
-                 rf'$\eta_{{\sigma,2}} = {eta_A2_med:+.3f}\,\pm\,{sig_eta_A2:.3f}$')
+    txt_sigma = rf'$\eta_{{\sigma}} = {eta_sigma_med:+.3f}\,\pm\,{sig_eta_sigma:.3f}$'
     if inject_fake and have_fake_fields and np.isfinite(alpha_sigma_med):
         d1 = eta_sigma_med - alpha_sigma_med
-        d2 = eta_A2_med - alpha_sigma_med
         txt_sigma += ('\n' +
                       rf'$\alpha_\sigma^\mathrm{{(inj)}} = {alpha_sigma_med:+.3f}$' '\n' +
-                      rf'$\Delta\eta_{{\sigma,1}} = {d1:+.3f},\;\Delta\eta_{{\sigma,2}} = {d2:+.3f}$')
+                      rf'$\Delta\eta_{{\sigma}} = {d1:+.3f}$')
     ax1.text(0.02, 0.96, txt_sigma, transform=ax1.transAxes, va='top', ha='left', alpha=1.0,
              fontsize=10, bbox=dict(boxstyle='round,pad=0.25', fc='white', lw=0.8), zorder=10)
 
-    txt_tau = (rf'$\eta_{{\tau,1}} = {eta_tau_med:+.3f}\,\pm\,{sig_eta_t1:.3f}$' '\n'
-               rf'$\eta_{{\tau,2}} = {eta_tau2_med:+.3f}\,\pm\,{sig_eta_t2:.3f}$')
+    txt_tau = rf'$\eta_{{\tau}} = {eta_tau_med:+.3f}\,\pm\,{sig_eta_t1:.3f}$'
     if inject_fake and have_fake_fields and np.isfinite(beta_tau_med):
         d1t = eta_tau_med - beta_tau_med
-        d2t = eta_tau2_med - beta_tau_med
         txt_tau += ('\n' +
                     rf'$\beta_\tau^\mathrm{{(inj)}} = {beta_tau_med:+.3f}$' '\n' +
-                    rf'$\Delta\eta_{{\tau,1}} = {d1t:+.3f},\;\Delta\eta_{{\tau,2}} = {d2t:+.3f}$')
+                    rf'$\Delta\eta_{{\tau}} = {d1t:+.3f}$')
     ax2.text(0.02, 0.96, txt_tau, transform=ax2.transAxes, va='top', ha='left', alpha=1.0,
              fontsize=10, bbox=dict(boxstyle='round,pad=0.25', fc='white', lw=0.8), zorder=10)
 
@@ -1619,9 +1641,7 @@ def plot_sigma_tau_vs_lambda_with_model(
         print(f"[diag] slope(points) d logτ / d logλ ≈ {slope_pts:+.3f}")
         print(f"[diag] slope(model ) d logτ / d logλ ≈ {slope_model:+.3f}")
         print(f"[diag] medians: ησ={eta_sigma_med:+.3f}±{sig_eta_sigma:.3f}, "
-              f"ηA2={eta_A2_med:+.3f}±{sig_eta_A2:.3f}, "
-              f"ητ1={eta_tau_med:+.3f}±{sig_eta_t1:.3f}, "
-              f"ητ2={eta_tau2_med:+.3f}±{sig_eta_t2:.3f}")
+              f"ητ={eta_tau_med:+.3f}±{sig_eta_t1:.3f}")
 
     # ---------- save ----------
     out_dir = f"plots/multiband/{prefix}/powerlaw/"

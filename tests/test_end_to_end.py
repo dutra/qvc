@@ -139,7 +139,7 @@ def test_end_to_end(tmp_path, monkeypatch):
     samples_flat = mcmc.get_samples(group_by_chain=False)
     samples_flat = tree_map(lambda x: np.asarray(device_get(x)), samples_flat)
     flat_per_band = flatten_flat_samples_per_band(samples_flat, bands=bands)
-    result = process_samples(flat_per_band, obj, broken_pl=False, bands=bands)
+    result = process_samples(flat_per_band, obj, bands=bands)
 
     quasar = {
         "object_id": obj["object_id"],
