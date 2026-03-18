@@ -109,22 +109,9 @@ For the full list of options:
 ```bash
 python -m qvc.light_curve.fit_light_curves --help
 ```
-
-
----
-# TBD
-
-## 2) Spectral Fitting
-
-This step uses the light-curve output from the previous section and fits the corresponding spectra.
-
-TBD
-
 ---
 
-## 3) Hubble-Diagram Fitting
-
-TBD
+3) Hubble-Diagram Fitting
 
 A subset of Hubble-diagram fitting and plotting can be run via:
 
@@ -132,60 +119,34 @@ A subset of Hubble-diagram fitting and plotting can be run via:
 
 Expected outputs resemble **Figures 2, 3, and 7**.
 
-To reproduce all Hubble-diagram plots from the manuscript, use the saved _dynesty checkpoints_ downloaded with the full data file. The full fitting procedure can be run with:
+To reproduce all Hubble-diagram plots from the manuscript, the full fitting procedure can be run with:
 
 ```bash
-PREFIX=demo \
-python -m hubble.hubble_fit --resume \
+python -m qvc.hubble.hubble_fit \ 
     --cosmo_models FlatLambdaCDM FlatwCDM Flatw0waCDM \
-    --run full \
-    --speed production \
-    --spectra_fit_csv "results/data/nov12a_11c_single_scratch_nov10a_carma_removemix_fixmeanband_no1pluszflux2L_freeiron_mc50_best.csv" \
-    --sdss_mags_csv "results/data/nov2_sdss_mags.csv" \
-    --zquery_csv "results/data/sep19_chisq_zquery.csv" \
-    --z_range 0.44 3.16 \
+    --run full \ 
+    --wrms_cut 1.2 \ 
+    --fhost_cut 0.1 \ 
+    --iron_frac_cut 0.001 \ 
+    --bc_frac_cut 0.001 \ 
+    --chi_sq_cut 10.0 \ 
+    --speed fast \ 
+    --spectra_fit_csv results/data/jaxqsofit_mar15c.csv \ 
+    --z_range 0.44 3.16 \ 
+    --result_prefix fiducial \ 
+    --prefix demo \ 
+    --pickled \ 
     "results/data/nov10a_single_chisq_carma_mixscalar_nozband_highertaufastlim_removemix_fixband_lagblrband_chisq_spl_nofhost_bwb_lmc-6_N1w1000s200t14ch4.h5"
 ```
 
-The `--resume` flag loads the dynesty checkpoint.
+---
+# TBD
 
-### Restricted redshift fit
+## 3) Spectral Fitting
+TBD 
 
-For the restricted redshift interval (**z = 1.0–3.16**):
+This step uses the light-curve output from the previous section and fits the corresponding spectra.
 
-```bash
-PREFIX=demo_zonecut \
-python -m hubble.hubble_fit --resume \
-    --cosmo_models FlatLambdaCDM FlatwCDM Flatw0waCDM \
-    --run full \
-    --speed production \
-    --spectra_fit_csv "results/data/nov12a_11c_single_scratch_nov10a_carma_removemix_fixmeanband_no1pluszflux2L_freeiron_mc50_best.csv" \
-    --sdss_mags_csv "results/data/nov2_sdss_mags.csv" \
-    --zquery_csv "results/data/sep19_chisq_zquery.csv" \
-    --z_range 1.0 3.16 \
-    "results/data/nov10a_single_chisq_carma_mixscalar_nozband_highertaufastlim_removemix_fixband_lagblrband_chisq_spl_nofhost_bwb_lmc-6_N1w1000s200t14ch4.h5"
-```
-
-As with `light_curve.fit_light_curves`, `hubble.hubble_fit` uses the `PREFIX` environment variable.
-
-Outputs:
-
-* All Hubble-diagram plots, tables, and results are generated under: `figures/hubble/`
-
-Expected figures:
-
-* **Figures 2–8, A1, and A2** under `figures/hubble/` for:
-
-  * `FlatLambdaCDM`
-  * `FlatwCDM`
-  * `Flatw0waCDM`
-
-Additional outputs:
-
-* **Table 4**
-* A printed summary of the cosmological model with the highest evidence (expected: `Flatw0waCDM`)
-
-Typical runtime (demo checkpoints): **< 1 hour**.
 
 ---
 
