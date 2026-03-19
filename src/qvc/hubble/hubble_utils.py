@@ -666,11 +666,24 @@ def read_quasars_from_hdf5_flat(file_path, N=None):
         if not keys:
             return []
 
-        columns = {key: hdf[key][...] for key in keys}
+        columns = {}
+        scalar_metadata = {}
+        for key in keys:
+            values = hdf[key][...]
+            arr = np.asarray(values)
+            if arr.ndim == 0:
+                scalar_metadata[key] = _decode_scalar(arr.item())
+                continue
+            columns[key] = values
+
+        if not columns:
+            return []
+
         if "object_id" in columns:
             n_rows = int(np.asarray(columns["object_id"]).shape[0])
         else:
-            n_rows = int(np.asarray(columns[keys[0]]).shape[0])
+            first_col = next(iter(columns.values()))
+            n_rows = int(np.asarray(first_col).shape[0])
 
         if N is not None and N >= 0:
             n_rows = min(n_rows, int(N))
@@ -713,6 +726,9 @@ def read_quasars_from_hdf5_flat(file_path, N=None):
                 while ordered and _is_missing_value(ordered[-1]):
                     ordered.pop()
                 row[base] = np.asarray(ordered)
+
+            for meta_key, meta_value in scalar_metadata.items():
+                row[meta_key] = meta_value
 
             quasars.append(row)
     return quasars

@@ -2,6 +2,7 @@ import h5py
 import os
 import numpy as np
 import jax.numpy as jnp
+import subprocess
 
 prefix = os.environ.get('PREFIX', "test")
 suffix = os.environ.get('SUFFIX', "test")
@@ -33,6 +34,60 @@ import jax.numpy as jnp
 from datetime import datetime
 
 import numpy as np
+
+
+_GIT_COMMIT_SENTINEL = object()
+_GIT_COMMIT_CACHE = _GIT_COMMIT_SENTINEL
+_RUN_METADATA_KEYS = {"git_commit", "run_datetime"}
+
+
+def _get_current_git_commit():
+    """
+    Resolve current git commit hash once per process.
+    Returns an empty string when unavailable.
+    """
+    global _GIT_COMMIT_CACHE
+    if _GIT_COMMIT_CACHE is not _GIT_COMMIT_SENTINEL:
+        return _GIT_COMMIT_CACHE
+
+    try:
+        proc = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=os.path.dirname(__file__),
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        _GIT_COMMIT_CACHE = proc.stdout.strip()
+    except Exception as exc:
+        logging.warning("Could not resolve git commit for HDF5 metadata: %s", exc)
+        _GIT_COMMIT_CACHE = ""
+    return _GIT_COMMIT_CACHE
+
+
+def _current_local_datetime_iso8601():
+    """
+    Return local datetime with timezone offset in ISO8601 format.
+    Example: 2026-03-19T16:14:33-04:00
+    """
+    return datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def _write_hdf5_run_metadata(hdf):
+    """
+    Write run metadata as root-level scalar datasets.
+    """
+    string_dt = h5py.string_dtype(encoding="utf-8")
+    metadata = {
+        "git_commit": _get_current_git_commit(),
+        "run_datetime": _current_local_datetime_iso8601(),
+    }
+
+    for key, value in metadata.items():
+        if key in hdf:
+            del hdf[key]
+        hdf.create_dataset(key, data=np.asarray(value, dtype=string_dt), dtype=string_dt)
 
 def pad_batch(batch_data, nBands):
     """
@@ -441,6 +496,8 @@ def load_all_samples_from_hdf5(file_path=None):
     samples = {}
     with h5py.File(file_path, "r") as hdf:
         for key in hdf.keys():
+            if key in _RUN_METADATA_KEYS:
+                continue
             samples[key] = np.array(hdf[key])
 
     logging.info(f"Loaded {len(samples)} datasets from {file_path}")
@@ -459,6 +516,7 @@ def save_all_samples_to_hdf5(samples):
     logging.info(f"Saving all samples to {file_path}")
 
     with h5py.File(file_path, "w") as hdf:
+        _write_hdf5_run_metadata(hdf)
         for key, value in samples.items():
             hdf.create_dataset(key, data=value)
     logging.info(f"Saved all samples to {file_path}")
@@ -480,6 +538,8 @@ def load_obj_samples_from_hdf5(object_id=None, file_path=None):
     samples = {}
     with h5py.File(file_path, "r") as hdf:
         for key in hdf.keys():
+            if key in _RUN_METADATA_KEYS:
+                continue
             samples[key] = np.array(hdf[key])
 
     logging.info(f"Loaded {len(samples)} datasets from {file_path}")
@@ -501,6 +561,7 @@ def save_obj_samples_to_hdf5(samples, object_id):
     logging.info(f"Saving samples for object_id {object_id} to {file_path}")
 
     with h5py.File(file_path, "w") as hdf:
+        _write_hdf5_run_metadata(hdf)
         for key, value in samples.items():
             hdf.create_dataset(key, data=value)
     logging.info(f"Saved samples for object_id {object_id} to {file_path}")
@@ -656,6 +717,7 @@ def save_quasar_list_hdf5(quasars, ignored_keys=None, size_threshold=1024):
         all_columns.update(row.keys())
 
     with h5py.File(file_path, "w") as hdf:
+        _write_hdf5_run_metadata(hdf)
         for col in sorted(all_columns):
             values = [row.get(col, None) for row in rows]
             arr = _build_column(values)

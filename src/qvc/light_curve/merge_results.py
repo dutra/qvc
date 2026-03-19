@@ -7,6 +7,7 @@ import pickle
 import sys
 
 import h5py
+import numpy as np
 from tqdm import tqdm
 
 from qvc.hubble.hubble_utils import populate_sdss_fields, read_quasars_from_hdf5_flat
@@ -14,6 +15,47 @@ from qvc.hubble.hubble_utils import populate_sdss_fields, read_quasars_from_hdf5
 
 def read_quasars_from_h5(h5_path):
     return read_quasars_from_hdf5_flat(h5_path)
+
+
+def _decode_h5_scalar(value):
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    if isinstance(value, np.generic):
+        value = value.item()
+        if isinstance(value, bytes):
+            return value.decode("utf-8", errors="replace")
+    return value
+
+
+def _read_h5_scalar_key(file_path, key):
+    """
+    Read a scalar/length-1 dataset from root and return string value.
+    Returns empty string when missing/unreadable.
+    """
+    try:
+        with h5py.File(file_path, "r") as hdf:
+            if key not in hdf:
+                print(f"WARNING: Missing metadata key '{key}' in {file_path}; using empty string.")
+                return ""
+
+            data = hdf[key][...]
+            arr = np.asarray(data)
+            if arr.ndim == 0:
+                value = _decode_h5_scalar(arr.item())
+                return "" if value is None else str(value)
+
+            if arr.ndim == 1 and arr.shape[0] == 1:
+                value = _decode_h5_scalar(arr[0])
+                return "" if value is None else str(value)
+
+            print(
+                f"WARNING: Metadata key '{key}' in {file_path} is not scalar/length-1 "
+                f"(shape={arr.shape}); using empty string."
+            )
+            return ""
+    except Exception as exc:
+        print(f"WARNING: Failed reading metadata key '{key}' from {file_path}: {exc}")
+        return ""
 
 
 def write_quasars_to_csv(quasars, csv_path, fields=None):
@@ -144,9 +186,14 @@ def load_and_merge_h5(file_list, expected_n):
     all_quasars = []
     for path in tqdm(file_list, desc="Merging HDF5 shards", unit="file"):
         try:
+            source_git_commit = _read_h5_scalar_key(path, "git_commit")
+            source_run_datetime = _read_h5_scalar_key(path, "run_datetime")
             qs = read_quasars_from_h5(path)
             if not enforce_expected_count(len(qs), expected_n, path):
                 continue
+            for row in qs:
+                row["git_commit"] = source_git_commit
+                row["run_datetime"] = source_run_datetime
             all_quasars.extend(qs)
         except Exception as e:
             print(f"ERROR reading {path}: {e}")
