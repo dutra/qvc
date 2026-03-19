@@ -57,10 +57,6 @@ def download_and_extract(url, folder):
 
 if __name__ == "__main__":
     items = [
-        # production hubble posteriors
-        ("https://drive.google.com/file/d/1WWLtKjTlVQr_qs1Q6VtnJQZc25g3XZ-6/view?usp=sharing", "results/hubble_posteriors"),
-        # test hubble posteriors
-        ("https://drive.google.com/file/d/1PuQTpsEP_S-6rJF6VddOOk-RghbuLOci/view?usp=sharing", "results/hubble_posteriors"),
         # AGN data
         ("https://drive.google.com/file/d/1SOsMIjgxnPsS7OKtkTRDaAWy3bwlJhBr/view?usp=sharing", "results/data"),
         # other data

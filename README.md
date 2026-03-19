@@ -14,7 +14,7 @@ A lightweight demo workflow is included to reproduce key figures and validate in
 
 ### Hardware
 - A modern laptop capable of running a Python environment is sufficient to run the demo workflow.
-- Disk space: **~50 MB** is required for the demo fitting a single light curve and fitting a single spectra. For the hubble diagram fitting, all dynesty checkpoints must be downloaded and **~44 GB** is required.
+- Disk space: **~50 MB** is required for the demo fitting a single light curve and fitting a single spectra. For the hubble diagram fitting, all posteriors must be downloaded and **~50MB** is required.
 
 - For improved performance, we recommend **16+ GB RAM** and a modern multi-core CPU.
 
@@ -27,25 +27,23 @@ These routines have been tested on:
 
 ### Software
 - A Python environment is required.
-- Tested with **Python `3.13.5`** and also `3.12.11`.
+- Tested with **Python** `3.12.11`.
 
 We recommend using a virtual environment manager such as **Conda**:
 - https://docs.conda.io/projects/conda/en/stable/user-guide/install/index.html
-
-The list of all python dependencies (installed in the next step) are listed under [environment.yml](environment.yml) for the main environment and [PyQSOFit/environment.yml](PyQSOFit/environment.yml) for PyQSOFit.
 
 ---
 
 ## Installation
 
-Installation typically completes in **under one hour** on a modern machine. Downloading the demo data may take longer depending on network speed.
+Installation typically completes in **a few minutes** on a modern machine. Downloading the demo data may take longer depending on network speed.
 
 ### 1) Create the main (JAX CPU) environment (recommended)
 
 From the repository root:
 
 ```bash
-conda env create -n jaxcpu -f environment.yml
+conda create -n jaxcpu -c conda-forge python=3.12.11
 conda activate jaxcpu
 ```
 
@@ -54,176 +52,66 @@ This **main environment** is used for:
 * Multi-band light-curve fitting
 * Hubble-diagram fitting
 
+Make sure to always activate the conda environment before working with QVC.
 
-### 2) Clone the repository
+### 2) Install EzTaoX
+For now, we need to install EzTaoX from the repository (the one installed with `pip install eztaox` is out-of-date):
+```bash
+git clone https://github.com/LSST-AGN-Variability/EzTaoX
+pip install EzTaoX
+```
+
+### 3) Clone the QVC repository and install
 ```bash
 git clone https://github.com/dutra/qvc.git
 cd qvc
-git checkout preview
-```
-
-### 3) Install the requirements:
-```bash
-pip install -r requirements.txt
-```
-
-### 4) Install `eztaox`
-
-```bash
-cd eztaox
-pip install .
-```
-
-### 5) Install `qvc`
-
-From the `qvc` repository root:
-
-```bash
 pip install -e .
 ```
 
----
-
-## PyQSOFit Environment (for Spectral Fitting)
-
-Spectral fitting relies on PyQSOFit and additional dependencies. We strongly recommend using a **separate environment**.
-
-### 1) Clone PyQSOFit
-
-From the `qvc` repository root:
-
+### 5) Fetch and setup the data files
+Run 
 ```bash
-git clone https://github.com/dutra/PyQSOFit.git
-cd PyQSOFit
+python -m qvc.setup_data
 ```
 
-### 2) Create a dedicated environment
+By default, we only include a single Light Curve (object id 1465126) data under `data/S82`.
+If you have other light curve catalos, please extract them there.
 
-**Important:** Installing `speclite` can downgrade NumPy and may break packages in your main environment. Keep PyQSOFit isolated.
 
-From inside the `PyQSOFit` directory:
-
-```bash
-conda env create -n pyqsofit -f environment.yml
-conda activate pyqsofit
-```
-
-### 3) Install PyQSOFit
-
-```bash
-pip install .
-```
-
----
-
-## Download the Demo Data
-
-1. Download the demo data file *qvc_data_demo.zip* (25 MB) from **`https://drive.google.com/drive/folders/16vBnl0Jnkn2k0y4gxQK9EMJm2tFTemYL?usp=sharing`**
-2. Extract it into the `src/` directory. The folder `data` must be placed in the `src/` directory.
-
-This will allow you to run steps _1) Multi-band Light-Curve Fitting_ and _2) Spectral Fitting_ for a single AGN light curve.
-
-In order to run step _3) Hubble-Diagram Fitting_ in a reasonable amount of time in a laptop, the result of all light curve fits and dynesty checkpoint needs to be downloaded:
-1. Download the results file *qvc_data_full.zip* (24 GB, ~40 GB extracted) from **`https://drive.google.com/drive/folders/16vBnl0Jnkn2k0y4gxQK9EMJm2tFTemYL?usp=sharing`**
-2. Extract and move the folders `data` and `results` into the `src/` directory, overwriting if necessary.
-
----
-
-# Demo Workflow
-
-## 1) Multi-band Light-Curve Fitting
+## Multi-band Light-Curve Fitting
 
 The multi-band fit can be run for a specific Object ID. The demo data includes Object ID **1465126**, which reproduces **Figure 1**.
-
-From the repository root:
-
-```bash
-cd src
-```
-
-Activate the main conda environment `jaxcpu`:
-```bash
-conda activate jaxcpu
-```
-
 Run the multi-band light curve fitting with:
 
 ```bash
 export PREFIX=demo
 export SUFFIX=1465126
-python -m light_curve.fit_light_curves --plot \
-    --progress --nwarm 100 --nsamp 50 --nchains 4 \
-    --max_tree_depth 8 \
-    --disable_fhost \
-    --bwb \
-    --filter_object_id 1465126
+python -m qvc.light_curve.fit_light_curves --plot \
+ --progress --nwarm 200 --nsamp 100 --nchains 4 \
+ --max_tree_depth 8 \
+ --filter_object_id 1465126
 ```
 
-For speed we run the demo with 100 warm up steps, 50 sampling steps, and a max tree depth of 8.
-Figure 1 in the manuscript was produced with 1000 warmup steps, 200 sample steps, and max tree depth of 14.
+For speed we run the demo with 200 warm up steps, 100 sampling steps, and a max tree depth of 8.
+Figure 1 in the manuscript was produced with 2000 warmup steps, 500 sample steps, and max tree depth of 14.
 
 Outputs:
 
-* Fit results: `src/results/data/demo/`
-* Plots: `figures/multiband/demo/`
-* Samples: `src/results/samples/demo/`
+* Fit results: `results/data/demo/`
+* Plots: `plots/multiband/demo/`
+* Samples: `results/samples/demo/`
 
-The expected output is **Figure 1** under `figures/multiband/demo/`.
+The expected output is **Figure 1** under `plots/multiband/demo/`.
 
 Additional options (example): `--rf_length_cut <days>`
 For the full list of options:
 
 ```bash
-python -m light_curve.fit_light_curves --help
+python -m qvc.light_curve.fit_light_curves --help
 ```
-
 ---
 
-## 2) Spectral Fitting
-
-This step uses the light-curve output from the previous section and fits the corresponding spectra.
-
-### Activate the PyQSOFit environment
-
-```bash
-conda activate pyqsofit
-```
-
-**Do not install `speclite` in your main environment.** It can downgrade NumPy and destabilize other dependencies.
-
-### Run the spectral fitting pipeline
-
-1. **Collect**: run multiple template/continuum configurations
-
-```bash
-python -m spectra.fit_spectra results/data/demo/1465126.h5 results/data/demo/1465126.csv \
-    --mode collect --MC_samples 1
-```
-
-2. **Select**: choose best fits with penalties to avoid overfitting Balmer continuum and host components
-
-```bash
-python -m spectra.fit_spectra results/data/demo/1465126.h5 results/data/demo/1465126.csv \
-    --mode select
-```
-
-3. **Single**: sample the selected fit(s) to estimate uncertainties
-
-```bash
-python -m spectra.fit_spectra results/data/demo/1465126.h5 results/data/demo/1465126.csv \
-    --single_csv results/data/demo/1465126.csv \
-    --mode single --MC_samples 50
-```
-
-The output file:
-
-* `results/data/demo/1465126.csv`
-
-This contains spectral-fit results, including the apparent magnitude at **rest-frame 2500 Å**, and can be passed to the Hubble-diagram fitting step via `--spectra_fit_csv`.
-
----
-
-## 3) Hubble-Diagram Fitting
+3) Hubble-Diagram Fitting
 
 A subset of Hubble-diagram fitting and plotting can be run via:
 
@@ -231,60 +119,34 @@ A subset of Hubble-diagram fitting and plotting can be run via:
 
 Expected outputs resemble **Figures 2, 3, and 7**.
 
-To reproduce all Hubble-diagram plots from the manuscript, use the saved _dynesty checkpoints_ downloaded with the full data file. The full fitting procedure can be run with:
+To reproduce all Hubble-diagram plots from the manuscript, the full fitting procedure can be run with:
 
 ```bash
-PREFIX=demo \
-python -m hubble.hubble_fit --resume \
+python -m qvc.hubble.hubble_fit \ 
     --cosmo_models FlatLambdaCDM FlatwCDM Flatw0waCDM \
-    --run full \
-    --speed production \
-    --spectra_fit_csv "results/data/nov12a_11c_single_scratch_nov10a_carma_removemix_fixmeanband_no1pluszflux2L_freeiron_mc50_best.csv" \
-    --sdss_mags_csv "results/data/nov2_sdss_mags.csv" \
-    --zquery_csv "results/data/sep19_chisq_zquery.csv" \
-    --z_range 0.44 3.16 \
+    --run full \ 
+    --wrms_cut 1.2 \ 
+    --fhost_cut 0.1 \ 
+    --iron_frac_cut 0.001 \ 
+    --bc_frac_cut 0.001 \ 
+    --chi_sq_cut 10.0 \ 
+    --speed fast \ 
+    --spectra_fit_csv results/data/jaxqsofit_mar15c.csv \ 
+    --z_range 0.44 3.16 \ 
+    --result_prefix fiducial \ 
+    --prefix demo \ 
+    --pickled \ 
     "results/data/nov10a_single_chisq_carma_mixscalar_nozband_highertaufastlim_removemix_fixband_lagblrband_chisq_spl_nofhost_bwb_lmc-6_N1w1000s200t14ch4.h5"
 ```
 
-The `--resume` flag loads the dynesty checkpoint.
+---
+# TBD
 
-### Restricted redshift fit
+## 3) Spectral Fitting
+TBD 
 
-For the restricted redshift interval (**z = 1.0–3.16**):
+This step uses the light-curve output from the previous section and fits the corresponding spectra.
 
-```bash
-PREFIX=demo_zonecut \
-python -m hubble.hubble_fit --resume \
-    --cosmo_models FlatLambdaCDM FlatwCDM Flatw0waCDM \
-    --run full \
-    --speed production \
-    --spectra_fit_csv "results/data/nov12a_11c_single_scratch_nov10a_carma_removemix_fixmeanband_no1pluszflux2L_freeiron_mc50_best.csv" \
-    --sdss_mags_csv "results/data/nov2_sdss_mags.csv" \
-    --zquery_csv "results/data/sep19_chisq_zquery.csv" \
-    --z_range 1.0 3.16 \
-    "results/data/nov10a_single_chisq_carma_mixscalar_nozband_highertaufastlim_removemix_fixband_lagblrband_chisq_spl_nofhost_bwb_lmc-6_N1w1000s200t14ch4.h5"
-```
-
-As with `light_curve.fit_light_curves`, `hubble.hubble_fit` uses the `PREFIX` environment variable.
-
-Outputs:
-
-* All Hubble-diagram plots, tables, and results are generated under: `figures/hubble/`
-
-Expected figures:
-
-* **Figures 2–8, A1, and A2** under `figures/hubble/` for:
-
-  * `FlatLambdaCDM`
-  * `FlatwCDM`
-  * `Flatw0waCDM`
-
-Additional outputs:
-
-* **Table 4**
-* A printed summary of the cosmological model with the highest evidence (expected: `Flatw0waCDM`)
-
-Typical runtime (demo checkpoints): **< 1 hour**.
 
 ---
 
