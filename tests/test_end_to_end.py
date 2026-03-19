@@ -116,7 +116,6 @@ def test_end_to_end(tmp_path, monkeypatch):
         disable_poly1=False,
         disable_lag_blr=False,
         drop_band_lyman_alpha=False,
-        sigma_tau_uniform=False,
         tau_fast_truncated=False,
     )
 
@@ -157,13 +156,13 @@ def test_end_to_end(tmp_path, monkeypatch):
         "cadence": obj["cadence"],
         "cadence_err": obj["cadence_err"],
         "number_points": obj["number_points"],
-        "log_sigma_UV": float(result["log_sigma_UV"]),
-        "log_sigma_UV_err": float(result["log_sigma_UV_err"]),
-        "log_tau_UV_RF": float(result["log_tau_UV_RF"]),
-        "log_tau_UV_RF_err": float(result["log_tau_UV_RF_err"]),
-        "log_sigma_UV_log_tau_UV_RF_cov_psd": float(result["log_sigma_UV_log_tau_UV_RF_cov_psd"]),
-        "log_sigma_UV_std_psd": float(result["log_sigma_UV_std_psd"]),
-        "log_tau_UV_RF_std_psd": float(result["log_tau_UV_RF_std_psd"]),
+        "log_sigma_uv": float(result["log_sigma_uv"]),
+        "log_sigma_uv_err": float(result["log_sigma_uv_err"]),
+        "log_tau_uv_rf": float(result["log_tau_uv_rf"]),
+        "log_tau_uv_rf_err": float(result["log_tau_uv_rf_err"]),
+        "log_sigma_uv_log_tau_uv_rf_cov_psd": float(result["log_sigma_uv_log_tau_uv_rf_cov_psd"]),
+        "log_sigma_uv_std_psd": float(result["log_sigma_uv_std_psd"]),
+        "log_tau_uv_rf_std_psd": float(result["log_tau_uv_rf_std_psd"]),
         "log_jitter_u": -9.0,
         "log_amp_delta_blr_u": -9.0,
         "log_jitter_g": float(np.percentile(flat_per_band["log_jitter_g"], 50)),
@@ -191,8 +190,8 @@ def test_end_to_end(tmp_path, monkeypatch):
     assert row["object_id"] == obj["object_id"]
     assert row["len_dropped_bands"] == 1
     assert np.isclose(row["t_rf_length"], obj["t_rf_length"])
-    assert np.isclose(row["log_sigma_UV"], result["log_sigma_UV"])
-    assert np.isclose(row["log_tau_UV_RF"], result["log_tau_UV_RF"])
+    assert np.isclose(row["log_sigma_uv"], result["log_sigma_uv"])
+    assert np.isclose(row["log_tau_uv_rf"], result["log_tau_uv_rf"])
     assert np.isclose(row["mags_mean_g"], obj["mags_means"][0])
     assert np.isclose(row["mags_mean_r"], obj["mags_means"][1])
     assert np.isclose(row["mags_mean_i"], obj["mags_means"][2])

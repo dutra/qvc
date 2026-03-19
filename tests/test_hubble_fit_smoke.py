@@ -37,12 +37,12 @@ def _make_fake_agn_sample(n_agn=24, seed=123):
 
     obs_dict = {
         "log_sigma_hat0": log_sigma_hat0,
-        "log_sigma_UV": log_sigma_uv,
-        "log_tau_UV_RF": log_tau_uv,
+        "log_sigma_uv": log_sigma_uv,
+        "log_tau_uv_rf": log_tau_uv,
         "log_sigma_hat0_err": np.full(n_agn, 0.04),
-        "log_sigma_UV_std_psd": np.full(n_agn, 0.05),
-        "log_tau_UV_RF_std_psd": np.full(n_agn, 0.06),
-        "log_sigma_UV_log_tau_UV_RF_cov_psd": np.full(n_agn, 0.001),
+        "log_sigma_uv_std_psd": np.full(n_agn, 0.05),
+        "log_tau_uv_rf_std_psd": np.full(n_agn, 0.06),
+        "log_sigma_uv_log_tau_uv_rf_cov_psd": np.full(n_agn, 0.001),
     }
     params_arr = hubble_model.agn_model_pack_params(true_params)
     obs_arr, _, pivots = hubble_model.agn_model_pack_obs(obs_dict)
@@ -58,12 +58,12 @@ def _make_fake_agn_sample(n_agn=24, seed=123):
             "apparent_mag_2500": apparent_mag,
             "apparent_mag_2500_err": np.full(n_agn, 0.04),
             "log_sigma_hat0": log_sigma_hat0,
-            "log_sigma_UV": log_sigma_uv,
-            "log_tau_UV_RF": log_tau_uv,
+            "log_sigma_uv": log_sigma_uv,
+            "log_tau_uv_rf": log_tau_uv,
             "log_sigma_hat0_err": np.full(n_agn, 0.04),
-            "log_sigma_UV_std_psd": np.full(n_agn, 0.05),
-            "log_tau_UV_RF_std_psd": np.full(n_agn, 0.06),
-            "log_sigma_UV_log_tau_UV_RF_cov_psd": np.full(n_agn, 0.001),
+            "log_sigma_uv_std_psd": np.full(n_agn, 0.05),
+            "log_tau_uv_rf_std_psd": np.full(n_agn, 0.06),
+            "log_sigma_uv_log_tau_uv_rf_cov_psd": np.full(n_agn, 0.001),
             "delta_m_flux_recal": rng.normal(0.0, 0.02, size=n_agn),
         }
     )

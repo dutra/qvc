@@ -211,7 +211,6 @@ def test_compute_parameter_kls_ignores_nonfinite_conditioning_samples():
         disable_poly1=False,
         disable_lag_blr=False,
         drop_band_lyman_alpha=False,
-        sigma_tau_uniform=False,
         tau_fast_truncated=False,
     )
 
@@ -239,6 +238,9 @@ def test_process_samples_keeps_uv_outputs_at_2500_and_stores_band_metadata():
         "log_sigma_center0": log_sigma_center0,
         "log_tau_slow_center0": log_tau_slow_center0,
         "log_tau_fast_center0": log_tau_fast_center0,
+        "log_sigma_uv": log_sigma_center0,
+        "log_tau_uv": log_tau_slow_center0,
+        "log_tau_fast_uv": log_tau_fast_center0,
         "eta_sigma": eta_sigma,
         "eta_tau": eta_tau,
         "log_lag_blr_g": np.asarray(np.log([30.0, 40.0, 50.0])),
@@ -255,14 +257,13 @@ def test_process_samples_keeps_uv_outputs_at_2500_and_stores_band_metadata():
         bands=bands,
     )
 
-    sigma_shift_to_uv = np.log(10.0) * np.asarray(log_single_pl(2500.0, lambda_center_rf, eta_sigma))
-    tau_shift_to_uv = np.log(10.0) * np.asarray(log_single_pl(2500.0, lambda_center_rf, eta_tau))
-    public_log_sigma_uv = log_sigma_center0 + sigma_shift_to_uv
-    public_log_tau_uv = log_tau_slow_center0 + tau_shift_to_uv
-
-    expected_log_sigma_uv = np.percentile(public_log_sigma_uv / np.log(10), 50)
+    expected_log_sigma_uv = np.percentile(log_sigma_center0 / np.log(10), 50)
     expected_log_tau_uv_rf = np.percentile(
-        public_log_tau_uv / np.log(10) - np.log10(1.0 + z),
+        log_tau_slow_center0 / np.log(10) - np.log10(1.0 + z),
+        50,
+    )
+    expected_log_tau_fast_uv_rf = np.percentile(
+        log_tau_fast_center0 / np.log(10) - np.log10(1.0 + z),
         50,
     )
 
@@ -270,9 +271,9 @@ def test_process_samples_keeps_uv_outputs_at_2500_and_stores_band_metadata():
     assert result["n_bands_kept"] == 3
     assert result["bands_kept"] == "g,r,i"
     assert np.isclose(result["log_sigma_uv"], expected_log_sigma_uv)
-    assert np.isclose(result["log_tau_uv"], np.percentile(public_log_tau_uv / np.log(10), 50))
-    assert np.isclose(result["log_sigma_UV"], expected_log_sigma_uv)
-    assert np.isclose(result["log_tau_UV_RF"], expected_log_tau_uv_rf)
+    assert np.isclose(result["log_tau_uv"], np.percentile(log_tau_slow_center0 / np.log(10), 50))
+    assert np.isclose(result["log_tau_uv_rf"], expected_log_tau_uv_rf)
+    assert np.isclose(result["log_tau_fast_uv_rf"], expected_log_tau_fast_uv_rf)
     assert np.isclose(
         result["log_lag_blr_r_RF"],
         np.percentile(np.log10([35.0, 45.0, 55.0]) - np.log10(1.0 + z), 50),
