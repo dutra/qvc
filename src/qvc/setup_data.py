@@ -7,24 +7,30 @@ import shutil
 from tqdm import tqdm
 from colorama import Fore, Style, init
 
-# Initialize colorama for Windows/Linux/Mac compatibility
+# Initialize colorama
 init(autoreset=True)
 
-def download_and_extract(url, folder):
+def download_and_extract(url, folder, filename=None):
     """
-    Downloads files/folders from Google Drive and extracts ZIPs with status updates.
+    Downloads files from Google Drive and extracts ZIPs.
+    Skips download if filename is provided and exists in folder.
     """
     # 1. Setup Directory
     if not os.path.exists(folder):
         os.makedirs(folder)
         print(f"{Fore.CYAN}DIR  {Fore.RESET} Created: {Style.DIM}{folder}")
 
+    # 2. Check if file already exists
+    if filename:
+        target_path = os.path.join(folder, filename)
+        if os.path.exists(target_path):
+            print(f"{Fore.YELLOW}SKIP {Fore.RESET} {filename} already exists in {folder}. Skipping.")
+            return
+
     try:
-        # 2. Download (gdown's built-in progress bar will show here)
         print(f"{Fore.BLUE}GET  {Fore.RESET} Fetching from Drive...")
         
-        # fuzzy=True extracts ID from URL automatically
-        # quiet=False keeps the gdown progress bar visible
+        # Download to a temporary path first
         path = gdown.download(url, quiet=False, fuzzy=True)
         
         if not path:
@@ -36,7 +42,6 @@ def download_and_extract(url, folder):
             print(f"{Fore.YELLOW}ZIP  {Fore.RESET} Extracting {path}...")
             
             with zipfile.ZipFile(path, 'r') as zip_ref:
-                # Get list of files to show a mini-progress for extraction if large
                 files = zip_ref.namelist()
                 for file in tqdm(files, desc="      Unzipping", unit="file", leave=False):
                     zip_ref.extract(member=file, path=folder)
@@ -46,32 +51,36 @@ def download_and_extract(url, folder):
         
         # 4. Handle Regular Files
         else:
-            dest_path = os.path.join(folder, os.path.basename(path))
-            # Move only if the file isn't already in the target folder
-            if os.path.abspath(path) != os.path.abspath(dest_path):
-                shutil.move(path, dest_path)
+            # If filename wasn't provided, use the name gdown gave us
+            final_name = filename if filename else os.path.basename(path)
+            dest_path = os.path.join(folder, final_name)
+            
+            # Move and rename if necessary
+            shutil.move(path, dest_path)
             print(f"{Fore.GREEN}OK   {Fore.RESET} File saved: {Style.BRIGHT}{dest_path}")
 
     except Exception as e:
         print(f"{Fore.RED}ERR  {Fore.RESET} Processing failed: {e}")
 
 if __name__ == "__main__":
+    # Format: (URL, Folder, Optional Filename)
     items = [
         # AGN data
-        ("https://drive.google.com/file/d/1SOsMIjgxnPsS7OKtkTRDaAWy3bwlJhBr/view?usp=sharing", "results/data"),
+        ("https://drive.google.com/file/d/1SOsMIjgxnPsS7OKtkTRDaAWy3bwlJhBr/view?usp=sharing", "results/data", 
+         "nov10a_single_chisq_carma_mixscalar_nozband_highertaufastlim_removemix_fixband_lagblrband_chisq_spl_nofhost_bwb_lmc-6_N1w1000s200t14ch4.h5.pkl"),
         # other data
-        ("https://drive.google.com/file/d/1sYr-N-DMpuWpbfdPg6zQ-IryP8InY5TK/view?usp=sharing", "./"),
+        ("https://drive.google.com/file/d/1sYr-N-DMpuWpbfdPg6zQ-IryP8InY5TK/view?usp=sharing", "./", "data/dr16q_prop_May01_2024.fits"),
         # nov2_sdss_mags.csv
-        ("https://drive.google.com/file/d/1TbwmKDeBRDMPIGtQm8GcZhpRhcmsGUBO/view?usp=sharing", 'results/data'),
-        # spectra csv results
-        ("https://drive.google.com/file/d/1AqoIp_gBFk4cnVWg7748g3z9o6d9S7cJ/view?usp=sharing", "results/data"),
+        ("https://drive.google.com/file/d/1TbwmKDeBRDMPIGtQm8GcZhpRhcmsGUBO/view?usp=sharing", 'results/data', "nov2_sdss_mags.csv"),
+        # spectra csv results #jaxqsofit_mar15c.csv
+        ("https://drive.google.com/file/d/17ahDyRx_Lb7KZoIlj4tGoK5k_mrMv96n/view?usp=sharing", "results/data", "jaxqsofit_mar15c.csv"),
     ]
 
     print(f"{Style.BRIGHT}{Fore.MAGENTA}=== Google Drive Batch Downloader ===\n")
     
-    # Global progress bar for the entire list of items
-    for url, folder in tqdm(items, desc="Overall Progress", unit="item"):
-        download_and_extract(url, folder)
+    for item in tqdm(items, desc="Overall Progress", unit="item"):
+        # This unpacks (url, folder) or (url, folder, filename) safely
+        download_and_extract(*item)
         print("-" * 50)
 
     print(f"\n{Fore.GREEN}{Style.BRIGHT}All tasks completed successfully!")
