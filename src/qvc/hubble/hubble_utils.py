@@ -1445,7 +1445,7 @@ def extract_cosmo_results_from_samples(
     logZ_tuple : (float, float) or None
         (logZ, logZerr) from dynesty; None for emcee.
     format_for_latex : bool, optional
-        If True, values are strings like r"$x \pm y$". Otherwise tuples (mean, std).
+        If True, values are strings like r"$x \\pm y$". Otherwise tuples (mean, std).
     value_fmt : str, optional
         Format for numbers when format_for_latex=True (e.g., "{:.2f}").
 
@@ -1479,7 +1479,7 @@ def extract_cosmo_results_from_samples(
     elif cosmo_model == "FlatwCDM":
         model_name_latex = "flat $w$CDM"
     elif cosmo_model == "FlatLambdaCDM":
-        model_name_latex = "flat $\Lambda$CDM"
+        model_name_latex = r"flat $\Lambda$CDM"
     else:
         model_name_latex = cosmo_model
 
