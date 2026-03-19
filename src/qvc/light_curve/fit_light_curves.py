@@ -184,19 +184,15 @@ def eta_tau_prior():
     return dist.Normal(0.5, 0.5)
 
 
-def log_sigma_center0_prior(eta_sigma, lambda_center_rf, *, sigma_tau_uniform=False):
+def log_sigma_center0_prior(eta_sigma, lambda_center_rf):
     sigma_shift = sigma_shift_to_uv(eta_sigma, lambda_center_rf)
-    if sigma_tau_uniform:
-        return dist.Uniform(-2.0 * jnp.log(10.0) - sigma_shift, 0.2 * jnp.log(10.0) - sigma_shift)
     return dist.Normal(-0.6 * jnp.log(10.0) - sigma_shift, 1.0 * jnp.log(10.0))
 
 
-def log_tau_slow_center0_prior(eta_tau, z, lambda_center_rf, *, sigma_tau_uniform=False):
+def log_tau_slow_center0_prior(eta_tau, z, lambda_center_rf):
     shift = tau_shift_to_uv(eta_tau, lambda_center_rf)
     log_tau_uv_high = jnp.log(10**4.0 * (1.0 + z))
     log_tau_uv_low = 0.0
-    if sigma_tau_uniform:
-        return dist.Uniform(log_tau_uv_low - shift, log_tau_uv_high - shift)
     return dist.TruncatedNormal(
         jnp.log(10**2.5 * (1.0 + z)) - shift,
         1.2 * jnp.log(10.0),
@@ -259,7 +255,6 @@ def compute_parameter_kls(
     disable_poly1=False,
     disable_lag_blr=False,
     drop_band_lyman_alpha=False,
-    sigma_tau_uniform=False,
     tau_fast_truncated=False,
 ):
     """Return approximate KL(q||p) for sampled light-curve parameters."""
@@ -284,7 +279,6 @@ def compute_parameter_kls(
                 log_sigma_center0_prior(
                     eta,
                     lambda_center_rf,
-                    sigma_tau_uniform=sigma_tau_uniform,
                 ),
                 x,
             ),
@@ -299,7 +293,6 @@ def compute_parameter_kls(
                     eta,
                     z,
                     lambda_center_rf,
-                    sigma_tau_uniform=sigma_tau_uniform,
                 ),
                 x,
             ),
@@ -309,16 +302,14 @@ def compute_parameter_kls(
     if "log_tau_fast_center0" in flat_samples:
         kls["log_tau_fast_center0_kl"] = conditional_kl_from_samples(
             flat_samples["log_tau_fast_center0"],
-            lambda x, eta: _dist_log_prob_array(
+            lambda x, log_tau_slow: _dist_log_prob_array(
                 log_tau_fast_center0_prior(
-                    eta,
-                    z,
-                    lambda_center_rf,
+                    log_tau_slow,
                     tau_fast_truncated=tau_fast_truncated,
                 ),
                 x,
             ),
-            eta_tau,
+            flat_samples["log_tau_slow_center0"],
         )
 
     if not disable_poly1 and "poly1" in flat_samples:
@@ -738,7 +729,6 @@ def build_single_object_model(
     disable_poly1=False,
     disable_lag_blr=False,
     drop_band_lyman_alpha=False,
-    sigma_tau_uniform=False,
     tau_fast_truncated=False,
 ):
     """Return the NumPyro model for one object."""
@@ -762,7 +752,6 @@ def build_single_object_model(
                 eta_tau,
                 z,
                 lambda_center_rf,
-                sigma_tau_uniform=sigma_tau_uniform,
             ),
         )
 
@@ -779,7 +768,6 @@ def build_single_object_model(
             log_sigma_center0_prior(
                 eta_sigma,
                 lambda_center_rf,
-                sigma_tau_uniform=sigma_tau_uniform,
             ),
         )
 
@@ -917,7 +905,6 @@ def main():
     parser.add_argument("--nsamp", type=int, default=250, help="Samples per chain for MCMC.")
     parser.add_argument("--nchains", type=int, default=2, help="Number of chains (>=1).")
     parser.add_argument("--inject_fake", action="store_true", help="Inject fake light curves.")
-    parser.add_argument("--bwb", action="store_true", help="Accepted for compatibility; ignored in the DHO model.")
     parser.add_argument("--max_tree_depth", type=int, default=8, help="NUTS max tree depth.")
     parser.add_argument("--load_sample_file", action="store_true", help="Load saved samples (debug).")
     parser.add_argument("--disable_poly1", action="store_true", help="Disable trend.")
@@ -926,7 +913,6 @@ def main():
     parser.add_argument("--load_stone_lcs", action="store_true", default=False, help="Use Stone LCs.")
     parser.add_argument("--disable_corner_plot", action="store_true", default=False, help="Disable corner plot.")
     parser.add_argument("--disable_lag_blr", action="store_true", default=False, help="Disable BLR lag model.")
-    parser.add_argument("--sigma_tau_uniform", action="store_true", default=False, help="Uniform priors for sigma/tau.")
     parser.add_argument("--disable_plot_psd", action="store_true", default=False, help="Disable PSD sub-plot.")
     parser.add_argument("--inject_random_fake_etas", action="store_true", default=False, help="Randomize fake etas.")
     parser.add_argument("--beta_tau", type=float, default=0.2, help="beta_tau for fake curves.")
@@ -940,9 +926,6 @@ def main():
     parser.add_argument("--tau_fast_truncated", action="store_true", default=False, help="Truncated prior for tau_fast0.")
     args = parser.parse_args()
     print("Args:", args)
-
-    if args.bwb:
-        logging.info("Ignoring --bwb for fit_light_curves.py; the DHO wrapper does not use the old BWB mixture.")
 
     if args.load_stone_lcs:
         objs = load_stone_lcs(filter_object_ids=args.filter_object_id)
@@ -1025,7 +1008,6 @@ def main():
                 disable_poly1=args.disable_poly1,
                 disable_lag_blr=args.disable_lag_blr,
                 drop_band_lyman_alpha=args.drop_band_lyman_alpha,
-                sigma_tau_uniform=args.sigma_tau_uniform,
                 tau_fast_truncated=args.tau_fast_truncated,
             )
 
@@ -1109,7 +1091,6 @@ def main():
                 disable_poly1=args.disable_poly1,
                 disable_lag_blr=args.disable_lag_blr,
                 drop_band_lyman_alpha=args.drop_band_lyman_alpha,
-                sigma_tau_uniform=args.sigma_tau_uniform,
                 tau_fast_truncated=args.tau_fast_truncated,
             )
 
