@@ -1131,7 +1131,8 @@ def main():
                     logging.error(f"[{oid}] Plotting error: {e}")
                     logging.error(traceback.format_exc())
 
-            final_result = obj | diagnostics | result | kl_result | dict(prefix=prefix, suffix=suffix)
+            final_result = obj | result | kl_result | dict(prefix=prefix, suffix=suffix) 
+            # final_result |= diagnostics
             log_sigma_uv = final_result.get("log_sigma_uv")
             log_sigma_uv_err = final_result.get("log_sigma_uv_err")
             log_tau_uv_rf = final_result.get("log_tau_uv_rf")
