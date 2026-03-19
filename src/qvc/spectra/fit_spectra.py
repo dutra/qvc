@@ -42,7 +42,7 @@ except ValueError:
 os.environ["XLA_FLAGS"] = f"--xla_force_host_platform_device_count={num_cores}"
 os.environ["JAX_PLATFORM_NAME"] = "cpu"
 
-from qvc.hubble.hubble_utils import match_radec, read_quasars_from_hdf5
+from qvc.hubble.hubble_utils import match_radec, read_quasars_from_hdf5_flat
 from jaxqsofit import QSOFit, build_default_prior_config
 
 
@@ -263,16 +263,12 @@ def load_quasar_core_list(fpath_in, pickled=False):
         with open(fpath_in + ".pkl", "rb") as f: 
             quasar_list = pickle.load(f)
     else:
-        quasar_list = read_quasars_from_hdf5(fpath_in)
+        quasar_list = read_quasars_from_hdf5_flat(fpath_in)
     return quasar_list
 
 
 def prepare_sample_df(quasar_list, filter_sdss_name=None, filter_object_id=None, N=None, skip=None):
     for q in quasar_list:
-        mags_mean = q["mags_mean"]
-        if len(mags_mean) == 5:
-            for i, band in enumerate(SDSS_BANDS):
-                q[f"mags_mean_{band}"] = mags_mean[i]
         for band in SDSS_BANDS:
             mag_mean = safe_float(q.get(f"mags_mean_{band}"))
             if np.isfinite(mag_mean):

@@ -468,74 +468,138 @@ def populate_spectra_fit(df, spectra_fit_csvs, best=True):
     return out
 def populate_sdss_fields(objs, progress_bar=True):
     print(f"Populating SDSS fields: {len(objs)}", flush=True)
-    cat = pd.read_parquet(f"data/S82/Catalog.parquet").set_index('idx')
-    hdul = fits.open('data/dr16q_prop_May01_2024.fits')
-    fits_data = hdul[1].data  # Assuming the data is in the first extension    
-    fits_data_2 = hdul[2].data  # Assuming the data is in the first extension    
-    for d in tqdm(objs, desc="Populating SDSS fields", disable=(not progress_bar)):
-        obj = cat.loc[cat['objectId'] == d['object_id']].iloc[0]
-        c1 = SkyCoord(fits_data['RA'], fits_data['DEC'], unit='deg')
-        c2 = SkyCoord(obj['RA'], obj['DEC'], unit='deg')
-        sep = c1.separation(c2).to(u.arcsec)
-        i = np.argwhere(sep < 1*u.arcsec).flatten()
-        if len(i) == 0:
-            print(f"Skipping entry {d['object_id']} as it does not exist in the fits data.")
-            continue
-        if len(i) > 1:
-            print(f"Warning: {d['sdss_name']} found multiple times in SDSS data")
-        i = i[0]  # Get the first index if there are multiple matches
-        d['ra'] = obj['RA']
-        d['dec'] = obj['DEC']
-        d['z'] = fits_data['Z_SYS'][i]
-        d['z_err'] = fits_data['Z_SYS_ERR'][i]
-        d['sdss_name'] = fits_data['SDSS_NAME'][i]
-        d['log_lbol'] = -999.0
-        if d['z'] < 0.7:
-            d['log_lbol'] = np.log10(5.15) + fits_data['LOGL3000'][i]
-            d['log_lbol_err'] = fits_data['LOGL3000_ERR'][i]
-        else:
-            d['log_lbol'] = fits_data['LOGLBOL'][i]
-            d["log_lbol_err"] = fits_data['LOGLBOL_ERR'][i]
+    if not objs:
+        return objs
 
-        logmbh = fits_data['LOGMBH'][i]
-        logmbh_err = fits_data['LOGMBH_ERR'][i]
-        if np.isfinite(logmbh) and logmbh != 0:
-            d['LOGMBH'] = logmbh
-            d['LOGMBH_ERR'] = logmbh_err
-        else:
-            d['LOGMBH'] = np.nan
-            d['LOGMBH_ERR'] = np.nan
-        d['LOGLEDD_RATIO'] = fits_data['LOGLEDD_RATIO'][i]
-        d['LOGLEDD_RATIO_ERR'] = fits_data['LOGLEDD_RATIO_ERR'][i]
-        d['ebv_wu'] = fits_data['EBV'][i]
-        d['sn_median_all'] = fits_data['SN_MEDIAN_ALL'][i]
-        d['M_i'] = fits_data_2['M_I'][i]
-        for b in ['u', 'g', 'r', 'i', 'z']:
-            filters = {'u':0, 'g':1, 'r':2, 'i':3, 'z':4}
-            d[f'PSFMAG_{b}'] = fits_data_2['PSFMAG'][i, filters[b]]
-        d['LOGLBOL'] = fits_data['LOGLBOL'][i]
-        d['LOGL1350'] = fits_data['LOGL1350'][i]
-        d['LOGL1700'] = fits_data['LOGL1700'][i]
-        d['LOGL2500_wu'] = fits_data['LOGL2500'][i]
-        d['LOGL3000'] = fits_data['LOGL3000'][i]
-        d['LOGL5100'] = fits_data['LOGL5100'][i]
-        d['LOGL1350_ERR'] = fits_data['LOGL1350_ERR'][i]
-        d['LOGL1700_ERR'] = fits_data['LOGL1700_ERR'][i]
-        d['LOGL2500_ERR_wu'] = fits_data['LOGL2500_ERR'][i]
-        d['LOGL3000_ERR'] = fits_data['LOGL3000_ERR'][i]
-        d['LOGL5100_ERR'] = fits_data['LOGL5100_ERR'][i]
+    # Keep this parameter for backward compatibility; matching is now vectorized.
+    _ = progress_bar
 
-        d['FHOST_5100'] = fits_data['FHOST_5100'][i]
-        d['EXTINCTION'] = fits_data_2['EXTINCTION'][i, filters['i']]
+    rows = pd.DataFrame(
+        {
+            "row_idx": np.arange(len(objs), dtype=int),
+            "object_id": [o.get("object_id") for o in objs],
+        }
+    )
+    rows["object_id_key"] = rows["object_id"].astype(str)
 
-        d['fhost'] = fits_data['FHOST_5100'][i]
-        with warnings.catch_warnings(record=True) as w:
-            warnings.simplefilter("always")
-            for b in ['u', 'g', 'r', 'i', 'z']:
-                d[f'apparent_mag_{b}'] = -2.5 * np.log10(fits_data_2['PSFFLUX'][i, filters[b]]) + 22.5
-                d[f'apparent_mag_{b}_err'] = 2.5/np.log(10) * np.sqrt(1/fits_data_2['PSFFLUX_IVAR'][i, filters[b]])/fits_data_2['PSFFLUX'][i, filters[b]]
-        if any(issubclass(warning.category, RuntimeWarning) for warning in w):
-            pass
+    cat = pd.read_parquet(resolve_qvc_data_path("data/S82/Catalog.parquet"))
+    cat_lookup = (
+        cat.loc[:, ["objectId", "RA", "DEC"]]
+        .dropna(subset=["objectId", "RA", "DEC"])
+        .assign(object_id_key=lambda d: d["objectId"].astype(str))
+        .drop_duplicates(subset=["object_id_key"], keep="first")
+        .loc[:, ["object_id_key", "RA", "DEC"]]
+    )
+    rows = rows.merge(cat_lookup, on="object_id_key", how="left")
+
+    with fits.open(resolve_qvc_data_path("data/dr16q_prop_May01_2024.fits")) as hdul:
+        fits_data = hdul[1].data
+        fits_data_2 = hdul[2].data
+
+        fits_coords = SkyCoord(ra=fits_data["RA"] * u.deg, dec=fits_data["DEC"] * u.deg)
+
+        valid_coord_mask = rows["RA"].notna() & rows["DEC"].notna()
+        if not np.any(valid_coord_mask):
+            print(f"Skipped {len(objs)} objects: no S82 catalog coordinates found.")
+            return objs
+
+        query_rows = rows.loc[valid_coord_mask, ["row_idx", "RA", "DEC"]].copy()
+        query_coords = SkyCoord(
+            ra=query_rows["RA"].to_numpy() * u.deg,
+            dec=query_rows["DEC"].to_numpy() * u.deg,
+        )
+        nearest_idx, d2d, _ = query_coords.match_to_catalog_sky(fits_coords)
+        match_mask = d2d < (1.0 * u.arcsec)
+
+        matched_query = query_rows.loc[match_mask].copy()
+        matched_query["fits_idx"] = np.asarray(nearest_idx[match_mask], dtype=int)
+
+        if matched_query.empty:
+            missing_catalog = int((~valid_coord_mask).sum())
+            missing_dr16q = int(valid_coord_mask.sum())
+            if missing_catalog:
+                print(f"Skipped {missing_catalog} objects: no S82 catalog coordinates found.")
+            print(f"Skipped {missing_dr16q} objects: no DR16Q match within 1 arcsec.")
+            return objs
+
+        matched_row_idx = matched_query["row_idx"].to_numpy(dtype=int)
+        matched_fits_idx = matched_query["fits_idx"].to_numpy(dtype=int)
+
+        z_vals = np.asarray(fits_data["Z_SYS"])[matched_fits_idx]
+        logl3000 = np.asarray(fits_data["LOGL3000"])[matched_fits_idx]
+        logl3000_err = np.asarray(fits_data["LOGL3000_ERR"])[matched_fits_idx]
+        loglbol = np.asarray(fits_data["LOGLBOL"])[matched_fits_idx]
+        loglbol_err = np.asarray(fits_data["LOGLBOL_ERR"])[matched_fits_idx]
+
+        # Preserve legacy z-dependent luminosity branch.
+        log_lbol = np.where(z_vals < 0.7, np.log10(5.15) + logl3000, loglbol)
+        log_lbol_err = np.where(z_vals < 0.7, logl3000_err, loglbol_err)
+
+        logmbh = np.asarray(fits_data["LOGMBH"])[matched_fits_idx]
+        logmbh_err = np.asarray(fits_data["LOGMBH_ERR"])[matched_fits_idx]
+        valid_logmbh = np.isfinite(logmbh) & (logmbh != 0)
+        logmbh_out = np.where(valid_logmbh, logmbh, np.nan)
+        logmbh_err_out = np.where(valid_logmbh, logmbh_err, np.nan)
+
+        band_to_idx = {"u": 0, "g": 1, "r": 2, "i": 3, "z": 4}
+        psfmag = np.asarray(fits_data_2["PSFMAG"])[matched_fits_idx, :]
+        psfflux = np.asarray(fits_data_2["PSFFLUX"])[matched_fits_idx, :]
+        psfflux_ivar = np.asarray(fits_data_2["PSFFLUX_IVAR"])[matched_fits_idx, :]
+
+        with np.errstate(divide="ignore", invalid="ignore"):
+            apparent_mag = np.where(psfflux > 0, -2.5 * np.log10(psfflux) + 22.5, np.nan)
+            apparent_mag_err = np.where(
+                (psfflux > 0) & (psfflux_ivar > 0),
+                (2.5 / np.log(10.0)) * np.sqrt(1.0 / psfflux_ivar) / psfflux,
+                np.nan,
+            )
+
+        update_fields = {
+            "ra": rows.loc[matched_row_idx, "RA"].to_numpy(),
+            "dec": rows.loc[matched_row_idx, "DEC"].to_numpy(),
+            "z": z_vals,
+            "z_err": np.asarray(fits_data["Z_SYS_ERR"])[matched_fits_idx],
+            "sdss_name": np.asarray(fits_data["SDSS_NAME"])[matched_fits_idx],
+            "log_lbol": log_lbol,
+            "log_lbol_err": log_lbol_err,
+            "LOGMBH": logmbh_out,
+            "LOGMBH_ERR": logmbh_err_out,
+            "LOGLEDD_RATIO": np.asarray(fits_data["LOGLEDD_RATIO"])[matched_fits_idx],
+            "LOGLEDD_RATIO_ERR": np.asarray(fits_data["LOGLEDD_RATIO_ERR"])[matched_fits_idx],
+            "ebv_wu": np.asarray(fits_data["EBV"])[matched_fits_idx],
+            "sn_median_all": np.asarray(fits_data["SN_MEDIAN_ALL"])[matched_fits_idx],
+            "M_i": np.asarray(fits_data_2["M_I"])[matched_fits_idx],
+            "LOGLBOL": loglbol,
+            "LOGL1350": np.asarray(fits_data["LOGL1350"])[matched_fits_idx],
+            "LOGL1700": np.asarray(fits_data["LOGL1700"])[matched_fits_idx],
+            "LOGL2500_wu": np.asarray(fits_data["LOGL2500"])[matched_fits_idx],
+            "LOGL3000": logl3000,
+            "LOGL5100": np.asarray(fits_data["LOGL5100"])[matched_fits_idx],
+            "LOGL1350_ERR": np.asarray(fits_data["LOGL1350_ERR"])[matched_fits_idx],
+            "LOGL1700_ERR": np.asarray(fits_data["LOGL1700_ERR"])[matched_fits_idx],
+            "LOGL2500_ERR_wu": np.asarray(fits_data["LOGL2500_ERR"])[matched_fits_idx],
+            "LOGL3000_ERR": logl3000_err,
+            "LOGL5100_ERR": np.asarray(fits_data["LOGL5100_ERR"])[matched_fits_idx],
+            "FHOST_5100": np.asarray(fits_data["FHOST_5100"])[matched_fits_idx],
+            "fhost": np.asarray(fits_data["FHOST_5100"])[matched_fits_idx],
+            "EXTINCTION": np.asarray(fits_data_2["EXTINCTION"])[matched_fits_idx, band_to_idx["i"]],
+        }
+        for band, bidx in band_to_idx.items():
+            update_fields[f"PSFMAG_{band}"] = psfmag[:, bidx]
+            update_fields[f"apparent_mag_{band}"] = apparent_mag[:, bidx]
+            update_fields[f"apparent_mag_{band}_err"] = apparent_mag_err[:, bidx]
+
+        for local_i, obj_i in enumerate(matched_row_idx):
+            d = objs[obj_i]
+            for key, values in update_fields.items():
+                d[key] = values[local_i]
+
+        missing_catalog = int((~valid_coord_mask).sum())
+        missing_dr16q = int(valid_coord_mask.sum() - len(matched_row_idx))
+        if missing_catalog:
+            print(f"Skipped {missing_catalog} objects: no S82 catalog coordinates found.")
+        if missing_dr16q:
+            print(f"Skipped {missing_dr16q} objects: no DR16Q match within 1 arcsec.")
 
     return objs
 
@@ -572,6 +636,86 @@ def read_quasars_from_hdf5(file_path, N=None):
             if (N is not None) and (N >= 0) and (len(quasar_list) >= N):
                 break
     return quasar_list
+
+
+def read_quasars_from_hdf5_flat(file_path, N=None):
+    """
+    Read a flat columnar HDF5 file (top-level datasets) into list[dict].
+    """
+    def _decode_scalar(x):
+        if isinstance(x, bytes):
+            return x.decode("utf-8", errors="replace")
+        if isinstance(x, np.generic):
+            x = x.item()
+            if isinstance(x, bytes):
+                return x.decode("utf-8", errors="replace")
+            return x
+        return x
+
+    def _is_missing_value(x):
+        if x is None:
+            return True
+        if isinstance(x, float) and np.isnan(x):
+            return True
+        if isinstance(x, str) and x == "":
+            return True
+        return False
+
+    with h5py.File(file_path, "r") as hdf:
+        keys = list(hdf.keys())
+        if not keys:
+            return []
+
+        columns = {key: hdf[key][...] for key in keys}
+        if "object_id" in columns:
+            n_rows = int(np.asarray(columns["object_id"]).shape[0])
+        else:
+            n_rows = int(np.asarray(columns[keys[0]]).shape[0])
+
+        if N is not None and N >= 0:
+            n_rows = min(n_rows, int(N))
+
+        quasars = []
+        for i in range(n_rows):
+            row = {}
+            for key, values in columns.items():
+                if np.asarray(values).shape[0] <= i:
+                    continue
+                row[key] = _decode_scalar(values[i])
+
+            # Rebuild grouped vectors for compatibility with code that expects
+            # array/list-style fields (e.g., base_u..base_z or base_0..base_n).
+            band_groups = defaultdict(dict)
+            index_groups = defaultdict(dict)
+            for key, value in row.items():
+                split_key = key.rsplit("_", 1)
+                if len(split_key) != 2:
+                    continue
+                base, suffix = split_key
+                if suffix in {"u", "g", "r", "i", "z"}:
+                    band_groups[base][suffix] = value
+                    continue
+                if suffix.isdigit():
+                    index_groups[base][int(suffix)] = value
+
+            for base, grouped in band_groups.items():
+                if base in row:
+                    continue
+                ordered = [grouped.get(band, np.nan) for band in ("u", "g", "r", "i", "z")]
+                compact = [v for v in ordered if not _is_missing_value(v)]
+                row[base] = np.asarray(compact if compact else ordered)
+
+            for base, grouped in index_groups.items():
+                if base in row:
+                    continue
+                max_idx = max(grouped.keys())
+                ordered = [grouped.get(j, np.nan) for j in range(max_idx + 1)]
+                while ordered and _is_missing_value(ordered[-1]):
+                    ordered.pop()
+                row[base] = np.asarray(ordered)
+
+            quasars.append(row)
+    return quasars
 
 def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFAULT_F_HOST_CUT,
                   exclude_object_ids_csv=None,
@@ -626,7 +770,7 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
             quasar_list = pickle.load(f)
     else:
         file_path = resolve_qvc_data_path(file_path)
-        quasar_list = read_quasars_from_hdf5(file_path)
+        quasar_list = read_quasars_from_hdf5_flat(file_path)
     print("Number of quasars loaded:", len(quasar_list))
 
     if populate_sdss:
