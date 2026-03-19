@@ -205,19 +205,16 @@ def log_tau_slow_center0_prior(eta_tau, z, lambda_center_rf, *, sigma_tau_unifor
     )
 
 
-def log_tau_fast_center0_prior(eta_tau, z, lambda_center_rf, *, tau_fast_truncated=False):
-    shift = tau_shift_to_uv(eta_tau, lambda_center_rf)
-    log_tau_fast_uv_low = 0.0
-    log_tau_fast_uv_high = jnp.log(100.0 * (1.0 + z))
-    log_tau_fast_uv_c = jnp.log(10.0 * (1.0 + z))
+def log_tau_fast_center0_prior(log_tau_slow_center0, *, tau_fast_truncated=False):
+    mean = jnp.asarray(log_tau_slow_center0) - jnp.log(10.0)
+    sigma = 0.5 * jnp.log(10.0)
     if tau_fast_truncated:
         return dist.TruncatedNormal(
-            log_tau_fast_uv_c - shift,
-            jnp.log(25.0),
-            low=log_tau_fast_uv_low - shift,
-            high=log_tau_fast_uv_high - shift,
+            mean,
+            sigma,
+            high=jnp.asarray(log_tau_slow_center0),
         )
-    return dist.Normal(log_tau_fast_uv_c - shift, jnp.log(25.0))
+    return dist.Normal(mean, sigma)
 
 
 def poly1_prior():
@@ -772,9 +769,7 @@ def build_single_object_model(
         log_tau_fast_center0 = numpyro.sample(
             "log_tau_fast_center0",
             log_tau_fast_center0_prior(
-                eta_tau,
-                z,
-                lambda_center_rf,
+                log_tau_slow_center0,
                 tau_fast_truncated=tau_fast_truncated,
             ),
         )
