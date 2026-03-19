@@ -9,13 +9,13 @@ agn_model_req_params = ("M0_agn", "alpha_agn", "beta_agn",
                         )
 agn_model_req_obs     = (
                         "log_sigma_hat0",
-                        "log_sigma_UV", "log_tau_UV_RF", 
+                        "log_sigma_uv", "log_tau_uv_rf",
                         #'dm_psf_correction',
                         #"PL_slope_blue"
                          )
 agn_model_req_errs   = (
                         "log_sigma_hat0_err",
-                        "log_sigma_UV_std_psd", "log_tau_UV_RF_std_psd", "log_sigma_UV_log_tau_UV_RF_cov_psd",
+                        "log_sigma_uv_std_psd", "log_tau_uv_rf_std_psd", "log_sigma_uv_log_tau_uv_rf_cov_psd",
                         #"dm_psf_correction_err",
                         )
 
@@ -41,8 +41,8 @@ def agn_model_pack_obs(obs_dict):
     obs = np.array([obs_dict[k] for k in agn_model_req_obs],  dtype=float)
     err = np.array([obs_dict[k] for k in agn_model_req_errs], dtype=float)
     pivots = {k: float(np.mean(obs_dict[k])) for k in agn_model_req_obs}
-    pivots["log_tau_UV_RF"] = np.log10(500)
-    pivots["log_sigma_UV"]  = np.log10(0.2)
+    pivots["log_tau_uv_rf"] = np.log10(500)
+    pivots["log_sigma_uv"]  = np.log10(0.2)
     pivots = np.array([pivots[k] for k in agn_model_req_obs], dtype=float)
     return obs, err, pivots
 
@@ -58,10 +58,10 @@ def M_model_agn(params_arr, obs_arr, pivots_array):
     beta_agn  = params_arr[agn_model_pidx["beta_agn"]]
     #gamma_agn = params_arr[agn_model_pidx["gamma_agn"]]
 
-    log_sigma_UV  = obs_arr[agn_model_oidx["log_sigma_UV"]]
-    log_tau_UV_RF = obs_arr[agn_model_oidx["log_tau_UV_RF"]]
-    log_sigma_UV_pivot  = pivots_array[agn_model_oidx["log_sigma_UV"]]
-    log_tau_UV_RF_pivot = pivots_array[agn_model_oidx["log_tau_UV_RF"]]
+    log_sigma_uv  = obs_arr[agn_model_oidx["log_sigma_uv"]]
+    log_tau_uv_rf = obs_arr[agn_model_oidx["log_tau_uv_rf"]]
+    log_sigma_uv_pivot  = pivots_array[agn_model_oidx["log_sigma_uv"]]
+    log_tau_uv_rf_pivot = pivots_array[agn_model_oidx["log_tau_uv_rf"]]
 
     #dm_psf_correction = obs_arr[agn_model_oidx["dm_psf_correction"]]
     #dm_psf_correction_pivot = pivots_array[agn_model_oidx["dm_psf_correction"]]
@@ -73,8 +73,8 @@ def M_model_agn(params_arr, obs_arr, pivots_array):
 
     return (
         M0_agn
-        + alpha_agn * (log_sigma_UV - log_sigma_UV_pivot)
-        + beta_agn  * (log_tau_UV_RF - log_tau_UV_RF_pivot)
+        + alpha_agn * (log_sigma_uv - log_sigma_uv_pivot)
+        + beta_agn  * (log_tau_uv_rf - log_tau_uv_rf_pivot)
         #+ gamma_agn * (dm_psf_correction - dm_psf_correction_pivot)
         #+ logistic(PL_slope_blue, A, k, x0)
         # + alpha_agn * (log_sigma_hat0 - log_sigma_hat0_pivot)
@@ -84,9 +84,9 @@ def M_model_agn_err(params_arr, obs_arr, err_arr, pivots_array, check_negative=F
     alpha_agn   = params_arr[agn_model_pidx["alpha_agn"]]
     beta_agn    = params_arr[agn_model_pidx["beta_agn"]]
     
-    log_sigma_UV_std_psd  = err_arr[agn_model_eidx["log_sigma_UV_std_psd"]]
-    log_tau_UV_RF_std_psd = err_arr[agn_model_eidx["log_tau_UV_RF_std_psd"]]
-    log_sigma_UV_log_tau_UV_RF_cov_psd = err_arr[agn_model_eidx["log_sigma_UV_log_tau_UV_RF_cov_psd"]]
+    log_sigma_uv_std_psd  = err_arr[agn_model_eidx["log_sigma_uv_std_psd"]]
+    log_tau_uv_rf_std_psd = err_arr[agn_model_eidx["log_tau_uv_rf_std_psd"]]
+    log_sigma_uv_log_tau_uv_rf_cov_psd = err_arr[agn_model_eidx["log_sigma_uv_log_tau_uv_rf_cov_psd"]]
 
     # gamma_agn   = params_arr[agn_model_pidx["gamma_agn"]]
     # dm_psf_correction_err = err_arr[agn_model_eidx["dm_psf_correction_err"]]
@@ -94,9 +94,9 @@ def M_model_agn_err(params_arr, obs_arr, err_arr, pivots_array, check_negative=F
     # log_sigma_hat0_err = err_arr[agn_model_eidx["log_sigma_hat0_err"]]
 
     r = (
-          (alpha_agn * log_sigma_UV_std_psd)**2
-        + (beta_agn  * log_tau_UV_RF_std_psd)**2
-        + 2 * alpha_agn * beta_agn * log_sigma_UV_log_tau_UV_RF_cov_psd
+          (alpha_agn * log_sigma_uv_std_psd)**2
+        + (beta_agn  * log_tau_uv_rf_std_psd)**2
+        + 2 * alpha_agn * beta_agn * log_sigma_uv_log_tau_uv_rf_cov_psd
         #+ (gamma_agn * dm_psf_correction_err)**2
         # (log_sigma_hat0_err * alpha_agn)**2
     )
@@ -108,99 +108,6 @@ def M_model_agn_err(params_arr, obs_arr, err_arr, pivots_array, check_negative=F
     else:
         return np.sqrt(r)
 
-# def _sigmoid(x, A, k, x0):
-#     return A / (1.0 + np.exp(-k * (x - x0)))
-
-# def _anchored_sigmoid(x, A, k, x0, x_piv):
-#     # anchored so effect is exactly zero at x_piv
-#     s  = 1.0 / (1.0 + np.exp(-k * (x      - x0)))
-#     sp = 1.0 / (1.0 + np.exp(-k * (x_piv  - x0)))
-#     return A * (s - sp)
-
-# def M_model_agn(params_arr, obs_arr, pivots_array):
-#     M0_agn    = params_arr[agn_model_pidx["M0_agn"]]
-#     alpha_agn = params_arr[agn_model_pidx["alpha_agn"]]
-#     beta_agn  = params_arr[agn_model_pidx["beta_agn"]]
-
-#     # --- new reddening correction params ---
-#     A_red  = params_arr[agn_model_pidx["A_red"]]   # expect negative (e.g. ~ -2)
-#     k_red  = params_arr[agn_model_pidx["k_red"]]   # >0 (e.g. ~ 1–3 per dex)
-#     x0_red = params_arr[agn_model_pidx["x0_red"]]  # bend near where trend starts
-
-#     log_sigma_UV  = obs_arr[agn_model_oidx["log_sigma_UV"]]
-#     log_tau_UV_RF = obs_arr[agn_model_oidx["log_tau_UV_RF"]]
-#     x_red         = obs_arr[agn_model_oidx["log_reddening_integral"]]  # NEW
-
-#     log_sigma_UV_pivot  = pivots_array[agn_model_oidx["log_sigma_UV"]]
-#     log_tau_UV_RF_pivot = pivots_array[agn_model_oidx["log_tau_UV_RF"]]
-#     x_red_pivot         = pivots_array[agn_model_oidx["log_reddening_integral"]]  # NEW
-
-#     # anchored sigmoid term (zero at small-reddening pivot)
-#     red_term = _anchored_sigmoid(x_red, A_red, np.abs(k_red) + 1e-6, x0_red, x_red_pivot)
-
-#     return (
-#         M0_agn
-#         + alpha_agn * (log_sigma_UV - log_sigma_UV_pivot)
-#         + beta_agn  * (log_tau_UV_RF - log_tau_UV_RF_pivot)
-#         + red_term
-#     )
-
-
-# def broken_power_law_err(x, x_err, x_break, d1, d2, ds):
-#     u = ds * (x - x_break)
-#     with np.errstate(over='ignore', under='ignore'):
-#         ten_u = np.power(10, u)
-#     ten_u = np.clip(ten_u, 1e-10, 1e10)  # prevent infs
-
-#     df_dx = d1 + (d2 - d1) * ten_u / (1 + ten_u)
-#     return np.abs(df_dx) * x_err
-
-# def broken_power_law(x, x_break, d1, d2, ds):
-#     """Broken power law defined to be zero at x_break.
-#     That decorrelates d1, d2 from M0_agn.
-#     """
-#     #print(f"broken_power_law: x={x}, x_break={x_break}, d1={d1}, d2={d2}, ds={ds}")
-#     delta = x - x_break
-#     term = (d2 - d1) / ds * np.log10(1 + 10**(ds * delta))
-#     offset = (d2 - d1) / ds * np.log10(2)  # value of the term when delta = 0
-#     return d1 * delta + term - offset
-
-# Broken power law model
-# def M_model_agn(params_arr, obs_arr, pivots_array):
-#     """AGN model with broken power law in log_sigma_UV."""
-
-#     M0_agn    = params_arr[agn_model_pidx["M0_agn"]]
-#     alpha_agn = params_arr[agn_model_pidx["alpha_agn"]]
-#     beta_agn  = params_arr[agn_model_pidx["beta_agn"]]
-#     gamma_agn = params_arr[agn_model_pidx["gamma_agn"]]
-
-#     log_sigma_hat0  = obs_arr[agn_model_oidx["log_sigma_hat0"]]
-#     log_sigma_hat0_pivot = pivots_array[agn_model_oidx["log_sigma_hat0"]]
-
-
-#     bpl = broken_power_law(log_sigma_hat0, log_sigma_hat0_pivot, alpha_agn, beta_agn, ds=gamma_agn)
-#     return M0_agn + bpl # + beta_agn * (log_tau_UV_RF - log_tau_UV_RF_pivot)
-
-# # keep this same(ish) signature as M_model_agn + x_err
-# def M_model_agn_err(params_arr, obs_arr, err_arr, pivots_array, check_negative=False):
-#     alpha_agn   = params_arr[agn_model_pidx["alpha_agn"]]
-#     beta_agn    = params_arr[agn_model_pidx["beta_agn"]]
-#     gamma_agn   = params_arr[agn_model_pidx["gamma_agn"]]
-
-#     log_sigma_hat0  = obs_arr[agn_model_oidx["log_sigma_hat0"]]
-#     log_sigma_hat0_pivot = pivots_array[agn_model_oidx["log_sigma_hat0"]]
-#     log_sigma_hat0_err = err_arr[agn_model_eidx["log_sigma_hat0_err"]]
-
-#     err_bpl = broken_power_law_err(log_sigma_hat0, log_sigma_hat0_err, log_sigma_hat0_pivot, alpha_agn, beta_agn, ds=gamma_agn)    
-#     #r = err_bpl**2 + (beta_agn * log_tau_UV_RF_err)**2
-#     r = err_bpl**2
-#     if check_negative:
-#         if np.any(r < 0):
-#             idx = np.where(r < 0)
-#             return np.full_like(r, -1), idx
-#         return np.sqrt(r), None
-#     else:
-#         return np.sqrt(r)
 
 def get_model_params(cosmo_model, only_sna=False):
     

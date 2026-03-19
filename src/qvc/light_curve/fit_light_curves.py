@@ -1156,13 +1156,13 @@ def main():
                     logging.error(traceback.format_exc())
 
             final_result = obj | diagnostics | result | kl_result | dict(prefix=prefix, suffix=suffix)
-            log_sigma_UV = final_result.get("log_sigma_UV")
-            log_sigma_UV_err = final_result.get("log_sigma_UV_err")
-            log_tau_UV_RF = final_result.get("log_tau_UV_RF")
-            log_tau_UV_RF_err = final_result.get("log_tau_UV_RF_err")
+            log_sigma_uv = final_result.get("log_sigma_uv")
+            log_sigma_uv_err = final_result.get("log_sigma_uv_err")
+            log_tau_uv_rf = final_result.get("log_tau_uv_rf")
+            log_tau_uv_rf_err = final_result.get("log_tau_uv_rf_err")
             print(
-                f"[{oid}] log_sigma_UV = {log_sigma_UV} ± {log_sigma_UV_err} ; "
-                f"log_tau_UV_RF = {log_tau_UV_RF} ± {log_tau_UV_RF_err}"
+                f"[{oid}] log_sigma_uv = {log_sigma_uv} ± {log_sigma_uv_err} ; "
+                f"log_tau_uv_rf = {log_tau_uv_rf} ± {log_tau_uv_rf_err}"
             )
 
             results.append(final_result)

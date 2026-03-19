@@ -593,9 +593,11 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
 
     from qvc.hubble.hubble_plotting import (
         plot_alpha_lambda_vs_l2500_by_redshift,
+        plot_alpha_lambda_vs_l2500,
         plot_alpha_lambda_histogram,
         plot_blr_lag_vs_amp_by_band,
         plot_blr_lag_vs_redshift_by_band,
+        plot_fast_vs_uv_variability,
         plot_f_host_center_vs_l2500,
         plot_Mi_relation,
         plot_cut_diagnostics,
@@ -686,7 +688,7 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
     df['log_jitter_total'] = np.log10(np.sqrt(jitter_total_sq))
     df['log_amp_delta_blr_total'] = np.log10(np.sqrt(amp_delta_blr_total_sq))
 
-    # df['log_sigma_UV'] = df['log_sigma_UV'] + 1/2 * np.log10(1 + df['z'])
+    # df['log_sigma_uv'] = df['log_sigma_uv'] + 1/2 * np.log10(1 + df['z'])
 
     if spectra_fit_csv is not None:
         print("Populating spectra fit data from:", spectra_fit_csv)
@@ -697,58 +699,62 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
             raise ValueError("spectra_fit_csv not provided and spectral fields not found in agn h5 file")
             #raise ValueError("spectra_fit_csv must be provided if alpha_lambda not in agn h5 file")
 
-    if "log_sigma_UV" in df.columns:
-        df["log_sigma_UV_uncorrected"] = pd.to_numeric(df["log_sigma_UV"], errors="coerce")
+    if "log_sigma_uv" in df.columns:
+        df["log_sigma_uv_uncorrected"] = pd.to_numeric(df["log_sigma_uv"], errors="coerce")
+    # Use the spectroscopic host fraction at 2500 A for the sigma_uv host correction.
     if correct_sigma_uv_host:
-        if {"log_sigma_UV_uncorrected", "frac_host_psf_2500"}.issubset(df.columns):
-            frac_host_psf = pd.to_numeric(df["frac_host_psf_2500"], errors="coerce")
-            valid_frac_host = np.isfinite(frac_host_psf) & (frac_host_psf != -1.0)
-            agn_frac_psf = 1.0 - frac_host_psf
-            valid_hostcorr = valid_frac_host & np.isfinite(agn_frac_psf) & (agn_frac_psf > 0.0)
-            df["sigma_UV_hostcorr_factor"] = np.where(valid_hostcorr, 1.0 / agn_frac_psf, np.nan)
-            df["log_sigma_UV"] = np.where(
+        if {"log_sigma_uv_uncorrected", "f_host_center"}.issubset(df.columns):
+            f_host_center = pd.to_numeric(df["f_host_center"], errors="coerce")
+            valid_frac_host = np.isfinite(f_host_center) & (f_host_center >= 0.0) & (f_host_center < 1.0)
+            agn_frac = 1.0 - f_host_center
+            valid_hostcorr = valid_frac_host & np.isfinite(agn_frac) & (agn_frac > 0.0)
+            df["sigma_uv_hostcorr_factor"] = np.where(valid_hostcorr, 1.0 / agn_frac, np.nan)
+            df["log_sigma_uv"] = np.where(
                 valid_hostcorr,
-                df["log_sigma_UV_uncorrected"] + np.log10(df["sigma_UV_hostcorr_factor"]),
-                df["log_sigma_UV_uncorrected"],
+                df["log_sigma_uv_uncorrected"] + np.log10(df["sigma_uv_hostcorr_factor"]),
+                df["log_sigma_uv_uncorrected"],
             )
             print(
-                "Applied sigma_UV host correction using frac_host_psf_2500: "
-                "sigma_UV_corrected = sigma_UV / (1 - frac_host_psf_2500)"
+                "Applied sigma_uv host correction using f_host_center: "
+                "sigma_uv_corrected = sigma_uv / (1 - f_host_center)"
             )
-            delta_log_sigma = df["log_sigma_UV"] - df["log_sigma_UV_uncorrected"]
+            delta_log_sigma = df["log_sigma_uv"] - df["log_sigma_uv_uncorrected"]
             valid_expected_increase = valid_hostcorr & np.isfinite(delta_log_sigma)
             if np.any(valid_expected_increase & (delta_log_sigma <= 0.0)):
                 bad_rows = df.loc[
                     valid_expected_increase & (delta_log_sigma <= 0.0),
-                    ["object_id", "frac_host_psf_2500", "log_sigma_UV_uncorrected", "log_sigma_UV"],
+                    ["object_id", "f_host_center", "log_sigma_uv_uncorrected", "log_sigma_uv"],
                 ]
                 raise ValueError(
-                    "Host-corrected log_sigma_UV should be larger than the uncorrected value "
-                    "for all valid frac_host_psf_2500 rows. Offending rows:\n"
+                    "Host-corrected log_sigma_uv should be larger than the uncorrected value "
+                    "for all valid f_host_center rows. Offending rows:\n"
                     f"{bad_rows.head(10).to_string(index=False)}"
                 )
             if np.any(valid_expected_increase):
                 print(
-                    "Host sigma_UV correction sanity check: "
+                    "Host sigma_uv correction sanity check: "
                     f"median delta={np.nanmedian(delta_log_sigma[valid_expected_increase]):.4f} dex, "
                     f"min delta={np.nanmin(delta_log_sigma[valid_expected_increase]):.4f} dex"
                 )
             plot_sigma_uv_host_correction(df, plot_path=plot_path, show=False)
         else:
-            raise KeyError("correct_sigma_uv_host=True requires 'log_sigma_UV' and 'frac_host_psf_2500'.")
+            raise KeyError("correct_sigma_uv_host=True requires 'log_sigma_uv' and 'f_host_center'.")
 
     if {"z", "apparent_mag_2500", "f_host_center"}.issubset(df.columns):
         plot_f_host_center_vs_l2500(df, plot_path=plot_path, show=False)
     if {"z", "apparent_mag_2500", "alpha_lambda"}.issubset(df.columns):
+        plot_alpha_lambda_vs_l2500(df, plot_path=plot_path, show=False)
         plot_alpha_lambda_vs_l2500_by_redshift(df, plot_path=plot_path, show=False)
     if "alpha_lambda" in df.columns:
         plot_alpha_lambda_histogram(df, plot_path=plot_path, show=False)
 
-    if {"z", "log_tau_UV_RF", "log_sigma_UV"}.issubset(df.columns):
+    if {"z", "log_tau_uv_rf", "log_sigma_uv"}.issubset(df.columns):
         plot_tau_sigma_vs_redshift(df, plot_path=plot_path, show=False)
-    if {"log_tau_UV_RF", "log_sigma_UV", "LOGMBH", "LOGLEDD_RATIO"}.issubset(df.columns):
+    if {"log_tau_uv_rf", "log_sigma_uv", "LOGMBH", "LOGLEDD_RATIO"}.issubset(df.columns):
         plot_tau_sigma_vs_wu_catalog(df, plot_path=plot_path, show=False)
-    if "log_sigma_UV" in df.columns or "log_sigma_uv" in df.columns:
+    if {"z", "log_tau_fast_uv", "log_tau_uv_rf", "log_sigma_uv"}.issubset(df.columns):
+        plot_fast_vs_uv_variability(df, plot_path=plot_path, show=False)
+    if "log_sigma_uv" in df.columns:
         if any(f"log_amp_delta_blr_{band}" in df.columns for band in ("u", "g", "r", "i", "z")):
             plot_blr_lag_vs_amp_by_band(df, plot_path=plot_path, show=False, lag_suffix="")
         if any(
@@ -811,7 +817,7 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
     df = df[mask_exclude].reset_index(drop=True)
 
 
-    mask_valid = (df['log_tau_UV_RF'] > 2*df['log_sigma_UV'] + 2.5)
+    mask_valid = (df['log_tau_uv_rf'] > 2 * df['log_sigma_uv'] + 2.5)
     num_removed = np.sum(~mask_valid)
     print(f"Cut on tau vs sigma diagram: {num_removed} objects removed")
     plot_cut_diagnostics(df.copy(), df[mask_valid], bins=30, cut_info="tau > 2*sigma + 2.5")
@@ -1740,8 +1746,8 @@ def write_results_tex_variables(
 
     # Global AGN and SN summary counts.
     obs_arr, err_arr, pivots_arr = agn_model_pack_obs(df_agn)
-    log_sigma_UV_pivot = pivots_arr[agn_model_oidx["log_sigma_UV"]]
-    log_tau_UV_RF_pivot = pivots_arr[agn_model_oidx["log_tau_UV_RF"]]
+    log_sigma_uv_pivot = pivots_arr[agn_model_oidx["log_sigma_uv"]]
+    log_tau_uv_rf_pivot = pivots_arr[agn_model_oidx["log_tau_uv_rf"]]
     n_fitted = len(df_agn[df_agn['z'].between(z_range[0], z_range[1])])
     lines.append(_cmd("NumAGNInitial", len(df_agn_all)))
     lines.append(_cmd("NumAGNCut", len(df_agn_all)-len(df_agn)))
@@ -1753,8 +1759,8 @@ def write_results_tex_variables(
     mask = (df_pantheon['zHD'] > 0.01) | is_calib_bool
     lines.append(_cmd("NumSNaPlotted", len(df_pantheon)))
     lines.append(_cmd("NumSNaFitted", len(df_pantheon[mask])))
-    lines.append(_cmd("SigmaUVPivot", f"{10**log_sigma_UV_pivot:.1f}"))
-    lines.append(_cmd("TauUVRFPivot", f"{10**log_tau_UV_RF_pivot:.0f}"))
+    lines.append(_cmd("SigmauvPivot", f"{10**log_sigma_uv_pivot:.1f}"))
+    lines.append(_cmd("TauuvrfPivot", f"{10**log_tau_uv_rf_pivot:.0f}"))
 
     for model_name, flat_samples in cosmo_model_sna_samples.items():
         flat_samples = np.asarray(flat_samples)
@@ -2062,15 +2068,15 @@ def report_pivots(df_agn):
     print(f"{'Quantity':<15}{'Type':<18}{'log10 value':>14}{'linear value':>16}")
 
     rows = [
-        ("sigma_UV", "computed mean", np.mean(df_agn["log_sigma_UV"])),
-        ("tau_UV_RF", "computed mean", np.mean(df_agn["log_tau_UV_RF"])),
+        ("sigma_uv", "computed mean", np.mean(df_agn["log_sigma_uv"])),
+        ("tau_uv_rf", "computed mean", np.mean(df_agn["log_tau_uv_rf"])),
     ]
 
     _, _, pivots_arr = agn_model_pack_obs(df_agn)
 
     rows.extend([
-        ("sigma_UV", "fixed pivot", pivots_arr[agn_model_oidx["log_sigma_UV"]]),
-        ("tau_UV_RF", "fixed pivot", pivots_arr[agn_model_oidx["log_tau_UV_RF"]]),
+        ("sigma_uv", "fixed pivot", pivots_arr[agn_model_oidx["log_sigma_uv"]]),
+        ("tau_uv_rf", "fixed pivot", pivots_arr[agn_model_oidx["log_tau_uv_rf"]]),
     ])
 
     for name, kind, log_val in rows:

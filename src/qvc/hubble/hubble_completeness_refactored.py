@@ -17,6 +17,229 @@ from qvc.hubble.hubble_utils import convert_M2500_to_logL2500, resolve_qvc_data_
 
 COSMO = FlatLambdaCDM(H0=70.0, Om0=0.3)
 
+
+def _binned_mean_interp_1d(z, y, *, z_bins=40):
+    """Fallback 1D trend estimate from z-binned means."""
+    z = np.asarray(z, dtype=float)
+    y = np.asarray(y, dtype=float)
+    mask = np.isfinite(z) & np.isfinite(y)
+    z = z[mask]
+    y = y[mask]
+    if z.size == 0:
+        raise ValueError("_binned_mean_interp_1d requires at least one finite (z, y) point.")
+
+    z_edges = np.linspace(z.min(), z.max(), int(z_bins) + 1) if np.isscalar(z_bins) else np.asarray(z_bins, dtype=float)
+    counts, _ = np.histogram(z, bins=z_edges)
+    sums, _ = np.histogram(z, bins=z_edges, weights=y)
+    mean = np.full(counts.shape, np.nan, dtype=float)
+    mean[counts > 0] = sums[counts > 0] / counts[counts > 0]
+
+    z_mid = 0.5 * (z_edges[:-1] + z_edges[1:])
+    valid = np.isfinite(mean)
+    if not np.any(valid):
+        raise ValueError("_binned_mean_interp_1d could not populate any finite bins.")
+
+    if np.any(~valid):
+        nearest_fill = RegularGridInterpolator(
+            (z_mid[valid],),
+            mean[valid],
+            bounds_error=False,
+            fill_value=None,
+        )
+        filled = mean.copy()
+        filled[~valid] = nearest_fill(z_mid[~valid, None])
+    else:
+        filled = mean
+
+    if len(z_mid) < 2:
+        y0 = float(filled[0])
+
+        def interp_single_bin(z_query):
+            zq = np.asarray(z_query, dtype=float)
+            out = np.full(np.atleast_1d(zq).shape, y0, dtype=float)
+            return out if np.ndim(z_query) > 0 else out[0]
+
+        return interp_single_bin
+
+    z_lo, z_hi = float(z_mid.min()), float(z_mid.max())
+
+    def interp_zonly(z_query):
+        zq = np.asarray(z_query, dtype=float)
+        out = np.interp(np.clip(np.atleast_1d(zq), z_lo, z_hi), z_mid, filled)
+        return out if np.ndim(z_query) > 0 else out[0]
+
+    return interp_zonly
+
+
+def build_lowess_trend_1d(
+    z,
+    y,
+    yerr=None,
+    *,
+    frac=0.25,
+    it=1,
+    min_points=10,
+):
+    """
+    Build a local 1D LOWESS-style trend evaluator with optional inverse-variance weights.
+
+    The returned callable clamps to the nearest endpoint value outside the fitted z range.
+    """
+    z = np.asarray(z, dtype=float)
+    y = np.asarray(y, dtype=float)
+    if yerr is None:
+        base_w = np.ones_like(y, dtype=float)
+    else:
+        yerr = np.asarray(yerr, dtype=float)
+        base_w = np.divide(
+            1.0,
+            yerr**2,
+            out=np.zeros_like(yerr, dtype=float),
+            where=np.isfinite(yerr) & (yerr > 0),
+        )
+
+    mask = np.isfinite(z) & np.isfinite(y) & np.isfinite(base_w) & (base_w > 0)
+    z = z[mask]
+    y = y[mask]
+    base_w = base_w[mask]
+
+    if z.size == 0:
+        raise ValueError("build_lowess_trend_1d requires at least one finite weighted point.")
+
+    order = np.argsort(z)
+    z = z[order]
+    y = y[order]
+    base_w = base_w[order]
+
+    z_unique, inverse = np.unique(z, return_inverse=True)
+    w_unique = np.bincount(inverse, weights=base_w)
+    y_unique = np.divide(
+        np.bincount(inverse, weights=base_w * y),
+        w_unique,
+        out=np.zeros_like(w_unique, dtype=float),
+        where=w_unique > 0,
+    )
+
+    n = z_unique.size
+    if n == 1:
+        y0 = float(y_unique[0])
+
+        def constant_eval(z_query):
+            zq = np.asarray(z_query, dtype=float)
+            out = np.full(np.atleast_1d(zq).shape, y0, dtype=float)
+            return out if np.ndim(z_query) > 0 else out[0]
+
+        return constant_eval
+
+    frac = float(np.clip(frac, 1.0 / n, 1.0))
+    span = min(n, max(2, int(np.ceil(frac * n)), int(min_points)))
+    robust_w = np.ones(n, dtype=float)
+
+    def _local_predict(z_query, robust_weights):
+        zq = np.atleast_1d(np.asarray(z_query, dtype=float))
+        pred = np.full(zq.shape, np.nan, dtype=float)
+        eps = max(np.finfo(float).eps, 1e-12 * max(1.0, float(z_unique[-1] - z_unique[0])))
+
+        for i, x0 in enumerate(zq):
+            dist = np.abs(z_unique - x0)
+            bandwidth = np.partition(dist, span - 1)[span - 1]
+            bandwidth = max(float(bandwidth), eps)
+            u = dist / bandwidth
+            kernel = np.where(u < 1.0, (1.0 - u**3) ** 3, 0.0)
+            kernel[dist == 0.0] = 1.0
+            w = kernel * w_unique * robust_weights
+            good = np.isfinite(w) & (w > 0)
+
+            if np.count_nonzero(good) < 2:
+                pred[i] = np.average(y_unique, weights=w_unique * robust_weights)
+                continue
+
+            x = z_unique[good] - x0
+            yy = y_unique[good]
+            ww = w[good]
+            s0 = np.sum(ww)
+            s1 = np.sum(ww * x)
+            s2 = np.sum(ww * x * x)
+            t0 = np.sum(ww * yy)
+            t1 = np.sum(ww * x * yy)
+            denom = s0 * s2 - s1 * s1
+            if (not np.isfinite(denom)) or abs(denom) < eps * max(1.0, s0 * s2):
+                pred[i] = t0 / s0
+            else:
+                pred[i] = (s2 * t0 - s1 * t1) / denom
+
+        return pred
+
+    for _ in range(max(int(it), 0)):
+        fitted = _local_predict(z_unique, robust_w)
+        resid = y_unique - fitted
+        scale = np.nanmedian(np.abs(resid))
+        if (not np.isfinite(scale)) or scale <= 0:
+            break
+        u = resid / (6.0 * scale)
+        robust_w = np.where(np.abs(u) < 1.0, (1.0 - u**2) ** 2, 0.0)
+        if not np.any(robust_w > 0):
+            robust_w = np.ones(n, dtype=float)
+            break
+
+    y_left = float(_local_predict(np.array([z_unique[0]]), robust_w)[0])
+    y_right = float(_local_predict(np.array([z_unique[-1]]), robust_w)[0])
+
+    def evaluate(z_query):
+        zq = np.asarray(z_query, dtype=float)
+        zq_1d = np.atleast_1d(zq)
+        out = _local_predict(zq_1d, robust_w)
+        out = np.where(zq_1d < z_unique[0], y_left, out)
+        out = np.where(zq_1d > z_unique[-1], y_right, out)
+        return out if np.ndim(z_query) > 0 else out[0]
+
+    return evaluate
+
+
+def _can_use_lowess_trend_1d(z, y=None, yerr=None, *, min_points=10):
+    """Return True when the inputs support a stable LOWESS fit."""
+    z = np.asarray(z, dtype=float)
+    mask = np.isfinite(z)
+
+    if y is not None:
+        y = np.asarray(y, dtype=float)
+        mask &= np.isfinite(y)
+
+    if yerr is not None:
+        yerr = np.asarray(yerr, dtype=float)
+        mask &= np.isfinite(yerr) & (yerr > 0)
+
+    if np.count_nonzero(mask) < max(int(min_points), 2):
+        return False
+
+    return np.unique(z[mask]).size >= 2
+
+
+def build_smooth_trend_1d(
+    z,
+    y,
+    yerr=None,
+    *,
+    frac=0.25,
+    it=1,
+    min_points=10,
+    fallback_bins=40,
+):
+    """
+    Build a smooth 1D trend with LOWESS when the input supports it,
+    otherwise fall back to a binned interpolation.
+    """
+    if _can_use_lowess_trend_1d(z, y=y, yerr=yerr, min_points=min_points):
+        return build_lowess_trend_1d(
+            z,
+            y,
+            yerr=yerr,
+            frac=frac,
+            it=it,
+            min_points=min_points,
+        )
+    return _binned_mean_interp_1d(z, y, z_bins=fallback_bins)
+
 class SimpleCompleteness2D:
     """
     Simple analytic completeness: sigmoid dropoff in apparent magnitude.
@@ -544,6 +767,142 @@ def _plot_completeness_vs_alpha_slices(
     plt.close(fig)
 
 
+def _plot_fixed_slice_completeness_map_4d(
+    completeness4d,
+    mag_edges,
+    z_edges,
+    mag_centers,
+    z_centers,
+    fhost_centers,
+    alpha_centers,
+    *,
+    plot_dir,
+    fhost_slice=0.05,
+    alpha_slice=-1.5,
+):
+    import matplotlib.pyplot as plt
+
+    fhost0 = float(np.clip(fhost_slice, fhost_centers[0], fhost_centers[-1]))
+    alpha0 = float(np.clip(alpha_slice, alpha_centers[0], alpha_centers[-1]))
+    M, Z = np.meshgrid(mag_centers, z_centers, indexing="ij")
+    C_slice = completeness4d(M, Z, np.full_like(M, fhost0), np.full_like(M, alpha0))
+
+    fig, ax = plt.subplots(figsize=(7, 5))
+    im = ax.imshow(
+        np.log10(np.clip(C_slice.T, 1e-12, None)),
+        origin="lower",
+        aspect="auto",
+        extent=[mag_edges[0], mag_edges[-1], z_edges[0], z_edges[-1]],
+        cmap="viridis",
+        vmin=-4,
+        vmax=0,
+    )
+    ax.set_ylabel(r"$z$")
+    ax.set_xlabel(r"$m_{2500\,\mathrm{\AA}}$ (mag)")
+    cbar = plt.colorbar(im, ax=ax)
+    cbar.set_label(
+        rf"$\log\,p(I{{=}}1\,|\,m,z,f_{{\rm host}}={fhost0:.2f},\alpha_{{\lambda}}={alpha0:.2f})$"
+    )
+    fig.tight_layout()
+    fig.savefig(os.path.join(plot_dir, "completeness_map_fixed_fhost_alpha.pdf"), dpi=600)
+    plt.close(fig)
+
+
+def _plot_weighted_marginal_completeness_map_4d(
+    C,
+    mag_edges,
+    z_edges,
+    fhost_true,
+    alpha_true,
+    fhost_edges,
+    alpha_edges,
+    *,
+    plot_dir,
+):
+    import matplotlib.pyplot as plt
+
+    H_latent, _ = np.histogramdd((fhost_true, alpha_true), bins=[fhost_edges, alpha_edges])
+    W = H_latent.astype(float)
+    if np.sum(W) <= 0:
+        W = np.ones_like(W, dtype=float)
+    W /= np.sum(W)
+
+    c_weighted = np.tensordot(C, W, axes=([2, 3], [0, 1]))
+
+    fig, ax = plt.subplots(figsize=(7, 5))
+    im = ax.imshow(
+        np.log10(np.clip(c_weighted.T, 1e-12, None)),
+        origin="lower",
+        aspect="auto",
+        extent=[mag_edges[0], mag_edges[-1], z_edges[0], z_edges[-1]],
+        cmap="viridis",
+        vmin=-4,
+        vmax=0,
+    )
+    ax.set_ylabel(r"$z$")
+    ax.set_xlabel(r"$m_{2500\,\mathrm{\AA}}$ (mag)")
+    cbar = plt.colorbar(im, ax=ax)
+    cbar.set_label(r"Population-weighted $\log\,p(I{=}1\,|\,m,z)$")
+    fig.tight_layout()
+    fig.savefig(os.path.join(plot_dir, "completeness_map_weighted_fhost_alpha.pdf"), dpi=600)
+    plt.close(fig)
+
+
+def _plot_mock_latent_summary_maps(
+    m_true,
+    z_true,
+    fhost_true,
+    alpha_true,
+    mag_edges,
+    z_edges,
+    *,
+    plot_dir,
+):
+    import matplotlib.pyplot as plt
+
+    def _binned_mean(x, y, value):
+        counts, _, _ = np.histogram2d(x, y, bins=[mag_edges, z_edges])
+        sums, _, _ = np.histogram2d(x, y, bins=[mag_edges, z_edges], weights=value)
+        mean = np.full_like(sums, np.nan, dtype=float)
+        mean[counts > 0] = sums[counts > 0] / counts[counts > 0]
+        return mean
+
+    def _binned_std(x, y, value):
+        counts, _, _ = np.histogram2d(x, y, bins=[mag_edges, z_edges])
+        sums, _, _ = np.histogram2d(x, y, bins=[mag_edges, z_edges], weights=value)
+        sums2, _, _ = np.histogram2d(x, y, bins=[mag_edges, z_edges], weights=value**2)
+        mean = np.full_like(sums, np.nan, dtype=float)
+        var = np.full_like(sums, np.nan, dtype=float)
+        mask = counts > 0
+        mean[mask] = sums[mask] / counts[mask]
+        var[mask] = np.maximum(sums2[mask] / counts[mask] - mean[mask] ** 2, 0.0)
+        return np.sqrt(var)
+
+    products = [
+        (_binned_mean(m_true, z_true, fhost_true), "mock_fhost_mean_map.pdf", r"Mean $f_{\rm host}$"),
+        (_binned_std(m_true, z_true, fhost_true), "mock_fhost_std_map.pdf", r"$\sigma(f_{\rm host})$"),
+        (_binned_mean(m_true, z_true, alpha_true), "mock_alpha_lambda_mean_map.pdf", r"Mean $\alpha_{\lambda}$"),
+        (_binned_std(m_true, z_true, alpha_true), "mock_alpha_lambda_std_map.pdf", r"$\sigma(\alpha_{\lambda})$"),
+    ]
+
+    for arr, filename, label in products:
+        fig, ax = plt.subplots(figsize=(7, 5))
+        im = ax.imshow(
+            arr.T,
+            origin="lower",
+            aspect="auto",
+            extent=[mag_edges[0], mag_edges[-1], z_edges[0], z_edges[-1]],
+            cmap="viridis",
+        )
+        ax.set_ylabel(r"$z$")
+        ax.set_xlabel(r"$m_{2500\,\mathrm{\AA}}$ (mag)")
+        cbar = plt.colorbar(im, ax=ax)
+        cbar.set_label(label)
+        fig.tight_layout()
+        fig.savefig(os.path.join(plot_dir, filename), dpi=600)
+        plt.close(fig)
+
+
 def get_completeness_function_3d_fhost(
     df_agn,
     sim_file="data/nov9_mock_mag_z_moresources.h5",
@@ -704,8 +1063,8 @@ def get_completeness_function_4d_fhost_alpha(
     plot=False,
     plot_path=None,
     fit_logL_max=45.5,
-    sigma_mag=0.2,
-    sigma_z_abs=0.2,
+    sigma_mag=0.02,
+    sigma_z_abs=0.02,
     sigma_fhost=0.05,
     sigma_alpha=0.15,
 ):
@@ -814,6 +1173,40 @@ def get_completeness_function_4d_fhost_alpha(
             plot_dir=plot_dir,
         )
 
+        _plot_fixed_slice_completeness_map_4d(
+            completeness4d,
+            mag_edges,
+            z_edges,
+            mag_centers,
+            z_centers,
+            fhost_centers,
+            alpha_centers,
+            plot_dir=plot_dir,
+            fhost_slice=float(np.nanmedian(fhost_obs)),
+            alpha_slice=float(np.nanmedian(alpha_obs)),
+        )
+
+        _plot_weighted_marginal_completeness_map_4d(
+            C,
+            mag_edges,
+            z_edges,
+            fhost_true,
+            alpha_true,
+            fhost_edges,
+            alpha_edges,
+            plot_dir=plot_dir,
+        )
+
+        _plot_mock_latent_summary_maps(
+            m_true,
+            z_true,
+            fhost_true,
+            alpha_true,
+            mag_edges,
+            z_edges,
+            plot_dir=plot_dir,
+        )
+
         fig, ax = plt.subplots(figsize=(7, 5))
         c_slice = C.mean(axis=(2, 3))
         im = ax.imshow(
@@ -828,7 +1221,7 @@ def get_completeness_function_4d_fhost_alpha(
         ax.set_ylabel(r"$z$")
         ax.set_xlabel(r"$m_{2500\,\mathrm{\AA}}$ (mag)")
         cbar = plt.colorbar(im, ax=ax)
-        cbar.set_label(r"Mean over $f_{\rm host}, \alpha_{\lambda}$: $\log\,p(I{=}1\,|\,m,z,f_{\rm host},\alpha_{\lambda})$")
+        cbar.set_label(r"Unweighted mean over $f_{\rm host}, \alpha_{\lambda}$: $\log\,p(I{=}1\,|\,m,z,f_{\rm host},\alpha_{\lambda})$")
         fig.tight_layout()
         fig.savefig(os.path.join(plot_dir, "completeness_map_mean_fhost_alpha.pdf"), dpi=600)
         plt.close(fig)
@@ -871,79 +1264,50 @@ def get_completeness_function_4d_fhost_alpha(
 import numpy as np
 from scipy.interpolate import NearestNDInterpolator, RegularGridInterpolator
 
-def make_dm_function(m, z, dm, m_bins=40, z_bins=40):
+
+def make_dm_function(
+    m,
+    z,
+    dm,
+    m_bins=40,
+    z_bins=40,
+    f_host_center=None,
+    alpha_lambda=None,
+    *,
+    lowess_frac=0.25,
+    lowess_it=1,
+    lowess_min_points=10,
+):
     """
-    Build a 2D interpolator dm(m,z) defined on bin midpoints.
-    Queries are clipped to the populated grid range and empty cells are filled
-    from the nearest populated bin before interpolation.
+    Build a 1D mean debias interpolator dm(z) for plotting/debiased magnitudes.
+
+    The returned callable accepts the historical point-array interface used by
+    the plotting code, but only the first column (redshift) is used.
     """
     m = np.asarray(m)
     z = np.asarray(z)
     dm = np.asarray(dm)
     mask = np.isfinite(m) & np.isfinite(z) & np.isfinite(dm)
-    m, z, dm = m[mask], z[mask], dm[mask]
-    if m.size == 0:
+    z, dm = z[mask], dm[mask]
+    if z.size == 0:
         raise ValueError("make_dm_function requires at least one finite (m, z, dm) point.")
 
-    # Build bin edges
-    m_edges = np.linspace(m.min(), m.max(), int(m_bins) + 1) if np.isscalar(m_bins) else np.asarray(m_bins)
-    z_edges = np.linspace(z.min(), z.max(), int(z_bins) + 1) if np.isscalar(z_bins) else np.asarray(z_bins)
-
-    # 2D binning: means per cell
-    counts, _, _ = np.histogram2d(z, m, bins=[z_edges, m_edges])
-    sums,   _, _ = np.histogram2d(z, m, bins=[z_edges, m_edges], weights=dm)
-    mean = np.full_like(sums, np.nan, dtype=float)
-    mean[counts > 0] = sums[counts > 0] / counts[counts > 0]
-
-    # Grid points are the bin midpoints
-    z_mid = 0.5 * (z_edges[:-1] + z_edges[1:])
-    m_mid = 0.5 * (m_edges[:-1] + m_edges[1:])
-
-    valid = np.isfinite(mean)
-    if not np.any(valid):
-        raise ValueError("make_dm_function could not populate any finite bias bins.")
-
-    if np.any(~valid):
-        zz, mm = np.meshgrid(z_mid, m_mid, indexing="ij")
-        nearest_fill = NearestNDInterpolator(
-            np.column_stack([zz[valid], mm[valid]]),
-            mean[valid],
-        )
-        filled = mean.copy()
-        filled[~valid] = nearest_fill(np.column_stack([zz[~valid], mm[~valid]]))
-    else:
-        filled = mean
-
-    if len(z_mid) < 2 or len(m_mid) < 2:
-        z0 = float(z_mid[0])
-        m0 = float(m_mid[0])
-        dm0 = float(filled[0, 0])
-
-        def interp_single_bin(pts):
-            pts = np.asarray(pts)
-            arr = np.atleast_2d(pts).astype(float)
-            out = np.full(arr.shape[0], dm0, dtype=float)
-            return out if np.ndim(pts) > 1 else out[0]
-
-        return interp_single_bin
-
-    interp_core = RegularGridInterpolator(
-        (z_mid, m_mid), filled,
-        method="linear", bounds_error=False, fill_value=None
+    trend = build_smooth_trend_1d(
+        z,
+        dm,
+        frac=lowess_frac,
+        it=lowess_it,
+        min_points=lowess_min_points,
+        fallback_bins=z_bins,
     )
 
-    z_lo, z_hi = float(z_mid.min()), float(z_mid.max())
-    m_lo, m_hi = float(m_mid.min()), float(m_mid.max())
-
-    def interp_clipped(pts):
+    def interp_zonly(pts):
         pts = np.asarray(pts)
         arr = np.atleast_2d(pts).astype(float)
-        arr[:, 0] = np.clip(arr[:, 0], z_lo, z_hi)
-        arr[:, 1] = np.clip(arr[:, 1], m_lo, m_hi)
-        out = interp_core(arr)
+        out = np.asarray(trend(arr[:, 0]), dtype=float)
         return out if np.ndim(pts) > 1 else out[0]
 
-    return interp_clipped
+    return interp_zonly
 
 def estimate_m50(bin_edges, true_counts, det_counts, ax=None):
     """

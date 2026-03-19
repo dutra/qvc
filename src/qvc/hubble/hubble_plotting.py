@@ -27,6 +27,7 @@ from qvc.hubble.hubble_likelihood import sigma_lens_from_dc
 from qvc.hubble.hubble_utils import convert_M2500_to_logL2500, cosmo_model_label_latex, format_result_errors, sym_percentile
 from qvc.hubble.hubble_completeness_refactored import (
     apparent_mag_to_logL2500,
+    build_smooth_trend_1d,
     fit_fhost_center_l2500_model,
     predict_fhost_center_from_logL2500,
 )
@@ -100,6 +101,19 @@ def _get_cosmo_from_params(model_name, params_dict, zp):
     raise ValueError(f"Invalid cosmology model: {model_name}")
 
 
+def _evaluate_dm_interp(dm_interp, z, m2500, *, f_host_center=None, alpha_lambda=None):
+    """Evaluate debias correction using the richest available feature set."""
+    z = np.asarray(z, dtype=float)
+    m2500 = np.asarray(m2500, dtype=float)
+    cols = [z, m2500]
+    if f_host_center is not None:
+        cols.append(np.asarray(f_host_center, dtype=float))
+        if alpha_lambda is not None:
+            cols.append(np.asarray(alpha_lambda, dtype=float))
+    pts = np.column_stack(cols)
+    return np.asarray(dm_interp(pts), dtype=float)
+
+
 def _coerce_dropped_bands(value):
     if isinstance(value, (list, tuple, set)):
         return set(value)
@@ -132,7 +146,7 @@ def _blr_line_assignment_longform(
     null_score=0.05,
 ):
     rows = []
-    continuum_ref_col = "log_sigma_UV" if "log_sigma_UV" in df.columns else "log_sigma_uv"
+    continuum_ref_col = "log_sigma_uv"
     for suffix in ("", "2"):
         component = 1 if suffix == "" else 2
         for band in ("u", "g", "r", "i", "z"):
@@ -233,8 +247,16 @@ def plot_blr_line_lags_vs_l2500(
 
     z = pd.to_numeric(df_agn["z"], errors="coerce").to_numpy(dtype=float)
     m2500 = pd.to_numeric(df_agn["apparent_mag_2500"], errors="coerce").to_numpy(dtype=float)
-    pts = np.column_stack([z, m2500])
-    actual_M2500 = (m2500 - dm_interp(pts)) - cosmo.distmod(z).value
+    actual_M2500 = (
+        m2500
+        - _evaluate_dm_interp(
+            dm_interp,
+            z,
+            m2500,
+            f_host_center=df_agn.get("f_host_center"),
+            alpha_lambda=df_agn.get("alpha_lambda"),
+        )
+    ) - cosmo.distmod(z).value
     logL2500_debiased = convert_M2500_to_logL2500(actual_M2500)
 
     assignments = _blr_line_assignment_longform(
@@ -408,21 +430,21 @@ def plot_cut_diagnostics(df_before, df_after, bins=30, cut_info="", save_path="p
 
 def plot_sigma_uv_host_correction(df, plot_path="plots/hubble", show=False):
     """Compare corrected and uncorrected UV variability amplitudes, colored by redshift."""
-    required = {"log_sigma_UV", "log_sigma_UV_uncorrected", "z", "frac_host_psf_2500"}
+    required = {"log_sigma_uv", "log_sigma_uv_uncorrected", "z", "frac_host_psf_2500"}
     if not required.issubset(df.columns):
         missing = ", ".join(sorted(required - set(df.columns)))
-        raise KeyError(f"Missing required columns for sigma_UV host-correction plot: {missing}")
+        raise KeyError(f"Missing required columns for sigma_uv host-correction plot: {missing}")
 
     z = pd.to_numeric(df["z"], errors="coerce").to_numpy(dtype=float)
     frac_host_psf = pd.to_numeric(df["frac_host_psf_2500"], errors="coerce").to_numpy(dtype=float)
     delta_log_sigma = (
-        pd.to_numeric(df["log_sigma_UV"], errors="coerce").to_numpy(dtype=float)
-        - pd.to_numeric(df["log_sigma_UV_uncorrected"], errors="coerce").to_numpy(dtype=float)
+        pd.to_numeric(df["log_sigma_uv"], errors="coerce").to_numpy(dtype=float)
+        - pd.to_numeric(df["log_sigma_uv_uncorrected"], errors="coerce").to_numpy(dtype=float)
     )
 
     mask_left = np.isfinite(delta_log_sigma) & np.isfinite(z)
     if not np.any(mask_left):
-        raise ValueError("No finite rows available for sigma_UV host-correction diagnostics.")
+        raise ValueError("No finite rows available for sigma_uv host-correction diagnostics.")
 
     x_left = z[mask_left]
     y_left = delta_log_sigma[mask_left]
@@ -487,15 +509,15 @@ def plot_sigma_uv_host_correction(df, plot_path="plots/hubble", show=False):
 
 
 def plot_tau_sigma_vs_redshift(df, plot_path="plots/hubble", show=False):
-    """Plot log tau_UV_RF and log sigma_UV against redshift for AGN diagnostics."""
-    required = {"z", "log_tau_UV_RF", "log_sigma_UV"}
+    """Plot log_tau_uv_rf and log_sigma_uv against redshift for AGN diagnostics."""
+    required = {"z", "log_tau_uv_rf", "log_sigma_uv"}
     if not required.issubset(df.columns):
         missing = ", ".join(sorted(required - set(df.columns)))
         raise KeyError(f"Missing required columns for tau/sigma vs redshift plot: {missing}")
 
     z = pd.to_numeric(df["z"], errors="coerce").to_numpy(dtype=float)
-    log_tau = pd.to_numeric(df["log_tau_UV_RF"], errors="coerce").to_numpy(dtype=float)
-    log_sigma = pd.to_numeric(df["log_sigma_UV"], errors="coerce").to_numpy(dtype=float)
+    log_tau = pd.to_numeric(df["log_tau_uv_rf"], errors="coerce").to_numpy(dtype=float)
+    log_sigma = pd.to_numeric(df["log_sigma_uv"], errors="coerce").to_numpy(dtype=float)
 
     fig, axes = plt.subplots(2, 1, figsize=(8.5, 10.0), sharex=True)
 
@@ -510,7 +532,7 @@ def plot_tau_sigma_vs_redshift(df, plot_path="plots/hubble", show=False):
             rasterized=True,
         )
     else:
-        axes[0].text(0.5, 0.5, "No finite log_tau_UV_RF values", ha="center", va="center", transform=axes[0].transAxes)
+        axes[0].text(0.5, 0.5, "No finite log_tau_uv_rf values", ha="center", va="center", transform=axes[0].transAxes)
     axes[0].set_xlabel("Redshift z")
     axes[0].set_ylabel(r"$\log \tau_{\rm UV,RF}$")
     axes[0].grid(True, alpha=0.25)
@@ -526,7 +548,7 @@ def plot_tau_sigma_vs_redshift(df, plot_path="plots/hubble", show=False):
             rasterized=True,
         )
     else:
-        axes[1].text(0.5, 0.5, "No finite log_sigma_UV values", ha="center", va="center", transform=axes[1].transAxes)
+        axes[1].text(0.5, 0.5, "No finite log_sigma_uv values", ha="center", va="center", transform=axes[1].transAxes)
     axes[1].set_xlabel("Redshift z")
     axes[1].set_ylabel(r"$\log \sigma_{\rm UV}$")
     axes[1].grid(True, alpha=0.25)
@@ -542,13 +564,13 @@ def plot_tau_sigma_vs_redshift(df, plot_path="plots/hubble", show=False):
 
 def plot_tau_sigma_vs_wu_catalog(df, plot_path="plots/hubble", show=False):
     """Plot UV variability diagnostics against Wu-catalog BH mass and Eddington ratio."""
-    required = {"log_tau_UV_RF", "log_sigma_UV", "LOGMBH", "LOGLEDD_RATIO"}
+    required = {"log_tau_uv_rf", "log_sigma_uv", "LOGMBH", "LOGLEDD_RATIO"}
     if not required.issubset(df.columns):
         missing = ", ".join(sorted(required - set(df.columns)))
         raise KeyError(f"Missing required columns for Wu-catalog diagnostic plot: {missing}")
 
-    log_tau = pd.to_numeric(df["log_tau_UV_RF"], errors="coerce").to_numpy(dtype=float)
-    log_sigma = pd.to_numeric(df["log_sigma_UV"], errors="coerce").to_numpy(dtype=float)
+    log_tau = pd.to_numeric(df["log_tau_uv_rf"], errors="coerce").to_numpy(dtype=float)
+    log_sigma = pd.to_numeric(df["log_sigma_uv"], errors="coerce").to_numpy(dtype=float)
     log_mbh = pd.to_numeric(df["LOGMBH"], errors="coerce").to_numpy(dtype=float)
     log_edd = pd.to_numeric(df["LOGLEDD_RATIO"], errors="coerce").to_numpy(dtype=float)
 
@@ -565,7 +587,7 @@ def plot_tau_sigma_vs_wu_catalog(df, plot_path="plots/hubble", show=False):
             rasterized=True,
         )
     else:
-        axes[0].text(0.5, 0.5, "No finite LOGMBH/log_tau_UV_RF values", ha="center", va="center", transform=axes[0].transAxes)
+        axes[0].text(0.5, 0.5, "No finite LOGMBH/log_tau_uv_rf values", ha="center", va="center", transform=axes[0].transAxes)
     axes[0].set_xlabel(r"$\log M_{\rm BH}$ (Wu catalog)")
     axes[0].set_ylabel(r"$\log \tau_{\rm UV,RF}$")
     axes[0].grid(True, alpha=0.25)
@@ -581,7 +603,7 @@ def plot_tau_sigma_vs_wu_catalog(df, plot_path="plots/hubble", show=False):
             rasterized=True,
         )
     else:
-        axes[1].text(0.5, 0.5, "No finite LOGLEDD_RATIO/log_sigma_UV values", ha="center", va="center", transform=axes[1].transAxes)
+        axes[1].text(0.5, 0.5, "No finite LOGLEDD_RATIO/log_sigma_uv values", ha="center", va="center", transform=axes[1].transAxes)
     axes[1].set_xlabel(r"$\log (L/L_{\rm Edd})$ (Wu catalog)")
     axes[1].set_ylabel(r"$\log \sigma_{\rm UV}$")
     axes[1].grid(True, alpha=0.25)
@@ -590,6 +612,108 @@ def plot_tau_sigma_vs_wu_catalog(df, plot_path="plots/hubble", show=False):
     return _save_figure(
         fig,
         os.path.join(diagnostics_path, "tau_sigma_vs_wu_catalog.pdf"),
+        dpi=200,
+        show=show,
+    )
+
+
+def plot_fast_vs_uv_variability(df, plot_path="plots/hubble", show=False):
+    """Plot fast-vs-UV variability timescales and amplitudes on log-log axes."""
+    tau_fast_col = "log_tau_fast_uv" if "log_tau_fast_uv" in df.columns else None
+    tau_uv_col = "log_tau_uv_rf" if "log_tau_uv_rf" in df.columns else ("log_tau_uv" if "log_tau_uv" in df.columns else None)
+    sigma_fast_col = None
+    sigma_uv_col = "log_sigma_uv" if "log_sigma_uv" in df.columns else None
+
+    required = [tau_fast_col, tau_uv_col, sigma_fast_col, sigma_uv_col]
+    if any(col is None for col in required):
+        missing = []
+        if tau_fast_col is None:
+            missing.append("log_tau_fast_uv")
+        if tau_uv_col is None:
+            missing.append("log_tau_uv_rf or log_tau_uv")
+        if sigma_fast_col is None:
+            missing.append("distinct sigma_fast column")
+        if sigma_uv_col is None:
+            missing.append("log_sigma_uv")
+        raise KeyError(f"Missing required columns for fast-vs-UV diagnostic plot: {', '.join(missing)}")
+
+    z = pd.to_numeric(df["z"], errors="coerce").to_numpy(dtype=float) if "z" in df.columns else np.full(len(df), np.nan)
+    log_tau_fast = pd.to_numeric(df[tau_fast_col], errors="coerce").to_numpy(dtype=float)
+    log_tau_uv = pd.to_numeric(df[tau_uv_col], errors="coerce").to_numpy(dtype=float)
+    log_sigma_fast = (
+        pd.to_numeric(df[sigma_fast_col], errors="coerce").to_numpy(dtype=float)
+        if sigma_fast_col is not None else np.full(len(df), np.nan)
+    )
+    log_sigma_uv = pd.to_numeric(df[sigma_uv_col], errors="coerce").to_numpy(dtype=float)
+
+    if tau_uv_col == "log_tau_uv" and "z" in df.columns:
+        log_tau_uv = log_tau_uv - np.log10(1.0 + z)
+    if tau_fast_col == "log_tau_fast_uv" and "z" in df.columns:
+        log_tau_fast = log_tau_fast - np.log10(1.0 + z)
+
+    tau_fast = np.power(10.0, log_tau_fast)
+    tau_uv = np.power(10.0, log_tau_uv)
+    sigma_fast = np.power(10.0, log_sigma_fast)
+    sigma_uv = np.power(10.0, log_sigma_uv)
+
+    fig, axes = plt.subplots(1, 2, figsize=(13.5, 5.8))
+
+    panels = [
+        (
+            axes[0],
+            tau_uv,
+            tau_fast,
+            r"$\tau_{\rm UV,RF}$ [days]",
+            r"$\tau_{\rm fast,UV,RF}$ [days]",
+            "No finite tau_fast/tau_uv values",
+        ),
+        (
+            axes[1],
+            sigma_uv,
+            sigma_fast,
+            r"$\sigma_{\rm UV}$ [mag]",
+            r"$\sigma_{\rm fast}$ [mag]",
+            "No distinct sigma_fast/sigma_uv values",
+        ),
+    ]
+
+    last_scatter = None
+    for ax, x, y, xlabel, ylabel, empty_label in panels:
+        mask = np.isfinite(x) & np.isfinite(y) & (x > 0.0) & (y > 0.0)
+        color_mask = mask & np.isfinite(z)
+        if np.any(mask):
+            cvals = z[mask] if np.any(color_mask) else None
+            last_scatter = ax.scatter(
+                x[mask],
+                y[mask],
+                c=cvals,
+                cmap="viridis" if cvals is not None else None,
+                s=10,
+                alpha=0.65,
+                linewidths=0,
+                rasterized=True,
+            )
+            lo = min(np.nanmin(x[mask]), np.nanmin(y[mask]))
+            hi = max(np.nanmax(x[mask]), np.nanmax(y[mask]))
+            if np.isfinite(lo) and np.isfinite(hi) and hi > lo:
+                ax.plot([lo, hi], [lo, hi], color="k", ls="--", lw=1.0, alpha=0.8)
+        else:
+            ax.text(0.5, 0.5, empty_label, ha="center", va="center", transform=ax.transAxes)
+
+        ax.set_xscale("log")
+        ax.set_yscale("log")
+        ax.set_xlabel(xlabel)
+        ax.set_ylabel(ylabel)
+        ax.grid(True, alpha=0.25, which="both")
+
+    if last_scatter is not None and last_scatter.get_array() is not None:
+        cbar = fig.colorbar(last_scatter, ax=axes.tolist())
+        cbar.set_label("Redshift z")
+
+    diagnostics_path = os.path.join(plot_path or "plots/hubble", "diagnostics")
+    return _save_figure(
+        fig,
+        os.path.join(diagnostics_path, "fast_vs_uv_variability.pdf"),
         dpi=200,
         show=show,
     )
@@ -843,6 +967,78 @@ def plot_alpha_lambda_vs_l2500_by_redshift(
     )
 
 
+def plot_alpha_lambda_vs_l2500(
+    df,
+    plot_path="plots/hubble",
+    show=False,
+    nbins_l2500=16,
+    min_bin_count=8,
+):
+    """Plot alpha_lambda against AGN-only log L_2500 in a single diagnostic panel."""
+    required = {"z", "apparent_mag_2500", "alpha_lambda"}
+    if not required.issubset(df.columns):
+        return None
+
+    z = pd.to_numeric(df["z"], errors="coerce").to_numpy(dtype=float)
+    m2500 = pd.to_numeric(df["apparent_mag_2500"], errors="coerce").to_numpy(dtype=float)
+    alpha_lambda = pd.to_numeric(df["alpha_lambda"], errors="coerce").to_numpy(dtype=float)
+    logL2500 = apparent_mag_to_logL2500(m2500, z, FlatLambdaCDM(H0=70.0, Om0=0.3))
+
+    mask = np.isfinite(z) & np.isfinite(m2500) & np.isfinite(alpha_lambda) & np.isfinite(logL2500) & (z > 0.0)
+    if not np.any(mask):
+        return None
+
+    x = logL2500[mask]
+    y = alpha_lambda[mask]
+    z_use = z[mask]
+
+    fig, ax = plt.subplots(figsize=(6.4, 5.0))
+    sc = ax.scatter(
+        x,
+        y,
+        c=z_use,
+        cmap="viridis",
+        s=12,
+        alpha=0.4,
+        linewidths=0,
+        rasterized=True,
+    )
+
+    if np.nanmax(x) > np.nanmin(x):
+        l_edges = np.linspace(np.nanmin(x), np.nanmax(x), nbins_l2500 + 1)
+        xmid = []
+        ymed = []
+        for i in range(len(l_edges) - 1):
+            lo = l_edges[i]
+            hi = l_edges[i + 1]
+            keep = (x >= lo) & (x < hi)
+            if i == len(l_edges) - 2:
+                keep = (x >= lo) & (x <= hi)
+            if np.count_nonzero(keep) >= min_bin_count:
+                xmid.append(np.nanmedian(x[keep]))
+                ymed.append(np.nanmedian(y[keep]))
+        if xmid:
+            ax.plot(xmid, ymed, color="k", lw=2, label="Binned median")
+
+    ax.set_xlabel(r"$\log L_{2500}$")
+    ax.set_ylabel(r"$\alpha_{\lambda}$")
+    ax.grid(True, alpha=0.2)
+    cbar = fig.colorbar(sc, ax=ax, orientation="vertical")
+    cbar.set_label("Redshift z")
+    handles, labels = ax.get_legend_handles_labels()
+    if handles:
+        ax.legend(frameon=False)
+    fig.tight_layout()
+
+    diagnostics_path = os.path.join(plot_path or "plots/hubble", "diagnostics")
+    return _save_figure(
+        fig,
+        os.path.join(diagnostics_path, "alpha_lambda_vs_l2500.pdf"),
+        dpi=200,
+        show=show,
+    )
+
+
 def plot_alpha_lambda_histogram(df, plot_path="plots/hubble", show=False, nbins=40):
     """Plot a simple alpha_lambda histogram and estimate its 1 sigma width."""
     if "alpha_lambda" not in df.columns:
@@ -902,12 +1098,12 @@ def plot_blr_lag_vs_amp_by_band(df, plot_path="plots/hubble", show=False, lag_su
         raise KeyError(f"No {amp_delta_prefix}<band> columns found in the dataframe.")
 
     continuum_ref_col = None
-    for candidate in ("log_sigma_uv", "log_sigma_UV"):
+    for candidate in ("log_sigma_uv",):
         if candidate in df.columns:
             continuum_ref_col = candidate
             break
     if continuum_ref_col is None:
-        raise KeyError("Missing continuum amplitude column: need 'log_sigma_uv' or 'log_sigma_UV'.")
+        raise KeyError("Missing continuum amplitude column: need 'log_sigma_uv'.")
 
     n_panels = len(bands)
     n_cols = 2 if n_panels > 1 else 1
@@ -2011,8 +2207,13 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     # De-bias (assumes your make_dm_function clips to grid, no extrapolation)
     if debias:
         #dm_interp = make_dm_function(m_obs, df_agn['z'], dms, method='linear')
-        pts = np.column_stack([df_agn['z'].values, m_obs])
-        mu_pred_samples -= dm_interp(pts)
+        mu_pred_samples -= _evaluate_dm_interp(
+            dm_interp,
+            df_agn["z"].values,
+            m_obs,
+            f_host_center=df_agn.get("f_host_center"),
+            alpha_lambda=df_agn.get("alpha_lambda"),
+        )
 
     mu_pred_median = np.percentile(mu_pred_samples, 50, axis=0)
     mu_pred_16th   = np.percentile(mu_pred_samples, 16, axis=0)
@@ -2104,7 +2305,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
 
     # AGN (inside)
     inset_ax.errorbar(
-        df_agn["z"][mask_in], mu_pred_median[mask_in], yerr=mu_pred_std[mask_in],
+        df_agn["z"][mask_in], mu_pred_median[mask_in], yerr=mu_pred_std_with_scatter[mask_in],
         fmt='o', linestyle='none', markersize=2,
         mfc="black", mec="none",
         ecolor="#666666", elinewidth=0.8,
@@ -2112,7 +2313,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     )
     # AGN (outside, open)
     inset_ax.errorbar(
-        df_agn["z"][mask_out], mu_pred_median[mask_out], yerr=mu_pred_std[mask_out],
+        df_agn["z"][mask_out], mu_pred_median[mask_out], yerr=mu_pred_std_with_scatter[mask_out],
         fmt='o', linestyle='none', markersize=2, mfc='none', mec="k", alpha=0.70,
         ecolor="#666666", elinewidth=0.8, zorder=1
     )
@@ -2180,7 +2381,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     # AGN (inside)
     for i in np.where(mask_in)[0]:
         ax.errorbar(
-            df_agn["z"].iloc[i], mu_pred_median[i], yerr=mu_pred_std[i],
+            df_agn["z"].iloc[i], mu_pred_median[i], yerr=mu_pred_std_with_scatter[i],
             fmt='o', linestyle='none', markersize=3,
             mec="none",
             mfc=(0, 0, 0, 0.3),
@@ -2192,7 +2393,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     # AGN (outside, open)
     for i in np.where(mask_out)[0]:
         ax.errorbar(
-            df_agn["z"].iloc[i], mu_pred_median[i], yerr=mu_pred_std[i],
+            df_agn["z"].iloc[i], mu_pred_median[i], yerr=mu_pred_std_with_scatter[i],
             fmt='o', linestyle='none', markersize=3, mfc='none',
             mec=(0, 0, 0, 0.4),
             capsize=2, capthick=0.8,
@@ -2610,8 +2811,13 @@ def plot_predicted_vs_actual_M2500(
 
     # --- actual minus optional debias ---
     if debias:
-        pts_all = np.column_stack([df_agn['z'].values, df_agn['apparent_mag_2500'].values])
-        actual_M_2500_eff = actual_M_2500 - dm_interp(pts_all)
+        actual_M_2500_eff = actual_M_2500 - _evaluate_dm_interp(
+            dm_interp,
+            df_agn["z"].values,
+            df_agn["apparent_mag_2500"].values,
+            f_host_center=df_agn.get("f_host_center"),
+            alpha_lambda=df_agn.get("alpha_lambda"),
+        )
     else:
         actual_M_2500_eff = actual_M_2500
 
@@ -2702,17 +2908,30 @@ def plot_predicted_vs_actual_M2500(
 
         actual_M_2500_bin = actual_M_2500[bin_mask].copy()
         if debias:
-            pts = np.column_stack([df_agn['z'][bin_mask], df_agn['apparent_mag_2500'][bin_mask]])
-            actual_M_2500_bin -= dm_interp(pts)
+            actual_M_2500_bin -= _evaluate_dm_interp(
+                dm_interp,
+                df_agn["z"][bin_mask],
+                df_agn["apparent_mag_2500"][bin_mask],
+                f_host_center=df_agn.get("f_host_center", None)[bin_mask] if "f_host_center" in df_agn.columns else None,
+                alpha_lambda=df_agn.get("alpha_lambda", None)[bin_mask] if "alpha_lambda" in df_agn.columns else None,
+            )
 
         x = actual_M_2500_bin
         y = M_2500_pred[bin_mask]
         xerr_bin = xerr[bin_mask]
         yerr_bin = M_2500_pred_err[bin_mask]
+        sigma_bin = np.sqrt(xerr_bin**2 + yerr_bin**2)
 
         # residuals (for CSV/diagnostics)
         resid = y - x
         resid_bybin_aligned[bin_mask] = resid
+
+        mask_chi2 = np.isfinite(resid) & np.isfinite(sigma_bin) & (sigma_bin > 0)
+        if np.any(mask_chi2):
+            dof = max(int(np.count_nonzero(mask_chi2)) - 1, 1)
+            chi2_red_bin = float(np.sum((resid[mask_chi2] / sigma_bin[mask_chi2]) ** 2) / dof)
+        else:
+            chi2_red_bin = np.nan
 
         # pick colors by category
         cats_bin = cats[bin_mask]
@@ -2771,6 +2990,11 @@ def plot_predicted_vs_actual_M2500(
             fontsize=22, color="k", ha="left", va="top", bbox=boxprops,
         )
         n_in_bin = int(np.sum(bin_mask))
+        if np.isfinite(chi2_red_bin):
+            ax.annotate(
+                rf"$\chi^2_\nu = {chi2_red_bin:.2f}$", xy=(0.97, 0.11), xycoords="axes fraction",
+                fontsize=20, color="k", ha="right", va="bottom", bbox=boxprops,
+            )
         ax.annotate(
             f"N = {n_in_bin}", xy=(0.97, 0.03), xycoords="axes fraction",
             fontsize=22, color="k", ha="right", va="bottom", bbox=boxprops,
@@ -2889,9 +3113,10 @@ def plot_full_residuals(
     df_agn, residuals, residuals_err, flat_samples, cosmo_model, z_pivot_agn,
     debias=False, dm_interp=None, plot_path='plots/hubble', show=False,
     *, nbins=10, min_count=5, z_cut=None, key_y='residuals', key_color='z',
+    z_range=(0.44, 3.16), residual_label='residuals', output_tag='full_residuals',
 ):
     df_agn = df_agn.copy()
-    df_agn['residuals'] = residuals
+    df_agn[residual_label] = residuals
 
     df_agn = df_agn.reset_index(drop=True)
 
@@ -2931,12 +3156,34 @@ def plot_full_residuals(
         frame['MY_M_2500'] = frame['apparent_mag_2500'].values - cosmo.distmod(frame['z'].values).value
 
         if debias:
-            pts = np.column_stack([frame['z'].values, frame['apparent_mag_2500'].values])
-            delta = dm_interp(pts)
+            delta = _evaluate_dm_interp(
+                dm_interp,
+                frame["z"].values,
+                frame["apparent_mag_2500"].values,
+                f_host_center=frame.get("f_host_center"),
+                alpha_lambda=frame.get("alpha_lambda"),
+            )
             frame['MY_M_2500'] -= delta
             frame['apparent_mag_2500'] -= delta
             if 'apparent_mag_2500_reddened' in frame.columns:
                 frame['apparent_mag_2500_reddened'] -= delta
+
+        if 'apparent_mag_2500_err' in frame.columns and 'apparent_mag_2500' in frame.columns:
+            mag = np.asarray(frame['apparent_mag_2500'], dtype=float)
+            mag_err = np.asarray(frame['apparent_mag_2500_err'], dtype=float)
+            frame['rel_apparent_mag_2500_err'] = np.divide(
+                mag_err,
+                np.maximum(np.abs(mag), 1e-8),
+                out=np.full_like(mag_err, np.nan, dtype=float),
+                where=np.isfinite(mag_err) & np.isfinite(mag),
+            )
+        if 'frac_host_psf_2500' in frame.columns:
+            frac_host = np.asarray(frame['frac_host_psf_2500'], dtype=float)
+            frame['log_frac_host_psf_2500'] = np.where(
+                np.isfinite(frac_host) & (frac_host > 0),
+                np.log10(frac_host),
+                np.nan,
+            )
 
         log_columns = {
             'dm_red': 'log_dm_red',
@@ -2945,8 +3192,8 @@ def plot_full_residuals(
             'redchi': 'log_redchi',
             'redchi2_conti_full': 'log_redchi2_conti_full',
             'apparent_mag_2500_err': 'log_apparent_mag_2500_err',
-            'log_sigma_UV_err': 'log_log_sigma_UV_err',
-            'log_tau_UV_RF_err': 'log_log_tau_UV_RF_err',
+            'log_sigma_uv_err': 'log_log_sigma_uv_err',
+            'log_tau_uv_rf_err': 'log_log_tau_uv_rf_err',
             'psf_minus_fiber_r': 'log_psf_minus_fiber_r',
             'petroRad_r': 'log_petroRad_r',
             'log_tau_uv_rhat': 'log_log_tau_uv_rhat',
@@ -2957,6 +3204,24 @@ def plot_full_residuals(
         for source_col, derived_col in log_columns.items():
             if source_col in frame.columns:
                 frame[derived_col] = _safelog(frame[source_col])
+
+        if {'log_tau_uv_rf', 'log_tau_fast_uv'}.issubset(frame.columns):
+            z = np.asarray(frame['z'], dtype=float)
+            log_tau_uv_rf = np.asarray(frame['log_tau_uv_rf'], dtype=float)
+            log_tau_fast_uv = np.asarray(frame['log_tau_fast_uv'], dtype=float)
+            log_tau_fast_uv_rf = log_tau_fast_uv - np.log10(1.0 + z)
+            tau_uv_rf = np.power(10.0, log_tau_uv_rf)
+            tau_fast_uv_rf = np.power(10.0, log_tau_fast_uv_rf)
+            frame['delta_tau_uv_fast_rf'] = np.where(
+                np.isfinite(tau_uv_rf) & np.isfinite(tau_fast_uv_rf),
+                tau_uv_rf - tau_fast_uv_rf,
+                np.nan,
+            )
+            frame['log_delta_tau_uv_fast_rf'] = np.where(
+                np.isfinite(frame['delta_tau_uv_fast_rf']) & (frame['delta_tau_uv_fast_rf'] > 0.0),
+                np.log10(frame['delta_tau_uv_fast_rf']),
+                np.nan,
+            )
 
         for col in ['BC', 'decomp_host', 'poly']:
             if col in frame.columns:
@@ -2970,17 +3235,20 @@ def plot_full_residuals(
 
     # ---- Which x-keys to show (keep your order) ----
     keys = [col for col in np.flip([
-        'frac_host_psf_2500',
+        'log_frac_host_psf_2500',
         'wrms', 'log_f_bc_over_pl_3000', 'log_f_fe_uv_over_pl_3000', 'log_f_host_center',
+        'rel_apparent_mag_2500_err',
         'apparent_mag_2500_err', 'log_apparent_mag_2500_err', 
-        'log_sigma_UV_err', 'log_log_sigma_UV_err',
-        'log_tau_UV_RF_err', 'log_log_tau_UV_RF_err',
+        'log_sigma_uv_err', 'log_log_sigma_uv_err',
+        'log_tau_uv_rf_err', 'log_log_tau_uv_rf_err',
         'apparent_mag_2500', 'apparent_mag_2500_reddened', 'dm_red', 'log_dm_red', 
         'ebv_wu',
         'conti_a_0', 'PL_slope_blue', 
         'MY_M_2500', 'z', 'log_lbol', 'log_ledd_ratio', 
-        'log_sigma_UV', 'log_sigma_hat_uv', 'log_sigma_hat0', 'log_sigma_hat_UV', 'log_tau_UV_RF',
+        'delta_tau_uv_fast_rf', 'log_delta_tau_uv_fast_rf',
+        'log_sigma_uv', 'log_sigma_hat_uv', 'log_sigma_hat0', 'log_tau_uv_rf',
         'log_sigma_uv', 'log_tau_uv', 'log_tau_fast_uv',
+        'log_tau_fast_band_u_RF', 'log_tau_fast_band_g_RF', 'log_tau_fast_band_r_RF', 'log_tau_fast_band_i_RF', 'log_tau_fast_band_z_RF',
         'sn_median_all', 'redchi', 'log_redchi', 'alpha_lambda',
         'redchi2_conti_full', 'log_redchi2_conti_full',
         'bwb_alpha', 'bwb_beta', 
@@ -2992,9 +3260,10 @@ def plot_full_residuals(
         'eta_sigma', 'eta_tau', 
         'PL_slope_blue', 'lam_min', 'lam_max', 'lam_range', 
         'poly1', 'psf_minus_fiber_r', 'log_psf_minus_fiber_r', 'petroRad_r', 'log_petroRad_r',
-        'cadence', 'cadence_err', 'number_points',
+        'cadence', 'number_points',
         'log_jitter_total', 'log_amp_delta_blr_total',
         'log_amp_delta_blr_u', 'log_amp_delta_blr_g', 'log_amp_delta_blr_r', 'log_amp_delta_blr_i', 'log_amp_delta_blr_z',
+        'log_amp_delta_lya_band_u', 'log_amp_delta_lya_band_g', 'log_amp_delta_lya_band_r', 'log_amp_delta_lya_band_i', 'log_amp_delta_lya_band_z',
         'log_jitter_u', 'log_jitter_g', 'log_jitter_r', 'log_jitter_i', 'log_jitter_z',
 
     ]) if col in df_agn.columns]
@@ -3031,7 +3300,7 @@ def plot_full_residuals(
 
     def _panel_xy_and_style(mask, key):
         color_values = df_agn.loc[mask, key_color].to_numpy()
-        if key_y == 'residuals':
+        if key_y == residual_label:
             x = df_agn.loc[mask, key].to_numpy()
             y = residuals[mask]
             xlabel, ylabel = key, key_y
@@ -3046,7 +3315,7 @@ def plot_full_residuals(
         return x, y, color_values, xlabel, ylabel, cmap, norm
 
     def _draw_reference_guides(ax, key, x):
-        if key_y == 'residuals':
+        if key_y == residual_label:
             ax.axhline(0, color='red', linestyle='--', lw=1)
             if key in keys_yx_line and len(x):
                 xmin, xmax = np.nanmin(x), np.nanmax(x)
@@ -3079,20 +3348,44 @@ def plot_full_residuals(
             x, y, color_values, xlabel, ylabel, cmap, norm = _panel_xy_and_style(mask, key)
             ax.set_xlabel(xlabel)
             ax.set_ylabel(ylabel)
-            sc = ax.scatter(
-                x,
-                y,
-                c=color_values,
-                cmap=cmap,
-                norm=norm,
-                s=10,
-                alpha=0.5,
-                rasterized=True,
-            )
+            z_masked = df_agn.loc[mask, 'z'].to_numpy(dtype=float)
+            in_z = (z_masked >= z_range[0]) & (z_masked <= z_range[1])
+            out_z = ~in_z
+
+            sc = None
+            if np.any(in_z):
+                sc = ax.scatter(
+                    x[in_z],
+                    y[in_z],
+                    c=color_values[in_z],
+                    cmap=cmap,
+                    norm=norm,
+                    s=10,
+                    alpha=0.5,
+                    rasterized=True,
+                )
+            if np.any(out_z):
+                edgecols = mpl.cm.get_cmap(cmap)(norm(color_values[out_z]))
+                sc_out = ax.scatter(
+                    x[out_z],
+                    y[out_z],
+                    c=color_values[out_z],
+                    cmap=cmap,
+                    norm=norm,
+                    s=10,
+                    alpha=0.8,
+                    facecolors='none',
+                    edgecolors=edgecols,
+                    linewidths=0.8,
+                    rasterized=True,
+                )
+                if sc is None:
+                    sc = sc_out
             _draw_reference_guides(ax, key, x)
 
-            cbar = fig.colorbar(sc, ax=ax, orientation='vertical', fraction=0.046, pad=0.04)
-            cbar.set_label(key_color, fontsize=12)
+            if sc is not None:
+                cbar = fig.colorbar(sc, ax=ax, orientation='vertical', fraction=0.046, pad=0.04)
+                cbar.set_label(key_color, fontsize=12)
 
             if residuals_err is None:
                 err = np.full_like(y, np.nan, dtype=float)
@@ -3103,8 +3396,7 @@ def plot_full_residuals(
             print(f"Error processing key {key}: {e}")
             ax.axis('off')
 
-        ax.set_title(key)
-        ax.grid(True)
+        ax.grid(False)
 
     # Hide any extra axes
     for j in range(n_keys, len(axes)):
@@ -3114,9 +3406,74 @@ def plot_full_residuals(
     fig.tight_layout()
     _save_figure(
         fig,
-        os.path.join(plot_path, f"full_residuals_{'debiased' if debias else 'biased'}_y{key_y}_c{key_color}_zcut{z_cut}.pdf"),
+        os.path.join(plot_path, f"{output_tag}_{'debiased' if debias else 'biased'}_y{key_y}_c{key_color}_zcut{z_cut}.pdf"),
         dpi=150,
         show=show,
+    )
+
+
+def plot_full_residuals_rz(
+    df_agn, residuals, residuals_err, flat_samples, cosmo_model, z_pivot_agn,
+    debias=False, dm_interp=None, plot_path='plots/hubble', show=False,
+    *, nbins=10, min_count=5, z_cut=None, key_y='r_z', key_color='z',
+    z_range=(0.44, 3.16), nz_bins=12, z_min_count=8,
+    lowess_frac=0.25, lowess_it=1, lowess_min_points=10,
+):
+    """
+    Plot redshift-detrended residual diagnostics where
+    r_z = residual - E[residual | z].
+
+    E[residual | z] is estimated with the shared 1D redshift smoother.
+    """
+    z = np.asarray(df_agn['z'], dtype=float)
+    r = np.asarray(residuals, dtype=float)
+    if residuals_err is None:
+        rerr = np.full_like(r, np.nan, dtype=float)
+    else:
+        rerr = np.asarray(residuals_err, dtype=float)
+
+    good = np.isfinite(z) & np.isfinite(r)
+    good_weighted = good & np.isfinite(rerr) & (rerr > 0)
+
+    if np.count_nonzero(good) < max(z_min_count, 3):
+        r_z = np.asarray(r, dtype=float)
+    else:
+        use_weighted = np.count_nonzero(good_weighted) >= max(z_min_count, 3)
+        fit_mask = good_weighted if use_weighted else good
+        z_good = z[fit_mask]
+        r_good = r[fit_mask]
+        rerr_good = rerr[fit_mask] if use_weighted else None
+        trend = build_smooth_trend_1d(
+            z_good,
+            r_good,
+            yerr=rerr_good,
+            frac=lowess_frac,
+            it=lowess_it,
+            min_points=max(int(lowess_min_points), int(z_min_count)),
+            fallback_bins=nz_bins,
+        )
+        trend_at_z = np.asarray(trend(z), dtype=float)
+        r_z = r - trend_at_z
+
+    return plot_full_residuals(
+        df_agn,
+        r_z,
+        residuals_err,
+        flat_samples,
+        cosmo_model,
+        z_pivot_agn,
+        debias=debias,
+        dm_interp=dm_interp,
+        plot_path=plot_path,
+        show=show,
+        nbins=nbins,
+        min_count=min_count,
+        z_cut=z_cut,
+        key_y=key_y,
+        key_color=key_color,
+        z_range=z_range,
+        residual_label='r_z',
+        output_tag='full_residuals_rz',
     )
 
 def _kde_conf_levels(Z, conf=(0.954, 0.683), plot_path=None):
@@ -3185,8 +3542,16 @@ def plot_predicted_L2500_vs_sigmahat(
     # --- y-data for MAIN: log10 L_2500 ---
     if debias:
         #dm_interp = make_dm_function(d["apparent_mag_2500"].values, d['z'].values, dms)
-        pts = np.column_stack([d['z'], d['apparent_mag_2500']])
-        actual_M2500 = (d['apparent_mag_2500'] - dm_interp(pts)) - cosmo.distmod(d['z']).value
+        actual_M2500 = (
+            d["apparent_mag_2500"]
+            - _evaluate_dm_interp(
+                dm_interp,
+                d["z"].values,
+                d["apparent_mag_2500"].values,
+                f_host_center=d.get("f_host_center"),
+                alpha_lambda=d.get("alpha_lambda"),
+            )
+        ) - cosmo.distmod(d["z"]).value
     else:
         actual_M2500 = d['apparent_mag_2500'] - cosmo.distmod(d['z']).value
     actual_logL2500 = convert_M2500_to_logL2500(actual_M2500)
@@ -3441,13 +3806,13 @@ def plot_predicted_L2500_vs_sigmahat(
 
     # x label (from MAIN pivots; just a label)
     obs_arr, err_arr, pivots_arr = agn_model_pack_obs(df_agn)
-    log_sigma_UV_pivot  = pivots_arr[agn_model_oidx["log_sigma_UV"]]
-    log_tau_UV_RF_pivot = pivots_arr[agn_model_oidx["log_tau_UV_RF"]]
-    sigma_UV_pivot  = 10.0 ** log_sigma_UV_pivot
-    tau_UV_RF_pivot = 10.0 ** log_tau_UV_RF_pivot
+    log_sigma_uv_pivot  = pivots_arr[agn_model_oidx["log_sigma_uv"]]
+    log_tau_uv_rf_pivot = pivots_arr[agn_model_oidx["log_tau_uv_rf"]]
+    sigma_uv_pivot  = 10.0 ** log_sigma_uv_pivot
+    tau_uv_rf_pivot = 10.0 ** log_tau_uv_rf_pivot
     alpha_agn_L = med_params['alpha_agn'] * (-1/2.5)
     beta_agn_L  = med_params['beta_agn']  * (-1/2.5)
-    xlabel = rf"$({{\sigma}}_\mathrm{{UV}} \, / \, {sigma_UV_pivot:.1f}\,\mathrm{{mag}})^{{{alpha_agn_L:.2f}}} \, ({{\tau}}_\mathrm{{UV,RF}} \, / \, {tau_UV_RF_pivot:.0f}\,\mathrm{{days}})^{{{beta_agn_L:.2f}}}$"
+    xlabel = rf"$({{\sigma}}_\mathrm{{uv}} \, / \, {sigma_uv_pivot:.1f}\,\mathrm{{mag}})^{{{alpha_agn_L:.2f}}} \, ({{\tau}}_\mathrm{{uv,rf}} \, / \, {tau_uv_rf_pivot:.0f}\,\mathrm{{days}})^{{{beta_agn_L:.2f}}}$"
     ax.set_xlabel(xlabel)
     ax.legend(loc='upper right')
 
@@ -3463,9 +3828,23 @@ def plot_predicted_L2500_vs_sigmahat(
     good = np.isfinite(residuals) & np.isfinite(sigma_chi) & (sigma_chi > 0)
 
     if show_residuals and ax_res is not None:
-        sc = ax_res.scatter(x_ref[good], residuals[good], s=5, alpha=0.4, c=np.zeros(np.sum(good)),
-                            cmap='viridis', lw=0.5, zorder=5)
-        fig.colorbar(sc, ax=ax_res, orientation='vertical').set_label('alpha_lambda (main)')
+        good_in = good & d["z"].between(z_range[0], z_range[1]).to_numpy(dtype=bool)
+        good_out = good & ~d["z"].between(z_range[0], z_range[1]).to_numpy(dtype=bool)
+        sc = None
+        if np.any(good_in):
+            sc = ax_res.scatter(
+                x_ref[good_in], residuals[good_in], s=5, alpha=0.4, c=np.zeros(np.sum(good_in)),
+                cmap='viridis', lw=0.5, zorder=5
+            )
+        if np.any(good_out):
+            sc_out = ax_res.scatter(
+                x_ref[good_out], residuals[good_out], s=5, alpha=0.8,
+                facecolors='none', edgecolors='k', linewidths=0.6, zorder=6
+            )
+            if sc is None:
+                sc = sc_out
+        if np.any(good_in) and sc is not None:
+            fig.colorbar(sc, ax=ax_res, orientation='vertical').set_label('alpha_lambda (main)')
 
         ax_res.axhline(0, color='m', linestyle='--', zorder=3)
         ax_res.set_ylabel('Residuals (log)')
@@ -3996,6 +4375,193 @@ def plot_residuals_vs_alphaOX(
     fig.tight_layout()
     os.makedirs(plot_path, exist_ok=True)
     _save_figure(fig, os.path.join(plot_path, "alphaOX_residuals.pdf"), show=show)
+
+
+def plot_debias_impact_diagnostics(
+    df_agn,
+    residuals_biased,
+    residuals_debiased,
+    *,
+    plot_path="plots/hubble",
+    show=False,
+    nbins=10,
+    min_count=6,
+):
+    """Plot the residual change induced by debiasing against key observables."""
+    delta_residual = np.asarray(residuals_biased, dtype=float) - np.asarray(residuals_debiased, dtype=float)
+
+    diagnostics = [
+        ("z", "Redshift z"),
+        ("apparent_mag_2500", r"$m_{2500}$"),
+        ("f_host_center", r"$f_{\rm host,center}$"),
+        ("alpha_lambda", r"$\alpha_{\lambda}$"),
+    ]
+
+    fig, axes = plt.subplots(2, 2, figsize=(11.0, 8.0), squeeze=False)
+    axes = axes.ravel()
+
+    for ax, (key, xlabel) in zip(axes, diagnostics):
+        if key not in df_agn.columns:
+            ax.axis("off")
+            continue
+
+        x = np.asarray(df_agn[key], dtype=float)
+        m = np.isfinite(x) & np.isfinite(delta_residual)
+        if np.count_nonzero(m) == 0:
+            ax.axis("off")
+            continue
+
+        x_use = x[m]
+        y_use = delta_residual[m]
+
+        ax.scatter(
+            x_use,
+            y_use,
+            s=12,
+            alpha=0.35,
+            color="tab:blue",
+            linewidths=0,
+            rasterized=True,
+        )
+        ax.axhline(0.0, color="magenta", lw=1.6, zorder=0)
+
+        if np.nanmax(x_use) > np.nanmin(x_use):
+            if key == "z":
+                trend = build_smooth_trend_1d(
+                    x_use,
+                    y_use,
+                    frac=0.25,
+                    it=1,
+                    min_points=max(int(min_count), 10),
+                    fallback_bins=nbins,
+                )
+                x_grid = np.linspace(np.nanmin(x_use), np.nanmax(x_use), 300)
+                ax.plot(x_grid, trend(x_grid), color="red", lw=2.0)
+            else:
+                # Horizontal banding is expected here because delta_residual remains
+                # a redshift-only correction projected onto other observables.
+                edges = np.linspace(np.nanmin(x_use), np.nanmax(x_use), nbins + 1)
+                xmid = []
+                ymed = []
+                for i in range(len(edges) - 1):
+                    lo = edges[i]
+                    hi = edges[i + 1]
+                    keep = (x_use >= lo) & (x_use < hi)
+                    if i == len(edges) - 2:
+                        keep = (x_use >= lo) & (x_use <= hi)
+                    if np.count_nonzero(keep) >= min_count:
+                        xmid.append(np.nanmedian(x_use[keep]))
+                        ymed.append(np.nanmedian(y_use[keep]))
+                if xmid:
+                    ax.plot(xmid, ymed, color="red", lw=2.0)
+
+        ax.set_xlabel(xlabel)
+        ax.set_ylabel(r"$\Delta$ residual = biased $-$ debiased (mag)")
+
+    fig.tight_layout()
+    diagnostics_path = os.path.join(plot_path or "plots/hubble", "diagnostics")
+    return _save_figure(
+        fig,
+        os.path.join(diagnostics_path, "debias_impact_diagnostics.pdf"),
+        dpi=200,
+        show=show,
+    )
+
+
+def plot_redshift_bin_residual_summary(
+    df_agn,
+    residuals_biased,
+    residuals_biased_err,
+    residuals_debiased,
+    residuals_debiased_err,
+    *,
+    plot_path="plots/hubble",
+    show=False,
+    z_bins=None,
+):
+    """Compare biased vs debiased residual summary statistics in redshift bins."""
+    z = np.asarray(df_agn["z"], dtype=float)
+    rb = np.asarray(residuals_biased, dtype=float)
+    eb = np.asarray(residuals_biased_err, dtype=float)
+    rd = np.asarray(residuals_debiased, dtype=float)
+    ed = np.asarray(residuals_debiased_err, dtype=float)
+
+    if z_bins is None:
+        z_bins = np.array([0.3, 0.6, 0.9, 1.2, 1.6, 2.0, 2.5, 3.2, np.inf], dtype=float)
+    else:
+        z_bins = np.asarray(z_bins, dtype=float)
+
+    rows = []
+    for i in range(len(z_bins) - 1):
+        lo = z_bins[i]
+        hi = z_bins[i + 1]
+        mask = (z >= lo) & (z < hi if np.isfinite(hi) else z >= lo)
+        mask_b = mask & np.isfinite(rb) & np.isfinite(eb) & (eb > 0)
+        mask_d = mask & np.isfinite(rd) & np.isfinite(ed) & (ed > 0)
+
+        def _stats(resid, err, m):
+            if np.count_nonzero(m) == 0:
+                return (0, np.nan, np.nan, np.nan)
+            r = resid[m]
+            e = err[m]
+            n = int(r.size)
+            rms = float(np.sqrt(np.mean(r**2)))
+            mad_sigma = float(1.4826 * np.median(np.abs(r - np.median(r))))
+            dof = max(n - 1, 1)
+            chi2_red = float(np.sum((r / e) ** 2) / dof)
+            return (n, rms, mad_sigma, chi2_red)
+
+        n_b, rms_b, mad_b, chi2_b = _stats(rb, eb, mask_b)
+        n_d, rms_d, mad_d, chi2_d = _stats(rd, ed, mask_d)
+        rows.append(
+            {
+                "z_lo": lo,
+                "z_hi": hi,
+                "z_mid": 0.5 * (lo + hi) if np.isfinite(hi) else lo + 0.1,
+                "N_biased": n_b,
+                "rms_biased": rms_b,
+                "mad_sigma_biased": mad_b,
+                "chi2_red_biased": chi2_b,
+                "N_debiased": n_d,
+                "rms_debiased": rms_d,
+                "mad_sigma_debiased": mad_d,
+                "chi2_red_debiased": chi2_d,
+            }
+        )
+
+    summary = pd.DataFrame(rows)
+    diagnostics_path = os.path.join(plot_path or "plots/hubble", "diagnostics")
+    os.makedirs(diagnostics_path, exist_ok=True)
+    summary.to_csv(os.path.join(diagnostics_path, "redshift_bin_residual_summary.csv"), index=False)
+
+    x = summary["z_mid"].to_numpy(dtype=float)
+    fig, axes = plt.subplots(3, 1, figsize=(8.0, 10.0), sharex=True)
+
+    axes[0].plot(x, summary["rms_biased"], color="tab:blue", marker="o", label="Biased")
+    axes[0].plot(x, summary["rms_debiased"], color="tab:red", marker="o", label="Debiased")
+    axes[0].set_ylabel("RMS residual")
+    axes[0].legend(frameon=False)
+
+    axes[1].plot(x, summary["mad_sigma_biased"], color="tab:blue", marker="o", label="Biased")
+    axes[1].plot(x, summary["mad_sigma_debiased"], color="tab:red", marker="o", label="Debiased")
+    axes[1].set_ylabel("1.4826 MAD")
+
+    axes[2].plot(x, summary["chi2_red_biased"], color="tab:blue", marker="o", label="Biased")
+    axes[2].plot(x, summary["chi2_red_debiased"], color="tab:red", marker="o", label="Debiased")
+    axes[2].axhline(1.0, color="magenta", lw=1.5)
+    axes[2].set_ylabel(r"$\chi^2_\nu$")
+    axes[2].set_xlabel("Redshift bin midpoint")
+
+    for ax in axes:
+        ax.grid(True, alpha=0.25)
+
+    fig.tight_layout()
+    return _save_figure(
+        fig,
+        os.path.join(diagnostics_path, "redshift_bin_residual_summary.pdf"),
+        dpi=200,
+        show=show,
+    )
 
 def plot_Mi_relation(df_agn, plot_path=None):
 

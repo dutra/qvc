@@ -56,13 +56,17 @@ from qvc.hubble.hubble_plotting import (
     plot_completeness_diagnostics,
     plot_completeness_vs_mag_at_redshifts,
     plot_cosmo_corner,
+    plot_debias_impact_diagnostics,
     plot_delta_m_flux_recal_vs_redshift,
     plot_dynesty,
+    plot_fast_vs_uv_variability,
     plot_full_residuals,
+    plot_full_residuals_rz,
     plot_hubble,
     plot_predicted_L2500_vs_sigmahat,
     plot_predicted_vs_actual_M2500,
     plot_redshift_histograms,
+    plot_redshift_bin_residual_summary,
     plot_residuals_vs_alphaOX,
 )
 from qvc.hubble.hubble_model import agn_model_pack_obs, agn_model_req_errs, agn_model_req_obs, agn_model_req_params, get_model_params
@@ -410,6 +414,8 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
         df_agn['apparent_mag_2500'].values,
         df_agn['z'].values,
         dmi_posterior_median,
+        f_host_center=df_agn["f_host_center"].values if "f_host_center" in df_agn.columns else None,
+        alpha_lambda=df_agn["alpha_lambda"].values if "alpha_lambda" in df_agn.columns else None,
     )
 
     print("Plotting completeness diagnostics...")
@@ -490,7 +496,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
 
     L_residuals_debiased, L_pred_std_debiased = plot_predicted_L2500_vs_sigmahat(flat_samples, df_agn, cosmo_model=cosmo_model, z_pivot_agn=z_pivot_agn, 
                                                             debias=True, dm_interp=dm_interp, show_residuals=False,
-                                                            show=False, plot_path=plot_path, df_calibrators=df_calibrators)
+                                                            show=False, plot_path=plot_path, df_calibrators=df_calibrators, z_range=z_range)
 
     plot_blr_line_lags_vs_l2500(
         flat_samples,
@@ -513,9 +519,10 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                     df_calibrators=df_calibrators)
     debiased_residuals, debiased_residuals_err, mu_pred_median_debiased, mu_pred_std_debiased, mu_pred_std_debiased_with_scatter = r
     # Biased
-    plot_hubble(flat_samples, df_agn, df_pantheon, 
+    r = plot_hubble(flat_samples, df_agn, df_pantheon, 
                 cosmo_model=cosmo_model, z_pivot_agn=z_pivot_agn, show_residuals=True,
-                show_true=False, show=False, debias=False, plot_path=plot_path, verbose=False)    
+                show_true=False, show=False, debias=False, plot_path=plot_path, verbose=False)
+    biased_residuals, biased_residuals_err, _, _, _ = r
 
     chisq_red_hubble_debiased, _ = reduced_chi_squared(debiased_residuals, mu_pred_std_debiased, n_params=len(model_labels)-1)
 
@@ -528,9 +535,39 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                                                                                   plot_path=plot_path)
     chisq_red_M2500_debiased, _ = reduced_chi_squared(M2500_residuals_debiased, M2500_std_debiased, n_params=len(model_labels)-1)
     print("Plotting debiased residuals...")
-    plot_full_residuals(df_agn, debiased_residuals, debiased_residuals_err, flat_samples, cosmo_model, z_pivot_agn, debias=True, dm_interp=dm_interp, show=False, plot_path=plot_path)
+    plot_full_residuals(df_agn, debiased_residuals, debiased_residuals_err, flat_samples, cosmo_model, z_pivot_agn, debias=True, dm_interp=dm_interp, show=False, plot_path=plot_path, z_range=z_range)
     plot_full_residuals(df_agn, debiased_residuals, debiased_residuals_err, flat_samples, cosmo_model, z_pivot_agn, debias=True, dm_interp=dm_interp, 
-                        show=False, plot_path=plot_path, key_y='z', key_color='residuals')
+                        show=False, plot_path=plot_path, key_y='z', key_color='residuals', z_range=z_range)
+    plot_full_residuals_rz(
+        df_agn,
+        debiased_residuals,
+        debiased_residuals_err,
+        flat_samples,
+        cosmo_model,
+        z_pivot_agn,
+        debias=True,
+        dm_interp=dm_interp,
+        show=False,
+        plot_path=plot_path,
+        z_range=z_range,
+    )
+    plot_debias_impact_diagnostics(
+        df_agn,
+        biased_residuals,
+        debiased_residuals,
+        plot_path=plot_path,
+        show=False,
+    )
+    plot_redshift_bin_residual_summary(
+        df_agn,
+        biased_residuals,
+        biased_residuals_err,
+        debiased_residuals,
+        debiased_residuals_err,
+        plot_path=plot_path,
+        show=False,
+    )
+    plot_fast_vs_uv_variability(df_agn, plot_path=plot_path, show=False)
 
     
     print("Plotting cosmological posteriors corner plot...")
@@ -722,7 +759,7 @@ if __name__ == "__main__":
         "--correct-sigma-uv-host",
         action="store_true",
         default=False,
-        help="Correct log_sigma_UV using frac_host_psf_2500 and save a diagnostics plot.",
+        help="Correct log_sigma_uv using frac_host_psf_2500 and save a diagnostics plot.",
     )
     parser.add_argument(
         "--use_jax",

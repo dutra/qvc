@@ -751,16 +751,6 @@ def process_samples(flat_samples, data, bands, percentiles=[16, 50, 84]):
     lambda_ref = 2500
     lam_ref_arr = np.full_like(eta_sigma, lambda_ref, dtype=float)
 
-    if log_sigma_uv is None and "log_sigma_center0" in flat_samples:
-        sigma_shift_to_uv = np.log(10.0) * np.asarray(log_single_pl(lambda_ref, lambda_center_rf, eta_sigma))
-        log_sigma_uv = np.asarray(flat_samples["log_sigma_center0"]) + sigma_shift_to_uv
-    if log_tau_uv is None and "log_tau_slow_center0" in flat_samples:
-        tau_shift_to_uv = np.log(10.0) * np.asarray(log_single_pl(lambda_ref, lambda_center_rf, eta_tau))
-        log_tau_uv = np.asarray(flat_samples["log_tau_slow_center0"]) + tau_shift_to_uv
-    if log_tau_fast_uv is None and "log_tau_fast_center0" in flat_samples:
-        tau_shift_to_uv = np.log(10.0) * np.asarray(log_single_pl(lambda_ref, lambda_center_rf, eta_tau))
-        log_tau_fast_uv = np.asarray(flat_samples["log_tau_fast_center0"]) + tau_shift_to_uv
-
     if "eta_sigma" not in result:
         result["eta_sigma"], result["eta_sigma_err"] = sym_percentile(eta_sigma)
     if "eta_tau" not in result:
@@ -772,6 +762,8 @@ def process_samples(flat_samples, data, bands, percentiles=[16, 50, 84]):
         result["log_tau_uv"], result["log_tau_uv_err"] = sym_percentile(log_tau_uv / np.log(10))
     if "log_tau_fast_uv" not in result:
         result["log_tau_fast_uv"], result["log_tau_fast_uv_err"] = sym_percentile(log_tau_fast_uv / np.log(10))
+    samples_log_tau_uv_rf = log_tau_uv / np.log(10) - np.log10(1 + data['z']) + log_single_pl(lambda_ref, lam_ref_arr, eta_tau)
+    result["log_tau_uv_rf"], result["log_tau_uv_rf_err"] = sym_percentile(samples_log_tau_uv_rf)
 
     log_sigma_band = []
     for band in bands:
@@ -814,43 +806,25 @@ def process_samples(flat_samples, data, bands, percentiles=[16, 50, 84]):
                 result[f"log_lag_blr{lag_suffix}_{band}_RF"] = median
                 result[f"log_lag_blr{lag_suffix}_{band}_RF_err"] = err
 
-
-    # log_sigma_UV
-    samples_log_sigma_UV = log_sigma_uv / np.log(10) + log_single_pl(lambda_ref, lam_ref_arr, eta_sigma)
-    result['log_sigma_UV'], result['log_sigma_UV_err'] = sym_percentile(samples_log_sigma_UV)
-
-    if "f_host" in flat_samples and "alpha_host" in flat_samples:
-        host_frac = flat_samples["f_host"] * (lambda_ref / 5100.0) ** flat_samples["alpha_host"]
-        dilution_factor = 1.0 / (1.0 + host_frac)
-        log_dilution = jnp.log(dilution_factor)
-        samples_log_sigma_UV_diluted = (log_sigma_uv - log_dilution) / np.log(10) + log_single_pl(lambda_ref, lam_ref_arr, eta_sigma)
-    else:
-        samples_log_sigma_UV_diluted = samples_log_sigma_UV
-    result['log_sigma_UV_diluted'], result['log_sigma_UV_diluted_err'] = sym_percentile(samples_log_sigma_UV_diluted)
-
-    # log_tau_UV_RF
-    samples_log_tau_UV_RF = log_tau_uv / np.log(10) - np.log10(1 + data['z']) + log_single_pl(lambda_ref, lam_ref_arr, eta_tau)
-    result['log_tau_UV_RF'], result['log_tau_UV_RF_err'] = sym_percentile(samples_log_tau_UV_RF)
-
-    # Compute covariance between log_sigma_UV and log_tau_UV_RF
-    cov_matrix = np.cov(samples_log_sigma_UV, samples_log_tau_UV_RF)
+    samples_log_sigma_uv = log_sigma_uv / np.log(10)
+    cov_matrix = np.cov(samples_log_sigma_uv, samples_log_tau_uv_rf)
     cov_log_sigma_tau = cov_matrix[0, 1]
     
     vx, vy, cov_log_sigma_tau_reg = regularize_cov_from_percentiles(
-        np.percentile(samples_log_sigma_UV, 16),
-        np.percentile(samples_log_sigma_UV, 84),
-        np.percentile(samples_log_tau_UV_RF, 16),
-        np.percentile(samples_log_tau_UV_RF, 84),
+        np.percentile(samples_log_sigma_uv, 16),
+        np.percentile(samples_log_sigma_uv, 84),
+        np.percentile(samples_log_tau_uv_rf, 16),
+        np.percentile(samples_log_tau_uv_rf, 84),
         cov_log_sigma_tau
     )
-    result['cov_log_sigma_UV_log_tau_UV_RF'] = cov_log_sigma_tau_reg
+    result['cov_log_sigma_uv_log_tau_uv_rf'] = cov_log_sigma_tau_reg
     print("Regularized covariance: ", cov_log_sigma_tau_reg)
 
-    C = psd_cov_from_samples(samples_log_sigma_UV, samples_log_tau_UV_RF, shrink_rho=0.05)
+    C = psd_cov_from_samples(samples_log_sigma_uv, samples_log_tau_uv_rf, shrink_rho=0.05)
     sx2, sy2, sxy = C[0,0], C[1,1], C[0,1]
-    result['log_sigma_UV_log_tau_UV_RF_cov_psd'] = sxy
-    result['log_sigma_UV_std_psd'] = np.sqrt(sx2)
-    result['log_tau_UV_RF_std_psd'] = np.sqrt(sy2)
+    result['log_sigma_uv_log_tau_uv_rf_cov_psd'] = sxy
+    result['log_sigma_uv_std_psd'] = np.sqrt(sx2)
+    result['log_tau_uv_rf_std_psd'] = np.sqrt(sy2)
     print("PSD covariance: ", sxy)
 
     return result

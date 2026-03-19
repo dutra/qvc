@@ -1448,8 +1448,8 @@ def plot_sigma_tau_vs_lambda_with_model(
 
     # UV refs (may be missing per-row)
     z      = arr('z')
-    tau_uv = arr('log_tau_UV_RF') if residual else np.zeros(len(rows))
-    sig_uv = arr('log_sigma_UV')  if residual else np.zeros(len(rows))
+    tau_uv = arr('log_tau_uv_rf') if residual else np.zeros(len(rows))
+    sig_uv = arr('log_sigma_uv')  if residual else np.zeros(len(rows))
 
     # ---------- figure ----------
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(6.2, 6.2),

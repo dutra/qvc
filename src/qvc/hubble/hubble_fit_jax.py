@@ -369,8 +369,8 @@ def _prepare_agn_arrays(agn_data: dict[str, np.ndarray]) -> dict[str, jnp.ndarra
     obs = jnp.stack([out[k] for k in agn_model_req_obs], axis=0)
     err = jnp.stack([out[k] for k in agn_model_req_errs], axis=0)
     pivots = jnp.asarray([float(np.mean(np.asarray(agn_data[k], dtype=float))) for k in agn_model_req_obs])
-    pivots = pivots.at[agn_model_req_obs.index("log_tau_UV_RF")].set(jnp.log10(500.0))
-    pivots = pivots.at[agn_model_req_obs.index("log_sigma_UV")].set(jnp.log10(0.2))
+    pivots = pivots.at[agn_model_req_obs.index("log_tau_uv_rf")].set(jnp.log10(500.0))
+    pivots = pivots.at[agn_model_req_obs.index("log_sigma_uv")].set(jnp.log10(0.2))
     out["_obs_arr"] = obs
     out["_err_arr"] = err
     out["_pivot_arr"] = pivots
@@ -392,18 +392,18 @@ def _prepare_pantheon_arrays(pantheon_data: dict[str, np.ndarray], L, lower, log
 
 def _agn_model_jax(params_vec, obs_arr, pivot_arr):
     M0_agn, alpha_agn, beta_agn = params_vec
-    log_sigma_uv = obs_arr[agn_model_req_obs.index("log_sigma_UV")]
-    log_tau_uv = obs_arr[agn_model_req_obs.index("log_tau_UV_RF")]
-    sig_piv = pivot_arr[agn_model_req_obs.index("log_sigma_UV")]
-    tau_piv = pivot_arr[agn_model_req_obs.index("log_tau_UV_RF")]
+    log_sigma_uv = obs_arr[agn_model_req_obs.index("log_sigma_uv")]
+    log_tau_uv = obs_arr[agn_model_req_obs.index("log_tau_uv_rf")]
+    sig_piv = pivot_arr[agn_model_req_obs.index("log_sigma_uv")]
+    tau_piv = pivot_arr[agn_model_req_obs.index("log_tau_uv_rf")]
     return M0_agn + alpha_agn * (log_sigma_uv - sig_piv) + beta_agn * (log_tau_uv - tau_piv)
 
 
 def _agn_model_err_jax(params_vec, err_arr):
     _, alpha_agn, beta_agn = params_vec
-    sig_std = err_arr[agn_model_req_errs.index("log_sigma_UV_std_psd")]
-    tau_std = err_arr[agn_model_req_errs.index("log_tau_UV_RF_std_psd")]
-    cov = err_arr[agn_model_req_errs.index("log_sigma_UV_log_tau_UV_RF_cov_psd")]
+    sig_std = err_arr[agn_model_req_errs.index("log_sigma_uv_std_psd")]
+    tau_std = err_arr[agn_model_req_errs.index("log_tau_uv_rf_std_psd")]
+    cov = err_arr[agn_model_req_errs.index("log_sigma_uv_log_tau_uv_rf_cov_psd")]
     var = (alpha_agn * sig_std) ** 2 + (beta_agn * tau_std) ** 2 + 2.0 * alpha_agn * beta_agn * cov
     return jnp.sqrt(jnp.maximum(var, 1e-18))
 
@@ -660,6 +660,7 @@ def run_single_jax(
         show=False,
         plot_path=plot_path,
         df_calibrators=None,
+        z_range=z_range,
     )
     plot_blr_line_lags_vs_l2500(
         flat_samples,
