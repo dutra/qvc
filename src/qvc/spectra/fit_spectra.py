@@ -582,7 +582,7 @@ def run_one_fit(rec, args):
                 nuts_target_accept=args.nuts_target_accept,
                 optax_steps=args.optax_steps,
                 optax_lr=args.optax_lr,
-                save_result=True,
+                save_result=args.save_jaxqsofit_samples,
                 save_fits_name=f"z{rec['z']:.3f}_{rec['sdss_name']}",
                 show_plot=False,
                 plot_fig=args.save_fig,
@@ -728,6 +728,9 @@ def parse_args():
     p.add_argument("--fit-poly-edge-flex", dest="fit_poly_edge_flex", action="store_true")
     p.add_argument("--no-fit-poly-edge-flex", dest="fit_poly_edge_flex", action="store_false")
 
+    p.set_defaults(save_jaxqsofit_samples=True)
+    p.add_argument("--save-jaxqsofit-samples", dest="save_jaxqsofit_samples", action="store_true")
+    p.add_argument("--no-save-jaxqsofit-samples", dest="save_jaxqsofit_samples", action="store_false")
     
 
     p.add_argument("--nproc", type=int, default=1, help="Use spawn multiprocessing when nproc > 1.")
