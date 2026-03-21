@@ -615,8 +615,16 @@ def populate_sdss_fields(objs, progress_bar=True):
             update_fields[f"apparent_mag_{band}_err"] = apparent_mag_err[:, bidx]
 
         target_index = df.index.to_numpy()[matched_row_idx]
-        for key, values in update_fields.items():
-            df.loc[target_index, key] = values
+        update_df = pd.DataFrame(update_fields, index=target_index)
+
+        existing_cols = [col for col in update_df.columns if col in df.columns]
+        if existing_cols:
+            df.update(update_df.loc[:, existing_cols], overwrite=True)
+
+        new_cols = [col for col in update_df.columns if col not in df.columns]
+        for col in new_cols:
+            df[col] = np.nan
+            df.update(update_df.loc[:, [col]], overwrite=True)
 
         missing_catalog = int((~valid_coord_mask).sum())
         missing_dr16q = int(valid_coord_mask.sum() - len(matched_row_idx))
@@ -715,7 +723,9 @@ def read_quasars_from_hdf5_flat(file_path, N=None):
         if not row_columns:
             return pd.DataFrame()
 
-        df = pd.DataFrame(row_columns)
+        # Materialize through records so pandas normalizes numeric backing arrays
+        # (e.g., big-endian inputs from FITS/HDF5) into native-compatible columns.
+        df = pd.DataFrame.from_records(pd.DataFrame(row_columns).to_dict("records"))
 
         if N is not None and N >= 0:
             df = df.iloc[: int(N)].reset_index(drop=True)
