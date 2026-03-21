@@ -651,6 +651,10 @@ def save_quasar_list_hdf5(quasars, ignored_keys=None, size_threshold=1024):
                 flat.size,
             )
             return
+        if flat.size == 5:
+            for i, band in enumerate(fixed_bands):
+                row[f"{base_key}_{band}"] = _to_scalar(flat[i])
+            return
         if _should_expand_as_bands(base_key, flat, obj_bands):
             band_to_value = {band: _to_scalar(flat[i]) for i, band in enumerate(obj_bands)}
             fill_value = _string_fill_for(band_to_value.values())

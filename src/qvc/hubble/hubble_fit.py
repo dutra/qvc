@@ -798,7 +798,6 @@ if __name__ == "__main__":
     if args.agn_calibrators:
         if args.agn_calibrators.endswith('.h5'):
             df_calibrators = read_quasars_from_hdf5_flat(args.agn_calibrators)
-            df_calibrators = pd.DataFrame(df_calibrators)
         elif args.agn_calibrators.endswith('.csv'):
             df_calibrators = pd.read_csv(args.agn_calibrators)
         else:

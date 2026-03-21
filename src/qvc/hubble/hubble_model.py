@@ -41,8 +41,8 @@ def agn_model_pack_obs(obs_dict):
     obs = np.array([obs_dict[k] for k in agn_model_req_obs],  dtype=float)
     err = np.array([obs_dict[k] for k in agn_model_req_errs], dtype=float)
     pivots = {k: float(np.mean(obs_dict[k])) for k in agn_model_req_obs}
-    pivots["log_tau_uv_rf"] = np.log10(500)
-    pivots["log_sigma_uv"]  = np.log10(0.2)
+    # pivots["log_tau_uv_rf"] = np.log10(500)
+    # pivots["log_sigma_uv"]  = np.log10(0.2)
     pivots = np.array([pivots[k] for k in agn_model_req_obs], dtype=float)
     return obs, err, pivots
 

@@ -467,17 +467,42 @@ def populate_spectra_fit(df, spectra_fit_csvs, best=True):
 
     return out
 def populate_sdss_fields(objs, progress_bar=True):
-    print(f"Populating SDSS fields: {len(objs)}", flush=True)
-    if not objs:
-        return objs
+    """
+    Populate SDSS/DR16Q-derived fields.
+
+    Supported inputs:
+    - pandas.DataFrame (returns pandas.DataFrame)
+    - list[dict] (returns list[dict], for backward compatibility)
+    """
+    input_is_df = isinstance(objs, pd.DataFrame)
+    input_is_list = isinstance(objs, list)
+    if not (input_is_df or input_is_list):
+        raise TypeError(
+            "populate_sdss_fields expects a pandas.DataFrame or list[dict], "
+            f"got {type(objs).__name__}"
+        )
+
+    if input_is_df:
+        df = objs.copy()
+    else:
+        if len(objs) == 0:
+            return objs
+        df = pd.DataFrame.from_records(objs)
+
+    print(f"Populating SDSS fields: {len(df)}", flush=True)
+    if df.empty:
+        return df if input_is_df else []
+
+    if "object_id" not in df.columns:
+        raise ValueError("populate_sdss_fields requires an 'object_id' column.")
 
     # Keep this parameter for backward compatibility; matching is now vectorized.
     _ = progress_bar
 
     rows = pd.DataFrame(
         {
-            "row_idx": np.arange(len(objs), dtype=int),
-            "object_id": [o.get("object_id") for o in objs],
+            "row_idx": np.arange(len(df), dtype=int),
+            "object_id": df["object_id"].to_numpy(),
         }
     )
     rows["object_id_key"] = rows["object_id"].astype(str)
@@ -501,7 +526,7 @@ def populate_sdss_fields(objs, progress_bar=True):
         valid_coord_mask = rows["RA"].notna() & rows["DEC"].notna()
         if not np.any(valid_coord_mask):
             print(f"Skipped {len(objs)} objects: no S82 catalog coordinates found.")
-            return objs
+            return df if input_is_df else df.to_dict("records")
 
         query_rows = rows.loc[valid_coord_mask, ["row_idx", "RA", "DEC"]].copy()
         query_coords = SkyCoord(
@@ -520,7 +545,7 @@ def populate_sdss_fields(objs, progress_bar=True):
             if missing_catalog:
                 print(f"Skipped {missing_catalog} objects: no S82 catalog coordinates found.")
             print(f"Skipped {missing_dr16q} objects: no DR16Q match within 1 arcsec.")
-            return objs
+            return df if input_is_df else df.to_dict("records")
 
         matched_row_idx = matched_query["row_idx"].to_numpy(dtype=int)
         matched_fits_idx = matched_query["fits_idx"].to_numpy(dtype=int)
@@ -589,10 +614,9 @@ def populate_sdss_fields(objs, progress_bar=True):
             update_fields[f"apparent_mag_{band}"] = apparent_mag[:, bidx]
             update_fields[f"apparent_mag_{band}_err"] = apparent_mag_err[:, bidx]
 
-        for local_i, obj_i in enumerate(matched_row_idx):
-            d = objs[obj_i]
-            for key, values in update_fields.items():
-                d[key] = values[local_i]
+        target_index = df.index.to_numpy()[matched_row_idx]
+        for key, values in update_fields.items():
+            df.loc[target_index, key] = values
 
         missing_catalog = int((~valid_coord_mask).sum())
         missing_dr16q = int(valid_coord_mask.sum() - len(matched_row_idx))
@@ -601,7 +625,7 @@ def populate_sdss_fields(objs, progress_bar=True):
         if missing_dr16q:
             print(f"Skipped {missing_dr16q} objects: no DR16Q match within 1 arcsec.")
 
-    return objs
+    return df if input_is_df else df.to_dict("records")
 
 
 def _mask_invalid_wu_bhmass(df):
@@ -640,7 +664,7 @@ def read_quasars_from_hdf5(file_path, N=None):
 
 def read_quasars_from_hdf5_flat(file_path, N=None):
     """
-    Read a flat columnar HDF5 file (top-level datasets) into list[dict].
+    Read a flat columnar HDF5 file (top-level datasets) into a DataFrame.
     """
     def _decode_scalar(x):
         if isinstance(x, bytes):
@@ -649,89 +673,56 @@ def read_quasars_from_hdf5_flat(file_path, N=None):
             x = x.item()
             if isinstance(x, bytes):
                 return x.decode("utf-8", errors="replace")
-            return x
         return x
 
-    def _is_missing_value(x):
-        if x is None:
-            return True
-        if isinstance(x, float) and np.isnan(x):
-            return True
-        if isinstance(x, str) and x == "":
-            return True
-        return False
+    def _decode_vector(arr):
+        arr = np.asarray(arr)
+        if arr.dtype.kind == "S":
+            return arr.astype(str)
+        if arr.dtype == object:
+            out = []
+            for v in arr:
+                out.append(_decode_scalar(v))
+            return np.asarray(out, dtype=object)
+        if arr.ndim > 1:
+            return np.asarray([_decode_scalar(v) for v in arr.tolist()], dtype=object)
+        return arr
 
     with h5py.File(file_path, "r") as hdf:
         keys = list(hdf.keys())
         if not keys:
-            return []
+            return pd.DataFrame()
 
-        columns = {}
+        row_columns = {}
         scalar_metadata = {}
+        n_rows = None
         for key in keys:
             values = hdf[key][...]
             arr = np.asarray(values)
             if arr.ndim == 0:
                 scalar_metadata[key] = _decode_scalar(arr.item())
                 continue
-            columns[key] = values
+            if n_rows is None:
+                n_rows = int(arr.shape[0])
+            elif int(arr.shape[0]) != n_rows:
+                warnings.warn(
+                    f"Skipping dataset '{key}' in {file_path}: incompatible leading "
+                    f"dimension {arr.shape[0]} (expected {n_rows})."
+                )
+                continue
+            row_columns[key] = _decode_vector(arr)
 
-        if not columns:
-            return []
+        if not row_columns:
+            return pd.DataFrame()
 
-        if "object_id" in columns:
-            n_rows = int(np.asarray(columns["object_id"]).shape[0])
-        else:
-            first_col = next(iter(columns.values()))
-            n_rows = int(np.asarray(first_col).shape[0])
+        df = pd.DataFrame(row_columns)
 
         if N is not None and N >= 0:
-            n_rows = min(n_rows, int(N))
+            df = df.iloc[: int(N)].reset_index(drop=True)
 
-        quasars = []
-        for i in range(n_rows):
-            row = {}
-            for key, values in columns.items():
-                if np.asarray(values).shape[0] <= i:
-                    continue
-                row[key] = _decode_scalar(values[i])
-
-            # Rebuild grouped vectors for compatibility with code that expects
-            # array/list-style fields (e.g., base_u..base_z or base_0..base_n).
-            band_groups = defaultdict(dict)
-            index_groups = defaultdict(dict)
-            for key, value in row.items():
-                split_key = key.rsplit("_", 1)
-                if len(split_key) != 2:
-                    continue
-                base, suffix = split_key
-                if suffix in {"u", "g", "r", "i", "z"}:
-                    band_groups[base][suffix] = value
-                    continue
-                if suffix.isdigit():
-                    index_groups[base][int(suffix)] = value
-
-            for base, grouped in band_groups.items():
-                if base in row:
-                    continue
-                ordered = [grouped.get(band, np.nan) for band in ("u", "g", "r", "i", "z")]
-                compact = [v for v in ordered if not _is_missing_value(v)]
-                row[base] = np.asarray(compact if compact else ordered)
-
-            for base, grouped in index_groups.items():
-                if base in row:
-                    continue
-                max_idx = max(grouped.keys())
-                ordered = [grouped.get(j, np.nan) for j in range(max_idx + 1)]
-                while ordered and _is_missing_value(ordered[-1]):
-                    ordered.pop()
-                row[base] = np.asarray(ordered)
-
-            for meta_key, meta_value in scalar_metadata.items():
-                row[meta_key] = meta_value
-
-            quasars.append(row)
-    return quasars
+        for meta_key, meta_value in scalar_metadata.items():
+            df[meta_key] = meta_value
+    return df
 
 def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFAULT_F_HOST_CUT,
                   exclude_object_ids_csv=None,
@@ -770,6 +761,37 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
     if exclude_object_ids_csv is None:
         exclude_object_ids_csv = []
 
+    def _normalize_dropped_bands(value):
+        if value is None:
+            return []
+        if isinstance(value, float) and np.isnan(value):
+            return []
+        if isinstance(value, bytes):
+            value = value.decode("utf-8", errors="replace")
+        if isinstance(value, str):
+            txt = value.strip()
+            if txt == "" or txt.lower() == "nan":
+                return []
+            # Handle list-like serialized strings such as "['u', 'z']"
+            if txt.startswith("[") and txt.endswith("]"):
+                try:
+                    parsed = literal_eval(txt)
+                    if isinstance(parsed, (list, tuple, set, np.ndarray)):
+                        return [str(x).strip() for x in parsed if str(x).strip()]
+                except Exception:
+                    pass
+            # Handle compact strings such as "uz" or delimiters like "u,z"
+            if "," in txt:
+                return [x.strip() for x in txt.split(",") if x.strip()]
+            if " " in txt:
+                return [x.strip() for x in txt.split() if x.strip()]
+            return [c for c in txt if c in {"u", "g", "r", "i", "z", "y"}]
+        if isinstance(value, np.ndarray):
+            return [str(x).strip() for x in value.tolist() if str(x).strip()]
+        if isinstance(value, (list, tuple, set)):
+            return [str(x).strip() for x in value if str(x).strip()]
+        return [str(value).strip()]
+
     if lc_info_csv is not None:
         lc_info_csv = resolve_qvc_data_path(lc_info_csv)
     if residuals_csv is not None:
@@ -783,44 +805,69 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
         pickle_path = file_path if str(file_path).endswith(".pkl") else f"{file_path}.pkl"
         pickle_path = resolve_qvc_data_path(pickle_path)
         with open(pickle_path, "rb") as f:
-            quasar_list = pickle.load(f)
+            payload = pickle.load(f)
+        if isinstance(payload, pd.DataFrame):
+            df = payload.copy()
+        elif isinstance(payload, list):
+            df = pd.DataFrame.from_records(payload)
+        elif isinstance(payload, dict):
+            df = pd.DataFrame(payload)
+        else:
+            raise TypeError(
+                "Unsupported pickled payload type for AGN data: "
+                f"{type(payload).__name__}"
+            )
     else:
         file_path = resolve_qvc_data_path(file_path)
-        quasar_list = read_quasars_from_hdf5_flat(file_path)
-    print("Number of quasars loaded:", len(quasar_list))
+        df = read_quasars_from_hdf5_flat(file_path)
+    print("Number of quasars loaded:", len(df))
+    legacy_required = [f"mags_mean_{i}" for i in range(4)]
+    if all(col in df.columns for col in legacy_required):
+        for i, b in enumerate(['u', 'g', 'r', 'i', 'z']):
+            legacy_col = f"mags_mean_{i}"
+            if legacy_col in df.columns and f"mags_mean_{b}" not in df.columns:
+                df[f"mags_mean_{b}"] = df[legacy_col]
+            if legacy_col in df.columns:
+                df = df.drop(columns=[legacy_col])
 
     if populate_sdss:
         print("Populating SDSS fields...")
-        populate_sdss_fields(quasar_list)
-        write_hdf5_file(quasar_list, file_path)
+        df = populate_sdss_fields(df)
 
-    for quasar in quasar_list:
-        if 'ebv_wu' not in quasar.keys():
-            print("Populating SDSS fields...")
-            populate_sdss_fields(quasar_list)
-            write_hdf5_file(quasar_list, file_path)
-            break
-        
-    bands = ['u', 'g', 'r', 'i', 'z']
-    if len(quasar_list[0]['mags_mean']) == 5:
-        bands = ['u', 'g', 'r', 'i', 'z']
-    elif len(quasar_list[0]['mags_mean']) == 3:
-        bands = ['g', 'r', 'i']
-    else:
-        raise ValueError("Unexpected number of bands in mags_means")
-    
-    for q in quasar_list:
-        clean_bands = set()
-        for i, b in enumerate(bands):
-            q[f'mags_mean_{b}'] = q['mags_mean'][i]
+    if ("ebv_wu" not in df.columns) or df["ebv_wu"].isna().all():
+        print("Populating SDSS fields...")
+        df = populate_sdss_fields(df)
 
-        del q['mags_mean']
+    if "dropped_bands" in df.columns:
+        df["dropped_bands"] = df["dropped_bands"].apply(_normalize_dropped_bands)
+        df["len_dropped_bands"] = df["dropped_bands"].apply(len)
 
-    for q in quasar_list:
-        q['len_dropped_bands'] = len(q['dropped_bands'])
-
-    df = pd.DataFrame(quasar_list)
     df = _mask_invalid_wu_bhmass(df)
+
+    required_mags_mean_cols = [f"mags_mean_{b}" for b in ("u", "g", "r", "i")]
+    missing_mags_mean_cols = [col for col in required_mags_mean_cols if col not in df.columns]
+    if missing_mags_mean_cols:
+        raise ValueError(
+            "Flat AGN input is missing required per-band magnitude means: "
+            f"{missing_mags_mean_cols}. "
+            "Only mags_mean_<band> columns are supported "
+            "(legacy mags_mean arrays and mags_mean_0..N are unsupported)."
+        )
+
+    required_var_cols = [f"log_jitter_{b}" for b in ("u", "g", "r", "i")] + [
+        f"log_amp_delta_blr_{b}" for b in ("u", "g", "r", "i")
+    ]
+    missing_var_cols = [col for col in required_var_cols if col not in df.columns]
+    if missing_var_cols:
+        raise ValueError(
+            "Flat AGN input is missing required variability columns: "
+            f"{missing_var_cols}."
+        )
+
+    if "dropped_bands" not in df.columns:
+        raise ValueError(
+            "Flat AGN input is missing required column 'dropped_bands'."
+        )
 
     dropped_bands = df['dropped_bands']
     jitter_total_sq = np.zeros(len(df))

@@ -261,21 +261,33 @@ def compute_derived_results(result, q, args):
 def load_quasar_core_list(fpath_in, pickled=False):
     if pickled:
         with open(fpath_in + ".pkl", "rb") as f: 
-            quasar_list = pickle.load(f)
+            payload = pickle.load(f)
+        if isinstance(payload, pd.DataFrame):
+            sample_df = payload.copy()
+        elif isinstance(payload, list):
+            sample_df = pd.DataFrame.from_records(payload)
+        elif isinstance(payload, dict):
+            sample_df = pd.DataFrame(payload)
+        else:
+            raise TypeError(f"Unsupported pickled input type: {type(payload).__name__}")
     else:
-        quasar_list = read_quasars_from_hdf5_flat(fpath_in)
-    return quasar_list
+        sample_df = read_quasars_from_hdf5_flat(fpath_in)
+    return sample_df
 
 
-def prepare_sample_df(quasar_list, filter_sdss_name=None, filter_object_id=None, N=None, skip=None):
-    for q in quasar_list:
-        for band in SDSS_BANDS:
-            mag_mean = safe_float(q.get(f"mags_mean_{band}"))
-            if np.isfinite(mag_mean):
-                mean_shift = safe_float(q.get(f"mean_{band}"), 0.0)
-                q[f"mean_corrected_{band}"] = mag_mean + mean_shift if np.isfinite(mean_shift) else mag_mean
-
-    sample_df = pd.DataFrame.from_records(quasar_list)
+def prepare_sample_df(sample_df, filter_sdss_name=None, filter_object_id=None, N=None, skip=None):
+    sample_df = sample_df.copy()
+    for band in SDSS_BANDS:
+        mag_col = f"mags_mean_{band}"
+        if mag_col not in sample_df.columns:
+            continue
+        mag_mean = pd.to_numeric(sample_df[mag_col], errors="coerce")
+        mean_col = f"mean_{band}"
+        if mean_col in sample_df.columns:
+            mean_shift = pd.to_numeric(sample_df[mean_col], errors="coerce").fillna(0.0)
+        else:
+            mean_shift = 0.0
+        sample_df[f"mean_corrected_{band}"] = mag_mean + mean_shift
 
     exclusion_sdss_names = {
         "221120.38+010905.6",  # wrong redshift
@@ -335,10 +347,10 @@ def match_to_dr16q(sample_df, dr16q_fits, max_sep_arcsec=1.0):
 
 
 def build_records(args):
-    quasar_list = load_quasar_core_list(args.fpath_in, pickled=args.pickled)
+    sample_df = load_quasar_core_list(args.fpath_in, pickled=args.pickled)
     print("build_records filtering on: ", args.filter_object_id)
     sample_df = prepare_sample_df(
-        quasar_list,
+        sample_df,
         filter_sdss_name=args.filter_sdss_name,
         filter_object_id=args.filter_object_id,
         N=args.N,

@@ -188,9 +188,10 @@ def load_and_merge_h5(file_list, expected_n):
         try:
             source_git_commit = _read_h5_scalar_key(path, "git_commit")
             source_run_datetime = _read_h5_scalar_key(path, "run_datetime")
-            qs = read_quasars_from_h5(path)
-            if not enforce_expected_count(len(qs), expected_n, path):
+            qs_df = read_quasars_from_h5(path)
+            if not enforce_expected_count(len(qs_df), expected_n, path):
                 continue
+            qs = qs_df.to_dict("records")
             for row in qs:
                 row["git_commit"] = source_git_commit
                 row["run_datetime"] = source_run_datetime
@@ -293,7 +294,7 @@ def main():
 
     if not args.skip_populate_sdss and all_quasars:
         print("Populating SDSS fields...")
-        populate_sdss_fields(all_quasars)
+        all_quasars = populate_sdss_fields(all_quasars)
 
     if out_format == "csv":
         seen = []
