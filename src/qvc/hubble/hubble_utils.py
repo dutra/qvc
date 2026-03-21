@@ -851,6 +851,9 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
     if "dropped_bands" in df.columns:
         df["dropped_bands"] = df["dropped_bands"].apply(_normalize_dropped_bands)
         df["len_dropped_bands"] = df["dropped_bands"].apply(len)
+    else:
+        df["dropped_bands"] = [[] for _ in range(len(df))]
+        df["len_dropped_bands"] = 0
 
     df = _mask_invalid_wu_bhmass(df)
 
