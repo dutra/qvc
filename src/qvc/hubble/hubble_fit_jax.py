@@ -64,6 +64,7 @@ from qvc.hubble.hubble_completeness_refactored import (
     get_completeness_function_2d,
     get_completeness_function_3d_fhost,
     get_completeness_function_4d_fhost_alpha,
+    make_dm_function,
 )
 from qvc.hubble.hubble_fit import (
     DEFAULT_COMPLETENESS_SIM_FILE,
@@ -73,6 +74,7 @@ from qvc.hubble.hubble_fit import (
     z_pivot_agn,
     z_pivot_sna,
 )
+from qvc.hubble.hubble_likelihood import log_likelihood
 from qvc.hubble.hubble_model import (
     agn_model_req_errs,
     agn_model_req_obs,
@@ -536,6 +538,44 @@ def _run_numpyro_nested(model, model_labels, *, seed: int, num_live_points: int,
     return ns, flat_samples, logZ, logZerr
 
 
+def _compute_numpy_blobs_from_samples(
+    flat_samples,
+    *,
+    model_labels,
+    agn_data,
+    pantheon_data,
+    _sna_L,
+    _sna_Lower,
+    _sna_LogdetCov,
+    cosmo_model,
+    completeness_params,
+    z_pivot_agn,
+    only_sna,
+):
+    logls = []
+    blobs = []
+    for theta in np.asarray(flat_samples, dtype=float):
+        logl, blob = log_likelihood(
+            theta,
+            agn_data=agn_data,
+            pantheon_data=pantheon_data,
+            _sna_L=_sna_L,
+            _sna_Lower=_sna_Lower,
+            _sna_LogdetCov=_sna_LogdetCov,
+            cosmo_model=cosmo_model,
+            completeness_params=completeness_params,
+            z_pivot_agn=z_pivot_agn,
+            agn_calibrators_data=None,
+            only_sna=only_sna,
+            use_full_cov=True,
+        )
+        logls.append(float(logl))
+        blobs.append(np.asarray(blob, dtype=float))
+    logls = np.asarray(logls, dtype=float)
+    blobs = np.asarray(blobs, dtype=float)
+    return logls, blobs
+
+
 def run_single_jax(
     df_agn,
     df_agn_all,
@@ -554,12 +594,18 @@ def run_single_jax(
     only_sna=False,
     N=None,
     uniform_redshift_distribution=False,
+    use_alpha_lambda_term=False,
+    use_redshift_log_f_term=False,
     seed=42,
 ):
     _require_jax_stack()
+    if use_alpha_lambda_term:
+        raise NotImplementedError("run_single_jax does not support --fit_alpha_lambda_term yet.")
+    if use_redshift_log_f_term:
+        raise NotImplementedError("run_single_jax does not support --fit_redshift_log_f_term yet.")
     validate_completeness_mode(completeness_mode)
 
-    run_tag = make_run_tag(cosmo_model, only_sna, speed, N, z_range)
+    run_tag = make_run_tag(cosmo_model, only_sna, speed, N, z_range, use_alpha_lambda_term=False)
     plot_path = f"plots/hubble/{prefix}/{run_tag}"
     os.makedirs(plot_path, exist_ok=True)
     print("Saving plots to", plot_path)
@@ -629,7 +675,6 @@ def run_single_jax(
         num_live_points, max_samples, dlogz = 96, 20_000, 0.08
     else:  # dev
         num_live_points, max_samples, dlogz = 64, 10_000, 0.1
-
     print(f"Running NumPyro nested sampler with {num_live_points=} {max_samples=} {dlogz=}")
     _, flat_samples, logZ, logZerr = _run_numpyro_nested(
         model,
@@ -640,13 +685,47 @@ def run_single_jax(
         dlogz=dlogz,
     )
 
+    logls, blobs = _compute_numpy_blobs_from_samples(
+        flat_samples,
+        model_labels=model_labels,
+        agn_data=agn_data,
+        pantheon_data=pantheon_data,
+        _sna_L=_sna_L,
+        _sna_Lower=_sna_Lower,
+        _sna_LogdetCov=_sna_LogdetCov,
+        cosmo_model=cosmo_model,
+        completeness_params=completeness_params,
+        z_pivot_agn=z_pivot_agn,
+        only_sna=only_sna,
+    )
+    idx_max_weight = int(np.argmax(logls))
+    integrals_max_w = blobs[idx_max_weight, 0, :]
+    dmi_max_w = blobs[idx_max_weight, 1, :]
+    dmi_posterior_median = np.median(blobs[:, 1, :], axis=0)
+
     checkpoint_folder = f"results/hubble_posteriors/{prefix}"
     os.makedirs(checkpoint_folder, exist_ok=True)
     checkpoint_file = os.path.join(checkpoint_folder, f"posteriors_{run_tag}_jax.h5")
-    save_chains(checkpoint_file, flat_samples=flat_samples, logZ=logZ if logZ is not None else np.nan, logZerr=logZerr if logZerr is not None else np.nan)
+    save_chains(
+        checkpoint_file,
+        flat_samples=flat_samples,
+        dmi_max_w=dmi_max_w,
+        dmi_posterior_median=dmi_posterior_median,
+        logZ=logZ if logZ is not None else np.nan,
+        logZerr=logZerr if logZerr is not None else np.nan,
+        integrals_max_w=integrals_max_w,
+    )
 
     display_results_summary(flat_samples, cosmo_model, z_pivot_agn)
     age, age_err = compute_age_universe_with_error(flat_samples, cosmo_model, max_eval=200)
+
+    dm_interp = make_dm_function(
+        agn_data["apparent_mag_2500"],
+        agn_data["z"],
+        dmi_posterior_median,
+        f_host_center=agn_data.get("f_host_center"),
+        alpha_lambda=agn_data.get("alpha_lambda"),
+    )
 
     plot_cosmo_corner(None, flat_samples, cosmo_model, z_pivot_sna, z_pivot_agn, show=False, plot_path=plot_path, speed=f"{speed}_jax")
     L_residuals_debiased, L_pred_std_debiased = plot_predicted_L2500_vs_sigmahat(
@@ -655,7 +734,7 @@ def run_single_jax(
         cosmo_model=cosmo_model,
         z_pivot_agn=z_pivot_agn,
         debias=True,
-        dm_interp=None,
+        dm_interp=dm_interp,
         show_residuals=False,
         show=False,
         plot_path=plot_path,
@@ -667,7 +746,7 @@ def run_single_jax(
         df_agn_fit,
         cosmo_model,
         z_pivot_agn,
-        None,
+        dm_interp,
         plot_path=plot_path,
         show=False,
     )
@@ -683,7 +762,7 @@ def run_single_jax(
         show_true=False,
         show=False,
         debias=True,
-        dm_interp=None,
+        dm_interp=dm_interp,
         plot_path=plot_path,
         cosmo_model_samples={},
         verbose=True,
@@ -695,10 +774,10 @@ def run_single_jax(
     print(f"Reduced chi-squared (debiased) Hubble: {chisq_red_hubble_debiased:.3f}")
 
     plot_completeness_diagnostics(
-        np.zeros(len(df_agn_fit), dtype=float),
+        dmi_posterior_median,
         agn_data["z"],
         agn_data["apparent_mag_2500"],
-        np.ones(len(df_agn_fit), dtype=float),
+        integrals_max_w,
         plot_path=plot_path,
     )
     return flat_samples, model_labels, logZ, logZerr, age, age_err

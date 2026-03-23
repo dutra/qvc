@@ -31,22 +31,32 @@ def _candidate_existing_path(*candidates):
     return None
 
 
+def _discover_qvc_root() -> Path:
+    """Find the repository root by walking upward to the pyproject file."""
+    here = Path(__file__).resolve()
+    for parent in here.parents:
+        if (parent / "pyproject.toml").exists():
+            return parent
+    return here.parents[3]
+
+
 def default_shen_pubtools_path():
-    script_path = Path(__file__).resolve()
-    qvc_root = script_path.parents[2]
+    qvc_root = _discover_qvc_root()
     return _candidate_existing_path(
         os.environ.get("SHEN_PUBTOOLS_PATH"),
         os.environ.get("HOPKINS_PUBTOOLS_PATH"),
+        qvc_root / "quasarlf" / "pubtools",
+        qvc_root.parent / "quasarlf" / "pubtools",
         qvc_root.parent / "quasarlf" / "pubtools",
         qvc_root / "external" / "quasarlf" / "pubtools",
     )
 
 
 def default_ananna_xlf_path():
-    script_path = Path(__file__).resolve()
-    qvc_root = script_path.parents[2]
+    qvc_root = _discover_qvc_root()
     return _candidate_existing_path(
         os.environ.get("ANANNA_XLF_PATH"),
+        qvc_root / "ananna_xlf" / "final_sol_all.npy.gz",
         qvc_root.parent / "ananna_xlf" / "final_sol_all.npy.gz",
         Path.home() / "ananna_xlf" / "final_sol_all.npy.gz",
     )

@@ -22,7 +22,8 @@ from scipy.stats import gaussian_kde
 from tqdm import tqdm
 
 from qvc.hubble.hubble_model import (M_model_agn, M_model_agn_err, get_model_params, agn_model_pack_params,
-    agn_model_pack_obs, agn_model_oidx, agn_model_pidx, agn_model_req_obs, agn_model_req_errs)
+    agn_model_pack_obs, agn_model_oidx, agn_model_pidx, agn_model_req_obs, agn_model_req_errs,
+    evaluate_log_f, infer_model_option_flags)
 from qvc.hubble.hubble_likelihood import sigma_lens_from_dc
 from qvc.hubble.hubble_utils import convert_M2500_to_logL2500, cosmo_model_label_latex, format_result_errors, sym_percentile
 from qvc.hubble.hubble_completeness_refactored import (
@@ -240,7 +241,14 @@ def plot_blr_line_lags_vs_l2500(
     if not required.issubset(df_agn.columns):
         return None
 
-    _, model_labels, _ = get_model_params(cosmo_model)
+    option_flags = infer_model_option_flags(
+        cosmo_model, np.asarray(flat_samples).shape[1]
+    )
+    _, model_labels, _ = get_model_params(
+        cosmo_model,
+        use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
+        use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
+    )
     param_indices = {name: model_labels.index(name) for name in model_labels}
     med_params = {key: np.median(flat_samples[:, idx]) for key, idx in param_indices.items()}
     cosmo = _get_cosmo_from_params(cosmo_model, med_params, z_pivot_agn)
@@ -617,6 +625,60 @@ def plot_tau_sigma_vs_wu_catalog(df, plot_path="plots/hubble", show=False):
     )
 
 
+def plot_eta_tau_sigma_vs_redshift(df, plot_path="plots/hubble", show=False):
+    """Plot eta_tau and eta_sigma against redshift for AGN diagnostics."""
+    required = {"z", "eta_tau", "eta_sigma"}
+    if not required.issubset(df.columns):
+        missing = ", ".join(sorted(required - set(df.columns)))
+        raise KeyError(f"Missing required columns for eta-vs-redshift plot: {missing}")
+
+    z = pd.to_numeric(df["z"], errors="coerce").to_numpy(dtype=float)
+    eta_tau = pd.to_numeric(df["eta_tau"], errors="coerce").to_numpy(dtype=float)
+    eta_sigma = pd.to_numeric(df["eta_sigma"], errors="coerce").to_numpy(dtype=float)
+
+    fig, axes = plt.subplots(2, 1, figsize=(8.5, 10.0), sharex=True)
+
+    mask_tau = np.isfinite(z) & np.isfinite(eta_tau)
+    if np.any(mask_tau):
+        axes[0].scatter(
+            z[mask_tau],
+            eta_tau[mask_tau],
+            s=5,
+            alpha=0.65,
+            linewidths=0,
+            rasterized=True,
+        )
+    else:
+        axes[0].text(0.5, 0.5, "No finite eta_tau values", ha="center", va="center", transform=axes[0].transAxes)
+    axes[0].set_xlabel("Redshift z")
+    axes[0].set_ylabel(r"$\eta_{\tau}$")
+    axes[0].grid(True, alpha=0.25)
+
+    mask_sigma = np.isfinite(z) & np.isfinite(eta_sigma)
+    if np.any(mask_sigma):
+        axes[1].scatter(
+            z[mask_sigma],
+            eta_sigma[mask_sigma],
+            s=5,
+            alpha=0.65,
+            linewidths=0,
+            rasterized=True,
+        )
+    else:
+        axes[1].text(0.5, 0.5, "No finite eta_sigma values", ha="center", va="center", transform=axes[1].transAxes)
+    axes[1].set_xlabel("Redshift z")
+    axes[1].set_ylabel(r"$\eta_{\sigma}$")
+    axes[1].grid(True, alpha=0.25)
+
+    diagnostics_path = os.path.join(plot_path or "plots/hubble", "diagnostics")
+    return _save_figure(
+        fig,
+        os.path.join(diagnostics_path, "eta_tau_sigma_vs_redshift.pdf"),
+        dpi=200,
+        show=show,
+    )
+
+
 def plot_fast_vs_uv_variability(df, plot_path="plots/hubble", show=False):
     """Plot fast-vs-UV variability timescales and amplitudes on log-log axes."""
     tau_fast_col = "log_tau_fast_uv" if "log_tau_fast_uv" in df.columns else None
@@ -624,17 +686,12 @@ def plot_fast_vs_uv_variability(df, plot_path="plots/hubble", show=False):
     sigma_fast_col = None
     sigma_uv_col = "log_sigma_uv" if "log_sigma_uv" in df.columns else None
 
-    required = [tau_fast_col, tau_uv_col, sigma_fast_col, sigma_uv_col]
-    if any(col is None for col in required):
+    if tau_fast_col is None or tau_uv_col is None:
         missing = []
         if tau_fast_col is None:
             missing.append("log_tau_fast_uv")
         if tau_uv_col is None:
             missing.append("log_tau_uv_rf or log_tau_uv")
-        if sigma_fast_col is None:
-            missing.append("distinct sigma_fast column")
-        if sigma_uv_col is None:
-            missing.append("log_sigma_uv")
         raise KeyError(f"Missing required columns for fast-vs-UV diagnostic plot: {', '.join(missing)}")
 
     z = pd.to_numeric(df["z"], errors="coerce").to_numpy(dtype=float) if "z" in df.columns else np.full(len(df), np.nan)
@@ -644,7 +701,10 @@ def plot_fast_vs_uv_variability(df, plot_path="plots/hubble", show=False):
         pd.to_numeric(df[sigma_fast_col], errors="coerce").to_numpy(dtype=float)
         if sigma_fast_col is not None else np.full(len(df), np.nan)
     )
-    log_sigma_uv = pd.to_numeric(df[sigma_uv_col], errors="coerce").to_numpy(dtype=float)
+    log_sigma_uv = (
+        pd.to_numeric(df[sigma_uv_col], errors="coerce").to_numpy(dtype=float)
+        if sigma_uv_col is not None else np.full(len(df), np.nan)
+    )
 
     if tau_uv_col == "log_tau_uv" and "z" in df.columns:
         log_tau_uv = log_tau_uv - np.log10(1.0 + z)
@@ -1076,6 +1136,126 @@ def plot_alpha_lambda_histogram(df, plot_path="plots/hubble", show=False, nbins=
     )
 
 
+def plot_alpha_lambda_vs_redshift(df, plot_path="plots/hubble", show=False, nbins_z=14, min_bin_count=6):
+    """Plot alpha_lambda against redshift with a binned median trend."""
+    required = {"z", "alpha_lambda"}
+    if not required.issubset(df.columns):
+        missing = ", ".join(sorted(required - set(df.columns)))
+        raise KeyError(f"Missing required columns for alpha_lambda vs redshift plot: {missing}")
+
+    z = pd.to_numeric(df["z"], errors="coerce").to_numpy(dtype=float)
+    alpha_lambda = pd.to_numeric(df["alpha_lambda"], errors="coerce").to_numpy(dtype=float)
+    mask = np.isfinite(z) & np.isfinite(alpha_lambda) & (z > 0.0)
+    if not np.any(mask):
+        return None
+
+    z_use = z[mask]
+    alpha_use = alpha_lambda[mask]
+
+    fig, ax = plt.subplots(figsize=(6.4, 5.0))
+    ax.scatter(
+        z_use,
+        alpha_use,
+        s=12,
+        alpha=0.35,
+        color="tab:blue",
+        linewidths=0,
+        rasterized=True,
+    )
+
+    if np.nanmax(z_use) > np.nanmin(z_use):
+        z_edges = np.linspace(np.nanmin(z_use), np.nanmax(z_use), nbins_z + 1)
+        zmid = []
+        ymed = []
+        for i in range(len(z_edges) - 1):
+            lo = z_edges[i]
+            hi = z_edges[i + 1]
+            keep = (z_use >= lo) & (z_use < hi)
+            if i == len(z_edges) - 2:
+                keep = (z_use >= lo) & (z_use <= hi)
+            if np.count_nonzero(keep) >= min_bin_count:
+                zmid.append(np.nanmedian(z_use[keep]))
+                ymed.append(np.nanmedian(alpha_use[keep]))
+        if zmid:
+            ax.plot(zmid, ymed, color="k", lw=2, label="Binned median")
+
+    ax.set_xlabel(r"$z$")
+    ax.set_ylabel(r"$\alpha_{\lambda}$")
+    ax.grid(True, alpha=0.2)
+    handles, labels = ax.get_legend_handles_labels()
+    if handles:
+        ax.legend(frameon=False)
+    fig.tight_layout()
+
+    diagnostics_path = os.path.join(plot_path or "plots/hubble", "diagnostics")
+    return _save_figure(
+        fig,
+        os.path.join(diagnostics_path, "alpha_lambda_vs_redshift.pdf"),
+        dpi=200,
+        show=show,
+    )
+
+
+def plot_alpha_lambda_vs_eta_sigma(df, plot_path="plots/hubble", show=False, nbins_eta=14, min_bin_count=6):
+    """Plot alpha_lambda against eta_sigma with a binned median trend."""
+    required = {"alpha_lambda", "eta_sigma"}
+    if not required.issubset(df.columns):
+        missing = ", ".join(sorted(required - set(df.columns)))
+        raise KeyError(f"Missing required columns for alpha_lambda vs eta_sigma plot: {missing}")
+
+    eta_sigma = pd.to_numeric(df["eta_sigma"], errors="coerce").to_numpy(dtype=float)
+    alpha_lambda = pd.to_numeric(df["alpha_lambda"], errors="coerce").to_numpy(dtype=float)
+    mask = np.isfinite(eta_sigma) & np.isfinite(alpha_lambda)
+    if not np.any(mask):
+        return None
+
+    x = eta_sigma[mask]
+    y = alpha_lambda[mask]
+
+    fig, ax = plt.subplots(figsize=(6.4, 5.0))
+    ax.scatter(
+        x,
+        y,
+        s=12,
+        alpha=0.35,
+        color="tab:blue",
+        linewidths=0,
+        rasterized=True,
+    )
+
+    if np.nanmax(x) > np.nanmin(x):
+        x_edges = np.linspace(np.nanmin(x), np.nanmax(x), nbins_eta + 1)
+        xmid = []
+        ymed = []
+        for i in range(len(x_edges) - 1):
+            lo = x_edges[i]
+            hi = x_edges[i + 1]
+            keep = (x >= lo) & (x < hi)
+            if i == len(x_edges) - 2:
+                keep = (x >= lo) & (x <= hi)
+            if np.count_nonzero(keep) >= min_bin_count:
+                xmid.append(np.nanmedian(x[keep]))
+                ymed.append(np.nanmedian(y[keep]))
+        if xmid:
+            ax.plot(xmid, ymed, color="k", lw=2, label="Binned median")
+
+    ax.set_xlabel(r"$\eta_{\sigma}$")
+    ax.set_ylabel(r"$\alpha_{\lambda}$")
+    ax.grid(True, alpha=0.2)
+    handles, labels = ax.get_legend_handles_labels()
+    if handles:
+        ax.legend(frameon=False)
+    fig.tight_layout()
+
+    diagnostics_path = os.path.join(plot_path or "plots/hubble", "diagnostics")
+    return _save_figure(
+        fig,
+        os.path.join(diagnostics_path, "alpha_lambda_vs_eta_sigma.pdf"),
+        dpi=200,
+        show=show,
+    )
+
+
 def plot_blr_lag_vs_amp_by_band(df, plot_path="plots/hubble", show=False, lag_suffix=""):
     """Plot BLR lag against inferred BLR amplitude in each band.
 
@@ -1286,6 +1466,96 @@ def plot_blr_lag_vs_redshift_by_band(df, plot_path="plots/hubble", show=False, l
         if suffix == "2"
         else "blr_lag_vs_redshift_by_band.pdf"
     )
+    return _save_figure(
+        fig,
+        os.path.join(diagnostics_path, output_name),
+        dpi=200,
+        show=show,
+    )
+
+
+def plot_blr_amp_vs_redshift_by_band(df, plot_path="plots/hubble", show=False, lag_suffix=""):
+    """Plot inferred BLR amplitude against redshift in each band."""
+    suffix = str(lag_suffix or "")
+    amp_delta_prefix = f"log_amp_delta_blr{suffix}_"
+
+    bands = [
+        band
+        for band in ("u", "g", "r", "i", "z")
+        if f"{amp_delta_prefix}{band}" in df.columns
+    ]
+    if not bands:
+        raise KeyError(f"No {amp_delta_prefix}<band> columns found in the dataframe.")
+
+    continuum_ref_col = None
+    for candidate in ("log_sigma_uv",):
+        if candidate in df.columns:
+            continuum_ref_col = candidate
+            break
+    if continuum_ref_col is None:
+        raise KeyError("Missing continuum amplitude column: need 'log_sigma_uv'.")
+
+    z = pd.to_numeric(df["z"], errors="coerce").to_numpy(dtype=float)
+    dropped_bands = df["dropped_bands"] if "dropped_bands" in df.columns else None
+    title_label = "BLR 2" if suffix == "2" else "BLR"
+
+    n_panels = len(bands)
+    n_cols = 2 if n_panels > 1 else 1
+    n_rows = int(np.ceil(n_panels / n_cols))
+    fig, axes = plt.subplots(
+        n_rows,
+        n_cols,
+        figsize=(6.3 * n_cols, 4.8 * n_rows),
+        squeeze=False,
+        sharex=True,
+        sharey=True,
+    )
+    axes = axes.ravel()
+
+    for ax, band in zip(axes, bands):
+        continuum_band_col = f"log_sigma_band_{band}"
+        continuum_col = continuum_band_col if continuum_band_col in df.columns else continuum_ref_col
+        amp_col = f"{amp_delta_prefix}{band}"
+
+        log_amp_blr = (
+            pd.to_numeric(df[continuum_col], errors="coerce").to_numpy(dtype=float)
+            + pd.to_numeric(df[amp_col], errors="coerce").to_numpy(dtype=float)
+        )
+        mask = np.isfinite(z) & np.isfinite(log_amp_blr)
+        if dropped_bands is not None:
+            mask &= ~dropped_bands.apply(lambda bands_set: band in bands_set).to_numpy()
+
+        if np.any(mask):
+            ax.scatter(
+                z[mask],
+                log_amp_blr[mask],
+                s=10,
+                alpha=0.4,
+                color="tab:blue",
+                linewidths=0,
+                rasterized=True,
+            )
+        else:
+            ax.text(
+                0.5,
+                0.5,
+                f"No finite {title_label} amplitudes for {band}-band",
+                ha="center",
+                va="center",
+                transform=ax.transAxes,
+            )
+
+        ax.set_xlabel(r"$z$")
+        ax.set_ylabel(rf"$\log A_{{\rm {title_label.lower().replace(' ', '')},{band}}}$")
+        ax.set_title(f"{title_label} amplitude vs z ({band}-band)")
+        ax.grid(True, alpha=0.2)
+
+    for ax in axes[n_panels:]:
+        ax.set_axis_off()
+
+    fig.tight_layout()
+    diagnostics_path = os.path.join(plot_path or "plots/hubble", "diagnostics")
+    output_name = "blr2_amp_vs_redshift_by_band.pdf" if suffix == "2" else "blr_amp_vs_redshift_by_band.pdf"
     return _save_figure(
         fig,
         os.path.join(diagnostics_path, output_name),
@@ -1652,7 +1922,15 @@ def plot_dynesty(results, cosmo_model, plot_path="plots/hubble", only_sna="", sp
     """
 
     os.makedirs(os.path.dirname(plot_path), exist_ok=True)
-    priors, model_labels, model_labels_latex = get_model_params(cosmo_model)
+    option_flags = infer_model_option_flags(
+        cosmo_model, np.asarray(results.samples).shape[1], only_sna=bool(only_sna)
+    )
+    priors, model_labels, model_labels_latex = get_model_params(
+        cosmo_model,
+        only_sna=bool(only_sna),
+        use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
+        use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
+    )
 
     # Cornerplot
     fig_corner, axes_corner = dyplot.cornerplot(results, labels=model_labels_latex, quantiles=[0.16, 0.5, 0.84],
@@ -1718,7 +1996,15 @@ def plot_traces(sampler, only_sna=False, cosmo_model='Flatw0waCDM', show=False, 
     else:
         samples = sampler.get_chain()
 
-    priors, model_labels, model_labels_latex = get_model_params(cosmo_model)
+    option_flags = infer_model_option_flags(
+        cosmo_model, samples.shape[-1], only_sna=only_sna
+    )
+    priors, model_labels, model_labels_latex = get_model_params(
+        cosmo_model,
+        only_sna=only_sna,
+        use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
+        use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
+    )
     ndim = len(model_labels)
 
     fig, axes = plt.subplots(ndim, 1, figsize=(10, ndim*2.5), sharex=True)
@@ -1760,7 +2046,15 @@ def plot_posterior_corner(flat_samples, only_sna=False, cosmo_model='Flatw0waCDM
         raise ValueError("cosmo_model must be 'FlatwCDM', 'Flatw0waCDM', or 'FlatLambdaCDM'")
 
     # Model parameters: AGN correlation + SN calibration + cosmology
-    priors, model_labels, model_labels_latex = get_model_params(cosmo_model)
+    option_flags = infer_model_option_flags(
+        cosmo_model, np.asarray(flat_samples).shape[1], only_sna=only_sna
+    )
+    priors, model_labels, model_labels_latex = get_model_params(
+        cosmo_model,
+        only_sna=only_sna,
+        use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
+        use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
+    )
 
     fig = corner.corner(
         flat_samples,
@@ -1804,7 +2098,15 @@ def plot_cosmo_corner(
     from scipy.stats import gaussian_kde
     from scipy.ndimage import gaussian_filter
     # --- pull model labels from your config ---
-    _, model_labels, model_labels_latex = get_model_params(cosmo_model)
+    ref_samples = flat_samples_agn if flat_samples_agn is not None else flat_samples_sn
+    option_flags = infer_model_option_flags(
+        cosmo_model, np.asarray(ref_samples).shape[1], only_sna=flat_samples_agn is None
+    )
+    _, model_labels, model_labels_latex = get_model_params(
+        cosmo_model,
+        use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
+        use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
+    )
     idx = {k: i for i, k in enumerate(model_labels)}
     latex = dict(zip(model_labels, model_labels_latex))
 
@@ -2155,7 +2457,14 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     z_grid = np.linspace(1e-4, 5.2, 500)
 
     # --- Parameter bookkeeping ---
-    _, model_labels, _ = get_model_params(cosmo_model)
+    option_flags = infer_model_option_flags(
+        cosmo_model, np.asarray(flat_samples).shape[1]
+    )
+    _, model_labels, _ = get_model_params(
+        cosmo_model,
+        use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
+        use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
+    )
     param_indices = {name: model_labels.index(name) for name in model_labels}
 
     # --- Small helper: μ_model(z | params) ---
@@ -2196,11 +2505,17 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     mu_pred_samples = []
     for s in flat_samples:
         sample_params = {k: s[param_indices[k]] for k in model_labels}
-        agn_params_arr = agn_model_pack_params(sample_params)
-        agn_obs_arr, agn_err_arr, agn_pivot_arr = agn_model_pack_obs(df_agn)
+        agn_params_arr = agn_model_pack_params(sample_params, use_alpha_lambda_term=option_flags["use_alpha_lambda_term"])
+        agn_obs_arr, agn_err_arr, agn_pivot_arr = agn_model_pack_obs(
+            df_agn, use_alpha_lambda_term=option_flags["use_alpha_lambda_term"]
+        )
 
-        predicted_M2500 = M_model_agn(agn_params_arr, agn_obs_arr, agn_pivot_arr)
-        predicted_M2500_err = M_model_agn_err(agn_params_arr, agn_obs_arr, agn_err_arr, agn_pivot_arr)
+        predicted_M2500 = M_model_agn(
+            agn_params_arr, agn_obs_arr, agn_pivot_arr, use_alpha_lambda_term=option_flags["use_alpha_lambda_term"]
+        )
+        predicted_M2500_err = M_model_agn_err(
+            agn_params_arr, agn_obs_arr, agn_err_arr, agn_pivot_arr, use_alpha_lambda_term=option_flags["use_alpha_lambda_term"]
+        )
         mu_pred_samples.append(m_obs - predicted_M2500)
     mu_pred_samples = np.array(mu_pred_samples)
 
@@ -2220,10 +2535,16 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     mu_pred_84th   = np.percentile(mu_pred_samples, 84, axis=0)
 
     # Per-object uncertainty (for yerr)
-    agn_params_arr = agn_model_pack_params(results)
-    agn_obs_arr, agn_err_arr, agn_pivot_arr = agn_model_pack_obs(df_agn)
-    predicted_M2500 = M_model_agn(agn_params_arr, agn_obs_arr, agn_pivot_arr)
-    predicted_M2500_err = M_model_agn_err(agn_params_arr, agn_obs_arr, agn_err_arr, agn_pivot_arr)
+    agn_params_arr = agn_model_pack_params(results, use_alpha_lambda_term=option_flags["use_alpha_lambda_term"])
+    agn_obs_arr, agn_err_arr, agn_pivot_arr = agn_model_pack_obs(
+        df_agn, use_alpha_lambda_term=option_flags["use_alpha_lambda_term"]
+    )
+    predicted_M2500 = M_model_agn(
+        agn_params_arr, agn_obs_arr, agn_pivot_arr, use_alpha_lambda_term=option_flags["use_alpha_lambda_term"]
+    )
+    predicted_M2500_err = M_model_agn_err(
+        agn_params_arr, agn_obs_arr, agn_err_arr, agn_pivot_arr, use_alpha_lambda_term=option_flags["use_alpha_lambda_term"]
+    )
 
     cosmo = get_cosmo(cosmo_model, results, z_pivot_agn)
     sigma_lens = sigma_lens_from_dc(df_agn['z'].values, cosmo)
@@ -2236,11 +2557,13 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
         predicted_M2500_err**2
     )
 
-    mu_pred_std_with_scatter = np.sqrt(
-        mu_pred_std**2 +
-        np.exp(results['log_f'])**2
-        #(np.exp(results['log_f']) + results['sigma_b'] * (1+df_agn["z"].values))**2
+    log_f_eff = evaluate_log_f(
+        results,
+        df_agn["z"].values,
+        z_pivot=z_pivot_agn,
+        use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
     )
+    mu_pred_std_with_scatter = np.sqrt(mu_pred_std**2 + np.exp(log_f_eff) ** 2)
     
     # Residuals (vs. median μ_model)
     mu_interp = np.interp(df_agn["z"].values, z_grid, mu_model_median)
@@ -2465,12 +2788,17 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
 
     # Survey magnitude limit (shade above)
     if completeness and not debias:
-        agn_params_arr = agn_model_pack_params(results)
+        agn_params_arr = agn_model_pack_params(results, use_alpha_lambda_term=option_flags["use_alpha_lambda_term"])
         agn_obs_med = {key: float(np.median(df_agn[key].values)) * np.ones_like(z_grid) for key in agn_model_req_obs + agn_model_req_errs}
-        agn_obs_arr, agn_err_arr, agn_pivot_arr = agn_model_pack_obs(agn_obs_med)
+        if option_flags["use_alpha_lambda_term"]:
+            agn_obs_med["alpha_lambda"] = float(np.median(df_agn["alpha_lambda"].values)) * np.ones_like(z_grid)
+            agn_obs_med["alpha_lambda_err"] = float(np.median(df_agn["alpha_lambda_err"].values)) * np.ones_like(z_grid)
+        agn_obs_arr, agn_err_arr, agn_pivot_arr = agn_model_pack_obs(
+            agn_obs_med, use_alpha_lambda_term=option_flags["use_alpha_lambda_term"]
+        )
 
         M_med_grid = np.median([
-            M_model_agn(agn_params_arr, agn_obs_arr, agn_pivot_arr)
+            M_model_agn(agn_params_arr, agn_obs_arr, agn_pivot_arr, use_alpha_lambda_term=option_flags["use_alpha_lambda_term"])
             for s in flat_samples
         ], axis=0)
 
@@ -2484,7 +2812,14 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     line_styles = {'Flatw0waCDM': 'dotted', 'FlatLambdaCDM': "dotted", 'FlatwCDM': 'dashdot'}
 
     for cosmo_model_other, cosmo_model_samples_other in cosmo_model_samples.items():
-        _, model_labels_other, _ = get_model_params(cosmo_model_other)
+        option_flags_other = infer_model_option_flags(
+            cosmo_model_other, np.asarray(cosmo_model_samples_other).shape[1]
+        )
+        _, model_labels_other, _ = get_model_params(
+            cosmo_model_other,
+            use_alpha_lambda_term=option_flags_other["use_alpha_lambda_term"],
+            use_redshift_log_f_term=option_flags_other["use_redshift_log_f_term"],
+        )
         model_label_latex_other = cosmo_model_label_latex(cosmo_model_other)
         results_other = {key: np.median(cosmo_model_samples_other[:, i]) for i, key in enumerate(model_labels_other)}
 
@@ -2525,7 +2860,14 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
 
 
         for cosmo_model_other, cosmo_model_samples_other in cosmo_model_samples.items():
-            _, model_labels_other, _ = get_model_params(cosmo_model_other)
+            option_flags_other = infer_model_option_flags(
+                cosmo_model_other, np.asarray(cosmo_model_samples_other).shape[1]
+            )
+            _, model_labels_other, _ = get_model_params(
+                cosmo_model_other,
+                use_alpha_lambda_term=option_flags_other["use_alpha_lambda_term"],
+                use_redshift_log_f_term=option_flags_other["use_redshift_log_f_term"],
+            )
             z_grid_fine = np.linspace(1e-4, 5.2, 500)
             results_other = {key: np.median(cosmo_model_samples_other[:, i]) for i, key in enumerate(model_labels_other)}
 
@@ -2544,6 +2886,20 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
 
         ax_resid.set_ylabel(r"$\Delta\mu$ (mag)")
         ax_resid.set_xlabel(r"$z$")
+        chi2_mask = np.isfinite(residuals) & np.isfinite(residuals_err) & (residuals_err > 0)
+        if np.any(chi2_mask):
+            dof = max(int(np.count_nonzero(chi2_mask)) - 1, 1)
+            chi2_red = float(np.sum((residuals[chi2_mask] / residuals_err[chi2_mask]) ** 2) / dof)
+            ax_resid.text(
+                0.98,
+                0.96,
+                rf"$\chi^2_\nu = {chi2_red:.2f}$",
+                transform=ax_resid.transAxes,
+                ha="right",
+                va="top",
+                fontsize=12,
+                bbox=dict(boxstyle="round,pad=0.2", facecolor="white", alpha=0.8, edgecolor="none"),
+            )
         if df_calibrators is not None:
             ax_resid.set_ylim(-0.5, 0.5)
             ax_resid.set_xlim(df_calibrators['z'].min()*0.2, df_calibrators['z'].max()*1.1)
@@ -2568,10 +2924,14 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
         ds = df_calibrators.copy()
 
         # Build predicted M_2500 for SHOW objects at median params (results)
-        agn_params_arr_show = agn_model_pack_params(results)
-        obs_show, err_show, piv_show = agn_model_pack_obs(ds)
-        pred_M_show      = M_model_agn(agn_params_arr_show, obs_show, piv_show)
-        pred_M_err_show  = M_model_agn_err(agn_params_arr_show, obs_show, err_show, piv_show)
+        agn_params_arr_show = agn_model_pack_params(results, use_alpha_lambda_term=option_flags["use_alpha_lambda_term"])
+        obs_show, err_show, piv_show = agn_model_pack_obs(ds, use_alpha_lambda_term=option_flags["use_alpha_lambda_term"])
+        pred_M_show = M_model_agn(
+            agn_params_arr_show, obs_show, piv_show, use_alpha_lambda_term=option_flags["use_alpha_lambda_term"]
+        )
+        pred_M_err_show = M_model_agn_err(
+            agn_params_arr_show, obs_show, err_show, piv_show, use_alpha_lambda_term=option_flags["use_alpha_lambda_term"]
+        )
 
         # Distance modulus prediction: mu = m_2500 - M_2500
         m_show = ds['apparent_mag_2500'].values
@@ -2581,7 +2941,13 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
 
         mu_show_std = ds['mu_err'].values
         # Optionally include intrinsic scatter (used in residuals if desired)
-        mu_show_std_with_scatter = np.sqrt(mu_show_std**2 + np.exp(results['log_f'])**2)
+        log_f_eff_show = evaluate_log_f(
+            results,
+            z_show,
+            z_pivot=z_pivot_agn,
+            use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
+        )
+        mu_show_std_with_scatter = np.sqrt(mu_show_std**2 + np.exp(log_f_eff_show) ** 2)
 
         # Distinct colors per object
         cmap = plt.get_cmap("Set1")  # 10 distinct colors
@@ -2723,13 +3089,29 @@ def plot_predicted_vs_actual_M2500(
     from astropy.cosmology import FlatLambdaCDM, FlatwCDM, FlatwpwaCDM, Flatw0waCDM
 
     # --- model parameters from samples ---
-    priors, model_labels, model_labels_latex = get_model_params(cosmo_model)
+    option_flags = infer_model_option_flags(
+        cosmo_model, np.asarray(flat_samples).shape[1]
+    )
+    priors, model_labels, model_labels_latex = get_model_params(
+        cosmo_model,
+        use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
+        use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
+    )
     results = {key: np.median(flat_samples[:, i])
                for i, key in enumerate(model_labels)}
     label_to_idx = {k: i for i, k in enumerate(model_labels)}
 
     # --- intrinsic scatter: sigma_int = exp(log_f) from posterior median ---
-    sigma_intrinsic = float(np.exp(results['log_f']))
+    sigma_intrinsic = float(
+        np.exp(
+            evaluate_log_f(
+                results,
+                np.array([z_pivot_agn]),
+                z_pivot=z_pivot_agn,
+                use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
+            )[0]
+        )
+    )
 
     # --- helpers to build cosmology objects ---
     def _cosmo_from_params(H0, Om0, **kw):
@@ -2766,11 +3148,17 @@ def plot_predicted_vs_actual_M2500(
     distmod_med = np.array([cosmo_med.distmod(zi).value for zi in z])
     actual_M_2500 = m_app - distmod_med
 
-    agn_params_arr = agn_model_pack_params(results)
-    agn_obs_arr, agn_err_arr, agn_pivot_arr = agn_model_pack_obs(df_agn)
+    agn_params_arr = agn_model_pack_params(results, use_alpha_lambda_term=option_flags["use_alpha_lambda_term"])
+    agn_obs_arr, agn_err_arr, agn_pivot_arr = agn_model_pack_obs(
+        df_agn, use_alpha_lambda_term=option_flags["use_alpha_lambda_term"]
+    )
 
-    M_2500_pred = M_model_agn(agn_params_arr, agn_obs_arr, agn_pivot_arr)
-    M_2500_pred_err = M_model_agn_err(agn_params_arr, agn_obs_arr, agn_err_arr, agn_pivot_arr)
+    M_2500_pred = M_model_agn(
+        agn_params_arr, agn_obs_arr, agn_pivot_arr, use_alpha_lambda_term=option_flags["use_alpha_lambda_term"]
+    )
+    M_2500_pred_err = M_model_agn_err(
+        agn_params_arr, agn_obs_arr, agn_err_arr, agn_pivot_arr, use_alpha_lambda_term=option_flags["use_alpha_lambda_term"]
+    )
     M_2500_pred_err[~np.isfinite(M_2500_pred_err) | (M_2500_pred_err < 0)] = np.nan
 
     # --- x-errors: propagate cosmology posterior into distance modulus ---
@@ -3121,7 +3509,14 @@ def plot_full_residuals(
     df_agn = df_agn.reset_index(drop=True)
 
     def _median_param_dict(samples):
-        _, model_labels, _ = get_model_params(cosmo_model)
+        option_flags = infer_model_option_flags(
+            cosmo_model, np.asarray(samples).shape[1]
+        )
+        _, model_labels, _ = get_model_params(
+            cosmo_model,
+            use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
+            use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
+        )
         return {
             key: np.percentile(samples[:, i], [16, 50, 84])
             for i, key in enumerate(model_labels)
@@ -3516,11 +3911,20 @@ def plot_predicted_L2500_vs_sigmahat(
     flat_samples = flat_samples[::thin_factor]
 
     # --- Indices & parameter names ---
-    priors, model_labels, model_labels_latex = get_model_params(cosmo_model)
+    option_flags = infer_model_option_flags(
+        cosmo_model, np.asarray(flat_samples).shape[1]
+    )
+    priors, model_labels, model_labels_latex = get_model_params(
+        cosmo_model,
+        use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
+        use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
+    )
     param_indices = {name: model_labels.index(name) for name in model_labels}
 
     # --- Pack obs/errs/pivots once (MAIN sample) ---
-    agn_obs_arr, agn_err_arr, agn_pivot_arr = agn_model_pack_obs(d)
+    agn_obs_arr, agn_err_arr, agn_pivot_arr = agn_model_pack_obs(
+        d, use_alpha_lambda_term=option_flags["use_alpha_lambda_term"]
+    )
 
     # Helper: posterior median dict
     med_params = {k: np.median(flat_samples[:, param_indices[k]]) for k in model_labels}
@@ -3558,13 +3962,17 @@ def plot_predicted_L2500_vs_sigmahat(
     y_log_meas_err = 0.4 * np.asarray(d['apparent_mag_2500_err'].fillna(0.0))
 
     # --- Reference x (built at POSTERIOR-MEDIAN params) ---
-    med_arr = agn_model_pack_params(med_params)
+    med_arr = agn_model_pack_params(med_params, use_alpha_lambda_term=option_flags["use_alpha_lambda_term"])
     M0_med = med_arr[agn_model_pidx["M0_agn"]]
-    x_log_ref = M_model_agn(med_arr, agn_obs_arr, agn_pivot_arr) - M0_med
+    x_log_ref = M_model_agn(
+        med_arr, agn_obs_arr, agn_pivot_arr, use_alpha_lambda_term=option_flags["use_alpha_lambda_term"]
+    ) - M0_med
     x_ref = 10.0 ** x_log_ref
 
     # x errors for MAIN at median params
-    pred_M_err_med = M_model_agn_err(med_arr, agn_obs_arr, agn_err_arr, agn_pivot_arr)
+    pred_M_err_med = M_model_agn_err(
+        med_arr, agn_obs_arr, agn_err_arr, agn_pivot_arr, use_alpha_lambda_term=option_flags["use_alpha_lambda_term"]
+    )
     x_lower = 10.0 ** (x_log_ref - pred_M_err_med)
     x_upper = 10.0 ** (x_log_ref + pred_M_err_med)
     xerr_asym = np.vstack((x_ref - np.maximum(x_lower, 1e-300),
@@ -3584,11 +3992,15 @@ def plot_predicted_L2500_vs_sigmahat(
         yerr_linear_show = (10.0**actual_logL2500_show) * np.log(10.0) * y_log_meas_err_show
 
         # x for SHOW at median params (using ONLY df_calibrators fields)
-        obs_show, err_show, piv_show = agn_model_pack_obs(ds)
-        x_log_ref_show = M_model_agn(med_arr, obs_show, piv_show) - M0_med
+        obs_show, err_show, piv_show = agn_model_pack_obs(ds, use_alpha_lambda_term=option_flags["use_alpha_lambda_term"])
+        x_log_ref_show = M_model_agn(
+            med_arr, obs_show, piv_show, use_alpha_lambda_term=option_flags["use_alpha_lambda_term"]
+        ) - M0_med
         x_show = 10.0 ** x_log_ref_show
 
-        pred_M_err_show = M_model_agn_err(med_arr, obs_show, err_show, piv_show)
+        pred_M_err_show = M_model_agn_err(
+            med_arr, obs_show, err_show, piv_show, use_alpha_lambda_term=option_flags["use_alpha_lambda_term"]
+        )
         x_log_lower_show = np.min(np.ravel(x_log_ref_show - pred_M_err_show))
         x_log_upper_show = np.max(np.ravel(x_log_ref_show + pred_M_err_show))
         x_lower_show = 10.0 ** (x_log_ref_show - pred_M_err_show)
@@ -3615,8 +4027,10 @@ def plot_predicted_L2500_vs_sigmahat(
     ylog_grid_by_sample = []
     for s in flat_samples:
         sample_params = {k: s[param_indices[k]] for k in model_labels}
-        s_arr = agn_model_pack_params(sample_params)
-        M_i = M_model_agn(s_arr, agn_obs_arr, agn_pivot_arr)
+        s_arr = agn_model_pack_params(sample_params, use_alpha_lambda_term=option_flags["use_alpha_lambda_term"])
+        M_i = M_model_agn(
+            s_arr, agn_obs_arr, agn_pivot_arr, use_alpha_lambda_term=option_flags["use_alpha_lambda_term"]
+        )
         Mc = np.mean(M_i)
         cov_Mx = np.mean((x_log_ref - xcm) * (M_i - Mc))
         k_s = cov_Mx / var_x
@@ -3740,11 +4154,15 @@ def plot_predicted_L2500_vs_sigmahat(
         yerr_linear_show = (10.0**actual_logL2500_show) * np.log(10.0) * y_log_meas_err_show
 
         # x for SHOW at median params (using ONLY df_calibrators fields)
-        obs_show, err_show, piv_show = agn_model_pack_obs(ds)
-        x_log_ref_show = M_model_agn(med_arr, obs_show, piv_show) - M0_med
+        obs_show, err_show, piv_show = agn_model_pack_obs(ds, use_alpha_lambda_term=option_flags["use_alpha_lambda_term"])
+        x_log_ref_show = M_model_agn(
+            med_arr, obs_show, piv_show, use_alpha_lambda_term=option_flags["use_alpha_lambda_term"]
+        ) - M0_med
         x_show = 10.0 ** x_log_ref_show
 
-        pred_M_err_show = M_model_agn_err(med_arr, obs_show, err_show, piv_show)
+        pred_M_err_show = M_model_agn_err(
+            med_arr, obs_show, err_show, piv_show, use_alpha_lambda_term=option_flags["use_alpha_lambda_term"]
+        )
         x_lower_show = 10.0 ** (x_log_ref_show - pred_M_err_show)
         x_upper_show = 10.0 ** (x_log_ref_show + pred_M_err_show)
 
@@ -3805,7 +4223,9 @@ def plot_predicted_L2500_vs_sigmahat(
     ax.xaxis.set_minor_locator(LogLocator(base=10.0, subs=np.arange(2, 10) * 0.1, numticks=100))
 
     # x label (from MAIN pivots; just a label)
-    obs_arr, err_arr, pivots_arr = agn_model_pack_obs(df_agn)
+    obs_arr, err_arr, pivots_arr = agn_model_pack_obs(
+        df_agn, use_alpha_lambda_term=option_flags["use_alpha_lambda_term"]
+    )
     log_sigma_uv_pivot  = pivots_arr[agn_model_oidx["log_sigma_uv"]]
     log_tau_uv_rf_pivot = pivots_arr[agn_model_oidx["log_tau_uv_rf"]]
     sigma_uv_pivot  = 10.0 ** log_sigma_uv_pivot

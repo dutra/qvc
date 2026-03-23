@@ -37,9 +37,21 @@ from qvc.hubble.hubble_model import (
     agn_model_pack_obs,
     agn_model_pack_params,
     get_model_params,
+    infer_model_option_flags,
+    infer_use_alpha_lambda_term,
 )
 
-QVC_ROOT = Path(__file__).resolve().parents[2]
+def _discover_qvc_root() -> Path:
+    """Find the repository root by walking upward to the pyproject file."""
+    here = Path(__file__).resolve()
+    for parent in here.parents:
+        if (parent / "pyproject.toml").exists():
+            return parent
+    # Fallback to the historical layout assumption if the search fails.
+    return here.parents[3]
+
+
+QVC_ROOT = _discover_qvc_root()
 
 
 def resolve_qvc_data_path(path_like: str | os.PathLike) -> str:
@@ -591,12 +603,38 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
         suffix = " or NaN" if allow_missing else ""
         return f"{left}{lower_text}, {upper_text}{right}{suffix}"
 
+    def _apply_uv_column_compatibility_shim(frame):
+        """Map legacy uppercase UV summary columns onto the lowercase schema."""
+        legacy_to_new = {
+            "log_sigma_UV": "log_sigma_uv",
+            "log_sigma_UV_err": "log_sigma_uv_err",
+            "log_sigma_UV_uncorrected": "log_sigma_uv_uncorrected",
+            "log_sigma_UV_std_psd": "log_sigma_uv_std_psd",
+            "log_tau_UV_RF": "log_tau_uv_rf",
+            "log_tau_UV_RF_err": "log_tau_uv_rf_err",
+            "log_tau_UV_RF_std_psd": "log_tau_uv_rf_std_psd",
+            "cov_log_sigma_UV_log_tau_UV_RF": "cov_log_sigma_uv_log_tau_uv_rf",
+            "log_sigma_UV_log_tau_UV_RF_cov_psd": "log_sigma_uv_log_tau_uv_rf_cov_psd",
+        }
+        copied = []
+        for legacy, new in legacy_to_new.items():
+            if new not in frame.columns and legacy in frame.columns:
+                frame[new] = frame[legacy]
+                copied.append(f"{legacy}->{new}")
+        if copied:
+            print("Applied UV compatibility shim:", ", ".join(copied))
+        return frame
+
     from qvc.hubble.hubble_plotting import (
         plot_alpha_lambda_vs_l2500_by_redshift,
         plot_alpha_lambda_vs_l2500,
+        plot_alpha_lambda_vs_eta_sigma,
         plot_alpha_lambda_histogram,
+        plot_alpha_lambda_vs_redshift,
+        plot_blr_amp_vs_redshift_by_band,
         plot_blr_lag_vs_amp_by_band,
         plot_blr_lag_vs_redshift_by_band,
+        plot_eta_tau_sigma_vs_redshift,
         plot_fast_vs_uv_variability,
         plot_f_host_center_vs_l2500,
         plot_Mi_relation,
@@ -660,6 +698,7 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
         q['len_dropped_bands'] = len(q['dropped_bands'])
 
     df = pd.DataFrame(quasar_list)
+    df = _apply_uv_column_compatibility_shim(df)
     df = _mask_invalid_wu_bhmass(df)
 
     dropped_bands = df['dropped_bands']
@@ -746,10 +785,15 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
         plot_alpha_lambda_vs_l2500(df, plot_path=plot_path, show=False)
         plot_alpha_lambda_vs_l2500_by_redshift(df, plot_path=plot_path, show=False)
     if "alpha_lambda" in df.columns:
+        plot_alpha_lambda_vs_redshift(df, plot_path=plot_path, show=False)
         plot_alpha_lambda_histogram(df, plot_path=plot_path, show=False)
+    if {"alpha_lambda", "eta_sigma"}.issubset(df.columns):
+        plot_alpha_lambda_vs_eta_sigma(df, plot_path=plot_path, show=False)
 
     if {"z", "log_tau_uv_rf", "log_sigma_uv"}.issubset(df.columns):
         plot_tau_sigma_vs_redshift(df, plot_path=plot_path, show=False)
+    if {"z", "eta_tau", "eta_sigma"}.issubset(df.columns):
+        plot_eta_tau_sigma_vs_redshift(df, plot_path=plot_path, show=False)
     if {"log_tau_uv_rf", "log_sigma_uv", "LOGMBH", "LOGLEDD_RATIO"}.issubset(df.columns):
         plot_tau_sigma_vs_wu_catalog(df, plot_path=plot_path, show=False)
     if {"z", "log_tau_fast_uv", "log_tau_uv_rf", "log_sigma_uv"}.issubset(df.columns):
@@ -757,6 +801,7 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
     if "log_sigma_uv" in df.columns:
         if any(f"log_amp_delta_blr_{band}" in df.columns for band in ("u", "g", "r", "i", "z")):
             plot_blr_lag_vs_amp_by_band(df, plot_path=plot_path, show=False, lag_suffix="")
+            plot_blr_amp_vs_redshift_by_band(df, plot_path=plot_path, show=False, lag_suffix="")
         if any(
             (f"log_lag_blr_{band}_RF" in df.columns) or (f"log_lag_blr_{band}" in df.columns)
             for band in ("u", "g", "r", "i", "z")
@@ -764,6 +809,7 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
             plot_blr_lag_vs_redshift_by_band(df, plot_path=plot_path, show=False, lag_suffix="")
         if any(f"log_amp_delta_blr2_{band}" in df.columns for band in ("u", "g", "r", "i", "z")):
             plot_blr_lag_vs_amp_by_band(df, plot_path=plot_path, show=False, lag_suffix="2")
+            plot_blr_amp_vs_redshift_by_band(df, plot_path=plot_path, show=False, lag_suffix="2")
         if any(
             (f"log_lag_blr2_{band}_RF" in df.columns) or (f"log_lag_blr2_{band}" in df.columns)
             for band in ("u", "g", "r", "i", "z")
@@ -1301,7 +1347,15 @@ def extract_cosmo_results_from_samples(
           "logZ": { "value": float, "err": float } or None
         }
     """
-    priors, model_labels, model_labels_latex = get_model_params(cosmo_model)
+    option_flags = infer_model_option_flags(
+        cosmo_model, np.asarray(samples).shape[1], only_sna=only_sna
+    )
+    priors, model_labels, model_labels_latex = get_model_params(
+        cosmo_model,
+        only_sna=only_sna,
+        use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
+        use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
+    )
 
     # Validate the sample array shape.
     samples = np.asarray(samples)
@@ -1352,14 +1406,32 @@ def extract_cosmo_results_from_samples(
         "logZ": logZ_out,
     }
 
-def display_results_summary(samples, cosmo_model, z_pivot_agn):
+def display_results_summary(
+    samples,
+    cosmo_model,
+    z_pivot_agn,
+    use_alpha_lambda_term=None,
+    use_redshift_log_f_term=None,
+):
     """
     Print median and 16/84% intervals for sampled params, plus derived w0 (and wa)
     when applicable. If cosmo_model == 'Flatw0waCDM', w0 is computed from (wp, wa)
     at the supplied z_pivot_agn.
     """
-    _, model_labels, _ = get_model_params(cosmo_model)
     samples = np.asarray(samples)
+    if use_alpha_lambda_term is None or use_redshift_log_f_term is None:
+        option_flags = infer_model_option_flags(
+            cosmo_model, samples.shape[1], only_sna=False
+        )
+        if use_alpha_lambda_term is None:
+            use_alpha_lambda_term = option_flags["use_alpha_lambda_term"]
+        if use_redshift_log_f_term is None:
+            use_redshift_log_f_term = option_flags["use_redshift_log_f_term"]
+    _, model_labels, _ = get_model_params(
+        cosmo_model,
+        use_alpha_lambda_term=use_alpha_lambda_term,
+        use_redshift_log_f_term=use_redshift_log_f_term,
+    )
 
     # Print the sampled parameter summaries first.
     med = np.median(samples, axis=0)
@@ -1458,7 +1530,14 @@ def compute_age_universe_with_error(samples, cosmo_model, weights=None, ci=(0.68
         }
     """
     # Get parameter names & any needed priors (e.g., zp for FlatwpwaCDM)
-    priors, model_labels, _ = get_model_params(cosmo_model)
+    option_flags = infer_model_option_flags(
+        cosmo_model, np.asarray(samples).shape[1]
+    )
+    priors, model_labels, _ = get_model_params(
+        cosmo_model,
+        use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
+        use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
+    )
 
     N = samples.shape[0]
     idx = np.arange(N)
@@ -1534,7 +1613,14 @@ def compute_pivot_redshift(flat_samples, cosmo_model, z_min=0.0, z_max=4.0):
         Constrained optimal pivot redshift (decorrelates w_p and w_a as much as
         possible under the z >= z_min constraint).
     """
-    priors, model_labels, model_labels_latex = get_model_params(cosmo_model)
+    option_flags = infer_model_option_flags(
+        cosmo_model, np.asarray(flat_samples).shape[1]
+    )
+    priors, model_labels, model_labels_latex = get_model_params(
+        cosmo_model,
+        use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
+        use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
+    )
     idx = {name: model_labels.index(name) for name in model_labels}
 
     # Samples
@@ -1595,7 +1681,14 @@ def posterior_corr(flat_samples, cosmo_model, z_pivot_agn):
     rho : float
         Posterior Pearson correlation coefficient corr(w0, wa).
     """
-    priors, model_labels, _ = get_model_params(cosmo_model)
+    option_flags = infer_model_option_flags(
+        cosmo_model, np.asarray(flat_samples).shape[1]
+    )
+    priors, model_labels, _ = get_model_params(
+        cosmo_model,
+        use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
+        use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
+    )
     flat_samples = np.asarray(flat_samples)
 
     def _idx(labels, *names):
@@ -1780,7 +1873,15 @@ def write_results_tex_variables(
 
     for model_name, flat_samples in cosmo_model_sna_samples.items():
         flat_samples = np.asarray(flat_samples)
-        priors, model_labels, _ = get_model_params(model_name)
+        option_flags = infer_model_option_flags(
+            model_name, flat_samples.shape[1], only_sna=True
+        )
+        priors, model_labels, _ = get_model_params(
+            model_name,
+            only_sna=True,
+            use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
+            use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
+        )
         results = {}
         for i, key in enumerate(model_labels):
             median, err, err_lower, err_upper = sym_percentile(flat_samples[:, i])
@@ -1804,7 +1905,14 @@ def write_results_tex_variables(
     # Per-model summary parameters.
     for model_name, flat_samples in cosmo_model_joint_samples.items():
         flat_samples = np.asarray(flat_samples)
-        priors, model_labels, _ = get_model_params(model_name)
+        option_flags = infer_model_option_flags(
+            model_name, flat_samples.shape[1]
+        )
+        priors, model_labels, _ = get_model_params(
+            model_name,
+            use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
+            use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
+        )
         results = {}
         for i, key in enumerate(model_labels):
             median, err, err_lower, err_upper = sym_percentile(flat_samples[:, i])

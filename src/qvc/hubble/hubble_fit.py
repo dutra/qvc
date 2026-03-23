@@ -69,7 +69,12 @@ from qvc.hubble.hubble_plotting import (
     plot_redshift_bin_residual_summary,
     plot_residuals_vs_alphaOX,
 )
-from qvc.hubble.hubble_model import agn_model_pack_obs, agn_model_req_errs, agn_model_req_obs, agn_model_req_params, get_model_params
+from qvc.hubble.hubble_model import (
+    agn_model_pack_obs,
+    evaluate_log_f,
+    get_agn_model_spec,
+    get_model_params,
+)
 from qvc.hubble.hubble_completeness_refactored import (
     get_completeness_function_2d,
     get_completeness_function_3d_fhost,
@@ -93,11 +98,21 @@ def prior_transform_dynesty(unit_cube, priors, model_labels):
     return [priors[key][0] + (priors[key][1] - priors[key][0]) * x
             for x, key in zip(unit_cube, model_labels)]
 
-def make_run_tag(cosmo_model, only_sna, speed, N, z_range):
+def make_run_tag(
+    cosmo_model,
+    only_sna,
+    speed,
+    N,
+    z_range,
+    use_alpha_lambda_term=False,
+    use_redshift_log_f_term=False,
+):
     zmin, zmax = z_range
     n_tag = "all" if N is None else f"N{N}"
     z_tag = f"z{zmin:.2f}_{zmax:.2f}".replace(".", "p")
-    return f"{cosmo_model}_{'sna' if only_sna else 'joint'}_{speed}_{n_tag}_{z_tag}"
+    alpha_tag = "_alphaLam" if use_alpha_lambda_term else ""
+    logf_tag = "_logfz" if use_redshift_log_f_term else ""
+    return f"{cosmo_model}_{'sna' if only_sna else 'joint'}_{speed}_{n_tag}_{z_tag}{alpha_tag}{logf_tag}"
 
 
 def validate_resume_checkpoint(results, checkpoint_file, ndim, n_agn):
@@ -154,17 +169,43 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                       completeness_sim_file=DEFAULT_COMPLETENESS_SIM_FILE,
                       completeness_mode="2d",
                       N=None,
+                      use_alpha_lambda_term=False,
+                      use_redshift_log_f_term=False,
                       ):
     validate_completeness_mode(completeness_mode)
-    run_tag = make_run_tag(cosmo_model, only_sna, speed, N, z_range)
+    run_tag = make_run_tag(
+        cosmo_model,
+        only_sna,
+        speed,
+        N,
+        z_range,
+        use_alpha_lambda_term=use_alpha_lambda_term,
+        use_redshift_log_f_term=use_redshift_log_f_term,
+    )
     plot_path = f"plots/hubble/{prefix}/{run_tag}"
     os.makedirs(plot_path, exist_ok=True)
 
-    priors, model_labels, model_labels_latex = get_model_params(cosmo_model, only_sna=only_sna)
+    priors, model_labels, model_labels_latex = get_model_params(
+        cosmo_model,
+        only_sna=only_sna,
+        use_alpha_lambda_term=use_alpha_lambda_term,
+        use_redshift_log_f_term=use_redshift_log_f_term,
+    )
     ndim = len(model_labels)
     print(f"Running sampling with {ndim} parameters for cosmological model: {cosmo_model}")
     if not use_full_cov:
         print("[WARNING] use_full_cov=False: fitting with diagonal SN uncertainties instead of the full covariance matrix.")
+
+    if use_alpha_lambda_term:
+        for required_col in ("alpha_lambda", "alpha_lambda_err"):
+            if required_col not in df_agn.columns:
+                raise KeyError(f"--fit_alpha_lambda_term requires df_agn[{required_col!r}].")
+            bad = ~np.isfinite(df_agn[required_col].to_numpy(dtype=float))
+            if np.any(bad):
+                raise ValueError(
+                    f"--fit_alpha_lambda_term requires finite {required_col} for all AGN used in the fit; "
+                    f"found {np.count_nonzero(bad)} non-finite rows."
+                )
 
     if completeness:
         if completeness_mode in ("3d_fhost", "4d_fhost_alpha"):
@@ -204,6 +245,9 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
     else:
         completeness_params = None
 
+    agn_model_req_params, agn_model_req_obs, agn_model_req_errs = get_agn_model_spec(
+        use_alpha_lambda_term=use_alpha_lambda_term
+    )
     agn_fields = agn_model_req_params + agn_model_req_obs + agn_model_req_errs
     agn_fields += ('apparent_mag_2500', 'apparent_mag_2500_err', 'z', 'z_err', 'object_id')
     if 'f_host_center' in df_agn.columns:
@@ -281,6 +325,8 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                 completeness_params=completeness_params,
                 only_sna=only_sna,
                 use_full_cov=use_full_cov,
+                use_alpha_lambda_term=use_alpha_lambda_term,
+                use_redshift_log_f_term=use_redshift_log_f_term,
             )
             ptform_kwargs = dict(priors=priors, model_labels=model_labels)
             sampler = DynamicNestedSampler(
@@ -390,8 +436,18 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
         print("  resampled blobs shape:", flat_blobs.shape)
         
         print("1 sigma scatter on HD (magnitudes)")
-        sigma_intrinsic = float(np.exp(median_samples[model_labels.index('log_f')]))
-        print("  sigma_intrinsic:", sigma_intrinsic)
+        median_params = dict(zip(model_labels, median_samples))
+        sigma_intrinsic = float(
+            np.exp(
+                evaluate_log_f(
+                    median_params,
+                    np.array([z_pivot_agn]),
+                    z_pivot=z_pivot_agn,
+                    use_redshift_log_f_term=use_redshift_log_f_term,
+                )[0]
+            )
+        )
+        print("  sigma_intrinsic(z_pivot):", sigma_intrinsic)
 
         print("Debias correction summary:")
         print("  median |dmi_max_w|:", float(np.nanmedian(np.abs(dmi_max_w))))
@@ -441,9 +497,19 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                skip_plots=False, residuals_sigma_clip=None, df_calibrators=None,
                prefix="default", uniform_redshift_distribution=False,
                completeness_sim_file=DEFAULT_COMPLETENESS_SIM_FILE,
-               completeness_mode="2d"):
+               completeness_mode="2d",
+               use_alpha_lambda_term=False,
+               use_redshift_log_f_term=False):
     validate_completeness_mode(completeness_mode)
-    run_tag = make_run_tag(cosmo_model, only_sna, speed, N, z_range)
+    run_tag = make_run_tag(
+        cosmo_model,
+        only_sna,
+        speed,
+        N,
+        z_range,
+        use_alpha_lambda_term=use_alpha_lambda_term,
+        use_redshift_log_f_term=use_redshift_log_f_term,
+    )
     plot_path = f"plots/hubble/{prefix}/{run_tag}"
     os.makedirs(plot_path, exist_ok=True)
     print(f"Saving plots to ", plot_path)
@@ -479,8 +545,16 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                                                         resume=resume, speed=speed,
                                                         prefix=prefix,
                                                         completeness_sim_file=completeness_sim_file,
-                                                        completeness_mode=completeness_mode)
-    display_results_summary(flat_samples, cosmo_model, z_pivot_agn)
+                                                        completeness_mode=completeness_mode,
+                                                        use_alpha_lambda_term=use_alpha_lambda_term,
+                                                        use_redshift_log_f_term=use_redshift_log_f_term)
+    display_results_summary(
+        flat_samples,
+        cosmo_model,
+        z_pivot_agn,
+        use_alpha_lambda_term=use_alpha_lambda_term,
+        use_redshift_log_f_term=use_redshift_log_f_term,
+    )
     print("Computing age of the universe with error propagation...")
     age, age_err = compute_age_universe_with_error(flat_samples, cosmo_model, max_eval=200)
 
@@ -618,7 +692,9 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
             speed="production", resume=False, N=None,
             prefix="default", result_prefix="", uniform_redshift_distribution=False,
             completeness_sim_file=DEFAULT_COMPLETENESS_SIM_FILE,
-            completeness_mode="2d"):
+            completeness_mode="2d",
+            use_alpha_lambda_term=False,
+            use_redshift_log_f_term=False):
 
     zmin, zmax = z_range
     n_tag = "all" if N is None else f"N{N}"
@@ -641,7 +717,9 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
                        cosmo_model_joint_samples=cosmo_model_joint_samples,
                        prefix=prefix, uniform_redshift_distribution=uniform_redshift_distribution,
                        completeness_sim_file=completeness_sim_file,
-                       completeness_mode=completeness_mode)
+                       completeness_mode=completeness_mode,
+                       use_alpha_lambda_term=use_alpha_lambda_term,
+                       use_redshift_log_f_term=use_redshift_log_f_term)
         
         samples_joint, model_labels_joint, dm_interp_joint, logZ_joint, logZerr_joint, debiased_residuals_joint, age_joint, age_err_joint = r
         #print(f"For model {cosmo_model}, universe age: {age:.3f} Gyr")
@@ -653,7 +731,9 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
                        resume=resume, speed=speed, N=N,
                        prefix=prefix, uniform_redshift_distribution=uniform_redshift_distribution,
                        completeness_sim_file=completeness_sim_file,
-                       completeness_mode=completeness_mode)
+                       completeness_mode=completeness_mode,
+                       use_alpha_lambda_term=use_alpha_lambda_term,
+                       use_redshift_log_f_term=use_redshift_log_f_term)
         samples_sna, model_labels_sna, dm_interp_sna, logZ_sna, logZerr_sna, debiased_residuals_sna, age_sna, age_sna_err = r
         
         plot_cosmo_corner(samples_sna, samples_joint, cosmo_model, z_pivot_sna, z_pivot_agn, show=False, 
@@ -762,6 +842,18 @@ if __name__ == "__main__":
         help="Correct log_sigma_uv using frac_host_psf_2500 and save a diagnostics plot.",
     )
     parser.add_argument(
+        "--fit_alpha_lambda_term",
+        action="store_true",
+        default=False,
+        help="Fit an additional linear alpha_lambda term in the AGN standardization relation.",
+    )
+    parser.add_argument(
+        "--fit_redshift_log_f_term",
+        action="store_true",
+        default=False,
+        help="Fit log_f(z) = log_f0 + gamma_f * log10((1+z)/(1+z_pivot)).",
+    )
+    parser.add_argument(
         "--use_jax",
         action="store_true",
         default=False,
@@ -832,6 +924,8 @@ if __name__ == "__main__":
                 only_sna=args.only_sna,
                 N=args.N,
                 uniform_redshift_distribution=args.uniform_redshift_distribution,
+                use_alpha_lambda_term=args.fit_alpha_lambda_term,
+                use_redshift_log_f_term=args.fit_redshift_log_f_term,
             )
     elif args.run == "single": # default
         cosmo_models_dict = {k: {} for k in args.cosmo_models}
@@ -844,7 +938,9 @@ if __name__ == "__main__":
                 df_calibrators=df_calibrators,
                 prefix=args.prefix,
                 completeness_sim_file=args.completeness_sim_file,
-                completeness_mode=args.completeness_mode)
+                completeness_mode=args.completeness_mode,
+                use_alpha_lambda_term=args.fit_alpha_lambda_term,
+                use_redshift_log_f_term=args.fit_redshift_log_f_term)
             samples_joint, model_labels, dm_interp, logZ_joint, logZerr_joint, debiased_residuals, age, age_err = r
             cosmo_models_dict[cosmo_model]['logZ'] = logZ_joint
             cosmo_models_dict[cosmo_model]['logZerr'] = logZerr_joint
@@ -874,6 +970,8 @@ if __name__ == "__main__":
                 speed=args.speed, resume=args.resume, N=args.N,
                 prefix=args.prefix, result_prefix=args.result_prefix, uniform_redshift_distribution=args.uniform_redshift_distribution,
                 completeness_sim_file=args.completeness_sim_file,
-                completeness_mode=args.completeness_mode)
+                completeness_mode=args.completeness_mode,
+                use_alpha_lambda_term=args.fit_alpha_lambda_term,
+                use_redshift_log_f_term=args.fit_redshift_log_f_term)
     
     print(f"Finished running Hubble fit pipeline for {args.cosmo_models}")
