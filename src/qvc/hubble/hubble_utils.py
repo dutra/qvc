@@ -479,77 +479,173 @@ def populate_spectra_fit(df, spectra_fit_csvs, best=True):
 
     return out
 def populate_sdss_fields(objs, progress_bar=True):
-    print(f"Populating SDSS fields: {len(objs)}", flush=True)
-    cat = pd.read_parquet(f"data/S82/Catalog.parquet").set_index('idx')
-    hdul = fits.open('data/dr16q_prop_May01_2024.fits')
-    fits_data = hdul[1].data  # Assuming the data is in the first extension    
-    fits_data_2 = hdul[2].data  # Assuming the data is in the first extension    
-    for d in tqdm(objs, desc="Populating SDSS fields", disable=(not progress_bar)):
-        obj = cat.loc[cat['objectId'] == d['object_id']].iloc[0]
-        c1 = SkyCoord(fits_data['RA'], fits_data['DEC'], unit='deg')
-        c2 = SkyCoord(obj['RA'], obj['DEC'], unit='deg')
-        sep = c1.separation(c2).to(u.arcsec)
-        i = np.argwhere(sep < 1*u.arcsec).flatten()
-        if len(i) == 0:
-            print(f"Skipping entry {d['object_id']} as it does not exist in the fits data.")
-            continue
-        if len(i) > 1:
-            print(f"Warning: {d['sdss_name']} found multiple times in SDSS data")
-        i = i[0]  # Get the first index if there are multiple matches
-        d['ra'] = obj['RA']
-        d['dec'] = obj['DEC']
-        d['z'] = fits_data['Z_SYS'][i]
-        d['z_err'] = fits_data['Z_SYS_ERR'][i]
-        d['sdss_name'] = fits_data['SDSS_NAME'][i]
-        d['log_lbol'] = -999.0
-        if d['z'] < 0.7:
-            d['log_lbol'] = np.log10(5.15) + fits_data['LOGL3000'][i]
-            d['log_lbol_err'] = fits_data['LOGL3000_ERR'][i]
-        else:
-            d['log_lbol'] = fits_data['LOGLBOL'][i]
-            d["log_lbol_err"] = fits_data['LOGLBOL_ERR'][i]
+    """
+    Populate SDSS/DR16Q-derived fields.
 
-        logmbh = fits_data['LOGMBH'][i]
-        logmbh_err = fits_data['LOGMBH_ERR'][i]
-        if np.isfinite(logmbh) and logmbh != 0:
-            d['LOGMBH'] = logmbh
-            d['LOGMBH_ERR'] = logmbh_err
-        else:
-            d['LOGMBH'] = np.nan
-            d['LOGMBH_ERR'] = np.nan
-        d['LOGLEDD_RATIO'] = fits_data['LOGLEDD_RATIO'][i]
-        d['LOGLEDD_RATIO_ERR'] = fits_data['LOGLEDD_RATIO_ERR'][i]
-        d['ebv_wu'] = fits_data['EBV'][i]
-        d['sn_median_all'] = fits_data['SN_MEDIAN_ALL'][i]
-        d['M_i'] = fits_data_2['M_I'][i]
-        for b in ['u', 'g', 'r', 'i', 'z']:
-            filters = {'u':0, 'g':1, 'r':2, 'i':3, 'z':4}
-            d[f'PSFMAG_{b}'] = fits_data_2['PSFMAG'][i, filters[b]]
-        d['LOGLBOL'] = fits_data['LOGLBOL'][i]
-        d['LOGL1350'] = fits_data['LOGL1350'][i]
-        d['LOGL1700'] = fits_data['LOGL1700'][i]
-        d['LOGL2500_wu'] = fits_data['LOGL2500'][i]
-        d['LOGL3000'] = fits_data['LOGL3000'][i]
-        d['LOGL5100'] = fits_data['LOGL5100'][i]
-        d['LOGL1350_ERR'] = fits_data['LOGL1350_ERR'][i]
-        d['LOGL1700_ERR'] = fits_data['LOGL1700_ERR'][i]
-        d['LOGL2500_ERR_wu'] = fits_data['LOGL2500_ERR'][i]
-        d['LOGL3000_ERR'] = fits_data['LOGL3000_ERR'][i]
-        d['LOGL5100_ERR'] = fits_data['LOGL5100_ERR'][i]
+    Supported inputs:
+    - pandas.DataFrame (returns pandas.DataFrame)
+    - list[dict] (returns list[dict], for backward compatibility)
+    """
+    input_is_df = isinstance(objs, pd.DataFrame)
+    input_is_list = isinstance(objs, list)
+    if not (input_is_df or input_is_list):
+        raise TypeError(
+            "populate_sdss_fields expects a pandas.DataFrame or list[dict], "
+            f"got {type(objs).__name__}"
+        )
 
-        d['FHOST_5100'] = fits_data['FHOST_5100'][i]
-        d['EXTINCTION'] = fits_data_2['EXTINCTION'][i, filters['i']]
+    if input_is_df:
+        df = objs.copy()
+    else:
+        if len(objs) == 0:
+            return objs
+        df = pd.DataFrame.from_records(objs)
 
-        d['fhost'] = fits_data['FHOST_5100'][i]
-        with warnings.catch_warnings(record=True) as w:
-            warnings.simplefilter("always")
-            for b in ['u', 'g', 'r', 'i', 'z']:
-                d[f'apparent_mag_{b}'] = -2.5 * np.log10(fits_data_2['PSFFLUX'][i, filters[b]]) + 22.5
-                d[f'apparent_mag_{b}_err'] = 2.5/np.log(10) * np.sqrt(1/fits_data_2['PSFFLUX_IVAR'][i, filters[b]])/fits_data_2['PSFFLUX'][i, filters[b]]
-        if any(issubclass(warning.category, RuntimeWarning) for warning in w):
-            pass
+    print(f"Populating SDSS fields: {len(df)}", flush=True)
+    if df.empty:
+        return df if input_is_df else []
 
-    return objs
+    if "object_id" not in df.columns:
+        raise ValueError("populate_sdss_fields requires an 'object_id' column.")
+
+    # Keep this parameter for backward compatibility; matching is now vectorized.
+    _ = progress_bar
+
+    rows = pd.DataFrame(
+        {
+            "row_idx": np.arange(len(df), dtype=int),
+            "object_id": df["object_id"].to_numpy(),
+        }
+    )
+    rows["object_id_key"] = rows["object_id"].astype(str)
+
+    cat = pd.read_parquet(resolve_qvc_data_path("data/S82/Catalog.parquet"))
+    cat_lookup = (
+        cat.loc[:, ["objectId", "RA", "DEC"]]
+        .dropna(subset=["objectId", "RA", "DEC"])
+        .assign(object_id_key=lambda d: d["objectId"].astype(str))
+        .drop_duplicates(subset=["object_id_key"], keep="first")
+        .loc[:, ["object_id_key", "RA", "DEC"]]
+    )
+    rows = rows.merge(cat_lookup, on="object_id_key", how="left")
+
+    with fits.open(resolve_qvc_data_path("data/dr16q_prop_May01_2024.fits")) as hdul:
+        fits_data = hdul[1].data
+        fits_data_2 = hdul[2].data
+
+        fits_coords = SkyCoord(ra=fits_data["RA"] * u.deg, dec=fits_data["DEC"] * u.deg)
+
+        valid_coord_mask = rows["RA"].notna() & rows["DEC"].notna()
+        if not np.any(valid_coord_mask):
+            print(f"Skipped {len(objs)} objects: no S82 catalog coordinates found.")
+            return df if input_is_df else df.to_dict("records")
+
+        query_rows = rows.loc[valid_coord_mask, ["row_idx", "RA", "DEC"]].copy()
+        query_coords = SkyCoord(
+            ra=query_rows["RA"].to_numpy() * u.deg,
+            dec=query_rows["DEC"].to_numpy() * u.deg,
+        )
+        nearest_idx, d2d, _ = query_coords.match_to_catalog_sky(fits_coords)
+        match_mask = d2d < (1.0 * u.arcsec)
+
+        matched_query = query_rows.loc[match_mask].copy()
+        matched_query["fits_idx"] = np.asarray(nearest_idx[match_mask], dtype=int)
+
+        if matched_query.empty:
+            missing_catalog = int((~valid_coord_mask).sum())
+            missing_dr16q = int(valid_coord_mask.sum())
+            if missing_catalog:
+                print(f"Skipped {missing_catalog} objects: no S82 catalog coordinates found.")
+            print(f"Skipped {missing_dr16q} objects: no DR16Q match within 1 arcsec.")
+            return df if input_is_df else df.to_dict("records")
+
+        matched_row_idx = matched_query["row_idx"].to_numpy(dtype=int)
+        matched_fits_idx = matched_query["fits_idx"].to_numpy(dtype=int)
+
+        z_vals = np.asarray(fits_data["Z_SYS"])[matched_fits_idx]
+        logl3000 = np.asarray(fits_data["LOGL3000"])[matched_fits_idx]
+        logl3000_err = np.asarray(fits_data["LOGL3000_ERR"])[matched_fits_idx]
+        loglbol = np.asarray(fits_data["LOGLBOL"])[matched_fits_idx]
+        loglbol_err = np.asarray(fits_data["LOGLBOL_ERR"])[matched_fits_idx]
+
+        # Preserve legacy z-dependent luminosity branch.
+        log_lbol = np.where(z_vals < 0.7, np.log10(5.15) + logl3000, loglbol)
+        log_lbol_err = np.where(z_vals < 0.7, logl3000_err, loglbol_err)
+
+        logmbh = np.asarray(fits_data["LOGMBH"])[matched_fits_idx]
+        logmbh_err = np.asarray(fits_data["LOGMBH_ERR"])[matched_fits_idx]
+        valid_logmbh = np.isfinite(logmbh) & (logmbh != 0)
+        logmbh_out = np.where(valid_logmbh, logmbh, np.nan)
+        logmbh_err_out = np.where(valid_logmbh, logmbh_err, np.nan)
+
+        band_to_idx = {"u": 0, "g": 1, "r": 2, "i": 3, "z": 4}
+        psfmag = np.asarray(fits_data_2["PSFMAG"])[matched_fits_idx, :]
+        psfflux = np.asarray(fits_data_2["PSFFLUX"])[matched_fits_idx, :]
+        psfflux_ivar = np.asarray(fits_data_2["PSFFLUX_IVAR"])[matched_fits_idx, :]
+
+        with np.errstate(divide="ignore", invalid="ignore"):
+            apparent_mag = np.where(psfflux > 0, -2.5 * np.log10(psfflux) + 22.5, np.nan)
+            apparent_mag_err = np.where(
+                (psfflux > 0) & (psfflux_ivar > 0),
+                (2.5 / np.log(10.0)) * np.sqrt(1.0 / psfflux_ivar) / psfflux,
+                np.nan,
+            )
+
+        update_fields = {
+            "ra": rows.loc[matched_row_idx, "RA"].to_numpy(),
+            "dec": rows.loc[matched_row_idx, "DEC"].to_numpy(),
+            "z": z_vals,
+            "z_err": np.asarray(fits_data["Z_SYS_ERR"])[matched_fits_idx],
+            "sdss_name": np.asarray(fits_data["SDSS_NAME"])[matched_fits_idx],
+            "log_lbol": log_lbol,
+            "log_lbol_err": log_lbol_err,
+            "LOGMBH": logmbh_out,
+            "LOGMBH_ERR": logmbh_err_out,
+            "LOGLEDD_RATIO": np.asarray(fits_data["LOGLEDD_RATIO"])[matched_fits_idx],
+            "LOGLEDD_RATIO_ERR": np.asarray(fits_data["LOGLEDD_RATIO_ERR"])[matched_fits_idx],
+            "ebv_wu": np.asarray(fits_data["EBV"])[matched_fits_idx],
+            "sn_median_all": np.asarray(fits_data["SN_MEDIAN_ALL"])[matched_fits_idx],
+            "M_i": np.asarray(fits_data_2["M_I"])[matched_fits_idx],
+            "LOGLBOL": loglbol,
+            "LOGL1350": np.asarray(fits_data["LOGL1350"])[matched_fits_idx],
+            "LOGL1700": np.asarray(fits_data["LOGL1700"])[matched_fits_idx],
+            "LOGL2500_wu": np.asarray(fits_data["LOGL2500"])[matched_fits_idx],
+            "LOGL3000": logl3000,
+            "LOGL5100": np.asarray(fits_data["LOGL5100"])[matched_fits_idx],
+            "LOGL1350_ERR": np.asarray(fits_data["LOGL1350_ERR"])[matched_fits_idx],
+            "LOGL1700_ERR": np.asarray(fits_data["LOGL1700_ERR"])[matched_fits_idx],
+            "LOGL2500_ERR_wu": np.asarray(fits_data["LOGL2500_ERR"])[matched_fits_idx],
+            "LOGL3000_ERR": logl3000_err,
+            "LOGL5100_ERR": np.asarray(fits_data["LOGL5100_ERR"])[matched_fits_idx],
+            "FHOST_5100": np.asarray(fits_data["FHOST_5100"])[matched_fits_idx],
+            "fhost": np.asarray(fits_data["FHOST_5100"])[matched_fits_idx],
+            "EXTINCTION": np.asarray(fits_data_2["EXTINCTION"])[matched_fits_idx, band_to_idx["i"]],
+        }
+        for band, bidx in band_to_idx.items():
+            update_fields[f"PSFMAG_{band}"] = psfmag[:, bidx]
+            update_fields[f"apparent_mag_{band}"] = apparent_mag[:, bidx]
+            update_fields[f"apparent_mag_{band}_err"] = apparent_mag_err[:, bidx]
+
+        target_index = df.index.to_numpy()[matched_row_idx]
+        update_df = pd.DataFrame(update_fields, index=target_index)
+
+        existing_cols = [col for col in update_df.columns if col in df.columns]
+        if existing_cols:
+            df.update(update_df.loc[:, existing_cols], overwrite=True)
+
+        new_cols = [col for col in update_df.columns if col not in df.columns]
+        for col in new_cols:
+            df[col] = np.nan
+            df.update(update_df.loc[:, [col]], overwrite=True)
+
+        missing_catalog = int((~valid_coord_mask).sum())
+        missing_dr16q = int(valid_coord_mask.sum() - len(matched_row_idx))
+        if missing_catalog:
+            print(f"Skipped {missing_catalog} objects: no S82 catalog coordinates found.")
+        if missing_dr16q:
+            print(f"Skipped {missing_dr16q} objects: no DR16Q match within 1 arcsec.")
+
+    return df if input_is_df else df.to_dict("records")
 
 
 def _mask_invalid_wu_bhmass(df):
@@ -584,6 +680,71 @@ def read_quasars_from_hdf5(file_path, N=None):
             if (N is not None) and (N >= 0) and (len(quasar_list) >= N):
                 break
     return quasar_list
+
+
+def read_quasars_from_hdf5_flat(file_path, N=None):
+    """
+    Read a flat columnar HDF5 file (top-level datasets) into a DataFrame.
+    """
+    def _decode_scalar(x):
+        if isinstance(x, bytes):
+            return x.decode("utf-8", errors="replace")
+        if isinstance(x, np.generic):
+            x = x.item()
+            if isinstance(x, bytes):
+                return x.decode("utf-8", errors="replace")
+        return x
+
+    def _decode_vector(arr):
+        arr = np.asarray(arr)
+        if arr.dtype.kind == "S":
+            return arr.astype(str)
+        if arr.dtype == object:
+            out = []
+            for v in arr:
+                out.append(_decode_scalar(v))
+            return np.asarray(out, dtype=object)
+        if arr.ndim > 1:
+            return np.asarray([_decode_scalar(v) for v in arr.tolist()], dtype=object)
+        return arr
+
+    with h5py.File(file_path, "r") as hdf:
+        keys = list(hdf.keys())
+        if not keys:
+            return pd.DataFrame()
+
+        row_columns = {}
+        scalar_metadata = {}
+        n_rows = None
+        for key in keys:
+            values = hdf[key][...]
+            arr = np.asarray(values)
+            if arr.ndim == 0:
+                scalar_metadata[key] = _decode_scalar(arr.item())
+                continue
+            if n_rows is None:
+                n_rows = int(arr.shape[0])
+            elif int(arr.shape[0]) != n_rows:
+                warnings.warn(
+                    f"Skipping dataset '{key}' in {file_path}: incompatible leading "
+                    f"dimension {arr.shape[0]} (expected {n_rows})."
+                )
+                continue
+            row_columns[key] = _decode_vector(arr)
+
+        if not row_columns:
+            return pd.DataFrame()
+
+        # Materialize through records so pandas normalizes numeric backing arrays
+        # (e.g., big-endian inputs from FITS/HDF5) into native-compatible columns.
+        df = pd.DataFrame.from_records(pd.DataFrame(row_columns).to_dict("records"))
+
+        if N is not None and N >= 0:
+            df = df.iloc[: int(N)].reset_index(drop=True)
+
+        for meta_key, meta_value in scalar_metadata.items():
+            df[meta_key] = meta_value
+    return df
 
 def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFAULT_F_HOST_CUT,
                   exclude_object_ids_csv=None,
@@ -648,6 +809,37 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
     if exclude_object_ids_csv is None:
         exclude_object_ids_csv = []
 
+    def _normalize_dropped_bands(value):
+        if value is None:
+            return []
+        if isinstance(value, float) and np.isnan(value):
+            return []
+        if isinstance(value, bytes):
+            value = value.decode("utf-8", errors="replace")
+        if isinstance(value, str):
+            txt = value.strip()
+            if txt == "" or txt.lower() == "nan":
+                return []
+            # Handle list-like serialized strings such as "['u', 'z']"
+            if txt.startswith("[") and txt.endswith("]"):
+                try:
+                    parsed = literal_eval(txt)
+                    if isinstance(parsed, (list, tuple, set, np.ndarray)):
+                        return [str(x).strip() for x in parsed if str(x).strip()]
+                except Exception:
+                    pass
+            # Handle compact strings such as "uz" or delimiters like "u,z"
+            if "," in txt:
+                return [x.strip() for x in txt.split(",") if x.strip()]
+            if " " in txt:
+                return [x.strip() for x in txt.split() if x.strip()]
+            return [c for c in txt if c in {"u", "g", "r", "i", "z", "y"}]
+        if isinstance(value, np.ndarray):
+            return [str(x).strip() for x in value.tolist() if str(x).strip()]
+        if isinstance(value, (list, tuple, set)):
+            return [str(x).strip() for x in value if str(x).strip()]
+        return [str(value).strip()]
+
     if lc_info_csv is not None:
         lc_info_csv = resolve_qvc_data_path(lc_info_csv)
     if residuals_csv is not None:
@@ -661,45 +853,72 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
         pickle_path = file_path if str(file_path).endswith(".pkl") else f"{file_path}.pkl"
         pickle_path = resolve_qvc_data_path(pickle_path)
         with open(pickle_path, "rb") as f:
-            quasar_list = pickle.load(f)
+            payload = pickle.load(f)
+        if isinstance(payload, pd.DataFrame):
+            df = payload.copy()
+        elif isinstance(payload, list):
+            df = pd.DataFrame.from_records(payload)
+        elif isinstance(payload, dict):
+            df = pd.DataFrame(payload)
+        else:
+            raise TypeError(
+                "Unsupported pickled payload type for AGN data: "
+                f"{type(payload).__name__}"
+            )
     else:
         file_path = resolve_qvc_data_path(file_path)
-        quasar_list = read_quasars_from_hdf5(file_path)
-    print("Number of quasars loaded:", len(quasar_list))
+        df = read_quasars_from_hdf5_flat(file_path)
+    print("Number of quasars loaded:", len(df))
+    legacy_required = [f"mags_mean_{i}" for i in range(4)]
+    if all(col in df.columns for col in legacy_required):
+        for i, b in enumerate(['u', 'g', 'r', 'i', 'z']):
+            legacy_col = f"mags_mean_{i}"
+            if legacy_col in df.columns and f"mags_mean_{b}" not in df.columns:
+                df[f"mags_mean_{b}"] = df[legacy_col]
+            if legacy_col in df.columns:
+                df = df.drop(columns=[legacy_col])
 
     if populate_sdss:
         print("Populating SDSS fields...")
-        populate_sdss_fields(quasar_list)
-        write_hdf5_file(quasar_list, file_path)
+        df = populate_sdss_fields(df)
 
-    for quasar in quasar_list:
-        if 'ebv_wu' not in quasar.keys():
-            print("Populating SDSS fields...")
-            populate_sdss_fields(quasar_list)
-            write_hdf5_file(quasar_list, file_path)
-            break
-        
-    bands = ['u', 'g', 'r', 'i', 'z']
-    if len(quasar_list[0]['mags_mean']) == 5:
-        bands = ['u', 'g', 'r', 'i', 'z']
-    elif len(quasar_list[0]['mags_mean']) == 3:
-        bands = ['g', 'r', 'i']
+    if ("ebv_wu" not in df.columns) or df["ebv_wu"].isna().all():
+        print("Populating SDSS fields...")
+        df = populate_sdss_fields(df)
+
+    if "dropped_bands" in df.columns:
+        df["dropped_bands"] = df["dropped_bands"].apply(_normalize_dropped_bands)
+        df["len_dropped_bands"] = df["dropped_bands"].apply(len)
     else:
-        raise ValueError("Unexpected number of bands in mags_means")
-    
-    for q in quasar_list:
-        clean_bands = set()
-        for i, b in enumerate(bands):
-            q[f'mags_mean_{b}'] = q['mags_mean'][i]
+        df["dropped_bands"] = [[] for _ in range(len(df))]
+        df["len_dropped_bands"] = 0
 
-        del q['mags_mean']
-
-    for q in quasar_list:
-        q['len_dropped_bands'] = len(q['dropped_bands'])
-
-    df = pd.DataFrame(quasar_list)
-    df = _apply_uv_column_compatibility_shim(df)
     df = _mask_invalid_wu_bhmass(df)
+
+    required_mags_mean_cols = [f"mags_mean_{b}" for b in ("u", "g", "r", "i")]
+    missing_mags_mean_cols = [col for col in required_mags_mean_cols if col not in df.columns]
+    if missing_mags_mean_cols:
+        raise ValueError(
+            "Flat AGN input is missing required per-band magnitude means: "
+            f"{missing_mags_mean_cols}. "
+            "Only mags_mean_<band> columns are supported "
+            "(legacy mags_mean arrays and mags_mean_0..N are unsupported)."
+        )
+
+    required_var_cols = [f"log_jitter_{b}" for b in ("u", "g", "r", "i")] + [
+        f"log_amp_delta_blr_{b}" for b in ("u", "g", "r", "i")
+    ]
+    missing_var_cols = [col for col in required_var_cols if col not in df.columns]
+    if missing_var_cols:
+        raise ValueError(
+            "Flat AGN input is missing required variability columns: "
+            f"{missing_var_cols}."
+        )
+
+    if "dropped_bands" not in df.columns:
+        raise ValueError(
+            "Flat AGN input is missing required column 'dropped_bands'."
+        )
 
     dropped_bands = df['dropped_bands']
     jitter_total_sq = np.zeros(len(df))
@@ -1331,7 +1550,7 @@ def extract_cosmo_results_from_samples(
     logZ_tuple : (float, float) or None
         (logZ, logZerr) from dynesty; None for emcee.
     format_for_latex : bool, optional
-        If True, values are strings like r"$x \pm y$". Otherwise tuples (mean, std).
+        If True, values are strings like r"$x \\pm y$". Otherwise tuples (mean, std).
     value_fmt : str, optional
         Format for numbers when format_for_latex=True (e.g., "{:.2f}").
 
@@ -1373,7 +1592,7 @@ def extract_cosmo_results_from_samples(
     elif cosmo_model == "FlatwCDM":
         model_name_latex = "flat $w$CDM"
     elif cosmo_model == "FlatLambdaCDM":
-        model_name_latex = "flat $\Lambda$CDM"
+        model_name_latex = r"flat $\Lambda$CDM"
     else:
         model_name_latex = cosmo_model
 

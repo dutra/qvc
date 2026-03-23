@@ -20,6 +20,7 @@ os.environ["JAX_PLATFORM_NAME"] = "cpu"
 
 import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
 from astropy.cosmology import FlatwCDM, Flatw0waCDM, FlatLambdaCDM, FlatwpwaCDM
 from scipy.interpolate import interp1d
 from scipy.signal import fftconvolve
@@ -43,6 +44,7 @@ from qvc.hubble.hubble_utils import (
     load_pantheon_data,
     posterior_corr,
     reduced_chi_squared,
+    read_quasars_from_hdf5_flat,
     report_pivots,
     save_chains,
     save_cosmo_results_hdf5,
@@ -887,8 +889,7 @@ if __name__ == "__main__":
     
     if args.agn_calibrators:
         if args.agn_calibrators.endswith('.h5'):
-            df_calibrators = read_quasars_from_hdf5(args.agn_data_show)
-            df_calibrators = pd.DataFrame(df_calibrators)
+            df_calibrators = read_quasars_from_hdf5_flat(args.agn_calibrators)
         elif args.agn_calibrators.endswith('.csv'):
             df_calibrators = pd.read_csv(args.agn_calibrators)
         else:

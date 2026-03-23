@@ -683,7 +683,7 @@ def plot_fast_vs_uv_variability(df, plot_path="plots/hubble", show=False):
     """Plot fast-vs-UV variability timescales and amplitudes on log-log axes."""
     tau_fast_col = "log_tau_fast_uv" if "log_tau_fast_uv" in df.columns else None
     tau_uv_col = "log_tau_uv_rf" if "log_tau_uv_rf" in df.columns else ("log_tau_uv" if "log_tau_uv" in df.columns else None)
-    sigma_fast_col = None
+    sigma_fast_col = 'log_sigma_fast_uv' if "log_sigma_fast_uv" in df.columns else None
     sigma_uv_col = "log_sigma_uv" if "log_sigma_uv" in df.columns else None
 
     if tau_fast_col is None or tau_uv_col is None:

@@ -1,3 +1,7 @@
+plots/
+results/
+data/
+
 *.tex
 *.png
 *.pdf

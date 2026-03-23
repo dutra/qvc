@@ -2,6 +2,7 @@ import h5py
 import os
 import numpy as np
 import jax.numpy as jnp
+import subprocess
 
 prefix = os.environ.get('PREFIX', "test")
 suffix = os.environ.get('SUFFIX', "test")
@@ -33,6 +34,60 @@ import jax.numpy as jnp
 from datetime import datetime
 
 import numpy as np
+
+
+_GIT_COMMIT_SENTINEL = object()
+_GIT_COMMIT_CACHE = _GIT_COMMIT_SENTINEL
+_RUN_METADATA_KEYS = {"git_commit", "run_datetime"}
+
+
+def _get_current_git_commit():
+    """
+    Resolve current git commit hash once per process.
+    Returns an empty string when unavailable.
+    """
+    global _GIT_COMMIT_CACHE
+    if _GIT_COMMIT_CACHE is not _GIT_COMMIT_SENTINEL:
+        return _GIT_COMMIT_CACHE
+
+    try:
+        proc = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=os.path.dirname(__file__),
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        _GIT_COMMIT_CACHE = proc.stdout.strip()
+    except Exception as exc:
+        logging.warning("Could not resolve git commit for HDF5 metadata: %s", exc)
+        _GIT_COMMIT_CACHE = ""
+    return _GIT_COMMIT_CACHE
+
+
+def _current_local_datetime_iso8601():
+    """
+    Return local datetime with timezone offset in ISO8601 format.
+    Example: 2026-03-19T16:14:33-04:00
+    """
+    return datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def _write_hdf5_run_metadata(hdf):
+    """
+    Write run metadata as root-level scalar datasets.
+    """
+    string_dt = h5py.string_dtype(encoding="utf-8")
+    metadata = {
+        "git_commit": _get_current_git_commit(),
+        "run_datetime": _current_local_datetime_iso8601(),
+    }
+
+    for key, value in metadata.items():
+        if key in hdf:
+            del hdf[key]
+        hdf.create_dataset(key, data=np.asarray(value, dtype=string_dt), dtype=string_dt)
 
 def pad_batch(batch_data, nBands):
     """
@@ -441,6 +496,8 @@ def load_all_samples_from_hdf5(file_path=None):
     samples = {}
     with h5py.File(file_path, "r") as hdf:
         for key in hdf.keys():
+            if key in _RUN_METADATA_KEYS:
+                continue
             samples[key] = np.array(hdf[key])
 
     logging.info(f"Loaded {len(samples)} datasets from {file_path}")
@@ -459,6 +516,7 @@ def save_all_samples_to_hdf5(samples):
     logging.info(f"Saving all samples to {file_path}")
 
     with h5py.File(file_path, "w") as hdf:
+        _write_hdf5_run_metadata(hdf)
         for key, value in samples.items():
             hdf.create_dataset(key, data=value)
     logging.info(f"Saved all samples to {file_path}")
@@ -480,6 +538,8 @@ def load_obj_samples_from_hdf5(object_id=None, file_path=None):
     samples = {}
     with h5py.File(file_path, "r") as hdf:
         for key in hdf.keys():
+            if key in _RUN_METADATA_KEYS:
+                continue
             samples[key] = np.array(hdf[key])
 
     logging.info(f"Loaded {len(samples)} datasets from {file_path}")
@@ -501,6 +561,7 @@ def save_obj_samples_to_hdf5(samples, object_id):
     logging.info(f"Saving samples for object_id {object_id} to {file_path}")
 
     with h5py.File(file_path, "w") as hdf:
+        _write_hdf5_run_metadata(hdf)
         for key, value in samples.items():
             hdf.create_dataset(key, data=value)
     logging.info(f"Saved samples for object_id {object_id} to {file_path}")
@@ -517,72 +578,154 @@ def delete_file(file_path):
 
 def save_quasar_list_hdf5(quasars, ignored_keys=None, size_threshold=1024):
     """
-    Save a list of quasar dictionaries to an HDF5 file, overwriting the file if it exists.
-    
+    Save a list of quasar dictionaries to a *flat columnar* HDF5 file.
+
     - The file is always truncated to start fresh.
-    - Each quasar is stored under a group named by its object_id.
-    - Nested dicts become sub-groups with datasets.
-    - Simple values are stored as attributes.
+    - Every field is written as a top-level dataset of length N.
+    - Band-related vectors are expanded to *_u, *_g, *_r, *_i, *_z.
+    - Other vectors are expanded to *_0, *_1, ...
+    - Nested dicts are flattened recursively using underscore-joined keys.
     - Keys in ignored_keys or arrays larger than size_threshold are skipped.
-    - Prints progress in the form 'i/N: Saved quasar <object_id>'.
     """
     ignored_keys = set(ignored_keys or [])
-    
+    fixed_bands = ("u", "g", "r", "i", "z")
     string_dt = h5py.string_dtype(encoding="utf-8")
 
+    def _to_scalar(x):
+        if isinstance(x, np.generic):
+            return x.item()
+        if isinstance(x, bytes):
+            return x.decode("utf-8", errors="replace")
+        return x
+
+    def _is_string_like(v):
+        return isinstance(v, (str, bytes, np.str_, np.bytes_))
+
+    def _is_numeric_like(v):
+        return isinstance(v, (int, float, np.integer, np.floating, np.bool_))
+
+    def _string_fill_for(values):
+        for v in values:
+            if _is_string_like(v):
+                return ""
+        return np.nan
+
+    def _should_expand_as_bands(base_key, arr_1d, obj_bands):
+        if obj_bands is None or len(arr_1d) != len(obj_bands):
+            return False
+        if any(band not in fixed_bands for band in obj_bands):
+            return False
+        if base_key.endswith("bands") or "band" in base_key:
+            return True
+        if base_key in {"mags_mean", "mags_means", "mean", "cadence", "cadence_err", "number_points"}:
+            return True
+        if base_key.startswith(("mags_mean_", "mags_means_", "mean_", "cadence_", "number_points_")):
+            return True
+        return False
+
+    def _flatten_value(row, base_key, value, obj_bands):
+        if isinstance(value, dict):
+            for sub_key, sub_value in value.items():
+                child_key = f"{base_key}_{sub_key}" if base_key else str(sub_key)
+                _flatten_value(row, child_key, sub_value, obj_bands)
+            return
+
+        arr = np.asarray(value) if value is not None else np.asarray(np.nan)
+        if arr.size > size_threshold:
+            logging.warning(
+                "Warning: Skipping key '%s' (too large: %s)",
+                base_key,
+                arr.size,
+            )
+            return
+
+        if arr.ndim == 0:
+            row[base_key] = _to_scalar(arr.reshape(-1)[0])
+            return
+
+        flat = arr.reshape(-1)
+        if flat.size > 5:
+            logging.warning(
+                "Warning: key '%s' has vector length %d (>5); not saving.",
+                base_key,
+                flat.size,
+            )
+            return
+        if flat.size == 5:
+            for i, band in enumerate(fixed_bands):
+                row[f"{base_key}_{band}"] = _to_scalar(flat[i])
+            return
+        if _should_expand_as_bands(base_key, flat, obj_bands):
+            band_to_value = {band: _to_scalar(flat[i]) for i, band in enumerate(obj_bands)}
+            fill_value = _string_fill_for(band_to_value.values())
+            for band in fixed_bands:
+                row[f"{base_key}_{band}"] = band_to_value.get(band, fill_value)
+            return
+
+        for i, v in enumerate(flat):
+            row[f"{base_key}_{i}"] = _to_scalar(v)
+
+    def _build_column(values):
+        has_string = any(_is_string_like(v) for v in values if v is not None and not (isinstance(v, float) and np.isnan(v)))
+        if has_string:
+            out = []
+            for v in values:
+                if v is None or (isinstance(v, float) and np.isnan(v)):
+                    out.append("")
+                elif isinstance(v, bytes):
+                    out.append(v.decode("utf-8", errors="replace"))
+                else:
+                    out.append(str(v))
+            return np.asarray(out, dtype=object).astype(string_dt)
+
+        has_numeric = any(_is_numeric_like(v) for v in values if v is not None)
+        if has_numeric:
+            out = []
+            for v in values:
+                if v is None:
+                    out.append(np.nan)
+                else:
+                    out.append(float(v))
+            return np.asarray(out, dtype=float)
+
+        out = ["" if v is None else str(v) for v in values]
+        return np.asarray(out, dtype=object).astype(string_dt)
+
+    rows = []
     total = len(quasars)
-    output_dir=f"results/data/{prefix}"
+    output_dir = f"results/data/{prefix}"
     os.makedirs(output_dir, exist_ok=True)
     file_path = os.path.join(output_dir, f"{suffix}.h5")
     logging.info(f"Saving {total} quasars to {file_path}")
 
-    with h5py.File(file_path, "w") as hdf:
-        for i, quasar in enumerate(quasars):
-            object_id = str(quasar["object_id"])
-            logging.info(f"Writing quasar {object_id} to {file_path}")
-            
-            group = hdf.create_group(object_id)
-            for key, value in quasar.items():
-                # Skip ignored keys
-                if key in ignored_keys:
-                    continue
+    for i, quasar in enumerate(quasars):
+        object_id = str(quasar["object_id"])
+        obj_bands = quasar.get("bands")
+        if isinstance(obj_bands, np.ndarray):
+            obj_bands = [str(x) for x in obj_bands.tolist()]
+        elif isinstance(obj_bands, (list, tuple)):
+            obj_bands = [str(x) for x in obj_bands]
+        else:
+            obj_bands = None
 
-                if isinstance(value, dict):
-                    # Nested dict → sub-group with datasets
-                    sub_group = group.create_group(key)
-                    for sub_key, sub_value in value.items():
-                        arr = np.asarray(sub_value)
-                        if arr.size > size_threshold:
-                            logging.warning(f"Warning: Skipping sub-key '{key}/{sub_key}' (too large: {arr.size})")
-                            continue
-                        if arr.dtype.kind in {'U', 'S', 'O'}:
-                            arr = arr.astype(string_dt)
-                        sub_group.create_dataset(sub_key, data=arr)
-                else:
-                    # Attributes for simple values
-                    if value is None:
-                        arr = np.array([])
-                    else:
-                        arr = np.asarray(value)
-                    if arr.size > size_threshold:
-                        logging.warning(f"Warning: Skipping key '{key}' (too large: {arr.size})")
-                        continue
-                    if arr.dtype.kind in {'U', 'S', 'O'}:
-                        arr = arr.astype(string_dt)
-                    try:
-                        group.attrs[key] = arr
-                    except Exception as e:
-                        logging.error(f"Error saving attribute '{key}' for object_id {object_id}: {e}")
-                        print("Value:", value)
-                        print("Converted Array:", arr)
-                        if isinstance(arr, np.ndarray):
-                            logging.error(f"  (type: {type(arr)}, shape: {arr.shape})")
-                        else:
-                            logging.error(f"  (type: {type(arr)})")
-                        raise e
-            
-            # Print progress
-            logging.info(f"{i+1}/{total}: Saved quasar {object_id}")
+        row = {"object_id": object_id}
+        for key, value in quasar.items():
+            if key in ignored_keys or key == "object_id":
+                continue
+            _flatten_value(row, str(key), value, obj_bands)
+        rows.append(row)
+        logging.info(f"{i+1}/{total}: Flattened quasar {object_id}")
+
+    all_columns = {"object_id"}
+    for row in rows:
+        all_columns.update(row.keys())
+
+    with h5py.File(file_path, "w") as hdf:
+        _write_hdf5_run_metadata(hdf)
+        for col in sorted(all_columns):
+            values = [row.get(col, None) for row in rows]
+            arr = _build_column(values)
+            hdf.create_dataset(col, data=arr)
 
     logging.info("All quasars saved successfully.")
     

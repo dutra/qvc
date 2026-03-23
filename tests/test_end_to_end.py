@@ -29,24 +29,67 @@ def _write_test_quasars_hdf5(path, quasars):
     path.parent.mkdir(parents=True, exist_ok=True)
     string_dt = h5py.string_dtype(encoding="utf-8")
 
+    def _to_scalar(x):
+        if isinstance(x, np.generic):
+            return x.item()
+        if isinstance(x, bytes):
+            return x.decode("utf-8", errors="replace")
+        return x
+
+    def _flatten_value(row, base_key, value):
+        if isinstance(value, dict):
+            for sub_key, sub_value in value.items():
+                _flatten_value(row, f"{base_key}_{sub_key}", sub_value)
+            return
+
+        arr = np.asarray(value)
+        if arr.ndim == 0:
+            row[base_key] = _to_scalar(arr.reshape(-1)[0])
+            return
+
+        flat = arr.reshape(-1)
+        for i, item in enumerate(flat):
+            row[f"{base_key}_{i}"] = _to_scalar(item)
+
+    rows = []
+    for quasar in quasars:
+        row = {"object_id": str(quasar["object_id"])}
+        for key, value in quasar.items():
+            if key == "object_id":
+                continue
+            _flatten_value(row, str(key), value)
+        rows.append(row)
+
+    all_keys = []
+    seen = set()
+    for row in rows:
+        for key in row.keys():
+            if key not in seen:
+                seen.add(key)
+                all_keys.append(key)
+
     with h5py.File(path, "w") as hdf:
-        for quasar in quasars:
-            group = hdf.create_group(str(quasar["object_id"]))
-            for key, value in quasar.items():
-                if key == "object_id":
-                    continue
-                if isinstance(value, dict):
-                    sub_group = group.create_group(key)
-                    for sub_key, sub_value in value.items():
-                        arr = np.asarray(sub_value)
-                        if arr.dtype.kind in {"U", "S", "O"}:
-                            arr = arr.astype(string_dt)
-                        sub_group.create_dataset(sub_key, data=arr)
-                else:
-                    arr = np.asarray(value)
-                    if arr.dtype.kind in {"U", "S", "O"}:
-                        arr = arr.astype(string_dt)
-                    group.attrs[key] = arr
+        for key in all_keys:
+            values = [row.get(key, None) for row in rows]
+            has_string = any(isinstance(v, (str, bytes)) for v in values if v is not None)
+            if has_string:
+                col = []
+                for v in values:
+                    if v is None:
+                        col.append("")
+                    elif isinstance(v, bytes):
+                        col.append(v.decode("utf-8", errors="replace"))
+                    else:
+                        col.append(str(v))
+                hdf.create_dataset(key, data=np.asarray(col, dtype=object).astype(string_dt))
+            else:
+                col = []
+                for v in values:
+                    if v is None:
+                        col.append(np.nan)
+                    else:
+                        col.append(float(v))
+                hdf.create_dataset(key, data=np.asarray(col, dtype=float))
 
 
 def _make_fake_public_object():
@@ -143,8 +186,12 @@ def test_end_to_end(tmp_path, monkeypatch):
     quasar = {
         "object_id": obj["object_id"],
         "z": float(obj["z"]),
-        "mags_mean": np.asarray(obj["mags_means"], dtype=float),
-        "dropped_bands": np.asarray(obj["dropped_bands"], dtype="U"),
+        "mags_mean_u": np.nan,
+        "mags_mean_g": float(obj["mags_means"][0]),
+        "mags_mean_r": float(obj["mags_means"][1]),
+        "mags_mean_i": float(obj["mags_means"][2]),
+        "mags_mean_z": np.nan,
+        "dropped_bands": ",".join(obj["dropped_bands"]),
         "t_rf_length": float(obj["t_rf_length"]),
         "t_obs_length": float(obj["t_obs_length"]),
         "ebv_wu": 0.01,
