@@ -106,6 +106,21 @@ def serialize_any(x):
         return repr(x)
 
 
+def sdss_spec_filename(plate: int, mjd: int, fiber: int) -> str:
+    return f"spec-{int(plate):04d}-{int(mjd):05d}-{int(fiber):04d}.fits"
+
+
+def sdss_cache_file_path(cache_dir: str | Path, plate: int, mjd: int, fiber: int) -> Path:
+    return Path(cache_dir) / sdss_spec_filename(plate=plate, mjd=mjd, fiber=fiber)
+
+
+def load_sdss_spec_from_cache(cache_dir: str | Path, plate: int, mjd: int, fiber: int):
+    cache_file = sdss_cache_file_path(cache_dir=cache_dir, plate=plate, mjd=mjd, fiber=fiber)
+    if cache_file.exists():
+        return fits.open(cache_file, memmap=False)
+    return None
+
+
 def sdss_bands_affected_by_lya(z, buffer=0.0):
     """
     SDSS ugriz bands whose rest-frame blue edge is below Ly-alpha.
@@ -317,7 +332,6 @@ def prepare_sample_df(sample_df, filter_sdss_name=None, filter_object_id=None, N
 def match_to_dr16q(sample_df, dr16q_fits, max_sep_arcsec=1.0):
     cols = ["RA", "DEC", "SDSS_NAME", "PLATE", "FIBERID", "MJD", "Z_SYS", "LOGLBOL"]
     data_cat = Table.read(dr16q_fits, hdu=1)[cols].to_pandas()
-
     df_matched, unmatched = match_radec(
         sample_df,
         data_cat,
@@ -347,7 +361,11 @@ def match_to_dr16q(sample_df, dr16q_fits, max_sep_arcsec=1.0):
 
 
 def build_records(args):
-    sample_df = load_quasar_core_list(args.fpath_in, pickled=args.pickled)
+    if str(args.fpath_in).lower().endswith(".csv"):
+        sample_df = pd.read_csv(args.fpath_in)
+    else:
+        sample_df = load_quasar_core_list(args.fpath_in, pickled=args.pickled)
+
     print("build_records filtering on: ", args.filter_object_id)
     sample_df = prepare_sample_df(
         sample_df,
@@ -372,19 +390,27 @@ def fetch_dustmaps(args):
 # SDSS spectrum cache
 # -----------------------------------------------------------------------------
 
-def fetch_spectrum_fits(sdss_name, plate, fiber, mjd, cache_dir="data/spectra_cache"):
+def fetch_spectrum_fits(args, plate, fiber, mjd, cache_dir="data/spectra_cache"):
     from astroquery.sdss import SDSS
 
     cache_dir = Path(cache_dir)
     cache_dir.mkdir(parents=True, exist_ok=True)
-    cache_file = cache_dir / f"{sdss_name}.fits"
+    cache_file = sdss_cache_file_path(
+        cache_dir=cache_dir,
+        plate=int(plate),
+        mjd=int(mjd),
+        fiber=int(fiber),
+    )
+    spec_file = sdss_spec_filename(plate=int(plate), mjd=int(mjd), fiber=int(fiber))
 
     if cache_file.exists():
         return fits.open(cache_file, memmap=False)
+    elif args.mode != "download":
+        raise RuntimeError(f"Cache file {cache_file} ({spec_file}) not found in non-download mode.")
 
     spec = SDSS.get_spectra(plate=int(plate), fiberID=int(fiber), mjd=int(mjd))
     if spec is None or len(spec) == 0:
-        raise RuntimeError(f"No SDSS spectrum found for {sdss_name}")
+        raise RuntimeError(f"No SDSS spectrum found for {spec_file}")
 
     hdul = spec[0]
     hdul.writeto(cache_file, overwrite=True)
@@ -392,11 +418,13 @@ def fetch_spectrum_fits(sdss_name, plate, fiber, mjd, cache_dir="data/spectra_ca
 
 
 
-def load_spec_from_cache(sdss_name, cache_dir="data/spectra_cache"):
-    cache_file = Path(cache_dir) / f"{sdss_name}.fits"
-    if cache_file.exists():
-        return fits.open(cache_file, memmap=False)
-    return None
+def load_spec_from_cache(plate, fiber, mjd, cache_dir="data/spectra_cache"):
+    return load_sdss_spec_from_cache(
+        cache_dir=cache_dir,
+        plate=int(plate),
+        mjd=int(mjd),
+        fiber=int(fiber),
+    )
 
 
 
@@ -529,10 +557,15 @@ def run_one_fit(rec, args):
     result["fig_dir"] = args.fig_dir if args.save_fig else None
 
     try:
-        hdul = load_spec_from_cache(rec["sdss_name"], cache_dir=args.cache_dir)
+        hdul = load_spec_from_cache(
+            rec["plate"],
+            rec["fiber"],
+            rec["mjd"],
+            cache_dir=args.cache_dir,
+        )
         if hdul is None:
             hdul = fetch_spectrum_fits(
-                rec["sdss_name"],
+                args,
                 rec["plate"],
                 rec["fiber"],
                 rec["mjd"],
@@ -633,7 +666,7 @@ def run_download(args):
     for rec in tqdm(records, desc="Downloading spectra"):
         try:
             hdul = fetch_spectrum_fits(
-                rec["sdss_name"],
+                args,
                 rec["plate"],
                 rec["fiber"],
                 rec["mjd"],
