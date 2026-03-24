@@ -177,7 +177,8 @@ def estimate_m2500_from_model(q):
     else:
         scale_psf = np.full_like(pl_norm, float(getattr(q, "scale_psf", np.nan)), dtype=float)
 
-    f_lambda_2500 = scale_psf * pl_norm * (2500.0 / 3000.0) ** pl_slope
+    pl_pivot = float(np.asarray(q._fit_prior_config["PL_pivot"], dtype=float))
+    f_lambda_2500 = scale_psf * pl_norm * (2500.0 / pl_pivot) ** pl_slope
 
     c_A_s = 2.99792458e18
     f_nu = (f_lambda_2500 * 1e-17) * (2500.0**2) / c_A_s
