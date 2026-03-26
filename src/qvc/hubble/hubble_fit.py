@@ -886,7 +886,8 @@ if __name__ == "__main__":
                            pickled=args.pickled,
                            correct_sigma_uv_host=args.correct_sigma_uv_host,
                            z_range=tuple(args.z_range), plot_path=agn_plot_path)
-    
+    if args.N is not None:
+        df_agn = df_agn.sample(n=args.N, random_state=42)
     if args.agn_calibrators:
         if args.agn_calibrators.endswith('.h5'):
             df_calibrators = read_quasars_from_hdf5_flat(args.agn_calibrators)

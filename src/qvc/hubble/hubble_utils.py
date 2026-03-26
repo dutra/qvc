@@ -232,18 +232,24 @@ def populate_xray(df, table_fpath="data/cscresults.vot"):
 
 def populate_lc_info(df, lc_info_csv):
     fields = {
-        'number_points': int,
-        'cadence': float,
-        'cadence_err': float,
-        't_std': float,
+        # 'number_points': int,
+        # 'cadence': float,
+        # 'cadence_err': float,
+        # 't_std': float,
+        # 'chi_sq_g_raw': float,
+        # 'chi_sq_red_g_raw': float,
+        # 'pvalue_g': float
+        'chi_sq_g': float,
     }
     # Load and concatenate two CSV files
     lc_info_csv = resolve_qvc_data_path(lc_info_csv)
+    conv = _wrap_converters(fields)
     df_lcinfo = pd.read_csv(
         lc_info_csv,
         dtype={'object_id': str},
-        converters=fields
+        converters=conv
     )
+    print(f"Loaded lc info CSV: {df_lcinfo.keys()} with {len(df_lcinfo)} rows")
     merged = df.merge(df_lcinfo, on='object_id', how='left', suffixes=('', '_lcinfo'))
 
     print("Length of lc info merged DataFrame:", len(merged))
@@ -255,7 +261,6 @@ def populate_lc_info(df, lc_info_csv):
             df[f'{col}'] = merged[f'{col}_lcinfo']
         else:
             df[col] = merged[col]
-
     return df
 
 def _norm_name(s):
@@ -326,6 +331,8 @@ def populate_spectra_fit(df, spectra_fit_csvs, best=True):
         'apparent_mag_2500_reddened_err': float,
         'apparent_mag_2500': float,
         'apparent_mag_2500_err': float,
+        'apparent_mag_2500_intrinsic': float,
+        'apparent_mag_2500_intrinsic_err': float,
         'apparent_mag_i_rest': float,
         'apparent_mag_i_rest_err': float,
         'apparent_mag_i_obs': float,
@@ -511,6 +518,13 @@ def populate_sdss_fields(objs, progress_bar=True):
     # Keep this parameter for backward compatibility; matching is now vectorized.
     _ = progress_bar
 
+    def _normalize_native_endian(values):
+        """Normalize numeric arrays/scalars to native-endian for pandas assignment."""
+        arr = np.asarray(values)
+        if arr.dtype.kind in {"i", "u", "f", "c", "b"} and arr.dtype.byteorder not in {"=", "|"}:
+            arr = arr.byteswap().view(arr.dtype.newbyteorder("="))
+        return arr
+
     rows = pd.DataFrame(
         {
             "row_idx": np.arange(len(df), dtype=int),
@@ -631,16 +645,15 @@ def populate_sdss_fields(objs, progress_bar=True):
             update_fields[f"apparent_mag_{band}_err"] = apparent_mag_err[:, bidx]
 
         target_index = df.index.to_numpy()[matched_row_idx]
-        update_df = pd.DataFrame(update_fields, index=target_index)
-
-        existing_cols = [col for col in update_df.columns if col in df.columns]
-        if existing_cols:
-            df.update(update_df.loc[:, existing_cols], overwrite=True)
-
-        new_cols = [col for col in update_df.columns if col not in df.columns]
-        for col in new_cols:
-            df[col] = np.nan
-            df.update(update_df.loc[:, [col]], overwrite=True)
+        for col, values in update_fields.items():
+            normalized_values = _normalize_native_endian(values)
+            if col not in df.columns:
+                value_kind = normalized_values.dtype.kind
+                if value_kind in {"U", "S", "O"}:
+                    df[col] = pd.Series([np.nan] * len(df), index=df.index, dtype=object)
+                else:
+                    df[col] = np.nan
+            df.loc[target_index, col] = normalized_values
 
         missing_catalog = int((~valid_coord_mask).sum())
         missing_dr16q = int(valid_coord_mask.sum() - len(matched_row_idx))
@@ -650,6 +663,137 @@ def populate_sdss_fields(objs, progress_bar=True):
             print(f"Skipped {missing_dr16q} objects: no DR16Q match within 1 arcsec.")
 
     return df if input_is_df else df.to_dict("records")
+
+
+def populate_sdss_rchi2_fields(df, csv_path="data/sdss/sdss_allspec_rchi2.csv"):
+    """Populate SDSS allspec quality columns using (object_id, plate, fiberid, mjd)."""
+    if "object_id" not in df.columns:
+        raise ValueError("populate_sdss_rchi2_fields requires an 'object_id' column.")
+
+    target_cols = ["RCHI2", "RCHI2DIFF", "VDISP", "ZWARNING", "RUN2D"]
+    key_cols = ["object_id", "plate", "fiberid", "mjd"]
+    csv_path = resolve_qvc_data_path(csv_path)
+
+    usecols = key_cols + target_cols
+    df_sdss = pd.read_csv(
+        csv_path,
+        usecols=usecols,
+        dtype={"object_id": str, "RUN2D": str},
+    )
+    missing_cols = [col for col in usecols if col not in df_sdss.columns]
+    if missing_cols:
+        raise ValueError(
+            f"Missing required SDSS RCHI2 columns in {csv_path}: {missing_cols}"
+        )
+
+    def _normalize_run2d(value):
+        if pd.isna(value):
+            return np.nan
+        text = str(value).strip()
+        if text.startswith("b'") and text.endswith("'"):
+            text = text[2:-1]
+        return text.strip()
+
+    def _to_int64(series):
+        return pd.to_numeric(series, errors="coerce").astype("Int64")
+
+    df_sdss["object_id"] = df_sdss["object_id"].astype(str)
+    for col in ["plate", "fiberid", "mjd"]:
+        df_sdss[col] = _to_int64(df_sdss[col])
+    df_sdss["RUN2D"] = df_sdss["RUN2D"].apply(_normalize_run2d)
+
+    out = df.copy()
+    out["object_id"] = out["object_id"].astype(str)
+
+    def _ensure_target_col(frame, col):
+        if col in frame.columns:
+            return
+        if col == "RUN2D":
+            frame[col] = pd.Series([np.nan] * len(frame), index=frame.index, dtype=object)
+        else:
+            frame[col] = np.nan
+
+    # Count all SDSS spectra rows per object_id, independent of composite-key match.
+    sdss_plate_count = (
+        df_sdss.groupby("object_id", as_index=False)
+        .size()
+        .rename(columns={"size": "sdss_plate_count"})
+    )
+    out = out.merge(sdss_plate_count, on="object_id", how="left")
+    out["sdss_plate_count"] = out["sdss_plate_count"].fillna(0).astype("Int64")
+
+    def _find_col(frame, preferred, fallback):
+        if preferred in frame.columns:
+            return preferred
+        if fallback in frame.columns:
+            return fallback
+        return None
+
+    plate_col = _find_col(out, "plate", "PLATEID")
+    fiberid_col = _find_col(out, "fiberid", "FIBERID")
+    mjd_col = _find_col(out, "mjd", "MJD")
+
+    if plate_col is None or fiberid_col is None or mjd_col is None:
+        for col in target_cols:
+            _ensure_target_col(out, col)
+        object_match_count = int(out["object_id"].isin(set(df_sdss["object_id"])).sum())
+        print(
+            "Populated SDSS RCHI2 fields "
+            f"from {csv_path}: loaded_rows={len(df_sdss)}, "
+            f"unique_object_id={df_sdss['object_id'].nunique()}, "
+            f"object_id_matches={object_match_count}, exact_key_matches=0, "
+            f"object_only_no_key_match={object_match_count} "
+            "(missing plate/fiberid/mjd columns in AGN table)"
+        )
+        return out
+
+    out["_sdss_plate_key"] = _to_int64(out[plate_col])
+    out["_sdss_fiberid_key"] = _to_int64(out[fiberid_col])
+    out["_sdss_mjd_key"] = _to_int64(out[mjd_col])
+
+    df_sdss_keyed = df_sdss.rename(
+        columns={
+            "plate": "_sdss_plate_key",
+            "fiberid": "_sdss_fiberid_key",
+            "mjd": "_sdss_mjd_key",
+        }
+    )
+    merged = out.merge(
+        df_sdss_keyed,
+        on=["object_id", "_sdss_plate_key", "_sdss_fiberid_key", "_sdss_mjd_key"],
+        how="left",
+        suffixes=("", "_sdss_rchi2"),
+        indicator="_sdss_match",
+    )
+
+    object_id_matched_mask = out["object_id"].isin(set(df_sdss["object_id"]))
+    exact_match_mask = merged["_sdss_match"] == "both"
+    for col in target_cols:
+        src_col = f"{col}_sdss_rchi2"
+        _ensure_target_col(out, col)
+        if src_col in merged.columns:
+            assign_vals = merged.loc[exact_match_mask, src_col].values
+        elif col in merged.columns:
+            assign_vals = merged.loc[exact_match_mask, col].values
+        else:
+            continue
+        if col == "RUN2D":
+            assign_vals = pd.Series(assign_vals, dtype=object).values
+        out.loc[exact_match_mask, col] = assign_vals
+
+    out = out.drop(columns=["_sdss_plate_key", "_sdss_fiberid_key", "_sdss_mjd_key"], errors="ignore")
+
+    object_id_match_count = int(object_id_matched_mask.sum())
+    exact_match_count = int(exact_match_mask.sum())
+    object_only_no_key_match = int(object_id_match_count - exact_match_count)
+    print(
+        "Populated SDSS RCHI2 fields "
+        f"from {csv_path}: loaded_rows={len(df_sdss)}, "
+        f"unique_object_id={df_sdss['object_id'].nunique()}, "
+        f"object_id_matches={object_id_match_count}, exact_key_matches={exact_match_count}, "
+        f"object_only_no_key_match={object_only_no_key_match}"
+    )
+    return out
 
 
 def _mask_invalid_wu_bhmass(df):
@@ -757,7 +901,7 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
                   pickled=False,
                   correct_sigma_uv_host=False,
                   iron_frac_cut=None, wrms_cut=None, chi_sq_cut=None,
-                  lc_info_csv="data/aug4_sample_chisqg10_ebv005sn3_lcdata.csv",
+                  lc_info_csv="data/lc_chisq.csv",
                   z_range=(0.44, 3.16),
                   plot_path="plots/hubble"):
     def _format_cut_bounds(lower, upper, *, upper_inclusive=True, allow_missing=False):
@@ -889,6 +1033,8 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
     if ("ebv_wu" not in df.columns) or df["ebv_wu"].isna().all():
         print("Populating SDSS fields...")
         df = populate_sdss_fields(df)
+
+    df = populate_sdss_rchi2_fields(df)
 
     if "dropped_bands" in df.columns:
         df["dropped_bands"] = df["dropped_bands"].apply(_normalize_dropped_bands)

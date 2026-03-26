@@ -3502,6 +3502,7 @@ def plot_full_residuals(
     debias=False, dm_interp=None, plot_path='plots/hubble', show=False,
     *, nbins=10, min_count=5, z_cut=None, key_y='residuals', key_color='z',
     z_range=(0.44, 3.16), residual_label='residuals', output_tag='full_residuals',
+    max_categories=12, category_min_count=5, category_jitter=0.15,
 ):
     df_agn = df_agn.copy()
     df_agn[residual_label] = residuals
@@ -3595,6 +3596,13 @@ def plot_full_residuals(
             'f_host_center': 'log_f_host_center',
             'f_bc_over_pl_3000': 'log_f_bc_over_pl_3000',
             'f_fe_uv_over_pl_3000': 'log_f_fe_uv_over_pl_3000',
+            'RCHI2': 'log_RCHI2',
+            'RCHI2DIFF': 'log_RCHI2DIFF',
+            'chi_sq_g': 'log_chi_sq_g',
+            'chi_sq_all': 'log_chi_sq_all',
+            'chi_sq_red_g_raw': 'log_chi_sq_red_g_raw',
+            'chi_sq_g_raw': 'log_chi_sq_g_raw',
+            'pvalue_g': 'log_pvalue_g',
         }
         for source_col, derived_col in log_columns.items():
             if source_col in frame.columns:
@@ -3629,39 +3637,42 @@ def plot_full_residuals(
     _augment_plot_columns(df_agn, cosmo)
 
     # ---- Which x-keys to show (keep your order) ----
-    keys = [col for col in np.flip([
+    keys = [col for col in [
+        'chi_sq_g', 'log_chi_sq_g', 'chi_sq_all', 'log_chi_sq_all',
+        #'chi_sq_red_g_raw', 'log_chi_sq_red_g_raw', 'chi_sq_g_raw', 'log_chi_sq_g_raw',
+        #'pvalue_g', 'log_pvalue_g',
+        #'sdss_plate_count', 'RCHI2', 'log_RCHI2', 'RCHI2DIFF', 'log_RCHI2DIFF', 'VDISP', 'ZWARNING', 'RUN2D',
         'log_frac_host_psf_2500',
         'wrms', 'log_f_bc_over_pl_3000', 'log_f_fe_uv_over_pl_3000', 'log_f_host_center',
         'rel_apparent_mag_2500_err',
-        'apparent_mag_2500_err', 'log_apparent_mag_2500_err', 
-        'log_sigma_uv_err', 'log_log_sigma_uv_err',
-        'log_tau_uv_rf_err', 'log_log_tau_uv_rf_err',
-        'apparent_mag_2500', 'apparent_mag_2500_reddened', 'dm_red', 'log_dm_red', 
+        #'apparent_mag_2500_err', 'log_apparent_mag_2500_err', 
+        #'log_sigma_uv_err', 'log_log_sigma_uv_err',
+        #'log_tau_uv_rf_err', 'log_log_tau_uv_rf_err',
+        #'apparent_mag_2500', 'apparent_mag_2500_reddened', 'dm_red', 'log_dm_red', 
         'ebv_wu',
-        'conti_a_0', 'PL_slope_blue', 
-        'MY_M_2500', 'z', 'log_lbol', 'log_ledd_ratio', 
+        #'conti_a_0', 'PL_slope_blue', 
+        #'MY_M_2500', 'z', 'log_lbol', 'log_ledd_ratio', 
         'delta_tau_uv_fast_rf', 'log_delta_tau_uv_fast_rf',
         'log_sigma_uv', 'log_sigma_hat_uv', 'log_sigma_hat0', 'log_tau_uv_rf',
         'log_sigma_uv', 'log_tau_uv', 'log_tau_fast_uv',
-        'log_tau_fast_band_u_RF', 'log_tau_fast_band_g_RF', 'log_tau_fast_band_r_RF', 'log_tau_fast_band_i_RF', 'log_tau_fast_band_z_RF',
+        #'log_tau_fast_band_u_RF', 'log_tau_fast_band_g_RF', 'log_tau_fast_band_r_RF', 'log_tau_fast_band_i_RF', 'log_tau_fast_band_z_RF',
         'sn_median_all', 'redchi', 'log_redchi', 'alpha_lambda',
-        'redchi2_conti_full', 'log_redchi2_conti_full',
+        #'redchi2_conti_full', 'log_redchi2_conti_full',
         'bwb_alpha', 'bwb_beta', 
-        'log_rho', 't_rf_length', 'tau_band_RF_mean',
-        'log_tau_band_RF_mean', 'log_t_rf_length', 
-        'alphaOX', 'alphaOX_int',
-        'bwb_alpha_u', 'bwb_alpha_g', 'bwb_alpha_r', 'bwb_alpha_i', 'bwb_alpha_z',
-        
-        'eta_sigma', 'eta_tau', 
-        'PL_slope_blue', 'lam_min', 'lam_max', 'lam_range', 
-        'poly1', 'psf_minus_fiber_r', 'log_psf_minus_fiber_r', 'petroRad_r', 'log_petroRad_r',
-        'cadence', 'number_points',
-        'log_jitter_total', 'log_amp_delta_blr_total',
+        #'log_rho', 't_rf_length', 'tau_band_RF_mean',
+        #'log_tau_band_RF_mean', 'log_t_rf_length', 
+        #'alphaOX', 'alphaOX_int',
+        #'bwb_alpha_u', 'bwb_alpha_g', 'bwb_alpha_r', 'bwb_alpha_i', 'bwb_alpha_z',
+        #'eta_sigma', 'eta_tau', 
+        #'PL_slope_blue', 'lam_min', 'lam_max', 'lam_range', 
+        #'poly1', 'psf_minus_fiber_r', 'log_psf_minus_fiber_r', 'petroRad_r', 'log_petroRad_r',
+        #'cadence', 'number_points',
+        #'log_jitter_total', 'log_amp_delta_blr_total',
         'log_amp_delta_blr_u', 'log_amp_delta_blr_g', 'log_amp_delta_blr_r', 'log_amp_delta_blr_i', 'log_amp_delta_blr_z',
         'log_amp_delta_lya_band_u', 'log_amp_delta_lya_band_g', 'log_amp_delta_lya_band_r', 'log_amp_delta_lya_band_i', 'log_amp_delta_lya_band_z',
-        'log_jitter_u', 'log_jitter_g', 'log_jitter_r', 'log_jitter_i', 'log_jitter_z',
+        #'log_jitter_u', 'log_jitter_g', 'log_jitter_r', 'log_jitter_i', 'log_jitter_z',
 
-    ]) if col in df_agn.columns]
+    ] if col in df_agn.columns]
 
 
     keys_masks = {
@@ -3681,7 +3692,7 @@ def plot_full_residuals(
     axes = axes.flatten()
 
     def _panel_mask(key):
-        if np.issubdtype(df_agn[key].dtype, np.number):
+        if pd.api.types.is_numeric_dtype(df_agn[key]):
             mask = (df_agn[key] > -1e9) & np.isfinite(df_agn[key])
         else:
             mask = np.ones(len(df_agn), dtype=bool)
@@ -3691,6 +3702,12 @@ def plot_full_residuals(
             low, high = keys_masks[key]
             mask &= df_agn[key].between(low, high)
         mask &= np.isfinite(residuals)
+        if isinstance(mask, pd.Series):
+            mask = mask.fillna(False).to_numpy(dtype=bool)
+        elif hasattr(mask, "fillna"):
+            mask = np.asarray(mask.fillna(False), dtype=bool)
+        else:
+            mask = np.asarray(mask, dtype=bool)
         return mask
 
     def _panel_xy_and_style(mask, key):
@@ -3699,7 +3716,17 @@ def plot_full_residuals(
             x = df_agn.loc[mask, key].to_numpy()
             y = residuals[mask]
             xlabel, ylabel = key, key_y
-            norm = mpl.colors.Normalize(vmin=np.nanmin(color_values), vmax=np.nanmax(color_values))
+            color_num = pd.to_numeric(pd.Series(color_values), errors='coerce').to_numpy(dtype=float)
+            finite_color = np.isfinite(color_num)
+            if np.any(finite_color):
+                cmin = float(np.nanmin(color_num[finite_color]))
+                cmax = float(np.nanmax(color_num[finite_color]))
+                if cmin == cmax:
+                    cmin, cmax = cmin - 1e-6, cmax + 1e-6
+                norm = mpl.colors.Normalize(vmin=cmin, vmax=cmax)
+                color_values = color_num
+            else:
+                norm = None
             cmap = 'viridis'
         else:
             x = df_agn.loc[mask, key_y].to_numpy()
@@ -3708,6 +3735,32 @@ def plot_full_residuals(
             norm = mpl.colors.Normalize(vmin=-4, vmax=4)
             cmap = 'bwr_r'
         return x, y, color_values, xlabel, ylabel, cmap, norm
+
+    def _normalize_category_value(value):
+        if pd.isna(value):
+            return np.nan
+        text = str(value).strip()
+        if text == "" or text.lower() in {"nan", "none", "null"}:
+            return np.nan
+        return text
+
+    def _prepare_categories(x_raw):
+        x_cat = pd.Series(x_raw).apply(_normalize_category_value)
+        valid = x_cat.notna()
+        if not np.any(valid):
+            return None, None, None
+        x_cat = x_cat.loc[valid].reset_index(drop=True)
+        counts = x_cat.value_counts()
+        eligible = counts[counts >= int(category_min_count)]
+        if eligible.empty:
+            keep = counts.index[: int(max_categories)]
+        else:
+            keep = eligible.index[: int(max_categories)]
+        x_limited = x_cat.where(x_cat.isin(set(keep)), "OTHER")
+        order = x_limited.value_counts().index.tolist()
+        x_limited = pd.Categorical(x_limited, categories=order, ordered=True)
+        positions = np.asarray(x_limited.codes, dtype=float)
+        return positions, np.asarray(x_limited.astype(str)), np.asarray(valid)
 
     def _draw_reference_guides(ax, key, x):
         if key_y == residual_label:
@@ -3744,49 +3797,189 @@ def plot_full_residuals(
             ax.set_xlabel(xlabel)
             ax.set_ylabel(ylabel)
             z_masked = df_agn.loc[mask, 'z'].to_numpy(dtype=float)
-            in_z = (z_masked >= z_range[0]) & (z_masked <= z_range[1])
-            out_z = ~in_z
+            x_is_numeric = pd.api.types.is_numeric_dtype(pd.Series(x))
+            if key_y == residual_label and not x_is_numeric:
+                cat_pos, cat_vals, valid_cat_mask = _prepare_categories(x)
+                if cat_pos is None:
+                    raise ValueError(f"No finite categorical values for key '{key}'.")
+                y = np.asarray(y)[valid_cat_mask]
+                z_masked = z_masked[valid_cat_mask]
+                color_values = np.asarray(color_values)[valid_cat_mask]
+                in_z = (z_masked >= z_range[0]) & (z_masked <= z_range[1])
+                out_z = ~in_z
 
-            sc = None
-            if np.any(in_z):
-                sc = ax.scatter(
-                    x[in_z],
-                    y[in_z],
-                    c=color_values[in_z],
-                    cmap=cmap,
-                    norm=norm,
-                    s=10,
-                    alpha=0.5,
-                    rasterized=True,
+                cats = list(dict.fromkeys(cat_vals.tolist()))
+                box_data = [np.asarray(y)[cat_vals == cat] for cat in cats]
+                ax.boxplot(
+                    box_data,
+                    positions=np.arange(len(cats), dtype=float),
+                    widths=0.55,
+                    showfliers=False,
+                    patch_artist=True,
+                    boxprops=dict(facecolor='white', edgecolor='0.35', linewidth=1.0),
+                    medianprops=dict(color='tab:red', linewidth=1.2),
+                    whiskerprops=dict(color='0.35', linewidth=1.0),
+                    capprops=dict(color='0.35', linewidth=1.0),
                 )
-            if np.any(out_z):
-                edgecols = mpl.cm.get_cmap(cmap)(norm(color_values[out_z]))
-                sc_out = ax.scatter(
-                    x[out_z],
-                    y[out_z],
-                    c=color_values[out_z],
-                    cmap=cmap,
-                    norm=norm,
-                    s=10,
-                    alpha=0.8,
-                    facecolors='none',
-                    edgecolors=edgecols,
-                    linewidths=0.8,
-                    rasterized=True,
-                )
-                if sc is None:
-                    sc = sc_out
-            _draw_reference_guides(ax, key, x)
 
-            if sc is not None:
-                cbar = fig.colorbar(sc, ax=ax, orientation='vertical', fraction=0.046, pad=0.04)
-                cbar.set_label(key_color, fontsize=12)
+                rng = np.random.default_rng(1000 + idx)
+                jitter = rng.uniform(-category_jitter, category_jitter, size=len(cat_pos))
+                xj = cat_pos + jitter
 
-            if residuals_err is None:
-                err = np.full_like(y, np.nan, dtype=float)
+                color_num = pd.to_numeric(pd.Series(color_values), errors='coerce').to_numpy(dtype=float)
+                finite_color = np.isfinite(color_num)
+                use_numeric_color = np.any(finite_color)
+                sc = None
+                if use_numeric_color:
+                    cmin = float(np.nanmin(color_num[finite_color]))
+                    cmax = float(np.nanmax(color_num[finite_color]))
+                    if cmin == cmax:
+                        cmin, cmax = cmin - 1e-6, cmax + 1e-6
+                    cat_norm = mpl.colors.Normalize(vmin=cmin, vmax=cmax)
+                    if np.any(in_z):
+                        sc = ax.scatter(
+                            xj[in_z],
+                            y[in_z],
+                            c=color_num[in_z],
+                            cmap=cmap,
+                            norm=cat_norm,
+                            s=10,
+                            alpha=0.5,
+                            rasterized=True,
+                        )
+                    if np.any(out_z):
+                        edgecols = mpl.cm.get_cmap(cmap)(cat_norm(color_num[out_z]))
+                        sc_out = ax.scatter(
+                            xj[out_z],
+                            y[out_z],
+                            c=color_num[out_z],
+                            cmap=cmap,
+                            norm=cat_norm,
+                            s=10,
+                            alpha=0.8,
+                            facecolors='none',
+                            edgecolors=edgecols,
+                            linewidths=0.8,
+                            rasterized=True,
+                        )
+                        if sc is None:
+                            sc = sc_out
+                    if sc is not None:
+                        cbar = fig.colorbar(sc, ax=ax, orientation='vertical', fraction=0.046, pad=0.04)
+                        cbar.set_label(key_color, fontsize=12)
+                else:
+                    if np.any(in_z):
+                        ax.scatter(
+                            xj[in_z],
+                            y[in_z],
+                            c='tab:blue',
+                            s=10,
+                            alpha=0.5,
+                            rasterized=True,
+                        )
+                    if np.any(out_z):
+                        ax.scatter(
+                            xj[out_z],
+                            y[out_z],
+                            c='tab:blue',
+                            s=10,
+                            alpha=0.8,
+                            facecolors='none',
+                            edgecolors='tab:blue',
+                            linewidths=0.8,
+                            rasterized=True,
+                        )
+
+                if residuals_err is None:
+                    err = np.full_like(y, np.nan, dtype=float)
+                else:
+                    err = np.asarray(residuals_err)[mask][valid_cat_mask]
+                for ci, cat in enumerate(cats):
+                    cat_mask = (cat_vals == cat)
+                    ww = np.isfinite(y[cat_mask]) & np.isfinite(err[cat_mask]) & (err[cat_mask] > 0)
+                    if not np.any(ww):
+                        continue
+                    ycat = y[cat_mask][ww]
+                    ecat = err[cat_mask][ww]
+                    wcat = 1.0 / np.square(ecat)
+                    wsum = np.sum(wcat)
+                    if not np.isfinite(wsum) or wsum <= 0:
+                        continue
+                    mean = np.sum(wcat * ycat) / wsum
+                    sem = np.sqrt(1.0 / wsum)
+                    ax.errorbar(ci, mean, yerr=sem, fmt='o', color='red', markersize=4, elinewidth=1.0, capsize=2, zorder=10)
+
+                ax.set_xticks(np.arange(len(cats), dtype=float))
+                ax.set_xticklabels(cats, rotation=45, ha='right')
+                ax.axhline(0, color='red', linestyle='--', lw=1)
             else:
-                err = np.asarray(residuals_err)[mask]
-            _draw_binned_overlay(ax, x, y, err)
+                in_z = (z_masked >= z_range[0]) & (z_masked <= z_range[1])
+                out_z = ~in_z
+
+                sc = None
+                if np.any(in_z):
+                    if norm is None:
+                        sc = ax.scatter(
+                            x[in_z],
+                            y[in_z],
+                            c='tab:blue',
+                            s=10,
+                            alpha=0.5,
+                            rasterized=True,
+                        )
+                    else:
+                        sc = ax.scatter(
+                            x[in_z],
+                            y[in_z],
+                            c=color_values[in_z],
+                            cmap=cmap,
+                            norm=norm,
+                            s=10,
+                            alpha=0.5,
+                            rasterized=True,
+                        )
+                if np.any(out_z):
+                    if norm is None:
+                        sc_out = ax.scatter(
+                            x[out_z],
+                            y[out_z],
+                            c='tab:blue',
+                            s=10,
+                            alpha=0.8,
+                            facecolors='none',
+                            edgecolors='tab:blue',
+                            linewidths=0.8,
+                            rasterized=True,
+                        )
+                    else:
+                        edgecols = mpl.cm.get_cmap(cmap)(norm(color_values[out_z]))
+                        sc_out = ax.scatter(
+                            x[out_z],
+                            y[out_z],
+                            c=color_values[out_z],
+                            cmap=cmap,
+                            norm=norm,
+                            s=10,
+                            alpha=0.8,
+                            facecolors='none',
+                            edgecolors=edgecols,
+                            linewidths=0.8,
+                            rasterized=True,
+                        )
+                    if sc is None:
+                        sc = sc_out
+                _draw_reference_guides(ax, key, x)
+
+                if sc is not None and norm is not None:
+                    cbar = fig.colorbar(sc, ax=ax, orientation='vertical', fraction=0.046, pad=0.04)
+                    cbar.set_label(key_color, fontsize=12)
+
+                if residuals_err is None:
+                    err = np.full_like(y, np.nan, dtype=float)
+                else:
+                    err = np.asarray(residuals_err)[mask]
+                if pd.api.types.is_numeric_dtype(pd.Series(x)) and pd.api.types.is_numeric_dtype(pd.Series(y)):
+                    _draw_binned_overlay(ax, x, y, err)
         except Exception as e:
             print(f"Error processing key {key}: {e}")
             ax.axis('off')
@@ -3813,6 +4006,7 @@ def plot_full_residuals_rz(
     *, nbins=10, min_count=5, z_cut=None, key_y='r_z', key_color='z',
     z_range=(0.44, 3.16), nz_bins=12, z_min_count=8,
     lowess_frac=0.25, lowess_it=1, lowess_min_points=10,
+    max_categories=12, category_min_count=5, category_jitter=0.15,
 ):
     """
     Plot redshift-detrended residual diagnostics where
@@ -3869,6 +4063,9 @@ def plot_full_residuals_rz(
         z_range=z_range,
         residual_label='r_z',
         output_tag='full_residuals_rz',
+        max_categories=max_categories,
+        category_min_count=category_min_count,
+        category_jitter=category_jitter,
     )
 
 def _kde_conf_levels(Z, conf=(0.954, 0.683), plot_path=None):
