@@ -3,6 +3,7 @@ results/
 data/
 *.log
 *.xsh
+*.err
 *.txt
 *.tex
 *.png
