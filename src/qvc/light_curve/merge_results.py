@@ -10,8 +10,8 @@ import h5py
 import numpy as np
 from tqdm import tqdm
 
-from qvc.hubble.hubble_utils import populate_sdss_fields, read_quasars_from_hdf5_flat
-
+from qvc.hubble.hubble_utils import read_quasars_from_hdf5_flat, populate_sdss_fields
+#from qvc.light_curve.multiband_generate_lc import populate_sdss_fields
 
 def read_quasars_from_h5(h5_path):
     return read_quasars_from_hdf5_flat(h5_path)
@@ -182,8 +182,10 @@ def deduplicate(quasars, keys):
     return [merged[k] for k in order]
 
 
-def load_and_merge_h5(file_list, expected_n):
+def load_and_merge_h5(file_list, expected_n, load_n):
     all_quasars = []
+    if load_n is not None:
+        file_list = file_list[:load_n]
     for path in tqdm(file_list, desc="Merging HDF5 shards", unit="file"):
         try:
             source_git_commit = _read_h5_scalar_key(path, "git_commit")
@@ -223,10 +225,17 @@ def main():
     )
     p.add_argument(
         "--expected",
-        "-N",
+        "-E",
         type=int,
         default=None,
         help="Expected number of rows per input HDF5 shard. If set, non-matching shards are skipped.",
+    )
+    p.add_argument(
+        "--N",
+        "-N",
+        type=int,
+        default=None,
+        help="Total number of shards to load.",
     )
     p.add_argument(
         "--skip-populate-sdss",
@@ -253,6 +262,7 @@ def main():
         default=["object_id", "run_label"],
         help="Keys to use for de-duplication across shards (last occurrence wins). Set to '' to disable.",
     )
+    
     args = p.parse_args()
 
     shard_dir = os.path.join(args.base_dir, args.prefix)
@@ -283,7 +293,7 @@ def main():
 
     print(f"Output: {out_path} (format: {out_format.upper()})")
 
-    all_quasars = load_and_merge_h5(file_list, expected_n=args.expected)
+    all_quasars = load_and_merge_h5(file_list, expected_n=args.expected, load_n=args.N)
     print(f"Loaded total of {len(all_quasars)} rows from {len(file_list)} shards.")
 
     dedup_keys = args.dedup_keys
@@ -295,7 +305,7 @@ def main():
     if not args.skip_populate_sdss and all_quasars:
         print("Populating SDSS fields...")
         all_quasars = populate_sdss_fields(all_quasars)
-
+        print(all_quasars[0]['plate'])
     if out_format == "csv":
         seen = []
         s = set()
@@ -307,9 +317,6 @@ def main():
         write_quasars_to_csv(all_quasars, out_path, fields=seen)
     elif out_format == "h5":
         write_quasars_to_h5_flat(all_quasars, out_path)
-        with open(out_path + ".pkl", "wb") as f:
-            pickle.dump(all_quasars, f)
-        print(f"Wrote {len(all_quasars)} rows to pickle file {out_path}.pkl")
     else:
         print(f"ERROR: Unsupported out-format: {out_format}")
         sys.exit(1)
