@@ -1,7 +1,9 @@
 plots/
 results/
 data/
-
+*.log
+*.xsh
+*.txt
 *.tex
 *.png
 *.pdf
