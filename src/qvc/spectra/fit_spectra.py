@@ -180,30 +180,83 @@ def build_psf_photometry_inputs(rec):
 
 
 def estimate_m2500_from_model(q):
-    """Fallback apparent mag estimate from model continuum at rest-frame 2500A."""
+    """Estimate reddened and intrinsic apparent mags at rest-frame 2500A from PL draws."""
     if not hasattr(q, "numpyro_samples") or q.numpyro_samples is None:
-        return np.nan, np.nan
+        return np.nan, np.nan, np.nan, np.nan
 
     s = q.numpyro_samples
-    pl_norm = np.asarray(s["PL_norm_eff"], dtype=float)
-    pl_slope = np.asarray(s["PL_slope"], dtype=float)
+
+    if "PL_norm" not in s or "PL_slope" not in s:
+        return np.nan, np.nan, np.nan, np.nan
+
+    pl_norm = np.asarray(s["PL_norm"], dtype=float).reshape(-1)
+    pl_slope = np.asarray(s["PL_slope"], dtype=float).reshape(-1)
+    if pl_norm.size == 0 or pl_slope.size == 0:
+        return np.nan, np.nan, np.nan, np.nan
+
+    n = min(pl_norm.size, pl_slope.size)
+    pl_norm = pl_norm[:n]
+    pl_slope = pl_slope[:n]
+
     if "scale_psf" in s:
-        scale_psf = np.asarray(s["scale_psf"], dtype=float)
+        scale_psf = np.asarray(s["scale_psf"], dtype=float).reshape(-1)
+        if scale_psf.size == 1:
+            scale_psf = np.full((n,), float(scale_psf[0]), dtype=float)
+        else:
+            scale_psf = scale_psf[:n]
     else:
         scale_psf = np.full_like(pl_norm, float(getattr(q, "scale_psf", np.nan)), dtype=float)
+        if not np.isfinite(scale_psf).any():
+            scale_psf = np.ones_like(pl_norm, dtype=float)
 
-    pl_pivot = float(np.asarray(q._fit_prior_config["PL_pivot"], dtype=float))
-    f_lambda_2500 = scale_psf * pl_norm * (2500.0 / pl_pivot) ** pl_slope
+    if "reddening_ebv" in s:
+        reddening_ebv = np.asarray(s["reddening_ebv"], dtype=float).reshape(-1)
+        if reddening_ebv.size == 1:
+            reddening_ebv = np.full((n,), float(reddening_ebv[0]), dtype=float)
+        else:
+            reddening_ebv = reddening_ebv[:n]
+    else:
+        reddening_ebv = np.zeros((n,), dtype=float)
+
+    prior_config = getattr(q, "_fit_prior_config", {}) or {}
+    pl_pivot = float(np.asarray(prior_config.get("PL_pivot", np.nan), dtype=float))
+    if not np.isfinite(pl_pivot) or pl_pivot <= 0.0:
+        wave = np.asarray(getattr(q, "wave", []), dtype=float)
+        if wave.size > 0 and np.all(np.isfinite(wave)):
+            pl_pivot = float(0.5 * (wave[0] + wave[-1]))
+        else:
+            pl_pivot = 2500.0
+
+    # NumPy equivalent of jaxqsofit.model._smc_like_reddening_jax at 2500A.
+    reddening_uv_ref = float(prior_config.get("reddening_uv_ref", 2500.0))
+    reddening_alpha = float(prior_config.get("reddening_alpha", 1.2))
+    reddening_uv_ref = max(reddening_uv_ref, 1e-8)
+    k_lambda_2500 = (2500.0 / reddening_uv_ref) ** (-reddening_alpha)
+    reddening_atten_2500 = 10.0 ** (-0.4 * np.maximum(reddening_ebv, 0.0) * k_lambda_2500)
+
+    f_lambda_2500_intrinsic = scale_psf * pl_norm * (2500.0 / pl_pivot) ** pl_slope
+    f_lambda_2500_reddened = f_lambda_2500_intrinsic * reddening_atten_2500
 
     c_A_s = 2.99792458e18
-    f_nu = (f_lambda_2500 * 1e-17) * (2500.0**2) / c_A_s
-    valid = np.isfinite(f_nu) & (f_nu > 0.0)
-    if not np.any(valid):
-        return np.nan, np.nan
-    m_2500_samples = -2.5 * np.log10(f_nu[valid]) - 48.60
+    f_nu_reddened = (f_lambda_2500_reddened * 1e-17) * (2500.0**2) / c_A_s
+    f_nu_intrinsic = (f_lambda_2500_intrinsic * 1e-17) * (2500.0**2) / c_A_s
 
-    m50, m_err, m16, m84 = sym_percentile(m_2500_samples)
-    return m50, m_err
+    valid_reddened = np.isfinite(f_nu_reddened) & (f_nu_reddened > 0.0)
+    valid_intrinsic = np.isfinite(f_nu_intrinsic) & (f_nu_intrinsic > 0.0)
+
+    if np.any(valid_reddened):
+        m_2500_samples = -2.5 * np.log10(f_nu_reddened[valid_reddened]) - 48.60
+        m50, m_err, _, _ = sym_percentile(m_2500_samples)
+    else:
+        m50, m_err = np.nan, np.nan
+
+    if np.any(valid_intrinsic):
+        m_2500_intrinsic_samples = -2.5 * np.log10(f_nu_intrinsic[valid_intrinsic]) - 48.60
+        m50_intrinsic, m_err_intrinsic, _, _ = sym_percentile(m_2500_intrinsic_samples)
+    else:
+        m50_intrinsic, m_err_intrinsic = np.nan, np.nan
+
+    return m50, m_err, m50_intrinsic, m_err_intrinsic
 
 
 def compute_derived_results(result, q, args):
@@ -262,12 +315,17 @@ def compute_derived_results(result, q, args):
     z = safe_float(result.get("z"))
     m2500 = np.nan
     m2500_err = np.nan
+    m2500_intrinsic = np.nan
+    m2500_intrinsic_err = np.nan
 
-    m2500, m2500_err = estimate_m2500_from_model(q)
+    m2500, m2500_err, m2500_intrinsic, m2500_intrinsic_err = estimate_m2500_from_model(q)
     print(f"Estimated m2500 from model: {m2500:.3f} +/- {m2500_err:.3f}")
+    print(f"Estimated intrinsic m2500 from model: {m2500_intrinsic:.3f} +/- {m2500_intrinsic_err:.3f}")
 
     result["apparent_mag_2500"] = m2500
     result["apparent_mag_2500_err"] = m2500_err
+    result["apparent_mag_2500_intrinsic"] = m2500_intrinsic
+    result["apparent_mag_2500_intrinsic_err"] = m2500_intrinsic_err
 
 
 # -----------------------------------------------------------------------------
