@@ -132,14 +132,15 @@ def _format_fraction(v) -> str:
 
 
 def make_stamp_text(row: pd.Series) -> str:
+    z = _format_fraction(row.get('z'))
     sdss_name = str(row.get("sdss_name", "unknown")).strip()
     object_id = str(row.get("object_id", "unknown")).strip()
-    m2500 = _format_fraction(row.get("apparent_magnitude_2500"))
+    m2500 = _format_fraction(row.get("apparent_mag_2500"))
     pl_slope = _format_fraction(row.get("PL_slope"))
     host = _format_fraction(row.get("f_host_center"))
     bc = _format_fraction(row.get("f_bc_over_pl_3000"))
     iron = _format_fraction(row.get("f_fe_uv_over_pl_3000"))
-    return f"sdss_name={sdss_name} | object_id={object_id} | m2500={m2500} | pl_slope={pl_slope}\nhost={host} | bc={bc} | iron={iron}"
+    return f"z={z} | sdss_name={sdss_name} | object_id={object_id} | m2500={m2500} | pl_slope={pl_slope} | host={host} | bc={bc} | iron={iron}"
 
 
 def _make_overlay(page_width, page_height, text, margin_pts, font_size):
