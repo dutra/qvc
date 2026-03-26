@@ -380,19 +380,22 @@ def make_lc(
     alpha_sigma=-0.5,
     beta_tau=0.2,
     drop_band_lyman_alpha=False,
+    verbose=True
 ):
     """Prepare one object's multiband time series into model-ready arrays."""
 
     if drop_band_lyman_alpha:
         dropped_bands = sdss_bands_affected_by_lya(data["z"]) + ["z"]
-        logging.info(
-            f"Excluding Ly-alpha-affected bands {dropped_bands} for object {data['object_id']} at z={data['z']}"
-        )
+        if verbose:
+            logging.info(
+                f"Excluding Ly-alpha-affected bands {dropped_bands} for object {data['object_id']} at z={data['z']}"
+            )
     else:
         dropped_bands = ["z"]
-        logging.info(
-            f"Excluding default bands {dropped_bands} for object {data['object_id']} at z={data['z']}; "
-            "keeping Ly-alpha-affected bands with smooth attenuation."
+        if verbose:
+            logging.info(
+                f"Excluding default bands {dropped_bands} for object {data['object_id']} at z={data['z']}; "
+                "keeping Ly-alpha-affected bands with smooth attenuation."
         )
 
     bands = [b for b in bands if b not in dropped_bands]
@@ -516,7 +519,8 @@ def make_lc(
 
     t_obs_length = float(np.max(all_times) - np.min(all_times))
     t_rf_length = float(t_obs_length / (1.0 + data["z"]))
-    print(f"[{data['object_id']}] Δt_obs={t_obs_length:.2f} d, Δt_rf={t_rf_length:.2f} d")
+    if verbose:
+        print(f"[{data['object_id']}] Δt_obs={t_obs_length:.2f} d, Δt_rf={t_rf_length:.2f} d")
 
     B = len(bands)
     mags_means = np.empty(B)
