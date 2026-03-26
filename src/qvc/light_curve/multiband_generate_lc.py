@@ -757,4 +757,7 @@ def populate_sdss_fields(s82_objs, progress_bar=False):
         d['log_mbh_err'] = fits_data['LOGMBH_ERR'][j]  # Extract log MBH error values
         d['log_ledd_ratio'] = fits_data['LOGLEDD_RATIO'][j]  # Extract log L/edd values
         d['log_ledd_ratio_err'] = fits_data['LOGLEDD_RATIO_ERR'][j]  # Extract log L/edd error values
+        d['plate'] = fits_data['PLATE'][j]
+        d['mjd'] = fits_data['MJD'][j]
+        d['fiberid'] = fits_data['FIBERID'][j]
     return s82_objs

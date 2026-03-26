@@ -592,6 +592,10 @@ def populate_sdss_fields(objs, progress_bar=True):
             )
 
         update_fields = {
+            "plate": np.asarray(fits_data["PLATE"])[matched_fits_idx],
+            "mjd": np.asarray(fits_data["MJD"])[matched_fits_idx],
+            "fiberid": np.asarray(fits_data["FIBERID"])[matched_fits_idx],
+
             "ra": rows.loc[matched_row_idx, "RA"].to_numpy(),
             "dec": rows.loc[matched_row_idx, "DEC"].to_numpy(),
             "z": z_vals,

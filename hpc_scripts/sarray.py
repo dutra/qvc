@@ -7,15 +7,16 @@ import pandas as pd
 num_jobs = -1
 skip = 0
 N = 1
-nwarm = 1000
+nwarm = 2000
 nsamp = 200
 ncores = 4
 nchains = ncores
 max_tree_depth = 14
 
-script_path = "submit_jobs/multibandfit" 
-log_path    = "log_jobs/multibandfit" 
+script_path = "hpc_scripts/jobs/multibandfit" 
+log_path    = "hpc_scripts/logs/multibandfit" 
 chisq_csv = "data/aug4_sample_chisqg10_ebv005sn3.csv"
+chisq_csv = "data/all_object_id.csv"
 #chisq_csv = "results/data/oct9b_missing_object_ids.csv"
 #fake_flags = "--inject_random_fake_etas --inject_fake --disable_lag_blr --disable_fhost"
 
@@ -24,13 +25,12 @@ chisq_csv = "data/aug4_sample_chisqg10_ebv005sn3.csv"
 #fhost_csv = "results/data/sept6_newN1fit_frachost0_nc16_sep27a_preview.csv"
 #fhost_csv = "results/data/sept6_newN1fit_frachost0_nc16_sep30a_preview.csv"
 fhost_csv = ""
-lmc = -6
 
 #sample = 'stoneyu'
 sample = 'chisq'
 bpl = False
 
-date = "nov10a_single_chisq_carma_mixscalar_nozband_highertaufastlim_removemix_fixband"
+date = "mar21d_all"
 
 flags = ""
 other = ""
@@ -43,7 +43,6 @@ else:
 # chisq
 if sample == 'chisq':
     print("Running chisq sample")
-    #filter_file = fhost_csv
     filter_file = chisq_csv
     flags += ""
 elif sample == 'stonelcs':
@@ -68,19 +67,11 @@ else:
     raise Exception("sample invalid")
 
 
-flags += " --disable_fhost --bwb"
-other += "_nofhost_bwb"
-#flags += " --disable_fhost --disable_poly1 --disable_band_drop"
-#other +="_nofhost_nopoly1_nobwb_disablebandrop"
-#flags += " --disable_fhost --bwb --rf_length_cut 2400 --disable_poly1"
-#other += "_nofhost_bwb_rflengthcut2400_nopoly1"
-
-if N > 1:
-    flags += " --d_eta"
-    other += "_deta"
+flags += ""
+other += ""
 
 
-prefix = f"{date}_lagblrband_{sample}_{other}_lmc{lmc}_N{N}w{nwarm}s{nsamp}t{max_tree_depth}ch{nchains}"
+prefix = f"{date}_{sample}_N{N}w{nwarm}s{nsamp}t{max_tree_depth}ch{nchains}"
 
 # --------------------------------
 os.makedirs(script_path, exist_ok=True)
@@ -109,7 +100,7 @@ sbatch_script = f"""#!/bin/bash
 #SBATCH --cpus-per-task={ncores}
 #SBATCH --mem=20G
 #SBATCH --partition=day
-#SBATCH --time=1:00:00
+#SBATCH --time=4:00:00
 
 # --- Environment ---
 export JAX_ENABLE_X64=True
@@ -122,7 +113,7 @@ export FILTER_CSV="{filter_file}"
 export FHOST_CSV="{fhost_csv}"
 
 module load miniconda
-conda activate jaxcpu
+conda activate jaxcpu2
 
 start=$(date +%s)
 echo "Start time: $start"
@@ -160,21 +151,15 @@ echo "object_ids: $IDS"
 
 
 # --- Run ---
-python multiband_fit_single.py --plot \\
-  --progress --nwarm {nwarm} --nsamp {nsamp} --nchains {nchains} \\
-  --max_tree_depth {max_tree_depth} \\
-  --lmc {lmc} \\
-  {flags} \\
-  --filter_object_id $IDS
-  #--fhost_csv "$FHOST_CSV"\\
-  
-# --plot 
-# --rf_length_cut 2400
-  #--N {N} --skip ${{START}} 
 
-          
-  #--d_eta --disable_poly1 \\
-          # 
+python -m qvc.light_curve.fit_light_curves \
+ --filter_object_id $IDS \
+ --plot \
+ --progress \
+ --nwarm {nwarm} \
+ --nsamp {nsamp} \
+ --nchains {nchains}
+
 end=$(date +%s)
 rt=$((end - start))
 echo "End time: $end"
@@ -184,17 +169,17 @@ echo "Total runtime: $((rt/3600))h $(((rt%3600)/60))m $((rt%60))s"
 with open(sbatch_filename, "w") as f:
     f.write(sbatch_script)
 
-# Submit one array covering all chunks
-if num_jobs > 10_000:
-    os.system(f"sbatch --array=0-9999 {sbatch_filename}")
-    print(f"Submitted array: 0-9999 using {sbatch_filename}")
-    os.system(f"sbatch --array=10000-{num_jobs} {sbatch_filename}")
-    print(f"Submitted array: 10000-{num_jobs} using {sbatch_filename}")
-elif num_jobs > 1:
-    os.system(f"sbatch --array={skip}-{skip+num_jobs-1} {sbatch_filename}")
-    print(f"Submitted array: {skip}-{skip+num_jobs-1} using {sbatch_filename}")
+MAX_ARRAY_SIZE = 10_000
+
+if num_jobs > 1:
+    start = skip
+    end = skip + num_jobs - 1
+
+    for batch_start in range(start, end + 1, MAX_ARRAY_SIZE):
+        batch_end = min(batch_start + MAX_ARRAY_SIZE - 1, end)
+        os.system(f"sbatch --array={batch_start}-{batch_end} {sbatch_filename}")
+        print(f"Submitted array: {batch_start}-{batch_end} using {sbatch_filename}")
+
 elif num_jobs == 1:
     os.system(f"sbatch {sbatch_filename}")
-    print(f"Submitted array: using {sbatch_filename}")
-
-
+    print(f"Submitted job using {sbatch_filename}")
