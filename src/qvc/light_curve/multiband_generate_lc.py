@@ -724,7 +724,7 @@ def load_s82_from_hdf5(file_path="s82_objs.h5"):
     return s82_objs
 
 def populate_sdss_fields(s82_objs, progress_bar=False):
-    raise NotImplementedError("Use the new version of this function in qvc.hubble.hubble_fit to populate SDSS fields directly during fitting, instead of as a separate step. This avoids redundant loading and matching of the SDSS data.")
+    #raise NotImplementedError("Use the new version of this function in qvc.hubble.hubble_fit to populate SDSS fields directly during fitting, instead of as a separate step. This avoids redundant loading and matching of the SDSS data.")
     #print(f"Populating SDSS fields: {len(s82_objs)}", flush=True)
     cat = pd.read_parquet(f"data/S82/Catalog.parquet").set_index('idx')
     hdul = fits.open('data/dr16q_prop_May01_2024.fits')
