@@ -1329,9 +1329,16 @@ def main():
     parser.add_argument("--rf_length_cut", type=int, default=-1, help="Rest-frame cut (days).")
     parser.add_argument("--exact_same_length", action="store_true", help="Exact same RF length cut.")
     parser.add_argument("--load_stone_lcs", action="store_true", default=False, help="Use Stone LCs.")
+    parser.add_argument("--disable_trace_plot", action="store_true", default=False, help="Disable MCMC trace plot.")
+    parser.add_argument("--disable_combined_plot", action="store_true", default=False, help="Disable combined light-curve fit plot.")
+    parser.add_argument("--disable_color_magnitude_plot", action="store_true", default=False, help="Disable color-magnitude plot.")
+    parser.add_argument("--disable_correlation_plot", action="store_true", default=False, help="Disable correlation matrix plot.")
+    parser.add_argument("--disable_histogram_plot", action="store_true", default=False, help="Disable posterior histogram plot.")
     parser.add_argument("--disable_corner_plot", action="store_true", default=False, help="Disable corner plot.")
     parser.add_argument("--disable_lag_blr", action="store_true", default=False, help="Disable BLR lag model.")
     parser.add_argument("--disable_plot_psd", action="store_true", default=False, help="Disable PSD sub-plot.")
+    parser.add_argument("--disable_sigma_tau_lambda_plot", action="store_true", default=False, help="Disable sigma-tau versus wavelength summary plot.")
+    parser.add_argument("--disable_recovery_plot", action="store_true", default=False, help="Disable fake-data recovery summary plot.")
     parser.add_argument("--inject_random_fake_etas", action="store_true", default=False, help="Randomize fake etas.")
     parser.add_argument("--beta_tau", type=float, default=0.2, help="beta_tau for fake curves.")
     parser.add_argument(
@@ -1543,36 +1550,41 @@ def main():
 
             if args.plot:
                 try:
-                    plot_mcmc_traces(obj_flat_samples_flatten_per_band, obj)
                     plot_data = result | psd_break_result
-                    save_combined_plot(
-                        plot_samples,
-                        m,
-                        obj["X"],
-                        obj["y"],
-                        obj["yerr"],
-                        obj["band_idx"],
-                        obj["mags_means"],
-                        obj["survey_times"],
-                        plot_data,
-                        time0=obj["time0"],
-                        bands=bands,
-                        plot_psd=(not args.disable_plot_psd),
-                    )
-                    save_color_magnitude_plot(
-                        plot_samples,
-                        m,
-                        obj["X"],
-                        obj["y"],
-                        obj["yerr"],
-                        obj["band_idx"],
-                        obj["mags_means"],
-                        plot_data,
-                        time0=obj["time0"],
-                        bands=bands,
-                    )
-                    plot_correlation_matrix(obj_flat_samples_flatten_per_band, obj)
-                    plot_all_histograms(obj_flat_samples_flatten_per_band, obj)
+                    if not args.disable_trace_plot:
+                        plot_mcmc_traces(obj_flat_samples_flatten_per_band, obj)
+                    if not args.disable_combined_plot:
+                        save_combined_plot(
+                            plot_samples,
+                            m,
+                            obj["X"],
+                            obj["y"],
+                            obj["yerr"],
+                            obj["band_idx"],
+                            obj["mags_means"],
+                            obj["survey_times"],
+                            plot_data,
+                            time0=obj["time0"],
+                            bands=bands,
+                            plot_psd=(not args.disable_plot_psd),
+                        )
+                    if not args.disable_color_magnitude_plot:
+                        save_color_magnitude_plot(
+                            plot_samples,
+                            m,
+                            obj["X"],
+                            obj["y"],
+                            obj["yerr"],
+                            obj["band_idx"],
+                            obj["mags_means"],
+                            plot_data,
+                            time0=obj["time0"],
+                            bands=bands,
+                        )
+                    if not args.disable_correlation_plot:
+                        plot_correlation_matrix(obj_flat_samples_flatten_per_band, obj)
+                    if not args.disable_histogram_plot:
+                        plot_all_histograms(obj_flat_samples_flatten_per_band, obj)
                     if not args.disable_corner_plot:
                         plot_posterior_fast(obj_flat_samples_flatten_per_band, obj)
                 except Exception as e:
@@ -1614,16 +1626,17 @@ def main():
 
     save_quasar_list_hdf5(results, ignored_keys=["X", "y", "yerr", "band_idx"])
 
-    try:
-        plot_sigma_tau_vs_lambda_with_model(
-            results,
-            inject_fake=args.inject_fake,
-        )
-    except Exception as e:
-        logging.error(f"plot_sigma_tau_vs_lambda_with_model error: {e}")
-        logging.error(traceback.format_exc())
+    if not args.disable_sigma_tau_lambda_plot:
+        try:
+            plot_sigma_tau_vs_lambda_with_model(
+                results,
+                inject_fake=args.inject_fake,
+            )
+        except Exception as e:
+            logging.error(f"plot_sigma_tau_vs_lambda_with_model error: {e}")
+            logging.error(traceback.format_exc())
 
-    if args.inject_fake:
+    if args.inject_fake and not args.disable_recovery_plot:
         try:
             plot_recovery(results)
         except Exception as e:
