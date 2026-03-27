@@ -9,6 +9,7 @@ import traceback
 
 import numpy as np
 from numpy.lib.stride_tricks import sliding_window_view
+from scipy.optimize import curve_fit
 from scipy.stats import median_abs_deviation
 from statsmodels.tsa.stattools import adfuller
 from tqdm import tqdm
@@ -224,6 +225,127 @@ def compute_object_adf_diagnostics(flat_samples, obj, bands):
 
     out["adf_min_pvalue"] = float(np.min(pvalues)) if pvalues else np.nan
     out["adf_any_pvalue_lt_0p05"] = bool(np.any(np.asarray(pvalues) < 0.05)) if pvalues else False
+    return out
+
+
+def bending_power_law_psd(freq, log_sigma, log_tau):
+    """Single-break PSD with flat low-frequency slope and -2 high-frequency slope."""
+
+    freq = np.asarray(freq, dtype=float)
+    sigma = np.power(10.0, float(log_sigma))
+    tau = np.power(10.0, float(log_tau))
+    denom = 1.0 + np.square(2.0 * np.pi * freq * tau)
+    return 2.0 * sigma * sigma * tau / denom
+
+
+def fit_bending_power_law_psd(freq, power, power_lo=None, power_hi=None):
+    """Fit a DRW-like bending PSD in log-space and return sigma/tau summaries."""
+
+    freq = np.asarray(freq, dtype=float)
+    power = np.asarray(power, dtype=float)
+    mask = np.isfinite(freq) & np.isfinite(power) & (freq > 0.0) & (power > 0.0)
+    if np.count_nonzero(mask) < 4:
+        return {
+            "log_sigma_bpl": np.nan,
+            "log_sigma_bpl_err": np.nan,
+            "log_tau_bpl": np.nan,
+            "log_tau_bpl_err": np.nan,
+            "psd_bpl_valid": False,
+            "psd_bpl_nbins": float(np.count_nonzero(mask)),
+        }
+
+    freq_fit = freq[mask]
+    power_fit = power[mask]
+    log_power = np.log10(power_fit)
+
+    if power_lo is not None and power_hi is not None:
+        lo = np.asarray(power_lo, dtype=float)[mask]
+        hi = np.asarray(power_hi, dtype=float)[mask]
+        err_lo = np.clip(log_power - np.log10(np.clip(lo, 1e-300, None)), 1e-3, None)
+        err_hi = np.clip(np.log10(np.clip(hi, 1e-300, None)) - log_power, 1e-3, None)
+        log_err = 0.5 * (err_lo + err_hi)
+    else:
+        log_err = np.full_like(log_power, 0.2)
+
+    f_mid = np.exp(np.mean(np.log(freq_fit)))
+    tau_init = 1.0 / (2.0 * np.pi * f_mid)
+    sigma_init = np.sqrt(
+        np.clip(
+            np.median(power_fit) * (1.0 + (2.0 * np.pi * f_mid * tau_init) ** 2) / (2.0 * tau_init),
+            1e-12,
+            None,
+        )
+    )
+
+    def model_log10(freq_val, log_sigma, log_tau):
+        psd = bending_power_law_psd(freq_val, log_sigma, log_tau)
+        return np.log10(np.clip(psd, 1e-300, None))
+
+    try:
+        popt, pcov = curve_fit(
+            model_log10,
+            freq_fit,
+            log_power,
+            p0=(np.log10(sigma_init), np.log10(tau_init)),
+            sigma=log_err,
+            absolute_sigma=True,
+            bounds=([-6.0, -1.0], [3.0, 6.0]),
+            maxfev=20000,
+        )
+        perr = np.sqrt(np.diag(pcov))
+    except Exception as exc:
+        logging.warning("Bending-PSD fit failed: %s", exc)
+        return {
+            "log_sigma_bpl": np.nan,
+            "log_sigma_bpl_err": np.nan,
+            "log_tau_bpl": np.nan,
+            "log_tau_bpl_err": np.nan,
+            "psd_bpl_valid": False,
+            "psd_bpl_nbins": float(freq_fit.size),
+        }
+
+    return {
+        "log_sigma_bpl": float(popt[0]),
+        "log_sigma_bpl_err": float(perr[0]) if np.all(np.isfinite(perr)) else np.nan,
+        "log_tau_bpl": float(popt[1]),
+        "log_tau_bpl_err": float(perr[1]) if np.all(np.isfinite(perr)) else np.nan,
+        "psd_bpl_valid": True,
+        "psd_bpl_nbins": float(freq_fit.size),
+    }
+
+
+def compute_lomb_scargle_break_diagnostics(model, samples, obj, z, *, n_freq=500):
+    """Fit a bending power law to the combined Lomb-Scargle PSD break."""
+
+    posterior_median = {k: np.median(v, axis=0) for k, v in samples.items()}
+    freqs = np.logspace(-6, 2, n_freq)
+    f_bin, p_bin, p_lo, p_hi, counts, p_noise = combined_lomb_scargle_from_model(
+        model,
+        obj["y"],
+        obj["yerr"],
+        posterior_median,
+        2.0 * np.pi * freqs,
+        amp_reference="uv",
+    )
+    fit = fit_bending_power_law_psd(f_bin, p_bin, p_lo, p_hi)
+    log_tau_rf = fit["log_tau_bpl"] - np.log10(1.0 + float(z)) if np.isfinite(fit["log_tau_bpl"]) else np.nan
+    log_tau_rf_err = fit["log_tau_bpl_err"]
+
+    out = {
+        "log_sigma_uv_bpl": fit["log_sigma_bpl"],
+        "log_sigma_uv_bpl_err": fit["log_sigma_bpl_err"],
+        "log_tau_uv_bpl": fit["log_tau_bpl"],
+        "log_tau_uv_bpl_err": fit["log_tau_bpl_err"],
+        "log_tau_uv_rf_bpl": log_tau_rf,
+        "log_tau_uv_rf_bpl_err": log_tau_rf_err,
+        "psd_bpl_valid": fit["psd_bpl_valid"],
+        "psd_bpl_nbins": fit["psd_bpl_nbins"],
+        "psd_noise_floor": float(p_noise) if np.isfinite(p_noise) else np.nan,
+    }
+    if np.isfinite(fit["log_tau_bpl"]):
+        out["log_nu_break_bpl"] = -np.log10(2.0 * np.pi) - fit["log_tau_bpl"]
+    else:
+        out["log_nu_break_bpl"] = np.nan
     return out
 
 
@@ -1170,6 +1292,19 @@ def main():
                 )
                 diagnostics = diagnostics_for_per_chain_samples(obj_samples_per_chain_flatten_per_band)
 
+            m = make_multiband_dho_blr_model(
+                obj["X"],
+                obj["y"],
+                obj["yerr"],
+                n_band=B,
+                zero_mean=zero_mean,
+                has_jitter=has_jitter,
+            )
+            plot_samples = add_model_prediction_params(
+                obj_flat_samples,
+                lam_rf,
+            )
+
             result = process_samples(
                 obj_flat_samples_flatten_per_band,
                 obj,
@@ -1179,6 +1314,12 @@ def main():
                 obj_flat_samples_flatten_per_band,
                 obj,
                 bands=bands,
+            )
+            psd_break_result = compute_lomb_scargle_break_diagnostics(
+                m,
+                plot_samples,
+                obj,
+                float(obj["z"]),
             )
             kl_result = compute_parameter_kls(
                 obj_flat_samples_flatten_per_band,
@@ -1195,17 +1336,20 @@ def main():
             if args.plot:
                 try:
                     plot_mcmc_traces(obj_flat_samples_flatten_per_band, obj)
-                    m = make_multiband_dho_blr_model(
+                    plot_data = result | psd_break_result
+                    save_combined_plot(
+                        plot_samples,
+                        m,
                         obj["X"],
                         obj["y"],
                         obj["yerr"],
-                        n_band=B,
-                        zero_mean=zero_mean,
-                        has_jitter=has_jitter,
-                    )
-                    plot_samples = add_model_prediction_params(
-                        obj_flat_samples,
-                        lam_rf,
+                        obj["band_idx"],
+                        obj["mags_means"],
+                        obj["survey_times"],
+                        plot_data,
+                        time0=obj["time0"],
+                        bands=bands,
+                        plot_psd=(not args.disable_plot_psd),
                     )
                     save_combined_plot(
                         plot_samples,
@@ -1216,10 +1360,12 @@ def main():
                         obj["band_idx"],
                         obj["mags_means"],
                         obj["survey_times"],
-                        result,
+                        plot_data,
                         time0=obj["time0"],
                         bands=bands,
                         plot_psd=(not args.disable_plot_psd),
+                        plot_bpl_fit=True,
+                        filename_suffix=f"{suffix}_bpl",
                     )
                     plot_correlation_matrix(obj_flat_samples_flatten_per_band, obj)
                     plot_all_histograms(obj_flat_samples_flatten_per_band, obj)
@@ -1229,15 +1375,19 @@ def main():
                     logging.error(f"[{oid}] Plotting error: {e}")
                     logging.error(traceback.format_exc())
 
-            final_result = obj | result | adf_result | kl_result | dict(prefix=prefix, suffix=suffix) 
+            final_result = obj | result | adf_result | psd_break_result | kl_result | dict(prefix=prefix, suffix=suffix) 
             # final_result |= diagnostics
             log_sigma_uv = final_result.get("log_sigma_uv")
             log_sigma_uv_err = final_result.get("log_sigma_uv_err")
             log_tau_uv_rf = final_result.get("log_tau_uv_rf")
             log_tau_uv_rf_err = final_result.get("log_tau_uv_rf_err")
+            log_sigma_uv_bpl = final_result.get("log_sigma_uv_bpl")
+            log_tau_uv_rf_bpl = final_result.get("log_tau_uv_rf_bpl")
             print(
                 f"[{oid}] log_sigma_uv = {log_sigma_uv} ± {log_sigma_uv_err} ; "
-                f"log_tau_uv_rf = {log_tau_uv_rf} ± {log_tau_uv_rf_err}"
+                f"log_tau_uv_rf = {log_tau_uv_rf} ± {log_tau_uv_rf_err} ; "
+                f"log_sigma_uv_bpl = {log_sigma_uv_bpl} ; "
+                f"log_tau_uv_rf_bpl = {log_tau_uv_rf_bpl}"
             )
 
             results.append(final_result)

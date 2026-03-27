@@ -14,10 +14,12 @@ if str(SRC) not in sys.path:
 
 from qvc.light_curve.fit_light_curves import (
     build_explicit_model_params,
+    bending_power_law_psd,
     compute_band_adf,
     compute_parameter_kls,
     compute_object_adf_diagnostics,
     compute_lambda_center_rf,
+    fit_bending_power_law_psd,
     lya_variability_weight,
     make_lc,
     posterior_median_mean_function,
@@ -419,3 +421,28 @@ def test_compute_object_adf_diagnostics_returns_per_band_fields():
         assert f"adf_valid_{band}" in result
     assert "adf_min_pvalue" in result
     assert "adf_any_pvalue_lt_0p05" in result
+
+
+def test_fit_bending_power_law_psd_recovers_tau_and_sigma():
+    freq = np.logspace(-4.5, -1.5, 60)
+    true_log_sigma = np.log10(0.2)
+    true_log_tau = np.log10(300.0)
+    power = bending_power_law_psd(freq, true_log_sigma, true_log_tau)
+    power_lo = power * 0.9
+    power_hi = power * 1.1
+
+    result = fit_bending_power_law_psd(freq, power, power_lo, power_hi)
+
+    assert result["psd_bpl_valid"] is True
+    assert np.isclose(result["log_sigma_bpl"], true_log_sigma, atol=0.05)
+    assert np.isclose(result["log_tau_bpl"], true_log_tau, atol=0.05)
+
+
+def test_fit_bending_power_law_psd_handles_too_few_bins():
+    result = fit_bending_power_law_psd(
+        np.array([1e-3, 2e-3, 3e-3]),
+        np.array([1.0, 2.0, 3.0]),
+    )
+
+    assert result["psd_bpl_valid"] is False
+    assert np.isnan(result["log_sigma_bpl"])

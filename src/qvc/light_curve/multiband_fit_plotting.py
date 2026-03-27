@@ -488,6 +488,7 @@ def combined_lomb_scargle_from_model(
     bins_per_decade: int = 2,
     min_per_bin: int = 1,
     normalization: str = "psd",
+    amp_reference: str = "band0",
 ):
     """
     Compute Lomb–Scargle PSD from a MyMultiVarModel, using a provided
@@ -553,12 +554,15 @@ def combined_lomb_scargle_from_model(
     # y = np.asarray(model.y, float).copy() - np.asarray(mean_vals, float)
     # yerr = np.asarray(model.yerr, float).copy()
 
-    # Normalize amplitudes to band 0 scale
+    # Normalize amplitudes to a common reference scale.
     if hasattr(model, "my_amp_transform"):
         log_sigma_band = np.asarray(model.my_amp_transform(params))
     else:
         log_sigma_band = np.log(np.asarray(params["amp_cont"]))
-    s0 = float(np.exp(log_sigma_band[0]))
+    if amp_reference == "uv" and "log_sigma_uv" in params:
+        s0 = float(np.exp(np.asarray(params["log_sigma_uv"])))
+    else:
+        s0 = float(np.exp(log_sigma_band[0]))
     s_b = np.exp(log_sigma_band)
     scale = s0 / s_b[band_idx]
     y *= scale
@@ -669,8 +673,16 @@ def bootstrap_lomb_scargle(
     }
 
 
+def _bending_power_law_psd_plot(freq, log_sigma, log_tau):
+    freq = np.asarray(freq, dtype=float)
+    sigma = 10.0 ** float(log_sigma)
+    tau = 10.0 ** float(log_tau)
+    return 2.0 * sigma * sigma * tau / (1.0 + (2.0 * np.pi * freq * tau) ** 2)
+
+
 def save_combined_plot(samples, model, X, y, yerr, band_idx, mags_means, survey_times,
-                       data, bands=['u', 'g', 'r', 'i', 'z'], plot_psd=True, show=False, time0=0.0):
+                       data, bands=['u', 'g', 'r', 'i', 'z'], plot_psd=True, show=False,
+                       time0=0.0, plot_bpl_fit=False, filename_suffix=None):
     import os
     import logging
     import numpy as np
@@ -899,6 +911,34 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, mags_means, survey_
             zorder=6,
         )
 
+        if plot_bpl_fit:
+            log_sigma_bpl = data.get("log_sigma_uv_bpl")
+            log_tau_bpl = data.get("log_tau_uv_bpl")
+            if np.isfinite(log_sigma_bpl) and np.isfinite(log_tau_bpl):
+                bpl_psd = _bending_power_law_psd_plot(f_bin, log_sigma_bpl, log_tau_bpl)
+                ax_psd.plot(
+                    f_bin,
+                    bpl_psd,
+                    lw=2.0,
+                    color="tab:blue",
+                    alpha=0.9,
+                    linestyle="--",
+                    label="Broken PL fit",
+                    zorder=6,
+                )
+
+                tau_bpl = 10.0 ** float(log_tau_bpl)
+                nu_bpl = 1.0 / (2.0 * np.pi * tau_bpl)
+                ax_psd.axvline(
+                    nu_bpl,
+                    color="tab:blue",
+                    linestyle="--",
+                    lw=1.5,
+                    alpha=0.9,
+                    zorder=5,
+                    label=r"$1/(2\,\pi\,\tau_{\mathrm{BPL}})$",
+                )
+
         ax_psd.set_xlabel("Frequency (days$^{-1}$)")
         ax_psd.set_ylabel(r"PSD ($\mathrm{mag}^2$ $\mathrm{days}$)")
         ax_psd.set_xscale("log")
@@ -913,7 +953,8 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, mags_means, survey_
     # Save the plot as a PNG file
     output_dir = f"plots/multiband/{prefix}/light_curves_fits"
     os.makedirs(output_dir, exist_ok=True)
-    fpath = os.path.join(output_dir, f'{data["z"]:.1f}_{object_id}_light_curve_{suffix}.pdf')
+    save_suffix = suffix if filename_suffix is None else filename_suffix
+    fpath = os.path.join(output_dir, f'{data["z"]:.1f}_{object_id}_light_curve_{save_suffix}.pdf')
     plt.savefig(fpath, dpi=600)
 
     logging.info(f"Saving figure to {fpath}")
