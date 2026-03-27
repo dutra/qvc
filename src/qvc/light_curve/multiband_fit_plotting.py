@@ -911,34 +911,6 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, mags_means, survey_
             zorder=6,
         )
 
-        if plot_bpl_fit:
-            log_sigma_bpl = data.get("log_sigma_uv_bpl")
-            log_tau_bpl = data.get("log_tau_uv_bpl")
-            if np.isfinite(log_sigma_bpl) and np.isfinite(log_tau_bpl):
-                bpl_psd = _bending_power_law_psd_plot(f_bin, log_sigma_bpl, log_tau_bpl)
-                ax_psd.plot(
-                    f_bin,
-                    bpl_psd,
-                    lw=2.0,
-                    color="tab:blue",
-                    alpha=0.9,
-                    linestyle="--",
-                    label="Broken PL fit",
-                    zorder=6,
-                )
-
-                tau_bpl = 10.0 ** float(log_tau_bpl)
-                nu_bpl = 1.0 / (2.0 * np.pi * tau_bpl)
-                ax_psd.axvline(
-                    nu_bpl,
-                    color="tab:blue",
-                    linestyle="--",
-                    lw=1.5,
-                    alpha=0.9,
-                    zorder=5,
-                    label=r"$1/(2\,\pi\,\tau_{\mathrm{BPL}})$",
-                )
-
         ax_psd.set_xlabel("Frequency (days$^{-1}$)")
         ax_psd.set_ylabel(r"PSD ($\mathrm{mag}^2$ $\mathrm{days}$)")
         ax_psd.set_xscale("log")

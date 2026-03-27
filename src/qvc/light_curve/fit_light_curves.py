@@ -228,14 +228,15 @@ def compute_object_adf_diagnostics(flat_samples, obj, bands):
     return out
 
 
-def bending_power_law_psd(freq, log_sigma, log_tau):
-    """Single-break PSD with flat low-frequency slope and -2 high-frequency slope."""
+def bending_power_law_psd(freq, log_sigma, log_tau, log_noise_floor=-99.0):
+    """Single-break PSD with flat low-frequency slope, -2 high-frequency slope, and white-noise floor."""
 
     freq = np.asarray(freq, dtype=float)
     sigma = np.power(10.0, float(log_sigma))
     tau = np.power(10.0, float(log_tau))
     denom = 1.0 + np.square(2.0 * np.pi * freq * tau)
-    return 2.0 * sigma * sigma * tau / denom
+    noise_floor = np.power(10.0, float(log_noise_floor))
+    return 2.0 * sigma * sigma * tau / denom + noise_floor
 
 
 def fit_bending_power_law_psd(freq, power, power_lo=None, power_hi=None):
@@ -250,6 +251,8 @@ def fit_bending_power_law_psd(freq, power, power_lo=None, power_hi=None):
             "log_sigma_bpl_err": np.nan,
             "log_tau_bpl": np.nan,
             "log_tau_bpl_err": np.nan,
+            "log_noise_floor_bpl": np.nan,
+            "log_noise_floor_bpl_err": np.nan,
             "psd_bpl_valid": False,
             "psd_bpl_nbins": float(np.count_nonzero(mask)),
         }
@@ -276,9 +279,10 @@ def fit_bending_power_law_psd(freq, power, power_lo=None, power_hi=None):
             None,
         )
     )
+    noise_floor_init = np.clip(np.percentile(power_fit, 10), 1e-12, None)
 
-    def model_log10(freq_val, log_sigma, log_tau):
-        psd = bending_power_law_psd(freq_val, log_sigma, log_tau)
+    def model_log10(freq_val, log_sigma, log_tau, log_noise_floor):
+        psd = bending_power_law_psd(freq_val, log_sigma, log_tau, log_noise_floor)
         return np.log10(np.clip(psd, 1e-300, None))
 
     try:
@@ -286,10 +290,10 @@ def fit_bending_power_law_psd(freq, power, power_lo=None, power_hi=None):
             model_log10,
             freq_fit,
             log_power,
-            p0=(np.log10(sigma_init), np.log10(tau_init)),
+            p0=(np.log10(sigma_init), np.log10(tau_init), np.log10(noise_floor_init)),
             sigma=log_err,
             absolute_sigma=True,
-            bounds=([-6.0, -1.0], [3.0, 6.0]),
+            bounds=([-6.0, -1.0, -12.0], [3.0, 6.0, 8.0]),
             maxfev=20000,
         )
         perr = np.sqrt(np.diag(pcov))
@@ -300,6 +304,8 @@ def fit_bending_power_law_psd(freq, power, power_lo=None, power_hi=None):
             "log_sigma_bpl_err": np.nan,
             "log_tau_bpl": np.nan,
             "log_tau_bpl_err": np.nan,
+            "log_noise_floor_bpl": np.nan,
+            "log_noise_floor_bpl_err": np.nan,
             "psd_bpl_valid": False,
             "psd_bpl_nbins": float(freq_fit.size),
         }
@@ -309,14 +315,21 @@ def fit_bending_power_law_psd(freq, power, power_lo=None, power_hi=None):
         "log_sigma_bpl_err": float(perr[0]) if np.all(np.isfinite(perr)) else np.nan,
         "log_tau_bpl": float(popt[1]),
         "log_tau_bpl_err": float(perr[1]) if np.all(np.isfinite(perr)) else np.nan,
+        "log_noise_floor_bpl": float(popt[2]),
+        "log_noise_floor_bpl_err": float(perr[2]) if np.all(np.isfinite(perr)) else np.nan,
         "psd_bpl_valid": True,
         "psd_bpl_nbins": float(freq_fit.size),
     }
 
 
 def compute_lomb_scargle_break_diagnostics(model, samples, obj, z, *, n_freq=500):
-    """Fit a bending power law to the combined Lomb-Scargle PSD break."""
+    """Fit a bending power law to the band nearest rest-frame 2500 A and convert to UV."""
 
+    bands = list(obj["bands"])
+    lam_rf = np.asarray([lambda_pivot[band] / (1.0 + float(z)) for band in bands], dtype=float)
+    ref_idx = int(np.argmin(np.abs(lam_rf - 2500.0)))
+    ref_band = bands[ref_idx]
+    lam_ref_band = float(lam_rf[ref_idx])
     posterior_median = {k: np.median(v, axis=0) for k, v in samples.items()}
     freqs = np.logspace(-6, 2, n_freq)
     f_bin, p_bin, p_lo, p_hi, counts, p_noise = combined_lomb_scargle_from_model(
@@ -325,17 +338,37 @@ def compute_lomb_scargle_break_diagnostics(model, samples, obj, z, *, n_freq=500
         obj["yerr"],
         posterior_median,
         2.0 * np.pi * freqs,
-        amp_reference="uv",
+        amp_reference="selected_band",
+        selected_band=ref_idx,
+        subtract_noise_floor=False,
     )
     fit = fit_bending_power_law_psd(f_bin, p_bin, p_lo, p_hi)
-    log_tau_rf = fit["log_tau_bpl"] - np.log10(1.0 + float(z)) if np.isfinite(fit["log_tau_bpl"]) else np.nan
+    eta_sigma = float(np.nanmedian(np.asarray(samples["eta_sigma"], dtype=float)))
+    eta_tau = float(np.nanmedian(np.asarray(samples["eta_tau"], dtype=float)))
+    log_sigma_uv = (
+        fit["log_sigma_bpl"] + log_single_pl(2500.0, lam_ref_band, eta_sigma)
+        if np.isfinite(fit["log_sigma_bpl"]) else np.nan
+    )
+    log_tau_uv_obs = (
+        fit["log_tau_bpl"] + log_single_pl(2500.0, lam_ref_band, eta_tau)
+        if np.isfinite(fit["log_tau_bpl"]) else np.nan
+    )
+    log_tau_rf = log_tau_uv_obs - np.log10(1.0 + float(z)) if np.isfinite(log_tau_uv_obs) else np.nan
     log_tau_rf_err = fit["log_tau_bpl_err"]
 
     out = {
-        "log_sigma_uv_bpl": fit["log_sigma_bpl"],
+        "psd_bpl_ref_band": ref_band,
+        "psd_bpl_ref_lambda_rf": lam_ref_band,
+        "log_sigma_bpl_ref_band": fit["log_sigma_bpl"],
+        "log_sigma_bpl_ref_band_err": fit["log_sigma_bpl_err"],
+        "log_tau_bpl_ref_band": fit["log_tau_bpl"],
+        "log_tau_bpl_ref_band_err": fit["log_tau_bpl_err"],
+        "log_sigma_uv_bpl": log_sigma_uv,
         "log_sigma_uv_bpl_err": fit["log_sigma_bpl_err"],
-        "log_tau_uv_bpl": fit["log_tau_bpl"],
+        "log_tau_uv_bpl": log_tau_uv_obs,
         "log_tau_uv_bpl_err": fit["log_tau_bpl_err"],
+        "log_noise_floor_bpl": fit["log_noise_floor_bpl"],
+        "log_noise_floor_bpl_err": fit["log_noise_floor_bpl_err"],
         "log_tau_uv_rf_bpl": log_tau_rf,
         "log_tau_uv_rf_bpl_err": log_tau_rf_err,
         "psd_bpl_valid": fit["psd_bpl_valid"],
@@ -347,6 +380,177 @@ def compute_lomb_scargle_break_diagnostics(model, samples, obj, z, *, n_freq=500
     else:
         out["log_nu_break_bpl"] = np.nan
     return out
+
+
+def empirical_structure_function(t, y, yerr=None, *, bins_per_decade=3, min_pairs=8):
+    """Compute a binned empirical structure function from one band."""
+
+    t = np.asarray(t, dtype=float)
+    y = np.asarray(y, dtype=float)
+    yerr = np.zeros_like(y) if yerr is None else np.asarray(yerr, dtype=float)
+
+    n = t.size
+    if n < 3:
+        return np.array([]), np.array([]), np.array([]), np.array([])
+
+    dt = np.abs(t[:, None] - t[None, :])
+    dy2 = np.square(y[:, None] - y[None, :])
+    noise2 = np.square(yerr[:, None]) + np.square(yerr[None, :])
+
+    iu = np.triu_indices(n, k=1)
+    tau = dt[iu]
+    sf2 = np.maximum(dy2[iu] - noise2[iu], 0.0)
+    good = np.isfinite(tau) & np.isfinite(sf2) & (tau > 0.0)
+    if np.count_nonzero(good) < min_pairs:
+        return np.array([]), np.array([]), np.array([]), np.array([])
+
+    tau = tau[good]
+    sf2 = sf2[good]
+    tmin = np.min(tau)
+    tmax = np.max(tau)
+    if not np.isfinite(tmin) or not np.isfinite(tmax) or tmax <= tmin:
+        return np.array([]), np.array([]), np.array([]), np.array([])
+
+    decades = np.log10(tmax) - np.log10(tmin)
+    n_bins = max(1, int(np.ceil(bins_per_decade * decades)))
+    edges = np.logspace(np.log10(tmin), np.log10(tmax), n_bins + 1)
+    which = np.digitize(tau, edges) - 1
+
+    tau_bin, sf_bin, sf_lo, sf_hi = [], [], [], []
+    for k in range(n_bins):
+        sel = which == k
+        if np.count_nonzero(sel) < min_pairs:
+            continue
+        tau_chunk = tau[sel]
+        sf_chunk = np.sqrt(sf2[sel])
+        tau_bin.append(10.0 ** np.mean(np.log10(tau_chunk)))
+        sf_bin.append(np.median(sf_chunk))
+        sf_lo.append(np.percentile(sf_chunk, 16))
+        sf_hi.append(np.percentile(sf_chunk, 84))
+
+    return (
+        np.asarray(tau_bin, dtype=float),
+        np.asarray(sf_bin, dtype=float),
+        np.asarray(sf_lo, dtype=float),
+        np.asarray(sf_hi, dtype=float),
+    )
+
+
+def fit_structure_function(tau, sf, sf_lo=None, sf_hi=None):
+    """Fit SF_inf * sqrt(1 - exp(-tau/tau_char)) and return sigma,tau."""
+
+    tau = np.asarray(tau, dtype=float)
+    sf = np.asarray(sf, dtype=float)
+    mask = np.isfinite(tau) & np.isfinite(sf) & (tau > 0.0) & (sf > 0.0)
+    if np.count_nonzero(mask) < 4:
+        return {
+            "log_sigma_sf": np.nan,
+            "log_sigma_sf_err": np.nan,
+            "log_tau_sf": np.nan,
+            "log_tau_sf_err": np.nan,
+            "sf_valid": False,
+            "sf_nbins": float(np.count_nonzero(mask)),
+        }
+
+    tau_fit = tau[mask]
+    sf_fit = sf[mask]
+
+    if sf_lo is not None and sf_hi is not None:
+        lo = np.asarray(sf_lo, dtype=float)[mask]
+        hi = np.asarray(sf_hi, dtype=float)[mask]
+        sf_err = 0.5 * (
+            np.clip(sf_fit - lo, 1e-4, None) +
+            np.clip(hi - sf_fit, 1e-4, None)
+        )
+    else:
+        sf_err = np.full_like(sf_fit, max(np.median(sf_fit) * 0.15, 1e-3))
+
+    sf_inf_init = np.clip(np.max(sf_fit), 1e-4, None)
+    tau_init = np.exp(np.mean(np.log(tau_fit)))
+
+    def sf_model(tau_val, log_sf_inf, log_tau):
+        sf_inf = 10.0 ** log_sf_inf
+        tau_char = 10.0 ** log_tau
+        return sf_inf * np.sqrt(np.clip(1.0 - np.exp(-tau_val / tau_char), 0.0, None))
+
+    try:
+        popt, pcov = curve_fit(
+            sf_model,
+            tau_fit,
+            sf_fit,
+            p0=(np.log10(sf_inf_init), np.log10(tau_init)),
+            sigma=sf_err,
+            absolute_sigma=True,
+            bounds=([-6.0, -1.0], [3.0, 6.0]),
+            maxfev=20000,
+        )
+        perr = np.sqrt(np.diag(pcov))
+    except Exception as exc:
+        logging.warning("Structure-function fit failed: %s", exc)
+        return {
+            "log_sigma_sf": np.nan,
+            "log_sigma_sf_err": np.nan,
+            "log_tau_sf": np.nan,
+            "log_tau_sf_err": np.nan,
+            "sf_valid": False,
+            "sf_nbins": float(tau_fit.size),
+        }
+
+    return {
+        "log_sigma_sf": float(popt[0] - np.log10(np.sqrt(2.0))),
+        "log_sigma_sf_err": float(perr[0]) if np.all(np.isfinite(perr)) else np.nan,
+        "log_tau_sf": float(popt[1]),
+        "log_tau_sf_err": float(perr[1]) if np.all(np.isfinite(perr)) else np.nan,
+        "sf_valid": True,
+        "sf_nbins": float(tau_fit.size),
+    }
+
+
+def compute_structure_function_diagnostics(samples, obj, z):
+    """Fit SF in the band nearest rest-frame 2500 A and convert to UV."""
+
+    bands = list(obj["bands"])
+    lam_rf = np.asarray([lambda_pivot[band] / (1.0 + float(z)) for band in bands], dtype=float)
+    ref_idx = int(np.argmin(np.abs(lam_rf - 2500.0)))
+    ref_band = bands[ref_idx]
+    lam_ref_band = float(lam_rf[ref_idx])
+
+    band_idx = np.asarray(obj["band_idx"])
+    mask = band_idx == ref_idx
+    t_band = np.asarray(obj["X"][0], dtype=float)[mask]
+    y_band = np.asarray(obj["y"], dtype=float)[mask]
+    yerr_band = np.asarray(obj["yerr"], dtype=float)[mask]
+    tau_sf, sf_med, sf_lo, sf_hi = empirical_structure_function(t_band, y_band, yerr_band)
+    fit = fit_structure_function(tau_sf, sf_med, sf_lo, sf_hi)
+
+    eta_sigma = float(np.nanmedian(np.asarray(samples["eta_sigma"], dtype=float)))
+    eta_tau = float(np.nanmedian(np.asarray(samples["eta_tau"], dtype=float)))
+    log_sigma_uv = (
+        fit["log_sigma_sf"] + log_single_pl(2500.0, lam_ref_band, eta_sigma)
+        if np.isfinite(fit["log_sigma_sf"]) else np.nan
+    )
+    log_tau_uv_obs = (
+        fit["log_tau_sf"] + log_single_pl(2500.0, lam_ref_band, eta_tau)
+        if np.isfinite(fit["log_tau_sf"]) else np.nan
+    )
+    log_tau_rf = log_tau_uv_obs - np.log10(1.0 + float(z)) if np.isfinite(log_tau_uv_obs) else np.nan
+
+    return {
+        "sf_ref_band": ref_band,
+        "sf_ref_lambda_rf": lam_ref_band,
+        "log_sigma_sf_ref_band": fit["log_sigma_sf"],
+        "log_sigma_sf_ref_band_err": fit["log_sigma_sf_err"],
+        "log_tau_sf_ref_band": fit["log_tau_sf"],
+        "log_tau_sf_ref_band_err": fit["log_tau_sf_err"],
+        "log_sigma_uv_sf": log_sigma_uv,
+        "log_sigma_uv_sf_err": fit["log_sigma_sf_err"],
+        "log_tau_uv_sf": log_tau_uv_obs,
+        "log_tau_uv_sf_err": fit["log_tau_sf_err"],
+        "log_tau_uv_rf_sf": log_tau_rf,
+        "log_tau_uv_rf_sf_err": fit["log_tau_sf_err"],
+        "sf_valid": fit["sf_valid"],
+        "sf_nbins": fit["sf_nbins"],
+    }
 
 
 def log_nonfinite_sample_summary(samples_dict, *, label, max_items=20):
@@ -1321,6 +1525,11 @@ def main():
                 obj,
                 float(obj["z"]),
             )
+            sf_result = compute_structure_function_diagnostics(
+                obj_flat_samples_flatten_per_band,
+                obj,
+                float(obj["z"]),
+            )
             kl_result = compute_parameter_kls(
                 obj_flat_samples_flatten_per_band,
                 bands=bands,
@@ -1351,22 +1560,6 @@ def main():
                         bands=bands,
                         plot_psd=(not args.disable_plot_psd),
                     )
-                    save_combined_plot(
-                        plot_samples,
-                        m,
-                        obj["X"],
-                        obj["y"],
-                        obj["yerr"],
-                        obj["band_idx"],
-                        obj["mags_means"],
-                        obj["survey_times"],
-                        plot_data,
-                        time0=obj["time0"],
-                        bands=bands,
-                        plot_psd=(not args.disable_plot_psd),
-                        plot_bpl_fit=True,
-                        filename_suffix=f"{suffix}_bpl",
-                    )
                     plot_correlation_matrix(obj_flat_samples_flatten_per_band, obj)
                     plot_all_histograms(obj_flat_samples_flatten_per_band, obj)
                     if not args.disable_corner_plot:
@@ -1375,7 +1568,7 @@ def main():
                     logging.error(f"[{oid}] Plotting error: {e}")
                     logging.error(traceback.format_exc())
 
-            final_result = obj | result | adf_result | psd_break_result | kl_result | dict(prefix=prefix, suffix=suffix) 
+            final_result = obj | result | adf_result | psd_break_result | sf_result | kl_result | dict(prefix=prefix, suffix=suffix) 
             # final_result |= diagnostics
             log_sigma_uv = final_result.get("log_sigma_uv")
             log_sigma_uv_err = final_result.get("log_sigma_uv_err")
@@ -1383,11 +1576,15 @@ def main():
             log_tau_uv_rf_err = final_result.get("log_tau_uv_rf_err")
             log_sigma_uv_bpl = final_result.get("log_sigma_uv_bpl")
             log_tau_uv_rf_bpl = final_result.get("log_tau_uv_rf_bpl")
+            log_sigma_uv_sf = final_result.get("log_sigma_uv_sf")
+            log_tau_uv_rf_sf = final_result.get("log_tau_uv_rf_sf")
             print(
                 f"[{oid}] log_sigma_uv = {log_sigma_uv} ± {log_sigma_uv_err} ; "
                 f"log_tau_uv_rf = {log_tau_uv_rf} ± {log_tau_uv_rf_err} ; "
                 f"log_sigma_uv_bpl = {log_sigma_uv_bpl} ; "
-                f"log_tau_uv_rf_bpl = {log_tau_uv_rf_bpl}"
+                f"log_tau_uv_rf_bpl = {log_tau_uv_rf_bpl} ; "
+                f"log_sigma_uv_sf = {log_sigma_uv_sf} ; "
+                f"log_tau_uv_rf_sf = {log_tau_uv_rf_sf}"
             )
 
             results.append(final_result)
