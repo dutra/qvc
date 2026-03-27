@@ -1359,7 +1359,7 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
     print("Final number of quasars:", len(df))
     plot_cut_diagnostics(df_all.copy(), df.copy(), bins=30, cut_info="all cuts")
     colorpanel_cols = [
-        col for col in ("f_host_center", "f_fe_uv_over_pl_3000", "f_bc_over_pl_3000", "wrms")
+        col for col in ("f_host_center", "f_bc_over_pl_3000", "wrms")
         if col in df_all.columns
     ]
     if len(colorpanel_cols) > 0 and "z" in df_all.columns and "apparent_mag_2500" in df_all.columns:

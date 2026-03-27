@@ -5397,7 +5397,7 @@ def plot_delta_m_flux_recal_vs_redshift(df_agn, plot_path="plots/hubble", show=F
 def plot_m2500_vs_z_colorpanels(
     df,
     df_keep=None,
-    color_cols=("f_host_center", "f_fe_uv_over_pl_3000", "f_bc_over_pl_3000", "wrms"),
+    color_cols=("f_host_center", "f_bc_over_pl_3000", "wrms"),
     xcol="z",
     ycol="apparent_mag_2500",
     z_range=None,
@@ -5405,7 +5405,7 @@ def plot_m2500_vs_z_colorpanels(
     log_color=True,
     color_clip=None,   # dict: {col: (vmin, vmax)} in displayed space (log space if log_color=True)
     cmap="viridis",
-    figsize=(11, 12),
+    figsize=(8, 8.5),
     s=12,
     alpha=0.7,
     thin=4,
