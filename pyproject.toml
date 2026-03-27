@@ -26,7 +26,8 @@ dependencies = [
     "tinygp==0.3.0",
     "tqdm==4.67.1",
     "gdown==5.2.1",
-    "colorama==0.4.6"
+    "colorama==0.4.6",
+    "statsmodels==0.14.6"
 ]
 
 [tool.setuptools]
