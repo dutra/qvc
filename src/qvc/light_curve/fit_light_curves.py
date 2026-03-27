@@ -1559,6 +1559,18 @@ def main():
                         bands=bands,
                         plot_psd=(not args.disable_plot_psd),
                     )
+                    save_color_magnitude_plot(
+                        plot_samples,
+                        m,
+                        obj["X"],
+                        obj["y"],
+                        obj["yerr"],
+                        obj["band_idx"],
+                        obj["mags_means"],
+                        plot_data,
+                        time0=obj["time0"],
+                        bands=bands,
+                    )
                     plot_correlation_matrix(obj_flat_samples_flatten_per_band, obj)
                     plot_all_histograms(obj_flat_samples_flatten_per_band, obj)
                     if not args.disable_corner_plot:

@@ -551,8 +551,13 @@ def combined_lomb_scargle_from_model(
         )
     y = np.asarray(y, float).copy() - np.asarray(mean_vals, float)
     yerr = np.asarray(yerr, float).copy()
-    # y = np.asarray(model.y, float).copy() - np.asarray(mean_vals, float)
-    # yerr = np.asarray(model.yerr, float).copy()
+
+    #if "log_jitter" in params:
+    #    jitter_band = np.exp(np.asarray(params["log_jitter"], dtype=float))
+    #    if jitter_band.ndim == 0:
+    #        jitter_band = np.full(int(np.max(band_idx)) + 1, float(jitter_band))
+    #    jitter_band = np.clip(np.asarray(jitter_band, dtype=float), 0.0, None)
+    #    yerr = np.sqrt(yerr**2 + jitter_band[band_idx] ** 2)
 
     # Normalize amplitudes to a common reference scale.
     if hasattr(model, "my_amp_transform"):
@@ -680,6 +685,153 @@ def _bending_power_law_psd_plot(freq, log_sigma, log_tau):
     return 2.0 * sigma * sigma * tau / (1.0 + (2.0 * np.pi * freq * tau) ** 2)
 
 
+def _binned_median_relation(x, y, *, n_bins=40, min_per_bin=20):
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    mask = np.isfinite(x) & np.isfinite(y)
+    if np.count_nonzero(mask) < min_per_bin:
+        return np.array([]), np.array([]), np.array([]), np.array([])
+
+    x = x[mask]
+    y = y[mask]
+    edges = np.linspace(np.min(x), np.max(x), n_bins + 1)
+    which = np.digitize(x, edges) - 1
+
+    x_mid, y_med, y_lo, y_hi = [], [], [], []
+    for k in range(n_bins):
+        sel = which == k
+        if np.count_nonzero(sel) < min_per_bin:
+            continue
+        x_chunk = x[sel]
+        y_chunk = y[sel]
+        x_mid.append(float(np.median(x_chunk)))
+        y_med.append(float(np.median(y_chunk)))
+        y_lo.append(float(np.percentile(y_chunk, 16)))
+        y_hi.append(float(np.percentile(y_chunk, 84)))
+
+    return (
+        np.asarray(x_mid, dtype=float),
+        np.asarray(y_med, dtype=float),
+        np.asarray(y_lo, dtype=float),
+        np.asarray(y_hi, dtype=float),
+    )
+
+
+def save_color_magnitude_plot(
+    samples,
+    model,
+    X,
+    y,
+    yerr,
+    band_idx,
+    mags_means,
+    data,
+    bands=['u', 'g', 'r', 'i', 'z'],
+    show=False,
+    time0=0.0,
+    filename_suffix=None,
+):
+    import os
+    import logging
+    import numpy as np
+    import matplotlib.pyplot as plt
+
+    logging.info("Saving color-magnitude plot")
+
+    if 'i' not in bands:
+        logging.warning("Skipping color-magnitude plot because i band is unavailable.")
+        return
+
+    object_id = data['object_id']
+    band_idx_map = {i: b for i, b in enumerate(bands)}
+    posterior_median = {k: np.median(v, axis=0) for k, v in samples.items()}
+    cm_params = dict(posterior_median)
+    if "lag0" in cm_params:
+        cm_params["lag0"] = np.zeros_like(np.asarray(cm_params["lag0"], dtype=float))
+    if "log_amp_delta_blr" in cm_params:
+        cm_params["log_amp_delta_blr"] = np.full_like(
+            np.asarray(cm_params["log_amp_delta_blr"], dtype=float),
+            -20.0,
+        )
+    if "log_amp_delta_blr2" in cm_params:
+        cm_params["log_amp_delta_blr2"] = np.full_like(
+            np.asarray(cm_params["log_amp_delta_blr2"], dtype=float),
+            -20.0,
+        )
+    if "amp_blr" in cm_params:
+        cm_params["amp_blr"] = np.full_like(np.asarray(cm_params["amp_blr"], dtype=float), 1e-20)
+    if "amp_blr2" in cm_params:
+        cm_params["amp_blr2"] = np.full_like(np.asarray(cm_params["amp_blr2"], dtype=float), 1e-20)
+    t = X[0] + time0
+    t_test = np.linspace(t.min() - 400, t.max() + 400, 4000)
+
+    model_cont_by_band = {}
+    model_cont_std_by_band = {}
+    for n in np.unique(band_idx):
+        result = model.pred(cm_params, (t_test - time0, jnp.full_like(t_test, n, dtype=int)))
+        if len(result) == 2:
+            mu, std = result
+            model_cont_by_band[n] = np.asarray(mu, dtype=float)
+            model_cont_std_by_band[n] = np.asarray(std, dtype=float)
+        else:
+            _, _, mu_cont, std_cont, _, _ = result
+            model_cont_by_band[n] = np.asarray(mu_cont, dtype=float)
+            model_cont_std_by_band[n] = np.asarray(std_cont, dtype=float)
+
+    i_idx = bands.index('i')
+    mu_i = model_cont_by_band.get(i_idx)
+    std_i = model_cont_std_by_band.get(i_idx)
+    if mu_i is None:
+        logging.warning("Skipping color-magnitude plot because no i-band model prediction is available.")
+        return
+
+    i_mag_model = mu_i + mags_means[i_idx]
+    fig, ax = plt.subplots(figsize=(7.5, 6.0))
+    for n in np.unique(band_idx):
+        if n == i_idx or n not in model_cont_by_band:
+            continue
+        band_name = band_idx_map[n]
+        mu_band = model_cont_by_band[n] + mags_means[n]
+        color_model = mu_band - i_mag_model
+        x, y_color, y_lo, y_hi = _binned_median_relation(i_mag_model, color_model)
+        if x.size == 0:
+            continue
+        order = np.argsort(x)
+        ax.plot(
+            x[order],
+            y_color[order],
+            color=colors[band_name],
+            lw=2.0,
+            alpha=0.95,
+            label=f"{band_name} - i",
+        )
+        ax.fill_between(
+            x[order],
+            y_lo[order],
+            y_hi[order],
+            color=colors[band_name],
+            alpha=0.18,
+            lw=0.0,
+        )
+
+    ax.set_xlabel("i-band magnitude (continuum model)")
+    ax.set_ylabel("Color (continuum model)")
+    ax.invert_xaxis()
+    ax.grid(False)
+    ax.legend(loc='best')
+    plt.tight_layout()
+
+    output_dir = f"plots/multiband/{prefix}/color_magnitude"
+    os.makedirs(output_dir, exist_ok=True)
+    save_suffix = suffix if filename_suffix is None else filename_suffix
+    fpath = os.path.join(output_dir, f'{data["z"]:.1f}_{object_id}_color_magnitude_{save_suffix}.pdf')
+    plt.savefig(fpath, dpi=600)
+    logging.info(f"Saving figure to {fpath}")
+    if show:
+        plt.show()
+    plt.close(fig)
+
+
 def save_combined_plot(samples, model, X, y, yerr, band_idx, mags_means, survey_times,
                        data, bands=['u', 'g', 'r', 'i', 'z'], plot_psd=True, show=False,
                        time0=0.0, plot_bpl_fit=False, filename_suffix=None):
@@ -702,6 +854,7 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, mags_means, survey_
 
     t = X[0] + time0
     posterior_median = {k: np.median(v, axis=0) for k, v in samples.items()}
+    t_test = np.linspace(t.min() - 400, t.max() + 400, 1000)
 
     for n in np.unique(band_idx):
         mask = (band_idx == n) & (yerr < 10.0)
@@ -720,9 +873,6 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, mags_means, survey_
             label=label, alpha=0.7, color=colors[band_idx_map[n]],
             lw=1, capsize=2, markersize=3
         )
-
-        # Generate test times for predictions
-        t_test = np.linspace(t.min() - 400, t.max() + 400, 1000)
 
         # Compute predictions using the model
         result = model.pred(posterior_median, (t_test - time0, jnp.full_like(t_test, n, dtype=int)))
