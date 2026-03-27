@@ -14,10 +14,13 @@ if str(SRC) not in sys.path:
 
 from qvc.light_curve.fit_light_curves import (
     build_explicit_model_params,
+    compute_band_adf,
     compute_parameter_kls,
+    compute_object_adf_diagnostics,
     compute_lambda_center_rf,
     lya_variability_weight,
     make_lc,
+    posterior_median_mean_function,
 )
 from qvc.light_curve.multiband_fit_utils import lambda_pivot, log_single_pl, process_samples
 
@@ -345,3 +348,74 @@ def test_compute_parameter_kls_returns_expected_keys():
     }
     assert expected_keys.issubset(kls.keys())
     assert all(np.isfinite(kls[key]) for key in expected_keys)
+
+
+def test_posterior_median_mean_function_uses_global_time_normalization():
+    t_eval = np.array([0.0, 20.0], dtype=float)
+    t_ref = np.array([0.0, 10.0, 20.0], dtype=float)
+    flat_samples = {
+        "mean_g": np.array([0.8, 1.0, 1.2], dtype=float),
+        "poly1": np.array([0.1, 0.2, 0.3], dtype=float),
+    }
+
+    got = posterior_median_mean_function(flat_samples, t_eval, "g", t_ref=t_ref)
+
+    t_center = 10.0
+    t_std = np.std(t_ref)
+    expected = 1.0 + 0.2 * ((t_eval - t_center) / t_std)
+    assert np.allclose(got, expected)
+
+
+def test_compute_band_adf_returns_valid_output_for_stationary_series():
+    rng = np.random.default_rng(7)
+    noise = rng.normal(scale=0.3, size=256)
+    x = np.empty_like(noise)
+    x[0] = noise[0]
+    for i in range(1, x.size):
+        x[i] = 0.5 * x[i - 1] + noise[i]
+
+    result = compute_band_adf(x)
+
+    assert result["adf_valid"] is True
+    assert np.isfinite(result["adf_stat"])
+    assert np.isfinite(result["adf_pvalue"])
+    assert result["adf_nobs"] > 0
+
+
+def test_compute_band_adf_rejects_constant_or_short_series():
+    short_result = compute_band_adf(np.array([1.0, 2.0, 3.0], dtype=float))
+    const_result = compute_band_adf(np.ones(16, dtype=float))
+
+    assert short_result["adf_valid"] is False
+    assert np.isnan(short_result["adf_stat"])
+    assert const_result["adf_valid"] is False
+    assert np.isnan(const_result["adf_pvalue"])
+
+
+def test_compute_object_adf_diagnostics_returns_per_band_fields():
+    obj = {
+        "X": (np.tile(np.arange(24, dtype=float), 2), np.array([0] * 24 + [1] * 24, dtype=int)),
+        "y": np.concatenate(
+            [
+                np.sin(np.arange(24, dtype=float) / 4.0),
+                np.cos(np.arange(24, dtype=float) / 5.0),
+            ]
+        ),
+        "band_idx": np.array([0] * 24 + [1] * 24, dtype=int),
+    }
+    flat_samples = {
+        "mean_g": np.array([0.0, 0.1, 0.0], dtype=float),
+        "mean_r": np.array([0.0, -0.1, 0.0], dtype=float),
+        "poly1": np.array([0.0, 0.01, 0.0], dtype=float),
+    }
+
+    result = compute_object_adf_diagnostics(flat_samples, obj, ["g", "r"])
+
+    for band in ("g", "r"):
+        assert f"adf_stat_{band}" in result
+        assert f"adf_pvalue_{band}" in result
+        assert f"adf_usedlag_{band}" in result
+        assert f"adf_nobs_{band}" in result
+        assert f"adf_valid_{band}" in result
+    assert "adf_min_pvalue" in result
+    assert "adf_any_pvalue_lt_0p05" in result

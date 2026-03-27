@@ -10,6 +10,7 @@ import traceback
 import numpy as np
 from numpy.lib.stride_tricks import sliding_window_view
 from scipy.stats import median_abs_deviation
+from statsmodels.tsa.stattools import adfuller
 from tqdm import tqdm
 
 # ---------- CPU & threading hygiene ----------
@@ -136,6 +137,94 @@ def conditional_kl_from_samples(x, build_prior_log_prob_fn, *conditioners):
     if not np.any(good_lp):
         return np.nan
     return float(np.mean(log_q[good_lp] - log_p[good_lp]))
+
+
+def linear_mean_time_scaling(t_ref):
+    """Return the global time centering/scaling used by the linear mean function."""
+
+    t_ref = np.asarray(t_ref, dtype=float)
+    if t_ref.size == 0:
+        return 0.0, 1.0
+    t_center = 0.5 * (np.min(t_ref) + np.max(t_ref))
+    t_std = max(float(np.std(t_ref)), 1e-6)
+    return float(t_center), t_std
+
+
+def posterior_median_mean_function(flat_samples, t_eval, band, *, t_ref=None):
+    """Return the posterior-median fitted mean function for one band."""
+
+    t_eval = np.asarray(t_eval, dtype=float)
+    if t_ref is None:
+        t_ref = t_eval
+    t_ref = np.asarray(t_ref, dtype=float)
+    mean_key = f"mean_{band}"
+    mean_level = float(np.nanmedian(np.asarray(flat_samples[mean_key], dtype=float))) if mean_key in flat_samples else 0.0
+    poly1 = float(np.nanmedian(np.asarray(flat_samples["poly1"], dtype=float))) if "poly1" in flat_samples else 0.0
+    t_center, t_std = linear_mean_time_scaling(t_ref)
+    time_scaled = (t_eval - t_center) / t_std
+    return mean_level + poly1 * time_scaled
+
+
+def compute_band_adf(values, *, regression="c", autolag="AIC"):
+    """Safely run the Augmented Dickey-Fuller test on one 1D series."""
+
+    values = np.asarray(values, dtype=float).ravel()
+    values = values[np.isfinite(values)]
+    result = {
+        "adf_stat": np.nan,
+        "adf_pvalue": np.nan,
+        "adf_usedlag": np.nan,
+        "adf_nobs": float(values.size),
+        "adf_valid": False,
+    }
+    if values.size < 4:
+        return result
+    if np.allclose(values, values[0], equal_nan=False):
+        return result
+
+    try:
+        stat, pvalue, usedlag, nobs, *_ = adfuller(values, regression=regression, autolag=autolag)
+    except Exception as exc:
+        logging.warning("ADF failed for series of length %d: %s", values.size, exc)
+        return result
+
+    result.update(
+        adf_stat=float(stat),
+        adf_pvalue=float(pvalue),
+        adf_usedlag=float(usedlag),
+        adf_nobs=float(nobs),
+        adf_valid=True,
+    )
+    return result
+
+
+def compute_object_adf_diagnostics(flat_samples, obj, bands):
+    """Compute per-band ADF diagnostics after subtracting the posterior mean function."""
+
+    t_all = np.asarray(obj["X"][0], dtype=float)
+    y_all = np.asarray(obj["y"], dtype=float)
+    band_idx = np.asarray(obj["band_idx"])
+
+    out = {}
+    pvalues = []
+    for i, band in enumerate(bands):
+        mask = band_idx == i
+        t_band = t_all[mask]
+        y_band = y_all[mask]
+        fitted_mean = posterior_median_mean_function(flat_samples, t_band, band, t_ref=t_all)
+        detrended = y_band - fitted_mean
+        adf = compute_band_adf(detrended)
+        out[f"adf_stat_{band}"] = adf["adf_stat"]
+        out[f"adf_pvalue_{band}"] = adf["adf_pvalue"]
+        out[f"adf_usedlag_{band}"] = adf["adf_usedlag"]
+        out[f"adf_nobs_{band}"] = adf["adf_nobs"]
+        out[f"adf_valid_{band}"] = adf["adf_valid"]
+        if np.isfinite(adf["adf_pvalue"]):
+            pvalues.append(adf["adf_pvalue"])
+
+    out["adf_min_pvalue"] = float(np.min(pvalues)) if pvalues else np.nan
+    out["adf_any_pvalue_lt_0p05"] = bool(np.any(np.asarray(pvalues) < 0.05)) if pvalues else False
+    return out
 
 
 def log_nonfinite_sample_summary(samples_dict, *, label, max_items=20):
@@ -1086,6 +1175,11 @@ def main():
                 obj,
                 bands=bands,
             )
+            adf_result = compute_object_adf_diagnostics(
+                obj_flat_samples_flatten_per_band,
+                obj,
+                bands=bands,
+            )
             kl_result = compute_parameter_kls(
                 obj_flat_samples_flatten_per_band,
                 bands=bands,
@@ -1135,7 +1229,7 @@ def main():
                     logging.error(f"[{oid}] Plotting error: {e}")
                     logging.error(traceback.format_exc())
 
-            final_result = obj | result | kl_result | dict(prefix=prefix, suffix=suffix) 
+            final_result = obj | result | adf_result | kl_result | dict(prefix=prefix, suffix=suffix) 
             # final_result |= diagnostics
             log_sigma_uv = final_result.get("log_sigma_uv")
             log_sigma_uv_err = final_result.get("log_sigma_uv_err")

@@ -17,7 +17,11 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from qvc.hubble import hubble_plotting, hubble_utils
-from qvc.light_curve.fit_light_curves import build_single_object_model, make_lc
+from qvc.light_curve.fit_light_curves import (
+    build_single_object_model,
+    compute_object_adf_diagnostics,
+    make_lc,
+)
 from qvc.light_curve.multiband_fit_utils import (
     flatten_flat_samples_per_band,
     lambda_pivot,
@@ -182,6 +186,7 @@ def test_end_to_end(tmp_path, monkeypatch):
     samples_flat = tree_map(lambda x: np.asarray(device_get(x)), samples_flat)
     flat_per_band = flatten_flat_samples_per_band(samples_flat, bands=bands)
     result = process_samples(flat_per_band, obj, bands=bands)
+    adf_result = compute_object_adf_diagnostics(flat_per_band, obj, bands)
 
     quasar = {
         "object_id": obj["object_id"],
@@ -219,6 +224,7 @@ def test_end_to_end(tmp_path, monkeypatch):
         "log_amp_delta_blr_r": float(np.percentile(flat_per_band["log_amp_delta_blr_r"], 50)),
         "log_amp_delta_blr_i": float(np.percentile(flat_per_band["log_amp_delta_blr_i"], 50)),
     }
+    quasar.update(adf_result)
 
     h5_path = tmp_path / "data" / "fake_light_curve_end_to_end.h5"
     _write_test_quasars_hdf5(h5_path, [quasar])
@@ -242,3 +248,8 @@ def test_end_to_end(tmp_path, monkeypatch):
     assert np.isclose(row["mags_mean_g"], obj["mags_means"][0])
     assert np.isclose(row["mags_mean_r"], obj["mags_means"][1])
     assert np.isclose(row["mags_mean_i"], obj["mags_means"][2])
+    assert "adf_min_pvalue" in row.index
+    assert "adf_any_pvalue_lt_0p05" in row.index
+    assert "adf_pvalue_g" in row.index
+    assert "adf_pvalue_r" in row.index
+    assert "adf_pvalue_i" in row.index
