@@ -339,8 +339,7 @@ def compute_lomb_scargle_break_diagnostics(model, samples, obj, z, *, n_freq=500
         posterior_median,
         2.0 * np.pi * freqs,
         amp_reference="selected_band",
-        selected_band=ref_idx,
-        subtract_noise_floor=False,
+        #selected_band=ref_idx,
     )
     fit = fit_bending_power_law_psd(f_bin, p_bin, p_lo, p_hi)
     eta_sigma = float(np.nanmedian(np.asarray(samples["eta_sigma"], dtype=float)))

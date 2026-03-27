@@ -833,26 +833,20 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, mags_means, survey_
         ax_psd.plot(freqs, psd_median, lw=2, color='m', alpha=0.8, label="Model PSD", zorder=4)
         ax_psd.fill_between(freqs, psd_lo, psd_hi, color='m', alpha=0.2, zorder=3)
 
-        boot_results = bootstrap_lomb_scargle(
+        f_bin, P_bin_med, P_lo, P_hi, counts, P_noise = combined_lomb_scargle_from_model(
             model,
             y,
             yerr,
             posterior_median,
-            freqs,
-            n_boot=100,
+            2.0 * np.pi * freqs,
         )
-
-        f_bin        = np.asarray(boot_results["f_bin"])
-        P_bin_med    = np.asarray(boot_results["P_bin_med"])
-        P_lo         = np.asarray(boot_results["P_bin_lo"])
-        P_hi         = np.asarray(boot_results["P_bin_hi"])
-        P_noise_med  = np.asarray(boot_results["P_noise_med"])
-        P_noise_lo   = np.asarray(boot_results["P_noise_lo"])
-        P_noise_hi   = np.asarray(boot_results["P_noise_hi"])
+        P_noise_med = np.full_like(P_bin_med, P_noise, dtype=float)
+        P_noise_lo = P_noise_med.copy()
+        P_noise_hi = P_noise_med.copy()
 
         # Renormalize data PSD to match model PSD at first bin
         model_at_f0 = np.interp(f_bin[0], freqs, psd_median)
-        scale = model_at_f0 / P_bin_med[0]
+        scale = model_at_f0 / max(P_bin_med[0], 1e-30)
 
         P_bin_med   = P_bin_med   * scale
         P_lo        = P_lo        * scale
