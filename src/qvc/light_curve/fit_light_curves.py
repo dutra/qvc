@@ -60,6 +60,7 @@ from qvc.light_curve.multiband_fit_plotting import *
 from qvc.light_curve.multiband_fit_utils import *
 from qvc.light_curve.multiband_generate_lc import *
 from qvc.light_curve.multiband_model_dho_blr import make_multiband_dho_blr_model
+from qvc.light_curve.variability_metrics import compute_variability_metrics_for_cleaned_lc
 
 
 zero_mean = False
@@ -1305,6 +1306,7 @@ def make_lc(
         "cadence_err": data["cadence_err"],
         "number_points": data["number_points"],
     }
+    out.update(compute_variability_metrics_for_cleaned_lc(out))
 
     if inject_fake:
         out["log_tau_fake"] = float(np.log(10 ** float(log_tau0_rf) * (1 + data["z"])))

@@ -11,6 +11,8 @@ import numpy as np
 from tqdm import tqdm
 
 from qvc.hubble.hubble_utils import read_quasars_from_hdf5_flat, populate_sdss_fields
+from qvc.light_curve.fit_light_curves import make_lc
+from qvc.light_curve.multiband_generate_lc import concat_light_curves
 #from qvc.light_curve.multiband_generate_lc import populate_sdss_fields
 
 def read_quasars_from_h5(h5_path):
@@ -204,6 +206,51 @@ def load_and_merge_h5(file_list, expected_n, load_n):
     return all_quasars
 
 
+def attach_variability_metrics(rows):
+    """Reload raw light curves and attach authoritative corrected variability metrics."""
+
+    object_ids = [str(row["object_id"]) for row in rows if row.get("object_id") not in (None, "")]
+    unique_object_ids = list(dict.fromkeys(object_ids))
+    reloaded = concat_light_curves(filter_object_ids=unique_object_ids, progress_bar=False)
+    reloaded_by_object_id = {str(obj["object_id"]): obj for obj in reloaded}
+
+    missing_object_ids = [oid for oid in unique_object_ids if oid not in reloaded_by_object_id]
+    if missing_object_ids:
+        raise ValueError(
+            "Failed to recompute variability with concat_light_curves; "
+            f"missing object_ids: {missing_object_ids}"
+        )
+
+    enriched_rows = []
+    unusable_object_ids = []
+    for row in rows:
+        object_id = str(row["object_id"])
+        lc = make_lc(
+            reloaded_by_object_id[object_id],
+            bands=["u", "g", "r", "i", "z"],
+            inject_fake=False,
+            drop_band_lyman_alpha=False,
+            verbose=False,
+        )
+        if lc is None:
+            unusable_object_ids.append(object_id)
+            continue
+
+        enriched = dict(row)
+        for key, value in lc.items():
+            if key.startswith("variability_"):
+                enriched[key] = value
+        enriched_rows.append(enriched)
+
+    if unusable_object_ids:
+        raise ValueError(
+            "Failed to recompute variability because make_lc returned None for "
+            f"object_ids: {unusable_object_ids}"
+        )
+
+    return enriched_rows
+
+
 def main():
     p = argparse.ArgumentParser(
         description=(
@@ -242,6 +289,12 @@ def main():
         action="store_true",
         default=False,
         help="Skip populate_sdss_fields before writing.",
+    )
+    p.add_argument(
+        "--compute-variability",
+        action="store_true",
+        default=False,
+        help="Reload S82 light curves via concat_light_curves and recompute corrected per-band variability metrics.",
     )
     p.add_argument(
         "--out",
@@ -302,10 +355,15 @@ def main():
         all_quasars = deduplicate(all_quasars, keys=dedup_keys)
         print(f"De-duplicated by '{dedup_keys}': {before} -> {len(all_quasars)}")
 
+    if args.compute_variability and all_quasars:
+        print("Computing corrected variability metrics from merged rows...")
+        all_quasars = attach_variability_metrics(all_quasars)
+
     if not args.skip_populate_sdss and all_quasars:
         print("Populating SDSS fields...")
         all_quasars = populate_sdss_fields(all_quasars)
-        print(all_quasars[0]['plate'])
+        if all_quasars and "plate" in all_quasars[0]:
+            print(all_quasars[0]["plate"])
     if out_format == "csv":
         seen = []
         s = set()
