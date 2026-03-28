@@ -5314,6 +5314,52 @@ def plot_Mi_relation(df_agn, plot_path=None):
     _save_figure(fig, os.path.join(diagnostics_path, "Mi_relation_comparison.pdf"), dpi=200)
 
 
+def plot_adf_pvalue_g_diagnostic(
+    df_agn,
+    plot_path="plots/hubble",
+    show=False,
+    pvalue_col="adf_pvalue_g",
+    alpha=0.05,
+):
+    """Plot g-band ADF p-value diagnostics against the non-stationary null."""
+    if pvalue_col not in df_agn.columns:
+        return None
+
+    pvals = pd.to_numeric(df_agn[pvalue_col], errors="coerce").to_numpy(dtype=float)
+    mask = np.isfinite(pvals) & (pvals >= 0.0) & (pvals <= 1.0)
+    pvals = pvals[mask]
+    if pvals.size == 0:
+        return None
+
+    pvals = pvals[pvals > 0.0]
+    if pvals.size == 0:
+        return None
+
+    n = pvals.size
+    pmin = float(np.nanmin(pvals))
+    left = 10 ** np.floor(np.log10(pmin))
+    bins = np.logspace(np.log10(left), 0.0, 30)
+
+    fig, ax = plt.subplots(figsize=(7.5, 4.8))
+    ax.hist(pvals, bins=bins, color="tab:green", alpha=0.85, edgecolor="white")
+    if alpha > 0.0:
+        ax.axvline(alpha, color="black", linestyle="--", linewidth=1.2)
+    ax.set_xscale("log")
+    ax.set_xlabel(r"$g$-band ADF p-value")
+    ax.set_ylabel("Count")
+    ax.set_title(f"ADF p-value distribution in g band (N = {n})")
+    fig.tight_layout()
+
+    diagnostics_path = os.path.join(plot_path or "plots/hubble", "diagnostics")
+    os.makedirs(diagnostics_path, exist_ok=True)
+    return _save_figure(
+        fig,
+        os.path.join(diagnostics_path, "adf_pvalue_g_diagnostic.pdf"),
+        dpi=200,
+        show=show,
+    )
+
+
 def plot_completeness_diagnostics(dmi_plot, z, m2500, integrals_max_w, plot_path="plots/hubble"):
 
     # Plot dmi vs z for the posterior-summary correction used in debiasing.

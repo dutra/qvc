@@ -228,6 +228,250 @@ def compute_object_adf_diagnostics(flat_samples, obj, bands):
     return out
 
 
+def extract_band_detrended_series(flat_samples, obj, bands, band, *, z=None):
+    """Return observed/rest-frame times, residuals, and errors for one detrended band."""
+
+    if band not in bands:
+        raise KeyError(f"Missing {band} band required for residual diagnostics.")
+
+    t_all = np.asarray(obj["X"][0], dtype=float)
+    y_all = np.asarray(obj["y"], dtype=float)
+    yerr_all = np.asarray(obj.get("yerr", np.full_like(y_all, np.nan)), dtype=float)
+    band_idx = np.asarray(obj["band_idx"])
+
+    i = bands.index(band)
+    mask = band_idx == i
+    t_band = t_all[mask]
+    y_band = y_all[mask]
+    yerr_band = yerr_all[mask]
+    fitted_mean = posterior_median_mean_function(flat_samples, t_band, band, t_ref=t_all)
+    residual = y_band - fitted_mean
+
+    z_val = float(obj.get("z", 0.0) if z is None else z)
+    t_rf = t_band / (1.0 + z_val)
+    return t_band, t_rf, residual, yerr_band
+
+
+def bin_series_mean_and_variance(t, y, yerr=None, *, bin_width=1000.0, min_count=3):
+    """Bin a 1D time series and summarize the mean and variance in each time bin."""
+
+    t = np.asarray(t, dtype=float).ravel()
+    y = np.asarray(y, dtype=float).ravel()
+    if yerr is None:
+        yerr = np.full_like(y, np.nan, dtype=float)
+    else:
+        yerr = np.asarray(yerr, dtype=float).ravel()
+
+    mask = np.isfinite(t) & np.isfinite(y)
+    if yerr.shape == y.shape:
+        mask &= np.isfinite(yerr) | ~np.isfinite(yerr)
+    t = t[mask]
+    y = y[mask]
+    yerr = yerr[mask]
+
+    out = {
+        "bin_center": np.array([], dtype=float),
+        "bin_count": np.array([], dtype=int),
+        "mean": np.array([], dtype=float),
+        "mean_err": np.array([], dtype=float),
+        "variance": np.array([], dtype=float),
+        "variance_err": np.array([], dtype=float),
+    }
+    if t.size == 0:
+        return out
+
+    t0 = float(np.min(t))
+    t1 = float(np.max(t))
+    if not np.isfinite(bin_width) or bin_width <= 0.0:
+        raise ValueError("bin_width must be positive.")
+    edges = np.arange(t0, t1 + bin_width, bin_width, dtype=float)
+    if edges.size < 2:
+        edges = np.array([t0, t0 + bin_width], dtype=float)
+    if edges[-1] <= t1:
+        edges = np.append(edges, edges[-1] + bin_width)
+
+    centers = []
+    counts = []
+    means = []
+    mean_errs = []
+    variances = []
+    variance_errs = []
+    for lo, hi in zip(edges[:-1], edges[1:]):
+        in_bin = (t >= lo) & (t < hi if hi < edges[-1] else t <= hi)
+        if int(np.sum(in_bin)) < int(min_count):
+            continue
+
+        t_bin = t[in_bin]
+        y_bin = y[in_bin]
+        yerr_bin = yerr[in_bin]
+        n = y_bin.size
+        if n < 2:
+            continue
+
+        good_w = np.isfinite(yerr_bin) & (yerr_bin > 0.0)
+        if np.any(good_w):
+            w = 1.0 / np.square(yerr_bin[good_w])
+            mean = float(np.average(y_bin[good_w], weights=w))
+            mean_err = float(np.sqrt(1.0 / np.sum(w)))
+        else:
+            mean = float(np.mean(y_bin))
+            mean_err = float(np.std(y_bin, ddof=1) / np.sqrt(n))
+
+        variance = float(np.var(y_bin, ddof=1))
+        variance_err = float(variance * np.sqrt(2.0 / max(n - 1, 1)))
+
+        centers.append(float(np.mean(t_bin)))
+        counts.append(int(n))
+        means.append(mean)
+        mean_errs.append(mean_err)
+        variances.append(variance)
+        variance_errs.append(variance_err)
+
+    out["bin_center"] = np.asarray(centers, dtype=float)
+    out["bin_count"] = np.asarray(counts, dtype=int)
+    out["mean"] = np.asarray(means, dtype=float)
+    out["mean_err"] = np.asarray(mean_errs, dtype=float)
+    out["variance"] = np.asarray(variances, dtype=float)
+    out["variance_err"] = np.asarray(variance_errs, dtype=float)
+    return out
+
+
+def fit_binned_linear_trend(x, y, yerr):
+    """Fit y = a + b (x - x0) and return slope/intercept summaries."""
+
+    x = np.asarray(x, dtype=float).ravel()
+    y = np.asarray(y, dtype=float).ravel()
+    yerr = np.asarray(yerr, dtype=float).ravel()
+    mask = np.isfinite(x) & np.isfinite(y) & np.isfinite(yerr) & (yerr > 0.0)
+    x = x[mask]
+    y = y[mask]
+    yerr = yerr[mask]
+
+    result = {
+        "valid": False,
+        "t_center": np.nan,
+        "slope": np.nan,
+        "slope_err": np.nan,
+        "slope_snr": np.nan,
+        "intercept": np.nan,
+        "intercept_err": np.nan,
+        "n_points": int(x.size),
+    }
+    if x.size < 3:
+        return result
+
+    x0 = float(np.median(x))
+    x_centered = x - x0
+    try:
+        coeffs, cov = np.polyfit(
+            x_centered,
+            y,
+            1,
+            w=1.0 / np.maximum(yerr, 1e-12),
+            cov=True,
+        )
+    except Exception:
+        return result
+
+    slope = float(coeffs[0])
+    intercept = float(coeffs[1])
+    slope_err = float(np.sqrt(max(cov[0, 0], 0.0)))
+    intercept_err = float(np.sqrt(max(cov[1, 1], 0.0)))
+    result.update(
+        valid=np.isfinite(slope) and np.isfinite(slope_err),
+        t_center=x0,
+        slope=slope,
+        slope_err=slope_err,
+        slope_snr=float(slope / slope_err) if np.isfinite(slope_err) and slope_err > 0.0 else np.nan,
+        intercept=intercept,
+        intercept_err=intercept_err,
+    )
+    return result
+
+
+def compute_g_band_residual_drift_diagnostics(
+    flat_samples,
+    obj,
+    bands,
+    *,
+    z=None,
+    bin_width_rf_days=1000.0,
+    min_count=3,
+    return_series=False,
+):
+    """Summarize mean/variance drift in detrended g-band residuals over rest-frame time."""
+
+    out = {
+        "g_resid_bin_width_rf_days": float(bin_width_rf_days),
+        "g_resid_n_bins": 0,
+        "g_resid_mean_trend_valid": False,
+        "g_resid_mean_slope": np.nan,
+        "g_resid_mean_slope_err": np.nan,
+        "g_resid_mean_slope_snr": np.nan,
+        "g_resid_mean_intercept": np.nan,
+        "g_resid_mean_intercept_err": np.nan,
+        "g_resid_mean_fit_t_center_rf": np.nan,
+        "g_resid_var_trend_valid": False,
+        "g_resid_var_slope": np.nan,
+        "g_resid_var_slope_err": np.nan,
+        "g_resid_var_slope_snr": np.nan,
+        "g_resid_var_intercept": np.nan,
+        "g_resid_var_intercept_err": np.nan,
+        "g_resid_var_fit_t_center_rf": np.nan,
+    }
+    if return_series:
+        out |= {
+            "g_resid_bin_center_rf": np.array([], dtype=float),
+            "g_resid_bin_count": np.array([], dtype=int),
+            "g_resid_bin_mean": np.array([], dtype=float),
+            "g_resid_bin_mean_err": np.array([], dtype=float),
+            "g_resid_bin_variance": np.array([], dtype=float),
+            "g_resid_bin_variance_err": np.array([], dtype=float),
+        }
+
+    try:
+        _, t_rf, residual, yerr = extract_band_detrended_series(flat_samples, obj, bands, "g", z=z)
+    except KeyError:
+        return out
+
+    binned = bin_series_mean_and_variance(
+        t_rf,
+        residual,
+        yerr,
+        bin_width=bin_width_rf_days,
+        min_count=min_count,
+    )
+    out["g_resid_n_bins"] = int(binned["bin_center"].size)
+    if return_series:
+        out["g_resid_bin_center_rf"] = binned["bin_center"]
+        out["g_resid_bin_count"] = binned["bin_count"]
+        out["g_resid_bin_mean"] = binned["mean"]
+        out["g_resid_bin_mean_err"] = binned["mean_err"]
+        out["g_resid_bin_variance"] = binned["variance"]
+        out["g_resid_bin_variance_err"] = binned["variance_err"]
+
+    mean_fit = fit_binned_linear_trend(binned["bin_center"], binned["mean"], binned["mean_err"])
+    var_fit = fit_binned_linear_trend(binned["bin_center"], binned["variance"], binned["variance_err"])
+
+    out.update(
+        g_resid_mean_trend_valid=bool(mean_fit["valid"]),
+        g_resid_mean_slope=mean_fit["slope"],
+        g_resid_mean_slope_err=mean_fit["slope_err"],
+        g_resid_mean_slope_snr=mean_fit["slope_snr"],
+        g_resid_mean_intercept=mean_fit["intercept"],
+        g_resid_mean_intercept_err=mean_fit["intercept_err"],
+        g_resid_mean_fit_t_center_rf=mean_fit["t_center"],
+        g_resid_var_trend_valid=bool(var_fit["valid"]),
+        g_resid_var_slope=var_fit["slope"],
+        g_resid_var_slope_err=var_fit["slope_err"],
+        g_resid_var_slope_snr=var_fit["slope_snr"],
+        g_resid_var_intercept=var_fit["intercept"],
+        g_resid_var_intercept_err=var_fit["intercept_err"],
+        g_resid_var_fit_t_center_rf=var_fit["t_center"],
+    )
+    return out
+
+
 def bending_power_law_psd(freq, log_sigma, log_tau, log_noise_floor=-99.0):
     """Single-break PSD with flat low-frequency slope, -2 high-frequency slope, and white-noise floor."""
 
@@ -1540,6 +1784,12 @@ def main():
                 obj,
                 bands=bands,
             )
+            drift_result = compute_g_band_residual_drift_diagnostics(
+                obj_flat_samples_flatten_per_band,
+                obj,
+                bands,
+                z=float(obj["z"]),
+            )
             psd_break_result = compute_lomb_scargle_break_diagnostics(
                 m,
                 plot_samples,
@@ -1596,6 +1846,17 @@ def main():
                             time0=obj["time0"],
                             bands=bands,
                         )
+                    drift_plot_result = compute_g_band_residual_drift_diagnostics(
+                        obj_flat_samples_flatten_per_band,
+                        obj,
+                        bands,
+                        z=float(obj["z"]),
+                        return_series=True,
+                    )
+                    save_g_band_binned_residual_drift_plot(
+                        drift_plot_result,
+                        obj | dict(prefix=prefix, suffix=suffix),
+                    )
                     if not args.disable_correlation_plot:
                         plot_correlation_matrix(obj_flat_samples_flatten_per_band, obj)
                     if not args.disable_histogram_plot:
@@ -1606,7 +1867,7 @@ def main():
                     logging.error(f"[{oid}] Plotting error: {e}")
                     logging.error(traceback.format_exc())
 
-            final_result = obj | result | adf_result | psd_break_result | sf_result | kl_result | dict(prefix=prefix, suffix=suffix) 
+            final_result = obj | result | adf_result | drift_result | psd_break_result | sf_result | kl_result | dict(prefix=prefix, suffix=suffix) 
             # final_result |= diagnostics
             log_sigma_uv = final_result.get("log_sigma_uv")
             log_sigma_uv_err = final_result.get("log_sigma_uv_err")

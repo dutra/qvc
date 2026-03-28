@@ -4,6 +4,7 @@ from pathlib import Path
 
 import h5py
 import numpy as np
+import pandas as pd
 import jax.numpy as jnp
 from jax import device_get, random
 from jax.tree_util import tree_map
@@ -19,6 +20,7 @@ if str(SRC) not in sys.path:
 from qvc.hubble import hubble_plotting, hubble_utils
 from qvc.light_curve.fit_light_curves import (
     build_single_object_model,
+    compute_g_band_residual_drift_diagnostics,
     compute_object_adf_diagnostics,
     make_lc,
 )
@@ -118,11 +120,32 @@ def _make_fake_public_object():
     }
 
 
+def test_plot_adf_pvalue_g_diagnostic_writes_pdf(tmp_path, monkeypatch):
+    monkeypatch.setenv("MPLCONFIGDIR", str(tmp_path / "mplconfig"))
+
+    df = pd.DataFrame(
+        {
+            "adf_pvalue_g": [0.001, 0.004, 0.02, 0.03, 0.07, 0.11, 0.2, 0.5, 0.8, np.nan],
+        }
+    )
+
+    out = hubble_plotting.plot_adf_pvalue_g_diagnostic(
+        df,
+        plot_path=str(tmp_path / "figures"),
+        show=False,
+    )
+
+    assert out is not None
+    assert os.path.exists(out)
+    assert out.endswith("adf_pvalue_g_diagnostic.pdf")
+
+
 def test_end_to_end(tmp_path, monkeypatch):
     monkeypatch.setenv("MPLCONFIGDIR", str(tmp_path / "mplconfig"))
 
     for name in (
         "plot_alpha_lambda_vs_l2500_by_redshift",
+        "plot_adf_pvalue_g_diagnostic",
         "plot_alpha_lambda_histogram",
         "plot_blr_lag_vs_amp_by_band",
         "plot_blr_lag_vs_redshift_by_band",
@@ -187,6 +210,7 @@ def test_end_to_end(tmp_path, monkeypatch):
     flat_per_band = flatten_flat_samples_per_band(samples_flat, bands=bands)
     result = process_samples(flat_per_band, obj, bands=bands)
     adf_result = compute_object_adf_diagnostics(flat_per_band, obj, bands)
+    drift_result = compute_g_band_residual_drift_diagnostics(flat_per_band, obj, bands, z=float(obj["z"]))
 
     quasar = {
         "object_id": obj["object_id"],
@@ -225,6 +249,7 @@ def test_end_to_end(tmp_path, monkeypatch):
         "log_amp_delta_blr_i": float(np.percentile(flat_per_band["log_amp_delta_blr_i"], 50)),
     }
     quasar.update(adf_result)
+    quasar.update(drift_result)
 
     h5_path = tmp_path / "data" / "fake_light_curve_end_to_end.h5"
     _write_test_quasars_hdf5(h5_path, [quasar])
@@ -253,3 +278,7 @@ def test_end_to_end(tmp_path, monkeypatch):
     assert "adf_pvalue_g" in row.index
     assert "adf_pvalue_r" in row.index
     assert "adf_pvalue_i" in row.index
+    assert "g_resid_mean_slope" in row.index
+    assert "g_resid_mean_slope_err" in row.index
+    assert "g_resid_var_slope" in row.index
+    assert "g_resid_var_slope_err" in row.index

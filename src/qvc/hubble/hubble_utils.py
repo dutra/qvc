@@ -935,6 +935,7 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
         return frame
 
     from qvc.hubble.hubble_plotting import (
+        plot_adf_pvalue_g_diagnostic,
         plot_alpha_lambda_vs_l2500_by_redshift,
         plot_alpha_lambda_vs_l2500,
         plot_alpha_lambda_vs_eta_sigma,
@@ -1159,7 +1160,6 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
         plot_alpha_lambda_histogram(df, plot_path=plot_path, show=False)
     if {"alpha_lambda", "eta_sigma"}.issubset(df.columns):
         plot_alpha_lambda_vs_eta_sigma(df, plot_path=plot_path, show=False)
-
     if {"z", "log_tau_uv_rf", "log_sigma_uv"}.issubset(df.columns):
         plot_tau_sigma_vs_redshift(df, plot_path=plot_path, show=False)
     if {"z", "eta_tau", "eta_sigma"}.issubset(df.columns):
@@ -1363,6 +1363,8 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
     print("Number of quasars with z > 3:", num_quasars_z_gt_3)
     print(f"\nTotal number of objects removed by all cuts: {len(df_all) - len(df)}")
     print("Final number of quasars:", len(df))
+    if "adf_pvalue_g" in df.columns:
+        plot_adf_pvalue_g_diagnostic(df, plot_path=plot_path, show=False)
     plot_cut_diagnostics(df_all.copy(), df.copy(), bins=30, cut_info="all cuts")
     colorpanel_cols = [
         col for col in ("f_host_center", "f_bc_over_pl_3000", "wrms")

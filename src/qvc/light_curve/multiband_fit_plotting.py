@@ -832,6 +832,79 @@ def save_color_magnitude_plot(
     plt.close(fig)
 
 
+def save_g_band_binned_residual_drift_plot(diagnostic, data, show=False, filename_suffix=None):
+    """Save a per-object g-band residual mean/variance drift diagnostic plot."""
+
+    object_id = data["object_id"]
+    z = float(data["z"])
+    x = np.asarray(diagnostic.get("g_resid_bin_center_rf", []), dtype=float)
+    y_mean = np.asarray(diagnostic.get("g_resid_bin_mean", []), dtype=float)
+    y_mean_err = np.asarray(diagnostic.get("g_resid_bin_mean_err", []), dtype=float)
+    y_var = np.asarray(diagnostic.get("g_resid_bin_variance", []), dtype=float)
+    y_var_err = np.asarray(diagnostic.get("g_resid_bin_variance_err", []), dtype=float)
+    counts = np.asarray(diagnostic.get("g_resid_bin_count", []), dtype=int)
+
+    if x.size == 0:
+        logging.warning("Skipping g-band residual drift plot because no binned residual diagnostics are available.")
+        return
+
+    fig, (ax_mean, ax_var) = plt.subplots(2, 1, figsize=(8, 7), sharex=True)
+
+    ax_mean.errorbar(
+        x,
+        y_mean,
+        yerr=y_mean_err,
+        fmt="o",
+        color=colors["g"],
+        ecolor=colors["g"],
+        capsize=3,
+        markersize=4,
+        alpha=0.85,
+    )
+    if bool(diagnostic.get("g_resid_mean_trend_valid", False)):
+        x0 = float(diagnostic["g_resid_mean_fit_t_center_rf"])
+        x_line = np.linspace(np.min(x), np.max(x), 200)
+        y_line = diagnostic["g_resid_mean_intercept"] + diagnostic["g_resid_mean_slope"] * (x_line - x0)
+        ax_mean.plot(x_line, y_line, color="black", lw=1.5)
+    ax_mean.axhline(0.0, color="0.5", linestyle="--", lw=1.0)
+    ax_mean.set_ylabel("Residual mean (mag)")
+    ax_mean.set_title(
+        f"g-band detrended residuals: binned mean and variance\n"
+        f"N bins = {x.size}, total points = {int(np.sum(counts))}"
+    )
+
+    ax_var.errorbar(
+        x,
+        y_var,
+        yerr=y_var_err,
+        fmt="o",
+        color=colors["g"],
+        ecolor=colors["g"],
+        capsize=3,
+        markersize=4,
+        alpha=0.85,
+    )
+    if bool(diagnostic.get("g_resid_var_trend_valid", False)):
+        x0 = float(diagnostic["g_resid_var_fit_t_center_rf"])
+        x_line = np.linspace(np.min(x), np.max(x), 200)
+        y_line = diagnostic["g_resid_var_intercept"] + diagnostic["g_resid_var_slope"] * (x_line - x0)
+        ax_var.plot(x_line, y_line, color="black", lw=1.5)
+    ax_var.set_xlabel("Rest-frame time (days)")
+    ax_var.set_ylabel(r"Residual variance (mag$^2$)")
+
+    fig.tight_layout()
+
+    output_dir = f"plots/multiband/{prefix}/g_band_residual_drift"
+    os.makedirs(output_dir, exist_ok=True)
+    save_suffix = suffix if filename_suffix is None else filename_suffix
+    fpath = os.path.join(output_dir, f"{z:.1f}_{object_id}_g_band_residual_drift_{save_suffix}.pdf")
+    plt.savefig(fpath, dpi=600)
+    logging.info(f"Saving figure to {fpath}")
+    if show:
+        plt.show()
+    plt.close(fig)
+
+
 def save_combined_plot(samples, model, X, y, yerr, band_idx, mags_means, survey_times,
                        data, bands=['u', 'g', 'r', 'i', 'z'], plot_psd=True, show=False,
                        time0=0.0, plot_bpl_fit=False, filename_suffix=None):
