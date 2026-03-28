@@ -779,7 +779,7 @@ def plot_fast_vs_uv_variability(df, plot_path="plots/hubble", show=False):
 
 
 def plot_sf_vs_uv_variability(df, plot_path="plots/hubble", show=False):
-    """Compare closest-band structure-function summaries against the main UV variability fit."""
+    """Compare UV-converted SF summaries from the g-band fit against the main UV variability fit."""
     required = {"log_sigma_uv", "log_sigma_uv_sf", "log_tau_uv_rf_sf"}
     if not required.issubset(df.columns):
         missing = ", ".join(sorted(required - set(df.columns)))

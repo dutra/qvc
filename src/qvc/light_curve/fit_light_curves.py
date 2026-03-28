@@ -519,11 +519,13 @@ def fit_structure_function(tau, sf, sf_lo=None, sf_hi=None):
 
 
 def compute_structure_function_diagnostics(samples, obj, z):
-    """Fit SF in the band nearest rest-frame 2500 A using rest-frame lags and convert to UV."""
+    """Fit SF in the g band using rest-frame lags and convert to UV."""
 
     bands = list(obj["bands"])
+    if "g" not in bands:
+        raise KeyError("Missing g band required for SF diagnostics.")
     lam_rf = np.asarray([lambda_pivot[band] / (1.0 + float(z)) for band in bands], dtype=float)
-    ref_idx = int(np.argmin(np.abs(lam_rf - 2500.0)))
+    ref_idx = bands.index("g")
     ref_band = bands[ref_idx]
     lam_ref_band = float(lam_rf[ref_idx])
 

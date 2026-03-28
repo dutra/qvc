@@ -15,6 +15,7 @@ if str(SRC) not in sys.path:
 from qvc.light_curve.fit_light_curves import (
     build_explicit_model_params,
     bending_power_law_psd,
+    compute_structure_function_diagnostics,
     compute_band_adf,
     compute_parameter_kls,
     compute_object_adf_diagnostics,
@@ -392,6 +393,44 @@ def test_compute_band_adf_rejects_constant_or_short_series():
     assert np.isnan(short_result["adf_stat"])
     assert const_result["adf_valid"] is False
     assert np.isnan(const_result["adf_pvalue"])
+
+
+def test_compute_structure_function_diagnostics_returns_finite_sensible_g_band_fit():
+    rng = np.random.default_rng(11)
+    sigma_true = 0.18
+    tau_true = 300.0
+    t_g = np.linspace(0.0, 3000.0, 40, dtype=float)
+    dt = np.abs(t_g[:, None] - t_g[None, :])
+    cov = (sigma_true**2) * np.exp(-dt / tau_true)
+    y_g = rng.multivariate_normal(np.zeros(t_g.size, dtype=float), cov)
+    yerr_g = np.full(t_g.size, 0.01, dtype=float)
+
+    t_r = np.linspace(0.0, 3000.0, 8, dtype=float)
+    y_r = np.zeros(t_r.size, dtype=float)
+    yerr_r = np.full(t_r.size, 0.02, dtype=float)
+
+    obj = {
+        "bands": ["g", "r"],
+        "band_idx": np.array([0] * t_g.size + [1] * t_r.size, dtype=int),
+        "X": (np.concatenate([t_g, t_r]), np.array([0] * t_g.size + [1] * t_r.size, dtype=int)),
+        "y": np.concatenate([y_g, y_r]),
+        "yerr": np.concatenate([yerr_g, yerr_r]),
+    }
+    samples = {
+        "eta_sigma": np.array([0.0, 0.05, -0.05], dtype=float),
+        "eta_tau": np.array([0.0, 0.05, -0.05], dtype=float),
+    }
+
+    result = compute_structure_function_diagnostics(samples, obj, z=0.8)
+
+    assert result["sf_ref_band"] == "g"
+    assert result["sf_valid"] is True
+    assert np.isfinite(result["log_sigma_sf_ref_band"])
+    assert np.isfinite(result["log_tau_sf_ref_band"])
+    assert 1.0 < result["log_tau_sf_ref_band"] < 4.0
+    assert -2.0 < result["log_sigma_sf_ref_band"] < 0.0
+    assert np.isclose(result["log_sigma_sf_ref_band"], np.log10(sigma_true), atol=0.35)
+    assert np.isclose(result["log_tau_sf_ref_band"], np.log10(tau_true), atol=0.45)
 
 
 def test_compute_object_adf_diagnostics_returns_per_band_fields():
