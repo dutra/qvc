@@ -228,8 +228,8 @@ def compute_object_adf_diagnostics(flat_samples, obj, bands):
     return out
 
 
-def extract_band_detrended_series(flat_samples, obj, bands, band, *, z=None):
-    """Return observed/rest-frame times, residuals, and errors for one detrended band."""
+def extract_band_detrended_series(flat_samples, obj, bands, band, *, z=None, subtract_mean=True):
+    """Return observed/rest-frame times, values, and errors for one band."""
 
     if band not in bands:
         raise KeyError(f"Missing {band} band required for residual diagnostics.")
@@ -244,12 +244,15 @@ def extract_band_detrended_series(flat_samples, obj, bands, band, *, z=None):
     t_band = t_all[mask]
     y_band = y_all[mask]
     yerr_band = yerr_all[mask]
-    fitted_mean = posterior_median_mean_function(flat_samples, t_band, band, t_ref=t_all)
-    residual = y_band - fitted_mean
+    if subtract_mean:
+        fitted_mean = posterior_median_mean_function(flat_samples, t_band, band, t_ref=t_all)
+        values = y_band - fitted_mean
+    else:
+        values = y_band
 
     z_val = float(obj.get("z", 0.0) if z is None else z)
     t_rf = t_band / (1.0 + z_val)
-    return t_band, t_rf, residual, yerr_band
+    return t_band, t_rf, values, yerr_band
 
 
 def bin_series_mean_and_variance(t, y, yerr=None, *, bin_width=1000.0, min_count=3):
@@ -468,6 +471,79 @@ def compute_g_band_residual_drift_diagnostics(
         g_resid_var_intercept=var_fit["intercept"],
         g_resid_var_intercept_err=var_fit["intercept_err"],
         g_resid_var_fit_t_center_rf=var_fit["t_center"],
+    )
+    return out
+
+
+def compute_g_band_raw_drift_diagnostics(
+    flat_samples,
+    obj,
+    bands,
+    *,
+    z=None,
+    bin_width_rf_days=1000.0,
+    min_count=3,
+):
+    """Summarize mean/variance drift in raw g-band light-curve values over rest-frame time."""
+
+    out = {
+        "g_raw_bin_width_rf_days": float(bin_width_rf_days),
+        "g_raw_n_bins": 0,
+        "g_raw_mean_trend_valid": False,
+        "g_raw_mean_slope": np.nan,
+        "g_raw_mean_slope_err": np.nan,
+        "g_raw_mean_slope_snr": np.nan,
+        "g_raw_mean_intercept": np.nan,
+        "g_raw_mean_intercept_err": np.nan,
+        "g_raw_mean_fit_t_center_rf": np.nan,
+        "g_raw_var_trend_valid": False,
+        "g_raw_var_slope": np.nan,
+        "g_raw_var_slope_err": np.nan,
+        "g_raw_var_slope_snr": np.nan,
+        "g_raw_var_intercept": np.nan,
+        "g_raw_var_intercept_err": np.nan,
+        "g_raw_var_fit_t_center_rf": np.nan,
+    }
+
+    try:
+        _, t_rf, values, yerr = extract_band_detrended_series(
+            flat_samples,
+            obj,
+            bands,
+            "g",
+            z=z,
+            subtract_mean=False,
+        )
+    except KeyError:
+        return out
+
+    binned = bin_series_mean_and_variance(
+        t_rf,
+        values,
+        yerr,
+        bin_width=bin_width_rf_days,
+        min_count=min_count,
+    )
+    out["g_raw_n_bins"] = int(binned["bin_center"].size)
+
+    mean_fit = fit_binned_linear_trend(binned["bin_center"], binned["mean"], binned["mean_err"])
+    var_fit = fit_binned_linear_trend(binned["bin_center"], binned["variance"], binned["variance_err"])
+
+    out.update(
+        g_raw_mean_trend_valid=bool(mean_fit["valid"]),
+        g_raw_mean_slope=mean_fit["slope"],
+        g_raw_mean_slope_err=mean_fit["slope_err"],
+        g_raw_mean_slope_snr=mean_fit["slope_snr"],
+        g_raw_mean_intercept=mean_fit["intercept"],
+        g_raw_mean_intercept_err=mean_fit["intercept_err"],
+        g_raw_mean_fit_t_center_rf=mean_fit["t_center"],
+        g_raw_var_trend_valid=bool(var_fit["valid"]),
+        g_raw_var_slope=var_fit["slope"],
+        g_raw_var_slope_err=var_fit["slope_err"],
+        g_raw_var_slope_snr=var_fit["slope_snr"],
+        g_raw_var_intercept=var_fit["intercept"],
+        g_raw_var_intercept_err=var_fit["intercept_err"],
+        g_raw_var_fit_t_center_rf=var_fit["t_center"],
     )
     return out
 
@@ -1790,6 +1866,12 @@ def main():
                 bands,
                 z=float(obj["z"]),
             )
+            raw_drift_result = compute_g_band_raw_drift_diagnostics(
+                obj_flat_samples_flatten_per_band,
+                obj,
+                bands,
+                z=float(obj["z"]),
+            )
             psd_break_result = compute_lomb_scargle_break_diagnostics(
                 m,
                 plot_samples,
@@ -1867,7 +1949,7 @@ def main():
                     logging.error(f"[{oid}] Plotting error: {e}")
                     logging.error(traceback.format_exc())
 
-            final_result = obj | result | adf_result | drift_result | psd_break_result | sf_result | kl_result | dict(prefix=prefix, suffix=suffix) 
+            final_result = obj | result | adf_result | drift_result | raw_drift_result | psd_break_result | sf_result | kl_result | dict(prefix=prefix, suffix=suffix) 
             # final_result |= diagnostics
             log_sigma_uv = final_result.get("log_sigma_uv")
             log_sigma_uv_err = final_result.get("log_sigma_uv_err")

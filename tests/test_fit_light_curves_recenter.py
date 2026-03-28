@@ -18,6 +18,7 @@ from qvc.light_curve.fit_light_curves import (
     compute_structure_function_diagnostics,
     compute_band_adf,
     compute_g_band_residual_drift_diagnostics,
+    compute_g_band_raw_drift_diagnostics,
     compute_parameter_kls,
     compute_object_adf_diagnostics,
     compute_lambda_center_rf,
@@ -510,6 +511,51 @@ def test_compute_g_band_residual_drift_diagnostics_returns_finite_positive_slope
     assert np.isfinite(result["g_resid_var_slope_err"])
     assert result["g_resid_mean_slope"] > 0.0
     assert result["g_resid_var_slope"] > 0.0
+
+
+def test_compute_g_band_raw_drift_diagnostics_returns_finite_positive_mean_slope():
+    t_bins = [
+        np.array([100.0, 250.0, 500.0, 750.0], dtype=float),
+        np.array([1100.0, 1250.0, 1500.0, 1750.0], dtype=float),
+        np.array([2100.0, 2250.0, 2500.0, 2750.0], dtype=float),
+        np.array([3100.0, 3250.0, 3500.0, 3750.0], dtype=float),
+    ]
+    means = [19.0, 19.2, 19.4, 19.6]
+    spreads = [0.05, 0.08, 0.1, 0.12]
+    y_chunks = []
+    for mu, spread in zip(means, spreads):
+        y_chunks.append(mu + np.array([-1.5, -0.5, 0.5, 1.5], dtype=float) * spread)
+
+    t_g = np.concatenate(t_bins)
+    y_g = np.concatenate(y_chunks)
+    yerr_g = np.full(t_g.size, 0.03, dtype=float)
+
+    obj = {
+        "z": 0.0,
+        "X": (t_g, np.zeros(t_g.size, dtype=int)),
+        "y": y_g,
+        "yerr": yerr_g,
+        "band_idx": np.zeros(t_g.size, dtype=int),
+    }
+    flat_samples = {
+        "mean_g": np.array([19.0, 19.0, 19.0], dtype=float),
+        "poly1": np.array([0.0, 0.0, 0.0], dtype=float),
+    }
+
+    result = compute_g_band_raw_drift_diagnostics(
+        flat_samples,
+        obj,
+        ["g"],
+        z=0.0,
+        bin_width_rf_days=1000.0,
+        min_count=4,
+    )
+
+    assert result["g_raw_n_bins"] == 4
+    assert result["g_raw_mean_trend_valid"] is True
+    assert np.isfinite(result["g_raw_mean_slope"])
+    assert np.isfinite(result["g_raw_mean_slope_err"])
+    assert result["g_raw_mean_slope"] > 0.0
 
 
 def test_fit_bending_power_law_psd_recovers_tau_and_sigma():

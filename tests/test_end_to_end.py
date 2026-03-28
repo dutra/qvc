@@ -21,6 +21,7 @@ from qvc.hubble import hubble_plotting, hubble_utils
 from qvc.light_curve.fit_light_curves import (
     build_single_object_model,
     compute_g_band_residual_drift_diagnostics,
+    compute_g_band_raw_drift_diagnostics,
     compute_object_adf_diagnostics,
     make_lc,
 )
@@ -211,6 +212,7 @@ def test_end_to_end(tmp_path, monkeypatch):
     result = process_samples(flat_per_band, obj, bands=bands)
     adf_result = compute_object_adf_diagnostics(flat_per_band, obj, bands)
     drift_result = compute_g_band_residual_drift_diagnostics(flat_per_band, obj, bands, z=float(obj["z"]))
+    raw_drift_result = compute_g_band_raw_drift_diagnostics(flat_per_band, obj, bands, z=float(obj["z"]))
 
     quasar = {
         "object_id": obj["object_id"],
@@ -250,6 +252,7 @@ def test_end_to_end(tmp_path, monkeypatch):
     }
     quasar.update(adf_result)
     quasar.update(drift_result)
+    quasar.update(raw_drift_result)
 
     h5_path = tmp_path / "data" / "fake_light_curve_end_to_end.h5"
     _write_test_quasars_hdf5(h5_path, [quasar])
@@ -282,3 +285,7 @@ def test_end_to_end(tmp_path, monkeypatch):
     assert "g_resid_mean_slope_err" in row.index
     assert "g_resid_var_slope" in row.index
     assert "g_resid_var_slope_err" in row.index
+    assert "g_raw_mean_slope" in row.index
+    assert "g_raw_mean_slope_err" in row.index
+    assert "g_raw_var_slope" in row.index
+    assert "g_raw_var_slope_err" in row.index
