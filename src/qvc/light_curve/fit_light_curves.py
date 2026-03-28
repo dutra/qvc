@@ -472,6 +472,11 @@ def fit_structure_function(tau, sf, sf_lo=None, sf_hi=None):
         tau_char = 10.0 ** log_tau
         return sf_inf * np.sqrt(np.clip(1.0 - np.exp(-tau_val / tau_char), 0.0, None))
 
+    log_tau_low = -1.0
+    log_tau_high = 6.0
+
+    log_sf_inf_high = np.log10(np.sqrt(2.0))
+
     try:
         popt, pcov = curve_fit(
             sf_model,
@@ -480,7 +485,7 @@ def fit_structure_function(tau, sf, sf_lo=None, sf_hi=None):
             p0=(np.log10(sf_inf_init), np.log10(tau_init)),
             sigma=sf_err,
             absolute_sigma=True,
-            bounds=([-6.0, -1.0], [3.0, 6.0]),
+            bounds=([-6.0, log_tau_low], [log_sf_inf_high, log_tau_high]),
             maxfev=20000,
         )
         perr = np.sqrt(np.diag(pcov))
@@ -495,18 +500,26 @@ def fit_structure_function(tau, sf, sf_lo=None, sf_hi=None):
             "sf_nbins": float(tau_fit.size),
         }
 
+    tau_char = 10.0 ** float(popt[1])
+    tau_min = float(np.nanmin(tau_fit))
+    tau_max = float(np.nanmax(tau_fit))
+    near_lower_bound = np.isclose(float(popt[1]), log_tau_low, atol=0.05)
+    near_upper_bound = np.isclose(float(popt[1]), log_tau_high, atol=0.05)
+    turnover_bracketed = np.isfinite(tau_char) and (tau_min < tau_char < tau_max)
+    sf_valid = bool(np.all(np.isfinite(popt)) and not near_lower_bound and not near_upper_bound and turnover_bracketed)
+
     return {
         "log_sigma_sf": float(popt[0] - np.log10(np.sqrt(2.0))),
         "log_sigma_sf_err": float(perr[0]) if np.all(np.isfinite(perr)) else np.nan,
         "log_tau_sf": float(popt[1]),
         "log_tau_sf_err": float(perr[1]) if np.all(np.isfinite(perr)) else np.nan,
-        "sf_valid": True,
+        "sf_valid": sf_valid,
         "sf_nbins": float(tau_fit.size),
     }
 
 
 def compute_structure_function_diagnostics(samples, obj, z):
-    """Fit SF in the band nearest rest-frame 2500 A and convert to UV."""
+    """Fit SF in the band nearest rest-frame 2500 A using rest-frame lags and convert to UV."""
 
     bands = list(obj["bands"])
     lam_rf = np.asarray([lambda_pivot[band] / (1.0 + float(z)) for band in bands], dtype=float)
@@ -516,7 +529,7 @@ def compute_structure_function_diagnostics(samples, obj, z):
 
     band_idx = np.asarray(obj["band_idx"])
     mask = band_idx == ref_idx
-    t_band = np.asarray(obj["X"][0], dtype=float)[mask]
+    t_band = np.asarray(obj["X"][0], dtype=float)[mask] / (1.0 + float(z))
     y_band = np.asarray(obj["y"], dtype=float)[mask]
     yerr_band = np.asarray(obj["yerr"], dtype=float)[mask]
     tau_sf, sf_med, sf_lo, sf_hi = empirical_structure_function(t_band, y_band, yerr_band)
@@ -528,11 +541,11 @@ def compute_structure_function_diagnostics(samples, obj, z):
         fit["log_sigma_sf"] + log_single_pl(2500.0, lam_ref_band, eta_sigma)
         if np.isfinite(fit["log_sigma_sf"]) else np.nan
     )
-    log_tau_uv_obs = (
+    log_tau_rf = (
         fit["log_tau_sf"] + log_single_pl(2500.0, lam_ref_band, eta_tau)
         if np.isfinite(fit["log_tau_sf"]) else np.nan
     )
-    log_tau_rf = log_tau_uv_obs - np.log10(1.0 + float(z)) if np.isfinite(log_tau_uv_obs) else np.nan
+    log_tau_uv_obs = log_tau_rf + np.log10(1.0 + float(z)) if np.isfinite(log_tau_rf) else np.nan
 
     return {
         "sf_ref_band": ref_band,

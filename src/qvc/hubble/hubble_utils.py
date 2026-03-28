@@ -949,6 +949,7 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
         plot_Mi_relation,
         plot_cut_diagnostics,
         plot_m2500_vs_z_colorpanels,
+        plot_sf_vs_uv_variability,
         plot_sigma_uv_host_correction,
         plot_tau_sigma_vs_wu_catalog,
         plot_tau_sigma_vs_redshift,
@@ -1034,7 +1035,7 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
         print("Populating SDSS fields...")
         df = populate_sdss_fields(df)
 
-    df = populate_sdss_rchi2_fields(df)
+    #df = populate_sdss_rchi2_fields(df)
 
     if "dropped_bands" in df.columns:
         df["dropped_bands"] = df["dropped_bands"].apply(_normalize_dropped_bands)
@@ -1167,6 +1168,11 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
         plot_tau_sigma_vs_wu_catalog(df, plot_path=plot_path, show=False)
     if {"z", "log_tau_fast_uv", "log_tau_uv_rf", "log_sigma_uv"}.issubset(df.columns):
         plot_fast_vs_uv_variability(df, plot_path=plot_path, show=False)
+    if {"log_sigma_uv", "log_sigma_uv_sf", "log_tau_uv_rf_sf"}.issubset(df.columns) and (
+        {"log_tau_uv_rf"}.issubset(df.columns)
+        or {"log_tau_uv", "z"}.issubset(df.columns)
+    ):
+        plot_sf_vs_uv_variability(df, plot_path=plot_path, show=False)
     if "log_sigma_uv" in df.columns:
         if any(f"log_amp_delta_blr_{band}" in df.columns for band in ("u", "g", "r", "i", "z")):
             plot_blr_lag_vs_amp_by_band(df, plot_path=plot_path, show=False, lag_suffix="")

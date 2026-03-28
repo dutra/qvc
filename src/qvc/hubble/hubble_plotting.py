@@ -779,6 +779,118 @@ def plot_fast_vs_uv_variability(df, plot_path="plots/hubble", show=False):
     )
 
 
+def plot_sf_vs_uv_variability(df, plot_path="plots/hubble", show=False):
+    """Compare closest-band structure-function summaries against the main UV variability fit."""
+    required = {"log_sigma_uv", "log_sigma_uv_sf", "log_tau_uv_rf_sf"}
+    if not required.issubset(df.columns):
+        missing = ", ".join(sorted(required - set(df.columns)))
+        raise KeyError(f"Missing required columns for SF-vs-UV diagnostic plot: {missing}")
+
+    tau_uv_col = "log_tau_uv_rf" if "log_tau_uv_rf" in df.columns else ("log_tau_uv" if "log_tau_uv" in df.columns else None)
+    if tau_uv_col is None:
+        missing = []
+        if tau_uv_col is None:
+            missing.append("log_tau_uv_rf or log_tau_uv")
+        raise KeyError(f"Missing required columns for SF-vs-UV diagnostic plot: {', '.join(missing)}")
+
+    chi_sq_g = (
+        pd.to_numeric(df["chi_sq_g"], errors="coerce").to_numpy(dtype=float)
+        if "chi_sq_g" in df.columns else np.full(len(df), np.nan)
+    )
+    log_chi_sq_g = np.full(len(df), np.nan, dtype=float)
+    positive_chi_sq = np.isfinite(chi_sq_g) & (chi_sq_g > 0.0)
+    log_chi_sq_g[positive_chi_sq] = np.log10(chi_sq_g[positive_chi_sq])
+    log_sigma_uv = pd.to_numeric(df["log_sigma_uv"], errors="coerce").to_numpy(dtype=float)
+    log_sigma_sf = pd.to_numeric(df["log_sigma_uv_sf"], errors="coerce").to_numpy(dtype=float)
+    log_tau_uv = pd.to_numeric(df[tau_uv_col], errors="coerce").to_numpy(dtype=float)
+    log_tau_sf = pd.to_numeric(df["log_tau_uv_rf_sf"], errors="coerce").to_numpy(dtype=float)
+    sf_valid = (
+        pd.Series(df["sf_valid"]).fillna(False).astype(bool).to_numpy()
+        if "sf_valid" in df.columns else np.ones(len(df), dtype=bool)
+    )
+
+    if tau_uv_col == "log_tau_uv" and "z" in df.columns:
+        z = pd.to_numeric(df["z"], errors="coerce").to_numpy(dtype=float)
+        log_tau_uv = log_tau_uv - np.log10(1.0 + z)
+
+    sigma_uv = np.power(10.0, log_sigma_uv)
+    sigma_sf = np.power(10.0, log_sigma_sf)
+    tau_uv = np.power(10.0, log_tau_uv)
+    tau_sf = np.power(10.0, log_tau_sf)
+
+    fig, axes = plt.subplots(1, 2, figsize=(13.5, 5.8))
+
+    panels = [
+        (
+            axes[0],
+            sigma_uv,
+            sigma_sf,
+            r"$\sigma_{\rm UV}$ [mag]",
+            r"$\sigma_{\rm SF}$ [mag]",
+            "No finite sigma_sf/sigma_uv values",
+        ),
+        (
+            axes[1],
+            tau_uv,
+            tau_sf,
+            r"$\tau_{\rm UV,RF}$ [days]",
+            r"$\tau_{\rm SF,UV,RF}$ [days]",
+            "No finite tau_sf/tau_uv values",
+        ),
+    ]
+
+    last_scatter = None
+    for ax, x, y, xlabel, ylabel, empty_label in panels:
+        mask = sf_valid & np.isfinite(x) & np.isfinite(y) & (x > 0.0) & (y > 0.0)
+        color_mask = mask & np.isfinite(log_chi_sq_g)
+        if np.any(mask):
+            if np.any(~color_mask & mask):
+                ax.scatter(
+                    x[mask & ~color_mask],
+                    y[mask & ~color_mask],
+                    color="0.75",
+                    s=10,
+                    alpha=0.35,
+                    linewidths=0,
+                    rasterized=True,
+                )
+            if np.any(color_mask):
+                last_scatter = ax.scatter(
+                    x[color_mask],
+                    y[color_mask],
+                    c=log_chi_sq_g[color_mask],
+                    cmap="viridis",
+                    s=10,
+                    alpha=0.65,
+                    linewidths=0,
+                    rasterized=True,
+                )
+            lo = min(np.nanmin(x[mask]), np.nanmin(y[mask]))
+            hi = max(np.nanmax(x[mask]), np.nanmax(y[mask]))
+            if np.isfinite(lo) and np.isfinite(hi) and hi > lo:
+                ax.plot([lo, hi], [lo, hi], color="k", ls="--", lw=1.0, alpha=0.8)
+        else:
+            ax.text(0.5, 0.5, empty_label, ha="center", va="center", transform=ax.transAxes)
+
+        ax.set_xscale("log")
+        ax.set_yscale("log")
+        ax.set_xlabel(xlabel)
+        ax.set_ylabel(ylabel)
+        ax.grid(True, alpha=0.25, which="both")
+
+    if last_scatter is not None and last_scatter.get_array() is not None:
+        cbar = fig.colorbar(last_scatter, ax=axes.tolist())
+        cbar.set_label(r"$\log_{10}(\chi^2_g)$")
+
+    diagnostics_path = os.path.join(plot_path or "plots/hubble", "diagnostics")
+    return _save_figure(
+        fig,
+        os.path.join(diagnostics_path, "sf_vs_uv_variability.pdf"),
+        dpi=200,
+        show=show,
+    )
+
+
 def plot_f_host_center_vs_l2500(
     df,
     plot_path="plots/hubble",
