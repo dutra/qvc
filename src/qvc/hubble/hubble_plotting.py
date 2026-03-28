@@ -764,7 +764,6 @@ def plot_fast_vs_uv_variability(df, plot_path="plots/hubble", show=False):
         ax.set_yscale("log")
         ax.set_xlabel(xlabel)
         ax.set_ylabel(ylabel)
-        ax.grid(True, alpha=0.25, which="both")
 
     if last_scatter is not None and last_scatter.get_array() is not None:
         cbar = fig.colorbar(last_scatter, ax=axes.tolist())
@@ -876,7 +875,6 @@ def plot_sf_vs_uv_variability(df, plot_path="plots/hubble", show=False):
         ax.set_yscale("log")
         ax.set_xlabel(xlabel)
         ax.set_ylabel(ylabel)
-        ax.grid(True, alpha=0.25, which="both")
 
     if last_scatter is not None and last_scatter.get_array() is not None:
         cbar = fig.colorbar(last_scatter, ax=axes.tolist())

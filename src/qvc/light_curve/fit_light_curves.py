@@ -472,8 +472,8 @@ def fit_structure_function(tau, sf, sf_lo=None, sf_hi=None):
         tau_char = 10.0 ** log_tau
         return sf_inf * np.sqrt(np.clip(1.0 - np.exp(-tau_val / tau_char), 0.0, None))
 
-    log_tau_low = -1.0
-    log_tau_high = 6.0
+    log_tau_low = 1.0
+    log_tau_high = 4.0
 
     log_sf_inf_high = np.log10(np.sqrt(2.0))
 
@@ -619,7 +619,7 @@ def log_sigma_center0_prior(eta_sigma, lambda_center_rf):
 def log_tau_slow_center0_prior(eta_tau, z, lambda_center_rf):
     shift = tau_shift_to_uv(eta_tau, lambda_center_rf)
     log_tau_uv_high = jnp.log(10**4.0 * (1.0 + z))
-    log_tau_uv_low = 0.0
+    log_tau_uv_low = jnp.log(10.0 * (1.0 + z))
     return dist.TruncatedNormal(
         jnp.log(10**2.5 * (1.0 + z)) - shift,
         1.2 * jnp.log(10.0),
