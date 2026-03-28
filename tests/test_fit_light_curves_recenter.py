@@ -185,6 +185,84 @@ def test_make_lc_can_hard_drop_lya_affected_bands():
     assert lc["dropped_bands"] == ["u", "z"]
 
 
+def test_make_lc_adds_variability_fields_for_retained_bands():
+    obj = {
+        "object_id": "varobj",
+        "z": 1.2,
+        "times": {
+            "u": np.array([0.0, 25.0, 380.0, 405.0], dtype=float),
+            "g": np.array([0.0, 25.0, 380.0, 405.0], dtype=float),
+            "r": np.array([5.0, 40.0, 385.0, 415.0], dtype=float),
+            "i": np.array([10.0, 50.0, 390.0, 420.0], dtype=float),
+            "z": np.array([0.0, 1.0], dtype=float),
+        },
+        "mags": {
+            "u": np.array([20.0, 20.2, 19.8, 20.1], dtype=float),
+            "g": np.array([20.0, 20.3, 19.7, 20.0], dtype=float),
+            "r": np.array([19.8, 20.0, 19.6, 19.9], dtype=float),
+            "i": np.array([19.6, 19.9, 19.5, 19.8], dtype=float),
+            "z": np.array([19.5, 19.6], dtype=float),
+        },
+        "magerrs": {band: np.full(len(vals), 0.1, dtype=float) for band, vals in {
+            "u": np.array([20.0, 20.2, 19.8, 20.1], dtype=float),
+            "g": np.array([20.0, 20.3, 19.7, 20.0], dtype=float),
+            "r": np.array([19.8, 20.0, 19.6, 19.9], dtype=float),
+            "i": np.array([19.6, 19.9, 19.5, 19.8], dtype=float),
+            "z": np.array([19.5, 19.6], dtype=float),
+        }.items()},
+        "cadence": {band: 5.0 for band in ["u", "g", "r", "i", "z"]},
+        "cadence_err": {band: 0.5 for band in ["u", "g", "r", "i", "z"]},
+        "number_points": {band: 4 for band in ["u", "g", "r", "i", "z"]},
+    }
+    obj["number_points"]["z"] = 2
+
+    lc = make_lc(obj, bands=["u", "g", "r", "i", "z"], drop_band_lyman_alpha=False)
+
+    assert lc is not None
+    for band in lc["bands"]:
+        assert f"variability_n_points_{band}" in lc
+        assert f"variability_chi_sq_{band}" in lc
+        assert f"variability_chi_sq_red_{band}" in lc
+        assert f"variability_pvalue_{band}" in lc
+        assert f"variability_neg_log10_pvalue_{band}" in lc
+    assert np.isfinite(lc["variability_chi_sq_red_g"])
+
+
+def test_make_lc_variability_uses_post_filtering_series():
+    times = np.arange(13, dtype=float) * 30.0
+    g_mags = np.array([20.0, 20.0, 20.1, 20.0, 20.1, 20.0, 23.5, 20.0, 20.1, 20.0, 20.1, 20.0, 20.1], dtype=float)
+    obj = {
+        "object_id": "outlier",
+        "z": 1.0,
+        "times": {
+            "g": times,
+            "r": np.array([0.0, 365.0], dtype=float),
+            "i": np.array([20.0, 385.0], dtype=float),
+            "z": np.array([0.0, 1.0], dtype=float),
+        },
+        "mags": {
+            "g": g_mags,
+            "r": np.array([19.8, 19.9], dtype=float),
+            "i": np.array([19.6, 19.7], dtype=float),
+            "z": np.array([19.5, 19.6], dtype=float),
+        },
+        "magerrs": {
+            "g": np.full(13, 0.05, dtype=float),
+            "r": np.full(2, 0.05, dtype=float),
+            "i": np.full(2, 0.05, dtype=float),
+            "z": np.full(2, 0.05, dtype=float),
+        },
+        "cadence": {band: 5.0 for band in ["g", "r", "i", "z"]},
+        "cadence_err": {band: 0.5 for band in ["g", "r", "i", "z"]},
+        "number_points": {"g": 13, "r": 2, "i": 2, "z": 2},
+    }
+
+    lc = make_lc(obj, bands=["g", "r", "i", "z"], drop_band_lyman_alpha=False)
+
+    assert lc is not None
+    assert lc["variability_n_points_g"] == 12
+
+
 def test_compute_parameter_kls_ignores_nonfinite_conditioning_samples():
     flat_samples = {
         "eta_sigma": np.array([-0.4, np.nan, -0.2, -0.3]),
