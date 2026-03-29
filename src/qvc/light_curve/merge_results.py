@@ -2,6 +2,7 @@
 import argparse
 import csv
 import glob
+import multiprocessing
 import os
 import pickle
 import sys
@@ -10,14 +11,9 @@ import h5py
 import numpy as np
 from tqdm import tqdm
 
-from qvc.hubble.hubble_utils import read_quasars_from_hdf5_flat
 from qvc.light_curve.fit_light_curves import make_lc
 from qvc.light_curve.multiband_generate_lc import concat_light_curves
 from qvc.light_curve.multiband_generate_lc import populate_sdss_fields
-
-def read_quasars_from_h5(h5_path):
-    return read_quasars_from_hdf5_flat(h5_path)
-
 
 def _decode_h5_scalar(value):
     if isinstance(value, bytes):
@@ -29,35 +25,100 @@ def _decode_h5_scalar(value):
     return value
 
 
-def _read_h5_scalar_key(file_path, key):
+def _decode_h5_vector(values):
+    arr = np.asarray(values)
+    if arr.dtype.kind == "S":
+        return arr.astype(str)
+    if arr.dtype == object:
+        out = []
+        for value in arr:
+            out.append(_decode_h5_scalar(value))
+        return np.asarray(out, dtype=object)
+    if arr.ndim > 1:
+        return np.asarray([_decode_h5_scalar(v) for v in arr.tolist()], dtype=object)
+    return arr
+
+
+def _read_optional_h5_scalar(hdf, file_path, key):
     """
     Read a scalar/length-1 dataset from root and return string value.
     Returns empty string when missing/unreadable.
     """
     try:
-        with h5py.File(file_path, "r") as hdf:
-            if key not in hdf:
-                print(f"WARNING: Missing metadata key '{key}' in {file_path}; using empty string.")
-                return ""
-
-            data = hdf[key][...]
-            arr = np.asarray(data)
-            if arr.ndim == 0:
-                value = _decode_h5_scalar(arr.item())
-                return "" if value is None else str(value)
-
-            if arr.ndim == 1 and arr.shape[0] == 1:
-                value = _decode_h5_scalar(arr[0])
-                return "" if value is None else str(value)
-
-            print(
-                f"WARNING: Metadata key '{key}' in {file_path} is not scalar/length-1 "
-                f"(shape={arr.shape}); using empty string."
-            )
+        if key not in hdf:
+            print(f"WARNING: Missing metadata key '{key}' in {file_path}; using empty string.")
             return ""
+
+        data = hdf[key][...]
+        arr = np.asarray(data)
+        if arr.ndim == 0:
+            value = _decode_h5_scalar(arr.item())
+            return "" if value is None else str(value)
+
+        if arr.ndim == 1 and arr.shape[0] == 1:
+            value = _decode_h5_scalar(arr[0])
+            return "" if value is None else str(value)
+
+        print(
+            f"WARNING: Metadata key '{key}' in {file_path} is not scalar/length-1 "
+            f"(shape={arr.shape}); using empty string."
+        )
+        return ""
     except Exception as exc:
         print(f"WARNING: Failed reading metadata key '{key}' from {file_path}: {exc}")
         return ""
+
+
+def _load_h5_shard(path, expected_n):
+    try:
+        with h5py.File(path, "r") as hdf:
+            source_git_commit = _read_optional_h5_scalar(hdf, path, "git_commit")
+            source_run_datetime = _read_optional_h5_scalar(hdf, path, "run_datetime")
+
+            row_columns = {}
+            n_rows = None
+            for key in hdf.keys():
+                values = hdf[key][...]
+                arr = np.asarray(values)
+                if arr.ndim == 0:
+                    continue
+                if arr.ndim == 1 and arr.shape[0] == 1 and key in {"git_commit", "run_datetime"}:
+                    continue
+                if n_rows is None:
+                    n_rows = int(arr.shape[0])
+                elif int(arr.shape[0]) != n_rows:
+                    print(
+                        f"WARNING: Skipping dataset '{key}' in {path}: incompatible leading "
+                        f"dimension {arr.shape[0]} (expected {n_rows})."
+                    )
+                    continue
+                row_columns[key] = _decode_h5_vector(arr)
+
+            if n_rows is None:
+                n_rows = 0
+
+            if not enforce_expected_count(n_rows, expected_n, path):
+                return {"path": path, "ok": True, "skip": True, "rows": []}
+
+            if not row_columns:
+                rows = []
+            else:
+                fields = list(row_columns.keys())
+                rows = []
+                for idx in range(n_rows):
+                    row = {field: row_columns[field][idx] for field in fields}
+                    row["git_commit"] = source_git_commit
+                    row["run_datetime"] = source_run_datetime
+                    rows.append(row)
+
+            return {"path": path, "ok": True, "skip": False, "rows": rows}
+    except Exception as exc:
+        return {"path": path, "ok": False, "skip": False, "error": str(exc), "rows": []}
+
+
+def _load_h5_shard_worker(args):
+    path, expected_n = args
+    return _load_h5_shard(path, expected_n)
 
 
 def write_quasars_to_csv(quasars, csv_path, fields=None):
@@ -184,25 +245,40 @@ def deduplicate(quasars, keys):
     return [merged[k] for k in order]
 
 
-def load_and_merge_h5(file_list, expected_n, load_n):
+def load_and_merge_h5(file_list, expected_n, load_n, workers=1):
     all_quasars = []
     if load_n is not None:
         file_list = file_list[:load_n]
-    for path in tqdm(file_list, desc="Merging HDF5 shards", unit="file"):
-        try:
-            source_git_commit = _read_h5_scalar_key(path, "git_commit")
-            source_run_datetime = _read_h5_scalar_key(path, "run_datetime")
-            qs_df = read_quasars_from_h5(path)
-            if not enforce_expected_count(len(qs_df), expected_n, path):
+
+    workers = max(1, int(workers))
+    if workers == 1:
+        iterator = (
+            _load_h5_shard(path, expected_n)
+            for path in tqdm(file_list, desc="Merging HDF5 shards", unit="file")
+        )
+    else:
+        ctx = multiprocessing.get_context("spawn")
+        pool = ctx.Pool(processes=workers)
+        iterator = tqdm(
+            pool.imap(_load_h5_shard_worker, ((path, expected_n) for path in file_list), chunksize=1),
+            total=len(file_list),
+            desc="Merging HDF5 shards",
+            unit="file",
+        )
+
+    try:
+        for result in iterator:
+            if not result["ok"]:
+                print(f"ERROR reading {result['path']}: {result['error']}")
                 continue
-            qs = qs_df.to_dict("records")
-            for row in qs:
-                row["git_commit"] = source_git_commit
-                row["run_datetime"] = source_run_datetime
-            all_quasars.extend(qs)
-        except Exception as e:
-            print(f"ERROR reading {path}: {e}")
-            continue
+            if result.get("skip"):
+                continue
+            all_quasars.extend(result["rows"])
+    finally:
+        if workers > 1:
+            pool.close()
+            pool.join()
+
     return all_quasars
 
 
@@ -293,6 +369,12 @@ def main():
         help="Total number of shards to load.",
     )
     p.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="Number of worker processes to use when reading HDF5 shards. Default: 1",
+    )
+    p.add_argument(
         "--skip-populate-sdss",
         action="store_true",
         default=False,
@@ -354,7 +436,16 @@ def main():
 
     print(f"Output: {out_path} (format: {out_format.upper()})")
 
-    all_quasars = load_and_merge_h5(file_list, expected_n=args.expected, load_n=args.N)
+    if args.workers < 1:
+        print("ERROR: --workers must be >= 1")
+        sys.exit(1)
+
+    all_quasars = load_and_merge_h5(
+        file_list,
+        expected_n=args.expected,
+        load_n=args.N,
+        workers=args.workers,
+    )
     print(f"Loaded total of {len(all_quasars)} rows from {len(file_list)} shards.")
 
     dedup_keys = args.dedup_keys

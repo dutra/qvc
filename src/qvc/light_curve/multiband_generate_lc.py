@@ -2,6 +2,7 @@ import os
 import numpy as np
 import pandas as pd
 import h5py
+from astropy.table import Table, join
 from astropy.io import fits
 from astropy.coordinates import SkyCoord
 from astropy import units as u
@@ -145,7 +146,7 @@ def concat_light_curves(filter_object_ids=None, progress_bar=False, skip=None, N
     cat = cat.loc[~cat.objectId.duplicated(keep="first")].copy()
     object_ids = cat["objectId"].tolist()
     if len(object_ids) == 0:
-        print("Found 0 objects in concat_light_curves_jax after time cut")
+        print("Found 0 objects in concat_light_curves_jax")
         return []
 
     valid_filter_ids = [filters[b] for b in bands]
@@ -300,7 +301,7 @@ def concat_light_curves(filter_object_ids=None, progress_bar=False, skip=None, N
 
     obs = pd.concat([sdss_obs, ps1_obs, ztf_obs], ignore_index=True)
     if obs.empty:
-        print("Found 0 objects in concat_light_curves_jax after time cut")
+        print("Found 0 objects in concat_light_curves_jax")
         return []
 
     finite_mask = np.isfinite(obs["time"]) & np.isfinite(obs["mag"]) & np.isfinite(obs["magerr"])
@@ -402,7 +403,7 @@ def concat_light_curves(filter_object_ids=None, progress_bar=False, skip=None, N
             }
         )
 
-    print(f"Found {len(s82_objs)} objects in concat_light_curves_jax after time cut")
+    print(f"Found {len(s82_objs)} objects in concat_light_curves_jax")
     return s82_objs
 
 def load_nearby_lcs(name):
@@ -543,40 +544,80 @@ def load_s82_from_hdf5(file_path="s82_objs.h5"):
     return s82_objs
 
 def populate_sdss_fields(s82_objs, progress_bar=False):
-    #raise NotImplementedError("Use the new version of this function in qvc.hubble.hubble_fit to populate SDSS fields directly during fitting, instead of as a separate step. This avoids redundant loading and matching of the SDSS data.")
-    #print(f"Populating SDSS fields: {len(s82_objs)}", flush=True)
-    cat = pd.read_parquet(f"data/S82/Catalog.parquet").set_index('idx')
-    hdul = fits.open('data/dr16q_prop_May01_2024.fits')
-    fits_data = hdul[1].data  # Assuming the data is in the first extension    
-    fits_data_2 = hdul[2].data  # Assuming the data is in the first extension    
-    for d in tqdm(s82_objs, desc="Populating SDSS fields", disable=(not progress_bar)):
-        obj_selection = cat.loc[cat['objectId'] == d['object_id']]
-        if obj_selection.empty:
-            print(f"Skipping entry {d['object_id']} as it does not exist in the catalog.")
-            continue
-        obj = obj_selection.iloc[0]
-        c1 = SkyCoord(fits_data['RA'], fits_data['DEC'], unit='deg')
-        c2 = SkyCoord(obj['RA'], obj['DEC'], unit='deg')
-        sep = c1.separation(c2).to(u.arcsec)
-        j = np.argwhere(sep < 1*u.arcsec).flatten()
-        if len(j) == 0:
-            print(f"Skipping entry {d['object_id']} as it does not exist in the fits data.")
-            continue
-        
-        j = j[0]  # Get the first index if there are multiple matches
-        d['ra'] = obj['RA']
-        d['dec'] = obj['DEC']
-        d['z'] = obj['Z_SYS']
-        d['sdss_name'] = fits_data['SDSS_NAME'][j]  # Extract SDSS_NAME
-        d['LOGLBOL'] = fits_data['LOGLBOL'][j]  # Extract log Lbol values
-        d["LOGLBOL_ERR"] = fits_data['LOGLBOL_ERR'][j]  # Extract log Lbol error values
-        d['LOGL5100'] = fits_data['LOGL5100'][j]  # Extract log Lbol values
-        d['LOGL5100_ERR'] = fits_data['LOGL5100_ERR'][j]
-        d['log_mbh'] = fits_data['LOGMBH'][j]  # Extract log MBH values
-        d['log_mbh_err'] = fits_data['LOGMBH_ERR'][j]  # Extract log MBH error values
-        d['log_ledd_ratio'] = fits_data['LOGLEDD_RATIO'][j]  # Extract log L/edd values
-        d['log_ledd_ratio_err'] = fits_data['LOGLEDD_RATIO_ERR'][j]  # Extract log L/edd error values
-        d['plate'] = fits_data['PLATE'][j]
-        d['mjd'] = fits_data['MJD'][j]
-        d['fiberid'] = fits_data['FIBERID'][j]
+    _ = progress_bar
+    if not s82_objs:
+        return s82_objs
+
+    rows = Table(
+        {
+            "row_idx": np.arange(len(s82_objs), dtype=int),
+            "object_id": [obj["object_id"] for obj in s82_objs],
+        }
+    )
+    rows["object_id_key"] = np.asarray(rows["object_id"]).astype(str)
+
+    cat = Table.read(
+        resolve_qvc_data_path("data/S82/Catalog.parquet"),
+        include_names=["objectId", "RA", "DEC", "Z_SYS"],
+    )
+    cat = cat[~np.isnan(cat["RA"]) & ~np.isnan(cat["DEC"])]
+    _, first_idx = np.unique(np.asarray(cat["objectId"]).astype(str), return_index=True)
+    cat = cat[np.sort(first_idx)]
+    cat["object_id_key"] = np.asarray(cat["objectId"]).astype(str)
+
+    rows = join(rows, cat["object_id_key", "RA", "DEC", "Z_SYS"], keys="object_id_key", join_type="left")
+    ra_mask = np.ma.getmaskarray(rows["RA"]) if hasattr(rows["RA"], "mask") else np.zeros(len(rows), dtype=bool)
+    dec_mask = np.ma.getmaskarray(rows["DEC"]) if hasattr(rows["DEC"], "mask") else np.zeros(len(rows), dtype=bool)
+    valid_rows = ~(ra_mask | dec_mask)
+
+    if not np.any(valid_rows):
+        for obj in s82_objs:
+            print(f"Skipping entry {obj['object_id']} as it does not exist in the catalog.")
+        return s82_objs
+
+    dr16q = Table.read(resolve_qvc_data_path("data/dr16q_prop_May01_2024.fits"), hdu=1)
+    fits_coords = SkyCoord(ra=np.asarray(dr16q["RA"]) * u.deg, dec=np.asarray(dr16q["DEC"]) * u.deg)
+
+    query_rows = rows[valid_rows]
+    query_coords = SkyCoord(
+        ra=np.asarray(query_rows["RA"], dtype=float) * u.deg,
+        dec=np.asarray(query_rows["DEC"], dtype=float) * u.deg,
+    )
+    nearest_idx, d2d, _ = query_coords.match_to_catalog_sky(fits_coords)
+    match_mask = d2d < (1.0 * u.arcsec)
+
+    missing_catalog_ids = np.asarray(rows["object_id"])[~valid_rows]
+    for object_id in missing_catalog_ids:
+        print(f"Skipping entry {object_id} as it does not exist in the catalog.")
+
+    unmatched_dr16q_ids = np.asarray(query_rows["object_id"])[~match_mask]
+    for object_id in unmatched_dr16q_ids:
+        print(f"Skipping entry {object_id} as it does not exist in the fits data.")
+
+    if not np.any(match_mask):
+        return s82_objs
+
+    matched_rows = query_rows[match_mask]
+    matched_row_idx = np.asarray(matched_rows["row_idx"], dtype=int)
+    matched_fits_idx = np.asarray(nearest_idx[match_mask], dtype=int)
+
+    for field, values in (
+        ("ra", np.asarray(matched_rows["RA"], dtype=float)),
+        ("dec", np.asarray(matched_rows["DEC"], dtype=float)),
+        ("z", np.asarray(matched_rows["Z_SYS"], dtype=float)),
+        ("sdss_name", np.asarray(dr16q["SDSS_NAME"])[matched_fits_idx]),
+        ("LOGLBOL", np.asarray(dr16q["LOGLBOL"])[matched_fits_idx]),
+        ("LOGLBOL_ERR", np.asarray(dr16q["LOGLBOL_ERR"])[matched_fits_idx]),
+        ("LOGL5100", np.asarray(dr16q["LOGL5100"])[matched_fits_idx]),
+        ("LOGL5100_ERR", np.asarray(dr16q["LOGL5100_ERR"])[matched_fits_idx]),
+        ("log_mbh", np.asarray(dr16q["LOGMBH"])[matched_fits_idx]),
+        ("log_mbh_err", np.asarray(dr16q["LOGMBH_ERR"])[matched_fits_idx]),
+        ("log_ledd_ratio", np.asarray(dr16q["LOGLEDD_RATIO"])[matched_fits_idx]),
+        ("log_ledd_ratio_err", np.asarray(dr16q["LOGLEDD_RATIO_ERR"])[matched_fits_idx]),
+        ("plate", np.asarray(dr16q["PLATE"])[matched_fits_idx]),
+        ("mjd", np.asarray(dr16q["MJD"])[matched_fits_idx]),
+        ("fiberid", np.asarray(dr16q["FIBERID"])[matched_fits_idx]),
+    ):
+        for row_idx, value in zip(matched_row_idx, values):
+            s82_objs[row_idx][field] = value
     return s82_objs

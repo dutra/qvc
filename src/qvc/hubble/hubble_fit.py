@@ -817,7 +817,7 @@ if __name__ == "__main__":
     parser.add_argument("--wrms_cut", type=float, default=DEFAULT_WRMS_CUT, help="Optional reduced chi-squared cut value to exclude outliers (default: None)")
     parser.add_argument("--iron_frac_cut", type=float, default=DEFAULT_IRON_FRAC_CUT, help="Optional iron fraction cut value to exclude outliers (default: None)")
     parser.add_argument("--bc_frac_cut", type=float, default=DEFAULT_BC_FRAC_CUT, help="Optional BC cut value to exclude outliers (default: None)")
-    parser.add_argument("--chi_sq_cut", type=float, default=DEFAULT_CHI_SQ_CUT, help="Optional g-band chi-squared cut value to exclude outliers when chi_sq_g is present.")
+    parser.add_argument("--variability_chi_sq_cut", type=float, default=DEFAULT_CHI_SQ_CUT, help="Optional g-band chi-squared cut value to exclude outliers when variability_chi_sq_g is present.")
     parser.add_argument("--prefix", type=str, default="default", help="Prefix directory under plots/hubble/ and results/, and result variable prefix.")
     parser.add_argument("--result_prefix", type=str, default="", help="Prefix for result variable names in LaTeX output (default: empty string)")
     parser.add_argument("--z_range", type=float, nargs=2, default=[0.44, 3.16], 
@@ -882,7 +882,9 @@ if __name__ == "__main__":
                            residuals_sigma_clip=args.residuals_sigma_clip, residuals_csv=args.residuals_csv,
                            exclude_object_ids_csv=args.exclude_object_ids_csv,
                            spectra_fit_csv=args.spectra_fit_csv,
-                           wrms_cut=args.wrms_cut, iron_frac_cut=args.iron_frac_cut, chi_sq_cut=args.chi_sq_cut,
+                           wrms_cut=args.wrms_cut, iron_frac_cut=args.iron_frac_cut,
+                           bc_frac_cut=args.bc_frac_cut,
+                           variability_chi_sq_cut=args.variability_chi_sq_cut,
                            pickled=args.pickled,
                            correct_sigma_uv_host=args.correct_sigma_uv_host,
                            z_range=tuple(args.z_range), plot_path=agn_plot_path)

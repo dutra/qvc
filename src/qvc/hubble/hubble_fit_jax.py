@@ -802,7 +802,8 @@ def main():
     parser.add_argument("--fhost_cut", type=float, default=DEFAULT_F_HOST_CUT)
     parser.add_argument("--wrms_cut", type=float, default=DEFAULT_WRMS_CUT)
     parser.add_argument("--iron_frac_cut", type=float, default=DEFAULT_IRON_FRAC_CUT)
-    parser.add_argument("--chi_sq_cut", type=float, default=DEFAULT_CHI_SQ_CUT)
+    parser.add_argument("--bc_frac_cut", type=float, default=DEFAULT_BC_FRAC_CUT)
+    parser.add_argument("--variability_chi_sq_cut", type=float, default=DEFAULT_CHI_SQ_CUT)
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
@@ -816,7 +817,8 @@ def main():
         spectra_fit_csv=args.spectra_fit_csv,
         wrms_cut=args.wrms_cut,
         iron_frac_cut=args.iron_frac_cut,
-        chi_sq_cut=args.chi_sq_cut,
+        bc_frac_cut=args.bc_frac_cut,
+        variability_chi_sq_cut=args.variability_chi_sq_cut,
         pickled=args.pickled,
         correct_sigma_uv_host=args.correct_sigma_uv_host,
         z_range=tuple(args.z_range),

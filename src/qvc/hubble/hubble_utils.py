@@ -900,7 +900,8 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
                   spectra_fit_csv=None, only_load=False,
                   pickled=False,
                   correct_sigma_uv_host=False,
-                  iron_frac_cut=None, wrms_cut=None, chi_sq_cut=None,
+                  iron_frac_cut=None, bc_frac_cut=None, wrms_cut=None,
+                  variability_chi_sq_cut=None,
                   lc_info_csv="data/lc_chisq.csv",
                   z_range=(0.44, 3.16),
                   plot_path="plots/hubble"):
@@ -1290,8 +1291,9 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
     cuts = build_agn_cuts(
         f_host_cut=fhost_cut,
         iron_frac_cut=iron_frac_cut if iron_frac_cut is not None else None,
+        bc_frac_cut=bc_frac_cut if bc_frac_cut is not None else None,
         wrms_cut=wrms_cut if wrms_cut is not None else None,
-        variability_chi_sq_g_cut=chi_sq_cut,
+        variability_chi_sq_g_cut=variability_chi_sq_cut,
     )
 
     if apply_cut:
