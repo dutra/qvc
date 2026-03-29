@@ -792,13 +792,13 @@ def plot_sf_vs_uv_variability(df, plot_path="plots/hubble", show=False):
             missing.append("log_tau_uv_rf or log_tau_uv")
         raise KeyError(f"Missing required columns for SF-vs-UV diagnostic plot: {', '.join(missing)}")
 
-    chi_sq_g = (
-        pd.to_numeric(df["chi_sq_g"], errors="coerce").to_numpy(dtype=float)
-        if "chi_sq_g" in df.columns else np.full(len(df), np.nan)
+    variability_chi_sq_g = (
+        pd.to_numeric(df["variability_chi_sq_g"], errors="coerce").to_numpy(dtype=float)
+        if "variability_chi_sq_g" in df.columns else np.full(len(df), np.nan)
     )
-    log_chi_sq_g = np.full(len(df), np.nan, dtype=float)
-    positive_chi_sq = np.isfinite(chi_sq_g) & (chi_sq_g > 0.0)
-    log_chi_sq_g[positive_chi_sq] = np.log10(chi_sq_g[positive_chi_sq])
+    log_variability_chi_sq_g = np.full(len(df), np.nan, dtype=float)
+    positive_chi_sq = np.isfinite(variability_chi_sq_g) & (variability_chi_sq_g > 0.0)
+    log_variability_chi_sq_g[positive_chi_sq] = np.log10(variability_chi_sq_g[positive_chi_sq])
     log_sigma_uv = pd.to_numeric(df["log_sigma_uv"], errors="coerce").to_numpy(dtype=float)
     log_sigma_sf = pd.to_numeric(df["log_sigma_uv_sf"], errors="coerce").to_numpy(dtype=float)
     log_tau_uv = pd.to_numeric(df[tau_uv_col], errors="coerce").to_numpy(dtype=float)
@@ -841,7 +841,7 @@ def plot_sf_vs_uv_variability(df, plot_path="plots/hubble", show=False):
     last_scatter = None
     for ax, x, y, xlabel, ylabel, empty_label in panels:
         mask = sf_valid & np.isfinite(x) & np.isfinite(y) & (x > 0.0) & (y > 0.0)
-        color_mask = mask & np.isfinite(log_chi_sq_g)
+        color_mask = mask & np.isfinite(log_variability_chi_sq_g)
         if np.any(mask):
             if np.any(~color_mask & mask):
                 ax.scatter(
@@ -857,7 +857,7 @@ def plot_sf_vs_uv_variability(df, plot_path="plots/hubble", show=False):
                 last_scatter = ax.scatter(
                     x[color_mask],
                     y[color_mask],
-                    c=log_chi_sq_g[color_mask],
+                    c=log_variability_chi_sq_g[color_mask],
                     cmap="viridis",
                     s=10,
                     alpha=0.65,
@@ -3708,11 +3708,8 @@ def plot_full_residuals(
             'f_fe_uv_over_pl_3000': 'log_f_fe_uv_over_pl_3000',
             'RCHI2': 'log_RCHI2',
             'RCHI2DIFF': 'log_RCHI2DIFF',
-            'chi_sq_g': 'log_chi_sq_g',
-            'chi_sq_all': 'log_chi_sq_all',
-            'chi_sq_red_g_raw': 'log_chi_sq_red_g_raw',
-            'chi_sq_g_raw': 'log_chi_sq_g_raw',
-            'pvalue_g': 'log_pvalue_g',
+            'variability_chi_sq_g': 'log_variability_chi_sq_g',
+
         }
         for source_col, derived_col in log_columns.items():
             if source_col in frame.columns:
@@ -3748,8 +3745,8 @@ def plot_full_residuals(
 
     # ---- Which x-keys to show (keep your order) ----
     keys = [col for col in [
-        'chi_sq_g', 'log_chi_sq_g', 'chi_sq_all', 'log_chi_sq_all',
-        #'chi_sq_red_g_raw', 'log_chi_sq_red_g_raw', 'chi_sq_g_raw', 'log_chi_sq_g_raw',
+        'variability_chi_sq_g', 'log_variability_chi_sq_g',
+        #'chi_sq_red_g_raw', 'log_chi_sq_red_g_raw', 'variability_chi_sq_g_raw', 'log_variability_chi_sq_g_raw',
         #'pvalue_g', 'log_pvalue_g',
         #'sdss_plate_count', 'RCHI2', 'log_RCHI2', 'RCHI2DIFF', 'log_RCHI2DIFF', 'VDISP', 'ZWARNING', 'RUN2D',
         'log_frac_host_psf_2500',

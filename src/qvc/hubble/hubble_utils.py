@@ -236,10 +236,10 @@ def populate_lc_info(df, lc_info_csv):
         # 'cadence': float,
         # 'cadence_err': float,
         # 't_std': float,
-        # 'chi_sq_g_raw': float,
+        # 'variability_chi_sq_g_raw': float,
         # 'chi_sq_red_g_raw': float,
         # 'pvalue_g': float
-        'chi_sq_g': float,
+        'variability_chi_sq_g': float,
     }
     # Load and concatenate two CSV files
     lc_info_csv = resolve_qvc_data_path(lc_info_csv)
@@ -1200,11 +1200,11 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
 
     df = populate_xray(df)
     
-    if lc_info_csv is not None:
-        print("Populating LC info from:", lc_info_csv)
-        df = populate_lc_info(df, lc_info_csv)
-    else:
-        print("[WARNING] lc_info_csv not provided")
+    # if lc_info_csv is not None:
+    #     print("Populating LC info from:", lc_info_csv)
+    #     df = populate_lc_info(df, lc_info_csv)
+    # else:
+    #     print("[WARNING] lc_info_csv not provided")
 
     num_quasars_z_0_1_before = len(df[(df['z'] > 0) & (df['z'] <= 1.0)])
     num_quasars_z_gt_3_before = len(df[df['z'] > 3])
@@ -1283,7 +1283,7 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
         f_host_cut=fhost_cut,
         iron_frac_cut=iron_frac_cut if iron_frac_cut is not None else None,
         wrms_cut=wrms_cut if wrms_cut is not None else None,
-        chi_sq_g_cut=chi_sq_cut,
+        variability_chi_sq_g_cut=chi_sq_cut,
     )
 
     if apply_cut:
