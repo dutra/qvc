@@ -5478,7 +5478,7 @@ def plot_Mi_relation(df_agn, plot_path=None):
 
     DL = cosmo.luminosity_distance(df_agn['z'].values).to(u.parsec).value
     M_i_my = df_agn['apparent_mag_2500'].values - 5.0 * (np.log10(DL) - 1)
-    M_i_Wu_z2 = 91 - 2.5 * df_agn['log_lbol']
+    M_i_Wu_z2 = 91 - 2.5 * df_agn['LOGLBOL_CORRECTED']
     M_i_Wu_z2 = M_i_Wu_z2.mask(M_i_Wu_z2 > 0)
 
     fig, ax = plt.subplots(figsize=(8, 6))

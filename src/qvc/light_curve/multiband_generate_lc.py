@@ -600,14 +600,23 @@ def populate_sdss_fields(s82_objs, progress_bar=False):
     matched_rows = query_rows[match_mask]
     matched_row_idx = np.asarray(matched_rows["row_idx"], dtype=int)
     matched_fits_idx = np.asarray(nearest_idx[match_mask], dtype=int)
+    z_vals = np.asarray(matched_rows["Z_SYS"], dtype=float)
+    logl3000 = np.asarray(dr16q["LOGL3000"])[matched_fits_idx]
+    logl3000_err = np.asarray(dr16q["LOGL3000_ERR"])[matched_fits_idx]
+    loglbol = np.asarray(dr16q["LOGLBOL"])[matched_fits_idx]
+    loglbol_err = np.asarray(dr16q["LOGLBOL_ERR"])[matched_fits_idx]
+    loglbol_corrected = np.where(z_vals < 0.7, np.log10(5.15) + logl3000, loglbol)
+    loglbol_corrected_err = np.where(z_vals < 0.7, logl3000_err, loglbol_err)
 
     for field, values in (
         ("ra", np.asarray(matched_rows["RA"], dtype=float)),
         ("dec", np.asarray(matched_rows["DEC"], dtype=float)),
-        ("z", np.asarray(matched_rows["Z_SYS"], dtype=float)),
+        ("z", z_vals),
         ("sdss_name", np.asarray(dr16q["SDSS_NAME"])[matched_fits_idx]),
-        ("LOGLBOL", np.asarray(dr16q["LOGLBOL"])[matched_fits_idx]),
-        ("LOGLBOL_ERR", np.asarray(dr16q["LOGLBOL_ERR"])[matched_fits_idx]),
+        ("LOGLBOL", loglbol),
+        ("LOGLBOL_ERR", loglbol_err),
+        ("LOGLBOL_CORRECTED", loglbol_corrected),
+        ("LOGLBOL_CORRECTED_ERR", loglbol_corrected_err),
         ("LOGL5100", np.asarray(dr16q["LOGL5100"])[matched_fits_idx]),
         ("LOGL5100_ERR", np.asarray(dr16q["LOGL5100_ERR"])[matched_fits_idx]),
         ("log_mbh", np.asarray(dr16q["LOGMBH"])[matched_fits_idx]),
