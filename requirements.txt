@@ -13,6 +13,7 @@ ipykernel==6.29.5
 pandas==2.3.1
 corner==2.2.3
 scipy==1.16.0
+speclite
 statsmodels
 ipython==9.1.0
 jupyterlab==4.4.4
