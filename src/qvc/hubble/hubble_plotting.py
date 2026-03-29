@@ -3746,6 +3746,8 @@ def plot_full_residuals(
     # ---- Which x-keys to show (keep your order) ----
     keys = [col for col in [
         'variability_chi_sq_g', 'log_variability_chi_sq_g',
+        'variability_chi_sq_red_g', 'log_variability_chi_sq_red_g',
+        'variability_pvalue_g', 'variability_neg_log10_pvalue_g',
         #'chi_sq_red_g_raw', 'log_chi_sq_red_g_raw', 'variability_chi_sq_g_raw', 'log_variability_chi_sq_g_raw',
         #'pvalue_g', 'log_pvalue_g',
         #'sdss_plate_count', 'RCHI2', 'log_RCHI2', 'RCHI2DIFF', 'log_RCHI2DIFF', 'VDISP', 'ZWARNING', 'RUN2D',
