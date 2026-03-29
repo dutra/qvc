@@ -276,13 +276,11 @@ def test_blr_line_assignment_uses_visibility_only():
 
 
 def test_build_single_object_model_disables_second_blr_term_by_default():
-    obj = _make_fake_obj_lc()
+    obj = _make_fake_public_object()
     lc = make_lc(
         obj,
         ["g", "r"],
-        random_state=np.random.default_rng(0),
         inject_fake=False,
-        adjust_error_by_redshift=False,
         drop_band_lyman_alpha=False,
     )
     obj = obj | lc
