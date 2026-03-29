@@ -706,6 +706,7 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
     os.makedirs(compare_plot_path, exist_ok=True)
 
     cosmo_models_result_dict = {k: {} for k in cosmo_models}
+    cosmo_models_sna_result_dict = {k: {} for k in cosmo_models}
     results_latex = []
     cosmo_model_joint_samples = {}
     cosmo_model_sna_samples = {}
@@ -749,6 +750,10 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
         cosmo_models_result_dict[cosmo_model]['logZerr'] = logZerr_joint
         cosmo_models_result_dict[cosmo_model]['age'] = age_joint
         cosmo_models_result_dict[cosmo_model]['age_err'] = age_err_joint
+        cosmo_models_sna_result_dict[cosmo_model]['logZ'] = logZ_sna
+        cosmo_models_sna_result_dict[cosmo_model]['logZerr'] = logZerr_sna
+        cosmo_models_sna_result_dict[cosmo_model]['age'] = age_sna
+        cosmo_models_sna_result_dict[cosmo_model]['age_err'] = age_sna_err
 
 
 
@@ -770,11 +775,30 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
             cosmo_models_result_dict[cosmo_model][f"{key}_err_lower"] = lower
             cosmo_models_result_dict[cosmo_model][f"{key}_err_upper"] = upper
 
+        for i, key in enumerate(model_labels_sna):
+            median, err, lower, upper = sym_percentile(samples_sna[:, i])
+            cosmo_models_sna_result_dict[cosmo_model][key] = median
+            cosmo_models_sna_result_dict[cosmo_model][f"{key}_err"] = err
+            cosmo_models_sna_result_dict[cosmo_model][f"{key}_err_lower"] = lower
+            cosmo_models_sna_result_dict[cosmo_model][f"{key}_err_upper"] = upper
+
     compare_r = compare_models_by_log_evidence_all(df_agn, cosmo_models_result_dict, write_path=f"{compare_plot_path}/")
+    is_calib_bool = np.asarray(df_pantheon['IS_CALIBRATOR'], dtype=bool)
+    sn_fit_mask = (df_pantheon['zHD'] > 0.01) | is_calib_bool
+    compare_r_sna = compare_models_by_log_evidence_all(
+        df_agn,
+        cosmo_models_sna_result_dict,
+        write_path=f"{compare_plot_path}/",
+        sample_label="SNe Ia",
+        sample_count=int(np.count_nonzero(sn_fit_mask)),
+        output_filename="compare_all_models_sn_only.txt",
+    )
     write_results_tex_variables(df_agn, df_agn_all, df_pantheon, z_range, 
                                 cosmo_model_joint_samples, cosmo_model_sna_samples, 
                                 compare_r, compare_plot_path, 
-                                result_prefix=result_prefix, cosmo_models_result_dict=cosmo_models_result_dict)
+                                result_prefix=result_prefix, cosmo_models_result_dict=cosmo_models_result_dict,
+                                cosmo_models_sna_result_dict=cosmo_models_sna_result_dict,
+                                compare_r_sna=compare_r_sna)
 
     os.makedirs(f"results/cosmo/{prefix}", exist_ok=True)
     save_cosmo_results_hdf5(
@@ -822,7 +846,6 @@ if __name__ == "__main__":
     parser.add_argument("--result_prefix", type=str, default="", help="Prefix for result variable names in LaTeX output (default: empty string)")
     parser.add_argument("--z_range", type=float, nargs=2, default=[0.44, 3.16], 
                         help="Redshift range for AGN data (default: [0.44, 3.16])")
-    parser.add_argument("--pickled", action="store_true", default=False, help="Use pickled data file (default: False)")
     parser.add_argument("--uniform_redshift_distribution", action="store_true", default=False, help="Select AGN subset with uniform redshift distribution (default: False)")
     parser.add_argument(
         "--completeness_sim_file",
@@ -885,7 +908,6 @@ if __name__ == "__main__":
                            wrms_cut=args.wrms_cut, iron_frac_cut=args.iron_frac_cut,
                            bc_frac_cut=args.bc_frac_cut,
                            variability_chi_sq_cut=args.variability_chi_sq_cut,
-                           pickled=args.pickled,
                            correct_sigma_uv_host=args.correct_sigma_uv_host,
                            z_range=tuple(args.z_range), plot_path=agn_plot_path)
     if args.N is not None:

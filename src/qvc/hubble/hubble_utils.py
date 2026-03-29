@@ -3,7 +3,6 @@
 import json
 import math
 import os
-import pickle
 import warnings
 from ast import literal_eval
 from collections import defaultdict
@@ -898,7 +897,6 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
                   exclude_object_ids_csv=None,
                   residuals_sigma_clip=None, residuals_csv=None,
                   spectra_fit_csv=None, only_load=False,
-                  pickled=False,
                   correct_sigma_uv_host=False,
                   iron_frac_cut=None, bc_frac_cut=None, wrms_cut=None,
                   variability_chi_sq_cut=None,
@@ -1002,26 +1000,9 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
         spectra_fit_csv = [resolve_qvc_data_path(path) for path in spectra_fit_csv]
     if exclude_object_ids_csv:
         exclude_object_ids_csv = [resolve_qvc_data_path(path) for path in exclude_object_ids_csv]
-    
-    if pickled:
-        pickle_path = file_path if str(file_path).endswith(".pkl") else f"{file_path}.pkl"
-        pickle_path = resolve_qvc_data_path(pickle_path)
-        with open(pickle_path, "rb") as f:
-            payload = pickle.load(f)
-        if isinstance(payload, pd.DataFrame):
-            df = payload.copy()
-        elif isinstance(payload, list):
-            df = pd.DataFrame.from_records(payload)
-        elif isinstance(payload, dict):
-            df = pd.DataFrame(payload)
-        else:
-            raise TypeError(
-                "Unsupported pickled payload type for AGN data: "
-                f"{type(payload).__name__}"
-            )
-    else:
-        file_path = resolve_qvc_data_path(file_path)
-        df = read_quasars_from_hdf5_flat(file_path)
+
+    file_path = resolve_qvc_data_path(file_path)
+    df = read_quasars_from_hdf5_flat(file_path)
     print("Number of quasars loaded:", len(df))
     legacy_required = [f"mags_mean_{i}" for i in range(4)]
     if all(col in df.columns for col in legacy_required):
@@ -1500,7 +1481,11 @@ def compare_models_by_log_evidence_all(
         cosmo_models_dict,
         jeffreys_thresholds=(1.0, 2.5, 5.0),   # |Δln Z| bands
         z_decisive=2.0,
-        write_path="plots/hubble/"
+        write_path="plots/hubble/",
+        *,
+        sample_label="AGNs",
+        sample_count=None,
+        output_filename="compare_all_models.txt",
 ):
     """
     Compare MANY models by log-evidence.
@@ -1663,14 +1648,14 @@ def compare_models_by_log_evidence_all(
             f"{t['sigma_from_odds_two_sided_ci_1sigma'][1]:.4f}]\n"
             f"Jeffreys strength: {t['jeffreys_strength']}; "
             f"decisive (|z_mc|≥{z_decisive:.1f})? {'yes' if t['decisive_zmc_ge_thresh'] else 'no'}\n"
-            f"Number of AGNs: {len(df_agn)}\n"
+            f"Number of {sample_label}: {len(df_agn) if sample_count is None else sample_count}\n"
         )
 
     # Print and save the text summary.
     for line in lines:
         print(line, end="")
     os.makedirs(write_path, exist_ok=True)
-    text_path = os.path.join(write_path, "compare_all_models.txt")
+    text_path = os.path.join(write_path, output_filename)
     with open(text_path, "w", encoding="utf-8") as f:
         f.writelines(lines)
 
@@ -2217,8 +2202,19 @@ def sigma_distance_asym(x1, err1, x2, err2_lower, err2_upper):
 
 
 def write_results_tex_variables(
-    df_agn, df_agn_all, df_pantheon, z_range, cosmo_model_joint_samples, cosmo_model_sna_samples, compare_r,
-    write_path, result_prefix="", chisq_dict=None, cosmo_models_result_dict=None
+    df_agn,
+    df_agn_all,
+    df_pantheon,
+    z_range,
+    cosmo_model_joint_samples,
+    cosmo_model_sna_samples,
+    compare_r,
+    write_path,
+    result_prefix="",
+    chisq_dict=None,
+    cosmo_models_result_dict=None,
+    cosmo_models_sna_result_dict=None,
+    compare_r_sna=None,
 ):
     """
     Write key cosmological parameters AND model comparison results
@@ -2284,15 +2280,29 @@ def write_results_tex_variables(
             results[f"{key}_err_upper"] = err_upper
 
         if 'M0_sn' in results:
-            lines.append(_cmd("SNMZero", format_result_errors(results['M0_sn'],results['M0_sn_err']), model_suffix=model_name))
+            lines.append(_cmd("SNOnlyMZero", format_result_errors(results['M0_sn'], results['M0_sn_err']), model_suffix=model_name))
         if 'Om0' in results:
-            lines.append(_cmd("SNOmZero", format_result_errors(results['Om0'],results['Om0_err']), model_suffix=model_name))
+            formatted = format_result_errors(results['Om0'], results['Om0_err'])
+            lines.append(_cmd("SNOnlyOmZero", formatted, model_suffix=model_name))
         if 'w0' in results:
-            lines.append(_cmd("SNwZero", format_result_errors(results['w0'],err_lower=results['w0_err_lower'], err_upper=results['w0_err_upper']), model_suffix=model_name))
+            formatted = format_result_errors(results['w0'], err_lower=results['w0_err_lower'], err_upper=results['w0_err_upper'])
+            lines.append(_cmd("SNOnlyWZero", formatted, model_suffix=model_name))
         if 'wa' in results:
-            lines.append(_cmd("SNwa", format_result_errors(results['wa'],err_lower=results['wa_err_lower'], err_upper=results['wa_err_upper'], nd=1), model_suffix=model_name))
+            formatted = format_result_errors(results['wa'], err_lower=results['wa_err_lower'], err_upper=results['wa_err_upper'], nd=1)
+            lines.append(_cmd("SNOnlyWa", formatted, model_suffix=model_name))
         if 'H0' in results:
-             lines.append(_cmd("SNHZero", format_result_errors(results['H0'],results['H0_err']), model_suffix=model_name))
+            formatted = format_result_errors(results['H0'], results['H0_err'])
+            lines.append(_cmd("SNOnlyHZero", formatted, model_suffix=model_name))
+
+        sna_result = (cosmo_models_sna_result_dict or {}).get(model_name)
+        if sna_result is not None:
+            lines.append(
+                _cmd(
+                    "SNOnlyAgeUniverse",
+                    format_result_errors(sna_result["age"], sna_result["age_err"], unit=r"Gyr"),
+                    model_suffix=model_name,
+                )
+            )
 
 
     # Per-model summary parameters.
@@ -2388,6 +2398,33 @@ def write_results_tex_variables(
                 lines.append(_cmd(f"JeffreysStrength{pair_name}", pair['jeffreys_strength']))
             else:
                 lines.append(_cmd(f"DeltaLogZ{pair_name}", "N/A"))
+
+    if compare_r_sna:
+        lines.append(r"% --- SN-only Model Comparisons ---")
+        if "preferred_model" in compare_r_sna:
+            lines.append(_cmd("SNOnlyPreferredModelOverall", compare_r_sna["preferred_model"]))
+
+        for r in compare_r_sna.get("ranking", []):
+            m_name = r["model"]
+            lines.append(_cmd("SNOnlyLogZ", f"{r['logZ']:.1f}", model_suffix=m_name))
+            lines.append(_cmd("SNOnlyLogZerr", f"{r['logZerr']:.1f}", model_suffix=m_name))
+            lines.append(_cmd("SNOnlyDeltaLogZ", f"{r['delta_logZ_vs_top']:.1f}", model_suffix=m_name))
+            lines.append(_cmd("SNOnlySigma", f"{r['sigma_two_sided_vs_top']:.1f}", model_suffix=m_name))
+            lines.append(_cmd("SNOnlyJeffreysStrength", r['jeffreys_strength_vs_top'], model_suffix=m_name))
+
+        pw = compare_r_sna.get("pairwise", {})
+        ranked_models = [r["model"] for r in compare_r_sna.get("ranking", [])]
+
+        for a, b in combinations(ranked_models, 2):
+            pair = pw.get(a, {}).get(b) or pw.get(b, {}).get(a)
+            pair_name = f"{_clean(a)}{_clean(b)}"
+
+            if pair:
+                lines.append(_cmd(f"SNOnlyDeltaLogZ{pair_name}", f"{pair['delta_logZ']:.1f} \\pm {pair['delta_logZ_err']:.1f}"))
+                lines.append(_cmd(f"SNOnlySigma{pair_name}", f"{pair['sigma_two_sided']:.1f}"))
+                lines.append(_cmd(f"SNOnlyJeffreysStrength{pair_name}", pair['jeffreys_strength']))
+            else:
+                lines.append(_cmd(f"SNOnlyDeltaLogZ{pair_name}", "N/A"))
 
     # Write the LaTeX command file.
     filename = f"param_results_{result_prefix.lower()}.tex" if result_prefix else "param_results.tex"

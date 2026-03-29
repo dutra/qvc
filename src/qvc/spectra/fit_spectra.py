@@ -18,7 +18,6 @@ from __future__ import annotations
 import argparse
 import multiprocessing as mp
 import os
-import pickle
 import traceback
 from functools import partial
 from pathlib import Path
@@ -348,21 +347,8 @@ def compute_derived_results(result, q, args):
 # sample building and cross-match
 # -----------------------------------------------------------------------------
 
-def load_quasar_core_list(fpath_in, pickled=False):
-    if pickled:
-        with open(fpath_in + ".pkl", "rb") as f: 
-            payload = pickle.load(f)
-        if isinstance(payload, pd.DataFrame):
-            sample_df = payload.copy()
-        elif isinstance(payload, list):
-            sample_df = pd.DataFrame.from_records(payload)
-        elif isinstance(payload, dict):
-            sample_df = pd.DataFrame(payload)
-        else:
-            raise TypeError(f"Unsupported pickled input type: {type(payload).__name__}")
-    else:
-        sample_df = read_quasars_from_hdf5_flat(fpath_in)
-    return sample_df
+def load_quasar_core_list(fpath_in):
+    return read_quasars_from_hdf5_flat(fpath_in)
 
 
 def prepare_sample_df(sample_df, filter_sdss_name=None, filter_object_id=None, N=None, skip=None):
@@ -439,7 +425,7 @@ def build_records(args):
     if str(args.fpath_in).lower().endswith(".csv"):
         sample_df = pd.read_csv(args.fpath_in)
     else:
-        sample_df = load_quasar_core_list(args.fpath_in, pickled=args.pickled)
+        sample_df = load_quasar_core_list(args.fpath_in)
 
     print("build_records filtering on: ", args.filter_object_id)
     sample_df = prepare_sample_df(
@@ -805,8 +791,6 @@ def parse_args():
     p.add_argument("--skip", type=int, default=None)
     p.add_argument("--filter_sdss_name", nargs="+", default=None)
     p.add_argument("--filter_object_id", nargs="+", default=None)
-    p.add_argument("--pickled", action="store_true", help="Use pickled data file")
-
     p.add_argument("--fit-method", choices=["optax", "nuts", "optax+nuts"], default="optax+nuts")
     p.add_argument("--dsps-ssp-fn", default="data/ssp_data_fsps_v3.2_lgmet_age.h5", help="Path to the DSPS SSP HDF5 file.")
     p.add_argument("--no-deredden", action="store_true")

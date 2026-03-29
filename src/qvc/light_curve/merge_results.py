@@ -4,7 +4,6 @@ import csv
 import glob
 import multiprocessing
 import os
-import pickle
 import sys
 
 import h5py

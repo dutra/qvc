@@ -1568,8 +1568,16 @@ def build_single_object_model(
                     jnp.full(B, -9.0),
                 )
             elif n_blr_terms <= 1:
-                log_amp_delta_blr = numpyro.sample("log_amp_delta_blr_raw", log_amp_delta_blr_prior())
-                log_lag_blr = numpyro.sample("log_lag_blr_raw", log_lag_blr_prior())
+                log_amp_delta_blr_raw = numpyro.sample("log_amp_delta_blr_raw", log_amp_delta_blr_prior())
+                log_lag_blr_raw = numpyro.sample("log_lag_blr_raw", log_lag_blr_prior())
+                log_amp_delta_blr = numpyro.deterministic(
+                    "log_amp_delta_blr",
+                    log_amp_delta_blr_raw,
+                )
+                log_lag_blr = numpyro.deterministic(
+                    "log_lag_blr",
+                    log_lag_blr_raw,
+                )
                 log_amp_delta_blr2 = numpyro.deterministic(
                     "log_amp_delta_blr2",
                     jnp.full(B, -9.0),
