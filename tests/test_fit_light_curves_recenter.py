@@ -298,6 +298,7 @@ def test_compute_parameter_kls_ignores_nonfinite_conditioning_samples():
         disable_lag_blr=False,
         drop_band_lyman_alpha=False,
         tau_fast_truncated=False,
+        n_blr_terms=2,
     )
 
     assert "log_sigma_center0_kl" in kls
@@ -408,6 +409,7 @@ def test_compute_parameter_kls_returns_expected_keys():
         z=z,
         lambda_center_rf=lambda_center_rf,
         log_jitter_mean=np.asarray([np.log(0.03), np.log(0.03)]),
+        n_blr_terms=2,
     )
 
     expected_keys = {

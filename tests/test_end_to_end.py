@@ -8,6 +8,7 @@ import pandas as pd
 import jax.numpy as jnp
 from jax import device_get, random
 from jax.tree_util import tree_map
+from numpyro.handlers import seed, trace
 from numpyro.infer import MCMC, NUTS
 
 
@@ -249,6 +250,49 @@ def test_blr_line_assignment_uses_visibility_only():
     assert out.iloc[0]["assigned_prob"] > out.iloc[0]["p_Hb"]
 
 
+def test_build_single_object_model_disables_second_blr_term_by_default():
+    obj = _make_fake_obj_lc()
+    lc = make_lc(
+        obj,
+        ["g", "r"],
+        random_state=np.random.default_rng(0),
+        inject_fake=False,
+        adjust_error_by_redshift=False,
+        drop_band_lyman_alpha=False,
+    )
+    obj = obj | lc
+
+    bands = obj["bands"]
+    lam_rf = jnp.array([lambda_pivot[b] for b in bands], dtype=float) / (1.0 + float(obj["z"]))
+    bidx = np.asarray(obj["band_idx"])
+    yerr = np.asarray(obj["yerr"])
+    log_jitter_mean = np.array(
+        [
+            np.log(np.mean(yerr[(bidx == i) & np.isfinite(yerr) & (yerr < 10)]))
+            for i in range(len(bands))
+        ],
+        dtype=float,
+    )
+    model = build_single_object_model(
+        obj,
+        lam_rf,
+        log_jitter_mean=jnp.array(log_jitter_mean),
+        disable_poly1=False,
+        disable_lag_blr=False,
+        drop_band_lyman_alpha=False,
+        tau_fast_truncated=False,
+        n_blr_terms=1,
+    )
+
+    model_trace = trace(seed(model, random.PRNGKey(0))).get_trace()
+    assert "log_amp_delta_blr_raw" in model_trace
+    assert "log_lag_blr_raw" in model_trace
+    assert "log_amp_delta_blr2_raw" not in model_trace
+    assert "log_lag_blr2_raw" not in model_trace
+    assert np.allclose(np.asarray(model_trace["log_amp_delta_blr2"]["value"]), -9.0)
+    assert np.allclose(np.asarray(model_trace["log_lag_blr2"]["value"]), -9.0)
+
+
 def test_end_to_end(tmp_path, monkeypatch):
     monkeypatch.setenv("MPLCONFIGDIR", str(tmp_path / "mplconfig"))
 
@@ -298,6 +342,7 @@ def test_end_to_end(tmp_path, monkeypatch):
         disable_lag_blr=False,
         drop_band_lyman_alpha=False,
         tau_fast_truncated=False,
+        n_blr_terms=1,
     )
 
     nuts = NUTS(

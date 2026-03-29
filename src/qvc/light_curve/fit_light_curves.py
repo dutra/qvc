@@ -1006,6 +1006,7 @@ def compute_parameter_kls(
     disable_lag_blr=False,
     drop_band_lyman_alpha=False,
     tau_fast_truncated=False,
+    n_blr_terms=1,
 ):
     """Return approximate KL(q||p) for sampled light-curve parameters."""
 
@@ -1103,14 +1104,20 @@ def compute_parameter_kls(
         if disable_lag_blr:
             continue
 
-        for amp_key in (f"log_amp_delta_blr_{band}", f"log_amp_delta_blr2_{band}"):
+        amp_keys = [f"log_amp_delta_blr_{band}"]
+        if n_blr_terms >= 2:
+            amp_keys.append(f"log_amp_delta_blr2_{band}")
+        for amp_key in amp_keys:
             if amp_key in flat_samples:
                 kls[f"{amp_key}_kl"] = kl_from_samples(
                     flat_samples[amp_key],
                     lambda x: _dist_log_prob_array(log_amp_delta_blr_prior(), x),
                 )
 
-        for lag_key in (f"log_lag_blr_{band}", f"log_lag_blr2_{band}"):
+        lag_keys = [f"log_lag_blr_{band}"]
+        if n_blr_terms >= 2:
+            lag_keys.append(f"log_lag_blr2_{band}")
+        for lag_key in lag_keys:
             if lag_key in flat_samples:
                 kls[f"{lag_key}_kl"] = kl_from_samples(
                     flat_samples[lag_key],
@@ -1485,6 +1492,7 @@ def build_single_object_model(
     disable_lag_blr=False,
     drop_band_lyman_alpha=False,
     tau_fast_truncated=False,
+    n_blr_terms=1,
 ):
     """Return the NumPyro model for one object."""
 
@@ -1551,6 +1559,17 @@ def build_single_object_model(
                     "log_lag_blr",
                     jnp.full(B, -9.0),
                 )
+                log_amp_delta_blr2 = numpyro.deterministic(
+                    "log_amp_delta_blr2",
+                    jnp.full(B, -9.0),
+                )
+                log_lag_blr2 = numpyro.deterministic(
+                    "log_lag_blr2",
+                    jnp.full(B, -9.0),
+                )
+            elif n_blr_terms <= 1:
+                log_amp_delta_blr = numpyro.sample("log_amp_delta_blr_raw", log_amp_delta_blr_prior())
+                log_lag_blr = numpyro.sample("log_lag_blr_raw", log_lag_blr_prior())
                 log_amp_delta_blr2 = numpyro.deterministic(
                     "log_amp_delta_blr2",
                     jnp.full(B, -9.0),
@@ -1686,6 +1705,7 @@ def main():
     )
     parser.add_argument("--load_nearby_lc_csv", type=str, default=None, help="CSV listing nearby LCs to load.")
     parser.add_argument("--tau_fast_truncated", action="store_true", default=False, help="Truncated prior for tau_fast0.")
+    parser.add_argument("--n_blr_terms", type=int, choices=(1, 2), default=1, help="Number of BLR lag terms to fit.")
     args = parser.parse_args()
     print("Args:", args)
 
@@ -1771,6 +1791,7 @@ def main():
                 disable_lag_blr=args.disable_lag_blr,
                 drop_band_lyman_alpha=args.drop_band_lyman_alpha,
                 tau_fast_truncated=args.tau_fast_truncated,
+                n_blr_terms=args.n_blr_terms,
             )
 
             init_strategy = numpyro.infer.init_to_median()
@@ -1895,6 +1916,7 @@ def main():
                 disable_lag_blr=args.disable_lag_blr,
                 drop_band_lyman_alpha=args.drop_band_lyman_alpha,
                 tau_fast_truncated=args.tau_fast_truncated,
+                n_blr_terms=args.n_blr_terms,
             )
 
             if args.plot:
