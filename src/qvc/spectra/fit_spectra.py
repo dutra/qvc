@@ -294,6 +294,8 @@ def compute_derived_results(result, q, args):
         result["f_host_5100"] = safe_float(result.get("frac_host_5100"))
 
     samples = q.numpyro_samples
+    result["bi"] = safe_float(getattr(q, "bi", np.nan))
+    result["bi_err"] = safe_float(getattr(q, "bi_err", np.nan))
     decompose_host_eff = bool(getattr(q, "_fit_decompose_host", getattr(args, "decompose_host", True)))
     result["decompose_host_effective"] = decompose_host_eff
 
@@ -610,6 +612,8 @@ def run_one_fit(rec, args):
         "flux_scale": 1.0,
         "bands_used": "",
         "numpyro_sample_count": 0,
+        "bi": np.nan,
+        "bi_err": np.nan,
     }
 
     os.makedirs(args.output_dir, exist_ok=True)
