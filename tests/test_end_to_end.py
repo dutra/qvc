@@ -141,6 +141,39 @@ def test_plot_adf_pvalue_g_diagnostic_writes_pdf(tmp_path, monkeypatch):
     assert out.endswith("adf_pvalue_g_diagnostic.pdf")
 
 
+def test_plot_g_band_drift_slope_histograms_writes_pdfs(tmp_path, monkeypatch):
+    monkeypatch.setenv("MPLCONFIGDIR", str(tmp_path / "mplconfig"))
+
+    df = pd.DataFrame(
+        {
+            "g_raw_mean_slope": [-2e-4, -1e-4, 0.0, 1e-4, 2e-4],
+            "g_resid_mean_slope": [-8e-5, -2e-5, 0.0, 2e-5, 8e-5],
+            "g_raw_var_slope": [-5e-6, -1e-6, 0.0, 1e-6, 5e-6],
+            "g_resid_var_slope": [-2e-6, -5e-7, 0.0, 5e-7, 2e-6],
+        }
+    )
+
+    out_mean = hubble_plotting.plot_g_band_drift_slope_histograms(
+        df,
+        slope_kind="mean",
+        plot_path=str(tmp_path / "figures"),
+        show=False,
+    )
+    out_var = hubble_plotting.plot_g_band_drift_slope_histograms(
+        df,
+        slope_kind="var",
+        plot_path=str(tmp_path / "figures"),
+        show=False,
+    )
+
+    assert out_mean is not None
+    assert out_var is not None
+    assert os.path.exists(out_mean)
+    assert os.path.exists(out_var)
+    assert out_mean.endswith("g_band_mean_slope_histograms.pdf")
+    assert out_var.endswith("g_band_var_slope_histograms.pdf")
+
+
 def test_end_to_end(tmp_path, monkeypatch):
     monkeypatch.setenv("MPLCONFIGDIR", str(tmp_path / "mplconfig"))
 
@@ -151,6 +184,7 @@ def test_end_to_end(tmp_path, monkeypatch):
         "plot_blr_lag_vs_amp_by_band",
         "plot_blr_lag_vs_redshift_by_band",
         "plot_f_host_center_vs_l2500",
+        "plot_g_band_drift_slope_histograms",
         "plot_Mi_relation",
         "plot_cut_diagnostics",
         "plot_m2500_vs_z_colorpanels",

@@ -5359,6 +5359,91 @@ def plot_adf_pvalue_g_diagnostic(
     )
 
 
+def plot_g_band_drift_slope_histograms(
+    df_agn,
+    *,
+    slope_kind="mean",
+    z_max=1.5,
+    plot_path="plots/hubble",
+    show=False,
+):
+    """Compare raw vs detrended g-band drift slopes in side-by-side histograms."""
+    if slope_kind not in {"mean", "var"}:
+        raise ValueError("slope_kind must be 'mean' or 'var'.")
+
+    raw_col = f"g_raw_{slope_kind}_slope"
+    resid_col = f"g_resid_{slope_kind}_slope"
+    if raw_col not in df_agn.columns or resid_col not in df_agn.columns:
+        return None
+
+    z = pd.to_numeric(df_agn.get("z"), errors="coerce").to_numpy(dtype=float) if "z" in df_agn.columns else None
+    if z is not None and np.isfinite(z_max):
+        mask_z = np.isfinite(z) & (z < float(z_max))
+    else:
+        mask_z = np.ones(len(df_agn), dtype=bool)
+
+    raw = pd.to_numeric(df_agn.loc[mask_z, raw_col], errors="coerce").to_numpy(dtype=float)
+    resid = pd.to_numeric(df_agn.loc[mask_z, resid_col], errors="coerce").to_numpy(dtype=float)
+    raw = raw[np.isfinite(raw)]
+    resid = resid[np.isfinite(resid)]
+    if raw.size == 0 or resid.size == 0:
+        return None
+
+    scale = 1e-4
+    raw_plot = raw / scale
+    resid_plot = resid / scale
+
+    combined = np.concatenate([raw_plot, resid_plot])
+    if combined.size == 0:
+        return None
+    xmax = float(np.nanmax(np.abs(combined)))
+    if (not np.isfinite(xmax)) or xmax <= 0.0:
+        xmax = 1.0
+    if np.nanmin(combined) == np.nanmax(combined):
+        center = float(np.nanmin(combined))
+        bins = np.linspace(center - 1.0, center + 1.0, 21)
+    else:
+        bins = np.linspace(-xmax, xmax, 31)
+
+    fig, axes = plt.subplots(1, 2, figsize=(11.0, 4.5), sharey=True)
+    labels = [
+        (axes[0], raw_plot, "no detrending"),
+        (axes[1], resid_plot, "with detrending"),
+    ]
+    if slope_kind == "mean":
+        xlabel = r"mean slope ($10^{-4}$ mag day$^{-1}$)"
+    else:
+        xlabel = r"variance slope ($10^{-4}$ mag$^2$ day$^{-1}$)"
+    for ax, values, panel_label in labels:
+        ax.hist(values, bins=bins, color="black", alpha=0.85, edgecolor="white")
+        q16, q50, q84 = np.nanpercentile(values, [16.0, 50.0, 84.0])
+        ax.axvspan(q16, q84, color="0.5", alpha=0.2, zorder=0)
+        ax.axvline(q50, color="0.25", linestyle="-", linewidth=1.4)
+        ax.axvline(0.0, color="dodgerblue", linestyle="-", linewidth=2.0)
+        ax.set_xlim(-xmax, xmax)
+        ax.set_xlabel(xlabel)
+        ax.text(
+            0.03,
+            0.95,
+            panel_label,
+            transform=ax.transAxes,
+            ha="left",
+            va="top",
+            fontsize=10,
+        )
+    axes[0].set_ylabel("Count")
+    fig.tight_layout()
+
+    diagnostics_path = os.path.join(plot_path or "plots/hubble", "diagnostics")
+    os.makedirs(diagnostics_path, exist_ok=True)
+    return _save_figure(
+        fig,
+        os.path.join(diagnostics_path, f"g_band_{slope_kind}_slope_histograms.pdf"),
+        dpi=200,
+        show=show,
+    )
+
+
 def plot_completeness_diagnostics(dmi_plot, z, m2500, integrals_max_w, plot_path="plots/hubble"):
 
     # Plot dmi vs z for the posterior-summary correction used in debiasing.
