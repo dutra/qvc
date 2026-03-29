@@ -5542,6 +5542,92 @@ def plot_adf_pvalue_g_diagnostic(
     )
 
 
+def plot_spectral_fraction_vs_redshift(
+    df_agn,
+    plot_path="plots/hubble",
+    show=False,
+    nbins=12,
+    min_bin_count=20,
+):
+    """Plot f_BC, f_FeII, and f_host_center against redshift."""
+    required = {"z", "f_bc_over_pl_3000", "f_fe_uv_over_pl_3000", "f_host_center"}
+    if not required.issubset(df_agn.columns):
+        return None
+
+    z = pd.to_numeric(df_agn["z"], errors="coerce").to_numpy(dtype=float)
+    panel_specs = [
+        ("f_bc_over_pl_3000", r"$f_{\rm BC}$"),
+        ("f_fe_uv_over_pl_3000", r"$f_{\rm FeII}$"),
+        ("f_host_center", r"$f_{\rm host,center}$"),
+    ]
+
+    fig, axes = plt.subplots(1, 3, figsize=(15.0, 4.6), sharex=True, squeeze=False)
+    axes = axes.ravel()
+
+    for ax, (col, ylabel) in zip(axes, panel_specs):
+        y = pd.to_numeric(df_agn[col], errors="coerce").to_numpy(dtype=float)
+        mask = np.isfinite(z) & np.isfinite(y)
+        if np.count_nonzero(mask) == 0:
+            ax.text(0.5, 0.5, f"No finite {col}", ha="center", va="center", transform=ax.transAxes)
+            ax.set_axis_off()
+            continue
+
+        z_use = z[mask]
+        y_use = y[mask]
+
+        ax.scatter(
+            z_use,
+            y_use,
+            s=10,
+            alpha=0.25,
+            color="k",
+            linewidths=0,
+            rasterized=True,
+        )
+
+        if np.nanmax(z_use) > np.nanmin(z_use):
+            edges = np.linspace(np.nanmin(z_use), np.nanmax(z_use), nbins + 1)
+            xmid = []
+            ymed = []
+            ylo = []
+            yhi = []
+            for i in range(len(edges) - 1):
+                lo = edges[i]
+                hi = edges[i + 1]
+                keep = (z_use >= lo) & (z_use < hi)
+                if i == len(edges) - 2:
+                    keep = (z_use >= lo) & (z_use <= hi)
+                if np.count_nonzero(keep) < min_bin_count:
+                    continue
+                y_bin = y_use[keep]
+                xmid.append(np.nanmedian(z_use[keep]))
+                ymed.append(np.nanmedian(y_bin))
+                ylo.append(np.nanpercentile(y_bin, 16))
+                yhi.append(np.nanpercentile(y_bin, 84))
+            if xmid:
+                xmid = np.asarray(xmid, dtype=float)
+                ymed = np.asarray(ymed, dtype=float)
+                ylo = np.asarray(ylo, dtype=float)
+                yhi = np.asarray(yhi, dtype=float)
+                ax.fill_between(xmid, ylo, yhi, color="tab:blue", alpha=0.18, linewidth=0)
+                ax.plot(xmid, ymed, color="tab:blue", lw=2.0)
+
+        ax.set_xlabel("Redshift z")
+        ax.set_ylabel(ylabel)
+        ax.grid(True, alpha=0.2)
+
+    fig.tight_layout()
+
+    diagnostics_path = os.path.join(plot_path or "plots/hubble", "diagnostics")
+    os.makedirs(diagnostics_path, exist_ok=True)
+    return _save_figure(
+        fig,
+        os.path.join(diagnostics_path, "spectral_fraction_vs_redshift.pdf"),
+        dpi=200,
+        show=show,
+    )
+
+
 def plot_g_band_drift_slope_histograms(
     df_agn,
     *,

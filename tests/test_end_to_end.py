@@ -175,6 +175,31 @@ def test_plot_g_band_drift_slope_histograms_writes_pdfs(tmp_path, monkeypatch):
     assert out_var.endswith("g_band_var_slope_histograms.pdf")
 
 
+def test_plot_spectral_fraction_vs_redshift_writes_pdf(tmp_path, monkeypatch):
+    monkeypatch.setenv("MPLCONFIGDIR", str(tmp_path / "mplconfig"))
+
+    df = pd.DataFrame(
+        {
+            "z": np.linspace(0.3, 2.2, 24),
+            "f_bc_over_pl_3000": np.linspace(0.05, 0.25, 24),
+            "f_fe_uv_over_pl_3000": np.linspace(0.1, 0.4, 24),
+            "f_host_center": np.linspace(0.3, 0.02, 24),
+        }
+    )
+
+    out = hubble_plotting.plot_spectral_fraction_vs_redshift(
+        df,
+        plot_path=str(tmp_path / "figures"),
+        show=False,
+        nbins=6,
+        min_bin_count=3,
+    )
+
+    assert out is not None
+    assert os.path.exists(out)
+    assert out.endswith("spectral_fraction_vs_redshift.pdf")
+
+
 def test_plot_blr_line_lags_vs_l2500_fiducial_writes_pdf(tmp_path, monkeypatch):
     monkeypatch.setenv("MPLCONFIGDIR", str(tmp_path / "mplconfig"))
 

@@ -952,6 +952,7 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
         plot_Mi_relation,
         plot_cut_diagnostics,
         plot_m2500_vs_z_colorpanels,
+        plot_spectral_fraction_vs_redshift,
         plot_sf_vs_uv_variability,
         plot_sigma_uv_host_correction,
         plot_tau_sigma_vs_wu_catalog,
@@ -1372,6 +1373,8 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
     print("Final number of quasars:", len(df))
     if "adf_pvalue_g" in df.columns:
         plot_adf_pvalue_g_diagnostic(df, plot_path=plot_path, show=False)
+    if {"z", "f_bc_over_pl_3000", "f_fe_uv_over_pl_3000", "f_host_center"}.issubset(df.columns):
+        plot_spectral_fraction_vs_redshift(df, plot_path=plot_path, show=False)
     if {"g_raw_mean_slope", "g_resid_mean_slope"}.issubset(df.columns):
         plot_g_band_drift_slope_histograms(df, slope_kind="mean", plot_path=plot_path, show=False)
     if {"g_raw_var_slope", "g_resid_var_slope"}.issubset(df.columns):
