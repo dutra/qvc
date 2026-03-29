@@ -942,6 +942,7 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
         plot_alpha_lambda_histogram,
         plot_alpha_lambda_vs_redshift,
         plot_blr_amp_vs_redshift_by_band,
+        plot_blr_line_lags_vs_l2500_fiducial,
         plot_blr_lag_vs_amp_by_band,
         plot_blr_lag_vs_redshift_by_band,
         plot_eta_tau_sigma_vs_redshift,
@@ -1174,6 +1175,11 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
         or {"log_tau_uv", "z"}.issubset(df.columns)
     ):
         plot_sf_vs_uv_variability(df, plot_path=plot_path, show=False)
+    if {"z", "apparent_mag_2500"}.issubset(df.columns) and any(
+        (f"log_lag_blr_{band}_RF" in df.columns) or (f"log_lag_blr2_{band}_RF" in df.columns)
+        for band in ("u", "g", "r", "i", "z")
+    ):
+        plot_blr_line_lags_vs_l2500_fiducial(df, plot_path=plot_path, show=False)
     if "log_sigma_uv" in df.columns:
         if any(f"log_amp_delta_blr_{band}" in df.columns for band in ("u", "g", "r", "i", "z")):
             plot_blr_lag_vs_amp_by_band(df, plot_path=plot_path, show=False, lag_suffix="")

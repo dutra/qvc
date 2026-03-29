@@ -148,6 +148,7 @@ def _blr_line_assignment_longform(
 ):
     rows = []
     continuum_ref_col = "log_sigma_uv"
+    logL2500_arr = np.asarray(logL2500_debiased, dtype=float)
     for suffix in ("", "2"):
         component = 1 if suffix == "" else 2
         for band in ("u", "g", "r", "i", "z"):
@@ -187,34 +188,38 @@ def _blr_line_assignment_longform(
                     np.isfinite(log_amp_blr[i])
                     and np.isfinite(log_lag_rf[i])
                     and np.isfinite(z[i])
-                    and np.isfinite(logL2500_debiased[i])
                 ):
                     continue
 
                 line_scores = {}
                 for line_name, cfg in _BLR_LINE_MODELS.items():
                     overlap = _soft_band_overlap_weight(cfg["lambda_rest"], z[i], band)
-                    mu_line = cfg["mu0"] + cfg["slope"] * (logL2500_debiased[i] - 30.0)
-                    lag_score = np.exp(-0.5 * ((log_lag_rf[i] - mu_line) / cfg["sigma"]) ** 2)
-                    line_scores[line_name] = overlap * lag_score
+                    line_scores[line_name] = overlap
 
-                total_score = null_score + sum(line_scores.values())
+                line_score_sum = float(sum(line_scores.values()))
+                total_score = null_score + line_score_sum
                 probs = {line_name: score / total_score for line_name, score in line_scores.items()}
-                assigned_line = max(probs, key=probs.get)
-                assigned_prob = probs[assigned_line]
+                p_null = null_score / total_score if np.isfinite(total_score) and total_score > 0.0 else np.nan
+                if (not np.isfinite(line_score_sum)) or line_score_sum <= 0.0:
+                    assigned_line = "Unassigned"
+                    assigned_prob = 0.0
+                else:
+                    assigned_line = max(probs, key=probs.get)
+                    assigned_prob = probs[assigned_line]
                 rows.append(
                     {
                         "object_id": object_ids[i],
                         "band": band,
                         "component": component,
                         "z": z[i],
-                        "logL2500_debiased": logL2500_debiased[i],
+                        "logL2500_debiased": logL2500_arr[i] if i < len(logL2500_arr) else np.nan,
                         "log_amp_blr": log_amp_blr[i],
                         "log_lag_rf": log_lag_rf[i],
                         "log_lag_rf_err": lag_err[i],
                         "well_constrained": bool(np.isfinite(lag_err[i]) and lag_err[i] <= lag_err_max),
                         "assigned_line": assigned_line,
                         "assigned_prob": assigned_prob,
+                        "p_null": p_null,
                         **{f"p_{name.replace(' ', '_').replace('β', 'b').replace('α', 'a')}": prob for name, prob in probs.items()},
                     }
                 )
@@ -282,7 +287,7 @@ def plot_blr_line_lags_vs_l2500(
         index=False,
     )
 
-    keep = assignments["well_constrained"] & (assignments["assigned_prob"] >= prob_thresh)
+    keep = assignments["assigned_prob"] >= prob_thresh
     selected = assignments.loc[keep].copy()
     selected.to_csv(
         os.path.join(diagnostics_path, "blr_line_assignment_selected.csv"),
@@ -342,13 +347,191 @@ def plot_blr_line_lags_vs_l2500(
         bbox_to_anchor=(0.5, 1.02),
     )
     fig.suptitle(
-        rf"Assigned BLR lags vs debiased $L_{{2500}}$ ({prob_thresh:.1f} probability, $\sigma_{{\log \tau}} \leq {lag_err_max:.2f}$)",
+        rf"Assigned BLR lags vs debiased $L_{{2500}}$ ($p \geq {prob_thresh:.1f}$)",
         y=1.05,
     )
     fig.tight_layout()
     return _save_figure(
         fig,
         os.path.join(diagnostics_path, "blr_line_lags_vs_l2500_debiased.pdf"),
+        dpi=200,
+        show=show,
+    )
+
+
+def plot_blr_assignment_probabilities(
+    assignments,
+    *,
+    plot_path="plots/hubble",
+    show=False,
+    filename="blr_line_assignment_probabilities.pdf",
+    title_suffix="",
+):
+    """Plot assigned-line probability distributions overall and by line."""
+    if assignments is None or len(assignments) == 0:
+        return None
+
+    df = pd.DataFrame(assignments).copy()
+    if "assigned_prob" not in df.columns or "assigned_line" not in df.columns:
+        return None
+
+    df["assigned_prob"] = pd.to_numeric(df["assigned_prob"], errors="coerce")
+    df = df[np.isfinite(df["assigned_prob"])].copy()
+    if df.empty:
+        return None
+
+    line_order = ["C IV", "Mg II", "Hβ", "Hα"]
+    fig, axes = plt.subplots(2, 3, figsize=(13.0, 8.0), sharex=True, sharey=True)
+    axes = axes.ravel()
+    panel_specs = [("All", df)] + [(line, df[df["assigned_line"] == line]) for line in line_order]
+    bins = np.linspace(0.0, 1.0, 21)
+
+    for ax, (label, sub) in zip(axes, panel_specs):
+        if sub.empty:
+            ax.text(0.5, 0.5, "No assignments", ha="center", va="center", transform=ax.transAxes)
+        else:
+            ax.hist(
+                sub["assigned_prob"].to_numpy(dtype=float),
+                bins=bins,
+                color="black",
+                alpha=0.85,
+                edgecolor="white",
+            )
+        ax.set_title(f"{label} (N={len(sub)})")
+        ax.set_xlabel("assigned probability")
+        ax.set_ylabel("Count")
+        ax.set_xlim(0.0, 1.0)
+
+    for ax in axes[len(panel_specs):]:
+        ax.set_axis_off()
+
+    suffix = f" {title_suffix}".rstrip() if title_suffix else ""
+    fig.suptitle(f"BLR assigned-line probabilities{suffix}", y=1.01)
+    fig.tight_layout()
+
+    diagnostics_path = os.path.join(plot_path or "plots/hubble", "diagnostics")
+    os.makedirs(diagnostics_path, exist_ok=True)
+    return _save_figure(
+        fig,
+        os.path.join(diagnostics_path, filename),
+        dpi=200,
+        show=show,
+    )
+
+
+def plot_blr_line_lags_vs_l2500_fiducial(
+    df_agn,
+    *,
+    plot_path="plots/hubble",
+    show=False,
+    prob_thresh=0.6,
+    lag_err_max=0.25,
+    cosmo=None,
+):
+    """Plot BLR lag against fiducial-cosmology L_2500 for each assigned broad line."""
+    if df_agn.empty:
+        return None
+    required = {"z", "apparent_mag_2500"}
+    if not required.issubset(df_agn.columns):
+        return None
+
+    if cosmo is None:
+        cosmo = FlatLambdaCDM(H0=70.0, Om0=0.3)
+
+    z = pd.to_numeric(df_agn["z"], errors="coerce").to_numpy(dtype=float)
+    m2500 = pd.to_numeric(df_agn["apparent_mag_2500"], errors="coerce").to_numpy(dtype=float)
+    actual_M2500 = m2500 - cosmo.distmod(z).value
+    logL2500_fid = convert_M2500_to_logL2500(actual_M2500)
+
+    assignments = _blr_line_assignment_longform(
+        df_agn,
+        logL2500_fid,
+        lag_err_max=lag_err_max,
+    )
+    if assignments.empty:
+        return None
+
+    diagnostics_path = os.path.join(plot_path or "plots/hubble", "diagnostics")
+    os.makedirs(diagnostics_path, exist_ok=True)
+    assignments.to_csv(
+        os.path.join(diagnostics_path, "blr_line_assignment_probabilities_fiducial.csv"),
+        index=False,
+    )
+    plot_blr_assignment_probabilities(
+        assignments,
+        plot_path=plot_path,
+        show=show,
+        filename="blr_line_assignment_probabilities_fiducial.pdf",
+        title_suffix="(fiducial cosmology)",
+    )
+
+    keep = assignments["assigned_prob"] >= prob_thresh
+    selected = assignments.loc[keep].copy()
+    selected.to_csv(
+        os.path.join(diagnostics_path, "blr_line_assignment_selected_fiducial.csv"),
+        index=False,
+    )
+
+    line_order = ["C IV", "Mg II", "Hβ", "Hα"]
+    fig, axes = plt.subplots(2, 2, figsize=(13.0, 10.5), sharex=True, sharey=True)
+    axes = axes.ravel()
+
+    for ax, line_name in zip(axes, line_order):
+        line_df = selected[selected["assigned_line"] == line_name]
+        if line_df.empty:
+            ax.text(
+                0.5,
+                0.5,
+                f"No assignments with p>{prob_thresh:.1f}",
+                ha="center",
+                va="center",
+                transform=ax.transAxes,
+            )
+        else:
+            for component, marker in ((1, "o"), (2, "s")):
+                comp_df = line_df[line_df["component"] == component]
+                if comp_df.empty:
+                    continue
+                for band in sorted(comp_df["band"].unique()):
+                    band_df = comp_df[comp_df["band"] == band]
+                    ax.scatter(
+                        band_df["logL2500_debiased"],
+                        band_df["log_lag_rf"],
+                        s=18,
+                        alpha=0.7,
+                        linewidths=0,
+                        color=_BAND_COLORS.get(band, "0.4"),
+                        marker=marker,
+                        rasterized=True,
+                    )
+        ax.set_title(f"{line_name} (N={len(line_df)})")
+        ax.grid(True, alpha=0.25)
+        ax.set_xlabel(r"$\log L_{2500}$ (fiducial cosmology)")
+        ax.set_ylabel(r"$\log \tau_{\rm BLR,RF}$")
+
+    band_handles = [
+        Line2D([0], [0], marker="o", linestyle="none", color=_BAND_COLORS[b], label=f"{b}-band", markersize=6)
+        for b in _BAND_COLORS
+    ]
+    component_handles = [
+        Line2D([0], [0], marker="o", linestyle="none", color="k", label="BLR 1", markersize=6),
+        Line2D([0], [0], marker="s", linestyle="none", color="k", label="BLR 2", markersize=6),
+    ]
+    fig.legend(
+        handles=band_handles + component_handles,
+        loc="upper center",
+        ncol=7,
+        frameon=False,
+        bbox_to_anchor=(0.5, 1.02),
+    )
+    fig.suptitle(
+        rf"Assigned BLR lags vs fiducial-cosmology $L_{{2500}}$ ($p \geq {prob_thresh:.1f}$)",
+        y=1.05,
+    )
+    fig.tight_layout()
+    return _save_figure(
+        fig,
+        os.path.join(diagnostics_path, "blr_line_lags_vs_l2500_fiducial.pdf"),
         dpi=200,
         show=show,
     )

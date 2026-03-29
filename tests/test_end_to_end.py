@@ -174,6 +174,81 @@ def test_plot_g_band_drift_slope_histograms_writes_pdfs(tmp_path, monkeypatch):
     assert out_var.endswith("g_band_var_slope_histograms.pdf")
 
 
+def test_plot_blr_line_lags_vs_l2500_fiducial_writes_pdf(tmp_path, monkeypatch):
+    monkeypatch.setenv("MPLCONFIGDIR", str(tmp_path / "mplconfig"))
+
+    df = pd.DataFrame(
+        {
+            "object_id": ["a", "b", "c", "d"],
+            "z": [1.2, 0.8, 0.5, 0.2],
+            "apparent_mag_2500": [20.5, 20.0, 19.5, 19.0],
+            "log_sigma_uv": [-0.7, -0.8, -0.9, -1.0],
+            "dropped_bands": [[], [], [], []],
+            "log_amp_delta_blr_g": [0.0, 0.0, 0.0, 0.0],
+            "log_lag_blr_g_RF": [1.15, 1.32, 1.52, 1.70],
+            "log_lag_blr_g_RF_err": [0.1, 0.1, 0.1, 0.1],
+        }
+    )
+
+    out = hubble_plotting.plot_blr_line_lags_vs_l2500_fiducial(
+        df,
+        plot_path=str(tmp_path / "figures"),
+        show=False,
+        prob_thresh=0.0,
+    )
+
+    assert out is not None
+    assert os.path.exists(out)
+    assert out.endswith("blr_line_lags_vs_l2500_fiducial.pdf")
+
+
+def test_plot_blr_assignment_probabilities_writes_pdf(tmp_path, monkeypatch):
+    monkeypatch.setenv("MPLCONFIGDIR", str(tmp_path / "mplconfig"))
+
+    assignments = pd.DataFrame(
+        {
+            "assigned_line": ["C IV", "Mg II", "Hβ", "Hα", "Mg II", "C IV"],
+            "assigned_prob": [0.25, 0.42, 0.58, 0.71, 0.33, 0.61],
+        }
+    )
+
+    out = hubble_plotting.plot_blr_assignment_probabilities(
+        assignments,
+        plot_path=str(tmp_path / "figures"),
+        show=False,
+        filename="blr_assignment_probabilities_test.pdf",
+    )
+
+    assert out is not None
+    assert os.path.exists(out)
+    assert out.endswith("blr_assignment_probabilities_test.pdf")
+
+
+def test_blr_line_assignment_uses_visibility_only():
+    df = pd.DataFrame(
+        {
+            "object_id": ["obj1"],
+            "z": [1.0],
+            "dropped_bands": [[]],
+            "log_sigma_uv": [-1.0],
+            "log_amp_delta_blr_g": [0.0],
+            "log_lag_blr_g_RF": [100.0],
+            "log_lag_blr_g_RF_err": [0.1],
+        }
+    )
+
+    out = hubble_plotting._blr_line_assignment_longform(
+        df,
+        np.array([np.nan], dtype=float),
+    )
+
+    assert len(out) == 1
+    assert out.iloc[0]["assigned_line"] == "Mg II"
+    assert np.isfinite(out.iloc[0]["assigned_prob"])
+    assert out.iloc[0]["assigned_prob"] > out.iloc[0]["p_C_IV"]
+    assert out.iloc[0]["assigned_prob"] > out.iloc[0]["p_Hb"]
+
+
 def test_end_to_end(tmp_path, monkeypatch):
     monkeypatch.setenv("MPLCONFIGDIR", str(tmp_path / "mplconfig"))
 
@@ -182,6 +257,7 @@ def test_end_to_end(tmp_path, monkeypatch):
         "plot_adf_pvalue_g_diagnostic",
         "plot_alpha_lambda_histogram",
         "plot_blr_lag_vs_amp_by_band",
+        "plot_blr_line_lags_vs_l2500_fiducial",
         "plot_blr_lag_vs_redshift_by_band",
         "plot_f_host_center_vs_l2500",
         "plot_g_band_drift_slope_histograms",
