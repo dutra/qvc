@@ -31,6 +31,7 @@ from qvc.light_curve.multiband_fit_utils import (
     lambda_pivot,
     process_samples,
 )
+from qvc.spectra.fit_spectra import effective_decompose_host_flag, effective_fit_bal_flag
 
 
 def _write_test_quasars_hdf5(path, quasars):
@@ -140,6 +141,22 @@ def test_plot_adf_pvalue_g_diagnostic_writes_pdf(tmp_path, monkeypatch):
     assert out is not None
     assert os.path.exists(out)
     assert out.endswith("adf_pvalue_g_diagnostic.pdf")
+
+
+def test_effective_decompose_host_flag_disables_host_above_z_1p5():
+    assert effective_decompose_host_flag(0.8, requested=True) is True
+    assert effective_decompose_host_flag(1.5, requested=True) is True
+    assert effective_decompose_host_flag(1.5001, requested=True) is False
+    assert effective_decompose_host_flag(3.0, requested=True) is False
+    assert effective_decompose_host_flag(0.8, requested=False) is False
+
+
+def test_effective_fit_bal_flag_enables_bal_only_above_z_2():
+    assert effective_fit_bal_flag(1.5) is False
+    assert effective_fit_bal_flag(2.0) is False
+    assert effective_fit_bal_flag(2.0001) is True
+    assert effective_fit_bal_flag(3.0) is True
+    assert effective_fit_bal_flag(np.nan) is False
 
 
 def test_plot_g_band_drift_slope_histograms_writes_pdfs(tmp_path, monkeypatch):

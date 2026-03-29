@@ -179,6 +179,18 @@ def build_psf_photometry_inputs(rec):
     return psf_bands_all, psf_mags_all, psf_mag_errs_all
 
 
+def effective_decompose_host_flag(z, requested=True):
+    """Disable host decomposition for high-redshift spectra."""
+    z = safe_float(z)
+    return bool(requested) and (not np.isfinite(z) or z <= 1.5)
+
+
+def effective_fit_bal_flag(z):
+    """Enable BAL components only for high-redshift spectra."""
+    z = safe_float(z)
+    return bool(np.isfinite(z) and z > 2.0)
+
+
 def estimate_m2500_from_model(q):
     """Estimate reddened and intrinsic apparent mags at rest-frame 2500A from PL draws."""
     if not hasattr(q, "numpyro_samples") or q.numpyro_samples is None:
@@ -283,15 +295,19 @@ def compute_derived_results(result, q, args):
         result["f_host_5100"] = safe_float(result.get("frac_host_5100"))
 
     samples = q.numpyro_samples
+    decompose_host_eff = bool(getattr(q, "_fit_decompose_host", getattr(args, "decompose_host", True)))
+    result["decompose_host_effective"] = decompose_host_eff
 
     # Host/AGN fraction near spectrum center from posterior samples.
-    log_frac_host = np.asarray(samples["log_frac_host"], dtype=float).reshape(-1)
-    frac_host_samp = 1.0 / (1.0 + np.exp(-log_frac_host))
-    p16, p50, p84 = np.nanpercentile(frac_host_samp, [16.0, 50.0, 84.0])
-
-    m50, m_err, m16, m84 = sym_percentile(frac_host_samp)
-    result["f_host_center"] = safe_float(m50)
-    result["f_host_center_err"] = safe_float(m_err)
+    if decompose_host_eff and "log_frac_host" in samples:
+        log_frac_host = np.asarray(samples["log_frac_host"], dtype=float).reshape(-1)
+        frac_host_samp = 1.0 / (1.0 + np.exp(-log_frac_host))
+        m50, m_err, _, _ = sym_percentile(frac_host_samp)
+        result["f_host_center"] = safe_float(m50)
+        result["f_host_center_err"] = safe_float(m_err)
+    else:
+        result["f_host_center"] = np.nan
+        result["f_host_center_err"] = np.nan
 
     # BC fraction
     i3000 = np.argmin(np.abs(np.asarray(q.wave) - 3000.0))
@@ -650,6 +666,10 @@ def run_one_fit(rec, args):
         )
 
         prior_config = build_default_prior_config(flux)
+        decompose_host_eff = effective_decompose_host_flag(rec["z"], requested=args.decompose_host)
+        fit_bal_eff = effective_fit_bal_flag(rec["z"])
+        result["decompose_host_effective"] = bool(decompose_host_eff)
+        result["fit_bal_effective"] = bool(fit_bal_eff)
         psf_bands_all, psf_mags_all, psf_mag_errs_all = build_psf_photometry_inputs(rec)
         result["bands_used"] = "".join(psf_bands_all)
         for band in SDSS_BANDS:
@@ -671,10 +691,11 @@ def run_one_fit(rec, args):
                 deredden=not args.no_deredden,
                 wave_range=(args.wave_min, args.wave_max),
                 fit_lines=args.fit_lines,
-                decompose_host=args.decompose_host,
+                decompose_host=decompose_host_eff,
                 fit_pl=args.fit_pl,
                 fit_fe=args.fit_fe,
                 fit_bc=args.fit_bc,
+                fit_bal=fit_bal_eff,
                 fit_poly=args.fit_poly,
                 mask_lya_forest=args.mask_lya_forest,
                 fit_method=args.fit_method,
