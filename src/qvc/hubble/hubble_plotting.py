@@ -5364,6 +5364,7 @@ def plot_g_band_drift_slope_histograms(
     *,
     slope_kind="mean",
     z_max=1.5,
+    m2500_max=22.5,
     plot_path="plots/hubble",
     show=False,
 ):
@@ -5376,14 +5377,20 @@ def plot_g_band_drift_slope_histograms(
     if raw_col not in df_agn.columns or resid_col not in df_agn.columns:
         return None
 
+    mask = np.ones(len(df_agn), dtype=bool)
     z = pd.to_numeric(df_agn.get("z"), errors="coerce").to_numpy(dtype=float) if "z" in df_agn.columns else None
     if z is not None and np.isfinite(z_max):
-        mask_z = np.isfinite(z) & (z < float(z_max))
-    else:
-        mask_z = np.ones(len(df_agn), dtype=bool)
+        mask &= np.isfinite(z) & (z < float(z_max))
+    m2500 = (
+        pd.to_numeric(df_agn.get("apparent_mag_2500"), errors="coerce").to_numpy(dtype=float)
+        if "apparent_mag_2500" in df_agn.columns
+        else None
+    )
+    if m2500 is not None and np.isfinite(m2500_max):
+        mask &= np.isfinite(m2500) & (m2500 < float(m2500_max))
 
-    raw = pd.to_numeric(df_agn.loc[mask_z, raw_col], errors="coerce").to_numpy(dtype=float)
-    resid = pd.to_numeric(df_agn.loc[mask_z, resid_col], errors="coerce").to_numpy(dtype=float)
+    raw = pd.to_numeric(df_agn.loc[mask, raw_col], errors="coerce").to_numpy(dtype=float)
+    resid = pd.to_numeric(df_agn.loc[mask, resid_col], errors="coerce").to_numpy(dtype=float)
     raw = raw[np.isfinite(raw)]
     resid = resid[np.isfinite(resid)]
     if raw.size == 0 or resid.size == 0:
