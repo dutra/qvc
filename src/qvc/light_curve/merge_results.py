@@ -10,10 +10,10 @@ import h5py
 import numpy as np
 from tqdm import tqdm
 
-from qvc.hubble.hubble_utils import read_quasars_from_hdf5_flat, populate_sdss_fields
+from qvc.hubble.hubble_utils import read_quasars_from_hdf5_flat
 from qvc.light_curve.fit_light_curves import make_lc
 from qvc.light_curve.multiband_generate_lc import concat_light_curves
-#from qvc.light_curve.multiband_generate_lc import populate_sdss_fields
+from qvc.light_curve.multiband_generate_lc import populate_sdss_fields
 
 def read_quasars_from_h5(h5_path):
     return read_quasars_from_hdf5_flat(h5_path)
@@ -225,8 +225,16 @@ def attach_variability_metrics(rows):
     unusable_object_ids = []
     for row in rows:
         object_id = str(row["object_id"])
+        source_obj = reloaded_by_object_id[object_id]
+        lc_input = dict(source_obj)
+        lc_input.update(row)
+        if "z" not in lc_input:
+            raise ValueError(
+                "Failed to recompute variability because required key 'z' is missing for "
+                f"object_id: {object_id}"
+            )
         lc = make_lc(
-            reloaded_by_object_id[object_id],
+            lc_input,
             bands=["u", "g", "r", "i", "z"],
             inject_fake=False,
             drop_band_lyman_alpha=False,
@@ -355,15 +363,15 @@ def main():
         all_quasars = deduplicate(all_quasars, keys=dedup_keys)
         print(f"De-duplicated by '{dedup_keys}': {before} -> {len(all_quasars)}")
 
-    if args.compute_variability and all_quasars:
-        print("Computing corrected variability metrics from merged rows...")
-        all_quasars = attach_variability_metrics(all_quasars)
-
     if not args.skip_populate_sdss and all_quasars:
         print("Populating SDSS fields...")
         all_quasars = populate_sdss_fields(all_quasars)
         if all_quasars and "plate" in all_quasars[0]:
             print(all_quasars[0]["plate"])
+
+    if args.compute_variability and all_quasars:
+        print("Computing corrected variability metrics from merged rows...")
+        all_quasars = attach_variability_metrics(all_quasars)
     if out_format == "csv":
         seen = []
         s = set()
