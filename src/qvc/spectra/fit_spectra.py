@@ -307,8 +307,8 @@ def compute_derived_results(result, q, args):
         result["f_host_center"] = safe_float(m50)
         result["f_host_center_err"] = safe_float(m_err)
     else:
-        result["f_host_center"] = np.nan
-        result["f_host_center_err"] = np.nan
+        result["f_host_center"] = 0.0
+        result["f_host_center_err"] = 0.0
 
     # BC fraction
     i3000 = np.argmin(np.abs(np.asarray(q.wave) - 3000.0))

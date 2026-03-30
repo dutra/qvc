@@ -346,6 +346,8 @@ def populate_spectra_fit(df, spectra_fit_csvs, best=True):
         'object_id': str,
         'f_host_2500': float,
         'f_host_5100': float,
+        'bi': float,
+        'bi_err': float,
         'ebv_fs': float,
         'euv_fs': float,
         'conti_a_0': float,
