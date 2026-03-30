@@ -544,6 +544,81 @@ def plot_blr_line_lags_vs_l2500_fiducial(
     )
 
 
+def plot_l2500_vs_uv_variability_fiducial(
+    df_agn,
+    *,
+    plot_path="plots/hubble",
+    show=False,
+    cosmo=None,
+    thin_step=5,
+    filename="l2500_vs_uv_variability_fiducial.pdf",
+    dynamic_axes=False,
+):
+    """Plot fiducial-cosmology L_2500 against log_sigma_uv and log_tau_uv_rf."""
+    required = {"z", "apparent_mag_2500", "log_sigma_uv", "log_tau_uv_rf"}
+    if not required.issubset(df_agn.columns):
+        missing = ", ".join(sorted(required - set(df_agn.columns)))
+        raise KeyError(f"Missing required columns for L2500 UV-variability plot: {missing}")
+
+    if cosmo is None:
+        cosmo = FlatLambdaCDM(H0=70.0, Om0=0.3)
+
+    z = pd.to_numeric(df_agn["z"], errors="coerce").to_numpy(dtype=float)
+    m2500 = pd.to_numeric(df_agn["apparent_mag_2500"], errors="coerce").to_numpy(dtype=float)
+    log_sigma = pd.to_numeric(df_agn["log_sigma_uv"], errors="coerce").to_numpy(dtype=float)
+    log_tau_rf = pd.to_numeric(df_agn["log_tau_uv_rf"], errors="coerce").to_numpy(dtype=float)
+
+    actual_M2500 = m2500 - cosmo.distmod(z).value
+    logL2500_fid = convert_M2500_to_logL2500(actual_M2500)
+
+    fig, axes = plt.subplots(1, 2, figsize=(13.5, 5.8), sharey=True)
+    panels = [
+        (log_sigma, r"$\log \sigma_{\rm UV}$", "No finite log_sigma_uv values"),
+        (log_tau_rf, r"$\log \tau_{\rm UV,RF}$", "No finite log_tau_uv_rf values"),
+    ]
+
+    for ax, (y, ylabel, empty_text) in zip(axes, panels):
+        mask = np.isfinite(logL2500_fid) & np.isfinite(y) & np.isfinite(z)
+        if np.any(mask):
+            idx = np.flatnonzero(mask)
+            if thin_step is not None and thin_step > 1:
+                idx = idx[::thin_step]
+            sc = ax.scatter(
+                y[idx],
+                logL2500_fid[idx],
+                c=z[idx],
+                cmap="viridis",
+                s=10,
+                alpha=0.7,
+                linewidths=0,
+                rasterized=True,
+            )
+            if dynamic_axes and idx.size > 0:
+                x = y[idx]
+                yplot = logL2500_fid[idx]
+                xpad = 0.05 * max(np.nanmax(x) - np.nanmin(x), 1e-6)
+                ypad = 0.05 * max(np.nanmax(yplot) - np.nanmin(yplot), 1e-6)
+                ax.set_xlim(np.nanmin(x) - xpad, np.nanmax(x) + xpad)
+                ax.set_ylim(np.nanmin(yplot) - ypad, np.nanmax(yplot) + ypad)
+        else:
+            sc = None
+            ax.text(0.5, 0.5, empty_text, ha="center", va="center", transform=ax.transAxes)
+        ax.set_xlabel(ylabel)
+        ax.set_ylabel(r"$\log L_{2500}$ (fiducial cosmology)")
+
+    if sc is not None:
+        cbar = fig.colorbar(sc, ax=axes.tolist())
+        cbar.set_label("Redshift z")
+
+    diagnostics_path = os.path.join(plot_path or "plots/hubble", "diagnostics")
+    return _save_figure(
+        fig,
+        os.path.join(diagnostics_path, filename),
+        dpi=200,
+        show=show,
+    )
+
+
 def plot_cut_diagnostics(df_before, df_after, bins=30, cut_info="", save_path="plots/hubble/cuts/"):
     """
     Plot a combined cut diagnostic with:
@@ -760,6 +835,74 @@ def plot_tau_sigma_vs_redshift(df, plot_path="plots/hubble", show=False):
     )
 
 
+def plot_sigma_uv_vs_tau_uv_rf(
+    df_agn,
+    *,
+    plot_path="plots/hubble",
+    show=False,
+    thin_step=5,
+    filename="sigma_uv_vs_tau_uv_rf.pdf",
+    dynamic_axes=False,
+):
+    """Plot log_sigma_uv against log_tau_uv_rf."""
+    required = {"log_sigma_uv", "log_tau_uv_rf"}
+    if not required.issubset(df_agn.columns):
+        missing = ", ".join(sorted(required - set(df_agn.columns)))
+        raise KeyError(f"Missing required columns for sigma/tau plot: {missing}")
+
+    log_sigma = pd.to_numeric(df_agn["log_sigma_uv"], errors="coerce").to_numpy(dtype=float)
+    log_tau_rf = pd.to_numeric(df_agn["log_tau_uv_rf"], errors="coerce").to_numpy(dtype=float)
+    z = (
+        pd.to_numeric(df_agn["z"], errors="coerce").to_numpy(dtype=float)
+        if "z" in df_agn.columns
+        else np.full(len(df_agn), np.nan, dtype=float)
+    )
+
+    mask = np.isfinite(log_sigma) & np.isfinite(log_tau_rf)
+    if np.any(mask):
+        idx = np.flatnonzero(mask)
+        if thin_step is not None and thin_step > 1:
+            idx = idx[::thin_step]
+    else:
+        idx = np.array([], dtype=int)
+
+    fig, ax = plt.subplots(1, 1, figsize=(6.8, 5.8))
+    if idx.size > 0:
+        color_values = z[idx]
+        use_color = np.all(np.isfinite(color_values))
+        sc = ax.scatter(
+            log_sigma[idx],
+            log_tau_rf[idx],
+            c=color_values if use_color else "0.3",
+            cmap="viridis" if use_color else None,
+            s=10,
+            alpha=0.7,
+            linewidths=0,
+            rasterized=True,
+        )
+        if dynamic_axes:
+            xpad = 0.05 * max(np.nanmax(log_sigma[idx]) - np.nanmin(log_sigma[idx]), 1e-6)
+            ypad = 0.05 * max(np.nanmax(log_tau_rf[idx]) - np.nanmin(log_tau_rf[idx]), 1e-6)
+            ax.set_xlim(np.nanmin(log_sigma[idx]) - xpad, np.nanmax(log_sigma[idx]) + xpad)
+            ax.set_ylim(np.nanmin(log_tau_rf[idx]) - ypad, np.nanmax(log_tau_rf[idx]) + ypad)
+        if use_color:
+            cbar = fig.colorbar(sc, ax=ax)
+            cbar.set_label("Redshift z")
+    else:
+        ax.text(0.5, 0.5, "No finite log_sigma_uv/log_tau_uv_rf values", ha="center", va="center", transform=ax.transAxes)
+
+    ax.set_xlabel(r"$\log \sigma_{\rm UV}$")
+    ax.set_ylabel(r"$\log \tau_{\rm UV,RF}$")
+
+    diagnostics_path = os.path.join(plot_path or "plots/hubble", "diagnostics")
+    return _save_figure(
+        fig,
+        os.path.join(diagnostics_path, filename),
+        dpi=200,
+        show=show,
+    )
+
+
 def plot_tau_sigma_vs_wu_catalog(df, plot_path="plots/hubble", show=False):
     """Plot UV variability diagnostics against Wu-catalog BH mass and Eddington ratio."""
     required = {"log_tau_uv_rf", "log_sigma_uv", "LOGMBH", "LOGLEDD_RATIO"}
@@ -771,10 +914,13 @@ def plot_tau_sigma_vs_wu_catalog(df, plot_path="plots/hubble", show=False):
     log_sigma = pd.to_numeric(df["log_sigma_uv"], errors="coerce").to_numpy(dtype=float)
     log_mbh = pd.to_numeric(df["LOGMBH"], errors="coerce").to_numpy(dtype=float)
     log_edd = pd.to_numeric(df["LOGLEDD_RATIO"], errors="coerce").to_numpy(dtype=float)
+    mask_tau = np.isfinite(log_mbh) & np.isfinite(log_tau)
+    mask_sigma = np.isfinite(log_edd) & np.isfinite(log_sigma)
+    if (not np.any(mask_tau)) and (not np.any(mask_sigma)):
+        return None
 
     fig, axes = plt.subplots(1, 2, figsize=(13.0, 5.5), sharey=False)
 
-    mask_tau = np.isfinite(log_mbh) & np.isfinite(log_tau)
     if np.any(mask_tau):
         axes[0].scatter(
             log_mbh[mask_tau],
@@ -790,7 +936,6 @@ def plot_tau_sigma_vs_wu_catalog(df, plot_path="plots/hubble", show=False):
     axes[0].set_ylabel(r"$\log \tau_{\rm UV,RF}$")
     axes[0].grid(True, alpha=0.25)
 
-    mask_sigma = np.isfinite(log_edd) & np.isfinite(log_sigma)
     if np.any(mask_sigma):
         axes[1].scatter(
             log_edd[mask_sigma],

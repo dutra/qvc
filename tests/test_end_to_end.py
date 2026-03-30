@@ -245,6 +245,30 @@ def test_plot_blr_line_lags_vs_l2500_fiducial_writes_pdf(tmp_path, monkeypatch):
     assert out.endswith("blr_line_lags_vs_l2500_fiducial.pdf")
 
 
+def test_plot_l2500_vs_uv_variability_fiducial_writes_pdf(tmp_path, monkeypatch):
+    monkeypatch.setenv("MPLCONFIGDIR", str(tmp_path / "mplconfig"))
+
+    df = pd.DataFrame(
+        {
+            "object_id": ["a", "b", "c", "d"],
+            "z": [0.3, 0.7, 1.1, 1.8],
+            "apparent_mag_2500": [19.1, 19.8, 20.6, 21.4],
+            "log_sigma_uv": [-1.05, -0.92, -0.84, -0.73],
+            "log_tau_uv_rf": [2.10, 2.35, 2.62, 2.88],
+        }
+    )
+
+    out = hubble_plotting.plot_l2500_vs_uv_variability_fiducial(
+        df,
+        plot_path=str(tmp_path / "figures"),
+        show=False,
+    )
+
+    assert out is not None
+    assert os.path.exists(out)
+    assert out.endswith("l2500_vs_uv_variability_fiducial.pdf")
+
+
 def test_plot_blr_assignment_probabilities_writes_pdf(tmp_path, monkeypatch):
     monkeypatch.setenv("MPLCONFIGDIR", str(tmp_path / "mplconfig"))
 

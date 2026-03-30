@@ -970,11 +970,13 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
         plot_fast_vs_uv_variability,
         plot_f_host_center_vs_l2500,
         plot_g_band_drift_slope_histograms,
+        plot_l2500_vs_uv_variability_fiducial,
         plot_Mi_relation,
         plot_cut_diagnostics,
         plot_m2500_vs_z_colorpanels,
         plot_spectral_fraction_vs_redshift,
         plot_sf_vs_uv_variability,
+        plot_sigma_uv_vs_tau_uv_rf,
         plot_sigma_uv_host_correction,
         plot_tau_sigma_vs_wu_catalog,
         plot_tau_sigma_vs_redshift,
@@ -1161,7 +1163,6 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
         plot_f_host_center_vs_l2500(df, plot_path=plot_path, show=False)
     if {"z", "apparent_mag_2500", "alpha_lambda"}.issubset(df.columns):
         plot_alpha_lambda_vs_l2500(df, plot_path=plot_path, show=False)
-        plot_alpha_lambda_vs_l2500_by_redshift(df, plot_path=plot_path, show=False)
     if "alpha_lambda" in df.columns:
         plot_alpha_lambda_vs_redshift(df, plot_path=plot_path, show=False)
         plot_alpha_lambda_histogram(df, plot_path=plot_path, show=False)
@@ -1169,6 +1170,19 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
         plot_alpha_lambda_vs_eta_sigma(df, plot_path=plot_path, show=False)
     if {"z", "log_tau_uv_rf", "log_sigma_uv"}.issubset(df.columns):
         plot_tau_sigma_vs_redshift(df, plot_path=plot_path, show=False)
+        plot_sigma_uv_vs_tau_uv_rf(
+            df,
+            plot_path=plot_path,
+            show=False,
+            filename="sigma_uv_vs_tau_uv_rf_precuts.pdf",
+        )
+    if {"z", "apparent_mag_2500", "log_tau_uv_rf", "log_sigma_uv"}.issubset(df.columns):
+        plot_l2500_vs_uv_variability_fiducial(
+            df,
+            plot_path=plot_path,
+            show=False,
+            filename="l2500_vs_uv_variability_fiducial_precuts.pdf",
+        )
     if {"z", "eta_tau", "eta_sigma"}.issubset(df.columns):
         plot_eta_tau_sigma_vs_redshift(df, plot_path=plot_path, show=False)
     if {"log_tau_uv_rf", "log_sigma_uv", "LOGMBH", "LOGLEDD_RATIO"}.issubset(df.columns):
@@ -1376,14 +1390,28 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
     print("Number of quasars with z > 3:", num_quasars_z_gt_3)
     print(f"\nTotal number of objects removed by all cuts: {len(df_all) - len(df)}")
     print("Final number of quasars:", len(df))
-    if "adf_pvalue_g" in df.columns:
-        plot_adf_pvalue_g_diagnostic(df, plot_path=plot_path, show=False)
     if {"z", "f_bc_over_pl_3000", "f_fe_uv_over_pl_3000", "f_host_center"}.issubset(df.columns):
         plot_spectral_fraction_vs_redshift(df, plot_path=plot_path, show=False)
     if {"g_raw_mean_slope", "g_resid_mean_slope"}.issubset(df.columns):
         plot_g_band_drift_slope_histograms(df, slope_kind="mean", plot_path=plot_path, show=False)
     if {"g_raw_var_slope", "g_resid_var_slope"}.issubset(df.columns):
         plot_g_band_drift_slope_histograms(df, slope_kind="var", plot_path=plot_path, show=False)
+    if {"log_tau_uv_rf", "log_sigma_uv"}.issubset(df.columns):
+        plot_sigma_uv_vs_tau_uv_rf(
+            df,
+            plot_path=plot_path,
+            show=False,
+            filename="sigma_uv_vs_tau_uv_rf_postcuts.pdf",
+            dynamic_axes=True,
+        )
+    if {"z", "apparent_mag_2500", "log_tau_uv_rf", "log_sigma_uv"}.issubset(df.columns):
+        plot_l2500_vs_uv_variability_fiducial(
+            df,
+            plot_path=plot_path,
+            show=False,
+            filename="l2500_vs_uv_variability_fiducial_postcuts.pdf",
+            dynamic_axes=True,
+        )
     plot_cut_diagnostics(df_all.copy(), df.copy(), bins=30, cut_info="all cuts")
     colorpanel_cols = [
         col for col in ("f_host_center", "f_bc_over_pl_3000", "wrms")

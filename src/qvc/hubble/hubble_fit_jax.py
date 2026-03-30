@@ -86,6 +86,7 @@ from qvc.hubble.hubble_plotting import (
     plot_completeness_diagnostics,
     plot_cosmo_corner,
     plot_delta_m_flux_recal_vs_redshift,
+    plot_full_residuals,
     plot_hubble,
     plot_predicted_L2500_vs_sigmahat,
     plot_redshift_histograms,
@@ -498,22 +499,46 @@ def _run_numpyro_nested(model, model_labels, *, seed: int, num_live_points: int,
 
     sample_key = jax.random.PRNGKey(seed + 1)
     flat_samples = None
+    results = getattr(ns, "_results", None)
+    total_num_samples = None
+    if results is not None and hasattr(results, "total_num_samples"):
+        total_num_samples = int(np.asarray(results.total_num_samples))
     for kwargs in (
+        {"rng_key": sample_key, "num_samples": total_num_samples, "group_by_chain": False},
+        {"rng_key": sample_key, "num_samples": total_num_samples},
         {"rng_key": sample_key, "group_by_chain": False},
         {"rng_key": sample_key},
         {},
     ):
         try:
+            if kwargs.get("num_samples") is None:
+                continue
             samples = ns.get_samples(**kwargs)
             flat_samples = np.column_stack([np.asarray(samples[label]) for label in model_labels])
             break
         except TypeError:
             continue
+    if flat_samples is None and hasattr(ns, "get_weighted_samples"):
+        weighted_samples, _ = ns.get_weighted_samples()
+        flat_samples = np.column_stack([np.asarray(weighted_samples[label]) for label in model_labels])
+    if flat_samples is None and results is not None and hasattr(results, "samples"):
+        flat_samples = np.column_stack([np.asarray(results.samples[label]) for label in model_labels])
     if flat_samples is None:
         raise RuntimeError("Could not extract posterior samples from NumPyro NestedSampler.")
 
     logZ = None
     logZerr = None
+    if results is not None:
+        for key_name in ("log_Z_mean", "logZ", "log_z", "log_evidence"):
+            if hasattr(results, key_name):
+                arr = np.asarray(getattr(results, key_name))
+                logZ = float(arr[-1] if arr.ndim > 0 else arr)
+                break
+        for key_name in ("log_Z_uncert", "logZerr", "log_z_err", "log_evidence_err"):
+            if hasattr(results, key_name):
+                arr = np.asarray(getattr(results, key_name))
+                logZerr = float(arr[-1] if arr.ndim > 0 else arr)
+                break
     extra_fields = None
     for getter in ("get_extra_fields",):
         if hasattr(ns, getter):
@@ -535,6 +560,19 @@ def _run_numpyro_nested(model, model_labels, *, seed: int, num_live_points: int,
                 logZerr = float(arr[-1] if arr.ndim > 0 else arr)
                 break
     return ns, flat_samples, logZ, logZerr
+
+
+def _nested_speed_preset(speed: str, ndim: int) -> tuple[int, int, float]:
+    """Match the Dynesty speed presets as closely as practical for NumPyro."""
+    if speed == "fast":
+        return 20, 10_000, 10.0
+    if speed == "production":
+        return max(1000, 50 * ndim), 500_000, 0.01
+    if speed == "dev":
+        return 25, 10_000, 0.01
+    if speed == "test":
+        return 250, 100_000, 0.01
+    raise ValueError(f"Unknown speed preset: {speed!r}")
 
 
 def _compute_numpy_blobs_from_samples(
@@ -666,15 +704,11 @@ def run_single_jax(
     )
     model = _build_numpyro_nested_model(model_labels, priors, loglike_fn)
 
-    if speed == "production":
-        num_live_points, max_samples, dlogz = max(800, 40 * len(model_labels)), 500_000, 0.01
-    elif speed == "fast":
-        num_live_points, max_samples, dlogz = 128, 50_000, 0.05
-    elif speed == "test":
-        num_live_points, max_samples, dlogz = 96, 20_000, 0.08
-    else:  # dev
-        num_live_points, max_samples, dlogz = 64, 10_000, 0.1
-    print(f"Running NumPyro nested sampler with {num_live_points=} {max_samples=} {dlogz=}")
+    num_live_points, max_samples, dlogz = _nested_speed_preset(speed, len(model_labels))
+    print(
+        "Running NumPyro nested sampler with Dynesty-matched speed preset "
+        f"{speed!r}: {num_live_points=} {max_samples=} {dlogz=}"
+    )
     _, flat_samples, logZ, logZerr = _run_numpyro_nested(
         model,
         model_labels,
@@ -755,6 +789,21 @@ def run_single_jax(
     )
     chisq_red_L2500, _ = reduced_chi_squared(L_residuals_debiased, L_pred_std_debiased, n_params=len(model_labels) - 1)
     print(f"Reduced chi-squared (debiased) M2500: {chisq_red_L2500:.3f}")
+    plot_full_residuals(
+        df_agn_fit,
+        L_residuals_debiased,
+        L_pred_std_debiased,
+        flat_samples,
+        cosmo_model,
+        z_pivot_agn,
+        debias=True,
+        dm_interp=dm_interp,
+        show=False,
+        plot_path=plot_path,
+        z_range=z_range,
+        residual_label="L2500_sigma_tau_residuals",
+        output_tag="full_residuals_l2500_sigma_tau",
+    )
 
     r = plot_hubble(
         flat_samples,
@@ -790,7 +839,7 @@ def main():
     parser = argparse.ArgumentParser(description="Experimental JAX/NumPyro nested-sampling Hubble-fit pipeline.", allow_abbrev=True)
     parser.add_argument("agn_data_filepath", type=str, help="Path to AGN data file")
     parser.add_argument("--cosmo_model", type=str, default="Flatw0waCDM", choices=["FlatLambdaCDM", "FlatwCDM", "Flatw0waCDM", "FlatwpwaCDM"])
-    parser.add_argument("--speed", type=str, choices=["production", "test", "fast", "dev"], default="dev")
+    parser.add_argument("--speed", type=str, choices=["production", "test", "fast", "dev"], default="production")
     parser.add_argument("--spectra_fit_csv", type=str, nargs="+", required=True)
     parser.add_argument("--prefix", type=str, default="default_jax")
     parser.add_argument("--z_range", type=float, nargs=2, default=[0.44, 3.16])

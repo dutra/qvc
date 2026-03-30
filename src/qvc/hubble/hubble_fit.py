@@ -612,6 +612,21 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
     chisq_red_M2500_debiased, _ = reduced_chi_squared(M2500_residuals_debiased, M2500_std_debiased, n_params=len(model_labels)-1)
     print("Plotting debiased residuals...")
     plot_full_residuals(df_agn, debiased_residuals, debiased_residuals_err, flat_samples, cosmo_model, z_pivot_agn, debias=True, dm_interp=dm_interp, show=False, plot_path=plot_path, z_range=z_range)
+    plot_full_residuals(
+        df_agn,
+        L_residuals_debiased,
+        L_pred_std_debiased,
+        flat_samples,
+        cosmo_model,
+        z_pivot_agn,
+        debias=True,
+        dm_interp=dm_interp,
+        show=False,
+        plot_path=plot_path,
+        z_range=z_range,
+        residual_label='L2500_sigma_tau_residuals',
+        output_tag='full_residuals_l2500_sigma_tau',
+    )
     plot_full_residuals(df_agn, debiased_residuals, debiased_residuals_err, flat_samples, cosmo_model, z_pivot_agn, debias=True, dm_interp=dm_interp, 
                         show=False, plot_path=plot_path, key_y='z', key_color='residuals', z_range=z_range)
     plot_full_residuals_rz(
