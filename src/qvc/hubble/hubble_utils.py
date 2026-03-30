@@ -1135,6 +1135,14 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
             raise ValueError("spectra_fit_csv not provided and spectral fields not found in agn h5 file")
             #raise ValueError("spectra_fit_csv must be provided if alpha_lambda not in agn h5 file")
 
+    if "f_host_center" in df.columns:
+        missing_f_host_center = pd.to_numeric(df["f_host_center"], errors="coerce").isna()
+        if np.any(missing_f_host_center):
+            df.loc[missing_f_host_center, "f_host_center"] = 0.0
+            if "f_host_center_err" in df.columns:
+                df.loc[missing_f_host_center, "f_host_center_err"] = 0.0
+            print(f"Filled {int(np.count_nonzero(missing_f_host_center))} NaN f_host_center values with 0.0")
+
     if "log_sigma_uv" in df.columns:
         df["log_sigma_uv_uncorrected"] = pd.to_numeric(df["log_sigma_uv"], errors="coerce")
     # Use the spectroscopic host fraction at 2500 A for the sigma_uv host correction.
