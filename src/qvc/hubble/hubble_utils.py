@@ -53,8 +53,12 @@ def _discover_qvc_root() -> Path:
 QVC_ROOT = _discover_qvc_root()
 
 
-def resolve_qvc_data_path(path_like: str | os.PathLike) -> str:
-    """Resolve a QVC data file independent of the current working directory."""
+def _resolve_qvc_repo_path(
+    path_like: str | os.PathLike,
+    *,
+    env_var: str,
+    repo_subdir: str,
+) -> str:
     path = Path(path_like).expanduser()
     if path.is_absolute():
         if path.exists():
@@ -62,19 +66,19 @@ def resolve_qvc_data_path(path_like: str | os.PathLike) -> str:
         raise FileNotFoundError(f"No such file or directory: '{path}'")
 
     candidates = []
-    env_data_dir = os.environ.get("QVC_DATA_DIR")
-    if env_data_dir:
-        env_data_dir = Path(env_data_dir).expanduser()
-        candidates.append(env_data_dir / path)
-        if path.parts[:1] == ("data",):
-            candidates.append(env_data_dir / Path(*path.parts[1:]))
+    env_dir = os.environ.get(env_var)
+    if env_dir:
+        env_dir = Path(env_dir).expanduser()
+        candidates.append(env_dir / path)
+        if path.parts[:1] == (repo_subdir,):
+            candidates.append(env_dir / Path(*path.parts[1:]))
 
     candidates.append(Path.cwd() / path)
     candidates.append(QVC_ROOT / path)
-    if path.parts[:1] == ("data",):
-        candidates.append(QVC_ROOT / "data" / Path(*path.parts[1:]))
+    if path.parts[:1] == (repo_subdir,):
+        candidates.append(QVC_ROOT / repo_subdir / Path(*path.parts[1:]))
     else:
-        candidates.append(QVC_ROOT / "data" / path)
+        candidates.append(QVC_ROOT / repo_subdir / path)
 
     seen = set()
     for candidate in candidates:
@@ -88,8 +92,26 @@ def resolve_qvc_data_path(path_like: str | os.PathLike) -> str:
     raise FileNotFoundError(
         f"No such file or directory: '{path_like}'. "
         f"Tried relative to cwd='{Path.cwd()}', QVC root='{QVC_ROOT}', "
-        "and optional QVC_DATA_DIR."
+        f"and optional {env_var}."
     )
+
+
+def resolve_qvc_data_path(path_like: str | os.PathLike) -> str:
+    """Resolve a QVC data file independent of the current working directory."""
+    return _resolve_qvc_repo_path(path_like, env_var="QVC_DATA_DIR", repo_subdir="data")
+
+
+def resolve_qvc_result_path(path_like: str | os.PathLike) -> str:
+    """Resolve a QVC results file independent of the current working directory."""
+    return _resolve_qvc_repo_path(path_like, env_var="QVC_RESULT_DIR", repo_subdir="results")
+
+
+def get_qvc_result_dir() -> Path:
+    """Return the base directory used for generated result artifacts."""
+    env_result_dir = os.environ.get("QVC_RESULT_DIR")
+    if env_result_dir:
+        return Path(env_result_dir).expanduser()
+    return QVC_ROOT / "results"
 
 def convert_M2500_to_logL2500(M2500):
     return -1/2.5 * (M2500 - 90.0)

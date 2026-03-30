@@ -93,6 +93,7 @@ from qvc.hubble.hubble_plotting import (
 from qvc.hubble.hubble_utils import (
     compute_age_universe_with_error,
     display_results_summary,
+    get_qvc_result_dir,
     load_agn_data,
     load_pantheon_data,
     reduced_chi_squared,
@@ -371,8 +372,6 @@ def _prepare_agn_arrays(agn_data: dict[str, np.ndarray]) -> dict[str, jnp.ndarra
     obs = jnp.stack([out[k] for k in agn_model_req_obs], axis=0)
     err = jnp.stack([out[k] for k in agn_model_req_errs], axis=0)
     pivots = jnp.asarray([float(np.mean(np.asarray(agn_data[k], dtype=float))) for k in agn_model_req_obs])
-    pivots = pivots.at[agn_model_req_obs.index("log_tau_uv_rf")].set(jnp.log10(500.0))
-    pivots = pivots.at[agn_model_req_obs.index("log_sigma_uv")].set(jnp.log10(0.2))
     out["_obs_arr"] = obs
     out["_err_arr"] = err
     out["_pivot_arr"] = pivots
@@ -703,9 +702,9 @@ def run_single_jax(
     dmi_max_w = blobs[idx_max_weight, 1, :]
     dmi_posterior_median = np.median(blobs[:, 1, :], axis=0)
 
-    checkpoint_folder = f"results/hubble_posteriors/{prefix}"
-    os.makedirs(checkpoint_folder, exist_ok=True)
-    checkpoint_file = os.path.join(checkpoint_folder, f"posteriors_{run_tag}_jax.h5")
+    checkpoint_folder = get_qvc_result_dir() / "hubble_posteriors" / prefix
+    checkpoint_folder.mkdir(parents=True, exist_ok=True)
+    checkpoint_file = str(checkpoint_folder / f"posteriors_{run_tag}_jax.h5")
     save_chains(
         checkpoint_file,
         flat_samples=flat_samples,
@@ -718,6 +717,10 @@ def run_single_jax(
 
     display_results_summary(flat_samples, cosmo_model, z_pivot_agn)
     age, age_err = compute_age_universe_with_error(flat_samples, cosmo_model, max_eval=200)
+
+    if only_sna:
+        print("Skipping AGN-specific post-processing and plots for SNe-only run.")
+        return flat_samples, model_labels, logZ, logZerr, age, age_err
 
     dm_interp = make_dm_function(
         agn_data["apparent_mag_2500"],
@@ -788,7 +791,6 @@ def main():
     parser.add_argument("agn_data_filepath", type=str, help="Path to AGN data file")
     parser.add_argument("--cosmo_model", type=str, default="Flatw0waCDM", choices=["FlatLambdaCDM", "FlatwCDM", "Flatw0waCDM", "FlatwpwaCDM"])
     parser.add_argument("--speed", type=str, choices=["production", "test", "fast", "dev"], default="dev")
-    parser.add_argument("--pickled", action="store_true", default=False)
     parser.add_argument("--spectra_fit_csv", type=str, nargs="+", required=True)
     parser.add_argument("--prefix", type=str, default="default_jax")
     parser.add_argument("--z_range", type=float, nargs=2, default=[0.44, 3.16])
@@ -819,7 +821,6 @@ def main():
         iron_frac_cut=args.iron_frac_cut,
         bc_frac_cut=args.bc_frac_cut,
         variability_chi_sq_cut=args.variability_chi_sq_cut,
-        pickled=args.pickled,
         correct_sigma_uv_host=args.correct_sigma_uv_host,
         z_range=tuple(args.z_range),
         plot_path=agn_plot_path,

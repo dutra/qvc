@@ -2,6 +2,7 @@ import numpy as np
 import os
 import math
 import re
+import warnings
 from ast import literal_eval
 
 import corner
@@ -34,6 +35,12 @@ from qvc.hubble.hubble_completeness_refactored import (
 )
 from dynesty.utils import resample_equal
 from dynesty import plotting as dyplot
+
+warnings.filterwarnings(
+    "ignore",
+    message=r"This figure includes Axes that are not compatible with tight_layout.*",
+    category=UserWarning,
+)
 
 
 _SDSS_FILTER_EDGES_OBS = {
@@ -2581,7 +2588,7 @@ def plot_cosmo_corner(
                         txt_value = format_result_errors(
                             median, err_lower=err_lower, err_upper=err_upper, nd=2
                         )
-                    if sna_names[i_sn] in ['wa']:
+                    elif sna_names[i_sn] in ['wa']:
                         txt_value = format_result_errors(
                             median, err_lower=err_lower, err_upper=err_upper, nd=1
                         )
@@ -3892,6 +3899,7 @@ def plot_full_residuals(
             'RCHI2': 'log_RCHI2',
             'RCHI2DIFF': 'log_RCHI2DIFF',
             'variability_chi_sq_g': 'log_variability_chi_sq_g',
+            'reddening_ebv': 'log_reddening_ebv'
 
         }
         for source_col, derived_col in log_columns.items():
@@ -3931,6 +3939,7 @@ def plot_full_residuals(
         'variability_chi_sq_g', 'log_variability_chi_sq_g',
         'variability_chi_sq_red_g', 'log_variability_chi_sq_red_g',
         'variability_pvalue_g', 'variability_neg_log10_pvalue_g',
+        'reddening_ebv', 'log_reddening_ebv',
         #'chi_sq_red_g_raw', 'log_chi_sq_red_g_raw', 'variability_chi_sq_g_raw', 'log_variability_chi_sq_g_raw',
         #'pvalue_g', 'log_pvalue_g',
         #'sdss_plate_count', 'RCHI2', 'log_RCHI2', 'RCHI2DIFF', 'log_RCHI2DIFF', 'VDISP', 'ZWARNING', 'RUN2D',

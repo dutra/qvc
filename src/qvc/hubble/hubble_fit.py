@@ -39,6 +39,7 @@ from qvc.hubble.hubble_utils import (
     compute_pivot_redshift,
     display_results_summary,
     extract_cosmo_results_from_samples,
+    get_qvc_result_dir,
     load_agn_data,
     load_chains,
     load_pantheon_data,
@@ -267,11 +268,10 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
     else:
         agn_calibrators_data = {col: df_calibrators[col].values for col in agn_calibrators_fields if col in df_calibrators.columns}
 
-    checkpoint_folder = f"results/hubble_posteriors/{prefix}"
-    if not os.path.exists(checkpoint_folder):
-        os.makedirs(checkpoint_folder)
+    checkpoint_folder = get_qvc_result_dir() / "hubble_posteriors" / prefix
+    checkpoint_folder.mkdir(parents=True, exist_ok=True)
 
-    checkpoint_file = os.path.join(checkpoint_folder, f"posteriors_{run_tag}.h5")
+    checkpoint_file = str(checkpoint_folder / f"posteriors_{run_tag}.h5")
     print(f"Checkpoint file: {checkpoint_file}")
     print(f"Starting Hubble Fit with {len(agn_data['z'])} AGNs and {len(pantheon_data['zHD'])} SNes...")
 
@@ -800,9 +800,10 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
                                 cosmo_models_sna_result_dict=cosmo_models_sna_result_dict,
                                 compare_r_sna=compare_r_sna)
 
-    os.makedirs(f"results/cosmo/{prefix}", exist_ok=True)
+    cosmo_output_dir = get_qvc_result_dir() / "cosmo" / prefix
+    cosmo_output_dir.mkdir(parents=True, exist_ok=True)
     save_cosmo_results_hdf5(
-        f"results/cosmo/{prefix}/cosmo_results_{n_tag}_{z_tag}.hdf5",
+        str(cosmo_output_dir / f"cosmo_results_{n_tag}_{z_tag}.hdf5"),
         cosmo_models_result_dict
     )
     
