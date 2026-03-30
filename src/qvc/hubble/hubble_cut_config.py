@@ -8,6 +8,7 @@ DEFAULT_CHI_SQ_CUT = 10.0
 DEFAULT_REDDENING_EBV_CUT = None
 DEFAULT_ALPHA_LAMBDA_UPPER_CUT = 0.0
 DEFAULT_LOG_AMP_DELTA_BLR_UPPER_CUT = -0.2
+
 DEFAULT_LOG_AMP_DELTA_BLR_UPPER_CUTS = {
     "u": DEFAULT_LOG_AMP_DELTA_BLR_UPPER_CUT,
     "g": DEFAULT_LOG_AMP_DELTA_BLR_UPPER_CUT,
@@ -39,8 +40,8 @@ def build_agn_cuts(
         wrms_cut = DEFAULT_WRMS_CUT
     if bc_frac_cut is None:
         bc_frac_cut = DEFAULT_BC_FRAC_CUT
-    if ebv_cut is None:
-        ebv_cut = DEFAULT_EBV_CUT
+    if reddening_ebv_cut is None:
+        reddening_ebv_cut = DEFAULT_REDDENING_EBV_CUT
 
     cuts = [
         ("log_tau_uv_rf", 1.5, 4.0),
@@ -54,7 +55,7 @@ def build_agn_cuts(
         ('f_fe_uv_over_pl_3000', None, iron_frac_cut),
         ('f_bc_over_pl_3000', None, bc_frac_cut),
         ("variability_chi_sq_g", variability_chi_sq_g_cut, None),
-        ("reddening_ebv", None, ebv_cut),
+        ("reddening_ebv", None, reddening_ebv_cut),
     ]
     if reddening_ebv_cut is not None:
         cuts.append(("reddening_ebv", None, reddening_ebv_cut))
