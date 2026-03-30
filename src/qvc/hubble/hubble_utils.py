@@ -25,7 +25,7 @@ from scipy import stats
 from tqdm import tqdm
 
 from qvc.hubble.hubble_cut_config import (
-    DEFAULT_EBV_CUT,
+    DEFAULT_REDDENING_EBV_CUT,
     DEFAULT_F_HOST_CUT,
     build_agn_cuts,
     build_log_amp_delta_blr_cuts,
