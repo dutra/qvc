@@ -5,6 +5,7 @@ DEFAULT_WRMS_CUT = 1.2
 DEFAULT_IRON_FRAC_CUT = 1.0 # Wide default cut that allows all values to pass
 DEFAULT_BC_FRAC_CUT = 1.0
 DEFAULT_CHI_SQ_CUT = 10.0
+DEFAULT_REDDENING_EBV_CUT = None
 DEFAULT_ALPHA_LAMBDA_UPPER_CUT = 0.0
 DEFAULT_LOG_AMP_DELTA_BLR_UPPER_CUT = -0.2
 DEFAULT_LOG_AMP_DELTA_BLR_UPPER_CUTS = {
@@ -22,6 +23,7 @@ def build_agn_cuts(
     bc_frac_cut=DEFAULT_BC_FRAC_CUT,
     wrms_cut=DEFAULT_WRMS_CUT,
     variability_chi_sq_g_cut=DEFAULT_CHI_SQ_CUT,
+    reddening_ebv_cut=DEFAULT_REDDENING_EBV_CUT,
 ):
     """
     Return the default AGN quality cuts as (column, lower, upper) tuples.
@@ -38,7 +40,7 @@ def build_agn_cuts(
     if bc_frac_cut is None:
         bc_frac_cut = DEFAULT_BC_FRAC_CUT
 
-    return [
+    cuts = [
         ("log_tau_uv_rf", 1.5, 4.0),
         ("wrms", None, wrms_cut),
         ("t_rf_length", 1700, None),
@@ -51,6 +53,9 @@ def build_agn_cuts(
         ('f_bc_over_pl_3000', None, bc_frac_cut),
         ("variability_chi_sq_g", variability_chi_sq_g_cut, None),
     ]
+    if reddening_ebv_cut is not None:
+        cuts.append(("reddening_ebv", None, reddening_ebv_cut))
+    return cuts
 
 
 def build_log_amp_delta_blr_cuts(cuts=None):

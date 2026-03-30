@@ -84,7 +84,14 @@ from qvc.hubble.hubble_completeness_refactored import (
     get_completeness_function_4d_fhost_alpha,
     make_dm_function,
 )
-from qvc.hubble.hubble_cut_config import (DEFAULT_F_HOST_CUT, DEFAULT_WRMS_CUT, DEFAULT_IRON_FRAC_CUT, DEFAULT_BC_FRAC_CUT, DEFAULT_CHI_SQ_CUT)
+from qvc.hubble.hubble_cut_config import (
+    DEFAULT_BC_FRAC_CUT,
+    DEFAULT_CHI_SQ_CUT,
+    DEFAULT_F_HOST_CUT,
+    DEFAULT_IRON_FRAC_CUT,
+    DEFAULT_REDDENING_EBV_CUT,
+    DEFAULT_WRMS_CUT,
+)
 
 VALID_COMPLETENESS_MODES = ("2d", "3d_fhost", "4d_fhost_alpha")
 
@@ -875,6 +882,12 @@ if __name__ == "__main__":
     parser.add_argument("--iron_frac_cut", type=float, default=DEFAULT_IRON_FRAC_CUT, help="Optional iron fraction cut value to exclude outliers (default: None)")
     parser.add_argument("--bc_frac_cut", type=float, default=DEFAULT_BC_FRAC_CUT, help="Optional BC cut value to exclude outliers (default: None)")
     parser.add_argument("--variability_chi_sq_cut", type=float, default=DEFAULT_CHI_SQ_CUT, help="Optional g-band chi-squared cut value to exclude outliers when variability_chi_sq_g is present.")
+    parser.add_argument(
+        "--reddening_ebv_cut",
+        type=float,
+        default=DEFAULT_REDDENING_EBV_CUT,
+        help="Optional upper limit on reddening_ebv to exclude reddened objects (default: disabled).",
+    )
     parser.add_argument("--prefix", type=str, default="default", help="Prefix directory under plots/hubble/ and results/, and result variable prefix.")
     parser.add_argument("--result_prefix", type=str, default="", help="Prefix for result variable names in LaTeX output (default: empty string)")
     parser.add_argument("--z_range", type=float, nargs=2, default=[0.44, 3.16], 
@@ -941,6 +954,7 @@ if __name__ == "__main__":
                            wrms_cut=args.wrms_cut, iron_frac_cut=args.iron_frac_cut,
                            bc_frac_cut=args.bc_frac_cut,
                            variability_chi_sq_cut=args.variability_chi_sq_cut,
+                           reddening_ebv_cut=args.reddening_ebv_cut,
                            correct_sigma_uv_host=args.correct_sigma_uv_host,
                            z_range=tuple(args.z_range), plot_path=agn_plot_path)
     if args.N is not None:
