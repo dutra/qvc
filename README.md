@@ -128,13 +128,12 @@ python -m qvc.hubble.hubble_fit \
     --fhost_cut 0.1 \ 
     --iron_frac_cut 0.001 \ 
     --bc_frac_cut 0.001 \ 
-    --chi_sq_cut 10.0 \ 
+    --variability_chi_sq_cut 10.0 \ 
     --speed fast \ 
     --spectra_fit_csv results/data/jaxqsofit_mar15c.csv \ 
     --z_range 0.44 3.16 \ 
     --result_prefix fiducial \ 
     --prefix demo \ 
-    --pickled \ 
     "results/data/nov10a_single_chisq_carma_mixscalar_nozband_highertaufastlim_removemix_fixband_lagblrband_chisq_spl_nofhost_bwb_lmc-6_N1w1000s200t14ch4.h5"
 ```
 
