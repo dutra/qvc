@@ -619,6 +619,72 @@ def plot_l2500_vs_uv_variability_fiducial(
     )
 
 
+def plot_l2500_vs_eta_sigma_fiducial(
+    df_agn,
+    *,
+    plot_path="plots/hubble",
+    show=False,
+    cosmo=None,
+    thin_step=5,
+    filename="l2500_vs_eta_sigma_fiducial.pdf",
+    dynamic_axes=False,
+):
+    """Plot fiducial-cosmology L_2500 against eta_sigma."""
+    required = {"z", "apparent_mag_2500", "eta_sigma"}
+    if not required.issubset(df_agn.columns):
+        missing = ", ".join(sorted(required - set(df_agn.columns)))
+        raise KeyError(f"Missing required columns for L2500 eta_sigma plot: {missing}")
+
+    if cosmo is None:
+        cosmo = FlatLambdaCDM(H0=70.0, Om0=0.3)
+
+    z = pd.to_numeric(df_agn["z"], errors="coerce").to_numpy(dtype=float)
+    m2500 = pd.to_numeric(df_agn["apparent_mag_2500"], errors="coerce").to_numpy(dtype=float)
+    eta_sigma = pd.to_numeric(df_agn["eta_sigma"], errors="coerce").to_numpy(dtype=float)
+
+    actual_M2500 = m2500 - cosmo.distmod(z).value
+    logL2500_fid = convert_M2500_to_logL2500(actual_M2500)
+
+    fig, ax = plt.subplots(1, 1, figsize=(7.2, 5.8))
+    mask = np.isfinite(logL2500_fid) & np.isfinite(eta_sigma) & np.isfinite(z)
+    if np.any(mask):
+        idx = np.flatnonzero(mask)
+        if thin_step is not None and thin_step > 1:
+            idx = idx[::thin_step]
+        sc = ax.scatter(
+            eta_sigma[idx],
+            logL2500_fid[idx],
+            c=z[idx],
+            cmap="viridis",
+            s=10,
+            alpha=0.7,
+            linewidths=0,
+            rasterized=True,
+        )
+        if dynamic_axes and idx.size > 0:
+            x = eta_sigma[idx]
+            yplot = logL2500_fid[idx]
+            xpad = 0.05 * max(np.nanmax(x) - np.nanmin(x), 1e-6)
+            ypad = 0.05 * max(np.nanmax(yplot) - np.nanmin(yplot), 1e-6)
+            ax.set_xlim(np.nanmin(x) - xpad, np.nanmax(x) + xpad)
+            ax.set_ylim(np.nanmin(yplot) - ypad, np.nanmax(yplot) + ypad)
+        cbar = fig.colorbar(sc, ax=ax)
+        cbar.set_label("Redshift z")
+    else:
+        ax.text(0.5, 0.5, "No finite eta_sigma values", ha="center", va="center", transform=ax.transAxes)
+
+    ax.set_xlabel(r"$\eta_{\sigma}$")
+    ax.set_ylabel(r"$\log L_{2500}$ (fiducial cosmology)")
+
+    diagnostics_path = os.path.join(plot_path or "plots/hubble", "diagnostics")
+    return _save_figure(
+        fig,
+        os.path.join(diagnostics_path, filename),
+        dpi=200,
+        show=show,
+    )
+
+
 def plot_cut_diagnostics(df_before, df_after, bins=30, cut_info="", save_path="plots/hubble/cuts/"):
     """
     Plot a combined cut diagnostic with:
@@ -960,7 +1026,12 @@ def plot_tau_sigma_vs_wu_catalog(df, plot_path="plots/hubble", show=False):
     )
 
 
-def plot_eta_tau_sigma_vs_redshift(df, plot_path="plots/hubble", show=False):
+def plot_eta_tau_sigma_vs_redshift(
+    df,
+    plot_path="plots/hubble",
+    show=False,
+    filename="eta_tau_sigma_vs_redshift.pdf",
+):
     """Plot eta_tau and eta_sigma against redshift for AGN diagnostics."""
     required = {"z", "eta_tau", "eta_sigma"}
     if not required.issubset(df.columns):
@@ -1008,7 +1079,7 @@ def plot_eta_tau_sigma_vs_redshift(df, plot_path="plots/hubble", show=False):
     diagnostics_path = os.path.join(plot_path or "plots/hubble", "diagnostics")
     return _save_figure(
         fig,
-        os.path.join(diagnostics_path, "eta_tau_sigma_vs_redshift.pdf"),
+        os.path.join(diagnostics_path, filename),
         dpi=200,
         show=show,
     )
@@ -4115,7 +4186,7 @@ def plot_full_residuals(
         #'log_tau_band_RF_mean', 'log_t_rf_length', 
         #'alphaOX', 'alphaOX_int',
         #'bwb_alpha_u', 'bwb_alpha_g', 'bwb_alpha_r', 'bwb_alpha_i', 'bwb_alpha_z',
-        #'eta_sigma', 'eta_tau', 
+        'eta_sigma', 'eta_tau',
         #'PL_slope_blue', 'lam_min', 'lam_max', 'lam_range', 
         #'poly1', 'psf_minus_fiber_r', 'log_psf_minus_fiber_r', 'petroRad_r', 'log_petroRad_r',
         #'cadence', 'number_points',

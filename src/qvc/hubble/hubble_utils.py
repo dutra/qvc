@@ -937,8 +937,8 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
         suffix = " or NaN" if allow_missing else ""
         return f"{left}{lower_text}, {upper_text}{right}{suffix}"
 
-    def _apply_uv_column_compatibility_shim(frame):
-        """Map legacy uppercase UV summary columns onto the lowercase schema."""
+    def _apply_column_compatibility_shim(frame):
+        """Map known legacy/alias column names onto the schema expected downstream."""
         legacy_to_new = {
             "log_sigma_UV": "log_sigma_uv",
             "log_sigma_UV_err": "log_sigma_uv_err",
@@ -950,13 +950,21 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
             "cov_log_sigma_UV_log_tau_UV_RF": "cov_log_sigma_uv_log_tau_uv_rf",
             "log_sigma_UV_log_tau_UV_RF_cov_psd": "log_sigma_uv_log_tau_uv_rf_cov_psd",
         }
+        alias_to_existing = {
+            "LOGMBH": "log_mbh",
+            "LOGMBH_ERR": "log_mbh_err",
+        }
         copied = []
         for legacy, new in legacy_to_new.items():
             if new not in frame.columns and legacy in frame.columns:
                 frame[new] = frame[legacy]
                 copied.append(f"{legacy}->{new}")
+        for new, alias in alias_to_existing.items():
+            if new not in frame.columns and alias in frame.columns:
+                frame[new] = frame[alias]
+                copied.append(f"{alias}->{new}")
         if copied:
-            print("Applied UV compatibility shim:", ", ".join(copied))
+            print("Applied column compatibility shim:", ", ".join(copied))
         return frame
 
     from qvc.hubble.hubble_plotting import (
@@ -974,6 +982,7 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
         plot_fast_vs_uv_variability,
         plot_f_host_center_vs_l2500,
         plot_g_band_drift_slope_histograms,
+        plot_l2500_vs_eta_sigma_fiducial,
         plot_l2500_vs_uv_variability_fiducial,
         plot_Mi_relation,
         plot_cut_diagnostics,
@@ -1031,6 +1040,7 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
 
     file_path = resolve_qvc_data_path(file_path)
     df = read_quasars_from_hdf5_flat(file_path)
+    df = _apply_column_compatibility_shim(df)
     print("Number of quasars loaded:", len(df))
     legacy_required = [f"mags_mean_{i}" for i in range(4)]
     if all(col in df.columns for col in legacy_required):
@@ -1186,6 +1196,13 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
             plot_path=plot_path,
             show=False,
             filename="l2500_vs_uv_variability_fiducial_precuts.pdf",
+        )
+    if {"z", "apparent_mag_2500", "eta_sigma"}.issubset(df.columns):
+        plot_l2500_vs_eta_sigma_fiducial(
+            df,
+            plot_path=plot_path,
+            show=False,
+            filename="l2500_vs_eta_sigma_fiducial_precuts.pdf",
         )
     if {"z", "eta_tau", "eta_sigma"}.issubset(df.columns):
         plot_eta_tau_sigma_vs_redshift(df, plot_path=plot_path, show=False)
@@ -1416,6 +1433,21 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
             show=False,
             filename="l2500_vs_uv_variability_fiducial_postcuts.pdf",
             dynamic_axes=True,
+        )
+    if {"z", "apparent_mag_2500", "eta_sigma"}.issubset(df.columns):
+        plot_l2500_vs_eta_sigma_fiducial(
+            df,
+            plot_path=plot_path,
+            show=False,
+            filename="l2500_vs_eta_sigma_fiducial_postcuts.pdf",
+            dynamic_axes=True,
+        )
+    if {"z", "eta_tau", "eta_sigma"}.issubset(df.columns):
+        plot_eta_tau_sigma_vs_redshift(
+            df,
+            plot_path=plot_path,
+            show=False,
+            filename="eta_tau_sigma_vs_redshift_postcuts.pdf",
         )
     plot_cut_diagnostics(df_all.copy(), df.copy(), bins=30, cut_info="all cuts")
     colorpanel_cols = [
