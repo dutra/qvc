@@ -210,3 +210,20 @@ def test_run_single_only_sna_smoke(fake_data, monkeypatch, tmp_path):
     assert residuals is None
     assert age == 13.7
     assert age_err == 0.2
+
+
+@pytest.mark.parametrize("resume_value, use_default_checkpoint", [(True, True), ("custom_resume.h5", False)])
+def test_resolve_resume_checkpoint_path_requires_existing_file(tmp_path, resume_value, use_default_checkpoint):
+    default_checkpoint = tmp_path / "default_resume.h5"
+    expected_path = default_checkpoint if use_default_checkpoint else tmp_path / "custom_resume.h5"
+
+    with pytest.raises(FileNotFoundError, match=str(expected_path)):
+        hubble_fit.resolve_resume_checkpoint_path(resume_value, str(default_checkpoint))
+
+
+@pytest.mark.parametrize("resume_value", ["True", "true", "1", "yes"])
+def test_resolve_resume_checkpoint_path_treats_true_like_default_checkpoint(tmp_path, resume_value):
+    default_checkpoint = tmp_path / "default_resume.h5"
+
+    with pytest.raises(FileNotFoundError, match=str(default_checkpoint)):
+        hubble_fit.resolve_resume_checkpoint_path(resume_value, str(default_checkpoint))

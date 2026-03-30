@@ -162,6 +162,29 @@ def validate_resume_checkpoint(results, checkpoint_file, ndim, n_agn):
                 "Delete the checkpoint or use a new output filename."
             )
 
+
+def resolve_resume_checkpoint_path(resume, checkpoint_file):
+    if not resume:
+        return None
+
+    if isinstance(resume, str):
+        resume_stripped = resume.strip()
+        resume_lower = resume_stripped.lower()
+        if resume_lower in {"true", "1", "yes"}:
+            resolved_checkpoint = checkpoint_file
+        elif resume_lower in {"false", "0", "no"}:
+            return None
+        else:
+            resolved_checkpoint = resume_stripped
+    else:
+        resolved_checkpoint = checkpoint_file
+
+    if not os.path.exists(resolved_checkpoint):
+        raise FileNotFoundError(
+            f"Resume was requested, but checkpoint file '{resolved_checkpoint}' does not exist."
+        )
+    return resolved_checkpoint
+
 def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, 
                       df_calibrators=None,
                       cosmo_model='Flatw0waCDM',
@@ -277,36 +300,30 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
 
     if resume:
         print("[WARNING] Resuming from checkpoint file...")
-        if isinstance(resume, str):
-            checkpoint_file = resume
+        checkpoint_file = resolve_resume_checkpoint_path(resume, checkpoint_file)
         print(f"Resuming from default checkpoint file: {checkpoint_file}")
-        if os.path.exists(checkpoint_file):
-            #sampler = DynamicNestedSampler.restore(checkpoint_file, pool=pool)
-            try:
-                r = load_chains(checkpoint_file)
-                validate_resume_checkpoint(
-                    r,
-                    checkpoint_file=checkpoint_file,
-                    ndim=ndim,
-                    n_agn=len(agn_data["z"]),
-                )
-            except Exception as exc:
-                raise RuntimeError(
-                    f"Failed to resume from checkpoint '{checkpoint_file}'. "
-                    "The checkpoint appears incompatible with the current run configuration "
-                    "(for example: different cosmology model, different selected AGN sample, "
-                    "or an older file format). Start a fresh run or remove the stale checkpoint."
-                ) from exc
-            flat_samples = r["flat_samples"]
-            dmi_max_w = r["dmi_max_w"]
-            dmi_posterior_median = r.get("dmi_posterior_median", dmi_max_w)
-            logZ = r["logZ"]
-            logZerr = r["logZerr"]
-            integrals_max_w = r["integrals_max_w"]
-        else:
-            print(f"Checkpoint file {checkpoint_file} does not exist. Starting fresh run.")
-            #raise RuntimeError("Checkpoint file does not exist.")
-            resume = False  # Start fresh if checkpoint doesn't exist
+        #sampler = DynamicNestedSampler.restore(checkpoint_file, pool=pool)
+        try:
+            r = load_chains(checkpoint_file)
+            validate_resume_checkpoint(
+                r,
+                checkpoint_file=checkpoint_file,
+                ndim=ndim,
+                n_agn=len(agn_data["z"]),
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                f"Failed to resume from checkpoint '{checkpoint_file}'. "
+                "The checkpoint appears incompatible with the current run configuration "
+                "(for example: different cosmology model, different selected AGN sample, "
+                "or an older file format). Start a fresh run or remove the stale checkpoint."
+            ) from exc
+        flat_samples = r["flat_samples"]
+        dmi_max_w = r["dmi_max_w"]
+        dmi_posterior_median = r.get("dmi_posterior_median", dmi_max_w)
+        logZ = r["logZ"]
+        logZerr = r["logZerr"]
+        integrals_max_w = r["integrals_max_w"]
 
 
     if not resume:

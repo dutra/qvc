@@ -3951,6 +3951,10 @@ def plot_full_residuals(
 ):
     df_agn = df_agn.copy()
     df_agn[residual_label] = residuals
+    if key_y == 'residuals':
+        key_y = residual_label
+    if key_color == 'residuals':
+        key_color = residual_label
 
     df_agn = df_agn.reset_index(drop=True)
 
@@ -4020,11 +4024,10 @@ def plot_full_residuals(
             )
         if 'frac_host_psf_2500' in frame.columns:
             frac_host = np.asarray(frame['frac_host_psf_2500'], dtype=float)
-            frame['log_frac_host_psf_2500'] = np.where(
-                np.isfinite(frac_host) & (frac_host > 0),
-                np.log10(frac_host),
-                np.nan,
-            )
+            log_frac_host = np.full(frac_host.shape, np.nan, dtype=float)
+            valid_frac_host = np.isfinite(frac_host) & (frac_host > 0)
+            log_frac_host[valid_frac_host] = np.log10(frac_host[valid_frac_host])
+            frame['log_frac_host_psf_2500'] = log_frac_host
 
         log_columns = {
             'dm_red': 'log_dm_red',
