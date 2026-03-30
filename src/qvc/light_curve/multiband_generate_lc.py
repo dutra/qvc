@@ -544,9 +544,31 @@ def load_s82_from_hdf5(file_path="s82_objs.h5"):
     return s82_objs
 
 def populate_sdss_fields(s82_objs, progress_bar=False):
+    redshift_tolerance = 1.0e-3
     _ = progress_bar
     if not s82_objs:
         return s82_objs
+
+    def _read_catalog_with_redshift():
+        cat_path = resolve_qvc_data_path("data/S82/Catalog.parquet")
+        read_attempts = (
+            ["objectId", "RA", "DEC", "z"],
+            ["objectId", "RA", "DEC", "Z_SYS"],
+        )
+        last_exc = None
+        for include_names in read_attempts:
+            try:
+                cat_local = Table.read(cat_path, include_names=include_names)
+                if include_names[-1] == "z":
+                    cat_local["catalog_z"] = cat_local["z"]
+                else:
+                    cat_local["catalog_z"] = cat_local["Z_SYS"]
+                return cat_local
+            except (KeyError, ValueError, OSError) as exc:
+                last_exc = exc
+        raise ValueError(
+            "S82 catalog must include either a 'z' or 'Z_SYS' redshift column."
+        ) from last_exc
 
     rows = Table(
         {
@@ -556,26 +578,48 @@ def populate_sdss_fields(s82_objs, progress_bar=False):
     )
     rows["object_id_key"] = np.asarray(rows["object_id"]).astype(str)
 
-    cat = Table.read(
-        resolve_qvc_data_path("data/S82/Catalog.parquet"),
-        include_names=["objectId", "RA", "DEC", "Z_SYS"],
-    )
+    cat = _read_catalog_with_redshift()
     cat = cat[~np.isnan(cat["RA"]) & ~np.isnan(cat["DEC"])]
     _, first_idx = np.unique(np.asarray(cat["objectId"]).astype(str), return_index=True)
     cat = cat[np.sort(first_idx)]
     cat["object_id_key"] = np.asarray(cat["objectId"]).astype(str)
 
-    rows = join(rows, cat["object_id_key", "RA", "DEC", "Z_SYS"], keys="object_id_key", join_type="left")
+    rows = join(rows, cat["object_id_key", "RA", "DEC", "catalog_z"], keys="object_id_key", join_type="left")
     ra_mask = np.ma.getmaskarray(rows["RA"]) if hasattr(rows["RA"], "mask") else np.zeros(len(rows), dtype=bool)
     dec_mask = np.ma.getmaskarray(rows["DEC"]) if hasattr(rows["DEC"], "mask") else np.zeros(len(rows), dtype=bool)
     valid_rows = ~(ra_mask | dec_mask)
 
-    if not np.any(valid_rows):
-        for obj in s82_objs:
-            print(f"Skipping entry {obj['object_id']} as it does not exist in the catalog.")
-        return s82_objs
+    if not np.all(valid_rows):
+        missing_catalog_ids = np.asarray(rows["object_id"])[~valid_rows]
+        missing_ids = ", ".join(str(object_id) for object_id in missing_catalog_ids)
+        raise ValueError(f"Missing S82 catalog match for object_id(s): {missing_ids}")
 
     dr16q = Table.read(resolve_qvc_data_path("data/dr16q_prop_May01_2024.fits"), hdu=1)
+    required_dr16q_columns = (
+        "RA",
+        "DEC",
+        "Z_SYS",
+        "Z_SYS_ERR",
+        "SDSS_NAME",
+        "EBV",
+        "LOGLBOL",
+        "LOGLBOL_ERR",
+        "LOGL3000",
+        "LOGL3000_ERR",
+        "LOGL5100",
+        "LOGL5100_ERR",
+        "LOGMBH",
+        "LOGMBH_ERR",
+        "LOGLEDD_RATIO",
+        "LOGLEDD_RATIO_ERR",
+        "PLATE",
+        "MJD",
+        "FIBERID",
+    )
+    missing_dr16q_columns = [name for name in required_dr16q_columns if name not in dr16q.colnames]
+    if missing_dr16q_columns:
+        missing_cols = ", ".join(missing_dr16q_columns)
+        raise ValueError(f"DR16Q table missing required column(s): {missing_cols}")
     fits_coords = SkyCoord(ra=np.asarray(dr16q["RA"]) * u.deg, dec=np.asarray(dr16q["DEC"]) * u.deg)
 
     query_rows = rows[valid_rows]
@@ -586,26 +630,40 @@ def populate_sdss_fields(s82_objs, progress_bar=False):
     nearest_idx, d2d, _ = query_coords.match_to_catalog_sky(fits_coords)
     match_mask = d2d < (1.0 * u.arcsec)
 
-    missing_catalog_ids = np.asarray(rows["object_id"])[~valid_rows]
-    for object_id in missing_catalog_ids:
-        print(f"Skipping entry {object_id} as it does not exist in the catalog.")
-
-    unmatched_dr16q_ids = np.asarray(query_rows["object_id"])[~match_mask]
-    for object_id in unmatched_dr16q_ids:
-        print(f"Skipping entry {object_id} as it does not exist in the fits data.")
-
-    if not np.any(match_mask):
-        return s82_objs
+    if not np.all(match_mask):
+        unmatched_dr16q_ids = np.asarray(query_rows["object_id"])[~match_mask]
+        missing_ids = ", ".join(str(object_id) for object_id in unmatched_dr16q_ids)
+        raise ValueError(f"Missing DR16Q match within 1 arcsec for object_id(s): {missing_ids}")
 
     matched_rows = query_rows[match_mask]
     matched_row_idx = np.asarray(matched_rows["row_idx"], dtype=int)
     matched_fits_idx = np.asarray(nearest_idx[match_mask], dtype=int)
-    z_vals = np.asarray(matched_rows["Z_SYS"], dtype=float)
+    cat_z_vals = np.asarray(matched_rows["catalog_z"], dtype=float)
+    dr16q_z_vals = np.asarray(dr16q["Z_SYS"][matched_fits_idx], dtype=float)
     z_err_vals = np.asarray(dr16q["Z_SYS_ERR"][matched_fits_idx], dtype=float)
     logl3000 = np.asarray(dr16q["LOGL3000"])[matched_fits_idx]
     logl3000_err = np.asarray(dr16q["LOGL3000_ERR"])[matched_fits_idx]
     loglbol = np.asarray(dr16q["LOGLBOL"])[matched_fits_idx]
     loglbol_err = np.asarray(dr16q["LOGLBOL_ERR"])[matched_fits_idx]
+    invalid_cat_z = ~np.isfinite(cat_z_vals)
+    if np.any(invalid_cat_z):
+        missing_ids = ", ".join(str(object_id) for object_id in np.asarray(matched_rows["object_id"])[invalid_cat_z])
+        raise ValueError(f"Missing S82 redshift for object_id(s): {missing_ids}")
+    invalid_dr16q_z = ~np.isfinite(dr16q_z_vals)
+    if np.any(invalid_dr16q_z):
+        missing_ids = ", ".join(str(object_id) for object_id in np.asarray(matched_rows["object_id"])[invalid_dr16q_z])
+        raise ValueError(f"Missing DR16Q Z_SYS for object_id(s): {missing_ids}")
+    invalid_z_err = ~np.isfinite(z_err_vals)
+    if np.any(invalid_z_err):
+        missing_ids = ", ".join(str(object_id) for object_id in np.asarray(matched_rows["object_id"])[invalid_z_err])
+        raise ValueError(f"Missing DR16Q Z_SYS_ERR for object_id(s): {missing_ids}")
+    z_disagreement = np.abs(cat_z_vals - dr16q_z_vals) > redshift_tolerance
+    if np.any(z_disagreement):
+        bad_ids = ", ".join(str(object_id) for object_id in np.asarray(matched_rows["object_id"])[z_disagreement])
+        raise ValueError(
+            f"Redshift disagreement exceeds tolerance {redshift_tolerance:g} for object_id(s): {bad_ids}"
+        )
+    z_vals = dr16q_z_vals
     loglbol_corrected = np.where(z_vals < 0.7, np.log10(5.15) + logl3000, loglbol)
     loglbol_corrected_err = np.where(z_vals < 0.7, logl3000_err, loglbol_err)
     ebv_vals = np.asarray(dr16q["EBV"])[matched_fits_idx]
@@ -633,4 +691,9 @@ def populate_sdss_fields(s82_objs, progress_bar=False):
     ):
         for row_idx, value in zip(matched_row_idx, values):
             s82_objs[row_idx][field] = value
+    for obj in s82_objs:
+        if "z" not in obj or not np.isfinite(obj["z"]):
+            raise ValueError(f"populate_sdss_fields did not populate finite z for object_id={obj['object_id']}")
+        if "z_err" not in obj or not np.isfinite(obj["z_err"]):
+            raise ValueError(f"populate_sdss_fields did not populate finite z_err for object_id={obj['object_id']}")
     return s82_objs
