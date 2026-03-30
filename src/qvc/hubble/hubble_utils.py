@@ -381,7 +381,9 @@ def populate_spectra_fit(df, spectra_fit_csvs, best=True):
         'f_bc_over_pl_3000': float,
         'f_host_center': float,
         'wrms': float,
-        'frac_host_psf_2500': float
+        'frac_host_psf_2500': float,
+        'reddening_ebv': float,
+        'ebv_mw': float,
     }
 
     # Drop existing derived columns before re-merging them from the fit tables.
@@ -514,6 +516,7 @@ def populate_sdss_fields(objs, progress_bar=True):
     - pandas.DataFrame (returns pandas.DataFrame)
     - list[dict] (returns list[dict], for backward compatibility)
     """
+    raise NotImplementedError("This function is currently disabled pending refactor.")
     input_is_df = isinstance(objs, pd.DataFrame)
     input_is_list = isinstance(objs, list)
     if not (input_is_df or input_is_list):
@@ -1035,13 +1038,13 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
             if legacy_col in df.columns:
                 df = df.drop(columns=[legacy_col])
 
-    if populate_sdss:
-        print("Populating SDSS fields...")
-        df = populate_sdss_fields(df)
+    # if populate_sdss:
+    #     print("Populating SDSS fields...")
+    #     df = populate_sdss_fields(df)
 
-    if ("ebv_wu" not in df.columns) or df["ebv_wu"].isna().all():
-        print("Populating SDSS fields...")
-        df = populate_sdss_fields(df)
+    # if ("ebv_wu" not in df.columns) or df["ebv_wu"].isna().all():
+    #     print("Populating SDSS fields...")
+    #     df = populate_sdss_fields(df)
 
     #df = populate_sdss_rchi2_fields(df)
 

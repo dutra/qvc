@@ -3899,7 +3899,8 @@ def plot_full_residuals(
             'RCHI2': 'log_RCHI2',
             'RCHI2DIFF': 'log_RCHI2DIFF',
             'variability_chi_sq_g': 'log_variability_chi_sq_g',
-            'reddening_ebv': 'log_reddening_ebv'
+            'reddening_ebv': 'log_reddening_ebv',
+            'ebv_mw': 'log_ebv_mw',
 
         }
         for source_col, derived_col in log_columns.items():
@@ -3940,6 +3941,8 @@ def plot_full_residuals(
         'variability_chi_sq_red_g', 'log_variability_chi_sq_red_g',
         'variability_pvalue_g', 'variability_neg_log10_pvalue_g',
         'reddening_ebv', 'log_reddening_ebv',
+        'ebv_mw', 'log_ebv_mw',
+        'apparent_mag_2500_intrinsict',
         #'chi_sq_red_g_raw', 'log_chi_sq_red_g_raw', 'variability_chi_sq_g_raw', 'log_variability_chi_sq_g_raw',
         #'pvalue_g', 'log_pvalue_g',
         #'sdss_plate_count', 'RCHI2', 'log_RCHI2', 'RCHI2DIFF', 'log_RCHI2DIFF', 'VDISP', 'ZWARNING', 'RUN2D',
