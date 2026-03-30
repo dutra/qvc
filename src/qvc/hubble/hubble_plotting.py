@@ -4120,6 +4120,7 @@ def plot_full_residuals(
             'RCHI2': 'log_RCHI2',
             'RCHI2DIFF': 'log_RCHI2DIFF',
             'variability_chi_sq_g': 'log_variability_chi_sq_g',
+            'variability_chi_sq_red_g': 'log_variability_chi_sq_red_g',
             'reddening_ebv': 'log_reddening_ebv',
             'ebv_mw': 'log_ebv_mw',
 

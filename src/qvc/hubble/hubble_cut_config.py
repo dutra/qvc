@@ -23,7 +23,7 @@ def build_agn_cuts(
     iron_frac_cut=DEFAULT_IRON_FRAC_CUT,
     bc_frac_cut=DEFAULT_BC_FRAC_CUT,
     wrms_cut=DEFAULT_WRMS_CUT,
-    variability_chi_sq_g_cut=DEFAULT_CHI_SQ_CUT,
+    variability_chi_sq_red_g_cut=DEFAULT_CHI_SQ_CUT,
     reddening_ebv_cut=DEFAULT_REDDENING_EBV_CUT,
 ):
     """
@@ -54,8 +54,7 @@ def build_agn_cuts(
         ("alpha_lambda", None, DEFAULT_ALPHA_LAMBDA_UPPER_CUT),
         ('f_fe_uv_over_pl_3000', None, iron_frac_cut),
         ('f_bc_over_pl_3000', None, bc_frac_cut),
-        ("variability_chi_sq_g", variability_chi_sq_g_cut, None),
-        ("reddening_ebv", None, reddening_ebv_cut),
+        ("variability_chi_sq_red_g", variability_chi_sq_red_g_cut, None),
     ]
     if reddening_ebv_cut is not None:
         cuts.append(("reddening_ebv", None, reddening_ebv_cut))

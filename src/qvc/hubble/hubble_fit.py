@@ -881,7 +881,12 @@ if __name__ == "__main__":
     parser.add_argument("--wrms_cut", type=float, default=DEFAULT_WRMS_CUT, help="Optional reduced chi-squared cut value to exclude outliers (default: None)")
     parser.add_argument("--iron_frac_cut", type=float, default=DEFAULT_IRON_FRAC_CUT, help="Optional iron fraction cut value to exclude outliers (default: None)")
     parser.add_argument("--bc_frac_cut", type=float, default=DEFAULT_BC_FRAC_CUT, help="Optional BC cut value to exclude outliers (default: None)")
-    parser.add_argument("--variability_chi_sq_cut", type=float, default=DEFAULT_CHI_SQ_CUT, help="Optional g-band chi-squared cut value to exclude outliers when variability_chi_sq_g is present.")
+    parser.add_argument(
+        "--variability_chi_sq_cut",
+        type=float,
+        default=DEFAULT_CHI_SQ_CUT,
+        help="Optional reduced g-band chi-squared cut value; keeps rows with variability_chi_sq_red_g >= cut.",
+    )
     parser.add_argument(
         "--reddening_ebv_cut",
         type=float,

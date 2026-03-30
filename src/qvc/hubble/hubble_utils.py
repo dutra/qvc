@@ -1342,7 +1342,7 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
         iron_frac_cut=iron_frac_cut if iron_frac_cut is not None else None,
         bc_frac_cut=bc_frac_cut if bc_frac_cut is not None else None,
         wrms_cut=wrms_cut if wrms_cut is not None else None,
-        variability_chi_sq_g_cut=variability_chi_sq_cut,
+        variability_chi_sq_red_g_cut=variability_chi_sq_cut,
         reddening_ebv_cut=reddening_ebv_cut,
     )
 
