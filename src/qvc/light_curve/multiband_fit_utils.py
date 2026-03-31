@@ -873,6 +873,11 @@ def process_samples(flat_samples, data, bands, percentiles=[16, 50, 84]):
     result['cov_log_sigma_uv_log_tau_uv_rf'] = cov_log_sigma_tau_reg
     print("Regularized covariance: ", cov_log_sigma_tau_reg)
 
+    C_old = psd_cov_from_samples(samples_log_sigma_uv, samples_log_tau_uv_rf, shrink_rho=0.05)
+    _, _, sxy_old = C_old[0,0], C_old[1,1], C_old[0,1]
+    result['log_sigma_uv_log_tau_uv_rf_cov_psd_old'] = sxy_old
+    print("Old PSD covariance: ", sxy_old)
+
     result['log_sigma_uv_log_tau_uv_rf_cov_psd'] = cov_log_sigma_tau_reg
     result['log_sigma_uv_std_psd'] = np.sqrt(vx)
     result['log_tau_uv_rf_std_psd'] = np.sqrt(vy)
