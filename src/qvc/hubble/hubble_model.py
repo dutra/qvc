@@ -6,6 +6,9 @@ AGN_ALPHA_LAMBDA_PARAM = "gamma_alpha_lambda"
 AGN_ALPHA_LAMBDA_OBS = "alpha_lambda"
 AGN_ALPHA_LAMBDA_ERR = "alpha_lambda_err"
 AGN_LOGF_Z_PARAM = "gamma_log_f_z"
+AGN_INTRINSIC_SCATTER_MAG_CENTER = 2.5 * 0.2  # 0.2 dex in luminosity = 0.5 mag
+AGN_LOG_F_PRIOR = (np.log(AGN_INTRINSIC_SCATTER_MAG_CENTER) - 0.8,
+                   np.log(AGN_INTRINSIC_SCATTER_MAG_CENTER) + 0.8)
 
 
 def get_agn_model_spec(use_alpha_lambda_term=False):
@@ -216,7 +219,7 @@ def get_model_params(
         # ("k_red",    (0.1,  5.0)),    # >0 (e.g. ~ 1–3 per dex)
         # ("x0_red",   (-5.0,  5.0)),    # bend near where trend starts
 
-        ("log_f",     (-5.0,  3.0)),
+        ("log_f",     AGN_LOG_F_PRIOR),
         (AGN_LOGF_Z_PARAM, (-10.0, 10.0)),
         #("sigma_b",   (-1,  1)),
 

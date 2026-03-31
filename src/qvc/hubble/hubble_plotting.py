@@ -969,6 +969,57 @@ def plot_sigma_uv_vs_tau_uv_rf(
     )
 
 
+def plot_sigma_uv_vs_variability_chi_sq_red_g(
+    df,
+    plot_path="plots/hubble",
+    show=False,
+    filename="sigma_uv_vs_variability_chi_sq_red_g.pdf",
+):
+    """Plot log_sigma_uv against log10 reduced g-band variability chi-squared."""
+    required = {"log_sigma_uv", "variability_chi_sq_red_g"}
+    if not required.issubset(df.columns):
+        missing = ", ".join(sorted(required - set(df.columns)))
+        raise KeyError(f"Missing required columns for sigma_uv vs reduced chi-squared plot: {missing}")
+
+    log_sigma = pd.to_numeric(df["log_sigma_uv"], errors="coerce").to_numpy(dtype=float)
+    chi_sq_red = pd.to_numeric(df["variability_chi_sq_red_g"], errors="coerce").to_numpy(dtype=float)
+    log_chi_sq_red = np.full(len(df), np.nan, dtype=float)
+    positive = np.isfinite(chi_sq_red) & (chi_sq_red > 0.0)
+    log_chi_sq_red[positive] = np.log10(chi_sq_red[positive])
+    mask = np.isfinite(log_sigma) & np.isfinite(log_chi_sq_red)
+
+    fig, ax = plt.subplots(1, 1, figsize=(7.5, 6.0))
+    if np.any(mask):
+        ax.scatter(
+            log_chi_sq_red[mask],
+            log_sigma[mask],
+            s=8,
+            alpha=0.65,
+            linewidths=0,
+            rasterized=True,
+        )
+    else:
+        ax.text(
+            0.5,
+            0.5,
+            "No finite log_sigma_uv/log_variability_chi_sq_red_g values",
+            ha="center",
+            va="center",
+            transform=ax.transAxes,
+        )
+    ax.set_xlabel(r"$\log \chi^2_{\rm red,g}$")
+    ax.set_ylabel(r"$\log \sigma_{\rm UV}$")
+    ax.grid(True, alpha=0.25)
+
+    diagnostics_path = os.path.join(plot_path or "plots/hubble", "diagnostics")
+    return _save_figure(
+        fig,
+        os.path.join(diagnostics_path, filename),
+        dpi=200,
+        show=show,
+    )
+
+
 def plot_tau_sigma_vs_wu_catalog(df, plot_path="plots/hubble", show=False):
     """Plot UV variability diagnostics against Wu-catalog BH mass and Eddington ratio."""
     required = {"log_tau_uv_rf", "log_sigma_uv", "LOGMBH", "LOGLEDD_RATIO"}
@@ -3583,6 +3634,7 @@ def plot_predicted_vs_actual_M2500(
     cmap="inferno",       # (unused for discrete bins now, kept for API compatibility)
     box_alpha=0.7,        # transparency of white annotation boxes
     show_sigma_band=True,
+    show_cosmo_uncertainty_band=True,
     completeness=True,    # add "<50% complete" red region
     m_lim=24.0,           # survey apparent-magnitude limit for completeness shading
     n_cosmo_draws=50,     # posterior draws to propagate cosmology errors (for xerr)
@@ -3592,7 +3644,8 @@ def plot_predicted_vs_actual_M2500(
     """
     Predicted vs Actual M_2500, with:
       • y-error bars from M_model_agn_err(...)
-      • x-error bars = sqrt(apparent_mag_2500_err^2 + sigma_mu_cosmo(z)^2)
+      • x-error bars = apparent_mag_2500_err only
+      • Optional cosmology-uncertainty band around y=x from sigma_mu_cosmo(z)
       • ±1σ band from intrinsic scatter sigma_int = exp(log_f) (magenta)
       • Points colored by delta error = predicted_M2500_err / |predicted_M2500|
         with discrete bins: <0.2, 0.2–0.3, 0.3–0.4, 0.4–0.5, >0.5.
@@ -3708,7 +3761,7 @@ def plot_predicted_vs_actual_M2500(
         cosmo_j = _cosmo_from_draw(row)
         mu_draws[j, :] = np.array([cosmo_j.distmod(zi).value for zi in z])
     sigma_mu_cosmo = np.nanstd(mu_draws, axis=0, ddof=1)  # per-object DM uncertainty
-    xerr = np.sqrt(m_app_err**2 + sigma_mu_cosmo**2)
+    xerr = np.asarray(m_app_err, dtype=float)
 
    # if debias:
         #dm_interp = make_dm_function(np.array(df_agn["apparent_mag_2500"].values), np.array(df_agn['z'].values), dms)
@@ -3726,7 +3779,7 @@ def plot_predicted_vs_actual_M2500(
         actual_M_2500_eff = actual_M_2500
 
     residuals_all = M_2500_pred - actual_M_2500_eff               # mag
-    sigma_all     = np.sqrt(M_2500_pred_err**2 + xerr**2)          # mag
+    sigma_all     = np.sqrt(M_2500_pred_err**2 + xerr**2)          # mag; object-level only
 
     # Safety mask for nan/inf on global vectors (used for overall outputs only)
     m_global = np.isfinite(residuals_all) & np.isfinite(sigma_all) & (sigma_all > 0)
@@ -3869,6 +3922,20 @@ def plot_predicted_vs_actual_M2500(
 
         # y = x reference and ±1σ intrinsic band
         ax.plot(xx, xx, color="m", alpha=0.9, lw=2.2, zorder=9)
+        if show_cosmo_uncertainty_band:
+            cosmo_sigma_bin = sigma_mu_cosmo[bin_mask]
+            finite_cosmo_sigma = np.isfinite(cosmo_sigma_bin) & (cosmo_sigma_bin > 0)
+            if np.any(finite_cosmo_sigma):
+                cosmo_sigma_med = float(np.nanmedian(cosmo_sigma_bin[finite_cosmo_sigma]))
+                ax.fill_between(
+                    xx,
+                    xx - cosmo_sigma_med,
+                    xx + cosmo_sigma_med,
+                    color="0.5",
+                    alpha=0.12,
+                    zorder=1,
+                    label=r"$y = x \pm 1\sigma_{\rm cosmo}$" if i == 0 else None,
+                )
         if show_sigma_band:
             ax.plot(xx, xx - sigma_intrinsic, color="m", alpha=0.7, lw=1.5, linestyle="--", zorder=9,
                     label=r"$y = x \pm 1\sigma_{\rm int}$" if i == 0 else None)
@@ -3933,7 +4000,7 @@ def plot_predicted_vs_actual_M2500(
         #     legend_added = True
 
         # Add band/completeness legend once as well (if present)
-        if (show_sigma_band or completeness) and i == num_cols-1:
+        if (show_sigma_band or show_cosmo_uncertainty_band or completeness) and i == num_cols-1:
             leg = ax.legend(loc="lower right", fontsize=12, frameon=True)
             leg.get_frame().set_facecolor("none")
             leg.get_frame().set_alpha(box_alpha)

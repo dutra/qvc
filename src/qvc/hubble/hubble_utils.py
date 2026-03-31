@@ -992,6 +992,7 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
         plot_m2500_vs_z_colorpanels,
         plot_spectral_fraction_vs_redshift,
         plot_sf_vs_uv_variability,
+        plot_sigma_uv_vs_variability_chi_sq_red_g,
         plot_sigma_uv_vs_tau_uv_rf,
         plot_sigma_uv_host_correction,
         plot_tau_sigma_vs_wu_catalog,
@@ -1200,6 +1201,13 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
             plot_path=plot_path,
             show=False,
             filename="sigma_uv_vs_tau_uv_rf_precuts.pdf",
+        )
+    if {"log_sigma_uv", "variability_chi_sq_red_g"}.issubset(df.columns):
+        plot_sigma_uv_vs_variability_chi_sq_red_g(
+            df,
+            plot_path=plot_path,
+            show=False,
+            filename="sigma_uv_vs_variability_chi_sq_red_g_precuts.pdf",
         )
     if {"z", "apparent_mag_2500", "log_tau_uv_rf", "log_sigma_uv"}.issubset(df.columns):
         plot_l2500_vs_uv_variability_fiducial(
@@ -1436,6 +1444,13 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
             show=False,
             filename="sigma_uv_vs_tau_uv_rf_postcuts.pdf",
             dynamic_axes=True,
+        )
+    if {"log_sigma_uv", "variability_chi_sq_red_g"}.issubset(df.columns):
+        plot_sigma_uv_vs_variability_chi_sq_red_g(
+            df,
+            plot_path=plot_path,
+            show=False,
+            filename="sigma_uv_vs_variability_chi_sq_red_g_postcuts.pdf",
         )
     if {"z", "apparent_mag_2500", "log_tau_uv_rf", "log_sigma_uv"}.issubset(df.columns):
         plot_l2500_vs_uv_variability_fiducial(
