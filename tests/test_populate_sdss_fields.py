@@ -56,6 +56,11 @@ def _build_dr16q_table():
 def _mock_table_read(monkeypatch, cat, dr16q):
     calls = []
 
+    monkeypatch.setattr(
+        "qvc.light_curve.multiband_generate_lc.resolve_qvc_data_path",
+        lambda path: str(path),
+    )
+
     def fake_read(path, *args, **kwargs):
         path = str(path)
         calls.append((path, kwargs.copy()))

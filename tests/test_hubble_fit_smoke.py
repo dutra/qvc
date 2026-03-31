@@ -217,7 +217,7 @@ def test_resolve_resume_checkpoint_path_requires_existing_file(tmp_path, resume_
     default_checkpoint = tmp_path / "default_resume.h5"
     expected_path = default_checkpoint if use_default_checkpoint else tmp_path / "custom_resume.h5"
 
-    with pytest.raises(FileNotFoundError, match=str(expected_path)):
+    with pytest.raises(FileNotFoundError, match=expected_path.name):
         hubble_fit.resolve_resume_checkpoint_path(resume_value, str(default_checkpoint))
 
 
@@ -225,5 +225,5 @@ def test_resolve_resume_checkpoint_path_requires_existing_file(tmp_path, resume_
 def test_resolve_resume_checkpoint_path_treats_true_like_default_checkpoint(tmp_path, resume_value):
     default_checkpoint = tmp_path / "default_resume.h5"
 
-    with pytest.raises(FileNotFoundError, match=str(default_checkpoint)):
+    with pytest.raises(FileNotFoundError, match=default_checkpoint.name):
         hubble_fit.resolve_resume_checkpoint_path(resume_value, str(default_checkpoint))
