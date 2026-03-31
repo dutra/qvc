@@ -45,6 +45,7 @@ import jax
 jax.config.update("jax_enable_x64", True)
 jax.config.update("jax_debug_nans", False)
 import jax.numpy as jnp
+from jax import lax
 from jax import random, device_get
 from jax.tree_util import tree_map
 
@@ -54,7 +55,16 @@ numpyro.set_host_device_count(num_cores)
 numpyro.enable_x64()
 numpyro.enable_validation(True)
 import numpyro.distributions as dist
-from numpyro.infer import MCMC, NUTS
+from numpyro.handlers import seed, trace
+from numpyro.infer import MCMC, NUTS, SVI, Trace_ELBO
+from numpyro.infer.autoguide import AutoNormal
+from numpyro.infer.initialization import init_to_value
+from numpyro.optim import Adam
+
+try:
+    from numpyro.contrib.nested_sampling import NestedSampler
+except ImportError:
+    NestedSampler = None
 
 from qvc.light_curve.multiband_fit_plotting import *
 from qvc.light_curve.multiband_fit_utils import *
@@ -79,6 +89,59 @@ def compute_lambda_center_rf(lam_rf):
     lam_rf = jnp.asarray(lam_rf)
     lam_rf = jnp.maximum(lam_rf, jnp.array(1e-12, dtype=lam_rf.dtype))
     return jnp.exp(jnp.mean(jnp.log(lam_rf)))
+
+
+def infer_nested_sampler_u_ndims(model, rng_key, *args, **kwargs):
+    """Mirror NumPyro nested-sampler latent-dimension counting."""
+
+    prototype_trace = trace(seed(model, rng_key)).get_trace(*args, **kwargs)
+    u_ndims = 0
+    for site in prototype_trace.values():
+        if (
+            site["type"] == "sample"
+            and not site["is_observed"]
+            and site["infer"].get("enumerate", "") != "parallel"
+        ):
+            shape = tuple(int(dim) for dim in site["fn"].shape())
+            u_ndims += int(np.prod(shape, dtype=int)) if shape else 1
+    return u_ndims
+
+
+def align_nested_sampler_num_live_points(model, rng_key, requested_num_live_points=None):
+    """Return a num_live_points value compatible with the active JAX device count."""
+
+    if requested_num_live_points is None:
+        requested_num_live_points = infer_nested_sampler_u_ndims(model, rng_key) * 2
+
+    requested_num_live_points = int(requested_num_live_points)
+    device_count = max(1, len(jax.devices()))
+    aligned_num_live_points = (
+        (requested_num_live_points + device_count - 1) // device_count
+    ) * device_count
+    return aligned_num_live_points, requested_num_live_points, device_count
+
+
+def run_svi_warm_start(model, rng_key, *, num_steps, learning_rate):
+    """Run AutoNormal SVI and return guide-median init values for NUTS."""
+
+    guide = AutoNormal(model)
+    svi = SVI(model, guide, Adam(learning_rate), Trace_ELBO())
+    svi_state = svi.init(rng_key)
+
+    def body_fn(_, carry):
+        state, _ = carry
+        state, loss = svi.update(state)
+        return state, loss
+
+    svi_state, final_loss = lax.fori_loop(
+        0,
+        int(num_steps),
+        body_fn,
+        (svi_state, jnp.array(jnp.nan, dtype=jnp.float64)),
+    )
+    params = svi.get_params(svi_state)
+    init_values = guide.median(params)
+    return init_values, float(device_get(final_loss))
 
 
 def _expand_last(x):
@@ -1686,8 +1749,45 @@ def main():
     parser.add_argument("--nwarm", type=int, default=500, help="Warmup steps for MCMC.")
     parser.add_argument("--nsamp", type=int, default=250, help="Samples per chain for MCMC.")
     parser.add_argument("--nchains", type=int, default=2, help="Number of chains (>=1).")
+    parser.add_argument(
+        "--fit_method",
+        type=str,
+        choices=("ns", "nuts", "svi+nuts"),
+        default="nuts",
+        help="Posterior fitting backend: nested sampling ('ns'), HMC/NUTS ('nuts'), or SVI warm-start plus NUTS ('svi+nuts').",
+    )
     parser.add_argument("--inject_fake", action="store_true", help="Inject fake light curves.")
     parser.add_argument("--max_tree_depth", type=int, default=8, help="NUTS max tree depth.")
+    parser.add_argument(
+        "--svi_steps",
+        type=int,
+        default=1000,
+        help="SVI warm-start steps used only with --fit_method svi+nuts.",
+    )
+    parser.add_argument(
+        "--svi_lr",
+        type=float,
+        default=1e-2,
+        help="SVI learning rate used only with --fit_method svi+nuts.",
+    )
+    parser.add_argument(
+        "--ns_num_live_points",
+        type=int,
+        default=None,
+        help="Nested sampler live-point count. Default uses NumPyro/JAXNS heuristic.",
+    )
+    parser.add_argument(
+        "--ns_max_samples",
+        type=int,
+        default=None,
+        help="Nested sampler maximum internal sample count. Default uses NumPyro/JAXNS heuristic.",
+    )
+    parser.add_argument(
+        "--ns_dlogz",
+        type=float,
+        default=10.0,
+        help="Nested sampler evidence tolerance for termination. Smaller is stricter. Default: 10.",
+    )
     parser.add_argument("--load_sample_file", action="store_true", help="Load saved samples (debug).")
     parser.add_argument("--disable_poly1", action="store_true", help="Disable trend.")
     parser.add_argument("--rf_length_cut", type=int, default=-1, help="Rest-frame cut (days).")
@@ -1753,6 +1853,38 @@ def main():
 
     results = []
     chain_method = "parallel" if args.nchains and args.nchains > 1 else "sequential"
+    if args.fit_method == "ns":
+        if NestedSampler is None:
+            raise ImportError(
+                "Requested --fit_method ns, but numpyro.contrib.nested_sampling is unavailable. "
+                "This NumPyro wrapper requires the optional 'jaxns' package to be installed."
+            )
+        if args.nchains != 1:
+            logging.warning(
+                "--fit_method ns does not use multiple chains; ignoring --nchains=%s.",
+                args.nchains,
+            )
+        if args.nwarm > 0:
+            logging.warning(
+                "--fit_method ns does not use warmup; ignoring --nwarm=%s.",
+                args.nwarm,
+            )
+        if args.max_tree_depth != parser.get_default("max_tree_depth"):
+            logging.warning(
+                "--fit_method ns does not use max_tree_depth; ignoring --max_tree_depth=%s.",
+                args.max_tree_depth,
+            )
+    elif args.fit_method == "nuts":
+        if args.svi_steps != parser.get_default("svi_steps"):
+            logging.warning(
+                "--fit_method nuts does not use SVI warm-start; ignoring --svi_steps=%s.",
+                args.svi_steps,
+            )
+        if args.svi_lr != parser.get_default("svi_lr"):
+            logging.warning(
+                "--fit_method nuts does not use SVI warm-start; ignoring --svi_lr=%s.",
+                args.svi_lr,
+            )
 
     iterator = tqdm(objs, desc="Fitting", disable=not args.progress)
     for idx, obj in enumerate(iterator):
@@ -1802,23 +1934,6 @@ def main():
                 n_blr_terms=args.n_blr_terms,
             )
 
-            init_strategy = numpyro.infer.init_to_median()
-            nuts = NUTS(
-                numpyro_model,
-                init_strategy=init_strategy,
-                dense_mass=True,
-                max_tree_depth=args.max_tree_depth,
-                target_accept_prob=0.9,
-            )
-            mcmc = MCMC(
-                nuts,
-                num_warmup=args.nwarm,
-                num_samples=args.nsamp,
-                num_chains=max(1, args.nchains),
-                chain_method=chain_method,
-                progress_bar=args.progress,
-            )
-
             if args.load_sample_file:
                 logging.warning("[DEBUG] Loading saved samples (flat) — developer mode.")
                 obj_flat_samples = load_obj_samples_from_hdf5(oid)
@@ -1826,9 +1941,87 @@ def main():
             else:
                 key = random.PRNGKey(0)
                 key = random.fold_in(key, idx)
-                mcmc.run(key)
-                samples_flat = mcmc.get_samples(group_by_chain=False)
-                samples_per_chain = mcmc.get_samples(group_by_chain=True)
+                if args.fit_method in ("nuts", "svi+nuts"):
+                    if args.fit_method == "svi+nuts":
+                        svi_key, mcmc_key = random.split(key)
+                        init_values, svi_final_loss = run_svi_warm_start(
+                            numpyro_model,
+                            svi_key,
+                            num_steps=args.svi_steps,
+                            learning_rate=args.svi_lr,
+                        )
+                        logging.info(
+                            "[%s] Completed SVI warm-start for NUTS with %d steps at lr=%g; final ELBO loss=%s.",
+                            oid,
+                            args.svi_steps,
+                            args.svi_lr,
+                            svi_final_loss,
+                        )
+                        init_strategy = init_to_value(values=init_values)
+                    else:
+                        mcmc_key = key
+                        init_strategy = numpyro.infer.init_to_median()
+                    nuts = NUTS(
+                        numpyro_model,
+                        init_strategy=init_strategy,
+                        dense_mass=True,
+                        max_tree_depth=args.max_tree_depth,
+                        target_accept_prob=0.9,
+                    )
+                    mcmc = MCMC(
+                        nuts,
+                        num_warmup=args.nwarm,
+                        num_samples=args.nsamp,
+                        num_chains=max(1, args.nchains),
+                        chain_method=chain_method,
+                        progress_bar=args.progress,
+                    )
+                    mcmc.run(mcmc_key)
+                    samples_flat = mcmc.get_samples(group_by_chain=False)
+                    samples_per_chain = mcmc.get_samples(group_by_chain=True)
+                else:
+                    ns_constructor_kwargs = {}
+                    ns_termination_kwargs = {}
+                    (
+                        aligned_num_live_points,
+                        requested_num_live_points,
+                        ns_device_count,
+                    ) = align_nested_sampler_num_live_points(
+                        numpyro_model,
+                        random.fold_in(key, 11),
+                        requested_num_live_points=args.ns_num_live_points,
+                    )
+                    if aligned_num_live_points != requested_num_live_points:
+                        logging.info(
+                            "[%s] Adjusting nested-sampler num_live_points from %d to %d "
+                            "to match %d active JAX devices.",
+                            oid,
+                            requested_num_live_points,
+                            aligned_num_live_points,
+                            ns_device_count,
+                        )
+                    ns_constructor_kwargs["num_live_points"] = aligned_num_live_points
+                    if args.ns_max_samples is not None:
+                        ns_constructor_kwargs["max_samples"] = args.ns_max_samples
+                    ns_termination_kwargs["dlogZ"] = args.ns_dlogz
+
+                    ns = NestedSampler(
+                        numpyro_model,
+                        constructor_kwargs=ns_constructor_kwargs,
+                        termination_kwargs=ns_termination_kwargs,
+                    )
+                    ns.run(key)
+                    samples_flat = ns.get_samples(
+                        random.fold_in(key, 1),
+                        num_samples=args.nsamp,
+                        group_by_chain=False,
+                    )
+                    samples_per_chain = ns.get_samples(
+                        random.fold_in(key, 2),
+                        num_samples=args.nsamp,
+                        group_by_chain=True,
+                    )
+
                 samples_flat = tree_map(lambda x: np.asarray(device_get(x)), samples_flat)
                 samples_per_chain = tree_map(lambda x: np.asarray(device_get(x)), samples_per_chain)
                 obj_flat_samples = samples_flat
@@ -1861,7 +2054,7 @@ def main():
             log_nonfinite_sample_summary(obj_flat_samples_flatten_per_band, label=f"{oid} per-band")
 
             diagnostics = {}
-            if samples_per_chain is not None:
+            if samples_per_chain is not None and args.fit_method == "nuts":
                 obj_samples_per_chain_flatten_per_band = flatten_per_chain_samples_per_band(
                     samples_per_chain,
                     bands=bands,
