@@ -374,61 +374,6 @@ def modify_h5_file(save_file_path, s82_objs):
                     del group[key]
 
 
-# def bands_redder_than(z, threshold=4000):
-#     """
-#     Returns a list of bands with rest-frame effective wavelength > 4000 Å.
-
-#     Args:
-#         z (float): Redshift.
-
-#     Returns:
-#         list: Bands redder than 4000 Å at rest frame.
-#     """
-#     bands = {
-#         'u': {'lambda_eff': 3551},
-#         'g': {'lambda_eff': 4686},
-#         'r': {'lambda_eff': 6165},
-#         'i': {'lambda_eff': 7481},
-#         'z': {'lambda_eff': 8931},
-#         'y': {'lambda_eff': 9700}
-#     }
-
-#     redder_bands = []
-#     for band, props in bands.items():
-#         rest_lambda_eff = props['lambda_eff'] / (1 + z)
-#         if rest_lambda_eff > threshold:
-#             redder_bands.append(band)
-
-#     return redder_bands
-
-# def bands_bluer_than_lyman_alpha(z, buffer=100):
-#     """
-#     Returns a list of bands with rest-frame effective wavelength < Lyman-alpha (1216 Å).
-
-#     Args:
-#         z (float): Redshift.
-
-#     Returns:
-#         list: Bands bluer than Lyman-alpha at rest frame.
-#     """
-#     lyman_alpha = 1216
-#     bands = {
-#         'u': {'lambda_eff': 3551},
-#         'g': {'lambda_eff': 4686},
-#         'r': {'lambda_eff': 6165},
-#         'i': {'lambda_eff': 7481},
-#         'z': {'lambda_eff': 8931},
-#         'y': {'lambda_eff': 9700}
-#     }
-
-#     bluer_bands = []
-#     for band, props in bands.items():
-#         rest_lambda_eff = props['lambda_eff'] / (1 + z)
-#         if rest_lambda_eff < (lyman_alpha - buffer):
-#             bluer_bands.append(band)
-
-#     return bluer_bands
-
 def sdss_bands_affected_by_lya(z, buffer=0.0):
     """
     SDSS ugriz bands whose *rest-frame blue edge* falls below 1216+buffer Å,
@@ -728,36 +673,6 @@ def save_quasar_list_hdf5(quasars, ignored_keys=None, size_threshold=1024):
             hdf.create_dataset(col, data=arr)
 
     logging.info("All quasars saved successfully.")
-    
-# def log_broken_pl(lam, lam_s, d1, d2, ds=0.1):
-#     """
-#     Log10 of a smooth broken power-law, normalized to 0 at lam_s.
-#     Slopes approach d1 for lam << lam_s and d2 for lam >> lam_s.
-    
-#     ds: smoothness control — larger ds = smoother transition,
-#         smaller ds = sharper transition.
-#     """
-#     x = lam / lam_s
-#     delta = d2 - d1
-
-#     # Use exponent 1/ds so larger ds => smoother
-#     smooth_exp = 1.0 / ds
-#     log10_1px = jnp.log1p(x**smooth_exp) / jnp.log(10.0)
-
-#     log_f = d1 * jnp.log10(x) + (delta / smooth_exp) * log10_1px
-#     log_f -= (delta / smooth_exp) * jnp.log10(2.0)  # normalize to 0 at lam_s
-
-#     return log_f
-
-
-# def log_broken_pl(lam, lam_s, d1, d2, ds=0.1):
-#     """
-#     Log10 of a simple power-law, normalized to 0 at lam_s.
-#     Slope is d everywhere.
-#     """
-#     x = lam / lam_s
-#     log_f = d1 * jnp.log10(x)
-#     return log_f
 
 def log_broken_pl(lam, lam_s, d1, d2, ds):
     """
@@ -795,15 +710,6 @@ def log_single_pl(lam, lam_s, d, *_, **__):
     ln10 = jnp.log(jnp.array(10.0, dtype=jnp.result_type(lam, lam_s, d)))
     # log10(lam/lam_s) = (log(lam) - log(lam_s)) / ln(10)
     return d * (jnp.log(lam) - jnp.log(lam_s)) / ln10
-
-# def log_single_pl(lam, lam_s, d, d2=None, ds=None):
-#     """
-#     Log10 of a simple power-law, normalized to 0 at lam_s.
-#     Slope is d everywhere.
-#     """
-#     x = lam / lam_s
-#     log_f = d * jnp.log10(x)
-#     return log_f
 
 def regularize_cov_from_percentiles(x16, x84, y16, y84, cov_xy, eps=1e-8):
     # 1) variance estimates from central 68% interval
@@ -967,12 +873,11 @@ def process_samples(flat_samples, data, bands, percentiles=[16, 50, 84]):
     result['cov_log_sigma_uv_log_tau_uv_rf'] = cov_log_sigma_tau_reg
     print("Regularized covariance: ", cov_log_sigma_tau_reg)
 
-    C = psd_cov_from_samples(samples_log_sigma_uv, samples_log_tau_uv_rf, shrink_rho=0.05)
-    sx2, sy2, sxy = C[0,0], C[1,1], C[0,1]
-    result['log_sigma_uv_log_tau_uv_rf_cov_psd'] = sxy
-    result['log_sigma_uv_std_psd'] = np.sqrt(sx2)
-    result['log_tau_uv_rf_std_psd'] = np.sqrt(sy2)
-    print("PSD covariance: ", sxy)
+    result['log_sigma_uv_log_tau_uv_rf_cov_psd'] = cov_log_sigma_tau_reg
+    result['log_sigma_uv_std_psd'] = np.sqrt(vx)
+    result['log_tau_uv_rf_std_psd'] = np.sqrt(vy)
+    print("Hubble covariance term: ", cov_log_sigma_tau_reg)
+    print("Hubble std terms: ", np.sqrt(vx), np.sqrt(vy))
 
     return result
 

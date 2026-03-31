@@ -24,7 +24,7 @@ from tqdm import tqdm
 
 from qvc.hubble.hubble_model import (M_model_agn, M_model_agn_err, get_model_params, agn_model_pack_params,
     agn_model_pack_obs, agn_model_oidx, agn_model_pidx, agn_model_req_obs, agn_model_req_errs,
-    evaluate_log_f, infer_model_option_flags)
+    evaluate_log_f, infer_model_option_flags, get_agn_model_spec, AGN_ALPHA_LAMBDA_PARAM, AGN_ALPHA_LAMBDA_ERR)
 from qvc.hubble.hubble_likelihood import sigma_lens_from_dc
 from qvc.hubble.hubble_utils import convert_M2500_to_logL2500, cosmo_model_label_latex, format_result_errors, sym_percentile
 from qvc.hubble.hubble_completeness_refactored import (
@@ -3112,16 +3112,41 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     predicted_M2500_err = M_model_agn_err(
         agn_params_arr, agn_obs_arr, agn_err_arr, agn_pivot_arr, use_alpha_lambda_term=option_flags["use_alpha_lambda_term"]
     )
+    req_params_local, _, req_errs_local = get_agn_model_spec(
+        use_alpha_lambda_term=option_flags["use_alpha_lambda_term"]
+    )
+    pidx_local = {k: i for i, k in enumerate(req_params_local)}
+    eidx_local = {k: i for i, k in enumerate(req_errs_local)}
+    alpha_agn = agn_params_arr[pidx_local["alpha_agn"]]
+    beta_agn = agn_params_arr[pidx_local["beta_agn"]]
+    log_sigma_uv_std_psd = agn_err_arr[eidx_local["log_sigma_uv_std_psd"]]
+    log_tau_uv_rf_std_psd = agn_err_arr[eidx_local["log_tau_uv_rf_std_psd"]]
+    log_sigma_uv_log_tau_uv_rf_cov_psd = agn_err_arr[eidx_local["log_sigma_uv_log_tau_uv_rf_cov_psd"]]
+    pred_m2500_sigma_var = (alpha_agn * log_sigma_uv_std_psd) ** 2
+    pred_m2500_tau_var = (beta_agn * log_tau_uv_rf_std_psd) ** 2
+    pred_m2500_cov_var = 2 * alpha_agn * beta_agn * log_sigma_uv_log_tau_uv_rf_cov_psd
+    pred_m2500_alpha_lambda_var = np.zeros_like(pred_m2500_sigma_var)
+    if option_flags["use_alpha_lambda_term"]:
+        gamma_alpha_lambda = agn_params_arr[pidx_local[AGN_ALPHA_LAMBDA_PARAM]]
+        alpha_lambda_err = agn_err_arr[eidx_local[AGN_ALPHA_LAMBDA_ERR]]
+        pred_m2500_alpha_lambda_var = (gamma_alpha_lambda * alpha_lambda_err) ** 2
 
     cosmo = get_cosmo(cosmo_model, results, z_pivot_agn)
     sigma_lens = sigma_lens_from_dc(df_agn['z'].values, cosmo)
 
+    apparent_mag_err = df_agn['apparent_mag_2500_err'].values
+    z_err = df_agn['z_err'].values
+    m_app_var = apparent_mag_err**2
+    lens_var = sigma_lens**2
+    z_var = z_err**2
+    pred_m2500_var = predicted_M2500_err**2
+
     mu_pred_std = np.sqrt(
-        df_agn['apparent_mag_2500_err'].values**2 +
+        m_app_var +
         #(0.055 * df_agn["z"].values)**2 +
-        sigma_lens**2 +
-        df_agn['z_err'].values**2 +
-        predicted_M2500_err**2
+        lens_var +
+        z_var +
+        pred_m2500_var
     )
 
     log_f_eff = evaluate_log_f(
@@ -3130,7 +3155,9 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
         z_pivot=z_pivot_agn,
         use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
     )
-    mu_pred_std_with_scatter = np.sqrt(mu_pred_std**2 + np.exp(log_f_eff) ** 2)
+    intrinsic_scatter = np.exp(log_f_eff)
+    intrinsic_var = intrinsic_scatter**2
+    mu_pred_std_with_scatter = np.sqrt(mu_pred_std**2 + intrinsic_var)
     
     # Residuals (vs. median μ_model)
     mu_interp = np.interp(df_agn["z"].values, z_grid, mu_model_median)
@@ -3565,6 +3592,110 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     os.makedirs(plot_path, exist_ok=True)
     filename = "hubble_diagram_debiased.pdf" if debias else "hubble_diagram.pdf"
     _save_figure(fig, os.path.join(plot_path, filename), dpi=600, show=show)
+
+    diagnostics_path = os.path.join(plot_path, "diagnostics")
+    os.makedirs(diagnostics_path, exist_ok=True)
+
+    total_var = m_app_var + lens_var + z_var + pred_m2500_var + intrinsic_var
+    error_budget_mask = np.isfinite(total_var) & np.isfinite(residuals) & (total_var > 0)
+    if np.any(error_budget_mask):
+        def _chi2_red_from_var(var_term):
+            mask = error_budget_mask & np.isfinite(var_term) & (var_term > 0)
+            if not np.any(mask):
+                return np.nan
+            dof_local = max(int(np.count_nonzero(mask)) - 1, 1)
+            return float(np.sum((residuals[mask] ** 2) / var_term[mask]) / dof_local)
+
+        def _median_fraction(component_var):
+            mask = error_budget_mask & np.isfinite(component_var)
+            if not np.any(mask):
+                return np.nan
+            return float(np.median(component_var[mask] / total_var[mask]))
+
+        residual_rms = float(np.sqrt(np.mean(residuals[error_budget_mask] ** 2)))
+        budget_rows = [
+            {"metric": "n_objects", "value": float(np.count_nonzero(error_budget_mask))},
+            {"metric": "residual_rms_mag", "value": residual_rms},
+            {"metric": "median_abs_residual_mag", "value": float(np.median(np.abs(residuals[error_budget_mask])))},
+            {"metric": "chi2_red_full", "value": _chi2_red_from_var(total_var)},
+            {"metric": "chi2_red_no_intrinsic_scatter", "value": _chi2_red_from_var(m_app_var + lens_var + z_var + pred_m2500_var)},
+            {"metric": "chi2_red_no_predicted_M2500_err", "value": _chi2_red_from_var(m_app_var + lens_var + z_var + intrinsic_var)},
+            {"metric": "chi2_red_no_sigma_lens", "value": _chi2_red_from_var(m_app_var + z_var + pred_m2500_var + intrinsic_var)},
+            {"metric": "chi2_red_no_apparent_mag_err", "value": _chi2_red_from_var(lens_var + z_var + pred_m2500_var + intrinsic_var)},
+            {"metric": "chi2_red_no_z_err", "value": _chi2_red_from_var(m_app_var + lens_var + pred_m2500_var + intrinsic_var)},
+            {"metric": "median_apparent_mag_err_mag", "value": float(np.median(apparent_mag_err[error_budget_mask]))},
+            {"metric": "median_sigma_lens_mag", "value": float(np.median(sigma_lens[error_budget_mask]))},
+            {"metric": "median_z_err_mag", "value": float(np.median(z_err[error_budget_mask]))},
+            {"metric": "median_predicted_M2500_err_mag", "value": float(np.median(predicted_M2500_err[error_budget_mask]))},
+            {"metric": "median_predicted_M2500_sigma_term_mag", "value": float(np.median(np.sqrt(np.clip(pred_m2500_sigma_var[error_budget_mask], 0.0, None))))},
+            {"metric": "median_predicted_M2500_tau_term_mag", "value": float(np.median(np.sqrt(np.clip(pred_m2500_tau_var[error_budget_mask], 0.0, None))))},
+            {"metric": "median_predicted_M2500_cov_term_mag_signed", "value": float(np.median(np.sign(pred_m2500_cov_var[error_budget_mask]) * np.sqrt(np.abs(pred_m2500_cov_var[error_budget_mask]))))},
+            {"metric": "median_predicted_M2500_alpha_lambda_term_mag", "value": float(np.median(np.sqrt(np.clip(pred_m2500_alpha_lambda_var[error_budget_mask], 0.0, None))))},
+            {"metric": "median_mu_pred_std_mag", "value": float(np.median(mu_pred_std[error_budget_mask]))},
+            {"metric": "median_intrinsic_scatter_mag", "value": float(np.median(intrinsic_scatter[error_budget_mask]))},
+            {"metric": "median_mu_pred_std_with_scatter_mag", "value": float(np.median(mu_pred_std_with_scatter[error_budget_mask]))},
+            {"metric": "median_var_fraction_apparent_mag_err", "value": _median_fraction(m_app_var)},
+            {"metric": "median_var_fraction_sigma_lens", "value": _median_fraction(lens_var)},
+            {"metric": "median_var_fraction_z_err", "value": _median_fraction(z_var)},
+            {"metric": "median_var_fraction_predicted_M2500_err", "value": _median_fraction(pred_m2500_var)},
+            {"metric": "median_var_fraction_intrinsic_scatter", "value": _median_fraction(intrinsic_var)},
+            {"metric": "median_var_fraction_predicted_M2500_sigma_term", "value": _median_fraction(pred_m2500_sigma_var)},
+            {"metric": "median_var_fraction_predicted_M2500_tau_term", "value": _median_fraction(pred_m2500_tau_var)},
+            {"metric": "median_var_fraction_predicted_M2500_cov_term", "value": _median_fraction(pred_m2500_cov_var)},
+            {"metric": "median_var_fraction_predicted_M2500_alpha_lambda_term", "value": _median_fraction(pred_m2500_alpha_lambda_var)},
+        ]
+        budget_suffix = "_debiased" if debias else ""
+        budget_summary_path = os.path.join(diagnostics_path, f"hubble_error_budget_summary{budget_suffix}.csv")
+        pd.DataFrame(budget_rows).to_csv(budget_summary_path, index=False)
+
+        per_object_budget_df = df_agn.copy()
+        per_object_budget_df["residuals"] = residuals
+        per_object_budget_df["residuals_err"] = residuals_err
+        per_object_budget_df["apparent_mag_2500_err_term"] = apparent_mag_err
+        per_object_budget_df["sigma_lens_term"] = sigma_lens
+        per_object_budget_df["z_err_term"] = z_err
+        per_object_budget_df["predicted_M2500_err_term"] = predicted_M2500_err
+        per_object_budget_df["predicted_M2500_sigma_term"] = np.sqrt(np.clip(pred_m2500_sigma_var, 0.0, None))
+        per_object_budget_df["predicted_M2500_tau_term"] = np.sqrt(np.clip(pred_m2500_tau_var, 0.0, None))
+        per_object_budget_df["predicted_M2500_cov_term_signed"] = np.sign(pred_m2500_cov_var) * np.sqrt(np.abs(pred_m2500_cov_var))
+        per_object_budget_df["predicted_M2500_alpha_lambda_term"] = np.sqrt(np.clip(pred_m2500_alpha_lambda_var, 0.0, None))
+        per_object_budget_df["intrinsic_scatter_term"] = intrinsic_scatter
+        per_object_budget_df["mu_pred_std_no_intrinsic"] = mu_pred_std
+        per_object_budget_df["mu_pred_std_with_intrinsic"] = mu_pred_std_with_scatter
+        per_object_budget_fields = [
+            "object_id",
+            "z",
+            "residuals",
+            "residuals_err",
+            "apparent_mag_2500_err_term",
+            "sigma_lens_term",
+            "z_err_term",
+            "predicted_M2500_err_term",
+            "predicted_M2500_sigma_term",
+            "predicted_M2500_tau_term",
+            "predicted_M2500_cov_term_signed",
+            "predicted_M2500_alpha_lambda_term",
+            "intrinsic_scatter_term",
+            "mu_pred_std_no_intrinsic",
+            "mu_pred_std_with_intrinsic",
+        ]
+        per_object_budget_fields = [field for field in per_object_budget_fields if field in per_object_budget_df.columns]
+        budget_per_object_path = os.path.join(diagnostics_path, f"hubble_error_budget_per_object{budget_suffix}.csv")
+        per_object_budget_df[per_object_budget_fields].to_csv(budget_per_object_path, index=False)
+
+        print(f"Saved Hubble error-budget summary to {budget_summary_path}")
+        print(f"Saved per-object Hubble error budget to {budget_per_object_path}")
+        print(
+            "Hubble error budget:"
+            f" chi2_full={_chi2_red_from_var(total_var):.3f},"
+            f" chi2_no_intrinsic={_chi2_red_from_var(m_app_var + lens_var + z_var + pred_m2500_var):.3f},"
+            f" chi2_no_predM={_chi2_red_from_var(m_app_var + lens_var + z_var + intrinsic_var):.3f},"
+            f" median_predM_err={float(np.median(predicted_M2500_err[error_budget_mask])):.3f} mag,"
+            f" median_predM_sigma={float(np.median(np.sqrt(np.clip(pred_m2500_sigma_var[error_budget_mask], 0.0, None)))):.3f} mag,"
+            f" median_predM_tau={float(np.median(np.sqrt(np.clip(pred_m2500_tau_var[error_budget_mask], 0.0, None)))):.3f} mag,"
+            f" median_intrinsic={float(np.median(intrinsic_scatter[error_budget_mask])):.3f} mag,"
+            f" residual_rms={residual_rms:.3f} mag"
+        )
 
     # Residual Outlier report
     outlier_mask = np.abs(residuals) > 4
