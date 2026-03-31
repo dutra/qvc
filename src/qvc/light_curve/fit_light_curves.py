@@ -1785,8 +1785,8 @@ def main():
     parser.add_argument(
         "--ns_dlogz",
         type=float,
-        default=10.0,
-        help="Nested sampler evidence tolerance for termination. Smaller is stricter. Default: 10.",
+        default=1.0,
+        help="Nested sampler evidence tolerance for termination. Smaller is stricter. Default: 1.",
     )
     parser.add_argument("--load_sample_file", action="store_true", help="Load saved samples (debug).")
     parser.add_argument("--disable_poly1", action="store_true", help="Disable trend.")
