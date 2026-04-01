@@ -5721,228 +5721,143 @@ def plot_residuals_vs_alphaOX(
     import numpy as np
     import matplotlib.pyplot as plt
     import matplotlib as mpl
+    z_all = np.asarray(df_agn["z"], dtype=float)
+    y_all = np.asarray(residuals, dtype=float)
+    yerr_all = np.asarray(residuals_err, dtype=float)
 
-    # --- Extract and sanitize inputs ---
-    x = np.asarray(df_agn["delta_alphaOX"])
-    xerr = np.asarray(df_agn.get("delta_alphaOX_err", np.full_like(x, np.nan)))
-    z = np.asarray(df_agn["z"])
-    y = np.asarray(residuals)
-    yerr = np.asarray(residuals_err)
+    def _plot_one(xcol, xerr_col, xlabel, filename):
+        x = np.asarray(df_agn.get(xcol, np.full(len(df_agn), np.nan)), dtype=float)
+        xerr = np.asarray(df_agn.get(xerr_col, np.full(len(df_agn), np.nan)), dtype=float)
+        z = z_all.copy()
+        y = y_all.copy()
+        yerr = yerr_all.copy()
 
-    m = np.isfinite(x) & np.isfinite(y) & np.isfinite(yerr)
-    if np.isfinite(xerr).any():
-        m &= np.isfinite(xerr) | np.isnan(xerr)
-    x, xerr, y, yerr, z = x[m], xerr[m], y[m], yerr[m], z[m]
+        m = np.isfinite(x) & np.isfinite(y) & np.isfinite(yerr) & np.isfinite(z)
+        if np.isfinite(xerr).any():
+            m &= np.isfinite(xerr) | np.isnan(xerr)
+        x, xerr, y, yerr, z = x[m], xerr[m], y[m], yerr[m], z[m]
 
-    # --- Figure/axes ---
-    fig, ax = plt.subplots(1, 1, figsize=(7.2, 5.2))
+        fig, ax = plt.subplots(1, 1, figsize=(7.2, 5.2))
+        ax.set_xlabel(xlabel)
+        ax.set_ylabel("Residuals (mag)")
+        ax.axhline(0.0, color="magenta", linewidth=2, zorder=0)
+        ax.set_ylim(-4.6, 3.9)
+        ax.grid(True, alpha=0.25)
 
-    vmin, vmax = np.nanmin(z), np.nanmax(z)
-    norm = mpl.colors.Normalize(vmin=vmin, vmax=vmax)
-    cmap = mpl.cm.get_cmap('viridis')
-    sm = mpl.cm.ScalarMappable(norm=norm, cmap=cmap)
+        if len(x) == 0:
+            ax.text(
+                0.5,
+                0.5,
+                f"No finite {xcol} values",
+                ha="center",
+                va="center",
+                transform=ax.transAxes,
+            )
+            fig.tight_layout()
+            os.makedirs(plot_path, exist_ok=True)
+            return _save_figure(fig, os.path.join(plot_path, filename), show=show)
 
-    # --- Masks for filled vs open ---
-    mask_in = (z > z_range[0]) & (z < z_range[1])   # filled
-    mask_out = ~mask_in                 # open (hollow)
+        vmin, vmax = np.nanmin(z), np.nanmax(z)
+        if not np.isfinite(vmin) or not np.isfinite(vmax):
+            vmin, vmax = 0.0, 1.0
+        elif vmin == vmax:
+            vmin -= 0.5
+            vmax += 0.5
+        norm = mpl.colors.Normalize(vmin=vmin, vmax=vmax)
+        cmap = mpl.cm.get_cmap("viridis")
+        sm = mpl.cm.ScalarMappable(norm=norm, cmap=cmap)
 
-    # --- Plot each point with its own error bar ---
-    n_pts = len(x)
-    for i in range(n_pts):
-        zi = z[i]
-        ci = cmap(norm(zi))
+        mask_in = (z > z_range[0]) & (z < z_range[1])
+        n_pts = len(x)
+        for i in range(n_pts):
+            zi = z[i]
+            ci = cmap(norm(zi))
+            xi_err = xerr[i] if np.isfinite(xerr[i]) else None
+            if mask_in[i]:
+                mfc = ci
+                mec = "none"
+            else:
+                mfc = "none"
+                mec = ci
 
-        # x-error for this point (None if not finite)
-        xi_err = xerr[i] if np.isfinite(xerr[i]) else None
+            label = "AGN" if i == n_pts - 1 else None
+            ax.errorbar(
+                x[i],
+                y[i],
+                xerr=xi_err,
+                yerr=yerr[i],
+                fmt="o",
+                markersize=6,
+                mfc=mfc,
+                mec=mec,
+                mew=0.9,
+                ecolor=(0.5, 0.5, 0.5, 0.7),
+                elinewidth=0.8,
+                capsize=2,
+                capthick=0.8,
+                zorder=2,
+                label=label,
+            )
 
-        # Filled vs hollow styling
-        if mask_in[i]:
-            mfc = ci
-            mec = 'none'
-        else:
-            mfc = 'none'
-            mec = ci
+        edges = None
+        if np.ndim(nbins) > 0:
+            edges = np.asarray(nbins, dtype=float)
+            if edges.ndim != 1 or edges.size < 2:
+                raise ValueError("Explicit 'nbins' must be a 1D array of bin edges with size >= 2.")
+        elif len(x) >= 2 and np.nanmax(x) > np.nanmin(x):
+            if binning == "quantile":
+                qs = np.linspace(0, 1, nbins + 1)
+                edges = np.unique(np.quantile(x, qs))
+            elif binning == "uniform":
+                edges = np.linspace(x.min(), x.max(), nbins + 1)
+            else:
+                raise ValueError("binning must be 'quantile', 'uniform', or provide explicit edges via nbins.")
 
-        label = "AGN" if i == n_pts - 1 else None  # only last point gets the legend label
+        if edges is not None and np.size(edges) >= 2:
+            bx, by, by_sem, _ = _weighted_bin_stats(
+                x,
+                y,
+                yerr,
+                bins=edges,
+                min_count=min_per_bin,
+                center="mid",
+            )
+            if len(bx):
+                ax.errorbar(
+                    bx,
+                    by,
+                    yerr=by_sem,
+                    fmt="o",
+                    ms=6,
+                    lw=2,
+                    color="red",
+                    mfc="red",
+                    mew=1.2,
+                    zorder=3,
+                    label="Binned mean",
+                )
 
-        ax.errorbar(
-            x[i], y[i],
-            xerr=xi_err,
-            yerr=yerr[i],
-            fmt='o',
-            markersize=6,
-            mfc=mfc,
-            mec=mec,
-            mew=0.9,
-            ecolor=(0.5, 0.5, 0.5, 0.7), elinewidth=0.8, capsize=2, capthick=0.8,
-            zorder=2,
-            label=label,
-        )
+        cbar = fig.colorbar(sm, ax=ax)
+        cbar.set_label(r"$z$")
+        ax.legend(loc="lower right", frameon=True, framealpha=0.8)
 
-    # Zero reference
-    ax.axhline(0.0, color='magenta', linewidth=2, zorder=0)
+        fig.tight_layout()
+        os.makedirs(plot_path, exist_ok=True)
+        return _save_figure(fig, os.path.join(plot_path, filename), show=show)
 
-    # --- Binning setup ---
-    if np.ndim(nbins) > 0:  # explicit edges provided
-        edges = np.asarray(nbins, dtype=float)
-        if edges.ndim != 1 or edges.size < 2:
-            raise ValueError("Explicit 'nbins' must be a 1D array of bin edges with size >= 2.")
-    else:
-        if binning == "quantile":
-            qs = np.linspace(0, 1, nbins + 1)
-            edges = np.quantile(x, qs)
-            edges = np.unique(edges)
-            if edges.size < 2:
-                raise ValueError("Not enough unique quantile edges for binning.")
-        elif binning == "uniform":
-            edges = np.linspace(x.min(), x.max(), nbins + 1)
-        else:
-            raise ValueError("binning must be 'quantile', 'uniform', or provide explicit edges via nbins.")
-
-    # --- Compute binned stats using _weighted_bin_stats ---
-    bx, by, by_sem, bN = _weighted_bin_stats(
-        x, y, yerr,
-        bins=edges,
-        min_count=min_per_bin,
-        center='mid',  # display at bin midpoints; change to 'weighted' if preferred
+    delta_path = _plot_one(
+        "delta_alphaOX",
+        "delta_alphaOX_err",
+        r"$\Delta\, \alpha_{\mathrm{OX}}$",
+        "delta_alphaOX_residuals.pdf",
     )
-
-    if len(bx):
-        ax.errorbar(
-            bx, by, yerr=by_sem,
-            fmt='o', ms=6, lw=2, color='red', mfc='red', mew=1.2,
-            zorder=3, label="Binned mean"
-        )
-
-    # --- Labels, colorbar, cosmetics ---
-    ax.set_xlabel(r'$\Delta\, \alpha_{\mathrm{OX}}$')
-    ax.set_ylabel('Residuals (mag)')
-
-    cbar = fig.colorbar(sm, ax=ax)
-    cbar.set_label(r'$z$')
-
-    # Legend with frame; last AGN point + binned mean will be picked up by labels
-    ax.legend(
-        loc='lower right',
-        frameon=True,
-        framealpha=0.8,
+    alpha_path = _plot_one(
+        "alphaOX",
+        "alphaOX_err",
+        r"$\alpha_{\mathrm{OX}}$",
+        "alphaOX_residuals.pdf",
     )
-
-    ax.set_ylim(-4.6, 3.9)
-    fig.tight_layout()
-    os.makedirs(plot_path, exist_ok=True)
-    _save_figure(fig, os.path.join(plot_path, "delta_alphaOX_residuals.pdf"), show=show)
-
-    # --- Extract and sanitize inputs ---
-    x = np.asarray(df_agn["alphaOX"])
-    xerr = np.asarray(df_agn.get("alphaOX_err", np.full_like(x, np.nan)))
-    z = np.asarray(df_agn["z"])
-    y = np.asarray(residuals)
-    yerr = np.asarray(residuals_err)
-
-    m = np.isfinite(x) & np.isfinite(y) & np.isfinite(yerr)
-    if np.isfinite(xerr).any():
-        m &= np.isfinite(xerr) | np.isnan(xerr)
-    x, xerr, y, yerr, z = x[m], xerr[m], y[m], yerr[m], z[m]
-
-    # --- Figure/axes ---
-    fig, ax = plt.subplots(1, 1, figsize=(7.2, 5.2))
-
-    vmin, vmax = np.nanmin(z), np.nanmax(z)
-    norm = mpl.colors.Normalize(vmin=vmin, vmax=vmax)
-    cmap = mpl.cm.get_cmap('viridis')
-    sm = mpl.cm.ScalarMappable(norm=norm, cmap=cmap)
-
-    # --- Masks for filled vs open ---
-    mask_in = (z > 0.44) & (z < 3.16)   # filled
-    mask_out = ~mask_in                 # open (hollow)
-
-    # --- Plot each point with its own error bar ---
-    n_pts = len(x)
-    for i in range(n_pts):
-        zi = z[i]
-        ci = cmap(norm(zi))
-
-        # x-error for this point (None if not finite)
-        xi_err = xerr[i] if np.isfinite(xerr[i]) else None
-
-        # Filled vs hollow styling
-        if mask_in[i]:
-            mfc = ci
-            mec = 'none'
-        else:
-            mfc = 'none'
-            mec = ci
-
-        label = "AGN" if i == n_pts - 1 else None  # only last point gets the legend label
-
-        ax.errorbar(
-            x[i], y[i],
-            xerr=xi_err,
-            yerr=yerr[i],
-            fmt='o',
-            markersize=6,
-            mfc=mfc,
-            mec=mec,
-            mew=0.9,
-            ecolor=(0.5, 0.5, 0.5, 0.7), elinewidth=0.8, capsize=2, capthick=0.8,
-            zorder=2,
-            label=label,
-        )
-
-    # Zero reference
-    ax.axhline(0.0, color='magenta', linewidth=2, zorder=0)
-
-    # --- Binning setup ---
-    if np.ndim(nbins) > 0:  # explicit edges provided
-        edges = np.asarray(nbins, dtype=float)
-        if edges.ndim != 1 or edges.size < 2:
-            raise ValueError("Explicit 'nbins' must be a 1D array of bin edges with size >= 2.")
-    else:
-        if binning == "quantile":
-            qs = np.linspace(0, 1, nbins + 1)
-            edges = np.quantile(x, qs)
-            edges = np.unique(edges)
-            if edges.size < 2:
-                raise ValueError("Not enough unique quantile edges for binning.")
-        elif binning == "uniform":
-            edges = np.linspace(x.min(), x.max(), nbins + 1)
-        else:
-            raise ValueError("binning must be 'quantile', 'uniform', or provide explicit edges via nbins.")
-
-    # --- Compute binned stats using _weighted_bin_stats ---
-    bx, by, by_sem, bN = _weighted_bin_stats(
-        x, y, yerr,
-        bins=edges,
-        min_count=min_per_bin,
-        center='mid',  # display at bin midpoints; change to 'weighted' if preferred
-    )
-
-    if len(bx):
-        ax.errorbar(
-            bx, by, yerr=by_sem,
-            fmt='o', ms=6, lw=2, color='red', mfc='red', mew=1.2,
-            zorder=3, label="Binned mean"
-        )
-
-    # --- Labels, colorbar, cosmetics ---
-    ax.set_xlabel(r'$\alpha_{\mathrm{OX}}$')
-    ax.set_ylabel('Residuals (mag)')
-
-    cbar = fig.colorbar(sm, ax=ax)
-    cbar.set_label(r'$z$')
-
-    # Legend with frame; last AGN point + binned mean will be picked up by labels
-    ax.legend(
-        loc='lower right',
-        frameon=True,
-        framealpha=0.8,
-    )
-
-    ax.set_ylim(-4.6, 3.9)
-    fig.tight_layout()
-    os.makedirs(plot_path, exist_ok=True)
-    _save_figure(fig, os.path.join(plot_path, "alphaOX_residuals.pdf"), show=show)
+    return delta_path, alpha_path
 
 
 def plot_debias_impact_diagnostics(
@@ -6069,28 +5984,39 @@ def plot_redshift_bin_residual_summary(
 
         def _stats(resid, err, m):
             if np.count_nonzero(m) == 0:
-                return (0, np.nan, np.nan, np.nan)
+                return (0, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan)
             r = resid[m]
             e = err[m]
             n = int(r.size)
+            w = 1.0 / np.square(e)
+            wsum = float(np.sum(w))
+            mean = float(np.sum(w * r) / wsum) if wsum > 0 else np.nan
+            mean_err = float(np.sqrt(1.0 / wsum)) if wsum > 0 else np.nan
+            median = float(np.median(r))
             rms = float(np.sqrt(np.mean(r**2)))
             mad_sigma = float(1.4826 * np.median(np.abs(r - np.median(r))))
             dof = max(n - 1, 1)
             chi2_red = float(np.sum((r / e) ** 2) / dof)
-            return (n, rms, mad_sigma, chi2_red)
+            return (n, mean, mean_err, median, rms, mad_sigma, chi2_red)
 
-        n_b, rms_b, mad_b, chi2_b = _stats(rb, eb, mask_b)
-        n_d, rms_d, mad_d, chi2_d = _stats(rd, ed, mask_d)
+        n_b, mean_b, mean_err_b, median_b, rms_b, mad_b, chi2_b = _stats(rb, eb, mask_b)
+        n_d, mean_d, mean_err_d, median_d, rms_d, mad_d, chi2_d = _stats(rd, ed, mask_d)
         rows.append(
             {
                 "z_lo": lo,
                 "z_hi": hi,
                 "z_mid": 0.5 * (lo + hi) if np.isfinite(hi) else lo + 0.1,
                 "N_biased": n_b,
+                "mean_biased": mean_b,
+                "mean_err_biased": mean_err_b,
+                "median_biased": median_b,
                 "rms_biased": rms_b,
                 "mad_sigma_biased": mad_b,
                 "chi2_red_biased": chi2_b,
                 "N_debiased": n_d,
+                "mean_debiased": mean_d,
+                "mean_err_debiased": mean_err_d,
+                "median_debiased": median_d,
                 "rms_debiased": rms_d,
                 "mad_sigma_debiased": mad_d,
                 "chi2_red_debiased": chi2_d,
@@ -6103,22 +6029,41 @@ def plot_redshift_bin_residual_summary(
     summary.to_csv(os.path.join(diagnostics_path, "redshift_bin_residual_summary.csv"), index=False)
 
     x = summary["z_mid"].to_numpy(dtype=float)
-    fig, axes = plt.subplots(3, 1, figsize=(8.0, 10.0), sharex=True)
+    fig, axes = plt.subplots(4, 1, figsize=(8.0, 12.0), sharex=True)
 
-    axes[0].plot(x, summary["rms_biased"], color="tab:blue", marker="o", label="Biased")
-    axes[0].plot(x, summary["rms_debiased"], color="tab:red", marker="o", label="Debiased")
-    axes[0].set_ylabel("RMS residual")
+    axes[0].errorbar(
+        x,
+        summary["mean_biased"],
+        yerr=summary["mean_err_biased"],
+        color="tab:blue",
+        marker="o",
+        label="Biased",
+    )
+    axes[0].errorbar(
+        x,
+        summary["mean_debiased"],
+        yerr=summary["mean_err_debiased"],
+        color="tab:red",
+        marker="o",
+        label="Debiased",
+    )
+    axes[0].axhline(0.0, color="k", lw=1.0, alpha=0.7)
+    axes[0].set_ylabel("Mean residual")
     axes[0].legend(frameon=False)
 
-    axes[1].plot(x, summary["mad_sigma_biased"], color="tab:blue", marker="o", label="Biased")
-    axes[1].plot(x, summary["mad_sigma_debiased"], color="tab:red", marker="o", label="Debiased")
-    axes[1].set_ylabel("1.4826 MAD")
+    axes[1].plot(x, summary["rms_biased"], color="tab:blue", marker="o", label="Biased")
+    axes[1].plot(x, summary["rms_debiased"], color="tab:red", marker="o", label="Debiased")
+    axes[1].set_ylabel("RMS residual")
 
-    axes[2].plot(x, summary["chi2_red_biased"], color="tab:blue", marker="o", label="Biased")
-    axes[2].plot(x, summary["chi2_red_debiased"], color="tab:red", marker="o", label="Debiased")
-    axes[2].axhline(1.0, color="magenta", lw=1.5)
-    axes[2].set_ylabel(r"$\chi^2_\nu$")
-    axes[2].set_xlabel("Redshift bin midpoint")
+    axes[2].plot(x, summary["mad_sigma_biased"], color="tab:blue", marker="o", label="Biased")
+    axes[2].plot(x, summary["mad_sigma_debiased"], color="tab:red", marker="o", label="Debiased")
+    axes[2].set_ylabel("1.4826 MAD")
+
+    axes[3].plot(x, summary["chi2_red_biased"], color="tab:blue", marker="o", label="Biased")
+    axes[3].plot(x, summary["chi2_red_debiased"], color="tab:red", marker="o", label="Debiased")
+    axes[3].axhline(1.0, color="magenta", lw=1.5)
+    axes[3].set_ylabel(r"$\chi^2_\nu$")
+    axes[3].set_xlabel("Redshift bin midpoint")
 
     for ax in axes:
         ax.grid(True, alpha=0.25)

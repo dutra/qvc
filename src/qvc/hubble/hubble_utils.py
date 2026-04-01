@@ -1475,12 +1475,12 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
     df = df[mask_exclude].reset_index(drop=True)
 
 
-    mask_valid = (df['log_tau_uv_rf'] > 2 * df['log_sigma_uv'] + 2.5)
-    num_removed = np.sum(~mask_valid)
-    print(f"Cut on tau vs sigma diagram: {num_removed} objects removed")
-    plot_cut_diagnostics(df.copy(), df[mask_valid], bins=30, cut_info="tau > 2*sigma + 2.5")
+    #mask_valid = (df['log_tau_uv_rf'] > 2 * df['log_sigma_uv'] + 2.5)
+    #num_removed = np.sum(~mask_valid)
+    #print(f"Cut on tau vs sigma diagram: {num_removed} objects removed")
+    #plot_cut_diagnostics(df.copy(), df[mask_valid], bins=30, cut_info="tau > 2*sigma + 2.5")
 
-    df = df[mask_valid].reset_index(drop=True)
+    #df = df[mask_valid].reset_index(drop=True)
     # mask_in  = df_agn["z"].between(0.44, 3.16)
 
     # Remove outliers listed in external CSV files.

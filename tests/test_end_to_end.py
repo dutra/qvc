@@ -336,6 +336,38 @@ def test_plot_sf_ref_band_vs_model_g_writes_custom_pdf(tmp_path, monkeypatch):
     assert out.endswith("sf_ref_band_vs_model_g_precut.pdf")
 
 
+def test_plot_redshift_bin_residual_summary_writes_pdf_and_csv(tmp_path, monkeypatch):
+    monkeypatch.setenv("MPLCONFIGDIR", str(tmp_path / "mplconfig"))
+
+    df = pd.DataFrame({"z": [0.4, 0.55, 0.85, 1.0, 1.35, 1.7, 2.2, 2.7]})
+    residuals_biased = np.array([0.08, 0.05, 0.04, 0.02, 0.01, -0.01, -0.03, -0.04], dtype=float)
+    residuals_debiased = np.array([0.03, 0.02, 0.01, 0.00, -0.01, -0.01, -0.02, -0.02], dtype=float)
+    residuals_biased_err = np.full_like(residuals_biased, 0.1)
+    residuals_debiased_err = np.full_like(residuals_debiased, 0.1)
+
+    out = hubble_plotting.plot_redshift_bin_residual_summary(
+        df,
+        residuals_biased,
+        residuals_biased_err,
+        residuals_debiased,
+        residuals_debiased_err,
+        plot_path=str(tmp_path / "figures"),
+        show=False,
+        z_bins=[0.3, 0.9, 1.6, 3.2],
+    )
+
+    csv_path = tmp_path / "figures" / "diagnostics" / "redshift_bin_residual_summary.csv"
+
+    assert out is not None
+    assert os.path.exists(out)
+    assert out.endswith("redshift_bin_residual_summary.pdf")
+    assert csv_path.exists()
+
+    summary = pd.read_csv(csv_path)
+    assert {"mean_biased", "mean_err_biased", "mean_debiased", "mean_err_debiased"}.issubset(summary.columns)
+    assert np.isfinite(summary["mean_debiased"]).any()
+
+
 def test_plot_blr_assignment_probabilities_writes_pdf(tmp_path, monkeypatch):
     monkeypatch.setenv("MPLCONFIGDIR", str(tmp_path / "mplconfig"))
 
