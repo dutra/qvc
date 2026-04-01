@@ -43,6 +43,7 @@ os.environ["JAX_PLATFORM_NAME"] = "cpu"
 
 from qvc.hubble.hubble_utils import match_radec, read_quasars_from_hdf5_flat
 from jaxqsofit import QSOFit, build_default_prior_config
+from jaxqsofit.model import reconstruct_posterior_components
 
 
 COSMO = FlatLambdaCDM(H0=70, Om0=0.3)
@@ -270,6 +271,191 @@ def estimate_m2500_from_model(q):
     return m50, m_err, m50_intrinsic, m_err_intrinsic
 
 
+def posterior_component_fraction_at_wave(q, numerator_key, denominator_key, wave0):
+    """Return posterior median/error for a model-component fraction at one wavelength."""
+    wave = np.asarray(getattr(q, "wave", []), dtype=float)
+    if wave.ndim != 1 or wave.size == 0 or not np.all(np.isfinite(wave)):
+        return np.nan, np.nan
+
+    pred_out = getattr(q, "pred_out", None)
+    if not isinstance(pred_out, dict):
+        return np.nan, np.nan
+
+    numerator = pred_out.get(numerator_key)
+    denominator = pred_out.get(denominator_key)
+    if numerator is None or denominator is None:
+        return np.nan, np.nan
+
+    numerator = np.asarray(numerator, dtype=float)
+    denominator = np.asarray(denominator, dtype=float)
+    if numerator.ndim == 1:
+        numerator = numerator[None, :]
+    if denominator.ndim == 1:
+        denominator = denominator[None, :]
+
+    if numerator.shape != denominator.shape or numerator.shape[-1] != wave.size:
+        return np.nan, np.nan
+
+    idx = int(np.argmin(np.abs(wave - float(wave0))))
+    numerator_vals = numerator[:, idx]
+    denominator_vals = denominator[:, idx]
+    frac = np.divide(
+        numerator_vals,
+        denominator_vals,
+        out=np.full(numerator_vals.shape, np.nan, dtype=float),
+        where=np.isfinite(numerator_vals) & np.isfinite(denominator_vals) & (denominator_vals != 0.0),
+    )
+    good = np.isfinite(frac)
+    if not np.any(good):
+        return np.nan, np.nan
+
+    median, err, _, _ = sym_percentile(frac[good])
+    return safe_float(median), safe_float(err)
+
+
+def reconstructed_component_fraction_at_wave(
+    q,
+    component_key,
+    reference_key,
+    wave0,
+    *,
+    apply_poly=False,
+    n_draws=None,
+):
+    """Return a posterior component/reference fraction from a tiny reconstructed window."""
+    wave_native = np.asarray(getattr(q, "wave", []), dtype=float)
+    if wave_native.ndim != 1 or wave_native.size < 2 or not np.all(np.isfinite(wave_native)):
+        return np.nan, np.nan
+
+    dw = float(np.nanmedian(np.diff(wave_native)))
+    if not np.isfinite(dw) or dw <= 0.0:
+        dw = max(abs(float(wave0)) * 1.0e-3, 1.0e-3)
+    delta = max(dw, abs(float(wave0)) * 1.0e-3, 1.0e-3)
+    wave_out = np.array([float(wave0) - delta, float(wave0), float(wave0) + delta], dtype=float)
+    if wave_out[0] <= 0.0:
+        eps = max(abs(float(wave0)) * 1.0e-4, 1.0e-3)
+        wave_out = np.array([max(float(wave0) - eps, 1.0e-6), float(wave0), float(wave0) + eps], dtype=float)
+
+    prior_config = getattr(q, "_fit_prior_config", None)
+    if isinstance(prior_config, dict):
+        prior_config = dict(prior_config)
+    else:
+        prior_config = build_default_prior_config(np.asarray(getattr(q, "flux", []), dtype=float))
+
+    pl_pivot = safe_float(prior_config.get("PL_pivot", np.nan))
+    if not np.isfinite(pl_pivot) or pl_pivot <= 0.0:
+        prior_config["PL_pivot"] = float(0.5 * (wave_native[0] + wave_native[-1]))
+
+    age_grid_gyr = getattr(q, "_fit_fsps_age_grid", None)
+    logzsol_grid = getattr(q, "_fit_fsps_logzsol_grid", None)
+    if age_grid_gyr is None or logzsol_grid is None:
+        fsps_grid = getattr(q, "fsps_grid", None)
+        age_grid_gyr = getattr(fsps_grid, "age_grid_gyr", None)
+        logzsol_grid = getattr(fsps_grid, "logzsol_grid", None)
+    if age_grid_gyr is None or logzsol_grid is None:
+        return np.nan, np.nan
+
+    recon = reconstruct_posterior_components(
+        wave_out=wave_out,
+        samples=getattr(q, "numpyro_samples", {}),
+        pred_out=getattr(q, "pred_out", None),
+        age_grid_gyr=age_grid_gyr,
+        logzsol_grid=logzsol_grid,
+        dsps_ssp_fn=getattr(q, "_fit_dsps_ssp_fn", "tempdata.h5"),
+        prior_config=prior_config,
+        fit_poly=bool(apply_poly) and bool(getattr(q, "_fit_fit_poly", False)),
+        fit_reddening=bool(getattr(q, "_fit_fit_reddening", False)),
+        fit_poly_order=int(getattr(q, "_fit_fit_poly_order", 2)),
+        fe_uv_wave=np.asarray(getattr(q, "fe_uv_wave", []), dtype=float),
+        fe_uv_flux=np.asarray(getattr(q, "fe_uv_flux", []), dtype=float),
+        fe_op_wave=np.asarray(getattr(q, "fe_op_wave", []), dtype=float),
+        fe_op_flux=np.asarray(getattr(q, "fe_op_flux", []), dtype=float),
+        custom_components=getattr(q, "_fit_custom_components", ()),
+        n_draws=n_draws,
+        return_components=True,
+    )
+    if component_key not in recon["draws"] or reference_key not in recon["draws"]:
+        return np.nan, np.nan
+
+    idx = int(np.argmin(np.abs(np.asarray(recon["wave"], dtype=float) - float(wave0))))
+    numerator_vals = np.asarray(recon["draws"][component_key], dtype=float)[:, idx]
+    denominator_vals = np.asarray(recon["draws"][reference_key], dtype=float)[:, idx]
+    frac = np.divide(
+        numerator_vals,
+        denominator_vals,
+        out=np.full(numerator_vals.shape, np.nan, dtype=float),
+        where=np.isfinite(numerator_vals) & np.isfinite(denominator_vals) & (denominator_vals != 0.0),
+    )
+    good = np.isfinite(frac)
+    if not np.any(good):
+        return np.nan, np.nan
+
+    median, err, _, _ = sym_percentile(frac[good])
+    return safe_float(median), safe_float(err)
+
+
+def estimate_host_center_fraction(q):
+    """Return the posterior host/continuum fraction at the spectrum midpoint."""
+    wave = np.asarray(getattr(q, "wave", []), dtype=float)
+    if wave.ndim != 1 or wave.size == 0 or not np.all(np.isfinite(wave)):
+        return np.nan, np.nan
+
+    lam_obs = np.asarray(getattr(q, "lam", []), dtype=float)
+    if lam_obs.ndim == 1 and lam_obs.size == wave.size and np.all(np.isfinite(lam_obs)):
+        z = safe_float(getattr(q, "z", np.nan), np.nan)
+        z_scale = max(1.0 + z, 1e-8) if np.isfinite(z) else 1.0
+        wave_center = float(0.5 * (lam_obs[0] + lam_obs[-1])) / z_scale
+    else:
+        wave_center = float(0.5 * (wave[0] + wave[-1]))
+
+    median, err = posterior_component_fraction_at_wave(
+        q,
+        numerator_key="gal_model",
+        denominator_key="continuum_model",
+        wave0=wave_center,
+    )
+    if np.isfinite(median):
+        return median, err
+
+    fallback = safe_float(getattr(q, "frac_host_pivot", np.nan))
+    if np.isfinite(fallback):
+        return fallback, np.nan
+    return np.nan, np.nan
+
+
+def estimate_host_2500_fraction(q):
+    """Return host/continuum at rest-frame 2500 A from posterior components."""
+    wave0 = 2500.0
+    wave = np.asarray(getattr(q, "wave", []), dtype=float)
+    if wave.ndim == 1 and wave.size > 0 and np.all(np.isfinite(wave)) and (wave[0] <= wave0 <= wave[-1]):
+        median, err = posterior_component_fraction_at_wave(
+            q,
+            numerator_key="gal_model",
+            denominator_key="continuum_model",
+            wave0=wave0,
+        )
+        if np.isfinite(median):
+            return median, err
+
+    try:
+        median, err = reconstructed_component_fraction_at_wave(
+            q,
+            component_key="host",
+            reference_key="continuum",
+            wave0=wave0,
+            apply_poly=False,
+        )
+        if np.isfinite(median):
+            return median, err
+    except Exception:
+        pass
+
+    fallback = safe_float(getattr(q, "frac_host_2500", np.nan))
+    if np.isfinite(fallback) and fallback >= 0.0:
+        return fallback, np.nan
+    return np.nan, np.nan
+
+
 def compute_derived_results(result, q, args):
     """
     Populate old fit_spectra-compatible columns from jaxqsofit outputs when possible.
@@ -288,25 +474,26 @@ def compute_derived_results(result, q, args):
     # if "PL_slope_red" not in result:
     #     result["PL_slope_red"] = safe_float(result.get("PL_slope"))
 
-    if "f_host_2500" not in result:
-        result["f_host_2500"] = safe_float(result.get("frac_host_2500"))
     if "f_host_5100" not in result:
         result["f_host_5100"] = safe_float(result.get("frac_host_5100"))
 
-    samples = q.numpyro_samples
     result["bi"] = safe_float(getattr(q, "bi", np.nan))
     result["bi_err"] = safe_float(getattr(q, "bi_err", np.nan))
     decompose_host_eff = bool(getattr(q, "_fit_decompose_host", getattr(args, "decompose_host", True)))
     result["decompose_host_effective"] = decompose_host_eff
 
-    # Host/AGN fraction near spectrum center from posterior samples.
-    if decompose_host_eff and "log_frac_host" in samples:
-        log_frac_host = np.asarray(samples["log_frac_host"], dtype=float).reshape(-1)
-        frac_host_samp = 1.0 / (1.0 + np.exp(-log_frac_host))
-        m50, m_err, _, _ = sym_percentile(frac_host_samp)
+    if decompose_host_eff:
+        f_host_2500, f_host_2500_err = estimate_host_2500_fraction(q)
+        result["f_host_2500"] = safe_float(f_host_2500)
+        result["f_host_2500_err"] = safe_float(f_host_2500_err)
+
+        # Host/continuum fraction at the center of the fitted spectrum.
+        m50, m_err = estimate_host_center_fraction(q)
         result["f_host_center"] = safe_float(m50)
         result["f_host_center_err"] = safe_float(m_err)
     else:
+        result["f_host_2500"] = 0.0
+        result["f_host_2500_err"] = 0.0
         result["f_host_center"] = 0.0
         result["f_host_center_err"] = 0.0
 
