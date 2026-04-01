@@ -6273,10 +6273,13 @@ def plot_g_band_drift_slope_histograms(
     df_agn,
     *,
     slope_kind="mean",
+    z_min=None,
     z_max=1.5,
     m2500_max=22.5,
+    x_limit=8.0,
     plot_path="plots/hubble",
     show=False,
+    filename=None,
 ):
     """Compare raw vs detrended g-band drift slopes in side-by-side histograms."""
     if slope_kind not in {"mean", "var"}:
@@ -6289,8 +6292,12 @@ def plot_g_band_drift_slope_histograms(
 
     mask = np.ones(len(df_agn), dtype=bool)
     z = pd.to_numeric(df_agn.get("z"), errors="coerce").to_numpy(dtype=float) if "z" in df_agn.columns else None
-    if z is not None and np.isfinite(z_max):
-        mask &= np.isfinite(z) & (z < float(z_max))
+    if z is not None:
+        mask &= np.isfinite(z)
+        if z_min is not None and np.isfinite(z_min):
+            mask &= z >= float(z_min)
+        if np.isfinite(z_max):
+            mask &= z < float(z_max)
     m2500 = (
         pd.to_numeric(df_agn.get("apparent_mag_2500"), errors="coerce").to_numpy(dtype=float)
         if "apparent_mag_2500" in df_agn.columns
@@ -6313,10 +6320,10 @@ def plot_g_band_drift_slope_histograms(
     combined = np.concatenate([raw_plot, resid_plot])
     if combined.size == 0:
         return None
-    xmax = float(np.nanmax(np.abs(combined)))
+    xmax = float(x_limit) if np.isfinite(x_limit) and x_limit > 0.0 else float(np.nanmax(np.abs(combined)))
     if (not np.isfinite(xmax)) or xmax <= 0.0:
         xmax = 1.0
-    if np.nanmin(combined) == np.nanmax(combined):
+    if np.nanmin(combined) == np.nanmax(combined) and not (np.isfinite(x_limit) and x_limit > 0.0):
         center = float(np.nanmin(combined))
         bins = np.linspace(center - 1.0, center + 1.0, 21)
     else:
@@ -6327,6 +6334,17 @@ def plot_g_band_drift_slope_histograms(
         (axes[0], raw_plot, "no detrending"),
         (axes[1], resid_plot, "with detrending"),
     ]
+    selection_label = []
+    if z_min is not None and np.isfinite(z_min) and np.isfinite(z_max):
+        selection_label.append(fr"${float(z_min):g} \leq z < {float(z_max):g}$")
+    elif z_min is not None and np.isfinite(z_min):
+        selection_label.append(fr"$z \geq {float(z_min):g}$")
+    elif np.isfinite(z_max):
+        selection_label.append(fr"$z < {float(z_max):g}$")
+    if np.isfinite(m2500_max):
+        selection_label.append(fr"$m_{{2500\,\mathrm{{\AA}}}} < {float(m2500_max):g}$")
+    selection_text = "\n".join(selection_label)
+
     if slope_kind == "mean":
         xlabel = r"mean slope ($10^{-4}$ mag day$^{-1}$)"
     else:
@@ -6334,8 +6352,9 @@ def plot_g_band_drift_slope_histograms(
     for ax, values, panel_label in labels:
         ax.hist(values, bins=bins, color="black", alpha=0.85, edgecolor="white")
         q16, q50, q84 = np.nanpercentile(values, [16.0, 50.0, 84.0])
+        sigma = float(np.nanstd(values, ddof=1)) if values.size > 1 else np.nan
         ax.axvspan(q16, q84, color="0.5", alpha=0.2, zorder=0)
-        ax.axvline(q50, color="0.25", linestyle="-", linewidth=1.4)
+        ax.axvline(q50, color="0.25", linestyle="--", linewidth=1.4)
         ax.axvline(0.0, color="dodgerblue", linestyle="-", linewidth=2.0)
         ax.set_xlim(-xmax, xmax)
         ax.set_xlabel(xlabel)
@@ -6348,14 +6367,37 @@ def plot_g_band_drift_slope_histograms(
             va="top",
             fontsize=10,
         )
+        if np.isfinite(sigma):
+            ax.text(
+                0.03,
+                0.86,
+                fr"$\sigma = {sigma:.2f}$",
+                transform=ax.transAxes,
+                ha="left",
+                va="top",
+                fontsize=9,
+            )
+        if selection_text:
+            ax.text(
+                0.97,
+                0.95,
+                selection_text,
+                transform=ax.transAxes,
+                ha="right",
+                va="top",
+                fontsize=9,
+                bbox=dict(boxstyle="round,pad=0.2", facecolor="white", edgecolor="0.7", alpha=0.9),
+            )
     axes[0].set_ylabel("Count")
     fig.tight_layout()
 
     diagnostics_path = os.path.join(plot_path or "plots/hubble", "diagnostics")
     os.makedirs(diagnostics_path, exist_ok=True)
+    if filename is None:
+        filename = f"g_band_{slope_kind}_slope_histograms.pdf"
     return _save_figure(
         fig,
-        os.path.join(diagnostics_path, f"g_band_{slope_kind}_slope_histograms.pdf"),
+        os.path.join(diagnostics_path, filename),
         dpi=200,
         show=show,
     )

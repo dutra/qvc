@@ -1513,9 +1513,27 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
     if {"z", "f_bc_over_pl_3000", "f_fe_uv_over_pl_3000", "f_host_center"}.issubset(df.columns):
         plot_spectral_fraction_vs_redshift(df, plot_path=plot_path, show=False)
     if {"g_raw_mean_slope", "g_resid_mean_slope"}.issubset(df.columns):
-        plot_g_band_drift_slope_histograms(df, slope_kind="mean", plot_path=plot_path, show=False)
+        for m2500_cut in (23.0, 22.5, 22.0, 21.5):
+            plot_g_band_drift_slope_histograms(
+                df,
+                slope_kind="mean",
+                z_min=0.8,
+                z_max=1.2,
+                m2500_max=m2500_cut,
+                plot_path=plot_path,
+                show=False,
+                filename=f"g_band_mean_slope_histograms_postcut_z0p8to1p2_m2500lt{str(m2500_cut).replace('.', 'p')}.pdf",
+            )
     if {"g_raw_var_slope", "g_resid_var_slope"}.issubset(df.columns):
-        plot_g_band_drift_slope_histograms(df, slope_kind="var", plot_path=plot_path, show=False)
+        plot_g_band_drift_slope_histograms(
+            df,
+            slope_kind="var",
+            z_min=0.8,
+            z_max=1.2,
+            plot_path=plot_path,
+            show=False,
+            filename="g_band_var_slope_histograms_postcut_z0p8to1p2.pdf",
+        )
     if {"log_tau_uv_rf", "log_sigma_uv"}.issubset(df.columns):
         plot_sigma_uv_vs_tau_uv_rf(
             df,

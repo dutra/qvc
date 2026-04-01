@@ -164,6 +164,8 @@ def test_plot_g_band_drift_slope_histograms_writes_pdfs(tmp_path, monkeypatch):
 
     df = pd.DataFrame(
         {
+            "z": [0.7, 0.9, 1.0, 1.1, 1.3],
+            "apparent_mag_2500": [22.4, 22.4, 22.1, 21.7, 21.2],
             "g_raw_mean_slope": [-2e-4, -1e-4, 0.0, 1e-4, 2e-4],
             "g_resid_mean_slope": [-8e-5, -2e-5, 0.0, 2e-5, 8e-5],
             "g_raw_var_slope": [-5e-6, -1e-6, 0.0, 1e-6, 5e-6],
@@ -174,22 +176,29 @@ def test_plot_g_band_drift_slope_histograms_writes_pdfs(tmp_path, monkeypatch):
     out_mean = hubble_plotting.plot_g_band_drift_slope_histograms(
         df,
         slope_kind="mean",
+        z_min=0.8,
+        z_max=1.2,
+        m2500_max=22.5,
         plot_path=str(tmp_path / "figures"),
         show=False,
+        filename="g_band_mean_slope_histograms_postcut_z0p8to1p2_m2500lt22p5.pdf",
     )
     out_var = hubble_plotting.plot_g_band_drift_slope_histograms(
         df,
         slope_kind="var",
+        z_min=0.8,
+        z_max=1.2,
         plot_path=str(tmp_path / "figures"),
         show=False,
+        filename="g_band_var_slope_histograms_postcut_z0p8to1p2.pdf",
     )
 
     assert out_mean is not None
     assert out_var is not None
     assert os.path.exists(out_mean)
     assert os.path.exists(out_var)
-    assert out_mean.endswith("g_band_mean_slope_histograms.pdf")
-    assert out_var.endswith("g_band_var_slope_histograms.pdf")
+    assert out_mean.endswith("g_band_mean_slope_histograms_postcut_z0p8to1p2_m2500lt22p5.pdf")
+    assert out_var.endswith("g_band_var_slope_histograms_postcut_z0p8to1p2.pdf")
 
 
 def test_plot_spectral_fraction_vs_redshift_writes_pdf(tmp_path, monkeypatch):
