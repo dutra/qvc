@@ -13,6 +13,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from qvc.light_curve.fit_light_curves import (
+    balmer_continuum_weight,
     build_explicit_model_params,
     bending_power_law_psd,
     compute_structure_function_diagnostics,
@@ -168,6 +169,36 @@ def test_build_explicit_model_params_smoothly_suppresses_blue_variability():
     assert ratio[2] > 0.9
 
 
+def test_balmer_continuum_weight_transitions_smoothly_across_3646():
+    lam_rf = jnp.array([3200.0, 3646.0, 3900.0, 4500.0])
+    weight = np.asarray(balmer_continuum_weight(lam_rf))
+
+    assert weight[0] > weight[1] > weight[2] > weight[3]
+    assert np.isclose(weight[1], 0.5)
+    assert weight[0] > 0.8
+    assert weight[3] < 0.05
+
+
+def test_build_explicit_model_params_smoothly_weights_bc_amplitude_but_not_bc_lag():
+    lam_rf = jnp.array([3200.0, 3646.0, 3900.0, 4500.0])
+    raw = _make_raw_public(len(lam_rf))
+    raw["log_amp_delta_bc"] = jnp.array(-0.4)
+    raw["log_lag_ratio_bc_to_blr"] = jnp.array(np.log(0.2))
+    raw["log_lag_blr"] = jnp.log(jnp.array([20.0, 30.0, 40.0, 50.0]))
+
+    explicit = build_explicit_model_params(raw, lam_rf)
+
+    bc_weight = np.asarray(balmer_continuum_weight(lam_rf))
+    amp_bc = np.asarray(explicit["amp_bc"])
+    lag_bc = np.asarray(explicit["lag_bc"])
+    expected_base_amp = np.exp(float(raw["log_sigma_uv"] + raw["log_amp_delta_bc"]))
+    expected_lag_bc = 0.2 * np.exp(np.mean(np.log(np.array([20.0, 30.0, 40.0, 50.0]))))
+
+    assert np.allclose(amp_bc, expected_base_amp * bc_weight)
+    assert amp_bc[0] > amp_bc[1] > amp_bc[2] > amp_bc[3] > 0.0
+    assert np.allclose(lag_bc, expected_lag_bc)
+
+
 def test_make_lc_drops_z_by_default_but_keeps_lya_bands():
     obj = _make_object(z=1.6)
     lc = make_lc(obj, bands=["u", "g", "r", "i", "z"], drop_band_lyman_alpha=False)
@@ -287,6 +318,8 @@ def test_compute_parameter_kls_ignores_nonfinite_conditioning_samples():
         "log_lag_blr_r": np.array([3.1, 3.2, 3.3, 3.25]),
         "log_lag_blr2_g": np.array([4.0, 4.1, 4.2, 4.15]),
         "log_lag_blr2_r": np.array([4.1, 4.2, 4.3, 4.25]),
+        "log_amp_delta_bc": np.array([-1.1, -1.0, -0.9, -1.05]),
+        "log_lag_ratio_bc_to_blr": np.array([np.log(0.15), np.log(0.2), np.log(0.25), np.log(0.22)]),
     }
 
     kls = compute_parameter_kls(
@@ -297,6 +330,7 @@ def test_compute_parameter_kls_ignores_nonfinite_conditioning_samples():
         log_jitter_mean=np.array([-3.0, -3.1]),
         disable_poly1=False,
         disable_lag_blr=False,
+        disable_lag_bc=False,
         drop_band_lyman_alpha=False,
         tau_fast_truncated=False,
         n_blr_terms=2,
@@ -337,6 +371,9 @@ def test_process_samples_keeps_uv_outputs_at_2500_and_stores_band_metadata():
         "log_lag_blr2_g": np.asarray(np.log([80.0, 90.0, 100.0])),
         "log_lag_blr2_r": np.asarray(np.log([85.0, 95.0, 105.0])),
         "log_lag_blr2_i": np.asarray(np.log([90.0, 100.0, 110.0])),
+        "lag_bc_g": np.asarray([6.0, 8.0, 10.0]),
+        "lag_bc_r": np.asarray([7.0, 9.0, 11.0]),
+        "lag_bc_i": np.asarray([8.0, 10.0, 12.0]),
     }
 
     result = process_samples(
@@ -370,11 +407,40 @@ def test_process_samples_keeps_uv_outputs_at_2500_and_stores_band_metadata():
         result["log_lag_blr2_r_RF"],
         np.percentile(np.log10([85.0, 95.0, 105.0]) - np.log10(1.0 + z), 50),
     )
+    assert np.isclose(
+        result["log_lag_bc_r_RF"],
+        np.percentile(np.log10([7.0, 9.0, 11.0]) - np.log10(1.0 + z), 50),
+    )
+    assert result["bc_weight_g"] > result["bc_weight_r"] > result["bc_weight_i"] > 0.9
     expected_sigma_rms_g = np.percentile(
         np.log10(np.array([0.18, 0.21, 0.24]) * np.sqrt((np.array([25.0, 32.0, 40.0]) ** 2 + np.array([250.0, 310.0, 400.0]) ** 2) / (np.array([250.0, 310.0, 400.0]) - np.array([25.0, 32.0, 40.0])) ** 2)),
         50,
     )
     assert np.isclose(result["log_sigma_rms_band_g"], expected_sigma_rms_g)
+
+
+def test_process_samples_keeps_bc_lag_for_band_near_balmer_edge():
+    z = lambda_pivot["r"] / 3900.0 - 1.0
+    flat_samples = {
+        "log_sigma_uv": np.asarray(np.log([0.18, 0.21, 0.24])),
+        "log_tau_uv": np.asarray(np.log([250.0, 310.0, 400.0])),
+        "log_tau_fast_uv": np.asarray(np.log([25.0, 32.0, 40.0])),
+        "eta_sigma": np.asarray([-0.6, -0.4, -0.5]),
+        "eta_tau": np.asarray([0.1, 0.3, 0.2]),
+        "lag_bc_r": np.asarray([7.0, 9.0, 11.0]),
+    }
+
+    result = process_samples(
+        flat_samples,
+        {"object_id": "obj", "z": z},
+        bands=["r"],
+    )
+
+    assert result["bc_weight_r"] > 0.2
+    assert np.isclose(
+        result["log_lag_bc_r_RF"],
+        np.percentile(np.log10([7.0, 9.0, 11.0]) - np.log10(1.0 + z), 50),
+    )
 
 
 def test_compute_parameter_kls_returns_expected_keys():
@@ -407,6 +473,8 @@ def test_compute_parameter_kls_returns_expected_keys():
         "log_lag_blr_r": rng.normal(np.log(25.0), 0.2, size=n),
         "log_lag_blr2_g": rng.normal(np.log(70.0), 0.2, size=n),
         "log_lag_blr2_r": rng.normal(np.log(80.0), 0.2, size=n),
+        "log_amp_delta_bc": rng.normal(-1.1, 0.2, size=n),
+        "log_lag_ratio_bc_to_blr": rng.uniform(np.log(0.1), np.log(0.3), size=n),
     }
 
     kls = compute_parameter_kls(
@@ -415,6 +483,7 @@ def test_compute_parameter_kls_returns_expected_keys():
         z=z,
         lambda_center_rf=lambda_center_rf,
         log_jitter_mean=np.asarray([np.log(0.03), np.log(0.03)]),
+        disable_lag_bc=False,
         n_blr_terms=2,
     )
 
@@ -433,8 +502,10 @@ def test_compute_parameter_kls_returns_expected_keys():
         "log_jitter_r_kl",
         "log_amp_delta_blr_g_kl",
         "log_amp_delta_blr2_g_kl",
+        "log_amp_delta_bc_kl",
         "log_lag_blr_g_kl",
         "log_lag_blr2_g_kl",
+        "log_lag_ratio_bc_to_blr_kl",
         "kl_total",
     }
     assert expected_keys.issubset(kls.keys())

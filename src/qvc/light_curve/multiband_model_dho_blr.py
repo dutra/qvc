@@ -100,17 +100,28 @@ class ContiBLR_SHO_Wrapper(qs.Wrapper):
         _t, b = X
         b = jnp.asarray(b, dtype=jnp.int32)
 
-        amp_cont = _safe_pos(jnp.asarray(self.params["amp_cont"]))[b]
+        amp_cont_all = jnp.asarray(self.params["amp_cont"])
+        lag_disk_all = jnp.asarray(self.params["lag_disk"])
+        amp_cont = _safe_pos(amp_cont_all)[b]
+        amp_bc = jnp.maximum(
+            jnp.asarray(self.params.get("amp_bc", jnp.zeros_like(amp_cont_all))),
+            0.0,
+        )[b]
         amp_blr = _safe_pos(jnp.asarray(self.params["amp_blr"]))[b]
         amp_blr2 = _safe_pos(jnp.asarray(self.params["amp_blr2"]))[b]
-        lag_disk = jnp.maximum(jnp.asarray(self.params["lag_disk"]), 0.0)[b]
+        lag_disk = jnp.maximum(lag_disk_all, 0.0)[b]
+        lag_bc = jnp.maximum(
+            jnp.asarray(self.params.get("lag_bc", jnp.zeros_like(lag_disk_all))),
+            0.0,
+        )[b]
         lag_blr = jnp.maximum(jnp.asarray(self.params["lag_blr"]), 0.0)[b]
         lag_blr2 = jnp.maximum(jnp.asarray(self.params["lag_blr2"]), 0.0)[b]
 
         h_cont = self._lagged_obs(b, lag_disk)
+        h_bc = self._lagged_obs(b, lag_disk + lag_bc)
         h_blr = self._lagged_obs(b, lag_disk + lag_blr)
         h_blr2 = self._lagged_obs(b, lag_disk + lag_blr2)
-        return amp_cont * h_cont + amp_blr * h_blr + amp_blr2 * h_blr2
+        return amp_cont * h_cont + amp_bc * h_bc + amp_blr * h_blr + amp_blr2 * h_blr2
 
 
 def qs_psd(kernel, omega, b: int, sigma_n2: float = 0.0):

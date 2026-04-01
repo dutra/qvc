@@ -450,6 +450,8 @@ def test_build_single_object_model_disables_second_blr_term_by_default():
     model_trace = trace(seed(model, random.PRNGKey(0))).get_trace()
     assert "log_amp_delta_blr_raw" in model_trace
     assert "log_lag_blr_raw" in model_trace
+    assert "log_amp_delta_bc" in model_trace
+    assert "log_lag_ratio_bc_to_blr" in model_trace
     assert "log_amp_delta_blr2_raw" not in model_trace
     assert "log_lag_blr2_raw" not in model_trace
     assert np.allclose(np.asarray(model_trace["log_amp_delta_blr2"]["value"]), -9.0)

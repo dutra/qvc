@@ -27,6 +27,9 @@ lambda_pivot = {
 filters = {"u": 0, "g": 1, "r": 2, "i": 3, "z": 4, "y": 5} # harcoded filter order for SDSS
 bands = ['u', 'g', 'r', 'i', 'z']#, 'y']
 #bands = ['g', 'r', 'i']
+BALMER_EDGE_REST_WAVELENGTH = 3646.0
+BALMER_EDGE_ATTENUATION_WIDTH = 250.0
+BALMER_EDGE_SUMMARY_WEIGHT_MIN = 0.05
 
 
 import os
@@ -39,6 +42,17 @@ import numpy as np
 _GIT_COMMIT_SENTINEL = object()
 _GIT_COMMIT_CACHE = _GIT_COMMIT_SENTINEL
 _RUN_METADATA_KEYS = {"git_commit", "run_datetime"}
+
+
+def _balmer_continuum_weight(
+    lam_rf,
+    transition=BALMER_EDGE_REST_WAVELENGTH,
+    width=BALMER_EDGE_ATTENUATION_WIDTH,
+):
+    """Match the smooth Balmer-edge attenuation used during fitting."""
+
+    lam_rf = np.asarray(lam_rf, dtype=float)
+    return 1.0 / (1.0 + np.exp((lam_rf - transition) / width))
 
 
 def _get_current_git_commit():
@@ -890,6 +904,18 @@ def process_samples(flat_samples, data, bands, percentiles=[16, 50, 84]):
                 median, err = sym_percentile(samples_log_lag_blr_rf)
                 result[f"log_lag_blr{lag_suffix}_{band}_RF"] = median
                 result[f"log_lag_blr{lag_suffix}_{band}_RF_err"] = err
+        lag_bc_key = f"lag_bc_{band}"
+        lam_eff = lambda_pivot[band] / (1.0 + data['z'])
+        bc_weight = float(_balmer_continuum_weight(lam_eff))
+        result[f"bc_weight_{band}"] = bc_weight
+        if lag_bc_key in flat_samples and bc_weight > BALMER_EDGE_SUMMARY_WEIGHT_MIN:
+            samples_lag_bc = np.asarray(flat_samples[lag_bc_key], dtype=float)
+            mask_bc = np.isfinite(samples_lag_bc) & (samples_lag_bc > 0.0)
+            if np.any(mask_bc):
+                samples_log_lag_bc_rf = np.log10(samples_lag_bc[mask_bc]) - np.log10(1 + data['z'])
+                median, err = sym_percentile(samples_log_lag_bc_rf)
+                result[f"log_lag_bc_{band}_RF"] = median
+                result[f"log_lag_bc_{band}_RF_err"] = err
 
     samples_log_sigma_uv = log_sigma_uv / np.log(10)
     cov_matrix = np.cov(samples_log_sigma_uv, samples_log_tau_uv_rf)
