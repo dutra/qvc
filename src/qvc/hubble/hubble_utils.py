@@ -1244,7 +1244,12 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
                     f"median delta={np.nanmedian(corrected_sigma_delta[valid_sigma_delta]):.4f} dex, "
                     f"max delta={np.nanmax(corrected_sigma_delta[valid_sigma_delta]):.4f} dex"
                 )
-            plot_sigma_uv_host_correction(df, plot_path=plot_path, show=False)
+            plot_sigma_uv_host_correction(
+                df,
+                plot_path=plot_path,
+                show=False,
+                filename="sigma_uv_host_correction_comparison_precut.pdf",
+            )
         else:
             missing_cols = sorted(required_cols - set(df.columns))
             raise KeyError(
@@ -1253,49 +1258,94 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
             )
 
     if {"z", "apparent_mag_2500", "f_host_center"}.issubset(df.columns):
-        plot_f_host_center_vs_l2500(df, plot_path=plot_path, show=False)
+        plot_f_host_center_vs_l2500(
+            df,
+            plot_path=plot_path,
+            show=False,
+            filename="f_host_center_vs_l2500_precut.pdf",
+        )
     if {"z", "apparent_mag_2500", "alpha_lambda"}.issubset(df.columns):
-        plot_alpha_lambda_vs_l2500(df, plot_path=plot_path, show=False)
+        plot_alpha_lambda_vs_l2500(
+            df,
+            plot_path=plot_path,
+            show=False,
+            filename="alpha_lambda_vs_l2500_precut.pdf",
+        )
     if "alpha_lambda" in df.columns:
-        plot_alpha_lambda_vs_redshift(df, plot_path=plot_path, show=False)
-        plot_alpha_lambda_histogram(df, plot_path=plot_path, show=False)
+        plot_alpha_lambda_vs_redshift(
+            df,
+            plot_path=plot_path,
+            show=False,
+            filename="alpha_lambda_vs_redshift_precut.pdf",
+        )
+        plot_alpha_lambda_histogram(
+            df,
+            plot_path=plot_path,
+            show=False,
+            filename="alpha_lambda_histogram_precut.pdf",
+        )
     if {"alpha_lambda", "eta_sigma"}.issubset(df.columns):
-        plot_alpha_lambda_vs_eta_sigma(df, plot_path=plot_path, show=False)
+        plot_alpha_lambda_vs_eta_sigma(
+            df,
+            plot_path=plot_path,
+            show=False,
+            filename="alpha_lambda_vs_eta_sigma_precut.pdf",
+        )
     if {"z", "log_tau_uv_rf", "log_sigma_uv"}.issubset(df.columns):
-        plot_tau_sigma_vs_redshift(df, plot_path=plot_path, show=False)
+        plot_tau_sigma_vs_redshift(
+            df,
+            plot_path=plot_path,
+            show=False,
+            filename="tau_sigma_vs_redshift_precut.pdf",
+        )
         plot_sigma_uv_vs_tau_uv_rf(
             df,
             plot_path=plot_path,
             show=False,
-            filename="sigma_uv_vs_tau_uv_rf_precuts.pdf",
+            filename="sigma_uv_vs_tau_uv_rf_precut.pdf",
         )
     if {"log_sigma_uv", "variability_chi_sq_red_g"}.issubset(df.columns):
         plot_sigma_uv_vs_variability_chi_sq_red_g(
             df,
             plot_path=plot_path,
             show=False,
-            filename="sigma_uv_vs_variability_chi_sq_red_g_precuts.pdf",
+            filename="sigma_uv_vs_variability_chi_sq_red_g_precut.pdf",
         )
     if {"z", "apparent_mag_2500", "log_tau_uv_rf", "log_sigma_uv"}.issubset(df.columns):
         plot_l2500_vs_uv_variability_fiducial(
             df,
             plot_path=plot_path,
             show=False,
-            filename="l2500_vs_uv_variability_fiducial_precuts.pdf",
+            filename="l2500_vs_uv_variability_fiducial_precut.pdf",
         )
     if {"z", "apparent_mag_2500", "eta_sigma"}.issubset(df.columns):
         plot_l2500_vs_eta_sigma_fiducial(
             df,
             plot_path=plot_path,
             show=False,
-            filename="l2500_vs_eta_sigma_fiducial_precuts.pdf",
+            filename="l2500_vs_eta_sigma_fiducial_precut.pdf",
         )
     if {"z", "eta_tau", "eta_sigma"}.issubset(df.columns):
-        plot_eta_tau_sigma_vs_redshift(df, plot_path=plot_path, show=False)
+        plot_eta_tau_sigma_vs_redshift(
+            df,
+            plot_path=plot_path,
+            show=False,
+            filename="eta_tau_sigma_vs_redshift_precut.pdf",
+        )
     if {"log_tau_uv_rf", "log_sigma_uv", "LOGMBH", "LOGLEDD_RATIO"}.issubset(df.columns):
-        plot_tau_sigma_vs_wu_catalog(df, plot_path=plot_path, show=False)
+        plot_tau_sigma_vs_wu_catalog(
+            df,
+            plot_path=plot_path,
+            show=False,
+            filename="tau_sigma_vs_wu_catalog_precut.pdf",
+        )
     if {"z", "log_tau_fast_uv", "log_tau_uv_rf", "log_sigma_uv"}.issubset(df.columns):
-        plot_fast_vs_uv_variability(df, plot_path=plot_path, show=False)
+        plot_fast_vs_uv_variability(
+            df,
+            plot_path=plot_path,
+            show=False,
+            filename="fast_vs_uv_variability_precut.pdf",
+        )
     if {"log_sigma_uv", "log_sigma_uv_sf", "log_tau_uv_rf_sf"}.issubset(df.columns) and (
         {"log_tau_uv_rf"}.issubset(df.columns)
         or {"log_tau_uv", "z"}.issubset(df.columns)
@@ -1304,37 +1354,79 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
             df,
             plot_path=plot_path,
             show=False,
-            filename="sf_vs_uv_variability_precuts.pdf",
+            filename="sf_vs_uv_variability_precut.pdf",
         )
     if {"log_sigma_sf_ref_band", "log_tau_sf_ref_band", "log_sigma_band_g", "log_tau_band_g_RF"}.issubset(df.columns):
         plot_sf_ref_band_vs_model_g(
             df,
             plot_path=plot_path,
             show=False,
-            filename="sf_ref_band_vs_model_g_precuts.pdf",
+            filename="sf_ref_band_vs_model_g_precut.pdf",
         )
     if {"z", "apparent_mag_2500"}.issubset(df.columns) and any(
         (f"log_lag_blr_{band}_RF" in df.columns) or (f"log_lag_blr2_{band}_RF" in df.columns)
         for band in ("u", "g", "r", "i", "z")
     ):
-        plot_blr_line_lags_vs_l2500_fiducial(df, plot_path=plot_path, show=False)
+        plot_blr_line_lags_vs_l2500_fiducial(
+            df,
+            plot_path=plot_path,
+            show=False,
+            filename="blr_line_lags_vs_l2500_fiducial_precut.pdf",
+            assignment_probabilities_filename="blr_line_assignment_probabilities_fiducial_precut.pdf",
+        )
     if "log_sigma_uv" in df.columns:
         if any(f"log_amp_delta_blr_{band}" in df.columns for band in ("u", "g", "r", "i", "z")):
-            plot_blr_lag_vs_amp_by_band(df, plot_path=plot_path, show=False, lag_suffix="")
-            plot_blr_amp_vs_redshift_by_band(df, plot_path=plot_path, show=False, lag_suffix="")
+            plot_blr_lag_vs_amp_by_band(
+                df,
+                plot_path=plot_path,
+                show=False,
+                lag_suffix="",
+                filename="blr_lag_vs_amp_by_band_precut.pdf",
+            )
+            plot_blr_amp_vs_redshift_by_band(
+                df,
+                plot_path=plot_path,
+                show=False,
+                lag_suffix="",
+                filename="blr_amp_vs_redshift_by_band_precut.pdf",
+            )
         if any(
             (f"log_lag_blr_{band}_RF" in df.columns) or (f"log_lag_blr_{band}" in df.columns)
             for band in ("u", "g", "r", "i", "z")
         ):
-            plot_blr_lag_vs_redshift_by_band(df, plot_path=plot_path, show=False, lag_suffix="")
+            plot_blr_lag_vs_redshift_by_band(
+                df,
+                plot_path=plot_path,
+                show=False,
+                lag_suffix="",
+                filename="blr_lag_vs_redshift_by_band_precut.pdf",
+            )
         if any(f"log_amp_delta_blr2_{band}" in df.columns for band in ("u", "g", "r", "i", "z")):
-            plot_blr_lag_vs_amp_by_band(df, plot_path=plot_path, show=False, lag_suffix="2")
-            plot_blr_amp_vs_redshift_by_band(df, plot_path=plot_path, show=False, lag_suffix="2")
+            plot_blr_lag_vs_amp_by_band(
+                df,
+                plot_path=plot_path,
+                show=False,
+                lag_suffix="2",
+                filename="blr_lag2_vs_amp_by_band_precut.pdf",
+            )
+            plot_blr_amp_vs_redshift_by_band(
+                df,
+                plot_path=plot_path,
+                show=False,
+                lag_suffix="2",
+                filename="blr2_amp_vs_redshift_by_band_precut.pdf",
+            )
         if any(
             (f"log_lag_blr2_{band}_RF" in df.columns) or (f"log_lag_blr2_{band}" in df.columns)
             for band in ("u", "g", "r", "i", "z")
         ):
-            plot_blr_lag_vs_redshift_by_band(df, plot_path=plot_path, show=False, lag_suffix="2")
+            plot_blr_lag_vs_redshift_by_band(
+                df,
+                plot_path=plot_path,
+                show=False,
+                lag_suffix="2",
+                filename="blr_lag2_vs_redshift_by_band_precut.pdf",
+            )
 
     # Remove objects with implausibly bright or faint apparent magnitude at 2500 A.
     mag_mask = ((df['apparent_mag_2500'] >= 16) & (df['apparent_mag_2500'] < 24))
@@ -1511,7 +1603,12 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
     print(f"\nTotal number of objects removed by all cuts: {len(df_all) - len(df)}")
     print("Final number of quasars:", len(df))
     if {"z", "f_bc_over_pl_3000", "f_fe_uv_over_pl_3000", "f_host_center"}.issubset(df.columns):
-        plot_spectral_fraction_vs_redshift(df, plot_path=plot_path, show=False)
+        plot_spectral_fraction_vs_redshift(
+            df,
+            plot_path=plot_path,
+            show=False,
+            filename="spectral_fraction_vs_redshift_postcut.pdf",
+        )
     if {"g_raw_mean_slope", "g_resid_mean_slope"}.issubset(df.columns):
         for m2500_cut in (23.0, 22.5, 22.0, 21.5):
             plot_g_band_drift_slope_histograms(
@@ -1539,7 +1636,7 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
             df,
             plot_path=plot_path,
             show=False,
-            filename="sigma_uv_vs_tau_uv_rf_postcuts.pdf",
+            filename="sigma_uv_vs_tau_uv_rf_postcut.pdf",
             dynamic_axes=True,
         )
     if {"log_sigma_uv", "variability_chi_sq_red_g"}.issubset(df.columns):
@@ -1547,14 +1644,14 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
             df,
             plot_path=plot_path,
             show=False,
-            filename="sigma_uv_vs_variability_chi_sq_red_g_postcuts.pdf",
+            filename="sigma_uv_vs_variability_chi_sq_red_g_postcut.pdf",
         )
     if {"z", "apparent_mag_2500", "log_tau_uv_rf", "log_sigma_uv"}.issubset(df.columns):
         plot_l2500_vs_uv_variability_fiducial(
             df,
             plot_path=plot_path,
             show=False,
-            filename="l2500_vs_uv_variability_fiducial_postcuts.pdf",
+            filename="l2500_vs_uv_variability_fiducial_postcut.pdf",
             dynamic_axes=True,
         )
     if {"z", "apparent_mag_2500", "eta_sigma"}.issubset(df.columns):
@@ -1562,7 +1659,7 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
             df,
             plot_path=plot_path,
             show=False,
-            filename="l2500_vs_eta_sigma_fiducial_postcuts.pdf",
+            filename="l2500_vs_eta_sigma_fiducial_postcut.pdf",
             dynamic_axes=True,
         )
     if {"z", "eta_tau", "eta_sigma"}.issubset(df.columns):
@@ -1570,7 +1667,7 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
             df,
             plot_path=plot_path,
             show=False,
-            filename="eta_tau_sigma_vs_redshift_postcuts.pdf",
+            filename="eta_tau_sigma_vs_redshift_postcut.pdf",
         )
     if {"log_sigma_uv", "log_sigma_uv_sf", "log_tau_uv_rf_sf"}.issubset(df.columns) and (
         {"log_tau_uv_rf"}.issubset(df.columns)
@@ -1580,14 +1677,14 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
             df,
             plot_path=plot_path,
             show=False,
-            filename="sf_vs_uv_variability_postcuts.pdf",
+            filename="sf_vs_uv_variability_postcut.pdf",
         )
     if {"log_sigma_sf_ref_band", "log_tau_sf_ref_band", "log_sigma_band_g", "log_tau_band_g_RF"}.issubset(df.columns):
         plot_sf_ref_band_vs_model_g(
             df,
             plot_path=plot_path,
             show=False,
-            filename="sf_ref_band_vs_model_g_postcuts.pdf",
+            filename="sf_ref_band_vs_model_g_postcut.pdf",
         )
     plot_cut_diagnostics(df_all.copy(), df.copy(), bins=30, cut_info="all cuts")
     colorpanel_cols = [

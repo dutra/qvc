@@ -298,12 +298,12 @@ def test_plot_sf_vs_uv_variability_writes_custom_pdf(tmp_path, monkeypatch):
         df,
         plot_path=str(tmp_path / "figures"),
         show=False,
-        filename="sf_vs_uv_variability_precuts.pdf",
+        filename="sf_vs_uv_variability_precut.pdf",
     )
 
     assert out is not None
     assert os.path.exists(out)
-    assert out.endswith("sf_vs_uv_variability_precuts.pdf")
+    assert out.endswith("sf_vs_uv_variability_precut.pdf")
 
 
 def test_plot_sf_ref_band_vs_model_g_writes_custom_pdf(tmp_path, monkeypatch):
@@ -328,12 +328,12 @@ def test_plot_sf_ref_band_vs_model_g_writes_custom_pdf(tmp_path, monkeypatch):
         df,
         plot_path=str(tmp_path / "figures"),
         show=False,
-        filename="sf_ref_band_vs_model_g_precuts.pdf",
+        filename="sf_ref_band_vs_model_g_precut.pdf",
     )
 
     assert out is not None
     assert os.path.exists(out)
-    assert out.endswith("sf_ref_band_vs_model_g_precuts.pdf")
+    assert out.endswith("sf_ref_band_vs_model_g_precut.pdf")
 
 
 def test_plot_blr_assignment_probabilities_writes_pdf(tmp_path, monkeypatch):

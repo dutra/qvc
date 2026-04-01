@@ -440,6 +440,8 @@ def plot_blr_line_lags_vs_l2500_fiducial(
     prob_thresh=0.6,
     lag_err_max=0.25,
     cosmo=None,
+    filename="blr_line_lags_vs_l2500_fiducial.pdf",
+    assignment_probabilities_filename="blr_line_assignment_probabilities_fiducial.pdf",
 ):
     """Plot BLR lag against fiducial-cosmology L_2500 for each assigned broad line."""
     if df_agn.empty:
@@ -474,7 +476,7 @@ def plot_blr_line_lags_vs_l2500_fiducial(
         assignments,
         plot_path=plot_path,
         show=show,
-        filename="blr_line_assignment_probabilities_fiducial.pdf",
+        filename=assignment_probabilities_filename,
         title_suffix="(fiducial cosmology)",
     )
 
@@ -544,7 +546,7 @@ def plot_blr_line_lags_vs_l2500_fiducial(
     fig.tight_layout()
     return _save_figure(
         fig,
-        os.path.join(diagnostics_path, "blr_line_lags_vs_l2500_fiducial.pdf"),
+        os.path.join(diagnostics_path, filename),
         dpi=200,
         show=show,
     )
@@ -773,7 +775,7 @@ def plot_cut_diagnostics(df_before, df_after, bins=30, cut_info="", save_path="p
     _save_figure(fig, plot_path, dpi=150)
 
 
-def plot_sigma_uv_host_correction(df, plot_path="plots/hubble", show=False):
+def plot_sigma_uv_host_correction(df, plot_path="plots/hubble", show=False, filename="sigma_uv_host_correction_comparison.pdf"):
     """Compare corrected and uncorrected UV variability amplitudes, colored by redshift."""
     required = {"log_sigma_uv", "log_sigma_uv_uncorrected", "z", "frac_host_psf_2500"}
     if not required.issubset(df.columns):
@@ -847,13 +849,13 @@ def plot_sigma_uv_host_correction(df, plot_path="plots/hubble", show=False):
     diagnostics_path = os.path.join(plot_path or "plots/hubble", "diagnostics")
     return _save_figure(
         fig,
-        os.path.join(diagnostics_path, "sigma_uv_host_correction_comparison.pdf"),
+        os.path.join(diagnostics_path, filename),
         dpi=200,
         show=show,
     )
 
 
-def plot_tau_sigma_vs_redshift(df, plot_path="plots/hubble", show=False):
+def plot_tau_sigma_vs_redshift(df, plot_path="plots/hubble", show=False, filename="tau_sigma_vs_redshift.pdf"):
     """Plot log_tau_uv_rf and log_sigma_uv against redshift for AGN diagnostics."""
     required = {"z", "log_tau_uv_rf", "log_sigma_uv"}
     if not required.issubset(df.columns):
@@ -901,7 +903,7 @@ def plot_tau_sigma_vs_redshift(df, plot_path="plots/hubble", show=False):
     diagnostics_path = os.path.join(plot_path or "plots/hubble", "diagnostics")
     return _save_figure(
         fig,
-        os.path.join(diagnostics_path, "tau_sigma_vs_redshift.pdf"),
+        os.path.join(diagnostics_path, filename),
         dpi=200,
         show=show,
     )
@@ -1026,7 +1028,7 @@ def plot_sigma_uv_vs_variability_chi_sq_red_g(
     )
 
 
-def plot_tau_sigma_vs_wu_catalog(df, plot_path="plots/hubble", show=False):
+def plot_tau_sigma_vs_wu_catalog(df, plot_path="plots/hubble", show=False, filename="tau_sigma_vs_wu_catalog.pdf"):
     """Plot UV variability diagnostics against Wu-catalog BH mass and Eddington ratio."""
     required = {"log_tau_uv_rf", "log_sigma_uv", "LOGMBH", "LOGLEDD_RATIO"}
     if not required.issubset(df.columns):
@@ -1077,7 +1079,7 @@ def plot_tau_sigma_vs_wu_catalog(df, plot_path="plots/hubble", show=False):
     diagnostics_path = os.path.join(plot_path or "plots/hubble", "diagnostics")
     return _save_figure(
         fig,
-        os.path.join(diagnostics_path, "tau_sigma_vs_wu_catalog.pdf"),
+        os.path.join(diagnostics_path, filename),
         dpi=200,
         show=show,
     )
@@ -1142,7 +1144,7 @@ def plot_eta_tau_sigma_vs_redshift(
     )
 
 
-def plot_fast_vs_uv_variability(df, plot_path="plots/hubble", show=False):
+def plot_fast_vs_uv_variability(df, plot_path="plots/hubble", show=False, filename="fast_vs_uv_variability.pdf"):
     """Plot fast-vs-UV variability timescales and amplitudes on log-log axes."""
     tau_fast_col = "log_tau_fast_uv" if "log_tau_fast_uv" in df.columns else None
     tau_uv_col = "log_tau_uv_rf" if "log_tau_uv_rf" in df.columns else ("log_tau_uv" if "log_tau_uv" in df.columns else None)
@@ -1235,7 +1237,7 @@ def plot_fast_vs_uv_variability(df, plot_path="plots/hubble", show=False):
     diagnostics_path = os.path.join(plot_path or "plots/hubble", "diagnostics")
     return _save_figure(
         fig,
-        os.path.join(diagnostics_path, "fast_vs_uv_variability.pdf"),
+        os.path.join(diagnostics_path, filename),
         dpi=200,
         show=show,
     )
@@ -1477,6 +1479,7 @@ def plot_f_host_center_vs_l2500(
     nbins=15,
     min_bin_count=5,
     fit_logL_max=45.5,
+    filename="f_host_center_vs_l2500.pdf",
 ):
     """Plot host fraction against AGN-only log L_2500 with median and sigmoid trends."""
     required = {"z", "apparent_mag_2500", "f_host_center"}
@@ -1587,7 +1590,7 @@ def plot_f_host_center_vs_l2500(
     diagnostics_path = os.path.join(plot_path or "plots/hubble", "diagnostics")
     return _save_figure(
         fig,
-        os.path.join(diagnostics_path, "f_host_center_vs_l2500.pdf"),
+        os.path.join(diagnostics_path, filename),
         dpi=200,
         show=show,
     )
@@ -1724,6 +1727,7 @@ def plot_alpha_lambda_vs_l2500(
     show=False,
     nbins_l2500=16,
     min_bin_count=8,
+    filename="alpha_lambda_vs_l2500.pdf",
 ):
     """Plot alpha_lambda against AGN-only log L_2500 in a single diagnostic panel."""
     required = {"z", "apparent_mag_2500", "alpha_lambda"}
@@ -1784,13 +1788,13 @@ def plot_alpha_lambda_vs_l2500(
     diagnostics_path = os.path.join(plot_path or "plots/hubble", "diagnostics")
     return _save_figure(
         fig,
-        os.path.join(diagnostics_path, "alpha_lambda_vs_l2500.pdf"),
+        os.path.join(diagnostics_path, filename),
         dpi=200,
         show=show,
     )
 
 
-def plot_alpha_lambda_histogram(df, plot_path="plots/hubble", show=False, nbins=40):
+def plot_alpha_lambda_histogram(df, plot_path="plots/hubble", show=False, nbins=40, filename="alpha_lambda_histogram.pdf"):
     """Plot a simple alpha_lambda histogram and estimate its 1 sigma width."""
     if "alpha_lambda" not in df.columns:
         raise KeyError("Missing required column: 'alpha_lambda'.")
@@ -1821,13 +1825,20 @@ def plot_alpha_lambda_histogram(df, plot_path="plots/hubble", show=False, nbins=
     diagnostics_path = os.path.join(plot_path or "plots/hubble", "diagnostics")
     return _save_figure(
         fig,
-        os.path.join(diagnostics_path, "alpha_lambda_histogram.pdf"),
+        os.path.join(diagnostics_path, filename),
         dpi=200,
         show=show,
     )
 
 
-def plot_alpha_lambda_vs_redshift(df, plot_path="plots/hubble", show=False, nbins_z=14, min_bin_count=6):
+def plot_alpha_lambda_vs_redshift(
+    df,
+    plot_path="plots/hubble",
+    show=False,
+    nbins_z=14,
+    min_bin_count=6,
+    filename="alpha_lambda_vs_redshift.pdf",
+):
     """Plot alpha_lambda against redshift with a binned median trend."""
     required = {"z", "alpha_lambda"}
     if not required.issubset(df.columns):
@@ -1881,13 +1892,20 @@ def plot_alpha_lambda_vs_redshift(df, plot_path="plots/hubble", show=False, nbin
     diagnostics_path = os.path.join(plot_path or "plots/hubble", "diagnostics")
     return _save_figure(
         fig,
-        os.path.join(diagnostics_path, "alpha_lambda_vs_redshift.pdf"),
+        os.path.join(diagnostics_path, filename),
         dpi=200,
         show=show,
     )
 
 
-def plot_alpha_lambda_vs_eta_sigma(df, plot_path="plots/hubble", show=False, nbins_eta=14, min_bin_count=6):
+def plot_alpha_lambda_vs_eta_sigma(
+    df,
+    plot_path="plots/hubble",
+    show=False,
+    nbins_eta=14,
+    min_bin_count=6,
+    filename="alpha_lambda_vs_eta_sigma.pdf",
+):
     """Plot alpha_lambda against eta_sigma with a binned median trend."""
     required = {"alpha_lambda", "eta_sigma"}
     if not required.issubset(df.columns):
@@ -1941,13 +1959,13 @@ def plot_alpha_lambda_vs_eta_sigma(df, plot_path="plots/hubble", show=False, nbi
     diagnostics_path = os.path.join(plot_path or "plots/hubble", "diagnostics")
     return _save_figure(
         fig,
-        os.path.join(diagnostics_path, "alpha_lambda_vs_eta_sigma.pdf"),
+        os.path.join(diagnostics_path, filename),
         dpi=200,
         show=show,
     )
 
 
-def plot_blr_lag_vs_amp_by_band(df, plot_path="plots/hubble", show=False, lag_suffix=""):
+def plot_blr_lag_vs_amp_by_band(df, plot_path="plots/hubble", show=False, lag_suffix="", filename=None):
     """Plot BLR lag against inferred BLR amplitude in each band.
 
     The plotted BLR amplitude is constructed from the continuum variability
@@ -2054,7 +2072,7 @@ def plot_blr_lag_vs_amp_by_band(df, plot_path="plots/hubble", show=False, lag_su
         ax.set_axis_off()
 
     diagnostics_path = os.path.join(plot_path or "plots/hubble", "diagnostics")
-    output_name = "blr_lag2_vs_amp_by_band.pdf" if suffix == "2" else "blr_lag_vs_amp_by_band.pdf"
+    output_name = filename if filename is not None else ("blr_lag2_vs_amp_by_band.pdf" if suffix == "2" else "blr_lag_vs_amp_by_band.pdf")
     return _save_figure(
         fig,
         os.path.join(diagnostics_path, output_name),
@@ -2063,7 +2081,7 @@ def plot_blr_lag_vs_amp_by_band(df, plot_path="plots/hubble", show=False, lag_su
     )
 
 
-def plot_blr_lag_vs_redshift_by_band(df, plot_path="plots/hubble", show=False, lag_suffix=""):
+def plot_blr_lag_vs_redshift_by_band(df, plot_path="plots/hubble", show=False, lag_suffix="", filename=None):
     """Plot BLR lag against redshift in each band."""
     suffix = str(lag_suffix or "")
     lag_prefix = f"log_lag_blr{suffix}_"
@@ -2152,7 +2170,7 @@ def plot_blr_lag_vs_redshift_by_band(df, plot_path="plots/hubble", show=False, l
         ax.set_axis_off()
 
     diagnostics_path = os.path.join(plot_path or "plots/hubble", "diagnostics")
-    output_name = (
+    output_name = filename if filename is not None else (
         "blr_lag2_vs_redshift_by_band.pdf"
         if suffix == "2"
         else "blr_lag_vs_redshift_by_band.pdf"
@@ -2165,7 +2183,7 @@ def plot_blr_lag_vs_redshift_by_band(df, plot_path="plots/hubble", show=False, l
     )
 
 
-def plot_blr_amp_vs_redshift_by_band(df, plot_path="plots/hubble", show=False, lag_suffix=""):
+def plot_blr_amp_vs_redshift_by_band(df, plot_path="plots/hubble", show=False, lag_suffix="", filename=None):
     """Plot inferred BLR amplitude against redshift in each band."""
     suffix = str(lag_suffix or "")
     amp_delta_prefix = f"log_amp_delta_blr{suffix}_"
@@ -2246,7 +2264,7 @@ def plot_blr_amp_vs_redshift_by_band(df, plot_path="plots/hubble", show=False, l
 
     fig.tight_layout()
     diagnostics_path = os.path.join(plot_path or "plots/hubble", "diagnostics")
-    output_name = "blr2_amp_vs_redshift_by_band.pdf" if suffix == "2" else "blr_amp_vs_redshift_by_band.pdf"
+    output_name = filename if filename is not None else ("blr2_amp_vs_redshift_by_band.pdf" if suffix == "2" else "blr_amp_vs_redshift_by_band.pdf")
     return _save_figure(
         fig,
         os.path.join(diagnostics_path, output_name),
@@ -6189,6 +6207,7 @@ def plot_spectral_fraction_vs_redshift(
     show=False,
     nbins=12,
     min_bin_count=20,
+    filename="spectral_fraction_vs_redshift.pdf",
 ):
     """Plot f_BC, f_FeII, and f_host_center against redshift."""
     required = {"z", "f_bc_over_pl_3000", "f_fe_uv_over_pl_3000", "f_host_center"}
@@ -6263,7 +6282,7 @@ def plot_spectral_fraction_vs_redshift(
     os.makedirs(diagnostics_path, exist_ok=True)
     return _save_figure(
         fig,
-        os.path.join(diagnostics_path, "spectral_fraction_vs_redshift.pdf"),
+        os.path.join(diagnostics_path, filename),
         dpi=200,
         show=show,
     )
