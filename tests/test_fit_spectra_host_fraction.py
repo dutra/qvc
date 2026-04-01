@@ -94,3 +94,54 @@ def test_estimate_host_2500_fraction_reconstructs_outside_native_range_without_p
 
     assert np.isclose(median, 0.25)
     assert np.isclose(err, 0.034)
+
+
+def test_compute_derived_results_uses_bc_over_total_continuum(monkeypatch):
+    monkeypatch.setattr(
+        fit_spectra,
+        "estimate_m2500_from_model",
+        lambda q: (np.nan, np.nan, np.nan, np.nan),
+    )
+    monkeypatch.setattr(
+        fit_spectra,
+        "reconstruct_posterior_components",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("unexpected reconstruction")),
+    )
+
+    q = SimpleNamespace(
+        numpyro_samples={"log_frac_host": np.zeros(3, dtype=float)},
+        pred_out={
+            "gal_model": np.zeros((3, 3), dtype=float),
+            "continuum_model": np.array(
+                [
+                    [2.0, 2.0, 2.0],
+                    [2.5, 2.5, 2.5],
+                    [1.5, 1.5, 1.5],
+                ],
+                dtype=float,
+            ),
+            "f_bc_model": np.array(
+                [
+                    [0.20, 0.20, 0.20],
+                    [0.25, 0.25, 0.25],
+                    [0.15, 0.15, 0.15],
+                ],
+                dtype=float,
+            ),
+            "f_pl_model": np.ones((3, 3), dtype=float),
+            "f_fe_mgii_model": np.zeros((3, 3), dtype=float),
+        },
+        lam=np.array([4000.0, 6000.0, 8000.0], dtype=float),
+        wave=np.array([2000.0, 3000.0, 4000.0], dtype=float),
+        z=1.0,
+        bi=np.nan,
+        bi_err=np.nan,
+        _fit_decompose_host=True,
+    )
+
+    result = {"z": 1.0}
+    args = SimpleNamespace(decompose_host=True)
+    fit_spectra.compute_derived_results(result, q, args)
+
+    assert np.isclose(result["f_bc_over_pl_3000"], 0.1)
+    assert np.isclose(result["f_bc_over_pl_3000_err"], 0.0136)

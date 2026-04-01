@@ -497,14 +497,13 @@ def compute_derived_results(result, q, args):
         result["f_host_center"] = 0.0
         result["f_host_center_err"] = 0.0
 
-    # BC fraction
-    i3000 = np.argmin(np.abs(np.asarray(q.wave) - 3000.0))
-
-    bc_draws = np.asarray(q.pred_out["f_bc_model"], dtype=float)[:, i3000]
-    pl_draws = np.asarray(q.pred_out["f_pl_model"], dtype=float)[:, i3000]
-
-    bc_over_pl_draws = bc_draws / pl_draws
-    m50, m_err, m16, m84 = sym_percentile(bc_over_pl_draws)
+    # BC fraction, now defined against the total continuum at 3000 A.
+    m50, m_err = posterior_component_fraction_at_wave(
+        q,
+        numerator_key="f_bc_model",
+        denominator_key="continuum_model",
+        wave0=3000.0,
+    )
     result["f_bc_over_pl_3000"] = safe_float(m50)
     result["f_bc_over_pl_3000_err"] = safe_float(m_err)
 
