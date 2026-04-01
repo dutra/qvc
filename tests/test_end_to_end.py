@@ -269,6 +269,64 @@ def test_plot_l2500_vs_uv_variability_fiducial_writes_pdf(tmp_path, monkeypatch)
     assert out.endswith("l2500_vs_uv_variability_fiducial.pdf")
 
 
+def test_plot_sf_vs_uv_variability_writes_custom_pdf(tmp_path, monkeypatch):
+    monkeypatch.setenv("MPLCONFIGDIR", str(tmp_path / "mplconfig"))
+
+    df = pd.DataFrame(
+        {
+            "object_id": ["a", "b", "c", "d"],
+            "z": [0.3, 0.7, 1.1, 1.8],
+            "log_sigma_uv": [-1.05, -0.92, -0.84, -0.73],
+            "log_sigma_uv_sf": [-1.00, -0.90, -0.80, -0.70],
+            "log_tau_uv_rf": [2.10, 2.35, 2.62, 2.88],
+            "log_tau_uv_rf_sf": [2.05, 2.30, 2.58, 2.80],
+            "variability_chi_sq_g": [8.0, 12.0, 20.0, 35.0],
+            "sf_valid": [True, True, True, True],
+        }
+    )
+
+    out = hubble_plotting.plot_sf_vs_uv_variability(
+        df,
+        plot_path=str(tmp_path / "figures"),
+        show=False,
+        filename="sf_vs_uv_variability_precuts.pdf",
+    )
+
+    assert out is not None
+    assert os.path.exists(out)
+    assert out.endswith("sf_vs_uv_variability_precuts.pdf")
+
+
+def test_plot_sf_ref_band_vs_model_g_writes_custom_pdf(tmp_path, monkeypatch):
+    monkeypatch.setenv("MPLCONFIGDIR", str(tmp_path / "mplconfig"))
+
+    df = pd.DataFrame(
+        {
+            "object_id": ["a", "b", "c", "d"],
+            "log_sigma_band_g": [-1.05, -0.92, -0.84, -0.73],
+            "log_sigma_rms_band_g": [-0.99, -0.88, -0.79, -0.69],
+            "log_sigma_sf_ref_band": [-1.00, -0.90, -0.80, -0.70],
+            "log_tau_band_g_RF": [2.10, 2.35, 2.62, 2.88],
+            "log_tau_sf_model_ref_band": [2.02, 2.28, 2.55, 2.77],
+            "log_tau_sf_ref_band": [2.05, 2.30, 2.58, 2.80],
+            "variability_chi_sq_g": [8.0, 12.0, 20.0, 35.0],
+            "sf_valid": [True, True, True, True],
+            "sf_ref_band": ["g", "g", "g", "g"],
+        }
+    )
+
+    out = hubble_plotting.plot_sf_ref_band_vs_model_g(
+        df,
+        plot_path=str(tmp_path / "figures"),
+        show=False,
+        filename="sf_ref_band_vs_model_g_precuts.pdf",
+    )
+
+    assert out is not None
+    assert os.path.exists(out)
+    assert out.endswith("sf_ref_band_vs_model_g_precuts.pdf")
+
+
 def test_plot_blr_assignment_probabilities_writes_pdf(tmp_path, monkeypatch):
     monkeypatch.setenv("MPLCONFIGDIR", str(tmp_path / "mplconfig"))
 
@@ -372,6 +430,8 @@ def test_end_to_end(tmp_path, monkeypatch):
         "plot_Mi_relation",
         "plot_cut_diagnostics",
         "plot_m2500_vs_z_colorpanels",
+        "plot_sf_ref_band_vs_model_g",
+        "plot_sf_vs_uv_variability",
         "plot_sigma_uv_host_correction",
         "plot_tau_sigma_vs_wu_catalog",
         "plot_tau_sigma_vs_redshift",

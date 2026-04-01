@@ -156,8 +156,37 @@ def match_radec(df_a, df_b, populate_cols=[], ra_col_a='ra', dec_col_a='dec', ra
     return result, unmatched_object_ids
 
 def populate_xray(df, table_fpath="data/cscresults.vot"):
+    xray_cols = [
+        "flux_aper_b",
+        "flux_aper_hilim_b",
+        "flux_aper_lolim_b",
+        "flux_aper_err_b",
+        "log_Lxray",
+        "log_Lxray_err",
+        "alphaOX",
+        "alphaOX_err",
+        "alphaOX_exp",
+        "alphaOX_exp_err",
+        "delta_alphaOX",
+        "delta_alphaOX_err",
+    ]
+
+    try:
+        resolved_table_fpath = resolve_qvc_data_path(table_fpath)
+    except FileNotFoundError:
+        warnings.warn(
+            f"CSC3 catalog not found at {table_fpath!r}; skipping X-ray enrichment.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        df_out = df.copy()
+        for col in xray_cols:
+            if col not in df_out.columns:
+                df_out[col] = np.nan
+        return df_out
+
     # Read the CSC VOTable and normalize the column names.
-    vo = parse(resolve_qvc_data_path(table_fpath))
+    vo = parse(resolved_table_fpath)
     table = vo.get_first_table().to_table()
 
     fields = vo.get_first_table().fields
@@ -984,6 +1013,7 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
         plot_cut_diagnostics,
         plot_m2500_vs_z_colorpanels,
         plot_spectral_fraction_vs_redshift,
+        plot_sf_ref_band_vs_model_g,
         plot_sf_vs_uv_variability,
         plot_sigma_uv_vs_variability_chi_sq_red_g,
         plot_sigma_uv_vs_tau_uv_rf,
@@ -1270,7 +1300,19 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
         {"log_tau_uv_rf"}.issubset(df.columns)
         or {"log_tau_uv", "z"}.issubset(df.columns)
     ):
-        plot_sf_vs_uv_variability(df, plot_path=plot_path, show=False)
+        plot_sf_vs_uv_variability(
+            df,
+            plot_path=plot_path,
+            show=False,
+            filename="sf_vs_uv_variability_precuts.pdf",
+        )
+    if {"log_sigma_sf_ref_band", "log_tau_sf_ref_band", "log_sigma_band_g", "log_tau_band_g_RF"}.issubset(df.columns):
+        plot_sf_ref_band_vs_model_g(
+            df,
+            plot_path=plot_path,
+            show=False,
+            filename="sf_ref_band_vs_model_g_precuts.pdf",
+        )
     if {"z", "apparent_mag_2500"}.issubset(df.columns) and any(
         (f"log_lag_blr_{band}_RF" in df.columns) or (f"log_lag_blr2_{band}_RF" in df.columns)
         for band in ("u", "g", "r", "i", "z")
@@ -1511,6 +1553,23 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
             plot_path=plot_path,
             show=False,
             filename="eta_tau_sigma_vs_redshift_postcuts.pdf",
+        )
+    if {"log_sigma_uv", "log_sigma_uv_sf", "log_tau_uv_rf_sf"}.issubset(df.columns) and (
+        {"log_tau_uv_rf"}.issubset(df.columns)
+        or {"log_tau_uv", "z"}.issubset(df.columns)
+    ):
+        plot_sf_vs_uv_variability(
+            df,
+            plot_path=plot_path,
+            show=False,
+            filename="sf_vs_uv_variability_postcuts.pdf",
+        )
+    if {"log_sigma_sf_ref_band", "log_tau_sf_ref_band", "log_sigma_band_g", "log_tau_band_g_RF"}.issubset(df.columns):
+        plot_sf_ref_band_vs_model_g(
+            df,
+            plot_path=plot_path,
+            show=False,
+            filename="sf_ref_band_vs_model_g_postcuts.pdf",
         )
     plot_cut_diagnostics(df_all.copy(), df.copy(), bins=30, cut_info="all cuts")
     colorpanel_cols = [

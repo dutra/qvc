@@ -711,6 +711,26 @@ def log_single_pl(lam, lam_s, d, *_, **__):
     # log10(lam/lam_s) = (log(lam) - log(lam_s)) / ln(10)
     return d * (jnp.log(lam) - jnp.log(lam_s)) / ln10
 
+def ordered_dho_taus(tau_fast, tau_slow, *, eps=1e-12):
+    """Return numerically safe fast/slow DHO timescales with fast <= slow."""
+
+    tau_fast = np.asarray(tau_fast, dtype=float)
+    tau_slow = np.asarray(tau_slow, dtype=float)
+    fast = np.maximum(np.minimum(tau_fast, tau_slow), eps)
+    slow = np.maximum(np.maximum(tau_fast, tau_slow), fast * (1.0 + 1e-6))
+    return fast, slow
+
+
+def dho_stationary_variance_factor(tau_fast, tau_slow, *, eps=1e-12):
+    """Variance factor of the observed overdamped-SHO process at zero lag."""
+
+    fast, slow = ordered_dho_taus(tau_fast, tau_slow, eps=eps)
+    denom = np.maximum(slow - fast, eps)
+    c_fast = -fast / denom
+    c_slow = slow / denom
+    return np.square(c_fast) + np.square(c_slow)
+
+
 def regularize_cov_from_percentiles(x16, x84, y16, y84, cov_xy, eps=1e-8):
     # 1) variance estimates from central 68% interval
     sx = 0.5 * (x84 - x16)
@@ -839,10 +859,22 @@ def process_samples(flat_samples, data, bands, percentiles=[16, 50, 84]):
         log_tau_fast_band.append(val)
     log_tau_fast_band = np.array(log_tau_fast_band).T
 
+    sigma_rms_band = []
+    for i, _band in enumerate(bands):
+        amp = np.power(10.0, log_sigma_band[:, i])
+        tau_fast = np.power(10.0, log_tau_fast_band[:, i])
+        tau_slow = np.power(10.0, log_tau_band[:, i])
+        variance_factor = dho_stationary_variance_factor(tau_fast, tau_slow)
+        sigma_rms_band.append(np.log10(amp * np.sqrt(np.maximum(variance_factor, 1e-300))))
+    sigma_rms_band = np.array(sigma_rms_band).T
+
     for i, band in enumerate(bands):
         median, err = sym_percentile(log_sigma_band[:, i])
         result[f"log_sigma_band_{band}"] = median
         result[f"log_sigma_band_{band}_err"] = err
+        median, err = sym_percentile(sigma_rms_band[:, i])
+        result[f"log_sigma_rms_band_{band}"] = median
+        result[f"log_sigma_rms_band_{band}_err"] = err
         median, err = sym_percentile(log_tau_band[:, i])
         result[f"log_tau_band_{band}_RF"] = median
         result[f"log_tau_band_{band}_RF_err"] = err

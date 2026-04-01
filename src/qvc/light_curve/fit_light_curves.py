@@ -766,7 +766,11 @@ def compute_lomb_scargle_break_diagnostics(model, samples, obj, z, *, n_freq=500
 
 
 def empirical_structure_function(t, y, yerr=None, *, bins_per_decade=3, min_pairs=8):
-    """Compute a binned empirical structure function from one band."""
+    """Compute a binned empirical structure function from one band.
+
+    Uses the Stone-style estimator in each lag bin:
+    SF(tau) = sqrt(mean(dm^2 - err_i^2 - err_j^2)).
+    """
 
     t = np.asarray(t, dtype=float)
     y = np.asarray(y, dtype=float)
@@ -782,13 +786,13 @@ def empirical_structure_function(t, y, yerr=None, *, bins_per_decade=3, min_pair
 
     iu = np.triu_indices(n, k=1)
     tau = dt[iu]
-    sf2 = np.maximum(dy2[iu] - noise2[iu], 0.0)
-    good = np.isfinite(tau) & np.isfinite(sf2) & (tau > 0.0)
+    sf2_term = dy2[iu] - noise2[iu]
+    good = np.isfinite(tau) & np.isfinite(sf2_term) & (tau > 0.0)
     if np.count_nonzero(good) < min_pairs:
         return np.array([]), np.array([]), np.array([]), np.array([])
 
     tau = tau[good]
-    sf2 = sf2[good]
+    sf2_term = sf2_term[good]
     tmin = np.min(tau)
     tmax = np.max(tau)
     if not np.isfinite(tmin) or not np.isfinite(tmax) or tmax <= tmin:
@@ -805,11 +809,21 @@ def empirical_structure_function(t, y, yerr=None, *, bins_per_decade=3, min_pair
         if np.count_nonzero(sel) < min_pairs:
             continue
         tau_chunk = tau[sel]
-        sf_chunk = np.sqrt(sf2[sel])
+        sf2_chunk = sf2_term[sel]
+        sf2_mean = float(np.mean(sf2_chunk))
+        if sf2_chunk.size > 1:
+            sf2_err = float(np.std(sf2_chunk, ddof=1) / np.sqrt(sf2_chunk.size))
+        else:
+            sf2_err = np.nan
+
+        sf_bin_val = np.sqrt(max(sf2_mean, 0.0))
+        sf2_lo = sf2_mean - sf2_err if np.isfinite(sf2_err) else sf2_mean
+        sf2_hi = sf2_mean + sf2_err if np.isfinite(sf2_err) else sf2_mean
+
         tau_bin.append(10.0 ** np.mean(np.log10(tau_chunk)))
-        sf_bin.append(np.median(sf_chunk))
-        sf_lo.append(np.percentile(sf_chunk, 16))
-        sf_hi.append(np.percentile(sf_chunk, 84))
+        sf_bin.append(sf_bin_val)
+        sf_lo.append(np.sqrt(max(sf2_lo, 0.0)))
+        sf_hi.append(np.sqrt(max(sf2_hi, 0.0)))
 
     return (
         np.asarray(tau_bin, dtype=float),
@@ -902,6 +916,92 @@ def fit_structure_function(tau, sf, sf_lo=None, sf_hi=None):
     }
 
 
+def dho_structure_function(tau, amp, tau_fast, tau_slow):
+    """Analytic SF of the continuum-only overdamped-SHO process."""
+
+    tau = np.asarray(tau, dtype=float)
+    amp = np.asarray(amp, dtype=float)
+    variance_factor = dho_stationary_variance_factor(tau_fast, tau_slow)
+    tau_fast_ord, tau_slow_ord = ordered_dho_taus(tau_fast, tau_slow)
+    denom = np.maximum(tau_slow_ord - tau_fast_ord, 1e-12)
+    c_fast = -tau_fast_ord / denom
+    c_slow = tau_slow_ord / denom
+    sf2 = 2.0 * np.square(amp) * (
+        np.square(c_fast) * (1.0 - np.exp(-tau / tau_fast_ord))
+        + np.square(c_slow) * (1.0 - np.exp(-tau / tau_slow_ord))
+    )
+    sf2 = np.where(np.isfinite(variance_factor), sf2, np.nan)
+    return np.sqrt(np.clip(sf2, 0.0, None))
+
+
+def _build_structure_function_lag_grid(t_band, tau_sf):
+    """Choose a rest-frame lag grid that reflects the observed g-band coverage."""
+
+    tau_sf = np.asarray(tau_sf, dtype=float)
+    valid_tau_sf = tau_sf[np.isfinite(tau_sf) & (tau_sf > 0.0)]
+    if valid_tau_sf.size >= 4:
+        return valid_tau_sf
+
+    t_band = np.asarray(t_band, dtype=float)
+    if t_band.size < 3:
+        return np.array([], dtype=float)
+    dt = np.abs(t_band[:, None] - t_band[None, :])
+    iu = np.triu_indices(t_band.size, k=1)
+    tau_pairs = dt[iu]
+    tau_pairs = tau_pairs[np.isfinite(tau_pairs) & (tau_pairs > 0.0)]
+    if tau_pairs.size < 4:
+        return np.array([], dtype=float)
+
+    tau_min = float(np.nanmin(tau_pairs))
+    tau_max = float(np.nanmax(tau_pairs))
+    if not np.isfinite(tau_min) or not np.isfinite(tau_max) or tau_max <= tau_min:
+        return np.array([], dtype=float)
+    return np.logspace(np.log10(tau_min), np.log10(tau_max), 16)
+
+
+def compute_model_structure_function_equivalent(samples, ref_band, tau_grid):
+    """Fit the same DRW SF form to the model-implied DHO SF in the reference band."""
+
+    nan_out = {
+        "log_sigma_sf_model_ref_band": np.nan,
+        "log_sigma_sf_model_ref_band_err": np.nan,
+        "log_tau_sf_model_ref_band": np.nan,
+        "log_tau_sf_model_ref_band_err": np.nan,
+        "sf_model_valid": False,
+    }
+
+    amp_key = f"amp_cont_{ref_band}"
+    tau_fast_key = f"tau_fast_{ref_band}"
+    tau_slow_key = f"tau_slow_{ref_band}"
+    if any(key not in samples for key in (amp_key, tau_fast_key, tau_slow_key)):
+        return nan_out
+
+    tau_grid = np.asarray(tau_grid, dtype=float)
+    tau_grid = tau_grid[np.isfinite(tau_grid) & (tau_grid > 0.0)]
+    if tau_grid.size < 4:
+        return nan_out
+
+    amp = np.asarray(samples[amp_key], dtype=float)
+    tau_fast = np.asarray(samples[tau_fast_key], dtype=float)
+    tau_slow = np.asarray(samples[tau_slow_key], dtype=float)
+    mask = np.isfinite(amp) & np.isfinite(tau_fast) & np.isfinite(tau_slow) & (amp > 0.0) & (tau_fast > 0.0) & (tau_slow > 0.0)
+    if np.count_nonzero(mask) == 0:
+        return nan_out
+
+    amp_med = float(np.nanmedian(amp[mask]))
+    tau_fast_med = float(np.nanmedian(tau_fast[mask]))
+    tau_slow_med = float(np.nanmedian(tau_slow[mask]))
+    sf_model = dho_structure_function(tau_grid, amp_med, tau_fast_med, tau_slow_med)
+    fit = fit_structure_function(tau_grid, sf_model)
+    return {
+        "log_sigma_sf_model_ref_band": fit["log_sigma_sf"],
+        "log_sigma_sf_model_ref_band_err": np.nan,
+        "log_tau_sf_model_ref_band": fit["log_tau_sf"],
+        "log_tau_sf_model_ref_band_err": np.nan,
+        "sf_model_valid": bool(fit["sf_valid"]),
+    }
+
+
 def compute_structure_function_diagnostics(samples, obj, z):
     """Fit SF in the g band using rest-frame lags and convert to UV."""
 
@@ -920,6 +1020,8 @@ def compute_structure_function_diagnostics(samples, obj, z):
     yerr_band = np.asarray(obj["yerr"], dtype=float)[mask]
     tau_sf, sf_med, sf_lo, sf_hi = empirical_structure_function(t_band, y_band, yerr_band)
     fit = fit_structure_function(tau_sf, sf_med, sf_lo, sf_hi)
+    tau_grid_model = _build_structure_function_lag_grid(t_band, tau_sf)
+    model_sf_fit = compute_model_structure_function_equivalent(samples, ref_band, tau_grid_model)
 
     eta_sigma = float(np.nanmedian(np.asarray(samples["eta_sigma"], dtype=float)))
     eta_tau = float(np.nanmedian(np.asarray(samples["eta_tau"], dtype=float)))
@@ -948,6 +1050,7 @@ def compute_structure_function_diagnostics(samples, obj, z):
         "log_tau_uv_rf_sf_err": fit["log_tau_sf_err"],
         "sf_valid": fit["sf_valid"],
         "sf_nbins": fit["sf_nbins"],
+        **model_sf_fit,
     }
 
 

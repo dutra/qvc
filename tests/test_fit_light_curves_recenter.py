@@ -22,6 +22,7 @@ from qvc.light_curve.fit_light_curves import (
     compute_parameter_kls,
     compute_object_adf_diagnostics,
     compute_lambda_center_rf,
+    empirical_structure_function,
     fit_bending_power_law_psd,
     lya_variability_weight,
     make_lc,
@@ -369,6 +370,11 @@ def test_process_samples_keeps_uv_outputs_at_2500_and_stores_band_metadata():
         result["log_lag_blr2_r_RF"],
         np.percentile(np.log10([85.0, 95.0, 105.0]) - np.log10(1.0 + z), 50),
     )
+    expected_sigma_rms_g = np.percentile(
+        np.log10(np.array([0.18, 0.21, 0.24]) * np.sqrt((np.array([25.0, 32.0, 40.0]) ** 2 + np.array([250.0, 310.0, 400.0]) ** 2) / (np.array([250.0, 310.0, 400.0]) - np.array([25.0, 32.0, 40.0])) ** 2)),
+        50,
+    )
+    assert np.isclose(result["log_sigma_rms_band_g"], expected_sigma_rms_g)
 
 
 def test_compute_parameter_kls_returns_expected_keys():
@@ -477,6 +483,36 @@ def test_compute_band_adf_rejects_constant_or_short_series():
     assert np.isnan(const_result["adf_pvalue"])
 
 
+def test_empirical_structure_function_matches_stone_definition():
+    t = np.array([0.0, 1.0, 2.0], dtype=float)
+    y = np.array([0.0, 1.0, 2.0], dtype=float)
+    yerr = np.array([0.1, 0.2, 0.3], dtype=float)
+
+    tau, sf, sf_lo, sf_hi = empirical_structure_function(
+        t,
+        y,
+        yerr,
+        bins_per_decade=1,
+        min_pairs=3,
+    )
+
+    pair_terms = np.array(
+        [
+            1.0**2 - 0.1**2 - 0.2**2,
+            2.0**2 - 0.1**2 - 0.3**2,
+            1.0**2 - 0.2**2 - 0.3**2,
+        ],
+        dtype=float,
+    )
+    expected_tau = 10.0 ** np.mean(np.log10([1.0, 2.0, 1.0]))
+    expected_sf = np.sqrt(np.mean(pair_terms))
+
+    assert tau.shape == (1,)
+    assert np.isclose(tau[0], expected_tau)
+    assert np.isclose(sf[0], expected_sf)
+    assert sf_lo[0] <= sf[0] <= sf_hi[0]
+
+
 def test_compute_structure_function_diagnostics_returns_finite_sensible_g_band_fit():
     rng = np.random.default_rng(11)
     sigma_true = 0.18
@@ -501,6 +537,9 @@ def test_compute_structure_function_diagnostics_returns_finite_sensible_g_band_f
     samples = {
         "eta_sigma": np.array([0.0, 0.05, -0.05], dtype=float),
         "eta_tau": np.array([0.0, 0.05, -0.05], dtype=float),
+        "amp_cont_g": np.array([0.18, 0.19, 0.20], dtype=float),
+        "tau_fast_g": np.array([35.0, 30.0, 40.0], dtype=float),
+        "tau_slow_g": np.array([320.0, 300.0, 340.0], dtype=float),
     }
 
     result = compute_structure_function_diagnostics(samples, obj, z=0.8)
@@ -511,6 +550,10 @@ def test_compute_structure_function_diagnostics_returns_finite_sensible_g_band_f
     assert 1.0 < result["log_tau_sf_ref_band"] < 4.0
     assert -2.0 < result["log_sigma_sf_ref_band"] < 0.0
     assert np.isclose(result["log_sigma_sf_ref_band"], np.log10(sigma_true), atol=0.35)
+    assert np.isfinite(result["log_sigma_sf_model_ref_band"])
+    assert np.isfinite(result["log_tau_sf_model_ref_band"])
+    assert result["sf_model_valid"] is True
+    assert result["log_tau_sf_model_ref_band"] < np.log10(np.median(samples["tau_slow_g"]))
 
 
 def test_compute_object_adf_diagnostics_returns_per_band_fields():

@@ -16,6 +16,7 @@ if str(SRC) not in sys.path:
 from qvc.hubble import hubble_fit
 from qvc.hubble.hubble_utils import (
     get_qvc_result_dir,
+    populate_xray,
     resolve_qvc_result_path,
 )
 
@@ -76,6 +77,38 @@ def test_resolve_qvc_result_path_missing_mentions_env_var(monkeypatch, tmp_path)
 
     with pytest.raises(FileNotFoundError, match="QVC_RESULT_DIR"):
         resolve_qvc_result_path("results/missing/file.h5")
+
+
+def test_populate_xray_missing_catalog_returns_nan_columns(monkeypatch, tmp_path):
+    repo_root = tmp_path / "repo"
+    (repo_root / "data").mkdir(parents=True)
+    monkeypatch.setattr("qvc.hubble.hubble_utils.QVC_ROOT", repo_root)
+    monkeypatch.delenv("QVC_DATA_DIR", raising=False)
+    monkeypatch.chdir(tmp_path)
+
+    df = pd.DataFrame({"object_id": ["agn_1"], "ra": [150.0], "dec": [2.0], "z": [1.0]})
+
+    with pytest.warns(RuntimeWarning, match="skipping X-ray enrichment"):
+        out = populate_xray(df)
+
+    assert len(out) == len(df)
+    np.testing.assert_array_equal(out["object_id"].to_numpy(), df["object_id"].to_numpy())
+    for col in (
+        "flux_aper_b",
+        "flux_aper_hilim_b",
+        "flux_aper_lolim_b",
+        "flux_aper_err_b",
+        "log_Lxray",
+        "log_Lxray_err",
+        "alphaOX",
+        "alphaOX_err",
+        "alphaOX_exp",
+        "alphaOX_exp_err",
+        "delta_alphaOX",
+        "delta_alphaOX_err",
+    ):
+        assert col in out.columns
+        assert out[col].isna().all()
 
 
 def _minimal_agn_df():

@@ -1241,7 +1241,12 @@ def plot_fast_vs_uv_variability(df, plot_path="plots/hubble", show=False):
     )
 
 
-def plot_sf_vs_uv_variability(df, plot_path="plots/hubble", show=False):
+def plot_sf_vs_uv_variability(
+    df,
+    plot_path="plots/hubble",
+    show=False,
+    filename="sf_vs_uv_variability.pdf",
+):
     """Compare UV-converted SF summaries from the g-band fit against the main UV variability fit."""
     required = {"log_sigma_uv", "log_sigma_uv_sf", "log_tau_uv_rf_sf"}
     if not required.issubset(df.columns):
@@ -1346,7 +1351,120 @@ def plot_sf_vs_uv_variability(df, plot_path="plots/hubble", show=False):
     diagnostics_path = os.path.join(plot_path or "plots/hubble", "diagnostics")
     return _save_figure(
         fig,
-        os.path.join(diagnostics_path, "sf_vs_uv_variability.pdf"),
+        os.path.join(diagnostics_path, filename),
+        dpi=200,
+        show=show,
+    )
+
+
+def plot_sf_ref_band_vs_model_g(
+    df,
+    plot_path="plots/hubble",
+    show=False,
+    filename="sf_ref_band_vs_model_g.pdf",
+):
+    """Compare empirical SF summaries against the closest model-equivalent g-band quantities."""
+    required = {"log_sigma_sf_ref_band", "log_tau_sf_ref_band"}
+    if not required.issubset(df.columns):
+        missing = ", ".join(sorted(required - set(df.columns)))
+        raise KeyError(f"Missing required columns for SF-ref-vs-model-g diagnostic plot: {missing}")
+
+    sigma_col = "log_sigma_rms_band_g" if "log_sigma_rms_band_g" in df.columns else "log_sigma_band_g"
+    tau_col = "log_tau_sf_model_ref_band" if "log_tau_sf_model_ref_band" in df.columns else "log_tau_band_g_RF"
+    if sigma_col not in df.columns or tau_col not in df.columns:
+        missing = [col for col in (sigma_col, tau_col) if col not in df.columns]
+        raise KeyError(
+            "Missing required model columns for SF-ref-vs-model-g diagnostic plot: "
+            + ", ".join(sorted(missing))
+        )
+
+    log_sigma_model_g = pd.to_numeric(df[sigma_col], errors="coerce").to_numpy(dtype=float)
+    log_sigma_sf_ref = pd.to_numeric(df["log_sigma_sf_ref_band"], errors="coerce").to_numpy(dtype=float)
+    log_tau_model_g = pd.to_numeric(df[tau_col], errors="coerce").to_numpy(dtype=float)
+    log_tau_sf_ref = pd.to_numeric(df["log_tau_sf_ref_band"], errors="coerce").to_numpy(dtype=float)
+    sf_valid = (
+        pd.Series(df["sf_valid"]).fillna(False).astype(bool).to_numpy()
+        if "sf_valid" in df.columns else np.ones(len(df), dtype=bool)
+    )
+    ref_band_ok = (
+        pd.Series(df["sf_ref_band"]).fillna("").astype(str).eq("g").to_numpy()
+        if "sf_ref_band" in df.columns else np.ones(len(df), dtype=bool)
+    )
+    variability_chi_sq_g = (
+        pd.to_numeric(df["variability_chi_sq_g"], errors="coerce").to_numpy(dtype=float)
+        if "variability_chi_sq_g" in df.columns else np.full(len(df), np.nan)
+    )
+    log_variability_chi_sq_g = np.full(len(df), np.nan, dtype=float)
+    positive_chi_sq = np.isfinite(variability_chi_sq_g) & (variability_chi_sq_g > 0.0)
+    log_variability_chi_sq_g[positive_chi_sq] = np.log10(variability_chi_sq_g[positive_chi_sq])
+
+    fig, axes = plt.subplots(1, 2, figsize=(13.5, 5.8))
+    panels = [
+        (
+            axes[0],
+            log_sigma_model_g,
+            log_sigma_sf_ref,
+            r"$\log \sigma_{g,\mathrm{model\ RMS}}$" if sigma_col == "log_sigma_rms_band_g" else r"$\log \sigma_{g,\mathrm{model}}$",
+            r"$\log \sigma_{\mathrm{SF,ref}}$",
+            "No finite SF/model-g sigma values",
+        ),
+        (
+            axes[1],
+            log_tau_model_g,
+            log_tau_sf_ref,
+            r"$\log \tau_{\mathrm{SF,model\ equiv}}$" if tau_col == "log_tau_sf_model_ref_band" else r"$\log \tau_{g,\mathrm{model,RF}}$",
+            r"$\log \tau_{\mathrm{SF,ref}}$",
+            "No finite SF/model-g tau values",
+        ),
+    ]
+
+    last_scatter = None
+    for ax, x, y, xlabel, ylabel, empty_label in panels:
+        mask = sf_valid & ref_band_ok & np.isfinite(x) & np.isfinite(y)
+        color_mask = mask & np.isfinite(log_variability_chi_sq_g)
+        if np.any(mask):
+            if np.any(mask & ~color_mask):
+                ax.scatter(
+                    x[mask & ~color_mask],
+                    y[mask & ~color_mask],
+                    color="0.75",
+                    s=10,
+                    alpha=0.35,
+                    linewidths=0,
+                    rasterized=True,
+                )
+            if np.any(color_mask):
+                last_scatter = ax.scatter(
+                    x[color_mask],
+                    y[color_mask],
+                    c=log_variability_chi_sq_g[color_mask],
+                    cmap="viridis",
+                    s=10,
+                    alpha=0.65,
+                    linewidths=0,
+                    rasterized=True,
+                )
+            lo = min(np.nanmin(x[mask]), np.nanmin(y[mask]))
+            hi = max(np.nanmax(x[mask]), np.nanmax(y[mask]))
+            if np.isfinite(lo) and np.isfinite(hi) and hi > lo:
+                pad = 0.05 * max(hi - lo, 1e-6)
+                ax.plot([lo, hi], [lo, hi], color="k", ls="--", lw=1.0, alpha=0.8)
+                ax.set_xlim(lo - pad, hi + pad)
+                ax.set_ylim(lo - pad, hi + pad)
+        else:
+            ax.text(0.5, 0.5, empty_label, ha="center", va="center", transform=ax.transAxes)
+
+        ax.set_xlabel(xlabel)
+        ax.set_ylabel(ylabel)
+
+    if last_scatter is not None and last_scatter.get_array() is not None:
+        cbar = fig.colorbar(last_scatter, ax=axes.tolist())
+        cbar.set_label(r"$\log_{10}(\chi^2_g)$")
+
+    diagnostics_path = os.path.join(plot_path or "plots/hubble", "diagnostics")
+    return _save_figure(
+        fig,
+        os.path.join(diagnostics_path, filename),
         dpi=200,
         show=show,
     )
