@@ -126,7 +126,14 @@ def make_run_tag(
 
 
 def validate_resume_checkpoint(results, checkpoint_file, ndim, n_agn):
-    required_keys = {"flat_samples", "dmi_max_w", "integrals_max_w", "logZ", "logZerr"}
+    required_keys = {
+        "flat_samples",
+        "dmi_max_w",
+        "dmi_posterior_sigma",
+        "integrals_max_w",
+        "logZ",
+        "logZerr",
+    }
     missing_keys = sorted(required_keys - set(results.keys()))
     if missing_keys:
         raise RuntimeError(
@@ -168,6 +175,13 @@ def validate_resume_checkpoint(results, checkpoint_file, ndim, n_agn):
                 f"dmi_posterior_median has length {value.shape[0]}, but the current run has {n_agn} AGN objects. "
                 "Delete the checkpoint or use a new output filename."
             )
+    value = np.asarray(results["dmi_posterior_sigma"])
+    if value.ndim != 0 and value.shape[0] != n_agn:
+        raise RuntimeError(
+            f"Resume checkpoint '{checkpoint_file}' is incompatible with the current AGN selection: "
+            f"dmi_posterior_sigma has length {value.shape[0]}, but the current run has {n_agn} AGN objects. "
+            "Delete the checkpoint or use a new output filename."
+        )
 
 
 def resolve_resume_checkpoint_path(resume, checkpoint_file):
@@ -328,6 +342,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
         flat_samples = r["flat_samples"]
         dmi_max_w = r["dmi_max_w"]
         dmi_posterior_median = r.get("dmi_posterior_median", dmi_max_w)
+        dmi_posterior_sigma = r["dmi_posterior_sigma"]
         logZ = r["logZ"]
         logZerr = r["logZerr"]
         integrals_max_w = r["integrals_max_w"]
@@ -440,6 +455,10 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
         integrals_max_w = blobs[idx_max_weight,:][0]  # this is integrals for that sample, shape: (nobj,)
         dmi_max_w = blobs[idx_max_weight,:][1]  # this is dmi for that sample, shape: (nobj,)
         dmi_posterior_median = np.median(flat_blobs[:, 1, :], axis=0)
+        dmi_posterior_sigma = 0.5 * (
+            np.percentile(flat_blobs[:, 1, :], 84, axis=0)
+            - np.percentile(flat_blobs[:, 1, :], 16, axis=0)
+        )
         
         print("\nHighest-weight (posterior) sample:")
         print("  idx:", idx_max_weight)
@@ -478,12 +497,14 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
         print("Debias correction summary:")
         print("  median |dmi_max_w|:", float(np.nanmedian(np.abs(dmi_max_w))))
         print("  median |dmi_posterior_median|:", float(np.nanmedian(np.abs(dmi_posterior_median))))
+        print("  median sigma_dmi:", float(np.nanmedian(dmi_posterior_sigma)))
 
         save_chains(
             checkpoint_file,
             flat_samples=flat_samples,
             dmi_max_w=dmi_max_w,
             dmi_posterior_median=dmi_posterior_median,
+            dmi_posterior_sigma=dmi_posterior_sigma,
             logZ=logZ,
             logZerr=logZerr,
             integrals_max_w=integrals_max_w,
@@ -511,7 +532,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
         plot_path=plot_path,
     )
 
-    return flat_samples, model_labels, dm_interp, logZ, logZerr
+    return flat_samples, model_labels, dm_interp, logZ, logZerr, dmi_posterior_sigma
 
 
 def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, 
@@ -560,7 +581,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
 
     report_pivots(df_agn_fit_selection)
 
-    flat_samples, model_labels, dm_interp, logZ, logZerr = run_mcmc_pipeline(
+    flat_samples, model_labels, dm_interp, logZ, logZerr, dmi_posterior_sigma = run_mcmc_pipeline(
                                                         df_agn_fit_selection, df_agn_all,
                                                         df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
                                                         df_calibrators=df_calibrators,
@@ -611,12 +632,37 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
     chisq_red_L2500, _ = reduced_chi_squared(L_residuals_debiased, L_pred_std_debiased, n_params=len(model_labels)-1)
 
     print("Plotting Hubble diagram...")
+    dmi_posterior_sigma_full = None
+    if uniform_redshift_distribution:
+        print(
+            "Uniform-redshift selection uses resampling with replacement; "
+            "disabling sigma_dmi overlay on full-sample Hubble plots."
+        )
+    else:
+        if len(df_agn_fit_selection) != len(dmi_posterior_sigma):
+            raise ValueError(
+                "Fit/plot alignment failure: "
+                f"df_agn_fit_selection has length {len(df_agn_fit_selection)}, "
+                f"but dmi_posterior_sigma has length {len(dmi_posterior_sigma)}."
+            )
+        fit_indices = pd.Index(df_agn_fit_selection.index)
+        if not fit_indices.isin(df_agn.index).all():
+            missing = fit_indices[~fit_indices.isin(df_agn.index)].tolist()[:10]
+            raise ValueError(
+                "Fit/plot alignment failure: fitted AGN selection contains index values "
+                f"not present in df_agn: {missing}"
+            )
+        dmi_posterior_sigma_full = np.full(len(df_agn), np.nan, dtype=float)
+        df_agn_index_positions = pd.Series(np.arange(len(df_agn)), index=df_agn.index)
+        dmi_posterior_sigma_full[df_agn_index_positions.loc[fit_indices].to_numpy()] = np.asarray(
+            dmi_posterior_sigma, dtype=float
+        )
     # Debiased (Bias corrected)
     r = plot_hubble(flat_samples, df_agn, df_pantheon, 
                     cosmo_model=cosmo_model, z_pivot_agn=z_pivot_agn, 
                     show_true=False, show=False, debias=True, dm_interp=dm_interp, plot_path=plot_path,
                     cosmo_model_samples=cosmo_model_joint_samples, verbose=verbose, residuals_sigma_clip=residuals_sigma_clip,
-                    df_calibrators=df_calibrators)
+                    df_calibrators=df_calibrators, dmi_sigma=dmi_posterior_sigma_full)
     debiased_residuals, debiased_residuals_err, mu_pred_median_debiased, mu_pred_std_debiased, mu_pred_std_debiased_with_scatter = r
     # Biased
     r = plot_hubble(flat_samples, df_agn, df_pantheon, 
@@ -624,7 +670,11 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 show_true=False, show=False, debias=False, plot_path=plot_path, verbose=False)
     biased_residuals, biased_residuals_err, _, _, _ = r
 
-    chisq_red_hubble_debiased, _ = reduced_chi_squared(debiased_residuals, mu_pred_std_debiased, n_params=len(model_labels)-1)
+    chisq_red_hubble_debiased, _ = reduced_chi_squared(
+        debiased_residuals,
+        mu_pred_std_debiased_with_scatter,
+        n_params=len(model_labels)-1,
+    )
 
 
 
@@ -915,7 +965,7 @@ if __name__ == "__main__":
         "--correct-sigma-uv-host",
         action="store_true",
         default=False,
-        help="Correct log_sigma_uv using frac_host_psf_2500 and save a diagnostics plot.",
+        help="Correct log_sigma_uv using f_host_center, propagate f_host_center_err into log_sigma_uv_std_psd, and save diagnostics plots.",
     )
     parser.add_argument(
         "--fit_alpha_lambda_term",
@@ -973,7 +1023,6 @@ if __name__ == "__main__":
             raise ValueError("Unsupported file format for agn_calibrators. Use .h5 or .csv")
     else:
         df_calibrators = None
-
 
     if args.use_jax:
         if args.run != "single":

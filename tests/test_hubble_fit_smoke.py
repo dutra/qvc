@@ -127,6 +127,7 @@ def test_run_single_skip_plots_smoke(fake_data, monkeypatch, tmp_path):
     priors, model_labels, _ = hubble_model.get_model_params("FlatLambdaCDM", only_sna=False)
     theta = np.array([(priors[key][0] + priors[key][1]) / 2.0 for key in model_labels], dtype=float)
     flat_samples = np.tile(theta[None, :], (8, 1))
+    dmi_posterior_sigma = np.full(len(df_agn), 0.05)
 
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(hubble_fit, "plot_redshift_histograms", lambda *args, **kwargs: None)
@@ -137,7 +138,14 @@ def test_run_single_skip_plots_smoke(fake_data, monkeypatch, tmp_path):
     monkeypatch.setattr(
         hubble_fit,
         "run_mcmc_pipeline",
-        lambda *args, **kwargs: (flat_samples, model_labels, lambda pts: np.zeros(len(np.atleast_2d(pts))), -50.0, 0.2),
+        lambda *args, **kwargs: (
+            flat_samples,
+            model_labels,
+            lambda pts: np.zeros(len(np.atleast_2d(pts))),
+            -50.0,
+            0.2,
+            dmi_posterior_sigma,
+        ),
     )
 
     result = hubble_fit.run_single(
@@ -172,6 +180,7 @@ def test_run_single_only_sna_smoke(fake_data, monkeypatch, tmp_path):
     priors, model_labels, _ = hubble_model.get_model_params("FlatLambdaCDM", only_sna=True)
     theta = np.array([(priors[key][0] + priors[key][1]) / 2.0 for key in model_labels], dtype=float)
     flat_samples = np.tile(theta[None, :], (8, 1))
+    dmi_posterior_sigma = np.full(len(df_agn), 0.05)
 
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(hubble_fit, "plot_redshift_histograms", lambda *args, **kwargs: None)
@@ -182,7 +191,14 @@ def test_run_single_only_sna_smoke(fake_data, monkeypatch, tmp_path):
     monkeypatch.setattr(
         hubble_fit,
         "run_mcmc_pipeline",
-        lambda *args, **kwargs: (flat_samples, model_labels, lambda pts: np.zeros(len(np.atleast_2d(pts))), -25.0, 0.15),
+        lambda *args, **kwargs: (
+            flat_samples,
+            model_labels,
+            lambda pts: np.zeros(len(np.atleast_2d(pts))),
+            -25.0,
+            0.15,
+            dmi_posterior_sigma,
+        ),
     )
 
     result = hubble_fit.run_single(
@@ -215,7 +231,7 @@ def test_run_single_only_sna_smoke(fake_data, monkeypatch, tmp_path):
 @pytest.mark.parametrize("resume_value, use_default_checkpoint", [(True, True), ("custom_resume.h5", False)])
 def test_resolve_resume_checkpoint_path_requires_existing_file(tmp_path, resume_value, use_default_checkpoint):
     default_checkpoint = tmp_path / "default_resume.h5"
-    expected_path = default_checkpoint if use_default_checkpoint else tmp_path / "custom_resume.h5"
+    expected_path = default_checkpoint if use_default_checkpoint else "custom_resume.h5"
 
     with pytest.raises(FileNotFoundError, match=expected_path.name):
         hubble_fit.resolve_resume_checkpoint_path(resume_value, str(default_checkpoint))

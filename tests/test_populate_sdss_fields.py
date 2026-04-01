@@ -49,6 +49,7 @@ def _build_dr16q_table():
             "PLATE": np.array([1000, 1001, 1002]),
             "MJD": np.array([55000, 55001, 55002]),
             "FIBERID": np.array([10, 11, 12]),
+            "SN_MEDIAN_ALL": np.array([15.0, 16.0, 17.0]),
         }
     )
 
@@ -100,6 +101,7 @@ def test_populate_sdss_fields_strict_success(monkeypatch):
     assert result[0]["z_err"] == 0.01
     assert result[0]["sdss_name"] == "A"
     assert result[0]["plate"] == 1000
+    assert result[0]["SN_MEDIAN_ALL"] == 15.0
     np.testing.assert_allclose(result[0]["LOGLBOL"], 45.1)
     np.testing.assert_allclose(result[0]["LOGLBOL_ERR"], 0.1)
     np.testing.assert_allclose(result[0]["LOGLBOL_CORRECTED"], np.log10(5.15) + 44.0)
@@ -112,6 +114,7 @@ def test_populate_sdss_fields_strict_success(monkeypatch):
     assert result[1]["sdss_name"] == "B"
     assert result[1]["LOGL5100"] == 45.2
     assert result[1]["fiberid"] == 11
+    assert result[1]["SN_MEDIAN_ALL"] == 16.0
     np.testing.assert_allclose(result[1]["LOGLBOL"], 46.2)
     np.testing.assert_allclose(result[1]["LOGLBOL_ERR"], 0.2)
     np.testing.assert_allclose(result[1]["LOGLBOL_CORRECTED"], 46.2)

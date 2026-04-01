@@ -383,10 +383,13 @@ def populate_spectra_fit(df, spectra_fit_csvs, best=True):
         'f_fe_uv_over_pl_3000': float,
         'f_bc_over_pl_3000': float,
         'f_host_center': float,
+        'f_host_center_err': float,
         'wrms': float,
         'frac_host_psf_2500': float,
         'reddening_ebv': float,
         'ebv_mw': float,
+        'ebv_wu': float,
+        'SN_MEDIAN_ALL': float
     }
 
     # Drop existing derived columns before re-merging them from the fit tables.
@@ -419,16 +422,6 @@ def populate_spectra_fit(df, spectra_fit_csvs, best=True):
         df_spectra.columns = [_norm_name(c) for c in df_spectra.columns]
         df_spectra = _ensure_object_id(df_spectra)
 
-        # Normalize boolean columns that may have been serialized as strings.
-        for bcol in ["best", "BC", "decomp_host", "poly"]:
-            if bcol in df_spectra.columns:
-                df_spectra[bcol] = (
-                    df_spectra[bcol]
-                    .astype(str)
-                    .str.strip()
-                    .str.lower()
-                    .isin(["true", "1", "t", "yes"])
-                )
 
         if best:
             # Keep only the preferred fit for each object.
@@ -1148,30 +1141,59 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
         df["log_sigma_uv_uncorrected"] = pd.to_numeric(df["log_sigma_uv"], errors="coerce")
     # Use the spectroscopic host fraction at 2500 A for the sigma_uv host correction.
     if correct_sigma_uv_host:
-        if {"log_sigma_uv_uncorrected", "f_host_center"}.issubset(df.columns):
+        required_cols = {"log_sigma_uv_uncorrected", "f_host_center", "log_sigma_uv_std_psd"}
+        if required_cols.issubset(df.columns):
             f_host_center = pd.to_numeric(df["f_host_center"], errors="coerce")
             valid_frac_host = np.isfinite(f_host_center) & (f_host_center >= 0.0) & (f_host_center < 1.0)
             agn_frac = 1.0 - f_host_center
             valid_hostcorr = valid_frac_host & np.isfinite(agn_frac) & (agn_frac > 0.0)
+            ln10 = np.log(10.0)
+
+            log_sigma_uv_std_psd_uncorrected = pd.to_numeric(
+                df["log_sigma_uv_std_psd"], errors="coerce"
+            )
+            df["log_sigma_uv_std_psd_uncorrected"] = log_sigma_uv_std_psd_uncorrected
+
+            if "f_host_center_err" in df.columns:
+                f_host_center_err = pd.to_numeric(df["f_host_center_err"], errors="coerce").fillna(0.0)
+            else:
+                f_host_center_err = pd.Series(np.zeros(len(df), dtype=float), index=df.index)
+            hostcorr_sigma_term = np.where(
+                valid_hostcorr,
+                f_host_center_err.to_numpy(dtype=float) / (agn_frac.to_numpy(dtype=float) * ln10),
+                0.0,
+            )
+            df["log_sigma_uv_hostcorr_err"] = hostcorr_sigma_term
+
             df["sigma_uv_hostcorr_factor"] = np.where(valid_hostcorr, 1.0 / agn_frac, np.nan)
             df["log_sigma_uv"] = np.where(
                 valid_hostcorr,
                 df["log_sigma_uv_uncorrected"] + np.log10(df["sigma_uv_hostcorr_factor"]),
                 df["log_sigma_uv_uncorrected"],
             )
+            corrected_sigma_var = (
+                np.square(log_sigma_uv_std_psd_uncorrected.to_numpy(dtype=float))
+                + np.square(hostcorr_sigma_term)
+            )
+            df["log_sigma_uv_std_psd_corrected"] = np.where(
+                valid_hostcorr,
+                np.sqrt(corrected_sigma_var),
+                log_sigma_uv_std_psd_uncorrected,
+            )
+            df["log_sigma_uv_std_psd"] = df["log_sigma_uv_std_psd_corrected"]
             print(
                 "Applied sigma_uv host correction using f_host_center: "
                 "sigma_uv_corrected = sigma_uv / (1 - f_host_center)"
             )
             delta_log_sigma = df["log_sigma_uv"] - df["log_sigma_uv_uncorrected"]
             valid_expected_increase = valid_hostcorr & np.isfinite(delta_log_sigma)
-            if np.any(valid_expected_increase & (delta_log_sigma <= 0.0)):
+            if np.any(valid_expected_increase & (delta_log_sigma < 0.0)):
                 bad_rows = df.loc[
-                    valid_expected_increase & (delta_log_sigma <= 0.0),
+                    valid_expected_increase & (delta_log_sigma < 0.0),
                     ["object_id", "f_host_center", "log_sigma_uv_uncorrected", "log_sigma_uv"],
                 ]
                 raise ValueError(
-                    "Host-corrected log_sigma_uv should be larger than the uncorrected value "
+                    "Host-corrected log_sigma_uv should be larger or equal than the uncorrected value "
                     "for all valid f_host_center rows. Offending rows:\n"
                     f"{bad_rows.head(10).to_string(index=False)}"
                 )
@@ -1181,9 +1203,24 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
                     f"median delta={np.nanmedian(delta_log_sigma[valid_expected_increase]):.4f} dex, "
                     f"min delta={np.nanmin(delta_log_sigma[valid_expected_increase]):.4f} dex"
                 )
+            corrected_sigma_delta = (
+                df["log_sigma_uv_std_psd"].to_numpy(dtype=float)
+                - df["log_sigma_uv_std_psd_uncorrected"].to_numpy(dtype=float)
+            )
+            valid_sigma_delta = valid_hostcorr & np.isfinite(corrected_sigma_delta)
+            if np.any(valid_sigma_delta):
+                print(
+                    "Host sigma_uv uncertainty propagation sanity check: "
+                    f"median delta={np.nanmedian(corrected_sigma_delta[valid_sigma_delta]):.4f} dex, "
+                    f"max delta={np.nanmax(corrected_sigma_delta[valid_sigma_delta]):.4f} dex"
+                )
             plot_sigma_uv_host_correction(df, plot_path=plot_path, show=False)
         else:
-            raise KeyError("correct_sigma_uv_host=True requires 'log_sigma_uv' and 'f_host_center'.")
+            missing_cols = sorted(required_cols - set(df.columns))
+            raise KeyError(
+                "correct_sigma_uv_host=True requires 'log_sigma_uv', 'f_host_center', "
+                f"and 'log_sigma_uv_std_psd'. Missing: {missing_cols}"
+            )
 
     if {"z", "apparent_mag_2500", "f_host_center"}.issubset(df.columns):
         plot_f_host_center_vs_l2500(df, plot_path=plot_path, show=False)
@@ -2728,6 +2765,7 @@ def select_agn_subset_uniform_with_replacement(
     print(f"+++ Unique AGNs in selected sample: {n_unique}/{len(df_out)}")
 
     return df_out
+
 
 
 def report_pivots(df_agn):

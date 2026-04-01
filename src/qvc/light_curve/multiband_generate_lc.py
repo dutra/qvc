@@ -615,6 +615,7 @@ def populate_sdss_fields(s82_objs, progress_bar=False):
         "PLATE",
         "MJD",
         "FIBERID",
+        "SN_MEDIAN_ALL"
     )
     missing_dr16q_columns = [name for name in required_dr16q_columns if name not in dr16q.colnames]
     if missing_dr16q_columns:
@@ -667,6 +668,7 @@ def populate_sdss_fields(s82_objs, progress_bar=False):
     loglbol_corrected = np.where(z_vals < 0.7, np.log10(5.15) + logl3000, loglbol)
     loglbol_corrected_err = np.where(z_vals < 0.7, logl3000_err, loglbol_err)
     ebv_vals = np.asarray(dr16q["EBV"])[matched_fits_idx]
+    sn_median_all = np.asarray(dr16q["SN_MEDIAN_ALL"])[matched_fits_idx]
 
     for field, values in (
         ("ra", np.asarray(matched_rows["RA"], dtype=float)),
@@ -688,6 +690,7 @@ def populate_sdss_fields(s82_objs, progress_bar=False):
         ("plate", np.asarray(dr16q["PLATE"])[matched_fits_idx]),
         ("mjd", np.asarray(dr16q["MJD"])[matched_fits_idx]),
         ("fiberid", np.asarray(dr16q["FIBERID"])[matched_fits_idx]),
+        ("SN_MEDIAN_ALL", sn_median_all),
     ):
         for row_idx, value in zip(matched_row_idx, values):
             s82_objs[row_idx][field] = value
