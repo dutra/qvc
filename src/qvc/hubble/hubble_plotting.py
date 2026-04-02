@@ -4828,7 +4828,17 @@ def plot_full_residuals(
             x = df_agn.loc[mask, key_y].to_numpy()
             y = df_agn.loc[mask, key].to_numpy()
             xlabel, ylabel = key_y, key
-            norm = mpl.colors.Normalize(vmin=-4, vmax=4)
+            color_num = pd.to_numeric(pd.Series(color_values), errors='coerce').to_numpy(dtype=float)
+            finite_color = np.isfinite(color_num)
+            if np.any(finite_color):
+                cmin = float(np.nanmin(color_num[finite_color]))
+                cmax = float(np.nanmax(color_num[finite_color]))
+                if cmin == cmax:
+                    cmin, cmax = cmin - 1e-6, cmax + 1e-6
+                norm = mpl.colors.Normalize(vmin=cmin, vmax=cmax)
+                color_values = color_num
+            else:
+                norm = None
             cmap = 'bwr_r'
         return x, y, color_values, xlabel, ylabel, cmap, norm
 
@@ -5090,7 +5100,7 @@ def plot_full_residuals(
 
     os.makedirs(plot_path, exist_ok=True)
     fig.tight_layout()
-    _save_figure(
+    return _save_figure(
         fig,
         os.path.join(plot_path, f"{output_tag}_{'debiased' if debias else 'biased'}_y{key_y}_c{key_color}_zcut{z_cut}.pdf"),
         dpi=150,
@@ -6328,8 +6338,6 @@ def plot_spectral_fraction_vs_redshift(
     if "f_PL" in df_agn.columns:
         panel_specs.append(("f_PL", r"$f_{\rm PL}$"))
 
-    if "f_host_center" in df_agn.columns:
-        panel_specs.append(("f_host_center", r"$f_{\rm host,center}$"))
     if "f_host_2500" in df_agn.columns:
         panel_specs.append(("f_host_2500", r"$f_{\rm host,2500}$"))
     if len(panel_specs) == 2:
