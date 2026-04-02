@@ -2406,6 +2406,13 @@ def main():
     parser.add_argument("--disable_correlation_plot", action="store_true", default=False, help="Disable correlation matrix plot.")
     parser.add_argument("--disable_histogram_plot", action="store_true", default=False, help="Disable posterior histogram plot.")
     parser.add_argument("--disable_corner_plot", action="store_true", default=False, help="Disable corner plot.")
+    parser.add_argument(
+        "--corner_plot_mode",
+        type=str,
+        choices=("fast", "full"),
+        default="fast",
+        help="Corner plot row selection: fast subsampling or full posterior samples.",
+    )
     parser.add_argument("--disable_lag_blr", action="store_true", default=False, help="Disable BLR lag model.")
     parser.add_argument("--disable_lag_bc", action="store_true", default=False, help="Disable Balmer-continuum lag model.")
     parser.add_argument("--disable_plot_psd", action="store_true", default=False, help="Disable PSD sub-plot.")
@@ -2791,7 +2798,11 @@ def main():
                     if not args.disable_histogram_plot:
                         plot_all_histograms(obj_flat_samples_flatten_per_band, obj)
                     if not args.disable_corner_plot:
-                        plot_posterior_fast(obj_flat_samples_flatten_per_band, obj)
+                        plot_posterior(
+                            obj_flat_samples_flatten_per_band,
+                            obj,
+                            sample_mode=args.corner_plot_mode,
+                        )
                 except Exception as e:
                     logging.error(f"[{oid}] Plotting error: {e}")
                     logging.error(traceback.format_exc())

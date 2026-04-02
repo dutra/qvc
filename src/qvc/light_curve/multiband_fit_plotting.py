@@ -55,6 +55,27 @@ def _get_param(sample_dict, primary, fallback=None):
     raise KeyError(f"Missing parameter '{primary}'" + (f" (fallback '{fallback}')" if fallback else ""))
 
 
+def _corner_plot_labels(samples_flat):
+    """Return ordered candidate and filtered corner-plot parameter labels."""
+
+    all_labels = list(samples_flat.keys())
+    excluded_prefixes = (
+        "lag_disk_",
+        "lag_bc_",
+        "lag_blr_",
+        "lag_blr2_",
+        "log_sigma_hat_",
+        "log_lag_blr_raw_",
+        "log_lag_blr2_raw_",
+    )
+    labels_for_corner = [
+        label
+        for label in all_labels
+        if not label.startswith(excluded_prefixes)
+    ]
+    return all_labels, labels_for_corner
+
+
 def save_lc_plot(times, mags, magerrs, object_id):
     logging.info("Saving LC plot")
     # Plot and save the light curves
@@ -76,46 +97,6 @@ def save_lc_plot(times, mags, magerrs, object_id):
     plt.savefig(os.path.join("light_curves", f'{object_id}_light_curve.png'))
     plt.close(fig)
     logging.info(f"Saved LC plot to light_curves/{object_id}_light_curve.png")
-
-def plot_posterior(samples_flat, data, bins=20):
-    """
-    Generalized corner plot of posterior parameters
-
-    Parameters
-    ----------
-    samples_flat : dict
-        Dict of MCMC samples, shape (n_samples, ...) for each param.
-    data : dict
-        Object metadata (must contain 'object_id' and 'z').
-    bins : int
-        Number of bins for corner plot.
-    """
-    logging.info("Saving posterior plot")
-    object_id = data['object_id']
-    z = data['z']
-    flat_labels = list(samples_flat.keys())
-    flat_arrays = [np.asarray(samples_flat[k]).flatten() for k in flat_labels]
-
-    corner_data = np.vstack(flat_arrays).T
-
-    for i in range(corner_data.shape[1]):
-        lo, hi = corner_data[:, i].min(), corner_data[:, i].max()
-        if lo == hi:  # constant parameter
-            #print("Corner Constant param: ", flat_labels[i])
-            corner_data[:, i] += np.random.normal(0, 1e-6, size=corner_data.shape[0])
-        if 'log_' in flat_labels[i]:
-            corner_data[:, i] = corner_data[:, i] / np.log(10)
-
-    fig = corner.corner(corner_data, labels=flat_labels, show_titles=True, 
-                        quantiles=[0.16, 0.5, 0.84], bins=bins, plot_datapoints=False, plot_contours=False)
-
-    # Save plot
-    output_dir = f"plots/multiband/{prefix}/posterior/"
-    os.makedirs(output_dir, exist_ok=True)
-    save_path = os.path.join(output_dir, f"{z:.1f}_{object_id}_posterior_{suffix}.pdf")
-    plt.savefig(save_path, dpi=100)
-    plt.close(fig)
-    logging.info(f"Saved posterior corner plot to {save_path}")
 
 def plot_posterior_fast_OLD(
     samples_flat,
@@ -247,9 +228,10 @@ def plot_posterior_fast_OLD(
     plt.close(fig)
     logging.info(f"Saved posterior corner plot to {save_path}")
 
-def plot_posterior_fast(
+def plot_posterior(
     samples_flat,
     data,
+    sample_mode="fast",
     bins=15,
     max_points=20_000,
     p_lo=0.5,
@@ -262,53 +244,57 @@ def plot_posterior_fast(
     rng_seed=None
 ):
     """
-    Faster corner plot for large MCMC draws.
+    Corner plot for posterior samples with fast-safe row selection.
 
-    Speed tactics:
-      - Subsample to meet a compute budget ~ O(N * D^2)
-      - Trim rows outside the central [p_lo, p_hi] percentile box across all dims
-      - Keep "constant" params by applying tiny jitter (so titles render)
-      - Avoid redundant copies; use float32
+    Both `fast` and `full` use the same bounded sampling and trimming path to
+    keep memory and runtime under control. `full` only changes the rendering
+    style to look denser.
     """
     import os, logging
     import numpy as np
     import matplotlib.pyplot as plt
     import corner
 
-    logging.info("Saving posterior plot (fast path)")
+    logging.info("Saving posterior plot (%s mode)", sample_mode)
     object_id = data["object_id"]
     z = data["z"]
 
+    if sample_mode not in {"fast", "full"}:
+        raise ValueError(f"Unsupported sample_mode={sample_mode!r}; expected 'fast' or 'full'.")
+
+    all_labels, labels_for_corner = _corner_plot_labels(samples_flat)
+    print("Corner candidate parameters:", all_labels)
+    print("Corner plotted parameters:", labels_for_corner)
+
+    samples_for_corner = {label: samples_flat[label] for label in labels_for_corner}
+
     # Stable column order
-    all_labels = np.array(list(samples_flat.keys()))
+    all_labels = np.array(labels_for_corner)
     D = len(all_labels)
 
-    # Determine a target N that respects both `max_points` and the D^2 cost
-    # (ensure at least a modest minimum so 1D histograms look sane)
-    rng = np.random.default_rng(rng_seed)
-    first = np.asarray(samples_flat[all_labels[0]])
+    first = np.asarray(samples_for_corner[all_labels[0]])
     first = first.reshape(first.shape[0], -1)[:, 0]
     n_total = first.shape[0]
+    # Both modes share the same bounded row-selection path. "full" differs only
+    # in rendering style, not in how many rows are plotted.
+    rng = np.random.default_rng(rng_seed)
     n_by_budget = max(2_000, int(panel_budget // max(D * D, 1)))
     n_target = min(n_total, max_points, n_by_budget)
-
+    idx = None
     if n_target < n_total:
         idx = rng.choice(n_total, size=n_target, replace=False)
-        n_use = n_target
-    else:
-        idx = None
-        n_use = n_total
+    prep_max_points = max_points
 
     sampled = {}
     for k in all_labels:
-        a = np.asarray(samples_flat[k]).reshape(n_total, -1)[:, 0]
+        a = np.asarray(samples_for_corner[k]).reshape(n_total, -1)[:, 0]
         if idx is not None:
             a = a[idx]
         sampled[k] = a
 
     X, labels, const_mask = _prep_matrix(
         sampled,
-        max_points=max_points,
+        max_points=prep_max_points,
         const_ptp=const_ptp,
         jitter_rel=jitter_rel,
         jitter_abs=jitter_abs,
@@ -372,7 +358,14 @@ def plot_posterior_fast(
         labels_plot = labels_plot[:keep_dim]
         ranges_plot = ranges_plot[:keep_dim]
 
-    # Corner tuned for speed
+    plot_datapoints = False
+    plot_contours = False
+    hist2d_kwargs = {"bins": int(bins)}
+    if sample_mode == "full":
+        logging.info("Full mode uses fast-safe sampling with denser rendering.")
+        plot_contours = True
+        hist2d_kwargs = {"bins": max(8, int(bins // 2)), "levels": [0.393, 0.865, 0.989]}
+
     fig = corner.corner(
         X_plot,
         labels=labels_plot,
@@ -380,9 +373,13 @@ def plot_posterior_fast(
         quantiles=[0.16, 0.5, 0.84],
         bins=int(bins),
         range=[tuple(r) for r in ranges_plot],
-        plot_datapoints=False,
-        plot_contours=False,        # no KDE
-        hist2d_kwargs={"bins": int(bins)},
+        plot_datapoints=plot_datapoints,
+        plot_contours=plot_contours,
+        hist2d_kwargs=hist2d_kwargs,
+        fill_contours=False,
+        no_fill_contours=True,
+        smooth=(0.8 if sample_mode == "full" else None),
+        smooth1d=(0.8 if sample_mode == "full" else None),
         max_n_ticks=3,
         quiet=True,
         use_math_text=False,
