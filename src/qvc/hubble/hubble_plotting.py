@@ -4623,6 +4623,7 @@ def plot_full_residuals(
             'ebv_mw': 'log_ebv_mw',
             'SN_MEDIAN_ALL': 'log_sn_median_all',
             'ebv_wu': 'log_ebv_wu',
+            'frac_bc_2500': 'log_frac_bc_2500',
 
         }
         for source_col, derived_col in log_columns.items():
@@ -4659,6 +4660,8 @@ def plot_full_residuals(
 
     # ---- Which x-keys to show (keep your order) ----
     keys = [col for col in [
+        'log_amp_delta_bc', 
+        'frac_bc_2500', 'log_frac_bc_2500',
         'variability_chi_sq_g', 'log_variability_chi_sq_g',
         'variability_chi_sq_red_g', 'log_variability_chi_sq_red_g',
         'variability_pvalue_g', 'variability_neg_log10_pvalue_g',
