@@ -2188,6 +2188,31 @@ def plot_blr_lag_vs_amp_by_band(df, plot_path="plots/hubble", show=False, lag_su
 
     dropped_bands = df["dropped_bands"] if "dropped_bands" in df.columns else None
     title_label = "BLR 2" if suffix == "2" else "BLR"
+    log_kl_by_band = {}
+    finite_log_kl_values = []
+    for band in bands:
+        lag_kl_col = f"{lag_prefix}{band}_kl"
+        if lag_kl_col not in df.columns:
+            log_kl_by_band[band] = np.full(len(df), np.nan, dtype=float)
+            continue
+        lag_kl = pd.to_numeric(df[lag_kl_col], errors="coerce").to_numpy(dtype=float)
+        log_kl = np.full_like(lag_kl, np.nan, dtype=float)
+        finite_positive = np.isfinite(lag_kl) & (lag_kl > 0.0)
+        log_kl[finite_positive] = np.clip(np.log10(lag_kl[finite_positive]), -3.0, None)
+        log_kl_by_band[band] = log_kl
+        finite_log_kl_values.append(log_kl[finite_positive])
+
+    kl_norm = None
+    if finite_log_kl_values:
+        finite_log_kl = np.concatenate(finite_log_kl_values)
+        if finite_log_kl.size:
+            kl_vmin = float(np.nanmin(finite_log_kl))
+            kl_vmax = float(np.nanmax(finite_log_kl))
+            if np.isclose(kl_vmin, kl_vmax):
+                kl_vmin -= 0.5
+                kl_vmax += 0.5
+            kl_norm = colors.Normalize(vmin=kl_vmin, vmax=kl_vmax)
+    kl_cmap = mpl.colormaps["viridis"]
 
     for ax, band in zip(axes, bands):
         continuum_band_col = f"log_sigma_band_{band}"
@@ -2216,6 +2241,7 @@ def plot_blr_lag_vs_amp_by_band(df, plot_path="plots/hubble", show=False, lag_su
             + pd.to_numeric(df[amp_col], errors="coerce").to_numpy(dtype=float)
         )
         log_lag = pd.to_numeric(df[lag_col], errors="coerce").to_numpy(dtype=float)
+        log_kl = log_kl_by_band[band]
         mask = np.isfinite(log_amp_blr) & np.isfinite(log_lag)
         if dropped_bands is not None:
             mask &= ~dropped_bands.apply(
@@ -2223,9 +2249,24 @@ def plot_blr_lag_vs_amp_by_band(df, plot_path="plots/hubble", show=False, lag_su
             ).to_numpy(dtype=bool)
 
         if np.any(mask):
+            finite_kl_mask = mask & np.isfinite(log_kl)
+            missing_kl_mask = mask & ~np.isfinite(log_kl)
+            if np.any(missing_kl_mask):
+                ax.scatter(
+                    log_amp_blr[missing_kl_mask],
+                    log_lag[missing_kl_mask],
+                    s=7,
+                    color="0.75",
+                    alpha=0.35,
+                    linewidths=0,
+                    rasterized=True,
+                )
             ax.scatter(
-                log_amp_blr[mask],
-                log_lag[mask],
+                log_amp_blr[finite_kl_mask] if np.any(finite_kl_mask) else log_amp_blr[mask],
+                log_lag[finite_kl_mask] if np.any(finite_kl_mask) else log_lag[mask],
+                c=log_kl[finite_kl_mask] if np.any(finite_kl_mask) else "0.75",
+                cmap=kl_cmap if np.any(finite_kl_mask) else None,
+                norm=kl_norm if np.any(finite_kl_mask) else None,
                 s=7,
                 alpha=0.6,
                 linewidths=0,
@@ -2251,6 +2292,12 @@ def plot_blr_lag_vs_amp_by_band(df, plot_path="plots/hubble", show=False, lag_su
 
     for ax in axes[n_panels:]:
         ax.set_axis_off()
+
+    if kl_norm is not None:
+        sm = mpl.cm.ScalarMappable(norm=kl_norm, cmap=kl_cmap)
+        sm.set_array([])
+        cbar = fig.colorbar(sm, ax=axes[:n_panels], pad=0.02, fraction=0.05)
+        cbar.set_label(r"$\log_{10}\,\mathrm{KL}_\tau$")
 
     diagnostics_path = os.path.join(plot_path or "plots/hubble", "diagnostics")
     output_name = filename if filename is not None else ("blr_lag2_vs_amp_by_band.pdf" if suffix == "2" else "blr_lag_vs_amp_by_band.pdf")

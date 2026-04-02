@@ -43,6 +43,9 @@ colors = {'u': 'tab:blue',
           'z': 'tab:brown', 
           'y': 'tab:gray'}
 
+SF_LAG_PLOT_MIN_RF = 10.0
+SF_LAG_PLOT_MAX_RF = 1e4
+
 
 def _get_param(sample_dict, primary, fallback=None):
     if primary in sample_dict:
@@ -898,6 +901,134 @@ def save_g_band_binned_residual_drift_plot(diagnostic, data, show=False, filenam
     os.makedirs(output_dir, exist_ok=True)
     save_suffix = suffix if filename_suffix is None else filename_suffix
     fpath = os.path.join(output_dir, f"{z:.1f}_{object_id}_g_band_residual_drift_{save_suffix}.pdf")
+    plt.savefig(fpath, dpi=600)
+    logging.info(f"Saving figure to {fpath}")
+    if show:
+        plt.show()
+    plt.close(fig)
+
+
+def _sf_bending_power_law_model_curve(tau, log_sigma_sf, log_tau_sf, alpha_short):
+    """Evaluate the fitted flat-large-lag bending SF curve."""
+
+    tau = np.asarray(tau, dtype=float)
+    if (
+        not np.isfinite(log_sigma_sf)
+        or not np.isfinite(log_tau_sf)
+        or not np.isfinite(alpha_short)
+    ):
+        return np.full_like(tau, np.nan, dtype=float)
+    sf_inf = np.power(10.0, float(log_sigma_sf))
+    tau_break = np.power(10.0, float(log_tau_sf))
+    ratio = np.clip(tau / tau_break, 1e-12, None)
+    return sf_inf / (1.0 + np.power(ratio, float(alpha_short)))
+
+
+def save_structure_function_plot(diagnostic, data, show=False, filename_suffix=None):
+    """Save a per-object all-band empirical SF plot tied to the g-band amplitude scale."""
+
+    object_id = data["object_id"]
+    z = float(data["z"])
+    ref_band = str(diagnostic.get("sf_ref_band", "g"))
+    sf_source_bands = str(diagnostic.get("sf_source_bands", ref_band) or ref_band)
+    sf_weighted = bool(diagnostic.get("sf_inverse_variance_weighted", True))
+    tau_sf = np.asarray(diagnostic.get("sf_tau_ref_band", []), dtype=float)
+    sf_med = np.asarray(diagnostic.get("sf_curve_ref_band", []), dtype=float)
+    sf_lo = np.asarray(diagnostic.get("sf_curve_lo_ref_band", []), dtype=float)
+    sf_hi = np.asarray(diagnostic.get("sf_curve_hi_ref_band", []), dtype=float)
+    tau_model = np.asarray(diagnostic.get("sf_model_tau_ref_band", []), dtype=float)
+    sf_model = np.asarray(diagnostic.get("sf_model_curve_ref_band", []), dtype=float)
+
+    valid_sf = (
+        np.isfinite(tau_sf)
+        & np.isfinite(sf_med)
+        & (tau_sf > 0.0)
+        & (sf_med > 0.0)
+    )
+    valid_model = (
+        np.isfinite(tau_model)
+        & np.isfinite(sf_model)
+        & (tau_model > 0.0)
+        & (sf_model > 0.0)
+    )
+    if not np.any(valid_sf) and not np.any(valid_model):
+        logging.warning("Skipping structure-function plot because no finite empirical/model SF points are available.")
+        return
+
+    fig, ax = plt.subplots(figsize=(7.4, 5.6))
+
+    if np.any(valid_sf):
+        yerr_lo = np.clip(sf_med[valid_sf] - sf_lo[valid_sf], 0.0, None)
+        yerr_hi = np.clip(sf_hi[valid_sf] - sf_med[valid_sf], 0.0, None)
+        ax.errorbar(
+            tau_sf[valid_sf],
+            sf_med[valid_sf],
+            yerr=[yerr_lo, yerr_hi],
+            fmt="o",
+            color=colors.get(ref_band, "k"),
+            ecolor=colors.get(ref_band, "k"),
+            capsize=3,
+            markersize=5,
+            alpha=0.9,
+            label=(
+                f"Empirical SF ({sf_source_bands} -> {ref_band} RMS, "
+                f"{'IVW' if sf_weighted else 'unweighted'})"
+            ),
+        )
+
+        tau_dense = np.logspace(
+            np.log10(SF_LAG_PLOT_MIN_RF),
+            np.log10(SF_LAG_PLOT_MAX_RF),
+            400,
+        )
+        sf_fit_curve = _sf_bending_power_law_model_curve(
+            tau_dense,
+            diagnostic.get("log_sigma_sf_ref_band", np.nan),
+            diagnostic.get("log_tau_sf_ref_band", np.nan),
+            diagnostic.get("sf_alpha_short_ref_band", np.nan),
+        )
+        if np.any(np.isfinite(sf_fit_curve) & (sf_fit_curve > 0.0)):
+            ax.plot(
+                tau_dense,
+                sf_fit_curve,
+                color="black",
+                lw=1.8,
+                zorder=5,
+                label="Bending-PL fit to empirical SF",
+            )
+
+    if np.any(valid_model):
+        order = np.argsort(tau_model[valid_model])
+        ax.plot(
+            tau_model[valid_model][order],
+            sf_model[valid_model][order],
+            color="magenta",
+            lw=1.8,
+            alpha=0.9,
+            label="GP-implied SF",
+        )
+
+    ax.set_xscale("log")
+    ax.set_yscale("log")
+    ax.set_xlim(SF_LAG_PLOT_MIN_RF, SF_LAG_PLOT_MAX_RF)
+    ax.set_xlabel("Rest-frame lag (days)")
+    ax.set_ylabel("SF (mag)")
+    ax.set_title(
+        f"Object {object_id}, z={z:.3f}, all-band SF -> {ref_band}-band RMS\n"
+        f"N bins={int(diagnostic.get('sf_nbins', 0))}, "
+        f"{'IVW' if sf_weighted else 'unweighted'}, "
+        f"log tau_SF={diagnostic.get('log_tau_sf_ref_band', np.nan):.3g}, "
+        f"alpha_short={diagnostic.get('sf_alpha_short_ref_band', np.nan):.2g}, "
+        f"log tau_GP-SF={diagnostic.get('log_tau_sf_model_ref_band', np.nan):.3g}"
+    )
+    ax.grid(True, which="both", alpha=0.25)
+    ax.legend(loc="best")
+    fig.tight_layout()
+
+    output_dir = f"plots/multiband/{prefix}/structure_function"
+    os.makedirs(output_dir, exist_ok=True)
+    save_suffix = suffix if filename_suffix is None else filename_suffix
+    fpath = os.path.join(output_dir, f"{z:.1f}_{object_id}_structure_function_{save_suffix}.pdf")
     plt.savefig(fpath, dpi=600)
     logging.info(f"Saving figure to {fpath}")
     if show:

@@ -9,7 +9,7 @@ import traceback
 
 import numpy as np
 from numpy.lib.stride_tricks import sliding_window_view
-from scipy.optimize import curve_fit
+from scipy.optimize import curve_fit, least_squares
 from scipy.stats import median_abs_deviation
 from statsmodels.tsa.stattools import adfuller
 from tqdm import tqdm
@@ -87,6 +87,9 @@ LOG_LAG_BLR_LOW = np.log(10.0)
 LOG_LAG_BLR_HIGH = np.log(1e3)
 LOG_LAG_RATIO_BC_TO_BLR_LOW = np.log(0.1)
 LOG_LAG_RATIO_BC_TO_BLR_HIGH = np.log(0.3)
+SF_MODEL_TAU_MIN_RF = 10.0
+SF_MODEL_TAU_MAX_RF = 1e4
+SF_MODEL_TAU_N_PLOT = 400
 
 
 def compute_lambda_center_rf(lam_rf):
@@ -782,20 +785,17 @@ def compute_lomb_scargle_break_diagnostics(model, samples, obj, z, *, n_freq=500
     return out
 
 
-def empirical_structure_function(t, y, yerr=None, *, bins_per_decade=3, min_pairs=8):
-    """Compute a binned empirical structure function from one band.
-
-    Uses the Stone-style estimator in each lag bin:
-    SF(tau) = sqrt(mean(dm^2 - err_i^2 - err_j^2)).
-    """
+def _structure_function_pairs(t, y, yerr=None, *, use_inverse_variance_weights=True):
+    """Return same-band pair lags, noise-subtracted squared differences, and pair weights."""
 
     t = np.asarray(t, dtype=float)
     y = np.asarray(y, dtype=float)
     yerr = np.zeros_like(y) if yerr is None else np.asarray(yerr, dtype=float)
 
     n = t.size
-    if n < 3:
-        return np.array([]), np.array([]), np.array([]), np.array([])
+    if n < 2:
+        empty = np.array([], dtype=float)
+        return empty, empty, empty
 
     dt = np.abs(t[:, None] - t[None, :])
     dy2 = np.square(y[:, None] - y[None, :])
@@ -803,44 +803,97 @@ def empirical_structure_function(t, y, yerr=None, *, bins_per_decade=3, min_pair
 
     iu = np.triu_indices(n, k=1)
     tau = dt[iu]
-    sf2_term = dy2[iu] - noise2[iu]
-    good = np.isfinite(tau) & np.isfinite(sf2_term) & (tau > 0.0)
+    noise2_term = noise2[iu]
+    sf2_term = dy2[iu] - noise2_term
+    if use_inverse_variance_weights:
+        sf2_weight = 1.0 / np.maximum(np.square(noise2_term), 1e-8)
+    else:
+        sf2_weight = np.ones_like(sf2_term)
+    return tau, sf2_term, sf2_weight
+
+
+def _bin_structure_function_pairs(
+    tau,
+    sf2_term,
+    sf2_weight=None,
+    *,
+    bins_per_decade=2,
+    min_pairs=1,
+    edges=None,
+):
+    """Bin precomputed SF pair terms in linear-lag bins."""
+
+    tau = np.asarray(tau, dtype=float)
+    sf2_term = np.asarray(sf2_term, dtype=float)
+    if sf2_weight is None:
+        sf2_weight = np.ones_like(sf2_term)
+    sf2_weight = np.asarray(sf2_weight, dtype=float)
+
+    good = (
+        np.isfinite(tau)
+        & np.isfinite(sf2_term)
+        & np.isfinite(sf2_weight)
+        & (tau > 0.0)
+        & (sf2_weight > 0.0)
+    )
     if np.count_nonzero(good) < min_pairs:
         return np.array([]), np.array([]), np.array([]), np.array([])
 
     tau = tau[good]
     sf2_term = sf2_term[good]
-    tmin = np.min(tau)
-    tmax = np.max(tau)
-    if not np.isfinite(tmin) or not np.isfinite(tmax) or tmax <= tmin:
-        return np.array([]), np.array([]), np.array([]), np.array([])
+    sf2_weight = sf2_weight[good]
+    fixed_edges = edges is not None
+    if not fixed_edges:
+        tmin = np.min(tau)
+        tmax = np.max(tau)
+        if not np.isfinite(tmin) or not np.isfinite(tmax) or tmax <= tmin:
+            return np.array([]), np.array([]), np.array([]), np.array([])
 
-    decades = np.log10(tmax) - np.log10(tmin)
-    n_bins = max(1, int(np.ceil(bins_per_decade * decades)))
-    edges = np.logspace(np.log10(tmin), np.log10(tmax), n_bins + 1)
+        decades = np.log10(tmax) - np.log10(tmin)
+        n_bins = max(1, int(np.ceil(bins_per_decade * decades)))
+        edges = np.linspace(tmin, tmax, n_bins + 1)
+    else:
+        edges = np.asarray(edges, dtype=float)
+        n_bins = max(1, edges.size - 1)
     which = np.clip(np.digitize(tau, edges) - 1, 0, n_bins - 1)
 
     tau_bin, sf_bin, sf_lo, sf_hi = [], [], [], []
     for k in range(n_bins):
         sel = which == k
         if np.count_nonzero(sel) < min_pairs:
+            if fixed_edges:
+                tau_bin.append(0.5 * (edges[k] + edges[k + 1]))
+                sf_bin.append(np.nan)
+                sf_lo.append(np.nan)
+                sf_hi.append(np.nan)
             continue
         tau_chunk = tau[sel]
         sf2_chunk = sf2_term[sel]
-        sf2_mean = float(np.mean(sf2_chunk))
-        if sf2_chunk.size > 1:
-            sf2_err = float(np.std(sf2_chunk, ddof=1) / np.sqrt(sf2_chunk.size))
-        else:
-            sf2_err = np.nan
+        weight_chunk = sf2_weight[sel]
+        weight_sum = float(np.sum(weight_chunk))
+        if weight_sum <= 0.0 or not np.isfinite(weight_sum):
+            if fixed_edges:
+                tau_bin.append(0.5 * (edges[k] + edges[k + 1]))
+                sf_bin.append(np.nan)
+                sf_lo.append(np.nan)
+                sf_hi.append(np.nan)
+            continue
 
-        sf_bin_val = np.sqrt(max(sf2_mean, 0.0))
-        sf2_lo = sf2_mean - sf2_err if np.isfinite(sf2_err) else sf2_mean
-        sf2_hi = sf2_mean + sf2_err if np.isfinite(sf2_err) else sf2_mean
+        sf2_lo, sf2_mean, sf2_hi = _weighted_quantile(
+            sf2_chunk,
+            weight_chunk,
+            [0.16, 0.5, 0.84],
+        )
+        sf_bin_val = np.sqrt(max(float(sf2_mean), 0.0))
 
-        tau_bin.append(10.0 ** np.mean(np.log10(tau_chunk)))
+        tau_bin.append(
+            0.5 * (edges[k] + edges[k + 1])
+            if fixed_edges
+            else np.mean(tau_chunk)
+        )
         sf_bin.append(sf_bin_val)
-        sf_lo.append(np.sqrt(max(sf2_lo, 0.0)))
-        sf_hi.append(np.sqrt(max(sf2_hi, 0.0)))
+        sf_lo.append(np.sqrt(max(float(sf2_lo), 0.0)) if np.isfinite(sf2_lo) else np.nan)
+        sf_hi.append(np.sqrt(max(float(sf2_hi), 0.0)) if np.isfinite(sf2_hi) else np.nan)
 
     return (
         np.asarray(tau_bin, dtype=float),
@@ -850,8 +903,271 @@ def empirical_structure_function(t, y, yerr=None, *, bins_per_decade=3, min_pair
     )
 
 
+def _structure_function_bin_edges(tau, *, bins_per_decade=2):
+    """Return linear-spaced SF bin edges from the finite positive pair lags."""
+
+    tau = np.asarray(tau, dtype=float)
+    tau = tau[np.isfinite(tau) & (tau > 0.0)]
+    if tau.size == 0:
+        return np.array([], dtype=float)
+    tmin = float(np.min(tau))
+    tmax = float(np.max(tau))
+    if not np.isfinite(tmin) or not np.isfinite(tmax) or tmax <= tmin:
+        return np.array([], dtype=float)
+    decades = np.log10(tmax) - np.log10(tmin)
+    n_bins = max(1, int(np.ceil(bins_per_decade * decades)))
+    return np.linspace(tmin, tmax, n_bins + 1)
+
+
+def _weighted_quantile(values, weights, quantiles):
+    """Return weighted quantiles for finite 1D samples."""
+
+    values = np.asarray(values, dtype=float)
+    weights = np.asarray(weights, dtype=float)
+    quantiles = np.asarray(quantiles, dtype=float)
+    mask = np.isfinite(values) & np.isfinite(weights) & (weights > 0.0)
+    if np.count_nonzero(mask) == 0:
+        return np.full_like(quantiles, np.nan, dtype=float)
+
+    values = values[mask]
+    weights = weights[mask]
+    order = np.argsort(values)
+    values = values[order]
+    weights = weights[order]
+    cdf = np.cumsum(weights)
+    cdf /= cdf[-1]
+    return np.interp(np.clip(quantiles, 0.0, 1.0), cdf, values)
+
+
+def empirical_structure_function(
+    t,
+    y,
+    yerr=None,
+    *,
+    bins_per_decade=2,
+    min_pairs=1,
+    use_inverse_variance_weights=True,
+):
+    """Compute a binned empirical structure function from one band.
+
+    Uses the Stone-style estimator in each lag bin:
+    SF(tau) = sqrt(mean(dm^2 - err_i^2 - err_j^2)).
+    """
+
+    tau, sf2_term, sf2_weight = _structure_function_pairs(
+        t,
+        y,
+        yerr,
+        use_inverse_variance_weights=use_inverse_variance_weights,
+    )
+    return _bin_structure_function_pairs(
+        tau,
+        sf2_term,
+        sf2_weight,
+        bins_per_decade=bins_per_decade,
+        min_pairs=min_pairs,
+    )
+
+
+def _noise_corrected_rms(y, yerr):
+    """Return sqrt(var(y) - mean(yerr^2)) with finite-data guards."""
+
+    y = np.asarray(y, dtype=float)
+    yerr = np.asarray(yerr, dtype=float)
+    mask = np.isfinite(y) & np.isfinite(yerr)
+    if np.count_nonzero(mask) < 2:
+        return np.nan
+    var_signal = float(np.var(y[mask], ddof=1))
+    var_noise = float(np.mean(np.square(yerr[mask])))
+    var_intrinsic = var_signal - var_noise
+    return np.sqrt(var_intrinsic) if np.isfinite(var_intrinsic) and var_intrinsic > 0.0 else np.nan
+
+
+def _posterior_median_band_jitter(samples, band):
+    """Return posterior-median white-noise jitter in linear mag units for one band."""
+
+    jitter_key = f"log_jitter_{band}"
+    if jitter_key not in samples:
+        return 0.0
+    log_jitter = np.asarray(samples[jitter_key], dtype=float)
+    finite = np.isfinite(log_jitter)
+    if not np.any(finite):
+        return 0.0
+    return float(np.exp(np.nanmedian(log_jitter[finite])))
+
+
+def empirical_structure_function_g_reference_from_all_bands(
+    samples,
+    obj,
+    z,
+    bands,
+    ref_band,
+    *,
+    bins_per_decade=2,
+    min_pairs=1,
+    use_inverse_variance_weights=True,
+    n_bootstrap=16,
+    bootstrap_seed=0,
+):
+    """Combine all same-band raw SF pairs after scaling amplitudes to the g-band RMS."""
+
+    bands = list(bands)
+    if ref_band not in bands:
+        raise KeyError(f"Reference band '{ref_band}' is not available in bands={bands}.")
+
+    band_idx = np.asarray(obj["band_idx"], dtype=int)
+    t_rf_all = np.asarray(obj["X"][0], dtype=float) / (1.0 + float(z))
+    y_all = np.asarray(obj["y"], dtype=float)
+    yerr_all = np.asarray(obj["yerr"], dtype=float)
+
+    band_payloads = {}
+    sigma_ref = np.nan
+    for i_band, band in enumerate(bands):
+        mask = band_idx == i_band
+        if np.count_nonzero(mask) < 2:
+            continue
+        yerr_eff = np.hypot(yerr_all[mask], _posterior_median_band_jitter(samples, band))
+        sigma_band = _noise_corrected_rms(y_all[mask], yerr_eff)
+        band_payloads[band] = {
+            "t_rf": t_rf_all[mask],
+            "y": y_all[mask],
+            "yerr": yerr_eff,
+            "sigma": sigma_band,
+        }
+        if band == ref_band:
+            sigma_ref = sigma_band
+
+    if not np.isfinite(sigma_ref) or sigma_ref <= 0.0:
+        sigma_ref = 1.0
+
+    tau_chunks = []
+    sf2_chunks = []
+    sf2_weight_chunks = []
+    bands_used = []
+    for band in bands:
+        payload = band_payloads.get(band)
+        if payload is None:
+            continue
+        sigma_band = payload["sigma"]
+        amp_scale_to_ref = (
+            sigma_band / sigma_ref
+            if np.isfinite(sigma_band) and sigma_band > 0.0
+            else 1.0
+        )
+        tau_band, sf2_band, sf2_weight_band = _structure_function_pairs(
+            payload["t_rf"],
+            payload["y"] / amp_scale_to_ref,
+            payload["yerr"] / amp_scale_to_ref,
+            use_inverse_variance_weights=use_inverse_variance_weights,
+        )
+        if tau_band.size == 0:
+            continue
+        tau_chunks.append(tau_band)
+        sf2_chunks.append(sf2_band)
+        sf2_weight_chunks.append(sf2_weight_band)
+        bands_used.append(band)
+
+    if not tau_chunks:
+        return (
+            np.array([], dtype=float),
+            np.array([], dtype=float),
+            np.array([], dtype=float),
+            np.array([], dtype=float),
+            [],
+        )
+
+    tau_all = np.concatenate(tau_chunks)
+    sf2_all = np.concatenate(sf2_chunks)
+    sf2_weight_all = np.concatenate(sf2_weight_chunks)
+    edges = _structure_function_bin_edges(tau_all, bins_per_decade=bins_per_decade)
+    tau_sf, sf_med, sf_lo, sf_hi = _bin_structure_function_pairs(
+        tau_all,
+        sf2_all,
+        sf2_weight_all,
+        bins_per_decade=bins_per_decade,
+        min_pairs=min_pairs,
+        edges=edges,
+    )
+    if n_bootstrap <= 1 or tau_sf.size == 0 or edges.size < 2:
+        return tau_sf, sf_med, sf_lo, sf_hi, bands_used
+
+    rng = np.random.default_rng(bootstrap_seed)
+    n_bins = edges.size - 1
+    sf_boot = np.full((int(n_bootstrap), n_bins), np.nan, dtype=float)
+    for i_boot in range(int(n_bootstrap)):
+        tau_boot_chunks = []
+        sf2_boot_chunks = []
+        sf2_weight_boot_chunks = []
+        for band in bands_used:
+            payload = band_payloads[band]
+            n_band = payload["t_rf"].size
+            if n_band < 2:
+                continue
+            draw = rng.integers(0, n_band, size=n_band)
+            sigma_band = payload["sigma"]
+            amp_scale_to_ref = (
+                sigma_band / sigma_ref
+                if np.isfinite(sigma_band) and sigma_band > 0.0
+                else 1.0
+            )
+            tau_band, sf2_band, sf2_weight_band = _structure_function_pairs(
+                payload["t_rf"][draw],
+                payload["y"][draw] / amp_scale_to_ref,
+                payload["yerr"][draw] / amp_scale_to_ref,
+                use_inverse_variance_weights=use_inverse_variance_weights,
+            )
+            if tau_band.size == 0:
+                continue
+            tau_boot_chunks.append(tau_band)
+            sf2_boot_chunks.append(sf2_band)
+            sf2_weight_boot_chunks.append(sf2_weight_band)
+
+        if not tau_boot_chunks:
+            continue
+        _, sf_boot_med, _, _ = _bin_structure_function_pairs(
+            np.concatenate(tau_boot_chunks),
+            np.concatenate(sf2_boot_chunks),
+            np.concatenate(sf2_weight_boot_chunks),
+            min_pairs=min_pairs,
+            edges=edges,
+        )
+        n_fill = min(n_bins, sf_boot_med.size)
+        sf_boot[i_boot, :n_fill] = sf_boot_med[:n_fill]
+
+    sf_lo_boot = np.full(n_bins, np.nan, dtype=float)
+    sf_hi_boot = np.full(n_bins, np.nan, dtype=float)
+    for k in range(n_bins):
+        sf_boot_k = sf_boot[:, k]
+        sf_boot_k = sf_boot_k[np.isfinite(sf_boot_k)]
+        if sf_boot_k.size < 4:
+            continue
+        sf_lo_boot[k], sf_hi_boot[k] = np.percentile(sf_boot_k, [16.0, 84.0])
+    n_fill = min(sf_med.size, sf_lo_boot.size)
+    sf_lo = sf_lo.copy()
+    sf_hi = sf_hi.copy()
+    valid_boot = (
+        np.isfinite(sf_lo_boot[:n_fill])
+        & np.isfinite(sf_hi_boot[:n_fill])
+        & (sf_lo_boot[:n_fill] <= sf_med[:n_fill])
+        & (sf_hi_boot[:n_fill] >= sf_med[:n_fill])
+    )
+    sf_lo[:n_fill] = np.where(valid_boot, sf_lo_boot[:n_fill], sf_lo[:n_fill])
+    sf_hi[:n_fill] = np.where(valid_boot, sf_hi_boot[:n_fill], sf_hi[:n_fill])
+    return tau_sf, sf_med, sf_lo, sf_hi, bands_used
+
+
+def _sf_bending_power_law_model(tau_val, log_sf_inf, log_tau, alpha_short):
+    """Evaluate a flat-large-lag bending SF with a bounded short-lag slope."""
+
+    tau_val = np.asarray(tau_val, dtype=float)
+    sf_inf = 10.0 ** float(log_sf_inf)
+    tau_break = 10.0 ** float(log_tau)
+    ratio = np.clip(tau_val / tau_break, 1e-12, None)
+    return sf_inf / (1.0 + np.power(ratio, float(alpha_short)))
+
+
 def fit_structure_function(tau, sf, sf_lo=None, sf_hi=None):
-    """Fit SF_inf * sqrt(1 - exp(-tau/tau_char)) and return sigma,tau."""
+    """Fit a bending power law with fixed large-lag slope and return sigma/tau."""
 
     tau = np.asarray(tau, dtype=float)
     sf = np.asarray(sf, dtype=float)
@@ -862,6 +1178,8 @@ def fit_structure_function(tau, sf, sf_lo=None, sf_hi=None):
             "log_sigma_sf_err": np.nan,
             "log_tau_sf": np.nan,
             "log_tau_sf_err": np.nan,
+            "sf_alpha_short": np.nan,
+            "sf_alpha_short_err": np.nan,
             "sf_valid": False,
             "sf_nbins": float(np.count_nonzero(mask)),
         }
@@ -877,33 +1195,50 @@ def fit_structure_function(tau, sf, sf_lo=None, sf_hi=None):
             np.clip(hi - sf_fit, 1e-4, None)
         )
     else:
-        sf_err = np.full_like(sf_fit, max(np.median(sf_fit) * 0.15, 1e-3))
+        sf_err = np.full_like(sf_fit, np.nan)
+    sf_err_floor = np.maximum(0.15 * sf_fit, max(np.median(sf_fit) * 0.05, 1e-3))
+    sf_err = np.where(np.isfinite(sf_err), sf_err, sf_err_floor)
+    sf_err = np.maximum(sf_err, sf_err_floor)
 
     sf_inf_init = np.clip(np.max(sf_fit), 1e-4, None)
     tau_init = np.exp(np.mean(np.log(tau_fit)))
 
-    def sf_model(tau_val, log_sf_inf, log_tau):
-        sf_inf = 10.0 ** log_sf_inf
-        tau_char = 10.0 ** log_tau
-        return sf_inf * np.sqrt(np.clip(1.0 - np.exp(-tau_val / tau_char), 0.0, None))
-
-    log_tau_low = 1.0
+    log_tau_low = np.log10(200.0)
     log_tau_high = 4.0
 
-    log_sf_inf_high = np.log10(np.sqrt(2.0))
+    alpha_short_init = -0.5
+    alpha_short_low = -1.0
+    alpha_short_high = -0.25
+    log_sf_inf_high = 1.0
+    log_sf_inf_init = np.clip(np.log10(sf_inf_init), -6.0 + 1e-3, log_sf_inf_high - 1e-3)
+    log_tau_init = np.clip(np.log10(tau_init), log_tau_low + 1e-3, log_tau_high - 1e-3)
 
     try:
-        popt, pcov = curve_fit(
-            sf_model,
-            tau_fit,
-            sf_fit,
-            p0=(np.log10(sf_inf_init), np.log10(tau_init)),
-            sigma=sf_err,
-            absolute_sigma=True,
-            bounds=([-6.0, log_tau_low], [log_sf_inf_high, log_tau_high]),
-            maxfev=20000,
+        result = least_squares(
+            lambda pars: (
+                _sf_bending_power_law_model(tau_fit, pars[0], pars[1], pars[2]) - sf_fit
+            ) / sf_err,
+            x0=np.array([log_sf_inf_init, log_tau_init, alpha_short_init], dtype=float),
+            bounds=(
+                np.array([-6.0, log_tau_low, alpha_short_low], dtype=float),
+                np.array([log_sf_inf_high, log_tau_high, alpha_short_high], dtype=float),
+            ),
+            loss="soft_l1",
+            f_scale=1.0,
+            max_nfev=20000,
         )
-        perr = np.sqrt(np.diag(pcov))
+        popt = result.x
+        if result.jac.shape[0] > result.jac.shape[1]:
+            _, svals, vh = np.linalg.svd(result.jac, full_matrices=False)
+            threshold = np.finfo(float).eps * max(result.jac.shape) * svals[0]
+            keep = svals > threshold
+            if np.any(keep):
+                pcov = (vh[keep].T / np.square(svals[keep])) @ vh[keep]
+                perr = np.sqrt(np.diag(pcov))
+            else:
+                perr = np.full_like(popt, np.nan)
+        else:
+            perr = np.full_like(popt, np.nan)
     except Exception as exc:
         logging.warning("Structure-function fit failed: %s", exc)
         return {
@@ -911,6 +1246,8 @@ def fit_structure_function(tau, sf, sf_lo=None, sf_hi=None):
             "log_sigma_sf_err": np.nan,
             "log_tau_sf": np.nan,
             "log_tau_sf_err": np.nan,
+            "sf_alpha_short": np.nan,
+            "sf_alpha_short_err": np.nan,
             "sf_valid": False,
             "sf_nbins": float(tau_fit.size),
         }
@@ -920,14 +1257,25 @@ def fit_structure_function(tau, sf, sf_lo=None, sf_hi=None):
     tau_max = float(np.nanmax(tau_fit))
     near_lower_bound = np.isclose(float(popt[1]), log_tau_low, atol=0.05)
     near_upper_bound = np.isclose(float(popt[1]), log_tau_high, atol=0.05)
+    slope_near_lower_bound = np.isclose(float(popt[2]), alpha_short_low, atol=0.02)
+    slope_near_upper_bound = np.isclose(float(popt[2]), alpha_short_high, atol=0.02)
     turnover_bracketed = np.isfinite(tau_char) and (tau_min < tau_char < tau_max)
-    sf_valid = bool(np.all(np.isfinite(popt)) and not near_lower_bound and not near_upper_bound and turnover_bracketed)
+    sf_valid = bool(
+        np.all(np.isfinite(popt))
+        and not near_lower_bound
+        and not near_upper_bound
+        and not slope_near_lower_bound
+        and not slope_near_upper_bound
+        and turnover_bracketed
+    )
 
     return {
-        "log_sigma_sf": float(popt[0] - np.log10(np.sqrt(2.0))),
+        "log_sigma_sf": float(popt[0]),
         "log_sigma_sf_err": float(perr[0]) if np.all(np.isfinite(perr)) else np.nan,
         "log_tau_sf": float(popt[1]),
         "log_tau_sf_err": float(perr[1]) if np.all(np.isfinite(perr)) else np.nan,
+        "sf_alpha_short": float(popt[2]),
+        "sf_alpha_short_err": float(perr[2]) if np.all(np.isfinite(perr)) else np.nan,
         "sf_valid": sf_valid,
         "sf_nbins": float(tau_fit.size),
     }
@@ -976,7 +1324,7 @@ def _build_structure_function_lag_grid(t_band, tau_sf):
     return np.logspace(np.log10(tau_min), np.log10(tau_max), 16)
 
 
-def compute_model_structure_function_equivalent(samples, ref_band, tau_grid):
+def compute_model_structure_function_equivalent(samples, ref_band, tau_grid, *, z=0.0, return_series=False):
     """Fit the same DRW SF form to the model-implied DHO SF in the reference band."""
 
     nan_out = {
@@ -986,16 +1334,16 @@ def compute_model_structure_function_equivalent(samples, ref_band, tau_grid):
         "log_tau_sf_model_ref_band_err": np.nan,
         "sf_model_valid": False,
     }
+    if return_series:
+        nan_out |= {
+            "sf_model_tau_ref_band": np.array([], dtype=float),
+            "sf_model_curve_ref_band": np.array([], dtype=float),
+        }
 
     amp_key = f"amp_cont_{ref_band}"
     tau_fast_key = f"tau_fast_{ref_band}"
     tau_slow_key = f"tau_slow_{ref_band}"
     if any(key not in samples for key in (amp_key, tau_fast_key, tau_slow_key)):
-        return nan_out
-
-    tau_grid = np.asarray(tau_grid, dtype=float)
-    tau_grid = tau_grid[np.isfinite(tau_grid) & (tau_grid > 0.0)]
-    if tau_grid.size < 4:
         return nan_out
 
     amp = np.asarray(samples[amp_key], dtype=float)
@@ -1006,21 +1354,59 @@ def compute_model_structure_function_equivalent(samples, ref_band, tau_grid):
         return nan_out
 
     amp_med = float(np.nanmedian(amp[mask]))
-    tau_fast_med = float(np.nanmedian(tau_fast[mask]))
-    tau_slow_med = float(np.nanmedian(tau_slow[mask]))
-    sf_model = dho_structure_function(tau_grid, amp_med, tau_fast_med, tau_slow_med)
-    fit = fit_structure_function(tau_grid, sf_model)
-    return {
+    one_plus_z = 1.0 + float(z)
+    tau_fast_med = float(np.nanmedian(tau_fast[mask])) / one_plus_z
+    tau_slow_med = float(np.nanmedian(tau_slow[mask])) / one_plus_z
+
+    tau_grid = np.asarray(tau_grid, dtype=float)
+    tau_grid = tau_grid[np.isfinite(tau_grid) & (tau_grid > 0.0)]
+    if tau_grid.size >= 4:
+        sf_model_fit_grid = dho_structure_function(tau_grid, amp_med, tau_fast_med, tau_slow_med)
+        fit = fit_structure_function(tau_grid, sf_model_fit_grid)
+    else:
+        fit = {
+            "log_sigma_sf": np.nan,
+            "log_tau_sf": np.nan,
+            "sf_valid": False,
+        }
+
+    out = {
         "log_sigma_sf_model_ref_band": fit["log_sigma_sf"],
         "log_sigma_sf_model_ref_band_err": np.nan,
         "log_tau_sf_model_ref_band": fit["log_tau_sf"],
         "log_tau_sf_model_ref_band_err": np.nan,
         "sf_model_valid": bool(fit["sf_valid"]),
     }
+    if return_series:
+        tau_model_plot = np.logspace(
+            np.log10(SF_MODEL_TAU_MIN_RF),
+            np.log10(SF_MODEL_TAU_MAX_RF),
+            SF_MODEL_TAU_N_PLOT,
+        )
+        sf_model_plot = dho_structure_function(
+            tau_model_plot,
+            amp_med,
+            tau_fast_med,
+            tau_slow_med,
+        )
+        out |= {
+            "sf_model_tau_ref_band": tau_model_plot,
+            "sf_model_curve_ref_band": sf_model_plot,
+        }
+    return out
 
 
-def compute_structure_function_diagnostics(samples, obj, z):
-    """Fit SF in the g band using rest-frame lags and convert to UV."""
+def compute_structure_function_diagnostics(
+    samples,
+    obj,
+    z,
+    *,
+    use_inverse_variance_weights=True,
+    n_bootstrap=16,
+    bootstrap_seed=0,
+    return_series=False,
+):
+    """Fit a raw all-band SF after scaling each band's amplitude to the g-band RMS."""
 
     bands = list(obj["bands"])
     if "g" not in bands:
@@ -1031,34 +1417,48 @@ def compute_structure_function_diagnostics(samples, obj, z):
     lam_ref_band = float(lam_rf[ref_idx])
 
     band_idx = np.asarray(obj["band_idx"])
-    mask = band_idx == ref_idx
-    t_band = np.asarray(obj["X"][0], dtype=float)[mask] / (1.0 + float(z))
-    y_band = np.asarray(obj["y"], dtype=float)[mask]
-    yerr_band = np.asarray(obj["yerr"], dtype=float)[mask]
-    tau_sf, sf_med, sf_lo, sf_hi = empirical_structure_function(t_band, y_band, yerr_band)
+    ref_mask = band_idx == ref_idx
+    t_band = np.asarray(obj["X"][0], dtype=float)[ref_mask] / (1.0 + float(z))
+    jitter_ref_band = _posterior_median_band_jitter(samples, ref_band)
+    tau_sf, sf_med, sf_lo, sf_hi, sf_bands_used = (
+        empirical_structure_function_g_reference_from_all_bands(
+            samples,
+            obj,
+            z,
+            bands,
+            ref_band,
+            use_inverse_variance_weights=use_inverse_variance_weights,
+            n_bootstrap=n_bootstrap,
+            bootstrap_seed=bootstrap_seed,
+        )
+    )
     fit = fit_structure_function(tau_sf, sf_med, sf_lo, sf_hi)
     tau_grid_model = _build_structure_function_lag_grid(t_band, tau_sf)
-    model_sf_fit = compute_model_structure_function_equivalent(samples, ref_band, tau_grid_model)
+    model_sf_fit = compute_model_structure_function_equivalent(
+        samples,
+        ref_band,
+        tau_grid_model,
+        z=float(z),
+        return_series=return_series,
+    )
 
-    eta_sigma = float(np.nanmedian(np.asarray(samples["eta_sigma"], dtype=float)))
-    eta_tau = float(np.nanmedian(np.asarray(samples["eta_tau"], dtype=float)))
-    log_sigma_uv = (
-        fit["log_sigma_sf"] + log_single_pl(2500.0, lam_ref_band, eta_sigma)
-        if np.isfinite(fit["log_sigma_sf"]) else np.nan
-    )
-    log_tau_rf = (
-        fit["log_tau_sf"] + log_single_pl(2500.0, lam_ref_band, eta_tau)
-        if np.isfinite(fit["log_tau_sf"]) else np.nan
-    )
+    log_sigma_uv = fit["log_sigma_sf"]
+    log_tau_rf = fit["log_tau_sf"]
     log_tau_uv_obs = log_tau_rf + np.log10(1.0 + float(z)) if np.isfinite(log_tau_rf) else np.nan
 
-    return {
+    out = {
         "sf_ref_band": ref_band,
+        "sf_source_bands": ",".join(sf_bands_used),
+        "sf_inverse_variance_weighted": bool(use_inverse_variance_weights),
+        "sf_n_bootstrap": int(n_bootstrap),
         "sf_ref_lambda_rf": lam_ref_band,
+        "log_jitter_sf_ref_band": np.log10(jitter_ref_band) if jitter_ref_band > 0.0 else np.nan,
         "log_sigma_sf_ref_band": fit["log_sigma_sf"],
         "log_sigma_sf_ref_band_err": fit["log_sigma_sf_err"],
         "log_tau_sf_ref_band": fit["log_tau_sf"],
         "log_tau_sf_ref_band_err": fit["log_tau_sf_err"],
+        "sf_alpha_short_ref_band": fit["sf_alpha_short"],
+        "sf_alpha_short_ref_band_err": fit["sf_alpha_short_err"],
         "log_sigma_uv_sf": log_sigma_uv,
         "log_sigma_uv_sf_err": fit["log_sigma_sf_err"],
         "log_tau_uv_sf": log_tau_uv_obs,
@@ -1069,6 +1469,14 @@ def compute_structure_function_diagnostics(samples, obj, z):
         "sf_nbins": fit["sf_nbins"],
         **model_sf_fit,
     }
+    if return_series:
+        out |= {
+            "sf_tau_ref_band": tau_sf,
+            "sf_curve_ref_band": sf_med,
+            "sf_curve_lo_ref_band": sf_lo,
+            "sf_curve_hi_ref_band": sf_hi,
+        }
+    return out
 
 
 def log_nonfinite_sample_summary(samples_dict, *, label, max_items=20):
@@ -2366,6 +2774,16 @@ def main():
                     )
                     save_g_band_binned_residual_drift_plot(
                         drift_plot_result,
+                        obj | dict(prefix=prefix, suffix=suffix),
+                    )
+                    sf_plot_result = compute_structure_function_diagnostics(
+                        obj_flat_samples_flatten_per_band,
+                        obj,
+                        float(obj["z"]),
+                        return_series=True,
+                    )
+                    save_structure_function_plot(
+                        sf_plot_result,
                         obj | dict(prefix=prefix, suffix=suffix),
                     )
                     if not args.disable_correlation_plot:
