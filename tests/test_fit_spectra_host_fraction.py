@@ -46,9 +46,7 @@ def test_compute_derived_results_uses_host_continuum_draw_ratio(monkeypatch):
     fit_spectra.compute_derived_results(result, q, args)
 
     assert np.isclose(result["f_host_2500"], 0.1)
-    assert np.isclose(result["f_host_center"], 0.1)
     assert np.isclose(result["f_host_2500_err"], 0.0136)
-    assert np.isclose(result["f_host_center_err"], 0.0136)
 
 
 def test_estimate_host_2500_fraction_reconstructs_outside_native_range_without_poly(monkeypatch):

@@ -921,7 +921,7 @@ def run_one_fit(rec, args):
         else:
             q.fit(
                 name=f"z{rec['z']:.3f}_{rec['sdss_name']}",
-                fit_poly_edge_flex=args.fit_poly_edge_flex,
+                #fit_poly_edge_flex=args.fit_poly_edge_flex,
                 deredden=not args.no_deredden,
                 wave_range=(args.wave_min, args.wave_max),
                 fit_lines=args.fit_lines,
@@ -1122,9 +1122,9 @@ def main():
     args = parse_args()
 
     # Set dustmaps location only when it will be used.
-    if args.mode == "fetch-dustmaps" or (args.mode == "fit" and not args.no_deredden):
-        from dustmaps.config import config
-        config["data_dir"] = args.dustmaps_data_dir
+    #if args.mode == "fetch-dustmaps" or (args.mode == "fit" and not args.no_deredden):
+        #from dustmaps.config import config
+        #config["data_dir"] = args.dustmaps_data_dir
 
     if args.mode == "download":
         run_download(args)

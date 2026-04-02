@@ -3,8 +3,8 @@ import os, math
 import pandas as pd
 
 # ---------- Parameters ----------
-#num_jobs = 500
 num_jobs = -1
+#num_jobs = 500
 skip = 0
 N = 1
 nwarm = 2000
@@ -12,11 +12,18 @@ nsamp = 200
 ncores = 4
 nchains = ncores
 max_tree_depth = 14
+nwarm = 500
+nsamp = 100
+ncores = 1
+max_tree_depth = 12
+nchains = ncores
 
 script_path = "hpc_scripts/jobs/multibandfit" 
 log_path    = "hpc_scripts/logs/multibandfit" 
-chisq_csv = "data/aug4_sample_chisqg10_ebv005sn3.csv"
-chisq_csv = "data/all_object_id.csv"
+#chisq_csv = "data/aug4_sample_chisqg10_ebv005sn3.csv"
+#chisq_csv = "data/all_object_id.csv"
+chisq_csv = "results/data/variability_chi_sq_red_g_gt_20.csv"
+#chisq_csv = "results/data/lc_chisq_corrected_good.csv"
 #chisq_csv = "results/data/oct9b_missing_object_ids.csv"
 #fake_flags = "--inject_random_fake_etas --inject_fake --disable_lag_blr --disable_fhost"
 
@@ -30,7 +37,7 @@ fhost_csv = ""
 sample = 'chisq'
 bpl = False
 
-date = "mar21d_all"
+date = "apr1a_redchisq20_fastrun"
 
 flags = ""
 other = ""
@@ -99,7 +106,7 @@ sbatch_script = f"""#!/bin/bash
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task={ncores}
 #SBATCH --mem=20G
-#SBATCH --partition=day
+#SBATCH --partition=day_amd
 #SBATCH --time=4:00:00
 
 # --- Environment ---
@@ -155,6 +162,8 @@ echo "object_ids: $IDS"
 python -m qvc.light_curve.fit_light_curves \
  --filter_object_id $IDS \
  --plot \
+ --disable_trace_plot --disable_correlation_plot --disable_histogram_plot \
+ --disable_corner_plot --disable_sigma_tau_lambda_plot --disable_recovery_plot \
  --progress \
  --nwarm {nwarm} \
  --nsamp {nsamp} \

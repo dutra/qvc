@@ -225,7 +225,6 @@ def test_plot_spectral_fraction_vs_redshift_writes_pdf(tmp_path, monkeypatch):
     assert os.path.exists(out)
     assert out.endswith("spectral_fraction_vs_redshift.pdf")
 
-
 def test_plot_sigma_bc_vs_redshift_writes_pdf(tmp_path, monkeypatch):
     monkeypatch.setenv("MPLCONFIGDIR", str(tmp_path / "mplconfig"))
 
@@ -247,6 +246,29 @@ def test_plot_sigma_bc_vs_redshift_writes_pdf(tmp_path, monkeypatch):
     assert out is not None
     assert os.path.exists(out)
     assert out.endswith("sigma_bc_vs_redshift_postcut.pdf")
+
+
+def test_plot_f_host_2500_vs_redshift_writes_pdf(tmp_path, monkeypatch):
+    monkeypatch.setenv("MPLCONFIGDIR", str(tmp_path / "mplconfig"))
+
+    df = pd.DataFrame(
+        {
+            "z": np.linspace(0.4, 2.4, 20),
+            "f_host_2500": np.linspace(0.22, 0.01, 20),
+        }
+    )
+
+    out = hubble_plotting.plot_f_host_2500_vs_redshift(
+        df,
+        plot_path=str(tmp_path / "figures"),
+        show=False,
+        nbins=5,
+        min_bin_count=3,
+    )
+
+    assert out is not None
+    assert os.path.exists(out)
+    assert out.endswith("f_host_2500_vs_redshift.pdf")
 
 
 def test_plot_sigma_bc_vs_frac_bc_writes_pdf(tmp_path, monkeypatch):
@@ -295,6 +317,37 @@ def test_plot_bc_lag_vs_l2500_writes_pdf(tmp_path, monkeypatch):
     assert out is not None
     assert os.path.exists(out)
     assert out.endswith("bc_lag_vs_l2500_postcut.pdf")
+
+
+def test_plot_residuals_vs_alphaOX_writes_both_pdfs(tmp_path, monkeypatch):
+    monkeypatch.setenv("MPLCONFIGDIR", str(tmp_path / "mplconfig"))
+
+    df = pd.DataFrame(
+        {
+            "z": [0.35, 0.6, 1.0, 1.8, 3.3],
+            "delta_alphaOX": [-0.15, -0.08, 0.0, 0.06, 0.12],
+            "delta_alphaOX_err": [0.03, 0.02, 0.02, 0.03, 0.04],
+            "alphaOX": [-1.9, -1.8, -1.7, -1.6, -1.5],
+            "alphaOX_err": [0.05, 0.04, 0.04, 0.05, 0.06],
+        }
+    )
+    residuals = np.array([0.18, 0.07, 0.01, -0.05, -0.12], dtype=float)
+    residuals_err = np.full_like(residuals, 0.08)
+
+    delta_path, alpha_path = hubble_plotting.plot_residuals_vs_alphaOX(
+        df,
+        residuals,
+        residuals_err,
+        plot_path=str(tmp_path / "figures"),
+        show=False,
+    )
+
+    assert delta_path is not None
+    assert alpha_path is not None
+    assert os.path.exists(delta_path)
+    assert os.path.exists(alpha_path)
+    assert delta_path.endswith("delta_alphaOX_residuals.pdf")
+    assert alpha_path.endswith("alphaOX_residuals.pdf")
 
 
 def test_plot_blr_line_lags_vs_l2500_fiducial_writes_pdf(tmp_path, monkeypatch):
@@ -573,7 +626,8 @@ def test_end_to_end(tmp_path, monkeypatch):
         "plot_bc_lag_vs_l2500",
         "plot_blr_line_lags_vs_l2500_fiducial",
         "plot_blr_lag_vs_redshift_by_band",
-        "plot_f_host_center_vs_l2500",
+        "plot_f_host_2500_vs_l2500",
+        "plot_f_host_2500_vs_redshift",
         "plot_g_band_drift_slope_histograms",
         "plot_Mi_relation",
         "plot_cut_diagnostics",
@@ -686,7 +740,7 @@ def test_end_to_end(tmp_path, monkeypatch):
     h5_path = tmp_path / "data" / "fake_light_curve_end_to_end.h5"
     _write_test_quasars_hdf5(h5_path, [quasar])
 
-    df = hubble_utils.load_agn_data(
+    df, df_all = hubble_utils.load_agn_data(
         h5_path,
         spectra_fit_csv=None,
         lc_info_csv=None,
@@ -694,6 +748,7 @@ def test_end_to_end(tmp_path, monkeypatch):
         apply_cut=False,
         plot_path=str(tmp_path / "figures"),
     )
+    assert df_all.equals(df)
 
     assert len(df) == 1
     row = df.iloc[0]

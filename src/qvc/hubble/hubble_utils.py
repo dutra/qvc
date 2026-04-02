@@ -41,6 +41,53 @@ from qvc.hubble.hubble_model import (
     infer_use_alpha_lambda_term,
 )
 
+PURPLE_ANSI = "\033[95m"
+RESET_ANSI = "\033[0m"
+
+
+def _append_cut_report_row(rows, *, step, criterion, before, kept, status):
+    before_i = int(before)
+    kept_i = int(kept)
+    rows.append(
+        {
+            "step": str(step),
+            "criterion": str(criterion),
+            "before": before_i,
+            "removed": before_i - kept_i,
+            "kept": kept_i,
+            "status": str(status),
+        }
+    )
+
+
+def _render_cut_summary_table(rows):
+    headers = ("step", "criterion", "before", "removed", "kept", "status")
+    rendered_rows = []
+    for row in rows:
+        rendered_rows.append({key: str(row[key]) for key in headers})
+
+    widths = {
+        key: max(len(key), *(len(row[key]) for row in rendered_rows)) if rendered_rows else len(key)
+        for key in headers
+    }
+
+    def _line(values):
+        return "| " + " | ".join(values[key].ljust(widths[key]) for key in headers) + " |"
+
+    border = "+-" + "-+-".join("-" * widths[key] for key in headers) + "-+"
+    lines = [
+        border,
+        _line({key: key for key in headers}),
+        border,
+    ]
+    lines.extend(_line(row) for row in rendered_rows)
+    lines.append(border)
+    return "\n".join(lines)
+
+
+def _wrap_text_in_purple(text):
+    return f"{PURPLE_ANSI}{text}{RESET_ANSI}"
+
 def _discover_qvc_root() -> Path:
     """Find the repository root by walking upward to the pyproject file."""
     here = Path(__file__).resolve()
@@ -963,7 +1010,8 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
                   reddening_ebv_cut=None,
                   lc_info_csv="data/lc_chisq.csv",
                   z_range=(0.44, 3.16),
-                  plot_path="plots/hubble"):
+                  plot_path="plots/hubble",
+                  cut_report_path=None):
     def _format_cut_bounds(lower, upper, *, upper_inclusive=True, allow_missing=False):
         left = "[" if lower is not None else "("
         right = "]" if upper_inclusive else ")"
@@ -1016,7 +1064,8 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
         plot_blr_lag_vs_redshift_by_band,
         plot_eta_tau_sigma_vs_redshift,
         plot_fast_vs_uv_variability,
-        plot_f_host_center_vs_l2500,
+        plot_f_host_2500_vs_redshift,
+        plot_f_host_2500_vs_l2500,
         plot_g_band_drift_slope_histograms,
         plot_l2500_vs_eta_sigma_fiducial,
         plot_l2500_vs_uv_variability_fiducial,
@@ -1037,6 +1086,34 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
 
     if exclude_object_ids_csv is None:
         exclude_object_ids_csv = []
+    cut_rows = []
+
+    def _record_cut(step, criterion, frame_before, mask, *, status="applied", reset_index=True):
+        before = len(frame_before)
+        kept = int(np.count_nonzero(mask))
+        _append_cut_report_row(
+            cut_rows,
+            step=step,
+            criterion=criterion,
+            before=before,
+            kept=kept,
+            status=status,
+        )
+        filtered = frame_before[mask]
+        if reset_index:
+            filtered = filtered.reset_index(drop=True)
+        return filtered
+
+    def _finalize_cut_report():
+        if only_load or not cut_rows:
+            return
+        table_text = _render_cut_summary_table(cut_rows)
+        print(_wrap_text_in_purple(table_text))
+        if cut_report_path is None:
+            return
+        report_path = Path(cut_report_path)
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(table_text + "\n", encoding="utf-8")
 
     def _normalize_dropped_bands(value):
         if value is None:
@@ -1172,23 +1249,23 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
             raise ValueError("spectra_fit_csv not provided and spectral fields not found in agn h5 file")
             #raise ValueError("spectra_fit_csv must be provided if alpha_lambda not in agn h5 file")
 
-    if "f_host_center" in df.columns:
-        missing_f_host_center = pd.to_numeric(df["f_host_center"], errors="coerce").isna()
-        if np.any(missing_f_host_center):
-            df.loc[missing_f_host_center, "f_host_center"] = 0.0
-            if "f_host_center_err" in df.columns:
-                df.loc[missing_f_host_center, "f_host_center_err"] = 0.0
-            print(f"Filled {int(np.count_nonzero(missing_f_host_center))} NaN f_host_center values with 0.0")
+    if "f_host_2500" in df.columns:
+        missing_f_host_2500 = pd.to_numeric(df["f_host_2500"], errors="coerce").isna()
+        if np.any(missing_f_host_2500):
+            df.loc[missing_f_host_2500, "f_host_2500"] = 0.0
+            if "f_host_2500_err" in df.columns:
+                df.loc[missing_f_host_2500, "f_host_2500_err"] = 0.0
+            print(f"Filled {int(np.count_nonzero(missing_f_host_2500))} NaN f_host_2500 values with 0.0")
 
     if "log_sigma_uv" in df.columns:
         df["log_sigma_uv_uncorrected"] = pd.to_numeric(df["log_sigma_uv"], errors="coerce")
     # Use the spectroscopic host fraction at 2500 A for the sigma_uv host correction.
     if correct_sigma_uv_host:
-        required_cols = {"log_sigma_uv_uncorrected", "f_host_center", "log_sigma_uv_std_psd"}
+        required_cols = {"log_sigma_uv_uncorrected", "f_host_2500", "log_sigma_uv_std_psd"}
         if required_cols.issubset(df.columns):
-            f_host_center = pd.to_numeric(df["f_host_center"], errors="coerce")
-            valid_frac_host = np.isfinite(f_host_center) & (f_host_center >= 0.0) & (f_host_center < 1.0)
-            agn_frac = 1.0 - f_host_center
+            f_host_2500 = pd.to_numeric(df["f_host_2500"], errors="coerce")
+            valid_frac_host = np.isfinite(f_host_2500) & (f_host_2500 >= 0.0) & (f_host_2500 < 1.0)
+            agn_frac = 1.0 - f_host_2500
             valid_hostcorr = valid_frac_host & np.isfinite(agn_frac) & (agn_frac > 0.0)
             ln10 = np.log(10.0)
 
@@ -1197,13 +1274,13 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
             )
             df["log_sigma_uv_std_psd_uncorrected"] = log_sigma_uv_std_psd_uncorrected
 
-            if "f_host_center_err" in df.columns:
-                f_host_center_err = pd.to_numeric(df["f_host_center_err"], errors="coerce").fillna(0.0)
+            if "f_host_2500_err" in df.columns:
+                f_host_2500_err = pd.to_numeric(df["f_host_2500_err"], errors="coerce").fillna(0.0)
             else:
-                f_host_center_err = pd.Series(np.zeros(len(df), dtype=float), index=df.index)
+                f_host_2500_err = pd.Series(np.zeros(len(df), dtype=float), index=df.index)
             hostcorr_sigma_term = np.where(
                 valid_hostcorr,
-                f_host_center_err.to_numpy(dtype=float) / (agn_frac.to_numpy(dtype=float) * ln10),
+                f_host_2500_err.to_numpy(dtype=float) / (agn_frac.to_numpy(dtype=float) * ln10),
                 0.0,
             )
             df["log_sigma_uv_hostcorr_err"] = hostcorr_sigma_term
@@ -1225,19 +1302,19 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
             )
             df["log_sigma_uv_std_psd"] = df["log_sigma_uv_std_psd_corrected"]
             print(
-                "Applied sigma_uv host correction using f_host_center: "
-                "sigma_uv_corrected = sigma_uv / (1 - f_host_center)"
+                "Applied sigma_uv host correction using f_host_2500: "
+                "sigma_uv_corrected = sigma_uv / (1 - f_host_2500)"
             )
             delta_log_sigma = df["log_sigma_uv"] - df["log_sigma_uv_uncorrected"]
             valid_expected_increase = valid_hostcorr & np.isfinite(delta_log_sigma)
             if np.any(valid_expected_increase & (delta_log_sigma < 0.0)):
                 bad_rows = df.loc[
                     valid_expected_increase & (delta_log_sigma < 0.0),
-                    ["object_id", "f_host_center", "log_sigma_uv_uncorrected", "log_sigma_uv"],
+                    ["object_id", "f_host_2500", "log_sigma_uv_uncorrected", "log_sigma_uv"],
                 ]
                 raise ValueError(
                     "Host-corrected log_sigma_uv should be larger or equal than the uncorrected value "
-                    "for all valid f_host_center rows. Offending rows:\n"
+                    "for all valid f_host_2500 rows. Offending rows:\n"
                     f"{bad_rows.head(10).to_string(index=False)}"
                 )
             if np.any(valid_expected_increase):
@@ -1266,17 +1343,12 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
         else:
             missing_cols = sorted(required_cols - set(df.columns))
             raise KeyError(
-                "correct_sigma_uv_host=True requires 'log_sigma_uv', 'f_host_center', "
+                "correct_sigma_uv_host=True requires 'log_sigma_uv', 'f_host_2500', "
                 f"and 'log_sigma_uv_std_psd'. Missing: {missing_cols}"
             )
 
-    if {"z", "apparent_mag_2500", "f_host_center"}.issubset(df.columns):
-        plot_f_host_center_vs_l2500(
-            df,
-            plot_path=plot_path,
-            show=False,
-            filename="f_host_center_vs_l2500_precut.pdf",
-        )
+    if {"z", "apparent_mag_2500", "f_host_2500"}.issubset(df.columns):
+        plot_f_host_2500_vs_l2500(df, plot_path=plot_path, show=False)
     if {"z", "apparent_mag_2500", "alpha_lambda"}.issubset(df.columns):
         plot_alpha_lambda_vs_l2500(
             df,
@@ -1485,10 +1557,8 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
 
     # Remove objects with implausibly bright or faint apparent magnitude at 2500 A.
     mag_mask = ((df['apparent_mag_2500'] >= 16) & (df['apparent_mag_2500'] < 24))
-    num_removed = np.sum(~mag_mask)
-    print(f"Cut on apparent_mag_2500 : {num_removed} objects removed")
     plot_cut_diagnostics(df.copy(), df[mag_mask], bins=30, cut_info="16 < apparent_mag_2500 < 24")
-    df = df[mag_mask].reset_index(drop=True)
+    df = _record_cut("apparent_mag_2500", "16 < apparent_mag_2500 < 24", df, mag_mask)
 
     df = populate_xray(df)
     
@@ -1507,7 +1577,8 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
     df_all = df.copy()
 
     if only_load:
-        return df
+        _finalize_cut_report()
+        return df, df_all
 
     df['log_t_rf_length'] = np.log10(df['t_rf_length'])
 
@@ -1526,17 +1597,8 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
         '015802.36+002917.3', # next to a star
     ]
     mask_exclude &= (~df['sdss_name'].astype(str).isin(exclusion_sdss_names))
-    print(f"Excluding {np.sum(~mask_exclude)} objects by exclusion list")
-    df = df[mask_exclude].reset_index(drop=True)
+    df = _record_cut("exclusion_list", "sdss_name/object_id exclusion list", df, mask_exclude)
 
-
-    #mask_valid = (df['log_tau_uv_rf'] > 2 * df['log_sigma_uv'] + 2.5)
-    #num_removed = np.sum(~mask_valid)
-    #print(f"Cut on tau vs sigma diagram: {num_removed} objects removed")
-    #plot_cut_diagnostics(df.copy(), df[mask_valid], bins=30, cut_info="tau > 2*sigma + 2.5")
-
-    #df = df[mask_valid].reset_index(drop=True)
-    # mask_in  = df_agn["z"].between(0.44, 3.16)
 
     # Remove outliers listed in external CSV files.
     for exclude_csv in exclude_object_ids_csv:
@@ -1544,32 +1606,49 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
             exclude_df = pd.read_csv(exclude_csv)
             exclude_ids = set(exclude_df['object_id'].astype(str))
             mask_exclude = ~df['object_id'].astype(str).isin(exclude_ids)
-            num_excluded = np.sum(~mask_exclude)
-            print(f"Excluding {num_excluded} objects from DataFrame based on {exclude_csv}")
             plot_cut_diagnostics(df.copy(), df[mask_exclude], bins=30, cut_info="exclude csv")
-            df = df[mask_exclude].reset_index(drop=True)
+            df = _record_cut(
+                f"exclude_csv:{Path(exclude_csv).name}",
+                f"object_id not in {Path(exclude_csv).name}",
+                df,
+                mask_exclude,
+            )
         else:
+            _append_cut_report_row(
+                cut_rows,
+                step=f"exclude_csv:{Path(exclude_csv).name}",
+                criterion=f"missing file: {exclude_csv}",
+                before=len(df),
+                kept=len(df),
+                status="warning",
+            )
             print(f"[WARNING] Exclusion CSV not found: {exclude_csv}")
 
     # Remove objects with too many dropped bands.
     mask_dropped = ~df['len_dropped_bands'].isin([4, 5])
-    num_removed_dropped = np.sum(~mask_dropped)
-    print(f"Removed {num_removed_dropped} objects with len_dropped_bands == 4 or 5")
     plot_cut_diagnostics(df.copy(), df[mask_dropped], bins=30, cut_info="dropped bands 4 or 5")
-    df = df[mask_dropped].reset_index(drop=True)
+    df = _record_cut("dropped_bands", "len_dropped_bands not in {4, 5}", df, mask_dropped)
     blr_amp_cuts = build_log_amp_delta_blr_cuts()
     for col, lower, upper in blr_amp_cuts:
+        cut_desc = f"{col} in {_format_cut_bounds(lower, upper, upper_inclusive=False, allow_missing=True)}"
+        if col not in df.columns:
+            _append_cut_report_row(
+                cut_rows,
+                step=f"blr_amp:{col}",
+                criterion=cut_desc,
+                before=len(df),
+                kept=len(df),
+                status="skipped",
+            )
+            continue
         mask = np.ones(len(df), dtype=bool)
         if lower is not None:
             mask &= df[col] >= lower
         if upper is not None:
             mask &= df[col] < upper
         mask |= df[col].isna()
-        num_removed = np.sum(~mask)
-        cut_desc = f"{col} in {_format_cut_bounds(lower, upper, upper_inclusive=False, allow_missing=True)}"
-        print(f"BLR amplitude cut {cut_desc}: removed {num_removed}")
         plot_cut_diagnostics(df.copy(), df[mask], bins=30, cut_info=cut_desc)
-        df = df[mask].reset_index(drop=True)
+        df = _record_cut(f"blr_amp:{col}", cut_desc, df, mask)
 
     cuts = build_agn_cuts(
         f_host_cut=fhost_cut,
@@ -1581,33 +1660,32 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
     )
 
     if apply_cut:
-        initial_count = len(df)
         mask = np.ones(len(df), dtype=bool)
         for col, lower, upper in cuts:
             cut_desc = f"{col} in {_format_cut_bounds(lower, upper, upper_inclusive=True)}"
             if col not in df.columns:
-                print(f"AGN scalar cut {cut_desc}: skipped (column missing)")
+                _append_cut_report_row(
+                    cut_rows,
+                    step=f"agn_scalar:{col}",
+                    criterion=cut_desc,
+                    before=len(df),
+                    kept=len(df),
+                    status="skipped",
+                )
                 continue
             col_mask = np.ones(len(df), dtype=bool)
             if lower is not None:
                 col_mask &= df[col] >= lower
             if upper is not None:
                 col_mask &= df[col] <= upper
-            cut_count = np.sum(~col_mask)
-            print(f"AGN scalar cut {cut_desc}: removed {cut_count}")
             plot_cut_diagnostics(df.copy(), df[col_mask], bins=30, cut_info=cut_desc)
-            mask &= col_mask
-        df = df[mask]
-
-        print(f"Total objects removed by all cuts: {initial_count - len(df)}")
+            df = _record_cut(f"agn_scalar:{col}", cut_desc, df, col_mask)
     # Drop rows that still lack the core continuum fit parameters.
     remove_nans_columns = ['alpha_lambda', 'alpha_lambda_err']
     for col in remove_nans_columns:
         nan_mask = ~df[col].isna()
-        num_nans = (~nan_mask).sum()
-        print(f"Removing {num_nans} objects with NaN in column '{col}'")
-        df = df[nan_mask]
-        plot_cut_diagnostics(df.copy(), df[mask], bins=30, cut_info=f"{col} not NaN")
+        plot_cut_diagnostics(df.copy(), df[nan_mask], bins=30, cut_info=f"{col} not NaN")
+        df = _record_cut(f"not_nan:{col}", f"{col} not NaN", df, nan_mask)
 
     df = df.reset_index(drop=True)
 
@@ -1619,24 +1697,31 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
             mu_zscore = dict(zip(residual_df['object_id'].astype(str), residual_df['mu_zscore']))
             df['mu_zscore'] = df['object_id'].astype(str).map(mu_zscore)
             mask_residual = df['mu_zscore'].abs() < residuals_sigma_clip
-            num_removed = np.sum(~mask_residual)
-            print(f"Cut on sigma clip with mu_score < {residuals_sigma_clip}: {num_removed} objects removed")
-            df = df.drop(columns=['mu_zscore'])
             plot_cut_diagnostics(df.copy(), df[mask_residual], bins=30, cut_info=f"|mu_zscore|<{residuals_sigma_clip}")
-
-            df = df[mask_residual].reset_index(drop=True)
+            df = _record_cut(
+                "residual_sigma_clip",
+                f"|mu_zscore| < {residuals_sigma_clip}",
+                df,
+                mask_residual,
+            )
+            df = df.drop(columns=['mu_zscore'])
         else:
+            _append_cut_report_row(
+                cut_rows,
+                step="residual_sigma_clip",
+                criterion=f"missing file: {residuals_csv}",
+                before=len(df),
+                kept=len(df),
+                status="warning",
+            )
             print(f"[WARNING] Residual CSV not found: {residuals_csv}")
             raise ValueError(f"Residual CSV not found: {residuals_csv}")
 
     # Require a positive finite magnitude uncertainty at 2500 A.
-    num_before = len(df)
     mask = (df['apparent_mag_2500_err'] > 0) & np.isfinite(df['apparent_mag_2500_err'])
     plot_cut_diagnostics(df.copy(), df[mask], bins=30, cut_info=f"0<apparent_mag_2500_err<inf")
 
-    df = df[mask].reset_index(drop=True)
-    num_after = len(df)
-    print(f"Dropped {num_before - num_after} objects with apparent_mag_2500_err <= 0 or not finite")
+    df = _record_cut("apparent_mag_2500_err", "0 < apparent_mag_2500_err < inf", df, mask)
 
     cosmo = FlatLambdaCDM(H0=70, Om0=0.3)
     y_log_meas_err = 0.4 * np.asarray(df['apparent_mag_2500_err'].fillna(1e9))
@@ -1645,10 +1730,7 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
     yerr_linear = 10**actual_logL2500 * np.log(10) * y_log_meas_err
     mask = yerr_linear/(10**actual_logL2500) < 0.5
     plot_cut_diagnostics(df.copy(), df[mask], bins=30, cut_info=f"frac_err_logL2500<0.5")
-
-    num_removed = np.sum(~mask)
-    print(f"\033[93mRemoved {num_removed} objects with fractional logL2500 error >= 0.5\033[0m")
-    df = df[mask]
+    df = _record_cut("frac_err_logL2500", "frac_err_logL2500 < 0.5", df, mask, reset_index=False)
 
     num_quasars_z_0_1 = len(df[(df['z'] > 0) & (df['z'] <= 1.0)])
     num_quasars_z_gt_3 = len(df[df['z'] > 3])
@@ -1791,19 +1873,26 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
     if len(colorpanel_cols) > 0 and "z" in df_all.columns and "apparent_mag_2500" in df_all.columns:
         cuts_plot_dir = os.path.join("plots", "hubble", "cuts")
         os.makedirs(cuts_plot_dir, exist_ok=True)
-        fig_colorpanels, _ = plot_m2500_vs_z_colorpanels(
+        colorpanel_result = plot_m2500_vs_z_colorpanels(
             df_all,
             df_keep=df,
             color_cols=tuple(colorpanel_cols),
             z_range=z_range,
         )
-        fig_colorpanels.savefig(
-            os.path.join(cuts_plot_dir, "m2500_vs_z_colorpanels.pdf"),
-            bbox_inches="tight",
-        )
-        plt.close(fig_colorpanels)
+        fig_colorpanels = None
+        if colorpanel_result:
+            if isinstance(colorpanel_result, tuple):
+                fig_colorpanels = colorpanel_result[0]
+            else:
+                fig_colorpanels = colorpanel_result
+        if fig_colorpanels is not None:
+            fig_colorpanels.savefig(
+                os.path.join(cuts_plot_dir, "m2500_vs_z_colorpanels.pdf"),
+                bbox_inches="tight",
+            )
+            plt.close(fig_colorpanels)
     plot_Mi_relation(df_all.copy())
-    
+    _finalize_cut_report()
     return df, df_all
 
 def load_pantheon_data():
