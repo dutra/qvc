@@ -150,7 +150,12 @@ def test_compute_derived_results_uses_bc_over_total_continuum(monkeypatch):
     args = SimpleNamespace(decompose_host=True)
     fit_spectra.compute_derived_results(result, q, args)
 
-    assert np.isclose(result["f_bc_3000"], 0.1)
-    assert np.isclose(result["f_bc_3000_err"], 0.0136)
-    assert np.isclose(result["f_fe_uv_3000"], 0.1)
-    assert np.isclose(result["f_fe_uv_3000_err"], 0.0136)
+    bc_ratio_draws = q.pred_out["f_bc_model"][:, 1] / q.pred_out["continuum_model"][:, 1]
+    fe_ratio_draws = q.pred_out["f_fe_mgii_model"][:, 1] / q.pred_out["continuum_model"][:, 1]
+    bc_p16, bc_p50, bc_p84 = np.percentile(bc_ratio_draws, [16, 50, 84])
+    fe_p16, fe_p50, fe_p84 = np.percentile(fe_ratio_draws, [16, 50, 84])
+
+    assert np.isclose(result["f_bc_3000"], bc_p50)
+    assert np.isclose(result["f_bc_3000_err"], 0.5 * (bc_p84 - bc_p16))
+    assert np.isclose(result["f_fe_uv_3000"], fe_p50)
+    assert np.isclose(result["f_fe_uv_3000_err"], 0.5 * (fe_p84 - fe_p16))
