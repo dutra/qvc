@@ -178,7 +178,7 @@ def agn_model_pack_obs(obs_dict, use_alpha_lambda_term=False):
     _require(req_errs, obs_dict, "errors")
     obs = np.array([obs_dict[k] for k in req_obs], dtype=float)
     err = np.array([obs_dict[k] for k in req_errs], dtype=float)
-    pivots = {k: float(np.mean(obs_dict[k])) for k in req_obs}
+    pivots = {k: float(np.median(obs_dict[k])) for k in req_obs}
     # pivots["log_tau_uv_rf"] = np.log10(500)
     # pivots["log_sigma_uv"]  = np.log10(0.2)
     pivots = np.array([pivots[k] for k in req_obs], dtype=float)

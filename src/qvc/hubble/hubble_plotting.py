@@ -1175,7 +1175,7 @@ def plot_sigma_uv_vs_tau_uv_rf(
         ax_hist_x.text(
             0.98,
             0.90,
-            f"{sigma_med_linear:.2f} mag",
+            f"{sigma_med_linear:.1f} mag",
             ha="right",
             va="top",
             transform=ax_hist_x.transAxes,
@@ -1192,7 +1192,7 @@ def plot_sigma_uv_vs_tau_uv_rf(
         ax_hist_y.text(
             0.95,
             0.98,
-            f"{tau_med_linear:.0f} days",
+            f"{100.0 * np.round(tau_med_linear / 100.0):.0f} days",
             ha="right",
             va="top",
             transform=ax_hist_y.transAxes,

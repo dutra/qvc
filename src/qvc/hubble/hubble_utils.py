@@ -3175,8 +3175,8 @@ def report_pivots(df_agn):
     print(f"{'Quantity':<15}{'Type':<18}{'log10 value':>14}{'linear value':>16}")
 
     rows = [
-        ("sigma_uv", "computed mean", np.mean(df_agn["log_sigma_uv"])),
-        ("tau_uv_rf", "computed mean", np.mean(df_agn["log_tau_uv_rf"])),
+        ("sigma_uv", "computed median", np.median(df_agn["log_sigma_uv"])),
+        ("tau_uv_rf", "computed median", np.median(df_agn["log_tau_uv_rf"])),
     ]
 
     _, _, pivots_arr = agn_model_pack_obs(df_agn)
@@ -3188,4 +3188,10 @@ def report_pivots(df_agn):
 
     for name, kind, log_val in rows:
         lin_val = 10**log_val
-        print(f"{name:<15}{kind:<18}{log_val:>14.4f}{lin_val:>16.4f}")
+        if name == "sigma_uv":
+            lin_text = f"{lin_val:.1f}"
+        elif name == "tau_uv_rf":
+            lin_text = f"{100.0 * np.round(lin_val / 100.0):.0f}"
+        else:
+            lin_text = f"{lin_val:.4f}"
+        print(f"{name:<15}{kind:<18}{log_val:>14.4f}{lin_text:>16}")
