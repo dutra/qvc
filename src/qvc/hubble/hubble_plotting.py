@@ -1112,9 +1112,14 @@ def plot_sigma_uv_vs_tau_uv_rf(
 
     log_sigma = pd.to_numeric(df_agn["log_sigma_uv"], errors="coerce").to_numpy(dtype=float)
     log_tau_rf = pd.to_numeric(df_agn["log_tau_uv_rf"], errors="coerce").to_numpy(dtype=float)
-    z = (
-        pd.to_numeric(df_agn["z"], errors="coerce").to_numpy(dtype=float)
-        if "z" in df_agn.columns
+    log_sigma_err = (
+        pd.to_numeric(df_agn["log_sigma_uv_err"], errors="coerce").to_numpy(dtype=float)
+        if "log_sigma_uv_err" in df_agn.columns
+        else np.full(len(df_agn), np.nan, dtype=float)
+    )
+    log_tau_rf_err = (
+        pd.to_numeric(df_agn["log_tau_uv_rf_err"], errors="coerce").to_numpy(dtype=float)
+        if "log_tau_uv_rf_err" in df_agn.columns
         else np.full(len(df_agn), np.nan, dtype=float)
     )
 
@@ -1126,18 +1131,31 @@ def plot_sigma_uv_vs_tau_uv_rf(
     else:
         idx = np.array([], dtype=int)
 
-    fig, ax = plt.subplots(1, 1, figsize=(6.8, 5.8))
+    fig = plt.figure(figsize=(7.8, 7.0))
+    gs = fig.add_gridspec(
+        2,
+        2,
+        width_ratios=(4.0, 1.2),
+        height_ratios=(1.2, 4.0),
+        hspace=0.05,
+        wspace=0.05,
+    )
+    ax_hist_x = fig.add_subplot(gs[0, 0])
+    ax = fig.add_subplot(gs[1, 0], sharex=ax_hist_x)
+    ax_hist_y = fig.add_subplot(gs[1, 1], sharey=ax)
     if idx.size > 0:
-        color_values = z[idx]
-        use_color = np.all(np.isfinite(color_values))
-        sc = ax.scatter(
+        ax.errorbar(
             log_sigma[idx],
             log_tau_rf[idx],
-            c=color_values if use_color else "0.3",
-            cmap="viridis" if use_color else None,
-            s=10,
+            xerr=log_sigma_err[idx] if np.any(np.isfinite(log_sigma_err[idx])) else None,
+            yerr=log_tau_rf_err[idx] if np.any(np.isfinite(log_tau_rf_err[idx])) else None,
+            fmt="o",
+            color="0.3",
+            ecolor="0.3",
+            markersize=2.2,
             alpha=0.7,
-            linewidths=0,
+            elinewidth=0.4,
+            capsize=0,
             rasterized=True,
         )
         if dynamic_axes:
@@ -1145,14 +1163,49 @@ def plot_sigma_uv_vs_tau_uv_rf(
             ypad = 0.05 * max(np.nanmax(log_tau_rf[idx]) - np.nanmin(log_tau_rf[idx]), 1e-6)
             ax.set_xlim(np.nanmin(log_sigma[idx]) - xpad, np.nanmax(log_sigma[idx]) + xpad)
             ax.set_ylim(np.nanmin(log_tau_rf[idx]) - ypad, np.nanmax(log_tau_rf[idx]) + ypad)
-        if use_color:
-            cbar = fig.colorbar(sc, ax=ax)
-            cbar.set_label("Redshift z")
+
+        sigma_use = log_sigma[idx]
+        tau_use = log_tau_rf[idx]
+        sigma_med = np.nanmedian(sigma_use)
+        tau_med = np.nanmedian(tau_use)
+        sigma_med_linear = 10.0 ** sigma_med
+        tau_med_linear = 10.0 ** tau_med
+        ax_hist_x.hist(sigma_use, bins=30, color="0.35", histtype="stepfilled", alpha=0.25)
+        ax_hist_x.axvline(sigma_med, color="k", ls="--", lw=1.5)
+        ax_hist_x.text(
+            0.98,
+            0.90,
+            f"{sigma_med_linear:.2f} mag",
+            ha="right",
+            va="top",
+            transform=ax_hist_x.transAxes,
+        )
+        ax_hist_y.hist(
+            tau_use,
+            bins=30,
+            orientation="horizontal",
+            color="0.35",
+            histtype="stepfilled",
+            alpha=0.25,
+        )
+        ax_hist_y.axhline(tau_med, color="k", ls="--", lw=1.5)
+        ax_hist_y.text(
+            0.95,
+            0.98,
+            f"{tau_med_linear:.0f} days",
+            ha="right",
+            va="top",
+            transform=ax_hist_y.transAxes,
+        )
     else:
         ax.text(0.5, 0.5, "No finite log_sigma_uv/log_tau_uv_rf values", ha="center", va="center", transform=ax.transAxes)
 
     ax.set_xlabel(r"$\log \sigma_{\rm UV}$")
     ax.set_ylabel(r"$\log \tau_{\rm UV,RF}$")
+    ax_hist_x.tick_params(labelbottom=False)
+    ax_hist_y.tick_params(labelleft=False)
+    ax_hist_x.set_ylabel("N")
+    ax_hist_y.set_xlabel("N")
 
     diagnostics_path = os.path.join(plot_path or "plots/hubble", "diagnostics")
     return _save_figure(
@@ -6487,6 +6540,21 @@ def plot_spectral_fraction_vs_redshift(
                 else pd.Series(0.0, index=frame.index)
             )
             frame["f_lines"] = f_na.fillna(0.0) + f_br.fillna(0.0)
+            f_na_err = (
+                pd.to_numeric(frame["f_na_err"], errors="coerce")
+                if "f_na_err" in frame.columns
+                else pd.Series(0.0, index=frame.index)
+            )
+            f_br_err = (
+                pd.to_numeric(frame["f_br_err"], errors="coerce")
+                if "f_br_err" in frame.columns
+                else pd.Series(0.0, index=frame.index)
+            )
+            if "f_na_err" in frame.columns or "f_br_err" in frame.columns:
+                frame["f_lines_err"] = np.hypot(
+                    f_na_err.fillna(0.0).to_numpy(dtype=float),
+                    f_br_err.fillna(0.0).to_numpy(dtype=float),
+                )
         return frame
 
     df_plot = _prepare_spectral_fraction_frame(df_agn)
@@ -6522,7 +6590,13 @@ def plot_spectral_fraction_vs_redshift(
 
     for i_ax, (ax, (col, ylabel)) in enumerate(zip(axes, panel_specs)):
         y = pd.to_numeric(df_plot[col], errors="coerce").to_numpy(dtype=float)
+        yerr = None
+        err_col = f"{col}_err"
+        if err_col in df_plot.columns:
+            yerr = pd.to_numeric(df_plot[err_col], errors="coerce").to_numpy(dtype=float)
         mask = np.isfinite(z) & np.isfinite(y) & (y > 0.0)
+        if yerr is not None:
+            mask &= np.isfinite(yerr) & (yerr >= 0.0)
         if np.count_nonzero(mask) == 0:
             ax.text(0.5, 0.5, f"No finite {col}", ha="center", va="center", transform=ax.transAxes)
             ax.set_axis_off()
@@ -6530,31 +6604,36 @@ def plot_spectral_fraction_vs_redshift(
 
         z_use = z[mask]
         y_use = y[mask]
+        yerr_use = yerr[mask] if yerr is not None else None
         in_z = (z_use >= z_range[0]) & (z_use <= z_range[1])
         out_z = ~in_z
 
         if np.any(in_z):
-            ax.scatter(
+            ax.errorbar(
                 z_use[in_z],
                 y_use[in_z],
-                s=10,
-                marker="o",
+                yerr=yerr_use[in_z] if yerr_use is not None else None,
+                fmt="o",
+                markersize=2.5,
                 alpha=0.25,
                 color="k",
-                linewidths=0,
+                elinewidth=0.4,
+                capsize=0,
                 zorder=3,
                 label=ylabel,
                 rasterized=True,
             )
         if np.any(out_z):
-            ax.scatter(
+            ax.errorbar(
                 z_use[out_z],
                 y_use[out_z],
-                s=20,
-                marker="D",
+                yerr=yerr_use[out_z] if yerr_use is not None else None,
+                fmt="D",
+                markersize=3.2,
                 alpha=0.30,
                 color="k",
-                linewidths=0,
+                elinewidth=0.4,
+                capsize=0,
                 zorder=3,
                 label=ylabel if not np.any(in_z) else None,
                 rasterized=True,
@@ -6563,16 +6642,25 @@ def plot_spectral_fraction_vs_redshift(
         if df_cut_plot is not None and col in df_cut_plot.columns:
             z_cut = pd.to_numeric(df_cut_plot["z"], errors="coerce").to_numpy(dtype=float)
             y_cut = pd.to_numeric(df_cut_plot[col], errors="coerce").to_numpy(dtype=float)
-            mask_cut = np.isfinite(z_cut) & np.isfinite(y_cut)
+            yerr_cut = None
+            err_col = f"{col}_err"
+            if err_col in df_cut_plot.columns:
+                yerr_cut = pd.to_numeric(df_cut_plot[err_col], errors="coerce").to_numpy(dtype=float)
+            mask_cut = np.isfinite(z_cut) & np.isfinite(y_cut) & (y_cut > 0.0)
+            if yerr_cut is not None:
+                mask_cut &= np.isfinite(yerr_cut) & (yerr_cut >= 0.0)
             if np.any(mask_cut):
-                ax.scatter(
+                yerr_plot = yerr_cut[mask_cut] if yerr_cut is not None else None
+                ax.errorbar(
                     z_cut[mask_cut],
                     y_cut[mask_cut],
-                    s=18,
-                    marker="x",
+                    yerr=yerr_plot,
+                    fmt="x",
+                    markersize=4,
                     alpha=0.6,
                     color="tab:red",
-                    linewidths=0.8,
+                    elinewidth=0.7,
+                    capsize=0,
                     zorder=2,
                     label="cut",
                     rasterized=True,
