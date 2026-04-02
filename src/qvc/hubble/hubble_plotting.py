@@ -6239,7 +6239,7 @@ def plot_spectral_fraction_vs_redshift(
     min_bin_count=20,
     filename="spectral_fraction_vs_redshift.pdf",
 ):
-    """Plot f_BC, f_FeII, and f_host_center against redshift."""
+    """Plot available spectral fractions against redshift."""
     required = {"z", "f_bc_3000", "f_fe_uv_3000", "f_host_center"}
     if not required.issubset(df_agn.columns):
         return None
@@ -6250,8 +6250,11 @@ def plot_spectral_fraction_vs_redshift(
         ("f_fe_uv_3000", r"$f_{\rm FeII}$"),
         ("f_host_center", r"$f_{\rm host,center}$"),
     ]
+    if "f_na" in df_agn.columns:
+        panel_specs.append(("f_na", r"$f_{\rm narrow}$"))
 
-    fig, axes = plt.subplots(1, 3, figsize=(15.0, 4.6), sharex=True, squeeze=False)
+    n_panels = len(panel_specs)
+    fig, axes = plt.subplots(1, n_panels, figsize=(5.0 * n_panels, 4.6), sharex=True, squeeze=False)
     axes = axes.ravel()
 
     for ax, (col, ylabel) in zip(axes, panel_specs):

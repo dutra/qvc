@@ -209,6 +209,7 @@ def test_plot_spectral_fraction_vs_redshift_writes_pdf(tmp_path, monkeypatch):
             "z": np.linspace(0.3, 2.2, 24),
             "f_bc_3000": np.linspace(0.05, 0.25, 24),
             "f_fe_uv_3000": np.linspace(0.1, 0.4, 24),
+            "f_na": np.linspace(0.02, 0.12, 24),
             "f_host_center": np.linspace(0.3, 0.02, 24),
         }
     )
