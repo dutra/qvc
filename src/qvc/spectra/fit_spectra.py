@@ -501,6 +501,26 @@ def estimate_host_2500_fraction(q):
     return np.nan, np.nan
 
 
+def estimate_pl_2500_fraction(q):
+    """Return power-law/total-model at rest-frame 2500 A from posterior components."""
+    wave0 = 2500.0
+    wave = np.asarray(getattr(q, "wave", []), dtype=float)
+    if wave.ndim == 1 and wave.size > 0 and np.all(np.isfinite(wave)) and (wave[0] <= wave0 <= wave[-1]):
+        median, err = posterior_component_fraction_at_wave(
+            q,
+            numerator_key="f_pl_model",
+            denominator_key="model",
+            wave0=wave0,
+        )
+        if np.isfinite(median):
+            return median, err
+
+    # No reconstruction fallback here: the available reconstruction helper only
+    # rebuilds continuum components, so it cannot preserve the requested
+    # "PL / total spectrum (including lines)" definition outside native coverage.
+    return np.nan, np.nan
+
+
 def compute_derived_results(result, q, args):
     """
     Populate old fit_spectra-compatible columns from jaxqsofit outputs when possible.
@@ -526,6 +546,10 @@ def compute_derived_results(result, q, args):
     result["bi_err"] = safe_float(getattr(q, "bi_err", np.nan))
     decompose_host_eff = bool(getattr(q, "_fit_decompose_host", getattr(args, "decompose_host", True)))
     result["decompose_host_effective"] = decompose_host_eff
+
+    f_pl_2500, f_pl_2500_err = estimate_pl_2500_fraction(q)
+    result["f_PL"] = safe_float(f_pl_2500)
+    result["f_PL_err"] = safe_float(f_pl_2500_err)
 
     if decompose_host_eff:
         f_host_2500, f_host_2500_err = estimate_host_2500_fraction(q)

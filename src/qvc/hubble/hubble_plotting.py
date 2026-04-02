@@ -6252,6 +6252,10 @@ def plot_spectral_fraction_vs_redshift(
     ]
     if "f_na" in df_agn.columns:
         panel_specs.append(("f_na", r"$f_{\rm narrow}$"))
+    if "f_br" in df_agn.columns:
+        panel_specs.append(("f_br", r"$f_{\rm broad}$"))
+    if "f_PL" in df_agn.columns:
+        panel_specs.append(("f_PL", r"$f_{\rm PL}$"))
 
     n_panels = len(panel_specs)
     fig, axes = plt.subplots(1, n_panels, figsize=(5.0 * n_panels, 4.6), sharex=True, squeeze=False)
