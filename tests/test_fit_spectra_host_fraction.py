@@ -191,6 +191,14 @@ def test_compute_derived_results_saves_narrow_line_to_continuum_integrated_fract
                 ],
                 dtype=float,
             ),
+            "line_model_broad": np.array(
+                [
+                    [0.0, 2.0, 0.0],
+                    [0.0, 4.0, 0.0],
+                    [0.0, 6.0, 0.0],
+                ],
+                dtype=float,
+            ),
             "f_bc_model": np.zeros((3, 3), dtype=float),
             "f_pl_model": np.ones((3, 3), dtype=float),
             "f_fe_mgii_model": np.zeros((3, 3), dtype=float),
@@ -208,12 +216,17 @@ def test_compute_derived_results_saves_narrow_line_to_continuum_integrated_fract
     fit_spectra.compute_derived_results(result, q, args)
 
     na_int = np.trapz(q.pred_out["line_model_narrow"], q.wave, axis=1)
+    br_int = np.trapz(q.pred_out["line_model_broad"], q.wave, axis=1)
     cont_int = np.trapz(q.pred_out["continuum_model"], q.wave, axis=1)
-    ratio_draws = na_int / cont_int
-    p16, p50, p84 = np.percentile(ratio_draws, [16, 50, 84])
+    na_ratio_draws = na_int / cont_int
+    br_ratio_draws = br_int / cont_int
+    na_p16, na_p50, na_p84 = np.percentile(na_ratio_draws, [16, 50, 84])
+    br_p16, br_p50, br_p84 = np.percentile(br_ratio_draws, [16, 50, 84])
 
-    assert np.isclose(result["f_na"], p50)
-    assert np.isclose(result["f_na_err"], 0.5 * (p84 - p16))
+    assert np.isclose(result["f_na"], na_p50)
+    assert np.isclose(result["f_na_err"], 0.5 * (na_p84 - na_p16))
+    assert np.isclose(result["f_br"], br_p50)
+    assert np.isclose(result["f_br_err"], 0.5 * (br_p84 - br_p16))
 
 
 def test_compute_derived_results_saves_narrow_line_fraction_without_host_decomposition(monkeypatch):
@@ -248,6 +261,14 @@ def test_compute_derived_results_saves_narrow_line_fraction_without_host_decompo
                 ],
                 dtype=float,
             ),
+            "line_model_broad": np.array(
+                [
+                    [0.0, 0.5, 0.0],
+                    [0.0, 1.0, 0.0],
+                    [0.0, 2.0, 0.0],
+                ],
+                dtype=float,
+            ),
             "f_bc_model": np.zeros((3, 3), dtype=float),
             "f_pl_model": np.ones((3, 3), dtype=float),
             "f_fe_mgii_model": np.zeros((3, 3), dtype=float),
@@ -265,11 +286,16 @@ def test_compute_derived_results_saves_narrow_line_fraction_without_host_decompo
     fit_spectra.compute_derived_results(result, q, args)
 
     na_int = np.trapz(q.pred_out["line_model_narrow"], q.wave, axis=1)
+    br_int = np.trapz(q.pred_out["line_model_broad"], q.wave, axis=1)
     cont_int = np.trapz(q.pred_out["continuum_model"], q.wave, axis=1)
-    ratio_draws = na_int / cont_int
-    p16, p50, p84 = np.percentile(ratio_draws, [16, 50, 84])
+    na_ratio_draws = na_int / cont_int
+    br_ratio_draws = br_int / cont_int
+    na_p16, na_p50, na_p84 = np.percentile(na_ratio_draws, [16, 50, 84])
+    br_p16, br_p50, br_p84 = np.percentile(br_ratio_draws, [16, 50, 84])
 
     assert result["f_host_2500"] == 0.0
     assert result["f_host_center"] == 0.0
-    assert np.isclose(result["f_na"], p50)
-    assert np.isclose(result["f_na_err"], 0.5 * (p84 - p16))
+    assert np.isclose(result["f_na"], na_p50)
+    assert np.isclose(result["f_na_err"], 0.5 * (na_p84 - na_p16))
+    assert np.isclose(result["f_br"], br_p50)
+    assert np.isclose(result["f_br_err"], 0.5 * (br_p84 - br_p16))

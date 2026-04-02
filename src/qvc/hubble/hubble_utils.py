@@ -460,6 +460,8 @@ def populate_spectra_fit(df, spectra_fit_csvs, best=True):
         'f_bc_3000': float,
         'f_na': float,
         'f_na_err': float,
+        'f_br': float,
+        'f_br_err': float,
         'f_host_center': float,
         'f_host_center_err': float,
         'wrms': float,

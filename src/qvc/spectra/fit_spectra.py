@@ -553,6 +553,15 @@ def compute_derived_results(result, q, args):
     result["f_na"] = safe_float(m50)
     result["f_na_err"] = safe_float(m_err)
 
+    m50, m_err = posterior_component_integrated_fraction(
+        q,
+        numerator_key="line_model_broad",
+        denominator_key="continuum_model",
+        positive_only=True,
+    )
+    result["f_br"] = safe_float(m50)
+    result["f_br_err"] = safe_float(m_err)
+
     # BC fraction, defined against the total continuum at 3000 A.
     m50, m_err = posterior_component_fraction_at_wave(
         q,
