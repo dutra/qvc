@@ -36,7 +36,7 @@ def _make_fake_fhost_df(n=200, seed=123):
             "object_id": [f"agn_{i:04d}" for i in range(n)],
             "z": z,
             "apparent_mag_2500": m2500,
-            "f_host_center": f_host,
+            "f_host_2500": f_host,
         }
     )
 
@@ -92,7 +92,7 @@ def _make_fake_agn_sample_with_fhost(n_agn=24, seed=123):
             "log_tau_uv_rf_std_psd": np.full(n_agn, 0.06),
             "log_sigma_uv_log_tau_uv_rf_cov_psd": np.full(n_agn, 0.001),
             "delta_m_flux_recal": rng.normal(0.0, 0.02, size=n_agn),
-            "f_host_center": f_host,
+            "f_host_2500": f_host,
         }
     )
 
@@ -109,27 +109,27 @@ def _write_fake_sim_file(path, n=2000, seed=321):
         handle.create_dataset("apparent_mag_2500", data=m2500)
 
 
-def test_fit_fhost_center_model_monotonic_and_bounded():
+def test_fit_fhost_2500_model_monotonic_and_bounded():
     df = _make_fake_fhost_df()
-    model = hcr.fit_fhost_center_l2500_model(df)
+    model = hcr.fit_fhost_2500_l2500_model(df)
     assert np.isfinite(model["x0"])
     assert np.isfinite(model["k"])
     assert np.isfinite(model["nu"])
     assert np.isfinite(model["sigma_host_logit"])
 
     grid = np.linspace(42.5, 45.5, 200)
-    pred = hcr.predict_fhost_center_from_logL2500(grid, model)
+    pred = hcr.predict_fhost_2500_from_logL2500(grid, model)
     assert np.all(np.isfinite(pred))
     assert np.all((pred > 0.0) & (pred < 1.0))
     assert np.all(np.diff(pred) <= 1e-8)
 
 
-def test_sample_fhost_center_from_model_is_bounded_and_luminosity_dependent():
+def test_sample_fhost_2500_from_model_is_bounded_and_luminosity_dependent():
     df = _make_fake_fhost_df()
-    model = hcr.fit_fhost_center_l2500_model(df)
+    model = hcr.fit_fhost_2500_l2500_model(df)
     rng = np.random.default_rng(0)
-    low = hcr.sample_fhost_center_from_logL2500(np.full(5000, 43.0), model, rng)
-    high = hcr.sample_fhost_center_from_logL2500(np.full(5000, 45.2), model, rng)
+    low = hcr.sample_fhost_2500_from_logL2500(np.full(5000, 43.0), model, rng)
+    high = hcr.sample_fhost_2500_from_logL2500(np.full(5000, 45.2), model, rng)
     assert np.all((low > 0.0) & (low < 1.0))
     assert np.all((high > 0.0) & (high < 1.0))
     assert np.mean(low) > np.mean(high)
@@ -173,7 +173,7 @@ def test_completeness3d_shape_and_likelihood_matches_2d_when_host_independent():
         z=z,
         completeness_model=comp3,
         m_grid=mag_centers,
-        f_host_center=f_host,
+        f_host_2500=f_host,
     )
 
     assert np.allclose(ll2, ll3, rtol=1e-10, atol=1e-10)
@@ -201,7 +201,7 @@ def test_get_completeness_function_3d_fhost_and_loglikelihood_smoke(tmp_path):
     theta = np.array([(priors[key][0] + priors[key][1]) / 2.0 for key in model_labels], dtype=float)
 
     agn_fields = hubble_model.agn_model_req_obs + hubble_model.agn_model_req_errs
-    agn_fields += ("apparent_mag_2500", "apparent_mag_2500_err", "z", "z_err", "object_id", "f_host_center")
+    agn_fields += ("apparent_mag_2500", "apparent_mag_2500_err", "z", "z_err", "object_id", "f_host_2500")
     agn_data = {col: df_agn[col].to_numpy() for col in agn_fields}
     pantheon_data = {col: df_pantheon[col].to_numpy() for col in df_pantheon.columns}
 

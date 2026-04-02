@@ -42,8 +42,8 @@ def _make_loader_input():
             "log_tau_uv_rf_std_psd": [0.2, 0.2, 0.2, 0.2, 0.2],
             "log_sigma_uv_log_tau_uv_rf_cov_psd": [0.01, 0.01, 0.01, 0.01, 0.01],
             "apparent_mag_2500": [20.3, 20.4, 20.5, 20.6, 20.7],
-            "f_host_center": [0.2, 0.0, 1.1, -0.1, 0.3],
-            "f_host_center_err": [0.05, 0.0, 0.1, 0.2, np.nan],
+            "f_host_2500": [0.2, 0.0, 1.1, -0.1, 0.3],
+            "f_host_2500_err": [0.05, 0.0, 0.1, 0.2, np.nan],
         }
     )
 
@@ -75,8 +75,8 @@ def test_load_agn_data_propagates_host_error_into_sigma_uv(monkeypatch, tmp_path
     ln10 = np.log(10.0)
     orig_sigma = df_in["log_sigma_uv"].to_numpy(dtype=float)
     orig_err = df_in["log_sigma_uv_std_psd"].to_numpy(dtype=float)
-    f_host = df_in["f_host_center"].to_numpy(dtype=float)
-    f_host_err = np.nan_to_num(df_in["f_host_center_err"].to_numpy(dtype=float), nan=0.0)
+    f_host = df_in["f_host_2500"].to_numpy(dtype=float)
+    f_host_err = np.nan_to_num(df_in["f_host_2500_err"].to_numpy(dtype=float), nan=0.0)
     valid = np.isfinite(f_host) & (f_host >= 0.0) & (f_host < 1.0)
     expected_delta = np.zeros(len(df_in), dtype=float)
     expected_delta[valid] = -np.log10(1.0 - f_host[valid])

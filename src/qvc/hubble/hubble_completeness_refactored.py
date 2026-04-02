@@ -460,21 +460,21 @@ def apparent_mag_to_logL2500(m2500, z, cosmo):
     return convert_M2500_to_logL2500(M2500)
 
 
-def fit_fhost_center_l2500_model(
+def fit_fhost_2500_l2500_model(
     df_agn,
     *,
     fit_logL_max=45.5,
     clip_eps=_FHOST_CLIP_EPS,
     cosmo=COSMO,
 ):
-    required = {"z", "apparent_mag_2500", "f_host_center"}
+    required = {"z", "apparent_mag_2500", "f_host_2500"}
     if not required.issubset(df_agn.columns):
         missing = ", ".join(sorted(required - set(df_agn.columns)))
         raise KeyError(f"Missing required columns for f_host model fit: {missing}")
 
     z = np.asarray(df_agn["z"], dtype=float)
     m2500 = np.asarray(df_agn["apparent_mag_2500"], dtype=float)
-    f_host = np.asarray(df_agn["f_host_center"], dtype=float)
+    f_host = np.asarray(df_agn["f_host_2500"], dtype=float)
     logL2500 = apparent_mag_to_logL2500(m2500, z, cosmo)
 
     fit_mask = (
@@ -487,7 +487,7 @@ def fit_fhost_center_l2500_model(
         & (logL2500 <= fit_logL_max)
     )
     if np.count_nonzero(fit_mask) < 8:
-        raise ValueError("Need at least 8 finite rows to fit the f_host_center(log L_2500) model.")
+        raise ValueError("Need at least 8 finite rows to fit the f_host_2500(log L_2500) model.")
 
     x_fit = logL2500[fit_mask]
     y_fit = np.clip(f_host[fit_mask], clip_eps, 1.0 - clip_eps)
@@ -523,14 +523,14 @@ def fit_fhost_center_l2500_model(
     }
 
 
-def predict_fhost_center_from_logL2500(logL2500, model):
+def predict_fhost_2500_from_logL2500(logL2500, model):
     clip_eps = float(model.get("clip_eps", _FHOST_CLIP_EPS))
     mean = generalized_sigmoid_fhost(logL2500, model["x0"], model["k"], model["nu"])
     return np.clip(mean, clip_eps, 1.0 - clip_eps)
 
 
-def sample_fhost_center_from_logL2500(logL2500, model, rng):
-    mean = predict_fhost_center_from_logL2500(logL2500, model)
+def sample_fhost_2500_from_logL2500(logL2500, model, rng):
+    mean = predict_fhost_2500_from_logL2500(logL2500, model)
     sigma_host_logit = float(model.get("sigma_host_logit", 0.0))
     if sigma_host_logit <= 0.0:
         return mean
@@ -725,7 +725,7 @@ def _plot_completeness_vs_fhost_slices(
             p = completeness3d(mag_eval, z_eval, fhost_centers)
             ax.plot(fhost_centers, p, lw=2, label=fr"$z={z0:.1f}$")
         ax.set_title(fr"$m_{{2500}}={mag0:.1f}$")
-        ax.set_xlabel(r"$f_{\rm host,center}$")
+        ax.set_xlabel(r"$f_{\rm host,2500}$")
         ax.grid(True, alpha=0.25)
     axes[0].set_ylabel(r"$p(\mathrm{detect}\mid m_{2500}, z, f_{\rm host})$")
     axes[-1].legend(frameon=False, loc="best")
@@ -918,12 +918,12 @@ def get_completeness_function_3d_fhost(
     sigma_fhost=0.05,
 ):
     """
-    Build p(detect | m, z, f_host_center) using a one-shot host-fraction parent model.
+    Build p(detect | m, z, f_host_2500) using a one-shot host-fraction parent model.
     """
     import matplotlib.pyplot as plt
 
-    if "f_host_center" not in df_agn.columns:
-        raise KeyError("df_agn must contain 'f_host_center' for 3D host-aware completeness.")
+    if "f_host_2500" not in df_agn.columns:
+        raise KeyError("df_agn must contain 'f_host_2500' for 3D host-aware completeness.")
 
     sim_file = resolve_qvc_data_path(sim_file)
     with h5py.File(sim_file, "r") as f:
@@ -935,7 +935,7 @@ def get_completeness_function_3d_fhost(
 
     z_obs = df_agn["z"].to_numpy(dtype=float)
     m_obs = df_agn["apparent_mag_2500"].to_numpy(dtype=float)
-    fhost_obs = df_agn["f_host_center"].to_numpy(dtype=float)
+    fhost_obs = df_agn["f_host_2500"].to_numpy(dtype=float)
 
     ok_obs = (
         np.isfinite(m_obs)
@@ -948,10 +948,10 @@ def get_completeness_function_3d_fhost(
     m_obs, z_obs, fhost_obs = m_obs[ok_obs], z_obs[ok_obs], fhost_obs[ok_obs]
     m_true, z_true = m_true[ok_true], z_true[ok_true]
 
-    host_model = fit_fhost_center_l2500_model(df_agn.loc[ok_obs], fit_logL_max=fit_logL_max, cosmo=COSMO)
+    host_model = fit_fhost_2500_l2500_model(df_agn.loc[ok_obs], fit_logL_max=fit_logL_max, cosmo=COSMO)
     logL_true = apparent_mag_to_logL2500(m_true, z_true, COSMO)
     rng = np.random.default_rng(12345)
-    fhost_true = sample_fhost_center_from_logL2500(logL_true, host_model, rng)
+    fhost_true = sample_fhost_2500_from_logL2500(logL_true, host_model, rng)
 
     mag_min, mag_max = 18.5, 24.0
     z_min, z_max = 0.0, 4.0
@@ -990,7 +990,7 @@ def get_completeness_function_3d_fhost(
         plot_dir = os.path.join(base_plot_path, "completeness")
         os.makedirs(plot_dir, exist_ok=True)
 
-        with open(os.path.join(plot_dir, "fhost_center_l2500_model.json"), "w") as handle:
+        with open(os.path.join(plot_dir, "fhost_2500_l2500_model.json"), "w") as handle:
             json.dump(host_model, handle, indent=2)
 
         _plot_completeness_vs_fhost_slices(
@@ -1032,7 +1032,7 @@ def get_completeness_function_3d_fhost(
             vmax=0,
         )
         ax.set_xlabel(r"$m_{2500\,\mathrm{\AA}}$ (mag)")
-        ax.set_ylabel(r"$f_{\rm host,center}$")
+        ax.set_ylabel(r"$f_{\rm host,2500}$")
         cbar = plt.colorbar(im, ax=ax)
         cbar.set_label(r"Mean over $z$: $\log\,p(I{=}1\,|\,m,z,f_{\rm host})$")
         fig.tight_layout()
@@ -1069,12 +1069,12 @@ def get_completeness_function_4d_fhost_alpha(
     sigma_alpha=0.15,
 ):
     """
-    Build p(detect | m, z, f_host_center, alpha_lambda) using a one-shot host model
+    Build p(detect | m, z, f_host_2500, alpha_lambda) using a one-shot host model
     and a fixed mock alpha_lambda population.
     """
     import matplotlib.pyplot as plt
 
-    required = {"f_host_center", "alpha_lambda", "apparent_mag_2500", "z"}
+    required = {"f_host_2500", "alpha_lambda", "apparent_mag_2500", "z"}
     if not required.issubset(df_agn.columns):
         missing = ", ".join(sorted(required - set(df_agn.columns)))
         raise KeyError(f"df_agn must contain columns for 4D completeness: {missing}")
@@ -1089,7 +1089,7 @@ def get_completeness_function_4d_fhost_alpha(
 
     z_obs = df_agn["z"].to_numpy(dtype=float)
     m_obs = df_agn["apparent_mag_2500"].to_numpy(dtype=float)
-    fhost_obs = df_agn["f_host_center"].to_numpy(dtype=float)
+    fhost_obs = df_agn["f_host_2500"].to_numpy(dtype=float)
     alpha_obs = df_agn["alpha_lambda"].to_numpy(dtype=float)
 
     ok_obs = (
@@ -1106,10 +1106,10 @@ def get_completeness_function_4d_fhost_alpha(
     m_obs, z_obs, fhost_obs, alpha_obs = m_obs[ok_obs], z_obs[ok_obs], fhost_obs[ok_obs], alpha_obs[ok_obs]
     m_true, z_true = m_true[ok_true], z_true[ok_true]
 
-    host_model = fit_fhost_center_l2500_model(df_agn.loc[ok_obs], fit_logL_max=fit_logL_max, cosmo=COSMO)
+    host_model = fit_fhost_2500_l2500_model(df_agn.loc[ok_obs], fit_logL_max=fit_logL_max, cosmo=COSMO)
     logL_true = apparent_mag_to_logL2500(m_true, z_true, COSMO)
     rng = np.random.default_rng(12345)
-    fhost_true = sample_fhost_center_from_logL2500(logL_true, host_model, rng)
+    fhost_true = sample_fhost_2500_from_logL2500(logL_true, host_model, rng)
     alpha_true = np.clip(rng.normal(_ALPHA_TRUE_MEAN, _ALPHA_TRUE_SIGMA, size=np.shape(m_true)), _ALPHA_MIN, _ALPHA_MAX)
 
     mag_min, mag_max = 18.5, 24.0
@@ -1154,7 +1154,7 @@ def get_completeness_function_4d_fhost_alpha(
         plot_dir = os.path.join(base_plot_path, "completeness")
         os.makedirs(plot_dir, exist_ok=True)
 
-        with open(os.path.join(plot_dir, "fhost_center_l2500_model.json"), "w") as handle:
+        with open(os.path.join(plot_dir, "fhost_2500_l2500_model.json"), "w") as handle:
             json.dump(host_model, handle, indent=2)
 
         _plot_completeness_vs_fhost_slices(
@@ -1271,7 +1271,7 @@ def make_dm_function(
     dm,
     m_bins=40,
     z_bins=40,
-    f_host_center=None,
+    f_host_2500=None,
     alpha_lambda=None,
     *,
     lowess_frac=0.25,

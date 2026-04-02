@@ -278,12 +278,12 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
 
     if completeness:
         if completeness_mode in ("3d_fhost", "4d_fhost_alpha"):
-            if "f_host_center" not in df_agn.columns:
-                raise KeyError(f"completeness_mode={completeness_mode!r} requires df_agn['f_host_center'].")
-            bad_fhost = ~np.isfinite(df_agn["f_host_center"].to_numpy(dtype=float))
+            if "f_host_2500" not in df_agn.columns:
+                raise KeyError(f"completeness_mode={completeness_mode!r} requires df_agn['f_host_2500'].")
+            bad_fhost = ~np.isfinite(df_agn["f_host_2500"].to_numpy(dtype=float))
             if np.any(bad_fhost):
                 raise ValueError(
-                    f"completeness_mode={completeness_mode!r} requires finite f_host_center for all AGN used in the fit; "
+                    f"completeness_mode={completeness_mode!r} requires finite f_host_2500 for all AGN used in the fit; "
                     f"found {np.count_nonzero(bad_fhost)} non-finite rows."
                 )
         if completeness_mode == "4d_fhost_alpha":
@@ -319,8 +319,8 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
     )
     agn_fields = agn_model_req_params + agn_model_req_obs + agn_model_req_errs
     agn_fields += ('apparent_mag_2500', 'apparent_mag_2500_err', 'z', 'z_err', 'object_id')
-    if 'f_host_center' in df_agn.columns:
-        agn_fields += ('f_host_center',)
+    if 'f_host_2500' in df_agn.columns:
+        agn_fields += ('f_host_2500',)
     if 'alpha_lambda' in df_agn.columns:
         agn_fields += ('alpha_lambda',)
     agn_data = {col: df_agn[col].values for col in agn_fields if col in df_agn.columns}
@@ -539,7 +539,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
         df_agn['apparent_mag_2500'].values,
         df_agn['z'].values,
         dmi_posterior_median,
-        f_host_center=df_agn["f_host_center"].values if "f_host_center" in df_agn.columns else None,
+        f_host_2500=df_agn["f_host_2500"].values if "f_host_2500" in df_agn.columns else None,
         alpha_lambda=df_agn["alpha_lambda"].values if "alpha_lambda" in df_agn.columns else None,
     )
 
@@ -944,7 +944,7 @@ if __name__ == "__main__":
         "--fhost_cut",
         type=float,
         default=DEFAULT_F_HOST_CUT,
-        help=f"Upper limit for f_host_center in the default AGN cuts (default: {DEFAULT_F_HOST_CUT})",
+        help=f"Upper limit for f_host_2500 in the default AGN cuts (default: {DEFAULT_F_HOST_CUT})",
     )
     parser.add_argument("--exclude_object_ids_csv", type=str, nargs='+', default=[], help="Path(s) to CSV file(s) containing object IDs to exclude")
     parser.add_argument("--residuals_sigma_clip", type=float, default=None, help="Optional residual cut value to exclude outliers (default: None)")
@@ -981,13 +981,13 @@ if __name__ == "__main__":
         type=str,
         choices=list(VALID_COMPLETENESS_MODES),
         default="2d",
-        help="Completeness model to use: 2D p(det|m,z), 3D p(det|m,z,f_host_center), or 4D p(det|m,z,f_host_center,alpha_lambda).",
+        help="Completeness model to use: 2D p(det|m,z), 3D p(det|m,z,f_host_2500), or 4D p(det|m,z,f_host_2500,alpha_lambda).",
     )
     parser.add_argument(
         "--correct-sigma-uv-host",
         action="store_true",
         default=False,
-        help="Correct log_sigma_uv using f_host_center, propagate f_host_center_err into log_sigma_uv_std_psd, and save diagnostics plots.",
+        help="Correct log_sigma_uv using f_host_2500, propagate f_host_2500_err into log_sigma_uv_std_psd, and save diagnostics plots.",
     )
     parser.add_argument(
         "--fit_alpha_lambda_term",
@@ -1023,6 +1023,7 @@ if __name__ == "__main__":
 
     df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_pantheon_data()
     agn_plot_path = f"plots/hubble/{args.prefix}"
+    cut_report_path = Path(agn_plot_path) / "cut_summary.txt"
     df_agn, df_agn_all = load_agn_data(args.agn_data_filepath, populate_sdss=args.force_populate_fields, 
                            apply_cut=not args.no_cuts, fhost_cut=args.fhost_cut,
                            residuals_sigma_clip=args.residuals_sigma_clip, residuals_csv=args.residuals_csv,
@@ -1033,7 +1034,8 @@ if __name__ == "__main__":
                            variability_chi_sq_cut=args.variability_chi_sq_cut,
                            reddening_ebv_cut=args.reddening_ebv_cut,
                            correct_sigma_uv_host=args.correct_sigma_uv_host,
-                           z_range=tuple(args.z_range), plot_path=agn_plot_path)
+                           z_range=tuple(args.z_range), plot_path=agn_plot_path,
+                           cut_report_path=cut_report_path)
     df_agn, effective_N = subsample_dataframe_at_most(
         df_agn,
         args.N,

@@ -486,16 +486,9 @@ def compute_derived_results(result, q, args):
         f_host_2500, f_host_2500_err = estimate_host_2500_fraction(q)
         result["f_host_2500"] = safe_float(f_host_2500)
         result["f_host_2500_err"] = safe_float(f_host_2500_err)
-
-        # Host/continuum fraction at the center of the fitted spectrum.
-        m50, m_err = estimate_host_center_fraction(q)
-        result["f_host_center"] = safe_float(m50)
-        result["f_host_center_err"] = safe_float(m_err)
     else:
         result["f_host_2500"] = 0.0
         result["f_host_2500_err"] = 0.0
-        result["f_host_center"] = 0.0
-        result["f_host_center_err"] = 0.0
 
     # BC fraction, defined against the total continuum at 3000 A.
     m50, m_err = posterior_component_fraction_at_wave(

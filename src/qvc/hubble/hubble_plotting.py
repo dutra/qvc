@@ -36,8 +36,8 @@ from qvc.hubble.hubble_utils import (
 from qvc.hubble.hubble_completeness_refactored import (
     apparent_mag_to_logL2500,
     build_smooth_trend_1d,
-    fit_fhost_center_l2500_model,
-    predict_fhost_center_from_logL2500,
+    fit_fhost_2500_l2500_model,
+    predict_fhost_2500_from_logL2500,
 )
 from dynesty.utils import resample_equal
 from dynesty import plotting as dyplot
@@ -183,13 +183,13 @@ def _get_cosmo_from_params(model_name, params_dict, zp):
     raise ValueError(f"Invalid cosmology model: {model_name}")
 
 
-def _evaluate_dm_interp(dm_interp, z, m2500, *, f_host_center=None, alpha_lambda=None):
+def _evaluate_dm_interp(dm_interp, z, m2500, *, f_host_2500=None, alpha_lambda=None):
     """Evaluate debias correction using the richest available feature set."""
     z = np.asarray(z, dtype=float)
     m2500 = np.asarray(m2500, dtype=float)
     cols = [z, m2500]
-    if f_host_center is not None:
-        cols.append(np.asarray(f_host_center, dtype=float))
+    if f_host_2500 is not None:
+        cols.append(np.asarray(f_host_2500, dtype=float))
         if alpha_lambda is not None:
             cols.append(np.asarray(alpha_lambda, dtype=float))
     pts = np.column_stack(cols)
@@ -354,7 +354,7 @@ def plot_blr_line_lags_vs_l2500(
             dm_interp,
             z,
             m2500,
-            f_host_center=df_agn.get("f_host_center"),
+            f_host_2500=df_agn.get("f_host_2500"),
             alpha_lambda=df_agn.get("alpha_lambda"),
         )
     ) - cosmo.distmod(z).value
@@ -1553,7 +1553,7 @@ def plot_sf_ref_band_vs_model_g(
     )
 
 
-def plot_f_host_center_vs_l2500(
+def plot_f_host_2500_vs_l2500(
     df,
     plot_path="plots/hubble",
     show=False,
@@ -1563,13 +1563,13 @@ def plot_f_host_center_vs_l2500(
     filename="f_host_center_vs_l2500.pdf",
 ):
     """Plot host fraction against AGN-only log L_2500 with median and sigmoid trends."""
-    required = {"z", "apparent_mag_2500", "f_host_center"}
+    required = {"z", "apparent_mag_2500", "f_host_2500"}
     if not required.issubset(df.columns):
         return None
 
     z = pd.to_numeric(df["z"], errors="coerce").to_numpy(dtype=float)
     m2500 = pd.to_numeric(df["apparent_mag_2500"], errors="coerce").to_numpy(dtype=float)
-    f_host = pd.to_numeric(df["f_host_center"], errors="coerce").to_numpy(dtype=float)
+    f_host = pd.to_numeric(df["f_host_2500"], errors="coerce").to_numpy(dtype=float)
 
     cosmo = FlatLambdaCDM(H0=70.0, Om0=0.3)
     logL2500 = apparent_mag_to_logL2500(m2500, z, cosmo)
@@ -1618,13 +1618,13 @@ def plot_f_host_center_vs_l2500(
         fit_mask = np.isfinite(x) & np.isfinite(y) & (x <= fit_logL_max)
         if np.count_nonzero(fit_mask) >= 8 and np.nanmax(x[fit_mask]) > np.nanmin(x[fit_mask]):
             try:
-                fit_model = fit_fhost_center_l2500_model(
+                fit_model = fit_fhost_2500_l2500_model(
                     df.loc[mask].copy(),
                     fit_logL_max=fit_logL_max,
                     cosmo=cosmo,
                 )
                 x_grid = np.linspace(np.nanmin(x), np.nanmax(x), 400)
-                y_grid = predict_fhost_center_from_logL2500(x_grid, fit_model)
+                y_grid = predict_fhost_2500_from_logL2500(x_grid, fit_model)
                 ax.plot(
                     x_grid,
                     y_grid,
@@ -1653,14 +1653,14 @@ def plot_f_host_center_vs_l2500(
         ax.text(
             0.5,
             0.5,
-            "No finite log L_2500 / f_host_center values",
+            "No finite log L_2500 / f_host_2500 values",
             ha="center",
             va="center",
             transform=ax.transAxes,
         )
 
     ax.set_xlabel(r"$\log L_{2500}$")
-    ax.set_ylabel(r"$f_{\rm host,center}$")
+    ax.set_ylabel(r"$f_{\rm host,2500}$")
     ax.set_ylim(0.0, 1.0)
     ax.grid(True, alpha=0.2)
     handles, labels = ax.get_legend_handles_labels()
@@ -1671,7 +1671,7 @@ def plot_f_host_center_vs_l2500(
     diagnostics_path = os.path.join(plot_path or "plots/hubble", "diagnostics")
     return _save_figure(
         fig,
-        os.path.join(diagnostics_path, filename),
+        os.path.join(diagnostics_path, "f_host_2500_vs_l2500.pdf"),
         dpi=200,
         show=show,
     )
@@ -2426,8 +2426,8 @@ def _plot_dm_by_band(
 
         cmap_obj = mpl.cm.get_cmap("viridis")
         norm = colors.Normalize(vmin=vmin, vmax=vmax)
-        edge_keep_out_z = cmap_obj(norm(petro_plot[keep_out_z])) if np.any(keep_out_z) else None
-        edge_cut_out_z = cmap_obj(norm(petro_plot[cut_out_z])) if np.any(cut_out_z) else None
+        color_keep_out_z = cmap_obj(norm(petro_plot[keep_out_z])) if np.any(keep_out_z) else None
+        color_cut_out_z = cmap_obj(norm(petro_plot[cut_out_z])) if np.any(cut_out_z) else None
 
         sc = ax.scatter(
             x_masked[keep_in_z],
@@ -2456,19 +2456,17 @@ def _plot_dm_by_band(
         ax.scatter(
             x_masked[keep_out_z],
             y_masked[keep_out_z],
-            edgecolors=edge_keep_out_z,
-            facecolors="none",
+            c=color_keep_out_z,
             s=s,
             alpha=1.0,
-            marker="o",
+            marker="D",
             linewidths=1.5,
             rasterized=True,
         )
         ax.scatter(
             x_masked[cut_out_z],
             y_masked[cut_out_z],
-            edgecolors=edge_cut_out_z,
-            facecolors="none",
+            c=color_cut_out_z,
             s=s,
             alpha=1.0,
             marker="D",
@@ -2580,15 +2578,15 @@ def plot_df_psf_fiber_vs_fhost(
     rolling_window=501,
     plot_path="plots/hubble/diagnostics",
 ):
-    """Plot PS1 PSF minus SDSS fiber magnitude offsets versus log10(f_host_center) for each band."""
+    """Plot PS1 PSF minus SDSS fiber magnitude offsets versus log10(f_host_2500) for each band."""
     return _plot_dm_by_band(
         df,
         x_getter=lambda frame, band: np.where(
-            np.asarray(frame["f_host_center"], dtype=float) > 0,
-            np.log10(np.asarray(frame["f_host_center"], dtype=float)),
+            np.asarray(frame["f_host_2500"], dtype=float) > 0,
+            np.log10(np.asarray(frame["f_host_2500"], dtype=float)),
             np.nan,
         ),
-        x_label=r"$\log_{10}(f_{\mathrm{host,center}})$",
+        x_label=r"$\log_{10}(f_{\mathrm{host,2500}})$",
         output_name="psf_ps1_minus_fiber_sdss_vs_fhost_by_band.pdf",
         df_keep=df_keep,
         bands=bands,
@@ -2611,8 +2609,8 @@ def plot_log_fhost_vs_petrorad_by_band(
     s=6,
     plot_path="plots/hubble/diagnostics",
 ):
-    """Plot log10(f_host_center) against log10(Petrosian radius) in each band."""
-    if "f_host_center" not in df.columns:
+    """Plot log10(f_host_2500) against log10(Petrosian radius) in each band."""
+    if "f_host_2500" not in df.columns:
         return None
 
     id_col = "object_id" if "object_id" in df.columns else None
@@ -2635,8 +2633,8 @@ def plot_log_fhost_vs_petrorad_by_band(
 
     z = np.asarray(df["z"], dtype=float)
     log_fhost = np.where(
-        np.asarray(df["f_host_center"], dtype=float) > 0,
-        np.log10(np.asarray(df["f_host_center"], dtype=float)),
+        np.asarray(df["f_host_2500"], dtype=float) > 0,
+        np.log10(np.asarray(df["f_host_2500"], dtype=float)),
         np.nan,
     )
 
@@ -2674,9 +2672,8 @@ def plot_log_fhost_vs_petrorad_by_band(
             y[keep_out_z],
             s=s,
             alpha=1.0,
-            edgecolors="tab:blue",
-            facecolors="none",
-            marker="o",
+            color="tab:blue",
+            marker="D",
             linewidths=1.5,
             rasterized=True,
         )
@@ -2685,15 +2682,14 @@ def plot_log_fhost_vs_petrorad_by_band(
             y[cut_out_z],
             s=s,
             alpha=1.0,
-            edgecolors="tab:orange",
-            facecolors="none",
+            color="tab:orange",
             marker="D",
             linewidths=1.5,
             rasterized=True,
         )
 
         ax.set_xlabel(r"$\log_{10}(\mathrm{petroRad})$")
-        ax.set_ylabel(r"$\log_{10}(f_{\mathrm{host,center}})$")
+        ax.set_ylabel(r"$\log_{10}(f_{\mathrm{host,2500}})$")
         ax.legend(loc="upper right", frameon=False)
 
     for ax in axes[n_panels:]:
@@ -3317,7 +3313,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
             dm_interp,
             df_agn["z"].values,
             m_obs,
-            f_host_center=df_agn.get("f_host_center"),
+            f_host_2500=df_agn.get("f_host_2500"),
             alpha_lambda=df_agn.get("alpha_lambda"),
         )
 
@@ -3448,7 +3444,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     # ---------- Inset (log-z) ----------
     inset_ax.set_xscale('log')
 
-    # Solid vs open AGN markers by z (both main and inset)
+    # Filled circles vs filled diamonds by z (both main and inset)
     mask_in  = df_agn["z"].between(z_range[0], z_range[1])
     mask_out = ~mask_in
 
@@ -3460,10 +3456,10 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
         ecolor="#666666", elinewidth=0.8,
         alpha=0.7, zorder=1, label="AGN"
     )
-    # AGN (outside, open)
+    # AGN (outside, filled diamond)
     inset_ax.errorbar(
         df_agn["z"][mask_out], mu_pred_median[mask_out], yerr=mu_pred_std_with_scatter[mask_out],
-        fmt='o', linestyle='none', markersize=2, mfc='none', mec="k", alpha=0.70,
+        fmt='D', linestyle='none', markersize=2, mfc="black", mec="none", alpha=0.70,
         ecolor="#666666", elinewidth=0.8, zorder=1
     )
 
@@ -3479,11 +3475,11 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
             ecolor='red', elinewidth=2.2, capsize=3.5,
             alpha=0.98, zorder=14, label="AGN (z-binned, log)"
         )
-        # binned (outside, open)
+        # binned (outside, filled diamond)
         inset_ax.errorbar(
             z_log[mask_out], mu_log_mean[mask_out], yerr=mu_log_sem[mask_out],
-            fmt='o', linestyle='none',
-            markersize=4, mfc='none', mec='red',
+            fmt='D', linestyle='none',
+            markersize=4, mfc='red', mec='none',
             ecolor='red', elinewidth=2.2, capsize=3.5,
             alpha=0.98, zorder=14, label="AGN (z-binned, log)",
         )
@@ -3539,12 +3535,12 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
             zorder=0, label="AGN" if i == np.where(mask_in)[0][0] else None
         )
 
-    # AGN (outside, open)
+    # AGN (outside, filled diamond)
     for i in np.where(mask_out)[0]:
         ax.errorbar(
             df_agn["z"].iloc[i], mu_pred_median[i], yerr=mu_pred_std_with_scatter[i],
-            fmt='o', linestyle='none', markersize=3, mfc='none',
-            mec=(0, 0, 0, 0.4),
+            fmt='D', linestyle='none', markersize=3, mfc=(0, 0, 0, 0.4),
+            mec="none",
             capsize=2, capthick=0.8,
             ecolor=(0.2, 0.2, 0.2, 0.1), elinewidth=0.8, zorder=0, label=None
         )
@@ -3588,11 +3584,11 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
             ecolor='red', elinewidth=2.2, capsize=3.5,
             alpha=0.98, zorder=14, label="AGN (z-binned)"
         )
-        # binned (outside, open)
+        # binned (outside, filled diamond)
         ax.errorbar(
             z_lin_scatter[mask_out], mu_lin_mean_scatter[mask_out], yerr=mu_lin_sem_scatter[mask_out],
-            fmt='o', linestyle='none',
-            markersize=5, mfc='none', mec='red',
+            fmt='D', linestyle='none',
+            markersize=5, mfc='red', mec='none',
             ecolor='red', elinewidth=2.2, capsize=3.5,
             alpha=0.98, zorder=14
         )
@@ -3679,8 +3675,8 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
             )
             ax_resid.errorbar(
                 z_res_lin_scatter[mask_out], resid_lin_mean_scatter[mask_out], yerr=resid_lin_sem_scatter[mask_out],
-                fmt='o', linestyle='none', markersize=6,
-                mfc='white', mec='red', ecolor='red', elinewidth=2.0, capsize=3.0,
+                fmt='D', linestyle='none', markersize=6,
+                mfc='red', mec='none', ecolor='red', elinewidth=2.0, capsize=3.0,
                 alpha=0.98, zorder=15
             )
 
@@ -4206,7 +4202,7 @@ def plot_predicted_vs_actual_M2500(
             dm_interp,
             df_agn["z"].values,
             df_agn["apparent_mag_2500"].values,
-            f_host_center=df_agn.get("f_host_center"),
+            f_host_2500=df_agn.get("f_host_2500"),
             alpha_lambda=df_agn.get("alpha_lambda"),
         )
     else:
@@ -4303,7 +4299,7 @@ def plot_predicted_vs_actual_M2500(
                 dm_interp,
                 df_agn["z"][bin_mask],
                 df_agn["apparent_mag_2500"][bin_mask],
-                f_host_center=df_agn.get("f_host_center", None)[bin_mask] if "f_host_center" in df_agn.columns else None,
+                f_host_2500=df_agn.get("f_host_2500", None)[bin_mask] if "f_host_2500" in df_agn.columns else None,
                 alpha_lambda=df_agn.get("alpha_lambda", None)[bin_mask] if "alpha_lambda" in df_agn.columns else None,
             )
 
@@ -4334,7 +4330,7 @@ def plot_predicted_vs_actual_M2500(
             fmt="none", ecolor="#666666", elinewidth=0.7, alpha=0.4, zorder=2
         )
 
-        # scatter with discrete colors: closed if 0.44 < z < 3.16, open otherwise
+        # scatter with discrete colors: filled circles inside z-range, filled diamonds outside
         z_bin = z[bin_mask]
         mask_closed = (z_bin > z_range[0]) & (z_bin < z_range[1])
         mask_open   = ~mask_closed
@@ -4347,10 +4343,11 @@ def plot_predicted_vs_actual_M2500(
             linewidths=0.8, zorder=3,
         )
 
-        # open markers (no fill; colored edges)
+        # filled diamonds outside z-range
         ax.scatter(
             x[mask_open], y[mask_open],
-            facecolors="none", edgecolors='k', #edgecolors=colors_bin[mask_open],
+            facecolors="k", edgecolors='k', #edgecolors=colors_bin[mask_open],
+            marker="D",
             s=20, alpha=1.0, linewidths=1, zorder=3,
         )
 
@@ -4577,7 +4574,7 @@ def plot_full_residuals(
                 dm_interp,
                 frame["z"].values,
                 frame["apparent_mag_2500"].values,
-                f_host_center=frame.get("f_host_center"),
+                f_host_2500=frame.get("f_host_2500"),
                 alpha_lambda=frame.get("alpha_lambda"),
             )
             frame['MY_M_2500'] -= delta
@@ -4890,7 +4887,7 @@ def plot_full_residuals(
                             norm=cat_norm,
                             s=10,
                             alpha=0.8,
-                            facecolors='none',
+                            marker='D',
                             edgecolors=edgecols,
                             linewidths=0.8,
                             rasterized=True,
@@ -4917,7 +4914,7 @@ def plot_full_residuals(
                             c='tab:blue',
                             s=10,
                             alpha=0.8,
-                            facecolors='none',
+                            marker='D',
                             edgecolors='tab:blue',
                             linewidths=0.8,
                             rasterized=True,
@@ -4979,7 +4976,7 @@ def plot_full_residuals(
                             c='tab:blue',
                             s=10,
                             alpha=0.8,
-                            facecolors='none',
+                            marker='D',
                             edgecolors='tab:blue',
                             linewidths=0.8,
                             rasterized=True,
@@ -4994,7 +4991,7 @@ def plot_full_residuals(
                             norm=norm,
                             s=10,
                             alpha=0.8,
-                            facecolors='none',
+                            marker='D',
                             edgecolors=edgecols,
                             linewidths=0.8,
                             rasterized=True,
@@ -5182,7 +5179,7 @@ def plot_predicted_L2500_vs_sigmahat(
                 dm_interp,
                 d["z"].values,
                 d["apparent_mag_2500"].values,
-                f_host_center=d.get("f_host_center"),
+                f_host_2500=d.get("f_host_2500"),
                 alpha_lambda=d.get("alpha_lambda"),
             )
         ) - cosmo.distmod(d["z"]).value
@@ -5301,10 +5298,10 @@ def plot_predicted_L2500_vs_sigmahat(
         ecolor=(0.2, 0.2, 0.2, 0.1), elinewidth=0.8, capsize=2, capthick=0.8,
         zorder=1, label="AGN"
     )
-    # outside redshift range: open markers
+    # outside redshift range: filled diamonds
     ax.errorbar(
         x_ref[mask_out], 10**actual_logL2500[mask_out], xerr=xerr_asym[:, mask_out], yerr=yerr_linear[mask_out],
-        fmt='o', linestyle='none', markersize=3, mfc='none', mec=(0,0,0,0.4),
+        fmt='D', linestyle='none', markersize=3, mfc=(0,0,0,0.4), mec="none",
         ecolor=(0.2, 0.2, 0.2, 0.1), elinewidth=0.8, capsize=2, capthick=0.8,
         zorder=1
     )
@@ -5489,7 +5486,7 @@ def plot_predicted_L2500_vs_sigmahat(
         if np.any(good_out):
             sc_out = ax_res.scatter(
                 x_ref[good_out], residuals[good_out], s=5, alpha=0.8,
-                facecolors='none', edgecolors='k', linewidths=0.6, zorder=6
+                c='k', marker='D', edgecolors='k', linewidths=0.6, zorder=6
             )
             if sc is None:
                 sc = sc_out
@@ -5958,7 +5955,7 @@ def plot_debias_impact_diagnostics(
     diagnostics = [
         ("z", "Redshift z"),
         ("apparent_mag_2500", r"$m_{2500}$"),
-        ("f_host_center", r"$f_{\rm host,center}$"),
+        ("f_host_2500", r"$f_{\rm host,2500}$"),
         ("alpha_lambda", r"$\alpha_{\lambda}$"),
     ]
 
@@ -6314,7 +6311,6 @@ def plot_spectral_fraction_vs_redshift(
         show=show,
     )
 
-
 def plot_sigma_bc_vs_redshift(
     df_agn,
     plot_path="plots/hubble",
@@ -6386,9 +6382,87 @@ def plot_sigma_bc_vs_redshift(
     ax.grid(True, alpha=0.2)
 
     diagnostics_path = os.path.join(plot_path or "plots/hubble", "diagnostics")
+    os.makedirs(diagnostics_path, exist_ok=True)
     return _save_figure(
         fig,
         os.path.join(diagnostics_path, filename),
+        dpi=200,
+        show=show,
+    )
+
+
+def plot_f_host_2500_vs_redshift(
+    df_agn,
+    plot_path="plots/hubble",
+    show=False,
+    nbins=12,
+    min_bin_count=20,
+):
+    """Plot f_host_2500 against redshift."""
+    required = {"z", "f_host_2500"}
+    if not required.issubset(df_agn.columns):
+        return None
+
+    z = pd.to_numeric(df_agn["z"], errors="coerce").to_numpy(dtype=float)
+    f_host_2500 = pd.to_numeric(df_agn["f_host_2500"], errors="coerce").to_numpy(dtype=float)
+    mask = np.isfinite(z) & np.isfinite(f_host_2500)
+
+    fig, ax = plt.subplots(1, 1, figsize=(7.0, 4.8))
+    if np.count_nonzero(mask) == 0:
+        ax.text(0.5, 0.5, "No finite f_host_2500", ha="center", va="center", transform=ax.transAxes)
+        ax.set_axis_off()
+    else:
+        z_use = z[mask]
+        y_use = f_host_2500[mask]
+
+        ax.scatter(
+            z_use,
+            y_use,
+            s=10,
+            alpha=0.25,
+            color="k",
+            linewidths=0,
+            rasterized=True,
+        )
+
+        if np.nanmax(z_use) > np.nanmin(z_use):
+            edges = np.linspace(np.nanmin(z_use), np.nanmax(z_use), nbins + 1)
+            xmid = []
+            ymed = []
+            ylo = []
+            yhi = []
+            for i in range(len(edges) - 1):
+                lo = edges[i]
+                hi = edges[i + 1]
+                keep = (z_use >= lo) & (z_use < hi)
+                if i == len(edges) - 2:
+                    keep = (z_use >= lo) & (z_use <= hi)
+                if np.count_nonzero(keep) < min_bin_count:
+                    continue
+                y_bin = y_use[keep]
+                xmid.append(np.nanmedian(z_use[keep]))
+                ymed.append(np.nanmedian(y_bin))
+                ylo.append(np.nanpercentile(y_bin, 16))
+                yhi.append(np.nanpercentile(y_bin, 84))
+            if xmid:
+                xmid = np.asarray(xmid, dtype=float)
+                ymed = np.asarray(ymed, dtype=float)
+                ylo = np.asarray(ylo, dtype=float)
+                yhi = np.asarray(yhi, dtype=float)
+                ax.fill_between(xmid, ylo, yhi, color="tab:blue", alpha=0.18, linewidth=0)
+                ax.plot(xmid, ymed, color="tab:blue", lw=2.0)
+
+        ax.set_xlabel("Redshift z")
+        ax.set_ylabel(r"$f_{\rm host,2500}$")
+        ax.grid(True, alpha=0.2)
+
+    fig.tight_layout()
+
+    diagnostics_path = os.path.join(plot_path or "plots/hubble", "diagnostics")
+    os.makedirs(diagnostics_path, exist_ok=True)
+    return _save_figure(
+        fig,
+        os.path.join(diagnostics_path, "f_host_2500_vs_redshift.pdf"),
         dpi=200,
         show=show,
     )
@@ -6477,6 +6551,7 @@ def plot_sigma_bc_vs_frac_bc(
     ax.grid(True, alpha=0.2)
 
     diagnostics_path = os.path.join(plot_path or "plots/hubble", "diagnostics")
+    os.makedirs(diagnostics_path, exist_ok=True)
     return _save_figure(
         fig,
         os.path.join(diagnostics_path, filename),
@@ -6570,6 +6645,7 @@ def plot_bc_lag_vs_l2500(
     ax.grid(True, alpha=0.2)
 
     diagnostics_path = os.path.join(plot_path or "plots/hubble", "diagnostics")
+    os.makedirs(diagnostics_path, exist_ok=True)
     return _save_figure(
         fig,
         os.path.join(diagnostics_path, filename),
@@ -7026,8 +7102,8 @@ def plot_m2500_vs_z_colorpanels(
         vmin = clip_lo if clip_lo is not None else np.nanmin(c_all_plot)
         vmax = clip_hi if clip_hi is not None else np.nanmax(c_all_plot)
         norm = colors.Normalize(vmin=vmin, vmax=vmax)
-        edge_keep_out_z = mpl.cm.get_cmap(cmap)(norm(c_keep_out_z_plot)) if len(c_keep_out_z_plot) else None
-        edge_cut_out_z = mpl.cm.get_cmap(cmap)(norm(c_cut_out_z_plot)) if len(c_cut_out_z_plot) else None
+        color_keep_out_z = mpl.cm.get_cmap(cmap)(norm(c_keep_out_z_plot)) if len(c_keep_out_z_plot) else None
+        color_cut_out_z = mpl.cm.get_cmap(cmap)(norm(c_cut_out_z_plot)) if len(c_cut_out_z_plot) else None
 
         print(
             f"[m2500_vs_z:{ccol}] kept_in_z={len(d_keep_in_z)} "
@@ -7045,11 +7121,10 @@ def plot_m2500_vs_z_colorpanels(
         ax.scatter(
             d_keep_out_z[xcol],
             d_keep_out_z[ycol],
-            edgecolors=edge_keep_out_z,
+            c=color_keep_out_z,
             s=s,
             alpha=1.0,
-            marker="o",
-            facecolors="none",
+            marker="D",
             linewidths=1.5,
             zorder=5,
             rasterized=True,
@@ -7057,8 +7132,7 @@ def plot_m2500_vs_z_colorpanels(
         ax.scatter(
             d_cut_out_z[xcol],
             d_cut_out_z[ycol],
-            edgecolors=edge_cut_out_z,
-            facecolors="none",
+            c=color_cut_out_z,
             s=s,
             alpha=1.0,
             marker="D",

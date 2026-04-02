@@ -1,276 +1,426 @@
 #!/usr/bin/env python3
+"""Merge rendered light-curve figure PDFs into one stamped PDF.
+
+Workflow:
+1. Load all rows from an input CSV.
+2. Resolve one rendered light-curve figure PDF per row using ``object_id``.
+3. Stamp the first page with row metadata.
+4. Append one page per CSV row (in CSV order), skipping missing figures.
 """
-Concatenate light-curve PNGs into a single PDF with optional overlays and filtering.
 
-Image path template (per row):
-    plots/multiband/{prefix}/light_curve_fits/{z:.1f}_{object_id}_light_curve_{image_id}.png
-
-Requirements:
-    - Python 3.8+
-    - pandas, pillow
-
-Example:
-    python make_lightcurve_pdf.py \
-        --csv results/data/objects.csv \
-        --prefix oct14a \
-        --output plots/multiband/oct14a/light_curve_fits/lightcurves_oct14a.pdf \
-        --overlay z,sdss_name,redchi2_conti_full \
-        --key z --low 0.5 --high 2.0 \
-        --max 100
-"""
+from __future__ import annotations
 
 import argparse
+import io
+import math
+import multiprocessing as mp
+import os
 import sys
+from collections import defaultdict
 from pathlib import Path
-from typing import Optional
 
 import numpy as np
 import pandas as pd
-from PIL import Image, ImageDraw, ImageFont
 from tqdm import tqdm
+
+try:
+    from pypdf import PdfReader, PdfWriter
+except ImportError:
+    print("ERROR: Please install 'pypdf' (pip install pypdf)", file=sys.stderr)
+    sys.exit(1)
+
+try:
+    from reportlab.lib.units import mm
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.ttfonts import TTFont
+    from reportlab.pdfgen import canvas
+except ImportError:
+    print("ERROR: Please install 'reportlab' (pip install reportlab)", file=sys.stderr)
+    sys.exit(1)
+
+
+REQUIRED_COLS = {"object_id"}
+STAMP_FIELD_SPECS = (
+    ("z", "numeric"),
+    ("sdss_name", "string"),
+    ("object_id", "string"),
+    ("apparent_mag_2500", "numeric"),
+    ("PL_slope", "numeric"),
+    ("f_host_2500", "numeric"),
+    ("f_bc_over_pl_3000", "numeric"),
+    ("f_fe_uv_over_pl_3000", "numeric"),
+    ("log_sigma_uv", "numeric"),
+    ("log_tau_uv_rf", "numeric"),
+    ("wrms", "numeric"),
+    ("variability_chi_sq_red_g", "numeric"),
+)
 
 
 def parse_args():
-    p = argparse.ArgumentParser(description="Concat light-curve PNGs into a PDF with overlays.")
-    p.add_argument("--csv", required=True, help="Input CSV containing at least object_id and z.")
-    p.add_argument("--prefix", required=True, help="Prefix used in the plots directory.")
-    p.add_argument("--output", required=False, default=None,
-                   help="Output PDF path. Defaults to plots/multiband/{prefix}/light_curve_fits/lightcurves_{prefix}.pdf")
-    p.add_argument("--object-id-col", default="object_id", help="Column name for object id (default: object_id).")
-    p.add_argument("--z-col", default="z", help="Column name for redshift z (default: z).")
-    p.add_argument("--overlay", default="redchi2_conti_full,m2500_residuals",
-                   help="Comma-separated list of CSV fields to overlay on images (e.g., 'z,sdss_name,redchi2_conti_full').")
-    p.add_argument("--key", default=None, help="Numeric CSV column to filter by (inclusive).")
-    p.add_argument("--low", type=float, default=None, help="Low bound for --key (inclusive).")
-    p.add_argument("--high", type=float, default=None, help="High bound for --key (inclusive).")
-    p.add_argument("--max", type=int, default=None, help="Maximum number of images to include.")
-    p.add_argument("--font-size", type=int, default=24, help="Overlay font size (default: 16).")
-    p.add_argument("--box-alpha", type=float, default=0.8, help="Overlay box opacity in [0,1] (default: 0.6).")
-    p.add_argument("--box-pad", type=int, default=8, help="Padding for overlay box (default: 8).")
-    p.add_argument("--skip-missing", action="store_true",
-                   help="Skip rows whose PNG is missing (instead of failing).")
-    p.add_argument("--sort-by", default=None, help="Column name to sort the CSV by (default: None).")
+    p = argparse.ArgumentParser(description="Build a stamped combined PDF from rendered light-curve figures.")
+    p.add_argument("csv", type=Path, help="Input CSV with one row per entry to include.")
+    p.add_argument("output", type=Path, help="Output merged PDF path.")
+    p.add_argument(
+        "--fig-dir",
+        type=Path,
+        default=Path("plots/multiband"),
+        help="Directory containing rendered light-curve PDFs. Default: plots/multiband",
+    )
+    p.add_argument(
+        "--workers",
+        type=int,
+        default=max(1, (os.cpu_count() or 2) - 1),
+        help="Number of worker processes. Default: CPU-1",
+    )
+    p.add_argument("--stamp-font-size", type=int, default=10, help="Overlay stamp font size.")
+    p.add_argument("--stamp-margin-mm", type=float, default=2.0, help="Overlay stamp margin (mm).")
+    p.add_argument("--dry-run", action="store_true", help="Resolve and stamp in memory but do not write output.")
     return p.parse_args()
 
 
-def build_image_path(prefix: str, z_val: float, object_id: str) -> Optional[Path]:
-    """
-    Find the first PNG whose filename contains the object_id.
-    Preference order:
-      1) '{z:.1f}_*{object_id}*.png'
-      2) '*{object_id}*.png'
-    Returns None if no file is found.
-    """
-    base = Path("plots") / "multiband" / prefix / "light_curves_fits"
-    z_str = f"{float(z_val):.1f}"
+def load_csv(csv_path: Path) -> pd.DataFrame:
+    df = pd.read_csv(csv_path, dtype={"object_id": "string"})
+    missing = [c for c in sorted(REQUIRED_COLS) if c not in df.columns]
+    if missing:
+        raise ValueError(f"CSV missing required columns: {missing}")
 
-    # Prefer exact z-prefixed matches if present
-    preferred = sorted(base.glob(f"{z_str}_*{object_id}*.png"))
-    if preferred:
-        return preferred[0]
-
-    # Fallback: any file containing object_id
-    generic = sorted(base.glob(f"*{object_id}*.png"))
-    return generic[0] if generic else None
+    return df.copy()
 
 
-def format_overlay_lines(row: pd.Series, object_id_col: str, z_col: str, fields: list) -> list:
-    lines = [f"object_id: {row[object_id_col]}"]
-    # Include z (rounded) if present, even if not in fields
-    if z_col in row and pd.notna(row[z_col]):
-        try:
-            lines.append(f"{z_col}: {float(row[z_col]):.3f}")
-        except Exception:
-            lines.append(f"{z_col}: {row[z_col]}")
-    for f in fields:
-        if f == "":
-            continue
-        if f not in row:
-            continue
-        val = row[f]
-        if pd.isna(val):
-            continue
-        # Pretty format floats
-        if isinstance(val, float):
-            # Short float representation
-            lines.append(f"{f}: {val:.5g}")
-        else:
-            lines.append(f"{f}: {val}")
-    return lines
-
-
-def draw_overlay(im: Image.Image, lines: list, font_size: int = 24, box_alpha: float = 0.6, box_pad: int = 8) -> Image.Image:
-    if not lines:
-        return im
-
-    # Ensure RGBA for alpha compositing
-    if im.mode != "RGBA":
-        im_rgba = im.convert("RGBA")
-    else:
-        im_rgba = im.copy()
-
-    draw = ImageDraw.Draw(im_rgba)
-
-    # Try default PIL font; fallback sizing
+def normalize_object_id_for_lookup(value) -> str:
+    if pd.isna(value):
+        return ""
+    text = str(value).strip()
+    if not text:
+        return ""
     try:
-        font = ImageFont.truetype(font="DejaVuSansMono.ttf", size=font_size)  # none uses default
+        numeric = float(text)
+    except (TypeError, ValueError):
+        return text
+    if math.isfinite(numeric) and numeric.is_integer():
+        return str(int(numeric))
+    return text
+
+
+def _extract_object_id_from_stem(stem: str) -> str | None:
+    marker = "_light_curve_"
+    if marker in stem:
+        prefix = stem.split(marker, 1)[0]
+        if "_" in prefix:
+            return prefix.rsplit("_", 1)[1].strip() or None
+    return None
+
+
+def build_figure_index(fig_dir: Path) -> dict[str, object]:
+    by_object_id: dict[str, list[Path]] = defaultdict(list)
+    all_paths: list[Path] = []
+    for path in fig_dir.rglob("*.pdf"):
+        if not path.is_file():
+            continue
+        all_paths.append(path)
+        object_id = _extract_object_id_from_stem(path.stem)
+        if object_id is None:
+            continue
+        by_object_id[object_id].append(path)
+
+    for object_id, paths in by_object_id.items():
+        by_object_id[object_id] = sorted(paths)
+
+    return {
+        "by_object_id": dict(by_object_id),
+        "all_paths": sorted(all_paths),
+    }
+
+
+def find_pdf_for_row(row: pd.Series, fig_index: dict[str, object]) -> Path | None:
+    object_id = normalize_object_id_for_lookup(row.get("object_id"))
+    if not object_id:
+        return None
+
+    candidates = list(fig_index["by_object_id"].get(object_id, []))
+    if not candidates:
+        candidates = [p for p in fig_index["all_paths"] if object_id in p.stem]
+        candidates = sorted(candidates)
+    if not candidates:
+        return None
+
+    z = pd.to_numeric(row.get("z", np.nan), errors="coerce")
+    if pd.notna(z):
+        pref_prefix = f"{float(z):.1f}_{object_id}_light_curve_"
+        preferred = [p for p in candidates if p.stem.startswith(pref_prefix)]
+        if preferred:
+            return preferred[0]
+
+    return candidates[0]
+
+
+def _format_stamp_value(value) -> str:
+    x = pd.to_numeric(value, errors="coerce")
+    if pd.notna(x):
+        xf = float(x)
+        if math.isfinite(xf):
+            return f"{xf:.4g}"
+    if value is None or pd.isna(value):
+        return "NA"
+    text = str(value).strip()
+    return text or "NA"
+
+
+def _format_stamp_string(value) -> str:
+    if value is None or pd.isna(value):
+        return "NA"
+    text = str(value).strip()
+    return text or "NA"
+
+
+def make_stamp_text(row: pd.Series) -> str:
+    parts = []
+    for field, value_type in STAMP_FIELD_SPECS:
+        formatter = _format_stamp_string if value_type == "string" else _format_stamp_value
+        parts.append(f"{field}={formatter(row.get(field))}")
+    return " | ".join(parts)
+
+
+def _wrap_text_to_width(text: str, max_width: float, measure_text) -> list[str]:
+    text = str(text).strip()
+    if not text:
+        return [""]
+
+    max_width = max(float(max_width), 1.0)
+    lines: list[str] = []
+
+    def append_wrapped_chunk(chunk: str):
+        chunk = chunk.strip()
+        if not chunk:
+            return
+        if measure_text(chunk) <= max_width:
+            lines.append(chunk)
+            return
+
+        words = chunk.split()
+        if len(words) > 1:
+            current = words[0]
+            for word in words[1:]:
+                candidate = f"{current} {word}"
+                if measure_text(candidate) <= max_width:
+                    current = candidate
+                else:
+                    lines.append(current)
+                    current = word
+            append_wrapped_chunk(current)
+            return
+
+        current = ""
+        for char in chunk:
+            candidate = f"{current}{char}"
+            if current and measure_text(candidate) > max_width:
+                lines.append(current)
+                current = char
+            else:
+                current = candidate
+        if current:
+            lines.append(current)
+
+    current_line = ""
+    for segment in text.split(" | "):
+        segment = segment.strip()
+        if not segment:
+            continue
+        candidate = segment if not current_line else f"{current_line} | {segment}"
+        if measure_text(candidate) <= max_width:
+            current_line = candidate
+            continue
+        if current_line:
+            lines.append(current_line)
+            current_line = ""
+        append_wrapped_chunk(segment)
+
+    if current_line:
+        lines.append(current_line)
+
+    return lines or [text]
+
+
+def _make_overlay(page_width, page_height, text, margin_pts, font_size):
+    buf = io.BytesIO()
+    try:
+        pdfmetrics.registerFont(TTFont("DejaVuSans", "DejaVuSans.ttf"))
+        font_name = "DejaVuSans"
     except Exception:
-        print("[WARN] Failed to load truetype font; using default.", file=sys.stderr)
-        font = ImageFont.load_default()
+        font_name = "Helvetica"
 
-    # Measure text block
-    line_w = 0
-    line_h_total = 0
-    line_heights = []
-    for line in lines:
-        w, h = draw.textbbox((0, 0), line, font=font)[2:]
-        line_w = max(line_w, w)
-        line_heights.append(h)
-        line_h_total += h
+    c = canvas.Canvas(buf, pagesize=(page_width, page_height))
+    c.setFont(font_name, font_size)
 
-    box_w = line_w + 2 * box_pad
-    box_h = line_h_total + (len(lines) - 1) * 2 + 2 * box_pad  # small inter-line gap
+    pad = 1.0
+    x = margin_pts
+    y = margin_pts
+    max_text_width = max(float(page_width) - 2.0 * float(margin_pts) - 2.0 * pad, 1.0)
+    lines = _wrap_text_to_width(
+        text,
+        max_text_width,
+        lambda line: c.stringWidth(line, font_name, font_size),
+    )
+    text_width = max(c.stringWidth(line, font_name, font_size) for line in lines)
+    line_height = font_size * 1.2
+    box_height = len(lines) * line_height + 2 * pad
 
-    img_w, img_h = im_rgba.size
+    c.setFillGray(1.0)
+    c.rect(x - pad, y - pad, text_width + 2 * pad, box_height, fill=1, stroke=0)
+    c.setFillGray(0.0)
+    top_y = y + pad + (len(lines) - 1) * line_height
+    for idx, line in enumerate(lines):
+        c.drawString(x, top_y - idx * line_height, line)
 
-    # Position top-left
-    #x0, y0 = box_pad, box_pad
-    #x1, y1 = x0 + box_w, y0 + box_h
+    c.showPage()
+    c.save()
+    buf.seek(0)
+    return buf
 
-    # --- bottom-left
-    x0 = box_pad
-    y0 = img_h - box_h - box_pad
 
-    # (Optionally) bottom-center or bottom-right:
-    # x0 = (img_w - box_w) // 2         # bottom-center
-    # x0 = img_w - box_w - box_pad      # bottom-right
-    # y0 = img_h - box_h - box_pad
+def stamp_first_page_to_bytes(src_pdf: Path, text: str, font_size: int, margin_mm: float) -> bytes:
+    reader = PdfReader(str(src_pdf))
+    if len(reader.pages) < 1:
+        raise ValueError(f"PDF has no pages: {src_pdf}")
 
-    # Semi-transparent rectangle
-    overlay = Image.new("RGBA", im_rgba.size, (0, 0, 0, 0))
-    rect = Image.new("RGBA", (int(box_w), int(box_h)), (255, 255, 255, int(255 * box_alpha)))
-    overlay.paste(rect, (int(x0), int(y0)))
-    im_rgba = Image.alpha_composite(im_rgba, overlay)
-    draw = ImageDraw.Draw(im_rgba)
+    page = reader.pages[0]
+    box = getattr(page, "cropbox", None) or page.mediabox
+    page_width, page_height = float(box.width), float(box.height)
+    if page_width <= 0 or page_height <= 0:
+        raise ValueError(f"Invalid page size in {src_pdf}")
 
-    # Draw text (white)
-    y = y0 + box_pad
-    for i, line in enumerate(lines):
-        draw.text((x0 + box_pad, y), line, fill=(0, 0, 0, 255), font=font)
-        y += line_heights[i] + 2
+    overlay_buf = _make_overlay(page_width, page_height, text, float(margin_mm) * mm, font_size)
+    overlay = PdfReader(overlay_buf).pages[0]
+    page.merge_page(overlay)
 
-    return im_rgba
+    writer = PdfWriter()
+    writer.add_page(page)
+
+    out = io.BytesIO()
+    writer.write(out)
+    out.seek(0)
+    return out.getvalue()
+
+
+def _worker_stamp(task):
+    idx, src_pdf_str, stamp_text, font_size, margin_mm = task
+    if src_pdf_str is None:
+        return idx, None, "missing"
+    try:
+        out = stamp_first_page_to_bytes(Path(src_pdf_str), stamp_text, font_size, margin_mm)
+        return idx, out, None
+    except Exception as exc:
+        return idx, None, str(exc)
+
+
+def stamp_tasks(tasks: list[tuple], workers: int) -> tuple[list[bytes | None], int, int]:
+    stamped_pages: list[bytes | None] = [None] * len(tasks)
+    skipped_missing = 0
+    stamp_failures = 0
+
+    workers = max(1, int(workers))
+    if workers == 1:
+        iterator = map(_worker_stamp, tasks)
+    else:
+        pool = mp.Pool(processes=workers)
+        iterator = pool.imap_unordered(_worker_stamp, tasks, chunksize=16)
+
+    try:
+        for idx, stamped_bytes, err in tqdm(iterator, total=len(tasks), desc="Stamping pages"):
+            if stamped_bytes is None:
+                if err == "missing":
+                    skipped_missing += 1
+                else:
+                    stamp_failures += 1
+            stamped_pages[idx] = stamped_bytes
+    finally:
+        if workers != 1:
+            pool.close()
+            pool.join()
+
+    return stamped_pages, skipped_missing, stamp_failures
+
+
+def write_merged_pdf(output: Path, stamped_pages: list[bytes | None]) -> int:
+    kept = [buf for buf in stamped_pages if buf is not None]
+    if not kept:
+        print("[ERROR] No output pages were produced.", file=sys.stderr)
+        return 1
+
+    writer = PdfWriter()
+    for buf in kept:
+        reader = PdfReader(io.BytesIO(buf))
+        writer.add_page(reader.pages[0])
+
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with open(output, "wb") as f:
+        writer.write(f)
+    print(f"[OK] Wrote combined PDF: {output}")
+    return 0
 
 
 def main():
     args = parse_args()
 
-    csv_path = Path(args.csv)
-    if not csv_path.exists():
-        print(f"[ERROR] CSV not found: {csv_path}", file=sys.stderr)
+    if not args.csv.exists():
+        print(f"[ERROR] CSV not found: {args.csv}", file=sys.stderr)
+        return 2
+    if not args.fig_dir.exists():
+        print(f"[ERROR] Figure directory not found: {args.fig_dir}", file=sys.stderr)
         return 2
 
-    df = pd.read_csv(csv_path)
-    for col in (args.object_id_col, args.z_col):
-        if col not in df.columns:
-            print(f"[ERROR] Missing required column '{col}' in CSV.", file=sys.stderr)
-            return 2
-
-    # Filter by numeric key if requested
-    if args.key is not None:  # hyphen isn't valid in Python attribute; fix below
-        pass
-    # Work around argparse name with hyphen:
-    key = getattr(args, "key")
-    if key:
-        if key not in df.columns:
-            print(f"[ERROR] --key '{key}' not found in CSV columns.", file=sys.stderr)
-            return 2
-        if args.low is not None:
-            df = df[df[key] >= args.low]
-        if args.high is not None:
-            df = df[df[key] <= args.high]
-
-
-    df = df.sort_values(by=args.sort_by, ascending=False)
+    try:
+        df = load_csv(args.csv)
+    except Exception as exc:
+        print(f"[ERROR] Failed to load CSV: {exc}", file=sys.stderr)
+        return 2
 
     if df.empty:
-        print("[WARN] No rows after filtering. Nothing to do.", file=sys.stderr)
+        print("[WARN] CSV has zero rows. Nothing to do.", file=sys.stderr)
         return 1
 
-    # Derive default output if needed
-    out_pdf = Path(args.output)
-    out_pdf.parent.mkdir(parents=True, exist_ok=True)
+    fig_index = build_figure_index(args.fig_dir)
+    if not fig_index["all_paths"]:
+        print(f"[WARN] No PDFs indexed under {args.fig_dir}", file=sys.stderr)
 
-    overlay_fields = [s.strip() for s in args.overlay.split(",")] if args.overlay else []
+    tasks = []
+    missing_pre = 0
+    missing_object_ids = []
+    for idx, (_, row) in enumerate(df.iterrows()):
+        src_pdf = find_pdf_for_row(row, fig_index)
+        object_id = _format_stamp_string(row.get("object_id"))
+        if src_pdf is None:
+            missing_pre += 1
+            missing_object_ids.append(object_id)
+        tasks.append(
+            (
+                idx,
+                str(src_pdf) if src_pdf is not None else None,
+                make_stamp_text(row),
+                int(args.stamp_font_size),
+                float(args.stamp_margin_mm),
+            )
+        )
 
-    images_for_pdf = []
-    missing = 0
-    taken = 0
+    if missing_pre:
+        print(f"[WARN] Missing figure for {missing_pre} row(s) before stamping.", file=sys.stderr)
+        preview = ", ".join(missing_object_ids[:10])
+        if preview:
+            print(f"[WARN] First missing object_id values: {preview}", file=sys.stderr)
 
-    # Iterate rows in CSV order
-    for idx, row in tqdm(df.iterrows(), total=len(df), desc="Processing"):
-        # Build path to PNG
-        try:
-            obj_id = str(int(row[args.object_id_col]))
-            z_val = float(row[args.z_col])
-        except Exception:
-            print(f"[WARN] Row {idx}: invalid {args.object_id_col} or {args.z_col}; skipping.", file=sys.stderr)
-            continue
+    stamped_pages, skipped_missing, stamp_failures = stamp_tasks(tasks, workers=args.workers)
+    kept = sum(1 for page in stamped_pages if page is not None)
+    print(
+        f"[INFO] Rows={len(df)} kept={kept} skipped={len(df) - kept} "
+        f"(missing={skipped_missing}, stamp_failures={stamp_failures})"
+    )
 
-        png_path = build_image_path(args.prefix, z_val, obj_id)
-        if png_path is None:
-            missing += 1
-            msg = f"[WARN] No PNG found for object_id={obj_id} (z≈{z_val:.1f})"
-            if args.skip_missing:
-                print(msg, file=sys.stderr)
-                continue
-            else:
-                print(msg, file=sys.stderr)
-                return 2
-            
-        # Open, overlay, and store
-        try:
-            im = Image.open(png_path)
-        except Exception as e:
-            print(f"[WARN] Failed to open {png_path}: {e}", file=sys.stderr)
-            if args.skip_missing:
-                continue
-            else:
-                return 2
+    if args.dry_run:
+        print("[DRY] Dry run complete; output PDF not written.")
+        return 0
 
-        lines = format_overlay_lines(row, args.object_id_col, args.z_col, overlay_fields)
-        im = draw_overlay(im, lines, font_size=args.font_size, box_alpha=args.box_alpha, box_pad=args.box_pad)
-
-        # Convert to RGB for PDF
-        im_rgb = im.convert("RGB")
-        if not images_for_pdf:
-            images_for_pdf.append(im_rgb)
-        else:
-            images_for_pdf.append(im_rgb)
-
-        taken += 1
-        if args.max is not None and taken >= args.max:
-            break
-
-    if not images_for_pdf:
-        print("[WARN] No images to save. Exiting.", file=sys.stderr)
-        return 1
-
-    # Save multi-page PDF
-    first = images_for_pdf[0]
-    rest = images_for_pdf[1:]
-    try:
-        first.save(out_pdf, "PDF", resolution=150.0, save_all=True, append_images=rest)
-    except Exception as e:
-        print(f"[ERROR] Failed to write PDF {out_pdf}: {e}", file=sys.stderr)
-        return 2
-
-    print(f"[OK] Wrote {len(images_for_pdf)} page(s) to: {out_pdf}")
-    if missing:
-        print(f"[NOTE] Missing PNGs skipped: {missing}")
-
-    return 0
+    return write_merged_pdf(args.output, stamped_pages)
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    raise SystemExit(main())
