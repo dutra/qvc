@@ -536,22 +536,22 @@ def compute_derived_results(result, q, args):
         m50, m_err = estimate_host_center_fraction(q)
         result["f_host_center"] = safe_float(m50)
         result["f_host_center_err"] = safe_float(m_err)
-
-        m50, m_err = posterior_component_integrated_fraction(
-            q,
-            numerator_key="line_model_narrow",
-            denominator_key="gal_model",
-            positive_only=True,
-        )
-        result["f_na"] = safe_float(m50)
-        result["f_na_err"] = safe_float(m_err)
     else:
         result["f_host_2500"] = 0.0
         result["f_host_2500_err"] = 0.0
         result["f_host_center"] = 0.0
         result["f_host_center_err"] = 0.0
-        result["f_na"] = np.nan
-        result["f_na_err"] = np.nan
+
+    # Narrow-line fraction, defined as integrated narrow-line flux over integrated
+    # total continuum flux so it remains well-defined even without host decomposition.
+    m50, m_err = posterior_component_integrated_fraction(
+        q,
+        numerator_key="line_model_narrow",
+        denominator_key="continuum_model",
+        positive_only=True,
+    )
+    result["f_na"] = safe_float(m50)
+    result["f_na_err"] = safe_float(m_err)
 
     # BC fraction, defined against the total continuum at 3000 A.
     m50, m_err = posterior_component_fraction_at_wave(
