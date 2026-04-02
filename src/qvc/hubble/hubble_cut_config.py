@@ -52,8 +52,8 @@ def build_agn_cuts(
         ("f_host_center", None, f_host_cut),
         ("frac_host_psf_2500", None, f_host_cut),
         ("alpha_lambda", None, DEFAULT_ALPHA_LAMBDA_UPPER_CUT),
-        ('f_fe_uv_over_pl_3000', None, iron_frac_cut),
-        ('f_bc_over_pl_3000', None, bc_frac_cut),
+        ('f_fe_uv_3000', None, iron_frac_cut),
+        ('f_bc_3000', None, bc_frac_cut),
         ("variability_chi_sq_red_g", variability_chi_sq_red_g_cut, None),
     ]
     if reddening_ebv_cut is not None:

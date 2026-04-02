@@ -816,7 +816,7 @@ def empirical_structure_function(t, y, yerr=None, *, bins_per_decade=3, min_pair
     decades = np.log10(tmax) - np.log10(tmin)
     n_bins = max(1, int(np.ceil(bins_per_decade * decades)))
     edges = np.logspace(np.log10(tmin), np.log10(tmax), n_bins + 1)
-    which = np.digitize(tau, edges) - 1
+    which = np.clip(np.digitize(tau, edges) - 1, 0, n_bins - 1)
 
     tau_bin, sf_bin, sf_lo, sf_hi = [], [], [], []
     for k in range(n_bins):

@@ -231,9 +231,9 @@ def test_run_single_only_sna_smoke(fake_data, monkeypatch, tmp_path):
 @pytest.mark.parametrize("resume_value, use_default_checkpoint", [(True, True), ("custom_resume.h5", False)])
 def test_resolve_resume_checkpoint_path_requires_existing_file(tmp_path, resume_value, use_default_checkpoint):
     default_checkpoint = tmp_path / "default_resume.h5"
-    expected_path = default_checkpoint if use_default_checkpoint else "custom_resume.h5"
+    expected_name = default_checkpoint.name if use_default_checkpoint else Path("custom_resume.h5").name
 
-    with pytest.raises(FileNotFoundError, match=expected_path.name):
+    with pytest.raises(FileNotFoundError, match=expected_name):
         hubble_fit.resolve_resume_checkpoint_path(resume_value, str(default_checkpoint))
 
 

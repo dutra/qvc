@@ -129,7 +129,14 @@ def test_compute_derived_results_uses_bc_over_total_continuum(monkeypatch):
                 dtype=float,
             ),
             "f_pl_model": np.ones((3, 3), dtype=float),
-            "f_fe_mgii_model": np.zeros((3, 3), dtype=float),
+            "f_fe_mgii_model": np.array(
+                [
+                    [0.20, 0.20, 0.20],
+                    [0.25, 0.25, 0.25],
+                    [0.15, 0.15, 0.15],
+                ],
+                dtype=float,
+            ),
         },
         lam=np.array([4000.0, 6000.0, 8000.0], dtype=float),
         wave=np.array([2000.0, 3000.0, 4000.0], dtype=float),
@@ -143,5 +150,7 @@ def test_compute_derived_results_uses_bc_over_total_continuum(monkeypatch):
     args = SimpleNamespace(decompose_host=True)
     fit_spectra.compute_derived_results(result, q, args)
 
-    assert np.isclose(result["f_bc_over_pl_3000"], 0.1)
-    assert np.isclose(result["f_bc_over_pl_3000_err"], 0.0136)
+    assert np.isclose(result["f_bc_3000"], 0.1)
+    assert np.isclose(result["f_bc_3000_err"], 0.0136)
+    assert np.isclose(result["f_fe_uv_3000"], 0.1)
+    assert np.isclose(result["f_fe_uv_3000_err"], 0.0136)

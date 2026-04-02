@@ -412,8 +412,31 @@ def test_process_samples_keeps_uv_outputs_at_2500_and_stores_band_metadata():
         np.percentile(np.log10([7.0, 9.0, 11.0]) - np.log10(1.0 + z), 50),
     )
     assert result["bc_weight_g"] > result["bc_weight_r"] > result["bc_weight_i"] > 0.9
+    lam_g_rf = lambda_pivot["g"] / (1.0 + z)
+    log_sigma_band_g = (
+        log_sigma_center0 / np.log(10)
+        + log_single_pl(lam_g_rf, np.full_like(eta_sigma, 2500.0), eta_sigma)
+    )
+    log_tau_band_g_rf = (
+        log_tau_slow_center0 / np.log(10)
+        - np.log10(1.0 + z)
+        + log_single_pl(lam_g_rf, np.full_like(eta_tau, 2500.0), eta_tau)
+    )
+    log_tau_fast_band_g_rf = (
+        log_tau_fast_center0 / np.log(10)
+        - np.log10(1.0 + z)
+        + log_single_pl(lam_g_rf, np.full_like(eta_tau, 2500.0), eta_tau)
+    )
+    tau_band_g_rf = np.power(10.0, log_tau_band_g_rf)
+    tau_fast_band_g_rf = np.power(10.0, log_tau_fast_band_g_rf)
     expected_sigma_rms_g = np.percentile(
-        np.log10(np.array([0.18, 0.21, 0.24]) * np.sqrt((np.array([25.0, 32.0, 40.0]) ** 2 + np.array([250.0, 310.0, 400.0]) ** 2) / (np.array([250.0, 310.0, 400.0]) - np.array([25.0, 32.0, 40.0])) ** 2)),
+        np.log10(
+            np.power(10.0, log_sigma_band_g)
+            * np.sqrt(
+                (tau_fast_band_g_rf**2 + tau_band_g_rf**2)
+                / (tau_band_g_rf - tau_fast_band_g_rf) ** 2
+            )
+        ),
         50,
     )
     assert np.isclose(result["log_sigma_rms_band_g"], expected_sigma_rms_g)

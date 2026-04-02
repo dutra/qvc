@@ -3656,7 +3656,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
 
     # Flat ΛCDM
     mu_conc = Planck18.distmod(z_grid).value
-    ax.plot(z_grid, mu_conc, color="#F0B000", lw=1.2, ls='--', zorder=5, alpha=1.0, label="flat $\Lambda$CDM (Planck 2018)")
+    ax.plot(z_grid, mu_conc, color="#F0B000", lw=1.2, ls='--', zorder=5, alpha=1.0, label=r"flat $\Lambda$CDM (Planck 2018)")
 
     # Labels
     ax.set_ylabel(r"$\mu$ (mag)")
@@ -3700,7 +3700,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
             mu_model_other = _mu_model(cosmo_model_other, results_other,   z_grid, z_pivot_agn)
             mu_model = _mu_model(cosmo_model, results, z_grid, z_pivot_agn)
             ax_resid.plot(z_grid_fine, mu_model_other - mu_model, lw=2.2, color=colors[cosmo_model_other], ls=line_styles[cosmo_model_other], 
-                          alpha=1.0, label=f"{cosmo_model_other} $\Delta$μ")
+                          alpha=1.0, label=fr"{cosmo_model_other} $\Delta$μ")
             
         # Planck 2018 ΛCDM
         mu_model_1 = _mu_model(cosmo_model, results, z_grid, z_pivot_agn)
@@ -4616,8 +4616,8 @@ def plot_full_residuals(
             'petroRad_r': 'log_petroRad_r',
             'log_tau_uv_rhat': 'log_log_tau_uv_rhat',
             'f_host_center': 'log_f_host_center',
-            'f_bc_over_pl_3000': 'log_f_bc_over_pl_3000',
-            'f_fe_uv_over_pl_3000': 'log_f_fe_uv_over_pl_3000',
+            'f_bc_3000': 'log_f_bc_3000',
+            'f_fe_uv_3000': 'log_f_fe_uv_3000',
             'RCHI2': 'log_RCHI2',
             'RCHI2DIFF': 'log_RCHI2DIFF',
             'variability_chi_sq_g': 'log_variability_chi_sq_g',
@@ -4675,7 +4675,7 @@ def plot_full_residuals(
         #'pvalue_g', 'log_pvalue_g',
         #'sdss_plate_count', 'RCHI2', 'log_RCHI2', 'RCHI2DIFF', 'log_RCHI2DIFF', 'VDISP', 'ZWARNING', 'RUN2D',
         'log_frac_host_psf_2500',
-        'wrms', 'log_f_bc_over_pl_3000', 'log_f_fe_uv_over_pl_3000', 'log_f_host_center',
+        'wrms', 'log_f_bc_3000', 'log_f_fe_uv_3000', 'log_f_host_center',
         'rel_apparent_mag_2500_err',
         #'apparent_mag_2500_err', 'log_apparent_mag_2500_err', 
         #'log_sigma_uv_err', 'log_log_sigma_uv_err',
@@ -6237,14 +6237,14 @@ def plot_spectral_fraction_vs_redshift(
     filename="spectral_fraction_vs_redshift.pdf",
 ):
     """Plot f_BC, f_FeII, and f_host_center against redshift."""
-    required = {"z", "f_bc_over_pl_3000", "f_fe_uv_over_pl_3000", "f_host_center"}
+    required = {"z", "f_bc_3000", "f_fe_uv_3000", "f_host_center"}
     if not required.issubset(df_agn.columns):
         return None
 
     z = pd.to_numeric(df_agn["z"], errors="coerce").to_numpy(dtype=float)
     panel_specs = [
-        ("f_bc_over_pl_3000", r"$f_{\rm BC}$"),
-        ("f_fe_uv_over_pl_3000", r"$f_{\rm FeII}$"),
+        ("f_bc_3000", r"$f_{\rm BC}$"),
+        ("f_fe_uv_3000", r"$f_{\rm FeII}$"),
         ("f_host_center", r"$f_{\rm host,center}$"),
     ]
 
@@ -6404,8 +6404,8 @@ def plot_sigma_bc_vs_frac_bc(
 ):
     """Plot inferred BC variability amplitude against the spectral BC fraction."""
 
-    if "f_bc_over_pl_3000" not in df_agn.columns:
-        raise KeyError("Missing required 'f_bc_over_pl_3000' column for sigma_BC vs f_BC plot.")
+    if "f_bc_3000" not in df_agn.columns:
+        raise KeyError("Missing required 'f_bc_3000' column for sigma_BC vs f_BC plot.")
 
     log_sigma_bc = _derive_log_sigma_bc(df_agn)
     if log_sigma_bc is None:
@@ -6414,7 +6414,7 @@ def plot_sigma_bc_vs_frac_bc(
             "'log_sigma_uv'+'log_amp_delta_bc' or per-band 'amp_bc_<band>' with 'bc_weight_<band>'."
         )
 
-    f_bc = pd.to_numeric(df_agn["f_bc_over_pl_3000"], errors="coerce").to_numpy(dtype=float)
+    f_bc = pd.to_numeric(df_agn["f_bc_3000"], errors="coerce").to_numpy(dtype=float)
     z = (
         pd.to_numeric(df_agn["z"], errors="coerce").to_numpy(dtype=float)
         if "z" in df_agn.columns
@@ -6905,7 +6905,7 @@ def plot_delta_m_flux_recal_vs_redshift(df_agn, plot_path="plots/hubble", show=F
 def plot_m2500_vs_z_colorpanels(
     df,
     df_keep=None,
-    color_cols=("f_host_center", "f_bc_over_pl_3000", "wrms"),
+    color_cols=("f_host_center", "f_bc_3000", "wrms"),
     xcol="z",
     ycol="apparent_mag_2500",
     z_range=None,
@@ -6949,8 +6949,8 @@ def plot_m2500_vs_z_colorpanels(
     # Pretty colorbar labels
     label_map = {
         "f_host_center": r"f_{\mathrm{host}}",
-        "f_fe_uv_over_pl_3000": r"f_{\mathrm{Fe\, II}}",
-        "f_bc_over_pl_3000": r"f_{\mathrm{BC}}",
+        "f_fe_uv_3000": r"f_{\mathrm{Fe\, II}}",
+        "f_bc_3000": r"f_{\mathrm{BC}}",
         "wrms": r"\chi^2/\nu",
     }
 

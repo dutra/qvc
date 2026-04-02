@@ -207,8 +207,8 @@ def test_plot_spectral_fraction_vs_redshift_writes_pdf(tmp_path, monkeypatch):
     df = pd.DataFrame(
         {
             "z": np.linspace(0.3, 2.2, 24),
-            "f_bc_over_pl_3000": np.linspace(0.05, 0.25, 24),
-            "f_fe_uv_over_pl_3000": np.linspace(0.1, 0.4, 24),
+            "f_bc_3000": np.linspace(0.05, 0.25, 24),
+            "f_fe_uv_3000": np.linspace(0.1, 0.4, 24),
             "f_host_center": np.linspace(0.3, 0.02, 24),
         }
     )
@@ -255,7 +255,7 @@ def test_plot_sigma_bc_vs_frac_bc_writes_pdf(tmp_path, monkeypatch):
     df = pd.DataFrame(
         {
             "z": np.linspace(0.4, 2.4, 24),
-            "f_bc_over_pl_3000": np.linspace(0.05, 0.35, 24),
+            "f_bc_3000": np.linspace(0.05, 0.35, 24),
             "log_sigma_uv": np.linspace(-1.0, -0.3, 24),
             "log_amp_delta_bc": np.linspace(-0.5, -0.2, 24),
         }

@@ -409,8 +409,8 @@ def populate_spectra_fit(df, spectra_fit_csvs, best=True):
         'PL_break_wave_inbounds': bool,
         'lam_rf_min': float,
         'lam_rf_max': float,
-        'f_fe_uv_over_pl_3000': float,
-        'f_bc_over_pl_3000': float,
+        'f_fe_uv_3000': float,
+        'f_bc_3000': float,
         'f_host_center': float,
         'f_host_center_err': float,
         'wrms': float,
@@ -530,7 +530,7 @@ def populate_spectra_fit(df, spectra_fit_csvs, best=True):
     # Propagate the magnitude error into log luminosity.
     out['log_L2500_int_fs_err'] = 0.4 * out['apparent_mag_2500_err']
 
-    out['iron_frac'] = out['f_fe_uv_over_pl_3000']
+    out['iron_frac'] = out['f_fe_uv_3000']
 
     return out
 def populate_sdss_fields(objs, progress_bar=True):
@@ -1352,7 +1352,7 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
             filename="sigma_bc_vs_redshift_precut.pdf",
         )
     if (
-        "f_bc_over_pl_3000" in df.columns
+        "f_bc_3000" in df.columns
         and (
             {"log_sigma_uv", "log_amp_delta_bc"}.issubset(df.columns)
             or any(
@@ -1647,7 +1647,7 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
     print("Number of quasars with z > 3:", num_quasars_z_gt_3)
     print(f"\nTotal number of objects removed by all cuts: {len(df_all) - len(df)}")
     print("Final number of quasars:", len(df))
-    if {"z", "f_bc_over_pl_3000", "f_fe_uv_over_pl_3000", "f_host_center"}.issubset(df.columns):
+    if {"z", "f_bc_3000", "f_fe_uv_3000", "f_host_center"}.issubset(df.columns):
         plot_spectral_fraction_vs_redshift(
             df,
             plot_path=plot_path,
@@ -1731,7 +1731,7 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
             filename="sigma_bc_vs_redshift_postcut.pdf",
         )
     if (
-        "f_bc_over_pl_3000" in df.columns
+        "f_bc_3000" in df.columns
         and (
             {"log_sigma_uv", "log_amp_delta_bc"}.issubset(df.columns)
             or any(
@@ -1775,7 +1775,7 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
         )
     plot_cut_diagnostics(df_all.copy(), df.copy(), bins=30, cut_info="all cuts")
     colorpanel_cols = [
-        col for col in ("f_host_center", "f_bc_over_pl_3000", "wrms")
+        col for col in ("f_host_center", "f_bc_3000", "wrms")
         if col in df_all.columns
     ]
     if len(colorpanel_cols) > 0 and "z" in df_all.columns and "apparent_mag_2500" in df_all.columns:
