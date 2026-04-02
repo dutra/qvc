@@ -4696,6 +4696,7 @@ def plot_full_residuals(
         #'alphaOX', 'alphaOX_int',
         #'bwb_alpha_u', 'bwb_alpha_g', 'bwb_alpha_r', 'bwb_alpha_i', 'bwb_alpha_z',
         'eta_sigma', 'eta_tau',
+        'log_amp_delta_bc',
         #'PL_slope_blue', 'lam_min', 'lam_max', 'lam_range', 
         #'poly1', 'psf_minus_fiber_r', 'log_psf_minus_fiber_r', 'petroRad_r', 'log_petroRad_r',
         #'cadence', 'number_points',

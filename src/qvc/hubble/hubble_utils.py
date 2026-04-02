@@ -1000,6 +1000,7 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
         plot_alpha_lambda_histogram,
         plot_alpha_lambda_vs_redshift,
         plot_blr_amp_vs_redshift_by_band,
+        plot_bc_lag_vs_l2500,
         plot_blr_line_lags_vs_l2500_fiducial,
         plot_blr_lag_vs_amp_by_band,
         plot_blr_lag_vs_redshift_by_band,
@@ -1015,6 +1016,8 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
         plot_spectral_fraction_vs_redshift,
         plot_sf_ref_band_vs_model_g,
         plot_sf_vs_uv_variability,
+        plot_sigma_bc_vs_frac_bc,
+        plot_sigma_bc_vs_redshift,
         plot_sigma_uv_vs_variability_chi_sq_red_g,
         plot_sigma_uv_vs_tau_uv_rf,
         plot_sigma_uv_host_correction,
@@ -1331,6 +1334,48 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
             plot_path=plot_path,
             show=False,
             filename="eta_tau_sigma_vs_redshift_precut.pdf",
+        )
+    if (
+        "z" in df.columns
+        and (
+            {"log_sigma_uv", "log_amp_delta_bc"}.issubset(df.columns)
+            or any(
+                (f"amp_bc_{band}" in df.columns) and (f"bc_weight_{band}" in df.columns)
+                for band in ("u", "g", "r", "i", "z")
+            )
+        )
+    ):
+        plot_sigma_bc_vs_redshift(
+            df,
+            plot_path=plot_path,
+            show=False,
+            filename="sigma_bc_vs_redshift_precut.pdf",
+        )
+    if (
+        "f_bc_over_pl_3000" in df.columns
+        and (
+            {"log_sigma_uv", "log_amp_delta_bc"}.issubset(df.columns)
+            or any(
+                (f"amp_bc_{band}" in df.columns) and (f"bc_weight_{band}" in df.columns)
+                for band in ("u", "g", "r", "i", "z")
+            )
+        )
+    ):
+        plot_sigma_bc_vs_frac_bc(
+            df,
+            plot_path=plot_path,
+            show=False,
+            filename="sigma_bc_vs_frac_bc_precut.pdf",
+        )
+    if {"z", "apparent_mag_2500"}.issubset(df.columns) and any(
+        (f"log_lag_bc_{band}_RF" in df.columns) or (f"lag_bc_{band}" in df.columns)
+        for band in ("u", "g", "r", "i", "z")
+    ):
+        plot_bc_lag_vs_l2500(
+            df,
+            plot_path=plot_path,
+            show=False,
+            filename="bc_lag_vs_l2500_precut.pdf",
         )
     if {"log_tau_uv_rf", "log_sigma_uv", "LOGMBH", "LOGLEDD_RATIO"}.issubset(df.columns):
         plot_tau_sigma_vs_wu_catalog(
@@ -1668,6 +1713,48 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
             plot_path=plot_path,
             show=False,
             filename="eta_tau_sigma_vs_redshift_postcut.pdf",
+        )
+    if (
+        "z" in df.columns
+        and (
+            {"log_sigma_uv", "log_amp_delta_bc"}.issubset(df.columns)
+            or any(
+                (f"amp_bc_{band}" in df.columns) and (f"bc_weight_{band}" in df.columns)
+                for band in ("u", "g", "r", "i", "z")
+            )
+        )
+    ):
+        plot_sigma_bc_vs_redshift(
+            df,
+            plot_path=plot_path,
+            show=False,
+            filename="sigma_bc_vs_redshift_postcut.pdf",
+        )
+    if (
+        "f_bc_over_pl_3000" in df.columns
+        and (
+            {"log_sigma_uv", "log_amp_delta_bc"}.issubset(df.columns)
+            or any(
+                (f"amp_bc_{band}" in df.columns) and (f"bc_weight_{band}" in df.columns)
+                for band in ("u", "g", "r", "i", "z")
+            )
+        )
+    ):
+        plot_sigma_bc_vs_frac_bc(
+            df,
+            plot_path=plot_path,
+            show=False,
+            filename="sigma_bc_vs_frac_bc_postcut.pdf",
+        )
+    if {"z", "apparent_mag_2500"}.issubset(df.columns) and any(
+        (f"log_lag_bc_{band}_RF" in df.columns) or (f"lag_bc_{band}" in df.columns)
+        for band in ("u", "g", "r", "i", "z")
+    ):
+        plot_bc_lag_vs_l2500(
+            df,
+            plot_path=plot_path,
+            show=False,
+            filename="bc_lag_vs_l2500_postcut.pdf",
         )
     if {"log_sigma_uv", "log_sigma_uv_sf", "log_tau_uv_rf_sf"}.issubset(df.columns) and (
         {"log_tau_uv_rf"}.issubset(df.columns)
