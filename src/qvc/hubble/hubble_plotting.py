@@ -5846,7 +5846,7 @@ def plot_residuals_vs_alphaOX(
             vmin -= 0.5
             vmax += 0.5
         norm = mpl.colors.Normalize(vmin=vmin, vmax=vmax)
-        cmap = mpl.cm.get_cmap("viridis")
+        cmap = mpl.colormaps["viridis"]
         sm = mpl.cm.ScalarMappable(norm=norm, cmap=cmap)
 
         mask_in = (z > z_range[0]) & (z < z_range[1])
@@ -6159,6 +6159,9 @@ def plot_redshift_bin_residual_summary(
     )
 
 def plot_Mi_relation(df_agn, plot_path=None):
+    required_cols = {"z", "apparent_mag_2500", "LOGLBOL_CORRECTED"}
+    if not required_cols.issubset(df_agn.columns):
+        return None
 
     cosmo   = FlatLambdaCDM(H0=70, Om0=0.3)
 

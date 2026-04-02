@@ -740,7 +740,7 @@ def test_end_to_end(tmp_path, monkeypatch):
     h5_path = tmp_path / "data" / "fake_light_curve_end_to_end.h5"
     _write_test_quasars_hdf5(h5_path, [quasar])
 
-    df = hubble_utils.load_agn_data(
+    df, df_all = hubble_utils.load_agn_data(
         h5_path,
         spectra_fit_csv=None,
         lc_info_csv=None,
@@ -748,6 +748,7 @@ def test_end_to_end(tmp_path, monkeypatch):
         apply_cut=False,
         plot_path=str(tmp_path / "figures"),
     )
+    assert df_all.equals(df)
 
     assert len(df) == 1
     row = df.iloc[0]

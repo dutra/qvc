@@ -62,7 +62,7 @@ def test_load_agn_data_propagates_host_error_into_sigma_uv(monkeypatch, tmp_path
     monkeypatch.setattr(hubble_plotting, "plot_cut_diagnostics", lambda *args, **kwargs: None)
     monkeypatch.setattr(hubble_utils, "populate_xray", lambda df: df)
 
-    df = hubble_utils.load_agn_data(
+    df, df_all = hubble_utils.load_agn_data(
         input_path,
         spectra_fit_csv=None,
         lc_info_csv=None,
@@ -71,6 +71,7 @@ def test_load_agn_data_propagates_host_error_into_sigma_uv(monkeypatch, tmp_path
         correct_sigma_uv_host=True,
         plot_path=str(tmp_path / "figures"),
     )
+    assert df_all.equals(df)
 
     ln10 = np.log(10.0)
     orig_sigma = df_in["log_sigma_uv"].to_numpy(dtype=float)

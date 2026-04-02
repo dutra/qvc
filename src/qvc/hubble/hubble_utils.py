@@ -1567,7 +1567,8 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
     df_all = df.copy()
 
     if only_load:
-        return df
+        _finalize_cut_report()
+        return df, df_all
 
     df['log_t_rf_length'] = np.log10(df['t_rf_length'])
 
@@ -1588,11 +1589,6 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
     mask_exclude &= (~df['sdss_name'].astype(str).isin(exclusion_sdss_names))
     df = _record_cut("exclusion_list", "sdss_name/object_id exclusion list", df, mask_exclude)
 
-
-    mask_valid = (df['log_tau_uv_rf'] > 2 * df['log_sigma_uv'] + 2.5)
-    plot_cut_diagnostics(df.copy(), df[mask_valid], bins=30, cut_info="tau > 2*sigma + 2.5")
-    df = _record_cut("tau_sigma", "tau > 2*sigma + 2.5", df, mask_valid)
-    # mask_in  = df_agn["z"].between(0.44, 3.16)
 
     # Remove outliers listed in external CSV files.
     for exclude_csv in exclude_object_ids_csv:
@@ -1867,19 +1863,26 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
     if len(colorpanel_cols) > 0 and "z" in df_all.columns and "apparent_mag_2500" in df_all.columns:
         cuts_plot_dir = os.path.join("plots", "hubble", "cuts")
         os.makedirs(cuts_plot_dir, exist_ok=True)
-        fig_colorpanels, _ = plot_m2500_vs_z_colorpanels(
+        colorpanel_result = plot_m2500_vs_z_colorpanels(
             df_all,
             df_keep=df,
             color_cols=tuple(colorpanel_cols),
             z_range=z_range,
         )
-        fig_colorpanels.savefig(
-            os.path.join(cuts_plot_dir, "m2500_vs_z_colorpanels.pdf"),
-            bbox_inches="tight",
-        )
-        plt.close(fig_colorpanels)
+        fig_colorpanels = None
+        if colorpanel_result:
+            if isinstance(colorpanel_result, tuple):
+                fig_colorpanels = colorpanel_result[0]
+            else:
+                fig_colorpanels = colorpanel_result
+        if fig_colorpanels is not None:
+            fig_colorpanels.savefig(
+                os.path.join(cuts_plot_dir, "m2500_vs_z_colorpanels.pdf"),
+                bbox_inches="tight",
+            )
+            plt.close(fig_colorpanels)
     plot_Mi_relation(df_all.copy())
-    
+    _finalize_cut_report()
     return df, df_all
 
 def load_pantheon_data():
