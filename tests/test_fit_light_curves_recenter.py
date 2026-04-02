@@ -13,6 +13,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from qvc.light_curve.fit_light_curves import (
+    _weighted_quantile,
     balmer_continuum_weight,
     build_explicit_model_params,
     bending_power_law_psd,
@@ -598,8 +599,18 @@ def test_empirical_structure_function_matches_stone_definition():
         ],
         dtype=float,
     )
-    expected_tau = 10.0 ** np.mean(np.log10([1.0, 2.0, 1.0]))
-    expected_sf = np.sqrt(np.mean(pair_terms))
+    pair_weights = 1.0 / np.square(
+        np.array(
+            [
+                0.1**2 + 0.2**2,
+                0.1**2 + 0.3**2,
+                0.2**2 + 0.3**2,
+            ],
+            dtype=float,
+        )
+    )
+    expected_tau = np.mean([1.0, 2.0, 1.0])
+    expected_sf = np.sqrt(_weighted_quantile(pair_terms, pair_weights, [0.5])[0])
 
     assert tau.shape == (1,)
     assert np.isclose(tau[0], expected_tau)
@@ -610,7 +621,7 @@ def test_empirical_structure_function_matches_stone_definition():
 def test_compute_structure_function_diagnostics_returns_finite_sensible_g_band_fit():
     rng = np.random.default_rng(11)
     sigma_true = 0.18
-    tau_true = 300.0
+    tau_true = 700.0
     t_g = np.linspace(0.0, 3000.0, 40, dtype=float)
     dt = np.abs(t_g[:, None] - t_g[None, :])
     cov = (sigma_true**2) * np.exp(-dt / tau_true)
@@ -632,8 +643,8 @@ def test_compute_structure_function_diagnostics_returns_finite_sensible_g_band_f
         "eta_sigma": np.array([0.0, 0.05, -0.05], dtype=float),
         "eta_tau": np.array([0.0, 0.05, -0.05], dtype=float),
         "amp_cont_g": np.array([0.18, 0.19, 0.20], dtype=float),
-        "tau_fast_g": np.array([35.0, 30.0, 40.0], dtype=float),
-        "tau_slow_g": np.array([320.0, 300.0, 340.0], dtype=float),
+        "tau_fast_g": np.array([75.0, 70.0, 80.0], dtype=float),
+        "tau_slow_g": np.array([720.0, 700.0, 740.0], dtype=float),
     }
 
     result = compute_structure_function_diagnostics(samples, obj, z=0.8)
