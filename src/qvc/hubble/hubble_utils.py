@@ -1755,6 +1755,19 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
             show=False,
             filename="spectral_fraction_vs_redshift_postcut.pdf",
         )
+        if "object_id" in df_all.columns and "object_id" in df.columns:
+            cut_object_ids = set(df["object_id"].astype(str))
+            df_cut_sources = df_all.loc[
+                ~df_all["object_id"].astype(str).isin(cut_object_ids)
+            ].copy()
+            plot_spectral_fraction_vs_redshift(
+                df,
+                plot_path=plot_path,
+                show=False,
+                z_range=z_range,
+                df_cut_sources=df_cut_sources,
+                filename="spectral_fraction_vs_redshift_cuts.pdf",
+            )
     if {"g_raw_mean_slope", "g_resid_mean_slope"}.issubset(df.columns):
         for m2500_cut in (23.0, 22.5, 22.0, 21.5):
             plot_g_band_drift_slope_histograms(

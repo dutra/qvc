@@ -6464,6 +6464,8 @@ def plot_spectral_fraction_vs_redshift(
     show=False,
     nbins=12,
     min_bin_count=20,
+    z_range=(0.44, 3.16),
+    df_cut_sources=None,
     filename="spectral_fraction_vs_redshift.pdf",
 ):
     """Plot available spectral fractions against redshift."""
@@ -6471,29 +6473,56 @@ def plot_spectral_fraction_vs_redshift(
     if not required.issubset(df_agn.columns):
         return None
 
-    z = pd.to_numeric(df_agn["z"], errors="coerce").to_numpy(dtype=float)
+    def _prepare_spectral_fraction_frame(frame):
+        frame = frame.copy()
+        if "f_na" in frame.columns or "f_br" in frame.columns:
+            f_na = (
+                pd.to_numeric(frame["f_na"], errors="coerce")
+                if "f_na" in frame.columns
+                else pd.Series(0.0, index=frame.index)
+            )
+            f_br = (
+                pd.to_numeric(frame["f_br"], errors="coerce")
+                if "f_br" in frame.columns
+                else pd.Series(0.0, index=frame.index)
+            )
+            frame["f_lines"] = f_na.fillna(0.0) + f_br.fillna(0.0)
+        return frame
+
+    df_plot = _prepare_spectral_fraction_frame(df_agn)
+    df_cut_plot = (
+        _prepare_spectral_fraction_frame(df_cut_sources)
+        if df_cut_sources is not None
+        else None
+    )
+    z = pd.to_numeric(df_plot["z"], errors="coerce").to_numpy(dtype=float)
     panel_specs = [
         ("f_bc_3000", r"$f_{\rm BC}$"),
         ("f_fe_uv_3000", r"$f_{\rm FeII}$"),
     ]
-    if "f_na" in df_agn.columns:
-        panel_specs.append(("f_na", r"$f_{\rm narrow}$"))
-    if "f_br" in df_agn.columns:
-        panel_specs.append(("f_br", r"$f_{\rm broad}$"))
+    if "f_lines" in df_plot.columns:
+        panel_specs.append(("f_lines", r"$f_{\rm lines}$"))
     if "f_PL" in df_agn.columns:
         panel_specs.append(("f_PL", r"$f_{\rm PL}$"))
 
-    if "f_host_2500" in df_agn.columns:
-        panel_specs.append(("f_host_2500", r"$f_{\rm host,2500}$"))
+    if "f_host_2500" in df_plot.columns:
+        panel_specs.append(("f_host_2500", r"$f_{\rm host,2500\,\AA}$"))
     if len(panel_specs) == 2:
         return None
 
-    fig, axes = plt.subplots(1, len(panel_specs), figsize=(5.0 * len(panel_specs), 4.6), sharex=True, squeeze=False)
+    fig, axes = plt.subplots(
+        1,
+        len(panel_specs),
+        figsize=(5.6 * len(panel_specs), 4.6),
+        sharex=True,
+        sharey=True,
+        squeeze=False,
+    )
     axes = axes.ravel()
 
-    for ax, (col, ylabel) in zip(axes, panel_specs):
-        y = pd.to_numeric(df_agn[col], errors="coerce").to_numpy(dtype=float)
-        mask = np.isfinite(z) & np.isfinite(y)
+    for i_ax, (ax, (col, ylabel)) in enumerate(zip(axes, panel_specs)):
+        y = pd.to_numeric(df_plot[col], errors="coerce").to_numpy(dtype=float)
+        mask = np.isfinite(z) & np.isfinite(y) & (y > 0.0)
         if np.count_nonzero(mask) == 0:
             ax.text(0.5, 0.5, f"No finite {col}", ha="center", va="center", transform=ax.transAxes)
             ax.set_axis_off()
@@ -6501,47 +6530,59 @@ def plot_spectral_fraction_vs_redshift(
 
         z_use = z[mask]
         y_use = y[mask]
+        in_z = (z_use >= z_range[0]) & (z_use <= z_range[1])
+        out_z = ~in_z
 
-        ax.scatter(
-            z_use,
-            y_use,
-            s=10,
-            alpha=0.25,
-            color="k",
-            linewidths=0,
-            rasterized=True,
-        )
+        if np.any(in_z):
+            ax.scatter(
+                z_use[in_z],
+                y_use[in_z],
+                s=10,
+                marker="o",
+                alpha=0.25,
+                color="k",
+                linewidths=0,
+                zorder=3,
+                label=ylabel,
+                rasterized=True,
+            )
+        if np.any(out_z):
+            ax.scatter(
+                z_use[out_z],
+                y_use[out_z],
+                s=20,
+                marker="D",
+                alpha=0.30,
+                color="k",
+                linewidths=0,
+                zorder=3,
+                label=ylabel if not np.any(in_z) else None,
+                rasterized=True,
+            )
 
-        if np.nanmax(z_use) > np.nanmin(z_use):
-            edges = np.linspace(np.nanmin(z_use), np.nanmax(z_use), nbins + 1)
-            xmid = []
-            ymed = []
-            ylo = []
-            yhi = []
-            for i in range(len(edges) - 1):
-                lo = edges[i]
-                hi = edges[i + 1]
-                keep = (z_use >= lo) & (z_use < hi)
-                if i == len(edges) - 2:
-                    keep = (z_use >= lo) & (z_use <= hi)
-                if np.count_nonzero(keep) < min_bin_count:
-                    continue
-                y_bin = y_use[keep]
-                xmid.append(np.nanmedian(z_use[keep]))
-                ymed.append(np.nanmedian(y_bin))
-                ylo.append(np.nanpercentile(y_bin, 16))
-                yhi.append(np.nanpercentile(y_bin, 84))
-            if xmid:
-                xmid = np.asarray(xmid, dtype=float)
-                ymed = np.asarray(ymed, dtype=float)
-                ylo = np.asarray(ylo, dtype=float)
-                yhi = np.asarray(yhi, dtype=float)
-                ax.fill_between(xmid, ylo, yhi, color="tab:blue", alpha=0.18, linewidth=0)
-                ax.plot(xmid, ymed, color="tab:blue", lw=2.0)
+        if df_cut_plot is not None and col in df_cut_plot.columns:
+            z_cut = pd.to_numeric(df_cut_plot["z"], errors="coerce").to_numpy(dtype=float)
+            y_cut = pd.to_numeric(df_cut_plot[col], errors="coerce").to_numpy(dtype=float)
+            mask_cut = np.isfinite(z_cut) & np.isfinite(y_cut)
+            if np.any(mask_cut):
+                ax.scatter(
+                    z_cut[mask_cut],
+                    y_cut[mask_cut],
+                    s=18,
+                    marker="x",
+                    alpha=0.6,
+                    color="tab:red",
+                    linewidths=0.8,
+                    zorder=2,
+                    label="cut",
+                    rasterized=True,
+                )
 
-        ax.set_xlabel("Redshift z")
-        ax.set_ylabel(ylabel)
-        ax.grid(True, alpha=0.2)
+        ax.set_xlabel(r"$z$")
+        ax.set_ylabel("Component fraction" if i_ax == 0 else "")
+        ax.set_yscale("log")
+        ax.set_ylim(1e-2, 1e0)
+        ax.legend(loc="upper right", frameon=False)
 
     fig.tight_layout()
 
