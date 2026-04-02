@@ -66,6 +66,29 @@ _BLR_LINE_MODELS = {
     "Hα": {"lambda_rest": 6563.0, "mu0": 1.72, "slope": 0.50, "sigma": 0.22},
 }
 
+_BLR_LINE_LUMINOSITY_SPECS = {
+    "C IV": {
+        "value_col": "log_lambda_Llambda_1350_agn",
+        "err_col": "log_lambda_Llambda_1350_agn_err",
+        "axis_label": r"$\log L_{1350}$",
+    },
+    "Mg II": {
+        "value_col": "log_lambda_Llambda_3000_agn",
+        "err_col": "log_lambda_Llambda_3000_agn_err",
+        "axis_label": r"$\log L_{3000}$",
+    },
+    "Hβ": {
+        "value_col": "log_lambda_Llambda_5100_agn",
+        "err_col": "log_lambda_Llambda_5100_agn_err",
+        "axis_label": r"$\log L_{5100}$",
+    },
+    "Hα": {
+        "value_col": "log_lambda_Llambda_5100_agn",
+        "err_col": "log_lambda_Llambda_5100_agn_err",
+        "axis_label": r"$\log L_{5100}$",
+    },
+}
+
 _BAND_COLORS = {
     "u": "tab:blue",
     "g": "tab:green",
@@ -222,16 +245,72 @@ def _soft_band_overlap_weight(line_lambda_rest, z, band, edge_softness=120.0):
     return float(sigmoid_left * sigmoid_right)
 
 
+def _coerce_numeric_vector(values, n_rows, *, fill_value=np.nan):
+    arr = np.full(n_rows, fill_value, dtype=float)
+    if values is None:
+        return arr
+    values_arr = np.asarray(values, dtype=float)
+    n_copy = min(n_rows, values_arr.size)
+    if n_copy > 0:
+        arr[:n_copy] = values_arr[:n_copy]
+    return arr
+
+
+def _build_blr_line_luminosity_maps(df, fallback_log_luminosity, log_luminosity_shift):
+    n_rows = len(df)
+    fallback_log_luminosity = _coerce_numeric_vector(
+        fallback_log_luminosity,
+        n_rows,
+    )
+    log_luminosity_shift = _coerce_numeric_vector(
+        log_luminosity_shift,
+        n_rows,
+        fill_value=0.0,
+    )
+
+    luminosity_maps = {}
+    for line_name, spec in _BLR_LINE_LUMINOSITY_SPECS.items():
+        values = (
+            pd.to_numeric(df[spec["value_col"]], errors="coerce").to_numpy(dtype=float)
+            if spec["value_col"] in df.columns
+            else np.full(n_rows, np.nan, dtype=float)
+        )
+        errs = (
+            pd.to_numeric(df[spec["err_col"]], errors="coerce").to_numpy(dtype=float)
+            if spec["err_col"] in df.columns
+            else np.full(n_rows, np.nan, dtype=float)
+        )
+        shifted_values = values.copy()
+        valid = np.isfinite(shifted_values) & np.isfinite(log_luminosity_shift)
+        shifted_values[valid] = shifted_values[valid] + log_luminosity_shift[valid]
+        use_fallback = ~np.isfinite(shifted_values)
+        shifted_values[use_fallback] = fallback_log_luminosity[use_fallback]
+        luminosity_maps[line_name] = {
+            "values": shifted_values,
+            "errs": np.where(np.isfinite(errs) & (errs >= 0.0), errs, np.nan),
+            "value_col": spec["value_col"],
+            "err_col": spec["err_col"],
+            "axis_label": spec["axis_label"],
+        }
+
+    return fallback_log_luminosity, luminosity_maps
+
+
 def _blr_line_assignment_longform(
     df,
     logL2500_debiased,
     *,
+    log_luminosity_shift=None,
     lag_err_max=0.25,
     null_score=0.05,
 ):
     rows = []
     continuum_ref_col = "log_sigma_uv"
-    logL2500_arr = np.asarray(logL2500_debiased, dtype=float)
+    logL2500_arr, luminosity_maps = _build_blr_line_luminosity_maps(
+        df,
+        logL2500_debiased,
+        log_luminosity_shift,
+    )
     for suffix in ("", "2"):
         component = 1 if suffix == "" else 2
         for band in ("u", "g", "r", "i", "z"):
@@ -295,6 +374,19 @@ def _blr_line_assignment_longform(
                 else:
                     assigned_line = max(probs, key=probs.get)
                     assigned_prob = probs[assigned_line]
+                luminosity_spec = luminosity_maps.get(assigned_line)
+                if luminosity_spec is None:
+                    log_luminosity = logL2500_arr[i] if i < len(logL2500_arr) else np.nan
+                    log_luminosity_err = np.nan
+                    luminosity_col = "logL2500_debiased"
+                    luminosity_err_col = None
+                    luminosity_axis_label = r"$\log L_{2500}$"
+                else:
+                    log_luminosity = luminosity_spec["values"][i]
+                    log_luminosity_err = luminosity_spec["errs"][i]
+                    luminosity_col = luminosity_spec["value_col"]
+                    luminosity_err_col = luminosity_spec["err_col"]
+                    luminosity_axis_label = luminosity_spec["axis_label"]
                 rows.append(
                     {
                         "object_id": object_ids[i],
@@ -302,6 +394,11 @@ def _blr_line_assignment_longform(
                         "component": component,
                         "z": z[i],
                         "logL2500_debiased": logL2500_arr[i] if i < len(logL2500_arr) else np.nan,
+                        "log_line_luminosity": log_luminosity,
+                        "log_line_luminosity_err": log_luminosity_err,
+                        "line_luminosity_col": luminosity_col,
+                        "line_luminosity_err_col": luminosity_err_col,
+                        "line_luminosity_axis_label": luminosity_axis_label,
                         "log_amp_blr": log_amp_blr[i],
                         "log_lag_rf": log_lag_rf[i],
                         "log_lag_rf_err": lag_err[i],
@@ -315,6 +412,64 @@ def _blr_line_assignment_longform(
                 )
 
     return pd.DataFrame(rows)
+
+
+def _plot_blr_lag_line_panel(ax, line_df, line_name, *, x_suffix=""):
+    if line_df.empty:
+        ax.text(
+            0.5,
+            0.5,
+            "No assignments after filters",
+            ha="center",
+            va="center",
+            transform=ax.transAxes,
+        )
+    else:
+        for component, marker in ((1, "o"), (2, "s")):
+            comp_df = line_df[line_df["component"] == component]
+            if comp_df.empty:
+                continue
+
+            x = pd.to_numeric(comp_df["log_line_luminosity"], errors="coerce").to_numpy(dtype=float)
+            y = pd.to_numeric(comp_df["log_lag_rf"], errors="coerce").to_numpy(dtype=float)
+            xerr = np.abs(
+                pd.to_numeric(comp_df["log_line_luminosity_err"], errors="coerce").to_numpy(dtype=float)
+            )
+            yerr = np.abs(
+                pd.to_numeric(comp_df["log_lag_rf_err"], errors="coerce").to_numpy(dtype=float)
+            )
+            keep = np.isfinite(x) & np.isfinite(y)
+            if not np.any(keep):
+                continue
+            xerr = np.where(np.isfinite(xerr[keep]), xerr[keep], 0.0)
+            yerr = np.where(np.isfinite(yerr[keep]), yerr[keep], 0.0)
+            ax.errorbar(
+                x[keep],
+                y[keep],
+                xerr=xerr,
+                yerr=yerr,
+                fmt=marker,
+                linestyle="none",
+                color="black",
+                ecolor="black",
+                markerfacecolor="black",
+                markeredgecolor="black",
+                markersize=4.0,
+                elinewidth=0.8,
+                capsize=2.0,
+                alpha=0.8,
+            )
+
+    x_label = _BLR_LINE_LUMINOSITY_SPECS.get(line_name, {}).get(
+        "axis_label",
+        r"$\log L_{2500}$",
+    )
+    if x_suffix:
+        x_label = f"{x_label} {x_suffix}"
+    ax.set_title(f"{line_name} (N={len(line_df)})")
+    ax.grid(True, alpha=0.25)
+    ax.set_xlabel(x_label)
+    ax.set_ylabel(r"$\log \tau_{\rm BLR,RF}$")
 
 
 def plot_blr_line_lags_vs_l2500(
@@ -331,7 +486,7 @@ def plot_blr_line_lags_vs_l2500(
     use_alpha_lambda_term=None,
     use_redshift_log_f_term=None,
 ):
-    """Plot BLR lag against debiased L_2500 for line-assigned, well-constrained components."""
+    """Plot BLR lag against line-matched debiased continuum luminosity."""
     if df_agn.empty or dm_interp is None:
         return None
     required = {"z", "apparent_mag_2500"}
@@ -355,21 +510,20 @@ def plot_blr_line_lags_vs_l2500(
 
     z = pd.to_numeric(df_agn["z"], errors="coerce").to_numpy(dtype=float)
     m2500 = pd.to_numeric(df_agn["apparent_mag_2500"], errors="coerce").to_numpy(dtype=float)
-    actual_M2500 = (
-        m2500
-        - _evaluate_dm_interp(
-            dm_interp,
-            z,
-            m2500,
-            f_host_2500=df_agn.get("f_host_2500"),
-            alpha_lambda=df_agn.get("alpha_lambda"),
-        )
-    ) - cosmo.distmod(z).value
+    dmi = _evaluate_dm_interp(
+        dm_interp,
+        z,
+        m2500,
+        f_host_2500=df_agn.get("f_host_2500"),
+        alpha_lambda=df_agn.get("alpha_lambda"),
+    )
+    actual_M2500 = (m2500 - dmi) - cosmo.distmod(z).value
     logL2500_debiased = convert_M2500_to_logL2500(actual_M2500)
 
     assignments = _blr_line_assignment_longform(
         df_agn,
         logL2500_debiased,
+        log_luminosity_shift=0.4 * dmi,
         lag_err_max=lag_err_max,
     )
     if assignments.empty:
@@ -395,54 +549,26 @@ def plot_blr_line_lags_vs_l2500(
 
     for ax, line_name in zip(axes, line_order):
         line_df = selected[selected["assigned_line"] == line_name]
-        if line_df.empty:
-            ax.text(
-                0.5,
-                0.5,
-                f"No assignments with p>{prob_thresh:.1f}",
-                ha="center",
-                va="center",
-                transform=ax.transAxes,
-            )
-        else:
-            for component, marker in ((1, "o"), (2, "s")):
-                comp_df = line_df[line_df["component"] == component]
-                if comp_df.empty:
-                    continue
-                for band in sorted(comp_df["band"].unique()):
-                    band_df = comp_df[comp_df["band"] == band]
-                    ax.scatter(
-                        band_df["logL2500_debiased"],
-                        band_df["log_lag_rf"],
-                        s=18,
-                        alpha=0.7,
-                        linewidths=0,
-                        color=_BAND_COLORS.get(band, "0.4"),
-                        marker=marker,
-                        rasterized=True,
-                    )
-        ax.set_title(f"{line_name} (N={len(line_df)})")
-        ax.grid(True, alpha=0.25)
-        ax.set_xlabel(r"$\log L_{2500}$ (debiased)")
-        ax.set_ylabel(r"$\log \tau_{\rm BLR,RF}$")
+        _plot_blr_lag_line_panel(
+            ax,
+            line_df,
+            line_name,
+            x_suffix="(debiased)",
+        )
 
-    band_handles = [
-        Line2D([0], [0], marker="o", linestyle="none", color=_BAND_COLORS[b], label=f"{b}-band", markersize=6)
-        for b in _BAND_COLORS
-    ]
     component_handles = [
         Line2D([0], [0], marker="o", linestyle="none", color="k", label="BLR 1", markersize=6),
         Line2D([0], [0], marker="s", linestyle="none", color="k", label="BLR 2", markersize=6),
     ]
     fig.legend(
-        handles=band_handles + component_handles,
+        handles=component_handles,
         loc="upper center",
-        ncol=7,
+        ncol=2,
         frameon=False,
         bbox_to_anchor=(0.5, 1.02),
     )
     fig.suptitle(
-        rf"Assigned BLR lags vs debiased $L_{{2500}}$ ($p \geq {prob_thresh:.1f}$)",
+        rf"Assigned BLR lags vs line-matched debiased continuum luminosity ($p \geq {prob_thresh:.1f}$)",
         y=1.05,
     )
     fig.tight_layout()
@@ -526,7 +652,7 @@ def plot_blr_line_lags_vs_l2500_fiducial(
     filename="blr_line_lags_vs_l2500_fiducial.pdf",
     assignment_probabilities_filename="blr_line_assignment_probabilities_fiducial.pdf",
 ):
-    """Plot BLR lag against fiducial-cosmology L_2500 for each assigned broad line."""
+    """Plot BLR lag against line-matched fit_spectra continuum luminosity."""
     if df_agn.empty:
         return None
     required = {"z", "apparent_mag_2500"}
@@ -581,54 +707,26 @@ def plot_blr_line_lags_vs_l2500_fiducial(
 
     for ax, line_name in zip(axes, line_order):
         line_df = selected[selected["assigned_line"] == line_name]
-        if line_df.empty:
-            ax.text(
-                0.5,
-                0.5,
-                "No assignments after filters",
-                ha="center",
-                va="center",
-                transform=ax.transAxes,
-            )
-        else:
-            for component, marker in ((1, "o"), (2, "s")):
-                comp_df = line_df[line_df["component"] == component]
-                if comp_df.empty:
-                    continue
-                for band in sorted(comp_df["band"].unique()):
-                    band_df = comp_df[comp_df["band"] == band]
-                    ax.scatter(
-                        band_df["logL2500_debiased"],
-                        band_df["log_lag_rf"],
-                        s=18,
-                        alpha=0.7,
-                        linewidths=0,
-                        color=_BAND_COLORS.get(band, "0.4"),
-                        marker=marker,
-                        rasterized=True,
-                    )
-        ax.set_title(f"{line_name} (N={len(line_df)})")
-        ax.grid(True, alpha=0.25)
-        ax.set_xlabel(r"$\log L_{2500}$ (fiducial cosmology)")
-        ax.set_ylabel(r"$\log \tau_{\rm BLR,RF}$")
+        _plot_blr_lag_line_panel(
+            ax,
+            line_df,
+            line_name,
+            x_suffix="(fit_spectra)",
+        )
 
-    band_handles = [
-        Line2D([0], [0], marker="o", linestyle="none", color=_BAND_COLORS[b], label=f"{b}-band", markersize=6)
-        for b in _BAND_COLORS
-    ]
     component_handles = [
         Line2D([0], [0], marker="o", linestyle="none", color="k", label="BLR 1", markersize=6),
         Line2D([0], [0], marker="s", linestyle="none", color="k", label="BLR 2", markersize=6),
     ]
     fig.legend(
-        handles=band_handles + component_handles,
+        handles=component_handles,
         loc="upper center",
-        ncol=7,
+        ncol=2,
         frameon=False,
         bbox_to_anchor=(0.5, 1.02),
     )
     fig.suptitle(
-        rf"Assigned BLR lags vs fiducial-cosmology $L_{{2500}}$ ($p \geq {prob_thresh:.1f}$)",
+        rf"Assigned BLR lags vs line-matched fit_spectra continuum luminosity ($p \geq {prob_thresh:.1f}$)",
         y=1.05,
     )
     fig.tight_layout()

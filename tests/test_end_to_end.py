@@ -648,6 +648,49 @@ def test_blr_line_assignment_uses_visibility_only():
     assert out.iloc[0]["assigned_prob"] > out.iloc[0]["p_Hb"]
 
 
+def test_blr_line_assignment_uses_fit_spectra_line_specific_luminosities():
+    df = pd.DataFrame(
+        {
+            "object_id": ["civ", "mgii", "hb", "ha"],
+            "z": [2.0, 0.8, 0.0, 0.0],
+            "dropped_bands": [[], [], [], []],
+            "log_sigma_uv": [-1.0, -1.0, -1.0, -1.0],
+            "log_amp_delta_blr_g": [0.0, 0.0, 0.0, np.nan],
+            "log_lag_blr_g_RF": [1.0, 1.1, 1.2, np.nan],
+            "log_lag_blr_g_RF_err": [0.1, 0.1, 0.1, np.nan],
+            "log_amp_delta_blr_r": [np.nan, np.nan, np.nan, 0.0],
+            "log_lag_blr_r_RF": [np.nan, np.nan, np.nan, 1.3],
+            "log_lag_blr_r_RF_err": [np.nan, np.nan, np.nan, 0.2],
+            "log_lambda_Llambda_1350_agn": [45.1, 45.2, 45.3, 45.4],
+            "log_lambda_Llambda_1350_agn_err": [0.01, 0.02, 0.03, 0.04],
+            "log_lambda_Llambda_3000_agn": [46.1, 46.2, 46.3, 46.4],
+            "log_lambda_Llambda_3000_agn_err": [0.05, 0.06, 0.07, 0.08],
+            "log_lambda_Llambda_5100_agn": [47.1, 47.2, 47.3, 47.4],
+            "log_lambda_Llambda_5100_agn_err": [0.09, 0.10, 0.11, 0.12],
+        }
+    )
+
+    out = hubble_plotting._blr_line_assignment_longform(
+        df,
+        np.array([99.0, 99.0, 99.0, 99.0], dtype=float),
+    )
+
+    expected = {
+        "civ": ("C IV", "log_lambda_Llambda_1350_agn", 45.1, 0.01),
+        "mgii": ("Mg II", "log_lambda_Llambda_3000_agn", 46.2, 0.06),
+        "hb": ("Hβ", "log_lambda_Llambda_5100_agn", 47.3, 0.11),
+        "ha": ("Hα", "log_lambda_Llambda_5100_agn", 47.4, 0.12),
+    }
+
+    assert len(out) == 4
+    for row in out.itertuples():
+        line_name, lum_col, log_lum, log_lum_err = expected[row.object_id]
+        assert row.assigned_line == line_name
+        assert row.line_luminosity_col == lum_col
+        assert np.isclose(row.log_line_luminosity, log_lum)
+        assert np.isclose(row.log_line_luminosity_err, log_lum_err)
+
+
 def test_build_single_object_model_disables_second_blr_term_by_default():
     obj = _make_fake_public_object()
     lc = make_lc(
