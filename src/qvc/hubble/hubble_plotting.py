@@ -72,6 +72,8 @@ _BAND_COLORS = {
     "z": "tab:purple",
 }
 
+_BLR_LAG_KL_MIN = 0.05
+
 
 def _pdf_path(path):
     """Normalize any requested output path to a PDF path."""
@@ -90,6 +92,72 @@ def _save_figure(fig, path, *, dpi=300, bbox_inches="tight", show=False):
         plt.show()
     plt.close(fig)
     return pdf_path
+
+
+def _nanmedian_stacked(rows):
+    """Return row-wise nanmedian for a sequence of equal-length arrays."""
+
+    if not rows:
+        return None
+    stacked = np.vstack(rows)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=RuntimeWarning)
+        return np.nanmedian(stacked, axis=0)
+
+
+def _derive_log_sigma_bc(df_agn):
+    """Infer a scalar log sigma_BC from the saved light-curve summary columns."""
+
+    if "log_sigma_bc" in df_agn.columns:
+        return pd.to_numeric(df_agn["log_sigma_bc"], errors="coerce").to_numpy(dtype=float)
+
+    if {"log_sigma_uv", "log_amp_delta_bc"}.issubset(df_agn.columns):
+        log_sigma_uv = pd.to_numeric(df_agn["log_sigma_uv"], errors="coerce").to_numpy(dtype=float)
+        log_amp_delta_bc = pd.to_numeric(df_agn["log_amp_delta_bc"], errors="coerce").to_numpy(dtype=float)
+        return log_sigma_uv + log_amp_delta_bc
+
+    rows = []
+    for band in ("u", "g", "r", "i", "z"):
+        amp_col = f"amp_bc_{band}"
+        weight_col = f"bc_weight_{band}"
+        if amp_col not in df_agn.columns or weight_col not in df_agn.columns:
+            continue
+        amp_bc = pd.to_numeric(df_agn[amp_col], errors="coerce").to_numpy(dtype=float)
+        bc_weight = pd.to_numeric(df_agn[weight_col], errors="coerce").to_numpy(dtype=float)
+        log_sigma_bc = np.full(len(df_agn), np.nan, dtype=float)
+        mask = np.isfinite(amp_bc) & np.isfinite(bc_weight) & (amp_bc > 0.0) & (bc_weight > 0.0)
+        log_sigma_bc[mask] = np.log10(amp_bc[mask]) - np.log10(bc_weight[mask])
+        rows.append(log_sigma_bc)
+    return _nanmedian_stacked(rows)
+
+
+def _derive_log_lag_bc_rf(df_agn):
+    """Infer a scalar rest-frame BC lag from saved per-band BC lag columns."""
+
+    rows_rf = []
+    for band in ("u", "g", "r", "i", "z"):
+        col = f"log_lag_bc_{band}_RF"
+        if col in df_agn.columns:
+            rows_rf.append(pd.to_numeric(df_agn[col], errors="coerce").to_numpy(dtype=float))
+    aggregated_rf = _nanmedian_stacked(rows_rf)
+    if aggregated_rf is not None:
+        return aggregated_rf
+
+    if "z" not in df_agn.columns:
+        return None
+
+    z = pd.to_numeric(df_agn["z"], errors="coerce").to_numpy(dtype=float)
+    rows_obs = []
+    for band in ("u", "g", "r", "i", "z"):
+        col = f"lag_bc_{band}"
+        if col not in df_agn.columns:
+            continue
+        lag_bc = pd.to_numeric(df_agn[col], errors="coerce").to_numpy(dtype=float)
+        log_lag_rf = np.full(len(df_agn), np.nan, dtype=float)
+        mask = np.isfinite(lag_bc) & (lag_bc > 0.0) & np.isfinite(z) & (z > -1.0)
+        log_lag_rf[mask] = np.log10(lag_bc[mask]) - np.log10(1.0 + z[mask])
+        rows_obs.append(log_lag_rf)
+    return _nanmedian_stacked(rows_obs)
 
 
 def _get_cosmo_from_params(model_name, params_dict, zp):
@@ -186,6 +254,12 @@ def _blr_line_assignment_longform(
                 if lag_err_col in df.columns
                 else np.full(len(df), np.nan, dtype=float)
             )
+            lag_kl_col = f"log_lag_blr{suffix}_{band}_kl"
+            lag_kl = (
+                pd.to_numeric(df[lag_kl_col], errors="coerce").to_numpy(dtype=float)
+                if lag_kl_col in df.columns
+                else np.full(len(df), np.nan, dtype=float)
+            )
             z = pd.to_numeric(df["z"], errors="coerce").to_numpy(dtype=float)
             object_ids = df["object_id"].astype(str).to_numpy() if "object_id" in df.columns else np.arange(len(df)).astype(str)
             dropped_sets = (
@@ -229,6 +303,7 @@ def _blr_line_assignment_longform(
                         "log_amp_blr": log_amp_blr[i],
                         "log_lag_rf": log_lag_rf[i],
                         "log_lag_rf_err": lag_err[i],
+                        "log_lag_kl": lag_kl[i],
                         "well_constrained": bool(np.isfinite(lag_err[i]) and lag_err[i] <= lag_err_max),
                         "assigned_line": assigned_line,
                         "assigned_prob": assigned_prob,
@@ -439,6 +514,7 @@ def plot_blr_line_lags_vs_l2500_fiducial(
     show=False,
     prob_thresh=0.6,
     lag_err_max=0.25,
+    lag_kl_min=_BLR_LAG_KL_MIN,
     cosmo=None,
     filename="blr_line_lags_vs_l2500_fiducial.pdf",
     assignment_probabilities_filename="blr_line_assignment_probabilities_fiducial.pdf",
@@ -481,6 +557,11 @@ def plot_blr_line_lags_vs_l2500_fiducial(
     )
 
     keep = assignments["assigned_prob"] >= prob_thresh
+    keep &= assignments["well_constrained"].to_numpy(dtype=bool)
+    keep &= pd.to_numeric(assignments["log_lag_rf"], errors="coerce").to_numpy(dtype=float) > 0.0
+    lag_kl = pd.to_numeric(assignments.get("log_lag_kl"), errors="coerce").to_numpy(dtype=float)
+    if np.any(np.isfinite(lag_kl)):
+        keep &= np.isfinite(lag_kl) & (lag_kl >= lag_kl_min)
     selected = assignments.loc[keep].copy()
     selected.to_csv(
         os.path.join(diagnostics_path, "blr_line_assignment_selected_fiducial.csv"),
@@ -497,7 +578,7 @@ def plot_blr_line_lags_vs_l2500_fiducial(
             ax.text(
                 0.5,
                 0.5,
-                f"No assignments with p>{prob_thresh:.1f}",
+                "No assignments after filters",
                 ha="center",
                 va="center",
                 transform=ax.transAxes,
@@ -6225,6 +6306,269 @@ def plot_spectral_fraction_vs_redshift(
 
     diagnostics_path = os.path.join(plot_path or "plots/hubble", "diagnostics")
     os.makedirs(diagnostics_path, exist_ok=True)
+    return _save_figure(
+        fig,
+        os.path.join(diagnostics_path, filename),
+        dpi=200,
+        show=show,
+    )
+
+
+def plot_sigma_bc_vs_redshift(
+    df_agn,
+    plot_path="plots/hubble",
+    show=False,
+    nbins=12,
+    min_bin_count=20,
+    filename="sigma_bc_vs_redshift.pdf",
+):
+    """Plot inferred BC variability amplitude against redshift."""
+
+    if "z" not in df_agn.columns:
+        raise KeyError("Missing required 'z' column for sigma_BC vs redshift plot.")
+
+    log_sigma_bc = _derive_log_sigma_bc(df_agn)
+    if log_sigma_bc is None:
+        raise KeyError(
+            "Missing required BC amplitude columns: need "
+            "'log_sigma_uv'+'log_amp_delta_bc' or per-band 'amp_bc_<band>' with 'bc_weight_<band>'."
+        )
+
+    z = pd.to_numeric(df_agn["z"], errors="coerce").to_numpy(dtype=float)
+    mask = np.isfinite(z) & np.isfinite(log_sigma_bc)
+
+    fig, ax = plt.subplots(1, 1, figsize=(7.2, 5.4))
+    if np.any(mask):
+        z_use = z[mask]
+        y_use = log_sigma_bc[mask]
+        ax.scatter(
+            z_use,
+            y_use,
+            s=10,
+            alpha=0.25,
+            color="k",
+            linewidths=0,
+            rasterized=True,
+        )
+
+        if np.nanmax(z_use) > np.nanmin(z_use):
+            edges = np.linspace(np.nanmin(z_use), np.nanmax(z_use), nbins + 1)
+            xmid = []
+            ymed = []
+            ylo = []
+            yhi = []
+            for i in range(len(edges) - 1):
+                lo = edges[i]
+                hi = edges[i + 1]
+                keep = (z_use >= lo) & (z_use < hi)
+                if i == len(edges) - 2:
+                    keep = (z_use >= lo) & (z_use <= hi)
+                if np.count_nonzero(keep) < min_bin_count:
+                    continue
+                y_bin = y_use[keep]
+                xmid.append(np.nanmedian(z_use[keep]))
+                ymed.append(np.nanmedian(y_bin))
+                ylo.append(np.nanpercentile(y_bin, 16))
+                yhi.append(np.nanpercentile(y_bin, 84))
+            if xmid:
+                xmid = np.asarray(xmid, dtype=float)
+                ymed = np.asarray(ymed, dtype=float)
+                ylo = np.asarray(ylo, dtype=float)
+                yhi = np.asarray(yhi, dtype=float)
+                ax.fill_between(xmid, ylo, yhi, color="tab:blue", alpha=0.18, linewidth=0)
+                ax.plot(xmid, ymed, color="tab:blue", lw=2.0)
+    else:
+        ax.text(0.5, 0.5, "No finite BC-amplitude values", ha="center", va="center", transform=ax.transAxes)
+
+    ax.set_xlabel("Redshift z")
+    ax.set_ylabel(r"$\log \sigma_{\rm BC}$")
+    ax.grid(True, alpha=0.2)
+
+    diagnostics_path = os.path.join(plot_path or "plots/hubble", "diagnostics")
+    return _save_figure(
+        fig,
+        os.path.join(diagnostics_path, filename),
+        dpi=200,
+        show=show,
+    )
+
+
+def plot_sigma_bc_vs_frac_bc(
+    df_agn,
+    plot_path="plots/hubble",
+    show=False,
+    nbins=12,
+    min_bin_count=20,
+    filename="sigma_bc_vs_frac_bc.pdf",
+):
+    """Plot inferred BC variability amplitude against the spectral BC fraction."""
+
+    if "f_bc_over_pl_3000" not in df_agn.columns:
+        raise KeyError("Missing required 'f_bc_over_pl_3000' column for sigma_BC vs f_BC plot.")
+
+    log_sigma_bc = _derive_log_sigma_bc(df_agn)
+    if log_sigma_bc is None:
+        raise KeyError(
+            "Missing required BC amplitude columns: need "
+            "'log_sigma_uv'+'log_amp_delta_bc' or per-band 'amp_bc_<band>' with 'bc_weight_<band>'."
+        )
+
+    f_bc = pd.to_numeric(df_agn["f_bc_over_pl_3000"], errors="coerce").to_numpy(dtype=float)
+    z = (
+        pd.to_numeric(df_agn["z"], errors="coerce").to_numpy(dtype=float)
+        if "z" in df_agn.columns
+        else np.full(len(df_agn), np.nan, dtype=float)
+    )
+    mask = np.isfinite(f_bc) & (f_bc > 0.0) & np.isfinite(log_sigma_bc)
+
+    fig, ax = plt.subplots(1, 1, figsize=(7.2, 5.4))
+    if np.any(mask):
+        x = np.log10(f_bc[mask])
+        y = log_sigma_bc[mask]
+        z_use = z[mask]
+
+        use_color = np.all(np.isfinite(z_use))
+        sc = ax.scatter(
+            x,
+            y,
+            c=z_use if use_color else "0.3",
+            cmap="viridis" if use_color else None,
+            s=12,
+            alpha=0.65,
+            linewidths=0,
+            rasterized=True,
+        )
+        if use_color:
+            cbar = fig.colorbar(sc, ax=ax)
+            cbar.set_label("Redshift z")
+
+        if np.nanmax(x) > np.nanmin(x):
+            edges = np.linspace(np.nanmin(x), np.nanmax(x), nbins + 1)
+            xmid = []
+            ymed = []
+            ylo = []
+            yhi = []
+            for i in range(len(edges) - 1):
+                lo = edges[i]
+                hi = edges[i + 1]
+                keep = (x >= lo) & (x < hi)
+                if i == len(edges) - 2:
+                    keep = (x >= lo) & (x <= hi)
+                if np.count_nonzero(keep) < min_bin_count:
+                    continue
+                y_bin = y[keep]
+                xmid.append(np.nanmedian(x[keep]))
+                ymed.append(np.nanmedian(y_bin))
+                ylo.append(np.nanpercentile(y_bin, 16))
+                yhi.append(np.nanpercentile(y_bin, 84))
+            if xmid:
+                xmid = np.asarray(xmid, dtype=float)
+                ymed = np.asarray(ymed, dtype=float)
+                ylo = np.asarray(ylo, dtype=float)
+                yhi = np.asarray(yhi, dtype=float)
+                ax.fill_between(xmid, ylo, yhi, color="tab:blue", alpha=0.18, linewidth=0)
+                ax.plot(xmid, ymed, color="tab:blue", lw=2.0)
+    else:
+        ax.text(0.5, 0.5, "No finite positive BC-amplitude / f_BC values", ha="center", va="center", transform=ax.transAxes)
+
+    ax.set_xlabel(r"$\log f_{\rm BC}$")
+    ax.set_ylabel(r"$\log \sigma_{\rm BC}$")
+    ax.grid(True, alpha=0.2)
+
+    diagnostics_path = os.path.join(plot_path or "plots/hubble", "diagnostics")
+    return _save_figure(
+        fig,
+        os.path.join(diagnostics_path, filename),
+        dpi=200,
+        show=show,
+    )
+
+
+def plot_bc_lag_vs_l2500(
+    df_agn,
+    plot_path="plots/hubble",
+    show=False,
+    nbins=12,
+    min_bin_count=20,
+    filename="bc_lag_vs_l2500.pdf",
+):
+    """Plot inferred rest-frame BC lag against fiducial 2500 A luminosity."""
+
+    required = {"z", "apparent_mag_2500"}
+    if not required.issubset(df_agn.columns):
+        missing = ", ".join(sorted(required - set(df_agn.columns)))
+        raise KeyError(f"Missing required columns for BC lag vs L2500 plot: {missing}")
+
+    log_lag_bc_rf = _derive_log_lag_bc_rf(df_agn)
+    if log_lag_bc_rf is None:
+        raise KeyError("Missing required BC lag columns: need 'log_lag_bc_<band>_RF' or 'lag_bc_<band>'.")
+
+    z = pd.to_numeric(df_agn["z"], errors="coerce").to_numpy(dtype=float)
+    m2500 = pd.to_numeric(df_agn["apparent_mag_2500"], errors="coerce").to_numpy(dtype=float)
+    cosmo = FlatLambdaCDM(H0=70.0, Om0=0.3)
+    logL2500 = np.full(len(df_agn), np.nan, dtype=float)
+    mask_lum = np.isfinite(z) & np.isfinite(m2500) & (z > 0.0)
+    if np.any(mask_lum):
+        M2500 = m2500[mask_lum] - cosmo.distmod(z[mask_lum]).value
+        logL2500[mask_lum] = convert_M2500_to_logL2500(M2500)
+
+    mask = np.isfinite(logL2500) & np.isfinite(log_lag_bc_rf)
+
+    fig, ax = plt.subplots(1, 1, figsize=(7.2, 5.4))
+    if np.any(mask):
+        x = logL2500[mask]
+        y = log_lag_bc_rf[mask]
+        z_use = z[mask]
+
+        use_color = np.all(np.isfinite(z_use))
+        sc = ax.scatter(
+            x,
+            y,
+            c=z_use if use_color else "0.3",
+            cmap="viridis" if use_color else None,
+            s=12,
+            alpha=0.65,
+            linewidths=0,
+            rasterized=True,
+        )
+        if use_color:
+            cbar = fig.colorbar(sc, ax=ax)
+            cbar.set_label("Redshift z")
+
+        if np.nanmax(x) > np.nanmin(x):
+            edges = np.linspace(np.nanmin(x), np.nanmax(x), nbins + 1)
+            xmid = []
+            ymed = []
+            ylo = []
+            yhi = []
+            for i in range(len(edges) - 1):
+                lo = edges[i]
+                hi = edges[i + 1]
+                keep = (x >= lo) & (x < hi)
+                if i == len(edges) - 2:
+                    keep = (x >= lo) & (x <= hi)
+                if np.count_nonzero(keep) < min_bin_count:
+                    continue
+                y_bin = y[keep]
+                xmid.append(np.nanmedian(x[keep]))
+                ymed.append(np.nanmedian(y_bin))
+                ylo.append(np.nanpercentile(y_bin, 16))
+                yhi.append(np.nanpercentile(y_bin, 84))
+            if xmid:
+                xmid = np.asarray(xmid, dtype=float)
+                ymed = np.asarray(ymed, dtype=float)
+                ylo = np.asarray(ylo, dtype=float)
+                yhi = np.asarray(yhi, dtype=float)
+                ax.fill_between(xmid, ylo, yhi, color="tab:blue", alpha=0.18, linewidth=0)
+                ax.plot(xmid, ymed, color="tab:blue", lw=2.0)
+    else:
+        ax.text(0.5, 0.5, "No finite BC-lag/L2500 values", ha="center", va="center", transform=ax.transAxes)
+
+    ax.set_xlabel(r"$\log L_{2500}$")
+    ax.set_ylabel(r"$\log \tau_{\rm BC,RF}$")
+    ax.grid(True, alpha=0.2)
+
+    diagnostics_path = os.path.join(plot_path or "plots/hubble", "diagnostics")
     return _save_figure(
         fig,
         os.path.join(diagnostics_path, filename),

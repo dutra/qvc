@@ -104,6 +104,28 @@ def validate_completeness_mode(completeness_mode):
         )
 
 
+def subsample_dataframe_at_most(df, n, *, random_state=42, label="rows"):
+    """Return at most ``n`` rows without crashing when ``n`` exceeds the population."""
+
+    if n is None:
+        return df, None
+
+    n = int(n)
+    if n < 0:
+        raise ValueError(f"Requested sample size must be non-negative, got {n}.")
+
+    available = len(df)
+    if n >= available:
+        if n > available:
+            print(
+                f"Requested N={n} but only {available} {label} are available after cuts; "
+                f"using all {available}."
+            )
+        return df, available
+
+    return df.sample(n=n, random_state=random_state), n
+
+
 def prior_transform_dynesty(unit_cube, priors, model_labels):
     return [priors[key][0] + (priors[key][1] - priors[key][0]) * x
             for x, key in zip(unit_cube, model_labels)]
@@ -1012,8 +1034,12 @@ if __name__ == "__main__":
                            reddening_ebv_cut=args.reddening_ebv_cut,
                            correct_sigma_uv_host=args.correct_sigma_uv_host,
                            z_range=tuple(args.z_range), plot_path=agn_plot_path)
-    if args.N is not None:
-        df_agn = df_agn.sample(n=args.N, random_state=42)
+    df_agn, effective_N = subsample_dataframe_at_most(
+        df_agn,
+        args.N,
+        random_state=42,
+        label="AGN objects",
+    )
     if args.agn_calibrators:
         if args.agn_calibrators.endswith('.h5'):
             df_calibrators = read_quasars_from_hdf5_flat(args.agn_calibrators)
@@ -1049,7 +1075,7 @@ if __name__ == "__main__":
                 completeness_sim_file=args.completeness_sim_file,
                 completeness_mode=args.completeness_mode,
                 only_sna=args.only_sna,
-                N=args.N,
+                N=effective_N,
                 uniform_redshift_distribution=args.uniform_redshift_distribution,
                 use_alpha_lambda_term=args.fit_alpha_lambda_term,
                 use_redshift_log_f_term=args.fit_redshift_log_f_term,
@@ -1060,7 +1086,7 @@ if __name__ == "__main__":
             r = run_single(df_agn=df_agn, df_agn_all=df_agn_all, df_pantheon=df_pantheon, _sna_L=_sna_L, _sna_Lower=_sna_Lower, _sna_LogdetCov=_sna_LogdetCov, 
                            cosmo_model=cosmo_model,
                 completeness=not args.disable_completeness, use_full_cov=not args.disable_full_covariance, resume=args.resume, z_range=args.z_range,
-                speed=args.speed, N=args.N, only_sna=args.only_sna,
+                speed=args.speed, N=effective_N, only_sna=args.only_sna,
                 skip_plots=args.skip_plots, residuals_sigma_clip=args.residuals_sigma_clip,
                 df_calibrators=df_calibrators,
                 prefix=args.prefix,
@@ -1074,7 +1100,7 @@ if __name__ == "__main__":
             cosmo_models_dict[cosmo_model]['age'] = age
             cosmo_models_dict[cosmo_model]['age_err'] = age_err
         zmin, zmax = args.z_range
-        n_tag = "all" if args.N is None else f"N{args.N}"
+        n_tag = "all" if effective_N is None else f"N{effective_N}"
         z_tag = f"z{zmin:.2f}_{zmax:.2f}".replace(".", "p")
         compare_path = f"plots/hubble/{args.prefix}/single_compare_{args.speed}_{n_tag}_{z_tag}"
         os.makedirs(compare_path, exist_ok=True)
@@ -1094,7 +1120,7 @@ if __name__ == "__main__":
                 cosmo_models=args.cosmo_models, skip_plots=args.skip_plots,
                 residuals_sigma_clip=args.residuals_sigma_clip,
                 z_range=args.z_range,
-                speed=args.speed, resume=args.resume, N=args.N,
+                speed=args.speed, resume=args.resume, N=effective_N,
                 prefix=args.prefix, result_prefix=args.result_prefix, uniform_redshift_distribution=args.uniform_redshift_distribution,
                 completeness_sim_file=args.completeness_sim_file,
                 completeness_mode=args.completeness_mode,

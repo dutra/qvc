@@ -243,3 +243,12 @@ def test_resolve_resume_checkpoint_path_treats_true_like_default_checkpoint(tmp_
 
     with pytest.raises(FileNotFoundError, match=default_checkpoint.name):
         hubble_fit.resolve_resume_checkpoint_path(resume_value, str(default_checkpoint))
+
+
+def test_subsample_dataframe_at_most_clamps_oversized_requests_without_reordering():
+    df = pd.DataFrame({"object_id": ["a", "b", "c"], "value": [1, 2, 3]})
+
+    sampled, effective_n = hubble_fit.subsample_dataframe_at_most(df, 10, random_state=42, label="AGN objects")
+
+    assert effective_n == 3
+    assert sampled.equals(df)

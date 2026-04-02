@@ -226,6 +226,77 @@ def test_plot_spectral_fraction_vs_redshift_writes_pdf(tmp_path, monkeypatch):
     assert out.endswith("spectral_fraction_vs_redshift.pdf")
 
 
+def test_plot_sigma_bc_vs_redshift_writes_pdf(tmp_path, monkeypatch):
+    monkeypatch.setenv("MPLCONFIGDIR", str(tmp_path / "mplconfig"))
+
+    df = pd.DataFrame(
+        {
+            "z": np.linspace(0.4, 2.4, 24),
+            "log_sigma_uv": np.linspace(-1.0, -0.3, 24),
+            "log_amp_delta_bc": np.linspace(-0.5, -0.2, 24),
+        }
+    )
+
+    out = hubble_plotting.plot_sigma_bc_vs_redshift(
+        df,
+        plot_path=str(tmp_path / "figures"),
+        show=False,
+        filename="sigma_bc_vs_redshift_postcut.pdf",
+    )
+
+    assert out is not None
+    assert os.path.exists(out)
+    assert out.endswith("sigma_bc_vs_redshift_postcut.pdf")
+
+
+def test_plot_sigma_bc_vs_frac_bc_writes_pdf(tmp_path, monkeypatch):
+    monkeypatch.setenv("MPLCONFIGDIR", str(tmp_path / "mplconfig"))
+
+    df = pd.DataFrame(
+        {
+            "z": np.linspace(0.4, 2.4, 24),
+            "f_bc_over_pl_3000": np.linspace(0.05, 0.35, 24),
+            "log_sigma_uv": np.linspace(-1.0, -0.3, 24),
+            "log_amp_delta_bc": np.linspace(-0.5, -0.2, 24),
+        }
+    )
+
+    out = hubble_plotting.plot_sigma_bc_vs_frac_bc(
+        df,
+        plot_path=str(tmp_path / "figures"),
+        show=False,
+        filename="sigma_bc_vs_frac_bc_postcut.pdf",
+    )
+
+    assert out is not None
+    assert os.path.exists(out)
+    assert out.endswith("sigma_bc_vs_frac_bc_postcut.pdf")
+
+
+def test_plot_bc_lag_vs_l2500_writes_pdf(tmp_path, monkeypatch):
+    monkeypatch.setenv("MPLCONFIGDIR", str(tmp_path / "mplconfig"))
+
+    df = pd.DataFrame(
+        {
+            "z": np.linspace(0.5, 2.0, 24),
+            "apparent_mag_2500": np.linspace(20.0, 22.5, 24),
+            "log_lag_bc_g_RF": np.linspace(0.8, 1.2, 24),
+            "log_lag_bc_r_RF": np.linspace(0.82, 1.18, 24),
+        }
+    )
+
+    out = hubble_plotting.plot_bc_lag_vs_l2500(
+        df,
+        plot_path=str(tmp_path / "figures"),
+        show=False,
+        filename="bc_lag_vs_l2500_postcut.pdf",
+    )
+
+    assert out is not None
+    assert os.path.exists(out)
+    assert out.endswith("bc_lag_vs_l2500_postcut.pdf")
+
+
 def test_plot_blr_line_lags_vs_l2500_fiducial_writes_pdf(tmp_path, monkeypatch):
     monkeypatch.setenv("MPLCONFIGDIR", str(tmp_path / "mplconfig"))
 
@@ -252,6 +323,39 @@ def test_plot_blr_line_lags_vs_l2500_fiducial_writes_pdf(tmp_path, monkeypatch):
     assert out is not None
     assert os.path.exists(out)
     assert out.endswith("blr_line_lags_vs_l2500_fiducial.pdf")
+
+
+def test_plot_blr_line_lags_vs_l2500_fiducial_filters_negative_and_prior_like_lags(tmp_path, monkeypatch):
+    monkeypatch.setenv("MPLCONFIGDIR", str(tmp_path / "mplconfig"))
+
+    plot_path = str(tmp_path / "figures")
+    df = pd.DataFrame(
+        {
+            "object_id": ["keep", "neg", "prior"],
+            "z": [1.2, 1.2, 1.2],
+            "apparent_mag_2500": [20.5, 20.2, 20.1],
+            "log_sigma_uv": [-0.7, -0.8, -0.9],
+            "dropped_bands": [[], [], []],
+            "log_amp_delta_blr_g": [0.0, 0.0, 0.0],
+            "log_lag_blr_g_RF": [1.15, -0.10, 1.20],
+            "log_lag_blr_g_RF_err": [0.1, 0.1, 0.1],
+            "log_lag_blr_g_kl": [0.20, 0.20, 0.01],
+        }
+    )
+
+    out = hubble_plotting.plot_blr_line_lags_vs_l2500_fiducial(
+        df,
+        plot_path=plot_path,
+        show=False,
+        prob_thresh=0.0,
+    )
+
+    selected_csv = os.path.join(plot_path, "diagnostics", "blr_line_assignment_selected_fiducial.csv")
+    selected = pd.read_csv(selected_csv)
+
+    assert out is not None
+    assert os.path.exists(out)
+    assert selected["object_id"].tolist() == ["keep"]
 
 
 def test_plot_l2500_vs_uv_variability_fiducial_writes_pdf(tmp_path, monkeypatch):
@@ -466,6 +570,7 @@ def test_end_to_end(tmp_path, monkeypatch):
         "plot_adf_pvalue_g_diagnostic",
         "plot_alpha_lambda_histogram",
         "plot_blr_lag_vs_amp_by_band",
+        "plot_bc_lag_vs_l2500",
         "plot_blr_line_lags_vs_l2500_fiducial",
         "plot_blr_lag_vs_redshift_by_band",
         "plot_f_host_center_vs_l2500",
@@ -475,6 +580,8 @@ def test_end_to_end(tmp_path, monkeypatch):
         "plot_m2500_vs_z_colorpanels",
         "plot_sf_ref_band_vs_model_g",
         "plot_sf_vs_uv_variability",
+        "plot_sigma_bc_vs_frac_bc",
+        "plot_sigma_bc_vs_redshift",
         "plot_sigma_uv_host_correction",
         "plot_tau_sigma_vs_wu_catalog",
         "plot_tau_sigma_vs_redshift",
