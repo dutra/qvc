@@ -4,8 +4,6 @@ from astropy.cosmology import FlatwCDM, Flatw0waCDM, FlatLambdaCDM, FlatwpwaCDM
 from scipy import stats
 import numpy as np
 
-from numpy import trapezoid as trapz
-
 #from qvc.hubble.hubble_utils import loglike_cmb_theta_simple
 from qvc.hubble.hubble_model import (
     get_model_params,
@@ -67,11 +65,11 @@ def completeness_loglike(
     pdf_model = stats.norm.pdf(m_grid[None, :], loc=m_model[:, None], scale=sig)  # (N,G)
     wpdf_model = pdf_model * p_det
 
-    Z = trapz(wpdf_model, m_grid, axis=1)                            # (N,)
+    Z = np.trapezoid(wpdf_model, m_grid, axis=1)                            # (N,)
     Z = np.clip(Z, tiny, None)                                          # guard denom
 
     # Debias for plotting (the scatter is mostly in M, not Malmquist)
-    m_Z = trapz(wpdf_model * m_grid[None, :], m_grid, axis=1)
+    m_Z = np.trapezoid(wpdf_model * m_grid[None, :], m_grid, axis=1)
     # If the selection integral is effectively zero, the conditional
     # expectation is undefined. In that case keep the debias correction at
     # zero instead of manufacturing huge magnitude shifts from tiny/tiny.

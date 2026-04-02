@@ -215,9 +215,9 @@ def test_compute_derived_results_saves_narrow_line_to_continuum_integrated_fract
     args = SimpleNamespace(decompose_host=True)
     fit_spectra.compute_derived_results(result, q, args)
 
-    na_int = np.trapz(q.pred_out["line_model_narrow"], q.wave, axis=1)
-    br_int = np.trapz(q.pred_out["line_model_broad"], q.wave, axis=1)
-    cont_int = np.trapz(q.pred_out["continuum_model"], q.wave, axis=1)
+    na_int = np.trapezoid(q.pred_out["line_model_narrow"], q.wave, axis=1)
+    br_int = np.trapezoid(q.pred_out["line_model_broad"], q.wave, axis=1)
+    cont_int = np.trapezoid(q.pred_out["continuum_model"], q.wave, axis=1)
     na_ratio_draws = na_int / cont_int
     br_ratio_draws = br_int / cont_int
     na_p16, na_p50, na_p84 = np.percentile(na_ratio_draws, [16, 50, 84])
@@ -285,9 +285,9 @@ def test_compute_derived_results_saves_narrow_line_fraction_without_host_decompo
     args = SimpleNamespace(decompose_host=False)
     fit_spectra.compute_derived_results(result, q, args)
 
-    na_int = np.trapz(q.pred_out["line_model_narrow"], q.wave, axis=1)
-    br_int = np.trapz(q.pred_out["line_model_broad"], q.wave, axis=1)
-    cont_int = np.trapz(q.pred_out["continuum_model"], q.wave, axis=1)
+    na_int = np.trapezoid(q.pred_out["line_model_narrow"], q.wave, axis=1)
+    br_int = np.trapezoid(q.pred_out["line_model_broad"], q.wave, axis=1)
+    cont_int = np.trapezoid(q.pred_out["continuum_model"], q.wave, axis=1)
     na_ratio_draws = na_int / cont_int
     br_ratio_draws = br_int / cont_int
     na_p16, na_p50, na_p84 = np.percentile(na_ratio_draws, [16, 50, 84])

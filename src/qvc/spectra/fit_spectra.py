@@ -342,8 +342,8 @@ def posterior_component_integrated_fraction(q, numerator_key, denominator_key, *
         numerator = np.where(np.isfinite(numerator), np.maximum(numerator, 0.0), np.nan)
         denominator = np.where(np.isfinite(denominator), np.maximum(denominator, 0.0), np.nan)
 
-    numerator_int = np.trapz(numerator, wave, axis=1)
-    denominator_int = np.trapz(denominator, wave, axis=1)
+    numerator_int = np.trapezoid(numerator, wave, axis=1)
+    denominator_int = np.trapezoid(denominator, wave, axis=1)
     frac = np.divide(
         numerator_int,
         denominator_int,

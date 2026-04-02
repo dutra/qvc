@@ -201,7 +201,7 @@ def test_plot_g_band_drift_slope_histograms_writes_pdfs(tmp_path, monkeypatch):
     assert out_var.endswith("g_band_var_slope_histograms_postcut_z0p8to1p2.pdf")
 
 
-def test_plot_spectral_fraction_vs_redshift_writes_pdf_with_f_host_center(tmp_path, monkeypatch):
+def test_plot_spectral_fraction_vs_redshift_requires_f_host_2500(tmp_path, monkeypatch):
     monkeypatch.setenv("MPLCONFIGDIR", str(tmp_path / "mplconfig"))
 
     df = pd.DataFrame(
@@ -219,12 +219,10 @@ def test_plot_spectral_fraction_vs_redshift_writes_pdf_with_f_host_center(tmp_pa
         plot_path=str(tmp_path / "figures"),
         show=False,
         nbins=6,
-        min_bin_count=3,
+            min_bin_count=3,
     )
 
-    assert out is not None
-    assert os.path.exists(out)
-    assert out.endswith("spectral_fraction_vs_redshift.pdf")
+    assert out is None
 
 
 def test_plot_spectral_fraction_vs_redshift_writes_pdf_with_f_host_2500_only(tmp_path, monkeypatch):
