@@ -411,6 +411,8 @@ def populate_spectra_fit(df, spectra_fit_csvs, best=True):
         'lam_rf_max': float,
         'f_fe_uv_3000': float,
         'f_bc_3000': float,
+        'f_na': float,
+        'f_na_err': float,
         'f_host_center': float,
         'f_host_center_err': float,
         'wrms': float,
@@ -450,6 +452,14 @@ def populate_spectra_fit(df, spectra_fit_csvs, best=True):
         # Normalize headers and ensure the merge key is present.
         df_spectra.columns = [_norm_name(c) for c in df_spectra.columns]
         df_spectra = _ensure_object_id(df_spectra)
+        required_fraction_cols = {"f_bc_3000", "f_fe_uv_3000"}
+        missing_fraction_cols = sorted(required_fraction_cols.difference(df_spectra.columns))
+        if missing_fraction_cols:
+            raise ValueError(
+                f"Spectra fit CSV '{csv_path}' is missing required columns {missing_fraction_cols}. "
+                "This pipeline now expects the new total-continuum fraction schema from fit_spectra "
+                "(`f_bc_3000` and `f_fe_uv_3000`). Regenerate the spectra-fit CSV with the current code."
+            )
 
 
         if best:

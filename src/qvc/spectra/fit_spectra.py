@@ -313,6 +313,51 @@ def posterior_component_fraction_at_wave(q, numerator_key, denominator_key, wave
     return safe_float(median), safe_float(err)
 
 
+def posterior_component_integrated_fraction(q, numerator_key, denominator_key, *, positive_only=True):
+    """Return posterior median/error for a ratio of integrated model components."""
+    wave = np.asarray(getattr(q, "wave", []), dtype=float)
+    if wave.ndim != 1 or wave.size < 2 or not np.all(np.isfinite(wave)):
+        return np.nan, np.nan
+
+    pred_out = getattr(q, "pred_out", None)
+    if not isinstance(pred_out, dict):
+        return np.nan, np.nan
+
+    numerator = pred_out.get(numerator_key)
+    denominator = pred_out.get(denominator_key)
+    if numerator is None or denominator is None:
+        return np.nan, np.nan
+
+    numerator = np.asarray(numerator, dtype=float)
+    denominator = np.asarray(denominator, dtype=float)
+    if numerator.ndim == 1:
+        numerator = numerator[None, :]
+    if denominator.ndim == 1:
+        denominator = denominator[None, :]
+
+    if numerator.shape != denominator.shape or numerator.shape[-1] != wave.size:
+        return np.nan, np.nan
+
+    if positive_only:
+        numerator = np.where(np.isfinite(numerator), np.maximum(numerator, 0.0), np.nan)
+        denominator = np.where(np.isfinite(denominator), np.maximum(denominator, 0.0), np.nan)
+
+    numerator_int = np.trapz(numerator, wave, axis=1)
+    denominator_int = np.trapz(denominator, wave, axis=1)
+    frac = np.divide(
+        numerator_int,
+        denominator_int,
+        out=np.full(numerator_int.shape, np.nan, dtype=float),
+        where=np.isfinite(numerator_int) & np.isfinite(denominator_int) & (denominator_int > 0.0),
+    )
+    good = np.isfinite(frac)
+    if not np.any(good):
+        return np.nan, np.nan
+
+    median, err, _, _ = sym_percentile(frac[good])
+    return safe_float(median), safe_float(err)
+
+
 def reconstructed_component_fraction_at_wave(
     q,
     component_key,
@@ -491,11 +536,22 @@ def compute_derived_results(result, q, args):
         m50, m_err = estimate_host_center_fraction(q)
         result["f_host_center"] = safe_float(m50)
         result["f_host_center_err"] = safe_float(m_err)
+
+        m50, m_err = posterior_component_integrated_fraction(
+            q,
+            numerator_key="line_model_narrow",
+            denominator_key="gal_model",
+            positive_only=True,
+        )
+        result["f_na"] = safe_float(m50)
+        result["f_na_err"] = safe_float(m_err)
     else:
         result["f_host_2500"] = 0.0
         result["f_host_2500_err"] = 0.0
         result["f_host_center"] = 0.0
         result["f_host_center_err"] = 0.0
+        result["f_na"] = np.nan
+        result["f_na_err"] = np.nan
 
     # BC fraction, defined against the total continuum at 3000 A.
     m50, m_err = posterior_component_fraction_at_wave(
