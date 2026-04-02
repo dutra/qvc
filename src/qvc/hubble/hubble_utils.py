@@ -37,7 +37,7 @@ from qvc.hubble.hubble_model import (
     agn_model_pack_obs,
     agn_model_pack_params,
     get_model_params,
-    infer_model_option_flags,
+    resolve_model_option_flags,
     infer_use_alpha_lambda_term,
 )
 
@@ -471,7 +471,10 @@ def populate_spectra_fit(df, spectra_fit_csvs, best=True):
         'reddening_ebv': float,
         'ebv_mw': float,
         'ebv_wu': float,
-        'SN_MEDIAN_ALL': float
+        'SN_MEDIAN_ALL': float,
+        'f_na': float,
+        'f_br': float,
+        'f_PL': float
     }
 
     # Drop existing derived columns before re-merging them from the fit tables.
@@ -1743,7 +1746,9 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
     print("Number of quasars with z > 3:", num_quasars_z_gt_3)
     print(f"\nTotal number of objects removed by all cuts: {len(df_all) - len(df)}")
     print("Final number of quasars:", len(df))
-    if {"z", "f_bc_3000", "f_fe_uv_3000", "f_host_center"}.issubset(df.columns):
+    if {"z", "f_bc_3000", "f_fe_uv_3000"}.issubset(df.columns) and (
+        "f_host_center" in df.columns or "f_host_2500" in df.columns
+    ):
         plot_spectral_fraction_vs_redshift(
             df,
             plot_path=plot_path,
@@ -1870,10 +1875,7 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
             filename="sf_ref_band_vs_model_g_postcut.pdf",
         )
     plot_cut_diagnostics(df_all.copy(), df.copy(), bins=30, cut_info="all cuts")
-    colorpanel_cols = [
-        col for col in ("f_host_center", "f_bc_3000", "wrms")
-        if col in df_all.columns
-    ]
+    colorpanel_cols = [col for col in ("f_host_2500", "f_host_center", "f_bc_3000", "wrms") if col in df_all.columns]
     if len(colorpanel_cols) > 0 and "z" in df_all.columns and "apparent_mag_2500" in df_all.columns:
         cuts_plot_dir = os.path.join("plots", "hubble", "cuts")
         os.makedirs(cuts_plot_dir, exist_ok=True)
@@ -2208,6 +2210,8 @@ def extract_cosmo_results_from_samples(
     *,
     format_for_latex=False,
     value_fmt="{:.3f}",
+    use_alpha_lambda_term=None,
+    use_redshift_log_f_term=None,
 ):
     """
     Extract summary stats for all cosmological parameters from posterior samples.
@@ -2239,8 +2243,12 @@ def extract_cosmo_results_from_samples(
           "logZ": { "value": float, "err": float } or None
         }
     """
-    option_flags = infer_model_option_flags(
-        cosmo_model, np.asarray(samples).shape[1], only_sna=only_sna
+    option_flags = resolve_model_option_flags(
+        cosmo_model,
+        np.asarray(samples).shape[1],
+        only_sna=only_sna,
+        use_alpha_lambda_term=use_alpha_lambda_term,
+        use_redshift_log_f_term=use_redshift_log_f_term,
     )
     priors, model_labels, model_labels_latex = get_model_params(
         cosmo_model,
@@ -2312,8 +2320,12 @@ def display_results_summary(
     """
     samples = np.asarray(samples)
     if use_alpha_lambda_term is None or use_redshift_log_f_term is None:
-        option_flags = infer_model_option_flags(
-            cosmo_model, samples.shape[1], only_sna=False
+        option_flags = resolve_model_option_flags(
+            cosmo_model,
+            samples.shape[1],
+            only_sna=False,
+            use_alpha_lambda_term=use_alpha_lambda_term,
+            use_redshift_log_f_term=use_redshift_log_f_term,
         )
         if use_alpha_lambda_term is None:
             use_alpha_lambda_term = option_flags["use_alpha_lambda_term"]
@@ -2391,7 +2403,16 @@ def _weighted_quantile(x, q, w=None):
     cum_w /= cum_w[-1]
     return np.interp(q, cum_w, x)
 
-def compute_age_universe_with_error(samples, cosmo_model, weights=None, ci=(0.68, 0.95), max_eval=None, random_seed=None):
+def compute_age_universe_with_error(
+    samples,
+    cosmo_model,
+    weights=None,
+    ci=(0.68, 0.95),
+    max_eval=None,
+    random_seed=None,
+    use_alpha_lambda_term=None,
+    use_redshift_log_f_term=None,
+):
     """
     Compute the posterior distribution of the Universe age and summarize it.
 
@@ -2422,8 +2443,11 @@ def compute_age_universe_with_error(samples, cosmo_model, weights=None, ci=(0.68
         }
     """
     # Get parameter names & any needed priors (e.g., zp for FlatwpwaCDM)
-    option_flags = infer_model_option_flags(
-        cosmo_model, np.asarray(samples).shape[1]
+    option_flags = resolve_model_option_flags(
+        cosmo_model,
+        np.asarray(samples).shape[1],
+        use_alpha_lambda_term=use_alpha_lambda_term,
+        use_redshift_log_f_term=use_redshift_log_f_term,
     )
     priors, model_labels, _ = get_model_params(
         cosmo_model,
@@ -2505,7 +2529,7 @@ def compute_pivot_redshift(flat_samples, cosmo_model, z_min=0.0, z_max=4.0):
         Constrained optimal pivot redshift (decorrelates w_p and w_a as much as
         possible under the z >= z_min constraint).
     """
-    option_flags = infer_model_option_flags(
+    option_flags = resolve_model_option_flags(
         cosmo_model, np.asarray(flat_samples).shape[1]
     )
     priors, model_labels, model_labels_latex = get_model_params(
@@ -2573,7 +2597,7 @@ def posterior_corr(flat_samples, cosmo_model, z_pivot_agn):
     rho : float
         Posterior Pearson correlation coefficient corr(w0, wa).
     """
-    option_flags = infer_model_option_flags(
+    option_flags = resolve_model_option_flags(
         cosmo_model, np.asarray(flat_samples).shape[1]
     )
     priors, model_labels, _ = get_model_params(
@@ -2776,7 +2800,7 @@ def write_results_tex_variables(
 
     for model_name, flat_samples in cosmo_model_sna_samples.items():
         flat_samples = np.asarray(flat_samples)
-        option_flags = infer_model_option_flags(
+        option_flags = resolve_model_option_flags(
             model_name, flat_samples.shape[1], only_sna=True
         )
         priors, model_labels, _ = get_model_params(
@@ -2822,7 +2846,7 @@ def write_results_tex_variables(
     # Per-model summary parameters.
     for model_name, flat_samples in cosmo_model_joint_samples.items():
         flat_samples = np.asarray(flat_samples)
-        option_flags = infer_model_option_flags(
+        option_flags = resolve_model_option_flags(
             model_name, flat_samples.shape[1]
         )
         priors, model_labels, _ = get_model_params(

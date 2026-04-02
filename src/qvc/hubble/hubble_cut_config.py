@@ -55,6 +55,7 @@ def build_agn_cuts(
         ('f_fe_uv_3000', None, iron_frac_cut),
         ('f_bc_3000', None, bc_frac_cut),
         ("variability_chi_sq_red_g", variability_chi_sq_red_g_cut, None),
+        #("f_br", 10**-1.75, None),
     ]
     if reddening_ebv_cut is not None:
         cuts.append(("reddening_ebv", None, reddening_ebv_cut))

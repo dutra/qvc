@@ -24,7 +24,7 @@ from tqdm import tqdm
 
 from qvc.hubble.hubble_model import (M_model_agn, M_model_agn_err, get_model_params, agn_model_pack_params,
     agn_model_pack_obs, agn_model_oidx, agn_model_pidx, agn_model_req_obs, agn_model_req_errs,
-    evaluate_log_f, infer_model_option_flags, get_agn_model_spec, AGN_ALPHA_LAMBDA_PARAM, AGN_ALPHA_LAMBDA_ERR)
+    evaluate_log_f, resolve_model_option_flags, get_agn_model_spec, AGN_ALPHA_LAMBDA_PARAM, AGN_ALPHA_LAMBDA_ERR)
 from qvc.hubble.hubble_likelihood import sigma_lens_from_dc
 from qvc.hubble.hubble_utils import (
     convert_M2500_to_logL2500,
@@ -47,6 +47,8 @@ warnings.filterwarnings(
     message=r"This figure includes Axes that are not compatible with tight_layout.*",
     category=UserWarning,
 )
+
+_FULL_RESIDUAL_YLIM = (-0.5, 0.5)
 
 
 _SDSS_FILTER_EDGES_OBS = {
@@ -326,6 +328,8 @@ def plot_blr_line_lags_vs_l2500(
     show=False,
     prob_thresh=0.9,
     lag_err_max=0.25,
+    use_alpha_lambda_term=None,
+    use_redshift_log_f_term=None,
 ):
     """Plot BLR lag against debiased L_2500 for line-assigned, well-constrained components."""
     if df_agn.empty or dm_interp is None:
@@ -334,8 +338,11 @@ def plot_blr_line_lags_vs_l2500(
     if not required.issubset(df_agn.columns):
         return None
 
-    option_flags = infer_model_option_flags(
-        cosmo_model, np.asarray(flat_samples).shape[1]
+    option_flags = resolve_model_option_flags(
+        cosmo_model,
+        np.asarray(flat_samples).shape[1],
+        use_alpha_lambda_term=use_alpha_lambda_term,
+        use_redshift_log_f_term=use_redshift_log_f_term,
     )
     _, model_labels, _ = get_model_params(
         cosmo_model,
@@ -1560,7 +1567,7 @@ def plot_f_host_2500_vs_l2500(
     nbins=15,
     min_bin_count=5,
     fit_logL_max=45.5,
-    filename="f_host_center_vs_l2500.pdf",
+    filename="f_host_2500_vs_l2500.pdf",
 ):
     """Plot host fraction against AGN-only log L_2500 with median and sigmoid trends."""
     required = {"z", "apparent_mag_2500", "f_host_2500"}
@@ -1669,12 +1676,7 @@ def plot_f_host_2500_vs_l2500(
     fig.tight_layout()
 
     diagnostics_path = os.path.join(plot_path or "plots/hubble", "diagnostics")
-    return _save_figure(
-        fig,
-        os.path.join(diagnostics_path, "f_host_2500_vs_l2500.pdf"),
-        dpi=200,
-        show=show,
-    )
+    return _save_figure(fig, os.path.join(diagnostics_path, filename), dpi=200, show=show)
 
 
 def plot_alpha_lambda_vs_l2500_by_redshift(
@@ -2701,15 +2703,28 @@ def plot_log_fhost_vs_petrorad_by_band(
     return fig
 
 
-def plot_dynesty(results, cosmo_model, plot_path="plots/hubble", only_sna="", speed="", show=False):
+def plot_dynesty(
+    results,
+    cosmo_model,
+    plot_path="plots/hubble",
+    only_sna="",
+    speed="",
+    show=False,
+    use_alpha_lambda_term=None,
+    use_redshift_log_f_term=None,
+):
     """
     Plot dynesty diagnostics: runplot, traceplot, and cornerpoints using dyplot.
     Saves figures to files with the given basename.
     """
 
     os.makedirs(os.path.dirname(plot_path), exist_ok=True)
-    option_flags = infer_model_option_flags(
-        cosmo_model, np.asarray(results.samples).shape[1], only_sna=bool(only_sna)
+    option_flags = resolve_model_option_flags(
+        cosmo_model,
+        np.asarray(results.samples).shape[1],
+        only_sna=bool(only_sna),
+        use_alpha_lambda_term=use_alpha_lambda_term,
+        use_redshift_log_f_term=use_redshift_log_f_term,
     )
     priors, model_labels, model_labels_latex = get_model_params(
         cosmo_model,
@@ -2762,7 +2777,16 @@ def plot_dynesty(results, cosmo_model, plot_path="plots/hubble", only_sna="", sp
     # except Exception as e:
     #     print(f"Error in runplot: {e}")
         
-def plot_traces(sampler, only_sna=False, cosmo_model='Flatw0waCDM', show=False, use_dynesty=False, plot_path="plots/hubble"):
+def plot_traces(
+    sampler,
+    only_sna=False,
+    cosmo_model='Flatw0waCDM',
+    show=False,
+    use_dynesty=False,
+    plot_path="plots/hubble",
+    use_alpha_lambda_term=None,
+    use_redshift_log_f_term=None,
+):
     """
     Plot parameter traces from dynesty nested sampling results.
     
@@ -2782,8 +2806,12 @@ def plot_traces(sampler, only_sna=False, cosmo_model='Flatw0waCDM', show=False, 
     else:
         samples = sampler.get_chain()
 
-    option_flags = infer_model_option_flags(
-        cosmo_model, samples.shape[-1], only_sna=only_sna
+    option_flags = resolve_model_option_flags(
+        cosmo_model,
+        samples.shape[-1],
+        only_sna=only_sna,
+        use_alpha_lambda_term=use_alpha_lambda_term,
+        use_redshift_log_f_term=use_redshift_log_f_term,
     )
     priors, model_labels, model_labels_latex = get_model_params(
         cosmo_model,
@@ -2820,7 +2848,15 @@ def plot_traces(sampler, only_sna=False, cosmo_model='Flatw0waCDM', show=False, 
 
     return fig
 
-def plot_posterior_corner(flat_samples, only_sna=False, cosmo_model='Flatw0waCDM', show=False, plot_path="plots/hubble"):
+def plot_posterior_corner(
+    flat_samples,
+    only_sna=False,
+    cosmo_model='Flatw0waCDM',
+    show=False,
+    plot_path="plots/hubble",
+    use_alpha_lambda_term=None,
+    use_redshift_log_f_term=None,
+):
     # Select cosmological parameters based on model
     if cosmo_model == 'FlatwCDM':
         cosmo_params = ['H0', 'Om0', 'w0']
@@ -2832,8 +2868,12 @@ def plot_posterior_corner(flat_samples, only_sna=False, cosmo_model='Flatw0waCDM
         raise ValueError("cosmo_model must be 'FlatwCDM', 'Flatw0waCDM', or 'FlatLambdaCDM'")
 
     # Model parameters: AGN correlation + SN calibration + cosmology
-    option_flags = infer_model_option_flags(
-        cosmo_model, np.asarray(flat_samples).shape[1], only_sna=only_sna
+    option_flags = resolve_model_option_flags(
+        cosmo_model,
+        np.asarray(flat_samples).shape[1],
+        only_sna=only_sna,
+        use_alpha_lambda_term=use_alpha_lambda_term,
+        use_redshift_log_f_term=use_redshift_log_f_term,
     )
     priors, model_labels, model_labels_latex = get_model_params(
         cosmo_model,
@@ -2875,6 +2915,8 @@ def plot_cosmo_corner(
     grid_q=(0.0005, 0.9995),
     pad_frac=0.25,
     include_alpha_beta=False,
+    use_alpha_lambda_term=None,
+    use_redshift_log_f_term=None,
 ):
     import os
     import numpy as np
@@ -2885,8 +2927,12 @@ def plot_cosmo_corner(
     from scipy.ndimage import gaussian_filter
     # --- pull model labels from your config ---
     ref_samples = flat_samples_agn if flat_samples_agn is not None else flat_samples_sn
-    option_flags = infer_model_option_flags(
-        cosmo_model, np.asarray(ref_samples).shape[1], only_sna=flat_samples_agn is None
+    option_flags = resolve_model_option_flags(
+        cosmo_model,
+        np.asarray(ref_samples).shape[1],
+        only_sna=flat_samples_agn is None,
+        use_alpha_lambda_term=use_alpha_lambda_term,
+        use_redshift_log_f_term=use_redshift_log_f_term,
     )
     _, model_labels, model_labels_latex = get_model_params(
         cosmo_model,
@@ -3211,7 +3257,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
                 show_binned_agn=True, show_residuals=True,
                 debias=False, dm_interp=None, show=False, completeness=True, show_true=False, verbose=True,
                 cosmo_model_samples={}, residuals_sigma_clip=None, df_calibrators=None, z_range=(0.44, 3.16),
-                dmi_sigma=None):
+                dmi_sigma=None, use_alpha_lambda_term=None, use_redshift_log_f_term=None):
     """
     Hubble diagram (Pantheon+-style):
       • Model line + 68% band in magenta
@@ -3244,8 +3290,11 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     z_grid = np.linspace(1e-4, 5.2, 500)
 
     # --- Parameter bookkeeping ---
-    option_flags = infer_model_option_flags(
-        cosmo_model, np.asarray(flat_samples).shape[1]
+    option_flags = resolve_model_option_flags(
+        cosmo_model,
+        np.asarray(flat_samples).shape[1],
+        use_alpha_lambda_term=use_alpha_lambda_term,
+        use_redshift_log_f_term=use_redshift_log_f_term,
     )
     _, model_labels, _ = get_model_params(
         cosmo_model,
@@ -3634,7 +3683,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     line_styles = {'Flatw0waCDM': 'dotted', 'FlatLambdaCDM': "dotted", 'FlatwCDM': 'dashdot'}
 
     for cosmo_model_other, cosmo_model_samples_other in cosmo_model_samples.items():
-        option_flags_other = infer_model_option_flags(
+        option_flags_other = resolve_model_option_flags(
             cosmo_model_other, np.asarray(cosmo_model_samples_other).shape[1]
         )
         _, model_labels_other, _ = get_model_params(
@@ -3682,7 +3731,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
 
 
         for cosmo_model_other, cosmo_model_samples_other in cosmo_model_samples.items():
-            option_flags_other = infer_model_option_flags(
+            option_flags_other = resolve_model_option_flags(
                 cosmo_model_other, np.asarray(cosmo_model_samples_other).shape[1]
             )
             _, model_labels_other, _ = get_model_params(
@@ -4069,7 +4118,9 @@ def plot_predicted_vs_actual_M2500(
     m_lim=24.0,           # survey apparent-magnitude limit for completeness shading
     n_cosmo_draws=50,     # posterior draws to propagate cosmology errors (for xerr)
     random_state=42,      # RNG seed for reproducibility of draws
-    z_range=(0.44, 3.16)
+    z_range=(0.44, 3.16),
+    use_alpha_lambda_term=None,
+    use_redshift_log_f_term=None,
 ):
     """
     Predicted vs Actual M_2500, with:
@@ -4088,8 +4139,11 @@ def plot_predicted_vs_actual_M2500(
     from astropy.cosmology import FlatLambdaCDM, FlatwCDM, FlatwpwaCDM, Flatw0waCDM
 
     # --- model parameters from samples ---
-    option_flags = infer_model_option_flags(
-        cosmo_model, np.asarray(flat_samples).shape[1]
+    option_flags = resolve_model_option_flags(
+        cosmo_model,
+        np.asarray(flat_samples).shape[1],
+        use_alpha_lambda_term=use_alpha_lambda_term,
+        use_redshift_log_f_term=use_redshift_log_f_term,
     )
     priors, model_labels, model_labels_latex = get_model_params(
         cosmo_model,
@@ -4517,6 +4571,7 @@ def plot_full_residuals(
     *, nbins=10, min_count=5, z_cut=None, key_y='residuals', key_color='z',
     z_range=(0.44, 3.16), residual_label='residuals', output_tag='full_residuals',
     max_categories=12, category_min_count=5, category_jitter=0.15,
+    use_alpha_lambda_term=None, use_redshift_log_f_term=None,
 ):
     df_agn = df_agn.copy()
     df_agn[residual_label] = residuals
@@ -4528,8 +4583,11 @@ def plot_full_residuals(
     df_agn = df_agn.reset_index(drop=True)
 
     def _median_param_dict(samples):
-        option_flags = infer_model_option_flags(
-            cosmo_model, np.asarray(samples).shape[1]
+        option_flags = resolve_model_option_flags(
+            cosmo_model,
+            np.asarray(samples).shape[1],
+            use_alpha_lambda_term=use_alpha_lambda_term,
+            use_redshift_log_f_term=use_redshift_log_f_term,
         )
         _, model_labels, _ = get_model_params(
             cosmo_model,
@@ -4613,6 +4671,7 @@ def plot_full_residuals(
             'petroRad_r': 'log_petroRad_r',
             'log_tau_uv_rhat': 'log_log_tau_uv_rhat',
             'f_host_center': 'log_f_host_center',
+            'f_host_2500': 'log_f_host_2500',
             'f_bc_3000': 'log_f_bc_3000',
             'f_fe_uv_3000': 'log_f_fe_uv_3000',
             'RCHI2': 'log_RCHI2',
@@ -4624,6 +4683,8 @@ def plot_full_residuals(
             'SN_MEDIAN_ALL': 'log_sn_median_all',
             'ebv_wu': 'log_ebv_wu',
             'frac_bc_2500': 'log_frac_bc_2500',
+            'f_na': 'log_f_na', 'f_br': 'log_f_br',
+            'f_PL': 'log_f_PL',
 
         }
         for source_col, derived_col in log_columns.items():
@@ -4660,6 +4721,8 @@ def plot_full_residuals(
 
     # ---- Which x-keys to show (keep your order) ----
     keys = [col for col in [
+        'f_na', 'log_f_na', 'f_br', 'log_f_br',
+        'f_PL', 'log_f_PL',
         'log_amp_delta_bc', 
         'frac_bc_2500', 'log_frac_bc_2500',
         'variability_chi_sq_g', 'log_variability_chi_sq_g',
@@ -4675,7 +4738,7 @@ def plot_full_residuals(
         #'pvalue_g', 'log_pvalue_g',
         #'sdss_plate_count', 'RCHI2', 'log_RCHI2', 'RCHI2DIFF', 'log_RCHI2DIFF', 'VDISP', 'ZWARNING', 'RUN2D',
         'log_frac_host_psf_2500',
-        'wrms', 'log_f_bc_3000', 'log_f_fe_uv_3000', 'log_f_host_center',
+        'wrms', 'log_f_bc_3000', 'log_f_fe_uv_3000', 'log_f_host_center', 'log_f_host_2500',
         'rel_apparent_mag_2500_err',
         #'apparent_mag_2500_err', 'log_apparent_mag_2500_err', 
         #'log_sigma_uv_err', 'log_log_sigma_uv_err',
@@ -5017,6 +5080,8 @@ def plot_full_residuals(
             print(f"Error processing key {key}: {e}")
             ax.axis('off')
 
+        if key_y == residual_label and ax.has_data():
+            ax.set_ylim(*_FULL_RESIDUAL_YLIM)
         ax.grid(False)
 
     # Hide any extra axes
@@ -5040,6 +5105,7 @@ def plot_full_residuals_rz(
     z_range=(0.44, 3.16), nz_bins=12, z_min_count=8,
     lowess_frac=0.25, lowess_it=1, lowess_min_points=10,
     max_categories=12, category_min_count=5, category_jitter=0.15,
+    use_alpha_lambda_term=None, use_redshift_log_f_term=None,
 ):
     """
     Plot redshift-detrended residual diagnostics where
@@ -5099,6 +5165,8 @@ def plot_full_residuals_rz(
         max_categories=max_categories,
         category_min_count=category_min_count,
         category_jitter=category_jitter,
+        use_alpha_lambda_term=use_alpha_lambda_term,
+        use_redshift_log_f_term=use_redshift_log_f_term,
     )
 
 def _kde_conf_levels(Z, conf=(0.954, 0.683), plot_path=None):
@@ -5131,7 +5199,8 @@ def _kde_conf_levels(Z, conf=(0.954, 0.683), plot_path=None):
 def plot_predicted_L2500_vs_sigmahat(
     flat_samples, df_agn, cosmo_model, z_pivot_agn,
     plot_path='plots/hubble', show=False, debias=True, dm_interp=None,
-    show_residuals=False, df_calibrators=None, z_range=(0.44, 3.16)
+    show_residuals=False, df_calibrators=None, z_range=(0.44, 3.16),
+    use_alpha_lambda_term=None, use_redshift_log_f_term=None,
 ):
     d = df_agn.copy()
 
@@ -5141,8 +5210,11 @@ def plot_predicted_L2500_vs_sigmahat(
     flat_samples = flat_samples[::thin_factor]
 
     # --- Indices & parameter names ---
-    option_flags = infer_model_option_flags(
-        cosmo_model, np.asarray(flat_samples).shape[1]
+    option_flags = resolve_model_option_flags(
+        cosmo_model,
+        np.asarray(flat_samples).shape[1],
+        use_alpha_lambda_term=use_alpha_lambda_term,
+        use_redshift_log_f_term=use_redshift_log_f_term,
     )
     priors, model_labels, model_labels_latex = get_model_params(
         cosmo_model,
@@ -6240,7 +6312,7 @@ def plot_spectral_fraction_vs_redshift(
     filename="spectral_fraction_vs_redshift.pdf",
 ):
     """Plot available spectral fractions against redshift."""
-    required = {"z", "f_bc_3000", "f_fe_uv_3000", "f_host_center"}
+    required = {"z", "f_bc_3000", "f_fe_uv_3000", "f_host_2500"}
     if not required.issubset(df_agn.columns):
         return None
 
@@ -6248,7 +6320,6 @@ def plot_spectral_fraction_vs_redshift(
     panel_specs = [
         ("f_bc_3000", r"$f_{\rm BC}$"),
         ("f_fe_uv_3000", r"$f_{\rm FeII}$"),
-        ("f_host_center", r"$f_{\rm host,center}$"),
     ]
     if "f_na" in df_agn.columns:
         panel_specs.append(("f_na", r"$f_{\rm narrow}$"))
@@ -6257,8 +6328,14 @@ def plot_spectral_fraction_vs_redshift(
     if "f_PL" in df_agn.columns:
         panel_specs.append(("f_PL", r"$f_{\rm PL}$"))
 
-    n_panels = len(panel_specs)
-    fig, axes = plt.subplots(1, n_panels, figsize=(5.0 * n_panels, 4.6), sharex=True, squeeze=False)
+    if "f_host_center" in df_agn.columns:
+        panel_specs.append(("f_host_center", r"$f_{\rm host,center}$"))
+    if "f_host_2500" in df_agn.columns:
+        panel_specs.append(("f_host_2500", r"$f_{\rm host,2500}$"))
+    if len(panel_specs) == 2:
+        return None
+
+    fig, axes = plt.subplots(1, len(panel_specs), figsize=(5.0 * len(panel_specs), 4.6), sharex=True, squeeze=False)
     axes = axes.ravel()
 
     for ax, (col, ylabel) in zip(axes, panel_specs):
@@ -6994,7 +7071,7 @@ def plot_delta_m_flux_recal_vs_redshift(df_agn, plot_path="plots/hubble", show=F
 def plot_m2500_vs_z_colorpanels(
     df,
     df_keep=None,
-    color_cols=("f_host_center", "f_bc_3000", "wrms"),
+    color_cols=("f_host_2500", "f_host_center", "f_bc_3000", "wrms"),
     xcol="z",
     ycol="apparent_mag_2500",
     z_range=None,
@@ -7037,6 +7114,7 @@ def plot_m2500_vs_z_colorpanels(
 
     # Pretty colorbar labels
     label_map = {
+        "f_host_2500": r"f_{\mathrm{host},2500}",
         "f_host_center": r"f_{\mathrm{host}}",
         "f_fe_uv_3000": r"f_{\mathrm{Fe\, II}}",
         "f_bc_3000": r"f_{\mathrm{BC}}",

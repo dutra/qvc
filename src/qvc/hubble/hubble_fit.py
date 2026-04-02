@@ -447,7 +447,15 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
 
         results = sampler.results
         print("Plotting full dynesty corner...")
-        plot_dynesty(sampler.results, cosmo_model, plot_path, only_sna=only_sna, speed=speed)
+        plot_dynesty(
+            sampler.results,
+            cosmo_model,
+            plot_path,
+            only_sna=only_sna,
+            speed=speed,
+            use_alpha_lambda_term=use_alpha_lambda_term,
+            use_redshift_log_f_term=use_redshift_log_f_term,
+        )
         logZ, logZerr = results.logz[-1], results.logzerr[-1]
         print(f"\nBayesian evidence logZ = {logZ:.2f} ± {logZerr:.2f}")
         if logZerr > 1:
@@ -625,7 +633,13 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         use_redshift_log_f_term=use_redshift_log_f_term,
     )
     print("Computing age of the universe with error propagation...")
-    age, age_err = compute_age_universe_with_error(flat_samples, cosmo_model, max_eval=200)
+    age, age_err = compute_age_universe_with_error(
+        flat_samples,
+        cosmo_model,
+        max_eval=200,
+        use_alpha_lambda_term=use_alpha_lambda_term,
+        use_redshift_log_f_term=use_redshift_log_f_term,
+    )
 
     if skip_plots or only_sna:
         print("Skipping plots, returning results...")
@@ -637,9 +651,21 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
 
     print("Plotting predicted L2500 vs ...")
 
-    L_residuals_debiased, L_pred_std_debiased = plot_predicted_L2500_vs_sigmahat(flat_samples, df_agn, cosmo_model=cosmo_model, z_pivot_agn=z_pivot_agn, 
-                                                            debias=True, dm_interp=dm_interp, show_residuals=False,
-                                                            show=False, plot_path=plot_path, df_calibrators=df_calibrators, z_range=z_range)
+    L_residuals_debiased, L_pred_std_debiased = plot_predicted_L2500_vs_sigmahat(
+        flat_samples,
+        df_agn,
+        cosmo_model=cosmo_model,
+        z_pivot_agn=z_pivot_agn,
+        debias=True,
+        dm_interp=dm_interp,
+        show_residuals=False,
+        show=False,
+        plot_path=plot_path,
+        df_calibrators=df_calibrators,
+        z_range=z_range,
+        use_alpha_lambda_term=use_alpha_lambda_term,
+        use_redshift_log_f_term=use_redshift_log_f_term,
+    )
 
     plot_blr_line_lags_vs_l2500(
         flat_samples,
@@ -649,6 +675,8 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         dm_interp,
         plot_path=plot_path,
         show=False,
+        use_alpha_lambda_term=use_alpha_lambda_term,
+        use_redshift_log_f_term=use_redshift_log_f_term,
     )
     
     chisq_red_L2500, _ = reduced_chi_squared(L_residuals_debiased, L_pred_std_debiased, n_params=len(model_labels)-1)
@@ -684,12 +712,16 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                     cosmo_model=cosmo_model, z_pivot_agn=z_pivot_agn, 
                     show_true=False, show=False, debias=True, dm_interp=dm_interp, plot_path=plot_path,
                     cosmo_model_samples=cosmo_model_joint_samples, verbose=verbose, residuals_sigma_clip=residuals_sigma_clip,
-                    df_calibrators=df_calibrators, dmi_sigma=dmi_posterior_sigma_full)
+                    df_calibrators=df_calibrators, dmi_sigma=dmi_posterior_sigma_full,
+                    use_alpha_lambda_term=use_alpha_lambda_term,
+                    use_redshift_log_f_term=use_redshift_log_f_term)
     debiased_residuals, debiased_residuals_err, mu_pred_median_debiased, mu_pred_std_debiased, mu_pred_std_debiased_with_scatter = r
     # Biased
     r = plot_hubble(flat_samples, df_agn, df_pantheon, 
                 cosmo_model=cosmo_model, z_pivot_agn=z_pivot_agn, show_residuals=True,
-                show_true=False, show=False, debias=False, plot_path=plot_path, verbose=False)
+                show_true=False, show=False, debias=False, plot_path=plot_path, verbose=False,
+                use_alpha_lambda_term=use_alpha_lambda_term,
+                use_redshift_log_f_term=use_redshift_log_f_term)
     biased_residuals, biased_residuals_err, _, _, _ = r
 
     chisq_red_hubble_debiased, _ = reduced_chi_squared(
@@ -701,13 +733,46 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
 
 
     print("Plotting predicted vs actual M2500...")
-    plot_predicted_vs_actual_M2500(flat_samples, df_agn, cosmo_model=cosmo_model, z_pivot_agn=z_pivot_agn, debias=False, show=False, plot_path=plot_path)
-    M2500_residuals_debiased, M2500_std_debiased, M2500_binned_residuals_debiased, _ = plot_predicted_vs_actual_M2500(flat_samples, df_agn, cosmo_model=cosmo_model, 
-                                                                                  z_pivot_agn=z_pivot_agn, debias=True, show=False, dm_interp=dm_interp,
-                                                                                  plot_path=plot_path)
+    plot_predicted_vs_actual_M2500(
+        flat_samples,
+        df_agn,
+        cosmo_model=cosmo_model,
+        z_pivot_agn=z_pivot_agn,
+        debias=False,
+        show=False,
+        plot_path=plot_path,
+        use_alpha_lambda_term=use_alpha_lambda_term,
+        use_redshift_log_f_term=use_redshift_log_f_term,
+    )
+    M2500_residuals_debiased, M2500_std_debiased, M2500_binned_residuals_debiased, _ = plot_predicted_vs_actual_M2500(
+        flat_samples,
+        df_agn,
+        cosmo_model=cosmo_model,
+        z_pivot_agn=z_pivot_agn,
+        debias=True,
+        show=False,
+        dm_interp=dm_interp,
+        plot_path=plot_path,
+        use_alpha_lambda_term=use_alpha_lambda_term,
+        use_redshift_log_f_term=use_redshift_log_f_term,
+    )
     chisq_red_M2500_debiased, _ = reduced_chi_squared(M2500_residuals_debiased, M2500_std_debiased, n_params=len(model_labels)-1)
     print("Plotting debiased residuals...")
-    plot_full_residuals(df_agn, debiased_residuals, debiased_residuals_err, flat_samples, cosmo_model, z_pivot_agn, debias=True, dm_interp=dm_interp, show=False, plot_path=plot_path, z_range=z_range)
+    plot_full_residuals(
+        df_agn,
+        debiased_residuals,
+        debiased_residuals_err,
+        flat_samples,
+        cosmo_model,
+        z_pivot_agn,
+        debias=True,
+        dm_interp=dm_interp,
+        show=False,
+        plot_path=plot_path,
+        z_range=z_range,
+        use_alpha_lambda_term=use_alpha_lambda_term,
+        use_redshift_log_f_term=use_redshift_log_f_term,
+    )
     plot_full_residuals(
         df_agn,
         L_residuals_debiased,
@@ -722,9 +787,26 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         z_range=z_range,
         residual_label='L2500_sigma_tau_residuals',
         output_tag='full_residuals_l2500_sigma_tau',
+        use_alpha_lambda_term=use_alpha_lambda_term,
+        use_redshift_log_f_term=use_redshift_log_f_term,
     )
-    plot_full_residuals(df_agn, debiased_residuals, debiased_residuals_err, flat_samples, cosmo_model, z_pivot_agn, debias=True, dm_interp=dm_interp, 
-                        show=False, plot_path=plot_path, key_y='z', key_color='residuals', z_range=z_range)
+    plot_full_residuals(
+        df_agn,
+        debiased_residuals,
+        debiased_residuals_err,
+        flat_samples,
+        cosmo_model,
+        z_pivot_agn,
+        debias=True,
+        dm_interp=dm_interp,
+        show=False,
+        plot_path=plot_path,
+        key_y='z',
+        key_color='residuals',
+        z_range=z_range,
+        use_alpha_lambda_term=use_alpha_lambda_term,
+        use_redshift_log_f_term=use_redshift_log_f_term,
+    )
     plot_full_residuals_rz(
         df_agn,
         debiased_residuals,
@@ -737,6 +819,8 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         show=False,
         plot_path=plot_path,
         z_range=z_range,
+        use_alpha_lambda_term=use_alpha_lambda_term,
+        use_redshift_log_f_term=use_redshift_log_f_term,
     )
     plot_debias_impact_diagnostics(
         df_agn,
@@ -760,7 +844,9 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
     print("Plotting cosmological posteriors corner plot...")
     plot_cosmo_corner(None, flat_samples, cosmo_model, z_pivot_sna, z_pivot_agn, show=False, 
                       plot_path=plot_path, speed=speed,
-                      gauss_sigma=1.5, kde_bw_scale=1.5)
+                      gauss_sigma=1.5, kde_bw_scale=1.5,
+                      use_alpha_lambda_term=use_alpha_lambda_term,
+                      use_redshift_log_f_term=use_redshift_log_f_term)
 
     if completeness:
         if completeness_mode == "4d_fhost_alpha":
@@ -852,10 +938,14 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
         
         plot_cosmo_corner(samples_sna, samples_joint, cosmo_model, z_pivot_sna, z_pivot_agn, show=False, 
                           plot_path=compare_plot_path, speed=speed,
-                          gauss_sigma=1.5, kde_bw_scale=1.5, include_alpha_beta=False)
+                          gauss_sigma=1.5, kde_bw_scale=1.5, include_alpha_beta=False,
+                          use_alpha_lambda_term=use_alpha_lambda_term,
+                          use_redshift_log_f_term=use_redshift_log_f_term)
         plot_cosmo_corner(samples_sna, samples_joint, cosmo_model, z_pivot_sna, z_pivot_agn, show=False, 
                           plot_path=compare_plot_path, speed=speed,
-                          gauss_sigma=1.5, kde_bw_scale=1.5, include_alpha_beta=True)
+                          gauss_sigma=1.5, kde_bw_scale=1.5, include_alpha_beta=True,
+                          use_alpha_lambda_term=use_alpha_lambda_term,
+                          use_redshift_log_f_term=use_redshift_log_f_term)
         
         cosmo_models_result_dict[cosmo_model]['logZ'] = logZ_joint
         cosmo_models_result_dict[cosmo_model]['logZerr'] = logZerr_joint

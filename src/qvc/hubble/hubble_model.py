@@ -74,6 +74,76 @@ def infer_model_option_flags(cosmo_model, sample_dim, only_sna=False):
     )
 
 
+def resolve_model_option_flags(
+    cosmo_model,
+    sample_dim,
+    *,
+    only_sna=False,
+    use_alpha_lambda_term=None,
+    use_redshift_log_f_term=None,
+):
+    combos = []
+    for alpha_flag in (False, True):
+        for logf_flag in (False, True):
+            _, labels, _ = get_model_params(
+                cosmo_model,
+                only_sna=only_sna,
+                use_alpha_lambda_term=alpha_flag,
+                use_redshift_log_f_term=logf_flag,
+            )
+            combos.append(
+                {
+                    "sample_dim": len(labels),
+                    "use_alpha_lambda_term": alpha_flag,
+                    "use_redshift_log_f_term": logf_flag,
+                }
+            )
+
+    matches = [combo for combo in combos if combo["sample_dim"] == sample_dim]
+    if use_alpha_lambda_term is not None:
+        matches = [
+            combo for combo in matches
+            if combo["use_alpha_lambda_term"] == use_alpha_lambda_term
+        ]
+    if use_redshift_log_f_term is not None:
+        matches = [
+            combo for combo in matches
+            if combo["use_redshift_log_f_term"] == use_redshift_log_f_term
+        ]
+
+    if len(matches) == 1:
+        return {
+            "use_alpha_lambda_term": matches[0]["use_alpha_lambda_term"],
+            "use_redshift_log_f_term": matches[0]["use_redshift_log_f_term"],
+        }
+
+    expected = sorted({combo["sample_dim"] for combo in combos})
+    requested = {
+        "use_alpha_lambda_term": use_alpha_lambda_term,
+        "use_redshift_log_f_term": use_redshift_log_f_term,
+    }
+    if len(matches) > 1:
+        matching_configs = [
+            {
+                "use_alpha_lambda_term": combo["use_alpha_lambda_term"],
+                "use_redshift_log_f_term": combo["use_redshift_log_f_term"],
+            }
+            for combo in matches
+        ]
+        raise ValueError(
+            f"Ambiguous model option flags for sample_dim={sample_dim}, "
+            f"cosmo_model={cosmo_model!r}. Matching configurations: "
+            f"{matching_configs}. Pass explicit use_alpha_lambda_term and/or "
+            f"use_redshift_log_f_term."
+        )
+
+    raise ValueError(
+        f"Could not resolve model option flags for sample_dim={sample_dim}, "
+        f"cosmo_model={cosmo_model!r}, requested={requested}. Expected one of "
+        f"{expected} columns."
+    )
+
+
 def infer_use_alpha_lambda_term(cosmo_model, sample_dim, only_sna=False):
     return infer_model_option_flags(
         cosmo_model, sample_dim, only_sna=only_sna

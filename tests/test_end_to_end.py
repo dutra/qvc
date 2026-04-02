@@ -201,7 +201,7 @@ def test_plot_g_band_drift_slope_histograms_writes_pdfs(tmp_path, monkeypatch):
     assert out_var.endswith("g_band_var_slope_histograms_postcut_z0p8to1p2.pdf")
 
 
-def test_plot_spectral_fraction_vs_redshift_writes_pdf(tmp_path, monkeypatch):
+def test_plot_spectral_fraction_vs_redshift_writes_pdf_with_f_host_center(tmp_path, monkeypatch):
     monkeypatch.setenv("MPLCONFIGDIR", str(tmp_path / "mplconfig"))
 
     df = pd.DataFrame(
@@ -211,6 +211,57 @@ def test_plot_spectral_fraction_vs_redshift_writes_pdf(tmp_path, monkeypatch):
             "f_fe_uv_3000": np.linspace(0.1, 0.4, 24),
             "f_na": np.linspace(0.02, 0.12, 24),
             "f_host_center": np.linspace(0.3, 0.02, 24),
+        }
+    )
+
+    out = hubble_plotting.plot_spectral_fraction_vs_redshift(
+        df,
+        plot_path=str(tmp_path / "figures"),
+        show=False,
+        nbins=6,
+        min_bin_count=3,
+    )
+
+    assert out is not None
+    assert os.path.exists(out)
+    assert out.endswith("spectral_fraction_vs_redshift.pdf")
+
+
+def test_plot_spectral_fraction_vs_redshift_writes_pdf_with_f_host_2500_only(tmp_path, monkeypatch):
+    monkeypatch.setenv("MPLCONFIGDIR", str(tmp_path / "mplconfig"))
+
+    df = pd.DataFrame(
+        {
+            "z": np.linspace(0.3, 2.2, 24),
+            "f_bc_3000": np.linspace(0.05, 0.25, 24),
+            "f_fe_uv_3000": np.linspace(0.1, 0.4, 24),
+            "f_host_2500": np.linspace(0.25, 0.01, 24),
+        }
+    )
+
+    out = hubble_plotting.plot_spectral_fraction_vs_redshift(
+        df,
+        plot_path=str(tmp_path / "figures"),
+        show=False,
+        nbins=6,
+        min_bin_count=3,
+    )
+
+    assert out is not None
+    assert os.path.exists(out)
+    assert out.endswith("spectral_fraction_vs_redshift.pdf")
+
+
+def test_plot_spectral_fraction_vs_redshift_writes_pdf_with_both_host_fractions(tmp_path, monkeypatch):
+    monkeypatch.setenv("MPLCONFIGDIR", str(tmp_path / "mplconfig"))
+
+    df = pd.DataFrame(
+        {
+            "z": np.linspace(0.3, 2.2, 24),
+            "f_bc_3000": np.linspace(0.05, 0.25, 24),
+            "f_fe_uv_3000": np.linspace(0.1, 0.4, 24),
+            "f_host_center": np.linspace(0.3, 0.02, 24),
+            "f_host_2500": np.linspace(0.25, 0.01, 24),
         }
     )
 
@@ -270,6 +321,30 @@ def test_plot_f_host_2500_vs_redshift_writes_pdf(tmp_path, monkeypatch):
     assert out is not None
     assert os.path.exists(out)
     assert out.endswith("f_host_2500_vs_redshift.pdf")
+
+
+def test_plot_m2500_vs_z_colorpanels_supports_both_host_columns(tmp_path, monkeypatch):
+    monkeypatch.setenv("MPLCONFIGDIR", str(tmp_path / "mplconfig"))
+
+    df = pd.DataFrame(
+        {
+            "object_id": [f"obj-{i}" for i in range(20)],
+            "z": np.linspace(0.4, 2.4, 20),
+            "apparent_mag_2500": np.linspace(20.5, 23.0, 20),
+            "f_host_center": np.linspace(0.30, 0.02, 20),
+            "f_host_2500": np.linspace(0.24, 0.01, 20),
+            "f_bc_3000": np.linspace(0.05, 0.25, 20),
+            "wrms": np.linspace(0.8, 1.4, 20),
+        }
+    )
+
+    result = hubble_plotting.plot_m2500_vs_z_colorpanels(
+        df,
+        df_keep=df.iloc[:12].copy(),
+        thin=1,
+    )
+
+    assert result is not None
 
 
 def test_plot_sigma_bc_vs_frac_bc_writes_pdf(tmp_path, monkeypatch):
