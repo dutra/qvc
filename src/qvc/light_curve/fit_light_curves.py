@@ -83,6 +83,8 @@ ETA_SIGMA_LOW = -5.0
 LOG_AMP_DELTA_LYA_LOW = -5.0
 LAG0_HIGH = 100.0
 LAG_BETA_HIGH = 5.0
+LOG_LAG_BLR_LOW = np.log(10.0)
+LOG_LAG_BLR_HIGH = np.log(1e3)
 LOG_LAG_RATIO_BC_TO_BLR_LOW = np.log(0.1)
 LOG_LAG_RATIO_BC_TO_BLR_HIGH = np.log(0.3)
 
@@ -1173,7 +1175,12 @@ def log_amp_delta_blr_prior():
 
 
 def log_lag_blr_prior():
-    return dist.Normal(jnp.log(1e2), jnp.log(50.0))
+    return dist.TruncatedNormal(
+        loc=jnp.log(1e2),
+        scale=jnp.log(10.0),
+        low=LOG_LAG_BLR_LOW,
+        high=LOG_LAG_BLR_HIGH,
+    )
 
 
 def log_amp_delta_bc_prior():
