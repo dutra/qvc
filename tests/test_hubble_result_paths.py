@@ -163,7 +163,16 @@ def test_run_mcmc_pipeline_default_resume_uses_result_dir(monkeypatch, tmp_path)
     monkeypatch.setattr(hubble_fit, "load_chains", fake_load_chains)
     monkeypatch.setattr(hubble_fit.os.path, "exists", lambda path: str(path) == str(expected))
 
-    flat_samples, model_labels, dm_interp, logz, logzerr, dmi_posterior_sigma = hubble_fit.run_mcmc_pipeline(
+    (
+        flat_samples,
+        model_labels,
+        dm_interp,
+        dmi_selection_sigma_interp,
+        logz,
+        logzerr,
+        dmi_posterior_sigma,
+        dmi_selection_sigma_posterior_median,
+    ) = hubble_fit.run_mcmc_pipeline(
         df_agn=df_agn,
         df_agn_all=df_agn.copy(),
         df_pantheon=df_pantheon,
@@ -183,9 +192,11 @@ def test_run_mcmc_pipeline_default_resume_uses_result_dir(monkeypatch, tmp_path)
     assert flat_samples.shape == (3, 1)
     assert model_labels == ["H0"]
     assert dm_interp == "interp"
+    assert dmi_selection_sigma_interp is None
     assert logz == -1.0
     assert logzerr == 0.2
     np.testing.assert_allclose(dmi_posterior_sigma, 0.05)
+    assert dmi_selection_sigma_posterior_median is None
 
 
 def test_run_mcmc_pipeline_explicit_resume_path_bypasses_default(monkeypatch, tmp_path):

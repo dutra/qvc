@@ -394,7 +394,8 @@ def plot_posterior(
     os.makedirs(output_dir, exist_ok=True)
     save_path = os.path.join(output_dir, f"{z:.1f}_{object_id}_posterior_{suffix}.pdf")
     fig.savefig(save_path, dpi=100, bbox_inches="tight")
-    plt.close(fig)
+    if isinstance(fig, plt.Figure):
+        plt.close(fig)
     logging.info(f"Saved posterior corner plot to {save_path}")
 
 

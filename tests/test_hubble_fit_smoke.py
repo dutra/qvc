@@ -119,7 +119,7 @@ def test_log_likelihood_finite_on_fake_lcdm_data(fake_data):
     )
 
     assert np.isfinite(logl)
-    assert blob.shape == (2, len(df_agn))
+    assert blob.shape == (3, len(df_agn))
 
 
 def test_run_single_skip_plots_smoke(fake_data, monkeypatch, tmp_path):
@@ -142,9 +142,11 @@ def test_run_single_skip_plots_smoke(fake_data, monkeypatch, tmp_path):
             flat_samples,
             model_labels,
             lambda pts: np.zeros(len(np.atleast_2d(pts))),
+            None,
             -50.0,
             0.2,
             dmi_posterior_sigma,
+            None,
         ),
     )
 
@@ -195,9 +197,11 @@ def test_run_single_only_sna_smoke(fake_data, monkeypatch, tmp_path):
             flat_samples,
             model_labels,
             lambda pts: np.zeros(len(np.atleast_2d(pts))),
+            None,
             -25.0,
             0.15,
             dmi_posterior_sigma,
+            None,
         ),
     )
 
