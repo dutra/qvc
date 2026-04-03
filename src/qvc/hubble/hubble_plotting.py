@@ -4375,11 +4375,7 @@ def plot_hubble_residual_normality(
             k2_stat = float(k2_stat)
             p_norm = float(p_norm)
 
-        x_grid = np.linspace(
-            min(-5.0, float(np.min(z_resid)) - 0.3),
-            max(5.0, float(np.max(z_resid)) + 0.3),
-            512,
-        )
+        x_grid = np.linspace(-5.0, 5.0, 512)
         ax_hist.hist(
             z_resid,
             bins=40,
@@ -4396,6 +4392,7 @@ def plot_hubble_residual_normality(
             label=r"$\mathcal{N}(0,1)$",
         )
         ax_hist.axvline(0.0, color="black", ls="--", lw=1.0, alpha=0.8)
+        ax_hist.set_xlim(-5.0, 5.0)
         ax_hist.set_xlabel(r"$\Delta\mu / \sigma_{\Delta\mu}$")
         ax_hist.set_ylabel("Density")
         ax_hist.legend(loc="upper left", frameon=False)
@@ -4603,7 +4600,9 @@ def plot_predicted_vs_actual_M2500(
         actual_M_2500_eff = actual_M_2500
 
     residuals_all = M_2500_pred - actual_M_2500_eff               # mag
-    sigma_all     = np.sqrt(M_2500_pred_err**2 + xerr**2)          # mag; object-level only
+    sigma_all     = np.sqrt(
+        M_2500_pred_err**2 + xerr**2 + sigma_intrinsic**2
+    )  # full chi2 denominator; plotted bars still exclude sigma_int
 
     # Safety mask for nan/inf on global vectors (used for overall outputs only)
     m_global = np.isfinite(residuals_all) & np.isfinite(sigma_all) & (sigma_all > 0)
@@ -4701,16 +4700,22 @@ def plot_predicted_vs_actual_M2500(
         y = M_2500_pred[bin_mask]
         xerr_bin = xerr[bin_mask]
         yerr_bin = M_2500_pred_err[bin_mask]
-        sigma_bin = np.sqrt(xerr_bin**2 + yerr_bin**2)
+        sigma_bin_chi2 = np.sqrt(xerr_bin**2 + yerr_bin**2 + sigma_intrinsic**2)
 
         # residuals (for CSV/diagnostics)
         resid = y - x
         resid_bybin_aligned[bin_mask] = resid
 
-        mask_chi2 = np.isfinite(resid) & np.isfinite(sigma_bin) & (sigma_bin > 0)
+        mask_chi2 = (
+            np.isfinite(resid)
+            & np.isfinite(sigma_bin_chi2)
+            & (sigma_bin_chi2 > 0)
+        )
         if np.any(mask_chi2):
             dof = max(int(np.count_nonzero(mask_chi2)) - 1, 1)
-            chi2_red_bin = float(np.sum((resid[mask_chi2] / sigma_bin[mask_chi2]) ** 2) / dof)
+            chi2_red_bin = float(
+                np.sum((resid[mask_chi2] / sigma_bin_chi2[mask_chi2]) ** 2) / dof
+            )
         else:
             chi2_red_bin = np.nan
 
@@ -5616,17 +5621,20 @@ def plot_predicted_L2500_vs_sigmahat(
     # --- Reference x (built at POSTERIOR-MEDIAN params) ---
     med_arr = agn_model_pack_params(med_params, use_alpha_lambda_term=option_flags["use_alpha_lambda_term"])
     M0_med = med_arr[agn_model_pidx["M0_agn"]]
-    x_log_ref = M_model_agn(
+    x_log_ref = -0.4 * (
+        M_model_agn(
         med_arr, agn_obs_arr, agn_pivot_arr, use_alpha_lambda_term=option_flags["use_alpha_lambda_term"]
-    ) - M0_med
+        ) - M0_med
+    )
     x_ref = 10.0 ** x_log_ref
 
     # x errors for MAIN at median params
     pred_M_err_med = M_model_agn_err(
         med_arr, agn_obs_arr, agn_err_arr, agn_pivot_arr, use_alpha_lambda_term=option_flags["use_alpha_lambda_term"]
     )
-    x_lower = 10.0 ** (x_log_ref - pred_M_err_med)
-    x_upper = 10.0 ** (x_log_ref + pred_M_err_med)
+    x_log_err_med = 0.4 * pred_M_err_med
+    x_lower = 10.0 ** (x_log_ref - x_log_err_med)
+    x_upper = 10.0 ** (x_log_ref + x_log_err_med)
     xerr_asym = np.vstack((x_ref - np.maximum(x_lower, 1e-300),
                            np.maximum(x_upper, x_ref) - x_ref))
 
@@ -5645,18 +5653,21 @@ def plot_predicted_L2500_vs_sigmahat(
 
         # x for SHOW at median params (using ONLY df_calibrators fields)
         obs_show, err_show, piv_show = agn_model_pack_obs(ds, use_alpha_lambda_term=option_flags["use_alpha_lambda_term"])
-        x_log_ref_show = M_model_agn(
+        x_log_ref_show = -0.4 * (
+            M_model_agn(
             med_arr, obs_show, piv_show, use_alpha_lambda_term=option_flags["use_alpha_lambda_term"]
-        ) - M0_med
+            ) - M0_med
+        )
         x_show = 10.0 ** x_log_ref_show
 
         pred_M_err_show = M_model_agn_err(
             med_arr, obs_show, err_show, piv_show, use_alpha_lambda_term=option_flags["use_alpha_lambda_term"]
         )
-        x_log_lower_show = np.min(np.ravel(x_log_ref_show - pred_M_err_show))
-        x_log_upper_show = np.max(np.ravel(x_log_ref_show + pred_M_err_show))
-        x_lower_show = 10.0 ** (x_log_ref_show - pred_M_err_show)
-        x_upper_show = 10.0 ** (x_log_ref_show + pred_M_err_show)
+        x_log_err_show = 0.4 * pred_M_err_show
+        x_log_lower_show = np.min(np.ravel(x_log_ref_show - x_log_err_show))
+        x_log_upper_show = np.max(np.ravel(x_log_ref_show + x_log_err_show))
+        x_lower_show = 10.0 ** (x_log_ref_show - x_log_err_show)
+        x_upper_show = 10.0 ** (x_log_ref_show + x_log_err_show)
     else:
         x_log_lower_show = 0
         x_log_upper_show = 0
@@ -5666,8 +5677,8 @@ def plot_predicted_L2500_vs_sigmahat(
     # --- Grid and band (unchanged) ---
     xcm = np.mean(x_log_ref)
     var_x = np.var(x_log_ref, ddof=1) if np.isfinite(np.var(x_log_ref, ddof=1)) else np.var(x_log_ref) + 1e-8
-    # x_min_err = np.min([np.min(x_log_ref - pred_M_err_med), np.min(x_log_lower_show)])
-    # x_max_err = np.max([np.max(x_log_ref + pred_M_err_med), np.max(x_log_upper_show)])
+    # x_min_err = np.min([np.min(x_log_ref - x_log_err_med), np.min(x_log_lower_show)])
+    # x_max_err = np.max([np.max(x_log_ref + x_log_err_med), np.max(x_log_upper_show)])
     x_min_err = np.min([np.min(x_log_ref), np.min(x_log_lower_show)])
     x_max_err = np.max([np.max(x_log_ref), np.max(x_log_upper_show)])
     print(f"x_log_ref range with errors: {x_min_err:.3f} to {x_max_err:.3f}")
@@ -5893,7 +5904,7 @@ def plot_predicted_L2500_vs_sigmahat(
     slope_grid = np.gradient(ylog_med, x_log_grid)
     f_slope = interp1d(x_log_grid, slope_grid, bounds_error=False, fill_value='extrapolate')
     slope_at_data = f_slope(x_log_ref)
-    sigma_x = np.asarray(pred_M_err_med, dtype=float)
+    sigma_x = np.asarray(x_log_err_med, dtype=float)
     sigma_xy = np.abs(slope_at_data) * np.abs(sigma_x)
     sigma_mu_log = 0.0
     sigma_chi = np.sqrt(sigma_meas**2 + sigma_xy**2 + sigma_mu_log**2)
@@ -5902,27 +5913,61 @@ def plot_predicted_L2500_vs_sigmahat(
     if show_residuals and ax_res is not None:
         good_in = good & d["z"].between(z_range[0], z_range[1]).to_numpy(dtype=bool)
         good_out = good & ~d["z"].between(z_range[0], z_range[1]).to_numpy(dtype=bool)
-        sc = None
         if np.any(good_in):
-            sc = ax_res.scatter(
-                x_ref[good_in], residuals[good_in], s=5, alpha=0.4, c=np.zeros(np.sum(good_in)),
-                cmap='viridis', lw=0.5, zorder=5
+            ax_res.errorbar(
+                x_ref[good_in],
+                residuals[good_in],
+                yerr=sigma_chi[good_in],
+                fmt='o',
+                linestyle='none',
+                markersize=2.8,
+                mfc=(0, 0, 0, 0.4),
+                mec="none",
+                ecolor=(0.2, 0.2, 0.2, 0.18),
+                elinewidth=0.6,
+                capsize=0,
+                zorder=5,
+                label="AGN",
             )
         if np.any(good_out):
-            sc_out = ax_res.scatter(
-                x_ref[good_out], residuals[good_out], s=5, alpha=0.8,
-                c='k', marker='D', edgecolors='k', linewidths=0.6, zorder=6
+            ax_res.errorbar(
+                x_ref[good_out],
+                residuals[good_out],
+                yerr=sigma_chi[good_out],
+                fmt='D',
+                linestyle='none',
+                markersize=2.8,
+                mfc=(0, 0, 0, 0.4),
+                mec="none",
+                ecolor=(0.2, 0.2, 0.2, 0.18),
+                elinewidth=0.6,
+                capsize=0,
+                zorder=6,
+                label="outside z range",
             )
-            if sc is None:
-                sc = sc_out
-        if np.any(good_in) and sc is not None:
-            fig.colorbar(sc, ax=ax_res, orientation='vertical').set_label('alpha_lambda (main)')
 
         ax_res.axhline(0, color='m', linestyle='--', zorder=3)
         ax_res.set_ylabel('Residuals (log)')
         ax_res.set_xlabel(xlabel)
         ax_res.set_xscale('log')
         ax_res.set_ylim(-2.2, 2.2)
+        chi2_red_in = np.nan
+        if np.any(good_in):
+            chi2_red_in, _ = reduced_chi_squared(
+                residuals[good_in],
+                sigma_chi[good_in],
+                n_params=len(model_labels) - 1,
+            )
+        if np.isfinite(chi2_red_in):
+            ax_res.text(
+                0.98,
+                0.95,
+                rf"$\chi^2_\nu={chi2_red_in:.2f}$",
+                color="red",
+                ha="right",
+                va="top",
+                transform=ax_res.transAxes,
+            )
 
 
     # Save & return

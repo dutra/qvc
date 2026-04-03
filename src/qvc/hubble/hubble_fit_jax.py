@@ -789,6 +789,18 @@ def run_single_jax(
     )
 
     plot_cosmo_corner(None, flat_samples, cosmo_model, z_pivot_sna, z_pivot_agn, show=False, plot_path=plot_path, speed=f"{speed}_jax")
+    plot_predicted_L2500_vs_sigmahat(
+        flat_samples,
+        df_agn_fit,
+        cosmo_model=cosmo_model,
+        z_pivot_agn=z_pivot_agn,
+        debias=False,
+        show_residuals=False,
+        show=False,
+        plot_path=plot_path,
+        df_calibrators=None,
+        z_range=z_range,
+    )
     L_residuals_debiased, L_pred_std_debiased = plot_predicted_L2500_vs_sigmahat(
         flat_samples,
         df_agn_fit,
@@ -796,7 +808,7 @@ def run_single_jax(
         z_pivot_agn=z_pivot_agn,
         debias=True,
         dm_interp=dm_interp,
-        show_residuals=False,
+        show_residuals=True,
         show=False,
         plot_path=plot_path,
         df_calibrators=None,

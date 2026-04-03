@@ -2350,6 +2350,12 @@ def display_results_summary(
         use_redshift_log_f_term=use_redshift_log_f_term,
     )
 
+    def _format_interval(median, lo, hi, ndigits=3):
+        return (
+            f"{median:.{ndigits}f} "
+            f"(+{hi - median:.{ndigits}f}, -{median - lo:.{ndigits}f})"
+        )
+
     # Print the sampled parameter summaries first.
     med = np.median(samples, axis=0)
     lo  = np.percentile(samples, 16, axis=0)
@@ -2394,6 +2400,33 @@ def display_results_summary(
             arr = samples[:, i_wa]
             m = np.median(arr); l = np.percentile(arr, 16); h = np.percentile(arr, 84)
             print(f"{'wa':>15}: {m:.4f} (+{h - m:.4f}, -{m - l:.4f})")
+
+    if "log_f" in model_labels:
+        idx_logf = model_labels.index("log_f")
+        log_f_samples = np.asarray(samples[:, idx_logf], dtype=float)
+        if use_redshift_log_f_term and (AGN_LOGF_Z_PARAM := "gamma_log_f_z") in model_labels:
+            idx_gamma_f = model_labels.index(AGN_LOGF_Z_PARAM)
+            gamma_f_samples = np.asarray(samples[:, idx_gamma_f], dtype=float)
+            log_f_samples = log_f_samples + gamma_f_samples * np.log10(
+                (1.0 + float(z_pivot_agn)) / (1.0 + float(z_pivot_agn))
+            )
+        sigma_mag_samples = np.exp(log_f_samples)
+        sigma_dex_samples = sigma_mag_samples / 2.5
+
+        mag_lo, mag_med, mag_hi = np.percentile(sigma_mag_samples, [16, 50, 84])
+        dex_lo, dex_med, dex_hi = np.percentile(sigma_dex_samples, [16, 50, 84])
+
+        title = f"Intrinsic AGN scatter at z_pivot={float(z_pivot_agn):.2f}"
+        mag_text = _format_interval(mag_med, mag_lo, mag_hi, ndigits=3) + " mag"
+        dex_text = _format_interval(dex_med, dex_lo, dex_hi, ndigits=3) + " dex"
+        width = max(len(title), len(mag_text) + 15, len(dex_text) + 15, 44)
+        border = "+" + "-" * (width + 2) + "+"
+        print(border)
+        print(f"| {title:<{width}} |")
+        print(border)
+        print(f"| {'sigma_int (mag)':<15}{mag_text:<{width - 15}} |")
+        print(f"| {'sigma_int (dex)':<15}{dex_text:<{width - 15}} |")
+        print(border)
     return
 
 def _weighted_quantile(x, q, w=None):

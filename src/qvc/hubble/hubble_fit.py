@@ -699,6 +699,20 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
 
     print("Plotting predicted L2500 vs ...")
 
+    plot_predicted_L2500_vs_sigmahat(
+        flat_samples,
+        df_agn,
+        cosmo_model=cosmo_model,
+        z_pivot_agn=z_pivot_agn,
+        debias=False,
+        show_residuals=False,
+        show=False,
+        plot_path=plot_path,
+        df_calibrators=df_calibrators,
+        z_range=z_range,
+        use_alpha_lambda_term=use_alpha_lambda_term,
+        use_redshift_log_f_term=use_redshift_log_f_term,
+    )
     L_residuals_debiased, L_pred_std_debiased = plot_predicted_L2500_vs_sigmahat(
         flat_samples,
         df_agn,
@@ -706,7 +720,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         z_pivot_agn=z_pivot_agn,
         debias=True,
         dm_interp=dm_interp,
-        show_residuals=False,
+        show_residuals=True,
         show=False,
         plot_path=plot_path,
         df_calibrators=df_calibrators,
