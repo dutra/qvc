@@ -19,13 +19,13 @@ from astropy import units as u
 from matplotlib.lines import Line2D
 from matplotlib.ticker import FuncFormatter, LogLocator
 from scipy.interpolate import RegularGridInterpolator, interp1d
-from scipy.stats import gaussian_kde
+from scipy.stats import gaussian_kde, kurtosis, norm, normaltest, probplot, skew
 from tqdm import tqdm
 
 from qvc.hubble.hubble_model import (M_model_agn, M_model_agn_err, get_model_params, agn_model_pack_params,
     agn_model_pack_obs, agn_model_oidx, agn_model_pidx, agn_model_req_obs, agn_model_req_errs,
     evaluate_log_f, resolve_model_option_flags, get_agn_model_spec, AGN_ALPHA_LAMBDA_PARAM, AGN_ALPHA_LAMBDA_ERR)
-from qvc.hubble.hubble_likelihood import sigma_lens_from_dc
+from qvc.hubble.hubble_likelihood import sigma_lens_from_dc, sigma_mu_from_z_err
 from qvc.hubble.hubble_utils import (
     convert_M2500_to_logL2500,
     cosmo_model_label_latex,
@@ -3455,7 +3455,8 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
                 show_binned_agn=True, show_residuals=True,
                 debias=False, dm_interp=None, show=False, completeness=True, show_true=False, verbose=True,
                 cosmo_model_samples={}, residuals_sigma_clip=None, df_calibrators=None, z_range=(0.44, 3.16),
-                dmi_sigma=None, use_alpha_lambda_term=None, use_redshift_log_f_term=None):
+                dmi_sigma=None, dmi_selection_sigma=None,
+                use_alpha_lambda_term=None, use_redshift_log_f_term=None):
     """
     Hubble diagram (Pantheon+-style):
       • Model line + 68% band in magenta
@@ -3602,7 +3603,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     sigma_lens = sigma_lens_from_dc(df_agn['z'].values, cosmo)
 
     apparent_mag_err = df_agn['apparent_mag_2500_err'].values
-    z_err = df_agn['z_err'].values
+    z_err = sigma_mu_from_z_err(df_agn["z"].values, df_agn["z_err"].values, cosmo)
     m_app_var = apparent_mag_err**2
     lens_var = sigma_lens**2
     z_var = z_err**2
@@ -3634,25 +3635,47 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
                 f"dmi_sigma has shape {sigma_dmi.shape}, but expected {mu_pred_std.shape}."
             )
 
+    sigma_sel = None
+    sigma_sel_floor_mag = 0.05
+    n_sigma_sel_floored = 0
+    if dmi_selection_sigma is not None:
+        sigma_sel = np.asarray(dmi_selection_sigma, dtype=float)
+        if sigma_sel.shape != mu_pred_std.shape:
+            raise ValueError(
+                f"dmi_selection_sigma has shape {sigma_sel.shape}, but expected {mu_pred_std.shape}."
+            )
+        sigma_sel_valid = np.isfinite(sigma_sel) & (sigma_sel > 0.0)
+        n_sigma_sel_floored = int(
+            np.count_nonzero(sigma_sel_valid & (sigma_sel < sigma_sel_floor_mag))
+        )
+        sigma_sel = np.where(
+            sigma_sel_valid,
+            np.maximum(sigma_sel, sigma_sel_floor_mag),
+            np.nan,
+        )
+
     # Residuals (vs. median μ_model)
     mu_interp = np.interp(df_agn["z"].values, z_grid, mu_model_median)
     residuals = mu_pred_median - mu_interp
     residuals_err = mu_pred_std_with_scatter
+    if debias and sigma_sel is not None:
+        use_sigma_sel = np.isfinite(sigma_sel) & (sigma_sel > 0.0)
+        residuals_err = np.where(use_sigma_sel, sigma_sel, residuals_err)
 
-    mu_zscore = np.abs(residuals) / mu_pred_std_with_scatter
+    mu_zscore = np.abs(residuals) / residuals_err
 
     # ----------------- BINNING -----------------
     # Linear-z bins for MAIN & RESIDUALS panel
     bins_linear = np.arange(0.32, np.max(df_agn["z"].values), 0.2)
     print("Using linear-z bins:", bins_linear)
     z_lin_scatter, mu_lin_mean_scatter, mu_lin_sem_scatter, n_lin = _weighted_bin_stats(
-        df_agn["z"].values, mu_pred_median, mu_pred_std_with_scatter, bins_linear
+        df_agn["z"].values, mu_pred_median, residuals_err, bins_linear
     )
     
 
     # NEW: binned residuals (linear-z), used in residual panel
     # z_res_lin_scatter, resid_lin_mean_scatter, resid_lin_sem_scatter, n_res = _weighted_bin_stats(
-    #     df_agn["z"].values, residuals, mu_pred_std_with_scatter, bins_linear
+    #     df_agn["z"].values, residuals, residuals_err, bins_linear
     # )
     z_res_lin_scatter = z_lin_scatter  # same bins
     mu_res_interp = np.interp(z_res_lin_scatter, z_grid, mu_model_median)
@@ -3669,7 +3692,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     bins_log = np.logspace(np.log10(bins_linear[0]), np.log10(bins_linear[-1]), n_bins_log + 1)
     #bins_log = bins_linear
     z_log, mu_log_mean, mu_log_sem, n_log = _weighted_bin_stats(
-        df_agn["z"].values, mu_pred_median, mu_pred_std_with_scatter, bins_log)
+        df_agn["z"].values, mu_pred_median, residuals_err, bins_log)
 
     # ======== Plot ========
     fig = plt.figure(figsize=(9, 7))
@@ -3697,7 +3720,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
 
     # AGN (inside)
     inset_ax.errorbar(
-        df_agn["z"][mask_in], mu_pred_median[mask_in], yerr=mu_pred_std_with_scatter[mask_in],
+        df_agn["z"][mask_in], mu_pred_median[mask_in], yerr=residuals_err[mask_in],
         fmt='o', linestyle='none', markersize=2,
         mfc="black", mec="none",
         ecolor="#666666", elinewidth=0.8,
@@ -3705,7 +3728,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     )
     # AGN (outside, filled diamond)
     inset_ax.errorbar(
-        df_agn["z"][mask_out], mu_pred_median[mask_out], yerr=mu_pred_std_with_scatter[mask_out],
+        df_agn["z"][mask_out], mu_pred_median[mask_out], yerr=residuals_err[mask_out],
         fmt='D', linestyle='none', markersize=2, mfc="black", mec="none", alpha=0.70,
         ecolor="#666666", elinewidth=0.8, zorder=1
     )
@@ -3773,7 +3796,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     # AGN (inside)
     for i in np.where(mask_in)[0]:
         ax.errorbar(
-            df_agn["z"].iloc[i], mu_pred_median[i], yerr=mu_pred_std_with_scatter[i],
+            df_agn["z"].iloc[i], mu_pred_median[i], yerr=residuals_err[i],
             fmt='o', linestyle='none', markersize=3,
             mec="none",
             mfc=(0, 0, 0, 0.3),
@@ -3785,7 +3808,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     # AGN (outside, filled diamond)
     for i in np.where(mask_out)[0]:
         ax.errorbar(
-            df_agn["z"].iloc[i], mu_pred_median[i], yerr=mu_pred_std_with_scatter[i],
+            df_agn["z"].iloc[i], mu_pred_median[i], yerr=residuals_err[i],
             fmt='D', linestyle='none', markersize=3, mfc=(0, 0, 0, 0.4),
             mec="none",
             capsize=2, capthick=0.8,
@@ -3974,7 +3997,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
                 if sigma_dmi is not None:
                     chi2_red_full_plus_sigma_dmi, _ = reduced_chi_squared(
                         residuals,
-                        mu_pred_std_with_scatter,
+                        residuals_err,
                         extra_err=sigma_dmi,
                         n_params=len(model_labels) - 1,
                     )
@@ -4118,6 +4141,9 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     sigma_dmi_var = np.zeros_like(mu_pred_std)
     if sigma_dmi is not None:
         sigma_dmi_var = np.square(sigma_dmi)
+    sigma_sel_var = np.full_like(mu_pred_std, np.nan, dtype=float)
+    if sigma_sel is not None:
+        sigma_sel_var = np.square(sigma_sel)
 
     total_var = m_app_var + lens_var + z_var + pred_m2500_var + intrinsic_var
     total_var_plus_sigma_dmi = total_var + sigma_dmi_var
@@ -4125,6 +4151,11 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     total_var_no_logf_plus_sigma_dmi = total_var_no_logf + sigma_dmi_var
     error_budget_mask = np.isfinite(total_var) & np.isfinite(residuals) & (total_var > 0)
     sigma_dmi_mask = error_budget_mask & np.isfinite(sigma_dmi) if sigma_dmi is not None else None
+    sigma_sel_mask = (
+        error_budget_mask & np.isfinite(sigma_sel) & (sigma_sel > 0.0)
+        if sigma_sel is not None
+        else None
+    )
     if np.any(error_budget_mask):
         def _chi2_red_from_var(var_term):
             mask = error_budget_mask & np.isfinite(var_term) & (var_term > 0)
@@ -4152,6 +4183,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
             {"metric": "chi2_red_no_sigma_lens", "value": _chi2_red_from_var(m_app_var + z_var + pred_m2500_var + intrinsic_var)},
             {"metric": "chi2_red_no_apparent_mag_err", "value": _chi2_red_from_var(lens_var + z_var + pred_m2500_var + intrinsic_var)},
             {"metric": "chi2_red_no_z_err", "value": _chi2_red_from_var(m_app_var + lens_var + pred_m2500_var + intrinsic_var)},
+            {"metric": "chi2_red_sigma_sel", "value": _chi2_red_from_var(sigma_sel_var)},
             {"metric": "median_apparent_mag_err_mag", "value": float(np.median(apparent_mag_err[error_budget_mask]))},
             {"metric": "median_sigma_lens_mag", "value": float(np.median(sigma_lens[error_budget_mask]))},
             {"metric": "median_z_err_mag", "value": float(np.median(z_err[error_budget_mask]))},
@@ -4164,6 +4196,9 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
             {"metric": "median_intrinsic_scatter_mag", "value": float(np.median(intrinsic_scatter[error_budget_mask]))},
             {"metric": "median_mu_pred_std_with_scatter_mag", "value": float(np.median(mu_pred_std_with_scatter[error_budget_mask]))},
             {"metric": "median_sigma_dmi_mag", "value": float(np.median(sigma_dmi[sigma_dmi_mask])) if sigma_dmi_mask is not None and np.any(sigma_dmi_mask) else np.nan},
+            {"metric": "median_sigma_sel_mag", "value": float(np.median(sigma_sel[sigma_sel_mask])) if sigma_sel_mask is not None and np.any(sigma_sel_mask) else np.nan},
+            {"metric": "sigma_sel_floor_mag", "value": float(sigma_sel_floor_mag)},
+            {"metric": "n_sigma_sel_floored", "value": float(n_sigma_sel_floored)},
             {"metric": "median_var_fraction_apparent_mag_err", "value": _median_fraction(m_app_var)},
             {"metric": "median_var_fraction_sigma_lens", "value": _median_fraction(lens_var)},
             {"metric": "median_var_fraction_z_err", "value": _median_fraction(z_var)},
@@ -4192,6 +4227,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
         per_object_budget_df["predicted_M2500_alpha_lambda_term"] = np.sqrt(np.clip(pred_m2500_alpha_lambda_var, 0.0, None))
         per_object_budget_df["intrinsic_scatter_term"] = intrinsic_scatter
         per_object_budget_df["sigma_dmi_term"] = sigma_dmi if sigma_dmi is not None else np.nan
+        per_object_budget_df["sigma_sel_term"] = sigma_sel if sigma_sel is not None else np.nan
         per_object_budget_df["mu_pred_std_no_intrinsic"] = mu_pred_std
         per_object_budget_df["mu_pred_std_with_intrinsic"] = mu_pred_std_with_scatter
         per_object_budget_df["mu_pred_std_with_intrinsic_and_sigma_dmi"] = np.sqrt(total_var_plus_sigma_dmi)
@@ -4211,6 +4247,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
             "predicted_M2500_alpha_lambda_term",
             "intrinsic_scatter_term",
             "sigma_dmi_term",
+            "sigma_sel_term",
             "mu_pred_std_no_intrinsic",
             "mu_pred_std_with_intrinsic",
             "mu_pred_std_no_intrinsic_and_sigma_dmi",
@@ -4297,7 +4334,112 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
                 npca_qso = df_agn.iloc[idx].get('npca_qso', 'N/A')
                 print(f"\tz: {z:.2f} | object_id: {object_id} | npca_qso: {npca_qso} | SDSS: {sdss_name} | RA: {ra:.5f} | DEC: {dec:.5f} | Residual: {residuals[idx]:.1f}")
 
-    return residuals, residuals_err, mu_pred_median, mu_pred_std, mu_pred_std_with_scatter
+    return residuals, residuals_err, mu_pred_median, mu_pred_std, residuals_err
+
+
+def plot_hubble_residual_normality(
+    residuals,
+    residuals_err,
+    *,
+    plot_path="plots/hubble",
+    show=False,
+    filename="hubble_residual_normality.pdf",
+):
+    """Plot histogram and normal Q-Q diagnostics for normalized Hubble residuals."""
+
+    residuals = np.asarray(residuals, dtype=float)
+    residuals_err = np.asarray(residuals_err, dtype=float)
+    mask = np.isfinite(residuals) & np.isfinite(residuals_err) & (residuals_err > 0.0)
+    z_resid = residuals[mask] / residuals_err[mask]
+
+    fig, (ax_hist, ax_qq) = plt.subplots(1, 2, figsize=(10.8, 4.8))
+    if z_resid.size == 0:
+        ax_hist.text(
+            0.5,
+            0.5,
+            "No finite normalized residuals",
+            ha="center",
+            va="center",
+            transform=ax_hist.transAxes,
+        )
+        ax_qq.set_axis_off()
+    else:
+        z_mean = float(np.mean(z_resid))
+        z_std = float(np.std(z_resid, ddof=1)) if z_resid.size > 1 else np.nan
+        z_skew = float(skew(z_resid, bias=False)) if z_resid.size > 2 else np.nan
+        z_kurt = float(kurtosis(z_resid, fisher=True, bias=False)) if z_resid.size > 3 else np.nan
+        k2_stat = np.nan
+        p_norm = np.nan
+        if z_resid.size >= 8:
+            k2_stat, p_norm = normaltest(z_resid)
+            k2_stat = float(k2_stat)
+            p_norm = float(p_norm)
+
+        x_grid = np.linspace(
+            min(-5.0, float(np.min(z_resid)) - 0.3),
+            max(5.0, float(np.max(z_resid)) + 0.3),
+            512,
+        )
+        ax_hist.hist(
+            z_resid,
+            bins=40,
+            density=True,
+            color="0.35",
+            alpha=0.35,
+            edgecolor="white",
+        )
+        ax_hist.plot(
+            x_grid,
+            norm.pdf(x_grid, loc=0.0, scale=1.0),
+            color="black",
+            lw=1.8,
+            label=r"$\mathcal{N}(0,1)$",
+        )
+        ax_hist.axvline(0.0, color="black", ls="--", lw=1.0, alpha=0.8)
+        ax_hist.set_xlabel(r"$\Delta\mu / \sigma_{\Delta\mu}$")
+        ax_hist.set_ylabel("Density")
+        ax_hist.legend(loc="upper left", frameon=False)
+        ax_hist.text(
+            0.98,
+            0.98,
+            (
+                f"N={z_resid.size}\n"
+                f"mean={z_mean:.2f}\n"
+                f"std={z_std:.2f}\n"
+                f"skew={z_skew:.2f}\n"
+                f"kurt={z_kurt:.2f}\n"
+                f"K2 p={p_norm:.2g}"
+            ),
+            ha="right",
+            va="top",
+            transform=ax_hist.transAxes,
+        )
+
+        osm, osr = probplot(z_resid, dist="norm", fit=False)
+        q_lo = min(float(np.min(osm)), float(np.min(osr)))
+        q_hi = max(float(np.max(osm)), float(np.max(osr)))
+        ax_qq.scatter(
+            osm,
+            osr,
+            s=10,
+            alpha=0.55,
+            color="0.25",
+            linewidths=0,
+            rasterized=True,
+        )
+        ax_qq.plot([q_lo, q_hi], [q_lo, q_hi], color="tab:red", lw=1.5)
+        ax_qq.set_xlabel("Normal quantiles")
+        ax_qq.set_ylabel("Observed quantiles")
+
+    fig.tight_layout()
+    diagnostics_path = os.path.join(plot_path or "plots/hubble", "diagnostics")
+    return _save_figure(
+        fig,
+        os.path.join(diagnostics_path, filename),
+        dpi=200,
+        show=show,
+    )
+
 
 def plot_predicted_vs_actual_M2500(
     flat_samples,

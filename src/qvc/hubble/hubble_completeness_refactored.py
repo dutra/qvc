@@ -1262,7 +1262,7 @@ def get_completeness_function_4d_fhost_alpha(
 
 
 import numpy as np
-from scipy.interpolate import NearestNDInterpolator, RegularGridInterpolator
+from scipy.interpolate import LinearNDInterpolator, NearestNDInterpolator, RegularGridInterpolator
 
 
 def make_dm_function(
@@ -1279,18 +1279,77 @@ def make_dm_function(
     lowess_min_points=10,
 ):
     """
-    Build a 1D mean debias interpolator dm(z) for plotting/debiased magnitudes.
+    Build a mean debias interpolator for plotting/debiased magnitudes.
 
     The returned callable accepts the historical point-array interface used by
-    the plotting code, but only the first column (redshift) is used.
+    the plotting code:
+      [z, m_2500]
+      [z, m_2500, f_host_2500]
+      [z, m_2500, f_host_2500, alpha_lambda]
+
+    If host/color columns are provided, they are included in the interpolation;
+    otherwise this falls back to the historical dm(z) trend.
     """
-    m = np.asarray(m)
-    z = np.asarray(z)
-    dm = np.asarray(dm)
+    m = np.asarray(m, dtype=float)
+    z = np.asarray(z, dtype=float)
+    dm = np.asarray(dm, dtype=float)
     mask = np.isfinite(m) & np.isfinite(z) & np.isfinite(dm)
-    z, dm = z[mask], dm[mask]
+    if f_host_2500 is not None:
+        f_host_2500 = np.asarray(f_host_2500, dtype=float)
+        mask &= np.isfinite(f_host_2500)
+    if alpha_lambda is not None:
+        alpha_lambda = np.asarray(alpha_lambda, dtype=float)
+        mask &= np.isfinite(alpha_lambda)
+
+    m, z, dm = m[mask], z[mask], dm[mask]
+    if f_host_2500 is not None:
+        f_host_2500 = f_host_2500[mask]
+    if alpha_lambda is not None:
+        alpha_lambda = alpha_lambda[mask]
     if z.size == 0:
         raise ValueError("make_dm_function requires at least one finite (m, z, dm) point.")
+
+    if f_host_2500 is not None:
+        feature_cols = [z, m, f_host_2500]
+        if alpha_lambda is not None:
+            feature_cols.append(alpha_lambda)
+        train_pts = np.column_stack(feature_cols)
+        center = np.median(train_pts, axis=0)
+        scale = 0.5 * (
+            np.percentile(train_pts, 84, axis=0)
+            - np.percentile(train_pts, 16, axis=0)
+        )
+        scale = np.where(np.isfinite(scale) & (scale > 0.0), scale, 1.0)
+        train_pts_scaled = (train_pts - center) / scale
+        try:
+            linear_interp = LinearNDInterpolator(train_pts_scaled, dm, fill_value=np.nan)
+        except Exception as exc:
+            print(
+                "Warning: failed to build LinearNDInterpolator for debias correction; "
+                f"falling back to nearest-neighbor interpolation only. Error: {exc}"
+            )
+            linear_interp = None
+        nearest_interp = NearestNDInterpolator(train_pts_scaled, dm)
+
+        def interp_features(pts):
+            pts = np.asarray(pts, dtype=float)
+            arr = np.atleast_2d(pts)
+            expected_dim = train_pts.shape[1]
+            if arr.shape[1] < expected_dim:
+                raise ValueError(
+                    f"dm_interp expected at least {expected_dim} columns, got {arr.shape[1]}."
+                )
+            arr_scaled = (arr[:, :expected_dim] - center) / scale
+            if linear_interp is None:
+                out = np.full(arr_scaled.shape[0], np.nan, dtype=float)
+            else:
+                out = np.asarray(linear_interp(arr_scaled), dtype=float)
+            missing = ~np.isfinite(out)
+            if np.any(missing):
+                out[missing] = np.asarray(nearest_interp(arr_scaled[missing]), dtype=float)
+            return out if np.ndim(pts) > 1 else out[0]
+
+        return interp_features
 
     trend = build_smooth_trend_1d(
         z,

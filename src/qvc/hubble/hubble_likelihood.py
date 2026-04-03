@@ -70,14 +70,17 @@ def completeness_loglike(
 
     # Debias for plotting (the scatter is mostly in M, not Malmquist)
     m_Z = np.trapezoid(wpdf_model * m_grid[None, :], m_grid, axis=1)
+    m2_Z = np.trapezoid(wpdf_model * m_grid[None, :] ** 2, m_grid, axis=1)
     # If the selection integral is effectively zero, the conditional
     # expectation is undefined. In that case keep the debias correction at
     # zero instead of manufacturing huge magnitude shifts from tiny/tiny.
     valid_Z = Z > (100.0 * tiny)
     E = np.where(valid_Z, m_Z / Z, m_model)
+    E2 = np.where(valid_Z, m2_Z / Z, m_model**2)
     dmi_obs = E - m_model
+    sigma_sel = np.sqrt(np.clip(E2 - E**2, 0.0, None))
 
-    blob = np.vstack([Z.astype(float), dmi_obs.astype(float)])
+    blob = np.vstack([Z.astype(float), dmi_obs.astype(float), sigma_sel.astype(float)])
     loglike_terms = np.log(Z)
 
     return np.sum(loglike_terms), blob
@@ -86,8 +89,8 @@ def completeness_loglike(
 
 # --- Log-likelihood ---
 def empty_blob(N_obj):
-    # FIX: always return (2, N_obj) float array
-    return np.zeros((2, N_obj), dtype=float)
+    # FIX: always return (3, N_obj) float array
+    return np.zeros((3, N_obj), dtype=float)
 
 def log_likelihood_pantheon_cephdist(params, pantheon_data, _sna_L, _sna_Lower, _sna_LogdetCov,
                                      cosmo, use_full_cov):
@@ -143,6 +146,21 @@ def sigma_lens_from_dc(z, cosmo, amp=0.06, z_ref=1.0, power=3/2):
     dc_1 = float(cosmo.comoving_distance(z_ref).value)
     ratio = np.clip(dc / dc_1, 0.0, None)
     return amp * ratio**power
+
+
+def sigma_mu_from_z_err(z, z_err, cosmo):
+    """
+    Project redshift uncertainty onto distance-modulus uncertainty with a
+    central finite difference in z.
+    """
+    z = np.asarray(z, dtype=float)
+    z_err = np.asarray(z_err, dtype=float)
+    z_lo = np.maximum(z - z_err, 1e-8)
+    z_hi = np.maximum(z + z_err, z_lo + 1e-8)
+    mu_lo = cosmo.distmod(z_lo).value
+    mu_hi = cosmo.distmod(z_hi).value
+    sigma_mu = 0.5 * np.abs(mu_hi - mu_lo)
+    return np.where(np.isfinite(z_err) & (z_err > 0.0), sigma_mu, 0.0)
 
 def log_likelihood(theta, *, agn_data, pantheon_data, 
                    _sna_L, _sna_Lower, _sna_LogdetCov,
@@ -219,6 +237,7 @@ def log_likelihood(theta, *, agn_data, pantheon_data,
         # return -np.inf, empty_blob(N_obj)
     
     sigma_lens = sigma_lens_from_dc(z, cosmo)   # vector (same shape as z)
+    sigma_mu_z = sigma_mu_from_z_err(z, z_err, cosmo)
 
     log_f_eff = evaluate_log_f(
         params, z, z_pivot=z_pivot_agn, use_redshift_log_f_term=use_redshift_log_f_term
@@ -226,7 +245,7 @@ def log_likelihood(theta, *, agn_data, pantheon_data,
     mu_err_sq = (
         m_err**2 +
         M_pred_err**2 +
-        z_err**2 +
+        sigma_mu_z**2 +
         #(0.055 * z)**2 +
         sigma_lens**2 +
         #(np.exp(params['log_f']) + params['sigma_b'] * (1+z))**2

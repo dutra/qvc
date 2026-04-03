@@ -66,6 +66,7 @@ from qvc.hubble.hubble_plotting import (
     plot_full_residuals,
     plot_full_residuals_rz,
     plot_hubble,
+    plot_hubble_residual_normality,
     plot_predicted_L2500_vs_sigmahat,
     plot_predicted_vs_actual_M2500,
     plot_redshift_histograms,
@@ -195,6 +196,15 @@ def validate_resume_checkpoint(results, checkpoint_file, ndim, n_agn):
             raise RuntimeError(
                 f"Resume checkpoint '{checkpoint_file}' is incompatible with the current AGN selection: "
                 f"dmi_posterior_median has length {value.shape[0]}, but the current run has {n_agn} AGN objects. "
+                "Delete the checkpoint or use a new output filename."
+            )
+    if "dmi_selection_sigma_posterior_median" in results:
+        value = np.asarray(results["dmi_selection_sigma_posterior_median"])
+        if value.ndim != 0 and value.shape[0] != n_agn:
+            raise RuntimeError(
+                f"Resume checkpoint '{checkpoint_file}' is incompatible with the current AGN selection: "
+                f"dmi_selection_sigma_posterior_median has length {value.shape[0]}, "
+                f"but the current run has {n_agn} AGN objects. "
                 "Delete the checkpoint or use a new output filename."
             )
     value = np.asarray(results["dmi_posterior_sigma"])
@@ -365,6 +375,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
         dmi_max_w = r["dmi_max_w"]
         dmi_posterior_median = r.get("dmi_posterior_median", dmi_max_w)
         dmi_posterior_sigma = r["dmi_posterior_sigma"]
+        dmi_selection_sigma_posterior_median = r.get("dmi_selection_sigma_posterior_median")
         logZ = r["logZ"]
         logZerr = r["logZerr"]
         integrals_max_w = r["integrals_max_w"]
@@ -489,6 +500,10 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
             np.percentile(flat_blobs[:, 1, :], 84, axis=0)
             - np.percentile(flat_blobs[:, 1, :], 16, axis=0)
         )
+        if completeness and flat_blobs.ndim == 3 and flat_blobs.shape[1] >= 3:
+            dmi_selection_sigma_posterior_median = np.median(flat_blobs[:, 2, :], axis=0)
+        else:
+            dmi_selection_sigma_posterior_median = None
         
         print("\nHighest-weight (posterior) sample:")
         print("  idx:", idx_max_weight)
@@ -528,6 +543,11 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
         print("  median |dmi_max_w|:", float(np.nanmedian(np.abs(dmi_max_w))))
         print("  median |dmi_posterior_median|:", float(np.nanmedian(np.abs(dmi_posterior_median))))
         print("  median sigma_dmi:", float(np.nanmedian(dmi_posterior_sigma)))
+        if dmi_selection_sigma_posterior_median is not None:
+            print(
+                "  median sigma_sel:",
+                float(np.nanmedian(dmi_selection_sigma_posterior_median)),
+            )
 
         save_chains(
             checkpoint_file,
@@ -535,6 +555,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
             dmi_max_w=dmi_max_w,
             dmi_posterior_median=dmi_posterior_median,
             dmi_posterior_sigma=dmi_posterior_sigma,
+            dmi_selection_sigma_posterior_median=dmi_selection_sigma_posterior_median,
             logZ=logZ,
             logZerr=logZerr,
             integrals_max_w=integrals_max_w,
@@ -550,6 +571,15 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
         f_host_2500=df_agn["f_host_2500"].values if "f_host_2500" in df_agn.columns else None,
         alpha_lambda=df_agn["alpha_lambda"].values if "alpha_lambda" in df_agn.columns else None,
     )
+    dmi_selection_sigma_interp = None
+    if dmi_selection_sigma_posterior_median is not None:
+        dmi_selection_sigma_interp = make_dm_function(
+            df_agn['apparent_mag_2500'].values,
+            df_agn['z'].values,
+            dmi_selection_sigma_posterior_median,
+            f_host_2500=df_agn["f_host_2500"].values if "f_host_2500" in df_agn.columns else None,
+            alpha_lambda=df_agn["alpha_lambda"].values if "alpha_lambda" in df_agn.columns else None,
+        )
 
     print("Plotting completeness diagnostics...")
 
@@ -562,7 +592,16 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
         plot_path=plot_path,
     )
 
-    return flat_samples, model_labels, dm_interp, logZ, logZerr, dmi_posterior_sigma
+    return (
+        flat_samples,
+        model_labels,
+        dm_interp,
+        dmi_selection_sigma_interp,
+        logZ,
+        logZerr,
+        dmi_posterior_sigma,
+        dmi_selection_sigma_posterior_median,
+    )
 
 
 def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, 
@@ -611,7 +650,16 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
 
     report_pivots(df_agn_fit_selection)
 
-    flat_samples, model_labels, dm_interp, logZ, logZerr, dmi_posterior_sigma = run_mcmc_pipeline(
+    (
+        flat_samples,
+        model_labels,
+        dm_interp,
+        dmi_selection_sigma_interp,
+        logZ,
+        logZerr,
+        dmi_posterior_sigma,
+        dmi_selection_sigma_posterior_median,
+    ) = run_mcmc_pipeline(
                                                         df_agn_fit_selection, df_agn_all,
                                                         df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
                                                         df_calibrators=df_calibrators,
@@ -683,6 +731,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
 
     print("Plotting Hubble diagram...")
     dmi_posterior_sigma_full = None
+    dmi_selection_sigma_full = None
     if uniform_redshift_distribution:
         print(
             "Uniform-redshift selection uses resampling with replacement; "
@@ -707,12 +756,33 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         dmi_posterior_sigma_full[df_agn_index_positions.loc[fit_indices].to_numpy()] = np.asarray(
             dmi_posterior_sigma, dtype=float
         )
+        if dmi_selection_sigma_posterior_median is not None:
+            dmi_selection_sigma_full = np.full(len(df_agn), np.nan, dtype=float)
+            dmi_selection_sigma_full[df_agn_index_positions.loc[fit_indices].to_numpy()] = np.asarray(
+                dmi_selection_sigma_posterior_median,
+                dtype=float,
+            )
+    if dmi_selection_sigma_interp is not None:
+        interp_cols = [
+            np.asarray(df_agn["z"].values, dtype=float),
+            np.asarray(df_agn["apparent_mag_2500"].values, dtype=float),
+        ]
+        if "f_host_2500" in df_agn.columns:
+            interp_cols.append(np.asarray(df_agn["f_host_2500"].values, dtype=float))
+            if "alpha_lambda" in df_agn.columns:
+                interp_cols.append(np.asarray(df_agn["alpha_lambda"].values, dtype=float))
+        dmi_selection_sigma_full = np.asarray(
+            dmi_selection_sigma_interp(np.column_stack(interp_cols)),
+            dtype=float,
+        )
     # Debiased (Bias corrected)
     r = plot_hubble(flat_samples, df_agn, df_pantheon, 
                     cosmo_model=cosmo_model, z_pivot_agn=z_pivot_agn, 
                     show_true=False, show=False, debias=True, dm_interp=dm_interp, plot_path=plot_path,
                     cosmo_model_samples=cosmo_model_joint_samples, verbose=verbose, residuals_sigma_clip=residuals_sigma_clip,
-                    df_calibrators=df_calibrators, dmi_sigma=dmi_posterior_sigma_full,
+                    df_calibrators=df_calibrators,
+                    dmi_sigma=dmi_posterior_sigma_full,
+                    dmi_selection_sigma=dmi_selection_sigma_full,
                     use_alpha_lambda_term=use_alpha_lambda_term,
                     use_redshift_log_f_term=use_redshift_log_f_term)
     debiased_residuals, debiased_residuals_err, mu_pred_median_debiased, mu_pred_std_debiased, mu_pred_std_debiased_with_scatter = r
@@ -728,6 +798,13 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         debiased_residuals,
         mu_pred_std_debiased_with_scatter,
         n_params=len(model_labels)-1,
+    )
+    plot_hubble_residual_normality(
+        debiased_residuals,
+        mu_pred_std_debiased_with_scatter,
+        plot_path=plot_path,
+        show=False,
+        filename="hubble_residual_normality_debiased.pdf",
     )
 
 

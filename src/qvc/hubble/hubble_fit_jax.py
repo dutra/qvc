@@ -186,6 +186,23 @@ def _distance_modulus_jax(z: jnp.ndarray, params: dict[str, Any], cosmo_model: s
     return mu, dc
 
 
+def _sigma_mu_from_z_err_jax(
+    z: jnp.ndarray,
+    z_err: jnp.ndarray,
+    params: dict[str, Any],
+    cosmo_model: str,
+    zp: float,
+) -> jnp.ndarray:
+    z = jnp.asarray(z)
+    z_err = jnp.asarray(z_err)
+    z_lo = jnp.maximum(z - z_err, 1e-8)
+    z_hi = jnp.maximum(z + z_err, z_lo + 1e-8)
+    mu_lo, _ = _distance_modulus_jax(z_lo, params, cosmo_model, zp)
+    mu_hi, _ = _distance_modulus_jax(z_hi, params, cosmo_model, zp)
+    sigma_mu = 0.5 * jnp.abs(mu_hi - mu_lo)
+    return jnp.where(jnp.isfinite(z_err) & (z_err > 0.0), sigma_mu, 0.0)
+
+
 def _prepare_completeness_for_jax(completeness_params):
     if completeness_params is None:
         return None
@@ -442,10 +459,17 @@ def _log_likelihood_jax(
     z_agn = agn_data_jax["z"]
     mu_cosmo, dc = _distance_modulus_jax(z_agn, params, cosmo_model, z_pivot_agn)
     sigma_lens = _sigma_lens_from_dc_jax(z_agn, dc)
+    sigma_mu_z = _sigma_mu_from_z_err_jax(
+        z_agn,
+        agn_data_jax["z_err"],
+        params,
+        cosmo_model,
+        z_pivot_agn,
+    )
     mu_err = jnp.sqrt(
         agn_data_jax["apparent_mag_2500_err"] ** 2
         + M_pred_err**2
-        + agn_data_jax["z_err"] ** 2
+        + sigma_mu_z**2
         + sigma_lens**2
         + jnp.exp(params["log_f"]) ** 2
     )
