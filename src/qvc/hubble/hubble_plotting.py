@@ -5843,21 +5843,25 @@ def plot_predicted_L2500_vs_sigmahat(
         ds = df_calibrators.copy()
 
         M2500_show = ds['apparent_mag_2500'].values - cosmo.distmod(ds['z'].values).value
-        # y for SHOW: actual_logL2500_show (use the same dm_interp built for MAIN)
-        # if debias:
-        #     pts_show = np.column_stack([ds['z'].values, ds['apparent_mag_2500'].values])
-        #     M2500_show = (ds['apparent_mag_2500'].values - dm_interp(pts_show)) - cosmo.distmod(ds['z'].values).value
+        if debias:
+            M2500_show -= _evaluate_dm_interp(
+                dm_interp,
+                ds["z"].values,
+                ds["apparent_mag_2500"].values,
+                f_host_2500=ds.get("f_host_2500"),
+                alpha_lambda=ds.get("alpha_lambda"),
+            )
         actual_logL2500_show = convert_M2500_to_logL2500(M2500_show)
         y_log_meas_err_show = 0.4 * np.asarray(ds['apparent_mag_2500_err'].fillna(0.0), dtype=float)
         yerr_linear_show = (10.0**actual_logL2500_show) * np.log(10.0) * y_log_meas_err_show
 
-        # x for SHOW at median params (using ONLY df_calibrators fields)
-        obs_show, err_show, piv_show = agn_model_pack_obs(ds, use_alpha_lambda_term=option_flags["use_alpha_lambda_term"])
+        # x for SHOW at median params, using the same AGN-sample pivots as the fit.
+        obs_show, err_show, _ = agn_model_pack_obs(ds, use_alpha_lambda_term=option_flags["use_alpha_lambda_term"])
         x_log_ref_show = -0.4 * (
             M_model_agn(
                 med_arr,
                 obs_show,
-                piv_show,
+                agn_pivot_arr,
                 use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
             )
             - M0_med
@@ -5865,7 +5869,11 @@ def plot_predicted_L2500_vs_sigmahat(
         x_show = 10.0 ** x_log_ref_show
 
         pred_M_err_show = M_model_agn_err(
-            med_arr, obs_show, err_show, piv_show, use_alpha_lambda_term=option_flags["use_alpha_lambda_term"]
+            med_arr,
+            obs_show,
+            err_show,
+            agn_pivot_arr,
+            use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
         )
         x_log_err_show = 0.4 * pred_M_err_show
         x_lower_show = 10.0 ** (x_log_ref_show - x_log_err_show)

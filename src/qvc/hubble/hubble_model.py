@@ -172,13 +172,22 @@ def agn_model_pack_params(params_dict, use_alpha_lambda_term=False):
     return params
 
 
+def _fixed_pivot_from_observable(key, values):
+    pivot = float(np.nanmedian(np.asarray(values, dtype=float)))
+    if key == "log_sigma_uv":
+        return float(np.log10(max(np.round(10.0**pivot, 1), 1e-8)))
+    if key == "log_tau_uv_rf":
+        return float(np.log10(max(np.round(10.0**pivot / 100.0) * 100.0, 1e-8)))
+    return pivot
+
+
 def agn_model_pack_obs(obs_dict, use_alpha_lambda_term=False):
     _, req_obs, req_errs = get_agn_model_spec(use_alpha_lambda_term=use_alpha_lambda_term)
     _require(req_obs, obs_dict, "observables")
     _require(req_errs, obs_dict, "errors")
     obs = np.array([obs_dict[k] for k in req_obs], dtype=float)
     err = np.array([obs_dict[k] for k in req_errs], dtype=float)
-    pivots = {k: float(np.median(obs_dict[k])) for k in req_obs}
+    pivots = {k: _fixed_pivot_from_observable(k, obs_dict[k]) for k in req_obs}
     # pivots["log_tau_uv_rf"] = np.log10(500)
     # pivots["log_sigma_uv"]  = np.log10(0.2)
     pivots = np.array([pivots[k] for k in req_obs], dtype=float)
