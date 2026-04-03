@@ -6757,8 +6757,6 @@ def plot_spectral_fraction_vs_redshift(
     ]
     if "f_lines" in df_plot.columns:
         panel_specs.append(("f_lines", r"$f_{\rm lines}$"))
-    if "f_PL" in df_agn.columns:
-        panel_specs.append(("f_PL", r"$f_{\rm PL}$"))
 
     if "f_host_2500" in df_plot.columns:
         panel_specs.append(("f_host_2500", r"$f_{\rm host,2500\,\AA}$"))
