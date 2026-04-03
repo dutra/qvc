@@ -6,6 +6,7 @@ import h5py
 import numpy as np
 import pandas as pd
 import jax.numpy as jnp
+from matplotlib.container import ErrorbarContainer
 from jax import device_get, random
 from jax.tree_util import tree_map
 from numpyro.handlers import seed, trace
@@ -121,6 +122,24 @@ def _make_fake_public_object():
         "cadence_err": {band: 0.5 for band in bands},
         "number_points": {band: 12 for band in bands},
     }
+
+
+def _horizontal_dashed_levels(ax):
+    levels = []
+    for line in ax.lines:
+        ydata = np.asarray(line.get_ydata(), dtype=float)
+        if line.get_linestyle() != "--" or ydata.size == 0 or not np.all(np.isfinite(ydata)):
+            continue
+        if np.allclose(ydata, ydata[0]):
+            levels.append(float(ydata[0]))
+    return levels
+
+
+def _has_cut_errorbar_overlay(ax):
+    return any(
+        isinstance(container, ErrorbarContainer) and container.get_label() == "cut"
+        for container in ax.containers
+    )
 
 
 def test_plot_adf_pvalue_g_diagnostic_writes_pdf(tmp_path, monkeypatch):
@@ -274,6 +293,104 @@ def test_plot_spectral_fraction_vs_redshift_writes_pdf_with_both_host_fractions(
     assert out is not None
     assert os.path.exists(out)
     assert out.endswith("spectral_fraction_vs_redshift.pdf")
+
+
+def test_plot_spectral_fraction_vs_redshift_draws_dashed_cut_thresholds(tmp_path, monkeypatch):
+    monkeypatch.setenv("MPLCONFIGDIR", str(tmp_path / "mplconfig"))
+
+    captured = {}
+    original_save_figure = hubble_plotting._save_figure
+
+    def _capture_save_figure(fig, path, **kwargs):
+        captured["axes"] = list(fig.axes)
+        captured["path"] = path
+        return original_save_figure(fig, path, **kwargs)
+
+    monkeypatch.setattr(hubble_plotting, "_save_figure", _capture_save_figure)
+
+    df = pd.DataFrame(
+        {
+            "z": np.linspace(0.3, 2.2, 24),
+            "f_bc_3000": np.linspace(0.05, 0.25, 24),
+            "f_fe_uv_3000": np.linspace(0.1, 0.4, 24),
+            "f_host_2500": np.linspace(0.25, 0.01, 24),
+        }
+    )
+    cut_thresholds = {"f_bc_3000": 0.2, "f_fe_uv_3000": 0.3, "f_host_2500": 0.15}
+
+    out = hubble_plotting.plot_spectral_fraction_vs_redshift(
+        df,
+        plot_path=str(tmp_path / "figures"),
+        show=False,
+        nbins=6,
+        min_bin_count=3,
+        cut_thresholds=cut_thresholds,
+    )
+
+    assert out is not None
+    assert os.path.exists(out)
+    assert captured["path"].endswith("spectral_fraction_vs_redshift.pdf")
+    assert len(captured["axes"]) == 3
+    for ax, expected in zip(captured["axes"], (0.2, 0.3, 0.15)):
+        assert any(np.isclose(level, expected) for level in _horizontal_dashed_levels(ax))
+
+
+def test_plot_spectral_fraction_vs_redshift_cut_overlay_keeps_thresholds_and_skips_f_lines(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("MPLCONFIGDIR", str(tmp_path / "mplconfig"))
+
+    captured = {}
+    original_save_figure = hubble_plotting._save_figure
+
+    def _capture_save_figure(fig, path, **kwargs):
+        captured["axes"] = list(fig.axes)
+        captured["path"] = path
+        return original_save_figure(fig, path, **kwargs)
+
+    monkeypatch.setattr(hubble_plotting, "_save_figure", _capture_save_figure)
+
+    df = pd.DataFrame(
+        {
+            "z": np.linspace(0.3, 2.2, 24),
+            "f_bc_3000": np.linspace(0.05, 0.25, 24),
+            "f_fe_uv_3000": np.linspace(0.1, 0.4, 24),
+            "f_na": np.linspace(0.02, 0.12, 24),
+            "f_host_2500": np.linspace(0.25, 0.01, 24),
+        }
+    )
+    df_cut_sources = pd.DataFrame(
+        {
+            "z": np.linspace(0.4, 2.0, 6),
+            "f_bc_3000": np.linspace(0.12, 0.22, 6),
+            "f_fe_uv_3000": np.linspace(0.18, 0.35, 6),
+            "f_na": np.linspace(0.03, 0.09, 6),
+            "f_host_2500": np.linspace(0.2, 0.04, 6),
+        }
+    )
+    cut_thresholds = {"f_bc_3000": 0.2, "f_fe_uv_3000": 0.3, "f_host_2500": 0.15}
+
+    out = hubble_plotting.plot_spectral_fraction_vs_redshift(
+        df,
+        plot_path=str(tmp_path / "figures"),
+        show=False,
+        nbins=6,
+        min_bin_count=3,
+        df_cut_sources=df_cut_sources,
+        filename="spectral_fraction_vs_redshift_cuts.pdf",
+        cut_thresholds=cut_thresholds,
+    )
+
+    assert out is not None
+    assert os.path.exists(out)
+    assert captured["path"].endswith("spectral_fraction_vs_redshift_cuts.pdf")
+    assert len(captured["axes"]) == 4
+    assert any(np.isclose(level, 0.2) for level in _horizontal_dashed_levels(captured["axes"][0]))
+    assert any(np.isclose(level, 0.3) for level in _horizontal_dashed_levels(captured["axes"][1]))
+    assert _horizontal_dashed_levels(captured["axes"][2]) == []
+    assert any(np.isclose(level, 0.15) for level in _horizontal_dashed_levels(captured["axes"][3]))
+    assert all(_has_cut_errorbar_overlay(ax) for ax in captured["axes"])
 
 
 def test_plot_spectral_fraction_vs_redshift_ignores_f_pl_panel(tmp_path, monkeypatch):

@@ -6793,6 +6793,7 @@ def plot_spectral_fraction_vs_redshift(
     z_range=(0.44, 3.16),
     df_cut_sources=None,
     filename="spectral_fraction_vs_redshift.pdf",
+    cut_thresholds=None,
 ):
     """Plot available spectral fractions against redshift."""
     required = {"z", "f_bc_3000", "f_fe_uv_3000", "f_host_2500"}
@@ -6928,8 +6929,8 @@ def plot_spectral_fraction_vs_redshift(
                     yerr=yerr_plot,
                     fmt="x",
                     markersize=4,
-                    alpha=0.6,
-                    color="tab:red",
+                    alpha=0.7,
+                    color="#E74C3C",
                     elinewidth=0.7,
                     capsize=0,
                     zorder=2,
@@ -6937,10 +6938,22 @@ def plot_spectral_fraction_vs_redshift(
                     rasterized=True,
                 )
 
+        threshold = None if cut_thresholds is None else cut_thresholds.get(col)
+        if threshold is not None and np.isfinite(threshold):
+            ax.axhline(
+                threshold,
+                color="gray",
+                linestyle="--",
+                linewidth=3,
+                alpha=1,
+                zorder=1,
+                label="cut threshold",
+            )
+
         ax.set_xlabel(r"$z$")
         ax.set_ylabel("Component fraction" if i_ax == 0 else "")
         ax.set_yscale("log")
-        ax.set_ylim(1e-2, 1e0)
+        ax.set_ylim(4e-3, 8e0)
         ax.legend(loc="upper right", frameon=False)
 
     fig.tight_layout()

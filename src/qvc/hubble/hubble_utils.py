@@ -1749,11 +1749,17 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
     if {"z", "f_bc_3000", "f_fe_uv_3000"}.issubset(df.columns) and (
         "f_host_center" in df.columns or "f_host_2500" in df.columns
     ):
+        spectral_fraction_cut_thresholds = {
+            "f_bc_3000": bc_frac_cut,
+            "f_fe_uv_3000": iron_frac_cut,
+            "f_host_2500": fhost_cut,
+        }
         plot_spectral_fraction_vs_redshift(
             df,
             plot_path=plot_path,
             show=False,
             filename="spectral_fraction_vs_redshift_postcut.pdf",
+            cut_thresholds=spectral_fraction_cut_thresholds,
         )
         if "object_id" in df_all.columns and "object_id" in df.columns:
             cut_object_ids = set(df["object_id"].astype(str))
@@ -1767,6 +1773,7 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
                 z_range=z_range,
                 df_cut_sources=df_cut_sources,
                 filename="spectral_fraction_vs_redshift_cuts.pdf",
+                cut_thresholds=spectral_fraction_cut_thresholds,
             )
     if {"g_raw_mean_slope", "g_resid_mean_slope"}.issubset(df.columns):
         for m2500_cut in (23.0, 22.5, 22.0, 21.5):
