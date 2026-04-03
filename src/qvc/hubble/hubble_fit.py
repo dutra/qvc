@@ -144,15 +144,20 @@ def make_run_tag(
     speed,
     N,
     z_range,
+    completeness=True,
     use_alpha_lambda_term=False,
     use_redshift_log_f_term=False,
 ):
     zmin, zmax = z_range
     n_tag = "all" if N is None else f"N{N}"
     z_tag = f"z{zmin:.2f}_{zmax:.2f}".replace(".", "p")
+    completeness_tag = "" if completeness else "_disable_completeness"
     alpha_tag = "_alphaLam" if use_alpha_lambda_term else ""
     logf_tag = "_logfz" if use_redshift_log_f_term else ""
-    return f"{cosmo_model}_{'sna' if only_sna else 'joint'}_{speed}_{n_tag}_{z_tag}{alpha_tag}{logf_tag}"
+    return (
+        f"{cosmo_model}_{'sna' if only_sna else 'joint'}_{speed}_{n_tag}_{z_tag}"
+        f"{completeness_tag}{alpha_tag}{logf_tag}"
+    )
 
 
 def validate_resume_checkpoint(results, checkpoint_file, ndim, n_agn):
@@ -379,6 +384,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
         speed,
         N,
         z_range,
+        completeness=completeness,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
     )
@@ -748,6 +754,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         speed,
         N,
         z_range,
+        completeness=completeness,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
     )
@@ -1173,6 +1180,7 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
             residuals_sigma_clip=None,
             z_range=(0.44, 3.16),
             speed="production", resume=False, N=None,
+            completeness=True,
             prefix="default", result_prefix="", uniform_redshift_distribution=False,
             completeness_sim_file=DEFAULT_COMPLETENESS_SIM_FILE,
             completeness_mode="2d",
@@ -1182,7 +1190,8 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
     zmin, zmax = z_range
     n_tag = "all" if N is None else f"N{N}"
     z_tag = f"z{zmin:.2f}_{zmax:.2f}".replace(".", "p")
-    compare_run_tag = f"model_compare_{speed}_{n_tag}_{z_tag}"
+    completeness_tag = "" if completeness else "_disable_completeness"
+    compare_run_tag = f"model_compare_{speed}_{n_tag}_{z_tag}{completeness_tag}"
     compare_plot_path = f"plots/hubble/{prefix}/{compare_run_tag}"
     os.makedirs(compare_plot_path, exist_ok=True)
 
@@ -1194,6 +1203,7 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
     for cosmo_model in cosmo_models:
         r = run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, 
                        cosmo_model=cosmo_model, only_sna=False, 
+                       completeness=completeness,
                        resume=resume, speed=speed, N=N,
                        skip_plots=skip_plots,
                        residuals_sigma_clip=residuals_sigma_clip,
@@ -1209,6 +1219,7 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
         #print(f"For model {cosmo_model}, universe age: {age:.3f} Gyr")
         r = run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, 
                        cosmo_model=cosmo_model, only_sna=True, 
+                       completeness=completeness,
                        skip_plots=skip_plots,
                        residuals_sigma_clip=residuals_sigma_clip,
                        z_range=z_range,
@@ -1478,7 +1489,11 @@ if __name__ == "__main__":
         zmin, zmax = args.z_range
         n_tag = "all" if effective_N is None else f"N{effective_N}"
         z_tag = f"z{zmin:.2f}_{zmax:.2f}".replace(".", "p")
-        compare_path = f"plots/hubble/{args.prefix}/single_compare_{args.speed}_{n_tag}_{z_tag}"
+        completeness_tag = "" if not args.disable_completeness else "_disable_completeness"
+        compare_path = (
+            f"plots/hubble/{args.prefix}/single_compare_{args.speed}_{n_tag}_{z_tag}"
+            f"{completeness_tag}"
+        )
         os.makedirs(compare_path, exist_ok=True)
         if len(cosmo_models_dict) >= 2:
             compare_r = compare_models_by_log_evidence_all(
@@ -1497,6 +1512,7 @@ if __name__ == "__main__":
                 residuals_sigma_clip=args.residuals_sigma_clip,
                 z_range=args.z_range,
                 speed=args.speed, resume=args.resume, N=effective_N,
+                completeness=not args.disable_completeness,
                 prefix=args.prefix, result_prefix=args.result_prefix, uniform_redshift_distribution=args.uniform_redshift_distribution,
                 completeness_sim_file=args.completeness_sim_file,
                 completeness_mode=args.completeness_mode,

@@ -3113,6 +3113,8 @@ def _save_mapping_hdf5(filename, **kwargs):
     """Save keyword arrays/scalars into a flat HDF5 file."""
     with h5py.File(filename, 'w') as f:
         for name, data in kwargs.items():
+            if data is None:
+                data = np.nan
             if isinstance(data, (np.ndarray, list)):
                 f.create_dataset(name, data=data, compression="gzip")
             else:

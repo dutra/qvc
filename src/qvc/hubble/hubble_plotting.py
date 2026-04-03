@@ -5843,26 +5843,82 @@ def plot_predicted_L2500_vs_sigmahat(
     ax.plot(x_grid, 10**ylog_med, color=color, lw=2.0, zorder=10, label='best-fit model')
 
     # --- Suberlak+2021 comparison in the same luminosity-space x convention ---
-    C = 0.035 + 0.118; C_err = np.sqrt(0.007**2 + 0.003**2)
+    # Suberlak+2021 gives separate luminosity slopes for log SF_inf and log tau.
+    # Convert those into d log L / d log x for
+    # x = (sigma/sigma0)^alpha_L (tau/tau0)^beta_L.
+    #
+    # Also plot a second variant that assumes fixed Eddington ratio, so
+    # log M_BH contributes as log M_BH ∝ log L ∝ -0.4 M_i.
+    c_tau_suberlak = 0.035
+    c_tau_suberlak_err = 0.007
+    d_tau_suberlak = 0.141
+    c_sigma_suberlak = 0.118
+    c_sigma_suberlak_err = 0.003
+    d_sigma_suberlak = 0.118
+    alpha_agn_L = med_params["alpha_agn"] * (-1.0 / 2.5)
+    beta_agn_L = med_params["beta_agn"] * (-1.0 / 2.5)
     xcm = float(np.nanmean(x_log_ref))
     ylog_anchor = np.interp(xcm, x_log_grid, ylog_med)
     L_anchor = 10.0**ylog_anchor
     x_anchor = 10.0**xcm
-    sub_slope = 6.25 * C
-    L_scale = L_anchor / (x_anchor ** sub_slope)
-    y_central = L_scale * (x_grid ** sub_slope)
-    rng = np.random.default_rng(42)
-    C_samps = rng.normal(loc=C, scale=C_err, size=100)
-    sub_slope_samps = 6.25 * C_samps
-    curves = (
-        L_anchor
-        / (x_anchor ** sub_slope_samps[:, None])
-        * (x_grid[None, :] ** sub_slope_samps[:, None])
+
+    def _plot_suberlak_projection(
+        c_sigma,
+        c_tau,
+        *,
+        c_sigma_err,
+        c_tau_err,
+        color,
+        label,
+    ):
+        suberlak_denom = alpha_agn_L * c_sigma + beta_agn_L * c_tau
+        if not np.isfinite(suberlak_denom) or np.abs(suberlak_denom) < 1e-8:
+            print(
+                "[WARNING] Skipping Suberlak+2021 overlay because the converted "
+                f"slope denominator is invalid: {suberlak_denom}"
+            )
+            return
+        sub_slope = -0.4 / suberlak_denom
+        y_central = L_anchor * (x_grid / x_anchor) ** sub_slope
+
+        rng = np.random.default_rng(42)
+        c_sigma_samps = rng.normal(
+            loc=c_sigma,
+            scale=c_sigma_err,
+            size=500,
+        )
+        c_tau_samps = rng.normal(
+            loc=c_tau,
+            scale=c_tau_err,
+            size=500,
+        )
+        denom_samps = alpha_agn_L * c_sigma_samps + beta_agn_L * c_tau_samps
+        valid_sub_samps = np.isfinite(denom_samps) & (np.abs(denom_samps) >= 1e-8)
+        sub_slope_samps = -0.4 / denom_samps[valid_sub_samps]
+        if sub_slope_samps.size == 0:
+            return
+        curves = L_anchor * (x_grid[None, :] / x_anchor) ** sub_slope_samps[:, None]
+        sub_lo, sub_hi = np.percentile(curves, [16, 84], axis=0)
+        ax.plot(x_grid, y_central, color=color, lw=2.0, zorder=10,
+                label=label, linestyle='--')
+        ax.fill_between(x_grid, sub_lo, sub_hi, color=color, alpha=0.25, zorder=8)
+
+    _plot_suberlak_projection(
+        c_sigma_suberlak,
+        c_tau_suberlak,
+        c_sigma_err=c_sigma_suberlak_err,
+        c_tau_err=c_tau_suberlak_err,
+        color='c',
+        label='Suberlak+2021 relation',
     )
-    sub_lo, sub_hi = np.percentile(curves, [16, 84], axis=0)
-    ax.plot(x_grid, y_central, color='c', lw=2.0, zorder=10,
-            label='Suberlak+2021 relation', linestyle='--')
-    ax.fill_between(x_grid, sub_lo, sub_hi, color='c', alpha=0.3, zorder=8)
+    # _plot_suberlak_projection(
+    #     c_sigma_suberlak - 0.4 * d_sigma_suberlak,
+    #     c_tau_suberlak - 0.4 * d_tau_suberlak,
+    #     c_sigma_err=c_sigma_suberlak_err,
+    #     c_tau_err=c_tau_suberlak_err,
+    #     color='darkorange',
+    #     label=r'Suberlak+2021, fixed $\lambda_{\rm Edd}$',
+    # )
 
     # ========= HIGHLIGHT: compute EVERYTHING from df_calibrators =========
     if df_calibrators is not None and len(df_calibrators) > 0:
@@ -5969,8 +6025,6 @@ def plot_predicted_L2500_vs_sigmahat(
     log_tau_uv_rf_pivot = pivots_arr[agn_model_oidx["log_tau_uv_rf"]]
     sigma_uv_pivot  = 10.0 ** log_sigma_uv_pivot
     tau_uv_rf_pivot = 10.0 ** log_tau_uv_rf_pivot
-    alpha_agn_L = med_params['alpha_agn'] * (-1/2.5)
-    beta_agn_L  = med_params['beta_agn']  * (-1/2.5)
     xlabel = rf"$({{\sigma}}_\mathrm{{uv}} \, / \, {sigma_uv_pivot:.1f}\,\mathrm{{mag}})^{{{alpha_agn_L:.2f}}} \, ({{\tau}}_\mathrm{{uv,rf}} \, / \, {tau_uv_rf_pivot:.0f}\,\mathrm{{days}})^{{{beta_agn_L:.2f}}}$"
     ax.set_xlabel(xlabel)
     ax.legend(loc='upper left')
