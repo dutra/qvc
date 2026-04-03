@@ -221,6 +221,37 @@ def _evaluate_dm_interp(dm_interp, z, m2500, *, f_host_2500=None, alpha_lambda=N
     return np.asarray(dm_interp(pts), dtype=float)
 
 
+def _resolve_debias_values(
+    df_agn,
+    *,
+    dm_interp=None,
+    dmi_values=None,
+):
+    """Use direct per-object dmi where available and fall back to dm_interp."""
+    dmi = None
+    if dmi_values is not None:
+        dmi = np.asarray(dmi_values, dtype=float)
+        if dmi.shape != (len(df_agn),):
+            raise ValueError(
+                f"dmi_values has shape {dmi.shape}, but expected {(len(df_agn),)}."
+            )
+    if dm_interp is None:
+        if dmi is None:
+            raise ValueError("Need either dm_interp or dmi_values for debias=True.")
+        return dmi
+
+    dmi_interp = _evaluate_dm_interp(
+        dm_interp,
+        df_agn["z"].values,
+        df_agn["apparent_mag_2500"].values,
+        f_host_2500=df_agn.get("f_host_2500"),
+        alpha_lambda=df_agn.get("alpha_lambda"),
+    )
+    if dmi is None:
+        return dmi_interp
+    return np.where(np.isfinite(dmi), dmi, dmi_interp)
+
+
 def _coerce_dropped_bands(value):
     if isinstance(value, (list, tuple, set)):
         return set(value)
@@ -3455,7 +3486,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
                 show_binned_agn=True, show_residuals=True,
                 debias=False, dm_interp=None, show=False, completeness=True, show_true=False, verbose=True,
                 cosmo_model_samples={}, residuals_sigma_clip=None, df_calibrators=None, z_range=(0.44, 3.16),
-                dmi_sigma=None, dmi_selection_sigma=None,
+                dmi_values=None, dmi_sigma=None, dmi_selection_sigma=None,
                 use_alpha_lambda_term=None, use_redshift_log_f_term=None):
     """
     Hubble diagram (Pantheon+-style):
@@ -3556,13 +3587,10 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
 
     # De-bias (assumes your make_dm_function clips to grid, no extrapolation)
     if debias:
-        #dm_interp = make_dm_function(m_obs, df_agn['z'], dms, method='linear')
-        mu_pred_samples -= _evaluate_dm_interp(
-            dm_interp,
-            df_agn["z"].values,
-            m_obs,
-            f_host_2500=df_agn.get("f_host_2500"),
-            alpha_lambda=df_agn.get("alpha_lambda"),
+        mu_pred_samples -= _resolve_debias_values(
+            df_agn,
+            dm_interp=dm_interp,
+            dmi_values=dmi_values,
         )
 
     mu_pred_median = np.percentile(mu_pred_samples, 50, axis=0)
@@ -5583,6 +5611,7 @@ def plot_predicted_L2500_vs_sigmahat(
     plot_path='plots/hubble', show=False, debias=True, dm_interp=None,
     show_residuals=False, df_calibrators=None, z_range=(0.44, 3.16),
     use_alpha_lambda_term=None, use_redshift_log_f_term=None,
+    dmi_values=None,
     dmi_selection_sigma_interp=None,
     sigma_sel_floor_mag=0.05,
 ):
@@ -5631,15 +5660,12 @@ def plot_predicted_L2500_vs_sigmahat(
 
     # --- y-data for MAIN: log10 L_2500 ---
     if debias:
-        #dm_interp = make_dm_function(d["apparent_mag_2500"].values, d['z'].values, dms)
         actual_M2500 = (
             d["apparent_mag_2500"]
-            - _evaluate_dm_interp(
-                dm_interp,
-                d["z"].values,
-                d["apparent_mag_2500"].values,
-                f_host_2500=d.get("f_host_2500"),
-                alpha_lambda=d.get("alpha_lambda"),
+            - _resolve_debias_values(
+                d,
+                dm_interp=dm_interp,
+                dmi_values=dmi_values,
             )
         ) - cosmo.distmod(d["z"]).value
     else:

@@ -295,10 +295,69 @@ def get_completeness_function_2d_simple(*args, mag_lim=24.0, width=0.2, plot=Fal
 
     return completeness2d, mag_centers, z_centers, dm, dz
 
+
+def _estimate_mock_count_scale(H_obs_s, H_true_s, mag_centers, *, complete_mag_max=20.0, eps=1e-12):
+    """
+    Estimate one global mock-count normalization from bright bins that should be
+    close to complete.
+    """
+    H_obs_s = np.asarray(H_obs_s, dtype=float)
+    H_true_s = np.asarray(H_true_s, dtype=float)
+    mag_centers = np.asarray(mag_centers, dtype=float)
+    bright = np.isfinite(mag_centers) & (mag_centers <= float(complete_mag_max))
+    if not np.any(bright):
+        return 1.0
+
+    bright_shape = (bright.size,) + (1,) * (H_true_s.ndim - 1)
+    bright_mask = bright.reshape(bright_shape)
+    obs_sum = float(np.sum(np.where(bright_mask, H_obs_s, 0.0)))
+    true_sum = float(np.sum(np.where(bright_mask, H_true_s, 0.0)))
+    if not np.isfinite(obs_sum) or not np.isfinite(true_sum) or obs_sum <= 0.0 or true_sum <= eps:
+        return 1.0
+    return max(obs_sum / true_sum, eps)
+
+
+def _scaled_completeness_ratio(
+    H_obs_s,
+    H_true_s,
+    mag_centers,
+    *,
+    label,
+    count_scale=None,
+    complete_mag_max=20.0,
+    eps=1e-12,
+):
+    """Compute completeness after one global bright-end normalization."""
+    if count_scale is None:
+        count_scale = _estimate_mock_count_scale(
+            H_obs_s,
+            H_true_s,
+            mag_centers,
+            complete_mag_max=complete_mag_max,
+            eps=eps,
+        )
+        scale_source = f"bright-end m<={complete_mag_max:.2f}"
+    else:
+        count_scale = max(float(count_scale), eps)
+        scale_source = "mock H5 metadata"
+    C_raw = H_obs_s / (count_scale * H_true_s + eps)
+    finite = np.isfinite(C_raw)
+    n_finite = int(np.count_nonzero(finite))
+    n_gt1 = int(np.count_nonzero(finite & (C_raw > 1.0)))
+    print(
+        f"{label}: mock count scale={count_scale:.4g} ({scale_source}); "
+        f"C_raw > 1 in {n_gt1}/{n_finite} finite bins ({n_gt1 / max(n_finite, 1):.2%}) before clipping."
+    )
+    C = np.asarray(C_raw, dtype=float)
+    C[H_true_s < eps] = 0.0
+    C = np.clip(C, 0.0, 1.0)
+    return C
+
 class Completeness2D:
     """
     Interpolates p(detect | m, z) on a (mag, z) grid.
-    - Outside the grid, returns 0 (via RegularGridInterpolator fill_value=0).
+    - Bright magnitudes are clipped to the bright grid edge; faint magnitudes
+      outside the grid still return 0 through fill_value=0.
     """
     def __init__(self, mag_centers, z_centers, completeness_map):
         self.mag_centers = np.asarray(mag_centers)
@@ -318,10 +377,27 @@ class Completeness2D:
             bounds_error=False,
             fill_value=0.0,
         )
+        self._warned_oob = False
 
     def __call__(self, mag, z):
-        mag = np.asarray(mag)
-        z   = np.asarray(z)
+        mag_raw = np.asarray(mag, dtype=float)
+        z_raw = np.asarray(z, dtype=float)
+        oob = (
+            (mag_raw < self.mag_min)
+            | (mag_raw > self.mag_max)
+            | (z_raw < self.z_min)
+            | (z_raw > self.z_max)
+        )
+        if np.any(oob) and not self._warned_oob:
+            print(
+                "[WARNING] Completeness2D received objects outside the "
+                f"grid range m=[{self.mag_min:.2f}, {self.mag_max:.2f}], "
+                f"z=[{self.z_min:.2f}, {self.z_max:.2f}]. "
+                f"count={int(np.count_nonzero(oob))}"
+            )
+            self._warned_oob = True
+        mag = np.maximum(np.asarray(mag, dtype=float), self.mag_min)
+        z = np.clip(np.asarray(z, dtype=float), self.z_min, self.z_max)
         m_b, z_b = np.broadcast_arrays(mag, z)
         pts = np.column_stack([m_b.ravel(), z_b.ravel()])
         vals = self._interp(pts)
@@ -339,7 +415,8 @@ class Completeness2D:
 class Completeness3D:
     """
     Interpolates p(detect | m, z, f_host) on a (mag, z, f_host) grid.
-    - Outside the grid, returns 0.
+    - Bright magnitudes are clipped to the bright grid edge; faint magnitudes
+      outside the grid still return 0.
     """
 
     def __init__(self, mag_centers, z_centers, fhost_centers, completeness_cube):
@@ -360,10 +437,31 @@ class Completeness3D:
             bounds_error=False,
             fill_value=0.0,
         )
+        self._warned_oob = False
 
     def __call__(self, mag, z, f_host):
-        mag = np.asarray(mag)
-        z = np.asarray(z)
+        mag_raw = np.asarray(mag, dtype=float)
+        z_raw = np.asarray(z, dtype=float)
+        f_host_raw = np.asarray(f_host, dtype=float)
+        oob = (
+            (mag_raw < self.mag_min)
+            | (mag_raw > self.mag_max)
+            | (z_raw < self.z_min)
+            | (z_raw > self.z_max)
+            | (f_host_raw < self.fhost_min)
+            | (f_host_raw > self.fhost_max)
+        )
+        if np.any(oob) and not self._warned_oob:
+            print(
+                "[WARNING] Completeness3D received objects outside the "
+                f"grid range m=[{self.mag_min:.2f}, {self.mag_max:.2f}], "
+                f"z=[{self.z_min:.2f}, {self.z_max:.2f}], "
+                f"f_host=[{self.fhost_min:.3f}, {self.fhost_max:.3f}]. "
+                f"count={int(np.count_nonzero(oob))}"
+            )
+            self._warned_oob = True
+        mag = np.maximum(np.asarray(mag, dtype=float), self.mag_min)
+        z = np.clip(np.asarray(z, dtype=float), self.z_min, self.z_max)
         f_host = np.asarray(f_host)
         # The completeness cube is defined on bin centers, but f_host is a
         # bounded physical variable on [0, 1]. Clip to the nearest supported
@@ -391,7 +489,8 @@ class Completeness3D:
 class Completeness4D:
     """
     Interpolates p(detect | m, z, f_host, alpha_lambda) on a regular grid.
-    - Outside the grid, returns 0.
+    - Bright magnitudes are clipped to the bright grid edge; faint magnitudes
+      outside the grid still return 0.
     """
 
     def __init__(self, mag_centers, z_centers, fhost_centers, alpha_centers, completeness_hypercube):
@@ -414,10 +513,35 @@ class Completeness4D:
             bounds_error=False,
             fill_value=0.0,
         )
+        self._warned_oob = False
 
     def __call__(self, mag, z, f_host, alpha_lambda):
-        mag = np.asarray(mag)
-        z = np.asarray(z)
+        mag_raw = np.asarray(mag, dtype=float)
+        z_raw = np.asarray(z, dtype=float)
+        f_host_raw = np.asarray(f_host, dtype=float)
+        alpha_raw = np.asarray(alpha_lambda, dtype=float)
+        oob = (
+            (mag_raw < self.mag_min)
+            | (mag_raw > self.mag_max)
+            | (z_raw < self.z_min)
+            | (z_raw > self.z_max)
+            | (f_host_raw < self.fhost_min)
+            | (f_host_raw > self.fhost_max)
+            | (alpha_raw < self.alpha_min)
+            | (alpha_raw > self.alpha_max)
+        )
+        if np.any(oob) and not self._warned_oob:
+            print(
+                "[WARNING] Completeness4D received objects outside the "
+                f"grid range m=[{self.mag_min:.2f}, {self.mag_max:.2f}], "
+                f"z=[{self.z_min:.2f}, {self.z_max:.2f}], "
+                f"f_host=[{self.fhost_min:.3f}, {self.fhost_max:.3f}], "
+                f"alpha_lambda=[{self.alpha_min:.2f}, {self.alpha_max:.2f}]. "
+                f"count={int(np.count_nonzero(oob))}"
+            )
+            self._warned_oob = True
+        mag = np.maximum(np.asarray(mag, dtype=float), self.mag_min)
+        z = np.clip(np.asarray(z, dtype=float), self.z_min, self.z_max)
         f_host = np.asarray(f_host)
         alpha_lambda = np.asarray(alpha_lambda)
         f_host = np.clip(f_host, self.fhost_min, self.fhost_max)
@@ -588,6 +712,7 @@ def get_completeness_function_2d(
         else:
             m_true = np.asarray(f["apparent_mag_i_rest"][:], dtype=float)
         z_true  = np.asarray(f["z"][:], dtype=float)
+        mock_count_scale = f.attrs.get("mock_count_scale")
 
     # Filter finite
     z_obs = df_agn["z"].to_numpy(dtype=float)
@@ -624,9 +749,14 @@ def get_completeness_function_2d(
         sigma_mag = 0.0
         H_true_s, H_obs_s = H_true, H_obs
     eps = 1e-12
-    C = H_obs_s / (H_true_s + eps)
-    C[H_true_s < eps] = 0.0
-    C = np.clip(C, 0.0, 1.0)
+    C = _scaled_completeness_ratio(
+        H_obs_s,
+        H_true_s,
+        mag_centers,
+        label="Completeness2D",
+        count_scale=mock_count_scale,
+        eps=eps,
+    )
 
     if fill_along_mag:
     # fill non-decreasing completeness along mag (for each z)
@@ -932,6 +1062,7 @@ def get_completeness_function_3d_fhost(
         else:
             m_true = np.asarray(f["apparent_mag_i_rest"][:], dtype=float)
         z_true = np.asarray(f["z"][:], dtype=float)
+        mock_count_scale = f.attrs.get("mock_count_scale")
 
     z_obs = df_agn["z"].to_numpy(dtype=float)
     m_obs = df_agn["apparent_mag_2500"].to_numpy(dtype=float)
@@ -979,9 +1110,14 @@ def get_completeness_function_3d_fhost(
         H_true_s, H_obs_s = H_true, H_obs
 
     eps = 1e-12
-    C = H_obs_s / (H_true_s + eps)
-    C[H_true_s < eps] = 0.0
-    C = np.clip(C, 0.0, 1.0)
+    C = _scaled_completeness_ratio(
+        H_obs_s,
+        H_true_s,
+        mag_centers,
+        label="Completeness3D",
+        count_scale=mock_count_scale,
+        eps=eps,
+    )
 
     completeness3d = Completeness3D(mag_centers, z_centers, fhost_centers, C)
 
@@ -1086,6 +1222,7 @@ def get_completeness_function_4d_fhost_alpha(
         else:
             m_true = np.asarray(f["apparent_mag_i_rest"][:], dtype=float)
         z_true = np.asarray(f["z"][:], dtype=float)
+        mock_count_scale = f.attrs.get("mock_count_scale")
 
     z_obs = df_agn["z"].to_numpy(dtype=float)
     m_obs = df_agn["apparent_mag_2500"].to_numpy(dtype=float)
@@ -1143,9 +1280,14 @@ def get_completeness_function_4d_fhost_alpha(
         H_true_s, H_obs_s = H_true, H_obs
 
     eps = 1e-12
-    C = H_obs_s / (H_true_s + eps)
-    C[H_true_s < eps] = 0.0
-    C = np.clip(C, 0.0, 1.0)
+    C = _scaled_completeness_ratio(
+        H_obs_s,
+        H_true_s,
+        mag_centers,
+        label="Completeness4D",
+        count_scale=mock_count_scale,
+        eps=eps,
+    )
 
     completeness4d = Completeness4D(mag_centers, z_centers, fhost_centers, alpha_centers, C)
 

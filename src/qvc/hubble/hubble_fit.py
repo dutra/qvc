@@ -31,7 +31,8 @@ from dynesty import utils as dyfunc
 plt.style.use(Path(__file__).with_name("style.mplstyle"))
 z_pivot_sna = 0.0
 z_pivot_agn = 1.5
-DEFAULT_COMPLETENESS_SIM_FILE = "data/nov9_mock_mag_z_moresources.h5"
+DEFAULT_COMPLETENESS_SIM_FILE = None
+DEFAULT_COMPLETENESS_MOCK_AREA_DEG2 = 5.0
 
 from qvc.hubble.hubble_utils import (
     compare_models_by_log_evidence_all,
@@ -84,6 +85,12 @@ from qvc.hubble.hubble_completeness_refactored import (
     get_completeness_function_3d_fhost,
     get_completeness_function_4d_fhost_alpha,
     make_dm_function,
+)
+from qvc.hubble.completeness_mock_catalog import (
+    COSMO as COMPLETENESS_MOCK_COSMO,
+    build_shen_lf,
+    mock_m_per_zbin,
+    save_mock_catalog,
 )
 from qvc.hubble.hubble_cut_config import (
     DEFAULT_BC_FRAC_CUT,
@@ -238,6 +245,120 @@ def resolve_resume_checkpoint_path(resume, checkpoint_file):
         )
     return resolved_checkpoint
 
+
+def _infer_radec_column(df, candidates):
+    for col in candidates:
+        if col in df.columns:
+            return col
+    return None
+
+
+def estimate_sky_box_area_deg2(df_agn_all):
+    """
+    Estimate the survey footprint area using the smallest RA arc enclosing all
+    source coordinates and a Dec bounding box.
+    """
+    ra_col = _infer_radec_column(df_agn_all, ("ra", "RA"))
+    dec_col = _infer_radec_column(df_agn_all, ("dec", "DEC"))
+    if ra_col is None or dec_col is None:
+        print(
+            "[WARNING] Could not estimate sky-box area from df_agn_all because "
+            "RA/Dec columns are missing; using default mock area "
+            f"{DEFAULT_COMPLETENESS_MOCK_AREA_DEG2:.1f} deg^2."
+        )
+        return DEFAULT_COMPLETENESS_MOCK_AREA_DEG2
+
+    ra = np.mod(pd.to_numeric(df_agn_all[ra_col], errors="coerce").to_numpy(dtype=float), 360.0)
+    dec = pd.to_numeric(df_agn_all[dec_col], errors="coerce").to_numpy(dtype=float)
+    finite = np.isfinite(ra) & np.isfinite(dec)
+    ra = ra[finite]
+    dec = dec[finite]
+    if ra.size < 2:
+        print(
+            "[WARNING] Too few finite RA/Dec rows to estimate sky-box area; "
+            f"using default mock area {DEFAULT_COMPLETENESS_MOCK_AREA_DEG2:.1f} deg^2."
+        )
+        return DEFAULT_COMPLETENESS_MOCK_AREA_DEG2
+
+    ra_sorted = np.sort(ra)
+    gaps = np.diff(np.concatenate([ra_sorted, [ra_sorted[0] + 360.0]]))
+    largest_gap_idx = int(np.argmax(gaps))
+    ra_span_deg = float(360.0 - gaps[largest_gap_idx])
+    ra_min = float(ra_sorted[(largest_gap_idx + 1) % ra_sorted.size])
+    ra_max = float(np.mod(ra_min + ra_span_deg, 360.0))
+    dec_min = float(np.min(dec))
+    dec_max = float(np.max(dec))
+
+    area_sr = np.deg2rad(ra_span_deg) * (
+        np.sin(np.deg2rad(dec_max)) - np.sin(np.deg2rad(dec_min))
+    )
+    area_deg2 = float(abs(area_sr) * (180.0 / np.pi) ** 2)
+    if not np.isfinite(area_deg2) or area_deg2 <= 0.0:
+        print(
+            "[WARNING] Invalid sky-box area estimate from RA/Dec; using default "
+            f"mock area {DEFAULT_COMPLETENESS_MOCK_AREA_DEG2:.1f} deg^2."
+        )
+        return DEFAULT_COMPLETENESS_MOCK_AREA_DEG2
+
+    print(
+        "Estimated pre-cut sky-box area from df_agn_all: "
+        f"{area_deg2:.1f} deg^2 "
+        f"(ra_col={ra_col}, dec_col={dec_col}, RA span={ra_span_deg:.2f} deg, "
+        f"RA box={ra_min:.2f}->{ra_max:.2f} deg, Dec box={dec_min:.2f}->{dec_max:.2f} deg)"
+    )
+    return area_deg2
+
+
+def generate_fresh_completeness_sim_file(plot_path, *, area_deg2, seed=123):
+    """Generate a fresh Shen-LF mock catalog for completeness-map construction."""
+    completeness_dir = Path(plot_path) / "completeness"
+    completeness_dir.mkdir(parents=True, exist_ok=True)
+    output_path = completeness_dir / "mock_completeness_catalog_fresh.h5"
+    thinning_probability = min(
+        1.0,
+        float(DEFAULT_COMPLETENESS_MOCK_AREA_DEG2) / max(float(area_deg2), 1e-12),
+    )
+
+    rng = np.random.default_rng(seed)
+    phi_log10, m_grid, z_bins = build_shen_lf(None)
+    _, _, _, _, z_all, m_all, m_rest_all, _ = mock_m_per_zbin(
+        phi_log10,
+        m_grid,
+        z_bins,
+        float(area_deg2),
+        -0.5,
+        0.3,
+        COMPLETENESS_MOCK_COSMO,
+        z_res=512,
+        m_scatter=0.0,
+        kcorr_zref=2.0,
+        m_lim=28.0,
+        thinning_probability=thinning_probability,
+        rng=rng,
+        return_z=True,
+        return_global=True,
+    )
+    n_generated = int(np.size(z_all))
+    print(
+        f"Fresh completeness mock generated {n_generated} sources "
+        f"after in-generator thinning (p_keep={thinning_probability:.4g})."
+    )
+    save_mock_catalog(
+        output_path,
+        z_all,
+        m_all,
+        m_rest_all,
+        m_limit=28.0,
+        thinning_probability=thinning_probability,
+        rng=rng,
+        area_deg2=area_deg2,
+    )
+    print(
+        f"Generated fresh completeness mock catalog: {output_path} "
+        f"(area_deg2={float(area_deg2):.1f}, p_keep={thinning_probability:.4g})"
+    )
+    return str(output_path)
+
 def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, 
                       df_calibrators=None,
                       cosmo_model='Flatw0waCDM',
@@ -287,6 +408,12 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                 )
 
     if completeness:
+        if completeness_sim_file is None:
+            completeness_area_deg2 = estimate_sky_box_area_deg2(df_agn_all)
+            completeness_sim_file = generate_fresh_completeness_sim_file(
+                plot_path,
+                area_deg2=completeness_area_deg2,
+            )
         if completeness_mode in ("3d_fhost", "4d_fhost_alpha"):
             if "f_host_2500" not in df_agn.columns:
                 raise KeyError(f"completeness_mode={completeness_mode!r} requires df_agn['f_host_2500'].")
@@ -305,10 +432,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                     "completeness_mode='4d_fhost_alpha' requires finite alpha_lambda for all AGN used in the fit; "
                     f"found {np.count_nonzero(bad_alpha)} non-finite rows."
                 )
-        if completeness_sim_file is None:
-            print(f"Building {completeness_mode} completeness map using default mock catalog file.")
-        else:
-            print(f"Building {completeness_mode} completeness map using mock catalog: {completeness_sim_file}")
+        print(f"Building {completeness_mode} completeness map using mock catalog: {completeness_sim_file}")
         if completeness_mode == "4d_fhost_alpha":
             completeness_params = get_completeness_function_4d_fhost_alpha(
                 df_agn, sim_file=completeness_sim_file, plot=True, plot_path=plot_path
@@ -599,6 +723,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
         dmi_selection_sigma_interp,
         logZ,
         logZerr,
+        dmi_posterior_median,
         dmi_posterior_sigma,
         dmi_selection_sigma_posterior_median,
     )
@@ -631,7 +756,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
     print(f"Saving plots to ", plot_path)
     if completeness:
         if completeness_sim_file is None:
-            print("Completeness enabled with default mock catalog file.")
+            print("Completeness enabled with a freshly generated mock catalog.")
         else:
             print(f"Completeness enabled with mock catalog file: {completeness_sim_file}")
 
@@ -657,6 +782,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         dmi_selection_sigma_interp,
         logZ,
         logZerr,
+        dmi_posterior_median,
         dmi_posterior_sigma,
         dmi_selection_sigma_posterior_median,
     ) = run_mcmc_pipeline(
@@ -699,6 +825,32 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
     #     return flat_samples, model_labels, dm_interp, logZ, logZerr, None, age, age_err
 
     print("Plotting predicted L2500 vs ...")
+    dmi_posterior_median_full = None
+    if uniform_redshift_distribution:
+        print(
+            "Uniform-redshift selection uses resampling with replacement; "
+            "using dm_interp-only debiasing in L2500 plots."
+        )
+    else:
+        if len(df_agn_fit_selection) != len(dmi_posterior_median):
+            raise ValueError(
+                "Fit/plot alignment failure: "
+                f"df_agn_fit_selection has length {len(df_agn_fit_selection)}, "
+                f"but dmi_posterior_median has length {len(dmi_posterior_median)}."
+            )
+        fit_indices = pd.Index(df_agn_fit_selection.index)
+        if not fit_indices.isin(df_agn.index).all():
+            missing = fit_indices[~fit_indices.isin(df_agn.index)].tolist()[:10]
+            raise ValueError(
+                "Fit/plot alignment failure: fitted AGN selection contains index values "
+                f"not present in df_agn: {missing}"
+            )
+        dmi_posterior_median_full = np.full(len(df_agn), np.nan, dtype=float)
+        df_agn_index_positions = pd.Series(np.arange(len(df_agn)), index=df_agn.index)
+        dmi_posterior_median_full[df_agn_index_positions.loc[fit_indices].to_numpy()] = np.asarray(
+            dmi_posterior_median,
+            dtype=float,
+        )
 
     plot_predicted_L2500_vs_sigmahat(
         flat_samples,
@@ -735,6 +887,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         z_pivot_agn=z_pivot_agn,
         debias=True,
         dm_interp=dm_interp,
+        dmi_values=dmi_posterior_median_full,
         dmi_selection_sigma_interp=dmi_selection_sigma_interp,
         show_residuals=False,
         show=False,
@@ -751,6 +904,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         z_pivot_agn=z_pivot_agn,
         debias=True,
         dm_interp=dm_interp,
+        dmi_values=dmi_posterior_median_full,
         dmi_selection_sigma_interp=dmi_selection_sigma_interp,
         show_residuals=True,
         show=False,
@@ -827,6 +981,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                     show_true=False, show=False, debias=True, dm_interp=dm_interp, plot_path=plot_path,
                     cosmo_model_samples=cosmo_model_joint_samples, verbose=verbose, residuals_sigma_clip=residuals_sigma_clip,
                     df_calibrators=df_calibrators,
+                    dmi_values=dmi_posterior_median_full,
                     dmi_sigma=dmi_posterior_sigma_full,
                     dmi_selection_sigma=dmi_selection_sigma_full,
                     use_alpha_lambda_term=use_alpha_lambda_term,
@@ -1188,7 +1343,7 @@ if __name__ == "__main__":
         "--completeness_sim_file",
         type=str,
         default=DEFAULT_COMPLETENESS_SIM_FILE,
-        help="Mock catalog HDF5 file to use when building the completeness map.",
+        help="Optional mock catalog HDF5 override. If omitted, generate a fresh mock catalog for each run.",
     )
     parser.add_argument(
         "--completeness_mode",

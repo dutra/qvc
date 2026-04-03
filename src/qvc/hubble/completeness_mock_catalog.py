@@ -196,12 +196,19 @@ def mock_m_per_zbin(
     kcorr_zref=2.0,
     completeness=None,
     m_lim=None,
+    thinning_probability=1.0,
     rng=None,
     return_z=False,
     return_global=False,
     verbose=False,
 ):
     rng = np.random.default_rng() if rng is None else rng
+    thinning_probability = float(thinning_probability)
+    if not np.isfinite(thinning_probability) or not (0.0 < thinning_probability <= 1.0):
+        raise ValueError(
+            "thinning_probability must be finite and in (0, 1], "
+            f"got {thinning_probability}."
+        )
 
     m_grid = np.asarray(m_grid, dtype=float)
     order = np.argsort(m_grid)
@@ -259,7 +266,7 @@ def mock_m_per_zbin(
 
         nexp = np.trapezoid(phi_int_z * dvdz, z)
         nexp_per_bin[i] = nexp
-        n_draw = rng.poisson(nexp)
+        n_draw = rng.poisson(nexp * thinning_probability)
         if n_draw == 0 or not np.isfinite(nexp) or nexp <= 0:
             per_z_m.append(np.empty(0, dtype=float))
             per_z_m_rest.append(np.empty(0, dtype=float))
@@ -295,12 +302,14 @@ def mock_m_per_zbin(
 
         cdf_m = np.cumsum(w_m, axis=1) / row_sum[:, None]
         u_rand = rng.random(z_samp.size)
-        idx = (cdf_m < u_rand[:, None]).sum(axis=1)
-        idx = np.clip(idx, 1, n_mag - 1)
-        cdf_lo = cdf_m[np.arange(z_samp.size), idx - 1]
+        idx = np.sum(cdf_m < u_rand[:, None], axis=1)
+        idx = np.clip(idx, 0, n_mag - 1)
+        cdf_lo = np.zeros(z_samp.size, dtype=float)
+        use_lo = idx > 0
+        cdf_lo[use_lo] = cdf_m[np.arange(z_samp.size)[use_lo], idx[use_lo] - 1]
         cdf_hi = cdf_m[np.arange(z_samp.size), idx]
-        m_lo = m_grid[idx - 1]
-        m_hi = m_grid[idx]
+        m_lo = edges[idx]
+        m_hi = edges[idx + 1]
         t = (u_rand - cdf_lo) / (cdf_hi - cdf_lo + 1e-12)
         m_abs = m_lo + t * (m_hi - m_lo)
 
@@ -363,12 +372,30 @@ def mock_m_per_zbin(
     return out
 
 
-def save_mock_catalog(output_path, z_all, m_all, m_2500_all, m_limit=None):
+def save_mock_catalog(
+    output_path,
+    z_all,
+    m_all,
+    m_2500_all,
+    m_limit=None,
+    *,
+    thinning_probability=1.0,
+    rng=None,
+    area_deg2=None,
+):
     output_path = Path(output_path).expanduser().resolve()
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    thinning_probability = float(thinning_probability)
+    if not np.isfinite(thinning_probability) or not (0.0 < thinning_probability <= 1.0):
+        raise ValueError(
+            "thinning_probability must be finite and in (0, 1], "
+            f"got {thinning_probability}."
+        )
     mask = np.ones_like(z_all, dtype=bool)
     if m_limit is not None:
         mask &= m_all < m_limit
+    n_before_thin = int(np.count_nonzero(mask))
+    n_after_thin = int(np.count_nonzero(mask))
     with h5py.File(output_path, "w") as h5file:
         h5file.create_dataset("z", data=z_all[mask])
         h5file.create_dataset("apparent_mag_i", data=m_all[mask])
@@ -376,6 +403,15 @@ def save_mock_catalog(output_path, z_all, m_all, m_2500_all, m_limit=None):
         h5file.create_dataset("apparent_mag_2500", data=m_2500_all[mask])
         # Keep the legacy key so existing completeness readers do not break.
         h5file.create_dataset("apparent_mag_i_rest", data=m_2500_all[mask])
+        h5file.attrs["thinning_probability"] = thinning_probability
+        h5file.attrs["mock_count_scale"] = 1.0 / thinning_probability
+        if area_deg2 is not None and np.isfinite(area_deg2):
+            h5file.attrs["area_deg2"] = float(area_deg2)
+    print(
+        "Saved mock catalog with "
+        f"{n_after_thin} / {n_before_thin} sources after m_lim cut "
+        f"(p_keep={thinning_probability:.4g}, mock_count_scale={1.0 / thinning_probability:.4g})"
+    )
 
 
 def plot_mock_catalog(z_all, m_values, plot_path, title, ylabel, bin_index):

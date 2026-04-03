@@ -69,6 +69,8 @@ from qvc.hubble.hubble_completeness_refactored import (
 from qvc.hubble.hubble_fit import (
     DEFAULT_COMPLETENESS_SIM_FILE,
     VALID_COMPLETENESS_MODES,
+    estimate_sky_box_area_deg2,
+    generate_fresh_completeness_sim_file,
     make_run_tag,
     validate_completeness_mode,
     z_pivot_agn,
@@ -684,6 +686,13 @@ def run_single_jax(
     report_pivots(df_agn_fit)
 
     if completeness:
+        if completeness_sim_file is None:
+            completeness_area_deg2 = estimate_sky_box_area_deg2(df_agn_all)
+            completeness_sim_file = generate_fresh_completeness_sim_file(
+                plot_path,
+                area_deg2=completeness_area_deg2,
+                seed=seed,
+            )
         if completeness_mode == "4d_fhost_alpha":
             completeness_params = get_completeness_function_4d_fhost_alpha(
                 df_agn_fit, sim_file=completeness_sim_file, plot=True, plot_path=plot_path
@@ -928,7 +937,12 @@ def main():
     parser.add_argument("--only_sna", action="store_true", default=False)
     parser.add_argument("--uniform_redshift_distribution", action="store_true", default=False)
     parser.add_argument("--disable_completeness", action="store_true", default=False)
-    parser.add_argument("--completeness_sim_file", type=str, default=DEFAULT_COMPLETENESS_SIM_FILE)
+    parser.add_argument(
+        "--completeness_sim_file",
+        type=str,
+        default=DEFAULT_COMPLETENESS_SIM_FILE,
+        help="Optional mock catalog HDF5 override. If omitted, generate a fresh mock catalog for each run.",
+    )
     parser.add_argument("--completeness_mode", type=str, choices=list(VALID_COMPLETENESS_MODES), default="2d")
     parser.add_argument("--correct-sigma-uv-host", action="store_true", default=False)
     parser.add_argument("--fhost_cut", type=float, default=DEFAULT_F_HOST_CUT)
