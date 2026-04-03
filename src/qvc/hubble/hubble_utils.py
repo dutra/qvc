@@ -2325,6 +2325,7 @@ def display_results_summary(
     z_pivot_agn,
     use_alpha_lambda_term=None,
     use_redshift_log_f_term=None,
+    sigma_sel_posterior_median=None,
 ):
     """
     Print median and 16/84% intervals for sampled params, plus derived w0 (and wa)
@@ -2419,13 +2420,32 @@ def display_results_summary(
         title = f"Intrinsic AGN scatter at z_pivot={float(z_pivot_agn):.2f}"
         mag_text = _format_interval(mag_med, mag_lo, mag_hi, ndigits=3) + " mag"
         dex_text = _format_interval(dex_med, dex_lo, dex_hi, ndigits=3) + " dex"
-        width = max(len(title), len(mag_text) + 15, len(dex_text) + 15, 44)
+        sigma_sel_text = None
+        delta_text = None
+        if sigma_sel_posterior_median is not None:
+            sigma_sel = np.asarray(sigma_sel_posterior_median, dtype=float)
+            valid_sel = np.isfinite(sigma_sel) & (sigma_sel > 0.0)
+            if np.any(valid_sel):
+                sel_med = float(np.nanmedian(sigma_sel[valid_sel]))
+                sigma_sel_text = f"{sel_med:.3f} mag"
+                delta_text = f"{mag_med - sel_med:+.3f} mag"
+        width = max(
+            len(title),
+            len(mag_text) + 15,
+            len(dex_text) + 15,
+            len(sigma_sel_text or "") + 20,
+            len(delta_text or "") + 20,
+            44,
+        )
         border = "+" + "-" * (width + 2) + "+"
         print(border)
         print(f"| {title:<{width}} |")
         print(border)
         print(f"| {'sigma_int (mag)':<15}{mag_text:<{width - 15}} |")
         print(f"| {'sigma_int (dex)':<15}{dex_text:<{width - 15}} |")
+        if sigma_sel_text is not None:
+            print(f"| {'median sigma_sel':<20}{sigma_sel_text:<{width - 20}} |")
+            print(f"| {'sigma_int - sel':<20}{delta_text:<{width - 20}} |")
         print(border)
     return
 

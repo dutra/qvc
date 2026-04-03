@@ -5556,6 +5556,8 @@ def plot_predicted_L2500_vs_sigmahat(
     plot_path='plots/hubble', show=False, debias=True, dm_interp=None,
     show_residuals=False, df_calibrators=None, z_range=(0.44, 3.16),
     use_alpha_lambda_term=None, use_redshift_log_f_term=None,
+    dmi_selection_sigma_interp=None,
+    sigma_sel_floor_mag=0.05,
 ):
     d = df_agn.copy()
 
@@ -5788,16 +5790,22 @@ def plot_predicted_L2500_vs_sigmahat(
     ax.fill_between(x_grid, 10**ylog_low, 10**ylog_high, color=color, alpha=0.5, zorder=9)
     ax.plot(x_grid, 10**ylog_med, color=color, lw=2.0, zorder=10, label='best-fit model')
 
-    # --- Suberlak+2021 comparison (unchanged) ---
+    # --- Suberlak+2021 comparison in the same luminosity-space x convention ---
     C = 0.035 + 0.118; C_err = np.sqrt(0.007**2 + 0.003**2)
     ylog_anchor = np.interp(xcm, x_log_grid, ylog_med)
     L_anchor = 10.0**ylog_anchor
     x_anchor = 10.0**xcm
-    L_scale = L_anchor * (x_anchor ** (2.5 * C))
-    y_central = L_scale * (x_grid ** (-2.5 * C))
+    sub_slope = 6.25 * C
+    L_scale = L_anchor / (x_anchor ** sub_slope)
+    y_central = L_scale * (x_grid ** sub_slope)
     rng = np.random.default_rng(42)
     C_samps = rng.normal(loc=C, scale=C_err, size=100)
-    curves = L_scale * (x_grid[None, :] ** (-2.5 * C_samps[:, None]))
+    sub_slope_samps = 6.25 * C_samps
+    curves = (
+        L_anchor
+        / (x_anchor ** sub_slope_samps[:, None])
+        * (x_grid[None, :] ** sub_slope_samps[:, None])
+    )
     sub_lo, sub_hi = np.percentile(curves, [16, 84], axis=0)
     ax.plot(x_grid, y_central, color='c', lw=2.0, zorder=10,
             label='Suberlak+2021 relation', linestyle='--')
@@ -5818,16 +5826,23 @@ def plot_predicted_L2500_vs_sigmahat(
 
         # x for SHOW at median params (using ONLY df_calibrators fields)
         obs_show, err_show, piv_show = agn_model_pack_obs(ds, use_alpha_lambda_term=option_flags["use_alpha_lambda_term"])
-        x_log_ref_show = M_model_agn(
-            med_arr, obs_show, piv_show, use_alpha_lambda_term=option_flags["use_alpha_lambda_term"]
-        ) - M0_med
+        x_log_ref_show = -0.4 * (
+            M_model_agn(
+                med_arr,
+                obs_show,
+                piv_show,
+                use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
+            )
+            - M0_med
+        )
         x_show = 10.0 ** x_log_ref_show
 
         pred_M_err_show = M_model_agn_err(
             med_arr, obs_show, err_show, piv_show, use_alpha_lambda_term=option_flags["use_alpha_lambda_term"]
         )
-        x_lower_show = 10.0 ** (x_log_ref_show - pred_M_err_show)
-        x_upper_show = 10.0 ** (x_log_ref_show + pred_M_err_show)
+        x_log_err_show = 0.4 * pred_M_err_show
+        x_lower_show = 10.0 ** (x_log_ref_show - x_log_err_show)
+        x_upper_show = 10.0 ** (x_log_ref_show + x_log_err_show)
 
         # Finite mask for safety
         m_show = (
@@ -5874,12 +5889,12 @@ def plot_predicted_L2500_vs_sigmahat(
     if df_calibrators is not None and len(df_calibrators) > 0:
         # ax.set_xlim((2e-9, 6e13))
         # ax.set_ylim((5e39, 2e48))
-        ax.set_xlim((np.min(x_grid), np.max(x_grid)))
+        ax.set_xlim((1.2e-3, 1.25e2))
         ax.set_ylim((np.min(10**ylog_med), np.max(10**ylog_med)))
     else:
         # ax.set_xlim((7e-8, 9e5))
         # ax.set_ylim((3e42, 2e47))
-        ax.set_xlim((np.min(x_grid), np.max(x_grid)))
+        ax.set_xlim((1.2e-3, 1.25e2))
         ax.set_ylim((np.min(10**ylog_med), np.max(10**ylog_med)))
 
     ax.xaxis.set_major_locator(LogLocator(base=10.0))
@@ -5897,7 +5912,7 @@ def plot_predicted_L2500_vs_sigmahat(
     beta_agn_L  = med_params['beta_agn']  * (-1/2.5)
     xlabel = rf"$({{\sigma}}_\mathrm{{uv}} \, / \, {sigma_uv_pivot:.1f}\,\mathrm{{mag}})^{{{alpha_agn_L:.2f}}} \, ({{\tau}}_\mathrm{{uv,rf}} \, / \, {tau_uv_rf_pivot:.0f}\,\mathrm{{days}})^{{{beta_agn_L:.2f}}}$"
     ax.set_xlabel(xlabel)
-    ax.legend(loc='upper right')
+    ax.legend(loc='upper left')
 
     # --- Residuals panel (MAIN) ---
     sigma_meas = np.asarray(y_log_meas_err, dtype=float)
@@ -5906,18 +5921,56 @@ def plot_predicted_L2500_vs_sigmahat(
     slope_at_data = f_slope(x_log_ref)
     sigma_x = np.asarray(x_log_err_med, dtype=float)
     sigma_xy = np.abs(slope_at_data) * np.abs(sigma_x)
-    sigma_mu_log = 0.0
-    sigma_chi = np.sqrt(sigma_meas**2 + sigma_xy**2 + sigma_mu_log**2)
-    good = np.isfinite(residuals) & np.isfinite(sigma_chi) & (sigma_chi > 0)
+    sigma_int_log = (
+        np.exp(
+            evaluate_log_f(
+                med_params,
+                np.asarray(d["z"].values, dtype=float),
+                z_pivot=z_pivot_agn,
+                use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
+            )
+        )
+        / 2.5
+    )
+    sigma_chi_plot = np.sqrt(sigma_meas**2 + sigma_xy**2)
+    sigma_chi_full = np.sqrt(sigma_meas**2 + sigma_xy**2 + sigma_int_log**2)
+    if debias and dmi_selection_sigma_interp is not None:
+        sigma_sel_mag = _evaluate_dm_interp(
+            dmi_selection_sigma_interp,
+            d["z"].values,
+            d["apparent_mag_2500"].values,
+            f_host_2500=d.get("f_host_2500"),
+            alpha_lambda=d.get("alpha_lambda"),
+        )
+        sigma_sel_mag = np.asarray(sigma_sel_mag, dtype=float)
+        sigma_sel_valid = np.isfinite(sigma_sel_mag) & (sigma_sel_mag > 0.0)
+        sigma_sel_log = np.full_like(sigma_sel_mag, np.nan, dtype=float)
+        sigma_sel_log[sigma_sel_valid] = (
+            np.maximum(sigma_sel_mag[sigma_sel_valid], float(sigma_sel_floor_mag))
+            / 2.5
+        )
+        sigma_chi_plot = np.where(sigma_sel_valid, sigma_sel_log, sigma_chi_plot)
+        sigma_chi_full = np.where(sigma_sel_valid, sigma_sel_log, sigma_chi_full)
+    good_plot = (
+        np.isfinite(residuals)
+        & np.isfinite(sigma_chi_plot)
+        & (sigma_chi_plot > 0)
+    )
+    good = (
+        np.isfinite(residuals)
+        & np.isfinite(sigma_chi_full)
+        & (sigma_chi_full > 0)
+    )
 
     if show_residuals and ax_res is not None:
         good_in = good & d["z"].between(z_range[0], z_range[1]).to_numpy(dtype=bool)
         good_out = good & ~d["z"].between(z_range[0], z_range[1]).to_numpy(dtype=bool)
         if np.any(good_in):
+            good_in_plot = good_plot & d["z"].between(z_range[0], z_range[1]).to_numpy(dtype=bool)
             ax_res.errorbar(
-                x_ref[good_in],
-                residuals[good_in],
-                yerr=sigma_chi[good_in],
+                x_ref[good_in_plot],
+                residuals[good_in_plot],
+                yerr=sigma_chi_plot[good_in_plot],
                 fmt='o',
                 linestyle='none',
                 markersize=2.8,
@@ -5930,10 +5983,11 @@ def plot_predicted_L2500_vs_sigmahat(
                 label="AGN",
             )
         if np.any(good_out):
+            good_out_plot = good_plot & ~d["z"].between(z_range[0], z_range[1]).to_numpy(dtype=bool)
             ax_res.errorbar(
-                x_ref[good_out],
-                residuals[good_out],
-                yerr=sigma_chi[good_out],
+                x_ref[good_out_plot],
+                residuals[good_out_plot],
+                yerr=sigma_chi_plot[good_out_plot],
                 fmt='D',
                 linestyle='none',
                 markersize=2.8,
@@ -5950,12 +6004,12 @@ def plot_predicted_L2500_vs_sigmahat(
         ax_res.set_ylabel('Residuals (log)')
         ax_res.set_xlabel(xlabel)
         ax_res.set_xscale('log')
-        ax_res.set_ylim(-2.2, 2.2)
+        ax_res.set_ylim(-1.0, 1.0)
         chi2_red_in = np.nan
         if np.any(good_in):
             chi2_red_in, _ = reduced_chi_squared(
                 residuals[good_in],
-                sigma_chi[good_in],
+                sigma_chi_full[good_in],
                 n_params=len(model_labels) - 1,
             )
         if np.isfinite(chi2_red_in):
@@ -5972,11 +6026,16 @@ def plot_predicted_L2500_vs_sigmahat(
 
     # Save & return
     os.makedirs(plot_path, exist_ok=True)
-    out_pdf = "predicted_L2500_vs_fullcorr_band_debiased.pdf" if debias else "predicted_L2500_vs_fullcorr_band.pdf"
+    out_pdf = "predicted_L2500_vs_fullcorr_band"
+    if debias:
+        out_pdf += "_debiased"
+    if show_residuals:
+        out_pdf += "_with_residuals"
+    out_pdf += ".pdf"
     _save_figure(fig, os.path.join(plot_path, out_pdf), dpi=600, show=show)
 
     # Return MAIN residuals; show residuals can be computed externally if needed
-    return residuals, sigma_chi
+    return residuals, sigma_chi_full
 
 def dmi_from_pdet_only(m_obs, m_obs_err, p_det, m_grid, sigma_completeness, z, tiny=1e-12, plot_path=None):
     """

@@ -759,6 +759,9 @@ def run_single_jax(
     integrals_max_w = blobs[idx_max_weight, 0, :]
     dmi_max_w = blobs[idx_max_weight, 1, :]
     dmi_posterior_median = np.median(blobs[:, 1, :], axis=0)
+    dmi_selection_sigma_posterior_median = None
+    if blobs.ndim == 3 and blobs.shape[1] >= 3:
+        dmi_selection_sigma_posterior_median = np.median(blobs[:, 2, :], axis=0)
 
     checkpoint_folder = get_qvc_result_dir() / "hubble_posteriors" / prefix
     checkpoint_folder.mkdir(parents=True, exist_ok=True)
@@ -768,12 +771,18 @@ def run_single_jax(
         flat_samples=flat_samples,
         dmi_max_w=dmi_max_w,
         dmi_posterior_median=dmi_posterior_median,
+        dmi_selection_sigma_posterior_median=dmi_selection_sigma_posterior_median,
         logZ=logZ if logZ is not None else np.nan,
         logZerr=logZerr if logZerr is not None else np.nan,
         integrals_max_w=integrals_max_w,
     )
 
-    display_results_summary(flat_samples, cosmo_model, z_pivot_agn)
+    display_results_summary(
+        flat_samples,
+        cosmo_model,
+        z_pivot_agn,
+        sigma_sel_posterior_median=dmi_selection_sigma_posterior_median,
+    )
     age, age_err = compute_age_universe_with_error(flat_samples, cosmo_model, max_eval=200)
 
     if only_sna:
@@ -787,6 +796,15 @@ def run_single_jax(
         f_host_2500=agn_data.get("f_host_2500"),
         alpha_lambda=agn_data.get("alpha_lambda"),
     )
+    dmi_selection_sigma_interp = None
+    if dmi_selection_sigma_posterior_median is not None:
+        dmi_selection_sigma_interp = make_dm_function(
+            agn_data["apparent_mag_2500"],
+            agn_data["z"],
+            dmi_selection_sigma_posterior_median,
+            f_host_2500=agn_data.get("f_host_2500"),
+            alpha_lambda=agn_data.get("alpha_lambda"),
+        )
 
     plot_cosmo_corner(None, flat_samples, cosmo_model, z_pivot_sna, z_pivot_agn, show=False, plot_path=plot_path, speed=f"{speed}_jax")
     plot_predicted_L2500_vs_sigmahat(
@@ -801,6 +819,32 @@ def run_single_jax(
         df_calibrators=None,
         z_range=z_range,
     )
+    plot_predicted_L2500_vs_sigmahat(
+        flat_samples,
+        df_agn_fit,
+        cosmo_model=cosmo_model,
+        z_pivot_agn=z_pivot_agn,
+        debias=False,
+        show_residuals=True,
+        show=False,
+        plot_path=plot_path,
+        df_calibrators=None,
+        z_range=z_range,
+    )
+    plot_predicted_L2500_vs_sigmahat(
+        flat_samples,
+        df_agn_fit,
+        cosmo_model=cosmo_model,
+        z_pivot_agn=z_pivot_agn,
+        debias=True,
+        dm_interp=dm_interp,
+        dmi_selection_sigma_interp=dmi_selection_sigma_interp,
+        show_residuals=False,
+        show=False,
+        plot_path=plot_path,
+        df_calibrators=None,
+        z_range=z_range,
+    )
     L_residuals_debiased, L_pred_std_debiased = plot_predicted_L2500_vs_sigmahat(
         flat_samples,
         df_agn_fit,
@@ -808,6 +852,7 @@ def run_single_jax(
         z_pivot_agn=z_pivot_agn,
         debias=True,
         dm_interp=dm_interp,
+        dmi_selection_sigma_interp=dmi_selection_sigma_interp,
         show_residuals=True,
         show=False,
         plot_path=plot_path,
