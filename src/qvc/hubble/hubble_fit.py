@@ -757,6 +757,11 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
     if completeness:
         if completeness_sim_file is None:
             print("Completeness enabled with a freshly generated mock catalog.")
+            completeness_area_deg2 = estimate_sky_box_area_deg2(df_agn_all)
+            completeness_sim_file = generate_fresh_completeness_sim_file(
+                plot_path,
+                area_deg2=completeness_area_deg2,
+            )
         else:
             print(f"Completeness enabled with mock catalog file: {completeness_sim_file}")
 
