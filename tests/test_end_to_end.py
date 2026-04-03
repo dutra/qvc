@@ -275,6 +275,46 @@ def test_plot_spectral_fraction_vs_redshift_writes_pdf_with_both_host_fractions(
     assert os.path.exists(out)
     assert out.endswith("spectral_fraction_vs_redshift.pdf")
 
+
+def test_plot_spectral_fraction_vs_redshift_ignores_f_pl_panel(tmp_path, monkeypatch):
+    monkeypatch.setenv("MPLCONFIGDIR", str(tmp_path / "mplconfig"))
+
+    captured = {}
+    original_save_figure = hubble_plotting._save_figure
+
+    def _capture_save_figure(fig, path, **kwargs):
+        captured["n_axes"] = len(fig.axes)
+        captured["path"] = path
+        return original_save_figure(fig, path, **kwargs)
+
+    monkeypatch.setattr(hubble_plotting, "_save_figure", _capture_save_figure)
+
+    df = pd.DataFrame(
+        {
+            "z": np.linspace(0.3, 2.2, 24),
+            "f_bc_3000": np.linspace(0.05, 0.25, 24),
+            "f_fe_uv_3000": np.linspace(0.1, 0.4, 24),
+            "f_na": np.linspace(0.02, 0.12, 24),
+            "f_host_2500": np.linspace(0.25, 0.01, 24),
+            "f_PL": np.linspace(0.15, 0.35, 24),
+        }
+    )
+
+    out = hubble_plotting.plot_spectral_fraction_vs_redshift(
+        df,
+        plot_path=str(tmp_path / "figures"),
+        show=False,
+        nbins=6,
+        min_bin_count=3,
+    )
+
+    assert out is not None
+    assert os.path.exists(out)
+    assert out.endswith("spectral_fraction_vs_redshift.pdf")
+    assert captured["path"].endswith("spectral_fraction_vs_redshift.pdf")
+    assert captured["n_axes"] == 4
+
+
 def test_plot_sigma_bc_vs_redshift_writes_pdf(tmp_path, monkeypatch):
     monkeypatch.setenv("MPLCONFIGDIR", str(tmp_path / "mplconfig"))
 
