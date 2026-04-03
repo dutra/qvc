@@ -875,6 +875,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         debias=True,
         show=False,
         dm_interp=dm_interp,
+        dmi_selection_sigma_interp=dmi_selection_sigma_interp,
         plot_path=plot_path,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_redshift_log_f_term=use_redshift_log_f_term,

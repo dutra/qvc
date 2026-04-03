@@ -4458,6 +4458,8 @@ def plot_predicted_vs_actual_M2500(
     z_range=(0.44, 3.16),
     use_alpha_lambda_term=None,
     use_redshift_log_f_term=None,
+    dmi_selection_sigma_interp=None,
+    sigma_sel_floor_mag=0.05,
 ):
     """
     Predicted vs Actual M_2500, with:
@@ -4600,9 +4602,27 @@ def plot_predicted_vs_actual_M2500(
         actual_M_2500_eff = actual_M_2500
 
     residuals_all = M_2500_pred - actual_M_2500_eff               # mag
-    sigma_all     = np.sqrt(
+    sigma_sel = None
+    if debias and dmi_selection_sigma_interp is not None:
+        sigma_sel = _evaluate_dm_interp(
+            dmi_selection_sigma_interp,
+            df_agn["z"].values,
+            df_agn["apparent_mag_2500"].values,
+            f_host_2500=df_agn.get("f_host_2500"),
+            alpha_lambda=df_agn.get("alpha_lambda"),
+        )
+        sigma_sel = np.asarray(sigma_sel, dtype=float)
+        sigma_sel_valid = np.isfinite(sigma_sel) & (sigma_sel > 0.0)
+        sigma_sel = np.where(
+            sigma_sel_valid,
+            np.maximum(sigma_sel, float(sigma_sel_floor_mag)),
+            np.nan,
+        )
+    sigma_all = np.sqrt(
         M_2500_pred_err**2 + xerr**2 + sigma_intrinsic**2
-    )  # full chi2 denominator; plotted bars still exclude sigma_int
+    )  # fallback full chi2 denominator; plotted bars still exclude sigma_int
+    if sigma_sel is not None:
+        sigma_all = np.where(np.isfinite(sigma_sel) & (sigma_sel > 0.0), sigma_sel, sigma_all)
 
     # Safety mask for nan/inf on global vectors (used for overall outputs only)
     m_global = np.isfinite(residuals_all) & np.isfinite(sigma_all) & (sigma_all > 0)
@@ -4701,6 +4721,13 @@ def plot_predicted_vs_actual_M2500(
         xerr_bin = xerr[bin_mask]
         yerr_bin = M_2500_pred_err[bin_mask]
         sigma_bin_chi2 = np.sqrt(xerr_bin**2 + yerr_bin**2 + sigma_intrinsic**2)
+        if sigma_sel is not None:
+            sigma_sel_bin = sigma_sel[bin_mask]
+            sigma_bin_chi2 = np.where(
+                np.isfinite(sigma_sel_bin) & (sigma_sel_bin > 0.0),
+                sigma_sel_bin,
+                sigma_bin_chi2,
+            )
 
         # residuals (for CSV/diagnostics)
         resid = y - x
