@@ -221,4 +221,4 @@ def test_get_completeness_function_3d_fhost_and_loglikelihood_smoke(tmp_path):
     )
 
     assert np.isfinite(logl)
-    assert blob.shape == (2, len(df_agn))
+    assert blob.shape == (3, len(df_agn))
