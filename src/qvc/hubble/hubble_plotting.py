@@ -5672,25 +5672,38 @@ def plot_predicted_L2500_vs_sigmahat(
         ds = df_calibrators.copy()
 
         M2500_show = ds['apparent_mag_2500'].values - cosmo.distmod(ds['z'].values).value
-        # y for SHOW: actual_logL2500_show (use the same dm_interp built for MAIN)
-        # if debias:
-        #     pts_show = np.column_stack([ds['z'].values, ds['apparent_mag_2500'].values])
-        #     M2500_show = (ds['apparent_mag_2500'].values - dm_interp(pts_show)) - cosmo.distmod(ds['z'].values).value
+        if debias:
+            M2500_show -= _evaluate_dm_interp(
+                dm_interp,
+                ds["z"].values,
+                ds["apparent_mag_2500"].values,
+                f_host_2500=ds.get("f_host_2500"),
+                alpha_lambda=ds.get("alpha_lambda"),
+            )
         actual_logL2500_show = convert_M2500_to_logL2500(M2500_show)
         y_log_meas_err_show = 0.4 * np.asarray(ds['apparent_mag_2500_err'].fillna(0.0), dtype=float)
         yerr_linear_show = (10.0**actual_logL2500_show) * np.log(10.0) * y_log_meas_err_show
 
-        # x for SHOW at median params (using ONLY df_calibrators fields)
-        obs_show, err_show, piv_show = agn_model_pack_obs(ds, use_alpha_lambda_term=option_flags["use_alpha_lambda_term"])
+        # x for SHOW at median params, using the AGN fit pivots.
+        obs_show, err_show, _ = agn_model_pack_obs(
+            ds, use_alpha_lambda_term=option_flags["use_alpha_lambda_term"]
+        )
         x_log_ref_show = -0.4 * (
             M_model_agn(
-            med_arr, obs_show, piv_show, use_alpha_lambda_term=option_flags["use_alpha_lambda_term"]
+                med_arr,
+                obs_show,
+                agn_pivot_arr,
+                use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
             ) - M0_med
         )
         x_show = 10.0 ** x_log_ref_show
 
         pred_M_err_show = M_model_agn_err(
-            med_arr, obs_show, err_show, piv_show, use_alpha_lambda_term=option_flags["use_alpha_lambda_term"]
+            med_arr,
+            obs_show,
+            err_show,
+            agn_pivot_arr,
+            use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
         )
         x_log_err_show = 0.4 * pred_M_err_show
         x_log_lower_show = np.min(np.ravel(x_log_ref_show - x_log_err_show))
@@ -5704,8 +5717,6 @@ def plot_predicted_L2500_vs_sigmahat(
         pred_M_err_show = 0
 
     # --- Grid and band (unchanged) ---
-    xcm = np.mean(x_log_ref)
-    var_x = np.var(x_log_ref, ddof=1) if np.isfinite(np.var(x_log_ref, ddof=1)) else np.var(x_log_ref) + 1e-8
     # x_min_err = np.min([np.min(x_log_ref - x_log_err_med), np.min(x_log_lower_show)])
     # x_max_err = np.max([np.max(x_log_ref + x_log_err_med), np.max(x_log_upper_show)])
     x_min_err = np.min([np.min(x_log_ref), np.min(x_log_lower_show)])
@@ -5716,20 +5727,8 @@ def plot_predicted_L2500_vs_sigmahat(
     x_log_grid = np.linspace(x_lo, x_hi, 250)
     x_grid = 10.0 ** x_log_grid
 
-    ylog_grid_by_sample = []
-    for s in flat_samples:
-        sample_params = {k: s[param_indices[k]] for k in model_labels}
-        s_arr = agn_model_pack_params(sample_params, use_alpha_lambda_term=option_flags["use_alpha_lambda_term"])
-        M_i = M_model_agn(
-            s_arr, agn_obs_arr, agn_pivot_arr, use_alpha_lambda_term=option_flags["use_alpha_lambda_term"]
-        )
-        Mc = np.mean(M_i)
-        cov_Mx = np.mean((x_log_ref - xcm) * (M_i - Mc))
-        k_s = cov_Mx / var_x
-        c_s = Mc - k_s * xcm
-        M_grid_s = c_s + k_s * x_log_grid
-        ylog_grid_by_sample.append(convert_M2500_to_logL2500(M_grid_s))
-    ylog_grid_by_sample = np.asarray(ylog_grid_by_sample)
+    M0_samples = np.asarray(flat_samples[:, param_indices["M0_agn"]], dtype=float)
+    ylog_grid_by_sample = x_log_grid[None, :] + convert_M2500_to_logL2500(M0_samples)[:, None]
     ylog_med  = np.median(ylog_grid_by_sample, axis=0)
     ylog_low  = np.percentile(ylog_grid_by_sample, 16, axis=0)
     ylog_high = np.percentile(ylog_grid_by_sample, 84, axis=0)
@@ -5819,6 +5818,7 @@ def plot_predicted_L2500_vs_sigmahat(
 
     # --- Suberlak+2021 comparison in the same luminosity-space x convention ---
     C = 0.035 + 0.118; C_err = np.sqrt(0.007**2 + 0.003**2)
+    xcm = float(np.nanmean(x_log_ref))
     ylog_anchor = np.interp(xcm, x_log_grid, ylog_med)
     L_anchor = 10.0**ylog_anchor
     x_anchor = 10.0**xcm
