@@ -47,8 +47,8 @@ def build_agn_cuts(
         ("log_tau_uv_rf", 1.5, 4.0),
         ("wrms", None, wrms_cut),
         ("t_rf_length", 1700, None),
-        ("log_tau_uv_rf_err", 0.0, 1.0),
-        ("log_sigma_uv_err", 0.0, 0.3),
+        # ("log_tau_uv_rf_err", 0.0, 1.0),
+        # ("log_sigma_uv_err", 0.0, 0.3),
         ("f_host_2500", None, f_host_cut),
         ("frac_host_psf_2500", None, f_host_cut),
         ("alpha_lambda", None, DEFAULT_ALPHA_LAMBDA_UPPER_CUT),
@@ -56,6 +56,7 @@ def build_agn_cuts(
         ('f_bc_3000', None, bc_frac_cut),
         ("variability_chi_sq_red_g", variability_chi_sq_red_g_cut, None),
         #("f_br", 10**-1.75, None),
+        ('log_sigma_uv', -1.5, 0.2)
     ]
     if reddening_ebv_cut is not None:
         cuts.append(("reddening_ebv", None, reddening_ebv_cut))
