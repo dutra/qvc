@@ -5576,6 +5576,20 @@ def plot_full_residuals(
             log_frac_host[valid_frac_host] = np.log10(frac_host[valid_frac_host])
             frame['log_frac_host_psf_2500'] = log_frac_host
 
+        if "f_na" in frame.columns or "f_br" in frame.columns:
+            f_na = (
+                pd.to_numeric(frame["f_na"], errors="coerce")
+                if "f_na" in frame.columns
+                else pd.Series(0.0, index=frame.index)
+            )
+            f_br = (
+                pd.to_numeric(frame["f_br"], errors="coerce")
+                if "f_br" in frame.columns
+                else pd.Series(0.0, index=frame.index)
+            )
+            frame["f_lines"] = f_na.fillna(0.0) + f_br.fillna(0.0)
+            frame["log_f_lines"] = _safelog(frame["f_lines"])
+
         log_columns = {
             'dm_red': 'log_dm_red',
             'reddening_integral': 'log_reddening_integral',
@@ -5590,20 +5604,15 @@ def plot_full_residuals(
             'psf_minus_fiber_r': 'log_psf_minus_fiber_r',
             'petroRad_r': 'log_petroRad_r',
             'log_tau_uv_rhat': 'log_log_tau_uv_rhat',
-            'f_host_center': 'log_f_host_center',
             'f_host_2500': 'log_f_host_2500',
             'f_bc_3000': 'log_f_bc_3000',
             'f_fe_uv_3000': 'log_f_fe_uv_3000',
             'RCHI2': 'log_RCHI2',
             'RCHI2DIFF': 'log_RCHI2DIFF',
-            'variability_chi_sq_g': 'log_variability_chi_sq_g',
-            'variability_chi_sq_red_g': 'log_variability_chi_sq_red_g',
             'reddening_ebv': 'log_reddening_ebv',
             'ebv_mw': 'log_ebv_mw',
-            'SN_MEDIAN_ALL': 'log_sn_median_all',
             'ebv_wu': 'log_ebv_wu',
             'frac_bc_2500': 'log_frac_bc_2500',
-            'f_na': 'log_f_na', 'f_br': 'log_f_br',
             'f_PL': 'log_f_PL',
 
         }
@@ -5641,24 +5650,20 @@ def plot_full_residuals(
 
     # ---- Which x-keys to show (keep your order) ----
     keys = [col for col in [
-        'f_na', 'log_f_na', 'f_br', 'log_f_br',
+        'log_f_lines',
         'f_PL', 'log_f_PL',
         'log_amp_delta_bc', 
         'frac_bc_2500', 'log_frac_bc_2500',
-        'variability_chi_sq_g', 'log_variability_chi_sq_g',
-        'variability_chi_sq_red_g', 'log_variability_chi_sq_red_g',
-        'variability_pvalue_g', 'variability_neg_log10_pvalue_g',
-        'reddening_ebv', 'log_reddening_ebv',
+        'log_reddening_ebv',
         'ebv_mw', 'log_ebv_mw',
         'ebv_wu', 'log_ebv_wu',
-        'SN_MEDIAN_ALL', 'log_sn_median_all',
         'log_bi',
         'apparent_mag_2500_intrinsict',
         #'chi_sq_red_g_raw', 'log_chi_sq_red_g_raw', 'variability_chi_sq_g_raw', 'log_variability_chi_sq_g_raw',
         #'pvalue_g', 'log_pvalue_g',
         #'sdss_plate_count', 'RCHI2', 'log_RCHI2', 'RCHI2DIFF', 'log_RCHI2DIFF', 'VDISP', 'ZWARNING', 'RUN2D',
         'log_frac_host_psf_2500',
-        'wrms', 'log_f_bc_3000', 'log_f_fe_uv_3000', 'log_f_host_center', 'log_f_host_2500',
+        'wrms', 'log_f_bc_3000', 'log_f_fe_uv_3000', 'log_f_host_2500',
         'rel_apparent_mag_2500_err',
         #'apparent_mag_2500_err', 'log_apparent_mag_2500_err', 
         #'log_sigma_uv_err', 'log_log_sigma_uv_err',
@@ -5668,8 +5673,8 @@ def plot_full_residuals(
         #'conti_a_0', 'PL_slope_blue', 
         #'MY_M_2500', 'z', 'log_lbol', 'log_ledd_ratio', 
         'delta_tau_uv_fast_rf', 'log_delta_tau_uv_fast_rf',
-        'log_sigma_uv', 'log_sigma_hat_uv', 'log_sigma_hat0', 'log_tau_uv_rf',
-        'log_sigma_uv', 'log_tau_uv', 'log_tau_fast_uv',
+        'log_sigma_uv', 'log_tau_uv_rf',
+        'log_tau_uv', 'log_tau_fast_uv',
         #'log_tau_fast_band_u_RF', 'log_tau_fast_band_g_RF', 'log_tau_fast_band_r_RF', 'log_tau_fast_band_i_RF', 'log_tau_fast_band_z_RF',
         'sn_median_all', 'redchi', 'log_redchi', 'alpha_lambda',
         #'redchi2_conti_full', 'log_redchi2_conti_full',
@@ -5703,9 +5708,28 @@ def plot_full_residuals(
     n_keys = len(keys)
     n_cols = 4
     n_rows = math.ceil(n_keys / n_cols)
+    share_residual_y = key_y == residual_label
 
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=(5 * n_cols, 3.5 * n_rows))
-    axes = axes.flatten()
+    fig, axes_grid = plt.subplots(
+        n_rows,
+        n_cols,
+        figsize=(5 * n_cols, 3.5 * n_rows),
+        sharey="row" if share_residual_y else False,
+        squeeze=False,
+    )
+    axes = axes_grid.flatten()
+
+    global_color_norm = None
+    global_color_cmap = 'viridis' if key_y == residual_label else 'bwr_r'
+    if key_color in df_agn.columns and pd.api.types.is_numeric_dtype(df_agn[key_color]):
+        color_all = pd.to_numeric(df_agn[key_color], errors='coerce').to_numpy(dtype=float)
+        finite_color_all = np.isfinite(color_all)
+        if np.any(finite_color_all):
+            cmin = float(np.nanmin(color_all[finite_color_all]))
+            cmax = float(np.nanmax(color_all[finite_color_all]))
+            if cmin == cmax:
+                cmin, cmax = cmin - 1e-6, cmax + 1e-6
+            global_color_norm = mpl.colors.Normalize(vmin=cmin, vmax=cmax)
 
     def _panel_mask(key):
         if pd.api.types.is_numeric_dtype(df_agn[key]):
@@ -5717,6 +5741,8 @@ def plot_full_residuals(
         if key in keys_masks:
             low, high = keys_masks[key]
             mask &= df_agn[key].between(low, high)
+        if key in {"f_host_2500", "log_f_host_2500"} and "f_host_2500" in df_agn.columns:
+            mask &= pd.to_numeric(df_agn["f_host_2500"], errors="coerce").to_numpy(dtype=float) > 0.0
         mask &= np.isfinite(residuals)
         if isinstance(mask, pd.Series):
             mask = mask.fillna(False).to_numpy(dtype=bool)
@@ -5735,15 +5761,17 @@ def plot_full_residuals(
             color_num = pd.to_numeric(pd.Series(color_values), errors='coerce').to_numpy(dtype=float)
             finite_color = np.isfinite(color_num)
             if np.any(finite_color):
-                cmin = float(np.nanmin(color_num[finite_color]))
-                cmax = float(np.nanmax(color_num[finite_color]))
-                if cmin == cmax:
-                    cmin, cmax = cmin - 1e-6, cmax + 1e-6
-                norm = mpl.colors.Normalize(vmin=cmin, vmax=cmax)
+                norm = global_color_norm
+                if norm is None:
+                    cmin = float(np.nanmin(color_num[finite_color]))
+                    cmax = float(np.nanmax(color_num[finite_color]))
+                    if cmin == cmax:
+                        cmin, cmax = cmin - 1e-6, cmax + 1e-6
+                    norm = mpl.colors.Normalize(vmin=cmin, vmax=cmax)
                 color_values = color_num
             else:
                 norm = None
-            cmap = 'viridis'
+            cmap = global_color_cmap
         else:
             x = df_agn.loc[mask, key_y].to_numpy()
             y = df_agn.loc[mask, key].to_numpy()
@@ -5751,15 +5779,17 @@ def plot_full_residuals(
             color_num = pd.to_numeric(pd.Series(color_values), errors='coerce').to_numpy(dtype=float)
             finite_color = np.isfinite(color_num)
             if np.any(finite_color):
-                cmin = float(np.nanmin(color_num[finite_color]))
-                cmax = float(np.nanmax(color_num[finite_color]))
-                if cmin == cmax:
-                    cmin, cmax = cmin - 1e-6, cmax + 1e-6
-                norm = mpl.colors.Normalize(vmin=cmin, vmax=cmax)
+                norm = global_color_norm
+                if norm is None:
+                    cmin = float(np.nanmin(color_num[finite_color]))
+                    cmax = float(np.nanmax(color_num[finite_color]))
+                    if cmin == cmax:
+                        cmin, cmax = cmin - 1e-6, cmax + 1e-6
+                    norm = mpl.colors.Normalize(vmin=cmin, vmax=cmax)
                 color_values = color_num
             else:
                 norm = None
-            cmap = 'bwr_r'
+            cmap = global_color_cmap
         return x, y, color_values, xlabel, ylabel, cmap, norm
 
     def _normalize_category_value(value):
@@ -5797,23 +5827,84 @@ def plot_full_residuals(
                 ax.plot([xmin, xmax], [xmin - xmid, xmax - xmid], color='red', linestyle='--', lw=1)
 
     def _draw_binned_overlay(ax, x, y, err):
-        mfin = np.isfinite(x) & np.isfinite(y) & np.isfinite(err) & (err > 0)
+        _ = err
+        mfin = np.isfinite(x) & np.isfinite(y)
         if not np.any(mfin):
             return
 
-        xb, yb, eb = x[mfin], y[mfin], err[mfin]
+        xb, yb = np.asarray(x[mfin], dtype=float), np.asarray(y[mfin], dtype=float)
         lo, hi = np.nanpercentile(xb, [1, 99])
         if not (np.isfinite(lo) and np.isfinite(hi) and hi > lo):
             lo, hi = np.nanmin(xb), np.nanmax(xb)
         bins = np.linspace(lo, hi, nbins + 1)
-        zc, mean, sem, _ = _weighted_bin_stats(xb, yb, eb, bins, min_count=min_count, center='weighted')
-        if len(zc):
-            ax.errorbar(
-                zc, mean, yerr=sem,
-                fmt='o', color='red', markersize=4,
-                elinewidth=1.0, capsize=2,
-                alpha=0.9, zorder=10
+        x_med, y_med, y_lo, y_hi, y_med_err = [], [], [], [], []
+        for i_bin in range(len(bins) - 1):
+            if i_bin == len(bins) - 2:
+                in_bin = (xb >= bins[i_bin]) & (xb <= bins[i_bin + 1])
+            else:
+                in_bin = (xb >= bins[i_bin]) & (xb < bins[i_bin + 1])
+            if np.count_nonzero(in_bin) < int(min_count):
+                continue
+            x_bin = xb[in_bin]
+            y_bin = yb[in_bin]
+            x_med.append(np.nanmedian(x_bin))
+            y_bin_med = np.nanmedian(y_bin)
+            y_med.append(y_bin_med)
+            lo_i, hi_i = np.nanpercentile(y_bin, [16, 84])
+            y_lo.append(lo_i)
+            y_hi.append(hi_i)
+            robust_sigma = max(0.5 * (hi_i - lo_i), 0.0)
+            y_med_err.append(1.253 * robust_sigma / np.sqrt(np.count_nonzero(in_bin)))
+
+        if x_med:
+            x_med = np.asarray(x_med, dtype=float)
+            y_med = np.asarray(y_med, dtype=float)
+            y_lo = np.asarray(y_lo, dtype=float)
+            y_hi = np.asarray(y_hi, dtype=float)
+            y_med_err = np.asarray(y_med_err, dtype=float)
+            order = np.argsort(x_med)
+            x_med = x_med[order]
+            y_med = y_med[order]
+            y_lo = y_lo[order]
+            y_hi = y_hi[order]
+            y_med_err = y_med_err[order]
+            ax.fill_between(
+                x_med,
+                y_lo,
+                y_hi,
+                color="0.6",
+                alpha=0.12,
+                linewidth=0,
+                zorder=8,
             )
+            ax.fill_between(
+                x_med,
+                y_med - y_med_err,
+                y_med + y_med_err,
+                color="red",
+                alpha=0.18,
+                linewidth=0,
+                zorder=9,
+            )
+            ax.plot(
+                x_med,
+                y_med,
+                color="red",
+                lw=1.8,
+                alpha=0.95,
+                zorder=10,
+            )
+
+    def _set_robust_numeric_xlim(ax, x):
+        x = np.asarray(x, dtype=float)
+        x = x[np.isfinite(x)]
+        if x.size < 2:
+            return
+        x_lo, x_hi = np.nanpercentile(x, [1.0, 99.0])
+        if not (np.isfinite(x_lo) and np.isfinite(x_hi) and x_hi > x_lo):
+            return
+        pad = 0.05 * (x_hi - x_lo)
+        ax.set_xlim(x_lo - pad, x_hi + pad)
 
     for idx, key in enumerate(keys):
         ax = axes[idx]
@@ -5821,7 +5912,14 @@ def plot_full_residuals(
             mask = _panel_mask(key)
             x, y, color_values, xlabel, ylabel, cmap, norm = _panel_xy_and_style(mask, key)
             ax.set_xlabel(xlabel)
-            ax.set_ylabel(ylabel)
+            if share_residual_y:
+                if idx % n_cols == 0:
+                    ax.set_ylabel(ylabel)
+                else:
+                    ax.set_ylabel("")
+                    ax.tick_params(labelleft=False)
+            else:
+                ax.set_ylabel(ylabel)
             z_masked = df_agn.loc[mask, 'z'].to_numpy(dtype=float)
             x_is_numeric = pd.api.types.is_numeric_dtype(pd.Series(x))
             if key_y == residual_label and not x_is_numeric:
@@ -5890,7 +5988,7 @@ def plot_full_residuals(
                         )
                         if sc is None:
                             sc = sc_out
-                    if sc is not None:
+                    if sc is not None and norm is not None and global_color_norm is None:
                         cbar = fig.colorbar(sc, ax=ax, orientation='vertical', fraction=0.046, pad=0.04)
                         cbar.set_label(key_color, fontsize=12)
                 else:
@@ -5920,20 +6018,57 @@ def plot_full_residuals(
                     err = np.full_like(y, np.nan, dtype=float)
                 else:
                     err = np.asarray(residuals_err)[mask][valid_cat_mask]
+                cat_x_med, cat_y_med, cat_y_lo, cat_y_hi, cat_y_med_err = [], [], [], [], []
                 for ci, cat in enumerate(cats):
                     cat_mask = (cat_vals == cat)
-                    ww = np.isfinite(y[cat_mask]) & np.isfinite(err[cat_mask]) & (err[cat_mask] > 0)
+                    _ = err
+                    ww = np.isfinite(y[cat_mask])
                     if not np.any(ww):
                         continue
                     ycat = y[cat_mask][ww]
-                    ecat = err[cat_mask][ww]
-                    wcat = 1.0 / np.square(ecat)
-                    wsum = np.sum(wcat)
-                    if not np.isfinite(wsum) or wsum <= 0:
+                    if ycat.size < int(min_count):
                         continue
-                    mean = np.sum(wcat * ycat) / wsum
-                    sem = np.sqrt(1.0 / wsum)
-                    ax.errorbar(ci, mean, yerr=sem, fmt='o', color='red', markersize=4, elinewidth=1.0, capsize=2, zorder=10)
+                    cat_x_med.append(float(ci))
+                    ycat_med = np.nanmedian(ycat)
+                    cat_y_med.append(ycat_med)
+                    lo_i, hi_i = np.nanpercentile(ycat, [16, 84])
+                    cat_y_lo.append(lo_i)
+                    cat_y_hi.append(hi_i)
+                    robust_sigma = max(0.5 * (hi_i - lo_i), 0.0)
+                    cat_y_med_err.append(1.253 * robust_sigma / np.sqrt(ycat.size))
+
+                if cat_x_med:
+                    cat_x_med = np.asarray(cat_x_med, dtype=float)
+                    cat_y_med = np.asarray(cat_y_med, dtype=float)
+                    cat_y_lo = np.asarray(cat_y_lo, dtype=float)
+                    cat_y_hi = np.asarray(cat_y_hi, dtype=float)
+                    cat_y_med_err = np.asarray(cat_y_med_err, dtype=float)
+                    ax.fill_between(
+                        cat_x_med,
+                        cat_y_lo,
+                        cat_y_hi,
+                        color="0.6",
+                        alpha=0.12,
+                        linewidth=0,
+                        zorder=8,
+                    )
+                    ax.fill_between(
+                        cat_x_med,
+                        cat_y_med - cat_y_med_err,
+                        cat_y_med + cat_y_med_err,
+                        color="red",
+                        alpha=0.18,
+                        linewidth=0,
+                        zorder=9,
+                    )
+                    ax.plot(
+                        cat_x_med,
+                        cat_y_med,
+                        color="red",
+                        lw=1.8,
+                        alpha=0.95,
+                        zorder=10,
+                    )
 
                 ax.set_xticks(np.arange(len(cats), dtype=float))
                 ax.set_xticklabels(cats, rotation=45, ha='right')
@@ -5996,7 +6131,7 @@ def plot_full_residuals(
                         sc = sc_out
                 _draw_reference_guides(ax, key, x)
 
-                if sc is not None and norm is not None:
+                if sc is not None and norm is not None and global_color_norm is None:
                     cbar = fig.colorbar(sc, ax=ax, orientation='vertical', fraction=0.046, pad=0.04)
                     cbar.set_label(key_color, fontsize=12)
 
@@ -6005,6 +6140,7 @@ def plot_full_residuals(
                 else:
                     err = np.asarray(residuals_err)[mask]
                 if pd.api.types.is_numeric_dtype(pd.Series(x)) and pd.api.types.is_numeric_dtype(pd.Series(y)):
+                    _set_robust_numeric_xlim(ax, x)
                     _draw_binned_overlay(ax, x, y, err)
         except Exception as e:
             print(f"Error processing key {key}: {e}")
@@ -6018,8 +6154,29 @@ def plot_full_residuals(
     for j in range(n_keys, len(axes)):
         axes[j].axis('off')
 
+    if global_color_norm is not None:
+        sm = mpl.cm.ScalarMappable(norm=global_color_norm, cmap=global_color_cmap)
+        sm.set_array([])
+        for i_row in range(n_rows):
+            row_start = i_row * n_cols
+            row_end = min((i_row + 1) * n_cols, len(axes))
+            row_axes = [
+                axes[j]
+                for j in range(row_start, row_end)
+                if j < n_keys and axes[j].axison
+            ]
+            if row_axes:
+                cbar = fig.colorbar(
+                    sm,
+                    ax=row_axes,
+                    orientation='vertical',
+                    fraction=0.025,
+                    pad=0.02,
+                )
+                cbar.set_label(key_color, fontsize=12)
+
     os.makedirs(plot_path, exist_ok=True)
-    fig.tight_layout()
+    fig.tight_layout(rect=(0.0, 0.0, 0.98, 1.0))
     return _save_figure(
         fig,
         os.path.join(plot_path, f"{output_tag}_{'debiased' if debias else 'biased'}_y{key_y}_c{key_color}_zcut{z_cut}.pdf"),

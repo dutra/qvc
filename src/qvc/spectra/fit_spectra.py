@@ -542,8 +542,19 @@ def compute_derived_results(result, q, args):
     if "f_host_5100" not in result:
         result["f_host_5100"] = safe_float(result.get("frac_host_5100"))
 
-    result["bi"] = safe_float(getattr(q, "bi", np.nan))
-    result["bi_err"] = safe_float(getattr(q, "bi_err", np.nan))
+    bi = safe_float(getattr(q, "bi", np.nan))
+    bi_err = safe_float(getattr(q, "bi_err", np.nan))
+    if bool(result.get("fit_bal_effective", False)) and not np.isfinite(bi):
+        try:
+            bi, bi_err = q.balnicity_index()
+        except Exception as exc:
+            if bool(getattr(args, "verbose", False)):
+                print(
+                    f"[WARNING] Failed to compute BAL BI for object_id={result.get('object_id')}: {exc}"
+                )
+            bi, bi_err = np.nan, np.nan
+    result["bi"] = safe_float(bi)
+    result["bi_err"] = safe_float(bi_err)
     decompose_host_eff = bool(getattr(q, "_fit_decompose_host", getattr(args, "decompose_host", True)))
     result["decompose_host_effective"] = decompose_host_eff
 
