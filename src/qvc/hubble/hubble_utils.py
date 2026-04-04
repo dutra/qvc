@@ -1470,6 +1470,7 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
             df,
             plot_path=plot_path,
             show=False,
+            prob_thresh=0.8,
             filename="blr_line_lags_vs_l2500_fiducial_precut.pdf",
             assignment_probabilities_filename="blr_line_assignment_probabilities_fiducial_precut.pdf",
         )

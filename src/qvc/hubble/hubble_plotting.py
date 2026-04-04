@@ -556,7 +556,7 @@ def plot_blr_line_lags_vs_l2500(
         index=False,
     )
 
-    keep = assignments["assigned_prob"] >= prob_thresh
+    keep = assignments["assigned_prob"] > prob_thresh
     selected = assignments.loc[keep].copy()
     selected.to_csv(
         os.path.join(diagnostics_path, "blr_line_assignment_selected.csv"),
@@ -746,7 +746,7 @@ def plot_blr_line_lags_vs_l2500_fiducial(
         bbox_to_anchor=(0.5, 1.02),
     )
     fig.suptitle(
-        rf"Assigned BLR lags vs line-matched fit_spectra continuum luminosity ($p \geq {prob_thresh:.1f}$)",
+        rf"Assigned BLR lags vs line-matched fit_spectra continuum luminosity ($p > {prob_thresh:.1f}$)",
         y=1.05,
     )
     fig.tight_layout()

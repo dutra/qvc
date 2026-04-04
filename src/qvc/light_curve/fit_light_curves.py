@@ -1582,12 +1582,14 @@ def log_amp_delta_blr_prior():
     return dist.Normal(-1.0, 1.0)
 
 
-def log_lag_blr_prior():
+def log_lag_blr_prior(z=0.0):
+    # Keep the model lag in observed-frame days, but anchor the prior in rest-frame days.
+    log_1pz = jnp.log1p(jnp.asarray(z, dtype=float))
     return dist.TruncatedNormal(
-        loc=jnp.log(1e2),
+        loc=jnp.log(1e2) + log_1pz,
         scale=jnp.log(10.0),
-        low=LOG_LAG_BLR_LOW,
-        high=LOG_LAG_BLR_HIGH,
+        low=LOG_LAG_BLR_LOW + log_1pz,
+        high=LOG_LAG_BLR_HIGH + log_1pz,
     )
 
 
@@ -1743,7 +1745,7 @@ def compute_parameter_kls(
             if lag_key in flat_samples:
                 kls[f"{lag_key}_kl"] = kl_from_samples(
                     flat_samples[lag_key],
-                    lambda x: _dist_log_prob_array(log_lag_blr_prior(), x),
+                    lambda x: _dist_log_prob_array(log_lag_blr_prior(z=z), x),
                 )
 
     finite_kls = [v for v in kls.values() if np.isfinite(v)]
@@ -2234,7 +2236,7 @@ def build_single_object_model(
                 )
             elif n_blr_terms <= 1:
                 log_amp_delta_blr_raw = numpyro.sample("log_amp_delta_blr_raw", log_amp_delta_blr_prior())
-                log_lag_blr_raw = numpyro.sample("log_lag_blr_raw", log_lag_blr_prior())
+                log_lag_blr_raw = numpyro.sample("log_lag_blr_raw", log_lag_blr_prior(z=z))
                 log_amp_delta_blr = numpyro.deterministic(
                     "log_amp_delta_blr",
                     log_amp_delta_blr_raw,
@@ -2253,9 +2255,9 @@ def build_single_object_model(
                 )
             else:
                 log_amp_delta_blr_raw = numpyro.sample("log_amp_delta_blr_raw", log_amp_delta_blr_prior())
-                log_lag_blr_raw = numpyro.sample("log_lag_blr_raw", log_lag_blr_prior())
+                log_lag_blr_raw = numpyro.sample("log_lag_blr_raw", log_lag_blr_prior(z=z))
                 log_amp_delta_blr2_raw = numpyro.sample("log_amp_delta_blr2_raw", log_amp_delta_blr_prior())
-                log_lag_blr2_raw = numpyro.sample("log_lag_blr2_raw", log_lag_blr_prior())
+                log_lag_blr2_raw = numpyro.sample("log_lag_blr2_raw", log_lag_blr_prior(z=z))
 
                 first_is_short = log_lag_blr_raw <= log_lag_blr2_raw
                 log_lag_blr = numpyro.deterministic(
