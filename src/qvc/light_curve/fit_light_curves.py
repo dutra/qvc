@@ -90,6 +90,7 @@ LOG_LAG_RATIO_BC_TO_BLR_HIGH = np.log(0.3)
 SF_MODEL_TAU_MIN_RF = 10.0
 SF_MODEL_TAU_MAX_RF = 1e4
 SF_MODEL_TAU_N_PLOT = 400
+LOG_SF_INF_TO_RMS = 0.5 * np.log10(2.0)
 
 
 def compute_lambda_center_rf(lam_rf):
@@ -1371,7 +1372,11 @@ def compute_model_structure_function_equivalent(samples, ref_band, tau_grid, *, 
         }
 
     out = {
-        "log_sigma_sf_model_ref_band": fit["log_sigma_sf"],
+        "log_sigma_sf_model_ref_band": (
+            fit["log_sigma_sf"] - LOG_SF_INF_TO_RMS
+            if np.isfinite(fit["log_sigma_sf"])
+            else np.nan
+        ),
         "log_sigma_sf_model_ref_band_err": np.nan,
         "log_tau_sf_model_ref_band": fit["log_tau_sf"],
         "log_tau_sf_model_ref_band_err": np.nan,
@@ -1442,7 +1447,11 @@ def compute_structure_function_diagnostics(
         return_series=return_series,
     )
 
-    log_sigma_uv = fit["log_sigma_sf"]
+    log_sigma_uv = (
+        fit["log_sigma_sf"] - LOG_SF_INF_TO_RMS
+        if np.isfinite(fit["log_sigma_sf"])
+        else np.nan
+    )
     log_tau_rf = fit["log_tau_sf"]
     log_tau_uv_obs = log_tau_rf + np.log10(1.0 + float(z)) if np.isfinite(log_tau_rf) else np.nan
 
@@ -1453,7 +1462,7 @@ def compute_structure_function_diagnostics(
         "sf_n_bootstrap": int(n_bootstrap),
         "sf_ref_lambda_rf": lam_ref_band,
         "log_jitter_sf_ref_band": np.log10(jitter_ref_band) if jitter_ref_band > 0.0 else np.nan,
-        "log_sigma_sf_ref_band": fit["log_sigma_sf"],
+        "log_sigma_sf_ref_band": log_sigma_uv,
         "log_sigma_sf_ref_band_err": fit["log_sigma_sf_err"],
         "log_tau_sf_ref_band": fit["log_tau_sf"],
         "log_tau_sf_ref_band_err": fit["log_tau_sf_err"],

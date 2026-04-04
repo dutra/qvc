@@ -5604,7 +5604,6 @@ def plot_full_residuals(
             'psf_minus_fiber_r': 'log_psf_minus_fiber_r',
             'petroRad_r': 'log_petroRad_r',
             'log_tau_uv_rhat': 'log_log_tau_uv_rhat',
-            'f_host_2500': 'log_f_host_2500',
             'f_bc_3000': 'log_f_bc_3000',
             'f_fe_uv_3000': 'log_f_fe_uv_3000',
             'RCHI2': 'log_RCHI2',
@@ -5663,7 +5662,7 @@ def plot_full_residuals(
         #'pvalue_g', 'log_pvalue_g',
         #'sdss_plate_count', 'RCHI2', 'log_RCHI2', 'RCHI2DIFF', 'log_RCHI2DIFF', 'VDISP', 'ZWARNING', 'RUN2D',
         'log_frac_host_psf_2500',
-        'wrms', 'log_f_bc_3000', 'log_f_fe_uv_3000', 'log_f_host_2500',
+        'wrms', 'log_f_bc_3000', 'log_f_fe_uv_3000',
         'rel_apparent_mag_2500_err',
         #'apparent_mag_2500_err', 'log_apparent_mag_2500_err', 
         #'log_sigma_uv_err', 'log_log_sigma_uv_err',
@@ -5672,7 +5671,7 @@ def plot_full_residuals(
         'ebv_wu',
         #'conti_a_0', 'PL_slope_blue', 
         #'MY_M_2500', 'z', 'log_lbol', 'log_ledd_ratio', 
-        'delta_tau_uv_fast_rf', 'log_delta_tau_uv_fast_rf',
+        'log_delta_tau_uv_fast_rf',
         'log_sigma_uv', 'log_tau_uv_rf',
         'log_tau_uv', 'log_tau_fast_uv',
         #'log_tau_fast_band_u_RF', 'log_tau_fast_band_g_RF', 'log_tau_fast_band_r_RF', 'log_tau_fast_band_i_RF', 'log_tau_fast_band_z_RF',
@@ -5688,7 +5687,8 @@ def plot_full_residuals(
         #'PL_slope_blue', 'lam_min', 'lam_max', 'lam_range', 
         #'poly1', 'psf_minus_fiber_r', 'log_psf_minus_fiber_r', 'petroRad_r', 'log_petroRad_r',
         #'cadence', 'number_points',
-        #'log_jitter_total', 'log_amp_delta_blr_total',
+        #'log_jitter_total',
+        'log_amp_delta_blr_total',
         'log_amp_delta_blr_u', 'log_amp_delta_blr_g', 'log_amp_delta_blr_r', 'log_amp_delta_blr_i', 'log_amp_delta_blr_z',
         'log_amp_delta_lya_band_u', 'log_amp_delta_lya_band_g', 'log_amp_delta_lya_band_r', 'log_amp_delta_lya_band_i', 'log_amp_delta_lya_band_z',
         #'log_jitter_u', 'log_jitter_g', 'log_jitter_r', 'log_jitter_i', 'log_jitter_z',
@@ -5699,7 +5699,7 @@ def plot_full_residuals(
     keys_masks = {
         'dm_red': (-5, 5),
         'log_dm_red': (-np.inf, 1),
-        'f_host_2500': (-2, 1),
+        'frac_host_psf_2500': (-2, 1),
         'log_lbol': (1, np.inf),
     }
 
@@ -5741,8 +5741,10 @@ def plot_full_residuals(
         if key in keys_masks:
             low, high = keys_masks[key]
             mask &= df_agn[key].between(low, high)
-        if key in {"f_host_2500", "log_f_host_2500"} and "f_host_2500" in df_agn.columns:
-            mask &= pd.to_numeric(df_agn["f_host_2500"], errors="coerce").to_numpy(dtype=float) > 0.0
+        if key in {"frac_host_psf_2500", "log_frac_host_psf_2500"} and "frac_host_psf_2500" in df_agn.columns:
+            mask &= pd.to_numeric(df_agn["frac_host_psf_2500"], errors="coerce").to_numpy(dtype=float) > 0.0
+        if key == "log_bi" and "bi" in df_agn.columns:
+            mask &= pd.to_numeric(df_agn["bi"], errors="coerce").to_numpy(dtype=float) > 0.0
         mask &= np.isfinite(residuals)
         if isinstance(mask, pd.Series):
             mask = mask.fillna(False).to_numpy(dtype=bool)
@@ -8209,14 +8211,54 @@ def plot_g_band_drift_slope_histograms(
     )
 
 
-def plot_completeness_diagnostics(dmi_plot, z, m2500, integrals_max_w, plot_path="plots/hubble"):
+def plot_completeness_diagnostics(
+    dmi_plot,
+    z,
+    m2500,
+    integrals_max_w=None,
+    plot_path="plots/hubble",
+    z_range=None,
+):
 
     # Plot dmi vs z for the posterior-summary correction used in debiasing.
-    dmi_interp = interp1d(z, dmi_plot, kind='nearest', bounds_error=False, fill_value='extrapolate')
+    z = np.asarray(z, dtype=float)
+    m2500 = np.asarray(m2500, dtype=float)
+    dmi_plot = np.asarray(dmi_plot, dtype=float)
+    if z.shape != dmi_plot.shape or m2500.shape != dmi_plot.shape:
+        raise ValueError(
+            f"Expected z, m2500, and dmi_plot to have the same shape, got "
+            f"{z.shape}, {m2500.shape}, {dmi_plot.shape}."
+        )
+    finite = np.isfinite(z) & np.isfinite(m2500) & np.isfinite(dmi_plot)
+    if z_range is None:
+        fit_mask = finite
+        out_mask = np.zeros_like(finite, dtype=bool)
+    else:
+        fit_mask = finite & (z >= z_range[0]) & (z <= z_range[1])
+        out_mask = finite & ~((z >= z_range[0]) & (z <= z_range[1]))
     
     fig, ax = plt.subplots(figsize=(8, 5))
 
-    ax.plot(z, -dmi_plot, marker="o", linestyle="none", label="AGN", color='k', alpha=0.5)
+    if np.any(fit_mask):
+        ax.plot(
+            z[fit_mask],
+            -dmi_plot[fit_mask],
+            marker="o",
+            linestyle="none",
+            label="in $z$ range",
+            color="k",
+            alpha=0.5,
+        )
+    if np.any(out_mask):
+        ax.plot(
+            z[out_mask],
+            -dmi_plot[out_mask],
+            marker="D",
+            linestyle="none",
+            label="outside $z$ range",
+            color="k",
+            alpha=0.5,
+        )
 
     ax.set_xlabel(r"$z$")
     ax.set_ylabel(r"$\Delta m$ (mag)")
@@ -8233,7 +8275,25 @@ def plot_completeness_diagnostics(dmi_plot, z, m2500, integrals_max_w, plot_path
     # Plot dmi vs m2500 (apparent magnitude)
     fig, ax = plt.subplots(figsize=(8, 5))
 
-    ax.scatter(m2500, -dmi_plot, alpha=0.5, s=20, color='k', label='AGN')
+    if np.any(fit_mask):
+        ax.scatter(
+            m2500[fit_mask],
+            -dmi_plot[fit_mask],
+            alpha=0.5,
+            s=20,
+            color="k",
+            label="in $z$ range",
+        )
+    if np.any(out_mask):
+        ax.scatter(
+            m2500[out_mask],
+            -dmi_plot[out_mask],
+            alpha=0.5,
+            s=28,
+            marker="D",
+            color="k",
+            label="outside $z$ range",
+        )
 
     ax.set_xlabel(r"Apparent magnitude $m_{2500}$ (mag)")
     ax.set_ylabel(r"$\Delta m$ (mag)")
@@ -8244,15 +8304,18 @@ def plot_completeness_diagnostics(dmi_plot, z, m2500, integrals_max_w, plot_path
     fig.savefig(f"{outdir}/dmi_vs_m2500_posterior_median.pdf", dpi=300)
     plt.close(fig)
 
-    # Plot log(integrals) vs redshift for highest-weight sample
-    fig, ax = plt.subplots(figsize=(8, 5))
-    ax.scatter(z, integrals_max_w, s=16, alpha=0.3)
-    ax.set_xlabel("Redshift (z)")
-    ax.set_ylabel("integral  (completeness)")
-    ax.set_title("Completeness integrals vs z — highest posterior weight sample")
-    ax.grid(True)
-    fig.tight_layout()
-    _save_figure(fig, os.path.join(outdir, "integrals_vs_z_highest_weight.pdf"), dpi=150)
+    if integrals_max_w is not None:
+        integrals_max_w = np.asarray(integrals_max_w, dtype=float)
+        if integrals_max_w.shape == z.shape:
+            mask_integrals = np.isfinite(z) & np.isfinite(integrals_max_w)
+            fig, ax = plt.subplots(figsize=(8, 5))
+            ax.scatter(z[mask_integrals], integrals_max_w[mask_integrals], s=16, alpha=0.3)
+            ax.set_xlabel("Redshift (z)")
+            ax.set_ylabel("integral  (completeness)")
+            ax.set_title("Completeness integrals vs z — highest posterior weight sample")
+            ax.grid(True)
+            fig.tight_layout()
+            _save_figure(fig, os.path.join(outdir, "integrals_vs_z_highest_weight.pdf"), dpi=150)
 
 def plot_redshift_histograms(df_pantheon, df_agn,
                             plot_path="plots/hubble",

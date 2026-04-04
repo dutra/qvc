@@ -1192,6 +1192,17 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
             raise ValueError("spectra_fit_csv not provided and spectral fields not found in agn h5 file")
             #raise ValueError("spectra_fit_csv must be provided if alpha_lambda not in agn h5 file")
 
+    if "frac_host_psf_2500" in df.columns:
+        if "f_host_2500" in df.columns and "f_host_fiber_2500" not in df.columns:
+            df["f_host_fiber_2500"] = pd.to_numeric(df["f_host_2500"], errors="coerce")
+        if "f_host_2500_err" in df.columns and "f_host_fiber_2500_err" not in df.columns:
+            df["f_host_fiber_2500_err"] = pd.to_numeric(df["f_host_2500_err"], errors="coerce")
+
+        df["f_host_2500"] = pd.to_numeric(df["frac_host_psf_2500"], errors="coerce")
+        if "frac_host_psf_2500_err" in df.columns:
+            df["f_host_2500_err"] = pd.to_numeric(df["frac_host_psf_2500_err"], errors="coerce")
+        print("Using frac_host_psf_2500 as f_host_2500 for completeness, sigma correction, and diagnostics.")
+
     if "f_host_2500" in df.columns:
         missing_f_host_2500 = pd.to_numeric(df["f_host_2500"], errors="coerce").isna()
         if np.any(missing_f_host_2500):
@@ -1202,7 +1213,7 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
 
     if "log_sigma_uv" in df.columns:
         df["log_sigma_uv_uncorrected"] = pd.to_numeric(df["log_sigma_uv"], errors="coerce")
-    # Use the spectroscopic host fraction at 2500 A for the sigma_uv host correction.
+    # Use the PSF-space spectroscopic host fraction at 2500 A for the sigma_uv host correction.
     if correct_sigma_uv_host:
         required_cols = {"log_sigma_uv_uncorrected", "f_host_2500", "log_sigma_uv_std_psd"}
         if required_cols.issubset(df.columns):
@@ -1245,8 +1256,8 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
             )
             df["log_sigma_uv_std_psd"] = df["log_sigma_uv_std_psd_corrected"]
             print(
-                "Applied sigma_uv host correction using f_host_2500: "
-                "sigma_uv_corrected = sigma_uv / (1 - f_host_2500)"
+                "Applied sigma_uv host correction using frac_host_psf_2500 via f_host_2500: "
+                "sigma_uv_corrected = sigma_uv / (1 - frac_host_psf_2500)"
             )
             delta_log_sigma = df["log_sigma_uv"] - df["log_sigma_uv_uncorrected"]
             valid_expected_increase = valid_hostcorr & np.isfinite(delta_log_sigma)
@@ -1286,7 +1297,7 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
         else:
             missing_cols = sorted(required_cols - set(df.columns))
             raise KeyError(
-                "correct_sigma_uv_host=True requires 'log_sigma_uv', 'f_host_2500', "
+                "correct_sigma_uv_host=True requires 'log_sigma_uv', 'frac_host_psf_2500' (copied into f_host_2500), "
                 f"and 'log_sigma_uv_std_psd'. Missing: {missing_cols}"
             )
 
@@ -1556,6 +1567,15 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
     df['log_t_rf_length'] = np.log10(df['t_rf_length'])
 
     df['log_f_host_2500'] = np.where(df['f_host_2500'] > 0, np.log10(df['f_host_2500']), np.nan)
+    if {"apparent_mag_2500", "apparent_mag_2500_err"}.issubset(df.columns):
+        mag_2500 = pd.to_numeric(df["apparent_mag_2500"], errors="coerce").to_numpy(dtype=float)
+        mag_2500_err = pd.to_numeric(df["apparent_mag_2500_err"], errors="coerce").to_numpy(dtype=float)
+        df["rel_apparent_mag_2500_err"] = np.divide(
+            mag_2500_err,
+            np.maximum(np.abs(mag_2500), 1e-8),
+            out=np.full_like(mag_2500_err, np.nan, dtype=float),
+            where=np.isfinite(mag_2500_err) & np.isfinite(mag_2500),
+        )
 
     df = df.reset_index(drop=True)
     
@@ -1652,6 +1672,51 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
                 col_mask &= df[col] <= upper
             plot_cut_diagnostics(df.copy(), df[col_mask], bins=30, cut_info=cut_desc)
             df = _record_cut(f"agn_scalar:{col}", cut_desc, df, col_mask)
+
+        if "log_amp_delta_bc" in df.columns:
+            bc_amp_upper = -0.2
+            bc_amp_mask = (
+                pd.to_numeric(df["log_amp_delta_bc"], errors="coerce").to_numpy(dtype=float)
+                <= bc_amp_upper
+            ) | df["log_amp_delta_bc"].isna().to_numpy(dtype=bool)
+            cut_desc = f"log_amp_delta_bc in (-inf, {bc_amp_upper}] or NaN"
+            plot_cut_diagnostics(df.copy(), df[bc_amp_mask], bins=30, cut_info=cut_desc)
+            df = _record_cut("agn_scalar:log_amp_delta_bc", cut_desc, df, bc_amp_mask)
+
+        for frac_col, log_col in (
+            ("f_fe_uv_3000", "log_f_fe_uv_3000"),
+            ("f_bc_3000", "log_f_bc_3000"),
+        ):
+            if frac_col not in df.columns:
+                _append_cut_report_row(
+                    cut_rows,
+                    step=f"agn_scalar:{log_col}",
+                    criterion=f"{log_col} <= -2 or NaN/non-positive",
+                    before=len(df),
+                    kept=len(df),
+                    status="skipped",
+                )
+                continue
+            frac_vals = pd.to_numeric(df[frac_col], errors="coerce").to_numpy(dtype=float)
+            frac_mask = (~np.isfinite(frac_vals)) | (frac_vals <= 0.0) | (frac_vals <= 1.0e-2)
+            cut_desc = f"{log_col} <= -2 or NaN/non-positive"
+            plot_cut_diagnostics(df.copy(), df[frac_mask], bins=30, cut_info=cut_desc)
+            df = _record_cut(f"agn_scalar:{log_col}", cut_desc, df, frac_mask)
+
+        if "rel_apparent_mag_2500_err" in df.columns:
+            rel_mag_err = pd.to_numeric(
+                df["rel_apparent_mag_2500_err"],
+                errors="coerce",
+            ).to_numpy(dtype=float)
+            rel_mag_err_mask = (~np.isfinite(rel_mag_err)) | (rel_mag_err <= 0.005)
+            cut_desc = "rel_apparent_mag_2500_err <= 0.005 or NaN"
+            plot_cut_diagnostics(df.copy(), df[rel_mag_err_mask], bins=30, cut_info=cut_desc)
+            df = _record_cut(
+                "agn_scalar:rel_apparent_mag_2500_err",
+                cut_desc,
+                df,
+                rel_mag_err_mask,
+            )
     # Drop rows that still lack the core continuum fit parameters.
     remove_nans_columns = ['alpha_lambda', 'alpha_lambda_err']
     for col in remove_nans_columns:

@@ -907,7 +907,7 @@ def save_g_band_binned_residual_drift_plot(diagnostic, data, show=False, filenam
 
 
 def _sf_bending_power_law_model_curve(tau, log_sigma_sf, log_tau_sf, alpha_short):
-    """Evaluate the fitted flat-large-lag bending SF curve."""
+    """Evaluate the fitted flat-large-lag SF curve from an RMS-normalized amplitude."""
 
     tau = np.asarray(tau, dtype=float)
     if (
@@ -916,7 +916,7 @@ def _sf_bending_power_law_model_curve(tau, log_sigma_sf, log_tau_sf, alpha_short
         or not np.isfinite(alpha_short)
     ):
         return np.full_like(tau, np.nan, dtype=float)
-    sf_inf = np.power(10.0, float(log_sigma_sf))
+    sf_inf = np.sqrt(2.0) * np.power(10.0, float(log_sigma_sf))
     tau_break = np.power(10.0, float(log_tau_sf))
     ratio = np.clip(tau / tau_break, 1e-12, None)
     return sf_inf / (1.0 + np.power(ratio, float(alpha_short)))

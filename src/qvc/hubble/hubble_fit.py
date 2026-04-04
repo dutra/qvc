@@ -82,6 +82,7 @@ from qvc.hubble.hubble_model import (
     get_model_params,
 )
 from qvc.hubble.hubble_completeness_refactored import (
+    evaluate_dm_interp,
     get_completeness_function_2d,
     get_completeness_function_3d_fhost,
     get_completeness_function_4d_fhost_alpha,
@@ -997,6 +998,26 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         dmi_selection_sigma_full = np.asarray(
             dmi_selection_sigma_interp(np.column_stack(interp_cols)),
             dtype=float,
+        )
+    if dmi_posterior_median_full is not None:
+        dmi_posterior_median_full_plot = np.where(
+            np.isfinite(dmi_posterior_median_full),
+            dmi_posterior_median_full,
+            evaluate_dm_interp(
+                dm_interp,
+                df_agn["z"].values,
+                df_agn["apparent_mag_2500"].values,
+                f_host_2500=df_agn["f_host_2500"].values if "f_host_2500" in df_agn.columns else None,
+                alpha_lambda=df_agn["alpha_lambda"].values if "alpha_lambda" in df_agn.columns else None,
+            ),
+        )
+        plot_completeness_diagnostics(
+            dmi_posterior_median_full_plot,
+            df_agn["z"].values,
+            df_agn["apparent_mag_2500"].values,
+            integrals_max_w=None,
+            plot_path=plot_path,
+            z_range=z_range,
         )
     # Debiased (Bias corrected)
     r = plot_hubble(flat_samples, df_agn, df_pantheon, 
