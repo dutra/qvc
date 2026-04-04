@@ -191,6 +191,12 @@ def effective_fit_bal_flag(z):
     return bool(np.isfinite(z) and z > 2.0)
 
 
+def effective_fit_bc_flag(z, requested=True):
+    """Disable Balmer-continuum fitting for high-redshift spectra."""
+    z = safe_float(z)
+    return bool(requested) and (not np.isfinite(z) or z <= 1.5)
+
+
 def estimate_m2500_from_model(q):
     """Estimate reddened and intrinsic apparent mags at rest-frame 2500A from PL draws."""
     if not hasattr(q, "numpyro_samples") or q.numpyro_samples is None:
@@ -980,8 +986,10 @@ def run_one_fit(rec, args):
 
         prior_config = build_default_prior_config(flux)
         decompose_host_eff = effective_decompose_host_flag(rec["z"], requested=args.decompose_host)
+        fit_bc_eff = effective_fit_bc_flag(rec["z"], requested=args.fit_bc)
         fit_bal_eff = effective_fit_bal_flag(rec["z"])
         result["decompose_host_effective"] = bool(decompose_host_eff)
+        result["fit_bc_effective"] = bool(fit_bc_eff)
         result["fit_bal_effective"] = bool(fit_bal_eff)
         psf_bands_all, psf_mags_all, psf_mag_errs_all = build_psf_photometry_inputs(rec)
         result["bands_used"] = "".join(psf_bands_all)
@@ -1007,7 +1015,7 @@ def run_one_fit(rec, args):
                 decompose_host=decompose_host_eff,
                 fit_pl=args.fit_pl,
                 fit_fe=args.fit_fe,
-                fit_bc=args.fit_bc,
+                fit_bc=fit_bc_eff,
                 fit_bal=fit_bal_eff,
                 fit_poly=args.fit_poly,
                 mask_lya_forest=args.mask_lya_forest,

@@ -5719,6 +5719,7 @@ def plot_full_residuals(
     n_cols = 4
     n_rows = math.ceil(n_keys / n_cols)
     share_residual_y = key_y == residual_label
+    use_symmetric_color_norm = key_color == residual_label
 
     fig, axes_grid = plt.subplots(
         n_rows,
@@ -5730,16 +5731,27 @@ def plot_full_residuals(
     axes = axes_grid.flatten()
 
     global_color_norm = None
-    global_color_cmap = 'viridis' if key_y == residual_label else 'bwr_r'
+    global_color_cmap = "bwr_r" if use_symmetric_color_norm else (
+        "viridis" if key_y == residual_label else "bwr_r"
+    )
+
+    def _make_color_norm(color_num):
+        color_num = np.asarray(color_num, dtype=float)
+        finite_color = np.isfinite(color_num)
+        if not np.any(finite_color):
+            return None
+        cmin = float(np.nanmin(color_num[finite_color]))
+        cmax = float(np.nanmax(color_num[finite_color]))
+        if use_symmetric_color_norm:
+            cabs = max(abs(cmin), abs(cmax), 1e-6)
+            return mpl.colors.TwoSlopeNorm(vmin=-cabs, vcenter=0.0, vmax=cabs)
+        if cmin == cmax:
+            cmin, cmax = cmin - 1e-6, cmax + 1e-6
+        return mpl.colors.Normalize(vmin=cmin, vmax=cmax)
+
     if key_color in df_agn.columns and pd.api.types.is_numeric_dtype(df_agn[key_color]):
         color_all = pd.to_numeric(df_agn[key_color], errors='coerce').to_numpy(dtype=float)
-        finite_color_all = np.isfinite(color_all)
-        if np.any(finite_color_all):
-            cmin = float(np.nanmin(color_all[finite_color_all]))
-            cmax = float(np.nanmax(color_all[finite_color_all]))
-            if cmin == cmax:
-                cmin, cmax = cmin - 1e-6, cmax + 1e-6
-            global_color_norm = mpl.colors.Normalize(vmin=cmin, vmax=cmax)
+        global_color_norm = _make_color_norm(color_all)
 
     def _panel_mask(key):
         if pd.api.types.is_numeric_dtype(df_agn[key]):
@@ -5773,13 +5785,7 @@ def plot_full_residuals(
             color_num = pd.to_numeric(pd.Series(color_values), errors='coerce').to_numpy(dtype=float)
             finite_color = np.isfinite(color_num)
             if np.any(finite_color):
-                norm = global_color_norm
-                if norm is None:
-                    cmin = float(np.nanmin(color_num[finite_color]))
-                    cmax = float(np.nanmax(color_num[finite_color]))
-                    if cmin == cmax:
-                        cmin, cmax = cmin - 1e-6, cmax + 1e-6
-                    norm = mpl.colors.Normalize(vmin=cmin, vmax=cmax)
+                norm = global_color_norm if global_color_norm is not None else _make_color_norm(color_num)
                 color_values = color_num
             else:
                 norm = None
@@ -5791,13 +5797,7 @@ def plot_full_residuals(
             color_num = pd.to_numeric(pd.Series(color_values), errors='coerce').to_numpy(dtype=float)
             finite_color = np.isfinite(color_num)
             if np.any(finite_color):
-                norm = global_color_norm
-                if norm is None:
-                    cmin = float(np.nanmin(color_num[finite_color]))
-                    cmax = float(np.nanmax(color_num[finite_color]))
-                    if cmin == cmax:
-                        cmin, cmax = cmin - 1e-6, cmax + 1e-6
-                    norm = mpl.colors.Normalize(vmin=cmin, vmax=cmax)
+                norm = global_color_norm if global_color_norm is not None else _make_color_norm(color_num)
                 color_values = color_num
             else:
                 norm = None
@@ -5967,11 +5967,7 @@ def plot_full_residuals(
                 use_numeric_color = np.any(finite_color)
                 sc = None
                 if use_numeric_color:
-                    cmin = float(np.nanmin(color_num[finite_color]))
-                    cmax = float(np.nanmax(color_num[finite_color]))
-                    if cmin == cmax:
-                        cmin, cmax = cmin - 1e-6, cmax + 1e-6
-                    cat_norm = mpl.colors.Normalize(vmin=cmin, vmax=cmax)
+                    cat_norm = norm if norm is not None else _make_color_norm(color_num)
                     if np.any(in_z):
                         sc = ax.scatter(
                             xj[in_z],
