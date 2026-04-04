@@ -53,6 +53,9 @@ def _make_fake_agn_sample(n_agn=24, seed=123):
     return pd.DataFrame(
         {
             "object_id": [f"agn_{i:03d}" for i in range(n_agn)],
+            "sdss_name": [f"{i:06d}.00+000000.0" for i in range(n_agn)],
+            "ra": np.linspace(10.0, 20.0, n_agn),
+            "dec": np.linspace(-5.0, 5.0, n_agn),
             "z": z,
             "z_err": np.full(n_agn, 0.002),
             "apparent_mag_2500": apparent_mag,
@@ -64,6 +67,16 @@ def _make_fake_agn_sample(n_agn=24, seed=123):
             "log_sigma_uv_std_psd": np.full(n_agn, 0.05),
             "log_tau_uv_rf_std_psd": np.full(n_agn, 0.06),
             "log_sigma_uv_log_tau_uv_rf_cov_psd": np.full(n_agn, 0.001),
+            "f_host_2500": np.full(n_agn, 0.2),
+            "f_host_2500_err": np.full(n_agn, 0.03),
+            "f_bc_3000": np.full(n_agn, 0.12),
+            "f_bc_3000_err": np.full(n_agn, 0.02),
+            "f_fe_uv_3000": np.full(n_agn, 0.18),
+            "f_fe_uv_3000_err": np.full(n_agn, 0.03),
+            "f_na": np.full(n_agn, 0.04),
+            "f_na_err": np.full(n_agn, 0.01),
+            "f_br": np.full(n_agn, 0.06),
+            "f_br_err": np.full(n_agn, 0.015),
             "delta_m_flux_recal": rng.normal(0.0, 0.02, size=n_agn),
         }
     )
@@ -230,6 +243,181 @@ def test_run_single_only_sna_smoke(fake_data, monkeypatch, tmp_path):
     assert residuals is None
     assert age == 13.7
     assert age_err == 0.2
+
+
+def test_run_single_calls_agn_table_only_for_joint_flatw0wa(monkeypatch, tmp_path):
+    df_agn = _make_fake_agn_sample()
+    df_pantheon = _make_fake_pantheon_sample()
+    priors, model_labels, _ = hubble_model.get_model_params("Flatw0waCDM", only_sna=False)
+    theta = np.array([(priors[key][0] + priors[key][1]) / 2.0 for key in model_labels], dtype=float)
+    flat_samples = np.tile(theta[None, :], (8, 1))
+    dmi_posterior_sigma = np.full(len(df_agn), 0.05)
+    calls = []
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(hubble_fit, "plot_redshift_histograms", lambda *args, **kwargs: None)
+    monkeypatch.setattr(hubble_fit, "plot_delta_m_flux_recal_vs_redshift", lambda *args, **kwargs: None)
+    monkeypatch.setattr(hubble_fit, "report_pivots", lambda *args, **kwargs: None)
+    monkeypatch.setattr(hubble_fit, "display_results_summary", lambda *args, **kwargs: None)
+    monkeypatch.setattr(hubble_fit, "compute_age_universe_with_error", lambda *args, **kwargs: (13.8, 0.1))
+    monkeypatch.setattr(
+        hubble_fit,
+        "run_mcmc_pipeline",
+        lambda *args, **kwargs: (
+            flat_samples,
+            model_labels,
+            lambda pts: np.zeros(len(np.atleast_2d(pts))),
+            None,
+            -50.0,
+            0.2,
+            dmi_posterior_sigma,
+            None,
+        ),
+    )
+    monkeypatch.setattr(hubble_fit, "plot_predicted_L2500_vs_sigmahat", lambda *args, **kwargs: (np.zeros(len(df_agn)), np.ones(len(df_agn))))
+    monkeypatch.setattr(hubble_fit, "plot_blr_line_lags_vs_l2500", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        hubble_fit,
+        "plot_hubble",
+        lambda *args, **kwargs: (
+            np.zeros(len(df_agn)),
+            np.ones(len(df_agn)),
+            np.full(len(df_agn), 44.0),
+            np.full(len(df_agn), 0.1),
+            np.full(len(df_agn), 0.2),
+        ),
+    )
+    monkeypatch.setattr(hubble_fit, "plot_hubble_residual_normality", lambda *args, **kwargs: None)
+    monkeypatch.setattr(hubble_fit, "plot_predicted_vs_actual_M2500", lambda *args, **kwargs: (np.zeros(len(df_agn)), np.ones(len(df_agn)), None, None))
+    monkeypatch.setattr(hubble_fit, "plot_full_residuals", lambda *args, **kwargs: None)
+    monkeypatch.setattr(hubble_fit, "plot_full_residuals_rz", lambda *args, **kwargs: None)
+    monkeypatch.setattr(hubble_fit, "plot_debias_impact_diagnostics", lambda *args, **kwargs: None)
+    monkeypatch.setattr(hubble_fit, "plot_redshift_bin_residual_summary", lambda *args, **kwargs: None)
+    monkeypatch.setattr(hubble_fit, "plot_fast_vs_uv_variability", lambda *args, **kwargs: None)
+    monkeypatch.setattr(hubble_fit, "plot_cosmo_corner", lambda *args, **kwargs: None)
+    monkeypatch.setattr(hubble_fit, "plot_residuals_vs_alphaOX", lambda *args, **kwargs: None)
+    monkeypatch.setattr(hubble_fit, "make_agn_latex_table", lambda *args, **kwargs: calls.append((args, kwargs)))
+
+    hubble_fit.run_single(
+        df_agn=df_agn,
+        df_agn_all=df_agn.copy(),
+        df_pantheon=df_pantheon,
+        _sna_L=None,
+        _sna_Lower=True,
+        _sna_LogdetCov=None,
+        cosmo_model="Flatw0waCDM",
+        completeness=False,
+        use_full_cov=False,
+        only_sna=False,
+        speed="fast",
+        z_range=(0.44, 3.16),
+        skip_plots=False,
+        prefix="unit",
+    )
+
+    assert len(calls) == 1
+
+
+def test_run_single_does_not_call_agn_table_for_only_sna(monkeypatch, tmp_path):
+    df_agn = _make_fake_agn_sample()
+    df_pantheon = _make_fake_pantheon_sample()
+    priors, model_labels, _ = hubble_model.get_model_params("Flatw0waCDM", only_sna=True)
+    theta = np.array([(priors[key][0] + priors[key][1]) / 2.0 for key in model_labels], dtype=float)
+    flat_samples = np.tile(theta[None, :], (8, 1))
+    dmi_posterior_sigma = np.full(len(df_agn), 0.05)
+    calls = []
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(hubble_fit, "plot_redshift_histograms", lambda *args, **kwargs: None)
+    monkeypatch.setattr(hubble_fit, "plot_delta_m_flux_recal_vs_redshift", lambda *args, **kwargs: None)
+    monkeypatch.setattr(hubble_fit, "report_pivots", lambda *args, **kwargs: None)
+    monkeypatch.setattr(hubble_fit, "display_results_summary", lambda *args, **kwargs: None)
+    monkeypatch.setattr(hubble_fit, "compute_age_universe_with_error", lambda *args, **kwargs: (13.7, 0.2))
+    monkeypatch.setattr(
+        hubble_fit,
+        "run_mcmc_pipeline",
+        lambda *args, **kwargs: (
+            flat_samples,
+            model_labels,
+            lambda pts: np.zeros(len(np.atleast_2d(pts))),
+            None,
+            -25.0,
+            0.15,
+            dmi_posterior_sigma,
+            None,
+        ),
+    )
+    monkeypatch.setattr(hubble_fit, "make_agn_latex_table", lambda *args, **kwargs: calls.append((args, kwargs)))
+
+    hubble_fit.run_single(
+        df_agn=df_agn,
+        df_agn_all=df_agn.copy(),
+        df_pantheon=df_pantheon,
+        _sna_L=None,
+        _sna_Lower=True,
+        _sna_LogdetCov=None,
+        cosmo_model="Flatw0waCDM",
+        completeness=False,
+        use_full_cov=False,
+        only_sna=True,
+        speed="fast",
+        z_range=(0.44, 3.16),
+        skip_plots=False,
+        prefix="unit",
+    )
+
+    assert calls == []
+
+
+def test_run_single_does_not_call_agn_table_when_skip_plots(monkeypatch, tmp_path):
+    df_agn = _make_fake_agn_sample()
+    df_pantheon = _make_fake_pantheon_sample()
+    priors, model_labels, _ = hubble_model.get_model_params("Flatw0waCDM", only_sna=False)
+    theta = np.array([(priors[key][0] + priors[key][1]) / 2.0 for key in model_labels], dtype=float)
+    flat_samples = np.tile(theta[None, :], (8, 1))
+    dmi_posterior_sigma = np.full(len(df_agn), 0.05)
+    calls = []
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(hubble_fit, "plot_redshift_histograms", lambda *args, **kwargs: None)
+    monkeypatch.setattr(hubble_fit, "plot_delta_m_flux_recal_vs_redshift", lambda *args, **kwargs: None)
+    monkeypatch.setattr(hubble_fit, "report_pivots", lambda *args, **kwargs: None)
+    monkeypatch.setattr(hubble_fit, "display_results_summary", lambda *args, **kwargs: None)
+    monkeypatch.setattr(hubble_fit, "compute_age_universe_with_error", lambda *args, **kwargs: (13.8, 0.1))
+    monkeypatch.setattr(
+        hubble_fit,
+        "run_mcmc_pipeline",
+        lambda *args, **kwargs: (
+            flat_samples,
+            model_labels,
+            lambda pts: np.zeros(len(np.atleast_2d(pts))),
+            None,
+            -50.0,
+            0.2,
+            dmi_posterior_sigma,
+            None,
+        ),
+    )
+    monkeypatch.setattr(hubble_fit, "make_agn_latex_table", lambda *args, **kwargs: calls.append((args, kwargs)))
+
+    hubble_fit.run_single(
+        df_agn=df_agn,
+        df_agn_all=df_agn.copy(),
+        df_pantheon=df_pantheon,
+        _sna_L=None,
+        _sna_Lower=True,
+        _sna_LogdetCov=None,
+        cosmo_model="Flatw0waCDM",
+        completeness=False,
+        use_full_cov=False,
+        only_sna=False,
+        speed="fast",
+        z_range=(0.44, 3.16),
+        skip_plots=True,
+        prefix="unit",
+    )
+
+    assert calls == []
 
 
 @pytest.mark.parametrize("resume_value, use_default_checkpoint", [(True, True), ("custom_resume.h5", False)])

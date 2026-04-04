@@ -37,6 +37,7 @@ from qvc.hubble.hubble_utils import (
 from qvc.hubble.hubble_completeness_refactored import (
     apparent_mag_to_logL2500,
     build_smooth_trend_1d,
+    evaluate_dm_interp,
     fit_fhost_2500_l2500_model,
     predict_fhost_2500_from_logL2500,
 )
@@ -542,7 +543,7 @@ def plot_blr_line_lags_vs_l2500(
 
     z = pd.to_numeric(df_agn["z"], errors="coerce").to_numpy(dtype=float)
     m2500 = pd.to_numeric(df_agn["apparent_mag_2500"], errors="coerce").to_numpy(dtype=float)
-    dmi = _evaluate_dm_interp(
+    dmi = evaluate_dm_interp(
         dm_interp,
         z,
         m2500,
@@ -5151,7 +5152,7 @@ def plot_predicted_vs_actual_M2500(
 
     # --- actual minus optional debias ---
     if debias:
-        actual_M_2500_eff = actual_M_2500 - _evaluate_dm_interp(
+        actual_M_2500_eff = actual_M_2500 - evaluate_dm_interp(
             dm_interp,
             df_agn["z"].values,
             df_agn["apparent_mag_2500"].values,
@@ -5164,7 +5165,7 @@ def plot_predicted_vs_actual_M2500(
     residuals_all = M_2500_pred - actual_M_2500_eff               # mag
     sigma_sel = None
     if debias and dmi_selection_sigma_interp is not None:
-        sigma_sel = _evaluate_dm_interp(
+        sigma_sel = evaluate_dm_interp(
             dmi_selection_sigma_interp,
             df_agn["z"].values,
             df_agn["apparent_mag_2500"].values,
@@ -5268,7 +5269,7 @@ def plot_predicted_vs_actual_M2500(
 
         actual_M_2500_bin = actual_M_2500[bin_mask].copy()
         if debias:
-            actual_M_2500_bin -= _evaluate_dm_interp(
+            actual_M_2500_bin -= evaluate_dm_interp(
                 dm_interp,
                 df_agn["z"][bin_mask],
                 df_agn["apparent_mag_2500"][bin_mask],
@@ -5560,7 +5561,7 @@ def plot_full_residuals(
         frame['MY_M_2500'] = frame['apparent_mag_2500'].values - cosmo.distmod(frame['z'].values).value
 
         if debias:
-            delta = _evaluate_dm_interp(
+            delta = evaluate_dm_interp(
                 dm_interp,
                 frame["z"].values,
                 frame["apparent_mag_2500"].values,
@@ -6582,7 +6583,7 @@ def plot_predicted_L2500_vs_sigmahat(
     sigma_chi_plot = np.sqrt(sigma_meas**2 + sigma_xy**2)
     sigma_chi_full = np.sqrt(sigma_meas**2 + sigma_xy**2 + sigma_int_log**2)
     if debias and dmi_selection_sigma_interp is not None:
-        sigma_sel_mag = _evaluate_dm_interp(
+        sigma_sel_mag = evaluate_dm_interp(
             dmi_selection_sigma_interp,
             d["z"].values,
             d["apparent_mag_2500"].values,

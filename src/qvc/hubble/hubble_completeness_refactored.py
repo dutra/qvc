@@ -18,6 +18,19 @@ from qvc.hubble.hubble_utils import convert_M2500_to_logL2500, resolve_qvc_data_
 COSMO = FlatLambdaCDM(H0=70.0, Om0=0.3)
 
 
+def evaluate_dm_interp(dm_interp, z, m2500, *, f_host_2500=None, alpha_lambda=None):
+    """Evaluate debias correction using the richest available feature set."""
+    z = np.asarray(z, dtype=float)
+    m2500 = np.asarray(m2500, dtype=float)
+    cols = [z, m2500]
+    if f_host_2500 is not None:
+        cols.append(np.asarray(f_host_2500, dtype=float))
+        if alpha_lambda is not None:
+            cols.append(np.asarray(alpha_lambda, dtype=float))
+    pts = np.column_stack(cols)
+    return np.asarray(dm_interp(pts), dtype=float)
+
+
 def _binned_mean_interp_1d(z, y, *, z_bins=40):
     """Fallback 1D trend estimate from z-binned means."""
     z = np.asarray(z, dtype=float)

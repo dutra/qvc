@@ -416,150 +416,99 @@ def parse_list(x):
     # Finally, treat the value as a comma-separated string.
     return [t.strip() for t in s.split(",") if t.strip()]
 
-def populate_spectra_fit(df, spectra_fit_csvs, best=True):
-    # Spectral-fit columns to merge into the AGN catalog.
+def populate_spectra_fit(df, spectra_fit_csvs):
     fields = {
-        'object_id': str,
-        'f_host_2500': float,
-        'f_PL': float,
-        'f_PL_err': float,
-        'f_host_5100': float,
-        'bi': float,
-        'bi_err': float,
-        'ebv_fs': float,
-        'euv_fs': float,
-        'conti_a_0': float,
-        'apparent_mag_2500_reddened': float,
-        'apparent_mag_2500_reddened_err': float,
-        'apparent_mag_2500': float,
-        'apparent_mag_2500_err': float,
-        'apparent_mag_2500_intrinsic': float,
-        'apparent_mag_2500_intrinsic_err': float,
-        'apparent_mag_i_rest': float,
-        'apparent_mag_i_rest_err': float,
-        'apparent_mag_i_obs': float,
-        'apparent_mag_i_obs_err': float,
-        'delta_m_flux_recal': float,
-        'alpha_lambda': float,
-        'alpha_lambda_err': float,
-        'aic': float,
-        'bic': float,
-        'decomp_host': bool,
-        'BC': bool,
-        'best': bool,
-        'bands_used': parse_list,
-        'PL_slope': float,
-        'PL_slope_err': float,
-        'PL_slope_blue': float,
-        'PL_slope_blue_err': float,
-        'PL_slope_red': float,
-        'PL_break_wave': float,
-        'iron_frac': float,
-        'PL_break_wave_inbounds': bool,
-        'lam_rf_min': float,
-        'lam_rf_max': float,
-        'f_fe_uv_3000': float,
-        'f_bc_3000': float,
-        'f_na': float,
-        'f_na_err': float,
-        'f_br': float,
-        'f_br_err': float,
-        'f_host_center': float,
-        'f_host_center_err': float,
-        'wrms': float,
-        'frac_host_psf_2500': float,
-        'reddening_ebv': float,
-        'ebv_mw': float,
-        'ebv_wu': float,
-        'SN_MEDIAN_ALL': float,
-        'f_na': float,
-        'f_br': float,
-        'f_PL': float
+        "object_id": str,
+        "apparent_mag_2500": float,
+        "apparent_mag_2500_err": float,
+        "apparent_mag_2500_reddened": float,
+        "apparent_mag_2500_reddened_err": float,
+        "apparent_mag_2500_intrinsic": float,
+        "apparent_mag_2500_intrinsic_err": float,
+        "apparent_mag_i_rest": float,
+        "apparent_mag_i_obs": float,
+        "delta_m_flux_recal": float,
+        "f_host_2500": float,
+        "f_host_2500_err": float,
+        "f_bc_3000": float,
+        "f_bc_3000_err": float,
+        "f_fe_uv_3000": float,
+        "f_fe_uv_3000_err": float,
+        "f_na": float,
+        "f_na_err": float,
+        "f_br": float,
+        "f_br_err": float,
+        "wrms": float,
+        "f_host_center": float,
+        "frac_host_psf_2500": float,
+        "reddening_ebv": float,
+        "bi": float,
+        "ebv_fs": float,
+        "euv_fs": float,
+        "conti_a_0": float,
+        "bands_used": parse_list,
+        "PL_slope": float,
+        "PL_slope_err": float,
     }
 
-    # Drop existing derived columns before re-merging them from the fit tables.
-    drop_targets = [c for c in fields.keys() if c != "object_id"]
-    existing_to_drop = [c for c in drop_targets if c in df.columns]
+    required_cols = {
+        "apparent_mag_2500",
+        "apparent_mag_2500_err",
+        "PL_slope",
+        "PL_slope_err",
+        "f_host_2500",
+        "f_host_2500_err",
+        "f_bc_3000",
+        "f_bc_3000_err",
+        "f_fe_uv_3000",
+        "f_fe_uv_3000_err",
+    }
+
+    df = _ensure_object_id(df.copy())
+    existing_to_drop = [col for col in fields if col != "object_id" and col in df.columns]
     if existing_to_drop:
         df = df.drop(columns=existing_to_drop)
 
-    # Normalize the merge key on the left-hand table.
-    df = _ensure_object_id(df)
-
-    expanded_df = df  # will be replaced if best=False
+    out = df
+    wanted = set(fields) | {"object_id"}
+    converters = _wrap_converters({k: v for k, v in fields.items() if k != "object_id"})
 
     for i, csv_path in enumerate(spectra_fit_csvs):
         csv_path = resolve_qvc_data_path(csv_path)
         print(f"\033[96mLoading spectra fit CSV ({i+1}/{len(spectra_fit_csvs)}): {csv_path}\033[0m")
 
-        wanted = set(fields.keys()) | {"object_id"}
-        conv = _wrap_converters({k: v for k, v in fields.items() if k not in {"best", "BC", "decomp_host", "poly"}})
-
         df_spectra = pd.read_csv(
             csv_path,
             usecols=lambda c: _norm_name(c) in wanted,
-            converters=conv,
+            converters=converters,
             encoding="utf-8-sig",
             skipinitialspace=True,
         )
-
-        # Normalize headers and ensure the merge key is present.
         df_spectra.columns = [_norm_name(c) for c in df_spectra.columns]
         df_spectra = _ensure_object_id(df_spectra)
-        required_fraction_cols = {"f_bc_3000", "f_fe_uv_3000"}
-        missing_fraction_cols = sorted(required_fraction_cols.difference(df_spectra.columns))
-        if missing_fraction_cols:
+
+        missing_required = sorted(required_cols.difference(df_spectra.columns))
+        if missing_required:
             raise ValueError(
-                f"Spectra fit CSV '{csv_path}' is missing required columns {missing_fraction_cols}. "
-                "This pipeline now expects the new total-continuum fraction schema from fit_spectra "
-                "(`f_bc_3000` and `f_fe_uv_3000`). Regenerate the spectra-fit CSV with the current code."
+                f"Spectra fit CSV '{csv_path}' is missing required columns {missing_required}. "
+                "Regenerate the spectra-fit CSV with the current fit_spectra pipeline."
             )
 
+        merged = out.merge(
+            df_spectra,
+            on="object_id",
+            how="left",
+            suffixes=("", "_spectralfit"),
+            validate="one_to_one",
+        )
+        print("Length of merged DataFrame:", len(merged))
 
-        if best:
-            # Keep only the preferred fit for each object.
-            if "best" in df_spectra.columns and df_spectra["best"].any():
-                df_spectra = df_spectra[df_spectra["best"] == True].reset_index(drop=True)
-                print(f"Length after best==True: {len(df_spectra)}")
-            merged = df.merge(
-                df_spectra,
-                on="object_id",
-                how="left",
-                suffixes=("_old", "_spectralfit"),
-                validate="one_to_one",
-            )
-            print("Length of merged DataFrame (best=True):", len(merged))
+        for col in fields:
+            if col == "object_id":
+                continue
+            if col in merged.columns:
+                out[col] = merged[col].values
 
-            # Copy spectral-fit columns onto matched rows only.
-            matched_mask = df["object_id"].isin(df_spectra["object_id"])
-            for col in list(fields.keys()):
-                if col == "object_id":
-                    continue
-                src_col = f"{col}_spectralfit" if f"{col}_spectralfit" in merged.columns else col
-                if src_col not in merged.columns:
-                    continue
-                if col in df.columns:
-                    # overwrite only for matched rows
-                    df.loc[matched_mask, col] = merged.loc[matched_mask, src_col].values
-                else:
-                    df.loc[matched_mask, col] = merged.loc[matched_mask, src_col].values
-
-        else:
-            # Preserve every fit row by expanding the table one-to-many.
-            expanded_df = expanded_df.merge(
-                df_spectra,
-                on="object_id",
-                how="left",
-                validate="one_to_many",
-            )
-            print("Length after expanding with one-to-many merge:", len(expanded_df))
-
-    # Continue with the selected output frame.
-    out = df if best else expanded_df
-
-    # Derive additional columns when the required inputs are present.
-    if "redchi" in out.columns:
-        out["log_redchi"] = np.log10(out["redchi"].replace(0, np.nan))
     if "ebv_fs" in out.columns:
         out["log_ebv_fs"] = np.log10(out["ebv_fs"].replace(0, np.nan))
     if "euv_fs" in out.columns:
@@ -568,33 +517,15 @@ def populate_spectra_fit(df, spectra_fit_csvs, best=True):
         out["dm_red"] = out["apparent_mag_2500_reddened"] - out["apparent_mag_2500"]
     if {"apparent_mag_2500_reddened_err", "apparent_mag_2500_err"}.issubset(out.columns):
         out["dm_red_err"] = np.sqrt(
-            out["apparent_mag_2500_reddened_err"]**2 + out["apparent_mag_2500_err"]**2
+            out["apparent_mag_2500_reddened_err"] ** 2 + out["apparent_mag_2500_err"] ** 2
         )
-    
-    if "reddening_integral" in out.columns:
-        out["log_reddening_integral"] = np.log10(out["reddening_integral"].replace(0, np.nan))
-    if "delta_qso01_redchi2" in out.columns:
-        out["log_delta_qso01_redchi2"] = np.log10(np.abs(out["delta_qso01_redchi2"].replace(0, np.nan)))
-    if "conti_a_0" in out.columns:
-        out["log_conti_a_0"] = np.log10(out["conti_a_0"].replace(0, 1e-9))  # avoid log(0)
-
-    # If 'alpha_lambda' is missing but 'PL_slope' exists, set alpha_lambda = PL_slope
-    if "alpha_lambda" not in out.columns and "PL_slope" in out.columns:
-        out["alpha_lambda"] = out["PL_slope"]
-    if "alpha_lambda_err" not in out.columns and "PL_slope_err" in out.columns:
-        out["alpha_lambda_err"] = out["PL_slope_err"]
-    
-    out['alpha_nu'] = -out['alpha_lambda'] - 2
-    out['alpha_nu_err'] = out['alpha_lambda_err']
-
-    # Convert apparent magnitude at 2500 A into log luminosity.
-    out['log_L2500_int_fs'] = -0.4 * (out['apparent_mag_2500'])
-    out['log_L2500_int_fs'] += 36.0  # 90 * 0.4 = 36
-
-    # Propagate the magnitude error into log luminosity.
-    out['log_L2500_int_fs_err'] = 0.4 * out['apparent_mag_2500_err']
-
-    out['iron_frac'] = out['f_fe_uv_3000']
+    out["alpha_lambda"] = out["PL_slope"]
+    out["alpha_lambda_err"] = out["PL_slope_err"]
+    out["alpha_nu"] = -out["alpha_lambda"] - 2
+    out["alpha_nu_err"] = out["alpha_lambda_err"]
+    out["log_L2500_int_fs"] = -0.4 * out["apparent_mag_2500"] + 36.0
+    out["log_L2500_int_fs_err"] = 0.4 * out["apparent_mag_2500_err"]
+    out["iron_frac"] = out["f_fe_uv_3000"]
 
     return out
 def populate_sdss_fields(objs, progress_bar=True):
@@ -1624,8 +1555,7 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
     df['log_t_rf_length'] = np.log10(df['t_rf_length'])
 
     df['log_f_host_2500'] = np.where(df['f_host_2500'] > 0, np.log10(df['f_host_2500']), np.nan)
-    df['log_f_host_5100'] = np.where(df['f_host_5100'] > 0, np.log10(df['f_host_5100']), np.nan)
-    
+
     df = df.reset_index(drop=True)
     
     # Apply a small hand-maintained exclusion list.
@@ -3296,27 +3226,14 @@ def select_agn_subset_uniform_with_replacement(
 
 def report_pivots(df_agn):
     print("\nAGN pivot summary")
-    print("-" * 68)
-    print(f"{'Quantity':<15}{'Type':<18}{'log10 value':>14}{'linear value':>16}")
-
-    rows = [
-        ("sigma_uv", "computed median", np.median(df_agn["log_sigma_uv"])),
-        ("tau_uv_rf", "computed median", np.median(df_agn["log_tau_uv_rf"])),
-    ]
-
     _, _, pivots_arr = agn_model_pack_obs(df_agn)
-
-    rows.extend([
-        ("sigma_uv", "fixed pivot", pivots_arr[agn_model_oidx["log_sigma_uv"]]),
-        ("tau_uv_rf", "fixed pivot", pivots_arr[agn_model_oidx["log_tau_uv_rf"]]),
-    ])
+    rows = [
+        ("sigma_uv", "median", np.median(df_agn["log_sigma_uv"])),
+        ("sigma_uv", "model pivot", pivots_arr[agn_model_oidx["log_sigma_uv"]]),
+        ("tau_uv_rf", "median", np.median(df_agn["log_tau_uv_rf"])),
+        ("tau_uv_rf", "model pivot", pivots_arr[agn_model_oidx["log_tau_uv_rf"]]),
+    ]
 
     for name, kind, log_val in rows:
         lin_val = 10**log_val
-        if name == "sigma_uv":
-            lin_text = f"{lin_val:.1f}"
-        elif name == "tau_uv_rf":
-            lin_text = f"{100.0 * np.round(lin_val / 100.0):.0f}"
-        else:
-            lin_text = f"{lin_val:.4f}"
-        print(f"{name:<15}{kind:<18}{log_val:>14.4f}{lin_text:>16}")
+        print(f"{name} {kind}: log10={log_val}, linear={lin_val}")
