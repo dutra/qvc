@@ -2,6 +2,7 @@ import math
 import os
 
 import numpy as np
+import pandas as pd
 
 from qvc.hubble.hubble_completeness_refactored import evaluate_dm_interp
 
@@ -34,6 +35,61 @@ REQUIRED_AGN_TABLE_COLUMNS = (
 )
 
 
+def _prepare_agn_table_dataframe(agn_df, mu, mu_err, dm_interp):
+    missing_cols = [col for col in REQUIRED_AGN_TABLE_COLUMNS if col not in agn_df.columns]
+    if missing_cols:
+        raise KeyError(f"AGN table requires columns: {missing_cols}")
+    if dm_interp is None:
+        raise ValueError("AGN table requires a non-None dm_interp.")
+
+    df = agn_df.copy()
+    df["mu"] = np.asarray(mu, dtype=float)
+    df["mu_err"] = np.asarray(mu_err, dtype=float)
+
+    dm_values = evaluate_dm_interp(
+        dm_interp,
+        df["z"],
+        df["apparent_mag_2500"],
+        f_host_2500=df["f_host_2500"] if "f_host_2500" in df.columns else None,
+        alpha_lambda=df["alpha_lambda"] if "alpha_lambda" in df.columns else None,
+    )
+    if dm_values.shape != (len(df),):
+        raise ValueError(
+            f"dm_interp returned shape {dm_values.shape}, expected {(len(df),)}."
+        )
+    df["apparent_mag_2500_corr"] = np.asarray(df["apparent_mag_2500"], dtype=float) - dm_values
+    df["apparent_mag_2500_corr_err"] = np.asarray(df["apparent_mag_2500_err"], dtype=float)
+    df["f_lines"] = np.asarray(df["f_na"], dtype=float) + np.asarray(df["f_br"], dtype=float)
+    df["f_lines_err"] = np.hypot(
+        np.asarray(df["f_na_err"], dtype=float),
+        np.asarray(df["f_br_err"], dtype=float),
+    )
+    return df
+
+
+def make_agn_csv_table(
+    agn_df,
+    mu,
+    mu_err,
+    dm_interp,
+    *,
+    sort_by,
+    ascending,
+    write_path,
+) -> pd.DataFrame:
+    df = _prepare_agn_table_dataframe(agn_df, mu, mu_err, dm_interp)
+
+    if sort_by is not None:
+        if sort_by not in df.columns:
+            raise KeyError(f"sort_by column {sort_by!r} is not present in AGN table data.")
+        df = df.sort_values(sort_by, ascending=ascending)
+
+    os.makedirs(write_path, exist_ok=True)
+    out_path = os.path.join(write_path, "agn_table.csv")
+    df.to_csv(out_path, index=False)
+    return df
+
+
 def make_agn_latex_table(
     agn_df,
     mu,
@@ -45,12 +101,6 @@ def make_agn_latex_table(
     max_rows,
     write_path,
 ) -> str:
-    missing_cols = [col for col in REQUIRED_AGN_TABLE_COLUMNS if col not in agn_df.columns]
-    if missing_cols:
-        raise KeyError(f"AGN LaTeX table requires columns: {missing_cols}")
-    if dm_interp is None:
-        raise ValueError("AGN LaTeX table requires a non-None dm_interp.")
-
     def _is_bad(x):
         return x is None or (isinstance(x, float) and (math.isnan(x) or math.isinf(x)))
 
@@ -77,28 +127,7 @@ def make_agn_latex_table(
         err_value = abs(float(err_value))
         return rf"${value:.{nd_val}f} \pm {err_value:.{nd_err}f}$"
 
-    df = agn_df.copy()
-    df["mu"] = np.asarray(mu, dtype=float)
-    df["mu_err"] = np.asarray(mu_err, dtype=float)
-
-    dm_values = evaluate_dm_interp(
-        dm_interp,
-        df["z"],
-        df["apparent_mag_2500"],
-        f_host_2500=df["f_host_2500"] if "f_host_2500" in df.columns else None,
-        alpha_lambda=df["alpha_lambda"] if "alpha_lambda" in df.columns else None,
-    )
-    if dm_values.shape != (len(df),):
-        raise ValueError(
-            f"dm_interp returned shape {dm_values.shape}, expected {(len(df),)}."
-        )
-    df["apparent_mag_2500_corr"] = np.asarray(df["apparent_mag_2500"], dtype=float) - dm_values
-    df["apparent_mag_2500_corr_err"] = np.asarray(df["apparent_mag_2500_err"], dtype=float)
-    df["f_lines"] = np.asarray(df["f_na"], dtype=float) + np.asarray(df["f_br"], dtype=float)
-    df["f_lines_err"] = np.hypot(
-        np.asarray(df["f_na_err"], dtype=float),
-        np.asarray(df["f_br_err"], dtype=float),
-    )
+    df = _prepare_agn_table_dataframe(agn_df, mu, mu_err, dm_interp)
 
     if max_rows is not None:
         df = df.sample(n=min(int(max_rows), len(df)), random_state=42)

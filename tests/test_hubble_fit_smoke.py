@@ -257,7 +257,8 @@ def test_run_single_calls_agn_table_only_for_joint_flatw0wa(monkeypatch, tmp_pat
     flat_samples = np.tile(theta[None, :], (8, 1))
     dmi_posterior_median = np.zeros(len(df_agn))
     dmi_posterior_sigma = np.full(len(df_agn), 0.05)
-    calls = []
+    latex_calls = []
+    csv_calls = []
 
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(hubble_fit, "plot_redshift_histograms", lambda *args, **kwargs: None)
@@ -302,7 +303,8 @@ def test_run_single_calls_agn_table_only_for_joint_flatw0wa(monkeypatch, tmp_pat
     monkeypatch.setattr(hubble_fit, "plot_fast_vs_uv_variability", lambda *args, **kwargs: None)
     monkeypatch.setattr(hubble_fit, "plot_cosmo_corner", lambda *args, **kwargs: None)
     monkeypatch.setattr(hubble_fit, "plot_residuals_vs_alphaOX", lambda *args, **kwargs: None)
-    monkeypatch.setattr(hubble_fit, "make_agn_latex_table", lambda *args, **kwargs: calls.append((args, kwargs)))
+    monkeypatch.setattr(hubble_fit, "make_agn_latex_table", lambda *args, **kwargs: latex_calls.append((args, kwargs)))
+    monkeypatch.setattr(hubble_fit, "make_agn_csv_table", lambda *args, **kwargs: csv_calls.append((args, kwargs)))
 
     hubble_fit.run_single(
         df_agn=df_agn,
@@ -321,7 +323,8 @@ def test_run_single_calls_agn_table_only_for_joint_flatw0wa(monkeypatch, tmp_pat
         prefix="unit",
     )
 
-    assert len(calls) == 1
+    assert len(latex_calls) == 1
+    assert len(csv_calls) == 1
 
 
 def test_run_single_does_not_call_agn_table_for_only_sna(monkeypatch, tmp_path):
@@ -332,7 +335,8 @@ def test_run_single_does_not_call_agn_table_for_only_sna(monkeypatch, tmp_path):
     flat_samples = np.tile(theta[None, :], (8, 1))
     dmi_posterior_median = np.zeros(len(df_agn))
     dmi_posterior_sigma = np.full(len(df_agn), 0.05)
-    calls = []
+    latex_calls = []
+    csv_calls = []
 
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(hubble_fit, "plot_redshift_histograms", lambda *args, **kwargs: None)
@@ -355,7 +359,8 @@ def test_run_single_does_not_call_agn_table_for_only_sna(monkeypatch, tmp_path):
             None,
         ),
     )
-    monkeypatch.setattr(hubble_fit, "make_agn_latex_table", lambda *args, **kwargs: calls.append((args, kwargs)))
+    monkeypatch.setattr(hubble_fit, "make_agn_latex_table", lambda *args, **kwargs: latex_calls.append((args, kwargs)))
+    monkeypatch.setattr(hubble_fit, "make_agn_csv_table", lambda *args, **kwargs: csv_calls.append((args, kwargs)))
 
     hubble_fit.run_single(
         df_agn=df_agn,
@@ -374,7 +379,8 @@ def test_run_single_does_not_call_agn_table_for_only_sna(monkeypatch, tmp_path):
         prefix="unit",
     )
 
-    assert calls == []
+    assert latex_calls == []
+    assert csv_calls == []
 
 
 def test_run_single_does_not_call_agn_table_when_skip_plots(monkeypatch, tmp_path):
@@ -385,7 +391,8 @@ def test_run_single_does_not_call_agn_table_when_skip_plots(monkeypatch, tmp_pat
     flat_samples = np.tile(theta[None, :], (8, 1))
     dmi_posterior_median = np.zeros(len(df_agn))
     dmi_posterior_sigma = np.full(len(df_agn), 0.05)
-    calls = []
+    latex_calls = []
+    csv_calls = []
 
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(hubble_fit, "plot_redshift_histograms", lambda *args, **kwargs: None)
@@ -408,7 +415,8 @@ def test_run_single_does_not_call_agn_table_when_skip_plots(monkeypatch, tmp_pat
             None,
         ),
     )
-    monkeypatch.setattr(hubble_fit, "make_agn_latex_table", lambda *args, **kwargs: calls.append((args, kwargs)))
+    monkeypatch.setattr(hubble_fit, "make_agn_latex_table", lambda *args, **kwargs: latex_calls.append((args, kwargs)))
+    monkeypatch.setattr(hubble_fit, "make_agn_csv_table", lambda *args, **kwargs: csv_calls.append((args, kwargs)))
 
     hubble_fit.run_single(
         df_agn=df_agn,
@@ -427,7 +435,8 @@ def test_run_single_does_not_call_agn_table_when_skip_plots(monkeypatch, tmp_pat
         prefix="unit",
     )
 
-    assert calls == []
+    assert latex_calls == []
+    assert csv_calls == []
 
 
 @pytest.mark.parametrize("resume_value, use_default_checkpoint", [(True, True), ("custom_resume.h5", False)])

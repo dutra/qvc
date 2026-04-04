@@ -74,7 +74,7 @@ from qvc.hubble.hubble_plotting import (
     plot_redshift_bin_residual_summary,
     plot_residuals_vs_alphaOX,
 )
-from qvc.hubble.tex_utils import make_agn_latex_table
+from qvc.hubble.tex_utils import make_agn_csv_table, make_agn_latex_table
 from qvc.hubble.hubble_model import (
     agn_model_pack_obs,
     evaluate_log_f,
@@ -1011,6 +1011,15 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                     use_redshift_log_f_term=use_redshift_log_f_term)
     debiased_residuals, debiased_residuals_err, mu_pred_median_debiased, mu_pred_std_debiased, mu_pred_std_debiased_with_scatter = r
     if cosmo_model == "Flatw0waCDM":
+        make_agn_csv_table(
+            df_agn,
+            mu_pred_median_debiased,
+            mu_pred_std_debiased_with_scatter,
+            dm_interp,
+            sort_by="z",
+            ascending=True,
+            write_path=plot_path,
+        )
         make_agn_latex_table(
             df_agn,
             mu_pred_median_debiased,
