@@ -24,9 +24,22 @@ from scipy.linalg import cho_factor
 from scipy import stats
 from tqdm import tqdm
 
+from qvc.hubble.cuts import (
+    ALPHA_LAMBDA_REQUIRED_COLUMNS,
+    APPARENT_MAG_2500_ERR_MIN,
+    APPARENT_MAG_2500_MAX,
+    APPARENT_MAG_2500_MIN,
+    DROPPED_BANDS_COUNTS_TO_REMOVE,
+    EXCLUDED_SDSS_NAMES,
+    F_BC_3000_MAX,
+    F_FE_UV_3000_MAX,
+    F_HOST_2500_MAX,
+    FRAC_ERR_LOG_L2500_MAX,
+    LOG_AMP_DELTA_BC_UPPER,
+    LOG_F_BC_3000_MAX,
+    REL_APPARENT_MAG_2500_ERR_MAX,
+)
 from qvc.hubble.hubble_cut_config import (
-    DEFAULT_REDDENING_EBV_CUT,
-    DEFAULT_F_HOST_CUT,
     build_agn_cuts,
     build_log_amp_delta_blr_cuts,
 )
@@ -940,14 +953,11 @@ def read_quasars_from_hdf5_flat(file_path, N=None):
             df[meta_key] = meta_value
     return df
 
-def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFAULT_F_HOST_CUT,
+def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
                   exclude_object_ids_csv=None,
                   residuals_sigma_clip=None, residuals_csv=None,
                   spectra_fit_csv=None, only_load=False,
                   correct_sigma_uv_host=False,
-                  iron_frac_cut=None, bc_frac_cut=None, wrms_cut=None,
-                  variability_chi_sq_cut=None,
-                  reddening_ebv_cut=None,
                   lc_info_csv="data/lc_chisq.csv",
                   z_range=(0.44, 3.16),
                   plot_path="plots/hubble",
@@ -1540,9 +1550,15 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
             )
 
     # Remove objects with implausibly bright or faint apparent magnitude at 2500 A.
-    mag_mask = ((df['apparent_mag_2500'] >= 16) & (df['apparent_mag_2500'] < 24))
-    plot_cut_diagnostics(df.copy(), df[mag_mask], bins=30, cut_info="16 < apparent_mag_2500 < 24")
-    df = _record_cut("apparent_mag_2500", "16 < apparent_mag_2500 < 24", df, mag_mask)
+    mag_mask = (
+        (df["apparent_mag_2500"] >= APPARENT_MAG_2500_MIN)
+        & (df["apparent_mag_2500"] < APPARENT_MAG_2500_MAX)
+    )
+    mag_cut_desc = (
+        f"{APPARENT_MAG_2500_MIN} <= apparent_mag_2500 < {APPARENT_MAG_2500_MAX}"
+    )
+    plot_cut_diagnostics(df.copy(), df[mag_mask], bins=30, cut_info=mag_cut_desc)
+    df = _record_cut("apparent_mag_2500", mag_cut_desc, df, mag_mask)
 
     df = populate_xray(df)
     
@@ -1583,12 +1599,7 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
     exclusion_object_ids = []
     mask_exclude = ~df['object_id'].astype(str).isin(exclusion_object_ids)
 
-    exclusion_sdss_names = [
-        '221120.38+010905.6', # removed because wrong redshift
-        '024555.35+005332.6', # removed because the spectrum is anomalous
-        '015802.36+002917.3', # next to a star
-    ]
-    mask_exclude &= (~df['sdss_name'].astype(str).isin(exclusion_sdss_names))
+    mask_exclude &= (~df["sdss_name"].astype(str).isin(EXCLUDED_SDSS_NAMES))
     df = _record_cut("exclusion_list", "sdss_name/object_id exclusion list", df, mask_exclude)
 
 
@@ -1617,9 +1628,14 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
             print(f"[WARNING] Exclusion CSV not found: {exclude_csv}")
 
     # Remove objects with too many dropped bands.
-    mask_dropped = ~df['len_dropped_bands'].isin([4, 5])
+    mask_dropped = ~df["len_dropped_bands"].isin(DROPPED_BANDS_COUNTS_TO_REMOVE)
     plot_cut_diagnostics(df.copy(), df[mask_dropped], bins=30, cut_info="dropped bands 4 or 5")
-    df = _record_cut("dropped_bands", "len_dropped_bands not in {4, 5}", df, mask_dropped)
+    df = _record_cut(
+        "dropped_bands",
+        f"len_dropped_bands not in {set(DROPPED_BANDS_COUNTS_TO_REMOVE)}",
+        df,
+        mask_dropped,
+    )
     blr_amp_cuts = build_log_amp_delta_blr_cuts()
     for col, lower, upper in blr_amp_cuts:
         cut_desc = f"{col} in {_format_cut_bounds(lower, upper, upper_inclusive=False, allow_missing=True)}"
@@ -1642,14 +1658,7 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
         plot_cut_diagnostics(df.copy(), df[mask], bins=30, cut_info=cut_desc)
         df = _record_cut(f"blr_amp:{col}", cut_desc, df, mask)
 
-    cuts = build_agn_cuts(
-        f_host_cut=fhost_cut,
-        iron_frac_cut=iron_frac_cut if iron_frac_cut is not None else None,
-        bc_frac_cut=bc_frac_cut if bc_frac_cut is not None else None,
-        wrms_cut=wrms_cut if wrms_cut is not None else None,
-        variability_chi_sq_red_g_cut=variability_chi_sq_cut,
-        reddening_ebv_cut=reddening_ebv_cut,
-    )
+    cuts = build_agn_cuts()
 
     if apply_cut:
         mask = np.ones(len(df), dtype=bool)
@@ -1674,7 +1683,7 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
             df = _record_cut(f"agn_scalar:{col}", cut_desc, df, col_mask)
 
         if "log_amp_delta_bc" in df.columns:
-            bc_amp_upper = -0.2
+            bc_amp_upper = LOG_AMP_DELTA_BC_UPPER
             bc_amp_mask = (
                 pd.to_numeric(df["log_amp_delta_bc"], errors="coerce").to_numpy(dtype=float)
                 <= bc_amp_upper
@@ -1683,10 +1692,7 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
             plot_cut_diagnostics(df.copy(), df[bc_amp_mask], bins=30, cut_info=cut_desc)
             df = _record_cut("agn_scalar:log_amp_delta_bc", cut_desc, df, bc_amp_mask)
 
-        for frac_col, log_col in (
-            ("f_fe_uv_3000", "log_f_fe_uv_3000"),
-            ("f_bc_3000", "log_f_bc_3000"),
-        ):
+        for frac_col, log_col in (("f_bc_3000", "log_f_bc_3000"),):
             if frac_col not in df.columns:
                 _append_cut_report_row(
                     cut_rows,
@@ -1698,8 +1704,9 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
                 )
                 continue
             frac_vals = pd.to_numeric(df[frac_col], errors="coerce").to_numpy(dtype=float)
-            frac_mask = (~np.isfinite(frac_vals)) | (frac_vals <= 0.0) | (frac_vals <= 1.0e-2)
-            cut_desc = f"{log_col} <= -2 or NaN/non-positive"
+            frac_upper = 10.0**LOG_F_BC_3000_MAX
+            frac_mask = (~np.isfinite(frac_vals)) | (frac_vals <= 0.0) | (frac_vals <= frac_upper)
+            cut_desc = f"{log_col} <= {LOG_F_BC_3000_MAX} or NaN/non-positive"
             plot_cut_diagnostics(df.copy(), df[frac_mask], bins=30, cut_info=cut_desc)
             df = _record_cut(f"agn_scalar:{log_col}", cut_desc, df, frac_mask)
 
@@ -1708,8 +1715,13 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
                 df["rel_apparent_mag_2500_err"],
                 errors="coerce",
             ).to_numpy(dtype=float)
-            rel_mag_err_mask = (~np.isfinite(rel_mag_err)) | (rel_mag_err <= 0.005)
-            cut_desc = "rel_apparent_mag_2500_err <= 0.005 or NaN"
+            rel_mag_err_mask = (
+                (~np.isfinite(rel_mag_err))
+                | (rel_mag_err < REL_APPARENT_MAG_2500_ERR_MAX)
+            )
+            cut_desc = (
+                f"rel_apparent_mag_2500_err < {REL_APPARENT_MAG_2500_ERR_MAX} or NaN"
+            )
             plot_cut_diagnostics(df.copy(), df[rel_mag_err_mask], bins=30, cut_info=cut_desc)
             df = _record_cut(
                 "agn_scalar:rel_apparent_mag_2500_err",
@@ -1718,7 +1730,7 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
                 rel_mag_err_mask,
             )
     # Drop rows that still lack the core continuum fit parameters.
-    remove_nans_columns = ['alpha_lambda', 'alpha_lambda_err']
+    remove_nans_columns = list(ALPHA_LAMBDA_REQUIRED_COLUMNS)
     for col in remove_nans_columns:
         nan_mask = ~df[col].isna()
         plot_cut_diagnostics(df.copy(), df[nan_mask], bins=30, cut_info=f"{col} not NaN")
@@ -1755,19 +1767,33 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
             raise ValueError(f"Residual CSV not found: {residuals_csv}")
 
     # Require a positive finite magnitude uncertainty at 2500 A.
-    mask = (df['apparent_mag_2500_err'] > 0) & np.isfinite(df['apparent_mag_2500_err'])
-    plot_cut_diagnostics(df.copy(), df[mask], bins=30, cut_info=f"0<apparent_mag_2500_err<inf")
+    mask = (
+        (df["apparent_mag_2500_err"] > APPARENT_MAG_2500_ERR_MIN)
+        & np.isfinite(df["apparent_mag_2500_err"])
+    )
+    plot_cut_diagnostics(
+        df.copy(),
+        df[mask],
+        bins=30,
+        cut_info=f"{APPARENT_MAG_2500_ERR_MIN}<apparent_mag_2500_err<inf",
+    )
 
-    df = _record_cut("apparent_mag_2500_err", "0 < apparent_mag_2500_err < inf", df, mask)
+    df = _record_cut(
+        "apparent_mag_2500_err",
+        f"{APPARENT_MAG_2500_ERR_MIN} < apparent_mag_2500_err < inf",
+        df,
+        mask,
+    )
 
     cosmo = FlatLambdaCDM(H0=70, Om0=0.3)
     y_log_meas_err = 0.4 * np.asarray(df['apparent_mag_2500_err'].fillna(1e9))
     actual_M2500 = df['apparent_mag_2500'] - cosmo.distmod(df['z']).value
     actual_logL2500 = convert_M2500_to_logL2500(actual_M2500)
     yerr_linear = 10**actual_logL2500 * np.log(10) * y_log_meas_err
-    mask = yerr_linear/(10**actual_logL2500) < 0.5
-    plot_cut_diagnostics(df.copy(), df[mask], bins=30, cut_info=f"frac_err_logL2500<0.5")
-    df = _record_cut("frac_err_logL2500", "frac_err_logL2500 < 0.5", df, mask, reset_index=False)
+    mask = yerr_linear / (10**actual_logL2500) < FRAC_ERR_LOG_L2500_MAX
+    frac_err_desc = f"frac_err_logL2500 < {FRAC_ERR_LOG_L2500_MAX}"
+    plot_cut_diagnostics(df.copy(), df[mask], bins=30, cut_info=frac_err_desc)
+    df = _record_cut("frac_err_logL2500", frac_err_desc, df, mask, reset_index=False)
 
     num_quasars_z_0_1 = len(df[(df['z'] > 0) & (df['z'] <= 1.0)])
     num_quasars_z_gt_3 = len(df[df['z'] > 3])
@@ -1780,9 +1806,9 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
         "f_host_center" in df.columns or "f_host_2500" in df.columns
     ):
         spectral_fraction_cut_thresholds = {
-            "f_bc_3000": bc_frac_cut,
-            "f_fe_uv_3000": iron_frac_cut,
-            "f_host_2500": fhost_cut,
+            "f_bc_3000": F_BC_3000_MAX,
+            "f_fe_uv_3000": F_FE_UV_3000_MAX,
+            "f_host_2500": F_HOST_2500_MAX,
         }
         plot_spectral_fraction_vs_redshift(
             df,

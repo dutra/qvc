@@ -94,14 +94,6 @@ from qvc.hubble.completeness_mock_catalog import (
     mock_m_per_zbin,
     save_mock_catalog,
 )
-from qvc.hubble.hubble_cut_config import (
-    DEFAULT_BC_FRAC_CUT,
-    DEFAULT_CHI_SQ_CUT,
-    DEFAULT_F_HOST_CUT,
-    DEFAULT_IRON_FRAC_CUT,
-    DEFAULT_REDDENING_EBV_CUT,
-    DEFAULT_WRMS_CUT,
-)
 
 VALID_COMPLETENESS_MODES = ("2d", "3d_fhost", "4d_fhost_alpha")
 
@@ -1377,31 +1369,10 @@ if __name__ == "__main__":
     parser.add_argument("--spectra_fit_csv", type=str, nargs='+', help="Path(s) to spectra fit CSV file(s)")
     parser.add_argument("--no_cuts", action="store_true", default=False, help="Disable AGN data cuts (default: False)")
     parser.add_argument("--skip_plots", action="store_true", default=False, help="Skip plotting steps (default: False)")
-    parser.add_argument(
-        "--fhost_cut",
-        type=float,
-        default=DEFAULT_F_HOST_CUT,
-        help=f"Upper limit for f_host_2500 in the default AGN cuts (default: {DEFAULT_F_HOST_CUT})",
-    )
     parser.add_argument("--exclude_object_ids_csv", type=str, nargs='+', default=[], help="Path(s) to CSV file(s) containing object IDs to exclude")
     parser.add_argument("--residuals_sigma_clip", type=float, default=None, help="Optional residual cut value to exclude outliers (default: None)")
     parser.add_argument("--residuals_csv", type=str, default=None, help="Path to CSV file containing residuals for outlier exclusion (default: None)")
     parser.add_argument("--agn_calibrators", type=str, default=None, help="Path to H5 or CSV file containing AGN data to use as calibrators (default: None)")
-    parser.add_argument("--wrms_cut", type=float, default=DEFAULT_WRMS_CUT, help="Optional reduced chi-squared cut value to exclude outliers (default: None)")
-    parser.add_argument("--iron_frac_cut", type=float, default=DEFAULT_IRON_FRAC_CUT, help="Optional iron fraction cut value to exclude outliers (default: None)")
-    parser.add_argument("--bc_frac_cut", type=float, default=DEFAULT_BC_FRAC_CUT, help="Optional BC cut value to exclude outliers (default: None)")
-    parser.add_argument(
-        "--variability_chi_sq_cut",
-        type=float,
-        default=DEFAULT_CHI_SQ_CUT,
-        help="Optional reduced g-band chi-squared cut value; keeps rows with variability_chi_sq_red_g >= cut.",
-    )
-    parser.add_argument(
-        "--reddening_ebv_cut",
-        type=float,
-        default=DEFAULT_REDDENING_EBV_CUT,
-        help="Optional upper limit on reddening_ebv to exclude reddened objects (default: disabled).",
-    )
     parser.add_argument("--prefix", type=str, default="default", help="Prefix directory under plots/hubble/ and results/, and result variable prefix.")
     parser.add_argument("--result_prefix", type=str, default="", help="Prefix for result variable names in LaTeX output (default: empty string)")
     parser.add_argument("--z_range", type=float, nargs=2, default=[0.44, 3.16], 
@@ -1462,14 +1433,10 @@ if __name__ == "__main__":
     agn_plot_path = f"plots/hubble/{args.prefix}"
     cut_report_path = Path(agn_plot_path) / "cut_summary.txt"
     df_agn, df_agn_all = load_agn_data(args.agn_data_filepath, populate_sdss=args.force_populate_fields, 
-                           apply_cut=not args.no_cuts, fhost_cut=args.fhost_cut,
+                           apply_cut=not args.no_cuts,
                            residuals_sigma_clip=args.residuals_sigma_clip, residuals_csv=args.residuals_csv,
                            exclude_object_ids_csv=args.exclude_object_ids_csv,
                            spectra_fit_csv=args.spectra_fit_csv,
-                           wrms_cut=args.wrms_cut, iron_frac_cut=args.iron_frac_cut,
-                           bc_frac_cut=args.bc_frac_cut,
-                           variability_chi_sq_cut=args.variability_chi_sq_cut,
-                           reddening_ebv_cut=args.reddening_ebv_cut,
                            correct_sigma_uv_host=args.correct_sigma_uv_host,
                            z_range=tuple(args.z_range), plot_path=agn_plot_path,
                            cut_report_path=cut_report_path)

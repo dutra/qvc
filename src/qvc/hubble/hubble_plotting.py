@@ -5484,6 +5484,16 @@ def plot_completeness_vs_mag_at_redshifts(
     _save_figure(fig, os.path.join(completeness_path, "completeness_vs_mag_at_redshifts.pdf"), dpi=300, show=show)
 
 
+def _residual_axis_label(residual_label):
+    if residual_label == "residuals":
+        return "Residuals (mag)"
+    if residual_label == "L2500_sigma_tau_residuals":
+        return r"$\Delta \log L_{2500}$ (dex)"
+    if residual_label == "r_z":
+        return r"$r_z$ (mag)"
+    return residual_label
+
+
 
 def plot_full_residuals(
     df_agn, residuals, residuals_err, flat_samples, cosmo_model, z_pivot_agn,
@@ -5759,7 +5769,7 @@ def plot_full_residuals(
         if key_y == residual_label:
             x = df_agn.loc[mask, key].to_numpy()
             y = residuals[mask]
-            xlabel, ylabel = key, key_y
+            xlabel, ylabel = key, _residual_axis_label(residual_label)
             color_num = pd.to_numeric(pd.Series(color_values), errors='coerce').to_numpy(dtype=float)
             finite_color = np.isfinite(color_num)
             if np.any(finite_color):
@@ -6795,7 +6805,7 @@ def plot_predicted_L2500_vs_sigmahat(
             )
 
         ax_res.axhline(0, color='m', linestyle='--', zorder=3)
-        ax_res.set_ylabel('Residuals (log)')
+        ax_res.set_ylabel(_residual_axis_label("L2500_sigma_tau_residuals"))
         ax_res.set_xlabel(xlabel)
         ax_res.set_xscale('log')
         ax_res.set_ylim(-1.0, 1.0)

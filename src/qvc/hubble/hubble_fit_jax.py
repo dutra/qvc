@@ -51,12 +51,6 @@ except Exception:
     dist = None
     NestedSampler = None
 
-from qvc.hubble.hubble_cut_config import (
-    DEFAULT_CHI_SQ_CUT,
-    DEFAULT_F_HOST_CUT,
-    DEFAULT_IRON_FRAC_CUT,
-    DEFAULT_WRMS_CUT,
-)
 from qvc.hubble.hubble_completeness_refactored import (
     Completeness2D,
     Completeness3D,
@@ -945,11 +939,6 @@ def main():
     )
     parser.add_argument("--completeness_mode", type=str, choices=list(VALID_COMPLETENESS_MODES), default="2d")
     parser.add_argument("--correct-sigma-uv-host", action="store_true", default=False)
-    parser.add_argument("--fhost_cut", type=float, default=DEFAULT_F_HOST_CUT)
-    parser.add_argument("--wrms_cut", type=float, default=DEFAULT_WRMS_CUT)
-    parser.add_argument("--iron_frac_cut", type=float, default=DEFAULT_IRON_FRAC_CUT)
-    parser.add_argument("--bc_frac_cut", type=float, default=DEFAULT_BC_FRAC_CUT)
-    parser.add_argument("--variability_chi_sq_cut", type=float, default=DEFAULT_CHI_SQ_CUT)
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
@@ -959,12 +948,7 @@ def main():
     df_agn, df_agn_all = load_agn_data(
         args.agn_data_filepath,
         apply_cut=True,
-        fhost_cut=args.fhost_cut,
         spectra_fit_csv=args.spectra_fit_csv,
-        wrms_cut=args.wrms_cut,
-        iron_frac_cut=args.iron_frac_cut,
-        bc_frac_cut=args.bc_frac_cut,
-        variability_chi_sq_cut=args.variability_chi_sq_cut,
         correct_sigma_uv_host=args.correct_sigma_uv_host,
         z_range=tuple(args.z_range),
         plot_path=agn_plot_path,

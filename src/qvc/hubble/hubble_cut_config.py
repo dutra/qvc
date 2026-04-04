@@ -1,20 +1,29 @@
 """Default AGN selection-cut configuration for the QVC pipeline."""
 
-DEFAULT_F_HOST_CUT = 1.0 # Wide default cut that allows all values to pass
-DEFAULT_WRMS_CUT = 1.2
-DEFAULT_IRON_FRAC_CUT = 1.0 # Wide default cut that allows all values to pass
-DEFAULT_BC_FRAC_CUT = 1.0
-DEFAULT_CHI_SQ_CUT = 20.0
-DEFAULT_REDDENING_EBV_CUT = None
-DEFAULT_ALPHA_LAMBDA_UPPER_CUT = None # Wide default cut that allows all values to pass
-DEFAULT_LOG_AMP_DELTA_BLR_UPPER_CUT = -0.2
+from qvc.hubble.cuts import (
+    AGN_SCALAR_PARAMETER_CUTS,
+    ALPHA_LAMBDA_MAX,
+    F_BC_3000_MAX,
+    F_FE_UV_3000_MAX,
+    F_HOST_2500_MAX,
+    LOG_AMP_DELTA_BLR_UPPER,
+    LOG_AMP_DELTA_BLR_UPPER_BY_BAND,
+    REDDENING_EBV_MAX,
+    VARIABILITY_CHI_SQ_RED_G_MIN,
+    WRMS_MAX,
+)
 
-DEFAULT_LOG_AMP_DELTA_BLR_UPPER_CUTS = {
-    "u": DEFAULT_LOG_AMP_DELTA_BLR_UPPER_CUT,
-    "g": DEFAULT_LOG_AMP_DELTA_BLR_UPPER_CUT,
-    "r": DEFAULT_LOG_AMP_DELTA_BLR_UPPER_CUT,
-    "i": DEFAULT_LOG_AMP_DELTA_BLR_UPPER_CUT,
-} # Wide default cuts that allow all values to pass
+
+DEFAULT_F_HOST_CUT = F_HOST_2500_MAX
+DEFAULT_WRMS_CUT = WRMS_MAX
+DEFAULT_IRON_FRAC_CUT = F_FE_UV_3000_MAX
+DEFAULT_BC_FRAC_CUT = F_BC_3000_MAX
+DEFAULT_CHI_SQ_CUT = VARIABILITY_CHI_SQ_RED_G_MIN
+DEFAULT_REDDENING_EBV_CUT = REDDENING_EBV_MAX
+DEFAULT_ALPHA_LAMBDA_UPPER_CUT = ALPHA_LAMBDA_MAX
+DEFAULT_LOG_AMP_DELTA_BLR_UPPER_CUT = LOG_AMP_DELTA_BLR_UPPER
+
+DEFAULT_LOG_AMP_DELTA_BLR_UPPER_CUTS = dict(LOG_AMP_DELTA_BLR_UPPER_BY_BAND)
 
 
 def build_agn_cuts(
@@ -43,20 +52,17 @@ def build_agn_cuts(
     if reddening_ebv_cut is None:
         reddening_ebv_cut = DEFAULT_REDDENING_EBV_CUT
 
+    cut_overrides = {
+        "wrms": (None, wrms_cut),
+        "f_host_2500": (None, f_host_cut),
+        "frac_host_psf_2500": (None, f_host_cut),
+        "f_fe_uv_3000": (None, iron_frac_cut),
+        "f_bc_3000": (None, bc_frac_cut),
+        "variability_chi_sq_red_g": (variability_chi_sq_red_g_cut, None),
+    }
     cuts = [
-        ("log_tau_uv_rf", 1.5, 4.0),
-        ("wrms", None, wrms_cut),
-        ("t_rf_length", 1700, None),
-        # ("log_tau_uv_rf_err", 0.0, 1.0),
-        # ("log_sigma_uv_err", 0.0, 0.3),
-        ("f_host_2500", None, f_host_cut),
-        ("frac_host_psf_2500", None, f_host_cut),
-        ("alpha_lambda", None, DEFAULT_ALPHA_LAMBDA_UPPER_CUT),
-        ('f_fe_uv_3000', None, iron_frac_cut),
-        ('f_bc_3000', None, bc_frac_cut),
-        ("variability_chi_sq_red_g", variability_chi_sq_red_g_cut, None),
-        #("f_br", 10**-1.75, None),
-        ('log_sigma_uv', -1.5, 0.2)
+        (column, *cut_overrides.get(column, (lower, upper)))
+        for column, lower, upper in AGN_SCALAR_PARAMETER_CUTS
     ]
     if reddening_ebv_cut is not None:
         cuts.append(("reddening_ebv", None, reddening_ebv_cut))
