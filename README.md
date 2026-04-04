@@ -36,7 +36,7 @@ We recommend using a virtual environment manager such as **Conda**:
 
 ## Installation
 
-Installation typically completes in **a few minutes** on a modern machine. Downloading the demo data may take longer depending on network speed.
+Installation typically completes in **a few minutes** on a modern machine.
 
 ### 1) Create the main (JAX CPU) environment (recommended)
 
@@ -61,7 +61,25 @@ git clone https://github.com/LSST-AGN-Variability/EzTaoX
 pip install EzTaoX
 ```
 
-### 3) Clone the QVC repository and install
+### 3) Compile _quasarlf/pubtools_
+We must compile the pubtools from
+```
+Xuejian Shen, Philip F Hopkins, Claude-André Faucher-Giguère, D M Alexander, Gordon T Richards, Nicholas P Ross, R C Hickox, The bolometric quasar luminosity function at z = 0–7, Monthly Notices of the Royal Astronomical Society, Volume 495, Issue 3, July 2020, Pages 3252–3275, https://doi.org/10.1093/mnras/staa1381
+```
+found at [https://bitbucket.org/ShenXuejian/quasarlf](https://bitbucket.org/ShenXuejian/quasarlf/)
+
+```
+git clone https://bitbucket.org/ShenXuejian/quasarlf.git
+```
+
+Follow the directions under `pubtools/clib` to compile `convolve.so` and `specialuse/convolve_ao.so`.
+Export the `pubtools` folder as a shell environment variable:
+
+```
+export SHEN_PUBTOOLS_PATH=<directory of quasarlf>/quasarlf/pubtools
+```
+
+### 4) Clone the QVC repository and install
 ```bash
 git clone https://github.com/dutra/qvc.git
 cd qvc
@@ -110,7 +128,8 @@ python -m qvc.light_curve.fit_light_curves --help
 ```
 ---
 
-3) Hubble-Diagram Fitting
+## Hubble-Diagram Fitting
+
 
 A subset of Hubble-diagram fitting and plotting can be run via:
 
