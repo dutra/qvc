@@ -778,6 +778,8 @@ def populate_sdss_fields(objs, progress_bar=True):
     return df if input_is_df else df.to_dict("records")
 
 
+
+
 def populate_sdss_rchi2_fields(df, csv_path="data/sdss/sdss_allspec_rchi2.csv"):
     """Populate SDSS allspec quality columns using (object_id, plate, fiberid, mjd)."""
     if "object_id" not in df.columns:
@@ -1039,6 +1041,7 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
             "log_tau_UV_RF_std_psd": "log_tau_uv_rf_std_psd",
             "cov_log_sigma_UV_log_tau_UV_RF": "cov_log_sigma_uv_log_tau_uv_rf",
             "log_sigma_UV_log_tau_UV_RF_cov_psd": "log_sigma_uv_log_tau_uv_rf_cov_psd",
+            "M_I": "M_i",
         }
         alias_to_existing = {
             "LOGMBH": "log_mbh",
@@ -1084,9 +1087,11 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
         plot_sf_vs_uv_variability,
         plot_sigma_bc_vs_frac_bc,
         plot_sigma_bc_vs_redshift,
+        plot_sigma_tau_err_std_psd_comparison,
         plot_sigma_uv_vs_variability_chi_sq_red_g,
         plot_sigma_uv_vs_tau_uv_rf,
         plot_sigma_uv_host_correction,
+        plot_suberlak_style_sigma_tau_fits,
         plot_tau_sigma_vs_wu_catalog,
         plot_tau_sigma_vs_redshift,
     )
@@ -1396,6 +1401,18 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
             show=False,
             filename="sigma_uv_vs_tau_uv_rf_precut.pdf",
         )
+    if {
+        "log_sigma_uv_err",
+        "log_sigma_uv_std_psd",
+        "log_tau_uv_rf_err",
+        "log_tau_uv_rf_std_psd",
+    }.issubset(df.columns):
+        plot_sigma_tau_err_std_psd_comparison(
+            df,
+            plot_path=plot_path,
+            show=False,
+            filename="sigma_tau_err_std_psd_comparison_precut.pdf",
+        )
     if {"log_sigma_uv", "variability_chi_sq_red_g"}.issubset(df.columns):
         plot_sigma_uv_vs_variability_chi_sq_red_g(
             df,
@@ -1472,6 +1489,23 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
             plot_path=plot_path,
             show=False,
             filename="tau_sigma_vs_wu_catalog_precut.pdf",
+        )
+    if {"log_tau_uv_rf", "log_sigma_uv", "LOGMBH", "z", "apparent_mag_2500"}.issubset(df.columns):
+        plot_suberlak_style_sigma_tau_fits(
+            df,
+            plot_path=plot_path,
+            show=False,
+            filename="suberlak_style_sigma_tau_fits_precut.pdf",
+            sample_label="precut M_2500",
+        )
+    if {"log_tau_uv_rf", "log_sigma_uv", "LOGMBH", "LOGLBOL_CORRECTED"}.issubset(df.columns):
+        plot_suberlak_style_sigma_tau_fits(
+            df,
+            plot_path=plot_path,
+            show=False,
+            filename="suberlak_style_sigma_tau_fits_Mi_precut.pdf",
+            abs_mag_column="M_i_Wu_z2",
+            sample_label="precut M_i_Wu_z2",
         )
     if {"z", "log_tau_fast_uv", "log_tau_uv_rf", "log_sigma_uv"}.issubset(df.columns):
         plot_fast_vs_uv_variability(
@@ -1805,6 +1839,18 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
             filename="sigma_uv_vs_tau_uv_rf_postcut.pdf",
             dynamic_axes=True,
         )
+    if {
+        "log_sigma_uv_err",
+        "log_sigma_uv_std_psd",
+        "log_tau_uv_rf_err",
+        "log_tau_uv_rf_std_psd",
+    }.issubset(df.columns):
+        plot_sigma_tau_err_std_psd_comparison(
+            df,
+            plot_path=plot_path,
+            show=False,
+            filename="sigma_tau_err_std_psd_comparison_postcut.pdf",
+        )
     if {"log_sigma_uv", "variability_chi_sq_red_g"}.issubset(df.columns):
         plot_sigma_uv_vs_variability_chi_sq_red_g(
             df,
@@ -1886,6 +1932,23 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True, fhost_cut=DEFA
             plot_path=plot_path,
             show=False,
             filename="sf_vs_uv_variability_postcut.pdf",
+        )
+    if {"log_tau_uv_rf", "log_sigma_uv", "LOGMBH", "z", "apparent_mag_2500"}.issubset(df.columns):
+        plot_suberlak_style_sigma_tau_fits(
+            df,
+            plot_path=plot_path,
+            show=False,
+            filename="suberlak_style_sigma_tau_fits_postcut.pdf",
+            sample_label="postcut M_2500",
+        )
+    if {"log_tau_uv_rf", "log_sigma_uv", "LOGMBH", "LOGLBOL_CORRECTED"}.issubset(df.columns):
+        plot_suberlak_style_sigma_tau_fits(
+            df,
+            plot_path=plot_path,
+            show=False,
+            filename="suberlak_style_sigma_tau_fits_Mi_postcut.pdf",
+            abs_mag_column="M_i_Wu_z2",
+            sample_label="postcut M_i_Wu_z2",
         )
     if {"log_sigma_sf_ref_band", "log_tau_sf_ref_band", "log_sigma_band_g", "log_tau_band_g_RF"}.issubset(df.columns):
         plot_sf_ref_band_vs_model_g(

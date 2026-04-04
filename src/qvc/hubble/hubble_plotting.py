@@ -19,6 +19,7 @@ from astropy import units as u
 from matplotlib.lines import Line2D
 from matplotlib.ticker import FuncFormatter, LogLocator
 from scipy.interpolate import RegularGridInterpolator, interp1d
+from scipy.optimize import minimize_scalar
 from scipy.stats import gaussian_kde, kurtosis, norm, normaltest, probplot, skew
 from tqdm import tqdm
 
@@ -1247,6 +1248,102 @@ def plot_sigma_uv_vs_tau_uv_rf(
     )
 
 
+def plot_sigma_tau_err_std_psd_comparison(
+    df,
+    *,
+    plot_path="plots/hubble",
+    show=False,
+    filename="sigma_tau_err_std_psd_comparison.pdf",
+):
+    """Compare raw percentile errors against regularized PSD std terms."""
+    specs = [
+        (
+            "log_sigma_uv_err",
+            "log_sigma_uv_std_psd",
+            r"$\log \sigma_{\rm UV}$",
+        ),
+        (
+            "log_tau_uv_rf_err",
+            "log_tau_uv_rf_std_psd",
+            r"$\log \tau_{\rm UV,RF}$",
+        ),
+    ]
+
+    fig, axes = plt.subplots(1, 2, figsize=(12.8, 5.8), sharey=False)
+    for ax, (raw_col, psd_col, axis_label) in zip(axes, specs):
+        if {raw_col, psd_col}.issubset(df.columns):
+            raw_err = pd.to_numeric(df[raw_col], errors="coerce").to_numpy(dtype=float)
+            psd_std = pd.to_numeric(df[psd_col], errors="coerce").to_numpy(dtype=float)
+            mask = (
+                np.isfinite(raw_err)
+                & np.isfinite(psd_std)
+                & (raw_err > 0.0)
+                & (psd_std > 0.0)
+            )
+        else:
+            mask = np.array([], dtype=bool)
+
+        if np.any(mask):
+            x = raw_err[mask]
+            y = psd_std[mask]
+            ax.scatter(
+                x,
+                y,
+                s=6,
+                alpha=0.45,
+                linewidths=0,
+                color="0.25",
+                rasterized=True,
+            )
+            lo = float(np.nanmin(np.concatenate([x, y])))
+            hi = float(np.nanmax(np.concatenate([x, y])))
+            pad = 0.05 * max(hi - lo, 1e-6)
+            ax.plot(
+                [lo - pad, hi + pad],
+                [lo - pad, hi + pad],
+                color="tab:red",
+                lw=1.8,
+                zorder=3,
+            )
+            ratio = y / x
+            ax.text(
+                0.04,
+                0.96,
+                "\n".join(
+                    [
+                        f"N={np.count_nonzero(mask)}",
+                        f"median ratio={np.nanmedian(ratio):.3f}",
+                    ]
+                ),
+                ha="left",
+                va="top",
+                transform=ax.transAxes,
+            )
+            ax.set_xlim(lo - pad, hi + pad)
+            ax.set_ylim(lo - pad, hi + pad)
+        else:
+            ax.text(
+                0.5,
+                0.5,
+                f"No finite {raw_col}/{psd_col} rows",
+                ha="center",
+                va="center",
+                transform=ax.transAxes,
+            )
+        ax.set_xlabel(f"{raw_col} (raw percentile)")
+        ax.set_ylabel(f"{psd_col} (regularized PSD)")
+        ax.set_title(axis_label)
+
+    fig.tight_layout()
+    diagnostics_path = os.path.join(plot_path or "plots/hubble", "diagnostics")
+    return _save_figure(
+        fig,
+        os.path.join(diagnostics_path, filename),
+        dpi=200,
+        show=show,
+    )
+
+
 def plot_sigma_uv_vs_variability_chi_sq_red_g(
     df,
     plot_path="plots/hubble",
@@ -1346,6 +1443,435 @@ def plot_tau_sigma_vs_wu_catalog(df, plot_path="plots/hubble", show=False, filen
     axes[1].set_ylabel(r"$\log \sigma_{\rm UV}$")
     axes[1].grid(True, alpha=0.25)
 
+    diagnostics_path = os.path.join(plot_path or "plots/hubble", "diagnostics")
+    return _save_figure(
+        fig,
+        os.path.join(diagnostics_path, filename),
+        dpi=200,
+        show=show,
+    )
+
+
+def _fit_suberlak_relation_fixed_lambda(
+    y,
+    yerr,
+    M_abs,
+    M_abs_err,
+    log_mbh,
+    log_mbh_err,
+    *,
+    b_lambda,
+    lambda_rf=2500.0,
+    nwarm=500,
+    nsamp=500,
+    nuts_seed=0,
+):
+    """Fit Suberlak's relation with fixed B and x/y measurement errors."""
+    y = np.asarray(y, dtype=float)
+    yerr = np.asarray(yerr, dtype=float)
+    M_abs = np.asarray(M_abs, dtype=float)
+    M_abs_err = np.asarray(M_abs_err, dtype=float)
+    log_mbh = np.asarray(log_mbh, dtype=float)
+    log_mbh_err = np.asarray(log_mbh_err, dtype=float)
+    x_lambda = np.log10(float(lambda_rf) / 4000.0)
+    mask = (
+        np.isfinite(y)
+        & np.isfinite(M_abs)
+        & np.isfinite(M_abs_err)
+        & np.isfinite(log_mbh)
+        & np.isfinite(log_mbh_err)
+        & np.isfinite(yerr)
+        & (yerr > 0.0)
+        & (M_abs_err > 0.0)
+        & (log_mbh_err > 0.0)
+    )
+    if np.count_nonzero(mask) < 4:
+        return None
+
+    y_fit = y[mask]
+    yerr_fit = yerr[mask]
+    M_abs_fit = M_abs[mask]
+    M_abs_err_fit = M_abs_err[mask]
+    log_mbh_fit = log_mbh[mask]
+    log_mbh_err_fit = log_mbh_err[mask]
+
+    x_mat = np.column_stack(
+        [
+            np.ones(np.count_nonzero(mask), dtype=float),
+            M_abs_fit + 23.0,
+            log_mbh_fit - 9.0,
+        ]
+    )
+    y_no_lambda = y_fit - float(b_lambda) * x_lambda
+    beta_init, *_ = np.linalg.lstsq(x_mat, y_no_lambda, rcond=None)
+
+    try:
+        import jax
+        import jax.numpy as jnp
+        import numpyro
+        import numpyro.distributions as dist
+        from numpyro.infer import MCMC, NUTS
+    except Exception as exc:
+        print(
+            "[WARNING] NumPyro unavailable for Suberlak-style NUTS regression; "
+            f"falling back to weighted least squares. Error: {exc}"
+        )
+
+        def _solve_beta_and_nll(log_sigma_int):
+            sigma_int = np.exp(float(log_sigma_int))
+            sigma_eff = np.sqrt(
+                np.maximum(yerr_fit, 1e-6) ** 2
+                + sigma_int**2
+                + (beta_init[1] * M_abs_err_fit) ** 2
+                + (beta_init[2] * log_mbh_err_fit) ** 2
+            )
+            w_sqrt = 1.0 / sigma_eff
+            beta_trial, *_ = np.linalg.lstsq(
+                x_mat * w_sqrt[:, None],
+                y_no_lambda * w_sqrt,
+                rcond=None,
+            )
+            sigma_eff = np.sqrt(
+                np.maximum(yerr_fit, 1e-6) ** 2
+                + sigma_int**2
+                + (beta_trial[1] * M_abs_err_fit) ** 2
+                + (beta_trial[2] * log_mbh_err_fit) ** 2
+            )
+            resid_trial = y_no_lambda - x_mat @ beta_trial
+            nll_trial = 0.5 * np.sum(
+                (resid_trial / sigma_eff) ** 2 + np.log(2.0 * np.pi * sigma_eff**2)
+            )
+            return beta_trial, sigma_int, resid_trial, float(nll_trial)
+
+        opt = minimize_scalar(
+            lambda log_sigma_int: _solve_beta_and_nll(log_sigma_int)[3],
+            bounds=(-8.0, 2.0),
+            method="bounded",
+        )
+        beta, sigma_int, resid_no_lambda, nll = _solve_beta_and_nll(opt.x)
+        samples = {
+            "A": np.array([beta[0]], dtype=float),
+            "C": np.array([beta[1]], dtype=float),
+            "D": np.array([beta[2]], dtype=float),
+            "sigma_int": np.array([sigma_int], dtype=float),
+        }
+    else:
+        y_j = jnp.asarray(y_fit)
+        yerr_j = jnp.asarray(np.maximum(yerr_fit, 1e-6))
+        m_j = jnp.asarray(M_abs_fit + 23.0)
+        merr_j = jnp.asarray(np.maximum(M_abs_err_fit, 1e-6))
+        bh_j = jnp.asarray(log_mbh_fit - 9.0)
+        bherr_j = jnp.asarray(np.maximum(log_mbh_err_fit, 1e-6))
+        xlam_j = jnp.asarray(x_lambda)
+
+        def _model():
+            A = numpyro.sample("A", dist.Normal(float(beta_init[0]), 1.0))
+            C = numpyro.sample("C", dist.Normal(float(beta_init[1]), 0.5))
+            D = numpyro.sample("D", dist.Normal(float(beta_init[2]), 0.5))
+            sigma_int = numpyro.sample("sigma_int", dist.HalfNormal(1.0))
+            mu = A + float(b_lambda) * xlam_j + C * m_j + D * bh_j
+            sigma_eff = jnp.sqrt(
+                yerr_j**2
+                + sigma_int**2
+                + (C * merr_j) ** 2
+                + (D * bherr_j) ** 2
+            )
+            numpyro.sample("y_obs", dist.Normal(mu, sigma_eff), obs=y_j)
+
+        kernel = NUTS(_model)
+        mcmc = MCMC(
+            kernel,
+            num_warmup=int(nwarm),
+            num_samples=int(nsamp),
+            num_chains=1,
+            progress_bar=False,
+        )
+        mcmc.run(jax.random.PRNGKey(int(nuts_seed)))
+        samples = {k: np.asarray(v) for k, v in mcmc.get_samples().items()}
+        beta = np.array(
+            [
+                np.median(samples["A"]),
+                np.median(samples["C"]),
+                np.median(samples["D"]),
+            ],
+            dtype=float,
+        )
+        sigma_int = float(np.median(samples["sigma_int"]))
+        resid_no_lambda = y_no_lambda - x_mat @ beta
+        sigma_eff = np.sqrt(
+            np.maximum(yerr_fit, 1e-6) ** 2
+            + sigma_int**2
+            + (beta[1] * M_abs_err_fit) ** 2
+            + (beta[2] * log_mbh_err_fit) ** 2
+        )
+        nll = float(
+            0.5
+            * np.sum(
+                (resid_no_lambda / sigma_eff) ** 2
+                + np.log(2.0 * np.pi * sigma_eff**2)
+            )
+        )
+    y_model = x_mat @ beta + float(b_lambda) * x_lambda
+    resid = y[mask] - y_model
+    sigma_eff = np.sqrt(np.maximum(yerr_fit, 1e-6) ** 2 + sigma_int**2)
+    sigma_eff = np.sqrt(
+        np.maximum(yerr_fit, 1e-6) ** 2
+        + sigma_int**2
+        + (beta[1] * M_abs_err_fit) ** 2
+        + (beta[2] * log_mbh_err_fit) ** 2
+    )
+    chi2 = np.sum((resid_no_lambda / sigma_eff) ** 2)
+    dof = max(1, np.count_nonzero(mask) - 4)
+    return {
+        "A": float(beta[0]),
+        "B": float(b_lambda),
+        "C": float(beta[1]),
+        "D": float(beta[2]),
+        "sigma_int": float(sigma_int),
+        "A_err": float(0.5 * (np.percentile(samples["A"], 84) - np.percentile(samples["A"], 16))),
+        "C_err": float(0.5 * (np.percentile(samples["C"], 84) - np.percentile(samples["C"], 16))),
+        "D_err": float(0.5 * (np.percentile(samples["D"], 84) - np.percentile(samples["D"], 16))),
+        "sigma_int_err": float(
+            0.5
+            * (
+                np.percentile(samples["sigma_int"], 84)
+                - np.percentile(samples["sigma_int"], 16)
+            )
+        ),
+        "mask": mask,
+        "y_model": y_model,
+        "resid": resid,
+        "chi2_red": float(chi2 / dof),
+        "nll": float(nll),
+        "n_used": int(np.count_nonzero(mask)),
+        "lambda_rf": float(lambda_rf),
+    }
+
+
+def plot_suberlak_style_sigma_tau_fits(
+    df,
+    plot_path="plots/hubble",
+    show=False,
+    filename="suberlak_style_sigma_tau_fits.pdf",
+    lambda_rf=2500.0,
+    abs_mag_column="M_2500",
+    sample_label=None,
+):
+    """Fit Suberlak-form regressions to log_sigma_uv and log_tau_uv_rf."""
+    required = {"LOGMBH", "log_sigma_uv", "log_tau_uv_rf"}
+    if abs_mag_column == "M_2500":
+        required |= {"z", "apparent_mag_2500"}
+    elif abs_mag_column == "M_i_Wu_z2":
+        required.add("LOGLBOL_CORRECTED")
+    else:
+        required.add(abs_mag_column)
+    if not required.issubset(df.columns):
+        missing = ", ".join(sorted(required - set(df.columns)))
+        raise KeyError(f"Missing required columns for Suberlak-style regression plot: {missing}")
+
+    if abs_mag_column == "M_2500":
+        cosmo_fid = FlatLambdaCDM(H0=70.0, Om0=0.3)
+        z_vals = pd.to_numeric(df["z"], errors="coerce").to_numpy(dtype=float)
+        M_abs = (
+            pd.to_numeric(df["apparent_mag_2500"], errors="coerce").to_numpy(dtype=float)
+            - cosmo_fid.distmod(z_vals).value
+        )
+        M_abs_err = np.sqrt(
+            pd.to_numeric(df["apparent_mag_2500_err"], errors="coerce").fillna(np.nan).to_numpy(dtype=float) ** 2
+            + sigma_mu_from_z_err(
+                z_vals,
+                pd.to_numeric(df["z_err"], errors="coerce").fillna(np.nan).to_numpy(dtype=float),
+                cosmo_fid,
+            ) ** 2
+        )
+        abs_mag_label = r"$M_{2500}$"
+    elif abs_mag_column == "M_i_Wu_z2":
+        loglbol_corrected = pd.to_numeric(
+            df["LOGLBOL_CORRECTED"],
+            errors="coerce",
+        ).to_numpy(dtype=float)
+        M_abs = 91.0 - 2.5 * loglbol_corrected
+        M_abs = np.where(np.isfinite(M_abs) & (M_abs <= 0.0), M_abs, np.nan)
+        if "LOGLBOL_CORRECTED_ERR" in df.columns:
+            M_abs_err = 2.5 * pd.to_numeric(
+                df["LOGLBOL_CORRECTED_ERR"],
+                errors="coerce",
+            ).to_numpy(dtype=float)
+        else:
+            M_abs_err = np.full(len(df), np.nan, dtype=float)
+        abs_mag_label = r"$M_{i,\rm Wu}$"
+    else:
+        M_abs = pd.to_numeric(df[abs_mag_column], errors="coerce").to_numpy(dtype=float)
+        err_col = f"{abs_mag_column}_err"
+        if err_col in df.columns:
+            M_abs_err = pd.to_numeric(df[err_col], errors="coerce").to_numpy(dtype=float)
+        else:
+            M_abs_err = np.full(len(df), np.nan, dtype=float)
+        abs_mag_label = rf"${abs_mag_column}$"
+    log_mbh = pd.to_numeric(df["LOGMBH"], errors="coerce").to_numpy(dtype=float)
+    if "LOGMBH_ERR" in df.columns:
+        log_mbh_err = pd.to_numeric(df["LOGMBH_ERR"], errors="coerce").to_numpy(dtype=float)
+    else:
+        log_mbh_err = np.full(len(df), np.nan, dtype=float)
+
+    fit_specs = [
+        {
+            "y_col": "log_sigma_uv",
+            "yerr_col": "log_sigma_uv_std_psd" if "log_sigma_uv_std_psd" in df.columns else "log_sigma_uv_err",
+            "b_lambda": -0.479,
+            "sub_c": 0.118,
+            "sub_d": 0.118,
+            "ylabel": r"$\log \sigma_{\rm UV}$",
+            "name": "sigma_uv",
+        },
+        {
+            "y_col": "log_tau_uv_rf",
+            "yerr_col": "log_tau_uv_rf_std_psd" if "log_tau_uv_rf_std_psd" in df.columns else "log_tau_uv_rf_err",
+            "b_lambda": 0.17,
+            "sub_c": 0.035,
+            "sub_d": 0.141,
+            "ylabel": r"$\log \tau_{\rm UV,RF}$",
+            "name": "tau_uv_rf",
+        },
+    ]
+
+    fig, axes = plt.subplots(1, 2, figsize=(13.5, 5.8), sharey=False)
+    for ax, spec in zip(axes, fit_specs):
+        if spec["yerr_col"] not in df.columns:
+            ax.text(
+                0.5,
+                0.5,
+                f"No {spec['yerr_col']} column",
+                ha="center",
+                va="center",
+                transform=ax.transAxes,
+            )
+            ax.set_xlabel(f"Suberlak-form prediction for {spec['name']}")
+            ax.set_ylabel(spec["ylabel"])
+            continue
+
+        y = pd.to_numeric(df[spec["y_col"]], errors="coerce").to_numpy(dtype=float)
+        yerr = pd.to_numeric(df[spec["yerr_col"]], errors="coerce").to_numpy(dtype=float)
+        fit = _fit_suberlak_relation_fixed_lambda(
+            y,
+            yerr,
+            M_abs,
+            M_abs_err,
+            log_mbh,
+            log_mbh_err,
+            b_lambda=spec["b_lambda"],
+            lambda_rf=lambda_rf,
+        )
+        if fit is None:
+            ax.text(
+                0.5,
+                0.5,
+                f"Not enough finite rows for {spec['name']}",
+                ha="center",
+                va="center",
+                transform=ax.transAxes,
+            )
+            ax.set_xlabel(f"Suberlak-form prediction for {spec['name']}")
+            ax.set_ylabel(spec["ylabel"])
+            continue
+
+        y_obs = y[fit["mask"]]
+        y_model = fit["y_model"]
+        yerr_fit = yerr[fit["mask"]]
+        print(
+            f"Suberlak-style fit"
+            f"{'' if sample_label is None else f' [{sample_label}]'} "
+            f"for {spec['name']} using {abs_mag_column} "
+            f"at lambda_RF={fit['lambda_rf']:.0f} A "
+            f"(B fixed={fit['B']:.3f}, N={fit['n_used']}, chi2_red={fit['chi2_red']:.3f}): "
+            f"A={fit['A']:.4f}±{fit['A_err']:.4f}, "
+            f"C={fit['C']:.4f}±{fit['C_err']:.4f} (Suberlak {spec['sub_c']:.4f}), "
+            f"D={fit['D']:.4f}±{fit['D_err']:.4f} (Suberlak {spec['sub_d']:.4f}), "
+            f"sigma_int={fit['sigma_int']:.4f}±{fit['sigma_int_err']:.4f} dex"
+        )
+        ax.errorbar(
+            y_model,
+            y_obs,
+            yerr=yerr_fit,
+            fmt="o",
+            linestyle="none",
+            markersize=3.0,
+            mfc=(0, 0, 0, 0.35),
+            mec="none",
+            ecolor=(0.2, 0.2, 0.2, 0.15),
+            elinewidth=0.8,
+            capsize=0,
+            zorder=2,
+            rasterized=True,
+        )
+        if y_obs.size > 50:
+            try:
+                kde = gaussian_kde(np.vstack([y_model, y_obs]), bw_method="scott")
+                xq = np.quantile(y_model, [0.01, 0.99])
+                yq = np.quantile(y_obs, [0.01, 0.99])
+                rx = xq[1] - xq[0]
+                ry = yq[1] - yq[0]
+                x_grid_kde, y_grid_kde = np.meshgrid(
+                    np.linspace(xq[0] - 0.1 * rx, xq[1] + 0.1 * rx, 220),
+                    np.linspace(yq[0] - 0.1 * ry, yq[1] + 0.1 * ry, 220),
+                )
+                z_kde = kde(
+                    np.vstack([x_grid_kde.ravel(), y_grid_kde.ravel()])
+                ).reshape(x_grid_kde.shape)
+                levels = _kde_conf_levels(z_kde, conf=(0.954, 0.683))
+                ax.contour(
+                    x_grid_kde,
+                    y_grid_kde,
+                    z_kde,
+                    levels=levels,
+                    colors=["0.5", "0.2"],
+                    linestyles=["--", "-"],
+                    linewidths=[1.6, 2.0],
+                    zorder=4,
+                )
+            except Exception as exc:
+                print(f"[Suberlak-style KDE contours] skipped for {spec['name']}: {exc}")
+        lo = float(np.nanmin(np.concatenate([y_obs, y_model])))
+        hi = float(np.nanmax(np.concatenate([y_obs, y_model])))
+        pad = 0.05 * max(hi - lo, 1e-3)
+        ax.plot([lo - pad, hi + pad], [lo - pad, hi + pad], color="tab:red", lw=1.8, zorder=3)
+        ax.set_xlim(lo - pad, hi + pad)
+        ax.set_ylim(lo - pad, hi + pad)
+        ax.set_xlabel(f"Suberlak-form prediction for {spec['name']} using {abs_mag_column}")
+        ax.set_ylabel(spec["ylabel"])
+        ax.text(
+            0.04,
+            0.96,
+            "\n".join(
+                [
+                    rf"$B={fit['B']:.3f}$ fixed",
+                    rf"$C={fit['C']:.3f}\pm{fit['C_err']:.3f}$, "
+                    rf"$D={fit['D']:.3f}\pm{fit['D_err']:.3f}$",
+                    rf"$\sigma_{{\rm int}}={fit['sigma_int']:.3f}\pm{fit['sigma_int_err']:.3f}$ dex",
+                    rf"$\chi^2_\nu={fit['chi2_red']:.2f}$",
+                ]
+            ),
+            transform=ax.transAxes,
+            ha="left",
+            va="top",
+            fontsize=12,
+        )
+        ax.legend(
+            handles=[
+                Line2D([0], [0], color="0.2", lw=2.0, ls="-", label=r"1$\sigma$"),
+                Line2D([0], [0], color="0.5", lw=1.6, ls="--", label=r"2$\sigma$"),
+            ],
+            loc="lower right",
+            frameon=False,
+            fontsize=11,
+        )
+
+    fig.suptitle(
+        rf"Suberlak-form fits at fixed $\lambda_{{\rm RF}}={lambda_rf:.0f}\,\AA$ "
+        rf"using {abs_mag_label} (fit $A,C,D$; $B$ fixed)",
+        y=0.99,
+    )
+    fig.tight_layout()
     diagnostics_path = os.path.join(plot_path or "plots/hubble", "diagnostics")
     return _save_figure(
         fig,
@@ -4399,9 +4925,15 @@ def plot_hubble_residual_normality(
         k2_stat = np.nan
         p_norm = np.nan
         if z_resid.size >= 8:
-            k2_stat, p_norm = normaltest(z_resid)
-            k2_stat = float(k2_stat)
-            p_norm = float(p_norm)
+            try:
+                k2_stat, p_norm = normaltest(np.asarray(z_resid, dtype=np.float64))
+                k2_stat = float(k2_stat)
+                p_norm = float(p_norm)
+            except Exception as exc:
+                print(
+                    "[WARNING] Skipping normaltest() in Hubble residual "
+                    f"Gaussianity diagnostic: {exc}"
+                )
 
         x_grid = np.linspace(-5.0, 5.0, 512)
         ax_hist.hist(

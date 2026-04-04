@@ -506,6 +506,16 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
         dmi_posterior_median = r.get("dmi_posterior_median", dmi_max_w)
         dmi_posterior_sigma = r["dmi_posterior_sigma"]
         dmi_selection_sigma_posterior_median = r.get("dmi_selection_sigma_posterior_median")
+        if dmi_selection_sigma_posterior_median is not None:
+            dmi_selection_sigma_posterior_median = np.asarray(
+                dmi_selection_sigma_posterior_median,
+                dtype=float,
+            )
+            if (
+                dmi_selection_sigma_posterior_median.ndim == 0
+                and not np.isfinite(dmi_selection_sigma_posterior_median)
+            ):
+                dmi_selection_sigma_posterior_median = None
         logZ = r["logZ"]
         logZerr = r["logZerr"]
         integrals_max_w = r["integrals_max_w"]
