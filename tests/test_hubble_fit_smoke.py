@@ -140,6 +140,7 @@ def test_run_single_skip_plots_smoke(fake_data, monkeypatch, tmp_path):
     priors, model_labels, _ = hubble_model.get_model_params("FlatLambdaCDM", only_sna=False)
     theta = np.array([(priors[key][0] + priors[key][1]) / 2.0 for key in model_labels], dtype=float)
     flat_samples = np.tile(theta[None, :], (8, 1))
+    dmi_posterior_median = np.zeros(len(df_agn))
     dmi_posterior_sigma = np.full(len(df_agn), 0.05)
 
     monkeypatch.chdir(tmp_path)
@@ -158,6 +159,7 @@ def test_run_single_skip_plots_smoke(fake_data, monkeypatch, tmp_path):
             None,
             -50.0,
             0.2,
+            dmi_posterior_median,
             dmi_posterior_sigma,
             None,
         ),
@@ -195,6 +197,7 @@ def test_run_single_only_sna_smoke(fake_data, monkeypatch, tmp_path):
     priors, model_labels, _ = hubble_model.get_model_params("FlatLambdaCDM", only_sna=True)
     theta = np.array([(priors[key][0] + priors[key][1]) / 2.0 for key in model_labels], dtype=float)
     flat_samples = np.tile(theta[None, :], (8, 1))
+    dmi_posterior_median = np.zeros(len(df_agn))
     dmi_posterior_sigma = np.full(len(df_agn), 0.05)
 
     monkeypatch.chdir(tmp_path)
@@ -213,6 +216,7 @@ def test_run_single_only_sna_smoke(fake_data, monkeypatch, tmp_path):
             None,
             -25.0,
             0.15,
+            dmi_posterior_median,
             dmi_posterior_sigma,
             None,
         ),
@@ -251,6 +255,7 @@ def test_run_single_calls_agn_table_only_for_joint_flatw0wa(monkeypatch, tmp_pat
     priors, model_labels, _ = hubble_model.get_model_params("Flatw0waCDM", only_sna=False)
     theta = np.array([(priors[key][0] + priors[key][1]) / 2.0 for key in model_labels], dtype=float)
     flat_samples = np.tile(theta[None, :], (8, 1))
+    dmi_posterior_median = np.zeros(len(df_agn))
     dmi_posterior_sigma = np.full(len(df_agn), 0.05)
     calls = []
 
@@ -270,6 +275,7 @@ def test_run_single_calls_agn_table_only_for_joint_flatw0wa(monkeypatch, tmp_pat
             None,
             -50.0,
             0.2,
+            dmi_posterior_median,
             dmi_posterior_sigma,
             None,
         ),
@@ -324,6 +330,7 @@ def test_run_single_does_not_call_agn_table_for_only_sna(monkeypatch, tmp_path):
     priors, model_labels, _ = hubble_model.get_model_params("Flatw0waCDM", only_sna=True)
     theta = np.array([(priors[key][0] + priors[key][1]) / 2.0 for key in model_labels], dtype=float)
     flat_samples = np.tile(theta[None, :], (8, 1))
+    dmi_posterior_median = np.zeros(len(df_agn))
     dmi_posterior_sigma = np.full(len(df_agn), 0.05)
     calls = []
 
@@ -343,6 +350,7 @@ def test_run_single_does_not_call_agn_table_for_only_sna(monkeypatch, tmp_path):
             None,
             -25.0,
             0.15,
+            dmi_posterior_median,
             dmi_posterior_sigma,
             None,
         ),
@@ -375,6 +383,7 @@ def test_run_single_does_not_call_agn_table_when_skip_plots(monkeypatch, tmp_pat
     priors, model_labels, _ = hubble_model.get_model_params("Flatw0waCDM", only_sna=False)
     theta = np.array([(priors[key][0] + priors[key][1]) / 2.0 for key in model_labels], dtype=float)
     flat_samples = np.tile(theta[None, :], (8, 1))
+    dmi_posterior_median = np.zeros(len(df_agn))
     dmi_posterior_sigma = np.full(len(df_agn), 0.05)
     calls = []
 
@@ -394,6 +403,7 @@ def test_run_single_does_not_call_agn_table_when_skip_plots(monkeypatch, tmp_pat
             None,
             -50.0,
             0.2,
+            dmi_posterior_median,
             dmi_posterior_sigma,
             None,
         ),

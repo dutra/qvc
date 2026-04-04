@@ -139,7 +139,7 @@ def test_run_mcmc_pipeline_default_resume_uses_result_dir(monkeypatch, tmp_path)
     df_agn = _minimal_agn_df()
     df_pantheon = _minimal_pantheon_df()
     result_root = tmp_path / "result_root"
-    expected = result_root / "hubble_posteriors" / "unit" / "posteriors_FlatLambdaCDM_joint_fast_all_z0p44_3p16.h5"
+    expected = result_root / "hubble_posteriors" / "unit" / "posteriors_FlatLambdaCDM_joint_fast_all_z0p44_3p16_disable_completeness.h5"
     captured = {}
 
     monkeypatch.setattr(hubble_fit, "get_qvc_result_dir", lambda: result_root)
@@ -170,6 +170,7 @@ def test_run_mcmc_pipeline_default_resume_uses_result_dir(monkeypatch, tmp_path)
         dmi_selection_sigma_interp,
         logz,
         logzerr,
+        dmi_posterior_median,
         dmi_posterior_sigma,
         dmi_selection_sigma_posterior_median,
     ) = hubble_fit.run_mcmc_pipeline(
@@ -195,6 +196,7 @@ def test_run_mcmc_pipeline_default_resume_uses_result_dir(monkeypatch, tmp_path)
     assert dmi_selection_sigma_interp is None
     assert logz == -1.0
     assert logzerr == 0.2
+    np.testing.assert_allclose(dmi_posterior_median, 0.0)
     np.testing.assert_allclose(dmi_posterior_sigma, 0.05)
     assert dmi_selection_sigma_posterior_median is None
 

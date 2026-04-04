@@ -110,7 +110,7 @@ def make_agn_latex_table(
     lines = [
         r"\begin{tabular}{@{}lcccccccccccccc@{}}",
         r"\hline\hline",
-        r"\textbf{SDSS Name} & RA & Dec & $z$ & $m_{2500}$ & $m_{2500}^{\mathrm{uncorr}}$ & $\mathrm{PL}_{\mathrm{slope}}$ & $\mu$ & $\log\tau_{\mathrm{UV,RF}}$ & $\log\sigma_{\mathrm{UV}}$ & $\mathrm{Cov}(\log\sigma_{\mathrm{UV}},\,\log\tau_{\mathrm{UV,RF}})$ & $f_{\rm{host,\,2500\,\text{\AA}}}$ & $f_{\rm{BC}}$ & $f_{\rm{lines}}$ & $f_{\rm{Fe\,II}}$ \\",
+        r"\textbf{SDSS Name} & RA & Dec & $z$ & $m_{2500}$ & $m_{2500}^{\mathrm{uncorr}}$ & \texttt{PL\_slope} & $\mu$ & $\log\tau_{\mathrm{UV,RF}}$ & $\log\sigma_{\mathrm{UV}}$ & $\mathrm{Cov}(\log\sigma_{\mathrm{UV}},\,\log\tau_{\mathrm{UV,RF}})$ & $f_{\rm{host,\,2500\,\text{\AA}}}$ & $f_{\rm{BC}}$ & $f_{\rm{lines}}$ & $f_{\rm{Fe\,II}}$ \\",
         r"& (deg) & (deg) &  & (mag) & (mag) &  & (mag) & (days) & (mag) &  &  &  &  &  \\",
         r"\hline",
     ]

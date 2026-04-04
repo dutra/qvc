@@ -210,19 +210,6 @@ def _get_cosmo_from_params(model_name, params_dict, zp):
     raise ValueError(f"Invalid cosmology model: {model_name}")
 
 
-def _evaluate_dm_interp(dm_interp, z, m2500, *, f_host_2500=None, alpha_lambda=None):
-    """Evaluate debias correction using the richest available feature set."""
-    z = np.asarray(z, dtype=float)
-    m2500 = np.asarray(m2500, dtype=float)
-    cols = [z, m2500]
-    if f_host_2500 is not None:
-        cols.append(np.asarray(f_host_2500, dtype=float))
-        if alpha_lambda is not None:
-            cols.append(np.asarray(alpha_lambda, dtype=float))
-    pts = np.column_stack(cols)
-    return np.asarray(dm_interp(pts), dtype=float)
-
-
 def _resolve_debias_values(
     df_agn,
     *,
@@ -242,7 +229,7 @@ def _resolve_debias_values(
             raise ValueError("Need either dm_interp or dmi_values for debias=True.")
         return dmi
 
-    dmi_interp = _evaluate_dm_interp(
+    dmi_interp = evaluate_dm_interp(
         dm_interp,
         df_agn["z"].values,
         df_agn["apparent_mag_2500"].values,
@@ -6232,7 +6219,7 @@ def plot_predicted_L2500_vs_sigmahat(
 
         M2500_show = ds['apparent_mag_2500'].values - cosmo.distmod(ds['z'].values).value
         if debias:
-            M2500_show -= _evaluate_dm_interp(
+            M2500_show -= evaluate_dm_interp(
                 dm_interp,
                 ds["z"].values,
                 ds["apparent_mag_2500"].values,
@@ -6459,7 +6446,7 @@ def plot_predicted_L2500_vs_sigmahat(
 
         M2500_show = ds['apparent_mag_2500'].values - cosmo.distmod(ds['z'].values).value
         if debias:
-            M2500_show -= _evaluate_dm_interp(
+            M2500_show -= evaluate_dm_interp(
                 dm_interp,
                 ds["z"].values,
                 ds["apparent_mag_2500"].values,
