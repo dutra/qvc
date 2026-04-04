@@ -282,7 +282,16 @@ def posterior_component_fraction_at_wave(q, numerator_key, denominator_key, wave
         return np.nan, np.nan
 
     numerator = pred_out.get(numerator_key)
-    denominator = pred_out.get(denominator_key)
+    if isinstance(denominator_key, (tuple, list)):
+        denominator = None
+        for key in denominator_key:
+            value = pred_out.get(key)
+            if value is None:
+                return np.nan, np.nan
+            value = np.asarray(value, dtype=float)
+            denominator = value if denominator is None else denominator + value
+    else:
+        denominator = pred_out.get(denominator_key)
     if numerator is None or denominator is None:
         return np.nan, np.nan
 
@@ -501,6 +510,26 @@ def estimate_host_2500_fraction(q):
     return np.nan, np.nan
 
 
+def estimate_host_psf_2500_fraction(q):
+    """Return PSF-space host/(AGN+host) at rest-frame 2500 A from posterior components."""
+    wave0 = 2500.0
+    wave = np.asarray(getattr(q, "wave", []), dtype=float)
+    if wave.ndim == 1 and wave.size > 0 and np.all(np.isfinite(wave)) and (wave[0] <= wave0 <= wave[-1]):
+        median, err = posterior_component_fraction_at_wave(
+            q,
+            numerator_key="gal_model_psf",
+            denominator_key=("agn_model_psf", "gal_model_psf"),
+            wave0=wave0,
+        )
+        if np.isfinite(median):
+            return median, err
+
+    fallback = safe_float(getattr(q, "frac_host_psf_2500", np.nan))
+    if np.isfinite(fallback) and fallback >= 0.0:
+        return fallback, np.nan
+    return np.nan, np.nan
+
+
 def estimate_pl_2500_fraction(q):
     """Return power-law/total-model at rest-frame 2500 A from posterior components."""
     wave0 = 2500.0
@@ -567,6 +596,10 @@ def compute_derived_results(result, q, args):
         result["f_host_2500"] = safe_float(f_host_2500)
         result["f_host_2500_err"] = safe_float(f_host_2500_err)
 
+        f_host_psf_2500, f_host_psf_2500_err = estimate_host_psf_2500_fraction(q)
+        result["frac_host_psf_2500"] = safe_float(f_host_psf_2500)
+        result["frac_host_psf_2500_err"] = safe_float(f_host_psf_2500_err)
+
         # Host/continuum fraction at the center of the fitted spectrum.
         m50, m_err = estimate_host_center_fraction(q)
         result["f_host_center"] = safe_float(m50)
@@ -574,6 +607,8 @@ def compute_derived_results(result, q, args):
     else:
         result["f_host_2500"] = 0.0
         result["f_host_2500_err"] = 0.0
+        result["frac_host_psf_2500"] = 0.0
+        result["frac_host_psf_2500_err"] = 0.0
         result["f_host_center"] = 0.0
         result["f_host_center_err"] = 0.0
 
