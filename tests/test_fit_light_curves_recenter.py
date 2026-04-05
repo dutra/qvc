@@ -30,6 +30,7 @@ from qvc.light_curve.fit_light_curves import (
     make_lc,
     posterior_median_mean_function,
 )
+from qvc.light_curve.multiband_fit_plotting import relative_to_2500_amplitude_scale
 from qvc.light_curve.multiband_fit_utils import lambda_pivot, log_single_pl, process_samples
 
 
@@ -792,7 +793,8 @@ def test_fit_bending_power_law_psd_recovers_tau_and_sigma():
     freq = np.logspace(-4.5, -1.5, 60)
     true_log_sigma = np.log10(0.2)
     true_log_tau = np.log10(300.0)
-    power = bending_power_law_psd(freq, true_log_sigma, true_log_tau)
+    true_alpha_high = -2.1
+    power = bending_power_law_psd(freq, true_log_sigma, true_log_tau, alpha_high=true_alpha_high)
     power_lo = power * 0.9
     power_hi = power * 1.1
 
@@ -801,6 +803,7 @@ def test_fit_bending_power_law_psd_recovers_tau_and_sigma():
     assert result["psd_bpl_valid"] is True
     assert np.isclose(result["log_sigma_bpl"], true_log_sigma, atol=0.05)
     assert np.isclose(result["log_tau_bpl"], true_log_tau, atol=0.05)
+    assert np.isclose(result["psd_bpl_alpha_high"], true_alpha_high, atol=0.15)
 
 
 def test_fit_bending_power_law_psd_handles_too_few_bins():
@@ -811,3 +814,30 @@ def test_fit_bending_power_law_psd_handles_too_few_bins():
 
     assert result["psd_bpl_valid"] is False
     assert np.isnan(result["log_sigma_bpl"])
+    assert np.isnan(result["psd_bpl_alpha_high"])
+
+
+def test_relative_to_2500_amplitude_scale_uses_only_eta_sigma_and_rest_wavelength():
+    lam_rf = np.array([1800.0, 2500.0, 4000.0], dtype=float)
+    eta_sigma = -0.6
+
+    got = relative_to_2500_amplitude_scale(lam_rf, eta_sigma)
+    expected = np.array(
+        [10.0 ** log_single_pl(2500.0, lam, eta_sigma) for lam in lam_rf],
+        dtype=float,
+    )
+
+    assert np.allclose(got, expected)
+    assert np.isclose(got[1], 1.0)
+
+
+def test_relative_to_2500_amplitude_scale_is_independent_of_absolute_sigma():
+    lam_rf = np.array([1900.0, 3200.0], dtype=float)
+    eta_sigma = -0.4
+    params_a = {"eta_sigma": eta_sigma, "log_sigma_uv": -2.0}
+    params_b = {"eta_sigma": eta_sigma, "log_sigma_uv": 3.0}
+
+    got_a = relative_to_2500_amplitude_scale(lam_rf, params_a["eta_sigma"])
+    got_b = relative_to_2500_amplitude_scale(lam_rf, params_b["eta_sigma"])
+
+    assert np.allclose(got_a, got_b)

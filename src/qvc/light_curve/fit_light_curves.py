@@ -10,7 +10,7 @@ import traceback
 import numpy as np
 from numpy.lib.stride_tricks import sliding_window_view
 from scipy.optimize import curve_fit, least_squares
-from scipy.stats import median_abs_deviation
+from scipy.stats import kurtosis, median_abs_deviation, normaltest, skew
 from statsmodels.tsa.stattools import adfuller
 from tqdm import tqdm
 
@@ -314,6 +314,105 @@ def compute_object_adf_diagnostics(flat_samples, obj, bands):
 
     out["adf_min_pvalue"] = float(np.min(pvalues)) if pvalues else np.nan
     out["adf_any_pvalue_lt_0p05"] = bool(np.any(np.asarray(pvalues) < 0.05)) if pvalues else False
+    return out
+
+
+def compute_multiband_residual_normality_diagnostics(
+    flat_samples,
+    obj,
+    bands,
+    *,
+    z=None,
+    return_series=True,
+):
+    """Summarize per-band normality diagnostics for detrended residuals."""
+
+    out = {}
+    pvalues = []
+    for band in bands:
+        try:
+            _, _, residual, yerr = extract_band_detrended_series(
+                flat_samples,
+                obj,
+                bands,
+                band,
+                z=z,
+                subtract_mean=True,
+            )
+        except KeyError:
+            continue
+
+        residual = np.asarray(residual, dtype=float).ravel()
+        yerr = np.asarray(yerr, dtype=float).ravel()
+        mask = np.isfinite(residual)
+        if yerr.shape == residual.shape:
+            mask &= np.isfinite(yerr) | ~np.isfinite(yerr)
+        residual = residual[mask]
+        yerr = yerr[mask]
+
+        stats = {
+            f"resid_normality_nobs_{band}": float(residual.size),
+            f"resid_normality_mean_{band}": np.nan,
+            f"resid_normality_std_{band}": np.nan,
+            f"resid_normality_skew_{band}": np.nan,
+            f"resid_normality_kurtosis_{band}": np.nan,
+            f"resid_normality_k2_{band}": np.nan,
+            f"resid_normality_pvalue_{band}": np.nan,
+            f"resid_normality_valid_{band}": False,
+        }
+        if residual.size == 0:
+            out.update(stats)
+            if return_series:
+                out[f"resid_normality_residual_{band}"] = residual
+                out[f"resid_normality_zscore_{band}"] = np.array([], dtype=float)
+                out[f"resid_normality_yerr_{band}"] = yerr
+            continue
+
+        mean = float(np.mean(residual))
+        std = float(np.std(residual, ddof=1)) if residual.size > 1 else np.nan
+        zscore = (
+            (residual - mean) / std
+            if np.isfinite(std) and std > 0.0
+            else np.full_like(residual, np.nan, dtype=float)
+        )
+        skewness = float(skew(residual, bias=False)) if residual.size > 2 else np.nan
+        excess_kurt = float(kurtosis(residual, fisher=True, bias=False)) if residual.size > 3 else np.nan
+        k2_stat = np.nan
+        p_norm = np.nan
+        if residual.size >= 8 and np.isfinite(std) and std > 0.0:
+            try:
+                k2_stat, p_norm = normaltest(np.asarray(residual, dtype=np.float64))
+                k2_stat = float(k2_stat)
+                p_norm = float(p_norm)
+            except Exception as exc:
+                logging.warning(
+                    "Normality test failed for %s band residuals of %s: %s",
+                    band,
+                    obj.get("object_id", "<unknown>"),
+                    exc,
+                )
+
+        stats.update(
+            {
+                f"resid_normality_mean_{band}": mean,
+                f"resid_normality_std_{band}": std,
+                f"resid_normality_skew_{band}": skewness,
+                f"resid_normality_kurtosis_{band}": excess_kurt,
+                f"resid_normality_k2_{band}": k2_stat,
+                f"resid_normality_pvalue_{band}": p_norm,
+                f"resid_normality_valid_{band}": bool(np.isfinite(std) and std > 0.0),
+            }
+        )
+        out.update(stats)
+        if np.isfinite(p_norm):
+            pvalues.append(p_norm)
+        if return_series:
+            out[f"resid_normality_residual_{band}"] = residual
+            out[f"resid_normality_zscore_{band}"] = zscore
+            out[f"resid_normality_yerr_{band}"] = yerr
+
+    out["resid_normality_min_pvalue"] = float(np.min(pvalues)) if pvalues else np.nan
+    out["resid_normality_any_pvalue_lt_0p05"] = bool(np.any(np.asarray(pvalues) < 0.05)) if pvalues else False
     return out
 
 
@@ -637,19 +736,20 @@ def compute_g_band_raw_drift_diagnostics(
     return out
 
 
-def bending_power_law_psd(freq, log_sigma, log_tau, log_noise_floor=-99.0):
-    """Single-break PSD with flat low-frequency slope, -2 high-frequency slope, and white-noise floor."""
+def bending_power_law_psd(freq, log_sigma, log_tau, log_noise_floor=-99.0, alpha_high=-2.0):
+    """Single-break PSD with flat low-frequency slope and configurable high-frequency slope."""
 
     freq = np.asarray(freq, dtype=float)
     sigma = np.power(10.0, float(log_sigma))
     tau = np.power(10.0, float(log_tau))
-    denom = 1.0 + np.square(2.0 * np.pi * freq * tau)
+    slope = -float(alpha_high)
+    denom = 1.0 + np.power(np.clip(2.0 * np.pi * freq * tau, 1e-30, None), slope)
     noise_floor = np.power(10.0, float(log_noise_floor))
     return 2.0 * sigma * sigma * tau / denom + noise_floor
 
 
 def fit_bending_power_law_psd(freq, power, power_lo=None, power_hi=None):
-    """Fit a DRW-like bending PSD in log-space and return sigma/tau summaries."""
+    """Fit a bending PSD in log-space and return sigma/tau summaries."""
 
     freq = np.asarray(freq, dtype=float)
     power = np.asarray(power, dtype=float)
@@ -662,6 +762,8 @@ def fit_bending_power_law_psd(freq, power, power_lo=None, power_hi=None):
             "log_tau_bpl_err": np.nan,
             "log_noise_floor_bpl": np.nan,
             "log_noise_floor_bpl_err": np.nan,
+            "psd_bpl_alpha_high": np.nan,
+            "psd_bpl_alpha_high_err": np.nan,
             "psd_bpl_valid": False,
             "psd_bpl_nbins": float(np.count_nonzero(mask)),
         }
@@ -690,8 +792,10 @@ def fit_bending_power_law_psd(freq, power, power_lo=None, power_hi=None):
     )
     noise_floor_init = np.clip(np.percentile(power_fit, 10), 1e-12, None)
 
-    def model_log10(freq_val, log_sigma, log_tau, log_noise_floor):
-        psd = bending_power_law_psd(freq_val, log_sigma, log_tau, log_noise_floor)
+    alpha_high_init = -2.0
+
+    def model_log10(freq_val, log_sigma, log_tau, log_noise_floor, alpha_high):
+        psd = bending_power_law_psd(freq_val, log_sigma, log_tau, log_noise_floor, alpha_high)
         return np.log10(np.clip(psd, 1e-300, None))
 
     try:
@@ -699,10 +803,10 @@ def fit_bending_power_law_psd(freq, power, power_lo=None, power_hi=None):
             model_log10,
             freq_fit,
             log_power,
-            p0=(np.log10(sigma_init), np.log10(tau_init), np.log10(noise_floor_init)),
+            p0=(np.log10(sigma_init), np.log10(tau_init), np.log10(noise_floor_init), alpha_high_init),
             sigma=log_err,
             absolute_sigma=True,
-            bounds=([-6.0, -1.0, -12.0], [3.0, 6.0, 8.0]),
+            bounds=([-6.0, -1.0, -12.0, -2.5], [3.0, 6.0, 8.0, -1.5]),
             maxfev=20000,
         )
         perr = np.sqrt(np.diag(pcov))
@@ -715,9 +819,20 @@ def fit_bending_power_law_psd(freq, power, power_lo=None, power_hi=None):
             "log_tau_bpl_err": np.nan,
             "log_noise_floor_bpl": np.nan,
             "log_noise_floor_bpl_err": np.nan,
+            "psd_bpl_alpha_high": np.nan,
+            "psd_bpl_alpha_high_err": np.nan,
             "psd_bpl_valid": False,
             "psd_bpl_nbins": float(freq_fit.size),
         }
+
+    tau_char = 10.0 ** float(popt[1])
+    tau_min = float(np.nanmin(1.0 / (2.0 * np.pi * freq_fit)))
+    tau_max = float(np.nanmax(1.0 / (2.0 * np.pi * freq_fit)))
+    near_tau_lower_bound = np.isclose(float(popt[1]), -1.0, atol=0.05)
+    near_tau_upper_bound = np.isclose(float(popt[1]), 6.0, atol=0.05)
+    near_slope_lower_bound = np.isclose(float(popt[3]), -2.5, atol=0.03)
+    near_slope_upper_bound = np.isclose(float(popt[3]), -1.5, atol=0.03)
+    turnover_bracketed = np.isfinite(tau_char) and (tau_min < tau_char < tau_max)
 
     return {
         "log_sigma_bpl": float(popt[0]),
@@ -726,13 +841,22 @@ def fit_bending_power_law_psd(freq, power, power_lo=None, power_hi=None):
         "log_tau_bpl_err": float(perr[1]) if np.all(np.isfinite(perr)) else np.nan,
         "log_noise_floor_bpl": float(popt[2]),
         "log_noise_floor_bpl_err": float(perr[2]) if np.all(np.isfinite(perr)) else np.nan,
-        "psd_bpl_valid": True,
+        "psd_bpl_alpha_high": float(popt[3]),
+        "psd_bpl_alpha_high_err": float(perr[3]) if np.all(np.isfinite(perr)) else np.nan,
+        "psd_bpl_valid": bool(
+            np.all(np.isfinite(popt))
+            and not near_tau_lower_bound
+            and not near_tau_upper_bound
+            and not near_slope_lower_bound
+            and not near_slope_upper_bound
+            and turnover_bracketed
+        ),
         "psd_bpl_nbins": float(freq_fit.size),
     }
 
 
 def compute_lomb_scargle_break_diagnostics(model, samples, obj, z, *, n_freq=500):
-    """Fit a bending power law to the band nearest rest-frame 2500 A and convert to UV."""
+    """Fit a bending power law to the plotted combined Lomb-Scargle PSD and convert to UV."""
 
     bands = list(obj["bands"])
     lam_rf = np.asarray([lambda_pivot[band] / (1.0 + float(z)) for band in bands], dtype=float)
@@ -741,52 +865,126 @@ def compute_lomb_scargle_break_diagnostics(model, samples, obj, z, *, n_freq=500
     lam_ref_band = float(lam_rf[ref_idx])
     posterior_median = {k: np.median(v, axis=0) for k, v in samples.items()}
     freqs = np.logspace(-6, 2, n_freq)
-    f_bin, p_bin, p_lo, p_hi, counts, p_noise = combined_lomb_scargle_from_model(
+
+    f_bin_norm, p_bin_norm, p_lo_norm, p_hi_norm, counts_norm, p_noise_norm = combined_lomb_scargle_from_model(
         model,
         obj["y"],
         obj["yerr"],
         posterior_median,
         2.0 * np.pi * freqs,
-        amp_reference="selected_band",
-        #selected_band=ref_idx,
+        amp_scaling_mode="absolute_gp_normalized",
     )
-    fit = fit_bending_power_law_psd(f_bin, p_bin, p_lo, p_hi)
+    f_bin_raw, p_bin_raw, p_lo_raw, p_hi_raw, counts_raw, p_noise_raw = combined_lomb_scargle_from_model(
+        model,
+        obj["y"],
+        obj["yerr"],
+        posterior_median,
+        2.0 * np.pi * freqs,
+        amp_scaling_mode="relative_to_2500",
+        band_wavelength_rf=lam_rf,
+    )
+
+    model_psd = (2.0 * np.pi) * np.asarray(
+        model.psd(
+            {k: jnp.array(v) for k, v in posterior_median.items()},
+            2.0 * np.pi * freqs,
+            b=0,
+            sigma_n2=0.0,
+        )
+    )
+    if f_bin_norm.size > 0 and p_bin_norm.size > 0 and np.all(np.isfinite(model_psd)):
+        model_at_f0 = float(np.interp(f_bin_norm[0], freqs, model_psd))
+        scale = model_at_f0 / max(float(p_bin_norm[0]), 1e-30)
+        p_bin_fit_norm = p_bin_norm * scale
+        p_lo_fit_norm = p_lo_norm * scale
+        p_hi_fit_norm = p_hi_norm * scale
+        p_noise_fit_norm = float(p_noise_norm) * scale if np.isfinite(p_noise_norm) else np.nan
+    else:
+        p_bin_fit_norm = p_bin_norm
+        p_lo_fit_norm = p_lo_norm
+        p_hi_fit_norm = p_hi_norm
+        p_noise_fit_norm = float(p_noise_norm) if np.isfinite(p_noise_norm) else np.nan
+
+    fit_norm = fit_bending_power_law_psd(f_bin_norm, p_bin_fit_norm, p_lo_fit_norm, p_hi_fit_norm)
+    fit_raw = fit_bending_power_law_psd(f_bin_raw, p_bin_raw, p_lo_raw, p_hi_raw)
     eta_sigma = float(np.nanmedian(np.asarray(samples["eta_sigma"], dtype=float)))
     eta_tau = float(np.nanmedian(np.asarray(samples["eta_tau"], dtype=float)))
     log_sigma_uv = (
-        fit["log_sigma_bpl"] + log_single_pl(2500.0, lam_ref_band, eta_sigma)
-        if np.isfinite(fit["log_sigma_bpl"]) else np.nan
+        fit_norm["log_sigma_bpl"] + log_single_pl(2500.0, lam_ref_band, eta_sigma)
+        if np.isfinite(fit_norm["log_sigma_bpl"]) else np.nan
     )
     log_tau_uv_obs = (
-        fit["log_tau_bpl"] + log_single_pl(2500.0, lam_ref_band, eta_tau)
-        if np.isfinite(fit["log_tau_bpl"]) else np.nan
+        fit_norm["log_tau_bpl"] + log_single_pl(2500.0, lam_ref_band, eta_tau)
+        if np.isfinite(fit_norm["log_tau_bpl"]) else np.nan
     )
     log_tau_rf = log_tau_uv_obs - np.log10(1.0 + float(z)) if np.isfinite(log_tau_uv_obs) else np.nan
-    log_tau_rf_err = fit["log_tau_bpl_err"]
+    log_tau_rf_err = fit_norm["log_tau_bpl_err"]
+    log_tau_ls_obs = fit_raw["log_tau_bpl"]
+    sigma_ls = np.power(10.0, fit_raw["log_sigma_bpl"]) if np.isfinite(fit_raw["log_sigma_bpl"]) else np.nan
+    sigma_ls_err = (
+        np.log(10.0) * sigma_ls * fit_raw["log_sigma_bpl_err"]
+        if np.isfinite(sigma_ls) and np.isfinite(fit_raw["log_sigma_bpl_err"])
+        else np.nan
+    )
+    log_tau_ls = (
+        fit_raw["log_tau_bpl"] - np.log10(1.0 + float(z))
+        if np.isfinite(fit_raw["log_tau_bpl"])
+        else np.nan
+    )
+    tau_ls = np.power(10.0, log_tau_ls) if np.isfinite(log_tau_ls) else np.nan
+    tau_ls_err = (
+        np.log(10.0) * tau_ls * fit_raw["log_tau_bpl_err"]
+        if np.isfinite(tau_ls) and np.isfinite(fit_raw["log_tau_bpl_err"])
+        else np.nan
+    )
+    tau_ls_obs = np.power(10.0, log_tau_ls_obs) if np.isfinite(log_tau_ls_obs) else np.nan
 
     out = {
         "psd_bpl_ref_band": ref_band,
         "psd_bpl_ref_lambda_rf": lam_ref_band,
-        "log_sigma_bpl_ref_band": fit["log_sigma_bpl"],
-        "log_sigma_bpl_ref_band_err": fit["log_sigma_bpl_err"],
-        "log_tau_bpl_ref_band": fit["log_tau_bpl"],
-        "log_tau_bpl_ref_band_err": fit["log_tau_bpl_err"],
+        "log_sigma_bpl_ref_band": fit_norm["log_sigma_bpl"],
+        "log_sigma_bpl_ref_band_err": fit_norm["log_sigma_bpl_err"],
+        "log_tau_bpl_ref_band": fit_norm["log_tau_bpl"],
+        "log_tau_bpl_ref_band_err": fit_norm["log_tau_bpl_err"],
         "log_sigma_uv_bpl": log_sigma_uv,
-        "log_sigma_uv_bpl_err": fit["log_sigma_bpl_err"],
+        "log_sigma_uv_bpl_err": fit_norm["log_sigma_bpl_err"],
         "log_tau_uv_bpl": log_tau_uv_obs,
-        "log_tau_uv_bpl_err": fit["log_tau_bpl_err"],
-        "log_noise_floor_bpl": fit["log_noise_floor_bpl"],
-        "log_noise_floor_bpl_err": fit["log_noise_floor_bpl_err"],
+        "log_tau_uv_bpl_err": fit_norm["log_tau_bpl_err"],
+        "log_noise_floor_bpl": fit_norm["log_noise_floor_bpl"],
+        "log_noise_floor_bpl_err": fit_norm["log_noise_floor_bpl_err"],
+        "psd_bpl_alpha_high": fit_norm["psd_bpl_alpha_high"],
+        "psd_bpl_alpha_high_err": fit_norm["psd_bpl_alpha_high_err"],
         "log_tau_uv_rf_bpl": log_tau_rf,
         "log_tau_uv_rf_bpl_err": log_tau_rf_err,
-        "psd_bpl_valid": fit["psd_bpl_valid"],
-        "psd_bpl_nbins": fit["psd_bpl_nbins"],
-        "psd_noise_floor": float(p_noise) if np.isfinite(p_noise) else np.nan,
+        "psd_bpl_valid": fit_norm["psd_bpl_valid"],
+        "psd_bpl_nbins": fit_norm["psd_bpl_nbins"],
+        "psd_noise_floor": p_noise_fit_norm,
+        "log_sigma_ls": fit_raw["log_sigma_bpl"],
+        "log_sigma_ls_err": fit_raw["log_sigma_bpl_err"],
+        "sigma_ls": sigma_ls,
+        "sigma_ls_err": sigma_ls_err,
+        "log_tau_ls_obs": log_tau_ls_obs,
+        "tau_ls_obs": tau_ls_obs,
+        "log_tau_ls": log_tau_ls,
+        "log_tau_ls_err": fit_raw["log_tau_bpl_err"],
+        "tau_ls": tau_ls,
+        "tau_ls_err": tau_ls_err,
+        "alpha_high_ls": fit_raw["psd_bpl_alpha_high"],
+        "alpha_high_ls_err": fit_raw["psd_bpl_alpha_high_err"],
+        "log_noise_floor_ls": fit_raw["log_noise_floor_bpl"],
+        "log_noise_floor_ls_err": fit_raw["log_noise_floor_bpl_err"],
+        "psd_noise_floor_ls": float(p_noise_raw) if np.isfinite(p_noise_raw) else np.nan,
+        "psd_ls_valid": fit_raw["psd_bpl_valid"],
+        "psd_ls_nbins": fit_raw["psd_bpl_nbins"],
     }
-    if np.isfinite(fit["log_tau_bpl"]):
-        out["log_nu_break_bpl"] = -np.log10(2.0 * np.pi) - fit["log_tau_bpl"]
+    if np.isfinite(fit_norm["log_tau_bpl"]):
+        out["log_nu_break_bpl"] = -np.log10(2.0 * np.pi) - fit_norm["log_tau_bpl"]
     else:
         out["log_nu_break_bpl"] = np.nan
+    if np.isfinite(fit_raw["log_tau_bpl"]):
+        out["log_nu_break_ls"] = -np.log10(2.0 * np.pi) - fit_raw["log_tau_bpl"]
+    else:
+        out["log_nu_break_ls"] = np.nan
     return out
 
 
@@ -2421,6 +2619,7 @@ def main():
     parser.add_argument("--disable_correlation_plot", action="store_true", default=False, help="Disable correlation matrix plot.")
     parser.add_argument("--disable_histogram_plot", action="store_true", default=False, help="Disable posterior histogram plot.")
     parser.add_argument("--disable_corner_plot", action="store_true", default=False, help="Disable corner plot.")
+    parser.add_argument("--plot_ls_broken_pl", action="store_true", default=False, help="Overlay the fitted Lomb-Scargle broken power law on the PSD subplot.")
     parser.add_argument(
         "--corner_plot_mode",
         type=str,
@@ -2795,6 +2994,7 @@ def main():
                             time0=obj["time0"],
                             bands=bands,
                             plot_psd=(not args.disable_plot_psd),
+                            plot_bpl_fit=args.plot_ls_broken_pl,
                         )
                     if not args.disable_color_magnitude_plot:
                         save_color_magnitude_plot(
@@ -2830,6 +3030,17 @@ def main():
                         sf_plot_result,
                         obj | dict(prefix=prefix, suffix=suffix),
                     )
+                    normality_plot_result = compute_multiband_residual_normality_diagnostics(
+                        obj_flat_samples_flatten_per_band,
+                        obj,
+                        bands,
+                        z=float(obj["z"]),
+                        return_series=True,
+                    )
+                    save_multiband_residual_normality_plot(
+                        normality_plot_result,
+                        obj | dict(prefix=prefix, suffix=suffix, bands=bands),
+                    )
                     if not args.disable_correlation_plot:
                         plot_correlation_matrix(obj_flat_samples_flatten_per_band, obj)
                     if not args.disable_histogram_plot:
@@ -2854,13 +3065,17 @@ def main():
             log_tau_uv_rf_bpl = final_result.get("log_tau_uv_rf_bpl")
             log_sigma_uv_sf = final_result.get("log_sigma_uv_sf")
             log_tau_uv_rf_sf = final_result.get("log_tau_uv_rf_sf")
+            sigma_ls = final_result.get("sigma_ls")
+            tau_ls = final_result.get("tau_ls")
             print(
                 f"[{oid}] log_sigma_uv = {log_sigma_uv} ± {log_sigma_uv_err} ; "
                 f"log_tau_uv_rf = {log_tau_uv_rf} ± {log_tau_uv_rf_err} ; "
                 f"log_sigma_uv_bpl = {log_sigma_uv_bpl} ; "
                 f"log_tau_uv_rf_bpl = {log_tau_uv_rf_bpl} ; "
                 f"log_sigma_uv_sf = {log_sigma_uv_sf} ; "
-                f"log_tau_uv_rf_sf = {log_tau_uv_rf_sf}"
+                f"log_tau_uv_rf_sf = {log_tau_uv_rf_sf} ; "
+                f"sigma_ls = {sigma_ls} ; "
+                f"tau_ls = {tau_ls}"
             )
 
             results.append(final_result)

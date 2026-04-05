@@ -11,6 +11,7 @@ import os
 import re
 import math
 import jax.numpy as jnp
+from scipy.stats import norm, probplot
 
 from astropy.timeseries import LombScargle
 
@@ -489,7 +490,10 @@ def combined_lomb_scargle_from_model(
     bins_per_decade: int = 2,
     min_per_bin: int = 1,
     normalization: str = "psd",
+    amp_scaling_mode: str = "absolute_gp_normalized",
     amp_reference: str = "band0",
+    band_wavelength_rf: np.ndarray | None = None,
+    lambda_target_rf: float = 2500.0,
 ):
     """
     Compute Lomb–Scargle PSD from a MyMultiVarModel, using a provided
@@ -498,7 +502,7 @@ def combined_lomb_scargle_from_model(
     Steps:
       - lag-subtract (my_lag_transform)
       - mean-subtract (mean_func)
-      - normalize amplitudes to band 0 scale (my_amp_transform)
+      - optionally normalize amplitudes using GP-informed band scaling
       - Lomb–Scargle combining all bands
       - log-bin in frequency space
 
@@ -560,17 +564,30 @@ def combined_lomb_scargle_from_model(
     #    jitter_band = np.clip(np.asarray(jitter_band, dtype=float), 0.0, None)
     #    yerr = np.sqrt(yerr**2 + jitter_band[band_idx] ** 2)
 
-    # Normalize amplitudes to a common reference scale.
-    if hasattr(model, "my_amp_transform"):
-        log_sigma_band = np.asarray(model.my_amp_transform(params))
+    if amp_scaling_mode == "absolute_gp_normalized":
+        if hasattr(model, "my_amp_transform"):
+            log_sigma_band = np.asarray(model.my_amp_transform(params))
+        else:
+            log_sigma_band = np.log(np.asarray(params["amp_cont"]))
+        if amp_reference == "uv" and "log_sigma_uv" in params:
+            s0 = float(np.exp(np.asarray(params["log_sigma_uv"])))
+        else:
+            s0 = float(np.exp(log_sigma_band[0]))
+        s_b = np.exp(log_sigma_band)
+        scale = s0 / s_b[band_idx]
+    elif amp_scaling_mode == "relative_to_2500":
+        if band_wavelength_rf is None:
+            raise ValueError("band_wavelength_rf is required for amp_scaling_mode='relative_to_2500'.")
+        if "eta_sigma" not in params:
+            raise KeyError("Missing required parameter 'eta_sigma' for raw LS wavelength calibration.")
+        scale_band = relative_to_2500_amplitude_scale(
+            band_wavelength_rf,
+            float(np.asarray(params["eta_sigma"])),
+            lambda_target_rf=lambda_target_rf,
+        )
+        scale = scale_band[band_idx]
     else:
-        log_sigma_band = np.log(np.asarray(params["amp_cont"]))
-    if amp_reference == "uv" and "log_sigma_uv" in params:
-        s0 = float(np.exp(np.asarray(params["log_sigma_uv"])))
-    else:
-        s0 = float(np.exp(log_sigma_band[0]))
-    s_b = np.exp(log_sigma_band)
-    scale = s0 / s_b[band_idx]
+        raise ValueError(f"Unknown amp_scaling_mode '{amp_scaling_mode}'.")
     y *= scale
 
     # Sort by time (optional, not required for LS)
@@ -608,6 +625,17 @@ def combined_lomb_scargle_from_model(
             counts.append(np.count_nonzero(sel))
 
     return np.array(f_bin), np.array(P_bin), np.array(P_lo), np.array(P_hi), np.array(counts), P_noise
+
+
+def relative_to_2500_amplitude_scale(band_wavelength_rf, eta_sigma, *, lambda_target_rf=2500.0):
+    """Return multiplicative per-band amplitude factors implied by the GP wavelength law."""
+
+    band_wavelength_rf = np.asarray(band_wavelength_rf, dtype=float)
+    log_scale_band = np.asarray(
+        [log_single_pl(lambda_target_rf, lam_rf, eta_sigma) for lam_rf in band_wavelength_rf],
+        dtype=float,
+    )
+    return np.power(10.0, log_scale_band)
 
 import numpy as np
 
@@ -679,11 +707,15 @@ def bootstrap_lomb_scargle(
     }
 
 
-def _bending_power_law_psd_plot(freq, log_sigma, log_tau):
+def _bending_power_law_psd_plot(freq, log_sigma, log_tau, alpha_high=-2.0, log_noise_floor=-99.0):
     freq = np.asarray(freq, dtype=float)
     sigma = 10.0 ** float(log_sigma)
     tau = 10.0 ** float(log_tau)
-    return 2.0 * sigma * sigma * tau / (1.0 + (2.0 * np.pi * freq * tau) ** 2)
+    slope = -float(alpha_high)
+    noise_floor = 10.0 ** float(log_noise_floor)
+    return 2.0 * sigma * sigma * tau / (
+        1.0 + np.power(np.clip(2.0 * np.pi * freq * tau, 1e-30, None), slope)
+    ) + noise_floor
 
 
 def _binned_median_relation(x, y, *, n_bins=40, min_per_bin=20):
@@ -899,6 +931,127 @@ def save_g_band_binned_residual_drift_plot(diagnostic, data, show=False, filenam
     os.makedirs(output_dir, exist_ok=True)
     save_suffix = suffix if filename_suffix is None else filename_suffix
     fpath = os.path.join(output_dir, f"{z:.1f}_{object_id}_g_band_residual_drift_{save_suffix}.pdf")
+    plt.savefig(fpath, dpi=600)
+    logging.info(f"Saving figure to {fpath}")
+    if show:
+        plt.show()
+    plt.close(fig)
+
+
+def save_multiband_residual_normality_plot(diagnostic, data, show=False, filename_suffix=None):
+    """Save per-band histogram and Q-Q diagnostics for detrended residuals."""
+
+    object_id = data["object_id"]
+    z = float(data["z"])
+    bands = list(data.get("bands", []))
+    if not bands:
+        bands = [
+            key.removeprefix("resid_normality_residual_")
+            for key in diagnostic
+            if key.startswith("resid_normality_residual_")
+        ]
+
+    available_bands = [
+        band
+        for band in bands
+        if f"resid_normality_residual_{band}" in diagnostic
+    ]
+    if not available_bands:
+        logging.warning("Skipping multiband residual normality plot because no detrended residuals are available.")
+        return
+
+    fig, axes = plt.subplots(
+        len(available_bands),
+        2,
+        figsize=(10.8, max(3.2 * len(available_bands), 3.8)),
+        squeeze=False,
+    )
+
+    for row, band in enumerate(available_bands):
+        ax_hist, ax_qq = axes[row]
+        residual = np.asarray(diagnostic.get(f"resid_normality_residual_{band}", []), dtype=float)
+        zscore = np.asarray(diagnostic.get(f"resid_normality_zscore_{band}", []), dtype=float)
+        residual = residual[np.isfinite(residual)]
+        zscore = zscore[np.isfinite(zscore)]
+
+        if zscore.size == 0:
+            ax_hist.text(
+                0.5,
+                0.5,
+                f"No finite detrended residuals\nfor {band} band",
+                ha="center",
+                va="center",
+                transform=ax_hist.transAxes,
+            )
+            ax_qq.set_axis_off()
+            continue
+
+        x_limit = max(4.0, float(np.nanmax(np.abs(zscore))) * 1.1)
+        x_limit = min(x_limit, 8.0)
+        x_grid = np.linspace(-x_limit, x_limit, 512)
+        ax_hist.hist(
+            zscore,
+            bins=min(20, max(8, int(np.sqrt(zscore.size)))),
+            density=True,
+            color=colors.get(band, "0.4"),
+            alpha=0.35,
+            edgecolor="white",
+        )
+        ax_hist.plot(
+            x_grid,
+            norm.pdf(x_grid, loc=0.0, scale=1.0),
+            color="black",
+            lw=1.6,
+        )
+        ax_hist.axvline(0.0, color="black", ls="--", lw=1.0, alpha=0.8)
+        ax_hist.set_xlim(-x_limit, x_limit)
+        ax_hist.set_ylabel(f"{band}-band density")
+        if row == len(available_bands) - 1:
+            ax_hist.set_xlabel("Standardized detrended residual")
+        ax_hist.text(
+            0.98,
+            0.98,
+            (
+                f"N={int(diagnostic.get(f'resid_normality_nobs_{band}', 0))}\n"
+                f"mean={diagnostic.get(f'resid_normality_mean_{band}', np.nan):.3f}\n"
+                f"std={diagnostic.get(f'resid_normality_std_{band}', np.nan):.3f}\n"
+                f"skew={diagnostic.get(f'resid_normality_skew_{band}', np.nan):.2f}\n"
+                f"kurt={diagnostic.get(f'resid_normality_kurtosis_{band}', np.nan):.2f}\n"
+                f"K2 p={diagnostic.get(f'resid_normality_pvalue_{band}', np.nan):.2g}"
+            ),
+            ha="right",
+            va="top",
+            transform=ax_hist.transAxes,
+        )
+        if row == 0:
+            ax_hist.set_title("Histogram")
+
+        osm, osr = probplot(zscore, dist="norm", fit=False)
+        q_lo = min(float(np.min(osm)), float(np.min(osr)))
+        q_hi = max(float(np.max(osm)), float(np.max(osr)))
+        ax_qq.scatter(
+            osm,
+            osr,
+            s=12,
+            alpha=0.6,
+            color=colors.get(band, "0.3"),
+            linewidths=0,
+            rasterized=True,
+        )
+        ax_qq.plot([q_lo, q_hi], [q_lo, q_hi], color="tab:red", lw=1.4)
+        if row == len(available_bands) - 1:
+            ax_qq.set_xlabel("Normal quantiles")
+        ax_qq.set_ylabel(f"{band}-band quantiles")
+        if row == 0:
+            ax_qq.set_title("Q-Q")
+
+    fig.suptitle("Detrended light-curve residual normality by band", y=0.995)
+    fig.tight_layout()
+
+    output_dir = f"plots/multiband/{prefix}/residual_normality"
+    os.makedirs(output_dir, exist_ok=True)
+    save_suffix = suffix if filename_suffix is None else filename_suffix
+    fpath = os.path.join(output_dir, f"{z:.1f}_{object_id}_residual_normality_{save_suffix}.pdf")
     plt.savefig(fpath, dpi=600)
     logging.info(f"Saving figure to {fpath}")
     if show:
@@ -1191,6 +1344,7 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, mags_means, survey_
             yerr,
             posterior_median,
             2.0 * np.pi * freqs,
+            amp_scaling_mode="absolute_gp_normalized",
         )
         P_noise_med = np.full_like(P_bin_med, P_noise, dtype=float)
         P_noise_lo = P_noise_med.copy()
@@ -1228,6 +1382,69 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, mags_means, survey_
             color='gray', linestyle='solid', lw=3,
             label="Noise floor", zorder=-10
         )
+
+        if plot_bpl_fit:
+            log_sigma_ls = data.get("log_sigma_ls")
+            log_tau_ls_obs = data.get("log_tau_ls_obs", data.get("log_tau_bpl_ref_band"))
+            alpha_high_ls = data.get("alpha_high_ls", data.get("psd_bpl_alpha_high"))
+            log_noise_floor_ls = data.get("log_noise_floor_ls", data.get("log_noise_floor_bpl"))
+            sigma_ls = data.get("sigma_ls")
+            tau_ls = data.get("tau_ls")
+            if all(np.isfinite(val) for val in (log_sigma_ls, log_tau_ls_obs, alpha_high_ls)):
+                psd_ls_fit = _bending_power_law_psd_plot(
+                    freqs,
+                    log_sigma_ls,
+                    log_tau_ls_obs,
+                    alpha_high=alpha_high_ls,
+                    log_noise_floor=(log_noise_floor_ls if np.isfinite(log_noise_floor_ls) else -99.0),
+                )
+                ax_psd.plot(
+                    freqs,
+                    psd_ls_fit,
+                    lw=1.8,
+                    color='tab:blue',
+                    alpha=0.95,
+                    linestyle='--',
+                    label="LS broken-PL fit (raw, 2500A-calibrated)",
+                    zorder=4.5,
+                )
+                if np.isfinite(sigma_ls) and np.isfinite(tau_ls):
+                    ax_psd.text(
+                        0.98,
+                        0.98,
+                        (
+                            "LS fit\n"
+                            f"$\\tau_{{\\rm ls,rf}}$={tau_ls:.1f} d\n"
+                            f"$\\sigma_{{\\rm ls}}$={sigma_ls:.3g}\n"
+                            f"$\\alpha_{{\\rm hi}}$={alpha_high_ls:.2f}"
+                        ),
+                        transform=ax_psd.transAxes,
+                        ha='right',
+                        va='top',
+                        bbox=dict(boxstyle='round,pad=0.2', fc='white', ec='0.8', alpha=0.9),
+                    )
+            log_sigma_bpl = data.get("log_sigma_bpl_ref_band")
+            log_tau_bpl_obs = data.get("log_tau_bpl_ref_band")
+            alpha_high_bpl = data.get("psd_bpl_alpha_high")
+            log_noise_floor_bpl = data.get("log_noise_floor_bpl")
+            if all(np.isfinite(val) for val in (log_sigma_bpl, log_tau_bpl_obs, alpha_high_bpl)):
+                psd_bpl_fit = _bending_power_law_psd_plot(
+                    freqs,
+                    log_sigma_bpl,
+                    log_tau_bpl_obs,
+                    alpha_high=alpha_high_bpl,
+                    log_noise_floor=(log_noise_floor_bpl if np.isfinite(log_noise_floor_bpl) else -99.0),
+                )
+                ax_psd.plot(
+                    freqs,
+                    psd_bpl_fit,
+                    lw=1.4,
+                    color='tab:cyan',
+                    alpha=0.85,
+                    linestyle=':',
+                    label="LS broken-PL fit (GP-normalized)",
+                    zorder=4.4,
+                )
 
         tau    = jnp.exp(posterior_median['log_tau_uv'])
         tau_lo = jnp.exp(jnp.percentile(tau_samples_for_psd, 16))
