@@ -16,6 +16,7 @@ def test_compute_derived_results_uses_host_continuum_draw_ratio(monkeypatch):
         "reconstruct_posterior_components",
         lambda **kwargs: (_ for _ in ()).throw(AssertionError("unexpected reconstruction")),
     )
+    monkeypatch.setattr(fit_spectra, "estimate_pl_psf_bandpass_fractions", lambda *args, **kwargs: {})
 
     q = SimpleNamespace(
         numpyro_samples={"log_frac_host": np.zeros(3, dtype=float)},
@@ -105,6 +106,7 @@ def test_compute_derived_results_uses_bc_over_total_continuum(monkeypatch):
         "reconstruct_posterior_components",
         lambda **kwargs: (_ for _ in ()).throw(AssertionError("unexpected reconstruction")),
     )
+    monkeypatch.setattr(fit_spectra, "estimate_pl_psf_bandpass_fractions", lambda *args, **kwargs: {})
 
     q = SimpleNamespace(
         numpyro_samples={"log_frac_host": np.zeros(3, dtype=float)},
@@ -170,6 +172,7 @@ def test_compute_derived_results_saves_narrow_line_to_continuum_integrated_fract
         "reconstruct_posterior_components",
         lambda **kwargs: (_ for _ in ()).throw(AssertionError("unexpected reconstruction")),
     )
+    monkeypatch.setattr(fit_spectra, "estimate_pl_psf_bandpass_fractions", lambda *args, **kwargs: {})
 
     q = SimpleNamespace(
         numpyro_samples={"log_frac_host": np.zeros(3, dtype=float)},
@@ -240,6 +243,7 @@ def test_compute_derived_results_saves_narrow_line_fraction_without_host_decompo
         "reconstruct_posterior_components",
         lambda **kwargs: (_ for _ in ()).throw(AssertionError("unexpected reconstruction")),
     )
+    monkeypatch.setattr(fit_spectra, "estimate_pl_psf_bandpass_fractions", lambda *args, **kwargs: {})
 
     q = SimpleNamespace(
         numpyro_samples={"log_frac_host": np.zeros(3, dtype=float)},
