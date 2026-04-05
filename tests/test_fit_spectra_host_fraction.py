@@ -306,6 +306,14 @@ def test_compute_derived_results_saves_narrow_line_fraction_without_host_decompo
 
 
 def test_estimate_pl_psf_bandpass_fractions_uses_reconstructed_draws():
+    captured = {}
+
+    filters = fit_spectra.get_sdss_filters()
+    u_wave_obs = fit_spectra.get_filter_wavelength_angstrom(filters["u"])
+    g_wave_obs = fit_spectra.get_filter_wavelength_angstrom(filters["g"])
+    r_wave_obs = fit_spectra.get_filter_wavelength_angstrom(filters["r"])
+    expected_wave_rf = np.unique(np.concatenate([u_wave_obs, g_wave_obs, r_wave_obs]) / (1.0 + 0.8))
+
     q = SimpleNamespace(
         z=0.8,
         wave=np.array([2000.0, 4000.0, 6000.0], dtype=float),
@@ -314,6 +322,47 @@ def test_estimate_pl_psf_bandpass_fractions_uses_reconstructed_draws():
             "scale_psf": np.ones(3, dtype=float),
             "eta_psf": np.ones(3, dtype=float),
             "line_model_psf": np.zeros((3, 3), dtype=float),
+        },
+        reconstruct_posterior_spectrum=lambda **kwargs: (
+            captured.setdefault("wave_out", np.asarray(kwargs["wave_out"], dtype=float)),
+            {
+                "wave": np.asarray(kwargs["wave_out"], dtype=float),
+                "draws": {
+                    "PL": np.full((3, len(kwargs["wave_out"])), 2.0, dtype=float),
+                    "host": np.full((3, len(kwargs["wave_out"])), 1.0, dtype=float),
+                    "Fe_uv": np.zeros((3, len(kwargs["wave_out"])), dtype=float),
+                    "Fe_op": np.zeros((3, len(kwargs["wave_out"])), dtype=float),
+                    "Balmer_cont": np.zeros((3, len(kwargs["wave_out"])), dtype=float),
+                    "continuum": np.full((3, len(kwargs["wave_out"])), 3.0, dtype=float),
+                },
+            },
+        )[1],
+    )
+
+    out = fit_spectra.estimate_pl_psf_bandpass_fractions(q, bands=("u", "g", "r"))
+
+    assert np.allclose(captured["wave_out"], expected_wave_rf)
+    assert np.isclose(out["u"][0], 2.0 / 3.0)
+    assert np.isclose(out["g"][0], 2.0 / 3.0)
+    assert np.isclose(out["r"][0], 2.0 / 3.0)
+
+
+def test_estimate_pl_psf_bandpass_fractions_ignores_nan_line_draws():
+    q = SimpleNamespace(
+        z=0.8,
+        wave=np.array([2000.0, 4000.0, 6000.0], dtype=float),
+        pred_out={
+            "f_pl_model": np.full((3, 3), 2.0, dtype=float),
+            "scale_psf": np.ones(3, dtype=float),
+            "eta_psf": np.ones(3, dtype=float),
+            "line_model_psf": np.array(
+                [
+                    [0.0, np.nan, 0.0],
+                    [0.0, np.nan, 0.0],
+                    [0.0, np.nan, 0.0],
+                ],
+                dtype=float,
+            ),
         },
         reconstruct_posterior_spectrum=lambda **kwargs: {
             "wave": np.asarray([1800.0, 3000.0, 5000.0], dtype=float),
@@ -330,5 +379,42 @@ def test_estimate_pl_psf_bandpass_fractions_uses_reconstructed_draws():
 
     out = fit_spectra.estimate_pl_psf_bandpass_fractions(q, bands=("g", "r"))
 
+    assert np.isfinite(out["g"][0])
+    assert np.isfinite(out["r"][0])
     assert np.isclose(out["g"][0], 2.0 / 3.0)
     assert np.isclose(out["r"][0], 2.0 / 3.0)
+
+
+def test_estimate_pl_psf_bandpass_fractions_uses_full_posterior_line_reconstruction(monkeypatch):
+    monkeypatch.setattr(
+        fit_spectra,
+        "_reconstruct_line_psf_draws_on_wave",
+        lambda q, wave_out, n_use: np.ones((n_use, len(wave_out)), dtype=float),
+    )
+
+    q = SimpleNamespace(
+        z=0.8,
+        wave=np.array([2000.0, 4000.0, 6000.0], dtype=float),
+        pred_out={
+            "f_pl_model": np.full((3, 3), 2.0, dtype=float),
+            "scale_psf": np.ones(3, dtype=float),
+            "eta_psf": np.ones(3, dtype=float),
+            "line_model_psf": np.array([[np.nan], [np.nan], [np.nan]], dtype=float),
+        },
+        reconstruct_posterior_spectrum=lambda **kwargs: {
+            "wave": np.asarray([1800.0, 3000.0, 5000.0], dtype=float),
+            "draws": {
+                "PL": np.full((3, 3), 2.0, dtype=float),
+                "host": np.full((3, 3), 1.0, dtype=float),
+                "Fe_uv": np.zeros((3, 3), dtype=float),
+                "Fe_op": np.zeros((3, 3), dtype=float),
+                "Balmer_cont": np.zeros((3, 3), dtype=float),
+                "continuum": np.full((3, 3), 3.0, dtype=float),
+            },
+        },
+    )
+
+    out = fit_spectra.estimate_pl_psf_bandpass_fractions(q, bands=("g",))
+
+    assert np.isfinite(out["g"][0])
+    assert np.isclose(out["g"][0], 2.0 / 4.0)

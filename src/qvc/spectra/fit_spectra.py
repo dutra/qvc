@@ -43,7 +43,15 @@ os.environ["JAX_PLATFORM_NAME"] = "cpu"
 
 from qvc.hubble.hubble_utils import match_radec, read_quasars_from_hdf5_flat
 from jaxqsofit import QSOFit, build_default_prior_config
-from jaxqsofit.model import reconstruct_posterior_components
+from jaxqsofit.custom_components import normalize_custom_line_components
+from jaxqsofit.model import (
+    _broad_line_mask,
+    _evaluate_custom_line_component_jax,
+    _extract_line_table_from_prior_config,
+    _many_gauss_lnlam,
+    build_tied_line_meta_from_linelist,
+    reconstruct_posterior_components,
+)
 
 
 COSMO = FlatLambdaCDM(H0=70, Om0=0.3)
@@ -198,23 +206,141 @@ def _draw_vector(values, *, n_use, fill_value):
     return np.pad(arr, (0, n_use - arr.size), mode="constant", constant_values=pad_value)
 
 
-def _line_psf_draws_on_wave(q, wave_out, n_use):
-    native_wave = np.asarray(getattr(q, "wave", []), dtype=float)
-    pred_out = getattr(q, "pred_out", {}) or {}
-    line_draws_native = np.asarray(pred_out.get("line_model_psf", []), dtype=float)
-    if (
-        native_wave.ndim != 1
-        or native_wave.size < 2
-        or line_draws_native.ndim != 2
-        or line_draws_native.shape[1] != native_wave.size
-    ):
+def _draw_matrix(values, *, n_use, n_cols, fill_value=0.0):
+    arr = np.asarray(values, dtype=float)
+    if arr.ndim == 0:
+        return np.full((n_use, n_cols), float(arr), dtype=float)
+    if arr.ndim == 1:
+        row = np.full((n_cols,), fill_value, dtype=float)
+        m = min(n_cols, arr.size)
+        row[:m] = arr[:m]
+        return np.repeat(row[None, :], n_use, axis=0)
+    if arr.shape[0] >= n_use:
+        arr = arr[:n_use]
+    else:
+        pad_row = np.nanmedian(arr, axis=0) if np.any(np.isfinite(arr)) else np.full((arr.shape[1],), fill_value, dtype=float)
+        arr = np.concatenate([arr, np.repeat(pad_row[None, :], n_use - arr.shape[0], axis=0)], axis=0)
+    if arr.shape[1] != n_cols:
+        out = np.full((n_use, n_cols), fill_value, dtype=float)
+        m = min(n_cols, arr.shape[1])
+        out[:, :m] = arr[:, :m]
+        arr = out
+    return np.nan_to_num(arr, nan=fill_value, posinf=fill_value, neginf=fill_value)
+
+
+def _reconstruct_line_psf_draws_on_wave(q, wave_out, n_use):
+    samples = getattr(q, "numpyro_samples", None)
+    if not isinstance(samples, dict) or len(samples) == 0:
         return np.zeros((n_use, len(wave_out)), dtype=float)
 
-    n_interp = min(n_use, line_draws_native.shape[0])
-    out = np.zeros((n_use, len(wave_out)), dtype=float)
-    for i in range(n_interp):
-        out[i] = np.interp(wave_out, native_wave, line_draws_native[i], left=0.0, right=0.0)
-    return out
+    prior_config = getattr(q, "_fit_prior_config", None)
+    if isinstance(prior_config, dict):
+        prior_config = dict(prior_config)
+    else:
+        prior_config = build_default_prior_config(np.asarray(getattr(q, "flux", []), dtype=float))
+
+    line_table = _extract_line_table_from_prior_config(prior_config)
+    tied_line_meta = build_tied_line_meta_from_linelist(line_table, wave_out) if line_table is not None else None
+    custom_line_components = normalize_custom_line_components(getattr(q, "_fit_custom_line_components", ()))
+
+    if (tied_line_meta is None or tied_line_meta.get("n_lines", 0) == 0) and len(custom_line_components) == 0:
+        return np.zeros((n_use, len(wave_out)), dtype=float)
+
+    wave_out = np.asarray(wave_out, dtype=float)
+    lnwave = np.log(wave_out)
+    out = np.zeros((n_use, wave_out.size), dtype=float)
+
+    fit_poly = bool(getattr(q, "_fit_fit_poly", False))
+    fit_poly_order = int(getattr(q, "_fit_fit_poly_order", 2))
+    w0 = 0.5 * (wave_out[0] + wave_out[-1])
+    x_poly = (wave_out - w0) / max(w0, 1.0)
+
+    line_dmu_group = np.asarray(samples.get("line_dmu_group", np.zeros((n_use, 0))), dtype=float)
+    line_sig_group = np.asarray(samples.get("line_sig_group", np.zeros((n_use, 0))), dtype=float)
+    line_amp_group = np.asarray(samples.get("line_amp_group", np.zeros((n_use, 0))), dtype=float)
+    if line_dmu_group.ndim == 1:
+        line_dmu_group = line_dmu_group[:, None]
+    if line_sig_group.ndim == 1:
+        line_sig_group = line_sig_group[:, None]
+    if line_amp_group.ndim == 1:
+        line_amp_group = line_amp_group[:, None]
+    if line_dmu_group.shape[0] < n_use:
+        line_dmu_group = _draw_matrix(line_dmu_group, n_use=n_use, n_cols=line_dmu_group.shape[1] if line_dmu_group.ndim == 2 else 0)
+    else:
+        line_dmu_group = line_dmu_group[:n_use]
+    if line_sig_group.shape[0] < n_use:
+        line_sig_group = _draw_matrix(line_sig_group, n_use=n_use, n_cols=line_sig_group.shape[1] if line_sig_group.ndim == 2 else 0)
+    else:
+        line_sig_group = line_sig_group[:n_use]
+    if line_amp_group.shape[0] < n_use:
+        line_amp_group = _draw_matrix(line_amp_group, n_use=n_use, n_cols=line_amp_group.shape[1] if line_amp_group.ndim == 2 else 0)
+    else:
+        line_amp_group = line_amp_group[:n_use]
+
+    scale_psf_draws = _draw_vector(
+        getattr(q, "pred_out", {}).get("scale_psf", getattr(q, "scale_psf", np.nan)),
+        n_use=n_use,
+        fill_value=1.0,
+    )
+    eta_psf_draws = _draw_vector(
+        getattr(q, "pred_out", {}).get("eta_psf", getattr(q, "eta_psf", np.nan)),
+        n_use=n_use,
+        fill_value=1.0,
+    )
+
+    if tied_line_meta is not None and tied_line_meta.get("n_lines", 0) > 0:
+        vgroup = np.asarray(tied_line_meta["vgroup"], dtype=int)
+        wgroup = np.asarray(tied_line_meta["wgroup"], dtype=int)
+        fgroup = np.asarray(tied_line_meta["fgroup"], dtype=int)
+        flux_ratio = np.asarray(tied_line_meta["flux_ratio"], dtype=float)
+        ln_lambda0 = np.asarray(tied_line_meta["ln_lambda0"], dtype=float)
+        broad_mask = _broad_line_mask(tied_line_meta.get("names", []))
+        for i in range(n_use):
+            dmu = line_dmu_group[i, vgroup] if line_dmu_group.shape[1] > 0 else np.zeros_like(ln_lambda0)
+            sigs = line_sig_group[i, wgroup] if line_sig_group.shape[1] > 0 else np.zeros_like(ln_lambda0)
+            amps = (line_amp_group[i, fgroup] if line_amp_group.shape[1] > 0 else np.zeros_like(ln_lambda0)) * flux_ratio
+            mus = ln_lambda0 + dmu
+            line_broad = np.asarray(_many_gauss_lnlam(lnwave, amps * broad_mask, mus, sigs), dtype=float)
+            line_narrow = np.asarray(_many_gauss_lnlam(lnwave, amps * (1.0 - broad_mask), mus, sigs), dtype=float)
+            out[i] += scale_psf_draws[i] * line_broad + scale_psf_draws[i] * eta_psf_draws[i] * line_narrow
+
+    if len(custom_line_components) > 0:
+        def _sample_line_value(samples_dict, key, default=0.0, draw_index=0):
+            vals = np.asarray(samples_dict.get(key, np.full((n_use,), default)), dtype=float).reshape(-1)
+            if vals.size == 0:
+                return default
+            if draw_index < vals.size:
+                return float(vals[draw_index])
+            return float(np.nanmedian(vals)) if np.any(np.isfinite(vals)) else default
+
+        for i in range(n_use):
+            for comp in custom_line_components:
+                custom_line = np.asarray(
+                    _evaluate_custom_line_component_jax(
+                        wave_out,
+                        samples,
+                        comp,
+                        lambda sdict, key, default=0.0, draw_index=i: _sample_line_value(sdict, key, default=default, draw_index=draw_index),
+                    ),
+                    dtype=float,
+                )
+                if comp.line_kind == "broad":
+                    out[i] += scale_psf_draws[i] * custom_line
+                else:
+                    out[i] += scale_psf_draws[i] * eta_psf_draws[i] * custom_line
+
+    if fit_poly:
+        poly = np.ones((n_use, wave_out.size), dtype=float)
+        for k in range(1, fit_poly_order + 1):
+            key = f"poly_c{k}"
+            if key not in samples:
+                continue
+            coeff = _draw_vector(samples[key], n_use=n_use, fill_value=0.0)
+            poly += coeff[:, None] * (x_poly[None, :] ** k)
+        poly = np.clip(poly, 0.2, 5.0)
+        out *= poly
+
+    return np.nan_to_num(out, nan=0.0, posinf=0.0, neginf=0.0)
 
 
 def estimate_pl_psf_bandpass_fractions(q, bands=SDSS_BANDS, n_draws=128):
@@ -236,26 +362,34 @@ def estimate_pl_psf_bandpass_fractions(q, bands=SDSS_BANDS, n_draws=128):
     if len(bands) == 0:
         return {}
 
-    support_mins = []
-    support_maxs = []
+    wave_rf_chunks = []
+    filter_specs = {}
     for band in bands:
         filt = filters[band]
         filt_wave = get_filter_wavelength_angstrom(filt)
         filt_trans = np.asarray(filt.response, dtype=float)
         if filt_wave.size == 0 or not np.any(np.isfinite(filt_trans)):
             continue
-        support = filt_wave[filt_trans > 0.01 * np.nanmax(filt_trans)]
-        if support.size >= 2:
-            support_mins.append(float(np.nanmin(support)) / (1.0 + z))
-            support_maxs.append(float(np.nanmax(support)) / (1.0 + z))
+        valid = np.isfinite(filt_wave) & np.isfinite(filt_trans)
+        if np.count_nonzero(valid) < 2:
+            continue
+        filt_wave = np.asarray(filt_wave[valid], dtype=float)
+        filt_trans = np.asarray(filt_trans[valid], dtype=float)
+        wave_rf_band = filt_wave / (1.0 + z)
+        wave_rf_chunks.append(wave_rf_band)
+        filter_specs[band] = (wave_rf_band, filt_trans)
 
-    wave_min = min([float(np.nanmin(native_wave))] + support_mins) if support_mins else float(np.nanmin(native_wave))
-    wave_max = max([float(np.nanmax(native_wave))] + support_maxs) if support_maxs else float(np.nanmax(native_wave))
+    if len(wave_rf_chunks) == 0:
+        return {band: (np.nan, np.nan) for band in bands}
+
+    wave_rf_concat = np.concatenate(wave_rf_chunks)
+    wave_rf, inv = np.unique(wave_rf_concat, return_inverse=True)
+    if wave_rf.size < 2:
+        return {band: (np.nan, np.nan) for band in bands}
 
     try:
         recon = q.reconstruct_posterior_spectrum(
-            wave_min=wave_min,
-            wave_max=wave_max,
+            wave_out=wave_rf,
             n_draws=n_draws,
             return_components=True,
         )
@@ -267,13 +401,18 @@ def estimate_pl_psf_bandpass_fractions(q, bands=SDSS_BANDS, n_draws=128):
 
     wave_rf = np.asarray(recon["wave"], dtype=float)
     recon_draws = recon["draws"]
-    pl_draws = np.asarray(recon_draws["PL"], dtype=float)
-    host_draws = np.asarray(recon_draws.get("host", np.zeros_like(pl_draws)), dtype=float)
+    pl_draws = np.nan_to_num(np.asarray(recon_draws["PL"], dtype=float), nan=0.0, posinf=0.0, neginf=0.0)
+    host_draws = np.nan_to_num(
+        np.asarray(recon_draws.get("host", np.zeros_like(pl_draws)), dtype=float),
+        nan=0.0,
+        posinf=0.0,
+        neginf=0.0,
+    )
     agn_cont_draws = np.zeros_like(pl_draws)
     for key, draws in recon_draws.items():
         if key in {"host", "continuum"}:
             continue
-        agn_cont_draws = agn_cont_draws + np.asarray(draws, dtype=float)
+        agn_cont_draws = agn_cont_draws + np.nan_to_num(np.asarray(draws, dtype=float), nan=0.0, posinf=0.0, neginf=0.0)
     n_use = pl_draws.shape[0]
 
     scale_psf_draws = _draw_vector(
@@ -290,16 +429,21 @@ def estimate_pl_psf_bandpass_fractions(q, bands=SDSS_BANDS, n_draws=128):
     pl_psf_draws = scale_psf_draws[:, None] * pl_draws
     agn_psf_draws = scale_psf_draws[:, None] * agn_cont_draws
     host_psf_draws = scale_psf_draws[:, None] * eta_psf_draws[:, None] * host_draws
-    line_psf_draws = _line_psf_draws_on_wave(q, wave_rf, n_use=n_use)
+    line_psf_draws = _reconstruct_line_psf_draws_on_wave(q, wave_rf, n_use=n_use)
     total_psf_draws = agn_psf_draws + host_psf_draws + line_psf_draws
 
     out = {}
-    wave_obs = wave_rf * (1.0 + z)
+    offset = 0
     for band in bands:
-        filt = filters[band]
-        filt_wave = get_filter_wavelength_angstrom(filt)
-        filt_trans = np.asarray(filt.response, dtype=float)
-        trans = np.interp(wave_obs, filt_wave, filt_trans, left=0.0, right=0.0)
+        if band not in filter_specs:
+            out[band] = (np.nan, np.nan)
+            continue
+        wave_rf_band, filt_trans = filter_specs[band]
+        n_band = wave_rf_band.size
+        inv_band = inv[offset:offset + n_band]
+        offset += n_band
+        trans = np.zeros_like(wave_rf, dtype=float)
+        np.maximum.at(trans, inv_band, filt_trans)
         if not np.any(trans > 0):
             out[band] = (np.nan, np.nan)
             continue
