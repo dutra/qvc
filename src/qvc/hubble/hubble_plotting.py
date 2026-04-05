@@ -983,13 +983,13 @@ def plot_cut_diagnostics(df_before, df_after, bins=30, cut_info="", save_path="p
 
 def plot_sigma_uv_host_correction(df, plot_path="plots/hubble", show=False, filename="sigma_uv_host_correction_comparison.pdf"):
     """Compare corrected and uncorrected UV variability amplitudes, colored by redshift."""
-    required = {"log_sigma_uv", "log_sigma_uv_uncorrected", "z", "frac_host_psf_2500"}
+    required = {"log_sigma_uv", "log_sigma_uv_uncorrected", "z", "f_PL"}
     if not required.issubset(df.columns):
         missing = ", ".join(sorted(required - set(df.columns)))
         raise KeyError(f"Missing required columns for sigma_uv host-correction plot: {missing}")
 
     z = pd.to_numeric(df["z"], errors="coerce").to_numpy(dtype=float)
-    frac_host_psf = pd.to_numeric(df["frac_host_psf_2500"], errors="coerce").to_numpy(dtype=float)
+    f_pl = pd.to_numeric(df["f_PL"], errors="coerce").to_numpy(dtype=float)
     delta_log_sigma = (
         pd.to_numeric(df["log_sigma_uv"], errors="coerce").to_numpy(dtype=float)
         - pd.to_numeric(df["log_sigma_uv_uncorrected"], errors="coerce").to_numpy(dtype=float)
@@ -1005,12 +1005,11 @@ def plot_sigma_uv_host_correction(df, plot_path="plots/hubble", show=False, file
 
     mask_right = (
         np.isfinite(delta_log_sigma)
-        & np.isfinite(frac_host_psf)
+        & np.isfinite(f_pl)
         & np.isfinite(z)
-        & (frac_host_psf != -1.0)
-        & (frac_host_psf > 0.0)
+        & (f_pl > 0.0)
     )
-    log_frac_host_psf = np.log10(frac_host_psf[mask_right]) if np.any(mask_right) else np.array([])
+    log_f_pl = np.log10(f_pl[mask_right]) if np.any(mask_right) else np.array([])
     delta_right = delta_log_sigma[mask_right]
     z_right = z[mask_right]
 
@@ -1033,7 +1032,7 @@ def plot_sigma_uv_host_correction(df, plot_path="plots/hubble", show=False, file
 
     if np.any(mask_right):
         sc_right = axes[1].scatter(
-            log_frac_host_psf,
+            log_f_pl,
             delta_right,
             c=z_right,
             cmap="viridis",
@@ -1044,13 +1043,137 @@ def plot_sigma_uv_host_correction(df, plot_path="plots/hubble", show=False, file
         )
         cbar = fig.colorbar(sc_right, ax=axes.tolist())
     else:
-        axes[1].text(0.5, 0.5, "No valid frac_host_psf_2500 values", ha="center", va="center", transform=axes[1].transAxes)
+        axes[1].text(0.5, 0.5, "No valid f_PL values", ha="center", va="center", transform=axes[1].transAxes)
         cbar = fig.colorbar(sc_left, ax=axes.tolist())
     axes[1].axhline(0.0, color="k", ls="--", lw=1, alpha=0.8)
-    axes[1].set_xlabel(r"$\log_{10}(\mathrm{frac\_host\_psf\_2500})$")
+    axes[1].set_xlabel(r"$\log_{10}(f_{\rm PL})$")
     axes[1].set_ylabel(r"$\Delta \log \sigma_{\rm UV}$")
     axes[1].grid(True, alpha=0.25)
     cbar.set_label("Redshift z")
+
+    diagnostics_path = os.path.join(plot_path or "plots/hubble", "diagnostics")
+    return _save_figure(
+        fig,
+        os.path.join(diagnostics_path, filename),
+        dpi=200,
+        show=show,
+    )
+
+
+def plot_sigma_uv_mpred_correction(
+    df,
+    alpha_agn,
+    plot_path="plots/hubble",
+    show=False,
+    filename="sigma_uv_mpred_correction_postcut.pdf",
+):
+    """Plot the magnitude-level impact of the sigma_uv dilution correction."""
+
+    required = {"log_sigma_uv", "log_sigma_uv_uncorrected", "z"}
+    if not required.issubset(df.columns):
+        missing = ", ".join(sorted(required - set(df.columns)))
+        raise KeyError(f"Missing required columns for sigma_uv M_pred correction plot: {missing}")
+
+    z = pd.to_numeric(df["z"], errors="coerce").to_numpy(dtype=float)
+    log_sigma_uv = pd.to_numeric(df["log_sigma_uv"], errors="coerce").to_numpy(dtype=float)
+    log_sigma_uv_uncorrected = pd.to_numeric(
+        df["log_sigma_uv_uncorrected"], errors="coerce"
+    ).to_numpy(dtype=float)
+    delta_log_sigma = log_sigma_uv - log_sigma_uv_uncorrected
+    delta_m_pred = float(alpha_agn) * delta_log_sigma
+
+    mask_main = np.isfinite(z) & np.isfinite(delta_m_pred)
+    if not np.any(mask_main):
+        raise ValueError("No finite rows available for sigma_uv M_pred correction diagnostics.")
+
+    fig = plt.figure(figsize=(17, 5.6))
+    gs = fig.add_gridspec(1, 3, width_ratios=[1.15, 1.15, 0.85], wspace=0.28)
+    ax_z = fig.add_subplot(gs[0, 0])
+    ax_fpl = fig.add_subplot(gs[0, 1], sharey=ax_z)
+    ax_hist = fig.add_subplot(gs[0, 2])
+
+    scatter = ax_z.scatter(
+        z[mask_main],
+        delta_m_pred[mask_main],
+        c=z[mask_main],
+        cmap="viridis",
+        s=10,
+        alpha=0.65,
+        linewidths=0,
+        rasterized=True,
+    )
+    ax_z.axhline(0.0, color="k", ls="--", lw=1, alpha=0.8)
+    ax_z.set_xlabel("Redshift $z$")
+    ax_z.set_ylabel(r"$\Delta M_{\rm pred}$ (mag)")
+    ax_z.grid(True, alpha=0.25)
+
+    if "f_PL" in df.columns:
+        f_pl = pd.to_numeric(df["f_PL"], errors="coerce").to_numpy(dtype=float)
+        mask_fpl = mask_main & np.isfinite(f_pl) & (f_pl > 0.0)
+    else:
+        f_pl = np.full(len(df), np.nan, dtype=float)
+        mask_fpl = np.zeros(len(df), dtype=bool)
+
+    if np.any(mask_fpl):
+        ax_fpl.scatter(
+            np.log10(f_pl[mask_fpl]),
+            delta_m_pred[mask_fpl],
+            c=z[mask_fpl],
+            cmap="viridis",
+            s=10,
+            alpha=0.65,
+            linewidths=0,
+            rasterized=True,
+        )
+        ax_fpl.grid(True, alpha=0.25)
+    else:
+        ax_fpl.text(
+            0.5,
+            0.5,
+            "No valid $f_{\\rm PL}$ values",
+            ha="center",
+            va="center",
+            transform=ax_fpl.transAxes,
+        )
+    ax_fpl.axhline(0.0, color="k", ls="--", lw=1, alpha=0.8)
+    ax_fpl.set_xlabel(r"$\log_{10}(f_{\rm PL})$")
+
+    delta_show = delta_m_pred[mask_main]
+    ax_hist.hist(
+        delta_show,
+        bins=40,
+        color="0.65",
+        edgecolor="white",
+        alpha=0.9,
+    )
+    median_delta = float(np.nanmedian(delta_show))
+    p90_abs = float(np.nanpercentile(np.abs(delta_show), 90))
+    ax_hist.axvline(0.0, color="k", ls="--", lw=1, alpha=0.8)
+    ax_hist.axvline(median_delta, color="tab:red", lw=2.0, alpha=0.9)
+    ax_hist.set_xlabel(r"$\Delta M_{\rm pred}$ (mag)")
+    ax_hist.set_ylabel("Count")
+    ax_hist.grid(True, alpha=0.25)
+    ax_hist.text(
+        0.97,
+        0.97,
+        f"N={delta_show.size}\n"
+        f"median={median_delta:.3f} mag\n"
+        f"90% |Δ|={p90_abs:.3f} mag",
+        ha="right",
+        va="top",
+        transform=ax_hist.transAxes,
+        fontsize=11,
+    )
+
+    colorbar = fig.colorbar(scatter, ax=[ax_z, ax_fpl], pad=0.02)
+    colorbar.set_label("Redshift z")
+
+    fig.suptitle(
+        r"$\Delta M_{\rm pred} = \alpha_{\rm agn}\,\Delta \log \sigma_{\rm UV}$"
+        + f"   ({float(alpha_agn):.3f} × correction)",
+        fontsize=16,
+        y=1.02,
+    )
 
     diagnostics_path = os.path.join(plot_path or "plots/hubble", "diagnostics")
     return _save_figure(
@@ -5653,6 +5776,9 @@ def plot_full_residuals(
                     {True: 1, False: 0, 'True': 1, 'False': 0, 'true': 1, 'false': 0}
                 )
 
+        if "log_sigma_uv_uncorrected" in frame.columns:
+            frame["log_sigma_uv_diluted"] = frame["log_sigma_uv_uncorrected"]
+
     results = _median_param_dict(flat_samples)
     cosmo = _build_cosmology(results)
     _augment_plot_columns(df_agn, cosmo)
@@ -5682,6 +5808,7 @@ def plot_full_residuals(
         #'conti_a_0', 'PL_slope_blue', 
         #'MY_M_2500', 'z', 'log_lbol', 'log_ledd_ratio', 
         'log_delta_tau_uv_fast_rf',
+        'log_sigma_uv_diluted',
         'log_sigma_uv', 'log_tau_uv_rf',
         'log_tau_uv', 'log_tau_fast_uv',
         #'log_tau_fast_band_u_RF', 'log_tau_fast_band_g_RF', 'log_tau_fast_band_r_RF', 'log_tau_fast_band_i_RF', 'log_tau_fast_band_z_RF',
@@ -8539,9 +8666,17 @@ def plot_m2500_vs_z_colorpanels(
 
         if log_color:
             d = d[d[ccol] > 0].copy()
+        if d.empty:
+            ax.set_axis_off()
+            continue
+
+        if log_color:
             c_all = np.log10(d[ccol].to_numpy(dtype=float))
         else:
             c_all = d[ccol].to_numpy(dtype=float)
+        if c_all.size == 0 or not np.any(np.isfinite(c_all)):
+            ax.set_axis_off()
+            continue
 
         keep = d["_is_kept"].to_numpy(dtype=bool)
         if ccol in cuts and cuts[ccol] is not None:

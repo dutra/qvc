@@ -3,8 +3,6 @@
 from qvc.hubble.cuts import (
     AGN_SCALAR_PARAMETER_CUTS,
     ALPHA_LAMBDA_MAX,
-    F_BC_3000_MAX,
-    F_FE_UV_3000_MAX,
     F_HOST_2500_MAX,
     LOG_AMP_DELTA_BLR_UPPER,
     LOG_AMP_DELTA_BLR_UPPER_BY_BAND,
@@ -16,8 +14,6 @@ from qvc.hubble.cuts import (
 
 DEFAULT_F_HOST_CUT = F_HOST_2500_MAX
 DEFAULT_WRMS_CUT = WRMS_MAX
-DEFAULT_IRON_FRAC_CUT = F_FE_UV_3000_MAX
-DEFAULT_BC_FRAC_CUT = F_BC_3000_MAX
 DEFAULT_CHI_SQ_CUT = VARIABILITY_CHI_SQ_RED_G_MIN
 DEFAULT_REDDENING_EBV_CUT = REDDENING_EBV_MAX
 DEFAULT_ALPHA_LAMBDA_UPPER_CUT = ALPHA_LAMBDA_MAX
@@ -29,8 +25,6 @@ DEFAULT_LOG_AMP_DELTA_BLR_UPPER_CUTS = dict(LOG_AMP_DELTA_BLR_UPPER_BY_BAND)
 def build_agn_cuts(
     *,
     f_host_cut=DEFAULT_F_HOST_CUT,
-    iron_frac_cut=DEFAULT_IRON_FRAC_CUT,
-    bc_frac_cut=DEFAULT_BC_FRAC_CUT,
     wrms_cut=DEFAULT_WRMS_CUT,
     variability_chi_sq_red_g_cut=DEFAULT_CHI_SQ_CUT,
     reddening_ebv_cut=DEFAULT_REDDENING_EBV_CUT,
@@ -43,12 +37,8 @@ def build_agn_cuts(
     """
     if f_host_cut is None:
         f_host_cut = DEFAULT_F_HOST_CUT
-    if iron_frac_cut is None:
-        iron_frac_cut = DEFAULT_IRON_FRAC_CUT
     if wrms_cut is None:
         wrms_cut = DEFAULT_WRMS_CUT
-    if bc_frac_cut is None:
-        bc_frac_cut = DEFAULT_BC_FRAC_CUT
     if reddening_ebv_cut is None:
         reddening_ebv_cut = DEFAULT_REDDENING_EBV_CUT
 
@@ -56,8 +46,6 @@ def build_agn_cuts(
         "wrms": (None, wrms_cut),
         "f_host_2500": (None, f_host_cut),
         "frac_host_psf_2500": (None, f_host_cut),
-        "f_fe_uv_3000": (None, iron_frac_cut),
-        "f_bc_3000": (None, bc_frac_cut),
         "variability_chi_sq_red_g": (variability_chi_sq_red_g_cut, None),
     }
     cuts = [

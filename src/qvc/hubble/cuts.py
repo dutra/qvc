@@ -1,7 +1,7 @@
 """Centralized parameter-cut thresholds for the QVC Hubble pipeline."""
 
-APPARENT_MAG_2500_MIN = 16.0
-APPARENT_MAG_2500_MAX = 24.0
+APPARENT_MAG_2500_MIN = None #16.0
+APPARENT_MAG_2500_MAX = None #24.0
 
 LOG_TAU_UV_RF_MIN = 1.5
 LOG_TAU_UV_RF_MAX = 4.0
@@ -9,9 +9,8 @@ WRMS_MAX = 1.2
 T_RF_LENGTH_MIN = 1700.0
 F_HOST_2500_MAX = 1.0
 FRAC_HOST_PSF_2500_MAX = 1.0
+ALPHA_LAMBDA_MIN = -2.0
 ALPHA_LAMBDA_MAX = None
-F_FE_UV_3000_MAX = 1.0
-F_BC_3000_MAX = 1.0
 VARIABILITY_CHI_SQ_RED_G_MIN = 20.0
 LOG_SIGMA_UV_MIN = -1.5
 LOG_SIGMA_UV_MAX = 0.2
@@ -25,7 +24,8 @@ LOG_AMP_DELTA_BLR_UPPER_BY_BAND = {
     "i": LOG_AMP_DELTA_BLR_UPPER,
 }
 LOG_AMP_DELTA_BC_UPPER = -0.2
-LOG_F_BC_3000_MAX = -2.0
+LOG_F_BC_3000_MAX = -3.0
+LOG_F_FE_UV_3000_MAX = -3.0
 REL_APPARENT_MAG_2500_ERR_MAX = 0.003
 APPARENT_MAG_2500_ERR_MIN = 0.0
 FRAC_ERR_LOG_L2500_MAX = 0.5
@@ -36,17 +36,13 @@ EXCLUDED_SDSS_NAMES = (
     "024555.35+005332.6",
     "015802.36+002917.3",
 )
-DROPPED_BANDS_COUNTS_TO_REMOVE = (4, 5)
-
 AGN_SCALAR_PARAMETER_CUTS = (
     ("log_tau_uv_rf", LOG_TAU_UV_RF_MIN, LOG_TAU_UV_RF_MAX),
     ("wrms", None, WRMS_MAX),
     ("t_rf_length", T_RF_LENGTH_MIN, None),
     ("f_host_2500", None, F_HOST_2500_MAX),
     ("frac_host_psf_2500", None, FRAC_HOST_PSF_2500_MAX),
-    ("alpha_lambda", None, ALPHA_LAMBDA_MAX),
-    ("f_fe_uv_3000", None, F_FE_UV_3000_MAX),
-    ("f_bc_3000", None, F_BC_3000_MAX),
+    ("alpha_lambda", ALPHA_LAMBDA_MIN, ALPHA_LAMBDA_MAX),
     ("variability_chi_sq_red_g", VARIABILITY_CHI_SQ_RED_G_MIN, None),
     ("log_sigma_uv", LOG_SIGMA_UV_MIN, LOG_SIGMA_UV_MAX),
 )

@@ -86,6 +86,7 @@ from qvc.hubble.hubble_plotting import (
     plot_hubble,
     plot_predicted_L2500_vs_sigmahat,
     plot_redshift_histograms,
+    plot_sigma_uv_mpred_correction,
 )
 from qvc.hubble.hubble_utils import (
     compute_age_universe_with_error,
@@ -870,6 +871,15 @@ def run_single_jax(
         dm_interp,
         plot_path=plot_path,
         show=False,
+    )
+    alpha_agn_idx = model_labels.index("alpha_agn")
+    alpha_agn_median = float(np.nanmedian(flat_samples[:, alpha_agn_idx]))
+    plot_sigma_uv_mpred_correction(
+        df_agn_fit,
+        alpha_agn_median,
+        plot_path=plot_path,
+        show=False,
+        filename="sigma_uv_mpred_correction_postcut.pdf",
     )
     chisq_red_L2500, _ = reduced_chi_squared(L_residuals_debiased, L_pred_std_debiased, n_params=len(model_labels) - 1)
     print(f"Reduced chi-squared (debiased) M2500: {chisq_red_L2500:.3f}")

@@ -29,14 +29,12 @@ from qvc.hubble.cuts import (
     APPARENT_MAG_2500_ERR_MIN,
     APPARENT_MAG_2500_MAX,
     APPARENT_MAG_2500_MIN,
-    DROPPED_BANDS_COUNTS_TO_REMOVE,
     EXCLUDED_SDSS_NAMES,
-    F_BC_3000_MAX,
-    F_FE_UV_3000_MAX,
     F_HOST_2500_MAX,
     FRAC_ERR_LOG_L2500_MAX,
     LOG_AMP_DELTA_BC_UPPER,
     LOG_F_BC_3000_MAX,
+    LOG_F_FE_UV_3000_MAX,
     REL_APPARENT_MAG_2500_ERR_MAX,
 )
 from qvc.hubble.hubble_cut_config import (
@@ -451,6 +449,8 @@ def populate_spectra_fit(df, spectra_fit_csvs):
         "f_na_err": float,
         "f_br": float,
         "f_br_err": float,
+        "f_PL": float,
+        "f_PL_err": float,
         "wrms": float,
         "f_host_center": float,
         "frac_host_psf_2500": float,
@@ -1223,14 +1223,12 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
 
     if "log_sigma_uv" in df.columns:
         df["log_sigma_uv_uncorrected"] = pd.to_numeric(df["log_sigma_uv"], errors="coerce")
-    # Use the PSF-space spectroscopic host fraction at 2500 A for the sigma_uv host correction.
+    # Use the PL/total fraction at 2500 A for the sigma_uv dilution correction.
     if correct_sigma_uv_host:
-        required_cols = {"log_sigma_uv_uncorrected", "f_host_2500", "log_sigma_uv_std_psd"}
+        required_cols = {"log_sigma_uv_uncorrected", "f_PL", "log_sigma_uv_std_psd"}
         if required_cols.issubset(df.columns):
-            f_host_2500 = pd.to_numeric(df["f_host_2500"], errors="coerce")
-            valid_frac_host = np.isfinite(f_host_2500) & (f_host_2500 >= 0.0) & (f_host_2500 < 1.0)
-            agn_frac = 1.0 - f_host_2500
-            valid_hostcorr = valid_frac_host & np.isfinite(agn_frac) & (agn_frac > 0.0)
+            f_pl = pd.to_numeric(df["f_PL"], errors="coerce")
+            valid_dilution = np.isfinite(f_pl) & (f_pl > 0.0) & (f_pl <= 1.0)
             ln10 = np.log(10.0)
 
             log_sigma_uv_std_psd_uncorrected = pd.to_numeric(
@@ -1238,20 +1236,20 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
             )
             df["log_sigma_uv_std_psd_uncorrected"] = log_sigma_uv_std_psd_uncorrected
 
-            if "f_host_2500_err" in df.columns:
-                f_host_2500_err = pd.to_numeric(df["f_host_2500_err"], errors="coerce").fillna(0.0)
+            if "f_PL_err" in df.columns:
+                f_pl_err = pd.to_numeric(df["f_PL_err"], errors="coerce").fillna(0.0)
             else:
-                f_host_2500_err = pd.Series(np.zeros(len(df), dtype=float), index=df.index)
+                f_pl_err = pd.Series(np.zeros(len(df), dtype=float), index=df.index)
             hostcorr_sigma_term = np.where(
-                valid_hostcorr,
-                f_host_2500_err.to_numpy(dtype=float) / (agn_frac.to_numpy(dtype=float) * ln10),
+                valid_dilution,
+                f_pl_err.to_numpy(dtype=float) / (f_pl.to_numpy(dtype=float) * ln10),
                 0.0,
             )
             df["log_sigma_uv_hostcorr_err"] = hostcorr_sigma_term
 
-            df["sigma_uv_hostcorr_factor"] = np.where(valid_hostcorr, 1.0 / agn_frac, np.nan)
+            df["sigma_uv_hostcorr_factor"] = np.where(valid_dilution, 1.0 / f_pl, np.nan)
             df["log_sigma_uv"] = np.where(
-                valid_hostcorr,
+                valid_dilution,
                 df["log_sigma_uv_uncorrected"] + np.log10(df["sigma_uv_hostcorr_factor"]),
                 df["log_sigma_uv_uncorrected"],
             )
@@ -1260,30 +1258,30 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
                 + np.square(hostcorr_sigma_term)
             )
             df["log_sigma_uv_std_psd_corrected"] = np.where(
-                valid_hostcorr,
+                valid_dilution,
                 np.sqrt(corrected_sigma_var),
                 log_sigma_uv_std_psd_uncorrected,
             )
             df["log_sigma_uv_std_psd"] = df["log_sigma_uv_std_psd_corrected"]
             print(
-                "Applied sigma_uv host correction using frac_host_psf_2500 via f_host_2500: "
-                "sigma_uv_corrected = sigma_uv / (1 - frac_host_psf_2500)"
+                "Applied sigma_uv dilution correction using f_PL: "
+                "sigma_uv_corrected = sigma_uv / f_PL"
             )
             delta_log_sigma = df["log_sigma_uv"] - df["log_sigma_uv_uncorrected"]
-            valid_expected_increase = valid_hostcorr & np.isfinite(delta_log_sigma)
+            valid_expected_increase = valid_dilution & np.isfinite(delta_log_sigma)
             if np.any(valid_expected_increase & (delta_log_sigma < 0.0)):
                 bad_rows = df.loc[
                     valid_expected_increase & (delta_log_sigma < 0.0),
-                    ["object_id", "f_host_2500", "log_sigma_uv_uncorrected", "log_sigma_uv"],
+                    ["object_id", "f_PL", "log_sigma_uv_uncorrected", "log_sigma_uv"],
                 ]
                 raise ValueError(
-                    "Host-corrected log_sigma_uv should be larger or equal than the uncorrected value "
-                    "for all valid f_host_2500 rows. Offending rows:\n"
+                    "Dilution-corrected log_sigma_uv should be larger or equal than the uncorrected value "
+                    "for all valid f_PL rows. Offending rows:\n"
                     f"{bad_rows.head(10).to_string(index=False)}"
                 )
             if np.any(valid_expected_increase):
                 print(
-                    "Host sigma_uv correction sanity check: "
+                    "Sigma_uv dilution correction sanity check: "
                     f"median delta={np.nanmedian(delta_log_sigma[valid_expected_increase]):.4f} dex, "
                     f"min delta={np.nanmin(delta_log_sigma[valid_expected_increase]):.4f} dex"
                 )
@@ -1291,10 +1289,10 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
                 df["log_sigma_uv_std_psd"].to_numpy(dtype=float)
                 - df["log_sigma_uv_std_psd_uncorrected"].to_numpy(dtype=float)
             )
-            valid_sigma_delta = valid_hostcorr & np.isfinite(corrected_sigma_delta)
+            valid_sigma_delta = valid_dilution & np.isfinite(corrected_sigma_delta)
             if np.any(valid_sigma_delta):
                 print(
-                    "Host sigma_uv uncertainty propagation sanity check: "
+                    "Sigma_uv dilution uncertainty propagation sanity check: "
                     f"median delta={np.nanmedian(corrected_sigma_delta[valid_sigma_delta]):.4f} dex, "
                     f"max delta={np.nanmax(corrected_sigma_delta[valid_sigma_delta]):.4f} dex"
                 )
@@ -1307,7 +1305,7 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
         else:
             missing_cols = sorted(required_cols - set(df.columns))
             raise KeyError(
-                "correct_sigma_uv_host=True requires 'log_sigma_uv', 'frac_host_psf_2500' (copied into f_host_2500), "
+                "correct_sigma_uv_host=True requires 'log_sigma_uv', 'f_PL', "
                 f"and 'log_sigma_uv_std_psd'. Missing: {missing_cols}"
             )
 
@@ -1550,13 +1548,22 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
             )
 
     # Remove objects with implausibly bright or faint apparent magnitude at 2500 A.
-    mag_mask = (
-        (df["apparent_mag_2500"] >= APPARENT_MAG_2500_MIN)
-        & (df["apparent_mag_2500"] < APPARENT_MAG_2500_MAX)
+    mag_mask = np.ones(len(df), dtype=bool)
+    if APPARENT_MAG_2500_MIN is not None:
+        mag_mask &= df["apparent_mag_2500"] >= APPARENT_MAG_2500_MIN
+    if APPARENT_MAG_2500_MAX is not None:
+        mag_mask &= df["apparent_mag_2500"] < APPARENT_MAG_2500_MAX
+    mag_lower_desc = (
+        str(APPARENT_MAG_2500_MIN)
+        if APPARENT_MAG_2500_MIN is not None
+        else "-inf"
     )
-    mag_cut_desc = (
-        f"{APPARENT_MAG_2500_MIN} <= apparent_mag_2500 < {APPARENT_MAG_2500_MAX}"
+    mag_upper_desc = (
+        str(APPARENT_MAG_2500_MAX)
+        if APPARENT_MAG_2500_MAX is not None
+        else "inf"
     )
+    mag_cut_desc = f"{mag_lower_desc} <= apparent_mag_2500 < {mag_upper_desc}"
     plot_cut_diagnostics(df.copy(), df[mag_mask], bins=30, cut_info=mag_cut_desc)
     df = _record_cut("apparent_mag_2500", mag_cut_desc, df, mag_mask)
 
@@ -1627,15 +1634,6 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
             )
             print(f"[WARNING] Exclusion CSV not found: {exclude_csv}")
 
-    # Remove objects with too many dropped bands.
-    mask_dropped = ~df["len_dropped_bands"].isin(DROPPED_BANDS_COUNTS_TO_REMOVE)
-    plot_cut_diagnostics(df.copy(), df[mask_dropped], bins=30, cut_info="dropped bands 4 or 5")
-    df = _record_cut(
-        "dropped_bands",
-        f"len_dropped_bands not in {set(DROPPED_BANDS_COUNTS_TO_REMOVE)}",
-        df,
-        mask_dropped,
-    )
     blr_amp_cuts = build_log_amp_delta_blr_cuts()
     for col, lower, upper in blr_amp_cuts:
         cut_desc = f"{col} in {_format_cut_bounds(lower, upper, upper_inclusive=False, allow_missing=True)}"
@@ -1692,21 +1690,24 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
             plot_cut_diagnostics(df.copy(), df[bc_amp_mask], bins=30, cut_info=cut_desc)
             df = _record_cut("agn_scalar:log_amp_delta_bc", cut_desc, df, bc_amp_mask)
 
-        for frac_col, log_col in (("f_bc_3000", "log_f_bc_3000"),):
+        for frac_col, log_col, log_upper in (
+            ("f_bc_3000", "log_f_bc_3000", LOG_F_BC_3000_MAX),
+            ("f_fe_uv_3000", "log_f_fe_uv_3000", LOG_F_FE_UV_3000_MAX),
+        ):
             if frac_col not in df.columns:
                 _append_cut_report_row(
                     cut_rows,
                     step=f"agn_scalar:{log_col}",
-                    criterion=f"{log_col} <= -2 or NaN/non-positive",
+                    criterion=f"{log_col} <= {log_upper} or NaN/non-positive",
                     before=len(df),
                     kept=len(df),
                     status="skipped",
                 )
                 continue
             frac_vals = pd.to_numeric(df[frac_col], errors="coerce").to_numpy(dtype=float)
-            frac_upper = 10.0**LOG_F_BC_3000_MAX
+            frac_upper = 10.0**log_upper
             frac_mask = (~np.isfinite(frac_vals)) | (frac_vals <= 0.0) | (frac_vals <= frac_upper)
-            cut_desc = f"{log_col} <= {LOG_F_BC_3000_MAX} or NaN/non-positive"
+            cut_desc = f"{log_col} <= {log_upper} or NaN/non-positive"
             plot_cut_diagnostics(df.copy(), df[frac_mask], bins=30, cut_info=cut_desc)
             df = _record_cut(f"agn_scalar:{log_col}", cut_desc, df, frac_mask)
 
@@ -1806,8 +1807,8 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
         "f_host_center" in df.columns or "f_host_2500" in df.columns
     ):
         spectral_fraction_cut_thresholds = {
-            "f_bc_3000": F_BC_3000_MAX,
-            "f_fe_uv_3000": F_FE_UV_3000_MAX,
+            "f_bc_3000": 10.0**LOG_F_BC_3000_MAX,
+            "f_fe_uv_3000": 10.0**LOG_F_FE_UV_3000_MAX,
             "f_host_2500": F_HOST_2500_MAX,
         }
         plot_spectral_fraction_vs_redshift(

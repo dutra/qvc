@@ -73,6 +73,7 @@ from qvc.hubble.hubble_plotting import (
     plot_redshift_histograms,
     plot_redshift_bin_residual_summary,
     plot_residuals_vs_alphaOX,
+    plot_sigma_uv_mpred_correction,
 )
 from qvc.hubble.tex_utils import make_agn_csv_table, make_agn_latex_table
 from qvc.hubble.hubble_model import (
@@ -840,6 +841,16 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
     #     print("Skipping AGN-specific plots for SNe-only run.")
     #     return flat_samples, model_labels, dm_interp, logZ, logZerr, None, age, age_err
 
+    alpha_agn_idx = model_labels.index("alpha_agn")
+    alpha_agn_median = float(np.nanmedian(flat_samples[:, alpha_agn_idx]))
+    plot_sigma_uv_mpred_correction(
+        df_agn,
+        alpha_agn_median,
+        plot_path=plot_path,
+        show=False,
+        filename="sigma_uv_mpred_correction_postcut.pdf",
+    )
+
     print("Plotting predicted L2500 vs ...")
     dmi_posterior_median_full = None
     if uniform_redshift_distribution:
@@ -1104,6 +1115,22 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         dm_interp=dm_interp,
         show=False,
         plot_path=plot_path,
+        z_range=z_range,
+        use_alpha_lambda_term=use_alpha_lambda_term,
+        use_redshift_log_f_term=use_redshift_log_f_term,
+    )
+    plot_full_residuals(
+        df_agn,
+        debiased_residuals,
+        debiased_residuals_err,
+        flat_samples,
+        cosmo_model,
+        z_pivot_agn,
+        debias=True,
+        dm_interp=dm_interp,
+        show=False,
+        plot_path=plot_path,
+        z_cut=1.5,
         z_range=z_range,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_redshift_log_f_term=use_redshift_log_f_term,

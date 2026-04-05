@@ -44,6 +44,8 @@ def _make_loader_input():
             "apparent_mag_2500": [20.3, 20.4, 20.5, 20.6, 20.7],
             "f_host_2500": [0.2, 0.0, 1.1, -0.1, 0.3],
             "f_host_2500_err": [0.05, 0.0, 0.1, 0.2, np.nan],
+            "f_PL": [0.8, 1.0, 1.1, -0.1, 0.7],
+            "f_PL_err": [0.05, 0.0, 0.1, 0.2, np.nan],
         }
     )
 
@@ -76,13 +78,13 @@ def test_load_agn_data_propagates_host_error_into_sigma_uv(monkeypatch, tmp_path
     ln10 = np.log(10.0)
     orig_sigma = df_in["log_sigma_uv"].to_numpy(dtype=float)
     orig_err = df_in["log_sigma_uv_std_psd"].to_numpy(dtype=float)
-    f_host = df_in["f_host_2500"].to_numpy(dtype=float)
-    f_host_err = np.nan_to_num(df_in["f_host_2500_err"].to_numpy(dtype=float), nan=0.0)
-    valid = np.isfinite(f_host) & (f_host >= 0.0) & (f_host < 1.0)
+    f_pl = df_in["f_PL"].to_numpy(dtype=float)
+    f_pl_err = np.nan_to_num(df_in["f_PL_err"].to_numpy(dtype=float), nan=0.0)
+    valid = np.isfinite(f_pl) & (f_pl > 0.0) & (f_pl <= 1.0)
     expected_delta = np.zeros(len(df_in), dtype=float)
-    expected_delta[valid] = -np.log10(1.0 - f_host[valid])
+    expected_delta[valid] = -np.log10(f_pl[valid])
     expected_host_err = np.zeros(len(df_in), dtype=float)
-    expected_host_err[valid] = f_host_err[valid] / ((1.0 - f_host[valid]) * ln10)
+    expected_host_err[valid] = f_pl_err[valid] / (f_pl[valid] * ln10)
     expected_err = orig_err.copy()
     expected_err[valid] = np.sqrt(orig_err[valid] ** 2 + expected_host_err[valid] ** 2)
 
@@ -94,7 +96,7 @@ def test_load_agn_data_propagates_host_error_into_sigma_uv(monkeypatch, tmp_path
     np.testing.assert_allclose(df["log_sigma_uv_std_psd"], expected_err)
 
     valid_factor = np.full(len(df_in), np.nan, dtype=float)
-    valid_factor[valid] = 1.0 / (1.0 - f_host[valid])
+    valid_factor[valid] = 1.0 / f_pl[valid]
     np.testing.assert_allclose(df["sigma_uv_hostcorr_factor"], valid_factor, equal_nan=True)
 
     obs_dict = {key: df[key].to_numpy(dtype=float) for key in hubble_model.agn_model_req_obs + hubble_model.agn_model_req_errs}
