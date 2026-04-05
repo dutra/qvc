@@ -70,6 +70,10 @@ from qvc.light_curve.multiband_fit_plotting import *
 from qvc.light_curve.multiband_fit_utils import *
 from qvc.light_curve.multiband_generate_lc import *
 from qvc.light_curve.multiband_model_dho_blr import make_multiband_dho_blr_model
+from qvc.light_curve.psf_constant_flux_correction import (
+    apply_constant_flux_correction_to_objects,
+    print_constant_flux_correction_summary,
+)
 from qvc.light_curve.variability_metrics import compute_variability_metrics_for_cleaned_lc
 
 
@@ -2440,6 +2444,18 @@ def main():
     parser.add_argument("--load_nearby_lc_csv", type=str, default=None, help="CSV listing nearby LCs to load.")
     parser.add_argument("--tau_fast_truncated", action="store_true", default=False, help="Truncated prior for tau_fast0.")
     parser.add_argument("--n_blr_terms", type=int, choices=(1, 2), default=1, help="Number of BLR lag terms to fit.")
+    parser.add_argument(
+        "--spectra_fit_csv",
+        nargs="+",
+        default=None,
+        help="Spectra-fit CSV file(s) used to derive per-band PSF PL/total fractions.",
+    )
+    parser.add_argument(
+        "--subtract_psf_constant_flux",
+        action="store_true",
+        default=False,
+        help="Subtract spectra-derived constant contaminating flux in PSF light curves before GP fitting.",
+    )
     args = parser.parse_args()
     print("Args:", args)
 
@@ -2466,6 +2482,16 @@ def main():
             same_length=args.exact_same_length,
         )
         print(f"After restframe cut, {len(objs)} objects remain.")
+
+    if args.subtract_psf_constant_flux:
+        if not args.spectra_fit_csv:
+            raise ValueError("--subtract_psf_constant_flux requires --spectra_fit_csv.")
+        objs, correction_summary = apply_constant_flux_correction_to_objects(
+            objs,
+            spectra_fit_csvs=args.spectra_fit_csv,
+            progress_bar=args.progress,
+        )
+        print_constant_flux_correction_summary(correction_summary)
 
     if args.inject_random_fake_etas:
         rng = np.random.default_rng()

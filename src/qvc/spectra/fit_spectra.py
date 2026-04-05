@@ -144,7 +144,8 @@ def sdss_bands_affected_by_lya(z, buffer=0.0):
 def get_sdss_filters():
     global _SDSS_FILTER_CACHE
     if _SDSS_FILTER_CACHE is None:
-        _SDSS_FILTER_CACHE = speclite_filters.load_filters(*[f"sdss2010-{b}" for b in SDSS_CAL_BANDS])
+        filters = speclite_filters.load_filters(*[f"sdss2010-{b}" for b in SDSS_BANDS])
+        _SDSS_FILTER_CACHE = {band: filt for band, filt in zip(SDSS_BANDS, filters)}
     return _SDSS_FILTER_CACHE
 
 
@@ -177,6 +178,134 @@ def build_psf_photometry_inputs(rec):
         psf_mag_errs_all.append(float(mag_err))
 
     return psf_bands_all, psf_mags_all, psf_mag_errs_all
+
+
+def _draw_vector(values, *, n_use, fill_value):
+    arr = np.asarray(values, dtype=float).reshape(-1)
+    if arr.size == 0:
+        return np.full(n_use, fill_value, dtype=float)
+    if arr.size >= n_use:
+        return arr[:n_use]
+    pad_value = float(np.nanmedian(arr)) if np.any(np.isfinite(arr)) else fill_value
+    return np.pad(arr, (0, n_use - arr.size), mode="constant", constant_values=pad_value)
+
+
+def _line_psf_draws_on_wave(q, wave_out, n_use):
+    native_wave = np.asarray(getattr(q, "wave", []), dtype=float)
+    pred_out = getattr(q, "pred_out", {}) or {}
+    line_draws_native = np.asarray(pred_out.get("line_model_psf", []), dtype=float)
+    if (
+        native_wave.ndim != 1
+        or native_wave.size < 2
+        or line_draws_native.ndim != 2
+        or line_draws_native.shape[1] != native_wave.size
+    ):
+        return np.zeros((n_use, len(wave_out)), dtype=float)
+
+    n_interp = min(n_use, line_draws_native.shape[0])
+    out = np.zeros((n_use, len(wave_out)), dtype=float)
+    for i in range(n_interp):
+        out[i] = np.interp(wave_out, native_wave, line_draws_native[i], left=0.0, right=0.0)
+    return out
+
+
+def estimate_pl_psf_bandpass_fractions(q, bands=SDSS_BANDS, n_draws=128):
+    """Return spectra-derived PSF PL/total fractions through each SDSS bandpass."""
+
+    z = safe_float(getattr(q, "z", np.nan))
+    native_wave = np.asarray(getattr(q, "wave", []), dtype=float)
+    pred_out = getattr(q, "pred_out", {}) or {}
+    if (not np.isfinite(z)) or native_wave.ndim != 1 or native_wave.size < 2:
+        return {}
+    if not hasattr(q, "reconstruct_posterior_spectrum"):
+        raise RuntimeError(
+            "QSOFit object does not expose reconstruct_posterior_spectrum(); "
+            "cannot compute bandpass PSF PL fractions without posterior reconstruction."
+        )
+
+    filters = get_sdss_filters()
+    bands = [str(band) for band in bands if str(band) in filters]
+    if len(bands) == 0:
+        return {}
+
+    support_mins = []
+    support_maxs = []
+    for band in bands:
+        filt = filters[band]
+        filt_wave = np.asarray(filt.wavelength.to_value(u.AA), dtype=float)
+        filt_trans = np.asarray(filt.response, dtype=float)
+        if filt_wave.size == 0 or not np.any(np.isfinite(filt_trans)):
+            continue
+        support = filt_wave[filt_trans > 0.01 * np.nanmax(filt_trans)]
+        if support.size >= 2:
+            support_mins.append(float(np.nanmin(support)) / (1.0 + z))
+            support_maxs.append(float(np.nanmax(support)) / (1.0 + z))
+
+    wave_min = min([float(np.nanmin(native_wave))] + support_mins) if support_mins else float(np.nanmin(native_wave))
+    wave_max = max([float(np.nanmax(native_wave))] + support_maxs) if support_maxs else float(np.nanmax(native_wave))
+
+    try:
+        recon = q.reconstruct_posterior_spectrum(
+            wave_min=wave_min,
+            wave_max=wave_max,
+            n_draws=n_draws,
+            return_components=True,
+        )
+    except Exception as exc:
+        raise RuntimeError(
+            "reconstruct_posterior_spectrum() failed while computing bandpass "
+            f"PSF PL fractions: {exc}"
+        ) from exc
+
+    wave_rf = np.asarray(recon["wave"], dtype=float)
+    recon_draws = recon["draws"]
+    pl_draws = np.asarray(recon_draws["PL"], dtype=float)
+    host_draws = np.asarray(recon_draws.get("host", np.zeros_like(pl_draws)), dtype=float)
+    agn_cont_draws = np.zeros_like(pl_draws)
+    for key, draws in recon_draws.items():
+        if key in {"host", "continuum"}:
+            continue
+        agn_cont_draws = agn_cont_draws + np.asarray(draws, dtype=float)
+    n_use = pl_draws.shape[0]
+
+    scale_psf_draws = _draw_vector(
+        pred_out.get("scale_psf", getattr(q, "scale_psf", np.nan)),
+        n_use=n_use,
+        fill_value=1.0,
+    )
+    eta_psf_draws = _draw_vector(
+        pred_out.get("eta_psf", getattr(q, "eta_psf", np.nan)),
+        n_use=n_use,
+        fill_value=1.0,
+    )
+
+    pl_psf_draws = scale_psf_draws[:, None] * pl_draws
+    agn_psf_draws = scale_psf_draws[:, None] * agn_cont_draws
+    host_psf_draws = scale_psf_draws[:, None] * eta_psf_draws[:, None] * host_draws
+    line_psf_draws = _line_psf_draws_on_wave(q, wave_rf, n_use=n_use)
+    total_psf_draws = agn_psf_draws + host_psf_draws + line_psf_draws
+
+    out = {}
+    wave_obs = wave_rf * (1.0 + z)
+    for band in bands:
+        filt = filters[band]
+        filt_wave = np.asarray(filt.wavelength.to_value(u.AA), dtype=float)
+        filt_trans = np.asarray(filt.response, dtype=float)
+        trans = np.interp(wave_obs, filt_wave, filt_trans, left=0.0, right=0.0)
+        if not np.any(trans > 0):
+            out[band] = (np.nan, np.nan)
+            continue
+        num_pl = np.trapezoid(pl_psf_draws * trans[None, :] * wave_rf[None, :], wave_rf, axis=1)
+        num_total = np.trapezoid(total_psf_draws * trans[None, :] * wave_rf[None, :], wave_rf, axis=1)
+        frac = np.full(n_use, np.nan, dtype=float)
+        good = np.isfinite(num_pl) & np.isfinite(num_total) & (num_total > 0)
+        frac[good] = np.clip(num_pl[good] / num_total[good], 0.0, 1.0)
+        if np.any(np.isfinite(frac)):
+            median, err, _, _ = sym_percentile(frac[np.isfinite(frac)])
+            out[band] = (float(median), float(err))
+        else:
+            out[band] = (np.nan, np.nan)
+    return out
 
 
 def effective_decompose_host_flag(z, requested=True):
@@ -596,6 +725,10 @@ def compute_derived_results(result, q, args):
     f_pl_2500, f_pl_2500_err = estimate_pl_2500_fraction(q)
     result["f_PL"] = safe_float(f_pl_2500)
     result["f_PL_err"] = safe_float(f_pl_2500_err)
+
+    for band, (median, err) in estimate_pl_psf_bandpass_fractions(q, bands=SDSS_BANDS).items():
+        result[f"f_PL_psf_{band}"] = safe_float(median)
+        result[f"f_PL_psf_{band}_err"] = safe_float(err)
 
     if decompose_host_eff:
         f_host_2500, f_host_2500_err = estimate_host_2500_fraction(q)

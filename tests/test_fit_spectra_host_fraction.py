@@ -299,3 +299,32 @@ def test_compute_derived_results_saves_narrow_line_fraction_without_host_decompo
     assert np.isclose(result["f_na_err"], 0.5 * (na_p84 - na_p16))
     assert np.isclose(result["f_br"], br_p50)
     assert np.isclose(result["f_br_err"], 0.5 * (br_p84 - br_p16))
+
+
+def test_estimate_pl_psf_bandpass_fractions_uses_reconstructed_draws():
+    q = SimpleNamespace(
+        z=0.8,
+        wave=np.array([2000.0, 4000.0, 6000.0], dtype=float),
+        pred_out={
+            "f_pl_model": np.full((3, 3), 2.0, dtype=float),
+            "scale_psf": np.ones(3, dtype=float),
+            "eta_psf": np.ones(3, dtype=float),
+            "line_model_psf": np.zeros((3, 3), dtype=float),
+        },
+        reconstruct_posterior_spectrum=lambda **kwargs: {
+            "wave": np.asarray([1800.0, 3000.0, 5000.0], dtype=float),
+            "draws": {
+                "PL": np.full((3, 3), 2.0, dtype=float),
+                "host": np.full((3, 3), 1.0, dtype=float),
+                "Fe_uv": np.zeros((3, 3), dtype=float),
+                "Fe_op": np.zeros((3, 3), dtype=float),
+                "Balmer_cont": np.zeros((3, 3), dtype=float),
+                "continuum": np.full((3, 3), 3.0, dtype=float),
+            },
+        },
+    )
+
+    out = fit_spectra.estimate_pl_psf_bandpass_fractions(q, bands=("g", "r"))
+
+    assert np.isclose(out["g"][0], 2.0 / 3.0)
+    assert np.isclose(out["r"][0], 2.0 / 3.0)
