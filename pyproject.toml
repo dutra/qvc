@@ -31,7 +31,6 @@ dependencies = [
     "colorama==0.4.6",
     "statsmodels==0.14.6",
     "jaxns==2.6.6"
-
 ]
 
 [tool.setuptools]

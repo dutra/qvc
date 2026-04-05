@@ -149,6 +149,14 @@ def get_sdss_filters():
     return _SDSS_FILTER_CACHE
 
 
+def get_filter_wavelength_angstrom(filt):
+    """Return filter wavelengths as a float array in Angstrom."""
+    wave = filt.wavelength
+    if hasattr(wave, "to_value"):
+        return np.asarray(wave.to_value(u.AA), dtype=float)
+    return np.asarray(wave, dtype=float)
+
+
 def build_psf_photometry_inputs(rec):
     """
     Build PSF-photometry inputs for jaxqsofit from mean-corrected multiband values.
@@ -232,7 +240,7 @@ def estimate_pl_psf_bandpass_fractions(q, bands=SDSS_BANDS, n_draws=128):
     support_maxs = []
     for band in bands:
         filt = filters[band]
-        filt_wave = np.asarray(filt.wavelength.to_value(u.AA), dtype=float)
+        filt_wave = get_filter_wavelength_angstrom(filt)
         filt_trans = np.asarray(filt.response, dtype=float)
         if filt_wave.size == 0 or not np.any(np.isfinite(filt_trans)):
             continue
@@ -289,7 +297,7 @@ def estimate_pl_psf_bandpass_fractions(q, bands=SDSS_BANDS, n_draws=128):
     wave_obs = wave_rf * (1.0 + z)
     for band in bands:
         filt = filters[band]
-        filt_wave = np.asarray(filt.wavelength.to_value(u.AA), dtype=float)
+        filt_wave = get_filter_wavelength_angstrom(filt)
         filt_trans = np.asarray(filt.response, dtype=float)
         trans = np.interp(wave_obs, filt_wave, filt_trans, left=0.0, right=0.0)
         if not np.any(trans > 0):

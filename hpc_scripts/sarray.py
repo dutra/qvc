@@ -37,7 +37,7 @@ fhost_csv = ""
 sample = 'chisq'
 bpl = False
 
-date = "apr1a_redchisq20_fastrun"
+date = "apr2a_redchisq20_ns"
 
 flags = ""
 other = ""
@@ -164,6 +164,8 @@ python -m qvc.light_curve.fit_light_curves \
  --plot \
  --disable_trace_plot --disable_correlation_plot --disable_histogram_plot \
  --disable_corner_plot --disable_sigma_tau_lambda_plot --disable_recovery_plot \
+ --fit_method ns \
+ --ns_num_live_points 500 \
  --progress \
  --nwarm {nwarm} \
  --nsamp {nsamp} \

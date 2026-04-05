@@ -2609,6 +2609,9 @@ def main():
         help="Nested sampler evidence tolerance for termination. Smaller is stricter. Default: 1.",
     )
     parser.add_argument("--load_sample_file", action="store_true", help="Load saved samples (debug).")
+    parser.add_argument("--save_sample_file", dest="save_sample_file", action="store_true", help="Save per-object posterior samples to HDF5.")
+    parser.add_argument("--no_save_sample_file", dest="save_sample_file", action="store_false", help="Do not save per-object posterior samples to HDF5.")
+    parser.set_defaults(save_sample_file=True)
     parser.add_argument("--disable_poly1", action="store_true", help="Disable trend.")
     parser.add_argument("--rf_length_cut", type=int, default=-1, help="Rest-frame cut (days).")
     parser.add_argument("--exact_same_length", action="store_true", help="Exact same RF length cut.")
@@ -2877,7 +2880,8 @@ def main():
                 samples_flat = tree_map(lambda x: np.asarray(device_get(x)), samples_flat)
                 samples_per_chain = tree_map(lambda x: np.asarray(device_get(x)), samples_per_chain)
                 obj_flat_samples = samples_flat
-                save_obj_samples_to_hdf5(obj_flat_samples, oid)
+                if args.save_sample_file:
+                    save_obj_samples_to_hdf5(obj_flat_samples, oid)
 
             explicit_scalar = build_explicit_model_params(obj_flat_samples, lam_rf)
             for key, explicit_key in (

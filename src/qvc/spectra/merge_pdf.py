@@ -42,9 +42,9 @@ except ImportError:
 
 REQUIRED_COLS = {
     "sdss_name",
-    "f_host_center",
-    "f_bc_3000",
-    "f_fe_uv_3000",
+    #"f_host_center",
+    #"f_bc_3000",
+    #"f_fe_uv_3000",
 }
 
 SDSS_TOKEN_RE = re.compile(r"\d{6}\.\d{2}[+-]\d{6}\.\d")
@@ -137,9 +137,9 @@ def make_stamp_text(row: pd.Series) -> str:
     object_id = str(row.get("object_id", "unknown")).strip()
     m2500 = _format_fraction(row.get("apparent_mag_2500"))
     pl_slope = _format_fraction(row.get("PL_slope"))
-    host = _format_fraction(row.get("f_host_center"))
-    bc = _format_fraction(row.get("f_bc_3000"))
-    iron = _format_fraction(row.get("f_fe_uv_3000"))
+    host = _format_fraction(row.get("f_host_center", ""))
+    bc = _format_fraction(row.get("f_bc_3000", ""))
+    iron = _format_fraction(row.get("f_fe_uv_3000", ""))
     return f"z={z} | sdss_name={sdss_name} | object_id={object_id} | m2500={m2500} | pl_slope={pl_slope} | host={host} | bc={bc} | iron={iron}"
 
 
