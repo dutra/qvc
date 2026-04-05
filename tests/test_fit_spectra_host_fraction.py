@@ -418,3 +418,325 @@ def test_estimate_pl_psf_bandpass_fractions_uses_full_posterior_line_reconstruct
 
     assert np.isfinite(out["g"][0])
     assert np.isclose(out["g"][0], 2.0 / 4.0)
+
+
+def test_reconstruct_line_psf_draws_extends_beyond_native_support_without_group_oob(monkeypatch):
+    full_meta = {
+        "n_lines": 2,
+        "vgroup": np.array([0, 1], dtype=int),
+        "wgroup": np.array([0, 1], dtype=int),
+        "fgroup": np.array([0, 1], dtype=int),
+        "flux_ratio": np.array([1.0, 1.0], dtype=float),
+        "ln_lambda0": np.log(np.array([3000.0, 7000.0], dtype=float)),
+        "amp_init_group": np.array([2.0, 4.0], dtype=float),
+        "names": ["narrow_in_1", "narrow_out_1"],
+    }
+    native_meta = {
+        "n_lines": 1,
+        "vgroup": np.array([0], dtype=int),
+        "wgroup": np.array([0], dtype=int),
+        "fgroup": np.array([0], dtype=int),
+        "flux_ratio": np.array([1.0], dtype=float),
+        "ln_lambda0": np.log(np.array([3000.0], dtype=float)),
+        "amp_init_group": np.array([2.0], dtype=float),
+        "names": ["narrow_in_1"],
+    }
+    calls = []
+
+    def fake_build(_line_table, wave):
+        wave = np.asarray(wave, dtype=float)
+        return native_meta if np.nanmax(wave) <= 4000.0 else full_meta
+
+    def fake_many_gauss(_lnwave, amps, mus, sigs):
+        calls.append((np.asarray(amps, dtype=float), np.asarray(mus, dtype=float), np.asarray(sigs, dtype=float)))
+        return np.zeros_like(_lnwave, dtype=float)
+
+    monkeypatch.setattr(fit_spectra, "_extract_line_table_from_prior_config", lambda _cfg: object())
+    monkeypatch.setattr(fit_spectra, "build_tied_line_meta_from_linelist", fake_build)
+    monkeypatch.setattr(fit_spectra, "_broad_line_mask", lambda names: np.array([0.0 if "narrow" in name else 1.0 for name in names], dtype=float))
+    monkeypatch.setattr(fit_spectra, "_many_gauss_lnlam", fake_many_gauss)
+
+    q = SimpleNamespace(
+        wave=np.array([2500.0, 3500.0, 4000.0], dtype=float),
+        numpyro_samples={
+            "line_dmu_group": np.array([[0.1]], dtype=float),
+            "line_sig_group": np.array([[0.5]], dtype=float),
+            "line_amp_group": np.array([[6.0]], dtype=float),
+        },
+        pred_out={"scale_psf": np.ones(1, dtype=float), "eta_psf": np.ones(1, dtype=float)},
+        _fit_prior_config={},
+        _fit_custom_line_components=(),
+    )
+
+    out = fit_spectra._reconstruct_line_psf_draws_on_wave(q, np.array([3000.0, 7000.0], dtype=float), n_use=1)
+
+    assert out.shape == (1, 2)
+    assert len(calls) == 2
+    narrow_amps, narrow_mus, narrow_sigs = calls[1]
+    assert np.allclose(narrow_amps, [6.0, 12.0])
+    assert np.allclose(narrow_sigs, [0.5, 0.5])
+    assert np.allclose(narrow_mus, np.log([3000.0, 7000.0]) + 0.1)
+
+
+def test_reconstruct_line_psf_draws_uses_family_typical_widths_offsets_and_norms(monkeypatch):
+    full_meta = {
+        "n_lines": 3,
+        "vgroup": np.array([0, 1, 2], dtype=int),
+        "wgroup": np.array([0, 1, 2], dtype=int),
+        "fgroup": np.array([0, 1, 2], dtype=int),
+        "flux_ratio": np.ones(3, dtype=float),
+        "ln_lambda0": np.log(np.array([3000.0, 3500.0, 8000.0], dtype=float)),
+        "amp_init_group": np.array([2.0, 4.0, 6.0], dtype=float),
+        "names": ["broad_a_1", "broad_b_1", "broad_out_1"],
+    }
+    native_meta = {
+        "n_lines": 2,
+        "vgroup": np.array([0, 1], dtype=int),
+        "wgroup": np.array([0, 1], dtype=int),
+        "fgroup": np.array([0, 1], dtype=int),
+        "flux_ratio": np.ones(2, dtype=float),
+        "ln_lambda0": np.log(np.array([3000.0, 3500.0], dtype=float)),
+        "amp_init_group": np.array([2.0, 4.0], dtype=float),
+        "names": ["broad_a_1", "broad_b_1"],
+    }
+    calls = []
+
+    def fake_build(_line_table, wave):
+        wave = np.asarray(wave, dtype=float)
+        return native_meta if np.nanmax(wave) <= 4000.0 else full_meta
+
+    def fake_many_gauss(_lnwave, amps, mus, sigs):
+        calls.append((np.asarray(amps, dtype=float), np.asarray(mus, dtype=float), np.asarray(sigs, dtype=float)))
+        return np.zeros_like(_lnwave, dtype=float)
+
+    monkeypatch.setattr(fit_spectra, "_extract_line_table_from_prior_config", lambda _cfg: object())
+    monkeypatch.setattr(fit_spectra, "build_tied_line_meta_from_linelist", fake_build)
+    monkeypatch.setattr(fit_spectra, "_broad_line_mask", lambda names: np.array([1.0 if "broad" in name else 0.0 for name in names], dtype=float))
+    monkeypatch.setattr(fit_spectra, "_many_gauss_lnlam", fake_many_gauss)
+
+    q = SimpleNamespace(
+        wave=np.array([2500.0, 3500.0, 4000.0], dtype=float),
+        numpyro_samples={
+            "line_dmu_group": np.array([[0.2, 0.6]], dtype=float),
+            "line_sig_group": np.array([[1.0, 3.0]], dtype=float),
+            "line_amp_group": np.array([[4.0, 8.0]], dtype=float),
+        },
+        pred_out={"scale_psf": np.ones(1, dtype=float), "eta_psf": np.ones(1, dtype=float)},
+        _fit_prior_config={},
+        _fit_custom_line_components=(),
+    )
+
+    fit_spectra._reconstruct_line_psf_draws_on_wave(q, np.array([3000.0, 3500.0, 8000.0], dtype=float), n_use=1)
+
+    broad_amps, broad_mus, broad_sigs = calls[0]
+    assert np.allclose(broad_amps, [4.0, 8.0, 12.0])
+    assert np.allclose(broad_sigs, [1.0, 3.0, 2.0])
+    assert np.allclose(broad_mus, np.log([3000.0, 3500.0, 8000.0]) + np.array([0.2, 0.6, 0.4]))
+
+
+def test_reconstruct_line_psf_draws_uses_family_median_norm_when_draw_has_no_anchor(monkeypatch):
+    full_meta = {
+        "n_lines": 2,
+        "vgroup": np.array([0, 1], dtype=int),
+        "wgroup": np.array([0, 1], dtype=int),
+        "fgroup": np.array([0, 1], dtype=int),
+        "flux_ratio": np.ones(2, dtype=float),
+        "ln_lambda0": np.log(np.array([3200.0, 8200.0], dtype=float)),
+        "amp_init_group": np.array([2.0, 6.0], dtype=float),
+        "names": ["broad_in_1", "broad_out_1"],
+    }
+    native_meta = {
+        "n_lines": 1,
+        "vgroup": np.array([0], dtype=int),
+        "wgroup": np.array([0], dtype=int),
+        "fgroup": np.array([0], dtype=int),
+        "flux_ratio": np.ones(1, dtype=float),
+        "ln_lambda0": np.log(np.array([3200.0], dtype=float)),
+        "amp_init_group": np.array([2.0], dtype=float),
+        "names": ["broad_in_1"],
+    }
+    calls = []
+
+    def fake_build(_line_table, wave):
+        wave = np.asarray(wave, dtype=float)
+        return native_meta if np.nanmax(wave) <= 4000.0 else full_meta
+
+    def fake_many_gauss(_lnwave, amps, mus, sigs):
+        calls.append((np.asarray(amps, dtype=float), np.asarray(mus, dtype=float), np.asarray(sigs, dtype=float)))
+        return np.zeros_like(_lnwave, dtype=float)
+
+    monkeypatch.setattr(fit_spectra, "_extract_line_table_from_prior_config", lambda _cfg: object())
+    monkeypatch.setattr(fit_spectra, "build_tied_line_meta_from_linelist", fake_build)
+    monkeypatch.setattr(fit_spectra, "_broad_line_mask", lambda names: np.array([1.0 if "broad" in name else 0.0 for name in names], dtype=float))
+    monkeypatch.setattr(fit_spectra, "_many_gauss_lnlam", fake_many_gauss)
+
+    q = SimpleNamespace(
+        wave=np.array([2500.0, 3500.0, 4000.0], dtype=float),
+        numpyro_samples={
+            "line_dmu_group": np.array([[0.0], [0.0]], dtype=float),
+            "line_sig_group": np.array([[1.5], [1.5]], dtype=float),
+            "line_amp_group": np.array([[0.0], [4.0]], dtype=float),
+        },
+        pred_out={"scale_psf": np.ones(2, dtype=float), "eta_psf": np.ones(2, dtype=float)},
+        _fit_prior_config={},
+        _fit_custom_line_components=(),
+    )
+
+    fit_spectra._reconstruct_line_psf_draws_on_wave(q, np.array([3200.0, 8200.0], dtype=float), n_use=2)
+
+    draw0_broad_amps = calls[0][0]
+    draw1_broad_amps = calls[2][0]
+    assert np.allclose(draw0_broad_amps, [0.0, 12.0])
+    assert np.allclose(draw1_broad_amps, [4.0, 12.0])
+
+
+def test_print_spectrum_diagnostics_includes_psf_and_broader_metrics(capsys):
+    result = {
+        "object_id": "obj-1",
+        "sdss_name": "J0000+0000",
+        "z": 1.2345,
+        "bands_used": "gri",
+        "f_PL_psf_g": 0.61,
+        "f_PL_psf_g_err": 0.04,
+        "f_PL_psf_r": 0.72,
+        "f_PL_psf_r_err": np.nan,
+        "f_PL": 0.55,
+        "f_PL_err": 0.02,
+        "f_host_2500": 0.12,
+        "f_host_2500_err": 0.03,
+        "frac_host_psf_2500": 0.09,
+        "frac_host_psf_2500_err": 0.01,
+        "f_host_center": 0.20,
+        "f_host_center_err": 0.02,
+        "apparent_mag_2500": 18.1,
+        "apparent_mag_2500_err": 0.3,
+        "apparent_mag_2500_intrinsic": 17.8,
+        "apparent_mag_2500_intrinsic_err": 0.2,
+    }
+
+    fit_spectra.print_spectrum_diagnostics(result)
+
+    out = capsys.readouterr().out
+    assert "Spectrum diagnostics for object_id=obj-1" in out
+    assert "Context: sdss_name=J0000+0000, z=1.23450, bands_used=gri" in out
+    assert "g: 0.6100 +/- 0.0400" in out
+    assert "r: 0.7200" in out
+    assert "f_host_2500: 0.1200 +/- 0.0300" in out
+    assert "apparent_mag_2500: 18.1000 +/- 0.3000" in out
+
+
+def test_print_spectrum_diagnostics_omits_nan_rows_and_uses_not_available(capsys):
+    result = {
+        "object_id": "obj-2",
+        "f_PL_psf_g": np.nan,
+        "f_PL_psf_g_err": np.nan,
+        "apparent_mag_2500": np.nan,
+        "apparent_mag_2500_err": np.nan,
+    }
+
+    fit_spectra.print_spectrum_diagnostics(result)
+
+    out = capsys.readouterr().out
+    assert "Spectrum diagnostics for object_id=obj-2" in out
+    assert "PSF constant-flux fractions:\n    not available" in out
+    assert "Broader diagnostics:\n    not available" in out
+    assert "apparent_mag_2500" not in out
+
+
+def test_run_one_fit_prints_consolidated_diagnostics_and_not_old_m2500_lines(monkeypatch, capsys, tmp_path):
+    class DummyHDUL:
+        def close(self):
+            return None
+
+    class DummyQSOFit:
+        def __init__(self, **kwargs):
+            self.flux = np.array([1.0, 1.0, 1.0], dtype=float)
+            self.err = np.array([0.1, 0.1, 0.1], dtype=float)
+            self.wave = np.array([2000.0, 3000.0, 4000.0], dtype=float)
+            self.model_total = np.array([1.0, 1.0, 1.0], dtype=float)
+            self.numpyro_samples = {"frac_jitter": np.zeros(1, dtype=float), "add_jitter": np.zeros(1, dtype=float)}
+            self.pred_out = {}
+            self.ra = kwargs["ra"]
+            self.dec = kwargs["dec"]
+            self.z = kwargs["z"]
+
+        def fit(self, **kwargs):
+            return None
+
+    monkeypatch.setattr(fit_spectra, "load_spec_from_cache", lambda *args, **kwargs: DummyHDUL())
+    monkeypatch.setattr(fit_spectra, "get_spectrum_arrays", lambda _hdul: (
+        np.array([4000.0, 5000.0, 6000.0], dtype=float),
+        np.array([1.0, 1.0, 1.0], dtype=float),
+        np.array([0.1, 0.1, 0.1], dtype=float),
+    ))
+    monkeypatch.setattr(fit_spectra, "QSOFit", DummyQSOFit)
+    monkeypatch.setattr(fit_spectra, "build_default_prior_config", lambda flux: {})
+    monkeypatch.setattr(fit_spectra, "build_psf_photometry_inputs", lambda rec: (["g", "r"], [19.0, 18.5], [0.1, 0.1]))
+    monkeypatch.setattr(fit_spectra, "extract_named_results", lambda q: {})
+    monkeypatch.setattr(fit_spectra, "extract_scalar_attrs", lambda q: {})
+    monkeypatch.setattr(fit_spectra, "extract_fit_stats", lambda q: {})
+
+    def fake_compute(result, q, args):
+        result["f_PL_psf_g"] = 0.65
+        result["f_PL_psf_g_err"] = 0.05
+        result["f_host_2500"] = 0.11
+        result["f_host_2500_err"] = 0.02
+        result["apparent_mag_2500"] = 18.2
+        result["apparent_mag_2500_err"] = 0.3
+        result["apparent_mag_2500_intrinsic"] = 17.9
+        result["apparent_mag_2500_intrinsic_err"] = 0.2
+
+    monkeypatch.setattr(fit_spectra, "compute_derived_results", fake_compute)
+
+    rec = {
+        "object_id": "obj-3",
+        "sdss_name": "J0001+0001",
+        "plate": 1,
+        "fiber": 2,
+        "mjd": 3,
+        "z": 1.1,
+        "ra": 10.0,
+        "dec": 20.0,
+        "loglbol": 46.0,
+        "mean_corrected_g": 19.0,
+        "mean_corrected_r": 18.5,
+    }
+    args = SimpleNamespace(
+        output_dir=str(tmp_path / "out"),
+        fig_dir=str(tmp_path / "fig"),
+        save_fig=False,
+        cache_dir=str(tmp_path / "cache"),
+        decompose_host=True,
+        fit_bc=True,
+        fit_lines=True,
+        fit_pl=True,
+        fit_fe=True,
+        fit_poly=False,
+        mask_lya_forest=False,
+        fit_method="optax",
+        dsps_ssp_fn="tempdata.h5",
+        nuts_warmup=1,
+        nuts_samples=1,
+        nuts_chains=1,
+        nuts_target_accept=0.9,
+        optax_steps=1,
+        optax_lr=1e-2,
+        save_jaxqsofit_samples=False,
+        plot_residual=False,
+        verbose=False,
+        resume=False,
+        no_deredden=False,
+        wave_min=1250.0,
+        wave_max=8000.0,
+        fit_bal=False,
+    )
+
+    result = fit_spectra.run_one_fit(rec, args)
+
+    out = capsys.readouterr().out
+    assert result["fit_ok"] is True
+    assert "Spectrum diagnostics for object_id=obj-3" in out
+    assert "g: 0.6500 +/- 0.0500" in out
+    assert "f_host_2500: 0.1100 +/- 0.0200" in out
+    assert "apparent_mag_2500: 18.2000 +/- 0.3000" in out
+    assert "Estimated m2500 from model" not in out

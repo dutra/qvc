@@ -228,6 +228,60 @@ def _draw_matrix(values, *, n_use, n_cols, fill_value=0.0):
     return np.nan_to_num(arr, nan=fill_value, posinf=fill_value, neginf=fill_value)
 
 
+def _line_template_strengths(tied_line_meta):
+    if tied_line_meta is None or tied_line_meta.get("n_lines", 0) == 0:
+        return np.zeros((0,), dtype=float)
+    fgroup = np.asarray(tied_line_meta.get("fgroup", []), dtype=int)
+    flux_ratio = np.asarray(tied_line_meta.get("flux_ratio", np.ones(len(fgroup))), dtype=float)
+    amp_init_group = np.asarray(
+        tied_line_meta.get("amp_init_group", np.ones(int(np.max(fgroup)) + 1 if len(fgroup) else 0)),
+        dtype=float,
+    )
+    if amp_init_group.ndim == 0:
+        amp_init_group = np.asarray([float(amp_init_group)], dtype=float)
+    base = np.ones(len(fgroup), dtype=float)
+    valid = (fgroup >= 0) & (fgroup < amp_init_group.size)
+    base[valid] = amp_init_group[fgroup[valid]]
+    return np.nan_to_num(base * flux_ratio, nan=0.0, posinf=0.0, neginf=0.0)
+
+
+def _safe_take_group_values(matrix, group_ids, *, row_index, default):
+    group_ids = np.asarray(group_ids, dtype=int)
+    out = np.full(group_ids.shape, default, dtype=float)
+    if matrix.ndim != 2 or matrix.shape[1] == 0 or group_ids.size == 0:
+        return out
+    valid = (group_ids >= 0) & (group_ids < matrix.shape[1])
+    if np.any(valid):
+        out[valid] = matrix[row_index, group_ids[valid]]
+    return np.nan_to_num(out, nan=default, posinf=default, neginf=default)
+
+
+def _nanmedian_or_default(values, default):
+    arr = np.asarray(values, dtype=float)
+    good = np.isfinite(arr)
+    if np.any(good):
+        return float(np.nanmedian(arr[good]))
+    return float(default)
+
+
+def _infer_family_draw(values, family_mask, *, default, require_positive=False):
+    values = np.asarray(values, dtype=float)
+    family_mask = np.asarray(family_mask, dtype=bool)
+    if values.ndim != 2 or values.shape[1] != family_mask.size or not np.any(family_mask):
+        return np.full(values.shape[0] if values.ndim == 2 else 0, float(default), dtype=float)
+    family_vals = values[:, family_mask]
+    valid = np.isfinite(family_vals)
+    if require_positive:
+        valid &= family_vals > 0.0
+    per_draw = np.full(family_vals.shape[0], np.nan, dtype=float)
+    any_valid = np.any(valid, axis=1)
+    if np.any(any_valid):
+        per_draw[any_valid] = np.nanmedian(np.where(valid[any_valid], family_vals[any_valid], np.nan), axis=1)
+    fallback = _nanmedian_or_default(np.where(valid, family_vals, np.nan), default=default)
+    per_draw[~np.isfinite(per_draw)] = fallback
+    return np.nan_to_num(per_draw, nan=fallback, posinf=fallback, neginf=fallback)
+
+
 def _reconstruct_line_psf_draws_on_wave(q, wave_out, n_use):
     samples = getattr(q, "numpyro_samples", None)
     if not isinstance(samples, dict) or len(samples) == 0:
@@ -240,7 +294,11 @@ def _reconstruct_line_psf_draws_on_wave(q, wave_out, n_use):
         prior_config = build_default_prior_config(np.asarray(getattr(q, "flux", []), dtype=float))
 
     line_table = _extract_line_table_from_prior_config(prior_config)
+    native_wave = np.asarray(getattr(q, "wave", []), dtype=float)
+    if native_wave.ndim != 1 or native_wave.size < 2 or not np.all(np.isfinite(native_wave)):
+        native_wave = np.asarray(wave_out, dtype=float)
     tied_line_meta = build_tied_line_meta_from_linelist(line_table, wave_out) if line_table is not None else None
+    native_tied_line_meta = build_tied_line_meta_from_linelist(line_table, native_wave) if line_table is not None else None
     custom_line_components = normalize_custom_line_components(getattr(q, "_fit_custom_line_components", ()))
 
     if (tied_line_meta is None or tied_line_meta.get("n_lines", 0) == 0) and len(custom_line_components) == 0:
@@ -289,16 +347,81 @@ def _reconstruct_line_psf_draws_on_wave(q, wave_out, n_use):
     )
 
     if tied_line_meta is not None and tied_line_meta.get("n_lines", 0) > 0:
-        vgroup = np.asarray(tied_line_meta["vgroup"], dtype=int)
-        wgroup = np.asarray(tied_line_meta["wgroup"], dtype=int)
-        fgroup = np.asarray(tied_line_meta["fgroup"], dtype=int)
-        flux_ratio = np.asarray(tied_line_meta["flux_ratio"], dtype=float)
         ln_lambda0 = np.asarray(tied_line_meta["ln_lambda0"], dtype=float)
-        broad_mask = _broad_line_mask(tied_line_meta.get("names", []))
+        line_lambda = np.exp(ln_lambda0)
+        broad_mask = np.asarray(_broad_line_mask(tied_line_meta.get("names", [])), dtype=float)
+        is_broad = broad_mask > 0.5
+        native_names = list(native_tied_line_meta.get("names", [])) if native_tied_line_meta is not None else []
+        native_name_to_idx = {name: idx for idx, name in enumerate(native_names)}
+        full_names = list(tied_line_meta.get("names", []))
+        use_native_line = np.array(
+            [
+                (name in native_name_to_idx)
+                and (native_wave[0] <= line_lambda[idx] <= native_wave[-1])
+                for idx, name in enumerate(full_names)
+            ],
+            dtype=bool,
+        )
+
+        native_amps = np.zeros((n_use, len(native_names)), dtype=float)
+        native_sigs = np.zeros((n_use, len(native_names)), dtype=float)
+        native_dmus = np.zeros((n_use, len(native_names)), dtype=float)
+        native_templates = np.zeros((len(native_names),), dtype=float)
+        native_broad_mask = np.zeros((len(native_names),), dtype=bool)
+        if native_tied_line_meta is not None and native_tied_line_meta.get("n_lines", 0) > 0:
+            native_vgroup = np.asarray(native_tied_line_meta["vgroup"], dtype=int)
+            native_wgroup = np.asarray(native_tied_line_meta["wgroup"], dtype=int)
+            native_fgroup = np.asarray(native_tied_line_meta["fgroup"], dtype=int)
+            native_flux_ratio = np.asarray(native_tied_line_meta["flux_ratio"], dtype=float)
+            native_templates = _line_template_strengths(native_tied_line_meta)
+            native_broad_mask = np.asarray(_broad_line_mask(native_names), dtype=float) > 0.5
+            for i in range(n_use):
+                native_dmus[i] = _safe_take_group_values(line_dmu_group, native_vgroup, row_index=i, default=0.0)
+                native_sigs[i] = _safe_take_group_values(line_sig_group, native_wgroup, row_index=i, default=0.0)
+                native_amp_base = _safe_take_group_values(line_amp_group, native_fgroup, row_index=i, default=0.0)
+                native_amps[i] = native_amp_base * native_flux_ratio
+
+        family_norm = {}
+        family_sig = {}
+        family_dmu = {}
+        for family_name, family_mask in (("broad", native_broad_mask), ("narrow", ~native_broad_mask)):
+            if family_mask.size == 0 or not np.any(family_mask):
+                family_norm[family_name] = np.zeros(n_use, dtype=float)
+                family_sig[family_name] = np.zeros(n_use, dtype=float)
+                family_dmu[family_name] = np.zeros(n_use, dtype=float)
+                continue
+            family_templates = native_templates[family_mask]
+            ratio_draws = np.full((n_use, np.count_nonzero(family_mask)), np.nan, dtype=float)
+            positive_templates = np.isfinite(family_templates) & (family_templates > 0.0)
+            if np.any(positive_templates):
+                ratio_draws[:, positive_templates] = native_amps[:, family_mask][:, positive_templates] / family_templates[positive_templates]
+            family_norm[family_name] = _infer_family_draw(ratio_draws, np.ones(ratio_draws.shape[1], dtype=bool), default=0.0, require_positive=True)
+            family_sig[family_name] = _infer_family_draw(native_sigs, family_mask, default=0.0, require_positive=True)
+            family_dmu[family_name] = _infer_family_draw(native_dmus, family_mask, default=0.0, require_positive=False)
+
+        full_templates = _line_template_strengths(tied_line_meta)
         for i in range(n_use):
-            dmu = line_dmu_group[i, vgroup] if line_dmu_group.shape[1] > 0 else np.zeros_like(ln_lambda0)
-            sigs = line_sig_group[i, wgroup] if line_sig_group.shape[1] > 0 else np.zeros_like(ln_lambda0)
-            amps = (line_amp_group[i, fgroup] if line_amp_group.shape[1] > 0 else np.zeros_like(ln_lambda0)) * flux_ratio
+            dmu = np.zeros_like(ln_lambda0)
+            sigs = np.zeros_like(ln_lambda0)
+            amps = np.zeros_like(ln_lambda0)
+            if np.any(use_native_line):
+                for full_idx in np.where(use_native_line)[0]:
+                    native_idx = native_name_to_idx[full_names[full_idx]]
+                    dmu[full_idx] = native_dmus[i, native_idx]
+                    sigs[full_idx] = native_sigs[i, native_idx]
+                    amps[full_idx] = native_amps[i, native_idx]
+            fallback_mask = ~use_native_line
+            if np.any(fallback_mask):
+                fallback_broad = fallback_mask & is_broad
+                fallback_narrow = fallback_mask & ~is_broad
+                if np.any(fallback_broad):
+                    amps[fallback_broad] = family_norm["broad"][i] * full_templates[fallback_broad]
+                    sigs[fallback_broad] = family_sig["broad"][i]
+                    dmu[fallback_broad] = family_dmu["broad"][i]
+                if np.any(fallback_narrow):
+                    amps[fallback_narrow] = family_norm["narrow"][i] * full_templates[fallback_narrow]
+                    sigs[fallback_narrow] = family_sig["narrow"][i]
+                    dmu[fallback_narrow] = family_dmu["narrow"][i]
             mus = ln_lambda0 + dmu
             line_broad = np.asarray(_many_gauss_lnlam(lnwave, amps * broad_mask, mus, sigs), dtype=float)
             line_narrow = np.asarray(_many_gauss_lnlam(lnwave, amps * (1.0 - broad_mask), mus, sigs), dtype=float)
@@ -383,7 +506,7 @@ def estimate_pl_psf_bandpass_fractions(q, bands=SDSS_BANDS, n_draws=128):
         return {band: (np.nan, np.nan) for band in bands}
 
     wave_rf_concat = np.concatenate(wave_rf_chunks)
-    wave_rf, inv = np.unique(wave_rf_concat, return_inverse=True)
+    wave_rf = np.unique(wave_rf_concat)
     if wave_rf.size < 2:
         return {band: (np.nan, np.nan) for band in bands}
 
@@ -433,17 +556,12 @@ def estimate_pl_psf_bandpass_fractions(q, bands=SDSS_BANDS, n_draws=128):
     total_psf_draws = agn_psf_draws + host_psf_draws + line_psf_draws
 
     out = {}
-    offset = 0
     for band in bands:
         if band not in filter_specs:
             out[band] = (np.nan, np.nan)
             continue
         wave_rf_band, filt_trans = filter_specs[band]
-        n_band = wave_rf_band.size
-        inv_band = inv[offset:offset + n_band]
-        offset += n_band
-        trans = np.zeros_like(wave_rf, dtype=float)
-        np.maximum.at(trans, inv_band, filt_trans)
+        trans = np.interp(wave_rf, wave_rf_band, filt_trans, left=0.0, right=0.0)
         if not np.any(trans > 0):
             out[band] = (np.nan, np.nan)
             continue
@@ -837,6 +955,70 @@ def estimate_pl_2500_fraction(q):
     return np.nan, np.nan
 
 
+def _format_value_with_err(value, err):
+    value = safe_float(value)
+    err = safe_float(err)
+    if not np.isfinite(value):
+        return None
+    if np.isfinite(err):
+        return f"{value:.4f} +/- {err:.4f}"
+    return f"{value:.4f}"
+
+
+def format_spectrum_diagnostics(result):
+    lines = []
+    object_id = str(result.get("object_id", "")).strip() or "unknown"
+    lines.append(f"Spectrum diagnostics for object_id={object_id}")
+
+    context_parts = []
+    sdss_name = str(result.get("sdss_name", "")).strip()
+    if sdss_name:
+        context_parts.append(f"sdss_name={sdss_name}")
+    z = safe_float(result.get("z"))
+    if np.isfinite(z):
+        context_parts.append(f"z={z:.5f}")
+    bands_used = str(result.get("bands_used", "")).strip()
+    if bands_used:
+        context_parts.append(f"bands_used={bands_used}")
+    lines.append("  Context: " + (", ".join(context_parts) if context_parts else "not available"))
+
+    psf_entries = []
+    for band in SDSS_BANDS:
+        value_str = _format_value_with_err(result.get(f"f_PL_psf_{band}"), result.get(f"f_PL_psf_{band}_err"))
+        if value_str is not None:
+            psf_entries.append(f"    {band}: {value_str}")
+    lines.append("  PSF constant-flux fractions:")
+    if psf_entries:
+        lines.extend(psf_entries)
+    else:
+        lines.append("    not available")
+
+    broader_specs = [
+        ("f_PL", "f_PL_err", "f_PL"),
+        ("f_host_2500", "f_host_2500_err", "f_host_2500"),
+        ("frac_host_psf_2500", "frac_host_psf_2500_err", "frac_host_psf_2500"),
+        ("f_host_center", "f_host_center_err", "f_host_center"),
+        ("apparent_mag_2500", "apparent_mag_2500_err", "apparent_mag_2500"),
+        ("apparent_mag_2500_intrinsic", "apparent_mag_2500_intrinsic_err", "apparent_mag_2500_intrinsic"),
+    ]
+    broader_entries = []
+    for key, err_key, label in broader_specs:
+        value_str = _format_value_with_err(result.get(key), result.get(err_key))
+        if value_str is not None:
+            broader_entries.append(f"    {label}: {value_str}")
+    lines.append("  Broader diagnostics:")
+    if broader_entries:
+        lines.extend(broader_entries)
+    else:
+        lines.append("    not available")
+
+    return "\n".join(lines)
+
+
+def print_spectrum_diagnostics(result):
+    print(format_spectrum_diagnostics(result))
+
+
 def compute_derived_results(result, q, args):
     """
     Populate old fit_spectra-compatible columns from jaxqsofit outputs when possible.
@@ -950,8 +1132,6 @@ def compute_derived_results(result, q, args):
     m2500_intrinsic_err = np.nan
 
     m2500, m2500_err, m2500_intrinsic, m2500_intrinsic_err = estimate_m2500_from_model(q)
-    print(f"Estimated m2500 from model: {m2500:.3f} +/- {m2500_err:.3f}")
-    print(f"Estimated intrinsic m2500 from model: {m2500_intrinsic:.3f} +/- {m2500_intrinsic_err:.3f}")
 
     result["apparent_mag_2500"] = m2500
     result["apparent_mag_2500_err"] = m2500_err
@@ -1331,6 +1511,7 @@ def run_one_fit(rec, args):
         result.update(extract_fit_stats(q))
         compute_derived_results(result, q, args)
         result["fit_ok"] = True
+        print_spectrum_diagnostics(result)
 
         return result
 
