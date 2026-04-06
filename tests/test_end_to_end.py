@@ -22,6 +22,7 @@ if str(SRC) not in sys.path:
 from qvc.hubble import hubble_plotting, hubble_utils
 from qvc.light_curve.fit_light_curves import (
     build_single_object_model,
+    build_single_object_model_flux,
     compute_g_band_residual_drift_diagnostics,
     compute_g_band_raw_drift_diagnostics,
     compute_object_adf_diagnostics,
@@ -887,6 +888,63 @@ def test_build_single_object_model_disables_second_blr_term_by_default():
     assert "log_lag_blr2_raw" not in model_trace
     assert np.allclose(np.asarray(model_trace["log_amp_delta_blr2"]["value"]), -9.0)
     assert np.allclose(np.asarray(model_trace["log_lag_blr2"]["value"]), -9.0)
+
+
+def test_build_single_object_model_flux_smoke():
+    obj = _make_fake_public_object()
+    lc = make_lc(
+        obj,
+        ["g", "r"],
+        inject_fake=False,
+        drop_band_lyman_alpha=False,
+    )
+    obj = obj | lc
+
+    bands = obj["bands"]
+    lam_rf = jnp.array([lambda_pivot[b] for b in bands], dtype=float) / (1.0 + float(obj["z"]))
+    bidx = np.asarray(obj["band_idx"])
+    yerr = np.asarray(obj["yerr"])
+    log_jitter_mean = np.array(
+        [
+            np.log(np.mean(yerr[(bidx == i) & np.isfinite(yerr) & (yerr < 10)]))
+            for i in range(len(bands))
+        ],
+        dtype=float,
+    )
+    numpyro_model = build_single_object_model_flux(
+        obj,
+        lam_rf,
+        log_jitter_mean=jnp.array(log_jitter_mean),
+        disable_poly1=False,
+        disable_lag_blr=False,
+        disable_lag_bc=False,
+        drop_band_lyman_alpha=False,
+        tau_fast_truncated=False,
+        n_blr_terms=1,
+    )
+
+    nuts = NUTS(
+        numpyro_model,
+        dense_mass=False,
+        max_tree_depth=2,
+        target_accept_prob=0.8,
+    )
+    mcmc = MCMC(
+        nuts,
+        num_warmup=3,
+        num_samples=4,
+        num_chains=1,
+        chain_method="sequential",
+        progress_bar=False,
+    )
+    mcmc.run(random.PRNGKey(1))
+
+    samples_flat = mcmc.get_samples(group_by_chain=False)
+    samples_flat = tree_map(lambda x: np.asarray(device_get(x)), samples_flat)
+    assert "_latent_cont" in samples_flat
+    assert np.all(np.isfinite(samples_flat["log_sigma_uv"]))
+    assert np.all(np.isfinite(samples_flat["log_tau_uv"]))
+    assert np.all(np.isfinite(samples_flat["F0_cont_band"]))
 
 
 def test_end_to_end(tmp_path, monkeypatch):
