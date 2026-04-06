@@ -168,12 +168,14 @@ def log_likelihood(theta, *, agn_data, pantheon_data,
                    z_pivot_agn,
                    agn_calibrators_data=None,
                    use_alpha_lambda_term=False,
+                   use_eta_sigma_term=False,
                    use_redshift_log_f_term=False,
                    only_sna=False, use_full_cov=False):
     priors, model_labels, model_labels_latex = get_model_params(
         cosmo_model,
         only_sna=only_sna,
         use_alpha_lambda_term=use_alpha_lambda_term,
+        use_eta_sigma_term=use_eta_sigma_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
     )
     model_priors = {key: priors[key] for key in model_labels}
@@ -214,13 +216,23 @@ def log_likelihood(theta, *, agn_data, pantheon_data,
     m_obs = agn_data['apparent_mag_2500']
     m_err = agn_data['apparent_mag_2500_err']
 
-    agn_params_arr = agn_model_pack_params(params, use_alpha_lambda_term=use_alpha_lambda_term)
+    agn_params_arr = agn_model_pack_params(
+        params,
+        use_alpha_lambda_term=use_alpha_lambda_term,
+        use_eta_sigma_term=use_eta_sigma_term,
+    )
     agn_obs_arr, agn_err_arr, agn_pivot_arr = agn_model_pack_obs(
-        agn_data, use_alpha_lambda_term=use_alpha_lambda_term
+        agn_data,
+        use_alpha_lambda_term=use_alpha_lambda_term,
+        use_eta_sigma_term=use_eta_sigma_term,
     )
 
     M_pred = M_model_agn(
-        agn_params_arr, agn_obs_arr, agn_pivot_arr, use_alpha_lambda_term=use_alpha_lambda_term
+        agn_params_arr,
+        agn_obs_arr,
+        agn_pivot_arr,
+        use_alpha_lambda_term=use_alpha_lambda_term,
+        use_eta_sigma_term=use_eta_sigma_term,
     )
     M_pred_err, idx = M_model_agn_err(
         agn_params_arr,
@@ -229,6 +241,7 @@ def log_likelihood(theta, *, agn_data, pantheon_data,
         agn_pivot_arr,
         check_negative=True,
         use_alpha_lambda_term=use_alpha_lambda_term,
+        use_eta_sigma_term=use_eta_sigma_term,
     )
     if np.any(M_pred_err < 0):
         print(f"[ERROR] Negative AGN model error at indices: {idx}. Returning -inf log-likelihood.")
@@ -294,6 +307,7 @@ def log_likelihood_nearbylcs(
     cosmo_model, completeness_params,
     z_pivot_agn,
     use_alpha_lambda_term=False,
+    use_eta_sigma_term=False,
     use_redshift_log_f_term=False,
     only_sna=False, use_full_cov=False
 ):
@@ -309,6 +323,7 @@ def log_likelihood_nearbylcs(
         cosmo_model,
         only_sna=only_sna,
         use_alpha_lambda_term=use_alpha_lambda_term,
+        use_eta_sigma_term=use_eta_sigma_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
     )
     model_priors = {key: priors[key] for key in model_labels}
@@ -349,16 +364,25 @@ def log_likelihood_nearbylcs(
     m_obs_nc = agn_data['apparent_mag_2500'][mask_noncal]
     m_err_nc = agn_data['apparent_mag_2500_err'][mask_noncal]
 
-    agn_params_arr = agn_model_pack_params(params, use_alpha_lambda_term=use_alpha_lambda_term)
+    agn_params_arr = agn_model_pack_params(
+        params,
+        use_alpha_lambda_term=use_alpha_lambda_term,
+        use_eta_sigma_term=use_eta_sigma_term,
+    )
 
     # pack obs/errs for the non-calibrator subset
     agn_obs_arr_nc, agn_err_arr_nc, agn_pivot_arr_nc = agn_model_pack_obs(
         {k: v[mask_noncal] for k, v in agn_data.items()},
         use_alpha_lambda_term=use_alpha_lambda_term,
+        use_eta_sigma_term=use_eta_sigma_term,
     )
 
     M_pred_nc = M_model_agn(
-        agn_params_arr, agn_obs_arr_nc, agn_pivot_arr_nc, use_alpha_lambda_term=use_alpha_lambda_term
+        agn_params_arr,
+        agn_obs_arr_nc,
+        agn_pivot_arr_nc,
+        use_alpha_lambda_term=use_alpha_lambda_term,
+        use_eta_sigma_term=use_eta_sigma_term,
     )
     M_pred_err_nc, idx_nc = M_model_agn_err(
         agn_params_arr,
@@ -367,6 +391,7 @@ def log_likelihood_nearbylcs(
         agn_pivot_arr_nc,
         check_negative=True,
         use_alpha_lambda_term=use_alpha_lambda_term,
+        use_eta_sigma_term=use_eta_sigma_term,
     )
     if np.any(M_pred_err_nc < 0):
         print(f"[ERROR] Negative AGN model error at indices (non-cal): {idx_nc}.")
@@ -408,10 +433,15 @@ def log_likelihood_nearbylcs(
         agn_obs_arr_c, agn_err_arr_c, agn_pivot_arr_c = agn_model_pack_obs(
             {k: agn_calibrators_data[k][cal_mask_tbl] for k in agn_calibrators_data.keys()},
             use_alpha_lambda_term=use_alpha_lambda_term,
+            use_eta_sigma_term=use_eta_sigma_term,
         )
 
         M_pred_c = M_model_agn(
-            agn_params_arr, agn_obs_arr_c, agn_pivot_arr_c, use_alpha_lambda_term=use_alpha_lambda_term
+            agn_params_arr,
+            agn_obs_arr_c,
+            agn_pivot_arr_c,
+            use_alpha_lambda_term=use_alpha_lambda_term,
+            use_eta_sigma_term=use_eta_sigma_term,
         )
         M_pred_err_c, idx_c = M_model_agn_err(
             agn_params_arr,
@@ -420,6 +450,7 @@ def log_likelihood_nearbylcs(
             agn_pivot_arr_c,
             check_negative=True,
             use_alpha_lambda_term=use_alpha_lambda_term,
+            use_eta_sigma_term=use_eta_sigma_term,
         )
         if np.any(M_pred_err_c < 0):
             print(f"[ERROR] Negative AGN model error at indices (calibrators): {idx_c}.")
