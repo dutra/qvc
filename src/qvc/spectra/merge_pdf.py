@@ -140,7 +140,18 @@ def make_stamp_text(row: pd.Series) -> str:
     host = _format_fraction(row.get("f_host_center", ""))
     bc = _format_fraction(row.get("f_bc_3000", ""))
     iron = _format_fraction(row.get("f_fe_uv_3000", ""))
-    return f"z={z} | sdss_name={sdss_name} | object_id={object_id} | m2500={m2500} | pl_slope={pl_slope} | host={host} | bc={bc} | iron={iron}"
+    host_psf_2500 = _format_fraction(row.get("frac_host_psf_2500", ""))
+    psf_parts = [
+        f"f_PL_psf_{band}={_format_fraction(row.get(f'f_PL_psf_{band}', ''))}"
+        for band in ["u", "g", "r", "i", "z"]
+    ]
+    lines = [
+        f"z={z} | sdss_name={sdss_name} | object_id={object_id}",
+        f"m2500={m2500} | pl_slope={pl_slope} | host={host} | bc={bc} | iron={iron}",
+        f"f_host_psf_2500={host_psf_2500}",
+        " | ".join(psf_parts),
+    ]
+    return "\n".join(lines)
 
 
 def _make_overlay(page_width, page_height, text, margin_pts, font_size):
@@ -155,14 +166,26 @@ def _make_overlay(page_width, page_height, text, margin_pts, font_size):
     c.setFont(font_name, font_size)
 
     x = margin_pts
-    y = margin_pts
-    text_width = c.stringWidth(text, font_name, font_size)
+    lines = text.splitlines() or [text]
+    line_height = font_size * 1.2
+    text_width = max(c.stringWidth(line, font_name, font_size) for line in lines)
+    text_height = line_height * len(lines)
+    y = margin_pts + text_height - line_height
 
     pad = 1.0
     c.setFillGray(1.0)
-    c.rect(x - pad, y - pad, text_width + 2 * pad, font_size + 2 * pad, fill=1, stroke=0)
+    c.rect(
+        x - pad,
+        margin_pts - pad,
+        text_width + 2 * pad,
+        text_height + 2 * pad,
+        fill=1,
+        stroke=0,
+    )
     c.setFillGray(0.0)
-    c.drawString(x, y, text)
+    for line in lines:
+        c.drawString(x, y, line)
+        y -= line_height
 
     c.showPage()
     c.save()
