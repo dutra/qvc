@@ -2575,6 +2575,10 @@ def build_single_object_model_flux(
     z = float(obj_dict["z"])
     B = int(len(lam_rf))
     lambda_center_rf = compute_lambda_center_rf(lam_rf)
+    baseline_flux_by_band = jnp.asarray(
+        [10.0 ** (-0.4 * float(val)) for val in np.asarray(obj_dict["mags_means"], dtype=float)],
+        dtype=float,
+    )
 
     def model():
         eta_sigma = numpyro.sample("eta_sigma", eta_sigma_prior())
@@ -2745,6 +2749,7 @@ def build_single_object_model_flux(
             y=y,
             yerr=yerr,
             n_band=B,
+            baseline_flux_by_band=baseline_flux_by_band,
             zero_mean=zero_mean,
             has_jitter=has_jitter,
         )

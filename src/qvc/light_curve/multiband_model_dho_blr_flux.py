@@ -34,6 +34,7 @@ class FluxHybridMultibandModel:
     y: jnp.ndarray
     yerr: jnp.ndarray
     n_band: int
+    baseline_flux_by_band: jnp.ndarray | None = None
     zero_mean: bool = False
     has_jitter: bool = True
     stability_jitter: float = 1e-6
@@ -44,18 +45,10 @@ class FluxHybridMultibandModel:
         self.y = jnp.asarray(self.y, dtype=float)
         self.yerr = jnp.asarray(self.yerr, dtype=float)
         self.mean_func = make_linear_mean_func(self.t, zero_mean=self.zero_mean)
-        self.f0_cont_band = self._compute_baseline_flux_by_band()
-
-    def _compute_baseline_flux_by_band(self):
-        baselines = []
-        for band_index in range(self.n_band):
-            mask = self.band == band_index
-            if bool(jnp.any(mask)):
-                median_mag = jnp.nanmedian(self.y[mask])
-            else:
-                median_mag = 0.0
-            baselines.append(mag_to_relative_flux(median_mag))
-        return jnp.asarray(baselines, dtype=float)
+        if self.baseline_flux_by_band is None:
+            self.f0_cont_band = jnp.ones(self.n_band, dtype=float)
+        else:
+            self.f0_cont_band = jnp.asarray(self.baseline_flux_by_band, dtype=float)
 
     def _continuum_kernel(self, params):
         zeros = jnp.zeros_like(jnp.asarray(params["amp_cont"]))
@@ -180,6 +173,7 @@ def make_multiband_dho_blr_flux_model(
     yerr,
     n_band=None,
     *,
+    baseline_flux_by_band=None,
     zero_mean=False,
     has_jitter=True,
 ):
@@ -191,6 +185,7 @@ def make_multiband_dho_blr_flux_model(
         y=y,
         yerr=yerr,
         n_band=n_band,
+        baseline_flux_by_band=baseline_flux_by_band,
         zero_mean=zero_mean,
         has_jitter=has_jitter,
     )
