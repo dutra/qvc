@@ -1359,7 +1359,6 @@ def fetch_dustmaps(args):
 # -----------------------------------------------------------------------------
 
 def fetch_spectrum_fits(args, plate, fiber, mjd, cache_dir="data/spectra_cache"):
-    from astroquery.sdss import SDSS
 
     cache_dir = Path(cache_dir)
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -1376,6 +1375,7 @@ def fetch_spectrum_fits(args, plate, fiber, mjd, cache_dir="data/spectra_cache")
     elif args.mode != "download":
         raise RuntimeError(f"Cache file {cache_file} ({spec_file}) not found in non-download mode.")
 
+    from astroquery.sdss import SDSS
     spec = SDSS.get_spectra(plate=int(plate), fiberID=int(fiber), mjd=int(mjd))
     if spec is None or len(spec) == 0:
         raise RuntimeError(f"No SDSS spectrum found for {spec_file}")
