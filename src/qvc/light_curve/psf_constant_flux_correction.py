@@ -4,14 +4,14 @@
 This module approximates AGN-only light curves by:
 
 1. converting PSF magnitudes to relative flux,
-2. estimating a constant contaminating flux from a spectra-derived PL/total
+2. estimating a constant contaminating flux from a spectra-derived variable-AGN/total
    bandpass fraction,
 3. subtracting that constant contaminating flux in flux space, and
 4. converting the corrected light curve back to magnitudes for the existing GP
    pipeline.
 
 The required spectra inputs are per-bandpass PSF fractions saved as
-``f_PL_psf_<band>``.
+``f_AGN_psf_<band>``.
 """
 
 from __future__ import annotations
@@ -65,7 +65,7 @@ def relative_fluxerr_to_magerr(flux, fluxerr):
     return (2.5 / np.log(10.0)) * fluxerr / np.clip(flux, 1e-300, None)
 
 
-def load_spectra_pl_psf_fractions(spectra_fit_csvs) -> dict[str, dict]:
+def load_spectra_psf_fractions(spectra_fit_csvs) -> dict[str, dict]:
     """Load only the spectra columns needed for PSF constant-flux correction."""
 
     if not spectra_fit_csvs:
@@ -78,13 +78,13 @@ def load_spectra_pl_psf_fractions(spectra_fit_csvs) -> dict[str, dict]:
         usecols = [
             col
             for col in header.columns
-            if col == "object_id" or col.startswith("f_PL_psf_")
+            if col == "object_id" or col.startswith("f_AGN_psf_")
         ]
         if "object_id" not in usecols:
             raise ValueError(f"Spectra CSV {resolved} is missing required column 'object_id'.")
-        if not any(col.startswith("f_PL_psf_") for col in usecols):
+        if not any(col.startswith("f_AGN_psf_") for col in usecols):
             raise ValueError(
-                f"Spectra CSV {resolved} is missing required per-band columns 'f_PL_psf_<band>'."
+                f"Spectra CSV {resolved} is missing required per-band columns 'f_AGN_psf_<band>'."
             )
         frames.append(pd.read_csv(resolved, usecols=usecols))
 
@@ -100,10 +100,10 @@ def load_spectra_pl_psf_fractions(spectra_fit_csvs) -> dict[str, dict]:
     }
 
 
-def get_bandpass_pl_fraction(source: Mapping[str, object], band: str) -> tuple[float, str | None]:
-    """Return the preferred PL/total fraction for one photometric band."""
+def get_bandpass_agn_fraction(source: Mapping[str, object], band: str) -> tuple[float, str | None]:
+    """Return the variable-AGN/total fraction for one photometric band."""
 
-    band_key = f"f_PL_psf_{band}"
+    band_key = f"f_AGN_psf_{band}"
     val = source.get(band_key, np.nan)
     if np.isfinite(val):
         val = float(val)
@@ -116,11 +116,11 @@ def get_bandpass_pl_fraction(source: Mapping[str, object], band: str) -> tuple[f
 def subtract_constant_flux_from_band(
     mags,
     magerrs,
-    pl_fraction,
+    agn_fraction,
     *,
     reference_stat: str = "median",
 ):
-    """Return a PL-only magnitude light curve from total PSF magnitudes."""
+    """Return a variable-AGN magnitude light curve from total PSF magnitudes."""
 
     mags = np.asarray(mags, dtype=float)
     magerrs = np.asarray(magerrs, dtype=float)
@@ -129,7 +129,7 @@ def subtract_constant_flux_from_band(
     corrected_magerrs = magerrs.astype(float, copy=True)
 
     summary = {
-        "pl_fraction": np.nan,
+        "agn_fraction": np.nan,
         "reference_total_flux": np.nan,
         "constant_contaminant_flux": np.nan,
         "n_points": int(np.sum(finite)),
@@ -137,7 +137,7 @@ def subtract_constant_flux_from_band(
         "median_delta_mag": np.nan,
     }
 
-    if (not np.isfinite(pl_fraction)) or pl_fraction <= 0.0 or np.sum(finite) == 0:
+    if (not np.isfinite(agn_fraction)) or agn_fraction <= 0.0 or np.sum(finite) == 0:
         return corrected_mags, corrected_magerrs, summary
 
     total_flux = mag_to_relative_flux(mags[finite])
@@ -150,22 +150,22 @@ def subtract_constant_flux_from_band(
     if (not np.isfinite(reference_total_flux)) or reference_total_flux <= 0.0:
         return corrected_mags, corrected_magerrs, summary
 
-    contaminant_flux = (1.0 - float(pl_fraction)) * reference_total_flux
-    pl_flux = total_flux - contaminant_flux
-    valid = pl_flux > 0.0
+    contaminant_flux = (1.0 - float(agn_fraction)) * reference_total_flux
+    agn_flux = total_flux - contaminant_flux
+    valid = agn_flux > 0.0
 
     corrected = np.full(total_flux.shape, np.nan, dtype=float)
     corrected_err = np.full(total_flux_err.shape, np.nan, dtype=float)
     if np.any(valid):
-        corrected[valid] = relative_flux_to_mag(pl_flux[valid])
-        corrected_err[valid] = relative_fluxerr_to_magerr(pl_flux[valid], total_flux_err[valid])
+        corrected[valid] = relative_flux_to_mag(agn_flux[valid])
+        corrected_err[valid] = relative_fluxerr_to_magerr(agn_flux[valid], total_flux_err[valid])
 
     corrected_mags[finite] = corrected
     corrected_magerrs[finite] = corrected_err
 
     summary.update(
         {
-            "pl_fraction": float(pl_fraction),
+            "agn_fraction": float(agn_fraction),
             "reference_total_flux": reference_total_flux,
             "constant_contaminant_flux": contaminant_flux,
             "n_nonpositive_after_subtraction": int(np.sum(~valid)),
@@ -208,14 +208,14 @@ def apply_constant_flux_correction_to_object(
     for band in bands:
         if band not in corrected_obj["mags"] or band not in lambda_pivot:
             continue
-        pl_fraction, source_key = get_bandpass_pl_fraction(corrected_obj, str(band))
-        if not np.isfinite(pl_fraction):
+        agn_fraction, source_key = get_bandpass_agn_fraction(corrected_obj, str(band))
+        if not np.isfinite(agn_fraction):
             n_missing_fraction_bands += 1
             continue
         mags_new, magerrs_new, summary = subtract_constant_flux_from_band(
             corrected_obj["mags"][band],
             corrected_obj["magerrs"][band],
-            pl_fraction,
+            agn_fraction,
             reference_stat=reference_stat,
         )
         corrected_obj["mags"][band] = mags_new
@@ -255,7 +255,7 @@ def apply_constant_flux_correction_to_objects(
 ):
     """Apply spectra-informed constant-flux subtraction to a list of objects."""
 
-    spectra_rows = load_spectra_pl_psf_fractions(spectra_fit_csvs)
+    spectra_rows = load_spectra_psf_fractions(spectra_fit_csvs)
     corrected_objs = []
     summary = {
         "n_objects": len(objs),
@@ -264,12 +264,12 @@ def apply_constant_flux_correction_to_objects(
         "n_bands_corrected": 0,
         "n_missing_spectra": 0,
         "n_nonpositive_after_subtraction": 0,
-        "median_pl_fraction": np.nan,
+        "median_agn_fraction": np.nan,
         "median_abs_delta_mag": np.nan,
         "per_band": {},
     }
 
-    pl_fractions = []
+    agn_fractions = []
     delta_mags = []
     missing_spectra_object_ids = []
     zero_corrected_object_ids = []
@@ -300,8 +300,8 @@ def apply_constant_flux_correction_to_objects(
             )
             for band_name, band_summary in corrected_obj["psf_constant_flux_band_summaries"].items():
                 band_name = str(band_name)
-                if np.isfinite(band_summary["pl_fraction"]):
-                    pl_fractions.append(float(band_summary["pl_fraction"]))
+                if np.isfinite(band_summary["agn_fraction"]):
+                    agn_fractions.append(float(band_summary["agn_fraction"]))
                 if np.isfinite(band_summary["median_delta_mag"]):
                     delta_mags.append(float(abs(band_summary["median_delta_mag"])))
                 stats = summary["per_band"].setdefault(
@@ -309,7 +309,7 @@ def apply_constant_flux_correction_to_objects(
                     {
                         "n_corrected": 0,
                         "n_nonpositive_after_subtraction": 0,
-                        "pl_fractions": [],
+                        "agn_fractions": [],
                         "abs_delta_mags": [],
                     },
                 )
@@ -317,21 +317,21 @@ def apply_constant_flux_correction_to_objects(
                 stats["n_nonpositive_after_subtraction"] += int(
                     band_summary["n_nonpositive_after_subtraction"]
                 )
-                if np.isfinite(band_summary["pl_fraction"]):
-                    stats["pl_fractions"].append(float(band_summary["pl_fraction"]))
+                if np.isfinite(band_summary["agn_fraction"]):
+                    stats["agn_fractions"].append(float(band_summary["agn_fraction"]))
                 if np.isfinite(band_summary["median_delta_mag"]):
                     stats["abs_delta_mags"].append(float(abs(band_summary["median_delta_mag"])))
         else:
             zero_corrected_object_ids.append(oid)
 
-    if pl_fractions:
-        summary["median_pl_fraction"] = float(np.nanmedian(np.asarray(pl_fractions, dtype=float)))
+    if agn_fractions:
+        summary["median_agn_fraction"] = float(np.nanmedian(np.asarray(agn_fractions, dtype=float)))
     if delta_mags:
         summary["median_abs_delta_mag"] = float(np.nanmedian(np.asarray(delta_mags, dtype=float)))
     for stats in summary["per_band"].values():
-        pl_vals = np.asarray(stats.pop("pl_fractions"), dtype=float)
+        agn_vals = np.asarray(stats.pop("agn_fractions"), dtype=float)
         delta_vals = np.asarray(stats.pop("abs_delta_mags"), dtype=float)
-        stats["median_pl_fraction"] = float(np.nanmedian(pl_vals)) if pl_vals.size > 0 else np.nan
+        stats["median_agn_fraction"] = float(np.nanmedian(agn_vals)) if agn_vals.size > 0 else np.nan
         stats["median_abs_delta_mag"] = (
             float(np.nanmedian(delta_vals)) if delta_vals.size > 0 else np.nan
         )
@@ -368,8 +368,8 @@ def print_constant_flux_correction_summary(summary):
         "  points driven non-positive after subtraction: "
         f"{summary['n_nonpositive_after_subtraction']}"
     )
-    if np.isfinite(summary["median_pl_fraction"]):
-        print(f"  median f_PL_psf: {summary['median_pl_fraction']:.3f}")
+    if np.isfinite(summary["median_agn_fraction"]):
+        print(f"  median retained AGN fraction: {summary['median_agn_fraction']:.3f}")
     if np.isfinite(summary["median_abs_delta_mag"]):
         print(f"  median |Δmag| after correction: {summary['median_abs_delta_mag']:.3f}")
     if summary["per_band"]:
@@ -378,7 +378,7 @@ def print_constant_flux_correction_summary(summary):
             stats = summary["per_band"][band]
             line = (
                 f"    {band}: n={stats['n_corrected']}, "
-                f"median f_PL_psf={stats['median_pl_fraction']:.3f}, "
+                f"median retained AGN fraction={stats['median_agn_fraction']:.3f}, "
                 f"median |Δmag|={stats['median_abs_delta_mag']:.3f}, "
                 f"nonpositive={stats['n_nonpositive_after_subtraction']}"
             )

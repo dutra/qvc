@@ -282,10 +282,13 @@ def _infer_family_draw(values, family_mask, *, default, require_positive=False):
     return np.nan_to_num(per_draw, nan=fallback, posinf=fallback, neginf=fallback)
 
 
-def _reconstruct_line_psf_draws_on_wave(q, wave_out, n_use):
+def _reconstruct_line_psf_draws_on_wave(q, wave_out, n_use, *, return_components=False):
     samples = getattr(q, "numpyro_samples", None)
     if not isinstance(samples, dict) or len(samples) == 0:
-        return np.zeros((n_use, len(wave_out)), dtype=float)
+        empty = np.zeros((n_use, len(wave_out)), dtype=float)
+        if return_components:
+            return {"broad": empty.copy(), "narrow": empty.copy(), "total": empty}
+        return empty
 
     prior_config = getattr(q, "_fit_prior_config", None)
     if isinstance(prior_config, dict):
@@ -302,11 +305,15 @@ def _reconstruct_line_psf_draws_on_wave(q, wave_out, n_use):
     custom_line_components = normalize_custom_line_components(getattr(q, "_fit_custom_line_components", ()))
 
     if (tied_line_meta is None or tied_line_meta.get("n_lines", 0) == 0) and len(custom_line_components) == 0:
-        return np.zeros((n_use, len(wave_out)), dtype=float)
+        empty = np.zeros((n_use, len(wave_out)), dtype=float)
+        if return_components:
+            return {"broad": empty.copy(), "narrow": empty.copy(), "total": empty}
+        return empty
 
     wave_out = np.asarray(wave_out, dtype=float)
     lnwave = np.log(wave_out)
-    out = np.zeros((n_use, wave_out.size), dtype=float)
+    out_broad = np.zeros((n_use, wave_out.size), dtype=float)
+    out_narrow = np.zeros((n_use, wave_out.size), dtype=float)
 
     fit_poly = bool(getattr(q, "_fit_fit_poly", False))
     fit_poly_order = int(getattr(q, "_fit_fit_poly_order", 2))
@@ -425,7 +432,8 @@ def _reconstruct_line_psf_draws_on_wave(q, wave_out, n_use):
             mus = ln_lambda0 + dmu
             line_broad = np.asarray(_many_gauss_lnlam(lnwave, amps * broad_mask, mus, sigs), dtype=float)
             line_narrow = np.asarray(_many_gauss_lnlam(lnwave, amps * (1.0 - broad_mask), mus, sigs), dtype=float)
-            out[i] += scale_psf_draws[i] * line_broad + scale_psf_draws[i] * eta_psf_draws[i] * line_narrow
+            out_broad[i] += scale_psf_draws[i] * line_broad
+            out_narrow[i] += scale_psf_draws[i] * eta_psf_draws[i] * line_narrow
 
     if len(custom_line_components) > 0:
         def _sample_line_value(samples_dict, key, default=0.0, draw_index=0):
@@ -448,9 +456,9 @@ def _reconstruct_line_psf_draws_on_wave(q, wave_out, n_use):
                     dtype=float,
                 )
                 if comp.line_kind == "broad":
-                    out[i] += scale_psf_draws[i] * custom_line
+                    out_broad[i] += scale_psf_draws[i] * custom_line
                 else:
-                    out[i] += scale_psf_draws[i] * eta_psf_draws[i] * custom_line
+                    out_narrow[i] += scale_psf_draws[i] * eta_psf_draws[i] * custom_line
 
     if fit_poly:
         poly = np.ones((n_use, wave_out.size), dtype=float)
@@ -461,29 +469,35 @@ def _reconstruct_line_psf_draws_on_wave(q, wave_out, n_use):
             coeff = _draw_vector(samples[key], n_use=n_use, fill_value=0.0)
             poly += coeff[:, None] * (x_poly[None, :] ** k)
         poly = np.clip(poly, 0.2, 5.0)
-        out *= poly
+        out_broad *= poly
+        out_narrow *= poly
 
-    return np.nan_to_num(out, nan=0.0, posinf=0.0, neginf=0.0)
+    out_broad = np.nan_to_num(out_broad, nan=0.0, posinf=0.0, neginf=0.0)
+    out_narrow = np.nan_to_num(out_narrow, nan=0.0, posinf=0.0, neginf=0.0)
+    out_total = out_broad + out_narrow
+    if return_components:
+        return {"broad": out_broad, "narrow": out_narrow, "total": out_total}
+    return out_total
 
 
-def estimate_pl_psf_bandpass_fractions(q, bands=SDSS_BANDS, n_draws=128):
-    """Return spectra-derived PSF PL/total fractions through each SDSS bandpass."""
+def _prepare_psf_bandpass_fraction_inputs(q, bands, n_draws):
+    """Return shared reconstructed draws needed for per-band PSF fractions."""
 
     z = safe_float(getattr(q, "z", np.nan))
     native_wave = np.asarray(getattr(q, "wave", []), dtype=float)
     pred_out = getattr(q, "pred_out", {}) or {}
     if (not np.isfinite(z)) or native_wave.ndim != 1 or native_wave.size < 2:
-        return {}
+        return None
     if not hasattr(q, "reconstruct_posterior_spectrum"):
         raise RuntimeError(
             "QSOFit object does not expose reconstruct_posterior_spectrum(); "
-            "cannot compute bandpass PSF PL fractions without posterior reconstruction."
+            "cannot compute bandpass PSF fractions without posterior reconstruction."
         )
 
     filters = get_sdss_filters()
     bands = [str(band) for band in bands if str(band) in filters]
     if len(bands) == 0:
-        return {}
+        return None
 
     wave_rf_chunks = []
     filter_specs = {}
@@ -503,12 +517,12 @@ def estimate_pl_psf_bandpass_fractions(q, bands=SDSS_BANDS, n_draws=128):
         filter_specs[band] = (wave_rf_band, filt_trans)
 
     if len(wave_rf_chunks) == 0:
-        return {band: (np.nan, np.nan) for band in bands}
+        return {"bands": bands, "filter_specs": filter_specs, "empty": True}
 
     wave_rf_concat = np.concatenate(wave_rf_chunks)
     wave_rf = np.unique(wave_rf_concat)
     if wave_rf.size < 2:
-        return {band: (np.nan, np.nan) for band in bands}
+        return {"bands": bands, "filter_specs": filter_specs, "empty": True}
 
     try:
         recon = q.reconstruct_posterior_spectrum(
@@ -519,7 +533,7 @@ def estimate_pl_psf_bandpass_fractions(q, bands=SDSS_BANDS, n_draws=128):
     except Exception as exc:
         raise RuntimeError(
             "reconstruct_posterior_spectrum() failed while computing bandpass "
-            f"PSF PL fractions: {exc}"
+            f"PSF fractions: {exc}"
         ) from exc
 
     wave_rf = np.asarray(recon["wave"], dtype=float)
@@ -535,7 +549,9 @@ def estimate_pl_psf_bandpass_fractions(q, bands=SDSS_BANDS, n_draws=128):
     for key, draws in recon_draws.items():
         if key in {"host", "continuum"}:
             continue
-        agn_cont_draws = agn_cont_draws + np.nan_to_num(np.asarray(draws, dtype=float), nan=0.0, posinf=0.0, neginf=0.0)
+        agn_cont_draws = agn_cont_draws + np.nan_to_num(
+            np.asarray(draws, dtype=float), nan=0.0, posinf=0.0, neginf=0.0
+        )
     n_use = pl_draws.shape[0]
 
     scale_psf_draws = _draw_vector(
@@ -552,8 +568,47 @@ def estimate_pl_psf_bandpass_fractions(q, bands=SDSS_BANDS, n_draws=128):
     pl_psf_draws = scale_psf_draws[:, None] * pl_draws
     agn_psf_draws = scale_psf_draws[:, None] * agn_cont_draws
     host_psf_draws = scale_psf_draws[:, None] * eta_psf_draws[:, None] * host_draws
-    line_psf_draws = _reconstruct_line_psf_draws_on_wave(q, wave_rf, n_use=n_use)
-    total_psf_draws = agn_psf_draws + host_psf_draws + line_psf_draws
+    try:
+        line_psf_draws = _reconstruct_line_psf_draws_on_wave(
+            q, wave_rf, n_use=n_use, return_components=True
+        )
+    except TypeError:
+        legacy_line_psf_draws = _reconstruct_line_psf_draws_on_wave(q, wave_rf, n_use=n_use)
+        line_psf_draws = {
+            "broad": np.zeros_like(legacy_line_psf_draws, dtype=float),
+            "narrow": np.zeros_like(legacy_line_psf_draws, dtype=float),
+            "total": np.asarray(legacy_line_psf_draws, dtype=float),
+        }
+
+    return {
+        "bands": bands,
+        "filter_specs": filter_specs,
+        "wave_rf": wave_rf,
+        "pl_psf_draws": pl_psf_draws,
+        "agn_psf_draws": agn_psf_draws,
+        "host_psf_draws": host_psf_draws,
+        "line_broad_psf_draws": line_psf_draws["broad"],
+        "line_narrow_psf_draws": line_psf_draws["narrow"],
+        "line_total_psf_draws": line_psf_draws["total"],
+        "empty": False,
+    }
+
+
+def estimate_pl_psf_bandpass_fractions(q, bands=SDSS_BANDS, n_draws=128):
+    """Return spectra-derived PSF PL/total fractions through each SDSS bandpass."""
+
+    shared = _prepare_psf_bandpass_fraction_inputs(q, bands=bands, n_draws=n_draws)
+    if shared is None:
+        return {}
+    bands = shared["bands"]
+    if shared["empty"]:
+        return {band: (np.nan, np.nan) for band in bands}
+
+    wave_rf = shared["wave_rf"]
+    filter_specs = shared["filter_specs"]
+    pl_psf_draws = shared["pl_psf_draws"]
+    total_psf_draws = shared["agn_psf_draws"] + shared["host_psf_draws"] + shared["line_total_psf_draws"]
+    n_use = pl_psf_draws.shape[0]
 
     out = {}
     for band in bands:
@@ -570,6 +625,50 @@ def estimate_pl_psf_bandpass_fractions(q, bands=SDSS_BANDS, n_draws=128):
         frac = np.full(n_use, np.nan, dtype=float)
         good = np.isfinite(num_pl) & np.isfinite(num_total) & (num_total > 0)
         frac[good] = np.clip(num_pl[good] / num_total[good], 0.0, 1.0)
+        if np.any(np.isfinite(frac)):
+            median, err, _, _ = sym_percentile(frac[np.isfinite(frac)])
+            out[band] = (float(median), float(err))
+        else:
+            out[band] = (np.nan, np.nan)
+    return out
+
+
+def estimate_agn_psf_bandpass_fractions(q, bands=SDSS_BANDS, n_draws=128):
+    """Return spectra-derived PSF variable-AGN/total fractions through each SDSS bandpass."""
+
+    shared = _prepare_psf_bandpass_fraction_inputs(q, bands=bands, n_draws=n_draws)
+    if shared is None:
+        return {}
+
+    bands = shared["bands"]
+    if shared["empty"]:
+        return {band: (np.nan, np.nan) for band in bands}
+
+    wave_rf = shared["wave_rf"]
+    filter_specs = shared["filter_specs"]
+    variable_agn_psf_draws = shared["agn_psf_draws"] + shared["line_broad_psf_draws"]
+    total_psf_draws = variable_agn_psf_draws + shared["host_psf_draws"] + shared["line_narrow_psf_draws"]
+    n_use = variable_agn_psf_draws.shape[0]
+
+    out = {}
+    for band in bands:
+        if band not in filter_specs:
+            out[band] = (np.nan, np.nan)
+            continue
+        wave_rf_band, filt_trans = filter_specs[band]
+        trans = np.interp(wave_rf, wave_rf_band, filt_trans, left=0.0, right=0.0)
+        if not np.any(trans > 0):
+            out[band] = (np.nan, np.nan)
+            continue
+        num_agn = np.trapezoid(
+            variable_agn_psf_draws * trans[None, :] * wave_rf[None, :],
+            wave_rf,
+            axis=1,
+        )
+        num_total = np.trapezoid(total_psf_draws * trans[None, :] * wave_rf[None, :], wave_rf, axis=1)
+        frac = np.full(n_use, np.nan, dtype=float)
+        good = np.isfinite(num_agn) & np.isfinite(num_total) & (num_total > 0)
+        frac[good] = np.clip(num_agn[good] / num_total[good], 0.0, 1.0)
         if np.any(np.isfinite(frac)):
             median, err, _, _ = sym_percentile(frac[np.isfinite(frac)])
             out[band] = (float(median), float(err))
@@ -982,14 +1081,23 @@ def format_spectrum_diagnostics(result):
         context_parts.append(f"bands_used={bands_used}")
     lines.append("  Context: " + (", ".join(context_parts) if context_parts else "not available"))
 
-    psf_entries = []
+    psf_constant_entries = []
+    psf_pl_entries = []
     for band in SDSS_BANDS:
+        value_str = _format_value_with_err(result.get(f"f_AGN_psf_{band}"), result.get(f"f_AGN_psf_{band}_err"))
+        if value_str is not None:
+            psf_constant_entries.append(f"    {band}: {value_str}")
         value_str = _format_value_with_err(result.get(f"f_PL_psf_{band}"), result.get(f"f_PL_psf_{band}_err"))
         if value_str is not None:
-            psf_entries.append(f"    {band}: {value_str}")
-    lines.append("  PSF constant-flux fractions:")
-    if psf_entries:
-        lines.extend(psf_entries)
+            psf_pl_entries.append(f"    {band}: {value_str}")
+    lines.append("  PSF variable-AGN fractions:")
+    if psf_constant_entries:
+        lines.extend(psf_constant_entries)
+    else:
+        lines.append("    not available")
+    lines.append("  PSF pure-PL fractions:")
+    if psf_pl_entries:
+        lines.extend(psf_pl_entries)
     else:
         lines.append("    not available")
 
@@ -1063,6 +1171,9 @@ def compute_derived_results(result, q, args):
     for band, (median, err) in estimate_pl_psf_bandpass_fractions(q, bands=SDSS_BANDS).items():
         result[f"f_PL_psf_{band}"] = safe_float(median)
         result[f"f_PL_psf_{band}_err"] = safe_float(err)
+    for band, (median, err) in estimate_agn_psf_bandpass_fractions(q, bands=SDSS_BANDS).items():
+        result[f"f_AGN_psf_{band}"] = safe_float(median)
+        result[f"f_AGN_psf_{band}_err"] = safe_float(err)
 
     if decompose_host_eff:
         f_host_2500, f_host_2500_err = estimate_host_2500_fraction(q)

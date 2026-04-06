@@ -17,6 +17,7 @@ def test_compute_derived_results_uses_host_continuum_draw_ratio(monkeypatch):
         lambda **kwargs: (_ for _ in ()).throw(AssertionError("unexpected reconstruction")),
     )
     monkeypatch.setattr(fit_spectra, "estimate_pl_psf_bandpass_fractions", lambda *args, **kwargs: {})
+    monkeypatch.setattr(fit_spectra, "estimate_agn_psf_bandpass_fractions", lambda *args, **kwargs: {})
 
     q = SimpleNamespace(
         numpyro_samples={"log_frac_host": np.zeros(3, dtype=float)},
@@ -107,6 +108,7 @@ def test_compute_derived_results_uses_bc_over_total_continuum(monkeypatch):
         lambda **kwargs: (_ for _ in ()).throw(AssertionError("unexpected reconstruction")),
     )
     monkeypatch.setattr(fit_spectra, "estimate_pl_psf_bandpass_fractions", lambda *args, **kwargs: {})
+    monkeypatch.setattr(fit_spectra, "estimate_agn_psf_bandpass_fractions", lambda *args, **kwargs: {})
 
     q = SimpleNamespace(
         numpyro_samples={"log_frac_host": np.zeros(3, dtype=float)},
@@ -173,6 +175,7 @@ def test_compute_derived_results_saves_narrow_line_to_continuum_integrated_fract
         lambda **kwargs: (_ for _ in ()).throw(AssertionError("unexpected reconstruction")),
     )
     monkeypatch.setattr(fit_spectra, "estimate_pl_psf_bandpass_fractions", lambda *args, **kwargs: {})
+    monkeypatch.setattr(fit_spectra, "estimate_agn_psf_bandpass_fractions", lambda *args, **kwargs: {})
 
     q = SimpleNamespace(
         numpyro_samples={"log_frac_host": np.zeros(3, dtype=float)},
@@ -244,6 +247,7 @@ def test_compute_derived_results_saves_narrow_line_fraction_without_host_decompo
         lambda **kwargs: (_ for _ in ()).throw(AssertionError("unexpected reconstruction")),
     )
     monkeypatch.setattr(fit_spectra, "estimate_pl_psf_bandpass_fractions", lambda *args, **kwargs: {})
+    monkeypatch.setattr(fit_spectra, "estimate_agn_psf_bandpass_fractions", lambda *args, **kwargs: {})
 
     q = SimpleNamespace(
         numpyro_samples={"log_frac_host": np.zeros(3, dtype=float)},
@@ -418,6 +422,47 @@ def test_estimate_pl_psf_bandpass_fractions_uses_full_posterior_line_reconstruct
 
     assert np.isfinite(out["g"][0])
     assert np.isclose(out["g"][0], 2.0 / 4.0)
+
+
+def test_estimate_agn_psf_bandpass_fractions_includes_broad_lines_but_not_narrow(monkeypatch):
+    monkeypatch.setattr(
+        fit_spectra,
+        "_reconstruct_line_psf_draws_on_wave",
+        lambda q, wave_out, n_use, return_components=False: (
+            {
+                "broad": np.full((n_use, len(wave_out)), 2.0, dtype=float),
+                "narrow": np.full((n_use, len(wave_out)), 1.0, dtype=float),
+                "total": np.full((n_use, len(wave_out)), 3.0, dtype=float),
+            }
+            if return_components
+            else np.full((n_use, len(wave_out)), 3.0, dtype=float)
+        ),
+    )
+
+    q = SimpleNamespace(
+        z=0.8,
+        wave=np.array([2000.0, 4000.0, 6000.0], dtype=float),
+        pred_out={
+            "scale_psf": np.ones(3, dtype=float),
+            "eta_psf": np.ones(3, dtype=float),
+        },
+        reconstruct_posterior_spectrum=lambda **kwargs: {
+            "wave": np.asarray(kwargs["wave_out"], dtype=float),
+            "draws": {
+                "PL": np.full((3, len(kwargs["wave_out"])), 2.0, dtype=float),
+                "host": np.full((3, len(kwargs["wave_out"])), 1.0, dtype=float),
+                "Fe_uv": np.zeros((3, len(kwargs["wave_out"])), dtype=float),
+                "Fe_op": np.zeros((3, len(kwargs["wave_out"])), dtype=float),
+                "Balmer_cont": np.zeros((3, len(kwargs["wave_out"])), dtype=float),
+                "continuum": np.full((3, len(kwargs["wave_out"])), 3.0, dtype=float),
+            },
+        },
+    )
+
+    out = fit_spectra.estimate_agn_psf_bandpass_fractions(q, bands=("g",))
+
+    assert np.isfinite(out["g"][0])
+    assert np.isclose(out["g"][0], 4.0 / 6.0)
 
 
 def test_reconstruct_line_psf_draws_extends_beyond_native_support_without_group_oob(monkeypatch):
@@ -596,6 +641,8 @@ def test_print_spectrum_diagnostics_includes_psf_and_broader_metrics(capsys):
         "sdss_name": "J0000+0000",
         "z": 1.2345,
         "bands_used": "gri",
+        "f_AGN_psf_g": 0.83,
+        "f_AGN_psf_g_err": 0.03,
         "f_PL_psf_g": 0.61,
         "f_PL_psf_g_err": 0.04,
         "f_PL_psf_r": 0.72,
@@ -619,6 +666,9 @@ def test_print_spectrum_diagnostics_includes_psf_and_broader_metrics(capsys):
     out = capsys.readouterr().out
     assert "Spectrum diagnostics for object_id=obj-1" in out
     assert "Context: sdss_name=J0000+0000, z=1.23450, bands_used=gri" in out
+    assert "PSF variable-AGN fractions:" in out
+    assert "g: 0.8300 +/- 0.0300" in out
+    assert "PSF pure-PL fractions:" in out
     assert "g: 0.6100 +/- 0.0400" in out
     assert "r: 0.7200" in out
     assert "f_host_2500: 0.1200 +/- 0.0300" in out
@@ -628,6 +678,8 @@ def test_print_spectrum_diagnostics_includes_psf_and_broader_metrics(capsys):
 def test_print_spectrum_diagnostics_omits_nan_rows_and_uses_not_available(capsys):
     result = {
         "object_id": "obj-2",
+        "f_AGN_psf_g": np.nan,
+        "f_AGN_psf_g_err": np.nan,
         "f_PL_psf_g": np.nan,
         "f_PL_psf_g_err": np.nan,
         "apparent_mag_2500": np.nan,
@@ -638,7 +690,8 @@ def test_print_spectrum_diagnostics_omits_nan_rows_and_uses_not_available(capsys
 
     out = capsys.readouterr().out
     assert "Spectrum diagnostics for object_id=obj-2" in out
-    assert "PSF constant-flux fractions:\n    not available" in out
+    assert "PSF variable-AGN fractions:\n    not available" in out
+    assert "PSF pure-PL fractions:\n    not available" in out
     assert "Broader diagnostics:\n    not available" in out
     assert "apparent_mag_2500" not in out
 
@@ -677,6 +730,8 @@ def test_run_one_fit_prints_consolidated_diagnostics_and_not_old_m2500_lines(mon
     monkeypatch.setattr(fit_spectra, "extract_fit_stats", lambda q: {})
 
     def fake_compute(result, q, args):
+        result["f_AGN_psf_g"] = 0.81
+        result["f_AGN_psf_g_err"] = 0.04
         result["f_PL_psf_g"] = 0.65
         result["f_PL_psf_g_err"] = 0.05
         result["f_host_2500"] = 0.11
