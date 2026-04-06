@@ -3,6 +3,8 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -13,6 +15,7 @@ if str(SRC) not in sys.path:
 
 from qvc.light_curve.psf_constant_flux_correction import (
     apply_constant_flux_correction_to_object,
+    apply_constant_flux_correction_to_objects,
     subtract_constant_flux_from_band,
 )
 
@@ -48,6 +51,7 @@ def test_apply_constant_flux_correction_to_object_requires_bandpass_fraction():
     corrected_obj, summary = apply_constant_flux_correction_to_object(obj)
 
     assert corrected_obj["psf_constant_flux_corrected"] is True
+    assert corrected_obj["psf_constant_flux_n_bands_corrected"] == 1
     assert summary["n_corrected_bands"] == 1
     band_summary = corrected_obj["psf_constant_flux_band_summaries"]["g"]
     assert band_summary["source_key"] == "f_PL_psf_g"
@@ -68,7 +72,78 @@ def test_apply_constant_flux_correction_to_object_skips_band_without_bandpass_fr
     corrected_obj, summary = apply_constant_flux_correction_to_object(obj)
 
     assert corrected_obj["psf_constant_flux_corrected"] is False
+    assert corrected_obj["psf_constant_flux_n_bands_corrected"] == 0
     assert summary["n_corrected_bands"] == 0
     assert summary["n_missing_fraction_bands"] == 1
     assert corrected_obj["psf_constant_flux_band_summaries"] == {}
     assert np.allclose(corrected_obj["mags"]["g"], obj["mags"]["g"])
+
+
+def _make_light_curve_object(object_id, *, include_fraction=False):
+    obj = {
+        "object_id": object_id,
+        "z": 1.0,
+        "times": {"g": np.array([0.0, 10.0, 20.0], dtype=float)},
+        "mags": {"g": np.array([20.0, 20.1, 19.9], dtype=float)},
+        "magerrs": {"g": np.full(3, 0.03, dtype=float)},
+        "mags_mean": [20.0],
+    }
+    if include_fraction:
+        obj["f_PL_psf_g"] = 0.5
+    return obj
+
+
+def _write_spectra_csv(tmp_path, rows):
+    csv_path = tmp_path / "spectra_fit.csv"
+    pd.DataFrame(rows).to_csv(csv_path, index=False)
+    return str(csv_path)
+
+
+def test_apply_constant_flux_correction_to_objects_raises_when_spectra_row_missing(tmp_path):
+    objs = [_make_light_curve_object("123")]
+    spectra_csv = _write_spectra_csv(
+        tmp_path,
+        [{"object_id": "999", "f_PL_psf_g": 0.5}],
+    )
+
+    with pytest.raises(ValueError, match="Missing spectra rows.*123"):
+        apply_constant_flux_correction_to_objects(
+            objs,
+            spectra_fit_csvs=[spectra_csv],
+        )
+
+
+def test_apply_constant_flux_correction_to_objects_raises_when_no_band_is_corrected(tmp_path):
+    objs = [_make_light_curve_object("123")]
+    spectra_csv = _write_spectra_csv(
+        tmp_path,
+        [{"object_id": "123", "f_PL_psf_g": np.nan}],
+    )
+
+    with pytest.raises(ValueError, match="No valid PSF constant-flux correction band.*123"):
+        apply_constant_flux_correction_to_objects(
+            objs,
+            spectra_fit_csvs=[spectra_csv],
+        )
+
+
+def test_apply_constant_flux_correction_to_objects_succeeds_when_all_objects_have_a_band(tmp_path):
+    objs = [_make_light_curve_object("123"), _make_light_curve_object("456")]
+    spectra_csv = _write_spectra_csv(
+        tmp_path,
+        [
+            {"object_id": "123", "f_PL_psf_g": 0.5},
+            {"object_id": "456", "f_PL_psf_g": 0.6},
+        ],
+    )
+
+    corrected_objs, summary = apply_constant_flux_correction_to_objects(
+        objs,
+        spectra_fit_csvs=[spectra_csv],
+    )
+
+    assert [str(obj["object_id"]) for obj in corrected_objs] == ["123", "456"]
+    assert all(obj["psf_constant_flux_corrected"] is True for obj in corrected_objs)
+    assert [obj["psf_constant_flux_n_bands_corrected"] for obj in corrected_objs] == [1, 1]
+    assert summary["n_objects_corrected"] == 2
+    assert summary["n_bands_corrected"] == 2

@@ -2,6 +2,7 @@ import h5py
 import os
 import numpy as np
 import jax.numpy as jnp
+import secrets
 import subprocess
 
 prefix = os.environ.get('PREFIX', "test")
@@ -560,6 +561,9 @@ def save_quasar_list_hdf5(quasars, ignored_keys=None, size_threshold=1024):
     def _is_string_like(v):
         return isinstance(v, (str, bytes, np.str_, np.bytes_))
 
+    def _is_bool_like(v):
+        return isinstance(v, (bool, np.bool_))
+
     def _is_numeric_like(v):
         return isinstance(v, (int, float, np.integer, np.floating, np.bool_))
 
@@ -637,6 +641,16 @@ def save_quasar_list_hdf5(quasars, ignored_keys=None, size_threshold=1024):
                     out.append(str(v))
             return np.asarray(out, dtype=object).astype(string_dt)
 
+        non_missing = [v for v in values if v is not None]
+        if non_missing and all(_is_bool_like(v) for v in non_missing):
+            out = []
+            for v in values:
+                if v is None:
+                    out.append(False)
+                else:
+                    out.append(bool(v))
+            return np.asarray(out, dtype=bool)
+
         has_numeric = any(_is_numeric_like(v) for v in values if v is not None)
         if has_numeric:
             out = []
@@ -650,11 +664,18 @@ def save_quasar_list_hdf5(quasars, ignored_keys=None, size_threshold=1024):
         out = ["" if v is None else str(v) for v in values]
         return np.asarray(out, dtype=object).astype(string_dt)
 
+    def _output_basename(quasars_list):
+        if len(quasars_list) == 1:
+            return f"{str(quasars_list[0]['object_id'])}.h5"
+        timestamp = datetime.now().astimezone().strftime("%Y%m%dT%H%M%S%f")
+        token = secrets.token_hex(4)
+        return f"{timestamp}_{token}.h5"
+
     rows = []
     total = len(quasars)
     output_dir = f"results/data/{prefix}"
     os.makedirs(output_dir, exist_ok=True)
-    file_path = os.path.join(output_dir, f"{suffix}.h5")
+    file_path = os.path.join(output_dir, _output_basename(quasars))
     logging.info(f"Saving {total} quasars to {file_path}")
 
     for i, quasar in enumerate(quasars):

@@ -2677,6 +2677,9 @@ def main():
     print(f"Loaded {len(objs)} objects.")
 
     objs = populate_sdss_fields(objs, progress_bar=args.progress)
+    for obj in objs:
+        obj["psf_constant_flux_n_bands_corrected"] = 0
+        obj["psf_constant_flux_corrected"] = False
     if args.rf_length_cut > 0:
         objs = cut_light_curve_restframe_window(
             objs,

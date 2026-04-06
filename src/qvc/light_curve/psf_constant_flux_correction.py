@@ -233,6 +233,7 @@ def apply_constant_flux_correction_to_object(
             for band in corrected_obj["mags"].keys()
         ]
 
+    corrected_obj["psf_constant_flux_n_bands_corrected"] = int(n_corrected_bands)
     corrected_obj["psf_constant_flux_corrected"] = bool(n_corrected_bands > 0)
     corrected_obj["psf_constant_flux_band_summaries"] = band_summaries
 
@@ -270,6 +271,8 @@ def apply_constant_flux_correction_to_objects(
 
     pl_fractions = []
     delta_mags = []
+    missing_spectra_object_ids = []
+    zero_corrected_object_ids = []
 
     iterator = tqdm(objs, desc="Applying PSF flux correction", disable=not progress_bar)
     for obj in iterator:
@@ -278,6 +281,7 @@ def apply_constant_flux_correction_to_objects(
         if spectra_row is None:
             corrected_objs.append(obj)
             summary["n_missing_spectra"] += 1
+            missing_spectra_object_ids.append(oid)
             continue
 
         merged = dict(obj)
@@ -317,6 +321,8 @@ def apply_constant_flux_correction_to_objects(
                     stats["pl_fractions"].append(float(band_summary["pl_fraction"]))
                 if np.isfinite(band_summary["median_delta_mag"]):
                     stats["abs_delta_mags"].append(float(abs(band_summary["median_delta_mag"])))
+        else:
+            zero_corrected_object_ids.append(oid)
 
     if pl_fractions:
         summary["median_pl_fraction"] = float(np.nanmedian(np.asarray(pl_fractions, dtype=float)))
@@ -329,6 +335,23 @@ def apply_constant_flux_correction_to_objects(
         stats["median_abs_delta_mag"] = (
             float(np.nanmedian(delta_vals)) if delta_vals.size > 0 else np.nan
         )
+
+    if missing_spectra_object_ids or zero_corrected_object_ids:
+        msg_parts = [
+            "--subtract_psf_constant_flux requires every object to have at least one corrected band."
+        ]
+        if missing_spectra_object_ids:
+            msg_parts.append(
+                "Missing spectra rows for object_id(s): "
+                + ", ".join(missing_spectra_object_ids)
+            )
+        if zero_corrected_object_ids:
+            msg_parts.append(
+                "No valid PSF constant-flux correction band for object_id(s): "
+                + ", ".join(zero_corrected_object_ids)
+            )
+        raise ValueError(" ".join(msg_parts))
+
     return corrected_objs, summary
 
 
