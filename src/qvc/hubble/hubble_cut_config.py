@@ -45,7 +45,6 @@ def build_agn_cuts(
     cut_overrides = {
         "wrms": (None, wrms_cut),
         "f_host_2500": (None, f_host_cut),
-        "frac_host_psf_2500": (None, f_host_cut),
         "variability_chi_sq_red_g": (variability_chi_sq_red_g_cut, None),
     }
     cuts = [

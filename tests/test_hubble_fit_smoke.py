@@ -444,6 +444,77 @@ def test_run_single_does_not_call_agn_table_when_skip_plots(monkeypatch, tmp_pat
     assert csv_calls == []
 
 
+def test_run_single_compare_sigma_only_skips_plotting_but_keeps_fit_outputs(monkeypatch, tmp_path):
+    df_agn = _make_fake_agn_sample()
+    df_pantheon = _make_fake_pantheon_sample()
+    priors, model_labels, _ = hubble_model.get_model_params("Flatw0waCDM", only_sna=False)
+    theta = np.array([(priors[key][0] + priors[key][1]) / 2.0 for key in model_labels], dtype=float)
+    flat_samples = np.tile(theta[None, :], (8, 1))
+    dmi_posterior_median = np.zeros(len(df_agn))
+    dmi_posterior_sigma = np.full(len(df_agn), 0.05)
+
+    monkeypatch.chdir(tmp_path)
+    redshift_calls = []
+    delta_m_calls = []
+    monkeypatch.setattr(
+        hubble_fit,
+        "plot_redshift_histograms",
+        lambda *args, **kwargs: redshift_calls.append((args, kwargs)),
+    )
+    monkeypatch.setattr(
+        hubble_fit,
+        "plot_delta_m_flux_recal_vs_redshift",
+        lambda *args, **kwargs: delta_m_calls.append((args, kwargs)),
+    )
+    monkeypatch.setattr(hubble_fit, "report_pivots", lambda *args, **kwargs: None)
+    monkeypatch.setattr(hubble_fit, "display_results_summary", lambda *args, **kwargs: None)
+    monkeypatch.setattr(hubble_fit, "compute_age_universe_with_error", lambda *args, **kwargs: (13.8, 0.1))
+    monkeypatch.setattr(
+        hubble_fit,
+        "run_mcmc_pipeline",
+        lambda *args, **kwargs: (
+            flat_samples,
+            model_labels,
+            lambda pts: np.zeros(len(np.atleast_2d(pts))),
+            None,
+            -50.0,
+            0.2,
+            dmi_posterior_median,
+            dmi_posterior_sigma,
+            None,
+        ),
+    )
+
+    result = hubble_fit.run_single(
+        df_agn=df_agn,
+        df_agn_all=df_agn.copy(),
+        df_pantheon=df_pantheon,
+        _sna_L=None,
+        _sna_Lower=True,
+        _sna_LogdetCov=None,
+        cosmo_model="Flatw0waCDM",
+        completeness=False,
+        use_full_cov=False,
+        only_sna=False,
+        speed="fast",
+        z_range=(0.44, 3.16),
+        skip_plots=False,
+        compare_sigma_only=True,
+        prefix="unit",
+    )
+
+    samples_out, labels_out, _, logz, logzerr, residuals, age, age_err = result
+    assert samples_out.shape == flat_samples.shape
+    assert labels_out == model_labels
+    assert logz == -50.0
+    assert logzerr == 0.2
+    assert residuals is None
+    assert age == 13.8
+    assert age_err == 0.1
+    assert redshift_calls == []
+    assert delta_m_calls == []
+
+
 @pytest.mark.parametrize("resume_value, use_default_checkpoint", [(True, True), ("custom_resume.h5", False)])
 def test_resolve_resume_checkpoint_path_requires_existing_file(tmp_path, resume_value, use_default_checkpoint):
     default_checkpoint = tmp_path / "default_resume.h5"
@@ -511,3 +582,78 @@ def test_run_mcmc_pipeline_requires_finite_eta_sigma_err_when_flag_enabled(fake_
             speed="fast",
             use_eta_sigma_term=True,
         )
+
+
+def test_run_mcmc_pipeline_compare_sigma_only_skips_completeness_plots_on_resume(monkeypatch, tmp_path):
+    df_agn = pd.DataFrame(
+        {
+            "object_id": ["agn_001", "agn_002"],
+            "z": [0.6, 1.1],
+            "z_err": [0.01, 0.01],
+            "apparent_mag_2500": [20.1, 20.4],
+            "apparent_mag_2500_err": [0.1, 0.1],
+        }
+    )
+    df_pantheon = pd.DataFrame(
+        {
+            "zHD": [0.05, 0.1],
+            "m_b_corr": [16.0, 17.0],
+            "IS_CALIBRATOR": [0, 0],
+            "CEPH_DIST": [-9.0, -9.0],
+            "MU_SH0ES_ERR_DIAG": [0.1, 0.1],
+        }
+    )
+    result_root = tmp_path / "result_root"
+    expected = result_root / "hubble_posteriors" / "unit" / "posteriors_FlatLambdaCDM_joint_fast_all_z0p44_3p16.h5"
+    completeness_calls = []
+    diagnostics_calls = []
+
+    monkeypatch.setattr(hubble_fit, "get_qvc_result_dir", lambda: result_root)
+    monkeypatch.setattr(hubble_fit, "get_model_params", lambda *args, **kwargs: ({"H0": (60.0, 80.0)}, ["H0"], ["H0"]))
+    monkeypatch.setattr(hubble_fit, "get_agn_model_spec", lambda *args, **kwargs: ((), (), ()))
+    monkeypatch.setattr(hubble_fit, "make_dm_function", lambda *args, **kwargs: "interp")
+    monkeypatch.setattr(
+        hubble_fit,
+        "plot_completeness_diagnostics",
+        lambda *args, **kwargs: diagnostics_calls.append((args, kwargs)),
+    )
+    monkeypatch.setattr(
+        hubble_fit,
+        "load_chains",
+        lambda path: {
+            "flat_samples": np.ones((3, 1)),
+            "dmi_max_w": np.zeros(len(df_agn)),
+            "dmi_posterior_median": np.zeros(len(df_agn)),
+            "dmi_posterior_sigma": np.full(len(df_agn), 0.05),
+            "integrals_max_w": np.ones(len(df_agn)),
+            "logZ": -1.0,
+            "logZerr": 0.2,
+        },
+    )
+    monkeypatch.setattr(hubble_fit.os.path, "exists", lambda path: str(path) == str(expected))
+    monkeypatch.setattr(
+        hubble_fit,
+        "get_completeness_function_2d",
+        lambda *args, **kwargs: completeness_calls.append(kwargs.get("plot")),
+    )
+
+    result = hubble_fit.run_mcmc_pipeline(
+        df_agn=df_agn,
+        df_agn_all=df_agn.copy(),
+        df_pantheon=df_pantheon,
+        _sna_L=None,
+        _sna_Lower=True,
+        _sna_LogdetCov=None,
+        cosmo_model="FlatLambdaCDM",
+        completeness=True,
+        use_full_cov=False,
+        resume=True,
+        speed="fast",
+        prefix="unit",
+        compare_sigma_only=True,
+        completeness_sim_file="dummy_completeness.h5",
+    )
+
+    assert result[0].shape == (3, 1)
+    assert diagnostics_calls == []
+    assert completeness_calls == [False]

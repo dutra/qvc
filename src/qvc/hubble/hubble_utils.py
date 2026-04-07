@@ -25,13 +25,8 @@ from scipy import stats
 from tqdm import tqdm
 
 from qvc.hubble.cuts import (
-    ALPHA_LAMBDA_REQUIRED_COLUMNS,
-    APPARENT_MAG_2500_ERR_MIN,
-    APPARENT_MAG_2500_MAX,
-    APPARENT_MAG_2500_MIN,
     EXCLUDED_SDSS_NAMES,
     F_HOST_2500_MAX,
-    FRAC_ERR_LOG_L2500_MAX,
     LOG_AMP_DELTA_BC_UPPER,
     LOG_F_BC_3000_MAX,
     LOG_F_FE_UV_3000_MAX,
@@ -1547,26 +1542,6 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
                 filename="blr_lag2_vs_redshift_by_band_precut.pdf",
             )
 
-    # Remove objects with implausibly bright or faint apparent magnitude at 2500 A.
-    mag_mask = np.ones(len(df), dtype=bool)
-    if APPARENT_MAG_2500_MIN is not None:
-        mag_mask &= df["apparent_mag_2500"] >= APPARENT_MAG_2500_MIN
-    if APPARENT_MAG_2500_MAX is not None:
-        mag_mask &= df["apparent_mag_2500"] < APPARENT_MAG_2500_MAX
-    mag_lower_desc = (
-        str(APPARENT_MAG_2500_MIN)
-        if APPARENT_MAG_2500_MIN is not None
-        else "-inf"
-    )
-    mag_upper_desc = (
-        str(APPARENT_MAG_2500_MAX)
-        if APPARENT_MAG_2500_MAX is not None
-        else "inf"
-    )
-    mag_cut_desc = f"{mag_lower_desc} <= apparent_mag_2500 < {mag_upper_desc}"
-    plot_cut_diagnostics(df.copy(), df[mag_mask], bins=30, cut_info=mag_cut_desc)
-    df = _record_cut("apparent_mag_2500", mag_cut_desc, df, mag_mask)
-
     df = populate_xray(df)
     
     # if lc_info_csv is not None:
@@ -1730,13 +1705,6 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
                 df,
                 rel_mag_err_mask,
             )
-    # Drop rows that still lack the core continuum fit parameters.
-    remove_nans_columns = list(ALPHA_LAMBDA_REQUIRED_COLUMNS)
-    for col in remove_nans_columns:
-        nan_mask = ~df[col].isna()
-        plot_cut_diagnostics(df.copy(), df[nan_mask], bins=30, cut_info=f"{col} not NaN")
-        df = _record_cut(f"not_nan:{col}", f"{col} not NaN", df, nan_mask)
-
     df = df.reset_index(drop=True)
 
     if residuals_sigma_clip is not None and residuals_csv is not None:
@@ -1766,35 +1734,6 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
             )
             print(f"[WARNING] Residual CSV not found: {residuals_csv}")
             raise ValueError(f"Residual CSV not found: {residuals_csv}")
-
-    # Require a positive finite magnitude uncertainty at 2500 A.
-    mask = (
-        (df["apparent_mag_2500_err"] > APPARENT_MAG_2500_ERR_MIN)
-        & np.isfinite(df["apparent_mag_2500_err"])
-    )
-    plot_cut_diagnostics(
-        df.copy(),
-        df[mask],
-        bins=30,
-        cut_info=f"{APPARENT_MAG_2500_ERR_MIN}<apparent_mag_2500_err<inf",
-    )
-
-    df = _record_cut(
-        "apparent_mag_2500_err",
-        f"{APPARENT_MAG_2500_ERR_MIN} < apparent_mag_2500_err < inf",
-        df,
-        mask,
-    )
-
-    cosmo = FlatLambdaCDM(H0=70, Om0=0.3)
-    y_log_meas_err = 0.4 * np.asarray(df['apparent_mag_2500_err'].fillna(1e9))
-    actual_M2500 = df['apparent_mag_2500'] - cosmo.distmod(df['z']).value
-    actual_logL2500 = convert_M2500_to_logL2500(actual_M2500)
-    yerr_linear = 10**actual_logL2500 * np.log(10) * y_log_meas_err
-    mask = yerr_linear / (10**actual_logL2500) < FRAC_ERR_LOG_L2500_MAX
-    frac_err_desc = f"frac_err_logL2500 < {FRAC_ERR_LOG_L2500_MAX}"
-    plot_cut_diagnostics(df.copy(), df[mask], bins=30, cut_info=frac_err_desc)
-    df = _record_cut("frac_err_logL2500", frac_err_desc, df, mask, reset_index=False)
 
     num_quasars_z_0_1 = len(df[(df['z'] > 0) & (df['z'] <= 1.0)])
     num_quasars_z_gt_3 = len(df[df['z'] > 3])

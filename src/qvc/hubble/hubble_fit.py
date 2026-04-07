@@ -371,6 +371,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                       completeness_sim_file=DEFAULT_COMPLETENESS_SIM_FILE,
                       completeness_mode="2d",
                       N=None,
+                      compare_sigma_only=False,
                       use_alpha_lambda_term=False,
                       use_eta_sigma_term=False,
                       use_redshift_log_f_term=False,
@@ -451,15 +452,15 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
         print(f"Building {completeness_mode} completeness map using mock catalog: {completeness_sim_file}")
         if completeness_mode == "4d_fhost_alpha":
             completeness_params = get_completeness_function_4d_fhost_alpha(
-                df_agn, sim_file=completeness_sim_file, plot=True, plot_path=plot_path
+                df_agn, sim_file=completeness_sim_file, plot=not compare_sigma_only, plot_path=plot_path
             )
         elif completeness_mode == "3d_fhost":
             completeness_params = get_completeness_function_3d_fhost(
-                df_agn, sim_file=completeness_sim_file, plot=True, plot_path=plot_path
+                df_agn, sim_file=completeness_sim_file, plot=not compare_sigma_only, plot_path=plot_path
             )
         else:
             completeness_params = get_completeness_function_2d(
-                df_agn, sim_file=completeness_sim_file, plot=True, plot_path=plot_path
+                df_agn, sim_file=completeness_sim_file, plot=not compare_sigma_only, plot_path=plot_path
             )
     else:
         completeness_params = None
@@ -596,7 +597,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                     dlogz_init=0.01,                 
                     n_effective=200,                # 300–1000 typical for model comparison
                     nlive_init=25,   # bump live points
-                    nlive_batch=15   # reasonable batch size for dynamic allocation
+                    nlive_batch=10   # reasonable batch size for dynamic allocation
                 )
 
             elif speed == "test":
@@ -611,17 +612,20 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
 
 
         results = sampler.results
-        print("Plotting full dynesty corner...")
-        plot_dynesty(
-            sampler.results,
-            cosmo_model,
-            plot_path,
-            only_sna=only_sna,
-            speed=speed,
-            use_alpha_lambda_term=use_alpha_lambda_term,
-            use_eta_sigma_term=use_eta_sigma_term,
-            use_redshift_log_f_term=use_redshift_log_f_term,
-        )
+        if compare_sigma_only:
+            print("compare_sigma_only=True: skipping dynesty plot generation.")
+        else:
+            print("Plotting full dynesty corner...")
+            plot_dynesty(
+                sampler.results,
+                cosmo_model,
+                plot_path,
+                only_sna=only_sna,
+                speed=speed,
+                use_alpha_lambda_term=use_alpha_lambda_term,
+                use_eta_sigma_term=use_eta_sigma_term,
+                use_redshift_log_f_term=use_redshift_log_f_term,
+            )
         logZ, logZerr = results.logz[-1], results.logzerr[-1]
         print(f"\nBayesian evidence logZ = {logZ:.2f} ± {logZerr:.2f}")
         if logZerr > 1:
@@ -736,16 +740,17 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
             alpha_lambda=df_agn["alpha_lambda"].values if "alpha_lambda" in df_agn.columns else None,
         )
 
-    print("Plotting completeness diagnostics...")
-
-    
-    plot_completeness_diagnostics(
-        dmi_posterior_median,
-        agn_data['z'],
-        agn_data['apparent_mag_2500'],
-        integrals_max_w,
-        plot_path=plot_path,
-    )
+    if compare_sigma_only:
+        print("compare_sigma_only=True: skipping completeness diagnostics plots.")
+    else:
+        print("Plotting completeness diagnostics...")
+        plot_completeness_diagnostics(
+            dmi_posterior_median,
+            agn_data['z'],
+            agn_data['apparent_mag_2500'],
+            integrals_max_w,
+            plot_path=plot_path,
+        )
 
     return (
         flat_samples,
@@ -770,6 +775,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                prefix="default", uniform_redshift_distribution=False,
                completeness_sim_file=DEFAULT_COMPLETENESS_SIM_FILE,
                completeness_mode="2d",
+               compare_sigma_only=False,
                use_alpha_lambda_term=False,
                use_eta_sigma_term=False,
                use_redshift_log_f_term=False):
@@ -805,12 +811,15 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
             z_range=z_range,
             N=N,
         )
-        plot_redshift_histograms(df_pantheon, df_agn_fit_selection, xscale="linear", plot_path=plot_path)
+        if not compare_sigma_only:
+            plot_redshift_histograms(df_pantheon, df_agn_fit_selection, xscale="linear", plot_path=plot_path)
     else:
         df_agn_fit_selection = df_agn[df_agn["z"].between(z_range[0], z_range[1])].copy()
-        plot_redshift_histograms(df_pantheon, df_agn, xscale="log", plot_path=plot_path)
+        if not compare_sigma_only:
+            plot_redshift_histograms(df_pantheon, df_agn, xscale="log", plot_path=plot_path)
 
-    plot_delta_m_flux_recal_vs_redshift(df_agn_fit_selection, plot_path=plot_path)
+    if not compare_sigma_only:
+        plot_delta_m_flux_recal_vs_redshift(df_agn_fit_selection, plot_path=plot_path)
 
     report_pivots(df_agn_fit_selection)
 
@@ -836,6 +845,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                                                         prefix=prefix,
                                                         completeness_sim_file=completeness_sim_file,
                                                         completeness_mode=completeness_mode,
+                                                        compare_sigma_only=compare_sigma_only,
                                                         use_alpha_lambda_term=use_alpha_lambda_term,
                                                         use_eta_sigma_term=use_eta_sigma_term,
                                                         use_redshift_log_f_term=use_redshift_log_f_term)
@@ -858,7 +868,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         use_redshift_log_f_term=use_redshift_log_f_term,
     )
 
-    if skip_plots or only_sna:
+    if compare_sigma_only or skip_plots or only_sna:
         print("Skipping plots, returning results...")
         return flat_samples, model_labels, dm_interp, logZ, logZerr, None, age, age_err
 
@@ -1295,6 +1305,7 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
             prefix="default", result_prefix="", uniform_redshift_distribution=False,
             completeness_sim_file=DEFAULT_COMPLETENESS_SIM_FILE,
             completeness_mode="2d",
+            compare_sigma_only=False,
             use_alpha_lambda_term=False,
             use_eta_sigma_term=False,
             use_redshift_log_f_term=False):
@@ -1330,6 +1341,7 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
                        prefix=prefix, uniform_redshift_distribution=uniform_redshift_distribution,
                        completeness_sim_file=completeness_sim_file,
                        completeness_mode=completeness_mode,
+                       compare_sigma_only=compare_sigma_only,
                        use_alpha_lambda_term=use_alpha_lambda_term,
                        use_eta_sigma_term=use_eta_sigma_term,
                        use_redshift_log_f_term=use_redshift_log_f_term)
@@ -1346,23 +1358,24 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
                        prefix=prefix, uniform_redshift_distribution=uniform_redshift_distribution,
                        completeness_sim_file=completeness_sim_file,
                        completeness_mode=completeness_mode,
+                       compare_sigma_only=compare_sigma_only,
                        use_alpha_lambda_term=use_alpha_lambda_term,
                        use_eta_sigma_term=use_eta_sigma_term,
                        use_redshift_log_f_term=use_redshift_log_f_term)
         samples_sna, model_labels_sna, dm_interp_sna, logZ_sna, logZerr_sna, debiased_residuals_sna, age_sna, age_sna_err = r
-        
-        plot_cosmo_corner(samples_sna, samples_joint, cosmo_model, z_pivot_sna, z_pivot_agn, show=False, 
-                          plot_path=compare_plot_path, speed=speed,
-                          gauss_sigma=1.5, kde_bw_scale=1.5, include_alpha_beta=False,
-                          use_alpha_lambda_term=use_alpha_lambda_term,
-                          use_eta_sigma_term=use_eta_sigma_term,
-                          use_redshift_log_f_term=use_redshift_log_f_term)
-        plot_cosmo_corner(samples_sna, samples_joint, cosmo_model, z_pivot_sna, z_pivot_agn, show=False, 
-                          plot_path=compare_plot_path, speed=speed,
-                          gauss_sigma=1.5, kde_bw_scale=1.5, include_alpha_beta=True,
-                          use_alpha_lambda_term=use_alpha_lambda_term,
-                          use_eta_sigma_term=use_eta_sigma_term,
-                          use_redshift_log_f_term=use_redshift_log_f_term)
+        if not compare_sigma_only:
+            plot_cosmo_corner(samples_sna, samples_joint, cosmo_model, z_pivot_sna, z_pivot_agn, show=False, 
+                              plot_path=compare_plot_path, speed=speed,
+                              gauss_sigma=1.5, kde_bw_scale=1.5, include_alpha_beta=False,
+                              use_alpha_lambda_term=use_alpha_lambda_term,
+                              use_eta_sigma_term=use_eta_sigma_term,
+                              use_redshift_log_f_term=use_redshift_log_f_term)
+            plot_cosmo_corner(samples_sna, samples_joint, cosmo_model, z_pivot_sna, z_pivot_agn, show=False, 
+                              plot_path=compare_plot_path, speed=speed,
+                              gauss_sigma=1.5, kde_bw_scale=1.5, include_alpha_beta=True,
+                              use_alpha_lambda_term=use_alpha_lambda_term,
+                              use_eta_sigma_term=use_eta_sigma_term,
+                              use_redshift_log_f_term=use_redshift_log_f_term)
         
         cosmo_models_result_dict[cosmo_model]['logZ'] = logZ_joint
         cosmo_models_result_dict[cosmo_model]['logZerr'] = logZerr_joint
@@ -1465,6 +1478,12 @@ if __name__ == "__main__":
     parser.add_argument("--spectra_fit_csv", type=str, nargs='+', help="Path(s) to spectra fit CSV file(s)")
     parser.add_argument("--no_cuts", action="store_true", default=False, help="Disable AGN data cuts (default: False)")
     parser.add_argument("--skip_plots", action="store_true", default=False, help="Skip plotting steps (default: False)")
+    parser.add_argument(
+        "--compare_sigma_only",
+        action="store_true",
+        default=False,
+        help="Run the full fit and evidence calculation, but skip non-essential plots and keep only text/console model-comparison sigma outputs.",
+    )
     parser.add_argument("--exclude_object_ids_csv", type=str, nargs='+', default=[], help="Path(s) to CSV file(s) containing object IDs to exclude")
     parser.add_argument("--residuals_sigma_clip", type=float, default=None, help="Optional residual cut value to exclude outliers (default: None)")
     parser.add_argument("--residuals_csv", type=str, default=None, help="Path to CSV file containing residuals for outlier exclusion (default: None)")
@@ -1601,6 +1620,7 @@ if __name__ == "__main__":
                 prefix=args.prefix,
                 completeness_sim_file=args.completeness_sim_file,
                 completeness_mode=args.completeness_mode,
+                compare_sigma_only=args.compare_sigma_only,
                 use_alpha_lambda_term=args.fit_alpha_lambda_term,
                 use_eta_sigma_term=args.fit_eta_sigma_term,
                 use_redshift_log_f_term=args.fit_redshift_log_f_term)
@@ -1642,6 +1662,7 @@ if __name__ == "__main__":
                 prefix=args.prefix, result_prefix=args.result_prefix, uniform_redshift_distribution=args.uniform_redshift_distribution,
                 completeness_sim_file=args.completeness_sim_file,
                 completeness_mode=args.completeness_mode,
+                compare_sigma_only=args.compare_sigma_only,
                 use_alpha_lambda_term=args.fit_alpha_lambda_term,
                 use_eta_sigma_term=args.fit_eta_sigma_term,
                 use_redshift_log_f_term=args.fit_redshift_log_f_term)

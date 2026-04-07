@@ -21,12 +21,10 @@ def get_agn_model_spec(use_alpha_lambda_term=False, use_eta_sigma_term=False):
         "beta_agn",
     )
     req_obs = (
-        "log_sigma_hat0",
         "log_sigma_uv",
         "log_tau_uv_rf",
     )
     req_errs = (
-        "log_sigma_hat0_err",
         "log_sigma_uv_std_psd",
         "log_tau_uv_rf_std_psd",
         "log_sigma_uv_log_tau_uv_rf_cov_psd",
@@ -273,7 +271,6 @@ def M_model_agn(params_arr, obs_arr, pivots_array, use_alpha_lambda_term=False, 
         + beta_agn  * (log_tau_uv_rf - log_tau_uv_rf_pivot)
         #+ gamma_agn * (dm_psf_correction - dm_psf_correction_pivot)
         #+ logistic(PL_slope_blue, A, k, x0)
-        # + alpha_agn * (log_sigma_hat0 - log_sigma_hat0_pivot)
     )
     if use_alpha_lambda_term:
         gamma_alpha_lambda = params_arr[pidx[AGN_ALPHA_LAMBDA_PARAM]]
@@ -312,9 +309,6 @@ def M_model_agn_err(
 
     # gamma_agn   = params_arr[agn_model_pidx["gamma_agn"]]
     # dm_psf_correction_err = err_arr[agn_model_eidx["dm_psf_correction_err"]]
-
-    # log_sigma_hat0_err = err_arr[agn_model_eidx["log_sigma_hat0_err"]]
-
     r = (
           (alpha_agn * log_sigma_uv_std_psd)**2
         + (beta_agn  * log_tau_uv_rf_std_psd)**2
