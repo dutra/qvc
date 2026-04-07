@@ -23,13 +23,22 @@ if str(SRC) not in sys.path:
 from qvc.hubble import hubble_plotting, hubble_utils
 from qvc.light_curve.fit_light_curves import (
     build_single_object_model,
+    build_single_object_model_continuum_only,
     build_single_object_model_mag_flux_linearized,
+    build_single_object_model_mag_fluxmix_stage2,
+    build_mag_fluxmix_fast_display_model,
+    compute_lomb_scargle_break_diagnostics,
     compute_g_band_residual_drift_diagnostics,
     compute_g_band_raw_drift_diagnostics,
     compute_object_adf_diagnostics,
     make_lc,
+    run_two_stage_fluxmix_fast_inference,
 )
-from qvc.light_curve.multiband_fit_plotting import plot_all_histograms
+from qvc.light_curve.multiband_fit_plotting import (
+    plot_all_histograms,
+    save_combined_plot,
+    save_dm_df_over_f_distribution_plot,
+)
 from qvc.light_curve.multiband_fit_utils import (
     flatten_flat_samples_per_band,
     flatten_per_chain_samples_per_band,
@@ -989,6 +998,306 @@ def test_build_single_object_model_mag_flux_linearized_rejects_second_blr_term()
         )
 
 
+def test_build_single_object_model_continuum_only_smoke():
+    obj = _make_fake_public_object()
+    lc = make_lc(
+        obj,
+        ["g", "r"],
+        inject_fake=False,
+        drop_band_lyman_alpha=False,
+    )
+    obj = obj | lc
+
+    bands = obj["bands"]
+    lam_rf = jnp.array([lambda_pivot[b] for b in bands], dtype=float) / (1.0 + float(obj["z"]))
+    bidx = np.asarray(obj["band_idx"])
+    yerr = np.asarray(obj["yerr"])
+    log_jitter_mean = np.array(
+        [
+            np.log(np.mean(yerr[(bidx == i) & np.isfinite(yerr) & (yerr < 10)]))
+            for i in range(len(bands))
+        ],
+        dtype=float,
+    )
+    numpyro_model = build_single_object_model_continuum_only(
+        obj,
+        lam_rf,
+        log_jitter_mean=jnp.array(log_jitter_mean),
+        disable_poly1=False,
+        drop_band_lyman_alpha=False,
+        tau_fast_truncated=False,
+    )
+
+    model_trace = trace(seed(numpyro_model, random.PRNGKey(0))).get_trace()
+    assert "log_amp_ratio_blr_raw" not in model_trace
+    assert "log_amp_ratio_bc" not in model_trace
+
+    nuts = NUTS(
+        numpyro_model,
+        dense_mass=False,
+        max_tree_depth=1,
+        target_accept_prob=0.8,
+    )
+    mcmc = MCMC(
+        nuts,
+        num_warmup=1,
+        num_samples=1,
+        num_chains=1,
+        chain_method="sequential",
+        progress_bar=False,
+    )
+    mcmc.run(random.PRNGKey(8))
+    samples_flat = tree_map(lambda x: np.asarray(device_get(x)), mcmc.get_samples(group_by_chain=False))
+    assert np.allclose(samples_flat["amp_blr"], 0.0)
+    assert np.allclose(samples_flat["amp_bc"], 0.0)
+    assert np.all(np.isfinite(samples_flat["amp_cont"]))
+
+
+def test_run_two_stage_fluxmix_fast_inference_smoke():
+    obj = _make_fake_public_object()
+    lc = make_lc(
+        obj,
+        ["g", "r"],
+        inject_fake=False,
+        drop_band_lyman_alpha=False,
+    )
+    obj = obj | lc
+
+    bands = obj["bands"]
+    lam_rf = jnp.array([lambda_pivot[b] for b in bands], dtype=float) / (1.0 + float(obj["z"]))
+    bidx = np.asarray(obj["band_idx"])
+    yerr = np.asarray(obj["yerr"])
+    log_jitter_mean = np.array(
+        [
+            np.log(np.mean(yerr[(bidx == i) & np.isfinite(yerr) & (yerr < 10)]))
+            for i in range(len(bands))
+        ],
+        dtype=float,
+    )
+
+    samples_flat, samples_per_chain, model, diagnostics = run_two_stage_fluxmix_fast_inference(
+        obj,
+        lam_rf,
+        log_jitter_mean=jnp.array(log_jitter_mean),
+        rng_key=random.PRNGKey(9),
+        num_warmup=1,
+        num_samples=1,
+        num_chains=1,
+        chain_method="sequential",
+        progress_bar=False,
+        dense_mass=False,
+        max_tree_depth=1,
+        disable_poly1=False,
+        disable_lag_blr=False,
+        disable_lag_bc=False,
+        drop_band_lyman_alpha=False,
+        tau_fast_truncated=False,
+        n_blr_terms=1,
+    )
+
+    assert "log_cont_scale" in samples_flat
+    assert "amp_cont" in samples_flat
+    assert "amp_blr" in samples_flat
+    assert "lag_blr" in samples_flat
+    assert np.all(np.isfinite(samples_flat["log_sigma_uv"]))
+    assert np.all(np.isfinite(samples_flat["amp_cont"]))
+    assert diagnostics["stage2_conditioned_on_median_basis"] is True
+
+    flat_per_band = flatten_flat_samples_per_band(samples_flat, bands)
+    per_chain_per_band = flatten_per_chain_samples_per_band(samples_per_chain, bands)
+    assert f"amp_cont_{bands[0]}" in flat_per_band
+    assert f"amp_blr_{bands[0]}" in per_chain_per_band
+
+    posterior_median = {k: np.median(v, axis=0) for k, v in samples_flat.items()}
+    query_t = jnp.array([-5000.0, 0.0, float(np.max(np.asarray(obj["X"][0], dtype=float))) + 500.0], dtype=float)
+    query_b = jnp.array([0, 0, 1], dtype=int)
+    pred_mu, pred_std = model.pred(posterior_median, (query_t, query_b))
+    assert np.all(np.isfinite(np.asarray(pred_mu)))
+    assert np.all(np.isfinite(np.asarray(pred_std)))
+
+    rebuilt_model = build_mag_fluxmix_fast_display_model(obj, lam_rf, samples_flat)
+    rebuilt_mu, rebuilt_std = rebuilt_model.pred(posterior_median, (query_t, query_b))
+    assert np.all(np.isfinite(np.asarray(rebuilt_mu)))
+    assert np.all(np.isfinite(np.asarray(rebuilt_std)))
+
+    psd_diag = compute_lomb_scargle_break_diagnostics(
+        rebuilt_model,
+        samples_flat,
+        obj,
+        float(obj["z"]),
+        n_freq=32,
+    )
+    assert "log_sigma_uv_bpl" in psd_diag
+    assert "log_sigma_bpl_ref_band" in psd_diag
+
+
+def test_run_alternating_two_stage_fluxmix_fast_inference_smoke():
+    obj = _make_fake_public_object()
+    lc = make_lc(
+        obj,
+        ["g", "r"],
+        inject_fake=False,
+        drop_band_lyman_alpha=False,
+    )
+    obj = obj | lc
+
+    bands = obj["bands"]
+    lam_rf = jnp.array([lambda_pivot[b] for b in bands], dtype=float) / (1.0 + float(obj["z"]))
+    bidx = np.asarray(obj["band_idx"])
+    yerr = np.asarray(obj["yerr"])
+    log_jitter_mean = np.array(
+        [
+            np.log(np.mean(yerr[(bidx == i) & np.isfinite(yerr) & (yerr < 10)]))
+            for i in range(len(bands))
+        ],
+        dtype=float,
+    )
+
+    samples_flat, samples_per_chain, model, diagnostics = run_two_stage_fluxmix_fast_inference(
+        obj,
+        lam_rf,
+        log_jitter_mean=jnp.array(log_jitter_mean),
+        rng_key=random.PRNGKey(11),
+        num_warmup=1,
+        num_samples=1,
+        num_chains=1,
+        chain_method="sequential",
+        progress_bar=False,
+        dense_mass=False,
+        max_tree_depth=1,
+        disable_poly1=False,
+        disable_lag_blr=False,
+        disable_lag_bc=False,
+        drop_band_lyman_alpha=False,
+        tau_fast_truncated=False,
+        n_blr_terms=1,
+        outer_iters=2,
+    )
+
+    assert np.all(np.isfinite(samples_flat["log_sigma_uv"]))
+    assert np.all(np.isfinite(samples_flat["amp_blr"]))
+    assert diagnostics["fluxmix_outer_iters"] == 2
+    assert "stage1_iter2_accept_prob" in diagnostics
+    assert "stage2_iter2_accept_prob" in diagnostics
+    assert "stage1_iter2_line_subtracted_rms" in diagnostics
+
+    posterior_median = {k: np.median(v, axis=0) for k, v in samples_flat.items()}
+    pred_mu, pred_std = model.pred(posterior_median, obj["X"])
+    assert np.all(np.isfinite(np.asarray(pred_mu)))
+    assert np.all(np.isfinite(np.asarray(pred_std)))
+    assert f"amp_cont_{bands[0]}" in flatten_per_chain_samples_per_band(samples_per_chain, bands)
+
+
+def test_save_combined_plot_fluxmix_handles_singleton_sample_entries(monkeypatch):
+    obj = _make_fake_public_object()
+    lc = make_lc(
+        obj,
+        ["g", "r"],
+        inject_fake=False,
+        drop_band_lyman_alpha=False,
+    )
+    obj = obj | lc
+
+    bands = obj["bands"]
+    lam_rf = jnp.array([lambda_pivot[b] for b in bands], dtype=float) / (1.0 + float(obj["z"]))
+    bidx = np.asarray(obj["band_idx"])
+    yerr = np.asarray(obj["yerr"])
+    log_jitter_mean = np.array(
+        [
+            np.log(np.mean(yerr[(bidx == i) & np.isfinite(yerr) & (yerr < 10)]))
+            for i in range(len(bands))
+        ],
+        dtype=float,
+    )
+
+    samples_flat, _, model, _ = run_two_stage_fluxmix_fast_inference(
+        obj,
+        lam_rf,
+        log_jitter_mean=jnp.array(log_jitter_mean),
+        rng_key=random.PRNGKey(10),
+        num_warmup=1,
+        num_samples=2,
+        num_chains=1,
+        chain_method="sequential",
+        progress_bar=False,
+        dense_mass=False,
+        max_tree_depth=1,
+        disable_poly1=False,
+        disable_lag_blr=False,
+        disable_lag_bc=False,
+        drop_band_lyman_alpha=False,
+        tau_fast_truncated=False,
+        n_blr_terms=1,
+    )
+
+    plot_samples = dict(samples_flat)
+    plot_samples["singleton_diag"] = np.asarray([1.0], dtype=float)
+    monkeypatch.setattr("matplotlib.pyplot.savefig", lambda *args, **kwargs: None)
+
+    save_combined_plot(
+        plot_samples,
+        model,
+        obj["X"],
+        obj["y"],
+        obj["yerr"],
+        obj["band_idx"],
+        obj["mags_means"],
+        obj.get("survey_times", {}),
+        obj,
+        time0=obj["time0"],
+        bands=bands,
+        plot_psd=True,
+        filename_suffix="pytest_fluxmix_singleton",
+    )
+
+
+def test_build_single_object_model_mag_fluxmix_stage2_rejects_second_blr_term():
+    obj = _make_fake_public_object()
+    lc = make_lc(
+        obj,
+        ["g", "r"],
+        inject_fake=False,
+        drop_band_lyman_alpha=False,
+    )
+    obj = obj | lc
+    bands = obj["bands"]
+    lam_rf = jnp.array([lambda_pivot[b] for b in bands], dtype=float) / (1.0 + float(obj["z"]))
+    stage1_raw_median = dict(
+        log_tau_slow_center0=jnp.log(100.0),
+        log_tau_fast_center0=jnp.log(10.0),
+        log_sigma_center0=jnp.log(0.1),
+        lambda_center_rf=jnp.exp(jnp.mean(jnp.log(lam_rf))),
+        poly1=0.0,
+        mean=jnp.zeros(len(bands)),
+        log_jitter=jnp.full(len(bands), -4.0),
+        lag0=jnp.asarray(5.0),
+        lag_beta=jnp.asarray(4.0 / 3.0),
+        log_amp_delta_lya=jnp.asarray(0.0),
+        eta_sigma=jnp.asarray(-0.5),
+        eta_tau=jnp.asarray(0.2),
+    )
+    basis_grid_t = jnp.linspace(-100.0, 100.0, 64)
+    basis_relflux_norm = jnp.ones((len(bands), 64), dtype=float) * 0.01
+    stage1_params_median = {
+        "lambda_center_rf": jnp.exp(jnp.mean(jnp.log(lam_rf))),
+        "log_sigma_uv": jnp.log(0.1),
+        "amp_cont": jnp.full(len(bands), 0.1),
+    }
+
+    with pytest.raises(ValueError, match=r"mag_fluxmix_fast.*n_blr_terms=1"):
+        build_single_object_model_mag_fluxmix_stage2(
+            obj,
+            lam_rf,
+            stage1_raw_median=stage1_raw_median,
+            stage1_params_median=stage1_params_median,
+            basis_grid_t=basis_grid_t,
+            basis_relflux_norm=basis_relflux_norm,
+            disable_lag_blr=False,
+            disable_lag_bc=False,
+            n_blr_terms=2,
+        )
+
+
 def test_plot_all_histograms_handles_constant_parameter(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     samples_flat = {
@@ -1002,6 +1311,30 @@ def test_plot_all_histograms_handles_constant_parameter(tmp_path, monkeypatch):
 
     _, _, save_path = plot_all_histograms(samples_flat, data)
     assert Path(save_path).exists()
+
+
+def test_save_dm_df_over_f_distribution_plot_writes_pdf(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    obj = _make_fake_public_object()
+    lc = make_lc(
+        obj,
+        ["g", "r"],
+        inject_fake=False,
+        drop_band_lyman_alpha=False,
+    )
+    obj = obj | lc
+
+    save_dm_df_over_f_distribution_plot(obj | {"bands": obj["bands"]})
+
+    save_path = (
+        tmp_path
+        / "plots"
+        / "multiband"
+        / "test"
+        / "dm_df_over_f_distributions"
+        / f"{float(obj['z']):.1f}_{obj['object_id']}_dm_df_over_f_test.pdf"
+    )
+    assert save_path.exists()
 
 
 def test_flatten_flat_samples_per_band_skips_internal_log_kernel_param():

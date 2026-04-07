@@ -194,6 +194,8 @@ def flatten_per_chain_samples_per_band(samples_per_chain, bands):
         if k.startswith('_') or k in internal_skip_keys:
             continue  # Skip metadata keys
         logging.debug(f"flatten_per_chain: {k} shape={getattr(v, 'shape', None)}")
+        if v.ndim == 0:
+            continue
         if v.ndim == 2:
             flattened_samples[k] = v
         elif v.ndim == 3:
@@ -264,6 +266,8 @@ def flatten_flat_samples_per_band(samples_flat, bands):
     for k, v in samples_flat.items():
         if k.startswith('_') or k in internal_skip_keys:
             continue  # Skip metadata keys
+        if v.ndim == 0:
+            continue
         if v.ndim == 1:
             flattened_samples[k] = v
         elif v.ndim == 2:

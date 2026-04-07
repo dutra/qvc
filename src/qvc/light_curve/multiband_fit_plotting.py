@@ -62,6 +62,51 @@ def _prediction_to_display(model, pred_result):
     return pred_result
 
 
+def _component_only_params(params, *, component):
+    """Return a copy of params with only the requested variability component active."""
+
+    out = dict(params)
+    if component == "continuum":
+        zero_keys = (
+            "amp_blr",
+            "amp_blr2",
+            "amp_bc",
+            "amp_blr_relflux",
+            "amp_blr2_relflux",
+            "amp_bc_relflux",
+        )
+    elif component == "line":
+        zero_keys = (
+            "amp_cont",
+            "amp_cont_relflux",
+        )
+    else:
+        raise ValueError(f"Unknown component {component!r}")
+
+    for key in zero_keys:
+        if key in out:
+            arr = np.asarray(out[key], dtype=float)
+            out[key] = np.zeros_like(arr)
+    return out
+
+
+def _posterior_sample_params_at_index(samples, i, reference_n):
+    """Build per-draw params while tolerating singleton or deterministic entries."""
+
+    out = {}
+    for key, value in samples.items():
+        arr = np.asarray(value)
+        if arr.ndim == 0:
+            out[key] = jnp.array(arr)
+        elif arr.shape[0] == reference_n:
+            out[key] = jnp.array(arr[i])
+        elif arr.shape[0] == 1:
+            out[key] = jnp.array(arr[0])
+        else:
+            out[key] = jnp.array(arr)
+    return out
+
+
 def _corner_plot_labels(samples_flat):
     """Return ordered candidate and filtered corner-plot parameter labels."""
 
@@ -1080,6 +1125,111 @@ def save_multiband_residual_normality_plot(diagnostic, data, show=False, filenam
     plt.close(fig)
 
 
+def save_dm_df_over_f_distribution_plot(data, show=False, filename_suffix=None):
+    """Save per-band histograms of dm and dF/F with Gaussian fits."""
+
+    object_id = data["object_id"]
+    z = float(data["z"])
+    bands = list(data.get("bands", []))
+    band_idx = np.asarray(data.get("band_idx", []), dtype=int)
+    dm_all = np.asarray(data.get("y", []), dtype=float)
+
+    if dm_all.size == 0 or len(bands) == 0:
+        logging.warning("Skipping dm/dF/F distribution plot because no cleaned light-curve residuals are available.")
+        return
+
+    fig, axes = plt.subplots(
+        len(bands),
+        2,
+        figsize=(10.5, max(3.0 * len(bands), 4.2)),
+        squeeze=False,
+    )
+
+    def _draw_hist_with_gaussian(ax, values, *, color, xlabel, band):
+        values = np.asarray(values, dtype=float)
+        values = values[np.isfinite(values)]
+        if values.size == 0:
+            ax.text(
+                0.5,
+                0.5,
+                f"No finite {xlabel}\nfor {band} band",
+                ha="center",
+                va="center",
+                transform=ax.transAxes,
+            )
+            return
+
+        bins = min(30, max(8, int(np.sqrt(values.size))))
+        ax.hist(
+            values,
+            bins=bins,
+            density=True,
+            color=color,
+            alpha=0.35,
+            edgecolor="white",
+        )
+
+        mu = float(np.mean(values))
+        sigma = float(np.std(values, ddof=1)) if values.size > 1 else 0.0
+        if np.isfinite(sigma) and sigma > 1e-12:
+            lo = float(np.min(values))
+            hi = float(np.max(values))
+            pad = max(1e-8, 0.1 * (hi - lo))
+            grid = np.linspace(lo - pad, hi + pad, 512)
+            ax.plot(grid, norm.pdf(grid, loc=mu, scale=sigma), color="black", lw=1.6)
+            ax.axvline(mu, color="black", ls="--", lw=1.0, alpha=0.9)
+        else:
+            ax.axvline(mu, color="black", ls="--", lw=1.0, alpha=0.9)
+
+        ax.set_xlabel(xlabel)
+        ax.set_ylabel(f"{band}-band density")
+        ax.text(
+            0.98,
+            0.98,
+            f"N={values.size}\nmu={mu:.3g}\nsigma={sigma:.3g}",
+            ha="right",
+            va="top",
+            transform=ax.transAxes,
+        )
+
+    for row, band in enumerate(bands):
+        mask = band_idx == row
+        dm_band = dm_all[mask]
+        df_over_f_band = np.power(10.0, -0.4 * dm_band) - 1.0
+
+        _draw_hist_with_gaussian(
+            axes[row, 0],
+            dm_band,
+            color=colors.get(band, "0.4"),
+            xlabel="dm (mag)",
+            band=band,
+        )
+        _draw_hist_with_gaussian(
+            axes[row, 1],
+            df_over_f_band,
+            color=colors.get(band, "0.4"),
+            xlabel="dF/F",
+            band=band,
+        )
+
+        if row == 0:
+            axes[row, 0].set_title("Magnitude Residual Distribution")
+            axes[row, 1].set_title("Relative-Flux Residual Distribution")
+
+    fig.suptitle("Per-band dm and dF/F distributions with Gaussian fits", y=0.995)
+    fig.tight_layout()
+
+    output_dir = f"plots/multiband/{prefix}/dm_df_over_f_distributions"
+    os.makedirs(output_dir, exist_ok=True)
+    save_suffix = suffix if filename_suffix is None else filename_suffix
+    fpath = os.path.join(output_dir, f"{z:.1f}_{object_id}_dm_df_over_f_{save_suffix}.pdf")
+    plt.savefig(fpath, dpi=600)
+    logging.info(f"Saving figure to {fpath}")
+    if show:
+        plt.show()
+    plt.close(fig)
+
+
 def _sf_bending_power_law_model_curve(tau, log_sigma_sf, log_tau_sf, alpha_short):
     """Evaluate the fitted flat-large-lag SF curve from an RMS-normalized amplitude."""
 
@@ -1264,6 +1414,33 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, mags_means, survey_
                 t_test, mu + offsets[n] - std, mu + offsets[n] + std,
                 alpha=0.3, lw=0.5, color=colors[band_idx_map[n]]
             )
+
+            cont_result = _prediction_to_display(
+                model,
+                model.pred(
+                    _component_only_params(posterior_median, component="continuum"),
+                    (t_test - time0, jnp.full_like(t_test, n, dtype=int)),
+                ),
+            )
+            mu_cont = np.asarray(cont_result[0], dtype=float)
+            mu_blr = np.asarray(mu, dtype=float) - mu_cont
+
+            ax_lc.plot(
+                t_test,
+                mu_cont + offsets[n],
+                alpha=0.75,
+                color=colors[band_idx_map[n]],
+                lw=1.0,
+                linestyle='--',
+            )
+            ax_lc.plot(
+                t_test,
+                mu_blr + offsets[n],
+                alpha=0.75,
+                color=colors[band_idx_map[n]],
+                lw=1.0,
+                linestyle=':',
+            )
         else:
             mu, std, mu_cont, std_cont, mu_blr, std_blr = result
 
@@ -1347,10 +1524,11 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, mags_means, survey_
 
         # Model PSD
         psd_samples = []
-        tau_samples_for_psd = samples['log_tau_uv']
-        n_samp = np.min([50, len(tau_samples_for_psd)])
+        tau_samples_for_psd = np.asarray(samples['log_tau_uv'])
+        n_total = int(len(tau_samples_for_psd))
+        n_samp = np.min([50, n_total])
         for i in range(n_samp):
-            sample_params = {k: jnp.array(v[i]) for k, v in samples.items()}
+            sample_params = _posterior_sample_params_at_index(samples, i, n_total)
             psd_i = (2.0 * jnp.pi) * model.psd(sample_params, 2 * np.pi * freqs, b=0, sigma_n2=0.0)
             psd_samples.append(np.asarray(psd_i))
         psd_samples = np.stack(psd_samples, axis=0)

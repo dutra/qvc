@@ -16,6 +16,7 @@ from qvc.light_curve.multiband_model_dho_blr import (
     ContiBLRFluxLinearized_SHO_Wrapper,
     ContiBLR_SHO_Wrapper,
     OverdampedSHOBaseQS,
+    TwoStageFluxMixDisplayModel,
     make_multiband_dho_blr_flux_linearized_model,
     make_multiband_dho_blr_model,
     qs_psd,
@@ -173,3 +174,34 @@ def test_make_multiband_dho_blr_flux_linearized_model_random_data():
     assert np.isclose(float(relative_flux_std_to_mag_std(0.0, 0.1)), (2.5 / np.log(10.0)) * 0.1)
     assert np.allclose(np.asarray(model.my_amp_transform(params)), expected_log_amp, rtol=1e-6, atol=1e-8)
     assert np.allclose(np.asarray(model.psd(params, omega, b=0, sigma_n2=0.0)), expected_psd, rtol=1e-6, atol=1e-8)
+
+
+def test_two_stage_fluxmix_display_soft_floors_large_negative_relflux():
+    class _StubContinuumModel:
+        X = (jnp.asarray([0.0]), jnp.asarray([0], dtype=int))
+        nBand = 1
+
+    model = TwoStageFluxMixDisplayModel(
+        continuum_model=_StubContinuumModel(),
+        basis_grid_t=jnp.asarray([0.0, 1.0], dtype=float),
+        basis_relflux_norm=jnp.asarray([[-1.0, -1.0]], dtype=float),
+        t_ref=jnp.asarray([0.0, 1.0], dtype=float),
+        zero_mean=True,
+        min_total_flux_ratio=0.05,
+        floor_softness=0.01,
+    )
+    params = {
+        "amp_cont": jnp.asarray([1.0], dtype=float),
+        "amp_blr": jnp.asarray([0.0], dtype=float),
+        "amp_bc": jnp.asarray([0.0], dtype=float),
+        "lag_blr": jnp.asarray([0.0], dtype=float),
+        "lag_bc": jnp.asarray([0.0], dtype=float),
+    }
+    pred_mu, pred_std = model.pred(
+        params,
+        (jnp.asarray([0.5], dtype=float), jnp.asarray([0], dtype=int)),
+    )
+
+    assert np.all(np.isfinite(np.asarray(pred_mu)))
+    assert np.all(np.isfinite(np.asarray(pred_std)))
+    assert float(np.asarray(pred_mu)[0]) < 4.0
