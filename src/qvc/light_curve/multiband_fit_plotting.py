@@ -56,6 +56,12 @@ def _get_param(sample_dict, primary, fallback=None):
     raise KeyError(f"Missing parameter '{primary}'" + (f" (fallback '{fallback}')" if fallback else ""))
 
 
+def _prediction_to_display(model, pred_result):
+    if hasattr(model, "prediction_to_display"):
+        return model.prediction_to_display(pred_result)
+    return pred_result
+
+
 def _corner_plot_labels(samples_flat):
     """Return ordered candidate and filtered corner-plot parameter labels."""
 
@@ -554,6 +560,8 @@ def combined_lomb_scargle_from_model(
             params,
             (t_lag, band_idx),
         )
+    if hasattr(model, "mean_to_display"):
+        mean_vals = model.mean_to_display(mean_vals)
     y = np.asarray(y, float).copy() - np.asarray(mean_vals, float)
     yerr = np.asarray(yerr, float).copy()
 
@@ -795,13 +803,26 @@ def save_color_magnitude_plot(
         cm_params["amp_blr"] = np.full_like(np.asarray(cm_params["amp_blr"], dtype=float), 1e-20)
     if "amp_blr2" in cm_params:
         cm_params["amp_blr2"] = np.full_like(np.asarray(cm_params["amp_blr2"], dtype=float), 1e-20)
+    if "amp_blr_relflux" in cm_params:
+        cm_params["amp_blr_relflux"] = np.full_like(
+            np.asarray(cm_params["amp_blr_relflux"], dtype=float),
+            1e-20,
+        )
+    if "amp_blr2_relflux" in cm_params:
+        cm_params["amp_blr2_relflux"] = np.full_like(
+            np.asarray(cm_params["amp_blr2_relflux"], dtype=float),
+            1e-20,
+        )
     t = X[0] + time0
     t_test = np.linspace(t.min() - 400, t.max() + 400, 4000)
 
     model_cont_by_band = {}
     model_cont_std_by_band = {}
     for n in np.unique(band_idx):
-        result = model.pred(cm_params, (t_test - time0, jnp.full_like(t_test, n, dtype=int)))
+        result = _prediction_to_display(
+            model,
+            model.pred(cm_params, (t_test - time0, jnp.full_like(t_test, n, dtype=int))),
+        )
         if len(result) == 2:
             mu, std = result
             model_cont_by_band[n] = np.asarray(mu, dtype=float)
@@ -1230,7 +1251,10 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, mags_means, survey_
         )
 
         # Compute predictions using the model
-        result = model.pred(posterior_median, (t_test - time0, jnp.full_like(t_test, n, dtype=int)))
+        result = _prediction_to_display(
+            model,
+            model.pred(posterior_median, (t_test - time0, jnp.full_like(t_test, n, dtype=int))),
+        )
 
         # Plot the predictions
         if len(result) == 2:
@@ -1771,9 +1795,12 @@ def plot_all_histograms(
             x_s   = x * scale
             l_s   = l * scale
             h_s   = h * scale
+            x_span = float(np.nanmax(x_s) - np.nanmin(x_s)) if np.all(np.isfinite(x_s)) else np.inf
+            const_tol = max(1e-12, abs(float(np.nanmedian(x_s))) * 1e-12) if np.any(np.isfinite(x_s)) else 1e-12
+            hist_bins = 1 if (not np.isfinite(x_span) or x_span <= const_tol or not np.isfinite(l_s) or not np.isfinite(h_s) or h_s <= l_s) else bins
 
             # density=True is fine after rescaling; values stay reasonable
-            ax.hist(x_s, bins=bins, range=(l_s, h_s), density=True, edgecolor="none")
+            ax.hist(x_s, bins=hist_bins, range=(l_s, h_s), density=True, edgecolor="none")
 
             # median + 68% interval (in scaled units)
             q16, q50, q84 = np.percentile(x_s, [16, 50, 84])

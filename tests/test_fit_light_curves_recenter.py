@@ -537,6 +537,43 @@ def test_compute_parameter_kls_returns_expected_keys():
     assert all(np.isfinite(kls[key]) for key in expected_keys)
 
 
+def test_compute_parameter_kls_uses_relflux_sigma_center0_when_requested():
+    rng = np.random.default_rng(321)
+    n = 32
+    flat_samples = {
+        "eta_sigma": rng.normal(-0.45, 0.08, size=n),
+        "eta_tau": rng.normal(0.55, 0.10, size=n),
+        "log_sigma_center0": rng.normal(-9.0, 0.05, size=n),
+        "log_sigma_center0_relflux": rng.normal(np.log(0.15), 0.15, size=n),
+        "log_tau_slow_center0": rng.normal(np.log(300.0), 0.3, size=n),
+        "log_tau_fast_center0": rng.normal(np.log(30.0), 0.2, size=n),
+        "poly1": rng.normal(0.0, 0.05, size=n),
+        "lag0": np.abs(rng.normal(5.0, 1.0, size=n)),
+        "lag_beta": np.abs(rng.normal(4.0 / 3.0, 0.1, size=n)),
+        "log_amp_delta_lya": rng.normal(-0.5, 0.1, size=n),
+        "mean_g": rng.normal(0.0, 0.05, size=n),
+        "log_jitter_g": rng.normal(np.log(0.03), 0.1, size=n),
+        "log_amp_delta_blr_g": rng.normal(-1.0, 0.2, size=n),
+        "log_lag_blr_g": rng.normal(np.log(20.0), 0.2, size=n),
+        "log_amp_delta_bc": rng.normal(-1.1, 0.2, size=n),
+        "log_lag_ratio_bc_to_blr": rng.uniform(np.log(0.1), np.log(0.3), size=n),
+    }
+
+    kls = compute_parameter_kls(
+        flat_samples,
+        bands=["g"],
+        z=1.2,
+        lambda_center_rf=2500.0,
+        log_jitter_mean=np.asarray([np.log(0.03)]),
+        model_variant="mag_flux_linearized",
+        disable_lag_bc=False,
+        n_blr_terms=1,
+    )
+
+    assert "log_sigma_center0_kl" in kls
+    assert np.isfinite(kls["log_sigma_center0_kl"])
+
+
 def test_posterior_median_mean_function_uses_global_time_normalization():
     t_eval = np.array([0.0, 20.0], dtype=float)
     t_ref = np.array([0.0, 10.0, 20.0], dtype=float)

@@ -186,9 +186,12 @@ def flatten_per_chain_samples_per_band(samples_per_chain, bands):
     dict
         Dictionary with flattened samples for each band, preserving chain structure.
     """
+    internal_skip_keys = {
+        "log_kernel_param",
+    }
     flattened_samples = {}
     for k, v in samples_per_chain.items():
-        if k.startswith('_'):
+        if k.startswith('_') or k in internal_skip_keys:
             continue  # Skip metadata keys
         logging.debug(f"flatten_per_chain: {k} shape={getattr(v, 'shape', None)}")
         if v.ndim == 2:
@@ -254,9 +257,12 @@ def flatten_flat_samples_per_band(samples_flat, bands):
     dict
         Dictionary with flattened samples for each band.
     """
+    internal_skip_keys = {
+        "log_kernel_param",
+    }
     flattened_samples = {}
     for k, v in samples_flat.items():
-        if k.startswith('_'):
+        if k.startswith('_') or k in internal_skip_keys:
             continue  # Skip metadata keys
         if v.ndim == 1:
             flattened_samples[k] = v

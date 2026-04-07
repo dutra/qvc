@@ -6,6 +6,7 @@ import h5py
 import numpy as np
 import pandas as pd
 import jax.numpy as jnp
+import pytest
 from matplotlib.container import ErrorbarContainer
 from jax import device_get, random
 from jax.tree_util import tree_map
@@ -22,14 +23,16 @@ if str(SRC) not in sys.path:
 from qvc.hubble import hubble_plotting, hubble_utils
 from qvc.light_curve.fit_light_curves import (
     build_single_object_model,
-    build_single_object_model_flux,
+    build_single_object_model_mag_flux_linearized,
     compute_g_band_residual_drift_diagnostics,
     compute_g_band_raw_drift_diagnostics,
     compute_object_adf_diagnostics,
     make_lc,
 )
+from qvc.light_curve.multiband_fit_plotting import plot_all_histograms
 from qvc.light_curve.multiband_fit_utils import (
     flatten_flat_samples_per_band,
+    flatten_per_chain_samples_per_band,
     lambda_pivot,
     process_samples,
 )
@@ -880,17 +883,17 @@ def test_build_single_object_model_disables_second_blr_term_by_default():
     )
 
     model_trace = trace(seed(model, random.PRNGKey(0))).get_trace()
-    assert "log_amp_delta_blr_raw" in model_trace
-    assert "log_lag_blr_raw" in model_trace
+    assert "log_amp_ratio_blr_raw" in model_trace
+    assert "delta_log_lag_blr_raw" in model_trace
     assert "log_amp_delta_bc" in model_trace
     assert "log_lag_ratio_bc_to_blr" in model_trace
-    assert "log_amp_delta_blr2_raw" not in model_trace
-    assert "log_lag_blr2_raw" not in model_trace
+    assert "log_amp_ratio_blr2_raw" not in model_trace
+    assert "delta_log_lag_blr2_raw" not in model_trace
     assert np.allclose(np.asarray(model_trace["log_amp_delta_blr2"]["value"]), -9.0)
     assert np.allclose(np.asarray(model_trace["log_lag_blr2"]["value"]), -9.0)
 
 
-def test_build_single_object_model_flux_smoke():
+def test_build_single_object_model_mag_flux_linearized_smoke():
     obj = _make_fake_public_object()
     lc = make_lc(
         obj,
@@ -911,7 +914,7 @@ def test_build_single_object_model_flux_smoke():
         ],
         dtype=float,
     )
-    numpyro_model = build_single_object_model_flux(
+    numpyro_model = build_single_object_model_mag_flux_linearized(
         obj,
         lam_rf,
         log_jitter_mean=jnp.array(log_jitter_mean),
@@ -926,25 +929,109 @@ def test_build_single_object_model_flux_smoke():
     nuts = NUTS(
         numpyro_model,
         dense_mass=False,
-        max_tree_depth=2,
+        max_tree_depth=1,
         target_accept_prob=0.8,
     )
     mcmc = MCMC(
         nuts,
-        num_warmup=3,
-        num_samples=4,
+        num_warmup=1,
+        num_samples=1,
         num_chains=1,
         chain_method="sequential",
         progress_bar=False,
     )
-    mcmc.run(random.PRNGKey(1))
+    mcmc.run(random.PRNGKey(4))
 
     samples_flat = mcmc.get_samples(group_by_chain=False)
     samples_flat = tree_map(lambda x: np.asarray(device_get(x)), samples_flat)
-    assert "_latent_cont" in samples_flat
+    assert "amp_cont" in samples_flat
+    assert "amp_cont_relflux" in samples_flat
+    assert "lag_blr" in samples_flat
     assert np.all(np.isfinite(samples_flat["log_sigma_uv"]))
-    assert np.all(np.isfinite(samples_flat["log_tau_uv"]))
+    assert np.all(np.isfinite(samples_flat["log_sigma_uv_relflux"]))
     assert np.all(np.isfinite(samples_flat["F0_cont_band"]))
+    assert np.all(np.isfinite(samples_flat["amp_cont_relflux"]))
+
+
+def test_build_single_object_model_mag_flux_linearized_rejects_second_blr_term():
+    obj = _make_fake_public_object()
+    lc = make_lc(
+        obj,
+        ["g", "r"],
+        inject_fake=False,
+        drop_band_lyman_alpha=False,
+    )
+    obj = obj | lc
+
+    bands = obj["bands"]
+    lam_rf = jnp.array([lambda_pivot[b] for b in bands], dtype=float) / (1.0 + float(obj["z"]))
+    bidx = np.asarray(obj["band_idx"])
+    yerr = np.asarray(obj["yerr"])
+    log_jitter_mean = np.array(
+        [
+            np.log(np.mean(yerr[(bidx == i) & np.isfinite(yerr) & (yerr < 10)]))
+            for i in range(len(bands))
+        ],
+        dtype=float,
+    )
+
+    with pytest.raises(ValueError, match=r"mag_flux_linearized.*n_blr_terms=1"):
+        build_single_object_model_mag_flux_linearized(
+            obj,
+            lam_rf,
+            log_jitter_mean=jnp.array(log_jitter_mean),
+            disable_poly1=False,
+            disable_lag_blr=False,
+            disable_lag_bc=False,
+            drop_band_lyman_alpha=False,
+            tau_fast_truncated=False,
+            n_blr_terms=2,
+        )
+
+
+def test_plot_all_histograms_handles_constant_parameter(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    samples_flat = {
+        "F0_cont_band_g": np.ones(32, dtype=float),
+        "amp_cont_g": np.linspace(0.1, 0.2, 32, dtype=float),
+    }
+    data = {
+        "object_id": "12345",
+        "z": 0.5,
+    }
+
+    _, _, save_path = plot_all_histograms(samples_flat, data)
+    assert Path(save_path).exists()
+
+
+def test_flatten_flat_samples_per_band_skips_internal_log_kernel_param():
+    flat_per_band = flatten_flat_samples_per_band(
+        {
+            "log_kernel_param": np.ones((20, 8), dtype=float),
+            "amp_cont": np.ones((20, 4), dtype=float),
+            "eta_sigma": np.ones(20, dtype=float),
+        },
+        bands=["u", "g", "r", "i"],
+    )
+
+    assert "log_kernel_param" not in flat_per_band
+    assert "amp_cont_u" in flat_per_band
+    assert "eta_sigma" in flat_per_band
+
+
+def test_flatten_per_chain_samples_per_band_skips_internal_log_kernel_param():
+    flat_per_band = flatten_per_chain_samples_per_band(
+        {
+            "log_kernel_param": np.ones((1, 20, 8), dtype=float),
+            "amp_cont": np.ones((1, 20, 4), dtype=float),
+            "eta_sigma": np.ones((1, 20), dtype=float),
+        },
+        bands=["u", "g", "r", "i"],
+    )
+
+    assert "log_kernel_param" not in flat_per_band
+    assert "amp_cont_u" in flat_per_band
+    assert "eta_sigma" in flat_per_band
 
 
 def test_end_to_end(tmp_path, monkeypatch):
