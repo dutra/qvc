@@ -2317,6 +2317,7 @@ def extract_cosmo_results_from_samples(
     format_for_latex=False,
     value_fmt="{:.3f}",
     use_alpha_lambda_term=None,
+    use_eta_sigma_term=None,
     use_redshift_log_f_term=None,
 ):
     """
@@ -2354,12 +2355,14 @@ def extract_cosmo_results_from_samples(
         np.asarray(samples).shape[1],
         only_sna=only_sna,
         use_alpha_lambda_term=use_alpha_lambda_term,
+        use_eta_sigma_term=use_eta_sigma_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
     )
     priors, model_labels, model_labels_latex = get_model_params(
         cosmo_model,
         only_sna=only_sna,
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
+        use_eta_sigma_term=option_flags["use_eta_sigma_term"],
         use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
     )
 
@@ -2417,6 +2420,7 @@ def display_results_summary(
     cosmo_model,
     z_pivot_agn,
     use_alpha_lambda_term=None,
+    use_eta_sigma_term=None,
     use_redshift_log_f_term=None,
     sigma_sel_posterior_median=None,
 ):
@@ -2426,21 +2430,29 @@ def display_results_summary(
     at the supplied z_pivot_agn.
     """
     samples = np.asarray(samples)
-    if use_alpha_lambda_term is None or use_redshift_log_f_term is None:
+    if (
+        use_alpha_lambda_term is None
+        or use_eta_sigma_term is None
+        or use_redshift_log_f_term is None
+    ):
         option_flags = resolve_model_option_flags(
             cosmo_model,
             samples.shape[1],
             only_sna=False,
             use_alpha_lambda_term=use_alpha_lambda_term,
+            use_eta_sigma_term=use_eta_sigma_term,
             use_redshift_log_f_term=use_redshift_log_f_term,
         )
         if use_alpha_lambda_term is None:
             use_alpha_lambda_term = option_flags["use_alpha_lambda_term"]
+        if use_eta_sigma_term is None:
+            use_eta_sigma_term = option_flags["use_eta_sigma_term"]
         if use_redshift_log_f_term is None:
             use_redshift_log_f_term = option_flags["use_redshift_log_f_term"]
     _, model_labels, _ = get_model_params(
         cosmo_model,
         use_alpha_lambda_term=use_alpha_lambda_term,
+        use_eta_sigma_term=use_eta_sigma_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
     )
 
@@ -2570,6 +2582,7 @@ def compute_age_universe_with_error(
     max_eval=None,
     random_seed=None,
     use_alpha_lambda_term=None,
+    use_eta_sigma_term=None,
     use_redshift_log_f_term=None,
 ):
     """
@@ -2606,11 +2619,13 @@ def compute_age_universe_with_error(
         cosmo_model,
         np.asarray(samples).shape[1],
         use_alpha_lambda_term=use_alpha_lambda_term,
+        use_eta_sigma_term=use_eta_sigma_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
     )
     priors, model_labels, _ = get_model_params(
         cosmo_model,
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
+        use_eta_sigma_term=option_flags["use_eta_sigma_term"],
         use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
     )
 
@@ -2694,6 +2709,7 @@ def compute_pivot_redshift(flat_samples, cosmo_model, z_min=0.0, z_max=4.0):
     priors, model_labels, model_labels_latex = get_model_params(
         cosmo_model,
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
+        use_eta_sigma_term=option_flags["use_eta_sigma_term"],
         use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
     )
     idx = {name: model_labels.index(name) for name in model_labels}
@@ -2762,6 +2778,7 @@ def posterior_corr(flat_samples, cosmo_model, z_pivot_agn):
     priors, model_labels, _ = get_model_params(
         cosmo_model,
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
+        use_eta_sigma_term=option_flags["use_eta_sigma_term"],
         use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
     )
     flat_samples = np.asarray(flat_samples)
@@ -2966,6 +2983,7 @@ def write_results_tex_variables(
             model_name,
             only_sna=True,
             use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
+            use_eta_sigma_term=option_flags["use_eta_sigma_term"],
             use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
         )
         results = {}
@@ -3011,6 +3029,7 @@ def write_results_tex_variables(
         priors, model_labels, _ = get_model_params(
             model_name,
             use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
+            use_eta_sigma_term=option_flags["use_eta_sigma_term"],
             use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
         )
         results = {}

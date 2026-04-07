@@ -5,13 +5,16 @@ from collections import OrderedDict
 AGN_ALPHA_LAMBDA_PARAM = "gamma_alpha_lambda"
 AGN_ALPHA_LAMBDA_OBS = "alpha_lambda"
 AGN_ALPHA_LAMBDA_ERR = "alpha_lambda_err"
+AGN_ETA_SIGMA_PARAM = "gamma_eta_sigma"
+AGN_ETA_SIGMA_OBS = "eta_sigma"
+AGN_ETA_SIGMA_ERR = "eta_sigma_err"
 AGN_LOGF_Z_PARAM = "gamma_log_f_z"
 AGN_INTRINSIC_SCATTER_MAG_CENTER = 2.5 * 0.2  # 0.2 dex in luminosity = 0.5 mag
 AGN_LOG_F_PRIOR = (np.log(AGN_INTRINSIC_SCATTER_MAG_CENTER) - 0.8,
                    np.log(AGN_INTRINSIC_SCATTER_MAG_CENTER) + 0.8)
 
 
-def get_agn_model_spec(use_alpha_lambda_term=False):
+def get_agn_model_spec(use_alpha_lambda_term=False, use_eta_sigma_term=False):
     req_params = (
         "M0_agn",
         "alpha_agn",
@@ -32,12 +35,17 @@ def get_agn_model_spec(use_alpha_lambda_term=False):
         req_params += (AGN_ALPHA_LAMBDA_PARAM,)
         req_obs += (AGN_ALPHA_LAMBDA_OBS,)
         req_errs += (AGN_ALPHA_LAMBDA_ERR,)
+    if use_eta_sigma_term:
+        req_params += (AGN_ETA_SIGMA_PARAM,)
+        req_obs += (AGN_ETA_SIGMA_OBS,)
+        req_errs += (AGN_ETA_SIGMA_ERR,)
     return req_params, req_obs, req_errs
 
 
 # Keep the default non-alpha model as the module-level import contract.
 agn_model_req_params, agn_model_req_obs, agn_model_req_errs = get_agn_model_spec(
-    use_alpha_lambda_term=False
+    use_alpha_lambda_term=False,
+    use_eta_sigma_term=False,
 )
 agn_model_pidx = {k: i for i, k in enumerate(agn_model_req_params)}
 agn_model_oidx = {k: i for i, k in enumerate(agn_model_req_obs)}
@@ -52,19 +60,29 @@ def _require(keys, provided, where):
 def infer_model_option_flags(cosmo_model, sample_dim, only_sna=False):
     combos = []
     for use_alpha_lambda_term in (False, True):
-        for use_redshift_log_f_term in (False, True):
-            _, labels, _ = get_model_params(
-                cosmo_model,
-                only_sna=only_sna,
-                use_alpha_lambda_term=use_alpha_lambda_term,
-                use_redshift_log_f_term=use_redshift_log_f_term,
-            )
-            combos.append((len(labels), use_alpha_lambda_term, use_redshift_log_f_term))
+        for use_eta_sigma_term in (False, True):
+            for use_redshift_log_f_term in (False, True):
+                _, labels, _ = get_model_params(
+                    cosmo_model,
+                    only_sna=only_sna,
+                    use_alpha_lambda_term=use_alpha_lambda_term,
+                    use_eta_sigma_term=use_eta_sigma_term,
+                    use_redshift_log_f_term=use_redshift_log_f_term,
+                )
+                combos.append(
+                    (
+                        len(labels),
+                        use_alpha_lambda_term,
+                        use_eta_sigma_term,
+                        use_redshift_log_f_term,
+                    )
+                )
     matches = [combo for combo in combos if combo[0] == sample_dim]
     if len(matches) == 1:
-        _, use_alpha_lambda_term, use_redshift_log_f_term = matches[0]
+        _, use_alpha_lambda_term, use_eta_sigma_term, use_redshift_log_f_term = matches[0]
         return {
             "use_alpha_lambda_term": use_alpha_lambda_term,
+            "use_eta_sigma_term": use_eta_sigma_term,
             "use_redshift_log_f_term": use_redshift_log_f_term,
         }
     expected = sorted({n for n, _, _ in combos})
@@ -80,30 +98,39 @@ def resolve_model_option_flags(
     *,
     only_sna=False,
     use_alpha_lambda_term=None,
+    use_eta_sigma_term=None,
     use_redshift_log_f_term=None,
 ):
     combos = []
     for alpha_flag in (False, True):
-        for logf_flag in (False, True):
-            _, labels, _ = get_model_params(
-                cosmo_model,
-                only_sna=only_sna,
-                use_alpha_lambda_term=alpha_flag,
-                use_redshift_log_f_term=logf_flag,
-            )
-            combos.append(
-                {
-                    "sample_dim": len(labels),
-                    "use_alpha_lambda_term": alpha_flag,
-                    "use_redshift_log_f_term": logf_flag,
-                }
-            )
+        for eta_flag in (False, True):
+            for logf_flag in (False, True):
+                _, labels, _ = get_model_params(
+                    cosmo_model,
+                    only_sna=only_sna,
+                    use_alpha_lambda_term=alpha_flag,
+                    use_eta_sigma_term=eta_flag,
+                    use_redshift_log_f_term=logf_flag,
+                )
+                combos.append(
+                    {
+                        "sample_dim": len(labels),
+                        "use_alpha_lambda_term": alpha_flag,
+                        "use_eta_sigma_term": eta_flag,
+                        "use_redshift_log_f_term": logf_flag,
+                    }
+                )
 
     matches = [combo for combo in combos if combo["sample_dim"] == sample_dim]
     if use_alpha_lambda_term is not None:
         matches = [
             combo for combo in matches
             if combo["use_alpha_lambda_term"] == use_alpha_lambda_term
+        ]
+    if use_eta_sigma_term is not None:
+        matches = [
+            combo for combo in matches
+            if combo["use_eta_sigma_term"] == use_eta_sigma_term
         ]
     if use_redshift_log_f_term is not None:
         matches = [
@@ -114,18 +141,21 @@ def resolve_model_option_flags(
     if len(matches) == 1:
         return {
             "use_alpha_lambda_term": matches[0]["use_alpha_lambda_term"],
+            "use_eta_sigma_term": matches[0]["use_eta_sigma_term"],
             "use_redshift_log_f_term": matches[0]["use_redshift_log_f_term"],
         }
 
     expected = sorted({combo["sample_dim"] for combo in combos})
     requested = {
         "use_alpha_lambda_term": use_alpha_lambda_term,
+        "use_eta_sigma_term": use_eta_sigma_term,
         "use_redshift_log_f_term": use_redshift_log_f_term,
     }
     if len(matches) > 1:
         matching_configs = [
             {
                 "use_alpha_lambda_term": combo["use_alpha_lambda_term"],
+                "use_eta_sigma_term": combo["use_eta_sigma_term"],
                 "use_redshift_log_f_term": combo["use_redshift_log_f_term"],
             }
             for combo in matches
@@ -133,8 +163,8 @@ def resolve_model_option_flags(
         raise ValueError(
             f"Ambiguous model option flags for sample_dim={sample_dim}, "
             f"cosmo_model={cosmo_model!r}. Matching configurations: "
-            f"{matching_configs}. Pass explicit use_alpha_lambda_term and/or "
-            f"use_redshift_log_f_term."
+            f"{matching_configs}. Pass explicit use_alpha_lambda_term, "
+            f"use_eta_sigma_term, and/or use_redshift_log_f_term."
         )
 
     raise ValueError(
@@ -148,6 +178,12 @@ def infer_use_alpha_lambda_term(cosmo_model, sample_dim, only_sna=False):
     return infer_model_option_flags(
         cosmo_model, sample_dim, only_sna=only_sna
     )["use_alpha_lambda_term"]
+
+
+def infer_use_eta_sigma_term(cosmo_model, sample_dim, only_sna=False):
+    return infer_model_option_flags(
+        cosmo_model, sample_dim, only_sna=only_sna
+    )["use_eta_sigma_term"]
 
 
 def infer_use_redshift_log_f_term(cosmo_model, sample_dim, only_sna=False):
@@ -165,8 +201,11 @@ def evaluate_log_f(params_dict, z, z_pivot, use_redshift_log_f_term=False):
     return log_f0 + gamma_f * np.log10((1.0 + z) / (1.0 + float(z_pivot)))
 
 
-def agn_model_pack_params(params_dict, use_alpha_lambda_term=False):
-    req_params, _, _ = get_agn_model_spec(use_alpha_lambda_term=use_alpha_lambda_term)
+def agn_model_pack_params(params_dict, use_alpha_lambda_term=False, use_eta_sigma_term=False):
+    req_params, _, _ = get_agn_model_spec(
+        use_alpha_lambda_term=use_alpha_lambda_term,
+        use_eta_sigma_term=use_eta_sigma_term,
+    )
     _require(req_params, params_dict, "params")
     params = np.array([params_dict[k] for k in req_params], dtype=float)
     return params
@@ -181,8 +220,11 @@ def _fixed_pivot_from_observable(key, values):
     return pivot
 
 
-def agn_model_pack_obs(obs_dict, use_alpha_lambda_term=False):
-    _, req_obs, req_errs = get_agn_model_spec(use_alpha_lambda_term=use_alpha_lambda_term)
+def agn_model_pack_obs(obs_dict, use_alpha_lambda_term=False, use_eta_sigma_term=False):
+    _, req_obs, req_errs = get_agn_model_spec(
+        use_alpha_lambda_term=use_alpha_lambda_term,
+        use_eta_sigma_term=use_eta_sigma_term,
+    )
     _require(req_obs, obs_dict, "observables")
     _require(req_errs, obs_dict, "errors")
     obs = np.array([obs_dict[k] for k in req_obs], dtype=float)
@@ -199,8 +241,11 @@ def hinge(x, a, b, x0):
 def logistic(x, A, k, x0):
      return A * expit(k*(x - x0))
 
-def M_model_agn(params_arr, obs_arr, pivots_array, use_alpha_lambda_term=False):
-    req_params, req_obs, _ = get_agn_model_spec(use_alpha_lambda_term=use_alpha_lambda_term)
+def M_model_agn(params_arr, obs_arr, pivots_array, use_alpha_lambda_term=False, use_eta_sigma_term=False):
+    req_params, req_obs, _ = get_agn_model_spec(
+        use_alpha_lambda_term=use_alpha_lambda_term,
+        use_eta_sigma_term=use_eta_sigma_term,
+    )
     pidx = {k: i for i, k in enumerate(req_params)}
     oidx = {k: i for i, k in enumerate(req_obs)}
 
@@ -235,10 +280,26 @@ def M_model_agn(params_arr, obs_arr, pivots_array, use_alpha_lambda_term=False):
         alpha_lambda = obs_arr[oidx[AGN_ALPHA_LAMBDA_OBS]]
         alpha_lambda_pivot = pivots_array[oidx[AGN_ALPHA_LAMBDA_OBS]]
         M_pred = M_pred + gamma_alpha_lambda * (alpha_lambda - alpha_lambda_pivot)
+    if use_eta_sigma_term:
+        gamma_eta_sigma = params_arr[pidx[AGN_ETA_SIGMA_PARAM]]
+        eta_sigma = obs_arr[oidx[AGN_ETA_SIGMA_OBS]]
+        eta_sigma_pivot = pivots_array[oidx[AGN_ETA_SIGMA_OBS]]
+        M_pred = M_pred + gamma_eta_sigma * (eta_sigma - eta_sigma_pivot)
     return M_pred
 
-def M_model_agn_err(params_arr, obs_arr, err_arr, pivots_array, check_negative=False, use_alpha_lambda_term=False):
-    req_params, _, req_errs = get_agn_model_spec(use_alpha_lambda_term=use_alpha_lambda_term)
+def M_model_agn_err(
+    params_arr,
+    obs_arr,
+    err_arr,
+    pivots_array,
+    check_negative=False,
+    use_alpha_lambda_term=False,
+    use_eta_sigma_term=False,
+):
+    req_params, _, req_errs = get_agn_model_spec(
+        use_alpha_lambda_term=use_alpha_lambda_term,
+        use_eta_sigma_term=use_eta_sigma_term,
+    )
     pidx = {k: i for i, k in enumerate(req_params)}
     eidx = {k: i for i, k in enumerate(req_errs)}
 
@@ -265,6 +326,10 @@ def M_model_agn_err(params_arr, obs_arr, err_arr, pivots_array, check_negative=F
         gamma_alpha_lambda = params_arr[pidx[AGN_ALPHA_LAMBDA_PARAM]]
         alpha_lambda_err = err_arr[eidx[AGN_ALPHA_LAMBDA_ERR]]
         r = r + (gamma_alpha_lambda * alpha_lambda_err) ** 2
+    if use_eta_sigma_term:
+        gamma_eta_sigma = params_arr[pidx[AGN_ETA_SIGMA_PARAM]]
+        eta_sigma_err = err_arr[eidx[AGN_ETA_SIGMA_ERR]]
+        r = r + (gamma_eta_sigma * eta_sigma_err) ** 2
     if check_negative:
         if np.any(r < 0):
             idx = np.where(r < 0)
@@ -278,6 +343,7 @@ def get_model_params(
     cosmo_model,
     only_sna=False,
     use_alpha_lambda_term=False,
+    use_eta_sigma_term=False,
     use_redshift_log_f_term=False,
 ):
     
@@ -288,6 +354,7 @@ def get_model_params(
         ("alpha_agn", (-20,  20.0)),
         ("beta_agn",  (-20.0,  20.0)),
         (AGN_ALPHA_LAMBDA_PARAM, (-20.0, 20.0)),
+        (AGN_ETA_SIGMA_PARAM, (-20.0, 20.0)),
         
         # ("A",    (-5.0,  5.0)),
         # ("k",    (0,  20.0)),
@@ -310,6 +377,8 @@ def get_model_params(
     ])
     if not use_alpha_lambda_term:
         priors.pop(AGN_ALPHA_LAMBDA_PARAM)
+    if not use_eta_sigma_term:
+        priors.pop(AGN_ETA_SIGMA_PARAM)
     if not use_redshift_log_f_term:
         priors.pop(AGN_LOGF_Z_PARAM)
 
@@ -345,6 +414,7 @@ def get_model_params(
         "alpha_agn": r"$\alpha_{\rm AGN}$",
         "beta_agn": r"$\beta_{\rm AGN}$",
         AGN_ALPHA_LAMBDA_PARAM: r"$\gamma_{\alpha_\lambda}$",
+        AGN_ETA_SIGMA_PARAM: r"$\gamma_{\eta_\sigma}$",
         "gamma_agn": r"$\gamma_{\rm AGN}$",
         "log_f": r"$\log f$",
         AGN_LOGF_Z_PARAM: r"$\gamma_{\log f,z}$",

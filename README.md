@@ -54,13 +54,6 @@ This **main environment** is used for:
 
 Make sure to always activate the conda environment before working with QVC.
 
-### 2) Install EzTaoX
-For now, we need to install EzTaoX from the repository (the one installed with `pip install eztaox` is out-of-date):
-```bash
-git clone https://github.com/LSST-AGN-Variability/EzTaoX
-pip install EzTaoX
-```
-
 ### 3) Compile _quasarlf/pubtools_
 We must compile the pubtools from
 ```
@@ -130,7 +123,6 @@ python -m qvc.light_curve.fit_light_curves --help
 
 ## Hubble-Diagram Fitting
 
-
 A subset of Hubble-diagram fitting and plotting can be run via:
 
 * `notebooks/hubble_diagram_plots.ipynb`
@@ -149,21 +141,34 @@ python -m qvc.hubble.hubble_fit \
     --bc_frac_cut 0.001 \ 
     --variability_chi_sq_cut 10.0 \ 
     --speed fast \ 
-    --spectra_fit_csv results/data/jaxqsofit_mar15c.csv \ 
+    --spectra_fit_csv results/data/spectra.csv \ 
     --z_range 0.44 3.16 \ 
     --result_prefix fiducial \ 
     --prefix demo \ 
-    "results/data/nov10a_single_chisq_carma_mixscalar_nozband_highertaufastlim_removemix_fixband_lagblrband_chisq_spl_nofhost_bwb_lmc-6_N1w1000s200t14ch4.h5"
+    "results/data/light_curves.h5"
 ```
 
----
-# TBD
+The `hubble_fit` in this step is ran with `--speed fast`, which uses a minimum amount of `dynesty` live points (e.g. 5) for a reasonable result ran in a reasonable time (~few hours) in a laptop.
+For our published results, we ran with `--speed production` which uses ~500 live points for a full exploration of the likelihood.
 
-## 3) Spectral Fitting
-TBD 
+---
+## Spectral Fitting
 
 This step uses the light-curve output from the previous section and fits the corresponding spectra.
 
+```bash
+python -m qvc.spectra.fit_spectra \
+  --mode fit \
+  results/data/demo/1465126.h5 \
+  results/data/demo/spectra_1465126.csv \
+  --cache-dir data/spectra_cache \
+  --verbose \
+  --save-fig \
+  --nuts-warmup 200 \
+  --nuts-samples 100 \
+  --nuts-chains 1 \
+  --filter_object_id 1465126 
+```
 
 ---
 

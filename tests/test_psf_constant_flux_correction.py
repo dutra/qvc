@@ -27,7 +27,7 @@ def test_subtract_constant_flux_from_band_makes_curve_fainter_and_more_variable(
     corrected_mags, corrected_magerrs, summary = subtract_constant_flux_from_band(
         mags,
         magerrs,
-        pl_fraction=0.5,
+        agn_fraction=0.5,
     )
 
     assert np.all(np.isfinite(corrected_mags))
@@ -45,7 +45,7 @@ def test_apply_constant_flux_correction_to_object_requires_bandpass_fraction():
         "mags": {"g": np.array([20.0, 20.1, 19.9], dtype=float)},
         "magerrs": {"g": np.full(3, 0.03, dtype=float)},
         "mags_mean": [20.0],
-        "f_PL_psf_g": 0.5,
+        "f_AGN_psf_g": 0.5,
     }
 
     corrected_obj, summary = apply_constant_flux_correction_to_object(obj)
@@ -54,8 +54,8 @@ def test_apply_constant_flux_correction_to_object_requires_bandpass_fraction():
     assert corrected_obj["psf_constant_flux_n_bands_corrected"] == 1
     assert summary["n_corrected_bands"] == 1
     band_summary = corrected_obj["psf_constant_flux_band_summaries"]["g"]
-    assert band_summary["source_key"] == "f_PL_psf_g"
-    assert np.isclose(band_summary["pl_fraction"], 0.5)
+    assert band_summary["source_key"] == "f_AGN_psf_g"
+    assert np.isclose(band_summary["agn_fraction"], 0.5)
     assert np.nanmedian(corrected_obj["mags"]["g"]) > np.nanmedian(obj["mags"]["g"])
 
 
@@ -89,7 +89,7 @@ def _make_light_curve_object(object_id, *, include_fraction=False):
         "mags_mean": [20.0],
     }
     if include_fraction:
-        obj["f_PL_psf_g"] = 0.5
+        obj["f_AGN_psf_g"] = 0.5
     return obj
 
 
@@ -103,7 +103,7 @@ def test_apply_constant_flux_correction_to_objects_raises_when_spectra_row_missi
     objs = [_make_light_curve_object("123")]
     spectra_csv = _write_spectra_csv(
         tmp_path,
-        [{"object_id": "999", "f_PL_psf_g": 0.5}],
+        [{"object_id": "999", "f_AGN_psf_g": 0.5}],
     )
 
     with pytest.raises(ValueError, match="Missing spectra rows.*123"):
@@ -117,7 +117,7 @@ def test_apply_constant_flux_correction_to_objects_raises_when_no_band_is_correc
     objs = [_make_light_curve_object("123")]
     spectra_csv = _write_spectra_csv(
         tmp_path,
-        [{"object_id": "123", "f_PL_psf_g": np.nan}],
+        [{"object_id": "123", "f_AGN_psf_g": np.nan}],
     )
 
     with pytest.raises(ValueError, match="No valid PSF constant-flux correction band.*123"):
@@ -132,8 +132,8 @@ def test_apply_constant_flux_correction_to_objects_succeeds_when_all_objects_hav
     spectra_csv = _write_spectra_csv(
         tmp_path,
         [
-            {"object_id": "123", "f_PL_psf_g": 0.5},
-            {"object_id": "456", "f_PL_psf_g": 0.6},
+            {"object_id": "123", "f_AGN_psf_g": 0.5},
+            {"object_id": "456", "f_AGN_psf_g": 0.6},
         ],
     )
 
@@ -147,3 +147,37 @@ def test_apply_constant_flux_correction_to_objects_succeeds_when_all_objects_hav
     assert [obj["psf_constant_flux_n_bands_corrected"] for obj in corrected_objs] == [1, 1]
     assert summary["n_objects_corrected"] == 2
     assert summary["n_bands_corrected"] == 2
+
+
+def test_apply_constant_flux_correction_to_object_does_not_accept_pl_fraction_only():
+    obj = {
+        "object_id": "123",
+        "z": 1.0,
+        "times": {"g": np.array([0.0, 10.0, 20.0], dtype=float)},
+        "mags": {"g": np.array([20.0, 20.1, 19.9], dtype=float)},
+        "magerrs": {"g": np.full(3, 0.03, dtype=float)},
+        "mags_mean": [20.0],
+        "f_PL_psf_g": 0.5,
+    }
+
+    corrected_obj, summary = apply_constant_flux_correction_to_object(obj)
+
+    assert corrected_obj["psf_constant_flux_band_summaries"] == {}
+    assert corrected_obj["psf_constant_flux_corrected"] is False
+    assert corrected_obj["psf_constant_flux_n_bands_corrected"] == 0
+    assert summary["n_corrected_bands"] == 0
+    assert summary["n_missing_fraction_bands"] == 1
+
+
+def test_apply_constant_flux_correction_to_objects_raises_when_csv_has_only_pl_columns(tmp_path):
+    objs = [_make_light_curve_object("123")]
+    spectra_csv = _write_spectra_csv(
+        tmp_path,
+        [{"object_id": "123", "f_PL_psf_g": 0.5}],
+    )
+
+    with pytest.raises(ValueError, match="missing required per-band columns 'f_AGN_psf_<band>'"):
+        apply_constant_flux_correction_to_objects(
+            objs,
+            spectra_fit_csvs=[spectra_csv],
+        )

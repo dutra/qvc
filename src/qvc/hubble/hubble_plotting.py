@@ -504,6 +504,7 @@ def plot_blr_line_lags_vs_l2500(
     prob_thresh=0.9,
     lag_err_max=0.25,
     use_alpha_lambda_term=None,
+    use_eta_sigma_term=None,
     use_redshift_log_f_term=None,
 ):
     """Plot BLR lag against line-matched debiased continuum luminosity."""
@@ -517,11 +518,13 @@ def plot_blr_line_lags_vs_l2500(
         cosmo_model,
         np.asarray(flat_samples).shape[1],
         use_alpha_lambda_term=use_alpha_lambda_term,
+        use_eta_sigma_term=use_eta_sigma_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
     )
     _, model_labels, _ = get_model_params(
         cosmo_model,
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
+        use_eta_sigma_term=option_flags["use_eta_sigma_term"],
         use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
     )
     param_indices = {name: model_labels.index(name) for name in model_labels}
@@ -3577,6 +3580,7 @@ def plot_dynesty(
     speed="",
     show=False,
     use_alpha_lambda_term=None,
+    use_eta_sigma_term=None,
     use_redshift_log_f_term=None,
 ):
     """
@@ -3590,12 +3594,14 @@ def plot_dynesty(
         np.asarray(results.samples).shape[1],
         only_sna=bool(only_sna),
         use_alpha_lambda_term=use_alpha_lambda_term,
+        use_eta_sigma_term=use_eta_sigma_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
     )
     priors, model_labels, model_labels_latex = get_model_params(
         cosmo_model,
         only_sna=bool(only_sna),
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
+        use_eta_sigma_term=option_flags["use_eta_sigma_term"],
         use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
     )
 
@@ -3651,6 +3657,7 @@ def plot_traces(
     use_dynesty=False,
     plot_path="plots/hubble",
     use_alpha_lambda_term=None,
+    use_eta_sigma_term=None,
     use_redshift_log_f_term=None,
 ):
     """
@@ -3677,12 +3684,14 @@ def plot_traces(
         samples.shape[-1],
         only_sna=only_sna,
         use_alpha_lambda_term=use_alpha_lambda_term,
+        use_eta_sigma_term=use_eta_sigma_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
     )
     priors, model_labels, model_labels_latex = get_model_params(
         cosmo_model,
         only_sna=only_sna,
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
+        use_eta_sigma_term=option_flags["use_eta_sigma_term"],
         use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
     )
     ndim = len(model_labels)
@@ -3721,6 +3730,7 @@ def plot_posterior_corner(
     show=False,
     plot_path="plots/hubble",
     use_alpha_lambda_term=None,
+    use_eta_sigma_term=None,
     use_redshift_log_f_term=None,
 ):
     # Select cosmological parameters based on model
@@ -3739,12 +3749,14 @@ def plot_posterior_corner(
         np.asarray(flat_samples).shape[1],
         only_sna=only_sna,
         use_alpha_lambda_term=use_alpha_lambda_term,
+        use_eta_sigma_term=use_eta_sigma_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
     )
     priors, model_labels, model_labels_latex = get_model_params(
         cosmo_model,
         only_sna=only_sna,
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
+        use_eta_sigma_term=option_flags["use_eta_sigma_term"],
         use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
     )
 
@@ -3782,6 +3794,7 @@ def plot_cosmo_corner(
     pad_frac=0.25,
     include_alpha_beta=False,
     use_alpha_lambda_term=None,
+    use_eta_sigma_term=None,
     use_redshift_log_f_term=None,
 ):
     import os
@@ -3798,11 +3811,13 @@ def plot_cosmo_corner(
         np.asarray(ref_samples).shape[1],
         only_sna=flat_samples_agn is None,
         use_alpha_lambda_term=use_alpha_lambda_term,
+        use_eta_sigma_term=use_eta_sigma_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
     )
     _, model_labels, model_labels_latex = get_model_params(
         cosmo_model,
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
+        use_eta_sigma_term=option_flags["use_eta_sigma_term"],
         use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
     )
     idx = {k: i for i, k in enumerate(model_labels)}
@@ -4124,7 +4139,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
                 debias=False, dm_interp=None, show=False, completeness=True, show_true=False, verbose=True,
                 cosmo_model_samples={}, residuals_sigma_clip=None, df_calibrators=None, z_range=(0.44, 3.16),
                 dmi_values=None, dmi_sigma=None, dmi_selection_sigma=None,
-                use_alpha_lambda_term=None, use_redshift_log_f_term=None):
+                use_alpha_lambda_term=None, use_eta_sigma_term=None, use_redshift_log_f_term=None):
     """
     Hubble diagram (Pantheon+-style):
       • Model line + 68% band in magenta
@@ -4161,11 +4176,13 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
         cosmo_model,
         np.asarray(flat_samples).shape[1],
         use_alpha_lambda_term=use_alpha_lambda_term,
+        use_eta_sigma_term=use_eta_sigma_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
     )
     _, model_labels, _ = get_model_params(
         cosmo_model,
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
+        use_eta_sigma_term=option_flags["use_eta_sigma_term"],
         use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
     )
     param_indices = {name: model_labels.index(name) for name in model_labels}
@@ -4208,16 +4225,31 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     mu_pred_samples = []
     for s in flat_samples:
         sample_params = {k: s[param_indices[k]] for k in model_labels}
-        agn_params_arr = agn_model_pack_params(sample_params, use_alpha_lambda_term=option_flags["use_alpha_lambda_term"])
+        agn_params_arr = agn_model_pack_params(
+            sample_params,
+            use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
+            use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+        )
         agn_obs_arr, agn_err_arr, agn_pivot_arr = agn_model_pack_obs(
-            df_agn, use_alpha_lambda_term=option_flags["use_alpha_lambda_term"]
+            df_agn,
+            use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
+            use_eta_sigma_term=option_flags["use_eta_sigma_term"],
         )
 
         predicted_M2500 = M_model_agn(
-            agn_params_arr, agn_obs_arr, agn_pivot_arr, use_alpha_lambda_term=option_flags["use_alpha_lambda_term"]
+            agn_params_arr,
+            agn_obs_arr,
+            agn_pivot_arr,
+            use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
+            use_eta_sigma_term=option_flags["use_eta_sigma_term"],
         )
         predicted_M2500_err = M_model_agn_err(
-            agn_params_arr, agn_obs_arr, agn_err_arr, agn_pivot_arr, use_alpha_lambda_term=option_flags["use_alpha_lambda_term"]
+            agn_params_arr,
+            agn_obs_arr,
+            agn_err_arr,
+            agn_pivot_arr,
+            use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
+            use_eta_sigma_term=option_flags["use_eta_sigma_term"],
         )
         mu_pred_samples.append(m_obs - predicted_M2500)
     mu_pred_samples = np.array(mu_pred_samples)
@@ -4235,18 +4267,34 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     mu_pred_84th   = np.percentile(mu_pred_samples, 84, axis=0)
 
     # Per-object uncertainty (for yerr)
-    agn_params_arr = agn_model_pack_params(results, use_alpha_lambda_term=option_flags["use_alpha_lambda_term"])
+    agn_params_arr = agn_model_pack_params(
+        results,
+        use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
+        use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+    )
     agn_obs_arr, agn_err_arr, agn_pivot_arr = agn_model_pack_obs(
-        df_agn, use_alpha_lambda_term=option_flags["use_alpha_lambda_term"]
+        df_agn,
+        use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
+        use_eta_sigma_term=option_flags["use_eta_sigma_term"],
     )
     predicted_M2500 = M_model_agn(
-        agn_params_arr, agn_obs_arr, agn_pivot_arr, use_alpha_lambda_term=option_flags["use_alpha_lambda_term"]
+        agn_params_arr,
+        agn_obs_arr,
+        agn_pivot_arr,
+        use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
+        use_eta_sigma_term=option_flags["use_eta_sigma_term"],
     )
     predicted_M2500_err = M_model_agn_err(
-        agn_params_arr, agn_obs_arr, agn_err_arr, agn_pivot_arr, use_alpha_lambda_term=option_flags["use_alpha_lambda_term"]
+        agn_params_arr,
+        agn_obs_arr,
+        agn_err_arr,
+        agn_pivot_arr,
+        use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
+        use_eta_sigma_term=option_flags["use_eta_sigma_term"],
     )
     req_params_local, _, req_errs_local = get_agn_model_spec(
-        use_alpha_lambda_term=option_flags["use_alpha_lambda_term"]
+        use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
+        use_eta_sigma_term=option_flags["use_eta_sigma_term"],
     )
     pidx_local = {k: i for i, k in enumerate(req_params_local)}
     eidx_local = {k: i for i, k in enumerate(req_errs_local)}
@@ -4545,17 +4593,32 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
 
     # Survey magnitude limit (shade above)
     if completeness and not debias:
-        agn_params_arr = agn_model_pack_params(results, use_alpha_lambda_term=option_flags["use_alpha_lambda_term"])
+        agn_params_arr = agn_model_pack_params(
+            results,
+            use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
+            use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+        )
         agn_obs_med = {key: float(np.median(df_agn[key].values)) * np.ones_like(z_grid) for key in agn_model_req_obs + agn_model_req_errs}
         if option_flags["use_alpha_lambda_term"]:
             agn_obs_med["alpha_lambda"] = float(np.median(df_agn["alpha_lambda"].values)) * np.ones_like(z_grid)
             agn_obs_med["alpha_lambda_err"] = float(np.median(df_agn["alpha_lambda_err"].values)) * np.ones_like(z_grid)
+        if option_flags["use_eta_sigma_term"]:
+            agn_obs_med["eta_sigma"] = float(np.median(df_agn["eta_sigma"].values)) * np.ones_like(z_grid)
+            agn_obs_med["eta_sigma_err"] = float(np.median(df_agn["eta_sigma_err"].values)) * np.ones_like(z_grid)
         agn_obs_arr, agn_err_arr, agn_pivot_arr = agn_model_pack_obs(
-            agn_obs_med, use_alpha_lambda_term=option_flags["use_alpha_lambda_term"]
+            agn_obs_med,
+            use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
+            use_eta_sigma_term=option_flags["use_eta_sigma_term"],
         )
 
         M_med_grid = np.median([
-            M_model_agn(agn_params_arr, agn_obs_arr, agn_pivot_arr, use_alpha_lambda_term=option_flags["use_alpha_lambda_term"])
+            M_model_agn(
+                agn_params_arr,
+                agn_obs_arr,
+                agn_pivot_arr,
+                use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
+                use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+            )
             for s in flat_samples
         ], axis=0)
 
@@ -4575,6 +4638,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
         _, model_labels_other, _ = get_model_params(
             cosmo_model_other,
             use_alpha_lambda_term=option_flags_other["use_alpha_lambda_term"],
+            use_eta_sigma_term=option_flags_other["use_eta_sigma_term"],
             use_redshift_log_f_term=option_flags_other["use_redshift_log_f_term"],
         )
         model_label_latex_other = cosmo_model_label_latex(cosmo_model_other)
@@ -4623,6 +4687,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
             _, model_labels_other, _ = get_model_params(
                 cosmo_model_other,
                 use_alpha_lambda_term=option_flags_other["use_alpha_lambda_term"],
+                use_eta_sigma_term=option_flags_other["use_eta_sigma_term"],
                 use_redshift_log_f_term=option_flags_other["use_redshift_log_f_term"],
             )
             z_grid_fine = np.linspace(1e-4, 5.2, 500)
@@ -4725,13 +4790,30 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
         ds = df_calibrators.copy()
 
         # Build predicted M_2500 for SHOW objects at median params (results)
-        agn_params_arr_show = agn_model_pack_params(results, use_alpha_lambda_term=option_flags["use_alpha_lambda_term"])
-        obs_show, err_show, piv_show = agn_model_pack_obs(ds, use_alpha_lambda_term=option_flags["use_alpha_lambda_term"])
+        agn_params_arr_show = agn_model_pack_params(
+            results,
+            use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
+            use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+        )
+        obs_show, err_show, piv_show = agn_model_pack_obs(
+            ds,
+            use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
+            use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+        )
         pred_M_show = M_model_agn(
-            agn_params_arr_show, obs_show, piv_show, use_alpha_lambda_term=option_flags["use_alpha_lambda_term"]
+            agn_params_arr_show,
+            obs_show,
+            piv_show,
+            use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
+            use_eta_sigma_term=option_flags["use_eta_sigma_term"],
         )
         pred_M_err_show = M_model_agn_err(
-            agn_params_arr_show, obs_show, err_show, piv_show, use_alpha_lambda_term=option_flags["use_alpha_lambda_term"]
+            agn_params_arr_show,
+            obs_show,
+            err_show,
+            piv_show,
+            use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
+            use_eta_sigma_term=option_flags["use_eta_sigma_term"],
         )
 
         # Distance modulus prediction: mu = m_2500 - M_2500
@@ -5128,6 +5210,7 @@ def plot_predicted_vs_actual_M2500(
     random_state=42,      # RNG seed for reproducibility of draws
     z_range=(0.44, 3.16),
     use_alpha_lambda_term=None,
+    use_eta_sigma_term=None,
     use_redshift_log_f_term=None,
     dmi_selection_sigma_interp=None,
     sigma_sel_floor_mag=0.05,
@@ -5153,11 +5236,13 @@ def plot_predicted_vs_actual_M2500(
         cosmo_model,
         np.asarray(flat_samples).shape[1],
         use_alpha_lambda_term=use_alpha_lambda_term,
+        use_eta_sigma_term=use_eta_sigma_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
     )
     priors, model_labels, model_labels_latex = get_model_params(
         cosmo_model,
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
+        use_eta_sigma_term=option_flags["use_eta_sigma_term"],
         use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
     )
     results = {key: np.median(flat_samples[:, i])
@@ -5211,16 +5296,31 @@ def plot_predicted_vs_actual_M2500(
     distmod_med = np.array([cosmo_med.distmod(zi).value for zi in z])
     actual_M_2500 = m_app - distmod_med
 
-    agn_params_arr = agn_model_pack_params(results, use_alpha_lambda_term=option_flags["use_alpha_lambda_term"])
+    agn_params_arr = agn_model_pack_params(
+        results,
+        use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
+        use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+    )
     agn_obs_arr, agn_err_arr, agn_pivot_arr = agn_model_pack_obs(
-        df_agn, use_alpha_lambda_term=option_flags["use_alpha_lambda_term"]
+        df_agn,
+        use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
+        use_eta_sigma_term=option_flags["use_eta_sigma_term"],
     )
 
     M_2500_pred = M_model_agn(
-        agn_params_arr, agn_obs_arr, agn_pivot_arr, use_alpha_lambda_term=option_flags["use_alpha_lambda_term"]
+        agn_params_arr,
+        agn_obs_arr,
+        agn_pivot_arr,
+        use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
+        use_eta_sigma_term=option_flags["use_eta_sigma_term"],
     )
     M_2500_pred_err = M_model_agn_err(
-        agn_params_arr, agn_obs_arr, agn_err_arr, agn_pivot_arr, use_alpha_lambda_term=option_flags["use_alpha_lambda_term"]
+        agn_params_arr,
+        agn_obs_arr,
+        agn_err_arr,
+        agn_pivot_arr,
+        use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
+        use_eta_sigma_term=option_flags["use_eta_sigma_term"],
     )
     M_2500_pred_err[~np.isfinite(M_2500_pred_err) | (M_2500_pred_err < 0)] = np.nan
 
@@ -5624,7 +5724,7 @@ def plot_full_residuals(
     *, nbins=10, min_count=5, z_cut=None, key_y='residuals', key_color='z',
     z_range=(0.44, 3.16), residual_label='residuals', output_tag='full_residuals',
     max_categories=12, category_min_count=5, category_jitter=0.15,
-    use_alpha_lambda_term=None, use_redshift_log_f_term=None,
+    use_alpha_lambda_term=None, use_eta_sigma_term=None, use_redshift_log_f_term=None,
 ):
     df_agn = df_agn.copy()
     df_agn[residual_label] = residuals
@@ -5640,11 +5740,13 @@ def plot_full_residuals(
             cosmo_model,
             np.asarray(samples).shape[1],
             use_alpha_lambda_term=use_alpha_lambda_term,
+            use_eta_sigma_term=use_eta_sigma_term,
             use_redshift_log_f_term=use_redshift_log_f_term,
         )
         _, model_labels, _ = get_model_params(
             cosmo_model,
             use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
+            use_eta_sigma_term=option_flags["use_eta_sigma_term"],
             use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
         )
         return {
@@ -5746,6 +5848,7 @@ def plot_full_residuals(
             'ebv_wu': 'log_ebv_wu',
             'frac_bc_2500': 'log_frac_bc_2500',
             'f_PL': 'log_f_PL',
+            'SN_MEDIAN_ALL': 'log_sn_median_all',
 
         }
         for source_col, derived_col in log_columns.items():
@@ -6327,7 +6430,7 @@ def plot_full_residuals_rz(
     z_range=(0.44, 3.16), nz_bins=12, z_min_count=8,
     lowess_frac=0.25, lowess_it=1, lowess_min_points=10,
     max_categories=12, category_min_count=5, category_jitter=0.15,
-    use_alpha_lambda_term=None, use_redshift_log_f_term=None,
+    use_alpha_lambda_term=None, use_eta_sigma_term=None, use_redshift_log_f_term=None,
 ):
     """
     Plot redshift-detrended residual diagnostics where
@@ -6388,6 +6491,7 @@ def plot_full_residuals_rz(
         category_min_count=category_min_count,
         category_jitter=category_jitter,
         use_alpha_lambda_term=use_alpha_lambda_term,
+        use_eta_sigma_term=use_eta_sigma_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
     )
 
@@ -6422,7 +6526,7 @@ def plot_predicted_L2500_vs_sigmahat(
     flat_samples, df_agn, cosmo_model, z_pivot_agn,
     plot_path='plots/hubble', show=False, debias=True, dm_interp=None,
     show_residuals=False, df_calibrators=None, z_range=(0.44, 3.16),
-    use_alpha_lambda_term=None, use_redshift_log_f_term=None,
+    use_alpha_lambda_term=None, use_eta_sigma_term=None, use_redshift_log_f_term=None,
     dmi_values=None,
     dmi_selection_sigma_interp=None,
     sigma_sel_floor_mag=0.05,
@@ -6439,18 +6543,22 @@ def plot_predicted_L2500_vs_sigmahat(
         cosmo_model,
         np.asarray(flat_samples).shape[1],
         use_alpha_lambda_term=use_alpha_lambda_term,
+        use_eta_sigma_term=use_eta_sigma_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
     )
     priors, model_labels, model_labels_latex = get_model_params(
         cosmo_model,
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
+        use_eta_sigma_term=option_flags["use_eta_sigma_term"],
         use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
     )
     param_indices = {name: model_labels.index(name) for name in model_labels}
 
     # --- Pack obs/errs/pivots once (MAIN sample) ---
     agn_obs_arr, agn_err_arr, agn_pivot_arr = agn_model_pack_obs(
-        d, use_alpha_lambda_term=option_flags["use_alpha_lambda_term"]
+        d,
+        use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
+        use_eta_sigma_term=option_flags["use_eta_sigma_term"],
     )
 
     # Helper: posterior median dict
@@ -6486,18 +6594,31 @@ def plot_predicted_L2500_vs_sigmahat(
     y_log_meas_err = 0.4 * np.asarray(d['apparent_mag_2500_err'].fillna(0.0))
 
     # --- Reference x (built at POSTERIOR-MEDIAN params) ---
-    med_arr = agn_model_pack_params(med_params, use_alpha_lambda_term=option_flags["use_alpha_lambda_term"])
+    med_arr = agn_model_pack_params(
+        med_params,
+        use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
+        use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+    )
     M0_med = med_arr[agn_model_pidx["M0_agn"]]
     x_log_ref = -0.4 * (
         M_model_agn(
-        med_arr, agn_obs_arr, agn_pivot_arr, use_alpha_lambda_term=option_flags["use_alpha_lambda_term"]
+            med_arr,
+            agn_obs_arr,
+            agn_pivot_arr,
+            use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
+            use_eta_sigma_term=option_flags["use_eta_sigma_term"],
         ) - M0_med
     )
     x_ref = 10.0 ** x_log_ref
 
     # x errors for MAIN at median params
     pred_M_err_med = M_model_agn_err(
-        med_arr, agn_obs_arr, agn_err_arr, agn_pivot_arr, use_alpha_lambda_term=option_flags["use_alpha_lambda_term"]
+        med_arr,
+        agn_obs_arr,
+        agn_err_arr,
+        agn_pivot_arr,
+        use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
+        use_eta_sigma_term=option_flags["use_eta_sigma_term"],
     )
     x_log_err_med = 0.4 * pred_M_err_med
     x_lower = 10.0 ** (x_log_ref - x_log_err_med)
@@ -6524,7 +6645,9 @@ def plot_predicted_L2500_vs_sigmahat(
 
         # x for SHOW at median params, using the AGN fit pivots.
         obs_show, err_show, _ = agn_model_pack_obs(
-            ds, use_alpha_lambda_term=option_flags["use_alpha_lambda_term"]
+            ds,
+            use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
+            use_eta_sigma_term=option_flags["use_eta_sigma_term"],
         )
         x_log_ref_show = -0.4 * (
             M_model_agn(
@@ -6532,6 +6655,7 @@ def plot_predicted_L2500_vs_sigmahat(
                 obs_show,
                 agn_pivot_arr,
                 use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
+                use_eta_sigma_term=option_flags["use_eta_sigma_term"],
             ) - M0_med
         )
         x_show = 10.0 ** x_log_ref_show
@@ -6542,6 +6666,7 @@ def plot_predicted_L2500_vs_sigmahat(
             err_show,
             agn_pivot_arr,
             use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
+            use_eta_sigma_term=option_flags["use_eta_sigma_term"],
         )
         x_log_err_show = 0.4 * pred_M_err_show
         x_log_lower_show = np.min(np.ravel(x_log_ref_show - x_log_err_show))
@@ -6750,13 +6875,18 @@ def plot_predicted_L2500_vs_sigmahat(
         yerr_linear_show = (10.0**actual_logL2500_show) * np.log(10.0) * y_log_meas_err_show
 
         # x for SHOW at median params, using the same AGN-sample pivots as the fit.
-        obs_show, err_show, _ = agn_model_pack_obs(ds, use_alpha_lambda_term=option_flags["use_alpha_lambda_term"])
+        obs_show, err_show, _ = agn_model_pack_obs(
+            ds,
+            use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
+            use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+        )
         x_log_ref_show = -0.4 * (
             M_model_agn(
                 med_arr,
                 obs_show,
                 agn_pivot_arr,
                 use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
+                use_eta_sigma_term=option_flags["use_eta_sigma_term"],
             )
             - M0_med
         )
@@ -6768,6 +6898,7 @@ def plot_predicted_L2500_vs_sigmahat(
             err_show,
             agn_pivot_arr,
             use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
+            use_eta_sigma_term=option_flags["use_eta_sigma_term"],
         )
         x_log_err_show = 0.4 * pred_M_err_show
         x_lower_show = 10.0 ** (x_log_ref_show - x_log_err_show)
@@ -6831,7 +6962,9 @@ def plot_predicted_L2500_vs_sigmahat(
 
     # x label (from MAIN pivots; just a label)
     obs_arr, err_arr, pivots_arr = agn_model_pack_obs(
-        df_agn, use_alpha_lambda_term=option_flags["use_alpha_lambda_term"]
+        df_agn,
+        use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
+        use_eta_sigma_term=option_flags["use_eta_sigma_term"],
     )
     log_sigma_uv_pivot  = pivots_arr[agn_model_oidx["log_sigma_uv"]]
     log_tau_uv_rf_pivot = pivots_arr[agn_model_oidx["log_tau_uv_rf"]]

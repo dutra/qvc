@@ -653,17 +653,28 @@ def run_single_jax(
     N=None,
     uniform_redshift_distribution=False,
     use_alpha_lambda_term=False,
+    use_eta_sigma_term=False,
     use_redshift_log_f_term=False,
     seed=42,
 ):
     _require_jax_stack()
     if use_alpha_lambda_term:
         raise NotImplementedError("run_single_jax does not support --fit_alpha_lambda_term yet.")
+    if use_eta_sigma_term:
+        raise NotImplementedError("run_single_jax does not support --fit_eta_sigma_term yet.")
     if use_redshift_log_f_term:
         raise NotImplementedError("run_single_jax does not support --fit_redshift_log_f_term yet.")
     validate_completeness_mode(completeness_mode)
 
-    run_tag = make_run_tag(cosmo_model, only_sna, speed, N, z_range, use_alpha_lambda_term=False)
+    run_tag = make_run_tag(
+        cosmo_model,
+        only_sna,
+        speed,
+        N,
+        z_range,
+        use_alpha_lambda_term=False,
+        use_eta_sigma_term=False,
+    )
     plot_path = f"plots/hubble/{prefix}/{run_tag}"
     os.makedirs(plot_path, exist_ok=True)
     print("Saving plots to", plot_path)

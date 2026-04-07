@@ -62,6 +62,7 @@ def _make_fake_agn_sample(n_agn=24, seed=123):
             "apparent_mag_2500_err": np.full(n_agn, 0.04),
             "log_sigma_hat0": log_sigma_hat0,
             "log_sigma_uv": log_sigma_uv,
+            "log_sigma_uv_uncorrected": log_sigma_uv + 0.02,
             "log_tau_uv_rf": log_tau_uv,
             "log_sigma_hat0_err": np.full(n_agn, 0.04),
             "log_sigma_uv_std_psd": np.full(n_agn, 0.05),
@@ -78,6 +79,10 @@ def _make_fake_agn_sample(n_agn=24, seed=123):
             "f_br": np.full(n_agn, 0.06),
             "f_br_err": np.full(n_agn, 0.015),
             "delta_m_flux_recal": rng.normal(0.0, 0.02, size=n_agn),
+            "eta_sigma": rng.normal(-0.45, 0.06, size=n_agn),
+            "eta_sigma_err": np.full(n_agn, 0.03),
+            "alpha_lambda": rng.normal(-1.7, 0.15, size=n_agn),
+            "alpha_lambda_err": np.full(n_agn, 0.08),
         }
     )
 
@@ -463,3 +468,46 @@ def test_subsample_dataframe_at_most_clamps_oversized_requests_without_reorderin
 
     assert effective_n == 3
     assert sampled.equals(df)
+
+
+def test_run_mcmc_pipeline_requires_eta_sigma_columns_when_flag_enabled(fake_data, monkeypatch, tmp_path):
+    df_agn, df_pantheon = fake_data
+    df_agn = df_agn.drop(columns=["eta_sigma"])
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(KeyError, match="fit_eta_sigma_term"):
+        hubble_fit.run_mcmc_pipeline(
+            df_agn=df_agn,
+            df_agn_all=df_agn.copy(),
+            df_pantheon=df_pantheon,
+            _sna_L=None,
+            _sna_Lower=True,
+            _sna_LogdetCov=None,
+            cosmo_model="FlatLambdaCDM",
+            completeness=False,
+            use_full_cov=False,
+            speed="fast",
+            use_eta_sigma_term=True,
+        )
+
+
+def test_run_mcmc_pipeline_requires_finite_eta_sigma_err_when_flag_enabled(fake_data, monkeypatch, tmp_path):
+    df_agn, df_pantheon = fake_data
+    df_agn = df_agn.copy()
+    df_agn.loc[df_agn.index[0], "eta_sigma_err"] = np.nan
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(ValueError, match="fit_eta_sigma_term"):
+        hubble_fit.run_mcmc_pipeline(
+            df_agn=df_agn,
+            df_agn_all=df_agn.copy(),
+            df_pantheon=df_pantheon,
+            _sna_L=None,
+            _sna_Lower=True,
+            _sna_LogdetCov=None,
+            cosmo_model="FlatLambdaCDM",
+            completeness=False,
+            use_full_cov=False,
+            speed="fast",
+            use_eta_sigma_term=True,
+        )

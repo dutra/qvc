@@ -56,6 +56,11 @@ def parse_args():
     p.add_argument("output", type=Path, help="Output merged PDF path.")
     p.add_argument("--fig-dir", type=Path, default=Path("plots/jaxqsofit"),
                    help="Directory containing figure PDFs. Default: plots/jaxqsofit")
+    p.add_argument("--sort-by", type=str, default=None,
+                   help="Optional CSV column to sort rows by before stamping.")
+    p.add_argument("--sort-order", type=str, default="ascending",
+                   choices=["ascending", "descending", "asc", "desc"],
+                   help="Sort direction when --sort-by is used. Default: ascending")
     p.add_argument("--workers", type=int, default=max(1, (os.cpu_count() or 2) - 1),
                    help="Number of worker processes. Default: CPU-1")
     p.add_argument("--stamp-font-size", type=int, default=10, help="Overlay stamp font size.")
@@ -64,7 +69,7 @@ def parse_args():
     return p.parse_args()
 
 
-def load_csv(csv_path: Path) -> pd.DataFrame:
+def load_csv(csv_path: Path, *, sort_by: str | None = None, ascending: bool = True) -> pd.DataFrame:
     df = pd.read_csv(csv_path)
     missing = [c for c in sorted(REQUIRED_COLS) if c not in df.columns]
     if missing:
@@ -72,6 +77,10 @@ def load_csv(csv_path: Path) -> pd.DataFrame:
 
     df = df.copy()
     df["sdss_name"] = df["sdss_name"].astype(str).str.strip()
+    if sort_by is not None:
+        if sort_by not in df.columns:
+            raise KeyError(f"sort_by column {sort_by!r} is not present in merge_pdf input data.")
+        df = df.sort_values(sort_by, ascending=ascending, kind="mergesort")
     return df
 
 
@@ -230,6 +239,7 @@ def _worker_stamp(task):
 
 def main():
     args = parse_args()
+    ascending = args.sort_order in {"ascending", "asc"}
 
     if not args.csv.exists():
         print(f"[ERROR] CSV not found: {args.csv}", file=sys.stderr)
@@ -239,7 +249,7 @@ def main():
         return 2
 
     try:
-        df = load_csv(args.csv)
+        df = load_csv(args.csv, sort_by=args.sort_by, ascending=ascending)
     except Exception as exc:
         print(f"[ERROR] Failed to load CSV: {exc}", file=sys.stderr)
         return 2
