@@ -91,6 +91,33 @@ _BLR_LINE_LUMINOSITY_SPECS = {
     },
 }
 
+_SHEN_2024_LAG_LUMINOSITY_RELATIONS = {
+    "Hβ": {
+        "intercept": 1.458,
+        "slope": 0.41,
+        "sigma_int": 0.32,
+        "log_lum_unit": 44.0,
+        "x_range": (42.87, 45.40),
+        "label": "Shen et al. (2024)",
+    },
+    "Mg II": {
+        "intercept": 2.086,
+        "slope": 0.31,
+        "sigma_int": 0.32,
+        "log_lum_unit": 45.0,
+        "x_range": (43.58, 46.28),
+        "label": "Shen et al. (2024)",
+    },
+    "C IV": {
+        "intercept": 1.840,
+        "slope": 0.32,
+        "sigma_int": 0.51,
+        "log_lum_unit": 45.0,
+        "x_range": (44.22, 46.95),
+        "label": "Shen et al. (2024)",
+    },
+}
+
 _BAND_COLORS = {
     "u": "tab:blue",
     "g": "tab:green",
@@ -480,6 +507,37 @@ def _plot_blr_lag_line_panel(ax, line_df, line_name, *, x_suffix=""):
                 alpha=0.8,
             )
 
+    shen_relation = _SHEN_2024_LAG_LUMINOSITY_RELATIONS.get(line_name)
+    if shen_relation is not None:
+        x_grid = np.linspace(
+            shen_relation["x_range"][0],
+            shen_relation["x_range"][1],
+            200,
+            dtype=float,
+        )
+        y_grid = shen_relation["intercept"] + shen_relation["slope"] * (
+            x_grid - shen_relation["log_lum_unit"]
+        )
+        sigma_int = float(shen_relation["sigma_int"])
+        ax.fill_between(
+            x_grid,
+            y_grid - sigma_int,
+            y_grid + sigma_int,
+            color="tab:blue",
+            alpha=0.12,
+            linewidth=0.0,
+            zorder=0,
+        )
+        ax.plot(
+            x_grid,
+            y_grid,
+            color="tab:blue",
+            linestyle="--",
+            linewidth=1.6,
+            label=shen_relation["label"],
+            zorder=1,
+        )
+
     x_label = _BLR_LINE_LUMINOSITY_SPECS.get(line_name, {}).get(
         "axis_label",
         r"$\log L_{2500}$",
@@ -582,11 +640,19 @@ def plot_blr_line_lags_vs_l2500(
     component_handles = [
         Line2D([0], [0], marker="o", linestyle="none", color="k", label="BLR 1", markersize=6),
         Line2D([0], [0], marker="s", linestyle="none", color="k", label="BLR 2", markersize=6),
+        Line2D(
+            [0],
+            [0],
+            color="tab:blue",
+            linestyle="--",
+            linewidth=1.6,
+            label="Shen et al. (2024)",
+        ),
     ]
     fig.legend(
         handles=component_handles,
         loc="upper center",
-        ncol=2,
+        ncol=3,
         frameon=False,
         bbox_to_anchor=(0.5, 1.02),
     )
@@ -740,11 +806,19 @@ def plot_blr_line_lags_vs_l2500_fiducial(
     component_handles = [
         Line2D([0], [0], marker="o", linestyle="none", color="k", label="BLR 1", markersize=6),
         Line2D([0], [0], marker="s", linestyle="none", color="k", label="BLR 2", markersize=6),
+        Line2D(
+            [0],
+            [0],
+            color="tab:blue",
+            linestyle="--",
+            linewidth=1.6,
+            label="Shen et al. (2024)",
+        ),
     ]
     fig.legend(
         handles=component_handles,
         loc="upper center",
-        ncol=2,
+        ncol=3,
         frameon=False,
         bbox_to_anchor=(0.5, 1.02),
     )

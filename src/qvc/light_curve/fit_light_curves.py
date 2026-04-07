@@ -3375,15 +3375,12 @@ def build_single_object_model_mag_fluxmix_stage2(
         yerr_eff = yerr
 
     lambda_center_rf = jnp.asarray(stage1_params_median["lambda_center_rf"], dtype=float)
-    line_ratio_offsets = compute_flux_line_ratio_offsets(
-        lam_rf,
-        lambda_center_rf=lambda_center_rf,
-        eta_sigma=jnp.asarray(stage1_raw_median["eta_sigma"], dtype=float),
-        log_amp_delta_lya=jnp.asarray(stage1_raw_median.get("log_amp_delta_lya", 0.0), dtype=float),
+    stage1_eta_sigma = jnp.asarray(stage1_raw_median["eta_sigma"], dtype=float)
+    stage1_log_sigma_center0 = jnp.asarray(stage1_raw_median["log_sigma_center0"], dtype=float)
+    log_amp_delta_lya_fixed = jnp.asarray(
+        stage1_raw_median.get("log_amp_delta_lya", 0.0),
+        dtype=float,
     )
-    bc_weight = balmer_continuum_weight(lam_rf)
-    stage1_log_sigma_uv = jnp.asarray(stage1_params_median["log_sigma_uv"], dtype=float)
-    stage1_amp_cont = jnp.asarray(stage1_params_median["amp_cont"], dtype=float)
     log_lag0_fixed = jnp.log(jnp.asarray(stage1_raw_median["lag0"], dtype=float))
     basis_grid_t = jnp.asarray(basis_grid_t, dtype=float)
     basis_relflux_norm = jnp.asarray(basis_relflux_norm, dtype=float)
@@ -3398,7 +3395,31 @@ def build_single_object_model_mag_fluxmix_stage2(
         )
 
     def model():
-        log_cont_scale = numpyro.sample("log_cont_scale", log_cont_scale_prior())
+        eta_sigma = numpyro.sample("eta_sigma", eta_sigma_prior())
+        log_sigma_center0 = numpyro.sample(
+            "log_sigma_center0",
+            log_sigma_center0_prior(
+                eta_sigma,
+                lambda_center_rf,
+            ),
+        )
+        numpyro.deterministic("stage1_basis_eta_sigma", stage1_eta_sigma)
+        numpyro.deterministic("stage1_basis_log_sigma_center0", stage1_log_sigma_center0)
+        numpyro.deterministic("delta_eta_sigma", eta_sigma - stage1_eta_sigma)
+        numpyro.deterministic(
+            "delta_log_sigma_center0",
+            log_sigma_center0 - stage1_log_sigma_center0,
+        )
+        numpyro.deterministic(
+            "log_cont_scale",
+            log_sigma_center0 - stage1_log_sigma_center0,
+        )
+        line_ratio_offsets = compute_flux_line_ratio_offsets(
+            lam_rf,
+            lambda_center_rf=lambda_center_rf,
+            eta_sigma=eta_sigma,
+            log_amp_delta_lya=log_amp_delta_lya_fixed,
+        )
 
         if disable_lag_blr:
             log_amp_delta_blr = numpyro.deterministic("log_amp_delta_blr", jnp.full(B, -9.0))
@@ -3443,23 +3464,24 @@ def build_single_object_model_mag_fluxmix_stage2(
                 log_amp_delta_blr2 = numpyro.deterministic("log_amp_delta_blr2", jnp.full(B, -9.0))
                 log_lag_blr2 = numpyro.deterministic("log_lag_blr2", jnp.full(B, -9.0))
 
-        cont_scale = jnp.exp(log_cont_scale)
-        amp_cont = stage1_amp_cont * cont_scale
-        if disable_lag_blr:
-            amp_blr = jnp.zeros_like(amp_cont)
-            lag_blr = jnp.zeros_like(amp_cont)
-            amp_bc = jnp.zeros_like(amp_cont)
-            lag_bc = jnp.zeros_like(amp_cont)
-        else:
-            amp_blr = jnp.exp(stage1_log_sigma_uv + log_cont_scale + log_amp_delta_blr)
-            lag_blr = jnp.exp(log_lag_blr)
-            if disable_lag_bc:
-                amp_bc = jnp.zeros_like(amp_cont)
-                lag_bc = jnp.zeros_like(amp_cont)
-            else:
-                amp_bc = jnp.exp(stage1_log_sigma_uv + log_cont_scale + log_amp_delta_bc) * bc_weight
-                lag_bc_shared = jnp.exp(jnp.mean(log_lag_blr) + log_lag_ratio_bc_to_blr)
-                lag_bc = jnp.full_like(amp_cont, lag_bc_shared)
+        stage2_raw_params = dict(stage1_raw_median)
+        stage2_raw_params["lambda_center_rf"] = lambda_center_rf
+        stage2_raw_params["eta_sigma"] = eta_sigma
+        stage2_raw_params["log_sigma_center0"] = log_sigma_center0
+        stage2_raw_params["log_amp_delta_lya"] = log_amp_delta_lya_fixed
+        stage2_raw_params["log_amp_delta_blr"] = log_amp_delta_blr
+        stage2_raw_params["log_lag_blr"] = log_lag_blr
+        stage2_raw_params["log_amp_delta_blr2"] = log_amp_delta_blr2
+        stage2_raw_params["log_lag_blr2"] = log_lag_blr2
+        if log_amp_delta_bc is not None:
+            stage2_raw_params["log_amp_delta_bc"] = log_amp_delta_bc
+            stage2_raw_params["log_lag_ratio_bc_to_blr"] = log_lag_ratio_bc_to_blr
+        explicit_params = build_explicit_model_params_fluxmix_fast(stage2_raw_params, lam_rf)
+        amp_cont = jnp.asarray(explicit_params["amp_cont"], dtype=float)
+        amp_blr = jnp.asarray(explicit_params["amp_blr"], dtype=float)
+        amp_bc = jnp.asarray(explicit_params["amp_bc"], dtype=float)
+        lag_blr = jnp.asarray(explicit_params["lag_blr"], dtype=float)
+        lag_bc = jnp.asarray(explicit_params["lag_bc"], dtype=float)
 
         def _relflux_one(tt, bb):
             prompt = amp_cont[bb] * _interp_band(tt, bb, 0.0)
@@ -3579,22 +3601,30 @@ def _fluxmix_stage1_raw_median_params(samples_flat, lam_rf):
     """Recover the stage-1 continuum median parameters from combined samples."""
 
     B = int(len(lam_rf))
-    log_cont_scale = np.asarray(
-        samples_flat.get(
-            "log_cont_scale",
-            np.zeros_like(np.asarray(samples_flat["log_sigma_center0"], dtype=float)),
-        ),
-        dtype=float,
-    )
     mean_default = np.zeros(B, dtype=float)
     jitter_default = np.full(B, np.log(1e-3), dtype=float)
     poly1_default = 0.0
     log_amp_delta_lya_default = 0.0
+    if "stage1_basis_log_sigma_center0" in samples_flat:
+        log_sigma_center0_stage1 = np.asarray(samples_flat["stage1_basis_log_sigma_center0"], dtype=float)
+    else:
+        log_cont_scale = np.asarray(
+            samples_flat.get(
+                "log_cont_scale",
+                np.zeros_like(np.asarray(samples_flat["log_sigma_center0"], dtype=float)),
+            ),
+            dtype=float,
+        )
+        log_sigma_center0_stage1 = np.asarray(samples_flat["log_sigma_center0"], dtype=float) - log_cont_scale
+    if "stage1_basis_eta_sigma" in samples_flat:
+        eta_sigma_stage1 = np.asarray(samples_flat["stage1_basis_eta_sigma"], dtype=float)
+    else:
+        eta_sigma_stage1 = np.asarray(samples_flat["eta_sigma"], dtype=float)
     return dict(
         log_tau_slow_center0=jnp.asarray(np.median(np.asarray(samples_flat["log_tau_slow_center0"], dtype=float), axis=0), dtype=float),
         log_tau_fast_center0=jnp.asarray(np.median(np.asarray(samples_flat["log_tau_fast_center0"], dtype=float), axis=0), dtype=float),
         log_sigma_center0=jnp.asarray(
-            np.median(np.asarray(samples_flat["log_sigma_center0"], dtype=float) - log_cont_scale, axis=0),
+            np.median(log_sigma_center0_stage1, axis=0),
             dtype=float,
         ),
         lambda_center_rf=compute_lambda_center_rf(lam_rf),
@@ -3616,7 +3646,7 @@ def _fluxmix_stage1_raw_median_params(samples_flat, lam_rf):
             np.median(np.asarray(samples_flat.get("log_amp_delta_lya", log_amp_delta_lya_default), dtype=float), axis=0),
             dtype=float,
         ),
-        eta_sigma=jnp.asarray(np.median(np.asarray(samples_flat["eta_sigma"], dtype=float), axis=0), dtype=float),
+        eta_sigma=jnp.asarray(np.median(eta_sigma_stage1, axis=0), dtype=float),
         eta_tau=jnp.asarray(np.median(np.asarray(samples_flat["eta_tau"], dtype=float), axis=0), dtype=float),
     )
 
@@ -3729,9 +3759,10 @@ def _combine_fluxmix_stage_samples(stage1_per_chain, stage2_per_chain, lam_rf):
 
     combined_per_chain_raw = _strip_explicit_prediction_keys(stage1_trim)
     combined_per_chain_raw.update(stage2_trim)
-    combined_per_chain_raw["log_sigma_center0"] = (
-        np.asarray(stage1_trim["log_sigma_center0"], dtype=float)
-        + np.asarray(stage2_trim["log_cont_scale"], dtype=float)
+    combined_per_chain_raw["stage1_basis_eta_sigma"] = np.asarray(stage1_trim["eta_sigma"], dtype=float)
+    combined_per_chain_raw["stage1_basis_log_sigma_center0"] = np.asarray(
+        stage1_trim["log_sigma_center0"],
+        dtype=float,
     )
     combined_per_chain = add_model_prediction_params(
         combined_per_chain_raw,
@@ -3878,6 +3909,12 @@ def run_two_stage_fluxmix_fast_inference(
             progress_bar=progress_bar,
             dense_mass=dense_mass,
             max_tree_depth=max_tree_depth,
+            init_strategy=init_to_value(
+                values={
+                    "eta_sigma": np.asarray(stage1_raw_median["eta_sigma"], dtype=float),
+                    "log_sigma_center0": np.asarray(stage1_raw_median["log_sigma_center0"], dtype=float),
+                }
+            ),
         )
 
         combined_flat, combined_per_chain = _combine_fluxmix_stage_samples(

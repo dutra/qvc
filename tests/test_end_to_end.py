@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 import jax.numpy as jnp
 import pytest
+import matplotlib.pyplot as plt
 from matplotlib.container import ErrorbarContainer
 from jax import device_get, random
 from jax.tree_util import tree_map
@@ -22,15 +23,18 @@ if str(SRC) not in sys.path:
 
 from qvc.hubble import hubble_plotting, hubble_utils
 from qvc.light_curve.fit_light_curves import (
+    build_explicit_model_params_fluxmix_fast,
     build_single_object_model,
     build_single_object_model_continuum_only,
     build_single_object_model_mag_flux_linearized,
     build_single_object_model_mag_fluxmix_stage2,
     build_mag_fluxmix_fast_display_model,
+    compute_flux_line_ratio_offsets,
     compute_lomb_scargle_break_diagnostics,
     compute_g_band_residual_drift_diagnostics,
     compute_g_band_raw_drift_diagnostics,
     compute_object_adf_diagnostics,
+    _fluxmix_stage1_raw_median_params,
     make_lc,
     run_two_stage_fluxmix_fast_inference,
 )
@@ -655,6 +659,35 @@ def test_plot_blr_line_lags_vs_l2500_fiducial_filters_negative_and_prior_like_la
     assert selected["object_id"].tolist() == ["keep"]
 
 
+def test_plot_blr_lag_line_panel_adds_shen_relation_for_supported_lines():
+    fig, axes = plt.subplots(1, 2, figsize=(8.0, 3.5))
+    hb_df = pd.DataFrame(
+        {
+            "component": [1],
+            "log_line_luminosity": [44.5],
+            "log_line_luminosity_err": [0.1],
+            "log_lag_rf": [1.6],
+            "log_lag_rf_err": [0.1],
+        }
+    )
+
+    hubble_plotting._plot_blr_lag_line_panel(axes[0], hb_df, "Hβ")
+    hubble_plotting._plot_blr_lag_line_panel(axes[1], hb_df, "Hα")
+
+    shen_lines_hb = [line for line in axes[0].lines if line.get_label() == "Shen et al. (2024)"]
+    shen_lines_ha = [line for line in axes[1].lines if line.get_label() == "Shen et al. (2024)"]
+
+    assert len(shen_lines_hb) == 1
+    assert len(shen_lines_ha) == 0
+    x = np.asarray(shen_lines_hb[0].get_xdata(), dtype=float)
+    y = np.asarray(shen_lines_hb[0].get_ydata(), dtype=float)
+    assert np.isclose(x[0], 42.87)
+    assert np.isclose(x[-1], 45.40)
+    np.testing.assert_allclose(y, 1.458 + 0.41 * (x - 44.0))
+
+    plt.close(fig)
+
+
 def test_plot_l2500_vs_uv_variability_fiducial_writes_pdf(tmp_path, monkeypatch):
     monkeypatch.setenv("MPLCONFIGDIR", str(tmp_path / "mplconfig"))
 
@@ -1188,6 +1221,54 @@ def test_run_alternating_two_stage_fluxmix_fast_inference_smoke():
     assert f"amp_cont_{bands[0]}" in flatten_per_chain_samples_per_band(samples_per_chain, bands)
 
 
+def test_fluxmix_stage2_eta_sigma_recomputes_continuum_and_line_ratios():
+    lam_rf = jnp.array([2000.0, 3500.0], dtype=float)
+    lambda_center_rf = jnp.exp(jnp.mean(jnp.log(lam_rf)))
+    raw_base = dict(
+        log_tau_slow_center0=jnp.log(100.0),
+        log_tau_fast_center0=jnp.log(10.0),
+        log_sigma_center0=jnp.log(0.1),
+        lambda_center_rf=lambda_center_rf,
+        poly1=0.0,
+        mean=jnp.zeros(2, dtype=float),
+        log_jitter=jnp.full(2, -4.0, dtype=float),
+        lag0=jnp.asarray(5.0),
+        lag_beta=jnp.asarray(4.0 / 3.0),
+        log_amp_delta_lya=jnp.asarray(0.0),
+        eta_sigma=jnp.asarray(-0.5),
+        eta_tau=jnp.asarray(0.2),
+        log_amp_delta_blr=jnp.array([-0.3, -0.2], dtype=float),
+        log_lag_blr=jnp.log(jnp.array([50.0, 60.0], dtype=float)),
+        log_amp_delta_blr2=jnp.full(2, -9.0, dtype=float),
+        log_lag_blr2=jnp.full(2, -9.0, dtype=float),
+        log_amp_delta_bc=jnp.asarray(-0.8),
+        log_lag_ratio_bc_to_blr=jnp.log(0.2),
+    )
+    raw_shifted = dict(raw_base)
+    raw_shifted["eta_sigma"] = jnp.asarray(-1.2)
+
+    explicit_base = build_explicit_model_params_fluxmix_fast(raw_base, lam_rf)
+    explicit_shifted = build_explicit_model_params_fluxmix_fast(raw_shifted, lam_rf)
+    ratio_base = compute_flux_line_ratio_offsets(
+        lam_rf,
+        lambda_center_rf=lambda_center_rf,
+        eta_sigma=raw_base["eta_sigma"],
+        log_amp_delta_lya=raw_base["log_amp_delta_lya"],
+    )
+    ratio_shifted = compute_flux_line_ratio_offsets(
+        lam_rf,
+        lambda_center_rf=lambda_center_rf,
+        eta_sigma=raw_shifted["eta_sigma"],
+        log_amp_delta_lya=raw_shifted["log_amp_delta_lya"],
+    )
+
+    assert not np.allclose(np.asarray(explicit_base["amp_cont"]), np.asarray(explicit_shifted["amp_cont"]))
+    assert not np.allclose(np.asarray(explicit_base["amp_blr"]), np.asarray(explicit_shifted["amp_blr"]))
+    assert not np.allclose(np.asarray(explicit_base["amp_bc"]), np.asarray(explicit_shifted["amp_bc"]))
+    assert not np.allclose(np.asarray(ratio_base["blr_band"]), np.asarray(ratio_shifted["blr_band"]))
+    assert not np.allclose(np.asarray(ratio_base["bc_ref"]), np.asarray(ratio_shifted["bc_ref"]))
+
+
 def test_save_combined_plot_fluxmix_handles_singleton_sample_entries(monkeypatch):
     obj = _make_fake_public_object()
     lc = make_lc(
@@ -1249,6 +1330,80 @@ def test_save_combined_plot_fluxmix_handles_singleton_sample_entries(monkeypatch
         plot_psd=True,
         filename_suffix="pytest_fluxmix_singleton",
     )
+
+
+def test_fluxmix_saved_samples_preserve_stage1_basis_for_rebuild():
+    obj = _make_fake_public_object()
+    lc = make_lc(
+        obj,
+        ["g", "r"],
+        inject_fake=False,
+        drop_band_lyman_alpha=False,
+    )
+    obj = obj | lc
+
+    bands = obj["bands"]
+    lam_rf = jnp.array([lambda_pivot[b] for b in bands], dtype=float) / (1.0 + float(obj["z"]))
+    bidx = np.asarray(obj["band_idx"])
+    yerr = np.asarray(obj["yerr"])
+    log_jitter_mean = np.array(
+        [
+            np.log(np.mean(yerr[(bidx == i) & np.isfinite(yerr) & (yerr < 10)]))
+            for i in range(len(bands))
+        ],
+        dtype=float,
+    )
+
+    samples_flat, _, _, _ = run_two_stage_fluxmix_fast_inference(
+        obj,
+        lam_rf,
+        log_jitter_mean=jnp.array(log_jitter_mean),
+        rng_key=random.PRNGKey(12),
+        num_warmup=1,
+        num_samples=2,
+        num_chains=1,
+        chain_method="sequential",
+        progress_bar=False,
+        dense_mass=False,
+        max_tree_depth=1,
+        disable_poly1=False,
+        disable_lag_blr=False,
+        disable_lag_bc=False,
+        drop_band_lyman_alpha=False,
+        tau_fast_truncated=False,
+        n_blr_terms=1,
+    )
+
+    assert "stage1_basis_eta_sigma" in samples_flat
+    assert "stage1_basis_log_sigma_center0" in samples_flat
+    assert "delta_eta_sigma" in samples_flat
+    assert "delta_log_sigma_center0" in samples_flat
+    np.testing.assert_allclose(
+        np.asarray(samples_flat["delta_eta_sigma"], dtype=float),
+        np.asarray(samples_flat["eta_sigma"], dtype=float)
+        - np.asarray(samples_flat["stage1_basis_eta_sigma"], dtype=float),
+    )
+    np.testing.assert_allclose(
+        np.asarray(samples_flat["delta_log_sigma_center0"], dtype=float),
+        np.asarray(samples_flat["log_sigma_center0"], dtype=float)
+        - np.asarray(samples_flat["stage1_basis_log_sigma_center0"], dtype=float),
+    )
+
+    stage1_raw = _fluxmix_stage1_raw_median_params(samples_flat, lam_rf)
+    np.testing.assert_allclose(
+        np.asarray(stage1_raw["eta_sigma"], dtype=float),
+        np.median(np.asarray(samples_flat["stage1_basis_eta_sigma"], dtype=float), axis=0),
+    )
+    np.testing.assert_allclose(
+        np.asarray(stage1_raw["log_sigma_center0"], dtype=float),
+        np.median(np.asarray(samples_flat["stage1_basis_log_sigma_center0"], dtype=float), axis=0),
+    )
+
+    rebuilt_model = build_mag_fluxmix_fast_display_model(obj, lam_rf, samples_flat)
+    posterior_median = {k: np.median(v, axis=0) for k, v in samples_flat.items()}
+    rebuilt_mu, rebuilt_std = rebuilt_model.pred(posterior_median, obj["X"])
+    assert np.all(np.isfinite(np.asarray(rebuilt_mu)))
+    assert np.all(np.isfinite(np.asarray(rebuilt_std)))
 
 
 def test_build_single_object_model_mag_fluxmix_stage2_rejects_second_blr_term():
