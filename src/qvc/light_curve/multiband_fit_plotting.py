@@ -107,25 +107,75 @@ def _posterior_sample_params_at_index(samples, i, reference_n):
     return out
 
 
+POSTERIOR_PLOT_KEY_GROUPS = {
+    "continuum": {
+        "exact": [
+            "eta_sigma",
+            "eta_tau",
+            "log_sigma_uv",
+            "log_tau_uv",
+            "log_tau_fast_uv",
+            "lag0",
+            "lag_beta",
+            "linear_trend",
+        ],
+        "prefixes": (),
+    },
+    "line_response": {
+        "exact": [
+            "dlog_amp_blr",
+            "log_lag_blr",
+            "dlog_amp_bc",
+            "log_lag_ratio_bc_to_blr",
+        ],
+        "prefixes": (
+            "dlog_amp_blr_",
+            "log_lag_blr_",
+        ),
+    },
+    "mean_and_noise": {
+        "exact": [
+            "mean",
+            "log_jitter",
+        ],
+        "prefixes": (
+            "mean_",
+            "log_jitter_",
+        ),
+    },
+}
+
+
+def _posterior_plot_labels(samples_flat):
+    """Return an ordered curated subset of posterior keys for diagnostic plots."""
+
+    all_labels = list(samples_flat.keys())
+    selected = []
+    seen = set()
+
+    def _add(label):
+        if label in samples_flat and label not in seen:
+            selected.append(label)
+            seen.add(label)
+
+    for group in POSTERIOR_PLOT_KEY_GROUPS.values():
+        for label in group["exact"]:
+            _add(label)
+        for prefix in group["prefixes"]:
+            for label in all_labels:
+                if label.startswith(prefix):
+                    _add(label)
+
+    if not selected:
+        selected = list(all_labels)
+
+    return all_labels, selected
+
+
 def _corner_plot_labels(samples_flat):
     """Return ordered candidate and filtered corner-plot parameter labels."""
 
-    all_labels = list(samples_flat.keys())
-    excluded_prefixes = (
-        "lag_disk_",
-        "lag_bc_",
-        "lag_blr_",
-        "lag_blr2_",
-        "log_sigma_hat_",
-        "log_lag_blr_raw_",
-        "log_lag_blr2_raw_",
-    )
-    labels_for_corner = [
-        label
-        for label in all_labels
-        if not label.startswith(excluded_prefixes)
-    ]
-    return all_labels, labels_for_corner
+    return _posterior_plot_labels(samples_flat)
 
 
 def save_lc_plot(times, mags, magerrs, object_id):
@@ -315,8 +365,8 @@ def plot_posterior(
         raise ValueError(f"Unsupported sample_mode={sample_mode!r}; expected 'fast' or 'full'.")
 
     all_labels, labels_for_corner = _corner_plot_labels(samples_flat)
-    print("Corner candidate parameters:", all_labels)
-    print("Corner plotted parameters:", labels_for_corner)
+    logging.info("Corner candidate parameters: %s", all_labels)
+    logging.info("Corner plotted parameters: %s", labels_for_corner)
 
     samples_for_corner = {label: samples_flat[label] for label in labels_for_corner}
 
@@ -421,6 +471,7 @@ def plot_posterior(
     fig = corner.corner(
         X_plot,
         labels=labels_plot,
+        color="black",
         show_titles=True,
         quantiles=[0.16, 0.5, 0.84],
         bins=int(bins),
@@ -1690,12 +1741,8 @@ def plot_mcmc_traces(samples_dict, data):
     """
     logging.info("Plotting MCMC Traces")
 
-    excluded_prefixes = ("tau_fast_", "tau_slow_")
-    trace_items = [
-        (key, value)
-        for key, value in samples_dict.items()
-        if not key.startswith(excluded_prefixes)
-    ]
+    _all_labels, labels_for_trace = _posterior_plot_labels(samples_dict)
+    trace_items = [(key, samples_dict[key]) for key in labels_for_trace]
 
     total_traces = len(trace_items)
     if total_traces == 0:
@@ -1724,9 +1771,9 @@ def plot_mcmc_traces(samples_dict, data):
 
     for idx, (key, values) in enumerate(trace_items):
         y, ylabel = _trace_transform(key, values)
-        axes[idx].plot(y, alpha=0.7)
+        axes[idx].plot(y, alpha=0.85, color="black", lw=0.8)
         axes[idx].set_ylabel(ylabel)
-        axes[idx].grid(True)
+        axes[idx].grid(True, alpha=0.3)
 
     axes[-1].set_xlabel("Sample index")
     plt.tight_layout()

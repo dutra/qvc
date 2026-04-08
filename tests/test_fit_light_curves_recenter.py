@@ -34,7 +34,7 @@ from qvc.light_curve.fit_light_curves import (
     make_lc,
     posterior_median_mean_function,
 )
-from qvc.light_curve.multiband_fit_plotting import relative_to_2500_amplitude_scale
+from qvc.light_curve.multiband_fit_plotting import _corner_plot_labels, relative_to_2500_amplitude_scale
 from qvc.light_curve.multiband_fit_utils import lambda_pivot, log_single_pl, process_samples
 
 
@@ -205,6 +205,50 @@ def test_log_tau_fast_center0_prior_is_centered_at_tau_slow_over_twenty_five():
 
     assert np.isclose(float(prior.loc), np.log(1000.0 / 25.0))
     assert np.isclose(float(prior.scale), 0.4 * np.log(10.0))
+
+
+def test_corner_plot_labels_keep_only_curated_main_parameters():
+    samples_flat = {
+        "eta_sigma": np.array([0.1, 0.2]),
+        "eta_tau": np.array([0.3, 0.4]),
+        "log_sigma_center0": np.array([0.8, 0.9]),
+        "log_sigma_uv": np.array([1.0, 1.1]),
+        "log_tau_slow_center0": np.array([1.8, 1.9]),
+        "log_tau_uv": np.array([2.0, 2.1]),
+        "log_tau_fast_center0": np.array([0.2, 0.3]),
+        "log_tau_fast_uv": np.array([0.5, 0.6]),
+        "lag0": np.array([5.0, 6.0]),
+        "lag_beta": np.array([1.1, 1.2]),
+        "linear_trend": np.array([0.0, 0.01]),
+        "dlog_amp_blr_g": np.array([-1.0, -0.9]),
+        "dlog_amp_blr2_g": np.array([-1.3, -1.2]),
+        "log_lag_blr_g": np.array([3.0, 3.1]),
+        "log_lag_blr2_g": np.array([3.5, 3.6]),
+        "mean_g": np.array([19.0, 19.1]),
+        "log_jitter_g": np.array([-2.0, -2.1]),
+        "amp_cont_g": np.array([0.2, 0.3]),
+        "tau_fast_g": np.array([10.0, 11.0]),
+        "tau_slow_g": np.array([100.0, 110.0]),
+        "lag_disk_g": np.array([1.0, 1.1]),
+    }
+
+    all_labels, labels_for_corner = _corner_plot_labels(samples_flat)
+
+    assert "eta_sigma" in labels_for_corner
+    assert "log_sigma_uv" in labels_for_corner
+    assert "dlog_amp_blr_g" in labels_for_corner
+    assert "mean_g" in labels_for_corner
+    assert "log_jitter_g" in labels_for_corner
+    assert "log_sigma_center0" not in labels_for_corner
+    assert "log_tau_slow_center0" not in labels_for_corner
+    assert "log_tau_fast_center0" not in labels_for_corner
+    assert "dlog_amp_blr2_g" not in labels_for_corner
+    assert "log_lag_blr2_g" not in labels_for_corner
+    assert "amp_cont_g" not in labels_for_corner
+    assert "tau_fast_g" not in labels_for_corner
+    assert "tau_slow_g" not in labels_for_corner
+    assert "lag_disk_g" not in labels_for_corner
+    assert set(labels_for_corner).issubset(set(all_labels))
 
 
 def test_balmer_continuum_weight_transitions_smoothly_across_3646():
