@@ -181,6 +181,25 @@ def _corner_plot_labels(samples_flat):
     return _posterior_plot_labels(samples_flat)
 
 
+def _trace_plot_labels(samples_flat):
+    """Return ordered trace-plot labels, including fitted survey offsets."""
+
+    all_labels, selected = _posterior_plot_labels(samples_flat)
+    trace_labels = list(selected)
+    seen = set(trace_labels)
+
+    for label in all_labels:
+        if not label.startswith("survey_delta_mag_") or label in seen:
+            continue
+        values = np.asarray(samples_flat[label], dtype=float)
+        if values.size == 0 or np.allclose(values, 0.0, atol=0.0, rtol=0.0):
+            continue
+        trace_labels.append(label)
+        seen.add(label)
+
+    return all_labels, trace_labels
+
+
 def save_lc_plot(times, mags, magerrs, object_id):
     logging.info("Saving LC plot")
     # Plot and save the light curves
@@ -662,6 +681,14 @@ def combined_lomb_scargle_from_model(
     if hasattr(model, "mean_to_display"):
         mean_vals = model.mean_to_display(mean_vals)
     y = np.asarray(y, float).copy() - np.asarray(mean_vals, float)
+    if (
+        getattr(model, "survey_idx", None) is not None
+        and "survey_delta_mag" in params
+    ):
+        survey_delta_mag = np.asarray(params["survey_delta_mag"], dtype=float)
+        if survey_delta_mag.ndim == 2:
+            survey_idx = np.asarray(model.survey_idx, dtype=np.int32)
+            y = y - survey_delta_mag[band_idx, survey_idx]
     yerr = np.asarray(yerr, float).copy()
 
     #if "log_jitter" in params:
@@ -1743,7 +1770,7 @@ def plot_mcmc_traces(samples_dict, data):
     """
     logging.info("Plotting MCMC Traces")
 
-    _all_labels, labels_for_trace = _posterior_plot_labels(samples_dict)
+    _all_labels, labels_for_trace = _trace_plot_labels(samples_dict)
     trace_items = [(key, samples_dict[key]) for key in labels_for_trace]
 
     total_traces = len(trace_items)

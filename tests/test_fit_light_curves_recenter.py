@@ -14,6 +14,8 @@ if str(SRC) not in sys.path:
 
 from qvc.light_curve.fit_light_curves import (
     _weighted_quantile,
+    _default_survey_labels_for_band,
+    _compute_survey_offset_active_mask,
     balmer_continuum_weight,
     build_explicit_model_params,
     bending_power_law_psd,
@@ -34,7 +36,11 @@ from qvc.light_curve.fit_light_curves import (
     make_lc,
     posterior_median_mean_function,
 )
-from qvc.light_curve.multiband_fit_plotting import _corner_plot_labels, relative_to_2500_amplitude_scale
+from qvc.light_curve.multiband_fit_plotting import (
+    _corner_plot_labels,
+    _trace_plot_labels,
+    relative_to_2500_amplitude_scale,
+)
 from qvc.light_curve.multiband_fit_utils import lambda_pivot, log_single_pl, process_samples
 
 
@@ -249,6 +255,23 @@ def test_corner_plot_labels_keep_only_curated_main_parameters():
     assert "tau_slow_g" not in labels_for_corner
     assert "lag_disk_g" not in labels_for_corner
     assert set(labels_for_corner).issubset(set(all_labels))
+
+
+def test_trace_plot_labels_include_fitted_survey_offsets_only():
+    samples_flat = {
+        "eta_sigma": np.array([0.1, 0.2]),
+        "survey_delta_mag_g_sdss": np.zeros(2, dtype=float),
+        "survey_delta_mag_g_ztf": np.array([0.01, 0.02], dtype=float),
+        "survey_delta_mag_r_ps1": np.array([-0.01, -0.005], dtype=float),
+    }
+
+    all_labels, labels_for_trace = _trace_plot_labels(samples_flat)
+
+    assert "eta_sigma" in labels_for_trace
+    assert "survey_delta_mag_g_ztf" in labels_for_trace
+    assert "survey_delta_mag_r_ps1" in labels_for_trace
+    assert "survey_delta_mag_g_sdss" not in labels_for_trace
+    assert set(labels_for_trace).issubset(set(all_labels))
 
 
 def test_balmer_continuum_weight_transitions_smoothly_across_3646():
@@ -658,6 +681,56 @@ def test_posterior_median_mean_function_uses_global_time_normalization():
     t_std = np.std(t_ref)
     expected = 1.0 + 0.2 * ((t_eval - t_center) / t_std)
     assert np.allclose(got, expected)
+
+
+def test_posterior_median_mean_function_applies_survey_offsets_in_mag_space():
+    t_eval = np.array([0.0, 20.0], dtype=float)
+    t_ref = np.array([0.0, 10.0, 20.0], dtype=float)
+    survey_idx = np.array([0, 2], dtype=np.int32)
+    flat_samples = {
+        "mean_g": np.array([1.0, 1.0, 1.0], dtype=float),
+        "linear_trend": np.array([0.0, 0.0, 0.0], dtype=float),
+        "survey_delta_mag_g_sdss": np.zeros(3, dtype=float),
+        "survey_delta_mag_g_ztf": np.full(3, 0.015, dtype=float),
+    }
+
+    got = posterior_median_mean_function(
+        flat_samples,
+        t_eval,
+        "g",
+        t_ref=t_ref,
+        survey_idx=survey_idx,
+        survey_names=("sdss", "ps1", "ztf"),
+    )
+
+    assert np.allclose(got, np.array([1.0, 1.015], dtype=float))
+
+
+def test_compute_survey_offset_active_mask_uses_first_active_survey_as_reference():
+    band_idx = np.array([0, 0, 0, 1, 1], dtype=np.int32)
+    survey_idx = np.array([1, 2, 2, 2, 2], dtype=np.int32)
+
+    got = _compute_survey_offset_active_mask(band_idx, survey_idx, n_bands=2)
+
+    expected = np.array(
+        [
+            [False, False, True],
+            [False, False, False],
+        ],
+        dtype=bool,
+    )
+    assert np.array_equal(got, expected)
+
+
+def test_default_survey_labels_keep_full_survey_name():
+    assert np.array_equal(
+        _default_survey_labels_for_band("g", 3),
+        np.array(["ztf", "ztf", "ztf"], dtype=str),
+    )
+    assert np.array_equal(
+        _default_survey_labels_for_band("u", 2),
+        np.array(["sdss", "sdss"], dtype=str),
+    )
 
 
 def test_compute_band_adf_returns_valid_output_for_stationary_series():

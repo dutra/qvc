@@ -130,6 +130,12 @@ def _normalize_survey_name(value):
     text = str(value).strip().lower()
     if text in {"", "nan", "none"}:
         return "sdss"
+    if text == "s":
+        return "sdss"
+    if text == "p":
+        return "ps1"
+    if text == "z":
+        return "ztf"
     if text in LC_SURVEY_TO_IDX:
         return text
     if text.startswith("panstarr") or text.startswith("pan-starr") or text == "panstarrs":
@@ -144,7 +150,7 @@ def _default_survey_labels_for_band(band, size):
         default = "sdss"
     else:
         default = "ztf"
-    return np.full(int(size), default, dtype=str)
+    return np.full(int(size), default, dtype=f"<U{len(default)}")
 
 
 def _survey_indices_from_labels(labels):
@@ -180,6 +186,67 @@ def _compute_log_jitter_mean_grid(yerr, band_idx, survey_idx, n_bands):
     return jnp.asarray(log_jitter_mean, dtype=float), active_mask
 
 
+def _compute_survey_offset_active_mask(band_idx, survey_idx, n_bands):
+    band_idx = np.asarray(band_idx, dtype=np.int32)
+    survey_idx = np.asarray(survey_idx, dtype=np.int32)
+    n_surveys = len(LC_SURVEY_NAMES)
+    active_mask = np.zeros((n_bands, n_surveys), dtype=bool)
+    for i in range(int(n_bands)):
+        band_surveys = survey_idx[band_idx == i]
+        if band_surveys.size == 0:
+            continue
+        active_surveys = np.unique(band_surveys)
+        ref_survey = int(np.min(active_surveys))
+        active_mask[i, active_surveys] = True
+        active_mask[i, ref_survey] = False
+    return active_mask
+
+
+def _get_object_active_noise_calibration_masks(obj_dict, n_bands):
+    band_idx = np.asarray(
+        obj_dict.get("band_idx", np.asarray(obj_dict["X"][1], dtype=np.int32)),
+        dtype=np.int32,
+    )
+    survey_idx = np.asarray(
+        obj_dict.get("survey_idx", np.zeros_like(band_idx, dtype=np.int32)),
+        dtype=np.int32,
+    )
+    log_jitter_active_mask = obj_dict.get("log_jitter_active_mask")
+    if log_jitter_active_mask is None:
+        _, log_jitter_active_mask = _compute_log_jitter_mean_grid(
+            np.asarray(obj_dict["yerr"], dtype=float),
+            band_idx,
+            survey_idx,
+            n_bands,
+        )
+    survey_offset_active_mask = obj_dict.get("survey_offset_active_mask")
+    if survey_offset_active_mask is None:
+        survey_offset_active_mask = _compute_survey_offset_active_mask(
+            band_idx,
+            survey_idx,
+            n_bands,
+        )
+    return (
+        np.asarray(log_jitter_active_mask, dtype=bool),
+        np.asarray(survey_offset_active_mask, dtype=bool),
+    )
+
+
+def _coerce_log_jitter_mean_grid(log_jitter_mean, n_bands):
+    log_jitter_mean = np.asarray(log_jitter_mean, dtype=float)
+    if log_jitter_mean.ndim == 2:
+        return jnp.asarray(log_jitter_mean, dtype=float)
+    if log_jitter_mean.ndim == 1 and log_jitter_mean.shape[0] == int(n_bands):
+        return jnp.asarray(
+            np.repeat(log_jitter_mean[:, None], len(LC_SURVEY_NAMES), axis=1),
+            dtype=float,
+        )
+    raise ValueError(
+        f"log_jitter_mean must have shape ({int(n_bands)},) or "
+        f"({int(n_bands)}, {len(LC_SURVEY_NAMES)}); got {log_jitter_mean.shape}."
+    )
+
+
 def _sample_log_jitter_grid(log_jitter_mean, active_mask):
     log_jitter_mean = jnp.asarray(log_jitter_mean, dtype=float)
     active_mask = np.asarray(active_mask, dtype=bool)
@@ -194,6 +261,22 @@ def _sample_log_jitter_grid(log_jitter_mean, active_mask):
         for idx_flat, (band_idx, survey_idx) in enumerate(active_indices):
             log_jitter = log_jitter.at[int(band_idx), int(survey_idx)].set(log_jitter_active[idx_flat])
     return numpyro.deterministic("log_jitter", log_jitter)
+
+
+def _sample_survey_delta_mag_grid(active_mask):
+    active_mask = np.asarray(active_mask, dtype=bool)
+    survey_delta_mag = jnp.zeros(active_mask.shape, dtype=float)
+    active_indices = np.argwhere(active_mask)
+    if active_indices.size:
+        survey_delta_mag_active = numpyro.sample(
+            "survey_delta_mag_active",
+            survey_delta_mag_prior().expand((active_indices.shape[0],)),
+        )
+        for idx_flat, (band_idx, survey_idx) in enumerate(active_indices):
+            survey_delta_mag = survey_delta_mag.at[int(band_idx), int(survey_idx)].set(
+                survey_delta_mag_active[idx_flat]
+            )
+    return numpyro.deterministic("survey_delta_mag", survey_delta_mag)
 
 
 def compute_lambda_center_rf(lam_rf):
@@ -532,7 +615,7 @@ def linear_mean_time_scaling(t_ref):
     return float(t_center), t_std
 
 
-def posterior_median_mean_function(flat_samples, t_eval, band, *, t_ref=None):
+def posterior_median_mean_function(flat_samples, t_eval, band, *, t_ref=None, survey_idx=None, survey_names=None):
     """Return the posterior-median fitted mean function for one band."""
 
     t_eval = np.asarray(t_eval, dtype=float)
@@ -549,9 +632,25 @@ def posterior_median_mean_function(flat_samples, t_eval, band, *, t_ref=None):
     t_center, t_std = linear_mean_time_scaling(t_ref)
     time_scaled = (t_eval - t_center) / t_std
     mean_curve = mean_level + linear_trend * time_scaled
+    survey_offset_mag = np.zeros_like(t_eval, dtype=float)
+    if survey_idx is not None:
+        survey_idx = np.asarray(survey_idx, dtype=np.int32)
+        if survey_names is None:
+            survey_names = LC_SURVEY_NAMES
+        survey_names = tuple(str(name) for name in survey_names)
+        if survey_idx.shape == t_eval.shape:
+            for survey_i, survey_name in enumerate(survey_names):
+                key = f"survey_delta_mag_{band}_{survey_name}"
+                if key not in flat_samples:
+                    continue
+                mask = survey_idx == survey_i
+                if not np.any(mask):
+                    continue
+                survey_offset_mag[mask] = float(np.nanmedian(np.asarray(flat_samples[key], dtype=float)))
     if "log_sigma_uv_relflux" in flat_samples or "amp_cont_relflux" in flat_samples:
-        return np.asarray(-2.5 * np.log10(np.clip(1.0 + mean_curve, 1e-12, None)), dtype=float)
-    return mean_curve
+        mean_curve = np.asarray(-2.5 * np.log10(np.clip(1.0 + mean_curve, 1e-12, None)), dtype=float)
+        return mean_curve + survey_offset_mag
+    return mean_curve + survey_offset_mag
 
 
 def compute_band_adf(values, *, regression="c", autolag="AIC"):
@@ -593,6 +692,8 @@ def compute_object_adf_diagnostics(flat_samples, obj, bands):
     t_all = np.asarray(obj["X"][0], dtype=float)
     y_all = np.asarray(obj["y"], dtype=float)
     band_idx = np.asarray(obj["band_idx"])
+    survey_idx_all = np.asarray(obj.get("survey_idx", np.zeros_like(band_idx, dtype=np.int32)), dtype=np.int32)
+    survey_names = tuple(obj.get("survey_names", LC_SURVEY_NAMES))
 
     out = {}
     pvalues = []
@@ -600,7 +701,14 @@ def compute_object_adf_diagnostics(flat_samples, obj, bands):
         mask = band_idx == i
         t_band = t_all[mask]
         y_band = y_all[mask]
-        fitted_mean = posterior_median_mean_function(flat_samples, t_band, band, t_ref=t_all)
+        fitted_mean = posterior_median_mean_function(
+            flat_samples,
+            t_band,
+            band,
+            t_ref=t_all,
+            survey_idx=survey_idx_all[mask],
+            survey_names=survey_names,
+        )
         detrended = y_band - fitted_mean
         adf = compute_band_adf(detrended)
         out[f"adf_stat_{band}"] = adf["adf_stat"]
@@ -725,6 +833,8 @@ def extract_band_detrended_series(flat_samples, obj, bands, band, *, z=None, sub
     y_all = np.asarray(obj["y"], dtype=float)
     yerr_all = np.asarray(obj.get("yerr", np.full_like(y_all, np.nan)), dtype=float)
     band_idx = np.asarray(obj["band_idx"])
+    survey_idx_all = np.asarray(obj.get("survey_idx", np.zeros_like(band_idx, dtype=np.int32)), dtype=np.int32)
+    survey_names = tuple(obj.get("survey_names", LC_SURVEY_NAMES))
 
     i = bands.index(band)
     mask = band_idx == i
@@ -732,7 +842,14 @@ def extract_band_detrended_series(flat_samples, obj, bands, band, *, z=None, sub
     y_band = y_all[mask]
     yerr_band = yerr_all[mask]
     if subtract_mean:
-        fitted_mean = posterior_median_mean_function(flat_samples, t_band, band, t_ref=t_all)
+        fitted_mean = posterior_median_mean_function(
+            flat_samples,
+            t_band,
+            band,
+            t_ref=t_all,
+            survey_idx=survey_idx_all[mask],
+            survey_names=survey_names,
+        )
         values = y_band - fitted_mean
     else:
         values = y_band
@@ -2149,6 +2266,10 @@ def log_jitter_prior(log_jitter_mean):
     return dist.Normal(log_jitter_mean, 1.0)
 
 
+def survey_delta_mag_prior():
+    return dist.Normal(0.0, 0.02)
+
+
 def dlog_amp_blr_prior():
     return dist.Normal(-1.0, 1.0)
 
@@ -2234,6 +2355,7 @@ def sample_flux_line_latent_params(
     log_lag0,
     log_jitter_mean,
     log_jitter_active_mask,
+    survey_offset_active_mask,
     line_ratio_offsets,
     mean_prior_dist=None,
     disable_lag_blr=False,
@@ -2263,6 +2385,7 @@ def sample_flux_line_latent_params(
     if mean_prior_dist is None:
         mean_prior_dist = mean_prior()
     log_jitter = _sample_log_jitter_grid(log_jitter_mean, log_jitter_active_mask)
+    survey_delta_mag = _sample_survey_delta_mag_grid(survey_offset_active_mask)
 
     with numpyro.plate("band", B):
         mean = numpyro.sample("mean", mean_prior_dist)
@@ -2357,6 +2480,7 @@ def sample_flux_line_latent_params(
         log_lag_blr,
         log_lag_blr2,
         log_jitter,
+        survey_delta_mag,
         dlog_amp_bc,
         log_lag_ratio_bc_to_blr,
     )
@@ -2491,6 +2615,12 @@ def compute_parameter_kls(
                         log_jitter_prior(float(log_jitter_mean[i, j])),
                         x,
                     ),
+                )
+            survey_delta_key = f"survey_delta_mag_{band}_{survey}"
+            if survey_delta_key in flat_samples:
+                kls[f"{survey_delta_key}_kl"] = kl_from_samples(
+                    flat_samples[survey_delta_key],
+                    lambda x: _dist_log_prob_array(survey_delta_mag_prior(), x),
                 )
 
         if disable_lag_blr:
@@ -3275,6 +3405,10 @@ def build_single_object_model(
     else:
         log_igm_transmission_band = jnp.zeros(B, dtype=lam_rf.dtype)
     lambda_uv = jnp.array(2500.0, dtype=lam_rf.dtype)
+    log_jitter_active_mask, survey_offset_active_mask = _get_object_active_noise_calibration_masks(
+        obj_dict, B
+    )
+    log_jitter_mean_grid = _coerce_log_jitter_mean_grid(log_jitter_mean, B)
 
     def model():
         eta_sigma = numpyro.sample("eta_sigma", eta_sigma_prior())
@@ -3328,14 +3462,16 @@ def build_single_object_model(
             log_lag_blr,
             log_lag_blr2,
             log_jitter,
+            survey_delta_mag,
             dlog_amp_bc,
             log_lag_ratio_bc_to_blr,
         ) = sample_flux_line_latent_params(
             B=B,
             z=z,
             log_lag0=log_lag0,
-            log_jitter_mean=log_jitter_mean,
-            log_jitter_active_mask=np.asarray(obj_dict["log_jitter_active_mask"], dtype=bool),
+            log_jitter_mean=log_jitter_mean_grid,
+            log_jitter_active_mask=log_jitter_active_mask,
+            survey_offset_active_mask=survey_offset_active_mask,
             line_ratio_offsets=line_ratio_offsets,
             disable_lag_blr=disable_lag_blr,
             disable_lag_bc=disable_lag_bc,
@@ -3357,6 +3493,7 @@ def build_single_object_model(
             log_lag_blr=log_lag_blr,
             log_lag_blr2=log_lag_blr2,
             log_jitter=log_jitter,
+            survey_delta_mag=survey_delta_mag,
             lag0=lag0,
             lag_beta=lag_beta,
             log_igm_transmission_band=log_igm_transmission_band,
@@ -3453,6 +3590,7 @@ def build_single_object_model_mag_flux_linearized(
         np.asarray(survey_idx, dtype=np.int32),
         B,
     )
+    _, survey_offset_active_mask = _get_object_active_noise_calibration_masks(obj_dict, B)
 
     def model():
         eta_sigma = numpyro.sample("eta_sigma", eta_sigma_prior())
@@ -3503,6 +3641,7 @@ def build_single_object_model_mag_flux_linearized(
             log_lag_blr,
             log_lag_blr2,
             log_jitter,
+            survey_delta_mag,
             dlog_amp_bc,
             log_lag_ratio_bc_to_blr,
         ) = sample_flux_line_latent_params(
@@ -3511,6 +3650,7 @@ def build_single_object_model_mag_flux_linearized(
             log_lag0=log_lag0,
             log_jitter_mean=log_jitter_mean_relflux,
             log_jitter_active_mask=log_jitter_active_mask_relflux,
+            survey_offset_active_mask=survey_offset_active_mask,
             line_ratio_offsets=line_ratio_offsets,
             mean_prior_dist=mean_prior_relflux(),
             disable_lag_blr=disable_lag_blr,
@@ -3533,6 +3673,7 @@ def build_single_object_model_mag_flux_linearized(
             log_lag_blr=log_lag_blr,
             log_lag_blr2=log_lag_blr2,
             log_jitter=log_jitter,
+            survey_delta_mag=survey_delta_mag,
             lag0=lag0,
             lag_beta=lag_beta,
             log_igm_transmission_band=log_igm_transmission_band,
@@ -3618,6 +3759,10 @@ def build_single_object_model_continuum_only(
         log_igm_transmission_band = compute_log_igm_transmission_band(bands, z)
     else:
         log_igm_transmission_band = jnp.zeros(B, dtype=lam_rf.dtype)
+    log_jitter_active_mask, survey_offset_active_mask = _get_object_active_noise_calibration_masks(
+        obj_dict, B
+    )
+    log_jitter_mean_grid = _coerce_log_jitter_mean_grid(log_jitter_mean, B)
 
     def model():
         eta_sigma = numpyro.sample("eta_sigma", eta_sigma_prior())
@@ -3654,8 +3799,11 @@ def build_single_object_model_continuum_only(
         lag0 = numpyro.sample("lag0", lag0_prior())
         lag_beta = numpyro.sample("lag_beta", lag_beta_prior())
         log_jitter = _sample_log_jitter_grid(
-            log_jitter_mean,
-            np.asarray(obj_dict["log_jitter_active_mask"], dtype=bool),
+            log_jitter_mean_grid,
+            log_jitter_active_mask,
+        )
+        survey_delta_mag = _sample_survey_delta_mag_grid(
+            survey_offset_active_mask,
         )
         with numpyro.plate("band", B):
             mean = numpyro.sample("mean", mean_prior())
@@ -3668,6 +3816,7 @@ def build_single_object_model_continuum_only(
             linear_trend=linear_trend,
             mean=mean,
             log_jitter=log_jitter,
+            survey_delta_mag=survey_delta_mag,
             lag0=lag0,
             lag_beta=lag_beta,
             log_igm_transmission_band=log_igm_transmission_band,
@@ -3752,6 +3901,12 @@ def build_single_object_model_mag_fluxmix_stage2(
         log_igm_transmission_band_fixed = jnp.zeros(B, dtype=lam_rf.dtype)
     mean_func = make_linear_mean_func(t, zero_mean=zero_mean)
     mean_obs = mean_func(stage1_raw_median, (t, bidx))
+    survey_delta_mag_fixed = jnp.asarray(
+        stage1_raw_median.get("survey_delta_mag", jnp.zeros((B, len(LC_SURVEY_NAMES)), dtype=float)),
+        dtype=float,
+    )
+    if survey_delta_mag_fixed.ndim == 2:
+        mean_obs = mean_obs + survey_delta_mag_fixed[bidx, survey_idx]
     log_jitter_fixed = jnp.asarray(stage1_raw_median["log_jitter"], dtype=float)
     if has_jitter:
         if log_jitter_fixed.ndim == 2:
@@ -3994,6 +4149,7 @@ def _fluxmix_stage1_raw_median_params(samples_flat, lam_rf):
     B = int(len(lam_rf))
     mean_default = np.zeros(B, dtype=float)
     jitter_default = np.full((B, len(LC_SURVEY_NAMES)), np.log(1e-3), dtype=float)
+    survey_delta_default = np.zeros((B, len(LC_SURVEY_NAMES)), dtype=float)
     linear_trend_default = 0.0
     if "stage1_basis_log_sigma_center0" in samples_flat:
         log_sigma_center0_stage1 = np.asarray(samples_flat["stage1_basis_log_sigma_center0"], dtype=float)
@@ -4038,6 +4194,13 @@ def _fluxmix_stage1_raw_median_params(samples_flat, lam_rf):
         ),
         log_jitter=jnp.asarray(
             np.median(np.asarray(samples_flat.get("log_jitter", jitter_default), dtype=float), axis=0),
+            dtype=float,
+        ),
+        survey_delta_mag=jnp.asarray(
+            np.median(
+                np.asarray(samples_flat.get("survey_delta_mag", survey_delta_default), dtype=float),
+                axis=0,
+            ),
             dtype=float,
         ),
         lag0=jnp.asarray(np.median(np.asarray(samples_flat["lag0"], dtype=float), axis=0), dtype=float),
@@ -4631,7 +4794,13 @@ def main():
                 survey_idx,
                 B,
             )
+            survey_offset_active_mask = _compute_survey_offset_active_mask(
+                bidx,
+                survey_idx,
+                B,
+            )
             obj["log_jitter_active_mask"] = log_jitter_active_mask
+            obj["survey_offset_active_mask"] = survey_offset_active_mask
             log_jitter_mean_fit = log_jitter_mean
             if args.model_variant == "mag_flux_linearized":
                 y_relflux = np.asarray(mag_residual_to_relative_flux(obj["y"]), dtype=float)

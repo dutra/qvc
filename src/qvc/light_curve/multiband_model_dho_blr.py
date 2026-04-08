@@ -3,6 +3,7 @@ from functools import partial
 import jax
 import jax.numpy as jnp
 import numpy as np
+import equinox as eqx
 from tinygp.helpers import JAXArray
 from tinygp.kernels import quasisep as qs
 import tinygp.kernels.quasisep as tkq
@@ -269,6 +270,20 @@ class ContiBLR_SHO_Model(MultiVarModel):
             return jnp.exp(log_jitter[band, self.survey_idx]) ** 2
         return (jnp.exp(jnp.atleast_1d(log_jitter)) ** 2)[band]
 
+    def _survey_offset_in_model_units(self, params, band):
+        survey_delta_mag = params.get("survey_delta_mag")
+        if survey_delta_mag is None or self.survey_idx is None:
+            return jnp.zeros_like(jnp.asarray(band, dtype=float))
+        survey_delta_mag = jnp.asarray(survey_delta_mag, dtype=float)
+        if survey_delta_mag.ndim != 2:
+            return jnp.zeros_like(jnp.asarray(band, dtype=float))
+        return survey_delta_mag[band, self.survey_idx]
+
+    def _observed_y_sorted(self, params, inds):
+        band = jnp.asarray(self.X[1], dtype=jnp.int32)
+        survey_offset = self._survey_offset_in_model_units(params, band)
+        return (self.y - survey_offset)[inds]
+
     def _build_gp(
         self, params: dict[str, JAXArray]
     ) -> tuple[GaussianProcess, JAXArray]:
@@ -309,6 +324,37 @@ class ContiBLR_SHO_Model(MultiVarModel):
     def psd(self, params, omega, b: int = 0, sigma_n2: float = 0.0):
         gp, _ = self._build_gp(params)
         return qs_psd(kernel=gp.kernel, omega=omega, b=b, sigma_n2=sigma_n2)
+
+    @eqx.filter_jit
+    def log_prob(self, params: dict[str, JAXArray]) -> JAXArray:
+        gp, inds = self._build_gp(params)
+        return gp.log_probability(y=self._observed_y_sorted(params, inds)) + self.log_prior(params)
+
+    def sample(self, params: dict[str, JAXArray]) -> None:
+        gp, inds = self._build_gp(params)
+        numpyro.sample("gp", gp.numpyro_dist(), obs=self._observed_y_sorted(params, inds))
+
+    def aic(self, params: dict[str, JAXArray]) -> JAXArray:
+        k = len(jax.flatten_util.ravel_pytree(params)[0])
+        gp, inds = self._build_gp(params)
+        log_likelihood = gp.log_probability(y=self._observed_y_sorted(params, inds))
+        return 2 * k - 2 * log_likelihood
+
+    def bic(self, params: dict[str, JAXArray]) -> JAXArray:
+        n = self.y.size
+        k = len(jax.flatten_util.ravel_pytree(params)[0])
+        gp, inds = self._build_gp(params)
+        log_likelihood = gp.log_probability(y=self._observed_y_sorted(params, inds))
+        return jnp.log(n) * k - 2 * log_likelihood
+
+    @eqx.filter_jit
+    def pred(
+        self, params: dict[str, JAXArray], X: JAXArray
+    ) -> tuple[JAXArray, JAXArray]:
+        new_X, _ = self.lag_transform(self.has_lag, params, X)
+        gp, inds = self._build_gp(params)
+        _, cond = gp.condition(self._observed_y_sorted(params, inds), new_X)
+        return cond.loc, jnp.sqrt(cond.variance)
 
 
 class ContiBLRRelativeFlux_SHO_Wrapper(ContiBLR_SHO_Wrapper):
@@ -379,6 +425,15 @@ class ContiBLRRelativeFlux_SHO_Model(ContiBLR_SHO_Model):
             else params["amp_cont"]
         )
         return jnp.log(_safe_pos(_mag_from_relflux_scale(amp_cont_relflux.dtype) * amp_cont_relflux))
+
+    def _survey_offset_in_model_units(self, params, band):
+        survey_delta_mag = params.get("survey_delta_mag")
+        if survey_delta_mag is None or self.survey_idx is None:
+            return jnp.zeros_like(jnp.asarray(band, dtype=float))
+        survey_delta_mag = jnp.asarray(survey_delta_mag, dtype=float)
+        if survey_delta_mag.ndim != 2:
+            return jnp.zeros_like(jnp.asarray(band, dtype=float))
+        return mag_residual_to_relative_flux(survey_delta_mag[band, self.survey_idx])
 
     def mean_to_display(self, mean_vals):
         return relative_flux_to_mag_residual(mean_vals)

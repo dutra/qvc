@@ -31,6 +31,7 @@ bands = ['u', 'g', 'r', 'i', 'z']#, 'y']
 BALMER_EDGE_REST_WAVELENGTH = 3646.0
 BALMER_EDGE_ATTENUATION_WIDTH = 250.0
 BALMER_EDGE_SUMMARY_WEIGHT_MIN = 0.05
+DEFAULT_SURVEY_NAMES = ("sdss", "ps1", "ztf")
 
 
 import os
@@ -189,6 +190,7 @@ def flatten_per_chain_samples_per_band(samples_per_chain, bands, survey_names=No
     internal_skip_keys = {
         "log_kernel_param",
         "log_jitter_active",
+        "survey_delta_mag_active",
     }
     flattened_samples = {}
     for k, v in samples_per_chain.items():
@@ -206,7 +208,12 @@ def flatten_per_chain_samples_per_band(samples_per_chain, bands, survey_names=No
             else:
                 raise ValueError(f"Unexpected band dimension for {k}: {v.shape} vs bands={len(bands)}")
         elif v.ndim == 4:
-            if survey_names is None or v.shape[-2:] != (len(bands), len(survey_names)):
+            if survey_names is None:
+                if v.shape[-1] == len(DEFAULT_SURVEY_NAMES):
+                    survey_names = DEFAULT_SURVEY_NAMES
+                else:
+                    survey_names = tuple(f"survey{j}" for j in range(v.shape[-1]))
+            if v.shape[-2:] != (len(bands), len(survey_names)):
                 raise ValueError(
                     f"Unexpected band/survey dimensions for {k}: {v.shape} "
                     f"vs bands={len(bands)}, surveys={0 if survey_names is None else len(survey_names)}"
@@ -273,6 +280,7 @@ def flatten_flat_samples_per_band(samples_flat, bands, survey_names=None):
     internal_skip_keys = {
         "log_kernel_param",
         "log_jitter_active",
+        "survey_delta_mag_active",
     }
     flattened_samples = {}
     for k, v in samples_flat.items():
@@ -288,7 +296,12 @@ def flatten_flat_samples_per_band(samples_flat, bands, survey_names=None):
             for i, band in enumerate(bands):
                 flattened_samples[f"{k}_{band}"] = v[:, i]
         elif v.ndim == 3:
-            if survey_names is None or v.shape[-2:] != (len(bands), len(survey_names)):
+            if survey_names is None:
+                if v.shape[-1] == len(DEFAULT_SURVEY_NAMES):
+                    survey_names = DEFAULT_SURVEY_NAMES
+                else:
+                    survey_names = tuple(f"survey{j}" for j in range(v.shape[-1]))
+            if v.shape[-2:] != (len(bands), len(survey_names)):
                 raise ValueError(
                     f"Unexpected band/survey dimensions for {k}: {v.shape} "
                     f"vs bands={len(bands)}, surveys={0 if survey_names is None else len(survey_names)}"
