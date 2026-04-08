@@ -2037,6 +2037,40 @@ def odds_sigmas_from_delta(delta):
     return sigma
 
 
+def _odds_sigma_summary_from_delta(delta, delta_err):
+    """Return central odds sigma and asymmetric bounds derived from |Δln Z| ± σΔ."""
+    abs_delta = abs(float(delta))
+    delta_err = float(delta_err)
+    sigma = odds_sigmas_from_delta(abs_delta)
+    sigma_lo = odds_sigmas_from_delta(max(abs_delta - delta_err, 0.0))
+    sigma_hi = odds_sigmas_from_delta(abs_delta + delta_err)
+    return {
+        "sigma": sigma,
+        "sigma_lo": sigma_lo,
+        "sigma_hi": sigma_hi,
+        "sigma_err_lower": sigma - sigma_lo,
+        "sigma_err_upper": sigma_hi - sigma,
+    }
+
+
+def _render_ascii_table(headers, rows):
+    widths = [len(header) for header in headers]
+    rendered_rows = []
+    for row in rows:
+        rendered = [str(value) for value in row]
+        rendered_rows.append(rendered)
+        widths = [max(width, len(value)) for width, value in zip(widths, rendered)]
+
+    def _line(values):
+        return "| " + " | ".join(value.ljust(width) for value, width in zip(values, widths)) + " |"
+
+    border = "+-" + "-+-".join("-" * width for width in widths) + "-+"
+    lines = [border, _line(headers), border]
+    lines.extend(_line(row) for row in rendered_rows)
+    lines.append(border)
+    return "\n".join(lines)
+
+
 def compare_models_by_log_evidence_all(
         df_agn,
         cosmo_models_dict,
@@ -2079,10 +2113,6 @@ def compare_models_by_log_evidence_all(
 
     # Sort models by descending log evidence.
     items.sort(key=lambda t: t[1], reverse=True)
-    labels = [t[0] for t in items]
-    logZs  = np.array([t[1] for t in items], dtype=float)
-    errs   = np.array([t[2] for t in items], dtype=float)
-
     top_label, top_logZ, top_err = items[0]
     preferred_model = top_label
 
@@ -2092,7 +2122,7 @@ def compare_models_by_log_evidence_all(
         d = z - top_logZ   # <= 0 for all except top (0)
         de = float(np.hypot(e, top_err))
         z_mc = np.inf if de == 0 else d / de
-        z2 = odds_sigmas_from_delta(d)
+        sigma_summary = _odds_sigma_summary_from_delta(d, de)
         log10K, B_str, B_ci = _bayes_factor_repr_from_delta(d, de)
         strength = _jeffreys_strength(abs(d), jeffreys_thresholds)
         ranking.append({
@@ -2102,8 +2132,13 @@ def compare_models_by_log_evidence_all(
             "delta_logZ_vs_top": d,
             "delta_logZ_err_vs_top": de,
             "z_mc_vs_top": z_mc,
-            #"sigma_one_sided_vs_top": z1,
-            "sigma_two_sided_vs_top": z2,
+            "sigma_two_sided_vs_top": sigma_summary["sigma"],
+            "sigma_two_sided_err_lower_vs_top": sigma_summary["sigma_err_lower"],
+            "sigma_two_sided_err_upper_vs_top": sigma_summary["sigma_err_upper"],
+            "sigma_two_sided_ci_1sigma_vs_top": (
+                sigma_summary["sigma_lo"],
+                sigma_summary["sigma_hi"],
+            ),
             "jeffreys_strength_vs_top": strength,
             "log10_Bayes_factor_vs_top": log10K,
             "Bayes_factor_str_vs_top": B_str,
@@ -2116,15 +2151,7 @@ def compare_models_by_log_evidence_all(
         delta = top_logZ - ru_logZ
         delta_err = float(np.hypot(top_err, ru_err))
         z_mc_head = np.inf if delta_err == 0 else delta / delta_err
-        absD = abs(delta)
-        sigma_one = 0
-        sigma_two = odds_sigmas_from_delta(delta)
-        # CI via ±1σ on Δ
-        def _odds_sigmas_at(d):
-            return odds_sigmas_from_delta(d)
-        s2_lo = _odds_sigmas_at(delta - delta_err)
-        s2_hi = _odds_sigmas_at(delta + delta_err)
-
+        sigma_summary = _odds_sigma_summary_from_delta(delta, delta_err)
         log10K, B_str, B_ci = _bayes_factor_repr_from_delta(delta, delta_err)
         strength = _jeffreys_strength(abs(delta), jeffreys_thresholds)
         decisive = abs(z_mc_head) >= z_decisive
@@ -2135,10 +2162,14 @@ def compare_models_by_log_evidence_all(
             "delta_logZ": delta,
             "delta_logZ_err": delta_err,
             "z_mc": z_mc_head,
-            "sigma_from_odds_one_sided": sigma_one,
-            "sigma_from_odds_two_sided": sigma_two,
-            #"sigma_from_odds_one_sided_ci_1sigma": (s1_lo, s1_hi),
-            "sigma_from_odds_two_sided_ci_1sigma": (s2_lo, s2_hi),
+            "sigma_from_odds_one_sided": 0,
+            "sigma_from_odds_two_sided": sigma_summary["sigma"],
+            "sigma_from_odds_two_sided_err_lower": sigma_summary["sigma_err_lower"],
+            "sigma_from_odds_two_sided_err_upper": sigma_summary["sigma_err_upper"],
+            "sigma_from_odds_two_sided_ci_1sigma": (
+                sigma_summary["sigma_lo"],
+                sigma_summary["sigma_hi"],
+            ),
             "log10_Bayes_factor": log10K,
             "Bayes_factor_str": B_str,
             "Bayes_factor_ci_1sigma": B_ci,
@@ -2160,6 +2191,9 @@ def compare_models_by_log_evidence_all(
                     "z_mc": np.nan,
                     "sigma_one_sided": np.nan,
                     "sigma_two_sided": np.nan,
+                    "sigma_two_sided_err_lower": np.nan,
+                    "sigma_two_sided_err_upper": np.nan,
+                    "sigma_two_sided_ci_1sigma": (np.nan, np.nan),
                     "jeffreys_strength": "—",
                     "log10_Bayes_factor": 0.0,
                     "Bayes_factor_str": "1:1",
@@ -2169,15 +2203,20 @@ def compare_models_by_log_evidence_all(
                 d = zi - zj
                 de = float(np.hypot(ei, ej))
                 zmc = np.inf if de == 0 else d / de
-                z2 = odds_sigmas_from_delta(d)
+                sigma_summary = _odds_sigma_summary_from_delta(d, de)
                 log10K, B_str, B_ci = _bayes_factor_repr_from_delta(d, de)
                 strength = _jeffreys_strength(abs(d), jeffreys_thresholds)
                 pairwise[li][lj] = {
                     "delta_logZ": d,
                     "delta_logZ_err": de,
                     "z_mc": zmc,
-                    #"sigma_one_sided": z1,
-                    "sigma_two_sided": z2,
+                    "sigma_two_sided": sigma_summary["sigma"],
+                    "sigma_two_sided_err_lower": sigma_summary["sigma_err_lower"],
+                    "sigma_two_sided_err_upper": sigma_summary["sigma_err_upper"],
+                    "sigma_two_sided_ci_1sigma": (
+                        sigma_summary["sigma_lo"],
+                        sigma_summary["sigma_hi"],
+                    ),
                     "jeffreys_strength": strength,
                     "log10_Bayes_factor": log10K,
                     "Bayes_factor_str": B_str,
@@ -2186,31 +2225,96 @@ def compare_models_by_log_evidence_all(
 
     # Build a human-readable text summary.
     lines = []
-    lines.append("Bayesian Model Comparison (multi-model)\n\n")
-    lines.append("Models (sorted by ln Z):\n")
-    for r in ranking:
-        star = "  *" if r["model"] == preferred_model else "   "
-        lines.append(
-            f"{star} {r['model']}: ln Z = {r['logZ']:.3f} ± {r['logZerr']:.3f} ; "
-            f"ΔlnZ(top) = {r['delta_logZ_vs_top']:.3f} ± {r['delta_logZ_err_vs_top']:.3f} ; "
-            f"Z_two = {r['sigma_two_sided_vs_top']:.3f}σ ; "
-            f"{r['jeffreys_strength_vs_top']}\n"
+    sample_total = len(df_agn) if sample_count is None else sample_count
+    lines.append("Bayesian Model Comparison (multi-model)\n")
+    lines.append(f"Sample: {sample_label} (N={sample_total})\n")
+    lines.append(
+        "Jeffreys thresholds on |Δln Z|: "
+        f"{jeffreys_thresholds[0]:.1f}, {jeffreys_thresholds[1]:.1f}, {jeffreys_thresholds[2]:.1f}\n"
+    )
+    lines.append(f"Preferred model: {preferred_model}\n\n")
+
+    ranking_headers = (
+        "rank",
+        "best",
+        "model",
+        "ln Z ± err",
+        "Δln Z(top) ± err",
+        "sigma_Z",
+        "sigma_Z -err/+err",
+        "Jeffreys",
+        "log10(K)",
+    )
+    ranking_rows = []
+    for idx, r in enumerate(ranking, start=1):
+        ranking_rows.append(
+            (
+                str(idx),
+                "*" if r["model"] == preferred_model else "",
+                r["model"],
+                f"{r['logZ']:.3f} ± {r['logZerr']:.3f}",
+                f"{r['delta_logZ_vs_top']:.3f} ± {r['delta_logZ_err_vs_top']:.3f}",
+                f"{r['sigma_two_sided_vs_top']:.3f}",
+                (
+                    f"-{r['sigma_two_sided_err_lower_vs_top']:.3f}"
+                    f"/+{r['sigma_two_sided_err_upper_vs_top']:.3f}"
+                ),
+                r["jeffreys_strength_vs_top"],
+                f"{r['log10_Bayes_factor_vs_top']:.3f}",
+            )
         )
-    lines.append("\nPreferred model: " + preferred_model + "\n")
+    lines.append("Ranking by log evidence:\n")
+    lines.append(_render_ascii_table(ranking_headers, ranking_rows) + "\n")
 
     if top_vs_runnerup is not None:
         t = top_vs_runnerup
+        lines.append("\nTop vs runner-up:\n")
         lines.append(
-            f"\nTop vs runner-up ({t['preferred_model']} vs {t['runner_up']}):\n"
-            f"Δln Z = {t['delta_logZ']:.3f} ± {t['delta_logZ_err']:.3f}  "
+            f"{t['preferred_model']} vs {t['runner_up']}: "
+            f"Δln Z = {t['delta_logZ']:.3f} ± {t['delta_logZ_err']:.3f} "
             f"(z_mc = {t['z_mc']:.2f})\n"
-            f"Two-sided Z (from odds): {t['sigma_from_odds_two_sided']:.4f}σ  "
-            f"[{t['sigma_from_odds_two_sided_ci_1sigma'][0]:.4f}, "
-            f"{t['sigma_from_odds_two_sided_ci_1sigma'][1]:.4f}]\n"
+            f"sigma_Z = {t['sigma_from_odds_two_sided']:.4f}"
+            f" -{t['sigma_from_odds_two_sided_err_lower']:.4f}"
+            f"/+{t['sigma_from_odds_two_sided_err_upper']:.4f} "
+            f"(CI: [{t['sigma_from_odds_two_sided_ci_1sigma'][0]:.4f}, "
+            f"{t['sigma_from_odds_two_sided_ci_1sigma'][1]:.4f}])\n"
+            f"log10(K) = {t['log10_Bayes_factor']:.3f}; "
+            f"Bayes factor = {t['Bayes_factor_str']}"
+            + (
+                f" {t['Bayes_factor_ci_1sigma'][2]}"
+                if t["Bayes_factor_ci_1sigma"] is not None else ""
+            )
+            + "\n"
             f"Jeffreys strength: {t['jeffreys_strength']}; "
             f"decisive (|z_mc|≥{z_decisive:.1f})? {'yes' if t['decisive_zmc_ge_thresh'] else 'no'}\n"
-            f"Number of {sample_label}: {len(df_agn) if sample_count is None else sample_count}\n"
         )
+
+    if len(items) > 2:
+        pairwise_headers = (
+            "models",
+            "Δln Z ± err",
+            "sigma_Z -err/+err",
+            "Jeffreys",
+            "log10(K)",
+        )
+        pairwise_rows = []
+        for a, b in combinations([label for label, _, _ in items], 2):
+            pair = pairwise[a][b]
+            pairwise_rows.append(
+                (
+                    f"{a} vs {b}",
+                    f"{pair['delta_logZ']:.3f} ± {pair['delta_logZ_err']:.3f}",
+                    (
+                        f"{pair['sigma_two_sided']:.3f} "
+                        f"-{pair['sigma_two_sided_err_lower']:.3f}"
+                        f"/+{pair['sigma_two_sided_err_upper']:.3f}"
+                    ),
+                    pair["jeffreys_strength"],
+                    f"{pair['log10_Bayes_factor']:.3f}",
+                )
+            )
+        lines.append("\nPairwise comparisons:\n")
+        lines.append(_render_ascii_table(pairwise_headers, pairwise_rows) + "\n")
 
     # Print and save the text summary.
     for line in lines:
