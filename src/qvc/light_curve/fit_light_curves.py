@@ -7,10 +7,12 @@ import argparse
 import logging
 import time
 import traceback
+from functools import lru_cache
 
 import numpy as np
 from numpy.lib.stride_tricks import sliding_window_view
 from scipy.optimize import curve_fit, least_squares
+from scipy.special import gammaln
 from scipy.stats import kurtosis, median_abs_deviation, normaltest, skew
 from statsmodels.tsa.stattools import adfuller
 from tqdm import tqdm
@@ -88,12 +90,9 @@ from qvc.light_curve.variability_metrics import compute_variability_metrics_for_
 
 zero_mean = False
 has_jitter = True
-LYA_REST_WAVELENGTH = 1216.0
-LYA_ATTENUATION_WIDTH = 20.0
 BALMER_EDGE_REST_WAVELENGTH = 3646.0
 BALMER_EDGE_ATTENUATION_WIDTH = 250.0
 ETA_SIGMA_LOW = -5.0
-LOG_AMP_DELTA_LYA_LOW = -5.0
 LAG0_HIGH = 100.0
 LAG_BETA_HIGH = 5.0
 LOG_LAG_BLR_LOW = np.log(10.0)
@@ -203,8 +202,18 @@ def _expand_last(x):
     return jnp.expand_dims(x, axis=-1) if x.ndim > 0 else x
 
 
+def _coerce_band_array(x, lam_rf):
+    x = jnp.asarray(x, dtype=jnp.asarray(lam_rf).dtype)
+    B = int(jnp.asarray(lam_rf).shape[0])
+    if x.ndim == 0:
+        return jnp.broadcast_to(x, (B,))
+    if x.shape[-1] == B:
+        return x
+    return jnp.broadcast_to(x, x.shape[:-1] + (B,))
+
+
 def compute_lam_lya_suppression_rf(bands, z):
-    """Return the rest-frame band edge used for Lyman-limit suppression."""
+    """Return the rest-frame band edge used for Lyman-related band diagnostics."""
 
     return jnp.asarray(
         [
@@ -215,15 +224,162 @@ def compute_lam_lya_suppression_rf(bands, z):
     )
 
 
-def lya_variability_weight(
-    lam_rf,
-    transition=LYA_REST_WAVELENGTH,
-    width=LYA_ATTENUATION_WIDTH,
-):
-    """Smooth effective Lyman suppression weight from rest-frame band edges."""
+@lru_cache(maxsize=1)
+def _load_sdss_lightcurve_filter_curves():
+    """Load SDSS filter curves once for band-integrated IGM transmission."""
 
-    lam_rf = jnp.asarray(lam_rf)
-    return 1.0 / (1.0 + jnp.exp((lam_rf - transition) / width))
+    from speclite import filters as speclite_filters
+
+    filters = speclite_filters.load_filters(*[f"sdss2010-{b}" for b in ("u", "g", "r", "i")])
+    out = {}
+    for band, filt in zip(("u", "g", "r", "i"), filters):
+        wave_obs = np.asarray(filt.wavelength, dtype=float)
+        transmission = np.asarray(filt.response, dtype=float)
+        good = np.isfinite(wave_obs) & np.isfinite(transmission) & (transmission > 0.0)
+        if np.any(good):
+            out[band] = (wave_obs[good], transmission[good])
+    return out
+
+
+def _build_igm_cache_np_nm(rest_wave_nm):
+    """Build wavelength-only helper arrays for the copied grahspj IGM model."""
+
+    wavelength = np.asarray(rest_wave_nm, dtype=float)
+    n_transitions_low = 10
+    n_transitions_max = 31
+    lambda_limit = 91.2
+    n_arr = np.arange(n_transitions_max, dtype=float)
+    lambda_n = np.ones_like(n_arr, dtype=float)
+    valid_n = n_arr >= 2
+    lambda_n[valid_n] = lambda_limit / (1.0 - 1.0 / (n_arr[valid_n] * n_arr[valid_n]))
+    z_n = wavelength[None, :] / lambda_n[:, None] - 1.0
+    n_eval = np.arange(3, n_transitions_max, dtype=float)
+    fact = np.array([1.0, 1.0, 1.0, 0.348, 0.179, 0.109, 0.0722, 0.0508, 0.0373, 0.0283], dtype=float)
+    fact_eval = np.zeros_like(n_eval, dtype=float)
+    fact_mask = n_eval <= 9.0
+    fact_eval[fact_mask] = fact[n_eval[fact_mask].astype(np.int32)]
+    val_gt9_coeff = 720.0 / (n_eval * (n_eval * n_eval * n_eval - 1.0))
+    z_l = wavelength / lambda_limit - 1.0
+    wl_ratio = wavelength / lambda_limit
+    n = np.arange(n_transitions_low - 1, dtype=float)
+    factorial_n = np.exp(gammaln(n + 1.0))
+    term2 = np.sum(np.power(-1.0, n) / (factorial_n * (2.0 * n - 1.0)))
+    ni = np.arange(1, n_transitions_low, dtype=float)
+    factorial_ni = np.exp(gammaln(ni + 1.0))
+    coeff = 2.0 * np.power(-1.0, ni) / (factorial_ni * ((6.0 * ni - 5.0) * (2.0 * ni - 1.0)))
+    return {
+        "wavelength": wavelength,
+        "z_n2": z_n[2],
+        "z_eval": z_n[3:],
+        "z_n9": z_n[9],
+        "z_l": z_l,
+        "wl_ratio": wl_ratio,
+        "fact": fact,
+        "fact_eval": fact_eval,
+        "n_eval": n_eval,
+        "val_gt9_coeff": val_gt9_coeff,
+        "term2": term2,
+        "coeff": coeff,
+    }
+
+
+def _evaluate_igm_transmission_np(igm_cache, redshift):
+    """Evaluate the copied grahspj IGM transmission on a rest-frame wavelength grid."""
+
+    n_transitions_low = 10
+    gamma = 0.2788
+    n0 = 0.25
+    z = float(redshift)
+    wavelength = igm_cache["wavelength"]
+    z_n2 = igm_cache["z_n2"]
+    z_eval = igm_cache["z_eval"]
+    z_n9 = igm_cache["z_n9"]
+    z_l = igm_cache["z_l"]
+    wl_ratio = igm_cache["wl_ratio"]
+    fact = igm_cache["fact"]
+    fact_eval = igm_cache["fact_eval"]
+    n_eval = igm_cache["n_eval"]
+
+    tau_a = 0.00211 * (1.0 + z) ** 3.7 if z <= 4.0 else 0.00058 * (1.0 + z) ** 4.5
+    tau2 = np.where(
+        z <= 4.0,
+        0.00211 * (1.0 + z_n2) ** 3.7,
+        0.00058 * (1.0 + z_n2) ** 4.5,
+    )
+    tau2 = np.where(z_n2 >= z, 0.0, tau2)
+    val_le5 = np.where(
+        z_eval < 3.0,
+        tau_a * fact_eval[:, None] * (0.25 * (1.0 + z_eval)) ** (1.0 / 3.0),
+        tau_a * fact_eval[:, None] * (0.25 * (1.0 + z_eval)) ** (1.0 / 6.0),
+    )
+    val_6_9 = tau_a * fact_eval[:, None] * (0.25 * (1.0 + z_eval)) ** (1.0 / 3.0)
+    tau9 = tau_a * fact[9] * (0.25 * (1.0 + z_n9)) ** (1.0 / 3.0)
+    val_gt9 = tau9[None, :] * igm_cache["val_gt9_coeff"][:, None]
+    val_eval = np.where(
+        n_eval[:, None] <= 5.0,
+        val_le5,
+        np.where(n_eval[:, None] <= 9.0, val_6_9, val_gt9),
+    )
+    tau_taun = tau2 + np.sum(np.where(z_eval >= z, 0.0, val_eval), axis=0)
+    w = z_l < z
+    tau_l_igm = np.where(
+        w,
+        0.805 * (1.0 + z_l) ** 3 * (1.0 / (1.0 + z_l) - 1.0 / (1.0 + z)),
+        0.0,
+    )
+    term1 = gamma - np.exp(-1.0)
+    term2 = igm_cache["term2"]
+    term3 = (1.0 + z) * wl_ratio ** 1.5 - wl_ratio ** 2.5
+    ni = np.arange(1, n_transitions_low, dtype=float)
+    coeff = igm_cache["coeff"]
+    term4_terms = coeff[:, None] * (
+        (1.0 + z) ** (2.5 - (3.0 * ni[:, None])) * wl_ratio[None, :] ** (3.0 * ni[:, None])
+        - wl_ratio[None, :] ** 2.5
+    )
+    term4 = np.sum(term4_terms, axis=0)
+    tau_l_lls = np.where(w, n0 * ((term1 - term2) * term3 - term4), 0.0)
+    lambda_min_igm = (1.0 + z) * 70.0
+    weight = np.where(wavelength < lambda_min_igm, (wavelength / lambda_min_igm) ** 2, 1.0)
+    transmission = np.exp(-tau_taun - tau_l_igm - tau_l_lls) * weight
+    return np.clip(transmission, 1.0e-12, 1.0)
+
+
+def compute_igm_transmission_rest_wave(rest_wave_angstrom, z):
+    """Return copied grahspj IGM transmission on a rest-frame wavelength grid in Angstrom."""
+
+    rest_wave_nm = np.asarray(rest_wave_angstrom, dtype=float) / 10.0
+    igm_cache = _build_igm_cache_np_nm(rest_wave_nm)
+    return _evaluate_igm_transmission_np(igm_cache, z)
+
+
+def compute_band_igm_transmission(bands, z):
+    """Return one effective IGM transmission factor per band, integrated under SDSS curves."""
+
+    z = float(z)
+    filters = _load_sdss_lightcurve_filter_curves()
+    transmissions = []
+    for band in bands:
+        band = str(band)
+        if band in filters:
+            wave_obs, response = filters[band]
+            rest_wave = wave_obs / (1.0 + z)
+            igm = compute_igm_transmission_rest_wave(rest_wave, z)
+            denom = np.maximum(np.trapezoid(response, wave_obs), 1.0e-30)
+            eff = np.trapezoid(response * igm, wave_obs) / denom
+        else:
+            wave_obs = np.asarray(
+                [SDSS_FILTER_BLUE_EDGE_OBS.get(band, lambda_pivot[band])],
+                dtype=float,
+            )
+            eff = compute_igm_transmission_rest_wave(wave_obs / (1.0 + z), z)[0]
+        transmissions.append(np.clip(eff, 1.0e-12, 1.0))
+    return jnp.asarray(transmissions, dtype=float)
+
+
+def compute_log_igm_transmission_band(bands, z):
+    """Return the per-band log transmission used to attenuate variability amplitudes."""
+
+    return jnp.log(compute_band_igm_transmission(bands, z))
 
 
 def balmer_continuum_weight(
@@ -1855,10 +2011,6 @@ def lag_beta_prior():
     return dist.TruncatedNormal(4.0 / 3.0, 0.2, low=0.0, high=LAG_BETA_HIGH)
 
 
-def log_amp_delta_lya_prior():
-    return dist.TruncatedNormal(-0.5, 0.75, low=LOG_AMP_DELTA_LYA_LOW, high=0.0)
-
-
 def mean_prior():
     return dist.Normal(0.0, 0.2)
 
@@ -1915,18 +2067,17 @@ def compute_flux_line_ratio_offsets(
     *,
     lambda_center_rf,
     eta_sigma,
-    log_amp_delta_lya,
-    lam_lya_rf=None,
+    log_igm_transmission_band=None,
 ):
     """Offsets mapping sampled line/continuum log-ratios back to legacy amplitude deltas."""
 
     lam_rf = jnp.asarray(lam_rf, dtype=float)
-    if lam_lya_rf is None:
-        lam_lya_rf = lam_rf
-    lam_lya_rf = jnp.asarray(lam_lya_rf, dtype=lam_rf.dtype)
     lambda_center_rf = jnp.asarray(lambda_center_rf, dtype=lam_rf.dtype)
     eta_sigma = jnp.asarray(eta_sigma, dtype=lam_rf.dtype)
-    log_amp_delta_lya = jnp.asarray(log_amp_delta_lya, dtype=lam_rf.dtype)
+    if log_igm_transmission_band is None:
+        log_igm_transmission_band = jnp.zeros_like(lam_rf, dtype=lam_rf.dtype)
+    log_igm_transmission_band = jnp.asarray(log_igm_transmission_band, dtype=lam_rf.dtype)
+    log_igm_transmission_band = jnp.broadcast_to(log_igm_transmission_band, lam_rf.shape)
 
     lambda_uv = jnp.array(2500.0, dtype=lam_rf.dtype)
     sigma_shift_to_uv = jnp.log(10.0) * log_single_pl(lambda_uv, lambda_center_rf, eta_sigma)
@@ -1935,8 +2086,7 @@ def compute_flux_line_ratio_offsets(
         _expand_last(lambda_center_rf),
         _expand_last(eta_sigma),
     )
-    log_amp_delta_lya_band = _expand_last(log_amp_delta_lya) * lya_variability_weight(lam_lya_rf)
-    log_ratio_offset_blr = _expand_last(sigma_shift_to_uv) - sigma_shift_to_band - log_amp_delta_lya_band
+    log_ratio_offset_blr = _expand_last(sigma_shift_to_uv) - sigma_shift_to_band - log_igm_transmission_band
 
     bc_weight = balmer_continuum_weight(lam_rf)
     log_ratio_offset_bc_band = log_ratio_offset_blr + jnp.log(jnp.maximum(bc_weight, 1e-12))
@@ -2181,12 +2331,6 @@ def compute_parameter_kls(
         kls["lag_beta_kl"] = kl_from_samples(
             flat_samples["lag_beta"],
             lambda x: _dist_log_prob_array(lag_beta_prior(), x),
-        )
-
-    if not drop_band_lyman_alpha and "log_amp_delta_lya" in flat_samples:
-        kls["log_amp_delta_lya_kl"] = kl_from_samples(
-            flat_samples["log_amp_delta_lya"],
-            lambda x: _dist_log_prob_array(log_amp_delta_lya_prior(), x),
         )
 
     if not disable_lag_blr and not disable_lag_bc:
@@ -2463,7 +2607,10 @@ def build_explicit_model_params(raw_params, lam_rf, *, lam_lya_rf=None):
             jnp.full_like(log_amp_delta_blr, -1e9),
         )
     )
-    log_amp_delta_lya = jnp.asarray(raw_params.get("log_amp_delta_lya", 0.0))
+    log_igm_transmission_band = raw_params.get("log_igm_transmission_band")
+    if log_igm_transmission_band is None:
+        log_igm_transmission_band = jnp.zeros_like(lam_rf, dtype=lam_rf.dtype)
+    log_igm_transmission_band = _coerce_band_array(log_igm_transmission_band, lam_rf)
     log_lag_blr = jnp.asarray(raw_params["log_lag_blr"])
     log_lag_blr2 = jnp.asarray(raw_params.get("log_lag_blr2", log_lag_blr))
     has_bc_lag = "log_amp_delta_bc" in raw_params
@@ -2502,7 +2649,6 @@ def build_explicit_model_params(raw_params, lam_rf, *, lam_lya_rf=None):
     log_sigma_center0_exp = _expand_last(log_sigma_center0)
     eta_sigma_exp = _expand_last(eta_sigma)
     eta_tau_exp = _expand_last(eta_tau)
-    log_amp_delta_lya_exp = _expand_last(log_amp_delta_lya)
     lag0_exp = _expand_last(lag0)
     lag_beta_exp = _expand_last(lag_beta)
     log_tau_fast_center0_exp = _expand_last(log_tau_fast_center0)
@@ -2514,10 +2660,9 @@ def build_explicit_model_params(raw_params, lam_rf, *, lam_lya_rf=None):
         lambda_center_rf_exp,
         eta_sigma_exp,
     )
-    log_amp_delta_lya_band = log_amp_delta_lya_exp * lya_variability_weight(lam_lya_rf)
     bc_weight = balmer_continuum_weight(lam_rf)
 
-    amp_cont = jnp.exp(log_sigma_band + log_amp_delta_lya_band)
+    amp_cont = jnp.exp(log_sigma_band + log_igm_transmission_band)
     amp_blr = jnp.exp(log_sigma_uv_exp + log_amp_delta_blr)
     amp_blr2 = jnp.exp(log_sigma_uv_exp + log_amp_delta_blr2)
     lag_disk = lag0_exp * (lam_rf / lambda_center_rf_exp) ** lag_beta_exp
@@ -2551,8 +2696,8 @@ def build_explicit_model_params(raw_params, lam_rf, *, lam_lya_rf=None):
     explicit["log_sigma_uv"] = log_sigma_uv
     explicit["log_tau_uv"] = log_tau_uv
     explicit["log_tau_fast_uv"] = log_tau_fast_uv
-    explicit["log_amp_delta_lya"] = log_amp_delta_lya
-    explicit["log_amp_delta_lya_band"] = log_amp_delta_lya_band
+    explicit["log_igm_transmission_band"] = log_igm_transmission_band
+    explicit["igm_transmission_band"] = jnp.exp(log_igm_transmission_band)
     explicit["bc_weight"] = bc_weight
     explicit["amp_cont"] = amp_cont
     explicit["amp_bc"] = amp_bc
@@ -2592,7 +2737,10 @@ def build_explicit_model_params_relflux(raw_params, lam_rf, *, lam_lya_rf=None):
             jnp.full_like(log_amp_delta_blr, -1e9),
         )
     )
-    log_amp_delta_lya = jnp.asarray(raw_params.get("log_amp_delta_lya", 0.0))
+    log_igm_transmission_band = raw_params.get("log_igm_transmission_band")
+    if log_igm_transmission_band is None:
+        log_igm_transmission_band = jnp.zeros_like(lam_rf, dtype=lam_rf.dtype)
+    log_igm_transmission_band = _coerce_band_array(log_igm_transmission_band, lam_rf)
     log_lag_blr = jnp.asarray(raw_params["log_lag_blr"])
     log_lag_blr2 = jnp.asarray(raw_params.get("log_lag_blr2", log_lag_blr))
     has_bc_lag = "log_amp_delta_bc" in raw_params
@@ -2636,7 +2784,6 @@ def build_explicit_model_params_relflux(raw_params, lam_rf, *, lam_lya_rf=None):
     log_sigma_center0_relflux_exp = _expand_last(log_sigma_center0_relflux)
     eta_sigma_exp = _expand_last(eta_sigma)
     eta_tau_exp = _expand_last(eta_tau)
-    log_amp_delta_lya_exp = _expand_last(log_amp_delta_lya)
     lag0_exp = _expand_last(lag0)
     lag_beta_exp = _expand_last(lag_beta)
     log_tau_fast_center0_exp = _expand_last(log_tau_fast_center0)
@@ -2648,10 +2795,9 @@ def build_explicit_model_params_relflux(raw_params, lam_rf, *, lam_lya_rf=None):
         lambda_center_rf_exp,
         eta_sigma_exp,
     )
-    log_amp_delta_lya_band = log_amp_delta_lya_exp * lya_variability_weight(lam_lya_rf)
     bc_weight = balmer_continuum_weight(lam_rf)
 
-    amp_cont_relflux = jnp.exp(log_sigma_band_relflux + log_amp_delta_lya_band)
+    amp_cont_relflux = jnp.exp(log_sigma_band_relflux + log_igm_transmission_band)
     amp_blr_relflux = jnp.exp(log_sigma_uv_relflux_exp + log_amp_delta_blr)
     amp_blr2_relflux = jnp.exp(log_sigma_uv_relflux_exp + log_amp_delta_blr2)
     lag_disk = lag0_exp * (lam_rf / lambda_center_rf_exp) ** lag_beta_exp
@@ -2695,8 +2841,8 @@ def build_explicit_model_params_relflux(raw_params, lam_rf, *, lam_lya_rf=None):
     explicit["log_sigma_uv"] = log_sigma_uv
     explicit["log_tau_uv"] = log_tau_uv
     explicit["log_tau_fast_uv"] = log_tau_fast_uv
-    explicit["log_amp_delta_lya"] = log_amp_delta_lya
-    explicit["log_amp_delta_lya_band"] = log_amp_delta_lya_band
+    explicit["log_igm_transmission_band"] = log_igm_transmission_band
+    explicit["igm_transmission_band"] = jnp.exp(log_igm_transmission_band)
     explicit["bc_weight"] = bc_weight
     explicit["amp_cont_relflux"] = amp_cont_relflux
     explicit["amp_bc_relflux"] = amp_bc_relflux
@@ -2775,7 +2921,8 @@ def add_model_prediction_params(samples, lam_rf, *, model_variant=None, lam_lya_
             "log_sigma_uv",
             "log_tau_uv",
             "log_tau_fast_uv",
-            "log_amp_delta_lya_band",
+            "log_igm_transmission_band",
+            "igm_transmission_band",
             "lambda_center_rf",
         )
     ):
@@ -2803,8 +2950,8 @@ def add_model_prediction_params(samples, lam_rf, *, model_variant=None, lam_lya_
         out["log_sigma_uv"] = np.asarray(explicit["log_sigma_uv"])
         out["log_tau_uv"] = np.asarray(explicit["log_tau_uv"])
         out["log_tau_fast_uv"] = np.asarray(explicit["log_tau_fast_uv"])
-        out["log_amp_delta_lya"] = np.asarray(explicit["log_amp_delta_lya"])
-        out["log_amp_delta_lya_band"] = np.asarray(explicit["log_amp_delta_lya_band"])
+        out["log_igm_transmission_band"] = np.asarray(explicit["log_igm_transmission_band"])
+        out["igm_transmission_band"] = np.asarray(explicit["igm_transmission_band"])
         out["log_cont_scale"] = np.asarray(explicit["log_cont_scale"])
         if "log_amp_delta_bc" in explicit:
             out["log_amp_delta_bc"] = np.asarray(explicit["log_amp_delta_bc"])
@@ -2838,7 +2985,8 @@ def add_model_prediction_params(samples, lam_rf, *, model_variant=None, lam_lya_
             "log_sigma_uv",
             "log_tau_uv",
             "log_tau_fast_uv",
-            "log_amp_delta_lya_band",
+            "log_igm_transmission_band",
+            "igm_transmission_band",
             "lambda_center_rf",
         )
     ):
@@ -2873,8 +3021,8 @@ def add_model_prediction_params(samples, lam_rf, *, model_variant=None, lam_lya_
         out["log_sigma_uv"] = np.asarray(explicit["log_sigma_uv"])
         out["log_tau_uv"] = np.asarray(explicit["log_tau_uv"])
         out["log_tau_fast_uv"] = np.asarray(explicit["log_tau_fast_uv"])
-        out["log_amp_delta_lya"] = np.asarray(explicit["log_amp_delta_lya"])
-        out["log_amp_delta_lya_band"] = np.asarray(explicit["log_amp_delta_lya_band"])
+        out["log_igm_transmission_band"] = np.asarray(explicit["log_igm_transmission_band"])
+        out["igm_transmission_band"] = np.asarray(explicit["igm_transmission_band"])
         if "log_amp_delta_bc" in explicit:
             out["log_amp_delta_bc"] = np.asarray(explicit["log_amp_delta_bc"])
         if "log_lag_ratio_bc_to_blr" in explicit:
@@ -2903,7 +3051,8 @@ def add_model_prediction_params(samples, lam_rf, *, model_variant=None, lam_lya_
             "log_sigma_uv",
             "log_tau_uv",
             "log_tau_fast_uv",
-            "log_amp_delta_lya_band",
+            "log_igm_transmission_band",
+            "igm_transmission_band",
             "lambda_center_rf",
         )
     ):
@@ -2931,8 +3080,8 @@ def add_model_prediction_params(samples, lam_rf, *, model_variant=None, lam_lya_
     out["log_sigma_uv"] = np.asarray(explicit["log_sigma_uv"])
     out["log_tau_uv"] = np.asarray(explicit["log_tau_uv"])
     out["log_tau_fast_uv"] = np.asarray(explicit["log_tau_fast_uv"])
-    out["log_amp_delta_lya"] = np.asarray(explicit["log_amp_delta_lya"])
-    out["log_amp_delta_lya_band"] = np.asarray(explicit["log_amp_delta_lya_band"])
+    out["log_igm_transmission_band"] = np.asarray(explicit["log_igm_transmission_band"])
+    out["igm_transmission_band"] = np.asarray(explicit["igm_transmission_band"])
     if "log_amp_delta_bc" in explicit:
         out["log_amp_delta_bc"] = np.asarray(explicit["log_amp_delta_bc"])
     if "log_lag_ratio_bc_to_blr" in explicit:
@@ -2969,6 +3118,11 @@ def build_single_object_model(
     if lam_lya_rf is None:
         lam_lya_rf = lam_rf
     lam_lya_rf = jnp.asarray(lam_lya_rf, dtype=lam_rf.dtype)
+    bands = tuple(str(b) for b in obj_dict.get("bands", []))
+    if bands:
+        log_igm_transmission_band = compute_log_igm_transmission_band(bands, z)
+    else:
+        log_igm_transmission_band = jnp.zeros(B, dtype=lam_rf.dtype)
     lambda_uv = jnp.array(2500.0, dtype=lam_rf.dtype)
 
     def model():
@@ -3010,17 +3164,11 @@ def build_single_object_model(
         log_lag0 = numpyro.deterministic("log_lag0", jnp.log(lag0))
         lag_beta = numpyro.sample("lag_beta", lag_beta_prior())
 
-        if drop_band_lyman_alpha:
-            log_amp_delta_lya = numpyro.deterministic("log_amp_delta_lya", 0.0)
-        else:
-            log_amp_delta_lya = numpyro.sample("log_amp_delta_lya", log_amp_delta_lya_prior())
-
         line_ratio_offsets = compute_flux_line_ratio_offsets(
             lam_rf,
             lambda_center_rf=lambda_center_rf,
             eta_sigma=eta_sigma,
-            log_amp_delta_lya=log_amp_delta_lya,
-            lam_lya_rf=lam_lya_rf,
+            log_igm_transmission_band=log_igm_transmission_band,
         )
         (
             mean,
@@ -3059,7 +3207,7 @@ def build_single_object_model(
             log_jitter=log_jitter,
             lag0=lag0,
             lag_beta=lag_beta,
-            log_amp_delta_lya=log_amp_delta_lya,
+            log_igm_transmission_band=log_igm_transmission_band,
             eta_sigma=eta_sigma,
             eta_tau=eta_tau,
         )
@@ -3086,7 +3234,8 @@ def build_single_object_model(
         numpyro.deterministic("amp_bc", params["amp_bc"])
         numpyro.deterministic("amp_blr", params["amp_blr"])
         numpyro.deterministic("amp_blr2", params["amp_blr2"])
-        numpyro.deterministic("log_amp_delta_lya_band", params["log_amp_delta_lya_band"])
+        numpyro.deterministic("log_igm_transmission_band", params["log_igm_transmission_band"])
+        numpyro.deterministic("igm_transmission_band", params["igm_transmission_band"])
         numpyro.deterministic("lag_disk", params["lag_disk"])
         numpyro.deterministic("lag_bc", params["lag_bc"])
         numpyro.deterministic("lag_blr", params["lag_blr"])
@@ -3134,6 +3283,11 @@ def build_single_object_model_mag_flux_linearized(
     if lam_lya_rf is None:
         lam_lya_rf = lam_rf
     lam_lya_rf = jnp.asarray(lam_lya_rf, dtype=lam_rf.dtype)
+    bands = tuple(str(b) for b in obj_dict.get("bands", []))
+    if bands:
+        log_igm_transmission_band = compute_log_igm_transmission_band(bands, z)
+    else:
+        log_igm_transmission_band = jnp.zeros(B, dtype=lam_rf.dtype)
     baseline_flux_by_band = reference_flux_from_mean_magnitudes(obj_dict["mags_means"])
     y_relflux = mag_residual_to_relative_flux(y)
     yerr_relflux = magerr_residual_to_relative_fluxerr(y, yerr)
@@ -3181,17 +3335,11 @@ def build_single_object_model_mag_flux_linearized(
         log_lag0 = numpyro.deterministic("log_lag0", jnp.log(lag0))
         lag_beta = numpyro.sample("lag_beta", lag_beta_prior())
 
-        if drop_band_lyman_alpha:
-            log_amp_delta_lya = numpyro.deterministic("log_amp_delta_lya", 0.0)
-        else:
-            log_amp_delta_lya = numpyro.sample("log_amp_delta_lya", log_amp_delta_lya_prior())
-
         line_ratio_offsets = compute_flux_line_ratio_offsets(
             lam_rf,
             lambda_center_rf=lambda_center_rf,
             eta_sigma=eta_sigma,
-            log_amp_delta_lya=log_amp_delta_lya,
-            lam_lya_rf=lam_lya_rf,
+            log_igm_transmission_band=log_igm_transmission_band,
         )
         (
             mean,
@@ -3231,7 +3379,7 @@ def build_single_object_model_mag_flux_linearized(
             log_jitter=log_jitter,
             lag0=lag0,
             lag_beta=lag_beta,
-            log_amp_delta_lya=log_amp_delta_lya,
+            log_igm_transmission_band=log_igm_transmission_band,
             eta_sigma=eta_sigma,
             eta_tau=eta_tau,
         )
@@ -3264,7 +3412,8 @@ def build_single_object_model_mag_flux_linearized(
         numpyro.deterministic("amp_bc", params["amp_bc"])
         numpyro.deterministic("amp_blr", params["amp_blr"])
         numpyro.deterministic("amp_blr2", params["amp_blr2"])
-        numpyro.deterministic("log_amp_delta_lya_band", params["log_amp_delta_lya_band"])
+        numpyro.deterministic("log_igm_transmission_band", params["log_igm_transmission_band"])
+        numpyro.deterministic("igm_transmission_band", params["igm_transmission_band"])
         numpyro.deterministic("lag_disk", params["lag_disk"])
         numpyro.deterministic("lag_bc", params["lag_bc"])
         numpyro.deterministic("lag_blr", params["lag_blr"])
@@ -3306,6 +3455,11 @@ def build_single_object_model_continuum_only(
     if lam_lya_rf is None:
         lam_lya_rf = lam_rf
     lam_lya_rf = jnp.asarray(lam_lya_rf, dtype=lam_rf.dtype)
+    bands = tuple(str(b) for b in obj_dict.get("bands", []))
+    if bands:
+        log_igm_transmission_band = compute_log_igm_transmission_band(bands, z)
+    else:
+        log_igm_transmission_band = jnp.zeros(B, dtype=lam_rf.dtype)
 
     def model():
         eta_sigma = numpyro.sample("eta_sigma", eta_sigma_prior())
@@ -3341,11 +3495,6 @@ def build_single_object_model_continuum_only(
 
         lag0 = numpyro.sample("lag0", lag0_prior())
         lag_beta = numpyro.sample("lag_beta", lag_beta_prior())
-        if drop_band_lyman_alpha:
-            log_amp_delta_lya = numpyro.deterministic("log_amp_delta_lya", 0.0)
-        else:
-            log_amp_delta_lya = numpyro.sample("log_amp_delta_lya", log_amp_delta_lya_prior())
-
         with numpyro.plate("band", B):
             mean = numpyro.sample("mean", mean_prior())
             log_jitter = numpyro.sample("log_jitter", log_jitter_prior(log_jitter_mean))
@@ -3360,7 +3509,7 @@ def build_single_object_model_continuum_only(
             log_jitter=log_jitter,
             lag0=lag0,
             lag_beta=lag_beta,
-            log_amp_delta_lya=log_amp_delta_lya,
+            log_igm_transmission_band=log_igm_transmission_band,
             eta_sigma=eta_sigma,
             eta_tau=eta_tau,
         )
@@ -3382,7 +3531,8 @@ def build_single_object_model_continuum_only(
         numpyro.deterministic("amp_bc", params["amp_bc"])
         numpyro.deterministic("amp_blr", params["amp_blr"])
         numpyro.deterministic("amp_blr2", params["amp_blr2"])
-        numpyro.deterministic("log_amp_delta_lya_band", params["log_amp_delta_lya_band"])
+        numpyro.deterministic("log_igm_transmission_band", params["log_igm_transmission_band"])
+        numpyro.deterministic("igm_transmission_band", params["igm_transmission_band"])
         numpyro.deterministic("lag_disk", params["lag_disk"])
         numpyro.deterministic("lag_bc", params["lag_bc"])
         numpyro.deterministic("lag_blr", params["lag_blr"])
@@ -3432,6 +3582,11 @@ def build_single_object_model_mag_fluxmix_stage2(
     if lam_lya_rf is None:
         lam_lya_rf = lam_rf
     lam_lya_rf = jnp.asarray(lam_lya_rf, dtype=lam_rf.dtype)
+    bands = tuple(str(b) for b in obj_dict.get("bands", []))
+    if bands:
+        log_igm_transmission_band_fixed = compute_log_igm_transmission_band(bands, z)
+    else:
+        log_igm_transmission_band_fixed = jnp.zeros(B, dtype=lam_rf.dtype)
     mean_func = make_linear_mean_func(t, zero_mean=zero_mean)
     mean_obs = mean_func(stage1_raw_median, (t, bidx))
     log_jitter_fixed = jnp.asarray(stage1_raw_median["log_jitter"], dtype=float)
@@ -3443,10 +3598,6 @@ def build_single_object_model_mag_fluxmix_stage2(
     lambda_center_rf = jnp.asarray(stage1_params_median["lambda_center_rf"], dtype=float)
     stage1_eta_sigma = jnp.asarray(stage1_raw_median["eta_sigma"], dtype=float)
     stage1_log_sigma_center0 = jnp.asarray(stage1_raw_median["log_sigma_center0"], dtype=float)
-    log_amp_delta_lya_fixed = jnp.asarray(
-        stage1_raw_median.get("log_amp_delta_lya", 0.0),
-        dtype=float,
-    )
     log_lag0_fixed = jnp.log(jnp.asarray(stage1_raw_median["lag0"], dtype=float))
     basis_grid_t = jnp.asarray(basis_grid_t, dtype=float)
     basis_relflux_norm = jnp.asarray(basis_relflux_norm, dtype=float)
@@ -3480,12 +3631,13 @@ def build_single_object_model_mag_fluxmix_stage2(
             "log_cont_scale",
             log_sigma_center0 - stage1_log_sigma_center0,
         )
+        numpyro.deterministic("log_igm_transmission_band", log_igm_transmission_band_fixed)
+        numpyro.deterministic("igm_transmission_band", jnp.exp(log_igm_transmission_band_fixed))
         line_ratio_offsets = compute_flux_line_ratio_offsets(
             lam_rf,
             lambda_center_rf=lambda_center_rf,
             eta_sigma=eta_sigma,
-            log_amp_delta_lya=log_amp_delta_lya_fixed,
-            lam_lya_rf=lam_lya_rf,
+            log_igm_transmission_band=log_igm_transmission_band_fixed,
         )
 
         if disable_lag_blr:
@@ -3535,7 +3687,7 @@ def build_single_object_model_mag_fluxmix_stage2(
         stage2_raw_params["lambda_center_rf"] = lambda_center_rf
         stage2_raw_params["eta_sigma"] = eta_sigma
         stage2_raw_params["log_sigma_center0"] = log_sigma_center0
-        stage2_raw_params["log_amp_delta_lya"] = log_amp_delta_lya_fixed
+        stage2_raw_params["log_igm_transmission_band"] = log_igm_transmission_band_fixed
         stage2_raw_params["log_amp_delta_blr"] = log_amp_delta_blr
         stage2_raw_params["log_lag_blr"] = log_lag_blr
         stage2_raw_params["log_amp_delta_blr2"] = log_amp_delta_blr2
@@ -3600,7 +3752,8 @@ _RECOMPUTE_EXPLICIT_KEYS = {
     "log_tau_fast_uv",
     "log_sigma_hat_uv",
     "log_sigma_hat0",
-    "log_amp_delta_lya_band",
+    "log_igm_transmission_band",
+    "igm_transmission_band",
     "lambda_center_rf",
 }
 
@@ -3675,7 +3828,6 @@ def _fluxmix_stage1_raw_median_params(samples_flat, lam_rf):
     mean_default = np.zeros(B, dtype=float)
     jitter_default = np.full(B, np.log(1e-3), dtype=float)
     poly1_default = 0.0
-    log_amp_delta_lya_default = 0.0
     if "stage1_basis_log_sigma_center0" in samples_flat:
         log_sigma_center0_stage1 = np.asarray(samples_flat["stage1_basis_log_sigma_center0"], dtype=float)
     else:
@@ -3691,6 +3843,10 @@ def _fluxmix_stage1_raw_median_params(samples_flat, lam_rf):
         eta_sigma_stage1 = np.asarray(samples_flat["stage1_basis_eta_sigma"], dtype=float)
     else:
         eta_sigma_stage1 = np.asarray(samples_flat["eta_sigma"], dtype=float)
+    if "log_igm_transmission_band" in samples_flat:
+        log_igm_transmission_band = np.asarray(samples_flat["log_igm_transmission_band"], dtype=float)
+    else:
+        log_igm_transmission_band = np.zeros((1, B), dtype=float)
     return dict(
         log_tau_slow_center0=jnp.asarray(np.median(np.asarray(samples_flat["log_tau_slow_center0"], dtype=float), axis=0), dtype=float),
         log_tau_fast_center0=jnp.asarray(np.median(np.asarray(samples_flat["log_tau_fast_center0"], dtype=float), axis=0), dtype=float),
@@ -3713,10 +3869,7 @@ def _fluxmix_stage1_raw_median_params(samples_flat, lam_rf):
         ),
         lag0=jnp.asarray(np.median(np.asarray(samples_flat["lag0"], dtype=float), axis=0), dtype=float),
         lag_beta=jnp.asarray(np.median(np.asarray(samples_flat["lag_beta"], dtype=float), axis=0), dtype=float),
-        log_amp_delta_lya=jnp.asarray(
-            np.median(np.asarray(samples_flat.get("log_amp_delta_lya", log_amp_delta_lya_default), dtype=float), axis=0),
-            dtype=float,
-        ),
+        log_igm_transmission_band=jnp.asarray(np.median(log_igm_transmission_band, axis=0), dtype=float),
         eta_sigma=jnp.asarray(np.median(eta_sigma_stage1, axis=0), dtype=float),
         eta_tau=jnp.asarray(np.median(np.asarray(samples_flat["eta_tau"], dtype=float), axis=0), dtype=float),
     )

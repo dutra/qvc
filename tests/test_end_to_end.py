@@ -1234,7 +1234,7 @@ def test_fluxmix_stage2_eta_sigma_recomputes_continuum_and_line_ratios():
         log_jitter=jnp.full(2, -4.0, dtype=float),
         lag0=jnp.asarray(5.0),
         lag_beta=jnp.asarray(4.0 / 3.0),
-        log_amp_delta_lya=jnp.asarray(0.0),
+        log_igm_transmission_band=jnp.zeros(2, dtype=float),
         eta_sigma=jnp.asarray(-0.5),
         eta_tau=jnp.asarray(0.2),
         log_amp_delta_blr=jnp.array([-0.3, -0.2], dtype=float),
@@ -1253,13 +1253,13 @@ def test_fluxmix_stage2_eta_sigma_recomputes_continuum_and_line_ratios():
         lam_rf,
         lambda_center_rf=lambda_center_rf,
         eta_sigma=raw_base["eta_sigma"],
-        log_amp_delta_lya=raw_base["log_amp_delta_lya"],
+        log_igm_transmission_band=raw_base["log_igm_transmission_band"],
     )
     ratio_shifted = compute_flux_line_ratio_offsets(
         lam_rf,
         lambda_center_rf=lambda_center_rf,
         eta_sigma=raw_shifted["eta_sigma"],
-        log_amp_delta_lya=raw_shifted["log_amp_delta_lya"],
+        log_igm_transmission_band=raw_shifted["log_igm_transmission_band"],
     )
 
     assert not np.allclose(np.asarray(explicit_base["amp_cont"]), np.asarray(explicit_shifted["amp_cont"]))
@@ -1427,7 +1427,7 @@ def test_build_single_object_model_mag_fluxmix_stage2_rejects_second_blr_term():
         log_jitter=jnp.full(len(bands), -4.0),
         lag0=jnp.asarray(5.0),
         lag_beta=jnp.asarray(4.0 / 3.0),
-        log_amp_delta_lya=jnp.asarray(0.0),
+        log_igm_transmission_band=jnp.zeros(len(bands), dtype=float),
         eta_sigma=jnp.asarray(-0.5),
         eta_tau=jnp.asarray(0.2),
     )

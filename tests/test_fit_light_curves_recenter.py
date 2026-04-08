@@ -17,6 +17,7 @@ from qvc.light_curve.fit_light_curves import (
     balmer_continuum_weight,
     build_explicit_model_params,
     bending_power_law_psd,
+    compute_band_igm_transmission,
     compute_lam_lya_suppression_rf,
     compute_structure_function_diagnostics,
     compute_band_adf,
@@ -27,7 +28,6 @@ from qvc.light_curve.fit_light_curves import (
     compute_lambda_center_rf,
     empirical_structure_function,
     fit_bending_power_law_psd,
-    lya_variability_weight,
     make_lc,
     posterior_median_mean_function,
 )
@@ -42,7 +42,7 @@ def _make_raw_public(n_band):
         "log_tau_fast_uv": jnp.array(np.log(30.0)),
         "eta_sigma": jnp.array(-0.55),
         "eta_tau": jnp.array(0.25),
-        "log_amp_delta_lya": jnp.array(0.0),
+        "log_igm_transmission_band": jnp.zeros((n_band,), dtype=float),
         "log_amp_delta_blr": jnp.full((n_band,), -1.0),
         "log_amp_delta_blr2": jnp.full((n_band,), -1.5),
         "log_lag_blr": jnp.full((n_band,), np.log(20.0)),
@@ -150,27 +150,23 @@ def test_build_explicit_model_params_centers_disk_lag_on_geometric_mean():
     assert np.isclose(lag_disk[center_idx], expected_lag0)
 
 
-def test_lya_variability_weight_tracks_lya_edge():
-    lam_rf = jnp.array([1100.0, 1216.0, 1250.0, 1600.0])
-    weight = np.asarray(lya_variability_weight(lam_rf))
-    assert weight[0] > weight[1] > weight[2] > weight[3]
-    assert weight[0] > 0.5
-    assert weight[-1] < 0.01
+def test_compute_band_igm_transmission_suppresses_u_more_than_redder_bands():
+    transmission = np.asarray(compute_band_igm_transmission(["u", "g", "r", "i"], 1.0), dtype=float)
+    assert transmission[0] < transmission[1] < transmission[2] <= transmission[3]
+    assert transmission[0] > 0.8
+    assert transmission[2] > 0.99
 
 
-def test_build_explicit_model_params_smoothly_suppresses_blue_edge_near_lya():
+def test_build_explicit_model_params_applies_log_igm_transmission_band_exactly():
     lam_rf = jnp.array([1500.0, 2000.0, 2500.0])
-    lam_lya_rf = jnp.array([1180.0, 1230.0, 1400.0])
     raw = _make_raw_public(len(lam_rf))
-    raw["log_amp_delta_lya"] = jnp.array(-1.0)
-    explicit = build_explicit_model_params(raw, lam_rf, lam_lya_rf=lam_lya_rf)
+    raw["log_igm_transmission_band"] = jnp.log(jnp.array([0.25, 0.5, 0.9], dtype=float))
+    explicit = build_explicit_model_params(raw, lam_rf)
 
     baseline = build_explicit_model_params(_make_raw_public(len(lam_rf)), lam_rf)
     ratio = np.asarray(explicit["amp_cont"]) / np.asarray(baseline["amp_cont"])
 
-    assert ratio[0] < ratio[1] < ratio[2]
-    assert ratio[0] < 0.5
-    assert ratio[2] > 0.9
+    assert np.allclose(ratio, np.array([0.25, 0.5, 0.9]))
 
 
 def test_compute_lam_lya_suppression_rf_turns_on_u_band_near_z_one_point_five():
@@ -181,8 +177,11 @@ def test_compute_lam_lya_suppression_rf_turns_on_u_band_near_z_one_point_five():
     assert high_z.shape == (1,)
     assert low_z[0] > 1216.0
     assert high_z[0] < 1216.0
-    assert float(lya_variability_weight(low_z)[0]) < 0.1
-    assert float(lya_variability_weight(high_z)[0]) > 0.8
+    low_u = float(np.asarray(compute_band_igm_transmission(["u"], 1.4), dtype=float)[0])
+    high_u = float(np.asarray(compute_band_igm_transmission(["u"], 1.6), dtype=float)[0])
+    assert low_u > high_u
+    assert low_u > 0.2
+    assert high_u < 0.2
 
 
 def test_balmer_continuum_weight_transitions_smoothly_across_3646():
@@ -321,7 +320,6 @@ def test_compute_parameter_kls_ignores_nonfinite_conditioning_samples():
         "poly1": np.array([0.0, 0.01, -0.01, 0.02]),
         "lag0": np.array([5.0, 5.5, 4.5, 5.2]),
         "lag_beta": np.array([1.2, 1.4, 1.3, 1.35]),
-        "log_amp_delta_lya": np.array([-0.1, -0.2, -0.15, -0.05]),
         "mean_g": np.array([0.0, 0.02, -0.01, 0.01]),
         "mean_r": np.array([0.0, 0.01, -0.02, 0.02]),
         "log_jitter_g": np.array([-3.0, -2.9, -3.1, -3.05]),
@@ -499,7 +497,6 @@ def test_compute_parameter_kls_returns_expected_keys():
         "poly1": rng.normal(0.0, 0.05, size=n),
         "lag0": np.abs(rng.normal(5.0, 1.0, size=n)),
         "lag_beta": np.abs(rng.normal(4.0 / 3.0, 0.1, size=n)),
-        "log_amp_delta_lya": rng.normal(-0.5, 0.1, size=n),
         "mean_g": rng.normal(0.0, 0.05, size=n),
         "mean_r": rng.normal(0.0, 0.05, size=n),
         "log_jitter_g": rng.normal(np.log(0.03), 0.1, size=n),
@@ -534,7 +531,6 @@ def test_compute_parameter_kls_returns_expected_keys():
         "log_tau_fast_center0_kl",
         "lag0_kl",
         "lag_beta_kl",
-        "log_amp_delta_lya_kl",
         "mean_g_kl",
         "mean_r_kl",
         "log_jitter_g_kl",
@@ -564,7 +560,6 @@ def test_compute_parameter_kls_uses_relflux_sigma_center0_when_requested():
         "poly1": rng.normal(0.0, 0.05, size=n),
         "lag0": np.abs(rng.normal(5.0, 1.0, size=n)),
         "lag_beta": np.abs(rng.normal(4.0 / 3.0, 0.1, size=n)),
-        "log_amp_delta_lya": rng.normal(-0.5, 0.1, size=n),
         "mean_g": rng.normal(0.0, 0.05, size=n),
         "log_jitter_g": rng.normal(np.log(0.03), 0.1, size=n),
         "log_amp_delta_blr_g": rng.normal(-1.0, 0.2, size=n),

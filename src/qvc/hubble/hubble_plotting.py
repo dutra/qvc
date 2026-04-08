@@ -6004,7 +6004,7 @@ def plot_full_residuals(
         #'log_jitter_total',
         'log_amp_delta_blr_total',
         'log_amp_delta_blr_u', 'log_amp_delta_blr_g', 'log_amp_delta_blr_r', 'log_amp_delta_blr_i', 'log_amp_delta_blr_z',
-        'log_amp_delta_lya_band_u', 'log_amp_delta_lya_band_g', 'log_amp_delta_lya_band_r', 'log_amp_delta_lya_band_i', 'log_amp_delta_lya_band_z',
+        'log_igm_transmission_band_u', 'log_igm_transmission_band_g', 'log_igm_transmission_band_r', 'log_igm_transmission_band_i', 'log_igm_transmission_band_z',
         #'log_jitter_u', 'log_jitter_g', 'log_jitter_r', 'log_jitter_i', 'log_jitter_z',
 
     ] if col in df_agn.columns]
