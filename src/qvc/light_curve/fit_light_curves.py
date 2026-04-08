@@ -120,6 +120,80 @@ SDSS_FILTER_BLUE_EDGE_OBS = {
     "z": 7964.70,
     "y": 9469.38,
 }
+LC_SURVEY_NAMES = tuple(SURVEY_NAMES)
+LC_SURVEY_TO_IDX = {name: idx for idx, name in enumerate(LC_SURVEY_NAMES)}
+
+
+def _normalize_survey_name(value):
+    if value is None:
+        return "sdss"
+    text = str(value).strip().lower()
+    if text in {"", "nan", "none"}:
+        return "sdss"
+    if text in LC_SURVEY_TO_IDX:
+        return text
+    if text.startswith("panstarr") or text.startswith("pan-starr") or text == "panstarrs":
+        return "ps1"
+    raise ValueError(f"Unsupported survey label {value!r}. Expected one of {LC_SURVEY_NAMES}.")
+
+
+def _default_survey_labels_for_band(band, size):
+    if int(size) <= 0:
+        return np.array([], dtype=str)
+    if str(band) == "u":
+        default = "sdss"
+    else:
+        default = "ztf"
+    return np.full(int(size), default, dtype=str)
+
+
+def _survey_indices_from_labels(labels):
+    labels = np.asarray(labels, dtype=str)
+    if labels.size == 0:
+        return np.array([], dtype=np.int32), np.array([], dtype=str)
+    normalized = np.asarray([_normalize_survey_name(value) for value in labels], dtype=str)
+    survey_idx = np.asarray([LC_SURVEY_TO_IDX[value] for value in normalized], dtype=np.int32)
+    return survey_idx, normalized
+
+
+def _compute_log_jitter_mean_grid(yerr, band_idx, survey_idx, n_bands):
+    yerr = np.asarray(yerr, dtype=float)
+    band_idx = np.asarray(band_idx, dtype=np.int32)
+    survey_idx = np.asarray(survey_idx, dtype=np.int32)
+    n_surveys = len(LC_SURVEY_NAMES)
+    log_jitter_mean = np.full((n_bands, n_surveys), np.log(1e-3), dtype=float)
+    active_mask = np.zeros((n_bands, n_surveys), dtype=bool)
+    fallback = np.log(1e-3)
+    for i in range(int(n_bands)):
+        band_mask = band_idx == i
+        good_band = band_mask & np.isfinite(yerr) & (yerr > 0.0)
+        if np.any(good_band):
+            fallback = float(np.log(np.mean(yerr[good_band])))
+        for j in range(n_surveys):
+            mask = good_band & (survey_idx == j)
+            active_mask[i, j] = bool(np.any(mask))
+            log_jitter_mean[i, j] = (
+                float(np.log(np.mean(yerr[mask])))
+                if np.any(mask)
+                else fallback
+            )
+    return jnp.asarray(log_jitter_mean, dtype=float), active_mask
+
+
+def _sample_log_jitter_grid(log_jitter_mean, active_mask):
+    log_jitter_mean = jnp.asarray(log_jitter_mean, dtype=float)
+    active_mask = np.asarray(active_mask, dtype=bool)
+    active_indices = np.argwhere(active_mask)
+    log_jitter = jnp.array(log_jitter_mean)
+    if active_indices.size:
+        active_means = jnp.asarray(log_jitter_mean[active_mask], dtype=float)
+        log_jitter_active = numpyro.sample(
+            "log_jitter_active",
+            log_jitter_prior(active_means),
+        )
+        for idx_flat, (band_idx, survey_idx) in enumerate(active_indices):
+            log_jitter = log_jitter.at[int(band_idx), int(survey_idx)].set(log_jitter_active[idx_flat])
+    return numpyro.deterministic("log_jitter", log_jitter)
 
 
 def compute_lambda_center_rf(lam_rf):
@@ -1411,12 +1485,15 @@ def _noise_corrected_rms(y, yerr):
     return np.sqrt(var_intrinsic) if np.isfinite(var_intrinsic) and var_intrinsic > 0.0 else np.nan
 
 
-def _posterior_median_band_jitter(samples, band):
-    """Return posterior-median white-noise jitter in linear mag units for one band."""
+def _posterior_median_band_survey_jitter(samples, band, survey):
+    """Return posterior-median white-noise jitter for one band-survey cell."""
 
-    jitter_key = f"log_jitter_{band}"
+    jitter_key = f"log_jitter_{band}_{survey}"
     if jitter_key not in samples:
-        return 0.0
+        legacy_key = f"log_jitter_{band}"
+        if legacy_key not in samples:
+            return 0.0
+        jitter_key = legacy_key
     log_jitter = np.asarray(samples[jitter_key], dtype=float)
     finite = np.isfinite(log_jitter)
     if not np.any(finite):
@@ -1447,6 +1524,11 @@ def empirical_structure_function_g_reference_from_all_bands(
     t_rf_all = np.asarray(obj["X"][0], dtype=float) / (1.0 + float(z))
     y_all = np.asarray(obj["y"], dtype=float)
     yerr_all = np.asarray(obj["yerr"], dtype=float)
+    survey_idx_all = np.asarray(
+        obj.get("survey_idx", np.zeros_like(band_idx, dtype=np.int32)),
+        dtype=np.int32,
+    )
+    survey_names = tuple(obj.get("survey_names", LC_SURVEY_NAMES))
 
     band_payloads = {}
     sigma_ref = np.nan
@@ -1454,7 +1536,18 @@ def empirical_structure_function_g_reference_from_all_bands(
         mask = band_idx == i_band
         if np.count_nonzero(mask) < 2:
             continue
-        yerr_eff = np.hypot(yerr_all[mask], _posterior_median_band_jitter(samples, band))
+        jitter_eff = np.asarray(
+            [
+                _posterior_median_band_survey_jitter(
+                    samples,
+                    band,
+                    survey_names[int(survey_idx)],
+                )
+                for survey_idx in survey_idx_all[mask]
+            ],
+            dtype=float,
+        )
+        yerr_eff = np.hypot(yerr_all[mask], jitter_eff)
         sigma_band = _noise_corrected_rms(y_all[mask], yerr_eff)
         band_payloads[band] = {
             "t_rf": t_rf_all[mask],
@@ -1849,7 +1942,20 @@ def compute_structure_function_diagnostics(
     band_idx = np.asarray(obj["band_idx"])
     ref_mask = band_idx == ref_idx
     t_band = np.asarray(obj["X"][0], dtype=float)[ref_mask] / (1.0 + float(z))
-    jitter_ref_band = _posterior_median_band_jitter(samples, ref_band)
+    ref_surveys = np.asarray(
+        obj.get("survey_idx", np.zeros_like(band_idx, dtype=np.int32))[ref_mask],
+        dtype=np.int32,
+    )
+    survey_names = tuple(obj.get("survey_names", LC_SURVEY_NAMES))
+    jitter_ref_samples = np.asarray(
+        [
+            _posterior_median_band_survey_jitter(samples, ref_band, survey_names[int(survey_idx)])
+            for survey_idx in ref_surveys
+        ],
+        dtype=float,
+    )
+    finite_jitter = jitter_ref_samples[np.isfinite(jitter_ref_samples) & (jitter_ref_samples > 0.0)]
+    jitter_ref_band = float(np.median(finite_jitter)) if finite_jitter.size else 0.0
     tau_sf, sf_med, sf_lo, sf_hi, sf_bands_used = (
         empirical_structure_function_g_reference_from_all_bands(
             samples,
@@ -2119,6 +2225,7 @@ def sample_flux_line_latent_params(
     z,
     log_lag0,
     log_jitter_mean,
+    log_jitter_active_mask,
     line_ratio_offsets,
     mean_prior_dist=None,
     disable_lag_blr=False,
@@ -2147,6 +2254,7 @@ def sample_flux_line_latent_params(
     log_amp_ratio_blr_loc = line_ratio_offsets["blr_band"] - 1.0
     if mean_prior_dist is None:
         mean_prior_dist = mean_prior()
+    log_jitter = _sample_log_jitter_grid(log_jitter_mean, log_jitter_active_mask)
 
     with numpyro.plate("band", B):
         mean = numpyro.sample("mean", mean_prior_dist)
@@ -2234,8 +2342,6 @@ def sample_flux_line_latent_params(
                 - line_ratio_offsets["blr_band"],
             )
 
-        log_jitter = numpyro.sample("log_jitter", log_jitter_prior(log_jitter_mean))
-
     return (
         mean,
         dlog_amp_blr,
@@ -2252,6 +2358,7 @@ def compute_parameter_kls(
     flat_samples,
     *,
     bands,
+    survey_names,
     z,
     lambda_center_rf,
     log_jitter_mean,
@@ -2367,12 +2474,16 @@ def compute_parameter_kls(
                 lambda x: _dist_log_prob_array(mean_prior_fn(), x),
             )
 
-        jitter_key = f"log_jitter_{band}"
-        if jitter_key in flat_samples:
-            kls[f"{jitter_key}_kl"] = kl_from_samples(
-                flat_samples[jitter_key],
-                lambda x: _dist_log_prob_array(log_jitter_prior(float(log_jitter_mean[i])), x),
-            )
+        for j, survey in enumerate(survey_names):
+            jitter_key = f"log_jitter_{band}_{survey}"
+            if jitter_key in flat_samples:
+                kls[f"{jitter_key}_kl"] = kl_from_samples(
+                    flat_samples[jitter_key],
+                    lambda x: _dist_log_prob_array(
+                        log_jitter_prior(float(log_jitter_mean[i, j])),
+                        x,
+                    ),
+                )
 
         if disable_lag_blr:
             continue
@@ -2432,6 +2543,7 @@ def make_lc(
     times = data["times"]
     mags = data["mags"]
     magerrs = data["magerrs"]
+    surveys = data.get("surveys", {})
 
     if len(bands) == 0:
         print(f"No usable bands for {data['object_id']}, skipping.", flush=True)
@@ -2440,6 +2552,15 @@ def make_lc(
     all_times = np.concatenate([np.asarray(times[b]) for b in bands])
     all_mags = np.concatenate([np.asarray(mags[b]) for b in bands])
     all_magerrs = np.concatenate([np.asarray(magerrs[b]) for b in bands])
+    all_surveys = np.concatenate(
+        [
+            np.asarray(
+                surveys.get(b, _default_survey_labels_for_band(b, len(times[b]))),
+                dtype=str,
+            )
+            for b in bands
+        ]
+    )
     band_idx = np.concatenate([np.full(len(times[b]), i) for i, b in enumerate(bands)]).astype(
         np.int64, copy=False
     )
@@ -2451,10 +2572,11 @@ def make_lc(
     tie_eps = 10.0 * np.finfo(all_times.dtype).eps
     key = all_times + band_idx.astype(all_times.dtype) * tie_eps
     order = np.argsort(key, kind="mergesort")
-    all_times, all_mags, all_magerrs, band_idx = (
+    all_times, all_mags, all_magerrs, all_surveys, band_idx = (
         all_times[order],
         all_mags[order],
         all_magerrs[order],
+        all_surveys[order],
         band_idx[order],
     )
 
@@ -2511,10 +2633,11 @@ def make_lc(
             all_mags[idx_band] = y_b
 
     mfin = np.isfinite(all_mags) & np.isfinite(all_magerrs) & np.isfinite(all_times)
-    all_times, all_mags, all_magerrs, band_idx = (
+    all_times, all_mags, all_magerrs, all_surveys, band_idx = (
         all_times[mfin],
         all_mags[mfin],
         all_magerrs[mfin],
+        all_surveys[mfin],
         band_idx[mfin],
     )
     if len(all_times) == 0:
@@ -2536,10 +2659,11 @@ def make_lc(
         is_out = np.abs(centers - medians) > 2.5 * mads
         keep[idx_b[window_size:-window_size][is_out]] = False
 
-    all_times, all_mags, all_magerrs, band_idx = (
+    all_times, all_mags, all_magerrs, all_surveys, band_idx = (
         all_times[keep],
         all_mags[keep],
         all_magerrs[keep],
+        all_surveys[keep],
         band_idx[keep],
     )
 
@@ -2565,6 +2689,7 @@ def make_lc(
             all_mags[m] = all_mags[m] - mu
 
     time0 = np.min(all_times)
+    survey_idx, survey_labels = _survey_indices_from_labels(all_surveys)
     X = (jnp.array(all_times) - jnp.min(all_times), jnp.array(band_idx))
     y = jnp.array(all_mags)
     yerr = jnp.array(all_magerrs)
@@ -2575,6 +2700,9 @@ def make_lc(
         "y": y,
         "yerr": yerr,
         "band_idx": band_idx,
+        "survey_idx": survey_idx,
+        "survey_labels": survey_labels,
+        "survey_names": LC_SURVEY_NAMES,
         "z": data["z"],
         "mags_means": mags_means,
         "mags_stds": mags_stds,
@@ -3126,6 +3254,7 @@ def build_single_object_model(
     (t, bidx) = obj_dict["X"]
     y = obj_dict["y"]
     yerr = obj_dict["yerr"]
+    survey_idx = jnp.asarray(obj_dict["survey_idx"], dtype=jnp.int32)
     z = float(obj_dict["z"])
     B = int(len(lam_rf))
     lambda_center_rf = compute_lambda_center_rf(lam_rf)
@@ -3198,6 +3327,7 @@ def build_single_object_model(
             z=z,
             log_lag0=log_lag0,
             log_jitter_mean=log_jitter_mean,
+            log_jitter_active_mask=np.asarray(obj_dict["log_jitter_active_mask"], dtype=bool),
             line_ratio_offsets=line_ratio_offsets,
             disable_lag_blr=disable_lag_blr,
             disable_lag_bc=disable_lag_bc,
@@ -3260,6 +3390,7 @@ def build_single_object_model(
             y=y,
             yerr=yerr,
             n_band=B,
+            survey_idx=survey_idx,
             zero_mean=zero_mean,
             has_jitter=has_jitter,
         )
@@ -3291,6 +3422,7 @@ def build_single_object_model_mag_flux_linearized(
     (t, bidx) = obj_dict["X"]
     y = obj_dict["y"]
     yerr = obj_dict["yerr"]
+    survey_idx = jnp.asarray(obj_dict["survey_idx"], dtype=jnp.int32)
     z = float(obj_dict["z"])
     B = int(len(lam_rf))
     lambda_center_rf = compute_lambda_center_rf(lam_rf)
@@ -3307,11 +3439,12 @@ def build_single_object_model_mag_flux_linearized(
     yerr_relflux = magerr_residual_to_relative_fluxerr(y, yerr)
     bidx_np = np.asarray(bidx)
     yerr_relflux_np = np.asarray(yerr_relflux, dtype=float)
-    log_jitter_mean_relflux = np.empty(B, dtype=float)
-    for i in range(B):
-        mask = (bidx_np == i) & np.isfinite(yerr_relflux_np) & (yerr_relflux_np > 0.0)
-        log_jitter_mean_relflux[i] = np.log(np.mean(yerr_relflux_np[mask])) if np.any(mask) else np.log(1e-6)
-    log_jitter_mean_relflux = jnp.asarray(log_jitter_mean_relflux, dtype=float)
+    log_jitter_mean_relflux, log_jitter_active_mask_relflux = _compute_log_jitter_mean_grid(
+        yerr_relflux_np,
+        bidx_np,
+        np.asarray(survey_idx, dtype=np.int32),
+        B,
+    )
 
     def model():
         eta_sigma = numpyro.sample("eta_sigma", eta_sigma_prior())
@@ -3369,6 +3502,7 @@ def build_single_object_model_mag_flux_linearized(
             z=z,
             log_lag0=log_lag0,
             log_jitter_mean=log_jitter_mean_relflux,
+            log_jitter_active_mask=log_jitter_active_mask_relflux,
             line_ratio_offsets=line_ratio_offsets,
             mean_prior_dist=mean_prior_relflux(),
             disable_lag_blr=disable_lag_blr,
@@ -3439,6 +3573,7 @@ def build_single_object_model_mag_flux_linearized(
             y=y_relflux,
             yerr=yerr_relflux,
             n_band=B,
+            survey_idx=survey_idx,
             baseline_flux_by_band=baseline_flux_by_band,
             zero_mean=zero_mean,
             has_jitter=has_jitter,
@@ -3463,6 +3598,7 @@ def build_single_object_model_continuum_only(
     (t, bidx) = obj_dict["X"]
     y = obj_dict["y"]
     yerr = obj_dict["yerr"]
+    survey_idx = jnp.asarray(obj_dict["survey_idx"], dtype=jnp.int32)
     z = float(obj_dict["z"])
     B = int(len(lam_rf))
     lambda_center_rf = compute_lambda_center_rf(lam_rf)
@@ -3509,9 +3645,12 @@ def build_single_object_model_continuum_only(
 
         lag0 = numpyro.sample("lag0", lag0_prior())
         lag_beta = numpyro.sample("lag_beta", lag_beta_prior())
+        log_jitter = _sample_log_jitter_grid(
+            log_jitter_mean,
+            np.asarray(obj_dict["log_jitter_active_mask"], dtype=bool),
+        )
         with numpyro.plate("band", B):
             mean = numpyro.sample("mean", mean_prior())
-            log_jitter = numpyro.sample("log_jitter", log_jitter_prior(log_jitter_mean))
 
         raw_params = dict(
             log_tau_slow_center0=log_tau_slow_center0,
@@ -3557,6 +3696,7 @@ def build_single_object_model_continuum_only(
             y=y,
             yerr=yerr,
             n_band=B,
+            survey_idx=survey_idx,
             zero_mean=zero_mean,
             has_jitter=has_jitter,
         )
@@ -3591,6 +3731,7 @@ def build_single_object_model_mag_fluxmix_stage2(
     (t, bidx) = obj_dict["X"]
     y = jnp.asarray(obj_dict["y"], dtype=float)
     yerr = jnp.asarray(obj_dict["yerr"], dtype=float)
+    survey_idx = jnp.asarray(obj_dict["survey_idx"], dtype=jnp.int32)
     z = float(obj_dict["z"])
     B = int(len(lam_rf))
     if lam_lya_rf is None:
@@ -3605,7 +3746,11 @@ def build_single_object_model_mag_fluxmix_stage2(
     mean_obs = mean_func(stage1_raw_median, (t, bidx))
     log_jitter_fixed = jnp.asarray(stage1_raw_median["log_jitter"], dtype=float)
     if has_jitter:
-        yerr_eff = jnp.sqrt(yerr**2 + jnp.exp(log_jitter_fixed)[bidx] ** 2)
+        if log_jitter_fixed.ndim == 2:
+            jitter_term = jnp.exp(log_jitter_fixed[bidx, survey_idx])
+        else:
+            jitter_term = jnp.exp(log_jitter_fixed[bidx])
+        yerr_eff = jnp.sqrt(yerr**2 + jitter_term ** 2)
     else:
         yerr_eff = yerr
 
@@ -3840,7 +3985,7 @@ def _fluxmix_stage1_raw_median_params(samples_flat, lam_rf):
 
     B = int(len(lam_rf))
     mean_default = np.zeros(B, dtype=float)
-    jitter_default = np.full(B, np.log(1e-3), dtype=float)
+    jitter_default = np.full((B, len(LC_SURVEY_NAMES)), np.log(1e-3), dtype=float)
     linear_trend_default = 0.0
     if "stage1_basis_log_sigma_center0" in samples_flat:
         log_sigma_center0_stage1 = np.asarray(samples_flat["stage1_basis_log_sigma_center0"], dtype=float)
@@ -3909,6 +4054,7 @@ def _build_fluxmix_continuum_basis(obj_dict, lam_rf, stage1_raw_median, *, lam_l
         obj_dict["y"],
         obj_dict["yerr"],
         n_band=B,
+        survey_idx=obj_dict["survey_idx"],
         zero_mean=zero_mean,
         has_jitter=has_jitter,
     )
@@ -4469,12 +4615,15 @@ def main():
 
             bidx = obj["band_idx"]
             yerr = np.asarray(obj["yerr"])
+            survey_idx = np.asarray(obj["survey_idx"], dtype=np.int32)
             B = len(bands)
-            ljm = np.empty(B)
-            for i in range(B):
-                m = (bidx == i) & np.isfinite(yerr) & (yerr < 10)
-                ljm[i] = np.log(np.mean(yerr[m])) if np.any(m) else np.log(1e-3)
-            log_jitter_mean = jnp.array(ljm)
+            log_jitter_mean, log_jitter_active_mask = _compute_log_jitter_mean_grid(
+                yerr,
+                bidx,
+                survey_idx,
+                B,
+            )
+            obj["log_jitter_active_mask"] = log_jitter_active_mask
             log_jitter_mean_fit = log_jitter_mean
             if args.model_variant == "mag_flux_linearized":
                 y_relflux = np.asarray(mag_residual_to_relative_flux(obj["y"]), dtype=float)
@@ -4482,11 +4631,12 @@ def main():
                     magerr_residual_to_relative_fluxerr(obj["y"], obj["yerr"]),
                     dtype=float,
                 )
-                ljm_relflux = np.empty(B)
-                for i in range(B):
-                    m = (bidx == i) & np.isfinite(yerr_relflux) & (yerr_relflux > 0.0)
-                    ljm_relflux[i] = np.log(np.mean(yerr_relflux[m])) if np.any(m) else np.log(1e-6)
-                log_jitter_mean_fit = jnp.array(ljm_relflux)
+                log_jitter_mean_fit, _ = _compute_log_jitter_mean_grid(
+                    yerr_relflux,
+                    bidx,
+                    survey_idx,
+                    B,
+                )
             if args.model_variant == "mag_linear":
                 model_builder = build_single_object_model
             elif args.model_variant == "mag_flux_linearized":
@@ -4671,6 +4821,7 @@ def main():
             obj_flat_samples_flatten_per_band = flatten_flat_samples_per_band(
                 obj_flat_samples,
                 bands=bands,
+                survey_names=obj["survey_names"],
             )
             log_nonfinite_sample_summary(obj_flat_samples_flatten_per_band, label=f"{oid} per-band")
 
@@ -4679,6 +4830,7 @@ def main():
                 obj_samples_per_chain_flatten_per_band = flatten_per_chain_samples_per_band(
                     samples_per_chain,
                     bands=bands,
+                    survey_names=obj["survey_names"],
                 )
                 diagnostics = diagnostics_for_per_chain_samples(obj_samples_per_chain_flatten_per_band)
             diagnostics |= stage_diagnostics
@@ -4689,6 +4841,7 @@ def main():
                     mag_residual_to_relative_flux(obj["y"]),
                     magerr_residual_to_relative_fluxerr(obj["y"], obj["yerr"]),
                     n_band=B,
+                    survey_idx=obj["survey_idx"],
                     baseline_flux_by_band=reference_flux_from_mean_magnitudes(obj["mags_means"]),
                     zero_mean=zero_mean,
                     has_jitter=has_jitter,
@@ -4705,6 +4858,7 @@ def main():
                     obj["y"],
                     obj["yerr"],
                     n_band=B,
+                    survey_idx=obj["survey_idx"],
                     zero_mean=zero_mean,
                     has_jitter=has_jitter,
                 )
@@ -4746,6 +4900,7 @@ def main():
             kl_result = compute_parameter_kls(
                 obj_flat_samples_flatten_per_band,
                 bands=bands,
+                survey_names=obj["survey_names"],
                 z=float(obj["z"]),
                 lambda_center_rf=float(lambda_center_rf),
                 log_jitter_mean=np.asarray(log_jitter_mean_fit),

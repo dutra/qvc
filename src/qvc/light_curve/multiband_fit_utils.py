@@ -169,7 +169,7 @@ def select_samples_for_object_per_chain(samples_per_chain, obj_index, universal_
     return obj_samples
 
 
-def flatten_per_chain_samples_per_band(samples_per_chain, bands):
+def flatten_per_chain_samples_per_band(samples_per_chain, bands, survey_names=None):
     """
     Flatten per-chain samples for each band.
     
@@ -199,10 +199,20 @@ def flatten_per_chain_samples_per_band(samples_per_chain, bands):
         if v.ndim == 2:
             flattened_samples[k] = v
         elif v.ndim == 3:
-            if v.shape[-1] != len(bands):
+            if v.shape[-1] == len(bands):
+                for i, band in enumerate(bands):
+                    flattened_samples[f"{k}_{band}"] = v[:, :, i]
+            else:
                 raise ValueError(f"Unexpected band dimension for {k}: {v.shape} vs bands={len(bands)}")
+        elif v.ndim == 4:
+            if survey_names is None or v.shape[-2:] != (len(bands), len(survey_names)):
+                raise ValueError(
+                    f"Unexpected band/survey dimensions for {k}: {v.shape} "
+                    f"vs bands={len(bands)}, surveys={0 if survey_names is None else len(survey_names)}"
+                )
             for i, band in enumerate(bands):
-                flattened_samples[f"{k}_{band}"] = v[:, :, i]
+                for j, survey in enumerate(survey_names):
+                    flattened_samples[f"{k}_{band}_{survey}"] = v[:, :, i, j]
         else:
             raise ValueError(f"Unexpected shape for {k}: {v.shape}")
     return flattened_samples
@@ -243,7 +253,7 @@ def select_samples_for_object(samples_flat, obj_index, universal_params):
 
     return obj_samples
 
-def flatten_flat_samples_per_band(samples_flat, bands):
+def flatten_flat_samples_per_band(samples_flat, bands, survey_names=None):
     """
     Flatten flat samples for each band.
     
@@ -271,11 +281,19 @@ def flatten_flat_samples_per_band(samples_flat, bands):
         if v.ndim == 1:
             flattened_samples[k] = v
         elif v.ndim == 2:
-            # Flatten over bands
             if v.shape[-1] != len(bands):
                 raise ValueError(f"Unexpected band dimension for {k}: {v.shape} vs bands={len(bands)}")
             for i, band in enumerate(bands):
                 flattened_samples[f"{k}_{band}"] = v[:, i]
+        elif v.ndim == 3:
+            if survey_names is None or v.shape[-2:] != (len(bands), len(survey_names)):
+                raise ValueError(
+                    f"Unexpected band/survey dimensions for {k}: {v.shape} "
+                    f"vs bands={len(bands)}, surveys={0 if survey_names is None else len(survey_names)}"
+                )
+            for i, band in enumerate(bands):
+                for j, survey in enumerate(survey_names):
+                    flattened_samples[f"{k}_{band}_{survey}"] = v[:, i, j]
         else:
             raise ValueError(f"Unexpected shape for {k}: {v.shape}") 
     return flattened_samples

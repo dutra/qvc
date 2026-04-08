@@ -23,6 +23,7 @@ lambda_pivot = {
 filters = {"u": 0, "g": 1, "r": 2, "i": 3, "z": 4, "y": 5} # harcoded filter order for SDSS
 bands = ['u', 'g', 'r', 'i', 'z']#, 'y']
 #bands = ['g', 'r', 'i']
+SURVEY_NAMES = ("sdss", "ps1", "ztf")
 
 def cut_light_curve_restframe_window(lc_list, n_days=1800, same_length=False):
     """
@@ -61,17 +62,20 @@ def cut_light_curve_restframe_window(lc_list, n_days=1800, same_length=False):
         new_mags = {}
         new_magerrs = {}
         new_times = {}
+        new_surveys = {}
         cut_rest_times = []
 
         for band in bands:
             t_obs = np.asarray(lc['times'].get(band, []))
             m_band = np.asarray(lc['mags'].get(band, []))
             me_band = np.asarray(lc['magerrs'].get(band, []))
+            survey_band = np.asarray(lc.get('surveys', {}).get(band, []))
 
             if len(t_obs) == 0:
                 new_times[band] = []
                 new_mags[band] = []
                 new_magerrs[band] = []
+                new_surveys[band] = []
                 continue
 
             # Convert to rest-frame
@@ -81,6 +85,7 @@ def cut_light_curve_restframe_window(lc_list, n_days=1800, same_length=False):
             new_times[band] = t_obs[mask]       # keep in observer frame
             new_mags[band] = m_band[mask]
             new_magerrs[band] = me_band[mask]
+            new_surveys[band] = survey_band[mask] if survey_band.size else []
             cut_rest_times.append(t_rest[mask])
 
         # --- Final rest-frame span check ---
@@ -107,6 +112,7 @@ def cut_light_curve_restframe_window(lc_list, n_days=1800, same_length=False):
             'span_rf': span_rf,
             'mags': new_mags,
             'magerrs': new_magerrs,
+            'surveys': new_surveys,
             'times': new_times,  # still in observer frame
             'mags_mean': mags_means,
             'mags_std': mags_stds,
@@ -312,6 +318,7 @@ def concat_light_curves(filter_object_ids=None, progress_bar=False, skip=None, N
     times_by_obj_band = by_obj_band["time"].apply(lambda x: x.to_numpy(dtype=float)).to_dict()
     mags_by_obj_band = by_obj_band["mag"].apply(lambda x: x.to_numpy(dtype=float)).to_dict()
     magerrs_by_obj_band = by_obj_band["magerr"].apply(lambda x: x.to_numpy(dtype=float)).to_dict()
+    surveys_by_obj_band = by_obj_band["survey"].apply(lambda x: x.astype(str).to_numpy()).to_dict()
     mags_mean_by_obj_band = by_obj_band["mag"].mean()
     number_points_by_obj = obs.groupby("object_id", sort=False).size()
     all_times_by_obj = (
@@ -372,11 +379,13 @@ def concat_light_curves(filter_object_ids=None, progress_bar=False, skip=None, N
         times = {}
         mags = {}
         magerrs = {}
+        surveys = {}
         for band in bands:
             key = (object_id, band)
             times[band] = np.asarray(times_by_obj_band.get(key, np.array([])), dtype=float)
             mags[band] = np.asarray(mags_by_obj_band.get(key, np.array([])), dtype=float)
             magerrs[band] = np.asarray(magerrs_by_obj_band.get(key, np.array([])), dtype=float)
+            surveys[band] = np.asarray(surveys_by_obj_band.get(key, np.array([])), dtype=str)
 
         mags_means = [
             float(mags_mean_by_obj_band.get((object_id, band), np.nan))
@@ -393,7 +402,9 @@ def concat_light_curves(filter_object_ids=None, progress_bar=False, skip=None, N
             {
                 "object_id": object_id,
                 "times": times,
+                "surveys": surveys,
                 "survey_times": survey_times,
+                "survey_names": SURVEY_NAMES,
                 "mags": mags,
                 "mags_mean": mags_means,
                 "magerrs": magerrs,
@@ -414,6 +425,7 @@ def load_nearby_lcs(name):
     mags = {band: [] for band in bands}
     magerrs = {band: [] for band in bands}
     times = {band: [] for band in bands}
+    surveys = {band: [] for band in bands}
 
     for band in bands:
         filter_name = f'z{band}'
@@ -421,6 +433,7 @@ def load_nearby_lcs(name):
         times[band] = df.loc[mask, 'mjd'].values
         mags[band] = df.loc[mask, 'mag'].values
         magerrs[band] = df.loc[mask, 'magerr'].values
+        surveys[band] = np.full(times[band].shape, "ztf", dtype=str)
 
     for band in bands:
         print(f"{band}: {len(mags[band])} mag points")
@@ -429,6 +442,8 @@ def load_nearby_lcs(name):
         'LOGLBOL': 1,
         'object_id': name,
         'times': times,
+        'surveys': surveys,
+        'survey_names': SURVEY_NAMES,
         'mags': mags,
         'magerrs': magerrs,
     }]

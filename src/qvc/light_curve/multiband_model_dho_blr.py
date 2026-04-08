@@ -1,8 +1,12 @@
+from functools import partial
+
 import jax
 import jax.numpy as jnp
 import numpy as np
 from tinygp.helpers import JAXArray
 from tinygp.kernels import quasisep as qs
+import tinygp.kernels.quasisep as tkq
+from tinygp import GaussianProcess
 
 from eztaox.models import MultiVarModel
 
@@ -209,6 +213,42 @@ def qs_psd(kernel, omega, b: int, sigma_n2: float = 0.0):
 class ContiBLR_SHO_Model(MultiVarModel):
     """MultiVarModel with a convenience PSD method for plotting."""
 
+    survey_idx: JAXArray | None = None
+
+    def __init__(
+        self,
+        X,
+        y,
+        yerr,
+        base_kernel,
+        nBand,
+        multiband_kernel=None,
+        mean_func=None,
+        amp_scale_func=None,
+        lag_func=None,
+        *,
+        survey_idx=None,
+        **kwargs,
+    ):
+        super().__init__(
+            X,
+            y,
+            yerr,
+            base_kernel,
+            nBand,
+            multiband_kernel=multiband_kernel,
+            mean_func=mean_func,
+            amp_scale_func=amp_scale_func,
+            lag_func=lag_func,
+            **kwargs,
+        )
+        if survey_idx is None:
+            self.survey_idx = None
+        else:
+            t = jnp.asarray(X[0])
+            inds = jnp.argsort(t)
+            self.survey_idx = jnp.asarray(survey_idx, dtype=jnp.int32)[inds]
+
     def my_lag_transform(
         self, X: JAXArray, has_lag: bool, params: dict[str, JAXArray]
     ) -> tuple[tuple[JAXArray, JAXArray], JAXArray]:
@@ -222,6 +262,49 @@ class ContiBLR_SHO_Model(MultiVarModel):
 
     def prediction_to_display(self, pred_result):
         return pred_result
+
+    def _jitter_diag(self, params, band):
+        log_jitter = jnp.asarray(params["log_jitter"])
+        if self.survey_idx is not None and log_jitter.ndim == 2:
+            return jnp.exp(log_jitter[band, self.survey_idx]) ** 2
+        return (jnp.exp(jnp.atleast_1d(log_jitter)) ** 2)[band]
+
+    def _build_gp(
+        self, params: dict[str, JAXArray]
+    ) -> tuple[GaussianProcess, JAXArray]:
+        log_amp_scales = self.get_amp_scale(params)
+        means = partial(self.get_mean, self.zero_mean, params)
+
+        X, inds = self.lag_transform(self.has_lag, params, self.X)
+        t = X[0]
+        band = X[1]
+
+        diags = self.diag
+        if self.has_jitter is True:
+            diags = self.diag + self._jitter_diag(params, band)
+
+        new_params = params.copy()
+        new_params["amplitudes"] = jnp.exp(log_amp_scales)
+        kernel = self.multiband_kernel(
+            params=new_params,
+            kernel=self.base_kernel_def(jnp.exp(new_params["log_kernel_param"])),
+        )
+
+        gp_kwargs = {
+            "diag": diags[inds],
+            "mean": means,
+        }
+        if isinstance(kernel, tkq.Quasisep):
+            gp_kwargs["assume_sorted"] = True
+
+        return (
+            GaussianProcess(
+                kernel,
+                (t[inds], band[inds]),
+                **gp_kwargs,
+            ),
+            inds,
+        )
 
     def psd(self, params, omega, b: int = 0, sigma_n2: float = 0.0):
         gp, _ = self._build_gp(params)
@@ -469,6 +552,7 @@ def make_multiband_dho_blr_model(
     yerr,
     n_band=None,
     *,
+    survey_idx=None,
     zero_mean=False,
     has_jitter=True,
 ):
@@ -494,6 +578,7 @@ def make_multiband_dho_blr_model(
         multiband_kernel=ContiBLR_SHO_Wrapper,
         mean_func=make_linear_mean_func(t, zero_mean=zero_mean),
         amp_scale_func=amp_scale_func,
+        survey_idx=survey_idx,
         zero_mean=zero_mean,
         has_jitter=has_jitter,
         has_lag=False,
@@ -506,6 +591,7 @@ def make_multiband_dho_blr_flux_linearized_model(
     yerr,
     n_band=None,
     *,
+    survey_idx=None,
     baseline_flux_by_band=None,
     zero_mean=False,
     has_jitter=True,
@@ -517,6 +603,7 @@ def make_multiband_dho_blr_flux_linearized_model(
         y,
         yerr,
         n_band=n_band,
+        survey_idx=survey_idx,
         baseline_flux_by_band=baseline_flux_by_band,
         zero_mean=zero_mean,
         has_jitter=has_jitter,
@@ -529,6 +616,7 @@ def make_multiband_dho_blr_relative_flux_model(
     yerr,
     n_band=None,
     *,
+    survey_idx=None,
     baseline_flux_by_band=None,
     zero_mean=False,
     has_jitter=True,
@@ -555,6 +643,7 @@ def make_multiband_dho_blr_relative_flux_model(
         multiband_kernel=ContiBLRRelativeFlux_SHO_Wrapper,
         mean_func=make_linear_mean_func(t, zero_mean=zero_mean),
         amp_scale_func=amp_scale_func,
+        survey_idx=survey_idx,
         zero_mean=zero_mean,
         has_jitter=has_jitter,
         has_lag=False,
