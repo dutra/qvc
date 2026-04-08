@@ -1162,6 +1162,10 @@ def test_run_two_stage_fluxmix_fast_inference_smoke():
     )
     assert "log_sigma_uv_bpl" in psd_diag
     assert "log_sigma_bpl_ref_band" in psd_diag
+    if np.isfinite(psd_diag["log_noise_floor_bpl"]):
+        assert np.isclose(psd_diag["psd_noise_floor"], 10.0 ** psd_diag["log_noise_floor_bpl"])
+    if np.isfinite(psd_diag["log_noise_floor_ls"]):
+        assert np.isclose(psd_diag["psd_noise_floor_ls"], 10.0 ** psd_diag["log_noise_floor_ls"])
 
 
 def test_run_alternating_two_stage_fluxmix_fast_inference_smoke():

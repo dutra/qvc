@@ -704,9 +704,11 @@ def combined_lomb_scargle_from_model(
     ls = LombScargle(t_lag, y, yerr, fit_mean=False)
     P_raw = ls.power(f_raw, normalization=normalization)
 
-    P_noise = np.median(P_raw[f_raw > 1/20])
-
-    P_raw = np.maximum(P_raw - P_noise, 0.0)  # keep non-negative
+    # The additive floor is fit downstream with the broken-PSD model.
+    # Avoid subtracting an empirical high-frequency median here, because it
+    # blends measurement noise with real short-timescale signal and window
+    # leakage.
+    P_noise = np.nan
 
     # Log-binning in f
     fmin, fmax = np.min(f_raw), np.max(f_raw)
@@ -1579,10 +1581,6 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, mags_means, survey_
             2.0 * np.pi * freqs,
             amp_scaling_mode="absolute_gp_normalized",
         )
-        P_noise_med = np.full_like(P_bin_med, P_noise, dtype=float)
-        P_noise_lo = P_noise_med.copy()
-        P_noise_hi = P_noise_med.copy()
-
         # Renormalize data PSD to match model PSD at first bin
         model_at_f0 = np.interp(f_bin[0], freqs, psd_median)
         scale = model_at_f0 / max(P_bin_med[0], 1e-30)
@@ -1590,9 +1588,6 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, mags_means, survey_
         P_bin_med   = P_bin_med   * scale
         P_lo        = P_lo        * scale
         P_hi        = P_hi        * scale
-        P_noise_med = P_noise_med * scale
-        P_noise_lo  = P_noise_lo  * scale
-        P_noise_hi  = P_noise_hi  * scale
 
         ax_psd.errorbar(
             f_bin,
@@ -1608,12 +1603,6 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, mags_means, survey_
             alpha=0.9,
             zorder=5,
             label="Lomb–Scargle PSD",
-        )
-
-        ax_psd.axhline(
-            np.median(P_noise_med),
-            color='gray', linestyle='solid', lw=3,
-            label="Noise floor", zorder=-10
         )
 
         if plot_bpl_fit:
@@ -1660,6 +1649,7 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, mags_means, survey_
             log_tau_bpl_obs = data.get("log_tau_bpl_ref_band")
             alpha_high_bpl = data.get("psd_bpl_alpha_high")
             log_noise_floor_bpl = data.get("log_noise_floor_bpl")
+            psd_noise_floor_bpl = data.get("psd_noise_floor")
             if all(np.isfinite(val) for val in (log_sigma_bpl, log_tau_bpl_obs, alpha_high_bpl)):
                 psd_bpl_fit = _bending_power_law_psd_plot(
                     freqs,
@@ -1677,6 +1667,15 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, mags_means, survey_
                     linestyle=':',
                     label="LS broken-PL fit (GP-normalized)",
                     zorder=4.4,
+                )
+            if np.isfinite(psd_noise_floor_bpl):
+                ax_psd.axhline(
+                    psd_noise_floor_bpl,
+                    color='gray',
+                    linestyle='solid',
+                    lw=3,
+                    label="Noise floor",
+                    zorder=-10,
                 )
 
         tau    = jnp.exp(posterior_median['log_tau_uv'])

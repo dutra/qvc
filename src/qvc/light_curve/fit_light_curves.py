@@ -1123,12 +1123,10 @@ def compute_lomb_scargle_break_diagnostics(model, samples, obj, z, *, n_freq=500
         p_bin_fit_norm = p_bin_norm * scale
         p_lo_fit_norm = p_lo_norm * scale
         p_hi_fit_norm = p_hi_norm * scale
-        p_noise_fit_norm = float(p_noise_norm) * scale if np.isfinite(p_noise_norm) else np.nan
     else:
         p_bin_fit_norm = p_bin_norm
         p_lo_fit_norm = p_lo_norm
         p_hi_fit_norm = p_hi_norm
-        p_noise_fit_norm = float(p_noise_norm) if np.isfinite(p_noise_norm) else np.nan
 
     fit_norm = fit_bending_power_law_psd(f_bin_norm, p_bin_fit_norm, p_lo_fit_norm, p_hi_fit_norm)
     fit_raw = fit_bending_power_law_psd(f_bin_raw, p_bin_raw, p_lo_raw, p_hi_raw)
@@ -1163,6 +1161,16 @@ def compute_lomb_scargle_break_diagnostics(model, samples, obj, z, *, n_freq=500
         else np.nan
     )
     tau_ls_obs = np.power(10.0, log_tau_ls_obs) if np.isfinite(log_tau_ls_obs) else np.nan
+    psd_noise_floor_norm = (
+        np.power(10.0, fit_norm["log_noise_floor_bpl"])
+        if np.isfinite(fit_norm["log_noise_floor_bpl"])
+        else np.nan
+    )
+    psd_noise_floor_raw = (
+        np.power(10.0, fit_raw["log_noise_floor_bpl"])
+        if np.isfinite(fit_raw["log_noise_floor_bpl"])
+        else np.nan
+    )
 
     out = {
         "psd_bpl_ref_band": ref_band,
@@ -1183,7 +1191,7 @@ def compute_lomb_scargle_break_diagnostics(model, samples, obj, z, *, n_freq=500
         "log_tau_uv_rf_bpl_err": log_tau_rf_err,
         "psd_bpl_valid": fit_norm["psd_bpl_valid"],
         "psd_bpl_nbins": fit_norm["psd_bpl_nbins"],
-        "psd_noise_floor": p_noise_fit_norm,
+        "psd_noise_floor": psd_noise_floor_norm,
         "log_sigma_ls": fit_raw["log_sigma_bpl"],
         "log_sigma_ls_err": fit_raw["log_sigma_bpl_err"],
         "sigma_ls": sigma_ls,
@@ -1198,7 +1206,7 @@ def compute_lomb_scargle_break_diagnostics(model, samples, obj, z, *, n_freq=500
         "alpha_high_ls_err": fit_raw["psd_bpl_alpha_high_err"],
         "log_noise_floor_ls": fit_raw["log_noise_floor_bpl"],
         "log_noise_floor_ls_err": fit_raw["log_noise_floor_bpl_err"],
-        "psd_noise_floor_ls": float(p_noise_raw) if np.isfinite(p_noise_raw) else np.nan,
+        "psd_noise_floor_ls": psd_noise_floor_raw,
         "psd_ls_valid": fit_raw["psd_bpl_valid"],
         "psd_ls_nbins": fit_raw["psd_bpl_nbins"],
     }
