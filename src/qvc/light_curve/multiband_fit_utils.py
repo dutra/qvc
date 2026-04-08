@@ -188,6 +188,7 @@ def flatten_per_chain_samples_per_band(samples_per_chain, bands, survey_names=No
     """
     internal_skip_keys = {
         "log_kernel_param",
+        "log_jitter_active",
     }
     flattened_samples = {}
     for k, v in samples_per_chain.items():
@@ -271,6 +272,7 @@ def flatten_flat_samples_per_band(samples_flat, bands, survey_names=None):
     """
     internal_skip_keys = {
         "log_kernel_param",
+        "log_jitter_active",
     }
     flattened_samples = {}
     for k, v in samples_flat.items():
@@ -848,6 +850,7 @@ def process_samples(flat_samples, data, bands, percentiles=[16, 50, 84]):
         "log_sigma_center0",
         "log_tau_slow_center0",
         "log_tau_fast_center0",
+        "log_jitter_active",
     }
     internal_skip_prefixes = (
         "dlog_amp_blr_raw",

@@ -149,7 +149,10 @@ POSTERIOR_PLOT_KEY_GROUPS = {
 def _posterior_plot_labels(samples_flat):
     """Return an ordered curated subset of posterior keys for diagnostic plots."""
 
-    all_labels = list(samples_flat.keys())
+    internal_skip_keys = {
+        "log_jitter_active",
+    }
+    all_labels = [label for label in samples_flat.keys() if label not in internal_skip_keys]
     selected = []
     seen = set()
 
