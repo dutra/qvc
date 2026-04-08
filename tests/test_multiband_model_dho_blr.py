@@ -74,6 +74,37 @@ def test_make_multiband_dho_blr_model_random_data():
     assert np.all(np.isfinite(np.asarray(stationary)))
     assert np.all(np.isfinite(np.asarray(transition)))
     assert np.all(np.isfinite(np.asarray(obs)))
+    assert not np.allclose(
+        np.asarray(stationary)[:n_band, n_band:],
+        0.0,
+        atol=1e-10,
+    )
+
+
+def test_exact_overdamped_sho_base_kernel_matches_unit_rms_covariance():
+    tau_fast = jnp.asarray([10.0], dtype=float)
+    tau_slow = jnp.asarray([100.0], dtype=float)
+    kernel = OverdampedSHOBaseQS(tau_fast=tau_fast, tau_slow=tau_slow)
+
+    P = np.asarray(kernel.stationary_covariance(), dtype=float)
+    h0 = np.asarray(kernel.observation_model((jnp.array(0.0), jnp.array(0))), dtype=float)
+    phi = np.asarray(
+        kernel.transition_matrix(
+            (jnp.array(0.0), jnp.array(0)),
+            (jnp.array(25.0), jnp.array(0)),
+        ),
+        dtype=float,
+    )
+    cov0 = float(h0 @ P @ h0)
+    cov25 = float(h0 @ phi @ P @ h0)
+    rho = float(tau_fast[0] / tau_slow[0])
+    expected25 = (
+        np.exp(-25.0 / float(tau_slow[0]))
+        - rho * np.exp(-25.0 / float(tau_fast[0]))
+    ) / (1.0 - rho)
+
+    assert np.isclose(cov0, 1.0, rtol=1e-6, atol=1e-8)
+    assert np.isclose(cov25, expected25, rtol=1e-6, atol=1e-8)
 
 
 def test_linearized_wrapper_matches_relflux_wrapper_shape():

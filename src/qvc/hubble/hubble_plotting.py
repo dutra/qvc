@@ -165,10 +165,10 @@ def _derive_log_sigma_bc(df_agn):
     if "log_sigma_bc" in df_agn.columns:
         return pd.to_numeric(df_agn["log_sigma_bc"], errors="coerce").to_numpy(dtype=float)
 
-    if {"log_sigma_uv", "log_amp_delta_bc"}.issubset(df_agn.columns):
+    if {"log_sigma_uv", "dlog_amp_bc"}.issubset(df_agn.columns):
         log_sigma_uv = pd.to_numeric(df_agn["log_sigma_uv"], errors="coerce").to_numpy(dtype=float)
-        log_amp_delta_bc = pd.to_numeric(df_agn["log_amp_delta_bc"], errors="coerce").to_numpy(dtype=float)
-        return log_sigma_uv + log_amp_delta_bc
+        dlog_amp_bc = pd.to_numeric(df_agn["dlog_amp_bc"], errors="coerce").to_numpy(dtype=float)
+        return log_sigma_uv + dlog_amp_bc
 
     rows = []
     for band in ("u", "g", "r", "i", "z"):
@@ -361,7 +361,7 @@ def _blr_line_assignment_longform(
     for suffix in ("", "2"):
         component = 1 if suffix == "" else 2
         for band in ("u", "g", "r", "i", "z"):
-            amp_col = f"log_amp_delta_blr{suffix}_{band}"
+            amp_col = f"dlog_amp_blr{suffix}_{band}"
             lag_col = f"log_lag_blr{suffix}_{band}_RF"
             lag_err_col = f"{lag_col}_err"
             if amp_col not in df.columns or lag_col not in df.columns:
@@ -2953,7 +2953,7 @@ def plot_blr_lag_vs_amp_by_band(df, plot_path="plots/hubble", show=False, lag_su
     UV-reference continuum amplitude.
     """
     suffix = str(lag_suffix or "")
-    amp_delta_prefix = f"log_amp_delta_blr{suffix}_"
+    amp_delta_prefix = f"dlog_amp_blr{suffix}_"
     lag_prefix = f"log_lag_blr{suffix}_"
     lag_rf_prefix = f"log_lag_blr{suffix}_"
 
@@ -3212,7 +3212,7 @@ def plot_blr_lag_vs_redshift_by_band(df, plot_path="plots/hubble", show=False, l
 def plot_blr_amp_vs_redshift_by_band(df, plot_path="plots/hubble", show=False, lag_suffix="", filename=None):
     """Plot inferred BLR amplitude against redshift in each band."""
     suffix = str(lag_suffix or "")
-    amp_delta_prefix = f"log_amp_delta_blr{suffix}_"
+    amp_delta_prefix = f"dlog_amp_blr{suffix}_"
 
     bands = [
         band
@@ -5964,7 +5964,7 @@ def plot_full_residuals(
     keys = [col for col in [
         'log_f_lines',
         'f_PL', 'log_f_PL',
-        'log_amp_delta_bc', 
+        'dlog_amp_bc', 
         'frac_bc_2500', 'log_frac_bc_2500',
         'log_reddening_ebv',
         'ebv_mw', 'log_ebv_mw',
@@ -5997,13 +5997,13 @@ def plot_full_residuals(
         #'alphaOX', 'alphaOX_int',
         #'bwb_alpha_u', 'bwb_alpha_g', 'bwb_alpha_r', 'bwb_alpha_i', 'bwb_alpha_z',
         'eta_sigma', 'eta_tau',
-        'log_amp_delta_bc',
+        'dlog_amp_bc',
         #'PL_slope_blue', 'lam_min', 'lam_max', 'lam_range', 
-        #'poly1', 'psf_minus_fiber_r', 'log_psf_minus_fiber_r', 'petroRad_r', 'log_petroRad_r',
+        #'linear_trend', 'psf_minus_fiber_r', 'log_psf_minus_fiber_r', 'petroRad_r', 'log_petroRad_r',
         #'cadence', 'number_points',
         #'log_jitter_total',
-        'log_amp_delta_blr_total',
-        'log_amp_delta_blr_u', 'log_amp_delta_blr_g', 'log_amp_delta_blr_r', 'log_amp_delta_blr_i', 'log_amp_delta_blr_z',
+        'dlog_amp_blr_total',
+        'dlog_amp_blr_u', 'dlog_amp_blr_g', 'dlog_amp_blr_r', 'dlog_amp_blr_i', 'dlog_amp_blr_z',
         'log_igm_transmission_band_u', 'log_igm_transmission_band_g', 'log_igm_transmission_band_r', 'log_igm_transmission_band_i', 'log_igm_transmission_band_z',
         #'log_jitter_u', 'log_jitter_g', 'log_jitter_r', 'log_jitter_i', 'log_jitter_z',
 
@@ -8091,7 +8091,7 @@ def plot_sigma_bc_vs_redshift(
     if log_sigma_bc is None:
         raise KeyError(
             "Missing required BC amplitude columns: need "
-            "'log_sigma_uv'+'log_amp_delta_bc' or per-band 'amp_bc_<band>' with 'bc_weight_<band>'."
+            "'log_sigma_uv'+'dlog_amp_bc' or per-band 'amp_bc_<band>' with 'bc_weight_<band>'."
         )
 
     z = pd.to_numeric(df_agn["z"], errors="coerce").to_numpy(dtype=float)
@@ -8248,7 +8248,7 @@ def plot_sigma_bc_vs_frac_bc(
     if log_sigma_bc is None:
         raise KeyError(
             "Missing required BC amplitude columns: need "
-            "'log_sigma_uv'+'log_amp_delta_bc' or per-band 'amp_bc_<band>' with 'bc_weight_<band>'."
+            "'log_sigma_uv'+'dlog_amp_bc' or per-band 'amp_bc_<band>' with 'bc_weight_<band>'."
         )
 
     f_bc = pd.to_numeric(df_agn["f_bc_3000"], errors="coerce").to_numpy(dtype=float)

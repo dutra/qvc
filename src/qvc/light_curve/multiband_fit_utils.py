@@ -767,13 +767,10 @@ def ordered_dho_taus(tau_fast, tau_slow, *, eps=1e-12):
 
 
 def dho_stationary_variance_factor(tau_fast, tau_slow, *, eps=1e-12):
-    """Variance factor of the observed overdamped-SHO process at zero lag."""
+    """Variance factor of the exact unit-RMS overdamped-SHO process at zero lag."""
 
     fast, slow = ordered_dho_taus(tau_fast, tau_slow, eps=eps)
-    denom = np.maximum(slow - fast, eps)
-    c_fast = -fast / denom
-    c_slow = slow / denom
-    return np.square(c_fast) + np.square(c_slow)
+    return np.ones_like(np.broadcast_arrays(fast, slow)[0], dtype=float)
 
 
 def regularize_cov_from_percentiles(x16, x84, y16, y84, cov_xy, eps=1e-8):
@@ -835,8 +832,8 @@ def process_samples(flat_samples, data, bands, percentiles=[16, 50, 84]):
         "log_tau_fast_center0",
     }
     internal_skip_prefixes = (
-        "log_amp_delta_blr_raw",
-        "log_amp_delta_blr2_raw",
+        "dlog_amp_blr_raw",
+        "dlog_amp_blr2_raw",
         "log_lag_blr_raw",
         "log_lag_blr2_raw",
     )

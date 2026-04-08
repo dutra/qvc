@@ -456,7 +456,7 @@ def test_plot_sigma_bc_vs_redshift_writes_pdf(tmp_path, monkeypatch):
         {
             "z": np.linspace(0.4, 2.4, 24),
             "log_sigma_uv": np.linspace(-1.0, -0.3, 24),
-            "log_amp_delta_bc": np.linspace(-0.5, -0.2, 24),
+            "dlog_amp_bc": np.linspace(-0.5, -0.2, 24),
         }
     )
 
@@ -527,7 +527,7 @@ def test_plot_sigma_bc_vs_frac_bc_writes_pdf(tmp_path, monkeypatch):
             "z": np.linspace(0.4, 2.4, 24),
             "f_bc_3000": np.linspace(0.05, 0.35, 24),
             "log_sigma_uv": np.linspace(-1.0, -0.3, 24),
-            "log_amp_delta_bc": np.linspace(-0.5, -0.2, 24),
+            "dlog_amp_bc": np.linspace(-0.5, -0.2, 24),
         }
     )
 
@@ -608,7 +608,7 @@ def test_plot_blr_line_lags_vs_l2500_fiducial_writes_pdf(tmp_path, monkeypatch):
             "apparent_mag_2500": [20.5, 20.0, 19.5, 19.0],
             "log_sigma_uv": [-0.7, -0.8, -0.9, -1.0],
             "dropped_bands": [[], [], [], []],
-            "log_amp_delta_blr_g": [0.0, 0.0, 0.0, 0.0],
+            "dlog_amp_blr_g": [0.0, 0.0, 0.0, 0.0],
             "log_lag_blr_g_RF": [1.15, 1.32, 1.52, 1.70],
             "log_lag_blr_g_RF_err": [0.1, 0.1, 0.1, 0.1],
         }
@@ -637,7 +637,7 @@ def test_plot_blr_line_lags_vs_l2500_fiducial_filters_negative_and_prior_like_la
             "apparent_mag_2500": [20.5, 20.2, 20.1],
             "log_sigma_uv": [-0.7, -0.8, -0.9],
             "dropped_bands": [[], [], []],
-            "log_amp_delta_blr_g": [0.0, 0.0, 0.0],
+            "dlog_amp_blr_g": [0.0, 0.0, 0.0],
             "log_lag_blr_g_RF": [1.15, -0.10, 1.20],
             "log_lag_blr_g_RF_err": [0.1, 0.1, 0.1],
             "log_lag_blr_g_kl": [0.20, 0.20, 0.01],
@@ -831,7 +831,7 @@ def test_blr_line_assignment_uses_visibility_only():
             "z": [1.0],
             "dropped_bands": [[]],
             "log_sigma_uv": [-1.0],
-            "log_amp_delta_blr_g": [0.0],
+            "dlog_amp_blr_g": [0.0],
             "log_lag_blr_g_RF": [100.0],
             "log_lag_blr_g_RF_err": [0.1],
         }
@@ -856,10 +856,10 @@ def test_blr_line_assignment_uses_fit_spectra_line_specific_luminosities():
             "z": [2.0, 0.8, 0.0, 0.0],
             "dropped_bands": [[], [], [], []],
             "log_sigma_uv": [-1.0, -1.0, -1.0, -1.0],
-            "log_amp_delta_blr_g": [0.0, 0.0, 0.0, np.nan],
+            "dlog_amp_blr_g": [0.0, 0.0, 0.0, np.nan],
             "log_lag_blr_g_RF": [1.0, 1.1, 1.2, np.nan],
             "log_lag_blr_g_RF_err": [0.1, 0.1, 0.1, np.nan],
-            "log_amp_delta_blr_r": [np.nan, np.nan, np.nan, 0.0],
+            "dlog_amp_blr_r": [np.nan, np.nan, np.nan, 0.0],
             "log_lag_blr_r_RF": [np.nan, np.nan, np.nan, 1.3],
             "log_lag_blr_r_RF_err": [np.nan, np.nan, np.nan, 0.2],
             "log_lambda_Llambda_1350_agn": [45.1, 45.2, 45.3, 45.4],
@@ -917,7 +917,7 @@ def test_build_single_object_model_disables_second_blr_term_by_default():
         obj,
         lam_rf,
         log_jitter_mean=jnp.array(log_jitter_mean),
-        disable_poly1=False,
+        disable_linear_trend=False,
         disable_lag_blr=False,
         drop_band_lyman_alpha=False,
         tau_fast_truncated=False,
@@ -927,11 +927,11 @@ def test_build_single_object_model_disables_second_blr_term_by_default():
     model_trace = trace(seed(model, random.PRNGKey(0))).get_trace()
     assert "log_amp_ratio_blr_raw" in model_trace
     assert "delta_log_lag_blr_raw" in model_trace
-    assert "log_amp_delta_bc" in model_trace
+    assert "dlog_amp_bc" in model_trace
     assert "log_lag_ratio_bc_to_blr" in model_trace
     assert "log_amp_ratio_blr2_raw" not in model_trace
     assert "delta_log_lag_blr2_raw" not in model_trace
-    assert np.allclose(np.asarray(model_trace["log_amp_delta_blr2"]["value"]), -9.0)
+    assert np.allclose(np.asarray(model_trace["dlog_amp_blr2"]["value"]), -9.0)
     assert np.allclose(np.asarray(model_trace["log_lag_blr2"]["value"]), -9.0)
 
 
@@ -960,7 +960,7 @@ def test_build_single_object_model_mag_flux_linearized_smoke():
         obj,
         lam_rf,
         log_jitter_mean=jnp.array(log_jitter_mean),
-        disable_poly1=False,
+        disable_linear_trend=False,
         disable_lag_blr=False,
         disable_lag_bc=False,
         drop_band_lyman_alpha=False,
@@ -1022,7 +1022,7 @@ def test_build_single_object_model_mag_flux_linearized_rejects_second_blr_term()
             obj,
             lam_rf,
             log_jitter_mean=jnp.array(log_jitter_mean),
-            disable_poly1=False,
+            disable_linear_trend=False,
             disable_lag_blr=False,
             disable_lag_bc=False,
             drop_band_lyman_alpha=False,
@@ -1056,7 +1056,7 @@ def test_build_single_object_model_continuum_only_smoke():
         obj,
         lam_rf,
         log_jitter_mean=jnp.array(log_jitter_mean),
-        disable_poly1=False,
+        disable_linear_trend=False,
         drop_band_lyman_alpha=False,
         tau_fast_truncated=False,
     )
@@ -1120,7 +1120,7 @@ def test_run_two_stage_fluxmix_fast_inference_smoke():
         progress_bar=False,
         dense_mass=False,
         max_tree_depth=1,
-        disable_poly1=False,
+        disable_linear_trend=False,
         disable_lag_blr=False,
         disable_lag_bc=False,
         drop_band_lyman_alpha=False,
@@ -1198,7 +1198,7 @@ def test_run_alternating_two_stage_fluxmix_fast_inference_smoke():
         progress_bar=False,
         dense_mass=False,
         max_tree_depth=1,
-        disable_poly1=False,
+        disable_linear_trend=False,
         disable_lag_blr=False,
         disable_lag_bc=False,
         drop_band_lyman_alpha=False,
@@ -1229,7 +1229,7 @@ def test_fluxmix_stage2_eta_sigma_recomputes_continuum_and_line_ratios():
         log_tau_fast_center0=jnp.log(10.0),
         log_sigma_center0=jnp.log(0.1),
         lambda_center_rf=lambda_center_rf,
-        poly1=0.0,
+        linear_trend=0.0,
         mean=jnp.zeros(2, dtype=float),
         log_jitter=jnp.full(2, -4.0, dtype=float),
         lag0=jnp.asarray(5.0),
@@ -1237,11 +1237,11 @@ def test_fluxmix_stage2_eta_sigma_recomputes_continuum_and_line_ratios():
         log_igm_transmission_band=jnp.zeros(2, dtype=float),
         eta_sigma=jnp.asarray(-0.5),
         eta_tau=jnp.asarray(0.2),
-        log_amp_delta_blr=jnp.array([-0.3, -0.2], dtype=float),
+        dlog_amp_blr=jnp.array([-0.3, -0.2], dtype=float),
         log_lag_blr=jnp.log(jnp.array([50.0, 60.0], dtype=float)),
-        log_amp_delta_blr2=jnp.full(2, -9.0, dtype=float),
+        dlog_amp_blr2=jnp.full(2, -9.0, dtype=float),
         log_lag_blr2=jnp.full(2, -9.0, dtype=float),
-        log_amp_delta_bc=jnp.asarray(-0.8),
+        dlog_amp_bc=jnp.asarray(-0.8),
         log_lag_ratio_bc_to_blr=jnp.log(0.2),
     )
     raw_shifted = dict(raw_base)
@@ -1303,7 +1303,7 @@ def test_save_combined_plot_fluxmix_handles_singleton_sample_entries(monkeypatch
         progress_bar=False,
         dense_mass=False,
         max_tree_depth=1,
-        disable_poly1=False,
+        disable_linear_trend=False,
         disable_lag_blr=False,
         disable_lag_bc=False,
         drop_band_lyman_alpha=False,
@@ -1366,7 +1366,7 @@ def test_fluxmix_saved_samples_preserve_stage1_basis_for_rebuild():
         progress_bar=False,
         dense_mass=False,
         max_tree_depth=1,
-        disable_poly1=False,
+        disable_linear_trend=False,
         disable_lag_blr=False,
         disable_lag_bc=False,
         drop_band_lyman_alpha=False,
@@ -1422,7 +1422,7 @@ def test_build_single_object_model_mag_fluxmix_stage2_rejects_second_blr_term():
         log_tau_fast_center0=jnp.log(10.0),
         log_sigma_center0=jnp.log(0.1),
         lambda_center_rf=jnp.exp(jnp.mean(jnp.log(lam_rf))),
-        poly1=0.0,
+        linear_trend=0.0,
         mean=jnp.zeros(len(bands)),
         log_jitter=jnp.full(len(bands), -4.0),
         lag0=jnp.asarray(5.0),
@@ -1573,7 +1573,7 @@ def test_end_to_end(tmp_path, monkeypatch):
         obj,
         lam_rf,
         log_jitter_mean=jnp.array(log_jitter_mean),
-        disable_poly1=False,
+        disable_linear_trend=False,
         disable_lag_blr=False,
         drop_band_lyman_alpha=False,
         tau_fast_truncated=False,
@@ -1632,13 +1632,13 @@ def test_end_to_end(tmp_path, monkeypatch):
         "log_sigma_uv_std_psd": float(result["log_sigma_uv_std_psd"]),
         "log_tau_uv_rf_std_psd": float(result["log_tau_uv_rf_std_psd"]),
         "log_jitter_u": -9.0,
-        "log_amp_delta_blr_u": -9.0,
+        "dlog_amp_blr_u": -9.0,
         "log_jitter_g": float(np.percentile(flat_per_band["log_jitter_g"], 50)),
         "log_jitter_r": float(np.percentile(flat_per_band["log_jitter_r"], 50)),
         "log_jitter_i": float(np.percentile(flat_per_band["log_jitter_i"], 50)),
-        "log_amp_delta_blr_g": float(np.percentile(flat_per_band["log_amp_delta_blr_g"], 50)),
-        "log_amp_delta_blr_r": float(np.percentile(flat_per_band["log_amp_delta_blr_r"], 50)),
-        "log_amp_delta_blr_i": float(np.percentile(flat_per_band["log_amp_delta_blr_i"], 50)),
+        "dlog_amp_blr_g": float(np.percentile(flat_per_band["dlog_amp_blr_g"], 50)),
+        "dlog_amp_blr_r": float(np.percentile(flat_per_band["dlog_amp_blr_r"], 50)),
+        "dlog_amp_blr_i": float(np.percentile(flat_per_band["dlog_amp_blr_i"], 50)),
     }
     quasar.update(adf_result)
     quasar.update(drift_result)

@@ -18,6 +18,8 @@ from qvc.light_curve.fit_light_curves import (
     build_explicit_model_params,
     bending_power_law_psd,
     compute_band_igm_transmission,
+    compute_igm_transmission_obs_wave,
+    compute_igm_transmission_rest_wave,
     compute_lam_lya_suppression_rf,
     compute_structure_function_diagnostics,
     compute_band_adf,
@@ -43,8 +45,8 @@ def _make_raw_public(n_band):
         "eta_sigma": jnp.array(-0.55),
         "eta_tau": jnp.array(0.25),
         "log_igm_transmission_band": jnp.zeros((n_band,), dtype=float),
-        "log_amp_delta_blr": jnp.full((n_band,), -1.0),
-        "log_amp_delta_blr2": jnp.full((n_band,), -1.5),
+        "dlog_amp_blr": jnp.full((n_band,), -1.0),
+        "dlog_amp_blr2": jnp.full((n_band,), -1.5),
         "log_lag_blr": jnp.full((n_band,), np.log(20.0)),
         "log_lag_blr2": jnp.full((n_band,), np.log(60.0)),
         "lag0": jnp.array(5.0),
@@ -114,8 +116,8 @@ def test_build_explicit_model_params_internal_and_public_forms_are_equivalent():
         "lambda_center_rf": explicit_public["lambda_center_rf"],
         "eta_sigma": jnp.array(-0.55),
         "eta_tau": jnp.array(0.25),
-        "log_amp_delta_blr": jnp.full((len(lam_rf),), -1.0),
-        "log_amp_delta_blr2": jnp.full((len(lam_rf),), -1.5),
+        "dlog_amp_blr": jnp.full((len(lam_rf),), -1.0),
+        "dlog_amp_blr2": jnp.full((len(lam_rf),), -1.5),
         "log_lag_blr": jnp.full((len(lam_rf),), np.log(20.0)),
         "log_lag_blr2": jnp.full((len(lam_rf),), np.log(60.0)),
         "lag0": jnp.array(5.0),
@@ -151,9 +153,9 @@ def test_build_explicit_model_params_centers_disk_lag_on_geometric_mean():
 
 
 def test_compute_band_igm_transmission_suppresses_u_more_than_redder_bands():
-    transmission = np.asarray(compute_band_igm_transmission(["u", "g", "r", "i"], 1.0), dtype=float)
+    transmission = np.asarray(compute_band_igm_transmission(["u", "g", "r", "i"], 3.0), dtype=float)
     assert transmission[0] < transmission[1] < transmission[2] <= transmission[3]
-    assert transmission[0] > 0.8
+    assert transmission[0] < 0.6
     assert transmission[2] > 0.99
 
 
@@ -169,6 +171,16 @@ def test_build_explicit_model_params_applies_log_igm_transmission_band_exactly()
     assert np.allclose(ratio, np.array([0.25, 0.5, 0.9]))
 
 
+def test_compute_igm_transmission_rest_wave_matches_observed_wave_conversion():
+    rest_wave = np.array([900.0, 1216.0, 1500.0], dtype=float)
+    z = 2.0
+
+    rest_eval = np.asarray(compute_igm_transmission_rest_wave(rest_wave, z), dtype=float)
+    obs_eval = np.asarray(compute_igm_transmission_obs_wave(rest_wave * (1.0 + z), z), dtype=float)
+
+    assert np.allclose(rest_eval, obs_eval)
+
+
 def test_compute_lam_lya_suppression_rf_turns_on_u_band_near_z_one_point_five():
     low_z = np.asarray(compute_lam_lya_suppression_rf(["u"], 1.4), dtype=float)
     high_z = np.asarray(compute_lam_lya_suppression_rf(["u"], 1.6), dtype=float)
@@ -179,9 +191,11 @@ def test_compute_lam_lya_suppression_rf_turns_on_u_band_near_z_one_point_five():
     assert high_z[0] < 1216.0
     low_u = float(np.asarray(compute_band_igm_transmission(["u"], 1.4), dtype=float)[0])
     high_u = float(np.asarray(compute_band_igm_transmission(["u"], 1.6), dtype=float)[0])
-    assert low_u > high_u
-    assert low_u > 0.2
-    assert high_u < 0.2
+    very_high_u = float(np.asarray(compute_band_igm_transmission(["u"], 3.0), dtype=float)[0])
+    assert low_u > high_u > very_high_u
+    assert low_u > 0.99
+    assert high_u > 0.99
+    assert very_high_u < 0.6
 
 
 def test_balmer_continuum_weight_transitions_smoothly_across_3646():
@@ -197,7 +211,7 @@ def test_balmer_continuum_weight_transitions_smoothly_across_3646():
 def test_build_explicit_model_params_smoothly_weights_bc_amplitude_but_not_bc_lag():
     lam_rf = jnp.array([3200.0, 3646.0, 3900.0, 4500.0])
     raw = _make_raw_public(len(lam_rf))
-    raw["log_amp_delta_bc"] = jnp.array(-0.4)
+    raw["dlog_amp_bc"] = jnp.array(-0.4)
     raw["log_lag_ratio_bc_to_blr"] = jnp.array(np.log(0.2))
     raw["log_lag_blr"] = jnp.log(jnp.array([20.0, 30.0, 40.0, 50.0]))
 
@@ -206,7 +220,7 @@ def test_build_explicit_model_params_smoothly_weights_bc_amplitude_but_not_bc_la
     bc_weight = np.asarray(balmer_continuum_weight(lam_rf))
     amp_bc = np.asarray(explicit["amp_bc"])
     lag_bc = np.asarray(explicit["lag_bc"])
-    expected_base_amp = np.exp(float(raw["log_sigma_uv"] + raw["log_amp_delta_bc"]))
+    expected_base_amp = np.exp(float(raw["log_sigma_uv"] + raw["dlog_amp_bc"]))
     expected_lag_bc = 0.2 * np.exp(np.mean(np.log(np.array([20.0, 30.0, 40.0, 50.0]))))
 
     assert np.allclose(amp_bc, expected_base_amp * bc_weight)
@@ -317,22 +331,22 @@ def test_compute_parameter_kls_ignores_nonfinite_conditioning_samples():
         "log_sigma_center0": np.array([-1.0, -0.9, -0.8, -0.85]),
         "log_tau_slow_center0": np.array([5.0, 5.1, 5.2, 5.15]),
         "log_tau_fast_center0": np.array([2.3, 2.4, 2.5, 2.45]),
-        "poly1": np.array([0.0, 0.01, -0.01, 0.02]),
+        "linear_trend": np.array([0.0, 0.01, -0.01, 0.02]),
         "lag0": np.array([5.0, 5.5, 4.5, 5.2]),
         "lag_beta": np.array([1.2, 1.4, 1.3, 1.35]),
         "mean_g": np.array([0.0, 0.02, -0.01, 0.01]),
         "mean_r": np.array([0.0, 0.01, -0.02, 0.02]),
         "log_jitter_g": np.array([-3.0, -2.9, -3.1, -3.05]),
         "log_jitter_r": np.array([-3.1, -3.0, -3.2, -3.05]),
-        "log_amp_delta_blr_g": np.array([-1.0, -0.9, -1.1, -1.05]),
-        "log_amp_delta_blr_r": np.array([-1.2, -1.1, -1.3, -1.25]),
-        "log_amp_delta_blr2_g": np.array([-1.5, -1.4, -1.6, -1.55]),
-        "log_amp_delta_blr2_r": np.array([-1.7, -1.6, -1.8, -1.75]),
+        "dlog_amp_blr_g": np.array([-1.0, -0.9, -1.1, -1.05]),
+        "dlog_amp_blr_r": np.array([-1.2, -1.1, -1.3, -1.25]),
+        "dlog_amp_blr2_g": np.array([-1.5, -1.4, -1.6, -1.55]),
+        "dlog_amp_blr2_r": np.array([-1.7, -1.6, -1.8, -1.75]),
         "log_lag_blr_g": np.array([3.0, 3.1, 3.2, 3.15]),
         "log_lag_blr_r": np.array([3.1, 3.2, 3.3, 3.25]),
         "log_lag_blr2_g": np.array([4.0, 4.1, 4.2, 4.15]),
         "log_lag_blr2_r": np.array([4.1, 4.2, 4.3, 4.25]),
-        "log_amp_delta_bc": np.array([-1.1, -1.0, -0.9, -1.05]),
+        "dlog_amp_bc": np.array([-1.1, -1.0, -0.9, -1.05]),
         "log_lag_ratio_bc_to_blr": np.array([np.log(0.15), np.log(0.2), np.log(0.25), np.log(0.22)]),
     }
 
@@ -342,7 +356,7 @@ def test_compute_parameter_kls_ignores_nonfinite_conditioning_samples():
         z=1.5,
         lambda_center_rf=2500.0,
         log_jitter_mean=np.array([-3.0, -3.1]),
-        disable_poly1=False,
+        disable_linear_trend=False,
         disable_lag_blr=False,
         disable_lag_bc=False,
         drop_band_lyman_alpha=False,
@@ -444,13 +458,7 @@ def test_process_samples_keeps_uv_outputs_at_2500_and_stores_band_metadata():
     tau_band_g_rf = np.power(10.0, log_tau_band_g_rf)
     tau_fast_band_g_rf = np.power(10.0, log_tau_fast_band_g_rf)
     expected_sigma_rms_g = np.percentile(
-        np.log10(
-            np.power(10.0, log_sigma_band_g)
-            * np.sqrt(
-                (tau_fast_band_g_rf**2 + tau_band_g_rf**2)
-                / (tau_band_g_rf - tau_fast_band_g_rf) ** 2
-            )
-        ),
+        log_sigma_band_g,
         50,
     )
     assert np.isclose(result["log_sigma_rms_band_g"], expected_sigma_rms_g)
@@ -494,22 +502,22 @@ def test_compute_parameter_kls_returns_expected_keys():
         "log_sigma_center0": rng.normal(np.log(0.2), 0.2, size=n),
         "log_tau_slow_center0": rng.normal(np.log(300.0), 0.3, size=n),
         "log_tau_fast_center0": rng.normal(np.log(30.0), 0.2, size=n),
-        "poly1": rng.normal(0.0, 0.05, size=n),
+        "linear_trend": rng.normal(0.0, 0.05, size=n),
         "lag0": np.abs(rng.normal(5.0, 1.0, size=n)),
         "lag_beta": np.abs(rng.normal(4.0 / 3.0, 0.1, size=n)),
         "mean_g": rng.normal(0.0, 0.05, size=n),
         "mean_r": rng.normal(0.0, 0.05, size=n),
         "log_jitter_g": rng.normal(np.log(0.03), 0.1, size=n),
         "log_jitter_r": rng.normal(np.log(0.03), 0.1, size=n),
-        "log_amp_delta_blr_g": rng.normal(-1.0, 0.2, size=n),
-        "log_amp_delta_blr_r": rng.normal(-1.0, 0.2, size=n),
-        "log_amp_delta_blr2_g": rng.normal(-1.2, 0.2, size=n),
-        "log_amp_delta_blr2_r": rng.normal(-1.2, 0.2, size=n),
+        "dlog_amp_blr_g": rng.normal(-1.0, 0.2, size=n),
+        "dlog_amp_blr_r": rng.normal(-1.0, 0.2, size=n),
+        "dlog_amp_blr2_g": rng.normal(-1.2, 0.2, size=n),
+        "dlog_amp_blr2_r": rng.normal(-1.2, 0.2, size=n),
         "log_lag_blr_g": rng.normal(np.log(20.0), 0.2, size=n),
         "log_lag_blr_r": rng.normal(np.log(25.0), 0.2, size=n),
         "log_lag_blr2_g": rng.normal(np.log(70.0), 0.2, size=n),
         "log_lag_blr2_r": rng.normal(np.log(80.0), 0.2, size=n),
-        "log_amp_delta_bc": rng.normal(-1.1, 0.2, size=n),
+        "dlog_amp_bc": rng.normal(-1.1, 0.2, size=n),
         "log_lag_ratio_bc_to_blr": rng.uniform(np.log(0.1), np.log(0.3), size=n),
     }
 
@@ -535,9 +543,9 @@ def test_compute_parameter_kls_returns_expected_keys():
         "mean_r_kl",
         "log_jitter_g_kl",
         "log_jitter_r_kl",
-        "log_amp_delta_blr_g_kl",
-        "log_amp_delta_blr2_g_kl",
-        "log_amp_delta_bc_kl",
+        "dlog_amp_blr_g_kl",
+        "dlog_amp_blr2_g_kl",
+        "dlog_amp_bc_kl",
         "log_lag_blr_g_kl",
         "log_lag_blr2_g_kl",
         "log_lag_ratio_bc_to_blr_kl",
@@ -557,14 +565,14 @@ def test_compute_parameter_kls_uses_relflux_sigma_center0_when_requested():
         "log_sigma_center0_relflux": rng.normal(np.log(0.15), 0.15, size=n),
         "log_tau_slow_center0": rng.normal(np.log(300.0), 0.3, size=n),
         "log_tau_fast_center0": rng.normal(np.log(30.0), 0.2, size=n),
-        "poly1": rng.normal(0.0, 0.05, size=n),
+        "linear_trend": rng.normal(0.0, 0.05, size=n),
         "lag0": np.abs(rng.normal(5.0, 1.0, size=n)),
         "lag_beta": np.abs(rng.normal(4.0 / 3.0, 0.1, size=n)),
         "mean_g": rng.normal(0.0, 0.05, size=n),
         "log_jitter_g": rng.normal(np.log(0.03), 0.1, size=n),
-        "log_amp_delta_blr_g": rng.normal(-1.0, 0.2, size=n),
+        "dlog_amp_blr_g": rng.normal(-1.0, 0.2, size=n),
         "log_lag_blr_g": rng.normal(np.log(20.0), 0.2, size=n),
-        "log_amp_delta_bc": rng.normal(-1.1, 0.2, size=n),
+        "dlog_amp_bc": rng.normal(-1.1, 0.2, size=n),
         "log_lag_ratio_bc_to_blr": rng.uniform(np.log(0.1), np.log(0.3), size=n),
     }
 
@@ -588,7 +596,7 @@ def test_posterior_median_mean_function_uses_global_time_normalization():
     t_ref = np.array([0.0, 10.0, 20.0], dtype=float)
     flat_samples = {
         "mean_g": np.array([0.8, 1.0, 1.2], dtype=float),
-        "poly1": np.array([0.1, 0.2, 0.3], dtype=float),
+        "linear_trend": np.array([0.1, 0.2, 0.3], dtype=float),
     }
 
     got = posterior_median_mean_function(flat_samples, t_eval, "g", t_ref=t_ref)
@@ -705,9 +713,9 @@ def test_compute_structure_function_diagnostics_returns_finite_sensible_g_band_f
     assert np.isfinite(result["log_tau_sf_model_ref_band"])
     assert result["log_sigma_sf_ref_band"] > np.log10(np.median(samples["amp_cont_g"]))
     assert np.isclose(
-        result["log_sigma_sf_ref_band"],
         result["log_sigma_sf_model_ref_band"],
-        atol=0.5,
+        np.log10(np.median(samples["amp_cont_g"])),
+        atol=0.15,
     )
     assert result["log_tau_sf_model_ref_band"] < np.log10(np.median(samples["tau_slow_g"]))
 
@@ -726,7 +734,7 @@ def test_compute_object_adf_diagnostics_returns_per_band_fields():
     flat_samples = {
         "mean_g": np.array([0.0, 0.1, 0.0], dtype=float),
         "mean_r": np.array([0.0, -0.1, 0.0], dtype=float),
-        "poly1": np.array([0.0, 0.01, 0.0], dtype=float),
+        "linear_trend": np.array([0.0, 0.01, 0.0], dtype=float),
     }
 
     result = compute_object_adf_diagnostics(flat_samples, obj, ["g", "r"])
@@ -767,7 +775,7 @@ def test_compute_g_band_residual_drift_diagnostics_returns_finite_positive_slope
     }
     flat_samples = {
         "mean_g": np.array([0.0, 0.0, 0.0], dtype=float),
-        "poly1": np.array([0.0, 0.0, 0.0], dtype=float),
+        "linear_trend": np.array([0.0, 0.0, 0.0], dtype=float),
     }
 
     result = compute_g_band_residual_drift_diagnostics(
@@ -816,7 +824,7 @@ def test_compute_g_band_raw_drift_diagnostics_returns_finite_positive_mean_slope
     }
     flat_samples = {
         "mean_g": np.array([19.0, 19.0, 19.0], dtype=float),
-        "poly1": np.array([0.0, 0.0, 0.0], dtype=float),
+        "linear_trend": np.array([0.0, 0.0, 0.0], dtype=float),
     }
 
     result = compute_g_band_raw_drift_diagnostics(

@@ -834,14 +834,14 @@ def save_color_magnitude_plot(
     cm_params = dict(posterior_median)
     if "lag0" in cm_params:
         cm_params["lag0"] = np.zeros_like(np.asarray(cm_params["lag0"], dtype=float))
-    if "log_amp_delta_blr" in cm_params:
-        cm_params["log_amp_delta_blr"] = np.full_like(
-            np.asarray(cm_params["log_amp_delta_blr"], dtype=float),
+    if "dlog_amp_blr" in cm_params:
+        cm_params["dlog_amp_blr"] = np.full_like(
+            np.asarray(cm_params["dlog_amp_blr"], dtype=float),
             -20.0,
         )
-    if "log_amp_delta_blr2" in cm_params:
-        cm_params["log_amp_delta_blr2"] = np.full_like(
-            np.asarray(cm_params["log_amp_delta_blr2"], dtype=float),
+    if "dlog_amp_blr2" in cm_params:
+        cm_params["dlog_amp_blr2"] = np.full_like(
+            np.asarray(cm_params["dlog_amp_blr2"], dtype=float),
             -20.0,
         )
     if "amp_blr" in cm_params:
@@ -1423,7 +1423,6 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, mags_means, survey_
                 ),
             )
             mu_cont = np.asarray(cont_result[0], dtype=float)
-            mu_blr = np.asarray(mu, dtype=float) - mu_cont
 
             ax_lc.plot(
                 t_test,
@@ -1433,16 +1432,8 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, mags_means, survey_
                 lw=1.0,
                 linestyle='--',
             )
-            ax_lc.plot(
-                t_test,
-                mu_blr + offsets[n],
-                alpha=0.75,
-                color=colors[band_idx_map[n]],
-                lw=1.0,
-                linestyle=':',
-            )
         else:
-            mu, std, mu_cont, std_cont, mu_blr, std_blr = result
+            mu, std, mu_cont, std_cont, _mu_blr, _std_blr = result
 
             ax_lc.plot(
                 t_test, mu_cont + offsets[n], alpha=0.5,
@@ -1452,17 +1443,6 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, mags_means, survey_
             ax_lc.fill_between(
                 t_test, mu_cont + offsets[n] - std_cont,
                 mu_cont + offsets[n] + std_cont,
-                alpha=0.15, lw=0.5, color=colors[band_idx_map[n]]
-            )
-
-            ax_lc.plot(
-                t_test, mu_blr + offsets[n], alpha=0.5,
-                color=colors[band_idx_map[n]], lw=1.0,
-                label=f'{band_idx_map[n]}-band BLR', linestyle=':'
-            )
-            ax_lc.fill_between(
-                t_test, mu_blr + offsets[n] - std_blr,
-                mu_blr + offsets[n] + std_blr,
                 alpha=0.15, lw=0.5, color=colors[band_idx_map[n]]
             )
 

@@ -56,7 +56,7 @@ def build_agn_cuts(
     return cuts
 
 
-def build_log_amp_delta_blr_cuts(cuts=None):
+def build_dlog_amp_blr_cuts(cuts=None):
     """
     Return the default per-band BLR amplitude cuts as (column, lower, upper) tuples.
 
@@ -67,6 +67,6 @@ def build_log_amp_delta_blr_cuts(cuts=None):
         cuts = DEFAULT_LOG_AMP_DELTA_BLR_UPPER_CUTS
 
     return [
-        (f"log_amp_delta_blr_{band}", None, upper)
+        (f"dlog_amp_blr_{band}", None, upper)
         for band, upper in cuts.items()
     ]

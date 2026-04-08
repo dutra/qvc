@@ -34,7 +34,7 @@ from qvc.hubble.cuts import (
 )
 from qvc.hubble.hubble_cut_config import (
     build_agn_cuts,
-    build_log_amp_delta_blr_cuts,
+    build_dlog_amp_blr_cuts,
 )
 from qvc.hubble.hubble_model import (
     M_model_agn,
@@ -1146,7 +1146,7 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
         )
 
     required_var_cols = [f"log_jitter_{b}" for b in ("u", "g", "r", "i")] + [
-        f"log_amp_delta_blr_{b}" for b in ("u", "g", "r", "i")
+        f"dlog_amp_blr_{b}" for b in ("u", "g", "r", "i")
     ]
     missing_var_cols = [col for col in required_var_cols if col not in df.columns]
     if missing_var_cols:
@@ -1171,12 +1171,12 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
         df[f'jitter_{b}'] = jitter
         jitter_total_sq = jitter_total_sq + jitter**2
 
-        #df.loc[dropped_bands.apply(lambda s: b in s), f'log_amp_delta_blr_{b}'] = np.nan
-        amp_delta_blr = 10**df[f'log_amp_delta_blr_{b}'].values
+        #df.loc[dropped_bands.apply(lambda s: b in s), f'dlog_amp_blr_{b}'] = np.nan
+        amp_delta_blr = 10**df[f'dlog_amp_blr_{b}'].values
         amp_delta_blr[dropped_bands.apply(lambda s: b in s)] = 0.0
         amp_delta_blr_total_sq = amp_delta_blr_total_sq + amp_delta_blr**2
         df[f'amp_delta_blr_{b}'] = amp_delta_blr
-        blr2_col = f'log_amp_delta_blr2_{b}'
+        blr2_col = f'dlog_amp_blr2_{b}'
         if blr2_col in df.columns:
             amp_delta_blr2 = 10**df[blr2_col].values
             amp_delta_blr2[dropped_bands.apply(lambda s: b in s)] = 0.0
@@ -1184,7 +1184,7 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
             df[f'amp_delta_blr2_{b}'] = amp_delta_blr2
 
     df['log_jitter_total'] = np.log10(np.sqrt(jitter_total_sq))
-    df['log_amp_delta_blr_total'] = np.log10(np.sqrt(amp_delta_blr_total_sq))
+    df['dlog_amp_blr_total'] = np.log10(np.sqrt(amp_delta_blr_total_sq))
 
     # df['log_sigma_uv'] = df['log_sigma_uv'] + 1/2 * np.log10(1 + df['z'])
 
@@ -1389,7 +1389,7 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
     if (
         "z" in df.columns
         and (
-            {"log_sigma_uv", "log_amp_delta_bc"}.issubset(df.columns)
+            {"log_sigma_uv", "dlog_amp_bc"}.issubset(df.columns)
             or any(
                 (f"amp_bc_{band}" in df.columns) and (f"bc_weight_{band}" in df.columns)
                 for band in ("u", "g", "r", "i", "z")
@@ -1405,7 +1405,7 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
     if (
         "f_bc_3000" in df.columns
         and (
-            {"log_sigma_uv", "log_amp_delta_bc"}.issubset(df.columns)
+            {"log_sigma_uv", "dlog_amp_bc"}.issubset(df.columns)
             or any(
                 (f"amp_bc_{band}" in df.columns) and (f"bc_weight_{band}" in df.columns)
                 for band in ("u", "g", "r", "i", "z")
@@ -1489,7 +1489,7 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
             assignment_probabilities_filename="blr_line_assignment_probabilities_fiducial_precut.pdf",
         )
     if "log_sigma_uv" in df.columns:
-        if any(f"log_amp_delta_blr_{band}" in df.columns for band in ("u", "g", "r", "i", "z")):
+        if any(f"dlog_amp_blr_{band}" in df.columns for band in ("u", "g", "r", "i", "z")):
             plot_blr_lag_vs_amp_by_band(
                 df,
                 plot_path=plot_path,
@@ -1515,7 +1515,7 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
                 lag_suffix="",
                 filename="blr_lag_vs_redshift_by_band_precut.pdf",
             )
-        if any(f"log_amp_delta_blr2_{band}" in df.columns for band in ("u", "g", "r", "i", "z")):
+        if any(f"dlog_amp_blr2_{band}" in df.columns for band in ("u", "g", "r", "i", "z")):
             plot_blr_lag_vs_amp_by_band(
                 df,
                 plot_path=plot_path,
@@ -1609,7 +1609,7 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
             )
             print(f"[WARNING] Exclusion CSV not found: {exclude_csv}")
 
-    blr_amp_cuts = build_log_amp_delta_blr_cuts()
+    blr_amp_cuts = build_dlog_amp_blr_cuts()
     for col, lower, upper in blr_amp_cuts:
         cut_desc = f"{col} in {_format_cut_bounds(lower, upper, upper_inclusive=False, allow_missing=True)}"
         if col not in df.columns:
@@ -1655,15 +1655,15 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
             plot_cut_diagnostics(df.copy(), df[col_mask], bins=30, cut_info=cut_desc)
             df = _record_cut(f"agn_scalar:{col}", cut_desc, df, col_mask)
 
-        if "log_amp_delta_bc" in df.columns:
+        if "dlog_amp_bc" in df.columns:
             bc_amp_upper = LOG_AMP_DELTA_BC_UPPER
             bc_amp_mask = (
-                pd.to_numeric(df["log_amp_delta_bc"], errors="coerce").to_numpy(dtype=float)
+                pd.to_numeric(df["dlog_amp_bc"], errors="coerce").to_numpy(dtype=float)
                 <= bc_amp_upper
-            ) | df["log_amp_delta_bc"].isna().to_numpy(dtype=bool)
-            cut_desc = f"log_amp_delta_bc in (-inf, {bc_amp_upper}] or NaN"
+            ) | df["dlog_amp_bc"].isna().to_numpy(dtype=bool)
+            cut_desc = f"dlog_amp_bc in (-inf, {bc_amp_upper}] or NaN"
             plot_cut_diagnostics(df.copy(), df[bc_amp_mask], bins=30, cut_info=cut_desc)
-            df = _record_cut("agn_scalar:log_amp_delta_bc", cut_desc, df, bc_amp_mask)
+            df = _record_cut("agn_scalar:dlog_amp_bc", cut_desc, df, bc_amp_mask)
 
         for frac_col, log_col, log_upper in (
             ("f_bc_3000", "log_f_bc_3000", LOG_F_BC_3000_MAX),
@@ -1846,7 +1846,7 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
     if (
         "z" in df.columns
         and (
-            {"log_sigma_uv", "log_amp_delta_bc"}.issubset(df.columns)
+            {"log_sigma_uv", "dlog_amp_bc"}.issubset(df.columns)
             or any(
                 (f"amp_bc_{band}" in df.columns) and (f"bc_weight_{band}" in df.columns)
                 for band in ("u", "g", "r", "i", "z")
@@ -1862,7 +1862,7 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
     if (
         "f_bc_3000" in df.columns
         and (
-            {"log_sigma_uv", "log_amp_delta_bc"}.issubset(df.columns)
+            {"log_sigma_uv", "dlog_amp_bc"}.issubset(df.columns)
             or any(
                 (f"amp_bc_{band}" in df.columns) and (f"bc_weight_{band}" in df.columns)
                 for band in ("u", "g", "r", "i", "z")

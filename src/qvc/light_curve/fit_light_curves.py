@@ -284,7 +284,7 @@ def _build_igm_cache_np_nm(rest_wave_nm):
 
 
 def _evaluate_igm_transmission_np(igm_cache, redshift):
-    """Evaluate the copied grahspj IGM transmission on a rest-frame wavelength grid."""
+    """Evaluate the copied grahspj IGM transmission on an observed-frame wavelength grid."""
 
     n_transitions_low = 10
     gamma = 0.2788
@@ -344,12 +344,19 @@ def _evaluate_igm_transmission_np(igm_cache, redshift):
     return np.clip(transmission, 1.0e-12, 1.0)
 
 
-def compute_igm_transmission_rest_wave(rest_wave_angstrom, z):
-    """Return copied grahspj IGM transmission on a rest-frame wavelength grid in Angstrom."""
+def compute_igm_transmission_obs_wave(obs_wave_angstrom, z):
+    """Return copied grahspj IGM transmission on an observed-frame wavelength grid in Angstrom."""
 
-    rest_wave_nm = np.asarray(rest_wave_angstrom, dtype=float) / 10.0
-    igm_cache = _build_igm_cache_np_nm(rest_wave_nm)
+    obs_wave_nm = np.asarray(obs_wave_angstrom, dtype=float) / 10.0
+    igm_cache = _build_igm_cache_np_nm(obs_wave_nm)
     return _evaluate_igm_transmission_np(igm_cache, z)
+
+
+def compute_igm_transmission_rest_wave(rest_wave_angstrom, z):
+    """Return copied grahspj IGM transmission for rest-frame wavelengths in Angstrom."""
+
+    obs_wave_angstrom = np.asarray(rest_wave_angstrom, dtype=float) * (1.0 + float(z))
+    return compute_igm_transmission_obs_wave(obs_wave_angstrom, z)
 
 
 def compute_band_igm_transmission(bands, z):
@@ -362,8 +369,7 @@ def compute_band_igm_transmission(bands, z):
         band = str(band)
         if band in filters:
             wave_obs, response = filters[band]
-            rest_wave = wave_obs / (1.0 + z)
-            igm = compute_igm_transmission_rest_wave(rest_wave, z)
+            igm = compute_igm_transmission_obs_wave(wave_obs, z)
             denom = np.maximum(np.trapezoid(response, wave_obs), 1.0e-30)
             eff = np.trapezoid(response * igm, wave_obs) / denom
         else:
@@ -371,7 +377,7 @@ def compute_band_igm_transmission(bands, z):
                 [SDSS_FILTER_BLUE_EDGE_OBS.get(band, lambda_pivot[band])],
                 dtype=float,
             )
-            eff = compute_igm_transmission_rest_wave(wave_obs / (1.0 + z), z)[0]
+            eff = compute_igm_transmission_obs_wave(wave_obs, z)[0]
         transmissions.append(np.clip(eff, 1.0e-12, 1.0))
     return jnp.asarray(transmissions, dtype=float)
 
@@ -461,10 +467,14 @@ def posterior_median_mean_function(flat_samples, t_eval, band, *, t_ref=None):
     t_ref = np.asarray(t_ref, dtype=float)
     mean_key = f"mean_{band}"
     mean_level = float(np.nanmedian(np.asarray(flat_samples[mean_key], dtype=float))) if mean_key in flat_samples else 0.0
-    poly1 = float(np.nanmedian(np.asarray(flat_samples["poly1"], dtype=float))) if "poly1" in flat_samples else 0.0
+    linear_trend = (
+        float(np.nanmedian(np.asarray(flat_samples["linear_trend"], dtype=float)))
+        if "linear_trend" in flat_samples
+        else 0.0
+    )
     t_center, t_std = linear_mean_time_scaling(t_ref)
     time_scaled = (t_eval - t_center) / t_std
-    mean_curve = mean_level + poly1 * time_scaled
+    mean_curve = mean_level + linear_trend * time_scaled
     if "log_sigma_uv_relflux" in flat_samples or "amp_cont_relflux" in flat_samples:
         return np.asarray(-2.5 * np.log10(np.clip(1.0 + mean_curve, 1e-12, None)), dtype=float)
     return mean_curve
@@ -1700,20 +1710,18 @@ def fit_structure_function(tau, sf, sf_lo=None, sf_hi=None):
 
 
 def dho_structure_function(tau, amp, tau_fast, tau_slow):
-    """Analytic SF of the continuum-only overdamped-SHO process."""
+    """Analytic SF of the exact unit-RMS continuum-only overdamped-SHO process."""
 
     tau = np.asarray(tau, dtype=float)
     amp = np.asarray(amp, dtype=float)
-    variance_factor = dho_stationary_variance_factor(tau_fast, tau_slow)
     tau_fast_ord, tau_slow_ord = ordered_dho_taus(tau_fast, tau_slow)
-    denom = np.maximum(tau_slow_ord - tau_fast_ord, 1e-12)
-    c_fast = -tau_fast_ord / denom
-    c_slow = tau_slow_ord / denom
-    sf2 = 2.0 * np.square(amp) * (
-        np.square(c_fast) * (1.0 - np.exp(-tau / tau_fast_ord))
-        + np.square(c_slow) * (1.0 - np.exp(-tau / tau_slow_ord))
-    )
-    sf2 = np.where(np.isfinite(variance_factor), sf2, np.nan)
+    rho = tau_fast_ord / np.maximum(tau_slow_ord, 1e-12)
+    denom = np.maximum(1.0 - rho, 1e-12)
+    cov_factor = (
+        np.exp(-tau / tau_slow_ord)
+        - rho * np.exp(-tau / np.maximum(tau_fast_ord, 1e-12))
+    ) / denom
+    sf2 = 2.0 * np.square(amp) * (1.0 - cov_factor)
     return np.sqrt(np.clip(sf2, 0.0, None))
 
 
@@ -1988,11 +1996,11 @@ def log_tau_fast_center0_prior(log_tau_slow_center0, *, tau_fast_truncated=False
     return dist.Normal(mean, sigma)
 
 
-def poly1_prior():
+def linear_trend_prior():
     return dist.Normal(0.0, 0.1)
 
 
-def poly1_prior_relflux():
+def linear_trend_prior_relflux():
     return dist.Normal(0.0, 0.1 / RELFLUX_TO_MAG_SCALE)
 
 
@@ -2023,7 +2031,7 @@ def log_jitter_prior(log_jitter_mean):
     return dist.Normal(log_jitter_mean, 1.0)
 
 
-def log_amp_delta_blr_prior():
+def dlog_amp_blr_prior():
     return dist.Normal(-1.0, 1.0)
 
 
@@ -2045,7 +2053,7 @@ def relative_log_lag_blr_prior(*, z=0.0, log_lag0=0.0):
     )
 
 
-def log_amp_delta_bc_prior():
+def dlog_amp_bc_prior():
     return dist.Normal(-1.0, 1.0)
 
 
@@ -2116,15 +2124,15 @@ def sample_flux_line_latent_params(
     """Sample flux line parameters in ratio space and reconstruct legacy deltas exactly."""
 
     if disable_lag_blr or disable_lag_bc:
-        log_amp_delta_bc = None
+        dlog_amp_bc = None
         log_lag_ratio_bc_to_blr = None
     else:
         log_amp_ratio_bc = numpyro.sample(
             "log_amp_ratio_bc",
             dist.Normal(line_ratio_offsets["bc_ref"] - 1.0, 1.0),
         )
-        log_amp_delta_bc = numpyro.deterministic(
-            "log_amp_delta_bc",
+        dlog_amp_bc = numpyro.deterministic(
+            "dlog_amp_bc",
             log_amp_ratio_bc - line_ratio_offsets["bc_ref"],
         )
         log_lag_ratio_bc_to_blr = numpyro.sample(
@@ -2140,16 +2148,16 @@ def sample_flux_line_latent_params(
         mean = numpyro.sample("mean", mean_prior_dist)
 
         if disable_lag_blr:
-            log_amp_delta_blr = numpyro.deterministic(
-                "log_amp_delta_blr",
+            dlog_amp_blr = numpyro.deterministic(
+                "dlog_amp_blr",
                 jnp.full(B, -9.0),
             )
             log_lag_blr = numpyro.deterministic(
                 "log_lag_blr",
                 jnp.full(B, -9.0),
             )
-            log_amp_delta_blr2 = numpyro.deterministic(
-                "log_amp_delta_blr2",
+            dlog_amp_blr2 = numpyro.deterministic(
+                "dlog_amp_blr2",
                 jnp.full(B, -9.0),
             )
             log_lag_blr2 = numpyro.deterministic(
@@ -2166,16 +2174,16 @@ def sample_flux_line_latent_params(
                 relative_log_lag_blr_prior(z=z, log_lag0=log_lag0),
             )
             log_lag_blr_raw = delta_log_lag_blr_raw + log_lag0
-            log_amp_delta_blr = numpyro.deterministic(
-                "log_amp_delta_blr",
+            dlog_amp_blr = numpyro.deterministic(
+                "dlog_amp_blr",
                 log_amp_ratio_blr_raw - line_ratio_offsets["blr_band"],
             )
             log_lag_blr = numpyro.deterministic(
                 "log_lag_blr",
                 log_lag_blr_raw,
             )
-            log_amp_delta_blr2 = numpyro.deterministic(
-                "log_amp_delta_blr2",
+            dlog_amp_blr2 = numpyro.deterministic(
+                "dlog_amp_blr2",
                 jnp.full(B, -9.0),
             )
             log_lag_blr2 = numpyro.deterministic(
@@ -2211,13 +2219,13 @@ def sample_flux_line_latent_params(
                 "log_lag_blr2",
                 jnp.where(first_is_short, log_lag_blr2_raw, log_lag_blr_raw),
             )
-            log_amp_delta_blr = numpyro.deterministic(
-                "log_amp_delta_blr",
+            dlog_amp_blr = numpyro.deterministic(
+                "dlog_amp_blr",
                 jnp.where(first_is_short, log_amp_ratio_blr_raw, log_amp_ratio_blr2_raw)
                 - line_ratio_offsets["blr_band"],
             )
-            log_amp_delta_blr2 = numpyro.deterministic(
-                "log_amp_delta_blr2",
+            dlog_amp_blr2 = numpyro.deterministic(
+                "dlog_amp_blr2",
                 jnp.where(first_is_short, log_amp_ratio_blr2_raw, log_amp_ratio_blr_raw)
                 - line_ratio_offsets["blr_band"],
             )
@@ -2226,12 +2234,12 @@ def sample_flux_line_latent_params(
 
     return (
         mean,
-        log_amp_delta_blr,
-        log_amp_delta_blr2,
+        dlog_amp_blr,
+        dlog_amp_blr2,
         log_lag_blr,
         log_lag_blr2,
         log_jitter,
-        log_amp_delta_bc,
+        dlog_amp_bc,
         log_lag_ratio_bc_to_blr,
     )
 
@@ -2244,7 +2252,7 @@ def compute_parameter_kls(
     lambda_center_rf,
     log_jitter_mean,
     model_variant="mag_linear",
-    disable_poly1=False,
+    disable_linear_trend=False,
     disable_lag_blr=False,
     disable_lag_bc=False,
     drop_band_lyman_alpha=False,
@@ -2264,7 +2272,9 @@ def compute_parameter_kls(
     sigma_prior_fn = (
         log_sigma_center0_relflux_prior if model_variant == "mag_flux_linearized" else log_sigma_center0_prior
     )
-    poly1_prior_fn = poly1_prior_relflux if model_variant == "mag_flux_linearized" else poly1_prior
+    linear_trend_prior_fn = (
+        linear_trend_prior_relflux if model_variant == "mag_flux_linearized" else linear_trend_prior
+    )
     mean_prior_fn = mean_prior_relflux if model_variant == "mag_flux_linearized" else mean_prior
 
     kls["eta_sigma_kl"] = kl_from_samples(
@@ -2316,10 +2326,10 @@ def compute_parameter_kls(
             flat_samples["log_tau_slow_center0"],
         )
 
-    if not disable_poly1 and "poly1" in flat_samples:
-        kls["poly1_kl"] = kl_from_samples(
-            flat_samples["poly1"],
-            lambda x: _dist_log_prob_array(poly1_prior_fn(), x),
+    if not disable_linear_trend and "linear_trend" in flat_samples:
+        kls["linear_trend_kl"] = kl_from_samples(
+            flat_samples["linear_trend"],
+            lambda x: _dist_log_prob_array(linear_trend_prior_fn(), x),
         )
 
     if "lag0" in flat_samples:
@@ -2334,10 +2344,10 @@ def compute_parameter_kls(
         )
 
     if not disable_lag_blr and not disable_lag_bc:
-        if "log_amp_delta_bc" in flat_samples:
-            kls["log_amp_delta_bc_kl"] = kl_from_samples(
-                flat_samples["log_amp_delta_bc"],
-                lambda x: _dist_log_prob_array(log_amp_delta_bc_prior(), x),
+        if "dlog_amp_bc" in flat_samples:
+            kls["dlog_amp_bc_kl"] = kl_from_samples(
+                flat_samples["dlog_amp_bc"],
+                lambda x: _dist_log_prob_array(dlog_amp_bc_prior(), x),
             )
         if "log_lag_ratio_bc_to_blr" in flat_samples:
             kls["log_lag_ratio_bc_to_blr_kl"] = kl_from_samples(
@@ -2363,14 +2373,14 @@ def compute_parameter_kls(
         if disable_lag_blr:
             continue
 
-        amp_keys = [f"log_amp_delta_blr_{band}"]
+        amp_keys = [f"dlog_amp_blr_{band}"]
         if n_blr_terms >= 2:
-            amp_keys.append(f"log_amp_delta_blr2_{band}")
+            amp_keys.append(f"dlog_amp_blr2_{band}")
         for amp_key in amp_keys:
             if amp_key in flat_samples:
                 kls[f"{amp_key}_kl"] = kl_from_samples(
                     flat_samples[amp_key],
-                    lambda x: _dist_log_prob_array(log_amp_delta_blr_prior(), x),
+                    lambda x: _dist_log_prob_array(dlog_amp_blr_prior(), x),
                 )
 
         lag_keys = [f"log_lag_blr_{band}"]
@@ -2600,11 +2610,11 @@ def build_explicit_model_params(raw_params, lam_rf, *, lam_lya_rf=None):
 
     eta_sigma = jnp.asarray(raw_params["eta_sigma"])
     eta_tau = jnp.asarray(raw_params["eta_tau"])
-    log_amp_delta_blr = jnp.asarray(raw_params["log_amp_delta_blr"])
-    log_amp_delta_blr2 = jnp.asarray(
+    dlog_amp_blr = jnp.asarray(raw_params["dlog_amp_blr"])
+    dlog_amp_blr2 = jnp.asarray(
         raw_params.get(
-            "log_amp_delta_blr2",
-            jnp.full_like(log_amp_delta_blr, -1e9),
+            "dlog_amp_blr2",
+            jnp.full_like(dlog_amp_blr, -1e9),
         )
     )
     log_igm_transmission_band = raw_params.get("log_igm_transmission_band")
@@ -2613,9 +2623,9 @@ def build_explicit_model_params(raw_params, lam_rf, *, lam_lya_rf=None):
     log_igm_transmission_band = _coerce_band_array(log_igm_transmission_band, lam_rf)
     log_lag_blr = jnp.asarray(raw_params["log_lag_blr"])
     log_lag_blr2 = jnp.asarray(raw_params.get("log_lag_blr2", log_lag_blr))
-    has_bc_lag = "log_amp_delta_bc" in raw_params
+    has_bc_lag = "dlog_amp_bc" in raw_params
     if has_bc_lag:
-        log_amp_delta_bc = jnp.asarray(raw_params["log_amp_delta_bc"])
+        dlog_amp_bc = jnp.asarray(raw_params["dlog_amp_bc"])
         log_lag_ratio_bc_to_blr = jnp.asarray(
             raw_params.get("log_lag_ratio_bc_to_blr", jnp.log(0.2))
         )
@@ -2663,15 +2673,15 @@ def build_explicit_model_params(raw_params, lam_rf, *, lam_lya_rf=None):
     bc_weight = balmer_continuum_weight(lam_rf)
 
     amp_cont = jnp.exp(log_sigma_band + log_igm_transmission_band)
-    amp_blr = jnp.exp(log_sigma_uv_exp + log_amp_delta_blr)
-    amp_blr2 = jnp.exp(log_sigma_uv_exp + log_amp_delta_blr2)
+    amp_blr = jnp.exp(log_sigma_uv_exp + dlog_amp_blr)
+    amp_blr2 = jnp.exp(log_sigma_uv_exp + dlog_amp_blr2)
     lag_disk = lag0_exp * (lam_rf / lambda_center_rf_exp) ** lag_beta_exp
     lag_blr = jnp.exp(log_lag_blr)
     lag_blr2 = jnp.exp(log_lag_blr2)
     if has_bc_lag:
-        log_amp_delta_bc_exp = _expand_last(log_amp_delta_bc)
+        dlog_amp_bc_exp = _expand_last(dlog_amp_bc)
         log_lag_bc_shared = jnp.mean(log_lag_blr, axis=-1) + jnp.asarray(log_lag_ratio_bc_to_blr)
-        amp_bc = jnp.exp(log_sigma_uv_exp + log_amp_delta_bc_exp) * bc_weight
+        amp_bc = jnp.exp(log_sigma_uv_exp + dlog_amp_bc_exp) * bc_weight
         lag_bc = jnp.broadcast_to(
             _expand_last(jnp.exp(log_lag_bc_shared)),
             lag_blr.shape,
@@ -2711,7 +2721,7 @@ def build_explicit_model_params(raw_params, lam_rf, *, lam_lya_rf=None):
     explicit["tau_slow_band"] = jnp.exp(log_tau_slow_band)
     explicit["log_kernel_param"] = log_kernel_param
     if has_bc_lag:
-        explicit["log_amp_delta_bc"] = log_amp_delta_bc
+        explicit["dlog_amp_bc"] = dlog_amp_bc
         explicit["log_lag_ratio_bc_to_blr"] = log_lag_ratio_bc_to_blr
     return explicit
 
@@ -2730,11 +2740,11 @@ def build_explicit_model_params_relflux(raw_params, lam_rf, *, lam_lya_rf=None):
 
     eta_sigma = jnp.asarray(raw_params["eta_sigma"])
     eta_tau = jnp.asarray(raw_params["eta_tau"])
-    log_amp_delta_blr = jnp.asarray(raw_params["log_amp_delta_blr"])
-    log_amp_delta_blr2 = jnp.asarray(
+    dlog_amp_blr = jnp.asarray(raw_params["dlog_amp_blr"])
+    dlog_amp_blr2 = jnp.asarray(
         raw_params.get(
-            "log_amp_delta_blr2",
-            jnp.full_like(log_amp_delta_blr, -1e9),
+            "dlog_amp_blr2",
+            jnp.full_like(dlog_amp_blr, -1e9),
         )
     )
     log_igm_transmission_band = raw_params.get("log_igm_transmission_band")
@@ -2743,9 +2753,9 @@ def build_explicit_model_params_relflux(raw_params, lam_rf, *, lam_lya_rf=None):
     log_igm_transmission_band = _coerce_band_array(log_igm_transmission_band, lam_rf)
     log_lag_blr = jnp.asarray(raw_params["log_lag_blr"])
     log_lag_blr2 = jnp.asarray(raw_params.get("log_lag_blr2", log_lag_blr))
-    has_bc_lag = "log_amp_delta_bc" in raw_params
+    has_bc_lag = "dlog_amp_bc" in raw_params
     if has_bc_lag:
-        log_amp_delta_bc = jnp.asarray(raw_params["log_amp_delta_bc"])
+        dlog_amp_bc = jnp.asarray(raw_params["dlog_amp_bc"])
         log_lag_ratio_bc_to_blr = jnp.asarray(
             raw_params.get("log_lag_ratio_bc_to_blr", jnp.log(0.2))
         )
@@ -2798,15 +2808,15 @@ def build_explicit_model_params_relflux(raw_params, lam_rf, *, lam_lya_rf=None):
     bc_weight = balmer_continuum_weight(lam_rf)
 
     amp_cont_relflux = jnp.exp(log_sigma_band_relflux + log_igm_transmission_band)
-    amp_blr_relflux = jnp.exp(log_sigma_uv_relflux_exp + log_amp_delta_blr)
-    amp_blr2_relflux = jnp.exp(log_sigma_uv_relflux_exp + log_amp_delta_blr2)
+    amp_blr_relflux = jnp.exp(log_sigma_uv_relflux_exp + dlog_amp_blr)
+    amp_blr2_relflux = jnp.exp(log_sigma_uv_relflux_exp + dlog_amp_blr2)
     lag_disk = lag0_exp * (lam_rf / lambda_center_rf_exp) ** lag_beta_exp
     lag_blr = jnp.exp(log_lag_blr)
     lag_blr2 = jnp.exp(log_lag_blr2)
     if has_bc_lag:
-        log_amp_delta_bc_exp = _expand_last(log_amp_delta_bc)
+        dlog_amp_bc_exp = _expand_last(dlog_amp_bc)
         log_lag_bc_shared = jnp.mean(log_lag_blr, axis=-1) + jnp.asarray(log_lag_ratio_bc_to_blr)
-        amp_bc_relflux = jnp.exp(log_sigma_uv_relflux_exp + log_amp_delta_bc_exp) * bc_weight
+        amp_bc_relflux = jnp.exp(log_sigma_uv_relflux_exp + dlog_amp_bc_exp) * bc_weight
         lag_bc = jnp.broadcast_to(
             _expand_last(jnp.exp(log_lag_bc_shared)),
             lag_blr.shape,
@@ -2860,7 +2870,7 @@ def build_explicit_model_params_relflux(raw_params, lam_rf, *, lam_lya_rf=None):
     explicit["tau_slow_band"] = jnp.exp(log_tau_slow_band)
     explicit["log_kernel_param"] = log_kernel_param
     if has_bc_lag:
-        explicit["log_amp_delta_bc"] = log_amp_delta_bc
+        explicit["dlog_amp_bc"] = dlog_amp_bc
         explicit["log_lag_ratio_bc_to_blr"] = log_lag_ratio_bc_to_blr
     return explicit
 
@@ -2872,8 +2882,8 @@ def build_explicit_model_params_continuum_only(raw_params, lam_rf, *, lam_lya_rf
     B = int(lam_rf.shape[0])
     raw = dict(raw_params)
     zeros = jnp.zeros(B, dtype=lam_rf.dtype)
-    raw.setdefault("log_amp_delta_blr", jnp.full(B, -9.0, dtype=lam_rf.dtype))
-    raw.setdefault("log_amp_delta_blr2", jnp.full(B, -9.0, dtype=lam_rf.dtype))
+    raw.setdefault("dlog_amp_blr", jnp.full(B, -9.0, dtype=lam_rf.dtype))
+    raw.setdefault("dlog_amp_blr2", jnp.full(B, -9.0, dtype=lam_rf.dtype))
     raw.setdefault("log_lag_blr", jnp.full(B, -9.0, dtype=lam_rf.dtype))
     raw.setdefault("log_lag_blr2", jnp.full(B, -9.0, dtype=lam_rf.dtype))
     explicit = build_explicit_model_params(raw, lam_rf, lam_lya_rf=lam_lya_rf)
@@ -2953,12 +2963,12 @@ def add_model_prediction_params(samples, lam_rf, *, model_variant=None, lam_lya_
         out["log_igm_transmission_band"] = np.asarray(explicit["log_igm_transmission_band"])
         out["igm_transmission_band"] = np.asarray(explicit["igm_transmission_band"])
         out["log_cont_scale"] = np.asarray(explicit["log_cont_scale"])
-        if "log_amp_delta_bc" in explicit:
-            out["log_amp_delta_bc"] = np.asarray(explicit["log_amp_delta_bc"])
+        if "dlog_amp_bc" in explicit:
+            out["dlog_amp_bc"] = np.asarray(explicit["dlog_amp_bc"])
         if "log_lag_ratio_bc_to_blr" in explicit:
             out["log_lag_ratio_bc_to_blr"] = np.asarray(explicit["log_lag_ratio_bc_to_blr"])
-        if "log_amp_delta_blr2" in explicit:
-            out["log_amp_delta_blr2"] = np.asarray(explicit["log_amp_delta_blr2"])
+        if "dlog_amp_blr2" in explicit:
+            out["dlog_amp_blr2"] = np.asarray(explicit["dlog_amp_blr2"])
         if "log_lag_blr2" in explicit:
             out["log_lag_blr2"] = np.asarray(explicit["log_lag_blr2"])
         out["lambda_center_rf"] = np.asarray(explicit["lambda_center_rf"])
@@ -3023,12 +3033,12 @@ def add_model_prediction_params(samples, lam_rf, *, model_variant=None, lam_lya_
         out["log_tau_fast_uv"] = np.asarray(explicit["log_tau_fast_uv"])
         out["log_igm_transmission_band"] = np.asarray(explicit["log_igm_transmission_band"])
         out["igm_transmission_band"] = np.asarray(explicit["igm_transmission_band"])
-        if "log_amp_delta_bc" in explicit:
-            out["log_amp_delta_bc"] = np.asarray(explicit["log_amp_delta_bc"])
+        if "dlog_amp_bc" in explicit:
+            out["dlog_amp_bc"] = np.asarray(explicit["dlog_amp_bc"])
         if "log_lag_ratio_bc_to_blr" in explicit:
             out["log_lag_ratio_bc_to_blr"] = np.asarray(explicit["log_lag_ratio_bc_to_blr"])
-        if "log_amp_delta_blr2" in explicit:
-            out["log_amp_delta_blr2"] = np.asarray(explicit["log_amp_delta_blr2"])
+        if "dlog_amp_blr2" in explicit:
+            out["dlog_amp_blr2"] = np.asarray(explicit["dlog_amp_blr2"])
         if "log_lag_blr2" in explicit:
             out["log_lag_blr2"] = np.asarray(explicit["log_lag_blr2"])
         out["lambda_center_rf"] = np.asarray(explicit["lambda_center_rf"])
@@ -3082,12 +3092,12 @@ def add_model_prediction_params(samples, lam_rf, *, model_variant=None, lam_lya_
     out["log_tau_fast_uv"] = np.asarray(explicit["log_tau_fast_uv"])
     out["log_igm_transmission_band"] = np.asarray(explicit["log_igm_transmission_band"])
     out["igm_transmission_band"] = np.asarray(explicit["igm_transmission_band"])
-    if "log_amp_delta_bc" in explicit:
-        out["log_amp_delta_bc"] = np.asarray(explicit["log_amp_delta_bc"])
+    if "dlog_amp_bc" in explicit:
+        out["dlog_amp_bc"] = np.asarray(explicit["dlog_amp_bc"])
     if "log_lag_ratio_bc_to_blr" in explicit:
         out["log_lag_ratio_bc_to_blr"] = np.asarray(explicit["log_lag_ratio_bc_to_blr"])
-    if "log_amp_delta_blr2" in explicit:
-        out["log_amp_delta_blr2"] = np.asarray(explicit["log_amp_delta_blr2"])
+    if "dlog_amp_blr2" in explicit:
+        out["dlog_amp_blr2"] = np.asarray(explicit["dlog_amp_blr2"])
     if "log_lag_blr2" in explicit:
         out["log_lag_blr2"] = np.asarray(explicit["log_lag_blr2"])
     out["lambda_center_rf"] = np.asarray(explicit["lambda_center_rf"])
@@ -3100,7 +3110,7 @@ def build_single_object_model(
     log_jitter_mean,
     *,
     lam_lya_rf=None,
-    disable_poly1=False,
+    disable_linear_trend=False,
     disable_lag_blr=False,
     disable_lag_bc=False,
     drop_band_lyman_alpha=False,
@@ -3155,10 +3165,10 @@ def build_single_object_model(
             ),
         )
 
-        if disable_poly1:
-            poly1 = numpyro.deterministic("poly1", 0.0)
+        if disable_linear_trend:
+            linear_trend = numpyro.deterministic("linear_trend", 0.0)
         else:
-            poly1 = numpyro.sample("poly1", poly1_prior())
+            linear_trend = numpyro.sample("linear_trend", linear_trend_prior())
 
         lag0 = numpyro.sample("lag0", lag0_prior())
         log_lag0 = numpyro.deterministic("log_lag0", jnp.log(lag0))
@@ -3172,12 +3182,12 @@ def build_single_object_model(
         )
         (
             mean,
-            log_amp_delta_blr,
-            log_amp_delta_blr2,
+            dlog_amp_blr,
+            dlog_amp_blr2,
             log_lag_blr,
             log_lag_blr2,
             log_jitter,
-            log_amp_delta_bc,
+            dlog_amp_bc,
             log_lag_ratio_bc_to_blr,
         ) = sample_flux_line_latent_params(
             B=B,
@@ -3198,10 +3208,10 @@ def build_single_object_model(
             log_tau_fast_center0=log_tau_fast_center0,
             log_sigma_center0=log_sigma_center0,
             lambda_center_rf=lambda_center_rf,
-            poly1=poly1,
+            linear_trend=linear_trend,
             mean=mean,
-            log_amp_delta_blr=log_amp_delta_blr,
-            log_amp_delta_blr2=log_amp_delta_blr2,
+            dlog_amp_blr=dlog_amp_blr,
+            dlog_amp_blr2=dlog_amp_blr2,
             log_lag_blr=log_lag_blr,
             log_lag_blr2=log_lag_blr2,
             log_jitter=log_jitter,
@@ -3211,8 +3221,8 @@ def build_single_object_model(
             eta_sigma=eta_sigma,
             eta_tau=eta_tau,
         )
-        if log_amp_delta_bc is not None:
-            raw_params["log_amp_delta_bc"] = log_amp_delta_bc
+        if dlog_amp_bc is not None:
+            raw_params["dlog_amp_bc"] = dlog_amp_bc
             raw_params["log_lag_ratio_bc_to_blr"] = log_lag_ratio_bc_to_blr
 
         params = build_explicit_model_params(
@@ -3260,7 +3270,7 @@ def build_single_object_model_mag_flux_linearized(
     log_jitter_mean,
     *,
     lam_lya_rf=None,
-    disable_poly1=False,
+    disable_linear_trend=False,
     disable_lag_blr=False,
     disable_lag_bc=False,
     drop_band_lyman_alpha=False,
@@ -3326,10 +3336,10 @@ def build_single_object_model_mag_flux_linearized(
             ),
         )
 
-        if disable_poly1:
-            poly1 = numpyro.deterministic("poly1", 0.0)
+        if disable_linear_trend:
+            linear_trend = numpyro.deterministic("linear_trend", 0.0)
         else:
-            poly1 = numpyro.sample("poly1", poly1_prior_relflux())
+            linear_trend = numpyro.sample("linear_trend", linear_trend_prior_relflux())
 
         lag0 = numpyro.sample("lag0", lag0_prior())
         log_lag0 = numpyro.deterministic("log_lag0", jnp.log(lag0))
@@ -3343,12 +3353,12 @@ def build_single_object_model_mag_flux_linearized(
         )
         (
             mean,
-            log_amp_delta_blr,
-            log_amp_delta_blr2,
+            dlog_amp_blr,
+            dlog_amp_blr2,
             log_lag_blr,
             log_lag_blr2,
             log_jitter,
-            log_amp_delta_bc,
+            dlog_amp_bc,
             log_lag_ratio_bc_to_blr,
         ) = sample_flux_line_latent_params(
             B=B,
@@ -3370,10 +3380,10 @@ def build_single_object_model_mag_flux_linearized(
             log_tau_fast_center0=log_tau_fast_center0,
             log_sigma_center0=log_sigma_center0,
             lambda_center_rf=lambda_center_rf,
-            poly1=poly1,
+            linear_trend=linear_trend,
             mean=mean,
-            log_amp_delta_blr=log_amp_delta_blr,
-            log_amp_delta_blr2=log_amp_delta_blr2,
+            dlog_amp_blr=dlog_amp_blr,
+            dlog_amp_blr2=dlog_amp_blr2,
             log_lag_blr=log_lag_blr,
             log_lag_blr2=log_lag_blr2,
             log_jitter=log_jitter,
@@ -3383,8 +3393,8 @@ def build_single_object_model_mag_flux_linearized(
             eta_sigma=eta_sigma,
             eta_tau=eta_tau,
         )
-        if log_amp_delta_bc is not None:
-            raw_params["log_amp_delta_bc"] = log_amp_delta_bc
+        if dlog_amp_bc is not None:
+            raw_params["dlog_amp_bc"] = dlog_amp_bc
             raw_params["log_lag_ratio_bc_to_blr"] = log_lag_ratio_bc_to_blr
 
         params = build_explicit_model_params_relflux(
@@ -3440,7 +3450,7 @@ def build_single_object_model_continuum_only(
     log_jitter_mean,
     *,
     lam_lya_rf=None,
-    disable_poly1=False,
+    disable_linear_trend=False,
     drop_band_lyman_alpha=False,
     tau_fast_truncated=False,
 ):
@@ -3488,10 +3498,10 @@ def build_single_object_model_continuum_only(
             ),
         )
 
-        if disable_poly1:
-            poly1 = numpyro.deterministic("poly1", 0.0)
+        if disable_linear_trend:
+            linear_trend = numpyro.deterministic("linear_trend", 0.0)
         else:
-            poly1 = numpyro.sample("poly1", poly1_prior())
+            linear_trend = numpyro.sample("linear_trend", linear_trend_prior())
 
         lag0 = numpyro.sample("lag0", lag0_prior())
         lag_beta = numpyro.sample("lag_beta", lag_beta_prior())
@@ -3504,7 +3514,7 @@ def build_single_object_model_continuum_only(
             log_tau_fast_center0=log_tau_fast_center0,
             log_sigma_center0=log_sigma_center0,
             lambda_center_rf=lambda_center_rf,
-            poly1=poly1,
+            linear_trend=linear_trend,
             mean=mean,
             log_jitter=log_jitter,
             lag0=lag0,
@@ -3641,23 +3651,23 @@ def build_single_object_model_mag_fluxmix_stage2(
         )
 
         if disable_lag_blr:
-            log_amp_delta_blr = numpyro.deterministic("log_amp_delta_blr", jnp.full(B, -9.0))
+            dlog_amp_blr = numpyro.deterministic("dlog_amp_blr", jnp.full(B, -9.0))
             log_lag_blr = numpyro.deterministic("log_lag_blr", jnp.full(B, -9.0))
-            log_amp_delta_blr2 = numpyro.deterministic("log_amp_delta_blr2", jnp.full(B, -9.0))
+            dlog_amp_blr2 = numpyro.deterministic("dlog_amp_blr2", jnp.full(B, -9.0))
             log_lag_blr2 = numpyro.deterministic("log_lag_blr2", jnp.full(B, -9.0))
-            log_amp_delta_bc = None
+            dlog_amp_bc = None
             log_lag_ratio_bc_to_blr = None
         else:
             if disable_lag_bc:
-                log_amp_delta_bc = None
+                dlog_amp_bc = None
                 log_lag_ratio_bc_to_blr = None
             else:
                 log_amp_ratio_bc = numpyro.sample(
                     "log_amp_ratio_bc",
                     dist.Normal(line_ratio_offsets["bc_ref"] - 1.0, 1.0),
                 )
-                log_amp_delta_bc = numpyro.deterministic(
-                    "log_amp_delta_bc",
+                dlog_amp_bc = numpyro.deterministic(
+                    "dlog_amp_bc",
                     log_amp_ratio_bc - line_ratio_offsets["bc_ref"],
                 )
                 log_lag_ratio_bc_to_blr = numpyro.sample(
@@ -3675,12 +3685,12 @@ def build_single_object_model_mag_fluxmix_stage2(
                     relative_log_lag_blr_prior(z=z, log_lag0=log_lag0_fixed),
                 )
                 log_lag_blr_raw = delta_log_lag_blr_raw + log_lag0_fixed
-                log_amp_delta_blr = numpyro.deterministic(
-                    "log_amp_delta_blr",
+                dlog_amp_blr = numpyro.deterministic(
+                    "dlog_amp_blr",
                     log_amp_ratio_blr_raw - line_ratio_offsets["blr_band"],
                 )
                 log_lag_blr = numpyro.deterministic("log_lag_blr", log_lag_blr_raw)
-                log_amp_delta_blr2 = numpyro.deterministic("log_amp_delta_blr2", jnp.full(B, -9.0))
+                dlog_amp_blr2 = numpyro.deterministic("dlog_amp_blr2", jnp.full(B, -9.0))
                 log_lag_blr2 = numpyro.deterministic("log_lag_blr2", jnp.full(B, -9.0))
 
         stage2_raw_params = dict(stage1_raw_median)
@@ -3688,12 +3698,12 @@ def build_single_object_model_mag_fluxmix_stage2(
         stage2_raw_params["eta_sigma"] = eta_sigma
         stage2_raw_params["log_sigma_center0"] = log_sigma_center0
         stage2_raw_params["log_igm_transmission_band"] = log_igm_transmission_band_fixed
-        stage2_raw_params["log_amp_delta_blr"] = log_amp_delta_blr
+        stage2_raw_params["dlog_amp_blr"] = dlog_amp_blr
         stage2_raw_params["log_lag_blr"] = log_lag_blr
-        stage2_raw_params["log_amp_delta_blr2"] = log_amp_delta_blr2
+        stage2_raw_params["dlog_amp_blr2"] = dlog_amp_blr2
         stage2_raw_params["log_lag_blr2"] = log_lag_blr2
-        if log_amp_delta_bc is not None:
-            stage2_raw_params["log_amp_delta_bc"] = log_amp_delta_bc
+        if dlog_amp_bc is not None:
+            stage2_raw_params["dlog_amp_bc"] = dlog_amp_bc
             stage2_raw_params["log_lag_ratio_bc_to_blr"] = log_lag_ratio_bc_to_blr
         explicit_params = build_explicit_model_params_fluxmix_fast(
             stage2_raw_params,
@@ -3827,7 +3837,7 @@ def _fluxmix_stage1_raw_median_params(samples_flat, lam_rf):
     B = int(len(lam_rf))
     mean_default = np.zeros(B, dtype=float)
     jitter_default = np.full(B, np.log(1e-3), dtype=float)
-    poly1_default = 0.0
+    linear_trend_default = 0.0
     if "stage1_basis_log_sigma_center0" in samples_flat:
         log_sigma_center0_stage1 = np.asarray(samples_flat["stage1_basis_log_sigma_center0"], dtype=float)
     else:
@@ -3855,8 +3865,14 @@ def _fluxmix_stage1_raw_median_params(samples_flat, lam_rf):
             dtype=float,
         ),
         lambda_center_rf=compute_lambda_center_rf(lam_rf),
-        poly1=jnp.asarray(
-            np.median(np.asarray(samples_flat.get("poly1", poly1_default), dtype=float), axis=0),
+        linear_trend=jnp.asarray(
+            np.median(
+                np.asarray(
+                    samples_flat.get("linear_trend", linear_trend_default),
+                    dtype=float,
+                ),
+                axis=0,
+            ),
             dtype=float,
         ),
         mean=jnp.asarray(
@@ -3935,7 +3951,7 @@ def _build_fluxmix_continuum_basis(obj_dict, lam_rf, stage1_raw_median, *, lam_l
 def _prediction_sample_subset(samples_flat, max_samples=64):
     relevant_keys = (
         "mean",
-        "poly1",
+        "linear_trend",
         "amp_cont",
         "amp_blr",
         "amp_bc",
@@ -4064,7 +4080,7 @@ def run_two_stage_fluxmix_fast_inference(
     progress_bar,
     dense_mass,
     max_tree_depth,
-    disable_poly1=False,
+    disable_linear_trend=False,
     disable_lag_blr=False,
     disable_lag_bc=False,
     drop_band_lyman_alpha=False,
@@ -4100,7 +4116,7 @@ def run_two_stage_fluxmix_fast_inference(
             lam_rf,
             log_jitter_mean=log_jitter_mean,
             lam_lya_rf=lam_lya_rf,
-            disable_poly1=disable_poly1,
+            disable_linear_trend=disable_linear_trend,
             drop_band_lyman_alpha=drop_band_lyman_alpha,
             tau_fast_truncated=tau_fast_truncated,
         )
@@ -4258,7 +4274,7 @@ def main():
     parser.add_argument("--save_sample_file", dest="save_sample_file", action="store_true", help="Save per-object posterior samples to HDF5.")
     parser.add_argument("--no_save_sample_file", dest="save_sample_file", action="store_false", help="Do not save per-object posterior samples to HDF5.")
     parser.set_defaults(save_sample_file=True)
-    parser.add_argument("--disable_poly1", action="store_true", help="Disable trend.")
+    parser.add_argument("--disable_linear_trend", action="store_true", help="Disable trend.")
     parser.add_argument("--rf_length_cut", type=int, default=-1, help="Rest-frame cut (days).")
     parser.add_argument("--exact_same_length", action="store_true", help="Exact same RF length cut.")
     parser.add_argument("--load_stone_lcs", action="store_true", default=False, help="Use Stone LCs.")
@@ -4508,7 +4524,7 @@ def main():
                     lam_rf,
                     log_jitter_mean=log_jitter_mean_fit,
                     lam_lya_rf=lam_lya_rf,
-                    disable_poly1=args.disable_poly1,
+                    disable_linear_trend=args.disable_linear_trend,
                     disable_lag_blr=args.disable_lag_blr,
                     disable_lag_bc=args.disable_lag_bc,
                     drop_band_lyman_alpha=args.drop_band_lyman_alpha,
@@ -4540,7 +4556,7 @@ def main():
                         progress_bar=args.progress,
                         dense_mass=args.dense_mass,
                         max_tree_depth=args.max_tree_depth,
-                        disable_poly1=args.disable_poly1,
+                        disable_linear_trend=args.disable_linear_trend,
                         disable_lag_blr=args.disable_lag_blr,
                         disable_lag_bc=args.disable_lag_bc,
                         drop_band_lyman_alpha=args.drop_band_lyman_alpha,
@@ -4730,7 +4746,7 @@ def main():
                 lambda_center_rf=float(lambda_center_rf),
                 log_jitter_mean=np.asarray(log_jitter_mean_fit),
                 model_variant=args.model_variant,
-                disable_poly1=args.disable_poly1,
+                disable_linear_trend=args.disable_linear_trend,
                 disable_lag_blr=args.disable_lag_blr,
                 disable_lag_bc=args.disable_lag_bc,
                 drop_band_lyman_alpha=args.drop_band_lyman_alpha,

@@ -74,7 +74,7 @@ def _interp_relflux_basis(grid_t, grid_y, query_t):
 
 
 class OverdampedSHOBaseQS(qs.Quasisep):
-    """Per-band overdamped-SHO latent driver with shared-noise fast/slow blocks."""
+    """Exact single-driver overdamped-SHO latent driver with bandwise fast/slow poles."""
 
     tau_fast: jnp.ndarray
     tau_slow: jnp.ndarray
@@ -94,6 +94,14 @@ class OverdampedSHOBaseQS(qs.Quasisep):
     def _B(self):
         return self.tau_fast.shape[0]
 
+    def _driver_loading(self):
+        tau_fast, tau_slow = self._ordered_taus()
+        return jnp.sqrt(2.0 / jnp.maximum(tau_fast + tau_slow, 1e-12))
+
+    def _obs_scale(self):
+        tau_fast, tau_slow = self._ordered_taus()
+        return (tau_fast + tau_slow) / jnp.maximum(tau_slow - tau_fast, 1e-12)
+
     def design_matrix(self):
         tau_fast, tau_slow = self._ordered_taus()
         lam_fast = 1.0 / tau_fast
@@ -104,31 +112,26 @@ class OverdampedSHOBaseQS(qs.Quasisep):
         return jnp.block([[A_fast, zero], [zero, A_slow]])
 
     def stationary_covariance(self):
-        def _P(tau):
-            tau = _safe_pos(tau)
-            ti = tau[:, None]
-            tj = tau[None, :]
-            P = 2.0 * jnp.sqrt(ti * tj) / jnp.maximum(ti + tj, 1e-12)
-            return 0.5 * (P + P.T)
-
         tau_fast, tau_slow = self._ordered_taus()
-        P_fast = _P(tau_fast)
-        P_slow = _P(tau_slow)
-        zero = jnp.zeros_like(P_fast)
-        return jnp.block([[P_fast, zero], [zero, P_slow]])
+        tau_all = jnp.concatenate([tau_fast, tau_slow])
+        beta = self._driver_loading()
+        beta_all = jnp.concatenate([beta, beta])
+        ti = tau_all[:, None]
+        tj = tau_all[None, :]
+        bi = beta_all[:, None]
+        bj = beta_all[None, :]
+        P = (bi * bj) * (ti * tj) / jnp.maximum(ti + tj, 1e-12)
+        return 0.5 * (P + P.T)
 
     def observation_model(self, X: JAXArray) -> JAXArray:
         _t, b = X
         b = jnp.asarray(b, dtype=jnp.int32)
         B = self._B()
-        tau_fast, tau_slow = self._ordered_taus()
-        denom = jnp.maximum(tau_slow[b] - tau_fast[b], 1e-12)
-        c_fast = -tau_fast[b] / denom
-        c_slow = tau_slow[b] / denom
+        obs_scale = self._obs_scale()
 
-        h = jnp.zeros(2 * B, dtype=tau_fast.dtype)
-        h = h.at[b].set(c_fast)
-        h = h.at[B + b].set(c_slow)
+        h = jnp.zeros(2 * B, dtype=obs_scale.dtype)
+        h = h.at[b].set(obs_scale[b])
+        h = h.at[B + b].set(-obs_scale[b])
         return h
 
     def transition_matrix(self, X1: JAXArray, X2: JAXArray) -> JAXArray:
@@ -453,9 +456,9 @@ def make_linear_mean_func(t_ref, zero_mean=False):
 
         band_idx = jnp.asarray(X[1], dtype=jnp.int32)
         mean = params["mean"][band_idx] if "mean" in params else 0.0
-        poly1 = params["poly1"] if "poly1" in params else 0.0
+        linear_trend = params["linear_trend"] if "linear_trend" in params else 0.0
         time_scaled = (X[0] - t_center) / t_std
-        return mean + poly1 * time_scaled
+        return mean + linear_trend * time_scaled
 
     return mean_func
 
