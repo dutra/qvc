@@ -1984,9 +1984,13 @@ def log_tau_slow_center0_prior(eta_tau, z, lambda_center_rf):
     )
 
 
+TAU_FAST_TO_SLOW_PRIOR_RATIO = 25.0
+TAU_FAST_PRIOR_LOGSIGMA_DEX = 0.4
+
+
 def log_tau_fast_center0_prior(log_tau_slow_center0, *, tau_fast_truncated=False):
-    mean = jnp.asarray(log_tau_slow_center0) - jnp.log(10.0)
-    sigma = 0.5 * jnp.log(10.0)
+    mean = jnp.asarray(log_tau_slow_center0) - jnp.log(TAU_FAST_TO_SLOW_PRIOR_RATIO)
+    sigma = TAU_FAST_PRIOR_LOGSIGMA_DEX * jnp.log(10.0)
     if tau_fast_truncated:
         return dist.TruncatedNormal(
             mean,

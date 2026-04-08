@@ -25,6 +25,7 @@ from qvc.light_curve.fit_light_curves import (
     compute_band_adf,
     compute_g_band_residual_drift_diagnostics,
     compute_g_band_raw_drift_diagnostics,
+    log_tau_fast_center0_prior,
     compute_parameter_kls,
     compute_object_adf_diagnostics,
     compute_lambda_center_rf,
@@ -196,6 +197,14 @@ def test_compute_lam_lya_suppression_rf_turns_on_u_band_near_z_one_point_five():
     assert low_u > 0.99
     assert high_u > 0.99
     assert very_high_u < 0.6
+
+
+def test_log_tau_fast_center0_prior_is_centered_at_tau_slow_over_twenty_five():
+    log_tau_slow = jnp.array(np.log(1000.0))
+    prior = log_tau_fast_center0_prior(log_tau_slow, tau_fast_truncated=False)
+
+    assert np.isclose(float(prior.loc), np.log(1000.0 / 25.0))
+    assert np.isclose(float(prior.scale), 0.4 * np.log(10.0))
 
 
 def test_balmer_continuum_weight_transitions_smoothly_across_3646():
