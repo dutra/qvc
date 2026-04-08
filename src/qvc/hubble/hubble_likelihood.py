@@ -93,7 +93,7 @@ def empty_blob(N_obj):
     return np.zeros((3, N_obj), dtype=float)
 
 def log_likelihood_pantheon_cephdist(params, pantheon_data, _sna_L, _sna_Lower, _sna_LogdetCov,
-                                     cosmo, use_full_cov):
+                                     cosmo, use_full_cov, use_ceph_dist_calibration=True):
     """
     Uses only SNe with (zHD > 0.01) OR IS_CALIBRATOR == True.
     For calibrators, replaces cosmological μ with Cepheid host distances.
@@ -110,7 +110,8 @@ def log_likelihood_pantheon_cephdist(params, pantheon_data, _sna_L, _sna_Lower, 
 
     # --- cosmological / Cepheid μ ---
     sn_mu_model = cosmo.distmod(zHD).value
-    sn_mu_model[is_calib_sel] = pantheon_data['CEPH_DIST'][mask][is_calib_sel]
+    if use_ceph_dist_calibration:
+        sn_mu_model[is_calib_sel] = pantheon_data['CEPH_DIST'][mask][is_calib_sel]
 
     # --- residuals ---
     res_snia = m_b_corr - (sn_mu_model + params['M0_sn'])
@@ -167,6 +168,8 @@ def log_likelihood(theta, *, agn_data, pantheon_data,
                    cosmo_model, completeness_params,
                    z_pivot_agn,
                    agn_calibrators_data=None,
+                   use_planck_h0_prior=False,
+                   use_ceph_dist_calibration=True,
                    use_alpha_lambda_term=False,
                    use_eta_sigma_term=False,
                    use_redshift_log_f_term=False,
@@ -174,6 +177,7 @@ def log_likelihood(theta, *, agn_data, pantheon_data,
     priors, model_labels, model_labels_latex = get_model_params(
         cosmo_model,
         only_sna=only_sna,
+        use_planck_h0_prior=use_planck_h0_prior,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
@@ -203,7 +207,8 @@ def log_likelihood(theta, *, agn_data, pantheon_data,
 
     ll_snia = log_likelihood_pantheon_cephdist(params, pantheon_data, 
                                                 _sna_L, _sna_Lower, _sna_LogdetCov,
-                                                cosmo, use_full_cov)
+                                                cosmo, use_full_cov,
+                                                use_ceph_dist_calibration=use_ceph_dist_calibration)
     
     if only_sna:
         return ll_snia, empty_blob(N_obj)
@@ -306,6 +311,8 @@ def log_likelihood_nearbylcs(
     _sna_L, _sna_Lower, _sna_LogdetCov,
     cosmo_model, completeness_params,
     z_pivot_agn,
+    use_planck_h0_prior=False,
+    use_ceph_dist_calibration=True,
     use_alpha_lambda_term=False,
     use_eta_sigma_term=False,
     use_redshift_log_f_term=False,
@@ -322,6 +329,7 @@ def log_likelihood_nearbylcs(
     priors, model_labels, model_labels_latex = get_model_params(
         cosmo_model,
         only_sna=only_sna,
+        use_planck_h0_prior=use_planck_h0_prior,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
         use_redshift_log_f_term=use_redshift_log_f_term,

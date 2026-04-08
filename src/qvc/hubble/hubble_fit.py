@@ -140,6 +140,7 @@ def make_run_tag(
     N,
     z_range,
     completeness=True,
+    disable_ceph_dist_calibration=False,
     use_alpha_lambda_term=False,
     use_eta_sigma_term=False,
     use_redshift_log_f_term=False,
@@ -148,12 +149,13 @@ def make_run_tag(
     n_tag = "all" if N is None else f"N{N}"
     z_tag = f"z{zmin:.2f}_{zmax:.2f}".replace(".", "p")
     completeness_tag = "" if completeness else "_disable_completeness"
+    ceph_tag = "_nocephdist_planckh0" if disable_ceph_dist_calibration else ""
     alpha_tag = "_alphaLam" if use_alpha_lambda_term else ""
     eta_sigma_tag = "_etaSigma" if use_eta_sigma_term else ""
     logf_tag = "_logfz" if use_redshift_log_f_term else ""
     return (
         f"{cosmo_model}_{'sna' if only_sna else 'joint'}_{speed}_{n_tag}_{z_tag}"
-        f"{completeness_tag}{alpha_tag}{eta_sigma_tag}{logf_tag}"
+        f"{completeness_tag}{ceph_tag}{alpha_tag}{eta_sigma_tag}{logf_tag}"
     )
 
 
@@ -372,6 +374,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                       completeness_mode="2d",
                       N=None,
                       compare_sigma_only=False,
+                      disable_ceph_dist_calibration=False,
                       use_alpha_lambda_term=False,
                       use_eta_sigma_term=False,
                       use_redshift_log_f_term=False,
@@ -384,6 +387,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
         N,
         z_range,
         completeness=completeness,
+        disable_ceph_dist_calibration=disable_ceph_dist_calibration,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
@@ -394,6 +398,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
     priors, model_labels, model_labels_latex = get_model_params(
         cosmo_model,
         only_sna=only_sna,
+        use_planck_h0_prior=disable_ceph_dist_calibration,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
@@ -553,6 +558,8 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                 completeness_params=completeness_params,
                 only_sna=only_sna,
                 use_full_cov=use_full_cov,
+                use_planck_h0_prior=disable_ceph_dist_calibration,
+                use_ceph_dist_calibration=not disable_ceph_dist_calibration,
                 use_alpha_lambda_term=use_alpha_lambda_term,
                 use_eta_sigma_term=use_eta_sigma_term,
                 use_redshift_log_f_term=use_redshift_log_f_term,
@@ -776,6 +783,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                completeness_sim_file=DEFAULT_COMPLETENESS_SIM_FILE,
                completeness_mode="2d",
                compare_sigma_only=False,
+               disable_ceph_dist_calibration=False,
                use_alpha_lambda_term=False,
                use_eta_sigma_term=False,
                use_redshift_log_f_term=False):
@@ -787,6 +795,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         N,
         z_range,
         completeness=completeness,
+        disable_ceph_dist_calibration=disable_ceph_dist_calibration,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
@@ -846,6 +855,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                                                         completeness_sim_file=completeness_sim_file,
                                                         completeness_mode=completeness_mode,
                                                         compare_sigma_only=compare_sigma_only,
+                                                        disable_ceph_dist_calibration=disable_ceph_dist_calibration,
                                                         use_alpha_lambda_term=use_alpha_lambda_term,
                                                         use_eta_sigma_term=use_eta_sigma_term,
                                                         use_redshift_log_f_term=use_redshift_log_f_term)
@@ -1306,6 +1316,7 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
             completeness_sim_file=DEFAULT_COMPLETENESS_SIM_FILE,
             completeness_mode="2d",
             compare_sigma_only=False,
+            disable_ceph_dist_calibration=False,
             use_alpha_lambda_term=False,
             use_eta_sigma_term=False,
             use_redshift_log_f_term=False):
@@ -1314,7 +1325,8 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
     n_tag = "all" if N is None else f"N{N}"
     z_tag = f"z{zmin:.2f}_{zmax:.2f}".replace(".", "p")
     completeness_tag = "" if completeness else "_disable_completeness"
-    compare_run_tag = f"model_compare_{speed}_{n_tag}_{z_tag}{completeness_tag}"
+    ceph_tag = "_nocephdist_planckh0" if disable_ceph_dist_calibration else ""
+    compare_run_tag = f"model_compare_{speed}_{n_tag}_{z_tag}{completeness_tag}{ceph_tag}"
     if use_alpha_lambda_term:
         compare_run_tag += "_alphaLam"
     if use_eta_sigma_term:
@@ -1342,6 +1354,7 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
                        completeness_sim_file=completeness_sim_file,
                        completeness_mode=completeness_mode,
                        compare_sigma_only=compare_sigma_only,
+                       disable_ceph_dist_calibration=disable_ceph_dist_calibration,
                        use_alpha_lambda_term=use_alpha_lambda_term,
                        use_eta_sigma_term=use_eta_sigma_term,
                        use_redshift_log_f_term=use_redshift_log_f_term)
@@ -1359,6 +1372,7 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
                        completeness_sim_file=completeness_sim_file,
                        completeness_mode=completeness_mode,
                        compare_sigma_only=compare_sigma_only,
+                       disable_ceph_dist_calibration=disable_ceph_dist_calibration,
                        use_alpha_lambda_term=use_alpha_lambda_term,
                        use_eta_sigma_term=use_eta_sigma_term,
                        use_redshift_log_f_term=use_redshift_log_f_term)
@@ -1470,6 +1484,12 @@ if __name__ == "__main__":
                         help="Cosmological models list (default: FlatwCDM)")
     parser.add_argument("--disable_completeness", action="store_true", default=False, help="Enable completeness correction (default: True)")
     parser.add_argument("--disable_full_covariance", action="store_true", default=False, help="Use full covariance matrix for SNIa likelihood (default: False)")
+    parser.add_argument(
+        "--disable_ceph_dist_calibration",
+        action="store_true",
+        default=False,
+        help="Disable the Pantheon calibrator CEPH_DIST replacement and switch the H0 prior to the Planck 2018 interval.",
+    )
     parser.add_argument("--resume", nargs="?", const=True, default=False, help="Resume previous MCMC run (default: False). If a string is provided, it is used as the checkpoint file.")
     parser.add_argument("--run", type=str, choices=["full", "single"], default="single", help="Run mode: compare_models, compare_sna, full, or single (default: single)")
     parser.add_argument("--speed", type=str, choices=["production", "test", "fast", "dev"], default="production", help="Sampling speed: production, test, or fast (default: production)")
@@ -1547,6 +1567,8 @@ if __name__ == "__main__":
         print("Warning: Running without full covariance may lead to underestimated uncertainties.")
     if args.disable_completeness:
         print("Warning: Running without completeness correction may lead to biased results.")
+    if args.disable_ceph_dist_calibration:
+        print("Warning: Running without CEPH_DIST calibration; using the Planck H0 prior instead.")
     if args.resume:
         print("Warning: Resuming previous MCMC run.")
 
@@ -1604,6 +1626,7 @@ if __name__ == "__main__":
                 only_sna=args.only_sna,
                 N=effective_N,
                 uniform_redshift_distribution=args.uniform_redshift_distribution,
+                disable_ceph_dist_calibration=args.disable_ceph_dist_calibration,
                 use_alpha_lambda_term=args.fit_alpha_lambda_term,
                 use_eta_sigma_term=args.fit_eta_sigma_term,
                 use_redshift_log_f_term=args.fit_redshift_log_f_term,
@@ -1621,6 +1644,7 @@ if __name__ == "__main__":
                 completeness_sim_file=args.completeness_sim_file,
                 completeness_mode=args.completeness_mode,
                 compare_sigma_only=args.compare_sigma_only,
+                disable_ceph_dist_calibration=args.disable_ceph_dist_calibration,
                 use_alpha_lambda_term=args.fit_alpha_lambda_term,
                 use_eta_sigma_term=args.fit_eta_sigma_term,
                 use_redshift_log_f_term=args.fit_redshift_log_f_term)
@@ -1633,12 +1657,13 @@ if __name__ == "__main__":
         n_tag = "all" if effective_N is None else f"N{effective_N}"
         z_tag = f"z{zmin:.2f}_{zmax:.2f}".replace(".", "p")
         completeness_tag = "" if not args.disable_completeness else "_disable_completeness"
+        ceph_tag = "_nocephdist_planckh0" if args.disable_ceph_dist_calibration else ""
         alpha_tag = "_alphaLam" if args.fit_alpha_lambda_term else ""
         eta_sigma_tag = "_etaSigma" if args.fit_eta_sigma_term else ""
         logf_tag = "_logfz" if args.fit_redshift_log_f_term else ""
         compare_path = (
             f"plots/hubble/{args.prefix}/single_compare_{args.speed}_{n_tag}_{z_tag}"
-            f"{completeness_tag}{alpha_tag}{eta_sigma_tag}{logf_tag}"
+            f"{completeness_tag}{ceph_tag}{alpha_tag}{eta_sigma_tag}{logf_tag}"
         )
         os.makedirs(compare_path, exist_ok=True)
         if len(cosmo_models_dict) >= 2:
@@ -1663,6 +1688,7 @@ if __name__ == "__main__":
                 completeness_sim_file=args.completeness_sim_file,
                 completeness_mode=args.completeness_mode,
                 compare_sigma_only=args.compare_sigma_only,
+                disable_ceph_dist_calibration=args.disable_ceph_dist_calibration,
                 use_alpha_lambda_term=args.fit_alpha_lambda_term,
                 use_eta_sigma_term=args.fit_eta_sigma_term,
                 use_redshift_log_f_term=args.fit_redshift_log_f_term)

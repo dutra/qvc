@@ -462,6 +462,7 @@ def _blr_line_assignment_longform(
 
 
 def _plot_blr_lag_line_panel(ax, line_df, line_name, *, x_suffix=""):
+    line_df = line_df[line_df["component"] == 1].copy()
     if line_df.empty:
         ax.text(
             0.5,
@@ -472,39 +473,40 @@ def _plot_blr_lag_line_panel(ax, line_df, line_name, *, x_suffix=""):
             transform=ax.transAxes,
         )
     else:
-        for component, marker in ((1, "o"), (2, "s")):
-            comp_df = line_df[line_df["component"] == component]
-            if comp_df.empty:
-                continue
-
-            x = pd.to_numeric(comp_df["log_line_luminosity"], errors="coerce").to_numpy(dtype=float)
-            y = pd.to_numeric(comp_df["log_lag_rf"], errors="coerce").to_numpy(dtype=float)
-            xerr = np.abs(
-                pd.to_numeric(comp_df["log_line_luminosity_err"], errors="coerce").to_numpy(dtype=float)
-            )
-            yerr = np.abs(
-                pd.to_numeric(comp_df["log_lag_rf_err"], errors="coerce").to_numpy(dtype=float)
-            )
-            keep = np.isfinite(x) & np.isfinite(y)
-            if not np.any(keep):
-                continue
+        x = pd.to_numeric(line_df["log_line_luminosity"], errors="coerce").to_numpy(dtype=float)
+        y = pd.to_numeric(line_df["log_lag_rf"], errors="coerce").to_numpy(dtype=float)
+        xerr = np.abs(
+            pd.to_numeric(line_df["log_line_luminosity_err"], errors="coerce").to_numpy(dtype=float)
+        )
+        yerr = np.abs(
+            pd.to_numeric(line_df["log_lag_rf_err"], errors="coerce").to_numpy(dtype=float)
+        )
+        keep = np.isfinite(x) & np.isfinite(y)
+        if np.any(keep):
+            x = x[keep]
+            y = y[keep]
             xerr = np.where(np.isfinite(xerr[keep]), xerr[keep], 0.0)
             yerr = np.where(np.isfinite(yerr[keep]), yerr[keep], 0.0)
             ax.errorbar(
-                x[keep],
-                y[keep],
+                x,
+                y,
                 xerr=xerr,
                 yerr=yerr,
-                fmt=marker,
-                linestyle="none",
-                color="black",
-                ecolor="black",
-                markerfacecolor="black",
-                markeredgecolor="black",
-                markersize=4.0,
-                elinewidth=0.8,
-                capsize=2.0,
-                alpha=0.8,
+                fmt="none",
+                ecolor=(0.0, 0.0, 0.0, 0.10),
+                elinewidth=0.35,
+                capsize=0.0,
+                zorder=2,
+            )
+            ax.scatter(
+                x,
+                y,
+                s=10.0,
+                marker="o",
+                facecolors=(0.0, 0.0, 0.0, 0.18),
+                edgecolors=(0.0, 0.0, 0.0, 0.26),
+                linewidths=0.15,
+                zorder=3,
             )
 
     shen_relation = _SHEN_2024_LAG_LUMINOSITY_RELATIONS.get(line_name)
@@ -639,7 +641,6 @@ def plot_blr_line_lags_vs_l2500(
 
     component_handles = [
         Line2D([0], [0], marker="o", linestyle="none", color="k", label="BLR 1", markersize=6),
-        Line2D([0], [0], marker="s", linestyle="none", color="k", label="BLR 2", markersize=6),
         Line2D(
             [0],
             [0],
@@ -652,7 +653,7 @@ def plot_blr_line_lags_vs_l2500(
     fig.legend(
         handles=component_handles,
         loc="upper center",
-        ncol=3,
+        ncol=2,
         frameon=False,
         bbox_to_anchor=(0.5, 1.02),
     )
@@ -779,7 +780,6 @@ def plot_blr_line_lags_vs_l2500_fiducial(
     )
 
     keep = assignments["assigned_prob"] >= prob_thresh
-    keep &= assignments["well_constrained"].to_numpy(dtype=bool)
     keep &= pd.to_numeric(assignments["log_lag_rf"], errors="coerce").to_numpy(dtype=float) > 0.0
     lag_kl = pd.to_numeric(assignments.get("log_lag_kl"), errors="coerce").to_numpy(dtype=float)
     if np.any(np.isfinite(lag_kl)):
@@ -805,7 +805,6 @@ def plot_blr_line_lags_vs_l2500_fiducial(
 
     component_handles = [
         Line2D([0], [0], marker="o", linestyle="none", color="k", label="BLR 1", markersize=6),
-        Line2D([0], [0], marker="s", linestyle="none", color="k", label="BLR 2", markersize=6),
         Line2D(
             [0],
             [0],
@@ -818,7 +817,7 @@ def plot_blr_line_lags_vs_l2500_fiducial(
     fig.legend(
         handles=component_handles,
         loc="upper center",
-        ncol=3,
+        ncol=2,
         frameon=False,
         bbox_to_anchor=(0.5, 1.02),
     )

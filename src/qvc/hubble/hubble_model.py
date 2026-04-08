@@ -63,6 +63,7 @@ def infer_model_option_flags(cosmo_model, sample_dim, only_sna=False):
                 _, labels, _ = get_model_params(
                     cosmo_model,
                     only_sna=only_sna,
+                    use_planck_h0_prior=False,
                     use_alpha_lambda_term=use_alpha_lambda_term,
                     use_eta_sigma_term=use_eta_sigma_term,
                     use_redshift_log_f_term=use_redshift_log_f_term,
@@ -95,6 +96,7 @@ def resolve_model_option_flags(
     sample_dim,
     *,
     only_sna=False,
+    use_planck_h0_prior=False,
     use_alpha_lambda_term=None,
     use_eta_sigma_term=None,
     use_redshift_log_f_term=None,
@@ -106,6 +108,7 @@ def resolve_model_option_flags(
                 _, labels, _ = get_model_params(
                     cosmo_model,
                     only_sna=only_sna,
+                    use_planck_h0_prior=use_planck_h0_prior,
                     use_alpha_lambda_term=alpha_flag,
                     use_eta_sigma_term=eta_flag,
                     use_redshift_log_f_term=logf_flag,
@@ -336,6 +339,7 @@ def M_model_agn_err(
 def get_model_params(
     cosmo_model,
     only_sna=False,
+    use_planck_h0_prior=False,
     use_alpha_lambda_term=False,
     use_eta_sigma_term=False,
     use_redshift_log_f_term=False,
@@ -363,8 +367,7 @@ def get_model_params(
         (AGN_LOGF_Z_PARAM, (-10.0, 10.0)),
         #("sigma_b",   (-1,  1)),
 
-        ("H0",       (60.0, 80.0)),
-        #("H0",       (67.37-0.54, 67.37+0.54)),  # Planck 2018 TT,TE,EE+lowE+lensing
+        ("H0",       (67.37-0.54, 67.37+0.54) if use_planck_h0_prior else (60.0, 80.0)),
         ("Om0",      (0.0, 1.0)),
         #("Om0",      (0.32, 0.34)),
         

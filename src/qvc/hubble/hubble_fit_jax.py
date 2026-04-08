@@ -437,13 +437,15 @@ def _log_likelihood_jax(
     pantheon_jax: dict[str, Any],
     completeness_jax: dict[str, Any] | None,
     only_sna: bool,
+    use_ceph_dist_calibration: bool,
 ) -> jnp.ndarray:
     params = _pack_param_dict(theta, model_labels)
 
     z_sn = pantheon_jax["zHD"]
     is_cal = pantheon_jax["IS_CALIBRATOR"]
     mu_sn, _ = _distance_modulus_jax(z_sn, params, cosmo_model, z_pivot_agn)
-    mu_sn = jnp.where(is_cal, pantheon_jax["CEPH_DIST"], mu_sn)
+    if use_ceph_dist_calibration:
+        mu_sn = jnp.where(is_cal, pantheon_jax["CEPH_DIST"], mu_sn)
     res_sn = pantheon_jax["m_b_corr"] - (mu_sn + params["M0_sn"])
     y = solve_triangular(pantheon_jax["_sna_L"], res_sn, lower=pantheon_jax["_sna_lower"])
     ll_sn = -0.5 * jnp.dot(y, y) - 0.5 * pantheon_jax["_sna_logdet"] - 0.5 * res_sn.shape[0] * jnp.log(2.0 * jnp.pi)
@@ -609,6 +611,7 @@ def _compute_numpy_blobs_from_samples(
     completeness_params,
     z_pivot_agn,
     only_sna,
+    disable_ceph_dist_calibration,
 ):
     logls = []
     blobs = []
@@ -624,6 +627,8 @@ def _compute_numpy_blobs_from_samples(
             completeness_params=completeness_params,
             z_pivot_agn=z_pivot_agn,
             agn_calibrators_data=None,
+            use_planck_h0_prior=disable_ceph_dist_calibration,
+            use_ceph_dist_calibration=not disable_ceph_dist_calibration,
             only_sna=only_sna,
             use_full_cov=True,
         )
@@ -652,6 +657,7 @@ def run_single_jax(
     only_sna=False,
     N=None,
     uniform_redshift_distribution=False,
+    disable_ceph_dist_calibration=False,
     use_alpha_lambda_term=False,
     use_eta_sigma_term=False,
     use_redshift_log_f_term=False,
@@ -672,6 +678,7 @@ def run_single_jax(
         speed,
         N,
         z_range,
+        disable_ceph_dist_calibration=disable_ceph_dist_calibration,
         use_alpha_lambda_term=False,
         use_eta_sigma_term=False,
     )
@@ -729,7 +736,11 @@ def run_single_jax(
     pantheon_jax = _prepare_pantheon_arrays(pantheon_data, _sna_L, _sna_Lower, _sna_LogdetCov)
     completeness_jax = _prepare_completeness_for_jax(completeness_params)
 
-    priors, model_labels, _ = get_model_params(cosmo_model, only_sna=only_sna)
+    priors, model_labels, _ = get_model_params(
+        cosmo_model,
+        only_sna=only_sna,
+        use_planck_h0_prior=disable_ceph_dist_calibration,
+    )
     loglike_fn = jax.jit(
         lambda theta: _log_likelihood_jax(
             theta,
@@ -739,6 +750,7 @@ def run_single_jax(
             pantheon_jax=pantheon_jax,
             completeness_jax=completeness_jax,
             only_sna=only_sna,
+            use_ceph_dist_calibration=not disable_ceph_dist_calibration,
         )
     )
     model = _build_numpyro_nested_model(model_labels, priors, loglike_fn)
@@ -769,6 +781,7 @@ def run_single_jax(
         completeness_params=completeness_params,
         z_pivot_agn=z_pivot_agn,
         only_sna=only_sna,
+        disable_ceph_dist_calibration=disable_ceph_dist_calibration,
     )
     idx_max_weight = int(np.argmax(logls))
     integrals_max_w = blobs[idx_max_weight, 0, :]
