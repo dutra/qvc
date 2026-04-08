@@ -17,6 +17,7 @@ from qvc.light_curve.fit_light_curves import (
     balmer_continuum_weight,
     build_explicit_model_params,
     bending_power_law_psd,
+    compute_lam_lya_suppression_rf,
     compute_structure_function_diagnostics,
     compute_band_adf,
     compute_g_band_residual_drift_diagnostics,
@@ -149,26 +150,39 @@ def test_build_explicit_model_params_centers_disk_lag_on_geometric_mean():
     assert np.isclose(lag_disk[center_idx], expected_lag0)
 
 
-def test_lya_variability_weight_is_stronger_blueward_of_lya():
-    lam_rf = jnp.array([1050.0, 1216.0, 1600.0, 2500.0])
+def test_lya_variability_weight_tracks_lya_edge():
+    lam_rf = jnp.array([1100.0, 1216.0, 1250.0, 1600.0])
     weight = np.asarray(lya_variability_weight(lam_rf))
     assert weight[0] > weight[1] > weight[2] > weight[3]
     assert weight[0] > 0.5
     assert weight[-1] < 0.01
 
 
-def test_build_explicit_model_params_smoothly_suppresses_blue_variability():
-    lam_rf = jnp.array([1100.0, 1300.0, 2000.0])
+def test_build_explicit_model_params_smoothly_suppresses_blue_edge_near_lya():
+    lam_rf = jnp.array([1500.0, 2000.0, 2500.0])
+    lam_lya_rf = jnp.array([1180.0, 1230.0, 1400.0])
     raw = _make_raw_public(len(lam_rf))
     raw["log_amp_delta_lya"] = jnp.array(-1.0)
-    explicit = build_explicit_model_params(raw, lam_rf)
+    explicit = build_explicit_model_params(raw, lam_rf, lam_lya_rf=lam_lya_rf)
 
     baseline = build_explicit_model_params(_make_raw_public(len(lam_rf)), lam_rf)
     ratio = np.asarray(explicit["amp_cont"]) / np.asarray(baseline["amp_cont"])
 
     assert ratio[0] < ratio[1] < ratio[2]
-    assert ratio[0] < 0.55
+    assert ratio[0] < 0.5
     assert ratio[2] > 0.9
+
+
+def test_compute_lam_lya_suppression_rf_turns_on_u_band_near_z_one_point_five():
+    low_z = np.asarray(compute_lam_lya_suppression_rf(["u"], 1.4), dtype=float)
+    high_z = np.asarray(compute_lam_lya_suppression_rf(["u"], 1.6), dtype=float)
+
+    assert low_z.shape == (1,)
+    assert high_z.shape == (1,)
+    assert low_z[0] > 1216.0
+    assert high_z[0] < 1216.0
+    assert float(lya_variability_weight(low_z)[0]) < 0.1
+    assert float(lya_variability_weight(high_z)[0]) > 0.8
 
 
 def test_balmer_continuum_weight_transitions_smoothly_across_3646():

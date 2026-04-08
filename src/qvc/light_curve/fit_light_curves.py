@@ -89,7 +89,7 @@ from qvc.light_curve.variability_metrics import compute_variability_metrics_for_
 zero_mean = False
 has_jitter = True
 LYA_REST_WAVELENGTH = 1216.0
-LYA_ATTENUATION_WIDTH = 150.0
+LYA_ATTENUATION_WIDTH = 20.0
 BALMER_EDGE_REST_WAVELENGTH = 3646.0
 BALMER_EDGE_ATTENUATION_WIDTH = 250.0
 ETA_SIGMA_LOW = -5.0
@@ -113,6 +113,14 @@ FLUXMIX_PREDICTION_FORWARD_PAD = 400.0
 FLUXMIX_MIN_TOTAL_FLUX_RATIO = 0.05
 FLUXMIX_TOTAL_FLUX_FLOOR_SOFTNESS = 0.01
 FLUXMIX_TOTAL_FLUX_FLOOR_PENALTY = 20.0
+SDSS_FILTER_BLUE_EDGE_OBS = {
+    "u": 3055.11,
+    "g": 3797.64,
+    "r": 5418.23,
+    "i": 6692.41,
+    "z": 7964.70,
+    "y": 9469.38,
+}
 
 
 def compute_lambda_center_rf(lam_rf):
@@ -195,8 +203,24 @@ def _expand_last(x):
     return jnp.expand_dims(x, axis=-1) if x.ndim > 0 else x
 
 
-def lya_variability_weight(lam_rf, transition=LYA_REST_WAVELENGTH, width=LYA_ATTENUATION_WIDTH):
-    """Smooth weight that approaches 1 blueward of Lyα and 0 redward of it."""
+def compute_lam_lya_suppression_rf(bands, z):
+    """Return the rest-frame band edge used for Lyman-limit suppression."""
+
+    return jnp.asarray(
+        [
+            SDSS_FILTER_BLUE_EDGE_OBS.get(str(band), lambda_pivot[str(band)]) / (1.0 + float(z))
+            for band in bands
+        ],
+        dtype=float,
+    )
+
+
+def lya_variability_weight(
+    lam_rf,
+    transition=LYA_REST_WAVELENGTH,
+    width=LYA_ATTENUATION_WIDTH,
+):
+    """Smooth effective Lyman suppression weight from rest-frame band edges."""
 
     lam_rf = jnp.asarray(lam_rf)
     return 1.0 / (1.0 + jnp.exp((lam_rf - transition) / width))
@@ -1886,10 +1910,20 @@ def log_cont_scale_prior():
     return dist.Normal(0.0, FLUXMIX_CONT_SCALE_PRIOR_SIGMA)
 
 
-def compute_flux_line_ratio_offsets(lam_rf, *, lambda_center_rf, eta_sigma, log_amp_delta_lya):
+def compute_flux_line_ratio_offsets(
+    lam_rf,
+    *,
+    lambda_center_rf,
+    eta_sigma,
+    log_amp_delta_lya,
+    lam_lya_rf=None,
+):
     """Offsets mapping sampled line/continuum log-ratios back to legacy amplitude deltas."""
 
     lam_rf = jnp.asarray(lam_rf, dtype=float)
+    if lam_lya_rf is None:
+        lam_lya_rf = lam_rf
+    lam_lya_rf = jnp.asarray(lam_lya_rf, dtype=lam_rf.dtype)
     lambda_center_rf = jnp.asarray(lambda_center_rf, dtype=lam_rf.dtype)
     eta_sigma = jnp.asarray(eta_sigma, dtype=lam_rf.dtype)
     log_amp_delta_lya = jnp.asarray(log_amp_delta_lya, dtype=lam_rf.dtype)
@@ -1901,7 +1935,7 @@ def compute_flux_line_ratio_offsets(lam_rf, *, lambda_center_rf, eta_sigma, log_
         _expand_last(lambda_center_rf),
         _expand_last(eta_sigma),
     )
-    log_amp_delta_lya_band = _expand_last(log_amp_delta_lya) * lya_variability_weight(lam_rf)
+    log_amp_delta_lya_band = _expand_last(log_amp_delta_lya) * lya_variability_weight(lam_lya_rf)
     log_ratio_offset_blr = _expand_last(sigma_shift_to_uv) - sigma_shift_to_band - log_amp_delta_lya_band
 
     bc_weight = balmer_continuum_weight(lam_rf)
@@ -2408,10 +2442,13 @@ def make_lc(
     return out
 
 
-def build_explicit_model_params(raw_params, lam_rf):
+def build_explicit_model_params(raw_params, lam_rf, *, lam_lya_rf=None):
     """Convert sampled high-level parameters into explicit model arrays."""
 
     lam_rf = jnp.asarray(lam_rf)
+    if lam_lya_rf is None:
+        lam_lya_rf = raw_params.get("lam_lya_rf", lam_rf)
+    lam_lya_rf = jnp.asarray(lam_lya_rf, dtype=lam_rf.dtype)
     lambda_uv = jnp.array(2500.0, dtype=lam_rf.dtype)
     lambda_center_rf = jnp.asarray(
         raw_params.get("lambda_center_rf", compute_lambda_center_rf(lam_rf))
@@ -2477,7 +2514,7 @@ def build_explicit_model_params(raw_params, lam_rf):
         lambda_center_rf_exp,
         eta_sigma_exp,
     )
-    log_amp_delta_lya_band = log_amp_delta_lya_exp * lya_variability_weight(lam_rf)
+    log_amp_delta_lya_band = log_amp_delta_lya_exp * lya_variability_weight(lam_lya_rf)
     bc_weight = balmer_continuum_weight(lam_rf)
 
     amp_cont = jnp.exp(log_sigma_band + log_amp_delta_lya_band)
@@ -2534,10 +2571,13 @@ def build_explicit_model_params(raw_params, lam_rf):
     return explicit
 
 
-def build_explicit_model_params_relflux(raw_params, lam_rf):
+def build_explicit_model_params_relflux(raw_params, lam_rf, *, lam_lya_rf=None):
     """Convert sampled relative-flux parameters into internal and legacy arrays."""
 
     lam_rf = jnp.asarray(lam_rf)
+    if lam_lya_rf is None:
+        lam_lya_rf = raw_params.get("lam_lya_rf", lam_rf)
+    lam_lya_rf = jnp.asarray(lam_lya_rf, dtype=lam_rf.dtype)
     lambda_uv = jnp.array(2500.0, dtype=lam_rf.dtype)
     lambda_center_rf = jnp.asarray(
         raw_params.get("lambda_center_rf", compute_lambda_center_rf(lam_rf))
@@ -2608,7 +2648,7 @@ def build_explicit_model_params_relflux(raw_params, lam_rf):
         lambda_center_rf_exp,
         eta_sigma_exp,
     )
-    log_amp_delta_lya_band = log_amp_delta_lya_exp * lya_variability_weight(lam_rf)
+    log_amp_delta_lya_band = log_amp_delta_lya_exp * lya_variability_weight(lam_lya_rf)
     bc_weight = balmer_continuum_weight(lam_rf)
 
     amp_cont_relflux = jnp.exp(log_sigma_band_relflux + log_amp_delta_lya_band)
@@ -2679,7 +2719,7 @@ def build_explicit_model_params_relflux(raw_params, lam_rf):
     return explicit
 
 
-def build_explicit_model_params_continuum_only(raw_params, lam_rf):
+def build_explicit_model_params_continuum_only(raw_params, lam_rf, *, lam_lya_rf=None):
     """Explicit continuum-only parameters with line amplitudes forced to zero."""
 
     lam_rf = jnp.asarray(lam_rf)
@@ -2690,7 +2730,7 @@ def build_explicit_model_params_continuum_only(raw_params, lam_rf):
     raw.setdefault("log_amp_delta_blr2", jnp.full(B, -9.0, dtype=lam_rf.dtype))
     raw.setdefault("log_lag_blr", jnp.full(B, -9.0, dtype=lam_rf.dtype))
     raw.setdefault("log_lag_blr2", jnp.full(B, -9.0, dtype=lam_rf.dtype))
-    explicit = build_explicit_model_params(raw, lam_rf)
+    explicit = build_explicit_model_params(raw, lam_rf, lam_lya_rf=lam_lya_rf)
     explicit["amp_bc"] = zeros
     explicit["amp_blr"] = zeros
     explicit["amp_blr2"] = zeros
@@ -2700,15 +2740,15 @@ def build_explicit_model_params_continuum_only(raw_params, lam_rf):
     return explicit
 
 
-def build_explicit_model_params_fluxmix_fast(raw_params, lam_rf):
+def build_explicit_model_params_fluxmix_fast(raw_params, lam_rf, *, lam_lya_rf=None):
     """Explicit parameters for the two-stage flux-mixing approximation."""
 
-    explicit = build_explicit_model_params(raw_params, lam_rf)
+    explicit = build_explicit_model_params(raw_params, lam_rf, lam_lya_rf=lam_lya_rf)
     explicit["log_cont_scale"] = jnp.asarray(raw_params.get("log_cont_scale", 0.0))
     return explicit
 
 
-def add_model_prediction_params(samples, lam_rf, *, model_variant=None):
+def add_model_prediction_params(samples, lam_rf, *, model_variant=None, lam_lya_rf=None):
     """Add explicit model parameters needed for prediction/plotting."""
 
     out = dict(samples)
@@ -2744,6 +2784,7 @@ def add_model_prediction_params(samples, lam_rf, *, model_variant=None):
         explicit = build_explicit_model_params_fluxmix_fast(
             out,
             lam_rf,
+            lam_lya_rf=lam_lya_rf,
         )
         out["log_kernel_param"] = np.asarray(explicit["log_kernel_param"])
         out["amp_cont"] = np.asarray(explicit["amp_cont"])
@@ -2806,6 +2847,7 @@ def add_model_prediction_params(samples, lam_rf, *, model_variant=None):
         explicit = build_explicit_model_params_relflux(
             out,
             lam_rf,
+            lam_lya_rf=lam_lya_rf,
         )
         out["log_kernel_param"] = np.asarray(explicit["log_kernel_param"])
         out["amp_cont_relflux"] = np.asarray(explicit["amp_cont_relflux"])
@@ -2870,6 +2912,7 @@ def add_model_prediction_params(samples, lam_rf, *, model_variant=None):
     explicit = build_explicit_model_params(
         out,
         lam_rf,
+        lam_lya_rf=lam_lya_rf,
     )
     out["log_kernel_param"] = np.asarray(explicit["log_kernel_param"])
     out["amp_cont"] = np.asarray(explicit["amp_cont"])
@@ -2907,6 +2950,7 @@ def build_single_object_model(
     lam_rf,
     log_jitter_mean,
     *,
+    lam_lya_rf=None,
     disable_poly1=False,
     disable_lag_blr=False,
     disable_lag_bc=False,
@@ -2922,6 +2966,9 @@ def build_single_object_model(
     z = float(obj_dict["z"])
     B = int(len(lam_rf))
     lambda_center_rf = compute_lambda_center_rf(lam_rf)
+    if lam_lya_rf is None:
+        lam_lya_rf = lam_rf
+    lam_lya_rf = jnp.asarray(lam_lya_rf, dtype=lam_rf.dtype)
     lambda_uv = jnp.array(2500.0, dtype=lam_rf.dtype)
 
     def model():
@@ -2973,6 +3020,7 @@ def build_single_object_model(
             lambda_center_rf=lambda_center_rf,
             eta_sigma=eta_sigma,
             log_amp_delta_lya=log_amp_delta_lya,
+            lam_lya_rf=lam_lya_rf,
         )
         (
             mean,
@@ -3022,6 +3070,7 @@ def build_single_object_model(
         params = build_explicit_model_params(
             raw_params,
             lam_rf,
+            lam_lya_rf=lam_lya_rf,
         )
 
         numpyro.deterministic("lambda_center_rf", params["lambda_center_rf"])
@@ -3061,6 +3110,7 @@ def build_single_object_model_mag_flux_linearized(
     lam_rf,
     log_jitter_mean,
     *,
+    lam_lya_rf=None,
     disable_poly1=False,
     disable_lag_blr=False,
     disable_lag_bc=False,
@@ -3081,6 +3131,9 @@ def build_single_object_model_mag_flux_linearized(
     z = float(obj_dict["z"])
     B = int(len(lam_rf))
     lambda_center_rf = compute_lambda_center_rf(lam_rf)
+    if lam_lya_rf is None:
+        lam_lya_rf = lam_rf
+    lam_lya_rf = jnp.asarray(lam_lya_rf, dtype=lam_rf.dtype)
     baseline_flux_by_band = reference_flux_from_mean_magnitudes(obj_dict["mags_means"])
     y_relflux = mag_residual_to_relative_flux(y)
     yerr_relflux = magerr_residual_to_relative_fluxerr(y, yerr)
@@ -3138,6 +3191,7 @@ def build_single_object_model_mag_flux_linearized(
             lambda_center_rf=lambda_center_rf,
             eta_sigma=eta_sigma,
             log_amp_delta_lya=log_amp_delta_lya,
+            lam_lya_rf=lam_lya_rf,
         )
         (
             mean,
@@ -3188,6 +3242,7 @@ def build_single_object_model_mag_flux_linearized(
         params = build_explicit_model_params_relflux(
             raw_params,
             lam_rf,
+            lam_lya_rf=lam_lya_rf,
         )
 
         numpyro.deterministic("lambda_center_rf", params["lambda_center_rf"])
@@ -3235,6 +3290,7 @@ def build_single_object_model_continuum_only(
     lam_rf,
     log_jitter_mean,
     *,
+    lam_lya_rf=None,
     disable_poly1=False,
     drop_band_lyman_alpha=False,
     tau_fast_truncated=False,
@@ -3247,6 +3303,9 @@ def build_single_object_model_continuum_only(
     z = float(obj_dict["z"])
     B = int(len(lam_rf))
     lambda_center_rf = compute_lambda_center_rf(lam_rf)
+    if lam_lya_rf is None:
+        lam_lya_rf = lam_rf
+    lam_lya_rf = jnp.asarray(lam_lya_rf, dtype=lam_rf.dtype)
 
     def model():
         eta_sigma = numpyro.sample("eta_sigma", eta_sigma_prior())
@@ -3305,8 +3364,11 @@ def build_single_object_model_continuum_only(
             eta_sigma=eta_sigma,
             eta_tau=eta_tau,
         )
-        params = build_explicit_model_params_continuum_only(raw_params, lam_rf)
-
+        params = build_explicit_model_params_continuum_only(
+            raw_params,
+            lam_rf,
+            lam_lya_rf=lam_lya_rf,
+        )
         numpyro.deterministic("lambda_center_rf", params["lambda_center_rf"])
         numpyro.deterministic("log_sigma_uv", params["log_sigma_uv"])
         numpyro.deterministic("log_tau_uv", params["log_tau_uv"])
@@ -3343,6 +3405,7 @@ def build_single_object_model_mag_fluxmix_stage2(
     obj_dict,
     lam_rf,
     *,
+    lam_lya_rf=None,
     stage1_raw_median,
     stage1_params_median,
     basis_grid_t,
@@ -3366,6 +3429,9 @@ def build_single_object_model_mag_fluxmix_stage2(
     yerr = jnp.asarray(obj_dict["yerr"], dtype=float)
     z = float(obj_dict["z"])
     B = int(len(lam_rf))
+    if lam_lya_rf is None:
+        lam_lya_rf = lam_rf
+    lam_lya_rf = jnp.asarray(lam_lya_rf, dtype=lam_rf.dtype)
     mean_func = make_linear_mean_func(t, zero_mean=zero_mean)
     mean_obs = mean_func(stage1_raw_median, (t, bidx))
     log_jitter_fixed = jnp.asarray(stage1_raw_median["log_jitter"], dtype=float)
@@ -3419,6 +3485,7 @@ def build_single_object_model_mag_fluxmix_stage2(
             lambda_center_rf=lambda_center_rf,
             eta_sigma=eta_sigma,
             log_amp_delta_lya=log_amp_delta_lya_fixed,
+            lam_lya_rf=lam_lya_rf,
         )
 
         if disable_lag_blr:
@@ -3476,7 +3543,11 @@ def build_single_object_model_mag_fluxmix_stage2(
         if log_amp_delta_bc is not None:
             stage2_raw_params["log_amp_delta_bc"] = log_amp_delta_bc
             stage2_raw_params["log_lag_ratio_bc_to_blr"] = log_lag_ratio_bc_to_blr
-        explicit_params = build_explicit_model_params_fluxmix_fast(stage2_raw_params, lam_rf)
+        explicit_params = build_explicit_model_params_fluxmix_fast(
+            stage2_raw_params,
+            lam_rf,
+            lam_lya_rf=lam_lya_rf,
+        )
         amp_cont = jnp.asarray(explicit_params["amp_cont"], dtype=float)
         amp_blr = jnp.asarray(explicit_params["amp_blr"], dtype=float)
         amp_bc = jnp.asarray(explicit_params["amp_bc"], dtype=float)
@@ -3651,11 +3722,15 @@ def _fluxmix_stage1_raw_median_params(samples_flat, lam_rf):
     )
 
 
-def _build_fluxmix_continuum_basis(obj_dict, lam_rf, stage1_raw_median):
+def _build_fluxmix_continuum_basis(obj_dict, lam_rf, stage1_raw_median, *, lam_lya_rf=None):
     """Build the fixed normalized continuum basis used by stage 2."""
 
     B = int(len(lam_rf))
-    continuum_params = build_explicit_model_params_continuum_only(stage1_raw_median, lam_rf)
+    continuum_params = build_explicit_model_params_continuum_only(
+        stage1_raw_median,
+        lam_rf,
+        lam_lya_rf=lam_lya_rf,
+    )
     continuum_model = make_multiband_dho_blr_model(
         obj_dict["X"],
         obj_dict["y"],
@@ -3747,7 +3822,7 @@ def _fluxmix_zero_line_amplitudes(params):
     return out
 
 
-def _combine_fluxmix_stage_samples(stage1_per_chain, stage2_per_chain, lam_rf):
+def _combine_fluxmix_stage_samples(stage1_per_chain, stage2_per_chain, lam_rf, *, lam_lya_rf=None):
     """Merge stage-1 and stage-2 per-chain samples into the public posterior dict."""
 
     n_draws = min(
@@ -3768,12 +3843,14 @@ def _combine_fluxmix_stage_samples(stage1_per_chain, stage2_per_chain, lam_rf):
         combined_per_chain_raw,
         lam_rf,
         model_variant="mag_fluxmix_fast",
+        lam_lya_rf=lam_lya_rf,
     )
     combined_flat = _flatten_per_chain_samples(combined_per_chain)
     combined_flat = add_model_prediction_params(
         combined_flat,
         lam_rf,
         model_variant="mag_fluxmix_fast",
+        lam_lya_rf=lam_lya_rf,
     )
     return combined_flat, combined_per_chain
 
@@ -3825,6 +3902,7 @@ def run_two_stage_fluxmix_fast_inference(
     lam_rf,
     log_jitter_mean,
     *,
+    lam_lya_rf=None,
     rng_key,
     num_warmup,
     num_samples,
@@ -3868,6 +3946,7 @@ def run_two_stage_fluxmix_fast_inference(
             stage1_fit_obj,
             lam_rf,
             log_jitter_mean=log_jitter_mean,
+            lam_lya_rf=lam_lya_rf,
             disable_poly1=disable_poly1,
             drop_band_lyman_alpha=drop_band_lyman_alpha,
             tau_fast_truncated=tau_fast_truncated,
@@ -3885,11 +3964,17 @@ def run_two_stage_fluxmix_fast_inference(
         )
 
         stage1_raw_median = _fluxmix_stage1_raw_median_params(stage1_flat, lam_rf)
-        basis_info = _build_fluxmix_continuum_basis(obj_dict, lam_rf, stage1_raw_median)
+        basis_info = _build_fluxmix_continuum_basis(
+            obj_dict,
+            lam_rf,
+            stage1_raw_median,
+            lam_lya_rf=lam_lya_rf,
+        )
 
         stage2_model = build_single_object_model_mag_fluxmix_stage2(
             obj_dict,
             lam_rf,
+            lam_lya_rf=lam_lya_rf,
             stage1_raw_median=stage1_raw_median,
             stage1_params_median=basis_info["continuum_params"],
             basis_grid_t=basis_info["basis_grid_t"],
@@ -3921,6 +4006,7 @@ def run_two_stage_fluxmix_fast_inference(
             stage1_per_chain,
             stage2_per_chain,
             lam_rf,
+            lam_lya_rf=lam_lya_rf,
         )
         display_model = _make_fluxmix_display_model(obj_dict, basis_info, combined_flat)
 
@@ -4202,6 +4288,7 @@ def main():
 
             bands = obj["bands"]
             lam_rf = jnp.array([lambda_pivot[b] for b in bands], dtype=float) / (1.0 + float(obj["z"]))
+            lam_lya_rf = compute_lam_lya_suppression_rf(bands, obj["z"])
             lambda_center_rf = compute_lambda_center_rf(lam_rf)
             print(f"[{oid}] Using bands: {bands}")
             print(f"[{oid}] lam_rf = {lam_rf}")
@@ -4267,6 +4354,7 @@ def main():
                     obj,
                     lam_rf,
                     log_jitter_mean=log_jitter_mean_fit,
+                    lam_lya_rf=lam_lya_rf,
                     disable_poly1=args.disable_poly1,
                     disable_lag_blr=args.disable_lag_blr,
                     disable_lag_bc=args.disable_lag_bc,
@@ -4290,6 +4378,7 @@ def main():
                         obj,
                         lam_rf,
                         log_jitter_mean=log_jitter_mean,
+                        lam_lya_rf=lam_lya_rf,
                         rng_key=key,
                         num_warmup=args.nwarm,
                         num_samples=args.nsamp,
@@ -4401,6 +4490,7 @@ def main():
                 obj_flat_samples,
                 lam_rf,
                 model_variant=args.model_variant,
+                lam_lya_rf=lam_lya_rf,
             )
 
             log_nonfinite_sample_summary(obj_flat_samples, label=oid)
