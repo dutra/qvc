@@ -233,8 +233,6 @@ def test_corner_plot_labels_keep_only_curated_main_parameters():
         "log_tau_uv": np.array([2.0, 2.1]),
         "log_tau_fast_center0": np.array([0.2, 0.3]),
         "log_tau_fast_uv": np.array([0.5, 0.6]),
-        "tau_drift": np.array([3000.0, 3200.0]),
-        "log_tau_drift": np.array([8.0, 8.1]),
         "lag0": np.array([5.0, 6.0]),
         "lag_beta": np.array([1.1, 1.2]),
         "linear_trend": np.array([0.0, 0.01]),
@@ -254,8 +252,6 @@ def test_corner_plot_labels_keep_only_curated_main_parameters():
 
     assert "eta_sigma" in labels_for_corner
     assert "log_sigma_uv" in labels_for_corner
-    assert "tau_drift" in labels_for_corner
-    assert "log_tau_drift" in labels_for_corner
     assert "dlog_amp_blr_g" in labels_for_corner
     assert "mean_g" in labels_for_corner
     assert "log_jitter_g" in labels_for_corner
@@ -275,7 +271,6 @@ def test_trace_plot_labels_include_fitted_survey_offsets_and_drift_params():
     samples_flat = {
         "eta_sigma": np.array([0.1, 0.2]),
         "dlog_amp_drift": np.array([-2.0, -1.8], dtype=float),
-        "tau_drift": np.array([3000.0, 3200.0], dtype=float),
         "log_tau_drift": np.array([6.0, 6.2], dtype=float),
         "survey_delta_mag_g_sdss": np.zeros(2, dtype=float),
         "survey_delta_mag_g_ztf": np.array([0.01, 0.02], dtype=float),
@@ -286,7 +281,6 @@ def test_trace_plot_labels_include_fitted_survey_offsets_and_drift_params():
 
     assert "eta_sigma" in labels_for_trace
     assert "dlog_amp_drift" in labels_for_trace
-    assert "tau_drift" in labels_for_trace
     assert "log_tau_drift" in labels_for_trace
     assert "survey_delta_mag_g_ztf" in labels_for_trace
     assert "survey_delta_mag_r_ps1" in labels_for_trace

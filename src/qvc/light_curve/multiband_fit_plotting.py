@@ -115,7 +115,6 @@ POSTERIOR_PLOT_KEY_GROUPS = {
             "log_sigma_uv",
             "log_tau_uv",
             "log_tau_fast_uv",
-            "tau_drift",
             "log_tau_drift",
             "dlog_amp_drift",
             "lag0",
