@@ -629,9 +629,18 @@ def posterior_median_mean_function(flat_samples, t_eval, band, *, t_ref=None, su
         if "linear_trend" in flat_samples
         else 0.0
     )
+    band_linear_trend = linear_trend
+    band_slope_key = f"linear_trend_band_{band}"
+    band_offset_key = f"linear_trend_band_offset_{band}"
+    if band_slope_key in flat_samples:
+        band_linear_trend = float(np.nanmedian(np.asarray(flat_samples[band_slope_key], dtype=float)))
+    elif band_offset_key in flat_samples:
+        band_linear_trend = linear_trend + float(
+            np.nanmedian(np.asarray(flat_samples[band_offset_key], dtype=float))
+        )
     t_center, t_std = linear_mean_time_scaling(t_ref)
     time_scaled = (t_eval - t_center) / t_std
-    mean_curve = mean_level + linear_trend * time_scaled
+    mean_curve = mean_level + band_linear_trend * time_scaled
     survey_offset_mag = np.zeros_like(t_eval, dtype=float)
     if survey_idx is not None:
         survey_idx = np.asarray(survey_idx, dtype=np.int32)
@@ -2239,6 +2248,27 @@ def linear_trend_prior_relflux():
     return dist.Normal(0.0, 0.1 / RELFLUX_TO_MAG_SCALE)
 
 
+def linear_trend_band_offset_raw_prior():
+    return dist.Normal(0.0, 0.02)
+
+
+def linear_trend_band_offset_raw_prior_relflux():
+    return dist.Normal(0.0, 0.02 / RELFLUX_TO_MAG_SCALE)
+
+
+def linear_trend_band_offset_prior(B, *, relflux=False):
+    """Marginal prior for the centered per-band slope offsets."""
+
+    if B <= 1:
+        return dist.Normal(0.0, 1e-6)
+    base_scale = (
+        0.02 / RELFLUX_TO_MAG_SCALE
+        if relflux
+        else 0.02
+    )
+    return dist.Normal(0.0, base_scale * jnp.sqrt((B - 1) / B))
+
+
 def lag0_prior():
     return dist.TruncatedNormal(5.0, 5.0, low=0.0, high=LAG0_HIGH)
 
@@ -2307,6 +2337,50 @@ def log_lag_ratio_bc_to_blr_prior():
 
 def log_cont_scale_prior():
     return dist.Normal(0.0, FLUXMIX_CONT_SCALE_PRIOR_SIGMA)
+
+
+def sample_linear_trend_with_band_offsets(
+    *,
+    B,
+    disable_linear_trend=False,
+    trend_prior_dist=None,
+    band_offset_raw_prior_dist=None,
+):
+    """Sample a global slope plus zero-sum per-band slope offsets."""
+
+    if trend_prior_dist is None:
+        trend_prior_dist = linear_trend_prior()
+    if band_offset_raw_prior_dist is None:
+        band_offset_raw_prior_dist = linear_trend_band_offset_raw_prior()
+
+    zeros = jnp.zeros(B, dtype=float)
+    if disable_linear_trend:
+        linear_trend = numpyro.deterministic("linear_trend", 0.0)
+        linear_trend_band_offset = numpyro.deterministic(
+            "linear_trend_band_offset",
+            zeros,
+        )
+        linear_trend_band = numpyro.deterministic(
+            "linear_trend_band",
+            zeros,
+        )
+        return linear_trend, linear_trend_band_offset, linear_trend_band
+
+    linear_trend = numpyro.sample("linear_trend", trend_prior_dist)
+    with numpyro.plate("band", B):
+        linear_trend_band_offset_raw = numpyro.sample(
+            "linear_trend_band_offset_raw",
+            band_offset_raw_prior_dist,
+        )
+    linear_trend_band_offset = numpyro.deterministic(
+        "linear_trend_band_offset",
+        linear_trend_band_offset_raw - jnp.mean(linear_trend_band_offset_raw),
+    )
+    linear_trend_band = numpyro.deterministic(
+        "linear_trend_band",
+        linear_trend + linear_trend_band_offset,
+    )
+    return linear_trend, linear_trend_band_offset, linear_trend_band
 
 
 def compute_flux_line_ratio_offsets(
@@ -2518,6 +2592,10 @@ def compute_parameter_kls(
     linear_trend_prior_fn = (
         linear_trend_prior_relflux if model_variant == "mag_flux_linearized" else linear_trend_prior
     )
+    linear_trend_band_offset_prior_fn = linear_trend_band_offset_prior(
+        len(bands),
+        relflux=(model_variant == "mag_flux_linearized"),
+    )
     mean_prior_fn = mean_prior_relflux if model_variant == "mag_flux_linearized" else mean_prior
 
     kls["eta_sigma_kl"] = kl_from_samples(
@@ -2599,6 +2677,14 @@ def compute_parameter_kls(
             )
 
     for i, band in enumerate(bands):
+        if not disable_linear_trend:
+            band_offset_key = f"linear_trend_band_offset_{band}"
+            if band_offset_key in flat_samples:
+                kls[f"{band_offset_key}_kl"] = kl_from_samples(
+                    flat_samples[band_offset_key],
+                    lambda x: _dist_log_prob_array(linear_trend_band_offset_prior_fn, x),
+                )
+
         mean_key = f"mean_{band}"
         if mean_key in flat_samples:
             kls[f"{mean_key}_kl"] = kl_from_samples(
@@ -3440,10 +3526,16 @@ def build_single_object_model(
             ),
         )
 
-        if disable_linear_trend:
-            linear_trend = numpyro.deterministic("linear_trend", 0.0)
-        else:
-            linear_trend = numpyro.sample("linear_trend", linear_trend_prior())
+        (
+            linear_trend,
+            linear_trend_band_offset,
+            _linear_trend_band,
+        ) = sample_linear_trend_with_band_offsets(
+            B=B,
+            disable_linear_trend=disable_linear_trend,
+            trend_prior_dist=linear_trend_prior(),
+            band_offset_raw_prior_dist=linear_trend_band_offset_raw_prior(),
+        )
 
         lag0 = numpyro.sample("lag0", lag0_prior())
         log_lag0 = numpyro.deterministic("log_lag0", jnp.log(lag0))
@@ -3487,6 +3579,7 @@ def build_single_object_model(
             log_sigma_center0=log_sigma_center0,
             lambda_center_rf=lambda_center_rf,
             linear_trend=linear_trend,
+            linear_trend_band_offset=linear_trend_band_offset,
             mean=mean,
             dlog_amp_blr=dlog_amp_blr,
             dlog_amp_blr2=dlog_amp_blr2,
@@ -3619,10 +3712,16 @@ def build_single_object_model_mag_flux_linearized(
             ),
         )
 
-        if disable_linear_trend:
-            linear_trend = numpyro.deterministic("linear_trend", 0.0)
-        else:
-            linear_trend = numpyro.sample("linear_trend", linear_trend_prior_relflux())
+        (
+            linear_trend,
+            linear_trend_band_offset,
+            _linear_trend_band,
+        ) = sample_linear_trend_with_band_offsets(
+            B=B,
+            disable_linear_trend=disable_linear_trend,
+            trend_prior_dist=linear_trend_prior_relflux(),
+            band_offset_raw_prior_dist=linear_trend_band_offset_raw_prior_relflux(),
+        )
 
         lag0 = numpyro.sample("lag0", lag0_prior())
         log_lag0 = numpyro.deterministic("log_lag0", jnp.log(lag0))
@@ -3667,6 +3766,7 @@ def build_single_object_model_mag_flux_linearized(
             log_sigma_center0=log_sigma_center0,
             lambda_center_rf=lambda_center_rf,
             linear_trend=linear_trend,
+            linear_trend_band_offset=linear_trend_band_offset,
             mean=mean,
             dlog_amp_blr=dlog_amp_blr,
             dlog_amp_blr2=dlog_amp_blr2,
@@ -3791,10 +3891,16 @@ def build_single_object_model_continuum_only(
             ),
         )
 
-        if disable_linear_trend:
-            linear_trend = numpyro.deterministic("linear_trend", 0.0)
-        else:
-            linear_trend = numpyro.sample("linear_trend", linear_trend_prior())
+        (
+            linear_trend,
+            linear_trend_band_offset,
+            _linear_trend_band,
+        ) = sample_linear_trend_with_band_offsets(
+            B=B,
+            disable_linear_trend=disable_linear_trend,
+            trend_prior_dist=linear_trend_prior(),
+            band_offset_raw_prior_dist=linear_trend_band_offset_raw_prior(),
+        )
 
         lag0 = numpyro.sample("lag0", lag0_prior())
         lag_beta = numpyro.sample("lag_beta", lag_beta_prior())
@@ -3814,6 +3920,7 @@ def build_single_object_model_continuum_only(
             log_sigma_center0=log_sigma_center0,
             lambda_center_rf=lambda_center_rf,
             linear_trend=linear_trend,
+            linear_trend_band_offset=linear_trend_band_offset,
             mean=mean,
             log_jitter=log_jitter,
             survey_delta_mag=survey_delta_mag,
@@ -4150,6 +4257,7 @@ def _fluxmix_stage1_raw_median_params(samples_flat, lam_rf):
     mean_default = np.zeros(B, dtype=float)
     jitter_default = np.full((B, len(LC_SURVEY_NAMES)), np.log(1e-3), dtype=float)
     survey_delta_default = np.zeros((B, len(LC_SURVEY_NAMES)), dtype=float)
+    linear_trend_band_offset_default = np.zeros(B, dtype=float)
     linear_trend_default = 0.0
     if "stage1_basis_log_sigma_center0" in samples_flat:
         log_sigma_center0_stage1 = np.asarray(samples_flat["stage1_basis_log_sigma_center0"], dtype=float)
@@ -4182,6 +4290,19 @@ def _fluxmix_stage1_raw_median_params(samples_flat, lam_rf):
             np.median(
                 np.asarray(
                     samples_flat.get("linear_trend", linear_trend_default),
+                    dtype=float,
+                ),
+                axis=0,
+            ),
+            dtype=float,
+        ),
+        linear_trend_band_offset=jnp.asarray(
+            np.median(
+                np.asarray(
+                    samples_flat.get(
+                        "linear_trend_band_offset",
+                        linear_trend_band_offset_default,
+                    ),
                     dtype=float,
                 ),
                 axis=0,

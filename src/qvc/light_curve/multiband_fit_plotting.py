@@ -1463,6 +1463,17 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, mags_means, survey_
 
     t = X[0] + time0
     posterior_median = {k: np.median(v, axis=0) for k, v in samples.items()}
+    y_plot = np.asarray(y, dtype=float).copy()
+    survey_idx_plot = getattr(model, "survey_idx", None)
+    if survey_idx_plot is not None and "survey_delta_mag" in posterior_median:
+        survey_delta_mag = np.asarray(posterior_median["survey_delta_mag"], dtype=float)
+        survey_idx_plot = np.asarray(survey_idx_plot, dtype=np.int32)
+        if (
+            survey_delta_mag.ndim == 2
+            and survey_idx_plot.shape == y_plot.shape
+            and np.asarray(band_idx).shape == y_plot.shape
+        ):
+            y_plot = y_plot - survey_delta_mag[np.asarray(band_idx, dtype=np.int32), survey_idx_plot]
     t_test = np.linspace(t.min() - 400, t.max() + 400, 1000)
 
     for n in np.unique(band_idx):
@@ -1478,7 +1489,7 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, mags_means, survey_
             label = f"{band_idx_map[n]}-band"
 
         ax_lc.errorbar(
-            t[mask], y[mask] + offsets[n], yerr=yerr[mask], fmt='o',
+            t[mask], y_plot[mask] + offsets[n], yerr=yerr[mask], fmt='o',
             label=label, alpha=0.7, color=colors[band_idx_map[n]],
             lw=1, capsize=2, markersize=3
         )

@@ -1336,6 +1336,63 @@ def test_save_combined_plot_fluxmix_handles_singleton_sample_entries(monkeypatch
     )
 
 
+def test_save_combined_plot_shifts_points_by_fitted_survey_offsets(monkeypatch):
+    class _DummyPlotModel:
+        def __init__(self, survey_idx):
+            self.survey_idx = jnp.asarray(survey_idx, dtype=jnp.int32)
+
+        def pred(self, params, new_X):
+            t_new, _b_new = new_X
+            n = len(np.asarray(t_new))
+            return jnp.zeros(n, dtype=float), jnp.zeros(n, dtype=float)
+
+    captured_y = []
+
+    def _fake_errorbar(self, x, y, *args, **kwargs):
+        captured_y.append(np.asarray(y, dtype=float))
+        return None
+
+    monkeypatch.setattr("matplotlib.axes.Axes.errorbar", _fake_errorbar)
+    monkeypatch.setattr("matplotlib.pyplot.savefig", lambda *args, **kwargs: None)
+
+    model = _DummyPlotModel(survey_idx=np.array([0, 2, 0, 2], dtype=np.int32))
+    samples = {
+        "survey_delta_mag": np.array(
+            [
+                [[0.0, 0.0, 0.1], [0.0, 0.0, 0.2]],
+                [[0.0, 0.0, 0.1], [0.0, 0.0, 0.2]],
+            ],
+            dtype=float,
+        )
+    }
+    X = (
+        jnp.array([10.0, 11.0, 12.0, 13.0], dtype=float),
+        jnp.array([0, 0, 1, 1], dtype=jnp.int32),
+    )
+    y = jnp.array([1.0, 2.0, 3.0, 4.0], dtype=float)
+    yerr = jnp.full(4, 0.05, dtype=float)
+    band_idx = np.array([0, 0, 1, 1], dtype=np.int32)
+    mags_means = np.array([0.0, 0.0], dtype=float)
+
+    save_combined_plot(
+        samples,
+        model,
+        X,
+        y,
+        yerr,
+        band_idx,
+        mags_means,
+        {},
+        {"object_id": "101", "z": 1.0},
+        bands=["g", "r"],
+        plot_psd=False,
+        filename_suffix="pytest_survey_shift",
+    )
+
+    np.testing.assert_allclose(captured_y[0], np.array([1.0, 1.9], dtype=float))
+    np.testing.assert_allclose(captured_y[1], np.array([3.25, 4.05], dtype=float))
+
+
 def test_fluxmix_saved_samples_preserve_stage1_basis_for_rebuild():
     obj = _make_fake_public_object()
     lc = make_lc(

@@ -100,23 +100,28 @@ def load_spectra_psf_fractions(spectra_fit_csvs) -> dict[str, dict]:
     }
 
 
-def get_bandpass_agn_fraction(source: Mapping[str, object], band: str) -> tuple[float, str | None]:
-    """Return the variable-AGN/total fraction for one photometric band."""
+def get_bandpass_agn_fraction(source: Mapping[str, object], band: str) -> tuple[float, float, str | None]:
+    """Return the variable-AGN/total fraction and its uncertainty for one photometric band."""
 
     band_key = f"f_AGN_psf_{band}"
+    band_err_key = f"{band_key}_err"
     val = source.get(band_key, np.nan)
+    err = source.get(band_err_key, np.nan)
     if np.isfinite(val):
         val = float(val)
         if 0.0 < val <= 1.0:
-            return min(val, 0.999), band_key
+            err = float(err) if np.isfinite(err) else 0.0
+            err = float(np.clip(err, 0.0, 1.0))
+            return min(val, 0.999), err, band_key
 
-    return np.nan, None
+    return np.nan, np.nan, None
 
 
 def subtract_constant_flux_from_band(
     mags,
     magerrs,
     agn_fraction,
+    agn_fraction_err=0.0,
     *,
     reference_stat: str = "median",
 ):
@@ -130,6 +135,7 @@ def subtract_constant_flux_from_band(
 
     summary = {
         "agn_fraction": np.nan,
+        "agn_fraction_err": np.nan,
         "reference_total_flux": np.nan,
         "constant_contaminant_flux": np.nan,
         "n_points": int(np.sum(finite)),
@@ -140,6 +146,8 @@ def subtract_constant_flux_from_band(
     if (not np.isfinite(agn_fraction)) or agn_fraction <= 0.0 or np.sum(finite) == 0:
         return corrected_mags, corrected_magerrs, summary
 
+    agn_fraction_err = float(agn_fraction_err) if np.isfinite(agn_fraction_err) else 0.0
+    agn_fraction_err = float(np.clip(agn_fraction_err, 0.0, 1.0))
     total_flux = mag_to_relative_flux(mags[finite])
     total_flux_err = magerr_to_relative_fluxerr(mags[finite], magerrs[finite])
 
@@ -158,7 +166,9 @@ def subtract_constant_flux_from_band(
     corrected_err = np.full(total_flux_err.shape, np.nan, dtype=float)
     if np.any(valid):
         corrected[valid] = relative_flux_to_mag(agn_flux[valid])
-        corrected_err[valid] = relative_fluxerr_to_magerr(agn_flux[valid], total_flux_err[valid])
+        agn_fraction_flux_err = np.full_like(total_flux_err, reference_total_flux * agn_fraction_err)
+        total_agn_flux_err = np.sqrt(total_flux_err**2 + agn_fraction_flux_err**2)
+        corrected_err[valid] = relative_fluxerr_to_magerr(agn_flux[valid], total_agn_flux_err[valid])
 
     corrected_mags[finite] = corrected
     corrected_magerrs[finite] = corrected_err
@@ -166,6 +176,7 @@ def subtract_constant_flux_from_band(
     summary.update(
         {
             "agn_fraction": float(agn_fraction),
+            "agn_fraction_err": agn_fraction_err,
             "reference_total_flux": reference_total_flux,
             "constant_contaminant_flux": contaminant_flux,
             "n_nonpositive_after_subtraction": int(np.sum(~valid)),
@@ -208,7 +219,7 @@ def apply_constant_flux_correction_to_object(
     for band in bands:
         if band not in corrected_obj["mags"] or band not in lambda_pivot:
             continue
-        agn_fraction, source_key = get_bandpass_agn_fraction(corrected_obj, str(band))
+        agn_fraction, agn_fraction_err, source_key = get_bandpass_agn_fraction(corrected_obj, str(band))
         if not np.isfinite(agn_fraction):
             n_missing_fraction_bands += 1
             continue
@@ -216,6 +227,7 @@ def apply_constant_flux_correction_to_object(
             corrected_obj["mags"][band],
             corrected_obj["magerrs"][band],
             agn_fraction,
+            agn_fraction_err=agn_fraction_err,
             reference_stat=reference_stat,
         )
         corrected_obj["mags"][band] = mags_new

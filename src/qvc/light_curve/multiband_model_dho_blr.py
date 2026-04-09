@@ -594,7 +594,15 @@ def make_linear_mean_func(t_ref, zero_mean=False):
 
         band_idx = jnp.asarray(X[1], dtype=jnp.int32)
         mean = params["mean"][band_idx] if "mean" in params else 0.0
-        linear_trend = params["linear_trend"] if "linear_trend" in params else 0.0
+        if "linear_trend_band" in params:
+            linear_trend = jnp.asarray(params["linear_trend_band"], dtype=t_ref.dtype)[band_idx]
+        else:
+            linear_trend = params["linear_trend"] if "linear_trend" in params else 0.0
+            if "linear_trend_band_offset" in params:
+                linear_trend = linear_trend + jnp.asarray(
+                    params["linear_trend_band_offset"],
+                    dtype=t_ref.dtype,
+                )[band_idx]
         time_scaled = (X[0] - t_center) / t_std
         return mean + linear_trend * time_scaled
 

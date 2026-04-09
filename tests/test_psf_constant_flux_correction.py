@@ -37,6 +37,28 @@ def test_subtract_constant_flux_from_band_makes_curve_fainter_and_more_variable(
     assert np.nanstd(corrected_mags) > np.nanstd(mags)
 
 
+def test_subtract_constant_flux_from_band_propagates_agn_fraction_error_into_magerr():
+    mags = np.array([20.0, 20.1, 19.9, 20.2], dtype=float)
+    magerrs = np.full_like(mags, 0.02)
+
+    _, corrected_magerrs_no_frac_err, _ = subtract_constant_flux_from_band(
+        mags,
+        magerrs,
+        agn_fraction=0.5,
+        agn_fraction_err=0.0,
+    )
+    _, corrected_magerrs_with_frac_err, summary = subtract_constant_flux_from_band(
+        mags,
+        magerrs,
+        agn_fraction=0.5,
+        agn_fraction_err=0.05,
+    )
+
+    assert np.all(np.isfinite(corrected_magerrs_with_frac_err))
+    assert np.all(corrected_magerrs_with_frac_err > corrected_magerrs_no_frac_err)
+    assert np.isclose(summary["agn_fraction_err"], 0.05)
+
+
 def test_apply_constant_flux_correction_to_object_requires_bandpass_fraction():
     obj = {
         "object_id": "123",
@@ -46,6 +68,7 @@ def test_apply_constant_flux_correction_to_object_requires_bandpass_fraction():
         "magerrs": {"g": np.full(3, 0.03, dtype=float)},
         "mags_mean": [20.0],
         "f_AGN_psf_g": 0.5,
+        "f_AGN_psf_g_err": 0.04,
     }
 
     corrected_obj, summary = apply_constant_flux_correction_to_object(obj)
@@ -56,6 +79,7 @@ def test_apply_constant_flux_correction_to_object_requires_bandpass_fraction():
     band_summary = corrected_obj["psf_constant_flux_band_summaries"]["g"]
     assert band_summary["source_key"] == "f_AGN_psf_g"
     assert np.isclose(band_summary["agn_fraction"], 0.5)
+    assert np.isclose(band_summary["agn_fraction_err"], 0.04)
     assert np.nanmedian(corrected_obj["mags"]["g"]) > np.nanmedian(obj["mags"]["g"])
 
 
