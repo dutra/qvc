@@ -182,11 +182,20 @@ def _corner_plot_labels(samples_flat):
 
 
 def _trace_plot_labels(samples_flat):
-    """Return ordered trace-plot labels, including fitted survey offsets."""
+    """Return ordered trace-plot labels, including fitted survey and slope offsets."""
 
     all_labels, selected = _posterior_plot_labels(samples_flat)
     trace_labels = list(selected)
     seen = set(trace_labels)
+
+    for label in all_labels:
+        if not label.startswith("linear_trend_band_offset_") or label in seen:
+            continue
+        values = np.asarray(samples_flat[label], dtype=float)
+        if values.size == 0 or np.allclose(values, 0.0, atol=0.0, rtol=0.0):
+            continue
+        trace_labels.append(label)
+        seen.add(label)
 
     for label in all_labels:
         if not label.startswith("survey_delta_mag_") or label in seen:

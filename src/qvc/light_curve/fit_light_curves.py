@@ -105,6 +105,7 @@ SF_MODEL_TAU_N_PLOT = 400
 LOG_SF_INF_TO_RMS = 0.5 * np.log10(2.0)
 RELFLUX_TO_MAG_SCALE = float(2.5 / np.log(10.0))
 LOG_RELFLUX_TO_MAG_SCALE = float(np.log(RELFLUX_TO_MAG_SCALE))
+LINEAR_TREND_RF_SIGMA_MAG_PER_DAY = 1e-4
 FLUXMIX_CONT_SCALE_PRIOR_SIGMA = 1.0
 FLUXMIX_BASIS_GRID_MIN_POINTS = 512
 FLUXMIX_BASIS_GRID_MAX_POINTS = 2048
@@ -2240,12 +2241,18 @@ def log_tau_fast_center0_prior(log_tau_slow_center0, *, tau_fast_truncated=False
     return dist.Normal(mean, sigma)
 
 
-def linear_trend_prior():
-    return dist.Normal(0.0, 0.1)
+def linear_trend_prior(*, t_ref, z):
+    _, t_std_obs = linear_mean_time_scaling(t_ref)
+    scale = max(
+        LINEAR_TREND_RF_SIGMA_MAG_PER_DAY * float(t_std_obs) / float(1.0 + z),
+        1e-8,
+    )
+    return dist.Normal(0.0, scale)
 
 
-def linear_trend_prior_relflux():
-    return dist.Normal(0.0, 0.1 / RELFLUX_TO_MAG_SCALE)
+def linear_trend_prior_relflux(*, t_ref, z):
+    mag_prior = linear_trend_prior(t_ref=t_ref, z=z)
+    return dist.Normal(0.0, float(mag_prior.scale) / RELFLUX_TO_MAG_SCALE)
 
 
 def linear_trend_band_offset_raw_prior():
@@ -2349,7 +2356,7 @@ def sample_linear_trend_with_band_offsets(
     """Sample a global slope plus zero-sum per-band slope offsets."""
 
     if trend_prior_dist is None:
-        trend_prior_dist = linear_trend_prior()
+        trend_prior_dist = dist.Normal(0.0, 0.1)
     if band_offset_raw_prior_dist is None:
         band_offset_raw_prior_dist = linear_trend_band_offset_raw_prior()
 
@@ -2565,6 +2572,7 @@ def compute_parameter_kls(
     *,
     bands,
     survey_names,
+    t_ref,
     z,
     lambda_center_rf,
     log_jitter_mean,
@@ -2590,13 +2598,16 @@ def compute_parameter_kls(
         log_sigma_center0_relflux_prior if model_variant == "mag_flux_linearized" else log_sigma_center0_prior
     )
     linear_trend_prior_fn = (
-        linear_trend_prior_relflux if model_variant == "mag_flux_linearized" else linear_trend_prior
+        linear_trend_prior_relflux(t_ref=t_ref, z=z)
+        if model_variant == "mag_flux_linearized"
+        else linear_trend_prior(t_ref=t_ref, z=z)
     )
     linear_trend_band_offset_prior_fn = linear_trend_band_offset_prior(
         len(bands),
         relflux=(model_variant == "mag_flux_linearized"),
     )
     mean_prior_fn = mean_prior_relflux if model_variant == "mag_flux_linearized" else mean_prior
+    log_jitter_mean_arr = np.asarray(log_jitter_mean, dtype=float)
 
     kls["eta_sigma_kl"] = kl_from_samples(
         eta_sigma,
@@ -2650,7 +2661,7 @@ def compute_parameter_kls(
     if not disable_linear_trend and "linear_trend" in flat_samples:
         kls["linear_trend_kl"] = kl_from_samples(
             flat_samples["linear_trend"],
-            lambda x: _dist_log_prob_array(linear_trend_prior_fn(), x),
+            lambda x: _dist_log_prob_array(linear_trend_prior_fn, x),
         )
 
     if "lag0" in flat_samples:
@@ -2692,13 +2703,31 @@ def compute_parameter_kls(
                 lambda x: _dist_log_prob_array(mean_prior_fn(), x),
             )
 
+        band_jitter_key = f"log_jitter_{band}"
+        if band_jitter_key in flat_samples:
+            if log_jitter_mean_arr.ndim == 1:
+                jitter_prior_mean = float(log_jitter_mean_arr[i])
+            else:
+                jitter_prior_mean = float(np.nanmean(log_jitter_mean_arr[i]))
+            kls[f"{band_jitter_key}_kl"] = kl_from_samples(
+                flat_samples[band_jitter_key],
+                lambda x: _dist_log_prob_array(
+                    log_jitter_prior(jitter_prior_mean),
+                    x,
+                ),
+            )
+
         for j, survey in enumerate(survey_names):
             jitter_key = f"log_jitter_{band}_{survey}"
             if jitter_key in flat_samples:
+                if log_jitter_mean_arr.ndim == 1:
+                    jitter_prior_mean = float(log_jitter_mean_arr[i])
+                else:
+                    jitter_prior_mean = float(log_jitter_mean_arr[i, j])
                 kls[f"{jitter_key}_kl"] = kl_from_samples(
                     flat_samples[jitter_key],
                     lambda x: _dist_log_prob_array(
-                        log_jitter_prior(float(log_jitter_mean[i, j])),
+                        log_jitter_prior(jitter_prior_mean),
                         x,
                     ),
                 )
@@ -3533,7 +3562,7 @@ def build_single_object_model(
         ) = sample_linear_trend_with_band_offsets(
             B=B,
             disable_linear_trend=disable_linear_trend,
-            trend_prior_dist=linear_trend_prior(),
+            trend_prior_dist=linear_trend_prior(t_ref=t, z=z),
             band_offset_raw_prior_dist=linear_trend_band_offset_raw_prior(),
         )
 
@@ -3719,7 +3748,7 @@ def build_single_object_model_mag_flux_linearized(
         ) = sample_linear_trend_with_band_offsets(
             B=B,
             disable_linear_trend=disable_linear_trend,
-            trend_prior_dist=linear_trend_prior_relflux(),
+            trend_prior_dist=linear_trend_prior_relflux(t_ref=t, z=z),
             band_offset_raw_prior_dist=linear_trend_band_offset_raw_prior_relflux(),
         )
 
@@ -3898,7 +3927,7 @@ def build_single_object_model_continuum_only(
         ) = sample_linear_trend_with_band_offsets(
             B=B,
             disable_linear_trend=disable_linear_trend,
-            trend_prior_dist=linear_trend_prior(),
+            trend_prior_dist=linear_trend_prior(t_ref=t, z=z),
             band_offset_raw_prior_dist=linear_trend_band_offset_raw_prior(),
         )
 
@@ -5199,6 +5228,7 @@ def main():
                 obj_flat_samples_flatten_per_band,
                 bands=bands,
                 survey_names=obj["survey_names"],
+                t_ref=np.asarray(obj["X"][0], dtype=float),
                 z=float(obj["z"]),
                 lambda_center_rf=float(lambda_center_rf),
                 log_jitter_mean=np.asarray(log_jitter_mean_fit),

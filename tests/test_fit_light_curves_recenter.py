@@ -28,6 +28,7 @@ from qvc.light_curve.fit_light_curves import (
     compute_g_band_residual_drift_diagnostics,
     compute_g_band_raw_drift_diagnostics,
     log_tau_fast_center0_prior,
+    linear_trend_prior,
     compute_parameter_kls,
     compute_object_adf_diagnostics,
     compute_lambda_center_rf,
@@ -213,6 +214,15 @@ def test_log_tau_fast_center0_prior_is_centered_at_tau_slow_over_twenty_five():
     assert np.isclose(float(prior.scale), 0.4 * np.log(10.0))
 
 
+def test_linear_trend_prior_matches_1e_minus_4_mag_per_day_in_rest_frame():
+    t_ref = np.array([0.0, 10.0, 20.0], dtype=float)
+    prior = linear_trend_prior(t_ref=t_ref, z=1.0)
+
+    expected_scale = 1e-4 * np.std(t_ref) / 2.0
+    assert np.isclose(float(prior.loc), 0.0)
+    assert np.isclose(float(prior.scale), expected_scale)
+
+
 def test_corner_plot_labels_keep_only_curated_main_parameters():
     samples_flat = {
         "eta_sigma": np.array([0.1, 0.2]),
@@ -257,9 +267,11 @@ def test_corner_plot_labels_keep_only_curated_main_parameters():
     assert set(labels_for_corner).issubset(set(all_labels))
 
 
-def test_trace_plot_labels_include_fitted_survey_offsets_only():
+def test_trace_plot_labels_include_fitted_survey_and_slope_offsets_only():
     samples_flat = {
         "eta_sigma": np.array([0.1, 0.2]),
+        "linear_trend_band_offset_g": np.array([0.01, 0.015], dtype=float),
+        "linear_trend_band_offset_r": np.zeros(2, dtype=float),
         "survey_delta_mag_g_sdss": np.zeros(2, dtype=float),
         "survey_delta_mag_g_ztf": np.array([0.01, 0.02], dtype=float),
         "survey_delta_mag_r_ps1": np.array([-0.01, -0.005], dtype=float),
@@ -268,6 +280,8 @@ def test_trace_plot_labels_include_fitted_survey_offsets_only():
     all_labels, labels_for_trace = _trace_plot_labels(samples_flat)
 
     assert "eta_sigma" in labels_for_trace
+    assert "linear_trend_band_offset_g" in labels_for_trace
+    assert "linear_trend_band_offset_r" not in labels_for_trace
     assert "survey_delta_mag_g_ztf" in labels_for_trace
     assert "survey_delta_mag_r_ps1" in labels_for_trace
     assert "survey_delta_mag_g_sdss" not in labels_for_trace
@@ -429,6 +443,8 @@ def test_compute_parameter_kls_ignores_nonfinite_conditioning_samples():
     kls = compute_parameter_kls(
         flat_samples,
         bands=["g", "r"],
+        survey_names=("sdss", "ps1", "ztf"),
+        t_ref=np.array([0.0, 10.0, 20.0], dtype=float),
         z=1.5,
         lambda_center_rf=2500.0,
         log_jitter_mean=np.array([-3.0, -3.1]),
@@ -600,6 +616,8 @@ def test_compute_parameter_kls_returns_expected_keys():
     kls = compute_parameter_kls(
         flat_samples,
         bands=bands,
+        survey_names=("sdss", "ps1", "ztf"),
+        t_ref=np.array([0.0, 10.0, 20.0], dtype=float),
         z=z,
         lambda_center_rf=lambda_center_rf,
         log_jitter_mean=np.asarray([np.log(0.03), np.log(0.03)]),
@@ -660,6 +678,7 @@ def test_compute_parameter_kls_includes_band_slope_offset_terms():
         flat_samples,
         bands=bands,
         survey_names=("sdss", "ps1", "ztf"),
+        t_ref=np.array([0.0, 10.0, 20.0], dtype=float),
         z=1.2,
         lambda_center_rf=2500.0,
         log_jitter_mean=np.asarray([np.log(0.03), np.log(0.03)]),
@@ -697,6 +716,8 @@ def test_compute_parameter_kls_uses_relflux_sigma_center0_when_requested():
     kls = compute_parameter_kls(
         flat_samples,
         bands=["g"],
+        survey_names=("sdss", "ps1", "ztf"),
+        t_ref=np.array([0.0, 10.0, 20.0], dtype=float),
         z=1.2,
         lambda_center_rf=2500.0,
         log_jitter_mean=np.asarray([np.log(0.03)]),
