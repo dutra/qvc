@@ -13,13 +13,33 @@ from tqdm import tqdm
 
 init(autoreset=True)
 
+DUSTMAPS_SENTINEL = ("sfd", "SFD_dust_4096_ngp.fits")
+
 
 def fetch_dustmaps():
     from dustmaps.config import config
     import dustmaps.sfd
 
+    data_dir = os.environ.get("QVC_DUSTMAPS_DIR")
+    if data_dir:
+        config["data_dir"] = data_dir
+
+    try:
+        configured_root = config["data_dir"]
+    except Exception:
+        configured_root = Path.home() / "dustmaps"
+    configured_dir = Path(configured_root).expanduser()
+    sentinel = configured_dir.joinpath(*DUSTMAPS_SENTINEL)
+    if sentinel.exists():
+        print(
+            f"{Fore.YELLOW}SKIP {Fore.RESET} dustmaps SFD data already exists at "
+            f"{Style.BRIGHT}{sentinel}"
+        )
+        return
+
     print(f"{Fore.BLUE}RUN  {Fore.RESET} Resetting dustmaps config...")
-    config.reset()
+    if not data_dir:
+        config.reset()
     print(f"{Fore.BLUE}RUN  {Fore.RESET} Fetching dustmaps SFD data...")
     dustmaps.sfd.fetch()
     print(f"{Fore.GREEN}OK   {Fore.RESET} dustmaps SFD data fetched.")

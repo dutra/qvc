@@ -1015,6 +1015,7 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
         plot_g_band_drift_slope_histograms,
         plot_l2500_vs_eta_sigma_fiducial,
         plot_l2500_vs_uv_variability_fiducial,
+        plot_linear_trend_vs_redshift,
         plot_Mi_relation,
         plot_cut_diagnostics,
         plot_m2500_vs_z_colorpanels,
@@ -1385,6 +1386,13 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
             plot_path=plot_path,
             show=False,
             filename="eta_tau_sigma_vs_redshift_precut.pdf",
+        )
+    if {"z", "linear_trend"}.issubset(df.columns):
+        plot_linear_trend_vs_redshift(
+            df,
+            plot_path=plot_path,
+            show=False,
+            filename="linear_trend_vs_redshift_precut.pdf",
         )
     if (
         "z" in df.columns
@@ -1842,6 +1850,13 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
             plot_path=plot_path,
             show=False,
             filename="eta_tau_sigma_vs_redshift_postcut.pdf",
+        )
+    if {"z", "linear_trend"}.issubset(df.columns):
+        plot_linear_trend_vs_redshift(
+            df,
+            plot_path=plot_path,
+            show=False,
+            filename="linear_trend_vs_redshift_postcut.pdf",
         )
     if (
         "z" in df.columns

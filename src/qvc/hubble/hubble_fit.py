@@ -68,6 +68,7 @@ from qvc.hubble.hubble_plotting import (
     plot_full_residuals_rz,
     plot_hubble,
     plot_hubble_residual_normality,
+    plot_hubble_residual_tail_diagnostics,
     plot_predicted_L2500_vs_sigmahat,
     plot_predicted_vs_actual_M2500,
     plot_redshift_histograms,
@@ -602,9 +603,9 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                 sampler.run_nested(
                     print_progress=True,
                     dlogz_init=0.01,                 
-                    n_effective=200,                # 300–1000 typical for model comparison
-                    nlive_init=25,   # bump live points
-                    nlive_batch=10   # reasonable batch size for dynamic allocation
+                    n_effective=500,                # 300–1000 typical for model comparison
+                    nlive_init=100,   # bump live points
+                    nlive_batch=25   # reasonable batch size for dynamic allocation
                 )
 
             elif speed == "test":
@@ -1125,6 +1126,15 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         plot_path=plot_path,
         show=False,
         filename="hubble_residual_normality_debiased.pdf",
+    )
+    plot_hubble_residual_tail_diagnostics(
+        df_agn,
+        debiased_residuals,
+        mu_pred_std_debiased_with_scatter,
+        sigma_dmi=dmi_posterior_sigma_full,
+        sigma_sel=dmi_selection_sigma_full,
+        plot_path=plot_path,
+        show=False,
     )
 
 

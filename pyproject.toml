@@ -12,6 +12,7 @@ dependencies = [
     "astropy==7.1.0",
     "corner==2.2.3",
     "dynesty==2.1.5",
+    "dustmaps",
     "h5py==3.14.0",
     "jax<=0.4.31",
     "jaxlib<=0.4.31",

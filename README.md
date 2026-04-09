@@ -8,6 +8,54 @@ This repository provides end-to-end tooling for:
 
 A lightweight demo workflow is included to reproduce key figures and validate installation.
 
+## Docker Demo
+
+A code-only Docker workflow is included for the lightweight demo. The image copies only the QVC code at build time. When the container starts, it downloads the required demo assets into a writable work directory and then runs:
+
+1. demo data setup,
+2. one light-curve fit for object `1465126`,
+3. one spectra fit for the same object,
+4. one fast single-model Hubble run using the downloaded AGN data.
+
+Build the image from the repository root:
+
+```bash
+docker build -t qvc-demo .
+```
+
+Run the full demo and persist downloads/results on the host:
+
+```bash
+mkdir -p "$(pwd)/docker-workdir"
+docker run --rm \
+  -v "$(pwd)/docker-workdir:/work/qvc-demo" \
+  qvc-demo
+```
+
+Run setup only:
+
+```bash
+docker run --rm \
+  -v "$(pwd)/docker-workdir:/work/qvc-demo" \
+  qvc-demo setup
+```
+
+Available container commands are:
+
+```text
+all
+setup
+light-curve
+spectra
+hubble
+```
+
+Notes:
+
+* The container is CPU-only and sets `QT_QPA_PLATFORM=offscreen`, `MPLBACKEND=Agg`, and `JAX_PLATFORM_NAME=cpu`.
+* Downloads, generated `results/`, generated `plots/`, and dustmaps files are written under `/work/qvc-demo` by default.
+* The default Docker Hubble run uses `FlatLambdaCDM`, `--run single`, `--speed fast`, and `--disable_completeness` so it does not require the external Shen `pubtools` build.
+
 ---
 
 ## System Requirements
