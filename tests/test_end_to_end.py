@@ -1665,6 +1665,18 @@ def test_end_to_end(tmp_path, monkeypatch):
     drift_result = compute_g_band_residual_drift_diagnostics(flat_per_band, obj, bands, z=float(obj["z"]))
     raw_drift_result = compute_g_band_raw_drift_diagnostics(flat_per_band, obj, bands, z=float(obj["z"]))
 
+    def _median_band_jitter(band):
+        direct_key = f"log_jitter_{band}"
+        if direct_key in flat_per_band:
+            return float(np.percentile(flat_per_band[direct_key], 50))
+        survey_keys = sorted(
+            key for key in flat_per_band.keys() if key.startswith(f"log_jitter_{band}_")
+        )
+        if not survey_keys:
+            raise KeyError(f"No jitter samples found for band {band!r}")
+        stacked = np.concatenate([np.asarray(flat_per_band[key], dtype=float).ravel() for key in survey_keys])
+        return float(np.percentile(stacked, 50))
+
     quasar = {
         "object_id": obj["object_id"],
         "z": float(obj["z"]),
@@ -1694,9 +1706,9 @@ def test_end_to_end(tmp_path, monkeypatch):
         "log_tau_uv_rf_std_psd": float(result["log_tau_uv_rf_std_psd"]),
         "log_jitter_u": -9.0,
         "dlog_amp_blr_u": -9.0,
-        "log_jitter_g": float(np.percentile(flat_per_band["log_jitter_g"], 50)),
-        "log_jitter_r": float(np.percentile(flat_per_band["log_jitter_r"], 50)),
-        "log_jitter_i": float(np.percentile(flat_per_band["log_jitter_i"], 50)),
+        "log_jitter_g": _median_band_jitter("g"),
+        "log_jitter_r": _median_band_jitter("r"),
+        "log_jitter_i": _median_band_jitter("i"),
         "dlog_amp_blr_g": float(np.percentile(flat_per_band["dlog_amp_blr_g"], 50)),
         "dlog_amp_blr_r": float(np.percentile(flat_per_band["dlog_amp_blr_r"], 50)),
         "dlog_amp_blr_i": float(np.percentile(flat_per_band["dlog_amp_blr_i"], 50)),

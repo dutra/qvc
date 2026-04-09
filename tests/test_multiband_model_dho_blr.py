@@ -4,6 +4,7 @@ from pathlib import Path
 
 import jax.numpy as jnp
 import numpy as np
+from tinygp.kernels import quasisep as qs
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -16,6 +17,7 @@ from qvc.light_curve.multiband_model_dho_blr import (
     ContiBLRFluxLinearized_SHO_Wrapper,
     ContiBLR_SHO_Wrapper,
     OverdampedSHOBaseQS,
+    SharedDRWBaseQS,
     TwoStageFluxMixDisplayModel,
     make_multiband_dho_blr_flux_linearized_model,
     make_multiband_dho_blr_model,
@@ -146,6 +148,58 @@ def test_linearized_wrapper_matches_relflux_wrapper_shape():
         assert np.allclose(np.asarray(obs_new), np.asarray(obs_old), rtol=1e-6, atol=1e-8)
 
 
+def test_wrapper_routes_drift_only_to_prompt_continuum():
+    tau_fast = jnp.asarray([10.0], dtype=float)
+    tau_slow = jnp.asarray([100.0], dtype=float)
+    tau_drift = jnp.asarray(1000.0, dtype=float)
+    base_kernel = qs.Sum(
+        OverdampedSHOBaseQS(tau_fast=tau_fast, tau_slow=tau_slow),
+        SharedDRWBaseQS(tau=tau_drift),
+    )
+    params = {
+        "amp_cont": jnp.asarray([0.2], dtype=float),
+        "amp_drift": jnp.asarray([0.05], dtype=float),
+        "amp_bc": jnp.asarray([0.03], dtype=float),
+        "amp_blr": jnp.asarray([0.04], dtype=float),
+        "amp_blr2": jnp.asarray([0.02], dtype=float),
+        "lag_disk": jnp.asarray([2.0], dtype=float),
+        "lag_bc": jnp.asarray([7.0], dtype=float),
+        "lag_blr": jnp.asarray([15.0], dtype=float),
+        "lag_blr2": jnp.asarray([30.0], dtype=float),
+    }
+    wrapper = ContiBLR_SHO_Wrapper(kernel=base_kernel, params=params)
+
+    obs = np.asarray(wrapper.observation_model((jnp.array(0.0), jnp.array(0))), dtype=float)
+    drift_tail = obs[-1]
+
+    params_changed_lines = dict(params)
+    params_changed_lines["amp_bc"] = jnp.asarray([0.3], dtype=float)
+    params_changed_lines["amp_blr"] = jnp.asarray([0.4], dtype=float)
+    params_changed_lines["amp_blr2"] = jnp.asarray([0.25], dtype=float)
+    params_changed_lines["lag_bc"] = jnp.asarray([70.0], dtype=float)
+    params_changed_lines["lag_blr"] = jnp.asarray([150.0], dtype=float)
+    params_changed_lines["lag_blr2"] = jnp.asarray([300.0], dtype=float)
+    wrapper_changed_lines = ContiBLR_SHO_Wrapper(kernel=base_kernel, params=params_changed_lines)
+    obs_changed_lines = np.asarray(
+        wrapper_changed_lines.observation_model((jnp.array(0.0), jnp.array(0))),
+        dtype=float,
+    )
+
+    params_changed_drift = dict(params)
+    params_changed_drift["amp_drift"] = jnp.asarray([0.1], dtype=float)
+    wrapper_changed_drift = ContiBLR_SHO_Wrapper(kernel=base_kernel, params=params_changed_drift)
+    obs_changed_drift = np.asarray(
+        wrapper_changed_drift.observation_model((jnp.array(0.0), jnp.array(0))),
+        dtype=float,
+    )
+
+    assert obs.shape == (3,)
+    assert np.isclose(drift_tail, obs_changed_lines[-1], rtol=1e-8, atol=1e-10)
+    assert np.isclose(obs[0], obs_changed_drift[0], rtol=1e-8, atol=1e-10)
+    assert np.isclose(obs[1], obs_changed_drift[1], rtol=1e-8, atol=1e-10)
+    assert not np.isclose(obs[-1], obs_changed_drift[-1], rtol=1e-6, atol=1e-8)
+
+
 def test_make_multiband_dho_blr_flux_linearized_model_random_data():
     rng = np.random.default_rng(7)
     n_band = 2
@@ -169,10 +223,12 @@ def test_make_multiband_dho_blr_flux_linearized_model_random_data():
 
     tau_fast = jnp.asarray(rng.uniform(5.0, 15.0, size=n_band))
     tau_slow = tau_fast + jnp.asarray(rng.uniform(20.0, 80.0, size=n_band))
+    tau_drift = jnp.asarray(500.0, dtype=float)
     amp_cont_relflux = jnp.asarray(rng.uniform(0.08, 0.2, size=n_band))
     params = {
-        "log_kernel_param": jnp.log(jnp.concatenate([tau_fast, tau_slow])),
+        "log_kernel_param": jnp.log(jnp.concatenate([tau_fast, tau_slow, jnp.atleast_1d(tau_drift)])),
         "amp_cont_relflux": amp_cont_relflux,
+        "amp_drift_relflux": jnp.zeros(n_band, dtype=float),
         "amp_bc_relflux": jnp.asarray(rng.uniform(0.01, 0.05, size=n_band)),
         "amp_blr_relflux": jnp.asarray(rng.uniform(0.01, 0.08, size=n_band)),
         "amp_blr2_relflux": jnp.zeros(n_band, dtype=float),

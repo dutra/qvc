@@ -267,11 +267,11 @@ def test_corner_plot_labels_keep_only_curated_main_parameters():
     assert set(labels_for_corner).issubset(set(all_labels))
 
 
-def test_trace_plot_labels_include_fitted_survey_and_slope_offsets_only():
+def test_trace_plot_labels_include_fitted_survey_offsets_and_drift_params():
     samples_flat = {
         "eta_sigma": np.array([0.1, 0.2]),
-        "linear_trend_band_offset_g": np.array([0.01, 0.015], dtype=float),
-        "linear_trend_band_offset_r": np.zeros(2, dtype=float),
+        "dlog_amp_drift": np.array([-2.0, -1.8], dtype=float),
+        "log_tau_drift": np.array([6.0, 6.2], dtype=float),
         "survey_delta_mag_g_sdss": np.zeros(2, dtype=float),
         "survey_delta_mag_g_ztf": np.array([0.01, 0.02], dtype=float),
         "survey_delta_mag_r_ps1": np.array([-0.01, -0.005], dtype=float),
@@ -280,8 +280,8 @@ def test_trace_plot_labels_include_fitted_survey_and_slope_offsets_only():
     all_labels, labels_for_trace = _trace_plot_labels(samples_flat)
 
     assert "eta_sigma" in labels_for_trace
-    assert "linear_trend_band_offset_g" in labels_for_trace
-    assert "linear_trend_band_offset_r" not in labels_for_trace
+    assert "dlog_amp_drift" in labels_for_trace
+    assert "log_tau_drift" in labels_for_trace
     assert "survey_delta_mag_g_ztf" in labels_for_trace
     assert "survey_delta_mag_r_ps1" in labels_for_trace
     assert "survey_delta_mag_g_sdss" not in labels_for_trace
@@ -594,7 +594,8 @@ def test_compute_parameter_kls_returns_expected_keys():
         "log_sigma_center0": rng.normal(np.log(0.2), 0.2, size=n),
         "log_tau_slow_center0": rng.normal(np.log(300.0), 0.3, size=n),
         "log_tau_fast_center0": rng.normal(np.log(30.0), 0.2, size=n),
-        "linear_trend": rng.normal(0.0, 0.05, size=n),
+        "dlog_amp_drift": rng.normal(-2.0, 0.3, size=n),
+        "delta_log_tau_drift": rng.normal(np.log(10.0), 0.25, size=n),
         "lag0": np.abs(rng.normal(5.0, 1.0, size=n)),
         "lag_beta": np.abs(rng.normal(4.0 / 3.0, 0.1, size=n)),
         "mean_g": rng.normal(0.0, 0.05, size=n),
@@ -631,6 +632,8 @@ def test_compute_parameter_kls_returns_expected_keys():
         "log_sigma_center0_kl",
         "log_tau_slow_center0_kl",
         "log_tau_fast_center0_kl",
+        "dlog_amp_drift_kl",
+        "delta_log_tau_drift_kl",
         "lag0_kl",
         "lag_beta_kl",
         "mean_g_kl",
@@ -649,7 +652,7 @@ def test_compute_parameter_kls_returns_expected_keys():
     assert all(np.isfinite(kls[key]) for key in expected_keys)
 
 
-def test_compute_parameter_kls_includes_band_slope_offset_terms():
+def test_compute_parameter_kls_includes_drift_terms():
     rng = np.random.default_rng(456)
     bands = ["g", "r"]
     n = 64
@@ -659,9 +662,8 @@ def test_compute_parameter_kls_includes_band_slope_offset_terms():
         "log_sigma_center0": rng.normal(np.log(0.2), 0.2, size=n),
         "log_tau_slow_center0": rng.normal(np.log(300.0), 0.3, size=n),
         "log_tau_fast_center0": rng.normal(np.log(30.0), 0.2, size=n),
-        "linear_trend": rng.normal(0.0, 0.05, size=n),
-        "linear_trend_band_offset_g": rng.normal(0.005, 0.01, size=n),
-        "linear_trend_band_offset_r": rng.normal(-0.005, 0.01, size=n),
+        "dlog_amp_drift": rng.normal(-2.0, 0.3, size=n),
+        "delta_log_tau_drift": rng.normal(np.log(10.0), 0.25, size=n),
         "lag0": np.abs(rng.normal(5.0, 1.0, size=n)),
         "lag_beta": np.abs(rng.normal(4.0 / 3.0, 0.1, size=n)),
         "mean_g": rng.normal(0.0, 0.05, size=n),
@@ -686,10 +688,10 @@ def test_compute_parameter_kls_includes_band_slope_offset_terms():
         n_blr_terms=1,
     )
 
-    assert "linear_trend_band_offset_g_kl" in kls
-    assert "linear_trend_band_offset_r_kl" in kls
-    assert np.isfinite(kls["linear_trend_band_offset_g_kl"])
-    assert np.isfinite(kls["linear_trend_band_offset_r_kl"])
+    assert "dlog_amp_drift_kl" in kls
+    assert "delta_log_tau_drift_kl" in kls
+    assert np.isfinite(kls["dlog_amp_drift_kl"])
+    assert np.isfinite(kls["delta_log_tau_drift_kl"])
 
 
 def test_compute_parameter_kls_uses_relflux_sigma_center0_when_requested():
@@ -702,7 +704,8 @@ def test_compute_parameter_kls_uses_relflux_sigma_center0_when_requested():
         "log_sigma_center0_relflux": rng.normal(np.log(0.15), 0.15, size=n),
         "log_tau_slow_center0": rng.normal(np.log(300.0), 0.3, size=n),
         "log_tau_fast_center0": rng.normal(np.log(30.0), 0.2, size=n),
-        "linear_trend": rng.normal(0.0, 0.05, size=n),
+        "dlog_amp_drift": rng.normal(-2.0, 0.3, size=n),
+        "delta_log_tau_drift": rng.normal(np.log(10.0), 0.25, size=n),
         "lag0": np.abs(rng.normal(5.0, 1.0, size=n)),
         "lag_beta": np.abs(rng.normal(4.0 / 3.0, 0.1, size=n)),
         "mean_g": rng.normal(0.0, 0.05, size=n),
