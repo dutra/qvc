@@ -1314,6 +1314,56 @@ def plot_tau_sigma_vs_redshift(df, plot_path="plots/hubble", show=False, filenam
     )
 
 
+def plot_linear_trend_vs_redshift(
+    df,
+    plot_path="plots/hubble",
+    show=False,
+    filename="linear_trend_vs_redshift.pdf",
+):
+    """Plot linear_trend against redshift for AGN diagnostics."""
+    required = {"z", "linear_trend"}
+    if not required.issubset(df.columns):
+        missing = ", ".join(sorted(required - set(df.columns)))
+        raise KeyError(f"Missing required columns for linear_trend-vs-redshift plot: {missing}")
+
+    z = pd.to_numeric(df["z"], errors="coerce").to_numpy(dtype=float)
+    linear_trend = pd.to_numeric(df["linear_trend"], errors="coerce").to_numpy(dtype=float)
+
+    fig, ax = plt.subplots(figsize=(8.5, 5.5))
+
+    mask = np.isfinite(z) & np.isfinite(linear_trend)
+    if np.any(mask):
+        ax.scatter(
+            z[mask],
+            linear_trend[mask],
+            s=5,
+            alpha=0.65,
+            linewidths=0,
+            rasterized=True,
+        )
+    else:
+        ax.text(
+            0.5,
+            0.5,
+            "No finite linear_trend values",
+            ha="center",
+            va="center",
+            transform=ax.transAxes,
+        )
+
+    ax.set_xlabel("Redshift z")
+    ax.set_ylabel("linear_trend")
+    ax.grid(True, alpha=0.25)
+
+    diagnostics_path = os.path.join(plot_path or "plots/hubble", "diagnostics")
+    return _save_figure(
+        fig,
+        os.path.join(diagnostics_path, filename),
+        dpi=200,
+        show=show,
+    )
+
+
 def plot_sigma_uv_vs_tau_uv_rf(
     df_agn,
     *,
@@ -5264,6 +5314,284 @@ def plot_hubble_residual_normality(
     )
 
 
+def _residual_tail_bin_stats(x, z_resid, *, nbins=10, min_count=25):
+    """Compute binned medians and negative-tail fractions for standardized residuals."""
+
+    x = np.asarray(x, dtype=float)
+    z_resid = np.asarray(z_resid, dtype=float)
+    mask = np.isfinite(x) & np.isfinite(z_resid)
+    if np.count_nonzero(mask) < max(min_count, 3):
+        return None
+
+    x_use = x[mask]
+    z_use = z_resid[mask]
+    if np.nanmax(x_use) <= np.nanmin(x_use):
+        return None
+
+    edges = np.linspace(np.nanmin(x_use), np.nanmax(x_use), int(nbins) + 1)
+    rows = []
+    for i in range(len(edges) - 1):
+        lo = edges[i]
+        hi = edges[i + 1]
+        keep = (x_use >= lo) & (x_use < hi)
+        if i == len(edges) - 2:
+            keep = (x_use >= lo) & (x_use <= hi)
+        n_bin = int(np.count_nonzero(keep))
+        if n_bin < int(min_count):
+            continue
+        z_bin = z_use[keep]
+        rows.append(
+            {
+                "x_mid": float(np.nanmedian(x_use[keep])),
+                "n_bin": n_bin,
+                "z_median": float(np.nanmedian(z_bin)),
+                "z_p16": float(np.nanpercentile(z_bin, 16)),
+                "z_p84": float(np.nanpercentile(z_bin, 84)),
+                "frac_lt_m2": float(np.mean(z_bin < -2.0)),
+                "frac_lt_m3": float(np.mean(z_bin < -3.0)),
+            }
+        )
+    if not rows:
+        return None
+    return pd.DataFrame(rows)
+
+
+def plot_hubble_residual_tail_diagnostics(
+    df_agn,
+    residuals,
+    residuals_err,
+    *,
+    sigma_dmi=None,
+    sigma_sel=None,
+    plot_path="plots/hubble",
+    show=False,
+    summary_filename="hubble_residual_tail_summary.csv",
+    overview_filename="hubble_residual_tail_overview.pdf",
+    fractions_filename="hubble_residual_tail_fractions.pdf",
+    nbins=10,
+    min_count=25,
+    n_worst=15,
+):
+    """Localize negative standardized-residual tails in the debiased Hubble sample."""
+
+    residuals = np.asarray(residuals, dtype=float)
+    residuals_err = np.asarray(residuals_err, dtype=float)
+    if residuals.shape != residuals_err.shape:
+        raise ValueError(
+            f"residuals shape {residuals.shape} does not match residuals_err shape {residuals_err.shape}."
+        )
+    if len(df_agn) != residuals.size:
+        raise ValueError(
+            f"df_agn has length {len(df_agn)}, but residual arrays have length {residuals.size}."
+        )
+
+    z_resid = np.full_like(residuals, np.nan, dtype=float)
+    valid = np.isfinite(residuals) & np.isfinite(residuals_err) & (residuals_err > 0.0)
+    z_resid[valid] = residuals[valid] / residuals_err[valid]
+
+    diagnostics_path = os.path.join(plot_path or "plots/hubble", "diagnostics")
+    os.makedirs(diagnostics_path, exist_ok=True)
+
+    summary = df_agn.copy()
+    summary["residuals"] = residuals
+    summary["residuals_err"] = residuals_err
+    summary["z_resid"] = z_resid
+    if sigma_dmi is not None:
+        sigma_dmi = np.asarray(sigma_dmi, dtype=float)
+        if sigma_dmi.shape != residuals.shape:
+            raise ValueError(
+                f"sigma_dmi shape {sigma_dmi.shape} does not match residual shape {residuals.shape}."
+            )
+        summary["sigma_dmi"] = sigma_dmi
+    else:
+        summary["sigma_dmi"] = np.nan
+    if sigma_sel is not None:
+        sigma_sel = np.asarray(sigma_sel, dtype=float)
+        if sigma_sel.shape != residuals.shape:
+            raise ValueError(
+                f"sigma_sel shape {sigma_sel.shape} does not match residual shape {residuals.shape}."
+            )
+        summary["sigma_sel"] = sigma_sel
+    else:
+        summary["sigma_sel"] = np.nan
+    summary["is_tail_lt_m2"] = summary["z_resid"] < -2.0
+    summary["is_tail_lt_m3"] = summary["z_resid"] < -3.0
+
+    preferred_cols = [
+        "object_id",
+        "sdss_name",
+        "z",
+        "residuals",
+        "residuals_err",
+        "z_resid",
+        "sigma_dmi",
+        "sigma_sel",
+        "f_host_2500",
+        "apparent_mag_2500",
+        "alpha_lambda",
+        "wrms",
+        "ra",
+        "dec",
+        "is_tail_lt_m2",
+        "is_tail_lt_m3",
+    ]
+    summary_cols = [col for col in preferred_cols if col in summary.columns]
+    summary_csv_path = os.path.join(diagnostics_path, summary_filename)
+    summary[summary_cols].sort_values("z_resid", ascending=True).to_csv(summary_csv_path, index=False)
+
+    n_valid = int(np.count_nonzero(np.isfinite(z_resid)))
+    n_lt_m2 = int(np.count_nonzero(z_resid < -2.0))
+    n_lt_m3 = int(np.count_nonzero(z_resid < -3.0))
+    n_lt_m4 = int(np.count_nonzero(z_resid < -4.0))
+    print(
+        "Hubble residual negative-tail diagnostics:"
+        f" N_valid={n_valid},"
+        f" N(z<-2)={n_lt_m2} ({(n_lt_m2 / n_valid if n_valid else np.nan):.3%}),"
+        f" N(z<-3)={n_lt_m3} ({(n_lt_m3 / n_valid if n_valid else np.nan):.3%}),"
+        f" N(z<-4)={n_lt_m4} ({(n_lt_m4 / n_valid if n_valid else np.nan):.3%})"
+    )
+
+    tail_mask = np.isfinite(z_resid) & (z_resid < -2.0)
+    if np.any(tail_mask):
+        tail_stats = [
+            f"N={int(np.count_nonzero(tail_mask))}",
+            f"median_residual={float(np.nanmedian(residuals[tail_mask])):.3f} mag",
+        ]
+        if "z" in summary.columns:
+            tail_stats.append(f"median_z={float(np.nanmedian(np.asarray(summary['z'], dtype=float)[tail_mask])):.3f}")
+        if "sigma_dmi" in summary.columns and np.any(np.isfinite(summary["sigma_dmi"])):
+            tail_stats.append(f"median_sigma_dmi={float(np.nanmedian(np.asarray(summary['sigma_dmi'], dtype=float)[tail_mask])):.3f} mag")
+        if "f_host_2500" in summary.columns and np.any(np.isfinite(summary["f_host_2500"])):
+            tail_stats.append(f"median_f_host_2500={float(np.nanmedian(np.asarray(summary['f_host_2500'], dtype=float)[tail_mask])):.3f}")
+        print("Negative tail summary (< -2 sigma): " + ", ".join(tail_stats))
+
+    worst = summary.loc[np.isfinite(summary["z_resid"])].sort_values("z_resid", ascending=True).head(int(n_worst))
+    if not worst.empty:
+        print(f"Worst {min(int(n_worst), len(worst))} objects by standardized residual:")
+        display_cols = [col for col in ["object_id", "sdss_name", "z", "residuals", "residuals_err", "z_resid", "sigma_dmi", "f_host_2500"] if col in worst.columns]
+        for _, row in worst[display_cols].iterrows():
+            fields = []
+            for col in display_cols:
+                value = row[col]
+                if isinstance(value, (float, np.floating)):
+                    fields.append(f"{col}={value:.3f}")
+                else:
+                    fields.append(f"{col}={value}")
+            print("  " + ", ".join(fields))
+
+    diagnostics = [
+        ("z", "Redshift z"),
+        ("sigma_dmi", r"$\sigma_{\rm dmi}$"),
+        ("f_host_2500", r"$f_{\rm host,2500}$"),
+        ("apparent_mag_2500", r"$m_{2500}$"),
+    ]
+
+    fig_overview, axes_overview = plt.subplots(2, 2, figsize=(11.0, 8.0), squeeze=False)
+    axes_overview = axes_overview.ravel()
+    fig_frac, axes_frac = plt.subplots(2, 2, figsize=(11.0, 8.0), squeeze=False)
+    axes_frac = axes_frac.ravel()
+
+    gaussian_ref_lt_m2 = float(norm.cdf(-2.0))
+    gaussian_ref_lt_m3 = float(norm.cdf(-3.0))
+
+    for ax_overview, ax_frac, (key, xlabel) in zip(axes_overview, axes_frac, diagnostics):
+        if key not in summary.columns:
+            ax_overview.axis("off")
+            ax_frac.axis("off")
+            continue
+
+        x = np.asarray(summary[key], dtype=float)
+        mask = np.isfinite(x) & np.isfinite(z_resid)
+        if np.count_nonzero(mask) == 0:
+            ax_overview.axis("off")
+            ax_frac.axis("off")
+            continue
+
+        x_use = x[mask]
+        z_use = z_resid[mask]
+        ax_overview.scatter(
+            x_use,
+            z_use,
+            s=12,
+            alpha=0.35,
+            color="tab:blue",
+            linewidths=0,
+            rasterized=True,
+        )
+        for yref, color, linestyle in [
+            (0.0, "black", "-"),
+            (-2.0, "tab:orange", "--"),
+            (2.0, "tab:orange", "--"),
+            (-3.0, "tab:red", ":"),
+            (3.0, "tab:red", ":"),
+        ]:
+            ax_overview.axhline(yref, color=color, lw=1.2, ls=linestyle, alpha=0.9)
+
+        stats_df = _residual_tail_bin_stats(x_use, z_use, nbins=nbins, min_count=min_count)
+        if stats_df is not None:
+            x_mid = stats_df["x_mid"].to_numpy(dtype=float)
+            z_mid = stats_df["z_median"].to_numpy(dtype=float)
+            z_lo = stats_df["z_p16"].to_numpy(dtype=float)
+            z_hi = stats_df["z_p84"].to_numpy(dtype=float)
+            ax_overview.fill_between(
+                x_mid,
+                z_lo,
+                z_hi,
+                color="0.6",
+                alpha=0.15,
+                linewidth=0,
+                zorder=8,
+            )
+            ax_overview.plot(x_mid, z_mid, color="red", lw=2.0, zorder=9)
+
+            ax_frac.plot(
+                x_mid,
+                stats_df["frac_lt_m2"].to_numpy(dtype=float),
+                color="tab:orange",
+                marker="o",
+                lw=1.8,
+                label=r"$P(z_{\rm resid} < -2)$",
+            )
+            ax_frac.plot(
+                x_mid,
+                stats_df["frac_lt_m3"].to_numpy(dtype=float),
+                color="tab:red",
+                marker="o",
+                lw=1.8,
+                label=r"$P(z_{\rm resid} < -3)$",
+            )
+
+        ax_overview.set_xlabel(xlabel)
+        ax_overview.set_ylabel(r"$\Delta\mu / \sigma_{\Delta\mu}$")
+
+        ax_frac.axhline(gaussian_ref_lt_m2, color="tab:orange", lw=1.0, ls="--", alpha=0.8)
+        ax_frac.axhline(gaussian_ref_lt_m3, color="tab:red", lw=1.0, ls="--", alpha=0.8)
+        ax_frac.set_ylim(0.0, 1.0)
+        ax_frac.set_xlabel(xlabel)
+        ax_frac.set_ylabel("Negative-tail fraction")
+        ax_frac.legend(frameon=False, fontsize=9, loc="upper right")
+        ax_frac.grid(True, alpha=0.25)
+
+    fig_overview.tight_layout()
+    fig_frac.tight_layout()
+    overview_path = _save_figure(
+        fig_overview,
+        os.path.join(diagnostics_path, overview_filename),
+        dpi=200,
+        show=show,
+    )
+    fractions_path = _save_figure(
+        fig_frac,
+        os.path.join(diagnostics_path, fractions_filename),
+        dpi=200,
+        show=show,
+    )
+    print(f"Saved Hubble residual tail summary to {summary_csv_path}")
+    print(f"Saved Hubble residual tail overview plot to {overview_path}")
+    print(f"Saved Hubble residual tail-fraction plot to {fractions_path}")
+    return overview_path, fractions_path, summary_csv_path
+
+
 def plot_predicted_vs_actual_M2500(
     flat_samples,
     df_agn,
@@ -5998,7 +6326,7 @@ def plot_full_residuals(
         'eta_sigma', 'eta_tau',
         'dlog_amp_bc',
         #'PL_slope_blue', 'lam_min', 'lam_max', 'lam_range', 
-        #'linear_trend', 'psf_minus_fiber_r', 'log_psf_minus_fiber_r', 'petroRad_r', 'log_petroRad_r',
+        'linear_trend', 'psf_minus_fiber_r', 'log_psf_minus_fiber_r', 'petroRad_r', 'log_petroRad_r',
         #'cadence', 'number_points',
         #'log_jitter_total',
         'dlog_amp_blr_total',
