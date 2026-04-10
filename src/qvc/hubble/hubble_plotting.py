@@ -4554,6 +4554,18 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     mask_in  = df_agn["z"].between(z_range[0], z_range[1])
     mask_out = ~mask_in
 
+    # Background AGN point cloud
+    inset_ax.scatter(
+        df_agn["z"][mask_in], mu_pred_median[mask_in],
+        s=10, marker='o', c="black", alpha=0.18,
+        linewidths=0, zorder=0, rasterized=True
+    )
+    inset_ax.scatter(
+        df_agn["z"][mask_out], mu_pred_median[mask_out],
+        s=12, marker='D', c="black", alpha=0.18,
+        linewidths=0, zorder=0, rasterized=True
+    )
+
     # AGN (inside)
     inset_ax.errorbar(
         df_agn["z"][mask_in], mu_pred_median[mask_in], yerr=residuals_err[mask_in],
@@ -4629,6 +4641,16 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
         print(f"Note: {n_clipped} / {len(df_agn)} AGN clipped in residuals panel (> 3σ)")
     mask_in  = df_agn["z"].between(z_range[0], z_range[1])
     mask_out = ~mask_in
+    ax.scatter(
+        df_agn["z"][mask_in], mu_pred_median[mask_in],
+        s=12, marker='o', c="black", alpha=0.18,
+        linewidths=0, zorder=-1, rasterized=True
+    )
+    ax.scatter(
+        df_agn["z"][mask_out], mu_pred_median[mask_out],
+        s=14, marker='D', c="black", alpha=0.18,
+        linewidths=0, zorder=-1, rasterized=True
+    )
     # AGN (inside)
     for i in np.where(mask_in)[0]:
         ax.errorbar(

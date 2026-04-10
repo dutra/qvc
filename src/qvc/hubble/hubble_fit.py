@@ -603,9 +603,9 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                 sampler.run_nested(
                     print_progress=True,
                     dlogz_init=0.01,                 
-                    n_effective=500,                # 300–1000 typical for model comparison
-                    nlive_init=100,   # bump live points
-                    nlive_batch=25   # reasonable batch size for dynamic allocation
+                    n_effective=300,                # 300–1000 typical for model comparison
+                    nlive_init=50,   # bump live points
+                    nlive_batch=15   # reasonable batch size for dynamic allocation
                 )
 
             elif speed == "test":

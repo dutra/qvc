@@ -49,6 +49,7 @@ from qvc.hubble.hubble_model import (
 
 PURPLE_ANSI = "\033[95m"
 RESET_ANSI = "\033[0m"
+HUBBLE_JITTER_SURVEYS = ("sdss", "ps1", "ztf")
 
 
 def _append_cut_report_row(rows, *, step, criterion, before, kept, status):
@@ -1146,14 +1147,24 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
             "(legacy mags_mean arrays and mags_mean_0..N are unsupported)."
         )
 
-    required_var_cols = [f"log_jitter_{b}" for b in ("u", "g", "r", "i")] + [
-        f"dlog_amp_blr_{b}" for b in ("u", "g", "r", "i")
-    ]
-    missing_var_cols = [col for col in required_var_cols if col not in df.columns]
+    required_blr_cols = [f"dlog_amp_blr_{b}" for b in ("u", "g", "r", "i")]
+    missing_var_cols = [col for col in required_blr_cols if col not in df.columns]
+    missing_jitter_bands = []
+    for b in ("u", "g", "r", "i"):
+        legacy_col = f"log_jitter_{b}"
+        survey_cols = [f"log_jitter_{b}_{survey}" for survey in HUBBLE_JITTER_SURVEYS]
+        if legacy_col not in df.columns and not any(col in df.columns for col in survey_cols):
+            missing_jitter_bands.append(b)
     if missing_var_cols:
         raise ValueError(
             "Flat AGN input is missing required variability columns: "
             f"{missing_var_cols}."
+        )
+    if missing_jitter_bands:
+        raise ValueError(
+            "Flat AGN input is missing jitter coverage for band(s): "
+            f"{missing_jitter_bands}. Expected either legacy log_jitter_<band> "
+            "columns or new log_jitter_<band>_<survey> columns."
         )
 
     if "dropped_bands" not in df.columns:
@@ -1166,25 +1177,45 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
     amp_delta_blr_total_sq = np.zeros(len(df))
 
     for b in ['u', 'g', 'r', 'i']:
-        #df.loc[dropped_bands.apply(lambda s: b in s), f'log_jitter_{b}'] = np.nan
-        jitter = 10**df[f'log_jitter_{b}'].values
-        jitter[dropped_bands.apply(lambda s: b in s)] = 0.0
+        dropped_band = dropped_bands.apply(lambda s: b in s).to_numpy(dtype=bool)
+        survey_jitter_sq = np.zeros(len(df))
+        survey_cols = [f"log_jitter_{b}_{survey}" for survey in HUBBLE_JITTER_SURVEYS]
+        available_survey_cols = [col for col in survey_cols if col in df.columns]
+        if available_survey_cols:
+            for col in available_survey_cols:
+                survey = col.removeprefix(f"log_jitter_{b}_")
+                jitter = np.exp(pd.to_numeric(df[col], errors="coerce").to_numpy(dtype=float))
+                jitter[~np.isfinite(jitter)] = np.nan
+                jitter[dropped_band] = 0.0
+                df[f"jitter_{b}_{survey}"] = jitter
+                survey_jitter_sq = survey_jitter_sq + np.nan_to_num(jitter, nan=0.0) ** 2
+            jitter = np.sqrt(survey_jitter_sq)
+        else:
+            # Legacy Hubble inputs stored unsuffixed per-band jitter in base-10 log space.
+            jitter = 10**pd.to_numeric(df[f'log_jitter_{b}'], errors="coerce").to_numpy(dtype=float)
+            jitter[~np.isfinite(jitter)] = np.nan
+            jitter[dropped_band] = 0.0
+            survey_jitter_sq = np.nan_to_num(jitter, nan=0.0) ** 2
         df[f'jitter_{b}'] = jitter
-        jitter_total_sq = jitter_total_sq + jitter**2
+        jitter_total_sq = jitter_total_sq + survey_jitter_sq
 
         #df.loc[dropped_bands.apply(lambda s: b in s), f'dlog_amp_blr_{b}'] = np.nan
         amp_delta_blr = 10**df[f'dlog_amp_blr_{b}'].values
-        amp_delta_blr[dropped_bands.apply(lambda s: b in s)] = 0.0
+        amp_delta_blr[dropped_band] = 0.0
         amp_delta_blr_total_sq = amp_delta_blr_total_sq + amp_delta_blr**2
         df[f'amp_delta_blr_{b}'] = amp_delta_blr
         blr2_col = f'dlog_amp_blr2_{b}'
         if blr2_col in df.columns:
             amp_delta_blr2 = 10**df[blr2_col].values
-            amp_delta_blr2[dropped_bands.apply(lambda s: b in s)] = 0.0
+            amp_delta_blr2[dropped_band] = 0.0
             amp_delta_blr_total_sq = amp_delta_blr_total_sq + amp_delta_blr2**2
             df[f'amp_delta_blr2_{b}'] = amp_delta_blr2
 
-    df['log_jitter_total'] = np.log10(np.sqrt(jitter_total_sq))
+    jitter_total = np.sqrt(jitter_total_sq)
+    log_jitter_total = np.full(len(df), np.nan, dtype=float)
+    valid_jitter_total = np.isfinite(jitter_total) & (jitter_total > 0.0)
+    log_jitter_total[valid_jitter_total] = np.log10(jitter_total[valid_jitter_total])
+    df['log_jitter_total'] = log_jitter_total
     df['dlog_amp_blr_total'] = np.log10(np.sqrt(amp_delta_blr_total_sq))
 
     # df['log_sigma_uv'] = df['log_sigma_uv'] + 1/2 * np.log10(1 + df['z'])
