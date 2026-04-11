@@ -148,6 +148,19 @@ def _save_figure(fig, path, *, dpi=300, bbox_inches="tight", show=False):
     return pdf_path
 
 
+def _population_scatter_offsets(scale, *, enabled=True, seed=1739):
+    """Return deterministic display-only Normal(0, scale) offsets."""
+    scale = np.asarray(scale, dtype=float)
+    offsets = np.zeros_like(scale, dtype=float)
+    if not enabled:
+        return offsets
+    valid = np.isfinite(scale) & (scale > 0.0)
+    if np.any(valid):
+        rng = np.random.default_rng(seed)
+        offsets[valid] = rng.normal(0.0, scale[valid])
+    return offsets
+
+
 def _nanmedian_stacked(rows):
     """Return row-wise nanmedian for a sequence of equal-length arrays."""
 
@@ -4493,10 +4506,20 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     # Residuals (vs. median μ_model)
     mu_interp = np.interp(df_agn["z"].values, z_grid, mu_model_median)
     residuals = mu_pred_median - mu_interp
+
+    # Display the population-level intrinsic scatter as point scatter, not as
+    # enlarged error bars. Keep chi-squared on the current sigma_sel path.
+    point_scatter_mu = _population_scatter_offsets(
+        intrinsic_scatter,
+        enabled=debias,
+        seed=1741,
+    )
+    mu_pred_plot = mu_pred_median + point_scatter_mu
     residuals_err = mu_pred_std_with_scatter
     if debias and sigma_sel is not None:
         use_sigma_sel = np.isfinite(sigma_sel) & (sigma_sel > 0.0)
         residuals_err = np.where(use_sigma_sel, sigma_sel, residuals_err)
+    display_residuals_err = mu_pred_std if debias else residuals_err
 
     mu_zscore = np.abs(residuals) / residuals_err
 
@@ -4505,7 +4528,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     bins_linear = np.arange(0.32, np.max(df_agn["z"].values), 0.2)
     print("Using linear-z bins:", bins_linear)
     z_lin_scatter, mu_lin_mean_scatter, mu_lin_sem_scatter, n_lin = _weighted_bin_stats(
-        df_agn["z"].values, mu_pred_median, residuals_err, bins_linear
+        df_agn["z"].values, mu_pred_plot, display_residuals_err, bins_linear
     )
     
 
@@ -4528,7 +4551,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     bins_log = np.logspace(np.log10(bins_linear[0]), np.log10(bins_linear[-1]), n_bins_log + 1)
     #bins_log = bins_linear
     z_log, mu_log_mean, mu_log_sem, n_log = _weighted_bin_stats(
-        df_agn["z"].values, mu_pred_median, residuals_err, bins_log)
+        df_agn["z"].values, mu_pred_plot, display_residuals_err, bins_log)
 
     # ======== Plot ========
     fig = plt.figure(figsize=(9, 7))
@@ -4556,19 +4579,19 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
 
     # Background AGN point cloud
     inset_ax.scatter(
-        df_agn["z"][mask_in], mu_pred_median[mask_in],
+        df_agn["z"][mask_in], mu_pred_plot[mask_in],
         s=10, marker='o', c="black", alpha=0.18,
         linewidths=0, zorder=0, rasterized=True
     )
     inset_ax.scatter(
-        df_agn["z"][mask_out], mu_pred_median[mask_out],
+        df_agn["z"][mask_out], mu_pred_plot[mask_out],
         s=12, marker='D', c="black", alpha=0.18,
         linewidths=0, zorder=0, rasterized=True
     )
 
     # AGN (inside)
     inset_ax.errorbar(
-        df_agn["z"][mask_in], mu_pred_median[mask_in], yerr=residuals_err[mask_in],
+        df_agn["z"][mask_in], mu_pred_plot[mask_in], yerr=display_residuals_err[mask_in],
         fmt='o', linestyle='none', markersize=2,
         mfc="black", mec="none",
         ecolor="#666666", elinewidth=0.8,
@@ -4576,7 +4599,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     )
     # AGN (outside, filled diamond)
     inset_ax.errorbar(
-        df_agn["z"][mask_out], mu_pred_median[mask_out], yerr=residuals_err[mask_out],
+        df_agn["z"][mask_out], mu_pred_plot[mask_out], yerr=display_residuals_err[mask_out],
         fmt='D', linestyle='none', markersize=2, mfc="black", mec="none", alpha=0.70,
         ecolor="#666666", elinewidth=0.8, zorder=1
     )
@@ -4642,19 +4665,19 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     mask_in  = df_agn["z"].between(z_range[0], z_range[1])
     mask_out = ~mask_in
     ax.scatter(
-        df_agn["z"][mask_in], mu_pred_median[mask_in],
+        df_agn["z"][mask_in], mu_pred_plot[mask_in],
         s=12, marker='o', c="black", alpha=0.18,
         linewidths=0, zorder=-1, rasterized=True
     )
     ax.scatter(
-        df_agn["z"][mask_out], mu_pred_median[mask_out],
+        df_agn["z"][mask_out], mu_pred_plot[mask_out],
         s=14, marker='D', c="black", alpha=0.18,
         linewidths=0, zorder=-1, rasterized=True
     )
     # AGN (inside)
     for i in np.where(mask_in)[0]:
         ax.errorbar(
-            df_agn["z"].iloc[i], mu_pred_median[i], yerr=residuals_err[i],
+            df_agn["z"].iloc[i], mu_pred_plot[i], yerr=display_residuals_err[i],
             fmt='o', linestyle='none', markersize=3,
             mec="none",
             mfc=(0, 0, 0, 0.3),
@@ -4666,7 +4689,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     # AGN (outside, filled diamond)
     for i in np.where(mask_out)[0]:
         ax.errorbar(
-            df_agn["z"].iloc[i], mu_pred_median[i], yerr=residuals_err[i],
+            df_agn["z"].iloc[i], mu_pred_plot[i], yerr=display_residuals_err[i],
             fmt='D', linestyle='none', markersize=3, mfc=(0, 0, 0, 0.4),
             mec="none",
             capsize=2, capthick=0.8,
@@ -5814,9 +5837,19 @@ def plot_predicted_vs_actual_M2500(
         )
     sigma_all = np.sqrt(
         M_2500_pred_err**2 + xerr**2 + sigma_intrinsic**2
-    )  # fallback full chi2 denominator; plotted bars still exclude sigma_int
+    )  # full chi2 denominator
     if sigma_sel is not None:
         sigma_all = np.where(np.isfinite(sigma_sel) & (sigma_sel > 0.0), sigma_sel, sigma_all)
+
+    # Display the population-level intrinsic scatter as point scatter, not as
+    # enlarged error bars. Keep chi-squared on the current sigma_sel path.
+    point_scatter_m2500 = _population_scatter_offsets(
+        np.full_like(M_2500_pred, sigma_intrinsic, dtype=float),
+        enabled=debias,
+        seed=1742,
+    )
+    M_2500_pred_plot = M_2500_pred + point_scatter_m2500
+    yerr_plot_all = np.asarray(M_2500_pred_err, dtype=float)
 
     # Safety mask for nan/inf on global vectors (used for overall outputs only)
     m_global = np.isfinite(residuals_all) & np.isfinite(sigma_all) & (sigma_all > 0)
@@ -5912,8 +5945,10 @@ def plot_predicted_vs_actual_M2500(
 
         x = actual_M_2500_bin
         y = M_2500_pred[bin_mask]
+        y_plot = M_2500_pred_plot[bin_mask]
         xerr_bin = xerr[bin_mask]
         yerr_bin = M_2500_pred_err[bin_mask]
+        yerr_plot_bin = yerr_plot_all[bin_mask]
         sigma_bin_chi2 = np.sqrt(xerr_bin**2 + yerr_bin**2 + sigma_intrinsic**2)
         if sigma_sel is not None:
             sigma_sel_bin = sigma_sel[bin_mask]
@@ -5946,7 +5981,7 @@ def plot_predicted_vs_actual_M2500(
 
         # plot errorbars
         ax.errorbar(
-            x, y, xerr=xerr_bin, yerr=yerr_bin,
+            x, y_plot, xerr=xerr_bin, yerr=yerr_plot_bin,
             fmt="none", ecolor="#666666", elinewidth=0.7, alpha=0.4, zorder=2
         )
 
@@ -5957,7 +5992,7 @@ def plot_predicted_vs_actual_M2500(
 
         # filled markers (keep black edges like before)
         ax.scatter(
-            x[mask_closed], y[mask_closed],
+            x[mask_closed], y_plot[mask_closed],
             facecolors="k", edgecolors='k', #c=colors_bin[mask_closed], 
             s=20, alpha=1.0,
             linewidths=0.8, zorder=3,
@@ -5965,7 +6000,7 @@ def plot_predicted_vs_actual_M2500(
 
         # filled diamonds outside z-range
         ax.scatter(
-            x[mask_open], y[mask_open],
+            x[mask_open], y_plot[mask_open],
             facecolors="k", edgecolors='k', #edgecolors=colors_bin[mask_open],
             marker="D",
             s=20, alpha=1.0, linewidths=1, zorder=3,
@@ -7136,13 +7171,32 @@ def plot_predicted_L2500_vs_sigmahat(
         ax_res = None
 
     # --- Baseline data (MAIN) ---
-    yerr_linear = 10**actual_logL2500 * np.log(10) * y_log_meas_err
+    sigma_int_log = (
+        np.exp(
+            evaluate_log_f(
+                med_params,
+                np.asarray(d["z"].values, dtype=float),
+                z_pivot=z_pivot_agn,
+                use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
+            )
+        )
+        / 2.5
+    )
+    point_scatter_logL = _population_scatter_offsets(
+        sigma_int_log,
+        enabled=debias,
+        seed=1743,
+    )
+    actual_logL2500_plot = actual_logL2500 + point_scatter_logL
+    residuals_plot = residuals + point_scatter_logL
+    y_log_display_err = np.asarray(y_log_meas_err, dtype=float)
+    yerr_linear_display = (10.0**actual_logL2500_plot) * np.log(10.0) * y_log_display_err
     mask_in  = d["z"].between(z_range[0], z_range[1])
     mask_out = ~mask_in
 
     # inside redshift range: filled markers
     ax.errorbar(
-        x_ref[mask_in], 10**actual_logL2500[mask_in], xerr=xerr_asym[:, mask_in], yerr=yerr_linear[mask_in],
+        x_ref[mask_in], 10**actual_logL2500_plot[mask_in], xerr=xerr_asym[:, mask_in], yerr=yerr_linear_display[mask_in],
         fmt='o', linestyle='none', markersize=4, mfc=(0,0,0,0.4), mec="none",
         #markeredgewidth=0,
         ecolor=(0.2, 0.2, 0.2, 0.1), elinewidth=0.8, capsize=2, capthick=0.8,
@@ -7150,7 +7204,7 @@ def plot_predicted_L2500_vs_sigmahat(
     )
     # outside redshift range: filled diamonds
     ax.errorbar(
-        x_ref[mask_out], 10**actual_logL2500[mask_out], xerr=xerr_asym[:, mask_out], yerr=yerr_linear[mask_out],
+        x_ref[mask_out], 10**actual_logL2500_plot[mask_out], xerr=xerr_asym[:, mask_out], yerr=yerr_linear_display[mask_out],
         fmt='D', linestyle='none', markersize=3, mfc=(0,0,0,0.4), mec="none",
         ecolor=(0.2, 0.2, 0.2, 0.1), elinewidth=0.8, capsize=2, capthick=0.8,
         zorder=1
@@ -7158,10 +7212,10 @@ def plot_predicted_L2500_vs_sigmahat(
 
     # --- 68% / 95% KDE contours (outlines only) ---
     try:
-        finite  = np.isfinite(x_log_ref) & np.isfinite(actual_logL2500)
+        finite  = np.isfinite(x_log_ref) & np.isfinite(actual_logL2500_plot)
         in_use  = finite & mask_in.values
         xlog    = x_log_ref[in_use]
-        ylog    = actual_logL2500[in_use]
+        ylog    = actual_logL2500_plot[in_use]
 
         if xlog.size > 50:
             kde = gaussian_kde(np.vstack([xlog, ylog]), bw_method='scott')
@@ -7404,17 +7458,6 @@ def plot_predicted_L2500_vs_sigmahat(
     slope_at_data = f_slope(x_log_ref)
     sigma_x = np.asarray(x_log_err_med, dtype=float)
     sigma_xy = np.abs(slope_at_data) * np.abs(sigma_x)
-    sigma_int_log = (
-        np.exp(
-            evaluate_log_f(
-                med_params,
-                np.asarray(d["z"].values, dtype=float),
-                z_pivot=z_pivot_agn,
-                use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
-            )
-        )
-        / 2.5
-    )
     sigma_chi_plot = np.sqrt(sigma_meas**2 + sigma_xy**2)
     sigma_chi_full = np.sqrt(sigma_meas**2 + sigma_xy**2 + sigma_int_log**2)
     if debias and dmi_selection_sigma_interp is not None:
@@ -7432,10 +7475,9 @@ def plot_predicted_L2500_vs_sigmahat(
             np.maximum(sigma_sel_mag[sigma_sel_valid], float(sigma_sel_floor_mag))
             / 2.5
         )
-        sigma_chi_plot = np.where(sigma_sel_valid, sigma_sel_log, sigma_chi_plot)
         sigma_chi_full = np.where(sigma_sel_valid, sigma_sel_log, sigma_chi_full)
     good_plot = (
-        np.isfinite(residuals)
+        np.isfinite(residuals_plot)
         & np.isfinite(sigma_chi_plot)
         & (sigma_chi_plot > 0)
     )
@@ -7447,12 +7489,12 @@ def plot_predicted_L2500_vs_sigmahat(
 
     if show_residuals and ax_res is not None:
         good_in = good & d["z"].between(z_range[0], z_range[1]).to_numpy(dtype=bool)
-        good_out = good & ~d["z"].between(z_range[0], z_range[1]).to_numpy(dtype=bool)
-        if np.any(good_in):
-            good_in_plot = good_plot & d["z"].between(z_range[0], z_range[1]).to_numpy(dtype=bool)
+        good_in_plot = good_plot & d["z"].between(z_range[0], z_range[1]).to_numpy(dtype=bool)
+        good_out_plot = good_plot & ~d["z"].between(z_range[0], z_range[1]).to_numpy(dtype=bool)
+        if np.any(good_in_plot):
             ax_res.errorbar(
                 x_ref[good_in_plot],
-                residuals[good_in_plot],
+                residuals_plot[good_in_plot],
                 yerr=sigma_chi_plot[good_in_plot],
                 fmt='o',
                 linestyle='none',
@@ -7465,11 +7507,10 @@ def plot_predicted_L2500_vs_sigmahat(
                 zorder=5,
                 label="AGN",
             )
-        if np.any(good_out):
-            good_out_plot = good_plot & ~d["z"].between(z_range[0], z_range[1]).to_numpy(dtype=bool)
+        if np.any(good_out_plot):
             ax_res.errorbar(
                 x_ref[good_out_plot],
-                residuals[good_out_plot],
+                residuals_plot[good_out_plot],
                 yerr=sigma_chi_plot[good_out_plot],
                 fmt='D',
                 linestyle='none',
