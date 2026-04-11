@@ -141,6 +141,7 @@ def make_run_tag(
     N,
     z_range,
     completeness=True,
+    completeness_mode="2d",
     disable_ceph_dist_calibration=False,
     use_alpha_lambda_term=False,
     use_eta_sigma_term=False,
@@ -149,7 +150,7 @@ def make_run_tag(
     zmin, zmax = z_range
     n_tag = "all" if N is None else f"N{N}"
     z_tag = f"z{zmin:.2f}_{zmax:.2f}".replace(".", "p")
-    completeness_tag = "" if completeness else "_disable_completeness"
+    completeness_tag = f"_{completeness_mode}" if completeness else "_disable_completeness"
     ceph_tag = "_nocephdist_planckh0" if disable_ceph_dist_calibration else ""
     alpha_tag = "_alphaLam" if use_alpha_lambda_term else ""
     eta_sigma_tag = "_etaSigma" if use_eta_sigma_term else ""
@@ -326,13 +327,15 @@ def generate_fresh_completeness_sim_file(plot_path, *, area_deg2, seed=123):
 
     rng = np.random.default_rng(seed)
     phi_log10, m_grid, z_bins = build_shen_lf(None)
-    _, _, _, _, z_all, m_all, m_rest_all, _ = mock_m_per_zbin(
+    alpha_nu_parent_mean = -0.5
+    alpha_nu_parent_sigma = 0.3
+    _, _, _, _, z_all, m_all, m_rest_all, _, alpha_lambda_all = mock_m_per_zbin(
         phi_log10,
         m_grid,
         z_bins,
         float(area_deg2),
-        -0.5,
-        0.3,
+        alpha_nu_parent_mean,
+        alpha_nu_parent_sigma,
         COMPLETENESS_MOCK_COSMO,
         z_res=512,
         m_scatter=0.0,
@@ -342,6 +345,7 @@ def generate_fresh_completeness_sim_file(plot_path, *, area_deg2, seed=123):
         rng=rng,
         return_z=True,
         return_global=True,
+        return_alpha=True,
     )
     n_generated = int(np.size(z_all))
     print(
@@ -354,9 +358,12 @@ def generate_fresh_completeness_sim_file(plot_path, *, area_deg2, seed=123):
         m_all,
         m_rest_all,
         m_limit=28.0,
+        alpha_lambda_all=alpha_lambda_all,
         thinning_probability=thinning_probability,
         rng=rng,
         area_deg2=area_deg2,
+        alpha_nu_parent_mean=alpha_nu_parent_mean,
+        alpha_nu_parent_sigma=alpha_nu_parent_sigma,
     )
     print(
         f"Generated fresh completeness mock catalog: {output_path} "
@@ -388,6 +395,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
         N,
         z_range,
         completeness=completeness,
+        completeness_mode=completeness_mode,
         disable_ceph_dist_calibration=disable_ceph_dist_calibration,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
@@ -796,6 +804,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         N,
         z_range,
         completeness=completeness,
+        completeness_mode=completeness_mode,
         disable_ceph_dist_calibration=disable_ceph_dist_calibration,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
@@ -1334,7 +1343,7 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
     zmin, zmax = z_range
     n_tag = "all" if N is None else f"N{N}"
     z_tag = f"z{zmin:.2f}_{zmax:.2f}".replace(".", "p")
-    completeness_tag = "" if completeness else "_disable_completeness"
+    completeness_tag = f"_{completeness_mode}" if completeness else "_disable_completeness"
     ceph_tag = "_nocephdist_planckh0" if disable_ceph_dist_calibration else ""
     compare_run_tag = f"model_compare_{speed}_{n_tag}_{z_tag}{completeness_tag}{ceph_tag}"
     if use_alpha_lambda_term:
@@ -1666,7 +1675,7 @@ if __name__ == "__main__":
         zmin, zmax = args.z_range
         n_tag = "all" if effective_N is None else f"N{effective_N}"
         z_tag = f"z{zmin:.2f}_{zmax:.2f}".replace(".", "p")
-        completeness_tag = "" if not args.disable_completeness else "_disable_completeness"
+        completeness_tag = f"_{args.completeness_mode}" if not args.disable_completeness else "_disable_completeness"
         ceph_tag = "_nocephdist_planckh0" if args.disable_ceph_dist_calibration else ""
         alpha_tag = "_alphaLam" if args.fit_alpha_lambda_term else ""
         eta_sigma_tag = "_etaSigma" if args.fit_eta_sigma_term else ""

@@ -18,8 +18,10 @@ from qvc.light_curve.fit_light_curves import (
     _compute_survey_offset_active_mask,
     balmer_continuum_weight,
     build_explicit_model_params,
+    build_explicit_model_params_relflux,
     bending_power_law_psd,
     compute_band_igm_transmission,
+    compute_flux_line_ratio_offsets,
     compute_igm_transmission_obs_wave,
     compute_igm_transmission_rest_wave,
     compute_lam_lya_suppression_rf,
@@ -167,16 +169,54 @@ def test_compute_band_igm_transmission_suppresses_u_more_than_redder_bands():
     assert transmission[2] > 0.99
 
 
-def test_build_explicit_model_params_applies_log_igm_transmission_band_exactly():
+def test_build_explicit_model_params_keeps_igm_out_of_continuum_amplitude():
     lam_rf = jnp.array([1500.0, 2000.0, 2500.0])
     raw = _make_raw_public(len(lam_rf))
-    raw["log_igm_transmission_band"] = jnp.log(jnp.array([0.25, 0.5, 0.9], dtype=float))
+    transmission = jnp.array([0.25, 0.5, 0.9], dtype=float)
+    raw["log_igm_transmission_band"] = jnp.log(transmission)
     explicit = build_explicit_model_params(raw, lam_rf)
 
     baseline = build_explicit_model_params(_make_raw_public(len(lam_rf)), lam_rf)
-    ratio = np.asarray(explicit["amp_cont"]) / np.asarray(baseline["amp_cont"])
 
-    assert np.allclose(ratio, np.array([0.25, 0.5, 0.9]))
+    assert np.allclose(np.asarray(explicit["amp_cont"]), np.asarray(baseline["amp_cont"]))
+    assert np.allclose(np.asarray(explicit["igm_transmission_band"]), np.asarray(transmission))
+
+
+def test_build_explicit_model_params_relflux_keeps_igm_out_of_continuum_amplitude():
+    lam_rf = jnp.array([1500.0, 2000.0, 2500.0])
+    raw = _make_raw_public(len(lam_rf))
+    transmission = jnp.array([0.25, 0.5, 0.9], dtype=float)
+    raw["log_igm_transmission_band"] = jnp.log(transmission)
+    explicit = build_explicit_model_params_relflux(raw, lam_rf)
+
+    baseline = build_explicit_model_params_relflux(_make_raw_public(len(lam_rf)), lam_rf)
+
+    assert np.allclose(
+        np.asarray(explicit["amp_cont_relflux"]),
+        np.asarray(baseline["amp_cont_relflux"]),
+    )
+    assert np.allclose(np.asarray(explicit["igm_transmission_band"]), np.asarray(transmission))
+
+
+def test_flux_line_ratio_offsets_ignore_static_igm_transmission():
+    lam_rf = jnp.array([1500.0, 2000.0, 2500.0])
+    lambda_center_rf = compute_lambda_center_rf(lam_rf)
+
+    baseline = compute_flux_line_ratio_offsets(
+        lam_rf,
+        lambda_center_rf=lambda_center_rf,
+        eta_sigma=jnp.array(-0.5),
+        log_igm_transmission_band=jnp.zeros(len(lam_rf), dtype=float),
+    )
+    absorbed = compute_flux_line_ratio_offsets(
+        lam_rf,
+        lambda_center_rf=lambda_center_rf,
+        eta_sigma=jnp.array(-0.5),
+        log_igm_transmission_band=jnp.log(jnp.array([0.25, 0.5, 0.9], dtype=float)),
+    )
+
+    assert np.allclose(np.asarray(absorbed["blr_band"]), np.asarray(baseline["blr_band"]))
+    assert np.isclose(float(absorbed["bc_ref"]), float(baseline["bc_ref"]))
 
 
 def test_compute_igm_transmission_rest_wave_matches_observed_wave_conversion():

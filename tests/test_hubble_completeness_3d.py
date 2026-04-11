@@ -16,6 +16,7 @@ if str(SRC) not in sys.path:
 
 from qvc.hubble import hubble_completeness_refactored as hcr
 from qvc.hubble import hubble_fit, hubble_likelihood, hubble_model
+from qvc.hubble.completeness_mock_catalog import save_mock_catalog
 
 
 def _make_fake_fhost_df(n=200, seed=123):
@@ -97,7 +98,22 @@ def _make_fake_agn_sample_with_fhost(n_agn=24, seed=123):
     )
 
 
-def _write_fake_sim_file(path, n=2000, seed=321):
+def _make_fake_agn_sample_with_fhost_alpha(n_agn=32, seed=123, alpha_center=-1.25):
+    rng = np.random.default_rng(seed)
+    df = _make_fake_agn_sample_with_fhost(n_agn=n_agn, seed=seed)
+    trend = 0.08 * (df["z"].to_numpy(dtype=float) - float(df["z"].mean()))
+    df["alpha_lambda"] = alpha_center + trend + rng.normal(0.0, 0.06, size=n_agn)
+    return df
+
+
+def _write_fake_sim_file(
+    path,
+    n=2000,
+    seed=321,
+    include_alpha=False,
+    alpha_center=-1.2,
+    include_fhost=False,
+):
     rng = np.random.default_rng(seed)
     z = rng.uniform(0.1, 3.5, size=n)
     logL = rng.uniform(42.2, 46.0, size=n)
@@ -107,6 +123,12 @@ def _write_fake_sim_file(path, n=2000, seed=321):
     with h5py.File(path, "w") as handle:
         handle.create_dataset("z", data=z)
         handle.create_dataset("apparent_mag_2500", data=m2500)
+        if include_alpha:
+            alpha_lambda = alpha_center + 0.12 * (z - np.mean(z)) + rng.normal(0.0, 0.08, size=n)
+            handle.create_dataset("alpha_lambda", data=alpha_lambda)
+        if include_fhost:
+            f_host = np.clip(0.25 + 0.08 * (z - np.mean(z)) + rng.normal(0.0, 0.05, size=n), 0.01, 0.9)
+            handle.create_dataset("f_host_2500", data=f_host)
 
 
 def test_fit_fhost_2500_model_monotonic_and_bounded():
@@ -139,22 +161,34 @@ def test_completeness3d_shape_and_likelihood_matches_2d_when_host_independent():
     mag_centers = np.linspace(18.5, 24.0, 9)
     z_centers = np.linspace(0.0, 4.0, 7)
     fhost_centers = np.linspace(0.05, 0.95, 5)
+    alpha_centers = np.linspace(-2.4, -0.8, 4)
     mm, zz = np.meshgrid(mag_centers, z_centers, indexing="ij")
     c2 = np.clip(np.exp(-0.12 * zz) / (1.0 + np.exp((mm - 22.0) / 0.35)), 0.0, 1.0)
     c3 = np.repeat(c2[:, :, None], len(fhost_centers), axis=2)
+    c4 = np.repeat(c3[:, :, :, None], len(alpha_centers), axis=3)
 
     comp2 = hcr.Completeness2D(mag_centers, z_centers, c2)
     comp3 = hcr.Completeness3D(mag_centers, z_centers, fhost_centers, c3)
+    comp4 = hcr.Completeness4D(mag_centers, z_centers, fhost_centers, alpha_centers, c4)
 
     q = comp3(np.array([[20.0, 21.0]]), np.array([[1.0, 2.0]]), np.array([[0.2, 0.8]]))
     assert q.shape == (1, 2)
     assert np.all((q >= 0.0) & (q <= 1.0))
+    q4 = comp4(
+        np.array([[20.0, 21.0]]),
+        np.array([[1.0, 2.0]]),
+        np.array([[0.2, 0.8]]),
+        np.array([[-1.9, -1.2]]),
+    )
+    assert q4.shape == (1, 2)
+    assert np.all((q4 >= 0.0) & (q4 <= 1.0))
 
     m_obs = np.array([20.5, 21.3, 22.1])
     m_model = np.array([20.4, 21.1, 22.0])
     mu_err = np.array([0.15, 0.18, 0.20])
     z = np.array([0.8, 1.5, 2.2])
     f_host = np.array([0.2, 0.5, 0.8])
+    alpha_lambda = np.array([-1.8, -1.5, -1.1])
 
     ll2, blob2 = hubble_likelihood.completeness_loglike(
         m_obs=m_obs,
@@ -175,9 +209,100 @@ def test_completeness3d_shape_and_likelihood_matches_2d_when_host_independent():
         m_grid=mag_centers,
         f_host_2500=f_host,
     )
+    ll4, blob4 = hubble_likelihood.completeness_loglike(
+        m_obs=m_obs,
+        m_obs_err=np.full_like(m_obs, 0.05),
+        m_model=m_model,
+        mu_err=mu_err,
+        z=z,
+        completeness_model=comp4,
+        m_grid=mag_centers,
+        f_host_2500=f_host,
+        alpha_lambda=alpha_lambda,
+    )
 
     assert np.allclose(ll2, ll3, rtol=1e-10, atol=1e-10)
     assert np.allclose(blob2, blob3, rtol=1e-10, atol=1e-10)
+    assert np.allclose(ll2, ll4, rtol=1e-10, atol=1e-10)
+    assert np.allclose(blob2, blob4, rtol=1e-10, atol=1e-10)
+
+
+def test_get_completeness_function_4d_fhost_alpha_uses_mock_alpha_dataset(tmp_path):
+    df_agn = _make_fake_agn_sample_with_fhost_alpha(alpha_center=-1.15)
+    sim_file = tmp_path / "mock4d_alpha.h5"
+    _write_fake_sim_file(sim_file, include_alpha=True, alpha_center=-0.95, include_fhost=True)
+
+    completeness_params = hcr.get_completeness_function_4d_fhost_alpha(
+        df_agn,
+        sim_file=str(sim_file),
+        plot=False,
+        n_mag_bins=8,
+        n_z_bins=8,
+        n_fhost_bins=4,
+        n_alpha_bins=5,
+        sigma_mag=0.25,
+        sigma_z_abs=0.25,
+        sigma_fhost=0.2,
+        sigma_alpha=0.4,
+    )
+
+    assert completeness_params[0].mode == "4d_fhost_alpha"
+    alpha_model = completeness_params[-1]
+    assert alpha_model["source"] == "mock_h5_dataset:alpha_lambda"
+    assert alpha_model["n_mock"] > 0
+    assert abs(alpha_model["alpha_mean"] - (-0.95)) < 0.25
+    host_model = completeness_params[-2]
+    assert host_model["source"] == "mock_h5_dataset:f_host_2500"
+    assert host_model["n_mock"] > 0
+
+
+def test_get_completeness_function_4d_fhost_alpha_falls_back_to_observed_alpha(tmp_path):
+    df_agn = _make_fake_agn_sample_with_fhost_alpha(alpha_center=-0.85)
+    sim_file = tmp_path / "mock4d_no_alpha.h5"
+    _write_fake_sim_file(sim_file, include_alpha=False)
+
+    completeness_params = hcr.get_completeness_function_4d_fhost_alpha(
+        df_agn,
+        sim_file=str(sim_file),
+        plot=False,
+        n_mag_bins=8,
+        n_z_bins=8,
+        n_fhost_bins=4,
+        n_alpha_bins=5,
+        sigma_mag=0.25,
+        sigma_z_abs=0.25,
+        sigma_fhost=0.2,
+        sigma_alpha=0.4,
+    )
+
+    alpha_model = completeness_params[-1]
+    assert alpha_model["source"] == "observed_alpha_lambda"
+    assert alpha_model["n_fit"] == len(df_agn)
+    assert abs(alpha_model["alpha_mean"] - np.median(df_agn["alpha_lambda"])) < 0.05
+
+
+def test_save_mock_catalog_persists_alpha_lambda(tmp_path):
+    out = tmp_path / "mock_with_alpha.h5"
+    z = np.array([0.5, 1.0, 1.5])
+    m_i = np.array([20.1, 21.2, 22.3])
+    m2500 = np.array([19.9, 21.0, 22.1])
+    alpha_lambda = np.array([-1.2, -1.4, -1.6])
+
+    save_mock_catalog(
+        out,
+        z,
+        m_i,
+        m2500,
+        alpha_lambda_all=alpha_lambda,
+        alpha_nu_parent_mean=-0.5,
+        alpha_nu_parent_sigma=0.3,
+    )
+
+    with h5py.File(out, "r") as handle:
+        np.testing.assert_allclose(handle["alpha_lambda"][:], alpha_lambda)
+        np.testing.assert_allclose(handle["alpha_nu"][:], -alpha_lambda - 2.0)
+        assert handle.attrs["alpha_lambda_parent_mean"] == -1.5
+        assert handle.attrs["alpha_lambda_parent_sigma"] == 0.3
 
 
 def test_get_completeness_function_3d_fhost_and_loglikelihood_smoke(tmp_path):

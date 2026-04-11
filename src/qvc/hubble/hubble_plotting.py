@@ -2939,6 +2939,149 @@ def plot_alpha_lambda_vs_redshift(
     )
 
 
+def _light_curve_point_count_series(df):
+    """Return total per-object LC point counts and the columns used."""
+    count_cols_by_band = {}
+    for col in df.columns:
+        match = re.match(r"^(variability_n_points|number_points)_([^_]+)$", str(col))
+        if match is None:
+            continue
+        prefix, band = match.groups()
+        count_cols_by_band.setdefault(band, {})[prefix] = col
+
+    selected_cols = []
+    for band in sorted(count_cols_by_band):
+        choices = count_cols_by_band[band]
+        selected_cols.append(choices.get("variability_n_points", choices.get("number_points")))
+
+    if selected_cols:
+        total = np.zeros(len(df), dtype=float)
+        has_count = np.zeros(len(df), dtype=bool)
+        for col in selected_cols:
+            values = pd.to_numeric(df[col], errors="coerce").to_numpy(dtype=float)
+            finite = np.isfinite(values)
+            total[finite] += values[finite]
+            has_count |= finite
+        total[~has_count] = np.nan
+        return total, selected_cols
+
+    if "number_points" not in df.columns:
+        return None, []
+
+    total = np.full(len(df), np.nan, dtype=float)
+    for i, value in enumerate(df["number_points"]):
+        parsed = value
+        if isinstance(value, str):
+            try:
+                parsed = literal_eval(value)
+            except Exception:
+                parsed = value
+        if isinstance(parsed, dict):
+            vals = pd.to_numeric(pd.Series(list(parsed.values())), errors="coerce").to_numpy(dtype=float)
+            if np.any(np.isfinite(vals)):
+                total[i] = np.nansum(vals)
+        elif isinstance(parsed, (list, tuple, np.ndarray)):
+            vals = pd.to_numeric(pd.Series(parsed), errors="coerce").to_numpy(dtype=float)
+            if np.any(np.isfinite(vals)):
+                total[i] = np.nansum(vals)
+        else:
+            scalar = pd.to_numeric(pd.Series([parsed]), errors="coerce").to_numpy(dtype=float)[0]
+            if np.isfinite(scalar):
+                total[i] = scalar
+    return total, ["number_points"]
+
+
+def plot_light_curve_n_points_vs_apparent_mag(
+    df,
+    plot_path="plots/hubble",
+    show=False,
+    filename="light_curve_n_points_vs_apparent_mag.pdf",
+    nbins_mag=12,
+    min_bin_count=5,
+):
+    """Plot total light-curve point count against apparent m_2500."""
+    if "apparent_mag_2500" not in df.columns:
+        raise KeyError("Missing required column for LC point-count diagnostic: 'apparent_mag_2500'.")
+
+    m2500 = pd.to_numeric(df["apparent_mag_2500"], errors="coerce").to_numpy(dtype=float)
+    n_points, count_cols = _light_curve_point_count_series(df)
+    if n_points is None or len(count_cols) == 0:
+        return None
+
+    mask = np.isfinite(m2500) & np.isfinite(n_points) & (n_points >= 0.0)
+    if not np.any(mask):
+        return None
+
+    x = m2500[mask]
+    y = n_points[mask]
+    z = (
+        pd.to_numeric(df["z"], errors="coerce").to_numpy(dtype=float)[mask]
+        if "z" in df.columns
+        else None
+    )
+
+    fig, ax = plt.subplots(figsize=(6.6, 5.0))
+    if z is not None and np.any(np.isfinite(z)):
+        sc = ax.scatter(
+            x,
+            y,
+            c=z,
+            cmap="viridis",
+            s=18,
+            alpha=0.65,
+            linewidths=0,
+            rasterized=True,
+        )
+        cbar = fig.colorbar(sc, ax=ax)
+        cbar.set_label(r"$z$")
+    else:
+        ax.scatter(
+            x,
+            y,
+            s=18,
+            alpha=0.55,
+            color="tab:blue",
+            linewidths=0,
+            rasterized=True,
+        )
+
+    if np.nanmax(x) > np.nanmin(x):
+        edges = np.linspace(np.nanmin(x), np.nanmax(x), int(nbins_mag) + 1)
+        x_mid, y_med, y_lo, y_hi = [], [], [], []
+        for i in range(len(edges) - 1):
+            lo = edges[i]
+            hi = edges[i + 1]
+            keep = (x >= lo) & (x < hi)
+            if i == len(edges) - 2:
+                keep = (x >= lo) & (x <= hi)
+            if np.count_nonzero(keep) >= int(min_bin_count):
+                x_mid.append(np.nanmedian(x[keep]))
+                y_med.append(np.nanmedian(y[keep]))
+                p16, p84 = np.nanpercentile(y[keep], [16.0, 84.0])
+                y_lo.append(p16)
+                y_hi.append(p84)
+        if x_mid:
+            ax.plot(x_mid, y_med, color="k", lw=2.0, label="Binned median")
+            ax.fill_between(x_mid, y_lo, y_hi, color="k", alpha=0.12, linewidth=0, label="16-84%")
+
+    ax.set_xlabel(r"$m_{2500\,\mathrm{\AA}}$ (mag)")
+    ax.set_ylabel("Total light-curve points")
+    ax.set_title(f"LC sampling vs apparent magnitude\nN={int(np.count_nonzero(mask))}, columns={len(count_cols)}")
+    ax.grid(True, alpha=0.2)
+    handles, _ = ax.get_legend_handles_labels()
+    if handles:
+        ax.legend(frameon=False)
+    fig.tight_layout()
+
+    diagnostics_path = os.path.join(plot_path or "plots/hubble", "diagnostics")
+    return _save_figure(
+        fig,
+        os.path.join(diagnostics_path, filename),
+        dpi=200,
+        show=show,
+    )
+
+
 def plot_alpha_lambda_vs_eta_sigma(
     df,
     plot_path="plots/hubble",

@@ -200,6 +200,7 @@ def mock_m_per_zbin(
     rng=None,
     return_z=False,
     return_global=False,
+    return_alpha=False,
     verbose=False,
 ):
     rng = np.random.default_rng() if rng is None else rng
@@ -251,6 +252,7 @@ def mock_m_per_zbin(
     per_z_m = []
     per_z_m_rest = []
     per_z = []
+    per_z_alpha_lambda = []
     nexp_per_bin = np.zeros(len(z_bins) - 1)
     nsel_per_bin = np.zeros(len(z_bins) - 1, dtype=int)
 
@@ -271,6 +273,7 @@ def mock_m_per_zbin(
             per_z_m.append(np.empty(0, dtype=float))
             per_z_m_rest.append(np.empty(0, dtype=float))
             per_z.append(np.empty(0, dtype=float))
+            per_z_alpha_lambda.append(np.empty(0, dtype=float))
             continue
 
         wz = phi_int_z * dvdz
@@ -279,6 +282,7 @@ def mock_m_per_zbin(
             per_z_m.append(np.empty(0, dtype=float))
             per_z_m_rest.append(np.empty(0, dtype=float))
             per_z.append(np.empty(0, dtype=float))
+            per_z_alpha_lambda.append(np.empty(0, dtype=float))
             continue
         cdf_z /= cdf_z[-1]
         z_samp = np.interp(rng.random(n_draw), cdf_z, z)
@@ -298,6 +302,7 @@ def mock_m_per_zbin(
             per_z_m.append(np.empty(0, dtype=float))
             per_z_m_rest.append(np.empty(0, dtype=float))
             per_z.append(np.empty(0, dtype=float))
+            per_z_alpha_lambda.append(np.empty(0, dtype=float))
             continue
 
         cdf_m = np.cumsum(w_m, axis=1) / row_sum[:, None]
@@ -315,6 +320,7 @@ def mock_m_per_zbin(
 
         dm_s = 5.0 * np.log10(cosmo.luminosity_distance(z_samp).to_value(u.pc)) - 5.0
         alpha_nu_samp = alpha_nu + rng.normal(0.0, dalpha_nu, size=z_samp.shape)
+        alpha_lambda_samp = -alpha_nu_samp - 2.0
         m_intrinsic = m_abs
 
         if kcorr_zref is None:
@@ -339,6 +345,7 @@ def mock_m_per_zbin(
             m_obs = m_obs[keep]
             m_2500_obs = m_2500_obs[keep]
             z_samp = z_samp[keep]
+            alpha_lambda_samp = alpha_lambda_samp[keep]
 
         if completeness is not None and m_obs.size > 0:
             p = np.clip(completeness(m_obs, z_samp), 0.0, 1.0)
@@ -346,14 +353,19 @@ def mock_m_per_zbin(
             m_obs = m_obs[keep]
             m_2500_obs = m_2500_obs[keep]
             z_samp = z_samp[keep]
+            alpha_lambda_samp = alpha_lambda_samp[keep]
 
         per_z_m.append(m_obs)
         per_z_m_rest.append(m_2500_obs)
         per_z.append(z_samp)
+        per_z_alpha_lambda.append(alpha_lambda_samp)
         nsel_per_bin[i] = m_obs.size
 
     if not (return_z or return_global):
-        return per_z_m, nexp_per_bin
+        out = (per_z_m, nexp_per_bin)
+        if return_alpha:
+            out = out + (per_z_alpha_lambda,)
+        return out
 
     out = (per_z_m, nexp_per_bin, per_z, nsel_per_bin)
     if return_global:
@@ -363,12 +375,18 @@ def mock_m_per_zbin(
             m_all = np.concatenate([per_z_m[i] for i in nonempty])
             m_rest_all = np.concatenate([per_z_m_rest[i] for i in nonempty])
             bin_index = np.concatenate([np.full(len(per_z_m[i]), i, dtype=int) for i in nonempty])
+            alpha_lambda_all = np.concatenate([per_z_alpha_lambda[i] for i in nonempty])
         else:
             z_all = np.empty(0, dtype=float)
             m_all = np.empty(0, dtype=float)
             m_rest_all = np.empty(0, dtype=float)
             bin_index = np.empty(0, dtype=int)
+            alpha_lambda_all = np.empty(0, dtype=float)
         out = out + (z_all, m_all, m_rest_all, bin_index)
+        if return_alpha:
+            out = out + (alpha_lambda_all,)
+    elif return_alpha:
+        out = out + (per_z_alpha_lambda,)
     return out
 
 
@@ -379,9 +397,12 @@ def save_mock_catalog(
     m_2500_all,
     m_limit=None,
     *,
+    alpha_lambda_all=None,
     thinning_probability=1.0,
     rng=None,
     area_deg2=None,
+    alpha_nu_parent_mean=None,
+    alpha_nu_parent_sigma=None,
 ):
     output_path = Path(output_path).expanduser().resolve()
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -394,6 +415,12 @@ def save_mock_catalog(
     mask = np.ones_like(z_all, dtype=bool)
     if m_limit is not None:
         mask &= m_all < m_limit
+    alpha_lambda_all = None if alpha_lambda_all is None else np.asarray(alpha_lambda_all, dtype=float)
+    if alpha_lambda_all is not None and alpha_lambda_all.shape != np.shape(z_all):
+        raise ValueError(
+            "alpha_lambda_all must have the same shape as z_all; "
+            f"got {alpha_lambda_all.shape} and {np.shape(z_all)}."
+        )
     n_before_thin = int(np.count_nonzero(mask))
     n_after_thin = int(np.count_nonzero(mask))
     with h5py.File(output_path, "w") as h5file:
@@ -403,8 +430,22 @@ def save_mock_catalog(
         h5file.create_dataset("apparent_mag_2500", data=m_2500_all[mask])
         # Keep the legacy key so existing completeness readers do not break.
         h5file.create_dataset("apparent_mag_i_rest", data=m_2500_all[mask])
+        if alpha_lambda_all is not None:
+            alpha_saved = alpha_lambda_all[mask]
+            h5file.create_dataset("alpha_lambda", data=alpha_saved)
+            h5file.create_dataset("alpha_nu", data=-alpha_saved - 2.0)
+            finite_alpha = alpha_saved[np.isfinite(alpha_saved)]
+            if finite_alpha.size > 0:
+                h5file.attrs["alpha_lambda_mean"] = float(np.nanmean(finite_alpha))
+                h5file.attrs["alpha_lambda_sigma"] = float(np.nanstd(finite_alpha, ddof=1)) if finite_alpha.size > 1 else 0.0
         h5file.attrs["thinning_probability"] = thinning_probability
         h5file.attrs["mock_count_scale"] = 1.0 / thinning_probability
+        if alpha_nu_parent_mean is not None and np.isfinite(alpha_nu_parent_mean):
+            h5file.attrs["alpha_nu_parent_mean"] = float(alpha_nu_parent_mean)
+            h5file.attrs["alpha_lambda_parent_mean"] = float(-alpha_nu_parent_mean - 2.0)
+        if alpha_nu_parent_sigma is not None and np.isfinite(alpha_nu_parent_sigma):
+            h5file.attrs["alpha_nu_parent_sigma"] = float(abs(alpha_nu_parent_sigma))
+            h5file.attrs["alpha_lambda_parent_sigma"] = float(abs(alpha_nu_parent_sigma))
         if area_deg2 is not None and np.isfinite(area_deg2):
             h5file.attrs["area_deg2"] = float(area_deg2)
     print(
@@ -470,7 +511,7 @@ def main():
         phi_log10, m_grid, z_bins = build_ananna_lf(args.ananna_xlf_path)
         area_deg2 = 50.0 if args.area_deg2 is None else args.area_deg2
 
-    _, nexp, _, nsel, z_all, m_all, m_rest_all, bin_index = mock_m_per_zbin(
+    _, nexp, _, nsel, z_all, m_all, m_rest_all, bin_index, alpha_lambda_all = mock_m_per_zbin(
         phi_log10,
         m_grid,
         z_bins,
@@ -485,10 +526,20 @@ def main():
         rng=rng,
         return_z=True,
         return_global=True,
+        return_alpha=True,
         verbose=args.verbose,
     )
 
-    save_mock_catalog(args.output, z_all, m_all, m_rest_all, m_limit=args.m_limit)
+    save_mock_catalog(
+        args.output,
+        z_all,
+        m_all,
+        m_rest_all,
+        m_limit=args.m_limit,
+        alpha_lambda_all=alpha_lambda_all,
+        alpha_nu_parent_mean=args.alpha_nu,
+        alpha_nu_parent_sigma=args.dalpha_nu,
+    )
     print(f"Saved mock catalog to {args.output}")
     print(f"Generated {len(z_all)} total mock sources before save cut.")
 

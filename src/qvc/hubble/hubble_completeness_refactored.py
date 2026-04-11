@@ -583,6 +583,127 @@ _ALPHA_TRUE_MEAN = -1.5
 _ALPHA_TRUE_SIGMA = 0.5
 _ALPHA_MIN = -4.0
 _ALPHA_MAX = 0.5
+_ALPHA_MIN_SIGMA = 0.05
+
+
+def _finite_float_attr(attrs, *keys):
+    for key in keys:
+        if key not in attrs:
+            continue
+        try:
+            value = float(attrs[key])
+        except (TypeError, ValueError):
+            continue
+        if np.isfinite(value):
+            return value
+    return None
+
+
+def _robust_alpha_sigma(alpha, *, fallback=_ALPHA_TRUE_SIGMA, min_sigma=_ALPHA_MIN_SIGMA):
+    alpha = np.asarray(alpha, dtype=float)
+    alpha = alpha[np.isfinite(alpha)]
+    sigma = np.nan
+    if alpha.size >= 2:
+        p16, p84 = np.nanpercentile(alpha, [16.0, 84.0])
+        sigma = 0.5 * (p84 - p16)
+        if (not np.isfinite(sigma)) or sigma <= 0.0:
+            sigma = np.nanstd(alpha, ddof=1)
+    if (not np.isfinite(sigma)) or sigma <= 0.0:
+        sigma = fallback
+    return float(max(sigma, min_sigma))
+
+
+def _alpha_lambda_model_from_values(
+    alpha_lambda,
+    *,
+    source,
+    count_key="n_fit",
+    fallback_mean=_ALPHA_TRUE_MEAN,
+    fallback_sigma=_ALPHA_TRUE_SIGMA,
+):
+    alpha = np.asarray(alpha_lambda, dtype=float)
+    mask = np.isfinite(alpha) & (alpha >= _ALPHA_MIN) & (alpha <= _ALPHA_MAX)
+    alpha = alpha[mask]
+    if alpha.size == 0:
+        mean = float(fallback_mean)
+        sigma = float(fallback_sigma)
+    else:
+        mean = float(np.nanmedian(alpha))
+        sigma = _robust_alpha_sigma(alpha, fallback=fallback_sigma)
+    return {
+        "alpha_mean": mean,
+        "alpha_sigma": sigma,
+        "alpha_min": float(_ALPHA_MIN),
+        "alpha_max": float(_ALPHA_MAX),
+        "source": source,
+        count_key: int(alpha.size),
+    }
+
+
+def fit_alpha_lambda_population(df_agn):
+    """Fit the fallback alpha_lambda parent from the usable observed sample."""
+    if "alpha_lambda" not in df_agn.columns:
+        return {
+            "alpha_mean": float(_ALPHA_TRUE_MEAN),
+            "alpha_sigma": float(_ALPHA_TRUE_SIGMA),
+            "alpha_min": float(_ALPHA_MIN),
+            "alpha_max": float(_ALPHA_MAX),
+            "source": "default_alpha_lambda",
+            "n_fit": 0,
+        }
+    return _alpha_lambda_model_from_values(
+        df_agn["alpha_lambda"].to_numpy(dtype=float),
+        source="observed_alpha_lambda",
+        count_key="n_fit",
+    )
+
+
+def sample_alpha_lambda_population(size, model, rng):
+    mean = float(model.get("alpha_mean", _ALPHA_TRUE_MEAN))
+    sigma = float(model.get("alpha_sigma", _ALPHA_TRUE_SIGMA))
+    sigma = max(sigma, _ALPHA_MIN_SIGMA)
+    return np.clip(rng.normal(mean, sigma, size=size), _ALPHA_MIN, _ALPHA_MAX)
+
+
+def _read_mock_alpha_lambda(h5file):
+    for key in ("alpha_lambda", "PL_slope"):
+        if key in h5file:
+            return np.asarray(h5file[key][:], dtype=float), f"mock_h5_dataset:{key}"
+    if "alpha_nu" in h5file:
+        alpha_nu = np.asarray(h5file["alpha_nu"][:], dtype=float)
+        return -alpha_nu - 2.0, "mock_h5_dataset:alpha_nu"
+    return None, None
+
+
+def _read_mock_fhost_2500(h5file):
+    for key in ("f_host_2500", "fhost_2500", "f_host"):
+        if key in h5file:
+            return np.asarray(h5file[key][:], dtype=float), f"mock_h5_dataset:{key}"
+    return None, None
+
+
+def _alpha_lambda_model_from_h5_attrs(attrs):
+    alpha_mean = _finite_float_attr(attrs, "alpha_lambda_parent_mean", "alpha_lambda_mean")
+    alpha_sigma = _finite_float_attr(attrs, "alpha_lambda_parent_sigma", "alpha_lambda_sigma")
+
+    alpha_nu_mean = _finite_float_attr(attrs, "alpha_nu_parent_mean", "alpha_nu_input_mean", "alpha_nu_mean")
+    alpha_nu_sigma = _finite_float_attr(attrs, "alpha_nu_parent_sigma", "alpha_nu_input_sigma", "alpha_nu_sigma")
+    if alpha_mean is None and alpha_nu_mean is not None:
+        alpha_mean = -alpha_nu_mean - 2.0
+    if alpha_sigma is None and alpha_nu_sigma is not None:
+        alpha_sigma = abs(alpha_nu_sigma)
+    if alpha_mean is None:
+        return None
+    if alpha_sigma is None or not np.isfinite(alpha_sigma) or alpha_sigma <= 0.0:
+        alpha_sigma = _ALPHA_TRUE_SIGMA
+    return {
+        "alpha_mean": float(np.clip(alpha_mean, _ALPHA_MIN, _ALPHA_MAX)),
+        "alpha_sigma": float(max(alpha_sigma, _ALPHA_MIN_SIGMA)),
+        "alpha_min": float(_ALPHA_MIN),
+        "alpha_max": float(_ALPHA_MAX),
+        "source": "mock_h5_attrs",
+        "n_fit": 0,
+    }
 
 
 def generalized_sigmoid_fhost(logL2500, x0, k, nu):
@@ -1061,7 +1182,7 @@ def get_completeness_function_3d_fhost(
     sigma_fhost=0.05,
 ):
     """
-    Build p(detect | m, z, f_host_2500) using a one-shot host-fraction parent model.
+    Build p(detect | m, z, f_host_2500), preferring mock f_host_2500 when available.
     """
     import matplotlib.pyplot as plt
 
@@ -1075,6 +1196,13 @@ def get_completeness_function_3d_fhost(
         else:
             m_true = np.asarray(f["apparent_mag_i_rest"][:], dtype=float)
         z_true = np.asarray(f["z"][:], dtype=float)
+        fhost_true_raw, fhost_source = _read_mock_fhost_2500(f)
+        if fhost_true_raw is not None and fhost_true_raw.shape != m_true.shape:
+            print(
+                "[WARNING] Ignoring mock f_host_2500 dataset because its shape "
+                f"{fhost_true_raw.shape} does not match apparent magnitude shape {m_true.shape}."
+            )
+            fhost_true_raw, fhost_source = None, None
         mock_count_scale = f.attrs.get("mock_count_scale")
 
     z_obs = df_agn["z"].to_numpy(dtype=float)
@@ -1088,14 +1216,32 @@ def get_completeness_function_3d_fhost(
         & (fhost_obs >= 0.0)
         & (fhost_obs <= 1.0)
     )
-    ok_true = np.isfinite(m_true) & np.isfinite(z_true)
+    if fhost_true_raw is None:
+        ok_true = np.isfinite(m_true) & np.isfinite(z_true)
+    else:
+        ok_true = (
+            np.isfinite(m_true)
+            & np.isfinite(z_true)
+            & np.isfinite(fhost_true_raw)
+            & (fhost_true_raw >= 0.0)
+            & (fhost_true_raw <= 1.0)
+        )
     m_obs, z_obs, fhost_obs = m_obs[ok_obs], z_obs[ok_obs], fhost_obs[ok_obs]
     m_true, z_true = m_true[ok_true], z_true[ok_true]
 
     host_model = fit_fhost_2500_l2500_model(df_agn.loc[ok_obs], fit_logL_max=fit_logL_max, cosmo=COSMO)
-    logL_true = apparent_mag_to_logL2500(m_true, z_true, COSMO)
     rng = np.random.default_rng(12345)
-    fhost_true = sample_fhost_2500_from_logL2500(logL_true, host_model, rng)
+    if fhost_true_raw is None:
+        logL_true = apparent_mag_to_logL2500(m_true, z_true, COSMO)
+        fhost_true = sample_fhost_2500_from_logL2500(logL_true, host_model, rng)
+        host_model["source"] = "observed_fhost_model"
+    else:
+        fhost_true = np.clip(fhost_true_raw[ok_true], 0.0, 1.0)
+        host_model["source"] = fhost_source
+        host_model["observed_fit_source"] = "observed_fhost_model"
+        host_model["n_mock"] = int(np.size(fhost_true))
+        host_model["mock_fhost_mean"] = float(np.nanmean(fhost_true)) if np.size(fhost_true) else np.nan
+        host_model["mock_fhost_sigma"] = float(np.nanstd(fhost_true, ddof=1)) if np.size(fhost_true) > 1 else 0.0
 
     mag_min, mag_max = 18.5, 24.0
     z_min, z_max = 0.0, 4.0
@@ -1206,20 +1352,20 @@ def get_completeness_function_4d_fhost_alpha(
     sim_file="data/nov9_mock_mag_z_moresources.h5",
     n_mag_bins=30,
     n_z_bins=40,
-    n_fhost_bins=20,
-    n_alpha_bins=20,
+    n_fhost_bins=12,
+    n_alpha_bins=12,
     smooth_counts=True,
     plot=False,
     plot_path=None,
     fit_logL_max=45.5,
-    sigma_mag=0.02,
-    sigma_z_abs=0.02,
-    sigma_fhost=0.05,
-    sigma_alpha=0.15,
+    sigma_mag=0.2,
+    sigma_z_abs=0.2,
+    sigma_fhost=0.1,
+    sigma_alpha=0.35,
 ):
     """
-    Build p(detect | m, z, f_host_2500, alpha_lambda) using a one-shot host model
-    and a fixed mock alpha_lambda population.
+    Build p(detect | m, z, f_host_2500, alpha_lambda), preferring mock
+    f_host_2500 and alpha_lambda populations when available.
     """
     import matplotlib.pyplot as plt
 
@@ -1235,6 +1381,21 @@ def get_completeness_function_4d_fhost_alpha(
         else:
             m_true = np.asarray(f["apparent_mag_i_rest"][:], dtype=float)
         z_true = np.asarray(f["z"][:], dtype=float)
+        fhost_true_raw, fhost_source = _read_mock_fhost_2500(f)
+        if fhost_true_raw is not None and fhost_true_raw.shape != m_true.shape:
+            print(
+                "[WARNING] Ignoring mock f_host_2500 dataset because its shape "
+                f"{fhost_true_raw.shape} does not match apparent magnitude shape {m_true.shape}."
+            )
+            fhost_true_raw, fhost_source = None, None
+        alpha_true_raw, alpha_source = _read_mock_alpha_lambda(f)
+        if alpha_true_raw is not None and alpha_true_raw.shape != m_true.shape:
+            print(
+                "[WARNING] Ignoring mock alpha_lambda dataset because its shape "
+                f"{alpha_true_raw.shape} does not match apparent magnitude shape {m_true.shape}."
+            )
+            alpha_true_raw, alpha_source = None, None
+        alpha_attr_model = _alpha_lambda_model_from_h5_attrs(f.attrs)
         mock_count_scale = f.attrs.get("mock_count_scale")
 
     z_obs = df_agn["z"].to_numpy(dtype=float)
@@ -1253,14 +1414,45 @@ def get_completeness_function_4d_fhost_alpha(
         & (alpha_obs <= _ALPHA_MAX)
     )
     ok_true = np.isfinite(m_true) & np.isfinite(z_true)
+    if fhost_true_raw is not None:
+        ok_true &= (
+            np.isfinite(fhost_true_raw)
+            & (fhost_true_raw >= 0.0)
+            & (fhost_true_raw <= 1.0)
+        )
+    if alpha_true_raw is not None:
+        ok_true &= (
+            np.isfinite(alpha_true_raw)
+            & (alpha_true_raw >= _ALPHA_MIN)
+            & (alpha_true_raw <= _ALPHA_MAX)
+        )
     m_obs, z_obs, fhost_obs, alpha_obs = m_obs[ok_obs], z_obs[ok_obs], fhost_obs[ok_obs], alpha_obs[ok_obs]
     m_true, z_true = m_true[ok_true], z_true[ok_true]
+    if alpha_true_raw is not None:
+        alpha_true = np.clip(alpha_true_raw[ok_true], _ALPHA_MIN, _ALPHA_MAX)
+        alpha_model = _alpha_lambda_model_from_values(
+            alpha_true,
+            source=alpha_source,
+            count_key="n_mock",
+        )
+    else:
+        alpha_model = alpha_attr_model or fit_alpha_lambda_population(df_agn.loc[ok_obs])
 
     host_model = fit_fhost_2500_l2500_model(df_agn.loc[ok_obs], fit_logL_max=fit_logL_max, cosmo=COSMO)
-    logL_true = apparent_mag_to_logL2500(m_true, z_true, COSMO)
     rng = np.random.default_rng(12345)
-    fhost_true = sample_fhost_2500_from_logL2500(logL_true, host_model, rng)
-    alpha_true = np.clip(rng.normal(_ALPHA_TRUE_MEAN, _ALPHA_TRUE_SIGMA, size=np.shape(m_true)), _ALPHA_MIN, _ALPHA_MAX)
+    if fhost_true_raw is None:
+        logL_true = apparent_mag_to_logL2500(m_true, z_true, COSMO)
+        fhost_true = sample_fhost_2500_from_logL2500(logL_true, host_model, rng)
+        host_model["source"] = "observed_fhost_model"
+    else:
+        fhost_true = np.clip(fhost_true_raw[ok_true], 0.0, 1.0)
+        host_model["source"] = fhost_source
+        host_model["observed_fit_source"] = "observed_fhost_model"
+        host_model["n_mock"] = int(np.size(fhost_true))
+        host_model["mock_fhost_mean"] = float(np.nanmean(fhost_true)) if np.size(fhost_true) else np.nan
+        host_model["mock_fhost_sigma"] = float(np.nanstd(fhost_true, ddof=1)) if np.size(fhost_true) > 1 else 0.0
+    if alpha_true_raw is None:
+        alpha_true = sample_alpha_lambda_population(np.shape(m_true), alpha_model, rng)
 
     mag_min, mag_max = 18.5, 24.0
     z_min, z_max = 0.0, 4.0
@@ -1412,7 +1604,7 @@ def get_completeness_function_4d_fhost_alpha(
         da,
         sigma_mag,
         host_model,
-        dict(alpha_mean=_ALPHA_TRUE_MEAN, alpha_sigma=_ALPHA_TRUE_SIGMA, alpha_min=_ALPHA_MIN, alpha_max=_ALPHA_MAX),
+        alpha_model,
     )
 
 

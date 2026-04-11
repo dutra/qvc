@@ -106,7 +106,7 @@ LOG_SF_INF_TO_RMS = 0.5 * np.log10(2.0)
 RELFLUX_TO_MAG_SCALE = float(2.5 / np.log(10.0))
 LOG_RELFLUX_TO_MAG_SCALE = float(np.log(RELFLUX_TO_MAG_SCALE))
 LINEAR_TREND_RF_SIGMA_MAG_PER_DAY = 1e-4
-DRIFT_LOG_TAU_RATIO_PRIOR_MEAN = float(np.log(10.0))
+DRIFT_LOG_TAU_RATIO_PRIOR_MEAN = float(np.log(20.0))
 DRIFT_LOG_TAU_RATIO_PRIOR_SIGMA = 0.7
 DRIFT_DLOG_AMP_PRIOR_MEAN = -2.0
 DRIFT_DLOG_AMP_PRIOR_SIGMA = 1.0
@@ -546,7 +546,7 @@ def compute_band_igm_transmission(bands, z):
 
 
 def compute_log_igm_transmission_band(bands, z):
-    """Return the per-band log transmission used to attenuate variability amplitudes."""
+    """Return per-band log IGM transmission for diagnostics and component bookkeeping."""
 
     return jnp.log(compute_band_igm_transmission(bands, z))
 
@@ -2434,15 +2434,15 @@ def compute_flux_line_ratio_offsets(
     eta_sigma,
     log_igm_transmission_band=None,
 ):
-    """Offsets mapping sampled line/continuum log-ratios back to legacy amplitude deltas."""
+    """Offsets mapping sampled line/continuum log-ratios back to legacy amplitude deltas.
+
+    ``log_igm_transmission_band`` is accepted for call-site compatibility but is
+    intentionally ignored: fixed IGM absorption cancels in residual amplitudes.
+    """
 
     lam_rf = jnp.asarray(lam_rf, dtype=float)
     lambda_center_rf = jnp.asarray(lambda_center_rf, dtype=lam_rf.dtype)
     eta_sigma = jnp.asarray(eta_sigma, dtype=lam_rf.dtype)
-    if log_igm_transmission_band is None:
-        log_igm_transmission_band = jnp.zeros_like(lam_rf, dtype=lam_rf.dtype)
-    log_igm_transmission_band = jnp.asarray(log_igm_transmission_band, dtype=lam_rf.dtype)
-    log_igm_transmission_band = jnp.broadcast_to(log_igm_transmission_band, lam_rf.shape)
 
     lambda_uv = jnp.array(2500.0, dtype=lam_rf.dtype)
     sigma_shift_to_uv = jnp.log(10.0) * log_single_pl(lambda_uv, lambda_center_rf, eta_sigma)
@@ -2451,7 +2451,7 @@ def compute_flux_line_ratio_offsets(
         _expand_last(lambda_center_rf),
         _expand_last(eta_sigma),
     )
-    log_ratio_offset_blr = _expand_last(sigma_shift_to_uv) - sigma_shift_to_band - log_igm_transmission_band
+    log_ratio_offset_blr = _expand_last(sigma_shift_to_uv) - sigma_shift_to_band
 
     bc_weight = balmer_continuum_weight(lam_rf)
     log_ratio_offset_bc_band = log_ratio_offset_blr + jnp.log(jnp.maximum(bc_weight, 1e-12))
@@ -3100,7 +3100,8 @@ def build_explicit_model_params(raw_params, lam_rf, *, lam_lya_rf=None):
     )
     bc_weight = balmer_continuum_weight(lam_rf)
 
-    amp_cont = jnp.exp(log_sigma_band + log_igm_transmission_band)
+    # Static multiplicative IGM absorption shifts the band mean, not mag residual amplitudes.
+    amp_cont = jnp.exp(log_sigma_band)
     amp_drift = jnp.exp(dlog_amp_drift_exp) * amp_cont
     amp_blr = jnp.exp(log_sigma_uv_exp + dlog_amp_blr)
     amp_blr2 = jnp.exp(log_sigma_uv_exp + dlog_amp_blr2)
@@ -3262,7 +3263,8 @@ def build_explicit_model_params_relflux(raw_params, lam_rf, *, lam_lya_rf=None):
     )
     bc_weight = balmer_continuum_weight(lam_rf)
 
-    amp_cont_relflux = jnp.exp(log_sigma_band_relflux + log_igm_transmission_band)
+    # Residual relative flux is measured around the observed mean, so fixed IGM cancels.
+    amp_cont_relflux = jnp.exp(log_sigma_band_relflux)
     amp_drift_relflux = jnp.exp(dlog_amp_drift_exp) * amp_cont_relflux
     amp_blr_relflux = jnp.exp(log_sigma_uv_relflux_exp + dlog_amp_blr)
     amp_blr2_relflux = jnp.exp(log_sigma_uv_relflux_exp + dlog_amp_blr2)

@@ -1018,6 +1018,7 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
         plot_l2500_vs_uv_variability_fiducial,
         plot_linear_trend_vs_redshift,
         plot_Mi_relation,
+        plot_light_curve_n_points_vs_apparent_mag,
         plot_cut_diagnostics,
         plot_m2500_vs_z_colorpanels,
         plot_spectral_fraction_vs_redshift,
@@ -1338,6 +1339,13 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
 
     if {"z", "apparent_mag_2500", "f_host_2500"}.issubset(df.columns):
         plot_f_host_2500_vs_l2500(df, plot_path=plot_path, show=False)
+    if "apparent_mag_2500" in df.columns:
+        plot_light_curve_n_points_vs_apparent_mag(
+            df,
+            plot_path=plot_path,
+            show=False,
+            filename="light_curve_n_points_vs_apparent_mag_precut.pdf",
+        )
     if {"z", "apparent_mag_2500", "alpha_lambda"}.issubset(df.columns):
         plot_alpha_lambda_vs_l2500(
             df,
@@ -1781,6 +1789,20 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
     print("Number of quasars with z > 3:", num_quasars_z_gt_3)
     print(f"\nTotal number of objects removed by all cuts: {len(df_all) - len(df)}")
     print("Final number of quasars:", len(df))
+    if "apparent_mag_2500" in df.columns:
+        plot_light_curve_n_points_vs_apparent_mag(
+            df,
+            plot_path=plot_path,
+            show=False,
+            filename="light_curve_n_points_vs_apparent_mag_postcut.pdf",
+        )
+    if "alpha_lambda" in df.columns:
+        plot_alpha_lambda_vs_redshift(
+            df,
+            plot_path=plot_path,
+            show=False,
+            filename="alpha_lambda_vs_redshift_postcut.pdf",
+        )
     if {"z", "f_bc_3000", "f_fe_uv_3000"}.issubset(df.columns) and (
         "f_host_center" in df.columns or "f_host_2500" in df.columns
     ):
