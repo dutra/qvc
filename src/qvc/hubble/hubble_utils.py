@@ -27,10 +27,13 @@ from tqdm import tqdm
 from qvc.hubble.cuts import (
     EXCLUDED_SDSS_NAMES,
     F_HOST_2500_MAX,
+    LIGHT_CURVE_N_POINTS_COLUMN,
+    LIGHT_CURVE_N_POINTS_EXCLUDED_BANDS,
     LOG_AMP_DELTA_BC_UPPER,
     LOG_F_BC_3000_MAX,
     LOG_F_FE_UV_3000_MAX,
     REL_APPARENT_MAG_2500_ERR_MAX,
+    add_light_curve_point_count_column,
 )
 from qvc.hubble.hubble_cut_config import (
     build_agn_cuts,
@@ -450,6 +453,9 @@ def populate_spectra_fit(df, spectra_fit_csvs):
         "wrms": float,
         "f_host_center": float,
         "frac_host_psf_2500": float,
+        "frac_host_psf_2500_err": float,
+        "f_host_2500_psf": float,
+        "f_host_2500_psf_err": float,
         "reddening_ebv": float,
         "bi": float,
         "ebv_fs": float,
@@ -1230,16 +1236,24 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
             raise ValueError("spectra_fit_csv not provided and spectral fields not found in agn h5 file")
             #raise ValueError("spectra_fit_csv must be provided if alpha_lambda not in agn h5 file")
 
-    if "frac_host_psf_2500" in df.columns:
+    if "f_host_2500_psf" not in df.columns and "frac_host_psf_2500" in df.columns:
+        df["f_host_2500_psf"] = pd.to_numeric(df["frac_host_psf_2500"], errors="coerce")
+    if "f_host_2500_psf_err" not in df.columns and "frac_host_psf_2500_err" in df.columns:
+        df["f_host_2500_psf_err"] = pd.to_numeric(df["frac_host_psf_2500_err"], errors="coerce")
+
+    if "f_host_2500_psf" in df.columns:
         if "f_host_2500" in df.columns and "f_host_fiber_2500" not in df.columns:
             df["f_host_fiber_2500"] = pd.to_numeric(df["f_host_2500"], errors="coerce")
         if "f_host_2500_err" in df.columns and "f_host_fiber_2500_err" not in df.columns:
             df["f_host_fiber_2500_err"] = pd.to_numeric(df["f_host_2500_err"], errors="coerce")
 
-        df["f_host_2500"] = pd.to_numeric(df["frac_host_psf_2500"], errors="coerce")
-        if "frac_host_psf_2500_err" in df.columns:
-            df["f_host_2500_err"] = pd.to_numeric(df["frac_host_psf_2500_err"], errors="coerce")
-        print("Using frac_host_psf_2500 as f_host_2500 for completeness, sigma correction, and diagnostics.")
+        df["f_host_2500"] = pd.to_numeric(df["f_host_2500_psf"], errors="coerce")
+        if "f_host_2500_psf_err" in df.columns:
+            df["f_host_2500_err"] = pd.to_numeric(df["f_host_2500_psf_err"], errors="coerce")
+        print(
+            "Using f_host_2500_psf from PSF posterior reconstruction as the primary host fraction; "
+            "completeness reads f_host_2500_psf explicitly."
+        )
 
     if "f_host_2500" in df.columns:
         missing_f_host_2500 = pd.to_numeric(df["f_host_2500"], errors="coerce").isna()
@@ -1251,6 +1265,16 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
 
     if "log_sigma_uv" in df.columns:
         df["log_sigma_uv_uncorrected"] = pd.to_numeric(df["log_sigma_uv"], errors="coerce")
+
+    df, lc_point_count_cols = add_light_curve_point_count_column(df)
+    if lc_point_count_cols:
+        excluded = ", ".join(LIGHT_CURVE_N_POINTS_EXCLUDED_BANDS)
+        print(
+            f"Computed {LIGHT_CURVE_N_POINTS_COLUMN} from: "
+            f"{', '.join(lc_point_count_cols)}"
+            f" excluding bands: {excluded}"
+        )
+
     # Use the PL/total fraction at 2500 A for the sigma_uv dilution correction.
     if correct_sigma_uv_host:
         required_cols = {"log_sigma_uv_uncorrected", "f_PL", "log_sigma_uv_std_psd"}
@@ -1337,14 +1361,22 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
                 f"and 'log_sigma_uv_std_psd'. Missing: {missing_cols}"
             )
 
-    if {"z", "apparent_mag_2500", "f_host_2500"}.issubset(df.columns):
-        plot_f_host_2500_vs_l2500(df, plot_path=plot_path, show=False)
+    if {"z", "apparent_mag_2500", "f_host_2500_psf"}.issubset(df.columns):
+        plot_f_host_2500_vs_l2500(
+            df,
+            plot_path=plot_path,
+            show=False,
+            filename="f_host_2500_vs_l2500_precut.pdf",
+            f_host_col="f_host_2500_psf",
+            f_host_label=r"$f_{\rm host,2500}^{\rm PSF}$",
+        )
     if "apparent_mag_2500" in df.columns:
         plot_light_curve_n_points_vs_apparent_mag(
             df,
             plot_path=plot_path,
             show=False,
             filename="light_curve_n_points_vs_apparent_mag_precut.pdf",
+            exclude_bands=LIGHT_CURVE_N_POINTS_EXCLUDED_BANDS,
         )
     if {"z", "apparent_mag_2500", "alpha_lambda"}.issubset(df.columns):
         plot_alpha_lambda_vs_l2500(
@@ -1789,12 +1821,22 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
     print("Number of quasars with z > 3:", num_quasars_z_gt_3)
     print(f"\nTotal number of objects removed by all cuts: {len(df_all) - len(df)}")
     print("Final number of quasars:", len(df))
+    if {"z", "apparent_mag_2500", "f_host_2500_psf"}.issubset(df.columns):
+        plot_f_host_2500_vs_l2500(
+            df,
+            plot_path=plot_path,
+            show=False,
+            filename="f_host_2500_vs_l2500_postcut.pdf",
+            f_host_col="f_host_2500_psf",
+            f_host_label=r"$f_{\rm host,2500}^{\rm PSF}$",
+        )
     if "apparent_mag_2500" in df.columns:
         plot_light_curve_n_points_vs_apparent_mag(
             df,
             plot_path=plot_path,
             show=False,
             filename="light_curve_n_points_vs_apparent_mag_postcut.pdf",
+            exclude_bands=LIGHT_CURVE_N_POINTS_EXCLUDED_BANDS,
         )
     if "alpha_lambda" in df.columns:
         plot_alpha_lambda_vs_redshift(

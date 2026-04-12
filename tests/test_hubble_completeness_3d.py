@@ -38,6 +38,7 @@ def _make_fake_fhost_df(n=200, seed=123):
             "z": z,
             "apparent_mag_2500": m2500,
             "f_host_2500": f_host,
+            "f_host_2500_psf": f_host,
         }
     )
 
@@ -94,6 +95,7 @@ def _make_fake_agn_sample_with_fhost(n_agn=24, seed=123):
             "log_sigma_uv_log_tau_uv_rf_cov_psd": np.full(n_agn, 0.001),
             "delta_m_flux_recal": rng.normal(0.0, 0.02, size=n_agn),
             "f_host_2500": f_host,
+            "f_host_2500_psf": f_host,
         }
     )
 
@@ -128,7 +130,7 @@ def _write_fake_sim_file(
             handle.create_dataset("alpha_lambda", data=alpha_lambda)
         if include_fhost:
             f_host = np.clip(0.25 + 0.08 * (z - np.mean(z)) + rng.normal(0.0, 0.05, size=n), 0.01, 0.9)
-            handle.create_dataset("f_host_2500", data=f_host)
+            handle.create_dataset("f_host_2500_psf", data=f_host)
 
 
 def test_fit_fhost_2500_model_monotonic_and_bounded():
@@ -207,7 +209,7 @@ def test_completeness3d_shape_and_likelihood_matches_2d_when_host_independent():
         z=z,
         completeness_model=comp3,
         m_grid=mag_centers,
-        f_host_2500=f_host,
+        f_host_2500_psf=f_host,
     )
     ll4, blob4 = hubble_likelihood.completeness_loglike(
         m_obs=m_obs,
@@ -217,7 +219,7 @@ def test_completeness3d_shape_and_likelihood_matches_2d_when_host_independent():
         z=z,
         completeness_model=comp4,
         m_grid=mag_centers,
-        f_host_2500=f_host,
+        f_host_2500_psf=f_host,
         alpha_lambda=alpha_lambda,
     )
 
@@ -227,8 +229,30 @@ def test_completeness3d_shape_and_likelihood_matches_2d_when_host_independent():
     assert np.allclose(blob2, blob4, rtol=1e-10, atol=1e-10)
 
 
+def test_completeness_callables_return_zero_for_nonfinite_queries():
+    mag_centers = np.linspace(18.5, 24.0, 5)
+    z_centers = np.linspace(0.1, 3.0, 4)
+    fhost_centers = np.linspace(0.05, 0.95, 3)
+    alpha_centers = np.linspace(-2.5, -0.5, 3)
+    c2 = np.ones((len(mag_centers), len(z_centers)))
+    c3 = np.ones((len(mag_centers), len(z_centers), len(fhost_centers)))
+    c4 = np.ones((len(mag_centers), len(z_centers), len(fhost_centers), len(alpha_centers)))
+
+    comp2 = hcr.Completeness2D(mag_centers, z_centers, c2)
+    comp3 = hcr.Completeness3D(mag_centers, z_centers, fhost_centers, c3)
+    comp4 = hcr.Completeness4D(mag_centers, z_centers, fhost_centers, alpha_centers, c4)
+
+    np.testing.assert_allclose(comp2([20.0, np.nan], [1.0, 1.0]), [1.0, 0.0])
+    np.testing.assert_allclose(comp3([20.0, np.nan], [1.0, 1.0], [0.2, 0.2]), [1.0, 0.0])
+    np.testing.assert_allclose(
+        comp4([20.0, np.nan], [1.0, 1.0], [0.2, 0.2], [-1.5, -1.5]),
+        [1.0, 0.0],
+    )
+
+
 def test_get_completeness_function_4d_fhost_alpha_uses_mock_alpha_dataset(tmp_path):
     df_agn = _make_fake_agn_sample_with_fhost_alpha(alpha_center=-1.15)
+    df_pre = _make_fake_agn_sample_with_fhost_alpha(n_agn=64, seed=456, alpha_center=-0.95)
     sim_file = tmp_path / "mock4d_alpha.h5"
     _write_fake_sim_file(sim_file, include_alpha=True, alpha_center=-0.95, include_fhost=True)
 
@@ -244,6 +268,8 @@ def test_get_completeness_function_4d_fhost_alpha_uses_mock_alpha_dataset(tmp_pa
         sigma_z_abs=0.25,
         sigma_fhost=0.2,
         sigma_alpha=0.4,
+        fit_logL_max=99.0,
+        df_agn_fhost_population=df_pre,
     )
 
     assert completeness_params[0].mode == "4d_fhost_alpha"
@@ -252,7 +278,9 @@ def test_get_completeness_function_4d_fhost_alpha_uses_mock_alpha_dataset(tmp_pa
     assert alpha_model["n_mock"] > 0
     assert abs(alpha_model["alpha_mean"] - (-0.95)) < 0.25
     host_model = completeness_params[-2]
-    assert host_model["source"] == "mock_h5_dataset:f_host_2500"
+    assert host_model["source"] == "mock_h5_dataset:f_host_2500_psf"
+    assert host_model["observed_fit_source"] == "precut_f_host_2500_psf_vs_l2500"
+    assert host_model["n_fit"] == len(df_pre)
     assert host_model["n_mock"] > 0
 
 
@@ -326,7 +354,7 @@ def test_get_completeness_function_3d_fhost_and_loglikelihood_smoke(tmp_path):
     theta = np.array([(priors[key][0] + priors[key][1]) / 2.0 for key in model_labels], dtype=float)
 
     agn_fields = hubble_model.agn_model_req_obs + hubble_model.agn_model_req_errs
-    agn_fields += ("apparent_mag_2500", "apparent_mag_2500_err", "z", "z_err", "object_id", "f_host_2500")
+    agn_fields += ("apparent_mag_2500", "apparent_mag_2500_err", "z", "z_err", "object_id", "f_host_2500_psf")
     agn_data = {col: df_agn[col].to_numpy() for col in agn_fields}
     pantheon_data = {col: df_pantheon[col].to_numpy() for col in df_pantheon.columns}
 
@@ -347,3 +375,53 @@ def test_get_completeness_function_3d_fhost_and_loglikelihood_smoke(tmp_path):
 
     assert np.isfinite(logl)
     assert blob.shape == (3, len(df_agn))
+
+
+def test_get_completeness_function_3d_ignores_legacy_fhost_column(tmp_path):
+    df_agn = _make_fake_agn_sample_with_fhost()
+    df_agn["f_host_2500"] = np.nan
+    sim_file = tmp_path / "mock3d_legacy_fhost_ignored.h5"
+    _write_fake_sim_file(sim_file, include_fhost=False)
+
+    completeness_params = hcr.get_completeness_function_3d_fhost(
+        df_agn,
+        sim_file=str(sim_file),
+        plot=False,
+        n_mag_bins=8,
+        n_z_bins=8,
+        n_fhost_bins=4,
+        sigma_mag=0.25,
+        sigma_z_abs=0.25,
+        sigma_fhost=0.2,
+        fit_logL_max=99.0,
+    )
+
+    assert completeness_params[0].mode == "3d_fhost"
+    assert completeness_params[-1]["observed_fit_source"] == "fit_sample_f_host_2500_psf_vs_l2500"
+
+
+def test_get_completeness_function_3d_fhost_fits_host_population_on_precut_sample(tmp_path):
+    df_postcut = _make_fake_agn_sample_with_fhost(n_agn=12, seed=123)
+    df_precut = _make_fake_agn_sample_with_fhost(n_agn=48, seed=456)
+    sim_file = tmp_path / "mock3d_no_fhost.h5"
+    _write_fake_sim_file(sim_file, include_fhost=False)
+
+    completeness_params = hcr.get_completeness_function_3d_fhost(
+        df_postcut,
+        sim_file=str(sim_file),
+        plot=False,
+        n_mag_bins=8,
+        n_z_bins=8,
+        n_fhost_bins=4,
+        sigma_mag=0.25,
+        sigma_z_abs=0.25,
+        sigma_fhost=0.2,
+        fit_logL_max=99.0,
+        df_agn_fhost_population=df_precut,
+    )
+
+    host_model = completeness_params[-1]
+    assert host_model["source"] == "observed_fhost_model"
+    assert host_model["observed_fit_source"] == "precut_f_host_2500_psf_vs_l2500"
+    assert host_model["n_observed_population"] == len(df_precut)
+    assert host_model["n_fit"] == len(df_precut)

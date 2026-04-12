@@ -84,6 +84,7 @@ from qvc.hubble.hubble_model import (
     get_model_params,
 )
 from qvc.hubble.hubble_completeness_refactored import (
+    COMPLETENESS_FHOST_COL,
     evaluate_dm_interp,
     get_completeness_function_2d,
     get_completeness_function_3d_fhost,
@@ -446,12 +447,16 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                 area_deg2=completeness_area_deg2,
             )
         if completeness_mode in ("3d_fhost", "4d_fhost_alpha"):
-            if "f_host_2500" not in df_agn.columns:
-                raise KeyError(f"completeness_mode={completeness_mode!r} requires df_agn['f_host_2500'].")
-            bad_fhost = ~np.isfinite(df_agn["f_host_2500"].to_numpy(dtype=float))
+            if COMPLETENESS_FHOST_COL not in df_agn.columns:
+                raise KeyError(
+                    f"completeness_mode={completeness_mode!r} requires "
+                    f"df_agn[{COMPLETENESS_FHOST_COL!r}]."
+                )
+            bad_fhost = ~np.isfinite(df_agn[COMPLETENESS_FHOST_COL].to_numpy(dtype=float))
             if np.any(bad_fhost):
                 raise ValueError(
-                    f"completeness_mode={completeness_mode!r} requires finite f_host_2500 for all AGN used in the fit; "
+                    f"completeness_mode={completeness_mode!r} requires finite {COMPLETENESS_FHOST_COL} "
+                    "for all AGN used in the fit; "
                     f"found {np.count_nonzero(bad_fhost)} non-finite rows."
                 )
         if completeness_mode == "4d_fhost_alpha":
@@ -466,11 +471,19 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
         print(f"Building {completeness_mode} completeness map using mock catalog: {completeness_sim_file}")
         if completeness_mode == "4d_fhost_alpha":
             completeness_params = get_completeness_function_4d_fhost_alpha(
-                df_agn, sim_file=completeness_sim_file, plot=not compare_sigma_only, plot_path=plot_path
+                df_agn,
+                sim_file=completeness_sim_file,
+                plot=not compare_sigma_only,
+                plot_path=plot_path,
+                df_agn_fhost_population=df_agn_all,
             )
         elif completeness_mode == "3d_fhost":
             completeness_params = get_completeness_function_3d_fhost(
-                df_agn, sim_file=completeness_sim_file, plot=not compare_sigma_only, plot_path=plot_path
+                df_agn,
+                sim_file=completeness_sim_file,
+                plot=not compare_sigma_only,
+                plot_path=plot_path,
+                df_agn_fhost_population=df_agn_all,
             )
         else:
             completeness_params = get_completeness_function_2d(
@@ -485,8 +498,8 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
     )
     agn_fields = agn_model_req_params + agn_model_req_obs + agn_model_req_errs
     agn_fields += ('apparent_mag_2500', 'apparent_mag_2500_err', 'z', 'z_err', 'object_id')
-    if 'f_host_2500' in df_agn.columns:
-        agn_fields += ('f_host_2500',)
+    if COMPLETENESS_FHOST_COL in df_agn.columns:
+        agn_fields += (COMPLETENESS_FHOST_COL,)
     if 'alpha_lambda' in df_agn.columns:
         agn_fields += ('alpha_lambda',)
     if 'eta_sigma' in df_agn.columns:
@@ -743,7 +756,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
         df_agn['apparent_mag_2500'].values,
         df_agn['z'].values,
         dmi_posterior_median,
-        f_host_2500=df_agn["f_host_2500"].values if "f_host_2500" in df_agn.columns else None,
+        f_host_2500_psf=df_agn[COMPLETENESS_FHOST_COL].values if COMPLETENESS_FHOST_COL in df_agn.columns else None,
         alpha_lambda=df_agn["alpha_lambda"].values if "alpha_lambda" in df_agn.columns else None,
     )
     dmi_selection_sigma_interp = None
@@ -752,7 +765,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
             df_agn['apparent_mag_2500'].values,
             df_agn['z'].values,
             dmi_selection_sigma_posterior_median,
-            f_host_2500=df_agn["f_host_2500"].values if "f_host_2500" in df_agn.columns else None,
+            f_host_2500_psf=df_agn[COMPLETENESS_FHOST_COL].values if COMPLETENESS_FHOST_COL in df_agn.columns else None,
             alpha_lambda=df_agn["alpha_lambda"].values if "alpha_lambda" in df_agn.columns else None,
         )
 
@@ -1054,8 +1067,8 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
             np.asarray(df_agn["z"].values, dtype=float),
             np.asarray(df_agn["apparent_mag_2500"].values, dtype=float),
         ]
-        if "f_host_2500" in df_agn.columns:
-            interp_cols.append(np.asarray(df_agn["f_host_2500"].values, dtype=float))
+        if COMPLETENESS_FHOST_COL in df_agn.columns:
+            interp_cols.append(np.asarray(df_agn[COMPLETENESS_FHOST_COL].values, dtype=float))
             if "alpha_lambda" in df_agn.columns:
                 interp_cols.append(np.asarray(df_agn["alpha_lambda"].values, dtype=float))
         dmi_selection_sigma_full = np.asarray(
@@ -1070,7 +1083,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 dm_interp,
                 df_agn["z"].values,
                 df_agn["apparent_mag_2500"].values,
-                f_host_2500=df_agn["f_host_2500"].values if "f_host_2500" in df_agn.columns else None,
+                f_host_2500_psf=df_agn[COMPLETENESS_FHOST_COL].values if COMPLETENESS_FHOST_COL in df_agn.columns else None,
                 alpha_lambda=df_agn["alpha_lambda"].values if "alpha_lambda" in df_agn.columns else None,
             ),
         )
@@ -1091,6 +1104,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                     dmi_values=dmi_posterior_median_full,
                     dmi_sigma=dmi_posterior_sigma_full,
                     dmi_selection_sigma=dmi_selection_sigma_full,
+                    z_range=z_range,
                     use_alpha_lambda_term=use_alpha_lambda_term,
                     use_eta_sigma_term=use_eta_sigma_term,
                     use_redshift_log_f_term=use_redshift_log_f_term)
@@ -1119,16 +1133,21 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
     r = plot_hubble(flat_samples, df_agn, df_pantheon, 
                 cosmo_model=cosmo_model, z_pivot_agn=z_pivot_agn, show_residuals=True,
                 show_true=False, show=False, debias=False, plot_path=plot_path, verbose=False,
+                z_range=z_range,
                 use_alpha_lambda_term=use_alpha_lambda_term,
                 use_eta_sigma_term=use_eta_sigma_term,
                 use_redshift_log_f_term=use_redshift_log_f_term)
     biased_residuals, biased_residuals_err, _, _, _ = r
 
-    chisq_red_hubble_debiased, _ = reduced_chi_squared(
-        debiased_residuals,
-        mu_pred_std_debiased_with_scatter,
-        n_params=len(model_labels)-1,
-    )
+    hubble_chi2_mask = df_agn["z"].between(z_range[0], z_range[1]).to_numpy(dtype=bool)
+    if np.any(hubble_chi2_mask):
+        chisq_red_hubble_debiased, _ = reduced_chi_squared(
+            debiased_residuals[hubble_chi2_mask],
+            mu_pred_std_debiased_with_scatter[hubble_chi2_mask],
+            n_params=len(model_labels)-1,
+        )
+    else:
+        chisq_red_hubble_debiased = np.nan
     plot_hubble_residual_normality(
         debiased_residuals,
         mu_pred_std_debiased_with_scatter,
@@ -1293,12 +1312,20 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         if completeness_mode == "4d_fhost_alpha":
             print("Plotting host-aware/color-aware 4D completeness diagnostics...")
             get_completeness_function_4d_fhost_alpha(
-                df_agn, sim_file=completeness_sim_file, plot=True, plot_path=plot_path
+                df_agn,
+                sim_file=completeness_sim_file,
+                plot=True,
+                plot_path=plot_path,
+                df_agn_fhost_population=df_agn_all,
             )
         elif completeness_mode == "3d_fhost":
             print("Plotting host-aware 3D completeness diagnostics...")
             get_completeness_function_3d_fhost(
-                df_agn, sim_file=completeness_sim_file, plot=True, plot_path=plot_path
+                df_agn,
+                sim_file=completeness_sim_file,
+                plot=True,
+                plot_path=plot_path,
+                df_agn_fhost_population=df_agn_all,
             )
         else:
             print("Plotting completeness vs magnitude at redshifts...")
@@ -1543,7 +1570,7 @@ if __name__ == "__main__":
         type=str,
         choices=list(VALID_COMPLETENESS_MODES),
         default="2d",
-        help="Completeness model to use: 2D p(det|m,z), 3D p(det|m,z,f_host_2500), or 4D p(det|m,z,f_host_2500,alpha_lambda).",
+        help="Completeness model to use: 2D p(det|m,z), 3D p(det|m,z,f_host_2500_psf), or 4D p(det|m,z,f_host_2500_psf,alpha_lambda).",
     )
     parser.add_argument(
         "--correct-sigma-uv-host",

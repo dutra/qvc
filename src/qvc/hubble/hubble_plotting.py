@@ -27,6 +27,7 @@ from qvc.hubble.hubble_model import (M_model_agn, M_model_agn_err, get_model_par
     agn_model_pack_obs, agn_model_oidx, agn_model_pidx, agn_model_req_obs, agn_model_req_errs,
     evaluate_log_f, resolve_model_option_flags, get_agn_model_spec, AGN_ALPHA_LAMBDA_PARAM, AGN_ALPHA_LAMBDA_ERR)
 from qvc.hubble.hubble_likelihood import sigma_lens_from_dc, sigma_mu_from_z_err
+from qvc.hubble.cuts import LIGHT_CURVE_N_POINTS_EXCLUDED_BANDS, light_curve_point_count_series
 from qvc.hubble.hubble_utils import (
     convert_M2500_to_logL2500,
     cosmo_model_label_latex,
@@ -35,6 +36,7 @@ from qvc.hubble.hubble_utils import (
     sym_percentile,
 )
 from qvc.hubble.hubble_completeness_refactored import (
+    COMPLETENESS_FHOST_COL,
     apparent_mag_to_logL2500,
     build_smooth_trend_1d,
     evaluate_dm_interp,
@@ -273,7 +275,7 @@ def _resolve_debias_values(
         dm_interp,
         df_agn["z"].values,
         df_agn["apparent_mag_2500"].values,
-        f_host_2500=df_agn.get("f_host_2500"),
+        f_host_2500_psf=df_agn.get(COMPLETENESS_FHOST_COL),
         alpha_lambda=df_agn.get("alpha_lambda"),
     )
     if dmi is None:
@@ -610,7 +612,7 @@ def plot_blr_line_lags_vs_l2500(
         dm_interp,
         z,
         m2500,
-        f_host_2500=df_agn.get("f_host_2500"),
+        f_host_2500_psf=df_agn.get(COMPLETENESS_FHOST_COL),
         alpha_lambda=df_agn.get("alpha_lambda"),
     )
     actual_M2500 = (m2500 - dmi) - cosmo.distmod(z).value
@@ -2526,15 +2528,19 @@ def plot_f_host_2500_vs_l2500(
     min_bin_count=5,
     fit_logL_max=45.5,
     filename="f_host_2500_vs_l2500.pdf",
+    f_host_col="f_host_2500",
+    f_host_label=None,
 ):
     """Plot host fraction against AGN-only log L_2500 with median and sigmoid trends."""
-    required = {"z", "apparent_mag_2500", "f_host_2500"}
+    required = {"z", "apparent_mag_2500", f_host_col}
     if not required.issubset(df.columns):
         return None
+    if f_host_label is None:
+        f_host_label = r"$f_{\rm host,2500}$"
 
     z = pd.to_numeric(df["z"], errors="coerce").to_numpy(dtype=float)
     m2500 = pd.to_numeric(df["apparent_mag_2500"], errors="coerce").to_numpy(dtype=float)
-    f_host = pd.to_numeric(df["f_host_2500"], errors="coerce").to_numpy(dtype=float)
+    f_host = pd.to_numeric(df[f_host_col], errors="coerce").to_numpy(dtype=float)
 
     cosmo = FlatLambdaCDM(H0=70.0, Om0=0.3)
     logL2500 = apparent_mag_to_logL2500(m2500, z, cosmo)
@@ -2583,8 +2589,10 @@ def plot_f_host_2500_vs_l2500(
         fit_mask = np.isfinite(x) & np.isfinite(y) & (x <= fit_logL_max)
         if np.count_nonzero(fit_mask) >= 8 and np.nanmax(x[fit_mask]) > np.nanmin(x[fit_mask]):
             try:
+                fit_df = df.loc[mask].copy()
+                fit_df["f_host_2500"] = y
                 fit_model = fit_fhost_2500_l2500_model(
-                    df.loc[mask].copy(),
+                    fit_df,
                     fit_logL_max=fit_logL_max,
                     cosmo=cosmo,
                 )
@@ -2618,14 +2626,14 @@ def plot_f_host_2500_vs_l2500(
         ax.text(
             0.5,
             0.5,
-            "No finite log L_2500 / f_host_2500 values",
+            f"No finite log L_2500 / {f_host_col} values",
             ha="center",
             va="center",
             transform=ax.transAxes,
         )
 
     ax.set_xlabel(r"$\log L_{2500}$")
-    ax.set_ylabel(r"$f_{\rm host,2500}$")
+    ax.set_ylabel(f_host_label)
     ax.set_ylim(0.0, 1.0)
     ax.grid(True, alpha=0.2)
     handles, labels = ax.get_legend_handles_labels()
@@ -2939,58 +2947,6 @@ def plot_alpha_lambda_vs_redshift(
     )
 
 
-def _light_curve_point_count_series(df):
-    """Return total per-object LC point counts and the columns used."""
-    count_cols_by_band = {}
-    for col in df.columns:
-        match = re.match(r"^(variability_n_points|number_points)_([^_]+)$", str(col))
-        if match is None:
-            continue
-        prefix, band = match.groups()
-        count_cols_by_band.setdefault(band, {})[prefix] = col
-
-    selected_cols = []
-    for band in sorted(count_cols_by_band):
-        choices = count_cols_by_band[band]
-        selected_cols.append(choices.get("variability_n_points", choices.get("number_points")))
-
-    if selected_cols:
-        total = np.zeros(len(df), dtype=float)
-        has_count = np.zeros(len(df), dtype=bool)
-        for col in selected_cols:
-            values = pd.to_numeric(df[col], errors="coerce").to_numpy(dtype=float)
-            finite = np.isfinite(values)
-            total[finite] += values[finite]
-            has_count |= finite
-        total[~has_count] = np.nan
-        return total, selected_cols
-
-    if "number_points" not in df.columns:
-        return None, []
-
-    total = np.full(len(df), np.nan, dtype=float)
-    for i, value in enumerate(df["number_points"]):
-        parsed = value
-        if isinstance(value, str):
-            try:
-                parsed = literal_eval(value)
-            except Exception:
-                parsed = value
-        if isinstance(parsed, dict):
-            vals = pd.to_numeric(pd.Series(list(parsed.values())), errors="coerce").to_numpy(dtype=float)
-            if np.any(np.isfinite(vals)):
-                total[i] = np.nansum(vals)
-        elif isinstance(parsed, (list, tuple, np.ndarray)):
-            vals = pd.to_numeric(pd.Series(parsed), errors="coerce").to_numpy(dtype=float)
-            if np.any(np.isfinite(vals)):
-                total[i] = np.nansum(vals)
-        else:
-            scalar = pd.to_numeric(pd.Series([parsed]), errors="coerce").to_numpy(dtype=float)[0]
-            if np.isfinite(scalar):
-                total[i] = scalar
-    return total, ["number_points"]
-
-
 def plot_light_curve_n_points_vs_apparent_mag(
     df,
     plot_path="plots/hubble",
@@ -2998,13 +2954,14 @@ def plot_light_curve_n_points_vs_apparent_mag(
     filename="light_curve_n_points_vs_apparent_mag.pdf",
     nbins_mag=12,
     min_bin_count=5,
+    exclude_bands=LIGHT_CURVE_N_POINTS_EXCLUDED_BANDS,
 ):
-    """Plot total light-curve point count against apparent m_2500."""
+    """Plot light-curve point count against apparent m_2500."""
     if "apparent_mag_2500" not in df.columns:
         raise KeyError("Missing required column for LC point-count diagnostic: 'apparent_mag_2500'.")
 
     m2500 = pd.to_numeric(df["apparent_mag_2500"], errors="coerce").to_numpy(dtype=float)
-    n_points, count_cols = _light_curve_point_count_series(df)
+    n_points, count_cols = light_curve_point_count_series(df, exclude_bands=exclude_bands)
     if n_points is None or len(count_cols) == 0:
         return None
 
@@ -3065,8 +3022,13 @@ def plot_light_curve_n_points_vs_apparent_mag(
             ax.fill_between(x_mid, y_lo, y_hi, color="k", alpha=0.12, linewidth=0, label="16-84%")
 
     ax.set_xlabel(r"$m_{2500\,\mathrm{\AA}}$ (mag)")
-    ax.set_ylabel("Total light-curve points")
-    ax.set_title(f"LC sampling vs apparent magnitude\nN={int(np.count_nonzero(mask))}, columns={len(count_cols)}")
+    excluded = tuple(str(b) for b in (exclude_bands or ()))
+    excluded_text = f" excluding {', '.join(excluded)}" if excluded else ""
+    ax.set_ylabel(f"Light-curve points{excluded_text}")
+    ax.set_title(
+        f"LC sampling vs apparent magnitude{excluded_text}\n"
+        f"N={int(np.count_nonzero(mask))}, columns={len(count_cols)}"
+    )
     ax.grid(True, alpha=0.2)
     handles, _ = ax.get_legend_handles_labels()
     if handles:
@@ -4649,6 +4611,10 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     # Residuals (vs. median μ_model)
     mu_interp = np.interp(df_agn["z"].values, z_grid, mu_model_median)
     residuals = mu_pred_median - mu_interp
+    z_values = df_agn["z"].to_numpy(dtype=float)
+    chi2_redshift_mask = np.isfinite(z_values)
+    if debias:
+        chi2_redshift_mask &= (z_values >= z_range[0]) & (z_values <= z_range[1])
 
     # Display the population-level intrinsic scatter as point scatter, not as
     # enlarged error bars. Keep chi-squared on the current sigma_sel path.
@@ -5023,29 +4989,33 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
         chi2_red_no_logf = np.nan
         chi2_red_full_plus_sigma_dmi = np.nan
         chi2_red_no_logf_plus_sigma_dmi = np.nan
-        if residuals.size:
+        if np.any(chi2_redshift_mask):
+            residuals_chi2 = residuals[chi2_redshift_mask]
+            residuals_err_chi2 = residuals_err[chi2_redshift_mask]
+            mu_pred_std_chi2 = mu_pred_std[chi2_redshift_mask]
             chi2_red, _ = reduced_chi_squared(
-                residuals,
-                residuals_err,
+                residuals_chi2,
+                residuals_err_chi2,
                 n_params=len(model_labels) - 1,
             )
             if debias:
                 chi2_red_no_logf, _ = reduced_chi_squared(
-                    residuals,
-                    mu_pred_std,
+                    residuals_chi2,
+                    mu_pred_std_chi2,
                     n_params=len(model_labels) - 1,
                 )
                 if sigma_dmi is not None:
+                    sigma_dmi_chi2 = sigma_dmi[chi2_redshift_mask]
                     chi2_red_full_plus_sigma_dmi, _ = reduced_chi_squared(
-                        residuals,
-                        residuals_err,
-                        extra_err=sigma_dmi,
+                        residuals_chi2,
+                        residuals_err_chi2,
+                        extra_err=sigma_dmi_chi2,
                         n_params=len(model_labels) - 1,
                     )
                     chi2_red_no_logf_plus_sigma_dmi, _ = reduced_chi_squared(
-                        residuals,
-                        mu_pred_std,
-                        extra_err=sigma_dmi,
+                        residuals_chi2,
+                        mu_pred_std_chi2,
+                        extra_err=sigma_dmi_chi2,
                         n_params=len(model_labels) - 1,
                     )
         if debias and np.isfinite(chi2_red):
@@ -5058,7 +5028,12 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
             ax_resid.text(
                 0.98,
                 0.96,
-                "$\\chi^2_\\nu$ debiased\n" + "\n".join(chi2_lines),
+                (
+                    "$\\chi^2_\\nu$ debiased\n"
+                    + rf"$z={z_range[0]:.2f}$-{z_range[1]:.2f} only"
+                    + "\n"
+                    + "\n".join(chi2_lines)
+                ),
                 transform=ax_resid.transAxes,
                 ha="right",
                 va="top",
@@ -5207,7 +5182,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     total_var_plus_sigma_dmi = total_var + sigma_dmi_var
     total_var_no_logf = m_app_var + lens_var + z_var + pred_m2500_var
     total_var_no_logf_plus_sigma_dmi = total_var_no_logf + sigma_dmi_var
-    error_budget_mask = np.isfinite(total_var) & np.isfinite(residuals) & (total_var > 0)
+    error_budget_mask = np.isfinite(total_var) & np.isfinite(residuals) & (total_var > 0) & chi2_redshift_mask
     sigma_dmi_mask = error_budget_mask & np.isfinite(sigma_dmi) if sigma_dmi is not None else None
     sigma_sel_mask = (
         error_budget_mask & np.isfinite(sigma_sel) & (sigma_sel > 0.0)
@@ -5955,7 +5930,7 @@ def plot_predicted_vs_actual_M2500(
             dm_interp,
             df_agn["z"].values,
             df_agn["apparent_mag_2500"].values,
-            f_host_2500=df_agn.get("f_host_2500"),
+            f_host_2500_psf=df_agn.get(COMPLETENESS_FHOST_COL),
             alpha_lambda=df_agn.get("alpha_lambda"),
         )
     else:
@@ -5968,7 +5943,7 @@ def plot_predicted_vs_actual_M2500(
             dmi_selection_sigma_interp,
             df_agn["z"].values,
             df_agn["apparent_mag_2500"].values,
-            f_host_2500=df_agn.get("f_host_2500"),
+            f_host_2500_psf=df_agn.get(COMPLETENESS_FHOST_COL),
             alpha_lambda=df_agn.get("alpha_lambda"),
         )
         sigma_sel = np.asarray(sigma_sel, dtype=float)
@@ -6082,7 +6057,7 @@ def plot_predicted_vs_actual_M2500(
                 dm_interp,
                 df_agn["z"][bin_mask],
                 df_agn["apparent_mag_2500"][bin_mask],
-                f_host_2500=df_agn.get("f_host_2500", None)[bin_mask] if "f_host_2500" in df_agn.columns else None,
+                f_host_2500_psf=df_agn.get(COMPLETENESS_FHOST_COL, None)[bin_mask] if COMPLETENESS_FHOST_COL in df_agn.columns else None,
                 alpha_lambda=df_agn.get("alpha_lambda", None)[bin_mask] if "alpha_lambda" in df_agn.columns else None,
             )
 
@@ -6388,7 +6363,7 @@ def plot_full_residuals(
                 dm_interp,
                 frame["z"].values,
                 frame["apparent_mag_2500"].values,
-                f_host_2500=frame.get("f_host_2500"),
+                f_host_2500_psf=frame.get(COMPLETENESS_FHOST_COL),
                 alpha_lambda=frame.get("alpha_lambda"),
             )
             frame['MY_M_2500'] -= delta
@@ -7237,7 +7212,7 @@ def plot_predicted_L2500_vs_sigmahat(
                 dm_interp,
                 ds["z"].values,
                 ds["apparent_mag_2500"].values,
-                f_host_2500=ds.get("f_host_2500"),
+                f_host_2500_psf=ds.get(COMPLETENESS_FHOST_COL),
                 alpha_lambda=ds.get("alpha_lambda"),
             )
         actual_logL2500_show = convert_M2500_to_logL2500(M2500_show)
@@ -7487,7 +7462,7 @@ def plot_predicted_L2500_vs_sigmahat(
                 dm_interp,
                 ds["z"].values,
                 ds["apparent_mag_2500"].values,
-                f_host_2500=ds.get("f_host_2500"),
+                f_host_2500_psf=ds.get(COMPLETENESS_FHOST_COL),
                 alpha_lambda=ds.get("alpha_lambda"),
             )
         actual_logL2500_show = convert_M2500_to_logL2500(M2500_show)
@@ -7608,7 +7583,7 @@ def plot_predicted_L2500_vs_sigmahat(
             dmi_selection_sigma_interp,
             d["z"].values,
             d["apparent_mag_2500"].values,
-            f_host_2500=d.get("f_host_2500"),
+            f_host_2500_psf=d.get(COMPLETENESS_FHOST_COL),
             alpha_lambda=d.get("alpha_lambda"),
         )
         sigma_sel_mag = np.asarray(sigma_sel_mag, dtype=float)

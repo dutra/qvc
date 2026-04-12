@@ -35,6 +35,8 @@ def _make_table_df():
             "log_sigma_uv_log_tau_uv_rf_cov_psd": [0.012],
             "f_host_2500": [0.21],
             "f_host_2500_err": [0.03],
+            "f_host_2500_psf": [0.18],
+            "f_host_2500_psf_err": [0.025],
             "f_bc_3000": [0.14],
             "f_bc_3000_err": [0.02],
             "f_fe_uv_3000": [0.31],
@@ -163,7 +165,7 @@ def test_make_agn_csv_table_supports_2d_dm_interp_with_richer_inputs(tmp_path):
     np.testing.assert_allclose(csv_df["apparent_mag_2500_corr"], [19.65])
 
 
-def test_make_agn_latex_table_passes_f_host_to_3d_dm_interp(tmp_path):
+def test_make_agn_latex_table_passes_psf_f_host_to_3d_dm_interp(tmp_path):
     df = _make_table_df()
     seen = {}
 
@@ -184,7 +186,7 @@ def test_make_agn_latex_table_passes_f_host_to_3d_dm_interp(tmp_path):
 
     np.testing.assert_allclose(
         seen["points"],
-        np.array([[1.2345, 20.15, 0.21]], dtype=float),
+        np.array([[1.2345, 20.15, 0.18]], dtype=float),
     )
 
     make_agn_csv_table(
@@ -220,7 +222,7 @@ def test_make_agn_latex_table_passes_alpha_lambda_to_4d_dm_interp(tmp_path):
 
     np.testing.assert_allclose(
         seen["points"],
-        np.array([[1.2345, 20.15, 0.21, -1.37]], dtype=float),
+        np.array([[1.2345, 20.15, 0.18, -1.37]], dtype=float),
     )
 
     make_agn_csv_table(

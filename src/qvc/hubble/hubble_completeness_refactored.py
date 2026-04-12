@@ -16,19 +16,36 @@ from qvc.hubble.hubble_utils import convert_M2500_to_logL2500, resolve_qvc_data_
 
 
 COSMO = FlatLambdaCDM(H0=70.0, Om0=0.3)
+COMPLETENESS_FHOST_COL = "f_host_2500_psf"
+COMPLETENESS_FHOST_ERR_COL = "f_host_2500_psf_err"
 
 
-def evaluate_dm_interp(dm_interp, z, m2500, *, f_host_2500=None, alpha_lambda=None):
+def evaluate_dm_interp(
+    dm_interp,
+    z,
+    m2500,
+    *,
+    f_host_2500_psf=None,
+    f_host_2500=None,
+    alpha_lambda=None,
+):
     """Evaluate debias correction using the richest available feature set."""
     z = np.asarray(z, dtype=float)
     m2500 = np.asarray(m2500, dtype=float)
     cols = [z, m2500]
-    if f_host_2500 is not None:
-        cols.append(np.asarray(f_host_2500, dtype=float))
+    # Completeness-derived debiasing should use the PSF host fraction.  Keep the
+    # old keyword only for external compatibility; internal callers pass PSF.
+    fhost = f_host_2500_psf if f_host_2500_psf is not None else f_host_2500
+    if fhost is not None:
+        cols.append(np.asarray(fhost, dtype=float))
         if alpha_lambda is not None:
             cols.append(np.asarray(alpha_lambda, dtype=float))
     pts = np.column_stack(cols)
-    return np.asarray(dm_interp(pts), dtype=float)
+    finite = np.all(np.isfinite(pts), axis=1)
+    out = np.full(pts.shape[0], np.nan, dtype=float)
+    if np.any(finite):
+        out[finite] = np.asarray(dm_interp(pts[finite]), dtype=float)
+    return out
 
 
 def _binned_mean_interp_1d(z, y, *, z_bins=40):
@@ -413,7 +430,10 @@ class Completeness2D:
         z = np.clip(np.asarray(z, dtype=float), self.z_min, self.z_max)
         m_b, z_b = np.broadcast_arrays(mag, z)
         pts = np.column_stack([m_b.ravel(), z_b.ravel()])
-        vals = self._interp(pts)
+        finite = np.all(np.isfinite(pts), axis=1)
+        vals = np.zeros(pts.shape[0], dtype=float)
+        if np.any(finite):
+            vals[finite] = self._interp(pts[finite])
         return vals.reshape(m_b.shape)
 
     @property
@@ -483,7 +503,10 @@ class Completeness3D:
         f_host = np.clip(f_host, self.fhost_min, self.fhost_max)
         m_b, z_b, f_b = np.broadcast_arrays(mag, z, f_host)
         pts = np.column_stack([m_b.ravel(), z_b.ravel(), f_b.ravel()])
-        vals = self._interp(pts)
+        finite = np.all(np.isfinite(pts), axis=1)
+        vals = np.zeros(pts.shape[0], dtype=float)
+        if np.any(finite):
+            vals[finite] = self._interp(pts[finite])
         return vals.reshape(m_b.shape)
 
     @property
@@ -561,7 +584,10 @@ class Completeness4D:
         alpha_lambda = np.clip(alpha_lambda, self.alpha_min, self.alpha_max)
         m_b, z_b, f_b, a_b = np.broadcast_arrays(mag, z, f_host, alpha_lambda)
         pts = np.column_stack([m_b.ravel(), z_b.ravel(), f_b.ravel(), a_b.ravel()])
-        vals = self._interp(pts)
+        finite = np.all(np.isfinite(pts), axis=1)
+        vals = np.zeros(pts.shape[0], dtype=float)
+        if np.any(finite):
+            vals[finite] = self._interp(pts[finite])
         return vals.reshape(m_b.shape)
 
     @property
@@ -675,8 +701,8 @@ def _read_mock_alpha_lambda(h5file):
     return None, None
 
 
-def _read_mock_fhost_2500(h5file):
-    for key in ("f_host_2500", "fhost_2500", "f_host"):
+def _read_mock_fhost_2500_psf(h5file):
+    for key in (COMPLETENESS_FHOST_COL, "frac_host_psf_2500", "fhost_2500_psf"):
         if key in h5file:
             return np.asarray(h5file[key][:], dtype=float), f"mock_h5_dataset:{key}"
     return None, None
@@ -721,18 +747,19 @@ def apparent_mag_to_logL2500(m2500, z, cosmo):
 def fit_fhost_2500_l2500_model(
     df_agn,
     *,
+    f_host_col="f_host_2500",
     fit_logL_max=45.5,
     clip_eps=_FHOST_CLIP_EPS,
     cosmo=COSMO,
 ):
-    required = {"z", "apparent_mag_2500", "f_host_2500"}
+    required = {"z", "apparent_mag_2500", f_host_col}
     if not required.issubset(df_agn.columns):
         missing = ", ".join(sorted(required - set(df_agn.columns)))
         raise KeyError(f"Missing required columns for f_host model fit: {missing}")
 
     z = np.asarray(df_agn["z"], dtype=float)
     m2500 = np.asarray(df_agn["apparent_mag_2500"], dtype=float)
-    f_host = np.asarray(df_agn["f_host_2500"], dtype=float)
+    f_host = np.asarray(df_agn[f_host_col], dtype=float)
     logL2500 = apparent_mag_to_logL2500(m2500, z, cosmo)
 
     fit_mask = (
@@ -795,6 +822,26 @@ def sample_fhost_2500_from_logL2500(logL2500, model, rng):
     sampled_logit = logit(mean) + rng.normal(0.0, sigma_host_logit, size=np.shape(mean))
     clip_eps = float(model.get("clip_eps", _FHOST_CLIP_EPS))
     return np.clip(expit(sampled_logit), clip_eps, 1.0 - clip_eps)
+
+
+def _fit_fhost_population_model(df_agn, df_agn_fhost_population, *, fit_logL_max):
+    """Fit the host-fraction parent on the supplied population frame."""
+
+    fit_df = df_agn if df_agn_fhost_population is None else df_agn_fhost_population
+    host_model = fit_fhost_2500_l2500_model(
+        fit_df,
+        f_host_col=COMPLETENESS_FHOST_COL,
+        fit_logL_max=fit_logL_max,
+        cosmo=COSMO,
+    )
+    host_model["observed_fit_source"] = (
+        "fit_sample_f_host_2500_psf_vs_l2500"
+        if df_agn_fhost_population is None
+        else "precut_f_host_2500_psf_vs_l2500"
+    )
+    host_model["n_observed_population"] = int(len(fit_df))
+    return host_model
+
 
 def predicted_new_loglbol(df_agn, loglbol):
 
@@ -1180,14 +1227,18 @@ def get_completeness_function_3d_fhost(
     sigma_mag=0.2,
     sigma_z_abs=0.2,
     sigma_fhost=0.05,
+    df_agn_fhost_population=None,
 ):
     """
-    Build p(detect | m, z, f_host_2500), preferring mock f_host_2500 when available.
+    Build p(detect | m, z, f_host_2500_psf), preferring mock PSF host
+    fractions when available.
     """
     import matplotlib.pyplot as plt
 
-    if "f_host_2500" not in df_agn.columns:
-        raise KeyError("df_agn must contain 'f_host_2500' for 3D host-aware completeness.")
+    if COMPLETENESS_FHOST_COL not in df_agn.columns:
+        raise KeyError(
+            f"df_agn must contain {COMPLETENESS_FHOST_COL!r} for 3D host-aware completeness."
+        )
 
     sim_file = resolve_qvc_data_path(sim_file)
     with h5py.File(sim_file, "r") as f:
@@ -1196,10 +1247,10 @@ def get_completeness_function_3d_fhost(
         else:
             m_true = np.asarray(f["apparent_mag_i_rest"][:], dtype=float)
         z_true = np.asarray(f["z"][:], dtype=float)
-        fhost_true_raw, fhost_source = _read_mock_fhost_2500(f)
+        fhost_true_raw, fhost_source = _read_mock_fhost_2500_psf(f)
         if fhost_true_raw is not None and fhost_true_raw.shape != m_true.shape:
             print(
-                "[WARNING] Ignoring mock f_host_2500 dataset because its shape "
+                "[WARNING] Ignoring mock PSF f_host_2500 dataset because its shape "
                 f"{fhost_true_raw.shape} does not match apparent magnitude shape {m_true.shape}."
             )
             fhost_true_raw, fhost_source = None, None
@@ -1207,7 +1258,7 @@ def get_completeness_function_3d_fhost(
 
     z_obs = df_agn["z"].to_numpy(dtype=float)
     m_obs = df_agn["apparent_mag_2500"].to_numpy(dtype=float)
-    fhost_obs = df_agn["f_host_2500"].to_numpy(dtype=float)
+    fhost_obs = df_agn[COMPLETENESS_FHOST_COL].to_numpy(dtype=float)
 
     ok_obs = (
         np.isfinite(m_obs)
@@ -1229,7 +1280,11 @@ def get_completeness_function_3d_fhost(
     m_obs, z_obs, fhost_obs = m_obs[ok_obs], z_obs[ok_obs], fhost_obs[ok_obs]
     m_true, z_true = m_true[ok_true], z_true[ok_true]
 
-    host_model = fit_fhost_2500_l2500_model(df_agn.loc[ok_obs], fit_logL_max=fit_logL_max, cosmo=COSMO)
+    host_model = _fit_fhost_population_model(
+        df_agn.loc[ok_obs],
+        df_agn_fhost_population,
+        fit_logL_max=fit_logL_max,
+    )
     rng = np.random.default_rng(12345)
     if fhost_true_raw is None:
         logL_true = apparent_mag_to_logL2500(m_true, z_true, COSMO)
@@ -1238,7 +1293,6 @@ def get_completeness_function_3d_fhost(
     else:
         fhost_true = np.clip(fhost_true_raw[ok_true], 0.0, 1.0)
         host_model["source"] = fhost_source
-        host_model["observed_fit_source"] = "observed_fhost_model"
         host_model["n_mock"] = int(np.size(fhost_true))
         host_model["mock_fhost_mean"] = float(np.nanmean(fhost_true)) if np.size(fhost_true) else np.nan
         host_model["mock_fhost_sigma"] = float(np.nanstd(fhost_true, ddof=1)) if np.size(fhost_true) > 1 else 0.0
@@ -1285,7 +1339,7 @@ def get_completeness_function_3d_fhost(
         plot_dir = os.path.join(base_plot_path, "completeness")
         os.makedirs(plot_dir, exist_ok=True)
 
-        with open(os.path.join(plot_dir, "fhost_2500_l2500_model.json"), "w") as handle:
+        with open(os.path.join(plot_dir, "fhost_2500_psf_l2500_model.json"), "w") as handle:
             json.dump(host_model, handle, indent=2)
 
         _plot_completeness_vs_fhost_slices(
@@ -1362,14 +1416,15 @@ def get_completeness_function_4d_fhost_alpha(
     sigma_z_abs=0.2,
     sigma_fhost=0.1,
     sigma_alpha=0.35,
+    df_agn_fhost_population=None,
 ):
     """
-    Build p(detect | m, z, f_host_2500, alpha_lambda), preferring mock
-    f_host_2500 and alpha_lambda populations when available.
+    Build p(detect | m, z, f_host_2500_psf, alpha_lambda), preferring mock
+    PSF host fractions and alpha_lambda populations when available.
     """
     import matplotlib.pyplot as plt
 
-    required = {"f_host_2500", "alpha_lambda", "apparent_mag_2500", "z"}
+    required = {COMPLETENESS_FHOST_COL, "alpha_lambda", "apparent_mag_2500", "z"}
     if not required.issubset(df_agn.columns):
         missing = ", ".join(sorted(required - set(df_agn.columns)))
         raise KeyError(f"df_agn must contain columns for 4D completeness: {missing}")
@@ -1381,10 +1436,10 @@ def get_completeness_function_4d_fhost_alpha(
         else:
             m_true = np.asarray(f["apparent_mag_i_rest"][:], dtype=float)
         z_true = np.asarray(f["z"][:], dtype=float)
-        fhost_true_raw, fhost_source = _read_mock_fhost_2500(f)
+        fhost_true_raw, fhost_source = _read_mock_fhost_2500_psf(f)
         if fhost_true_raw is not None and fhost_true_raw.shape != m_true.shape:
             print(
-                "[WARNING] Ignoring mock f_host_2500 dataset because its shape "
+                "[WARNING] Ignoring mock PSF f_host_2500 dataset because its shape "
                 f"{fhost_true_raw.shape} does not match apparent magnitude shape {m_true.shape}."
             )
             fhost_true_raw, fhost_source = None, None
@@ -1400,7 +1455,7 @@ def get_completeness_function_4d_fhost_alpha(
 
     z_obs = df_agn["z"].to_numpy(dtype=float)
     m_obs = df_agn["apparent_mag_2500"].to_numpy(dtype=float)
-    fhost_obs = df_agn["f_host_2500"].to_numpy(dtype=float)
+    fhost_obs = df_agn[COMPLETENESS_FHOST_COL].to_numpy(dtype=float)
     alpha_obs = df_agn["alpha_lambda"].to_numpy(dtype=float)
 
     ok_obs = (
@@ -1438,7 +1493,11 @@ def get_completeness_function_4d_fhost_alpha(
     else:
         alpha_model = alpha_attr_model or fit_alpha_lambda_population(df_agn.loc[ok_obs])
 
-    host_model = fit_fhost_2500_l2500_model(df_agn.loc[ok_obs], fit_logL_max=fit_logL_max, cosmo=COSMO)
+    host_model = _fit_fhost_population_model(
+        df_agn.loc[ok_obs],
+        df_agn_fhost_population,
+        fit_logL_max=fit_logL_max,
+    )
     rng = np.random.default_rng(12345)
     if fhost_true_raw is None:
         logL_true = apparent_mag_to_logL2500(m_true, z_true, COSMO)
@@ -1447,7 +1506,6 @@ def get_completeness_function_4d_fhost_alpha(
     else:
         fhost_true = np.clip(fhost_true_raw[ok_true], 0.0, 1.0)
         host_model["source"] = fhost_source
-        host_model["observed_fit_source"] = "observed_fhost_model"
         host_model["n_mock"] = int(np.size(fhost_true))
         host_model["mock_fhost_mean"] = float(np.nanmean(fhost_true)) if np.size(fhost_true) else np.nan
         host_model["mock_fhost_sigma"] = float(np.nanstd(fhost_true, ddof=1)) if np.size(fhost_true) > 1 else 0.0
@@ -1501,7 +1559,7 @@ def get_completeness_function_4d_fhost_alpha(
         plot_dir = os.path.join(base_plot_path, "completeness")
         os.makedirs(plot_dir, exist_ok=True)
 
-        with open(os.path.join(plot_dir, "fhost_2500_l2500_model.json"), "w") as handle:
+        with open(os.path.join(plot_dir, "fhost_2500_psf_l2500_model.json"), "w") as handle:
             json.dump(host_model, handle, indent=2)
 
         _plot_completeness_vs_fhost_slices(
@@ -1618,6 +1676,7 @@ def make_dm_function(
     dm,
     m_bins=40,
     z_bins=40,
+    f_host_2500_psf=None,
     f_host_2500=None,
     alpha_lambda=None,
     *,
@@ -1631,33 +1690,35 @@ def make_dm_function(
     The returned callable accepts the historical point-array interface used by
     the plotting code:
       [z, m_2500]
-      [z, m_2500, f_host_2500]
-      [z, m_2500, f_host_2500, alpha_lambda]
+      [z, m_2500, f_host_2500_psf]
+      [z, m_2500, f_host_2500_psf, alpha_lambda]
 
-    If host/color columns are provided, they are included in the interpolation;
-    otherwise this falls back to the historical dm(z) trend.
+    If host/color columns are provided, they are included in the interpolation.
+    Internal completeness callers use the PSF host fraction; the old
+    f_host_2500 keyword remains only as a compatibility alias.
     """
     m = np.asarray(m, dtype=float)
     z = np.asarray(z, dtype=float)
     dm = np.asarray(dm, dtype=float)
     mask = np.isfinite(m) & np.isfinite(z) & np.isfinite(dm)
-    if f_host_2500 is not None:
-        f_host_2500 = np.asarray(f_host_2500, dtype=float)
-        mask &= np.isfinite(f_host_2500)
+    fhost = f_host_2500_psf if f_host_2500_psf is not None else f_host_2500
+    if fhost is not None:
+        fhost = np.asarray(fhost, dtype=float)
+        mask &= np.isfinite(fhost)
     if alpha_lambda is not None:
         alpha_lambda = np.asarray(alpha_lambda, dtype=float)
         mask &= np.isfinite(alpha_lambda)
 
     m, z, dm = m[mask], z[mask], dm[mask]
-    if f_host_2500 is not None:
-        f_host_2500 = f_host_2500[mask]
+    if fhost is not None:
+        fhost = fhost[mask]
     if alpha_lambda is not None:
         alpha_lambda = alpha_lambda[mask]
     if z.size == 0:
         raise ValueError("make_dm_function requires at least one finite (m, z, dm) point.")
 
-    if f_host_2500 is not None:
-        feature_cols = [z, m, f_host_2500]
+    if fhost is not None:
+        feature_cols = [z, m, fhost]
         if alpha_lambda is not None:
             feature_cols.append(alpha_lambda)
         train_pts = np.column_stack(feature_cols)
@@ -1686,14 +1747,20 @@ def make_dm_function(
                 raise ValueError(
                     f"dm_interp expected at least {expected_dim} columns, got {arr.shape[1]}."
                 )
+            finite = np.all(np.isfinite(arr[:, :expected_dim]), axis=1)
+            out = np.full(arr.shape[0], np.nan, dtype=float)
+            if not np.any(finite):
+                return out if np.ndim(pts) > 1 else out[0]
             arr_scaled = (arr[:, :expected_dim] - center) / scale
+            arr_scaled_finite = arr_scaled[finite]
             if linear_interp is None:
-                out = np.full(arr_scaled.shape[0], np.nan, dtype=float)
+                finite_out = np.full(arr_scaled_finite.shape[0], np.nan, dtype=float)
             else:
-                out = np.asarray(linear_interp(arr_scaled), dtype=float)
-            missing = ~np.isfinite(out)
+                finite_out = np.asarray(linear_interp(arr_scaled_finite), dtype=float)
+            missing = ~np.isfinite(finite_out)
             if np.any(missing):
-                out[missing] = np.asarray(nearest_interp(arr_scaled[missing]), dtype=float)
+                finite_out[missing] = np.asarray(nearest_interp(arr_scaled_finite[missing]), dtype=float)
+            out[finite] = finite_out
             return out if np.ndim(pts) > 1 else out[0]
 
         return interp_features

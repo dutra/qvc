@@ -13,6 +13,7 @@ from qvc.hubble.hubble_model import (
     agn_model_pack_obs,
     evaluate_log_f,
 )
+from qvc.hubble.hubble_completeness_refactored import COMPLETENESS_FHOST_COL
 
 def completeness_loglike(
     m_obs,
@@ -24,7 +25,7 @@ def completeness_loglike(
     m_grid,
     sigma_completeness=0.0,
     tiny=1e-300,
-    f_host_2500=None,
+    f_host_2500_psf=None,
     alpha_lambda=None,
 ):
     """
@@ -48,16 +49,16 @@ def completeness_loglike(
     # completeness on grid for each object
     mode = getattr(completeness_model, "mode", "2d")
     if mode == "4d_fhost_alpha":
-        if f_host_2500 is None or alpha_lambda is None:
-            raise ValueError("f_host_2500 and alpha_lambda are required for 4D host/color completeness.")
-        f_host_2500 = np.asarray(f_host_2500)
+        if f_host_2500_psf is None or alpha_lambda is None:
+            raise ValueError("f_host_2500_psf and alpha_lambda are required for 4D host/color completeness.")
+        fhost = np.asarray(f_host_2500_psf)
         alpha_lambda = np.asarray(alpha_lambda)
-        p_det = completeness_model(m_grid[None, :], z[:, None], f_host_2500[:, None], alpha_lambda[:, None])
+        p_det = completeness_model(m_grid[None, :], z[:, None], fhost[:, None], alpha_lambda[:, None])
     elif mode == "3d_fhost":
-        if f_host_2500 is None:
-            raise ValueError("f_host_2500 is required for 3D host-aware completeness.")
-        f_host_2500 = np.asarray(f_host_2500)
-        p_det = completeness_model(m_grid[None, :], z[:, None], f_host_2500[:, None])
+        if f_host_2500_psf is None:
+            raise ValueError("f_host_2500_psf is required for 3D host-aware completeness.")
+        fhost = np.asarray(f_host_2500_psf)
+        p_det = completeness_model(m_grid[None, :], z[:, None], fhost[:, None])
     else:
         p_det = completeness_model(m_grid[None, :], z[:, None])                 # (N,G)
 
@@ -293,7 +294,7 @@ def log_likelihood(theta, *, agn_data, pantheon_data,
             m_model=m_model, mu_err=mu_err, z=z,
             completeness_model=completeness_model, m_grid=mag_centers,
             sigma_completeness=completeness_scatter,
-            f_host_2500=agn_data.get("f_host_2500"),
+            f_host_2500_psf=agn_data.get(COMPLETENESS_FHOST_COL),
             alpha_lambda=agn_data.get("alpha_lambda"),
         )
 
@@ -503,7 +504,7 @@ def log_likelihood_nearbylcs(
             m_model=m_model_nc, mu_err=mu_err_nc, z=z_nc,
             completeness_model=completeness_model, m_grid=mag_centers,
             sigma_completeness=completeness_scatter,
-            f_host_2500=agn_data.get("f_host_2500", None)[mask_noncal] if agn_data.get("f_host_2500", None) is not None else None,
+            f_host_2500_psf=agn_data.get(COMPLETENESS_FHOST_COL, None)[mask_noncal] if agn_data.get(COMPLETENESS_FHOST_COL, None) is not None else None,
             alpha_lambda=agn_data.get("alpha_lambda", None)[mask_noncal] if agn_data.get("alpha_lambda", None) is not None else None,
         )
 

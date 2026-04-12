@@ -13,6 +13,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from qvc.hubble import hubble_plotting
+from qvc.hubble.cuts import LIGHT_CURVE_N_POINTS_EXCLUDED_BANDS
 
 
 def test_plot_light_curve_n_points_vs_apparent_mag_writes_pdf(tmp_path, monkeypatch):
@@ -38,3 +39,34 @@ def test_plot_light_curve_n_points_vs_apparent_mag_writes_pdf(tmp_path, monkeypa
     assert os.path.exists(out)
     assert out.endswith("light_curve_n_points_vs_apparent_mag.pdf")
 
+
+def test_plot_light_curve_n_points_vs_apparent_mag_excludes_u_by_default(tmp_path, monkeypatch):
+    captured = {}
+
+    def fake_point_count_series(_df, *, exclude_bands=None):
+        captured["exclude_bands"] = exclude_bands
+        return np.array([10.0, 20.0, 30.0]), ["variability_n_points_g"]
+
+    def fake_save_figure(fig, path, **_kwargs):
+        hubble_plotting.plt.close(fig)
+        return path
+
+    monkeypatch.setattr(hubble_plotting, "light_curve_point_count_series", fake_point_count_series)
+    monkeypatch.setattr(hubble_plotting, "_save_figure", fake_save_figure)
+
+    df = pd.DataFrame(
+        {
+            "z": [0.7, 1.0, 1.4],
+            "apparent_mag_2500": [20.0, 20.5, 21.0],
+            "variability_n_points_u": [1000, 1000, 1000],
+            "variability_n_points_g": [10, 20, 30],
+        }
+    )
+
+    hubble_plotting.plot_light_curve_n_points_vs_apparent_mag(
+        df,
+        plot_path=str(tmp_path / "figures"),
+        show=False,
+    )
+
+    assert captured["exclude_bands"] == LIGHT_CURVE_N_POINTS_EXCLUDED_BANDS

@@ -80,3 +80,33 @@ def test_make_dm_function_sparse_input_falls_back_cleanly():
 
     assert vals.shape == (2,)
     assert np.all(np.isfinite(vals))
+
+
+def test_host_debias_interpolator_returns_nan_for_nonfinite_queries():
+    z = np.linspace(0.5, 2.5, 12)
+    m = 20.0 + 0.4 * z
+    fhost = np.linspace(0.1, 0.6, z.size)
+    dm = -0.2 - 0.15 * z + 0.05 * fhost
+
+    dm_interp = hcr.make_dm_function(m, z, dm, f_host_2500_psf=fhost)
+    pts = np.array(
+        [
+            [1.0, 20.4, 0.2],
+            [np.nan, 20.5, 0.3],
+            [1.8, np.inf, 0.4],
+            [2.0, 20.8, np.nan],
+        ]
+    )
+
+    vals = dm_interp(pts)
+    vals_public = hcr.evaluate_dm_interp(
+        dm_interp,
+        pts[:, 0],
+        pts[:, 1],
+        f_host_2500_psf=pts[:, 2],
+    )
+
+    assert vals.shape == (4,)
+    assert np.isfinite(vals[0])
+    assert np.all(np.isnan(vals[1:]))
+    assert np.allclose(vals_public, vals, equal_nan=True)

@@ -4,7 +4,7 @@ import os
 import numpy as np
 import pandas as pd
 
-from qvc.hubble.hubble_completeness_refactored import evaluate_dm_interp
+from qvc.hubble.hubble_completeness_refactored import COMPLETENESS_FHOST_COL, evaluate_dm_interp
 
 
 REQUIRED_AGN_TABLE_COLUMNS = (
@@ -50,7 +50,7 @@ def _prepare_agn_table_dataframe(agn_df, mu, mu_err, dm_interp):
         dm_interp,
         df["z"],
         df["apparent_mag_2500"],
-        f_host_2500=df["f_host_2500"] if "f_host_2500" in df.columns else None,
+        f_host_2500_psf=df[COMPLETENESS_FHOST_COL] if COMPLETENESS_FHOST_COL in df.columns else None,
         alpha_lambda=df["alpha_lambda"] if "alpha_lambda" in df.columns else None,
     )
     if dm_values.shape != (len(df),):

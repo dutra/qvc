@@ -52,6 +52,7 @@ except Exception:
     NestedSampler = None
 
 from qvc.hubble.hubble_completeness_refactored import (
+    COMPLETENESS_FHOST_COL,
     Completeness2D,
     Completeness3D,
     Completeness4D,
@@ -340,7 +341,7 @@ def _interp_regular_4d(x, y, z, w, x_grid, y_grid, z_grid, w_grid, values):
     return jnp.where(valid, out, 0.0)
 
 
-def _completeness_loglike_jax(m_model, mu_err, z, completeness, f_host_2500, alpha_lambda):
+def _completeness_loglike_jax(m_model, mu_err, z, completeness, f_host_2500_psf, alpha_lambda):
     if completeness is None:
         return 0.0
     m_grid = completeness["mag_centers"]
@@ -350,7 +351,7 @@ def _completeness_loglike_jax(m_model, mu_err, z, completeness, f_host_2500, alp
         p_det = _interp_regular_4d(
             m_grid[None, :],
             z[:, None],
-            f_host_2500[:, None],
+            f_host_2500_psf[:, None],
             alpha_lambda[:, None],
             completeness["mag_centers"],
             completeness["z_centers"],
@@ -362,7 +363,7 @@ def _completeness_loglike_jax(m_model, mu_err, z, completeness, f_host_2500, alp
         p_det = _interp_regular_3d(
             m_grid[None, :],
             z[:, None],
-            f_host_2500[:, None],
+            f_host_2500_psf[:, None],
             completeness["mag_centers"],
             completeness["z_centers"],
             completeness["fhost_centers"],
@@ -477,8 +478,15 @@ def _log_likelihood_jax(
 
     m_model = M_pred + mu_cosmo
     if completeness_jax is not None:
-        f_host_2500 = agn_data_jax.get("f_host_2500")
-        ll_comp = _completeness_loglike_jax(m_model, mu_err, z_agn, completeness_jax, f_host_2500, agn_data_jax.get("alpha_lambda"))
+        f_host_2500_psf = agn_data_jax.get(COMPLETENESS_FHOST_COL)
+        ll_comp = _completeness_loglike_jax(
+            m_model,
+            mu_err,
+            z_agn,
+            completeness_jax,
+            f_host_2500_psf,
+            agn_data_jax.get("alpha_lambda"),
+        )
     else:
         ll_comp = 0.0
     return ll_sn + ll_agn - ll_comp
@@ -708,11 +716,19 @@ def run_single_jax(
             )
         if completeness_mode == "4d_fhost_alpha":
             completeness_params = get_completeness_function_4d_fhost_alpha(
-                df_agn_fit, sim_file=completeness_sim_file, plot=True, plot_path=plot_path
+                df_agn_fit,
+                sim_file=completeness_sim_file,
+                plot=True,
+                plot_path=plot_path,
+                df_agn_fhost_population=df_agn_all,
             )
         elif completeness_mode == "3d_fhost":
             completeness_params = get_completeness_function_3d_fhost(
-                df_agn_fit, sim_file=completeness_sim_file, plot=True, plot_path=plot_path
+                df_agn_fit,
+                sim_file=completeness_sim_file,
+                plot=True,
+                plot_path=plot_path,
+                df_agn_fhost_population=df_agn_all,
             )
         else:
             completeness_params = get_completeness_function_2d(
@@ -723,8 +739,8 @@ def run_single_jax(
 
     agn_fields = agn_model_req_params + agn_model_req_obs + agn_model_req_errs
     agn_fields += ("apparent_mag_2500", "apparent_mag_2500_err", "z", "z_err", "object_id")
-    if "f_host_2500" in df_agn_fit.columns:
-        agn_fields += ("f_host_2500",)
+    if COMPLETENESS_FHOST_COL in df_agn_fit.columns:
+        agn_fields += (COMPLETENESS_FHOST_COL,)
     if "alpha_lambda" in df_agn_fit.columns:
         agn_fields += ("alpha_lambda",)
     agn_data = {col: df_agn_fit[col].values for col in agn_fields if col in df_agn_fit.columns}
@@ -821,7 +837,7 @@ def run_single_jax(
         agn_data["apparent_mag_2500"],
         agn_data["z"],
         dmi_posterior_median,
-        f_host_2500=agn_data.get("f_host_2500"),
+        f_host_2500_psf=agn_data.get(COMPLETENESS_FHOST_COL),
         alpha_lambda=agn_data.get("alpha_lambda"),
     )
     dmi_selection_sigma_interp = None
@@ -830,7 +846,7 @@ def run_single_jax(
             agn_data["apparent_mag_2500"],
             agn_data["z"],
             dmi_selection_sigma_posterior_median,
-            f_host_2500=agn_data.get("f_host_2500"),
+            f_host_2500_psf=agn_data.get(COMPLETENESS_FHOST_COL),
             alpha_lambda=agn_data.get("alpha_lambda"),
         )
 
@@ -938,9 +954,18 @@ def run_single_jax(
         verbose=True,
         residuals_sigma_clip=None,
         df_calibrators=None,
+        z_range=z_range,
     )
     debiased_residuals, debiased_residuals_err, _, mu_pred_std_debiased, _ = r
-    chisq_red_hubble_debiased, _ = reduced_chi_squared(debiased_residuals, mu_pred_std_debiased, n_params=len(model_labels) - 1)
+    hubble_chi2_mask = df_agn_fit["z"].between(z_range[0], z_range[1]).to_numpy(dtype=bool)
+    if np.any(hubble_chi2_mask):
+        chisq_red_hubble_debiased, _ = reduced_chi_squared(
+            debiased_residuals[hubble_chi2_mask],
+            mu_pred_std_debiased[hubble_chi2_mask],
+            n_params=len(model_labels) - 1,
+        )
+    else:
+        chisq_red_hubble_debiased = np.nan
     print(f"Reduced chi-squared (debiased) Hubble: {chisq_red_hubble_debiased:.3f}")
 
     plot_completeness_diagnostics(

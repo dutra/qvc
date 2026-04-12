@@ -1,0 +1,145 @@
+import os
+import sys
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+
+ROOT = Path(__file__).resolve().parents[1]
+SRC = ROOT / "src"
+os.chdir(SRC)
+if str(SRC) not in sys.path:
+    sys.path.insert(0, str(SRC))
+
+from qvc.hubble import hubble_plotting, hubble_utils  # noqa: E402
+
+
+def _minimal_agn_frame(n=10):
+    z = np.linspace(0.7, 2.0, n)
+    return pd.DataFrame(
+        {
+            "object_id": [f"obj{i}" for i in range(n)],
+            "sdss_name": [f"sdss{i}" for i in range(n)],
+            "z": z,
+            "dropped_bands": ["" for _ in range(n)],
+            "mags_mean_u": np.full(n, 20.5),
+            "mags_mean_g": np.full(n, 20.0),
+            "mags_mean_r": np.full(n, 19.8),
+            "mags_mean_i": np.full(n, 19.7),
+            "log_jitter_u": np.full(n, -4.0),
+            "log_jitter_g": np.full(n, -4.0),
+            "log_jitter_r": np.full(n, -4.0),
+            "log_jitter_i": np.full(n, -4.0),
+            "dlog_amp_blr_u": np.full(n, -1.0),
+            "dlog_amp_blr_g": np.full(n, -1.0),
+            "dlog_amp_blr_r": np.full(n, -1.0),
+            "dlog_amp_blr_i": np.full(n, -1.0),
+            "log_tau_uv_rf": np.full(n, 2.5),
+            "wrms": np.full(n, 0.5),
+            "t_rf_length": np.full(n, 2000.0),
+            "f_host_2500": np.linspace(0.08, 0.25, n),
+            "frac_host_psf_2500": np.linspace(0.05, 0.18, n),
+            "frac_host_psf_2500_err": np.full(n, 0.02),
+            "alpha_lambda": np.full(n, -1.5),
+            "variability_chi_sq_red_g": np.full(n, 30.0),
+            "log_sigma_uv": np.full(n, -0.6),
+            "log_sigma_uv_std_psd": np.full(n, 0.05),
+            "apparent_mag_2500": np.linspace(20.0, 21.0, n),
+            "apparent_mag_2500_err": np.full(n, 0.01),
+            "number_points_g": np.full(n, 300),
+            "number_points_r": np.full(n, 300),
+        }
+    )
+
+
+def test_load_agn_data_makes_precut_and_postcut_fhost_l2500_plots(tmp_path, monkeypatch):
+    source_path = tmp_path / "agn.h5"
+    source_path.touch()
+    monkeypatch.setattr(
+        hubble_utils,
+        "read_quasars_from_hdf5_flat",
+        lambda *_args, **_kwargs: _minimal_agn_frame(),
+    )
+    monkeypatch.setattr(hubble_utils, "populate_xray", lambda df: df)
+
+    captured_calls = []
+
+    def capture_fhost_l2500(*_args, **kwargs):
+        captured_calls.append(kwargs)
+        return None
+
+    plot_noops = (
+        "plot_adf_pvalue_g_diagnostic",
+        "plot_alpha_lambda_vs_l2500_by_redshift",
+        "plot_alpha_lambda_vs_l2500",
+        "plot_alpha_lambda_vs_eta_sigma",
+        "plot_alpha_lambda_histogram",
+        "plot_alpha_lambda_vs_redshift",
+        "plot_blr_amp_vs_redshift_by_band",
+        "plot_bc_lag_vs_l2500",
+        "plot_blr_line_lags_vs_l2500_fiducial",
+        "plot_blr_lag_vs_amp_by_band",
+        "plot_blr_lag_vs_redshift_by_band",
+        "plot_eta_tau_sigma_vs_redshift",
+        "plot_fast_vs_uv_variability",
+        "plot_f_host_2500_vs_redshift",
+        "plot_g_band_drift_slope_histograms",
+        "plot_l2500_vs_eta_sigma_fiducial",
+        "plot_l2500_vs_uv_variability_fiducial",
+        "plot_linear_trend_vs_redshift",
+        "plot_Mi_relation",
+        "plot_light_curve_n_points_vs_apparent_mag",
+        "plot_cut_diagnostics",
+        "plot_m2500_vs_z_colorpanels",
+        "plot_spectral_fraction_vs_redshift",
+        "plot_sf_ref_band_vs_model_g",
+        "plot_sf_vs_uv_variability",
+        "plot_sigma_bc_vs_frac_bc",
+        "plot_sigma_bc_vs_redshift",
+        "plot_sigma_tau_err_std_psd_comparison",
+        "plot_sigma_uv_vs_variability_chi_sq_red_g",
+        "plot_sigma_uv_vs_tau_uv_rf",
+        "plot_sigma_uv_host_correction",
+        "plot_suberlak_style_sigma_tau_fits",
+        "plot_tau_sigma_vs_wu_catalog",
+        "plot_tau_sigma_vs_redshift",
+    )
+    for name in plot_noops:
+        monkeypatch.setattr(hubble_plotting, name, lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(hubble_plotting, "plot_f_host_2500_vs_l2500", capture_fhost_l2500)
+
+    hubble_utils.load_agn_data(
+        source_path,
+        spectra_fit_csv=None,
+        lc_info_csv=None,
+        apply_cut=True,
+        plot_path=str(tmp_path / "figures"),
+        cut_report_path=tmp_path / "cut_summary.txt",
+    )
+
+    captured_by_filename = {call.get("filename"): call for call in captured_calls}
+    assert "f_host_2500_vs_l2500_precut.pdf" in captured_by_filename
+    assert "f_host_2500_vs_l2500_postcut.pdf" in captured_by_filename
+    assert captured_by_filename["f_host_2500_vs_l2500_precut.pdf"]["f_host_col"] == "f_host_2500_psf"
+    assert captured_by_filename["f_host_2500_vs_l2500_postcut.pdf"]["f_host_col"] == "f_host_2500_psf"
+
+
+def test_plot_f_host_2500_vs_l2500_accepts_psf_column(tmp_path, monkeypatch):
+    monkeypatch.setenv("MPLCONFIGDIR", str(tmp_path / "mplconfig"))
+    df = _minimal_agn_frame(n=12).drop(columns=["f_host_2500"])
+    df["f_host_2500_psf"] = df["frac_host_psf_2500"]
+
+    out = hubble_plotting.plot_f_host_2500_vs_l2500(
+        df,
+        plot_path=str(tmp_path / "figures"),
+        show=False,
+        fit_logL_max=99.0,
+        filename="f_host_2500_psf_vs_l2500.pdf",
+        f_host_col="f_host_2500_psf",
+        f_host_label=r"$f_{\rm host,2500}^{\rm PSF}$",
+    )
+
+    assert out is not None
+    assert os.path.exists(out)
+    assert out.endswith("f_host_2500_psf_vs_l2500.pdf")
