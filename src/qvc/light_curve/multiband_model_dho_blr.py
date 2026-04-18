@@ -150,38 +150,6 @@ class OverdampedSHOBaseQS(qs.Quasisep):
         return jnp.block([[Phi_fast, zero], [zero, Phi_slow]])
 
 
-class SharedDRWBaseQS(qs.Quasisep):
-    """Unit-variance shared OU/DRW latent driver used for secular prompt drift."""
-
-    tau: jnp.ndarray
-
-    def coord_to_sortable(self, X):
-        t, b = X
-        return t + 1e-9 * jnp.asarray(b, dtype=jnp.int32)
-
-    def _tau(self):
-        return _safe_pos(jnp.asarray(self.tau)).reshape(())
-
-    def design_matrix(self):
-        tau = self._tau()
-        return jnp.asarray([[-1.0 / tau]], dtype=tau.dtype)
-
-    def stationary_covariance(self):
-        tau = self._tau()
-        return jnp.asarray([[1.0]], dtype=tau.dtype)
-
-    def observation_model(self, X: JAXArray) -> JAXArray:
-        del X
-        tau = self._tau()
-        return jnp.asarray([1.0], dtype=tau.dtype)
-
-    def transition_matrix(self, X1: JAXArray, X2: JAXArray) -> JAXArray:
-        t1, _ = X1
-        t2, _ = X2
-        tau = self._tau()
-        return jnp.asarray([[jnp.exp(-(t2 - t1) / tau)]], dtype=tau.dtype)
-
-
 class ContiBLR_SHO_Wrapper(qs.Wrapper):
     """Multiband wrapper around a shared latent overdamped-SHO base kernel."""
 
@@ -194,28 +162,18 @@ class ContiBLR_SHO_Wrapper(qs.Wrapper):
     def transition_matrix(self, X1: JAXArray, X2: JAXArray) -> JAXArray:
         return self.kernel.transition_matrix(X1, X2)
 
-    def _component_kernels(self):
-        if isinstance(self.kernel, qs.Sum):
-            return self.kernel.kernel1, self.kernel.kernel2
-        return self.kernel, None
-
-    def _lagged_obs_from_component(self, kernel, b, lag):
-        h0 = kernel.observation_model((0.0, b))
-        phi = kernel.transition_matrix((0.0, b), (lag, b))
+    def _lagged_obs(self, b, lag):
+        h0 = self.kernel.observation_model((0.0, b))
+        phi = self.kernel.transition_matrix((0.0, b), (lag, b))
         return h0 @ phi
 
     def observation_model(self, X: JAXArray) -> JAXArray:
         _t, b = X
         b = jnp.asarray(b, dtype=jnp.int32)
-        main_kernel, drift_kernel = self._component_kernels()
 
         amp_cont_all = jnp.asarray(self.params["amp_cont"])
-        amp_drift_all = jnp.asarray(
-            self.params.get("amp_drift", jnp.zeros_like(amp_cont_all))
-        )
         lag_disk_all = jnp.asarray(self.params["lag_disk"])
         amp_cont = _safe_pos(amp_cont_all)[b]
-        amp_drift = jnp.maximum(amp_drift_all, 0.0)[b]
         amp_bc = jnp.maximum(
             jnp.asarray(self.params.get("amp_bc", jnp.zeros_like(amp_cont_all))),
             0.0,
@@ -230,16 +188,11 @@ class ContiBLR_SHO_Wrapper(qs.Wrapper):
         lag_blr = jnp.maximum(jnp.asarray(self.params["lag_blr"]), 0.0)[b]
         lag_blr2 = jnp.maximum(jnp.asarray(self.params["lag_blr2"]), 0.0)[b]
 
-        h_cont = self._lagged_obs_from_component(main_kernel, b, lag_disk)
-        h_bc = self._lagged_obs_from_component(main_kernel, b, lag_disk + lag_bc)
-        h_blr = self._lagged_obs_from_component(main_kernel, b, lag_disk + lag_blr)
-        h_blr2 = self._lagged_obs_from_component(main_kernel, b, lag_disk + lag_blr2)
-        main_obs = amp_cont * h_cont + amp_bc * h_bc + amp_blr * h_blr + amp_blr2 * h_blr2
-        if drift_kernel is None:
-            return main_obs
-        h_drift = self._lagged_obs_from_component(drift_kernel, b, lag_disk)
-        drift_obs = amp_drift * h_drift
-        return jnp.concatenate((main_obs, drift_obs))
+        h_cont = self._lagged_obs(b, lag_disk)
+        h_bc = self._lagged_obs(b, lag_disk + lag_bc)
+        h_blr = self._lagged_obs(b, lag_disk + lag_blr)
+        h_blr2 = self._lagged_obs(b, lag_disk + lag_blr2)
+        return amp_cont * h_cont + amp_bc * h_bc + amp_blr * h_blr + amp_blr2 * h_blr2
 
 
 def qs_psd(kernel, omega, b: int, sigma_n2: float = 0.0):
@@ -247,14 +200,6 @@ def qs_psd(kernel, omega, b: int, sigma_n2: float = 0.0):
 
     A = kernel.design_matrix()
     P = kernel.stationary_covariance()
-    if hasattr(A, "to_dense"):
-        A = A.to_dense()
-    else:
-        A = jnp.asarray(A)
-    if hasattr(P, "to_dense"):
-        P = P.to_dense()
-    else:
-        P = jnp.asarray(P)
     Qc = -(A @ P + P @ A.T)
     I = jnp.eye(A.shape[0], dtype=A.dtype)
     h = kernel.observation_model((jnp.array(0.0), jnp.array(int(b))))
@@ -312,45 +257,6 @@ class ContiBLR_SHO_Model(MultiVarModel):
 
     def my_amp_transform(self, params: dict[str, JAXArray]) -> JAXArray:
         return jnp.log(_safe_pos(jnp.asarray(params["amp_cont"])))
-
-    def _psd_component_params(self, params, *, component):
-        if component == "total":
-            return params
-
-        out = dict(params)
-        if component == "main":
-            for key in (
-                "amp_blr",
-                "amp_blr2",
-                "amp_bc",
-                "amp_blr_relflux",
-                "amp_blr2_relflux",
-                "amp_bc_relflux",
-                "amp_drift",
-                "amp_drift_relflux",
-            ):
-                if key in out:
-                    arr = jnp.asarray(out[key], dtype=float)
-                    out[key] = jnp.zeros_like(arr)
-            return out
-
-        if component == "drift":
-            for key in (
-                "amp_cont",
-                "amp_bc",
-                "amp_blr",
-                "amp_blr2",
-                "amp_cont_relflux",
-                "amp_bc_relflux",
-                "amp_blr_relflux",
-                "amp_blr2_relflux",
-            ):
-                if key in out:
-                    arr = jnp.asarray(out[key], dtype=float)
-                    out[key] = jnp.zeros_like(arr)
-            return out
-
-        raise ValueError(f"Unknown PSD component {component!r}")
 
     def mean_to_display(self, mean_vals):
         return mean_vals
@@ -415,8 +321,8 @@ class ContiBLR_SHO_Model(MultiVarModel):
             inds,
         )
 
-    def psd(self, params, omega, b: int = 0, sigma_n2: float = 0.0, *, component="total"):
-        gp, _ = self._build_gp(self._psd_component_params(params, component=component))
+    def psd(self, params, omega, b: int = 0, sigma_n2: float = 0.0):
+        gp, _ = self._build_gp(params)
         return qs_psd(kernel=gp.kernel, omega=omega, b=b, sigma_n2=sigma_n2)
 
     @eqx.filter_jit
@@ -457,21 +363,14 @@ class ContiBLRRelativeFlux_SHO_Wrapper(ContiBLR_SHO_Wrapper):
     def observation_model(self, X: JAXArray) -> JAXArray:
         _t, b = X
         b = jnp.asarray(b, dtype=jnp.int32)
-        main_kernel, drift_kernel = self._component_kernels()
 
         amp_cont_all = jnp.asarray(
             self.params["amp_cont_relflux"]
             if "amp_cont_relflux" in self.params
             else self.params["amp_cont"]
         )
-        amp_drift_all = jnp.asarray(
-            self.params["amp_drift_relflux"]
-            if "amp_drift_relflux" in self.params
-            else self.params.get("amp_drift", jnp.zeros_like(amp_cont_all))
-        )
         lag_disk_all = jnp.asarray(self.params["lag_disk"])
         amp_cont = _safe_pos(amp_cont_all)[b]
-        amp_drift = jnp.maximum(amp_drift_all, 0.0)[b]
         amp_bc = jnp.maximum(
             jnp.asarray(
                 self.params["amp_bc_relflux"]
@@ -505,16 +404,11 @@ class ContiBLRRelativeFlux_SHO_Wrapper(ContiBLR_SHO_Wrapper):
             0.0,
         )[b]
 
-        h_cont = self._lagged_obs_from_component(main_kernel, b, lag_disk)
-        h_bc = self._lagged_obs_from_component(main_kernel, b, lag_disk + lag_bc)
-        h_blr = self._lagged_obs_from_component(main_kernel, b, lag_disk + lag_blr)
-        h_blr2 = self._lagged_obs_from_component(main_kernel, b, lag_disk + lag_blr2)
-        main_obs = amp_cont * h_cont + amp_bc * h_bc + amp_blr * h_blr + amp_blr2 * h_blr2
-        if drift_kernel is None:
-            return main_obs
-        h_drift = self._lagged_obs_from_component(drift_kernel, b, lag_disk)
-        drift_obs = amp_drift * h_drift
-        return jnp.concatenate((main_obs, drift_obs))
+        h_cont = self._lagged_obs(b, lag_disk)
+        h_bc = self._lagged_obs(b, lag_disk + lag_bc)
+        h_blr = self._lagged_obs(b, lag_disk + lag_blr)
+        h_blr2 = self._lagged_obs(b, lag_disk + lag_blr2)
+        return amp_cont * h_cont + amp_bc * h_bc + amp_blr * h_blr + amp_blr2 * h_blr2
 
 
 class ContiBLRFluxLinearized_SHO_Wrapper(ContiBLRRelativeFlux_SHO_Wrapper):
@@ -562,8 +456,8 @@ class ContiBLRRelativeFlux_SHO_Model(ContiBLR_SHO_Model):
             relative_flux_std_to_mag_std(mu_blr_rel, std_blr_rel),
         )
 
-    def psd(self, params, omega, b: int = 0, sigma_n2: float = 0.0, *, component="total"):
-        gp, _ = self._build_gp(self._psd_component_params(params, component=component))
+    def psd(self, params, omega, b: int = 0, sigma_n2: float = 0.0):
+        gp, _ = self._build_gp(params)
         relflux_psd = qs_psd(kernel=gp.kernel, omega=omega, b=b, sigma_n2=sigma_n2)
         scale = _mag_from_relflux_scale(relflux_psd.dtype)
         return relflux_psd * scale**2
@@ -739,12 +633,9 @@ def make_multiband_dho_blr_model(
         X,
         y,
         yerr,
-        base_kernel=qs.Sum(
-            OverdampedSHOBaseQS(
-                tau_fast=jnp.full(n_band, 10.0),
-                tau_slow=jnp.full(n_band, 100.0),
-            ),
-            SharedDRWBaseQS(tau=jnp.asarray(1000.0)),
+        base_kernel=OverdampedSHOBaseQS(
+            tau_fast=jnp.full(n_band, 10.0),
+            tau_slow=jnp.full(n_band, 100.0),
         ),
         nBand=n_band,
         multiband_kernel=ContiBLR_SHO_Wrapper,
@@ -807,12 +698,9 @@ def make_multiband_dho_blr_relative_flux_model(
         X,
         y,
         yerr,
-        base_kernel=qs.Sum(
-            OverdampedSHOBaseQS(
-                tau_fast=jnp.full(n_band, 10.0),
-                tau_slow=jnp.full(n_band, 100.0),
-            ),
-            SharedDRWBaseQS(tau=jnp.asarray(1000.0)),
+        base_kernel=OverdampedSHOBaseQS(
+            tau_fast=jnp.full(n_band, 10.0),
+            tau_slow=jnp.full(n_band, 100.0),
         ),
         nBand=n_band,
         multiband_kernel=ContiBLRRelativeFlux_SHO_Wrapper,
@@ -858,7 +746,6 @@ __all__ = [
     "ContiBLRFluxLinearized_SHO_Wrapper",
     "ContiBLR_SHO_Wrapper",
     "OverdampedSHOBaseQS",
-    "SharedDRWBaseQS",
     "mag_residual_to_relative_flux",
     "magerr_residual_to_relative_fluxerr",
     "make_linear_mean_func",

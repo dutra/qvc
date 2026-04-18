@@ -198,7 +198,7 @@ def test_build_explicit_model_params_relflux_keeps_igm_out_of_continuum_amplitud
     assert np.allclose(np.asarray(explicit["igm_transmission_band"]), np.asarray(transmission))
 
 
-def test_flux_line_ratio_offsets_ignore_static_igm_transmission():
+def test_flux_line_ratio_offsets_include_static_igm_transmission():
     lam_rf = jnp.array([1500.0, 2000.0, 2500.0])
     lambda_center_rf = compute_lambda_center_rf(lam_rf)
 
@@ -215,8 +215,14 @@ def test_flux_line_ratio_offsets_ignore_static_igm_transmission():
         log_igm_transmission_band=jnp.log(jnp.array([0.25, 0.5, 0.9], dtype=float)),
     )
 
-    assert np.allclose(np.asarray(absorbed["blr_band"]), np.asarray(baseline["blr_band"]))
-    assert np.isclose(float(absorbed["bc_ref"]), float(baseline["bc_ref"]))
+    expected_blr = np.asarray(baseline["blr_band"]) - np.log(np.array([0.25, 0.5, 0.9], dtype=float))
+    bc_weight = np.maximum(np.asarray(balmer_continuum_weight(lam_rf), dtype=float), 1e-6)
+    expected_bc_ref = np.sum(
+        bc_weight * (expected_blr + np.log(np.maximum(np.asarray(balmer_continuum_weight(lam_rf), dtype=float), 1e-12)))
+    ) / np.sum(bc_weight)
+
+    assert np.allclose(np.asarray(absorbed["blr_band"]), expected_blr)
+    assert np.isclose(float(absorbed["bc_ref"]), expected_bc_ref)
 
 
 def test_compute_igm_transmission_rest_wave_matches_observed_wave_conversion():
@@ -307,11 +313,11 @@ def test_corner_plot_labels_keep_only_curated_main_parameters():
     assert set(labels_for_corner).issubset(set(all_labels))
 
 
-def test_trace_plot_labels_include_fitted_survey_offsets_and_drift_params():
+def test_trace_plot_labels_include_fitted_survey_and_slope_offsets_only():
     samples_flat = {
         "eta_sigma": np.array([0.1, 0.2]),
-        "dlog_amp_drift": np.array([-2.0, -1.8], dtype=float),
-        "log_tau_drift": np.array([6.0, 6.2], dtype=float),
+        "linear_trend_band_offset_g": np.array([0.01, 0.015], dtype=float),
+        "linear_trend_band_offset_r": np.zeros(2, dtype=float),
         "survey_delta_mag_g_sdss": np.zeros(2, dtype=float),
         "survey_delta_mag_g_ztf": np.array([0.01, 0.02], dtype=float),
         "survey_delta_mag_r_ps1": np.array([-0.01, -0.005], dtype=float),
@@ -320,8 +326,8 @@ def test_trace_plot_labels_include_fitted_survey_offsets_and_drift_params():
     all_labels, labels_for_trace = _trace_plot_labels(samples_flat)
 
     assert "eta_sigma" in labels_for_trace
-    assert "dlog_amp_drift" in labels_for_trace
-    assert "log_tau_drift" in labels_for_trace
+    assert "linear_trend_band_offset_g" in labels_for_trace
+    assert "linear_trend_band_offset_r" not in labels_for_trace
     assert "survey_delta_mag_g_ztf" in labels_for_trace
     assert "survey_delta_mag_r_ps1" in labels_for_trace
     assert "survey_delta_mag_g_sdss" not in labels_for_trace
@@ -634,8 +640,7 @@ def test_compute_parameter_kls_returns_expected_keys():
         "log_sigma_center0": rng.normal(np.log(0.2), 0.2, size=n),
         "log_tau_slow_center0": rng.normal(np.log(300.0), 0.3, size=n),
         "log_tau_fast_center0": rng.normal(np.log(30.0), 0.2, size=n),
-        "dlog_amp_drift": rng.normal(-2.0, 0.3, size=n),
-        "delta_log_tau_drift": rng.normal(np.log(10.0), 0.25, size=n),
+        "linear_trend": rng.normal(0.0, 0.05, size=n),
         "lag0": np.abs(rng.normal(5.0, 1.0, size=n)),
         "lag_beta": np.abs(rng.normal(4.0 / 3.0, 0.1, size=n)),
         "mean_g": rng.normal(0.0, 0.05, size=n),
@@ -672,8 +677,6 @@ def test_compute_parameter_kls_returns_expected_keys():
         "log_sigma_center0_kl",
         "log_tau_slow_center0_kl",
         "log_tau_fast_center0_kl",
-        "dlog_amp_drift_kl",
-        "delta_log_tau_drift_kl",
         "lag0_kl",
         "lag_beta_kl",
         "mean_g_kl",
@@ -692,7 +695,7 @@ def test_compute_parameter_kls_returns_expected_keys():
     assert all(np.isfinite(kls[key]) for key in expected_keys)
 
 
-def test_compute_parameter_kls_includes_drift_terms():
+def test_compute_parameter_kls_includes_band_slope_offset_terms():
     rng = np.random.default_rng(456)
     bands = ["g", "r"]
     n = 64
@@ -702,8 +705,9 @@ def test_compute_parameter_kls_includes_drift_terms():
         "log_sigma_center0": rng.normal(np.log(0.2), 0.2, size=n),
         "log_tau_slow_center0": rng.normal(np.log(300.0), 0.3, size=n),
         "log_tau_fast_center0": rng.normal(np.log(30.0), 0.2, size=n),
-        "dlog_amp_drift": rng.normal(-2.0, 0.3, size=n),
-        "delta_log_tau_drift": rng.normal(np.log(10.0), 0.25, size=n),
+        "linear_trend": rng.normal(0.0, 0.05, size=n),
+        "linear_trend_band_offset_g": rng.normal(0.005, 0.01, size=n),
+        "linear_trend_band_offset_r": rng.normal(-0.005, 0.01, size=n),
         "lag0": np.abs(rng.normal(5.0, 1.0, size=n)),
         "lag_beta": np.abs(rng.normal(4.0 / 3.0, 0.1, size=n)),
         "mean_g": rng.normal(0.0, 0.05, size=n),
@@ -728,10 +732,10 @@ def test_compute_parameter_kls_includes_drift_terms():
         n_blr_terms=1,
     )
 
-    assert "dlog_amp_drift_kl" in kls
-    assert "delta_log_tau_drift_kl" in kls
-    assert np.isfinite(kls["dlog_amp_drift_kl"])
-    assert np.isfinite(kls["delta_log_tau_drift_kl"])
+    assert "linear_trend_band_offset_g_kl" in kls
+    assert "linear_trend_band_offset_r_kl" in kls
+    assert np.isfinite(kls["linear_trend_band_offset_g_kl"])
+    assert np.isfinite(kls["linear_trend_band_offset_r_kl"])
 
 
 def test_compute_parameter_kls_uses_relflux_sigma_center0_when_requested():
@@ -744,8 +748,7 @@ def test_compute_parameter_kls_uses_relflux_sigma_center0_when_requested():
         "log_sigma_center0_relflux": rng.normal(np.log(0.15), 0.15, size=n),
         "log_tau_slow_center0": rng.normal(np.log(300.0), 0.3, size=n),
         "log_tau_fast_center0": rng.normal(np.log(30.0), 0.2, size=n),
-        "dlog_amp_drift": rng.normal(-2.0, 0.3, size=n),
-        "delta_log_tau_drift": rng.normal(np.log(10.0), 0.25, size=n),
+        "linear_trend": rng.normal(0.0, 0.05, size=n),
         "lag0": np.abs(rng.normal(5.0, 1.0, size=n)),
         "lag_beta": np.abs(rng.normal(4.0 / 3.0, 0.1, size=n)),
         "mean_g": rng.normal(0.0, 0.05, size=n),

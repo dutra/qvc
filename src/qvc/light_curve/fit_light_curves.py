@@ -106,11 +106,6 @@ LOG_SF_INF_TO_RMS = 0.5 * np.log10(2.0)
 RELFLUX_TO_MAG_SCALE = float(2.5 / np.log(10.0))
 LOG_RELFLUX_TO_MAG_SCALE = float(np.log(RELFLUX_TO_MAG_SCALE))
 LINEAR_TREND_RF_SIGMA_MAG_PER_DAY = 1e-4
-DRIFT_LOG_TAU_RATIO_PRIOR_MEAN = float(np.log(20.0))
-DRIFT_LOG_TAU_RATIO_PRIOR_SIGMA = 0.7
-DRIFT_DLOG_AMP_PRIOR_MEAN = -2.0
-DRIFT_DLOG_AMP_PRIOR_SIGMA = 1.0
-DISABLED_DRIFT_DLOG_AMP = -20.0
 FLUXMIX_CONT_SCALE_PRIOR_SIGMA = 1.0
 FLUXMIX_BASIS_GRID_MIN_POINTS = 512
 FLUXMIX_BASIS_GRID_MAX_POINTS = 2048
@@ -2281,38 +2276,6 @@ def linear_trend_band_offset_prior(B, *, relflux=False):
     return dist.Normal(0.0, base_scale * jnp.sqrt((B - 1) / B))
 
 
-def dlog_amp_drift_prior():
-    return dist.Normal(DRIFT_DLOG_AMP_PRIOR_MEAN, DRIFT_DLOG_AMP_PRIOR_SIGMA)
-
-
-def delta_log_tau_drift_prior():
-    return dist.TruncatedNormal(
-        DRIFT_LOG_TAU_RATIO_PRIOR_MEAN,
-        DRIFT_LOG_TAU_RATIO_PRIOR_SIGMA,
-        low=0.0,
-    )
-
-
-def sample_drift_latent_params(*, disable_drift=False):
-    if disable_drift:
-        dlog_amp_drift = numpyro.deterministic(
-            "dlog_amp_drift",
-            jnp.asarray(DISABLED_DRIFT_DLOG_AMP, dtype=float),
-        )
-        delta_log_tau_drift = numpyro.deterministic(
-            "delta_log_tau_drift",
-            jnp.asarray(DRIFT_LOG_TAU_RATIO_PRIOR_MEAN, dtype=float),
-        )
-        return dlog_amp_drift, delta_log_tau_drift
-
-    dlog_amp_drift = numpyro.sample("dlog_amp_drift", dlog_amp_drift_prior())
-    delta_log_tau_drift = numpyro.sample(
-        "delta_log_tau_drift",
-        delta_log_tau_drift_prior(),
-    )
-    return dlog_amp_drift, delta_log_tau_drift
-
-
 def lag0_prior():
     return dist.TruncatedNormal(5.0, 5.0, low=0.0, high=LAG0_HIGH)
 
@@ -2434,15 +2397,15 @@ def compute_flux_line_ratio_offsets(
     eta_sigma,
     log_igm_transmission_band=None,
 ):
-    """Offsets mapping sampled line/continuum log-ratios back to legacy amplitude deltas.
-
-    ``log_igm_transmission_band`` is accepted for call-site compatibility but is
-    intentionally ignored: fixed IGM absorption cancels in residual amplitudes.
-    """
+    """Offsets mapping sampled line/continuum log-ratios back to legacy amplitude deltas."""
 
     lam_rf = jnp.asarray(lam_rf, dtype=float)
     lambda_center_rf = jnp.asarray(lambda_center_rf, dtype=lam_rf.dtype)
     eta_sigma = jnp.asarray(eta_sigma, dtype=lam_rf.dtype)
+    if log_igm_transmission_band is None:
+        log_igm_transmission_band = jnp.zeros_like(lam_rf, dtype=lam_rf.dtype)
+    log_igm_transmission_band = jnp.asarray(log_igm_transmission_band, dtype=lam_rf.dtype)
+    log_igm_transmission_band = jnp.broadcast_to(log_igm_transmission_band, lam_rf.shape)
 
     lambda_uv = jnp.array(2500.0, dtype=lam_rf.dtype)
     sigma_shift_to_uv = jnp.log(10.0) * log_single_pl(lambda_uv, lambda_center_rf, eta_sigma)
@@ -2451,7 +2414,7 @@ def compute_flux_line_ratio_offsets(
         _expand_last(lambda_center_rf),
         _expand_last(eta_sigma),
     )
-    log_ratio_offset_blr = _expand_last(sigma_shift_to_uv) - sigma_shift_to_band
+    log_ratio_offset_blr = _expand_last(sigma_shift_to_uv) - sigma_shift_to_band - log_igm_transmission_band
 
     bc_weight = balmer_continuum_weight(lam_rf)
     log_ratio_offset_bc_band = log_ratio_offset_blr + jnp.log(jnp.maximum(bc_weight, 1e-12))
@@ -2615,7 +2578,6 @@ def compute_parameter_kls(
     log_jitter_mean,
     model_variant="mag_linear",
     disable_linear_trend=False,
-    disable_drift=False,
     disable_lag_blr=False,
     disable_lag_bc=False,
     drop_band_lyman_alpha=False,
@@ -2624,7 +2586,6 @@ def compute_parameter_kls(
 ):
     """Return approximate KL(q||p) for sampled light-curve parameters."""
 
-    disable_drift = bool(disable_drift or disable_linear_trend)
     kls = {}
     eta_sigma = np.asarray(flat_samples["eta_sigma"])
     eta_tau = np.asarray(flat_samples["eta_tau"])
@@ -2635,6 +2596,15 @@ def compute_parameter_kls(
     )
     sigma_prior_fn = (
         log_sigma_center0_relflux_prior if model_variant == "mag_flux_linearized" else log_sigma_center0_prior
+    )
+    linear_trend_prior_fn = (
+        linear_trend_prior_relflux(t_ref=t_ref, z=z)
+        if model_variant == "mag_flux_linearized"
+        else linear_trend_prior(t_ref=t_ref, z=z)
+    )
+    linear_trend_band_offset_prior_fn = linear_trend_band_offset_prior(
+        len(bands),
+        relflux=(model_variant == "mag_flux_linearized"),
     )
     mean_prior_fn = mean_prior_relflux if model_variant == "mag_flux_linearized" else mean_prior
     log_jitter_mean_arr = np.asarray(log_jitter_mean, dtype=float)
@@ -2688,16 +2658,10 @@ def compute_parameter_kls(
             flat_samples["log_tau_slow_center0"],
         )
 
-    if not disable_drift and "dlog_amp_drift" in flat_samples:
-        kls["dlog_amp_drift_kl"] = kl_from_samples(
-            flat_samples["dlog_amp_drift"],
-            lambda x: _dist_log_prob_array(dlog_amp_drift_prior(), x),
-        )
-
-    if not disable_drift and "delta_log_tau_drift" in flat_samples:
-        kls["delta_log_tau_drift_kl"] = kl_from_samples(
-            flat_samples["delta_log_tau_drift"],
-            lambda x: _dist_log_prob_array(delta_log_tau_drift_prior(), x),
+    if not disable_linear_trend and "linear_trend" in flat_samples:
+        kls["linear_trend_kl"] = kl_from_samples(
+            flat_samples["linear_trend"],
+            lambda x: _dist_log_prob_array(linear_trend_prior_fn, x),
         )
 
     if "lag0" in flat_samples:
@@ -2724,6 +2688,14 @@ def compute_parameter_kls(
             )
 
     for i, band in enumerate(bands):
+        if not disable_linear_trend:
+            band_offset_key = f"linear_trend_band_offset_{band}"
+            if band_offset_key in flat_samples:
+                kls[f"{band_offset_key}_kl"] = kl_from_samples(
+                    flat_samples[band_offset_key],
+                    lambda x: _dist_log_prob_array(linear_trend_band_offset_prior_fn, x),
+                )
+
         mean_key = f"mean_{band}"
         if mean_key in flat_samples:
             kls[f"{mean_key}_kl"] = kl_from_samples(
@@ -3023,9 +2995,6 @@ def build_explicit_model_params(raw_params, lam_rf, *, lam_lya_rf=None):
 
     eta_sigma = jnp.asarray(raw_params["eta_sigma"])
     eta_tau = jnp.asarray(raw_params["eta_tau"])
-    dlog_amp_drift = jnp.asarray(
-        raw_params.get("dlog_amp_drift", DISABLED_DRIFT_DLOG_AMP)
-    )
     dlog_amp_blr = jnp.asarray(raw_params["dlog_amp_blr"])
     dlog_amp_blr2 = jnp.asarray(
         raw_params.get(
@@ -3071,20 +3040,8 @@ def build_explicit_model_params(raw_params, lam_rf, *, lam_lya_rf=None):
         log_tau_fast_uv = jnp.asarray(raw_params["log_tau_fast_uv"])
         log_tau_fast_center0 = log_tau_fast_uv - tau_shift_to_uv
 
-    if "log_tau_drift" in raw_params:
-        log_tau_drift = jnp.asarray(raw_params["log_tau_drift"])
-        delta_log_tau_drift = jnp.asarray(
-            raw_params.get("delta_log_tau_drift", log_tau_drift - log_tau_uv)
-        )
-    else:
-        delta_log_tau_drift = jnp.asarray(
-            raw_params.get("delta_log_tau_drift", DRIFT_LOG_TAU_RATIO_PRIOR_MEAN)
-        )
-        log_tau_drift = log_tau_uv + delta_log_tau_drift
-
     log_sigma_uv_exp = _expand_last(log_sigma_uv)
     log_sigma_center0_exp = _expand_last(log_sigma_center0)
-    dlog_amp_drift_exp = _expand_last(dlog_amp_drift)
     eta_sigma_exp = _expand_last(eta_sigma)
     eta_tau_exp = _expand_last(eta_tau)
     lag0_exp = _expand_last(lag0)
@@ -3102,7 +3059,6 @@ def build_explicit_model_params(raw_params, lam_rf, *, lam_lya_rf=None):
 
     # Static multiplicative IGM absorption shifts the band mean, not mag residual amplitudes.
     amp_cont = jnp.exp(log_sigma_band)
-    amp_drift = jnp.exp(dlog_amp_drift_exp) * amp_cont
     amp_blr = jnp.exp(log_sigma_uv_exp + dlog_amp_blr)
     amp_blr2 = jnp.exp(log_sigma_uv_exp + dlog_amp_blr2)
     lag_disk = lag0_exp * (lam_rf / lambda_center_rf_exp) ** lag_beta_exp
@@ -3126,21 +3082,13 @@ def build_explicit_model_params(raw_params, lam_rf, *, lam_lya_rf=None):
     )
     log_tau_fast_band = log_tau_fast_center0_exp + log_tau_scale
     log_tau_slow_band = log_tau_slow_center0_exp + log_tau_scale
-    log_tau_drift_param = _expand_last(log_tau_drift)
-    if jnp.ndim(log_tau_drift_param) == 0:
-        log_tau_drift_param = jnp.reshape(log_tau_drift_param, (1,))
-    log_kernel_param = jnp.concatenate(
-        [log_tau_fast_band, log_tau_slow_band, log_tau_drift_param],
-        axis=-1,
-    )
+    log_kernel_param = jnp.concatenate([log_tau_fast_band, log_tau_slow_band], axis=-1)
 
     explicit = dict(raw_params)
     explicit["lambda_center_rf"] = lambda_center_rf
     explicit["log_sigma_center0"] = log_sigma_center0
     explicit["log_tau_slow_center0"] = log_tau_slow_center0
     explicit["log_tau_fast_center0"] = log_tau_fast_center0
-    explicit["delta_log_tau_drift"] = delta_log_tau_drift
-    explicit["log_tau_drift"] = log_tau_drift
     explicit["log_sigma_uv"] = log_sigma_uv
     explicit["log_tau_uv"] = log_tau_uv
     explicit["log_tau_fast_uv"] = log_tau_fast_uv
@@ -3148,8 +3096,6 @@ def build_explicit_model_params(raw_params, lam_rf, *, lam_lya_rf=None):
     explicit["igm_transmission_band"] = jnp.exp(log_igm_transmission_band)
     explicit["bc_weight"] = bc_weight
     explicit["amp_cont"] = amp_cont
-    explicit["dlog_amp_drift"] = dlog_amp_drift
-    explicit["amp_drift"] = amp_drift
     explicit["amp_bc"] = amp_bc
     explicit["amp_blr"] = amp_blr
     explicit["amp_blr2"] = amp_blr2
@@ -3159,7 +3105,6 @@ def build_explicit_model_params(raw_params, lam_rf, *, lam_lya_rf=None):
     explicit["lag_blr2"] = lag_blr2
     explicit["tau_fast_band"] = jnp.exp(log_tau_fast_band)
     explicit["tau_slow_band"] = jnp.exp(log_tau_slow_band)
-    explicit["tau_drift"] = jnp.exp(log_tau_drift)
     explicit["log_kernel_param"] = log_kernel_param
     if has_bc_lag:
         explicit["dlog_amp_bc"] = dlog_amp_bc
@@ -3181,9 +3126,6 @@ def build_explicit_model_params_relflux(raw_params, lam_rf, *, lam_lya_rf=None):
 
     eta_sigma = jnp.asarray(raw_params["eta_sigma"])
     eta_tau = jnp.asarray(raw_params["eta_tau"])
-    dlog_amp_drift = jnp.asarray(
-        raw_params.get("dlog_amp_drift", DISABLED_DRIFT_DLOG_AMP)
-    )
     dlog_amp_blr = jnp.asarray(raw_params["dlog_amp_blr"])
     dlog_amp_blr2 = jnp.asarray(
         raw_params.get(
@@ -3234,20 +3176,8 @@ def build_explicit_model_params_relflux(raw_params, lam_rf, *, lam_lya_rf=None):
         log_tau_fast_uv = jnp.asarray(raw_params["log_tau_fast_uv"])
         log_tau_fast_center0 = log_tau_fast_uv - tau_shift
 
-    if "log_tau_drift" in raw_params:
-        log_tau_drift = jnp.asarray(raw_params["log_tau_drift"])
-        delta_log_tau_drift = jnp.asarray(
-            raw_params.get("delta_log_tau_drift", log_tau_drift - log_tau_uv)
-        )
-    else:
-        delta_log_tau_drift = jnp.asarray(
-            raw_params.get("delta_log_tau_drift", DRIFT_LOG_TAU_RATIO_PRIOR_MEAN)
-        )
-        log_tau_drift = log_tau_uv + delta_log_tau_drift
-
     log_sigma_uv_relflux_exp = _expand_last(log_sigma_uv_relflux)
     log_sigma_center0_relflux_exp = _expand_last(log_sigma_center0_relflux)
-    dlog_amp_drift_exp = _expand_last(dlog_amp_drift)
     eta_sigma_exp = _expand_last(eta_sigma)
     eta_tau_exp = _expand_last(eta_tau)
     lag0_exp = _expand_last(lag0)
@@ -3265,7 +3195,6 @@ def build_explicit_model_params_relflux(raw_params, lam_rf, *, lam_lya_rf=None):
 
     # Residual relative flux is measured around the observed mean, so fixed IGM cancels.
     amp_cont_relflux = jnp.exp(log_sigma_band_relflux)
-    amp_drift_relflux = jnp.exp(dlog_amp_drift_exp) * amp_cont_relflux
     amp_blr_relflux = jnp.exp(log_sigma_uv_relflux_exp + dlog_amp_blr)
     amp_blr2_relflux = jnp.exp(log_sigma_uv_relflux_exp + dlog_amp_blr2)
     lag_disk = lag0_exp * (lam_rf / lambda_center_rf_exp) ** lag_beta_exp
@@ -3289,19 +3218,12 @@ def build_explicit_model_params_relflux(raw_params, lam_rf, *, lam_lya_rf=None):
     )
     log_tau_fast_band = log_tau_fast_center0_exp + log_tau_scale
     log_tau_slow_band = log_tau_slow_center0_exp + log_tau_scale
-    log_tau_drift_param = _expand_last(log_tau_drift)
-    if jnp.ndim(log_tau_drift_param) == 0:
-        log_tau_drift_param = jnp.reshape(log_tau_drift_param, (1,))
-    log_kernel_param = jnp.concatenate(
-        [log_tau_fast_band, log_tau_slow_band, log_tau_drift_param],
-        axis=-1,
-    )
+    log_kernel_param = jnp.concatenate([log_tau_fast_band, log_tau_slow_band], axis=-1)
 
     scale = jnp.asarray(RELFLUX_TO_MAG_SCALE, dtype=lam_rf.dtype)
     log_sigma_center0 = log_sigma_center0_relflux + LOG_RELFLUX_TO_MAG_SCALE
     log_sigma_uv = log_sigma_uv_relflux + LOG_RELFLUX_TO_MAG_SCALE
     amp_cont = scale * amp_cont_relflux
-    amp_drift = scale * amp_drift_relflux
     amp_bc = scale * amp_bc_relflux
     amp_blr = scale * amp_blr_relflux
     amp_blr2 = scale * amp_blr2_relflux
@@ -3313,8 +3235,6 @@ def build_explicit_model_params_relflux(raw_params, lam_rf, *, lam_lya_rf=None):
     explicit["log_sigma_center0"] = log_sigma_center0
     explicit["log_tau_slow_center0"] = log_tau_slow_center0
     explicit["log_tau_fast_center0"] = log_tau_fast_center0
-    explicit["delta_log_tau_drift"] = delta_log_tau_drift
-    explicit["log_tau_drift"] = log_tau_drift
     explicit["log_sigma_uv"] = log_sigma_uv
     explicit["log_tau_uv"] = log_tau_uv
     explicit["log_tau_fast_uv"] = log_tau_fast_uv
@@ -3322,13 +3242,10 @@ def build_explicit_model_params_relflux(raw_params, lam_rf, *, lam_lya_rf=None):
     explicit["igm_transmission_band"] = jnp.exp(log_igm_transmission_band)
     explicit["bc_weight"] = bc_weight
     explicit["amp_cont_relflux"] = amp_cont_relflux
-    explicit["amp_drift_relflux"] = amp_drift_relflux
     explicit["amp_bc_relflux"] = amp_bc_relflux
     explicit["amp_blr_relflux"] = amp_blr_relflux
     explicit["amp_blr2_relflux"] = amp_blr2_relflux
     explicit["amp_cont"] = amp_cont
-    explicit["dlog_amp_drift"] = dlog_amp_drift
-    explicit["amp_drift"] = amp_drift
     explicit["amp_bc"] = amp_bc
     explicit["amp_blr"] = amp_blr
     explicit["amp_blr2"] = amp_blr2
@@ -3338,7 +3255,6 @@ def build_explicit_model_params_relflux(raw_params, lam_rf, *, lam_lya_rf=None):
     explicit["lag_blr2"] = lag_blr2
     explicit["tau_fast_band"] = jnp.exp(log_tau_fast_band)
     explicit["tau_slow_band"] = jnp.exp(log_tau_slow_band)
-    explicit["tau_drift"] = jnp.exp(log_tau_drift)
     explicit["log_kernel_param"] = log_kernel_param
     if has_bc_lag:
         explicit["dlog_amp_bc"] = dlog_amp_bc
@@ -3390,7 +3306,6 @@ def add_model_prediction_params(samples, lam_rf, *, model_variant=None, lam_lya_
         for key in (
             "log_kernel_param",
             "amp_cont",
-            "amp_drift",
             "amp_bc",
             "amp_blr",
             "amp_blr2",
@@ -3400,11 +3315,9 @@ def add_model_prediction_params(samples, lam_rf, *, model_variant=None, lam_lya_
             "lag_blr2",
             "tau_fast_band",
             "tau_slow_band",
-            "tau_drift",
             "log_sigma_uv",
             "log_tau_uv",
             "log_tau_fast_uv",
-            "log_tau_drift",
             "log_igm_transmission_band",
             "igm_transmission_band",
             "lambda_center_rf",
@@ -3419,7 +3332,6 @@ def add_model_prediction_params(samples, lam_rf, *, model_variant=None, lam_lya_
         )
         out["log_kernel_param"] = np.asarray(explicit["log_kernel_param"])
         out["amp_cont"] = np.asarray(explicit["amp_cont"])
-        out["amp_drift"] = np.asarray(explicit["amp_drift"])
         out["amp_bc"] = np.asarray(explicit["amp_bc"])
         out["amp_blr"] = np.asarray(explicit["amp_blr"])
         out["amp_blr2"] = np.asarray(explicit["amp_blr2"])
@@ -3429,19 +3341,15 @@ def add_model_prediction_params(samples, lam_rf, *, model_variant=None, lam_lya_
         out["lag_blr2"] = np.asarray(explicit["lag_blr2"])
         out["tau_fast_band"] = np.asarray(explicit["tau_fast_band"])
         out["tau_slow_band"] = np.asarray(explicit["tau_slow_band"])
-        out["tau_drift"] = np.asarray(explicit["tau_drift"])
         out["log_sigma_center0"] = np.asarray(explicit["log_sigma_center0"])
         out["log_tau_slow_center0"] = np.asarray(explicit["log_tau_slow_center0"])
         out["log_tau_fast_center0"] = np.asarray(explicit["log_tau_fast_center0"])
         out["log_sigma_uv"] = np.asarray(explicit["log_sigma_uv"])
         out["log_tau_uv"] = np.asarray(explicit["log_tau_uv"])
         out["log_tau_fast_uv"] = np.asarray(explicit["log_tau_fast_uv"])
-        out["log_tau_drift"] = np.asarray(explicit["log_tau_drift"])
         out["log_igm_transmission_band"] = np.asarray(explicit["log_igm_transmission_band"])
         out["igm_transmission_band"] = np.asarray(explicit["igm_transmission_band"])
         out["log_cont_scale"] = np.asarray(explicit["log_cont_scale"])
-        out["dlog_amp_drift"] = np.asarray(explicit["dlog_amp_drift"])
-        out["delta_log_tau_drift"] = np.asarray(explicit["delta_log_tau_drift"])
         if "dlog_amp_bc" in explicit:
             out["dlog_amp_bc"] = np.asarray(explicit["dlog_amp_bc"])
         if "log_lag_ratio_bc_to_blr" in explicit:
@@ -3457,12 +3365,10 @@ def add_model_prediction_params(samples, lam_rf, *, model_variant=None, lam_lya_
         for key in (
             "log_kernel_param",
             "amp_cont_relflux",
-            "amp_drift_relflux",
             "amp_bc_relflux",
             "amp_blr_relflux",
             "amp_blr2_relflux",
             "amp_cont",
-            "amp_drift",
             "amp_bc",
             "amp_blr",
             "amp_blr2",
@@ -3472,12 +3378,10 @@ def add_model_prediction_params(samples, lam_rf, *, model_variant=None, lam_lya_
             "lag_blr2",
             "tau_fast_band",
             "tau_slow_band",
-            "tau_drift",
             "log_sigma_uv_relflux",
             "log_sigma_uv",
             "log_tau_uv",
             "log_tau_fast_uv",
-            "log_tau_drift",
             "log_igm_transmission_band",
             "igm_transmission_band",
             "lambda_center_rf",
@@ -3492,12 +3396,10 @@ def add_model_prediction_params(samples, lam_rf, *, model_variant=None, lam_lya_
         )
         out["log_kernel_param"] = np.asarray(explicit["log_kernel_param"])
         out["amp_cont_relflux"] = np.asarray(explicit["amp_cont_relflux"])
-        out["amp_drift_relflux"] = np.asarray(explicit["amp_drift_relflux"])
         out["amp_bc_relflux"] = np.asarray(explicit["amp_bc_relflux"])
         out["amp_blr_relflux"] = np.asarray(explicit["amp_blr_relflux"])
         out["amp_blr2_relflux"] = np.asarray(explicit["amp_blr2_relflux"])
         out["amp_cont"] = np.asarray(explicit["amp_cont"])
-        out["amp_drift"] = np.asarray(explicit["amp_drift"])
         out["amp_bc"] = np.asarray(explicit["amp_bc"])
         out["amp_blr"] = np.asarray(explicit["amp_blr"])
         out["amp_blr2"] = np.asarray(explicit["amp_blr2"])
@@ -3507,7 +3409,6 @@ def add_model_prediction_params(samples, lam_rf, *, model_variant=None, lam_lya_
         out["lag_blr2"] = np.asarray(explicit["lag_blr2"])
         out["tau_fast_band"] = np.asarray(explicit["tau_fast_band"])
         out["tau_slow_band"] = np.asarray(explicit["tau_slow_band"])
-        out["tau_drift"] = np.asarray(explicit["tau_drift"])
         out["log_sigma_center0_relflux"] = np.asarray(explicit["log_sigma_center0_relflux"])
         out.setdefault("log_sigma_center0", np.asarray(explicit["log_sigma_center0_relflux"]))
         out["log_sigma_center0_mag_equiv"] = np.asarray(explicit["log_sigma_center0"])
@@ -3517,11 +3418,8 @@ def add_model_prediction_params(samples, lam_rf, *, model_variant=None, lam_lya_
         out["log_sigma_uv"] = np.asarray(explicit["log_sigma_uv"])
         out["log_tau_uv"] = np.asarray(explicit["log_tau_uv"])
         out["log_tau_fast_uv"] = np.asarray(explicit["log_tau_fast_uv"])
-        out["log_tau_drift"] = np.asarray(explicit["log_tau_drift"])
         out["log_igm_transmission_band"] = np.asarray(explicit["log_igm_transmission_band"])
         out["igm_transmission_band"] = np.asarray(explicit["igm_transmission_band"])
-        out["dlog_amp_drift"] = np.asarray(explicit["dlog_amp_drift"])
-        out["delta_log_tau_drift"] = np.asarray(explicit["delta_log_tau_drift"])
         if "dlog_amp_bc" in explicit:
             out["dlog_amp_bc"] = np.asarray(explicit["dlog_amp_bc"])
         if "log_lag_ratio_bc_to_blr" in explicit:
@@ -3538,7 +3436,6 @@ def add_model_prediction_params(samples, lam_rf, *, model_variant=None, lam_lya_
         for key in (
             "log_kernel_param",
             "amp_cont",
-            "amp_drift",
             "amp_bc",
             "amp_blr",
             "amp_blr2",
@@ -3548,11 +3445,9 @@ def add_model_prediction_params(samples, lam_rf, *, model_variant=None, lam_lya_
             "lag_blr2",
             "tau_fast_band",
             "tau_slow_band",
-            "tau_drift",
             "log_sigma_uv",
             "log_tau_uv",
             "log_tau_fast_uv",
-            "log_tau_drift",
             "log_igm_transmission_band",
             "igm_transmission_band",
             "lambda_center_rf",
@@ -3567,7 +3462,6 @@ def add_model_prediction_params(samples, lam_rf, *, model_variant=None, lam_lya_
     )
     out["log_kernel_param"] = np.asarray(explicit["log_kernel_param"])
     out["amp_cont"] = np.asarray(explicit["amp_cont"])
-    out["amp_drift"] = np.asarray(explicit["amp_drift"])
     out["amp_bc"] = np.asarray(explicit["amp_bc"])
     out["amp_blr"] = np.asarray(explicit["amp_blr"])
     out["amp_blr2"] = np.asarray(explicit["amp_blr2"])
@@ -3577,18 +3471,14 @@ def add_model_prediction_params(samples, lam_rf, *, model_variant=None, lam_lya_
     out["lag_blr2"] = np.asarray(explicit["lag_blr2"])
     out["tau_fast_band"] = np.asarray(explicit["tau_fast_band"])
     out["tau_slow_band"] = np.asarray(explicit["tau_slow_band"])
-    out["tau_drift"] = np.asarray(explicit["tau_drift"])
     out["log_sigma_center0"] = np.asarray(explicit["log_sigma_center0"])
     out["log_tau_slow_center0"] = np.asarray(explicit["log_tau_slow_center0"])
     out["log_tau_fast_center0"] = np.asarray(explicit["log_tau_fast_center0"])
     out["log_sigma_uv"] = np.asarray(explicit["log_sigma_uv"])
     out["log_tau_uv"] = np.asarray(explicit["log_tau_uv"])
     out["log_tau_fast_uv"] = np.asarray(explicit["log_tau_fast_uv"])
-    out["log_tau_drift"] = np.asarray(explicit["log_tau_drift"])
     out["log_igm_transmission_band"] = np.asarray(explicit["log_igm_transmission_band"])
     out["igm_transmission_band"] = np.asarray(explicit["igm_transmission_band"])
-    out["dlog_amp_drift"] = np.asarray(explicit["dlog_amp_drift"])
-    out["delta_log_tau_drift"] = np.asarray(explicit["delta_log_tau_drift"])
     if "dlog_amp_bc" in explicit:
         out["dlog_amp_bc"] = np.asarray(explicit["dlog_amp_bc"])
     if "log_lag_ratio_bc_to_blr" in explicit:
@@ -3608,7 +3498,6 @@ def build_single_object_model(
     *,
     lam_lya_rf=None,
     disable_linear_trend=False,
-    disable_drift=False,
     disable_lag_blr=False,
     disable_lag_bc=False,
     drop_band_lyman_alpha=False,
@@ -3637,7 +3526,6 @@ def build_single_object_model(
         obj_dict, B
     )
     log_jitter_mean_grid = _coerce_log_jitter_mean_grid(log_jitter_mean, B)
-    disable_drift = bool(disable_drift or disable_linear_trend)
 
     def model():
         eta_sigma = numpyro.sample("eta_sigma", eta_sigma_prior())
@@ -3668,8 +3556,15 @@ def build_single_object_model(
                 lambda_center_rf,
             ),
         )
-        dlog_amp_drift, delta_log_tau_drift = sample_drift_latent_params(
-            disable_drift=disable_drift,
+        (
+            linear_trend,
+            linear_trend_band_offset,
+            _linear_trend_band,
+        ) = sample_linear_trend_with_band_offsets(
+            B=B,
+            disable_linear_trend=disable_linear_trend,
+            trend_prior_dist=linear_trend_prior(t_ref=t, z=z),
+            band_offset_raw_prior_dist=linear_trend_band_offset_raw_prior(),
         )
 
         lag0 = numpyro.sample("lag0", lag0_prior())
@@ -3713,8 +3608,8 @@ def build_single_object_model(
             log_tau_fast_center0=log_tau_fast_center0,
             log_sigma_center0=log_sigma_center0,
             lambda_center_rf=lambda_center_rf,
-            dlog_amp_drift=dlog_amp_drift,
-            delta_log_tau_drift=delta_log_tau_drift,
+            linear_trend=linear_trend,
+            linear_trend_band_offset=linear_trend_band_offset,
             mean=mean,
             dlog_amp_blr=dlog_amp_blr,
             dlog_amp_blr2=dlog_amp_blr2,
@@ -3742,15 +3637,12 @@ def build_single_object_model(
         numpyro.deterministic("log_sigma_uv", params["log_sigma_uv"])
         numpyro.deterministic("log_tau_uv", params["log_tau_uv"])
         numpyro.deterministic("log_tau_fast_uv", params["log_tau_fast_uv"])
-        numpyro.deterministic("log_tau_drift", params["log_tau_drift"])
         log_sigma_hat_uv = params["log_sigma_uv"] - 0.5 * params["log_tau_uv"]
         numpyro.deterministic("log_sigma_hat_uv", log_sigma_hat_uv)
         numpyro.deterministic("log_sigma_hat0", log_sigma_hat_uv)
         numpyro.deterministic("tau_fast", params["tau_fast_band"])
         numpyro.deterministic("tau_slow", params["tau_slow_band"])
-        numpyro.deterministic("tau_drift", params["tau_drift"])
         numpyro.deterministic("amp_cont", params["amp_cont"])
-        numpyro.deterministic("amp_drift", params["amp_drift"])
         numpyro.deterministic("amp_bc", params["amp_bc"])
         numpyro.deterministic("amp_blr", params["amp_blr"])
         numpyro.deterministic("amp_blr2", params["amp_blr2"])
@@ -3782,7 +3674,6 @@ def build_single_object_model_mag_flux_linearized(
     *,
     lam_lya_rf=None,
     disable_linear_trend=False,
-    disable_drift=False,
     disable_lag_blr=False,
     disable_lag_bc=False,
     drop_band_lyman_alpha=False,
@@ -3823,7 +3714,6 @@ def build_single_object_model_mag_flux_linearized(
         B,
     )
     _, survey_offset_active_mask = _get_object_active_noise_calibration_masks(obj_dict, B)
-    disable_drift = bool(disable_drift or disable_linear_trend)
 
     def model():
         eta_sigma = numpyro.sample("eta_sigma", eta_sigma_prior())
@@ -3851,8 +3741,15 @@ def build_single_object_model_mag_flux_linearized(
                 lambda_center_rf,
             ),
         )
-        dlog_amp_drift, delta_log_tau_drift = sample_drift_latent_params(
-            disable_drift=disable_drift,
+        (
+            linear_trend,
+            linear_trend_band_offset,
+            _linear_trend_band,
+        ) = sample_linear_trend_with_band_offsets(
+            B=B,
+            disable_linear_trend=disable_linear_trend,
+            trend_prior_dist=linear_trend_prior_relflux(t_ref=t, z=z),
+            band_offset_raw_prior_dist=linear_trend_band_offset_raw_prior_relflux(),
         )
 
         lag0 = numpyro.sample("lag0", lag0_prior())
@@ -3897,8 +3794,8 @@ def build_single_object_model_mag_flux_linearized(
             log_tau_fast_center0=log_tau_fast_center0,
             log_sigma_center0=log_sigma_center0,
             lambda_center_rf=lambda_center_rf,
-            dlog_amp_drift=dlog_amp_drift,
-            delta_log_tau_drift=delta_log_tau_drift,
+            linear_trend=linear_trend,
+            linear_trend_band_offset=linear_trend_band_offset,
             mean=mean,
             dlog_amp_blr=dlog_amp_blr,
             dlog_amp_blr2=dlog_amp_blr2,
@@ -3928,20 +3825,16 @@ def build_single_object_model_mag_flux_linearized(
         numpyro.deterministic("log_sigma_uv", params["log_sigma_uv"])
         numpyro.deterministic("log_tau_uv", params["log_tau_uv"])
         numpyro.deterministic("log_tau_fast_uv", params["log_tau_fast_uv"])
-        numpyro.deterministic("log_tau_drift", params["log_tau_drift"])
         log_sigma_hat_uv = params["log_sigma_uv"] - 0.5 * params["log_tau_uv"]
         numpyro.deterministic("log_sigma_hat_uv", log_sigma_hat_uv)
         numpyro.deterministic("log_sigma_hat0", log_sigma_hat_uv)
         numpyro.deterministic("tau_fast", params["tau_fast_band"])
         numpyro.deterministic("tau_slow", params["tau_slow_band"])
-        numpyro.deterministic("tau_drift", params["tau_drift"])
         numpyro.deterministic("amp_cont_relflux", params["amp_cont_relflux"])
-        numpyro.deterministic("amp_drift_relflux", params["amp_drift_relflux"])
         numpyro.deterministic("amp_bc_relflux", params["amp_bc_relflux"])
         numpyro.deterministic("amp_blr_relflux", params["amp_blr_relflux"])
         numpyro.deterministic("amp_blr2_relflux", params["amp_blr2_relflux"])
         numpyro.deterministic("amp_cont", params["amp_cont"])
-        numpyro.deterministic("amp_drift", params["amp_drift"])
         numpyro.deterministic("amp_bc", params["amp_bc"])
         numpyro.deterministic("amp_blr", params["amp_blr"])
         numpyro.deterministic("amp_blr2", params["amp_blr2"])
@@ -3975,7 +3868,6 @@ def build_single_object_model_continuum_only(
     *,
     lam_lya_rf=None,
     disable_linear_trend=False,
-    disable_drift=False,
     drop_band_lyman_alpha=False,
     tau_fast_truncated=False,
 ):
@@ -4000,7 +3892,6 @@ def build_single_object_model_continuum_only(
         obj_dict, B
     )
     log_jitter_mean_grid = _coerce_log_jitter_mean_grid(log_jitter_mean, B)
-    disable_drift = bool(disable_drift or disable_linear_trend)
 
     def model():
         eta_sigma = numpyro.sample("eta_sigma", eta_sigma_prior())
@@ -4028,8 +3919,15 @@ def build_single_object_model_continuum_only(
                 lambda_center_rf,
             ),
         )
-        dlog_amp_drift, delta_log_tau_drift = sample_drift_latent_params(
-            disable_drift=disable_drift,
+        (
+            linear_trend,
+            linear_trend_band_offset,
+            _linear_trend_band,
+        ) = sample_linear_trend_with_band_offsets(
+            B=B,
+            disable_linear_trend=disable_linear_trend,
+            trend_prior_dist=linear_trend_prior(t_ref=t, z=z),
+            band_offset_raw_prior_dist=linear_trend_band_offset_raw_prior(),
         )
 
         lag0 = numpyro.sample("lag0", lag0_prior())
@@ -4049,8 +3947,8 @@ def build_single_object_model_continuum_only(
             log_tau_fast_center0=log_tau_fast_center0,
             log_sigma_center0=log_sigma_center0,
             lambda_center_rf=lambda_center_rf,
-            dlog_amp_drift=dlog_amp_drift,
-            delta_log_tau_drift=delta_log_tau_drift,
+            linear_trend=linear_trend,
+            linear_trend_band_offset=linear_trend_band_offset,
             mean=mean,
             log_jitter=log_jitter,
             survey_delta_mag=survey_delta_mag,
@@ -4069,15 +3967,12 @@ def build_single_object_model_continuum_only(
         numpyro.deterministic("log_sigma_uv", params["log_sigma_uv"])
         numpyro.deterministic("log_tau_uv", params["log_tau_uv"])
         numpyro.deterministic("log_tau_fast_uv", params["log_tau_fast_uv"])
-        numpyro.deterministic("log_tau_drift", params["log_tau_drift"])
         log_sigma_hat_uv = params["log_sigma_uv"] - 0.5 * params["log_tau_uv"]
         numpyro.deterministic("log_sigma_hat_uv", log_sigma_hat_uv)
         numpyro.deterministic("log_sigma_hat0", log_sigma_hat_uv)
         numpyro.deterministic("tau_fast", params["tau_fast_band"])
         numpyro.deterministic("tau_slow", params["tau_slow_band"])
-        numpyro.deterministic("tau_drift", params["tau_drift"])
         numpyro.deterministic("amp_cont", params["amp_cont"])
-        numpyro.deterministic("amp_drift", params["amp_drift"])
         numpyro.deterministic("amp_bc", params["amp_bc"])
         numpyro.deterministic("amp_blr", params["amp_blr"])
         numpyro.deterministic("amp_blr2", params["amp_blr2"])
@@ -4298,21 +4193,17 @@ def build_single_object_model_mag_fluxmix_stage2(
 _RECOMPUTE_EXPLICIT_KEYS = {
     "log_kernel_param",
     "amp_cont",
-    "amp_drift",
     "amp_bc",
     "amp_blr",
     "amp_blr2",
-    "amp_drift_relflux",
     "lag_disk",
     "lag_bc",
     "lag_blr",
     "lag_blr2",
     "tau_fast_band",
     "tau_slow_band",
-    "tau_drift",
     "tau_fast",
     "tau_slow",
-    "log_tau_drift",
     "log_sigma_uv",
     "log_tau_uv",
     "log_tau_fast_uv",
@@ -4394,6 +4285,8 @@ def _fluxmix_stage1_raw_median_params(samples_flat, lam_rf):
     mean_default = np.zeros(B, dtype=float)
     jitter_default = np.full((B, len(LC_SURVEY_NAMES)), np.log(1e-3), dtype=float)
     survey_delta_default = np.zeros((B, len(LC_SURVEY_NAMES)), dtype=float)
+    linear_trend_band_offset_default = np.zeros(B, dtype=float)
+    linear_trend_default = 0.0
     if "stage1_basis_log_sigma_center0" in samples_flat:
         log_sigma_center0_stage1 = np.asarray(samples_flat["stage1_basis_log_sigma_center0"], dtype=float)
     else:
@@ -4421,20 +4314,23 @@ def _fluxmix_stage1_raw_median_params(samples_flat, lam_rf):
             dtype=float,
         ),
         lambda_center_rf=compute_lambda_center_rf(lam_rf),
-        dlog_amp_drift=jnp.asarray(
+        linear_trend=jnp.asarray(
             np.median(
                 np.asarray(
-                    samples_flat.get("dlog_amp_drift", np.array([DISABLED_DRIFT_DLOG_AMP], dtype=float)),
+                    samples_flat.get("linear_trend", linear_trend_default),
                     dtype=float,
                 ),
                 axis=0,
             ),
             dtype=float,
         ),
-        delta_log_tau_drift=jnp.asarray(
+        linear_trend_band_offset=jnp.asarray(
             np.median(
                 np.asarray(
-                    samples_flat.get("delta_log_tau_drift", np.array([DRIFT_LOG_TAU_RATIO_PRIOR_MEAN], dtype=float)),
+                    samples_flat.get(
+                        "linear_trend_band_offset",
+                        linear_trend_band_offset_default,
+                    ),
                     dtype=float,
                 ),
                 axis=0,
@@ -4525,16 +4421,12 @@ def _build_fluxmix_continuum_basis(obj_dict, lam_rf, stage1_raw_median, *, lam_l
 def _prediction_sample_subset(samples_flat, max_samples=64):
     relevant_keys = (
         "mean",
+        "linear_trend",
         "amp_cont",
-        "amp_drift",
         "amp_blr",
         "amp_bc",
         "lag_blr",
         "lag_bc",
-        "tau_drift",
-        "log_tau_drift",
-        "dlog_amp_drift",
-        "delta_log_tau_drift",
     )
     available = {
         key: np.asarray(samples_flat[key])
@@ -4659,7 +4551,6 @@ def run_two_stage_fluxmix_fast_inference(
     dense_mass,
     max_tree_depth,
     disable_linear_trend=False,
-    disable_drift=False,
     disable_lag_blr=False,
     disable_lag_bc=False,
     drop_band_lyman_alpha=False,
@@ -4675,8 +4566,6 @@ def run_two_stage_fluxmix_fast_inference(
         )
     if int(outer_iters) < 1:
         raise ValueError("outer_iters must be >= 1.")
-    disable_drift = bool(disable_drift or disable_linear_trend)
-
     stage1_fit_obj = dict(obj_dict)
     combined_flat = None
     combined_per_chain = None
@@ -4697,7 +4586,6 @@ def run_two_stage_fluxmix_fast_inference(
             log_jitter_mean=log_jitter_mean,
             lam_lya_rf=lam_lya_rf,
             disable_linear_trend=disable_linear_trend,
-            disable_drift=disable_drift,
             drop_band_lyman_alpha=drop_band_lyman_alpha,
             tau_fast_truncated=tau_fast_truncated,
         )
@@ -4855,16 +4743,7 @@ def main():
     parser.add_argument("--save_sample_file", dest="save_sample_file", action="store_true", help="Save per-object posterior samples to HDF5.")
     parser.add_argument("--no_save_sample_file", dest="save_sample_file", action="store_false", help="Do not save per-object posterior samples to HDF5.")
     parser.set_defaults(save_sample_file=True)
-    parser.add_argument(
-        "--disable_linear_trend",
-        action="store_true",
-        help="Deprecated alias for --disable_drift.",
-    )
-    parser.add_argument(
-        "--disable_drift",
-        action="store_true",
-        help="Disable the long-timescale nuisance drift component.",
-    )
+    parser.add_argument("--disable_linear_trend", action="store_true", help="Disable trend.")
     parser.add_argument("--rf_length_cut", type=int, default=-1, help="Rest-frame cut (days).")
     parser.add_argument("--exact_same_length", action="store_true", help="Exact same RF length cut.")
     parser.add_argument("--load_stone_lcs", action="store_true", default=False, help="Use Stone LCs.")
@@ -4918,9 +4797,6 @@ def main():
     )
     args = parser.parse_args()
     print("Args:", args)
-    disable_drift = bool(args.disable_drift or args.disable_linear_trend)
-    if args.disable_linear_trend:
-        logging.warning("--disable_linear_trend is deprecated; use --disable_drift.")
 
     if args.load_stone_lcs:
         objs = load_stone_lcs(filter_object_ids=args.filter_object_id)
@@ -5128,7 +5004,6 @@ def main():
                     log_jitter_mean=log_jitter_mean_fit,
                     lam_lya_rf=lam_lya_rf,
                     disable_linear_trend=args.disable_linear_trend,
-                    disable_drift=disable_drift,
                     disable_lag_blr=args.disable_lag_blr,
                     disable_lag_bc=args.disable_lag_bc,
                     drop_band_lyman_alpha=args.drop_band_lyman_alpha,
@@ -5161,7 +5036,6 @@ def main():
                         dense_mass=args.dense_mass,
                         max_tree_depth=args.max_tree_depth,
                         disable_linear_trend=args.disable_linear_trend,
-                        disable_drift=disable_drift,
                         disable_lag_blr=args.disable_lag_blr,
                         disable_lag_bc=args.disable_lag_bc,
                         drop_band_lyman_alpha=args.drop_band_lyman_alpha,
@@ -5358,7 +5232,6 @@ def main():
                 log_jitter_mean=np.asarray(log_jitter_mean_fit),
                 model_variant=args.model_variant,
                 disable_linear_trend=args.disable_linear_trend,
-                disable_drift=disable_drift,
                 disable_lag_blr=args.disable_lag_blr,
                 disable_lag_bc=args.disable_lag_bc,
                 drop_band_lyman_alpha=args.drop_band_lyman_alpha,
