@@ -6,6 +6,7 @@ usage() {
   cat <<'EOF'
 Usage:
   bash scripts/copy_paper_assets.sh \
+    --speed fast \
     --fiducial-dir plots/hubble/apr2a_apr1a_fast_paper \
     --restricted-dir plots/hubble/apr2a_apr1a_fast_paper_restricted \
     [--only hubble|spectra|light-curve|appendix] \
@@ -16,6 +17,8 @@ Description:
 
 Notes:
   - Run this from the repository root.
+  - --speed must match the hubble run tag used inside the source directories.
+  - Hubble paper assets are expected under completeness-tagged `_2d` run directories.
   - The manifest is hardcoded for the current paper draft.
   - --draft is accepted for logging only and is not parsed.
   - --only filters the copy to a single asset group.
@@ -70,6 +73,7 @@ copy_from_dir() {
 
 REPO_ROOT="$(pwd)"
 DEST_ROOT="$REPO_ROOT/plots/paper"
+SPEED=""
 FIDUCIAL_DIR=""
 RESTRICTED_DIR=""
 DRAFT_PATH=""
@@ -77,6 +81,10 @@ ONLY_GROUP=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --speed)
+      SPEED="${2:-}"
+      shift 2
+      ;;
     --fiducial-dir)
       FIDUCIAL_DIR="${2:-}"
       shift 2
@@ -105,11 +113,20 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if [[ -z "$FIDUCIAL_DIR" || -z "$RESTRICTED_DIR" ]]; then
-  echo "error: both --fiducial-dir and --restricted-dir are required" >&2
+if [[ -z "$SPEED" || -z "$FIDUCIAL_DIR" || -z "$RESTRICTED_DIR" ]]; then
+  echo "error: --speed, --fiducial-dir, and --restricted-dir are required" >&2
   usage >&2
   exit 1
 fi
+
+case "$SPEED" in
+  production|test|fast|dev)
+    ;;
+  *)
+    echo "error: --speed must be one of: production, test, fast, dev" >&2
+    exit 1
+    ;;
+esac
 
 if [[ -n "$ONLY_GROUP" ]]; then
   case "$ONLY_GROUP" in
@@ -152,26 +169,30 @@ mkdir -p "$DEST_ROOT"
 declare -a COPIED=()
 declare -a MISSING=()
 
+FIDUCIAL_RUN_DIR="Flatw0waCDM_joint_${SPEED}_all_z0p44_3p16_2d"
+FIDUCIAL_MODEL_COMPARE_DIR="model_compare_${SPEED}_all_z0p44_3p16_2d"
+RESTRICTED_MODEL_COMPARE_DIR="model_compare_${SPEED}_all_z1p00_3p16_2d"
+
 copy_hubble_assets() {
   copy_from_root "src/plots/appendix/N_vs_logZ_grid.pdf" "hubble" "N_vs_logZ_grid.pdf"
   copy_from_root "src/plots/appendix/N_vs_cosmo_corner_grid.pdf" "hubble" "N_vs_cosmo_corner_grid.pdf"
-  copy_from_dir "$FIDUCIAL_DIR" "Flatw0waCDM_joint_fast_all_z0p44_3p16/predicted_L2500_vs_fullcorr_band_debiased.pdf" "hubble" "predicted_L2500_vs_fullcorr_band_debiased.pdf"
-  copy_from_dir "$FIDUCIAL_DIR" "Flatw0waCDM_joint_fast_all_z0p44_3p16/redshift_histograms.pdf" "hubble" "redshift_histograms.pdf"
-  copy_from_dir "$FIDUCIAL_DIR" "Flatw0waCDM_joint_fast_all_z0p44_3p16/hubble_diagram_debiased.pdf" "hubble" "hubble_diagram_debiased.pdf"
-  copy_from_dir "$FIDUCIAL_DIR" "Flatw0waCDM_joint_fast_all_z0p44_3p16/hubble_diagram.pdf" "hubble" "hubble_diagram.pdf"
-  copy_from_dir "$FIDUCIAL_DIR" "Flatw0waCDM_joint_fast_all_z0p44_3p16/predicted_vs_actual_M2500_debias.pdf" "hubble" "predicted_vs_actual_M2500_debias.pdf"
-  copy_from_dir "$FIDUCIAL_DIR" "Flatw0waCDM_joint_fast_all_z0p44_3p16/alphaOX_residuals.pdf" "hubble" "alphaOx_residuals.pdf"
-  copy_from_dir "$FIDUCIAL_DIR" "Flatw0waCDM_joint_fast_all_z0p44_3p16/delta_alphaOX_residuals.pdf" "hubble" "dalphaOx_int_residuals.pdf"
-  copy_from_dir "$FIDUCIAL_DIR" "Flatw0waCDM_joint_fast_all_z0p44_3p16/completeness/completeness_map.pdf" "hubble" "completeness_map.pdf"
+  copy_from_dir "$FIDUCIAL_DIR" "$FIDUCIAL_RUN_DIR/predicted_L2500_vs_fullcorr_band_debiased.pdf" "hubble" "predicted_L2500_vs_fullcorr_band_debiased.pdf"
+  copy_from_dir "$FIDUCIAL_DIR" "$FIDUCIAL_RUN_DIR/redshift_histograms.pdf" "hubble" "redshift_histograms.pdf"
+  copy_from_dir "$FIDUCIAL_DIR" "$FIDUCIAL_RUN_DIR/hubble_diagram_debiased.pdf" "hubble" "hubble_diagram_debiased.pdf"
+  copy_from_dir "$FIDUCIAL_DIR" "$FIDUCIAL_RUN_DIR/hubble_diagram.pdf" "hubble" "hubble_diagram.pdf"
+  copy_from_dir "$FIDUCIAL_DIR" "$FIDUCIAL_RUN_DIR/predicted_vs_actual_M2500_debias.pdf" "hubble" "predicted_vs_actual_M2500_debias.pdf"
+  copy_from_dir "$FIDUCIAL_DIR" "$FIDUCIAL_RUN_DIR/alphaOX_residuals.pdf" "hubble" "alphaOx_residuals.pdf"
+  copy_from_dir "$FIDUCIAL_DIR" "$FIDUCIAL_RUN_DIR/delta_alphaOX_residuals.pdf" "hubble" "dalphaOx_int_residuals.pdf"
+  copy_from_dir "$FIDUCIAL_DIR" "$FIDUCIAL_RUN_DIR/completeness/completeness_map.pdf" "hubble" "completeness_map.pdf"
   copy_from_dir "$FIDUCIAL_DIR" "diagnostics/spectral_fraction_vs_redshift_cuts.pdf" "hubble" "spectral_fraction_vs_redshift_cuts.pdf"
-  copy_from_dir "$FIDUCIAL_DIR" "model_compare_fast_all_z0p44_3p16/cosmo_corner_Flatw0waCDM_alphabeta.pdf" "hubble" "cosmo_corner_Flatw0waCDM_alphabeta.pdf"
-  copy_from_dir "$FIDUCIAL_DIR" "model_compare_fast_all_z0p44_3p16/cosmo_corner_FlatwCDM_alphabeta.pdf" "hubble" "cosmo_corner_FlatwCDM_alphabeta.pdf"
-  copy_from_dir "$FIDUCIAL_DIR" "model_compare_fast_all_z0p44_3p16/cosmo_corner_FlatLambdaCDM_alphabeta.pdf" "hubble" "cosmo_corner_FlatLambdaCDM_alphabeta.pdf"
-  copy_from_dir "$FIDUCIAL_DIR" "model_compare_fast_all_z0p44_3p16/cosmo_corner_Flatw0waCDM_alphabeta.pdf" "hubble" "cosmo_corner_Flatw0waCDM_noalphabeta.pdf"
-  copy_from_dir "$FIDUCIAL_DIR" "model_compare_fast_all_z0p44_3p16/cosmo_corner_FlatwCDM_alphabeta.pdf" "hubble" "cosmo_corner_FlatwCDM_noalphabeta.pdf"
-  copy_from_dir "$FIDUCIAL_DIR" "model_compare_fast_all_z0p44_3p16/cosmo_corner_FlatLambdaCDM_alphabeta.pdf" "hubble" "cosmo_corner_FlatLambdaCDM_noalphabeta.pdf"
-  copy_from_dir "$FIDUCIAL_DIR" "model_compare_fast_all_z0p44_3p16/param_results_fiducial.tex" "hubble" "param_results_fiducial.tex"
-  copy_from_dir "$RESTRICTED_DIR" "model_compare_fast_all_z1p00_3p16/param_results_restricted.tex" "hubble" "param_results_restricted.tex"
+  copy_from_dir "$FIDUCIAL_DIR" "$FIDUCIAL_MODEL_COMPARE_DIR/cosmo_corner_Flatw0waCDM_alphabeta.pdf" "hubble" "cosmo_corner_Flatw0waCDM_alphabeta.pdf"
+  copy_from_dir "$FIDUCIAL_DIR" "$FIDUCIAL_MODEL_COMPARE_DIR/cosmo_corner_FlatwCDM_alphabeta.pdf" "hubble" "cosmo_corner_FlatwCDM_alphabeta.pdf"
+  copy_from_dir "$FIDUCIAL_DIR" "$FIDUCIAL_MODEL_COMPARE_DIR/cosmo_corner_FlatLambdaCDM_alphabeta.pdf" "hubble" "cosmo_corner_FlatLambdaCDM_alphabeta.pdf"
+  copy_from_dir "$FIDUCIAL_DIR" "$FIDUCIAL_MODEL_COMPARE_DIR/cosmo_corner_Flatw0waCDM_alphabeta.pdf" "hubble" "cosmo_corner_Flatw0waCDM_noalphabeta.pdf"
+  copy_from_dir "$FIDUCIAL_DIR" "$FIDUCIAL_MODEL_COMPARE_DIR/cosmo_corner_FlatwCDM_alphabeta.pdf" "hubble" "cosmo_corner_FlatwCDM_noalphabeta.pdf"
+  copy_from_dir "$FIDUCIAL_DIR" "$FIDUCIAL_MODEL_COMPARE_DIR/cosmo_corner_FlatLambdaCDM_alphabeta.pdf" "hubble" "cosmo_corner_FlatLambdaCDM_noalphabeta.pdf"
+  copy_from_dir "$FIDUCIAL_DIR" "$FIDUCIAL_MODEL_COMPARE_DIR/param_results_fiducial.tex" "hubble" "param_results_fiducial.tex"
+  copy_from_dir "$RESTRICTED_DIR" "$RESTRICTED_MODEL_COMPARE_DIR/param_results_restricted.tex" "hubble" "param_results_restricted.tex"
 }
 
 copy_spectra_assets() {
@@ -185,8 +206,8 @@ copy_light_curve_assets() {
 copy_appendix_assets() {
   copy_from_root "src/plots/appendix/N_vs_logZ_grid.pdf" "appendix" "N_vs_logZ_grid.pdf"
   copy_from_root "src/plots/appendix/N_vs_cosmo_corner_grid.pdf" "appendix" "N_vs_cosmo_corner_grid.pdf"
-  copy_from_dir "$FIDUCIAL_DIR" "Flatw0waCDM_joint_fast_all_z0p44_3p16/hubble_diagram.pdf" "appendix" "hubble_diagram.pdf"
-  copy_from_dir "$FIDUCIAL_DIR" "Flatw0waCDM_joint_fast_all_z0p44_3p16/completeness/completeness_map.pdf" "appendix" "completeness_map.pdf"
+  copy_from_dir "$FIDUCIAL_DIR" "$FIDUCIAL_RUN_DIR/hubble_diagram.pdf" "appendix" "hubble_diagram.pdf"
+  copy_from_dir "$FIDUCIAL_DIR" "$FIDUCIAL_RUN_DIR/completeness/completeness_map.pdf" "appendix" "completeness_map.pdf"
 }
 
 case "${ONLY_GROUP:-all}" in
@@ -217,6 +238,7 @@ if [[ ${#MISSING[@]} -gt 0 ]]; then
 fi
 
 printf 'Copied %d assets into %s\n' "${#COPIED[@]}" "$DEST_ROOT"
+printf 'Speed: %s\n' "$SPEED"
 if [[ -n "$DRAFT_PATH" ]]; then
   printf 'Draft reference: %s\n' "$DRAFT_PATH"
 fi

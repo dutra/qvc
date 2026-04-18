@@ -98,9 +98,78 @@ def test_load_agn_data_propagates_host_error_into_sigma_uv(monkeypatch, tmp_path
     valid_factor = np.full(len(df_in), np.nan, dtype=float)
     valid_factor[valid] = 1.0 / f_pl[valid]
     np.testing.assert_allclose(df["sigma_uv_hostcorr_factor"], valid_factor, equal_nan=True)
+    np.testing.assert_allclose(df["jitter_g"], 10**df_in["log_jitter_g"].to_numpy(dtype=float))
+    expected_legacy_jitter_total = np.sqrt(
+        (10**df_in["log_jitter_u"].to_numpy(dtype=float)) ** 2
+        + (10**df_in["log_jitter_g"].to_numpy(dtype=float)) ** 2
+        + (10**df_in["log_jitter_r"].to_numpy(dtype=float)) ** 2
+        + (10**df_in["log_jitter_i"].to_numpy(dtype=float)) ** 2
+    )
+    np.testing.assert_allclose(df["log_jitter_total"], np.log10(expected_legacy_jitter_total))
 
     obs_dict = {key: df[key].to_numpy(dtype=float) for key in hubble_model.agn_model_req_obs + hubble_model.agn_model_req_errs}
     obs_arr, err_arr, pivots = hubble_model.agn_model_pack_obs(obs_dict)
     assert obs_arr.shape[1] == len(df)
     assert err_arr.shape[1] == len(df)
     assert pivots.shape[0] == len(hubble_model.agn_model_req_obs)
+
+
+def test_load_agn_data_uses_survey_band_log_jitter_grid(monkeypatch, tmp_path):
+    df_in = _make_loader_input().iloc[:2].copy()
+    df_in["dropped_bands"] = ["", "r"]
+    for band in ("u", "g", "r", "i"):
+        df_in = df_in.drop(columns=[f"log_jitter_{band}"])
+
+    jitter_values = {
+        "u": {"sdss": [0.010, 0.020], "ps1": [0.011, 0.021], "ztf": [0.012, 0.022]},
+        "g": {"sdss": [0.020, 0.030], "ps1": [0.021, 0.031], "ztf": [0.022, 0.032]},
+        "r": {"sdss": [0.030, 0.040], "ps1": [0.031, 0.041], "ztf": [0.032, 0.042]},
+        "i": {"sdss": [0.040, 0.050], "ps1": [0.041, 0.051], "ztf": [0.042, 0.052]},
+    }
+    for band, by_survey in jitter_values.items():
+        for survey, values in by_survey.items():
+            df_in[f"log_jitter_{band}_{survey}"] = np.log(np.asarray(values, dtype=float))
+
+    input_path = tmp_path / "fake_input.h5"
+    input_path.touch()
+    monkeypatch.setattr(hubble_utils, "read_quasars_from_hdf5_flat", lambda *args, **kwargs: df_in.copy())
+    monkeypatch.setattr(hubble_utils, "populate_xray", lambda df: df)
+
+    df, df_all = hubble_utils.load_agn_data(
+        input_path,
+        spectra_fit_csv=None,
+        lc_info_csv=None,
+        only_load=True,
+        apply_cut=False,
+        plot_path=str(tmp_path / "figures"),
+    )
+    assert df_all.equals(df)
+
+    row0 = df.iloc[0]
+    row1 = df.iloc[1]
+    assert np.isclose(row0["jitter_g_sdss"], jitter_values["g"]["sdss"][0])
+    assert np.isclose(row0["jitter_g_ps1"], jitter_values["g"]["ps1"][0])
+    expected_g0 = np.sqrt(sum(jitter_values["g"][survey][0] ** 2 for survey in ("sdss", "ps1", "ztf")))
+    assert np.isclose(row0["jitter_g"], expected_g0)
+
+    assert row1["jitter_r_sdss"] == 0.0
+    assert row1["jitter_r_ps1"] == 0.0
+    assert row1["jitter_r_ztf"] == 0.0
+    assert row1["jitter_r"] == 0.0
+
+    expected_total0 = np.sqrt(
+        sum(
+            jitter_values[band][survey][0] ** 2
+            for band in ("u", "g", "r", "i")
+            for survey in ("sdss", "ps1", "ztf")
+        )
+    )
+    expected_total1 = np.sqrt(
+        sum(
+            jitter_values[band][survey][1] ** 2
+            for band in ("u", "g", "i")
+            for survey in ("sdss", "ps1", "ztf")
+        )
+    )
+    assert np.isclose(row0["log_jitter_total"], np.log10(expected_total0))
+    assert np.isclose(row1["log_jitter_total"], np.log10(expected_total1))

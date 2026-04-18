@@ -4690,12 +4690,12 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     inset_ax.scatter(
         df_agn["z"][mask_in], mu_pred_plot[mask_in],
         s=10, marker='o', c="black", alpha=0.18,
-        linewidths=0, zorder=0, rasterized=True
+        linewidths=0, zorder=0
     )
     inset_ax.scatter(
         df_agn["z"][mask_out], mu_pred_plot[mask_out],
         s=12, marker='D', c="black", alpha=0.18,
-        linewidths=0, zorder=0, rasterized=True
+        linewidths=0, zorder=0
     )
 
     # AGN (inside)
@@ -4776,12 +4776,12 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     ax.scatter(
         df_agn["z"][mask_in], mu_pred_plot[mask_in],
         s=12, marker='o', c="black", alpha=0.18,
-        linewidths=0, zorder=-1, rasterized=True
+        linewidths=0, zorder=-1
     )
     ax.scatter(
         df_agn["z"][mask_out], mu_pred_plot[mask_out],
         s=14, marker='D', c="black", alpha=0.18,
-        linewidths=0, zorder=-1, rasterized=True
+        linewidths=0, zorder=-1
     )
     # AGN (inside)
     for i in np.where(mask_in)[0]:
@@ -4970,9 +4970,9 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
             z_grid_fine = np.linspace(1e-4, 5.2, 500)
             results_other = {key: np.median(cosmo_model_samples_other[:, i]) for i, key in enumerate(model_labels_other)}
 
-            mu_model_other = _mu_model(cosmo_model_other, results_other,   z_grid, z_pivot_agn)
-            mu_model = _mu_model(cosmo_model, results, z_grid, z_pivot_agn)
-            ax_resid.plot(z_grid_fine, mu_model_other - mu_model, lw=2.2, color=colors[cosmo_model_other], ls=line_styles[cosmo_model_other], 
+            mu_model_other_fine = _mu_model(cosmo_model_other, results_other, z_grid_fine, z_pivot_agn)
+            mu_model_fine = _mu_model(cosmo_model, results, z_grid_fine, z_pivot_agn)
+            ax_resid.plot(z_grid_fine, mu_model_other_fine - mu_model_fine, lw=2.2, color=colors[cosmo_model_other], ls=line_styles[cosmo_model_other], 
                           alpha=1.0, label=fr"{cosmo_model_other} $\Delta$μ")
             
         # Planck 2018 ΛCDM
