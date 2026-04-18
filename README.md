@@ -136,6 +136,17 @@ python -m qvc.setup_data
 By default, we only include a single Light Curve (object id 1465126) data under `data/S82` and corresponding spectra under `data/spectra_cache`.
 If you have other light curve catalos or spectra, please extract them there.
 
+To fetch the appendix datasets instead, run:
+
+```bash
+python -m qvc.setup_data --appendix
+```
+
+This downloads:
+
+* S82 DRW fits from MacLeod et al 2010 extracted under `data/MacLeod2010`
+* Fits from Stone 2021 extracted under `data/Stone2021`.
+
 
 ## Multi-band Light-Curve Fitting
 
