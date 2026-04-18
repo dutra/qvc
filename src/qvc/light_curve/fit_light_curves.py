@@ -2225,7 +2225,7 @@ def log_tau_slow_center0_prior(eta_tau, z, lambda_center_rf):
     )
 
 
-TAU_FAST_TO_SLOW_PRIOR_RATIO = 25.0
+TAU_FAST_TO_SLOW_PRIOR_RATIO = 150.0
 TAU_FAST_PRIOR_LOGSIGMA_DEX = 0.4
 
 
