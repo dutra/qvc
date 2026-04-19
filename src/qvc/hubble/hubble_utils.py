@@ -3373,8 +3373,16 @@ def _save_mapping_hdf5(filename, **kwargs):
         for name, data in kwargs.items():
             if data is None:
                 data = np.nan
-            if isinstance(data, (np.ndarray, list)):
-                f.create_dataset(name, data=data, compression="gzip")
+            if isinstance(data, str):
+                f.create_dataset(name, data=data, dtype=h5py.string_dtype(encoding="utf-8"))
+                continue
+            if isinstance(data, (np.ndarray, list, tuple)):
+                arr = np.asarray(data)
+                if arr.dtype.kind in {"U", "O"}:
+                    arr = arr.astype(h5py.string_dtype(encoding="utf-8"))
+                    f.create_dataset(name, data=arr)
+                else:
+                    f.create_dataset(name, data=arr, compression="gzip")
             else:
                 f.create_dataset(name, data=data)
     print(f"Saved: {list(kwargs.keys())} to {filename}")
@@ -3385,7 +3393,12 @@ def _load_mapping_hdf5(filename):
     results = {}
     with h5py.File(filename, 'r') as f:
         for key in f.keys():
-            results[key] = f[key][()]
+            value = f[key][()]
+            if isinstance(value, bytes):
+                value = value.decode("utf-8")
+            elif isinstance(value, np.ndarray) and value.dtype.kind == "S":
+                value = value.astype(str)
+            results[key] = value
     return results
 
 

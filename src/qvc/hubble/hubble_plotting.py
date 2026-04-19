@@ -163,6 +163,18 @@ def _population_scatter_offsets(scale, *, enabled=True, seed=1739):
     return offsets
 
 
+def _resolve_clipped_mask(df_like, clipped_mask):
+    if clipped_mask is None:
+        return None
+    clipped_mask = np.asarray(clipped_mask, dtype=bool)
+    if clipped_mask.ndim != 1 or clipped_mask.shape[0] != len(df_like):
+        raise ValueError(
+            f"clipped_mask must be a 1D boolean array of length {len(df_like)}, "
+            f"got shape {clipped_mask.shape}."
+        )
+    return clipped_mask
+
+
 def _nanmedian_stacked(rows):
     """Return row-wise nanmedian for a sequence of equal-length arrays."""
 
@@ -498,6 +510,9 @@ def _plot_blr_lag_line_panel(ax, line_df, line_name, *, x_suffix=""):
         )
         keep = np.isfinite(x) & np.isfinite(y)
         if np.any(keep):
+            clipped_mask = None
+            if "is_clipped" in line_df.columns:
+                clipped_mask = np.asarray(line_df["is_clipped"], dtype=bool)[keep]
             x = x[keep]
             y = y[keep]
             xerr = np.where(np.isfinite(xerr[keep]), xerr[keep], 0.0)
@@ -523,6 +538,18 @@ def _plot_blr_lag_line_panel(ax, line_df, line_name, *, x_suffix=""):
                 linewidths=0.15,
                 zorder=3,
             )
+            if clipped_mask is not None and np.any(clipped_mask):
+                ax.scatter(
+                    x[clipped_mask],
+                    y[clipped_mask],
+                    s=20.0,
+                    marker="o",
+                    facecolors="tab:green",
+                    edgecolors="tab:green",
+                    linewidths=0.3,
+                    zorder=4,
+                    label="Clipped AGN" if line_name == "C IV" else None,
+                )
 
     shen_relation = _SHEN_2024_LAG_LUMINOSITY_RELATIONS.get(line_name)
     if shen_relation is not None:
@@ -578,6 +605,7 @@ def plot_blr_line_lags_vs_l2500(
     show=False,
     prob_thresh=0.9,
     lag_err_max=0.25,
+    clipped_mask=None,
     use_alpha_lambda_term=None,
     use_eta_sigma_term=None,
     use_redshift_log_f_term=None,
@@ -626,6 +654,10 @@ def plot_blr_line_lags_vs_l2500(
     )
     if assignments.empty:
         return None
+    clipped_mask = _resolve_clipped_mask(df_agn, clipped_mask)
+    clipped_object_ids = set()
+    if clipped_mask is not None and "object_id" in df_agn.columns:
+        clipped_object_ids = set(df_agn.loc[clipped_mask, "object_id"].astype(str))
 
     diagnostics_path = os.path.join(plot_path or "plots/hubble", "diagnostics")
     os.makedirs(diagnostics_path, exist_ok=True)
@@ -647,6 +679,9 @@ def plot_blr_line_lags_vs_l2500(
 
     for ax, line_name in zip(axes, line_order):
         line_df = selected[selected["assigned_line"] == line_name]
+        if clipped_object_ids and "object_id" in line_df.columns:
+            line_df = line_df.copy()
+            line_df["is_clipped"] = line_df["object_id"].astype(str).isin(clipped_object_ids)
         _plot_blr_lag_line_panel(
             ax,
             line_df,
@@ -4379,7 +4414,8 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
                 show_binned_agn=True, show_residuals=True,
                 debias=False, dm_interp=None, show=False, completeness=True, show_true=False, verbose=True,
                 cosmo_model_samples={}, residuals_sigma_clip=None, df_calibrators=None, z_range=(0.44, 3.16),
-                dmi_values=None, dmi_sigma=None, dmi_selection_sigma=None,
+                dmi_values=None, dmi_sigma=None, dmi_selection_sigma=None, clipped_mask=None,
+                filename=None, sigma_clip_threshold=None,
                 use_alpha_lambda_term=None, use_eta_sigma_term=None, use_redshift_log_f_term=None):
     """
     Hubble diagram (Pantheon+-style):
@@ -4404,6 +4440,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
 
     # --- Labels ---
     label = cosmo_model_label_latex(cosmo_model)
+    clipped_mask = _resolve_clipped_mask(df_agn, clipped_mask)
 
     # --- Thinning for speed (cap to ~500 samples) ---
     n_samples = int(flat_samples.shape[0])
@@ -4634,7 +4671,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
 
     # ----------------- BINNING -----------------
     # Linear-z bins for MAIN & RESIDUALS panel
-    bins_linear = np.arange(0.32, np.max(df_agn["z"].values), 0.2)
+    bins_linear = np.arange(np.min(df_agn["z"].values), np.max(df_agn["z"].values)-0.1, 0.2)
     print("Using linear-z bins:", bins_linear)
     z_lin_scatter, mu_lin_mean_scatter, mu_lin_sem_scatter, n_lin = _weighted_bin_stats(
         df_agn["z"].values, mu_pred_plot, display_residuals_err, bins_linear
@@ -4685,6 +4722,8 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     # Filled circles vs filled diamonds by z (both main and inset)
     mask_in  = df_agn["z"].between(z_range[0], z_range[1])
     mask_out = ~mask_in
+    clipped_in = clipped_mask & mask_in.to_numpy(dtype=bool) if clipped_mask is not None else None
+    clipped_out = clipped_mask & mask_out.to_numpy(dtype=bool) if clipped_mask is not None else None
 
     # Background AGN point cloud
     inset_ax.scatter(
@@ -4712,6 +4751,29 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
         fmt='D', linestyle='none', markersize=2, mfc="black", mec="none", alpha=0.70,
         ecolor="#666666", elinewidth=0.8, zorder=1
     )
+    if clipped_in is not None and np.any(clipped_in):
+        inset_ax.scatter(
+            df_agn["z"][clipped_in],
+            mu_pred_plot[clipped_in],
+            s=16,
+            marker="o",
+            c="tab:green",
+            alpha=0.95,
+            linewidths=0,
+            zorder=3,
+            label="Clipped AGN",
+        )
+    if clipped_out is not None and np.any(clipped_out):
+        inset_ax.scatter(
+            df_agn["z"][clipped_out],
+            mu_pred_plot[clipped_out],
+            s=18,
+            marker="D",
+            c="tab:green",
+            alpha=0.95,
+            linewidths=0,
+            zorder=3,
+        )
 
     # INSET: log-binned AGN
     if show_binned_agn:
@@ -4762,15 +4824,15 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
 
     # ---------- Main plot ----------
 
-    # Color AGN points: clipped (mu_zscore > 3) as blue, others as black        
-    clipped = mu_zscore > 3
-    # if residuals_sigma_clip is None:
-    #     colors = np.where(clipped, 'b', 'k')
-    # else:
-    colors = ['black'] * len(df_agn)
     if verbose:
-        n_clipped = np.sum(clipped)
-        print(f"Note: {n_clipped} / {len(df_agn)} AGN clipped in residuals panel (> 3σ)")
+        if sigma_clip_threshold is not None:
+            threshold = float(sigma_clip_threshold)
+            n_above_threshold = int(np.count_nonzero(mu_zscore > threshold))
+            print(
+                "Note: "
+                f"{n_above_threshold} / {len(df_agn)} AGN exceed the residuals threshold "
+                f"(|mu_zscore| > {threshold:.2f}) in this panel."
+            )
     mask_in  = df_agn["z"].between(z_range[0], z_range[1])
     mask_out = ~mask_in
     ax.scatter(
@@ -4803,6 +4865,29 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
             mec="none",
             capsize=2, capthick=0.8,
             ecolor=(0.2, 0.2, 0.2, 0.1), elinewidth=0.8, zorder=0, label=None
+        )
+    if clipped_in is not None and np.any(clipped_in):
+        ax.scatter(
+            df_agn["z"][clipped_in],
+            mu_pred_plot[clipped_in],
+            s=22,
+            marker="o",
+            c="tab:green",
+            alpha=0.95,
+            linewidths=0,
+            zorder=2,
+            label="Clipped AGN",
+        )
+    if clipped_out is not None and np.any(clipped_out):
+        ax.scatter(
+            df_agn["z"][clipped_out],
+            mu_pred_plot[clipped_out],
+            s=24,
+            marker="D",
+            c="tab:green",
+            alpha=0.95,
+            linewidths=0,
+            zorder=2,
         )
 
     # inset_ax.errorbar(
@@ -5165,7 +5250,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     # Save/show
     fig.tight_layout()
     os.makedirs(plot_path, exist_ok=True)
-    filename = "hubble_diagram_debiased.pdf" if debias else "hubble_diagram.pdf"
+    filename = filename or ("hubble_diagram_debiased.pdf" if debias else "hubble_diagram.pdf")
     _save_figure(fig, os.path.join(plot_path, filename), dpi=600, show=show)
 
     diagnostics_path = os.path.join(plot_path, "diagnostics")
@@ -5773,6 +5858,7 @@ def plot_predicted_vs_actual_M2500(
     n_cosmo_draws=50,     # posterior draws to propagate cosmology errors (for xerr)
     random_state=42,      # RNG seed for reproducibility of draws
     z_range=(0.44, 3.16),
+    clipped_mask=None,
     use_alpha_lambda_term=None,
     use_eta_sigma_term=None,
     use_redshift_log_f_term=None,
@@ -5794,6 +5880,7 @@ def plot_predicted_vs_actual_M2500(
     import matplotlib.pyplot as plt
     from matplotlib.lines import Line2D
     from astropy.cosmology import FlatLambdaCDM, FlatwCDM, FlatwpwaCDM, Flatw0waCDM
+    clipped_mask = _resolve_clipped_mask(df_agn, clipped_mask)
 
     # --- model parameters from samples ---
     option_flags = resolve_model_option_flags(
@@ -6107,6 +6194,7 @@ def plot_predicted_vs_actual_M2500(
         z_bin = z[bin_mask]
         mask_closed = (z_bin > z_range[0]) & (z_bin < z_range[1])
         mask_open   = ~mask_closed
+        clipped_bin = clipped_mask[bin_mask] if clipped_mask is not None else None
 
         # filled markers (keep black edges like before)
         ax.scatter(
@@ -6123,6 +6211,33 @@ def plot_predicted_vs_actual_M2500(
             marker="D",
             s=20, alpha=1.0, linewidths=1, zorder=3,
         )
+        if clipped_bin is not None and np.any(clipped_bin):
+            clipped_closed = mask_closed & clipped_bin
+            clipped_open = mask_open & clipped_bin
+            if np.any(clipped_closed):
+                ax.scatter(
+                    x[clipped_closed],
+                    y_plot[clipped_closed],
+                    facecolors="tab:green",
+                    edgecolors="tab:green",
+                    s=28,
+                    alpha=0.95,
+                    linewidths=0.6,
+                    zorder=4,
+                    label="Clipped AGN" if i == 0 else None,
+                )
+            if np.any(clipped_open):
+                ax.scatter(
+                    x[clipped_open],
+                    y_plot[clipped_open],
+                    facecolors="tab:green",
+                    edgecolors="tab:green",
+                    marker="D",
+                    s=28,
+                    alpha=0.95,
+                    linewidths=0.6,
+                    zorder=4,
+                )
 
         # y = x reference and ±1σ intrinsic band
         ax.plot(xx, xx, color="m", alpha=0.9, lw=2.2, zorder=9)
@@ -6300,6 +6415,7 @@ def plot_full_residuals(
     *, nbins=10, min_count=5, z_cut=None, key_y='residuals', key_color='z',
     z_range=(0.44, 3.16), residual_label='residuals', output_tag='full_residuals',
     max_categories=12, category_min_count=5, category_jitter=0.15,
+    clipped_mask=None,
     use_alpha_lambda_term=None, use_eta_sigma_term=None, use_redshift_log_f_term=None,
 ):
     df_agn = df_agn.copy()
@@ -6310,6 +6426,7 @@ def plot_full_residuals(
         key_color = residual_label
 
     df_agn = df_agn.reset_index(drop=True)
+    clipped_mask = _resolve_clipped_mask(df_agn, clipped_mask)
 
     def _median_param_dict(samples):
         option_flags = resolve_model_option_flags(
@@ -6747,6 +6864,7 @@ def plot_full_residuals(
                 y = np.asarray(y)[valid_cat_mask]
                 z_masked = z_masked[valid_cat_mask]
                 color_values = np.asarray(color_values)[valid_cat_mask]
+                clipped_cat = clipped_mask[mask][valid_cat_mask] if clipped_mask is not None else None
                 in_z = (z_masked >= z_range[0]) & (z_masked <= z_range[1])
                 out_z = ~in_z
 
@@ -6827,6 +6945,31 @@ def plot_full_residuals(
                             linewidths=0.8,
                             rasterized=True,
                         )
+                if clipped_cat is not None and np.any(clipped_cat):
+                    clipped_in = clipped_cat & in_z
+                    clipped_out = clipped_cat & out_z
+                    if np.any(clipped_in):
+                        ax.scatter(
+                            xj[clipped_in],
+                            y[clipped_in],
+                            c="tab:green",
+                            s=16,
+                            alpha=0.9,
+                            linewidths=0,
+                            rasterized=True,
+                        )
+                    if np.any(clipped_out):
+                        ax.scatter(
+                            xj[clipped_out],
+                            y[clipped_out],
+                            c="tab:green",
+                            s=18,
+                            alpha=0.95,
+                            marker="D",
+                            edgecolors="tab:green",
+                            linewidths=0.8,
+                            rasterized=True,
+                        )
 
                 if residuals_err is None:
                     err = np.full_like(y, np.nan, dtype=float)
@@ -6890,6 +7033,7 @@ def plot_full_residuals(
             else:
                 in_z = (z_masked >= z_range[0]) & (z_masked <= z_range[1])
                 out_z = ~in_z
+                clipped_local = clipped_mask[mask] if clipped_mask is not None else None
 
                 sc = None
                 if np.any(in_z):
@@ -6943,6 +7087,31 @@ def plot_full_residuals(
                         )
                     if sc is None:
                         sc = sc_out
+                if clipped_local is not None and np.any(clipped_local):
+                    clipped_in = clipped_local & in_z
+                    clipped_out = clipped_local & out_z
+                    if np.any(clipped_in):
+                        ax.scatter(
+                            np.asarray(x)[clipped_in],
+                            np.asarray(y)[clipped_in],
+                            c="tab:green",
+                            s=16,
+                            alpha=0.9,
+                            linewidths=0,
+                            rasterized=True,
+                        )
+                    if np.any(clipped_out):
+                        ax.scatter(
+                            np.asarray(x)[clipped_out],
+                            np.asarray(y)[clipped_out],
+                            c="tab:green",
+                            s=18,
+                            alpha=0.95,
+                            marker='D',
+                            edgecolors='tab:green',
+                            linewidths=0.8,
+                            rasterized=True,
+                        )
                 _draw_reference_guides(ax, key, x)
 
                 if sc is not None and norm is not None and global_color_norm is None:
@@ -7006,6 +7175,7 @@ def plot_full_residuals_rz(
     z_range=(0.44, 3.16), nz_bins=12, z_min_count=8,
     lowess_frac=0.25, lowess_it=1, lowess_min_points=10,
     max_categories=12, category_min_count=5, category_jitter=0.15,
+    clipped_mask=None,
     use_alpha_lambda_term=None, use_eta_sigma_term=None, use_redshift_log_f_term=None,
 ):
     """
@@ -7061,6 +7231,7 @@ def plot_full_residuals_rz(
         key_y=key_y,
         key_color=key_color,
         z_range=z_range,
+        clipped_mask=clipped_mask,
         residual_label='r_z',
         output_tag='full_residuals_rz',
         max_categories=max_categories,
@@ -7105,9 +7276,11 @@ def plot_predicted_L2500_vs_sigmahat(
     use_alpha_lambda_term=None, use_eta_sigma_term=None, use_redshift_log_f_term=None,
     dmi_values=None,
     dmi_selection_sigma_interp=None,
+    clipped_mask=None,
     sigma_sel_floor_mag=0.05,
 ):
     d = df_agn.copy()
+    clipped_mask = _resolve_clipped_mask(d, clipped_mask)
 
     # --- Thinning for speed ---
     n_samples = int(flat_samples.shape[0])
@@ -7311,6 +7484,8 @@ def plot_predicted_L2500_vs_sigmahat(
     yerr_linear_display = (10.0**actual_logL2500_plot) * np.log(10.0) * y_log_display_err
     mask_in  = d["z"].between(z_range[0], z_range[1])
     mask_out = ~mask_in
+    clipped_in = clipped_mask & mask_in.to_numpy(dtype=bool) if clipped_mask is not None else None
+    clipped_out = clipped_mask & mask_out.to_numpy(dtype=bool) if clipped_mask is not None else None
 
     # inside redshift range: filled markers
     ax.errorbar(
@@ -7327,6 +7502,29 @@ def plot_predicted_L2500_vs_sigmahat(
         ecolor=(0.2, 0.2, 0.2, 0.1), elinewidth=0.8, capsize=2, capthick=0.8,
         zorder=1
     )
+    if clipped_in is not None and np.any(clipped_in):
+        ax.scatter(
+            x_ref[clipped_in],
+            10**actual_logL2500_plot[clipped_in],
+            s=26,
+            marker="o",
+            c="tab:green",
+            alpha=0.95,
+            linewidths=0,
+            zorder=2,
+            label="Clipped AGN",
+        )
+    if clipped_out is not None and np.any(clipped_out):
+        ax.scatter(
+            x_ref[clipped_out],
+            10**actual_logL2500_plot[clipped_out],
+            s=28,
+            marker="D",
+            c="tab:green",
+            alpha=0.95,
+            linewidths=0,
+            zorder=2,
+        )
 
     # --- 68% / 95% KDE contours (outlines only) ---
     try:
@@ -7641,6 +7839,32 @@ def plot_predicted_L2500_vs_sigmahat(
                 zorder=6,
                 label="outside z range",
             )
+        if clipped_mask is not None:
+            clipped_good_in = good_in_plot & clipped_mask
+            clipped_good_out = good_out_plot & clipped_mask
+            if np.any(clipped_good_in):
+                ax_res.scatter(
+                    x_ref[clipped_good_in],
+                    residuals_plot[clipped_good_in],
+                    s=24,
+                    marker="o",
+                    c="tab:green",
+                    alpha=0.95,
+                    linewidths=0,
+                    zorder=7,
+                    label="Clipped AGN",
+                )
+            if np.any(clipped_good_out):
+                ax_res.scatter(
+                    x_ref[clipped_good_out],
+                    residuals_plot[clipped_good_out],
+                    s=26,
+                    marker="D",
+                    c="tab:green",
+                    alpha=0.95,
+                    linewidths=0,
+                    zorder=7,
+                )
 
         ax_res.axhline(0, color='m', linestyle='--', zorder=3)
         ax_res.set_ylabel(_residual_axis_label("L2500_sigma_tau_residuals"))
@@ -7956,7 +8180,8 @@ def plot_residuals_vs_alphaOX(
     nbins=6,
     binning="uniform",     # "quantile", "uniform", or pass explicit edges via nbins=array_like
     min_per_bin=4,           # hide bins with too few points
-    z_range=(0.44, 3.16)
+    z_range=(0.44, 3.16),
+    clipped_mask=None,
 ):
     """
     Plot residuals vs delta_alphaOX and alphaOX, colored by redshift, with binned means.
@@ -7971,6 +8196,7 @@ def plot_residuals_vs_alphaOX(
     import numpy as np
     import matplotlib.pyplot as plt
     import matplotlib as mpl
+    clipped_mask = _resolve_clipped_mask(df_agn, clipped_mask)
     z_all = np.asarray(df_agn["z"], dtype=float)
     y_all = np.asarray(residuals, dtype=float)
     yerr_all = np.asarray(residuals_err, dtype=float)
@@ -7981,11 +8207,14 @@ def plot_residuals_vs_alphaOX(
         z = z_all.copy()
         y = y_all.copy()
         yerr = yerr_all.copy()
+        clipped_local = clipped_mask.copy() if clipped_mask is not None else None
 
         m = np.isfinite(x) & np.isfinite(y) & np.isfinite(yerr) & np.isfinite(z)
         if np.isfinite(xerr).any():
             m &= np.isfinite(xerr) | np.isnan(xerr)
         x, xerr, y, yerr, z = x[m], xerr[m], y[m], yerr[m], z[m]
+        if clipped_local is not None:
+            clipped_local = clipped_local[m]
 
         fig, ax = plt.subplots(1, 1, figsize=(7.2, 5.2))
         ax.set_xlabel(xlabel)
@@ -8048,6 +8277,30 @@ def plot_residuals_vs_alphaOX(
                 zorder=2,
                 label=label,
             )
+        if clipped_local is not None and np.any(clipped_local):
+            in_clipped = mask_in & clipped_local
+            out_clipped = (~mask_in) & clipped_local
+            if np.any(in_clipped):
+                ax.scatter(
+                    x[in_clipped],
+                    y[in_clipped],
+                    s=26,
+                    c="tab:green",
+                    linewidths=0,
+                    zorder=3,
+                    label="Clipped AGN",
+                )
+            if np.any(out_clipped):
+                ax.scatter(
+                    x[out_clipped],
+                    y[out_clipped],
+                    s=28,
+                    c="tab:green",
+                    marker="D",
+                    edgecolors="tab:green",
+                    linewidths=0.8,
+                    zorder=3,
+                )
 
         edges = None
         if np.ndim(nbins) > 0:
@@ -8119,8 +8372,10 @@ def plot_debias_impact_diagnostics(
     show=False,
     nbins=10,
     min_count=6,
+    clipped_mask=None,
 ):
     """Plot the residual change induced by debiasing against key observables."""
+    clipped_mask = _resolve_clipped_mask(df_agn, clipped_mask)
     delta_residual = np.asarray(residuals_biased, dtype=float) - np.asarray(residuals_debiased, dtype=float)
 
     diagnostics = [
@@ -8146,6 +8401,7 @@ def plot_debias_impact_diagnostics(
 
         x_use = x[m]
         y_use = delta_residual[m]
+        clipped_use = clipped_mask[m] if clipped_mask is not None else None
 
         ax.scatter(
             x_use,
@@ -8156,6 +8412,16 @@ def plot_debias_impact_diagnostics(
             linewidths=0,
             rasterized=True,
         )
+        if clipped_use is not None and np.any(clipped_use):
+            ax.scatter(
+                x_use[clipped_use],
+                y_use[clipped_use],
+                s=18,
+                alpha=0.9,
+                color="tab:green",
+                linewidths=0,
+                rasterized=True,
+            )
         ax.axhline(0.0, color="magenta", lw=1.6, zorder=0)
 
         if np.nanmax(x_use) > np.nanmin(x_use):
