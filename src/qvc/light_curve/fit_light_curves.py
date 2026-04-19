@@ -2276,13 +2276,19 @@ def linear_trend_band_offset_prior(B, *, relflux=False):
     return dist.Normal(0.0, base_scale * jnp.sqrt((B - 1) / B))
 
 
-def lag0_prior():
-    return dist.TruncatedNormal(5.0, 5.0, low=0.0, high=LAG0_HIGH)
+def lag0_prior(z=0.0):
+    one_plus_z = 1.0 + jnp.asarray(z, dtype=float)
+    return dist.TruncatedNormal(
+        5.0 * one_plus_z,
+        5.0 * one_plus_z,
+        low=0.0,
+        high=LAG0_HIGH * one_plus_z,
+    )
 
 
-def log_lag0_prior():
+def log_lag0_prior(z=0.0):
     return dist.TransformedDistribution(
-        lag0_prior(),
+        lag0_prior(z=z),
         dist.transforms.ExpTransform().inv,
     )
 
@@ -2667,7 +2673,7 @@ def compute_parameter_kls(
     if "lag0" in flat_samples:
         kls["lag0_kl"] = kl_from_samples(
             flat_samples["lag0"],
-            lambda x: _dist_log_prob_array(lag0_prior(), x),
+            lambda x: _dist_log_prob_array(lag0_prior(z=z), x),
         )
     if "lag_beta" in flat_samples:
         kls["lag_beta_kl"] = kl_from_samples(
@@ -3567,7 +3573,7 @@ def build_single_object_model(
             band_offset_raw_prior_dist=linear_trend_band_offset_raw_prior(),
         )
 
-        lag0 = numpyro.sample("lag0", lag0_prior())
+        lag0 = numpyro.sample("lag0", lag0_prior(z=z))
         log_lag0 = numpyro.deterministic("log_lag0", jnp.log(lag0))
         lag_beta = numpyro.sample("lag_beta", lag_beta_prior())
 
@@ -3637,9 +3643,6 @@ def build_single_object_model(
         numpyro.deterministic("log_sigma_uv", params["log_sigma_uv"])
         numpyro.deterministic("log_tau_uv", params["log_tau_uv"])
         numpyro.deterministic("log_tau_fast_uv", params["log_tau_fast_uv"])
-        log_sigma_hat_uv = params["log_sigma_uv"] - 0.5 * params["log_tau_uv"]
-        numpyro.deterministic("log_sigma_hat_uv", log_sigma_hat_uv)
-        numpyro.deterministic("log_sigma_hat0", log_sigma_hat_uv)
         numpyro.deterministic("tau_fast", params["tau_fast_band"])
         numpyro.deterministic("tau_slow", params["tau_slow_band"])
         numpyro.deterministic("amp_cont", params["amp_cont"])
@@ -3752,7 +3755,7 @@ def build_single_object_model_mag_flux_linearized(
             band_offset_raw_prior_dist=linear_trend_band_offset_raw_prior_relflux(),
         )
 
-        lag0 = numpyro.sample("lag0", lag0_prior())
+        lag0 = numpyro.sample("lag0", lag0_prior(z=z))
         log_lag0 = numpyro.deterministic("log_lag0", jnp.log(lag0))
         lag_beta = numpyro.sample("lag_beta", lag_beta_prior())
 
@@ -3825,9 +3828,6 @@ def build_single_object_model_mag_flux_linearized(
         numpyro.deterministic("log_sigma_uv", params["log_sigma_uv"])
         numpyro.deterministic("log_tau_uv", params["log_tau_uv"])
         numpyro.deterministic("log_tau_fast_uv", params["log_tau_fast_uv"])
-        log_sigma_hat_uv = params["log_sigma_uv"] - 0.5 * params["log_tau_uv"]
-        numpyro.deterministic("log_sigma_hat_uv", log_sigma_hat_uv)
-        numpyro.deterministic("log_sigma_hat0", log_sigma_hat_uv)
         numpyro.deterministic("tau_fast", params["tau_fast_band"])
         numpyro.deterministic("tau_slow", params["tau_slow_band"])
         numpyro.deterministic("amp_cont_relflux", params["amp_cont_relflux"])
@@ -3930,7 +3930,7 @@ def build_single_object_model_continuum_only(
             band_offset_raw_prior_dist=linear_trend_band_offset_raw_prior(),
         )
 
-        lag0 = numpyro.sample("lag0", lag0_prior())
+        lag0 = numpyro.sample("lag0", lag0_prior(z=z))
         lag_beta = numpyro.sample("lag_beta", lag_beta_prior())
         log_jitter = _sample_log_jitter_grid(
             log_jitter_mean_grid,
@@ -3967,9 +3967,6 @@ def build_single_object_model_continuum_only(
         numpyro.deterministic("log_sigma_uv", params["log_sigma_uv"])
         numpyro.deterministic("log_tau_uv", params["log_tau_uv"])
         numpyro.deterministic("log_tau_fast_uv", params["log_tau_fast_uv"])
-        log_sigma_hat_uv = params["log_sigma_uv"] - 0.5 * params["log_tau_uv"]
-        numpyro.deterministic("log_sigma_hat_uv", log_sigma_hat_uv)
-        numpyro.deterministic("log_sigma_hat0", log_sigma_hat_uv)
         numpyro.deterministic("tau_fast", params["tau_fast_band"])
         numpyro.deterministic("tau_slow", params["tau_slow_band"])
         numpyro.deterministic("amp_cont", params["amp_cont"])
@@ -4207,8 +4204,6 @@ _RECOMPUTE_EXPLICIT_KEYS = {
     "log_sigma_uv",
     "log_tau_uv",
     "log_tau_fast_uv",
-    "log_sigma_hat_uv",
-    "log_sigma_hat0",
     "log_igm_transmission_band",
     "igm_transmission_band",
     "lambda_center_rf",

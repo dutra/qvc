@@ -604,7 +604,7 @@ def test_run_mcmc_pipeline_compare_sigma_only_skips_completeness_plots_on_resume
         }
     )
     result_root = tmp_path / "result_root"
-    expected = result_root / "hubble_posteriors" / "unit" / "posteriors_FlatLambdaCDM_joint_fast_all_z0p44_3p16.h5"
+    expected = result_root / "hubble_posteriors" / "unit" / "posteriors_FlatLambdaCDM_joint_fast_all_z0p44_3p16_2d.h5"
     completeness_calls = []
     diagnostics_calls = []
 

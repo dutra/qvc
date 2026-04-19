@@ -1849,33 +1849,6 @@ def plot_mcmc_traces(samples_dict, data):
         plt.close(fig2)
         print("Saved eta_sigma vs. log_tau trace plot to", save_path2)
 
-    # Plot eta_sigma vs. log_sigma_hat_uv trace if both are present
-    if 'eta_sigma' in samples_dict and 'log_sigma_hat_uv' in samples_dict:
-        fig_eta_sigma, ax_eta_sigma = plt.subplots(figsize=(6, 5))
-        ax_eta_sigma.scatter(samples_dict['log_sigma_hat_uv'], samples_dict['eta_sigma'], alpha=0.7, lw=0.7)
-        ax_eta_sigma.set_xlabel('log_sigma_hat_uv')
-        ax_eta_sigma.set_ylabel('eta_sigma')
-        ax_eta_sigma.set_title('Trace: eta_sigma vs. log_sigma_hat_uv')
-        ax_eta_sigma.grid(True)
-        save_path_eta_sigma = os.path.join(output_dir, f"{data['z']:.1f}_{data['object_id']}_eta_sigma_vs_logsigma.png")
-        plt.tight_layout()
-        plt.savefig(save_path_eta_sigma, dpi=100)
-        plt.close(fig_eta_sigma)
-        logging.info(f"Saved eta_sigma vs. log_sigma_hat_uv trace plot to {save_path_eta_sigma}")
-
-    # Plot log_tau_uv vs. log_sigma_hat_uv trace if both are present
-    if 'log_tau_uv' in samples_dict and 'log_sigma_hat_uv' in samples_dict:
-        fig3, ax3 = plt.subplots(figsize=(6, 5))
-        ax3.scatter(samples_dict['log_tau_uv'], samples_dict['log_sigma_hat_uv'], alpha=0.7, lw=0.7)
-        ax3.set_xlabel('log_tau_uv')
-        ax3.set_ylabel('log_sigma_hat_uv')
-        ax3.set_title('Trace: log_tau_uv vs. log_sigma_hat_uv')
-        ax3.grid(True)
-        save_path3 = os.path.join(output_dir, f"{data['z']:.1f}_{data['object_id']}_logtau_vs_logsigma.png")
-        plt.tight_layout()
-        plt.savefig(save_path3, dpi=100)
-        plt.close(fig3)
-        logging.info(f"Saved log_tau_uv vs. log_sigma_hat_uv trace plot to {save_path3}")
     """
     
     

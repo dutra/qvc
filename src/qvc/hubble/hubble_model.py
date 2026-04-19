@@ -317,7 +317,6 @@ def M_model_agn_err(
         + (beta_agn  * log_tau_uv_rf_std_psd)**2
         + 2 * alpha_agn * beta_agn * log_sigma_uv_log_tau_uv_rf_cov_psd
         #+ (gamma_agn * dm_psf_correction_err)**2
-        # (log_sigma_hat0_err * alpha_agn)**2
     )
     if use_alpha_lambda_term:
         gamma_alpha_lambda = params_arr[pidx[AGN_ALPHA_LAMBDA_PARAM]]
