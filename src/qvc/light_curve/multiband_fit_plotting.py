@@ -146,31 +146,58 @@ POSTERIOR_PLOT_KEY_GROUPS = {
 }
 
 
+POSTERIOR_PLOT_SKIP_EXACT = {
+    "log_jitter_active",
+    "log_sigma_center0",
+    "log_tau_slow_center0",
+    "log_tau_fast_center0",
+}
+
+
+POSTERIOR_PLOT_SKIP_PREFIXES = (
+    "amp_cont",
+    "amp_blr",
+    "amp_blr2",
+    "amp_bc",
+    "tau_fast",
+    "tau_slow",
+    "lag_blr_",
+    "lag_blr2_",
+    "lag_bc_",
+    "lag_disk_",
+    "log_lag_blr_raw_",
+    "log_lag_blr2_raw_",
+    "linear_trend_band_offset_",
+    "survey_delta_mag_",
+)
+
+
+def _label_band_suffix(label, prefix):
+    if not label.startswith(prefix):
+        return None
+    return label[len(prefix):]
+
+
 def _posterior_plot_labels(samples_flat):
     """Return an ordered curated subset of posterior keys for diagnostic plots."""
 
-    internal_skip_keys = {
-        "log_jitter_active",
-    }
-    all_labels = [label for label in samples_flat.keys() if label not in internal_skip_keys]
+    all_labels = [label for label in samples_flat.keys() if label not in POSTERIOR_PLOT_SKIP_EXACT]
     selected = []
-    seen = set()
 
-    def _add(label):
-        if label in samples_flat and label not in seen:
-            selected.append(label)
-            seen.add(label)
+    for label in all_labels:
+        if label.startswith(POSTERIOR_PLOT_SKIP_PREFIXES):
+            continue
+        if label.startswith("dlog_amp_blr2"):
+            continue
 
-    for group in POSTERIOR_PLOT_KEY_GROUPS.values():
-        for label in group["exact"]:
-            _add(label)
-        for prefix in group["prefixes"]:
-            for label in all_labels:
-                if label.startswith(prefix):
-                    _add(label)
+        band = _label_band_suffix(label, "log_lag_blr2_")
+        if band is not None and f"dlog_amp_blr2_{band}" in samples_flat:
+            continue
 
-    if not selected:
-        selected = list(all_labels)
+        if label == "log_lag_blr2" and "dlog_amp_blr2" in samples_flat:
+            continue
+
+        selected.append(label)
 
     return all_labels, selected
 
@@ -398,6 +425,8 @@ def plot_posterior(
     all_labels, labels_for_corner = _corner_plot_labels(samples_flat)
     logging.info("Corner candidate parameters: %s", all_labels)
     logging.info("Corner plotted parameters: %s", labels_for_corner)
+    print(f"Corner candidate parameters: {all_labels}")
+    print(f"Corner plotted parameters: {labels_for_corner}")
 
     samples_for_corner = {label: samples_flat[label] for label in labels_for_corner}
 
