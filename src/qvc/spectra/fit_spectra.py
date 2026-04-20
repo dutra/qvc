@@ -1579,7 +1579,8 @@ def run_one_fit(rec, args):
                 filename=f"z{rec['z']:.3f}_{rec['sdss_name']}",  # important: matches fit(name=...)
                 output_path=str(args.output_dir),
                 kwargs_plot={"show_plot": False},
-                plot_diagnostics=False,
+                plot_diagnostics=args.plot_mcmc_diagnostics,
+                diagnostics_kwargs={"save_fig_path": args.fig_dir},
             )
         else:
             q.fit(
@@ -1616,6 +1617,8 @@ def run_one_fit(rec, args):
                 psf_bands=psf_bands_all,
                 use_psf_phot=True,
             )
+            if args.plot_mcmc_diagnostics:
+                q.plot_mcmc_diagnostics(save_fig_path=args.fig_dir)
 
         result.update(extract_named_results(q))
         result.update(extract_scalar_attrs(q))
@@ -1756,6 +1759,7 @@ def parse_args():
 
     p.add_argument("--nproc", type=int, default=1, help="Use spawn multiprocessing when nproc > 1.")
     p.add_argument("--plot-residual", dest="plot_residual", action="store_true", default=False, help="Plot residuals in fit figures.")
+    p.add_argument("--plot_mcmc_diagnostics", action="store_true", default=False, help="Plot trace/corner MCMC diagnostics when posterior samples are available.")
     p.add_argument("--disable_rescale_flux", "--disable-rescale-flux", dest="disable_rescale_flux", action="store_true", help="Disable magnitude-based flux rescaling.")
     p.set_defaults(save_fig=True)
     p.add_argument("--save-fig", dest="save_fig", action="store_true")
