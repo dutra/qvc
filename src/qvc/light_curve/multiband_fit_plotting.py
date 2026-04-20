@@ -165,6 +165,7 @@ POSTERIOR_PLOT_SKIP_PREFIXES = (
     "lag_blr2_",
     "lag_bc_",
     "lag_disk_",
+    "delta_log_lag_blr_raw_",
     "log_lag_blr_raw_",
     "log_lag_blr2_raw_",
     "linear_trend_band_offset_",

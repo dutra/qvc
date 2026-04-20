@@ -4734,7 +4734,7 @@ def main():
         default=1.0,
         help="Nested sampler evidence tolerance for termination. Smaller is stricter. Default: 1.",
     )
-    parser.add_argument("--load_sample_file", action="store_true", help="Load saved samples (debug).")
+    parser.add_argument("--resume", action="store_true", help="Load saved samples (debug).")
     parser.add_argument("--save_sample_file", dest="save_sample_file", action="store_true", help="Save per-object posterior samples to HDF5.")
     parser.add_argument("--no_save_sample_file", dest="save_sample_file", action="store_false", help="Do not save per-object posterior samples to HDF5.")
     parser.set_defaults(save_sample_file=True)
@@ -5009,7 +5009,7 @@ def main():
                 numpyro_model = None
 
             stage_diagnostics = {}
-            if args.load_sample_file:
+            if args.resume:
                 logging.warning("[DEBUG] Loading saved samples (flat) — developer mode.")
                 obj_flat_samples = load_obj_samples_from_hdf5(oid)
                 samples_per_chain = None
