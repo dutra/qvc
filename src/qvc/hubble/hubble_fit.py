@@ -99,6 +99,7 @@ from qvc.hubble.completeness_mock_catalog import (
 )
 
 VALID_COMPLETENESS_MODES = ("2d", "3d_fhost", "4d_fhost_alpha")
+SPEED_CHOICES = ("fastest", "quick", "standard", "production")
 
 
 def validate_completeness_mode(completeness_mode):
@@ -106,6 +107,17 @@ def validate_completeness_mode(completeness_mode):
         raise ValueError(
             f"Invalid completeness_mode={completeness_mode!r}. "
             f"Expected one of {VALID_COMPLETENESS_MODES}."
+        )
+
+
+def normalize_speed(speed):
+    normalized = str(speed).strip().lower()
+    if normalized in SPEED_CHOICES:
+        return normalized
+    else:
+        raise ValueError(
+            f"Invalid speed={speed!r}. Expected one of {SPEED_CHOICES}. "
+            "Ordered fastest to slowest: fastest, quick, standard, production."
         )
 
 
@@ -148,6 +160,7 @@ def make_run_tag(
     use_eta_sigma_term=False,
     use_redshift_log_f_term=False,
 ):
+    speed = normalize_speed(speed)
     zmin, zmax = z_range
     n_tag = "all" if N is None else f"N{N}"
     z_tag = f"z{zmin:.2f}_{zmax:.2f}".replace(".", "p")
@@ -230,6 +243,101 @@ def validate_resume_checkpoint(results, checkpoint_file, ndim, n_agn):
         )
 
 
+def _validate_resume_replot_checkpoint_params(results, checkpoint_file, ndim):
+    if "flat_samples" not in results:
+        raise RuntimeError(
+            f"Resume-replot checkpoint '{checkpoint_file}' is missing required dataset 'flat_samples'."
+        )
+    flat_samples = np.asarray(results["flat_samples"])
+    if flat_samples.ndim != 2:
+        raise RuntimeError(
+            f"Resume-replot checkpoint '{checkpoint_file}' has flat_samples with shape {flat_samples.shape}, "
+            "but a 2D array is required."
+        )
+    if flat_samples.shape[1] != ndim:
+        raise RuntimeError(
+            f"Resume-replot checkpoint '{checkpoint_file}' was created for a different parameterization: "
+            f"flat_samples has {flat_samples.shape[1]} columns, but the current model expects {ndim}."
+        )
+
+
+def _remap_resume_replot_checkpoint(results, checkpoint_file, df_agn_fit_selection, ndim):
+    """Return checkpoint payload remapped to the current cut AGN fit selection."""
+
+    _validate_resume_replot_checkpoint_params(results, checkpoint_file, ndim)
+    if "object_id_fit_selection" not in results:
+        raise RuntimeError(
+            f"Resume-replot checkpoint '{checkpoint_file}' is missing required dataset "
+            "'object_id_fit_selection'. Replotting with new cuts requires a checkpoint "
+            "written by a version that stores fit object IDs."
+        )
+
+    saved_ids = _normalize_object_id_array(
+        results["object_id_fit_selection"],
+        field_name="object_id_fit_selection",
+        checkpoint_file=checkpoint_file,
+    )
+    current_ids = df_agn_fit_selection["object_id"].astype(str).to_numpy()
+    saved_index = {}
+    duplicate_saved = set()
+    for idx, object_id in enumerate(saved_ids):
+        if object_id in saved_index:
+            duplicate_saved.add(object_id)
+        saved_index[object_id] = idx
+    if duplicate_saved:
+        preview = ", ".join(sorted(duplicate_saved)[:5])
+        raise RuntimeError(
+            f"Resume-replot checkpoint '{checkpoint_file}' has duplicate object_id_fit_selection "
+            f"entries ({len(duplicate_saved)} duplicate IDs; examples: {preview})."
+        )
+
+    missing_ids = [object_id for object_id in current_ids if object_id not in saved_index]
+    if missing_ids:
+        preview = ", ".join(missing_ids[:10])
+        raise RuntimeError(
+            f"Resume-replot checkpoint '{checkpoint_file}' does not contain all AGNs requested "
+            f"by the current cuts. Missing {len(missing_ids)} / {len(current_ids)} current "
+            f"object IDs; examples: {preview}. This mode can only remove or reorder AGNs "
+            "that were present in the original checkpoint."
+        )
+
+    remap_idx = np.array([saved_index[object_id] for object_id in current_ids], dtype=int)
+    out = dict(results)
+    out["object_id_fit_selection"] = current_ids
+    per_object_keys = (
+        "dmi_max_w",
+        "dmi_posterior_median",
+        "dmi_posterior_sigma",
+        "integrals_max_w",
+        "dmi_selection_sigma_posterior_median",
+    )
+    required_per_object = {
+        "dmi_max_w",
+        "dmi_posterior_sigma",
+        "integrals_max_w",
+    }
+    for key in per_object_keys:
+        if key not in results:
+            if key in required_per_object:
+                raise RuntimeError(
+                    f"Resume-replot checkpoint '{checkpoint_file}' is missing required dataset {key!r}."
+                )
+            continue
+        value = np.asarray(results[key])
+        if value.ndim == 0:
+            out[key] = value
+            continue
+        if value.shape[0] != saved_ids.shape[0]:
+            raise RuntimeError(
+                f"Resume-replot checkpoint '{checkpoint_file}' has incompatible dataset {key!r}: "
+                f"length {value.shape[0]}, but object_id_fit_selection has length {saved_ids.shape[0]}."
+            )
+        out[key] = value[remap_idx]
+    if "dmi_posterior_median" not in out:
+        out["dmi_posterior_median"] = out["dmi_max_w"]
+    return out
+
+
 def resolve_resume_checkpoint_path(resume, checkpoint_file):
     if not resume:
         return None
@@ -299,6 +407,60 @@ def _normalize_object_id_array(values, *, field_name, checkpoint_file):
     if arr.dtype.kind == "S":
         arr = arr.astype(str)
     return arr.astype(str)
+
+
+def _load_resume_replot_object_ids(resume):
+    resume_path = str(resume).strip()
+    if resume_path.lower() in {"true", "1", "yes", "false", "0", "no"}:
+        raise ValueError("--resume_replot_with_cuts requires --resume to be an explicit posterior H5 path.")
+    if not os.path.exists(resume_path):
+        raise FileNotFoundError(
+            f"Resume-replot checkpoint file '{resume_path}' does not exist. "
+            "Replace the placeholder with the posterior H5 you want to replot."
+        )
+    results = load_chains(resume_path)
+    if "object_id_fit_selection" not in results:
+        raise RuntimeError(
+            f"Resume-replot checkpoint '{resume_path}' is missing required dataset "
+            "'object_id_fit_selection'. Replotting with new cuts requires a checkpoint "
+            "written by a version that stores fit object IDs."
+        )
+    object_ids = _normalize_object_id_array(
+        results["object_id_fit_selection"],
+        field_name="object_id_fit_selection",
+        checkpoint_file=resume_path,
+    )
+    if len(np.unique(object_ids)) != len(object_ids):
+        raise RuntimeError(f"Resume-replot checkpoint '{resume_path}' has duplicate object_id_fit_selection entries.")
+    return resume_path, object_ids
+
+
+def _select_resume_replot_fit_selection(df_agn, resume):
+    resume_path, saved_ids = _load_resume_replot_object_ids(resume)
+    current_ids = df_agn["object_id"].astype(str)
+    saved_order = {object_id: idx for idx, object_id in enumerate(saved_ids)}
+    keep_mask = current_ids.isin(saved_order)
+    filtered = df_agn.loc[keep_mask].copy()
+    if filtered.empty:
+        raise RuntimeError(
+            f"None of the {len(saved_ids)} AGNs saved in resume checkpoint '{resume_path}' survived the current cuts."
+        )
+    filtered["_resume_replot_order"] = filtered["object_id"].astype(str).map(saved_order)
+    filtered = (
+        filtered.sort_values("_resume_replot_order", kind="stable")
+        .drop(columns=["_resume_replot_order"])
+        .reset_index(drop=True)
+    )
+    print(
+        "Resume-replot fit selection: "
+        f"using {len(filtered)} / {len(saved_ids)} saved checkpoint AGNs that survived "
+        f"the current cuts; plotting will still use all {len(df_agn)} current-cut AGNs."
+    )
+    return filtered
+
+
+def restrict_agn_to_resume_replot_sample(df_agn, resume):
+    return _select_resume_replot_fit_selection(df_agn, resume).reset_index(drop=True)
 
 
 def _extract_pass1_state_from_checkpoint(
@@ -697,6 +859,7 @@ def _run_fit_stage(
     use_eta_sigma_term,
     use_redshift_log_f_term,
     checkpoint_file_override=None,
+    resume_replot_with_cuts=False,
 ):
     (
         flat_samples,
@@ -733,6 +896,7 @@ def _run_fit_stage(
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
+        resume_replot_with_cuts=resume_replot_with_cuts,
     )
     display_results_summary(
         flat_samples,
@@ -839,8 +1003,10 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                       use_alpha_lambda_term=False,
                       use_eta_sigma_term=False,
                       use_redshift_log_f_term=False,
+                      resume_replot_with_cuts=False,
                       ):
     validate_completeness_mode(completeness_mode)
+    speed = normalize_speed(speed)
     run_tag = make_run_tag(
         cosmo_model,
         only_sna,
@@ -867,6 +1033,10 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
     )
     ndim = len(model_labels)
     print(f"Running sampling with {ndim} parameters for cosmological model: {cosmo_model}")
+    if resume_replot_with_cuts and not resume:
+        raise ValueError("--resume_replot_with_cuts requires --resume to point at an existing posterior H5 file.")
+    if resume_replot_with_cuts and only_sna:
+        raise ValueError("--resume_replot_with_cuts is only supported for joint AGN Hubble fits, not --only_sna.")
     if not use_full_cov:
         print("[WARNING] use_full_cov=False: fitting with diagonal SN uncertainties instead of the full covariance matrix.")
 
@@ -891,7 +1061,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                     f"found {np.count_nonzero(bad)} non-finite rows."
                 )
 
-    if completeness:
+    if completeness and not resume_replot_with_cuts:
         if completeness_sim_file is None:
             completeness_area_deg2 = estimate_sky_box_area_deg2(df_agn_all)
             completeness_sim_file = generate_fresh_completeness_sim_file(
@@ -982,19 +1152,38 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
         #sampler = DynamicNestedSampler.restore(checkpoint_file, pool=pool)
         try:
             r = load_chains(checkpoint_file)
-            validate_resume_checkpoint(
-                r,
-                checkpoint_file=checkpoint_file,
-                ndim=ndim,
-                n_agn=len(agn_data["z"]),
-            )
+            if resume_replot_with_cuts:
+                r = _remap_resume_replot_checkpoint(
+                    r,
+                    checkpoint_file,
+                    df_agn,
+                    ndim,
+                )
+                print(
+                    "Resume-replot with cuts: loaded posterior samples and remapped "
+                    f"per-AGN arrays to {len(df_agn)} current AGN by object_id."
+                )
+            else:
+                validate_resume_checkpoint(
+                    r,
+                    checkpoint_file=checkpoint_file,
+                    ndim=ndim,
+                    n_agn=len(agn_data["z"]),
+                )
         except Exception as exc:
-            raise RuntimeError(
-                f"Failed to resume from checkpoint '{checkpoint_file}'. "
-                "The checkpoint appears incompatible with the current run configuration "
-                "(for example: different cosmology model, different selected AGN sample, "
-                "or an older file format). Start a fresh run or remove the stale checkpoint."
-            ) from exc
+            if resume_replot_with_cuts:
+                raise RuntimeError(
+                    f"Failed to resume/replot from checkpoint '{checkpoint_file}' with the current AGN cuts. "
+                    "The checkpoint must match the current parameterization and include object_id_fit_selection "
+                    "metadata covering every current AGN."
+                ) from exc
+            else:
+                raise RuntimeError(
+                    f"Failed to resume from checkpoint '{checkpoint_file}'. "
+                    "The checkpoint appears incompatible with the current run configuration "
+                    "(for example: different cosmology model, different selected AGN sample, "
+                    "or an older file format). Start a fresh run or remove the stale checkpoint."
+                ) from exc
         flat_samples = r["flat_samples"]
         dmi_max_w = r["dmi_max_w"]
         dmi_posterior_median = r.get("dmi_posterior_median", dmi_max_w)
@@ -1053,8 +1242,8 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                 queue_size=num_cores,
                 blob=True
             )
-            if speed == 'fast':
-                print("[Warning] Starting fast run...")
+            if speed == "fastest":
+                print("[Warning] Starting fastest run...")
                 sampler.run_nested(
                     print_progress=True,
                     dlogz_init=10,                 
@@ -1072,8 +1261,8 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                     nlive_batch=max(500, 25*ndim)   # reasonable batch size for dynamic allocation
                     # optional: sample='rwalk', walks=50, bound='multi' if you expect multi-modality
                 )
-            elif speed == "dev":
-                print("[Warning] Starting DEV run...")
+            elif speed == "quick":
+                print("[Warning] Starting quick run...")
                 sampler.run_nested(
                     print_progress=True,
                     dlogz_init=0.01,                 
@@ -1082,8 +1271,8 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                     nlive_batch=25   # reasonable batch size for dynamic allocation
                 )
 
-            elif speed == "test":
-                print("[Warning] Starting TEST run...")
+            elif speed == "standard":
+                print("[Warning] Starting standard run...")
                 sampler.run_nested(
                     print_progress=True,
                     dlogz_init=0.01,                 
@@ -1091,6 +1280,8 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                     nlive_init=250,   # bump live points
                     nlive_batch=100   # reasonable batch size for dynamic allocation
                 )
+            else:
+                raise ValueError(f"Invalid speed={speed!r}. Expected one of {SPEED_CHOICES}.")
 
 
         results = sampler.results
@@ -1197,6 +1388,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
             dmi_posterior_median=dmi_posterior_median,
             dmi_posterior_sigma=dmi_posterior_sigma,
             dmi_selection_sigma_posterior_median=dmi_selection_sigma_posterior_median,
+            object_id_fit_selection=df_agn["object_id"].astype(str).to_numpy(),
             logZ=logZ,
             logZerr=logZerr,
             integrals_max_w=integrals_max_w,
@@ -1263,8 +1455,10 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                disable_ceph_dist_calibration=False,
                use_alpha_lambda_term=False,
                use_eta_sigma_term=False,
-               use_redshift_log_f_term=False):
+               use_redshift_log_f_term=False,
+               resume_replot_with_cuts=False):
     validate_completeness_mode(completeness_mode)
+    speed = normalize_speed(speed)
     run_tag = make_run_tag(
         cosmo_model,
         only_sna,
@@ -1283,7 +1477,10 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
     print(f"Saving plots to ", plot_path)
     if completeness:
         if completeness_sim_file is None:
-            print("Completeness enabled with a freshly generated mock catalog.")
+            if resume_replot_with_cuts:
+                print("Completeness diagnostics enabled with a freshly generated mock catalog.")
+            else:
+                print("Completeness enabled with a freshly generated mock catalog.")
             completeness_area_deg2 = estimate_sky_box_area_deg2(df_agn_all)
             completeness_sim_file = generate_fresh_completeness_sim_file(
                 plot_path,
@@ -1293,6 +1490,15 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
             print(f"Completeness enabled with mock catalog file: {completeness_sim_file}")
 
     disable_sigma_clip_pass = bool(disable_sigma_clip_pass)
+    if resume_replot_with_cuts:
+        if not resume:
+            raise ValueError("resume_replot_with_cuts=True requires resume to point at an existing posterior H5 file.")
+        if not disable_sigma_clip_pass and not only_sna:
+            print(
+                "[INFO] resume_replot_with_cuts=True: bypassing the internal two-pass "
+                "sigma-clipping refit and regenerating plots for the current cut sample."
+            )
+        disable_sigma_clip_pass = True
     apply_two_pass_sigma_clip = (not disable_sigma_clip_pass) and (not only_sna)
     if apply_two_pass_sigma_clip and skip_plots:
         raise ValueError("Two-pass sigma clipping requires skip_plots=False so Hubble residuals can be computed.")
@@ -1308,12 +1514,25 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         )
 
     df_agn_full_sample = df_agn.copy()
-    df_agn_fit_selection = _select_agn_fit_selection(
-        df_agn_full_sample,
-        z_range=z_range,
-        N=N,
-        uniform_redshift_distribution=uniform_redshift_distribution,
-    )
+    if resume_replot_with_cuts:
+        if uniform_redshift_distribution:
+            raise ValueError("--resume_replot_with_cuts does not support uniform_redshift_distribution=True.")
+        if N is not None:
+            print(
+                "[INFO] --resume_replot_with_cuts uses the saved checkpoint object_id list "
+                "for the fit/debias selection; N is ignored for the resumed fit selection."
+            )
+        df_agn_fit_selection = _select_resume_replot_fit_selection(
+            df_agn_full_sample[df_agn_full_sample["z"].between(z_range[0], z_range[1])],
+            resume,
+        )
+    else:
+        df_agn_fit_selection = _select_agn_fit_selection(
+            df_agn_full_sample,
+            z_range=z_range,
+            N=N,
+            uniform_redshift_distribution=uniform_redshift_distribution,
+        )
     pass1_diagnostics_df = None
     keep_mask_full = None
     checkpoint_paths = _build_checkpoint_paths(prefix, run_tag)
@@ -1402,6 +1621,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 use_eta_sigma_term=use_eta_sigma_term,
                 use_redshift_log_f_term=use_redshift_log_f_term,
                 checkpoint_file_override=pass1_checkpoint_file,
+                resume_replot_with_cuts=False,
             )
             dmi_posterior_median_pass1_full = _map_fit_values_to_plot_sample(
                 df_agn_full_sample,
@@ -1591,6 +1811,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
+        resume_replot_with_cuts=resume_replot_with_cuts,
     )
     if apply_two_pass_sigma_clip:
         _write_stage_checkpoint(
@@ -2115,6 +2336,8 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
             use_eta_sigma_term=False,
             use_redshift_log_f_term=False):
 
+    validate_completeness_mode(completeness_mode)
+    speed = normalize_speed(speed)
     zmin, zmax = z_range
     n_tag = "all" if N is None else f"N{N}"
     z_tag = f"z{zmin:.2f}_{zmax:.2f}".replace(".", "p")
@@ -2299,7 +2522,16 @@ if __name__ == "__main__":
         help="For two-pass sigma clipping, choose which stage to resume: overall workflow ('both'), only the first pass ('pass1'), or only the second pass using embedded pass-1 state ('pass2'). Ignored when two-pass sigma clipping is disabled.",
     )
     parser.add_argument("--run", type=str, choices=["full", "single"], default="single", help="Run mode: compare_models, compare_sna, full, or single (default: single)")
-    parser.add_argument("--speed", type=str, choices=["production", "test", "fast", "dev"], default="production", help="Sampling speed: production, test, or fast (default: production)")
+    parser.add_argument(
+        "--speed",
+        type=str,
+        choices=SPEED_CHOICES,
+        default="production",
+        help=(
+            "Sampling speed preset. Preferred names, fastest to slowest: "
+            "fastest, quick, standard, production."
+        ),
+    )
     parser.add_argument("--N", type=int, default=None, help="Number of AGNs to run (default: all)")
     parser.add_argument("--only_sna", action="store_true", default=False, help="Run SNIa-only fit (default: False)")
     parser.add_argument("--spectra_fit_csv", type=str, nargs='+', help="Path(s) to spectra fit CSV file(s)")
@@ -2375,8 +2607,18 @@ if __name__ == "__main__":
         default=False,
         help="Use the experimental JAX/NumPyro nested-sampling pipeline instead of the default Dynesty pipeline.",
     )
+    parser.add_argument(
+        "--resume_replot_with_cuts",
+        action="store_true",
+        default=False,
+        help=(
+            "Load posterior samples from --resume, remap saved per-AGN debias arrays by object_id "
+            "to the current cut AGN sample, and regenerate plots without rerunning sampling."
+        ),
+    )
 
     args = parser.parse_args()
+    args.speed = normalize_speed(args.speed)
 
     print("Running Hubble fit with the following settings:")
     for k, v in vars(args).items():
@@ -2390,6 +2632,13 @@ if __name__ == "__main__":
         print("Warning: Running without CEPH_DIST calibration; using the Planck H0 prior instead.")
     if args.resume:
         print("Warning: Resuming previous MCMC run.")
+    if args.resume_replot_with_cuts:
+        if not args.resume:
+            raise ValueError("--resume_replot_with_cuts requires --resume path/to/posteriors.h5.")
+        if args.run != "single":
+            raise NotImplementedError("--resume_replot_with_cuts currently supports only --run single.")
+        if args.use_jax:
+            raise NotImplementedError("--resume_replot_with_cuts is not supported with --use_jax.")
 
     df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_pantheon_data()
     agn_plot_path = f"plots/hubble/{args.prefix}"
@@ -2402,12 +2651,15 @@ if __name__ == "__main__":
                            correct_sigma_uv_host=args.correct_sigma_uv_host,
                            z_range=tuple(args.z_range), plot_path=agn_plot_path,
                            cut_report_path=cut_report_path)
-    df_agn, effective_N = subsample_dataframe_at_most(
-        df_agn,
-        args.N,
-        random_state=42,
-        label="AGN objects",
-    )
+    if args.resume_replot_with_cuts:
+        effective_N = args.N
+    else:
+        df_agn, effective_N = subsample_dataframe_at_most(
+            df_agn,
+            args.N,
+            random_state=42,
+            label="AGN objects",
+        )
     if args.agn_calibrators:
         if args.agn_calibrators.endswith('.h5'):
             df_calibrators = read_quasars_from_hdf5_flat(args.agn_calibrators)
@@ -2469,7 +2721,8 @@ if __name__ == "__main__":
                 disable_ceph_dist_calibration=args.disable_ceph_dist_calibration,
                 use_alpha_lambda_term=args.fit_alpha_lambda_term,
                 use_eta_sigma_term=args.fit_eta_sigma_term,
-                use_redshift_log_f_term=args.fit_redshift_log_f_term)
+                use_redshift_log_f_term=args.fit_redshift_log_f_term,
+                resume_replot_with_cuts=args.resume_replot_with_cuts)
             samples_joint, model_labels, dm_interp, logZ_joint, logZerr_joint, debiased_residuals, age, age_err = r
             cosmo_models_dict[cosmo_model]['logZ'] = logZ_joint
             cosmo_models_dict[cosmo_model]['logZerr'] = logZerr_joint

@@ -63,10 +63,12 @@ from qvc.hubble.hubble_completeness_refactored import (
 )
 from qvc.hubble.hubble_fit import (
     DEFAULT_COMPLETENESS_SIM_FILE,
+    SPEED_CHOICES,
     VALID_COMPLETENESS_MODES,
     estimate_sky_box_area_deg2,
     generate_fresh_completeness_sim_file,
     make_run_tag,
+    normalize_speed,
     validate_completeness_mode,
     z_pivot_agn,
     z_pivot_sna,
@@ -595,13 +597,14 @@ def _run_numpyro_nested(model, model_labels, *, seed: int, num_live_points: int,
 
 def _nested_speed_preset(speed: str, ndim: int) -> tuple[int, int, float]:
     """Match the Dynesty speed presets as closely as practical for NumPyro."""
-    if speed == "fast":
+    speed = normalize_speed(speed)
+    if speed == "fastest":
         return 20, 10_000, 10.0
     if speed == "production":
         return max(1000, 50 * ndim), 500_000, 0.01
-    if speed == "dev":
+    if speed == "quick":
         return 25, 10_000, 0.01
-    if speed == "test":
+    if speed == "standard":
         return 250, 100_000, 0.01
     raise ValueError(f"Unknown speed preset: {speed!r}")
 
@@ -658,7 +661,7 @@ def run_single_jax(
     cosmo_model="Flatw0waCDM",
     completeness=True,
     z_range=(0.44, 3.16),
-    speed="fast",
+    speed="fastest",
     prefix="default_jax",
     completeness_sim_file=DEFAULT_COMPLETENESS_SIM_FILE,
     completeness_mode="2d",
@@ -679,6 +682,7 @@ def run_single_jax(
     if use_redshift_log_f_term:
         raise NotImplementedError("run_single_jax does not support --fit_redshift_log_f_term yet.")
     validate_completeness_mode(completeness_mode)
+    speed = normalize_speed(speed)
 
     run_tag = make_run_tag(
         cosmo_model,
@@ -982,7 +986,7 @@ def main():
     parser = argparse.ArgumentParser(description="Experimental JAX/NumPyro nested-sampling Hubble-fit pipeline.", allow_abbrev=True)
     parser.add_argument("agn_data_filepath", type=str, help="Path to AGN data file")
     parser.add_argument("--cosmo_model", type=str, default="Flatw0waCDM", choices=["FlatLambdaCDM", "FlatwCDM", "Flatw0waCDM", "FlatwpwaCDM"])
-    parser.add_argument("--speed", type=str, choices=["production", "test", "fast", "dev"], default="production")
+    parser.add_argument("--speed", type=str, choices=SPEED_CHOICES, default="production")
     parser.add_argument("--spectra_fit_csv", type=str, nargs="+", required=True)
     parser.add_argument("--prefix", type=str, default="default_jax")
     parser.add_argument("--z_range", type=float, nargs=2, default=[0.44, 3.16])
@@ -1000,6 +1004,7 @@ def main():
     parser.add_argument("--correct-sigma-uv-host", action="store_true", default=False)
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
+    args.speed = normalize_speed(args.speed)
 
     _require_jax_stack()
     df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_pantheon_data()

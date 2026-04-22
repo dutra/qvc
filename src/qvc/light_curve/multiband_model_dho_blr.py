@@ -9,6 +9,7 @@ from tinygp.kernels import quasisep as qs
 import tinygp.kernels.quasisep as tkq
 from tinygp import GaussianProcess
 
+from eztaox.kernels import direct, quasisep
 from eztaox.models import MultiVarModel
 
 
@@ -215,6 +216,10 @@ class ContiBLR_SHO_Model(MultiVarModel):
     """MultiVarModel with a convenience PSD method for plotting."""
 
     survey_idx: JAXArray | None = None
+    nBand: int
+    n_band: int
+    t_in_bands: list[JAXArray]
+    concat_inds_in_bands: list[JAXArray]
 
     def __init__(
         self,
@@ -231,24 +236,58 @@ class ContiBLR_SHO_Model(MultiVarModel):
         survey_idx=None,
         **kwargs,
     ):
-        super().__init__(
-            X,
-            y,
-            yerr,
-            base_kernel,
-            nBand,
-            multiband_kernel=multiband_kernel,
-            mean_func=mean_func,
-            amp_scale_func=amp_scale_func,
-            lag_func=lag_func,
-            **kwargs,
-        )
+        t = jnp.asarray(X[0])
+        band = jnp.asarray(X[1], dtype=jnp.int32)
+        y = jnp.asarray(y)
+        yerr = jnp.asarray(yerr)
+        inds = jnp.argsort(t)
+
+        self.X = (t[inds], band[inds])
+        self.diag = (yerr**2)[inds]
+        self.y = y[inds]
+        self.base_kernel_def = jax.flatten_util.ravel_pytree(base_kernel)[1]
+        is_quasisep_kernel = isinstance(base_kernel, qs.Quasisep)
+        self.nBand = nBand
+        self.n_band = nBand
+
+        # Some EzTaoX releases precompute per-band sorted indices with jnp.unique()
+        # in MultiVarModel.__init__. That is not valid when this qvc model is built
+        # from traced arrays inside NumPyro. qvc uses the simpler lag_transform()
+        # below, so these fast-path caches are intentionally left empty.
+        self.t_in_bands = []
+        self.concat_inds_in_bands = []
+
+        if multiband_kernel is None:
+            if is_quasisep_kernel:
+                multiband_kernel = quasisep.MultibandLowRank
+            else:
+                multiband_kernel = direct.MultibandLowRank
+        self.multiband_kernel = multiband_kernel
+        self.mean_func = mean_func
+        self.amp_scale_func = amp_scale_func
+        self.lag_func = lag_func
+        self.zero_mean = kwargs.get("zero_mean", True)
+        self.has_jitter = kwargs.get("has_jitter", False)
+        self.has_lag = kwargs.get("has_lag", False)
+
         if survey_idx is None:
             self.survey_idx = None
         else:
-            t = jnp.asarray(X[0])
-            inds = jnp.argsort(t)
             self.survey_idx = jnp.asarray(survey_idx, dtype=jnp.int32)[inds]
+
+    def lag_transform(
+        self, has_lag: bool, params: dict[str, JAXArray], X: JAXArray
+    ) -> tuple[tuple[JAXArray, JAXArray], JAXArray]:
+        if has_lag is False:
+            lags = jnp.zeros(self.nBand)
+        elif self.lag_func is not None:
+            lags = self.lag_func(params)
+        else:
+            lags = self._default_lag_func(params)
+
+        t, band = X
+        new_t = t - lags[band]
+        return (new_t, band), jnp.argsort(new_t)
 
     def my_lag_transform(
         self, X: JAXArray, has_lag: bool, params: dict[str, JAXArray]

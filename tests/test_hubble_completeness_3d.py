@@ -229,6 +229,112 @@ def test_completeness3d_shape_and_likelihood_matches_2d_when_host_independent():
     assert np.allclose(blob2, blob4, rtol=1e-10, atol=1e-10)
 
 
+def test_completeness_loglike_caches_detection_grid_across_parameter_calls():
+    mag_centers = np.linspace(18.5, 24.0, 9)
+    z_centers = np.linspace(0.0, 4.0, 7)
+    mm, zz = np.meshgrid(mag_centers, z_centers, indexing="ij")
+    c2 = np.clip(np.exp(-0.12 * zz) / (1.0 + np.exp((mm - 22.0) / 0.35)), 0.0, 1.0)
+    base = hcr.Completeness2D(mag_centers, z_centers, c2)
+
+    class CountingCompleteness:
+        mode = "2d"
+
+        def __init__(self, wrapped):
+            self.wrapped = wrapped
+            self.calls = 0
+
+        def __call__(self, *args, **kwargs):
+            self.calls += 1
+            return self.wrapped(*args, **kwargs)
+
+    comp = CountingCompleteness(base)
+    m_obs = np.array([20.5, 21.3, 22.1])
+    m_model = np.array([20.4, 21.1, 22.0])
+    mu_err = np.array([0.15, 0.18, 0.20])
+    z = np.array([0.8, 1.5, 2.2])
+
+    ll1, blob1 = hubble_likelihood.completeness_loglike(
+        m_obs=m_obs,
+        m_obs_err=np.full_like(m_obs, 0.05),
+        m_model=m_model,
+        mu_err=mu_err,
+        z=z,
+        completeness_model=comp,
+        m_grid=mag_centers,
+    )
+    ll2, blob2 = hubble_likelihood.completeness_loglike(
+        m_obs=m_obs,
+        m_obs_err=np.full_like(m_obs, 0.05),
+        m_model=m_model + 0.05,
+        mu_err=mu_err,
+        z=z,
+        completeness_model=comp,
+        m_grid=mag_centers,
+    )
+
+    assert comp.calls == 1
+    assert np.isfinite(ll1)
+    assert np.isfinite(ll2)
+    assert blob1.shape == blob2.shape == (3, len(m_obs))
+
+
+def test_log_likelihood_does_not_use_completeness_smoothing_as_extra_scatter(monkeypatch):
+    df_agn = _make_fake_agn_sample_with_fhost(n_agn=4)
+    df_pantheon = pd.DataFrame(
+        {
+            "zHD": np.linspace(0.02, 0.8, 8),
+            "m_b_corr": np.linspace(15.0, 18.0, 8),
+            "IS_CALIBRATOR": np.zeros(8, dtype=int),
+            "CEPH_DIST": np.full(8, -9.0),
+            "MU_SH0ES_ERR_DIAG": np.full(8, 0.08),
+        }
+    )
+    mag_centers = np.linspace(18.5, 24.0, 9)
+    z_centers = np.linspace(0.0, 4.0, 7)
+    c2 = np.ones((len(mag_centers), len(z_centers)))
+    completeness_params = (
+        hcr.Completeness2D(mag_centers, z_centers, c2),
+        mag_centers,
+        z_centers,
+        0.5,
+        0.1,
+        99.0,
+    )
+    captured = {}
+
+    def fake_completeness_loglike(*args, **kwargs):
+        captured["sigma_completeness"] = kwargs["sigma_completeness"]
+        n = len(kwargs["z"])
+        return 0.0, np.ones((3, n), dtype=float)
+
+    monkeypatch.setattr(hubble_likelihood, "completeness_loglike", fake_completeness_loglike)
+
+    priors, model_labels, _ = hubble_model.get_model_params("FlatLambdaCDM", only_sna=False)
+    theta = np.array([(priors[key][0] + priors[key][1]) / 2.0 for key in model_labels], dtype=float)
+    agn_fields = hubble_model.agn_model_req_obs + hubble_model.agn_model_req_errs
+    agn_fields += ("apparent_mag_2500", "apparent_mag_2500_err", "z", "z_err", "object_id")
+    agn_data = {col: df_agn[col].to_numpy() for col in agn_fields}
+    pantheon_data = {col: df_pantheon[col].to_numpy() for col in df_pantheon.columns}
+
+    logl, _ = hubble_likelihood.log_likelihood(
+        theta,
+        agn_data=agn_data,
+        pantheon_data=pantheon_data,
+        _sna_L=None,
+        _sna_Lower=True,
+        _sna_LogdetCov=None,
+        cosmo_model="FlatLambdaCDM",
+        completeness_params=completeness_params,
+        z_pivot_agn=hubble_fit.z_pivot_agn,
+        agn_calibrators_data=None,
+        only_sna=False,
+        use_full_cov=False,
+    )
+
+    assert np.isfinite(logl)
+    assert captured["sigma_completeness"] == 0.0
+
+
 def test_completeness_callables_return_zero_for_nonfinite_queries():
     mag_centers = np.linspace(18.5, 24.0, 5)
     z_centers = np.linspace(0.1, 3.0, 4)

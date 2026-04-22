@@ -1,7 +1,6 @@
 
 from scipy.linalg import cho_solve
 from astropy.cosmology import FlatwCDM, Flatw0waCDM, FlatLambdaCDM, FlatwpwaCDM
-from scipy import stats
 import numpy as np
 
 #from qvc.hubble.hubble_utils import loglike_cmb_theta_simple
@@ -14,6 +13,69 @@ from qvc.hubble.hubble_model import (
     evaluate_log_f,
 )
 from qvc.hubble.hubble_completeness_refactored import COMPLETENESS_FHOST_COL
+
+_LOG_2PI = np.log(2.0 * np.pi)
+_INV_SQRT_2PI = 1.0 / np.sqrt(2.0 * np.pi)
+
+
+def _normal_logpdf_sum(residuals, sigma):
+    residuals = np.asarray(residuals, dtype=float)
+    sigma = np.asarray(sigma, dtype=float)
+    return float(np.sum(-0.5 * (residuals / sigma) ** 2 - np.log(sigma) - 0.5 * _LOG_2PI))
+
+
+def _array_cache_token(arr):
+    if arr is None:
+        return None
+    arr = np.asarray(arr)
+    return (id(arr), arr.shape, arr.dtype.str)
+
+
+def _cached_completeness_pdet(
+    completeness_model,
+    m_grid,
+    z,
+    *,
+    f_host_2500_psf=None,
+    alpha_lambda=None,
+):
+    """Evaluate p(detect) on the fixed likelihood grid, caching across sampler calls."""
+
+    mode = getattr(completeness_model, "mode", "2d")
+    key = (
+        mode,
+        _array_cache_token(m_grid),
+        _array_cache_token(z),
+        _array_cache_token(f_host_2500_psf),
+        _array_cache_token(alpha_lambda),
+    )
+    cache = getattr(completeness_model, "_likelihood_pdet_cache", None)
+    if cache is None:
+        cache = {}
+        setattr(completeness_model, "_likelihood_pdet_cache", cache)
+    if key in cache:
+        return cache[key]
+
+    if mode == "4d_fhost_alpha":
+        if f_host_2500_psf is None or alpha_lambda is None:
+            raise ValueError("f_host_2500_psf and alpha_lambda are required for 4D host/color completeness.")
+        p_det = completeness_model(
+            m_grid[None, :],
+            z[:, None],
+            np.asarray(f_host_2500_psf)[:, None],
+            np.asarray(alpha_lambda)[:, None],
+        )
+    elif mode == "3d_fhost":
+        if f_host_2500_psf is None:
+            raise ValueError("f_host_2500_psf is required for 3D host-aware completeness.")
+        p_det = completeness_model(m_grid[None, :], z[:, None], np.asarray(f_host_2500_psf)[:, None])
+    else:
+        p_det = completeness_model(m_grid[None, :], z[:, None])
+
+    p_det = np.asarray(p_det, dtype=float)
+    cache[key] = p_det
+    return p_det
+
 
 def completeness_loglike(
     m_obs,
@@ -36,7 +98,8 @@ def completeness_loglike(
     mu_err  : array (N_obj,) Gaussian sigma for each magnitude
     z       : array (N_obj,) redshifts
     m_grid  : array (N_grid,) magnitude grid (e.g., the map's mag_centers)
-    sigma_completeness : float, additional uncertainty in completeness
+    sigma_completeness : float, optional physical scatter in the selection variable.
+        This should not be set from the completeness-map smoothing bandwidth.
     """
     m_grid = np.asarray(m_grid)
     z      = np.asarray(z)
@@ -46,24 +109,17 @@ def completeness_loglike(
     # shared pieces
     sig = np.sqrt(mu_err[:, None]**2 + float(sigma_completeness)**2)   # (N,1)
 
-    # completeness on grid for each object
-    mode = getattr(completeness_model, "mode", "2d")
-    if mode == "4d_fhost_alpha":
-        if f_host_2500_psf is None or alpha_lambda is None:
-            raise ValueError("f_host_2500_psf and alpha_lambda are required for 4D host/color completeness.")
-        fhost = np.asarray(f_host_2500_psf)
-        alpha_lambda = np.asarray(alpha_lambda)
-        p_det = completeness_model(m_grid[None, :], z[:, None], fhost[:, None], alpha_lambda[:, None])
-    elif mode == "3d_fhost":
-        if f_host_2500_psf is None:
-            raise ValueError("f_host_2500_psf is required for 3D host-aware completeness.")
-        fhost = np.asarray(f_host_2500_psf)
-        p_det = completeness_model(m_grid[None, :], z[:, None], fhost[:, None])
-    else:
-        p_det = completeness_model(m_grid[None, :], z[:, None])                 # (N,G)
+    p_det = _cached_completeness_pdet(
+        completeness_model,
+        m_grid,
+        z,
+        f_host_2500_psf=f_host_2500_psf,
+        alpha_lambda=alpha_lambda,
+    )
 
     # Model-centered selection factor: Z_i
-    pdf_model = stats.norm.pdf(m_grid[None, :], loc=m_model[:, None], scale=sig)  # (N,G)
+    dx = (m_grid[None, :] - m_model[:, None]) / sig
+    pdf_model = np.exp(-0.5 * dx**2) * (_INV_SQRT_2PI / sig)  # (N,G)
     wpdf_model = pdf_model * p_det
 
     Z = np.trapezoid(wpdf_model, m_grid, axis=1)                            # (N,)
@@ -133,7 +189,7 @@ def log_likelihood_pantheon_cephdist(params, pantheon_data, _sna_L, _sna_Lower, 
         ll_snia = -0.5 * quad_form - 0.5 * _sna_LogdetCov - 0.5 * n * np.log(2 * np.pi)
     else:
         sigma = pantheon_data['MU_SH0ES_ERR_DIAG'][mask]
-        ll_snia = np.sum(stats.norm.logpdf(res_snia, scale=sigma))
+        ll_snia = _normal_logpdf_sum(res_snia, sigma)
 
     return ll_snia
 
@@ -276,8 +332,7 @@ def log_likelihood(theta, *, agn_data, pantheon_data,
 
     mu_cosmo = cosmo.distmod(z).value
 
-    ll_agn_terms = stats.norm.logpdf(mu_pred - mu_cosmo, scale=mu_err)    
-    ll_agn = np.sum(ll_agn_terms)
+    ll_agn = _normal_logpdf_sum(mu_pred - mu_cosmo, mu_err)
 
     m_model = M_pred + mu_cosmo  # model-predicted magnitude
 
@@ -286,14 +341,12 @@ def log_likelihood(theta, *, agn_data, pantheon_data,
     if completeness_params is not None:
         completeness_model = completeness_params[0]
         mag_centers = completeness_params[1]
-        mode = getattr(completeness_model, "mode", "2d")
-        completeness_scatter = completeness_params[-3] if mode == "4d_fhost_alpha" else (completeness_params[-2] if mode == "3d_fhost" else completeness_params[-1])
         ll_completeness, comp_blob = completeness_loglike(
             m_obs=m_obs,
             m_obs_err=m_err,
             m_model=m_model, mu_err=mu_err, z=z,
             completeness_model=completeness_model, m_grid=mag_centers,
-            sigma_completeness=completeness_scatter,
+            sigma_completeness=0.0,
             f_host_2500_psf=agn_data.get(COMPLETENESS_FHOST_COL),
             alpha_lambda=agn_data.get("alpha_lambda"),
         )
@@ -423,8 +476,7 @@ def log_likelihood_nearbylcs(
         np.exp(log_f_eff_nc)**2
     )
 
-    ll_agn_terms_nc = stats.norm.logpdf(mu_pred_nc - mu_cosmo_nc, scale=mu_err_nc)
-    ll_agn_noncal = np.sum(ll_agn_terms_nc)
+    ll_agn_noncal = _normal_logpdf_sum(mu_pred_nc - mu_cosmo_nc, mu_err_nc)
 
     # ========================
     # 2) CALIBRATOR AGN (agn_calibrators_data ONLY)
@@ -481,7 +533,7 @@ def log_likelihood_nearbylcs(
             mu_cal_err**2
         )
 
-        ll_agn_cal = np.sum(stats.norm.logpdf(mu_pred_c - mu_cal, scale=mu_err_c))
+        ll_agn_cal = _normal_logpdf_sum(mu_pred_c - mu_cal, mu_err_c)
     else:
         raise ValueError("No calibrator AGN found in agn_calibrators_data where AGN_IS_CALIBRATOR is True.")
         ll_agn_cal = 0.0
@@ -494,8 +546,6 @@ def log_likelihood_nearbylcs(
     if completeness_params is not None and np.any(mask_noncal):
         completeness_model = completeness_params[0]
         mag_centers = completeness_params[1]
-        mode = getattr(completeness_model, "mode", "2d")
-        completeness_scatter = completeness_params[-3] if mode == "4d_fhost_alpha" else (completeness_params[-2] if mode == "3d_fhost" else completeness_params[-1])
         # model-predicted magnitude for non-calibrators (cosmo-anchored for selection)
         m_model_nc = M_pred_nc + mu_cosmo_nc
         ll_completeness, comp_blob = completeness_loglike(
@@ -503,7 +553,7 @@ def log_likelihood_nearbylcs(
             m_obs_err=m_err_nc,
             m_model=m_model_nc, mu_err=mu_err_nc, z=z_nc,
             completeness_model=completeness_model, m_grid=mag_centers,
-            sigma_completeness=completeness_scatter,
+            sigma_completeness=0.0,
             f_host_2500_psf=agn_data.get(COMPLETENESS_FHOST_COL, None)[mask_noncal] if agn_data.get(COMPLETENESS_FHOST_COL, None) is not None else None,
             alpha_lambda=agn_data.get("alpha_lambda", None)[mask_noncal] if agn_data.get("alpha_lambda", None) is not None else None,
         )

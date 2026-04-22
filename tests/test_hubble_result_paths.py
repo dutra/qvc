@@ -21,6 +21,17 @@ from qvc.hubble.hubble_utils import (
 )
 
 
+def test_speed_names_are_ordered_and_do_not_accept_legacy_aliases():
+    assert hubble_fit.SPEED_CHOICES == ("fastest", "quick", "standard", "production")
+    assert hubble_fit.normalize_speed("fastest") == "fastest"
+    assert hubble_fit.normalize_speed("quick") == "quick"
+    assert hubble_fit.normalize_speed("standard") == "standard"
+    assert hubble_fit.normalize_speed("production") == "production"
+
+    with pytest.raises(ValueError, match="Invalid speed"):
+        hubble_fit.normalize_speed("fast")
+
+
 def test_resolve_qvc_result_path_absolute_existing(tmp_path):
     target = tmp_path / "artifact.h5"
     target.write_text("ok")
@@ -139,7 +150,7 @@ def test_run_mcmc_pipeline_default_resume_uses_result_dir(monkeypatch, tmp_path)
     df_agn = _minimal_agn_df()
     df_pantheon = _minimal_pantheon_df()
     result_root = tmp_path / "result_root"
-    expected = result_root / "hubble_posteriors" / "unit" / "posteriors_FlatLambdaCDM_joint_fast_all_z0p44_3p16_disable_completeness.h5"
+    expected = result_root / "hubble_posteriors" / "unit" / "posteriors_FlatLambdaCDM_joint_fastest_all_z0p44_3p16_disable_completeness.h5"
     captured = {}
 
     monkeypatch.setattr(hubble_fit, "get_qvc_result_dir", lambda: result_root)
@@ -184,7 +195,7 @@ def test_run_mcmc_pipeline_default_resume_uses_result_dir(monkeypatch, tmp_path)
         completeness=False,
         use_full_cov=False,
         resume=True,
-        speed="fast",
+        speed="fastest",
         prefix="unit",
     )
 
@@ -242,11 +253,177 @@ def test_run_mcmc_pipeline_explicit_resume_path_bypasses_default(monkeypatch, tm
         completeness=False,
         use_full_cov=False,
         resume=str(explicit),
-        speed="fast",
+        speed="fastest",
         prefix="unit",
     )
 
     assert captured["path"] == str(explicit)
+
+
+def test_run_mcmc_pipeline_new_checkpoint_writes_fit_object_ids(monkeypatch, tmp_path):
+    df_agn = _minimal_agn_df()
+    df_pantheon = _minimal_pantheon_df()
+    captured = {}
+
+    class DummyPool:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class DummyContext:
+        def Pool(self, processes):
+            return DummyPool()
+
+    class DummyResults:
+        samples = np.array([[70.0], [71.0], [72.0]], dtype=float)
+        logl = np.array([-3.0, -2.0, -1.0], dtype=float)
+        logz = np.array([0.0], dtype=float)
+        logzerr = np.array([0.1], dtype=float)
+        logwt = np.log(np.array([1.0, 2.0, 3.0], dtype=float))
+        blob = np.array(
+            [
+                [[1.0, 1.1], [0.01, 0.02], [0.1, 0.2]],
+                [[2.0, 2.1], [0.03, 0.04], [0.3, 0.4]],
+                [[3.0, 3.1], [0.05, 0.06], [0.5, 0.6]],
+            ],
+            dtype=float,
+        )
+
+    class DummySampler:
+        def __init__(self, *args, **kwargs):
+            self.results = DummyResults()
+
+        def run_nested(self, *args, **kwargs):
+            return None
+
+    monkeypatch.setattr(hubble_fit, "DynamicNestedSampler", DummySampler)
+    monkeypatch.setattr(hubble_fit.multiprocessing, "get_context", lambda *args, **kwargs: DummyContext())
+    monkeypatch.setattr(hubble_fit, "get_model_params", lambda *args, **kwargs: ({"H0": (60.0, 80.0)}, ["H0"], ["H0"]))
+    monkeypatch.setattr(hubble_fit, "get_agn_model_spec", lambda *args, **kwargs: ((), (), ()))
+    monkeypatch.setattr(hubble_fit, "make_dm_function", lambda *args, **kwargs: "interp")
+    monkeypatch.setattr(hubble_fit, "plot_dynesty", lambda *args, **kwargs: None)
+    monkeypatch.setattr(hubble_fit, "plot_completeness_diagnostics", lambda *args, **kwargs: None)
+    monkeypatch.setattr(hubble_fit, "evaluate_log_f", lambda *args, **kwargs: np.zeros(1, dtype=float))
+    monkeypatch.setattr(hubble_fit.dyfunc, "resample_equal", lambda idx, weights: idx)
+    monkeypatch.setattr(hubble_fit, "save_chains", lambda filename, **kwargs: captured.update(kwargs))
+
+    hubble_fit.run_mcmc_pipeline(
+        df_agn=df_agn,
+        df_agn_all=df_agn.copy(),
+        df_pantheon=df_pantheon,
+        _sna_L=None,
+        _sna_Lower=True,
+        _sna_LogdetCov=None,
+        cosmo_model="FlatLambdaCDM",
+        completeness=False,
+        use_full_cov=False,
+        speed="fastest",
+        prefix="unit",
+    )
+
+    np.testing.assert_array_equal(captured["object_id_fit_selection"], df_agn["object_id"].astype(str).to_numpy())
+
+
+def test_resume_replot_with_cuts_remaps_per_object_arrays_by_object_id(tmp_path):
+    checkpoint = tmp_path / "posterior.h5"
+    hubble_fit.save_chains(
+        str(checkpoint),
+        flat_samples=np.ones((3, 1)),
+        object_id_fit_selection=np.array(["agn_a", "agn_b", "agn_c"]),
+        dmi_max_w=np.array([10.0, 20.0, 30.0]),
+        dmi_posterior_median=np.array([11.0, 21.0, 31.0]),
+        dmi_posterior_sigma=np.array([0.1, 0.2, 0.3]),
+        dmi_selection_sigma_posterior_median=np.array([1.1, 1.2, 1.3]),
+        integrals_max_w=np.array([100.0, 200.0, 300.0]),
+        logZ=-1.0,
+        logZerr=0.1,
+    )
+    current = pd.DataFrame({"object_id": ["agn_c", "agn_a"]})
+    remapped = hubble_fit._remap_resume_replot_checkpoint(
+        hubble_fit.load_chains(str(checkpoint)),
+        str(checkpoint),
+        current,
+        ndim=1,
+    )
+
+    np.testing.assert_array_equal(remapped["object_id_fit_selection"], np.array(["agn_c", "agn_a"]))
+    np.testing.assert_allclose(remapped["dmi_max_w"], [30.0, 10.0])
+    np.testing.assert_allclose(remapped["dmi_posterior_median"], [31.0, 11.0])
+    np.testing.assert_allclose(remapped["dmi_posterior_sigma"], [0.3, 0.1])
+    np.testing.assert_allclose(remapped["dmi_selection_sigma_posterior_median"], [1.3, 1.1])
+    np.testing.assert_allclose(remapped["integrals_max_w"], [300.0, 100.0])
+
+
+def test_resume_replot_with_cuts_rejects_missing_current_object_id(tmp_path):
+    checkpoint = tmp_path / "posterior.h5"
+    hubble_fit.save_chains(
+        str(checkpoint),
+        flat_samples=np.ones((3, 1)),
+        object_id_fit_selection=np.array(["agn_a", "agn_b"]),
+        dmi_max_w=np.array([10.0, 20.0]),
+        dmi_posterior_sigma=np.array([0.1, 0.2]),
+        integrals_max_w=np.array([100.0, 200.0]),
+        logZ=-1.0,
+        logZerr=0.1,
+    )
+    current = pd.DataFrame({"object_id": ["agn_a", "agn_missing"]})
+
+    with pytest.raises(RuntimeError, match="Missing 1 / 2 current object IDs"):
+        hubble_fit._remap_resume_replot_checkpoint(
+            hubble_fit.load_chains(str(checkpoint)),
+            str(checkpoint),
+            current,
+            ndim=1,
+        )
+
+
+def test_resume_replot_with_cuts_rejects_legacy_checkpoint_without_object_ids(tmp_path):
+    checkpoint = tmp_path / "legacy.h5"
+    hubble_fit.save_chains(
+        str(checkpoint),
+        flat_samples=np.ones((3, 1)),
+        dmi_max_w=np.array([10.0, 20.0]),
+        dmi_posterior_sigma=np.array([0.1, 0.2]),
+        integrals_max_w=np.array([100.0, 200.0]),
+        logZ=-1.0,
+        logZerr=0.1,
+    )
+    current = pd.DataFrame({"object_id": ["agn_a"]})
+
+    with pytest.raises(RuntimeError, match="object_id_fit_selection"):
+        hubble_fit._remap_resume_replot_checkpoint(
+            hubble_fit.load_chains(str(checkpoint)),
+            str(checkpoint),
+            current,
+            ndim=1,
+        )
+
+
+def test_restrict_agn_to_resume_replot_sample_applies_current_cuts_with_checkpoint_order(tmp_path):
+    checkpoint = tmp_path / "posterior.h5"
+    hubble_fit.save_chains(
+        str(checkpoint),
+        flat_samples=np.ones((3, 1)),
+        object_id_fit_selection=np.array(["agn_c", "agn_a", "agn_b"]),
+        dmi_max_w=np.array([30.0, 10.0, 20.0]),
+        dmi_posterior_sigma=np.array([0.3, 0.1, 0.2]),
+        integrals_max_w=np.array([300.0, 100.0, 200.0]),
+        logZ=-1.0,
+        logZerr=0.1,
+    )
+    current_after_cuts = pd.DataFrame(
+        {
+            "object_id": ["agn_b", "agn_x", "agn_c"],
+            "z": [0.5, 0.6, 0.7],
+        }
+    )
+
+    restricted = hubble_fit.restrict_agn_to_resume_replot_sample(current_after_cuts, str(checkpoint))
+
+    assert restricted["object_id"].tolist() == ["agn_c", "agn_b"]
+    assert restricted["z"].tolist() == [0.7, 0.5]
 
 
 def test_run_all_saves_cosmo_results_under_result_dir(monkeypatch, tmp_path):
@@ -282,7 +459,7 @@ def test_run_all_saves_cosmo_results_under_result_dir(monkeypatch, tmp_path):
         cosmo_models=["FlatLambdaCDM"],
         skip_plots=True,
         z_range=(0.44, 3.16),
-        speed="fast",
+        speed="fastest",
         prefix="unit",
     )
 
@@ -339,7 +516,7 @@ def test_run_all_compare_sigma_only_still_compares_models_and_skips_corner_plots
         skip_plots=False,
         compare_sigma_only=True,
         z_range=(0.44, 3.16),
-        speed="fast",
+        speed="fastest",
         prefix="unit",
     )
 

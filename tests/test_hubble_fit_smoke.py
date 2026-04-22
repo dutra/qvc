@@ -192,7 +192,7 @@ def test_run_single_skip_plots_smoke(fake_data, monkeypatch, tmp_path):
         completeness=False,
         use_full_cov=False,
         only_sna=False,
-        speed="fast",
+        speed="fastest",
         z_range=(0.44, 3.16),
         skip_plots=True,
         disable_sigma_clip_pass=True,
@@ -251,7 +251,7 @@ def test_run_single_only_sna_smoke(fake_data, monkeypatch, tmp_path):
         completeness=False,
         use_full_cov=False,
         only_sna=True,
-        speed="fast",
+        speed="fastest",
         z_range=(0.44, 3.16),
         skip_plots=False,
         prefix="unit",
@@ -345,7 +345,7 @@ def test_run_single_calls_agn_table_only_for_joint_flatw0wa(monkeypatch, tmp_pat
         completeness=False,
         use_full_cov=False,
         only_sna=False,
-        speed="fast",
+        speed="fastest",
         z_range=(0.44, 3.16),
         skip_plots=False,
         prefix="unit",
@@ -401,7 +401,7 @@ def test_run_single_does_not_call_agn_table_for_only_sna(monkeypatch, tmp_path):
         completeness=False,
         use_full_cov=False,
         only_sna=True,
-        speed="fast",
+        speed="fastest",
         z_range=(0.44, 3.16),
         skip_plots=False,
         prefix="unit",
@@ -457,7 +457,7 @@ def test_run_single_does_not_call_agn_table_when_skip_plots(monkeypatch, tmp_pat
         completeness=False,
         use_full_cov=False,
         only_sna=False,
-        speed="fast",
+        speed="fastest",
         z_range=(0.44, 3.16),
         skip_plots=True,
         disable_sigma_clip_pass=True,
@@ -520,7 +520,7 @@ def test_run_single_compare_sigma_only_skips_plotting_but_keeps_fit_outputs(monk
         completeness=False,
         use_full_cov=False,
         only_sna=False,
-        speed="fast",
+        speed="fastest",
         z_range=(0.44, 3.16),
         skip_plots=False,
         compare_sigma_only=True,
@@ -629,7 +629,7 @@ def test_run_mcmc_pipeline_requires_eta_sigma_columns_when_flag_enabled(fake_dat
             cosmo_model="FlatLambdaCDM",
             completeness=False,
             use_full_cov=False,
-            speed="fast",
+            speed="fastest",
             use_eta_sigma_term=True,
         )
 
@@ -651,7 +651,7 @@ def test_run_mcmc_pipeline_requires_finite_eta_sigma_err_when_flag_enabled(fake_
             cosmo_model="FlatLambdaCDM",
             completeness=False,
             use_full_cov=False,
-            speed="fast",
+            speed="fastest",
             use_eta_sigma_term=True,
         )
 
@@ -676,7 +676,7 @@ def test_run_mcmc_pipeline_compare_sigma_only_skips_completeness_plots_on_resume
         }
     )
     result_root = tmp_path / "result_root"
-    expected = result_root / "hubble_posteriors" / "unit" / "posteriors_FlatLambdaCDM_joint_fast_all_z0p44_3p16_2d.h5"
+    expected = result_root / "hubble_posteriors" / "unit" / "posteriors_FlatLambdaCDM_joint_fastest_all_z0p44_3p16_2d.h5"
     completeness_calls = []
     diagnostics_calls = []
 
@@ -720,7 +720,7 @@ def test_run_mcmc_pipeline_compare_sigma_only_skips_completeness_plots_on_resume
         completeness=True,
         use_full_cov=False,
         resume=True,
-        speed="fast",
+        speed="fastest",
         prefix="unit",
         compare_sigma_only=True,
         completeness_sim_file="dummy_completeness.h5",
@@ -768,6 +768,106 @@ def _write_fake_checkpoint(path, flat_samples, dmi_posterior_median, dmi_posteri
         logZerr=float(logzerr),
         integrals_max_w=np.ones(len(dmi_posterior_median), dtype=float),
     )
+
+
+def test_run_single_resume_replot_with_cuts_bypasses_sampling_passes_and_plots_current_cut_sample(monkeypatch, tmp_path):
+    df_agn = _make_fake_agn_sample(n_agn=3)
+    checkpoint_ids = df_agn.iloc[[2, 0]]["object_id"].astype(str).to_numpy()
+    df_pantheon = _make_fake_pantheon_sample()
+    priors, model_labels, _ = hubble_model.get_model_params("FlatLambdaCDM", only_sna=False)
+    theta = np.array([(priors[key][0] + priors[key][1]) / 2.0 for key in model_labels], dtype=float)
+    pipeline_calls = []
+    plot_hubble_calls = []
+    completeness_plot_calls = []
+
+    monkeypatch.chdir(tmp_path)
+    _patch_run_single_plot_stack(monkeypatch)
+    generated_completeness = tmp_path / "generated_completeness.h5"
+    monkeypatch.setattr(hubble_fit, "estimate_sky_box_area_deg2", lambda *args, **kwargs: 5.0)
+    monkeypatch.setattr(hubble_fit, "generate_fresh_completeness_sim_file", lambda *args, **kwargs: str(generated_completeness))
+    monkeypatch.setattr(
+        hubble_fit,
+        "get_completeness_function_2d",
+        lambda *args, **kwargs: (
+            completeness_plot_calls.append(kwargs.get("sim_file")),
+            (
+                np.ones((2, 2)),
+                np.array([19.0, 20.0]),
+                np.array([0.5, 1.0]),
+                0.5,
+                0.1,
+                0.0,
+            ),
+        )[1],
+    )
+    monkeypatch.setattr(hubble_fit, "plot_completeness_vs_mag_at_redshifts", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        hubble_fit,
+        "_load_resume_replot_object_ids",
+        lambda resume: (str(resume), checkpoint_ids),
+    )
+
+    def fake_run_mcmc_pipeline(df_agn_arg, *args, **kwargs):
+        pipeline_calls.append(
+            {
+                "object_ids": df_agn_arg["object_id"].tolist(),
+                "resume": kwargs.get("resume"),
+                "resume_replot_with_cuts": kwargs.get("resume_replot_with_cuts"),
+                "completeness_sim_file": kwargs.get("completeness_sim_file"),
+            }
+        )
+        n = len(df_agn_arg)
+        return (
+            np.tile(theta[None, :], (8, 1)),
+            model_labels,
+            lambda pts: np.zeros(len(np.atleast_2d(pts))),
+            None,
+            -5.0,
+            0.2,
+            np.arange(n, dtype=float),
+            np.full(n, 0.05),
+            None,
+        )
+
+    def fake_plot_hubble(flat_samples, df_plot, df_pantheon, *args, **kwargs):
+        plot_hubble_calls.append(
+            {
+                "object_ids": df_plot["object_id"].tolist(),
+                "filename": kwargs.get("filename"),
+            }
+        )
+        n = len(df_plot)
+        return np.zeros(n), np.ones(n), np.zeros(n), np.ones(n), np.ones(n)
+
+    monkeypatch.setattr(hubble_fit, "run_mcmc_pipeline", fake_run_mcmc_pipeline)
+    monkeypatch.setattr(hubble_fit, "plot_hubble", fake_plot_hubble)
+
+    hubble_fit.run_single(
+        df_agn,
+        df_agn.copy(),
+        df_pantheon,
+        None,
+        True,
+        None,
+        cosmo_model="FlatLambdaCDM",
+        completeness=True,
+        use_full_cov=False,
+        resume=str(tmp_path / "posterior.h5"),
+        speed="fastest",
+        prefix="unit",
+        resume_replot_with_cuts=True,
+    )
+
+    expected_fit_ids = checkpoint_ids.tolist()
+    expected_plot_ids = df_agn["object_id"].tolist()
+    assert len(pipeline_calls) == 1
+    assert pipeline_calls[0]["object_ids"] == expected_fit_ids
+    assert pipeline_calls[0]["resume"] == str(tmp_path / "posterior.h5")
+    assert pipeline_calls[0]["resume_replot_with_cuts"] is True
+    assert pipeline_calls[0]["completeness_sim_file"] == str(generated_completeness)
+    assert plot_hubble_calls[0]["object_ids"] == expected_plot_ids
+    assert plot_hubble_calls[0]["filename"] is None
+    assert completeness_plot_calls == [str(generated_completeness)]
 
 
 def test_run_single_two_pass_sigma_clip_filters_outliers_and_writes_diagnostics(monkeypatch, tmp_path):
@@ -856,7 +956,7 @@ def test_run_single_two_pass_sigma_clip_filters_outliers_and_writes_diagnostics(
         completeness=False,
         use_full_cov=False,
         only_sna=False,
-        speed="fast",
+        speed="fastest",
         z_range=(0.44, 3.16),
         disable_sigma_clip_pass=False,
         sigma_clip_threshold=3.0,
@@ -878,8 +978,8 @@ def test_run_single_two_pass_sigma_clip_filters_outliers_and_writes_diagnostics(
     assert plot_hubble_calls[1]["filename"] == "hubble_diagram_pass1_full_sample_clipped_debiased.pdf"
     assert plot_hubble_calls[1]["sigma_clip_threshold"] == 3.0
 
-    run_dir = tmp_path / "plots" / "hubble" / "unit" / "FlatLambdaCDM_joint_fast_all_z0p44_3p16_disable_completeness"
-    run_tag = hubble_fit.make_run_tag("FlatLambdaCDM", False, "fast", None, (0.44, 3.16), completeness=False)
+    run_dir = tmp_path / "plots" / "hubble" / "unit" / "FlatLambdaCDM_joint_fastest_all_z0p44_3p16_disable_completeness"
+    run_tag = hubble_fit.make_run_tag("FlatLambdaCDM", False, "fastest", None, (0.44, 3.16), completeness=False)
     checkpoint_paths = hubble_fit._build_checkpoint_paths("unit", run_tag)
     pass1_df = pd.read_csv(run_dir / "residuals_pass1.csv")
     clipped_df = pd.read_csv(run_dir / "clipped_objects_pass1.csv")
@@ -971,7 +1071,7 @@ def test_run_single_two_pass_sigma_clip_reruns_even_without_clipped_objects(monk
         completeness=False,
         use_full_cov=False,
         only_sna=False,
-        speed="fast",
+        speed="fastest",
         z_range=(0.44, 3.16),
         disable_sigma_clip_pass=False,
         sigma_clip_threshold=3.0,
@@ -1091,7 +1191,7 @@ def test_run_single_two_pass_sigma_clip_removes_clipped_object_ids_from_second_p
         completeness=False,
         use_full_cov=False,
         only_sna=False,
-        speed="fast",
+        speed="fastest",
         z_range=(0.44, 3.16),
         disable_sigma_clip_pass=False,
         sigma_clip_threshold=3.0,
@@ -1197,14 +1297,14 @@ def test_run_single_two_pass_sigma_clip_keeps_new_pass2_outlier(monkeypatch, tmp
         completeness=False,
         use_full_cov=False,
         only_sna=False,
-        speed="fast",
+        speed="fastest",
         z_range=(0.44, 3.16),
         disable_sigma_clip_pass=False,
         sigma_clip_threshold=3.0,
         prefix="unit",
     )
 
-    run_dir = tmp_path / "plots" / "hubble" / "unit" / "FlatLambdaCDM_joint_fast_all_z0p44_3p16_disable_completeness"
+    run_dir = tmp_path / "plots" / "hubble" / "unit" / "FlatLambdaCDM_joint_fastest_all_z0p44_3p16_disable_completeness"
     final_df = pd.read_csv(run_dir / "residuals.csv")
     assert set(final_df["object_id"]) == set(df_agn["object_id"])
     assert final_df.loc[final_df["object_id"] == "agn_001", "mu_zscore_pass1"].item() < 3.0
@@ -1234,7 +1334,7 @@ def test_run_single_resume_stage_pass2_skips_first_pass(monkeypatch, tmp_path):
         ),
     )
 
-    run_tag = hubble_fit.make_run_tag("FlatLambdaCDM", False, "fast", None, (0.44, 3.16), completeness=False)
+    run_tag = hubble_fit.make_run_tag("FlatLambdaCDM", False, "fastest", None, (0.44, 3.16), completeness=False)
     checkpoint_paths = hubble_fit._build_checkpoint_paths("unit", run_tag)
     flat_samples_pass1 = np.tile(theta[None, :], (8, 1))
     _write_fake_checkpoint(checkpoint_paths["pass1"], flat_samples_pass1, np.zeros(5), np.full(5, 0.05), logz=-11.0)
@@ -1286,7 +1386,7 @@ def test_run_single_resume_stage_pass2_skips_first_pass(monkeypatch, tmp_path):
         completeness=False,
         use_full_cov=False,
         only_sna=False,
-        speed="fast",
+        speed="fastest",
         z_range=(0.44, 3.16),
         disable_sigma_clip_pass=False,
         sigma_clip_threshold=3.0,
@@ -1310,7 +1410,7 @@ def test_run_single_resume_stage_pass2_rejects_legacy_checkpoint(monkeypatch, tm
     monkeypatch.chdir(tmp_path)
     _patch_run_single_plot_stack(monkeypatch)
 
-    run_tag = hubble_fit.make_run_tag("FlatLambdaCDM", False, "fast", None, (0.44, 3.16), completeness=False)
+    run_tag = hubble_fit.make_run_tag("FlatLambdaCDM", False, "fastest", None, (0.44, 3.16), completeness=False)
     checkpoint_paths = hubble_fit._build_checkpoint_paths("unit", run_tag)
     _write_fake_checkpoint(checkpoint_paths["single"], np.tile(theta[None, :], (8, 1)), np.zeros(len(df_agn)), np.full(len(df_agn), 0.05), logz=-9.0)
 
@@ -1326,7 +1426,7 @@ def test_run_single_resume_stage_pass2_rejects_legacy_checkpoint(monkeypatch, tm
             completeness=False,
             use_full_cov=False,
             only_sna=False,
-            speed="fast",
+            speed="fastest",
             z_range=(0.44, 3.16),
             disable_sigma_clip_pass=False,
             sigma_clip_threshold=3.0,
@@ -1387,7 +1487,7 @@ def test_run_single_resume_stage_pass1_stops_before_second_pass(monkeypatch, tmp
         completeness=False,
         use_full_cov=False,
         only_sna=False,
-        speed="fast",
+        speed="fastest",
         z_range=(0.44, 3.16),
         disable_sigma_clip_pass=False,
         sigma_clip_threshold=3.0,
@@ -1482,7 +1582,7 @@ def test_run_single_disable_sigma_clip_pass_skips_two_pass_branch(monkeypatch, t
         completeness=False,
         use_full_cov=False,
         only_sna=False,
-        speed="fast",
+        speed="fastest",
         z_range=(0.44, 3.16),
         disable_sigma_clip_pass=True,
         sigma_clip_threshold=3.0,
