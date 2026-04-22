@@ -101,6 +101,12 @@ APPENDIX_STEPS = [
         "filename": "TotalDat.fits.gz",
         "skip_if_exists": "TotalDat.fits",
     },
+    {
+        "type": "download",
+        "url": "https://data.sdss.org/sas/dr17/sdss/spectro/redux/specObj-dr17.fits",
+        "folder": "data/SDSS_DR17",
+        "filename": "specObj-dr17.fits",
+    }
 ]
 
 
@@ -160,9 +166,31 @@ def download_from_http(url, filename=None):
     with urllib.request.urlopen(url) as response:
         resolved_name = filename or infer_filename_from_response(response) or infer_filename_from_url(url)
         print(f"{Fore.BLUE}GET  {Fore.RESET} Fetching via HTTP: {resolved_name}...")
+        content_length = response.headers.get("Content-Length")
+        total_bytes = None
+        if content_length:
+            try:
+                parsed_length = int(content_length)
+            except ValueError:
+                parsed_length = None
+            if parsed_length is not None and parsed_length >= 0:
+                total_bytes = parsed_length
         suffix = Path(resolved_name).suffix
         with tempfile.NamedTemporaryFile(delete=False, suffix=suffix or "") as handle:
-            shutil.copyfileobj(response, handle)
+            with tqdm(
+                total=total_bytes,
+                desc=f"      Downloading {Path(resolved_name).name}",
+                unit="B",
+                unit_scale=True,
+                unit_divisor=1024,
+                leave=False,
+            ) as progress:
+                while True:
+                    chunk = response.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    handle.write(chunk)
+                    progress.update(len(chunk))
             temp_path = handle.name
 
     return temp_path, resolved_name

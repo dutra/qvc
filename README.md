@@ -146,7 +146,38 @@ This downloads:
 
 * S82 DRW fits from MacLeod et al 2010 extracted under `data/MacLeod2010`
 * Fits from Stone 2021 extracted under `data/Stone2021`.
+* SDSS information under `data/SDSS_DR17`. Note: This download may take a long time and it is only required when running `create_master_input_list.py` script (see next section).
 
+## Useful Scripts
+
+Useful repo-level scripts live under `scripts/` and are intended to be run from the repository root after `pip install -e .`.
+
+`scripts/create_master_input_list.py` exports a master CSV of S82 light curves joined to DR17 spectroscopy metadata, with optional cuts on `variability_chi_sq_red_g` and `RUN2D`.
+
+```bash
+/home/dutra/.conda/envs/jaxcpu4/bin/python scripts/create_master_input_list.py \
+  --output-csv results/data/master_input_list.csv \
+  --variability_chisq_cut 20 \
+  --run2d_cut v5_6_0
+```
+
+`scripts/run_demo.sh` runs the lightweight local demo workflow that sets up data and executes the example fit pipeline.
+
+```bash
+bash scripts/run_demo.sh
+```
+
+`scripts/docker_entrypoint.sh` is the container entrypoint used by the Docker demo image and supports `all`, `setup`, `light-curve`, `spectra`, and `hubble`.
+
+```bash
+bash scripts/docker_entrypoint.sh setup
+```
+
+`scripts/copy_paper_assets.sh` copies generated manuscript assets into the expected paper-output locations.
+
+```bash
+bash scripts/copy_paper_assets.sh
+```
 
 ## Multi-band Light-Curve Fitting
 
