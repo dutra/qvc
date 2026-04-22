@@ -188,27 +188,17 @@ A subset of Hubble-diagram fitting and plotting can be run via:
 
 Expected outputs resemble **Figures 2, 3, and 7**.
 
-To reproduce all Hubble-diagram plots from the manuscript, the full fitting procedure can be run with:
+To reproduce the full manuscript-style Hubble-diagram pipeline, run:
 
 ```bash
-python -m qvc.hubble.hubble_fit \ 
-    --cosmo_models FlatLambdaCDM FlatwCDM Flatw0waCDM \
-    --run full \ 
-    --wrms_cut 1.2 \ 
-    --fhost_cut 0.1 \ 
-    --iron_frac_cut 0.001 \ 
-    --bc_frac_cut 0.001 \ 
-    --variability_chi_sq_cut 10.0 \ 
-    --speed fast \ 
-    --spectra_fit_csv results/data/spectra.csv \ 
-    --z_range 0.44 3.16 \ 
-    --result_prefix fiducial \ 
-    --prefix demo \ 
-    "results/data/light_curves.h5"
+xonsh run_hubble_paper.xonsh
 ```
 
-The `hubble_fit` in this step is ran with `--speed fast`, which uses a minimum amount of `dynesty` live points (e.g. 5) for a reasonable result ran in a reasonable time (~few hours) in a laptop.
-For our published results, we ran with `--speed production` which uses ~500 live points for a full exploration of the likelihood.
+`run_hubble_paper.xonsh` is the entrypoint for the full paper pipeline. It orchestrates the required `qvc.hubble.hubble_fit` runs and prefixes used for the paper outputs.
+
+If you need a lower-level manual invocation of the Hubble fitter instead of the full pipeline script, you can still run `python -m qvc.hubble.hubble_fit ...` directly with the desired arguments.
+
+The pipeline currently sets `speed = "test"` inside `run_hubble_paper.xonsh`. More generally, `hubble_fit` can be run with `--speed fast` for a lighter run that uses a minimum number of `dynesty` live points for a reasonable result in a few hours on a laptop. For our published results, we used `--speed production`, which uses about 500 live points for a fuller exploration of the likelihood.
 
 ---
 ## Spectral Fitting
