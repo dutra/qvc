@@ -151,12 +151,14 @@ def build_mail_lines() -> str:
     return "#SBATCH --mail-type=ALL\n"
 
 
-def build_stone_identity_plot_path(prefix: str) -> str:
-    return str(REPO_ROOT / "plots" / "lc_tests" / prefix / "sigma_tau_identity_grid.pdf")
+def build_stone_identity_plot_path(prefix: str, job_description: str) -> str:
+    filename = f"sigma_tau_identity_grid_{job_description}.pdf"
+    return str(REPO_ROOT / "plots" / "lc_tests" / prefix / filename)
 
 
-def build_macleod_identity_plot_path(prefix: str) -> str:
-    return str(REPO_ROOT / "plots" / "lc_tests" / prefix / "sigma_tau_identity_grid.pdf")
+def build_macleod_identity_plot_path(prefix: str, job_description: str) -> str:
+    filename = f"sigma_tau_identity_grid_{job_description}.pdf"
+    return str(REPO_ROOT / "plots" / "lc_tests" / prefix / filename)
 
 
 def build_object_ids_path(prefix: str, job: JobConfig) -> Path:
@@ -290,6 +292,7 @@ echo "Total runtime: $((rt/3600))h $(((rt%3600)/60))m $((rt%60))s"
 
 def build_merge_sbatch_script(
     prefix: str,
+    job_description: str,
     args,
     *,
     enable_stone_identity_plot: bool = False,
@@ -301,12 +304,12 @@ def build_merge_sbatch_script(
     if enable_stone_identity_plot:
         merge_cmd += (
             " --plot-stone-sigma-tau-identity-grid"
-            f' --stone-identity-plot-out "{build_stone_identity_plot_path(prefix)}"'
+            f' --stone-identity-plot-out "{build_stone_identity_plot_path(prefix, job_description)}"'
         )
     if enable_macleod_identity_plot:
         merge_cmd += (
             " --plot-macleod-sigma-tau-identity-grid"
-            f' --macleod-identity-plot-out "{build_macleod_identity_plot_path(prefix)}"'
+            f' --macleod-identity-plot-out "{build_macleod_identity_plot_path(prefix, job_description)}"'
         )
     return f"""#!/bin/bash
 #SBATCH --job-name=merge_{prefix}
@@ -460,6 +463,7 @@ def main():
         )
         merge_sbatch_script = build_merge_sbatch_script(
             prefix,
+            job.description,
             args,
             enable_stone_identity_plot=job.description.startswith("stone"),
             enable_macleod_identity_plot=job.description == "macleod",
