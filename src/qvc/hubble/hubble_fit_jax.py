@@ -956,7 +956,7 @@ def run_single_jax(
         df_calibrators=None,
         z_range=z_range,
     )
-    debiased_residuals, debiased_residuals_err, _, mu_pred_std_debiased, _ = r
+    debiased_residuals, _debiased_clipping_sigma, _, mu_pred_std_debiased, _ = r
     hubble_chi2_mask = df_agn_fit["z"].between(z_range[0], z_range[1]).to_numpy(dtype=bool)
     if np.any(hubble_chi2_mask):
         chisq_red_hubble_debiased, _ = reduced_chi_squared(

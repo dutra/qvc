@@ -4416,7 +4416,8 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
                 cosmo_model_samples={}, residuals_sigma_clip=None, df_calibrators=None, z_range=(0.44, 3.16),
                 dmi_values=None, dmi_sigma=None, dmi_selection_sigma=None, clipped_mask=None,
                 filename=None, sigma_clip_threshold=None,
-                use_alpha_lambda_term=None, use_eta_sigma_term=None, use_redshift_log_f_term=None):
+                use_alpha_lambda_term=None, use_eta_sigma_term=None, use_redshift_log_f_term=None,
+                residuals_csv_filename="residuals.csv"):
     """
     Hubble diagram (Pantheon+-style):
       • Model line + 68% band in magenta
@@ -4426,7 +4427,12 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
       • Main: AGN binned in linear z
       • Inset: AGN binned in log z (matches inset x-scale)
     If residuals_2 is provided, the residuals panel overlays a solid line of (residuals - residuals_2).
-    Returns: residuals, mu_pred_median, mu_pred_std
+    Returns:
+      residuals,
+      clipping_sigma,
+      mu_pred_median,
+      mu_pred_std,
+      mu_pred_std_with_scatter
     """
     import os
     import numpy as np
@@ -4654,28 +4660,39 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
         chi2_redshift_mask &= (z_values >= z_range[0]) & (z_values <= z_range[1])
 
     # Display the population-level intrinsic scatter as point scatter, not as
-    # enlarged error bars. Keep chi-squared on the current sigma_sel path.
+    # enlarged error bars. Sigma clipping should still use the standard Hubble
+    # uncertainty path with intrinsic scatter, while chi-squared can optionally
+    # follow the sigma_sel selection-scatter model.
     point_scatter_mu = _population_scatter_offsets(
         intrinsic_scatter,
         enabled=debias,
         seed=1741,
     )
     mu_pred_plot = mu_pred_median + point_scatter_mu
-    residuals_err = mu_pred_std_with_scatter
+    clipping_sigma = mu_pred_std_with_scatter
+    chi2_sigma = clipping_sigma
     if debias and sigma_sel is not None:
         use_sigma_sel = np.isfinite(sigma_sel) & (sigma_sel > 0.0)
-        residuals_err = np.where(use_sigma_sel, sigma_sel, residuals_err)
-    display_residuals_err = mu_pred_std if debias else residuals_err
+        chi2_sigma = np.where(use_sigma_sel, sigma_sel, chi2_sigma)
+    display_residuals_err = mu_pred_std if debias else chi2_sigma
 
-    mu_zscore = np.abs(residuals) / residuals_err
+    mu_zscore = np.abs(residuals) / clipping_sigma
 
     # ----------------- BINNING -----------------
     # Linear-z bins for MAIN & RESIDUALS panel
-    bins_linear = np.arange(np.min(df_agn["z"].values), np.max(df_agn["z"].values)-0.1, 0.2)
+    #bins_linear = np.arange(0.4, 3.36, 0.1)
+    bins_linear = np.arange(0.4, 3.41, 0.2)
+
     print("Using linear-z bins:", bins_linear)
     z_lin_scatter, mu_lin_mean_scatter, mu_lin_sem_scatter, n_lin = _weighted_bin_stats(
-        df_agn["z"].values, mu_pred_plot, display_residuals_err, bins_linear
+        df_agn["z"].values,
+        mu_pred_plot,
+        display_residuals_err,
+        bins_linear,
+        min_count=5,
+        center="mid",
     )
+
     
 
     # NEW: binned residuals (linear-z), used in residual panel
@@ -5076,7 +5093,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
         chi2_red_no_logf_plus_sigma_dmi = np.nan
         if np.any(chi2_redshift_mask):
             residuals_chi2 = residuals[chi2_redshift_mask]
-            residuals_err_chi2 = residuals_err[chi2_redshift_mask]
+            residuals_err_chi2 = chi2_sigma[chi2_redshift_mask]
             mu_pred_std_chi2 = mu_pred_std[chi2_redshift_mask]
             chi2_red, _ = reduced_chi_squared(
                 residuals_chi2,
@@ -5334,7 +5351,9 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
 
         per_object_budget_df = df_agn.copy()
         per_object_budget_df["residuals"] = residuals
-        per_object_budget_df["residuals_err"] = residuals_err
+        per_object_budget_df["residuals_err"] = clipping_sigma
+        per_object_budget_df["clipping_sigma"] = clipping_sigma
+        per_object_budget_df["chi2_sigma"] = chi2_sigma
         per_object_budget_df["apparent_mag_2500_err_term"] = apparent_mag_err
         per_object_budget_df["sigma_lens_term"] = sigma_lens
         per_object_budget_df["z_err_term"] = z_err
@@ -5410,7 +5429,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
             z   = df_agn.iloc[idx]['z']
             npca_qso = df_agn.iloc[idx].get('npca_qso', 'N/A')
             print(f"\tz: {z:.2f} | object_id: {object_id} | npca_qso: {npca_qso} | SDSS: {sdss_name} | RA: {ra:.5f} | DEC: {dec:.5f} | Residual: {residuals[idx]:.1f}")
-    # Save residuals to CSV under plot_path
+    # Save raw per-object plot payload to CSV under plot_path.
     if debias:
         residuals_df = df_agn.copy()
         residuals_df["residuals"] = residuals
@@ -5420,16 +5439,21 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
         residuals_df["sigma_dmi"] = sigma_dmi if sigma_dmi is not None else np.nan
         residuals_df["mu_pred_std_with_scatter_and_sigma_dmi"] = np.sqrt(total_var_plus_sigma_dmi)
         residuals_df["mu_pred_std_and_sigma_dmi"] = np.sqrt(total_var_no_logf_plus_sigma_dmi)
+        residuals_df["clipping_sigma"] = clipping_sigma
+        residuals_df["chi2_sigma"] = chi2_sigma
+        residuals_df["sigma_sel"] = sigma_sel if sigma_sel is not None else np.nan
         residuals_df["mu_zscore"] = mu_zscore
         fields = ['object_id', 'apparent_mag_2500', 'f_host_2500', 'ra', 'dec', 
                   'mu_pred_median', 'mu_pred_std', 'mu_pred_std_with_scatter',
+                  'clipping_sigma', 'chi2_sigma', 'sigma_sel',
                   'sigma_dmi', 'mu_pred_std_with_scatter_and_sigma_dmi', 'mu_pred_std_and_sigma_dmi',
                   'z', 'wrms', 'sdss_name', 'residuals', 'mu_zscore']
         residuals_df = residuals_df[fields]
         residuals_df = residuals_df.sort_values(by="residuals", ascending=False)
-        csv_path = os.path.join(plot_path, "residuals.csv")
-        residuals_df.to_csv(csv_path, index=False)
-        print(f"Residuals saved to {csv_path}")
+        if residuals_csv_filename is not None:
+            csv_path = os.path.join(plot_path, residuals_csv_filename)
+            residuals_df.to_csv(csv_path, index=False)
+            print(f"Residuals saved to {csv_path}")
 
         # Save outliers with residuals > 4 to outliers.csv
         if np.any(outlier_mask):
@@ -5452,7 +5476,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
                 npca_qso = df_agn.iloc[idx].get('npca_qso', 'N/A')
                 print(f"\tz: {z:.2f} | object_id: {object_id} | npca_qso: {npca_qso} | SDSS: {sdss_name} | RA: {ra:.5f} | DEC: {dec:.5f} | Residual: {residuals[idx]:.1f}")
 
-    return residuals, residuals_err, mu_pred_median, mu_pred_std, residuals_err
+    return residuals, clipping_sigma, mu_pred_median, mu_pred_std, mu_pred_std_with_scatter
 
 
 def plot_hubble_residual_normality(
