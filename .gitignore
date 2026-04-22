@@ -1,6 +1,7 @@
 plots/
 results/
 data/
+*.sh
 *.log
 *.xsh
 *.err

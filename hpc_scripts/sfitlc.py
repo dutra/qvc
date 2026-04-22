@@ -2,6 +2,7 @@
 import argparse
 import math
 import os
+import sys
 import subprocess
 from dataclasses import dataclass
 from datetime import datetime
@@ -10,14 +11,16 @@ from pathlib import Path
 import pandas as pd
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+SRC_ROOT = REPO_ROOT / "src"
+if str(SRC_ROOT) not in sys.path:
+    sys.path.insert(0, str(SRC_ROOT))
+
+from qvc.light_curve.multiband_generate_lc import resolve_macleod_object_ids, resolve_stone_object_ids
+
 SCRIPT_DIR = REPO_ROOT / "hpc_scripts" / "jobs" / "multibandfit"
 LOG_ROOT = REPO_ROOT / "hpc_scripts" / "logs" / "multibandfit"
 DEFAULT_SPECTRA_FIT_CSV = "results/data/jaxqsofit_apr5d_chisq20_mar31a_good.csv"
 MAX_ARRAY_SIZE = 10_000
-
-STONE_OBJECT_IDS = [
-    "1386553", "1386655", "1386671", "1386720", "1386822", "1386837", "1386875", "1387017", "1387043", "1387044", "1387099", "1387119", "1387151", "1387156", "1387164", "1387174", "1387201", "1387205", "1387206", "1387226", "1387264", "1387268", "1387321", "1387366", "1387390", "1387409", "1387457", "1387458", "1387472", "1387494", "1387498", "1387513", "1387518", "1387528", "1387544", "1387546", "1387551", "1387557", "1387579", "1387618", "1387636", "1387641", "1387685", "1387687", "1387712", "1387714", "1387725", "1387735", "1387743", "1387807", "1387819", "1387821", "1387876", "1387917", "1387938", "1387946", "1388012", "1388025", "1388047", "1388051", "1388067", "1388070", "1388092", "1388108", "1388129", "1388166", "1388172", "1388230", "1388234", "1388270", "1388304", "1388322", "1388340", "1388366", "1388389", "1388390", "1388412", "1388413", "1388442", "1388467", "1388483", "1388509", "1388513", "1388573", "1388576", "1388577", "1388636", "1388643", "1388651", "1388729", "1388730", "1388743", "1388799", "1388817", "1388819", "1388831", "1388943", "1388963", "1388968", "1388993", "1389026", "1389033", "1389038", "1389080", "1389088", "1389104", "1389158", "1389192", "1389198", "1389212", "1389269", "1389289", "1389350", "1389354", "1389363", "1389395", "1389463", "1389477", "1389486", "1389488", "1389516", "1389560", "1389594", "1389630", "1389660", "1389683", "1389729", "1389734", "1389741", "1389763", "1389767", "1389786", "1389799", "1389832", "1389873", "1389884", "1389887", "1389915", "1389968", "1389975", "1390004", "1390012", "1390021", "1390026", "1390049", "1390080", "1390140", "1390151", "1390159", "1390223", "1390226", "1390243", "1390319", "1390331", "1390335", "1390346", "1390379", "1390392", "1390435", "1390490", "1390491", "1390559", "1390576", "1390594", "1390597", "1390600", "1390621", "1390673", "1390677", "1390747", "1390798", "1390830", "1390837", "1390847", "1390858", "1390860", "1390942", "1390992", "1391093", "1391150", "1391164", "1391199", "1391217", "1391283", "1391454", "1391583", "1391675", "1391766", "1391814",
-]
 
 
 @dataclass(frozen=True)
@@ -30,7 +33,7 @@ class JobConfig:
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Submit multiband-fit SLURM jobs.")
-    parser.add_argument("--fit", choices=("chisq", "stone"), required=True, help="Sample to submit.")
+    parser.add_argument("--fit", choices=("chisq", "stone", "macleod"), required=True, help="Sample to submit.")
     parser.add_argument("--chisq-csv", type=str, default=None, help="CSV file with object_id column for --fit chisq.")
     parser.add_argument("--num-jobs", type=int, default=-1, help="-1 means submit all chunks after skip.")
     parser.add_argument("--skip", type=int, default=0, help="Number of chunks to skip.")
@@ -76,6 +79,14 @@ def load_chisq_ids(chisq_csv: str) -> list[str]:
     return df["object_id"].astype(str).tolist()
 
 
+def load_stone_ids() -> list[str]:
+    return resolve_stone_object_ids()
+
+
+def load_macleod_ids() -> list[str]:
+    return resolve_macleod_object_ids()
+
+
 def build_job_configs(fit: str, chisq_csv: str) -> list[JobConfig]:
     if fit == "chisq":
         return [
@@ -86,23 +97,32 @@ def build_job_configs(fit: str, chisq_csv: str) -> list[JobConfig]:
             )
         ]
     if fit == "stone":
+        stone_object_ids = load_stone_ids()
         return [
-            JobConfig(description="stone", object_ids=STONE_OBJECT_IDS),
+            JobConfig(description="stone", object_ids=stone_object_ids),
             JobConfig(
                 description="stone_nolinear",
-                object_ids=STONE_OBJECT_IDS,
+                object_ids=stone_object_ids,
                 extra_flags=("--disable_linear_trend",),
             ),
             JobConfig(
                 description="stone_rf2400",
-                object_ids=STONE_OBJECT_IDS,
+                object_ids=stone_object_ids,
                 extra_flags=("--rf_length_cut", "2400"),
             ),
             JobConfig(
                 description="stone_rf2400_nolinear",
-                object_ids=STONE_OBJECT_IDS,
+                object_ids=stone_object_ids,
                 extra_flags=("--disable_linear_trend", "--rf_length_cut", "2400"),
             ),
+        ]
+    if fit == "macleod":
+        return [
+            JobConfig(
+                description="macleod",
+                object_ids=load_macleod_ids(),
+                use_psf_constant_flux=False,
+            )
         ]
     raise ValueError(f"Unsupported fit mode: {fit}")
 
@@ -129,6 +149,14 @@ def build_flag_lines(flags: list[str]) -> str:
 
 def build_mail_lines() -> str:
     return "#SBATCH --mail-type=ALL\n"
+
+
+def build_stone_identity_plot_path(prefix: str) -> str:
+    return str(REPO_ROOT / "results" / "plots" / prefix / "sigma_tau_identity_grid.pdf")
+
+
+def build_macleod_identity_plot_path(prefix: str) -> str:
+    return str(REPO_ROOT / "results" / "plots" / prefix / "sigma_tau_identity_grid.pdf")
 
 
 def build_sbatch_script(prefix: str, job: JobConfig, args, chisq_csv: str, spectra_fit_csv: str) -> str:
@@ -244,9 +272,26 @@ echo "Total runtime: $((rt/3600))h $(((rt%3600)/60))m $((rt%60))s"
 """
 
 
-def build_merge_sbatch_script(prefix: str, args) -> str:
+def build_merge_sbatch_script(
+    prefix: str,
+    args,
+    *,
+    enable_stone_identity_plot: bool = False,
+    enable_macleod_identity_plot: bool = False,
+) -> str:
     log_dir = LOG_ROOT / prefix
     log_pattern = log_dir / f"{prefix}-merge-%j.txt"
+    merge_cmd = f'python -m qvc.light_curve.merge_results "{prefix}" --compute-variability'
+    if enable_stone_identity_plot:
+        merge_cmd += (
+            " --plot-stone-sigma-tau-identity-grid"
+            f' --stone-identity-plot-out "{build_stone_identity_plot_path(prefix)}"'
+        )
+    if enable_macleod_identity_plot:
+        merge_cmd += (
+            " --plot-macleod-sigma-tau-identity-grid"
+            f' --macleod-identity-plot-out "{build_macleod_identity_plot_path(prefix)}"'
+        )
     return f"""#!/bin/bash
 #SBATCH --job-name=merge_{prefix}
 #SBATCH --output={log_pattern}
@@ -268,7 +313,7 @@ start_epoch=$(date +%s)
 echo "Start epoch: $start_epoch"
 echo "SLURM_JOB_ID=${{SLURM_JOB_ID:-}}"
 
-python -m qvc.light_curve.merge_results "{prefix}" --compute-variability
+{merge_cmd}
 
 end_epoch=$(date +%s)
 rt=$(( end_epoch - start_epoch ))
@@ -371,7 +416,12 @@ def main():
         _, task_start, task_end = validate_chunking(total_objects, args.N, args.skip, args.num_jobs)
         prefix = f"{run_stamp}_{git_hash}_{job.description}"
         sbatch_script = build_sbatch_script(prefix, job, args, chisq_csv, spectra_fit_csv)
-        merge_sbatch_script = build_merge_sbatch_script(prefix, args)
+        merge_sbatch_script = build_merge_sbatch_script(
+            prefix,
+            args,
+            enable_stone_identity_plot=job.description.startswith("stone"),
+            enable_macleod_identity_plot=job.description == "macleod",
+        )
         sbatch_path = write_job_script(prefix, sbatch_script)
         merge_sbatch_path = write_job_script(f"{prefix}_merge", merge_sbatch_script)
         submit_script(

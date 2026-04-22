@@ -5,14 +5,30 @@ import glob
 import multiprocessing
 import os
 import sys
+from pathlib import Path
 
 import h5py
+import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
+from astropy import units as u
+from astropy.coordinates import SkyCoord
 from tqdm import tqdm
 
+from qvc.hubble.cuts import LOG_SIGMA_UV_MAX, LOG_SIGMA_UV_MIN, LOG_TAU_UV_RF_MAX, LOG_TAU_UV_RF_MIN
+from qvc.hubble.hubble_utils import resolve_qvc_data_path
 from qvc.light_curve.fit_light_curves import make_lc
-from qvc.light_curve.multiband_generate_lc import concat_light_curves
-from qvc.light_curve.multiband_generate_lc import populate_sdss_fields
+from qvc.light_curve.multiband_generate_lc import (
+    MACLEOD_BANDS,
+    MACLEOD_COLUMNS,
+    concat_light_curves,
+    populate_sdss_fields,
+    read_macleod_band,
+)
+from qvc.light_curve.plotting_appendix import plot_sigma_tau_identity_grid
+
+MACLEOD_YEAR_DAYS = 365.25
+MACLEOD_IDENTITY_BANDS = ("u", "g", "r", "i")
 
 def _decode_h5_scalar(value):
     if isinstance(value, bytes):
@@ -334,7 +350,192 @@ def attach_variability_metrics(rows):
     return enriched_rows
 
 
-def main():
+def build_stone_identity_plot_path(prefix: str, base_dir: str) -> str:
+    base_path = Path(base_dir)
+    return str(base_path.parent / "plots" / prefix / "sigma_tau_identity_grid.pdf")
+
+
+def build_stone_identity_plot_dataframe(rows):
+    df = pd.DataFrame(rows).copy()
+    for band in ("g", "r", "i"):
+        df[f"ours_sigma_{band}"] = pd.to_numeric(df[f"log_sigma_band_{band}"], errors="coerce")
+        df[f"ours_sigma_{band}_err"] = pd.to_numeric(df[f"log_sigma_band_{band}_err"], errors="coerce")
+        df[f"ours_tau_{band}"] = pd.to_numeric(df[f"log_tau_band_{band}_RF"], errors="coerce")
+        df[f"ours_tau_{band}_err"] = pd.to_numeric(df[f"log_tau_band_{band}_RF_err"], errors="coerce")
+    return df
+
+
+def write_stone_sigma_tau_identity_grid(rows, output_path: str):
+    plot_df = build_stone_identity_plot_dataframe(rows)
+    output_path = str(output_path)
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+
+    sigma_keys = {
+        "x": "stone_log_SIGMA_{band}",
+        "y": "ours_sigma_{band}",
+        "xerr": ("stone_log_SIGMA_{band}_ERR_L", "stone_log_SIGMA_{band}_ERR_U"),
+        "yerr": "ours_sigma_{band}_err",
+    }
+    tau_keys = {
+        "x": "stone_log_TAU_REST_{band}",
+        "y": "ours_tau_{band}",
+        "xerr": ("stone_log_TAU_REST_{band}_ERR_L", "stone_log_TAU_REST_{band}_ERR_U"),
+        "yerr": "ours_tau_{band}_err",
+    }
+    fig = plot_sigma_tau_identity_grid(
+        plot_df,
+        sigma_keys,
+        tau_keys,
+        bands=("g", "r", "i"),
+        show=False,
+        output_path=output_path,
+    )
+    plt.close(fig)
+    print(f"Wrote Stone sigma/tau identity grid to {output_path}")
+    return output_path
+
+
+def _match_rows_to_catalog(df_rows, df_catalog, max_sep_arcsec=1.0):
+    row_coords = SkyCoord(
+        ra=pd.to_numeric(df_rows["ra"], errors="coerce").to_numpy(dtype=float) * u.deg,
+        dec=pd.to_numeric(df_rows["dec"], errors="coerce").to_numpy(dtype=float) * u.deg,
+    )
+    catalog_coords = SkyCoord(
+        ra=pd.to_numeric(df_catalog["ra"], errors="coerce").to_numpy(dtype=float) * u.deg,
+        dec=pd.to_numeric(df_catalog["dec"], errors="coerce").to_numpy(dtype=float) * u.deg,
+    )
+    idx, d2d, _ = row_coords.match_to_catalog_sky(catalog_coords)
+    matched = df_rows.copy()
+    matched["matched_idx_b"] = np.where(d2d < (max_sep_arcsec * u.arcsec), idx, -1)
+    matched["matched_sep_arcsec"] = d2d.arcsec
+    return matched
+
+
+def build_macleod_identity_plot_path(prefix: str, base_dir: str) -> str:
+    return build_stone_identity_plot_path(prefix, base_dir)
+
+
+def build_macleod_identity_plot_data(rows, macleod_dir=None, max_sep_arcsec=1.0):
+    if macleod_dir is None:
+        macleod_dir = resolve_qvc_data_path("data/MacLeod2010")
+    else:
+        macleod_dir = str(macleod_dir)
+
+    df_rows = pd.DataFrame(rows).copy()
+    if df_rows.empty:
+        return {}
+
+    by_band = {}
+    for band in MACLEOD_IDENTITY_BANDS:
+        macleod = read_macleod_band(band, macleod_dir=macleod_dir)
+        matched = _match_rows_to_catalog(df_rows, macleod, max_sep_arcsec=max_sep_arcsec)
+        matched = matched[matched["matched_idx_b"] >= 0].copy()
+        if matched.empty:
+            by_band[band] = matched
+            continue
+
+        matched_idx = matched["matched_idx_b"].to_numpy(dtype=int)
+        rename_map = {
+            "SDR5ID": f"macleod_SDR5ID_{band}",
+            "redshift": f"macleod_redshift_{band}",
+            "log10_tau_days": f"macleod_tau_obs_{band}",
+            "log10_tau_lim_lo": f"macleod_tau_obs_lo_{band}",
+            "log10_tau_lim_hi": f"macleod_tau_obs_hi_{band}",
+            "log10_sigma_mag_sqrt_yr": f"macleod_log_sigma_hat_catalog_{band}",
+            "log10_sig_lim_lo": f"macleod_sigma_obs_lo_{band}",
+            "log10_sig_lim_hi": f"macleod_sigma_obs_hi_{band}",
+            "npts": f"macleod_npts_{band}",
+            "edge_flag": f"macleod_edge_flag_{band}",
+            "chi2_pdf": f"macleod_chi2_pdf_{band}",
+            "Plike": f"macleod_Plike_{band}",
+            "Pnoise": f"macleod_Pnoise_{band}",
+            "Pinf": f"macleod_Pinf_{band}",
+        }
+        for source_col, target_col in rename_map.items():
+            matched[target_col] = macleod.iloc[matched_idx][source_col].to_numpy()
+
+        matched[f"macleod_sigma_{band}"] = (
+            pd.to_numeric(matched[f"macleod_log_sigma_hat_catalog_{band}"], errors="coerce")
+            - 0.5 * np.log10(2.0 * MACLEOD_YEAR_DAYS)
+            + 0.5 * pd.to_numeric(matched[f"macleod_tau_obs_{band}"], errors="coerce")
+        )
+        matched[f"macleod_sigma_lo_{band}"] = (
+            pd.to_numeric(matched[f"macleod_sigma_obs_lo_{band}"], errors="coerce")
+            - 0.5 * np.log10(2.0 * MACLEOD_YEAR_DAYS)
+            + 0.5 * pd.to_numeric(matched[f"macleod_tau_obs_{band}"], errors="coerce")
+        )
+        matched[f"macleod_sigma_hi_{band}"] = (
+            pd.to_numeric(matched[f"macleod_sigma_obs_hi_{band}"], errors="coerce")
+            - 0.5 * np.log10(2.0 * MACLEOD_YEAR_DAYS)
+            + 0.5 * pd.to_numeric(matched[f"macleod_tau_obs_{band}"], errors="coerce")
+        )
+        matched[f"macleod_tau_{band}"] = pd.to_numeric(matched[f"macleod_tau_obs_{band}"], errors="coerce")
+        matched[f"macleod_tau_lo_{band}"] = pd.to_numeric(matched[f"macleod_tau_obs_lo_{band}"], errors="coerce")
+        matched[f"macleod_tau_hi_{band}"] = pd.to_numeric(matched[f"macleod_tau_obs_hi_{band}"], errors="coerce")
+        matched[f"ours_sigma_{band}"] = pd.to_numeric(matched[f"log_sigma_band_{band}"], errors="coerce")
+        matched[f"ours_sigma_{band}_err"] = pd.to_numeric(matched[f"log_sigma_band_{band}_err"], errors="coerce")
+        matched[f"ours_tau_{band}"] = pd.to_numeric(matched[f"log_tau_band_{band}_RF"], errors="coerce")
+        matched[f"ours_tau_{band}_err"] = pd.to_numeric(matched[f"log_tau_band_{band}_RF_err"], errors="coerce")
+
+        m10_quality_mask = (
+            (pd.to_numeric(matched[f"macleod_edge_flag_{band}"], errors="coerce") == 0)
+            & (
+                pd.to_numeric(matched[f"macleod_Plike_{band}"], errors="coerce")
+                - pd.to_numeric(matched[f"macleod_Pnoise_{band}"], errors="coerce")
+                > 2.0
+            )
+            & (
+                pd.to_numeric(matched[f"macleod_Plike_{band}"], errors="coerce")
+                - pd.to_numeric(matched[f"macleod_Pinf_{band}"], errors="coerce")
+                > 0.05
+            )
+        )
+        finite_range_mask = (
+            matched[f"macleod_tau_{band}"].between(LOG_TAU_UV_RF_MIN, LOG_TAU_UV_RF_MAX)
+            & matched[f"macleod_sigma_{band}"].between(LOG_SIGMA_UV_MIN, LOG_SIGMA_UV_MAX)
+        )
+        by_band[band] = matched.loc[m10_quality_mask & finite_range_mask].copy()
+    return by_band
+
+
+def write_macleod_sigma_tau_identity_grid(rows, output_path: str, macleod_dir=None):
+    by_band = build_macleod_identity_plot_data(rows, macleod_dir=macleod_dir)
+    output_path = str(output_path)
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+
+    sigma_keys = {
+        "x": "macleod_sigma_{band}",
+        "y": "ours_sigma_{band}",
+        "xerr": ("macleod_sigma_lo_{band}", "macleod_sigma_hi_{band}"),
+        "xerr_mode": "bounds",
+        "yerr": "ours_sigma_{band}_err",
+        "xlabel": r"$\log\!\,\sigma_<<band>>\,(\mathrm{mag})$" + "\n(MacLeod+2010)",
+        "ylabel": r"$\log\!\,\sigma_<<band>>\,(\mathrm{mag})$" + "\n(this work)",
+    }
+    tau_keys = {
+        "x": "macleod_tau_{band}",
+        "y": "ours_tau_{band}",
+        "xerr": ("macleod_tau_lo_{band}", "macleod_tau_hi_{band}"),
+        "xerr_mode": "bounds",
+        "yerr": "ours_tau_{band}_err",
+        "xlabel": r"$\log\!\,\tau_{\mathrm{<<band>>},\,\mathrm{RF}}\,(\mathrm{days})$" + "\n(MacLeod+2010)",
+        "ylabel": r"$\log\!\,\tau_{\mathrm{<<band>>},\,\mathrm{RF}}\,(\mathrm{days})$" + "\n(this work)",
+    }
+    fig = plot_sigma_tau_identity_grid(
+        by_band,
+        sigma_keys,
+        tau_keys,
+        bands=MACLEOD_IDENTITY_BANDS,
+        show=False,
+        output_path=output_path,
+        style={"point_alpha": 0.25, "error_alpha": 0.08, "rasterized": False},
+    )
+    plt.close(fig)
+    print(f"Wrote MacLeod sigma/tau identity grid to {output_path}")
+    return output_path
+
+
+def main(argv=None):
     p = argparse.ArgumentParser(
         description=(
             "Merge flat HDF5 shards (*.h5) found in <base_dir>/<prefix>/ "
@@ -386,6 +587,30 @@ def main():
         help="Reload S82 light curves via concat_light_curves and recompute corrected per-band variability metrics.",
     )
     p.add_argument(
+        "--plot-stone-sigma-tau-identity-grid",
+        action="store_true",
+        default=False,
+        help="Generate a Stone raw-vs-fit sigma/tau identity grid from the merged rows.",
+    )
+    p.add_argument(
+        "--stone-identity-plot-out",
+        type=str,
+        default=None,
+        help="Optional output path for the Stone sigma/tau identity grid PDF.",
+    )
+    p.add_argument(
+        "--plot-macleod-sigma-tau-identity-grid",
+        action="store_true",
+        default=False,
+        help="Generate a MacLeod raw-vs-fit sigma/tau identity grid from the merged rows.",
+    )
+    p.add_argument(
+        "--macleod-identity-plot-out",
+        type=str,
+        default=None,
+        help="Optional output path for the MacLeod sigma/tau identity grid PDF.",
+    )
+    p.add_argument(
         "--out",
         type=str,
         default=None,
@@ -405,7 +630,7 @@ def main():
         help="Keys to use for de-duplication across shards (last occurrence wins). Set to '' to disable.",
     )
     
-    args = p.parse_args()
+    args = p.parse_args(argv)
 
     shard_dir = os.path.join(args.base_dir, args.prefix)
     file_list = sorted(glob.glob(os.path.join(shard_dir, "*.h5")))
@@ -462,6 +687,15 @@ def main():
     if args.compute_variability and all_quasars:
         print("Computing corrected variability metrics from merged rows...")
         all_quasars = attach_variability_metrics(all_quasars)
+
+    if args.plot_stone_sigma_tau_identity_grid and all_quasars:
+        plot_out = args.stone_identity_plot_out or build_stone_identity_plot_path(args.prefix, args.base_dir)
+        write_stone_sigma_tau_identity_grid(all_quasars, plot_out)
+
+    if args.plot_macleod_sigma_tau_identity_grid and all_quasars:
+        plot_out = args.macleod_identity_plot_out or build_macleod_identity_plot_path(args.prefix, args.base_dir)
+        write_macleod_sigma_tau_identity_grid(all_quasars, plot_out)
+
     if out_format == "csv":
         seen = []
         s = set()

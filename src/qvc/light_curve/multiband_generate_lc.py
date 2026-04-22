@@ -2,6 +2,7 @@ import os
 import numpy as np
 import pandas as pd
 import h5py
+import warnings
 from astropy.table import Table, join
 from astropy.io import fits
 from astropy.coordinates import SkyCoord
@@ -24,6 +25,219 @@ filters = {"u": 0, "g": 1, "r": 2, "i": 3, "z": 4, "y": 5} # harcoded filter ord
 bands = ['u', 'g', 'r', 'i', 'z']#, 'y']
 #bands = ['g', 'r', 'i']
 SURVEY_NAMES = ("sdss", "ps1", "ztf")
+STONE_FITS_RELATIVE_PATH = "data/Stone2021/TotalDat.fits"
+STONE_S82_MAX_SEP_ARCSEC = 1.0
+MACLEOD_DIR_RELATIVE_PATH = "data/MacLeod2010"
+MACLEOD_BANDS = ("u", "g", "r", "i")
+MACLEOD_S82_MAX_SEP_ARCSEC = 1.0
+MACLEOD_COLUMNS = [
+    "SDR5ID",
+    "ra",
+    "dec",
+    "redshift",
+    "M_i",
+    "mass_BH_Msun",
+    "chi2_pdf",
+    "log10_tau_days",
+    "log10_sigma_mag_sqrt_yr",
+    "log10_tau_lim_lo",
+    "log10_tau_lim_hi",
+    "log10_sig_lim_lo",
+    "log10_sig_lim_hi",
+    "edge_flag",
+    "Plike",
+    "Pnoise",
+    "Pinf",
+    "mu",
+    "npts",
+]
+
+
+def resolve_stone_s82_matches(
+    stone_fits_path=None,
+    s82_catalog_path=None,
+    max_sep_arcsec=STONE_S82_MAX_SEP_ARCSEC,
+):
+    """Resolve Stone rows to S82 object IDs via nearest-neighbor sky matching."""
+    if stone_fits_path is None:
+        stone_fits_path = resolve_qvc_data_path(STONE_FITS_RELATIVE_PATH)
+    else:
+        stone_fits_path = str(stone_fits_path)
+
+    if s82_catalog_path is None:
+        s82_catalog_path = resolve_qvc_data_path("data/S82/Catalog.parquet")
+    else:
+        s82_catalog_path = str(s82_catalog_path)
+
+    with fits.open(stone_fits_path) as hdul:
+        stone_data = hdul[1].data
+        stone_df = pd.DataFrame(
+            {
+                "stone_row_index": np.arange(len(stone_data), dtype=int),
+                "stone_DBID": np.asarray(stone_data["DBID"]).astype("int64"),
+                "stone_RA": np.asarray(stone_data["RA"]).astype("float64"),
+                "stone_DEC": np.asarray(stone_data["DEC"]).astype("float64"),
+            }
+        )
+
+    cat = pd.read_parquet(s82_catalog_path).reset_index()
+    cat_lookup = cat.loc[:, ["objectId", "RA", "DEC"]].copy()
+    cat_lookup["objectId"] = cat_lookup["objectId"].astype(str)
+
+    stone_coords = SkyCoord(
+        ra=stone_df["stone_RA"].to_numpy() * u.deg,
+        dec=stone_df["stone_DEC"].to_numpy() * u.deg,
+    )
+    cat_coords = SkyCoord(
+        ra=cat_lookup["RA"].to_numpy() * u.deg,
+        dec=cat_lookup["DEC"].to_numpy() * u.deg,
+    )
+
+    idx, d2d, _ = stone_coords.match_to_catalog_sky(cat_coords)
+    sep_arcsec = d2d.to(u.arcsec).value
+    match_mask = d2d < (max_sep_arcsec * u.arcsec)
+
+    matched = stone_df.loc[match_mask].copy()
+    matched["object_id"] = cat_lookup["objectId"].to_numpy()[idx][match_mask]
+    matched["match_sep_arcsec"] = sep_arcsec[match_mask]
+
+    unmatched = stone_df.loc[~match_mask].copy()
+    unmatched["match_sep_arcsec"] = sep_arcsec[~match_mask]
+    if not unmatched.empty:
+        details = ", ".join(
+            f"{int(row.stone_DBID)} ({row.match_sep_arcsec:.3f} arcsec)"
+            for row in unmatched.itertuples(index=False)
+        )
+        warnings.warn(
+            f"Skipping {len(unmatched)} Stone rows without an S82 match within "
+            f"{max_sep_arcsec:.3f} arcsec: {details}",
+            stacklevel=2,
+        )
+
+    return matched.reset_index(drop=True), unmatched.reset_index(drop=True)
+
+
+def resolve_stone_object_ids(
+    stone_fits_path=None,
+    s82_catalog_path=None,
+    max_sep_arcsec=STONE_S82_MAX_SEP_ARCSEC,
+):
+    """Return matched S82 object IDs for the Stone sample in Stone row order."""
+    matched, _ = resolve_stone_s82_matches(
+        stone_fits_path=stone_fits_path,
+        s82_catalog_path=s82_catalog_path,
+        max_sep_arcsec=max_sep_arcsec,
+    )
+    return matched["object_id"].astype(str).tolist()
+
+
+def read_macleod_band(band, macleod_dir=None):
+    """Read one MacLeod DRW catalog band and apply the notebook's tau-error validity cut."""
+    if macleod_dir is None:
+        macleod_dir = resolve_qvc_data_path(MACLEOD_DIR_RELATIVE_PATH)
+    path = os.path.join(str(macleod_dir), f"s82drw_{band}.dat")
+    df = pd.read_csv(path, comment="#", sep=r"\s+", header=None)
+    df.columns = MACLEOD_COLUMNS
+
+    x_tau = pd.to_numeric(df["log10_tau_days"], errors="coerce").to_numpy(dtype=float)
+    tau_lo = pd.to_numeric(df["log10_tau_lim_lo"], errors="coerce").to_numpy(dtype=float)
+    tau_hi = pd.to_numeric(df["log10_tau_lim_hi"], errors="coerce").to_numpy(dtype=float)
+    edge_flag = pd.to_numeric(df["edge_flag"], errors="coerce").to_numpy(dtype=float)
+    xerr_low_tau = x_tau - tau_lo
+    xerr_high_tau = tau_hi - x_tau
+    valid_xerr_tau = (
+        np.isfinite(xerr_low_tau)
+        & np.isfinite(xerr_high_tau)
+        & (xerr_low_tau >= 0.0)
+        & (xerr_high_tau >= 0.0)
+        & (tau_lo < tau_hi)
+        & (tau_lo < x_tau)
+        & (x_tau < tau_hi)
+        & (edge_flag == 0)
+    )
+    valid_large_tau_hi = np.isfinite(xerr_high_tau) & np.isfinite(x_tau)
+    df = df.loc[valid_xerr_tau & valid_large_tau_hi].copy()
+    df["band"] = band
+    return df
+
+
+def resolve_macleod_s82_matches(
+    bands=MACLEOD_BANDS,
+    macleod_dir=None,
+    s82_catalog_path=None,
+    max_sep_arcsec=MACLEOD_S82_MAX_SEP_ARCSEC,
+):
+    """Resolve MacLeod rows to S82 object IDs via nearest-neighbor sky matching."""
+    if macleod_dir is None:
+        macleod_dir = resolve_qvc_data_path(MACLEOD_DIR_RELATIVE_PATH)
+    else:
+        macleod_dir = str(macleod_dir)
+
+    if s82_catalog_path is None:
+        s82_catalog_path = resolve_qvc_data_path("data/S82/Catalog.parquet")
+    else:
+        s82_catalog_path = str(s82_catalog_path)
+
+    cat = pd.read_parquet(s82_catalog_path).reset_index()
+    cat_lookup = cat.loc[:, ["objectId", "RA", "DEC"]].copy()
+    cat_lookup["objectId"] = cat_lookup["objectId"].astype(str)
+    cat_coords = SkyCoord(
+        ra=cat_lookup["RA"].to_numpy() * u.deg,
+        dec=cat_lookup["DEC"].to_numpy() * u.deg,
+    )
+
+    matched_frames = []
+    unmatched_frames = []
+    for band in bands:
+        band_df = read_macleod_band(band, macleod_dir=macleod_dir)
+        query = band_df.loc[:, ["SDR5ID", "ra", "dec"]].copy()
+        coords = SkyCoord(ra=query["ra"].to_numpy() * u.deg, dec=query["dec"].to_numpy() * u.deg)
+        idx, d2d, _ = coords.match_to_catalog_sky(cat_coords)
+        sep_arcsec = d2d.to(u.arcsec).value
+        match_mask = d2d < (max_sep_arcsec * u.arcsec)
+
+        matched = query.loc[match_mask].copy()
+        matched["band"] = band
+        matched["object_id"] = cat_lookup["objectId"].to_numpy()[idx][match_mask]
+        matched["match_sep_arcsec"] = sep_arcsec[match_mask]
+        matched_frames.append(matched.reset_index(drop=True))
+
+        unmatched = query.loc[~match_mask].copy()
+        unmatched["band"] = band
+        unmatched["match_sep_arcsec"] = sep_arcsec[~match_mask]
+        unmatched_frames.append(unmatched.reset_index(drop=True))
+
+    matched_all = pd.concat(matched_frames, ignore_index=True) if matched_frames else pd.DataFrame()
+    unmatched_all = pd.concat(unmatched_frames, ignore_index=True) if unmatched_frames else pd.DataFrame()
+    if not unmatched_all.empty:
+        details = ", ".join(
+            f"{row.band}:{int(row.SDR5ID)} ({row.match_sep_arcsec:.3f} arcsec)"
+            for row in unmatched_all.itertuples(index=False)
+        )
+        warnings.warn(
+            f"Skipping {len(unmatched_all)} MacLeod rows without an S82 match within "
+            f"{max_sep_arcsec:.3f} arcsec: {details}",
+            stacklevel=2,
+        )
+    return matched_all, unmatched_all
+
+
+def resolve_macleod_object_ids(
+    bands=MACLEOD_BANDS,
+    macleod_dir=None,
+    s82_catalog_path=None,
+    max_sep_arcsec=MACLEOD_S82_MAX_SEP_ARCSEC,
+):
+    """Return matched S82 object IDs for the MacLeod sample, de-duplicated in first-seen order."""
+    matched, _ = resolve_macleod_s82_matches(
+        bands=bands,
+        macleod_dir=macleod_dir,
+        s82_catalog_path=s82_catalog_path,
+        max_sep_arcsec=max_sep_arcsec,
+    )
+    if matched.empty:
+        return []
+    return matched["object_id"].astype(str).drop_duplicates(keep="first").tolist()
 
 def cut_light_curve_restframe_window(lc_list, n_days=1800, same_length=False):
     """
@@ -450,10 +664,9 @@ def load_nearby_lcs(name):
 
 def load_stone_lcs(filter_object_ids=[], skip=None, N=None):
     # Load Stone et al. (2022) data
-    fits_file = 'data/stone_TotalDat_v2.fits'
-    hdul = fits.open(fits_file)
-    data = hdul[1].data
-    hdul.close()
+    fits_file = resolve_qvc_data_path(STONE_FITS_RELATIVE_PATH)
+    with fits.open(fits_file) as hdul:
+        data = hdul[1].data
     bands = ['g', 'r', 'i']
     fields = [
         'MAG', 'MAG_ERR', 'MJD',
@@ -509,24 +722,19 @@ def load_stone_lcs(filter_object_ids=[], skip=None, N=None):
                 f'stone_log_TAU_REST_{band}_ERR': (data[f'log_TAU_REST_{band}_ERR_L'][i] + data[f'log_TAU_REST_{band}_ERR_U'][i]) / 2,
             }
 
-    stone_coords = SkyCoord(ra=data['RA']*u.deg, dec=data['DEC']*u.deg)
-    stone_ids = data['DBID']
-
-    # S82 Catalog
-    cat = pd.read_parquet("data/S82/Catalog.parquet").reset_index()
-    cat_coords = SkyCoord(ra=cat['RA'].values*u.deg, dec=cat['DEC'].values*u.deg)
-    cat_objids = cat['objectId'].values
-
-    # Match lcs within 1 arcsec
-    idx, d2d, _ = stone_coords.match_to_catalog_sky(cat_coords)
-    match_mask = d2d < 1 * u.arcsec
-
-    for i, matched in enumerate(match_mask):
-        if matched:
-            stone_lcs[stone_ids[i]]['object_id'] = cat_objids[idx[i]]
-        else:
-            print(f"Stone DBID {stone_ids[i]} has no match in S82 catalog, removing.")
-            del stone_lcs[stone_ids[i]]
+    matched_rows, _ = resolve_stone_s82_matches(
+        stone_fits_path=fits_file,
+        max_sep_arcsec=STONE_S82_MAX_SEP_ARCSEC,
+    )
+    matched_object_ids = {
+        int(row.stone_DBID): str(row.object_id) for row in matched_rows.itertuples(index=False)
+    }
+    for stone_dbid in list(stone_lcs):
+        object_id = matched_object_ids.get(int(stone_dbid))
+        if object_id is None:
+            del stone_lcs[stone_dbid]
+            continue
+        stone_lcs[stone_dbid]['object_id'] = object_id
 
     if filter_object_ids:
         stone_lcs = {k: v for k, v in stone_lcs.items() if v.get('object_id') in filter_object_ids}
