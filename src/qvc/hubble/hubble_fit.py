@@ -2349,18 +2349,53 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
     else:
         chisq_red_hubble_debiased = np.nan
     plot_hubble_residual_normality(
-        debiased_residuals,
-        mu_pred_std_debiased_with_scatter,
+        debiased_residuals[hubble_chi2_mask],
+        mu_pred_std_debiased_with_scatter[hubble_chi2_mask],
         plot_path=plot_path,
         show=False,
         filename="hubble_residual_normality_debiased.pdf",
     )
-    plot_hubble_residual_tail_diagnostics(
+    plot_hubble(
+        flat_samples,
         df_agn_pass2_plot_sample,
-        debiased_residuals,
-        mu_pred_std_debiased_with_scatter,
-        sigma_dmi=dmi_posterior_sigma_full,
-        sigma_sel=dmi_selection_sigma_full,
+        df_pantheon,
+        cosmo_model=cosmo_model,
+        z_pivot_agn=z_pivot_agn,
+        show_true=False,
+        show=False,
+        debias=True,
+        dm_interp=dm_interp,
+        plot_path=plot_path,
+        cosmo_model_samples=cosmo_model_joint_samples,
+        verbose=False,
+        residuals_sigma_clip=residuals_sigma_clip,
+        df_calibrators=df_calibrators,
+        dmi_values=dmi_posterior_median_full,
+        dmi_sigma=dmi_posterior_sigma_full,
+        dmi_selection_sigma=dmi_selection_sigma_full,
+        filename="hubble_diagram_debiased_no_logf.pdf",
+        residuals_csv_filename="hubble_plot_residuals_no_logf.csv",
+        sigma_clip_threshold=sigma_clip_threshold if apply_two_pass_sigma_clip else None,
+        z_range=z_range,
+        use_alpha_lambda_term=use_alpha_lambda_term,
+        use_eta_sigma_term=use_eta_sigma_term,
+        use_redshift_log_f_term=use_redshift_log_f_term,
+        use_intrinsic_scatter_in_residual_sigma=False,
+        diagnostics_suffix="_debiased_no_logf",
+    )
+    plot_hubble_residual_normality(
+        debiased_residuals[hubble_chi2_mask],
+        mu_pred_std_debiased[hubble_chi2_mask],
+        plot_path=plot_path,
+        show=False,
+        filename="hubble_residual_normality_debiased_no_logf.pdf",
+    )
+    plot_hubble_residual_tail_diagnostics(
+        df_agn_pass2_plot_sample.loc[hubble_chi2_mask].copy(),
+        debiased_residuals[hubble_chi2_mask],
+        mu_pred_std_debiased_with_scatter[hubble_chi2_mask],
+        sigma_dmi=dmi_posterior_sigma_full[hubble_chi2_mask] if dmi_posterior_sigma_full is not None else None,
+        sigma_sel=dmi_selection_sigma_full[hubble_chi2_mask] if dmi_selection_sigma_full is not None else None,
         plot_path=plot_path,
         show=False,
     )

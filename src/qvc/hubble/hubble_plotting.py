@@ -4417,6 +4417,8 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
                 dmi_values=None, dmi_sigma=None, dmi_selection_sigma=None, clipped_mask=None,
                 filename=None, sigma_clip_threshold=None,
                 use_alpha_lambda_term=None, use_eta_sigma_term=None, use_redshift_log_f_term=None,
+                use_intrinsic_scatter_in_residual_sigma=True,
+                diagnostics_suffix=None,
                 residuals_csv_filename="residuals.csv"):
     """
     Hubble diagram (Pantheon+-style):
@@ -4669,7 +4671,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
         seed=1741,
     )
     mu_pred_plot = mu_pred_median + point_scatter_mu
-    clipping_sigma = mu_pred_std_with_scatter
+    clipping_sigma = mu_pred_std_with_scatter if use_intrinsic_scatter_in_residual_sigma else mu_pred_std
     chi2_sigma = clipping_sigma
     if debias and sigma_sel is not None:
         use_sigma_sel = np.isfinite(sigma_sel) & (sigma_sel > 0.0)
@@ -5072,19 +5074,25 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
                 use_redshift_log_f_term=option_flags_other["use_redshift_log_f_term"],
             )
             z_grid_fine = np.linspace(1e-4, 5.2, 500)
-            results_other = {key: np.median(cosmo_model_samples_other[:, i]) for i, key in enumerate(model_labels_other)}
-
-            mu_model_other_fine = _mu_model(cosmo_model_other, results_other, z_grid_fine, z_pivot_agn)
-            mu_model_fine = _mu_model(cosmo_model, results, z_grid_fine, z_pivot_agn)
-            ax_resid.plot(z_grid_fine, mu_model_other_fine - mu_model_fine, lw=2.2, color=colors[cosmo_model_other], ls=line_styles[cosmo_model_other], 
+            param_indices_other = {name: model_labels_other.index(name) for name in model_labels_other}
+            mu_models_other_fine = np.array([
+                _mu_model(
+                    cosmo_model_other,
+                    {k: s[param_indices_other[k]] for k in model_labels_other},
+                    z_grid_fine,
+                    z_pivot_agn,
+                )
+                for s in np.asarray(cosmo_model_samples_other)
+            ])
+            mu_model_other_fine = np.percentile(mu_models_other_fine, 50, axis=0)
+            mu_model_current_fine = np.interp(z_grid_fine, z_grid, mu_model_median)
+            ax_resid.plot(z_grid_fine, mu_model_other_fine - mu_model_current_fine, lw=2.2, color=colors[cosmo_model_other], ls=line_styles[cosmo_model_other],
                           alpha=1.0, label=fr"{cosmo_model_other} $\Delta$μ")
             
         # Planck 2018 ΛCDM
-        mu_model_1 = _mu_model(cosmo_model, results, z_grid, z_pivot_agn)
-
         mu_conc = Planck18.distmod(z_grid).value
         #ax.plot(z_grid, mu_conc, color="#F0B000", lw=1.2, ls='--', zorder=5, alpha=1.0, label="flat $\Lambda$CDM (Planck 2018)")
-        ax_resid.plot(z_grid, mu_conc - mu_model_1, lw=2.2, color="#F0B000", ls='--', alpha=1.0,)
+        ax_resid.plot(z_grid, mu_conc - mu_model_median, lw=2.2, color="#F0B000", ls='--', alpha=1.0,)
 
 
         ax_resid.set_ylabel(r"$\Delta\mu$ (mag)")
@@ -5347,7 +5355,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
             {"metric": "median_var_fraction_predicted_M2500_cov_term", "value": _median_fraction(pred_m2500_cov_var)},
             {"metric": "median_var_fraction_predicted_M2500_alpha_lambda_term", "value": _median_fraction(pred_m2500_alpha_lambda_var)},
         ]
-        budget_suffix = "_debiased" if debias else ""
+        budget_suffix = diagnostics_suffix if diagnostics_suffix is not None else ("_debiased" if debias else "")
         budget_summary_path = os.path.join(diagnostics_path, f"hubble_error_budget_summary{budget_suffix}.csv")
         pd.DataFrame(budget_rows).to_csv(budget_summary_path, index=False)
 

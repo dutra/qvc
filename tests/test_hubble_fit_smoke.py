@@ -1357,13 +1357,16 @@ def test_run_single_two_pass_sigma_clip_fresh_mode_reruns_without_warm_start(mon
     assert pipeline_calls[1]["warm_start_flat_samples"] is None
     assert pipeline_calls[0]["logZ_is_approximate"] is False
     assert pipeline_calls[1]["logZ_is_approximate"] is False
-    assert len(plot_hubble_calls) == 4
+    assert len(plot_hubble_calls) == 5
     assert plot_hubble_calls[0]["filename"] == "hubble_diagram_pass1_full_sample_debiased.pdf"
     assert plot_hubble_calls[0].get("clipped_mask") is None
     assert plot_hubble_calls[0]["sigma_clip_threshold"] == 3.0
     np.testing.assert_array_equal(plot_hubble_calls[1]["clipped_mask"], np.zeros(len(df_agn), dtype=bool))
     assert plot_hubble_calls[1]["filename"] == "hubble_diagram_pass1_full_sample_clipped_debiased.pdf"
     assert plot_hubble_calls[1]["sigma_clip_threshold"] == 3.0
+    assert plot_hubble_calls[4]["filename"] == "hubble_diagram_debiased_no_logf.pdf"
+    assert plot_hubble_calls[4]["use_intrinsic_scatter_in_residual_sigma"] is False
+    assert plot_hubble_calls[4]["diagnostics_suffix"] == "_debiased_no_logf"
 
 
 def test_run_single_two_pass_sigma_clip_removes_clipped_object_ids_from_second_pass_outputs(monkeypatch, tmp_path):
@@ -2019,7 +2022,9 @@ def test_run_single_disable_sigma_clip_pass_skips_two_pass_branch(monkeypatch, t
 
     assert len(pipeline_calls) == 1
     assert pipeline_calls[0] == df_agn["object_id"].tolist()
-    assert len(plot_hubble_calls) == 2
+    assert len(plot_hubble_calls) == 3
+    assert plot_hubble_calls[2]["filename"] == "hubble_diagram_debiased_no_logf.pdf"
+    assert plot_hubble_calls[2]["use_intrinsic_scatter_in_residual_sigma"] is False
     for kwargs in plot_hubble_calls:
         assert "clipped_mask" not in kwargs
     for kwargs in l2500_calls:
