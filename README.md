@@ -91,7 +91,7 @@ Installation typically completes in **a few minutes** on a modern machine.
 From the repository root:
 
 ```bash
-conda create -n jaxcpu -c conda-forge python=3.12.11
+conda create -n jaxcpu -c conda-forge python=3.12.11 pip 
 conda activate jaxcpu
 ```
 
