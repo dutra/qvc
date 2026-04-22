@@ -4419,6 +4419,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
                 use_alpha_lambda_term=None, use_eta_sigma_term=None, use_redshift_log_f_term=None,
                 use_intrinsic_scatter_in_residual_sigma=True,
                 diagnostics_suffix=None,
+                agn_likelihood_space_chi2=None,
                 residuals_csv_filename="residuals.csv"):
     """
     Hubble diagram (Pantheon+-style):
@@ -4662,9 +4663,9 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
         chi2_redshift_mask &= (z_values >= z_range[0]) & (z_values <= z_range[1])
 
     # Display the population-level intrinsic scatter as point scatter, not as
-    # enlarged error bars. Sigma clipping should still use the standard Hubble
-    # uncertainty path with intrinsic scatter, while chi-squared can optionally
-    # follow the sigma_sel selection-scatter model.
+    # enlarged error bars. Sigma clipping can still use the broader population
+    # scatter path, but the Hubble-diagram chi2 should use the same per-point
+    # uncertainties shown on the plotted data.
     point_scatter_mu = _population_scatter_offsets(
         intrinsic_scatter,
         enabled=debias,
@@ -4672,11 +4673,8 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     )
     mu_pred_plot = mu_pred_median + point_scatter_mu
     clipping_sigma = mu_pred_std_with_scatter if use_intrinsic_scatter_in_residual_sigma else mu_pred_std
-    chi2_sigma = clipping_sigma
-    if debias and sigma_sel is not None:
-        use_sigma_sel = np.isfinite(sigma_sel) & (sigma_sel > 0.0)
-        chi2_sigma = np.where(use_sigma_sel, sigma_sel, chi2_sigma)
-    display_residuals_err = mu_pred_std if debias else chi2_sigma
+    display_residuals_err = mu_pred_std if debias else clipping_sigma
+    chi2_sigma = display_residuals_err
 
     mu_zscore = np.abs(residuals) / clipping_sigma
 
@@ -5098,62 +5096,54 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
         ax_resid.set_ylabel(r"$\Delta\mu$ (mag)")
         ax_resid.set_xlabel(r"$z$")
         chi2_red = np.nan
-        chi2_red_no_logf = np.nan
-        chi2_red_full_plus_sigma_dmi = np.nan
-        chi2_red_no_logf_plus_sigma_dmi = np.nan
+        chi2_red_with_logf = np.nan
+        chi2_red_shown_plus_sigma_dmi = np.nan
+        chi2_red_with_logf_plus_sigma_dmi = np.nan
         if np.any(chi2_redshift_mask):
             residuals_chi2 = residuals[chi2_redshift_mask]
             residuals_err_chi2 = chi2_sigma[chi2_redshift_mask]
-            mu_pred_std_chi2 = mu_pred_std[chi2_redshift_mask]
+            mu_pred_std_with_scatter_chi2 = mu_pred_std_with_scatter[chi2_redshift_mask]
             chi2_red, _ = reduced_chi_squared(
                 residuals_chi2,
                 residuals_err_chi2,
                 n_params=len(model_labels) - 1,
             )
             if debias:
-                chi2_red_no_logf, _ = reduced_chi_squared(
+                chi2_red_with_logf, _ = reduced_chi_squared(
                     residuals_chi2,
-                    mu_pred_std_chi2,
+                    mu_pred_std_with_scatter_chi2,
                     n_params=len(model_labels) - 1,
                 )
                 if sigma_dmi is not None:
                     sigma_dmi_chi2 = sigma_dmi[chi2_redshift_mask]
-                    chi2_red_full_plus_sigma_dmi, _ = reduced_chi_squared(
+                    chi2_red_shown_plus_sigma_dmi, _ = reduced_chi_squared(
                         residuals_chi2,
                         residuals_err_chi2,
                         extra_err=sigma_dmi_chi2,
                         n_params=len(model_labels) - 1,
                     )
-                    chi2_red_no_logf_plus_sigma_dmi, _ = reduced_chi_squared(
+                    chi2_red_with_logf_plus_sigma_dmi, _ = reduced_chi_squared(
                         residuals_chi2,
-                        mu_pred_std_chi2,
+                        mu_pred_std_with_scatter_chi2,
                         extra_err=sigma_dmi_chi2,
                         n_params=len(model_labels) - 1,
                     )
-        if debias and np.isfinite(chi2_red):
-            chi2_lines = [
-                rf"full: {chi2_red:.2f}",
-                rf"no log $f$: {chi2_red_no_logf:.2f}" if np.isfinite(chi2_red_no_logf) else r"no log $f$: nan",
-                rf"full $+\sigma_{{\rm dmi}}$: {chi2_red_full_plus_sigma_dmi:.2f}" if np.isfinite(chi2_red_full_plus_sigma_dmi) else r"full $+\sigma_{\rm dmi}$: nan",
-                rf"no log $f$ $+\sigma_{{\rm dmi}}$: {chi2_red_no_logf_plus_sigma_dmi:.2f} [rec]" if np.isfinite(chi2_red_no_logf_plus_sigma_dmi) else r"no log $f$ $+\sigma_{\rm dmi}$: nan [rec]",
-            ]
+        if (
+            debias
+            and agn_likelihood_space_chi2 is not None
+            and np.isfinite(agn_likelihood_space_chi2)
+        ):
             ax_resid.text(
                 0.98,
                 0.96,
-                (
-                    "$\\chi^2_\\nu$ debiased\n"
-                    + rf"$z={z_range[0]:.2f}$-{z_range[1]:.2f} only"
-                    + "\n"
-                    + "\n".join(chi2_lines)
-                ),
+                rf"$\chi^2_\nu = {agn_likelihood_space_chi2:.2f}$",
                 transform=ax_resid.transAxes,
                 ha="right",
                 va="top",
-                fontsize=10,
-                linespacing=1.15,
+                fontsize=12,
                 bbox=dict(boxstyle="round,pad=0.2", facecolor="white", alpha=0.8, edgecolor="none"),
             )
-        elif np.isfinite(chi2_red):
+        elif (not debias) and np.isfinite(chi2_red):
             ax_resid.text(
                 0.98,
                 0.96,
@@ -5721,46 +5711,6 @@ def plot_hubble_residual_tail_diagnostics(
     summary_csv_path = os.path.join(diagnostics_path, summary_filename)
     summary[summary_cols].sort_values("z_resid", ascending=True).to_csv(summary_csv_path, index=False)
 
-    n_valid = int(np.count_nonzero(np.isfinite(z_resid)))
-    n_lt_m2 = int(np.count_nonzero(z_resid < -2.0))
-    n_lt_m3 = int(np.count_nonzero(z_resid < -3.0))
-    n_lt_m4 = int(np.count_nonzero(z_resid < -4.0))
-    print(
-        "Hubble residual negative-tail diagnostics:"
-        f" N_valid={n_valid},"
-        f" N(z<-2)={n_lt_m2} ({(n_lt_m2 / n_valid if n_valid else np.nan):.3%}),"
-        f" N(z<-3)={n_lt_m3} ({(n_lt_m3 / n_valid if n_valid else np.nan):.3%}),"
-        f" N(z<-4)={n_lt_m4} ({(n_lt_m4 / n_valid if n_valid else np.nan):.3%})"
-    )
-
-    tail_mask = np.isfinite(z_resid) & (z_resid < -2.0)
-    if np.any(tail_mask):
-        tail_stats = [
-            f"N={int(np.count_nonzero(tail_mask))}",
-            f"median_residual={float(np.nanmedian(residuals[tail_mask])):.3f} mag",
-        ]
-        if "z" in summary.columns:
-            tail_stats.append(f"median_z={float(np.nanmedian(np.asarray(summary['z'], dtype=float)[tail_mask])):.3f}")
-        if "sigma_dmi" in summary.columns and np.any(np.isfinite(summary["sigma_dmi"])):
-            tail_stats.append(f"median_sigma_dmi={float(np.nanmedian(np.asarray(summary['sigma_dmi'], dtype=float)[tail_mask])):.3f} mag")
-        if "f_host_2500" in summary.columns and np.any(np.isfinite(summary["f_host_2500"])):
-            tail_stats.append(f"median_f_host_2500={float(np.nanmedian(np.asarray(summary['f_host_2500'], dtype=float)[tail_mask])):.3f}")
-        print("Negative tail summary (< -2 sigma): " + ", ".join(tail_stats))
-
-    worst = summary.loc[np.isfinite(summary["z_resid"])].sort_values("z_resid", ascending=True).head(int(n_worst))
-    if not worst.empty:
-        print(f"Worst {min(int(n_worst), len(worst))} objects by standardized residual:")
-        display_cols = [col for col in ["object_id", "sdss_name", "z", "residuals", "residuals_err", "z_resid", "sigma_dmi", "f_host_2500"] if col in worst.columns]
-        for _, row in worst[display_cols].iterrows():
-            fields = []
-            for col in display_cols:
-                value = row[col]
-                if isinstance(value, (float, np.floating)):
-                    fields.append(f"{col}={value:.3f}")
-                else:
-                    fields.append(f"{col}={value}")
-            print("  " + ", ".join(fields))
-
     diagnostics = [
         ("z", "Redshift z"),
         ("sigma_dmi", r"$\sigma_{\rm dmi}$"),
@@ -5868,9 +5818,6 @@ def plot_hubble_residual_tail_diagnostics(
         dpi=200,
         show=show,
     )
-    print(f"Saved Hubble residual tail summary to {summary_csv_path}")
-    print(f"Saved Hubble residual tail overview plot to {overview_path}")
-    print(f"Saved Hubble residual tail-fraction plot to {fractions_path}")
     return overview_path, fractions_path, summary_csv_path
 
 

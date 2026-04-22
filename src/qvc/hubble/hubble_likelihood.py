@@ -463,6 +463,7 @@ def log_likelihood_nearbylcs(
     mu_cosmo_nc = cosmo.distmod(z_nc).value
 
     sigma_lens = sigma_lens_from_dc(z_nc, cosmo)   # vector (same shape as z)
+    sigma_mu_z_nc = sigma_mu_from_z_err(z_nc, z_err_nc, cosmo)
 
     log_f_eff_nc = evaluate_log_f(
         params, z_nc, z_pivot=z_pivot_agn, use_redshift_log_f_term=use_redshift_log_f_term
@@ -470,7 +471,7 @@ def log_likelihood_nearbylcs(
     mu_err_nc = np.sqrt(
         m_err_nc**2 +
         M_pred_err_nc**2 +
-        z_err_nc**2 +
+        sigma_mu_z_nc**2 +
         sigma_lens**2 +
         #(0.055 * z_nc)**2 +
         np.exp(log_f_eff_nc)**2

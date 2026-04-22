@@ -305,7 +305,11 @@ def test_plot_hubble_debiased_returns_clipping_sigma_and_writes_distinct_diagnos
     residuals_df = pd.read_csv(tmp_path / "residuals.csv")
     for col in ("mu_pred_std", "mu_pred_std_with_scatter", "clipping_sigma", "chi2_sigma", "sigma_sel", "mu_zscore"):
         assert col in residuals_df.columns
-    np.testing.assert_allclose(residuals_df["chi2_sigma"].to_numpy(dtype=float), 7.0)
+    np.testing.assert_allclose(residuals_df["sigma_sel"].to_numpy(dtype=float), 7.0)
+    np.testing.assert_allclose(
+        residuals_df["chi2_sigma"].to_numpy(dtype=float),
+        residuals_df["mu_pred_std"].to_numpy(dtype=float),
+    )
     np.testing.assert_allclose(
         residuals_df["mu_zscore"].to_numpy(dtype=float),
         np.abs(residuals_df["residuals"].to_numpy(dtype=float)) / residuals_df["clipping_sigma"].to_numpy(dtype=float),
