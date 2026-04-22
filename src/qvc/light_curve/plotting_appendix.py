@@ -89,8 +89,8 @@ def _format_identity_panel_metrics(metrics, *, unit, header=None):
     lines.extend(
         [
             f"N = {metrics['N']}",
-            f"Bias = {metrics['Bias']:.3f} {unit}",
-            f"$\\sigma$ = {metrics['sigma']:.3f} {unit}",
+            f"Bias = {metrics['Bias']:.2f} {unit}",
+            f"$\\sigma$ = {metrics['sigma']:.2f} {unit}",
         ]
     )
     return "\n".join(lines)
