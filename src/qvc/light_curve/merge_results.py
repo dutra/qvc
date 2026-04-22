@@ -13,6 +13,7 @@ import numpy as np
 import pandas as pd
 from astropy import units as u
 from astropy.coordinates import SkyCoord
+from astropy.io import fits
 from tqdm import tqdm
 
 from qvc.hubble.cuts import LOG_SIGMA_UV_MAX, LOG_SIGMA_UV_MIN, LOG_TAU_UV_RF_MAX, LOG_TAU_UV_RF_MIN
@@ -24,11 +25,15 @@ from qvc.light_curve.multiband_generate_lc import (
     concat_light_curves,
     populate_sdss_fields,
     read_macleod_band,
+    resolve_stone_s82_matches,
 )
 from qvc.light_curve.plotting_appendix import plot_sigma_tau_identity_grid
 
 MACLEOD_YEAR_DAYS = 365.25
 MACLEOD_IDENTITY_BANDS = ("u", "g", "r", "i")
+STONE_IDENTITY_BANDS = ("g", "r", "i")
+STONE_SIGMA_LIMITS = (-1.6, 0.2)
+STONE_TAU_LIMITS = (1.4, 4.6)
 
 def _decode_h5_scalar(value):
     if isinstance(value, bytes):
@@ -355,18 +360,82 @@ def build_stone_identity_plot_path(prefix: str, base_dir: str) -> str:
     return str(base_path.parent / "plots" / prefix / "sigma_tau_identity_grid.pdf")
 
 
-def build_stone_identity_plot_dataframe(rows):
-    df = pd.DataFrame(rows).copy()
-    for band in ("g", "r", "i"):
-        df[f"ours_sigma_{band}"] = pd.to_numeric(df[f"log_sigma_band_{band}"], errors="coerce")
-        df[f"ours_sigma_{band}_err"] = pd.to_numeric(df[f"log_sigma_band_{band}_err"], errors="coerce")
-        df[f"ours_tau_{band}"] = pd.to_numeric(df[f"log_tau_band_{band}_RF"], errors="coerce")
-        df[f"ours_tau_{band}_err"] = pd.to_numeric(df[f"log_tau_band_{band}_RF_err"], errors="coerce")
-    return df
+def build_stone_identity_plot_data(rows, stone_fits_path=None, s82_catalog_path=None, max_sep_arcsec=1.0):
+    df_rows = pd.DataFrame(rows).copy()
+    if df_rows.empty:
+        return df_rows
+
+    if stone_fits_path is None:
+        stone_fits_path = resolve_qvc_data_path("data/Stone2021/TotalDat.fits")
+    else:
+        stone_fits_path = str(stone_fits_path)
+
+    with fits.open(stone_fits_path, memmap=False) as hdul:
+        stone_data = hdul[1].data
+
+        stone_rows = []
+        for i in range(len(stone_data)):
+            row = {
+                "stone_DBID": int(stone_data["DBID"][i]),
+                "stone_RA": float(stone_data["RA"][i]),
+                "stone_DEC": float(stone_data["DEC"][i]),
+                "stone_Z": float(stone_data["Z"][i]),
+            }
+            for band in STONE_IDENTITY_BANDS:
+                row |= {
+                    f"stone_log_SIGMA_{band}": float(stone_data[f"log_SIGMA_{band}"][i]),
+                    f"stone_log_SIGMA_{band}_ERR_L": float(stone_data[f"log_SIGMA_{band}_ERR_L"][i]),
+                    f"stone_log_SIGMA_{band}_ERR_U": float(stone_data[f"log_SIGMA_{band}_ERR_U"][i]),
+                    f"stone_log_TAU_REST_{band}": float(stone_data[f"log_TAU_REST_{band}"][i]),
+                    f"stone_log_TAU_REST_{band}_ERR_L": float(stone_data[f"log_TAU_REST_{band}_ERR_L"][i]),
+                    f"stone_log_TAU_REST_{band}_ERR_U": float(stone_data[f"log_TAU_REST_{band}_ERR_U"][i]),
+                }
+            stone_rows.append(row)
+
+    stone_df = pd.DataFrame(stone_rows)
+    matched, _ = resolve_stone_s82_matches(
+        stone_fits_path=stone_fits_path,
+        s82_catalog_path=s82_catalog_path,
+        max_sep_arcsec=max_sep_arcsec,
+    )
+    if matched.empty:
+        return matched.copy()
+
+    matched = matched.copy()
+    matched["stone_DBID"] = pd.to_numeric(matched["stone_DBID"], errors="coerce").astype("Int64")
+    stone_df["stone_DBID"] = pd.to_numeric(stone_df["stone_DBID"], errors="coerce").astype("Int64")
+    stone_df = stone_df.merge(
+        matched.loc[:, ["stone_DBID", "object_id", "match_sep_arcsec"]],
+        on="stone_DBID",
+        how="inner",
+    )
+    if stone_df.empty:
+        return stone_df
+
+    df_rows["object_id"] = df_rows["object_id"].astype(str)
+    stone_df["object_id"] = stone_df["object_id"].astype(str)
+    merged = stone_df.merge(df_rows, on="object_id", how="inner", suffixes=("_stone", "_fit"))
+    if merged.empty:
+        return merged
+
+    for band in STONE_IDENTITY_BANDS:
+        merged[f"ours_sigma_{band}"] = pd.to_numeric(merged[f"log_sigma_band_{band}"], errors="coerce")
+        merged[f"ours_sigma_{band}_err"] = pd.to_numeric(merged[f"log_sigma_band_{band}_err"], errors="coerce")
+        merged[f"ours_tau_{band}"] = pd.to_numeric(merged[f"log_tau_band_{band}_RF"], errors="coerce")
+        merged[f"ours_tau_{band}_err"] = pd.to_numeric(merged[f"log_tau_band_{band}_RF_err"], errors="coerce")
+    return merged
 
 
-def write_stone_sigma_tau_identity_grid(rows, output_path: str):
-    plot_df = build_stone_identity_plot_dataframe(rows)
+def write_stone_sigma_tau_identity_grid(rows, output_path: str, stone_fits_path=None, s82_catalog_path=None):
+    plot_df = build_stone_identity_plot_data(
+        rows,
+        stone_fits_path=stone_fits_path,
+        s82_catalog_path=s82_catalog_path,
+    )
+    if plot_df.empty:
+        print("WARNING: Skipping Stone sigma/tau identity grid because no matched Stone comparison rows were found.")
+        return None
+
     output_path = str(output_path)
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
@@ -375,20 +444,27 @@ def write_stone_sigma_tau_identity_grid(rows, output_path: str):
         "y": "ours_sigma_{band}",
         "xerr": ("stone_log_SIGMA_{band}_ERR_L", "stone_log_SIGMA_{band}_ERR_U"),
         "yerr": "ours_sigma_{band}_err",
+        "xlabel": r"$\log\!\,\sigma_<<band>>$ (mag)" + "\n(Stone+21)",
+        "ylabel": r"$\log\!\,\sigma_<<band>>$ (mag)" + "\n(this work)",
     }
     tau_keys = {
         "x": "stone_log_TAU_REST_{band}",
         "y": "ours_tau_{band}",
         "xerr": ("stone_log_TAU_REST_{band}_ERR_L", "stone_log_TAU_REST_{band}_ERR_U"),
         "yerr": "ours_tau_{band}_err",
+        "xlabel": r"$\log\!\,\tau_{\mathrm{<<band>>},\,\mathrm{RF}}\,(\mathrm{days})$" + "\n(Stone+21)",
+        "ylabel": r"$\log\!\,\tau_{\mathrm{<<band>>},\,\mathrm{RF}}\,(\mathrm{days})$" + "\n(this work)",
     }
     fig = plot_sigma_tau_identity_grid(
         plot_df,
         sigma_keys,
         tau_keys,
-        bands=("g", "r", "i"),
+        bands=STONE_IDENTITY_BANDS,
+        figsize=(12, 7.6),
         show=False,
         output_path=output_path,
+        sigma_limits=STONE_SIGMA_LIMITS,
+        tau_limits=STONE_TAU_LIMITS,
     )
     plt.close(fig)
     print(f"Wrote Stone sigma/tau identity grid to {output_path}")
