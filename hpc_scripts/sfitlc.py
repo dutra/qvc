@@ -152,11 +152,11 @@ def build_mail_lines() -> str:
 
 
 def build_stone_identity_plot_path(prefix: str) -> str:
-    return str(REPO_ROOT / "results" / "plots" / prefix / "sigma_tau_identity_grid.pdf")
+    return str(REPO_ROOT / "plots" / "lc_tests" / prefix / "sigma_tau_identity_grid.pdf")
 
 
 def build_macleod_identity_plot_path(prefix: str) -> str:
-    return str(REPO_ROOT / "results" / "plots" / prefix / "sigma_tau_identity_grid.pdf")
+    return str(REPO_ROOT / "plots" / "lc_tests" / prefix / "sigma_tau_identity_grid.pdf")
 
 
 def build_object_ids_path(prefix: str, job: JobConfig) -> Path:
