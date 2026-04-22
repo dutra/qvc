@@ -80,8 +80,48 @@ def _format_panel_metrics(metrics, *, header=None):
     return "\n".join(lines)
 
 
+def _format_identity_panel_metrics(metrics, *, unit, header=None):
+    if metrics is None:
+        return None
+    lines = []
+    if header:
+        lines.append(header)
+    lines.extend(
+        [
+            f"N = {metrics['N']}",
+            f"Bias = {metrics['Bias']:.3f} {unit}",
+            f"$\\sigma$ = {metrics['sigma']:.3f} {unit}",
+        ]
+    )
+    return "\n".join(lines)
+
+
 def _annotate_panel_metrics(ax, metrics, *, loc="lower right", header=None, fontsize=8.5):
     text = _format_panel_metrics(metrics, header=header)
+    if not text:
+        return
+    anchors = {
+        "lower right": (0.97, 0.03, "right", "bottom"),
+        "lower left": (0.03, 0.03, "left", "bottom"),
+        "upper right": (0.97, 0.97, "right", "top"),
+        "upper left": (0.03, 0.97, "left", "top"),
+    }
+    x, y, ha, va = anchors[loc]
+    ax.text(
+        x,
+        y,
+        text,
+        transform=ax.transAxes,
+        ha=ha,
+        va=va,
+        fontsize=fontsize,
+        bbox=dict(boxstyle="round,pad=0.25", facecolor="white", edgecolor="0.6", alpha=0.9),
+        zorder=20,
+    )
+
+
+def _annotate_identity_panel_metrics(ax, metrics, *, unit, loc="lower right", header=None, fontsize=8.5):
+    text = _format_identity_panel_metrics(metrics, unit=unit, header=header)
     if not text:
         return
     anchors = {
@@ -275,6 +315,8 @@ def plot_sigma_tau_identity_grid(
     sigma_limits = sigma_limits or _row_limits(sigma_keys, "sigma")
     tau_limits = tau_limits or _row_limits(tau_keys, "tau")
 
+    metric_units = ("mag", "dex")
+
     for row_index, (keydict, row_limits) in enumerate(((sigma_keys, sigma_limits), (tau_keys, tau_limits))):
         for col, band in enumerate(bands):
             ax = axes[row_index, col]
@@ -324,7 +366,13 @@ def plot_sigma_tau_identity_grid(
             )
             ax.set_xlabel(_resolve_label(keydict.get("xlabel"), band), labelpad=2, fontsize=label_fontsize)
             ax.set_ylabel(_resolve_label(keydict.get("ylabel"), band), labelpad=2, fontsize=label_fontsize)
-            _annotate_panel_metrics(ax, metrics, loc="lower right", fontsize=metric_fontsize)
+            _annotate_identity_panel_metrics(
+                ax,
+                metrics,
+                unit=metric_units[row_index],
+                loc="lower right",
+                fontsize=metric_fontsize,
+            )
 
     _set_row_ticks(axes[0])
     _set_row_ticks(axes[1])
