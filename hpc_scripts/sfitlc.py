@@ -159,11 +159,24 @@ def build_macleod_identity_plot_path(prefix: str) -> str:
     return str(REPO_ROOT / "results" / "plots" / prefix / "sigma_tau_identity_grid.pdf")
 
 
-def build_sbatch_script(prefix: str, job: JobConfig, args, chisq_csv: str, spectra_fit_csv: str) -> str:
+def build_object_ids_path(prefix: str, job: JobConfig) -> Path:
+    return SCRIPT_DIR / f"{prefix}_{job.description}_object_ids.txt"
+
+
+def build_sbatch_script(
+    prefix: str,
+    job: JobConfig,
+    args,
+    chisq_csv: str,
+    spectra_fit_csv: str,
+    object_ids_path: Path | None = None,
+) -> str:
     log_dir = LOG_ROOT / prefix
     log_pattern = log_dir / f"{prefix}-%A_%a-%j.txt"
-    object_ids_literal = repr(job.object_ids)
+    if args.fit != "chisq" and object_ids_path is None:
+        raise ValueError(f"object_ids_path is required for fit mode {args.fit!r}.")
     filter_csv = str(REPO_ROOT / chisq_csv) if chisq_csv is not None else ""
+    object_id_file = str(object_ids_path) if object_ids_path is not None else ""
     base_flags = [
         "--plot",
         "--disable_trace_plot",
@@ -213,6 +226,7 @@ export SKIP="{args.skip}"
 export TASK_FALLBACK="{args.skip}"
 export FIT_MODE="{args.fit}"
 export FILTER_CSV="{filter_csv}"
+export OBJECT_ID_FILE="{object_id_file}"
 export START=""
 export END=""
 
@@ -236,6 +250,7 @@ IDS=$(
 python - <<'PY'
 import os
 import pandas as pd
+from itertools import islice
 
 fit_mode = os.environ["FIT_MODE"]
 start = int(os.environ["START"])
@@ -245,7 +260,8 @@ if fit_mode == "chisq":
     df = pd.read_csv(os.environ["FILTER_CSV"])
     ids = df["object_id"].astype(str).tolist()[start:end]
 else:
-    ids = {object_ids_literal}[start:end]
+    with open(os.environ["OBJECT_ID_FILE"], encoding="utf-8") as fh:
+        ids = [line.strip() for line in islice(fh, start, end) if line.strip()]
 
 print(" ".join(ids))
 PY
@@ -331,6 +347,12 @@ def write_job_script(prefix: str, sbatch_script: str) -> Path:
     return sbatch_path
 
 
+def write_object_ids_file(object_ids_path: Path, object_ids: list[str]) -> Path:
+    object_ids_path.parent.mkdir(parents=True, exist_ok=True)
+    object_ids_path.write_text("".join(f"{object_id}\n" for object_id in object_ids), encoding="utf-8")
+    return object_ids_path
+
+
 def parse_sbatch_job_id(stdout: str) -> str:
     parts = stdout.strip().split()
     for token in reversed(parts):
@@ -340,13 +362,23 @@ def parse_sbatch_job_id(stdout: str) -> str:
 
 
 def run_sbatch(cmd: list[str]) -> str:
-    result = subprocess.run(
-        cmd,
-        check=True,
-        cwd=REPO_ROOT,
-        capture_output=True,
-        text=True,
-    )
+    try:
+        result = subprocess.run(
+            cmd,
+            check=True,
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        stdout = (exc.stdout or exc.output or "").strip()
+        stderr = (exc.stderr or "").strip()
+        details = [f"sbatch failed with exit code {exc.returncode}: {' '.join(cmd)}"]
+        if stdout:
+            details.append(f"stdout:\n{stdout}")
+        if stderr:
+            details.append(f"stderr:\n{stderr}")
+        raise RuntimeError("\n".join(details)) from exc
     stdout = result.stdout.strip()
     if stdout:
         print(stdout)
@@ -415,7 +447,17 @@ def main():
         total_objects = len(job.object_ids)
         _, task_start, task_end = validate_chunking(total_objects, args.N, args.skip, args.num_jobs)
         prefix = f"{run_stamp}_{git_hash}_{job.description}"
-        sbatch_script = build_sbatch_script(prefix, job, args, chisq_csv, spectra_fit_csv)
+        object_ids_path = None
+        if args.fit != "chisq":
+            object_ids_path = write_object_ids_file(build_object_ids_path(prefix, job), job.object_ids)
+        sbatch_script = build_sbatch_script(
+            prefix,
+            job,
+            args,
+            chisq_csv,
+            spectra_fit_csv,
+            object_ids_path=object_ids_path,
+        )
         merge_sbatch_script = build_merge_sbatch_script(
             prefix,
             args,
