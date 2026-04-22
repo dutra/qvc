@@ -100,6 +100,7 @@ from qvc.hubble.completeness_mock_catalog import (
 
 VALID_COMPLETENESS_MODES = ("2d", "3d_fhost", "4d_fhost_alpha")
 SPEED_CHOICES = ("fastest", "quick", "standard", "production")
+SIGMA_CLIP_SECOND_PASS_MODES = ("warm", "fresh")
 
 
 def validate_completeness_mode(completeness_mode):
@@ -119,6 +120,45 @@ def normalize_speed(speed):
             f"Invalid speed={speed!r}. Expected one of {SPEED_CHOICES}. "
             "Ordered fastest to slowest: fastest, quick, standard, production."
         )
+
+
+def normalize_sigma_clip_second_pass_mode(mode):
+    normalized = str(mode).strip().lower()
+    if normalized in SIGMA_CLIP_SECOND_PASS_MODES:
+        return normalized
+    raise ValueError(
+        f"Invalid sigma_clip_second_pass_mode={mode!r}. "
+        f"Expected one of {SIGMA_CLIP_SECOND_PASS_MODES}."
+    )
+
+
+def get_dynesty_speed_settings(speed, ndim, *, warm_start=False):
+    speed = normalize_speed(speed)
+    if speed == "fastest":
+        settings = dict(dlogz_init=10, n_effective=50, nlive_init=20, nlive_batch=5)
+    elif speed == "quick":
+        settings = dict(dlogz_init=0.01, n_effective=500, nlive_init=50, nlive_batch=20)
+    elif speed == "standard":
+        settings = dict(dlogz_init=0.01, n_effective=1000, nlive_init=250, nlive_batch=100)
+    elif speed == "production":
+        settings = dict(
+            dlogz_init=0.01,
+            n_effective=2000,
+            nlive_init=max(1000, 50 * ndim),
+            nlive_batch=max(500, 25 * ndim),
+        )
+    else:
+        raise ValueError(f"Invalid speed={speed!r}. Expected one of {SPEED_CHOICES}.")
+
+    if not warm_start:
+        return settings
+
+    return {
+        "dlogz_init": settings["dlogz_init"],
+        "n_effective": max(25, int(np.ceil(0.10 * settings["n_effective"]))),
+        "nlive_init": max(2 * ndim + 1, int(np.ceil(0.10 * settings["nlive_init"]))),
+        "nlive_batch": max(5, int(np.ceil(0.10 * settings["nlive_batch"]))),
+    }
 
 
 def subsample_dataframe_at_most(df, n, *, random_state=42, label="rows"):
@@ -146,6 +186,80 @@ def subsample_dataframe_at_most(df, n, *, random_state=42, label="rows"):
 def prior_transform_dynesty(unit_cube, priors, model_labels):
     return [priors[key][0] + (priors[key][1] - priors[key][0]) * x
             for x, key in zip(unit_cube, model_labels)]
+
+
+def inverse_prior_transform_dynesty(samples, priors, model_labels, *, eps=1e-9):
+    samples = np.asarray(samples, dtype=float)
+    if samples.ndim != 2 or samples.shape[1] != len(model_labels):
+        raise ValueError(
+            f"Expected samples with shape (n, {len(model_labels)}), got {samples.shape}."
+        )
+    unit = np.empty_like(samples, dtype=float)
+    for j, key in enumerate(model_labels):
+        lo, hi = priors[key]
+        width = float(hi) - float(lo)
+        if not np.isfinite(width) or width <= 0.0:
+            raise ValueError(f"Prior for {key!r} must have finite positive width, got {(lo, hi)}.")
+        unit[:, j] = (samples[:, j] - float(lo)) / width
+    return np.clip(unit, eps, 1.0 - eps)
+
+
+def build_warm_start_live_points(
+    flat_samples,
+    *,
+    priors,
+    model_labels,
+    nlive,
+    loglike_func,
+    logl_kwargs,
+    rng_seed=12345,
+    jitter_scale=1e-3,
+    eps=1e-9,
+):
+    flat_samples = np.asarray(flat_samples, dtype=float)
+    if flat_samples.ndim != 2 or flat_samples.shape[1] != len(model_labels):
+        raise ValueError(
+            f"Warm-start flat_samples must have shape (n, {len(model_labels)}), got {flat_samples.shape}."
+        )
+    finite = np.all(np.isfinite(flat_samples), axis=1)
+    flat_samples = flat_samples[finite]
+    if flat_samples.size == 0:
+        raise ValueError("Cannot build warm-start live points from an empty/non-finite pass-1 posterior.")
+
+    rng = np.random.default_rng(rng_seed)
+    replace = len(flat_samples) < int(nlive)
+    selected = flat_samples[
+        rng.choice(len(flat_samples), size=int(nlive), replace=replace)
+    ]
+    live_u = inverse_prior_transform_dynesty(selected, priors, model_labels, eps=eps)
+    if jitter_scale and jitter_scale > 0.0:
+        live_u = np.clip(
+            live_u + rng.normal(0.0, float(jitter_scale), size=live_u.shape),
+            eps,
+            1.0 - eps,
+        )
+    live_v = np.asarray(
+        [prior_transform_dynesty(row, priors, model_labels) for row in live_u],
+        dtype=float,
+    )
+
+    live_logl = []
+    live_blobs = []
+    for theta in live_v:
+        value = loglike_func(theta, **logl_kwargs)
+        if isinstance(value, tuple):
+            logl, blob = value
+        else:
+            logl, blob = value, None
+        live_logl.append(float(logl))
+        if blob is not None:
+            live_blobs.append(np.asarray(blob, dtype=float))
+
+    live_logl = np.asarray(live_logl, dtype=float)
+    if len(live_blobs) == len(live_logl):
+        return [live_u, live_v, live_logl, np.asarray(live_blobs, dtype=float)]
+    return [live_u, live_v, live_logl]
+
 
 def make_run_tag(
     cosmo_model,
@@ -547,12 +661,21 @@ def _write_stage_checkpoint(
     df_agn_fit_selection=None,
     keep_mask_full=None,
     pass1_diagnostics_df=None,
+    sigma_clip_second_pass_mode=None,
+    sigma_clip_warm_start_from_pass1=None,
+    logZ_is_approximate=None,
 ):
     source_checkpoint_file = source_checkpoint_file or target_checkpoint_file
     payload = load_chains(source_checkpoint_file)
     payload["sigma_clip_pass_stage"] = str(sigma_clip_pass_stage)
     if sigma_clip_threshold is not None:
         payload["sigma_clip_threshold"] = float(sigma_clip_threshold)
+    if sigma_clip_second_pass_mode is not None:
+        payload["sigma_clip_second_pass_mode"] = str(sigma_clip_second_pass_mode)
+    if sigma_clip_warm_start_from_pass1 is not None:
+        payload["sigma_clip_warm_start_from_pass1"] = bool(sigma_clip_warm_start_from_pass1)
+    if logZ_is_approximate is not None:
+        payload["logZ_is_approximate"] = bool(logZ_is_approximate)
     if df_agn_full_sample is not None:
         payload["object_id_full_sample"] = df_agn_full_sample["object_id"].astype(str).to_numpy()
     if df_agn_plot_sample is not None:
@@ -877,6 +1000,9 @@ def _run_fit_stage(
     use_redshift_log_f_term,
     checkpoint_file_override=None,
     resume_replot_with_cuts=False,
+    warm_start_flat_samples=None,
+    logZ_is_approximate=False,
+    df_agn_completeness=None,
 ):
     (
         flat_samples,
@@ -914,6 +1040,9 @@ def _run_fit_stage(
         use_eta_sigma_term=use_eta_sigma_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
         resume_replot_with_cuts=resume_replot_with_cuts,
+        warm_start_flat_samples=warm_start_flat_samples,
+        logZ_is_approximate=logZ_is_approximate,
+        df_agn_completeness=df_agn_completeness,
     )
     display_results_summary(
         flat_samples,
@@ -1021,6 +1150,9 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                       use_eta_sigma_term=False,
                       use_redshift_log_f_term=False,
                       resume_replot_with_cuts=False,
+                      warm_start_flat_samples=None,
+                      logZ_is_approximate=False,
+                      df_agn_completeness=None,
                       ):
     validate_completeness_mode(completeness_mode)
     speed = normalize_speed(speed)
@@ -1078,6 +1210,9 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                     f"found {np.count_nonzero(bad)} non-finite rows."
                 )
 
+    if df_agn_completeness is None:
+        df_agn_completeness = df_agn
+
     if completeness and not resume_replot_with_cuts:
         if completeness_sim_file is None:
             completeness_area_deg2 = estimate_sky_box_area_deg2(df_agn_all)
@@ -1086,31 +1221,32 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                 area_deg2=completeness_area_deg2,
             )
         if completeness_mode in ("3d_fhost", "4d_fhost_alpha"):
-            if COMPLETENESS_FHOST_COL not in df_agn.columns:
+            if COMPLETENESS_FHOST_COL not in df_agn_completeness.columns:
                 raise KeyError(
                     f"completeness_mode={completeness_mode!r} requires "
-                    f"df_agn[{COMPLETENESS_FHOST_COL!r}]."
+                    f"df_agn_completeness[{COMPLETENESS_FHOST_COL!r}]."
                 )
-            bad_fhost = ~np.isfinite(df_agn[COMPLETENESS_FHOST_COL].to_numpy(dtype=float))
+            bad_fhost = ~np.isfinite(df_agn_completeness[COMPLETENESS_FHOST_COL].to_numpy(dtype=float))
             if np.any(bad_fhost):
                 raise ValueError(
                     f"completeness_mode={completeness_mode!r} requires finite {COMPLETENESS_FHOST_COL} "
-                    "for all AGN used in the fit; "
+                    "for all AGN used to estimate the completeness map; "
                     f"found {np.count_nonzero(bad_fhost)} non-finite rows."
                 )
         if completeness_mode == "4d_fhost_alpha":
-            if "alpha_lambda" not in df_agn.columns:
-                raise KeyError("completeness_mode='4d_fhost_alpha' requires df_agn['alpha_lambda'].")
-            bad_alpha = ~np.isfinite(df_agn["alpha_lambda"].to_numpy(dtype=float))
+            if "alpha_lambda" not in df_agn_completeness.columns:
+                raise KeyError("completeness_mode='4d_fhost_alpha' requires df_agn_completeness['alpha_lambda'].")
+            bad_alpha = ~np.isfinite(df_agn_completeness["alpha_lambda"].to_numpy(dtype=float))
             if np.any(bad_alpha):
                 raise ValueError(
-                    "completeness_mode='4d_fhost_alpha' requires finite alpha_lambda for all AGN used in the fit; "
+                    "completeness_mode='4d_fhost_alpha' requires finite alpha_lambda for all AGN used "
+                    "to estimate the completeness map; "
                     f"found {np.count_nonzero(bad_alpha)} non-finite rows."
                 )
         print(f"Building {completeness_mode} completeness map using mock catalog: {completeness_sim_file}")
         if completeness_mode == "4d_fhost_alpha":
             completeness_params = get_completeness_function_4d_fhost_alpha(
-                df_agn,
+                df_agn_completeness,
                 sim_file=completeness_sim_file,
                 plot=not compare_sigma_only,
                 plot_path=plot_path,
@@ -1118,7 +1254,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
             )
         elif completeness_mode == "3d_fhost":
             completeness_params = get_completeness_function_3d_fhost(
-                df_agn,
+                df_agn_completeness,
                 sim_file=completeness_sim_file,
                 plot=not compare_sigma_only,
                 plot_path=plot_path,
@@ -1126,7 +1262,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
             )
         else:
             completeness_params = get_completeness_function_2d(
-                df_agn, sim_file=completeness_sim_file, plot=not compare_sigma_only, plot_path=plot_path
+                df_agn_completeness, sim_file=completeness_sim_file, plot=not compare_sigma_only, plot_path=plot_path
             )
     else:
         completeness_params = None
@@ -1246,8 +1382,9 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                 use_redshift_log_f_term=use_redshift_log_f_term,
             )
             ptform_kwargs = dict(priors=priors, model_labels=model_labels)
+            loglike_func = log_likelihood_nearbylcs if agn_calibrators_data is not None else log_likelihood
             sampler = DynamicNestedSampler(
-                log_likelihood_nearbylcs if agn_calibrators_data is not None else log_likelihood,
+                loglike_func,
                 prior_transform_dynesty,
                 ndim,
                 logl_kwargs=logl_kwargs,
@@ -1259,46 +1396,32 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                 queue_size=num_cores,
                 blob=True
             )
-            if speed == "fastest":
-                print("[Warning] Starting fastest run...")
-                sampler.run_nested(
-                    print_progress=True,
-                    dlogz_init=10,                 
-                    n_effective=50,                # 300–1000 typical for model comparison
-                    nlive_init=20,   # bump live points
-                    nlive_batch=5   # reasonable batch size for dynamic allocation
+            warm_start = warm_start_flat_samples is not None
+            speed_settings = get_dynesty_speed_settings(speed, ndim, warm_start=warm_start)
+            live_points = None
+            if warm_start:
+                print(
+                    "[Warning] Starting warm-start sigma-clipped top-up run "
+                    f"with {speed!r} settings: {speed_settings}"
                 )
-            elif speed == "production":
-                print("Starting production run...")
-                sampler.run_nested(
-                    print_progress=True,
-                    dlogz_init=0.01,                 
-                    n_effective=2000,                # 300–1000 typical for model comparison
-                    nlive_init=max(1000, 50*ndim),   # bump live points
-                    nlive_batch=max(500, 25*ndim)   # reasonable batch size for dynamic allocation
-                    # optional: sample='rwalk', walks=50, bound='multi' if you expect multi-modality
-                )
-            elif speed == "quick":
-                print("[Warning] Starting quick run...")
-                sampler.run_nested(
-                    print_progress=True,
-                    dlogz_init=0.01,                 
-                    n_effective=500,                # 300–1000 typical for model comparison
-                    nlive_init=50,   # bump live points
-                    nlive_batch=20   # reasonable batch size for dynamic allocation
-                )
-
-            elif speed == "standard":
-                print("[Warning] Starting standard run...")
-                sampler.run_nested(
-                    print_progress=True,
-                    dlogz_init=0.01,                 
-                    n_effective=1000,                # 300–1000 typical for model comparison
-                    nlive_init=250,   # bump live points
-                    nlive_batch=100   # reasonable batch size for dynamic allocation
+                live_points = build_warm_start_live_points(
+                    warm_start_flat_samples,
+                    priors=priors,
+                    model_labels=model_labels,
+                    nlive=speed_settings["nlive_init"],
+                    loglike_func=loglike_func,
+                    logl_kwargs=logl_kwargs,
                 )
             else:
-                raise ValueError(f"Invalid speed={speed!r}. Expected one of {SPEED_CHOICES}.")
+                print(f"Starting {speed} run with settings: {speed_settings}")
+            sampler.run_nested(
+                print_progress=True,
+                dlogz_init=speed_settings["dlogz_init"],
+                n_effective=speed_settings["n_effective"],
+                nlive_init=speed_settings["nlive_init"],
+                nlive_batch=speed_settings["nlive_batch"],
+                live_points=live_points,
+            )
 
 
         results = sampler.results
@@ -1408,6 +1531,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
             object_id_fit_selection=df_agn["object_id"].astype(str).to_numpy(),
             logZ=logZ,
             logZerr=logZerr,
+            logZ_is_approximate=bool(logZ_is_approximate),
             integrals_max_w=integrals_max_w,
         )
 
@@ -1465,6 +1589,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                skip_plots=False, residuals_sigma_clip=None, df_calibrators=None,
                disable_sigma_clip_pass=False, sigma_clip_threshold=3.0,
                resume_stage="both",
+               sigma_clip_second_pass_mode="warm",
                prefix="default", uniform_redshift_distribution=False,
                completeness_sim_file=DEFAULT_COMPLETENESS_SIM_FILE,
                completeness_mode="2d",
@@ -1476,6 +1601,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                resume_replot_with_cuts=False):
     validate_completeness_mode(completeness_mode)
     speed = normalize_speed(speed)
+    sigma_clip_second_pass_mode = normalize_sigma_clip_second_pass_mode(sigma_clip_second_pass_mode)
     run_tag = make_run_tag(
         cosmo_model,
         only_sna,
@@ -1562,6 +1688,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
     pass2_resume_arg = False
     selected_resume_checkpoint = None
     selected_resume_results = None
+    pass2_warm_start_flat_samples = None
 
     if apply_two_pass_sigma_clip:
         if resume:
@@ -1598,8 +1725,9 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 pass1_resume_arg = selected_resume_checkpoint
 
         if not skip_pass1_sampling:
+            df_agn_pass1_fit_selection = df_agn_pass2_fit_selection.copy()
             print(
-                f"Running first Hubble-fit pass for {len(df_agn_pass2_fit_selection)} AGN "
+                f"Running Hubble fit for {len(df_agn_pass1_fit_selection)} AGN "
                 f"with sigma clipping threshold |mu_zscore| < {sigma_clip_threshold:.2f}."
             )
             (
@@ -1615,7 +1743,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 _age_pass1,
                 _age_err_pass1,
             ) = _run_fit_stage(
-                df_agn_pass2_fit_selection,
+                df_agn_pass1_fit_selection,
                 df_agn_all,
                 df_pantheon,
                 _sna_L,
@@ -1640,17 +1768,18 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 use_redshift_log_f_term=use_redshift_log_f_term,
                 checkpoint_file_override=pass1_checkpoint_file,
                 resume_replot_with_cuts=False,
+                df_agn_completeness=df_agn_full_sample_preclip,
             )
             dmi_posterior_median_pass1_full = _map_fit_values_to_plot_sample(
                 df_agn_full_sample_preclip,
-                df_agn_pass2_fit_selection,
+                df_agn_pass1_fit_selection,
                 dmi_posterior_median_pass1,
                 value_name="dmi_posterior_median_pass1",
                 uniform_redshift_distribution=uniform_redshift_distribution,
             )
             dmi_posterior_sigma_pass1_full = _map_fit_values_to_plot_sample(
                 df_agn_full_sample_preclip,
-                df_agn_pass2_fit_selection,
+                df_agn_pass1_fit_selection,
                 dmi_posterior_sigma_pass1,
                 value_name="dmi_posterior_sigma_pass1",
                 uniform_redshift_distribution=uniform_redshift_distribution,
@@ -1659,7 +1788,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
             if dmi_selection_sigma_posterior_median_pass1 is not None:
                 dmi_selection_sigma_pass1_full = _map_fit_values_to_plot_sample(
                     df_agn_full_sample_preclip,
-                    df_agn_pass2_fit_selection,
+                    df_agn_pass1_fit_selection,
                     dmi_selection_sigma_posterior_median_pass1,
                     value_name="dmi_selection_sigma_posterior_median_pass1",
                     uniform_redshift_distribution=uniform_redshift_distribution,
@@ -1703,6 +1832,8 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 N=N,
                 uniform_redshift_distribution=uniform_redshift_distribution,
             )
+            if sigma_clip_second_pass_mode == "warm":
+                pass2_warm_start_flat_samples = flat_samples_pass1
             _write_sigma_clip_diagnostics(
                 pass1_diagnostics_df,
                 plot_path,
@@ -1723,7 +1854,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 sigma_clip_threshold=sigma_clip_threshold,
                 df_agn_full_sample=df_agn_full_sample_preclip,
                 df_agn_plot_sample=df_agn_pass2_plot_sample,
-                df_agn_fit_selection=df_agn_pass2_fit_selection,
+                df_agn_fit_selection=df_agn_pass1_fit_selection,
                 keep_mask_full=keep_mask_full,
                 pass1_diagnostics_df=pass1_diagnostics_df,
             )
@@ -1769,6 +1900,49 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 N=N,
                 uniform_redshift_distribution=uniform_redshift_distribution,
             )
+            if sigma_clip_second_pass_mode == "warm" and not pass2_resume_arg:
+                if selected_resume_results is None or "flat_samples" not in selected_resume_results:
+                    raise RuntimeError(
+                        "Cannot warm-start sigma-clipped pass 2 from the resumed pass-1 checkpoint "
+                        "because it does not contain flat_samples."
+                    )
+                expected_pass1_fit_selection = _select_agn_fit_selection(
+                    df_agn_full_sample_preclip,
+                    z_range=z_range,
+                    N=N,
+                    uniform_redshift_distribution=uniform_redshift_distribution,
+                )
+                if "object_id_fit_selection" not in selected_resume_results:
+                    raise RuntimeError(
+                        f"Cannot warm-start sigma-clipped pass 2 from '{selected_resume_checkpoint}' "
+                        "because the pass-1 checkpoint does not contain object_id_fit_selection. "
+                        "Rerun pass 1 with the current code."
+                    )
+                saved_pass1_ids = _normalize_object_id_array(
+                    selected_resume_results["object_id_fit_selection"],
+                    field_name="object_id_fit_selection",
+                    checkpoint_file=selected_resume_checkpoint,
+                )
+                expected_pass1_ids = expected_pass1_fit_selection["object_id"].astype(str).to_numpy()
+                if saved_pass1_ids.shape != expected_pass1_ids.shape or not np.array_equal(saved_pass1_ids, expected_pass1_ids):
+                    raise RuntimeError(
+                        f"Cannot warm-start sigma-clipped pass 2 from '{selected_resume_checkpoint}' "
+                        "because its pass-1 object_id_fit_selection does not match the current pass-1 fit selection."
+                    )
+                validate_resume_checkpoint(
+                    selected_resume_results,
+                    checkpoint_file=selected_resume_checkpoint,
+                    ndim=len(get_model_params(
+                        cosmo_model,
+                        only_sna=only_sna,
+                        use_planck_h0_prior=disable_ceph_dist_calibration,
+                        use_alpha_lambda_term=use_alpha_lambda_term,
+                        use_eta_sigma_term=use_eta_sigma_term,
+                        use_redshift_log_f_term=use_redshift_log_f_term,
+                    )[1]),
+                    n_agn=len(expected_pass1_fit_selection),
+                )
+                pass2_warm_start_flat_samples = selected_resume_results["flat_samples"]
             _write_sigma_clip_diagnostics(
                 pass1_diagnostics_df,
                 plot_path,
@@ -1796,8 +1970,10 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 )
         if pass2_resume_arg:
             print("Resuming second Hubble-fit pass from the pass-2 checkpoint.")
+        elif sigma_clip_second_pass_mode == "warm":
+            print("Running warm-start second Hubble-fit pass on the clipped AGN sample.")
         else:
-            print("Running second Hubble-fit pass on the clipped AGN sample.")
+            print("Running fresh second Hubble-fit pass on the clipped AGN sample.")
 
     if uniform_redshift_distribution:
         if not compare_sigma_only:
@@ -1811,6 +1987,15 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
 
     report_pivots(df_agn_pass2_fit_selection)
 
+    warm_start_pass2 = (
+        apply_two_pass_sigma_clip
+        and sigma_clip_second_pass_mode == "warm"
+        and not pass2_resume_arg
+    )
+    if warm_start_pass2 and pass2_warm_start_flat_samples is None:
+        raise RuntimeError(
+            "Sigma-clipped pass 2 is configured for warm-start mode, but no pass-1 posterior samples are available."
+        )
     (
         flat_samples,
         model_labels,
@@ -1849,6 +2034,9 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         use_eta_sigma_term=use_eta_sigma_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
         resume_replot_with_cuts=resume_replot_with_cuts,
+        warm_start_flat_samples=pass2_warm_start_flat_samples if warm_start_pass2 else None,
+        logZ_is_approximate=warm_start_pass2,
+        df_agn_completeness=df_agn_full_sample_preclip,
     )
     if apply_two_pass_sigma_clip:
         _write_stage_checkpoint(
@@ -1856,6 +2044,9 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
             source_checkpoint_file=pass2_resume_arg if pass2_resume_arg else pass2_checkpoint_file,
             sigma_clip_pass_stage="pass2",
             sigma_clip_threshold=sigma_clip_threshold,
+            sigma_clip_second_pass_mode=sigma_clip_second_pass_mode,
+            sigma_clip_warm_start_from_pass1=warm_start_pass2,
+            logZ_is_approximate=warm_start_pass2,
             df_agn_full_sample=df_agn_full_sample_preclip,
             df_agn_plot_sample=df_agn_pass2_plot_sample,
             df_agn_fit_selection=df_agn_pass2_fit_selection,
@@ -2318,10 +2509,11 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                       use_redshift_log_f_term=use_redshift_log_f_term)
 
     if completeness:
+        df_agn_completeness_plot_sample = df_agn_full_sample_preclip
         if completeness_mode == "4d_fhost_alpha":
             print("Plotting host-aware/color-aware 4D completeness diagnostics...")
             get_completeness_function_4d_fhost_alpha(
-                df_agn_pass2_plot_sample,
+                df_agn_completeness_plot_sample,
                 sim_file=completeness_sim_file,
                 plot=True,
                 plot_path=plot_path,
@@ -2330,7 +2522,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         elif completeness_mode == "3d_fhost":
             print("Plotting host-aware 3D completeness diagnostics...")
             get_completeness_function_3d_fhost(
-                df_agn_pass2_plot_sample,
+                df_agn_completeness_plot_sample,
                 sim_file=completeness_sim_file,
                 plot=True,
                 plot_path=plot_path,
@@ -2339,7 +2531,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         else:
             print("Plotting completeness vs magnitude at redshifts...")
             p_detect, mag_centers, z_centers, dm, dz, completeness_scatter = get_completeness_function_2d(
-                df_agn_pass2_plot_sample, sim_file=completeness_sim_file, plot=True, plot_path=plot_path
+                df_agn_completeness_plot_sample, sim_file=completeness_sim_file, plot=True, plot_path=plot_path
             )
             plot_completeness_vs_mag_at_redshifts(
                 p_detect, mag_centers, z_centers, plot_path=plot_path
@@ -2375,6 +2567,7 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
             z_range=(0.44, 3.16),
             speed="production", resume=False, N=None,
             resume_stage="both",
+            sigma_clip_second_pass_mode="warm",
             completeness=True,
             prefix="default", result_prefix="", uniform_redshift_distribution=False,
             completeness_sim_file=DEFAULT_COMPLETENESS_SIM_FILE,
@@ -2387,6 +2580,7 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
 
     validate_completeness_mode(completeness_mode)
     speed = normalize_speed(speed)
+    sigma_clip_second_pass_mode = normalize_sigma_clip_second_pass_mode(sigma_clip_second_pass_mode)
     zmin, zmax = z_range
     n_tag = "all" if N is None else f"N{N}"
     z_tag = f"z{zmin:.2f}_{zmax:.2f}".replace(".", "p")
@@ -2417,6 +2611,7 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
                        disable_sigma_clip_pass=disable_sigma_clip_pass,
                        sigma_clip_threshold=sigma_clip_threshold,
                        resume_stage=resume_stage,
+                       sigma_clip_second_pass_mode=sigma_clip_second_pass_mode,
                        z_range=z_range,
                        cosmo_model_joint_samples=cosmo_model_joint_samples,
                        prefix=prefix, uniform_redshift_distribution=uniform_redshift_distribution,
@@ -2438,6 +2633,7 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
                        disable_sigma_clip_pass=disable_sigma_clip_pass,
                        sigma_clip_threshold=sigma_clip_threshold,
                        resume_stage=resume_stage,
+                       sigma_clip_second_pass_mode=sigma_clip_second_pass_mode,
                        z_range=z_range,
                        resume=resume, speed=speed, N=N,
                        prefix=prefix, uniform_redshift_distribution=uniform_redshift_distribution,
@@ -2607,6 +2803,16 @@ if __name__ == "__main__":
         default=3.0,
         help="Absolute mu_zscore clipping threshold for internal two-pass Hubble fitting (default: 3.0).",
     )
+    parser.add_argument(
+        "--sigma_clip_second_pass_mode",
+        type=str,
+        choices=SIGMA_CLIP_SECOND_PASS_MODES,
+        default="warm",
+        help=(
+            "Second-stage behavior after sigma clipping: 'warm' seeds a small approximate "
+            "top-up run from the pass-1 posterior; 'fresh' reruns the clipped fit from the prior."
+        ),
+    )
     parser.add_argument("--agn_calibrators", type=str, default=None, help="Path to H5 or CSV file containing AGN data to use as calibrators (default: None)")
     parser.add_argument("--prefix", type=str, default="default", help="Prefix directory under plots/hubble/ and results/, and result variable prefix.")
     parser.add_argument("--result_prefix", type=str, default="", help="Prefix for result variable names in LaTeX output (default: empty string)")
@@ -2762,6 +2968,7 @@ if __name__ == "__main__":
                 disable_sigma_clip_pass=args.disable_sigma_clip_pass,
                 sigma_clip_threshold=args.sigma_clip_threshold,
                 resume_stage=args.resume_stage,
+                sigma_clip_second_pass_mode=args.sigma_clip_second_pass_mode,
                 df_calibrators=df_calibrators,
                 prefix=args.prefix,
                 completeness_sim_file=args.completeness_sim_file,
@@ -2810,6 +3017,7 @@ if __name__ == "__main__":
                 z_range=args.z_range,
                 speed=args.speed, resume=args.resume, N=effective_N,
                 resume_stage=args.resume_stage,
+                sigma_clip_second_pass_mode=args.sigma_clip_second_pass_mode,
                 completeness=not args.disable_completeness,
                 prefix=args.prefix, result_prefix=args.result_prefix, uniform_redshift_distribution=args.uniform_redshift_distribution,
                 completeness_sim_file=args.completeness_sim_file,

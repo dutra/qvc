@@ -323,7 +323,14 @@ def test_run_single_two_pass_sigma_clip_uses_plot_hubble_clipping_sigma(monkeypa
     _patch_run_single_plot_stack(monkeypatch)
 
     def fake_run_mcmc_pipeline(df_agn, *args, **kwargs):
-        pipeline_calls.append(df_agn["object_id"].tolist())
+        pipeline_calls.append(
+            {
+                "object_ids": df_agn["object_id"].tolist(),
+                "completeness_object_ids": kwargs["df_agn_completeness"]["object_id"].tolist(),
+                "warm_start_flat_samples": kwargs.get("warm_start_flat_samples"),
+                "logZ_is_approximate": kwargs.get("logZ_is_approximate"),
+            }
+        )
         flat_samples = np.tile(theta[None, :], (8, 1))
         n = len(df_agn)
         _write_fake_checkpoint(
@@ -381,7 +388,7 @@ def test_run_single_two_pass_sigma_clip_uses_plot_hubble_clipping_sigma(monkeypa
         completeness=False,
         use_full_cov=False,
         only_sna=False,
-        speed="fast",
+        speed="fastest",
         z_range=(0.44, 3.16),
         disable_sigma_clip_pass=False,
         sigma_clip_threshold=3.0,
@@ -389,8 +396,10 @@ def test_run_single_two_pass_sigma_clip_uses_plot_hubble_clipping_sigma(monkeypa
     )
 
     assert len(pipeline_calls) == 2
-    assert pipeline_calls[0] == ["agn_000", "agn_001", "agn_002", "agn_003"]
-    assert pipeline_calls[1] == ["agn_001", "agn_002", "agn_003"]
+    assert pipeline_calls[0]["object_ids"] == ["agn_000", "agn_001", "agn_002", "agn_003"]
+    assert pipeline_calls[1]["object_ids"] == ["agn_001", "agn_002", "agn_003"]
+    assert pipeline_calls[0]["warm_start_flat_samples"] is None
+    assert pipeline_calls[1]["warm_start_flat_samples"] is not None
 
 
 def test_run_single_calls_agn_table_only_for_joint_flatw0wa(monkeypatch, tmp_path):
@@ -730,6 +739,38 @@ def test_write_stage_checkpoint_roundtrips_pass1_state(tmp_path):
     assert extracted["pass1_diagnostics_df"]["mu_zscore"].tolist() == [0.1, 3.2, 0.2, 0.3]
 
 
+def test_build_warm_start_live_points_uses_unit_cube_and_blobs():
+    priors = {"x": (0.0, 10.0), "y": (-5.0, 5.0)}
+    model_labels = ["x", "y"]
+    flat_samples = np.array([[1.0, -1.0], [2.0, 0.0], [3.0, 1.0]], dtype=float)
+    calls = []
+
+    def fake_loglike(theta, **kwargs):
+        theta = np.asarray(theta, dtype=float)
+        calls.append(theta)
+        return -float(np.sum(theta**2)), np.array([theta[0], theta[1], theta.sum()])
+
+    live_u, live_v, live_logl, live_blobs = hubble_fit.build_warm_start_live_points(
+        flat_samples,
+        priors=priors,
+        model_labels=model_labels,
+        nlive=5,
+        loglike_func=fake_loglike,
+        logl_kwargs={},
+        rng_seed=7,
+        jitter_scale=1e-4,
+    )
+
+    assert live_u.shape == (5, 2)
+    assert live_v.shape == (5, 2)
+    assert live_logl.shape == (5,)
+    assert live_blobs.shape == (5, 3)
+    assert len(calls) == 5
+    assert np.all(live_u > 0.0)
+    assert np.all(live_u < 1.0)
+    np.testing.assert_allclose(live_blobs[:, 2], live_v.sum(axis=1))
+
+
 def test_subsample_dataframe_at_most_clamps_oversized_requests_without_reordering():
     df = pd.DataFrame({"object_id": ["a", "b", "c"], "value": [1, 2, 3]})
 
@@ -855,6 +896,78 @@ def test_run_mcmc_pipeline_compare_sigma_only_skips_completeness_plots_on_resume
     assert result[0].shape == (3, 1)
     assert diagnostics_calls == []
     assert completeness_calls == [False]
+
+
+def test_run_mcmc_pipeline_uses_explicit_parent_sample_for_completeness_map(monkeypatch, tmp_path):
+    df_fit = _make_fake_agn_sample(n_agn=2)
+    df_parent = _make_fake_agn_sample(n_agn=4)
+    df_pantheon = _make_fake_pantheon_sample()
+    priors, model_labels, _ = hubble_model.get_model_params("FlatLambdaCDM", only_sna=False)
+    theta = np.array([(priors[key][0] + priors[key][1]) / 2.0 for key in model_labels], dtype=float)
+    completeness_sample_ids = []
+
+    class FakeResults:
+        samples = np.tile(theta[None, :], (6, 1))
+        logl = np.full(6, -1.0)
+        logwt = np.zeros(6)
+        logz = np.array([-3.0])
+        logzerr = np.array([0.1])
+        blob = np.zeros((6, 3, len(df_fit)))
+        blobs = blob
+
+    class FakeSampler:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def run_nested(self, *args, **kwargs):
+            self.results = FakeResults()
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(hubble_fit, "get_qvc_result_dir", lambda: Path.cwd() / "results")
+    monkeypatch.setattr(hubble_fit, "DynamicNestedSampler", FakeSampler)
+    monkeypatch.setattr(hubble_fit, "plot_dynesty", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        hubble_fit,
+        "get_completeness_function_2d",
+        lambda df_arg, *args, **kwargs: (
+            completeness_sample_ids.append(df_arg["object_id"].tolist()),
+            (
+                np.ones((2, 2)),
+                np.array([19.0, 20.0]),
+                np.array([0.5, 1.0]),
+                0.5,
+                0.1,
+                0.0,
+            ),
+        )[1],
+    )
+    monkeypatch.setattr(
+        hubble_fit,
+        "log_likelihood",
+        lambda theta_arg, **kwargs: (
+            -1.0,
+            np.zeros((3, len(kwargs["agn_data"]["object_id"]))),
+        ),
+    )
+
+    result = hubble_fit.run_mcmc_pipeline(
+        df_agn=df_fit,
+        df_agn_all=df_parent.copy(),
+        df_pantheon=df_pantheon,
+        _sna_L=None,
+        _sna_Lower=True,
+        _sna_LogdetCov=None,
+        cosmo_model="FlatLambdaCDM",
+        completeness=True,
+        use_full_cov=False,
+        speed="fastest",
+        prefix="unit",
+        completeness_sim_file="dummy_completeness.h5",
+        df_agn_completeness=df_parent,
+    )
+
+    assert result[6].shape == (len(df_fit),)
+    assert completeness_sample_ids == [df_parent["object_id"].tolist()]
 
 
 def _patch_run_single_plot_stack(monkeypatch):
@@ -1015,7 +1128,14 @@ def test_run_single_two_pass_sigma_clip_filters_outliers_and_writes_diagnostics(
     _patch_run_single_plot_stack(monkeypatch)
 
     def fake_run_mcmc_pipeline(df_agn, *args, **kwargs):
-        pipeline_calls.append(df_agn["object_id"].tolist())
+        pipeline_calls.append(
+            {
+                "object_ids": df_agn["object_id"].tolist(),
+                "completeness_object_ids": kwargs["df_agn_completeness"]["object_id"].tolist(),
+                "warm_start_flat_samples": kwargs.get("warm_start_flat_samples"),
+                "logZ_is_approximate": kwargs.get("logZ_is_approximate"),
+            }
+        )
         flat_samples = np.tile(theta[None, :], (8, 1))
         n = len(df_agn)
         logz = -10.0 - len(pipeline_calls)
@@ -1090,8 +1210,14 @@ def test_run_single_two_pass_sigma_clip_filters_outliers_and_writes_diagnostics(
     )
 
     assert len(pipeline_calls) == 2
-    assert pipeline_calls[0] == ["agn_000", "agn_001", "agn_002", "agn_003", "agn_004"]
-    assert pipeline_calls[1] == ["agn_000", "agn_003", "agn_004"]
+    assert pipeline_calls[0]["object_ids"] == ["agn_000", "agn_001", "agn_002", "agn_003", "agn_004"]
+    assert pipeline_calls[0]["completeness_object_ids"] == df_agn["object_id"].tolist()
+    assert pipeline_calls[0]["warm_start_flat_samples"] is None
+    assert pipeline_calls[0]["logZ_is_approximate"] is False
+    assert pipeline_calls[1]["object_ids"] == ["agn_000", "agn_003", "agn_004"]
+    assert pipeline_calls[1]["completeness_object_ids"] == df_agn["object_id"].tolist()
+    np.testing.assert_allclose(pipeline_calls[1]["warm_start_flat_samples"], np.tile(theta[None, :], (8, 1)))
+    assert pipeline_calls[1]["logZ_is_approximate"] is True
     assert result[3] == -12.0
     assert plot_hubble_calls[0]["object_ids"] == df_agn["object_id"].tolist()
     assert plot_hubble_calls[0]["filename"] == "hubble_diagram_pass1_full_sample_debiased.pdf"
@@ -1135,14 +1261,23 @@ def test_run_single_two_pass_sigma_clip_filters_outliers_and_writes_diagnostics(
     pass2_checkpoint = hubble_fit.load_chains(checkpoint_paths["pass2"])
     assert hubble_fit._checkpoint_stage_from_results(pass1_checkpoint) == "pass1"
     assert hubble_fit._checkpoint_stage_from_results(pass2_checkpoint) == "pass2"
+    assert pass2_checkpoint["sigma_clip_second_pass_mode"] == "warm"
+    assert bool(pass2_checkpoint["sigma_clip_warm_start_from_pass1"])
+    assert bool(pass2_checkpoint["logZ_is_approximate"])
     assert "keep_mask_full" in pass1_checkpoint
     assert "mu_zscore_pass1" in pass1_checkpoint
     assert "keep_mask_full" in pass2_checkpoint
     assert "mu_zscore_pass1" in pass2_checkpoint
+    assert len(pass1_checkpoint["object_id_fit_selection"]) == len(pass1_checkpoint["dmi_posterior_median"])
+    assert len(pass2_checkpoint["object_id_fit_selection"]) == len(pass2_checkpoint["dmi_posterior_median"])
+    assert set(pass1_checkpoint["object_id_fit_selection"].astype(str)) == {
+        "agn_000", "agn_001", "agn_002", "agn_003", "agn_004"
+    }
+    assert set(pass2_checkpoint["object_id_fit_selection"].astype(str)) == {"agn_000", "agn_003", "agn_004"}
     assert set(pass2_checkpoint["object_id_plot_sample"].astype(str)) == {"agn_000", "agn_003", "agn_004"}
 
 
-def test_run_single_two_pass_sigma_clip_reruns_even_without_clipped_objects(monkeypatch, tmp_path):
+def test_run_single_two_pass_sigma_clip_fresh_mode_reruns_without_warm_start(monkeypatch, tmp_path):
     df_agn = _make_fake_agn_sample(n_agn=4)
     df_pantheon = _make_fake_pantheon_sample()
     priors, model_labels, _ = hubble_model.get_model_params("FlatLambdaCDM", only_sna=False)
@@ -1154,7 +1289,13 @@ def test_run_single_two_pass_sigma_clip_reruns_even_without_clipped_objects(monk
     _patch_run_single_plot_stack(monkeypatch)
 
     def fake_run_mcmc_pipeline(df_agn, *args, **kwargs):
-        pipeline_calls.append(df_agn["object_id"].tolist())
+        pipeline_calls.append(
+            {
+                "object_ids": df_agn["object_id"].tolist(),
+                "warm_start_flat_samples": kwargs.get("warm_start_flat_samples"),
+                "logZ_is_approximate": kwargs.get("logZ_is_approximate"),
+            }
+        )
         flat_samples = np.tile(theta[None, :], (8, 1))
         n = len(df_agn)
         _write_fake_checkpoint(
@@ -1206,11 +1347,16 @@ def test_run_single_two_pass_sigma_clip_reruns_even_without_clipped_objects(monk
         z_range=(0.44, 3.16),
         disable_sigma_clip_pass=False,
         sigma_clip_threshold=3.0,
+        sigma_clip_second_pass_mode="fresh",
         prefix="unit",
     )
 
     assert len(pipeline_calls) == 2
-    assert pipeline_calls[1] == pipeline_calls[0]
+    assert pipeline_calls[1]["object_ids"] == pipeline_calls[0]["object_ids"]
+    assert pipeline_calls[0]["warm_start_flat_samples"] is None
+    assert pipeline_calls[1]["warm_start_flat_samples"] is None
+    assert pipeline_calls[0]["logZ_is_approximate"] is False
+    assert pipeline_calls[1]["logZ_is_approximate"] is False
     assert len(plot_hubble_calls) == 4
     assert plot_hubble_calls[0]["filename"] == "hubble_diagram_pass1_full_sample_debiased.pdf"
     assert plot_hubble_calls[0].get("clipped_mask") is None
@@ -1545,7 +1691,7 @@ def test_run_single_two_pass_sigma_clip_keeps_out_of_range_survivor_in_stage2_pl
         completeness=False,
         use_full_cov=False,
         only_sna=False,
-        speed="fast",
+        speed="fastest",
         z_range=(0.44, 3.16),
         disable_sigma_clip_pass=False,
         sigma_clip_threshold=3.0,
@@ -1572,7 +1718,7 @@ def test_run_single_two_pass_sigma_clip_keeps_out_of_range_survivor_in_stage2_pl
     assert debias_impact_calls[0] == expected_stage2_plot_ids
     assert alphaox_calls[0] == expected_stage2_plot_ids
 
-    run_dir = tmp_path / "plots" / "hubble" / "unit" / "FlatLambdaCDM_joint_fast_all_z0p44_3p16_disable_completeness"
+    run_dir = tmp_path / "plots" / "hubble" / "unit" / "FlatLambdaCDM_joint_fastest_all_z0p44_3p16_disable_completeness"
     final_df = pd.read_csv(run_dir / "residuals.csv")
     pass2_membership_df = pd.read_csv(run_dir / "sigma_clip_membership_pass2.csv")
     assert set(final_df["object_id"]) == set(expected_stage2_plot_ids)
@@ -1630,7 +1776,14 @@ def test_run_single_resume_stage_pass2_skips_first_pass(monkeypatch, tmp_path):
     pipeline_calls = []
 
     def fake_run_mcmc_pipeline(df_agn, *args, **kwargs):
-        pipeline_calls.append({"object_ids": df_agn["object_id"].tolist(), "resume": kwargs.get("resume")})
+        pipeline_calls.append(
+            {
+                "object_ids": df_agn["object_id"].tolist(),
+                "resume": kwargs.get("resume"),
+                "warm_start_flat_samples": kwargs.get("warm_start_flat_samples"),
+                "logZ_is_approximate": kwargs.get("logZ_is_approximate"),
+            }
+        )
         flat_samples = np.tile(theta[None, :], (8, 1))
         n = len(df_agn)
         _write_fake_checkpoint(kwargs["checkpoint_file_override"], flat_samples, np.zeros(n), np.full(n, 0.05), logz=-12.0)
@@ -1671,6 +1824,8 @@ def test_run_single_resume_stage_pass2_skips_first_pass(monkeypatch, tmp_path):
     assert len(pipeline_calls) == 1
     assert pipeline_calls[0]["resume"] is False
     assert pipeline_calls[0]["object_ids"] == ["agn_000", "agn_002", "agn_003", "agn_004"]
+    np.testing.assert_allclose(pipeline_calls[0]["warm_start_flat_samples"], flat_samples_pass1)
+    assert pipeline_calls[0]["logZ_is_approximate"] is True
     assert result[3] == -12.0
 
 

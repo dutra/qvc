@@ -4695,14 +4695,16 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
 
     
 
-    # NEW: binned residuals (linear-z), used in residual panel
-    # z_res_lin_scatter, resid_lin_mean_scatter, resid_lin_sem_scatter, n_res = _weighted_bin_stats(
-    #     df_agn["z"].values, residuals, residuals_err, bins_linear
-    # )
-    z_res_lin_scatter = z_lin_scatter  # same bins
-    mu_res_interp = np.interp(z_res_lin_scatter, z_grid, mu_model_median)
-    resid_lin_mean_scatter = mu_lin_mean_scatter - mu_res_interp
-    resid_lin_sem_scatter = mu_lin_sem_scatter
+    # Residual-panel bins must use the actual residuals, not the display-only
+    # scattered ordinates used in the main Hubble diagram.
+    z_res_lin_scatter, resid_lin_mean_scatter, resid_lin_sem_scatter, n_res = _weighted_bin_stats(
+        df_agn["z"].values,
+        residuals,
+        clipping_sigma,
+        bins_linear,
+        min_count=5,
+        center="mid",
+    )
 
     # Log-z bins for INSET (match inset xscale='log')
     zpos = df_agn["z"].values[df_agn["z"].values > 0]
