@@ -44,7 +44,7 @@ def parse_args():
     parser.add_argument("--max-tree-depth", type=int, default=12, help="NUTS max tree depth.")
     parser.add_argument("--partition", default="day_amd", help="SLURM partition.")
     parser.add_argument("--time", default="2:00:00", help="SLURM time limit.")
-    parser.add_argument("--mem", default="20G", help="SLURM memory request.")
+    parser.add_argument("--mem", default="10G", help="SLURM memory request.")
     parser.add_argument("--env", default="jaxcpu2", help="Conda environment to activate inside submitted jobs.")
     args = parser.parse_args()
     if args.fit == "chisq" and not args.chisq_csv:
