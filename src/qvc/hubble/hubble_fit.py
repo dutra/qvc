@@ -543,6 +543,7 @@ def _write_stage_checkpoint(
     sigma_clip_pass_stage,
     sigma_clip_threshold=None,
     df_agn_full_sample=None,
+    df_agn_plot_sample=None,
     df_agn_fit_selection=None,
     keep_mask_full=None,
     pass1_diagnostics_df=None,
@@ -554,6 +555,8 @@ def _write_stage_checkpoint(
         payload["sigma_clip_threshold"] = float(sigma_clip_threshold)
     if df_agn_full_sample is not None:
         payload["object_id_full_sample"] = df_agn_full_sample["object_id"].astype(str).to_numpy()
+    if df_agn_plot_sample is not None:
+        payload["object_id_plot_sample"] = df_agn_plot_sample["object_id"].astype(str).to_numpy()
     if df_agn_fit_selection is not None:
         payload["object_id_fit_selection"] = df_agn_fit_selection["object_id"].astype(str).to_numpy()
     if keep_mask_full is not None:
@@ -804,6 +807,7 @@ def _write_sigma_clip_membership_audit(
     plot_path,
     *,
     filename,
+    df_agn_fit_selection=None,
 ):
     keep_mask_full = np.asarray(keep_mask_full, dtype=bool)
     if keep_mask_full.shape[0] != len(df_agn_full_sample):
@@ -814,7 +818,18 @@ def _write_sigma_clip_membership_audit(
 
     audit_df = df_agn_full_sample.copy()
     audit_df["is_in_pass2_sample"] = keep_mask_full
+    audit_df["is_in_pass2_plot_sample"] = keep_mask_full
     audit_df["was_clipped_pass1"] = ~keep_mask_full
+    audit_df["is_in_pass2_fit_selection"] = False
+    if df_agn_fit_selection is not None:
+        fit_indices = pd.Index(df_agn_fit_selection.index)
+        if not fit_indices.isin(audit_df.index).all():
+            missing = fit_indices[~fit_indices.isin(audit_df.index)].tolist()[:10]
+            raise ValueError(
+                "Sigma-clip membership audit alignment failure: "
+                f"fit-selection indices missing from full sample: {missing}"
+            )
+        audit_df.loc[fit_indices, "is_in_pass2_fit_selection"] = True
     preferred_columns = [
         "object_id",
         "sdss_name",
@@ -822,6 +837,8 @@ def _write_sigma_clip_membership_audit(
         "dec",
         "z",
         "is_in_pass2_sample",
+        "is_in_pass2_plot_sample",
+        "is_in_pass2_fit_selection",
         "was_clipped_pass1",
     ]
     remaining_columns = [col for col in audit_df.columns if col not in preferred_columns]
@@ -1268,7 +1285,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                     dlogz_init=0.01,                 
                     n_effective=500,                # 300–1000 typical for model comparison
                     nlive_init=50,   # bump live points
-                    nlive_batch=25   # reasonable batch size for dynamic allocation
+                    nlive_batch=20   # reasonable batch size for dynamic allocation
                 )
 
             elif speed == "standard":
@@ -1513,7 +1530,8 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
             f"[INFO] Ignoring resume_stage={resume_stage!r} because two-pass sigma clipping is disabled."
         )
 
-    df_agn_full_sample = df_agn.copy()
+    df_agn_full_sample_preclip = df_agn.copy()
+    df_agn_pass2_plot_sample = df_agn_full_sample_preclip.copy()
     if resume_replot_with_cuts:
         if uniform_redshift_distribution:
             raise ValueError("--resume_replot_with_cuts does not support uniform_redshift_distribution=True.")
@@ -1522,13 +1540,13 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 "[INFO] --resume_replot_with_cuts uses the saved checkpoint object_id list "
                 "for the fit/debias selection; N is ignored for the resumed fit selection."
             )
-        df_agn_fit_selection = _select_resume_replot_fit_selection(
-            df_agn_full_sample[df_agn_full_sample["z"].between(z_range[0], z_range[1])],
+        df_agn_pass2_fit_selection = _select_resume_replot_fit_selection(
+            df_agn_pass2_plot_sample[df_agn_pass2_plot_sample["z"].between(z_range[0], z_range[1])],
             resume,
         )
     else:
-        df_agn_fit_selection = _select_agn_fit_selection(
-            df_agn_full_sample,
+        df_agn_pass2_fit_selection = _select_agn_fit_selection(
+            df_agn_pass2_plot_sample,
             z_range=z_range,
             N=N,
             uniform_redshift_distribution=uniform_redshift_distribution,
@@ -1564,7 +1582,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 extracted_state = _extract_pass1_state_from_checkpoint(
                     selected_resume_results,
                     selected_resume_checkpoint,
-                    df_agn_full_sample,
+                    df_agn_full_sample_preclip,
                     sigma_clip_threshold=sigma_clip_threshold,
                 )
                 keep_mask_full = extracted_state["keep_mask_full"]
@@ -1581,7 +1599,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
 
         if not skip_pass1_sampling:
             print(
-                f"Running first Hubble-fit pass for {len(df_agn_fit_selection)} AGN "
+                f"Running first Hubble-fit pass for {len(df_agn_pass2_fit_selection)} AGN "
                 f"with sigma clipping threshold |mu_zscore| < {sigma_clip_threshold:.2f}."
             )
             (
@@ -1597,7 +1615,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 _age_pass1,
                 _age_err_pass1,
             ) = _run_fit_stage(
-                df_agn_fit_selection,
+                df_agn_pass2_fit_selection,
                 df_agn_all,
                 df_pantheon,
                 _sna_L,
@@ -1624,15 +1642,15 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 resume_replot_with_cuts=False,
             )
             dmi_posterior_median_pass1_full = _map_fit_values_to_plot_sample(
-                df_agn_full_sample,
-                df_agn_fit_selection,
+                df_agn_full_sample_preclip,
+                df_agn_pass2_fit_selection,
                 dmi_posterior_median_pass1,
                 value_name="dmi_posterior_median_pass1",
                 uniform_redshift_distribution=uniform_redshift_distribution,
             )
             dmi_posterior_sigma_pass1_full = _map_fit_values_to_plot_sample(
-                df_agn_full_sample,
-                df_agn_fit_selection,
+                df_agn_full_sample_preclip,
+                df_agn_pass2_fit_selection,
                 dmi_posterior_sigma_pass1,
                 value_name="dmi_posterior_sigma_pass1",
                 uniform_redshift_distribution=uniform_redshift_distribution,
@@ -1640,15 +1658,15 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
             dmi_selection_sigma_pass1_full = None
             if dmi_selection_sigma_posterior_median_pass1 is not None:
                 dmi_selection_sigma_pass1_full = _map_fit_values_to_plot_sample(
-                    df_agn_full_sample,
-                    df_agn_fit_selection,
+                    df_agn_full_sample_preclip,
+                    df_agn_pass2_fit_selection,
                     dmi_selection_sigma_posterior_median_pass1,
                     value_name="dmi_selection_sigma_posterior_median_pass1",
                     uniform_redshift_distribution=uniform_redshift_distribution,
                 )
-            pass1_residuals_full, pass1_residuals_err_full, _, _, _ = plot_hubble(
+            pass1_residuals_full, pass1_clipping_sigma_full, _, _, _ = plot_hubble(
                 flat_samples_pass1,
-                df_agn_full_sample,
+                df_agn_full_sample_preclip,
                 df_pantheon,
                 cosmo_model=cosmo_model,
                 z_pivot_agn=z_pivot_agn,
@@ -1665,6 +1683,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 dmi_sigma=dmi_posterior_sigma_pass1_full,
                 dmi_selection_sigma=dmi_selection_sigma_pass1_full,
                 filename="hubble_diagram_pass1_full_sample_debiased.pdf",
+                residuals_csv_filename="hubble_plot_residuals_pass1.csv",
                 sigma_clip_threshold=sigma_clip_threshold,
                 z_range=z_range,
                 use_alpha_lambda_term=use_alpha_lambda_term,
@@ -1672,10 +1691,17 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 use_redshift_log_f_term=use_redshift_log_f_term,
             )
             pass1_diagnostics_df, keep_mask_full = _build_sigma_clip_diagnostics(
-                df_agn_full_sample,
+                df_agn_full_sample_preclip,
                 pass1_residuals_full,
-                pass1_residuals_err_full,
+                pass1_clipping_sigma_full,
                 sigma_clip_threshold=sigma_clip_threshold,
+            )
+            df_agn_pass2_plot_sample = df_agn_full_sample_preclip.loc[keep_mask_full].copy()
+            df_agn_pass2_fit_selection = _select_agn_fit_selection(
+                df_agn_pass2_plot_sample,
+                z_range=z_range,
+                N=N,
+                uniform_redshift_distribution=uniform_redshift_distribution,
             )
             _write_sigma_clip_diagnostics(
                 pass1_diagnostics_df,
@@ -1684,28 +1710,30 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 clipped_filename="clipped_objects_pass1.csv",
             )
             _write_sigma_clip_membership_audit(
-                df_agn_full_sample,
+                df_agn_full_sample_preclip,
                 keep_mask_full,
                 plot_path,
                 filename="sigma_clip_membership_pass1.csv",
+                df_agn_fit_selection=df_agn_pass2_fit_selection,
             )
             _write_stage_checkpoint(
                 pass1_checkpoint_file,
                 source_checkpoint_file=pass1_resume_arg if pass1_resume_arg else pass1_checkpoint_file,
                 sigma_clip_pass_stage="pass1",
                 sigma_clip_threshold=sigma_clip_threshold,
-                df_agn_full_sample=df_agn_full_sample,
-                df_agn_fit_selection=df_agn_fit_selection,
+                df_agn_full_sample=df_agn_full_sample_preclip,
+                df_agn_plot_sample=df_agn_pass2_plot_sample,
+                df_agn_fit_selection=df_agn_pass2_fit_selection,
                 keep_mask_full=keep_mask_full,
                 pass1_diagnostics_df=pass1_diagnostics_df,
             )
-            n_before = len(df_agn_full_sample)
+            n_before = len(df_agn_full_sample_preclip)
             n_after = int(np.count_nonzero(keep_mask_full))
             print(f"Sigma-clipping pass 1 kept {n_after} / {n_before} AGN and clipped {n_before - n_after}.")
             clipped_mask_pass1_full = ~keep_mask_full
             plot_hubble(
                 flat_samples_pass1,
-                df_agn_full_sample,
+                df_agn_full_sample_preclip,
                 df_pantheon,
                 cosmo_model=cosmo_model,
                 z_pivot_agn=z_pivot_agn,
@@ -1723,6 +1751,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 dmi_selection_sigma=dmi_selection_sigma_pass1_full,
                 clipped_mask=clipped_mask_pass1_full,
                 filename="hubble_diagram_pass1_full_sample_clipped_debiased.pdf",
+                residuals_csv_filename="hubble_plot_residuals_pass1_clipped.csv",
                 sigma_clip_threshold=sigma_clip_threshold,
                 z_range=z_range,
                 use_alpha_lambda_term=use_alpha_lambda_term,
@@ -1733,6 +1762,13 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 print("Stopping after resumed pass-1 fit as requested by resume_stage='pass1'.")
                 return flat_samples_pass1, model_labels_pass1, dm_interp_pass1, _logZ_pass1, _logZerr_pass1, None, _age_pass1, _age_err_pass1
         else:
+            df_agn_pass2_plot_sample = df_agn_full_sample_preclip.loc[keep_mask_full].copy()
+            df_agn_pass2_fit_selection = _select_agn_fit_selection(
+                df_agn_pass2_plot_sample,
+                z_range=z_range,
+                N=N,
+                uniform_redshift_distribution=uniform_redshift_distribution,
+            )
             _write_sigma_clip_diagnostics(
                 pass1_diagnostics_df,
                 plot_path,
@@ -1740,23 +1776,24 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 clipped_filename="clipped_objects_pass1.csv",
             )
             _write_sigma_clip_membership_audit(
-                df_agn_full_sample,
+                df_agn_full_sample_preclip,
                 keep_mask_full,
                 plot_path,
                 filename="sigma_clip_membership_pass1.csv",
+                df_agn_fit_selection=df_agn_pass2_fit_selection,
             )
 
-        # The second pass intentionally reuses only the pass-1 keep mask.
-        # A refit can still produce new >threshold mu_zscore objects, but we do
-        # not iterate clipping beyond this single rerun.
-        if np.any(~keep_mask_full):
-            df_agn_full_sample = df_agn_full_sample.loc[keep_mask_full].copy()
-        df_agn_fit_selection = _select_agn_fit_selection(
-            df_agn_full_sample,
-            z_range=z_range,
-            N=N,
-            uniform_redshift_distribution=uniform_redshift_distribution,
-        )
+        # Stage 2 removes all pass-1 sigma-clipped objects globally from the
+        # plotting sample, while keeping outside-z survivors in the final plots.
+        # Only the surviving in-range objects are used for the stage-2 fit.
+        if not uniform_redshift_distribution:
+            expected_pass2_fit = df_agn_pass2_plot_sample[
+                df_agn_pass2_plot_sample["z"].between(z_range[0], z_range[1])
+            ].copy()
+            if not expected_pass2_fit["object_id"].tolist() == df_agn_pass2_fit_selection["object_id"].tolist():
+                raise RuntimeError(
+                    "Stage-2 fit selection is inconsistent with the surviving in-range plot sample."
+                )
         if pass2_resume_arg:
             print("Resuming second Hubble-fit pass from the pass-2 checkpoint.")
         else:
@@ -1764,15 +1801,15 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
 
     if uniform_redshift_distribution:
         if not compare_sigma_only:
-            plot_redshift_histograms(df_pantheon, df_agn_fit_selection, xscale="linear", plot_path=plot_path)
+            plot_redshift_histograms(df_pantheon, df_agn_pass2_fit_selection, xscale="linear", plot_path=plot_path)
     else:
         if not compare_sigma_only:
-            plot_redshift_histograms(df_pantheon, df_agn_full_sample, xscale="log", plot_path=plot_path)
+            plot_redshift_histograms(df_pantheon, df_agn_pass2_plot_sample, xscale="log", plot_path=plot_path)
 
     if not compare_sigma_only:
-        plot_delta_m_flux_recal_vs_redshift(df_agn_fit_selection, plot_path=plot_path)
+        plot_delta_m_flux_recal_vs_redshift(df_agn_pass2_fit_selection, plot_path=plot_path)
 
-    report_pivots(df_agn_fit_selection)
+    report_pivots(df_agn_pass2_fit_selection)
 
     (
         flat_samples,
@@ -1787,7 +1824,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         age,
         age_err,
     ) = _run_fit_stage(
-        df_agn_fit_selection,
+        df_agn_pass2_fit_selection,
         df_agn_all,
         df_pantheon,
         _sna_L,
@@ -1819,8 +1856,9 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
             source_checkpoint_file=pass2_resume_arg if pass2_resume_arg else pass2_checkpoint_file,
             sigma_clip_pass_stage="pass2",
             sigma_clip_threshold=sigma_clip_threshold,
-            df_agn_full_sample=df_agn.copy(),
-            df_agn_fit_selection=df_agn_fit_selection,
+            df_agn_full_sample=df_agn_full_sample_preclip,
+            df_agn_plot_sample=df_agn_pass2_plot_sample,
+            df_agn_fit_selection=df_agn_pass2_fit_selection,
             keep_mask_full=keep_mask_full,
             pass1_diagnostics_df=pass1_diagnostics_df,
         )
@@ -1836,7 +1874,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
     alpha_agn_idx = model_labels.index("alpha_agn")
     alpha_agn_median = float(np.nanmedian(flat_samples[:, alpha_agn_idx]))
     plot_sigma_uv_mpred_correction(
-        df_agn_full_sample,
+        df_agn_pass2_plot_sample,
         alpha_agn_median,
         plot_path=plot_path,
         show=False,
@@ -1852,8 +1890,8 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         )
     else:
         dmi_posterior_median_full = _map_fit_values_to_plot_sample(
-            df_agn_full_sample,
-            df_agn_fit_selection,
+            df_agn_pass2_plot_sample,
+            df_agn_pass2_fit_selection,
             dmi_posterior_median,
             value_name="dmi_posterior_median",
             uniform_redshift_distribution=uniform_redshift_distribution,
@@ -1861,7 +1899,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
 
     plot_predicted_L2500_vs_sigmahat(
         flat_samples,
-        df_agn_full_sample,
+        df_agn_pass2_plot_sample,
         cosmo_model=cosmo_model,
         z_pivot_agn=z_pivot_agn,
         debias=False,
@@ -1876,7 +1914,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
     )
     plot_predicted_L2500_vs_sigmahat(
         flat_samples,
-        df_agn_full_sample,
+        df_agn_pass2_plot_sample,
         cosmo_model=cosmo_model,
         z_pivot_agn=z_pivot_agn,
         debias=False,
@@ -1891,7 +1929,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
     )
     plot_predicted_L2500_vs_sigmahat(
         flat_samples,
-        df_agn_full_sample,
+        df_agn_pass2_plot_sample,
         cosmo_model=cosmo_model,
         z_pivot_agn=z_pivot_agn,
         debias=True,
@@ -1909,7 +1947,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
     )
     L_residuals_debiased, L_pred_std_debiased = plot_predicted_L2500_vs_sigmahat(
         flat_samples,
-        df_agn_full_sample,
+        df_agn_pass2_plot_sample,
         cosmo_model=cosmo_model,
         z_pivot_agn=z_pivot_agn,
         debias=True,
@@ -1928,7 +1966,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
 
     plot_blr_line_lags_vs_l2500(
         flat_samples,
-        df_agn_full_sample,
+        df_agn_pass2_plot_sample,
         cosmo_model,
         z_pivot_agn,
         dm_interp,
@@ -1951,29 +1989,29 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         )
     else:
         dmi_posterior_sigma_full = _map_fit_values_to_plot_sample(
-            df_agn_full_sample,
-            df_agn_fit_selection,
+            df_agn_pass2_plot_sample,
+            df_agn_pass2_fit_selection,
             dmi_posterior_sigma,
             value_name="dmi_posterior_sigma",
             uniform_redshift_distribution=uniform_redshift_distribution,
         )
         if dmi_selection_sigma_posterior_median is not None:
             dmi_selection_sigma_full = _map_fit_values_to_plot_sample(
-                df_agn_full_sample,
-                df_agn_fit_selection,
+                df_agn_pass2_plot_sample,
+                df_agn_pass2_fit_selection,
                 dmi_selection_sigma_posterior_median,
                 value_name="dmi_selection_sigma_posterior_median",
                 uniform_redshift_distribution=uniform_redshift_distribution,
             )
     if dmi_selection_sigma_interp is not None:
         interp_cols = [
-            np.asarray(df_agn_full_sample["z"].values, dtype=float),
-            np.asarray(df_agn_full_sample["apparent_mag_2500"].values, dtype=float),
+            np.asarray(df_agn_pass2_plot_sample["z"].values, dtype=float),
+            np.asarray(df_agn_pass2_plot_sample["apparent_mag_2500"].values, dtype=float),
         ]
-        if COMPLETENESS_FHOST_COL in df_agn_full_sample.columns:
-            interp_cols.append(np.asarray(df_agn_full_sample[COMPLETENESS_FHOST_COL].values, dtype=float))
-            if "alpha_lambda" in df_agn_full_sample.columns:
-                interp_cols.append(np.asarray(df_agn_full_sample["alpha_lambda"].values, dtype=float))
+        if COMPLETENESS_FHOST_COL in df_agn_pass2_plot_sample.columns:
+            interp_cols.append(np.asarray(df_agn_pass2_plot_sample[COMPLETENESS_FHOST_COL].values, dtype=float))
+            if "alpha_lambda" in df_agn_pass2_plot_sample.columns:
+                interp_cols.append(np.asarray(df_agn_pass2_plot_sample["alpha_lambda"].values, dtype=float))
         dmi_selection_sigma_full = np.asarray(
             dmi_selection_sigma_interp(np.column_stack(interp_cols)),
             dtype=float,
@@ -1984,22 +2022,22 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
             dmi_posterior_median_full,
             evaluate_dm_interp(
                 dm_interp,
-                df_agn_full_sample["z"].values,
-                df_agn_full_sample["apparent_mag_2500"].values,
-                f_host_2500_psf=df_agn_full_sample[COMPLETENESS_FHOST_COL].values if COMPLETENESS_FHOST_COL in df_agn_full_sample.columns else None,
-                alpha_lambda=df_agn_full_sample["alpha_lambda"].values if "alpha_lambda" in df_agn_full_sample.columns else None,
+                df_agn_pass2_plot_sample["z"].values,
+                df_agn_pass2_plot_sample["apparent_mag_2500"].values,
+                f_host_2500_psf=df_agn_pass2_plot_sample[COMPLETENESS_FHOST_COL].values if COMPLETENESS_FHOST_COL in df_agn_pass2_plot_sample.columns else None,
+                alpha_lambda=df_agn_pass2_plot_sample["alpha_lambda"].values if "alpha_lambda" in df_agn_pass2_plot_sample.columns else None,
             ),
         )
         plot_completeness_diagnostics(
             dmi_posterior_median_full_plot,
-            df_agn_full_sample["z"].values,
-            df_agn_full_sample["apparent_mag_2500"].values,
+            df_agn_pass2_plot_sample["z"].values,
+            df_agn_pass2_plot_sample["apparent_mag_2500"].values,
             integrals_max_w=None,
             plot_path=plot_path,
             z_range=z_range,
         )
     # Debiased (Bias corrected)
-    r = plot_hubble(flat_samples, df_agn_full_sample, df_pantheon, 
+    r = plot_hubble(flat_samples, df_agn_pass2_plot_sample, df_pantheon,
                     cosmo_model=cosmo_model, z_pivot_agn=z_pivot_agn, 
                     show_true=False, show=False, debias=True, dm_interp=dm_interp, plot_path=plot_path,
                     cosmo_model_samples=cosmo_model_joint_samples, verbose=verbose, residuals_sigma_clip=residuals_sigma_clip,
@@ -2007,17 +2045,18 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                     dmi_values=dmi_posterior_median_full,
                     dmi_sigma=dmi_posterior_sigma_full,
                     dmi_selection_sigma=dmi_selection_sigma_full,
+                    residuals_csv_filename="hubble_plot_residuals.csv",
                     sigma_clip_threshold=sigma_clip_threshold if apply_two_pass_sigma_clip else None,
                     z_range=z_range,
                     use_alpha_lambda_term=use_alpha_lambda_term,
                     use_eta_sigma_term=use_eta_sigma_term,
                     use_redshift_log_f_term=use_redshift_log_f_term)
-    debiased_residuals, debiased_residuals_err, mu_pred_median_debiased, mu_pred_std_debiased, mu_pred_std_debiased_with_scatter = r
+    debiased_residuals, debiased_clipping_sigma, mu_pred_median_debiased, mu_pred_std_debiased, mu_pred_std_debiased_with_scatter = r
     if apply_two_pass_sigma_clip:
         final_diagnostics_df, keep_mask_pass2 = _build_sigma_clip_diagnostics(
-            df_agn_full_sample,
+            df_agn_pass2_plot_sample,
             debiased_residuals,
-            debiased_residuals_err,
+            debiased_clipping_sigma,
             sigma_clip_threshold=sigma_clip_threshold,
         )
         final_diagnostics_df = final_diagnostics_df.rename(
@@ -2034,6 +2073,10 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 final_diagnostics_df.index, "was_clipped"
             ].to_numpy(dtype=bool)
         final_diagnostics_df["is_in_pass2_sample"] = True
+        final_diagnostics_df["is_in_pass2_plot_sample"] = True
+        final_diagnostics_df["is_in_pass2_fit_selection"] = final_diagnostics_df["z"].between(
+            z_range[0], z_range[1]
+        )
         _write_sigma_clip_diagnostics(
             final_diagnostics_df,
             plot_path,
@@ -2041,8 +2084,10 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         )
         if keep_mask_full is not None:
             if pass1_diagnostics_df is None:
-                pass2_membership_audit = df_agn_full_sample.copy()
+                pass2_membership_audit = df_agn_full_sample_preclip.copy()
                 pass2_membership_audit["is_in_pass2_sample"] = True
+                pass2_membership_audit["is_in_pass2_plot_sample"] = True
+                pass2_membership_audit["is_in_pass2_fit_selection"] = False
                 pass2_membership_audit["was_clipped_pass1"] = False
             else:
                 pass2_membership_audit = pass1_diagnostics_df.copy()
@@ -2053,6 +2098,10 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                     }
                 )
                 pass2_membership_audit["is_in_pass2_sample"] = keep_mask_full
+                pass2_membership_audit["is_in_pass2_plot_sample"] = keep_mask_full
+                pass2_membership_audit["is_in_pass2_fit_selection"] = False
+            fit_indices_pass2 = pd.Index(df_agn_pass2_fit_selection.index)
+            pass2_membership_audit.loc[fit_indices_pass2, "is_in_pass2_fit_selection"] = True
             pass2_membership_audit["mu_zscore_pass2"] = np.nan
             pass2_membership_audit["was_clipped_pass2"] = pd.Series(
                 pd.array([pd.NA] * len(pass2_membership_audit), dtype="boolean"),
@@ -2070,7 +2119,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
             )
     if cosmo_model == "Flatw0waCDM":
         make_agn_csv_table(
-            df_agn_full_sample,
+            df_agn_pass2_plot_sample,
             mu_pred_median_debiased,
             mu_pred_std_debiased_with_scatter,
             dm_interp,
@@ -2079,7 +2128,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
             write_path=plot_path,
         )
         make_agn_latex_table(
-            df_agn_full_sample,
+            df_agn_pass2_plot_sample,
             mu_pred_median_debiased,
             mu_pred_std_debiased_with_scatter,
             dm_interp,
@@ -2089,7 +2138,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
             write_path=plot_path,
         )
     # Biased
-    r = plot_hubble(flat_samples, df_agn_full_sample, df_pantheon, 
+    r = plot_hubble(flat_samples, df_agn_pass2_plot_sample, df_pantheon,
                 cosmo_model=cosmo_model, z_pivot_agn=z_pivot_agn, show_residuals=True,
                 show_true=False, show=False, debias=False, plot_path=plot_path, verbose=False,
                 sigma_clip_threshold=sigma_clip_threshold if apply_two_pass_sigma_clip else None,
@@ -2099,7 +2148,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 use_redshift_log_f_term=use_redshift_log_f_term)
     biased_residuals, biased_residuals_err, _, _, _ = r
 
-    hubble_chi2_mask = df_agn_full_sample["z"].between(z_range[0], z_range[1]).to_numpy(dtype=bool)
+    hubble_chi2_mask = df_agn_pass2_plot_sample["z"].between(z_range[0], z_range[1]).to_numpy(dtype=bool)
     if np.any(hubble_chi2_mask):
         chisq_red_hubble_debiased, _ = reduced_chi_squared(
             debiased_residuals[hubble_chi2_mask],
@@ -2116,7 +2165,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         filename="hubble_residual_normality_debiased.pdf",
     )
     plot_hubble_residual_tail_diagnostics(
-        df_agn_full_sample,
+        df_agn_pass2_plot_sample,
         debiased_residuals,
         mu_pred_std_debiased_with_scatter,
         sigma_dmi=dmi_posterior_sigma_full,
@@ -2130,7 +2179,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
     print("Plotting predicted vs actual M2500...")
     plot_predicted_vs_actual_M2500(
         flat_samples,
-        df_agn_full_sample,
+        df_agn_pass2_plot_sample,
         cosmo_model=cosmo_model,
         z_pivot_agn=z_pivot_agn,
         debias=False,
@@ -2142,7 +2191,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
     )
     M2500_residuals_debiased, M2500_std_debiased, M2500_binned_residuals_debiased, _ = plot_predicted_vs_actual_M2500(
         flat_samples,
-        df_agn_full_sample,
+        df_agn_pass2_plot_sample,
         cosmo_model=cosmo_model,
         z_pivot_agn=z_pivot_agn,
         debias=True,
@@ -2157,9 +2206,9 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
     chisq_red_M2500_debiased, _ = reduced_chi_squared(M2500_residuals_debiased, M2500_std_debiased, n_params=len(model_labels)-1)
     print("Plotting debiased residuals...")
     plot_full_residuals(
-        df_agn_full_sample,
+        df_agn_pass2_plot_sample,
         debiased_residuals,
-        debiased_residuals_err,
+        debiased_clipping_sigma,
         flat_samples,
         cosmo_model,
         z_pivot_agn,
@@ -2173,9 +2222,9 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         use_redshift_log_f_term=use_redshift_log_f_term,
     )
     plot_full_residuals(
-        df_agn_full_sample,
+        df_agn_pass2_plot_sample,
         debiased_residuals,
-        debiased_residuals_err,
+        debiased_clipping_sigma,
         flat_samples,
         cosmo_model,
         z_pivot_agn,
@@ -2190,7 +2239,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         use_redshift_log_f_term=use_redshift_log_f_term,
     )
     plot_full_residuals(
-        df_agn_full_sample,
+        df_agn_pass2_plot_sample,
         L_residuals_debiased,
         L_pred_std_debiased,
         flat_samples,
@@ -2208,9 +2257,9 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         use_redshift_log_f_term=use_redshift_log_f_term,
     )
     plot_full_residuals(
-        df_agn_full_sample,
+        df_agn_pass2_plot_sample,
         debiased_residuals,
-        debiased_residuals_err,
+        debiased_clipping_sigma,
         flat_samples,
         cosmo_model,
         z_pivot_agn,
@@ -2226,9 +2275,9 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         use_redshift_log_f_term=use_redshift_log_f_term,
     )
     plot_full_residuals_rz(
-        df_agn_full_sample,
+        df_agn_pass2_plot_sample,
         debiased_residuals,
-        debiased_residuals_err,
+        debiased_clipping_sigma,
         flat_samples,
         cosmo_model,
         z_pivot_agn,
@@ -2242,22 +2291,22 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         use_redshift_log_f_term=use_redshift_log_f_term,
     )
     plot_debias_impact_diagnostics(
-        df_agn_full_sample,
+        df_agn_pass2_plot_sample,
         biased_residuals,
         debiased_residuals,
         plot_path=plot_path,
         show=False,
     )
     plot_redshift_bin_residual_summary(
-        df_agn_full_sample,
+        df_agn_pass2_plot_sample,
         biased_residuals,
         biased_residuals_err,
         debiased_residuals,
-        debiased_residuals_err,
+        debiased_clipping_sigma,
         plot_path=plot_path,
         show=False,
     )
-    plot_fast_vs_uv_variability(df_agn_full_sample, plot_path=plot_path, show=False)
+    plot_fast_vs_uv_variability(df_agn_pass2_plot_sample, plot_path=plot_path, show=False)
 
     
     print("Plotting cosmological posteriors corner plot...")
@@ -2272,7 +2321,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         if completeness_mode == "4d_fhost_alpha":
             print("Plotting host-aware/color-aware 4D completeness diagnostics...")
             get_completeness_function_4d_fhost_alpha(
-                df_agn_full_sample,
+                df_agn_pass2_plot_sample,
                 sim_file=completeness_sim_file,
                 plot=True,
                 plot_path=plot_path,
@@ -2281,7 +2330,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         elif completeness_mode == "3d_fhost":
             print("Plotting host-aware 3D completeness diagnostics...")
             get_completeness_function_3d_fhost(
-                df_agn_full_sample,
+                df_agn_pass2_plot_sample,
                 sim_file=completeness_sim_file,
                 plot=True,
                 plot_path=plot_path,
@@ -2290,7 +2339,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         else:
             print("Plotting completeness vs magnitude at redshifts...")
             p_detect, mag_centers, z_centers, dm, dz, completeness_scatter = get_completeness_function_2d(
-                df_agn_full_sample, sim_file=completeness_sim_file, plot=True, plot_path=plot_path
+                df_agn_pass2_plot_sample, sim_file=completeness_sim_file, plot=True, plot_path=plot_path
             )
             plot_completeness_vs_mag_at_redshifts(
                 p_detect, mag_centers, z_centers, plot_path=plot_path
@@ -2308,9 +2357,9 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
     }
 
     plot_residuals_vs_alphaOX(
-        df_agn_full_sample,
+        df_agn_pass2_plot_sample,
         debiased_residuals,
-        debiased_residuals_err,
+        debiased_clipping_sigma,
         show=False,
         plot_path=plot_path,
     )

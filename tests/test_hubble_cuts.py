@@ -20,6 +20,10 @@ from qvc.hubble.cuts import (  # noqa: E402
     light_curve_point_count_series,
 )
 from qvc.hubble.hubble_cut_config import build_agn_cuts  # noqa: E402
+from qvc.hubble.hubble_utils import (  # noqa: E402
+    _append_cut_report_row,
+    _count_redshift_bin_removals,
+)
 
 
 def test_build_agn_cuts_includes_light_curve_point_count_minimum():
@@ -84,3 +88,50 @@ def test_add_light_curve_point_count_column_handles_legacy_number_points():
 
     assert count_cols == ["number_points"]
     np.testing.assert_allclose(out[LIGHT_CURVE_N_POINTS_COLUMN], [501, 600, 499])
+
+
+def test_count_redshift_bin_removals_uses_requested_bins():
+    df = pd.DataFrame(
+        {
+            "z": [0.1, 0.439, 0.44, 0.8, 1.0, 1.5, 2.0, 3.16, 3.17, np.nan],
+        }
+    )
+
+    counts = _count_redshift_bin_removals(df)
+
+    assert counts == {
+        "removed_z_lt_0p44": 2,
+        "removed_z_0p44_to_1": 2,
+        "removed_z_1_to_2": 2,
+        "removed_z_2_to_3p16": 2,
+        "removed_z_gt_3p16": 1,
+    }
+
+
+def test_append_cut_report_row_includes_zero_filled_redshift_bins_without_removed_frame():
+    rows = []
+
+    _append_cut_report_row(
+        rows,
+        step="agn_scalar:dummy",
+        criterion="dummy skipped",
+        before=5,
+        kept=5,
+        status="skipped",
+    )
+
+    assert rows == [
+        {
+            "step": "agn_scalar:dummy",
+            "criterion": "dummy skipped",
+            "before": 5,
+            "removed": 0,
+            "kept": 5,
+            "status": "skipped",
+            "removed_z_lt_0p44": 0,
+            "removed_z_0p44_to_1": 0,
+            "removed_z_1_to_2": 0,
+            "removed_z_2_to_3p16": 0,
+            "removed_z_gt_3p16": 0,
+        }
+    ]

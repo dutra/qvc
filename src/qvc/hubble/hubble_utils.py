@@ -55,19 +55,50 @@ RESET_ANSI = "\033[0m"
 HUBBLE_JITTER_SURVEYS = ("sdss", "ps1", "ztf")
 
 
-def _append_cut_report_row(rows, *, step, criterion, before, kept, status):
+def _count_redshift_bin_removals(frame):
+    zero_counts = {
+        "removed_z_lt_0p44": 0,
+        "removed_z_0p44_to_1": 0,
+        "removed_z_1_to_2": 0,
+        "removed_z_2_to_3p16": 0,
+        "removed_z_gt_3p16": 0,
+    }
+    if frame is None or len(frame) == 0 or "z" not in frame.columns:
+        return zero_counts
+
+    z = pd.to_numeric(frame["z"], errors="coerce").to_numpy(dtype=float)
+    counts = {
+        "removed_z_lt_0p44": int(np.count_nonzero(z < 0.44)),
+        "removed_z_0p44_to_1": int(np.count_nonzero((z >= 0.44) & (z < 1.0))),
+        "removed_z_1_to_2": int(np.count_nonzero((z >= 1.0) & (z < 2.0))),
+        "removed_z_2_to_3p16": int(np.count_nonzero((z >= 2.0) & (z <= 3.16))),
+        "removed_z_gt_3p16": int(np.count_nonzero(z > 3.16)),
+    }
+    return counts
+
+
+def _append_cut_report_row(
+    rows,
+    *,
+    step,
+    criterion,
+    before,
+    kept,
+    status,
+    removed_frame=None,
+):
     before_i = int(before)
     kept_i = int(kept)
-    rows.append(
-        {
-            "step": str(step),
-            "criterion": str(criterion),
-            "before": before_i,
-            "removed": before_i - kept_i,
-            "kept": kept_i,
-            "status": str(status),
-        }
-    )
+    row = {
+        "step": str(step),
+        "criterion": str(criterion),
+        "before": before_i,
+        "removed": before_i - kept_i,
+        "kept": kept_i,
+        "status": str(status),
+    }
+    row.update(_count_redshift_bin_removals(removed_frame))
+    rows.append(row)
 
 
 def _render_cut_summary_table(rows):
@@ -1048,6 +1079,7 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
     def _record_cut(step, criterion, frame_before, mask, *, status="applied", reset_index=True):
         before = len(frame_before)
         kept = int(np.count_nonzero(mask))
+        removed_frame = frame_before.loc[~np.asarray(mask, dtype=bool)].copy()
         _append_cut_report_row(
             cut_rows,
             step=step,
@@ -1055,6 +1087,7 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
             before=before,
             kept=kept,
             status=status,
+            removed_frame=removed_frame,
         )
         filtered = frame_before[mask]
         if reset_index:
@@ -1071,6 +1104,8 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
         report_path = Path(cut_report_path)
         report_path.parent.mkdir(parents=True, exist_ok=True)
         report_path.write_text(table_text + "\n", encoding="utf-8")
+        diagnostics_path = report_path.parent / "cut_diagnostics_by_z.csv"
+        pd.DataFrame(cut_rows).to_csv(diagnostics_path, index=False)
 
     def _normalize_dropped_bands(value):
         if value is None:

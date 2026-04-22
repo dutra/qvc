@@ -267,6 +267,132 @@ def test_run_single_only_sna_smoke(fake_data, monkeypatch, tmp_path):
     assert age_err == 0.2
 
 
+def test_plot_hubble_debiased_returns_clipping_sigma_and_writes_distinct_diagnostics(monkeypatch, tmp_path):
+    df_agn = _make_fake_agn_sample(n_agn=6).copy()
+    df_agn["wrms"] = np.linspace(0.1, 0.2, len(df_agn))
+    df_pantheon = _make_fake_pantheon_sample(n_sne=6).copy()
+    cosmo = FlatLambdaCDM(H0=70.0, Om0=0.3)
+    df_pantheon["MU_SH0ES"] = cosmo.distmod(df_pantheon["zHD"].to_numpy(dtype=float)).value
+    df_pantheon["biasCor_m_b"] = np.zeros(len(df_pantheon), dtype=float)
+
+    priors, model_labels, _ = hubble_model.get_model_params("FlatLambdaCDM", only_sna=False)
+    theta = np.array([(priors[key][0] + priors[key][1]) / 2.0 for key in model_labels], dtype=float)
+    flat_samples = np.tile(theta[None, :], (6, 1))
+
+    monkeypatch.setattr(hubble_plotting, "_save_figure", lambda fig, path, **kwargs: path)
+
+    residuals, clipping_sigma, _, _, mu_pred_std_with_scatter = hubble_plotting.plot_hubble(
+        flat_samples,
+        df_agn,
+        df_pantheon,
+        cosmo_model="FlatLambdaCDM",
+        z_pivot_agn=hubble_fit.z_pivot_agn,
+        plot_path=str(tmp_path),
+        show=False,
+        debias=True,
+        dm_interp=None,
+        dmi_values=np.zeros(len(df_agn), dtype=float),
+        dmi_selection_sigma=np.full(len(df_agn), 7.0, dtype=float),
+        residuals_csv_filename="residuals.csv",
+    )
+
+    assert residuals.shape == (len(df_agn),)
+    assert clipping_sigma.shape == (len(df_agn),)
+    assert mu_pred_std_with_scatter.shape == (len(df_agn),)
+    np.testing.assert_allclose(clipping_sigma, mu_pred_std_with_scatter)
+    assert not np.allclose(clipping_sigma, np.full(len(df_agn), 7.0, dtype=float))
+
+    residuals_df = pd.read_csv(tmp_path / "residuals.csv")
+    for col in ("mu_pred_std", "mu_pred_std_with_scatter", "clipping_sigma", "chi2_sigma", "sigma_sel", "mu_zscore"):
+        assert col in residuals_df.columns
+    np.testing.assert_allclose(residuals_df["chi2_sigma"].to_numpy(dtype=float), 7.0)
+    np.testing.assert_allclose(
+        residuals_df["mu_zscore"].to_numpy(dtype=float),
+        np.abs(residuals_df["residuals"].to_numpy(dtype=float)) / residuals_df["clipping_sigma"].to_numpy(dtype=float),
+    )
+
+
+def test_run_single_two_pass_sigma_clip_uses_plot_hubble_clipping_sigma(monkeypatch, tmp_path):
+    df_agn = _make_fake_agn_sample(n_agn=4)
+    df_pantheon = _make_fake_pantheon_sample()
+    priors, model_labels, _ = hubble_model.get_model_params("FlatLambdaCDM", only_sna=False)
+    theta = np.array([(priors[key][0] + priors[key][1]) / 2.0 for key in model_labels], dtype=float)
+    pipeline_calls = []
+
+    monkeypatch.chdir(tmp_path)
+    _patch_run_single_plot_stack(monkeypatch)
+
+    def fake_run_mcmc_pipeline(df_agn, *args, **kwargs):
+        pipeline_calls.append(df_agn["object_id"].tolist())
+        flat_samples = np.tile(theta[None, :], (8, 1))
+        n = len(df_agn)
+        _write_fake_checkpoint(
+            kwargs["checkpoint_file_override"],
+            flat_samples,
+            np.zeros(n),
+            np.full(n, 0.05),
+            logz=-70.0 - len(pipeline_calls),
+            logzerr=0.2,
+        )
+        return (
+            flat_samples,
+            model_labels,
+            lambda pts: np.zeros(len(np.atleast_2d(pts))),
+            None,
+            -70.0 - len(pipeline_calls),
+            0.2,
+            np.zeros(n),
+            np.full(n, 0.05),
+            None,
+        )
+
+    def fake_plot_hubble(*args, **kwargs):
+        n = len(args[1])
+        if len(pipeline_calls) == 1 and kwargs.get("filename") == "hubble_diagram_pass1_full_sample_debiased.pdf":
+            residuals = np.array([4.0, 4.0, 0.1, 0.1], dtype=float)
+            clipping_sigma = np.array([1.0, 10.0, 1.0, 1.0], dtype=float)
+            mu_pred_std_with_scatter = np.array([10.0, 1.0, 1.0, 1.0], dtype=float)
+            return (
+                residuals,
+                clipping_sigma,
+                np.full(n, 44.0),
+                np.full(n, 0.1),
+                mu_pred_std_with_scatter,
+            )
+        return (
+            np.zeros(n, dtype=float),
+            np.ones(n, dtype=float),
+            np.full(n, 44.0),
+            np.full(n, 0.1),
+            np.full(n, 0.2),
+        )
+
+    monkeypatch.setattr(hubble_fit, "run_mcmc_pipeline", fake_run_mcmc_pipeline)
+    monkeypatch.setattr(hubble_fit, "plot_hubble", fake_plot_hubble)
+
+    hubble_fit.run_single(
+        df_agn=df_agn,
+        df_agn_all=df_agn.copy(),
+        df_pantheon=df_pantheon,
+        _sna_L=None,
+        _sna_Lower=True,
+        _sna_LogdetCov=None,
+        cosmo_model="FlatLambdaCDM",
+        completeness=False,
+        use_full_cov=False,
+        only_sna=False,
+        speed="fast",
+        z_range=(0.44, 3.16),
+        disable_sigma_clip_pass=False,
+        sigma_clip_threshold=3.0,
+        prefix="unit",
+    )
+
+    assert len(pipeline_calls) == 2
+    assert pipeline_calls[0] == ["agn_000", "agn_001", "agn_002", "agn_003"]
+    assert pipeline_calls[1] == ["agn_001", "agn_002", "agn_003"]
+
+
 def test_run_single_calls_agn_table_only_for_joint_flatw0wa(monkeypatch, tmp_path):
     df_agn = _make_fake_agn_sample()
     df_pantheon = _make_fake_pantheon_sample()
@@ -994,10 +1120,14 @@ def test_run_single_two_pass_sigma_clip_filters_outliers_and_writes_diagnostics(
     assert final_df["was_clipped_pass1"].eq(False).all()
     assert final_df["was_clipped_pass2"].eq(False).all()
     assert final_df["is_in_pass2_sample"].eq(True).all()
+    assert final_df["is_in_pass2_plot_sample"].eq(True).all()
+    assert final_df["is_in_pass2_fit_selection"].eq(True).all()
     assert "mu_zscore_pass1" in final_df.columns
     assert "mu_zscore_pass2" in final_df.columns
     assert set(pass1_membership_df.loc[pass1_membership_df["was_clipped_pass1"], "object_id"]) == {"agn_001", "agn_002", "agn_005"}
     assert set(pass2_membership_df.loc[pass2_membership_df["is_in_pass2_sample"], "object_id"]) == {"agn_000", "agn_003", "agn_004"}
+    assert pass2_membership_df["is_in_pass2_plot_sample"].equals(pass2_membership_df["is_in_pass2_sample"])
+    assert set(pass2_membership_df.loc[pass2_membership_df["is_in_pass2_fit_selection"], "object_id"]) == {"agn_000", "agn_003", "agn_004"}
     assert not set(pass2_membership_df.loc[pass2_membership_df["was_clipped_pass1"], "object_id"]) & set(
         pass2_membership_df.loc[pass2_membership_df["is_in_pass2_sample"], "object_id"]
     )
@@ -1009,6 +1139,7 @@ def test_run_single_two_pass_sigma_clip_filters_outliers_and_writes_diagnostics(
     assert "mu_zscore_pass1" in pass1_checkpoint
     assert "keep_mask_full" in pass2_checkpoint
     assert "mu_zscore_pass1" in pass2_checkpoint
+    assert set(pass2_checkpoint["object_id_plot_sample"].astype(str)) == {"agn_000", "agn_003", "agn_004"}
 
 
 def test_run_single_two_pass_sigma_clip_reruns_even_without_clipped_objects(monkeypatch, tmp_path):
@@ -1311,6 +1442,148 @@ def test_run_single_two_pass_sigma_clip_keeps_new_pass2_outlier(monkeypatch, tmp
     assert final_df.loc[final_df["object_id"] == "agn_001", "mu_zscore_pass2"].item() > 3.0
     assert final_df.loc[final_df["object_id"] == "agn_001", "was_clipped_pass1"].item() == False
     assert final_df.loc[final_df["object_id"] == "agn_001", "is_in_pass2_sample"].item() == True
+
+
+def test_run_single_two_pass_sigma_clip_keeps_out_of_range_survivor_in_stage2_plots(monkeypatch, tmp_path):
+    df_agn = _make_fake_agn_sample(n_agn=5)
+    df_agn = pd.concat(
+        [
+            df_agn,
+            df_agn.loc[[1]].assign(object_id="agn_out_survivor", z=3.4),
+            df_agn.loc[[2]].assign(object_id="agn_out_clipped", z=3.5),
+        ],
+        ignore_index=True,
+    )
+    df_pantheon = _make_fake_pantheon_sample()
+    priors, model_labels, _ = hubble_model.get_model_params("FlatLambdaCDM", only_sna=False)
+    theta = np.array([(priors[key][0] + priors[key][1]) / 2.0 for key in model_labels], dtype=float)
+    pipeline_calls = []
+    plot_hubble_calls = []
+    l2500_calls = []
+    m2500_calls = []
+    full_residual_calls = []
+    full_residual_rz_calls = []
+    blr_calls = []
+    debias_impact_calls = []
+    alphaox_calls = []
+
+    monkeypatch.chdir(tmp_path)
+    _patch_run_single_plot_stack(monkeypatch)
+
+    def fake_run_mcmc_pipeline(df_agn, *args, **kwargs):
+        pipeline_calls.append(df_agn["object_id"].tolist())
+        flat_samples = np.tile(theta[None, :], (8, 1))
+        n = len(df_agn)
+        _write_fake_checkpoint(
+            kwargs["checkpoint_file_override"],
+            flat_samples,
+            np.zeros(n),
+            np.full(n, 0.05),
+            logz=-60.0,
+            logzerr=0.2,
+        )
+        return (
+            flat_samples,
+            model_labels,
+            lambda pts: np.zeros(len(np.atleast_2d(pts))),
+            None,
+            -60.0,
+            0.2,
+            np.zeros(n),
+            np.full(n, 0.05),
+            None,
+        )
+
+    def fake_plot_hubble(*args, **kwargs):
+        df_plot = args[1]
+        plot_hubble_calls.append(
+            {
+                "object_ids": df_plot["object_id"].tolist(),
+                "filename": kwargs.get("filename"),
+                "residuals_csv_filename": kwargs.get("residuals_csv_filename"),
+            }
+        )
+        n = len(df_plot)
+        if len(plot_hubble_calls) == 1:
+            residuals = np.array([0.1, 3.5, np.nan, 0.2, 0.3, 0.4, 4.2], dtype=float)
+        else:
+            residuals = np.zeros(n, dtype=float)
+        return (
+            residuals,
+            np.ones(n, dtype=float),
+            np.full(n, 44.0),
+            np.full(n, 0.1),
+            np.full(n, 0.2),
+        )
+
+    monkeypatch.setattr(hubble_fit, "run_mcmc_pipeline", fake_run_mcmc_pipeline)
+    monkeypatch.setattr(hubble_fit, "plot_hubble", fake_plot_hubble)
+    monkeypatch.setattr(
+        hubble_fit,
+        "plot_predicted_L2500_vs_sigmahat",
+        lambda *args, **kwargs: (l2500_calls.append(args[1]["object_id"].tolist()), (np.zeros(len(args[1])), np.ones(len(args[1]))))[1],
+    )
+    monkeypatch.setattr(hubble_fit, "plot_blr_line_lags_vs_l2500", lambda *args, **kwargs: blr_calls.append(args[1]["object_id"].tolist()))
+    monkeypatch.setattr(
+        hubble_fit,
+        "plot_predicted_vs_actual_M2500",
+        lambda *args, **kwargs: (m2500_calls.append(args[1]["object_id"].tolist()), (np.zeros(len(args[1])), np.ones(len(args[1])), None, None))[1],
+    )
+    monkeypatch.setattr(hubble_fit, "plot_full_residuals", lambda *args, **kwargs: full_residual_calls.append(args[0]["object_id"].tolist()))
+    monkeypatch.setattr(hubble_fit, "plot_full_residuals_rz", lambda *args, **kwargs: full_residual_rz_calls.append(args[0]["object_id"].tolist()))
+    monkeypatch.setattr(hubble_fit, "plot_debias_impact_diagnostics", lambda *args, **kwargs: debias_impact_calls.append(args[0]["object_id"].tolist()))
+    monkeypatch.setattr(hubble_fit, "plot_residuals_vs_alphaOX", lambda *args, **kwargs: alphaox_calls.append(args[0]["object_id"].tolist()))
+
+    hubble_fit.run_single(
+        df_agn=df_agn,
+        df_agn_all=df_agn.copy(),
+        df_pantheon=df_pantheon,
+        _sna_L=None,
+        _sna_Lower=True,
+        _sna_LogdetCov=None,
+        cosmo_model="FlatLambdaCDM",
+        completeness=False,
+        use_full_cov=False,
+        only_sna=False,
+        speed="fast",
+        z_range=(0.44, 3.16),
+        disable_sigma_clip_pass=False,
+        sigma_clip_threshold=3.0,
+        prefix="unit",
+    )
+
+    expected_stage2_plot_ids = ["agn_000", "agn_003", "agn_004", "agn_out_survivor"]
+    expected_stage2_fit_ids = ["agn_000", "agn_003", "agn_004"]
+    assert pipeline_calls[0] == ["agn_000", "agn_001", "agn_002", "agn_003", "agn_004"]
+    assert pipeline_calls[1] == expected_stage2_fit_ids
+    assert plot_hubble_calls[0]["object_ids"] == df_agn["object_id"].tolist()
+    assert plot_hubble_calls[2]["object_ids"] == expected_stage2_plot_ids
+    assert plot_hubble_calls[2]["residuals_csv_filename"] == "hubble_plot_residuals.csv"
+    assert plot_hubble_calls[3]["object_ids"] == expected_stage2_plot_ids
+    for call_ids in l2500_calls:
+        assert call_ids == expected_stage2_plot_ids
+    for call_ids in m2500_calls:
+        assert call_ids == expected_stage2_plot_ids
+    for call_ids in full_residual_calls:
+        assert call_ids == expected_stage2_plot_ids
+    for call_ids in full_residual_rz_calls:
+        assert call_ids == expected_stage2_plot_ids
+    assert blr_calls[0] == expected_stage2_plot_ids
+    assert debias_impact_calls[0] == expected_stage2_plot_ids
+    assert alphaox_calls[0] == expected_stage2_plot_ids
+
+    run_dir = tmp_path / "plots" / "hubble" / "unit" / "FlatLambdaCDM_joint_fast_all_z0p44_3p16_disable_completeness"
+    final_df = pd.read_csv(run_dir / "residuals.csv")
+    pass2_membership_df = pd.read_csv(run_dir / "sigma_clip_membership_pass2.csv")
+    assert set(final_df["object_id"]) == set(expected_stage2_plot_ids)
+    assert final_df["was_clipped_pass1"].eq(False).all()
+    assert final_df["is_in_pass2_plot_sample"].eq(True).all()
+    assert set(final_df.loc[final_df["is_in_pass2_fit_selection"], "object_id"]) == set(expected_stage2_fit_ids)
+    assert set(final_df.loc[~final_df["is_in_pass2_fit_selection"], "object_id"]) == {"agn_out_survivor"}
+    assert final_df.loc[final_df["object_id"] == "agn_out_survivor", "z"].item() > 3.16
+    assert set(pass2_membership_df.loc[pass2_membership_df["is_in_pass2_plot_sample"], "object_id"]) == set(expected_stage2_plot_ids)
+    assert set(pass2_membership_df.loc[pass2_membership_df["is_in_pass2_fit_selection"], "object_id"]) == set(expected_stage2_fit_ids)
+    assert not {"agn_001", "agn_002", "agn_out_clipped"} & set(final_df["object_id"])
 
 
 def test_run_single_resume_stage_pass2_skips_first_pass(monkeypatch, tmp_path):
