@@ -61,6 +61,7 @@ from qvc.hubble.hubble_likelihood import (
     sigma_mu_from_z_err,
 )
 from qvc.hubble.hubble_plotting import (
+    plot_blr_diagnostics_summary,
     plot_blr_line_lags_vs_l2500,
     plot_completeness_diagnostics,
     plot_completeness_vs_mag_at_redshifts,
@@ -2280,7 +2281,12 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         use_eta_sigma_term=use_eta_sigma_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
     )
-    
+    plot_blr_diagnostics_summary(
+        df_agn_pass2_plot_sample,
+        plot_path=plot_path,
+        show=False,
+    )
+
     chisq_red_L2500, _ = reduced_chi_squared(L_residuals_debiased, L_pred_std_debiased, n_params=len(model_labels)-1)
     chisq_red_agn_likelihood_space, _ = compute_agn_likelihood_space_reduced_chi2(
         flat_samples,

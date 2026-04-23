@@ -1042,6 +1042,7 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
         plot_alpha_lambda_histogram,
         plot_alpha_lambda_vs_redshift,
         plot_blr_amp_vs_redshift_by_band,
+        plot_blr_diagnostics_summary,
         plot_bc_lag_vs_l2500,
         plot_blr_line_lags_vs_l2500_fiducial,
         plot_blr_lag_vs_amp_by_band,
@@ -1405,6 +1406,12 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
             f_host_col="f_host_2500_psf",
             f_host_label=r"$f_{\rm host,2500}^{\rm PSF}$",
         )
+    plot_blr_diagnostics_summary(
+        df,
+        plot_path=plot_path,
+        show=False,
+        filename="blr_precut.pdf",
+    )
     if "apparent_mag_2500" in df.columns:
         plot_light_curve_n_points_vs_apparent_mag(
             df,
@@ -1865,6 +1872,12 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
             f_host_col="f_host_2500_psf",
             f_host_label=r"$f_{\rm host,2500}^{\rm PSF}$",
         )
+    plot_blr_diagnostics_summary(
+        df,
+        plot_path=plot_path,
+        show=False,
+        filename="blr_postcut.pdf",
+    )
     if "apparent_mag_2500" in df.columns:
         plot_light_curve_n_points_vs_apparent_mag(
             df,

@@ -129,6 +129,22 @@ _BAND_COLORS = {
 }
 
 _BLR_LAG_KL_MIN = 0.05
+_BLR_PDF_BANDS = ("u", "g", "r", "i")
+_BLR_PDF_LINE_WAVELENGTHS = {
+    "Lyα 1216": 1215.67,
+    "C IV 1549": 1549.0,
+    "C III] 1909": 1908.73,
+    "Mg II 2798": 2798.0,
+    "Hβ 4861": 4861.33,
+    "Hα 6563": 6562.80,
+    "BC": 3646.0,
+}
+_BLR_PDF_BAND_EDGES = {
+    "u": (3000.0, 4000.0),
+    "g": (4000.0, 5500.0),
+    "r": (5500.0, 7000.0),
+    "i": (7000.0, 8500.0),
+}
 
 
 def _pdf_path(path):
@@ -148,6 +164,172 @@ def _save_figure(fig, path, *, dpi=300, bbox_inches="tight", show=False):
         plt.show()
     plt.close(fig)
     return pdf_path
+
+
+def _add_blr_visibility_overlays(ax_top, ax_bottom, band, z_min, z_max):
+    lo, hi = _BLR_PDF_BAND_EDGES[band]
+    z_grid = np.linspace(0.0, 4.0, 600)
+    y_text = ax_bottom.get_ylim()[0] + 0.3
+
+    for line_name, lam0 in _BLR_PDF_LINE_WAVELENGTHS.items():
+        lam_obs = lam0 * (1.0 + z_grid)
+        in_band = (lam_obs >= lo + 200.0) & (lam_obs <= hi - 200.0)
+        if not np.any(in_band):
+            continue
+
+        diff = np.diff(in_band.astype(int))
+        entry_indices = np.where(diff == 1)[0] + 1
+        exit_indices = np.where(diff == -1)[0] + 1
+        if in_band[0]:
+            entry_indices = np.insert(entry_indices, 0, 0)
+        if in_band[-1]:
+            exit_indices = np.append(exit_indices, len(z_grid) - 1)
+
+        for entry, exit_idx in zip(entry_indices, exit_indices):
+            z_start = float(z_grid[entry])
+            z_end = float(z_grid[exit_idx])
+            if not (z_min < z_end and z_start < z_max):
+                continue
+            ax_top.axvspan(z_start, z_end, color="m", alpha=0.2, zorder=-5)
+            ax_bottom.axvspan(z_start, z_end, color="m", alpha=0.2, zorder=-5)
+            ax_bottom.text(
+                0.5 * (z_start + z_end),
+                y_text,
+                line_name,
+                color="m",
+                rotation=90,
+                va="bottom",
+                ha="center",
+                fontsize=12,
+            )
+
+
+def plot_blr_diagnostics_summary(
+    df_agn,
+    *,
+    plot_path="plots/hubble",
+    show=False,
+    filename="blr.pdf",
+):
+    """Plot the notebook-style BLR and continuum amplitude summary versus redshift."""
+    if df_agn is None or len(df_agn) == 0:
+        return None
+
+    required_columns = {"z", "log_sigma0", "log_sigma0_err"}
+    for band in _BLR_PDF_BANDS:
+        required_columns.update(
+            {
+                f"log_amp_delta_blr_{band}",
+                f"log_amp_delta_blr_{band}_err",
+                f"log_sigma_band_{band}",
+                f"log_sigma_band_{band}_err",
+            }
+        )
+    if not required_columns.issubset(df_agn.columns):
+        return None
+
+    z = pd.to_numeric(df_agn["z"], errors="coerce").to_numpy(dtype=float)
+    z_finite = z[np.isfinite(z)]
+    if z_finite.size == 0:
+        return None
+
+    fig, axes = plt.subplots(
+        2,
+        len(_BLR_PDF_BANDS),
+        figsize=(4 * len(_BLR_PDF_BANDS), 7),
+        sharex=True,
+        sharey="row",
+    )
+    point_color_top = (0.0, 0.0, 0.0, 0.01)
+    point_color_bottom = (0.0, 0.0, 0.0, 0.02)
+    plotted_any = False
+
+    for i, band in enumerate(_BLR_PDF_BANDS):
+        ax_top = axes[0, i]
+        ax_bottom = axes[1, i]
+
+        blr = (
+            pd.to_numeric(df_agn["log_sigma0"], errors="coerce")
+            + pd.to_numeric(df_agn[f"log_amp_delta_blr_{band}"], errors="coerce")
+        ).to_numpy(dtype=float)
+        blr_err = np.hypot(
+            pd.to_numeric(df_agn["log_sigma0_err"], errors="coerce").to_numpy(dtype=float),
+            pd.to_numeric(df_agn[f"log_amp_delta_blr_{band}_err"], errors="coerce").to_numpy(dtype=float),
+        )
+        cont = pd.to_numeric(df_agn[f"log_sigma_band_{band}"], errors="coerce").to_numpy(dtype=float)
+        cont_err = pd.to_numeric(df_agn[f"log_sigma_band_{band}_err"], errors="coerce").to_numpy(dtype=float)
+
+        blr_mask = np.isfinite(z) & np.isfinite(blr) & np.isfinite(blr_err)
+        cont_mask = np.isfinite(z) & np.isfinite(cont) & np.isfinite(cont_err)
+        plotted_any |= np.any(blr_mask) or np.any(cont_mask)
+
+        if np.any(blr_mask):
+            ax_top.errorbar(
+                z[blr_mask],
+                blr[blr_mask],
+                yerr=blr_err[blr_mask],
+                linestyle="none",
+                marker="o",
+                markersize=4,
+                mfc=point_color_top,
+                mec="none",
+                ecolor=point_color_top,
+                color=point_color_top,
+                elinewidth=0.8,
+                capsize=0,
+                label=f"AGN {band}",
+            )
+        else:
+            ax_top.text(0.5, 0.5, "No data", ha="center", va="center", transform=ax_top.transAxes)
+        ax_top.legend(loc="upper right")
+        if i == 0:
+            ax_top.set_ylabel(r"$\sigma_\mathrm{BLR,\ band}$")
+
+        if np.any(cont_mask):
+            ax_bottom.errorbar(
+                z[cont_mask],
+                cont[cont_mask],
+                yerr=cont_err[cont_mask],
+                linestyle="none",
+                marker="o",
+                markersize=4,
+                mfc=point_color_bottom,
+                mec="none",
+                ecolor=point_color_bottom,
+                color=point_color_bottom,
+                elinewidth=0.8,
+                capsize=0,
+                label=f"AGN {band}",
+            )
+        else:
+            ax_bottom.text(0.5, 0.5, "No data", ha="center", va="center", transform=ax_bottom.transAxes)
+        ax_bottom.legend(loc="upper right")
+        ax_bottom.set_xlabel("z")
+        ax_bottom.set_ylim(-2.5, 0.4)
+        if i == 0:
+            ax_bottom.set_ylabel(r"$\sigma_\mathrm{cont,\ band}$")
+
+        _add_blr_visibility_overlays(
+            ax_top,
+            ax_bottom,
+            band,
+            float(np.nanmin(z_finite)),
+            float(np.nanmax(z_finite)),
+        )
+
+    if not plotted_any:
+        plt.close(fig)
+        return None
+
+    fig.tight_layout()
+    diagnostics_path = os.path.join(plot_path or "plots/hubble", "diagnostics")
+    os.makedirs(diagnostics_path, exist_ok=True)
+    return _save_figure(
+        fig,
+        os.path.join(diagnostics_path, filename),
+        dpi=600,
+        show=show,
+    )
 
 
 def _population_scatter_offsets(scale, *, enabled=True, seed=1739):

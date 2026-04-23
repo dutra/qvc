@@ -83,6 +83,24 @@ def _make_fake_agn_sample(n_agn=24, seed=123):
             "eta_sigma_err": np.full(n_agn, 0.03),
             "alpha_lambda": rng.normal(-1.7, 0.15, size=n_agn),
             "alpha_lambda_err": np.full(n_agn, 0.08),
+            "log_sigma0": log_sigma_uv - 0.25,
+            "log_sigma0_err": np.full(n_agn, 0.04),
+            "log_amp_delta_blr_u": np.full(n_agn, -0.30),
+            "log_amp_delta_blr_u_err": np.full(n_agn, 0.04),
+            "log_amp_delta_blr_g": np.full(n_agn, -0.25),
+            "log_amp_delta_blr_g_err": np.full(n_agn, 0.04),
+            "log_amp_delta_blr_r": np.full(n_agn, -0.20),
+            "log_amp_delta_blr_r_err": np.full(n_agn, 0.04),
+            "log_amp_delta_blr_i": np.full(n_agn, -0.15),
+            "log_amp_delta_blr_i_err": np.full(n_agn, 0.04),
+            "log_sigma_band_u": log_sigma_uv - 0.10,
+            "log_sigma_band_u_err": np.full(n_agn, 0.04),
+            "log_sigma_band_g": log_sigma_uv - 0.08,
+            "log_sigma_band_g_err": np.full(n_agn, 0.04),
+            "log_sigma_band_r": log_sigma_uv - 0.06,
+            "log_sigma_band_r_err": np.full(n_agn, 0.04),
+            "log_sigma_band_i": log_sigma_uv - 0.04,
+            "log_sigma_band_i_err": np.full(n_agn, 0.04),
         }
     )
 
@@ -984,6 +1002,7 @@ def _patch_run_single_plot_stack(monkeypatch):
     monkeypatch.setattr(hubble_fit, "plot_sigma_uv_mpred_correction", lambda *args, **kwargs: None)
     monkeypatch.setattr(hubble_fit, "plot_predicted_L2500_vs_sigmahat", lambda *args, **kwargs: (np.zeros(len(args[1])), np.ones(len(args[1]))))
     monkeypatch.setattr(hubble_fit, "plot_blr_line_lags_vs_l2500", lambda *args, **kwargs: None)
+    monkeypatch.setattr(hubble_fit, "plot_blr_diagnostics_summary", lambda *args, **kwargs: None)
     monkeypatch.setattr(hubble_fit, "plot_hubble_residual_normality", lambda *args, **kwargs: None)
     monkeypatch.setattr(hubble_fit, "plot_hubble_residual_tail_diagnostics", lambda *args, **kwargs: None)
     monkeypatch.setattr(hubble_fit, "plot_predicted_vs_actual_M2500", lambda *args, **kwargs: (np.zeros(len(args[1])), np.ones(len(args[1])), None, None))
@@ -1391,6 +1410,7 @@ def test_run_single_two_pass_sigma_clip_removes_clipped_object_ids_from_second_p
     full_residual_calls = []
     full_residual_rz_calls = []
     blr_calls = []
+    blr_pdf_calls = []
     debias_impact_calls = []
     alphaox_calls = []
 
@@ -1454,6 +1474,7 @@ def test_run_single_two_pass_sigma_clip_removes_clipped_object_ids_from_second_p
         lambda *args, **kwargs: (l2500_calls.append(args[1]["object_id"].tolist()), (np.zeros(len(args[1])), np.ones(len(args[1]))))[1],
     )
     monkeypatch.setattr(hubble_fit, "plot_blr_line_lags_vs_l2500", lambda *args, **kwargs: blr_calls.append(args[1]["object_id"].tolist()))
+    monkeypatch.setattr(hubble_fit, "plot_blr_diagnostics_summary", lambda *args, **kwargs: blr_pdf_calls.append(args[0]["object_id"].tolist()))
     monkeypatch.setattr(
         hubble_fit,
         "plot_predicted_vs_actual_M2500",
@@ -1506,6 +1527,7 @@ def test_run_single_two_pass_sigma_clip_removes_clipped_object_ids_from_second_p
     for call_ids in full_residual_rz_calls:
         assert call_ids == expected_second_pass_ids
     assert blr_calls[0] == expected_second_pass_ids
+    assert blr_pdf_calls[0] == expected_second_pass_ids
     assert debias_impact_calls[0] == expected_second_pass_ids
     assert alphaox_calls[0] == expected_second_pass_ids
 
@@ -1617,6 +1639,7 @@ def test_run_single_two_pass_sigma_clip_keeps_out_of_range_survivor_in_stage2_pl
     full_residual_calls = []
     full_residual_rz_calls = []
     blr_calls = []
+    blr_pdf_calls = []
     debias_impact_calls = []
     alphaox_calls = []
 
@@ -1677,6 +1700,7 @@ def test_run_single_two_pass_sigma_clip_keeps_out_of_range_survivor_in_stage2_pl
         lambda *args, **kwargs: (l2500_calls.append(args[1]["object_id"].tolist()), (np.zeros(len(args[1])), np.ones(len(args[1]))))[1],
     )
     monkeypatch.setattr(hubble_fit, "plot_blr_line_lags_vs_l2500", lambda *args, **kwargs: blr_calls.append(args[1]["object_id"].tolist()))
+    monkeypatch.setattr(hubble_fit, "plot_blr_diagnostics_summary", lambda *args, **kwargs: blr_pdf_calls.append(args[0]["object_id"].tolist()))
     monkeypatch.setattr(
         hubble_fit,
         "plot_predicted_vs_actual_M2500",
@@ -1722,6 +1746,7 @@ def test_run_single_two_pass_sigma_clip_keeps_out_of_range_survivor_in_stage2_pl
     for call_ids in full_residual_rz_calls:
         assert call_ids == expected_stage2_plot_ids
     assert blr_calls[0] == expected_stage2_plot_ids
+    assert blr_pdf_calls[0] == expected_stage2_plot_ids
     assert debias_impact_calls[0] == expected_stage2_plot_ids
     assert alphaox_calls[0] == expected_stage2_plot_ids
 
@@ -1947,6 +1972,7 @@ def test_run_single_disable_sigma_clip_pass_skips_two_pass_branch(monkeypatch, t
     full_residual_calls = []
     full_residual_rz_calls = []
     blr_calls = []
+    blr_pdf_calls = []
     debias_impact_calls = []
     alphaox_calls = []
 
@@ -1996,6 +2022,7 @@ def test_run_single_disable_sigma_clip_pass_skips_two_pass_branch(monkeypatch, t
         lambda *args, **kwargs: (l2500_calls.append(kwargs), (np.zeros(len(args[1])), np.ones(len(args[1]))))[1],
     )
     monkeypatch.setattr(hubble_fit, "plot_blr_line_lags_vs_l2500", lambda *args, **kwargs: blr_calls.append(kwargs))
+    monkeypatch.setattr(hubble_fit, "plot_blr_diagnostics_summary", lambda *args, **kwargs: blr_pdf_calls.append(kwargs))
     monkeypatch.setattr(
         hubble_fit,
         "plot_predicted_vs_actual_M2500",
@@ -2040,6 +2067,8 @@ def test_run_single_disable_sigma_clip_pass_skips_two_pass_branch(monkeypatch, t
     for kwargs in full_residual_rz_calls:
         assert "clipped_mask" not in kwargs
     for kwargs in blr_calls:
+        assert "clipped_mask" not in kwargs
+    for kwargs in blr_pdf_calls:
         assert "clipped_mask" not in kwargs
     for kwargs in debias_impact_calls:
         assert "clipped_mask" not in kwargs

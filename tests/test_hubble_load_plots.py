@@ -49,11 +49,29 @@ def _minimal_agn_frame(n=10):
             "apparent_mag_2500_err": np.full(n, 0.01),
             "number_points_g": np.full(n, 300),
             "number_points_r": np.full(n, 300),
+            "log_sigma0": np.full(n, -1.2),
+            "log_sigma0_err": np.full(n, 0.04),
+            "log_amp_delta_blr_u": np.full(n, -0.25),
+            "log_amp_delta_blr_u_err": np.full(n, 0.03),
+            "log_amp_delta_blr_g": np.full(n, -0.20),
+            "log_amp_delta_blr_g_err": np.full(n, 0.03),
+            "log_amp_delta_blr_r": np.full(n, -0.15),
+            "log_amp_delta_blr_r_err": np.full(n, 0.03),
+            "log_amp_delta_blr_i": np.full(n, -0.10),
+            "log_amp_delta_blr_i_err": np.full(n, 0.03),
+            "log_sigma_band_u": np.full(n, -1.0),
+            "log_sigma_band_u_err": np.full(n, 0.04),
+            "log_sigma_band_g": np.full(n, -0.95),
+            "log_sigma_band_g_err": np.full(n, 0.04),
+            "log_sigma_band_r": np.full(n, -0.90),
+            "log_sigma_band_r_err": np.full(n, 0.04),
+            "log_sigma_band_i": np.full(n, -0.85),
+            "log_sigma_band_i_err": np.full(n, 0.04),
         }
     )
 
 
-def test_load_agn_data_makes_precut_and_postcut_fhost_l2500_plots(tmp_path, monkeypatch):
+def test_load_agn_data_makes_precut_and_postcut_fhost_and_blr_plots(tmp_path, monkeypatch):
     source_path = tmp_path / "agn.h5"
     source_path.touch()
     monkeypatch.setattr(
@@ -65,7 +83,7 @@ def test_load_agn_data_makes_precut_and_postcut_fhost_l2500_plots(tmp_path, monk
 
     captured_calls = []
 
-    def capture_fhost_l2500(*_args, **kwargs):
+    def capture_plot(*_args, **kwargs):
         captured_calls.append(kwargs)
         return None
 
@@ -107,7 +125,8 @@ def test_load_agn_data_makes_precut_and_postcut_fhost_l2500_plots(tmp_path, monk
     )
     for name in plot_noops:
         monkeypatch.setattr(hubble_plotting, name, lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(hubble_plotting, "plot_f_host_2500_vs_l2500", capture_fhost_l2500)
+    monkeypatch.setattr(hubble_plotting, "plot_f_host_2500_vs_l2500", capture_plot)
+    monkeypatch.setattr(hubble_plotting, "plot_blr_diagnostics_summary", capture_plot)
 
     hubble_utils.load_agn_data(
         source_path,
@@ -121,6 +140,8 @@ def test_load_agn_data_makes_precut_and_postcut_fhost_l2500_plots(tmp_path, monk
     captured_by_filename = {call.get("filename"): call for call in captured_calls}
     assert "f_host_2500_vs_l2500_precut.pdf" in captured_by_filename
     assert "f_host_2500_vs_l2500_postcut.pdf" in captured_by_filename
+    assert "blr_precut.pdf" in captured_by_filename
+    assert "blr_postcut.pdf" in captured_by_filename
     assert captured_by_filename["f_host_2500_vs_l2500_precut.pdf"]["f_host_col"] == "f_host_2500_psf"
     assert captured_by_filename["f_host_2500_vs_l2500_postcut.pdf"]["f_host_col"] == "f_host_2500_psf"
 
@@ -143,3 +164,31 @@ def test_plot_f_host_2500_vs_l2500_accepts_psf_column(tmp_path, monkeypatch):
     assert out is not None
     assert os.path.exists(out)
     assert out.endswith("f_host_2500_psf_vs_l2500.pdf")
+
+
+def test_plot_blr_diagnostics_summary_writes_default_pdf(tmp_path, monkeypatch):
+    monkeypatch.setenv("MPLCONFIGDIR", str(tmp_path / "mplconfig"))
+    df = _minimal_agn_frame(n=12)
+
+    out = hubble_plotting.plot_blr_diagnostics_summary(
+        df,
+        plot_path=str(tmp_path / "figures"),
+        show=False,
+    )
+
+    assert out is not None
+    assert os.path.exists(out)
+    assert out.endswith(os.path.join("diagnostics", "blr.pdf"))
+
+
+def test_plot_blr_diagnostics_summary_returns_none_when_columns_missing(tmp_path, monkeypatch):
+    monkeypatch.setenv("MPLCONFIGDIR", str(tmp_path / "mplconfig"))
+    df = _minimal_agn_frame(n=8).drop(columns=["log_sigma0"])
+
+    out = hubble_plotting.plot_blr_diagnostics_summary(
+        df,
+        plot_path=str(tmp_path / "figures"),
+        show=False,
+    )
+
+    assert out is None
