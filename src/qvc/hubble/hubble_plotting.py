@@ -3470,7 +3470,7 @@ def plot_blr_lag_vs_amp_by_band(df, plot_path="plots/hubble", show=False, lag_su
         ax.set_xlabel(r"$\log A_{\rm BLR}$")
         ax.set_ylabel(lag_label)
         ax.set_title(f"{title_label} {band}-band")
-        ax.grid(True, alpha=0.25)
+        ax.grid(False)
 
     for ax in axes[n_panels:]:
         ax.set_axis_off()
