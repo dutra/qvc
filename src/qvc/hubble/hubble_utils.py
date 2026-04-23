@@ -49,6 +49,7 @@ from qvc.hubble.hubble_model import (
     resolve_model_option_flags,
     infer_use_alpha_lambda_term,
 )
+from qvc.light_curve.plotting_appendix import plot_sigma_tau_identity_grid
 
 PURPLE_ANSI = "\033[95m"
 RESET_ANSI = "\033[0m"
@@ -1108,6 +1109,76 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
         diagnostics_path = report_path.parent / "cut_diagnostics_by_z.csv"
         pd.DataFrame(cut_rows).to_csv(diagnostics_path, index=False)
 
+    def _plot_sigma_tau_ls_identity(frame, *, suffix, sigma_limits=None, tau_limits=None):
+        sigma_keys = {
+            "x": "log_sigma_uv_bpl",
+            "y": "log_sigma_ls",
+            "xerr": "log_sigma_uv_bpl_err",
+            "yerr": "log_sigma_ls_err",
+            "xlabel": r"$\log\!\,\sigma_{\mathrm{UV}}\,(\mathrm{mag})$" "\n(UV DRW BPL)",
+            "ylabel": r"$\log\!\,\sigma_{\mathrm{LS}}\,(\mathrm{mag})$" "\n(LS)",
+        }
+        tau_keys = {
+            "x": "log_tau_uv_rf_bpl",
+            "y": "log_tau_ls",
+            "xerr": "log_tau_uv_rf_bpl_err",
+            "yerr": "log_tau_ls_err",
+            "xlabel": r"$\log\!\,\tau_{\mathrm{UV},\,\mathrm{RF}}\,(\mathrm{days})$" "\n(UV DRW BPL)",
+            "ylabel": r"$\log\!\,\tau_{\mathrm{LS}}\,(\mathrm{days})$" "\n(LS)",
+        }
+        required_xy = {
+            sigma_keys["x"],
+            sigma_keys["y"],
+            tau_keys["x"],
+            tau_keys["y"],
+        }
+        missing_xy = sorted(required_xy - set(frame.columns))
+        if missing_xy:
+            print(
+                "[WARNING] Skipping sigma/tau LS identity grid "
+                f"({suffix}): missing columns {missing_xy}"
+            )
+            return
+
+        def _metric_finite_count(keydict):
+            finite = np.isfinite(pd.to_numeric(frame[keydict["x"]], errors="coerce").to_numpy(dtype=float))
+            finite &= np.isfinite(pd.to_numeric(frame[keydict["y"]], errors="coerce").to_numpy(dtype=float))
+            xerr_key = keydict.get("xerr")
+            yerr_key = keydict.get("yerr")
+            if xerr_key in frame.columns:
+                finite &= np.isfinite(pd.to_numeric(frame[xerr_key], errors="coerce").to_numpy(dtype=float))
+            if yerr_key in frame.columns:
+                finite &= np.isfinite(pd.to_numeric(frame[yerr_key], errors="coerce").to_numpy(dtype=float))
+            return int(np.count_nonzero(finite))
+
+        sigma_n = _metric_finite_count(sigma_keys)
+        tau_n = _metric_finite_count(tau_keys)
+        output_path = Path(plot_path or "plots/hubble") / "diagnostics" / f"sigma_tau_ls_identity_{suffix}.pdf"
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            fig = plot_sigma_tau_identity_grid(
+                frame,
+                sigma_keys,
+                tau_keys,
+                bands=("uv",),
+                figsize=(4.8, 7.8),
+                show=False,
+                output_path=str(output_path),
+                sigma_limits=sigma_limits,
+                tau_limits=tau_limits,
+            )
+            plt.close(fig)
+        except ValueError as exc:
+            print(
+                "[WARNING] Skipping sigma/tau LS identity grid "
+                f"({suffix}): {exc}"
+            )
+            return
+
+        print(f"Sigma/tau LS identity grid written to: {output_path.resolve()}")
+        print(f"  sigma finite rows used: {sigma_n:,}")
+        print(f"  tau finite rows used: {tau_n:,}")
+
     def _normalize_dropped_bands(value):
         if value is None:
             return []
@@ -1662,6 +1733,7 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
                 lag_suffix="2",
                 filename="blr_lag2_vs_redshift_by_band_precut.pdf",
             )
+    _plot_sigma_tau_ls_identity(df, suffix="precut")
 
     df = populate_xray(df)
     
@@ -2077,6 +2149,12 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
             show=False,
             filename="sf_ref_band_vs_model_g_postcut.pdf",
         )
+    _plot_sigma_tau_ls_identity(
+        df,
+        suffix="postcut",
+        sigma_limits=(-1.9, 1.2),
+        tau_limits=(-0.2, 4.9),
+    )
     plot_cut_diagnostics(df_all.copy(), df.copy(), bins=30, cut_info="all cuts")
     colorpanel_cols = [col for col in ("f_host_2500", "f_host_center", "f_bc_3000", "wrms") if col in df_all.columns]
     if len(colorpanel_cols) > 0 and "z" in df_all.columns and "apparent_mag_2500" in df_all.columns:
