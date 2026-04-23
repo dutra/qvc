@@ -41,7 +41,7 @@ except ValueError:
 os.environ["XLA_FLAGS"] = f"--xla_force_host_platform_device_count={num_cores}"
 os.environ["JAX_PLATFORM_NAME"] = "cpu"
 
-from qvc.hubble.hubble_utils import match_radec, read_quasars_from_hdf5_flat
+from qvc.hubble.hubble_utils import match_radec, read_quasars_from_hdf5_flat, resolve_qvc_data_path
 from jaxqsofit import QSOFit, build_default_prior_config
 from jaxqsofit.custom_components import normalize_custom_line_components
 from jaxqsofit.model import (
@@ -1267,6 +1267,56 @@ def load_quasar_core_list(fpath_in):
     return read_quasars_from_hdf5_flat(fpath_in)
 
 
+def build_sample_df_from_object_ids(object_ids):
+    requested_ids = [normalize_object_id(obj_id) for obj_id in (object_ids or [])]
+    requested_ids = [obj_id for obj_id in requested_ids if obj_id]
+    requested_ids = list(dict.fromkeys(requested_ids))
+    if len(requested_ids) == 0:
+        raise ValueError("No non-empty object_id values were provided.")
+
+    catalog_path = resolve_qvc_data_path("data/S82/Catalog.parquet")
+    cat = pd.read_parquet(catalog_path)
+    required_cols = {"objectId", "RA", "DEC"}
+    missing = required_cols - set(cat.columns)
+    if missing:
+        raise ValueError(
+            f"S82 catalog at {catalog_path} is missing required column(s): {sorted(missing)}"
+        )
+
+    lookup = (
+        cat.loc[:, ["objectId", "RA", "DEC"]]
+        .dropna(subset=["objectId", "RA", "DEC"])
+        .assign(object_id=lambda d: d["objectId"].map(normalize_object_id))
+    )
+    lookup = lookup[lookup["object_id"] != ""]
+    lookup = (
+        lookup.drop_duplicates(subset=["object_id"], keep="first")
+        .set_index("object_id")
+        .loc[:, ["RA", "DEC"]]
+    )
+
+    selected = lookup.reindex(requested_ids)
+    missing_ids = [
+        oid
+        for oid, ra, dec in zip(requested_ids, selected["RA"].tolist(), selected["DEC"].tolist())
+        if not (np.isfinite(safe_float(ra)) and np.isfinite(safe_float(dec)))
+    ]
+    if missing_ids:
+        preview = ", ".join(missing_ids[:20])
+        raise ValueError(
+            "Could not resolve RA/DEC from S82 Catalog.parquet for "
+            f"{len(missing_ids)} object_id(s). First missing: {preview}"
+        )
+
+    return pd.DataFrame(
+        {
+            "object_id": requested_ids,
+            "ra": selected["RA"].astype(float).to_numpy(),
+            "dec": selected["DEC"].astype(float).to_numpy(),
+        }
+    )
+
+
 def _apply_h5_mean_correction(sample_df):
     sample_df = sample_df.copy()
     for band in SDSS_BANDS:
@@ -1414,7 +1464,9 @@ def match_to_dr16q(sample_df, dr16q_fits, max_sep_arcsec=1.0):
 
 
 def build_records(args):
-    if str(args.fpath_in).lower().endswith(".csv"):
+    if args.fpath_in is None:
+        sample_df = build_sample_df_from_object_ids(args.filter_object_id)
+    elif str(args.fpath_in).lower().endswith(".csv"):
         sample_df = pd.read_csv(args.fpath_in)
     else:
         sample_df = load_quasar_core_list(args.fpath_in)
@@ -1874,9 +1926,10 @@ def parse_args():
     if args.fpath_out is None and args.fpath_out_opt is not None:
         args.fpath_out = args.fpath_out_opt
 
-    # fit and download need the input catalog; fit also needs output CSV.
-    if args.mode in {"fit", "download"} and not args.fpath_in:
-        p.error("--fpath-in is required for --mode fit/download.")
+    # fit and download need an input source (catalog file or object_id filter);
+    # fit also needs output CSV.
+    if args.mode in {"fit", "download"} and not (args.fpath_in or args.filter_object_id):
+        p.error("--mode fit/download requires at least one of --fpath-in or --filter_object_id.")
     if args.mode == "fit" and not args.fpath_out:
         p.error("fpath_out is required for --mode fit.")
 
