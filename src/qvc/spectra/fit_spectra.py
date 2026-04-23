@@ -1753,7 +1753,17 @@ def run_download(args):
 def run_fit(args):
     records = build_records(args)
     if len(records) == 0:
-        raise RuntimeError("No records to process.")
+        filter_ids = [normalize_object_id(x) for x in (args.filter_object_id or [])]
+        filter_ids = [x for x in filter_ids if x]
+        hint = ""
+        if filter_ids:
+            preview = ", ".join(filter_ids[:10])
+            hint = (
+                " "
+                f"Requested --filter_object_id values (first up to 10): {preview}. "
+                "These IDs may be absent from the input catalog/H5."
+            )
+        raise RuntimeError(f"No records to process.{hint}")
 
     worker = partial(run_one_fit, args=args)
 
@@ -1777,10 +1787,9 @@ def run_fit(args):
 def parse_args():
     p = argparse.ArgumentParser(description="Fit SDSS spectra with jaxqsofit.")
 
-    # Preserve the existing positional CLI interface for batch scripts.
-    p.add_argument("fpath_in", nargs="?", help="Input HDF5 quasar catalog.")
+    # Keep output positional for batch scripts, but require explicit input flag.
     p.add_argument("fpath_out", nargs="?", help="Output CSV with one row per fitted object.")
-    p.add_argument("--fpath-in", dest="fpath_in_opt", default=None, help="Input HDF5 quasar catalog.")
+    p.add_argument("--fpath-in", dest="fpath_in", default=None, help="Input HDF5/CSV quasar catalog.")
     p.add_argument("--fpath-out", dest="fpath_out_opt", default=None, help="Output CSV with one row per fitted object.")
     p.add_argument("--mode", choices=["download", "fit", "fetch-dustmaps"], required=True)
 
@@ -1862,15 +1871,12 @@ def parse_args():
     p.add_argument("--dustmaps-data-dir", default="results/dustmaps", help="Directory to store dustmaps data (used for fetch-dustmaps mode)")
     args = p.parse_args()
 
-    # Resolve optional aliases first.
-    if args.fpath_in is None and args.fpath_in_opt is not None:
-        args.fpath_in = args.fpath_in_opt
     if args.fpath_out is None and args.fpath_out_opt is not None:
         args.fpath_out = args.fpath_out_opt
 
     # fit and download need the input catalog; fit also needs output CSV.
     if args.mode in {"fit", "download"} and not args.fpath_in:
-        p.error("fpath_in is required for --mode fit/download.")
+        p.error("--fpath-in is required for --mode fit/download.")
     if args.mode == "fit" and not args.fpath_out:
         p.error("fpath_out is required for --mode fit.")
 
