@@ -161,6 +161,11 @@ def build_macleod_identity_plot_path(prefix: str, job_description: str) -> str:
     return str(REPO_ROOT / "plots" / "lc_tests" / prefix / filename)
 
 
+def build_suberlak_identity_plot_path(prefix: str, job_description: str) -> str:
+    filename = f"sigma_tau_identity_grid_suberlak_{job_description}.pdf"
+    return str(REPO_ROOT / "plots" / "lc_tests" / prefix / filename)
+
+
 def build_object_ids_path(prefix: str, job: JobConfig) -> Path:
     return SCRIPT_DIR / f"{prefix}_{job.description}_object_ids.txt"
 
@@ -297,6 +302,7 @@ def build_merge_sbatch_script(
     *,
     enable_stone_identity_plot: bool = False,
     enable_macleod_identity_plot: bool = False,
+    enable_suberlak_identity_plot: bool = False,
 ) -> str:
     log_dir = LOG_ROOT / prefix
     log_pattern = log_dir / f"{prefix}-merge-%j.txt"
@@ -310,6 +316,11 @@ def build_merge_sbatch_script(
         merge_cmd += (
             " --plot-macleod-sigma-tau-identity-grid"
             f' --macleod-identity-plot-out "{build_macleod_identity_plot_path(prefix, job_description)}"'
+        )
+    if enable_suberlak_identity_plot:
+        merge_cmd += (
+            " --plot-suberlak-sigma-tau-identity-grid"
+            f' --suberlak-identity-plot-out "{build_suberlak_identity_plot_path(prefix, job_description)}"'
         )
     return f"""#!/bin/bash
 #SBATCH --job-name=merge_{prefix}
@@ -467,6 +478,7 @@ def main():
             args,
             enable_stone_identity_plot=job.description.startswith("stone"),
             enable_macleod_identity_plot=job.description == "macleod",
+            enable_suberlak_identity_plot=job.description == "macleod",
         )
         sbatch_path = write_job_script(prefix, sbatch_script)
         merge_sbatch_path = write_job_script(f"{prefix}_merge", merge_sbatch_script)

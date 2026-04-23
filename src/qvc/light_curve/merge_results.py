@@ -32,8 +32,10 @@ from qvc.light_curve.plotting_appendix import plot_sigma_tau_identity_grid
 MACLEOD_YEAR_DAYS = 365.25
 MACLEOD_IDENTITY_BANDS = ("u", "g", "r", "i")
 STONE_IDENTITY_BANDS = ("g", "r", "i")
+SUBERLAK_IDENTITY_BANDS = ("r",)
 STONE_SIGMA_LIMITS = (-1.6, 0.2)
 STONE_TAU_LIMITS = (1.4, 4.6)
+SUBERLAK_RELATIVE_PATH = "data/190807_Celerite_real_Jeff1_Shen2008-2011_s82drw_r.txt"
 
 def _decode_h5_scalar(value):
     if isinstance(value, bytes):
@@ -491,6 +493,11 @@ def build_macleod_identity_plot_path(prefix: str, base_dir: str) -> str:
     return build_stone_identity_plot_path(prefix, base_dir)
 
 
+def build_suberlak_identity_plot_path(prefix: str, base_dir: str) -> str:
+    base_path = Path(build_stone_identity_plot_path(prefix, base_dir))
+    return str(base_path.with_name("sigma_tau_identity_grid_suberlak.pdf"))
+
+
 def build_macleod_identity_plot_data(rows, macleod_dir=None, max_sep_arcsec=1.0):
     if macleod_dir is None:
         macleod_dir = resolve_qvc_data_path("data/MacLeod2010")
@@ -611,6 +618,148 @@ def write_macleod_sigma_tau_identity_grid(rows, output_path: str, macleod_dir=No
     return output_path
 
 
+def build_suberlak_identity_plot_data(rows, suberlak_path=None, max_sep_arcsec=1.0):
+    if suberlak_path is None:
+        suberlak_path = resolve_qvc_data_path(SUBERLAK_RELATIVE_PATH)
+    else:
+        suberlak_path = str(suberlak_path)
+
+    df_rows = pd.DataFrame(rows).copy()
+    if df_rows.empty:
+        return df_rows
+
+    for col in ("ra", "dec"):
+        df_rows[col] = pd.to_numeric(df_rows[col], errors="coerce")
+    df_rows = df_rows.loc[np.isfinite(df_rows["ra"]) & np.isfinite(df_rows["dec"])].copy()
+    if df_rows.empty:
+        return df_rows
+
+    suberlak_raw = pd.read_csv(suberlak_path, comment="#", sep=r"\s+")
+    for col in (
+        "RA",
+        "DEC",
+        "REDSHIFT",
+        "sigmaEXP_sdss-ps1",
+        "tauEXP_sdss-ps1",
+        "log10sigmahat",
+        "log10tau",
+        "Plike",
+        "Pnoise",
+        "Pinf",
+        "edge",
+    ):
+        suberlak_raw[col] = pd.to_numeric(suberlak_raw[col], errors="coerce")
+
+    suberlak_valid = suberlak_raw.loc[
+        np.isfinite(suberlak_raw["RA"])
+        & np.isfinite(suberlak_raw["DEC"])
+        & np.isfinite(suberlak_raw["REDSHIFT"])
+        & np.isfinite(suberlak_raw["sigmaEXP_sdss-ps1"])
+        & np.isfinite(suberlak_raw["tauEXP_sdss-ps1"])
+        & np.isfinite(suberlak_raw["log10sigmahat"])
+        & np.isfinite(suberlak_raw["log10tau"])
+        & np.isfinite(suberlak_raw["Plike"])
+        & np.isfinite(suberlak_raw["Pnoise"])
+        & np.isfinite(suberlak_raw["Pinf"])
+        & np.isfinite(suberlak_raw["edge"])
+        & (suberlak_raw["sigmaEXP_sdss-ps1"] > 0.0)
+        & (suberlak_raw["tauEXP_sdss-ps1"] > 2.0)
+        & ((1.0 + suberlak_raw["REDSHIFT"]) > 0.0)
+    ].copy()
+    if suberlak_valid.empty:
+        return suberlak_valid
+
+    suberlak_valid["suberlak_quality_mask"] = (
+        (suberlak_valid["log10sigmahat"] > -10.0)
+        & (suberlak_valid["log10tau"] > -10.0)
+        & (suberlak_valid["Plike"] - suberlak_valid["Pnoise"] > 2.0)
+        & (suberlak_valid["Plike"] - suberlak_valid["Pinf"] > 0.05)
+        & (suberlak_valid["edge"] == 0)
+        & (suberlak_valid["tauEXP_sdss-ps1"] > 2.0)
+    )
+
+    suberlak_coords = SkyCoord(
+        ra=suberlak_valid["RA"].to_numpy(dtype=float) * u.deg,
+        dec=suberlak_valid["DEC"].to_numpy(dtype=float) * u.deg,
+    )
+    row_coords = SkyCoord(
+        ra=df_rows["ra"].to_numpy(dtype=float) * u.deg,
+        dec=df_rows["dec"].to_numpy(dtype=float) * u.deg,
+    )
+    idx, d2d, _ = suberlak_coords.match_to_catalog_sky(row_coords)
+    match_mask = d2d < (max_sep_arcsec * u.arcsec)
+
+    suberlak_matched = suberlak_valid.loc[match_mask].copy().reset_index(drop=True)
+    if suberlak_matched.empty:
+        return suberlak_matched
+    suberlak_matched["matched_sep_arcsec"] = d2d.arcsec[match_mask]
+    matched_rows = df_rows.iloc[idx[match_mask]].copy().reset_index(drop=True)
+    suberlak_matched["object_id"] = matched_rows["object_id"].astype(str).to_numpy()
+
+    suberlak_plot_df = pd.concat(
+        [suberlak_matched.reset_index(drop=True), matched_rows.reset_index(drop=True)],
+        axis=1,
+    )
+    suberlak_plot_df = suberlak_plot_df.loc[:, ~suberlak_plot_df.columns.duplicated()].copy()
+    suberlak_plot_df["suberlak_sigma_r"] = np.log10(
+        pd.to_numeric(suberlak_plot_df["sigmaEXP_sdss-ps1"], errors="coerce")
+    )
+    suberlak_plot_df["suberlak_tau_r"] = np.log10(
+        pd.to_numeric(suberlak_plot_df["tauEXP_sdss-ps1"], errors="coerce")
+        / (1.0 + pd.to_numeric(suberlak_plot_df["REDSHIFT"], errors="coerce"))
+    )
+    suberlak_plot_df["m6_log_tau_rf_floor"] = suberlak_plot_df["suberlak_tau_r"] >= 1.5
+    suberlak_plot_df["ours_sigma_r"] = pd.to_numeric(suberlak_plot_df["log_sigma_band_r"], errors="coerce")
+    suberlak_plot_df["ours_sigma_r_err"] = pd.to_numeric(
+        suberlak_plot_df["log_sigma_band_r_err"], errors="coerce"
+    )
+    suberlak_plot_df["ours_tau_r"] = pd.to_numeric(suberlak_plot_df["log_tau_band_r_RF"], errors="coerce")
+    suberlak_plot_df["ours_tau_r_err"] = pd.to_numeric(
+        suberlak_plot_df["log_tau_band_r_RF_err"], errors="coerce"
+    )
+    return suberlak_plot_df.loc[
+        suberlak_plot_df["suberlak_quality_mask"] & suberlak_plot_df["m6_log_tau_rf_floor"]
+    ].copy()
+
+
+def write_suberlak_sigma_tau_identity_grid(rows, output_path: str, suberlak_path=None):
+    plot_df = build_suberlak_identity_plot_data(rows, suberlak_path=suberlak_path)
+    if plot_df.empty:
+        print("WARNING: Skipping Suberlak sigma/tau identity grid because no matched comparison rows were found.")
+        return None
+
+    output_path = str(output_path)
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+
+    suberlak_sigma_keys = {
+        "x": "suberlak_sigma_{band}",
+        "y": "ours_sigma_{band}",
+        "yerr": "ours_sigma_{band}_err",
+        "xlabel": r"$\log\!\,\sigma_<<band>>\,(\mathrm{mag})$" + "\n(Suberlak+2021)",
+        "ylabel": r"$\log\!\,\sigma_<<band>>\,(\mathrm{mag})$" + "\n(this work)",
+    }
+    suberlak_tau_keys = {
+        "x": "suberlak_tau_{band}",
+        "y": "ours_tau_{band}",
+        "yerr": "ours_tau_{band}_err",
+        "xlabel": r"$\log\!\,\tau_{\mathrm{<<band>>},\,\mathrm{RF}}\,(\mathrm{days})$" + "\n(Suberlak+2021)",
+        "ylabel": r"$\log\!\,\tau_{\mathrm{<<band>>},\,\mathrm{RF}}\,(\mathrm{days})$" + "\n(this work)",
+    }
+    fig = plot_sigma_tau_identity_grid(
+        plot_df,
+        suberlak_sigma_keys,
+        suberlak_tau_keys,
+        bands=SUBERLAK_IDENTITY_BANDS,
+        figsize=(4.6, 7.6),
+        show=False,
+        output_path=output_path,
+        style={"point_alpha": 0.35, "error_alpha": 0.12, "rasterized": False},
+    )
+    plt.close(fig)
+    print(f"Wrote Suberlak sigma/tau identity grid to {output_path}")
+    return output_path
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(
         description=(
@@ -685,6 +834,18 @@ def main(argv=None):
         type=str,
         default=None,
         help="Optional output path for the MacLeod sigma/tau identity grid PDF.",
+    )
+    p.add_argument(
+        "--plot-suberlak-sigma-tau-identity-grid",
+        action="store_true",
+        default=False,
+        help="Generate a Suberlak raw-vs-fit sigma/tau identity grid from the merged rows.",
+    )
+    p.add_argument(
+        "--suberlak-identity-plot-out",
+        type=str,
+        default=None,
+        help="Optional output path for the Suberlak sigma/tau identity grid PDF.",
     )
     p.add_argument(
         "--out",
@@ -771,6 +932,10 @@ def main(argv=None):
     if args.plot_macleod_sigma_tau_identity_grid and all_quasars:
         plot_out = args.macleod_identity_plot_out or build_macleod_identity_plot_path(args.prefix, args.base_dir)
         write_macleod_sigma_tau_identity_grid(all_quasars, plot_out)
+
+    if args.plot_suberlak_sigma_tau_identity_grid and all_quasars:
+        plot_out = args.suberlak_identity_plot_out or build_suberlak_identity_plot_path(args.prefix, args.base_dir)
+        write_suberlak_sigma_tau_identity_grid(all_quasars, plot_out)
 
     if out_format == "csv":
         seen = []

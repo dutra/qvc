@@ -4,6 +4,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from matplotlib.lines import Line2D
+from matplotlib.legend_handler import HandlerBase
 from matplotlib.ticker import AutoMinorLocator, MultipleLocator
 
 plt.style.use(Path(__file__).with_name("style.mplstyle"))
@@ -17,6 +18,88 @@ COLORS = {
     "z": "tab:brown",
     "y": "tab:gray",
 }
+
+
+class _ErrorbarLegendHandle:
+    def __init__(self, *, markerfacecolor, markeredgecolor, markersize, linewidth, alpha, error_color, error_lw, capsize):
+        self.markerfacecolor = markerfacecolor
+        self.markeredgecolor = markeredgecolor
+        self.markersize = markersize
+        self.linewidth = linewidth
+        self.alpha = alpha
+        self.error_color = error_color
+        self.error_lw = error_lw
+        self.capsize = capsize
+
+
+class _HandlerErrorbarMarker(HandlerBase):
+    def create_artists(self, legend, orig_handle, xdescent, ydescent, width, height, fontsize, trans):
+        cx = xdescent + 0.5 * width
+        cy = ydescent + 0.5 * height
+        half_err = 5
+        half_cap = min(orig_handle.capsize, 0.22 * min(width, height))
+
+        hline = Line2D(
+            [cx - half_err, cx + half_err],
+            [cy, cy],
+            color=orig_handle.error_color,
+            lw=orig_handle.error_lw,
+            alpha=orig_handle.alpha,
+            transform=trans,
+        )
+        vline = Line2D(
+            [cx, cx],
+            [cy - half_err, cy + half_err],
+            color=orig_handle.error_color,
+            lw=orig_handle.error_lw,
+            alpha=orig_handle.alpha,
+            transform=trans,
+        )
+        cap_left = Line2D(
+            [cx - half_err, cx - half_err],
+            [cy - half_cap, cy + half_cap],
+            color=orig_handle.error_color,
+            lw=orig_handle.error_lw,
+            alpha=orig_handle.alpha,
+            transform=trans,
+        )
+        cap_right = Line2D(
+            [cx + half_err, cx + half_err],
+            [cy - half_cap, cy + half_cap],
+            color=orig_handle.error_color,
+            lw=orig_handle.error_lw,
+            alpha=orig_handle.alpha,
+            transform=trans,
+        )
+        cap_bottom = Line2D(
+            [cx - half_cap, cx + half_cap],
+            [cy - half_err, cy - half_err],
+            color=orig_handle.error_color,
+            lw=orig_handle.error_lw,
+            alpha=orig_handle.alpha,
+            transform=trans,
+        )
+        cap_top = Line2D(
+            [cx - half_cap, cx + half_cap],
+            [cy + half_err, cy + half_err],
+            color=orig_handle.error_color,
+            lw=orig_handle.error_lw,
+            alpha=orig_handle.alpha,
+            transform=trans,
+        )
+        marker = Line2D(
+            [cx],
+            [cy],
+            marker="o",
+            linestyle="none",
+            markersize=orig_handle.markersize,
+            markerfacecolor=orig_handle.markerfacecolor,
+            markeredgecolor=orig_handle.markeredgecolor,
+            markeredgewidth=orig_handle.linewidth,
+            alpha=orig_handle.alpha,
+            transform=trans,
+        )
+        return [hline, vline, cap_left, cap_right, cap_bottom, cap_top, marker]
 
 
 def _symmetrize_error(err):
@@ -263,7 +346,12 @@ def plot_sigma_tau_identity_grid(
         constrained_layout=True,
     )
     fig.set_constrained_layout_pads(w_pad=0.0, h_pad=0.01, wspace=0.0, hspace=0.05)
-    axes = np.atleast_2d(axes)
+    axes = np.asarray(axes, dtype=object)
+    if axes.ndim == 1:
+        if ncols == 1:
+            axes = axes[:, np.newaxis]
+        else:
+            axes = axes[np.newaxis, :]
 
     def _style_axis(ax):
         ax.minorticks_on()
@@ -361,11 +449,32 @@ def plot_sigma_tau_identity_grid(
                 edgecolor=style["point_edgecolor"],
                 linewidths=style["point_linewidth"],
                 zorder=-8,
-                label="AGN",
                 rasterized=style["rasterized"],
             )
             ax.set_xlabel(_resolve_label(keydict.get("xlabel"), band), labelpad=2, fontsize=label_fontsize)
             ax.set_ylabel(_resolve_label(keydict.get("ylabel"), band), labelpad=2, fontsize=label_fontsize)
+            legend_handle = _ErrorbarLegendHandle(
+                markerfacecolor=style["point_color"],
+                markeredgecolor=style["point_edgecolor"],
+                markersize=np.sqrt(style["point_size"]),
+                linewidth=style["point_linewidth"],
+                alpha=style["point_alpha"],
+                error_color=style["error_color"],
+                error_lw=style["error_lw"],
+                capsize=style["error_capsize"],
+            )
+            ax.legend(
+                handles=[legend_handle],
+                labels=["AGN"],
+                handler_map={_ErrorbarLegendHandle: _HandlerErrorbarMarker()},
+                loc="upper left",
+                frameon=False,
+                fancybox=True,
+                framealpha=1,
+                edgecolor="0.2",
+                facecolor="white",
+                fontsize=legend_fontsize,
+            )
             _annotate_identity_panel_metrics(
                 ax,
                 metrics,
@@ -376,18 +485,6 @@ def plot_sigma_tau_identity_grid(
 
     _set_row_ticks(axes[0])
     _set_row_ticks(axes[1])
-
-    handles, labels = axes[0, 0].get_legend_handles_labels()
-    if handles:
-        axes[0, 0].legend(
-            loc="upper left",
-            frameon=False,
-            fancybox=True,
-            framealpha=1,
-            edgecolor="0.2",
-            facecolor="white",
-            fontsize=legend_fontsize,
-        )
 
     for i in range(2):
         for j in range(1, ncols):
