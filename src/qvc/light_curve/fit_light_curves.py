@@ -1300,21 +1300,22 @@ def compute_lomb_scargle_break_diagnostics(model, samples, obj, z, *, n_freq=500
         2.0 * np.pi * freqs,
         amp_scaling_mode="absolute_gp_normalized",
     )
-    f_bin_raw, p_bin_raw, p_lo_raw, p_hi_raw, counts_raw, p_noise_raw = combined_lomb_scargle_from_model(
-        model,
+    f_bin_raw, _p_raw_raw, p_bin_raw, p_lo_raw, p_hi_raw, counts_raw, p_noise_raw = combined_raw_band_lomb_scargle(
+        obj["X"],
         obj["y"],
         obj["yerr"],
         posterior_median,
         2.0 * np.pi * freqs,
-        amp_scaling_mode="relative_to_2500",
+        ref_band_idx=ref_idx,
         band_wavelength_rf=lam_rf,
+        survey_idx=obj.get("survey_idx"),
     )
 
-    model_psd = (2.0 * np.pi) * np.asarray(
+    model_psd = np.asarray(
         model.psd(
             {k: jnp.array(v) for k, v in posterior_median.items()},
             2.0 * np.pi * freqs,
-            b=0,
+            b=ref_idx,
             sigma_n2=0.0,
         )
     )

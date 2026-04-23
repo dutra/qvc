@@ -107,6 +107,189 @@ def _posterior_sample_params_at_index(samples, i, reference_n):
     return out
 
 
+def _inflate_yerr_with_jitter(yerr, band_idx, params, survey_idx=None):
+    """Return yerr with posterior jitter added in quadrature."""
+
+    yerr = np.asarray(yerr, dtype=float)
+    if "log_jitter" not in params:
+        return yerr
+
+    log_jitter = np.asarray(params["log_jitter"], dtype=float)
+    band_idx = np.asarray(band_idx, dtype=np.int32)
+    if log_jitter.ndim == 0:
+        jitter = np.full_like(yerr, float(np.exp(log_jitter)), dtype=float)
+    elif log_jitter.ndim == 2 and survey_idx is not None:
+        survey_idx = np.asarray(survey_idx, dtype=np.int32)
+        jitter = np.exp(log_jitter[band_idx, survey_idx])
+    else:
+        jitter_by_band = np.exp(np.atleast_1d(log_jitter))
+        jitter = jitter_by_band[band_idx]
+
+    jitter = np.clip(np.asarray(jitter, dtype=float), 0.0, None)
+    return np.sqrt(yerr**2 + jitter**2)
+
+
+def _weighted_lomb_scargle_design(t, yerr, freq, *, fit_mean=True):
+    """Precompute the weighted floating-mean LS normal equations."""
+
+    t = np.asarray(t, dtype=float)
+    yerr = np.asarray(yerr, dtype=float)
+    freq = np.asarray(freq, dtype=float)
+    weights = 1.0 / np.square(yerr)
+    weights = weights / np.sum(weights)
+
+    phase = 2.0 * np.pi * freq[:, None] * t[None, :]
+    cos_term = np.cos(phase)
+    sin_term = np.sin(phase)
+    wc = cos_term * weights[None, :]
+    ws = sin_term * weights[None, :]
+
+    if fit_mean:
+        matrices = np.empty((freq.size, 3, 3), dtype=float)
+        sum_c = np.sum(wc, axis=1)
+        sum_s = np.sum(ws, axis=1)
+        matrices[:, 0, 0] = 1.0
+        matrices[:, 0, 1] = sum_c
+        matrices[:, 1, 0] = sum_c
+        matrices[:, 0, 2] = sum_s
+        matrices[:, 2, 0] = sum_s
+        matrices[:, 1, 1] = np.sum(wc * cos_term, axis=1)
+        matrices[:, 1, 2] = np.sum(wc * sin_term, axis=1)
+        matrices[:, 2, 1] = matrices[:, 1, 2]
+        matrices[:, 2, 2] = np.sum(ws * sin_term, axis=1)
+    else:
+        matrices = np.empty((freq.size, 2, 2), dtype=float)
+        matrices[:, 0, 0] = np.sum(wc * cos_term, axis=1)
+        matrices[:, 0, 1] = np.sum(wc * sin_term, axis=1)
+        matrices[:, 1, 0] = matrices[:, 0, 1]
+        matrices[:, 1, 1] = np.sum(ws * sin_term, axis=1)
+
+    finite_t = t[np.isfinite(t)]
+    baseline = float(np.nanmax(finite_t) - np.nanmin(finite_t)) if finite_t.size >= 2 else 1.0
+    return {
+        "weights": weights,
+        "cos": cos_term,
+        "sin": sin_term,
+        "pinv": np.linalg.pinv(matrices, rcond=1e-12),
+        "baseline": baseline,
+        "fit_mean": bool(fit_mean),
+    }
+
+
+def _weighted_lomb_scargle_density_from_design(y, design):
+    """Weighted floating-mean LS periodogram in one-sided cyclic PSD units."""
+
+    y = np.asarray(y, dtype=float)
+    weights = design["weights"]
+    weighted_y = weights * y
+    weighted_y2 = float(np.sum(weights * y * y))
+    if design["fit_mean"]:
+        rhs0 = float(np.sum(weighted_y))
+        rhs = np.column_stack(
+            [
+                np.full(design["cos"].shape[0], rhs0, dtype=float),
+                design["cos"] @ weighted_y,
+                design["sin"] @ weighted_y,
+            ]
+        )
+        null_explained = rhs0 * rhs0
+    else:
+        rhs = np.column_stack([design["cos"] @ weighted_y, design["sin"] @ weighted_y])
+        null_explained = 0.0
+
+    beta = np.einsum("fij,fj->fi", design["pinv"], rhs)
+    explained = np.einsum("fi,fi->f", beta, rhs)
+    max_delta = max(weighted_y2 - null_explained, 0.0)
+    delta_weighted_mean_square = np.clip(explained - null_explained, 0.0, max_delta)
+    return design["baseline"] * delta_weighted_mean_square
+
+
+def _weighted_lomb_scargle_density(t, y, yerr, freq, *, normalization="psd", fit_mean=True):
+    """Weighted floating-mean LS periodogram, preserving physical PSD units."""
+
+    if normalization != "psd":
+        return LombScargle(t, y, yerr, fit_mean=fit_mean, center_data=False).power(
+            freq,
+            normalization=normalization,
+        )
+    design = _weighted_lomb_scargle_design(t, yerr, freq, fit_mean=fit_mean)
+    return _weighted_lomb_scargle_density_from_design(y, design)
+
+
+def _smooth_positive_frequency_series(values, window):
+    """Smooth a positive frequency series with an edge-padded log moving average."""
+
+    values = np.asarray(values, dtype=float)
+    window = int(window or 0)
+    if window <= 1 or values.size < 3:
+        return values.copy()
+    if window % 2 == 0:
+        window += 1
+    window = min(window, values.size if values.size % 2 == 1 else values.size - 1)
+    if window <= 1:
+        return values.copy()
+
+    idx = np.arange(values.size)
+    valid = np.isfinite(values) & (values > 0.0)
+    if np.count_nonzero(valid) == 0:
+        return values.copy()
+    if np.count_nonzero(valid) == 1:
+        filled = np.full(values.size, values[valid][0], dtype=float)
+    else:
+        filled = np.interp(idx, idx[valid], values[valid])
+
+    log_values = np.log(np.clip(filled, 1e-300, None))
+    half = window // 2
+    padded = np.pad(log_values, (half, half), mode="edge")
+    kernel = np.full(window, 1.0 / float(window), dtype=float)
+    return np.exp(np.convolve(padded, kernel, mode="valid"))
+
+
+def _smooth_noise_floor(noise_floor_arr, window):
+    """Smooth each band's MC noise floor before subtraction."""
+
+    noise_floor_arr = np.asarray(noise_floor_arr, dtype=float)
+    if int(window or 0) <= 1 or noise_floor_arr.size == 0:
+        return noise_floor_arr
+    return np.asarray(
+        [_smooth_positive_frequency_series(row, window) for row in noise_floor_arr],
+        dtype=float,
+    )
+
+
+def _tail_match_to_white_floor(f_bin, signal, signal_lo, signal_hi, noise_floor, *, f_min=None, f_max=None):
+    """Subtract a constant residual floor so the highest plotted bin matches the MC floor."""
+
+    f_bin = np.asarray(f_bin, dtype=float)
+    signal = np.asarray(signal, dtype=float).copy()
+    signal_lo = np.asarray(signal_lo, dtype=float).copy()
+    signal_hi = np.asarray(signal_hi, dtype=float).copy()
+    noise_floor = np.asarray(noise_floor, dtype=float)
+
+    valid = (
+        np.isfinite(f_bin)
+        & np.isfinite(signal)
+        & np.isfinite(signal_lo)
+        & np.isfinite(signal_hi)
+        & np.isfinite(noise_floor)
+        & (signal > 0.0)
+        & (noise_floor > 0.0)
+    )
+    if f_min is not None:
+        valid &= f_bin >= float(f_min)
+    if f_max is not None:
+        valid &= f_bin <= float(f_max)
+    valid_idx = np.flatnonzero(valid)
+    if valid_idx.size == 0:
+        return signal, signal_lo, signal_hi, 0.0
+
+    tail_idx = valid_idx[np.argmax(f_bin[valid_idx])]
+    residual_floor = max(float(signal[tail_idx] - noise_floor[tail_idx]), 0.0)
+    if residual_floor <= 0.0:
+        return signal, signal_lo, signal_hi, 0.0
+    return signal - residual_floor, signal_lo - residual_floor, signal_hi - residual_floor, residual_floor
+
+
 POSTERIOR_PLOT_KEY_GROUPS = {
     "continuum": {
         "exact": [
@@ -650,13 +833,14 @@ def combined_lomb_scargle_from_model(
     params: dict,
     omega: np.ndarray,
     *,
-    bins_per_decade: int = 2,
+    bins_per_decade: int = 3,
     min_per_bin: int = 1,
     normalization: str = "psd",
     amp_scaling_mode: str = "absolute_gp_normalized",
     amp_reference: str = "band0",
     band_wavelength_rf: np.ndarray | None = None,
     lambda_target_rf: float = 2500.0,
+    fit_mean: bool = True,
 ):
     """
     Compute Lomb–Scargle PSD from a MyMultiVarModel, using a provided
@@ -729,13 +913,12 @@ def combined_lomb_scargle_from_model(
             survey_idx = np.asarray(model.survey_idx, dtype=np.int32)
             y = y - survey_delta_mag[band_idx, survey_idx]
     yerr = np.asarray(yerr, float).copy()
-
-    #if "log_jitter" in params:
-    #    jitter_band = np.exp(np.asarray(params["log_jitter"], dtype=float))
-    #    if jitter_band.ndim == 0:
-    #        jitter_band = np.full(int(np.max(band_idx)) + 1, float(jitter_band))
-    #    jitter_band = np.clip(np.asarray(jitter_band, dtype=float), 0.0, None)
-    #    yerr = np.sqrt(yerr**2 + jitter_band[band_idx] ** 2)
+    yerr = _inflate_yerr_with_jitter(
+        yerr,
+        band_idx,
+        params,
+        survey_idx=getattr(model, "survey_idx", None),
+    )
 
     if amp_scaling_mode == "absolute_gp_normalized":
         if hasattr(model, "my_amp_transform"):
@@ -769,9 +952,14 @@ def combined_lomb_scargle_from_model(
     yerr *= scale
     yerr = yerr[order]
 
-    # Lomb–Scargle
-    ls = LombScargle(t_lag, y, yerr, fit_mean=False)
-    P_raw = ls.power(f_raw, normalization=normalization)
+    P_raw = _weighted_lomb_scargle_density(
+        t_lag,
+        y,
+        yerr,
+        f_raw,
+        normalization=normalization,
+        fit_mean=fit_mean,
+    )
 
     # The additive floor is fit downstream with the broken-PSD model.
     # Avoid subtracting an empirical high-frequency median here, because it
@@ -794,7 +982,7 @@ def combined_lomb_scargle_from_model(
             P_chunk = P_raw[sel]
             f_center = 10.0 ** (np.mean(np.log10(f_chunk)))
             f_bin.append(f_center)
-            P_bin.append(np.median(P_chunk))
+            P_bin.append(np.nanmean(P_chunk))
             P_lo.append(np.percentile(P_chunk, 16))
             P_hi.append(np.percentile(P_chunk, 84))
             counts.append(np.count_nonzero(sel))
@@ -811,6 +999,289 @@ def relative_to_2500_amplitude_scale(band_wavelength_rf, eta_sigma, *, lambda_ta
         dtype=float,
     )
     return np.power(10.0, log_scale_band)
+
+
+def combined_raw_band_lomb_scargle(
+    X,
+    y,
+    yerr,
+    params: dict,
+    omega: np.ndarray,
+    *,
+    ref_band_idx: int,
+    bins_per_decade: int = 2,
+    min_per_bin: int = 1,
+    normalization: str = "psd",
+    band_wavelength_rf: np.ndarray | None = None,
+    lambda_target_rf: float | None = None,
+    survey_idx=None,
+    subtract_weighted_band_mean: bool = True,
+    fit_mean: bool = True,
+    noise_floor_smooth_width: int = 21,
+    n_noise_sim: int = 200,
+    random_state: int = 12345,
+):
+    """Compute weighted raw and smoothed-MC-white-floor-subtracted per-band LS periodograms."""
+
+    omega = np.asarray(omega, dtype=float)
+    f_raw = omega / (2.0 * np.pi)
+    t = np.asarray(X[0], dtype=float)
+    band_idx = np.asarray(X[1], dtype=np.int32)
+    y = np.asarray(y, dtype=float)
+    yerr = _inflate_yerr_with_jitter(
+        np.asarray(yerr, dtype=float),
+        band_idx,
+        params,
+        survey_idx=survey_idx,
+    )
+
+    if band_wavelength_rf is None:
+        scale_band = np.ones(int(np.nanmax(band_idx)) + 1, dtype=float)
+    else:
+        if "eta_sigma" not in params:
+            raise KeyError("Missing required parameter 'eta_sigma' for raw LS wavelength calibration.")
+        lambda_target = (
+            float(band_wavelength_rf[int(ref_band_idx)])
+            if lambda_target_rf is None
+            else float(lambda_target_rf)
+        )
+        scale_band = relative_to_2500_amplitude_scale(
+            band_wavelength_rf,
+            float(np.asarray(params["eta_sigma"])),
+            lambda_target_rf=lambda_target,
+        )
+
+    powers = []
+    band_inputs = []
+    for b in np.unique(band_idx):
+        mask = (band_idx == b) & np.isfinite(t) & np.isfinite(y) & np.isfinite(yerr) & (yerr > 0.0)
+        if np.count_nonzero(mask) < 3:
+            continue
+        t_band = t[mask]
+        y_band = y[mask] * scale_band[int(b)]
+        yerr_band = yerr[mask] * scale_band[int(b)]
+        order = np.argsort(t_band)
+        t_band = t_band[order]
+        y_band = y_band[order]
+        yerr_band = yerr_band[order]
+        design = _weighted_lomb_scargle_design(
+            t_band,
+            yerr_band,
+            f_raw,
+            fit_mean=fit_mean,
+        )
+        band_inputs.append((t_band, yerr_band, design))
+        if subtract_weighted_band_mean:
+            weights = 1.0 / np.square(yerr_band)
+            weights = weights / np.sum(weights)
+            y_band = y_band - np.sum(weights * y_band)
+
+        if normalization == "psd":
+            power = _weighted_lomb_scargle_density_from_design(y_band, design)
+        else:
+            power = _weighted_lomb_scargle_density(
+                t_band,
+                y_band,
+                yerr_band,
+                f_raw,
+                normalization=normalization,
+                fit_mean=fit_mean,
+            )
+        powers.append(power)
+
+    if not powers:
+        empty = np.array([], dtype=float)
+        return empty, empty, empty, empty, empty, np.array([], dtype=int), np.nan
+
+    powers_arr = np.asarray(powers, dtype=float)
+    noise_samples = None
+    if n_noise_sim and n_noise_sim > 0:
+        rng = np.random.default_rng(random_state)
+        noise_all = []
+        for _ in range(int(n_noise_sim)):
+            noise_powers = []
+            for t_band, yerr_band, design in band_inputs:
+                y_noise = rng.normal(loc=0.0, scale=yerr_band)
+                if subtract_weighted_band_mean:
+                    weights = 1.0 / np.square(yerr_band)
+                    weights = weights / np.sum(weights)
+                    y_noise = y_noise - np.sum(weights * y_noise)
+                if normalization == "psd":
+                    p_noise = _weighted_lomb_scargle_density_from_design(y_noise, design)
+                else:
+                    p_noise = _weighted_lomb_scargle_density(
+                        t_band,
+                        y_noise,
+                        yerr_band,
+                        f_raw,
+                        normalization=normalization,
+                        fit_mean=fit_mean,
+                    )
+                noise_powers.append(p_noise)
+            noise_all.append(np.asarray(noise_powers, dtype=float))
+        noise_samples = np.asarray(noise_all, dtype=float)
+    noise_floor_arr = (
+        np.nanmean(noise_samples, axis=0)
+        if noise_samples is not None
+        else np.zeros_like(powers_arr)
+    )
+    noise_floor_arr = _smooth_noise_floor(noise_floor_arr, noise_floor_smooth_width)
+    signal_arr = powers_arr - noise_floor_arr
+
+    fmin, fmax = np.min(f_raw), np.max(f_raw)
+    decades = np.log10(fmax) - np.log10(fmin)
+    n_bins = int(np.ceil(bins_per_decade * decades))
+    edges = np.logspace(np.log10(fmin), np.log10(fmax), n_bins + 1)
+    which = np.digitize(f_raw, edges) - 1
+
+    f_bin, P_raw_bin, P_signal_bin, P_lo, P_hi, counts, P_noise_bin = [], [], [], [], [], [], []
+    for k in range(n_bins):
+        sel = which == k
+        if np.count_nonzero(sel) >= min_per_bin:
+            f_chunk = f_raw[sel]
+            raw_chunk = powers_arr[:, sel].ravel()
+            signal_chunk = signal_arr[:, sel].ravel()
+            noise_chunk = noise_floor_arr[:, sel].ravel()
+            raw_chunk = raw_chunk[np.isfinite(raw_chunk)]
+            signal_chunk = signal_chunk[np.isfinite(signal_chunk)]
+            noise_chunk = noise_chunk[np.isfinite(noise_chunk)]
+            if raw_chunk.size == 0 or signal_chunk.size == 0:
+                continue
+            f_bin.append(10.0 ** np.mean(np.log10(f_chunk)))
+            P_raw_bin.append(np.nanmedian(raw_chunk))
+            P_signal_bin.append(np.nanmedian(signal_chunk))
+            P_lo.append(np.percentile(signal_chunk, 16))
+            P_hi.append(np.percentile(signal_chunk, 84))
+            counts.append(signal_chunk.size)
+            P_noise_bin.append(np.nanmean(noise_chunk) if noise_chunk.size else np.nan)
+
+    P_noise_out = np.array(P_noise_bin) if noise_samples is not None else np.nan
+    return (
+        np.array(f_bin),
+        np.array(P_raw_bin),
+        np.array(P_signal_bin),
+        np.array(P_lo),
+        np.array(P_hi),
+        np.array(counts),
+        P_noise_out,
+    )
+
+
+def estimate_lomb_scargle_white_noise_floor(
+    model,
+    yerr,
+    params: dict,
+    omega: np.ndarray,
+    *,
+    bins_per_decade: int = 2,
+    min_per_bin: int = 1,
+    normalization: str = "psd",
+    amp_scaling_mode: str = "relative_to_2500",
+    amp_reference: str = "band0",
+    band_wavelength_rf: np.ndarray | None = None,
+    lambda_target_rf: float = 2500.0,
+    fit_mean: bool = True,
+    noise_floor_smooth_width: int = 21,
+    n_sim: int = 300,
+    random_state: int = 12345,
+):
+    """Estimate the binned LS white-noise floor from the actual cadence and errors."""
+
+    omega = np.asarray(omega, float)
+    f_raw = omega / (2.0 * np.pi)
+
+    if hasattr(model, "my_lag_transform"):
+        (t_lag, band_idx), _ = model.my_lag_transform(model.X, model.has_lag, params)
+    else:
+        (t_lag, band_idx), _ = model.lag_transform(model.has_lag, params, model.X)
+    t_lag = np.asarray(t_lag, float)
+    band_idx = np.asarray(band_idx, int)
+    yerr = np.asarray(yerr, float).copy()
+    yerr = _inflate_yerr_with_jitter(
+        yerr,
+        band_idx,
+        params,
+        survey_idx=getattr(model, "survey_idx", None),
+    )
+
+    if amp_scaling_mode == "absolute_gp_normalized":
+        if hasattr(model, "my_amp_transform"):
+            log_sigma_band = np.asarray(model.my_amp_transform(params))
+        else:
+            log_sigma_band = np.log(np.asarray(params["amp_cont"]))
+        if amp_reference == "uv" and "log_sigma_uv" in params:
+            s0 = float(np.exp(np.asarray(params["log_sigma_uv"])))
+        else:
+            s0 = float(np.exp(log_sigma_band[0]))
+        scale = s0 / np.exp(log_sigma_band)[band_idx]
+    elif amp_scaling_mode == "relative_to_2500":
+        if band_wavelength_rf is None:
+            raise ValueError("band_wavelength_rf is required for amp_scaling_mode='relative_to_2500'.")
+        if "eta_sigma" not in params:
+            raise KeyError("Missing required parameter 'eta_sigma' for raw LS wavelength calibration.")
+        scale_band = relative_to_2500_amplitude_scale(
+            band_wavelength_rf,
+            float(np.asarray(params["eta_sigma"])),
+            lambda_target_rf=lambda_target_rf,
+        )
+        scale = scale_band[band_idx]
+    else:
+        raise ValueError(f"Unknown amp_scaling_mode '{amp_scaling_mode}'.")
+
+    order = np.argsort(t_lag)
+    t_lag = t_lag[order]
+    yerr = (yerr * scale)[order]
+
+    fmin, fmax = np.min(f_raw), np.max(f_raw)
+    decades = np.log10(fmax) - np.log10(fmin)
+    n_bins = int(np.ceil(bins_per_decade * decades))
+    edges = np.logspace(np.log10(fmin), np.log10(fmax), n_bins + 1)
+    which = np.digitize(f_raw, edges) - 1
+
+    rng = np.random.default_rng(random_state)
+    floor_samples = []
+    f_bin_ref = None
+    counts_ref = None
+    design = _weighted_lomb_scargle_design(t_lag, yerr, f_raw, fit_mean=fit_mean)
+
+    for _ in range(int(n_sim)):
+        y_noise = rng.normal(loc=0.0, scale=yerr)
+        if normalization == "psd":
+            power = _weighted_lomb_scargle_density_from_design(y_noise, design)
+        else:
+            power = _weighted_lomb_scargle_density(
+                t_lag,
+                y_noise,
+                yerr,
+                f_raw,
+                normalization=normalization,
+                fit_mean=fit_mean,
+            )
+        power = _smooth_positive_frequency_series(power, noise_floor_smooth_width)
+
+        f_bin, p_bin, counts = [], [], []
+        for k in range(n_bins):
+            sel = which == k
+            if np.count_nonzero(sel) >= min_per_bin:
+                f_chunk = f_raw[sel]
+                p_chunk = power[sel]
+                f_bin.append(10.0 ** np.mean(np.log10(f_chunk)))
+                p_bin.append(np.nanmean(p_chunk))
+                counts.append(np.count_nonzero(sel))
+
+        if f_bin_ref is None:
+            f_bin_ref = np.asarray(f_bin, dtype=float)
+            counts_ref = np.asarray(counts, dtype=int)
+        floor_samples.append(np.asarray(p_bin, dtype=float))
+
+    floor_samples = np.vstack(floor_samples)
+    return (
+        f_bin_ref,
+        np.nanmean(floor_samples, axis=0),
+        np.percentile(floor_samples, 16, axis=0),
+        np.percentile(floor_samples, 84, axis=0),
+        counts_ref,
+    )
 
 import numpy as np
 
@@ -1633,16 +2104,38 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, mags_means, survey_
             posterior_median[k] = jnp.array(posterior_median[k])
 
         print("Plotting PSD...")
+        psd_xlim = (2e-6, 1.5e-2)
         freqs = np.logspace(-6, 2, 500)
+        t_for_psd = np.asarray(X[0], dtype=float)
+        t_for_psd = t_for_psd[np.isfinite(t_for_psd)]
+        t_baseline = float(np.nanmax(t_for_psd) - np.nanmin(t_for_psd)) if t_for_psd.size >= 2 else np.nan
+        freq_tau_baseline = (
+            1.0 / (2.0 * np.pi * t_baseline)
+            if np.isfinite(t_baseline) and t_baseline > 0.0
+            else np.nan
+        )
+        freqs_ls = freqs
+        z = float(data.get("z", np.nan))
+        band_wavelength_rf = np.asarray(
+            [lambda_pivot[band] / (1.0 + z) for band in bands],
+            dtype=float,
+        )
+        psd_ref_idx = int(np.nanargmin(np.abs(band_wavelength_rf - 2500.0)))
 
-        # Model PSD
+        # Model PSD for the observed band whose rest wavelength is closest to 2500 A.
+        # model.psd takes angular frequency but returns one-sided cyclic PSD density.
         psd_samples = []
         tau_samples_for_psd = np.asarray(samples['log_tau_uv'])
         n_total = int(len(tau_samples_for_psd))
         n_samp = np.min([50, n_total])
         for i in range(n_samp):
             sample_params = _posterior_sample_params_at_index(samples, i, n_total)
-            psd_i = (2.0 * jnp.pi) * model.psd(sample_params, 2 * np.pi * freqs, b=0, sigma_n2=0.0)
+            psd_i = model.psd(
+                sample_params,
+                2 * np.pi * freqs,
+                b=psd_ref_idx,
+                sigma_n2=0.0,
+            )
             psd_samples.append(np.asarray(psd_i))
         psd_samples = np.stack(psd_samples, axis=0)
 
@@ -1650,55 +2143,114 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, mags_means, survey_
         psd_lo = np.percentile(psd_samples, 16, axis=0)
         psd_hi = np.percentile(psd_samples, 84, axis=0)
 
-        ax_psd.plot(freqs, psd_median, lw=2, color='m', alpha=0.8, label="Model PSD", zorder=4)
+        ref_band = bands[psd_ref_idx]
+        ax_psd.plot(
+            freqs,
+            psd_median,
+            lw=2,
+            color='m',
+            alpha=0.8,
+            label="Model PSD",
+            zorder=4,
+        )
         ax_psd.fill_between(freqs, psd_lo, psd_hi, color='m', alpha=0.2, zorder=3)
 
-        f_bin, P_bin_med, P_lo, P_hi, counts, P_noise = combined_lomb_scargle_from_model(
-            model,
+        f_bin, P_bin_raw, P_signal, P_lo, P_hi, counts, P_noise = combined_raw_band_lomb_scargle(
+            X,
             y,
             yerr,
             posterior_median,
-            2.0 * np.pi * freqs,
-            amp_scaling_mode="absolute_gp_normalized",
+            2.0 * np.pi * freqs_ls,
+            ref_band_idx=psd_ref_idx,
+            bins_per_decade=3,
+            band_wavelength_rf=band_wavelength_rf,
+            survey_idx=getattr(model, "survey_idx", None),
         )
-        # Renormalize data PSD to match model PSD at first bin
-        model_at_f0 = np.interp(f_bin[0], freqs, psd_median)
-        scale = model_at_f0 / max(P_bin_med[0], 1e-30)
-
-        P_bin_med   = P_bin_med   * scale
-        P_lo        = P_lo        * scale
-        P_hi        = P_hi        * scale
-
-        ax_psd.errorbar(
+        if isinstance(P_noise, np.ndarray):
+            P_noise_on_bin = P_noise
+        else:
+            P_noise_on_bin = np.zeros_like(P_bin_raw)
+        P_signal_lo = P_lo
+        P_signal_hi = P_hi
+        P_signal, P_signal_lo, P_signal_hi, empirical_tail_floor = _tail_match_to_white_floor(
             f_bin,
-            P_bin_med,
-            yerr=[P_bin_med - P_lo, P_hi - P_bin_med],
-            markersize=4,
-            fmt="o",
-            color='k',
-            ecolor="k",
-            elinewidth=0.8,
-            capsize=4.0,
-            capthick=0.8,
-            alpha=0.9,
-            zorder=5,
-            label="Lomb–Scargle PSD",
+            P_signal,
+            P_signal_lo,
+            P_signal_hi,
+            P_noise_on_bin,
+            f_min=psd_xlim[0],
+            f_max=psd_xlim[1],
         )
+        if empirical_tail_floor > 0.0:
+            print(
+                "Empirical PSD tail correction: subtracting residual floor "
+                f"{empirical_tail_floor:.4g} so highest plotted LS bin matches MC white floor."
+            )
+        signal_positive = (
+            np.isfinite(P_signal)
+            & np.isfinite(P_signal_lo)
+            & np.isfinite(P_signal_hi)
+            & (P_signal > 0.0)
+            & (P_signal_hi > 0.0)
+        )
+
+        floor_positive = np.isfinite(P_noise_on_bin) & (P_noise_on_bin > 0.0)
+        if np.count_nonzero(floor_positive):
+            ax_psd.plot(
+                f_bin[floor_positive],
+                P_noise_on_bin[floor_positive],
+                color='tab:orange',
+                linestyle=':',
+                lw=1.5,
+                alpha=0.9,
+                zorder=2.5,
+                label="noise floor",
+            )
+
+        if np.count_nonzero(signal_positive):
+            ax_psd.errorbar(
+                f_bin[signal_positive],
+                P_signal[signal_positive],
+                yerr=[
+                    np.clip(
+                        P_signal[signal_positive] - np.clip(P_signal_lo[signal_positive], 1e-300, None),
+                        0.0,
+                        None,
+                    ),
+                    np.clip(P_signal_hi[signal_positive] - P_signal[signal_positive], 0.0, None),
+                ],
+                markersize=4,
+                fmt="o",
+                color='k',
+                ecolor="k",
+                elinewidth=0.8,
+                capsize=4.0,
+                capthick=0.8,
+                alpha=0.9,
+                zorder=5,
+                label="Lomb-Scargle PSD",
+            )
 
         if plot_bpl_fit:
+            def _finite_scalar(value):
+                try:
+                    return np.isfinite(float(value))
+                except (TypeError, ValueError):
+                    return False
+
             log_sigma_ls = data.get("log_sigma_ls")
             log_tau_ls_obs = data.get("log_tau_ls_obs", data.get("log_tau_bpl_ref_band"))
             alpha_high_ls = data.get("alpha_high_ls", data.get("psd_bpl_alpha_high"))
             log_noise_floor_ls = data.get("log_noise_floor_ls", data.get("log_noise_floor_bpl"))
             sigma_ls = data.get("sigma_ls")
             tau_ls = data.get("tau_ls")
-            if all(np.isfinite(val) for val in (log_sigma_ls, log_tau_ls_obs, alpha_high_ls)):
+            if all(_finite_scalar(val) for val in (log_sigma_ls, log_tau_ls_obs, alpha_high_ls)):
                 psd_ls_fit = _bending_power_law_psd_plot(
                     freqs,
                     log_sigma_ls,
                     log_tau_ls_obs,
                     alpha_high=alpha_high_ls,
-                    log_noise_floor=(log_noise_floor_ls if np.isfinite(log_noise_floor_ls) else -99.0),
+                    log_noise_floor=(log_noise_floor_ls if _finite_scalar(log_noise_floor_ls) else -99.0),
                 )
                 ax_psd.plot(
                     freqs,
@@ -1707,10 +2259,10 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, mags_means, survey_
                     color='tab:blue',
                     alpha=0.95,
                     linestyle='--',
-                    label="LS broken-PL fit (raw, 2500A-calibrated)",
+                    label="2500A LS broken-PL fit",
                     zorder=4.5,
                 )
-                if np.isfinite(sigma_ls) and np.isfinite(tau_ls):
+                if _finite_scalar(sigma_ls) and _finite_scalar(tau_ls):
                     ax_psd.text(
                         0.98,
                         0.98,
@@ -1725,39 +2277,6 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, mags_means, survey_
                         va='top',
                         bbox=dict(boxstyle='round,pad=0.2', fc='white', ec='0.8', alpha=0.9),
                     )
-            log_sigma_bpl = data.get("log_sigma_bpl_ref_band")
-            log_tau_bpl_obs = data.get("log_tau_bpl_ref_band")
-            alpha_high_bpl = data.get("psd_bpl_alpha_high")
-            log_noise_floor_bpl = data.get("log_noise_floor_bpl")
-            psd_noise_floor_bpl = data.get("psd_noise_floor")
-            if all(np.isfinite(val) for val in (log_sigma_bpl, log_tau_bpl_obs, alpha_high_bpl)):
-                psd_bpl_fit = _bending_power_law_psd_plot(
-                    freqs,
-                    log_sigma_bpl,
-                    log_tau_bpl_obs,
-                    alpha_high=alpha_high_bpl,
-                    log_noise_floor=(log_noise_floor_bpl if np.isfinite(log_noise_floor_bpl) else -99.0),
-                )
-                ax_psd.plot(
-                    freqs,
-                    psd_bpl_fit,
-                    lw=1.4,
-                    color='tab:cyan',
-                    alpha=0.85,
-                    linestyle=':',
-                    label="LS broken-PL fit (GP-normalized)",
-                    zorder=4.4,
-                )
-            if np.isfinite(psd_noise_floor_bpl):
-                ax_psd.axhline(
-                    psd_noise_floor_bpl,
-                    color='gray',
-                    linestyle='solid',
-                    lw=3,
-                    label="Noise floor",
-                    zorder=-10,
-                )
-
         tau    = jnp.exp(posterior_median['log_tau_uv'])
         tau_lo = jnp.exp(jnp.percentile(tau_samples_for_psd, 16))
         tau_hi = jnp.exp(jnp.percentile(tau_samples_for_psd, 84))
@@ -1782,18 +2301,19 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, mags_means, survey_
             capsize=4,
             elinewidth=2,
             alpha=0.8,
-            label=r"$1/(2\,\pi\,\tau_{\mathrm{UV}})$",
+            label=r"$1/(2\,\pi\,\tau_{\mathrm{UV,obs}})$",
             zorder=6,
         )
 
-        ax_psd.set_xlabel("Frequency (days$^{-1}$)")
-        ax_psd.set_ylabel(r"PSD ($\mathrm{mag}^2$ $\mathrm{days}$)")
+        ax_psd.set_xlabel(r"Cyclic frequency $f$ (days$^{-1}$)")
+        ax_psd.set_ylabel(r"Nearest-2500A PSD ($\mathrm{mag}^2$ $\mathrm{days}$)")
         ax_psd.set_xscale("log")
         ax_psd.set_yscale("log")
+        ax_psd.tick_params(axis='x', which='both', pad=9)
         ax_psd.grid(False)
         ax_psd.legend(loc='lower left')
         ax_psd.set_ylim(2e-2, 9e4)
-        ax_psd.set_xlim(2e-6, 1.5e-2)
+        ax_psd.set_xlim(*psd_xlim)
 
     plt.tight_layout()
 

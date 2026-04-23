@@ -197,7 +197,7 @@ class ContiBLR_SHO_Wrapper(qs.Wrapper):
 
 
 def qs_psd(kernel, omega, b: int, sigma_n2: float = 0.0):
-    """One-sided PSD for a quasiseparable kernel with multiband observations."""
+    """One-sided cyclic-frequency PSD density evaluated at angular omega."""
 
     A = kernel.design_matrix()
     P = kernel.stationary_covariance()
