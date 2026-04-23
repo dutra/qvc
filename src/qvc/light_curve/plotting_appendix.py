@@ -316,6 +316,8 @@ def plot_sigma_tau_identity_grid(
     style=None,
     sigma_limits=None,
     tau_limits=None,
+    sigma_lims=None,
+    tau_lims=None,
 ):
     label_fontsize = 14
     tick_fontsize = 12
@@ -400,13 +402,38 @@ def plot_sigma_tau_identity_grid(
         pad = max(0.04 * (hi - lo), pad_floor)
         return (lo - pad, hi + pad)
 
+    def _normalize_axis_limits(name, value):
+        if value is None:
+            return None
+        if not isinstance(value, (tuple, list, np.ndarray)) or len(value) != 2:
+            raise ValueError(f"{name} must be None or a 2-length sequence, got {value!r}.")
+        try:
+            lo = float(value[0])
+            hi = float(value[1])
+        except (TypeError, ValueError):
+            raise ValueError(f"{name} values must be numeric, got {value!r}.") from None
+        if not np.isfinite(lo) or not np.isfinite(hi):
+            raise ValueError(f"{name} values must be finite, got {value!r}.")
+        if lo >= hi:
+            raise ValueError(f"{name} must satisfy lower < upper, got {value!r}.")
+        return (lo, hi)
+
     sigma_limits = sigma_limits or _row_limits(sigma_keys, "sigma")
     tau_limits = tau_limits or _row_limits(tau_keys, "tau")
+    sigma_lims = _normalize_axis_limits("sigma_lims", sigma_lims)
+    tau_lims = _normalize_axis_limits("tau_lims", tau_lims)
 
     # Identity residuals are computed in log space (delta = y - x), so both rows are in dex.
     metric_units = ("dex", "dex")
 
-    for row_index, (keydict, row_limits) in enumerate(((sigma_keys, sigma_limits), (tau_keys, tau_limits))):
+    sigma_row_lims = sigma_lims if sigma_lims is not None else sigma_limits
+    tau_row_lims = tau_lims if tau_lims is not None else tau_limits
+    row_configs = (
+        (sigma_keys, sigma_row_lims),
+        (tau_keys, tau_row_lims),
+    )
+
+    for row_index, (keydict, row_lims) in enumerate(row_configs):
         for col, band in enumerate(bands):
             ax = axes[row_index, col]
             df_band = data.get(band) if isinstance(data, dict) else data
@@ -416,9 +443,19 @@ def plot_sigma_tau_identity_grid(
                 continue
 
             panel_data, message = _extract_xyerr(df_band, keydict, band)
-            ax.plot(row_limits, row_limits, ls="--", lw=2.0, color=COLORS.get(band, "0.2"), zorder=-4)
-            ax.set_xlim(*row_limits)
-            ax.set_ylim(*row_limits)
+            diag_lo = row_lims[0]
+            diag_hi = row_lims[1]
+            if diag_hi > diag_lo:
+                ax.plot(
+                    [diag_lo, diag_hi],
+                    [diag_lo, diag_hi],
+                    ls="--",
+                    lw=2.0,
+                    color=COLORS.get(band, "0.2"),
+                    zorder=-4,
+                )
+            ax.set_xlim(*row_lims)
+            ax.set_ylim(*row_lims)
             _style_axis(ax)
 
             if panel_data is None:
