@@ -403,7 +403,8 @@ def plot_sigma_tau_identity_grid(
     sigma_limits = sigma_limits or _row_limits(sigma_keys, "sigma")
     tau_limits = tau_limits or _row_limits(tau_keys, "tau")
 
-    metric_units = ("mag", "dex")
+    # Identity residuals are computed in log space (delta = y - x), so both rows are in dex.
+    metric_units = ("dex", "dex")
 
     for row_index, (keydict, row_limits) in enumerate(((sigma_keys, sigma_limits), (tau_keys, tau_limits))):
         for col, band in enumerate(bands):
