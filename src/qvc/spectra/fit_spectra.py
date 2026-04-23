@@ -78,6 +78,15 @@ def safe_float(x, default=np.nan):
         return default
 
 
+def normalize_object_id(value):
+    if value is None:
+        return ""
+    text = str(value).strip()
+    if not text:
+        return ""
+    return text[:-2] if text.endswith(".0") else text
+
+
 def coerce_scalar(x):
     if isinstance(x, np.generic):
         return x.item()
@@ -1258,7 +1267,7 @@ def load_quasar_core_list(fpath_in):
     return read_quasars_from_hdf5_flat(fpath_in)
 
 
-def prepare_sample_df(sample_df, filter_sdss_name=None, filter_object_id=None, N=None, skip=None):
+def _apply_h5_mean_correction(sample_df):
     sample_df = sample_df.copy()
     for band in SDSS_BANDS:
         mag_col = f"mags_mean_{band}"
@@ -1271,6 +1280,75 @@ def prepare_sample_df(sample_df, filter_sdss_name=None, filter_object_id=None, N
         else:
             mean_shift = 0.0
         sample_df[f"mean_corrected_{band}"] = mag_mean + mean_shift
+    return sample_df
+
+
+def load_lc_mean_corrected_by_object_id(object_ids):
+    from qvc.light_curve.multiband_generate_lc import concat_light_curves
+
+    requested_ids = [normalize_object_id(obj_id) for obj_id in object_ids]
+    requested_ids = [obj_id for obj_id in requested_ids if obj_id]
+    if len(requested_ids) == 0:
+        return {}
+
+    # concat_light_curves intersects caller-provided ids with S82 integer ids.
+    # Pass both string and int forms to maximize matching robustness.
+    filter_values = []
+    for obj_id in requested_ids:
+        filter_values.append(obj_id)
+        try:
+            filter_values.append(int(obj_id))
+        except Exception:
+            pass
+
+    lc_objects = concat_light_curves(filter_object_ids=filter_values, progress_bar=False)
+    by_object_id = {}
+    for obj in lc_objects:
+        norm_id = normalize_object_id(obj.get("object_id"))
+        if not norm_id:
+            continue
+        bands = obj.get("bands", [])
+        mags_mean = obj.get("mags_mean", [])
+        row = {f"mean_corrected_{band}": np.nan for band in SDSS_BANDS}
+        for band, mag in zip(bands, mags_mean):
+            band_name = str(band)
+            if band_name not in SDSS_BANDS:
+                continue
+            mag_val = safe_float(mag)
+            if np.isfinite(mag_val):
+                row[f"mean_corrected_{band_name}"] = float(mag_val)
+        by_object_id[norm_id] = row
+    return by_object_id
+
+
+def _apply_lc_mean_correction(sample_df):
+    sample_df = sample_df.copy()
+    for band in SDSS_BANDS:
+        col = f"mean_corrected_{band}"
+        if col not in sample_df.columns:
+            sample_df[col] = np.nan
+    object_ids = sample_df["object_id"].astype(str).tolist()
+    by_object_id = load_lc_mean_corrected_by_object_id(object_ids)
+    for idx, norm_id in enumerate(sample_df["object_id_norm"].tolist()):
+        row = by_object_id.get(norm_id)
+        if row is None:
+            continue
+        for band in SDSS_BANDS:
+            sample_df.at[idx, f"mean_corrected_{band}"] = row.get(f"mean_corrected_{band}", np.nan)
+    return sample_df
+
+
+def prepare_sample_df(
+    sample_df,
+    filter_sdss_name=None,
+    filter_object_id=None,
+    N=None,
+    skip=None,
+    use_h5_mean_correction=False,
+):
+    sample_df = sample_df.copy()
+    sample_df["object_id"] = sample_df["object_id"].astype(str).str.strip()
+    sample_df["object_id_norm"] = sample_df["object_id"].map(normalize_object_id)
 
     exclusion_sdss_names = {
         "221120.38+010905.6",  # wrong redshift
@@ -1283,8 +1361,9 @@ def prepare_sample_df(sample_df, filter_sdss_name=None, filter_object_id=None, N
     if filter_sdss_name is not None:
         sample_df = sample_df[sample_df["sdss_name"].astype(str).isin(filter_sdss_name)]
     if filter_object_id is not None:
-        ids = [str(x) for x in filter_object_id]
-        sample_df = sample_df[sample_df["object_id"].astype(str).isin(ids)]
+        ids = [normalize_object_id(x) for x in filter_object_id]
+        ids = [x for x in ids if x]
+        sample_df = sample_df[sample_df["object_id_norm"].isin(ids)]
 
     if skip is not None:
         sample_df = sample_df.iloc[int(skip):]
@@ -1292,7 +1371,13 @@ def prepare_sample_df(sample_df, filter_sdss_name=None, filter_object_id=None, N
         sample_df = sample_df.iloc[: int(N)]
 
     sample_df = sample_df.reset_index(drop=True)
-    sample_df["object_id"] = sample_df["object_id"].astype(str).str.strip()
+    if use_h5_mean_correction:
+        sample_df = _apply_h5_mean_correction(sample_df)
+    else:
+        sample_df = _apply_lc_mean_correction(sample_df)
+
+    sample_df["object_id"] = sample_df["object_id_norm"]
+    sample_df = sample_df.drop(columns=["object_id_norm"])
     return sample_df
 
 
@@ -1341,6 +1426,7 @@ def build_records(args):
         filter_object_id=args.filter_object_id,
         N=args.N,
         skip=args.skip,
+        use_h5_mean_correction=bool(args.use_h5_mean_correction),
     )
     print(f"Sample size after filtering: {len(sample_df)}")
     if len(sample_df) > 0:
@@ -1761,6 +1847,12 @@ def parse_args():
     p.add_argument("--plot-residual", dest="plot_residual", action="store_true", default=False, help="Plot residuals in fit figures.")
     p.add_argument("--plot_mcmc_diagnostics", action="store_true", default=False, help="Plot trace/corner MCMC diagnostics when posterior samples are available.")
     p.add_argument("--disable_rescale_flux", "--disable-rescale-flux", dest="disable_rescale_flux", action="store_true", help="Disable magnitude-based flux rescaling.")
+    p.add_argument(
+        "--use-h5-mean-correction",
+        action="store_true",
+        default=False,
+        help="Use legacy H5 mean correction (mags_mean_* + mean_*) instead of light-curve-derived means.",
+    )
     p.set_defaults(save_fig=True)
     p.add_argument("--save-fig", dest="save_fig", action="store_true")
     p.add_argument("--no-save-fig", dest="save_fig", action="store_false")
