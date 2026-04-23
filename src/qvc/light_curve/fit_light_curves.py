@@ -1175,7 +1175,7 @@ def bending_power_law_psd(freq, log_sigma, log_tau, log_noise_floor=-99.0, alpha
 
 
 def fit_bending_power_law_psd(freq, power, power_lo=None, power_hi=None):
-    """Fit a bending PSD in log-space and return sigma/tau summaries."""
+    """Fit a zero-floor bending PSD in log-space and return sigma/tau summaries."""
 
     freq = np.asarray(freq, dtype=float)
     power = np.asarray(power, dtype=float)
@@ -1201,9 +1201,20 @@ def fit_bending_power_law_psd(freq, power, power_lo=None, power_hi=None):
     if power_lo is not None and power_hi is not None:
         lo = np.asarray(power_lo, dtype=float)[mask]
         hi = np.asarray(power_hi, dtype=float)[mask]
-        err_lo = np.clip(log_power - np.log10(np.clip(lo, 1e-300, None)), 1e-3, None)
-        err_hi = np.clip(np.log10(np.clip(hi, 1e-300, None)) - log_power, 1e-3, None)
-        log_err = 0.5 * (err_lo + err_hi)
+        log_err = np.full_like(log_power, 0.25)
+        valid_lo = np.isfinite(lo) & (lo > 0.0) & (lo < power_fit)
+        valid_hi = np.isfinite(hi) & (hi > power_fit)
+        err_lo = np.full_like(log_power, np.nan)
+        err_hi = np.full_like(log_power, np.nan)
+        err_lo[valid_lo] = log_power[valid_lo] - np.log10(lo[valid_lo])
+        err_hi[valid_hi] = np.log10(hi[valid_hi]) - log_power[valid_hi]
+        both = valid_lo & valid_hi
+        only_lo = valid_lo & ~valid_hi
+        only_hi = valid_hi & ~valid_lo
+        log_err[both] = 0.5 * (err_lo[both] + err_hi[both])
+        log_err[only_lo] = err_lo[only_lo]
+        log_err[only_hi] = err_hi[only_hi]
+        log_err = np.clip(log_err, 0.05, 0.60)
     else:
         log_err = np.full_like(log_power, 0.2)
 
@@ -1216,12 +1227,11 @@ def fit_bending_power_law_psd(freq, power, power_lo=None, power_hi=None):
             None,
         )
     )
-    noise_floor_init = np.clip(np.percentile(power_fit, 10), 1e-12, None)
-
     alpha_high_init = -2.0
+    fixed_log_noise_floor = -99.0
 
-    def model_log10(freq_val, log_sigma, log_tau, log_noise_floor, alpha_high):
-        psd = bending_power_law_psd(freq_val, log_sigma, log_tau, log_noise_floor, alpha_high)
+    def model_log10(freq_val, log_sigma, log_tau, alpha_high):
+        psd = bending_power_law_psd(freq_val, log_sigma, log_tau, fixed_log_noise_floor, alpha_high)
         return np.log10(np.clip(psd, 1e-300, None))
 
     try:
@@ -1229,10 +1239,10 @@ def fit_bending_power_law_psd(freq, power, power_lo=None, power_hi=None):
             model_log10,
             freq_fit,
             log_power,
-            p0=(np.log10(sigma_init), np.log10(tau_init), np.log10(noise_floor_init), alpha_high_init),
+            p0=(np.log10(sigma_init), np.log10(tau_init), alpha_high_init),
             sigma=log_err,
             absolute_sigma=True,
-            bounds=([-6.0, -1.0, -12.0, -2.5], [3.0, 6.0, 8.0, -1.5]),
+            bounds=([-6.0, -1.0, -2.5], [3.0, 6.0, -1.5]),
             maxfev=20000,
         )
         perr = np.sqrt(np.diag(pcov))
@@ -1256,8 +1266,8 @@ def fit_bending_power_law_psd(freq, power, power_lo=None, power_hi=None):
     tau_max = float(np.nanmax(1.0 / (2.0 * np.pi * freq_fit)))
     near_tau_lower_bound = np.isclose(float(popt[1]), -1.0, atol=0.05)
     near_tau_upper_bound = np.isclose(float(popt[1]), 6.0, atol=0.05)
-    near_slope_lower_bound = np.isclose(float(popt[3]), -2.5, atol=0.03)
-    near_slope_upper_bound = np.isclose(float(popt[3]), -1.5, atol=0.03)
+    near_slope_lower_bound = np.isclose(float(popt[2]), -2.5, atol=0.03)
+    near_slope_upper_bound = np.isclose(float(popt[2]), -1.5, atol=0.03)
     turnover_bracketed = np.isfinite(tau_char) and (tau_min < tau_char < tau_max)
 
     return {
@@ -1265,10 +1275,10 @@ def fit_bending_power_law_psd(freq, power, power_lo=None, power_hi=None):
         "log_sigma_bpl_err": float(perr[0]) if np.all(np.isfinite(perr)) else np.nan,
         "log_tau_bpl": float(popt[1]),
         "log_tau_bpl_err": float(perr[1]) if np.all(np.isfinite(perr)) else np.nan,
-        "log_noise_floor_bpl": float(popt[2]),
-        "log_noise_floor_bpl_err": float(perr[2]) if np.all(np.isfinite(perr)) else np.nan,
-        "psd_bpl_alpha_high": float(popt[3]),
-        "psd_bpl_alpha_high_err": float(perr[3]) if np.all(np.isfinite(perr)) else np.nan,
+        "log_noise_floor_bpl": fixed_log_noise_floor,
+        "log_noise_floor_bpl_err": 0.0,
+        "psd_bpl_alpha_high": float(popt[2]),
+        "psd_bpl_alpha_high_err": float(perr[2]) if np.all(np.isfinite(perr)) else np.nan,
         "psd_bpl_valid": bool(
             np.all(np.isfinite(popt))
             and not near_tau_lower_bound
@@ -1284,6 +1294,8 @@ def fit_bending_power_law_psd(freq, power, power_lo=None, power_hi=None):
 def compute_lomb_scargle_break_diagnostics(model, samples, obj, z, *, n_freq=500):
     """Fit a bending power law to the plotted combined Lomb-Scargle PSD and convert to UV."""
 
+    ls_bins_per_decade = 3
+    ls_min_per_bin = 5
     bands = list(obj["bands"])
     lam_rf = np.asarray([lambda_pivot[band] / (1.0 + float(z)) for band in bands], dtype=float)
     ref_idx = int(np.argmin(np.abs(lam_rf - 2500.0)))
@@ -1307,9 +1319,41 @@ def compute_lomb_scargle_break_diagnostics(model, samples, obj, z, *, n_freq=500
         posterior_median,
         2.0 * np.pi * freqs,
         ref_band_idx=ref_idx,
+        bins_per_decade=ls_bins_per_decade,
+        min_per_bin=ls_min_per_bin,
         band_wavelength_rf=lam_rf,
         survey_idx=obj.get("survey_idx"),
     )
+    f_leak_raw, p_leak_raw = estimate_model_window_leakage(
+        model,
+        samples,
+        obj["X"],
+        obj["yerr"],
+        2.0 * np.pi * freqs,
+        ref_band_idx=ref_idx,
+        bins_per_decade=ls_bins_per_decade,
+        min_per_bin=ls_min_per_bin,
+        band_wavelength_rf=lam_rf,
+        survey_idx=obj.get("survey_idx"),
+    )
+    valid_leak = (
+        np.isfinite(f_leak_raw)
+        & np.isfinite(p_leak_raw)
+        & (f_leak_raw > 0.0)
+        & (p_leak_raw > 0.0)
+    )
+    if np.count_nonzero(valid_leak) >= 2:
+        leakage_at_raw_bin = np.interp(
+            f_bin_raw,
+            f_leak_raw[valid_leak],
+            p_leak_raw[valid_leak],
+            left=0.0,
+            right=0.0,
+        )
+        leakage_at_raw_bin = np.clip(leakage_at_raw_bin, 0.0, None)
+        p_bin_raw = p_bin_raw - leakage_at_raw_bin
+        p_lo_raw = p_lo_raw - leakage_at_raw_bin
+        p_hi_raw = p_hi_raw - leakage_at_raw_bin
 
     model_psd = np.asarray(
         model.psd(
@@ -1318,6 +1362,30 @@ def compute_lomb_scargle_break_diagnostics(model, samples, obj, z, *, n_freq=500
             b=ref_idx,
             sigma_n2=0.0,
         )
+    )
+    if "log_tau_uv" in samples:
+        n_total = int(len(np.asarray(samples["log_tau_uv"])))
+    else:
+        n_total = 0
+        for value in samples.values():
+            arr = np.asarray(value)
+            if arr.ndim > 0 and arr.shape[0] > 1:
+                n_total = int(arr.shape[0])
+                break
+    psd_display_samples = []
+    for i in range(min(50, n_total)):
+        sample_params = posterior_sample_params_at_index(samples, i, n_total)
+        psd_i = model.psd(
+            sample_params,
+            2.0 * np.pi * freqs,
+            b=ref_idx,
+            sigma_n2=0.0,
+        )
+        psd_display_samples.append(np.asarray(psd_i))
+    psd_display_median = (
+        np.median(np.stack(psd_display_samples, axis=0), axis=0)
+        if psd_display_samples
+        else model_psd
     )
     if f_bin_norm.size > 0 and p_bin_norm.size > 0 and np.all(np.isfinite(model_psd)):
         model_at_f0 = float(np.interp(f_bin_norm[0], freqs, model_psd))
@@ -1331,7 +1399,71 @@ def compute_lomb_scargle_break_diagnostics(model, samples, obj, z, *, n_freq=500
         p_hi_fit_norm = p_hi_norm
 
     fit_norm = fit_bending_power_law_psd(f_bin_norm, p_bin_fit_norm, p_lo_fit_norm, p_hi_fit_norm)
-    fit_raw = fit_bending_power_law_psd(f_bin_raw, p_bin_raw, p_lo_raw, p_hi_raw)
+
+    psd_xlim = (8e-6, 1.5e-2)
+    psd_ymin = 2e-2
+    signal_finite = (
+        np.isfinite(f_bin_raw)
+        & np.isfinite(p_bin_raw)
+        & np.isfinite(p_lo_raw)
+        & np.isfinite(p_hi_raw)
+    )
+    signal_plot = signal_finite.copy()
+    p_bin_display = np.asarray(p_bin_raw, dtype=float).copy()
+    model_at_bin = np.interp(f_bin_raw, freqs, psd_display_median, left=np.nan, right=np.nan)
+    display_floor = np.maximum(1.35 * psd_ymin, 0.35 * model_at_bin)
+    display_floor = np.where(np.isfinite(display_floor), display_floor, 1.35 * psd_ymin)
+    floor_plotted = signal_plot & (p_bin_display <= 0.0)
+    zero_cross = signal_plot & (p_bin_display > 0.0) & (p_lo_raw <= 0.0)
+    lower_span = np.clip(p_bin_display - p_lo_raw, 1e-300, None)
+    zero_cross_frac = np.clip(-p_lo_raw / lower_span, 0.0, 1.0)
+    shrink = np.clip(0.25 + 1.75 * zero_cross_frac, 0.0, 1.0)
+    p_bin_display[zero_cross] = (
+        (1.0 - shrink[zero_cross]) * p_bin_display[zero_cross]
+        + shrink[zero_cross] * display_floor[zero_cross]
+    )
+    p_bin_display[floor_plotted] = display_floor[floor_plotted]
+    signal_plot &= p_bin_display > 0.0
+    p_display_err_lo = np.clip(
+        p_bin_display - np.clip(p_lo_raw, 1e-300, None),
+        0.0,
+        None,
+    )
+    p_display_err_hi = np.clip(p_hi_raw - p_bin_display, 0.0, None)
+    p_display_err_lo[floor_plotted] = 0.0
+    display_fit_mask = signal_plot & (f_bin_raw >= psd_xlim[0]) & (f_bin_raw <= psd_xlim[1])
+    display_fit_raw = fit_bending_power_law_to_display_points(
+        f_bin_raw[display_fit_mask],
+        p_bin_display[display_fit_mask],
+        p_display_err_lo[display_fit_mask],
+        p_display_err_hi[display_fit_mask],
+    )
+    if display_fit_raw is None:
+        fit_raw = {
+            "log_sigma_bpl": np.nan,
+            "log_sigma_bpl_err": np.nan,
+            "log_tau_bpl": np.nan,
+            "log_tau_bpl_err": np.nan,
+            "log_noise_floor_bpl": np.nan,
+            "log_noise_floor_bpl_err": np.nan,
+            "psd_bpl_alpha_high": np.nan,
+            "psd_bpl_alpha_high_err": np.nan,
+            "psd_bpl_valid": False,
+            "psd_bpl_nbins": float(np.count_nonzero(display_fit_mask)),
+        }
+    else:
+        fit_raw = {
+            "log_sigma_bpl": display_fit_raw["log_sigma"],
+            "log_sigma_bpl_err": display_fit_raw["log_sigma_err"],
+            "log_tau_bpl": display_fit_raw["log_tau"],
+            "log_tau_bpl_err": display_fit_raw["log_tau_err"],
+            "log_noise_floor_bpl": -99.0,
+            "log_noise_floor_bpl_err": 0.0,
+            "psd_bpl_alpha_high": display_fit_raw["alpha_high"],
+            "psd_bpl_alpha_high_err": display_fit_raw["alpha_high_err"],
+            "psd_bpl_valid": display_fit_raw["valid"],
+            "psd_bpl_nbins": float(display_fit_raw["n_points"]),
+        }
     eta_sigma = float(np.nanmedian(np.asarray(samples["eta_sigma"], dtype=float)))
     eta_tau = float(np.nanmedian(np.asarray(samples["eta_tau"], dtype=float)))
     log_sigma_uv = (

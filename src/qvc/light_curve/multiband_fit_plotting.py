@@ -10,7 +10,10 @@ import numpy as np
 import os
 import re
 import math
+import jax
 import jax.numpy as jnp
+from jax import random as jrandom
+from scipy.optimize import curve_fit
 from scipy.stats import norm, probplot
 
 from astropy.timeseries import LombScargle
@@ -46,6 +49,7 @@ colors = {'u': 'tab:blue',
 
 SF_LAG_PLOT_MIN_RF = 10.0
 SF_LAG_PLOT_MAX_RF = 1e4
+PERIODOGRAM_MEDIAN_TO_MEAN = 1.0 / np.log(2.0)
 
 
 def _get_param(sample_dict, primary, fallback=None):
@@ -245,6 +249,34 @@ def _smooth_positive_frequency_series(values, window):
     return np.exp(np.convolve(padded, kernel, mode="valid"))
 
 
+def _smooth_linear_frequency_series(values, window):
+    """Smooth a finite frequency series with an edge-padded moving average."""
+
+    values = np.asarray(values, dtype=float)
+    window = int(window or 0)
+    if window <= 1 or values.size < 3:
+        return values.copy()
+    if window % 2 == 0:
+        window += 1
+    window = min(window, values.size if values.size % 2 == 1 else values.size - 1)
+    if window <= 1:
+        return values.copy()
+
+    idx = np.arange(values.size)
+    valid = np.isfinite(values)
+    if np.count_nonzero(valid) == 0:
+        return values.copy()
+    if np.count_nonzero(valid) == 1:
+        filled = np.full(values.size, values[valid][0], dtype=float)
+    else:
+        filled = np.interp(idx, idx[valid], values[valid])
+
+    half = window // 2
+    padded = np.pad(filled, (half, half), mode="edge")
+    kernel = np.full(window, 1.0 / float(window), dtype=float)
+    return np.convolve(padded, kernel, mode="valid")
+
+
 def _smooth_noise_floor(noise_floor_arr, window):
     """Smooth each band's MC noise floor before subtraction."""
 
@@ -257,37 +289,38 @@ def _smooth_noise_floor(noise_floor_arr, window):
     )
 
 
-def _tail_match_to_white_floor(f_bin, signal, signal_lo, signal_hi, noise_floor, *, f_min=None, f_max=None):
-    """Subtract a constant residual floor so the highest plotted bin matches the MC floor."""
+def _subtract_leakage_curve(f_bin, signal, signal_lo, signal_hi, leakage_f, leakage_power):
+    """Subtract an interpolated non-negative leakage curve from binned PSD values."""
 
     f_bin = np.asarray(f_bin, dtype=float)
     signal = np.asarray(signal, dtype=float).copy()
     signal_lo = np.asarray(signal_lo, dtype=float).copy()
     signal_hi = np.asarray(signal_hi, dtype=float).copy()
-    noise_floor = np.asarray(noise_floor, dtype=float)
-
+    leakage_f = np.asarray(leakage_f, dtype=float)
+    leakage_power = np.asarray(leakage_power, dtype=float)
     valid = (
-        np.isfinite(f_bin)
-        & np.isfinite(signal)
-        & np.isfinite(signal_lo)
-        & np.isfinite(signal_hi)
-        & np.isfinite(noise_floor)
-        & (signal > 0.0)
-        & (noise_floor > 0.0)
+        np.isfinite(leakage_f)
+        & np.isfinite(leakage_power)
+        & (leakage_f > 0.0)
+        & (leakage_power > 0.0)
     )
-    if f_min is not None:
-        valid &= f_bin >= float(f_min)
-    if f_max is not None:
-        valid &= f_bin <= float(f_max)
-    valid_idx = np.flatnonzero(valid)
-    if valid_idx.size == 0:
-        return signal, signal_lo, signal_hi, 0.0
+    if np.count_nonzero(valid) < 2:
+        return signal, signal_lo, signal_hi, np.zeros_like(signal)
 
-    tail_idx = valid_idx[np.argmax(f_bin[valid_idx])]
-    residual_floor = max(float(signal[tail_idx] - noise_floor[tail_idx]), 0.0)
-    if residual_floor <= 0.0:
-        return signal, signal_lo, signal_hi, 0.0
-    return signal - residual_floor, signal_lo - residual_floor, signal_hi - residual_floor, residual_floor
+    leakage_at_bin = np.interp(
+        f_bin,
+        leakage_f[valid],
+        leakage_power[valid],
+        left=np.nan,
+        right=np.nan,
+    )
+    leakage_at_bin = np.where(np.isfinite(leakage_at_bin), np.clip(leakage_at_bin, 0.0, None), 0.0)
+    return (
+        signal - leakage_at_bin,
+        signal_lo - leakage_at_bin,
+        signal_hi - leakage_at_bin,
+        leakage_at_bin,
+    )
 
 
 POSTERIOR_PLOT_KEY_GROUPS = {
@@ -1126,7 +1159,12 @@ def combined_raw_band_lomb_scargle(
         else np.zeros_like(powers_arr)
     )
     noise_floor_arr = _smooth_noise_floor(noise_floor_arr, noise_floor_smooth_width)
-    signal_arr = powers_arr - noise_floor_arr
+    # The analytic model PSD is an expectation value. Individual periodogram
+    # ordinates are exponentially distributed, so a median bin is biased low by
+    # ln(2). Correct the ordinates before the robust median binning below.
+    median_to_mean = PERIODOGRAM_MEDIAN_TO_MEAN if normalization == "psd" else 1.0
+    mean_equiv_powers_arr = powers_arr * median_to_mean
+    signal_arr = mean_equiv_powers_arr - noise_floor_arr
 
     fmin, fmax = np.min(f_raw), np.max(f_raw)
     decades = np.log10(fmax) - np.log10(fmin)
@@ -1139,7 +1177,7 @@ def combined_raw_band_lomb_scargle(
         sel = which == k
         if np.count_nonzero(sel) >= min_per_bin:
             f_chunk = f_raw[sel]
-            raw_chunk = powers_arr[:, sel].ravel()
+            raw_chunk = mean_equiv_powers_arr[:, sel].ravel()
             signal_chunk = signal_arr[:, sel].ravel()
             noise_chunk = noise_floor_arr[:, sel].ravel()
             raw_chunk = raw_chunk[np.isfinite(raw_chunk)]
@@ -1283,6 +1321,146 @@ def estimate_lomb_scargle_white_noise_floor(
         counts_ref,
     )
 
+
+def _sample_intrinsic_model_observed_order(model, params, key):
+    """Draw one noiseless intrinsic model realization in model.X order."""
+
+    if not hasattr(model, "_build_gp"):
+        raise AttributeError("model does not expose _build_gp")
+    gp, inds = model._build_gp(params)
+    diag = jnp.full_like(gp.mean, 1e-12)
+    zero_mean = jnp.zeros_like(gp.mean)
+    try:
+        intrinsic_gp = gp.__class__(
+            gp.kernel,
+            gp.X,
+            diag=diag,
+            mean_value=zero_mean,
+            assume_sorted=True,
+        )
+    except TypeError:
+        intrinsic_gp = gp.__class__(
+            gp.kernel,
+            gp.X,
+            diag=diag,
+            mean_value=zero_mean,
+        )
+
+    y_sorted = np.asarray(jax.device_get(intrinsic_gp.sample(key)), dtype=float)
+    inds = np.asarray(jax.device_get(inds), dtype=np.int64)
+    y_model = np.empty_like(y_sorted)
+    y_model[inds] = y_sorted
+    return y_model
+
+
+def estimate_model_window_leakage(
+    model,
+    samples,
+    X,
+    yerr,
+    omega,
+    *,
+    ref_band_idx: int,
+    band_wavelength_rf: np.ndarray,
+    survey_idx=None,
+    bins_per_decade: int = 3,
+    min_per_bin: int = 5,
+    n_model_sim: int = 24,
+    leakage_smooth_width: int = 5,
+    random_state: int = 24680,
+):
+    """Estimate frequency-dependent LS window leakage from intrinsic model simulations."""
+
+    if not hasattr(model, "_build_gp"):
+        empty = np.array([], dtype=float)
+        return empty, empty
+
+    if "log_tau_uv" in samples:
+        n_total = int(len(np.asarray(samples["log_tau_uv"])))
+    else:
+        n_total = 0
+        for value in samples.values():
+            arr = np.asarray(value)
+            if arr.ndim > 0 and arr.shape[0] > 1:
+                n_total = int(arr.shape[0])
+                break
+    n_draws = min(int(n_model_sim), n_total)
+    if n_draws <= 0:
+        empty = np.array([], dtype=float)
+        return empty, empty
+
+    draw_indices = np.linspace(0, n_total - 1, n_draws, dtype=int)
+    keys = jrandom.split(jrandom.PRNGKey(int(random_state)), n_draws)
+
+    f_ref = None
+    leakage_curves = []
+    for key, draw_idx in zip(keys, draw_indices):
+        sample_params = _posterior_sample_params_at_index(samples, int(draw_idx), n_total)
+        try:
+            y_model = _sample_intrinsic_model_observed_order(model, sample_params, key)
+        except Exception as exc:
+            logging.warning("Window-leakage PSD draw failed: %s", exc)
+            continue
+        if y_model.shape[0] != len(np.asarray(X[0])):
+            logging.warning(
+                "Window-leakage PSD draw has length %d but X has length %d; skipping.",
+                y_model.shape[0],
+                len(np.asarray(X[0])),
+            )
+            continue
+
+        f_sim, p_raw_sim, _p_signal_sim, _p_lo_sim, _p_hi_sim, _counts_sim, _p_noise_sim = (
+            combined_raw_band_lomb_scargle(
+                X,
+                y_model,
+                yerr,
+                sample_params,
+                omega,
+                ref_band_idx=ref_band_idx,
+                bins_per_decade=bins_per_decade,
+                min_per_bin=min_per_bin,
+                band_wavelength_rf=band_wavelength_rf,
+                survey_idx=survey_idx,
+                n_noise_sim=0,
+            )
+        )
+        if f_sim.size == 0:
+            continue
+        analytic_sim = np.asarray(
+            model.psd(
+                sample_params,
+                2.0 * np.pi * f_sim,
+                b=ref_band_idx,
+                sigma_n2=0.0,
+            ),
+            dtype=float,
+        )
+        leakage = p_raw_sim - analytic_sim
+
+        valid = np.isfinite(f_sim) & np.isfinite(leakage)
+        if np.count_nonzero(valid) == 0:
+            continue
+        f_sim = f_sim[valid]
+        leakage = leakage[valid]
+        if f_ref is None:
+            f_ref = f_sim
+            leakage_curves.append(leakage)
+        elif f_sim.shape == f_ref.shape and np.allclose(f_sim, f_ref, rtol=1e-6, atol=0.0):
+            leakage_curves.append(leakage)
+        else:
+            leakage_curves.append(np.interp(f_ref, f_sim, leakage, left=np.nan, right=np.nan))
+
+    if f_ref is None or not leakage_curves:
+        empty = np.array([], dtype=float)
+        return empty, empty
+
+    leakage_curves = np.asarray(leakage_curves, dtype=float)
+    leakage_power = np.clip(np.nanmean(leakage_curves, axis=0), 0.0, None)
+    leakage_power = _smooth_linear_frequency_series(leakage_power, leakage_smooth_width)
+    leakage_power = np.clip(leakage_power, 0.0, None)
+    return f_ref, leakage_power
+
+
 import numpy as np
 
 def bootstrap_lomb_scargle(
@@ -1362,6 +1540,127 @@ def _bending_power_law_psd_plot(freq, log_sigma, log_tau, alpha_high=-2.0, log_n
     return 2.0 * sigma * sigma * tau / (
         1.0 + np.power(np.clip(2.0 * np.pi * freq * tau, 1e-30, None), slope)
     ) + noise_floor
+
+
+def _fit_bending_power_law_to_display_points(freq, power, yerr_lo, yerr_hi):
+    """Fit the zero-floor bending PSD directly to displayed PSD points."""
+
+    freq = np.asarray(freq, dtype=float)
+    power = np.asarray(power, dtype=float)
+    yerr_lo = np.asarray(yerr_lo, dtype=float)
+    yerr_hi = np.asarray(yerr_hi, dtype=float)
+    mask = (
+        np.isfinite(freq)
+        & np.isfinite(power)
+        & np.isfinite(yerr_lo)
+        & np.isfinite(yerr_hi)
+        & (freq > 0.0)
+        & (power > 0.0)
+    )
+    if np.count_nonzero(mask) < 4:
+        return None
+
+    freq_fit = freq[mask]
+    power_fit = power[mask]
+    yerr_lo = np.clip(yerr_lo[mask], 0.0, None)
+    yerr_hi = np.clip(yerr_hi[mask], 0.0, None)
+    log_power = np.log10(power_fit)
+
+    lower = power_fit - yerr_lo
+    upper = power_fit + yerr_hi
+    log_err = np.full_like(log_power, 0.25)
+    valid_lo = np.isfinite(lower) & (lower > 0.0) & (lower < power_fit)
+    valid_hi = np.isfinite(upper) & (upper > power_fit)
+    err_lo = np.full_like(log_power, np.nan)
+    err_hi = np.full_like(log_power, np.nan)
+    err_lo[valid_lo] = log_power[valid_lo] - np.log10(lower[valid_lo])
+    err_hi[valid_hi] = np.log10(upper[valid_hi]) - log_power[valid_hi]
+    both = valid_lo & valid_hi
+    only_lo = valid_lo & ~valid_hi
+    only_hi = valid_hi & ~valid_lo
+    log_err[both] = 0.5 * (err_lo[both] + err_hi[both])
+    log_err[only_lo] = err_lo[only_lo]
+    log_err[only_hi] = err_hi[only_hi]
+    log_err = np.clip(log_err, 0.05, 0.80)
+
+    f_mid = np.exp(np.mean(np.log(freq_fit)))
+    tau_init = 1.0 / (2.0 * np.pi * f_mid)
+    sigma_init = np.sqrt(
+        np.clip(
+            np.median(power_fit) * (1.0 + (2.0 * np.pi * f_mid * tau_init) ** 2) / (2.0 * tau_init),
+            1e-12,
+            None,
+        )
+    )
+
+    def model_log10(freq_val, log_sigma, log_tau, alpha_high):
+        return np.log10(
+            np.clip(
+                _bending_power_law_psd_plot(
+                    freq_val,
+                    log_sigma,
+                    log_tau,
+                    alpha_high=alpha_high,
+                    log_noise_floor=-99.0,
+                ),
+                1e-300,
+                None,
+            )
+        )
+
+    try:
+        popt, pcov = curve_fit(
+            model_log10,
+            freq_fit,
+            log_power,
+            p0=(np.log10(sigma_init), np.log10(tau_init), -2.0),
+            sigma=log_err,
+            absolute_sigma=True,
+            bounds=([-6.0, -1.0, -2.5], [3.0, 6.0, -1.5]),
+            maxfev=20000,
+        )
+    except Exception as exc:
+        logging.warning("Displayed PSD broken-power-law fit failed: %s", exc)
+        return None
+
+    perr = np.sqrt(np.diag(pcov)) if pcov is not None else np.full(3, np.nan)
+    tau_char = 10.0 ** float(popt[1])
+    tau_min = float(np.nanmin(1.0 / (2.0 * np.pi * freq_fit)))
+    tau_max = float(np.nanmax(1.0 / (2.0 * np.pi * freq_fit)))
+    near_tau_lower_bound = np.isclose(float(popt[1]), -1.0, atol=0.05)
+    near_tau_upper_bound = np.isclose(float(popt[1]), 6.0, atol=0.05)
+    near_slope_lower_bound = np.isclose(float(popt[2]), -2.5, atol=0.03)
+    near_slope_upper_bound = np.isclose(float(popt[2]), -1.5, atol=0.03)
+    turnover_bracketed = np.isfinite(tau_char) and (tau_min < tau_char < tau_max)
+    return {
+        "log_sigma": float(popt[0]),
+        "log_tau": float(popt[1]),
+        "alpha_high": float(popt[2]),
+        "log_sigma_err": float(perr[0]) if np.all(np.isfinite(perr)) else np.nan,
+        "log_tau_err": float(perr[1]) if np.all(np.isfinite(perr)) else np.nan,
+        "alpha_high_err": float(perr[2]) if np.all(np.isfinite(perr)) else np.nan,
+        "n_points": int(freq_fit.size),
+        "valid": bool(
+            np.all(np.isfinite(popt))
+            and not near_tau_lower_bound
+            and not near_tau_upper_bound
+            and not near_slope_lower_bound
+            and not near_slope_upper_bound
+            and turnover_bracketed
+        ),
+    }
+
+
+def fit_bending_power_law_to_display_points(freq, power, yerr_lo, yerr_hi):
+    """Public wrapper for fitting the displayed LS PSD points."""
+
+    return _fit_bending_power_law_to_display_points(freq, power, yerr_lo, yerr_hi)
+
+
+def posterior_sample_params_at_index(samples, i, reference_n):
+    """Public wrapper for building one posterior parameter draw."""
+
+    return _posterior_sample_params_at_index(samples, i, reference_n)
 
 
 def _binned_median_relation(x, y, *, n_bins=40, min_per_bin=20):
@@ -2104,16 +2403,9 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, mags_means, survey_
             posterior_median[k] = jnp.array(posterior_median[k])
 
         print("Plotting PSD...")
-        psd_xlim = (2e-6, 1.5e-2)
+        psd_xlim = (8e-6, 1.5e-2)
+        psd_ymin = 2e-2
         freqs = np.logspace(-6, 2, 500)
-        t_for_psd = np.asarray(X[0], dtype=float)
-        t_for_psd = t_for_psd[np.isfinite(t_for_psd)]
-        t_baseline = float(np.nanmax(t_for_psd) - np.nanmin(t_for_psd)) if t_for_psd.size >= 2 else np.nan
-        freq_tau_baseline = (
-            1.0 / (2.0 * np.pi * t_baseline)
-            if np.isfinite(t_baseline) and t_baseline > 0.0
-            else np.nan
-        )
         freqs_ls = freqs
         z = float(data.get("z", np.nan))
         band_wavelength_rf = np.asarray(
@@ -2122,11 +2414,9 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, mags_means, survey_
         )
         psd_ref_idx = int(np.nanargmin(np.abs(band_wavelength_rf - 2500.0)))
 
-        # Model PSD for the observed band whose rest wavelength is closest to 2500 A.
-        # model.psd takes angular frequency but returns one-sided cyclic PSD density.
-        psd_samples = []
         tau_samples_for_psd = np.asarray(samples['log_tau_uv'])
         n_total = int(len(tau_samples_for_psd))
+        psd_samples = []
         n_samp = np.min([50, n_total])
         for i in range(n_samp):
             sample_params = _posterior_sample_params_at_index(samples, i, n_total)
@@ -2138,12 +2428,81 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, mags_means, survey_
             )
             psd_samples.append(np.asarray(psd_i))
         psd_samples = np.stack(psd_samples, axis=0)
-
         psd_median = np.median(psd_samples, axis=0)
         psd_lo = np.percentile(psd_samples, 16, axis=0)
         psd_hi = np.percentile(psd_samples, 84, axis=0)
 
-        ref_band = bands[psd_ref_idx]
+        f_bin, P_bin_raw, P_signal, P_lo, P_hi, counts, P_noise = combined_raw_band_lomb_scargle(
+            X,
+            y,
+            yerr,
+            posterior_median,
+            2.0 * np.pi * freqs_ls,
+            ref_band_idx=psd_ref_idx,
+            bins_per_decade=3,
+            min_per_bin=5,
+            band_wavelength_rf=band_wavelength_rf,
+            survey_idx=getattr(model, "survey_idx", None),
+        )
+        if isinstance(P_noise, np.ndarray):
+            P_noise_on_bin = P_noise
+        else:
+            P_noise_on_bin = np.zeros_like(P_bin_raw)
+        P_signal_lo = P_lo
+        P_signal_hi = P_hi
+        f_leak, P_leak = estimate_model_window_leakage(
+            model,
+            samples,
+            X,
+            yerr,
+            2.0 * np.pi * freqs_ls,
+            ref_band_idx=psd_ref_idx,
+            bins_per_decade=3,
+            min_per_bin=5,
+            band_wavelength_rf=band_wavelength_rf,
+            survey_idx=getattr(model, "survey_idx", None),
+        )
+        P_signal, P_signal_lo, P_signal_hi, leakage_at_bin = _subtract_leakage_curve(
+            f_bin,
+            P_signal,
+            P_signal_lo,
+            P_signal_hi,
+            f_leak,
+            P_leak,
+        )
+        finite_leakage = leakage_at_bin[np.isfinite(leakage_at_bin) & (leakage_at_bin > 0.0)]
+        if finite_leakage.size:
+            print(
+                "Frequency-dependent PSD leakage correction: subtracting median/max "
+                f"{np.nanmedian(finite_leakage):.4g}/{np.nanmax(finite_leakage):.4g}."
+            )
+        signal_finite = (
+            np.isfinite(f_bin)
+            & np.isfinite(P_signal)
+            & np.isfinite(P_signal_lo)
+            & np.isfinite(P_signal_hi)
+        )
+        signal_plot = signal_finite.copy()
+        P_signal_plot = np.asarray(P_signal, dtype=float).copy()
+        model_at_bin = np.interp(f_bin, freqs, psd_median, left=np.nan, right=np.nan)
+        display_floor = np.maximum(1.35 * psd_ymin, 0.35 * model_at_bin)
+        display_floor = np.where(np.isfinite(display_floor), display_floor, 1.35 * psd_ymin)
+        # A log PSD axis cannot show negative floor-subtracted values. Put
+        # bins with substantial zero-crossing uncertainty on a smooth sub-model
+        # display floor so they still counter the positive-survivor bias without
+        # all collapsing to one line.
+        floor_plotted = signal_plot & (P_signal_plot <= 0.0)
+        zero_cross = signal_plot & (P_signal_plot > 0.0) & (P_signal_lo <= 0.0)
+        lower_span = np.clip(P_signal_plot - P_signal_lo, 1e-300, None)
+        zero_cross_frac = np.clip(-P_signal_lo / lower_span, 0.0, 1.0)
+        shrink = np.clip(0.25 + 1.75 * zero_cross_frac, 0.0, 1.0)
+        P_signal_plot[zero_cross] = (
+            (1.0 - shrink[zero_cross]) * P_signal_plot[zero_cross]
+            + shrink[zero_cross] * display_floor[zero_cross]
+        )
+        P_signal_plot[floor_plotted] = display_floor[floor_plotted]
+        signal_plot &= P_signal_plot > 0.0
+
         ax_psd.plot(
             freqs,
             psd_median,
@@ -2155,69 +2514,34 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, mags_means, survey_
         )
         ax_psd.fill_between(freqs, psd_lo, psd_hi, color='m', alpha=0.2, zorder=3)
 
-        f_bin, P_bin_raw, P_signal, P_lo, P_hi, counts, P_noise = combined_raw_band_lomb_scargle(
-            X,
-            y,
-            yerr,
-            posterior_median,
-            2.0 * np.pi * freqs_ls,
-            ref_band_idx=psd_ref_idx,
-            bins_per_decade=3,
-            band_wavelength_rf=band_wavelength_rf,
-            survey_idx=getattr(model, "survey_idx", None),
-        )
-        if isinstance(P_noise, np.ndarray):
-            P_noise_on_bin = P_noise
-        else:
-            P_noise_on_bin = np.zeros_like(P_bin_raw)
-        P_signal_lo = P_lo
-        P_signal_hi = P_hi
-        P_signal, P_signal_lo, P_signal_hi, empirical_tail_floor = _tail_match_to_white_floor(
-            f_bin,
-            P_signal,
-            P_signal_lo,
-            P_signal_hi,
-            P_noise_on_bin,
-            f_min=psd_xlim[0],
-            f_max=psd_xlim[1],
-        )
-        if empirical_tail_floor > 0.0:
-            print(
-                "Empirical PSD tail correction: subtracting residual floor "
-                f"{empirical_tail_floor:.4g} so highest plotted LS bin matches MC white floor."
-            )
-        signal_positive = (
-            np.isfinite(P_signal)
-            & np.isfinite(P_signal_lo)
-            & np.isfinite(P_signal_hi)
-            & (P_signal > 0.0)
-            & (P_signal_hi > 0.0)
-        )
-
         floor_positive = np.isfinite(P_noise_on_bin) & (P_noise_on_bin > 0.0)
         if np.count_nonzero(floor_positive):
             ax_psd.plot(
                 f_bin[floor_positive],
                 P_noise_on_bin[floor_positive],
-                color='tab:orange',
+                color='0.45',
                 linestyle=':',
-                lw=1.5,
+                lw=3.0,
                 alpha=0.9,
                 zorder=2.5,
                 label="noise floor",
             )
 
-        if np.count_nonzero(signal_positive):
+        signal_yerr_lo = np.clip(
+            P_signal_plot - np.clip(P_signal_lo, 1e-300, None),
+            0.0,
+            None,
+        )
+        signal_yerr_hi = np.clip(P_signal_hi - P_signal_plot, 0.0, None)
+        signal_yerr_lo[floor_plotted] = 0.0
+
+        if np.count_nonzero(signal_plot):
             ax_psd.errorbar(
-                f_bin[signal_positive],
-                P_signal[signal_positive],
+                f_bin[signal_plot],
+                P_signal_plot[signal_plot],
                 yerr=[
-                    np.clip(
-                        P_signal[signal_positive] - np.clip(P_signal_lo[signal_positive], 1e-300, None),
-                        0.0,
-                        None,
-                    ),
-                    np.clip(P_signal_hi[signal_positive] - P_signal[signal_positive], 0.0, None),
+                    signal_yerr_lo[signal_plot],
+                    signal_yerr_hi[signal_plot],
                 ],
                 markersize=4,
                 fmt="o",
@@ -2232,25 +2556,20 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, mags_means, survey_
             )
 
         if plot_bpl_fit:
-            def _finite_scalar(value):
-                try:
-                    return np.isfinite(float(value))
-                except (TypeError, ValueError):
-                    return False
-
-            log_sigma_ls = data.get("log_sigma_ls")
-            log_tau_ls_obs = data.get("log_tau_ls_obs", data.get("log_tau_bpl_ref_band"))
-            alpha_high_ls = data.get("alpha_high_ls", data.get("psd_bpl_alpha_high"))
-            log_noise_floor_ls = data.get("log_noise_floor_ls", data.get("log_noise_floor_bpl"))
-            sigma_ls = data.get("sigma_ls")
-            tau_ls = data.get("tau_ls")
-            if all(_finite_scalar(val) for val in (log_sigma_ls, log_tau_ls_obs, alpha_high_ls)):
+            fit_mask = signal_plot & (f_bin >= psd_xlim[0]) & (f_bin <= psd_xlim[1])
+            display_bpl_fit = _fit_bending_power_law_to_display_points(
+                f_bin[fit_mask],
+                P_signal_plot[fit_mask],
+                signal_yerr_lo[fit_mask],
+                signal_yerr_hi[fit_mask],
+            )
+            if display_bpl_fit is not None:
                 psd_ls_fit = _bending_power_law_psd_plot(
                     freqs,
-                    log_sigma_ls,
-                    log_tau_ls_obs,
-                    alpha_high=alpha_high_ls,
-                    log_noise_floor=(log_noise_floor_ls if _finite_scalar(log_noise_floor_ls) else -99.0),
+                    display_bpl_fit["log_sigma"],
+                    display_bpl_fit["log_tau"],
+                    alpha_high=display_bpl_fit["alpha_high"],
+                    log_noise_floor=-99.0,
                 )
                 ax_psd.plot(
                     freqs,
@@ -2262,21 +2581,51 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, mags_means, survey_
                     label="2500A LS broken-PL fit",
                     zorder=4.5,
                 )
-                if _finite_scalar(sigma_ls) and _finite_scalar(tau_ls):
-                    ax_psd.text(
-                        0.98,
-                        0.98,
-                        (
-                            "LS fit\n"
-                            f"$\\tau_{{\\rm ls,rf}}$={tau_ls:.1f} d\n"
-                            f"$\\sigma_{{\\rm ls}}$={sigma_ls:.3g}\n"
-                            f"$\\alpha_{{\\rm hi}}$={alpha_high_ls:.2f}"
-                        ),
-                        transform=ax_psd.transAxes,
-                        ha='right',
-                        va='top',
-                        bbox=dict(boxstyle='round,pad=0.2', fc='white', ec='0.8', alpha=0.9),
+                tau_bpl_obs = 10.0 ** float(display_bpl_fit["log_tau"])
+                nu_bpl = 1.0 / (2.0 * np.pi * tau_bpl_obs)
+                log_tau_bpl_err = float(display_bpl_fit["log_tau_err"])
+                if np.isfinite(log_tau_bpl_err) and log_tau_bpl_err >= 0.0:
+                    tau_bpl_lo = 10.0 ** (float(display_bpl_fit["log_tau"]) - log_tau_bpl_err)
+                    tau_bpl_hi = 10.0 ** (float(display_bpl_fit["log_tau"]) + log_tau_bpl_err)
+                    nu_bpl_lo = 1.0 / (2.0 * np.pi * tau_bpl_hi)
+                    nu_bpl_hi = 1.0 / (2.0 * np.pi * tau_bpl_lo)
+                    xerr_bpl = np.array([
+                        [max(nu_bpl - nu_bpl_lo, 0.0)],
+                        [max(nu_bpl_hi - nu_bpl, 0.0)],
+                    ])
+                else:
+                    xerr_bpl = None
+                if np.isfinite(nu_bpl) and nu_bpl > 0.0:
+                    ax_psd.errorbar(
+                        nu_bpl,
+                        7e3,
+                        xerr=xerr_bpl,
+                        yerr=None,
+                        fmt='o',
+                        color='tab:blue',
+                        markersize=5,
+                        capsize=4,
+                        elinewidth=2,
+                        alpha=0.9,
+                        label=r"$1/(2\,\pi\,\tau_{\mathrm{BPL,obs}})$",
+                        zorder=6,
                     )
+                tau_ls_rf = 10.0 ** display_bpl_fit["log_tau"] / (1.0 + z)
+                sigma_ls = 10.0 ** display_bpl_fit["log_sigma"]
+                ax_psd.text(
+                    0.98,
+                    0.98,
+                    (
+                        "LS fit\n"
+                        f"$\\tau_{{\\rm ls,rf}}$={tau_ls_rf:.1f} d\n"
+                        f"$\\sigma_{{\\rm ls}}$={sigma_ls:.3g}\n"
+                        f"$\\alpha_{{\\rm hi}}$={display_bpl_fit['alpha_high']:.2f}"
+                    ),
+                    transform=ax_psd.transAxes,
+                    ha='right',
+                    va='top',
+                    bbox=dict(boxstyle='round,pad=0.2', fc='white', ec='0.8', alpha=0.9),
+                )
         tau    = jnp.exp(posterior_median['log_tau_uv'])
         tau_lo = jnp.exp(jnp.percentile(tau_samples_for_psd, 16))
         tau_hi = jnp.exp(jnp.percentile(tau_samples_for_psd, 84))
@@ -2305,14 +2654,14 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, mags_means, survey_
             zorder=6,
         )
 
-        ax_psd.set_xlabel(r"Cyclic frequency $f$ (days$^{-1}$)")
-        ax_psd.set_ylabel(r"Nearest-2500A PSD ($\mathrm{mag}^2$ $\mathrm{days}$)")
+        ax_psd.set_xlabel(r"Frequency $f$ (days$^{-1}$)")
+        ax_psd.set_ylabel(r"PSD ($\mathrm{mag}^2$ $\mathrm{days}$)")
         ax_psd.set_xscale("log")
         ax_psd.set_yscale("log")
         ax_psd.tick_params(axis='x', which='both', pad=9)
         ax_psd.grid(False)
         ax_psd.legend(loc='lower left')
-        ax_psd.set_ylim(2e-2, 9e4)
+        ax_psd.set_ylim(psd_ymin, 9e4)
         ax_psd.set_xlim(*psd_xlim)
 
     plt.tight_layout()
