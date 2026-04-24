@@ -35,28 +35,50 @@ REQUIRED_AGN_TABLE_COLUMNS = (
 )
 
 
-def _prepare_agn_table_dataframe(agn_df, mu, mu_err, dm_interp):
+def _resolve_table_debias_values(agn_df, *, dm_interp=None, dmi_values=None):
+    dmi = None
+    if dmi_values is not None:
+        dmi = np.asarray(dmi_values, dtype=float)
+        if dmi.shape != (len(agn_df),):
+            raise ValueError(
+                f"dmi_values has shape {dmi.shape}, but expected {(len(agn_df),)}."
+            )
+
+    if dm_interp is None:
+        if dmi is None:
+            raise ValueError("AGN table requires either dm_interp or dmi_values.")
+        return dmi
+
+    dmi_interp = evaluate_dm_interp(
+        dm_interp,
+        agn_df["z"],
+        agn_df["apparent_mag_2500"],
+        f_host_2500_psf=agn_df[COMPLETENESS_FHOST_COL] if COMPLETENESS_FHOST_COL in agn_df.columns else None,
+        alpha_lambda=agn_df["alpha_lambda"] if "alpha_lambda" in agn_df.columns else None,
+    )
+    if dmi_interp.shape != (len(agn_df),):
+        raise ValueError(
+            f"dm_interp returned shape {dmi_interp.shape}, expected {(len(agn_df),)}."
+        )
+    if dmi is None:
+        return dmi_interp
+    return np.where(np.isfinite(dmi), dmi, dmi_interp)
+
+
+def _prepare_agn_table_dataframe(agn_df, mu, mu_err, dm_interp=None, dmi_values=None):
     missing_cols = [col for col in REQUIRED_AGN_TABLE_COLUMNS if col not in agn_df.columns]
     if missing_cols:
         raise KeyError(f"AGN table requires columns: {missing_cols}")
-    if dm_interp is None:
-        raise ValueError("AGN table requires a non-None dm_interp.")
 
     df = agn_df.copy()
     df["mu"] = np.asarray(mu, dtype=float)
     df["mu_err"] = np.asarray(mu_err, dtype=float)
 
-    dm_values = evaluate_dm_interp(
-        dm_interp,
-        df["z"],
-        df["apparent_mag_2500"],
-        f_host_2500_psf=df[COMPLETENESS_FHOST_COL] if COMPLETENESS_FHOST_COL in df.columns else None,
-        alpha_lambda=df["alpha_lambda"] if "alpha_lambda" in df.columns else None,
+    dm_values = _resolve_table_debias_values(
+        df,
+        dm_interp=dm_interp,
+        dmi_values=dmi_values,
     )
-    if dm_values.shape != (len(df),):
-        raise ValueError(
-            f"dm_interp returned shape {dm_values.shape}, expected {(len(df),)}."
-        )
     df["apparent_mag_2500_corr"] = np.asarray(df["apparent_mag_2500"], dtype=float) - dm_values
     df["apparent_mag_2500_corr_err"] = np.asarray(df["apparent_mag_2500_err"], dtype=float)
     df["f_lines"] = np.asarray(df["f_na"], dtype=float) + np.asarray(df["f_br"], dtype=float)
@@ -71,13 +93,20 @@ def make_agn_csv_table(
     agn_df,
     mu,
     mu_err,
-    dm_interp,
+    dm_interp=None,
     *,
+    dmi_values=None,
     sort_by,
     ascending,
     write_path,
 ) -> pd.DataFrame:
-    df = _prepare_agn_table_dataframe(agn_df, mu, mu_err, dm_interp)
+    df = _prepare_agn_table_dataframe(
+        agn_df,
+        mu,
+        mu_err,
+        dm_interp=dm_interp,
+        dmi_values=dmi_values,
+    )
 
     if sort_by is not None:
         if sort_by not in df.columns:
@@ -94,8 +123,9 @@ def make_agn_latex_table(
     agn_df,
     mu,
     mu_err,
-    dm_interp,
+    dm_interp=None,
     *,
+    dmi_values=None,
     sort_by,
     ascending,
     max_rows,
@@ -127,7 +157,13 @@ def make_agn_latex_table(
         err_value = abs(float(err_value))
         return rf"${value:.{nd_val}f} \pm {err_value:.{nd_err}f}$"
 
-    df = _prepare_agn_table_dataframe(agn_df, mu, mu_err, dm_interp)
+    df = _prepare_agn_table_dataframe(
+        agn_df,
+        mu,
+        mu_err,
+        dm_interp=dm_interp,
+        dmi_values=dmi_values,
+    )
 
     if max_rows is not None:
         df = df.sample(n=min(int(max_rows), len(df)), random_state=42)

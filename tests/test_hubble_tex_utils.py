@@ -165,6 +165,62 @@ def test_make_agn_csv_table_supports_2d_dm_interp_with_richer_inputs(tmp_path):
     np.testing.assert_allclose(csv_df["apparent_mag_2500_corr"], [19.65])
 
 
+def test_make_agn_tables_support_direct_dmi_values_without_dm_interp(tmp_path):
+    df = pd.concat([_make_table_df(), _make_table_df()], ignore_index=True)
+    df.loc[1, "sdss_name"] = "223456.78+123456.7"
+    df.loc[1, "z"] = 2.3456
+    df.loc[1, "apparent_mag_2500"] = 21.15
+    dmi_values = np.array([0.25, 0.75], dtype=float)
+
+    csv_df = make_agn_csv_table(
+        df,
+        mu=np.array([44.21, 45.21]),
+        mu_err=np.array([0.13, 0.23]),
+        dm_interp=None,
+        dmi_values=dmi_values,
+        sort_by="z",
+        ascending=True,
+        write_path=str(tmp_path),
+    )
+    latex = make_agn_latex_table(
+        df,
+        mu=np.array([44.21, 45.21]),
+        mu_err=np.array([0.13, 0.23]),
+        dm_interp=None,
+        dmi_values=dmi_values,
+        sort_by="z",
+        ascending=True,
+        max_rows=30,
+        write_path=str(tmp_path),
+    )
+
+    np.testing.assert_allclose(
+        csv_df["apparent_mag_2500_corr"],
+        csv_df["apparent_mag_2500"] - dmi_values,
+    )
+    assert "$19.90 \\pm 0.07$" in latex
+
+
+def test_make_agn_csv_table_prefers_direct_dmi_values_and_falls_back_to_dm_interp(tmp_path):
+    df = pd.concat([_make_table_df(), _make_table_df()], ignore_index=True)
+    df.loc[1, "sdss_name"] = "223456.78+123456.7"
+    df.loc[1, "z"] = 2.3456
+    df.loc[1, "apparent_mag_2500"] = 21.15
+
+    csv_df = make_agn_csv_table(
+        df,
+        mu=np.array([44.21, 45.21]),
+        mu_err=np.array([0.13, 0.23]),
+        dm_interp=lambda points: np.full(np.asarray(points).shape[0], 0.5, dtype=float),
+        dmi_values=np.array([0.2, np.nan], dtype=float),
+        sort_by="z",
+        ascending=True,
+        write_path=str(tmp_path),
+    )
+
+    np.testing.assert_allclose(csv_df["apparent_mag_2500_corr"], [19.95, 20.65])
+
+
 def test_make_agn_latex_table_passes_psf_f_host_to_3d_dm_interp(tmp_path):
     df = _make_table_df()
     seen = {}
@@ -286,6 +342,33 @@ def test_make_agn_latex_table_raises_for_missing_required_columns(tmp_path, miss
             mu=np.array([44.21]),
             mu_err=np.array([0.13]),
             dm_interp=lambda points: np.zeros(np.asarray(points).shape[0], dtype=float),
+            sort_by="z",
+            ascending=True,
+            write_path=str(tmp_path),
+        )
+
+
+def test_make_agn_tables_raise_without_dm_interp_or_dmi_values(tmp_path):
+    df = _make_table_df()
+
+    with pytest.raises(ValueError, match="dm_interp or dmi_values"):
+        make_agn_latex_table(
+            df,
+            mu=np.array([44.21]),
+            mu_err=np.array([0.13]),
+            dm_interp=None,
+            sort_by="z",
+            ascending=True,
+            max_rows=30,
+            write_path=str(tmp_path),
+        )
+
+    with pytest.raises(ValueError, match="dm_interp or dmi_values"):
+        make_agn_csv_table(
+            df,
+            mu=np.array([44.21]),
+            mu_err=np.array([0.13]),
+            dm_interp=None,
             sort_by="z",
             ascending=True,
             write_path=str(tmp_path),
