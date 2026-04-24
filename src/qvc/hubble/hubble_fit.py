@@ -2580,6 +2580,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
             "apparent_mag_2500_err_term",
             "sigma_lens_term",
             "z_err_term",
+            "intrinsic_scatter_term",
         }
         if required_no_mpred_cols.issubset(hdbudget_df.columns):
             budget_mask = hdbudget_df["z"].between(z_range[0], z_range[1]).to_numpy(dtype=bool)
@@ -2587,6 +2588,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 np.square(hdbudget_df["apparent_mag_2500_err_term"].to_numpy(dtype=float))
                 + np.square(hdbudget_df["sigma_lens_term"].to_numpy(dtype=float))
                 + np.square(hdbudget_df["z_err_term"].to_numpy(dtype=float))
+                + np.square(hdbudget_df["intrinsic_scatter_term"].to_numpy(dtype=float))
             )
             if np.any(budget_mask):
                 chisq_red_hubble_debiased_no_mpred_err, _ = reduced_chi_squared(
@@ -2594,6 +2596,12 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                     sigma_no_mpred[budget_mask],
                     n_params=len(model_labels)-1,
                 )
+        else:
+            missing_no_mpred_cols = sorted(required_no_mpred_cols.difference(hdbudget_df.columns))
+            print(
+                "[WARNING] Skipping 'Hubble no Mpred err' reduced chi-squared "
+                f"because diagnostics CSV is missing required columns: {missing_no_mpred_cols}"
+            )
     plot_hubble_residual_normality(
         debiased_residuals[hubble_chi2_mask],
         mu_pred_std_debiased_with_scatter[hubble_chi2_mask],
