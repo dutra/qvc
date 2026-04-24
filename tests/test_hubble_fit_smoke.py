@@ -158,6 +158,59 @@ def test_log_likelihood_finite_on_fake_lcdm_data(fake_data):
     assert blob.shape == (3, len(df_agn))
 
 
+def test_compute_agn_likelihood_space_reduced_chi2_uses_only_agn_relevant_dof(fake_data):
+    df_agn, _ = fake_data
+    priors, model_labels, _ = hubble_model.get_model_params(
+        "Flatw0waCDM",
+        only_sna=False,
+        use_alpha_lambda_term=True,
+        use_eta_sigma_term=True,
+        use_redshift_log_f_term=True,
+    )
+    theta = np.array([(priors[key][0] + priors[key][1]) / 2.0 for key in model_labels], dtype=float)
+    flat_samples = np.tile(theta[None, :], (4, 1))
+
+    chi2_red, meta = hubble_fit.compute_agn_likelihood_space_reduced_chi2(
+        flat_samples,
+        model_labels,
+        df_agn,
+        "Flatw0waCDM",
+        z_pivot_agn=hubble_fit.z_pivot_agn,
+        use_alpha_lambda_term=True,
+        use_eta_sigma_term=True,
+        use_redshift_log_f_term=True,
+    )
+
+    expected_labels = {
+        "M0_agn",
+        "alpha_agn",
+        "beta_agn",
+        hubble_model.AGN_ALPHA_LAMBDA_PARAM,
+        hubble_model.AGN_ETA_SIGMA_PARAM,
+        "log_f",
+        hubble_model.AGN_LOGF_Z_PARAM,
+        "H0",
+        "Om0",
+        "w0",
+        "wa",
+    }
+
+    assert np.isfinite(chi2_red)
+    assert set(
+        hubble_fit._agn_likelihood_param_labels(
+            model_labels,
+            "Flatw0waCDM",
+            use_alpha_lambda_term=True,
+            use_eta_sigma_term=True,
+            use_redshift_log_f_term=True,
+        )
+    ) == expected_labels
+    assert "M0_sn" in model_labels
+    assert "M0_sn" not in expected_labels
+    assert meta["n_params"] == len(expected_labels)
+    assert meta["dof"] == len(df_agn) - len(expected_labels)
+
+
 def test_compute_direct_full_sample_completeness_summaries_freezes_fit_pivots(fake_data):
     df_agn, df_pantheon = fake_data
     df_fit = df_agn.iloc[:3].copy()

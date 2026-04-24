@@ -84,6 +84,7 @@ from qvc.hubble.hubble_plotting import (
 )
 from qvc.hubble.tex_utils import make_agn_csv_table, make_agn_latex_table
 from qvc.hubble.hubble_model import (
+    AGN_LOGF_Z_PARAM,
     agn_model_pack_obs,
     agn_model_pack_params,
     evaluate_log_f,
@@ -163,6 +164,42 @@ def _cosmo_from_params(cosmo_model, params, zp):
     raise ValueError(f"Invalid cosmology model: {cosmo_model!r}")
 
 
+def _agn_likelihood_param_labels(
+    model_labels,
+    cosmo_model,
+    *,
+    use_alpha_lambda_term=False,
+    use_eta_sigma_term=False,
+    use_redshift_log_f_term=False,
+):
+    allowed_labels = {
+        "M0_agn",
+        "alpha_agn",
+        "beta_agn",
+        "log_f",
+        "H0",
+        "Om0",
+    }
+    if cosmo_model == "FlatwCDM":
+        allowed_labels.add("w0")
+    elif cosmo_model == "Flatw0waCDM":
+        allowed_labels.update({"w0", "wa"})
+    elif cosmo_model == "FlatwpwaCDM":
+        allowed_labels.update({"wp", "wa"})
+    elif cosmo_model != "FlatLambdaCDM":
+        raise ValueError(f"Invalid cosmology model: {cosmo_model!r}")
+
+    req_params, _, _ = get_agn_model_spec(
+        use_alpha_lambda_term=use_alpha_lambda_term,
+        use_eta_sigma_term=use_eta_sigma_term,
+    )
+    allowed_labels.update(req_params)
+    if use_redshift_log_f_term:
+        allowed_labels.add(AGN_LOGF_Z_PARAM)
+
+    return [label for label in model_labels if label in allowed_labels]
+
+
 def compute_agn_likelihood_space_reduced_chi2(
     flat_samples,
     model_labels,
@@ -175,8 +212,16 @@ def compute_agn_likelihood_space_reduced_chi2(
     use_redshift_log_f_term=False,
 ):
     """Compute AGN chi2 with the same residual and variance as the AGN likelihood."""
+    agn_likelihood_labels = _agn_likelihood_param_labels(
+        model_labels,
+        cosmo_model,
+        use_alpha_lambda_term=use_alpha_lambda_term,
+        use_eta_sigma_term=use_eta_sigma_term,
+        use_redshift_log_f_term=use_redshift_log_f_term,
+    )
+    n_agn_params = len(agn_likelihood_labels)
     if df_agn_fit_selection is None or len(df_agn_fit_selection) == 0:
-        return np.nan, {"chi2": np.nan, "dof": 0, "N_eff": 0, "n_params": len(model_labels)}
+        return np.nan, {"chi2": np.nan, "dof": 0, "N_eff": 0, "n_params": n_agn_params}
 
     samples = np.asarray(flat_samples, dtype=float)
     if samples.ndim != 2 or samples.shape[1] != len(model_labels):
@@ -241,7 +286,7 @@ def compute_agn_likelihood_space_reduced_chi2(
     return reduced_chi_squared(
         mu_pred - mu_cosmo,
         mu_err,
-        n_params=len(model_labels),
+        n_params=n_agn_params,
     )
 
 
