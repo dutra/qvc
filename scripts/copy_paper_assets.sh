@@ -120,10 +120,10 @@ if [[ -z "$SPEED" || -z "$FIDUCIAL_DIR" || -z "$RESTRICTED_DIR" ]]; then
 fi
 
 case "$SPEED" in
-  production|test|fast|dev)
+  production|standard|quick|fastest)
     ;;
   *)
-    echo "error: --speed must be one of: production, test, fast, dev" >&2
+    echo "error: --speed must be one of: production, standard, quick, fastest" >&2
     exit 1
     ;;
 esac

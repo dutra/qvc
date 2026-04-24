@@ -451,7 +451,7 @@ def plot_sigma_tau_identity_grid(
                     [diag_lo, diag_hi],
                     ls="--",
                     lw=2.0,
-                    color=COLORS.get(band, "0.2"),
+                    color=COLORS.get(band, "m"),
                     zorder=-4,
                 )
             ax.set_xlim(*row_lims)
