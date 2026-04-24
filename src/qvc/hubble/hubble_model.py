@@ -221,7 +221,12 @@ def _fixed_pivot_from_observable(key, values):
     return pivot
 
 
-def agn_model_pack_obs(obs_dict, use_alpha_lambda_term=False, use_eta_sigma_term=False):
+def agn_model_pack_obs(
+    obs_dict,
+    use_alpha_lambda_term=False,
+    use_eta_sigma_term=False,
+    pivot_values=None,
+):
     _, req_obs, req_errs = get_agn_model_spec(
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
@@ -230,10 +235,20 @@ def agn_model_pack_obs(obs_dict, use_alpha_lambda_term=False, use_eta_sigma_term
     _require(req_errs, obs_dict, "errors")
     obs = np.array([obs_dict[k] for k in req_obs], dtype=float)
     err = np.array([obs_dict[k] for k in req_errs], dtype=float)
-    pivots = {k: _fixed_pivot_from_observable(k, obs_dict[k]) for k in req_obs}
-    # pivots["log_tau_uv_rf"] = np.log10(500)
-    # pivots["log_sigma_uv"]  = np.log10(0.2)
-    pivots = np.array([pivots[k] for k in req_obs], dtype=float)
+    if pivot_values is None:
+        pivots = {k: _fixed_pivot_from_observable(k, obs_dict[k]) for k in req_obs}
+        # pivots["log_tau_uv_rf"] = np.log10(500)
+        # pivots["log_sigma_uv"]  = np.log10(0.2)
+        pivots = np.array([pivots[k] for k in req_obs], dtype=float)
+    elif isinstance(pivot_values, dict):
+        _require(req_obs, pivot_values, "pivot_values")
+        pivots = np.array([pivot_values[k] for k in req_obs], dtype=float)
+    else:
+        pivots = np.asarray(pivot_values, dtype=float)
+        if pivots.shape != (len(req_obs),):
+            raise ValueError(
+                f"pivot_values has shape {pivots.shape}, but expected {(len(req_obs),)}."
+            )
     return obs, err, pivots
 
 def hinge(x, a, b, x0):

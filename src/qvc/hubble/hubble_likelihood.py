@@ -225,6 +225,7 @@ def log_likelihood(theta, *, agn_data, pantheon_data,
                    cosmo_model, completeness_params,
                    z_pivot_agn,
                    agn_calibrators_data=None,
+                   agn_pivot_arr=None,
                    use_planck_h0_prior=False,
                    use_ceph_dist_calibration=True,
                    use_alpha_lambda_term=False,
@@ -287,6 +288,7 @@ def log_likelihood(theta, *, agn_data, pantheon_data,
         agn_data,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        pivot_values=agn_pivot_arr,
     )
 
     M_pred = M_model_agn(

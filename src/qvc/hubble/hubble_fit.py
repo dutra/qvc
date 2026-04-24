@@ -94,7 +94,6 @@ from qvc.hubble.hubble_model import (
 )
 from qvc.hubble.hubble_completeness_refactored import (
     COMPLETENESS_FHOST_COL,
-    evaluate_dm_interp,
     get_completeness_function_2d,
     get_completeness_function_3d_fhost,
     get_completeness_function_4d_fhost_alpha,
@@ -909,6 +908,75 @@ def _select_agn_fit_selection(
     return df_agn[df_agn["z"].between(z_range[0], z_range[1])].copy()
 
 
+def _build_completeness_params(
+    df_agn_completeness,
+    df_agn_all,
+    *,
+    completeness,
+    completeness_mode,
+    completeness_sim_file,
+    plot_path,
+    plot=False,
+):
+    if not completeness:
+        return None
+
+    if completeness_mode in ("3d_fhost", "4d_fhost_alpha"):
+        if COMPLETENESS_FHOST_COL not in df_agn_completeness.columns:
+            raise KeyError(
+                f"completeness_mode={completeness_mode!r} requires "
+                f"df_agn_completeness[{COMPLETENESS_FHOST_COL!r}]."
+            )
+        bad_fhost = ~np.isfinite(
+            df_agn_completeness[COMPLETENESS_FHOST_COL].to_numpy(dtype=float)
+        )
+        if np.any(bad_fhost):
+            raise ValueError(
+                f"completeness_mode={completeness_mode!r} requires finite "
+                f"{COMPLETENESS_FHOST_COL} for all AGN used to estimate the "
+                "completeness map; "
+                f"found {np.count_nonzero(bad_fhost)} non-finite rows."
+            )
+    if completeness_mode == "4d_fhost_alpha":
+        if "alpha_lambda" not in df_agn_completeness.columns:
+            raise KeyError(
+                "completeness_mode='4d_fhost_alpha' requires "
+                "df_agn_completeness['alpha_lambda']."
+            )
+        bad_alpha = ~np.isfinite(
+            df_agn_completeness["alpha_lambda"].to_numpy(dtype=float)
+        )
+        if np.any(bad_alpha):
+            raise ValueError(
+                "completeness_mode='4d_fhost_alpha' requires finite alpha_lambda "
+                "for all AGN used to estimate the completeness map; "
+                f"found {np.count_nonzero(bad_alpha)} non-finite rows."
+            )
+
+    if completeness_mode == "4d_fhost_alpha":
+        return get_completeness_function_4d_fhost_alpha(
+            df_agn_completeness,
+            sim_file=completeness_sim_file,
+            plot=plot,
+            plot_path=plot_path,
+            df_agn_fhost_population=df_agn_all,
+        )
+    if completeness_mode == "3d_fhost":
+        return get_completeness_function_3d_fhost(
+            df_agn_completeness,
+            sim_file=completeness_sim_file,
+            plot=plot,
+            plot_path=plot_path,
+            df_agn_fhost_population=df_agn_all,
+        )
+    return get_completeness_function_2d(
+        df_agn_completeness,
+        sim_file=completeness_sim_file,
+        plot=plot,
+        plot_path=plot_path,
+    )
+
+
 def _map_fit_values_to_plot_sample(
     df_plot,
     df_fit_selection,
@@ -963,6 +1031,84 @@ def _extract_fit_values_from_plot_sample(
         )
     df_plot_index_positions = pd.Series(np.arange(len(df_plot)), index=df_plot.index)
     return plot_values[df_plot_index_positions.loc[fit_indices].to_numpy()]
+
+
+def _compute_direct_full_sample_completeness_summaries(
+    flat_samples,
+    *,
+    df_agn_fit_selection,
+    df_agn_plot_sample,
+    df_pantheon,
+    _sna_L,
+    _sna_Lower,
+    _sna_LogdetCov,
+    cosmo_model,
+    completeness_params,
+    z_pivot_agn,
+    use_full_cov,
+    disable_ceph_dist_calibration,
+    use_alpha_lambda_term,
+    use_eta_sigma_term,
+    use_redshift_log_f_term,
+):
+    n_plot = len(df_agn_plot_sample)
+    if n_plot == 0:
+        empty = np.empty(0, dtype=float)
+        return empty, empty, None
+
+    if len(df_agn_fit_selection) == 0:
+        raise ValueError("Cannot compute direct full-sample completeness summaries with an empty fit selection.")
+
+    _, _, fit_pivot_arr = agn_model_pack_obs(
+        df_agn_fit_selection,
+        use_alpha_lambda_term=use_alpha_lambda_term,
+        use_eta_sigma_term=use_eta_sigma_term,
+    )
+
+    if completeness_params is None:
+        zeros = np.zeros(n_plot, dtype=float)
+        return zeros, zeros, None
+
+    dmi_draws = []
+    sigma_sel_draws = []
+    for theta in np.asarray(flat_samples, dtype=float):
+        _, blob = log_likelihood(
+            theta,
+            agn_data=df_agn_plot_sample,
+            pantheon_data=df_pantheon,
+            _sna_L=_sna_L,
+            _sna_Lower=_sna_Lower,
+            _sna_LogdetCov=_sna_LogdetCov,
+            cosmo_model=cosmo_model,
+            completeness_params=completeness_params,
+            z_pivot_agn=z_pivot_agn,
+            agn_calibrators_data=None,
+            agn_pivot_arr=fit_pivot_arr,
+            use_planck_h0_prior=disable_ceph_dist_calibration,
+            use_ceph_dist_calibration=not disable_ceph_dist_calibration,
+            use_alpha_lambda_term=use_alpha_lambda_term,
+            use_eta_sigma_term=use_eta_sigma_term,
+            use_redshift_log_f_term=use_redshift_log_f_term,
+            only_sna=False,
+            use_full_cov=use_full_cov,
+        )
+        blob = np.asarray(blob, dtype=float)
+        dmi_draws.append(blob[1])
+        sigma_sel_draws.append(blob[2])
+
+    dmi_draws = np.asarray(dmi_draws, dtype=float)
+    sigma_sel_draws = np.asarray(sigma_sel_draws, dtype=float)
+    dmi_posterior_median_full_direct = np.median(dmi_draws, axis=0)
+    dmi_posterior_sigma_full_direct = 0.5 * (
+        np.percentile(dmi_draws, 84, axis=0)
+        - np.percentile(dmi_draws, 16, axis=0)
+    )
+    dmi_selection_sigma_full_direct = np.median(sigma_sel_draws, axis=0)
+    return (
+        dmi_posterior_median_full_direct,
+        dmi_posterior_sigma_full_direct,
+        dmi_selection_sigma_full_direct,
+    )
 
 
 def _build_sigma_clip_diagnostics(
@@ -1334,50 +1480,16 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                 plot_path,
                 area_deg2=completeness_area_deg2,
             )
-        if completeness_mode in ("3d_fhost", "4d_fhost_alpha"):
-            if COMPLETENESS_FHOST_COL not in df_agn_completeness.columns:
-                raise KeyError(
-                    f"completeness_mode={completeness_mode!r} requires "
-                    f"df_agn_completeness[{COMPLETENESS_FHOST_COL!r}]."
-                )
-            bad_fhost = ~np.isfinite(df_agn_completeness[COMPLETENESS_FHOST_COL].to_numpy(dtype=float))
-            if np.any(bad_fhost):
-                raise ValueError(
-                    f"completeness_mode={completeness_mode!r} requires finite {COMPLETENESS_FHOST_COL} "
-                    "for all AGN used to estimate the completeness map; "
-                    f"found {np.count_nonzero(bad_fhost)} non-finite rows."
-                )
-        if completeness_mode == "4d_fhost_alpha":
-            if "alpha_lambda" not in df_agn_completeness.columns:
-                raise KeyError("completeness_mode='4d_fhost_alpha' requires df_agn_completeness['alpha_lambda'].")
-            bad_alpha = ~np.isfinite(df_agn_completeness["alpha_lambda"].to_numpy(dtype=float))
-            if np.any(bad_alpha):
-                raise ValueError(
-                    "completeness_mode='4d_fhost_alpha' requires finite alpha_lambda for all AGN used "
-                    "to estimate the completeness map; "
-                    f"found {np.count_nonzero(bad_alpha)} non-finite rows."
-                )
         print(f"Building {completeness_mode} completeness map using mock catalog: {completeness_sim_file}")
-        if completeness_mode == "4d_fhost_alpha":
-            completeness_params = get_completeness_function_4d_fhost_alpha(
-                df_agn_completeness,
-                sim_file=completeness_sim_file,
-                plot=not compare_sigma_only,
-                plot_path=plot_path,
-                df_agn_fhost_population=df_agn_all,
-            )
-        elif completeness_mode == "3d_fhost":
-            completeness_params = get_completeness_function_3d_fhost(
-                df_agn_completeness,
-                sim_file=completeness_sim_file,
-                plot=not compare_sigma_only,
-                plot_path=plot_path,
-                df_agn_fhost_population=df_agn_all,
-            )
-        else:
-            completeness_params = get_completeness_function_2d(
-                df_agn_completeness, sim_file=completeness_sim_file, plot=not compare_sigma_only, plot_path=plot_path
-            )
+        completeness_params = _build_completeness_params(
+            df_agn_completeness,
+            df_agn_all,
+            completeness=completeness,
+            completeness_mode=completeness_mode,
+            completeness_sim_file=completeness_sim_file,
+            plot_path=plot_path,
+            plot=not compare_sigma_only,
+        )
     else:
         completeness_params = None
 
@@ -1797,6 +1909,22 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
     pass1_checkpoint_file = checkpoint_paths["pass1"]
     pass2_checkpoint_file = checkpoint_paths["pass2"]
     single_checkpoint_file = checkpoint_paths["single"]
+    direct_completeness_params = None
+
+    def _get_direct_completeness_params():
+        nonlocal direct_completeness_params
+        if direct_completeness_params is None:
+            direct_completeness_params = _build_completeness_params(
+                df_agn_full_sample_preclip,
+                df_agn_all,
+                completeness=completeness,
+                completeness_mode=completeness_mode,
+                completeness_sim_file=completeness_sim_file,
+                plot_path=plot_path,
+                plot=False,
+            )
+        return direct_completeness_params
+
     skip_pass1_sampling = False
     pass1_resume_arg = False
     pass2_resume_arg = False
@@ -1884,29 +2012,27 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 resume_replot_with_cuts=False,
                 df_agn_completeness=df_agn_full_sample_preclip,
             )
-            dmi_posterior_median_pass1_full = _map_fit_values_to_plot_sample(
-                df_agn_full_sample_preclip,
-                df_agn_pass1_fit_selection,
-                dmi_posterior_median_pass1,
-                value_name="dmi_posterior_median_pass1",
-                uniform_redshift_distribution=uniform_redshift_distribution,
+            (
+                dmi_posterior_median_pass1_full,
+                dmi_posterior_sigma_pass1_full,
+                dmi_selection_sigma_pass1_full,
+            ) = _compute_direct_full_sample_completeness_summaries(
+                flat_samples_pass1,
+                df_agn_fit_selection=df_agn_pass1_fit_selection,
+                df_agn_plot_sample=df_agn_full_sample_preclip,
+                df_pantheon=df_pantheon,
+                _sna_L=_sna_L,
+                _sna_Lower=_sna_Lower,
+                _sna_LogdetCov=_sna_LogdetCov,
+                cosmo_model=cosmo_model,
+                completeness_params=_get_direct_completeness_params(),
+                z_pivot_agn=z_pivot_agn,
+                use_full_cov=use_full_cov,
+                disable_ceph_dist_calibration=disable_ceph_dist_calibration,
+                use_alpha_lambda_term=use_alpha_lambda_term,
+                use_eta_sigma_term=use_eta_sigma_term,
+                use_redshift_log_f_term=use_redshift_log_f_term,
             )
-            dmi_posterior_sigma_pass1_full = _map_fit_values_to_plot_sample(
-                df_agn_full_sample_preclip,
-                df_agn_pass1_fit_selection,
-                dmi_posterior_sigma_pass1,
-                value_name="dmi_posterior_sigma_pass1",
-                uniform_redshift_distribution=uniform_redshift_distribution,
-            )
-            dmi_selection_sigma_pass1_full = None
-            if dmi_selection_sigma_posterior_median_pass1 is not None:
-                dmi_selection_sigma_pass1_full = _map_fit_values_to_plot_sample(
-                    df_agn_full_sample_preclip,
-                    df_agn_pass1_fit_selection,
-                    dmi_selection_sigma_posterior_median_pass1,
-                    value_name="dmi_selection_sigma_posterior_median_pass1",
-                    uniform_redshift_distribution=uniform_redshift_distribution,
-                )
             pass1_residuals_full, pass1_clipping_sigma_full, _, _, _ = plot_hubble(
                 flat_samples_pass1,
                 df_agn_full_sample_preclip,
@@ -2186,22 +2312,32 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         filename="sigma_uv_mpred_correction_postcut.pdf",
     )
 
-    print("Plotting predicted L2500 vs ...")
-    dmi_posterior_median_full = None
-    if uniform_redshift_distribution:
-        print(
-            "Uniform-redshift selection uses resampling with replacement; "
-            "using dm_interp-only debiasing in L2500 plots."
-        )
-    else:
-        dmi_posterior_median_full = _map_fit_values_to_plot_sample(
-            df_agn_pass2_plot_sample,
-            df_agn_pass2_fit_selection,
-            dmi_posterior_median,
-            value_name="dmi_posterior_median",
-            uniform_redshift_distribution=uniform_redshift_distribution,
-        )
+    (
+        dmi_posterior_median_full_direct,
+        dmi_posterior_sigma_full_direct,
+        dmi_selection_sigma_full_direct,
+    ) = _compute_direct_full_sample_completeness_summaries(
+        flat_samples,
+        df_agn_fit_selection=df_agn_pass2_fit_selection,
+        df_agn_plot_sample=df_agn_pass2_plot_sample,
+        df_pantheon=df_pantheon,
+        _sna_L=_sna_L,
+        _sna_Lower=_sna_Lower,
+        _sna_LogdetCov=_sna_LogdetCov,
+        cosmo_model=cosmo_model,
+        completeness_params=_get_direct_completeness_params(),
+        z_pivot_agn=z_pivot_agn,
+        use_full_cov=use_full_cov,
+        disable_ceph_dist_calibration=disable_ceph_dist_calibration,
+        use_alpha_lambda_term=use_alpha_lambda_term,
+        use_eta_sigma_term=use_eta_sigma_term,
+        use_redshift_log_f_term=use_redshift_log_f_term,
+    )
+    dmi_posterior_median_full = dmi_posterior_median_full_direct
+    dmi_posterior_sigma_full = dmi_posterior_sigma_full_direct
+    dmi_selection_sigma_full = dmi_selection_sigma_full_direct
 
+    print("Plotting predicted L2500 vs ...")
     plot_predicted_L2500_vs_sigmahat(
         flat_samples,
         df_agn_pass2_plot_sample,
@@ -2240,7 +2376,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         debias=True,
         dm_interp=dm_interp,
         dmi_values=dmi_posterior_median_full,
-        dmi_selection_sigma_interp=dmi_selection_sigma_interp,
+        dmi_selection_sigma=dmi_selection_sigma_full,
         show_residuals=False,
         show=False,
         plot_path=plot_path,
@@ -2258,7 +2394,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         debias=True,
         dm_interp=dm_interp,
         dmi_values=dmi_posterior_median_full,
-        dmi_selection_sigma_interp=dmi_selection_sigma_interp,
+        dmi_selection_sigma=dmi_selection_sigma_full,
         show_residuals=True,
         show=False,
         plot_path=plot_path,
@@ -2274,7 +2410,8 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         df_agn_pass2_plot_sample,
         cosmo_model,
         z_pivot_agn,
-        dm_interp,
+        dm_interp=dm_interp,
+        dmi_values=dmi_posterior_median_full,
         plot_path=plot_path,
         show=False,
         use_alpha_lambda_term=use_alpha_lambda_term,
@@ -2300,56 +2437,9 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
     )
 
     print("Plotting Hubble diagram...")
-    dmi_posterior_sigma_full = None
-    dmi_selection_sigma_full = None
-    if uniform_redshift_distribution:
-        print(
-            "Uniform-redshift selection uses resampling with replacement; "
-            "disabling sigma_dmi overlay on full-sample Hubble plots."
-        )
-    else:
-        dmi_posterior_sigma_full = _map_fit_values_to_plot_sample(
-            df_agn_pass2_plot_sample,
-            df_agn_pass2_fit_selection,
-            dmi_posterior_sigma,
-            value_name="dmi_posterior_sigma",
-            uniform_redshift_distribution=uniform_redshift_distribution,
-        )
-        if dmi_selection_sigma_posterior_median is not None:
-            dmi_selection_sigma_full = _map_fit_values_to_plot_sample(
-                df_agn_pass2_plot_sample,
-                df_agn_pass2_fit_selection,
-                dmi_selection_sigma_posterior_median,
-                value_name="dmi_selection_sigma_posterior_median",
-                uniform_redshift_distribution=uniform_redshift_distribution,
-            )
-    if dmi_selection_sigma_interp is not None:
-        interp_cols = [
-            np.asarray(df_agn_pass2_plot_sample["z"].values, dtype=float),
-            np.asarray(df_agn_pass2_plot_sample["apparent_mag_2500"].values, dtype=float),
-        ]
-        if COMPLETENESS_FHOST_COL in df_agn_pass2_plot_sample.columns:
-            interp_cols.append(np.asarray(df_agn_pass2_plot_sample[COMPLETENESS_FHOST_COL].values, dtype=float))
-            if "alpha_lambda" in df_agn_pass2_plot_sample.columns:
-                interp_cols.append(np.asarray(df_agn_pass2_plot_sample["alpha_lambda"].values, dtype=float))
-        dmi_selection_sigma_full = np.asarray(
-            dmi_selection_sigma_interp(np.column_stack(interp_cols)),
-            dtype=float,
-        )
     if dmi_posterior_median_full is not None:
-        dmi_posterior_median_full_plot = np.where(
-            np.isfinite(dmi_posterior_median_full),
-            dmi_posterior_median_full,
-            evaluate_dm_interp(
-                dm_interp,
-                df_agn_pass2_plot_sample["z"].values,
-                df_agn_pass2_plot_sample["apparent_mag_2500"].values,
-                f_host_2500_psf=df_agn_pass2_plot_sample[COMPLETENESS_FHOST_COL].values if COMPLETENESS_FHOST_COL in df_agn_pass2_plot_sample.columns else None,
-                alpha_lambda=df_agn_pass2_plot_sample["alpha_lambda"].values if "alpha_lambda" in df_agn_pass2_plot_sample.columns else None,
-            ),
-        )
         plot_completeness_diagnostics(
-            dmi_posterior_median_full_plot,
+            dmi_posterior_median_full,
             df_agn_pass2_plot_sample["z"].values,
             df_agn_pass2_plot_sample["apparent_mag_2500"].values,
             integrals_max_w=None,
@@ -2578,7 +2668,8 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         debias=True,
         show=False,
         dm_interp=dm_interp,
-        dmi_selection_sigma_interp=dmi_selection_sigma_interp,
+        dmi_values=dmi_posterior_median_full,
+        dmi_selection_sigma=dmi_selection_sigma_full,
         plot_path=plot_path,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
@@ -2595,6 +2686,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         z_pivot_agn,
         debias=True,
         dm_interp=dm_interp,
+        dmi_values=dmi_posterior_median_full,
         show=False,
         plot_path=plot_path,
         z_range=z_range,
@@ -2611,6 +2703,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         z_pivot_agn,
         debias=True,
         dm_interp=dm_interp,
+        dmi_values=dmi_posterior_median_full,
         show=False,
         plot_path=plot_path,
         z_cut=1.5,
@@ -2628,6 +2721,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         z_pivot_agn,
         debias=True,
         dm_interp=dm_interp,
+        dmi_values=dmi_posterior_median_full,
         show=False,
         plot_path=plot_path,
         z_range=z_range,
@@ -2646,6 +2740,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         z_pivot_agn,
         debias=True,
         dm_interp=dm_interp,
+        dmi_values=dmi_posterior_median_full,
         show=False,
         plot_path=plot_path,
         key_y='z',
@@ -2664,6 +2759,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         z_pivot_agn,
         debias=True,
         dm_interp=dm_interp,
+        dmi_values=dmi_posterior_median_full,
         show=False,
         plot_path=plot_path,
         z_range=z_range,

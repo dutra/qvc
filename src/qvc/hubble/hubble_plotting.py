@@ -477,6 +477,47 @@ def _resolve_debias_values(
     return np.where(np.isfinite(dmi), dmi, dmi_interp)
 
 
+def _resolve_selection_sigma_values(
+    df_agn,
+    *,
+    dmi_selection_sigma=None,
+    dmi_selection_sigma_interp=None,
+    sigma_sel_floor_mag=0.05,
+):
+    sigma_sel = None
+    if dmi_selection_sigma is not None:
+        sigma_sel = np.asarray(dmi_selection_sigma, dtype=float)
+        if sigma_sel.shape != (len(df_agn),):
+            raise ValueError(
+                "dmi_selection_sigma has shape "
+                f"{sigma_sel.shape}, but expected {(len(df_agn),)}."
+            )
+
+    if dmi_selection_sigma_interp is not None:
+        sigma_sel_interp = evaluate_dm_interp(
+            dmi_selection_sigma_interp,
+            df_agn["z"].values,
+            df_agn["apparent_mag_2500"].values,
+            f_host_2500_psf=df_agn.get(COMPLETENESS_FHOST_COL),
+            alpha_lambda=df_agn.get("alpha_lambda"),
+        )
+        if sigma_sel is None:
+            sigma_sel = sigma_sel_interp
+        else:
+            sigma_sel = np.where(np.isfinite(sigma_sel), sigma_sel, sigma_sel_interp)
+
+    if sigma_sel is None:
+        return None
+
+    sigma_sel = np.asarray(sigma_sel, dtype=float)
+    sigma_sel_valid = np.isfinite(sigma_sel) & (sigma_sel > 0.0)
+    return np.where(
+        sigma_sel_valid,
+        np.maximum(sigma_sel, float(sigma_sel_floor_mag)),
+        np.nan,
+    )
+
+
 def _coerce_dropped_bands(value):
     if isinstance(value, (list, tuple, set)):
         return set(value)
@@ -781,8 +822,9 @@ def plot_blr_line_lags_vs_l2500(
     df_agn,
     cosmo_model,
     z_pivot_agn,
-    dm_interp,
+    dm_interp=None,
     *,
+    dmi_values=None,
     plot_path="plots/hubble",
     show=False,
     prob_thresh=0.9,
@@ -793,7 +835,7 @@ def plot_blr_line_lags_vs_l2500(
     use_redshift_log_f_term=None,
 ):
     """Plot BLR lag against line-matched debiased continuum luminosity."""
-    if df_agn.empty or dm_interp is None:
+    if df_agn.empty or (dm_interp is None and dmi_values is None):
         return None
     required = {"z", "apparent_mag_2500"}
     if not required.issubset(df_agn.columns):
@@ -818,12 +860,10 @@ def plot_blr_line_lags_vs_l2500(
 
     z = pd.to_numeric(df_agn["z"], errors="coerce").to_numpy(dtype=float)
     m2500 = pd.to_numeric(df_agn["apparent_mag_2500"], errors="coerce").to_numpy(dtype=float)
-    dmi = evaluate_dm_interp(
-        dm_interp,
-        z,
-        m2500,
-        f_host_2500_psf=df_agn.get(COMPLETENESS_FHOST_COL),
-        alpha_lambda=df_agn.get("alpha_lambda"),
+    dmi = _resolve_debias_values(
+        df_agn,
+        dm_interp=dm_interp,
+        dmi_values=dmi_values,
     )
     actual_M2500 = (m2500 - dmi) - cosmo.distmod(z).value
     logL2500_debiased = convert_M2500_to_logL2500(actual_M2500)
@@ -6010,6 +6050,7 @@ def plot_predicted_vs_actual_M2500(
     z_pivot_agn,
     plot_path="plots/hubble",
     dm_interp=None,  # de-biasing function (optional)
+    dmi_values=None,
     debias=False,
     show=False,
     cmap="inferno",       # (unused for discrete bins now, kept for API compatibility)
@@ -6025,6 +6066,7 @@ def plot_predicted_vs_actual_M2500(
     use_alpha_lambda_term=None,
     use_eta_sigma_term=None,
     use_redshift_log_f_term=None,
+    dmi_selection_sigma=None,
     dmi_selection_sigma_interp=None,
     sigma_sel_floor_mag=0.05,
 ):
@@ -6176,32 +6218,22 @@ def plot_predicted_vs_actual_M2500(
 
     # --- actual minus optional debias ---
     if debias:
-        actual_M_2500_eff = actual_M_2500 - evaluate_dm_interp(
-            dm_interp,
-            df_agn["z"].values,
-            df_agn["apparent_mag_2500"].values,
-            f_host_2500_psf=df_agn.get(COMPLETENESS_FHOST_COL),
-            alpha_lambda=df_agn.get("alpha_lambda"),
+        actual_M_2500_eff = actual_M_2500 - _resolve_debias_values(
+            df_agn,
+            dm_interp=dm_interp,
+            dmi_values=dmi_values,
         )
     else:
         actual_M_2500_eff = actual_M_2500
 
     residuals_all = M_2500_pred - actual_M_2500_eff               # mag
     sigma_sel = None
-    if debias and dmi_selection_sigma_interp is not None:
-        sigma_sel = evaluate_dm_interp(
-            dmi_selection_sigma_interp,
-            df_agn["z"].values,
-            df_agn["apparent_mag_2500"].values,
-            f_host_2500_psf=df_agn.get(COMPLETENESS_FHOST_COL),
-            alpha_lambda=df_agn.get("alpha_lambda"),
-        )
-        sigma_sel = np.asarray(sigma_sel, dtype=float)
-        sigma_sel_valid = np.isfinite(sigma_sel) & (sigma_sel > 0.0)
-        sigma_sel = np.where(
-            sigma_sel_valid,
-            np.maximum(sigma_sel, float(sigma_sel_floor_mag)),
-            np.nan,
+    if debias:
+        sigma_sel = _resolve_selection_sigma_values(
+            df_agn,
+            dmi_selection_sigma=dmi_selection_sigma,
+            dmi_selection_sigma_interp=dmi_selection_sigma_interp,
+            sigma_sel_floor_mag=sigma_sel_floor_mag,
         )
     sigma_all = np.sqrt(
         M_2500_pred_err**2 + xerr**2 + sigma_intrinsic**2
@@ -6301,17 +6333,7 @@ def plot_predicted_vs_actual_M2500(
         if not np.any(bin_mask):
             ax.axis("off"); continue
 
-        actual_M_2500_bin = actual_M_2500[bin_mask].copy()
-        if debias:
-            actual_M_2500_bin -= evaluate_dm_interp(
-                dm_interp,
-                df_agn["z"][bin_mask],
-                df_agn["apparent_mag_2500"][bin_mask],
-                f_host_2500_psf=df_agn.get(COMPLETENESS_FHOST_COL, None)[bin_mask] if COMPLETENESS_FHOST_COL in df_agn.columns else None,
-                alpha_lambda=df_agn.get("alpha_lambda", None)[bin_mask] if "alpha_lambda" in df_agn.columns else None,
-            )
-
-        x = actual_M_2500_bin
+        x = actual_M_2500_eff[bin_mask]
         y = M_2500_pred[bin_mask]
         y_plot = M_2500_pred_plot[bin_mask]
         xerr_bin = xerr[bin_mask]
@@ -6574,7 +6596,7 @@ def _residual_axis_label(residual_label):
 
 def plot_full_residuals(
     df_agn, residuals, residuals_err, flat_samples, cosmo_model, z_pivot_agn,
-    debias=False, dm_interp=None, plot_path='plots/hubble', show=False,
+    debias=False, dm_interp=None, dmi_values=None, plot_path='plots/hubble', show=False,
     *, nbins=10, min_count=5, z_cut=None, key_y='residuals', key_color='z',
     z_range=(0.44, 3.16), residual_label='residuals', output_tag='full_residuals',
     max_categories=12, category_min_count=5, category_jitter=0.15,
@@ -6639,12 +6661,10 @@ def plot_full_residuals(
         frame['MY_M_2500'] = frame['apparent_mag_2500'].values - cosmo.distmod(frame['z'].values).value
 
         if debias:
-            delta = evaluate_dm_interp(
-                dm_interp,
-                frame["z"].values,
-                frame["apparent_mag_2500"].values,
-                f_host_2500_psf=frame.get(COMPLETENESS_FHOST_COL),
-                alpha_lambda=frame.get("alpha_lambda"),
+            delta = _resolve_debias_values(
+                frame,
+                dm_interp=dm_interp,
+                dmi_values=dmi_values,
             )
             frame['MY_M_2500'] -= delta
             frame['apparent_mag_2500'] -= delta
@@ -7333,7 +7353,7 @@ def plot_full_residuals(
 
 def plot_full_residuals_rz(
     df_agn, residuals, residuals_err, flat_samples, cosmo_model, z_pivot_agn,
-    debias=False, dm_interp=None, plot_path='plots/hubble', show=False,
+    debias=False, dm_interp=None, dmi_values=None, plot_path='plots/hubble', show=False,
     *, nbins=10, min_count=5, z_cut=None, key_y='r_z', key_color='z',
     z_range=(0.44, 3.16), nz_bins=12, z_min_count=8,
     lowess_frac=0.25, lowess_it=1, lowess_min_points=10,
@@ -7386,6 +7406,7 @@ def plot_full_residuals_rz(
         z_pivot_agn,
         debias=debias,
         dm_interp=dm_interp,
+        dmi_values=dmi_values,
         plot_path=plot_path,
         show=show,
         nbins=nbins,
@@ -7438,6 +7459,7 @@ def plot_predicted_L2500_vs_sigmahat(
     show_residuals=False, df_calibrators=None, z_range=(0.44, 3.16),
     use_alpha_lambda_term=None, use_eta_sigma_term=None, use_redshift_log_f_term=None,
     dmi_values=None,
+    dmi_selection_sigma=None,
     dmi_selection_sigma_interp=None,
     clipped_mask=None,
     sigma_sel_floor_mag=0.05,
@@ -7939,22 +7961,18 @@ def plot_predicted_L2500_vs_sigmahat(
     sigma_xy = np.abs(slope_at_data) * np.abs(sigma_x)
     sigma_chi_plot = np.sqrt(sigma_meas**2 + sigma_xy**2)
     sigma_chi_full = np.sqrt(sigma_meas**2 + sigma_xy**2 + sigma_int_log**2)
-    if debias and dmi_selection_sigma_interp is not None:
-        sigma_sel_mag = evaluate_dm_interp(
-            dmi_selection_sigma_interp,
-            d["z"].values,
-            d["apparent_mag_2500"].values,
-            f_host_2500_psf=d.get(COMPLETENESS_FHOST_COL),
-            alpha_lambda=d.get("alpha_lambda"),
+    if debias:
+        sigma_sel_mag = _resolve_selection_sigma_values(
+            d,
+            dmi_selection_sigma=dmi_selection_sigma,
+            dmi_selection_sigma_interp=dmi_selection_sigma_interp,
+            sigma_sel_floor_mag=sigma_sel_floor_mag,
         )
-        sigma_sel_mag = np.asarray(sigma_sel_mag, dtype=float)
-        sigma_sel_valid = np.isfinite(sigma_sel_mag) & (sigma_sel_mag > 0.0)
-        sigma_sel_log = np.full_like(sigma_sel_mag, np.nan, dtype=float)
-        sigma_sel_log[sigma_sel_valid] = (
-            np.maximum(sigma_sel_mag[sigma_sel_valid], float(sigma_sel_floor_mag))
-            / 2.5
-        )
-        sigma_chi_full = np.where(sigma_sel_valid, sigma_sel_log, sigma_chi_full)
+        if sigma_sel_mag is not None:
+            sigma_sel_valid = np.isfinite(sigma_sel_mag) & (sigma_sel_mag > 0.0)
+            sigma_sel_log = np.full_like(sigma_sel_mag, np.nan, dtype=float)
+            sigma_sel_log[sigma_sel_valid] = sigma_sel_mag[sigma_sel_valid] / 2.5
+            sigma_chi_full = np.where(sigma_sel_valid, sigma_sel_log, sigma_chi_full)
     good_plot = (
         np.isfinite(residuals_plot)
         & np.isfinite(sigma_chi_plot)

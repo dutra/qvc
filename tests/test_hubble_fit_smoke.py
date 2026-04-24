@@ -158,6 +158,106 @@ def test_log_likelihood_finite_on_fake_lcdm_data(fake_data):
     assert blob.shape == (3, len(df_agn))
 
 
+def test_compute_direct_full_sample_completeness_summaries_freezes_fit_pivots(fake_data):
+    df_agn, df_pantheon = fake_data
+    df_fit = df_agn.iloc[:3].copy()
+    df_plot = pd.concat(
+        [
+            df_fit,
+            df_fit.iloc[[0]].assign(
+                object_id="agn_outside",
+                z=3.4,
+                log_sigma_uv=0.8,
+                log_tau_uv_rf=4.2,
+                apparent_mag_2500=22.1,
+            ),
+        ],
+        ignore_index=True,
+    )
+
+    priors, model_labels, _ = hubble_model.get_model_params("FlatLambdaCDM", only_sna=False)
+    params = {key: (priors[key][0] + priors[key][1]) / 2.0 for key in model_labels}
+    params["alpha_agn"] = -2.0
+    params["beta_agn"] = -1.0
+    theta = np.array([params[key] for key in model_labels], dtype=float)
+    flat_samples = np.tile(theta[None, :], (5, 1))
+
+    class SimpleCompleteness:
+        mode = "2d"
+
+        def __call__(self, m_grid, z):
+            m_grid = np.asarray(m_grid, dtype=float)
+            z = np.asarray(z, dtype=float)
+            return 1.0 / (1.0 + np.exp((m_grid - (22.2 + 0.15 * z)) / 0.2))
+
+    completeness_params = (
+        SimpleCompleteness(),
+        np.linspace(18.0, 24.5, 96),
+    )
+
+    _, _, fit_pivots = hubble_model.agn_model_pack_obs(df_fit)
+    _, _, plot_pivots = hubble_model.agn_model_pack_obs(df_plot)
+    _, fit_blob = hubble_likelihood.log_likelihood(
+        theta,
+        agn_data=df_fit,
+        pantheon_data=df_pantheon,
+        _sna_L=None,
+        _sna_Lower=True,
+        _sna_LogdetCov=None,
+        cosmo_model="FlatLambdaCDM",
+        completeness_params=completeness_params,
+        z_pivot_agn=hubble_fit.z_pivot_agn,
+        agn_calibrators_data=None,
+        agn_pivot_arr=fit_pivots,
+        only_sna=False,
+        use_full_cov=False,
+    )
+    _, naive_plot_blob = hubble_likelihood.log_likelihood(
+        theta,
+        agn_data=df_plot,
+        pantheon_data=df_pantheon,
+        _sna_L=None,
+        _sna_Lower=True,
+        _sna_LogdetCov=None,
+        cosmo_model="FlatLambdaCDM",
+        completeness_params=completeness_params,
+        z_pivot_agn=hubble_fit.z_pivot_agn,
+        agn_calibrators_data=None,
+        only_sna=False,
+        use_full_cov=False,
+    )
+
+    (
+        dmi_full_direct,
+        dmi_sigma_full_direct,
+        sigma_sel_full_direct,
+    ) = hubble_fit._compute_direct_full_sample_completeness_summaries(
+        flat_samples,
+        df_agn_fit_selection=df_fit,
+        df_agn_plot_sample=df_plot,
+        df_pantheon=df_pantheon,
+        _sna_L=None,
+        _sna_Lower=True,
+        _sna_LogdetCov=None,
+        cosmo_model="FlatLambdaCDM",
+        completeness_params=completeness_params,
+        z_pivot_agn=hubble_fit.z_pivot_agn,
+        use_full_cov=False,
+        disable_ceph_dist_calibration=False,
+        use_alpha_lambda_term=False,
+        use_eta_sigma_term=False,
+        use_redshift_log_f_term=False,
+    )
+
+    np.testing.assert_allclose(dmi_full_direct[:-1], fit_blob[1], atol=1e-10)
+    np.testing.assert_allclose(sigma_sel_full_direct[:-1], fit_blob[2], atol=1e-10)
+    np.testing.assert_allclose(dmi_sigma_full_direct, 0.0, atol=1e-12)
+    assert not np.allclose(plot_pivots, fit_pivots, atol=1e-12)
+    assert np.isfinite(dmi_full_direct[-1])
+    assert np.isfinite(sigma_sel_full_direct[-1])
+    assert not np.allclose(naive_plot_blob[1][:-1], fit_blob[1], atol=1e-10)
+
+
 def test_run_single_skip_plots_smoke(fake_data, monkeypatch, tmp_path):
     df_agn, df_pantheon = fake_data
     priors, model_labels, _ = hubble_model.get_model_params("FlatLambdaCDM", only_sna=False)
@@ -225,6 +325,138 @@ def test_run_single_skip_plots_smoke(fake_data, monkeypatch, tmp_path):
     assert residuals is None
     assert age == 13.8
     assert age_err == 0.1
+
+
+def test_run_single_threads_direct_full_sample_debias_arrays_to_plots(monkeypatch, tmp_path):
+    df_agn = _make_fake_agn_sample(n_agn=5)
+    df_agn = pd.concat(
+        [
+            df_agn,
+            df_agn.iloc[[0]].assign(object_id="agn_outside", z=3.5),
+        ],
+        ignore_index=True,
+    )
+    df_pantheon = _make_fake_pantheon_sample()
+    priors, model_labels, _ = hubble_model.get_model_params("FlatLambdaCDM", only_sna=False)
+    theta = np.array([(priors[key][0] + priors[key][1]) / 2.0 for key in model_labels], dtype=float)
+    flat_samples = np.tile(theta[None, :], (8, 1))
+
+    direct_dmi = np.linspace(0.01, 0.06, len(df_agn))
+    direct_sigma = np.full(len(df_agn), 0.02)
+    direct_sigma_sel = np.full(len(df_agn), 0.07)
+
+    hubble_calls = []
+    l2500_calls = []
+    m2500_calls = []
+    blr_calls = []
+    full_residual_calls = []
+    full_residual_rz_calls = []
+
+    monkeypatch.chdir(tmp_path)
+    _patch_run_single_plot_stack(monkeypatch)
+
+    def fake_run_mcmc_pipeline(df_agn_arg, *args, **kwargs):
+        n = len(df_agn_arg)
+        _write_fake_checkpoint(
+            kwargs["checkpoint_file_override"],
+            flat_samples,
+            np.zeros(n),
+            np.full(n, 0.05),
+            logz=-21.0,
+            logzerr=0.2,
+        )
+        return (
+            flat_samples,
+            model_labels,
+            lambda pts: np.zeros(len(np.atleast_2d(pts))),
+            lambda pts: np.full(len(np.atleast_2d(pts)), 0.09),
+            -21.0,
+            0.2,
+            np.zeros(n),
+            np.full(n, 0.05),
+            np.full(n, 0.09),
+        )
+
+    def fake_plot_hubble(*args, **kwargs):
+        hubble_calls.append(kwargs)
+        n = len(args[1])
+        return (
+            np.zeros(n, dtype=float),
+            np.ones(n, dtype=float),
+            np.full(n, 44.0),
+            np.full(n, 0.1),
+            np.full(n, 0.2),
+        )
+
+    def fake_plot_predicted_L2500_vs_sigmahat(*args, **kwargs):
+        l2500_calls.append(kwargs)
+        n = len(args[1])
+        return np.zeros(n, dtype=float), np.ones(n, dtype=float)
+
+    def fake_plot_predicted_vs_actual_M2500(*args, **kwargs):
+        m2500_calls.append(kwargs)
+        n = len(args[1])
+        return np.zeros(n, dtype=float), np.ones(n, dtype=float), None, None
+
+    def fake_plot_blr_line_lags_vs_l2500(*args, **kwargs):
+        blr_calls.append(kwargs)
+
+    def fake_plot_full_residuals(*args, **kwargs):
+        full_residual_calls.append(kwargs)
+
+    def fake_plot_full_residuals_rz(*args, **kwargs):
+        full_residual_rz_calls.append(kwargs)
+
+    monkeypatch.setattr(hubble_fit, "run_mcmc_pipeline", fake_run_mcmc_pipeline)
+    monkeypatch.setattr(
+        hubble_fit,
+        "_compute_direct_full_sample_completeness_summaries",
+        lambda *args, **kwargs: (
+            direct_dmi.copy(),
+            direct_sigma.copy(),
+            direct_sigma_sel.copy(),
+        ),
+    )
+    monkeypatch.setattr(hubble_fit, "plot_hubble", fake_plot_hubble)
+    monkeypatch.setattr(hubble_fit, "plot_predicted_L2500_vs_sigmahat", fake_plot_predicted_L2500_vs_sigmahat)
+    monkeypatch.setattr(hubble_fit, "plot_predicted_vs_actual_M2500", fake_plot_predicted_vs_actual_M2500)
+    monkeypatch.setattr(hubble_fit, "plot_blr_line_lags_vs_l2500", fake_plot_blr_line_lags_vs_l2500)
+    monkeypatch.setattr(hubble_fit, "plot_full_residuals", fake_plot_full_residuals)
+    monkeypatch.setattr(hubble_fit, "plot_full_residuals_rz", fake_plot_full_residuals_rz)
+
+    hubble_fit.run_single(
+        df_agn=df_agn,
+        df_agn_all=df_agn.copy(),
+        df_pantheon=df_pantheon,
+        _sna_L=None,
+        _sna_Lower=True,
+        _sna_LogdetCov=None,
+        cosmo_model="FlatLambdaCDM",
+        completeness=False,
+        use_full_cov=False,
+        only_sna=False,
+        speed="fastest",
+        z_range=(0.44, 3.16),
+        disable_sigma_clip_pass=True,
+        prefix="unit",
+    )
+
+    debiased_hubble_call = next(call for call in hubble_calls if call.get("debias"))
+    np.testing.assert_allclose(debiased_hubble_call["dmi_values"], direct_dmi)
+    np.testing.assert_allclose(debiased_hubble_call["dmi_sigma"], direct_sigma)
+    np.testing.assert_allclose(debiased_hubble_call["dmi_selection_sigma"], direct_sigma_sel)
+
+    debiased_l2500_call = next(call for call in l2500_calls if call.get("debias"))
+    np.testing.assert_allclose(debiased_l2500_call["dmi_values"], direct_dmi)
+    np.testing.assert_allclose(debiased_l2500_call["dmi_selection_sigma"], direct_sigma_sel)
+
+    debiased_m2500_call = next(call for call in m2500_calls if call.get("debias"))
+    np.testing.assert_allclose(debiased_m2500_call["dmi_values"], direct_dmi)
+    np.testing.assert_allclose(debiased_m2500_call["dmi_selection_sigma"], direct_sigma_sel)
+
+    np.testing.assert_allclose(blr_calls[0]["dmi_values"], direct_dmi)
+    assert all(np.allclose(call["dmi_values"], direct_dmi) for call in full_residual_calls)
+    np.testing.assert_allclose(full_residual_rz_calls[0]["dmi_values"], direct_dmi)
 
 
 def test_run_single_only_sna_smoke(fake_data, monkeypatch, tmp_path):
@@ -1102,6 +1334,15 @@ def test_run_single_resume_replot_with_cuts_bypasses_sampling_passes_and_plots_c
         return np.zeros(n), np.ones(n), np.zeros(n), np.ones(n), np.ones(n)
 
     monkeypatch.setattr(hubble_fit, "run_mcmc_pipeline", fake_run_mcmc_pipeline)
+    monkeypatch.setattr(
+        hubble_fit,
+        "_compute_direct_full_sample_completeness_summaries",
+        lambda *args, **kwargs: (
+            np.zeros(len(df_agn), dtype=float),
+            np.zeros(len(df_agn), dtype=float),
+            None,
+        ),
+    )
     monkeypatch.setattr(hubble_fit, "plot_hubble", fake_plot_hubble)
 
     hubble_fit.run_single(
@@ -1129,7 +1370,7 @@ def test_run_single_resume_replot_with_cuts_bypasses_sampling_passes_and_plots_c
     assert pipeline_calls[0]["completeness_sim_file"] == str(generated_completeness)
     assert plot_hubble_calls[0]["object_ids"] == expected_plot_ids
     assert plot_hubble_calls[0]["filename"] is None
-    assert completeness_plot_calls == [str(generated_completeness)]
+    assert completeness_plot_calls == [str(generated_completeness), str(generated_completeness)]
 
 
 def test_run_single_two_pass_sigma_clip_filters_outliers_and_writes_diagnostics(monkeypatch, tmp_path):
