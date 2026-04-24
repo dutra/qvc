@@ -6,9 +6,11 @@ import os
 import sys
 
 import pandas as pd
+from astropy.io import fits
 from tqdm import tqdm
 
 from qvc.hubble.hubble_utils import populate_sdss_fields
+from qvc.hubble.hubble_utils import resolve_qvc_data_path
 
 
 def read_quasars_from_csv(csv_path):
@@ -121,6 +123,80 @@ def load_and_merge_csv(file_list, expected_n):
     return all_quasars
 
 
+def _normalize_run2d(value):
+    if pd.isna(value):
+        return pd.NA
+    text = str(value).strip()
+    if text.startswith("b'") and text.endswith("'"):
+        text = text[2:-1]
+    text = text.strip()
+    if not text:
+        return pd.NA
+    return text
+
+
+def populate_sdss_run2d_from_fits(quasars, fits_path):
+    """Populate SDSS_RUN2D using DR17 specObj keys (plate, mjd, fiberid/fiber)."""
+    if not quasars:
+        return list(quasars)
+
+    df = pd.DataFrame.from_records(quasars)
+    out = df.copy()
+
+    key_cols = ("plate", "mjd")
+    has_fiberid = "fiberid" in out.columns
+    has_fiber = "fiber" in out.columns
+    if not all(c in out.columns for c in key_cols) or (not has_fiberid and not has_fiber):
+        out["SDSS_RUN2D"] = pd.NA
+        print(
+            "[WARNING] Cannot populate SDSS_RUN2D: merged data is missing required key columns "
+            "(need plate, mjd, and fiberid or fiber)."
+        )
+        return out.to_dict("records")
+
+    if has_fiberid:
+        fiber_col = "fiberid"
+    else:
+        fiber_col = "fiber"
+
+    try:
+        with fits.open(fits_path, memmap=True) as hdul:
+            data = hdul[1].data
+            table = pd.DataFrame(
+                {
+                    "plate": data["PLATE"],
+                    "mjd": data["MJD"],
+                    "fiberid": data["FIBERID"],
+                    "SDSS_RUN2D": data["RUN2D"],
+                }
+            )
+    except Exception as exc:
+        out["SDSS_RUN2D"] = pd.NA
+        print(f"[WARNING] Could not read SDSS RUN2D FITS file {fits_path}: {exc}")
+        return out.to_dict("records")
+
+    for col in ("plate", "mjd", "fiberid"):
+        table[col] = pd.to_numeric(table[col], errors="coerce").astype("Int64")
+    table["SDSS_RUN2D"] = table["SDSS_RUN2D"].apply(_normalize_run2d).astype("string")
+    table = table.drop_duplicates(subset=["plate", "mjd", "fiberid"], keep="first")
+
+    out["plate"] = pd.to_numeric(out["plate"], errors="coerce").astype("Int64")
+    out["mjd"] = pd.to_numeric(out["mjd"], errors="coerce").astype("Int64")
+    out["_fiber_merge_key"] = pd.to_numeric(out[fiber_col], errors="coerce").astype("Int64")
+
+    merged = out.merge(
+        table.rename(columns={"fiberid": "_fiber_merge_key"}),
+        on=["plate", "mjd", "_fiber_merge_key"],
+        how="left",
+    )
+    merged = merged.drop(columns=["_fiber_merge_key"])
+    n_matched = int(pd.notna(merged["SDSS_RUN2D"]).sum())
+    print(
+        f"Populated SDSS_RUN2D from {fits_path}: matched {n_matched} / {len(merged)} rows."
+    )
+    return merged.to_dict("records")
+
+
 def main():
     p = argparse.ArgumentParser(
         description=(
@@ -155,6 +231,16 @@ def main():
         action="store_true",
         default=False,
         help="Skip populate_sdss_fields before writing.",
+    )
+    p.add_argument(
+        "--populate_sdss_run2d_file",
+        nargs="?",
+        const="data/SDSS_DR17/specObj-dr17.fits",
+        default=None,
+        help=(
+            "Populate SDSS_RUN2D using RUN2D from the given SDSS DR17 specObj FITS file. "
+            "If passed without a value, defaults to data/SDSS_DR17/specObj-dr17.fits."
+        ),
     )
     p.add_argument(
         "--out",
@@ -201,6 +287,19 @@ def main():
     if not args.skip_populate_sdss and all_quasars:
         print("Populating SDSS fields...")
         all_quasars = populate_sdss_fields(all_quasars)
+
+    if args.populate_sdss_run2d_file and all_quasars:
+        try:
+            fits_path = resolve_qvc_data_path(args.populate_sdss_run2d_file)
+        except FileNotFoundError:
+            fits_path = args.populate_sdss_run2d_file
+        if not os.path.exists(fits_path):
+            print(
+                f"[WARNING] --populate_sdss_run2d_file requested, but file not found: {fits_path}. "
+                "Continuing without SDSS_RUN2D enrichment."
+            )
+        else:
+            all_quasars = populate_sdss_run2d_from_fits(all_quasars, fits_path)
 
     seen = []
     seen_set = set()
