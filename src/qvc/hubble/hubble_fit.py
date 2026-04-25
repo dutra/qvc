@@ -569,8 +569,9 @@ def _remap_resume_replot_checkpoint(results, checkpoint_file, df_agn_fit_selecti
         raise RuntimeError(
             f"Resume-replot checkpoint '{checkpoint_file}' does not contain all AGNs requested "
             f"by the current cuts. Missing {len(missing_ids)} / {len(current_ids)} current "
-            f"object IDs; examples: {preview}. This mode can only remove or reorder AGNs "
-            "that were present in the original checkpoint."
+            f"object IDs; examples: {preview}. The posterior H5 lacks per-object debias "
+            "arrays for these newly included AGNs. This mode can only remove or reorder "
+            "AGNs that were present in the original checkpoint."
         )
 
     remap_idx = np.array([saved_index[object_id] for object_id in current_ids], dtype=int)
@@ -631,6 +632,46 @@ def resolve_resume_checkpoint_path(resume, checkpoint_file):
             f"Resume was requested, but checkpoint file '{resolved_checkpoint}' does not exist."
         )
     return resolved_checkpoint
+
+
+def normalize_resume_by_model(resume, cosmo_models):
+    models = list(cosmo_models)
+    if not models:
+        return {}
+
+    if resume is False or resume is None:
+        return {model: False for model in models}
+
+    if resume is True:
+        return {model: True for model in models}
+
+    if isinstance(resume, str):
+        resume_stripped = resume.strip()
+        resume_lower = resume_stripped.lower()
+        if resume_lower in {"true", "1", "yes"}:
+            return {model: True for model in models}
+        if resume_lower in {"false", "0", "no"}:
+            return {model: False for model in models}
+        resume_paths = [resume_stripped]
+    else:
+        resume_values = list(resume)
+        if len(resume_values) == 0:
+            return {model: True for model in models}
+        if len(resume_values) == 1:
+            resume_stripped = str(resume_values[0]).strip()
+            resume_lower = resume_stripped.lower()
+            if resume_lower in {"true", "1", "yes"}:
+                return {model: True for model in models}
+            if resume_lower in {"false", "0", "no"}:
+                return {model: False for model in models}
+        resume_paths = [str(value).strip() for value in resume_values]
+
+    if len(resume_paths) != len(models):
+        raise ValueError(
+            "Explicit --resume checkpoint paths must match --cosmo_models one-for-one. "
+            f"Got {len(resume_paths)} resume path(s) for {len(models)} model(s): {models}."
+        )
+    return dict(zip(models, resume_paths))
 
 
 def _normalize_resume_stage(resume_stage):
@@ -1934,12 +1975,18 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
             raise ValueError("--resume_replot_with_cuts does not support uniform_redshift_distribution=True.")
         if N is not None:
             print(
-                "[INFO] --resume_replot_with_cuts uses the saved checkpoint object_id list "
-                "for the fit/debias selection; N is ignored for the resumed fit selection."
+                "[INFO] --resume_replot_with_cuts uses the current cuts for the fit/debias "
+                "selection; N is ignored for the resumed fit selection."
             )
-        df_agn_pass2_fit_selection = _select_resume_replot_fit_selection(
-            df_agn_pass2_plot_sample[df_agn_pass2_plot_sample["z"].between(z_range[0], z_range[1])],
-            resume,
+        print(
+            "[INFO] --resume_replot_with_cuts will use the checkpoint object_id list "
+            "only to remap and validate saved per-AGN debias arrays."
+        )
+        df_agn_pass2_fit_selection = _select_agn_fit_selection(
+            df_agn_pass2_plot_sample,
+            z_range=z_range,
+            N=None,
+            uniform_redshift_distribution=False,
         )
     else:
         df_agn_pass2_fit_selection = _select_agn_fit_selection(
@@ -2470,10 +2517,28 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
     )
 
     chisq_red_L2500, _ = reduced_chi_squared(L_residuals_debiased, L_pred_std_debiased, n_params=len(model_labels)-1)
+    df_agn_agn_likelihood_chi2_selection = df_agn_pass2_fit_selection
+    if resume_replot_with_cuts:
+        df_agn_agn_likelihood_chi2_selection = df_agn_pass2_plot_sample[
+            df_agn_pass2_plot_sample["z"].between(z_range[0], z_range[1])
+        ].copy()
     chisq_red_agn_likelihood_space, _ = compute_agn_likelihood_space_reduced_chi2(
         flat_samples,
         model_labels,
-        df_agn_pass2_fit_selection,
+        df_agn_agn_likelihood_chi2_selection,
+        cosmo_model,
+        z_pivot_agn=z_pivot_agn,
+        use_alpha_lambda_term=use_alpha_lambda_term,
+        use_eta_sigma_term=use_eta_sigma_term,
+        use_redshift_log_f_term=use_redshift_log_f_term,
+    )
+    df_agn_agn_likelihood_chi2_selection_zgt1 = df_agn_agn_likelihood_chi2_selection[
+        df_agn_agn_likelihood_chi2_selection["z"].between(1.0, z_range[1], inclusive="right")
+    ]
+    chisq_red_agn_likelihood_space_zgt1, _ = compute_agn_likelihood_space_reduced_chi2(
+        flat_samples,
+        model_labels,
+        df_agn_agn_likelihood_chi2_selection_zgt1,
         cosmo_model,
         z_pivot_agn=z_pivot_agn,
         use_alpha_lambda_term=use_alpha_lambda_term,
@@ -2506,7 +2571,8 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                     use_alpha_lambda_term=use_alpha_lambda_term,
                     use_eta_sigma_term=use_eta_sigma_term,
                     use_redshift_log_f_term=use_redshift_log_f_term,
-                    agn_likelihood_space_chi2=chisq_red_agn_likelihood_space)
+                    agn_likelihood_space_chi2=chisq_red_agn_likelihood_space,
+                    agn_likelihood_space_chi2_zgt1=chisq_red_agn_likelihood_space_zgt1)
     debiased_residuals, debiased_clipping_sigma, mu_pred_median_debiased, mu_pred_std_debiased, mu_pred_std_debiased_with_scatter = r
     if apply_two_pass_sigma_clip:
         final_diagnostics_df, keep_mask_pass2 = _build_sigma_clip_diagnostics(
@@ -2681,6 +2747,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         use_redshift_log_f_term=use_redshift_log_f_term,
         use_intrinsic_scatter_in_residual_sigma=False,
         agn_likelihood_space_chi2=chisq_red_agn_likelihood_space,
+        agn_likelihood_space_chi2_zgt1=chisq_red_agn_likelihood_space_zgt1,
         diagnostics_suffix="_debiased_no_logf",
     )
     plot_hubble_residual_normality(
@@ -2943,11 +3010,13 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
     results_latex = []
     cosmo_model_joint_samples = {}
     cosmo_model_sna_samples = {}
+    resume_by_model = normalize_resume_by_model(resume, cosmo_models)
     for cosmo_model in cosmo_models:
+        model_resume = resume_by_model[cosmo_model]
         r = run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, 
                        cosmo_model=cosmo_model, only_sna=False, 
                        completeness=completeness,
-                       resume=resume, speed=speed, N=N,
+                       resume=model_resume, speed=speed, N=N,
                        skip_plots=skip_plots,
                        residuals_sigma_clip=residuals_sigma_clip,
                        disable_sigma_clip_pass=disable_sigma_clip_pass,
@@ -2977,7 +3046,7 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
                        resume_stage=resume_stage,
                        sigma_clip_second_pass_mode=sigma_clip_second_pass_mode,
                        z_range=z_range,
-                       resume=resume, speed=speed, N=N,
+                       resume=model_resume, speed=speed, N=N,
                        prefix=prefix, uniform_redshift_distribution=uniform_redshift_distribution,
                        completeness_sim_file=completeness_sim_file,
                        completeness_mode=completeness_mode,
@@ -3100,7 +3169,15 @@ if __name__ == "__main__":
         default=False,
         help="Disable the Pantheon calibrator CEPH_DIST replacement and switch the H0 prior to the Planck 2018 interval.",
     )
-    parser.add_argument("--resume", nargs="?", const=True, default=False, help="Resume previous MCMC run (default: False). If a string is provided, it is used as the checkpoint file.")
+    parser.add_argument(
+        "--resume",
+        nargs="*",
+        default=False,
+        help=(
+            "Resume previous MCMC run(s). With no paths, each model uses its default checkpoint. "
+            "With explicit paths, pass one H5 path per --cosmo_models entry."
+        ),
+    )
     parser.add_argument(
         "--resume_stage",
         type=str,
@@ -3122,6 +3199,13 @@ if __name__ == "__main__":
     parser.add_argument("--N", type=int, default=None, help="Number of AGNs to run (default: all)")
     parser.add_argument("--only_sna", action="store_true", default=False, help="Run SNIa-only fit (default: False)")
     parser.add_argument("--spectra_fit_csv", type=str, nargs='+', help="Path(s) to spectra fit CSV file(s)")
+    parser.add_argument(
+        "--spectra_sdss_run2d",
+        type=str,
+        choices=["all", "v5_13_2", "26"],
+        default="all",
+        help="Optional SDSS_RUN2D filter for spectra-matched AGN rows. Applies only when cuts are enabled.",
+    )
     parser.add_argument("--no_cuts", action="store_true", default=False, help="Disable AGN data cuts (default: False)")
     parser.add_argument("--skip_plots", action="store_true", default=False, help="Skip plotting steps (default: False)")
     parser.add_argument(
@@ -3220,6 +3304,7 @@ if __name__ == "__main__":
     print("Running Hubble fit with the following settings:")
     for k, v in vars(args).items():
         print(f"  {k}: {v}")
+    resume_by_model = normalize_resume_by_model(args.resume, args.cosmo_models)
 
     if args.disable_full_covariance:
         print("Warning: Running without full covariance may lead to underestimated uncertainties.")
@@ -3227,10 +3312,11 @@ if __name__ == "__main__":
         print("Warning: Running without completeness correction may lead to biased results.")
     if args.disable_ceph_dist_calibration:
         print("Warning: Running without CEPH_DIST calibration; using the Planck H0 prior instead.")
-    if args.resume:
+    has_resume = any(bool(value) for value in resume_by_model.values())
+    if has_resume:
         print("Warning: Resuming previous MCMC run.")
     if args.resume_replot_with_cuts:
-        if not args.resume:
+        if not has_resume:
             raise ValueError("--resume_replot_with_cuts requires --resume path/to/posteriors.h5.")
         if args.run != "single":
             raise NotImplementedError("--resume_replot_with_cuts currently supports only --run single.")
@@ -3245,6 +3331,7 @@ if __name__ == "__main__":
                            residuals_sigma_clip=args.residuals_sigma_clip, residuals_csv=args.residuals_csv,
                            exclude_object_ids_csv=args.exclude_object_ids_csv,
                            spectra_fit_csv=args.spectra_fit_csv,
+                           spectra_sdss_run2d=args.spectra_sdss_run2d,
                            correct_sigma_uv_host=args.correct_sigma_uv_host,
                            z_range=tuple(args.z_range), plot_path=agn_plot_path,
                            cut_report_path=cut_report_path)
@@ -3270,7 +3357,7 @@ if __name__ == "__main__":
     if args.use_jax:
         if args.run != "single":
             raise NotImplementedError("--use_jax currently supports only --run single.")
-        if args.resume:
+        if has_resume:
             raise NotImplementedError("--use_jax does not support --resume yet.")
         if args.agn_calibrators is not None:
             raise NotImplementedError("--use_jax does not support --agn_calibrators yet.")
@@ -3304,7 +3391,7 @@ if __name__ == "__main__":
         for cosmo_model in args.cosmo_models:
             r = run_single(df_agn=df_agn, df_agn_all=df_agn_all, df_pantheon=df_pantheon, _sna_L=_sna_L, _sna_Lower=_sna_Lower, _sna_LogdetCov=_sna_LogdetCov, 
                            cosmo_model=cosmo_model,
-                completeness=not args.disable_completeness, use_full_cov=not args.disable_full_covariance, resume=args.resume, z_range=args.z_range,
+                completeness=not args.disable_completeness, use_full_cov=not args.disable_full_covariance, resume=resume_by_model[cosmo_model], z_range=args.z_range,
                 speed=args.speed, N=effective_N, only_sna=args.only_sna,
                 skip_plots=args.skip_plots, residuals_sigma_clip=args.residuals_sigma_clip,
                 disable_sigma_clip_pass=args.disable_sigma_clip_pass,

@@ -496,6 +496,7 @@ def populate_spectra_fit(df, spectra_fit_csvs):
         "bands_used": parse_list,
         "PL_slope": float,
         "PL_slope_err": float,
+        'SDSS_RUN2D': str,
     }
 
     required_cols = {
@@ -756,139 +757,6 @@ def populate_sdss_fields(objs, progress_bar=True):
     return df if input_is_df else df.to_dict("records")
 
 
-
-
-def populate_sdss_rchi2_fields(df, csv_path="data/sdss/sdss_allspec_rchi2.csv"):
-    """Populate SDSS allspec quality columns using (object_id, plate, fiberid, mjd)."""
-    if "object_id" not in df.columns:
-        raise ValueError("populate_sdss_rchi2_fields requires an 'object_id' column.")
-
-    target_cols = ["RCHI2", "RCHI2DIFF", "VDISP", "ZWARNING", "RUN2D"]
-    key_cols = ["object_id", "plate", "fiberid", "mjd"]
-    csv_path = resolve_qvc_data_path(csv_path)
-
-    usecols = key_cols + target_cols
-    df_sdss = pd.read_csv(
-        csv_path,
-        usecols=usecols,
-        dtype={"object_id": str, "RUN2D": str},
-    )
-    missing_cols = [col for col in usecols if col not in df_sdss.columns]
-    if missing_cols:
-        raise ValueError(
-            f"Missing required SDSS RCHI2 columns in {csv_path}: {missing_cols}"
-        )
-
-    def _normalize_run2d(value):
-        if pd.isna(value):
-            return np.nan
-        text = str(value).strip()
-        if text.startswith("b'") and text.endswith("'"):
-            text = text[2:-1]
-        return text.strip()
-
-    def _to_int64(series):
-        return pd.to_numeric(series, errors="coerce").astype("Int64")
-
-    df_sdss["object_id"] = df_sdss["object_id"].astype(str)
-    for col in ["plate", "fiberid", "mjd"]:
-        df_sdss[col] = _to_int64(df_sdss[col])
-    df_sdss["RUN2D"] = df_sdss["RUN2D"].apply(_normalize_run2d)
-
-    out = df.copy()
-    out["object_id"] = out["object_id"].astype(str)
-
-    def _ensure_target_col(frame, col):
-        if col in frame.columns:
-            return
-        if col == "RUN2D":
-            frame[col] = pd.Series([np.nan] * len(frame), index=frame.index, dtype=object)
-        else:
-            frame[col] = np.nan
-
-    # Count all SDSS spectra rows per object_id, independent of composite-key match.
-    sdss_plate_count = (
-        df_sdss.groupby("object_id", as_index=False)
-        .size()
-        .rename(columns={"size": "sdss_plate_count"})
-    )
-    out = out.merge(sdss_plate_count, on="object_id", how="left")
-    out["sdss_plate_count"] = out["sdss_plate_count"].fillna(0).astype("Int64")
-
-    def _find_col(frame, preferred, fallback):
-        if preferred in frame.columns:
-            return preferred
-        if fallback in frame.columns:
-            return fallback
-        return None
-
-    plate_col = _find_col(out, "plate", "PLATEID")
-    fiberid_col = _find_col(out, "fiberid", "FIBERID")
-    mjd_col = _find_col(out, "mjd", "MJD")
-
-    if plate_col is None or fiberid_col is None or mjd_col is None:
-        for col in target_cols:
-            _ensure_target_col(out, col)
-        object_match_count = int(out["object_id"].isin(set(df_sdss["object_id"])).sum())
-        print(
-            "Populated SDSS RCHI2 fields "
-            f"from {csv_path}: loaded_rows={len(df_sdss)}, "
-            f"unique_object_id={df_sdss['object_id'].nunique()}, "
-            f"object_id_matches={object_match_count}, exact_key_matches=0, "
-            f"object_only_no_key_match={object_match_count} "
-            "(missing plate/fiberid/mjd columns in AGN table)"
-        )
-        return out
-
-    out["_sdss_plate_key"] = _to_int64(out[plate_col])
-    out["_sdss_fiberid_key"] = _to_int64(out[fiberid_col])
-    out["_sdss_mjd_key"] = _to_int64(out[mjd_col])
-
-    df_sdss_keyed = df_sdss.rename(
-        columns={
-            "plate": "_sdss_plate_key",
-            "fiberid": "_sdss_fiberid_key",
-            "mjd": "_sdss_mjd_key",
-        }
-    )
-    merged = out.merge(
-        df_sdss_keyed,
-        on=["object_id", "_sdss_plate_key", "_sdss_fiberid_key", "_sdss_mjd_key"],
-        how="left",
-        suffixes=("", "_sdss_rchi2"),
-        indicator="_sdss_match",
-    )
-
-    object_id_matched_mask = out["object_id"].isin(set(df_sdss["object_id"]))
-    exact_match_mask = merged["_sdss_match"] == "both"
-    for col in target_cols:
-        src_col = f"{col}_sdss_rchi2"
-        _ensure_target_col(out, col)
-        if src_col in merged.columns:
-            assign_vals = merged.loc[exact_match_mask, src_col].values
-        elif col in merged.columns:
-            assign_vals = merged.loc[exact_match_mask, col].values
-        else:
-            continue
-        if col == "RUN2D":
-            assign_vals = pd.Series(assign_vals, dtype=object).values
-        out.loc[exact_match_mask, col] = assign_vals
-
-    out = out.drop(columns=["_sdss_plate_key", "_sdss_fiberid_key", "_sdss_mjd_key"], errors="ignore")
-
-    object_id_match_count = int(object_id_matched_mask.sum())
-    exact_match_count = int(exact_match_mask.sum())
-    object_only_no_key_match = int(object_id_match_count - exact_match_count)
-    print(
-        "Populated SDSS RCHI2 fields "
-        f"from {csv_path}: loaded_rows={len(df_sdss)}, "
-        f"unique_object_id={df_sdss['object_id'].nunique()}, "
-        f"object_id_matches={object_id_match_count}, exact_key_matches={exact_match_count}, "
-        f"object_only_no_key_match={object_only_no_key_match}"
-    )
-    return out
-
-
 def _mask_invalid_wu_bhmass(df):
     """Mask Wu-catalog BH masses that use zero as a missing-value sentinel."""
     if "LOGMBH" not in df.columns:
@@ -991,6 +859,7 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
                   exclude_object_ids_csv=None,
                   residuals_sigma_clip=None, residuals_csv=None,
                   spectra_fit_csv=None, only_load=False,
+                  spectra_sdss_run2d="all",
                   correct_sigma_uv_host=False,
                   lc_info_csv="data/lc_chisq.csv",
                   z_range=(0.44, 3.16),
@@ -1111,20 +980,20 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
 
     def _plot_sigma_tau_ls_identity(frame, *, suffix, sigma_limits=None, tau_limits=None):
         sigma_keys = {
-            "x": "log_sigma_uv_bpl",
+            "x": "log_sigma_uv",
             "y": "log_sigma_ls",
-            "xerr": "log_sigma_uv_bpl_err",
-            "yerr": "log_sigma_ls_err",
-            "xlabel": r"$\log\!\,\sigma_{\mathrm{UV}}\,(\mathrm{mag})$" "\n(UV DRW BPL)",
-            "ylabel": r"$\log\!\,\sigma_{\mathrm{LS}}\,(\mathrm{mag})$" "\n(LS)",
+            "xerr": "log_sigma_uv_err",
+            "yerr": "log_sigma_uv_bpl_err",
+            "xlabel": r"$\log\!\,\sigma_{\mathrm{UV}}\,(\mathrm{mag})$" "\n(UV)",
+            "ylabel": r"$\log\!\,\sigma_{\mathrm{UV}}\,(\mathrm{mag})$" "\n(UV DRW BPL)",
         }
         tau_keys = {
-            "x": "log_tau_uv_rf_bpl",
+            "x": "log_tau_uv_rf",
             "y": "log_tau_ls",
-            "xerr": "log_tau_uv_rf_bpl_err",
-            "yerr": "log_tau_ls_err",
-            "xlabel": r"$\log\!\,\tau_{\mathrm{UV},\,\mathrm{RF}}\,(\mathrm{days})$" "\n(UV DRW BPL)",
-            "ylabel": r"$\log\!\,\tau_{\mathrm{LS}}\,(\mathrm{days})$" "\n(LS)",
+            "xerr": "log_tau_uv_rf_err",
+            "yerr": "log_tau_uv_rf_bpl_err",
+            "xlabel": r"$\log\!\,\tau_{\mathrm{UV},\,\mathrm{RF}}\,(\mathrm{days})$" "\n(UV)",
+            "ylabel": r"$\log\!\,\tau_{\mathrm{UV},\,\mathrm{RF}}\,(\mathrm{days})$" "\n(UV DRW BPL)",
         }
         required_xy = {
             sigma_keys["x"],
@@ -1210,6 +1079,16 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
             return [str(x).strip() for x in value if str(x).strip()]
         return [str(value).strip()]
 
+    def _normalize_run2d_value(value):
+        if value is None:
+            return None
+        text = str(value).strip()
+        if not text:
+            return None
+        if text.lower() in {"nan", "none"}:
+            return None
+        return text.lower()
+
     if lc_info_csv is not None:
         lc_info_csv = resolve_qvc_data_path(lc_info_csv)
     if residuals_csv is not None:
@@ -1231,16 +1110,6 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
                 df[f"mags_mean_{b}"] = df[legacy_col]
             if legacy_col in df.columns:
                 df = df.drop(columns=[legacy_col])
-
-    # if populate_sdss:
-    #     print("Populating SDSS fields...")
-    #     df = populate_sdss_fields(df)
-
-    # if ("ebv_wu" not in df.columns) or df["ebv_wu"].isna().all():
-    #     print("Populating SDSS fields...")
-    #     df = populate_sdss_fields(df)
-
-    #df = populate_sdss_rchi2_fields(df)
 
     if "dropped_bands" in df.columns:
         df["dropped_bands"] = df["dropped_bands"].apply(_normalize_dropped_bands)
@@ -1898,6 +1767,18 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
                 df,
                 rel_mag_err_mask,
             )
+        requested_run2d = _normalize_run2d_value(spectra_sdss_run2d)
+        if requested_run2d not in {None, "all"}:
+            if "SDSS_RUN2D" not in df.columns:
+                raise ValueError(
+                    "spectra_sdss_run2d filtering was requested but SDSS_RUN2D is not available. "
+                    "Provide --spectra_fit_csv with SDSS_RUN2D or disable this filter."
+                )
+            normalized_run2d = df["SDSS_RUN2D"].map(_normalize_run2d_value)
+            run2d_mask = normalized_run2d == requested_run2d
+            cut_desc = f"SDSS_RUN2D == {requested_run2d}"
+            plot_cut_diagnostics(df.copy(), df[run2d_mask], bins=30, cut_info=cut_desc)
+            df = _record_cut("agn_scalar:SDSS_RUN2D", cut_desc, df, run2d_mask)
     df = df.reset_index(drop=True)
 
     if residuals_sigma_clip is not None and residuals_csv is not None:
@@ -2152,8 +2033,6 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
     _plot_sigma_tau_ls_identity(
         df,
         suffix="postcut",
-        sigma_limits=(-1.9, 1.2),
-        tau_limits=(-0.2, 4.9),
     )
     plot_cut_diagnostics(df_all.copy(), df.copy(), bins=30, cut_info="all cuts")
     colorpanel_cols = [col for col in ("f_host_2500", "f_host_center", "f_bc_3000", "wrms") if col in df_all.columns]

@@ -4642,6 +4642,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
                 use_intrinsic_scatter_in_residual_sigma=True,
                 diagnostics_suffix=None,
                 agn_likelihood_space_chi2=None,
+                agn_likelihood_space_chi2_zgt1=None,
                 residuals_csv_filename="residuals.csv"):
     """
     Hubble diagram (Pantheon+-style):
@@ -5318,6 +5319,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
         ax_resid.set_ylabel(r"$\Delta\mu$ (mag)")
         ax_resid.set_xlabel(r"$z$")
         chi2_red = np.nan
+        chi2_red_zgt1 = np.nan
         chi2_red_with_logf = np.nan
         chi2_red_shown_plus_sigma_dmi = np.nan
         chi2_red_with_logf_plus_sigma_dmi = np.nan
@@ -5330,6 +5332,17 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
                 residuals_err_chi2,
                 n_params=len(model_labels) - 1,
             )
+            high_z_chi2_mask = (
+                chi2_redshift_mask
+                & (z_values > 1.0)
+                & (z_values <= z_range[1])
+            )
+            if np.any(high_z_chi2_mask):
+                chi2_red_zgt1, _ = reduced_chi_squared(
+                    residuals[high_z_chi2_mask],
+                    chi2_sigma[high_z_chi2_mask],
+                    n_params=len(model_labels) - 1,
+                )
             if debias:
                 chi2_red_with_logf, _ = reduced_chi_squared(
                     residuals_chi2,
@@ -5350,26 +5363,27 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
                         extra_err=sigma_dmi_chi2,
                         n_params=len(model_labels) - 1,
                     )
+        chi2_text_value = chi2_red
+        chi2_text_value_zgt1 = chi2_red_zgt1
+        if debias and agn_likelihood_space_chi2 is not None and np.isfinite(agn_likelihood_space_chi2):
+            chi2_text_value = agn_likelihood_space_chi2
         if (
             debias
-            and agn_likelihood_space_chi2 is not None
-            and np.isfinite(agn_likelihood_space_chi2)
+            and agn_likelihood_space_chi2_zgt1 is not None
+            and np.isfinite(agn_likelihood_space_chi2_zgt1)
         ):
+            chi2_text_value_zgt1 = agn_likelihood_space_chi2_zgt1
+
+        if np.isfinite(chi2_text_value):
+            chi2_annotation_lines = [rf"$\chi^2_\nu = {chi2_text_value:.2f}$"]
+            if np.isfinite(chi2_text_value_zgt1):
+                chi2_annotation_lines.append(
+                    rf"$\chi^2_\nu(1<z<{z_range[1]:g}) = {chi2_text_value_zgt1:.2f}$"
+                )
             ax_resid.text(
                 0.98,
                 0.96,
-                rf"$\chi^2_\nu = {agn_likelihood_space_chi2:.2f}$",
-                transform=ax_resid.transAxes,
-                ha="right",
-                va="top",
-                fontsize=12,
-                bbox=dict(boxstyle="round,pad=0.2", facecolor="white", alpha=0.8, edgecolor="none"),
-            )
-        elif (not debias) and np.isfinite(chi2_red):
-            ax_resid.text(
-                0.98,
-                0.96,
-                rf"$\chi^2_\nu = {chi2_red:.2f}$",
+                "\n".join(chi2_annotation_lines),
                 transform=ax_resid.transAxes,
                 ha="right",
                 va="top",

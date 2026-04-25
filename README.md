@@ -158,7 +158,7 @@ Useful repo-level scripts live under `scripts/` and are intended to be run from 
 /home/dutra/.conda/envs/jaxcpu4/bin/python scripts/create_master_input_list.py \
   --output-csv results/data/master_input_list.csv \
   --variability_chisq_cut 20 \
-  --run2d_cut v5_6_0
+  --run2d_cut v5_13_2
 ```
 
 `scripts/run_demo.sh` runs the lightweight local demo workflow that sets up data and executes the example fit pipeline.

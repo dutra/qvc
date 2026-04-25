@@ -1,3 +1,4 @@
+import ast
 import os
 import sys
 from pathlib import Path
@@ -619,6 +620,72 @@ def test_plot_hubble_debiased_returns_clipping_sigma_and_writes_distinct_diagnos
     )
 
 
+def test_plot_hubble_residual_chi2_annotation_includes_high_z(monkeypatch, tmp_path):
+    from matplotlib.axes import Axes
+
+    df_agn = _make_fake_agn_sample(n_agn=6).copy()
+    df_agn["wrms"] = np.linspace(0.1, 0.2, len(df_agn))
+    df_pantheon = _make_fake_pantheon_sample(n_sne=6).copy()
+    cosmo = FlatLambdaCDM(H0=70.0, Om0=0.3)
+    df_pantheon["MU_SH0ES"] = cosmo.distmod(df_pantheon["zHD"].to_numpy(dtype=float)).value
+    df_pantheon["biasCor_m_b"] = np.zeros(len(df_pantheon), dtype=float)
+
+    priors, model_labels, _ = hubble_model.get_model_params("FlatLambdaCDM", only_sna=False)
+    theta = np.array([(priors[key][0] + priors[key][1]) / 2.0 for key in model_labels], dtype=float)
+    flat_samples = np.tile(theta[None, :], (6, 1))
+
+    text_calls = []
+    original_text = Axes.text
+
+    def capture_text(self, x, y, s, *args, **kwargs):
+        if r"\chi^2_\nu" in str(s):
+            text_calls.append(str(s))
+        return original_text(self, x, y, s, *args, **kwargs)
+
+    monkeypatch.setattr(Axes, "text", capture_text)
+    monkeypatch.setattr(hubble_plotting, "_save_figure", lambda fig, path, **kwargs: path)
+
+    hubble_plotting.plot_hubble(
+        flat_samples,
+        df_agn,
+        df_pantheon,
+        cosmo_model="FlatLambdaCDM",
+        z_pivot_agn=hubble_fit.z_pivot_agn,
+        plot_path=str(tmp_path),
+        show=False,
+        debias=True,
+        dm_interp=None,
+        dmi_values=np.zeros(len(df_agn), dtype=float),
+        agn_likelihood_space_chi2=1.23,
+        agn_likelihood_space_chi2_zgt1=2.34,
+        residuals_csv_filename=None,
+    )
+
+    assert any(
+        r"$\chi^2_\nu = 1.23$" in text
+        and rf"$\chi^2_\nu(1<z<3.16) = 2.34$" in text
+        and "\n" in text
+        for text in text_calls
+    )
+
+    text_calls.clear()
+    hubble_plotting.plot_hubble(
+        flat_samples,
+        df_agn,
+        df_pantheon,
+        cosmo_model="FlatLambdaCDM",
+        z_pivot_agn=hubble_fit.z_pivot_agn,
+        plot_path=str(tmp_path),
+        show=False,
+        debias=False,
+        z_range=(0.44, 0.9),
+        residuals_csv_filename=None,
+    )
+
+    chi2_text = next(text for text in text_calls if r"\chi^2_\nu" in text)
+    assert "(1<z<" not in chi2_text
+
+
 def test_run_single_two_pass_sigma_clip_uses_plot_hubble_clipping_sigma(monkeypatch, tmp_path):
     df_agn = _make_fake_agn_sample(n_agn=4)
     df_pantheon = _make_fake_pantheon_sample()
@@ -999,6 +1066,108 @@ def test_resolve_resume_checkpoint_path_treats_true_like_default_checkpoint(tmp_
         hubble_fit.resolve_resume_checkpoint_path(resume_value, str(default_checkpoint))
 
 
+def test_normalize_resume_by_model_no_resume():
+    assert hubble_fit.normalize_resume_by_model(
+        False,
+        ["FlatLambdaCDM", "FlatwCDM"],
+    ) == {"FlatLambdaCDM": False, "FlatwCDM": False}
+
+
+def test_normalize_resume_by_model_flag_only_uses_defaults():
+    assert hubble_fit.normalize_resume_by_model(
+        [],
+        ["FlatLambdaCDM", "FlatwCDM"],
+    ) == {"FlatLambdaCDM": True, "FlatwCDM": True}
+
+
+def test_normalize_resume_by_model_single_model_single_path():
+    assert hubble_fit.normalize_resume_by_model(
+        ["flatlambda.h5"],
+        ["FlatLambdaCDM"],
+    ) == {"FlatLambdaCDM": "flatlambda.h5"}
+
+
+def test_normalize_resume_by_model_multiple_models_matching_paths():
+    assert hubble_fit.normalize_resume_by_model(
+        ["flatlambda.h5", "flatw.h5"],
+        ["FlatLambdaCDM", "FlatwCDM"],
+    ) == {"FlatLambdaCDM": "flatlambda.h5", "FlatwCDM": "flatw.h5"}
+
+
+@pytest.mark.parametrize(
+    "resume_values",
+    [
+        ["shared.h5"],
+        ["flatlambda.h5", "flatw.h5"],
+        ["flatlambda.h5", "flatw.h5", "flatw0wa.h5", "extra.h5"],
+    ],
+)
+def test_normalize_resume_by_model_rejects_mismatched_path_count(resume_values):
+    models = ["FlatLambdaCDM", "FlatwCDM", "Flatw0waCDM"]
+
+    with pytest.raises(ValueError, match="one-for-one"):
+        hubble_fit.normalize_resume_by_model(resume_values, models)
+
+
+def test_run_all_dispatches_resume_path_per_cosmo_model(monkeypatch, tmp_path):
+    calls = []
+
+    def fake_run_single(*args, **kwargs):
+        calls.append(
+            {
+                "cosmo_model": kwargs["cosmo_model"],
+                "only_sna": kwargs["only_sna"],
+                "resume": kwargs["resume"],
+            }
+        )
+        return (
+            np.ones((4, 2), dtype=float),
+            ["H0", "Om0"],
+            None,
+            -10.0,
+            0.1,
+            None,
+            13.8,
+            0.1,
+        )
+
+    monkeypatch.setattr(hubble_fit, "run_single", fake_run_single)
+    monkeypatch.setattr(
+        hubble_fit,
+        "compare_models_by_log_evidence_all",
+        lambda *args, **kwargs: {"delta_logZ": 0.0},
+    )
+    monkeypatch.setattr(hubble_fit, "extract_cosmo_results_from_samples", lambda *args, **kwargs: {})
+    monkeypatch.setattr(hubble_fit, "write_results_tex_variables", lambda *args, **kwargs: None)
+    monkeypatch.setattr(hubble_fit, "save_cosmo_results_hdf5", lambda *args, **kwargs: None)
+    monkeypatch.setattr(hubble_fit, "get_qvc_result_dir", lambda: tmp_path)
+
+    df_agn = _make_fake_agn_sample(n_agn=4)
+    df_pantheon = _make_fake_pantheon_sample(n_sne=4)
+
+    hubble_fit.run_all(
+        df_agn,
+        df_agn,
+        df_pantheon,
+        np.eye(len(df_pantheon)),
+        np.eye(len(df_pantheon)),
+        0.0,
+        cosmo_models=["FlatLambdaCDM", "FlatwCDM"],
+        resume=["flatlambda.h5", "flatw.h5"],
+        speed="fastest",
+        compare_sigma_only=True,
+        disable_sigma_clip_pass=True,
+        prefix=str(tmp_path / "plots"),
+    )
+
+    assert calls == [
+        {"cosmo_model": "FlatLambdaCDM", "only_sna": False, "resume": "flatlambda.h5"},
+        {"cosmo_model": "FlatLambdaCDM", "only_sna": True, "resume": "flatlambda.h5"},
+        {"cosmo_model": "FlatwCDM", "only_sna": False, "resume": "flatw.h5"},
+        {"cosmo_model": "FlatwCDM", "only_sna": True, "resume": "flatw.h5"},
+    ]
+
+
 def test_resolve_two_pass_resume_checkpoint_prefers_pass2_then_pass1(tmp_path):
     paths = {
         "single": str(tmp_path / "single.h5"),
@@ -1318,14 +1487,15 @@ def _write_fake_checkpoint(path, flat_samples, dmi_posterior_median, dmi_posteri
 
 
 def test_run_single_resume_replot_with_cuts_bypasses_sampling_passes_and_plots_current_cut_sample(monkeypatch, tmp_path):
-    df_agn = _make_fake_agn_sample(n_agn=3)
-    checkpoint_ids = df_agn.iloc[[2, 0]]["object_id"].astype(str).to_numpy()
+    df_agn = _make_fake_agn_sample(n_agn=4)
+    df_agn.loc[:, "z"] = np.array([0.5, 1.2, 3.3, 2.0], dtype=float)
     df_pantheon = _make_fake_pantheon_sample()
     priors, model_labels, _ = hubble_model.get_model_params("FlatLambdaCDM", only_sna=False)
     theta = np.array([(priors[key][0] + priors[key][1]) / 2.0 for key in model_labels], dtype=float)
     pipeline_calls = []
     plot_hubble_calls = []
     completeness_plot_calls = []
+    agn_chi2_calls = []
 
     monkeypatch.chdir(tmp_path)
     _patch_run_single_plot_stack(monkeypatch)
@@ -1351,7 +1521,7 @@ def test_run_single_resume_replot_with_cuts_bypasses_sampling_passes_and_plots_c
     monkeypatch.setattr(
         hubble_fit,
         "_load_resume_replot_object_ids",
-        lambda resume: (str(resume), checkpoint_ids),
+        lambda resume: pytest.fail("_load_resume_replot_object_ids should not select the resume-replot sample"),
     )
 
     def fake_run_mcmc_pipeline(df_agn_arg, *args, **kwargs):
@@ -1381,10 +1551,18 @@ def test_run_single_resume_replot_with_cuts_bypasses_sampling_passes_and_plots_c
             {
                 "object_ids": df_plot["object_id"].tolist(),
                 "filename": kwargs.get("filename"),
+                "agn_likelihood_space_chi2": kwargs.get("agn_likelihood_space_chi2"),
+                "agn_likelihood_space_chi2_zgt1": kwargs.get("agn_likelihood_space_chi2_zgt1"),
             }
         )
         n = len(df_plot)
         return np.zeros(n), np.ones(n), np.zeros(n), np.ones(n), np.ones(n)
+
+    def fake_compute_agn_likelihood_space_reduced_chi2(flat_samples, model_labels, df_agn_arg, *args, **kwargs):
+        object_ids = df_agn_arg["object_id"].tolist()
+        agn_chi2_calls.append(object_ids)
+        value = 9.87 if len(agn_chi2_calls) == 1 else 6.54
+        return value, {"chi2": value, "dof": max(len(object_ids) - len(model_labels), 1)}
 
     monkeypatch.setattr(hubble_fit, "run_mcmc_pipeline", fake_run_mcmc_pipeline)
     monkeypatch.setattr(
@@ -1397,6 +1575,11 @@ def test_run_single_resume_replot_with_cuts_bypasses_sampling_passes_and_plots_c
         ),
     )
     monkeypatch.setattr(hubble_fit, "plot_hubble", fake_plot_hubble)
+    monkeypatch.setattr(
+        hubble_fit,
+        "compute_agn_likelihood_space_reduced_chi2",
+        fake_compute_agn_likelihood_space_reduced_chi2,
+    )
 
     hubble_fit.run_single(
         df_agn,
@@ -1414,7 +1597,7 @@ def test_run_single_resume_replot_with_cuts_bypasses_sampling_passes_and_plots_c
         resume_replot_with_cuts=True,
     )
 
-    expected_fit_ids = checkpoint_ids.tolist()
+    expected_fit_ids = ["agn_000", "agn_001", "agn_003"]
     expected_plot_ids = df_agn["object_id"].tolist()
     assert len(pipeline_calls) == 1
     assert pipeline_calls[0]["object_ids"] == expected_fit_ids
@@ -1423,7 +1606,32 @@ def test_run_single_resume_replot_with_cuts_bypasses_sampling_passes_and_plots_c
     assert pipeline_calls[0]["completeness_sim_file"] == str(generated_completeness)
     assert plot_hubble_calls[0]["object_ids"] == expected_plot_ids
     assert plot_hubble_calls[0]["filename"] is None
+    assert agn_chi2_calls == [
+        ["agn_000", "agn_001", "agn_003"],
+        ["agn_001", "agn_003"],
+    ]
+    assert plot_hubble_calls[0]["agn_likelihood_space_chi2"] == 9.87
+    assert plot_hubble_calls[0]["agn_likelihood_space_chi2_zgt1"] == 6.54
     assert completeness_plot_calls == [str(generated_completeness), str(generated_completeness)]
+
+
+def test_remap_resume_replot_checkpoint_rejects_current_cut_ids_missing_from_checkpoint():
+    df_agn = pd.DataFrame({"object_id": ["agn_000", "agn_new"]})
+    results = {
+        "flat_samples": np.ones((4, 2), dtype=float),
+        "object_id_fit_selection": np.array(["agn_000"], dtype=str),
+        "dmi_max_w": np.zeros(1, dtype=float),
+        "dmi_posterior_sigma": np.full(1, 0.05),
+        "integrals_max_w": np.ones(1, dtype=float),
+    }
+
+    with pytest.raises(RuntimeError, match="lacks per-object debias arrays"):
+        hubble_fit._remap_resume_replot_checkpoint(
+            results,
+            "posterior.h5",
+            df_agn,
+            ndim=2,
+        )
 
 
 def test_run_single_two_pass_sigma_clip_filters_outliers_and_writes_diagnostics(monkeypatch, tmp_path):
@@ -2412,3 +2620,22 @@ def test_load_agn_data_residuals_csv_cut_remains_available(monkeypatch, tmp_path
     assert all_df["object_id"].tolist() == ["agn_a", "agn_b", "agn_c"]
     assert filtered_df["object_id"].tolist() == ["agn_a", "agn_c"]
     assert "mu_zscore" not in filtered_df.columns
+
+
+def test_hubble_fit_cli_declares_and_forwards_spectra_sdss_run2d():
+    source_path = Path(hubble_fit.__file__)
+    tree = ast.parse(source_path.read_text(encoding="utf-8"))
+
+    parser_declared = False
+    load_kwargs = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            if isinstance(node.func, ast.Attribute) and node.func.attr == "add_argument":
+                if node.args and isinstance(node.args[0], ast.Constant):
+                    if node.args[0].value == "--spectra_sdss_run2d":
+                        parser_declared = True
+            if isinstance(node.func, ast.Name) and node.func.id == "load_agn_data":
+                load_kwargs.update(kw.arg for kw in node.keywords if kw.arg is not None)
+
+    assert parser_declared
+    assert "spectra_sdss_run2d" in load_kwargs
