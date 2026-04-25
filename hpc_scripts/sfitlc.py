@@ -44,7 +44,7 @@ def parse_args():
     parser.add_argument("--max-tree-depth", type=int, default=12, help="NUTS max tree depth.")
     parser.add_argument("--partition", default="day_amd", help="SLURM partition.")
     parser.add_argument("--time", default="2:00:00", help="SLURM time limit.")
-    parser.add_argument("--mem", default="10G", help="SLURM memory request.")
+    parser.add_argument("--mem", default="6G", help="SLURM memory request.")
     parser.add_argument("--env", default="jaxcpu2", help="Conda environment to activate inside submitted jobs.")
     parser.add_argument(
         "--resume",
@@ -418,18 +418,23 @@ def run_sbatch(cmd: list[str]) -> str:
     return parse_sbatch_job_id(stdout)
 
 
-def submit_merge_script(merge_sbatch_path: Path, dependency_job_id: str, prefix: str) -> str:
+def submit_merge_script(merge_sbatch_path: Path, dependency_job_ids: str | list[str], prefix: str) -> str:
+    if isinstance(dependency_job_ids, str):
+        dependency_job_ids = [dependency_job_ids]
+    if not dependency_job_ids:
+        raise ValueError(f"No dependency job IDs provided for merge job {prefix}.")
+    dependency_text = ":".join(dependency_job_ids)
     cmd = [
         "sbatch",
-        f"--dependency=afterany:{dependency_job_id}",
+        f"--dependency=afterany:{dependency_text}",
         str(merge_sbatch_path),
     ]
     print(
         f"Submitting merge job for {prefix}: {' '.join(cmd)} "
-        f"(depends on {dependency_job_id})"
+        f"(depends on {dependency_text})"
     )
     merge_job_id = run_sbatch(cmd)
-    print(f"Submitted merge job {merge_job_id} for {prefix} after dependency {dependency_job_id}")
+    print(f"Submitted merge job {merge_job_id} for {prefix} after dependency {dependency_text}")
     return merge_job_id
 
 
@@ -457,13 +462,15 @@ def submit_script(
         submit_merge_script(merge_sbatch_path, job_id, prefix)
         return
 
+    job_ids = []
     for batch_start in range(start_task, end_task + 1, MAX_ARRAY_SIZE):
         batch_end = min(batch_start + MAX_ARRAY_SIZE - 1, end_task)
         cmd = ["sbatch", f"--array={batch_start}-{batch_end}", str(sbatch_path)]
         print("Submitting:", " ".join(cmd))
         job_id = run_sbatch(cmd)
+        job_ids.append(job_id)
         print(f"Submitted light-curve job {job_id} for {prefix} array range {batch_start}-{batch_end}")
-        submit_merge_script(merge_sbatch_path, job_id, prefix)
+    submit_merge_script(merge_sbatch_path, job_ids, prefix)
 
 
 def main():
