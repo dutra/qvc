@@ -46,6 +46,15 @@ def parse_args():
     parser.add_argument("--time", default="2:00:00", help="SLURM time limit.")
     parser.add_argument("--mem", default="10G", help="SLURM memory request.")
     parser.add_argument("--env", default="jaxcpu2", help="Conda environment to activate inside submitted jobs.")
+    parser.add_argument(
+        "--resume",
+        metavar="PREFIX_BASE",
+        default=None,
+        help=(
+            "Resume an existing run by shared prefix base. The per-job prefix is built as "
+            "PREFIX_BASE plus the job description, for example PREFIX_BASE_stone."
+        ),
+    )
     args = parser.parse_args()
     if args.fit == "chisq" and not args.chisq_csv:
         parser.error("--chisq-csv is required when --fit chisq is used.")
@@ -170,6 +179,12 @@ def build_object_ids_path(prefix: str, job: JobConfig) -> Path:
     return SCRIPT_DIR / f"{prefix}_{job.description}_object_ids.txt"
 
 
+def build_run_prefix(job_description: str, run_stamp: str, git_hash: str, resume_prefix_base: str | None) -> str:
+    if resume_prefix_base:
+        return f"{resume_prefix_base}_{job_description}"
+    return f"{run_stamp}_{git_hash}_{job_description}"
+
+
 def build_sbatch_script(
     prefix: str,
     job: JobConfig,
@@ -203,6 +218,8 @@ def build_sbatch_script(
         "--max_tree_depth",
         str(args.max_tree_depth),
     ]
+    if getattr(args, "resume", None):
+        base_flags.append("--resume")
     if job.use_psf_constant_flux:
         base_flags.extend(
             [
@@ -460,7 +477,7 @@ def main():
     for job in build_job_configs(args.fit, chisq_csv):
         total_objects = len(job.object_ids)
         _, task_start, task_end = validate_chunking(total_objects, args.N, args.skip, args.num_jobs)
-        prefix = f"{run_stamp}_{git_hash}_{job.description}"
+        prefix = build_run_prefix(job.description, run_stamp, git_hash, args.resume)
         object_ids_path = None
         if args.fit != "chisq":
             object_ids_path = write_object_ids_file(build_object_ids_path(prefix, job), job.object_ids)
