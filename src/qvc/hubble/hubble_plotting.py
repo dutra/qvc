@@ -7651,8 +7651,42 @@ def plot_predicted_L2500_vs_sigmahat(
     x_log_grid = np.linspace(x_lo, x_hi, 250)
     x_grid = 10.0 ** x_log_grid
 
-    M0_samples = np.asarray(flat_samples[:, param_indices["M0_agn"]], dtype=float)
-    ylog_grid_by_sample = x_log_grid[None, :] + convert_M2500_to_logL2500(M0_samples)[:, None]
+    model_band_mask = (
+        np.isfinite(x_log_ref)
+        & np.isfinite(np.asarray(d["z"].values, dtype=float))
+        & (np.asarray(d["z"].values, dtype=float) >= z_range[0])
+        & (np.asarray(d["z"].values, dtype=float) <= z_range[1])
+    )
+    if np.count_nonzero(model_band_mask) < 2:
+        model_band_mask = np.isfinite(x_log_ref)
+
+    ylog_grid_by_sample = []
+    for sample in flat_samples:
+        sample_params = {k: sample[param_indices[k]] for k in model_labels}
+        sample_arr = agn_model_pack_params(
+            sample_params,
+            use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
+            use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+        )
+        sample_M0 = sample_arr[agn_model_pidx["M0_agn"]]
+        sample_x_log = -0.4 * (
+            M_model_agn(
+                sample_arr,
+                agn_obs_arr,
+                agn_pivot_arr,
+                use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
+                use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+            )
+            - sample_M0
+        )
+        sample_ylog = sample_x_log + convert_M2500_to_logL2500(sample_M0)
+        fit_mask = model_band_mask & np.isfinite(sample_ylog)
+        if np.count_nonzero(fit_mask) >= 2 and np.nanmax(x_log_ref[fit_mask]) > np.nanmin(x_log_ref[fit_mask]):
+            slope, intercept = np.polyfit(x_log_ref[fit_mask], sample_ylog[fit_mask], 1)
+            ylog_grid_by_sample.append(slope * x_log_grid + intercept)
+        else:
+            ylog_grid_by_sample.append(x_log_grid + convert_M2500_to_logL2500(sample_M0))
+    ylog_grid_by_sample = np.asarray(ylog_grid_by_sample, dtype=float)
     ylog_med  = np.median(ylog_grid_by_sample, axis=0)
     ylog_low  = np.percentile(ylog_grid_by_sample, 16, axis=0)
     ylog_high = np.percentile(ylog_grid_by_sample, 84, axis=0)
