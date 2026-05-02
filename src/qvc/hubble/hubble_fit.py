@@ -1877,6 +1877,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
             agn_data['apparent_mag_2500'],
             integrals_max_w,
             plot_path=plot_path,
+            z_range=z_range,
         )
 
     return (

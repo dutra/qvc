@@ -978,6 +978,7 @@ def run_single_jax(
         agn_data["apparent_mag_2500"],
         integrals_max_w,
         plot_path=plot_path,
+        z_range=z_range,
     )
     return flat_samples, model_labels, logZ, logZerr, age, age_err
 

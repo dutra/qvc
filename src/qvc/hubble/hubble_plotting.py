@@ -3069,6 +3069,8 @@ def plot_alpha_lambda_vs_l2500(
         l_edges = np.linspace(np.nanmin(x), np.nanmax(x), nbins_l2500 + 1)
         xmid = []
         ymed = []
+        ylo = []
+        yhi = []
         for i in range(len(l_edges) - 1):
             lo = l_edges[i]
             hi = l_edges[i + 1]
@@ -3078,12 +3080,23 @@ def plot_alpha_lambda_vs_l2500(
             if np.count_nonzero(keep) >= min_bin_count:
                 xmid.append(np.nanmedian(x[keep]))
                 ymed.append(np.nanmedian(y[keep]))
+                ylo.append(np.nanpercentile(y[keep], 16))
+                yhi.append(np.nanpercentile(y[keep], 84))
         if xmid:
+            ax.fill_between(
+                xmid,
+                ylo,
+                yhi,
+                color="k",
+                alpha=0.16,
+                linewidth=0,
+                label=r"Binned $1\sigma$",
+            )
             ax.plot(xmid, ymed, color="k", lw=2, label="Binned median")
 
     ax.set_xlabel(r"$\log L_{2500}$")
     ax.set_ylabel(r"$\alpha_{\lambda}$")
-    ax.grid(True, alpha=0.2)
+    ax.grid(False)
     cbar = fig.colorbar(sc, ax=ax, orientation="vertical")
     cbar.set_label("Redshift z")
     handles, labels = ax.get_legend_handles_labels()
@@ -7652,10 +7665,13 @@ def plot_predicted_L2500_vs_sigmahat(
     # --- Figure scaffold ---
     color = 'm'
     if show_residuals:
-        fig = plt.figure(figsize=(8, 8))
-        gs = gridspec.GridSpec(2, 1, height_ratios=[3, 1], hspace=0.05)
-        ax = fig.add_subplot(gs[0])
-        ax_res = fig.add_subplot(gs[1], sharex=ax)
+        fig, (ax, ax_res) = plt.subplots(
+            2,
+            1,
+            figsize=(8, 8),
+            sharex=True,
+            gridspec_kw={"height_ratios": [3, 1], "hspace": 0.05},
+        )
     else:
         fig, ax = plt.subplots(figsize=(8, 6))
         ax_res = None
@@ -7745,20 +7761,30 @@ def plot_predicted_L2500_vs_sigmahat(
 
             # Ascending levels: [95%, 68%]
             levels = _kde_conf_levels(Z, conf=(0.954, 0.683))
+            if show_residuals:
+                contour_color = "red"
+                contour_linewidths = (2.6, 3.2)
+                contour_handles = [
+                    Line2D([0],[0], color='red', lw=2.6, ls='-', label='95% contour'),
+                    Line2D([0],[0], color='red', lw=3.2, ls='-',  label='68% contour'),
+                ]
+            else:
+                contour_color = "darkgray"
+                contour_linewidths = (1.6, 2.0)
+                contour_handles = [
+                    Line2D([0],[0], color='k', lw=1.2, ls='--', label='95% contour'),
+                    Line2D([0],[0], color='k', lw=1.8, ls='-',  label='68% contour'),
+                ]
 
             CS = ax.contour(10.0**Xg, 10.0**Yg, Z,
                             levels=levels,
-                            colors='darkgray',
+                            colors=contour_color,
                             alpha=1.0,
                             linestyles=('solid', 'solid'),   # 95% dashed, 68% solid
-                            linewidths=(1.6, 2.0),
+                            linewidths=contour_linewidths,
                             zorder=4)
 
-            from matplotlib.lines import Line2D
-            _extra_contour_handles = [
-                Line2D([0],[0], color='k', lw=1.2, ls='--', label='95% contour'),
-                Line2D([0],[0], color='k', lw=1.8, ls='-',  label='68% contour'),
-            ]
+            _extra_contour_handles = contour_handles
         else:
             _extra_contour_handles = []
     except Exception as e:
@@ -7963,7 +7989,8 @@ def plot_predicted_L2500_vs_sigmahat(
     sigma_uv_pivot  = 10.0 ** log_sigma_uv_pivot
     tau_uv_rf_pivot = 10.0 ** log_tau_uv_rf_pivot
     xlabel = rf"$({{\sigma}}_\mathrm{{uv}} \, / \, {sigma_uv_pivot:.1f}\,\mathrm{{mag}})^{{{alpha_agn_L:.2f}}} \, ({{\tau}}_\mathrm{{uv,rf}} \, / \, {tau_uv_rf_pivot:.0f}\,\mathrm{{days}})^{{{beta_agn_L:.2f}}}$"
-    ax.set_xlabel(xlabel)
+    if not show_residuals:
+        ax.set_xlabel(xlabel)
     ax.legend(loc='upper left')
 
     # --- Residuals panel (MAIN) ---
@@ -8066,18 +8093,14 @@ def plot_predicted_L2500_vs_sigmahat(
         ax_res.set_xlabel(xlabel)
         ax_res.set_xscale('log')
         ax_res.set_ylim(-1.0, 1.0)
-        chi2_red_in = np.nan
+        rms_scatter_in = np.nan
         if np.any(good_in):
-            chi2_red_in, _ = reduced_chi_squared(
-                residuals[good_in],
-                sigma_chi_full[good_in],
-                n_params=len(model_labels) - 1,
-            )
-        if np.isfinite(chi2_red_in):
+            rms_scatter_in = float(np.sqrt(np.nanmean(np.square(residuals[good_in]))))
+        if np.isfinite(rms_scatter_in):
             ax_res.text(
                 0.98,
                 0.95,
-                rf"$\chi^2_\nu={chi2_red_in:.2f}$",
+                rf"$1\sigma\ \mathrm{{RMS}}={rms_scatter_in:.2f}$",
                 color="red",
                 ha="right",
                 va="top",
@@ -8396,7 +8419,7 @@ def plot_residuals_vs_alphaOX(
     y_all = np.asarray(residuals, dtype=float)
     yerr_all = np.asarray(residuals_err, dtype=float)
 
-    def _plot_one(xcol, xerr_col, xlabel, filename):
+    def _plot_one(xcol, xerr_col, xlabel, filename, *, marker_alpha=1.0, show_grid=True):
         x = np.asarray(df_agn.get(xcol, np.full(len(df_agn), np.nan)), dtype=float)
         xerr = np.asarray(df_agn.get(xerr_col, np.full(len(df_agn), np.nan)), dtype=float)
         z = z_all.copy()
@@ -8416,7 +8439,7 @@ def plot_residuals_vs_alphaOX(
         ax.set_ylabel("Residuals (mag)")
         ax.axhline(0.0, color="magenta", linewidth=2, zorder=0)
         ax.set_ylim(-4.6, 3.9)
-        ax.grid(True, alpha=0.25)
+        ax.grid(show_grid, alpha=0.25)
 
         if len(x) == 0:
             ax.text(
@@ -8469,6 +8492,7 @@ def plot_residuals_vs_alphaOX(
                 elinewidth=0.8,
                 capsize=2,
                 capthick=0.8,
+                alpha=marker_alpha,
                 zorder=2,
                 label=label,
             )
@@ -8555,7 +8579,15 @@ def plot_residuals_vs_alphaOX(
         r"$\alpha_{\mathrm{OX}}$",
         "alphaOX_residuals.pdf",
     )
-    return delta_path, alpha_path
+    alpha_lambda_path = _plot_one(
+        "alpha_lambda",
+        "alpha_lambda_err",
+        r"$\alpha_{\lambda}$",
+        "alpha_lambda_residuals.pdf",
+        marker_alpha=0.55,
+        show_grid=False,
+    )
+    return delta_path, alpha_path, alpha_lambda_path
 
 
 def plot_debias_impact_diagnostics(
@@ -9590,6 +9622,7 @@ def plot_completeness_diagnostics(
             -dmi_plot[fit_mask],
             alpha=0.5,
             s=20,
+            marker="o",
             color="k",
             label="in $z$ range",
         )

@@ -577,12 +577,14 @@ def test_plot_residuals_vs_alphaOX_writes_both_pdfs(tmp_path, monkeypatch):
             "delta_alphaOX_err": [0.03, 0.02, 0.02, 0.03, 0.04],
             "alphaOX": [-1.9, -1.8, -1.7, -1.6, -1.5],
             "alphaOX_err": [0.05, 0.04, 0.04, 0.05, 0.06],
+            "alpha_lambda": [-1.9, -1.8, -1.7, -1.6, -1.5],
+            "alpha_lambda_err": [0.05, 0.04, 0.04, 0.05, 0.06],
         }
     )
     residuals = np.array([0.18, 0.07, 0.01, -0.05, -0.12], dtype=float)
     residuals_err = np.full_like(residuals, 0.08)
 
-    delta_path, alpha_path = hubble_plotting.plot_residuals_vs_alphaOX(
+    delta_path, alpha_path, alpha_lambda_path = hubble_plotting.plot_residuals_vs_alphaOX(
         df,
         residuals,
         residuals_err,
@@ -594,8 +596,10 @@ def test_plot_residuals_vs_alphaOX_writes_both_pdfs(tmp_path, monkeypatch):
     assert alpha_path is not None
     assert os.path.exists(delta_path)
     assert os.path.exists(alpha_path)
+    assert os.path.exists(alpha_lambda_path)
     assert delta_path.endswith("delta_alphaOX_residuals.pdf")
     assert alpha_path.endswith("alphaOX_residuals.pdf")
+    assert alpha_lambda_path.endswith("alpha_lambda_residuals.pdf")
 
 
 def test_plot_blr_line_lags_vs_l2500_fiducial_writes_pdf(tmp_path, monkeypatch):

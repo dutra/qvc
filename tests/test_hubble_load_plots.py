@@ -180,6 +180,7 @@ def test_load_agn_data_makes_precut_and_postcut_fhost_and_blr_plots(tmp_path, mo
     for name in plot_noops:
         monkeypatch.setattr(hubble_plotting, name, lambda *_args, **_kwargs: None)
     monkeypatch.setattr(hubble_plotting, "plot_f_host_2500_vs_l2500", capture_plot)
+    monkeypatch.setattr(hubble_plotting, "plot_alpha_lambda_vs_l2500", capture_plot)
     monkeypatch.setattr(hubble_plotting, "plot_blr_diagnostics_summary", capture_plot)
 
     hubble_utils.load_agn_data(
@@ -194,6 +195,8 @@ def test_load_agn_data_makes_precut_and_postcut_fhost_and_blr_plots(tmp_path, mo
     captured_by_filename = {call.get("filename"): call for call in captured_calls}
     assert "f_host_2500_vs_l2500_precut.pdf" in captured_by_filename
     assert "f_host_2500_vs_l2500_postcut.pdf" in captured_by_filename
+    assert "alpha_lambda_vs_l2500_precut.pdf" in captured_by_filename
+    assert "alpha_lambda_vs_l2500_postcut.pdf" in captured_by_filename
     assert "blr_precut.pdf" in captured_by_filename
     assert "blr_postcut.pdf" in captured_by_filename
     assert captured_by_filename["f_host_2500_vs_l2500_precut.pdf"]["f_host_col"] == "f_host_2500_psf"

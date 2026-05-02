@@ -1839,6 +1839,13 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
             filename="light_curve_n_points_vs_apparent_mag_postcut.pdf",
             exclude_bands=LIGHT_CURVE_N_POINTS_EXCLUDED_BANDS,
         )
+    if {"z", "apparent_mag_2500", "alpha_lambda"}.issubset(df.columns):
+        plot_alpha_lambda_vs_l2500(
+            df,
+            plot_path=plot_path,
+            show=False,
+            filename="alpha_lambda_vs_l2500_postcut.pdf",
+        )
     if "alpha_lambda" in df.columns:
         plot_alpha_lambda_vs_redshift(
             df,
