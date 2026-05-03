@@ -917,6 +917,7 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
         plot_blr_line_lags_vs_l2500_fiducial,
         plot_blr_lag_vs_amp_by_band,
         plot_blr_lag_vs_redshift_by_band,
+        plot_bpl_psd_vs_uv_variability,
         plot_eta_tau_sigma_vs_redshift,
         plot_fast_vs_uv_variability,
         plot_f_host_2500_vs_redshift,
@@ -983,17 +984,17 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
             "x": "log_sigma_uv",
             "y": "log_sigma_ls",
             "xerr": "log_sigma_uv_err",
-            "yerr": "log_sigma_uv_bpl_err",
+            "yerr": "log_sigma_ls_err",
             "xlabel": r"$\log\!\,\sigma_{\mathrm{UV}}\,(\mathrm{mag})$" "\n(UV)",
-            "ylabel": r"$\log\!\,\sigma_{\mathrm{UV}}\,(\mathrm{mag})$" "\n(UV DRW BPL)",
+            "ylabel": r"$\log\!\,\sigma_{\mathrm{LS,BPL}}\,(\mathrm{mag})$" "\n(PSD fit)",
         }
         tau_keys = {
             "x": "log_tau_uv_rf",
             "y": "log_tau_ls",
             "xerr": "log_tau_uv_rf_err",
-            "yerr": "log_tau_uv_rf_bpl_err",
+            "yerr": "log_tau_ls_err",
             "xlabel": r"$\log\!\,\tau_{\mathrm{UV},\,\mathrm{RF}}\,(\mathrm{days})$" "\n(UV)",
-            "ylabel": r"$\log\!\,\tau_{\mathrm{UV},\,\mathrm{RF}}\,(\mathrm{days})$" "\n(UV DRW BPL)",
+            "ylabel": r"$\log\!\,\tau_{\mathrm{LS,BPL,RF}}\,(\mathrm{days})$" "\n(PSD fit)",
         }
         required_xy = {
             sigma_keys["x"],
@@ -1537,6 +1538,16 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
             show=False,
             filename="sf_ref_band_vs_model_g_precut.pdf",
         )
+    if {"log_sigma_uv", "log_sigma_ls", "log_tau_ls"}.issubset(df.columns) and (
+        {"log_tau_uv_rf"}.issubset(df.columns)
+        or {"log_tau_uv", "z"}.issubset(df.columns)
+    ):
+        plot_bpl_psd_vs_uv_variability(
+            df,
+            plot_path=plot_path,
+            show=False,
+            filename="bpl_psd_vs_uv_variability_precut.pdf",
+        )
     if {"z", "apparent_mag_2500"}.issubset(df.columns) and any(
         (f"log_lag_blr_{band}_RF" in df.columns) or (f"log_lag_blr2_{band}_RF" in df.columns)
         for band in ("u", "g", "r", "i", "z")
@@ -2036,6 +2047,16 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
             plot_path=plot_path,
             show=False,
             filename="sf_ref_band_vs_model_g_postcut.pdf",
+        )
+    if {"log_sigma_uv", "log_sigma_ls", "log_tau_ls"}.issubset(df.columns) and (
+        {"log_tau_uv_rf"}.issubset(df.columns)
+        or {"log_tau_uv", "z"}.issubset(df.columns)
+    ):
+        plot_bpl_psd_vs_uv_variability(
+            df,
+            plot_path=plot_path,
+            show=False,
+            filename="bpl_psd_vs_uv_variability_postcut.pdf",
         )
     _plot_sigma_tau_ls_identity(
         df,

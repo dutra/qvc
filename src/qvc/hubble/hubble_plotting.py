@@ -2664,6 +2664,150 @@ def plot_sf_vs_uv_variability(
     )
 
 
+def plot_bpl_psd_vs_uv_variability(
+    df,
+    plot_path="plots/hubble",
+    show=False,
+    filename="bpl_psd_vs_uv_variability.pdf",
+):
+    """Compare the displayed LS bending-power-law PSD fit against the main UV fit."""
+    required = {"log_sigma_uv", "log_sigma_ls", "log_tau_ls"}
+    if not required.issubset(df.columns):
+        missing = ", ".join(sorted(required - set(df.columns)))
+        raise KeyError(f"Missing required columns for BPL PSD-vs-UV diagnostic plot: {missing}")
+    tau_uv_col = "log_tau_uv_rf" if "log_tau_uv_rf" in df.columns else ("log_tau_uv" if "log_tau_uv" in df.columns else None)
+    if tau_uv_col is None:
+        raise KeyError("Missing required column for BPL PSD-vs-UV diagnostic plot: log_tau_uv_rf or log_tau_uv")
+
+    z = pd.to_numeric(df["z"], errors="coerce").to_numpy(dtype=float) if "z" in df.columns else np.full(len(df), np.nan)
+    log_sigma_uv = pd.to_numeric(df["log_sigma_uv"], errors="coerce").to_numpy(dtype=float)
+    log_sigma_bpl = pd.to_numeric(df["log_sigma_ls"], errors="coerce").to_numpy(dtype=float)
+    alpha_high = (
+        pd.to_numeric(df["alpha_high_ls"], errors="coerce").to_numpy(dtype=float)
+        if "alpha_high_ls" in df.columns else np.full(len(df), -2.0, dtype=float)
+    )
+    slope = -alpha_high
+    valid_slope = np.isfinite(slope) & (slope > 1.0)
+    rms_factor = np.full(len(df), 1.0 / np.sqrt(2.0), dtype=float)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        rms_factor[valid_slope] = np.sqrt(
+            1.0 / (slope[valid_slope] * np.sin(np.pi / slope[valid_slope]))
+        )
+    rms_factor = np.where(np.isfinite(rms_factor) & (rms_factor > 0.0), rms_factor, 1.0 / np.sqrt(2.0))
+    log_sigma_bpl_comparable = log_sigma_bpl + np.log10(rms_factor / np.sqrt(2.0 * np.pi))
+    log_tau_uv = pd.to_numeric(df[tau_uv_col], errors="coerce").to_numpy(dtype=float)
+    log_tau_bpl = pd.to_numeric(df["log_tau_ls"], errors="coerce").to_numpy(dtype=float)
+    if tau_uv_col == "log_tau_uv" and "z" in df.columns:
+        log_tau_uv = log_tau_uv - np.log10(1.0 + z)
+    psd_valid = (
+        pd.Series(df["psd_ls_valid"]).fillna(False).astype(bool).to_numpy()
+        if "psd_ls_valid" in df.columns else np.ones(len(df), dtype=bool)
+    )
+
+    variability_chi_sq_g = (
+        pd.to_numeric(df["variability_chi_sq_g"], errors="coerce").to_numpy(dtype=float)
+        if "variability_chi_sq_g" in df.columns else np.full(len(df), np.nan)
+    )
+    log_variability_chi_sq_g = np.full(len(df), np.nan, dtype=float)
+    positive_chi_sq = np.isfinite(variability_chi_sq_g) & (variability_chi_sq_g > 0.0)
+    log_variability_chi_sq_g[positive_chi_sq] = np.log10(variability_chi_sq_g[positive_chi_sq])
+
+    finite_color = np.isfinite(log_variability_chi_sq_g)
+    color_norm = None
+    if np.any(finite_color):
+        cmin = float(np.nanmin(log_variability_chi_sq_g[finite_color]))
+        cmax = float(np.nanmax(log_variability_chi_sq_g[finite_color]))
+        if np.isclose(cmin, cmax):
+            cmin -= 0.5
+            cmax += 0.5
+        color_norm = colors.Normalize(vmin=cmin, vmax=cmax)
+    cmap = mpl.colormaps["viridis"]
+
+    fig, axes = plt.subplots(1, 2, figsize=(13.5, 5.8))
+    last_scatter = None
+
+    panels = [
+        (
+            axes[0],
+            np.power(10.0, log_sigma_uv),
+            np.power(10.0, log_sigma_bpl_comparable),
+            r"$\sigma_{\rm UV}$ [mag]",
+            r"$\sigma_{\rm LS,BPL}$ [mag]",
+            "No finite BPL sigma values",
+        ),
+        (
+            axes[1],
+            np.power(10.0, log_tau_uv),
+            np.power(10.0, log_tau_bpl),
+            r"$\tau_{\rm UV,RF}$ [days]",
+            r"$\tau_{\rm LS,BPL,RF}$ [days]",
+            "No finite BPL tau values",
+        ),
+    ]
+    for ax, x, y, xlabel, ylabel, empty_label in panels:
+        finite_mask = np.isfinite(x) & np.isfinite(y) & (x > 0.0) & (y > 0.0)
+        valid_mask = finite_mask & psd_valid
+        invalid_mask = finite_mask & ~psd_valid
+        color_mask = valid_mask & np.isfinite(log_variability_chi_sq_g)
+        if np.any(finite_mask):
+            if np.any(invalid_mask):
+                ax.scatter(
+                    x[invalid_mask],
+                    y[invalid_mask],
+                    facecolors="none",
+                    edgecolors="0.65",
+                    s=20,
+                    alpha=0.5,
+                    linewidths=0.8,
+                    rasterized=True,
+                    label="PSD fit flagged invalid",
+                )
+            if np.any(valid_mask & ~color_mask):
+                ax.scatter(
+                    x[valid_mask & ~color_mask],
+                    y[valid_mask & ~color_mask],
+                    color="0.75",
+                    s=10,
+                    alpha=0.35,
+                    linewidths=0,
+                    rasterized=True,
+                )
+            if np.any(color_mask):
+                last_scatter = ax.scatter(
+                    x[color_mask],
+                    y[color_mask],
+                    c=log_variability_chi_sq_g[color_mask],
+                    cmap=cmap,
+                    norm=color_norm,
+                    s=10,
+                    alpha=0.65,
+                    linewidths=0,
+                    rasterized=True,
+                )
+            lo = min(np.nanmin(x[finite_mask]), np.nanmin(y[finite_mask]))
+            hi = max(np.nanmax(x[finite_mask]), np.nanmax(y[finite_mask]))
+            if np.isfinite(lo) and np.isfinite(hi) and hi > lo:
+                ax.plot([lo, hi], [lo, hi], color="k", ls="--", lw=1.0, alpha=0.8)
+        else:
+            ax.text(0.5, 0.5, empty_label, ha="center", va="center", transform=ax.transAxes)
+        ax.set_xscale("log")
+        ax.set_yscale("log")
+        ax.set_xlabel(xlabel)
+        ax.set_ylabel(ylabel)
+
+    if last_scatter is not None and last_scatter.get_array() is not None:
+        cbar = fig.colorbar(last_scatter, ax=axes.tolist())
+        cbar.set_label(r"$\log_{10}(\chi^2_g)$")
+
+    diagnostics_path = os.path.join(plot_path or "plots/hubble", "diagnostics")
+    return _save_figure(
+        fig,
+        os.path.join(diagnostics_path, filename),
+        dpi=200,
+        show=show,
+    )
+
+
 def plot_sf_ref_band_vs_model_g(
     df,
     plot_path="plots/hubble",
