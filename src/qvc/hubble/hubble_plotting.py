@@ -8406,6 +8406,534 @@ def plot_predicted_L2500_vs_sigmahat(
     # Return MAIN residuals; show residuals can be computed externally if needed
     return residuals, sigma_chi_full
 
+
+def plot_L2500_vs_sigma_tau_separate(
+    flat_samples,
+    df_agn,
+    cosmo_model,
+    z_pivot_agn,
+    plot_path="plots/hubble",
+    show=False,
+    debias=True,
+    dm_interp=None,
+    dmi_values=None,
+    dmi_selection_sigma=None,
+    dmi_selection_sigma_interp=None,
+    clipped_mask=None,
+    show_residuals=True,
+    z_range=(0.44, 3.16),
+    use_alpha_lambda_term=None,
+    use_eta_sigma_term=None,
+    use_redshift_log_f_term=None,
+    sigma_sel_floor_mag=0.05,
+):
+    """Plot debiased L_2500 against sigma_UV and tau_UV,RF in separate panels."""
+
+    d = df_agn.copy()
+    clipped_mask = _resolve_clipped_mask(d, clipped_mask)
+
+    n_samples = int(flat_samples.shape[0])
+    thin_factor = max(1, n_samples // 500)
+    flat_samples = flat_samples[::thin_factor]
+
+    option_flags = resolve_model_option_flags(
+        cosmo_model,
+        np.asarray(flat_samples).shape[1],
+        use_alpha_lambda_term=use_alpha_lambda_term,
+        use_eta_sigma_term=use_eta_sigma_term,
+        use_redshift_log_f_term=use_redshift_log_f_term,
+    )
+    _priors, model_labels, _model_labels_latex = get_model_params(
+        cosmo_model,
+        use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
+        use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+        use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
+    )
+    param_indices = {name: model_labels.index(name) for name in model_labels}
+    med_params = {k: np.median(flat_samples[:, param_indices[k]]) for k in model_labels}
+
+    if cosmo_model == "FlatwCDM":
+        cosmo = FlatwCDM(H0=med_params["H0"], Om0=med_params["Om0"], w0=med_params["w0"])
+    elif cosmo_model == "FlatwpwaCDM":
+        cosmo = FlatwpwaCDM(
+            H0=med_params["H0"],
+            Om0=med_params["Om0"],
+            wp=med_params["wp"],
+            wa=med_params["wa"],
+            zp=z_pivot_agn,
+        )
+    elif cosmo_model == "Flatw0waCDM":
+        cosmo = Flatw0waCDM(H0=med_params["H0"], Om0=med_params["Om0"], w0=med_params["w0"], wa=med_params["wa"])
+    elif cosmo_model == "FlatLambdaCDM":
+        cosmo = FlatLambdaCDM(H0=med_params["H0"], Om0=med_params["Om0"])
+    else:
+        raise ValueError(f"Unknown cosmological model: {cosmo_model}")
+
+    if debias:
+        actual_M2500 = (
+            d["apparent_mag_2500"]
+            - _resolve_debias_values(d, dm_interp=dm_interp, dmi_values=dmi_values)
+        ) - cosmo.distmod(d["z"]).value
+    else:
+        actual_M2500 = d["apparent_mag_2500"] - cosmo.distmod(d["z"]).value
+    actual_logL2500 = convert_M2500_to_logL2500(actual_M2500)
+    y_log_meas_err = 0.4 * np.asarray(d["apparent_mag_2500_err"].fillna(0.0), dtype=float)
+
+    agn_obs_arr, agn_err_arr, agn_pivot_arr = agn_model_pack_obs(
+        d,
+        use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
+        use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+    )
+    med_arr = agn_model_pack_params(
+        med_params,
+        use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
+        use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+    )
+    M0_med = med_arr[agn_model_pidx["M0_agn"]]
+    logL0_med = convert_M2500_to_logL2500(M0_med)
+    full_x_log_ref = -0.4 * (
+        M_model_agn(
+            med_arr,
+            agn_obs_arr,
+            agn_pivot_arr,
+            use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
+            use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+        )
+        - M0_med
+    )
+    model_logL_at_data = full_x_log_ref + logL0_med
+    residuals = actual_logL2500 - model_logL_at_data
+
+    pred_M_err_med = M_model_agn_err(
+        med_arr,
+        agn_obs_arr,
+        agn_err_arr,
+        agn_pivot_arr,
+        use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
+        use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+    )
+    sigma_meas = np.asarray(y_log_meas_err, dtype=float)
+    sigma_model = 0.4 * np.asarray(pred_M_err_med, dtype=float)
+    sigma_chi_plot = np.sqrt(sigma_meas**2 + sigma_model**2)
+
+    sigma_int_log = np.exp(
+        evaluate_log_f(
+            med_params,
+            np.asarray(d["z"].values, dtype=float),
+            z_pivot=z_pivot_agn,
+            use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
+        )
+    ) / 2.5
+    sigma_chi_full = np.sqrt(sigma_chi_plot**2 + sigma_int_log**2)
+    if debias:
+        sigma_sel_mag = _resolve_selection_sigma_values(
+            d,
+            dmi_selection_sigma=dmi_selection_sigma,
+            dmi_selection_sigma_interp=dmi_selection_sigma_interp,
+            sigma_sel_floor_mag=sigma_sel_floor_mag,
+        )
+        if sigma_sel_mag is not None:
+            sigma_sel_valid = np.isfinite(sigma_sel_mag) & (sigma_sel_mag > 0.0)
+            sigma_sel_log = np.full_like(sigma_sel_mag, np.nan, dtype=float)
+            sigma_sel_log[sigma_sel_valid] = sigma_sel_mag[sigma_sel_valid] / 2.5
+            sigma_chi_full = np.where(sigma_sel_valid, sigma_sel_log, sigma_chi_full)
+
+    point_scatter_logL = _population_scatter_offsets(sigma_int_log, enabled=debias, seed=1847)
+    actual_logL2500_plot = actual_logL2500 + point_scatter_logL
+    residuals_plot = residuals + point_scatter_logL
+    yerr_linear_display = (10.0**actual_logL2500_plot) * np.log(10.0) * y_log_meas_err
+
+    log_sigma = pd.to_numeric(d["log_sigma_uv"], errors="coerce").to_numpy(dtype=float)
+    log_tau = pd.to_numeric(d["log_tau_uv_rf"], errors="coerce").to_numpy(dtype=float)
+    log_sigma_err = (
+        pd.to_numeric(d["log_sigma_uv_std_psd"], errors="coerce").to_numpy(dtype=float)
+        if "log_sigma_uv_std_psd" in d.columns
+        else pd.to_numeric(d.get("log_sigma_uv_err", pd.Series(np.nan, index=d.index)), errors="coerce").to_numpy(dtype=float)
+    )
+    log_tau_err = (
+        pd.to_numeric(d["log_tau_uv_rf_std_psd"], errors="coerce").to_numpy(dtype=float)
+        if "log_tau_uv_rf_std_psd" in d.columns
+        else pd.to_numeric(d.get("log_tau_uv_rf_err", pd.Series(np.nan, index=d.index)), errors="coerce").to_numpy(dtype=float)
+    )
+
+    log_sigma_pivot = agn_pivot_arr[agn_model_oidx["log_sigma_uv"]]
+    log_tau_pivot = agn_pivot_arr[agn_model_oidx["log_tau_uv_rf"]]
+    alpha_L_med = -0.4 * med_params["alpha_agn"]
+    beta_L_med = -0.4 * med_params["beta_agn"]
+
+    def _grid_for(values):
+        finite = values[np.isfinite(values)]
+        if finite.size < 2:
+            return np.linspace(-1.0, 1.0, 250)
+        lo, hi = np.nanpercentile(finite, [1, 99])
+        pad = 0.12 * max(hi - lo, 0.1)
+        return np.linspace(lo - pad, hi + pad, 250)
+
+    grids = {
+        "sigma": _grid_for(log_sigma),
+        "tau": _grid_for(log_tau),
+    }
+
+    def _posterior_band(which, grid):
+        curves = []
+        for sample in flat_samples:
+            sample_params = {k: sample[param_indices[k]] for k in model_labels}
+            sample_M0 = sample_params["M0_agn"]
+            sample_logL0 = convert_M2500_to_logL2500(sample_M0)
+            if which == "sigma":
+                slope = -0.4 * sample_params["alpha_agn"]
+                pivot = log_sigma_pivot
+            else:
+                slope = -0.4 * sample_params["beta_agn"]
+                pivot = log_tau_pivot
+            curves.append(sample_logL0 + slope * (grid - pivot))
+        curves = np.asarray(curves, dtype=float)
+        return (
+            np.nanmedian(curves, axis=0),
+            np.nanpercentile(curves, 16, axis=0),
+            np.nanpercentile(curves, 84, axis=0),
+        )
+
+    bands = {
+        "sigma": _posterior_band("sigma", grids["sigma"]),
+        "tau": _posterior_band("tau", grids["tau"]),
+    }
+
+    if show_residuals:
+        fig, axes = plt.subplots(
+            2,
+            2,
+            figsize=(12.5, 8.0),
+            sharex="col",
+            gridspec_kw={"height_ratios": [3, 1], "hspace": 0.05, "wspace": 0.22},
+        )
+        top_axes = axes[0]
+        residual_axes = axes[1]
+    else:
+        fig, top_axes = plt.subplots(1, 2, figsize=(12.5, 5.8), sharey=True)
+        residual_axes = [None, None]
+    specs = [
+        {
+            "key": "sigma",
+            "xlog": log_sigma,
+            "xlog_err": log_sigma_err,
+            "xlabel": r"$\sigma_{\rm UV}$ (mag)",
+            "model_label": rf"$L_{{2500}} \propto \sigma_{{\rm UV}}^{{{alpha_L_med:.2f}}}$",
+        },
+        {
+            "key": "tau",
+            "xlog": log_tau,
+            "xlog_err": log_tau_err,
+            "xlabel": r"$\tau_{\rm UV,RF}$ (days)",
+            "model_label": rf"$L_{{2500}} \propto \tau_{{\rm UV,RF}}^{{{beta_L_med:.2f}}}$",
+        },
+    ]
+    mask_in = d["z"].between(z_range[0], z_range[1]).to_numpy(dtype=bool)
+    mask_out = ~mask_in
+    good_residual = np.isfinite(residuals_plot) & np.isfinite(sigma_chi_plot) & (sigma_chi_plot > 0)
+    good_in = np.isfinite(residuals) & np.isfinite(sigma_chi_full) & (sigma_chi_full > 0) & mask_in
+
+    for col, spec in enumerate(specs):
+        ax = top_axes[col]
+        ax_res = residual_axes[col]
+        x = np.power(10.0, spec["xlog"])
+        x_lo = np.power(10.0, spec["xlog"] - spec["xlog_err"])
+        x_hi = np.power(10.0, spec["xlog"] + spec["xlog_err"])
+        xerr = np.vstack((x - np.maximum(x_lo, 1e-300), np.maximum(x_hi, x) - x))
+        finite_x = np.isfinite(x) & (x > 0.0)
+        for select, marker, size, label in (
+            (mask_in, "o", 4, "AGN"),
+            (mask_out, "D", 3, "outside z range"),
+        ):
+            mask = finite_x & select & np.isfinite(actual_logL2500_plot)
+            if np.any(mask):
+                ax.errorbar(
+                    x[mask],
+                    10.0**actual_logL2500_plot[mask],
+                    xerr=xerr[:, mask],
+                    yerr=yerr_linear_display[mask],
+                    fmt=marker,
+                    linestyle="none",
+                    markersize=size,
+                    mfc=(0, 0, 0, 0.4),
+                    mec="none",
+                    ecolor=(0.2, 0.2, 0.2, 0.12),
+                    elinewidth=0.8,
+                    capsize=2,
+                    capthick=0.8,
+                    zorder=2,
+                    label=label if col == 0 else None,
+                )
+        if clipped_mask is not None:
+            clipped = finite_x & clipped_mask & np.isfinite(actual_logL2500_plot)
+            if np.any(clipped):
+                ax.scatter(
+                    x[clipped],
+                    10.0**actual_logL2500_plot[clipped],
+                    s=28,
+                    marker="D",
+                    c="tab:green",
+                    alpha=0.95,
+                    linewidths=0,
+                    zorder=4,
+                    label="Clipped AGN" if col == 0 else None,
+                )
+
+        grid = grids[spec["key"]]
+        y_med, y_lo, y_hi = bands[spec["key"]]
+        x_grid = np.power(10.0, grid)
+        ax.fill_between(x_grid, 10.0**y_lo, 10.0**y_hi, color="m", alpha=0.35, zorder=8)
+        ax.plot(x_grid, 10.0**y_med, color="m", lw=2.0, zorder=9, label=spec["model_label"])
+        ax.set_xscale("log")
+        ax.set_yscale("log")
+        if not show_residuals:
+            y_limit_values = [
+                np.asarray(10.0**actual_logL2500_plot[finite_x & np.isfinite(actual_logL2500_plot)], dtype=float),
+                np.asarray(10.0**y_lo, dtype=float),
+                np.asarray(10.0**y_hi, dtype=float),
+            ]
+            y_limit_values = np.concatenate([arr[np.isfinite(arr) & (arr > 0.0)] for arr in y_limit_values])
+            if y_limit_values.size:
+                y_lo_lim, y_hi_lim = np.nanpercentile(y_limit_values, [0.5, 99.5])
+                if np.isfinite(y_lo_lim) and np.isfinite(y_hi_lim) and y_hi_lim > y_lo_lim:
+                    pad_dex = 0.08 * (np.log10(y_hi_lim) - np.log10(y_lo_lim))
+                    ax.set_ylim(
+                        10.0 ** (np.log10(y_lo_lim) - pad_dex),
+                        10.0 ** (np.log10(y_hi_lim) + pad_dex),
+                    )
+        ax.set_ylabel(r"$L_{2500\,\mathrm{\AA}}$ (erg s$^{-1}$)" if col == 0 else "")
+        if not show_residuals:
+            ax.set_xlabel(spec["xlabel"])
+        ax.legend(loc="upper left", frameon=True, fontsize=10)
+
+        if not show_residuals:
+            continue
+
+        res_in = finite_x & good_residual & mask_in
+        res_out = finite_x & good_residual & mask_out
+        if np.any(res_in):
+            ax_res.errorbar(
+                x[res_in],
+                residuals_plot[res_in],
+                yerr=sigma_chi_plot[res_in],
+                fmt="o",
+                linestyle="none",
+                markersize=2.8,
+                mfc=(0, 0, 0, 0.4),
+                mec="none",
+                ecolor=(0.2, 0.2, 0.2, 0.18),
+                elinewidth=0.6,
+                capsize=0,
+                zorder=5,
+            )
+        if np.any(res_out):
+            ax_res.errorbar(
+                x[res_out],
+                residuals_plot[res_out],
+                yerr=sigma_chi_plot[res_out],
+                fmt="D",
+                linestyle="none",
+                markersize=2.8,
+                mfc=(0, 0, 0, 0.4),
+                mec="none",
+                ecolor=(0.2, 0.2, 0.2, 0.18),
+                elinewidth=0.6,
+                capsize=0,
+                zorder=6,
+            )
+        ax_res.axhline(0.0, color="m", linestyle="--", zorder=3)
+        ax_res.set_xscale("log")
+        ax_res.set_ylim(-1.0, 1.0)
+        ax_res.set_xlabel(spec["xlabel"])
+        ax_res.set_ylabel(_residual_axis_label("L2500_sigma_tau_residuals") if col == 0 else "")
+        if np.any(good_in) and col == 1:
+            rms_scatter_in = float(np.sqrt(np.nanmean(np.square(residuals[good_in]))))
+            ax_res.text(
+                0.98,
+                0.95,
+                rf"$1\sigma\ \mathrm{{RMS}}={rms_scatter_in:.2f}$",
+                color="red",
+                ha="right",
+                va="top",
+                transform=ax_res.transAxes,
+            )
+
+    fig.tight_layout()
+    os.makedirs(plot_path, exist_ok=True)
+    out_pdf = "L2500_vs_sigma_tau_separate"
+    if debias:
+        out_pdf += "_debiased"
+    if show_residuals:
+        out_pdf += "_with_residuals"
+    out_pdf += ".pdf"
+    _save_figure(fig, os.path.join(plot_path, out_pdf), dpi=600, show=show)
+    return residuals, sigma_chi_full
+
+
+def plot_catalog_quantity_vs_sigma_tau_separate(
+    df_agn,
+    *,
+    y_col,
+    yerr_col=None,
+    y_label,
+    filename,
+    plot_path="plots/hubble",
+    show=False,
+    clipped_mask=None,
+    z_range=(0.44, 3.16),
+):
+    """Plot an external catalog quantity against sigma_UV and tau_UV,RF."""
+
+    d = df_agn.copy()
+    if (
+        y_col == "LOGLEDD_RATIO"
+        and y_col not in d.columns
+        and {"LOGLBOL_CORRECTED", "LOGMBH"}.issubset(d.columns)
+    ):
+        d[y_col] = (
+            pd.to_numeric(d["LOGLBOL_CORRECTED"], errors="coerce")
+            - pd.to_numeric(d["LOGMBH"], errors="coerce")
+            - np.log10(1.26e38)
+        )
+        if yerr_col is not None and yerr_col not in d.columns:
+            lbol_err = pd.to_numeric(d.get("LOGLBOL_CORRECTED_ERR", pd.Series(np.nan, index=d.index)), errors="coerce")
+            mbh_err = pd.to_numeric(d.get("LOGMBH_ERR", pd.Series(np.nan, index=d.index)), errors="coerce")
+            d[yerr_col] = np.sqrt(np.square(lbol_err) + np.square(mbh_err))
+
+    required = {"log_sigma_uv", "log_tau_uv_rf", "z", y_col}
+    if not required.issubset(d.columns):
+        missing = ", ".join(sorted(required - set(d.columns)))
+        print(f"[WARNING] Skipping {filename}: missing required columns: {missing}")
+        return None
+
+    clipped_mask = _resolve_clipped_mask(d, clipped_mask)
+    y = pd.to_numeric(d[y_col], errors="coerce").to_numpy(dtype=float)
+    yerr = (
+        pd.to_numeric(d[yerr_col], errors="coerce").to_numpy(dtype=float)
+        if yerr_col is not None and yerr_col in d.columns
+        else np.full(len(d), np.nan, dtype=float)
+    )
+    log_sigma = pd.to_numeric(d["log_sigma_uv"], errors="coerce").to_numpy(dtype=float)
+    log_tau = pd.to_numeric(d["log_tau_uv_rf"], errors="coerce").to_numpy(dtype=float)
+    log_sigma_err = (
+        pd.to_numeric(d["log_sigma_uv_std_psd"], errors="coerce").to_numpy(dtype=float)
+        if "log_sigma_uv_std_psd" in d.columns
+        else pd.to_numeric(d.get("log_sigma_uv_err", pd.Series(np.nan, index=d.index)), errors="coerce").to_numpy(dtype=float)
+    )
+    log_tau_err = (
+        pd.to_numeric(d["log_tau_uv_rf_std_psd"], errors="coerce").to_numpy(dtype=float)
+        if "log_tau_uv_rf_std_psd" in d.columns
+        else pd.to_numeric(d.get("log_tau_uv_rf_err", pd.Series(np.nan, index=d.index)), errors="coerce").to_numpy(dtype=float)
+    )
+    z = pd.to_numeric(d["z"], errors="coerce").to_numpy(dtype=float)
+    mask_in = np.isfinite(z) & (z >= z_range[0]) & (z <= z_range[1])
+    mask_out = ~mask_in
+    if not np.any(np.isfinite(y)):
+        print(f"[WARNING] Skipping {filename}: no finite values in {y_col}.")
+        return None
+
+    fig, axes = plt.subplots(1, 2, figsize=(12.5, 5.8), sharey=True)
+    specs = [
+        {
+            "xlog": log_sigma,
+            "xlog_err": log_sigma_err,
+            "xlabel": r"$\sigma_{\rm UV}$ (mag)",
+        },
+        {
+            "xlog": log_tau,
+            "xlog_err": log_tau_err,
+            "xlabel": r"$\tau_{\rm UV,RF}$ (days)",
+        },
+    ]
+
+    def _plot_binned_band(ax, xlog, yvals):
+        finite = np.isfinite(xlog) & np.isfinite(yvals)
+        if np.count_nonzero(finite) < 25:
+            return
+        x_use = xlog[finite]
+        y_use = yvals[finite]
+        n_bins = min(12, max(5, int(np.sqrt(x_use.size))))
+        edges = np.nanquantile(x_use, np.linspace(0.0, 1.0, n_bins + 1))
+        edges = np.unique(edges)
+        if edges.size < 3:
+            return
+        x_mid, y_med, y_lo, y_hi = [], [], [], []
+        for lo, hi in zip(edges[:-1], edges[1:]):
+            sel = (x_use >= lo) & (x_use <= hi)
+            if np.count_nonzero(sel) < 5:
+                continue
+            x_mid.append(float(np.nanmedian(x_use[sel])))
+            y_med.append(float(np.nanmedian(y_use[sel])))
+            y_lo.append(float(np.nanpercentile(y_use[sel], 16)))
+            y_hi.append(float(np.nanpercentile(y_use[sel], 84)))
+        if len(x_mid) < 2:
+            return
+        x_plot = np.power(10.0, np.asarray(x_mid))
+        ax.fill_between(x_plot, y_lo, y_hi, color="m", alpha=0.25, zorder=8)
+        ax.plot(x_plot, y_med, color="m", lw=2.0, zorder=9, label="binned median")
+
+    for col, spec in enumerate(specs):
+        ax = axes[col]
+        x = np.power(10.0, spec["xlog"])
+        x_lo = np.power(10.0, spec["xlog"] - spec["xlog_err"])
+        x_hi = np.power(10.0, spec["xlog"] + spec["xlog_err"])
+        xerr = np.vstack((x - np.maximum(x_lo, 1e-300), np.maximum(x_hi, x) - x))
+        finite = np.isfinite(x) & (x > 0.0) & np.isfinite(y)
+        yerr_plot = np.where(np.isfinite(yerr) & (yerr >= 0.0), yerr, np.nan)
+        for select, marker, size, label in (
+            (mask_in, "o", 4, "AGN"),
+            (mask_out, "D", 3, "outside z range"),
+        ):
+            mask = finite & select
+            if np.any(mask):
+                ax.errorbar(
+                    x[mask],
+                    y[mask],
+                    xerr=xerr[:, mask],
+                    yerr=yerr_plot[mask],
+                    fmt=marker,
+                    linestyle="none",
+                    markersize=size,
+                    mfc=(0, 0, 0, 0.4),
+                    mec="none",
+                    ecolor=(0.2, 0.2, 0.2, 0.12),
+                    elinewidth=0.8,
+                    capsize=2,
+                    capthick=0.8,
+                    zorder=2,
+                    label=label if col == 0 else None,
+                )
+        if clipped_mask is not None:
+            clipped = finite & clipped_mask
+            if np.any(clipped):
+                ax.scatter(
+                    x[clipped],
+                    y[clipped],
+                    s=28,
+                    marker="D",
+                    c="tab:green",
+                    alpha=0.95,
+                    linewidths=0,
+                    zorder=4,
+                    label="Clipped AGN" if col == 0 else None,
+                )
+
+        _plot_binned_band(ax, spec["xlog"], y)
+        ax.set_xscale("log")
+        ax.set_xlabel(spec["xlabel"])
+        ax.set_ylabel(y_label if col == 0 else "")
+        y_visible = y[finite]
+        if y_visible.size:
+            lo, hi = np.nanpercentile(y_visible, [0.5, 99.5])
+            if np.isfinite(lo) and np.isfinite(hi) and hi > lo:
+                pad = 0.08 * (hi - lo)
+                ax.set_ylim(lo - pad, hi + pad)
+        ax.legend(loc="best", frameon=True, fontsize=10)
+
+    fig.tight_layout()
+    os.makedirs(plot_path, exist_ok=True)
+    return _save_figure(fig, os.path.join(plot_path, filename), dpi=600, show=show)
+
 def dmi_from_pdet_only(m_obs, m_obs_err, p_det, m_grid, sigma_completeness, z, tiny=1e-12, plot_path=None):
     """
     m_obs: (N,)

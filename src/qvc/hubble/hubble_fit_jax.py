@@ -87,6 +87,8 @@ from qvc.hubble.hubble_plotting import (
     plot_delta_m_flux_recal_vs_redshift,
     plot_full_residuals,
     plot_hubble,
+    plot_L2500_vs_sigma_tau_separate,
+    plot_catalog_quantity_vs_sigma_tau_separate,
     plot_predicted_L2500_vs_sigmahat,
     plot_redshift_histograms,
     plot_sigma_uv_mpred_correction,
@@ -905,6 +907,52 @@ def run_single_jax(
         show=False,
         plot_path=plot_path,
         df_calibrators=None,
+        z_range=z_range,
+    )
+    plot_L2500_vs_sigma_tau_separate(
+        flat_samples,
+        df_agn_fit,
+        cosmo_model=cosmo_model,
+        z_pivot_agn=z_pivot_agn,
+        debias=True,
+        dm_interp=dm_interp,
+        dmi_selection_sigma_interp=dmi_selection_sigma_interp,
+        show_residuals=False,
+        show=False,
+        plot_path=plot_path,
+        z_range=z_range,
+    )
+    plot_L2500_vs_sigma_tau_separate(
+        flat_samples,
+        df_agn_fit,
+        cosmo_model=cosmo_model,
+        z_pivot_agn=z_pivot_agn,
+        debias=True,
+        dm_interp=dm_interp,
+        dmi_selection_sigma_interp=dmi_selection_sigma_interp,
+        show_residuals=True,
+        show=False,
+        plot_path=plot_path,
+        z_range=z_range,
+    )
+    plot_catalog_quantity_vs_sigma_tau_separate(
+        df_agn_fit,
+        y_col="LOGMBH",
+        yerr_col="LOGMBH_ERR",
+        y_label=r"$\log M_{\rm BH}$",
+        filename="MBH_vs_sigma_tau_separate.pdf",
+        plot_path=plot_path,
+        show=False,
+        z_range=z_range,
+    )
+    plot_catalog_quantity_vs_sigma_tau_separate(
+        df_agn_fit,
+        y_col="LOGLEDD_RATIO",
+        yerr_col="LOGLEDD_RATIO_ERR",
+        y_label=r"$\log (L/L_{\rm Edd})$",
+        filename="Eddington_ratio_vs_sigma_tau_separate.pdf",
+        plot_path=plot_path,
+        show=False,
         z_range=z_range,
     )
     plot_blr_line_lags_vs_l2500(
