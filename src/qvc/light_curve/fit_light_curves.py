@@ -70,6 +70,7 @@ except ImportError:
     NestedSampler = None
 
 from qvc.light_curve.multiband_fit_plotting import *
+from qvc.light_curve.multiband_fit_plotting import _subtract_leakage_curve
 from qvc.light_curve.multiband_fit_utils import *
 from qvc.light_curve.multiband_generate_lc import *
 from qvc.light_curve.multiband_model_dho_blr import (
@@ -1336,24 +1337,14 @@ def compute_lomb_scargle_break_diagnostics(model, samples, obj, z, *, n_freq=500
         band_wavelength_rf=lam_rf,
         survey_idx=obj.get("survey_idx"),
     )
-    valid_leak = (
-        np.isfinite(f_leak_raw)
-        & np.isfinite(p_leak_raw)
-        & (f_leak_raw > 0.0)
-        & (p_leak_raw > 0.0)
+    p_bin_raw, p_lo_raw, p_hi_raw, _leakage_at_raw_bin = _subtract_leakage_curve(
+        f_bin_raw,
+        p_bin_raw,
+        p_lo_raw,
+        p_hi_raw,
+        f_leak_raw,
+        p_leak_raw,
     )
-    if np.count_nonzero(valid_leak) >= 2:
-        leakage_at_raw_bin = np.interp(
-            f_bin_raw,
-            f_leak_raw[valid_leak],
-            p_leak_raw[valid_leak],
-            left=0.0,
-            right=0.0,
-        )
-        leakage_at_raw_bin = np.clip(leakage_at_raw_bin, 0.0, None)
-        p_bin_raw = p_bin_raw - leakage_at_raw_bin
-        p_lo_raw = p_lo_raw - leakage_at_raw_bin
-        p_hi_raw = p_hi_raw - leakage_at_raw_bin
 
     model_psd = np.asarray(
         model.psd(

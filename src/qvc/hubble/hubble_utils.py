@@ -2061,6 +2061,8 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
     _plot_sigma_tau_ls_identity(
         df,
         suffix="postcut",
+        sigma_limits=(-1.9, 1.2),
+        tau_limits=(-0.2, 4.9),
     )
     plot_cut_diagnostics(df_all.copy(), df.copy(), bins=30, cut_info="all cuts")
     colorpanel_cols = [col for col in ("f_host_2500", "f_host_center", "f_bc_3000", "wrms") if col in df_all.columns]

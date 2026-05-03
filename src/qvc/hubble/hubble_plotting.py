@@ -2669,6 +2669,7 @@ def plot_bpl_psd_vs_uv_variability(
     plot_path="plots/hubble",
     show=False,
     filename="bpl_psd_vs_uv_variability.pdf",
+    max_log_tau_bpl_err=0.5,
 ):
     """Compare the displayed LS bending-power-law PSD fit against the main UV fit."""
     required = {"log_sigma_uv", "log_sigma_ls", "log_tau_ls"}
@@ -2681,7 +2682,15 @@ def plot_bpl_psd_vs_uv_variability(
 
     z = pd.to_numeric(df["z"], errors="coerce").to_numpy(dtype=float) if "z" in df.columns else np.full(len(df), np.nan)
     log_sigma_uv = pd.to_numeric(df["log_sigma_uv"], errors="coerce").to_numpy(dtype=float)
+    log_sigma_uv_err = (
+        pd.to_numeric(df["log_sigma_uv_err"], errors="coerce").to_numpy(dtype=float)
+        if "log_sigma_uv_err" in df.columns else np.full(len(df), np.nan)
+    )
     log_sigma_bpl = pd.to_numeric(df["log_sigma_ls"], errors="coerce").to_numpy(dtype=float)
+    log_sigma_bpl_err = (
+        pd.to_numeric(df["log_sigma_ls_err"], errors="coerce").to_numpy(dtype=float)
+        if "log_sigma_ls_err" in df.columns else np.full(len(df), np.nan)
+    )
     alpha_high = (
         pd.to_numeric(df["alpha_high_ls"], errors="coerce").to_numpy(dtype=float)
         if "alpha_high_ls" in df.columns else np.full(len(df), -2.0, dtype=float)
@@ -2696,12 +2705,41 @@ def plot_bpl_psd_vs_uv_variability(
     rms_factor = np.where(np.isfinite(rms_factor) & (rms_factor > 0.0), rms_factor, 1.0 / np.sqrt(2.0))
     log_sigma_bpl_comparable = log_sigma_bpl + np.log10(rms_factor / np.sqrt(2.0 * np.pi))
     log_tau_uv = pd.to_numeric(df[tau_uv_col], errors="coerce").to_numpy(dtype=float)
+    log_tau_uv_err_col = f"{tau_uv_col}_err"
+    log_tau_uv_err = (
+        pd.to_numeric(df[log_tau_uv_err_col], errors="coerce").to_numpy(dtype=float)
+        if log_tau_uv_err_col in df.columns else np.full(len(df), np.nan)
+    )
     log_tau_bpl = pd.to_numeric(df["log_tau_ls"], errors="coerce").to_numpy(dtype=float)
+    log_tau_bpl_err = (
+        pd.to_numeric(df["log_tau_ls_err"], errors="coerce").to_numpy(dtype=float)
+        if "log_tau_ls_err" in df.columns else np.full(len(df), np.nan)
+    )
     if tau_uv_col == "log_tau_uv" and "z" in df.columns:
         log_tau_uv = log_tau_uv - np.log10(1.0 + z)
+
+    if "log_tau_uv" in df.columns:
+        log_tau_uv_obs = pd.to_numeric(df["log_tau_uv"], errors="coerce").to_numpy(dtype=float)
+        log_tau_uv_obs_err = (
+            pd.to_numeric(df["log_tau_uv_err"], errors="coerce").to_numpy(dtype=float)
+            if "log_tau_uv_err" in df.columns else log_tau_uv_err
+        )
+    else:
+        log_tau_uv_obs = log_tau_uv + np.log10(1.0 + z)
+        log_tau_uv_obs_err = log_tau_uv_err
+    log_tau_bpl_obs = (
+        pd.to_numeric(df["log_tau_ls_obs"], errors="coerce").to_numpy(dtype=float)
+        if "log_tau_ls_obs" in df.columns else log_tau_bpl + np.log10(1.0 + z)
+    )
     psd_valid = (
         pd.Series(df["psd_ls_valid"]).fillna(False).astype(bool).to_numpy()
         if "psd_ls_valid" in df.columns else np.ones(len(df), dtype=bool)
+    )
+    tau_bpl_well_constrained = (
+        psd_valid
+        & np.isfinite(log_tau_bpl_err)
+        & (log_tau_bpl_err >= 0.0)
+        & (log_tau_bpl_err <= float(max_log_tau_bpl_err))
     )
 
     variability_chi_sq_g = (
@@ -2723,33 +2761,82 @@ def plot_bpl_psd_vs_uv_variability(
         color_norm = colors.Normalize(vmin=cmin, vmax=cmax)
     cmap = mpl.colormaps["viridis"]
 
-    fig, axes = plt.subplots(1, 2, figsize=(13.5, 5.8))
+    fig, axes = plt.subplots(1, 3, figsize=(18.5, 5.8))
     last_scatter = None
+
+    def _linear_error_from_log(value, log_value, log_err):
+        value = np.asarray(value, dtype=float)
+        log_value = np.asarray(log_value, dtype=float)
+        log_err = np.asarray(log_err, dtype=float)
+        finite = (
+            np.isfinite(value)
+            & np.isfinite(log_value)
+            & np.isfinite(log_err)
+            & (value > 0.0)
+            & (log_err >= 0.0)
+        )
+        lower = np.full(value.shape, np.nan, dtype=float)
+        upper = np.full(value.shape, np.nan, dtype=float)
+        lower[finite] = np.clip(value[finite] - np.power(10.0, log_value[finite] - log_err[finite]), 0.0, None)
+        upper[finite] = np.clip(np.power(10.0, log_value[finite] + log_err[finite]) - value[finite], 0.0, None)
+        return np.vstack([lower, upper])
 
     panels = [
         (
             axes[0],
             np.power(10.0, log_sigma_uv),
             np.power(10.0, log_sigma_bpl_comparable),
+            _linear_error_from_log(np.power(10.0, log_sigma_uv), log_sigma_uv, log_sigma_uv_err),
+            _linear_error_from_log(np.power(10.0, log_sigma_bpl_comparable), log_sigma_bpl_comparable, log_sigma_bpl_err),
             r"$\sigma_{\rm UV}$ [mag]",
             r"$\sigma_{\rm LS,BPL}$ [mag]",
             "No finite BPL sigma values",
+            np.ones(len(df), dtype=bool),
         ),
         (
             axes[1],
+            np.power(10.0, log_tau_uv_obs),
+            np.power(10.0, log_tau_bpl_obs),
+            _linear_error_from_log(np.power(10.0, log_tau_uv_obs), log_tau_uv_obs, log_tau_uv_obs_err),
+            _linear_error_from_log(np.power(10.0, log_tau_bpl_obs), log_tau_bpl_obs, log_tau_bpl_err),
+            r"$\tau_{\rm UV,obs}$ [days]",
+            r"$\tau_{\rm LS,BPL,obs}$ [days]",
+            "No well-constrained observed-frame BPL tau values",
+            tau_bpl_well_constrained,
+        ),
+        (
+            axes[2],
             np.power(10.0, log_tau_uv),
             np.power(10.0, log_tau_bpl),
+            _linear_error_from_log(np.power(10.0, log_tau_uv), log_tau_uv, log_tau_uv_err),
+            _linear_error_from_log(np.power(10.0, log_tau_bpl), log_tau_bpl, log_tau_bpl_err),
             r"$\tau_{\rm UV,RF}$ [days]",
             r"$\tau_{\rm LS,BPL,RF}$ [days]",
-            "No finite BPL tau values",
+            "No well-constrained BPL tau values",
+            tau_bpl_well_constrained,
         ),
     ]
-    for ax, x, y, xlabel, ylabel, empty_label in panels:
-        finite_mask = np.isfinite(x) & np.isfinite(y) & (x > 0.0) & (y > 0.0)
+    for ax, x, y, xerr, yerr, xlabel, ylabel, empty_label, panel_filter in panels:
+        finite_mask = np.isfinite(x) & np.isfinite(y) & (x > 0.0) & (y > 0.0) & panel_filter
         valid_mask = finite_mask & psd_valid
         invalid_mask = finite_mask & ~psd_valid
         color_mask = valid_mask & np.isfinite(log_variability_chi_sq_g)
         if np.any(finite_mask):
+            err_mask = finite_mask & np.all(np.isfinite(xerr), axis=0) & np.all(np.isfinite(yerr), axis=0)
+            if np.any(err_mask):
+                ax.errorbar(
+                    x[err_mask],
+                    y[err_mask],
+                    xerr=xerr[:, err_mask],
+                    yerr=yerr[:, err_mask],
+                    fmt="none",
+                    ecolor="0.70",
+                    elinewidth=0.45,
+                    alpha=0.20,
+                    capsize=0,
+                    rasterized=True,
+                    zorder=1,
+                )
             if np.any(invalid_mask):
                 ax.scatter(
                     x[invalid_mask],
@@ -2761,6 +2848,7 @@ def plot_bpl_psd_vs_uv_variability(
                     linewidths=0.8,
                     rasterized=True,
                     label="PSD fit flagged invalid",
+                    zorder=2,
                 )
             if np.any(valid_mask & ~color_mask):
                 ax.scatter(
@@ -2771,6 +2859,7 @@ def plot_bpl_psd_vs_uv_variability(
                     alpha=0.35,
                     linewidths=0,
                     rasterized=True,
+                    zorder=3,
                 )
             if np.any(color_mask):
                 last_scatter = ax.scatter(
@@ -2783,11 +2872,29 @@ def plot_bpl_psd_vs_uv_variability(
                     alpha=0.65,
                     linewidths=0,
                     rasterized=True,
+                    zorder=4,
                 )
             lo = min(np.nanmin(x[finite_mask]), np.nanmin(y[finite_mask]))
             hi = max(np.nanmax(x[finite_mask]), np.nanmax(y[finite_mask]))
             if np.isfinite(lo) and np.isfinite(hi) and hi > lo:
                 ax.plot([lo, hi], [lo, hi], color="k", ls="--", lw=1.0, alpha=0.8)
+            corr_mask = finite_mask & np.isfinite(np.log10(x)) & np.isfinite(np.log10(y))
+            n_corr = int(np.count_nonzero(corr_mask))
+            if n_corr >= 3:
+                rho = float(np.corrcoef(np.log10(x[corr_mask]), np.log10(y[corr_mask]))[0, 1])
+                annotation = rf"$N={n_corr}$" "\n" rf"$r={rho:.2f}$"
+            else:
+                annotation = rf"$N={n_corr}$"
+            ax.text(
+                0.04,
+                0.96,
+                annotation,
+                ha="left",
+                va="top",
+                transform=ax.transAxes,
+                fontsize=10,
+                bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="0.8", alpha=0.8),
+            )
         else:
             ax.text(0.5, 0.5, empty_label, ha="center", va="center", transform=ax.transAxes)
         ax.set_xscale("log")

@@ -125,6 +125,9 @@ def _inflate_yerr_with_jitter(yerr, band_idx, params, survey_idx=None):
     elif log_jitter.ndim == 2 and survey_idx is not None:
         survey_idx = np.asarray(survey_idx, dtype=np.int32)
         jitter = np.exp(log_jitter[band_idx, survey_idx])
+    elif log_jitter.ndim == 2:
+        jitter_by_band = np.exp(np.nanmedian(log_jitter, axis=1))
+        jitter = jitter_by_band[band_idx]
     else:
         jitter_by_band = np.exp(np.atleast_1d(log_jitter))
         jitter = jitter_by_band[band_idx]
@@ -289,7 +292,16 @@ def _smooth_noise_floor(noise_floor_arr, window):
     )
 
 
-def _subtract_leakage_curve(f_bin, signal, signal_lo, signal_hi, leakage_f, leakage_power):
+def _subtract_leakage_curve(
+    f_bin,
+    signal,
+    signal_lo,
+    signal_hi,
+    leakage_f,
+    leakage_power,
+    *,
+    max_leakage_fraction=0.8,
+):
     """Subtract an interpolated non-negative leakage curve from binned PSD values."""
 
     f_bin = np.asarray(f_bin, dtype=float)
@@ -315,6 +327,12 @@ def _subtract_leakage_curve(f_bin, signal, signal_lo, signal_hi, leakage_f, leak
         right=np.nan,
     )
     leakage_at_bin = np.where(np.isfinite(leakage_at_bin), np.clip(leakage_at_bin, 0.0, None), 0.0)
+    if max_leakage_fraction is not None:
+        signal_cap = np.clip(signal, 0.0, None)
+        leakage_at_bin = np.minimum(
+            leakage_at_bin,
+            float(max_leakage_fraction) * signal_cap,
+        )
     return (
         signal - leakage_at_bin,
         signal_lo - leakage_at_bin,
@@ -2515,7 +2533,7 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, mags_means, survey_
         ax_psd.fill_between(freqs, psd_lo, psd_hi, color='m', alpha=0.2, zorder=3)
 
         floor_positive = np.isfinite(P_noise_on_bin) & (P_noise_on_bin > 0.0)
-        if np.count_nonzero(floor_positive):
+        if plot_bpl_fit and np.count_nonzero(floor_positive):
             ax_psd.plot(
                 f_bin[floor_positive],
                 P_noise_on_bin[floor_positive],
@@ -2525,6 +2543,18 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, mags_means, survey_
                 alpha=0.9,
                 zorder=2.5,
                 label="noise floor",
+            )
+        leakage_positive = np.isfinite(leakage_at_bin) & (leakage_at_bin > 0.0)
+        if np.count_nonzero(leakage_positive):
+            ax_psd.plot(
+                f_bin[leakage_positive],
+                leakage_at_bin[leakage_positive],
+                color="tab:orange",
+                linestyle=":",
+                lw=2.4,
+                alpha=0.85,
+                zorder=2.6,
+                label="window leakage",
             )
 
         signal_yerr_lo = np.clip(
