@@ -1223,6 +1223,84 @@ def combined_raw_band_lomb_scargle(
     )
 
 
+def _combined_analytic_psd_bin_baseline(
+    model,
+    X,
+    yerr,
+    params: dict,
+    omega: np.ndarray,
+    *,
+    ref_band_idx: int,
+    bins_per_decade: int = 2,
+    min_per_bin: int = 1,
+    band_wavelength_rf: np.ndarray | None = None,
+    lambda_target_rf: float | None = None,
+    survey_idx=None,
+):
+    """Bin the analytic per-band PSD in the same way as the combined raw LS PSD."""
+
+    omega = np.asarray(omega, dtype=float)
+    f_raw = omega / (2.0 * np.pi)
+    band_idx = np.asarray(X[1], dtype=np.int32)
+    yerr = _inflate_yerr_with_jitter(
+        np.asarray(yerr, dtype=float),
+        band_idx,
+        params,
+        survey_idx=survey_idx,
+    )
+
+    if band_wavelength_rf is None:
+        scale_band = np.ones(int(np.nanmax(band_idx)) + 1, dtype=float)
+    else:
+        if "eta_sigma" not in params:
+            raise KeyError("Missing required parameter 'eta_sigma' for analytic PSD bin baseline.")
+        lambda_target = (
+            float(band_wavelength_rf[int(ref_band_idx)])
+            if lambda_target_rf is None
+            else float(lambda_target_rf)
+        )
+        scale_band = relative_to_2500_amplitude_scale(
+            band_wavelength_rf,
+            float(np.asarray(params["eta_sigma"])),
+            lambda_target_rf=lambda_target,
+        )
+
+    analytic_powers = []
+    for b in np.unique(band_idx):
+        mask = np.isfinite(yerr) & (yerr > 0.0) & (band_idx == b)
+        if np.count_nonzero(mask) < 3:
+            continue
+        power = np.asarray(
+            model.psd(params, omega, b=int(b), sigma_n2=0.0),
+            dtype=float,
+        )
+        analytic_powers.append(power * float(scale_band[int(b)]) ** 2)
+
+    if not analytic_powers:
+        empty = np.array([], dtype=float)
+        return empty, empty
+
+    analytic_arr = np.asarray(analytic_powers, dtype=float)
+    fmin, fmax = np.min(f_raw), np.max(f_raw)
+    decades = np.log10(fmax) - np.log10(fmin)
+    n_bins = int(np.ceil(bins_per_decade * decades))
+    edges = np.logspace(np.log10(fmin), np.log10(fmax), n_bins + 1)
+    which = np.digitize(f_raw, edges) - 1
+
+    f_bin, p_bin = [], []
+    for k in range(n_bins):
+        sel = which == k
+        if np.count_nonzero(sel) >= min_per_bin:
+            chunk = analytic_arr[:, sel].ravel()
+            chunk = chunk[np.isfinite(chunk)]
+            if chunk.size == 0:
+                continue
+            f_bin.append(10.0 ** np.mean(np.log10(f_raw[sel])))
+            p_bin.append(np.nanmedian(chunk))
+
+    return np.array(f_bin), np.array(p_bin)
+
+
 def estimate_lomb_scargle_white_noise_floor(
     model,
     yerr,
@@ -1444,15 +1522,21 @@ def estimate_model_window_leakage(
         )
         if f_sim.size == 0:
             continue
-        analytic_sim = np.asarray(
-            model.psd(
-                sample_params,
-                2.0 * np.pi * f_sim,
-                b=ref_band_idx,
-                sigma_n2=0.0,
-            ),
-            dtype=float,
+        f_analytic, p_analytic = _combined_analytic_psd_bin_baseline(
+            model,
+            X,
+            yerr,
+            sample_params,
+            omega,
+            ref_band_idx=ref_band_idx,
+            bins_per_decade=bins_per_decade,
+            min_per_bin=min_per_bin,
+            band_wavelength_rf=band_wavelength_rf,
+            survey_idx=survey_idx,
         )
+        if f_analytic.size == 0:
+            continue
+        analytic_sim = np.interp(f_sim, f_analytic, p_analytic, left=np.nan, right=np.nan)
         leakage = p_raw_sim - analytic_sim
 
         valid = np.isfinite(f_sim) & np.isfinite(leakage)
@@ -2557,6 +2641,21 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, mags_means, survey_
                 label="window leakage",
             )
 
+        raw_plot = np.isfinite(f_bin) & np.isfinite(P_bin_raw) & (P_bin_raw > 0.0)
+        if plot_bpl_fit and np.count_nonzero(raw_plot):
+            ax_psd.scatter(
+                f_bin[raw_plot],
+                P_bin_raw[raw_plot],
+                s=22,
+                marker="o",
+                facecolors="0.65",
+                edgecolors="0.65",
+                linewidths=0.5,
+                alpha=0.55,
+                zorder=3.2,
+                label="uncorrected LS PSD",
+            )
+
         signal_yerr_lo = np.clip(
             P_signal_plot - np.clip(P_signal_lo, 1e-300, None),
             0.0,
@@ -2593,7 +2692,7 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, mags_means, survey_
                 signal_yerr_lo[fit_mask],
                 signal_yerr_hi[fit_mask],
             )
-            if display_bpl_fit is not None:
+            if display_bpl_fit is not None and display_bpl_fit["valid"]:
                 psd_ls_fit = _bending_power_law_psd_plot(
                     freqs,
                     display_bpl_fit["log_sigma"],
