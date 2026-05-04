@@ -50,6 +50,7 @@ from qvc.hubble.hubble_model import (
     resolve_model_option_flags,
     infer_use_alpha_lambda_term,
 )
+from qvc.hubble.sigma_tau_lambda_fit import fit_sigma_tau_lambda_broken_pl
 from qvc.light_curve.plotting_appendix import plot_sigma_tau_identity_grid
 
 PURPLE_ANSI = "\033[95m"
@@ -937,6 +938,7 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
         plot_sigma_bc_vs_frac_bc,
         plot_sigma_bc_vs_redshift,
         plot_sigma_tau_err_std_psd_comparison,
+        plot_sigma_tau_vs_lambda_broken_pl_fit,
         plot_sigma_uv_vs_variability_chi_sq_red_g,
         plot_sigma_uv_vs_tau_uv_rf,
         plot_sigma_uv_host_correction,
@@ -1923,6 +1925,12 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
             show=False,
             filename="sigma_uv_vs_tau_uv_rf_postcut.pdf",
             dynamic_axes=True,
+        )
+        plot_sigma_tau_vs_lambda_broken_pl_fit(
+            df,
+            plot_path=plot_path,
+            show=False,
+            filename="sigma_tau_vs_lambda_broken_pl_fit_postcut.pdf",
         )
     if {
         "log_sigma_uv_err",
@@ -3171,6 +3179,57 @@ def write_results_tex_variables(
     lines.append(_cmd("NumSNaFitted", len(df_pantheon[mask])))
     lines.append(_cmd("SigmauvPivot", f"{10**log_sigma_uv_pivot:.1f}"))
     lines.append(_cmd("TauuvrfPivot", f"{10**log_tau_uv_rf_pivot:.0f}"))
+    try:
+        sigma_tau_lambda_fit = fit_sigma_tau_lambda_broken_pl(df_agn)
+    except (KeyError, ValueError) as exc:
+        warnings.warn(
+            "Skipping sigma/tau wavelength-fit TeX variables: "
+            f"{exc}",
+            RuntimeWarning,
+        )
+        sigma_tau_lambda_fit = None
+    if sigma_tau_lambda_fit is not None:
+        lines.append(r"% --- Sigma/tau wavelength broken power-law fit ---")
+        lines.append(
+            _cmd(
+                "EtaSigmaBlueLambda",
+                format_result_errors(
+                    sigma_tau_lambda_fit["eta_sigma_blue"],
+                    sigma_tau_lambda_fit["eta_sigma_blue_err"],
+                    nd=2,
+                ),
+            )
+        )
+        lines.append(
+            _cmd(
+                "EtaSigmaRedLambda",
+                format_result_errors(
+                    sigma_tau_lambda_fit["eta_sigma_red"],
+                    sigma_tau_lambda_fit["eta_sigma_red_err"],
+                    nd=2,
+                ),
+            )
+        )
+        lines.append(
+            _cmd(
+                "EtaTauBlueLambda",
+                format_result_errors(
+                    sigma_tau_lambda_fit["eta_tau_blue"],
+                    sigma_tau_lambda_fit["eta_tau_blue_err"],
+                    nd=2,
+                ),
+            )
+        )
+        lines.append(
+            _cmd(
+                "EtaTauRedLambda",
+                format_result_errors(
+                    sigma_tau_lambda_fit["eta_tau_red"],
+                    sigma_tau_lambda_fit["eta_tau_red_err"],
+                    nd=2,
+                ),
+            )
+        )
 
     for model_name, flat_samples in cosmo_model_sna_samples.items():
         flat_samples = np.asarray(flat_samples)

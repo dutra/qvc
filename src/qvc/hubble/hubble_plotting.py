@@ -17,7 +17,7 @@ from astropy.cosmology import FlatwCDM, FlatwpwaCDM, FlatLambdaCDM, Flatw0waCDM
 from astropy.cosmology.realizations import Planck18
 from astropy import units as u
 from matplotlib.lines import Line2D
-from matplotlib.ticker import FuncFormatter, LogLocator
+from matplotlib.ticker import FixedLocator, FormatStrFormatter, FuncFormatter, LogLocator, NullLocator
 from scipy.interpolate import RegularGridInterpolator, interp1d
 from scipy.optimize import minimize_scalar
 from scipy.stats import gaussian_kde, kurtosis, norm, normaltest, probplot, skew
@@ -28,6 +28,13 @@ from qvc.hubble.hubble_model import (M_model_agn, M_model_agn_err, get_model_par
     evaluate_log_f, resolve_model_option_flags, get_agn_model_spec, AGN_ALPHA_LAMBDA_PARAM, AGN_ALPHA_LAMBDA_ERR)
 from qvc.hubble.hubble_likelihood import sigma_lens_from_dc, sigma_mu_from_z_err
 from qvc.hubble.cuts import LIGHT_CURVE_N_POINTS_EXCLUDED_BANDS, light_curve_point_count_series
+from qvc.light_curve.band_colors import BAND_COLORS as LIGHT_CURVE_BAND_COLORS
+from qvc.hubble.sigma_tau_lambda_fit import (
+    SDSS_LAMBDA_PIVOT,
+    fit_sigma_tau_lambda_broken_pl,
+    log_broken_pl,
+    std_from_slope_cov,
+)
 from qvc.hubble.hubble_utils import (
     convert_M2500_to_logL2500,
     cosmo_model_label_latex,
@@ -120,13 +127,7 @@ _SHEN_2024_LAG_LUMINOSITY_RELATIONS = {
     },
 }
 
-_BAND_COLORS = {
-    "u": "tab:blue",
-    "g": "tab:green",
-    "r": "tab:red",
-    "i": "tab:orange",
-    "z": "tab:purple",
-}
+_BAND_COLORS = LIGHT_CURVE_BAND_COLORS.copy()
 
 _BLR_LAG_KL_MIN = 0.05
 _BLR_PDF_BANDS = ("u", "g", "r", "i")
@@ -1754,6 +1755,186 @@ def plot_sigma_uv_vs_tau_uv_rf(
         fig,
         os.path.join(diagnostics_path, filename),
         dpi=200,
+        show=show,
+    )
+
+
+def plot_sigma_tau_vs_lambda_broken_pl_fit(
+    df,
+    *,
+    plot_path="plots/hubble",
+    show=False,
+    filename="sigma_tau_vs_lambda_broken_pl_fit_postcut.pdf",
+    bands=("u", "g", "r", "i", "z"),
+    lam_s=2500.0,
+    ds_fixed_sigma=0.1,
+    ds_fixed_tau=0.1,
+    min_points=3,
+):
+    """Plot UV-subtracted per-band sigma/tau versus rest wavelength with broken power-law fits."""
+    try:
+        fit_result = fit_sigma_tau_lambda_broken_pl(
+            df,
+            bands=bands,
+            lam_s=lam_s,
+            ds_fixed_sigma=ds_fixed_sigma,
+            ds_fixed_tau=ds_fixed_tau,
+            min_points=min_points,
+            include_plot_payload=True,
+        )
+    except (KeyError, ValueError) as exc:
+        print(
+            "[WARNING] Skipping sigma/tau wavelength broken power-law diagnostic: "
+            f"{exc}"
+        )
+        return None
+
+    sigma_data = fit_result["sigma_data"]
+    tau_data = fit_result["tau_data"]
+    fit_sigma = fit_result["fit_sigma"]
+    fit_tau = fit_result["fit_tau"]
+
+    xgrid = np.linspace(2, 5, 600)
+    xgrid = np.sort(np.unique(np.append(xgrid, np.log10(float(lam_s)))))
+    lam_grid = 10.0**xgrid
+    yfit_sigma = fit_sigma["intercept"] + log_broken_pl(
+        lam_grid,
+        lam_s,
+        fit_sigma["d1"],
+        fit_sigma["d2"],
+        ds_fixed_sigma,
+    )
+    yfit_tau = fit_tau["intercept"] + log_broken_pl(
+        lam_grid,
+        lam_s,
+        fit_tau["d1"],
+        fit_tau["d2"],
+        ds_fixed_tau,
+    )
+    std_sigma = std_from_slope_cov(fit_sigma, lam_grid, lam_s=lam_s, ds_fixed=ds_fixed_sigma)
+    std_tau = std_from_slope_cov(fit_tau, lam_grid, lam_s=lam_s, ds_fixed=ds_fixed_tau)
+
+    fig, (ax_sigma, ax_tau) = plt.subplots(
+        2,
+        1,
+        figsize=(6.2, 6.2),
+        sharex=True,
+        constrained_layout=True,
+    )
+    fig.set_constrained_layout_pads(w_pad=0.01, h_pad=0.01, wspace=0.01, hspace=0.02)
+
+    plotted_bands = []
+    for band in bands:
+        if band not in SDSS_LAMBDA_PIVOT:
+            continue
+        sigma_mask = sigma_data["band"] == band
+        tau_mask = tau_data["band"] == band
+        if np.any(sigma_mask):
+            plotted_bands.append(band)
+            ax_sigma.scatter(
+                sigma_data["x"][sigma_mask],
+                sigma_data["y_res"][sigma_mask],
+                s=14,
+                alpha=0.5,
+                color=_BAND_COLORS.get(band),
+                edgecolor="none",
+                rasterized=True,
+                zorder=1,
+            )
+        if np.any(tau_mask):
+            ax_tau.scatter(
+                tau_data["x"][tau_mask],
+                tau_data["y_res"][tau_mask],
+                s=14,
+                alpha=0.6,
+                color=_BAND_COLORS.get(band),
+                edgecolor="none",
+                rasterized=True,
+                zorder=1,
+            )
+
+    if std_sigma is not None:
+        ax_sigma.fill_between(
+            xgrid,
+            yfit_sigma - std_sigma,
+            yfit_sigma + std_sigma,
+            color="m",
+            alpha=0.30,
+            linewidth=0,
+            zorder=4,
+        )
+    if std_tau is not None:
+        ax_tau.fill_between(
+            xgrid,
+            yfit_tau - std_tau,
+            yfit_tau + std_tau,
+            color="m",
+            alpha=0.30,
+            linewidth=0,
+            zorder=4,
+        )
+    ax_sigma.plot(xgrid, yfit_sigma, color="m", lw=1.6, zorder=5)
+    ax_tau.plot(xgrid, yfit_tau, color="m", lw=1.6, zorder=5)
+
+    for ax in (ax_sigma, ax_tau):
+        ax.tick_params(direction="in", which="both", top=True, right=True, length=3, pad=2)
+        for spine in ax.spines.values():
+            spine.set_linewidth(1.0)
+
+    ax_sigma.set_ylabel(r"$\log(\sigma_{\mathrm{band}}/\sigma_{\mathrm{UV}})$")
+    ax_tau.set_ylabel(r"$\log(\tau_{\mathrm{band,RF}}/\tau_{\mathrm{UV,RF}})$")
+    ax_tau.set_xlabel(r"$\log_{10}\,\lambda_{\mathrm{RF}}\;(\mathrm{\AA})$")
+
+    def _loglam_to_angstrom(x):
+        return np.power(10.0, x)
+
+    def _angstrom_to_loglam(x):
+        with np.errstate(divide="ignore", invalid="ignore"):
+            return np.log10(x)
+
+    secax = ax_sigma.secondary_xaxis("top", functions=(_loglam_to_angstrom, _angstrom_to_loglam))
+    secax.set_xlabel(r"$\lambda_{\mathrm{RF}}\;(\mathrm{\AA})$")
+    secax.tick_params(direction="in", which="major", top=True)
+    lam_min, lam_max = float(10.0**xgrid.min()), float(10.0**xgrid.max())
+    span = lam_max - lam_min
+    candidates = np.array([500.0, 1000.0, 2000.0])
+    step = float(candidates[np.argmin(np.abs(span / candidates - 4.0))])
+    ticks_angstrom = np.arange(
+        np.ceil(lam_min / step) * step,
+        np.floor(lam_max / step) * step + 0.5 * step,
+        step,
+    )
+    ticks_angstrom = ticks_angstrom[(ticks_angstrom >= lam_min) & (ticks_angstrom <= lam_max)]
+    secax.xaxis.set_major_locator(FixedLocator(ticks_angstrom))
+    secax.xaxis.set_major_formatter(FormatStrFormatter("%.0f"))
+    secax.xaxis.set_minor_locator(NullLocator())
+
+    band_handles = [
+        Line2D(
+            [0],
+            [0],
+            linestyle="none",
+            marker="o",
+            markersize=6,
+            markerfacecolor=_BAND_COLORS.get(band),
+            markeredgecolor="none",
+            label=f"{band}-band",
+        )
+        for band in dict.fromkeys(plotted_bands)
+    ]
+    model_handle = [Line2D([0], [0], color="m", lw=1.6, label="Population fit")]
+    if band_handles:
+        ax_sigma.legend(handles=band_handles + model_handle, loc="upper right", frameon=False, ncol=2, fontsize=9)
+
+    ax_sigma.set_ylim(-0.54, 0.64)
+    ax_tau.set_xlim(2.81, 3.89)
+    ax_tau.set_ylim(-0.69, 0.64)
+
+    diagnostics_path = os.path.join(plot_path or "plots/hubble", "diagnostics")
+    return _save_figure(
+        fig,
+        os.path.join(diagnostics_path, filename),
+        dpi=600,
         show=show,
     )
 
@@ -5537,7 +5718,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     # ---------- Residuals panel ----------
     if show_residuals:
         # Zero line
-        ax_resid.axhline(0.0, color="m", lw=2.2, zorder=1)
+        ax_resid.axhline(0.0, color="m", lw=3.0, zorder=1)
 
         # NEW: binned residuals in red (points + thin connecting line)
         if z_res_lin_scatter.size:
