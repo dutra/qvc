@@ -341,6 +341,55 @@ def _subtract_leakage_curve(
     )
 
 
+def apply_window_response_correction(
+    f_bin,
+    signal,
+    signal_lo,
+    signal_hi,
+    response_f,
+    response,
+    *,
+    min_response=0.25,
+    max_response=4.0,
+):
+    """Divide binned LS PSD values by the simulated LS/analytic response."""
+
+    f_bin = np.asarray(f_bin, dtype=float)
+    signal = np.asarray(signal, dtype=float).copy()
+    signal_lo = np.asarray(signal_lo, dtype=float).copy()
+    signal_hi = np.asarray(signal_hi, dtype=float).copy()
+    response_f = np.asarray(response_f, dtype=float)
+    response = np.asarray(response, dtype=float)
+    valid = (
+        np.isfinite(response_f)
+        & np.isfinite(response)
+        & (response_f > 0.0)
+        & (response > 0.0)
+    )
+    if np.count_nonzero(valid) < 2:
+        return signal, signal_lo, signal_hi, np.ones_like(signal)
+
+    response_at_bin = np.interp(
+        f_bin,
+        response_f[valid],
+        response[valid],
+        left=np.nan,
+        right=np.nan,
+    )
+    response_at_bin = np.where(np.isfinite(response_at_bin), response_at_bin, 1.0)
+    response_at_bin = np.clip(
+        response_at_bin,
+        float(min_response),
+        float(max_response),
+    )
+    return (
+        signal / response_at_bin,
+        signal_lo / response_at_bin,
+        signal_hi / response_at_bin,
+        response_at_bin,
+    )
+
+
 POSTERIOR_PLOT_KEY_GROUPS = {
     "continuum": {
         "exact": [
@@ -1052,6 +1101,72 @@ def relative_to_2500_amplitude_scale(band_wavelength_rf, eta_sigma, *, lambda_ta
     return np.power(10.0, log_scale_band)
 
 
+def subtract_gp_mean_for_psd(model, params: dict, X, y, *, survey_idx=None):
+    """Subtract the deterministic GP mean/trend, without removing GP variability."""
+
+    y_detrended = np.asarray(y, dtype=float).copy()
+    t = np.asarray(X[0], dtype=float)
+    band_idx = np.asarray(X[1], dtype=np.int32)
+
+    mean_func = getattr(model, "mean_func", None)
+    if mean_func is not None:
+        try:
+            mean_vals = mean_func(params, (jnp.asarray(t), jnp.asarray(band_idx)))
+        except TypeError:
+            t_center = float(np.mean(t))
+            t_std = float(np.std(t))
+            mean_vals = mean_func(
+                getattr(model, "zero_mean", False),
+                int(np.nanmax(band_idx)) + 1,
+                t_center,
+                t_std,
+                params,
+                (jnp.asarray(t), jnp.asarray(band_idx)),
+            )
+        if hasattr(model, "mean_to_display"):
+            mean_vals = model.mean_to_display(mean_vals)
+        mean_vals = np.asarray(mean_vals, dtype=float)
+        if mean_vals.shape == y_detrended.shape:
+            good = np.isfinite(y_detrended) & np.isfinite(mean_vals)
+            y_detrended[good] -= mean_vals[good]
+        else:
+            logging.warning(
+                "Skipping GP mean subtraction before LS PSD: mean shape %s does not match y shape %s.",
+                mean_vals.shape,
+                y_detrended.shape,
+            )
+
+    if survey_idx is None:
+        survey_idx = getattr(model, "survey_idx", None)
+    if survey_idx is not None and "survey_delta_mag" in params:
+        survey_delta_mag = np.asarray(params["survey_delta_mag"], dtype=float)
+        survey_idx = np.asarray(survey_idx, dtype=np.int32)
+        if (
+            survey_delta_mag.ndim == 2
+            and survey_idx.shape == y_detrended.shape
+            and band_idx.shape == y_detrended.shape
+        ):
+            good = (
+                np.isfinite(y_detrended)
+                & np.isfinite(survey_delta_mag[band_idx, survey_idx])
+            )
+            y_detrended[good] -= survey_delta_mag[band_idx, survey_idx][good]
+
+    return y_detrended
+
+
+def drop_highest_frequency_bins(mask, freq, *, n_drop: int = 2):
+    """Return a copy of mask with the highest selected frequency bins removed."""
+
+    out = np.asarray(mask, dtype=bool).copy()
+    freq = np.asarray(freq, dtype=float)
+    selected = np.where(out & np.isfinite(freq))[0]
+    if selected.size > int(n_drop):
+        drop = selected[np.argsort(freq[selected])[-int(n_drop):]]
+        out[drop] = False
+    return out
+
+
 def combined_raw_band_lomb_scargle(
     X,
     y,
@@ -1561,6 +1676,138 @@ def estimate_model_window_leakage(
     leakage_power = _smooth_linear_frequency_series(leakage_power, leakage_smooth_width)
     leakage_power = np.clip(leakage_power, 0.0, None)
     return f_ref, leakage_power
+
+
+def estimate_model_window_response(
+    model,
+    samples,
+    X,
+    yerr,
+    omega,
+    *,
+    ref_band_idx: int,
+    band_wavelength_rf: np.ndarray,
+    survey_idx=None,
+    bins_per_decade: int = 3,
+    min_per_bin: int = 5,
+    n_model_sim: int = 24,
+    response_smooth_width: int = 5,
+    random_state: int = 24680,
+):
+    """Estimate recovered-LS / analytic-PSD response from intrinsic model simulations."""
+
+    if not hasattr(model, "_build_gp"):
+        empty = np.array([], dtype=float)
+        return empty, empty
+
+    if "log_tau_uv" in samples:
+        n_total = int(len(np.asarray(samples["log_tau_uv"])))
+    else:
+        n_total = 0
+        for value in samples.values():
+            arr = np.asarray(value)
+            if arr.ndim > 0 and arr.shape[0] > 1:
+                n_total = int(arr.shape[0])
+                break
+    n_draws = min(int(n_model_sim), n_total)
+    if n_draws <= 0:
+        empty = np.array([], dtype=float)
+        return empty, empty
+
+    draw_indices = np.linspace(0, n_total - 1, n_draws, dtype=int)
+    keys = jrandom.split(jrandom.PRNGKey(int(random_state)), n_draws)
+
+    f_ref = None
+    recovered_curves = []
+    analytic_curves = []
+    for key, draw_idx in zip(keys, draw_indices):
+        sample_params = _posterior_sample_params_at_index(samples, int(draw_idx), n_total)
+        try:
+            y_model = _sample_intrinsic_model_observed_order(model, sample_params, key)
+        except Exception as exc:
+            logging.warning("Window-response PSD draw failed: %s", exc)
+            continue
+        if y_model.shape[0] != len(np.asarray(X[0])):
+            logging.warning(
+                "Window-response PSD draw has length %d but X has length %d; skipping.",
+                y_model.shape[0],
+                len(np.asarray(X[0])),
+            )
+            continue
+
+        f_sim, p_raw_sim, _p_signal_sim, _p_lo_sim, _p_hi_sim, _counts_sim, _p_noise_sim = (
+            combined_raw_band_lomb_scargle(
+                X,
+                y_model,
+                yerr,
+                sample_params,
+                omega,
+                ref_band_idx=ref_band_idx,
+                bins_per_decade=bins_per_decade,
+                min_per_bin=min_per_bin,
+                band_wavelength_rf=band_wavelength_rf,
+                survey_idx=survey_idx,
+                n_noise_sim=0,
+            )
+        )
+        if f_sim.size == 0:
+            continue
+        f_analytic, p_analytic = _combined_analytic_psd_bin_baseline(
+            model,
+            X,
+            yerr,
+            sample_params,
+            omega,
+            ref_band_idx=ref_band_idx,
+            bins_per_decade=bins_per_decade,
+            min_per_bin=min_per_bin,
+            band_wavelength_rf=band_wavelength_rf,
+            survey_idx=survey_idx,
+        )
+        if f_analytic.size == 0:
+            continue
+
+        analytic_sim = np.interp(f_sim, f_analytic, p_analytic, left=np.nan, right=np.nan)
+        valid = (
+            np.isfinite(f_sim)
+            & np.isfinite(p_raw_sim)
+            & np.isfinite(analytic_sim)
+            & (analytic_sim > 0.0)
+            & (p_raw_sim > 0.0)
+        )
+        if np.count_nonzero(valid) == 0:
+            continue
+        f_sim = f_sim[valid]
+        recovered = p_raw_sim[valid]
+        analytic_sim = analytic_sim[valid]
+        if f_ref is None:
+            f_ref = f_sim
+            recovered_curves.append(recovered)
+            analytic_curves.append(analytic_sim)
+        elif f_sim.shape == f_ref.shape and np.allclose(f_sim, f_ref, rtol=1e-6, atol=0.0):
+            recovered_curves.append(recovered)
+            analytic_curves.append(analytic_sim)
+        else:
+            recovered_curves.append(np.interp(f_ref, f_sim, recovered, left=np.nan, right=np.nan))
+            analytic_curves.append(np.interp(f_ref, f_sim, analytic_sim, left=np.nan, right=np.nan))
+
+    if f_ref is None or not recovered_curves or not analytic_curves:
+        empty = np.array([], dtype=float)
+        return empty, empty
+
+    recovered_curves = np.asarray(recovered_curves, dtype=float)
+    analytic_curves = np.asarray(analytic_curves, dtype=float)
+    recovered = np.nanmean(recovered_curves, axis=0)
+    analytic = np.nanmean(analytic_curves, axis=0)
+    response = np.divide(
+        recovered,
+        analytic,
+        out=np.full_like(recovered, np.nan, dtype=float),
+        where=np.isfinite(recovered) & np.isfinite(analytic) & (analytic > 0.0),
+    )
+    response = _smooth_positive_frequency_series(response, response_smooth_width)
+    response = np.where(np.isfinite(response), np.clip(response, 0.0, None), np.nan)
+    return f_ref, response
 
 
 import numpy as np
@@ -2506,6 +2753,7 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, mags_means, survey_
 
         print("Plotting PSD...")
         psd_xlim = (8e-6, 1.5e-2)
+        psd_bpl_fit_fmax = 2e-3
         psd_ymin = 2e-2
         freqs = np.logspace(-6, 2, 500)
         freqs_ls = freqs
@@ -2534,9 +2782,16 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, mags_means, survey_
         psd_lo = np.percentile(psd_samples, 16, axis=0)
         psd_hi = np.percentile(psd_samples, 84, axis=0)
 
-        f_bin, P_bin_raw, P_signal, P_lo, P_hi, counts, P_noise = combined_raw_band_lomb_scargle(
+        y_psd = subtract_gp_mean_for_psd(
+            model,
+            posterior_median,
             X,
             y,
+            survey_idx=getattr(model, "survey_idx", None),
+        )
+        f_bin, P_bin_raw, P_signal, P_lo, P_hi, counts, P_noise = combined_raw_band_lomb_scargle(
+            X,
+            y_psd,
             yerr,
             posterior_median,
             2.0 * np.pi * freqs_ls,
@@ -2552,7 +2807,7 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, mags_means, survey_
             P_noise_on_bin = np.zeros_like(P_bin_raw)
         P_signal_lo = P_lo
         P_signal_hi = P_hi
-        f_leak, P_leak = estimate_model_window_leakage(
+        f_response, window_response = estimate_model_window_response(
             model,
             samples,
             X,
@@ -2564,19 +2819,20 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, mags_means, survey_
             band_wavelength_rf=band_wavelength_rf,
             survey_idx=getattr(model, "survey_idx", None),
         )
-        P_signal, P_signal_lo, P_signal_hi, leakage_at_bin = _subtract_leakage_curve(
+        P_signal, P_signal_lo, P_signal_hi, response_at_bin = apply_window_response_correction(
             f_bin,
             P_signal,
             P_signal_lo,
             P_signal_hi,
-            f_leak,
-            P_leak,
+            f_response,
+            window_response,
         )
-        finite_leakage = leakage_at_bin[np.isfinite(leakage_at_bin) & (leakage_at_bin > 0.0)]
-        if finite_leakage.size:
+        finite_response = response_at_bin[np.isfinite(response_at_bin) & (response_at_bin > 0.0)]
+        if finite_response.size:
             print(
-                "Frequency-dependent PSD leakage correction: subtracting median/max "
-                f"{np.nanmedian(finite_leakage):.4g}/{np.nanmax(finite_leakage):.4g}."
+                "Frequency-dependent PSD window response correction: dividing by median/range "
+                f"{np.nanmedian(finite_response):.4g}/"
+                f"{np.nanmin(finite_response):.4g}-{np.nanmax(finite_response):.4g}."
             )
         signal_finite = (
             np.isfinite(f_bin)
@@ -2628,19 +2884,6 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, mags_means, survey_
                 zorder=2.5,
                 label="noise floor",
             )
-        leakage_positive = np.isfinite(leakage_at_bin) & (leakage_at_bin > 0.0)
-        if np.count_nonzero(leakage_positive):
-            ax_psd.plot(
-                f_bin[leakage_positive],
-                leakage_at_bin[leakage_positive],
-                color="tab:orange",
-                linestyle=":",
-                lw=2.4,
-                alpha=0.85,
-                zorder=2.6,
-                label="window leakage",
-            )
-
         raw_plot = np.isfinite(f_bin) & np.isfinite(P_bin_raw) & (P_bin_raw > 0.0)
         if plot_bpl_fit and np.count_nonzero(raw_plot):
             ax_psd.scatter(
@@ -2685,7 +2928,11 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, mags_means, survey_
             )
 
         if plot_bpl_fit:
-            fit_mask = signal_plot & (f_bin >= psd_xlim[0]) & (f_bin <= psd_xlim[1])
+            fit_mask = (
+                signal_plot
+                & (f_bin >= psd_xlim[0])
+                & (f_bin <= psd_bpl_fit_fmax)
+            )
             display_bpl_fit = _fit_bending_power_law_to_display_points(
                 f_bin[fit_mask],
                 P_signal_plot[fit_mask],

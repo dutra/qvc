@@ -2670,6 +2670,7 @@ def plot_bpl_psd_vs_uv_variability(
     show=False,
     filename="bpl_psd_vs_uv_variability.pdf",
     max_log_tau_bpl_err=0.5,
+    min_log_chi_sq_red_g=3.0,
 ):
     """Compare the displayed LS bending-power-law PSD fit against the main UV fit."""
     required = {"log_sigma_uv", "log_sigma_ls", "log_tau_ls"}
@@ -2742,19 +2743,20 @@ def plot_bpl_psd_vs_uv_variability(
         & (log_tau_bpl_err <= float(max_log_tau_bpl_err))
     )
 
-    variability_chi_sq_g = (
-        pd.to_numeric(df["variability_chi_sq_g"], errors="coerce").to_numpy(dtype=float)
-        if "variability_chi_sq_g" in df.columns else np.full(len(df), np.nan)
+    variability_chi_sq_red_g = (
+        pd.to_numeric(df["variability_chi_sq_red_g"], errors="coerce").to_numpy(dtype=float)
+        if "variability_chi_sq_red_g" in df.columns else np.full(len(df), np.nan)
     )
-    log_variability_chi_sq_g = np.full(len(df), np.nan, dtype=float)
-    positive_chi_sq = np.isfinite(variability_chi_sq_g) & (variability_chi_sq_g > 0.0)
-    log_variability_chi_sq_g[positive_chi_sq] = np.log10(variability_chi_sq_g[positive_chi_sq])
+    log_variability_chi_sq_red_g = np.full(len(df), np.nan, dtype=float)
+    positive_chi_sq = np.isfinite(variability_chi_sq_red_g) & (variability_chi_sq_red_g > 0.0)
+    log_variability_chi_sq_red_g[positive_chi_sq] = np.log10(variability_chi_sq_red_g[positive_chi_sq])
+    high_chi_sq_red = log_variability_chi_sq_red_g > float(min_log_chi_sq_red_g)
 
-    finite_color = np.isfinite(log_variability_chi_sq_g)
+    finite_color = high_chi_sq_red & np.isfinite(log_variability_chi_sq_red_g)
     color_norm = None
     if np.any(finite_color):
-        cmin = float(np.nanmin(log_variability_chi_sq_g[finite_color]))
-        cmax = float(np.nanmax(log_variability_chi_sq_g[finite_color]))
+        cmin = float(np.nanmin(log_variability_chi_sq_red_g[finite_color]))
+        cmax = float(np.nanmax(log_variability_chi_sq_red_g[finite_color]))
         if np.isclose(cmin, cmax):
             cmin -= 0.5
             cmax += 0.5
@@ -2790,8 +2792,8 @@ def plot_bpl_psd_vs_uv_variability(
             _linear_error_from_log(np.power(10.0, log_sigma_bpl_comparable), log_sigma_bpl_comparable, log_sigma_bpl_err),
             r"$\sigma_{\rm UV}$ [mag]",
             r"$\sigma_{\rm LS,BPL}$ [mag]",
-            "No finite BPL sigma values",
-            np.ones(len(df), dtype=bool),
+            rf"No valid BPL sigma values with $\log_{{10}}\chi^2_{{\rm red,g}}>{min_log_chi_sq_red_g:.1f}$",
+            psd_valid & high_chi_sq_red,
         ),
         (
             axes[1],
@@ -2801,8 +2803,8 @@ def plot_bpl_psd_vs_uv_variability(
             _linear_error_from_log(np.power(10.0, log_tau_bpl_obs), log_tau_bpl_obs, log_tau_bpl_err),
             r"$\tau_{\rm UV,obs}$ [days]",
             r"$\tau_{\rm LS,BPL,obs}$ [days]",
-            "No well-constrained observed-frame BPL tau values",
-            tau_bpl_well_constrained,
+            rf"No well-constrained observed-frame BPL tau values with $\log_{{10}}\chi^2_{{\rm red,g}}>{min_log_chi_sq_red_g:.1f}$",
+            tau_bpl_well_constrained & high_chi_sq_red,
         ),
         (
             axes[2],
@@ -2812,15 +2814,13 @@ def plot_bpl_psd_vs_uv_variability(
             _linear_error_from_log(np.power(10.0, log_tau_bpl), log_tau_bpl, log_tau_bpl_err),
             r"$\tau_{\rm UV,RF}$ [days]",
             r"$\tau_{\rm LS,BPL,RF}$ [days]",
-            "No well-constrained BPL tau values",
-            tau_bpl_well_constrained,
+            rf"No well-constrained BPL tau values with $\log_{{10}}\chi^2_{{\rm red,g}}>{min_log_chi_sq_red_g:.1f}$",
+            tau_bpl_well_constrained & high_chi_sq_red,
         ),
     ]
     for ax, x, y, xerr, yerr, xlabel, ylabel, empty_label, panel_filter in panels:
         finite_mask = np.isfinite(x) & np.isfinite(y) & (x > 0.0) & (y > 0.0) & panel_filter
-        valid_mask = finite_mask & psd_valid
-        invalid_mask = finite_mask & ~psd_valid
-        color_mask = valid_mask & np.isfinite(log_variability_chi_sq_g)
+        color_mask = finite_mask & np.isfinite(log_variability_chi_sq_red_g)
         if np.any(finite_mask):
             err_mask = finite_mask & np.all(np.isfinite(xerr), axis=0) & np.all(np.isfinite(yerr), axis=0)
             if np.any(err_mask):
@@ -2837,23 +2837,10 @@ def plot_bpl_psd_vs_uv_variability(
                     rasterized=True,
                     zorder=1,
                 )
-            if np.any(invalid_mask):
+            if np.any(finite_mask & ~color_mask):
                 ax.scatter(
-                    x[invalid_mask],
-                    y[invalid_mask],
-                    facecolors="none",
-                    edgecolors="0.65",
-                    s=20,
-                    alpha=0.5,
-                    linewidths=0.8,
-                    rasterized=True,
-                    label="PSD fit flagged invalid",
-                    zorder=2,
-                )
-            if np.any(valid_mask & ~color_mask):
-                ax.scatter(
-                    x[valid_mask & ~color_mask],
-                    y[valid_mask & ~color_mask],
+                    x[finite_mask & ~color_mask],
+                    y[finite_mask & ~color_mask],
                     color="0.75",
                     s=10,
                     alpha=0.35,
@@ -2865,7 +2852,7 @@ def plot_bpl_psd_vs_uv_variability(
                 last_scatter = ax.scatter(
                     x[color_mask],
                     y[color_mask],
-                    c=log_variability_chi_sq_g[color_mask],
+                    c=log_variability_chi_sq_red_g[color_mask],
                     cmap=cmap,
                     norm=color_norm,
                     s=10,
@@ -2904,7 +2891,7 @@ def plot_bpl_psd_vs_uv_variability(
 
     if last_scatter is not None and last_scatter.get_array() is not None:
         cbar = fig.colorbar(last_scatter, ax=axes.tolist())
-        cbar.set_label(r"$\log_{10}(\chi^2_g)$")
+        cbar.set_label(r"$\log_{10}(\chi^2_{\rm red,g})$")
 
     diagnostics_path = os.path.join(plot_path or "plots/hubble", "diagnostics")
     return _save_figure(

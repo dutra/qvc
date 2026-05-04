@@ -70,7 +70,10 @@ except ImportError:
     NestedSampler = None
 
 from qvc.light_curve.multiband_fit_plotting import *
-from qvc.light_curve.multiband_fit_plotting import _subtract_leakage_curve
+from qvc.light_curve.multiband_fit_plotting import (
+    apply_window_response_correction,
+    subtract_gp_mean_for_psd,
+)
 from qvc.light_curve.multiband_fit_utils import *
 from qvc.light_curve.multiband_generate_lc import *
 from qvc.light_curve.multiband_model_dho_blr import (
@@ -1304,6 +1307,13 @@ def compute_lomb_scargle_break_diagnostics(model, samples, obj, z, *, n_freq=500
     lam_ref_band = float(lam_rf[ref_idx])
     posterior_median = {k: np.median(v, axis=0) for k, v in samples.items()}
     freqs = np.logspace(-6, 2, n_freq)
+    y_psd = subtract_gp_mean_for_psd(
+        model,
+        posterior_median,
+        obj["X"],
+        obj["y"],
+        survey_idx=obj.get("survey_idx"),
+    )
 
     f_bin_norm, p_bin_norm, p_lo_norm, p_hi_norm, counts_norm, p_noise_norm = combined_lomb_scargle_from_model(
         model,
@@ -1315,7 +1325,7 @@ def compute_lomb_scargle_break_diagnostics(model, samples, obj, z, *, n_freq=500
     )
     f_bin_raw, _p_raw_raw, p_bin_raw, p_lo_raw, p_hi_raw, counts_raw, p_noise_raw = combined_raw_band_lomb_scargle(
         obj["X"],
-        obj["y"],
+        y_psd,
         obj["yerr"],
         posterior_median,
         2.0 * np.pi * freqs,
@@ -1325,7 +1335,7 @@ def compute_lomb_scargle_break_diagnostics(model, samples, obj, z, *, n_freq=500
         band_wavelength_rf=lam_rf,
         survey_idx=obj.get("survey_idx"),
     )
-    f_leak_raw, p_leak_raw = estimate_model_window_leakage(
+    f_response_raw, response_raw = estimate_model_window_response(
         model,
         samples,
         obj["X"],
@@ -1337,13 +1347,13 @@ def compute_lomb_scargle_break_diagnostics(model, samples, obj, z, *, n_freq=500
         band_wavelength_rf=lam_rf,
         survey_idx=obj.get("survey_idx"),
     )
-    p_bin_raw, p_lo_raw, p_hi_raw, _leakage_at_raw_bin = _subtract_leakage_curve(
+    p_bin_raw, p_lo_raw, p_hi_raw, _response_at_raw_bin = apply_window_response_correction(
         f_bin_raw,
         p_bin_raw,
         p_lo_raw,
         p_hi_raw,
-        f_leak_raw,
-        p_leak_raw,
+        f_response_raw,
+        response_raw,
     )
 
     model_psd = np.asarray(
@@ -1389,7 +1399,20 @@ def compute_lomb_scargle_break_diagnostics(model, samples, obj, z, *, n_freq=500
         p_lo_fit_norm = p_lo_norm
         p_hi_fit_norm = p_hi_norm
 
-    fit_norm = fit_bending_power_law_psd(f_bin_norm, p_bin_fit_norm, p_lo_fit_norm, p_hi_fit_norm)
+    psd_bpl_fit_fmax = 2e-3
+    fit_norm_mask = (
+        np.isfinite(f_bin_norm)
+        & np.isfinite(p_bin_fit_norm)
+        & np.isfinite(p_lo_fit_norm)
+        & np.isfinite(p_hi_fit_norm)
+        & (f_bin_norm <= psd_bpl_fit_fmax)
+    )
+    fit_norm = fit_bending_power_law_psd(
+        f_bin_norm[fit_norm_mask],
+        p_bin_fit_norm[fit_norm_mask],
+        p_lo_fit_norm[fit_norm_mask],
+        p_hi_fit_norm[fit_norm_mask],
+    )
 
     psd_xlim = (8e-6, 1.5e-2)
     psd_ymin = 2e-2
@@ -1422,7 +1445,11 @@ def compute_lomb_scargle_break_diagnostics(model, samples, obj, z, *, n_freq=500
     )
     p_display_err_hi = np.clip(p_hi_raw - p_bin_display, 0.0, None)
     p_display_err_lo[floor_plotted] = 0.0
-    display_fit_mask = signal_plot & (f_bin_raw >= psd_xlim[0]) & (f_bin_raw <= psd_xlim[1])
+    display_fit_mask = (
+        signal_plot
+        & (f_bin_raw >= psd_xlim[0])
+        & (f_bin_raw <= psd_bpl_fit_fmax)
+    )
     display_fit_raw = fit_bending_power_law_to_display_points(
         f_bin_raw[display_fit_mask],
         p_bin_display[display_fit_mask],
