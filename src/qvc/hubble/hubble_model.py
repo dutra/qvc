@@ -12,6 +12,8 @@ AGN_LOGF_Z_PARAM = "gamma_log_f_z"
 AGN_INTRINSIC_SCATTER_MAG_CENTER = 2.5 * 0.2  # 0.2 dex in luminosity = 0.5 mag
 AGN_LOG_F_PRIOR = (np.log(AGN_INTRINSIC_SCATTER_MAG_CENTER) - 0.8,
                    np.log(AGN_INTRINSIC_SCATTER_MAG_CENTER) + 0.8)
+PLANCK_H0_PRIOR = (67.37 - 0.54, 67.37 + 0.54)
+PLANCK_OM0_PRIOR = (0.315 - 0.007, 0.315 + 0.007)
 
 
 def get_agn_model_spec(use_alpha_lambda_term=False, use_eta_sigma_term=False):
@@ -55,7 +57,7 @@ def _require(keys, provided, where):
         raise KeyError(f"Missing {where}: {sorted(miss)}")
 
 
-def infer_model_option_flags(cosmo_model, sample_dim, only_sna=False):
+def infer_model_option_flags(cosmo_model, sample_dim, only_sna=False, only_agn=False):
     combos = []
     for use_alpha_lambda_term in (False, True):
         for use_eta_sigma_term in (False, True):
@@ -63,6 +65,7 @@ def infer_model_option_flags(cosmo_model, sample_dim, only_sna=False):
                 _, labels, _ = get_model_params(
                     cosmo_model,
                     only_sna=only_sna,
+                    only_agn=only_agn,
                     use_planck_h0_prior=False,
                     use_alpha_lambda_term=use_alpha_lambda_term,
                     use_eta_sigma_term=use_eta_sigma_term,
@@ -84,7 +87,7 @@ def infer_model_option_flags(cosmo_model, sample_dim, only_sna=False):
             "use_eta_sigma_term": use_eta_sigma_term,
             "use_redshift_log_f_term": use_redshift_log_f_term,
         }
-    expected = sorted({n for n, _, _ in combos})
+    expected = sorted({n for n, _, _, _ in combos})
     raise ValueError(
         f"Could not infer model option flags for sample_dim={sample_dim}, "
         f"cosmo_model={cosmo_model!r}. Expected one of {expected} columns."
@@ -96,31 +99,38 @@ def resolve_model_option_flags(
     sample_dim,
     *,
     only_sna=False,
+    only_agn=None,
     use_planck_h0_prior=False,
     use_alpha_lambda_term=None,
     use_eta_sigma_term=None,
     use_redshift_log_f_term=None,
 ):
     combos = []
-    for alpha_flag in (False, True):
-        for eta_flag in (False, True):
-            for logf_flag in (False, True):
-                _, labels, _ = get_model_params(
-                    cosmo_model,
-                    only_sna=only_sna,
-                    use_planck_h0_prior=use_planck_h0_prior,
-                    use_alpha_lambda_term=alpha_flag,
-                    use_eta_sigma_term=eta_flag,
-                    use_redshift_log_f_term=logf_flag,
-                )
-                combos.append(
-                    {
-                        "sample_dim": len(labels),
-                        "use_alpha_lambda_term": alpha_flag,
-                        "use_eta_sigma_term": eta_flag,
-                        "use_redshift_log_f_term": logf_flag,
-                    }
-                )
+    only_agn_options = (False,) if only_sna and only_agn is None else (
+        (False, True) if only_agn is None else (bool(only_agn),)
+    )
+    for only_agn_flag in only_agn_options:
+        for alpha_flag in (False, True):
+            for eta_flag in (False, True):
+                for logf_flag in (False, True):
+                    _, labels, _ = get_model_params(
+                        cosmo_model,
+                        only_sna=only_sna,
+                        only_agn=only_agn_flag,
+                        use_planck_h0_prior=use_planck_h0_prior,
+                        use_alpha_lambda_term=alpha_flag,
+                        use_eta_sigma_term=eta_flag,
+                        use_redshift_log_f_term=logf_flag,
+                    )
+                    combos.append(
+                        {
+                            "sample_dim": len(labels),
+                            "only_agn": only_agn_flag,
+                            "use_alpha_lambda_term": alpha_flag,
+                            "use_eta_sigma_term": eta_flag,
+                            "use_redshift_log_f_term": logf_flag,
+                        }
+                    )
 
     matches = [combo for combo in combos if combo["sample_dim"] == sample_dim]
     if use_alpha_lambda_term is not None:
@@ -138,9 +148,14 @@ def resolve_model_option_flags(
             combo for combo in matches
             if combo["use_redshift_log_f_term"] == use_redshift_log_f_term
         ]
+    if only_agn is None and len(matches) > 1:
+        non_agn_matches = [combo for combo in matches if not combo["only_agn"]]
+        if len(non_agn_matches) == 1:
+            matches = non_agn_matches
 
     if len(matches) == 1:
         return {
+            "only_agn": matches[0]["only_agn"],
             "use_alpha_lambda_term": matches[0]["use_alpha_lambda_term"],
             "use_eta_sigma_term": matches[0]["use_eta_sigma_term"],
             "use_redshift_log_f_term": matches[0]["use_redshift_log_f_term"],
@@ -158,6 +173,7 @@ def resolve_model_option_flags(
                 "use_alpha_lambda_term": combo["use_alpha_lambda_term"],
                 "use_eta_sigma_term": combo["use_eta_sigma_term"],
                 "use_redshift_log_f_term": combo["use_redshift_log_f_term"],
+                "only_agn": combo["only_agn"],
             }
             for combo in matches
         ]
@@ -175,21 +191,21 @@ def resolve_model_option_flags(
     )
 
 
-def infer_use_alpha_lambda_term(cosmo_model, sample_dim, only_sna=False):
+def infer_use_alpha_lambda_term(cosmo_model, sample_dim, only_sna=False, only_agn=False):
     return infer_model_option_flags(
-        cosmo_model, sample_dim, only_sna=only_sna
+        cosmo_model, sample_dim, only_sna=only_sna, only_agn=only_agn
     )["use_alpha_lambda_term"]
 
 
-def infer_use_eta_sigma_term(cosmo_model, sample_dim, only_sna=False):
+def infer_use_eta_sigma_term(cosmo_model, sample_dim, only_sna=False, only_agn=False):
     return infer_model_option_flags(
-        cosmo_model, sample_dim, only_sna=only_sna
+        cosmo_model, sample_dim, only_sna=only_sna, only_agn=only_agn
     )["use_eta_sigma_term"]
 
 
-def infer_use_redshift_log_f_term(cosmo_model, sample_dim, only_sna=False):
+def infer_use_redshift_log_f_term(cosmo_model, sample_dim, only_sna=False, only_agn=False):
     return infer_model_option_flags(
-        cosmo_model, sample_dim, only_sna=only_sna
+        cosmo_model, sample_dim, only_sna=only_sna, only_agn=only_agn
     )["use_redshift_log_f_term"]
 
 
@@ -353,11 +369,15 @@ def M_model_agn_err(
 def get_model_params(
     cosmo_model,
     only_sna=False,
+    only_agn=False,
     use_planck_h0_prior=False,
+    use_planck_om_prior=False,
     use_alpha_lambda_term=False,
     use_eta_sigma_term=False,
     use_redshift_log_f_term=False,
 ):
+    if only_sna and only_agn:
+        raise ValueError("only_sna and only_agn cannot both be True.")
     
     priors = OrderedDict([
         ("M0_sn",       (-20, -18)),    # SN absolute magnitude, MLE: ~-19.3
@@ -381,9 +401,8 @@ def get_model_params(
         (AGN_LOGF_Z_PARAM, (-10.0, 10.0)),
         #("sigma_b",   (-1,  1)),
 
-        ("H0",       (67.37-0.54, 67.37+0.54) if use_planck_h0_prior else (60.0, 80.0)),
-        ("Om0",      (0.0, 1.0)),
-        #("Om0",      (0.32, 0.34)),
+        ("H0",       PLANCK_H0_PRIOR if use_planck_h0_prior else (60.0, 80.0)),
+        ("Om0",      PLANCK_OM0_PRIOR if use_planck_om_prior else (0.0, 1.0)),
         
     ])
     if not use_alpha_lambda_term:
@@ -392,6 +411,8 @@ def get_model_params(
         priors.pop(AGN_ETA_SIGMA_PARAM)
     if not use_redshift_log_f_term:
         priors.pop(AGN_LOGF_Z_PARAM)
+    if only_agn:
+        priors.pop("M0_sn")
 
     # Select cosmological parameters based on model
     if cosmo_model == 'FlatLambdaCDM':

@@ -305,6 +305,7 @@ def test_load_agn_data_run2d_filter_v5_13_2_and_drop_missing(tmp_path, monkeypat
     df = _minimal_agn_frame(n=5)
     df["object_id"] = ["a", "b", "c", "d", "e"]
     df["SDSS_RUN2D"] = ["v5_13_2", "26", "", None, "v5_13_2"]
+    df["frac_host_psf_2500"] = np.full(len(df), 5e-4)
 
     monkeypatch.setattr(hubble_utils, "read_quasars_from_hdf5_flat", lambda *_args, **_kwargs: df.copy())
     monkeypatch.setattr(hubble_utils, "populate_xray", lambda frame: frame)
@@ -329,6 +330,7 @@ def test_load_agn_data_run2d_filter_26(tmp_path, monkeypatch):
     df = _minimal_agn_frame(n=4)
     df["object_id"] = ["a", "b", "c", "d"]
     df["SDSS_RUN2D"] = ["v5_13_2", "26", "26", "v5_13_2"]
+    df["frac_host_psf_2500"] = np.full(len(df), 5e-4)
 
     monkeypatch.setattr(hubble_utils, "read_quasars_from_hdf5_flat", lambda *_args, **_kwargs: df.copy())
     monkeypatch.setattr(hubble_utils, "populate_xray", lambda frame: frame)

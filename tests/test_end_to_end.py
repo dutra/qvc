@@ -159,6 +159,26 @@ def _has_cut_errorbar_overlay(ax):
     )
 
 
+def _errorbar_container_has_data(container):
+    if not isinstance(container, ErrorbarContainer) or not container.lines:
+        return False
+    data_line = container.lines[0]
+    if data_line is None:
+        return False
+    return np.asarray(data_line.get_xdata()).size > 0
+
+
+def _has_cut_marker_overlay(ax):
+    return any(line.get_label() == "cut" for line in ax.lines)
+
+
+def _legend_labels(ax):
+    legend = ax.get_legend()
+    if legend is None:
+        return []
+    return [text.get_text() for text in legend.get_texts()]
+
+
 def test_plot_adf_pvalue_g_diagnostic_writes_pdf(tmp_path, monkeypatch):
     monkeypatch.setenv("MPLCONFIGDIR", str(tmp_path / "mplconfig"))
 
@@ -402,12 +422,110 @@ def test_plot_spectral_fraction_vs_redshift_cut_overlay_keeps_thresholds_and_ski
     assert out is not None
     assert os.path.exists(out)
     assert captured["path"].endswith("spectral_fraction_vs_redshift_cuts.pdf")
-    assert len(captured["axes"]) == 4
+    assert len(captured["axes"]) == 3
     assert any(np.isclose(level, 0.2) for level in _horizontal_dashed_levels(captured["axes"][0]))
     assert any(np.isclose(level, 0.3) for level in _horizontal_dashed_levels(captured["axes"][1]))
-    assert _horizontal_dashed_levels(captured["axes"][2]) == []
-    assert any(np.isclose(level, 0.15) for level in _horizontal_dashed_levels(captured["axes"][3]))
-    assert all(_has_cut_errorbar_overlay(ax) for ax in captured["axes"])
+    assert any(np.isclose(level, 0.15) for level in _horizontal_dashed_levels(captured["axes"][2]))
+    assert all(_has_cut_marker_overlay(ax) for ax in captured["axes"])
+    assert not any(_has_cut_errorbar_overlay(ax) for ax in captured["axes"])
+
+
+def test_plot_spectral_fraction_vs_redshift_skips_log_invalid_errorbars(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("MPLCONFIGDIR", str(tmp_path / "mplconfig"))
+
+    captured = {}
+    original_save_figure = hubble_plotting._save_figure
+
+    def _capture_save_figure(fig, path, **kwargs):
+        captured["axes"] = list(fig.axes)
+        captured["path"] = path
+        return original_save_figure(fig, path, **kwargs)
+
+    monkeypatch.setattr(hubble_plotting, "_save_figure", _capture_save_figure)
+
+    df = pd.DataFrame(
+        {
+            "z": np.linspace(0.3, 2.2, 24),
+            "f_bc_3000": np.linspace(0.001, 0.003, 24),
+            "f_bc_3000_err": np.linspace(0.01, 0.03, 24),
+            "f_fe_uv_3000": np.linspace(0.002, 0.004, 24),
+            "f_fe_uv_3000_err": np.linspace(0.02, 0.04, 24),
+            "f_host_2500": np.linspace(1e-6, 1e-4, 24),
+            "f_host_2500_err": np.linspace(1e-3, 2e-3, 24),
+        }
+    )
+
+    out = hubble_plotting.plot_spectral_fraction_vs_redshift(
+        df,
+        plot_path=str(tmp_path / "figures"),
+        show=False,
+        nbins=6,
+        min_bin_count=3,
+    )
+
+    assert out is not None
+    assert os.path.exists(out)
+    for ax in captured["axes"]:
+        assert not any(_errorbar_container_has_data(container) for container in ax.containers)
+
+
+def test_plot_spectral_fraction_vs_redshift_reports_typical_fractional_error(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("MPLCONFIGDIR", str(tmp_path / "mplconfig"))
+
+    captured = {}
+    original_save_figure = hubble_plotting._save_figure
+
+    def _capture_save_figure(fig, path, **kwargs):
+        captured["axes"] = list(fig.axes)
+        captured["path"] = path
+        return original_save_figure(fig, path, **kwargs)
+
+    monkeypatch.setattr(hubble_plotting, "_save_figure", _capture_save_figure)
+
+    f_bc = np.linspace(0.05, 0.25, 24)
+    f_fe = np.linspace(0.1, 0.4, 24)
+    f_host = np.linspace(0.25, 0.01, 24)
+    df = pd.DataFrame(
+        {
+            "z": np.linspace(0.3, 3.4, 24),
+            "f_bc_3000": f_bc,
+            "f_bc_3000_err": 0.1 * f_bc,
+            "f_fe_uv_3000": f_fe,
+            "f_fe_uv_3000_err": 0.2 * f_fe,
+            "f_host_2500": f_host,
+            "f_host_2500_err": 0.3 * f_host,
+        }
+    )
+
+    out = hubble_plotting.plot_spectral_fraction_vs_redshift(
+        df,
+        plot_path=str(tmp_path / "figures"),
+        show=False,
+        nbins=6,
+        min_bin_count=3,
+    )
+
+    assert out is not None
+    assert os.path.exists(out)
+    expected_component_labels = (r"$f_{\rm BC}$", r"$f_{\rm FeII}$", r"$f_{\rm host,2500\,\AA}$")
+    for ax, expected_label in zip(captured["axes"], expected_component_labels):
+        assert expected_label in _legend_labels(ax)
+        assert not any(label.startswith("typ. err/f") for label in _legend_labels(ax))
+        proxy_containers = [
+            container
+            for container in ax.containers
+            if isinstance(container, ErrorbarContainer) and container.get_label() == expected_label
+        ]
+        assert len(proxy_containers) == 1
+        assert not _errorbar_container_has_data(proxy_containers[0])
+    for ax in captured["axes"]:
+        assert not any(_errorbar_container_has_data(container) for container in ax.containers)
 
 
 def test_plot_spectral_fraction_vs_redshift_ignores_f_pl_panel(tmp_path, monkeypatch):
@@ -446,7 +564,7 @@ def test_plot_spectral_fraction_vs_redshift_ignores_f_pl_panel(tmp_path, monkeyp
     assert os.path.exists(out)
     assert out.endswith("spectral_fraction_vs_redshift.pdf")
     assert captured["path"].endswith("spectral_fraction_vs_redshift.pdf")
-    assert captured["n_axes"] == 4
+    assert captured["n_axes"] == 3
 
 
 def test_plot_sigma_bc_vs_redshift_writes_pdf(tmp_path, monkeypatch):
@@ -1153,6 +1271,7 @@ def test_run_two_stage_fluxmix_fast_inference_smoke():
     assert np.all(np.isfinite(np.asarray(pred_std)))
 
     rebuilt_model = build_mag_fluxmix_fast_display_model(obj, lam_rf, samples_flat)
+    rebuilt_model.survey_idx = jnp.asarray(obj["survey_idx"], dtype=jnp.int32)
     rebuilt_mu, rebuilt_std = rebuilt_model.pred(posterior_median, (query_t, query_b))
     assert np.all(np.isfinite(np.asarray(rebuilt_mu)))
     assert np.all(np.isfinite(np.asarray(rebuilt_std)))
@@ -1321,6 +1440,7 @@ def test_save_combined_plot_fluxmix_handles_singleton_sample_entries(monkeypatch
 
     plot_samples = dict(samples_flat)
     plot_samples["singleton_diag"] = np.asarray([1.0], dtype=float)
+    model.survey_idx = jnp.asarray(obj["survey_idx"], dtype=jnp.int32)
     monkeypatch.setattr("matplotlib.pyplot.savefig", lambda *args, **kwargs: None)
 
     save_combined_plot(

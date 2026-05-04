@@ -23,6 +23,7 @@ from astropy.io.votable import parse
 from scipy.linalg import cho_factor
 from scipy import stats
 from tqdm import tqdm
+from scipy.stats import gaussian_kde
 
 from qvc.hubble.cuts import (
     EXCLUDED_SDSS_NAMES,
@@ -2502,6 +2503,7 @@ def extract_cosmo_results_from_samples(
     only_sna,
     logZ_tuple=None,
     *,
+    only_agn=False,
     format_for_latex=False,
     value_fmt="{:.3f}",
     use_alpha_lambda_term=None,
@@ -2542,6 +2544,7 @@ def extract_cosmo_results_from_samples(
         cosmo_model,
         np.asarray(samples).shape[1],
         only_sna=only_sna,
+        only_agn=only_agn,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
@@ -2549,6 +2552,7 @@ def extract_cosmo_results_from_samples(
     priors, model_labels, model_labels_latex = get_model_params(
         cosmo_model,
         only_sna=only_sna,
+        only_agn=option_flags["only_agn"],
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
         use_eta_sigma_term=option_flags["use_eta_sigma_term"],
         use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
@@ -2618,19 +2622,20 @@ def display_results_summary(
     at the supplied z_pivot_agn.
     """
     samples = np.asarray(samples)
+    option_flags = resolve_model_option_flags(
+        cosmo_model,
+        samples.shape[1],
+        only_sna=False,
+        only_agn=None,
+        use_alpha_lambda_term=use_alpha_lambda_term,
+        use_eta_sigma_term=use_eta_sigma_term,
+        use_redshift_log_f_term=use_redshift_log_f_term,
+    )
     if (
         use_alpha_lambda_term is None
         or use_eta_sigma_term is None
         or use_redshift_log_f_term is None
     ):
-        option_flags = resolve_model_option_flags(
-            cosmo_model,
-            samples.shape[1],
-            only_sna=False,
-            use_alpha_lambda_term=use_alpha_lambda_term,
-            use_eta_sigma_term=use_eta_sigma_term,
-            use_redshift_log_f_term=use_redshift_log_f_term,
-        )
         if use_alpha_lambda_term is None:
             use_alpha_lambda_term = option_flags["use_alpha_lambda_term"]
         if use_eta_sigma_term is None:
@@ -2639,6 +2644,7 @@ def display_results_summary(
             use_redshift_log_f_term = option_flags["use_redshift_log_f_term"]
     _, model_labels, _ = get_model_params(
         cosmo_model,
+        only_agn=option_flags["only_agn"],
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
@@ -2806,12 +2812,14 @@ def compute_age_universe_with_error(
     option_flags = resolve_model_option_flags(
         cosmo_model,
         np.asarray(samples).shape[1],
+        only_agn=None,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
     )
     priors, model_labels, _ = get_model_params(
         cosmo_model,
+        only_agn=option_flags["only_agn"],
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
         use_eta_sigma_term=option_flags["use_eta_sigma_term"],
         use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
@@ -2896,6 +2904,7 @@ def compute_pivot_redshift(flat_samples, cosmo_model, z_min=0.0, z_max=4.0):
     )
     priors, model_labels, model_labels_latex = get_model_params(
         cosmo_model,
+        only_agn=option_flags["only_agn"],
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
         use_eta_sigma_term=option_flags["use_eta_sigma_term"],
         use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
@@ -2965,6 +2974,7 @@ def posterior_corr(flat_samples, cosmo_model, z_pivot_agn):
     )
     priors, model_labels, _ = get_model_params(
         cosmo_model,
+        only_agn=option_flags["only_agn"],
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
         use_eta_sigma_term=option_flags["use_eta_sigma_term"],
         use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
@@ -3170,6 +3180,7 @@ def write_results_tex_variables(
         priors, model_labels, _ = get_model_params(
             model_name,
             only_sna=True,
+            only_agn=option_flags["only_agn"],
             use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
             use_eta_sigma_term=option_flags["use_eta_sigma_term"],
             use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
@@ -3216,6 +3227,7 @@ def write_results_tex_variables(
         )
         priors, model_labels, _ = get_model_params(
             model_name,
+            only_agn=option_flags["only_agn"],
             use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
             use_eta_sigma_term=option_flags["use_eta_sigma_term"],
             use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
@@ -3462,6 +3474,22 @@ def save_cosmo_results_hdf5(filename, models_dict):
                 grp.create_dataset(param_name, data=value)
     
     print(f"Saved models: {list(models_dict.keys())} to {filename}")
+
+
+def load_cosmo_results_hdf5(filename):
+    """
+    Load cosmological model results saved by save_cosmo_results_hdf5.
+    """
+    results = {}
+    with h5py.File(filename, 'r') as f:
+        for model_name in f.keys():
+            results[model_name] = {}
+            grp = f[model_name]
+
+            for param_name in grp.keys():
+                results[model_name][param_name] = grp[param_name][()]
+
+    return results
 
 def select_agn_subset_uniform_with_replacement(
     df_agn,

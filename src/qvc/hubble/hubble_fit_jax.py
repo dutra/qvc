@@ -442,20 +442,29 @@ def _log_likelihood_jax(
     pantheon_jax: dict[str, Any],
     completeness_jax: dict[str, Any] | None,
     only_sna: bool,
+    only_agn: bool,
     use_ceph_dist_calibration: bool,
+    early_de_guard: bool,
 ) -> jnp.ndarray:
     params = _pack_param_dict(theta, model_labels)
+    if early_de_guard and cosmo_model == "Flatw0waCDM":
+        early_de_ok = params["w0"] + params["wa"] < 0.0
+    else:
+        early_de_ok = True
 
-    z_sn = pantheon_jax["zHD"]
-    is_cal = pantheon_jax["IS_CALIBRATOR"]
-    mu_sn, _ = _distance_modulus_jax(z_sn, params, cosmo_model, z_pivot_agn)
-    if use_ceph_dist_calibration:
-        mu_sn = jnp.where(is_cal, pantheon_jax["CEPH_DIST"], mu_sn)
-    res_sn = pantheon_jax["m_b_corr"] - (mu_sn + params["M0_sn"])
-    y = solve_triangular(pantheon_jax["_sna_L"], res_sn, lower=pantheon_jax["_sna_lower"])
-    ll_sn = -0.5 * jnp.dot(y, y) - 0.5 * pantheon_jax["_sna_logdet"] - 0.5 * res_sn.shape[0] * jnp.log(2.0 * jnp.pi)
+    if only_agn:
+        ll_sn = 0.0
+    else:
+        z_sn = pantheon_jax["zHD"]
+        is_cal = pantheon_jax["IS_CALIBRATOR"]
+        mu_sn, _ = _distance_modulus_jax(z_sn, params, cosmo_model, z_pivot_agn)
+        if use_ceph_dist_calibration:
+            mu_sn = jnp.where(is_cal, pantheon_jax["CEPH_DIST"], mu_sn)
+        res_sn = pantheon_jax["m_b_corr"] - (mu_sn + params["M0_sn"])
+        y = solve_triangular(pantheon_jax["_sna_L"], res_sn, lower=pantheon_jax["_sna_lower"])
+        ll_sn = -0.5 * jnp.dot(y, y) - 0.5 * pantheon_jax["_sna_logdet"] - 0.5 * res_sn.shape[0] * jnp.log(2.0 * jnp.pi)
     if only_sna:
-        return ll_sn
+        return jnp.where(early_de_ok, ll_sn, -jnp.inf)
 
     agn_param_vec = jnp.stack([params[k] for k in agn_model_req_params], axis=0)
     M_pred = _agn_model_jax(agn_param_vec, agn_data_jax["_obs_arr"], agn_data_jax["_pivot_arr"])
@@ -493,7 +502,7 @@ def _log_likelihood_jax(
         )
     else:
         ll_comp = 0.0
-    return ll_sn + ll_agn - ll_comp
+    return jnp.where(early_de_ok, ll_sn + ll_agn - ll_comp, -jnp.inf)
 
 
 def _build_numpyro_nested_model(model_labels, priors, loglike_fn):
@@ -624,7 +633,11 @@ def _compute_numpy_blobs_from_samples(
     completeness_params,
     z_pivot_agn,
     only_sna,
+    only_agn,
     disable_ceph_dist_calibration,
+    use_planck_h0_prior,
+    use_planck_om_prior,
+    early_de_guard=False,
 ):
     logls = []
     blobs = []
@@ -640,9 +653,12 @@ def _compute_numpy_blobs_from_samples(
             completeness_params=completeness_params,
             z_pivot_agn=z_pivot_agn,
             agn_calibrators_data=None,
-            use_planck_h0_prior=disable_ceph_dist_calibration,
+            use_planck_h0_prior=use_planck_h0_prior,
+            use_planck_om_prior=use_planck_om_prior,
             use_ceph_dist_calibration=not disable_ceph_dist_calibration,
+            early_de_guard=early_de_guard,
             only_sna=only_sna,
+            only_agn=only_agn,
             use_full_cov=True,
         )
         logls.append(float(logl))
@@ -671,9 +687,13 @@ def run_single_jax(
     N=None,
     uniform_redshift_distribution=False,
     disable_ceph_dist_calibration=False,
+    use_planck_h0_prior=False,
+    use_planck_om_prior=False,
+    only_agn=False,
     use_alpha_lambda_term=False,
     use_eta_sigma_term=False,
     use_redshift_log_f_term=False,
+    early_de_guard=False,
     seed=42,
 ):
     _require_jax_stack()
@@ -685,6 +705,9 @@ def run_single_jax(
         raise NotImplementedError("run_single_jax does not support --fit_redshift_log_f_term yet.")
     validate_completeness_mode(completeness_mode)
     speed = normalize_speed(speed)
+    if only_sna and only_agn:
+        raise ValueError("only_sna and only_agn cannot both be True.")
+    use_planck_h0_prior = use_planck_h0_prior or disable_ceph_dist_calibration
 
     run_tag = make_run_tag(
         cosmo_model,
@@ -692,7 +715,10 @@ def run_single_jax(
         speed,
         N,
         z_range,
+        only_agn=only_agn,
         disable_ceph_dist_calibration=disable_ceph_dist_calibration,
+        use_planck_h0_prior=use_planck_h0_prior,
+        use_planck_om_prior=use_planck_om_prior,
         use_alpha_lambda_term=False,
         use_eta_sigma_term=False,
     )
@@ -702,12 +728,12 @@ def run_single_jax(
 
     if uniform_redshift_distribution:
         df_agn_fit = select_agn_subset_uniform_with_replacement(df_agn, z_range=z_range, N=N)
-        plot_redshift_histograms(df_pantheon, df_agn_fit, xscale="linear", plot_path=plot_path)
+        plot_redshift_histograms(df_pantheon, df_agn_fit, xscale="linear", plot_path=plot_path, only_agn=only_agn)
     else:
         df_agn_fit = df_agn[df_agn["z"].between(z_range[0], z_range[1])].copy()
         if N is not None:
             df_agn_fit = df_agn_fit.sample(n=min(N, len(df_agn_fit)), random_state=seed)
-        plot_redshift_histograms(df_pantheon, df_agn, xscale="log", plot_path=plot_path)
+        plot_redshift_histograms(df_pantheon, df_agn, xscale="log", plot_path=plot_path, only_agn=only_agn)
 
     plot_delta_m_flux_recal_vs_redshift(df_agn_fit, plot_path=plot_path)
     report_pivots(df_agn_fit)
@@ -761,7 +787,9 @@ def run_single_jax(
     priors, model_labels, _ = get_model_params(
         cosmo_model,
         only_sna=only_sna,
-        use_planck_h0_prior=disable_ceph_dist_calibration,
+        only_agn=only_agn,
+        use_planck_h0_prior=use_planck_h0_prior,
+        use_planck_om_prior=use_planck_om_prior,
     )
     loglike_fn = jax.jit(
         lambda theta: _log_likelihood_jax(
@@ -772,7 +800,9 @@ def run_single_jax(
             pantheon_jax=pantheon_jax,
             completeness_jax=completeness_jax,
             only_sna=only_sna,
+            only_agn=only_agn,
             use_ceph_dist_calibration=not disable_ceph_dist_calibration,
+            early_de_guard=early_de_guard,
         )
     )
     model = _build_numpyro_nested_model(model_labels, priors, loglike_fn)
@@ -803,7 +833,11 @@ def run_single_jax(
         completeness_params=completeness_params,
         z_pivot_agn=z_pivot_agn,
         only_sna=only_sna,
+        only_agn=only_agn,
         disable_ceph_dist_calibration=disable_ceph_dist_calibration,
+        use_planck_h0_prior=use_planck_h0_prior,
+        use_planck_om_prior=use_planck_om_prior,
+        early_de_guard=early_de_guard,
     )
     idx_max_weight = int(np.argmax(logls))
     integrals_max_w = blobs[idx_max_weight, 0, :]
@@ -856,7 +890,17 @@ def run_single_jax(
             alpha_lambda=agn_data.get("alpha_lambda"),
         )
 
-    plot_cosmo_corner(None, flat_samples, cosmo_model, z_pivot_sna, z_pivot_agn, show=False, plot_path=plot_path, speed=f"{speed}_jax")
+    plot_cosmo_corner(
+        None,
+        flat_samples,
+        cosmo_model,
+        z_pivot_sna,
+        z_pivot_agn,
+        show=False,
+        plot_path=plot_path,
+        speed=f"{speed}_jax",
+        only_agn=only_agn,
+    )
     plot_predicted_L2500_vs_sigmahat(
         flat_samples,
         df_agn_fit,
@@ -1007,6 +1051,7 @@ def run_single_jax(
         residuals_sigma_clip=None,
         df_calibrators=None,
         z_range=z_range,
+        only_agn=only_agn,
     )
     debiased_residuals, _debiased_clipping_sigma, _, mu_pred_std_debiased, _ = r
     hubble_chi2_mask = df_agn_fit["z"].between(z_range[0], z_range[1]).to_numpy(dtype=bool)
@@ -1041,8 +1086,18 @@ def main():
     parser.add_argument("--z_range", type=float, nargs=2, default=[0.44, 3.16])
     parser.add_argument("--N", type=int, default=None)
     parser.add_argument("--only_sna", action="store_true", default=False)
+    parser.add_argument("--only_agn", action="store_true", default=False)
     parser.add_argument("--uniform_redshift_distribution", action="store_true", default=False)
     parser.add_argument("--disable_completeness", action="store_true", default=False)
+    parser.add_argument("--disable_ceph_dist_calibration", action="store_true", default=False)
+    parser.add_argument("--use_planck_h0_prior", action="store_true", default=False)
+    parser.add_argument("--use_planck_om_prior", action="store_true", default=False)
+    parser.add_argument(
+        "--early-de-guard",
+        action="store_true",
+        default=False,
+        help="Reject Flatw0waCDM samples with w0 + wa >= 0. Disabled by default.",
+    )
     parser.add_argument(
         "--completeness_sim_file",
         type=str,
@@ -1054,6 +1109,9 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
     args.speed = normalize_speed(args.speed)
+    if args.only_sna and args.only_agn:
+        raise ValueError("--only_sna and --only_agn cannot be used together.")
+    effective_use_planck_h0_prior = args.use_planck_h0_prior or args.disable_ceph_dist_calibration
 
     _require_jax_stack()
     df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_pantheon_data()
@@ -1081,8 +1139,13 @@ def main():
         completeness_sim_file=args.completeness_sim_file,
         completeness_mode=args.completeness_mode,
         only_sna=args.only_sna,
+        only_agn=args.only_agn,
         N=args.N,
         uniform_redshift_distribution=args.uniform_redshift_distribution,
+        disable_ceph_dist_calibration=args.disable_ceph_dist_calibration,
+        use_planck_h0_prior=effective_use_planck_h0_prior,
+        use_planck_om_prior=args.use_planck_om_prior,
+        early_de_guard=args.early_de_guard,
         seed=args.seed,
     )
 

@@ -850,6 +850,7 @@ def plot_blr_line_lags_vs_l2500(
     )
     _, model_labels, _ = get_model_params(
         cosmo_model,
+        only_agn=option_flags["only_agn"],
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
         use_eta_sigma_term=option_flags["use_eta_sigma_term"],
         use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
@@ -4326,6 +4327,7 @@ def plot_dynesty(
     cosmo_model,
     plot_path="plots/hubble",
     only_sna="",
+    only_agn=False,
     speed="",
     show=False,
     use_alpha_lambda_term=None,
@@ -4342,6 +4344,7 @@ def plot_dynesty(
         cosmo_model,
         np.asarray(results.samples).shape[1],
         only_sna=bool(only_sna),
+        only_agn=bool(only_agn),
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
@@ -4349,6 +4352,7 @@ def plot_dynesty(
     priors, model_labels, model_labels_latex = get_model_params(
         cosmo_model,
         only_sna=bool(only_sna),
+        only_agn=option_flags["only_agn"],
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
         use_eta_sigma_term=option_flags["use_eta_sigma_term"],
         use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
@@ -4439,6 +4443,7 @@ def plot_traces(
     priors, model_labels, model_labels_latex = get_model_params(
         cosmo_model,
         only_sna=only_sna,
+        only_agn=option_flags["only_agn"],
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
         use_eta_sigma_term=option_flags["use_eta_sigma_term"],
         use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
@@ -4504,6 +4509,7 @@ def plot_posterior_corner(
     priors, model_labels, model_labels_latex = get_model_params(
         cosmo_model,
         only_sna=only_sna,
+        only_agn=option_flags["only_agn"],
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
         use_eta_sigma_term=option_flags["use_eta_sigma_term"],
         use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
@@ -4542,6 +4548,7 @@ def plot_cosmo_corner(
     grid_q=(0.0005, 0.9995),
     pad_frac=0.25,
     include_alpha_beta=False,
+    only_agn=False,
     use_alpha_lambda_term=None,
     use_eta_sigma_term=None,
     use_redshift_log_f_term=None,
@@ -4559,12 +4566,14 @@ def plot_cosmo_corner(
         cosmo_model,
         np.asarray(ref_samples).shape[1],
         only_sna=flat_samples_agn is None,
+        only_agn=only_agn,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
     )
     _, model_labels, model_labels_latex = get_model_params(
         cosmo_model,
+        only_agn=option_flags["only_agn"],
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
         use_eta_sigma_term=option_flags["use_eta_sigma_term"],
         use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
@@ -4820,7 +4829,8 @@ def plot_cosmo_corner(
     legend = []
     if sna_data is not None:
         legend.append(Line2D([0], [0], color="dodgerblue", lw=6, label="SN Ia"))
-    legend.append(Line2D([0], [0], color="k", lw=6, label="SN Ia + AGN"))
+    agn_label = "AGN" if only_agn else "SN Ia + AGN"
+    legend.append(Line2D([0], [0], color="k", lw=6, label=agn_label))
     fig.legend(handles=legend, bbox_to_anchor=(0.99, 0.92), loc="upper right",
                fontsize=18, frameon=False, markerscale=1.5)
 
@@ -4890,6 +4900,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
                 dmi_values=None, dmi_sigma=None, dmi_selection_sigma=None, clipped_mask=None,
                 filename=None, sigma_clip_threshold=None,
                 use_alpha_lambda_term=None, use_eta_sigma_term=None, use_redshift_log_f_term=None,
+                only_agn=False,
                 use_intrinsic_scatter_in_residual_sigma=True,
                 diagnostics_suffix=None,
                 agn_likelihood_space_chi2=None,
@@ -4936,15 +4947,23 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     option_flags = resolve_model_option_flags(
         cosmo_model,
         np.asarray(flat_samples).shape[1],
+        only_agn=only_agn,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
     )
     _, model_labels, _ = get_model_params(
         cosmo_model,
+        only_agn=option_flags["only_agn"],
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
         use_eta_sigma_term=option_flags["use_eta_sigma_term"],
         use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
+    )
+    show_sne = (
+        not option_flags["only_agn"]
+        and df_pantheon is not None
+        and {"zHD", "MU_SH0ES", "MU_SH0ES_ERR_DIAG"}.issubset(df_pantheon.columns)
+        and len(df_pantheon) > 0
     )
     param_indices = {name: model_labels.index(name) for name in model_labels}
 
@@ -5290,10 +5309,11 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
         )
 
     # SN Ia
-    inset_ax.errorbar(
-        df_pantheon["zHD"], df_pantheon["MU_SH0ES"], yerr=df_pantheon["MU_SH0ES_ERR_DIAG"],
-        fmt='s', markersize=2, color="#0A84FF", linestyle='none', lw=0.8, alpha=0.7, zorder=1, label="SN Ia"
-    )
+    if show_sne:
+        inset_ax.errorbar(
+            df_pantheon["zHD"], df_pantheon["MU_SH0ES"], yerr=df_pantheon["MU_SH0ES_ERR_DIAG"],
+            fmt='s', markersize=2, color="#0A84FF", linestyle='none', lw=0.8, alpha=0.7, zorder=1, label="SN Ia"
+        )
 
     # Model + band
     inset_ax.plot(z_grid, mu_model_median, color="m", lw=1.4, alpha=1.0, zorder=5, label=label)
@@ -5432,14 +5452,15 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
         )
 
     # SN Ia
-    if debias:
-        sna_mu = df_pantheon["MU_SH0ES"]
-    else:
-        sna_mu = df_pantheon["MU_SH0ES"] + df_pantheon['biasCor_m_b']
-    ax.errorbar(
-        df_pantheon["zHD"], sna_mu, yerr=df_pantheon["MU_SH0ES_ERR_DIAG"],
-        fmt='s', markersize=2, color="#0A84FF", linestyle='none', lw=0.8, alpha=0.7, zorder=1, label="SN Ia"
-    )
+    if show_sne:
+        if debias:
+            sna_mu = df_pantheon["MU_SH0ES"]
+        else:
+            sna_mu = df_pantheon["MU_SH0ES"] + df_pantheon['biasCor_m_b']
+        ax.errorbar(
+            df_pantheon["zHD"], sna_mu, yerr=df_pantheon["MU_SH0ES_ERR_DIAG"],
+            fmt='s', markersize=2, color="#0A84FF", linestyle='none', lw=0.8, alpha=0.7, zorder=1, label="SN Ia"
+        )
 
 
     # Model + 68% band
@@ -5492,6 +5513,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
         )
         _, model_labels_other, _ = get_model_params(
             cosmo_model_other,
+            only_agn=option_flags_other["only_agn"],
             use_alpha_lambda_term=option_flags_other["use_alpha_lambda_term"],
             use_eta_sigma_term=option_flags_other["use_eta_sigma_term"],
             use_redshift_log_f_term=option_flags_other["use_redshift_log_f_term"],
@@ -5541,6 +5563,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
             )
             _, model_labels_other, _ = get_model_params(
                 cosmo_model_other,
+                only_agn=option_flags_other["only_agn"],
                 use_alpha_lambda_term=option_flags_other["use_alpha_lambda_term"],
                 use_eta_sigma_term=option_flags_other["use_eta_sigma_term"],
                 use_redshift_log_f_term=option_flags_other["use_redshift_log_f_term"],
@@ -6362,6 +6385,7 @@ def plot_predicted_vs_actual_M2500(
     )
     priors, model_labels, model_labels_latex = get_model_params(
         cosmo_model,
+        only_agn=option_flags["only_agn"],
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
         use_eta_sigma_term=option_flags["use_eta_sigma_term"],
         use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
@@ -6888,6 +6912,7 @@ def plot_full_residuals(
         )
         _, model_labels, _ = get_model_params(
             cosmo_model,
+            only_agn=option_flags["only_agn"],
             use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
             use_eta_sigma_term=option_flags["use_eta_sigma_term"],
             use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
@@ -7747,6 +7772,7 @@ def plot_predicted_L2500_vs_sigmahat(
     )
     priors, model_labels, model_labels_latex = get_model_params(
         cosmo_model,
+        only_agn=option_flags["only_agn"],
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
         use_eta_sigma_term=option_flags["use_eta_sigma_term"],
         use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
@@ -9702,6 +9728,8 @@ def plot_spectral_fraction_vs_redshift(
     df_cut_sources=None,
     filename="spectral_fraction_vs_redshift.pdf",
     cut_thresholds=None,
+    log_safe_errors=True,
+    show_cut_source_errors=False,
 ):
     """Plot available spectral fractions against redshift."""
     required = {"z", "f_bc_3000", "f_fe_uv_3000", "f_host_2500"}
@@ -9739,6 +9767,48 @@ def plot_spectral_fraction_vs_redshift(
                 )
         return frame
 
+    def _plot_fraction_points(
+        ax,
+        x,
+        y,
+        *,
+        yerr=None,
+        fmt="o",
+        markersize=2.5,
+        alpha=0.25,
+        color="k",
+        elinewidth=0.4,
+        zorder=3,
+        label=None,
+        rasterized=True,
+    ):
+        x = np.asarray(x, dtype=float)
+        y = np.asarray(y, dtype=float)
+        ax.plot(
+            x,
+            y,
+            linestyle="None",
+            marker=fmt,
+            markersize=markersize,
+            alpha=alpha,
+            color=color,
+            zorder=zorder,
+            label=label,
+            rasterized=rasterized,
+        )
+
+    def _typical_fractional_error(y, yerr):
+        if yerr is None:
+            return None
+        y = np.asarray(y, dtype=float)
+        yerr = np.asarray(yerr, dtype=float)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            frac_err = yerr / y
+        valid = np.isfinite(y) & (y > 0.0) & np.isfinite(yerr) & (yerr > 0.0) & np.isfinite(frac_err)
+        if not np.any(valid):
+            return None
+        return float(np.nanmedian(frac_err[valid]))
+
     df_plot = _prepare_spectral_fraction_frame(df_agn)
     df_cut_plot = (
         _prepare_spectral_fraction_frame(df_cut_sources)
@@ -9750,9 +9820,6 @@ def plot_spectral_fraction_vs_redshift(
         ("f_bc_3000", r"$f_{\rm BC}$"),
         ("f_fe_uv_3000", r"$f_{\rm FeII}$"),
     ]
-    if "f_lines" in df_plot.columns:
-        panel_specs.append(("f_lines", r"$f_{\rm lines}$"))
-
     if "f_host_2500" in df_plot.columns:
         panel_specs.append(("f_host_2500", r"$f_{\rm host,2500\,\AA}$"))
     if len(panel_specs) == 2:
@@ -9775,8 +9842,6 @@ def plot_spectral_fraction_vs_redshift(
         if err_col in df_plot.columns:
             yerr = pd.to_numeric(df_plot[err_col], errors="coerce").to_numpy(dtype=float)
         mask = np.isfinite(z) & np.isfinite(y) & (y > 0.0)
-        if yerr is not None:
-            mask &= np.isfinite(yerr) & (yerr >= 0.0)
         if np.count_nonzero(mask) == 0:
             ax.text(0.5, 0.5, f"No finite {col}", ha="center", va="center", transform=ax.transAxes)
             ax.set_axis_off()
@@ -9785,37 +9850,54 @@ def plot_spectral_fraction_vs_redshift(
         z_use = z[mask]
         y_use = y[mask]
         yerr_use = yerr[mask] if yerr is not None else None
+        typical_frac_err = _typical_fractional_error(y_use, yerr_use)
+        component_label = None if typical_frac_err is not None else ylabel
         in_z = (z_use >= z_range[0]) & (z_use <= z_range[1])
         out_z = ~in_z
 
-        if np.any(in_z):
+        if typical_frac_err is not None:
             ax.errorbar(
+                [],
+                [],
+                yerr=typical_frac_err,
+                fmt="o",
+                markersize=2.5,
+                alpha=0.6,
+                color="k",
+                elinewidth=0.9,
+                capsize=2,
+                zorder=3,
+                label=ylabel,
+            )
+
+        if np.any(in_z):
+            _plot_fraction_points(
+                ax,
                 z_use[in_z],
                 y_use[in_z],
                 yerr=yerr_use[in_z] if yerr_use is not None else None,
                 fmt="o",
                 markersize=2.5,
-                alpha=0.25,
+                alpha=0.1,
                 color="k",
                 elinewidth=0.4,
-                capsize=0,
                 zorder=3,
-                label=ylabel,
+                label=component_label,
                 rasterized=True,
             )
         if np.any(out_z):
-            ax.errorbar(
+            _plot_fraction_points(
+                ax,
                 z_use[out_z],
                 y_use[out_z],
                 yerr=yerr_use[out_z] if yerr_use is not None else None,
                 fmt="D",
                 markersize=3.2,
-                alpha=0.30,
+                alpha=0.2,
                 color="k",
                 elinewidth=0.4,
-                capsize=0,
                 zorder=3,
-                label=ylabel if not np.any(in_z) else None,
+                label=component_label if not np.any(in_z) else None,
                 rasterized=True,
             )
 
@@ -9827,11 +9909,14 @@ def plot_spectral_fraction_vs_redshift(
             if err_col in df_cut_plot.columns:
                 yerr_cut = pd.to_numeric(df_cut_plot[err_col], errors="coerce").to_numpy(dtype=float)
             mask_cut = np.isfinite(z_cut) & np.isfinite(y_cut) & (y_cut > 0.0)
-            if yerr_cut is not None:
-                mask_cut &= np.isfinite(yerr_cut) & (yerr_cut >= 0.0)
             if np.any(mask_cut):
-                yerr_plot = yerr_cut[mask_cut] if yerr_cut is not None else None
-                ax.errorbar(
+                yerr_plot = (
+                    yerr_cut[mask_cut]
+                    if show_cut_source_errors and yerr_cut is not None
+                    else None
+                )
+                _plot_fraction_points(
+                    ax,
                     z_cut[mask_cut],
                     y_cut[mask_cut],
                     yerr=yerr_plot,
@@ -9840,7 +9925,6 @@ def plot_spectral_fraction_vs_redshift(
                     alpha=0.7,
                     color="#E74C3C",
                     elinewidth=0.7,
-                    capsize=0,
                     zorder=2,
                     label="cut",
                     rasterized=True,
@@ -9861,7 +9945,7 @@ def plot_spectral_fraction_vs_redshift(
         ax.set_xlabel(r"$z$")
         ax.set_ylabel("Component fraction" if i_ax == 0 else "")
         ax.set_yscale("log")
-        ax.set_ylim(4e-3, 8e0)
+        ax.set_ylim(5e-6, 8e0)
         ax.legend(loc="upper right", frameon=False)
 
     fig.tight_layout()
@@ -10466,6 +10550,7 @@ def plot_redshift_histograms(df_pantheon, df_agn,
                             xscale="log",
                             bins=40,
                             z_range=(0.44, 3.16),
+                            only_agn=False,
                             show=False):
     """
     Plot redshift histograms for SN (Pantheon) and AGN samples
@@ -10473,7 +10558,13 @@ def plot_redshift_histograms(df_pantheon, df_agn,
     """
 
     # --- SN ---
-    z_sn = df_pantheon[z_col_sn].to_numpy()
+    show_sne = (
+        not only_agn
+        and df_pantheon is not None
+        and z_col_sn in df_pantheon.columns
+        and len(df_pantheon) > 0
+    )
+    z_sn = df_pantheon[z_col_sn].to_numpy() if show_sne else np.empty(0, dtype=float)
 
     # --- AGN ---
     z_agn_all = df_agn[z_col_agn].to_numpy()
@@ -10502,14 +10593,15 @@ def plot_redshift_histograms(df_pantheon, df_agn,
     fig, ax = plt.subplots(figsize=(8,5))
 
     # SN
-    ax.hist(
-        z_sn,
-        bins=log_bins,
-        histtype="step",
-        color="dodgerblue",
-        linewidth=2.5,
-        label="SN Ia (Pantheon+)"
-    )
+    if show_sne:
+        ax.hist(
+            z_sn,
+            bins=log_bins,
+            histtype="step",
+            color="dodgerblue",
+            linewidth=2.5,
+            label="SN Ia (Pantheon+)"
+        )
 
     # AGN full sample
     ax.hist(
