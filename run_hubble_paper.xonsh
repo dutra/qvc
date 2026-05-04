@@ -4,12 +4,12 @@
 $QT_QPA_PLATFORM = "offscreen"
 $NUM_CORES = "30"
 
-speed = "standard"
+speed = "production"
 
-spectra_fit_csv = "results/data/jaxqsofit_apr19b_chisq20_apr18h.csv"
-h5_file = "results/data/apr18h_taufasttoslow150_chisq_N1w500s200t12ch1.h5"
+spectra_fit_csv = "results/data/jaxqsofit_apr20c_chisq20_apr18h_all_run2d.csv"
+h5_file = "results/data/apr23_1148am_6159c97_chisq.h5"
 
-$PREFIX = f"paper_apr22a_{speed}"
+$PREFIX = f"paper_may2a_apr23lc_apr19bspec_{speed}"
 prefix = $PREFIX
 echo "Running hubble_fit.py and PREFIX=" $PREFIX
 
