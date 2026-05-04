@@ -170,7 +170,7 @@ declare -a COPIED=()
 declare -a MISSING=()
 
 FIDUCIAL_RUN_DIR="Flatw0waCDM_joint_${SPEED}_all_z0p44_3p16_2d"
-FIDUCIAL_MODEL_COMPARE_DIR="model_compare_${SPEED}_all_z0p44_3p16_2d"
+FIDUCIAL_MODEL_COMPARE_DIR="model_compare_joint_${SPEED}_all_z0p44_3p16_2d"
 RESTRICTED_MODEL_COMPARE_DIR="model_compare_${SPEED}_all_z1p00_3p16_2d"
 
 copy_hubble_assets() {

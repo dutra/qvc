@@ -3189,13 +3189,19 @@ def write_results_tex_variables(
         )
         sigma_tau_lambda_fit = None
     if sigma_tau_lambda_fit is not None:
+        def _tex_lambda_slope_err(err, *, floor=0.01):
+            errf = _to_finite_float(err)
+            if errf is None:
+                return err
+            return max(abs(errf), floor)
+
         lines.append(r"% --- Sigma/tau wavelength broken power-law fit ---")
         lines.append(
             _cmd(
                 "EtaSigmaBlueLambda",
                 format_result_errors(
                     sigma_tau_lambda_fit["eta_sigma_blue"],
-                    sigma_tau_lambda_fit["eta_sigma_blue_err"],
+                    _tex_lambda_slope_err(sigma_tau_lambda_fit["eta_sigma_blue_err"]),
                     nd=2,
                 ),
             )
@@ -3205,7 +3211,7 @@ def write_results_tex_variables(
                 "EtaSigmaRedLambda",
                 format_result_errors(
                     sigma_tau_lambda_fit["eta_sigma_red"],
-                    sigma_tau_lambda_fit["eta_sigma_red_err"],
+                    _tex_lambda_slope_err(sigma_tau_lambda_fit["eta_sigma_red_err"]),
                     nd=2,
                 ),
             )
@@ -3215,7 +3221,7 @@ def write_results_tex_variables(
                 "EtaTauBlueLambda",
                 format_result_errors(
                     sigma_tau_lambda_fit["eta_tau_blue"],
-                    sigma_tau_lambda_fit["eta_tau_blue_err"],
+                    _tex_lambda_slope_err(sigma_tau_lambda_fit["eta_tau_blue_err"]),
                     nd=2,
                 ),
             )
@@ -3225,7 +3231,7 @@ def write_results_tex_variables(
                 "EtaTauRedLambda",
                 format_result_errors(
                     sigma_tau_lambda_fit["eta_tau_red"],
-                    sigma_tau_lambda_fit["eta_tau_red_err"],
+                    _tex_lambda_slope_err(sigma_tau_lambda_fit["eta_tau_red_err"]),
                     nd=2,
                 ),
             )

@@ -5,15 +5,20 @@ $QT_QPA_PLATFORM = "offscreen"
 $NUM_CORES = "30"
 
 speed = "production"
+python_cmd = "/home/dutra/.conda/envs/jaxcpu4/bin/python"
 
 spectra_fit_csv = "results/data/jaxqsofit_apr20c_chisq20_apr18h_all_run2d.csv"
 h5_file = "results/data/apr23_1148am_6159c97_chisq.h5"
 
-$PREFIX = f"paper_may2a_apr23lc_apr19bspec_{speed}"
-prefix = $PREFIX
+base_prefix = f"paper_may2a_apr23lc_apr19bspec_{speed}"
+fiducial_prefix = base_prefix
+restricted_prefix = f"{base_prefix}_restricted"
+
+$PREFIX = fiducial_prefix
+prefix = fiducial_prefix
 echo "Running hubble_fit.py and PREFIX=" $PREFIX
 
-python -m qvc.hubble.hubble_fit \
+@(python_cmd) -m qvc.hubble.hubble_fit --resume \
     --cosmo_models FlatLambdaCDM FlatwCDM Flatw0waCDM \
     --run full \
     --speed @(speed) \
@@ -25,10 +30,11 @@ python -m qvc.hubble.hubble_fit \
     @(h5_file)
     
 
-$PREFIX = $PREFIX + "_restricted"
-prefix = $PREFIX
+$PREFIX = restricted_prefix
+prefix = restricted_prefix
+echo "Running hubble_fit.py and PREFIX=" $PREFIX
 
-python -m qvc.hubble.hubble_fit \
+@(python_cmd) -m qvc.hubble.hubble_fit --resume \
     --cosmo_models FlatLambdaCDM FlatwCDM Flatw0waCDM \
     --run full \
     --speed @(speed) \
@@ -38,4 +44,8 @@ python -m qvc.hubble.hubble_fit \
     --prefix @(prefix) \
     --sigma_clip_threshold 3.0 \
     @(h5_file)
-    
+
+bash scripts/copy_paper_assets.sh \
+    --speed @(speed) \
+    --fiducial-dir @(f"plots/hubble/{fiducial_prefix}") \
+    --restricted-dir @(f"plots/hubble/{restricted_prefix}")
