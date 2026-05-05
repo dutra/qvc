@@ -972,9 +972,10 @@ def get_completeness_function_2d(
         plot_dir = os.path.join(base_plot_path, "completeness")
         os.makedirs(plot_dir, exist_ok=True)
         # Plot completeness map
+        C_plot = gaussian_filter(C, sigma=(1, 1), mode="nearest")
         plt.figure(figsize=(7, 5))
         im = plt.imshow(
-            np.log10(np.clip(C.T, 1e-12, None)), origin="lower", aspect="auto",
+            np.log10(np.clip(C_plot.T, 1e-12, None)), origin="lower", aspect="auto",
             extent=[mag_edges[0], mag_edges[-1], z_edges[0], z_edges[-1]], cmap="viridis",
             vmin=-4, vmax=0
         )

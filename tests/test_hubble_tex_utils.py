@@ -26,6 +26,8 @@ def _make_table_df():
             "z_err": [0.0012],
             "apparent_mag_2500": [20.15],
             "apparent_mag_2500_err": [0.07],
+            "alpha_lambda": [-1.52],
+            "alpha_lambda_err": [0.08],
             "PL_slope": [-1.37],
             "PL_slope_err": [0.08],
             "log_tau_uv_rf": [2.34],
@@ -110,9 +112,9 @@ def test_make_agn_csv_table_writes_expected_output(tmp_path):
         write_path=str(tmp_path),
     )
 
-    out_path = tmp_path / "agn_table.csv"
-    assert out_path.exists()
-    loaded = pd.read_csv(out_path)
+    all_fields_path = tmp_path / "agn_table_all_fields.csv"
+    assert all_fields_path.exists()
+    loaded = pd.read_csv(all_fields_path)
     assert len(loaded) == 2
     assert list(loaded["z"]) == sorted(df["z"].tolist())
     for col in ("mu", "mu_err", "apparent_mag_2500_corr", "apparent_mag_2500_corr_err", "f_lines", "f_lines_err"):
@@ -121,9 +123,57 @@ def test_make_agn_csv_table_writes_expected_output(tmp_path):
     np.testing.assert_allclose(loaded["f_lines"], loaded["f_na"] + loaded["f_br"])
     assert list(csv_df["z"]) == sorted(df["z"].tolist())
 
+    plain_path = tmp_path / "agn_table.csv"
+    assert plain_path.exists()
+    plain = pd.read_csv(plain_path)
+    assert list(plain.columns) == [
+        "SDSS Name",
+        "RA",
+        "Dec",
+        "z",
+        "z_err",
+        "m_2500",
+        "m_2500_err",
+        "m_2500_uncorr",
+        "m_2500_uncorr_err",
+        "alpha_lambda",
+        "alpha_lambda_err",
+        "mu",
+        "mu_err",
+        "log_tau_UV_RF",
+        "log_tau_UV_RF_err",
+        "log_sigma_UV",
+        "log_sigma_UV_err",
+        "cov_log_sigma_UV_log_tau_UV_RF",
+        "f_host_2500A",
+        "f_host_2500A_err",
+        "f_BC",
+        "f_BC_err",
+        "f_lines",
+        "f_lines_err",
+        "f_FeII",
+        "f_FeII_err",
+    ]
+    assert "PL_slope" not in plain.columns
+    assert list(plain["z"]) == sorted(df["z"].tolist())
+    np.testing.assert_allclose(plain["m_2500"], loaded["apparent_mag_2500_corr"])
+    np.testing.assert_allclose(plain["m_2500_err"], loaded["apparent_mag_2500_corr_err"])
+    np.testing.assert_allclose(plain["m_2500_uncorr"], loaded["apparent_mag_2500"])
+    np.testing.assert_allclose(plain["m_2500_uncorr_err"], loaded["apparent_mag_2500_err"])
+    np.testing.assert_allclose(plain["alpha_lambda"], loaded["alpha_lambda"])
+    np.testing.assert_allclose(plain["alpha_lambda_err"], loaded["alpha_lambda_err"])
+    np.testing.assert_allclose(plain["mu_err"], loaded["mu_err"])
+    np.testing.assert_allclose(plain["log_tau_UV_RF_err"], loaded["log_tau_uv_rf_std_psd"])
+    np.testing.assert_allclose(plain["log_sigma_UV_err"], loaded["log_sigma_uv_std_psd"])
+    np.testing.assert_allclose(plain["f_host_2500A_err"], loaded["f_host_2500_err"])
+    np.testing.assert_allclose(plain["f_BC_err"], loaded["f_bc_3000_err"])
+    np.testing.assert_allclose(plain["f_lines"], loaded["f_lines"])
+    np.testing.assert_allclose(plain["f_lines_err"], np.hypot(loaded["f_na_err"], loaded["f_br_err"]))
+    np.testing.assert_allclose(plain["f_FeII_err"], loaded["f_fe_uv_3000_err"])
+
 
 def test_make_agn_latex_table_supports_2d_dm_interp_with_richer_inputs(tmp_path):
-    df = _make_table_df()
+    df = _make_table_df().drop(columns=["alpha_lambda"])
 
     def dm_interp(points):
         arr = np.asarray(points, dtype=float)
@@ -149,7 +199,7 @@ def test_make_agn_csv_table_supports_2d_dm_interp_with_richer_inputs(tmp_path):
 
     def dm_interp(points):
         arr = np.asarray(points, dtype=float)
-        assert arr.shape == (1, 3)
+        assert arr.shape == (1, 4)
         return np.full(arr.shape[0], 0.5, dtype=float)
 
     csv_df = make_agn_csv_table(
@@ -222,7 +272,7 @@ def test_make_agn_csv_table_prefers_direct_dmi_values_and_falls_back_to_dm_inter
 
 
 def test_make_agn_latex_table_passes_psf_f_host_to_3d_dm_interp(tmp_path):
-    df = _make_table_df()
+    df = _make_table_df().drop(columns=["alpha_lambda"])
     seen = {}
 
     def dm_interp(points):
@@ -243,16 +293,6 @@ def test_make_agn_latex_table_passes_psf_f_host_to_3d_dm_interp(tmp_path):
     np.testing.assert_allclose(
         seen["points"],
         np.array([[1.2345, 20.15, 0.18]], dtype=float),
-    )
-
-    make_agn_csv_table(
-        df,
-        mu=np.array([44.21]),
-        mu_err=np.array([0.13]),
-        dm_interp=dm_interp,
-        sort_by="z",
-        ascending=True,
-        write_path=str(tmp_path),
     )
 
 
@@ -346,6 +386,24 @@ def test_make_agn_latex_table_raises_for_missing_required_columns(tmp_path, miss
             ascending=True,
             write_path=str(tmp_path),
         )
+
+
+def test_make_agn_csv_table_requires_alpha_lambda_for_plain_output(tmp_path):
+    df = _make_table_df().drop(columns=["alpha_lambda"])
+
+    with pytest.raises(KeyError, match="alpha_lambda"):
+        make_agn_csv_table(
+            df,
+            mu=np.array([44.21]),
+            mu_err=np.array([0.13]),
+            dmi_values=np.array([0.0]),
+            sort_by="z",
+            ascending=True,
+            write_path=str(tmp_path),
+        )
+
+    assert (tmp_path / "agn_table_all_fields.csv").exists()
+    assert not (tmp_path / "agn_table.csv").exists()
 
 
 def test_make_agn_tables_raise_without_dm_interp_or_dmi_values(tmp_path):

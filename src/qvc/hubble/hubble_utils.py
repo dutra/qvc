@@ -56,6 +56,29 @@ from qvc.light_curve.plotting_appendix import plot_sigma_tau_identity_grid
 PURPLE_ANSI = "\033[95m"
 RESET_ANSI = "\033[0m"
 HUBBLE_JITTER_SURVEYS = ("sdss", "ps1", "ztf")
+STRICT_UPPER_BOUND_SCALAR_CUT_COLUMNS = frozenset({"apparent_mag_2500"})
+
+
+def _scalar_cut_has_inclusive_upper(column):
+    return column not in STRICT_UPPER_BOUND_SCALAR_CUT_COLUMNS
+
+
+def _scalar_parameter_cut_mask(frame, column, lower, upper):
+    if column in STRICT_UPPER_BOUND_SCALAR_CUT_COLUMNS:
+        values = pd.to_numeric(frame[column], errors="coerce").to_numpy(dtype=float)
+        mask = np.ones(len(frame), dtype=bool)
+        if lower is not None:
+            mask &= values >= lower
+        if upper is not None:
+            mask &= values < upper
+        return mask
+
+    mask = np.ones(len(frame), dtype=bool)
+    if lower is not None:
+        mask &= frame[column] >= lower
+    if upper is not None:
+        mask &= frame[column] <= upper
+    return mask
 
 
 def _count_redshift_bin_removals(frame):
@@ -1712,7 +1735,8 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
     if apply_cut:
         mask = np.ones(len(df), dtype=bool)
         for col, lower, upper in cuts:
-            cut_desc = f"{col} in {_format_cut_bounds(lower, upper, upper_inclusive=True)}"
+            upper_inclusive = _scalar_cut_has_inclusive_upper(col)
+            cut_desc = f"{col} in {_format_cut_bounds(lower, upper, upper_inclusive=upper_inclusive)}"
             if col not in df.columns:
                 _append_cut_report_row(
                     cut_rows,
@@ -1723,11 +1747,7 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
                     status="skipped",
                 )
                 continue
-            col_mask = np.ones(len(df), dtype=bool)
-            if lower is not None:
-                col_mask &= df[col] >= lower
-            if upper is not None:
-                col_mask &= df[col] <= upper
+            col_mask = _scalar_parameter_cut_mask(df, col, lower, upper)
             plot_cut_diagnostics(df.copy(), df[col_mask], bins=30, cut_info=cut_desc)
             df = _record_cut(f"agn_scalar:{col}", cut_desc, df, col_mask)
 

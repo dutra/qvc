@@ -211,19 +211,18 @@ def plot_blr_diagnostics_summary(
     plot_path="plots/hubble",
     show=False,
     filename="blr.pdf",
+    z_range=(0.44, 3.16),
 ):
-    """Plot the notebook-style BLR and continuum amplitude summary versus redshift."""
+    """Plot the BLR and continuum amplitude summary versus redshift."""
     if df_agn is None or len(df_agn) == 0:
         return None
 
-    required_columns = {"z", "log_sigma0", "log_sigma0_err"}
+    required_columns = {"z", "log_sigma_uv"}
     for band in _BLR_PDF_BANDS:
         required_columns.update(
             {
-                f"log_amp_delta_blr_{band}",
-                f"log_amp_delta_blr_{band}_err",
+                f"dlog_amp_blr_{band}",
                 f"log_sigma_band_{band}",
-                f"log_sigma_band_{band}_err",
             }
         )
     if not required_columns.issubset(df_agn.columns):
@@ -241,45 +240,78 @@ def plot_blr_diagnostics_summary(
         sharex=True,
         sharey="row",
     )
-    point_color_top = (0.0, 0.0, 0.0, 0.01)
-    point_color_bottom = (0.0, 0.0, 0.0, 0.02)
+    point_color = (0.0, 0.0, 0.0, 0.2)
+    error_color = (0.2, 0.2, 0.2, 0.05)
     plotted_any = False
+    z_in_range = (z >= z_range[0]) & (z <= z_range[1])
+
+    def _plot_range_split_points(ax, y, yerr, valid_mask, *, label):
+        in_mask = valid_mask & z_in_range
+        out_mask = valid_mask & ~z_in_range
+        if np.any(in_mask):
+            ax.errorbar(
+                z[in_mask],
+                y[in_mask],
+                yerr=yerr[in_mask] if yerr is not None else None,
+                fmt="o",
+                linestyle="none",
+                markersize=4,
+                mfc=point_color,
+                mec="none",
+                ecolor=error_color,
+                elinewidth=0.8,
+                capsize=2,
+                capthick=0.8,
+                zorder=1,
+                label=label,
+            )
+        if np.any(out_mask):
+            ax.errorbar(
+                z[out_mask],
+                y[out_mask],
+                yerr=yerr[out_mask] if yerr is not None else None,
+                fmt="D",
+                linestyle="none",
+                markersize=3,
+                mfc=point_color,
+                mec="none",
+                ecolor=error_color,
+                elinewidth=0.8,
+                capsize=2,
+                capthick=0.8,
+                zorder=1,
+            )
 
     for i, band in enumerate(_BLR_PDF_BANDS):
         ax_top = axes[0, i]
         ax_bottom = axes[1, i]
 
         blr = (
-            pd.to_numeric(df_agn["log_sigma0"], errors="coerce")
-            + pd.to_numeric(df_agn[f"log_amp_delta_blr_{band}"], errors="coerce")
+            pd.to_numeric(df_agn["log_sigma_uv"], errors="coerce")
+            + pd.to_numeric(df_agn[f"dlog_amp_blr_{band}"], errors="coerce")
         ).to_numpy(dtype=float)
-        blr_err = np.hypot(
-            pd.to_numeric(df_agn["log_sigma0_err"], errors="coerce").to_numpy(dtype=float),
-            pd.to_numeric(df_agn[f"log_amp_delta_blr_{band}_err"], errors="coerce").to_numpy(dtype=float),
-        )
+        blr_err = None
+        blr_err_cols = ("log_sigma_uv_err", f"dlog_amp_blr_{band}_err")
+        if all(col in df_agn.columns for col in blr_err_cols):
+            blr_err = np.hypot(
+                pd.to_numeric(df_agn["log_sigma_uv_err"], errors="coerce").to_numpy(dtype=float),
+                pd.to_numeric(df_agn[f"dlog_amp_blr_{band}_err"], errors="coerce").to_numpy(dtype=float),
+            )
         cont = pd.to_numeric(df_agn[f"log_sigma_band_{band}"], errors="coerce").to_numpy(dtype=float)
-        cont_err = pd.to_numeric(df_agn[f"log_sigma_band_{band}_err"], errors="coerce").to_numpy(dtype=float)
+        cont_err = None
+        if f"log_sigma_band_{band}_err" in df_agn.columns:
+            cont_err = pd.to_numeric(df_agn[f"log_sigma_band_{band}_err"], errors="coerce").to_numpy(dtype=float)
 
-        blr_mask = np.isfinite(z) & np.isfinite(blr) & np.isfinite(blr_err)
-        cont_mask = np.isfinite(z) & np.isfinite(cont) & np.isfinite(cont_err)
+        blr_mask = np.isfinite(z) & np.isfinite(blr)
+        if blr_err is not None:
+            blr_mask &= np.isfinite(blr_err)
+        cont_mask = np.isfinite(z) & np.isfinite(cont)
+        if cont_err is not None:
+            cont_mask &= np.isfinite(cont_err)
         plotted_any |= np.any(blr_mask) or np.any(cont_mask)
 
         if np.any(blr_mask):
-            ax_top.errorbar(
-                z[blr_mask],
-                blr[blr_mask],
-                yerr=blr_err[blr_mask],
-                linestyle="none",
-                marker="o",
-                markersize=4,
-                mfc=point_color_top,
-                mec="none",
-                ecolor=point_color_top,
-                color=point_color_top,
-                elinewidth=0.8,
-                capsize=0,
-                label=f"AGN {band}",
-            )
+            _plot_range_split_points(ax_top, blr, blr_err, blr_mask, label=f"AGN {band}")
         else:
             ax_top.text(0.5, 0.5, "No data", ha="center", va="center", transform=ax_top.transAxes)
         ax_top.legend(loc="upper right")
@@ -287,21 +319,7 @@ def plot_blr_diagnostics_summary(
             ax_top.set_ylabel(r"$\sigma_\mathrm{BLR,\ band}$")
 
         if np.any(cont_mask):
-            ax_bottom.errorbar(
-                z[cont_mask],
-                cont[cont_mask],
-                yerr=cont_err[cont_mask],
-                linestyle="none",
-                marker="o",
-                markersize=4,
-                mfc=point_color_bottom,
-                mec="none",
-                ecolor=point_color_bottom,
-                color=point_color_bottom,
-                elinewidth=0.8,
-                capsize=0,
-                label=f"AGN {band}",
-            )
+            _plot_range_split_points(ax_bottom, cont, cont_err, cont_mask, label=f"AGN {band}")
         else:
             ax_bottom.text(0.5, 0.5, "No data", ha="center", va="center", transform=ax_bottom.transAxes)
         ax_bottom.legend(loc="upper right")

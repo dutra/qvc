@@ -13,6 +13,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from qvc.hubble.cuts import (  # noqa: E402
+    APPARENT_MAG_2500_MAX,
     LIGHT_CURVE_N_POINTS_COLUMN,
     LIGHT_CURVE_N_POINTS_EXCLUDED_BANDS,
     LIGHT_CURVE_N_POINTS_MIN,
@@ -23,6 +24,8 @@ from qvc.hubble.hubble_cut_config import build_agn_cuts  # noqa: E402
 from qvc.hubble.hubble_utils import (  # noqa: E402
     _append_cut_report_row,
     _count_redshift_bin_removals,
+    _scalar_cut_has_inclusive_upper,
+    _scalar_parameter_cut_mask,
 )
 
 
@@ -32,6 +35,37 @@ def test_build_agn_cuts_includes_light_curve_point_count_minimum():
 
     assert cut_map[LIGHT_CURVE_N_POINTS_COLUMN] == (LIGHT_CURVE_N_POINTS_MIN, None)
     assert LIGHT_CURVE_N_POINTS_EXCLUDED_BANDS == ("u",)
+
+
+def test_build_agn_cuts_includes_apparent_mag_2500_strict_maximum():
+    cuts = build_agn_cuts()
+    cut_map = {column: (lower, upper) for column, lower, upper in cuts}
+
+    assert cut_map["apparent_mag_2500"] == (None, APPARENT_MAG_2500_MAX)
+    assert not _scalar_cut_has_inclusive_upper("apparent_mag_2500")
+
+
+def test_apparent_mag_2500_cut_rejects_exact_threshold_and_nonfinite():
+    df = pd.DataFrame(
+        {
+            "apparent_mag_2500": [
+                APPARENT_MAG_2500_MAX - 0.1,
+                APPARENT_MAG_2500_MAX,
+                APPARENT_MAG_2500_MAX + 0.1,
+                np.nan,
+                "not-a-number",
+            ],
+        }
+    )
+
+    mask = _scalar_parameter_cut_mask(
+        df,
+        "apparent_mag_2500",
+        None,
+        APPARENT_MAG_2500_MAX,
+    )
+
+    np.testing.assert_array_equal(mask, [True, False, False, False, False])
 
 
 def test_light_curve_point_count_series_prefers_cleaned_per_band_counts():
