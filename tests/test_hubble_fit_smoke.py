@@ -159,6 +159,85 @@ def test_log_likelihood_finite_on_fake_lcdm_data(fake_data):
     assert blob.shape == (3, len(df_agn))
 
 
+def test_log_likelihood_only_agn_skips_pantheon_and_sn_parameter(fake_data):
+    df_agn, _ = fake_data
+    priors, model_labels, _ = hubble_model.get_model_params("FlatLambdaCDM", only_agn=True)
+    assert "M0_sn" not in model_labels
+    theta = np.array([(priors[key][0] + priors[key][1]) / 2.0 for key in model_labels], dtype=float)
+
+    agn_fields = hubble_model.agn_model_req_obs + hubble_model.agn_model_req_errs
+    agn_fields += ("apparent_mag_2500", "apparent_mag_2500_err", "z", "z_err", "object_id")
+    agn_data = {col: df_agn[col].to_numpy() for col in agn_fields}
+
+    logl, blob = hubble_likelihood.log_likelihood(
+        theta,
+        agn_data=agn_data,
+        pantheon_data={},
+        _sna_L=None,
+        _sna_Lower=True,
+        _sna_LogdetCov=None,
+        cosmo_model="FlatLambdaCDM",
+        completeness_params=None,
+        z_pivot_agn=hubble_fit.z_pivot_agn,
+        agn_calibrators_data=None,
+        only_agn=True,
+        use_full_cov=False,
+    )
+
+    assert np.isfinite(logl)
+    assert blob.shape == (3, len(df_agn))
+
+
+def test_flatw0wa_early_de_guard_is_opt_in(fake_data):
+    df_agn, df_pantheon = fake_data
+    priors, model_labels, _ = hubble_model.get_model_params("Flatw0waCDM", only_sna=False)
+    params = {key: (priors[key][0] + priors[key][1]) / 2.0 for key in model_labels}
+    params["w0"] = -0.2
+    params["wa"] = 0.3
+    theta = np.array([params[key] for key in model_labels], dtype=float)
+
+    agn_fields = hubble_model.agn_model_req_obs + hubble_model.agn_model_req_errs
+    agn_fields += ("apparent_mag_2500", "apparent_mag_2500_err", "z", "z_err", "object_id")
+    agn_data = {col: df_agn[col].to_numpy() for col in agn_fields}
+    pantheon_data = {col: df_pantheon[col].to_numpy() for col in df_pantheon.columns}
+
+    logl_default, blob_default = hubble_likelihood.log_likelihood(
+        theta,
+        agn_data=agn_data,
+        pantheon_data=pantheon_data,
+        _sna_L=None,
+        _sna_Lower=True,
+        _sna_LogdetCov=None,
+        cosmo_model="Flatw0waCDM",
+        completeness_params=None,
+        z_pivot_agn=hubble_fit.z_pivot_agn,
+        agn_calibrators_data=None,
+        only_sna=False,
+        use_full_cov=False,
+    )
+    logl_guarded, blob_guarded = hubble_likelihood.log_likelihood(
+        theta,
+        agn_data=agn_data,
+        pantheon_data=pantheon_data,
+        _sna_L=None,
+        _sna_Lower=True,
+        _sna_LogdetCov=None,
+        cosmo_model="Flatw0waCDM",
+        completeness_params=None,
+        z_pivot_agn=hubble_fit.z_pivot_agn,
+        agn_calibrators_data=None,
+        early_de_guard=True,
+        only_sna=False,
+        use_full_cov=False,
+    )
+
+    assert params["w0"] + params["wa"] >= 0.0
+    assert np.isfinite(logl_default)
+    assert blob_default.shape == (3, len(df_agn))
+    assert logl_guarded == -np.inf
+    np.testing.assert_array_equal(blob_guarded, np.zeros((3, len(df_agn))))
+
+
 def test_compute_agn_likelihood_space_reduced_chi2_uses_only_agn_relevant_dof(fake_data):
     df_agn, _ = fake_data
     priors, model_labels, _ = hubble_model.get_model_params(
@@ -298,6 +377,8 @@ def test_compute_direct_full_sample_completeness_summaries_freezes_fit_pivots(fa
         z_pivot_agn=hubble_fit.z_pivot_agn,
         use_full_cov=False,
         disable_ceph_dist_calibration=False,
+        use_planck_h0_prior=False,
+        use_planck_om_prior=False,
         use_alpha_lambda_term=False,
         use_eta_sigma_term=False,
         use_redshift_log_f_term=False,
@@ -571,6 +652,124 @@ def test_run_single_only_sna_smoke(fake_data, monkeypatch, tmp_path):
     assert age_err == 0.2
 
 
+def test_run_single_only_agn_keeps_agn_hubble_plots(fake_data, monkeypatch, tmp_path):
+    df_agn, df_pantheon = fake_data
+    priors, model_labels, _ = hubble_model.get_model_params("FlatLambdaCDM", only_agn=True)
+    assert "M0_sn" not in model_labels
+    theta = np.array([(priors[key][0] + priors[key][1]) / 2.0 for key in model_labels], dtype=float)
+    flat_samples = np.tile(theta[None, :], (8, 1))
+    plot_hubble_calls = []
+    plot_cosmo_corner_calls = []
+
+    monkeypatch.chdir(tmp_path)
+    _patch_run_single_plot_stack(monkeypatch)
+    monkeypatch.setattr(
+        hubble_fit,
+        "run_mcmc_pipeline",
+        lambda df_agn_arg, *args, **kwargs: (
+            flat_samples,
+            model_labels,
+            lambda pts: np.zeros(len(np.atleast_2d(pts))),
+            None,
+            -24.0,
+            0.12,
+            np.zeros(len(df_agn_arg)),
+            np.full(len(df_agn_arg), 0.05),
+            None,
+        ),
+    )
+
+    def fake_plot_hubble(*args, **kwargs):
+        plot_hubble_calls.append(kwargs)
+        n = len(args[1])
+        return (
+            np.zeros(n, dtype=float),
+            np.ones(n, dtype=float),
+            np.full(n, 44.0),
+            np.full(n, 0.1),
+            np.full(n, 0.2),
+        )
+
+    monkeypatch.setattr(hubble_fit, "plot_hubble", fake_plot_hubble)
+    monkeypatch.setattr(
+        hubble_fit,
+        "plot_cosmo_corner",
+        lambda *args, **kwargs: plot_cosmo_corner_calls.append(kwargs),
+    )
+
+    result = hubble_fit.run_single(
+        df_agn=df_agn,
+        df_agn_all=df_agn.copy(),
+        df_pantheon=df_pantheon,
+        _sna_L=None,
+        _sna_Lower=True,
+        _sna_LogdetCov=None,
+        cosmo_model="FlatLambdaCDM",
+        completeness=False,
+        use_full_cov=False,
+        only_agn=True,
+        speed="fastest",
+        z_range=(0.44, 3.16),
+        disable_sigma_clip_pass=True,
+        skip_plots=False,
+        prefix="unit",
+    )
+
+    samples_out, labels_out, _, logz, logzerr, residuals, age, age_err = result
+    assert samples_out.shape == flat_samples.shape
+    assert labels_out == model_labels
+    assert logz == -24.0
+    assert logzerr == 0.12
+    assert residuals is not None
+    assert age == 13.8
+    assert age_err == 0.1
+    assert plot_hubble_calls
+    assert all(call.get("only_agn") is True for call in plot_hubble_calls)
+    assert plot_cosmo_corner_calls
+    assert all(call.get("only_agn") is True for call in plot_cosmo_corner_calls)
+
+
+def test_plot_cosmo_corner_only_agn_legend_label(monkeypatch, tmp_path):
+    rng = np.random.default_rng(987)
+    priors, model_labels, _ = hubble_model.get_model_params("FlatLambdaCDM", only_agn=True)
+    center = np.array([(priors[key][0] + priors[key][1]) / 2.0 for key in model_labels], dtype=float)
+    samples = np.tile(center[None, :], (80, 1))
+    samples += rng.normal(
+        0.0,
+        np.array([0.05, 0.08, 0.06, 0.03, 0.2, 0.03], dtype=float),
+        size=samples.shape,
+    )
+    captured = {}
+
+    def fake_save_figure(fig, *args, **kwargs):
+        captured["fig"] = fig
+
+    monkeypatch.setattr(hubble_plotting, "_save_figure", fake_save_figure)
+
+    hubble_plotting.plot_cosmo_corner(
+        None,
+        samples,
+        "FlatLambdaCDM",
+        z_pivot_sna=0.01,
+        z_pivot_agn=1.0,
+        plot_path=str(tmp_path),
+        show=False,
+        smooth=24,
+        only_agn=True,
+    )
+
+    fig = captured["fig"]
+    legend_labels = [
+        text.get_text()
+        for legend in fig.legends
+        for text in legend.get_texts()
+    ]
+    assert "AGN" in legend_labels
+    assert "SN Ia + AGN" not in legend_labels
+    import matplotlib.pyplot as plt
+    plt.close(fig)
+
+
 def test_plot_hubble_debiased_returns_clipping_sigma_and_writes_distinct_diagnostics(monkeypatch, tmp_path):
     df_agn = _make_fake_agn_sample(n_agn=6).copy()
     df_agn["wrms"] = np.linspace(0.1, 0.2, len(df_agn))
@@ -774,6 +973,102 @@ def test_run_single_two_pass_sigma_clip_uses_plot_hubble_clipping_sigma(monkeypa
     assert pipeline_calls[1]["object_ids"] == ["agn_001", "agn_002", "agn_003"]
     assert pipeline_calls[0]["warm_start_flat_samples"] is None
     assert pipeline_calls[1]["warm_start_flat_samples"] is not None
+
+
+def test_run_single_only_agn_two_pass_passes_only_agn_to_pass1_clipped_plot(monkeypatch, tmp_path):
+    df_agn = _make_fake_agn_sample(n_agn=4)
+    df_pantheon = _make_fake_pantheon_sample()
+    priors, model_labels, _ = hubble_model.get_model_params("FlatLambdaCDM", only_agn=True)
+    theta = np.array([(priors[key][0] + priors[key][1]) / 2.0 for key in model_labels], dtype=float)
+    pipeline_calls = []
+    plot_calls = []
+
+    monkeypatch.chdir(tmp_path)
+    _patch_run_single_plot_stack(monkeypatch)
+
+    def fake_run_mcmc_pipeline(df_agn_arg, *args, **kwargs):
+        pipeline_calls.append(
+            {
+                "object_ids": df_agn_arg["object_id"].tolist(),
+                "only_agn": kwargs.get("only_agn"),
+            }
+        )
+        flat_samples = np.tile(theta[None, :], (8, 1))
+        n = len(df_agn_arg)
+        _write_fake_checkpoint(
+            kwargs["checkpoint_file_override"],
+            flat_samples,
+            np.zeros(n),
+            np.full(n, 0.05),
+            logz=-80.0 - len(pipeline_calls),
+            logzerr=0.2,
+        )
+        return (
+            flat_samples,
+            model_labels,
+            lambda pts: np.zeros(len(np.atleast_2d(pts))),
+            None,
+            -80.0 - len(pipeline_calls),
+            0.2,
+            np.zeros(n),
+            np.full(n, 0.05),
+            None,
+        )
+
+    def fake_plot_hubble(*args, **kwargs):
+        plot_calls.append(kwargs)
+        n = len(args[1])
+        if kwargs.get("filename") == "hubble_diagram_pass1_full_sample_debiased.pdf":
+            return (
+                np.array([4.0, 0.1, 0.1, 0.1], dtype=float),
+                np.ones(n, dtype=float),
+                np.full(n, 44.0),
+                np.full(n, 0.1),
+                np.full(n, 0.2),
+            )
+        return (
+            np.zeros(n, dtype=float),
+            np.ones(n, dtype=float),
+            np.full(n, 44.0),
+            np.full(n, 0.1),
+            np.full(n, 0.2),
+        )
+
+    monkeypatch.setattr(hubble_fit, "run_mcmc_pipeline", fake_run_mcmc_pipeline)
+    monkeypatch.setattr(hubble_fit, "plot_hubble", fake_plot_hubble)
+
+    hubble_fit.run_single(
+        df_agn=df_agn,
+        df_agn_all=df_agn.copy(),
+        df_pantheon=df_pantheon,
+        _sna_L=None,
+        _sna_Lower=True,
+        _sna_LogdetCov=None,
+        cosmo_model="FlatLambdaCDM",
+        completeness=False,
+        use_full_cov=False,
+        only_agn=True,
+        speed="fastest",
+        z_range=(0.44, 3.16),
+        disable_sigma_clip_pass=False,
+        sigma_clip_threshold=3.0,
+        prefix="unit",
+    )
+
+    assert len(pipeline_calls) == 2
+    assert all(call["only_agn"] is True for call in pipeline_calls)
+    pass1_plot_calls = [
+        call for call in plot_calls
+        if call.get("filename") in {
+            "hubble_diagram_pass1_full_sample_debiased.pdf",
+            "hubble_diagram_pass1_full_sample_clipped_debiased.pdf",
+        }
+    ]
+    assert {call["filename"] for call in pass1_plot_calls} == {
+        "hubble_diagram_pass1_full_sample_debiased.pdf",
+        "hubble_diagram_pass1_full_sample_clipped_debiased.pdf",
+    }
+    assert all(call.get("only_agn") is True for call in pass1_plot_calls)
 
 
 def test_run_single_calls_agn_table_only_for_joint_flatw0wa(monkeypatch, tmp_path):
@@ -1213,6 +1508,37 @@ def test_write_stage_checkpoint_roundtrips_pass1_state(tmp_path):
     )
     np.testing.assert_array_equal(extracted["keep_mask_full"], keep_mask)
     assert extracted["pass1_diagnostics_df"]["mu_zscore"].tolist() == [0.1, 3.2, 0.2, 0.3]
+
+
+def test_cosmo_results_hdf5_roundtrips_nested_model_results(tmp_path):
+    output_path = tmp_path / "cosmo_results.hdf5"
+    models_dict = {
+        "FlatLambdaCDM": {
+            "H0": 73.2,
+            "N": 2000,
+            "samples": np.array([0.31, 0.32, 0.33]),
+            "missing": None,
+        },
+        "Flatw0waCDM": {
+            "w0": -0.9,
+            "wa": -1.2,
+            "logZ": 4154.1,
+        },
+    }
+
+    hubble_utils.save_cosmo_results_hdf5(str(output_path), models_dict)
+    loaded = hubble_utils.load_cosmo_results_hdf5(str(output_path))
+
+    assert set(loaded) == set(models_dict)
+    assert set(loaded["FlatLambdaCDM"]) == set(models_dict["FlatLambdaCDM"])
+    assert set(loaded["Flatw0waCDM"]) == set(models_dict["Flatw0waCDM"])
+    assert loaded["FlatLambdaCDM"]["H0"] == pytest.approx(73.2)
+    assert int(loaded["FlatLambdaCDM"]["N"]) == 2000
+    np.testing.assert_allclose(loaded["FlatLambdaCDM"]["samples"], [0.31, 0.32, 0.33])
+    assert np.isnan(loaded["FlatLambdaCDM"]["missing"])
+    assert loaded["Flatw0waCDM"]["w0"] == pytest.approx(-0.9)
+    assert loaded["Flatw0waCDM"]["wa"] == pytest.approx(-1.2)
+    assert loaded["Flatw0waCDM"]["logZ"] == pytest.approx(4154.1)
 
 
 def test_build_warm_start_live_points_uses_unit_cube_and_blobs():
@@ -2639,3 +2965,19 @@ def test_hubble_fit_cli_declares_and_forwards_spectra_sdss_run2d():
 
     assert parser_declared
     assert "spectra_sdss_run2d" in load_kwargs
+
+
+def test_hubble_fit_cli_declares_only_agn_and_rejects_only_sna_combo():
+    source = Path(hubble_fit.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+
+    parser_declared = False
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            if isinstance(node.func, ast.Attribute) and node.func.attr == "add_argument":
+                if node.args and isinstance(node.args[0], ast.Constant):
+                    if node.args[0].value == "--only_agn":
+                        parser_declared = True
+
+    assert parser_declared
+    assert "--only_sna and --only_agn cannot be used together." in source

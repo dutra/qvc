@@ -229,7 +229,21 @@ xonsh run_hubble_paper.xonsh
 
 If you need a lower-level manual invocation of the Hubble fitter instead of the full pipeline script, you can still run `python -m qvc.hubble.hubble_fit ...` directly with the desired arguments.
 
-The pipeline currently sets `speed = "test"` inside `run_hubble_paper.xonsh`. More generally, `hubble_fit` can be run with `--speed fast` for a lighter run that uses a minimum number of `dynesty` live points for a reasonable result in a few hours on a laptop. For our published results, we used `--speed production`, which uses about 500 live points for a fuller exploration of the likelihood.
+The pipeline currently sets `speed = "standard"` inside `run_hubble_paper.xonsh`. More generally, `hubble_fit` can be run with `--speed quick` for a lighter run that uses a minimum number of `dynesty` live points for a reasonable result in a few hours on a laptop. For our published results, we used `--speed production`, which uses about 500 live points for a fuller exploration of the likelihood.
+
+For manually running a limited, faster set of the hubble diagram pipeline:
+```bash
+python -m qvc.hubble.hubble_fit \
+    --disable_sigma_clip_pass \
+    --cosmo_models FlatLambdaCDM FlatwCDM Flatw0waCDM  \
+    --run single \
+    --speed quick \
+    --spectra_fit_csv @(spectra_fit_csv) \
+    --z_range 0.44 3.16 \
+    --result_prefix "fiducial" \
+    --prefix <prefix> \
+    <light curves h5file path>
+``` 
 
 ---
 ## Spectral Fitting

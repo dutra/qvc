@@ -227,15 +227,21 @@ def log_likelihood(theta, *, agn_data, pantheon_data,
                    agn_calibrators_data=None,
                    agn_pivot_arr=None,
                    use_planck_h0_prior=False,
+                   use_planck_om_prior=False,
                    use_ceph_dist_calibration=True,
                    use_alpha_lambda_term=False,
                    use_eta_sigma_term=False,
                    use_redshift_log_f_term=False,
-                   only_sna=False, use_full_cov=False):
+                   early_de_guard=False,
+                   only_sna=False,
+                   only_agn=False,
+                   use_full_cov=False):
     priors, model_labels, model_labels_latex = get_model_params(
         cosmo_model,
         only_sna=only_sna,
+        only_agn=only_agn,
         use_planck_h0_prior=use_planck_h0_prior,
+        use_planck_om_prior=use_planck_om_prior,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
@@ -258,15 +264,24 @@ def log_likelihood(theta, *, agn_data, pantheon_data,
         cosmo = FlatwCDM(H0=params['H0'], Om0=params['Om0'], w0=params['w0'])
     elif cosmo_model == 'Flatw0waCDM':
         cosmo = Flatw0waCDM(H0=params['H0'], Om0=params['Om0'], w0=params['w0'], wa=params['wa'])
-        # if params['w0'] + params['wa'] >= 0:  # "no early DE" guard
-        #     return -np.inf, empty_blob(N_obj)
+        if early_de_guard and params['w0'] + params['wa'] >= 0:  # "no early DE" guard
+            return -np.inf, empty_blob(N_obj)
     elif cosmo_model == 'FlatLambdaCDM':
         cosmo = FlatLambdaCDM(H0=params['H0'], Om0=params['Om0'])
 
-    ll_snia = log_likelihood_pantheon_cephdist(params, pantheon_data, 
-                                                _sna_L, _sna_Lower, _sna_LogdetCov,
-                                                cosmo, use_full_cov,
-                                                use_ceph_dist_calibration=use_ceph_dist_calibration)
+    if only_agn:
+        ll_snia = 0.0
+    else:
+        ll_snia = log_likelihood_pantheon_cephdist(
+            params,
+            pantheon_data,
+            _sna_L,
+            _sna_Lower,
+            _sna_LogdetCov,
+            cosmo,
+            use_full_cov,
+            use_ceph_dist_calibration=use_ceph_dist_calibration,
+        )
     
     if only_sna:
         return ll_snia, empty_blob(N_obj)
@@ -356,7 +371,6 @@ def log_likelihood(theta, *, agn_data, pantheon_data,
     # ll_cmb, _ = loglike_cmb_theta_simple(cosmo)
     
     ll = ll_snia + ll_agn - ll_completeness
-    
     return ll, comp_blob
 
 def log_likelihood_nearbylcs(
@@ -368,11 +382,15 @@ def log_likelihood_nearbylcs(
     cosmo_model, completeness_params,
     z_pivot_agn,
     use_planck_h0_prior=False,
+    use_planck_om_prior=False,
     use_ceph_dist_calibration=True,
     use_alpha_lambda_term=False,
     use_eta_sigma_term=False,
     use_redshift_log_f_term=False,
-    only_sna=False, use_full_cov=False
+    early_de_guard=False,
+    only_sna=False,
+    only_agn=False,
+    use_full_cov=False
 ):
     """
     AGN likelihood with separate calibrators table.
@@ -385,7 +403,9 @@ def log_likelihood_nearbylcs(
     priors, model_labels, model_labels_latex = get_model_params(
         cosmo_model,
         only_sna=only_sna,
+        only_agn=only_agn,
         use_planck_h0_prior=use_planck_h0_prior,
+        use_planck_om_prior=use_planck_om_prior,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
@@ -408,6 +428,8 @@ def log_likelihood_nearbylcs(
         cosmo = FlatwCDM(H0=params['H0'], Om0=params['Om0'], w0=params['w0'])
     elif cosmo_model == 'Flatw0waCDM':
         cosmo = Flatw0waCDM(H0=params['H0'], Om0=params['Om0'], w0=params['w0'], wa=params['wa'])
+        if early_de_guard and params['w0'] + params['wa'] >= 0:  # "no early DE" guard
+            return -np.inf, empty_blob(N_obj)
     elif cosmo_model == 'FlatwpwaCDM':
         cosmo = FlatwpwaCDM(H0=params['H0'], Om0=params['Om0'], wp=params['wp'], wa=params['wa'], zp=z_pivot_agn)
     elif cosmo_model == 'FlatLambdaCDM':

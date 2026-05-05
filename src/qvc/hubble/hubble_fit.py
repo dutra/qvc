@@ -143,6 +143,16 @@ def normalize_sigma_clip_second_pass_mode(mode):
     )
 
 
+def _fit_mode_label(only_sna=False, only_agn=False):
+    if only_sna and only_agn:
+        raise ValueError("only_sna and only_agn cannot both be True.")
+    if only_sna:
+        return "sna"
+    if only_agn:
+        return "agn"
+    return "joint"
+
+
 def _cosmo_from_params(cosmo_model, params, zp):
     if cosmo_model == "FlatwCDM":
         return FlatwCDM(H0=params["H0"], Om0=params["Om0"], w0=params["w0"])
@@ -427,9 +437,12 @@ def make_run_tag(
     speed,
     N,
     z_range,
+    only_agn=False,
     completeness=True,
     completeness_mode="2d",
     disable_ceph_dist_calibration=False,
+    use_planck_h0_prior=False,
+    use_planck_om_prior=False,
     use_alpha_lambda_term=False,
     use_eta_sigma_term=False,
     use_redshift_log_f_term=False,
@@ -440,12 +453,14 @@ def make_run_tag(
     z_tag = f"z{zmin:.2f}_{zmax:.2f}".replace(".", "p")
     completeness_tag = f"_{completeness_mode}" if completeness else "_disable_completeness"
     ceph_tag = "_nocephdist_planckh0" if disable_ceph_dist_calibration else ""
+    planck_h0_tag = "_planckh0" if use_planck_h0_prior and not disable_ceph_dist_calibration else ""
+    planck_om_tag = "_planckom" if use_planck_om_prior else ""
     alpha_tag = "_alphaLam" if use_alpha_lambda_term else ""
     eta_sigma_tag = "_etaSigma" if use_eta_sigma_term else ""
     logf_tag = "_logfz" if use_redshift_log_f_term else ""
     return (
-        f"{cosmo_model}_{'sna' if only_sna else 'joint'}_{speed}_{n_tag}_{z_tag}"
-        f"{completeness_tag}{ceph_tag}{alpha_tag}{eta_sigma_tag}{logf_tag}"
+        f"{cosmo_model}_{_fit_mode_label(only_sna, only_agn)}_{speed}_{n_tag}_{z_tag}"
+        f"{completeness_tag}{ceph_tag}{planck_h0_tag}{planck_om_tag}{alpha_tag}{eta_sigma_tag}{logf_tag}"
     )
 
 
@@ -1135,9 +1150,13 @@ def _compute_direct_full_sample_completeness_summaries(
     z_pivot_agn,
     use_full_cov,
     disable_ceph_dist_calibration,
-    use_alpha_lambda_term,
-    use_eta_sigma_term,
-    use_redshift_log_f_term,
+    use_planck_h0_prior,
+    use_planck_om_prior,
+    only_agn=False,
+    use_alpha_lambda_term=False,
+    use_eta_sigma_term=False,
+    use_redshift_log_f_term=False,
+    early_de_guard=False,
 ):
     n_plot = len(df_agn_plot_sample)
     if n_plot == 0:
@@ -1172,12 +1191,15 @@ def _compute_direct_full_sample_completeness_summaries(
             z_pivot_agn=z_pivot_agn,
             agn_calibrators_data=None,
             agn_pivot_arr=fit_pivot_arr,
-            use_planck_h0_prior=disable_ceph_dist_calibration,
+            use_planck_h0_prior=use_planck_h0_prior,
+            use_planck_om_prior=use_planck_om_prior,
             use_ceph_dist_calibration=not disable_ceph_dist_calibration,
             use_alpha_lambda_term=use_alpha_lambda_term,
             use_eta_sigma_term=use_eta_sigma_term,
             use_redshift_log_f_term=use_redshift_log_f_term,
+            early_de_guard=early_de_guard,
             only_sna=False,
+            only_agn=only_agn,
             use_full_cov=use_full_cov,
         )
         blob = np.asarray(blob, dtype=float)
@@ -1332,6 +1354,7 @@ def _run_fit_stage(
     df_calibrators,
     cosmo_model,
     only_sna,
+    only_agn,
     completeness,
     use_full_cov,
     z_range,
@@ -1343,15 +1366,19 @@ def _run_fit_stage(
     completeness_mode,
     compare_sigma_only,
     disable_ceph_dist_calibration,
+    use_planck_h0_prior,
+    use_planck_om_prior,
     use_alpha_lambda_term,
     use_eta_sigma_term,
     use_redshift_log_f_term,
+    early_de_guard=False,
     checkpoint_file_override=None,
     resume_replot_with_cuts=False,
     warm_start_flat_samples=None,
     logZ_is_approximate=False,
     df_agn_completeness=None,
 ):
+    use_planck_h0_prior = use_planck_h0_prior or disable_ceph_dist_calibration
     (
         flat_samples,
         model_labels,
@@ -1372,6 +1399,7 @@ def _run_fit_stage(
         df_calibrators=df_calibrators,
         cosmo_model=cosmo_model,
         only_sna=only_sna,
+        only_agn=only_agn,
         completeness=completeness,
         use_full_cov=use_full_cov,
         z_range=z_range,
@@ -1384,9 +1412,12 @@ def _run_fit_stage(
         completeness_mode=completeness_mode,
         compare_sigma_only=compare_sigma_only,
         disable_ceph_dist_calibration=disable_ceph_dist_calibration,
+        use_planck_h0_prior=use_planck_h0_prior,
+        use_planck_om_prior=use_planck_om_prior,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
+        early_de_guard=early_de_guard,
         resume_replot_with_cuts=resume_replot_with_cuts,
         warm_start_flat_samples=warm_start_flat_samples,
         logZ_is_approximate=logZ_is_approximate,
@@ -1484,7 +1515,7 @@ def generate_fresh_completeness_sim_file(plot_path, *, area_deg2, seed=123):
 def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, 
                       df_calibrators=None,
                       cosmo_model='Flatw0waCDM',
-                      only_sna=False, completeness=True, use_full_cov=True,
+                      only_sna=False, only_agn=False, completeness=True, use_full_cov=True,
                       resume=False, speed="production",
                       z_range=(0.44, 3.16),
                       prefix="default",
@@ -1494,9 +1525,12 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                       N=None,
                       compare_sigma_only=False,
                       disable_ceph_dist_calibration=False,
+                      use_planck_h0_prior=False,
+                      use_planck_om_prior=False,
                       use_alpha_lambda_term=False,
                       use_eta_sigma_term=False,
                       use_redshift_log_f_term=False,
+                      early_de_guard=False,
                       resume_replot_with_cuts=False,
                       warm_start_flat_samples=None,
                       logZ_is_approximate=False,
@@ -1504,15 +1538,20 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                       ):
     validate_completeness_mode(completeness_mode)
     speed = normalize_speed(speed)
+    _fit_mode_label(only_sna, only_agn)
+    use_planck_h0_prior = use_planck_h0_prior or disable_ceph_dist_calibration
     run_tag = make_run_tag(
         cosmo_model,
         only_sna,
         speed,
         N,
         z_range,
+        only_agn=only_agn,
         completeness=completeness,
         completeness_mode=completeness_mode,
         disable_ceph_dist_calibration=disable_ceph_dist_calibration,
+        use_planck_h0_prior=use_planck_h0_prior,
+        use_planck_om_prior=use_planck_om_prior,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
@@ -1523,7 +1562,9 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
     priors, model_labels, model_labels_latex = get_model_params(
         cosmo_model,
         only_sna=only_sna,
-        use_planck_h0_prior=disable_ceph_dist_calibration,
+        only_agn=only_agn,
+        use_planck_h0_prior=use_planck_h0_prior,
+        use_planck_om_prior=use_planck_om_prior,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
@@ -1610,7 +1651,11 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
         else _build_checkpoint_paths(prefix, run_tag)["single"]
     )
     print(f"Checkpoint file: {checkpoint_file}")
-    print(f"Starting Hubble Fit with {len(agn_data['z'])} AGNs and {len(pantheon_data['zHD'])} SNes...")
+    n_sne = len(pantheon_data["zHD"]) if "zHD" in pantheon_data else 0
+    if only_agn:
+        print(f"Starting AGN-only Hubble Fit with {len(agn_data['z'])} AGNs; SN likelihood disabled.")
+    else:
+        print(f"Starting Hubble Fit with {len(agn_data['z'])} AGNs and {n_sne} SNes...")
 
     if resume:
         print("[WARNING] Resuming from checkpoint file...")
@@ -1688,12 +1733,15 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                 z_pivot_agn=z_pivot_agn,
                 completeness_params=completeness_params,
                 only_sna=only_sna,
+                only_agn=only_agn,
                 use_full_cov=use_full_cov,
-                use_planck_h0_prior=disable_ceph_dist_calibration,
+                use_planck_h0_prior=use_planck_h0_prior,
+                use_planck_om_prior=use_planck_om_prior,
                 use_ceph_dist_calibration=not disable_ceph_dist_calibration,
                 use_alpha_lambda_term=use_alpha_lambda_term,
                 use_eta_sigma_term=use_eta_sigma_term,
                 use_redshift_log_f_term=use_redshift_log_f_term,
+                early_de_guard=early_de_guard,
             )
             ptform_kwargs = dict(priors=priors, model_labels=model_labels)
             loglike_func = log_likelihood_nearbylcs if agn_calibrators_data is not None else log_likelihood
@@ -1748,6 +1796,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                 cosmo_model,
                 plot_path,
                 only_sna=only_sna,
+                only_agn=only_agn,
                 speed=speed,
                 use_alpha_lambda_term=use_alpha_lambda_term,
                 use_eta_sigma_term=use_eta_sigma_term,
@@ -1897,7 +1946,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
 
 def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, 
                cosmo_model, completeness=True, use_full_cov=True, 
-               N=None, resume=False, only_sna=False, speed="production", 
+               N=None, resume=False, only_sna=False, only_agn=False, speed="production", 
                cosmo_model_joint_samples={}, cosmo_model_sna_samples={},
                verbose=True,
                z_range=(0.44, 3.16),
@@ -1910,12 +1959,17 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                completeness_mode="2d",
                compare_sigma_only=False,
                disable_ceph_dist_calibration=False,
+               use_planck_h0_prior=False,
+               use_planck_om_prior=False,
                use_alpha_lambda_term=False,
                use_eta_sigma_term=False,
                use_redshift_log_f_term=False,
+               early_de_guard=False,
                resume_replot_with_cuts=False):
     validate_completeness_mode(completeness_mode)
     speed = normalize_speed(speed)
+    _fit_mode_label(only_sna, only_agn)
+    use_planck_h0_prior = use_planck_h0_prior or disable_ceph_dist_calibration
     sigma_clip_second_pass_mode = normalize_sigma_clip_second_pass_mode(sigma_clip_second_pass_mode)
     run_tag = make_run_tag(
         cosmo_model,
@@ -1923,9 +1977,12 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         speed,
         N,
         z_range,
+        only_agn=only_agn,
         completeness=completeness,
         completeness_mode=completeness_mode,
         disable_ceph_dist_calibration=disable_ceph_dist_calibration,
+        use_planck_h0_prior=use_planck_h0_prior,
+        use_planck_om_prior=use_planck_om_prior,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
@@ -2089,6 +2146,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 df_calibrators=df_calibrators,
                 cosmo_model=cosmo_model,
                 only_sna=only_sna,
+                only_agn=only_agn,
                 completeness=completeness,
                 use_full_cov=use_full_cov,
                 z_range=z_range,
@@ -2100,9 +2158,12 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 completeness_mode=completeness_mode,
                 compare_sigma_only=compare_sigma_only,
                 disable_ceph_dist_calibration=disable_ceph_dist_calibration,
+                use_planck_h0_prior=use_planck_h0_prior,
+                use_planck_om_prior=use_planck_om_prior,
                 use_alpha_lambda_term=use_alpha_lambda_term,
                 use_eta_sigma_term=use_eta_sigma_term,
                 use_redshift_log_f_term=use_redshift_log_f_term,
+                early_de_guard=early_de_guard,
                 checkpoint_file_override=pass1_checkpoint_file,
                 resume_replot_with_cuts=False,
                 df_agn_completeness=df_agn_full_sample_preclip,
@@ -2124,9 +2185,13 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 z_pivot_agn=z_pivot_agn,
                 use_full_cov=use_full_cov,
                 disable_ceph_dist_calibration=disable_ceph_dist_calibration,
+                use_planck_h0_prior=use_planck_h0_prior,
+                use_planck_om_prior=use_planck_om_prior,
+                only_agn=only_agn,
                 use_alpha_lambda_term=use_alpha_lambda_term,
                 use_eta_sigma_term=use_eta_sigma_term,
                 use_redshift_log_f_term=use_redshift_log_f_term,
+                early_de_guard=early_de_guard,
             )
             pass1_residuals_full, pass1_clipping_sigma_full, _, _, _ = plot_hubble(
                 flat_samples_pass1,
@@ -2153,6 +2218,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 use_alpha_lambda_term=use_alpha_lambda_term,
                 use_eta_sigma_term=use_eta_sigma_term,
                 use_redshift_log_f_term=use_redshift_log_f_term,
+                only_agn=only_agn,
             )
             pass1_diagnostics_df, keep_mask_full = _build_sigma_clip_diagnostics(
                 df_agn_full_sample_preclip,
@@ -2223,6 +2289,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 use_alpha_lambda_term=use_alpha_lambda_term,
                 use_eta_sigma_term=use_eta_sigma_term,
                 use_redshift_log_f_term=use_redshift_log_f_term,
+                only_agn=only_agn,
             )
             if resume_stage == "pass1":
                 print("Stopping after resumed pass-1 fit as requested by resume_stage='pass1'.")
@@ -2270,7 +2337,9 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                     ndim=len(get_model_params(
                         cosmo_model,
                         only_sna=only_sna,
-                        use_planck_h0_prior=disable_ceph_dist_calibration,
+                        only_agn=only_agn,
+                        use_planck_h0_prior=use_planck_h0_prior,
+                        use_planck_om_prior=use_planck_om_prior,
                         use_alpha_lambda_term=use_alpha_lambda_term,
                         use_eta_sigma_term=use_eta_sigma_term,
                         use_redshift_log_f_term=use_redshift_log_f_term,
@@ -2312,10 +2381,10 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
 
     if uniform_redshift_distribution:
         if not compare_sigma_only:
-            plot_redshift_histograms(df_pantheon, df_agn_pass2_fit_selection, xscale="linear", plot_path=plot_path)
+            plot_redshift_histograms(df_pantheon, df_agn_pass2_fit_selection, xscale="linear", plot_path=plot_path, only_agn=only_agn)
     else:
         if not compare_sigma_only:
-            plot_redshift_histograms(df_pantheon, df_agn_pass2_plot_sample, xscale="log", plot_path=plot_path)
+            plot_redshift_histograms(df_pantheon, df_agn_pass2_plot_sample, xscale="log", plot_path=plot_path, only_agn=only_agn)
 
     if not compare_sigma_only:
         plot_delta_m_flux_recal_vs_redshift(df_agn_pass2_fit_selection, plot_path=plot_path)
@@ -2353,6 +2422,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         df_calibrators=df_calibrators,
         cosmo_model=cosmo_model,
         only_sna=only_sna,
+        only_agn=only_agn,
         completeness=completeness,
         use_full_cov=use_full_cov,
         z_range=z_range,
@@ -2365,9 +2435,12 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         completeness_mode=completeness_mode,
         compare_sigma_only=compare_sigma_only,
         disable_ceph_dist_calibration=disable_ceph_dist_calibration,
+        use_planck_h0_prior=use_planck_h0_prior,
+        use_planck_om_prior=use_planck_om_prior,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
+        early_de_guard=early_de_guard,
         resume_replot_with_cuts=resume_replot_with_cuts,
         warm_start_flat_samples=pass2_warm_start_flat_samples if warm_start_pass2 else None,
         logZ_is_approximate=warm_start_pass2,
@@ -2424,9 +2497,13 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         z_pivot_agn=z_pivot_agn,
         use_full_cov=use_full_cov,
         disable_ceph_dist_calibration=disable_ceph_dist_calibration,
+        use_planck_h0_prior=use_planck_h0_prior,
+        use_planck_om_prior=use_planck_om_prior,
+        only_agn=only_agn,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
+        early_de_guard=early_de_guard,
     )
     dmi_posterior_median_full = dmi_posterior_median_full_direct
     dmi_posterior_sigma_full = dmi_posterior_sigma_full_direct
@@ -2628,6 +2705,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                     use_alpha_lambda_term=use_alpha_lambda_term,
                     use_eta_sigma_term=use_eta_sigma_term,
                     use_redshift_log_f_term=use_redshift_log_f_term,
+                    only_agn=only_agn,
                     agn_likelihood_space_chi2=chisq_red_agn_likelihood_space,
                     agn_likelihood_space_chi2_zgt1=chisq_red_agn_likelihood_space_zgt1)
     debiased_residuals, debiased_clipping_sigma, mu_pred_median_debiased, mu_pred_std_debiased, mu_pred_std_debiased_with_scatter = r
@@ -2726,7 +2804,8 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 z_range=z_range,
                 use_alpha_lambda_term=use_alpha_lambda_term,
                 use_eta_sigma_term=use_eta_sigma_term,
-                use_redshift_log_f_term=use_redshift_log_f_term)
+                use_redshift_log_f_term=use_redshift_log_f_term,
+                only_agn=only_agn)
     biased_residuals, biased_residuals_err, _, _, _ = r
 
     hubble_chi2_mask = df_agn_pass2_plot_sample["z"].between(z_range[0], z_range[1]).to_numpy(dtype=bool)
@@ -2802,6 +2881,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
+        only_agn=only_agn,
         use_intrinsic_scatter_in_residual_sigma=False,
         agn_likelihood_space_chi2=chisq_red_agn_likelihood_space,
         agn_likelihood_space_chi2_zgt1=chisq_red_agn_likelihood_space_zgt1,
@@ -2969,6 +3049,8 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
     plot_cosmo_corner(None, flat_samples, cosmo_model, z_pivot_sna, z_pivot_agn, show=False, 
                       plot_path=plot_path, speed=speed,
                       gauss_sigma=1.5, kde_bw_scale=1.5,
+                      include_alpha_beta=True,
+                      only_agn=only_agn,
                       use_alpha_lambda_term=use_alpha_lambda_term,
                       use_eta_sigma_term=use_eta_sigma_term,
                       use_redshift_log_f_term=use_redshift_log_f_term)
@@ -3040,19 +3122,29 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
             completeness_mode="2d",
             compare_sigma_only=False,
             disable_ceph_dist_calibration=False,
+            use_planck_h0_prior=False,
+            use_planck_om_prior=False,
+            only_agn=False,
             use_alpha_lambda_term=False,
             use_eta_sigma_term=False,
-            use_redshift_log_f_term=False):
+            use_redshift_log_f_term=False,
+            early_de_guard=False):
 
     validate_completeness_mode(completeness_mode)
     speed = normalize_speed(speed)
+    if only_agn:
+        print("Running full model comparison in AGN-only mode; SNe-only comparison branch is disabled.")
+    use_planck_h0_prior = use_planck_h0_prior or disable_ceph_dist_calibration
     sigma_clip_second_pass_mode = normalize_sigma_clip_second_pass_mode(sigma_clip_second_pass_mode)
     zmin, zmax = z_range
     n_tag = "all" if N is None else f"N{N}"
     z_tag = f"z{zmin:.2f}_{zmax:.2f}".replace(".", "p")
     completeness_tag = f"_{completeness_mode}" if completeness else "_disable_completeness"
     ceph_tag = "_nocephdist_planckh0" if disable_ceph_dist_calibration else ""
-    compare_run_tag = f"model_compare_{speed}_{n_tag}_{z_tag}{completeness_tag}{ceph_tag}"
+    planck_h0_tag = "_planckh0" if use_planck_h0_prior and not disable_ceph_dist_calibration else ""
+    planck_om_tag = "_planckom" if use_planck_om_prior else ""
+    mode_tag = _fit_mode_label(False, only_agn)
+    compare_run_tag = f"model_compare_{mode_tag}_{speed}_{n_tag}_{z_tag}{completeness_tag}{ceph_tag}{planck_h0_tag}{planck_om_tag}"
     if use_alpha_lambda_term:
         compare_run_tag += "_alphaLam"
     if use_eta_sigma_term:
@@ -3072,6 +3164,7 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
         model_resume = resume_by_model[cosmo_model]
         r = run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, 
                        cosmo_model=cosmo_model, only_sna=False, 
+                       only_agn=only_agn,
                        completeness=completeness,
                        resume=model_resume, speed=speed, N=N,
                        skip_plots=skip_plots,
@@ -3087,33 +3180,47 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
                        completeness_mode=completeness_mode,
                        compare_sigma_only=compare_sigma_only,
                        disable_ceph_dist_calibration=disable_ceph_dist_calibration,
+                       use_planck_h0_prior=use_planck_h0_prior,
+                       use_planck_om_prior=use_planck_om_prior,
                        use_alpha_lambda_term=use_alpha_lambda_term,
                        use_eta_sigma_term=use_eta_sigma_term,
-                       use_redshift_log_f_term=use_redshift_log_f_term)
+                       use_redshift_log_f_term=use_redshift_log_f_term,
+                       early_de_guard=early_de_guard)
         
         samples_joint, model_labels_joint, dm_interp_joint, logZ_joint, logZerr_joint, debiased_residuals_joint, age_joint, age_err_joint = r
         #print(f"For model {cosmo_model}, universe age: {age:.3f} Gyr")
-        r = run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, 
-                       cosmo_model=cosmo_model, only_sna=True, 
-                       completeness=completeness,
-                       skip_plots=skip_plots,
-                       residuals_sigma_clip=residuals_sigma_clip,
-                       disable_sigma_clip_pass=disable_sigma_clip_pass,
-                       sigma_clip_threshold=sigma_clip_threshold,
-                       resume_stage=resume_stage,
-                       sigma_clip_second_pass_mode=sigma_clip_second_pass_mode,
-                       z_range=z_range,
-                       resume=model_resume, speed=speed, N=N,
-                       prefix=prefix, uniform_redshift_distribution=uniform_redshift_distribution,
-                       completeness_sim_file=completeness_sim_file,
-                       completeness_mode=completeness_mode,
-                       compare_sigma_only=compare_sigma_only,
-                       disable_ceph_dist_calibration=disable_ceph_dist_calibration,
-                       use_alpha_lambda_term=use_alpha_lambda_term,
-                       use_eta_sigma_term=use_eta_sigma_term,
-                       use_redshift_log_f_term=use_redshift_log_f_term)
-        samples_sna, model_labels_sna, dm_interp_sna, logZ_sna, logZerr_sna, debiased_residuals_sna, age_sna, age_sna_err = r
-        if not compare_sigma_only:
+        if only_agn:
+            samples_sna = None
+            model_labels_sna = []
+            logZ_sna = np.nan
+            logZerr_sna = np.nan
+            age_sna = np.nan
+            age_sna_err = np.nan
+        else:
+            r = run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, 
+                           cosmo_model=cosmo_model, only_sna=True, 
+                           completeness=completeness,
+                           skip_plots=skip_plots,
+                           residuals_sigma_clip=residuals_sigma_clip,
+                           disable_sigma_clip_pass=disable_sigma_clip_pass,
+                           sigma_clip_threshold=sigma_clip_threshold,
+                           resume_stage=resume_stage,
+                           sigma_clip_second_pass_mode=sigma_clip_second_pass_mode,
+                           z_range=z_range,
+                           resume=model_resume, speed=speed, N=N,
+                           prefix=prefix, uniform_redshift_distribution=uniform_redshift_distribution,
+                           completeness_sim_file=completeness_sim_file,
+                           completeness_mode=completeness_mode,
+                           compare_sigma_only=compare_sigma_only,
+                           disable_ceph_dist_calibration=disable_ceph_dist_calibration,
+                           use_planck_h0_prior=use_planck_h0_prior,
+                           use_planck_om_prior=use_planck_om_prior,
+                           use_alpha_lambda_term=use_alpha_lambda_term,
+                           use_eta_sigma_term=use_eta_sigma_term,
+                           use_redshift_log_f_term=use_redshift_log_f_term,
+                           early_de_guard=early_de_guard)
+            samples_sna, model_labels_sna, dm_interp_sna, logZ_sna, logZerr_sna, debiased_residuals_sna, age_sna, age_sna_err = r
+        if not compare_sigma_only and not only_agn:
             plot_cosmo_corner(samples_sna, samples_joint, cosmo_model, z_pivot_sna, z_pivot_agn, show=False, 
                               plot_path=compare_plot_path, speed=speed,
                               gauss_sigma=1.5, kde_bw_scale=1.5, include_alpha_beta=False,
@@ -3138,21 +3245,24 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
 
 
 
-        r_sna   = extract_cosmo_results_from_samples(
-            samples_sna,
-            cosmo_model,
-            True,
-            logZ_tuple=(logZ_sna, logZerr_sna),
-            format_for_latex=True,
-            value_fmt="{:.2f}",
-            use_alpha_lambda_term=use_alpha_lambda_term,
-            use_eta_sigma_term=use_eta_sigma_term,
-            use_redshift_log_f_term=use_redshift_log_f_term,
-        )
+        r_sna = None
+        if not only_agn:
+            r_sna = extract_cosmo_results_from_samples(
+                samples_sna,
+                cosmo_model,
+                True,
+                logZ_tuple=(logZ_sna, logZerr_sna),
+                format_for_latex=True,
+                value_fmt="{:.2f}",
+                use_alpha_lambda_term=use_alpha_lambda_term,
+                use_eta_sigma_term=use_eta_sigma_term,
+                use_redshift_log_f_term=use_redshift_log_f_term,
+            )
         r_joint   = extract_cosmo_results_from_samples(
             samples_joint,
             cosmo_model,
             False,
+            only_agn=only_agn,
             logZ_tuple=(logZ_joint, logZerr_joint),
             format_for_latex=True,
             value_fmt="{:.2f}",
@@ -3162,8 +3272,10 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
         )
 
         cosmo_model_joint_samples[cosmo_model] = samples_joint
-        cosmo_model_sna_samples[cosmo_model] = samples_sna
-        results_latex.extend([r_sna, r_joint])
+        if not only_agn:
+            cosmo_model_sna_samples[cosmo_model] = samples_sna
+            results_latex.append(r_sna)
+        results_latex.append(r_joint)
 
         cosmo_models_result_dict[cosmo_model] |= dict(N=N, z_i=z_range[0], z_f=z_range[1])
 
@@ -3174,24 +3286,27 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
             cosmo_models_result_dict[cosmo_model][f"{key}_err_lower"] = lower
             cosmo_models_result_dict[cosmo_model][f"{key}_err_upper"] = upper
 
-        for i, key in enumerate(model_labels_sna):
-            median, err, lower, upper = sym_percentile(samples_sna[:, i])
-            cosmo_models_sna_result_dict[cosmo_model][key] = median
-            cosmo_models_sna_result_dict[cosmo_model][f"{key}_err"] = err
-            cosmo_models_sna_result_dict[cosmo_model][f"{key}_err_lower"] = lower
-            cosmo_models_sna_result_dict[cosmo_model][f"{key}_err_upper"] = upper
+        if not only_agn:
+            for i, key in enumerate(model_labels_sna):
+                median, err, lower, upper = sym_percentile(samples_sna[:, i])
+                cosmo_models_sna_result_dict[cosmo_model][key] = median
+                cosmo_models_sna_result_dict[cosmo_model][f"{key}_err"] = err
+                cosmo_models_sna_result_dict[cosmo_model][f"{key}_err_lower"] = lower
+                cosmo_models_sna_result_dict[cosmo_model][f"{key}_err_upper"] = upper
 
     compare_r = compare_models_by_log_evidence_all(df_agn, cosmo_models_result_dict, write_path=f"{compare_plot_path}/")
-    is_calib_bool = np.asarray(df_pantheon['IS_CALIBRATOR'], dtype=bool)
-    sn_fit_mask = (df_pantheon['zHD'] > 0.01) | is_calib_bool
-    compare_r_sna = compare_models_by_log_evidence_all(
-        df_agn,
-        cosmo_models_sna_result_dict,
-        write_path=f"{compare_plot_path}/",
-        sample_label="SNe Ia",
-        sample_count=int(np.count_nonzero(sn_fit_mask)),
-        output_filename="compare_all_models_sn_only.txt",
-    )
+    compare_r_sna = None
+    if not only_agn:
+        is_calib_bool = np.asarray(df_pantheon['IS_CALIBRATOR'], dtype=bool)
+        sn_fit_mask = (df_pantheon['zHD'] > 0.01) | is_calib_bool
+        compare_r_sna = compare_models_by_log_evidence_all(
+            df_agn,
+            cosmo_models_sna_result_dict,
+            write_path=f"{compare_plot_path}/",
+            sample_label="SNe Ia",
+            sample_count=int(np.count_nonzero(sn_fit_mask)),
+            output_filename="compare_all_models_sn_only.txt",
+        )
     write_results_tex_variables(df_agn, df_agn_all, df_pantheon, z_range, 
                                 cosmo_model_joint_samples, cosmo_model_sna_samples, 
                                 compare_r, compare_plot_path, 
@@ -3227,6 +3342,24 @@ if __name__ == "__main__":
         help="Disable the Pantheon calibrator CEPH_DIST replacement and switch the H0 prior to the Planck 2018 interval.",
     )
     parser.add_argument(
+        "--use_planck_h0_prior",
+        action="store_true",
+        default=False,
+        help="Use the Planck 2018 top-hat H0 prior without changing Cepheid distance calibration.",
+    )
+    parser.add_argument(
+        "--use_planck_om_prior",
+        action="store_true",
+        default=False,
+        help="Use the Planck 2018 top-hat Om0 prior.",
+    )
+    parser.add_argument(
+        "--early-de-guard",
+        action="store_true",
+        default=False,
+        help="Reject Flatw0waCDM samples with w0 + wa >= 0. Disabled by default.",
+    )
+    parser.add_argument(
         "--resume",
         nargs="*",
         default=False,
@@ -3255,6 +3388,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("--N", type=int, default=None, help="Number of AGNs to run (default: all)")
     parser.add_argument("--only_sna", action="store_true", default=False, help="Run SNIa-only fit (default: False)")
+    parser.add_argument("--only_agn", action="store_true", default=False, help="Run AGN-only fit with the Supernova likelihood and M0_sn disabled (default: False)")
     parser.add_argument("--spectra_fit_csv", type=str, nargs='+', help="Path(s) to spectra fit CSV file(s)")
     parser.add_argument(
         "--spectra_sdss_run2d",
@@ -3362,6 +3496,8 @@ if __name__ == "__main__":
     for k, v in vars(args).items():
         print(f"  {k}: {v}")
     resume_by_model = normalize_resume_by_model(args.resume, args.cosmo_models)
+    if args.only_sna and args.only_agn:
+        raise ValueError("--only_sna and --only_agn cannot be used together.")
 
     if args.disable_full_covariance:
         print("Warning: Running without full covariance may lead to underestimated uncertainties.")
@@ -3369,6 +3505,11 @@ if __name__ == "__main__":
         print("Warning: Running without completeness correction may lead to biased results.")
     if args.disable_ceph_dist_calibration:
         print("Warning: Running without CEPH_DIST calibration; using the Planck H0 prior instead.")
+    effective_use_planck_h0_prior = args.use_planck_h0_prior or args.disable_ceph_dist_calibration
+    if args.use_planck_h0_prior and not args.disable_ceph_dist_calibration:
+        print("Using the Planck H0 prior with Cepheid distance calibration enabled.")
+    if args.use_planck_om_prior:
+        print("Using the Planck Om0 prior.")
     has_resume = any(bool(value) for value in resume_by_model.values())
     if has_resume:
         print("Warning: Resuming previous MCMC run.")
@@ -3436,12 +3577,16 @@ if __name__ == "__main__":
                 completeness_sim_file=args.completeness_sim_file,
                 completeness_mode=args.completeness_mode,
                 only_sna=args.only_sna,
+                only_agn=args.only_agn,
                 N=effective_N,
                 uniform_redshift_distribution=args.uniform_redshift_distribution,
                 disable_ceph_dist_calibration=args.disable_ceph_dist_calibration,
+                use_planck_h0_prior=effective_use_planck_h0_prior,
+                use_planck_om_prior=args.use_planck_om_prior,
                 use_alpha_lambda_term=args.fit_alpha_lambda_term,
                 use_eta_sigma_term=args.fit_eta_sigma_term,
                 use_redshift_log_f_term=args.fit_redshift_log_f_term,
+                early_de_guard=args.early_de_guard,
             )
     elif args.run == "single": # default
         cosmo_models_dict = {k: {} for k in args.cosmo_models}
@@ -3449,7 +3594,7 @@ if __name__ == "__main__":
             r = run_single(df_agn=df_agn, df_agn_all=df_agn_all, df_pantheon=df_pantheon, _sna_L=_sna_L, _sna_Lower=_sna_Lower, _sna_LogdetCov=_sna_LogdetCov, 
                            cosmo_model=cosmo_model,
                 completeness=not args.disable_completeness, use_full_cov=not args.disable_full_covariance, resume=resume_by_model[cosmo_model], z_range=args.z_range,
-                speed=args.speed, N=effective_N, only_sna=args.only_sna,
+                speed=args.speed, N=effective_N, only_sna=args.only_sna, only_agn=args.only_agn,
                 skip_plots=args.skip_plots, residuals_sigma_clip=args.residuals_sigma_clip,
                 disable_sigma_clip_pass=args.disable_sigma_clip_pass,
                 sigma_clip_threshold=args.sigma_clip_threshold,
@@ -3461,9 +3606,12 @@ if __name__ == "__main__":
                 completeness_mode=args.completeness_mode,
                 compare_sigma_only=args.compare_sigma_only,
                 disable_ceph_dist_calibration=args.disable_ceph_dist_calibration,
+                use_planck_h0_prior=effective_use_planck_h0_prior,
+                use_planck_om_prior=args.use_planck_om_prior,
                 use_alpha_lambda_term=args.fit_alpha_lambda_term,
                 use_eta_sigma_term=args.fit_eta_sigma_term,
                 use_redshift_log_f_term=args.fit_redshift_log_f_term,
+                early_de_guard=args.early_de_guard,
                 resume_replot_with_cuts=args.resume_replot_with_cuts)
             samples_joint, model_labels, dm_interp, logZ_joint, logZerr_joint, debiased_residuals, age, age_err = r
             cosmo_models_dict[cosmo_model]['logZ'] = logZ_joint
@@ -3475,12 +3623,15 @@ if __name__ == "__main__":
         z_tag = f"z{zmin:.2f}_{zmax:.2f}".replace(".", "p")
         completeness_tag = f"_{args.completeness_mode}" if not args.disable_completeness else "_disable_completeness"
         ceph_tag = "_nocephdist_planckh0" if args.disable_ceph_dist_calibration else ""
+        planck_h0_tag = "_planckh0" if effective_use_planck_h0_prior and not args.disable_ceph_dist_calibration else ""
+        planck_om_tag = "_planckom" if args.use_planck_om_prior else ""
         alpha_tag = "_alphaLam" if args.fit_alpha_lambda_term else ""
         eta_sigma_tag = "_etaSigma" if args.fit_eta_sigma_term else ""
         logf_tag = "_logfz" if args.fit_redshift_log_f_term else ""
+        mode_tag = _fit_mode_label(args.only_sna, args.only_agn)
         compare_path = (
-            f"plots/hubble/{args.prefix}/single_compare_{args.speed}_{n_tag}_{z_tag}"
-            f"{completeness_tag}{ceph_tag}{alpha_tag}{eta_sigma_tag}{logf_tag}"
+            f"plots/hubble/{args.prefix}/single_compare_{mode_tag}_{args.speed}_{n_tag}_{z_tag}"
+            f"{completeness_tag}{ceph_tag}{planck_h0_tag}{planck_om_tag}{alpha_tag}{eta_sigma_tag}{logf_tag}"
         )
         os.makedirs(compare_path, exist_ok=True)
         if len(cosmo_models_dict) >= 2:
@@ -3510,8 +3661,12 @@ if __name__ == "__main__":
                 completeness_mode=args.completeness_mode,
                 compare_sigma_only=args.compare_sigma_only,
                 disable_ceph_dist_calibration=args.disable_ceph_dist_calibration,
+                use_planck_h0_prior=effective_use_planck_h0_prior,
+                use_planck_om_prior=args.use_planck_om_prior,
+                only_agn=args.only_agn,
                 use_alpha_lambda_term=args.fit_alpha_lambda_term,
                 use_eta_sigma_term=args.fit_eta_sigma_term,
-                use_redshift_log_f_term=args.fit_redshift_log_f_term)
+                use_redshift_log_f_term=args.fit_redshift_log_f_term,
+                early_de_guard=args.early_de_guard)
     
     print(f"Finished running Hubble fit pipeline for {args.cosmo_models}")

@@ -77,6 +77,18 @@ def _minimal_agn_frame(n=10):
             "log_sigma_band_r_err": np.full(n, 0.04),
             "log_sigma_band_i": np.full(n, -0.85),
             "log_sigma_band_i_err": np.full(n, 0.04),
+            "log_sigma_band_z": np.full(n, -0.80),
+            "log_sigma_band_z_err": np.full(n, 0.04),
+            "log_tau_band_u_RF": np.full(n, 2.40),
+            "log_tau_band_u_RF_err": np.full(n, 0.05),
+            "log_tau_band_g_RF": np.full(n, 2.45),
+            "log_tau_band_g_RF_err": np.full(n, 0.05),
+            "log_tau_band_r_RF": np.full(n, 2.50),
+            "log_tau_band_r_RF_err": np.full(n, 0.05),
+            "log_tau_band_i_RF": np.full(n, 2.55),
+            "log_tau_band_i_RF_err": np.full(n, 0.05),
+            "log_tau_band_z_RF": np.full(n, 2.60),
+            "log_tau_band_z_RF_err": np.full(n, 0.05),
         }
     )
 
@@ -112,6 +124,7 @@ def _patch_load_agn_plotters(monkeypatch):
         "plot_sigma_bc_vs_frac_bc",
         "plot_sigma_bc_vs_redshift",
         "plot_sigma_tau_err_std_psd_comparison",
+        "plot_sigma_tau_vs_lambda_broken_pl_fit",
         "plot_sigma_uv_vs_variability_chi_sq_red_g",
         "plot_sigma_uv_vs_tau_uv_rf",
         "plot_sigma_uv_host_correction",
@@ -172,6 +185,7 @@ def test_load_agn_data_makes_precut_and_postcut_fhost_and_blr_plots(tmp_path, mo
         "plot_sigma_bc_vs_frac_bc",
         "plot_sigma_bc_vs_redshift",
         "plot_sigma_tau_err_std_psd_comparison",
+        "plot_sigma_tau_vs_lambda_broken_pl_fit",
         "plot_sigma_uv_vs_variability_chi_sq_red_g",
         "plot_sigma_uv_vs_tau_uv_rf",
         "plot_sigma_uv_host_correction",
@@ -184,6 +198,7 @@ def test_load_agn_data_makes_precut_and_postcut_fhost_and_blr_plots(tmp_path, mo
     monkeypatch.setattr(hubble_plotting, "plot_f_host_2500_vs_l2500", capture_plot)
     monkeypatch.setattr(hubble_plotting, "plot_alpha_lambda_vs_l2500", capture_plot)
     monkeypatch.setattr(hubble_plotting, "plot_blr_diagnostics_summary", capture_plot)
+    monkeypatch.setattr(hubble_plotting, "plot_sigma_tau_vs_lambda_broken_pl_fit", capture_plot)
 
     hubble_utils.load_agn_data(
         source_path,
@@ -201,6 +216,7 @@ def test_load_agn_data_makes_precut_and_postcut_fhost_and_blr_plots(tmp_path, mo
     assert "alpha_lambda_vs_l2500_postcut.pdf" in captured_by_filename
     assert "blr_precut.pdf" in captured_by_filename
     assert "blr_postcut.pdf" in captured_by_filename
+    assert "sigma_tau_vs_lambda_broken_pl_fit_postcut.pdf" in captured_by_filename
     assert captured_by_filename["f_host_2500_vs_l2500_precut.pdf"]["f_host_col"] == "f_host_2500_psf"
     assert captured_by_filename["f_host_2500_vs_l2500_postcut.pdf"]["f_host_col"] == "f_host_2500_psf"
 
@@ -305,6 +321,7 @@ def test_load_agn_data_run2d_filter_v5_13_2_and_drop_missing(tmp_path, monkeypat
     df = _minimal_agn_frame(n=5)
     df["object_id"] = ["a", "b", "c", "d", "e"]
     df["SDSS_RUN2D"] = ["v5_13_2", "26", "", None, "v5_13_2"]
+    df["frac_host_psf_2500"] = np.full(len(df), 5e-4)
 
     monkeypatch.setattr(hubble_utils, "read_quasars_from_hdf5_flat", lambda *_args, **_kwargs: df.copy())
     monkeypatch.setattr(hubble_utils, "populate_xray", lambda frame: frame)
@@ -329,6 +346,7 @@ def test_load_agn_data_run2d_filter_26(tmp_path, monkeypatch):
     df = _minimal_agn_frame(n=4)
     df["object_id"] = ["a", "b", "c", "d"]
     df["SDSS_RUN2D"] = ["v5_13_2", "26", "26", "v5_13_2"]
+    df["frac_host_psf_2500"] = np.full(len(df), 5e-4)
 
     monkeypatch.setattr(hubble_utils, "read_quasars_from_hdf5_flat", lambda *_args, **_kwargs: df.copy())
     monkeypatch.setattr(hubble_utils, "populate_xray", lambda frame: frame)

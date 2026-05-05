@@ -21,6 +21,7 @@ from astropy.timeseries import LombScargle
 prefix = os.environ.get('PREFIX', "test")
 suffix = os.environ.get('SUFFIX', "test")
 
+from qvc.light_curve.band_colors import BAND_COLORS
 from qvc.light_curve.multiband_fit_utils import log_single_pl
 
 import logging
@@ -40,12 +41,7 @@ lambda_pivot = {
     'y': 9633,  # PS1 y-band
 }
 
-colors = {'u': 'tab:blue',
-          'g': 'tab:green', 
-          'r': 'tab:orange', 
-          'i': 'tab:red', 
-          'z': 'tab:brown', 
-          'y': 'tab:gray'}
+colors = BAND_COLORS.copy()
 
 SF_LAG_PLOT_MIN_RF = 10.0
 SF_LAG_PLOT_MAX_RF = 1e4

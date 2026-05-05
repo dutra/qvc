@@ -166,7 +166,10 @@ def download_from_http(url, filename=None):
     with urllib.request.urlopen(url) as response:
         resolved_name = filename or infer_filename_from_response(response) or infer_filename_from_url(url)
         print(f"{Fore.BLUE}GET  {Fore.RESET} Fetching via HTTP: {resolved_name}...")
-        content_length = response.headers.get("Content-Length")
+        headers = getattr(response, "headers", None)
+        if headers is None:
+            headers = response.info()
+        content_length = headers.get("Content-Length")
         total_bytes = None
         if content_length:
             try:

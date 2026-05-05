@@ -7,17 +7,12 @@ from matplotlib.lines import Line2D
 from matplotlib.legend_handler import HandlerBase
 from matplotlib.ticker import AutoMinorLocator, MultipleLocator
 
+from qvc.light_curve.band_colors import BAND_COLORS
+
 plt.style.use(Path(__file__).with_name("style.mplstyle"))
 
 
-COLORS = {
-    "u": "tab:blue",
-    "g": "tab:green",
-    "r": "tab:orange",
-    "i": "tab:red",
-    "z": "tab:brown",
-    "y": "tab:gray",
-}
+COLORS = BAND_COLORS.copy()
 
 
 class _ErrorbarLegendHandle:

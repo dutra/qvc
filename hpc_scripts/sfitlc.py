@@ -19,7 +19,7 @@ from qvc.light_curve.multiband_generate_lc import resolve_macleod_object_ids, re
 
 SCRIPT_DIR = REPO_ROOT / "hpc_scripts" / "jobs" / "multibandfit"
 LOG_ROOT = REPO_ROOT / "hpc_scripts" / "logs" / "multibandfit"
-DEFAULT_SPECTRA_FIT_CSV = "results/data/jaxqsofit_apr5d_chisq20_mar31a_good.csv"
+DEFAULT_SPECTRA_FIT_CSV = "results/data/jaxqsofit/jaxqsofit_apr20c_chisq20_apr18h_all.csv"
 MAX_ARRAY_SIZE = 10_000
 
 
@@ -39,11 +39,11 @@ def parse_args():
     parser.add_argument("--skip", type=int, default=0, help="Number of chunks to skip.")
     parser.add_argument("--N", type=int, default=1, help="Objects per array task.")
     parser.add_argument("--nwarm", type=int, default=500, help="Warmup steps.")
-    parser.add_argument("--nsamp", type=int, default=200, help="Posterior samples per chain.")
+    parser.add_argument("--nsamp", type=int, default=250, help="Posterior samples per chain.")
     parser.add_argument("--ncores", type=int, default=1, help="CPUs per task.")
     parser.add_argument("--max-tree-depth", type=int, default=12, help="NUTS max tree depth.")
     parser.add_argument("--partition", default="day_amd", help="SLURM partition.")
-    parser.add_argument("--time", default="2:00:00", help="SLURM time limit.")
+    parser.add_argument("--time", default="1:00:00", help="SLURM time limit.")
     parser.add_argument("--mem", default="6G", help="SLURM memory request.")
     parser.add_argument("--env", default="jaxcpu2", help="Conda environment to activate inside submitted jobs.")
     parser.add_argument(
@@ -82,7 +82,8 @@ def make_run_stamp() -> str:
 
 
 def load_chisq_ids(chisq_csv: str) -> list[str]:
-    df = pd.read_csv(REPO_ROOT / chisq_csv)
+    #df = pd.read_csv(REPO_ROOT / chisq_csv)
+    df = pd.read_csv(REPO_ROOT / "results/data/df_agn_after_cuts.csv")
     if "object_id" not in df.columns:
         raise KeyError(f"{chisq_csv} is missing an 'object_id' column.")
     return df["object_id"].astype(str).tolist()
@@ -205,6 +206,9 @@ def build_sbatch_script(
         "--disable_correlation_plot",
         "--disable_histogram_plot",
         "--disable_corner_plot",
+        "--plot_ls_broken_pl",
+        "--disable_color_magnitude_plot",
+        "--disable_recovery_plot",
         "--disable_sigma_tau_lambda_plot",
         "--disable_recovery_plot",
         "--fit_method",
@@ -344,7 +348,7 @@ def build_merge_sbatch_script(
 #SBATCH --output={log_pattern}
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=1
-#SBATCH --mem={args.mem}
+#SBATCH --mem=40G
 #SBATCH --partition={args.partition}
 #SBATCH --time={args.time}
 {build_mail_lines()}\

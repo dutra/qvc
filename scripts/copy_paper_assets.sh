@@ -170,7 +170,7 @@ declare -a COPIED=()
 declare -a MISSING=()
 
 FIDUCIAL_RUN_DIR="Flatw0waCDM_joint_${SPEED}_all_z0p44_3p16_2d"
-FIDUCIAL_MODEL_COMPARE_DIR="model_compare_${SPEED}_all_z0p44_3p16_2d"
+FIDUCIAL_MODEL_COMPARE_DIR="model_compare_joint_${SPEED}_all_z0p44_3p16_2d"
 RESTRICTED_MODEL_COMPARE_DIR="model_compare_${SPEED}_all_z1p00_3p16_2d"
 
 copy_hubble_assets() {
@@ -185,6 +185,7 @@ copy_hubble_assets() {
   copy_from_dir "$FIDUCIAL_DIR" "$FIDUCIAL_RUN_DIR/delta_alphaOX_residuals.pdf" "hubble" "dalphaOx_int_residuals.pdf"
   copy_from_dir "$FIDUCIAL_DIR" "$FIDUCIAL_RUN_DIR/completeness/completeness_map.pdf" "hubble" "completeness_map.pdf"
   copy_from_dir "$FIDUCIAL_DIR" "diagnostics/spectral_fraction_vs_redshift_cuts.pdf" "hubble" "spectral_fraction_vs_redshift_cuts.pdf"
+  copy_from_dir "$FIDUCIAL_DIR" "diagnostics/sigma_tau_vs_lambda_broken_pl_fit_postcut.pdf" "hubble" "sigma_tau_vs_lambda_broken_pl_fit_postcut.pdf"
   copy_from_dir "$FIDUCIAL_DIR" "$FIDUCIAL_MODEL_COMPARE_DIR/cosmo_corner_Flatw0waCDM_alphabeta.pdf" "hubble" "cosmo_corner_Flatw0waCDM_alphabeta.pdf"
   copy_from_dir "$FIDUCIAL_DIR" "$FIDUCIAL_MODEL_COMPARE_DIR/cosmo_corner_FlatwCDM_alphabeta.pdf" "hubble" "cosmo_corner_FlatwCDM_alphabeta.pdf"
   copy_from_dir "$FIDUCIAL_DIR" "$FIDUCIAL_MODEL_COMPARE_DIR/cosmo_corner_FlatLambdaCDM_alphabeta.pdf" "hubble" "cosmo_corner_FlatLambdaCDM_alphabeta.pdf"
