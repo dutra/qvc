@@ -2670,7 +2670,8 @@ def plot_bpl_psd_vs_uv_variability(
     show=False,
     filename="bpl_psd_vs_uv_variability.pdf",
     max_log_tau_bpl_err=0.5,
-    min_log_chi_sq_red_g=3.0,
+    min_log_chi_sq_red_g=None,
+    z_range=(0.44, 3.16),
 ):
     """Compare the displayed LS bending-power-law PSD fit against the main UV fit."""
     required = {"log_sigma_uv", "log_sigma_ls", "log_tau_ls"}
@@ -2743,28 +2744,7 @@ def plot_bpl_psd_vs_uv_variability(
         & (log_tau_bpl_err <= float(max_log_tau_bpl_err))
     )
 
-    variability_chi_sq_red_g = (
-        pd.to_numeric(df["variability_chi_sq_red_g"], errors="coerce").to_numpy(dtype=float)
-        if "variability_chi_sq_red_g" in df.columns else np.full(len(df), np.nan)
-    )
-    log_variability_chi_sq_red_g = np.full(len(df), np.nan, dtype=float)
-    positive_chi_sq = np.isfinite(variability_chi_sq_red_g) & (variability_chi_sq_red_g > 0.0)
-    log_variability_chi_sq_red_g[positive_chi_sq] = np.log10(variability_chi_sq_red_g[positive_chi_sq])
-    high_chi_sq_red = log_variability_chi_sq_red_g > float(min_log_chi_sq_red_g)
-
-    finite_color = high_chi_sq_red & np.isfinite(log_variability_chi_sq_red_g)
-    color_norm = None
-    if np.any(finite_color):
-        cmin = float(np.nanmin(log_variability_chi_sq_red_g[finite_color]))
-        cmax = float(np.nanmax(log_variability_chi_sq_red_g[finite_color]))
-        if np.isclose(cmin, cmax):
-            cmin -= 0.5
-            cmax += 0.5
-        color_norm = colors.Normalize(vmin=cmin, vmax=cmax)
-    cmap = mpl.colormaps["viridis"]
-
-    fig, axes = plt.subplots(1, 3, figsize=(18.5, 5.8))
-    last_scatter = None
+    fig, axes = plt.subplots(1, 2, figsize=(11.2, 5.2))
 
     def _linear_error_from_log(value, log_value, log_err):
         value = np.asarray(value, dtype=float)
@@ -2790,108 +2770,111 @@ def plot_bpl_psd_vs_uv_variability(
             np.power(10.0, log_sigma_bpl_comparable),
             _linear_error_from_log(np.power(10.0, log_sigma_uv), log_sigma_uv, log_sigma_uv_err),
             _linear_error_from_log(np.power(10.0, log_sigma_bpl_comparable), log_sigma_bpl_comparable, log_sigma_bpl_err),
-            r"$\sigma_{\rm UV}$ [mag]",
-            r"$\sigma_{\rm LS,BPL}$ [mag]",
-            rf"No valid BPL sigma values with $\log_{{10}}\chi^2_{{\rm red,g}}>{min_log_chi_sq_red_g:.1f}$",
-            psd_valid & high_chi_sq_red,
+            r"$\sigma_{\rm UV}$ (mag)",
+            r"$\sigma_{\rm LS}$ (mag)",
+            "No valid BPL sigma values",
+            psd_valid & (np.power(10.0, log_sigma_bpl_comparable) > 5e-2),
+            (2e-2, 2e0),
         ),
         (
             axes[1],
-            np.power(10.0, log_tau_uv_obs),
-            np.power(10.0, log_tau_bpl_obs),
-            _linear_error_from_log(np.power(10.0, log_tau_uv_obs), log_tau_uv_obs, log_tau_uv_obs_err),
-            _linear_error_from_log(np.power(10.0, log_tau_bpl_obs), log_tau_bpl_obs, log_tau_bpl_err),
-            r"$\tau_{\rm UV,obs}$ [days]",
-            r"$\tau_{\rm LS,BPL,obs}$ [days]",
-            rf"No well-constrained observed-frame BPL tau values with $\log_{{10}}\chi^2_{{\rm red,g}}>{min_log_chi_sq_red_g:.1f}$",
-            tau_bpl_well_constrained & high_chi_sq_red,
-        ),
-        (
-            axes[2],
             np.power(10.0, log_tau_uv),
             np.power(10.0, log_tau_bpl),
             _linear_error_from_log(np.power(10.0, log_tau_uv), log_tau_uv, log_tau_uv_err),
             _linear_error_from_log(np.power(10.0, log_tau_bpl), log_tau_bpl, log_tau_bpl_err),
-            r"$\tau_{\rm UV,RF}$ [days]",
-            r"$\tau_{\rm LS,BPL,RF}$ [days]",
-            rf"No well-constrained BPL tau values with $\log_{{10}}\chi^2_{{\rm red,g}}>{min_log_chi_sq_red_g:.1f}$",
-            tau_bpl_well_constrained & high_chi_sq_red,
+            r"$\tau_{\rm UV,RF}$ (days)",
+            r"$\tau_{\rm LS,RF}$ (days)",
+            "No well-constrained BPL tau values",
+            tau_bpl_well_constrained & (np.power(10.0, log_sigma_bpl_comparable) > 5e-2),
+            None,
         ),
     ]
-    for ax, x, y, xerr, yerr, xlabel, ylabel, empty_label, panel_filter in panels:
+    for ax, x, y, xerr, yerr, xlabel, ylabel, empty_label, panel_filter, fixed_axis_limits in panels:
         finite_mask = np.isfinite(x) & np.isfinite(y) & (x > 0.0) & (y > 0.0) & panel_filter
-        color_mask = finite_mask & np.isfinite(log_variability_chi_sq_red_g)
         if np.any(finite_mask):
             err_mask = finite_mask & np.all(np.isfinite(xerr), axis=0) & np.all(np.isfinite(yerr), axis=0)
-            if np.any(err_mask):
-                ax.errorbar(
-                    x[err_mask],
-                    y[err_mask],
-                    xerr=xerr[:, err_mask],
-                    yerr=yerr[:, err_mask],
-                    fmt="none",
-                    ecolor="0.70",
-                    elinewidth=0.45,
-                    alpha=0.20,
-                    capsize=0,
-                    rasterized=True,
-                    zorder=1,
-                )
-            if np.any(finite_mask & ~color_mask):
-                ax.scatter(
-                    x[finite_mask & ~color_mask],
-                    y[finite_mask & ~color_mask],
-                    color="0.75",
-                    s=10,
-                    alpha=0.35,
-                    linewidths=0,
-                    rasterized=True,
-                    zorder=3,
-                )
-            if np.any(color_mask):
-                last_scatter = ax.scatter(
-                    x[color_mask],
-                    y[color_mask],
-                    c=log_variability_chi_sq_red_g[color_mask],
-                    cmap=cmap,
-                    norm=color_norm,
-                    s=10,
-                    alpha=0.65,
-                    linewidths=0,
-                    rasterized=True,
-                    zorder=4,
-                )
+            in_z = finite_mask & np.isfinite(z) & (z >= z_range[0]) & (z <= z_range[1])
+            out_z = finite_mask & ~in_z
+            for mask, marker, label in ((in_z, "o", "AGN"), (out_z, "D", None)):
+                if not np.any(mask):
+                    continue
+                marker_err = mask & err_mask
+                if np.any(marker_err):
+                    ax.errorbar(
+                        x[marker_err],
+                        y[marker_err],
+                        xerr=xerr[:, marker_err],
+                        yerr=yerr[:, marker_err],
+                        fmt=marker,
+                        linestyle="none",
+                        markersize=3,
+                        mfc=(0, 0, 0, 0.4),
+                        mec="none",
+                        ecolor=(0.2, 0.2, 0.2, 0.1),
+                        elinewidth=0.8,
+                        capsize=2,
+                        capthick=0.8,
+                        rasterized=True,
+                        zorder=1,
+                        label=label,
+                    )
+                marker_noerr = mask & ~err_mask
+                if np.any(marker_noerr):
+                    ax.scatter(
+                        x[marker_noerr],
+                        y[marker_noerr],
+                        s=10 if marker == "o" else 12,
+                        marker=marker,
+                        c="black",
+                        alpha=0.4,
+                        linewidths=0,
+                        rasterized=True,
+                        zorder=1,
+                        label=label if not np.any(marker_err) else None,
+                    )
             lo = min(np.nanmin(x[finite_mask]), np.nanmin(y[finite_mask]))
             hi = max(np.nanmax(x[finite_mask]), np.nanmax(y[finite_mask]))
-            if np.isfinite(lo) and np.isfinite(hi) and hi > lo:
-                ax.plot([lo, hi], [lo, hi], color="k", ls="--", lw=1.0, alpha=0.8)
-            corr_mask = finite_mask & np.isfinite(np.log10(x)) & np.isfinite(np.log10(y))
-            n_corr = int(np.count_nonzero(corr_mask))
-            if n_corr >= 3:
-                rho = float(np.corrcoef(np.log10(x[corr_mask]), np.log10(y[corr_mask]))[0, 1])
-                annotation = rf"$N={n_corr}$" "\n" rf"$r={rho:.2f}$"
-            else:
-                annotation = rf"$N={n_corr}$"
-            ax.text(
-                0.04,
-                0.96,
-                annotation,
-                ha="left",
-                va="top",
-                transform=ax.transAxes,
-                fontsize=10,
-                bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="0.8", alpha=0.8),
-            )
+            log_delta = np.log10(y[finite_mask]) - np.log10(x[finite_mask])
+            log_delta = log_delta[np.isfinite(log_delta)]
+            if log_delta.size:
+                bias = float(np.mean(log_delta))
+                sigma = float(np.std(log_delta))
+                ax.text(
+                    0.97,
+                    0.03,
+                    (
+                        f"N = {log_delta.size}\n"
+                        f"bias = {bias:.2f} dex\n"
+                        f"$\\sigma$ = {sigma:.2f} dex"
+                    ),
+                    transform=ax.transAxes,
+                    ha="right",
+                    va="bottom",
+                    fontsize=10.5,
+                    bbox=dict(boxstyle="round,pad=0.25", facecolor="white", edgecolor="0.6", alpha=0.9),
+                    zorder=20,
+                )
         else:
             ax.text(0.5, 0.5, empty_label, ha="center", va="center", transform=ax.transAxes)
         ax.set_xscale("log")
         ax.set_yscale("log")
+        if np.any(finite_mask) and np.isfinite(lo) and np.isfinite(hi) and hi > lo:
+            if fixed_axis_limits is not None:
+                axis_limits = fixed_axis_limits
+            else:
+                log_lo = np.log10(lo)
+                log_hi = np.log10(hi)
+                pad = 0.12 * max(log_hi - log_lo, 1e-6)
+                axis_limits = (10.0 ** (log_lo - pad), 10.0 ** (log_hi + pad))
+            ax.set_xlim(*axis_limits)
+            ax.set_ylim(*axis_limits)
+            ax.plot(axis_limits, axis_limits, color="m", ls="-", lw=2.2, alpha=0.95, zorder=0)
+        ax.tick_params(axis="x", which="both", pad=8)
         ax.set_xlabel(xlabel)
         ax.set_ylabel(ylabel)
-
-    if last_scatter is not None and last_scatter.get_array() is not None:
-        cbar = fig.colorbar(last_scatter, ax=axes.tolist())
-        cbar.set_label(r"$\log_{10}(\chi^2_{\rm red,g})$")
+        handles, labels = ax.get_legend_handles_labels()
+        if handles:
+            ax.legend(frameon=False, loc="best")
 
     diagnostics_path = os.path.join(plot_path or "plots/hubble", "diagnostics")
     return _save_figure(
