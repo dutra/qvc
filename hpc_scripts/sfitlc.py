@@ -19,7 +19,7 @@ from qvc.light_curve.multiband_generate_lc import resolve_macleod_object_ids, re
 
 SCRIPT_DIR = REPO_ROOT / "hpc_scripts" / "jobs" / "multibandfit"
 LOG_ROOT = REPO_ROOT / "hpc_scripts" / "logs" / "multibandfit"
-DEFAULT_SPECTRA_FIT_CSV = "results/data/jaxqsofit/jaxqsofit_apr20c_chisq20_apr18h_all.csv"
+DEFAULT_SPECTRA_FIT_CSV = "results/data/jaxqsofit/jaxqsofit_apr20c_chisq20_apr18h_all_run2d.csv"
 MAX_ARRAY_SIZE = 10_000
 
 
@@ -82,8 +82,7 @@ def make_run_stamp() -> str:
 
 
 def load_chisq_ids(chisq_csv: str) -> list[str]:
-    #df = pd.read_csv(REPO_ROOT / chisq_csv)
-    df = pd.read_csv(REPO_ROOT / "results/data/df_agn_after_cuts.csv")
+    df = pd.read_csv(REPO_ROOT / chisq_csv)
     if "object_id" not in df.columns:
         raise KeyError(f"{chisq_csv} is missing an 'object_id' column.")
     return df["object_id"].astype(str).tolist()
@@ -206,7 +205,7 @@ def build_sbatch_script(
         "--disable_correlation_plot",
         "--disable_histogram_plot",
         "--disable_corner_plot",
-        "--plot_ls_broken_pl",
+        #"--plot_ls_broken_pl",
         "--disable_color_magnitude_plot",
         "--disable_recovery_plot",
         "--disable_sigma_tau_lambda_plot",
@@ -483,7 +482,7 @@ def main():
     git_hash = get_git_short_hash()
     run_stamp = make_run_stamp()
     chisq_csv = args.chisq_csv
-    spectra_fit_csv = chisq_csv if chisq_csv is not None else DEFAULT_SPECTRA_FIT_CSV
+    spectra_fit_csv = DEFAULT_SPECTRA_FIT_CSV
 
     for job in build_job_configs(args.fit, chisq_csv):
         total_objects = len(job.object_ids)
