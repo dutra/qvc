@@ -1,10 +1,12 @@
 import sys
 from pathlib import Path
 import re
+import os
 
 import h5py
 import numpy as np
 import pandas as pd
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -14,6 +16,12 @@ if str(SRC) not in sys.path:
 
 from qvc.hubble.hubble_utils import read_quasars_from_hdf5_flat
 from qvc.light_curve import multiband_fit_utils as mfu
+
+
+def _write_sample_hdf5(path, value):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with h5py.File(path, "w") as hdf:
+        hdf.create_dataset("theta", data=np.asarray([value], dtype=float))
 
 
 def _mock_quasars():
@@ -50,6 +58,62 @@ def _mock_quasars():
             },
         },
     ]
+
+
+def test_load_obj_samples_from_hdf5_ignores_current_suffix(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    mfu.prefix = "sample_resume"
+    mfu.suffix = "job1"
+
+    sample_path = tmp_path / "results" / "samples" / "sample_resume" / "1424946_job21413.h5"
+    _write_sample_hdf5(sample_path, 21413.0)
+
+    samples = mfu.load_obj_samples_from_hdf5("1424946")
+
+    assert np.allclose(samples["theta"], [21413.0])
+
+
+def test_load_obj_samples_from_hdf5_uses_newest_object_id_match(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    mfu.prefix = "sample_resume_newest"
+    mfu.suffix = "job1"
+
+    sample_dir = tmp_path / "results" / "samples" / "sample_resume_newest"
+    old_path = sample_dir / "1424946_job1.h5"
+    new_path = sample_dir / "1424946_job21413.h5"
+    _write_sample_hdf5(old_path, 1.0)
+    _write_sample_hdf5(new_path, 21413.0)
+    os.utime(old_path, (1000, 1000))
+    os.utime(new_path, (2000, 2000))
+
+    samples = mfu.load_obj_samples_from_hdf5("1424946")
+
+    assert np.allclose(samples["theta"], [21413.0])
+
+
+def test_load_obj_samples_from_hdf5_missing_object_id_match(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    mfu.prefix = "sample_resume_missing"
+    mfu.suffix = "job1"
+
+    sample_path = tmp_path / "results" / "samples" / "sample_resume_missing" / "14249460_job1.h5"
+    _write_sample_hdf5(sample_path, 10.0)
+
+    with pytest.raises(FileNotFoundError, match="object_id='1424946'"):
+        mfu.load_obj_samples_from_hdf5("1424946")
+
+
+def test_load_obj_samples_from_hdf5_explicit_file_path_is_exact(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    mfu.prefix = "sample_resume_exact"
+    mfu.suffix = "job1"
+
+    exact_path = tmp_path / "custom" / "not_the_object_suffix.h5"
+    _write_sample_hdf5(exact_path, 99.0)
+
+    samples = mfu.load_obj_samples_from_hdf5("1424946", file_path=str(exact_path))
+
+    assert np.allclose(samples["theta"], [99.0])
 
 
 def test_flat_hdf5_roundtrip_and_schema(tmp_path, monkeypatch):

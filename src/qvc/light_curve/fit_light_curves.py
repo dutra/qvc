@@ -4682,6 +4682,14 @@ def build_mag_fluxmix_fast_display_model(obj_dict, lam_rf, samples_flat):
     )
 
 
+def apply_resume_sample_save_policy(args):
+    """Disable per-object posterior sample writes when reusing saved samples."""
+    if getattr(args, "resume", False) and getattr(args, "save_sample_file", False):
+        logging.info("--resume set; disabling per-object posterior sample file saving.")
+        args.save_sample_file = False
+    return args
+
+
 def run_two_stage_fluxmix_fast_inference(
     obj_dict,
     lam_rf,
@@ -4942,6 +4950,7 @@ def main():
         help="Subtract spectra-derived constant contaminating flux in PSF light curves before GP fitting.",
     )
     args = parser.parse_args()
+    args = apply_resume_sample_save_policy(args)
     print("Args:", args)
 
     if args.load_stone_lcs:

@@ -430,6 +430,60 @@ def test_plot_spectral_fraction_vs_redshift_cut_overlay_keeps_thresholds_and_ski
     assert not any(_has_cut_errorbar_overlay(ax) for ax in captured["axes"])
 
 
+def test_plot_spectral_fraction_vs_redshift_uses_per_panel_redshift_limits(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("MPLCONFIGDIR", str(tmp_path / "mplconfig"))
+
+    captured = {}
+    original_save_figure = hubble_plotting._save_figure
+
+    def _capture_save_figure(fig, path, **kwargs):
+        captured["axes"] = list(fig.axes)
+        captured["path"] = path
+        return original_save_figure(fig, path, **kwargs)
+
+    monkeypatch.setattr(hubble_plotting, "_save_figure", _capture_save_figure)
+
+    df = pd.DataFrame(
+        {
+            "z": np.array([0.5, 0.7, 1.1, 1.5, 2.0, 2.5]),
+            "f_bc_3000": np.array([0.04, 0.08, 0.12, np.nan, np.nan, np.nan]),
+            "f_fe_uv_3000": np.array([np.nan, np.nan, 0.11, 0.15, 0.19, np.nan]),
+            "f_host_2500": np.array([np.nan, np.nan, np.nan, np.nan, 0.16, 0.20]),
+        }
+    )
+    df_cut_sources = pd.DataFrame(
+        {
+            "z": np.array([0.2, 3.4]),
+            "f_bc_3000": np.array([0.03, np.nan]),
+            "f_fe_uv_3000": np.array([np.nan, 0.24]),
+            "f_host_2500": np.array([np.nan, np.nan]),
+        }
+    )
+
+    out = hubble_plotting.plot_spectral_fraction_vs_redshift(
+        df,
+        plot_path=str(tmp_path / "figures"),
+        show=False,
+        df_cut_sources=df_cut_sources,
+    )
+
+    assert out is not None
+    assert os.path.exists(out)
+    assert captured["path"].endswith("spectral_fraction_vs_redshift.pdf")
+    assert len(captured["axes"]) == 3
+
+    xlims = [ax.get_xlim() for ax in captured["axes"]]
+    assert len({tuple(np.round(xlim, 6)) for xlim in xlims}) == 3
+    assert xlims[0][0] < 0.2 < xlims[0][1]
+    assert xlims[1][0] < 3.4 < xlims[1][1]
+    assert xlims[2][0] < 2.0 < xlims[2][1]
+    assert xlims[2][0] < 2.5 < xlims[2][1]
+    assert xlims[2][1] < 3.4
+
+
 def test_plot_spectral_fraction_vs_redshift_skips_log_invalid_errorbars(
     tmp_path,
     monkeypatch,
@@ -687,6 +741,18 @@ def test_plot_bc_lag_vs_l2500_writes_pdf(tmp_path, monkeypatch):
 
 def test_plot_residuals_vs_alphaOX_writes_both_pdfs(tmp_path, monkeypatch):
     monkeypatch.setenv("MPLCONFIGDIR", str(tmp_path / "mplconfig"))
+    saved_grid_visibility = {}
+    original_save_figure = hubble_plotting._save_figure
+
+    def capture_grid_visibility(fig, path, *args, **kwargs):
+        saved_grid_visibility[os.path.basename(path)] = any(
+            line.get_visible()
+            for ax in fig.axes
+            for line in (*ax.get_xgridlines(), *ax.get_ygridlines())
+        )
+        return original_save_figure(fig, path, *args, **kwargs)
+
+    monkeypatch.setattr(hubble_plotting, "_save_figure", capture_grid_visibility)
 
     df = pd.DataFrame(
         {
@@ -718,6 +784,9 @@ def test_plot_residuals_vs_alphaOX_writes_both_pdfs(tmp_path, monkeypatch):
     assert delta_path.endswith("delta_alphaOX_residuals.pdf")
     assert alpha_path.endswith("alphaOX_residuals.pdf")
     assert alpha_lambda_path.endswith("alpha_lambda_residuals.pdf")
+    assert saved_grid_visibility["delta_alphaOX_residuals.pdf"] is False
+    assert saved_grid_visibility["alphaOX_residuals.pdf"] is False
+    assert saved_grid_visibility["alpha_lambda_residuals.pdf"] is False
 
 
 def test_plot_blr_line_lags_vs_l2500_fiducial_writes_pdf(tmp_path, monkeypatch):

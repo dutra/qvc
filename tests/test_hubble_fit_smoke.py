@@ -838,7 +838,15 @@ def test_plot_hubble_residual_chi2_annotation_includes_high_z(monkeypatch, tmp_p
 
     def capture_text(self, x, y, s, *args, **kwargs):
         if r"\chi^2_\nu" in str(s):
-            text_calls.append(str(s))
+            text_calls.append(
+                {
+                    "x": x,
+                    "y": y,
+                    "text": str(s),
+                    "ha": kwargs.get("ha"),
+                    "va": kwargs.get("va"),
+                }
+            )
         return original_text(self, x, y, s, *args, **kwargs)
 
     monkeypatch.setattr(Axes, "text", capture_text)
@@ -860,12 +868,16 @@ def test_plot_hubble_residual_chi2_annotation_includes_high_z(monkeypatch, tmp_p
         residuals_csv_filename=None,
     )
 
-    assert any(
-        r"$\chi^2_\nu = 1.23$" in text
-        and rf"$\chi^2_\nu(1<z<3.16) = 2.34$" in text
-        and "\n" in text
-        for text in text_calls
+    annotation = next(
+        call for call in text_calls
+        if r"$\chi^2_\nu(0.44<z<3.16) = 1.23$" in call["text"]
     )
+    assert rf"$\chi^2_\nu(1<z<3.16) = 2.34$" in annotation["text"]
+    assert "\n" in annotation["text"]
+    assert annotation["x"] == 0.02
+    assert annotation["y"] == 0.04
+    assert annotation["ha"] == "left"
+    assert annotation["va"] == "bottom"
 
     text_calls.clear()
     hubble_plotting.plot_hubble(
@@ -881,7 +893,8 @@ def test_plot_hubble_residual_chi2_annotation_includes_high_z(monkeypatch, tmp_p
         residuals_csv_filename=None,
     )
 
-    chi2_text = next(text for text in text_calls if r"\chi^2_\nu" in text)
+    chi2_text = next(call["text"] for call in text_calls if r"\chi^2_\nu" in call["text"])
+    assert r"$\chi^2_\nu(0.44<z<0.9)" in chi2_text
     assert "(1<z<" not in chi2_text
 
 

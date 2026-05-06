@@ -313,6 +313,7 @@ def plot_sigma_tau_identity_grid(
     tau_limits=None,
     sigma_lims=None,
     tau_lims=None,
+    layout="vertical",
 ):
     label_fontsize = 14
     tick_fontsize = 12
@@ -333,16 +334,30 @@ def plot_sigma_tau_identity_grid(
         **(style or {}),
     }
 
+    layout = str(layout).lower()
+    if layout not in {"vertical", "horizontal"}:
+        raise ValueError("layout must be either 'vertical' or 'horizontal'.")
+
     ncols = len(bands)
-    fig, axes = plt.subplots(
-        2,
-        ncols,
-        figsize=figsize,
-        sharex="row",
-        sharey="row",
-        constrained_layout=True,
-    )
-    fig.set_constrained_layout_pads(w_pad=0.0, h_pad=0.01, wspace=0.0, hspace=0.05)
+    if layout == "vertical":
+        fig, axes = plt.subplots(
+            2,
+            ncols,
+            figsize=figsize,
+            sharex="row",
+            sharey="row",
+            constrained_layout=True,
+        )
+        fig.set_constrained_layout_pads(w_pad=0.0, h_pad=0.01, wspace=0.0, hspace=0.05)
+    else:
+        fig, axes = plt.subplots(
+            ncols,
+            2,
+            figsize=figsize,
+            constrained_layout=True,
+            squeeze=False,
+        )
+        fig.set_constrained_layout_pads(w_pad=0.0, h_pad=0.01, wspace=0.05, hspace=0.0)
     axes = np.asarray(axes, dtype=object)
     if axes.ndim == 1:
         if ncols == 1:
@@ -430,7 +445,7 @@ def plot_sigma_tau_identity_grid(
 
     for row_index, (keydict, row_lims) in enumerate(row_configs):
         for col, band in enumerate(bands):
-            ax = axes[row_index, col]
+            ax = axes[row_index, col] if layout == "vertical" else axes[col, row_index]
             df_band = data.get(band) if isinstance(data, dict) else data
             if df_band is None:
                 _style_axis(ax)
@@ -516,12 +531,16 @@ def plot_sigma_tau_identity_grid(
                 fontsize=metric_fontsize,
             )
 
-    _set_row_ticks(axes[0])
-    _set_row_ticks(axes[1])
+    if layout == "vertical":
+        _set_row_ticks(axes[0])
+        _set_row_ticks(axes[1])
 
-    for i in range(2):
-        for j in range(1, ncols):
-            axes[i, j].tick_params(labelleft=False)
+        for i in range(2):
+            for j in range(1, ncols):
+                axes[i, j].tick_params(labelleft=False)
+    else:
+        for ax in axes.ravel():
+            _set_row_ticks([ax])
 
     if output_path is not None:
         fig.savefig(output_path, dpi=600, bbox_inches="tight")

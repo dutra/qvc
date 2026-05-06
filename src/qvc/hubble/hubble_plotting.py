@@ -5831,20 +5831,22 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
             chi2_text_value_zgt1 = agn_likelihood_space_chi2_zgt1
 
         if np.isfinite(chi2_text_value):
-            chi2_annotation_lines = [rf"$\chi^2_\nu = {chi2_text_value:.2f}$"]
+            chi2_annotation_lines = [
+                rf"$\chi^2_\nu({z_range[0]:.2f}<z<{z_range[1]:.2f}) = {chi2_text_value:.2f}$"
+            ]
             if np.isfinite(chi2_text_value_zgt1):
                 chi2_annotation_lines.append(
-                    rf"$\chi^2_\nu(1<z<{z_range[1]:g}) = {chi2_text_value_zgt1:.2f}$"
+                    rf"$\chi^2_\nu(1.00<z<{z_range[1]:.2f}) = {chi2_text_value_zgt1:.2f}$"
                 )
             ax_resid.text(
-                0.98,
-                0.96,
+                0.02,
+                0.08,
                 "\n".join(chi2_annotation_lines),
                 transform=ax_resid.transAxes,
-                ha="right",
-                va="top",
-                fontsize=12,
-                bbox=dict(boxstyle="round,pad=0.2", facecolor="white", alpha=0.8, edgecolor="none"),
+                ha="left",
+                va="bottom",
+                fontsize=11,
+                bbox=dict(boxstyle="round,pad=0.02", facecolor="white", alpha=0.4, edgecolor="none"),
             )
         if df_calibrators is not None:
             ax_resid.set_ylim(-0.5, 0.5)
@@ -9447,7 +9449,10 @@ def plot_residuals_vs_alphaOX(
         ax.set_ylabel("Residuals (mag)")
         ax.axhline(0.0, color="magenta", linewidth=2, zorder=0)
         ax.set_ylim(-4.6, 3.9)
-        ax.grid(show_grid, alpha=0.25)
+        if show_grid:
+            ax.grid(True, alpha=0.25)
+        else:
+            ax.grid(False)
 
         if len(x) == 0:
             ax.text(
@@ -9580,12 +9585,14 @@ def plot_residuals_vs_alphaOX(
         "delta_alphaOX_err",
         r"$\Delta\, \alpha_{\mathrm{OX}}$",
         "delta_alphaOX_residuals.pdf",
+        show_grid=False,
     )
     alpha_path = _plot_one(
         "alphaOX",
         "alphaOX_err",
         r"$\alpha_{\mathrm{OX}}$",
         "alphaOX_residuals.pdf",
+        show_grid=False,
     )
     alpha_lambda_path = _plot_one(
         "alpha_lambda",
@@ -9991,6 +9998,19 @@ def plot_spectral_fraction_vs_redshift(
             return None
         return float(np.nanmedian(frac_err[valid]))
 
+    def _set_panel_redshift_xlim(ax, redshift_values):
+        redshift_values = np.asarray(redshift_values, dtype=float)
+        redshift_values = redshift_values[np.isfinite(redshift_values)]
+        if redshift_values.size == 0:
+            return
+        z_lo = float(np.nanmin(redshift_values))
+        z_hi = float(np.nanmax(redshift_values))
+        if z_hi > z_lo:
+            pad = 0.05 * (z_hi - z_lo)
+        else:
+            pad = 0.1
+        ax.set_xlim(z_lo - pad, z_hi + pad)
+
     df_plot = _prepare_spectral_fraction_frame(df_agn)
     df_cut_plot = (
         _prepare_spectral_fraction_frame(df_cut_sources)
@@ -9998,6 +10018,8 @@ def plot_spectral_fraction_vs_redshift(
         else None
     )
     z = pd.to_numeric(df_plot["z"], errors="coerce").to_numpy(dtype=float)
+    kept_color = "tab:red"
+    cut_color = "gray"
     panel_specs = [
         ("f_bc_3000", r"$f_{\rm BC}$"),
         ("f_fe_uv_3000", r"$f_{\rm FeII}$"),
@@ -10011,11 +10033,32 @@ def plot_spectral_fraction_vs_redshift(
         1,
         len(panel_specs),
         figsize=(5.6 * len(panel_specs), 4.6),
-        sharex=True,
+        sharex=False,
         sharey=True,
         squeeze=False,
     )
     axes = axes.ravel()
+
+    def _order_legend_entries(handles, labels):
+        entries_by_label = {}
+        for handle, label in zip(handles, labels):
+            if label and not label.startswith("_") and label not in entries_by_label:
+                entries_by_label[label] = handle
+
+        def _priority(label):
+            if label.endswith("(kept)"):
+                return 0
+            if label.endswith("(cut)"):
+                return 1
+            if label == "cut threshold":
+                return 2
+            return 3
+
+        ordered_labels = sorted(
+            entries_by_label,
+            key=lambda label: (_priority(label), list(entries_by_label).index(label)),
+        )
+        return [entries_by_label[label] for label in ordered_labels], ordered_labels
 
     for i_ax, (ax, (col, ylabel)) in enumerate(zip(axes, panel_specs)):
         y = pd.to_numeric(df_plot[col], errors="coerce").to_numpy(dtype=float)
@@ -10032,8 +10075,11 @@ def plot_spectral_fraction_vs_redshift(
         z_use = z[mask]
         y_use = y[mask]
         yerr_use = yerr[mask] if yerr is not None else None
+        panel_redshifts = [z_use]
         typical_frac_err = _typical_fractional_error(y_use, yerr_use)
-        component_label = None if typical_frac_err is not None else ylabel
+        kept_label = f"{ylabel} (kept)"
+        cut_label = f"{ylabel} (cut)"
+        component_label = None if typical_frac_err is not None else kept_label
         in_z = (z_use >= z_range[0]) & (z_use <= z_range[1])
         out_z = ~in_z
 
@@ -10044,12 +10090,12 @@ def plot_spectral_fraction_vs_redshift(
                 yerr=typical_frac_err,
                 fmt="o",
                 markersize=2.5,
-                alpha=0.6,
-                color="k",
+                alpha=0.5,
+                color=kept_color,
                 elinewidth=0.9,
                 capsize=2,
                 zorder=3,
-                label=ylabel,
+                label=kept_label,
             )
 
         if np.any(in_z):
@@ -10061,7 +10107,7 @@ def plot_spectral_fraction_vs_redshift(
                 fmt="o",
                 markersize=2.5,
                 alpha=0.1,
-                color="k",
+                color=kept_color,
                 elinewidth=0.4,
                 zorder=3,
                 label=component_label,
@@ -10075,10 +10121,10 @@ def plot_spectral_fraction_vs_redshift(
                 yerr=yerr_use[out_z] if yerr_use is not None else None,
                 fmt="D",
                 markersize=3.2,
-                alpha=0.2,
-                color="k",
+                alpha=0.1,
+                color=kept_color,
                 elinewidth=0.4,
-                zorder=3,
+                zorder=6,
                 label=component_label if not np.any(in_z) else None,
                 rasterized=True,
             )
@@ -10092,6 +10138,8 @@ def plot_spectral_fraction_vs_redshift(
                 yerr_cut = pd.to_numeric(df_cut_plot[err_col], errors="coerce").to_numpy(dtype=float)
             mask_cut = np.isfinite(z_cut) & np.isfinite(y_cut) & (y_cut > 0.0)
             if np.any(mask_cut):
+                z_cut_use = z_cut[mask_cut]
+                panel_redshifts.append(z_cut_use)
                 yerr_plot = (
                     yerr_cut[mask_cut]
                     if show_cut_source_errors and yerr_cut is not None
@@ -10099,16 +10147,16 @@ def plot_spectral_fraction_vs_redshift(
                 )
                 _plot_fraction_points(
                     ax,
-                    z_cut[mask_cut],
+                    z_cut_use,
                     y_cut[mask_cut],
                     yerr=yerr_plot,
                     fmt="x",
                     markersize=4,
                     alpha=0.7,
-                    color="#E74C3C",
+                    color=cut_color,
                     elinewidth=0.7,
                     zorder=2,
-                    label="cut",
+                    label=cut_label,
                     rasterized=True,
                 )
 
@@ -10124,11 +10172,23 @@ def plot_spectral_fraction_vs_redshift(
                 label="cut threshold",
             )
 
+        _set_panel_redshift_xlim(ax, np.concatenate(panel_redshifts))
         ax.set_xlabel(r"$z$")
         ax.set_ylabel("Component fraction" if i_ax == 0 else "")
         ax.set_yscale("log")
-        ax.set_ylim(5e-6, 8e0)
-        ax.legend(loc="upper right", frameon=False)
+        ax.set_ylim(2e-6, 5e1)
+        handles, labels = _order_legend_entries(*ax.get_legend_handles_labels())
+        if handles:
+            ax.legend(
+                handles,
+                labels,
+                fontsize=14,
+                loc="upper right",
+                frameon=True,
+                facecolor="white",
+                framealpha=0.75,
+                edgecolor="none",
+            )
 
     fig.tight_layout()
 

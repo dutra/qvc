@@ -3364,8 +3364,8 @@ def write_results_tex_variables(
             lines.append(_cmd("LIntercept", format_result_errors(*_sym_percentile(L_intercept), unit=r"erg\,s^{-1}"), model_suffix=model_name))
             lines.append(_cmd("AlphaAGNL", format_result_errors(*_sym_percentile(alpha_L)), model_suffix=model_name))
             lines.append(_cmd("BetaAGNL", format_result_errors(*_sym_percentile(beta_L)), model_suffix=model_name))
-            lines.append(_cmd("ScatterHD", format_result_errors(*_sym_percentile(hd_scatter), unit=r"mag"), model_suffix=model_name))
-            lines.append(_cmd("ScatterL", format_result_errors(*_sym_percentile(l_scatter), unit=r"dex"), model_suffix=model_name))
+            lines.append(_cmd("ScatterHD", format_result_errors(*_sym_percentile(hd_scatter)), model_suffix=model_name))
+            lines.append(_cmd("ScatterL", format_result_errors(*_sym_percentile(l_scatter)), model_suffix=model_name))
         except ValueError:
             pass
 

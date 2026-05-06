@@ -1,6 +1,7 @@
 import os
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import jax.numpy as jnp
 import numpy as np
@@ -37,6 +38,7 @@ from qvc.light_curve.fit_light_curves import (
     compute_lambda_center_rf,
     empirical_structure_function,
     fit_bending_power_law_psd,
+    apply_resume_sample_save_policy,
     make_lc,
     posterior_median_mean_function,
 )
@@ -86,6 +88,24 @@ def test_compute_lambda_center_rf_matches_geometric_mean():
     expected = float(np.exp(np.mean(np.log(np.asarray(lam_rf)))))
     got = float(compute_lambda_center_rf(lam_rf))
     assert np.isclose(got, expected)
+
+
+def test_apply_resume_sample_save_policy_disables_sample_saving_on_resume():
+    args = SimpleNamespace(resume=True, save_sample_file=True)
+
+    returned = apply_resume_sample_save_policy(args)
+
+    assert returned is args
+    assert args.save_sample_file is False
+
+
+def test_apply_resume_sample_save_policy_preserves_fresh_sample_saving_choice():
+    args = SimpleNamespace(resume=False, save_sample_file=True)
+
+    returned = apply_resume_sample_save_policy(args)
+
+    assert returned is args
+    assert args.save_sample_file is True
 
 
 def test_build_explicit_model_params_preserves_uv_intercepts_across_band_sets():
