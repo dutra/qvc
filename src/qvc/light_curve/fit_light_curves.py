@@ -4909,6 +4909,12 @@ def main():
     parser.add_argument("--disable_corner_plot", action="store_true", default=False, help="Disable corner plot.")
     parser.add_argument("--plot_ls_broken_pl", action="store_true", default=False, help="Overlay the fitted Lomb-Scargle broken power law on the PSD subplot.")
     parser.add_argument(
+        "--show_combined_light_curve_component_overlay",
+        action="store_true",
+        default=False,
+        help="Show the dashed component overlay on the combined light-curve fit plot.",
+    )
+    parser.add_argument(
         "--corner_plot_mode",
         type=str,
         choices=("fast", "full"),
@@ -5414,6 +5420,9 @@ def main():
                             bands=bands,
                             plot_psd=(not args.disable_plot_psd),
                             plot_bpl_fit=args.plot_ls_broken_pl,
+                            show_combined_light_curve_component_overlay=(
+                                args.show_combined_light_curve_component_overlay
+                            ),
                         )
                     if not args.disable_color_magnitude_plot:
                         save_color_magnitude_plot(

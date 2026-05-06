@@ -1586,6 +1586,73 @@ def test_save_combined_plot_shifts_points_by_fitted_survey_offsets(monkeypatch):
     np.testing.assert_allclose(captured_y[1], np.array([3.25, 4.05], dtype=float))
 
 
+def test_save_combined_plot_component_overlay_is_opt_in(monkeypatch):
+    class _DummyPlotModel:
+        def pred(self, params, new_X):
+            t_new, _b_new = new_X
+            n = len(np.asarray(t_new))
+            return jnp.zeros(n, dtype=float), jnp.full(n, 0.1, dtype=float)
+
+    dashed_plot_counts = []
+
+    def _fake_savefig(*args, **kwargs):
+        return None
+
+    def _fake_plot(self, *args, **kwargs):
+        if kwargs.get("linestyle") == "--":
+            dashed_plot_counts[-1] += 1
+        return []
+
+    monkeypatch.setattr("matplotlib.pyplot.savefig", _fake_savefig)
+    monkeypatch.setattr("matplotlib.axes.Axes.plot", _fake_plot)
+
+    samples = {"amp_blr": np.zeros((2,), dtype=float)}
+    X = (
+        jnp.array([10.0, 11.0, 12.0, 13.0], dtype=float),
+        jnp.array([0, 0, 1, 1], dtype=jnp.int32),
+    )
+    y = jnp.array([1.0, 2.0, 3.0, 4.0], dtype=float)
+    yerr = jnp.full(4, 0.05, dtype=float)
+    band_idx = np.array([0, 0, 1, 1], dtype=np.int32)
+    mags_means = np.array([0.0, 0.0], dtype=float)
+    data = {"object_id": "101", "z": 1.0}
+
+    dashed_plot_counts.append(0)
+    save_combined_plot(
+        samples,
+        _DummyPlotModel(),
+        X,
+        y,
+        yerr,
+        band_idx,
+        mags_means,
+        {},
+        data,
+        bands=["g", "r"],
+        plot_psd=False,
+        filename_suffix="pytest_component_overlay_default",
+    )
+
+    dashed_plot_counts.append(0)
+    save_combined_plot(
+        samples,
+        _DummyPlotModel(),
+        X,
+        y,
+        yerr,
+        band_idx,
+        mags_means,
+        {},
+        data,
+        bands=["g", "r"],
+        plot_psd=False,
+        filename_suffix="pytest_component_overlay_enabled",
+        show_combined_light_curve_component_overlay=True,
+    )
+
+    assert dashed_plot_counts == [0, 2]
+
+
 def test_fluxmix_saved_samples_preserve_stage1_basis_for_rebuild():
     obj = _make_fake_public_object()
     lc = make_lc(

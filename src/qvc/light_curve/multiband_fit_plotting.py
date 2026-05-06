@@ -2597,7 +2597,8 @@ def save_structure_function_plot(diagnostic, data, show=False, filename_suffix=N
 
 def save_combined_plot(samples, model, X, y, yerr, band_idx, mags_means, survey_times,
                        data, bands=['u', 'g', 'r', 'i', 'z'], plot_psd=True, show=False,
-                       time0=0.0, plot_bpl_fit=False, filename_suffix=None):
+                       time0=0.0, plot_bpl_fit=False, filename_suffix=None,
+                       show_combined_light_curve_component_overlay=False):
     import os
     import logging
     import numpy as np
@@ -2663,36 +2664,38 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, mags_means, survey_
                 alpha=0.3, lw=0.5, color=colors[band_idx_map[n]]
             )
 
-            cont_result = _prediction_to_display(
-                model,
-                model.pred(
-                    _component_only_params(posterior_median, component="continuum"),
-                    (t_test - time0, jnp.full_like(t_test, n, dtype=int)),
-                ),
-            )
-            mu_cont = np.asarray(cont_result[0], dtype=float)
+            if show_combined_light_curve_component_overlay:
+                cont_result = _prediction_to_display(
+                    model,
+                    model.pred(
+                        _component_only_params(posterior_median, component="continuum"),
+                        (t_test - time0, jnp.full_like(t_test, n, dtype=int)),
+                    ),
+                )
+                mu_cont = np.asarray(cont_result[0], dtype=float)
 
-            ax_lc.plot(
-                t_test,
-                mu_cont + offsets[n],
-                alpha=0.75,
-                color=colors[band_idx_map[n]],
-                lw=1.0,
-                linestyle='--',
-            )
+                ax_lc.plot(
+                    t_test,
+                    mu_cont + offsets[n],
+                    alpha=0.75,
+                    color=colors[band_idx_map[n]],
+                    lw=1.0,
+                    linestyle='--',
+                )
         else:
             mu, std, mu_cont, std_cont, _mu_blr, _std_blr = result
 
-            ax_lc.plot(
-                t_test, mu_cont + offsets[n], alpha=0.5,
-                color=colors[band_idx_map[n]], lw=1.0,
-                label=f'{band_idx_map[n]}-band continuum', linestyle='--'
-            )
-            ax_lc.fill_between(
-                t_test, mu_cont + offsets[n] - std_cont,
-                mu_cont + offsets[n] + std_cont,
-                alpha=0.15, lw=0.5, color=colors[band_idx_map[n]]
-            )
+            if show_combined_light_curve_component_overlay:
+                ax_lc.plot(
+                    t_test, mu_cont + offsets[n], alpha=0.5,
+                    color=colors[band_idx_map[n]], lw=1.0,
+                    label=f'{band_idx_map[n]}-band continuum', linestyle='--'
+                )
+                ax_lc.fill_between(
+                    t_test, mu_cont + offsets[n] - std_cont,
+                    mu_cont + offsets[n] + std_cont,
+                    alpha=0.15, lw=0.5, color=colors[band_idx_map[n]]
+                )
 
             ax_lc.plot(t_test, mu + offsets[n], alpha=0.8, color=colors[band_idx_map[n]], lw=1.0)
             ax_lc.fill_between(
