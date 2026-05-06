@@ -3026,7 +3026,7 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, mags_means, survey_
             zorder=6,
         )
 
-        ax_psd.set_xlabel(r"Frequency $f$ (days$^{-1}$)")
+        ax_psd.set_xlabel(r"Frequency (days$^{-1}$)")
         ax_psd.set_ylabel(r"PSD ($\mathrm{mag}^2$ $\mathrm{days}$)")
         ax_psd.set_xscale("log")
         ax_psd.set_yscale("log")
