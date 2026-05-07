@@ -2703,7 +2703,7 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, mags_means, survey_
                 alpha=0.3, lw=0.5, color=colors[band_idx_map[n]]
             )
 
-    ax_lc.set_ylim(ax_lc.get_ylim()[0] - 0.24, ax_lc.get_ylim()[1])
+    ax_lc.set_ylim(ax_lc.get_ylim()[0] - 0.62, ax_lc.get_ylim()[1] + 0.1)
     ax_lc.set_xlabel('Time (modified Julian days)')
     ax_lc.set_ylabel('Apparent magnitude')
     ax_lc.invert_yaxis()
@@ -2743,7 +2743,7 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, mags_means, survey_
             zorder=11
         )
 
-    ax_lc.legend(loc='upper right')
+    ax_lc.legend(loc='upper right', framealpha=1.0)
 
     if plot_psd:
         # Ensure all elements of posterior_median are jnp arrays
@@ -2872,7 +2872,7 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, mags_means, survey_
         ax_psd.fill_between(freqs, psd_lo, psd_hi, color='m', alpha=0.2, zorder=3)
 
         floor_positive = np.isfinite(P_noise_on_bin) & (P_noise_on_bin > 0.0)
-        if plot_bpl_fit and np.count_nonzero(floor_positive):
+        if np.count_nonzero(floor_positive):
             ax_psd.plot(
                 f_bin[floor_positive],
                 P_noise_on_bin[floor_positive],
