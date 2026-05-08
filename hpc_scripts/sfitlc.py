@@ -123,9 +123,9 @@ def build_job_configs(fit: str, chisq_csv: str) -> list[JobConfig]:
     if fit == "samelength":
         stone_object_ids = load_stone_ids()
         return [
-            JobConfig(description="samelength", object_ids=stone_object_ids),
+            JobConfig(description="samelength_fulllength", object_ids=stone_object_ids),
             JobConfig(
-                description="samelength_nolinear",
+                description="samelength_fulllength_nolinear",
                 object_ids=stone_object_ids,
                 extra_flags=("--disable_linear_trend",),
             ),
@@ -195,7 +195,8 @@ def build_samelength_comparison_plot_dir(run_prefix_base: str) -> Path:
 
 
 def build_samelength_comparison_plot_path(run_prefix_base: str, x_description: str, y_description: str) -> str:
-    filename = f"sigma_tau_identity_grid_{x_description}_vs_{y_description}.pdf"
+    y_label = y_description.removeprefix("samelength_")
+    filename = f"sigma_tau_identity_grid_{x_description}_vs_{y_label}.pdf"
     return str(build_samelength_comparison_plot_dir(run_prefix_base) / filename)
 
 
@@ -401,8 +402,8 @@ def build_samelength_comparison_sbatch_script(run_prefix_base: str, args) -> str
     log_dir = LOG_ROOT / prefix
     log_pattern = log_dir / f"{prefix}-%j.txt"
     comparisons = [
-        ("samelength_rf2400", "samelength"),
-        ("samelength_rf2400_nolinear", "samelength_nolinear"),
+        ("samelength_rf2400", "samelength_fulllength"),
+        ("samelength_rf2400_nolinear", "samelength_fulllength_nolinear"),
     ]
     commands = []
     for x_description, y_description in comparisons:
