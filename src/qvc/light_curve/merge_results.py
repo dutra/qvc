@@ -473,6 +473,123 @@ def write_stone_sigma_tau_identity_grid(rows, output_path: str, stone_fits_path=
     return output_path
 
 
+def load_merged_rows_for_prefix(prefix: str, base_dir: str = "results/data") -> list[dict]:
+    path = os.path.join(base_dir, f"{prefix}.h5")
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"Merged result file not found for prefix {prefix!r}: {path}")
+    result = _load_h5_shard(path, expected_n=None)
+    if not result["ok"]:
+        raise RuntimeError(f"Failed to load merged result file {path}: {result.get('error', '')}")
+    return result["rows"]
+
+
+def build_samelength_identity_plot_data(x_rows, y_rows):
+    x_df = pd.DataFrame(x_rows).copy()
+    y_df = pd.DataFrame(y_rows).copy()
+    if x_df.empty or y_df.empty:
+        return pd.DataFrame()
+    if "object_id" not in x_df.columns or "object_id" not in y_df.columns:
+        raise KeyError("Both same-length comparison inputs must include an 'object_id' column.")
+
+    x_df["object_id"] = x_df["object_id"].astype(str)
+    y_df["object_id"] = y_df["object_id"].astype(str)
+    merged = x_df.merge(
+        y_df,
+        on="object_id",
+        how="inner",
+        suffixes=("_same_length", "_this_work"),
+    )
+    if merged.empty:
+        return merged
+
+    for band in STONE_IDENTITY_BANDS:
+        merged[f"same_length_sigma_{band}"] = pd.to_numeric(
+            merged[f"log_sigma_band_{band}_same_length"],
+            errors="coerce",
+        )
+        merged[f"same_length_sigma_{band}_err"] = pd.to_numeric(
+            merged[f"log_sigma_band_{band}_err_same_length"],
+            errors="coerce",
+        )
+        merged[f"this_work_sigma_{band}"] = pd.to_numeric(
+            merged[f"log_sigma_band_{band}_this_work"],
+            errors="coerce",
+        )
+        merged[f"this_work_sigma_{band}_err"] = pd.to_numeric(
+            merged[f"log_sigma_band_{band}_err_this_work"],
+            errors="coerce",
+        )
+        merged[f"same_length_tau_{band}"] = pd.to_numeric(
+            merged[f"log_tau_band_{band}_RF_same_length"],
+            errors="coerce",
+        )
+        merged[f"same_length_tau_{band}_err"] = pd.to_numeric(
+            merged[f"log_tau_band_{band}_RF_err_same_length"],
+            errors="coerce",
+        )
+        merged[f"this_work_tau_{band}"] = pd.to_numeric(
+            merged[f"log_tau_band_{band}_RF_this_work"],
+            errors="coerce",
+        )
+        merged[f"this_work_tau_{band}_err"] = pd.to_numeric(
+            merged[f"log_tau_band_{band}_RF_err_this_work"],
+            errors="coerce",
+        )
+    return merged
+
+
+def write_samelength_sigma_tau_identity_grid(x_rows, y_rows, output_path: str):
+    plot_df = build_samelength_identity_plot_data(x_rows, y_rows)
+    if plot_df.empty:
+        print("WARNING: Skipping same-length sigma/tau identity grid because no matched rows were found.")
+        return None
+
+    output_path = str(output_path)
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+
+    sigma_keys = {
+        "x": "same_length_sigma_{band}",
+        "y": "this_work_sigma_{band}",
+        "xerr": "same_length_sigma_{band}_err",
+        "yerr": "this_work_sigma_{band}_err",
+        "xlabel": r"$\log\!\,\sigma_<<band>>$ (mag)" + "\n(same length)",
+        "ylabel": r"$\log\!\,\sigma_<<band>>$ (mag)" + "\n(this work)",
+    }
+    tau_keys = {
+        "x": "same_length_tau_{band}",
+        "y": "this_work_tau_{band}",
+        "xerr": "same_length_tau_{band}_err",
+        "yerr": "this_work_tau_{band}_err",
+        "xlabel": r"$\log\!\,\tau_{\mathrm{<<band>>},\,\mathrm{RF}}\,(\mathrm{days})$" + "\n(same length)",
+        "ylabel": r"$\log\!\,\tau_{\mathrm{<<band>>},\,\mathrm{RF}}\,(\mathrm{days})$" + "\n(this work)",
+    }
+    fig = plot_sigma_tau_identity_grid(
+        plot_df,
+        sigma_keys,
+        tau_keys,
+        bands=STONE_IDENTITY_BANDS,
+        figsize=(12, 7.6),
+        show=False,
+        output_path=output_path,
+        sigma_limits=STONE_SIGMA_LIMITS,
+        tau_limits=STONE_TAU_LIMITS,
+    )
+    plt.close(fig)
+    print(f"Wrote same-length sigma/tau identity grid to {output_path}")
+    return output_path
+
+
+def write_samelength_sigma_tau_identity_grid_for_prefixes(
+    x_prefix: str,
+    y_prefix: str,
+    output_path: str,
+    base_dir: str = "results/data",
+):
+    x_rows = load_merged_rows_for_prefix(x_prefix, base_dir=base_dir)
+    y_rows = load_merged_rows_for_prefix(y_prefix, base_dir=base_dir)
+    return write_samelength_sigma_tau_identity_grid(x_rows, y_rows, output_path)
+
+
 def _match_rows_to_catalog(df_rows, df_catalog, max_sep_arcsec=1.0):
     row_coords = SkyCoord(
         ra=pd.to_numeric(df_rows["ra"], errors="coerce").to_numpy(dtype=float) * u.deg,
@@ -770,6 +887,7 @@ def main(argv=None):
     )
     p.add_argument(
         "prefix",
+        nargs="?",
         type=str,
         help="Subdirectory under --base-dir containing top-level *.h5 shards. Also used for default output name.",
     )
@@ -825,6 +943,30 @@ def main(argv=None):
         help="Optional output path for the Stone sigma/tau identity grid PDF.",
     )
     p.add_argument(
+        "--plot-samelength-sigma-tau-identity-grid",
+        action="store_true",
+        default=False,
+        help="Generate a same-length rf2400-vs-baseline sigma/tau identity grid from merged output files.",
+    )
+    p.add_argument(
+        "--samelength-x-prefix",
+        type=str,
+        default=None,
+        help="Merged results prefix for the same-length/rf2400 x-axis run.",
+    )
+    p.add_argument(
+        "--samelength-y-prefix",
+        type=str,
+        default=None,
+        help="Merged results prefix for the baseline y-axis run.",
+    )
+    p.add_argument(
+        "--samelength-identity-plot-out",
+        type=str,
+        default=None,
+        help="Output path for the same-length comparison identity grid PDF.",
+    )
+    p.add_argument(
         "--plot-macleod-sigma-tau-identity-grid",
         action="store_true",
         default=False,
@@ -869,6 +1011,26 @@ def main(argv=None):
     )
     
     args = p.parse_args(argv)
+
+    if args.plot_samelength_sigma_tau_identity_grid:
+        if not args.samelength_x_prefix or not args.samelength_y_prefix:
+            print("ERROR: --samelength-x-prefix and --samelength-y-prefix are required.")
+            sys.exit(1)
+        if not args.samelength_identity_plot_out:
+            print("ERROR: --samelength-identity-plot-out is required.")
+            sys.exit(1)
+        write_samelength_sigma_tau_identity_grid_for_prefixes(
+            args.samelength_x_prefix,
+            args.samelength_y_prefix,
+            args.samelength_identity_plot_out,
+            base_dir=args.base_dir,
+        )
+        print("Done.")
+        return
+
+    if not args.prefix:
+        print("ERROR: prefix is required unless --plot-samelength-sigma-tau-identity-grid is used.")
+        sys.exit(1)
 
     shard_dir = os.path.join(args.base_dir, args.prefix)
     file_list = sorted(glob.glob(os.path.join(shard_dir, "*.h5")))

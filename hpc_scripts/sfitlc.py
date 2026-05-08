@@ -33,7 +33,12 @@ class JobConfig:
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Submit multiband-fit SLURM jobs.")
-    parser.add_argument("--fit", choices=("chisq", "stone", "macleod"), required=True, help="Sample to submit.")
+    parser.add_argument(
+        "--fit",
+        choices=("chisq", "stone", "macleod", "samelength"),
+        required=True,
+        help="Sample to submit.",
+    )
     parser.add_argument("--chisq-csv", type=str, default=None, help="CSV file with object_id column for --fit chisq.")
     parser.add_argument("--num-jobs", type=int, default=-1, help="-1 means submit all chunks after skip.")
     parser.add_argument("--skip", type=int, default=0, help="Number of chunks to skip.")
@@ -114,13 +119,23 @@ def build_job_configs(fit: str, chisq_csv: str) -> list[JobConfig]:
                 object_ids=stone_object_ids,
                 extra_flags=("--disable_linear_trend",),
             ),
+        ]
+    if fit == "samelength":
+        stone_object_ids = load_stone_ids()
+        return [
+            JobConfig(description="samelength", object_ids=stone_object_ids),
             JobConfig(
-                description="stone_rf2400",
+                description="samelength_nolinear",
+                object_ids=stone_object_ids,
+                extra_flags=("--disable_linear_trend",),
+            ),
+            JobConfig(
+                description="samelength_rf2400",
                 object_ids=stone_object_ids,
                 extra_flags=("--rf_length_cut", "2400"),
             ),
             JobConfig(
-                description="stone_rf2400_nolinear",
+                description="samelength_rf2400_nolinear",
                 object_ids=stone_object_ids,
                 extra_flags=("--disable_linear_trend", "--rf_length_cut", "2400"),
             ),
@@ -173,6 +188,15 @@ def build_macleod_identity_plot_path(prefix: str, job_description: str) -> str:
 def build_suberlak_identity_plot_path(prefix: str, job_description: str) -> str:
     filename = f"sigma_tau_identity_grid_suberlak_{job_description}.pdf"
     return str(REPO_ROOT / "plots" / "lc_tests" / prefix / filename)
+
+
+def build_samelength_comparison_plot_dir(run_prefix_base: str) -> Path:
+    return REPO_ROOT / "plots" / "lc_tests" / f"{run_prefix_base}_samelength_comparison"
+
+
+def build_samelength_comparison_plot_path(run_prefix_base: str, x_description: str, y_description: str) -> str:
+    filename = f"sigma_tau_identity_grid_{x_description}_vs_{y_description}.pdf"
+    return str(build_samelength_comparison_plot_dir(run_prefix_base) / filename)
 
 
 def build_object_ids_path(prefix: str, job: JobConfig) -> Path:
@@ -372,6 +396,57 @@ echo "Total runtime: $((rt/3600))h $(((rt%3600)/60))m $((rt%60))s"
 """
 
 
+def build_samelength_comparison_sbatch_script(run_prefix_base: str, args) -> str:
+    prefix = f"{run_prefix_base}_samelength_comparison"
+    log_dir = LOG_ROOT / prefix
+    log_pattern = log_dir / f"{prefix}-%j.txt"
+    comparisons = [
+        ("samelength_rf2400", "samelength"),
+        ("samelength_rf2400_nolinear", "samelength_nolinear"),
+    ]
+    commands = []
+    for x_description, y_description in comparisons:
+        x_prefix = build_run_prefix(x_description, "", "", run_prefix_base)
+        y_prefix = build_run_prefix(y_description, "", "", run_prefix_base)
+        plot_out = build_samelength_comparison_plot_path(run_prefix_base, x_description, y_description)
+        commands.append(
+            "python -m qvc.light_curve.merge_results"
+            " --plot-samelength-sigma-tau-identity-grid"
+            f' --samelength-x-prefix "{x_prefix}"'
+            f' --samelength-y-prefix "{y_prefix}"'
+            f' --samelength-identity-plot-out "{plot_out}"'
+        )
+    comparison_cmds = "\n".join(commands)
+    return f"""#!/bin/bash
+#SBATCH --job-name=samelength_cmp_{run_prefix_base}
+#SBATCH --output={log_pattern}
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=1
+#SBATCH --mem=20G
+#SBATCH --partition={args.partition}
+#SBATCH --time={args.time}
+{build_mail_lines()}\
+
+set -euo pipefail
+
+module load miniconda
+conda activate {args.env}
+
+cd "{REPO_ROOT}"
+
+start_epoch=$(date +%s)
+echo "Start epoch: $start_epoch"
+echo "SLURM_JOB_ID=${{SLURM_JOB_ID:-}}"
+
+{comparison_cmds}
+
+end_epoch=$(date +%s)
+rt=$(( end_epoch - start_epoch ))
+echo "End epoch: $end_epoch"
+echo "Total runtime: $((rt/3600))h $(((rt%3600)/60))m $((rt%60))s"
+"""
+
+
 def write_job_script(prefix: str, sbatch_script: str) -> Path:
     SCRIPT_DIR.mkdir(parents=True, exist_ok=True)
     (LOG_ROOT / prefix).mkdir(parents=True, exist_ok=True)
@@ -449,7 +524,7 @@ def submit_script(
     total_objects: int,
     fit_label: str,
     prefix: str,
-) -> None:
+) -> str:
     if total_objects == 0:
         raise ValueError(f"No object_ids found for {fit_label}.")
 
@@ -462,8 +537,7 @@ def submit_script(
         print("Submitting:", " ".join(cmd))
         job_id = run_sbatch(cmd)
         print(f"Submitted light-curve job {job_id} for {prefix}")
-        submit_merge_script(merge_sbatch_path, job_id, prefix)
-        return
+        return submit_merge_script(merge_sbatch_path, job_id, prefix)
 
     job_ids = []
     for batch_start in range(start_task, end_task + 1, MAX_ARRAY_SIZE):
@@ -473,7 +547,29 @@ def submit_script(
         job_id = run_sbatch(cmd)
         job_ids.append(job_id)
         print(f"Submitted light-curve job {job_id} for {prefix} array range {batch_start}-{batch_end}")
-    submit_merge_script(merge_sbatch_path, job_ids, prefix)
+    return submit_merge_script(merge_sbatch_path, job_ids, prefix)
+
+
+def submit_samelength_comparison_script(
+    comparison_sbatch_path: Path,
+    dependency_job_ids: list[str],
+    run_prefix_base: str,
+) -> str:
+    if not dependency_job_ids:
+        raise ValueError("No merge job IDs provided for samelength comparison job.")
+    dependency_text = ":".join(dependency_job_ids)
+    cmd = [
+        "sbatch",
+        f"--dependency=afterany:{dependency_text}",
+        str(comparison_sbatch_path),
+    ]
+    print(
+        f"Submitting samelength comparison job for {run_prefix_base}: {' '.join(cmd)} "
+        f"(depends on {dependency_text})"
+    )
+    comparison_job_id = run_sbatch(cmd)
+    print(f"Submitted samelength comparison job {comparison_job_id} for {run_prefix_base}")
+    return comparison_job_id
 
 
 def main():
@@ -481,8 +577,10 @@ def main():
     args = parse_args()
     git_hash = get_git_short_hash()
     run_stamp = make_run_stamp()
+    run_prefix_base = args.resume or f"{run_stamp}_{git_hash}"
     chisq_csv = args.chisq_csv
     spectra_fit_csv = DEFAULT_SPECTRA_FIT_CSV
+    samelength_merge_job_ids = []
 
     for job in build_job_configs(args.fit, chisq_csv):
         total_objects = len(job.object_ids)
@@ -503,13 +601,13 @@ def main():
             prefix,
             job.description,
             args,
-            enable_stone_identity_plot=job.description.startswith("stone"),
+            enable_stone_identity_plot=args.fit == "stone" and job.description.startswith("stone"),
             enable_macleod_identity_plot=job.description == "macleod",
             enable_suberlak_identity_plot=job.description == "macleod",
         )
         sbatch_path = write_job_script(prefix, sbatch_script)
         merge_sbatch_path = write_job_script(f"{prefix}_merge", merge_sbatch_script)
-        submit_script(
+        merge_job_id = submit_script(
             sbatch_path,
             merge_sbatch_path,
             task_start,
@@ -517,6 +615,20 @@ def main():
             total_objects,
             job.description,
             prefix,
+        )
+        if args.fit == "samelength":
+            samelength_merge_job_ids.append(merge_job_id)
+
+    if args.fit == "samelength":
+        comparison_sbatch_script = build_samelength_comparison_sbatch_script(run_prefix_base, args)
+        comparison_sbatch_path = write_job_script(
+            f"{run_prefix_base}_samelength_comparison",
+            comparison_sbatch_script,
+        )
+        submit_samelength_comparison_script(
+            comparison_sbatch_path,
+            samelength_merge_job_ids,
+            run_prefix_base,
         )
 
 
