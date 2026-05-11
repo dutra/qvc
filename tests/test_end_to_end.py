@@ -169,7 +169,10 @@ def _errorbar_container_has_data(container):
 
 
 def _has_cut_marker_overlay(ax):
-    return any(line.get_label() == "cut" for line in ax.lines)
+    return any(
+        line.get_label() == "cut" or line.get_label().endswith("(cut)")
+        for line in ax.lines
+    )
 
 
 def _legend_labels(ax):
@@ -526,7 +529,7 @@ def test_plot_spectral_fraction_vs_redshift_skips_log_invalid_errorbars(
         assert not any(_errorbar_container_has_data(container) for container in ax.containers)
 
 
-def test_plot_spectral_fraction_vs_redshift_reports_typical_fractional_error(
+def test_plot_spectral_fraction_vs_redshift_omits_typical_error_annotation(
     tmp_path,
     monkeypatch,
 ):
@@ -569,15 +572,9 @@ def test_plot_spectral_fraction_vs_redshift_reports_typical_fractional_error(
     assert os.path.exists(out)
     expected_component_labels = (r"$f_{\rm BC}$", r"$f_{\rm FeII}$", r"$f_{\rm host,2500\,\AA}$")
     for ax, expected_label in zip(captured["axes"], expected_component_labels):
-        assert expected_label in _legend_labels(ax)
+        assert f"{expected_label} (kept)" in _legend_labels(ax)
         assert not any(label.startswith("typ. err/f") for label in _legend_labels(ax))
-        proxy_containers = [
-            container
-            for container in ax.containers
-            if isinstance(container, ErrorbarContainer) and container.get_label() == expected_label
-        ]
-        assert len(proxy_containers) == 1
-        assert not _errorbar_container_has_data(proxy_containers[0])
+        assert not any("median err" in text.get_text() for text in ax.texts)
     for ax in captured["axes"]:
         assert not any(_errorbar_container_has_data(container) for container in ax.containers)
 

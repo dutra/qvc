@@ -61,27 +61,43 @@ DEFAULT_STEPS = [
     },
     {
         "type": "download",
-        "url": "https://drive.google.com/file/d/1bq1GEBEApSgJz0ezyxIx6ORz79epmQuU/view?usp=sharing",
+        "url": "https://drive.google.com/file/d/1PUVRL7AlyG_15wKpkpF5wR-uYpCS8q11/view?usp=sharing",
         "folder": "results/data",
-        "filename": "light_curves.h5",
+        "filename": "lc_data_all.h5",
     },
     {
         "type": "download",
-        "url": "https://drive.google.com/file/d/11py-CEJuszTn12eMTEn4cMLD4vbJJ15e/view?usp=sharing",
+        "url": "https://drive.google.com/file/d/1VtccnFl5WIan4pZHfyia6KjhgkrCAHrt/view?usp=sharing",
         "folder": "results/data",
-        "filename": "spectra.csv",
+        "filename": "spectra_data_all.csv",
     },
     {
         "type": "download",
-        "url": "https://drive.google.com/file/d/1j39Tc1vy3nnCdVayWIKu-6IlOeC_moke/view?usp=sharing",
-        "folder": "data/spectra_cache",
-        "filename": "spec-9180-57693-0463.fits",
+        "url": "https://drive.google.com/file/d/1UTGwSZXfLm8kSAKTDHeS9r685isycLeC/view?usp=sharing",
+        "folder": "data/spectra_cache_all",
+        "filename": "spec-9152-58041-0926.fits",
+    },
+    {
+        "type": "download",
+        "url": "https://drive.google.com/file/d/1QNOzH3_gmM1mCQezQJdW557MpUQdc2UW/view?usp=sharing",
+        "folder": "results/",
+    },
+    {
+        "type": "download",
+        "url": "https://drive.google.com/file/d/1KDnXK3pSWD3ZtFSIHIoDMjYJBviRdnoF/view?usp=sharing",
+        "folder": "results/data/",
+        "filename": "mock_completeness_catalog_fresh.h5",
     },
     {
         "type": "download",
         "url": "https://portal.nersc.gov/project/hacc/aphearin/DSPS_data/ssp_data_fsps_v3.2_lgmet_age.h5",
         "folder": "data/",
         "filename": "ssp_data_fsps_v3.2_lgmet_age.h5",
+    },
+    {
+        "type": "download",
+        "url": "https://drive.google.com/file/d/1zg2-T8Y5C4iEiPpWy3UUc21dUYjAttlU/view?usp=sharing",
+        "folder": "results/cosmo/",
     },
     {"type": "command", "name": "fetch_dustmaps"},
 ]
@@ -101,12 +117,12 @@ APPENDIX_STEPS = [
         "filename": "TotalDat.fits.gz",
         "skip_if_exists": "TotalDat.fits",
     },
-    {
-        "type": "download",
-        "url": "https://data.sdss.org/sas/dr17/sdss/spectro/redux/specObj-dr17.fits",
-        "folder": "data/SDSS_DR17",
-        "filename": "specObj-dr17.fits",
-    }
+    # {
+    #     "type": "download",
+    #     "url": "https://data.sdss.org/sas/dr17/sdss/spectro/redux/specObj-dr17.fits",
+    #     "folder": "data/SDSS_DR17",
+    #     "filename": "specObj-dr17.fits",
+    # }
 ]
 
 

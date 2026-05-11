@@ -872,10 +872,10 @@ def test_plot_hubble_residual_chi2_annotation_includes_high_z(monkeypatch, tmp_p
         call for call in text_calls
         if r"$\chi^2_\nu(0.44<z<3.16) = 1.23$" in call["text"]
     )
-    assert rf"$\chi^2_\nu(1<z<3.16) = 2.34$" in annotation["text"]
+    assert rf"$\chi^2_\nu(1.00<z<3.16) = 2.34$" in annotation["text"]
     assert "\n" in annotation["text"]
     assert annotation["x"] == 0.02
-    assert annotation["y"] == 0.04
+    assert annotation["y"] == 0.08
     assert annotation["ha"] == "left"
     assert annotation["va"] == "bottom"
 
@@ -894,7 +894,7 @@ def test_plot_hubble_residual_chi2_annotation_includes_high_z(monkeypatch, tmp_p
     )
 
     chi2_text = next(call["text"] for call in text_calls if r"\chi^2_\nu" in call["text"])
-    assert r"$\chi^2_\nu(0.44<z<0.9)" in chi2_text
+    assert r"$\chi^2_\nu(0.44<z<0.90)" in chi2_text
     assert "(1<z<" not in chi2_text
 
 

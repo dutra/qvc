@@ -5846,7 +5846,8 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
                 ha="left",
                 va="bottom",
                 fontsize=11,
-                bbox=dict(boxstyle="round,pad=0.02", facecolor="white", alpha=0.4, edgecolor="none"),
+                bbox=dict(boxstyle="round,pad=0.02", facecolor="white", alpha=0.8, edgecolor="none"),
+                zorder=20,                
             )
         if df_calibrators is not None:
             ax_resid.set_ylim(-0.5, 0.5)
@@ -8009,6 +8010,8 @@ def plot_predicted_L2500_vs_sigmahat(
         use_eta_sigma_term=option_flags["use_eta_sigma_term"],
     )
     M0_med = med_arr[agn_model_pidx["M0_agn"]]
+    logL0_med = convert_M2500_to_logL2500(M0_med)
+    L2500_offset = 10.0 ** logL0_med
     x_log_ref = -0.4 * (
         M_model_agn(
             med_arr,
@@ -8444,7 +8447,7 @@ def plot_predicted_L2500_vs_sigmahat(
             )
 
     # --- Axes & labels ---
-    ax.set_ylabel(r'$L_{2500\,\mathrm{\AA}}$ (erg s$^{-1}$)')
+    ax.set_ylabel(r'$L_{2500\,\mathrm{\AA}}$ (erg s$^{-1}$)', fontsize=14)
     ax.set_xscale('log'); ax.set_yscale('log')
     if df_calibrators is not None and len(df_calibrators) > 0:
         # ax.set_xlim((2e-9, 6e13))
@@ -8470,9 +8473,15 @@ def plot_predicted_L2500_vs_sigmahat(
     log_tau_uv_rf_pivot = pivots_arr[agn_model_oidx["log_tau_uv_rf"]]
     sigma_uv_pivot  = 10.0 ** log_sigma_uv_pivot
     tau_uv_rf_pivot = 10.0 ** log_tau_uv_rf_pivot
-    xlabel = rf"$({{\sigma}}_\mathrm{{uv}} \, / \, {sigma_uv_pivot:.1f}\,\mathrm{{mag}})^{{{alpha_agn_L:.2f}}} \, ({{\tau}}_\mathrm{{uv,rf}} \, / \, {tau_uv_rf_pivot:.0f}\,\mathrm{{days}})^{{{beta_agn_L:.2f}}}$"
+    offset_mantissa, offset_exponent = f"{L2500_offset:.2e}".split("e")
+    offset_exponent = int(offset_exponent)
+    xlabel = (
+        rf"$({offset_mantissa}\times10^{{{offset_exponent}}}\,\mathrm{{erg\,s^{{-1}}}})\,"
+        rf"({{\sigma}}_\mathrm{{uv}} \, / \, {sigma_uv_pivot:.1f}\,\mathrm{{mag}})^{{{alpha_agn_L:.2f}}}"
+        rf"({{\tau}}_\mathrm{{uv,rf}} \, / \, {tau_uv_rf_pivot:.0f}\,\mathrm{{days}})^{{{beta_agn_L:.2f}}}$"
+    )
     if not show_residuals:
-        ax.set_xlabel(xlabel)
+        ax.set_xlabel(xlabel, fontsize=14)
     ax.legend(loc='upper left')
 
     # --- Residuals panel (MAIN) ---
@@ -9919,6 +9928,7 @@ def plot_spectral_fraction_vs_redshift(
     cut_thresholds=None,
     log_safe_errors=True,
     show_cut_source_errors=False,
+    cap_cut_source_errors=False,
 ):
     """Plot available spectral fractions against redshift."""
     required = {"z", "f_bc_3000", "f_fe_uv_3000", "f_host_2500"}
@@ -9967,12 +9977,65 @@ def plot_spectral_fraction_vs_redshift(
         alpha=0.25,
         color="k",
         elinewidth=0.4,
+        error_alpha=None,
+        error_color=None,
+        capsize=1.5,
+        max_yerr=None,
         zorder=3,
         label=None,
         rasterized=True,
     ):
         x = np.asarray(x, dtype=float)
         y = np.asarray(y, dtype=float)
+        if yerr is not None:
+            yerr = np.asarray(yerr, dtype=float)
+            valid_err = np.isfinite(yerr) & (yerr > 0.0)
+            if np.any(valid_err):
+                if not np.all(valid_err):
+                    ax.plot(
+                        x[~valid_err],
+                        y[~valid_err],
+                        linestyle="None",
+                        marker=fmt,
+                        markersize=markersize,
+                        alpha=alpha,
+                        color=color,
+                        zorder=zorder,
+                        label=None,
+                        rasterized=rasterized,
+                    )
+                x_err = x[valid_err]
+                y_err_center = y[valid_err]
+                yerr_err = yerr[valid_err]
+                if max_yerr is not None and np.isfinite(max_yerr) and max_yerr > 0.0:
+                    yerr_err = np.minimum(yerr_err, float(max_yerr))
+                lower_err = np.minimum(yerr_err, 0.999999 * y_err_center)
+                if error_color is None:
+                    error_color = color
+                if error_alpha is None:
+                    error_alpha = alpha
+                error_container = ax.errorbar(
+                    x_err,
+                    y_err_center,
+                    yerr=np.vstack([lower_err, yerr_err]),
+                    linestyle="None",
+                    marker=fmt,
+                    markersize=markersize,
+                    alpha=alpha,
+                    color=color,
+                    ecolor=error_color,
+                    elinewidth=elinewidth,
+                    capsize=capsize,
+                    zorder=zorder,
+                    label=label,
+                    rasterized=rasterized,
+                )
+                _, caplines, barlinecols = error_container
+                for bar_collection in barlinecols:
+                    bar_collection.set_alpha(error_alpha)
+                for capline in caplines:
+                    capline.set_alpha(error_alpha)
+                return
         ax.plot(
             x,
             y,
@@ -9986,7 +10049,7 @@ def plot_spectral_fraction_vs_redshift(
             rasterized=rasterized,
         )
 
-    def _typical_fractional_error(y, yerr):
+    def _typical_errors(y, yerr):
         if yerr is None:
             return None
         y = np.asarray(y, dtype=float)
@@ -9996,7 +10059,7 @@ def plot_spectral_fraction_vs_redshift(
         valid = np.isfinite(y) & (y > 0.0) & np.isfinite(yerr) & (yerr > 0.0) & np.isfinite(frac_err)
         if not np.any(valid):
             return None
-        return float(np.nanmedian(frac_err[valid]))
+        return float(np.nanmedian(frac_err[valid])), float(np.nanmedian(yerr[valid]))
 
     def _set_panel_redshift_xlim(ax, redshift_values):
         redshift_values = np.asarray(redshift_values, dtype=float)
@@ -10032,7 +10095,7 @@ def plot_spectral_fraction_vs_redshift(
     fig, axes = plt.subplots(
         1,
         len(panel_specs),
-        figsize=(5.6 * len(panel_specs), 4.6),
+        figsize=(4 * len(panel_specs), 4),
         sharex=False,
         sharey=True,
         squeeze=False,
@@ -10076,34 +10139,19 @@ def plot_spectral_fraction_vs_redshift(
         y_use = y[mask]
         yerr_use = yerr[mask] if yerr is not None else None
         panel_redshifts = [z_use]
-        typical_frac_err = _typical_fractional_error(y_use, yerr_use)
+        kept_typical_errors = _typical_errors(y_use, yerr_use)
         kept_label = f"{ylabel} (kept)"
         cut_label = f"{ylabel} (cut)"
-        component_label = None if typical_frac_err is not None else kept_label
+        component_label = kept_label
         in_z = (z_use >= z_range[0]) & (z_use <= z_range[1])
         out_z = ~in_z
-
-        if typical_frac_err is not None:
-            ax.errorbar(
-                [],
-                [],
-                yerr=typical_frac_err,
-                fmt="o",
-                markersize=2.5,
-                alpha=0.5,
-                color=kept_color,
-                elinewidth=0.9,
-                capsize=2,
-                zorder=3,
-                label=kept_label,
-            )
 
         if np.any(in_z):
             _plot_fraction_points(
                 ax,
                 z_use[in_z],
                 y_use[in_z],
-                yerr=yerr_use[in_z] if yerr_use is not None else None,
+                yerr=None,
                 fmt="o",
                 markersize=2.5,
                 alpha=0.1,
@@ -10118,7 +10166,7 @@ def plot_spectral_fraction_vs_redshift(
                 ax,
                 z_use[out_z],
                 y_use[out_z],
-                yerr=yerr_use[out_z] if yerr_use is not None else None,
+                yerr=None,
                 fmt="D",
                 markersize=3.2,
                 alpha=0.1,
@@ -10145,6 +10193,11 @@ def plot_spectral_fraction_vs_redshift(
                     if show_cut_source_errors and yerr_cut is not None
                     else None
                 )
+                max_cut_yerr = (
+                    kept_typical_errors[1]
+                    if cap_cut_source_errors and kept_typical_errors is not None
+                    else None
+                )
                 _plot_fraction_points(
                     ax,
                     z_cut_use,
@@ -10154,7 +10207,11 @@ def plot_spectral_fraction_vs_redshift(
                     markersize=4,
                     alpha=0.7,
                     color=cut_color,
-                    elinewidth=0.7,
+                    elinewidth=0.32,
+                    error_alpha=0.26,
+                    error_color=cut_color,
+                    capsize=0,
+                    max_yerr=max_cut_yerr,
                     zorder=2,
                     label=cut_label,
                     rasterized=True,
@@ -10182,7 +10239,7 @@ def plot_spectral_fraction_vs_redshift(
             ax.legend(
                 handles,
                 labels,
-                fontsize=14,
+                fontsize=12,
                 loc="upper right",
                 frameon=True,
                 facecolor="white",

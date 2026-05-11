@@ -2703,7 +2703,7 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, mags_means, survey_
                 alpha=0.3, lw=0.5, color=colors[band_idx_map[n]]
             )
 
-    ax_lc.set_ylim(ax_lc.get_ylim()[0] - 0.62, ax_lc.get_ylim()[1] + 0.1)
+    ax_lc.set_ylim(ax_lc.get_ylim()[0] - 0.71, ax_lc.get_ylim()[1] + 0.1)
     ax_lc.set_xlabel('Time (modified Julian days)')
     ax_lc.set_ylabel('Apparent magnitude')
     ax_lc.invert_yaxis()
@@ -3016,7 +3016,7 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, mags_means, survey_
 
         print("Plotting vertical line at nu =", nu, "corresponding to tau =", tau)
         ax_psd.errorbar(
-            nu, 2e4,
+            nu, 2e3,
             xerr=xerr,
             yerr=None,
             fmt='o',
@@ -3036,7 +3036,7 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, mags_means, survey_
         ax_psd.tick_params(axis='x', which='both', pad=9)
         ax_psd.grid(False)
         ax_psd.legend(loc='lower left')
-        ax_psd.set_ylim(psd_ymin, 9e4)
+        ax_psd.set_ylim(psd_ymin, 7e3)
         ax_psd.set_xlim(*psd_xlim)
 
     plt.tight_layout()

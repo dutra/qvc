@@ -19,16 +19,25 @@ export QVC_RESULT_DIR
 export QVC_DUSTMAPS_DIR
 export PYTHONPATH="${QVC_CODE_DIR}/src${PYTHONPATH:+:${PYTHONPATH}}"
 
-DEMO_PREFIX="${DEMO_PREFIX:-demo}"
-DEMO_OBJECT_ID="${DEMO_OBJECT_ID:-1465126}"
-DEMO_COSMO_MODEL="${DEMO_COSMO_MODEL:-FlatLambdaCDM}"
+DEMO_PREFIX="${DEMO_PREFIX:-lc_paper}"
+DEMO_OBJECT_ID="${DEMO_OBJECT_ID:-1452887}"
 
 LC_H5_REL="results/data/${DEMO_PREFIX}/${DEMO_OBJECT_ID}.h5"
 LC_H5="${QVC_WORKDIR}/${LC_H5_REL}"
-SPECTRA_CSV_REL="results/data/${DEMO_PREFIX}/spectra_${DEMO_OBJECT_ID}.csv"
+SPECTRA_INPUT_H5_REL="results/data/lc_data_all.h5"
+SPECTRA_INPUT_H5="${QVC_WORKDIR}/${SPECTRA_INPUT_H5_REL}"
+SPECTRA_CSV_REL="results/data/jaxqsofit/test.csv"
 SPECTRA_CSV="${QVC_WORKDIR}/${SPECTRA_CSV_REL}"
-AGN_DATA_REL="results/data/light_curves.h5"
-AGN_DATA="${QVC_WORKDIR}/${AGN_DATA_REL}"
+HUBBLE_LC_H5_REL="results/data/lc_data_all.h5"
+HUBBLE_LC_H5="${QVC_WORKDIR}/${HUBBLE_LC_H5_REL}"
+HUBBLE_SPECTRA_CSV_REL="results/data/spectra_data_all.csv"
+HUBBLE_SPECTRA_CSV="${QVC_WORKDIR}/${HUBBLE_SPECTRA_CSV_REL}"
+HUBBLE_COMPLETENESS_SIM_REL="results/data/mock_completeness_catalog_fresh.h5"
+HUBBLE_COMPLETENESS_SIM="${QVC_WORKDIR}/${HUBBLE_COMPLETENESS_SIM_REL}"
+HUBBLE_FIDUCIAL_PREFIX="${HUBBLE_FIDUCIAL_PREFIX:-paper_hubble_final_production}"
+HUBBLE_RESTRICTED_PREFIX="${HUBBLE_RESTRICTED_PREFIX:-paper_hubble_final_production_restricted}"
+HUBBLE_FIDUCIAL_POSTERIORS="${QVC_WORKDIR}/results/hubble_posteriors/${HUBBLE_FIDUCIAL_PREFIX}"
+HUBBLE_RESTRICTED_POSTERIORS="${QVC_WORKDIR}/results/hubble_posteriors/${HUBBLE_RESTRICTED_PREFIX}"
 
 log() {
   printf '[qvc-demo] %s\n' "$*"
@@ -65,9 +74,9 @@ run_setup() {
   local required=(
     "${QVC_WORKDIR}/data/dr16q_prop_May01_2024.fits"
     "${QVC_WORKDIR}/data/ssp_data_fsps_v3.2_lgmet_age.h5"
-    "${QVC_WORKDIR}/data/spectra_cache/spec-9180-57693-0463.fits"
-    "${AGN_DATA}"
-    "${QVC_WORKDIR}/results/data/spectra.csv"
+    "${SPECTRA_INPUT_H5}"
+    "${HUBBLE_SPECTRA_CSV}"
+    "${HUBBLE_COMPLETENESS_SIM}"
     "${QVC_DUSTMAPS_DIR}/sfd/SFD_dust_4096_ngp.fits"
   )
 
@@ -94,14 +103,20 @@ run_light_curve() {
   fi
 
   log "running light-curve fit for object ${DEMO_OBJECT_ID}"
-  python -m qvc.light_curve.fit_light_curves \
-    --plot \
+  python -m qvc.light_curve.fit_light_curves --resume \
+    --filter_object_id "${DEMO_OBJECT_ID}" \
+    --svi_steps 1000 \
+    --nwarm 500 \
+    --nsamp 250 \
+    --nchains 1 \
     --progress \
-    --nwarm 200 \
-    --nsamp 100 \
-    --nchains 4 \
-    --max_tree_depth 8 \
-    --filter_object_id "${DEMO_OBJECT_ID}"
+    --plot \
+    --disable_correlation_plot \
+    --disable_histogram_plot \
+    --disable_sigma_tau_lambda_plot \
+    --disable_recovery_plot \
+    --fit_method "svi+nuts" \
+    --corner_plot_mode "full"
 
   if [[ ! -f "${LC_H5}" ]]; then
     log "expected light-curve output not found: ${LC_H5}"
@@ -113,10 +128,14 @@ run_spectra() {
   ensure_workdirs
   cd "${QVC_WORKDIR}"
 
-  mkdir -p "${QVC_WORKDIR}/results/data/${DEMO_PREFIX}" "${QVC_WORKDIR}/results/jaxqsofit/${DEMO_PREFIX}" "${QVC_WORKDIR}/plots/jaxqsofit/${DEMO_PREFIX}"
+  mkdir -p "${QVC_WORKDIR}/results/data/jaxqsofit" "${QVC_WORKDIR}/results/jaxqsofit/test" "${QVC_WORKDIR}/plots/jaxqsofit/test"
 
-  if [[ ! -f "${LC_H5}" ]]; then
-    log "missing light-curve input for spectra stage: ${LC_H5}"
+  if [[ ! -f "${SPECTRA_INPUT_H5}" ]]; then
+    log "missing H5 input for spectra stage: ${SPECTRA_INPUT_H5}"
+    exit 1
+  fi
+  if [[ ! -d "${QVC_WORKDIR}/data/spectra_cache_all" ]]; then
+    log "missing spectra cache for spectra stage: ${QVC_WORKDIR}/data/spectra_cache_all"
     exit 1
   fi
 
@@ -128,17 +147,20 @@ run_spectra() {
   log "running spectra fit for object ${DEMO_OBJECT_ID}"
   python -m qvc.spectra.fit_spectra \
     --mode fit \
-    --cache-dir "data/spectra_cache" \
-    --output-dir "results/jaxqsofit/${DEMO_PREFIX}" \
-    --fig-dir "plots/jaxqsofit/${DEMO_PREFIX}" \
+    --resume \
+    --fpath-in "${SPECTRA_INPUT_H5_REL}" \
+    "${SPECTRA_CSV_REL}" \
+    --cache-dir "data/spectra_cache_all" \
+    --output-dir "results/jaxqsofit/test" \
+    --fig-dir "plots/jaxqsofit/test" \
     --verbose \
     --save-fig \
-    --nuts-warmup 200 \
-    --nuts-samples 100 \
+    --nuts-warmup 500 \
+    --nuts-samples 300 \
     --nuts-chains 1 \
     --filter_object_id "${DEMO_OBJECT_ID}" \
-    "${LC_H5_REL}" \
-    "${SPECTRA_CSV_REL}"
+    --plot_mcmc_diagnostics \
+    --nproc 1
 
   if [[ ! -f "${SPECTRA_CSV}" ]]; then
     log "expected spectra output not found: ${SPECTRA_CSV}"
@@ -150,25 +172,52 @@ run_hubble() {
   ensure_workdirs
   cd "${QVC_WORKDIR}"
 
-  if [[ ! -f "${AGN_DATA}" ]]; then
-    log "missing downloaded AGN input for hubble stage: ${AGN_DATA}"
+  if [[ ! -f "${HUBBLE_LC_H5}" ]]; then
+    log "missing light-curve input for hubble stage: ${HUBBLE_LC_H5}"
     exit 1
   fi
-  if [[ ! -f "${SPECTRA_CSV}" ]]; then
-    log "missing spectra summary for hubble stage: ${SPECTRA_CSV}"
+  if [[ ! -f "${HUBBLE_SPECTRA_CSV}" ]]; then
+    log "missing spectra summary for hubble stage: ${HUBBLE_SPECTRA_CSV}"
+    exit 1
+  fi
+  if [[ ! -f "${HUBBLE_COMPLETENESS_SIM}" ]]; then
+    log "missing completeness mock catalog for hubble stage: ${HUBBLE_COMPLETENESS_SIM}"
+    exit 1
+  fi
+  if [[ ! -d "${HUBBLE_FIDUCIAL_POSTERIORS}" ]]; then
+    log "missing fiducial resume checkpoints: ${HUBBLE_FIDUCIAL_POSTERIORS}"
+    exit 1
+  fi
+  if [[ ! -d "${HUBBLE_RESTRICTED_POSTERIORS}" ]]; then
+    log "missing restricted resume checkpoints: ${HUBBLE_RESTRICTED_POSTERIORS}"
     exit 1
   fi
 
-  log "running hubble fit using downloaded data"
-  python -m qvc.hubble.hubble_fit \
-    --cosmo_models "${DEMO_COSMO_MODEL}" \
-    --run single \
-    --speed fast \
-    --disable_completeness \
-    --spectra_fit_csv "${SPECTRA_CSV_REL}" \
+  log "running fiducial hubble fit from resume checkpoints"
+  python -m qvc.hubble.hubble_fit --resume \
+    --cosmo_models FlatLambdaCDM FlatwCDM Flatw0waCDM \
+    --run full \
+    --speed production \
+    --spectra_fit_csv "${HUBBLE_SPECTRA_CSV_REL}" \
+    --completeness_sim_file "${HUBBLE_COMPLETENESS_SIM_REL}" \
     --z_range 0.44 3.16 \
-    --prefix "${DEMO_PREFIX}" \
-    "${AGN_DATA_REL}"
+    --result_prefix "fiducial" \
+    --prefix "${HUBBLE_FIDUCIAL_PREFIX}" \
+    --sigma_clip_threshold 3.0 \
+    "${HUBBLE_LC_H5_REL}"
+
+  log "running restricted hubble fit from resume checkpoints"
+  python -m qvc.hubble.hubble_fit --resume \
+    --cosmo_models FlatLambdaCDM FlatwCDM Flatw0waCDM \
+    --run full \
+    --speed production \
+    --spectra_fit_csv "${HUBBLE_SPECTRA_CSV_REL}" \
+    --completeness_sim_file "${HUBBLE_COMPLETENESS_SIM_REL}" \
+    --z_range 1.0 3.16 \
+    --result_prefix "restricted" \
+    --prefix "${HUBBLE_RESTRICTED_PREFIX}" \
+    --sigma_clip_threshold 3.0 \
+    "${HUBBLE_LC_H5_REL}"
 }
 
 case "${COMMAND}" in

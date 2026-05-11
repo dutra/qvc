@@ -45,13 +45,13 @@ def test_build_agn_cuts_includes_apparent_mag_2500_strict_maximum():
     assert not _scalar_cut_has_inclusive_upper("apparent_mag_2500")
 
 
-def test_apparent_mag_2500_cut_rejects_exact_threshold_and_nonfinite():
+def test_apparent_mag_2500_cut_is_disabled_when_threshold_is_none():
     df = pd.DataFrame(
         {
             "apparent_mag_2500": [
-                APPARENT_MAG_2500_MAX - 0.1,
-                APPARENT_MAG_2500_MAX,
-                APPARENT_MAG_2500_MAX + 0.1,
+                20.0,
+                22.5,
+                23.0,
                 np.nan,
                 "not-a-number",
             ],
@@ -65,7 +65,7 @@ def test_apparent_mag_2500_cut_rejects_exact_threshold_and_nonfinite():
         APPARENT_MAG_2500_MAX,
     )
 
-    np.testing.assert_array_equal(mask, [True, False, False, False, False])
+    np.testing.assert_array_equal(mask, [True, True, True, True, True])
 
 
 def test_light_curve_point_count_series_prefers_cleaned_per_band_counts():

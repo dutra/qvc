@@ -171,11 +171,11 @@ declare -a MISSING=()
 
 FIDUCIAL_RUN_DIR="Flatw0waCDM_joint_${SPEED}_all_z0p44_3p16_2d"
 FIDUCIAL_MODEL_COMPARE_DIR="model_compare_joint_${SPEED}_all_z0p44_3p16_2d"
-RESTRICTED_MODEL_COMPARE_DIR="model_compare_${SPEED}_all_z1p00_3p16_2d"
+RESTRICTED_MODEL_COMPARE_DIR="model_compare_joint_${SPEED}_all_z1p00_3p16_2d"
 
 copy_hubble_assets() {
-  copy_from_root "src/plots/appendix/N_vs_logZ_grid.pdf" "hubble" "N_vs_logZ_grid.pdf"
-  copy_from_root "src/plots/appendix/N_vs_cosmo_corner_grid.pdf" "hubble" "N_vs_cosmo_corner_grid.pdf"
+  #copy_from_root "src/plots/appendix/N_vs_logZ_grid.pdf" "hubble" "N_vs_logZ_grid.pdf"
+  #copy_from_root "src/plots/appendix/N_vs_cosmo_corner_grid.pdf" "hubble" "N_vs_cosmo_corner_grid.pdf"
   copy_from_dir "$FIDUCIAL_DIR" "$FIDUCIAL_RUN_DIR/predicted_L2500_vs_fullcorr_band_debiased.pdf" "hubble" "predicted_L2500_vs_fullcorr_band_debiased.pdf"
   copy_from_dir "$FIDUCIAL_DIR" "$FIDUCIAL_RUN_DIR/redshift_histograms.pdf" "hubble" "redshift_histograms.pdf"
   copy_from_dir "$FIDUCIAL_DIR" "$FIDUCIAL_RUN_DIR/hubble_diagram_debiased.pdf" "hubble" "hubble_diagram_debiased.pdf"
@@ -195,22 +195,25 @@ copy_hubble_assets() {
   copy_from_dir "$FIDUCIAL_DIR" "$FIDUCIAL_MODEL_COMPARE_DIR/cosmo_corner_FlatwCDM_alphabeta.pdf" "hubble" "cosmo_corner_FlatwCDM_noalphabeta.pdf"
   copy_from_dir "$FIDUCIAL_DIR" "$FIDUCIAL_MODEL_COMPARE_DIR/cosmo_corner_FlatLambdaCDM_alphabeta.pdf" "hubble" "cosmo_corner_FlatLambdaCDM_noalphabeta.pdf"
   copy_from_dir "$FIDUCIAL_DIR" "$FIDUCIAL_MODEL_COMPARE_DIR/param_results_fiducial.tex" "hubble" "param_results_fiducial.tex"
+  copy_from_dir "$FIDUCIAL_DIR" "$FIDUCIAL_RUN_DIR/hubble_diagram.pdf" "hubble" "hubble_diagram.pdf"
+  copy_from_dir "$FIDUCIAL_DIR" "$FIDUCIAL_RUN_DIR/completeness/completeness_map.pdf" "hubble" "completeness_map.pdf"
   copy_from_dir "$RESTRICTED_DIR" "$RESTRICTED_MODEL_COMPARE_DIR/param_results_restricted.tex" "hubble" "param_results_restricted.tex"
 }
 
 copy_spectra_assets() {
-  copy_from_root "plots/jaxqsofit/z0.907_212805.25-005145.7.pdf" "spectra" "z0.907_212805.25-005145.7.pdf"
+  :
+  #copy_from_root "plots/jaxqsofit/z0.907_212805.25-005145.7.pdf" "spectra" "z0.907_212805.25-005145.7.pdf"
 }
 
 copy_light_curve_assets() {
-  copy_from_root "src/plots/multiband/test/light_curves_fits/0.9_1465126_light_curve_job4709.pdf" "light_curve" "0.9_1465126_light_curve_job4709.pdf"
+  :
+  #copy_from_root "src/plots/multiband/test/light_curves_fits/0.9_1465126_light_curve_job4709.pdf" "light_curve" "0.9_1465126_light_curve_job4709.pdf"
 }
 
 copy_appendix_assets() {
-  copy_from_root "src/plots/appendix/N_vs_logZ_grid.pdf" "appendix" "N_vs_logZ_grid.pdf"
-  copy_from_root "src/plots/appendix/N_vs_cosmo_corner_grid.pdf" "appendix" "N_vs_cosmo_corner_grid.pdf"
-  copy_from_dir "$FIDUCIAL_DIR" "$FIDUCIAL_RUN_DIR/hubble_diagram.pdf" "appendix" "hubble_diagram.pdf"
-  copy_from_dir "$FIDUCIAL_DIR" "$FIDUCIAL_RUN_DIR/completeness/completeness_map.pdf" "appendix" "completeness_map.pdf"
+  :
+  #copy_from_root "src/plots/appendix/N_vs_logZ_grid.pdf" "appendix" "N_vs_logZ_grid.pdf"
+  #copy_from_root "src/plots/appendix/N_vs_cosmo_corner_grid.pdf" "appendix" "N_vs_cosmo_corner_grid.pdf"
 }
 
 case "${ONLY_GROUP:-all}" in

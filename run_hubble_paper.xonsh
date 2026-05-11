@@ -5,10 +5,10 @@ $QT_QPA_PLATFORM = "offscreen"
 $NUM_CORES = "30"
 
 speed = "production"
-python_cmd = "/home/dutra/.conda/envs/jaxcpu4/bin/python"
+python_cmd = "python"
 
-spectra_fit_csv = "results/data/jaxqsofit_apr20c_chisq20_apr18h_all_run2d.csv"
-h5_file = "results/data/apr23_1148am_6159c97_chisq.h5"
+spectra_fit_csv = "results/data/spectra_data_all.csv"
+h5_file = "results/data/lc_data_all.h5"
 
 base_prefix = f"paper_may2a_apr23lc_apr19bspec_{speed}"
 fiducial_prefix = base_prefix
