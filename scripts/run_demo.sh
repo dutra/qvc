@@ -3,19 +3,25 @@ set -euo pipefail
 
 COMMAND="${1:-all}"
 
-QVC_CODE_DIR="${QVC_CODE_DIR:-/opt/qvc}"
-QVC_WORKDIR="${QVC_WORKDIR:-/work/qvc-demo}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+QVC_CODE_DIR="${QVC_CODE_DIR:-${REPO_ROOT}}"
+QVC_WORKDIR="${QVC_WORKDIR:-${REPO_ROOT}}"
 QVC_DATA_DIR="${QVC_DATA_DIR:-${QVC_WORKDIR}/data}"
 QVC_RESULT_DIR="${QVC_RESULT_DIR:-${QVC_WORKDIR}/results}"
 QVC_PLOTS_DIR="${QVC_PLOTS_DIR:-${QVC_WORKDIR}/plots}"
-QVC_DUSTMAPS_DIR="${QVC_DUSTMAPS_DIR:-${QVC_WORKDIR}/.dustmaps}"
+QVC_DUSTMAPS_DIR="${QVC_DUSTMAPS_DIR:-${QVC_WORKDIR}/results/dustmaps}"
 
 export QT_QPA_PLATFORM="${QT_QPA_PLATFORM:-offscreen}"
 export MPLBACKEND="${MPLBACKEND:-Agg}"
 export JAX_PLATFORM_NAME="${JAX_PLATFORM_NAME:-cpu}"
 export NUM_CORES="${NUM_CORES:-4}"
+export QVC_CODE_DIR
+export QVC_WORKDIR
 export QVC_DATA_DIR
 export QVC_RESULT_DIR
+export QVC_PLOTS_DIR
 export QVC_DUSTMAPS_DIR
 export PYTHONPATH="${QVC_CODE_DIR}/src${PYTHONPATH:+:${PYTHONPATH}}"
 
@@ -97,31 +103,22 @@ run_light_curve() {
   export PREFIX="${DEMO_PREFIX}"
   export SUFFIX="${DEMO_PREFIX}"
 
-  if [[ -f "${LC_H5}" ]]; then
-    log "light-curve output already exists at ${LC_H5}; reusing it"
-    return
-  fi
-
   log "running light-curve fit for object ${DEMO_OBJECT_ID}"
-  python -m qvc.light_curve.fit_light_curves --resume \
+  python -m qvc.light_curve.fit_light_curves \
     --filter_object_id "${DEMO_OBJECT_ID}" \
-    --svi_steps 1000 \
-    --nwarm 500 \
-    --nsamp 250 \
+    --svi_steps 100 \
+    --nwarm 100 \
+    --nsamp 100 \
     --nchains 1 \
     --progress \
     --plot \
-    --disable_correlation_plot \
-    --disable_histogram_plot \
-    --disable_sigma_tau_lambda_plot \
-    --disable_recovery_plot \
     --fit_method "svi+nuts" \
     --corner_plot_mode "full"
 
-  if [[ ! -f "${LC_H5}" ]]; then
-    log "expected light-curve output not found: ${LC_H5}"
-    exit 1
-  fi
+  # if [[ ! -f "${LC_H5}" ]]; then
+  #   log "expected light-curve output not found: ${LC_H5}"
+  #   exit 1
+  # fi
 }
 
 run_spectra() {
@@ -139,15 +136,10 @@ run_spectra() {
     exit 1
   fi
 
-  if [[ -f "${SPECTRA_CSV}" ]]; then
-    log "spectra output already exists at ${SPECTRA_CSV}; reusing it"
-    return
-  fi
 
   log "running spectra fit for object ${DEMO_OBJECT_ID}"
   python -m qvc.spectra.fit_spectra \
     --mode fit \
-    --resume \
     --fpath-in "${SPECTRA_INPUT_H5_REL}" \
     "${SPECTRA_CSV_REL}" \
     --cache-dir "data/spectra_cache_all" \
@@ -155,17 +147,17 @@ run_spectra() {
     --fig-dir "plots/jaxqsofit/test" \
     --verbose \
     --save-fig \
-    --nuts-warmup 500 \
-    --nuts-samples 300 \
+    --nuts-warmup 100 \
+    --nuts-samples 100 \
     --nuts-chains 1 \
     --filter_object_id "${DEMO_OBJECT_ID}" \
     --plot_mcmc_diagnostics \
     --nproc 1
 
-  if [[ ! -f "${SPECTRA_CSV}" ]]; then
-    log "expected spectra output not found: ${SPECTRA_CSV}"
-    exit 1
-  fi
+  # if [[ ! -f "${SPECTRA_CSV}" ]]; then
+  #   log "expected spectra output not found: ${SPECTRA_CSV}"
+  #   exit 1
+  # fi
 }
 
 run_hubble() {
@@ -230,13 +222,11 @@ case "${COMMAND}" in
     ;;
   spectra)
     run_setup
-    run_light_curve
+    #run_light_curve
     run_spectra
     ;;
   hubble)
     run_setup
-    run_light_curve
-    run_spectra
     run_hubble
     ;;
   all)

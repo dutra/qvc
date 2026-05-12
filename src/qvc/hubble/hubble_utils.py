@@ -886,7 +886,7 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
                   spectra_fit_csv=None, only_load=False,
                   spectra_sdss_run2d="all",
                   correct_sigma_uv_host=False,
-                  lc_info_csv="data/lc_chisq.csv",
+                  lc_info_csv=None,
                   z_range=(0.44, 3.16),
                   plot_path="plots/hubble",
                   cut_report_path=None):

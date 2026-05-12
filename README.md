@@ -8,6 +8,10 @@ This repository provides end-to-end tooling for:
 
 The demo workflow downloads the needed data, fits one light curve, fits one spectrum, and recreates the publication Hubble runs with saved posteriors.
 
+The resulting figures are found under the `docker-workdir/plots` folder (if ran with docker) or `plots` folder.
+
+Note: For speed, the light curve fitting and spectra fitting will run with a minimal number of warmup and sampling steps, and the produced plots may have minor deviations from the published figures. The published figures were ran with longer warmup and sampling steps in Yale's HPC Clusters.
+
 ## Quick Start
 
 ```bash
@@ -16,19 +20,11 @@ cd qvc
 ```
 
 ### Docker
-For convenience, we include a self-contained Docker container.
+For convenience, we include a self-contained Docker (https://www.docker.com) container.
 
 ```bash
 docker build -t qvc-demo .
 mkdir -p "$(pwd)/docker-workdir"
-```
-
-Run setup only:
-
-```bash
-docker run --rm \
-  -v "$(pwd)/docker-workdir:/work/qvc-demo" \
-  qvc-demo setup
 ```
 
 Run the full replication workflow:
@@ -49,11 +45,12 @@ spectra
 hubble
 ```
 
-The Docker setup step downloads the data automatically into `/work/qvc-demo`, including the generated completeness mock used by the Hubble stage. Generated `results/`, `plots/`, and dustmaps files are written there as well.
+The Docker setup step downloads the data automatically into `docker-workdir`, including the generated completeness mock used by the Hubble stage. Generated `results/`, `plots/`, and dustmaps files are written there as well.
 
 ## Local Install
 
-Create and activate a Python environment:
+You may also install the package using pip. 
+First, create and activate a Python environment. We recommend Conda (https://www.anaconda.com/download).
 
 ```bash
 conda create -n jaxcpu -c conda-forge python=3.12.11 pip
@@ -61,16 +58,10 @@ conda activate jaxcpu
 pip install -e .
 ```
 
-Download data:
-
-```bash
-python -m qvc.setup_data
-```
-
 Run the full demo workflow:
 
 ```bash
-bash scripts/run_demo.sh
+bash scripts/run_demo.sh all
 ```
 
 You can also run individual stages:

@@ -23,15 +23,9 @@ def fetch_dustmaps():
     from dustmaps.config import config
     import dustmaps.sfd
 
-    data_dir = os.environ.get("QVC_DUSTMAPS_DIR")
-    if data_dir:
-        config["data_dir"] = data_dir
-
-    try:
-        configured_root = config["data_dir"]
-    except Exception:
-        configured_root = Path.home() / "dustmaps"
+    configured_root = os.environ.get("QVC_DUSTMAPS_DIR") or "results/dustmaps"
     configured_dir = Path(configured_root).expanduser()
+    config["data_dir"] = str(configured_dir)
     sentinel = configured_dir.joinpath(*DUSTMAPS_SENTINEL)
     if sentinel.exists():
         print(
@@ -40,9 +34,6 @@ def fetch_dustmaps():
         )
         return
 
-    print(f"{Fore.BLUE}RUN  {Fore.RESET} Resetting dustmaps config...")
-    if not data_dir:
-        config.reset()
     print(f"{Fore.BLUE}RUN  {Fore.RESET} Fetching dustmaps SFD data...")
     dustmaps.sfd.fetch()
     print(f"{Fore.GREEN}OK   {Fore.RESET} dustmaps SFD data fetched.")
@@ -55,7 +46,7 @@ COMMANDS = {
 DEFAULT_STEPS = [
     {
         "type": "download",
-        "url": "https://drive.google.com/file/d/1sYr-N-DMpuWpbfdPg6zQ-IryP8InY5TK/view?usp=sharing",
+        "url": "https://drive.google.com/file/d/1LRTJOGOWTPnQZQMsKBpOje8sZbf3T4bn/view?usp=sharing",
         "folder": "./",
         "filename": "data/dr16q_prop_May01_2024.fits",
     },
@@ -99,6 +90,19 @@ DEFAULT_STEPS = [
         "url": "https://drive.google.com/file/d/1zg2-T8Y5C4iEiPpWy3UUc21dUYjAttlU/view?usp=sharing",
         "folder": "results/cosmo/",
     },
+    {
+        "type": "download",
+        "url": "https://github.com/PantheonPlusSH0ES/DataRelease/raw/c447f0fea703fcd0fff57de5000947b5ca81286b/Pantheon+_Data/4_DISTANCES_AND_COVAR/Pantheon+SH0ES_STAT+SYS.cov",
+        "folder": "data/",
+        "filename": "Pantheon+SH0ES_STAT+SYS.cov",
+    },
+    {
+        "type": "download",
+        "url": "https://github.com/PantheonPlusSH0ES/DataRelease/raw/c447f0fea703fcd0fff57de5000947b5ca81286b/Pantheon+_Data/4_DISTANCES_AND_COVAR/Pantheon+SH0ES.dat",
+        "folder": "data/",
+        "filename": "Pantheon+SH0ES.dat",
+    },
+    
     {"type": "command", "name": "fetch_dustmaps"},
 ]
 
