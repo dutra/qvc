@@ -838,7 +838,15 @@ def test_plot_hubble_residual_chi2_annotation_includes_high_z(monkeypatch, tmp_p
 
     def capture_text(self, x, y, s, *args, **kwargs):
         if r"\chi^2_\nu" in str(s):
-            text_calls.append(str(s))
+            text_calls.append(
+                {
+                    "x": x,
+                    "y": y,
+                    "text": str(s),
+                    "ha": kwargs.get("ha"),
+                    "va": kwargs.get("va"),
+                }
+            )
         return original_text(self, x, y, s, *args, **kwargs)
 
     monkeypatch.setattr(Axes, "text", capture_text)
@@ -860,12 +868,16 @@ def test_plot_hubble_residual_chi2_annotation_includes_high_z(monkeypatch, tmp_p
         residuals_csv_filename=None,
     )
 
-    assert any(
-        r"$\chi^2_\nu = 1.23$" in text
-        and rf"$\chi^2_\nu(1<z<3.16) = 2.34$" in text
-        and "\n" in text
-        for text in text_calls
+    annotation = next(
+        call for call in text_calls
+        if r"$\chi^2_\nu(0.44<z<3.16) = 1.23$" in call["text"]
     )
+    assert rf"$\chi^2_\nu(1.00<z<3.16) = 2.34$" in annotation["text"]
+    assert "\n" in annotation["text"]
+    assert annotation["x"] == 0.02
+    assert annotation["y"] == 0.08
+    assert annotation["ha"] == "left"
+    assert annotation["va"] == "bottom"
 
     text_calls.clear()
     hubble_plotting.plot_hubble(
@@ -881,7 +893,8 @@ def test_plot_hubble_residual_chi2_annotation_includes_high_z(monkeypatch, tmp_p
         residuals_csv_filename=None,
     )
 
-    chi2_text = next(text for text in text_calls if r"\chi^2_\nu" in text)
+    chi2_text = next(call["text"] for call in text_calls if r"\chi^2_\nu" in call["text"])
+    assert r"$\chi^2_\nu(0.44<z<0.90)" in chi2_text
     assert "(1<z<" not in chi2_text
 
 
@@ -1157,6 +1170,8 @@ def test_run_single_calls_agn_table_only_for_joint_flatw0wa(monkeypatch, tmp_pat
 
     assert len(latex_calls) == 1
     assert len(csv_calls) == 1
+    csv_df_arg = csv_calls[0][0][0]
+    assert csv_df_arg["object_id"].tolist() == df_agn["object_id"].tolist()
 
 
 def test_run_single_does_not_call_agn_table_for_only_sna(monkeypatch, tmp_path):
@@ -1781,6 +1796,8 @@ def _patch_run_single_plot_stack(monkeypatch):
     monkeypatch.setattr(hubble_fit, "compute_age_universe_with_error", lambda *args, **kwargs: (13.8, 0.1))
     monkeypatch.setattr(hubble_fit, "plot_sigma_uv_mpred_correction", lambda *args, **kwargs: None)
     monkeypatch.setattr(hubble_fit, "plot_predicted_L2500_vs_sigmahat", lambda *args, **kwargs: (np.zeros(len(args[1])), np.ones(len(args[1]))))
+    monkeypatch.setattr(hubble_fit, "plot_L2500_vs_sigma_tau_separate", lambda *args, **kwargs: None)
+    monkeypatch.setattr(hubble_fit, "plot_catalog_quantity_vs_sigma_tau_separate", lambda *args, **kwargs: None)
     monkeypatch.setattr(hubble_fit, "plot_blr_line_lags_vs_l2500", lambda *args, **kwargs: None)
     monkeypatch.setattr(hubble_fit, "plot_blr_diagnostics_summary", lambda *args, **kwargs: None)
     monkeypatch.setattr(hubble_fit, "plot_hubble_residual_normality", lambda *args, **kwargs: None)

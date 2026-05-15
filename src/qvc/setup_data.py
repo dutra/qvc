@@ -23,15 +23,9 @@ def fetch_dustmaps():
     from dustmaps.config import config
     import dustmaps.sfd
 
-    data_dir = os.environ.get("QVC_DUSTMAPS_DIR")
-    if data_dir:
-        config["data_dir"] = data_dir
-
-    try:
-        configured_root = config["data_dir"]
-    except Exception:
-        configured_root = Path.home() / "dustmaps"
+    configured_root = os.environ.get("QVC_DUSTMAPS_DIR") or "results/dustmaps"
     configured_dir = Path(configured_root).expanduser()
+    config["data_dir"] = str(configured_dir)
     sentinel = configured_dir.joinpath(*DUSTMAPS_SENTINEL)
     if sentinel.exists():
         print(
@@ -40,9 +34,6 @@ def fetch_dustmaps():
         )
         return
 
-    print(f"{Fore.BLUE}RUN  {Fore.RESET} Resetting dustmaps config...")
-    if not data_dir:
-        config.reset()
     print(f"{Fore.BLUE}RUN  {Fore.RESET} Fetching dustmaps SFD data...")
     dustmaps.sfd.fetch()
     print(f"{Fore.GREEN}OK   {Fore.RESET} dustmaps SFD data fetched.")
@@ -55,27 +46,38 @@ COMMANDS = {
 DEFAULT_STEPS = [
     {
         "type": "download",
-        "url": "https://drive.google.com/file/d/1sYr-N-DMpuWpbfdPg6zQ-IryP8InY5TK/view?usp=sharing",
+        "url": "https://drive.google.com/file/d/1LRTJOGOWTPnQZQMsKBpOje8sZbf3T4bn/view?usp=sharing",
         "folder": "./",
         "filename": "data/dr16q_prop_May01_2024.fits",
     },
     {
         "type": "download",
-        "url": "https://drive.google.com/file/d/1bq1GEBEApSgJz0ezyxIx6ORz79epmQuU/view?usp=sharing",
+        "url": "https://drive.google.com/file/d/1PUVRL7AlyG_15wKpkpF5wR-uYpCS8q11/view?usp=sharing",
         "folder": "results/data",
-        "filename": "light_curves.h5",
+        "filename": "lc_data_all.h5",
     },
     {
         "type": "download",
-        "url": "https://drive.google.com/file/d/11py-CEJuszTn12eMTEn4cMLD4vbJJ15e/view?usp=sharing",
+        "url": "https://drive.google.com/file/d/1VtccnFl5WIan4pZHfyia6KjhgkrCAHrt/view?usp=sharing",
         "folder": "results/data",
-        "filename": "spectra.csv",
+        "filename": "spectra_data_all.csv",
     },
     {
         "type": "download",
-        "url": "https://drive.google.com/file/d/1j39Tc1vy3nnCdVayWIKu-6IlOeC_moke/view?usp=sharing",
-        "folder": "data/spectra_cache",
-        "filename": "spec-9180-57693-0463.fits",
+        "url": "https://drive.google.com/file/d/1UTGwSZXfLm8kSAKTDHeS9r685isycLeC/view?usp=sharing",
+        "folder": "data/spectra_cache_all",
+        "filename": "spec-9152-58041-0926.fits",
+    },
+    {
+        "type": "download",
+        "url": "https://drive.google.com/file/d/1QNOzH3_gmM1mCQezQJdW557MpUQdc2UW/view?usp=sharing",
+        "folder": "results/",
+    },
+    {
+        "type": "download",
+        "url": "https://drive.google.com/file/d/1KDnXK3pSWD3ZtFSIHIoDMjYJBviRdnoF/view?usp=sharing",
+        "folder": "results/data/",
+        "filename": "mock_completeness_catalog_fresh.h5",
     },
     {
         "type": "download",
@@ -83,6 +85,24 @@ DEFAULT_STEPS = [
         "folder": "data/",
         "filename": "ssp_data_fsps_v3.2_lgmet_age.h5",
     },
+    {
+        "type": "download",
+        "url": "https://drive.google.com/file/d/1zg2-T8Y5C4iEiPpWy3UUc21dUYjAttlU/view?usp=sharing",
+        "folder": "results/cosmo/",
+    },
+    {
+        "type": "download",
+        "url": "https://github.com/PantheonPlusSH0ES/DataRelease/raw/c447f0fea703fcd0fff57de5000947b5ca81286b/Pantheon+_Data/4_DISTANCES_AND_COVAR/Pantheon+SH0ES_STAT+SYS.cov",
+        "folder": "data/",
+        "filename": "Pantheon+SH0ES_STAT+SYS.cov",
+    },
+    {
+        "type": "download",
+        "url": "https://github.com/PantheonPlusSH0ES/DataRelease/raw/c447f0fea703fcd0fff57de5000947b5ca81286b/Pantheon+_Data/4_DISTANCES_AND_COVAR/Pantheon+SH0ES.dat",
+        "folder": "data/",
+        "filename": "Pantheon+SH0ES.dat",
+    },
+    
     {"type": "command", "name": "fetch_dustmaps"},
 ]
 
@@ -101,12 +121,12 @@ APPENDIX_STEPS = [
         "filename": "TotalDat.fits.gz",
         "skip_if_exists": "TotalDat.fits",
     },
-    {
-        "type": "download",
-        "url": "https://data.sdss.org/sas/dr17/sdss/spectro/redux/specObj-dr17.fits",
-        "folder": "data/SDSS_DR17",
-        "filename": "specObj-dr17.fits",
-    }
+    # {
+    #     "type": "download",
+    #     "url": "https://data.sdss.org/sas/dr17/sdss/spectro/redux/specObj-dr17.fits",
+    #     "folder": "data/SDSS_DR17",
+    #     "filename": "specObj-dr17.fits",
+    # }
 ]
 
 

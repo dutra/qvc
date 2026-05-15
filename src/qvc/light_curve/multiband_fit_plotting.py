@@ -2597,7 +2597,8 @@ def save_structure_function_plot(diagnostic, data, show=False, filename_suffix=N
 
 def save_combined_plot(samples, model, X, y, yerr, band_idx, mags_means, survey_times,
                        data, bands=['u', 'g', 'r', 'i', 'z'], plot_psd=True, show=False,
-                       time0=0.0, plot_bpl_fit=False, filename_suffix=None):
+                       time0=0.0, plot_bpl_fit=False, filename_suffix=None,
+                       show_combined_light_curve_component_overlay=False):
     import os
     import logging
     import numpy as np
@@ -2663,36 +2664,38 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, mags_means, survey_
                 alpha=0.3, lw=0.5, color=colors[band_idx_map[n]]
             )
 
-            cont_result = _prediction_to_display(
-                model,
-                model.pred(
-                    _component_only_params(posterior_median, component="continuum"),
-                    (t_test - time0, jnp.full_like(t_test, n, dtype=int)),
-                ),
-            )
-            mu_cont = np.asarray(cont_result[0], dtype=float)
+            if show_combined_light_curve_component_overlay:
+                cont_result = _prediction_to_display(
+                    model,
+                    model.pred(
+                        _component_only_params(posterior_median, component="continuum"),
+                        (t_test - time0, jnp.full_like(t_test, n, dtype=int)),
+                    ),
+                )
+                mu_cont = np.asarray(cont_result[0], dtype=float)
 
-            ax_lc.plot(
-                t_test,
-                mu_cont + offsets[n],
-                alpha=0.75,
-                color=colors[band_idx_map[n]],
-                lw=1.0,
-                linestyle='--',
-            )
+                ax_lc.plot(
+                    t_test,
+                    mu_cont + offsets[n],
+                    alpha=0.75,
+                    color=colors[band_idx_map[n]],
+                    lw=1.0,
+                    linestyle='--',
+                )
         else:
             mu, std, mu_cont, std_cont, _mu_blr, _std_blr = result
 
-            ax_lc.plot(
-                t_test, mu_cont + offsets[n], alpha=0.5,
-                color=colors[band_idx_map[n]], lw=1.0,
-                label=f'{band_idx_map[n]}-band continuum', linestyle='--'
-            )
-            ax_lc.fill_between(
-                t_test, mu_cont + offsets[n] - std_cont,
-                mu_cont + offsets[n] + std_cont,
-                alpha=0.15, lw=0.5, color=colors[band_idx_map[n]]
-            )
+            if show_combined_light_curve_component_overlay:
+                ax_lc.plot(
+                    t_test, mu_cont + offsets[n], alpha=0.5,
+                    color=colors[band_idx_map[n]], lw=1.0,
+                    label=f'{band_idx_map[n]}-band continuum', linestyle='--'
+                )
+                ax_lc.fill_between(
+                    t_test, mu_cont + offsets[n] - std_cont,
+                    mu_cont + offsets[n] + std_cont,
+                    alpha=0.15, lw=0.5, color=colors[band_idx_map[n]]
+                )
 
             ax_lc.plot(t_test, mu + offsets[n], alpha=0.8, color=colors[band_idx_map[n]], lw=1.0)
             ax_lc.fill_between(
@@ -2700,7 +2703,7 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, mags_means, survey_
                 alpha=0.3, lw=0.5, color=colors[band_idx_map[n]]
             )
 
-    ax_lc.set_ylim(ax_lc.get_ylim()[0] - 0.24, ax_lc.get_ylim()[1])
+    ax_lc.set_ylim(ax_lc.get_ylim()[0] - 0.71, ax_lc.get_ylim()[1] + 0.1)
     ax_lc.set_xlabel('Time (modified Julian days)')
     ax_lc.set_ylabel('Apparent magnitude')
     ax_lc.invert_yaxis()
@@ -2740,7 +2743,7 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, mags_means, survey_
             zorder=11
         )
 
-    ax_lc.legend(loc='upper right')
+    ax_lc.legend(loc='upper right', framealpha=1.0)
 
     if plot_psd:
         # Ensure all elements of posterior_median are jnp arrays
@@ -2869,7 +2872,7 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, mags_means, survey_
         ax_psd.fill_between(freqs, psd_lo, psd_hi, color='m', alpha=0.2, zorder=3)
 
         floor_positive = np.isfinite(P_noise_on_bin) & (P_noise_on_bin > 0.0)
-        if plot_bpl_fit and np.count_nonzero(floor_positive):
+        if np.count_nonzero(floor_positive):
             ax_psd.plot(
                 f_bin[floor_positive],
                 P_noise_on_bin[floor_positive],
@@ -3013,7 +3016,7 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, mags_means, survey_
 
         print("Plotting vertical line at nu =", nu, "corresponding to tau =", tau)
         ax_psd.errorbar(
-            nu, 2e4,
+            nu, 2e3,
             xerr=xerr,
             yerr=None,
             fmt='o',
@@ -3026,14 +3029,14 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, mags_means, survey_
             zorder=6,
         )
 
-        ax_psd.set_xlabel(r"Frequency $f$ (days$^{-1}$)")
+        ax_psd.set_xlabel(r"Frequency (days$^{-1}$)")
         ax_psd.set_ylabel(r"PSD ($\mathrm{mag}^2$ $\mathrm{days}$)")
         ax_psd.set_xscale("log")
         ax_psd.set_yscale("log")
         ax_psd.tick_params(axis='x', which='both', pad=9)
         ax_psd.grid(False)
         ax_psd.legend(loc='lower left')
-        ax_psd.set_ylim(psd_ymin, 9e4)
+        ax_psd.set_ylim(psd_ymin, 7e3)
         ax_psd.set_xlim(*psd_xlim)
 
     plt.tight_layout()

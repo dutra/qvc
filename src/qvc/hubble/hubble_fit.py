@@ -94,6 +94,7 @@ from qvc.hubble.hubble_model import (
     get_model_params,
     M_model_agn,
     M_model_agn_err,
+    resolve_model_option_flags,
 )
 from qvc.hubble.hubble_completeness_refactored import (
     COMPLETENESS_FHOST_COL,
@@ -174,6 +175,128 @@ def _cosmo_from_params(cosmo_model, params, zp):
             zp=zp,
         )
     raise ValueError(f"Invalid cosmology model: {cosmo_model!r}")
+
+
+def _resolve_table_debias_values_for_frame(df_agn, *, dm_interp=None, dmi_values=None):
+    if dmi_values is not None:
+        dmi = np.asarray(dmi_values, dtype=float)
+        if dmi.shape != (len(df_agn),):
+            raise ValueError(f"dmi_values has shape {dmi.shape}, but expected {(len(df_agn),)}.")
+        return dmi
+    if dm_interp is None:
+        return np.zeros(len(df_agn), dtype=float)
+    return np.asarray(
+        dm_interp(
+            np.column_stack(
+                [
+                    df_agn["apparent_mag_2500"].to_numpy(dtype=float),
+                    df_agn["z"].to_numpy(dtype=float),
+                ]
+            )
+        ),
+        dtype=float,
+    )
+
+
+def _compute_debiased_agn_table_mu(
+    flat_samples,
+    model_labels,
+    df_agn,
+    cosmo_model,
+    *,
+    z_pivot_agn,
+    dm_interp=None,
+    dmi_values=None,
+    only_agn=False,
+    use_alpha_lambda_term=False,
+    use_eta_sigma_term=False,
+    use_redshift_log_f_term=False,
+):
+    """Compute debiased AGN distance-modulus table values without making plots."""
+    samples = np.asarray(flat_samples, dtype=float)
+    if samples.ndim != 2 or samples.shape[1] != len(model_labels):
+        raise ValueError(
+            f"Expected flat_samples shape (n, {len(model_labels)}), got {samples.shape}."
+        )
+    if len(df_agn) == 0:
+        return np.empty(0, dtype=float), np.empty(0, dtype=float)
+
+    option_flags = resolve_model_option_flags(
+        cosmo_model,
+        samples.shape[1],
+        only_agn=only_agn,
+        use_alpha_lambda_term=use_alpha_lambda_term,
+        use_eta_sigma_term=use_eta_sigma_term,
+        use_redshift_log_f_term=use_redshift_log_f_term,
+    )
+    param_indices = {label: idx for idx, label in enumerate(model_labels)}
+    m_obs = df_agn["apparent_mag_2500"].to_numpy(dtype=float)
+    agn_obs_arr, agn_err_arr, agn_pivot_arr = agn_model_pack_obs(
+        df_agn,
+        use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
+        use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+    )
+
+    mu_samples = []
+    for sample in samples:
+        sample_params = {label: sample[param_indices[label]] for label in model_labels}
+        agn_params_arr = agn_model_pack_params(
+            sample_params,
+            use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
+            use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+        )
+        predicted_M2500 = M_model_agn(
+            agn_params_arr,
+            agn_obs_arr,
+            agn_pivot_arr,
+            use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
+            use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+        )
+        mu_samples.append(m_obs - predicted_M2500)
+
+    debias_values = _resolve_table_debias_values_for_frame(
+        df_agn,
+        dm_interp=dm_interp,
+        dmi_values=dmi_values,
+    )
+    mu_samples = np.asarray(mu_samples, dtype=float) - debias_values
+    mu_median = np.percentile(mu_samples, 50, axis=0)
+
+    median_params = {
+        label: float(np.nanmedian(samples[:, idx]))
+        for idx, label in enumerate(model_labels)
+    }
+    agn_params_arr = agn_model_pack_params(
+        median_params,
+        use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
+        use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+    )
+    predicted_M2500_err = M_model_agn_err(
+        agn_params_arr,
+        agn_obs_arr,
+        agn_err_arr,
+        agn_pivot_arr,
+        use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
+        use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+    )
+    cosmo = _cosmo_from_params(cosmo_model, median_params, z_pivot_agn)
+    z = df_agn["z"].to_numpy(dtype=float)
+    m_err = df_agn["apparent_mag_2500_err"].to_numpy(dtype=float)
+    z_err = df_agn["z_err"].to_numpy(dtype=float)
+    log_f_eff = evaluate_log_f(
+        median_params,
+        z,
+        z_pivot=z_pivot_agn,
+        use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
+    )
+    mu_err = np.sqrt(
+        m_err**2
+        + predicted_M2500_err**2
+        + sigma_mu_from_z_err(z, z_err, cosmo)**2
+        + sigma_lens_from_dc(z, cosmo)**2
+        + np.exp(log_f_eff) ** 2
+    )
+    return mu_median, mu_err
 
 
 def _agn_likelihood_param_labels(
@@ -2775,12 +2898,56 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 index=False,
             )
     if cosmo_model == "Flatw0waCDM":
+        df_agn_table_sample = df_agn_full_sample_preclip
+        table_sample_matches_plot_sample = (
+            len(df_agn_table_sample) == len(df_agn_pass2_plot_sample)
+            and df_agn_table_sample["object_id"].astype(str).reset_index(drop=True).equals(
+                df_agn_pass2_plot_sample["object_id"].astype(str).reset_index(drop=True)
+            )
+        )
+        if table_sample_matches_plot_sample:
+            dmi_posterior_median_table = dmi_posterior_median_full
+        else:
+            dmi_posterior_median_table, _, _ = _compute_direct_full_sample_completeness_summaries(
+                flat_samples,
+                df_agn_fit_selection=df_agn_pass2_fit_selection,
+                df_agn_plot_sample=df_agn_table_sample,
+                df_pantheon=df_pantheon,
+                _sna_L=_sna_L,
+                _sna_Lower=_sna_Lower,
+                _sna_LogdetCov=_sna_LogdetCov,
+                cosmo_model=cosmo_model,
+                completeness_params=_get_direct_completeness_params(),
+                z_pivot_agn=z_pivot_agn,
+                use_full_cov=use_full_cov,
+                disable_ceph_dist_calibration=disable_ceph_dist_calibration,
+                use_planck_h0_prior=use_planck_h0_prior,
+                use_planck_om_prior=use_planck_om_prior,
+                only_agn=only_agn,
+                use_alpha_lambda_term=use_alpha_lambda_term,
+                use_eta_sigma_term=use_eta_sigma_term,
+                use_redshift_log_f_term=use_redshift_log_f_term,
+                early_de_guard=early_de_guard,
+            )
+        mu_table, mu_err_table = _compute_debiased_agn_table_mu(
+            flat_samples,
+            model_labels,
+            df_agn_table_sample,
+            cosmo_model,
+            z_pivot_agn=z_pivot_agn,
+            dm_interp=dm_interp,
+            dmi_values=dmi_posterior_median_table,
+            only_agn=only_agn,
+            use_alpha_lambda_term=use_alpha_lambda_term,
+            use_eta_sigma_term=use_eta_sigma_term,
+            use_redshift_log_f_term=use_redshift_log_f_term,
+        )
         make_agn_csv_table(
-            df_agn_pass2_plot_sample,
-            mu_pred_median_debiased,
-            mu_pred_std_debiased_with_scatter,
+            df_agn_table_sample,
+            mu_table,
+            mu_err_table,
             dm_interp,
-            dmi_values=dmi_posterior_median_full,
+            dmi_values=dmi_posterior_median_table,
             sort_by="z",
             ascending=True,
             write_path=plot_path,
@@ -3533,7 +3700,7 @@ if __name__ == "__main__":
                            correct_sigma_uv_host=args.correct_sigma_uv_host,
                            z_range=tuple(args.z_range), plot_path=agn_plot_path,
                            cut_report_path=cut_report_path)
-    if args.resume_replot_with_cuts:
+    if args.resume_replot_with_cuts or args.uniform_redshift_distribution:
         effective_N = args.N
     else:
         df_agn, effective_N = subsample_dataframe_at_most(

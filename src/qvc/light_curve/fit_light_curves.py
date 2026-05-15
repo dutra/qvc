@@ -4868,6 +4868,14 @@ def build_mag_fluxmix_fast_display_model(obj_dict, lam_rf, samples_flat):
     )
 
 
+def apply_resume_sample_save_policy(args):
+    """Disable per-object posterior sample writes when reusing saved samples."""
+    if getattr(args, "resume", False) and getattr(args, "save_sample_file", False):
+        logging.info("--resume set; disabling per-object posterior sample file saving.")
+        args.save_sample_file = False
+    return args
+
+
 def run_two_stage_fluxmix_fast_inference(
     obj_dict,
     lam_rf,
@@ -5085,7 +5093,18 @@ def main():
     parser.add_argument("--disable_correlation_plot", action="store_true", default=False, help="Disable correlation matrix plot.")
     parser.add_argument("--disable_histogram_plot", action="store_true", default=False, help="Disable posterior histogram plot.")
     parser.add_argument("--disable_corner_plot", action="store_true", default=False, help="Disable corner plot.")
-    parser.add_argument("--plot_ls_broken_pl", action="store_true", default=False, help="Overlay the fitted Lomb-Scargle broken power law on the PSD subplot.")
+    parser.add_argument(
+        "--plot_ls_broken_pl",
+        action="store_true",
+        default=False,
+        help="Overlay the fitted Lomb-Scargle broken power law and uncorrected LS PSD points on the PSD subplot.",
+    )
+    parser.add_argument(
+        "--show_combined_light_curve_component_overlay",
+        action="store_true",
+        default=False,
+        help="Show the dashed component overlay on the combined light-curve fit plot.",
+    )
     parser.add_argument(
         "--corner_plot_mode",
         type=str,
@@ -5128,6 +5147,7 @@ def main():
         help="Subtract spectra-derived constant contaminating flux in PSF light curves before GP fitting.",
     )
     args = parser.parse_args()
+    args = apply_resume_sample_save_policy(args)
     print("Args:", args)
 
     if args.load_stone_lcs:
@@ -5633,6 +5653,9 @@ def main():
                             bands=bands,
                             plot_psd=(not args.disable_plot_psd),
                             plot_bpl_fit=args.plot_ls_broken_pl,
+                            show_combined_light_curve_component_overlay=(
+                                args.show_combined_light_curve_component_overlay
+                            ),
                         )
                     if not args.disable_color_magnitude_plot:
                         save_color_magnitude_plot(

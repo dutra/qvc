@@ -289,7 +289,19 @@ def test_plot_f_host_2500_vs_l2500_accepts_psf_column(tmp_path, monkeypatch):
 
 def test_plot_blr_diagnostics_summary_writes_default_pdf(tmp_path, monkeypatch):
     monkeypatch.setenv("MPLCONFIGDIR", str(tmp_path / "mplconfig"))
-    df = _minimal_agn_frame(n=12)
+    old_schema_cols = [
+        "log_sigma0",
+        "log_sigma0_err",
+        "log_amp_delta_blr_u",
+        "log_amp_delta_blr_u_err",
+        "log_amp_delta_blr_g",
+        "log_amp_delta_blr_g_err",
+        "log_amp_delta_blr_r",
+        "log_amp_delta_blr_r_err",
+        "log_amp_delta_blr_i",
+        "log_amp_delta_blr_i_err",
+    ]
+    df = _minimal_agn_frame(n=12).drop(columns=old_schema_cols)
 
     out = hubble_plotting.plot_blr_diagnostics_summary(
         df,
@@ -302,9 +314,36 @@ def test_plot_blr_diagnostics_summary_writes_default_pdf(tmp_path, monkeypatch):
     assert out.endswith(os.path.join("diagnostics", "blr.pdf"))
 
 
+def test_plot_blr_diagnostics_summary_marks_out_of_range_redshifts(tmp_path, monkeypatch):
+    monkeypatch.setenv("MPLCONFIGDIR", str(tmp_path / "mplconfig"))
+    df = _minimal_agn_frame(n=6)
+    df["z"] = [0.2, 0.7, 1.2, 2.0, 3.0, 3.8]
+    errorbar_calls = []
+    original_errorbar = hubble_plotting.mpl.axes.Axes.errorbar
+
+    def capture_errorbar(self, *args, **kwargs):
+        errorbar_calls.append(kwargs)
+        return original_errorbar(self, *args, **kwargs)
+
+    monkeypatch.setattr(hubble_plotting.mpl.axes.Axes, "errorbar", capture_errorbar)
+
+    out = hubble_plotting.plot_blr_diagnostics_summary(
+        df,
+        plot_path=str(tmp_path / "figures"),
+        show=False,
+    )
+
+    formats = [call.get("fmt") for call in errorbar_calls]
+    assert out is not None
+    assert "o" in formats
+    assert "D" in formats
+    assert any(call.get("markersize") == 4 for call in errorbar_calls if call.get("fmt") == "o")
+    assert any(call.get("markersize") == 3 for call in errorbar_calls if call.get("fmt") == "D")
+
+
 def test_plot_blr_diagnostics_summary_returns_none_when_columns_missing(tmp_path, monkeypatch):
     monkeypatch.setenv("MPLCONFIGDIR", str(tmp_path / "mplconfig"))
-    df = _minimal_agn_frame(n=8).drop(columns=["log_sigma0"])
+    df = _minimal_agn_frame(n=8).drop(columns=["dlog_amp_blr_u"])
 
     out = hubble_plotting.plot_blr_diagnostics_summary(
         df,

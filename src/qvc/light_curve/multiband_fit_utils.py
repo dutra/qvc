@@ -531,9 +531,30 @@ def load_obj_samples_from_hdf5(object_id=None, file_path=None):
     """
     """
     if file_path is None:
-        output_dir=f"results/samples/{prefix}/"
+        object_id = str(object_id)
+        output_dir = os.path.join("results", "samples", prefix)
         os.makedirs(output_dir, exist_ok=True)
-        file_path = os.path.join(output_dir, f"{object_id}_{suffix}.h5")
+        candidates = [
+            os.path.join(output_dir, f"{object_id}.h5"),
+            *[
+                os.path.join(output_dir, name)
+                for name in os.listdir(output_dir)
+                if name.startswith(f"{object_id}_") and name.endswith(".h5")
+            ],
+        ]
+        candidates = [candidate for candidate in candidates if os.path.exists(candidate)]
+        if not candidates:
+            raise FileNotFoundError(
+                f"HDF5 sample file not found for object_id={object_id!r} in {output_dir}. "
+                f"Searched {object_id}.h5 and {object_id}_*.h5; ignored current suffix={suffix!r}."
+            )
+        file_path = max(candidates, key=lambda path: (os.path.getmtime(path), os.path.basename(path)))
+        logging.info(
+            "Resolved object_id %s sample file by object-id search, ignoring suffix %r: %s",
+            object_id,
+            suffix,
+            file_path,
+        )
 
     if not os.path.exists(file_path):
         raise FileNotFoundError(f"HDF5 file not found: {file_path}")

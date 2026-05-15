@@ -34,6 +34,35 @@ REQUIRED_AGN_TABLE_COLUMNS = (
     "f_br_err",
 )
 
+AGN_TABLE_PLAIN_COLUMNS = {
+    "SDSS Name": "sdss_name",
+    "RA": "ra",
+    "Dec": "dec",
+    "z": "z",
+    "z_err": "z_err",
+    "m_2500": "apparent_mag_2500_corr",
+    "m_2500_err": "apparent_mag_2500_corr_err",
+    "m_2500_uncorr": "apparent_mag_2500",
+    "m_2500_uncorr_err": "apparent_mag_2500_err",
+    "alpha_lambda": "alpha_lambda",
+    "alpha_lambda_err": "alpha_lambda_err",
+    "mu": "mu",
+    "mu_err": "mu_err",
+    "log_tau_UV_RF": "log_tau_uv_rf",
+    "log_tau_UV_RF_err": "log_tau_uv_rf_std_psd",
+    "log_sigma_UV": "log_sigma_uv",
+    "log_sigma_UV_err": "log_sigma_uv_std_psd",
+    "cov_log_sigma_UV_log_tau_UV_RF": "log_sigma_uv_log_tau_uv_rf_cov_psd",
+    "f_host_2500A": "f_host_2500",
+    "f_host_2500A_err": "f_host_2500_err",
+    "f_BC": "f_bc_3000",
+    "f_BC_err": "f_bc_3000_err",
+    "f_lines": "f_lines",
+    "f_lines_err": "f_lines_err",
+    "f_FeII": "f_fe_uv_3000",
+    "f_FeII_err": "f_fe_uv_3000_err",
+}
+
 
 def _resolve_table_debias_values(agn_df, *, dm_interp=None, dmi_values=None):
     dmi = None
@@ -114,8 +143,24 @@ def make_agn_csv_table(
         df = df.sort_values(sort_by, ascending=ascending)
 
     os.makedirs(write_path, exist_ok=True)
-    out_path = os.path.join(write_path, "agn_table.csv")
+    out_path = os.path.join(write_path, "agn_table_all_fields.csv")
     df.to_csv(out_path, index=False)
+
+    missing_plain_cols = [
+        input_col
+        for input_col in AGN_TABLE_PLAIN_COLUMNS.values()
+        if input_col not in df.columns
+    ]
+    if missing_plain_cols:
+        raise KeyError(f"Plain AGN table requires columns: {missing_plain_cols}")
+    plain_df = pd.DataFrame(
+        {
+            output_col: df[input_col].to_numpy()
+            for output_col, input_col in AGN_TABLE_PLAIN_COLUMNS.items()
+        }
+    )
+    plain_path = os.path.join(write_path, "agn_table.csv")
+    plain_df.to_csv(plain_path, index=False)
     return df
 
 

@@ -211,19 +211,18 @@ def plot_blr_diagnostics_summary(
     plot_path="plots/hubble",
     show=False,
     filename="blr.pdf",
+    z_range=(0.44, 3.16),
 ):
-    """Plot the notebook-style BLR and continuum amplitude summary versus redshift."""
+    """Plot the BLR and continuum amplitude summary versus redshift."""
     if df_agn is None or len(df_agn) == 0:
         return None
 
-    required_columns = {"z", "log_sigma0", "log_sigma0_err"}
+    required_columns = {"z", "log_sigma_uv"}
     for band in _BLR_PDF_BANDS:
         required_columns.update(
             {
-                f"log_amp_delta_blr_{band}",
-                f"log_amp_delta_blr_{band}_err",
+                f"dlog_amp_blr_{band}",
                 f"log_sigma_band_{band}",
-                f"log_sigma_band_{band}_err",
             }
         )
     if not required_columns.issubset(df_agn.columns):
@@ -241,45 +240,78 @@ def plot_blr_diagnostics_summary(
         sharex=True,
         sharey="row",
     )
-    point_color_top = (0.0, 0.0, 0.0, 0.01)
-    point_color_bottom = (0.0, 0.0, 0.0, 0.02)
+    point_color = (0.0, 0.0, 0.0, 0.2)
+    error_color = (0.2, 0.2, 0.2, 0.05)
     plotted_any = False
+    z_in_range = (z >= z_range[0]) & (z <= z_range[1])
+
+    def _plot_range_split_points(ax, y, yerr, valid_mask, *, label):
+        in_mask = valid_mask & z_in_range
+        out_mask = valid_mask & ~z_in_range
+        if np.any(in_mask):
+            ax.errorbar(
+                z[in_mask],
+                y[in_mask],
+                yerr=yerr[in_mask] if yerr is not None else None,
+                fmt="o",
+                linestyle="none",
+                markersize=4,
+                mfc=point_color,
+                mec="none",
+                ecolor=error_color,
+                elinewidth=0.8,
+                capsize=2,
+                capthick=0.8,
+                zorder=1,
+                label=label,
+            )
+        if np.any(out_mask):
+            ax.errorbar(
+                z[out_mask],
+                y[out_mask],
+                yerr=yerr[out_mask] if yerr is not None else None,
+                fmt="D",
+                linestyle="none",
+                markersize=3,
+                mfc=point_color,
+                mec="none",
+                ecolor=error_color,
+                elinewidth=0.8,
+                capsize=2,
+                capthick=0.8,
+                zorder=1,
+            )
 
     for i, band in enumerate(_BLR_PDF_BANDS):
         ax_top = axes[0, i]
         ax_bottom = axes[1, i]
 
         blr = (
-            pd.to_numeric(df_agn["log_sigma0"], errors="coerce")
-            + pd.to_numeric(df_agn[f"log_amp_delta_blr_{band}"], errors="coerce")
+            pd.to_numeric(df_agn["log_sigma_uv"], errors="coerce")
+            + pd.to_numeric(df_agn[f"dlog_amp_blr_{band}"], errors="coerce")
         ).to_numpy(dtype=float)
-        blr_err = np.hypot(
-            pd.to_numeric(df_agn["log_sigma0_err"], errors="coerce").to_numpy(dtype=float),
-            pd.to_numeric(df_agn[f"log_amp_delta_blr_{band}_err"], errors="coerce").to_numpy(dtype=float),
-        )
+        blr_err = None
+        blr_err_cols = ("log_sigma_uv_err", f"dlog_amp_blr_{band}_err")
+        if all(col in df_agn.columns for col in blr_err_cols):
+            blr_err = np.hypot(
+                pd.to_numeric(df_agn["log_sigma_uv_err"], errors="coerce").to_numpy(dtype=float),
+                pd.to_numeric(df_agn[f"dlog_amp_blr_{band}_err"], errors="coerce").to_numpy(dtype=float),
+            )
         cont = pd.to_numeric(df_agn[f"log_sigma_band_{band}"], errors="coerce").to_numpy(dtype=float)
-        cont_err = pd.to_numeric(df_agn[f"log_sigma_band_{band}_err"], errors="coerce").to_numpy(dtype=float)
+        cont_err = None
+        if f"log_sigma_band_{band}_err" in df_agn.columns:
+            cont_err = pd.to_numeric(df_agn[f"log_sigma_band_{band}_err"], errors="coerce").to_numpy(dtype=float)
 
-        blr_mask = np.isfinite(z) & np.isfinite(blr) & np.isfinite(blr_err)
-        cont_mask = np.isfinite(z) & np.isfinite(cont) & np.isfinite(cont_err)
+        blr_mask = np.isfinite(z) & np.isfinite(blr)
+        if blr_err is not None:
+            blr_mask &= np.isfinite(blr_err)
+        cont_mask = np.isfinite(z) & np.isfinite(cont)
+        if cont_err is not None:
+            cont_mask &= np.isfinite(cont_err)
         plotted_any |= np.any(blr_mask) or np.any(cont_mask)
 
         if np.any(blr_mask):
-            ax_top.errorbar(
-                z[blr_mask],
-                blr[blr_mask],
-                yerr=blr_err[blr_mask],
-                linestyle="none",
-                marker="o",
-                markersize=4,
-                mfc=point_color_top,
-                mec="none",
-                ecolor=point_color_top,
-                color=point_color_top,
-                elinewidth=0.8,
-                capsize=0,
-                label=f"AGN {band}",
-            )
+            _plot_range_split_points(ax_top, blr, blr_err, blr_mask, label=f"AGN {band}")
         else:
             ax_top.text(0.5, 0.5, "No data", ha="center", va="center", transform=ax_top.transAxes)
         ax_top.legend(loc="upper right")
@@ -287,21 +319,7 @@ def plot_blr_diagnostics_summary(
             ax_top.set_ylabel(r"$\sigma_\mathrm{BLR,\ band}$")
 
         if np.any(cont_mask):
-            ax_bottom.errorbar(
-                z[cont_mask],
-                cont[cont_mask],
-                yerr=cont_err[cont_mask],
-                linestyle="none",
-                marker="o",
-                markersize=4,
-                mfc=point_color_bottom,
-                mec="none",
-                ecolor=point_color_bottom,
-                color=point_color_bottom,
-                elinewidth=0.8,
-                capsize=0,
-                label=f"AGN {band}",
-            )
+            _plot_range_split_points(ax_bottom, cont, cont_err, cont_mask, label=f"AGN {band}")
         else:
             ax_bottom.text(0.5, 0.5, "No data", ha="center", va="center", transform=ax_bottom.transAxes)
         ax_bottom.legend(loc="upper right")
@@ -5940,20 +5958,23 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
             chi2_text_value_zgt1 = agn_likelihood_space_chi2_zgt1
 
         if np.isfinite(chi2_text_value):
-            chi2_annotation_lines = [rf"$\chi^2_\nu = {chi2_text_value:.2f}$"]
+            chi2_annotation_lines = [
+                rf"$\chi^2_\nu({z_range[0]:.2f}<z<{z_range[1]:.2f}) = {chi2_text_value:.2f}$"
+            ]
             if np.isfinite(chi2_text_value_zgt1):
                 chi2_annotation_lines.append(
-                    rf"$\chi^2_\nu(1<z<{z_range[1]:g}) = {chi2_text_value_zgt1:.2f}$"
+                    rf"$\chi^2_\nu(1.00<z<{z_range[1]:.2f}) = {chi2_text_value_zgt1:.2f}$"
                 )
             ax_resid.text(
-                0.98,
-                0.96,
+                0.02,
+                0.08,
                 "\n".join(chi2_annotation_lines),
                 transform=ax_resid.transAxes,
-                ha="right",
-                va="top",
-                fontsize=12,
-                bbox=dict(boxstyle="round,pad=0.2", facecolor="white", alpha=0.8, edgecolor="none"),
+                ha="left",
+                va="bottom",
+                fontsize=11,
+                bbox=dict(boxstyle="round,pad=0.02", facecolor="white", alpha=0.8, edgecolor="none"),
+                zorder=20,                
             )
         if df_calibrators is not None:
             ax_resid.set_ylim(-0.5, 0.5)
@@ -8116,6 +8137,8 @@ def plot_predicted_L2500_vs_sigmahat(
         use_eta_sigma_term=option_flags["use_eta_sigma_term"],
     )
     M0_med = med_arr[agn_model_pidx["M0_agn"]]
+    logL0_med = convert_M2500_to_logL2500(M0_med)
+    L2500_offset = 10.0 ** logL0_med
     x_log_ref = -0.4 * (
         M_model_agn(
             med_arr,
@@ -8551,7 +8574,7 @@ def plot_predicted_L2500_vs_sigmahat(
             )
 
     # --- Axes & labels ---
-    ax.set_ylabel(r'$L_{2500\,\mathrm{\AA}}$ (erg s$^{-1}$)')
+    ax.set_ylabel(r'$L_{2500\,\mathrm{\AA}}$ (erg s$^{-1}$)', fontsize=14)
     ax.set_xscale('log'); ax.set_yscale('log')
     if df_calibrators is not None and len(df_calibrators) > 0:
         # ax.set_xlim((2e-9, 6e13))
@@ -8577,9 +8600,15 @@ def plot_predicted_L2500_vs_sigmahat(
     log_tau_uv_rf_pivot = pivots_arr[agn_model_oidx["log_tau_uv_rf"]]
     sigma_uv_pivot  = 10.0 ** log_sigma_uv_pivot
     tau_uv_rf_pivot = 10.0 ** log_tau_uv_rf_pivot
-    xlabel = rf"$({{\sigma}}_\mathrm{{uv}} \, / \, {sigma_uv_pivot:.1f}\,\mathrm{{mag}})^{{{alpha_agn_L:.2f}}} \, ({{\tau}}_\mathrm{{uv,rf}} \, / \, {tau_uv_rf_pivot:.0f}\,\mathrm{{days}})^{{{beta_agn_L:.2f}}}$"
+    offset_mantissa, offset_exponent = f"{L2500_offset:.2e}".split("e")
+    offset_exponent = int(offset_exponent)
+    xlabel = (
+        rf"$({offset_mantissa}\times10^{{{offset_exponent}}}\,\mathrm{{erg\,s^{{-1}}}})\,"
+        rf"({{\sigma}}_\mathrm{{uv}} \, / \, {sigma_uv_pivot:.1f}\,\mathrm{{mag}})^{{{alpha_agn_L:.2f}}}"
+        rf"({{\tau}}_\mathrm{{uv,rf}} \, / \, {tau_uv_rf_pivot:.0f}\,\mathrm{{days}})^{{{beta_agn_L:.2f}}}$"
+    )
     if not show_residuals:
-        ax.set_xlabel(xlabel)
+        ax.set_xlabel(xlabel, fontsize=14)
     ax.legend(loc='upper left')
 
     # --- Residuals panel (MAIN) ---
@@ -9556,7 +9585,10 @@ def plot_residuals_vs_alphaOX(
         ax.set_ylabel("Residuals (mag)")
         ax.axhline(0.0, color="magenta", linewidth=2, zorder=0)
         ax.set_ylim(-4.6, 3.9)
-        ax.grid(show_grid, alpha=0.25)
+        if show_grid:
+            ax.grid(True, alpha=0.25)
+        else:
+            ax.grid(False)
 
         if len(x) == 0:
             ax.text(
@@ -9689,12 +9721,14 @@ def plot_residuals_vs_alphaOX(
         "delta_alphaOX_err",
         r"$\Delta\, \alpha_{\mathrm{OX}}$",
         "delta_alphaOX_residuals.pdf",
+        show_grid=False,
     )
     alpha_path = _plot_one(
         "alphaOX",
         "alphaOX_err",
         r"$\alpha_{\mathrm{OX}}$",
         "alphaOX_residuals.pdf",
+        show_grid=False,
     )
     alpha_lambda_path = _plot_one(
         "alpha_lambda",
@@ -10021,6 +10055,7 @@ def plot_spectral_fraction_vs_redshift(
     cut_thresholds=None,
     log_safe_errors=True,
     show_cut_source_errors=False,
+    cap_cut_source_errors=False,
 ):
     """Plot available spectral fractions against redshift."""
     required = {"z", "f_bc_3000", "f_fe_uv_3000", "f_host_2500"}
@@ -10069,12 +10104,65 @@ def plot_spectral_fraction_vs_redshift(
         alpha=0.25,
         color="k",
         elinewidth=0.4,
+        error_alpha=None,
+        error_color=None,
+        capsize=1.5,
+        max_yerr=None,
         zorder=3,
         label=None,
         rasterized=True,
     ):
         x = np.asarray(x, dtype=float)
         y = np.asarray(y, dtype=float)
+        if yerr is not None:
+            yerr = np.asarray(yerr, dtype=float)
+            valid_err = np.isfinite(yerr) & (yerr > 0.0)
+            if np.any(valid_err):
+                if not np.all(valid_err):
+                    ax.plot(
+                        x[~valid_err],
+                        y[~valid_err],
+                        linestyle="None",
+                        marker=fmt,
+                        markersize=markersize,
+                        alpha=alpha,
+                        color=color,
+                        zorder=zorder,
+                        label=None,
+                        rasterized=rasterized,
+                    )
+                x_err = x[valid_err]
+                y_err_center = y[valid_err]
+                yerr_err = yerr[valid_err]
+                if max_yerr is not None and np.isfinite(max_yerr) and max_yerr > 0.0:
+                    yerr_err = np.minimum(yerr_err, float(max_yerr))
+                lower_err = np.minimum(yerr_err, 0.999999 * y_err_center)
+                if error_color is None:
+                    error_color = color
+                if error_alpha is None:
+                    error_alpha = alpha
+                error_container = ax.errorbar(
+                    x_err,
+                    y_err_center,
+                    yerr=np.vstack([lower_err, yerr_err]),
+                    linestyle="None",
+                    marker=fmt,
+                    markersize=markersize,
+                    alpha=alpha,
+                    color=color,
+                    ecolor=error_color,
+                    elinewidth=elinewidth,
+                    capsize=capsize,
+                    zorder=zorder,
+                    label=label,
+                    rasterized=rasterized,
+                )
+                _, caplines, barlinecols = error_container
+                for bar_collection in barlinecols:
+                    bar_collection.set_alpha(error_alpha)
+                for capline in caplines:
+                    capline.set_alpha(error_alpha)
+                return
         ax.plot(
             x,
             y,
@@ -10088,7 +10176,7 @@ def plot_spectral_fraction_vs_redshift(
             rasterized=rasterized,
         )
 
-    def _typical_fractional_error(y, yerr):
+    def _typical_errors(y, yerr):
         if yerr is None:
             return None
         y = np.asarray(y, dtype=float)
@@ -10098,7 +10186,20 @@ def plot_spectral_fraction_vs_redshift(
         valid = np.isfinite(y) & (y > 0.0) & np.isfinite(yerr) & (yerr > 0.0) & np.isfinite(frac_err)
         if not np.any(valid):
             return None
-        return float(np.nanmedian(frac_err[valid]))
+        return float(np.nanmedian(frac_err[valid])), float(np.nanmedian(yerr[valid]))
+
+    def _set_panel_redshift_xlim(ax, redshift_values):
+        redshift_values = np.asarray(redshift_values, dtype=float)
+        redshift_values = redshift_values[np.isfinite(redshift_values)]
+        if redshift_values.size == 0:
+            return
+        z_lo = float(np.nanmin(redshift_values))
+        z_hi = float(np.nanmax(redshift_values))
+        if z_hi > z_lo:
+            pad = 0.05 * (z_hi - z_lo)
+        else:
+            pad = 0.1
+        ax.set_xlim(z_lo - pad, z_hi + pad)
 
     df_plot = _prepare_spectral_fraction_frame(df_agn)
     df_cut_plot = (
@@ -10107,6 +10208,8 @@ def plot_spectral_fraction_vs_redshift(
         else None
     )
     z = pd.to_numeric(df_plot["z"], errors="coerce").to_numpy(dtype=float)
+    kept_color = "tab:red"
+    cut_color = "gray"
     panel_specs = [
         ("f_bc_3000", r"$f_{\rm BC}$"),
         ("f_fe_uv_3000", r"$f_{\rm FeII}$"),
@@ -10119,12 +10222,33 @@ def plot_spectral_fraction_vs_redshift(
     fig, axes = plt.subplots(
         1,
         len(panel_specs),
-        figsize=(5.6 * len(panel_specs), 4.6),
-        sharex=True,
+        figsize=(4 * len(panel_specs), 4),
+        sharex=False,
         sharey=True,
         squeeze=False,
     )
     axes = axes.ravel()
+
+    def _order_legend_entries(handles, labels):
+        entries_by_label = {}
+        for handle, label in zip(handles, labels):
+            if label and not label.startswith("_") and label not in entries_by_label:
+                entries_by_label[label] = handle
+
+        def _priority(label):
+            if label.endswith("(kept)"):
+                return 0
+            if label.endswith("(cut)"):
+                return 1
+            if label == "cut threshold":
+                return 2
+            return 3
+
+        ordered_labels = sorted(
+            entries_by_label,
+            key=lambda label: (_priority(label), list(entries_by_label).index(label)),
+        )
+        return [entries_by_label[label] for label in ordered_labels], ordered_labels
 
     for i_ax, (ax, (col, ylabel)) in enumerate(zip(axes, panel_specs)):
         y = pd.to_numeric(df_plot[col], errors="coerce").to_numpy(dtype=float)
@@ -10141,36 +10265,24 @@ def plot_spectral_fraction_vs_redshift(
         z_use = z[mask]
         y_use = y[mask]
         yerr_use = yerr[mask] if yerr is not None else None
-        typical_frac_err = _typical_fractional_error(y_use, yerr_use)
-        component_label = None if typical_frac_err is not None else ylabel
+        panel_redshifts = [z_use]
+        kept_typical_errors = _typical_errors(y_use, yerr_use)
+        kept_label = f"{ylabel} (kept)"
+        cut_label = f"{ylabel} (cut)"
+        component_label = kept_label
         in_z = (z_use >= z_range[0]) & (z_use <= z_range[1])
         out_z = ~in_z
-
-        if typical_frac_err is not None:
-            ax.errorbar(
-                [],
-                [],
-                yerr=typical_frac_err,
-                fmt="o",
-                markersize=2.5,
-                alpha=0.6,
-                color="k",
-                elinewidth=0.9,
-                capsize=2,
-                zorder=3,
-                label=ylabel,
-            )
 
         if np.any(in_z):
             _plot_fraction_points(
                 ax,
                 z_use[in_z],
                 y_use[in_z],
-                yerr=yerr_use[in_z] if yerr_use is not None else None,
+                yerr=None,
                 fmt="o",
                 markersize=2.5,
                 alpha=0.1,
-                color="k",
+                color=kept_color,
                 elinewidth=0.4,
                 zorder=3,
                 label=component_label,
@@ -10181,13 +10293,13 @@ def plot_spectral_fraction_vs_redshift(
                 ax,
                 z_use[out_z],
                 y_use[out_z],
-                yerr=yerr_use[out_z] if yerr_use is not None else None,
+                yerr=None,
                 fmt="D",
                 markersize=3.2,
-                alpha=0.2,
-                color="k",
+                alpha=0.1,
+                color=kept_color,
                 elinewidth=0.4,
-                zorder=3,
+                zorder=6,
                 label=component_label if not np.any(in_z) else None,
                 rasterized=True,
             )
@@ -10201,23 +10313,34 @@ def plot_spectral_fraction_vs_redshift(
                 yerr_cut = pd.to_numeric(df_cut_plot[err_col], errors="coerce").to_numpy(dtype=float)
             mask_cut = np.isfinite(z_cut) & np.isfinite(y_cut) & (y_cut > 0.0)
             if np.any(mask_cut):
+                z_cut_use = z_cut[mask_cut]
+                panel_redshifts.append(z_cut_use)
                 yerr_plot = (
                     yerr_cut[mask_cut]
                     if show_cut_source_errors and yerr_cut is not None
                     else None
                 )
+                max_cut_yerr = (
+                    kept_typical_errors[1]
+                    if cap_cut_source_errors and kept_typical_errors is not None
+                    else None
+                )
                 _plot_fraction_points(
                     ax,
-                    z_cut[mask_cut],
+                    z_cut_use,
                     y_cut[mask_cut],
                     yerr=yerr_plot,
                     fmt="x",
                     markersize=4,
                     alpha=0.7,
-                    color="#E74C3C",
-                    elinewidth=0.7,
+                    color=cut_color,
+                    elinewidth=0.32,
+                    error_alpha=0.26,
+                    error_color=cut_color,
+                    capsize=0,
+                    max_yerr=max_cut_yerr,
                     zorder=2,
-                    label="cut",
+                    label=cut_label,
                     rasterized=True,
                 )
 
@@ -10233,11 +10356,23 @@ def plot_spectral_fraction_vs_redshift(
                 label="cut threshold",
             )
 
+        _set_panel_redshift_xlim(ax, np.concatenate(panel_redshifts))
         ax.set_xlabel(r"$z$")
         ax.set_ylabel("Component fraction" if i_ax == 0 else "")
         ax.set_yscale("log")
-        ax.set_ylim(5e-6, 8e0)
-        ax.legend(loc="upper right", frameon=False)
+        ax.set_ylim(2e-6, 5e1)
+        handles, labels = _order_legend_entries(*ax.get_legend_handles_labels())
+        if handles:
+            ax.legend(
+                handles,
+                labels,
+                fontsize=12,
+                loc="upper right",
+                frameon=True,
+                facecolor="white",
+                framealpha=0.75,
+                edgecolor="none",
+            )
 
     fig.tight_layout()
 

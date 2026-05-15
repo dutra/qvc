@@ -14,6 +14,7 @@ LIGHT_CURVE_N_POINTS_MIN = 250
 LIGHT_CURVE_N_POINTS_COLUMN = "light_curve_n_points"
 LIGHT_CURVE_N_POINTS_EXCLUDED_BANDS = ("u",)
 F_HOST_2500_MAX = 0.001
+APPARENT_MAG_2500_MAX = None
 ALPHA_LAMBDA_MIN = None
 ALPHA_LAMBDA_MAX = None
 
@@ -48,6 +49,7 @@ AGN_SCALAR_PARAMETER_CUTS = (
     ("t_rf_length", T_RF_LENGTH_MIN, None),
     (LIGHT_CURVE_N_POINTS_COLUMN, LIGHT_CURVE_N_POINTS_MIN, None),
     ("f_host_2500", None, F_HOST_2500_MAX),
+    ("apparent_mag_2500", None, APPARENT_MAG_2500_MAX),
     ("alpha_lambda", ALPHA_LAMBDA_MIN, ALPHA_LAMBDA_MAX),
     ("variability_chi_sq_red_g", VARIABILITY_CHI_SQ_RED_G_MIN, None),
     ("log_sigma_uv", LOG_SIGMA_UV_MIN, LOG_SIGMA_UV_MAX),

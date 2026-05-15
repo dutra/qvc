@@ -133,6 +133,34 @@ def _write_fake_sim_file(
             handle.create_dataset("f_host_2500_psf", data=f_host)
 
 
+def test_completeness_2d_plot_smoothing_is_display_only(tmp_path):
+    df_agn = _make_fake_agn_sample_with_fhost(n_agn=36)
+    sim_file = tmp_path / "mock2d.h5"
+    _write_fake_sim_file(sim_file, n=1200)
+
+    comp_no_plot, mag_centers, z_centers, *_ = hcr.get_completeness_function_2d(
+        df_agn,
+        sim_file=str(sim_file),
+        n_mag_bins=12,
+        n_z_bins=10,
+        plot=False,
+    )
+    comp_with_plot, mag_centers_plot, z_centers_plot, *_ = hcr.get_completeness_function_2d(
+        df_agn,
+        sim_file=str(sim_file),
+        n_mag_bins=12,
+        n_z_bins=10,
+        plot=True,
+        plot_path=str(tmp_path),
+    )
+
+    mag_grid, z_grid = np.meshgrid(mag_centers, z_centers, indexing="ij")
+    np.testing.assert_allclose(mag_centers_plot, mag_centers)
+    np.testing.assert_allclose(z_centers_plot, z_centers)
+    np.testing.assert_allclose(comp_with_plot(mag_grid, z_grid), comp_no_plot(mag_grid, z_grid))
+    assert (tmp_path / "completeness" / "completeness_map.pdf").exists()
+
+
 def test_fit_fhost_2500_model_monotonic_and_bounded():
     df = _make_fake_fhost_df()
     model = hcr.fit_fhost_2500_l2500_model(df)
