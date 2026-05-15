@@ -1,0 +1,17 @@
+name: jaxcpu
+channels:
+  - defaults
+dependencies:
+  - ipython
+  - jupyterlab
+  - matplotlib
+  - pyarrow
+  - tqdm
+  - scipy
+  - astropy
+  - h5py
+  - pip
+  - pandas
+  - numpy
+  - python=3.13.5
+prefix: /opt/miniconda3/envs/jaxcpu

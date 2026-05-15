@@ -1,0 +1,31 @@
+channels:
+  - defaults
+  - conda-forge
+dependencies:
+  - python==3.13.5
+  - pip
+  - pip:
+    - jax==0.7.1
+    - jaxopt==0.8.5
+    - jupyterlab==4.4.4
+    - numpyro==0.19.0
+    - tinygp==0.3.0
+    - matplotlib==3.10.0
+    - astropy==7.1.0
+    - h5py==3.14.0
+    - tqdm==4.67.1
+    - ipykernel==6.29.5
+    - pandas==2.3.1
+    - corner==2.2.3
+    - scipy==1.16.0
+    - ipython==9.1.0
+    - jupyterlab==4.4.4
+    - matplotlib==3.10.0
+    - pyarrow==19.0.0
+    - tqdm==4.67.1
+    - scipy==1.16.0
+    - astropy==7.1.0
+    - h5py==3.14.0
+    - pip==25.1
+    - pandas==2.3.1
+    - numpy==2.3.1
