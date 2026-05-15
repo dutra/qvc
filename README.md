@@ -81,6 +81,8 @@ All plots and results will be generated under `plots/` and `results/`, respectiv
 
 Downloads the demo inputs, cached spectrum, Hubble inputs, generated completeness mock, DSPS data, Pantheon+ files, and dustmaps data needed by the local workflow.
 
+Expected output: downloaded inputs under `data/`, `results/data/`, `results/cosmo/`, `results/hubble_posteriors/`, and dustmaps under `results/dustmaps/`.
+
 ```bash
 python -m qvc.setup_data
 ```
@@ -89,8 +91,10 @@ python -m qvc.setup_data
 
 Fits the demo AGN light curve for object `1452887` with reduced SVI/NUTS sampling and writes the local light-curve result files and plots.
 
+Expected output: results under `results/data/demo/` and figures under `plots/multiband/demo/`.
+
 ```bash
-python -m qvc.light_curve.fit_light_curves \
+PREFIX=demo SUFFIX=demo python -m qvc.light_curve.fit_light_curves \
   --filter_object_id 1452887 \
   --svi_steps 100 \
   --nwarm 100 \
@@ -106,14 +110,16 @@ python -m qvc.light_curve.fit_light_curves \
 
 Fits the matching cached SDSS spectrum with `qvc.spectra.fit_spectra`, saving the output CSV, fit figures, and MCMC diagnostic plots.
 
+Expected output: the fit CSV at `results/data/spectra/demo.csv`, result artifacts under `results/spectra/demo/`, and figures under `plots/spectra/demo/`.
+
 ```bash
 python -m qvc.spectra.fit_spectra \
   --mode fit \
   --fpath-in "results/data/lc_data_all.h5" \
-  "results/data/jaxqsofit/test.csv" \
+  "results/data/spectra/demo.csv" \
   --cache-dir "data/spectra_cache_all" \
-  --output-dir "results/jaxqsofit/test" \
-  --fig-dir "plots/jaxqsofit/test" \
+  --output-dir "results/spectra/demo" \
+  --fig-dir "plots/spectra/demo" \
   --verbose \
   --save-fig \
   --nuts-warmup 100 \
@@ -127,6 +133,8 @@ python -m qvc.spectra.fit_spectra \
 ### Hubble Diagram Fitting
 
 Resumes the saved fiducial and restricted Hubble posterior checkpoints and regenerates the comparison outputs and plots.
+
+Expected output: results under `results/` and figures under `plots/hubble/paper_hubble_final_production/` and `plots/hubble/paper_hubble_final_production_restricted/`.
 
 #### Fiducial fit
 
@@ -164,7 +172,10 @@ python -m qvc.hubble.hubble_fit --resume \
 ## System Notes
 
 - Tested with Python `3.12.11`.
+- Tested on an AMD x86_64 desktop, MacBook Air M1, and Yale HPC.
 - All required Python packages and versions are listed under `requirements.txt` and will be installed automatically with the `pip install -e .` command.
+- Typical local install time is on the order of 10 minutes and less than 1 hour on a normal desktop computer, depending on hardware and internet speed.
+- Local demo runtime is on the order of a few hours on a normal computer.
 - Full-scale production runs were executed on Yale HPC and required over `100,000` CPU-hours.
 
 ## Optional Pubtools Build
