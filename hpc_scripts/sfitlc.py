@@ -2,6 +2,7 @@
 import argparse
 import math
 import os
+import shlex
 import sys
 import subprocess
 from dataclasses import dataclass
@@ -65,7 +66,8 @@ def parse_args():
             "PREFIX_BASE plus the job description, for example PREFIX_BASE_stone."
         ),
     )
-    args = parser.parse_args()
+    args, extra_fit_flags = parser.parse_known_args()
+    args.extra_fit_flags = tuple(extra_fit_flags)
     if args.fit == "chisq" and not args.chisq_csv:
         parser.error("--chisq-csv is required when --fit chisq is used.")
     try:
@@ -186,7 +188,7 @@ def validate_chunking(total_objects: int, n_per_job: int, skip: int, num_jobs: i
 
 
 def build_flag_lines(flags: list[str]) -> str:
-    return " \\\n ".join(flags)
+    return " \\\n ".join(shlex.quote(flag) for flag in flags)
 
 
 def build_mail_lines() -> str:
@@ -283,6 +285,7 @@ def build_sbatch_script(
             ]
         )
     base_flags.extend(job.extra_flags)
+    base_flags.extend(getattr(args, "extra_fit_flags", ()))
     return f"""#!/bin/bash
 #SBATCH --job-name=multiband_{prefix}
 #SBATCH --output={log_pattern}
