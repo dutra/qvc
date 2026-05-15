@@ -52,6 +52,11 @@ def parse_args():
     parser.add_argument("--mem", default="6G", help="SLURM memory request.")
     parser.add_argument("--env", default="jaxcpu2", help="Conda environment to activate inside submitted jobs.")
     parser.add_argument(
+        "--description",
+        default=None,
+        help="Optional run description inserted after the run stamp in fresh run prefixes.",
+    )
+    parser.add_argument(
         "--resume",
         metavar="PREFIX_BASE",
         default=None,
@@ -63,6 +68,10 @@ def parse_args():
     args = parser.parse_args()
     if args.fit == "chisq" and not args.chisq_csv:
         parser.error("--chisq-csv is required when --fit chisq is used.")
+    try:
+        args.description = normalize_run_description(args.description)
+    except ValueError as exc:
+        parser.error(str(exc))
     return args
 
 
@@ -84,6 +93,15 @@ def get_git_short_hash() -> str:
 def make_run_stamp() -> str:
     now = datetime.now()
     return f"{now.strftime('%b').lower()}{now.day}_{now.strftime('%I%M%p').lower()}"
+
+
+def normalize_run_description(description: str | None) -> str | None:
+    if description is None:
+        return None
+    normalized = description.strip().lower().replace(" ", "_")
+    if not normalized:
+        raise ValueError("--description cannot be blank.")
+    return normalized
 
 
 def load_chisq_ids(chisq_csv: str) -> list[str]:
@@ -204,9 +222,17 @@ def build_object_ids_path(prefix: str, job: JobConfig) -> Path:
     return SCRIPT_DIR / f"{prefix}_{job.description}_object_ids.txt"
 
 
-def build_run_prefix(job_description: str, run_stamp: str, git_hash: str, resume_prefix_base: str | None) -> str:
+def build_run_prefix(
+    job_description: str,
+    run_stamp: str,
+    git_hash: str,
+    resume_prefix_base: str | None,
+    run_description: str | None = None,
+) -> str:
     if resume_prefix_base:
         return f"{resume_prefix_base}_{job_description}"
+    if run_description:
+        return f"{run_stamp}_{run_description}_{git_hash}_{job_description}"
     return f"{run_stamp}_{git_hash}_{job_description}"
 
 
@@ -578,7 +604,9 @@ def main():
     args = parse_args()
     git_hash = get_git_short_hash()
     run_stamp = make_run_stamp()
-    run_prefix_base = args.resume or f"{run_stamp}_{git_hash}"
+    run_prefix_base = args.resume or "_".join(
+        part for part in (run_stamp, args.description, git_hash) if part
+    )
     chisq_csv = args.chisq_csv
     spectra_fit_csv = DEFAULT_SPECTRA_FIT_CSV
     samelength_merge_job_ids = []
@@ -586,7 +614,7 @@ def main():
     for job in build_job_configs(args.fit, chisq_csv):
         total_objects = len(job.object_ids)
         _, task_start, task_end = validate_chunking(total_objects, args.N, args.skip, args.num_jobs)
-        prefix = build_run_prefix(job.description, run_stamp, git_hash, args.resume)
+        prefix = build_run_prefix(job.description, run_stamp, git_hash, args.resume, args.description)
         object_ids_path = None
         if args.fit != "chisq":
             object_ids_path = write_object_ids_file(build_object_ids_path(prefix, job), job.object_ids)
