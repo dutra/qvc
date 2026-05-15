@@ -928,6 +928,7 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
         plot_l2500_vs_eta_sigma_fiducial,
         plot_l2500_vs_uv_variability_fiducial,
         plot_linear_trend_vs_redshift,
+        plot_mean_function_slope_vs_tau,
         plot_Mi_relation,
         plot_light_curve_n_points_vs_apparent_mag,
         plot_cut_diagnostics,
@@ -1450,6 +1451,15 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
             plot_path=plot_path,
             show=False,
             filename="linear_trend_vs_redshift_precut.pdf",
+        )
+    if "linear_trend" in df.columns and (
+        "log_tau_uv_rf" in df.columns or {"log_tau_uv", "z"}.issubset(df.columns)
+    ):
+        plot_mean_function_slope_vs_tau(
+            df,
+            plot_path=plot_path,
+            show=False,
+            filename="mean_function_slope_vs_tau_precut.pdf",
         )
     if (
         "z" in df.columns
@@ -1980,6 +1990,15 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
             plot_path=plot_path,
             show=False,
             filename="linear_trend_vs_redshift_postcut.pdf",
+        )
+    if "linear_trend" in df.columns and (
+        "log_tau_uv_rf" in df.columns or {"log_tau_uv", "z"}.issubset(df.columns)
+    ):
+        plot_mean_function_slope_vs_tau(
+            df,
+            plot_path=plot_path,
+            show=False,
+            filename="mean_function_slope_vs_tau_postcut.pdf",
         )
     if (
         "z" in df.columns

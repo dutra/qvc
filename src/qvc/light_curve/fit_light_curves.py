@@ -117,6 +117,8 @@ FLUXMIX_PREDICTION_FORWARD_PAD = 400.0
 FLUXMIX_MIN_TOTAL_FLUX_RATIO = 0.05
 FLUXMIX_TOTAL_FLUX_FLOOR_SOFTNESS = 0.01
 FLUXMIX_TOTAL_FLUX_FLOOR_PENALTY = 20.0
+FLUX_LINEARIZED_REFINEMENT_ITERS = 3
+FLUX_LINEARIZED_MIN_TOTAL_FLUX_RATIO = 0.05
 SDSS_FILTER_BLUE_EDGE_OBS = {
     "u": 3055.11,
     "g": 3797.64,
@@ -3857,8 +3859,12 @@ def build_single_object_model_mag_flux_linearized(
     else:
         log_igm_transmission_band = jnp.zeros(B, dtype=lam_rf.dtype)
     baseline_flux_by_band = reference_flux_from_mean_magnitudes(obj_dict["mags_means"])
-    y_relflux = mag_residual_to_relative_flux(y)
-    yerr_relflux = magerr_residual_to_relative_fluxerr(y, yerr)
+    if "y_relflux_fit" in obj_dict and "yerr_relflux_fit" in obj_dict:
+        y_relflux = jnp.asarray(obj_dict["y_relflux_fit"], dtype=float)
+        yerr_relflux = jnp.asarray(obj_dict["yerr_relflux_fit"], dtype=float)
+    else:
+        y_relflux = mag_residual_to_relative_flux(y)
+        yerr_relflux = magerr_residual_to_relative_fluxerr(y, yerr)
     bidx_np = np.asarray(bidx)
     yerr_relflux_np = np.asarray(yerr_relflux, dtype=float)
     log_jitter_mean_relflux, log_jitter_active_mask_relflux = _compute_log_jitter_mean_grid(
@@ -4422,6 +4428,186 @@ def _run_nuts_inference(
         "elapsed_sec": float(elapsed),
     }
     return samples_flat, samples_per_chain, diagnostics
+
+
+def _flux_linearized_fit_object(obj_dict, y_relflux, yerr_relflux):
+    fit_obj = dict(obj_dict)
+    fit_obj["y_relflux_fit"] = jnp.asarray(y_relflux, dtype=float)
+    fit_obj["yerr_relflux_fit"] = jnp.asarray(yerr_relflux, dtype=float)
+    return fit_obj
+
+
+def _flux_linearized_initial_arrays(obj_dict):
+    return (
+        mag_residual_to_relative_flux(obj_dict["y"]),
+        magerr_residual_to_relative_fluxerr(obj_dict["y"], obj_dict["yerr"]),
+    )
+
+
+def _posterior_median_params(samples_flat):
+    return {
+        key: np.nanmedian(np.asarray(value), axis=0)
+        for key, value in samples_flat.items()
+    }
+
+
+def _flux_linearized_pseudo_data_from_prediction(obj_dict, model, params):
+    """Build one Gauss-Newton pseudo-data update for the magnitude likelihood."""
+
+    r_star, _ = model.pred(params, obj_dict["X"])
+    r_star = np.asarray(device_get(r_star), dtype=float)
+    y_mag = np.asarray(obj_dict["y"], dtype=float)
+    yerr_mag = np.asarray(obj_dict["yerr"], dtype=float)
+
+    total_flux_ratio = np.maximum(
+        1.0 + r_star,
+        FLUX_LINEARIZED_MIN_TOTAL_FLUX_RATIO,
+    )
+    mag_model = -2.5 * np.log10(total_flux_ratio)
+    dmag_dr = -(2.5 / np.log(10.0)) / total_flux_ratio
+    y_relflux = r_star + (y_mag - mag_model) / dmag_dr
+    yerr_relflux = yerr_mag / np.maximum(np.abs(dmag_dr), 1e-12)
+    return jnp.asarray(y_relflux, dtype=float), jnp.asarray(yerr_relflux, dtype=float)
+
+
+def _build_mag_flux_linearized_model_for_fit(obj_dict, lam_rf, log_jitter_mean, **kwargs):
+    return build_single_object_model_mag_flux_linearized(
+        obj_dict,
+        lam_rf,
+        log_jitter_mean=log_jitter_mean,
+        **kwargs,
+    )
+
+
+def run_iterated_mag_flux_linearized_inference(
+    obj_dict,
+    lam_rf,
+    log_jitter_mean,
+    *,
+    lam_lya_rf=None,
+    rng_key,
+    fit_method,
+    num_warmup,
+    num_samples,
+    num_chains,
+    chain_method,
+    progress_bar,
+    dense_mass,
+    max_tree_depth,
+    svi_steps,
+    svi_lr,
+    disable_linear_trend=False,
+    disable_lag_blr=False,
+    disable_lag_bc=False,
+    drop_band_lyman_alpha=False,
+    tau_fast_truncated=False,
+    n_blr_terms=1,
+):
+    """Iteratively refit the relative-flux QS model using local magnitude-likelihood pseudo-data."""
+
+    if fit_method == "ns":
+        raise ValueError(
+            "model_variant='mag_flux_linearized' uses iterative local likelihood refinement "
+            "and currently requires --fit_method nuts or svi+nuts."
+        )
+
+    y_fit, yerr_fit = _flux_linearized_initial_arrays(obj_dict)
+    samples_flat = None
+    samples_per_chain = None
+    diagnostics = {
+        "flux_linearized_refinement_iters": int(FLUX_LINEARIZED_REFINEMENT_ITERS),
+        "flux_linearized_min_total_flux_ratio": float(FLUX_LINEARIZED_MIN_TOTAL_FLUX_RATIO),
+    }
+
+    model_kwargs = dict(
+        lam_lya_rf=lam_lya_rf,
+        disable_linear_trend=disable_linear_trend,
+        disable_lag_blr=disable_lag_blr,
+        disable_lag_bc=disable_lag_bc,
+        drop_band_lyman_alpha=drop_band_lyman_alpha,
+        tau_fast_truncated=tau_fast_truncated,
+        n_blr_terms=n_blr_terms,
+    )
+
+    for iter_idx in range(int(FLUX_LINEARIZED_REFINEMENT_ITERS)):
+        fit_obj = _flux_linearized_fit_object(obj_dict, y_fit, yerr_fit)
+        iter_model = _build_mag_flux_linearized_model_for_fit(
+            fit_obj,
+            lam_rf,
+            log_jitter_mean,
+            **model_kwargs,
+        )
+        iter_key = random.fold_in(rng_key, iter_idx)
+        if fit_method == "svi+nuts":
+            svi_key, mcmc_key = random.split(iter_key)
+            init_values, svi_final_loss = run_svi_warm_start(
+                iter_model,
+                svi_key,
+                num_steps=svi_steps,
+                learning_rate=svi_lr,
+                progress_bar=progress_bar,
+            )
+            init_strategy = init_to_value(values=init_values)
+            diagnostics[f"flux_linearized_iter{iter_idx + 1}_svi_final_loss"] = float(svi_final_loss)
+        else:
+            mcmc_key = iter_key
+            init_strategy = numpyro.infer.init_to_median()
+
+        samples_flat, samples_per_chain, iter_diag = _run_nuts_inference(
+            iter_model,
+            mcmc_key,
+            num_warmup=num_warmup,
+            num_samples=num_samples,
+            num_chains=num_chains,
+            chain_method=chain_method,
+            progress_bar=progress_bar,
+            dense_mass=dense_mass,
+            max_tree_depth=max_tree_depth,
+            init_strategy=init_strategy,
+        )
+        diagnostics[f"flux_linearized_iter{iter_idx + 1}_accept_prob"] = iter_diag["accept_prob"]
+        diagnostics[f"flux_linearized_iter{iter_idx + 1}_num_divergences"] = iter_diag["num_divergences"]
+        diagnostics[f"flux_linearized_iter{iter_idx + 1}_elapsed_sec"] = iter_diag["elapsed_sec"]
+
+        samples_for_prediction = add_model_prediction_params(
+            samples_flat,
+            lam_rf,
+            model_variant="mag_flux_linearized",
+            lam_lya_rf=lam_lya_rf,
+        )
+        params_median = _posterior_median_params(samples_for_prediction)
+        display_model = make_multiband_dho_blr_flux_linearized_model(
+            obj_dict["X"],
+            y_fit,
+            yerr_fit,
+            n_band=int(len(lam_rf)),
+            survey_idx=obj_dict["survey_idx"],
+            baseline_flux_by_band=reference_flux_from_mean_magnitudes(obj_dict["mags_means"]),
+            zero_mean=zero_mean,
+            has_jitter=has_jitter,
+        )
+        y_next, yerr_next = _flux_linearized_pseudo_data_from_prediction(
+            obj_dict,
+            display_model,
+            params_median,
+        )
+        diagnostics[f"flux_linearized_iter{iter_idx + 1}_pseudo_delta_rms"] = float(
+            np.sqrt(np.nanmean(np.square(np.asarray(y_next) - np.asarray(y_fit))))
+        )
+        if iter_idx < int(FLUX_LINEARIZED_REFINEMENT_ITERS) - 1:
+            y_fit, yerr_fit = y_next, yerr_next
+
+    diagnostics["accept_prob"] = diagnostics[
+        f"flux_linearized_iter{int(FLUX_LINEARIZED_REFINEMENT_ITERS)}_accept_prob"
+    ]
+    diagnostics["num_divergences"] = diagnostics[
+        f"flux_linearized_iter{int(FLUX_LINEARIZED_REFINEMENT_ITERS)}_num_divergences"
+    ]
+    diagnostics["elapsed_sec"] = sum(
+        diagnostics[f"flux_linearized_iter{i + 1}_elapsed_sec"]
+        for i in range(int(FLUX_LINEARIZED_REFINEMENT_ITERS))
+    )
+    return samples_flat, samples_per_chain, fit_obj, diagnostics
 
 
 def _fluxmix_stage1_raw_median_params(samples_flat, lam_rf):
@@ -5001,6 +5187,11 @@ def main():
         raise ValueError(
             f"--fit_method {args.fit_method} is only supported with --model_variant mag_fluxmix_fast."
         )
+    if args.model_variant == "mag_flux_linearized" and args.fit_method == "ns":
+        raise ValueError(
+            "model_variant='mag_flux_linearized' now always uses iterative local likelihood refinement "
+            "and requires --fit_method nuts or svi+nuts."
+        )
     if args.fit_method == "alternating_two_stage_nuts" and args.fluxmix_outer_iters < 2:
         raise ValueError("--fit_method alternating_two_stage_nuts requires --fluxmix_outer_iters >= 2.")
     if args.fit_method == "ns":
@@ -5115,9 +5306,9 @@ def main():
                     raise ValueError(
                         "model_variant='mag_flux_linearized' currently supports only n_blr_terms=1."
                     )
-                model_builder = build_single_object_model_mag_flux_linearized
+                model_builder = None
                 logging.info(
-                    "[%s] mag_flux_linearized using relative-flux QS approximation with mag-equivalent outputs; active_components=%s",
+                    "[%s] mag_flux_linearized using iterative local magnitude-likelihood refinement with relative-flux QS solves; active_components=%s",
                     oid,
                     "cont,blr" if args.disable_lag_bc or args.disable_lag_blr else "cont,blr,bc",
                 )
@@ -5160,6 +5351,7 @@ def main():
                 numpyro_model = None
 
             stage_diagnostics = {}
+            flux_linearized_fit_obj = None
             if args.resume:
                 logging.warning("[DEBUG] Loading saved samples (flat) — developer mode.")
                 obj_flat_samples = load_obj_samples_from_hdf5(oid)
@@ -5188,6 +5380,30 @@ def main():
                         tau_fast_truncated=args.tau_fast_truncated,
                         n_blr_terms=args.n_blr_terms,
                         outer_iters=(args.fluxmix_outer_iters if args.fit_method == "alternating_two_stage_nuts" else 1),
+                    )
+                elif args.model_variant == "mag_flux_linearized":
+                    obj_flat_samples, samples_per_chain, flux_linearized_fit_obj, stage_diagnostics = run_iterated_mag_flux_linearized_inference(
+                        obj,
+                        lam_rf,
+                        log_jitter_mean=log_jitter_mean_fit,
+                        lam_lya_rf=lam_lya_rf,
+                        rng_key=key,
+                        fit_method=args.fit_method,
+                        num_warmup=args.nwarm,
+                        num_samples=args.nsamp,
+                        num_chains=args.nchains,
+                        chain_method=chain_method,
+                        progress_bar=args.progress,
+                        dense_mass=args.dense_mass,
+                        max_tree_depth=args.max_tree_depth,
+                        svi_steps=args.svi_steps,
+                        svi_lr=args.svi_lr,
+                        disable_linear_trend=args.disable_linear_trend,
+                        disable_lag_blr=args.disable_lag_blr,
+                        disable_lag_bc=args.disable_lag_bc,
+                        drop_band_lyman_alpha=args.drop_band_lyman_alpha,
+                        tau_fast_truncated=args.tau_fast_truncated,
+                        n_blr_terms=args.n_blr_terms,
                     )
                 elif args.fit_method in ("nuts", "svi+nuts"):
                     if args.fit_method == "svi+nuts":
@@ -5307,10 +5523,22 @@ def main():
             diagnostics |= stage_diagnostics
 
             if args.model_variant == "mag_flux_linearized":
+                fit_obj_for_display = flux_linearized_fit_obj if flux_linearized_fit_obj is not None else obj
+                y_relflux_display, yerr_relflux_display = (
+                    (
+                        fit_obj_for_display["y_relflux_fit"],
+                        fit_obj_for_display["yerr_relflux_fit"],
+                    )
+                    if "y_relflux_fit" in fit_obj_for_display and "yerr_relflux_fit" in fit_obj_for_display
+                    else (
+                        mag_residual_to_relative_flux(obj["y"]),
+                        magerr_residual_to_relative_fluxerr(obj["y"], obj["yerr"]),
+                    )
+                )
                 m = make_multiband_dho_blr_flux_linearized_model(
                     obj["X"],
-                    mag_residual_to_relative_flux(obj["y"]),
-                    magerr_residual_to_relative_fluxerr(obj["y"], obj["yerr"]),
+                    y_relflux_display,
+                    yerr_relflux_display,
                     n_band=B,
                     survey_idx=obj["survey_idx"],
                     baseline_flux_by_band=reference_flux_from_mean_magnitudes(obj["mags_means"]),

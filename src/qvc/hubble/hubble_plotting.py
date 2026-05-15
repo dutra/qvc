@@ -1638,6 +1638,133 @@ def plot_linear_trend_vs_redshift(
     )
 
 
+def plot_mean_function_slope_vs_tau(
+    df,
+    plot_path="plots/hubble",
+    show=False,
+    filename="mean_function_slope_vs_tau.pdf",
+    z_range=(0.44, 3.16),
+):
+    """Plot the fitted GP mean-function trend parameter against UV rest-frame tau."""
+    if "linear_trend" not in df.columns:
+        raise KeyError("Missing required column for mean-function-slope-vs-tau plot: linear_trend")
+    tau_col = "log_tau_uv_rf" if "log_tau_uv_rf" in df.columns else ("log_tau_uv" if "log_tau_uv" in df.columns else None)
+    if tau_col is None:
+        raise KeyError("Missing required column for mean-function-slope-vs-tau plot: log_tau_uv_rf or log_tau_uv")
+    if tau_col == "log_tau_uv" and "z" not in df.columns:
+        raise KeyError("Missing required column for mean-function-slope-vs-tau plot: z")
+
+    z = pd.to_numeric(df["z"], errors="coerce").to_numpy(dtype=float) if "z" in df.columns else np.full(len(df), np.nan)
+    log_tau = pd.to_numeric(df[tau_col], errors="coerce").to_numpy(dtype=float)
+    log_tau_err = (
+        pd.to_numeric(df[f"{tau_col}_err"], errors="coerce").to_numpy(dtype=float)
+        if f"{tau_col}_err" in df.columns else np.full(len(df), np.nan)
+    )
+    if tau_col == "log_tau_uv":
+        log_tau = log_tau - np.log10(1.0 + z)
+
+    tau = np.power(10.0, log_tau)
+    tau_err = np.full((2, len(df)), np.nan, dtype=float)
+    finite_tau_err = (
+        np.isfinite(tau)
+        & np.isfinite(log_tau)
+        & np.isfinite(log_tau_err)
+        & (tau > 0.0)
+        & (log_tau_err >= 0.0)
+    )
+    tau_err[0, finite_tau_err] = np.clip(
+        tau[finite_tau_err] - np.power(10.0, log_tau[finite_tau_err] - log_tau_err[finite_tau_err]),
+        0.0,
+        None,
+    )
+    tau_err[1, finite_tau_err] = np.clip(
+        np.power(10.0, log_tau[finite_tau_err] + log_tau_err[finite_tau_err]) - tau[finite_tau_err],
+        0.0,
+        None,
+    )
+
+    slope = pd.to_numeric(df["linear_trend"], errors="coerce").to_numpy(dtype=float)
+    slope_err = (
+        pd.to_numeric(df["linear_trend_err"], errors="coerce").to_numpy(dtype=float)
+        if "linear_trend_err" in df.columns else np.full(len(df), np.nan)
+    )
+
+    fig, ax = plt.subplots(figsize=(6.2, 4.8))
+    finite = np.isfinite(tau) & (tau > 0.0) & np.isfinite(slope)
+    if np.any(finite):
+        err_mask = finite & np.all(np.isfinite(tau_err), axis=0) & np.isfinite(slope_err) & (slope_err >= 0.0)
+        in_z = finite & np.isfinite(z) & (z >= z_range[0]) & (z <= z_range[1])
+        out_z = finite & ~in_z
+        for mask, marker, label in ((in_z, "o", "AGN"), (out_z, "D", None)):
+            if not np.any(mask):
+                continue
+            marker_err = mask & err_mask
+            if np.any(marker_err):
+                ax.errorbar(
+                    tau[marker_err],
+                    slope[marker_err],
+                    xerr=tau_err[:, marker_err],
+                    yerr=slope_err[marker_err],
+                    fmt=marker,
+                    linestyle="none",
+                    markersize=3,
+                    mfc=(0, 0, 0, 0.4),
+                    mec="none",
+                    ecolor=(0.2, 0.2, 0.2, 0.1),
+                    elinewidth=0.8,
+                    capsize=2,
+                    capthick=0.8,
+                    rasterized=True,
+                    zorder=1,
+                    label=label,
+                )
+            marker_noerr = mask & ~err_mask
+            if np.any(marker_noerr):
+                ax.scatter(
+                    tau[marker_noerr],
+                    slope[marker_noerr],
+                    s=10 if marker == "o" else 12,
+                    marker=marker,
+                    c="black",
+                    alpha=0.4,
+                    linewidths=0,
+                    rasterized=True,
+                    zorder=1,
+                    label=label if not np.any(marker_err) else None,
+                )
+
+        log_tau_finite = np.log10(tau[finite])
+        log_lo = np.nanmin(log_tau_finite)
+        log_hi = np.nanmax(log_tau_finite)
+        log_pad = 0.08 * max(log_hi - log_lo, 1e-6)
+        ax.set_xlim(10.0 ** (log_lo - log_pad), 10.0 ** (log_hi + log_pad))
+
+        y_lo = np.nanmin(slope[finite])
+        y_hi = np.nanmax(slope[finite])
+        if np.isfinite(y_lo) and np.isfinite(y_hi):
+            y_span = max(y_hi - y_lo, 1e-8)
+            ax.set_ylim(y_lo - 0.12 * y_span, y_hi + 0.12 * y_span)
+    else:
+        ax.text(0.5, 0.5, "No finite linear_trend/tau values", ha="center", va="center", transform=ax.transAxes)
+
+    ax.axhline(0.0, color="0.45", lw=1.0, alpha=0.8, zorder=0)
+    ax.set_xscale("log")
+    ax.tick_params(axis="x", which="both", pad=8)
+    ax.set_xlabel(r"$\tau_{\rm UV,RF}$ (days)")
+    ax.set_ylabel("Mean-function slope (linear_trend)")
+    handles, labels = ax.get_legend_handles_labels()
+    if handles:
+        ax.legend(frameon=False, loc="best")
+
+    diagnostics_path = os.path.join(plot_path or "plots/hubble", "diagnostics")
+    return _save_figure(
+        fig,
+        os.path.join(diagnostics_path, filename),
+        dpi=200,
+        show=show,
+    )
+
+
 def plot_sigma_uv_vs_tau_uv_rf(
     df_agn,
     *,
