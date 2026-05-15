@@ -8,9 +8,9 @@ This repository provides end-to-end tooling for:
 
 The demo workflow downloads the needed data, fits one light curve, fits one spectrum, and recreates the publication Hubble runs with saved posteriors.
 
-The resulting figures are found under the `docker-workdir/plots` folder (if ran with docker) or `plots` folder.
+The resulting figures are found under `docker-workdir/plots/` when run with Docker, or under `plots/` for a local run.
 
-Note: For speed, the light curve fitting and spectra fitting will run with a minimal number of warmup and sampling steps, and the produced plots may have minor deviations from the published figures. The published figures were ran with longer warmup and sampling steps in Yale's HPC Clusters.
+Note: For speed, the light curve fitting and spectra fitting will run with a minimal number of warmup and sampling steps, and the produced plots may have minor deviations from the published figures. The published figures were run with longer warmup and sampling steps in Yale's HPC Clusters.
 
 ## Quick Start
 
@@ -49,7 +49,7 @@ The Docker setup step downloads the data automatically into `docker-workdir`, in
 
 ## Local Install
 
-You may also install the package using pip. 
+You may also install the package using pip.
 First, create and activate a Python environment. We recommend Conda (https://www.anaconda.com/download).
 
 ```bash
@@ -73,10 +73,98 @@ bash scripts/run_demo.sh spectra
 bash scripts/run_demo.sh hubble
 ```
 
+Alternatively, you may call each command directly. Note again that these commands will run a minimal number of warmup and sampling steps for speed; the produced plots may have minor deviations from the published figures. The published figures were run with longer warmup and sampling steps in Yale's HPC Clusters.
+
+All plots and results will be generated under `plots/` and `results/`, respectively.
+
+### Setup
+
+Downloads the demo inputs, cached spectrum, Hubble inputs, generated completeness mock, DSPS data, Pantheon+ files, and dustmaps data needed by the local workflow.
+
+```bash
+python -m qvc.setup_data
+```
+
+### Light Curve Fitting
+
+Fits the demo AGN light curve for object `1452887` with reduced SVI/NUTS sampling and writes the local light-curve result files and plots.
+
+```bash
+python -m qvc.light_curve.fit_light_curves \
+  --filter_object_id 1452887 \
+  --svi_steps 100 \
+  --nwarm 100 \
+  --nsamp 100 \
+  --nchains 1 \
+  --progress \
+  --plot \
+  --fit_method "svi+nuts" \
+  --corner_plot_mode "full"
+```
+
+### Spectra Fitting
+
+Fits the matching cached SDSS spectrum with `qvc.spectra.fit_spectra`, saving the output CSV, fit figures, and MCMC diagnostic plots.
+
+```bash
+python -m qvc.spectra.fit_spectra \
+  --mode fit \
+  --fpath-in "results/data/lc_data_all.h5" \
+  "results/data/jaxqsofit/test.csv" \
+  --cache-dir "data/spectra_cache_all" \
+  --output-dir "results/jaxqsofit/test" \
+  --fig-dir "plots/jaxqsofit/test" \
+  --verbose \
+  --save-fig \
+  --nuts-warmup 100 \
+  --nuts-samples 100 \
+  --nuts-chains 1 \
+  --filter_object_id 1452887 \
+  --plot_mcmc_diagnostics \
+  --nproc 1
+```
+
+### Hubble Diagram Fitting
+
+Resumes the saved fiducial and restricted Hubble posterior checkpoints and regenerates the comparison outputs and plots.
+
+#### Fiducial fit
+
+```bash
+python -m qvc.hubble.hubble_fit --resume \
+  --cosmo_models FlatLambdaCDM FlatwCDM Flatw0waCDM \
+  --run full \
+  --speed production \
+  --spectra_fit_csv "results/data/spectra_data_all.csv" \
+  --completeness_sim_file "results/data/mock_completeness_catalog_fresh.h5" \
+  --z_range 0.44 3.16 \
+  --result_prefix "fiducial" \
+  --prefix "paper_hubble_final_production" \
+  --sigma_clip_threshold 3.0 \
+  "results/data/lc_data_all.h5"
+```
+
+#### Restricted fit
+
+```bash
+python -m qvc.hubble.hubble_fit --resume \
+  --cosmo_models FlatLambdaCDM FlatwCDM Flatw0waCDM \
+  --run full \
+  --speed production \
+  --spectra_fit_csv "results/data/spectra_data_all.csv" \
+  --completeness_sim_file "results/data/mock_completeness_catalog_fresh.h5" \
+  --z_range 1.0 3.16 \
+  --result_prefix "restricted" \
+  --prefix "paper_hubble_final_production_restricted" \
+  --sigma_clip_threshold 3.0 \
+  "results/data/lc_data_all.h5"
+```
+
+
 ## System Notes
 
 - Tested with Python `3.12.11`.
-- The Docker image is CPU-only and sets `QT_QPA_PLATFORM=offscreen`, `MPLBACKEND=Agg`, and `JAX_PLATFORM_NAME=cpu`.
+- All required Python packages and versions are listed under `requirements.txt` and will be installed automatically with the `pip install -e .` command.
 - Full-scale production runs were executed on Yale HPC and required over `100,000` CPU-hours.
 
 ## Optional Pubtools Build
@@ -110,7 +198,7 @@ To fetch appendix datasets:
 python -m qvc.setup_data --appendix
 ```
 
-Appendix notebooks live under `notebooks/`.
+The Stone, MacLeod, and same-length comparison plots were generated using Yale's HPC by running the `hpc_scripts/sfitlc.py` script.
 
 ## HPC Scripts
 The `hpc_scripts` folder contains Slurm/Yale-HPC-oriented helpers. Treat these as templates: partitions, paths, Conda environments, and account-specific settings may need local edits.
