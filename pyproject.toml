@@ -14,11 +14,11 @@ dependencies = [
     "dynesty==2.1.5",
     "dustmaps",
     "h5py==3.14.0",
-    "jax<=0.4.31",
-    "jaxlib<=0.4.31",
-    "jaxqsofit @ git+https://github.com/burke86/jaxqsofit.git",
-    "EzTaoX==0.2.0",
-    "jaxopt==0.8.5",
+    "jax==0.6.2",
+    "jaxlib==0.6.2",
+    "jaxopt",
+    #"jaxqsofit @ git+https://github.com/burke86/jaxqsofit.git",
+    #"EzTaoX==0.2.0",
     "matplotlib==3.10.0",
     "numpy==2.3.1",
     "numpyro==0.19.0",
@@ -32,7 +32,7 @@ dependencies = [
     "gdown==5.2.1",
     "colorama==0.4.6",
     "statsmodels==0.14.6",
-    "jaxns==2.6.6"
+    "jaxns>=2.6.9"
 ]
 
 [tool.setuptools]
