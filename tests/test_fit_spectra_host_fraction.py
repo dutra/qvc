@@ -1,8 +1,148 @@
 from types import SimpleNamespace
 
 import numpy as np
+import pandas as pd
+import pytest
 
 from qvc.spectra import fit_spectra
+
+
+def _patch_concat_light_curves(monkeypatch, lc_objects):
+    import qvc.light_curve.multiband_generate_lc as multiband_generate_lc
+
+    monkeypatch.setattr(
+        multiband_generate_lc,
+        "concat_light_curves",
+        lambda *args, **kwargs: lc_objects,
+    )
+
+
+def test_prepare_sample_df_uses_concat_lc_mean_and_h5_fit_mean(monkeypatch):
+    _patch_concat_light_curves(
+        monkeypatch,
+        [
+            {
+                "object_id": "1458203",
+                "mags_mean": [20.0, 21.0, 19.5, 19.25, 18.9],
+            }
+        ],
+    )
+    sample_df = pd.DataFrame(
+        [
+            {
+                "object_id": "1458203",
+                "sdss_name": "221958.21+003709.1",
+                "z": 3.090241,
+                "mags_mean_r": 99.0,
+                "mags_mean_i": 98.0,
+                "mean_r": -0.20,
+                "mean_r_err": 0.05,
+                "mean_i": 0.10,
+                "mean_i_err": 0.04,
+            }
+        ]
+    )
+
+    out = fit_spectra.prepare_sample_df(sample_df, filter_sdss_name=["221958.21+003709.1"])
+
+    row = out.iloc[0]
+    assert np.isclose(row["lc_mean_r"], 19.5)
+    assert np.isclose(row["lc_mean_i"], 19.25)
+    assert np.isclose(row["mean_corrected_r"], 19.30)
+    assert np.isclose(row["mean_corrected_i"], 19.35)
+
+
+def test_prepare_sample_df_requires_concat_lc_mean(monkeypatch):
+    _patch_concat_light_curves(monkeypatch, [{"object_id": "1458203", "mags_mean": [20.0, 21.0]}])
+    sample_df = pd.DataFrame(
+        [
+            {
+                "object_id": "1458203",
+                "sdss_name": "221958.21+003709.1",
+                "z": 3.090241,
+                "mean_r": -0.20,
+                "mean_r_err": 0.05,
+                "mean_i": 0.10,
+                "mean_i_err": 0.04,
+            }
+        ]
+    )
+
+    with pytest.raises(ValueError, match="missing finite lc_mean_r"):
+        fit_spectra.prepare_sample_df(sample_df, filter_sdss_name=["221958.21+003709.1"])
+
+
+def test_prepare_sample_df_requires_h5_fit_mean(monkeypatch):
+    _patch_concat_light_curves(
+        monkeypatch,
+        [{"object_id": "1458203", "mags_mean": [20.0, 21.0, 19.5, 19.25, 18.9]}],
+    )
+    sample_df = pd.DataFrame(
+        [
+            {
+                "object_id": "1458203",
+                "sdss_name": "221958.21+003709.1",
+                "z": 3.090241,
+                "mean_r_err": 0.05,
+                "mean_i": 0.10,
+                "mean_i_err": 0.04,
+            }
+        ]
+    )
+
+    with pytest.raises(ValueError, match="missing finite mean_r"):
+        fit_spectra.prepare_sample_df(sample_df, filter_sdss_name=["221958.21+003709.1"])
+
+
+def test_prepare_sample_df_requires_positive_h5_fit_mean_error(monkeypatch):
+    _patch_concat_light_curves(
+        monkeypatch,
+        [{"object_id": "1458203", "mags_mean": [20.0, 21.0, 19.5, 19.25, 18.9]}],
+    )
+    sample_df = pd.DataFrame(
+        [
+            {
+                "object_id": "1458203",
+                "sdss_name": "221958.21+003709.1",
+                "z": 3.090241,
+                "mean_r": -0.20,
+                "mean_r_err": 0.0,
+                "mean_i": 0.10,
+                "mean_i_err": 0.04,
+            }
+        ]
+    )
+
+    with pytest.raises(ValueError, match="missing positive finite mean_r_err"):
+        fit_spectra.prepare_sample_df(sample_df, filter_sdss_name=["221958.21+003709.1"])
+
+
+def test_build_psf_photometry_inputs_drops_lya_bands_and_uses_h5_errors():
+    rec = {
+        "z": 3.090241,
+        "lc_mean_u": 20.0,
+        "mean_u": 0.10,
+        "mean_u_err": 0.07,
+        "mean_corrected_u": 20.10,
+        "lc_mean_g": 21.0,
+        "mean_g": 0.20,
+        "mean_g_err": 0.06,
+        "mean_corrected_g": 21.20,
+        "lc_mean_r": 19.5,
+        "mean_r": -0.20,
+        "mean_r_err": 0.05,
+        "mean_corrected_r": 19.30,
+        "lc_mean_i": 19.25,
+        "mean_i": 0.10,
+        "mean_i_err": 0.04,
+        "mean_corrected_i": 19.35,
+    }
+
+    bands, mags, errs = fit_spectra.build_psf_photometry_inputs(rec)
+
+    assert bands == ["r", "i"]
+    assert mags == [19.30, 19.35]
+    assert errs == [0.05, 0.04]
 
 
 def test_compute_derived_results_uses_host_continuum_draw_ratio(monkeypatch):
@@ -698,24 +838,29 @@ def test_print_spectrum_diagnostics_omits_nan_rows_and_uses_not_available(capsys
 
 def test_run_one_fit_prints_consolidated_diagnostics_and_not_old_m2500_lines(monkeypatch, capsys, tmp_path):
     diagnostics_calls = []
+    config_calls = []
+    fit_calls = []
 
     class DummyHDUL:
         def close(self):
             return None
 
-    class DummyQSOFit:
-        def __init__(self, **kwargs):
-            self.flux = np.array([1.0, 1.0, 1.0], dtype=float)
-            self.err = np.array([0.1, 0.1, 0.1], dtype=float)
+    class DummyJAXQSOFit:
+        def __init__(self, config):
+            config_calls.append(config)
+            self.config = config
+            self.flux = np.asarray(config.spectroscopy.fluxes, dtype=float)
+            self.err = np.asarray(config.spectroscopy.errors, dtype=float)
             self.wave = np.array([2000.0, 3000.0, 4000.0], dtype=float)
             self.model_total = np.array([1.0, 1.0, 1.0], dtype=float)
             self.numpyro_samples = {"frac_jitter": np.zeros(1, dtype=float), "add_jitter": np.zeros(1, dtype=float)}
             self.pred_out = {}
-            self.ra = kwargs["ra"]
-            self.dec = kwargs["dec"]
-            self.z = kwargs["z"]
+            self.ra = config.observation.ra
+            self.dec = config.observation.dec
+            self.z = config.observation.redshift
 
         def fit(self, **kwargs):
+            fit_calls.append(kwargs)
             return None
 
         def plot_mcmc_diagnostics(self, **kwargs):
@@ -727,7 +872,7 @@ def test_run_one_fit_prints_consolidated_diagnostics_and_not_old_m2500_lines(mon
         np.array([1.0, 1.0, 1.0], dtype=float),
         np.array([0.1, 0.1, 0.1], dtype=float),
     ))
-    monkeypatch.setattr(fit_spectra, "QSOFit", DummyQSOFit)
+    monkeypatch.setattr(fit_spectra, "JAXQSOFit", DummyJAXQSOFit)
     monkeypatch.setattr(fit_spectra, "build_default_prior_config", lambda flux: {})
     monkeypatch.setattr(fit_spectra, "build_psf_photometry_inputs", lambda rec: (["g", "r"], [19.0, 18.5], [0.1, 0.1]))
     monkeypatch.setattr(fit_spectra, "extract_named_results", lambda q: {})
@@ -802,6 +947,40 @@ def test_run_one_fit_prints_consolidated_diagnostics_and_not_old_m2500_lines(mon
     assert "apparent_mag_2500: 18.2000 +/- 0.3000" in out
     assert "Estimated m2500 from model" not in out
     assert diagnostics_calls == []
+    assert len(config_calls) == 1
+    config = config_calls[0]
+    assert config.observation.object_id == "z1.100_J0001+0001"
+    assert config.observation.apply_mw_deredden is True
+    assert config.preprocessing.wave_range == (1250.0, 8000.0)
+    assert config.preprocessing.mask_lya_forest is False
+    assert config.continuum.fit_power_law is True
+    assert config.continuum.fit_feii is True
+    assert config.continuum.fit_balmer_continuum is True
+    assert config.continuum.fit_bal_absorption is False
+    assert config.continuum.fit_polynomial_tilt is False
+    assert config.continuum.fit_reddening is True
+    assert config.host.enabled is True
+    assert config.host.dsps_ssp_fn == "tempdata.h5"
+    assert config.lines.enabled is True
+    assert config.inference.method == "optax"
+    assert config.inference.map_steps == 1
+    assert config.inference.learning_rate == 1e-2
+    assert config.output.output_path == str(tmp_path / "out")
+    assert config.output.save_name == "z1.100_J0001+0001"
+    assert config.output.save_result is False
+    assert config.output.plot_fig is False
+    assert config.output.save_fig is False
+    assert config.psf_photometry.filter_names == ("g", "r")
+    assert config.psf_photometry.magnitudes == [19.0, 18.5]
+    assert config.psf_photometry.magnitude_errors == [0.1, 0.1]
+    assert fit_calls == [{
+        "verbose": False,
+        "kwargs_plot": {
+            "save_fig_path": args.fig_dir,
+            "plot_residual": False,
+            "show_plot": False,
+        },
+    }]
 
 
 def test_run_one_fit_plots_mcmc_diagnostics_when_requested(monkeypatch, tmp_path):
@@ -811,17 +990,17 @@ def test_run_one_fit_plots_mcmc_diagnostics_when_requested(monkeypatch, tmp_path
         def close(self):
             return None
 
-    class DummyQSOFit:
-        def __init__(self, **kwargs):
-            self.flux = np.array([1.0, 1.0, 1.0], dtype=float)
-            self.err = np.array([0.1, 0.1, 0.1], dtype=float)
+    class DummyJAXQSOFit:
+        def __init__(self, config):
+            self.flux = np.asarray(config.spectroscopy.fluxes, dtype=float)
+            self.err = np.asarray(config.spectroscopy.errors, dtype=float)
             self.wave = np.array([2000.0, 3000.0, 4000.0], dtype=float)
             self.model_total = np.array([1.0, 1.0, 1.0], dtype=float)
             self.numpyro_samples = {"frac_jitter": np.zeros(1, dtype=float), "add_jitter": np.zeros(1, dtype=float)}
             self.pred_out = {}
-            self.ra = kwargs["ra"]
-            self.dec = kwargs["dec"]
-            self.z = kwargs["z"]
+            self.ra = config.observation.ra
+            self.dec = config.observation.dec
+            self.z = config.observation.redshift
 
         def fit(self, **kwargs):
             return None
@@ -835,7 +1014,7 @@ def test_run_one_fit_plots_mcmc_diagnostics_when_requested(monkeypatch, tmp_path
         np.array([1.0, 1.0, 1.0], dtype=float),
         np.array([0.1, 0.1, 0.1], dtype=float),
     ))
-    monkeypatch.setattr(fit_spectra, "QSOFit", DummyQSOFit)
+    monkeypatch.setattr(fit_spectra, "JAXQSOFit", DummyJAXQSOFit)
     monkeypatch.setattr(fit_spectra, "build_default_prior_config", lambda flux: {})
     monkeypatch.setattr(fit_spectra, "build_psf_photometry_inputs", lambda rec: (["g", "r"], [19.0, 18.5], [0.1, 0.1]))
     monkeypatch.setattr(fit_spectra, "extract_named_results", lambda q: {})
@@ -900,31 +1079,23 @@ def test_run_one_fit_resume_forwards_plot_mcmc_diagnostics(monkeypatch, tmp_path
         def close(self):
             return None
 
-    class DummyQSOFit:
-        def __init__(self, **kwargs):
+    class DummyJAXQSOFit:
+        def __init__(self, config=None):
             self.flux = np.array([1.0, 1.0, 1.0], dtype=float)
             self.err = np.array([0.1, 0.1, 0.1], dtype=float)
             self.wave = np.array([2000.0, 3000.0, 4000.0], dtype=float)
             self.model_total = np.array([1.0, 1.0, 1.0], dtype=float)
             self.numpyro_samples = {"frac_jitter": np.zeros(1, dtype=float), "add_jitter": np.zeros(1, dtype=float)}
             self.pred_out = {}
-            self.ra = kwargs["ra"]
-            self.dec = kwargs["dec"]
-            self.z = kwargs["z"]
+            self.ra = 10.0
+            self.dec = 20.0
+            self.z = 1.1
+            self.use_psf_phot = True
 
         @classmethod
         def load_from_samples(cls, **kwargs):
             load_calls.append(kwargs)
-            return cls(
-                lam=np.array([4000.0, 5000.0, 6000.0], dtype=float),
-                flux=np.array([1.0, 1.0, 1.0], dtype=float),
-                err=np.array([0.1, 0.1, 0.1], dtype=float),
-                z=1.1,
-                ra=10.0,
-                dec=20.0,
-                filename=kwargs["filename"],
-                output_path=kwargs["output_path"],
-            )
+            return cls()
 
     monkeypatch.setattr(fit_spectra, "load_spec_from_cache", lambda *args, **kwargs: DummyHDUL())
     monkeypatch.setattr(fit_spectra, "get_spectrum_arrays", lambda _hdul: (
@@ -932,7 +1103,7 @@ def test_run_one_fit_resume_forwards_plot_mcmc_diagnostics(monkeypatch, tmp_path
         np.array([1.0, 1.0, 1.0], dtype=float),
         np.array([0.1, 0.1, 0.1], dtype=float),
     ))
-    monkeypatch.setattr(fit_spectra, "QSOFit", DummyQSOFit)
+    monkeypatch.setattr(fit_spectra, "JAXQSOFit", DummyJAXQSOFit)
     monkeypatch.setattr(fit_spectra, "build_default_prior_config", lambda flux: {})
     monkeypatch.setattr(fit_spectra, "build_psf_photometry_inputs", lambda rec: (["g", "r"], [19.0, 18.5], [0.1, 0.1]))
     monkeypatch.setattr(fit_spectra, "extract_named_results", lambda q: {})
@@ -988,5 +1159,92 @@ def test_run_one_fit_resume_forwards_plot_mcmc_diagnostics(monkeypatch, tmp_path
 
     assert result["fit_ok"] is True
     assert len(load_calls) == 1
+    assert load_calls[0]["kwargs_plot"] == {
+        "save_fig_path": args.fig_dir,
+        "show_plot": False,
+    }
     assert load_calls[0]["plot_diagnostics"] is True
     assert load_calls[0]["diagnostics_kwargs"] == {"save_fig_path": args.fig_dir}
+
+
+def test_run_one_fit_resume_fails_when_saved_samples_lack_psf_photometry(monkeypatch, tmp_path):
+    class DummyHDUL:
+        def close(self):
+            return None
+
+    class DummyJAXQSOFit:
+        def __init__(self):
+            self.flux = np.array([1.0, 1.0, 1.0], dtype=float)
+            self.err = np.array([0.1, 0.1, 0.1], dtype=float)
+            self.wave = np.array([2000.0, 3000.0, 4000.0], dtype=float)
+            self.model_total = np.array([1.0, 1.0, 1.0], dtype=float)
+            self.numpyro_samples = {"frac_jitter": np.zeros(1, dtype=float), "add_jitter": np.zeros(1, dtype=float)}
+            self.pred_out = {}
+            self.ra = 10.0
+            self.dec = 20.0
+            self.z = 1.1
+            self.use_psf_phot = False
+
+        @classmethod
+        def load_from_samples(cls, **kwargs):
+            return cls()
+
+    monkeypatch.setattr(fit_spectra, "load_spec_from_cache", lambda *args, **kwargs: DummyHDUL())
+    monkeypatch.setattr(fit_spectra, "get_spectrum_arrays", lambda _hdul: (
+        np.array([4000.0, 5000.0, 6000.0], dtype=float),
+        np.array([1.0, 1.0, 1.0], dtype=float),
+        np.array([0.1, 0.1, 0.1], dtype=float),
+    ))
+    monkeypatch.setattr(fit_spectra, "JAXQSOFit", DummyJAXQSOFit)
+    monkeypatch.setattr(fit_spectra, "build_default_prior_config", lambda flux: {})
+    monkeypatch.setattr(fit_spectra, "build_psf_photometry_inputs", lambda rec: (["g", "r"], [19.0, 18.5], [0.1, 0.1]))
+
+    rec = {
+        "object_id": "obj-6",
+        "sdss_name": "J0004+0004",
+        "plate": 1,
+        "fiber": 2,
+        "mjd": 3,
+        "z": 1.1,
+        "ra": 10.0,
+        "dec": 20.0,
+        "loglbol": 46.0,
+        "mean_corrected_g": 19.0,
+        "mean_corrected_r": 18.5,
+    }
+    args = SimpleNamespace(
+        output_dir=str(tmp_path / "out"),
+        fig_dir=str(tmp_path / "fig"),
+        save_fig=False,
+        cache_dir=str(tmp_path / "cache"),
+        decompose_host=True,
+        fit_bc=True,
+        fit_lines=True,
+        fit_pl=True,
+        fit_fe=True,
+        fit_poly=False,
+        mask_lya_forest=False,
+        fit_method="optax",
+        dsps_ssp_fn="tempdata.h5",
+        nuts_warmup=1,
+        nuts_samples=1,
+        nuts_chains=1,
+        nuts_target_accept=0.9,
+        optax_steps=1,
+        optax_lr=1e-2,
+        save_jaxqsofit_samples=False,
+        plot_residual=False,
+        plot_mcmc_diagnostics=False,
+        verbose=False,
+        resume=True,
+        no_deredden=False,
+        wave_min=1250.0,
+        wave_max=8000.0,
+        fit_bal=False,
+    )
+
+    result = fit_spectra.run_one_fit(rec, args)
+
+    assert result["fit_ok"] is False
+    assert "were fit without PSF photometry" in result["error_message"]
+    assert "Rerun without --resume" in result["error_message"]

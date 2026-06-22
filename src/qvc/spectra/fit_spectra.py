@@ -42,7 +42,20 @@ os.environ["XLA_FLAGS"] = f"--xla_force_host_platform_device_count={num_cores}"
 os.environ["JAX_PLATFORM_NAME"] = "cpu"
 
 from qvc.hubble.hubble_utils import match_radec, read_quasars_from_hdf5_flat, resolve_qvc_data_path
-from jaxqsofit import QSOFit, build_default_prior_config
+from jaxqsofit import (
+    ContinuumConfig,
+    FitConfig,
+    HostConfig,
+    InferenceConfig,
+    JAXQSOFit,
+    LineConfig,
+    Observation,
+    OutputConfig,
+    PreprocessingConfig,
+    PSFPhotometryData,
+    SpectroscopyData,
+    build_default_prior_config,
+)
 from jaxqsofit.custom_components import normalize_custom_line_components
 from jaxqsofit.model import (
     _broad_line_mask,
@@ -193,10 +206,14 @@ def build_psf_photometry_inputs(rec):
         if not np.isfinite(mag):
             continue
 
-        # Prefer posterior mean-band errors from multiband fitting; fall back to LC scatter.
         mag_err = safe_float(rec.get(f"mean_{band}_err"))
+        if not (np.isfinite(mag_err) and mag_err > 0.0):
+            continue
 
-        print(f"Band: {band} -- Mags Mean: {rec.get(f'mags_mean_{band}')}, Mean: {rec.get(f'mean_{band}')}, Corrected Mag: {mag}")
+        print(
+            f"Band: {band} -- LC Mean: {rec.get(f'lc_mean_{band}')}, "
+            f"Fit Mean: {rec.get(f'mean_{band}')}, Corrected Mag: {mag}"
+        )
 
         psf_bands_all.append(band)
         psf_mags_all.append(float(mag))
@@ -499,7 +516,7 @@ def _prepare_psf_bandpass_fraction_inputs(q, bands, n_draws):
         return None
     if not hasattr(q, "reconstruct_posterior_spectrum"):
         raise RuntimeError(
-            "QSOFit object does not expose reconstruct_posterior_spectrum(); "
+            "JAXQSOFit object does not expose reconstruct_posterior_spectrum(); "
             "cannot compute bandpass PSF fractions without posterior reconstruction."
         )
 
@@ -1317,23 +1334,20 @@ def build_sample_df_from_object_ids(object_ids):
     )
 
 
-def _apply_h5_mean_correction(sample_df):
-    sample_df = sample_df.copy()
-    for band in SDSS_BANDS:
-        mag_col = f"mags_mean_{band}"
-        if mag_col not in sample_df.columns:
-            continue
-        mag_mean = pd.to_numeric(sample_df[mag_col], errors="coerce")
-        mean_col = f"mean_{band}"
-        if mean_col in sample_df.columns:
-            mean_shift = pd.to_numeric(sample_df[mean_col], errors="coerce").fillna(0.0)
-        else:
-            mean_shift = 0.0
-        sample_df[f"mean_corrected_{band}"] = mag_mean + mean_shift
-    return sample_df
+def _psf_calibration_bands_for_z(z):
+    dropped_bands = set(sdss_bands_affected_by_lya(z)) if np.isfinite(safe_float(z)) else set()
+    return [band for band in SDSS_CAL_BANDS if band not in dropped_bands]
 
 
-def load_lc_mean_corrected_by_object_id(object_ids):
+def _format_row_identity(row):
+    object_id = normalize_object_id(row.get("object_id_norm", row.get("object_id")))
+    sdss_name = str(row.get("sdss_name", "")).strip()
+    if sdss_name:
+        return f"object_id={object_id}, sdss_name={sdss_name}"
+    return f"object_id={object_id}"
+
+
+def load_lc_mean_by_object_id(object_ids):
     from qvc.light_curve.multiband_generate_lc import concat_light_curves
 
     requested_ids = [normalize_object_id(obj_id) for obj_id in object_ids]
@@ -1357,16 +1371,12 @@ def load_lc_mean_corrected_by_object_id(object_ids):
         norm_id = normalize_object_id(obj.get("object_id"))
         if not norm_id:
             continue
-        bands = obj.get("bands", [])
         mags_mean = obj.get("mags_mean", [])
-        row = {f"mean_corrected_{band}": np.nan for band in SDSS_BANDS}
-        for band, mag in zip(bands, mags_mean):
-            band_name = str(band)
-            if band_name not in SDSS_BANDS:
-                continue
+        row = {f"lc_mean_{band}": np.nan for band in SDSS_BANDS}
+        for band, mag in zip(SDSS_BANDS, mags_mean):
             mag_val = safe_float(mag)
             if np.isfinite(mag_val):
-                row[f"mean_corrected_{band_name}"] = float(mag_val)
+                row[f"lc_mean_{band}"] = float(mag_val)
         by_object_id[norm_id] = row
     return by_object_id
 
@@ -1374,17 +1384,40 @@ def load_lc_mean_corrected_by_object_id(object_ids):
 def _apply_lc_mean_correction(sample_df):
     sample_df = sample_df.copy()
     for band in SDSS_BANDS:
-        col = f"mean_corrected_{band}"
-        if col not in sample_df.columns:
-            sample_df[col] = np.nan
+        for col in (f"lc_mean_{band}", f"mean_corrected_{band}"):
+            if col not in sample_df.columns:
+                sample_df[col] = np.nan
     object_ids = sample_df["object_id"].astype(str).tolist()
-    by_object_id = load_lc_mean_corrected_by_object_id(object_ids)
+    by_object_id = load_lc_mean_by_object_id(object_ids)
     for idx, norm_id in enumerate(sample_df["object_id_norm"].tolist()):
         row = by_object_id.get(norm_id)
         if row is None:
             continue
         for band in SDSS_BANDS:
-            sample_df.at[idx, f"mean_corrected_{band}"] = row.get(f"mean_corrected_{band}", np.nan)
+            sample_df.at[idx, f"lc_mean_{band}"] = row.get(f"lc_mean_{band}", np.nan)
+
+    missing = []
+    for idx, row in sample_df.iterrows():
+        z = safe_float(row.get("z"))
+        for band in _psf_calibration_bands_for_z(z):
+            lc_col = f"lc_mean_{band}"
+            mean_col = f"mean_{band}"
+            err_col = f"mean_{band}_err"
+            lc_mean = safe_float(row.get(lc_col))
+            fit_mean = safe_float(row.get(mean_col))
+            fit_mean_err = safe_float(row.get(err_col))
+            if not np.isfinite(lc_mean):
+                missing.append(f"{_format_row_identity(row)} band={band}: missing finite {lc_col} from concat_light_curves()")
+            if not np.isfinite(fit_mean):
+                missing.append(f"{_format_row_identity(row)} band={band}: missing finite {mean_col} from H5/input")
+            if not (np.isfinite(fit_mean_err) and fit_mean_err > 0.0):
+                missing.append(f"{_format_row_identity(row)} band={band}: missing positive finite {err_col} from H5/input")
+            if np.isfinite(lc_mean) and np.isfinite(fit_mean):
+                sample_df.at[idx, f"mean_corrected_{band}"] = float(lc_mean + fit_mean)
+    if missing:
+        preview = "; ".join(missing[:10])
+        more = "" if len(missing) <= 10 else f"; ... {len(missing) - 10} more"
+        raise ValueError(f"Cannot build PSF photometry inputs. {preview}{more}")
     return sample_df
 
 
@@ -1422,9 +1455,11 @@ def prepare_sample_df(
 
     sample_df = sample_df.reset_index(drop=True)
     if use_h5_mean_correction:
-        sample_df = _apply_h5_mean_correction(sample_df)
-    else:
-        sample_df = _apply_lc_mean_correction(sample_df)
+        print(
+            "--use-h5-mean-correction is deprecated for spectra PSF correction; "
+            "using concat_light_curves() LC means plus H5/input mean_* offsets."
+        )
+    sample_df = _apply_lc_mean_correction(sample_df)
 
     sample_df["object_id"] = sample_df["object_id_norm"]
     sample_df = sample_df.drop(columns=["object_id_norm"])
@@ -1687,17 +1722,7 @@ def run_one_fit(rec, args):
         if len(lam) == 0:
             raise RuntimeError("Spectrum has no good pixels after ivar filtering.")
 
-        q = QSOFit(
-            lam=lam,
-            flux=flux,
-            err=err,
-            z=float(rec["z"]),
-            ra=float(rec["ra"]),
-            dec=float(rec["dec"]),
-            filename=f"z{rec['z']:.3f}_{rec['sdss_name']}",
-            output_path=str(args.output_dir),
-        )
-
+        fit_name = f"z{rec['z']:.3f}_{rec['sdss_name']}"
         prior_config = build_default_prior_config(flux)
         decompose_host_eff = effective_decompose_host_flag(rec["z"], requested=args.decompose_host)
         fit_bc_eff = effective_fit_bc_flag(rec["z"], requested=args.fit_bc)
@@ -1713,47 +1738,91 @@ def run_one_fit(rec, args):
                 result[f"mean_corrected_{band}"] = float(mag)
 
         if args.resume:
-            q = QSOFit.load_from_samples(
-                filename=f"z{rec['z']:.3f}_{rec['sdss_name']}",  # important: matches fit(name=...)
+            q = JAXQSOFit.load_from_samples(
+                filename=fit_name,  # important: matches OutputConfig(save_name=...)
                 output_path=str(args.output_dir),
-                kwargs_plot={"show_plot": False},
+                kwargs_plot={
+                    "save_fig_path": args.fig_dir,
+                    "show_plot": False,
+                },
                 plot_diagnostics=args.plot_mcmc_diagnostics,
                 diagnostics_kwargs={"save_fig_path": args.fig_dir},
             )
+            if len(psf_bands_all) > 0 and not bool(getattr(q, "use_psf_phot", False)):
+                raise RuntimeError(
+                    f"Saved samples for {fit_name} were fit without PSF photometry, "
+                    f"but current inputs provide PSF bands {''.join(psf_bands_all)}. "
+                    "Rerun without --resume to refit with PSF mag correction."
+                )
         else:
-            q.fit(
-                name=f"z{rec['z']:.3f}_{rec['sdss_name']}",
-                #fit_poly_edge_flex=args.fit_poly_edge_flex,
-                deredden=not args.no_deredden,
-                wave_range=(args.wave_min, args.wave_max),
-                fit_lines=args.fit_lines,
-                decompose_host=decompose_host_eff,
-                fit_pl=args.fit_pl,
-                fit_fe=args.fit_fe,
-                fit_bc=fit_bc_eff,
-                fit_bal=fit_bal_eff,
-                fit_poly=args.fit_poly,
-                mask_lya_forest=args.mask_lya_forest,
-                fit_method=args.fit_method,
+            psf_photometry = None
+            if len(psf_bands_all) > 0:
+                psf_photometry = PSFPhotometryData(
+                    magnitudes=psf_mags_all,
+                    magnitude_errors=psf_mag_errs_all,
+                    filter_names=tuple(psf_bands_all),
+                )
+
+            config = FitConfig(
+                observation=Observation(
+                    object_id=fit_name,
+                    redshift=float(rec["z"]),
+                    ra=float(rec["ra"]),
+                    dec=float(rec["dec"]),
+                    apply_mw_deredden=not args.no_deredden,
+                ),
+                spectroscopy=SpectroscopyData(
+                    wave_obs=lam,
+                    fluxes=flux,
+                    errors=err,
+                ),
+                psf_photometry=psf_photometry,
+                preprocessing=PreprocessingConfig(
+                    wave_range=(args.wave_min, args.wave_max),
+                    mask_lya_forest=args.mask_lya_forest,
+                ),
+                continuum=ContinuumConfig(
+                    fit_power_law=args.fit_pl,
+                    fit_feii=args.fit_fe,
+                    fit_balmer_continuum=fit_bc_eff,
+                    fit_bal_absorption=fit_bal_eff,
+                    fit_polynomial_tilt=args.fit_poly,
+                    fit_reddening=True,
+                ),
+                host=HostConfig(
+                    enabled=decompose_host_eff,
+                    dsps_ssp_fn=args.dsps_ssp_fn,
+                ),
+                lines=LineConfig(
+                    enabled=args.fit_lines,
+                ),
+                inference=InferenceConfig(
+                    method=args.fit_method,
+                    map_steps=args.optax_steps,
+                    learning_rate=args.optax_lr,
+                    num_warmup=args.nuts_warmup,
+                    num_samples=args.nuts_samples,
+                    num_chains=args.nuts_chains,
+                    target_accept_prob=args.nuts_target_accept,
+                ),
+                output=OutputConfig(
+                    output_path=str(args.output_dir),
+                    save_name=fit_name,
+                    save_result=args.save_jaxqsofit_samples,
+                    plot_fig=args.save_fig,
+                    save_fig=args.save_fig,
+                    show_plot=False,
+                ),
                 prior_config=prior_config,
-                dsps_ssp_fn=args.dsps_ssp_fn,
-                nuts_warmup=args.nuts_warmup,
-                nuts_samples=args.nuts_samples,
-                nuts_chains=args.nuts_chains,
-                nuts_target_accept=args.nuts_target_accept,
-                optax_steps=args.optax_steps,
-                optax_lr=args.optax_lr,
-                save_result=args.save_jaxqsofit_samples,
-                save_fits_name=f"z{rec['z']:.3f}_{rec['sdss_name']}",
-                show_plot=False,
-                plot_fig=args.save_fig,
-                save_fig=args.save_fig,
+            )
+            q = JAXQSOFit(config)
+            q.fit(
                 verbose=args.verbose,
-                kwargs_plot={"save_fig_path": args.fig_dir, 'plot_residual': args.plot_residual},
-                psf_mags=psf_mags_all,
-                psf_mag_errs=psf_mag_errs_all,
-                psf_bands=psf_bands_all,
-                use_psf_phot=True,
+                kwargs_plot={
+                    "save_fig_path": args.fig_dir,
+                    "plot_residual": args.plot_residual,
+                    "show_plot": False,
+                },
             )
             if args.plot_mcmc_diagnostics:
                 q.plot_mcmc_diagnostics(save_fig_path=args.fig_dir)
