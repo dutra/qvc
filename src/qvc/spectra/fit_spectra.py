@@ -19,6 +19,7 @@ import argparse
 import multiprocessing as mp
 import os
 import traceback
+from collections.abc import Mapping
 from functools import partial
 from pathlib import Path
 
@@ -43,6 +44,7 @@ os.environ["JAX_PLATFORM_NAME"] = "cpu"
 
 from qvc.hubble.hubble_utils import match_radec, read_quasars_from_hdf5_flat, resolve_qvc_data_path
 from jaxqsofit import (
+    BALConfig,
     ContinuumConfig,
     FitConfig,
     HostConfig,
@@ -134,6 +136,24 @@ def serialize_any(x):
         return arr.tolist()
     except Exception:
         return repr(x)
+
+
+def prior_config_for_fit_config(prior_config):
+    """
+    Normalize prior configs for current jaxqsofit FitConfig validation.
+
+    Older jaxqsofit versions accepted low-level model-prior mappings directly.
+    Current versions expect structured PriorConfig sections, with raw model
+    priors carried under "_model_priors".
+    """
+    if not isinstance(prior_config, Mapping):
+        return prior_config
+    if len(prior_config) == 0:
+        return None
+    structured_keys = {"continuum", "host", "lines", "feii", "psf", "student_t_df", "_model_priors"}
+    if any(key in prior_config for key in structured_keys):
+        return prior_config
+    return {"_model_priors": dict(prior_config)}
 
 
 def sdss_spec_filename(plate: int, mjd: int, fiber: int) -> str:
@@ -1785,9 +1805,11 @@ def run_one_fit(rec, args):
                     fit_power_law=args.fit_pl,
                     fit_feii=args.fit_fe,
                     fit_balmer_continuum=fit_bc_eff,
-                    fit_bal_absorption=fit_bal_eff,
                     fit_polynomial_tilt=args.fit_poly,
                     fit_reddening=True,
+                ),
+                bal=BALConfig(
+                    enabled=fit_bal_eff,
                 ),
                 host=HostConfig(
                     enabled=decompose_host_eff,
@@ -1813,7 +1835,7 @@ def run_one_fit(rec, args):
                     save_fig=args.save_fig,
                     show_plot=False,
                 ),
-                prior_config=prior_config,
+                prior_config=prior_config_for_fit_config(prior_config),
             )
             q = JAXQSOFit(config)
             q.fit(

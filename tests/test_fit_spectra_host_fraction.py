@@ -956,7 +956,7 @@ def test_run_one_fit_prints_consolidated_diagnostics_and_not_old_m2500_lines(mon
     assert config.continuum.fit_power_law is True
     assert config.continuum.fit_feii is True
     assert config.continuum.fit_balmer_continuum is True
-    assert config.continuum.fit_bal_absorption is False
+    assert config.bal.enabled is False
     assert config.continuum.fit_polynomial_tilt is False
     assert config.continuum.fit_reddening is True
     assert config.host.enabled is True
