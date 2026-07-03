@@ -1945,7 +1945,7 @@ def parse_args():
     p.add_argument("--filter_sdss_name", nargs="+", default=None)
     p.add_argument("--filter_object_id", nargs="+", default=None)
     p.add_argument("--fit-method", choices=["optax", "nuts", "optax+nuts"], default="optax+nuts")
-    p.add_argument("--dsps-ssp-fn", default="data/ssp_data_fsps_v3.2_lgmet_age.h5", help="Path to the DSPS SSP HDF5 file.")
+    p.add_argument("--dsps-ssp-fn", default="data/ssp_data_continuum_fsps_v3.2_lgmet_age.h5", help="Path to the DSPS SSP HDF5 file.")
     p.add_argument("--no-deredden", action="store_true")
 
     p.add_argument("--wave-min", type=float, default=1250.0, help="Rest-frame minimum wavelength.")
