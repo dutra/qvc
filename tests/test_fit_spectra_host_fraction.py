@@ -35,6 +35,10 @@ def test_prepare_sample_df_uses_concat_lc_mean_and_h5_fit_mean(monkeypatch):
                 "z": 3.090241,
                 "mags_mean_r": 99.0,
                 "mags_mean_i": 98.0,
+                "mean_u": 0.10,
+                "mean_u_err": 0.07,
+                "mean_g": 0.20,
+                "mean_g_err": 0.06,
                 "mean_r": -0.20,
                 "mean_r_err": 0.05,
                 "mean_i": 0.10,
@@ -46,8 +50,12 @@ def test_prepare_sample_df_uses_concat_lc_mean_and_h5_fit_mean(monkeypatch):
     out = fit_spectra.prepare_sample_df(sample_df, filter_sdss_name=["221958.21+003709.1"])
 
     row = out.iloc[0]
+    assert np.isclose(row["lc_mean_u"], 20.0)
+    assert np.isclose(row["lc_mean_g"], 21.0)
     assert np.isclose(row["lc_mean_r"], 19.5)
     assert np.isclose(row["lc_mean_i"], 19.25)
+    assert np.isclose(row["mean_corrected_u"], 20.10)
+    assert np.isclose(row["mean_corrected_g"], 21.20)
     assert np.isclose(row["mean_corrected_r"], 19.30)
     assert np.isclose(row["mean_corrected_i"], 19.35)
 
@@ -60,6 +68,10 @@ def test_prepare_sample_df_requires_concat_lc_mean(monkeypatch):
                 "object_id": "1458203",
                 "sdss_name": "221958.21+003709.1",
                 "z": 3.090241,
+                "mean_u": 0.10,
+                "mean_u_err": 0.07,
+                "mean_g": 0.20,
+                "mean_g_err": 0.06,
                 "mean_r": -0.20,
                 "mean_r_err": 0.05,
                 "mean_i": 0.10,
@@ -83,6 +95,10 @@ def test_prepare_sample_df_requires_h5_fit_mean(monkeypatch):
                 "object_id": "1458203",
                 "sdss_name": "221958.21+003709.1",
                 "z": 3.090241,
+                "mean_u": 0.10,
+                "mean_u_err": 0.07,
+                "mean_g": 0.20,
+                "mean_g_err": 0.06,
                 "mean_r_err": 0.05,
                 "mean_i": 0.10,
                 "mean_i_err": 0.04,
@@ -105,6 +121,10 @@ def test_prepare_sample_df_requires_positive_h5_fit_mean_error(monkeypatch):
                 "object_id": "1458203",
                 "sdss_name": "221958.21+003709.1",
                 "z": 3.090241,
+                "mean_u": 0.10,
+                "mean_u_err": 0.07,
+                "mean_g": 0.20,
+                "mean_g_err": 0.06,
                 "mean_r": -0.20,
                 "mean_r_err": 0.0,
                 "mean_i": 0.10,
@@ -117,7 +137,7 @@ def test_prepare_sample_df_requires_positive_h5_fit_mean_error(monkeypatch):
         fit_spectra.prepare_sample_df(sample_df, filter_sdss_name=["221958.21+003709.1"])
 
 
-def test_build_psf_photometry_inputs_drops_lya_bands_and_uses_h5_errors():
+def test_build_psf_photometry_inputs_keeps_all_valid_bands_and_uses_h5_errors():
     rec = {
         "z": 3.090241,
         "lc_mean_u": 20.0,
@@ -140,9 +160,30 @@ def test_build_psf_photometry_inputs_drops_lya_bands_and_uses_h5_errors():
 
     bands, mags, errs = fit_spectra.build_psf_photometry_inputs(rec)
 
-    assert bands == ["r", "i"]
-    assert mags == [19.30, 19.35]
-    assert errs == [0.05, 0.04]
+    assert bands == ["u", "g", "r", "i"]
+    assert mags == [20.10, 21.20, 19.30, 19.35]
+    assert errs == [0.07, 0.06, 0.05, 0.04]
+
+
+def test_extract_fit_stats_uses_fitted_arrays_without_local_lya_cutoff():
+    q = SimpleNamespace(
+        wave=np.array([1100.0, 1300.0, 2000.0], dtype=float),
+        flux=np.array([2.0, 4.0, 6.0], dtype=float),
+        model_total=np.array([1.0, 2.0, 3.0], dtype=float),
+        err=np.array([1.0, 1.0, 1.0], dtype=float),
+        numpyro_samples={
+            "frac_jitter": np.zeros(1, dtype=float),
+            "add_jitter": np.zeros(1, dtype=float),
+        },
+    )
+
+    out = fit_spectra.extract_fit_stats(q)
+
+    assert out["n_pixels"] == 3
+    assert np.isclose(out["chi2"], 14.0)
+    assert np.isclose(out["chi2_per_pixel"], 14.0 / 3.0)
+    assert np.isclose(out["wrms"], np.sqrt(14.0 / 3.0))
+    assert out["wave_min_rf"] == 1100.0
 
 
 def test_compute_derived_results_uses_host_continuum_draw_ratio(monkeypatch):
@@ -917,7 +958,6 @@ def test_run_one_fit_prints_consolidated_diagnostics_and_not_old_m2500_lines(mon
         fit_pl=True,
         fit_fe=True,
         fit_poly=False,
-        mask_lya_forest=False,
         fit_method="optax",
         dsps_ssp_fn="tempdata.h5",
         nuts_warmup=1,
@@ -952,7 +992,6 @@ def test_run_one_fit_prints_consolidated_diagnostics_and_not_old_m2500_lines(mon
     assert config.observation.object_id == "z1.100_J0001+0001"
     assert config.observation.apply_mw_deredden is True
     assert config.preprocessing.wave_range == (1250.0, 8000.0)
-    assert config.preprocessing.mask_lya_forest is False
     assert config.continuum.fit_power_law is True
     assert config.continuum.fit_feii is True
     assert config.continuum.fit_balmer_continuum is True
@@ -1046,7 +1085,6 @@ def test_run_one_fit_plots_mcmc_diagnostics_when_requested(monkeypatch, tmp_path
         fit_pl=True,
         fit_fe=True,
         fit_poly=False,
-        mask_lya_forest=False,
         fit_method="optax",
         dsps_ssp_fn="tempdata.h5",
         nuts_warmup=1,
@@ -1135,7 +1173,6 @@ def test_run_one_fit_resume_forwards_plot_mcmc_diagnostics(monkeypatch, tmp_path
         fit_pl=True,
         fit_fe=True,
         fit_poly=False,
-        mask_lya_forest=False,
         fit_method="optax",
         dsps_ssp_fn="tempdata.h5",
         nuts_warmup=1,
@@ -1223,7 +1260,6 @@ def test_run_one_fit_resume_fails_when_saved_samples_lack_psf_photometry(monkeyp
         fit_pl=True,
         fit_fe=True,
         fit_poly=False,
-        mask_lya_forest=False,
         fit_method="optax",
         dsps_ssp_fn="tempdata.h5",
         nuts_warmup=1,

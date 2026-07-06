@@ -171,26 +171,6 @@ def load_sdss_spec_from_cache(cache_dir: str | Path, plate: int, mjd: int, fiber
     return None
 
 
-def sdss_bands_affected_by_lya(z, buffer=0.0):
-    """
-    SDSS ugriz bands whose rest-frame blue edge is below Ly-alpha.
-    """
-    edges_obs = {
-        "u": (3055.11, 4030.64),
-        "g": (3797.64, 5553.04),
-        "r": (5418.23, 6994.42),
-        "i": (6692.41, 8400.32),
-        "z": (7964.70, 10873.33),
-    }
-
-    cutoff = 1216.0 + float(buffer)
-    affected = []
-    for band, (lo_obs, _hi_obs) in edges_obs.items():
-        if (lo_obs / (1.0 + float(z))) < cutoff:
-            affected.append(band)
-    return affected
-
-
 def get_sdss_filters():
     global _SDSS_FILTER_CACHE
     if _SDSS_FILTER_CACHE is None:
@@ -211,17 +191,11 @@ def build_psf_photometry_inputs(rec):
     """
     Build PSF-photometry inputs for jaxqsofit from mean-corrected multiband values.
     """
-    z = safe_float(rec.get("z"))
-    dropped_bands = set(sdss_bands_affected_by_lya(z)) if np.isfinite(z) else set()
-
     psf_bands_all = []
     psf_mags_all = []
     psf_mag_errs_all = []
 
     for band in SDSS_CAL_BANDS:
-        if band in dropped_bands:
-            continue
-
         mag = safe_float(rec.get(f"mean_corrected_{band}"))
         if not np.isfinite(mag):
             continue
@@ -1354,11 +1328,6 @@ def build_sample_df_from_object_ids(object_ids):
     )
 
 
-def _psf_calibration_bands_for_z(z):
-    dropped_bands = set(sdss_bands_affected_by_lya(z)) if np.isfinite(safe_float(z)) else set()
-    return [band for band in SDSS_CAL_BANDS if band not in dropped_bands]
-
-
 def _format_row_identity(row):
     object_id = normalize_object_id(row.get("object_id_norm", row.get("object_id")))
     sdss_name = str(row.get("sdss_name", "")).strip()
@@ -1418,8 +1387,7 @@ def _apply_lc_mean_correction(sample_df):
 
     missing = []
     for idx, row in sample_df.iterrows():
-        z = safe_float(row.get("z"))
-        for band in _psf_calibration_bands_for_z(z):
+        for band in SDSS_CAL_BANDS:
             lc_col = f"lc_mean_{band}"
             mean_col = f"mean_{band}"
             err_col = f"mean_{band}_err"
@@ -1649,8 +1617,6 @@ def extract_fit_stats(q):
 
     resid = np.asarray(q.flux) - np.asarray(q.model_total)
     sigma = np.asarray(q.err)
-    mask = np.asarray(q.wave, dtype=float) >= 1215.67
-    resid = resid[mask]
 
     s = q.numpyro_samples
     frac_j = safe_float(np.median(np.asarray(s.get("frac_jitter", 0.0))), 0.0)
@@ -1799,7 +1765,6 @@ def run_one_fit(rec, args):
                 psf_photometry=psf_photometry,
                 preprocessing=PreprocessingConfig(
                     wave_range=(args.wave_min, args.wave_max),
-                    mask_lya_forest=args.mask_lya_forest,
                 ),
                 continuum=ContinuumConfig(
                     fit_power_law=args.fit_pl,
@@ -1981,10 +1946,6 @@ def parse_args():
     p.set_defaults(fit_poly=True)
     p.add_argument("--fit-poly", dest="fit_poly", action="store_true")
     p.add_argument("--no-fit-poly", dest="fit_poly", action="store_false")
-
-    p.set_defaults(mask_lya_forest=True)
-    p.add_argument("--mask-lya-forest", dest="mask_lya_forest", action="store_true")
-    p.add_argument("--no-mask-lya-forest", dest="mask_lya_forest", action="store_false")
 
     p.set_defaults(fit_poly_edge_flex=True)
     p.add_argument("--fit-poly-edge-flex", dest="fit_poly_edge_flex", action="store_true")
