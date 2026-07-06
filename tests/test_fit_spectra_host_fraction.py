@@ -914,7 +914,7 @@ def test_run_one_fit_prints_consolidated_diagnostics_and_not_old_m2500_lines(mon
         np.array([0.1, 0.1, 0.1], dtype=float),
     ))
     monkeypatch.setattr(fit_spectra, "JAXQSOFit", DummyJAXQSOFit)
-    monkeypatch.setattr(fit_spectra, "build_default_prior_config", lambda flux: {})
+    monkeypatch.setattr(fit_spectra, "build_default_prior_config", lambda *args, **kwargs: {})
     monkeypatch.setattr(fit_spectra, "build_psf_photometry_inputs", lambda rec: (["g", "r"], [19.0, 18.5], [0.1, 0.1]))
     monkeypatch.setattr(fit_spectra, "extract_named_results", lambda q: {})
     monkeypatch.setattr(fit_spectra, "extract_scalar_attrs", lambda q: {})
@@ -1054,7 +1054,7 @@ def test_run_one_fit_plots_mcmc_diagnostics_when_requested(monkeypatch, tmp_path
         np.array([0.1, 0.1, 0.1], dtype=float),
     ))
     monkeypatch.setattr(fit_spectra, "JAXQSOFit", DummyJAXQSOFit)
-    monkeypatch.setattr(fit_spectra, "build_default_prior_config", lambda flux: {})
+    monkeypatch.setattr(fit_spectra, "build_default_prior_config", lambda *args, **kwargs: {})
     monkeypatch.setattr(fit_spectra, "build_psf_photometry_inputs", lambda rec: (["g", "r"], [19.0, 18.5], [0.1, 0.1]))
     monkeypatch.setattr(fit_spectra, "extract_named_results", lambda q: {})
     monkeypatch.setattr(fit_spectra, "extract_scalar_attrs", lambda q: {})
@@ -1142,7 +1142,7 @@ def test_run_one_fit_resume_forwards_plot_mcmc_diagnostics(monkeypatch, tmp_path
         np.array([0.1, 0.1, 0.1], dtype=float),
     ))
     monkeypatch.setattr(fit_spectra, "JAXQSOFit", DummyJAXQSOFit)
-    monkeypatch.setattr(fit_spectra, "build_default_prior_config", lambda flux: {})
+    monkeypatch.setattr(fit_spectra, "build_default_prior_config", lambda *args, **kwargs: {})
     monkeypatch.setattr(fit_spectra, "build_psf_photometry_inputs", lambda rec: (["g", "r"], [19.0, 18.5], [0.1, 0.1]))
     monkeypatch.setattr(fit_spectra, "extract_named_results", lambda q: {})
     monkeypatch.setattr(fit_spectra, "extract_scalar_attrs", lambda q: {})
@@ -1233,7 +1233,7 @@ def test_run_one_fit_resume_fails_when_saved_samples_lack_psf_photometry(monkeyp
         np.array([0.1, 0.1, 0.1], dtype=float),
     ))
     monkeypatch.setattr(fit_spectra, "JAXQSOFit", DummyJAXQSOFit)
-    monkeypatch.setattr(fit_spectra, "build_default_prior_config", lambda flux: {})
+    monkeypatch.setattr(fit_spectra, "build_default_prior_config", lambda *args, **kwargs: {})
     monkeypatch.setattr(fit_spectra, "build_psf_photometry_inputs", lambda rec: (["g", "r"], [19.0, 18.5], [0.1, 0.1]))
 
     rec = {

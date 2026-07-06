@@ -55,8 +55,8 @@ from jaxqsofit import (
     OutputConfig,
     PreprocessingConfig,
     PSFPhotometryData,
+    PriorConfig,
     SpectroscopyData,
-    build_default_prior_config,
 )
 from jaxqsofit.custom_components import normalize_custom_line_components
 from jaxqsofit.model import (
@@ -150,10 +150,15 @@ def prior_config_for_fit_config(prior_config):
         return prior_config
     if len(prior_config) == 0:
         return None
-    structured_keys = {"continuum", "host", "lines", "feii", "psf", "student_t_df", "_model_priors"}
+    structured_keys = {"continuum", "host", "lines", "feii", "psf", "_model_priors"}
     if any(key in prior_config for key in structured_keys):
         return prior_config
     return {"_model_priors": dict(prior_config)}
+
+
+def build_default_prior_config(flux, redshift=None, **kwargs):
+    """Build jaxqsofit default priors using the current public API."""
+    return PriorConfig.from_spectrum(flux=flux, redshift=redshift, **kwargs).to_mapping()
 
 
 def sdss_spec_filename(plate: int, mjd: int, fiber: int) -> str:
@@ -1709,7 +1714,7 @@ def run_one_fit(rec, args):
             raise RuntimeError("Spectrum has no good pixels after ivar filtering.")
 
         fit_name = f"z{rec['z']:.3f}_{rec['sdss_name']}"
-        prior_config = build_default_prior_config(flux)
+        prior_config = build_default_prior_config(flux, redshift=float(rec["z"]))
         decompose_host_eff = effective_decompose_host_flag(rec["z"], requested=args.decompose_host)
         fit_bc_eff = effective_fit_bc_flag(rec["z"], requested=args.fit_bc)
         fit_bal_eff = effective_fit_bal_flag(rec["z"])
