@@ -19,17 +19,17 @@ from qvc.hubble.hubble_utils import read_quasars_from_hdf5_flat
 # 1. Define your job settings here
 # ==========================================
 #prefix = "jaxqsofit_apr1a_chisq20_mar31a"
-prefix = "jaxqsofit_jun30b"
+prefix = "jaxqsofit_jul3b"
 partition = "day"
-time_limit = "6:00:00"
+time_limit = "12:00:00"
 
 # Number of object_ids per array task
-chunk_size = 1
+chunk_size = 12
 
 # Number of CPUs used by fit_spectra.py
-nproc = 1
-cpus_per_task = 1
-mem = "20G"
+nproc = 3
+cpus_per_task = 3
+mem = "32G"
 
 fit_script = "fit_spectra.py"
 
