@@ -37,7 +37,7 @@ job_name = "_".join(job_name_parts)
 # 1. Define your job settings here
 # ==========================================
 #prefix = "jaxqsofit_apr1a_chisq20_mar31a"
-prefix = "jaxqsofit_jul6b"
+prefix = "jaxqsofit_jul8a"
 partition = "day"
 time_limit = "10:00:00"
 
@@ -295,6 +295,9 @@ cmd = [
     out_csv,
     "--cache-dir", cache_dir,
     "--verbose",
+    "--save-fig",
+    "--optax-steps", "2000",
+    "--optax-lr", "0.01",
     "--nuts-warmup", "250",
     "--nuts-samples", "250",
     "--nuts-chains", "1",
