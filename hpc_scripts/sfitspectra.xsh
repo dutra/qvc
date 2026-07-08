@@ -19,9 +19,9 @@ from qvc.hubble.hubble_utils import read_quasars_from_hdf5_flat
 # 1. Define your job settings here
 # ==========================================
 #prefix = "jaxqsofit_apr1a_chisq20_mar31a"
-prefix = "jaxqsofit_jul3b"
+prefix = "jaxqsofit_jul6b"
 partition = "day"
-time_limit = "12:00:00"
+time_limit = "10:00:00"
 
 # Number of object_ids per array task
 chunk_size = 12
