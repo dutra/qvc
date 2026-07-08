@@ -287,7 +287,7 @@ cmd = [
     "--cache-dir", cache_dir,
     "--verbose",
     "--save-fig",
-    "--nuts-warmup", "1000",
+    "--nuts-warmup", "250",
     "--nuts-samples", "250",
     "--nuts-chains", "1",
     "--output-dir", real_output_dir,

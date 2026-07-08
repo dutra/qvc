@@ -1921,10 +1921,10 @@ def parse_args():
     p.add_argument("--wave-min", type=float, default=1250.0, help="Rest-frame minimum wavelength.")
     p.add_argument("--wave-max", type=float, default=8000.0, help="Rest-frame maximum wavelength.")
 
-    p.add_argument("--optax-steps", type=int, default=600)
+    p.add_argument("--optax-steps", type=int, default=2000)
     p.add_argument("--optax-lr", type=float, default=1e-2)
-    p.add_argument("--nuts-warmup", type=int, default=50)
-    p.add_argument("--nuts-samples", type=int, default=50)
+    p.add_argument("--nuts-warmup", type=int, default=250)
+    p.add_argument("--nuts-samples", type=int, default=250)
     p.add_argument("--nuts-chains", type=int, default=1)
     p.add_argument("--nuts-target-accept", type=float, default=0.9)
 
