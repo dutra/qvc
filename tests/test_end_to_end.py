@@ -202,10 +202,10 @@ def test_plot_adf_pvalue_g_diagnostic_writes_pdf(tmp_path, monkeypatch):
     assert out.endswith("adf_pvalue_g_diagnostic.pdf")
 
 
-def test_effective_decompose_host_flag_disables_host_above_z_1p5():
+def test_effective_decompose_host_flag_disables_host_above_z_1p6():
     assert effective_decompose_host_flag(0.8, requested=True) is True
-    assert effective_decompose_host_flag(1.5, requested=True) is True
-    assert effective_decompose_host_flag(1.5001, requested=True) is False
+    assert effective_decompose_host_flag(1.6, requested=True) is True
+    assert effective_decompose_host_flag(1.6001, requested=True) is False
     assert effective_decompose_host_flag(3.0, requested=True) is False
     assert effective_decompose_host_flag(0.8, requested=False) is False
 

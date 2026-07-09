@@ -705,7 +705,7 @@ def estimate_agn_psf_bandpass_fractions(q, bands=SDSS_BANDS, n_draws=128):
 def effective_decompose_host_flag(z, requested=True):
     """Disable host decomposition for high-redshift spectra."""
     z = safe_float(z)
-    return bool(requested) and (not np.isfinite(z) or z <= 1.5)
+    return bool(requested) and (not np.isfinite(z) or z <= 1.6)
 
 
 def effective_fit_bal_flag(z):
