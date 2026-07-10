@@ -85,6 +85,9 @@ from qvc.light_curve.multiband_model_dho_blr import (
     make_linear_mean_func,
     relative_flux_to_mag_residual,
 )
+from qvc.light_curve.multiband_model_dho_blr_erlang import (
+    make_multiband_dho_blr_flux_linearized_erlang_model,
+)
 from qvc.light_curve.psf_constant_flux_correction import (
     apply_constant_flux_correction_to_objects,
     print_constant_flux_correction_summary,
@@ -2750,22 +2753,22 @@ def compute_parameter_kls(
     eta_tau = np.asarray(flat_samples["eta_tau"])
     sigma_center0_key = (
         "log_sigma_center0_relflux"
-        if model_variant == "mag_flux_linearized" and "log_sigma_center0_relflux" in flat_samples
+        if model_variant in ("mag_flux_linearized", "mag_flux_linearized_erlang") and "log_sigma_center0_relflux" in flat_samples
         else "log_sigma_center0"
     )
     sigma_prior_fn = (
-        log_sigma_center0_relflux_prior if model_variant == "mag_flux_linearized" else log_sigma_center0_prior
+        log_sigma_center0_relflux_prior if model_variant in ("mag_flux_linearized", "mag_flux_linearized_erlang") else log_sigma_center0_prior
     )
     linear_trend_prior_fn = (
         linear_trend_prior_relflux(t_ref=t_ref, z=z)
-        if model_variant == "mag_flux_linearized"
+        if model_variant in ("mag_flux_linearized", "mag_flux_linearized_erlang")
         else linear_trend_prior(t_ref=t_ref, z=z)
     )
     linear_trend_band_offset_prior_fn = linear_trend_band_offset_prior(
         len(bands),
-        relflux=(model_variant == "mag_flux_linearized"),
+        relflux=(model_variant in ("mag_flux_linearized", "mag_flux_linearized_erlang")),
     )
-    mean_prior_fn = mean_prior_relflux if model_variant == "mag_flux_linearized" else mean_prior
+    mean_prior_fn = mean_prior_relflux if model_variant in ("mag_flux_linearized", "mag_flux_linearized_erlang") else mean_prior
     log_jitter_mean_arr = np.asarray(log_jitter_mean, dtype=float)
 
     kls["eta_sigma_kl"] = kl_from_samples(
@@ -2823,12 +2826,12 @@ def compute_parameter_kls(
             lambda x: _dist_log_prob_array(linear_trend_prior_fn, x),
         )
 
-    if "lag0" in flat_samples:
+    if model_variant != "mag_flux_linearized_erlang" and "lag0" in flat_samples:
         kls["lag0_kl"] = kl_from_samples(
             flat_samples["lag0"],
             lambda x: _dist_log_prob_array(lag0_prior(z=z), x),
         )
-    if "lag_beta" in flat_samples:
+    if model_variant != "mag_flux_linearized_erlang" and "lag_beta" in flat_samples:
         kls["lag_beta_kl"] = kl_from_samples(
             flat_samples["lag_beta"],
             lambda x: _dist_log_prob_array(lag_beta_prior(), x),
@@ -3456,7 +3459,7 @@ def add_model_prediction_params(samples, lam_rf, *, model_variant=None, lam_lya_
     out = dict(samples)
     use_fluxmix = model_variant == "mag_fluxmix_fast" or "log_cont_scale" in out
     use_relflux = (
-        model_variant == "mag_flux_linearized"
+        model_variant in ("mag_flux_linearized", "mag_flux_linearized_erlang")
         or "log_sigma_uv_relflux" in out
         or "amp_cont_relflux" in out
     )
@@ -3835,6 +3838,7 @@ def build_single_object_model_mag_flux_linearized(
     drop_band_lyman_alpha=False,
     tau_fast_truncated=False,
     n_blr_terms=1,
+    use_erlang=False,
 ):
     """Return the relative-flux quasi-separable model for one object."""
 
@@ -3912,9 +3916,16 @@ def build_single_object_model_mag_flux_linearized(
             band_offset_raw_prior_dist=linear_trend_band_offset_raw_prior_relflux(),
         )
 
-        lag0 = numpyro.sample("lag0", lag0_prior(z=z))
-        log_lag0 = numpyro.deterministic("log_lag0", jnp.log(lag0))
-        lag_beta = numpyro.sample("lag_beta", lag_beta_prior())
+        if use_erlang:
+            # This first implementation gives the prompt continuum zero delay
+            # and assigns all inferred response delay to the causal BLR chain.
+            lag0 = numpyro.deterministic("lag0", jnp.asarray(0.0))
+            log_lag0 = numpyro.deterministic("log_lag0", jnp.asarray(0.0))
+            lag_beta = numpyro.deterministic("lag_beta", jnp.asarray(0.0))
+        else:
+            lag0 = numpyro.sample("lag0", lag0_prior(z=z))
+            log_lag0 = numpyro.deterministic("log_lag0", jnp.log(lag0))
+            lag_beta = numpyro.sample("lag_beta", lag_beta_prior())
 
         line_ratio_offsets = compute_flux_line_ratio_offsets(
             lam_rf,
@@ -3942,7 +3953,7 @@ def build_single_object_model_mag_flux_linearized(
             line_ratio_offsets=line_ratio_offsets,
             mean_prior_dist=mean_prior_relflux(),
             disable_lag_blr=disable_lag_blr,
-            disable_lag_bc=disable_lag_bc,
+            disable_lag_bc=(True if use_erlang else disable_lag_bc),
             n_blr_terms=n_blr_terms,
         )
 
@@ -4003,7 +4014,12 @@ def build_single_object_model_mag_flux_linearized(
         numpyro.deterministic("lag_blr2", params["lag_blr2"])
         numpyro.deterministic("F0_cont_band", baseline_flux_by_band)
 
-        m = make_multiband_dho_blr_flux_linearized_model(
+        model_factory = (
+            make_multiband_dho_blr_flux_linearized_erlang_model
+            if use_erlang
+            else make_multiband_dho_blr_flux_linearized_model
+        )
+        m = model_factory(
             X=(t, bidx),
             y=y_relflux,
             yerr=yerr_relflux,
@@ -4502,6 +4518,7 @@ def run_iterated_mag_flux_linearized_inference(
     drop_band_lyman_alpha=False,
     tau_fast_truncated=False,
     n_blr_terms=1,
+    model_variant="mag_flux_linearized",
 ):
     """Iteratively refit the relative-flux QS model using local magnitude-likelihood pseudo-data."""
 
@@ -4527,6 +4544,7 @@ def run_iterated_mag_flux_linearized_inference(
         drop_band_lyman_alpha=drop_band_lyman_alpha,
         tau_fast_truncated=tau_fast_truncated,
         n_blr_terms=n_blr_terms,
+        use_erlang=(model_variant == "mag_flux_linearized_erlang"),
     )
 
     for iter_idx in range(int(FLUX_LINEARIZED_REFINEMENT_ITERS)):
@@ -4576,7 +4594,12 @@ def run_iterated_mag_flux_linearized_inference(
             lam_lya_rf=lam_lya_rf,
         )
         params_median = _posterior_median_params(samples_for_prediction)
-        display_model = make_multiband_dho_blr_flux_linearized_model(
+        display_factory = (
+            make_multiband_dho_blr_flux_linearized_erlang_model
+            if model_variant == "mag_flux_linearized_erlang"
+            else make_multiband_dho_blr_flux_linearized_model
+        )
+        display_model = display_factory(
             obj_dict["X"],
             y_fit,
             yerr_fit,
@@ -5130,7 +5153,7 @@ def main():
     parser.add_argument("--n_blr_terms", type=int, choices=(1, 2), default=1, help="Number of BLR lag terms to fit.")
     parser.add_argument(
         "--model_variant",
-        choices=("mag_linear", "mag_flux_linearized", "mag_fluxmix_fast"),
+        choices=("mag_linear", "mag_flux_linearized", "mag_flux_linearized_erlang", "mag_fluxmix_fast"),
         default="mag_linear",
         help="Light-curve model path: the legacy additive-magnitude quasi-sep solver, the relative-flux quasi-sep approximation with mag-equivalent outputs, or the staged fast flux-mixing approximation.",
     )
@@ -5207,9 +5230,9 @@ def main():
         raise ValueError(
             f"--fit_method {args.fit_method} is only supported with --model_variant mag_fluxmix_fast."
         )
-    if args.model_variant == "mag_flux_linearized" and args.fit_method == "ns":
+    if args.model_variant in ("mag_flux_linearized", "mag_flux_linearized_erlang") and args.fit_method == "ns":
         raise ValueError(
-            "model_variant='mag_flux_linearized' now always uses iterative local likelihood refinement "
+            "flux-linearized model variants use iterative local likelihood refinement "
             "and requires --fit_method nuts or svi+nuts."
         )
     if args.fit_method == "alternating_two_stage_nuts" and args.fluxmix_outer_iters < 2:
@@ -5307,7 +5330,7 @@ def main():
             obj["log_jitter_active_mask"] = log_jitter_active_mask
             obj["survey_offset_active_mask"] = survey_offset_active_mask
             log_jitter_mean_fit = log_jitter_mean
-            if args.model_variant == "mag_flux_linearized":
+            if args.model_variant in ("mag_flux_linearized", "mag_flux_linearized_erlang"):
                 y_relflux = np.asarray(mag_residual_to_relative_flux(obj["y"]), dtype=float)
                 yerr_relflux = np.asarray(
                     magerr_residual_to_relative_fluxerr(obj["y"], obj["yerr"]),
@@ -5321,16 +5344,17 @@ def main():
                 )
             if args.model_variant == "mag_linear":
                 model_builder = build_single_object_model
-            elif args.model_variant == "mag_flux_linearized":
+            elif args.model_variant in ("mag_flux_linearized", "mag_flux_linearized_erlang"):
                 if args.n_blr_terms != 1:
                     raise ValueError(
-                        "model_variant='mag_flux_linearized' currently supports only n_blr_terms=1."
+                        f"model_variant={args.model_variant!r} currently supports only n_blr_terms=1."
                     )
                 model_builder = None
                 logging.info(
-                    "[%s] mag_flux_linearized using iterative local magnitude-likelihood refinement with relative-flux QS solves; active_components=%s",
+                    "[%s] %s using iterative local magnitude-likelihood refinement with relative-flux QS solves; active_components=%s",
                     oid,
-                    "cont,blr" if args.disable_lag_bc or args.disable_lag_blr else "cont,blr,bc",
+                    args.model_variant,
+                    "cont,blr" if args.model_variant == "mag_flux_linearized_erlang" or args.disable_lag_bc or args.disable_lag_blr else "cont,blr,bc",
                 )
             elif args.model_variant == "mag_fluxmix_fast":
                 if args.n_blr_terms != 1:
@@ -5401,7 +5425,7 @@ def main():
                         n_blr_terms=args.n_blr_terms,
                         outer_iters=(args.fluxmix_outer_iters if args.fit_method == "alternating_two_stage_nuts" else 1),
                     )
-                elif args.model_variant == "mag_flux_linearized":
+                elif args.model_variant in ("mag_flux_linearized", "mag_flux_linearized_erlang"):
                     obj_flat_samples, samples_per_chain, flux_linearized_fit_obj, stage_diagnostics = run_iterated_mag_flux_linearized_inference(
                         obj,
                         lam_rf,
@@ -5424,6 +5448,7 @@ def main():
                         drop_band_lyman_alpha=args.drop_band_lyman_alpha,
                         tau_fast_truncated=args.tau_fast_truncated,
                         n_blr_terms=args.n_blr_terms,
+                        model_variant=args.model_variant,
                     )
                 elif args.fit_method in ("nuts", "svi+nuts"):
                     if args.fit_method == "svi+nuts":
@@ -5542,7 +5567,7 @@ def main():
                 diagnostics = diagnostics_for_per_chain_samples(obj_samples_per_chain_flatten_per_band)
             diagnostics |= stage_diagnostics
 
-            if args.model_variant == "mag_flux_linearized":
+            if args.model_variant in ("mag_flux_linearized", "mag_flux_linearized_erlang"):
                 fit_obj_for_display = flux_linearized_fit_obj if flux_linearized_fit_obj is not None else obj
                 y_relflux_display, yerr_relflux_display = (
                     (
@@ -5555,7 +5580,12 @@ def main():
                         magerr_residual_to_relative_fluxerr(obj["y"], obj["yerr"]),
                     )
                 )
-                m = make_multiband_dho_blr_flux_linearized_model(
+                display_factory = (
+                    make_multiband_dho_blr_flux_linearized_erlang_model
+                    if args.model_variant == "mag_flux_linearized_erlang"
+                    else make_multiband_dho_blr_flux_linearized_model
+                )
+                m = display_factory(
                     obj["X"],
                     y_relflux_display,
                     yerr_relflux_display,
