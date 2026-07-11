@@ -8,6 +8,7 @@ deviation ``lag / sqrt(order)``.
 
 from functools import partial
 
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 from jax.scipy.linalg import expm
@@ -58,7 +59,7 @@ class ErlangResponseDHOQS(qs.Quasisep):
     lag_blr: jnp.ndarray
     amp_cont: jnp.ndarray
     amp_blr: jnp.ndarray
-    order: int = DEFAULT_ERLANG_ORDER
+    order: int = eqx.field(static=True, default=DEFAULT_ERLANG_ORDER)
 
     def coord_to_sortable(self, X):
         t, b = X

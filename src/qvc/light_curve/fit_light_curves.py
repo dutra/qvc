@@ -2558,6 +2558,7 @@ def sample_linear_trend_with_band_offsets(
     disable_linear_trend=False,
     trend_prior_dist=None,
     band_offset_raw_prior_dist=None,
+    shared_linear_trend=False,
 ):
     """Sample a global slope plus zero-sum per-band slope offsets."""
 
@@ -2580,6 +2581,17 @@ def sample_linear_trend_with_band_offsets(
         return linear_trend, linear_trend_band_offset, linear_trend_band
 
     linear_trend = numpyro.sample("linear_trend", trend_prior_dist)
+    if shared_linear_trend:
+        linear_trend_band_offset = numpyro.deterministic(
+            "linear_trend_band_offset",
+            zeros,
+        )
+        linear_trend_band = numpyro.deterministic(
+            "linear_trend_band",
+            jnp.full(B, linear_trend),
+        )
+        return linear_trend, linear_trend_band_offset, linear_trend_band
+
     with numpyro.plate("band", B):
         linear_trend_band_offset_raw = numpyro.sample(
             "linear_trend_band_offset_raw",
@@ -4004,6 +4016,7 @@ def build_single_object_model_mag_flux_linearized(
             disable_linear_trend=disable_linear_trend,
             trend_prior_dist=linear_trend_prior_relflux(t_ref=t, z=z),
             band_offset_raw_prior_dist=linear_trend_band_offset_raw_prior_relflux(),
+            shared_linear_trend=use_erlang,
         )
 
         if use_erlang:
@@ -4106,9 +4119,10 @@ def build_single_object_model_mag_flux_linearized(
         numpyro.deterministic("lag_blr2", params["lag_blr2"])
         numpyro.deterministic("F0_cont_band", baseline_flux_by_band)
 
+        use_erlang_response = use_erlang and not disable_lag_blr
         model_factory = (
             make_multiband_dho_blr_flux_linearized_erlang_model
-            if use_erlang
+            if use_erlang_response
             else make_multiband_dho_blr_flux_linearized_model
         )
         m = model_factory(
@@ -4120,7 +4134,7 @@ def build_single_object_model_mag_flux_linearized(
             baseline_flux_by_band=baseline_flux_by_band,
             zero_mean=zero_mean,
             has_jitter=has_jitter,
-            **({"erlang_order": erlang_order} if use_erlang else {}),
+            **({"erlang_order": erlang_order} if use_erlang_response else {}),
         )
         numpyro.factor("loglike", m.log_prob(params))
 
@@ -4503,6 +4517,7 @@ def _run_nuts_inference(
     progress_bar,
     dense_mass,
     max_tree_depth,
+    target_accept=0.9,
     init_strategy=None,
 ):
     if init_strategy is None:
@@ -4512,7 +4527,7 @@ def _run_nuts_inference(
         init_strategy=init_strategy,
         dense_mass=dense_mass,
         max_tree_depth=max_tree_depth,
-        target_accept_prob=0.9,
+        target_accept_prob=target_accept,
     )
     mcmc = MCMC(
         nuts,
@@ -4605,6 +4620,7 @@ def run_iterated_mag_flux_linearized_inference(
     max_tree_depth,
     svi_steps,
     svi_lr,
+    target_accept=0.9,
     disable_linear_trend=False,
     disable_lag_blr=False,
     disable_lag_bc=False,
@@ -4680,6 +4696,7 @@ def run_iterated_mag_flux_linearized_inference(
             progress_bar=progress_bar,
             dense_mass=dense_mass,
             max_tree_depth=max_tree_depth,
+            target_accept=target_accept,
             init_strategy=init_strategy,
         )
         diagnostics[f"flux_linearized_iter{iter_idx + 1}_accept_prob"] = iter_diag["accept_prob"]
@@ -4693,9 +4710,12 @@ def run_iterated_mag_flux_linearized_inference(
             lam_lya_rf=lam_lya_rf,
         )
         params_median = _posterior_median_params(samples_for_prediction)
+        use_erlang_response = (
+            model_variant == "mag_flux_linearized_erlang" and not disable_lag_blr
+        )
         display_factory = (
             make_multiband_dho_blr_flux_linearized_erlang_model
-            if model_variant == "mag_flux_linearized_erlang"
+            if use_erlang_response
             else make_multiband_dho_blr_flux_linearized_model
         )
         display_model = display_factory(
@@ -4707,7 +4727,7 @@ def run_iterated_mag_flux_linearized_inference(
             baseline_flux_by_band=reference_flux_from_mean_magnitudes(obj_dict["mags_means"]),
             zero_mean=zero_mean,
             has_jitter=has_jitter,
-            **({"erlang_order": erlang_order} if model_variant == "mag_flux_linearized_erlang" else {}),
+            **({"erlang_order": erlang_order} if use_erlang_response else {}),
         )
         y_next, yerr_next = _flux_linearized_pseudo_data_from_prediction(
             obj_dict,
@@ -5013,6 +5033,7 @@ def run_two_stage_fluxmix_fast_inference(
     progress_bar,
     dense_mass,
     max_tree_depth,
+    target_accept=0.9,
     disable_linear_trend=False,
     disable_lag_blr=False,
     disable_lag_bc=False,
@@ -5062,6 +5083,7 @@ def run_two_stage_fluxmix_fast_inference(
             progress_bar=progress_bar,
             dense_mass=dense_mass,
             max_tree_depth=max_tree_depth,
+            target_accept=target_accept,
         )
 
         stage1_raw_median = _fluxmix_stage1_raw_median_params(stage1_flat, lam_rf)
@@ -5095,6 +5117,7 @@ def run_two_stage_fluxmix_fast_inference(
             progress_bar=progress_bar,
             dense_mass=dense_mass,
             max_tree_depth=max_tree_depth,
+            target_accept=target_accept,
             init_strategy=init_to_value(
                 values={
                     "eta_sigma": np.asarray(stage1_raw_median["eta_sigma"], dtype=float),
@@ -5161,6 +5184,12 @@ def main():
     )
     parser.add_argument("--inject_fake", action="store_true", help="Inject fake light curves.")
     parser.add_argument("--max_tree_depth", type=int, default=8, help="NUTS max tree depth.")
+    parser.add_argument(
+        "--target_accept",
+        type=float,
+        default=0.9,
+        help="Target NUTS acceptance probability (default: 0.9).",
+    )
     parser.add_argument(
         "--dense_mass",
         action="store_true",
@@ -5385,6 +5414,8 @@ def main():
         raise ValueError("--shared_blr_lag is not yet supported by model_variant='mag_fluxmix_fast'.")
     if args.erlang_order < 1:
         raise ValueError("--erlang_order must be at least 1.")
+    if not 0.0 < args.target_accept < 1.0:
+        raise ValueError("--target_accept must be strictly between 0 and 1.")
     if args.erlang_order != DEFAULT_ERLANG_ORDER and args.model_variant != "mag_flux_linearized_erlang":
         raise ValueError("--erlang_order is only used by --model_variant mag_flux_linearized_erlang.")
     if args.fit_method == "ns":
@@ -5504,7 +5535,7 @@ def main():
                     "[%s] %s using iterative local magnitude-likelihood refinement with relative-flux QS solves; active_components=%s",
                     oid,
                     args.model_variant,
-                    "cont,blr" if args.model_variant == "mag_flux_linearized_erlang" or args.disable_lag_bc or args.disable_lag_blr else "cont,blr,bc",
+                    "cont" if args.disable_lag_blr else ("cont,blr" if args.model_variant == "mag_flux_linearized_erlang" or args.disable_lag_bc else "cont,blr,bc"),
                 )
             elif args.model_variant == "mag_fluxmix_fast":
                 if args.n_blr_terms != 1:
@@ -5569,6 +5600,7 @@ def main():
                         progress_bar=args.progress,
                         dense_mass=args.dense_mass,
                         max_tree_depth=args.max_tree_depth,
+                        target_accept=args.target_accept,
                         disable_linear_trend=args.disable_linear_trend,
                         disable_lag_blr=args.disable_lag_blr,
                         disable_lag_bc=args.disable_lag_bc,
@@ -5594,6 +5626,7 @@ def main():
                         max_tree_depth=args.max_tree_depth,
                         svi_steps=args.svi_steps,
                         svi_lr=args.svi_lr,
+                        target_accept=args.target_accept,
                         disable_linear_trend=args.disable_linear_trend,
                         disable_lag_blr=args.disable_lag_blr,
                         disable_lag_bc=args.disable_lag_bc,
@@ -5631,7 +5664,7 @@ def main():
                         init_strategy=init_strategy,
                         dense_mass=args.dense_mass,
                         max_tree_depth=args.max_tree_depth,
-                        target_accept_prob=0.9,
+                        target_accept_prob=args.target_accept,
                     )
                     mcmc = MCMC(
                         nuts,
