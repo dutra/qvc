@@ -231,6 +231,21 @@ def _draw_vector(values, *, n_use, fill_value):
     return np.pad(arr, (0, n_use - arr.size), mode="constant", constant_values=pad_value)
 
 
+def _draw_vector_strict(values, *, n_use):
+    arr = np.asarray(values, dtype=float).reshape(-1)
+    if arr.size == 0:
+        return None
+    if arr.size == 1:
+        arr = np.full(n_use, float(arr[0]), dtype=float)
+    elif arr.size >= n_use:
+        arr = arr[:n_use]
+    else:
+        arr = np.pad(arr, (0, n_use - arr.size), mode="constant", constant_values=np.nan)
+    if not np.all(np.isfinite(arr)):
+        return None
+    return arr
+
+
 def _draw_matrix(values, *, n_use, n_cols, fill_value=0.0):
     arr = np.asarray(values, dtype=float)
     if arr.ndim == 0:
@@ -253,23 +268,6 @@ def _draw_matrix(values, *, n_use, n_cols, fill_value=0.0):
     return np.nan_to_num(arr, nan=fill_value, posinf=fill_value, neginf=fill_value)
 
 
-def _line_template_strengths(tied_line_meta):
-    if tied_line_meta is None or tied_line_meta.get("n_lines", 0) == 0:
-        return np.zeros((0,), dtype=float)
-    fgroup = np.asarray(tied_line_meta.get("fgroup", []), dtype=int)
-    flux_ratio = np.asarray(tied_line_meta.get("flux_ratio", np.ones(len(fgroup))), dtype=float)
-    amp_init_group = np.asarray(
-        tied_line_meta.get("amp_init_group", np.ones(int(np.max(fgroup)) + 1 if len(fgroup) else 0)),
-        dtype=float,
-    )
-    if amp_init_group.ndim == 0:
-        amp_init_group = np.asarray([float(amp_init_group)], dtype=float)
-    base = np.ones(len(fgroup), dtype=float)
-    valid = (fgroup >= 0) & (fgroup < amp_init_group.size)
-    base[valid] = amp_init_group[fgroup[valid]]
-    return np.nan_to_num(base * flux_ratio, nan=0.0, posinf=0.0, neginf=0.0)
-
-
 def _safe_take_group_values(matrix, group_ids, *, row_index, default):
     group_ids = np.asarray(group_ids, dtype=int)
     out = np.full(group_ids.shape, default, dtype=float)
@@ -279,32 +277,6 @@ def _safe_take_group_values(matrix, group_ids, *, row_index, default):
     if np.any(valid):
         out[valid] = matrix[row_index, group_ids[valid]]
     return np.nan_to_num(out, nan=default, posinf=default, neginf=default)
-
-
-def _nanmedian_or_default(values, default):
-    arr = np.asarray(values, dtype=float)
-    good = np.isfinite(arr)
-    if np.any(good):
-        return float(np.nanmedian(arr[good]))
-    return float(default)
-
-
-def _infer_family_draw(values, family_mask, *, default, require_positive=False):
-    values = np.asarray(values, dtype=float)
-    family_mask = np.asarray(family_mask, dtype=bool)
-    if values.ndim != 2 or values.shape[1] != family_mask.size or not np.any(family_mask):
-        return np.full(values.shape[0] if values.ndim == 2 else 0, float(default), dtype=float)
-    family_vals = values[:, family_mask]
-    valid = np.isfinite(family_vals)
-    if require_positive:
-        valid &= family_vals > 0.0
-    per_draw = np.full(family_vals.shape[0], np.nan, dtype=float)
-    any_valid = np.any(valid, axis=1)
-    if np.any(any_valid):
-        per_draw[any_valid] = np.nanmedian(np.where(valid[any_valid], family_vals[any_valid], np.nan), axis=1)
-    fallback = _nanmedian_or_default(np.where(valid, family_vals, np.nan), default=default)
-    per_draw[~np.isfinite(per_draw)] = fallback
-    return np.nan_to_num(per_draw, nan=fallback, posinf=fallback, neginf=fallback)
 
 
 def _reconstruct_line_psf_draws_on_wave(q, wave_out, n_use, *, return_components=False):
@@ -331,6 +303,15 @@ def _reconstruct_line_psf_draws_on_wave(q, wave_out, n_use, *, return_components
 
     if (tied_line_meta is None or tied_line_meta.get("n_lines", 0) == 0) and len(custom_line_components) == 0:
         empty = np.zeros((n_use, len(wave_out)), dtype=float)
+        if return_components:
+            return {"broad": empty.copy(), "narrow": empty.copy(), "total": empty}
+        return empty
+
+    pred_out = getattr(q, "pred_out", {}) or {}
+    scale_psf_draws = _draw_vector_strict(pred_out.get("scale_psf", []), n_use=n_use)
+    eta_psf_draws = _draw_vector_strict(pred_out.get("eta_psf", []), n_use=n_use)
+    if scale_psf_draws is None or eta_psf_draws is None:
+        empty = np.full((n_use, len(wave_out)), np.nan, dtype=float)
         if return_components:
             return {"broad": empty.copy(), "narrow": empty.copy(), "total": empty}
         return empty
@@ -367,22 +348,10 @@ def _reconstruct_line_psf_draws_on_wave(q, wave_out, n_use, *, return_components
     else:
         line_amp_group = line_amp_group[:n_use]
 
-    scale_psf_draws = _draw_vector(
-        getattr(q, "pred_out", {}).get("scale_psf", getattr(q, "scale_psf", np.nan)),
-        n_use=n_use,
-        fill_value=1.0,
-    )
-    eta_psf_draws = _draw_vector(
-        getattr(q, "pred_out", {}).get("eta_psf", getattr(q, "eta_psf", np.nan)),
-        n_use=n_use,
-        fill_value=1.0,
-    )
-
     if tied_line_meta is not None and tied_line_meta.get("n_lines", 0) > 0:
         ln_lambda0 = np.asarray(tied_line_meta["ln_lambda0"], dtype=float)
         line_lambda = np.exp(ln_lambda0)
         broad_mask = np.asarray(_broad_line_mask(tied_line_meta.get("names", [])), dtype=float)
-        is_broad = broad_mask > 0.5
         native_names = list(native_tied_line_meta.get("names", [])) if native_tied_line_meta is not None else []
         native_name_to_idx = {name: idx for idx, name in enumerate(native_names)}
         full_names = list(tied_line_meta.get("names", []))
@@ -398,40 +367,17 @@ def _reconstruct_line_psf_draws_on_wave(q, wave_out, n_use, *, return_components
         native_amps = np.zeros((n_use, len(native_names)), dtype=float)
         native_sigs = np.zeros((n_use, len(native_names)), dtype=float)
         native_dmus = np.zeros((n_use, len(native_names)), dtype=float)
-        native_templates = np.zeros((len(native_names),), dtype=float)
-        native_broad_mask = np.zeros((len(native_names),), dtype=bool)
         if native_tied_line_meta is not None and native_tied_line_meta.get("n_lines", 0) > 0:
             native_vgroup = np.asarray(native_tied_line_meta["vgroup"], dtype=int)
             native_wgroup = np.asarray(native_tied_line_meta["wgroup"], dtype=int)
             native_fgroup = np.asarray(native_tied_line_meta["fgroup"], dtype=int)
             native_flux_ratio = np.asarray(native_tied_line_meta["flux_ratio"], dtype=float)
-            native_templates = _line_template_strengths(native_tied_line_meta)
-            native_broad_mask = np.asarray(_broad_line_mask(native_names), dtype=float) > 0.5
             for i in range(n_use):
                 native_dmus[i] = _safe_take_group_values(line_dmu_group, native_vgroup, row_index=i, default=0.0)
                 native_sigs[i] = _safe_take_group_values(line_sig_group, native_wgroup, row_index=i, default=0.0)
                 native_amp_base = _safe_take_group_values(line_amp_group, native_fgroup, row_index=i, default=0.0)
                 native_amps[i] = native_amp_base * native_flux_ratio
 
-        family_norm = {}
-        family_sig = {}
-        family_dmu = {}
-        for family_name, family_mask in (("broad", native_broad_mask), ("narrow", ~native_broad_mask)):
-            if family_mask.size == 0 or not np.any(family_mask):
-                family_norm[family_name] = np.zeros(n_use, dtype=float)
-                family_sig[family_name] = np.zeros(n_use, dtype=float)
-                family_dmu[family_name] = np.zeros(n_use, dtype=float)
-                continue
-            family_templates = native_templates[family_mask]
-            ratio_draws = np.full((n_use, np.count_nonzero(family_mask)), np.nan, dtype=float)
-            positive_templates = np.isfinite(family_templates) & (family_templates > 0.0)
-            if np.any(positive_templates):
-                ratio_draws[:, positive_templates] = native_amps[:, family_mask][:, positive_templates] / family_templates[positive_templates]
-            family_norm[family_name] = _infer_family_draw(ratio_draws, np.ones(ratio_draws.shape[1], dtype=bool), default=0.0, require_positive=True)
-            family_sig[family_name] = _infer_family_draw(native_sigs, family_mask, default=0.0, require_positive=True)
-            family_dmu[family_name] = _infer_family_draw(native_dmus, family_mask, default=0.0, require_positive=False)
-
-        full_templates = _line_template_strengths(tied_line_meta)
         for i in range(n_use):
             dmu = np.zeros_like(ln_lambda0)
             sigs = np.zeros_like(ln_lambda0)
@@ -442,18 +388,6 @@ def _reconstruct_line_psf_draws_on_wave(q, wave_out, n_use, *, return_components
                     dmu[full_idx] = native_dmus[i, native_idx]
                     sigs[full_idx] = native_sigs[i, native_idx]
                     amps[full_idx] = native_amps[i, native_idx]
-            fallback_mask = ~use_native_line
-            if np.any(fallback_mask):
-                fallback_broad = fallback_mask & is_broad
-                fallback_narrow = fallback_mask & ~is_broad
-                if np.any(fallback_broad):
-                    amps[fallback_broad] = family_norm["broad"][i] * full_templates[fallback_broad]
-                    sigs[fallback_broad] = family_sig["broad"][i]
-                    dmu[fallback_broad] = family_dmu["broad"][i]
-                if np.any(fallback_narrow):
-                    amps[fallback_narrow] = family_norm["narrow"][i] * full_templates[fallback_narrow]
-                    sigs[fallback_narrow] = family_sig["narrow"][i]
-                    dmu[fallback_narrow] = family_dmu["narrow"][i]
             mus = ln_lambda0 + dmu
             line_broad = np.asarray(_many_gauss_lnlam(lnwave, amps * broad_mask, mus, sigs), dtype=float)
             line_narrow = np.asarray(_many_gauss_lnlam(lnwave, amps * (1.0 - broad_mask), mus, sigs), dtype=float)
@@ -497,8 +431,6 @@ def _reconstruct_line_psf_draws_on_wave(q, wave_out, n_use, *, return_components
         out_broad *= poly
         out_narrow *= poly
 
-    out_broad = np.nan_to_num(out_broad, nan=0.0, posinf=0.0, neginf=0.0)
-    out_narrow = np.nan_to_num(out_narrow, nan=0.0, posinf=0.0, neginf=0.0)
     out_total = out_broad + out_narrow
     if return_components:
         return {"broad": out_broad, "narrow": out_narrow, "total": out_total}
@@ -579,16 +511,10 @@ def _prepare_psf_bandpass_fraction_inputs(q, bands, n_draws):
         )
     n_use = pl_draws.shape[0]
 
-    scale_psf_draws = _draw_vector(
-        pred_out.get("scale_psf", getattr(q, "scale_psf", np.nan)),
-        n_use=n_use,
-        fill_value=1.0,
-    )
-    eta_psf_draws = _draw_vector(
-        pred_out.get("eta_psf", getattr(q, "eta_psf", np.nan)),
-        n_use=n_use,
-        fill_value=1.0,
-    )
+    scale_psf_draws = _draw_vector_strict(pred_out.get("scale_psf", []), n_use=n_use)
+    eta_psf_draws = _draw_vector_strict(pred_out.get("eta_psf", []), n_use=n_use)
+    if scale_psf_draws is None or eta_psf_draws is None:
+        return {"bands": bands, "filter_specs": filter_specs, "empty": True}
 
     pl_psf_draws = scale_psf_draws[:, None] * pl_draws
     agn_psf_draws = scale_psf_draws[:, None] * agn_cont_draws
@@ -739,34 +665,40 @@ def estimate_m2500_from_model(q):
     pl_norm = pl_norm[:n]
     pl_slope = pl_slope[:n]
 
-    if "scale_psf" in s:
-        scale_psf = np.asarray(s["scale_psf"], dtype=float).reshape(-1)
-        if scale_psf.size == 1:
-            scale_psf = np.full((n,), float(scale_psf[0]), dtype=float)
-        else:
-            scale_psf = scale_psf[:n]
+    if "scale_psf" not in s:
+        return np.nan, np.nan, np.nan, np.nan
+    scale_psf = np.asarray(s["scale_psf"], dtype=float).reshape(-1)
+    if scale_psf.size == 0:
+        return np.nan, np.nan, np.nan, np.nan
+    if scale_psf.size == 1:
+        scale_psf = np.full((n,), float(scale_psf[0]), dtype=float)
     else:
-        scale_psf = np.full_like(pl_norm, float(getattr(q, "scale_psf", np.nan)), dtype=float)
-        if not np.isfinite(scale_psf).any():
-            scale_psf = np.ones_like(pl_norm, dtype=float)
+        n = min(n, scale_psf.size)
+        pl_norm = pl_norm[:n]
+        pl_slope = pl_slope[:n]
+        scale_psf = scale_psf[:n]
+    if not np.all(np.isfinite(scale_psf)):
+        return np.nan, np.nan, np.nan, np.nan
 
     if "reddening_ebv" in s:
         reddening_ebv = np.asarray(s["reddening_ebv"], dtype=float).reshape(-1)
         if reddening_ebv.size == 1:
             reddening_ebv = np.full((n,), float(reddening_ebv[0]), dtype=float)
         else:
+            n = min(n, reddening_ebv.size)
+            pl_norm = pl_norm[:n]
+            pl_slope = pl_slope[:n]
+            scale_psf = scale_psf[:n]
             reddening_ebv = reddening_ebv[:n]
     else:
         reddening_ebv = np.zeros((n,), dtype=float)
+    if not np.all(np.isfinite(reddening_ebv)):
+        return np.nan, np.nan, np.nan, np.nan
 
     prior_config = getattr(q, "_fit_prior_config", {}) or {}
     pl_pivot = float(np.asarray(prior_config.get("PL_pivot", np.nan), dtype=float))
     if not np.isfinite(pl_pivot) or pl_pivot <= 0.0:
-        wave = np.asarray(getattr(q, "wave", []), dtype=float)
-        if wave.size > 0 and np.all(np.isfinite(wave)):
-            pl_pivot = float(0.5 * (wave[0] + wave[-1]))
-        else:
-            pl_pivot = 2500.0
+        return np.nan, np.nan, np.nan, np.nan
 
     # NumPy equivalent of jaxqsofit.model._smc_like_reddening_jax at 2500A.
     reddening_uv_ref = float(prior_config.get("reddening_uv_ref", 2500.0))
@@ -1000,9 +932,6 @@ def estimate_host_center_fraction(q):
     if np.isfinite(median):
         return median, err
 
-    fallback = safe_float(getattr(q, "frac_host_pivot", np.nan))
-    if np.isfinite(fallback):
-        return fallback, np.nan
     return np.nan, np.nan
 
 
@@ -1020,22 +949,6 @@ def estimate_host_2500_fraction(q):
         if np.isfinite(median):
             return median, err
 
-    try:
-        median, err = reconstructed_component_fraction_at_wave(
-            q,
-            component_key="host",
-            reference_key="continuum",
-            wave0=wave0,
-            apply_poly=False,
-        )
-        if np.isfinite(median):
-            return median, err
-    except Exception:
-        pass
-
-    fallback = safe_float(getattr(q, "frac_host_2500", np.nan))
-    if np.isfinite(fallback) and fallback >= 0.0:
-        return fallback, np.nan
     return np.nan, np.nan
 
 
@@ -1053,9 +966,6 @@ def estimate_host_psf_2500_fraction(q):
         if np.isfinite(median):
             return median, err
 
-    fallback = safe_float(getattr(q, "frac_host_psf_2500", np.nan))
-    if np.isfinite(fallback) and fallback >= 0.0:
-        return fallback, np.nan
     return np.nan, np.nan
 
 

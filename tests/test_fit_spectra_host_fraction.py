@@ -232,25 +232,12 @@ def test_compute_derived_results_uses_host_continuum_draw_ratio(monkeypatch):
     assert np.isclose(result["f_host_2500_err"], 0.0136)
 
 
-def test_estimate_host_2500_fraction_reconstructs_outside_native_range_without_poly(monkeypatch):
-    def fake_reconstruct(**kwargs):
-        assert kwargs["fit_poly"] is False
-        return {
-            "wave": np.asarray(kwargs["wave_out"], dtype=float),
-            "draws": {
-                "host": np.array(
-                    [
-                        [0.20, 0.20, 0.20],
-                        [0.25, 0.25, 0.25],
-                        [0.30, 0.30, 0.30],
-                    ],
-                    dtype=float,
-                ),
-                "continuum": np.ones((3, 3), dtype=float),
-            },
-        }
-
-    monkeypatch.setattr(fit_spectra, "reconstruct_posterior_components", fake_reconstruct)
+def test_estimate_host_2500_fraction_requires_native_2500_coverage(monkeypatch):
+    monkeypatch.setattr(
+        fit_spectra,
+        "reconstruct_posterior_components",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("unexpected reconstruction")),
+    )
 
     q = SimpleNamespace(
         wave=np.array([3000.0, 4000.0, 5000.0], dtype=float),
@@ -273,8 +260,39 @@ def test_estimate_host_2500_fraction_reconstructs_outside_native_range_without_p
 
     median, err = fit_spectra.estimate_host_2500_fraction(q)
 
-    assert np.isclose(median, 0.25)
-    assert np.isclose(err, 0.034)
+    assert np.isnan(median)
+    assert np.isnan(err)
+
+
+def test_estimate_host_psf_2500_fraction_ignores_scalar_fallback_without_native_coverage():
+    q = SimpleNamespace(
+        wave=np.array([3000.0, 4000.0, 5000.0], dtype=float),
+        pred_out={
+            "gal_model_psf": np.ones((3, 3), dtype=float),
+            "agn_model_psf": np.ones((3, 3), dtype=float),
+        },
+        frac_host_psf_2500=0.42,
+    )
+
+    median, err = fit_spectra.estimate_host_psf_2500_fraction(q)
+
+    assert np.isnan(median)
+    assert np.isnan(err)
+
+
+def test_estimate_host_center_fraction_ignores_scalar_fallback_without_components():
+    q = SimpleNamespace(
+        wave=np.array([2000.0, 3000.0, 4000.0], dtype=float),
+        lam=np.array([4000.0, 6000.0, 8000.0], dtype=float),
+        z=1.0,
+        pred_out={},
+        frac_host_pivot=0.42,
+    )
+
+    median, err = fit_spectra.estimate_host_center_fraction(q)
+
+    assert np.isnan(median)
+    assert np.isnan(err)
 
 
 def test_compute_derived_results_uses_bc_over_total_continuum(monkeypatch):
@@ -646,7 +664,7 @@ def test_estimate_agn_psf_bandpass_fractions_includes_broad_lines_but_not_narrow
     assert np.isclose(out["g"][0], 4.0 / 6.0)
 
 
-def test_reconstruct_line_psf_draws_extends_beyond_native_support_without_group_oob(monkeypatch):
+def test_reconstruct_line_psf_draws_keeps_only_native_supported_lines(monkeypatch):
     full_meta = {
         "n_lines": 2,
         "vgroup": np.array([0, 1], dtype=int),
@@ -699,12 +717,12 @@ def test_reconstruct_line_psf_draws_extends_beyond_native_support_without_group_
     assert out.shape == (1, 2)
     assert len(calls) == 2
     narrow_amps, narrow_mus, narrow_sigs = calls[1]
-    assert np.allclose(narrow_amps, [6.0, 12.0])
-    assert np.allclose(narrow_sigs, [0.5, 0.5])
-    assert np.allclose(narrow_mus, np.log([3000.0, 7000.0]) + 0.1)
+    assert np.allclose(narrow_amps, [6.0, 0.0])
+    assert np.allclose(narrow_sigs, [0.5, 0.0])
+    assert np.allclose(narrow_mus, np.log([3000.0, 7000.0]) + np.array([0.1, 0.0]))
 
 
-def test_reconstruct_line_psf_draws_uses_family_typical_widths_offsets_and_norms(monkeypatch):
+def test_reconstruct_line_psf_draws_does_not_extrapolate_family_lines(monkeypatch):
     full_meta = {
         "n_lines": 3,
         "vgroup": np.array([0, 1, 2], dtype=int),
@@ -755,12 +773,12 @@ def test_reconstruct_line_psf_draws_uses_family_typical_widths_offsets_and_norms
     fit_spectra._reconstruct_line_psf_draws_on_wave(q, np.array([3000.0, 3500.0, 8000.0], dtype=float), n_use=1)
 
     broad_amps, broad_mus, broad_sigs = calls[0]
-    assert np.allclose(broad_amps, [4.0, 8.0, 12.0])
-    assert np.allclose(broad_sigs, [1.0, 3.0, 2.0])
-    assert np.allclose(broad_mus, np.log([3000.0, 3500.0, 8000.0]) + np.array([0.2, 0.6, 0.4]))
+    assert np.allclose(broad_amps, [4.0, 8.0, 0.0])
+    assert np.allclose(broad_sigs, [1.0, 3.0, 0.0])
+    assert np.allclose(broad_mus, np.log([3000.0, 3500.0, 8000.0]) + np.array([0.2, 0.6, 0.0]))
 
 
-def test_reconstruct_line_psf_draws_uses_family_median_norm_when_draw_has_no_anchor(monkeypatch):
+def test_reconstruct_line_psf_draws_does_not_use_family_median_when_draw_has_no_anchor(monkeypatch):
     full_meta = {
         "n_lines": 2,
         "vgroup": np.array([0, 1], dtype=int),
@@ -812,8 +830,74 @@ def test_reconstruct_line_psf_draws_uses_family_median_norm_when_draw_has_no_anc
 
     draw0_broad_amps = calls[0][0]
     draw1_broad_amps = calls[2][0]
-    assert np.allclose(draw0_broad_amps, [0.0, 12.0])
-    assert np.allclose(draw1_broad_amps, [4.0, 12.0])
+    assert np.allclose(draw0_broad_amps, [0.0, 0.0])
+    assert np.allclose(draw1_broad_amps, [4.0, 0.0])
+
+
+def test_reconstruct_line_psf_draws_requires_posterior_psf_scaling(monkeypatch):
+    meta = {
+        "n_lines": 1,
+        "vgroup": np.array([0], dtype=int),
+        "wgroup": np.array([0], dtype=int),
+        "fgroup": np.array([0], dtype=int),
+        "flux_ratio": np.array([1.0], dtype=float),
+        "ln_lambda0": np.log(np.array([3000.0], dtype=float)),
+        "amp_init_group": np.array([2.0], dtype=float),
+        "names": ["broad_a_1"],
+    }
+
+    monkeypatch.setattr(fit_spectra, "_extract_line_table_from_prior_config", lambda _cfg: object())
+    monkeypatch.setattr(fit_spectra, "build_tied_line_meta_from_linelist", lambda _line_table, _wave: meta)
+    monkeypatch.setattr(fit_spectra, "_broad_line_mask", lambda names: np.ones(len(names), dtype=float))
+
+    q = SimpleNamespace(
+        wave=np.array([2500.0, 3500.0], dtype=float),
+        numpyro_samples={
+            "line_dmu_group": np.array([[0.0]], dtype=float),
+            "line_sig_group": np.array([[1.0]], dtype=float),
+            "line_amp_group": np.array([[4.0]], dtype=float),
+        },
+        pred_out={},
+        scale_psf=1.0,
+        eta_psf=1.0,
+        _fit_prior_config={},
+        _fit_custom_line_components=(),
+    )
+
+    out = fit_spectra._reconstruct_line_psf_draws_on_wave(q, np.array([3000.0], dtype=float), n_use=1)
+
+    assert np.isnan(out).all()
+
+
+def test_estimate_m2500_from_model_requires_posterior_scale_psf():
+    q = SimpleNamespace(
+        numpyro_samples={
+            "PL_norm": np.ones(3, dtype=float),
+            "PL_slope": np.zeros(3, dtype=float),
+        },
+        scale_psf=2.0,
+        _fit_prior_config={"PL_pivot": 2500.0},
+    )
+
+    out = fit_spectra.estimate_m2500_from_model(q)
+
+    assert all(np.isnan(value) for value in out)
+
+
+def test_estimate_m2500_from_model_requires_fitted_pl_pivot():
+    q = SimpleNamespace(
+        numpyro_samples={
+            "PL_norm": np.ones(3, dtype=float),
+            "PL_slope": np.zeros(3, dtype=float),
+            "scale_psf": np.ones(3, dtype=float),
+        },
+        wave=np.array([2000.0, 3000.0], dtype=float),
+        _fit_prior_config={},
+    )
+
+    out = fit_spectra.estimate_m2500_from_model(q)
+
+    assert all(np.isnan(value) for value in out)
 
 
 def test_print_spectrum_diagnostics_includes_psf_and_broader_metrics(capsys):
