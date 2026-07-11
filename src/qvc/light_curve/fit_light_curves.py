@@ -58,6 +58,7 @@ numpyro.set_host_device_count(num_cores)
 numpyro.enable_x64()
 numpyro.enable_validation(False)
 import numpyro.distributions as dist
+from numpyro.diagnostics import print_summary as numpyro_print_summary
 from numpyro.handlers import seed, trace
 from numpyro.infer import MCMC, NUTS, SVI, Trace_ELBO
 from numpyro.infer.autoguide import AutoNormal
@@ -2338,6 +2339,34 @@ def log_nonfinite_sample_summary(samples_dict, *, label, max_items=20):
         preview,
         " ..." if len(bad) > max_items else "",
     )
+
+
+def print_light_curve_posterior_summary(
+    object_id,
+    *,
+    samples_per_chain=None,
+    flat_samples=None,
+):
+    """Print one NumPyro posterior summary after an object's final fit."""
+
+    if samples_per_chain is not None:
+        samples = samples_per_chain
+        group_by_chain = True
+    elif flat_samples is not None:
+        samples = flat_samples
+        group_by_chain = False
+    else:
+        logging.warning("[%s] No posterior samples available for NumPyro summary.", object_id)
+        return
+
+    print(f"\n[{object_id}] NumPyro posterior summary:")
+    try:
+        numpyro_print_summary(samples, prob=0.90, group_by_chain=group_by_chain)
+    except (AssertionError, ValueError) as exc:
+        # NumPyro requires at least four draws for split-Rhat/ESS. Keep very
+        # short smoke fits usable instead of failing after inference succeeds.
+        print(f"Summary unavailable: {exc or 'at least four posterior draws are required.'}")
+    print()
 
 
 def sigma_shift_to_uv(eta_sigma, lambda_center_rf, lambda_uv=2500.0):
@@ -5540,6 +5569,12 @@ def main():
 
                 if args.save_sample_file:
                     save_obj_samples_to_hdf5(obj_flat_samples, oid)
+
+            print_light_curve_posterior_summary(
+                oid,
+                samples_per_chain=samples_per_chain,
+                flat_samples=obj_flat_samples,
+            )
 
             obj_flat_samples = add_model_prediction_params(
                 obj_flat_samples,

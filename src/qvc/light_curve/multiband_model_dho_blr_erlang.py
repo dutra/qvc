@@ -75,21 +75,35 @@ class ErlangResponseDHOQS(qs.Quasisep):
         base = self._base()
         A0 = base.design_matrix()
         B, n0, n = self._dimensions()
+        order = int(self.order)
         dtype = A0.dtype
-        A = jnp.zeros((n, n), dtype=dtype).at[:n0, :n0].set(A0)
-        h0 = base.observation_model
+        n_response = B * order
+        rates = order / _safe_pos(jnp.asarray(self.lag_blr, dtype=dtype))
+        state_rates = jnp.repeat(rates, order)
 
-        for b in range(B):
-            rate = int(self.order) / _safe_pos(jnp.asarray(self.lag_blr)[b])
-            start = n0 + b * int(self.order)
-            driver_h = h0((jnp.array(0.0, dtype=dtype), jnp.array(b, dtype=jnp.int32)))
-            A = A.at[start, :n0].set(rate * driver_h)
-            A = A.at[start, start].set(-rate)
-            for k in range(1, int(self.order)):
-                idx = start + k
-                A = A.at[idx, idx - 1].set(rate)
-                A = A.at[idx, idx].set(-rate)
-        return A
+        # Each response chain has -q on its diagonal and q directly below the
+        # diagonal, except at boundaries between bands.
+        response = -jnp.diag(state_rates)
+        sub_rows = jnp.arange(1, n_response, dtype=jnp.int32)
+        within_chain = (sub_rows % order) != 0
+        response = response.at[sub_rows, sub_rows - 1].set(
+            jnp.where(within_chain, state_rates[sub_rows], 0.0)
+        )
+
+        # The first state in each chain is driven by q times that band's DHO
+        # observation. Build all band loadings at once from the base scales.
+        obs_scale = base._obs_scale()
+        eye = jnp.eye(B, dtype=dtype)
+        driver_loadings = jnp.concatenate(
+            [obs_scale[:, None] * eye, -obs_scale[:, None] * eye],
+            axis=1,
+        )
+        driver = jnp.zeros((n_response, n0), dtype=dtype)
+        chain_starts = jnp.arange(B, dtype=jnp.int32) * order
+        driver = driver.at[chain_starts].set(rates[:, None] * driver_loadings)
+
+        zero_top_right = jnp.zeros((n0, n_response), dtype=dtype)
+        return jnp.block([[A0, zero_top_right], [driver, response]])
 
     def stationary_covariance(self):
         """Solve the continuous Lyapunov equation for the augmented state."""

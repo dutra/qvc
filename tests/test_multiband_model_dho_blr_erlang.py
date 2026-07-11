@@ -30,6 +30,68 @@ from qvc.light_curve.multiband_model_dho_blr import (
 jax.config.update("jax_enable_x64", True)
 
 
+def _original_loop_design_matrix(kernel):
+    """Pre-vectorization implementation retained as a numerical oracle."""
+
+    base = kernel._base()
+    A0 = base.design_matrix()
+    B, n0, n = kernel._dimensions()
+    dtype = A0.dtype
+    A = jnp.zeros((n, n), dtype=dtype).at[:n0, :n0].set(A0)
+    for b in range(B):
+        rate = int(kernel.order) / jnp.maximum(jnp.asarray(kernel.lag_blr)[b], 1e-12)
+        start = n0 + b * int(kernel.order)
+        driver_h = base.observation_model(
+            (jnp.array(0.0, dtype=dtype), jnp.array(b, dtype=jnp.int32))
+        )
+        A = A.at[start, :n0].set(rate * driver_h)
+        A = A.at[start, start].set(-rate)
+        for k in range(1, int(kernel.order)):
+            idx = start + k
+            A = A.at[idx, idx - 1].set(rate)
+            A = A.at[idx, idx].set(-rate)
+    return A
+
+
+@pytest.mark.parametrize("n_band", [1, 2, 5])
+@pytest.mark.parametrize("order", [1, 2, 4, 6])
+def test_vectorized_design_matrix_matches_original_loops(n_band, order):
+    tau_fast = jnp.linspace(8.0, 28.0, n_band)
+    tau_slow = jnp.linspace(90.0, 330.0, n_band)
+    lag_blr = jnp.linspace(25.0, 180.0, n_band)
+    kernel = ErlangResponseDHOQS(
+        tau_fast=tau_fast,
+        tau_slow=tau_slow,
+        lag_blr=lag_blr,
+        amp_cont=jnp.linspace(0.1, 0.3, n_band),
+        amp_blr=jnp.linspace(0.02, 0.09, n_band),
+        order=order,
+    )
+    vectorized = np.asarray(kernel.design_matrix())
+    original = np.asarray(_original_loop_design_matrix(kernel))
+    np.testing.assert_array_equal(vectorized, original)
+
+
+def test_vectorized_design_matrix_lag_gradient_matches_original_loops():
+    def objective(lags, original):
+        kernel = ErlangResponseDHOQS(
+            tau_fast=jnp.array([11.0, 23.0]),
+            tau_slow=jnp.array([120.0, 275.0]),
+            lag_blr=lags,
+            amp_cont=jnp.array([0.15, 0.28]),
+            amp_blr=jnp.array([0.03, 0.08]),
+            order=4,
+        )
+        A = _original_loop_design_matrix(kernel) if original else kernel.design_matrix()
+        weights = jnp.arange(A.size, dtype=float).reshape(A.shape) + 1.0
+        return jnp.sum(A * weights)
+
+    lags = jnp.array([42.0, 135.0])
+    vectorized_grad = jax.grad(lambda x: objective(x, False))(lags)
+    original_grad = jax.grad(lambda x: objective(x, True))(lags)
+    np.testing.assert_allclose(vectorized_grad, original_grad, rtol=1e-13, atol=1e-13)
+
+
 def test_erlang_response_has_requested_deterministic_centroid():
     lag = 120.0
     order = 4
