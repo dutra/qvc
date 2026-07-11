@@ -2529,9 +2529,19 @@ def log_lag_blr_prior(z=0.0):
 
 
 def relative_log_lag_blr_prior(*, z=0.0, log_lag0=0.0):
-    return dist.TransformedDistribution(
-        log_lag_blr_prior(z=z),
-        dist.transforms.AffineTransform(loc=log_lag0, scale=1.0).inv,
+    # Shifting a TruncatedNormal with an inverse AffineTransform causes
+    # NumPyro to report unconstrained Real support for the transformed
+    # distribution.  Since TruncatedNormal.log_prob does not itself mask
+    # values outside its support, NUTS can then explore lags beyond the
+    # intended bounds.  Shift all parameters explicitly so the interval
+    # support is retained by the sampler.
+    prior = log_lag_blr_prior(z=z)
+    log_lag0 = jnp.asarray(log_lag0, dtype=float)
+    return dist.TruncatedNormal(
+        loc=prior.base_dist.loc - log_lag0,
+        scale=prior.base_dist.scale,
+        low=prior.low - log_lag0,
+        high=prior.high - log_lag0,
     )
 
 

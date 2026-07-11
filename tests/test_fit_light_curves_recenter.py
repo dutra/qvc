@@ -33,6 +33,8 @@ from qvc.light_curve.fit_light_curves import (
     TAU_FAST_TO_SLOW_PRIOR_RATIO,
     log_tau_fast_center0_prior,
     log_tau_fast_separation_raw_prior,
+    log_lag_blr_prior,
+    relative_log_lag_blr_prior,
     ordered_log_tau_fast,
     linear_trend_prior,
     compute_parameter_kls,
@@ -90,6 +92,41 @@ def test_compute_lambda_center_rf_matches_geometric_mean():
     expected = float(np.exp(np.mean(np.log(np.asarray(lam_rf)))))
     got = float(compute_lambda_center_rf(lam_rf))
     assert np.isclose(got, expected)
+
+
+def test_relative_log_lag_blr_prior_retains_shifted_interval_support():
+    z = 1.3
+    log_lag0 = np.log(7.0)
+    absolute = log_lag_blr_prior(z=z)
+    relative = relative_log_lag_blr_prior(z=z, log_lag0=log_lag0)
+
+    assert np.isclose(
+        float(relative.support.lower_bound),
+        float(absolute.support.lower_bound) - log_lag0,
+    )
+    assert np.isclose(
+        float(relative.support.upper_bound),
+        float(absolute.support.upper_bound) - log_lag0,
+    )
+    assert np.isclose(
+        float(relative.base_dist.loc),
+        float(absolute.base_dist.loc) - log_lag0,
+    )
+    assert np.isclose(
+        float(relative.base_dist.scale),
+        float(absolute.base_dist.scale),
+    )
+
+
+def test_relative_log_lag_blr_prior_bounds_reconstruct_absolute_lag_bounds():
+    z = 0.8
+    log_lag0 = np.log(12.0)
+    relative = relative_log_lag_blr_prior(z=z, log_lag0=log_lag0)
+
+    reconstructed_low = np.exp(float(relative.support.lower_bound) + log_lag0)
+    reconstructed_high = np.exp(float(relative.support.upper_bound) + log_lag0)
+    assert np.isclose(reconstructed_low, 10.0 * (1.0 + z))
+    assert np.isclose(reconstructed_high, 1000.0 * (1.0 + z))
 
 
 def test_apply_resume_sample_save_policy_disables_sample_saving_on_resume():
