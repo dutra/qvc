@@ -32,6 +32,8 @@ from qvc.light_curve.fit_light_curves import (
     compute_g_band_raw_drift_diagnostics,
     TAU_FAST_TO_SLOW_PRIOR_RATIO,
     log_tau_fast_center0_prior,
+    log_tau_fast_separation_raw_prior,
+    ordered_log_tau_fast,
     linear_trend_prior,
     compute_parameter_kls,
     compute_object_adf_diagnostics,
@@ -279,6 +281,30 @@ def test_log_tau_fast_center0_prior_is_centered_at_configured_tau_slow_ratio():
 
     assert np.isclose(float(prior.loc), np.log(1000.0 / TAU_FAST_TO_SLOW_PRIOR_RATIO))
     assert np.isclose(float(prior.scale), 0.4 * np.log(10.0))
+
+
+def test_smooth_ordered_tau_parameterization_is_strict_and_centered():
+    log_tau_slow = jnp.log(1500.0)
+    raw_prior = log_tau_fast_separation_raw_prior()
+    log_tau_fast = ordered_log_tau_fast(log_tau_slow, raw_prior.loc)
+
+    assert float(log_tau_fast) < float(log_tau_slow)
+    assert np.isclose(
+        np.exp(float(log_tau_slow - log_tau_fast)),
+        TAU_FAST_TO_SLOW_PRIOR_RATIO,
+        rtol=1e-12,
+    )
+
+
+@pytest.mark.parametrize("raw", [-30.0, -5.0, 0.0, 5.0, 30.0])
+def test_smooth_ordered_tau_parameterization_has_finite_gradient(raw):
+    value, gradient = jax.value_and_grad(
+        lambda x: ordered_log_tau_fast(jnp.log(1500.0), x)
+    )(jnp.asarray(raw))
+
+    assert np.isfinite(float(value))
+    assert np.isfinite(float(gradient))
+    assert float(value) < float(jnp.log(1500.0))
 
 
 def test_linear_trend_prior_matches_1e_minus_4_mag_per_day_in_rest_frame():

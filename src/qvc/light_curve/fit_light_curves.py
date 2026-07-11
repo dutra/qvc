@@ -87,6 +87,7 @@ from qvc.light_curve.multiband_model_dho_blr import (
     relative_flux_to_mag_residual,
 )
 from qvc.light_curve.multiband_model_dho_blr_erlang import (
+    DEFAULT_ERLANG_ORDER,
     make_multiband_dho_blr_flux_linearized_erlang_model,
 )
 from qvc.light_curve.psf_constant_flux_correction import (
@@ -2426,6 +2427,20 @@ def log_tau_fast_center0_prior(log_tau_slow_center0, *, tau_fast_truncated=False
     return dist.Normal(mean, sigma)
 
 
+def log_tau_fast_separation_raw_prior():
+    """Prior coordinate for a smooth, strictly positive log-timescale gap."""
+
+    target_gap = jnp.log(TAU_FAST_TO_SLOW_PRIOR_RATIO)
+    raw_loc = jnp.log(jnp.expm1(target_gap))
+    return dist.Normal(raw_loc, TAU_FAST_PRIOR_LOGSIGMA_DEX * jnp.log(10.0))
+
+
+def ordered_log_tau_fast(log_tau_slow, separation_raw):
+    """Map an unconstrained coordinate to ``log_tau_fast < log_tau_slow``."""
+
+    return jnp.asarray(log_tau_slow) - jax.nn.softplus(jnp.asarray(separation_raw))
+
+
 def linear_trend_prior(*, t_ref, z):
     _, t_std_obs = linear_mean_time_scaling(t_ref)
     scale = max(
@@ -2633,6 +2648,8 @@ def sample_flux_line_latent_params(
     disable_lag_blr=False,
     disable_lag_bc=False,
     n_blr_terms=1,
+    shared_blr_lag=False,
+    blr_lag_band_scatter=None,
 ):
     """Sample flux line parameters in ratio space and reconstruct legacy deltas exactly."""
 
@@ -2659,6 +2676,20 @@ def sample_flux_line_latent_params(
     log_jitter = _sample_log_jitter_grid(log_jitter_mean, log_jitter_active_mask)
     survey_delta_mag = _sample_survey_delta_mag_grid(survey_offset_active_mask)
 
+    shared_log_lag_blr = None
+    use_pooled_blr_lag = shared_blr_lag or blr_lag_band_scatter is not None
+    band_scatter = 0.0 if shared_blr_lag else blr_lag_band_scatter
+    if use_pooled_blr_lag and not disable_lag_blr:
+        if n_blr_terms != 1:
+            raise ValueError("Pooled BLR lags currently require n_blr_terms=1.")
+        if band_scatter is None or float(band_scatter) < 0.0:
+            raise ValueError("blr_lag_band_scatter must be non-negative.")
+        shared_delta_log_lag_blr_raw = numpyro.sample(
+            "delta_log_lag_blr_shared_raw",
+            relative_log_lag_blr_prior(z=z, log_lag0=log_lag0),
+        )
+        shared_log_lag_blr = shared_delta_log_lag_blr_raw + log_lag0
+
     with numpyro.plate("band", B):
         mean = numpyro.sample("mean", mean_prior_dist)
 
@@ -2684,11 +2715,24 @@ def sample_flux_line_latent_params(
                 "log_amp_ratio_blr_raw",
                 dist.Normal(log_amp_ratio_blr_loc, 1.0),
             )
-            delta_log_lag_blr_raw = numpyro.sample(
-                "delta_log_lag_blr_raw",
-                relative_log_lag_blr_prior(z=z, log_lag0=log_lag0),
-            )
-            log_lag_blr_raw = delta_log_lag_blr_raw + log_lag0
+            if shared_log_lag_blr is None:
+                delta_log_lag_blr_raw = numpyro.sample(
+                    "delta_log_lag_blr_raw",
+                    relative_log_lag_blr_prior(z=z, log_lag0=log_lag0),
+                )
+                log_lag_blr_raw = delta_log_lag_blr_raw + log_lag0
+            else:
+                if float(band_scatter) > 0.0:
+                    blr_lag_band_offset_raw = numpyro.sample(
+                        "blr_lag_band_offset_raw",
+                        dist.Normal(0.0, 1.0),
+                    )
+                    log_lag_blr_raw = (
+                        shared_log_lag_blr
+                        + jnp.asarray(band_scatter) * blr_lag_band_offset_raw
+                    )
+                else:
+                    log_lag_blr_raw = jnp.broadcast_to(shared_log_lag_blr, (B,))
             dlog_amp_blr = numpyro.deterministic(
                 "dlog_amp_blr",
                 log_amp_ratio_blr_raw - line_ratio_offsets["blr_band"],
@@ -3694,6 +3738,8 @@ def build_single_object_model(
     drop_band_lyman_alpha=False,
     tau_fast_truncated=False,
     n_blr_terms=1,
+    shared_blr_lag=False,
+    blr_lag_band_scatter=None,
 ):
     """Return the NumPyro model for one object."""
 
@@ -3789,6 +3835,8 @@ def build_single_object_model(
             disable_lag_blr=disable_lag_blr,
             disable_lag_bc=disable_lag_bc,
             n_blr_terms=n_blr_terms,
+            shared_blr_lag=shared_blr_lag,
+            blr_lag_band_scatter=blr_lag_band_scatter,
         )
 
         _ = numpyro.deterministic("log_tau_fake", float(obj_dict.get("log_tau_fake", -99.0)))
@@ -3868,6 +3916,9 @@ def build_single_object_model_mag_flux_linearized(
     tau_fast_truncated=False,
     n_blr_terms=1,
     use_erlang=False,
+    shared_blr_lag=False,
+    erlang_order=DEFAULT_ERLANG_ORDER,
+    blr_lag_band_scatter=None,
 ):
     """Return the relative-flux quasi-separable model for one object."""
 
@@ -3920,13 +3971,23 @@ def build_single_object_model_mag_flux_linearized(
                 lambda_center_rf,
             ),
         )
-        log_tau_fast_center0 = numpyro.sample(
-            "log_tau_fast_center0",
-            log_tau_fast_center0_prior(
-                log_tau_slow_center0,
-                tau_fast_truncated=tau_fast_truncated,
-            ),
-        )
+        if use_erlang:
+            log_tau_separation_raw = numpyro.sample(
+                "log_tau_separation_raw",
+                log_tau_fast_separation_raw_prior(),
+            )
+            log_tau_fast_center0 = numpyro.deterministic(
+                "log_tau_fast_center0",
+                ordered_log_tau_fast(log_tau_slow_center0, log_tau_separation_raw),
+            )
+        else:
+            log_tau_fast_center0 = numpyro.sample(
+                "log_tau_fast_center0",
+                log_tau_fast_center0_prior(
+                    log_tau_slow_center0,
+                    tau_fast_truncated=tau_fast_truncated,
+                ),
+            )
         log_sigma_center0 = numpyro.sample(
             "log_sigma_center0",
             log_sigma_center0_relflux_prior(
@@ -3984,6 +4045,8 @@ def build_single_object_model_mag_flux_linearized(
             disable_lag_blr=disable_lag_blr,
             disable_lag_bc=(True if use_erlang else disable_lag_bc),
             n_blr_terms=n_blr_terms,
+            shared_blr_lag=shared_blr_lag,
+            blr_lag_band_scatter=blr_lag_band_scatter,
         )
 
         _ = numpyro.deterministic("log_tau_fake", float(obj_dict.get("log_tau_fake", -99.0)))
@@ -4057,6 +4120,7 @@ def build_single_object_model_mag_flux_linearized(
             baseline_flux_by_band=baseline_flux_by_band,
             zero_mean=zero_mean,
             has_jitter=has_jitter,
+            **({"erlang_order": erlang_order} if use_erlang else {}),
         )
         numpyro.factor("loglike", m.log_prob(params))
 
@@ -4548,6 +4612,9 @@ def run_iterated_mag_flux_linearized_inference(
     tau_fast_truncated=False,
     n_blr_terms=1,
     model_variant="mag_flux_linearized",
+    shared_blr_lag=False,
+    erlang_order=DEFAULT_ERLANG_ORDER,
+    blr_lag_band_scatter=None,
 ):
     """Iteratively refit the relative-flux QS model using local magnitude-likelihood pseudo-data."""
 
@@ -4574,6 +4641,9 @@ def run_iterated_mag_flux_linearized_inference(
         tau_fast_truncated=tau_fast_truncated,
         n_blr_terms=n_blr_terms,
         use_erlang=(model_variant == "mag_flux_linearized_erlang"),
+        shared_blr_lag=shared_blr_lag,
+        erlang_order=erlang_order,
+        blr_lag_band_scatter=blr_lag_band_scatter,
     )
 
     for iter_idx in range(int(FLUX_LINEARIZED_REFINEMENT_ITERS)):
@@ -4637,6 +4707,7 @@ def run_iterated_mag_flux_linearized_inference(
             baseline_flux_by_band=reference_flux_from_mean_magnitudes(obj_dict["mags_means"]),
             zero_mean=zero_mean,
             has_jitter=has_jitter,
+            **({"erlang_order": erlang_order} if model_variant == "mag_flux_linearized_erlang" else {}),
         )
         y_next, yerr_next = _flux_linearized_pseudo_data_from_prediction(
             obj_dict,
@@ -5093,8 +5164,16 @@ def main():
     parser.add_argument(
         "--dense_mass",
         action="store_true",
-        help="Use dense mass matrix adaptation for NUTS. Off by default because latent-field models can be very slow and memory-heavy.",
+        dest="dense_mass",
+        help="Use dense mass matrix adaptation for NUTS (default).",
     )
+    parser.add_argument(
+        "--no_dense_mass",
+        action="store_false",
+        dest="dense_mass",
+        help="Use diagonal rather than dense mass matrix adaptation for NUTS.",
+    )
+    parser.set_defaults(dense_mass=True)
     parser.add_argument(
         "--svi_steps",
         type=int,
@@ -5165,6 +5244,26 @@ def main():
         help="Corner plot row selection: fast subsampling or full posterior samples.",
     )
     parser.add_argument("--disable_lag_blr", action="store_true", default=False, help="Disable BLR lag model.")
+    parser.add_argument(
+        "--shared_blr_lag",
+        action="store_true",
+        default=False,
+        help="Sample one BLR lag and use it in every retained band; per-band BLR amplitudes remain free.",
+    )
+    parser.add_argument(
+        "--blr_lag_band_scatter",
+        type=float,
+        default=0.4,
+        help="Partially pool band BLR lags around one shared log lag with this fixed natural-log scatter (default: 0.4).",
+    )
+    parser.add_argument(
+        "--independent_blr_lags",
+        action="store_const",
+        const=None,
+        dest="blr_lag_band_scatter",
+        help="Use the legacy fully independent prior for each band's BLR lag.",
+    )
+    parser.set_defaults(blr_lag_band_scatter=0.4)
     parser.add_argument("--disable_lag_bc", action="store_true", default=False, help="Disable Balmer-continuum lag model.")
     parser.add_argument("--disable_plot_psd", action="store_true", default=False, help="Disable PSD sub-plot.")
     parser.add_argument("--disable_sigma_tau_lambda_plot", action="store_true", default=False, help="Disable sigma-tau versus wavelength summary plot.")
@@ -5180,6 +5279,12 @@ def main():
     parser.add_argument("--load_nearby_lc_csv", type=str, default=None, help="CSV listing nearby LCs to load.")
     parser.add_argument("--tau_fast_truncated", action="store_true", default=False, help="Truncated prior for tau_fast0.")
     parser.add_argument("--n_blr_terms", type=int, choices=(1, 2), default=1, help="Number of BLR lag terms to fit.")
+    parser.add_argument(
+        "--erlang_order",
+        type=int,
+        default=DEFAULT_ERLANG_ORDER,
+        help=f"Positive Erlang BLR response order for --model_variant mag_flux_linearized_erlang (default: {DEFAULT_ERLANG_ORDER}).",
+    )
     parser.add_argument(
         "--model_variant",
         choices=("mag_linear", "mag_flux_linearized", "mag_flux_linearized_erlang", "mag_fluxmix_fast"),
@@ -5266,6 +5371,22 @@ def main():
         )
     if args.fit_method == "alternating_two_stage_nuts" and args.fluxmix_outer_iters < 2:
         raise ValueError("--fit_method alternating_two_stage_nuts requires --fluxmix_outer_iters >= 2.")
+    if args.shared_blr_lag:
+        args.blr_lag_band_scatter = 0.0
+    if args.model_variant == "mag_fluxmix_fast":
+        args.blr_lag_band_scatter = None
+    if args.shared_blr_lag and args.n_blr_terms != 1:
+        raise ValueError("--shared_blr_lag currently requires --n_blr_terms 1.")
+    if args.blr_lag_band_scatter is not None and args.blr_lag_band_scatter < 0.0:
+        raise ValueError("--blr_lag_band_scatter must be non-negative.")
+    if args.blr_lag_band_scatter is not None and args.n_blr_terms != 1:
+        raise ValueError("--blr_lag_band_scatter currently requires --n_blr_terms 1.")
+    if args.shared_blr_lag and args.model_variant == "mag_fluxmix_fast":
+        raise ValueError("--shared_blr_lag is not yet supported by model_variant='mag_fluxmix_fast'.")
+    if args.erlang_order < 1:
+        raise ValueError("--erlang_order must be at least 1.")
+    if args.erlang_order != DEFAULT_ERLANG_ORDER and args.model_variant != "mag_flux_linearized_erlang":
+        raise ValueError("--erlang_order is only used by --model_variant mag_flux_linearized_erlang.")
     if args.fit_method == "ns":
         if NestedSampler is None:
             raise ImportError(
@@ -5419,6 +5540,8 @@ def main():
                     drop_band_lyman_alpha=args.drop_band_lyman_alpha,
                     tau_fast_truncated=args.tau_fast_truncated,
                     n_blr_terms=args.n_blr_terms,
+                    shared_blr_lag=args.shared_blr_lag,
+                    blr_lag_band_scatter=args.blr_lag_band_scatter,
                 )
             else:
                 numpyro_model = None
@@ -5478,6 +5601,9 @@ def main():
                         tau_fast_truncated=args.tau_fast_truncated,
                         n_blr_terms=args.n_blr_terms,
                         model_variant=args.model_variant,
+                        shared_blr_lag=args.shared_blr_lag,
+                        erlang_order=args.erlang_order,
+                        blr_lag_band_scatter=args.blr_lag_band_scatter,
                     )
                 elif args.fit_method in ("nuts", "svi+nuts"):
                     if args.fit_method == "svi+nuts":

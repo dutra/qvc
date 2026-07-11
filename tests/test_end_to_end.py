@@ -1219,6 +1219,61 @@ def test_build_single_object_model_mag_flux_linearized_rejects_second_blr_term()
         )
 
 
+def test_flux_linearized_erlang_shared_blr_lag_uses_one_stochastic_lag():
+    obj = _make_fake_public_object()
+    obj = obj | make_lc(
+        obj,
+        ["g", "r"],
+        inject_fake=False,
+        drop_band_lyman_alpha=False,
+    )
+    bands = obj["bands"]
+    lam_rf = jnp.array([lambda_pivot[b] for b in bands], dtype=float) / (1.0 + float(obj["z"]))
+    bidx = np.asarray(obj["band_idx"])
+    yerr = np.asarray(obj["yerr"])
+    log_jitter_mean = jnp.array(
+        [np.log(np.mean(yerr[bidx == i])) for i in range(len(bands))],
+        dtype=float,
+    )
+    model = build_single_object_model_mag_flux_linearized(
+        obj,
+        lam_rf,
+        log_jitter_mean,
+        disable_lag_bc=True,
+        n_blr_terms=1,
+        use_erlang=True,
+        shared_blr_lag=True,
+        erlang_order=2,
+    )
+
+    model_trace = trace(seed(model, random.PRNGKey(91))).get_trace()
+
+    assert model_trace["delta_log_lag_blr_shared_raw"]["type"] == "sample"
+    assert np.ndim(np.asarray(model_trace["delta_log_lag_blr_shared_raw"]["value"])) == 0
+    assert "delta_log_lag_blr_raw" not in model_trace
+    log_lags = np.asarray(model_trace["log_lag_blr"]["value"])
+    assert log_lags.shape == (len(bands),)
+    np.testing.assert_array_equal(log_lags, np.full_like(log_lags, log_lags[0]))
+
+    pooled_model = build_single_object_model_mag_flux_linearized(
+        obj,
+        lam_rf,
+        log_jitter_mean,
+        disable_lag_bc=True,
+        n_blr_terms=1,
+        use_erlang=True,
+        blr_lag_band_scatter=0.4,
+        erlang_order=3,
+    )
+    pooled_trace = trace(seed(pooled_model, random.PRNGKey(92))).get_trace()
+    pooled_lags = np.asarray(pooled_trace["log_lag_blr"]["value"])
+    pooled_offsets = np.asarray(pooled_trace["blr_lag_band_offset_raw"]["value"])
+
+    assert pooled_offsets.shape == (len(bands),)
+    assert pooled_lags.shape == (len(bands),)
+    assert not np.all(pooled_lags == pooled_lags[0])
+
+
 def test_build_single_object_model_continuum_only_smoke():
     obj = _make_fake_public_object()
     lc = make_lc(

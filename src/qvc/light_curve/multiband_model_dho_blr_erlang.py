@@ -22,7 +22,7 @@ from qvc.light_curve.multiband_model_dho_blr import (
 )
 
 
-DEFAULT_ERLANG_ORDER = 4
+DEFAULT_ERLANG_ORDER = 3
 
 
 def erlang_impulse_response(t, lag, order=DEFAULT_ERLANG_ORDER):
