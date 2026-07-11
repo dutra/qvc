@@ -367,7 +367,7 @@ class ContiBLR_SHO_Model(MultiVarModel):
     @eqx.filter_jit
     def log_prob(self, params: dict[str, JAXArray]) -> JAXArray:
         gp, inds = self._build_gp(params)
-        return gp.log_probability(y=self._observed_y_sorted(params, inds)) + self.log_prior(params)
+        return gp.log_probability(y=self._observed_y_sorted(params, inds))
 
     def sample(self, params: dict[str, JAXArray]) -> None:
         gp, inds = self._build_gp(params)

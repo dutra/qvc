@@ -1248,6 +1248,7 @@ def test_flux_linearized_erlang_shared_blr_lag_uses_one_stochastic_lag():
 
     model_trace = trace(seed(model, random.PRNGKey(91))).get_trace()
 
+    assert np.all(np.isfinite(np.asarray(model_trace["loglike"]["fn"].log_factor)))
     assert model_trace["delta_log_lag_blr_shared_raw"]["type"] == "sample"
     assert np.ndim(np.asarray(model_trace["delta_log_lag_blr_shared_raw"]["value"])) == 0
     assert "delta_log_lag_blr_raw" not in model_trace

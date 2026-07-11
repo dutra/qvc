@@ -92,6 +92,209 @@ def test_vectorized_design_matrix_lag_gradient_matches_original_loops():
     np.testing.assert_allclose(vectorized_grad, original_grad, rtol=1e-13, atol=1e-13)
 
 
+def _make_kernel(n_band, order, lag_scale=1.0):
+    return ErlangResponseDHOQS(
+        tau_fast=jnp.linspace(8.0, 28.0, n_band),
+        tau_slow=jnp.linspace(90.0, 330.0, n_band),
+        lag_blr=lag_scale * jnp.linspace(25.0, 180.0, n_band),
+        amp_cont=jnp.linspace(0.1, 0.3, n_band),
+        amp_blr=jnp.linspace(0.02, 0.09, n_band),
+        order=order,
+    )
+
+
+@pytest.mark.parametrize("n_band", [1, 2, 5])
+@pytest.mark.parametrize("order", [1, 2, 4, 6])
+def test_closed_form_transition_matrix_matches_expm(n_band, order):
+    kernel = _make_kernel(n_band, order)
+    for dt in [0.0, 0.05, 0.37, 5.0, 41.7, 333.0, -12.5]:
+        X1 = (jnp.asarray(100.0), jnp.asarray(0))
+        X2 = (jnp.asarray(100.0 + dt), jnp.asarray(min(1, n_band - 1)))
+        closed = np.asarray(kernel.transition_matrix(X1, X2))
+        oracle = np.asarray(kernel._transition_matrix_expm(X1, X2))
+        np.testing.assert_allclose(closed, oracle, rtol=1e-9, atol=1e-12)
+
+
+def test_closed_form_transition_matrix_gradients_match_expm():
+    def objective(theta, use_oracle):
+        kernel = ErlangResponseDHOQS(
+            tau_fast=theta["tau_fast"],
+            tau_slow=theta["tau_slow"],
+            lag_blr=theta["lag_blr"],
+            amp_cont=jnp.array([0.15, 0.28]),
+            amp_blr=jnp.array([0.03, 0.08]),
+            order=3,
+        )
+        X1 = (jnp.asarray(0.0), jnp.asarray(0))
+        X2 = (jnp.asarray(17.3), jnp.asarray(1))
+        fn = kernel._transition_matrix_expm if use_oracle else kernel.transition_matrix
+        phi = fn(X1, X2)
+        weights = jnp.arange(phi.size, dtype=float).reshape(phi.shape) + 1.0
+        return jnp.sum(phi * weights)
+
+    theta = {
+        "tau_fast": jnp.array([11.0, 23.0]),
+        "tau_slow": jnp.array([120.0, 275.0]),
+        "lag_blr": jnp.array([42.0, 135.0]),
+    }
+    grad_closed = jax.grad(lambda th: objective(th, False))(theta)
+    grad_oracle = jax.grad(lambda th: objective(th, True))(theta)
+    for key in theta:
+        np.testing.assert_allclose(
+            grad_closed[key], grad_oracle[key], rtol=1e-8, atol=1e-12
+        )
+
+
+def _gp_log_likelihood(kernel, use_oracle_transition=False):
+    rng = np.random.default_rng(42)
+    n_band = kernel.tau_fast.shape[0]
+    t = np.sort(rng.uniform(0.0, 1500.0, 400))
+    band = rng.integers(0, n_band, t.size)
+    y = rng.normal(0.0, 0.1, t.size)
+    X = (jnp.asarray(t), jnp.asarray(band, dtype=jnp.int32))
+
+    if use_oracle_transition:
+        class OracleKernel(ErlangResponseDHOQS):
+            def transition_matrix(self, X1, X2):
+                return self._transition_matrix_expm(X1, X2)
+
+        kernel = OracleKernel(
+            tau_fast=kernel.tau_fast,
+            tau_slow=kernel.tau_slow,
+            lag_blr=kernel.lag_blr,
+            amp_cont=kernel.amp_cont,
+            amp_blr=kernel.amp_blr,
+            order=kernel.order,
+        )
+
+    from tinygp import GaussianProcess
+
+    gp = GaussianProcess(kernel, X, diag=jnp.full(t.size, 4e-4), assume_sorted=True)
+    return float(gp.log_probability(jnp.asarray(y)))
+
+
+@pytest.mark.parametrize("order", [1, 3])
+def test_closed_form_transition_preserves_gp_log_likelihood(order):
+    kernel = _make_kernel(3, order)
+    closed = _gp_log_likelihood(kernel, use_oracle_transition=False)
+    oracle = _gp_log_likelihood(kernel, use_oracle_transition=True)
+    np.testing.assert_allclose(closed, oracle, rtol=1e-10)
+
+
+@pytest.mark.parametrize("n_band", [1, 2, 5])
+@pytest.mark.parametrize("order", [1, 2, 4, 6])
+def test_block_sylvester_stationary_covariance_matches_kron(n_band, order):
+    kernel = _make_kernel(n_band, order)
+    blockwise = np.asarray(kernel.stationary_covariance())
+    oracle = np.asarray(kernel._stationary_covariance_kron())
+    np.testing.assert_allclose(blockwise, oracle, rtol=1e-10, atol=1e-13)
+
+
+def test_block_sylvester_stationary_covariance_gradients_match_kron():
+    def objective(theta, use_oracle):
+        kernel = ErlangResponseDHOQS(
+            tau_fast=theta["tau_fast"],
+            tau_slow=theta["tau_slow"],
+            lag_blr=theta["lag_blr"],
+            amp_cont=jnp.array([0.15, 0.28]),
+            amp_blr=jnp.array([0.03, 0.08]),
+            order=3,
+        )
+        fn = (
+            kernel._stationary_covariance_kron
+            if use_oracle
+            else kernel.stationary_covariance
+        )
+        P = fn()
+        weights = jnp.arange(P.size, dtype=float).reshape(P.shape) + 1.0
+        return jnp.sum(P * weights)
+
+    theta = {
+        "tau_fast": jnp.array([11.0, 23.0]),
+        "tau_slow": jnp.array([120.0, 275.0]),
+        "lag_blr": jnp.array([42.0, 135.0]),
+    }
+    grad_blockwise = jax.grad(lambda th: objective(th, False))(theta)
+    grad_oracle = jax.grad(lambda th: objective(th, True))(theta)
+    for key in theta:
+        np.testing.assert_allclose(
+            grad_blockwise[key], grad_oracle[key], rtol=1e-8, atol=1e-12
+        )
+
+
+def _collision_kernel(order, lag_blr):
+    """Kernel whose band-0 response rate can collide with a continuum rate."""
+
+    return ErlangResponseDHOQS(
+        tau_fast=jnp.array([20.0, 11.0]),
+        tau_slow=jnp.array([150.0, 240.0]),
+        lag_blr=jnp.asarray(lag_blr),
+        amp_cont=jnp.array([0.15, 0.28]),
+        amp_blr=jnp.array([0.03, 0.08]),
+        order=order,
+    )
+
+
+@pytest.mark.parametrize("order", [1, 3, 6])
+@pytest.mark.parametrize("tau_collide", [20.0, 150.0])
+@pytest.mark.parametrize("z_rel", [0.0, 1e-15, 1e-10, 1e-6, 1e-3])
+def test_transition_matrix_is_stable_at_pole_collisions(order, tau_collide, z_rel):
+    # Response rate q = order / lag equals a continuum rate 1/tau (up to a
+    # relative offset z_rel), the singular point of the naive closed form.
+    lag0 = order * tau_collide * (1.0 + z_rel)
+    kernel = _collision_kernel(order, [lag0, 90.0])
+    for dt in [0.3, 12.0, 75.0, 400.0]:
+        X1 = (jnp.asarray(0.0), jnp.asarray(0))
+        X2 = (jnp.asarray(dt), jnp.asarray(0))
+        closed = np.asarray(kernel.transition_matrix(X1, X2))
+        oracle = np.asarray(kernel._transition_matrix_expm(X1, X2))
+        assert np.all(np.isfinite(closed))
+        np.testing.assert_allclose(closed, oracle, rtol=1e-9, atol=1e-12)
+
+
+@pytest.mark.parametrize("z_rel", [0.0, 1e-12, 1e-6])
+def test_transition_matrix_gradients_are_finite_and_match_at_collisions(z_rel):
+    order = 3
+
+    def objective(theta, use_oracle):
+        kernel = _collision_kernel(order, theta["lag_blr"])
+        X1 = (jnp.asarray(0.0), jnp.asarray(0))
+        X2 = (jnp.asarray(37.0), jnp.asarray(0))
+        fn = kernel._transition_matrix_expm if use_oracle else kernel.transition_matrix
+        phi = fn(X1, X2)
+        weights = jnp.arange(phi.size, dtype=float).reshape(phi.shape) + 1.0
+        return jnp.sum(phi * weights)
+
+    theta = {"lag_blr": jnp.array([order * 20.0 * (1.0 + z_rel), 90.0])}
+    grad_closed = jax.grad(lambda th: objective(th, False))(theta)
+    grad_oracle = jax.grad(lambda th: objective(th, True))(theta)
+    assert np.all(np.isfinite(np.asarray(grad_closed["lag_blr"])))
+    np.testing.assert_allclose(
+        grad_closed["lag_blr"], grad_oracle["lag_blr"], rtol=1e-7, atol=1e-12
+    )
+
+
+def test_gp_log_likelihood_finite_and_matches_oracle_at_collision():
+    order = 3
+    kernel = _collision_kernel(order, [order * 20.0, 90.0])
+    closed = _gp_log_likelihood(kernel, use_oracle_transition=False)
+    oracle = _gp_log_likelihood(kernel, use_oracle_transition=True)
+    assert np.isfinite(closed)
+    np.testing.assert_allclose(closed, oracle, rtol=1e-10)
+
+
+@pytest.mark.parametrize("lag0", [1e-12, 1e-6, 1e4])
+def test_transition_matrix_gradients_finite_at_extreme_lags(lag0):
+    def objective(lags):
+        kernel = _collision_kernel(3, lags)
+        X1 = (jnp.asarray(0.0), jnp.asarray(0))
+        X2 = (jnp.asarray(250.0), jnp.asarray(0))
+        return jnp.sum(kernel.transition_matrix(X1, X2))
+
+    grad = jax.grad(objective)(jnp.array([lag0, 90.0]))
+    assert np.all(np.isfinite(np.asarray(grad)))
+
+
 def test_erlang_response_has_requested_deterministic_centroid():
     lag = 120.0
     order = 4
