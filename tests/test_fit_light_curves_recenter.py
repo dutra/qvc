@@ -45,6 +45,11 @@ from qvc.light_curve.fit_light_curves import (
     apply_resume_sample_save_policy,
     make_lc,
     posterior_median_mean_function,
+    binned_loo_residual_pair_correlation,
+    compute_loo_short_lag_residual_diagnostics,
+)
+from qvc.light_curve.multiband_model_dho_blr_erlang import (
+    make_multiband_dho_blr_flux_linearized_erlang_model,
 )
 from qvc.light_curve.multiband_fit_plotting import (
     _corner_plot_labels,
@@ -127,6 +132,68 @@ def test_relative_log_lag_blr_prior_bounds_reconstruct_absolute_lag_bounds():
     reconstructed_high = np.exp(float(relative.support.upper_bound) + log_lag0)
     assert np.isclose(reconstructed_low, 10.0 * (1.0 + z))
     assert np.isclose(reconstructed_high, 1000.0 * (1.0 + z))
+
+
+def test_binned_loo_residual_pair_correlation_uses_within_band_rest_frame_pairs():
+    times_rf = np.array([0.0, 5.0, 20.0, 0.0, 8.0, 40.0])
+    band_idx = np.array([0, 0, 0, 1, 1, 1])
+    residuals = np.array([1.0, 2.0, -1.0, -1.0, -2.0, 3.0])
+
+    result = binned_loo_residual_pair_correlation(
+        times_rf,
+        band_idx,
+        residuals,
+        bin_edges=(0.0, 10.0, 30.0, 100.0),
+        bands=("g", "r"),
+    )
+
+    # The 0--10 day pairs are (g0,g1) and (r0,r1), both with product +2.
+    assert result["loo_resid_pair_count_rf_0_10d"] == 2
+    assert np.isclose(result["loo_resid_corr_rf_0_10d"], 2.0)
+    assert result["loo_resid_pair_count_rf_0_10d_g"] == 1
+    assert result["loo_resid_pair_count_rf_0_10d_r"] == 1
+    # Cross-band pairs at identical times must never enter the statistic.
+    assert result["loo_resid_pair_count_rf_10_30d"] == 2
+
+
+def test_loo_residual_diagnostic_accepts_numpy_posterior_samples_for_erlang_model():
+    times = np.array([0.0, 2.0, 8.0, 20.0, 0.5, 4.0, 12.0, 25.0])
+    band_idx = np.array([0, 0, 0, 0, 1, 1, 1, 1], dtype=np.int32)
+    order = np.argsort(times + 1e-9 * band_idx)
+    times, band_idx = times[order], band_idx[order]
+    y = 0.03 * np.sin(times / 15.0)
+    yerr = np.full(times.size, 0.02)
+    model = make_multiband_dho_blr_flux_linearized_erlang_model(
+        (jnp.asarray(times), jnp.asarray(band_idx)),
+        jnp.asarray(y),
+        jnp.asarray(yerr),
+        n_band=2,
+        survey_idx=jnp.zeros(times.size, dtype=jnp.int32),
+        erlang_order=3,
+    )
+    median = {
+        "tau_fast_band": np.array([10.0, 10.0]),
+        "tau_slow_band": np.array([300.0, 300.0]),
+        "amp_cont_relflux": np.array([0.15, 0.15]),
+        "amp_blr_relflux": np.array([0.03, 0.03]),
+        "lag_blr": np.array([50.0, 60.0]),
+        "mean": np.zeros(2),
+        "linear_trend": np.array(0.0),
+        "log_jitter": np.log(np.full((2, 3), 0.01)),
+        "survey_delta_mag": np.zeros((2, 3)),
+    }
+    samples = {key: np.stack([value, value]) for key, value in median.items()}
+
+    result = compute_loo_short_lag_residual_diagnostics(
+        model,
+        samples,
+        {"object_id": "mock", "z": 1.0, "X": (times, band_idx)},
+        ["g", "r"],
+    )
+
+    assert result["loo_resid_valid"]
+    assert result["loo_resid_nobs"] == times.size
+    assert result["loo_resid_pair_count_rf_0_10d"] > 0
 
 
 def test_apply_resume_sample_save_policy_disables_sample_saving_on_resume():

@@ -844,6 +844,161 @@ def compute_multiband_residual_normality_diagnostics(
     return out
 
 
+LOO_RESIDUAL_RF_BIN_EDGES = (0.0, 10.0, 30.0, 100.0, 300.0)
+
+
+def _format_rest_frame_bin_edge(value):
+    value = float(value)
+    return str(int(value)) if value.is_integer() else str(value).replace(".", "p")
+
+
+def binned_loo_residual_pair_correlation(
+    times_rf,
+    band_idx,
+    standardized_residuals,
+    *,
+    bin_edges=LOO_RESIDUAL_RF_BIN_EDGES,
+    bands=None,
+):
+    """Summarize within-band LOO residual products in rest-frame lag bins."""
+
+    times_rf = np.asarray(times_rf, dtype=float).ravel()
+    band_idx = np.asarray(band_idx, dtype=np.int32).ravel()
+    residuals = np.asarray(standardized_residuals, dtype=float).ravel()
+    if not (times_rf.shape == band_idx.shape == residuals.shape):
+        raise ValueError("times_rf, band_idx, and standardized_residuals must match")
+    edges = np.asarray(bin_edges, dtype=float)
+    if edges.ndim != 1 or edges.size < 2 or np.any(np.diff(edges) <= 0.0):
+        raise ValueError("bin_edges must be a strictly increasing 1D sequence")
+
+    finite = np.isfinite(times_rf) & np.isfinite(residuals)
+    times_rf = times_rf[finite]
+    band_idx = band_idx[finite]
+    residuals = residuals[finite]
+    if bands is None:
+        band_values = np.unique(band_idx)
+        band_names = [str(int(value)) for value in band_values]
+    else:
+        band_names = [str(band) for band in bands]
+        band_values = np.arange(len(band_names), dtype=np.int32)
+
+    out = {}
+    for edge_index, (low, high) in enumerate(zip(edges[:-1], edges[1:])):
+        suffix = (
+            f"{_format_rest_frame_bin_edge(low)}_"
+            f"{_format_rest_frame_bin_edge(high)}d"
+        )
+        all_products = []
+        products_by_band = {}
+        for band_value, band_name in zip(band_values, band_names):
+            mask = band_idx == band_value
+            t_band = times_rf[mask]
+            r_band = residuals[mask]
+            if t_band.size < 2:
+                products = np.array([], dtype=float)
+            else:
+                dt = np.abs(t_band[:, None] - t_band[None, :])
+                products_matrix = r_band[:, None] * r_band[None, :]
+                upper = np.triu(np.ones(dt.shape, dtype=bool), k=1)
+                in_bin = upper & (dt >= low) & (
+                    dt <= high if edge_index == len(edges) - 2 else dt < high
+                )
+                products = np.asarray(products_matrix[in_bin], dtype=float)
+                products = products[np.isfinite(products)]
+            products_by_band[band_name] = products
+            if products.size:
+                all_products.append(products)
+
+        combined = (
+            np.concatenate(all_products) if all_products else np.array([], dtype=float)
+        )
+        for label, products in [(None, combined), *products_by_band.items()]:
+            key_suffix = suffix if label is None else f"{suffix}_{label}"
+            count = int(products.size)
+            mean = float(np.mean(products)) if count else np.nan
+            stderr = (
+                float(np.std(products, ddof=1) / np.sqrt(count))
+                if count > 1
+                else np.nan
+            )
+            zscore = mean / stderr if np.isfinite(stderr) and stderr > 0.0 else np.nan
+            out[f"loo_resid_pair_count_rf_{key_suffix}"] = count
+            out[f"loo_resid_corr_rf_{key_suffix}"] = mean
+            out[f"loo_resid_corr_stderr_rf_{key_suffix}"] = stderr
+            out[f"loo_resid_corr_z_rf_{key_suffix}"] = zscore
+    return out
+
+
+def compute_loo_short_lag_residual_diagnostics(
+    model,
+    samples,
+    obj,
+    bands,
+    *,
+    bin_edges=LOO_RESIDUAL_RF_BIN_EDGES,
+):
+    """Compute exact Gaussian LOO standardized-residual correlations."""
+
+    oid = obj.get("object_id", "<unknown>")
+    try:
+        params = tree_map(jnp.asarray, _posterior_median_params(samples))
+        gp, inds = model._build_gp(params)
+        y_sorted = np.asarray(model._observed_y_sorted(params, inds), dtype=float)
+        mean_sorted = np.asarray(gp.loc, dtype=float)
+        covariance = np.asarray(gp.covariance, dtype=float)
+        covariance = 0.5 * (covariance + covariance.T)
+        scale = max(float(np.nanmedian(np.diag(covariance))), 1.0)
+        covariance = covariance + np.eye(covariance.shape[0]) * (1e-10 * scale)
+        chol = np.linalg.cholesky(covariance)
+        centered = y_sorted - mean_sorted
+        alpha = np.linalg.solve(chol.T, np.linalg.solve(chol, centered))
+        precision = np.linalg.solve(chol.T, np.linalg.solve(chol, np.eye(chol.shape[0])))
+        precision_diag = np.diag(precision)
+        loo_standardized = alpha / np.sqrt(np.maximum(precision_diag, 1e-300))
+        times_sorted = np.asarray(gp.X[0], dtype=float)
+        bands_sorted = np.asarray(gp.X[1], dtype=np.int32)
+        times_rf = times_sorted / (1.0 + float(obj.get("z", 0.0)))
+        result = binned_loo_residual_pair_correlation(
+            times_rf,
+            bands_sorted,
+            loo_standardized,
+            bin_edges=bin_edges,
+            bands=bands,
+        )
+        result["loo_resid_valid"] = True
+        result["loo_resid_nobs"] = int(loo_standardized.size)
+    except Exception as exc:
+        logging.warning("[%s] LOO residual diagnostic failed: %s", oid, exc)
+        result = {
+            "loo_resid_valid": False,
+            "loo_resid_nobs": 0,
+            "loo_resid_error": str(exc),
+        }
+
+    if not result["loo_resid_valid"]:
+        print(
+            f"[{oid}] LOO standardized-residual diagnostic unavailable: "
+            f"{result.get('loo_resid_error', 'unknown error')}"
+        )
+        return result
+
+    print(f"[{oid}] LOO standardized-residual correlation (rest-frame bins):")
+    edges = np.asarray(bin_edges, dtype=float)
+    for low, high in zip(edges[:-1], edges[1:]):
+        suffix = (
+            f"{_format_rest_frame_bin_edge(low)}_"
+            f"{_format_rest_frame_bin_edge(high)}d"
+        )
+        print(
+            f"  {low:g}–{high:g} d: "
+            f"corr={result.get(f'loo_resid_corr_rf_{suffix}', np.nan):+.4f}, "
+            f"SE={result.get(f'loo_resid_corr_stderr_rf_{suffix}', np.nan):.4f}, "
+            f"z={result.get(f'loo_resid_corr_z_rf_{suffix}', np.nan):+.2f}, "
+            f"pairs={result.get(f'loo_resid_pair_count_rf_{suffix}', 0)}"
+        )
+    return result
+
+
 def extract_band_detrended_series(flat_samples, obj, bands, band, *, z=None, subtract_mean=True):
     """Return observed/rest-frame times, values, and errors for one band."""
 
@@ -5817,6 +5972,13 @@ def main():
                 )
             plot_samples = obj_flat_samples
 
+            loo_residual_result = compute_loo_short_lag_residual_diagnostics(
+                m,
+                plot_samples,
+                obj,
+                bands,
+            )
+
             result = process_samples(
                 obj_flat_samples_flatten_per_band,
                 obj,
@@ -5953,7 +6115,7 @@ def main():
                     logging.error(f"[{oid}] Plotting error: {e}")
                     logging.error(traceback.format_exc())
 
-            final_result = obj | result | adf_result | drift_result | raw_drift_result | psd_break_result | sf_result | kl_result | diagnostics | dict(prefix=prefix, suffix=suffix, model_variant=args.model_variant) 
+            final_result = obj | result | adf_result | drift_result | raw_drift_result | psd_break_result | sf_result | kl_result | loo_residual_result | diagnostics | dict(prefix=prefix, suffix=suffix, model_variant=args.model_variant)
             log_sigma_uv = final_result.get("log_sigma_uv")
             log_sigma_uv_err = final_result.get("log_sigma_uv_err")
             log_tau_uv_rf = final_result.get("log_tau_uv_rf")
