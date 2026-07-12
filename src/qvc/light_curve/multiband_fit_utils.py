@@ -571,14 +571,14 @@ def load_obj_samples_from_hdf5(object_id=None, file_path=None):
     logging.info(f"Loaded {len(samples)} datasets from {file_path}")
     return samples
 
-def save_obj_samples_to_hdf5(samples, object_id):
+def save_obj_samples_to_hdf5(samples, object_id, scalar_diagnostics=None):
     """
     Save all samples to an HDF5 file, one file per object_id.
 
     Args:
         samples (dict): Dictionary containing MCMC samples.
         object_id (str): The object ID for which the samples belong.
-        output_dir (str): Directory where the HDF5 files will be saved.
+        scalar_diagnostics (dict | None): Per-object scalar fit diagnostics.
     """
     output_dir=f"results/samples/{prefix}"
     os.makedirs(output_dir, exist_ok=True)
@@ -590,6 +590,8 @@ def save_obj_samples_to_hdf5(samples, object_id):
         _write_hdf5_run_metadata(hdf)
         for key, value in samples.items():
             hdf.create_dataset(key, data=value)
+        for key, value in (scalar_diagnostics or {}).items():
+            hdf.create_dataset(key, data=np.asarray(value, dtype=float))
     logging.info(f"Saved samples for object_id {object_id} to {file_path}")
 
 def delete_file(file_path):

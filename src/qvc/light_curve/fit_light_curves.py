@@ -955,6 +955,11 @@ def compute_loo_short_lag_residual_diagnostics(
         precision = np.linalg.solve(chol.T, np.linalg.solve(chol, np.eye(chol.shape[0])))
         precision_diag = np.diag(precision)
         loo_standardized = alpha / np.sqrt(np.maximum(precision_diag, 1e-300))
+        finite_loo = np.isfinite(loo_standardized)
+        loo_standardized_finite = loo_standardized[finite_loo]
+        if not loo_standardized_finite.size:
+            raise ValueError("No finite LOO standardized residuals.")
+        loo_chi2_eff = float(np.mean(np.square(loo_standardized_finite)))
         times_sorted = np.asarray(gp.X[0], dtype=float)
         bands_sorted = np.asarray(gp.X[1], dtype=np.int32)
         times_rf = times_sorted / (1.0 + float(obj.get("z", 0.0)))
@@ -966,12 +971,16 @@ def compute_loo_short_lag_residual_diagnostics(
             bands=bands,
         )
         result["loo_resid_valid"] = True
-        result["loo_resid_nobs"] = int(loo_standardized.size)
+        result["loo_resid_nobs"] = int(loo_standardized_finite.size)
+        result["loo_chi2_eff"] = loo_chi2_eff
+        result["loo_rms"] = float(np.sqrt(loo_chi2_eff)) if np.isfinite(loo_chi2_eff) else np.nan
     except Exception as exc:
         logging.warning("[%s] LOO residual diagnostic failed: %s", oid, exc)
         result = {
             "loo_resid_valid": False,
             "loo_resid_nobs": 0,
+            "loo_chi2_eff": np.nan,
+            "loo_rms": np.nan,
             "loo_resid_error": str(exc),
         }
 
@@ -982,6 +991,12 @@ def compute_loo_short_lag_residual_diagnostics(
         )
         return result
 
+    print(
+        f"[{oid}] LOO standardized-residual summary: "
+        f"chi2_eff={result['loo_chi2_eff']:.4f}, "
+        f"rms={result['loo_rms']:.4f}, "
+        f"nobs={result['loo_resid_nobs']}"
+    )
     print(f"[{oid}] LOO standardized-residual correlation (rest-frame bins):")
     edges = np.asarray(bin_edges, dtype=float)
     for low, high in zip(edges[:-1], edges[1:]):
@@ -5891,9 +5906,6 @@ def main():
                     samples_per_chain = tree_map(lambda x: np.asarray(device_get(x)), samples_per_chain)
                     obj_flat_samples = samples_flat
 
-                if args.save_sample_file:
-                    save_obj_samples_to_hdf5(obj_flat_samples, oid)
-
             print_light_curve_posterior_summary(
                 oid,
                 samples_per_chain=samples_per_chain,
@@ -5978,6 +5990,15 @@ def main():
                 obj,
                 bands,
             )
+            if args.save_sample_file:
+                save_obj_samples_to_hdf5(
+                    obj_flat_samples,
+                    oid,
+                    scalar_diagnostics={
+                        "loo_chi2_eff": loo_residual_result["loo_chi2_eff"],
+                        "loo_rms": loo_residual_result["loo_rms"],
+                    },
+                )
 
             result = process_samples(
                 obj_flat_samples_flatten_per_band,

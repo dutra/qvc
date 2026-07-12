@@ -3,8 +3,11 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import h5py
+import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -56,6 +59,7 @@ from qvc.light_curve.multiband_fit_plotting import (
     _trace_plot_labels,
     relative_to_2500_amplitude_scale,
 )
+from qvc.light_curve import multiband_fit_utils
 from qvc.light_curve.multiband_fit_utils import lambda_pivot, log_single_pl, process_samples
 
 
@@ -194,6 +198,39 @@ def test_loo_residual_diagnostic_accepts_numpy_posterior_samples_for_erlang_mode
     assert result["loo_resid_valid"]
     assert result["loo_resid_nobs"] == times.size
     assert result["loo_resid_pair_count_rf_0_10d"] > 0
+    assert np.isfinite(result["loo_chi2_eff"])
+    assert np.isclose(result["loo_rms"] ** 2, result["loo_chi2_eff"])
+
+    median_params = {key: jnp.asarray(np.median(value, axis=0)) for key, value in samples.items()}
+    gp, inds = model._build_gp(median_params)
+    y_sorted = np.asarray(model._observed_y_sorted(median_params, inds), dtype=float)
+    covariance = np.asarray(gp.covariance, dtype=float)
+    covariance = 0.5 * (covariance + covariance.T)
+    covariance += np.eye(covariance.shape[0]) * (1e-10 * max(float(np.nanmedian(np.diag(covariance))), 1.0))
+    chol = np.linalg.cholesky(covariance)
+    alpha = np.linalg.solve(chol.T, np.linalg.solve(chol, y_sorted - np.asarray(gp.loc, dtype=float)))
+    precision = np.linalg.solve(chol.T, np.linalg.solve(chol, np.eye(chol.shape[0])))
+    loo_standardized = alpha / np.sqrt(np.maximum(np.diag(precision), 1e-300))
+    expected_chi2_eff = np.mean(np.square(loo_standardized[np.isfinite(loo_standardized)]))
+    assert np.isclose(result["loo_chi2_eff"], expected_chi2_eff)
+
+
+def test_save_obj_samples_to_hdf5_writes_loo_scalar_diagnostics(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(multiband_fit_utils, "prefix", "loo_test")
+    monkeypatch.setattr(multiband_fit_utils, "suffix", "run")
+
+    multiband_fit_utils.save_obj_samples_to_hdf5(
+        {"lag_blr": np.array([1.0, 2.0])},
+        "object",
+        scalar_diagnostics={"loo_chi2_eff": 1.25, "loo_rms": np.sqrt(1.25)},
+    )
+
+    output_path = tmp_path / "results/samples/loo_test/object_run.h5"
+    with h5py.File(output_path, "r") as hdf:
+        np.testing.assert_array_equal(hdf["lag_blr"][:], np.array([1.0, 2.0]))
+        assert hdf["loo_chi2_eff"][()] == 1.25
+        assert np.isclose(hdf["loo_rms"][()], np.sqrt(1.25))
 
 
 def test_apply_resume_sample_save_policy_disables_sample_saving_on_resume():
