@@ -5367,8 +5367,8 @@ def main():
     parser.add_argument(
         "--target_accept",
         type=float,
-        default=0.6,
-        help="Target NUTS acceptance probability (default: 0.9).",
+        default=0.7,
+        help="Target NUTS acceptance probability (default: 0.7).",
     )
     parser.add_argument(
         "--dense_mass",
