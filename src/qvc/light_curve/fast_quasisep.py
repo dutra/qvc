@@ -78,10 +78,11 @@ def _driver_to_chain_columns_horner(dt, lam, e_lam, q, eq, sign, order):
 
 
 def _erlang_scatter_indices(n_band, order):
-    """Static (rows, cols) enumerating the nonzeros of the *transposed* phi.
+    """Static (rows, cols) enumerating the forward causal transition ``phi``.
 
     Layout matches ``ErlangResponseDHOQS``: states ``[fast(B), slow(B),
-    chains(B*k)]``; ``transition_matrix`` returns ``phi.T``.
+    chains(B*k)]``; ``transition_matrix`` returns the usual column-state
+    transition ``phi``.
     """
     B, k = int(n_band), int(order)
     n0 = 2 * B
@@ -90,18 +91,18 @@ def _erlang_scatter_indices(n_band, order):
         rows.append(b), cols.append(b)
     for b in range(B):
         rows.append(B + b), cols.append(B + b)
-    # phi[chain_i, chain_j] (lower-tri Toeplitz incl. diagonal), transposed
+    # phi[chain_i, chain_j] (lower-tri Toeplitz incl. diagonal)
     for b in range(B):
         for i in range(k):
             for j in range(i + 1):
-                rows.append(n0 + b * k + j), cols.append(n0 + b * k + i)
-    # phi[chain_i, driver_b] columns, transposed
+                rows.append(n0 + b * k + i), cols.append(n0 + b * k + j)
+    # phi[chain_i, driver_b] columns
     for b in range(B):
         for i in range(k):
-            rows.append(b), cols.append(n0 + b * k + i)
+            rows.append(n0 + b * k + i), cols.append(b)
     for b in range(B):
         for i in range(k):
-            rows.append(B + b), cols.append(n0 + b * k + i)
+            rows.append(n0 + b * k + i), cols.append(B + b)
     return np.asarray(rows), np.asarray(cols)
 
 
@@ -283,10 +284,13 @@ def fused_log_probability(kernel, X, diag, resid, *, sort_time=None):
         a = jax.vmap(kernel.transition_matrix)(Xp, X)
 
     h = jax.vmap(kernel.observation_model)(X)
-    q = h
     ph = h @ Pinf
-    d = jnp.sum(ph * q, axis=1) + diag
-    p = jax.vmap(jnp.dot)(ph, a)
+    d = jnp.sum(ph * h, axis=1) + diag
+    # Direct causal QSM generators. For i > j,
+    # K_ij = h_i F_i ... F_{j+1} Pinf h_j. This differs from tinygp's
+    # reversible-process default and is required for delayed responses.
+    p = jax.vmap(jnp.dot)(h, a)
+    q = h @ Pinf.T
 
     ties = jnp.concatenate([jnp.zeros((1,), bool), jnp.diff(t) == 0.0])
     value = scan_loglike(d, p, q, a, resid, ties)
