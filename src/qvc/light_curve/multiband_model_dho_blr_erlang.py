@@ -314,19 +314,14 @@ class ContiBLRErlangRelativeFluxModel(ContiBLRRelativeFlux_SHO_Model):
     """Relative-flux model that constructs the augmented Erlang kernel."""
 
     erlang_order: int
+    use_fast_solver: bool
 
-    def __init__(self, *args, erlang_order=DEFAULT_ERLANG_ORDER, **kwargs):
+    def __init__(self, *args, erlang_order=DEFAULT_ERLANG_ORDER, use_fast_solver=False, **kwargs):
         super().__init__(*args, **kwargs)
         self.erlang_order = int(erlang_order)
+        self.use_fast_solver = bool(use_fast_solver)
 
-    def _build_gp(self, params):
-        means = partial(self.get_mean, self.zero_mean, params)
-        X, inds = self.lag_transform(False, params, self.X)
-        t, band = X
-        diags = self.diag
-        if self.has_jitter:
-            diags = diags + self._jitter_diag(params, band)
-
+    def _build_kernel(self, params):
         tau_fast = jnp.asarray(params["tau_fast_band"])
         tau_slow = jnp.asarray(params["tau_slow_band"])
         amp_cont = jnp.asarray(
@@ -335,7 +330,7 @@ class ContiBLRErlangRelativeFluxModel(ContiBLRRelativeFlux_SHO_Model):
         amp_blr = jnp.asarray(
             params["amp_blr_relflux"] if "amp_blr_relflux" in params else params["amp_blr"]
         )
-        kernel = ErlangResponseDHOQS(
+        return ErlangResponseDHOQS(
             tau_fast=tau_fast,
             tau_slow=tau_slow,
             lag_blr=jnp.asarray(params["lag_blr"]),
@@ -343,15 +338,47 @@ class ContiBLRErlangRelativeFluxModel(ContiBLRRelativeFlux_SHO_Model):
             amp_blr=amp_blr,
             order=self.erlang_order,
         )
+
+    def _likelihood_inputs(self, params):
+        means = partial(self.get_mean, self.zero_mean, params)
+        X, inds = self.lag_transform(False, params, self.X)
+        t, band = X
+        diags = self.diag
+        if self.has_jitter:
+            diags = diags + self._jitter_diag(params, band)
+        return means, (t[inds], band[inds]), diags[inds], inds
+
+    def _build_gp(self, params):
+        means, Xs, diags, inds = self._likelihood_inputs(params)
         return (
             GaussianProcess(
-                kernel,
-                (t[inds], band[inds]),
-                diag=diags[inds],
+                self._build_kernel(params),
+                Xs,
+                diag=diags,
                 mean=means,
                 assume_sorted=True,
             ),
             inds,
+        )
+
+    @eqx.filter_jit
+    def log_prob(self, params):
+        """GP log-likelihood; optionally via the fused single-scan solver.
+
+        The fast path computes exactly the same value and gradients as the
+        tinygp solver (see ``qvc.light_curve.fast_quasisep`` and
+        ``tests/test_fast_quasisep.py``) with a hand-written adjoint and an
+        exact identity branch for simultaneous multiband epochs.
+        """
+        if not self.use_fast_solver:
+            return super().log_prob(params)
+        from qvc.light_curve.fast_quasisep import fused_log_probability
+
+        means, Xs, diags, inds = self._likelihood_inputs(params)
+        mean_vec = jax.vmap(means)(Xs)
+        resid = self._observed_y_sorted(params, inds) - mean_vec
+        return fused_log_probability(
+            self._build_kernel(params), Xs, diags, resid, sort_time=Xs[0]
         )
 
 
@@ -366,6 +393,7 @@ def make_multiband_dho_blr_flux_linearized_erlang_model(
     zero_mean=False,
     has_jitter=True,
     erlang_order=DEFAULT_ERLANG_ORDER,
+    use_fast_solver=False,
 ):
     """Construct the relative-flux DHO plus causal Erlang BLR model."""
 
@@ -388,6 +416,7 @@ def make_multiband_dho_blr_flux_linearized_erlang_model(
         has_jitter=has_jitter,
         has_lag=False,
         erlang_order=erlang_order,
+        use_fast_solver=use_fast_solver,
     )
 
 

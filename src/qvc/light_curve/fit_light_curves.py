@@ -4110,6 +4110,7 @@ def build_single_object_model_mag_flux_linearized(
     use_erlang=False,
     shared_blr_lag=False,
     erlang_order=DEFAULT_ERLANG_ORDER,
+    use_fast_solver=False,
     blr_lag_band_scatter=None,
 ):
     """Return the relative-flux quasi-separable model for one object."""
@@ -4314,7 +4315,11 @@ def build_single_object_model_mag_flux_linearized(
             baseline_flux_by_band=baseline_flux_by_band,
             zero_mean=zero_mean,
             has_jitter=has_jitter,
-            **({"erlang_order": erlang_order} if use_erlang_response else {}),
+            **(
+                {"erlang_order": erlang_order, "use_fast_solver": use_fast_solver}
+                if use_erlang_response
+                else {}
+            ),
         )
         numpyro.factor("loglike", m.log_prob(params))
 
@@ -4810,6 +4815,7 @@ def run_iterated_mag_flux_linearized_inference(
     model_variant="mag_flux_linearized",
     shared_blr_lag=False,
     erlang_order=DEFAULT_ERLANG_ORDER,
+    use_fast_solver=False,
     blr_lag_band_scatter=None,
 ):
     """Iteratively refit the relative-flux QS model using local magnitude-likelihood pseudo-data."""
@@ -4839,6 +4845,7 @@ def run_iterated_mag_flux_linearized_inference(
         use_erlang=(model_variant == "mag_flux_linearized_erlang"),
         shared_blr_lag=shared_blr_lag,
         erlang_order=erlang_order,
+        use_fast_solver=use_fast_solver,
         blr_lag_band_scatter=blr_lag_band_scatter,
     )
 
@@ -5495,6 +5502,15 @@ def main():
         help=f"Positive Erlang BLR response order for --model_variant mag_flux_linearized_erlang (default: {DEFAULT_ERLANG_ORDER}).",
     )
     parser.add_argument(
+        "--fast_solver",
+        action="store_true",
+        default=False,
+        help=(
+            "Use the fused single-scan quasisep likelihood with a custom adjoint "
+            "(exact; --model_variant mag_flux_linearized_erlang only)."
+        ),
+    )
+    parser.add_argument(
         "--model_variant",
         choices=("mag_linear", "mag_flux_linearized", "mag_flux_linearized_erlang", "mag_fluxmix_fast"),
         default="mag_linear",
@@ -5598,6 +5614,8 @@ def main():
         raise ValueError("--target_accept must be strictly between 0 and 1.")
     if args.erlang_order != DEFAULT_ERLANG_ORDER and args.model_variant != "mag_flux_linearized_erlang":
         raise ValueError("--erlang_order is only used by --model_variant mag_flux_linearized_erlang.")
+    if args.fast_solver and args.model_variant != "mag_flux_linearized_erlang":
+        raise ValueError("--fast_solver is only used by --model_variant mag_flux_linearized_erlang.")
     if args.fit_method == "ns":
         if NestedSampler is None:
             raise ImportError(
@@ -5816,6 +5834,7 @@ def main():
                         model_variant=args.model_variant,
                         shared_blr_lag=args.shared_blr_lag,
                         erlang_order=args.erlang_order,
+                        use_fast_solver=args.fast_solver,
                         blr_lag_band_scatter=args.blr_lag_band_scatter,
                     )
                 elif args.fit_method in ("nuts", "svi+nuts"):
