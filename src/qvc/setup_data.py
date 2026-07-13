@@ -81,9 +81,9 @@ DEFAULT_STEPS = [
     },
     {
         "type": "download",
-        "url": "https://portal.nersc.gov/project/hacc/aphearin/DSPS_data/ssp_data_fsps_v3.2_lgmet_age.h5",
+        "url": "https://portal.nersc.gov/project/hacc/aphearin/DSPS_data/ssp_data_continuum_fsps_v3.2_lgmet_age.h5",
         "folder": "data/",
-        "filename": "ssp_data_fsps_v3.2_lgmet_age.h5",
+        "filename": "ssp_data_continuum_fsps_v3.2_lgmet_age.h5",
     },
     {
         "type": "download",
