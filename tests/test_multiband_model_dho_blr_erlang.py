@@ -361,6 +361,110 @@ def test_erlang_state_impulse_response_peaks_after_zero():
     assert np.isclose(t[np.argmax(output)], lag * (order - 1) / order, atol=0.3)
 
 
+def test_erlang_cross_covariance_has_causal_direction_and_matches_convolution():
+    """Check direction against an external, past-only convolution oracle.
+
+    This deliberately does not use the augmented Erlang state to construct the
+    oracle.  For R(t) = integral psi(u) C(t-u) du, u >= 0, the cross covariance
+    is
+
+        Cov[C(0), R(s)] = integral psi(u) k_C(s-u) du.
+
+    This test would fail if the continuum/response cross covariance were
+    accidentally transposed while remaining symmetric and positive definite.
+    """
+
+    from scipy.linalg import expm
+
+    lag = 80.0
+    order = 4
+    kernel = ErlangResponseDHOQS(
+        tau_fast=jnp.array([20.0]),
+        tau_slow=jnp.array([150.0]),
+        lag_blr=jnp.array([lag]),
+        amp_cont=jnp.array([1.0]),
+        amp_blr=jnp.array([1.0]),
+        order=order,
+    )
+
+    A = np.asarray(kernel.design_matrix())
+    P = np.asarray(kernel.stationary_covariance())
+    base = kernel._base()
+    A0 = np.asarray(base.design_matrix())
+    P0 = np.asarray(base.stationary_covariance())
+    h0 = np.asarray(base.observation_model((jnp.array(0.0), jnp.array(0))))
+
+    h_cont = np.zeros(A.shape[0])
+    h_cont[: A0.shape[0]] = h0
+    h_resp = np.zeros(A.shape[0])
+    h_resp[-1] = 1.0
+
+    # The integration grid is independent of the state-space implementation.
+    u = np.linspace(0.0, 12.0 * lag, 24001)
+    psi = np.asarray(erlang_impulse_response(u, lag, order))
+
+    def base_covariance(delta):
+        # The scalar stationary base covariance is even in delta.
+        F = expm(A0 * abs(float(delta)))
+        return h0 @ P0 @ F.T @ h0
+
+    def convolution_oracle(separation):
+        values = np.array([base_covariance(separation - ui) for ui in u])
+        return np.trapezoid(psi * values, u)
+
+    def augmented_cross_covariance(separation):
+        F = expm(A * abs(float(separation)))
+        if separation >= 0.0:
+            # C(0), followed by R(separation).
+            return h_resp @ F @ P @ h_cont
+        # R(separation), followed by C(0).
+        return h_cont @ F @ P @ h_resp
+
+    separations = np.array([-160.0, -80.0, 0.0, 40.0, 80.0, 160.0])
+    state_values = np.array([augmented_cross_covariance(s) for s in separations])
+    oracle_values = np.array([convolution_oracle(s) for s in separations])
+    np.testing.assert_allclose(state_values, oracle_values, rtol=2e-6, atol=2e-9)
+
+    # A delayed response must correlate more strongly with an earlier
+    # continuum than with a continuum the same distance in its future.
+    forward = augmented_cross_covariance(lag)
+    reverse = augmented_cross_covariance(-lag)
+    assert forward > reverse
+
+    # Exercise TinyGP's exact transition convention explicitly.  For t1<t2 it
+    # contracts h2 @ Pinf @ transition(t1,t2) @ h1.
+    X1 = (jnp.asarray(0.0), jnp.asarray(0))
+    X2 = (jnp.asarray(lag), jnp.asarray(0))
+    tinygp_forward = (
+        h_resp
+        @ np.asarray(kernel.transition_matrix(X1, X2))
+        @ np.asarray(kernel.stationary_covariance())
+        @ h_cont
+    )
+    np.testing.assert_allclose(tinygp_forward, forward, rtol=2e-10, atol=2e-12)
+
+
+def test_causal_qsm_matches_pairwise_dense_covariance_and_is_psd():
+    kernel = ErlangResponseDHOQS(
+        tau_fast=jnp.array([18.0, 27.0]),
+        tau_slow=jnp.array([140.0, 230.0]),
+        lag_blr=jnp.array([55.0, 105.0]),
+        amp_cont=jnp.array([0.7, 0.5]),
+        amp_blr=jnp.array([0.12, 0.3]),
+        order=3,
+    )
+    times = jnp.array([0.0, 0.0, 17.0, 43.0, 43.0, 91.0, 180.0])
+    bands = jnp.array([0, 1, 1, 0, 1, 0, 1], dtype=jnp.int32)
+    X = (times, bands)
+    qsm_dense = np.asarray(kernel.to_symm_qsm(X).to_dense())
+    pairwise_dense = np.asarray(
+        jax.vmap(lambda x1: jax.vmap(lambda x2: kernel.evaluate(x1, x2))(X))(X)
+    )
+    np.testing.assert_allclose(qsm_dense, pairwise_dense, rtol=2e-10, atol=2e-12)
+    np.testing.assert_allclose(qsm_dense, qsm_dense.T, rtol=0.0, atol=2e-12)
+    assert np.linalg.eigvalsh(qsm_dense).min() > -1e-10
+
+
 def test_deterministic_erlang_response_recovers_injected_centroid_lag():
     injected_lag = 75.0
     order = 4

@@ -16,6 +16,7 @@ import numpy as np
 from jax.scipy.linalg import expm
 from tinygp import GaussianProcess
 from tinygp.kernels import quasisep as qs
+from tinygp.solvers.quasisep.core import DiagQSM, StrictLowerTriQSM, SymmQSM
 
 from qvc.light_curve.multiband_model_dho_blr import (
     ContiBLRRelativeFlux_SHO_Model,
@@ -246,14 +247,17 @@ class ErlangResponseDHOQS(qs.Quasisep):
         return sign * jnp.where(use_series[:, None], series, difference)
 
     def transition_matrix(self, X1, X2):
-        """Analytic ``expm(A^T dt)`` exploiting the block band structure.
+        """Analytic causal transition in tinygp's Quasisep convention.
 
         The design matrix has no dynamical coupling between bands: each band
         is an independent block of two continuum poles plus one Erlang chain,
         so every block of the matrix exponential is available in closed form.
-        tinygp's Quasisep convention contracts ``Pinf @ transition`` on the
-        right, so the assembled matrix is the transpose of the usual
-        column-state transition.
+
+        This returns the usual forward column-state transition ``F``.  The
+        base tinygp ``Quasisep`` conversion assumes a reversible process; this
+        class overrides that conversion below so the non-reversible causal
+        covariance is represented directly without an ill-conditioned
+        similarity transform.
         """
 
         t1, _ = X1
@@ -291,7 +295,7 @@ class ErlangResponseDHOQS(qs.Quasisep):
             dt, lam_slow, e_slow, q, eq, -1.0
         )
 
-        # Assemble the standard (rows = to-state) transition, then transpose.
+        # Assemble the standard column-state transition (rows = to-state).
         b = jnp.arange(B)
         chain_idx = n0 + b[:, None] * k + jnp.arange(k)[None, :]
         phi = jnp.zeros((n, n), dtype=e_fast.dtype)
@@ -300,14 +304,57 @@ class ErlangResponseDHOQS(qs.Quasisep):
         phi = phi.at[chain_idx[:, :, None], chain_idx[:, None, :]].set(chain)
         phi = phi.at[chain_idx, b[:, None]].set(col_fast)
         phi = phi.at[chain_idx, B + b[:, None]].set(col_slow)
-        return phi.T
+        return phi
 
     def _transition_matrix_expm(self, X1, X2):
         """Numerical oracle for transition_matrix(), retained for tests."""
 
         t1, _ = X1
         t2, _ = X2
-        return expm(self.design_matrix().T * (t2 - t1))
+        return expm(self.design_matrix() * (t2 - t1))
+
+    def to_symm_qsm(self, X):
+        """Build the causal symmetric QSM without assuming reversibility."""
+
+        Pinf = self.stationary_covariance()
+        Xprev = jax.tree_util.tree_map(lambda y: jnp.append(y[0], y[:-1]), X)
+        a = jax.vmap(self.transition_matrix)(Xprev, X)
+        h = jax.vmap(self.observation_model)(X)
+        d = jnp.einsum("ni,ij,nj->n", h, Pinf, h)
+        # For i > j: K_ij = h_i F_i ... F_{j+1} Pinf h_j.
+        p = jax.vmap(lambda hi, Fi: hi @ Fi)(h, a)
+        q = h @ Pinf.T
+        return SymmQSM(
+            diag=DiagQSM(d=d),
+            lower=StrictLowerTriQSM(p=p, q=q, a=a),
+        )
+
+    def evaluate(self, X1, X2):
+        """Evaluate the causal covariance for arbitrary coordinate pairs."""
+
+        Pinf = self.stationary_covariance()
+        h1 = self.observation_model(X1)
+        h2 = self.observation_model(X2)
+        return jnp.where(
+            self.coord_to_sortable(X1) < self.coord_to_sortable(X2),
+            h2 @ self.transition_matrix(X1, X2) @ Pinf @ h1,
+            h1 @ self.transition_matrix(X2, X1) @ Pinf @ h2,
+        )
+
+    def matmul(self, X1, X2=None, y=None):
+        """Use the fast QSM for training and a dense causal cross-covariance."""
+
+        if y is None:
+            if X2 is None:
+                raise ValueError("Missing right-hand side for kernel matmul")
+            y = X2
+            X2 = None
+        if X2 is None:
+            return self.to_symm_qsm(X1) @ y
+        covariance = jax.vmap(
+            lambda x1: jax.vmap(lambda x2: self.evaluate(x1, x2))(X2)
+        )(X1)
+        return covariance @ y
 
 
 class ContiBLRErlangRelativeFluxModel(ContiBLRRelativeFlux_SHO_Model):
