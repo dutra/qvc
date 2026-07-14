@@ -10,7 +10,6 @@ import traceback
 from functools import lru_cache
 
 import numpy as np
-from numpy.lib.stride_tricks import sliding_window_view
 from scipy.optimize import curve_fit, least_squares
 from scipy.special import gammaln
 from scipy.stats import kurtosis, median_abs_deviation, normaltest, skew
@@ -3194,6 +3193,61 @@ def compute_parameter_kls(
     return kls
 
 
+def rolling_photometric_outlier_mask(
+    times,
+    mags,
+    magerrs,
+    *,
+    half_window_days=30.0,
+    min_neighbors=8,
+    threshold=3.0,
+):
+    """Flag conservative local outliers in a center-excluded time window.
+
+    The window uses observer-frame days. Points near temporal edges and gaps are
+    only tested when at least ``min_neighbors`` other measurements fall within
+    the truncated time window.
+    """
+
+    times = np.asarray(times, dtype=float)
+    mags = np.asarray(mags, dtype=float)
+    magerrs = np.asarray(magerrs, dtype=float)
+    if not (times.shape == mags.shape == magerrs.shape):
+        raise ValueError("times, mags, and magerrs must have matching shapes")
+    if half_window_days <= 0.0:
+        raise ValueError("half_window_days must be positive")
+    if min_neighbors < 1:
+        raise ValueError("min_neighbors must be at least 1")
+    if threshold <= 0.0:
+        raise ValueError("threshold must be positive")
+
+    rejected = np.zeros(mags.shape, dtype=bool)
+    n_points = mags.size
+    for i in range(n_points):
+        neighbor_idx = np.flatnonzero(
+            (np.arange(n_points) != i)
+            & np.isfinite(times)
+            & (np.abs(times - times[i]) <= float(half_window_days))
+        )
+        finite_neighbors = (
+            np.isfinite(mags[neighbor_idx]) & np.isfinite(magerrs[neighbor_idx])
+        )
+        neighbor_idx = neighbor_idx[finite_neighbors]
+        if neighbor_idx.size < int(min_neighbors):
+            continue
+        if not (np.isfinite(mags[i]) and np.isfinite(magerrs[i]) and magerrs[i] >= 0.0):
+            continue
+
+        local = mags[neighbor_idx]
+        local_median = float(np.median(local))
+        local_sigma = 1.4826 * float(median_abs_deviation(local))
+        total_sigma = np.hypot(magerrs[i], local_sigma)
+        if total_sigma > 0.0:
+            rejected[i] = abs(mags[i] - local_median) > threshold * total_sigma
+
+    return rejected
+
+
 def make_lc(
     data,
     bands,
@@ -3324,20 +3378,22 @@ def make_lc(
         print(f"No finite values for {data['object_id']}, skipping.", flush=True)
         return None
 
-    window_size = 6
     keep = np.ones(len(all_times), dtype=bool)
     for b in np.unique(band_idx):
         mask = band_idx == b
+        t_b = all_times[mask]
         yb = all_mags[mask]
+        yerr_b = all_magerrs[mask]
         idx_b = np.where(mask)[0]
-        if len(yb) < 2 * window_size + 1:
-            continue
-        windows = sliding_window_view(yb, 2 * window_size + 1)
-        centers = yb[window_size:-window_size]
-        medians = np.nanmean(windows, axis=1)
-        mads = median_abs_deviation(windows, axis=1, nan_policy="omit")
-        is_out = np.abs(centers - medians) > 2.5 * mads
-        keep[idx_b[window_size:-window_size][is_out]] = False
+        is_out = rolling_photometric_outlier_mask(
+            t_b,
+            yb,
+            yerr_b,
+            half_window_days=30.0,
+            min_neighbors=8,
+            threshold=3.0,
+        )
+        keep[idx_b[is_out]] = False
 
     all_times, all_mags, all_magerrs, all_surveys, band_idx = (
         all_times[keep],
