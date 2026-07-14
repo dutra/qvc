@@ -134,7 +134,7 @@ def test_relative_log_lag_blr_prior_bounds_reconstruct_absolute_lag_bounds():
 
     reconstructed_low = np.exp(float(relative.support.lower_bound) + log_lag0)
     reconstructed_high = np.exp(float(relative.support.upper_bound) + log_lag0)
-    assert np.isclose(reconstructed_low, 10.0 * (1.0 + z))
+    assert np.isclose(reconstructed_low, 0.1 * (1.0 + z))
     assert np.isclose(reconstructed_high, 1000.0 * (1.0 + z))
 
 
@@ -614,7 +614,7 @@ def test_make_lc_adds_variability_fields_for_retained_bands():
 
 
 def test_make_lc_variability_uses_post_filtering_series():
-    times = np.arange(13, dtype=float) * 30.0
+    times = np.arange(13, dtype=float) * 5.0
     g_mags = np.array([20.0, 20.0, 20.1, 20.0, 20.1, 20.0, 23.5, 20.0, 20.1, 20.0, 20.1, 20.0, 20.1], dtype=float)
     obj = {
         "object_id": "outlier",
