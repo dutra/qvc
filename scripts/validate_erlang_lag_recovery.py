@@ -40,8 +40,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--bands", nargs="+", default=["u", "g", "r", "i"])
     parser.add_argument("--blr-band", default="r")
     parser.add_argument("--n-realizations", type=int, default=20)
+    parser.add_argument("--n-lag-grid", type=int, default=241)
     parser.add_argument("--seed", type=int, default=20260711)
     parser.add_argument("--erlang-order", type=int, default=3)
+    parser.add_argument(
+        "--injection-response",
+        choices=("erlang", "delta"),
+        default="erlang",
+        help="Transfer function used to generate the mock data; fitting always uses Erlang.",
+    )
     parser.add_argument("--tau-drw", type=float, default=300.0)
     parser.add_argument("--sigma-cont", type=float, default=0.15)
     parser.add_argument("--lag-min", type=float, default=10.0, help="Minimum rest-frame lag [days]")
@@ -177,6 +184,38 @@ def posterior_quantiles(log_lag_grid, log_likelihood, quantiles=(0.16, 0.5, 0.84
     return np.exp(np.interp(np.asarray(quantiles), cdf, grid))
 
 
+def sample_delta_response_drw(
+    rng,
+    times,
+    bands,
+    errors,
+    *,
+    lag,
+    fraction,
+    tau_drw,
+    sigma_cont,
+    blr_band_index,
+):
+    """Sample continuum plus an exact delayed copy in the selected BLR band."""
+    times = np.asarray(times, dtype=float)
+    bands = np.asarray(bands, dtype=np.int32)
+    errors = np.asarray(errors, dtype=float)
+    response = (bands == int(blr_band_index)).astype(float) * float(fraction)
+
+    def ou_cov(left, right):
+        return np.exp(-np.abs(left[:, None] - right[None, :]) / float(tau_drw))
+
+    delayed_times = times - float(lag)
+    covariance = float(sigma_cont) ** 2 * (
+        ou_cov(times, times)
+        + response[:, None] * ou_cov(delayed_times, times)
+        + response[None, :] * ou_cov(times, delayed_times)
+        + response[:, None] * response[None, :] * ou_cov(delayed_times, delayed_times)
+    )
+    covariance.flat[:: covariance.shape[0] + 1] += errors**2 + 1e-10
+    return rng.multivariate_normal(np.zeros(times.size), covariance)
+
+
 def main() -> None:
     args = parse_args()
     times, bands, errors, band_names, redshift = load_real_cadence(
@@ -189,7 +228,9 @@ def main() -> None:
     noise_var = errors**2
     tau_fast = 0.5  # Negligible relative to this cadence: DRW-like SHO limit.
     one_plus_z = 1.0 + redshift
-    log_lag_grid_rf = np.linspace(np.log(args.lag_min), np.log(args.lag_max), 241)
+    log_lag_grid_rf = np.linspace(
+        np.log(args.lag_min), np.log(args.lag_max), args.n_lag_grid
+    )
     log_lag_grid_obs = log_lag_grid_rf + np.log(one_plus_z)
     log_likelihood_grid = make_log_likelihood_grid_fn(
         times,
@@ -216,24 +257,37 @@ def main() -> None:
         zip(true_lags_rf, true_fractions, strict=True)
     ):
         true_lag_obs = true_lag * one_plus_z
-        kernel = make_kernel(
-            n_band,
-            jnp.asarray(true_lag_obs),
-            jnp.asarray(true_fraction),
-            tau_fast=tau_fast,
-            tau_drw=args.tau_drw,
-            sigma_cont=args.sigma_cont,
-            erlang_order=args.erlang_order,
-            blr_band_index=blr_band_index,
-        )
-        gp = GaussianProcess(
-            kernel,
-            (times, bands),
-            diag=noise_var,
-            assume_sorted=True,
-        )
-        key = jax.random.PRNGKey(args.seed + index)
-        simulated = gp.sample(key)
+        if args.injection_response == "delta":
+            simulated = jnp.asarray(sample_delta_response_drw(
+                rng,
+                times,
+                bands,
+                errors,
+                lag=true_lag_obs,
+                fraction=true_fraction,
+                tau_drw=args.tau_drw,
+                sigma_cont=args.sigma_cont,
+                blr_band_index=blr_band_index,
+            ))
+        else:
+            kernel = make_kernel(
+                n_band,
+                jnp.asarray(true_lag_obs),
+                jnp.asarray(true_fraction),
+                tau_fast=tau_fast,
+                tau_drw=args.tau_drw,
+                sigma_cont=args.sigma_cont,
+                erlang_order=args.erlang_order,
+                blr_band_index=blr_band_index,
+            )
+            gp = GaussianProcess(
+                kernel,
+                (times, bands),
+                diag=noise_var,
+                assume_sorted=True,
+            )
+            key = jax.random.PRNGKey(args.seed + index)
+            simulated = gp.sample(key)
         log_likelihood = np.asarray(
             log_likelihood_grid(
                 jnp.asarray(log_lag_grid_obs), simulated, jnp.asarray(true_fraction)
@@ -250,6 +304,7 @@ def main() -> None:
             "lag_low_rest": lag_low,
             "lag_high_rest": lag_high,
             "true_blr_fraction": true_fraction,
+            "injection_response": args.injection_response,
         }
         rows.append(row)
         print(
