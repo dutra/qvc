@@ -46,11 +46,12 @@ def parse_args():
     parser.add_argument("--N", type=int, default=1, help="Objects per array task.")
     parser.add_argument("--nwarm", type=int, default=500, help="Warmup steps.")
     parser.add_argument("--nsamp", type=int, default=250, help="Posterior samples per chain.")
+    parser.add_argument("--svi-steps", type=int, default=1000, help="SVI warm-start steps.")
     parser.add_argument("--ncores", type=int, default=1, help="CPUs per task.")
     parser.add_argument("--max-tree-depth", type=int, default=12, help="NUTS max tree depth.")
-    parser.add_argument("--partition", default="day_amd", help="SLURM partition.")
-    parser.add_argument("--time", default="1:00:00", help="SLURM time limit.")
-    parser.add_argument("--mem", default="6G", help="SLURM memory request.")
+    parser.add_argument("--partition", default="day", help="SLURM partition.")
+    parser.add_argument("--time", default="2:00:00", help="SLURM time limit.")
+    parser.add_argument("--mem", default="12G", help="SLURM memory request.")
     parser.add_argument("--env", default="jaxcpu2", help="Conda environment to activate inside submitted jobs.")
     parser.add_argument(
         "--description",
@@ -265,6 +266,8 @@ def build_sbatch_script(
         "--disable_recovery_plot",
         "--fit_method",
         "svi+nuts",
+        "--svi_steps",
+        str(args.svi_steps),
         "--nwarm",
         str(args.nwarm),
         "--nsamp",
