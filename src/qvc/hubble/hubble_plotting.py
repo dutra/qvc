@@ -60,6 +60,9 @@ warnings.filterwarnings(
 )
 
 _FULL_RESIDUAL_YLIM = (-0.5, 0.5)
+_OUT_OF_RANGE_AGN_COLOR = "#354B5B"
+_OUT_OF_RANGE_AGN_MARKER_COLOR = mpl.colors.to_rgba(_OUT_OF_RANGE_AGN_COLOR, alpha=0.65)
+_OUT_OF_RANGE_AGN_ERROR_COLOR = mpl.colors.to_rgba(_OUT_OF_RANGE_AGN_COLOR, alpha=0.3)
 
 
 _SDSS_FILTER_EDGES_OBS = {
@@ -572,12 +575,8 @@ def _coerce_numeric_vector(values, n_rows, *, fill_value=np.nan):
     return arr
 
 
-def _build_blr_line_luminosity_maps(df, fallback_log_luminosity, log_luminosity_shift):
+def _build_blr_line_luminosity_maps(df, log_luminosity_shift):
     n_rows = len(df)
-    fallback_log_luminosity = _coerce_numeric_vector(
-        fallback_log_luminosity,
-        n_rows,
-    )
     log_luminosity_shift = _coerce_numeric_vector(
         log_luminosity_shift,
         n_rows,
@@ -599,8 +598,6 @@ def _build_blr_line_luminosity_maps(df, fallback_log_luminosity, log_luminosity_
         shifted_values = values.copy()
         valid = np.isfinite(shifted_values) & np.isfinite(log_luminosity_shift)
         shifted_values[valid] = shifted_values[valid] + log_luminosity_shift[valid]
-        use_fallback = ~np.isfinite(shifted_values)
-        shifted_values[use_fallback] = fallback_log_luminosity[use_fallback]
         luminosity_maps[line_name] = {
             "values": shifted_values,
             "errs": np.where(np.isfinite(errs) & (errs >= 0.0), errs, np.nan),
@@ -609,7 +606,7 @@ def _build_blr_line_luminosity_maps(df, fallback_log_luminosity, log_luminosity_
             "axis_label": spec["axis_label"],
         }
 
-    return fallback_log_luminosity, luminosity_maps
+    return luminosity_maps
 
 
 def _blr_line_assignment_longform(
@@ -622,11 +619,8 @@ def _blr_line_assignment_longform(
 ):
     rows = []
     continuum_ref_col = "log_sigma_uv"
-    logL2500_arr, luminosity_maps = _build_blr_line_luminosity_maps(
-        df,
-        logL2500_debiased,
-        log_luminosity_shift,
-    )
+    logL2500_arr = _coerce_numeric_vector(logL2500_debiased, len(df))
+    luminosity_maps = _build_blr_line_luminosity_maps(df, log_luminosity_shift)
     for suffix in ("", "2"):
         component = 1 if suffix == "" else 2
         for band in ("u", "g", "r", "i", "z"):
@@ -692,11 +686,11 @@ def _blr_line_assignment_longform(
                     assigned_prob = probs[assigned_line]
                 luminosity_spec = luminosity_maps.get(assigned_line)
                 if luminosity_spec is None:
-                    log_luminosity = logL2500_arr[i] if i < len(logL2500_arr) else np.nan
+                    log_luminosity = np.nan
                     log_luminosity_err = np.nan
-                    luminosity_col = "logL2500_debiased"
+                    luminosity_col = None
                     luminosity_err_col = None
-                    luminosity_axis_label = r"$\log L_{2500}$"
+                    luminosity_axis_label = None
                 else:
                     log_luminosity = luminosity_spec["values"][i]
                     log_luminosity_err = luminosity_spec["errs"][i]
@@ -5233,6 +5227,10 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     """
     import os
     import numpy as np
+
+    out_of_range_color = _OUT_OF_RANGE_AGN_COLOR
+    out_of_range_main_marker_color = _OUT_OF_RANGE_AGN_MARKER_COLOR
+    out_of_range_main_error_color = _OUT_OF_RANGE_AGN_ERROR_COLOR
     import matplotlib.pyplot as plt
     from mpl_toolkits.axes_grid1.inset_locator import inset_axes
     from astropy.cosmology import FlatLambdaCDM, FlatwCDM, Flatw0waCDM
@@ -5554,7 +5552,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     )
     inset_ax.scatter(
         df_agn["z"][mask_out], mu_pred_plot[mask_out],
-        s=12, marker='D', c="black", alpha=0.18,
+        s=12, marker='D', c=out_of_range_color, alpha=0.35,
         linewidths=0, zorder=0
     )
 
@@ -5569,8 +5567,8 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     # AGN (outside, filled diamond)
     inset_ax.errorbar(
         df_agn["z"][mask_out], mu_pred_plot[mask_out], yerr=display_residuals_err[mask_out],
-        fmt='D', linestyle='none', markersize=2, mfc="black", mec="none", alpha=0.70,
-        ecolor="#666666", elinewidth=0.8, zorder=1
+        fmt='D', linestyle='none', markersize=2, mfc=out_of_range_color, mec="none", alpha=0.85,
+        ecolor=out_of_range_color, elinewidth=0.8, zorder=1
     )
     if clipped_in is not None and np.any(clipped_in):
         inset_ax.scatter(
@@ -5664,7 +5662,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     )
     ax.scatter(
         df_agn["z"][mask_out], mu_pred_plot[mask_out],
-        s=14, marker='D', c="black", alpha=0.18,
+        s=14, marker='D', c=out_of_range_color, alpha=0.35,
         linewidths=0, zorder=-1
     )
     # AGN (inside)
@@ -5683,10 +5681,10 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     for i in np.where(mask_out)[0]:
         ax.errorbar(
             df_agn["z"].iloc[i], mu_pred_plot[i], yerr=display_residuals_err[i],
-            fmt='D', linestyle='none', markersize=3, mfc=(0, 0, 0, 0.4),
+            fmt='D', linestyle='none', markersize=3, mfc=out_of_range_main_marker_color,
             mec="none",
             capsize=2, capthick=0.8,
-            ecolor=(0.2, 0.2, 0.2, 0.1), elinewidth=0.8, zorder=0, label=None
+            ecolor=out_of_range_main_error_color, elinewidth=0.8, zorder=0, label=None
         )
     if clipped_in is not None and np.any(clipped_in):
         ax.scatter(
@@ -6970,22 +6968,31 @@ def plot_predicted_vs_actual_M2500(
         cats_bin = cats[bin_mask]
         colors_bin = np.where(cats_bin >= 0, palette[np.clip(cats_bin, 0, 4)], "#999999")  # gray for NaN
 
-        # plot errorbars
-        ax.errorbar(
-            x, y_plot, xerr=xerr_bin, yerr=yerr_plot_bin,
-            fmt="none", ecolor="#666666", elinewidth=0.7, alpha=0.4, zorder=2
-        )
-
-        # scatter with discrete colors: filled circles inside z-range, filled diamonds outside
+        # Filled circles are in range; out-of-range objects follow the Hubble
+        # diagram's dark blue-gray diamond styling.
         z_bin = z[bin_mask]
-        mask_closed = (z_bin > z_range[0]) & (z_bin < z_range[1])
-        mask_open   = ~mask_closed
+        mask_closed = (z_bin >= z_range[0]) & (z_bin <= z_range[1])
+        mask_open = ~mask_closed
         clipped_bin = clipped_mask[bin_mask] if clipped_mask is not None else None
 
-        # filled markers (keep black edges like before)
+        if np.any(mask_closed):
+            ax.errorbar(
+                x[mask_closed], y_plot[mask_closed],
+                xerr=xerr_bin[mask_closed], yerr=yerr_plot_bin[mask_closed],
+                fmt="none", ecolor="#666666", elinewidth=0.7, alpha=0.4, zorder=2,
+            )
+        if np.any(mask_open):
+            ax.errorbar(
+                x[mask_open], y_plot[mask_open],
+                xerr=xerr_bin[mask_open], yerr=yerr_plot_bin[mask_open],
+                fmt="none", ecolor=_OUT_OF_RANGE_AGN_ERROR_COLOR,
+                elinewidth=0.7, zorder=2,
+            )
+
+        # Filled markers. Green clipped markers are overlaid below.
         ax.scatter(
             x[mask_closed], y_plot[mask_closed],
-            facecolors="k", edgecolors='k', #c=colors_bin[mask_closed], 
+            facecolors="k", edgecolors='k', #c=colors_bin[mask_closed],
             s=20, alpha=1.0,
             linewidths=0.8, zorder=3,
         )
@@ -6993,9 +7000,9 @@ def plot_predicted_vs_actual_M2500(
         # filled diamonds outside z-range
         ax.scatter(
             x[mask_open], y_plot[mask_open],
-            facecolors="k", edgecolors='k', #edgecolors=colors_bin[mask_open],
+            facecolors=_OUT_OF_RANGE_AGN_MARKER_COLOR, edgecolors="none",
             marker="D",
-            s=20, alpha=1.0, linewidths=1, zorder=3,
+            s=20, linewidths=0, zorder=3,
         )
         if clipped_bin is not None and np.any(clipped_bin):
             clipped_closed = mask_closed & clipped_bin
@@ -8068,6 +8075,10 @@ def plot_predicted_L2500_vs_sigmahat(
 ):
     d = df_agn.copy()
     clipped_mask = _resolve_clipped_mask(d, clipped_mask)
+    out_of_range_color = "#354B5B"
+    out_of_range_marker_color = mpl.colors.to_rgba(out_of_range_color, alpha=0.4)
+    out_of_range_error_color = mpl.colors.to_rgba(out_of_range_color, alpha=0.1)
+    out_of_range_residual_error_color = mpl.colors.to_rgba(out_of_range_color, alpha=0.18)
 
     # --- Thinning for speed ---
     n_samples = int(flat_samples.shape[0])
@@ -8325,8 +8336,8 @@ def plot_predicted_L2500_vs_sigmahat(
     # outside redshift range: filled diamonds
     ax.errorbar(
         x_ref[mask_out], 10**actual_logL2500_plot[mask_out], xerr=xerr_asym[:, mask_out], yerr=yerr_linear_display[mask_out],
-        fmt='D', linestyle='none', markersize=3, mfc=(0,0,0,0.4), mec="none",
-        ecolor=(0.2, 0.2, 0.2, 0.1), elinewidth=0.8, capsize=2, capthick=0.8,
+        fmt='D', linestyle='none', markersize=3, mfc=out_of_range_marker_color, mec="none",
+        ecolor=out_of_range_error_color, elinewidth=0.8, capsize=2, capthick=0.8,
         zorder=1
     )
     if clipped_in is not None and np.any(clipped_in):
@@ -8671,9 +8682,9 @@ def plot_predicted_L2500_vs_sigmahat(
                 fmt='D',
                 linestyle='none',
                 markersize=2.8,
-                mfc=(0, 0, 0, 0.4),
+                mfc=out_of_range_marker_color,
                 mec="none",
-                ecolor=(0.2, 0.2, 0.2, 0.18),
+                ecolor=out_of_range_residual_error_color,
                 elinewidth=0.6,
                 capsize=0,
                 zorder=6,
