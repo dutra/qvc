@@ -6,14 +6,17 @@ filters has an Erlang impulse response with centroid ``lag`` and standard
 deviation ``lag / sqrt(order)``.
 """
 
+import math
 from functools import partial
 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+import numpy as np
 from jax.scipy.linalg import expm
 from tinygp import GaussianProcess
 from tinygp.kernels import quasisep as qs
+from tinygp.solvers.quasisep.core import DiagQSM, StrictLowerTriQSM, SymmQSM
 
 from qvc.light_curve.multiband_model_dho_blr import (
     ContiBLRRelativeFlux_SHO_Model,
@@ -79,7 +82,7 @@ class ErlangResponseDHOQS(qs.Quasisep):
         order = int(self.order)
         dtype = A0.dtype
         n_response = B * order
-        rates = order / _safe_pos(jnp.asarray(self.lag_blr, dtype=dtype))
+        rates = self._response_rates().astype(dtype)
         state_rates = jnp.repeat(rates, order)
 
         # Each response chain has -q on its diagonal and q directly below the
@@ -106,8 +109,65 @@ class ErlangResponseDHOQS(qs.Quasisep):
         zero_top_right = jnp.zeros((n0, n_response), dtype=dtype)
         return jnp.block([[A0, zero_top_right], [driver, response]])
 
+    def _band_state_indices(self):
+        """State indices grouped per band: (fast, slow, chain_1..chain_k)."""
+
+        B, n0, _n = self._dimensions()
+        k = int(self.order)
+        b = jnp.arange(B)
+        return jnp.concatenate(
+            [
+                b[:, None],
+                B + b[:, None],
+                n0 + b[:, None] * k + jnp.arange(k)[None, :],
+            ],
+            axis=1,
+        )
+
     def stationary_covariance(self):
-        """Solve the continuous Lyapunov equation for the augmented state."""
+        """Solve the continuous Lyapunov equation for the augmented state.
+
+        The design matrix has no dynamical coupling between bands, so the
+        Lyapunov equation splits into one small Sylvester equation per band
+        pair, ``A_b P_bb' + P_bb' A_b'^T = -Q_bb'``, instead of one dense
+        Kronecker system over the full augmented state.
+        """
+
+        base = self._base()
+        A = self.design_matrix()
+        P0 = base.stationary_covariance()
+        A0 = base.design_matrix()
+        Q0 = -(A0 @ P0 + P0 @ A0.T)
+        B, n0, n = self._dimensions()
+        k = int(self.order)
+        m = 2 + k
+
+        idx = self._band_state_indices()
+        A_blocks = A[idx[:, :, None], idx[:, None, :]]
+        b = jnp.arange(B)
+        driver_idx = jnp.stack([b, B + b], axis=1)
+        eye_m = jnp.eye(m, dtype=A.dtype)
+
+        def solve_pair(bi, bj):
+            # White noise only enters through the driver states, so Q_bb'
+            # is nonzero only in the leading 2x2 block.
+            Q_pair = jnp.zeros((m, m), dtype=A.dtype)
+            Q_pair = Q_pair.at[:2, :2].set(
+                Q0[driver_idx[bi][:, None], driver_idx[bj][None, :]]
+            )
+            # Row-major vec: vec(A_bi X + X A_bj^T) =
+            # (A_bi kron I + I kron A_bj) vec(X).
+            operator = jnp.kron(A_blocks[bi], eye_m) + jnp.kron(eye_m, A_blocks[bj])
+            return jnp.linalg.solve(operator, -Q_pair.reshape(-1)).reshape((m, m))
+
+        bi, bj = jnp.meshgrid(b, b, indexing="ij")
+        blocks = jax.vmap(solve_pair)(bi.ravel(), bj.ravel())
+        P = jnp.zeros((n, n), dtype=A.dtype)
+        P = P.at[idx[bi.ravel()][:, :, None], idx[bj.ravel()][:, None, :]].set(blocks)
+        return 0.5 * (P + P.T)
+
+    def _stationary_covariance_kron(self):
+        """Numerical oracle for stationary_covariance(), retained for tests."""
 
         base = self._base()
         A = self.design_matrix()
@@ -137,31 +197,178 @@ class ErlangResponseDHOQS(qs.Quasisep):
         h = h.at[response_idx].set(_safe_pos(jnp.asarray(self.amp_blr))[b])
         return h
 
+    def _response_rates(self):
+        return int(self.order) / _safe_pos(jnp.asarray(self.lag_blr, dtype=float))
+
+    def _driver_to_chain_columns(self, dt, lam, e_lam, q, eq, sign):
+        """Closed-form response of each chain state to a unit driver state.
+
+        A driver mode ``e^{-lam t}`` fed through ``j`` identical first-order
+        filters of rate ``q`` gives, with ``z = q - lam``,
+
+            x_j(dt) = (q / z)^j [e^{-lam dt} - e^{-q dt} S_{j-1}(z dt)]
+                    = e^{-q dt} (q dt)^j  sum_{p>=0} (z dt)^p / (p + j)!
+
+        where ``S_{j-1}`` is the exponential partial sum.  The first form
+        suffers catastrophic cancellation for small ``|z dt|`` (error grows
+        as ``(q/z)^j``), so it is only used for ``|z dt| > 1``; the second
+        converges quickly there and is exact at ``z = 0``.  Each branch sees
+        clamped inputs so the unselected branch stays finite under autodiff.
+        """
+
+        k = int(self.order)
+        j = np.arange(1, k + 1)
+        z = q - lam
+        zt = z * dt
+        use_series = jnp.abs(zt) <= 1.0
+
+        n_terms = 26
+        p = np.arange(n_terms)
+        inv_fact_pj = jnp.asarray(
+            [[1.0 / math.factorial(int(pi) + int(ji)) for pi in p] for ji in j]
+        )
+        zt_series = jnp.where(use_series, zt, 0.0)
+        zt_pows = jnp.power(zt_series[:, None], p)
+        series = (
+            eq[:, None]
+            * jnp.power(q[:, None] * dt, j)
+            * jnp.einsum("bp,jp->bj", zt_pows, inv_fact_pj)
+        )
+
+        z_safe = jnp.where(use_series, 1.0, z)
+        zt_safe = jnp.where(use_series, 1.0, zt)
+        m = np.arange(k)
+        inv_fact_m = jnp.asarray([1.0 / math.factorial(int(i)) for i in m])
+        partial_sums = jnp.cumsum(jnp.power(zt_safe[:, None], m) * inv_fact_m, axis=1)
+        difference = jnp.power((q / z_safe)[:, None], j) * (
+            e_lam[:, None] - eq[:, None] * partial_sums
+        )
+
+        return sign * jnp.where(use_series[:, None], series, difference)
+
     def transition_matrix(self, X1, X2):
+        """Analytic causal transition in tinygp's Quasisep convention.
+
+        The design matrix has no dynamical coupling between bands: each band
+        is an independent block of two continuum poles plus one Erlang chain,
+        so every block of the matrix exponential is available in closed form.
+
+        This returns the usual forward column-state transition ``F``.  The
+        base tinygp ``Quasisep`` conversion assumes a reversible process; this
+        class overrides that conversion below so the non-reversible causal
+        covariance is represented directly without an ill-conditioned
+        similarity transform.
+        """
+
         t1, _ = X1
         t2, _ = X2
-        # tinygp's Quasisep convention contracts ``Pinf @ transition`` on the
-        # right, so this is the transpose of the usual column-state transition.
-        return expm(self.design_matrix().T * (t2 - t1))
+        dt = t2 - t1
+        B, n0, n = self._dimensions()
+        k = int(self.order)
+        base = self._base()
+        tau_fast, tau_slow = base._ordered_taus()
+        lam_fast = 1.0 / tau_fast
+        lam_slow = 1.0 / tau_slow
+        obs_scale = base._obs_scale()
+        q = self._response_rates()
+
+        e_fast = jnp.exp(-lam_fast * dt)
+        e_slow = jnp.exp(-lam_slow * dt)
+        eq = jnp.exp(-q * dt)
+
+        # Chain-to-chain block: the exponential of a Jordan-like block is
+        # lower-triangular Toeplitz, e^{-q dt} (q dt)^d / d! on subdiagonal d.
+        d = np.subtract.outer(np.arange(k), np.arange(k))
+        inv_fact_d = jnp.asarray(
+            [[1.0 / math.factorial(int(v)) if v >= 0 else 0.0 for v in row] for row in d]
+        )
+        chain = (
+            eq[:, None, None]
+            * jnp.power(q[:, None, None] * dt, np.maximum(d, 0))
+            * inv_fact_d
+        )
+
+        col_fast = obs_scale[:, None] * self._driver_to_chain_columns(
+            dt, lam_fast, e_fast, q, eq, +1.0
+        )
+        col_slow = obs_scale[:, None] * self._driver_to_chain_columns(
+            dt, lam_slow, e_slow, q, eq, -1.0
+        )
+
+        # Assemble the standard column-state transition (rows = to-state).
+        b = jnp.arange(B)
+        chain_idx = n0 + b[:, None] * k + jnp.arange(k)[None, :]
+        phi = jnp.zeros((n, n), dtype=e_fast.dtype)
+        phi = phi.at[b, b].set(e_fast)
+        phi = phi.at[B + b, B + b].set(e_slow)
+        phi = phi.at[chain_idx[:, :, None], chain_idx[:, None, :]].set(chain)
+        phi = phi.at[chain_idx, b[:, None]].set(col_fast)
+        phi = phi.at[chain_idx, B + b[:, None]].set(col_slow)
+        return phi
+
+    def _transition_matrix_expm(self, X1, X2):
+        """Numerical oracle for transition_matrix(), retained for tests."""
+
+        t1, _ = X1
+        t2, _ = X2
+        return expm(self.design_matrix() * (t2 - t1))
+
+    def to_symm_qsm(self, X):
+        """Build the causal symmetric QSM without assuming reversibility."""
+
+        Pinf = self.stationary_covariance()
+        Xprev = jax.tree_util.tree_map(lambda y: jnp.append(y[0], y[:-1]), X)
+        a = jax.vmap(self.transition_matrix)(Xprev, X)
+        h = jax.vmap(self.observation_model)(X)
+        d = jnp.einsum("ni,ij,nj->n", h, Pinf, h)
+        # For i > j: K_ij = h_i F_i ... F_{j+1} Pinf h_j.
+        p = jax.vmap(lambda hi, Fi: hi @ Fi)(h, a)
+        q = h @ Pinf.T
+        return SymmQSM(
+            diag=DiagQSM(d=d),
+            lower=StrictLowerTriQSM(p=p, q=q, a=a),
+        )
+
+    def evaluate(self, X1, X2):
+        """Evaluate the causal covariance for arbitrary coordinate pairs."""
+
+        Pinf = self.stationary_covariance()
+        h1 = self.observation_model(X1)
+        h2 = self.observation_model(X2)
+        return jnp.where(
+            self.coord_to_sortable(X1) < self.coord_to_sortable(X2),
+            h2 @ self.transition_matrix(X1, X2) @ Pinf @ h1,
+            h1 @ self.transition_matrix(X2, X1) @ Pinf @ h2,
+        )
+
+    def matmul(self, X1, X2=None, y=None):
+        """Use the fast QSM for training and a dense causal cross-covariance."""
+
+        if y is None:
+            if X2 is None:
+                raise ValueError("Missing right-hand side for kernel matmul")
+            y = X2
+            X2 = None
+        if X2 is None:
+            return self.to_symm_qsm(X1) @ y
+        covariance = jax.vmap(
+            lambda x1: jax.vmap(lambda x2: self.evaluate(x1, x2))(X2)
+        )(X1)
+        return covariance @ y
 
 
 class ContiBLRErlangRelativeFluxModel(ContiBLRRelativeFlux_SHO_Model):
     """Relative-flux model that constructs the augmented Erlang kernel."""
 
     erlang_order: int
+    use_fast_solver: bool
 
-    def __init__(self, *args, erlang_order=DEFAULT_ERLANG_ORDER, **kwargs):
+    def __init__(self, *args, erlang_order=DEFAULT_ERLANG_ORDER, use_fast_solver=False, **kwargs):
         super().__init__(*args, **kwargs)
         self.erlang_order = int(erlang_order)
+        self.use_fast_solver = bool(use_fast_solver)
 
-    def _build_gp(self, params):
-        means = partial(self.get_mean, self.zero_mean, params)
-        X, inds = self.lag_transform(False, params, self.X)
-        t, band = X
-        diags = self.diag
-        if self.has_jitter:
-            diags = diags + self._jitter_diag(params, band)
-
+    def _build_kernel(self, params):
         tau_fast = jnp.asarray(params["tau_fast_band"])
         tau_slow = jnp.asarray(params["tau_slow_band"])
         amp_cont = jnp.asarray(
@@ -170,7 +377,7 @@ class ContiBLRErlangRelativeFluxModel(ContiBLRRelativeFlux_SHO_Model):
         amp_blr = jnp.asarray(
             params["amp_blr_relflux"] if "amp_blr_relflux" in params else params["amp_blr"]
         )
-        kernel = ErlangResponseDHOQS(
+        return ErlangResponseDHOQS(
             tau_fast=tau_fast,
             tau_slow=tau_slow,
             lag_blr=jnp.asarray(params["lag_blr"]),
@@ -178,15 +385,47 @@ class ContiBLRErlangRelativeFluxModel(ContiBLRRelativeFlux_SHO_Model):
             amp_blr=amp_blr,
             order=self.erlang_order,
         )
+
+    def _likelihood_inputs(self, params):
+        means = partial(self.get_mean, self.zero_mean, params)
+        X, inds = self.lag_transform(False, params, self.X)
+        t, band = X
+        diags = self.diag
+        if self.has_jitter:
+            diags = diags + self._jitter_diag(params, band)
+        return means, (t[inds], band[inds]), diags[inds], inds
+
+    def _build_gp(self, params):
+        means, Xs, diags, inds = self._likelihood_inputs(params)
         return (
             GaussianProcess(
-                kernel,
-                (t[inds], band[inds]),
-                diag=diags[inds],
+                self._build_kernel(params),
+                Xs,
+                diag=diags,
                 mean=means,
                 assume_sorted=True,
             ),
             inds,
+        )
+
+    @eqx.filter_jit
+    def log_prob(self, params):
+        """GP log-likelihood; optionally via the fused single-scan solver.
+
+        The fast path computes exactly the same value and gradients as the
+        tinygp solver (see ``qvc.light_curve.fast_quasisep`` and
+        ``tests/test_fast_quasisep.py``) with a hand-written adjoint and an
+        exact identity branch for simultaneous multiband epochs.
+        """
+        if not self.use_fast_solver:
+            return super().log_prob(params)
+        from qvc.light_curve.fast_quasisep import fused_log_probability
+
+        means, Xs, diags, inds = self._likelihood_inputs(params)
+        mean_vec = jax.vmap(means)(Xs)
+        resid = self._observed_y_sorted(params, inds) - mean_vec
+        return fused_log_probability(
+            self._build_kernel(params), Xs, diags, resid, sort_time=Xs[0]
         )
 
 
@@ -201,6 +440,7 @@ def make_multiband_dho_blr_flux_linearized_erlang_model(
     zero_mean=False,
     has_jitter=True,
     erlang_order=DEFAULT_ERLANG_ORDER,
+    use_fast_solver=False,
 ):
     """Construct the relative-flux DHO plus causal Erlang BLR model."""
 
@@ -223,6 +463,7 @@ def make_multiband_dho_blr_flux_linearized_erlang_model(
         has_jitter=has_jitter,
         has_lag=False,
         erlang_order=erlang_order,
+        use_fast_solver=use_fast_solver,
     )
 
 

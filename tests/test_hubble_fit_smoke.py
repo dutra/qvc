@@ -819,6 +819,80 @@ def test_plot_hubble_debiased_returns_clipping_sigma_and_writes_distinct_diagnos
     )
 
 
+def test_plot_predicted_vs_actual_m2500_marks_out_of_range_objects(monkeypatch, tmp_path):
+    from matplotlib.axes import Axes
+    import matplotlib.pyplot as plt
+
+    df_agn = _make_fake_agn_sample(n_agn=3).copy()
+    # The lower boundary is in range; the other objects are out of range, with
+    # the final one clipped.
+    df_agn["z"] = [0.44, 3.20, 3.25]
+    priors, model_labels, _ = hubble_model.get_model_params("FlatLambdaCDM", only_sna=False)
+    theta = np.array([(priors[key][0] + priors[key][1]) / 2.0 for key in model_labels], dtype=float)
+    flat_samples = np.tile(theta[None, :], (4, 1))
+
+    scatter_calls = []
+    errorbar_calls = []
+    captured = {}
+    original_scatter = Axes.scatter
+    original_errorbar = Axes.errorbar
+
+    def capture_scatter(self, *args, **kwargs):
+        scatter_calls.append(kwargs.copy())
+        return original_scatter(self, *args, **kwargs)
+
+    def capture_errorbar(self, *args, **kwargs):
+        errorbar_calls.append(kwargs.copy())
+        return original_errorbar(self, *args, **kwargs)
+
+    monkeypatch.setattr(Axes, "scatter", capture_scatter)
+    monkeypatch.setattr(Axes, "errorbar", capture_errorbar)
+    monkeypatch.setattr(
+        hubble_plotting,
+        "_save_figure",
+        lambda fig, *args, **kwargs: captured.setdefault("fig", fig),
+    )
+
+    hubble_plotting.plot_predicted_vs_actual_M2500(
+        flat_samples,
+        df_agn,
+        "FlatLambdaCDM",
+        z_pivot_agn=hubble_fit.z_pivot_agn,
+        plot_path=str(tmp_path),
+        show=False,
+        z_range=(0.44, 3.16),
+        clipped_mask=np.array([False, False, True]),
+        completeness=False,
+        show_sigma_band=False,
+        show_cosmo_uncertainty_band=False,
+    )
+
+    assert any(
+        call.get("marker") == "D"
+        and np.allclose(
+            hubble_plotting.mpl.colors.to_rgba(call["facecolors"]),
+            hubble_plotting._OUT_OF_RANGE_AGN_MARKER_COLOR,
+        )
+        for call in scatter_calls
+    )
+    assert any(
+        call.get("marker") == "D" and call.get("facecolors") == "tab:green"
+        for call in scatter_calls
+    )
+    assert any(
+        call.get("facecolors") == "k" and call.get("marker") is None
+        for call in scatter_calls
+    )
+    assert any(
+        np.allclose(
+            hubble_plotting.mpl.colors.to_rgba(call["ecolor"]),
+            hubble_plotting._OUT_OF_RANGE_AGN_ERROR_COLOR,
+        )
+        for call in errorbar_calls
+    )
+    plt.close(captured["fig"])
+
+
 def test_plot_hubble_residual_chi2_annotation_includes_high_z(monkeypatch, tmp_path):
     from matplotlib.axes import Axes
 

@@ -10,7 +10,6 @@ import traceback
 from functools import lru_cache
 
 import numpy as np
-from numpy.lib.stride_tricks import sliding_window_view
 from scipy.optimize import curve_fit, least_squares
 from scipy.special import gammaln
 from scipy.stats import kurtosis, median_abs_deviation, normaltest, skew
@@ -104,7 +103,7 @@ BALMER_EDGE_ATTENUATION_WIDTH = 250.0
 ETA_SIGMA_LOW = -5.0
 LAG0_HIGH = 100.0
 LAG_BETA_HIGH = 5.0
-LOG_LAG_BLR_LOW = np.log(10.0)
+LOG_LAG_BLR_LOW = np.log(0.1)
 LOG_LAG_BLR_HIGH = np.log(1e3)
 LOG_LAG_RATIO_BC_TO_BLR_LOW = np.log(0.1)
 LOG_LAG_RATIO_BC_TO_BLR_HIGH = np.log(0.3)
@@ -842,6 +841,176 @@ def compute_multiband_residual_normality_diagnostics(
     out["resid_normality_min_pvalue"] = float(np.min(pvalues)) if pvalues else np.nan
     out["resid_normality_any_pvalue_lt_0p05"] = bool(np.any(np.asarray(pvalues) < 0.05)) if pvalues else False
     return out
+
+
+LOO_RESIDUAL_RF_BIN_EDGES = (0.0, 10.0, 30.0, 100.0, 300.0)
+
+
+def _format_rest_frame_bin_edge(value):
+    value = float(value)
+    return str(int(value)) if value.is_integer() else str(value).replace(".", "p")
+
+
+def binned_loo_residual_pair_correlation(
+    times_rf,
+    band_idx,
+    standardized_residuals,
+    *,
+    bin_edges=LOO_RESIDUAL_RF_BIN_EDGES,
+    bands=None,
+):
+    """Summarize within-band LOO residual products in rest-frame lag bins."""
+
+    times_rf = np.asarray(times_rf, dtype=float).ravel()
+    band_idx = np.asarray(band_idx, dtype=np.int32).ravel()
+    residuals = np.asarray(standardized_residuals, dtype=float).ravel()
+    if not (times_rf.shape == band_idx.shape == residuals.shape):
+        raise ValueError("times_rf, band_idx, and standardized_residuals must match")
+    edges = np.asarray(bin_edges, dtype=float)
+    if edges.ndim != 1 or edges.size < 2 or np.any(np.diff(edges) <= 0.0):
+        raise ValueError("bin_edges must be a strictly increasing 1D sequence")
+
+    finite = np.isfinite(times_rf) & np.isfinite(residuals)
+    times_rf = times_rf[finite]
+    band_idx = band_idx[finite]
+    residuals = residuals[finite]
+    if bands is None:
+        band_values = np.unique(band_idx)
+        band_names = [str(int(value)) for value in band_values]
+    else:
+        band_names = [str(band) for band in bands]
+        band_values = np.arange(len(band_names), dtype=np.int32)
+
+    out = {}
+    for edge_index, (low, high) in enumerate(zip(edges[:-1], edges[1:])):
+        suffix = (
+            f"{_format_rest_frame_bin_edge(low)}_"
+            f"{_format_rest_frame_bin_edge(high)}d"
+        )
+        all_products = []
+        products_by_band = {}
+        for band_value, band_name in zip(band_values, band_names):
+            mask = band_idx == band_value
+            t_band = times_rf[mask]
+            r_band = residuals[mask]
+            if t_band.size < 2:
+                products = np.array([], dtype=float)
+            else:
+                dt = np.abs(t_band[:, None] - t_band[None, :])
+                products_matrix = r_band[:, None] * r_band[None, :]
+                upper = np.triu(np.ones(dt.shape, dtype=bool), k=1)
+                in_bin = upper & (dt >= low) & (
+                    dt <= high if edge_index == len(edges) - 2 else dt < high
+                )
+                products = np.asarray(products_matrix[in_bin], dtype=float)
+                products = products[np.isfinite(products)]
+            products_by_band[band_name] = products
+            if products.size:
+                all_products.append(products)
+
+        combined = (
+            np.concatenate(all_products) if all_products else np.array([], dtype=float)
+        )
+        for label, products in [(None, combined), *products_by_band.items()]:
+            key_suffix = suffix if label is None else f"{suffix}_{label}"
+            count = int(products.size)
+            mean = float(np.mean(products)) if count else np.nan
+            stderr = (
+                float(np.std(products, ddof=1) / np.sqrt(count))
+                if count > 1
+                else np.nan
+            )
+            zscore = mean / stderr if np.isfinite(stderr) and stderr > 0.0 else np.nan
+            out[f"loo_resid_pair_count_rf_{key_suffix}"] = count
+            out[f"loo_resid_corr_rf_{key_suffix}"] = mean
+            out[f"loo_resid_corr_stderr_rf_{key_suffix}"] = stderr
+            out[f"loo_resid_corr_z_rf_{key_suffix}"] = zscore
+    return out
+
+
+def compute_loo_short_lag_residual_diagnostics(
+    model,
+    samples,
+    obj,
+    bands,
+    *,
+    bin_edges=LOO_RESIDUAL_RF_BIN_EDGES,
+):
+    """Compute exact Gaussian LOO standardized-residual correlations."""
+
+    oid = obj.get("object_id", "<unknown>")
+    try:
+        params = tree_map(jnp.asarray, _posterior_median_params(samples))
+        gp, inds = model._build_gp(params)
+        y_sorted = np.asarray(model._observed_y_sorted(params, inds), dtype=float)
+        mean_sorted = np.asarray(gp.loc, dtype=float)
+        covariance = np.asarray(gp.covariance, dtype=float)
+        covariance = 0.5 * (covariance + covariance.T)
+        scale = max(float(np.nanmedian(np.diag(covariance))), 1.0)
+        covariance = covariance + np.eye(covariance.shape[0]) * (1e-10 * scale)
+        chol = np.linalg.cholesky(covariance)
+        centered = y_sorted - mean_sorted
+        alpha = np.linalg.solve(chol.T, np.linalg.solve(chol, centered))
+        precision = np.linalg.solve(chol.T, np.linalg.solve(chol, np.eye(chol.shape[0])))
+        precision_diag = np.diag(precision)
+        loo_standardized = alpha / np.sqrt(np.maximum(precision_diag, 1e-300))
+        finite_loo = np.isfinite(loo_standardized)
+        loo_standardized_finite = loo_standardized[finite_loo]
+        if not loo_standardized_finite.size:
+            raise ValueError("No finite LOO standardized residuals.")
+        loo_chi2_eff = float(np.mean(np.square(loo_standardized_finite)))
+        times_sorted = np.asarray(gp.X[0], dtype=float)
+        bands_sorted = np.asarray(gp.X[1], dtype=np.int32)
+        times_rf = times_sorted / (1.0 + float(obj.get("z", 0.0)))
+        result = binned_loo_residual_pair_correlation(
+            times_rf,
+            bands_sorted,
+            loo_standardized,
+            bin_edges=bin_edges,
+            bands=bands,
+        )
+        result["loo_resid_valid"] = True
+        result["loo_resid_nobs"] = int(loo_standardized_finite.size)
+        result["loo_chi2_eff"] = loo_chi2_eff
+        result["loo_rms"] = float(np.sqrt(loo_chi2_eff)) if np.isfinite(loo_chi2_eff) else np.nan
+    except Exception as exc:
+        logging.warning("[%s] LOO residual diagnostic failed: %s", oid, exc)
+        result = {
+            "loo_resid_valid": False,
+            "loo_resid_nobs": 0,
+            "loo_chi2_eff": np.nan,
+            "loo_rms": np.nan,
+            "loo_resid_error": str(exc),
+        }
+
+    if not result["loo_resid_valid"]:
+        print(
+            f"[{oid}] LOO standardized-residual diagnostic unavailable: "
+            f"{result.get('loo_resid_error', 'unknown error')}"
+        )
+        return result
+
+    print(
+        f"[{oid}] LOO standardized-residual summary: "
+        f"chi2_eff={result['loo_chi2_eff']:.4f}, "
+        f"rms={result['loo_rms']:.4f}, "
+        f"nobs={result['loo_resid_nobs']}"
+    )
+    print(f"[{oid}] LOO standardized-residual correlation (rest-frame bins):")
+    edges = np.asarray(bin_edges, dtype=float)
+    for low, high in zip(edges[:-1], edges[1:]):
+        suffix = (
+            f"{_format_rest_frame_bin_edge(low)}_"
+            f"{_format_rest_frame_bin_edge(high)}d"
+        )
+        print(
+            f"  {low:g}–{high:g} d: "
+            f"corr={result.get(f'loo_resid_corr_rf_{suffix}', np.nan):+.4f}, "
+            f"SE={result.get(f'loo_resid_corr_stderr_rf_{suffix}', np.nan):.4f}, "
+            f"z={result.get(f'loo_resid_corr_z_rf_{suffix}', np.nan):+.2f}, "
+            f"pairs={result.get(f'loo_resid_pair_count_rf_{suffix}', 0)}"
+        )
+    return result
 
 
 def extract_band_detrended_series(flat_samples, obj, bands, band, *, z=None, subtract_mean=True):
@@ -2529,9 +2698,19 @@ def log_lag_blr_prior(z=0.0):
 
 
 def relative_log_lag_blr_prior(*, z=0.0, log_lag0=0.0):
-    return dist.TransformedDistribution(
-        log_lag_blr_prior(z=z),
-        dist.transforms.AffineTransform(loc=log_lag0, scale=1.0).inv,
+    # Shifting a TruncatedNormal with an inverse AffineTransform causes
+    # NumPyro to report unconstrained Real support for the transformed
+    # distribution.  Since TruncatedNormal.log_prob does not itself mask
+    # values outside its support, NUTS can then explore lags beyond the
+    # intended bounds.  Shift all parameters explicitly so the interval
+    # support is retained by the sampler.
+    prior = log_lag_blr_prior(z=z)
+    log_lag0 = jnp.asarray(log_lag0, dtype=float)
+    return dist.TruncatedNormal(
+        loc=prior.base_dist.loc - log_lag0,
+        scale=prior.base_dist.scale,
+        low=prior.low - log_lag0,
+        high=prior.high - log_lag0,
     )
 
 
@@ -3014,6 +3193,61 @@ def compute_parameter_kls(
     return kls
 
 
+def rolling_photometric_outlier_mask(
+    times,
+    mags,
+    magerrs,
+    *,
+    half_window_days=30.0,
+    min_neighbors=8,
+    threshold=3.0,
+):
+    """Flag conservative local outliers in a center-excluded time window.
+
+    The window uses observer-frame days. Points near temporal edges and gaps are
+    only tested when at least ``min_neighbors`` other measurements fall within
+    the truncated time window.
+    """
+
+    times = np.asarray(times, dtype=float)
+    mags = np.asarray(mags, dtype=float)
+    magerrs = np.asarray(magerrs, dtype=float)
+    if not (times.shape == mags.shape == magerrs.shape):
+        raise ValueError("times, mags, and magerrs must have matching shapes")
+    if half_window_days <= 0.0:
+        raise ValueError("half_window_days must be positive")
+    if min_neighbors < 1:
+        raise ValueError("min_neighbors must be at least 1")
+    if threshold <= 0.0:
+        raise ValueError("threshold must be positive")
+
+    rejected = np.zeros(mags.shape, dtype=bool)
+    n_points = mags.size
+    for i in range(n_points):
+        neighbor_idx = np.flatnonzero(
+            (np.arange(n_points) != i)
+            & np.isfinite(times)
+            & (np.abs(times - times[i]) <= float(half_window_days))
+        )
+        finite_neighbors = (
+            np.isfinite(mags[neighbor_idx]) & np.isfinite(magerrs[neighbor_idx])
+        )
+        neighbor_idx = neighbor_idx[finite_neighbors]
+        if neighbor_idx.size < int(min_neighbors):
+            continue
+        if not (np.isfinite(mags[i]) and np.isfinite(magerrs[i]) and magerrs[i] >= 0.0):
+            continue
+
+        local = mags[neighbor_idx]
+        local_median = float(np.median(local))
+        local_sigma = 1.4826 * float(median_abs_deviation(local))
+        total_sigma = np.hypot(magerrs[i], local_sigma)
+        if total_sigma > 0.0:
+            rejected[i] = abs(mags[i] - local_median) > threshold * total_sigma
+
+    return rejected
+
+
 def make_lc(
     data,
     bands,
@@ -3144,20 +3378,22 @@ def make_lc(
         print(f"No finite values for {data['object_id']}, skipping.", flush=True)
         return None
 
-    window_size = 6
     keep = np.ones(len(all_times), dtype=bool)
     for b in np.unique(band_idx):
         mask = band_idx == b
+        t_b = all_times[mask]
         yb = all_mags[mask]
+        yerr_b = all_magerrs[mask]
         idx_b = np.where(mask)[0]
-        if len(yb) < 2 * window_size + 1:
-            continue
-        windows = sliding_window_view(yb, 2 * window_size + 1)
-        centers = yb[window_size:-window_size]
-        medians = np.nanmean(windows, axis=1)
-        mads = median_abs_deviation(windows, axis=1, nan_policy="omit")
-        is_out = np.abs(centers - medians) > 2.5 * mads
-        keep[idx_b[window_size:-window_size][is_out]] = False
+        is_out = rolling_photometric_outlier_mask(
+            t_b,
+            yb,
+            yerr_b,
+            half_window_days=30.0,
+            min_neighbors=8,
+            threshold=3.0,
+        )
+        keep[idx_b[is_out]] = False
 
     all_times, all_mags, all_magerrs, all_surveys, band_idx = (
         all_times[keep],
@@ -3930,6 +4166,7 @@ def build_single_object_model_mag_flux_linearized(
     use_erlang=False,
     shared_blr_lag=False,
     erlang_order=DEFAULT_ERLANG_ORDER,
+    use_fast_solver=False,
     blr_lag_band_scatter=None,
 ):
     """Return the relative-flux quasi-separable model for one object."""
@@ -4134,7 +4371,11 @@ def build_single_object_model_mag_flux_linearized(
             baseline_flux_by_band=baseline_flux_by_band,
             zero_mean=zero_mean,
             has_jitter=has_jitter,
-            **({"erlang_order": erlang_order} if use_erlang_response else {}),
+            **(
+                {"erlang_order": erlang_order, "use_fast_solver": use_fast_solver}
+                if use_erlang_response
+                else {}
+            ),
         )
         numpyro.factor("loglike", m.log_prob(params))
 
@@ -4630,6 +4871,7 @@ def run_iterated_mag_flux_linearized_inference(
     model_variant="mag_flux_linearized",
     shared_blr_lag=False,
     erlang_order=DEFAULT_ERLANG_ORDER,
+    use_fast_solver=False,
     blr_lag_band_scatter=None,
 ):
     """Iteratively refit the relative-flux QS model using local magnitude-likelihood pseudo-data."""
@@ -4659,6 +4901,7 @@ def run_iterated_mag_flux_linearized_inference(
         use_erlang=(model_variant == "mag_flux_linearized_erlang"),
         shared_blr_lag=shared_blr_lag,
         erlang_order=erlang_order,
+        use_fast_solver=use_fast_solver,
         blr_lag_band_scatter=blr_lag_band_scatter,
     )
 
@@ -5187,8 +5430,8 @@ def main():
     parser.add_argument(
         "--target_accept",
         type=float,
-        default=0.9,
-        help="Target NUTS acceptance probability (default: 0.9).",
+        default=0.7,
+        help="Target NUTS acceptance probability (default: 0.7).",
     )
     parser.add_argument(
         "--dense_mass",
@@ -5315,6 +5558,15 @@ def main():
         help=f"Positive Erlang BLR response order for --model_variant mag_flux_linearized_erlang (default: {DEFAULT_ERLANG_ORDER}).",
     )
     parser.add_argument(
+        "--fast_solver",
+        action="store_true",
+        default=False,
+        help=(
+            "Use the fused single-scan quasisep likelihood with a custom adjoint "
+            "(exact; --model_variant mag_flux_linearized_erlang only)."
+        ),
+    )
+    parser.add_argument(
         "--model_variant",
         choices=("mag_linear", "mag_flux_linearized", "mag_flux_linearized_erlang", "mag_fluxmix_fast"),
         default="mag_linear",
@@ -5418,6 +5670,8 @@ def main():
         raise ValueError("--target_accept must be strictly between 0 and 1.")
     if args.erlang_order != DEFAULT_ERLANG_ORDER and args.model_variant != "mag_flux_linearized_erlang":
         raise ValueError("--erlang_order is only used by --model_variant mag_flux_linearized_erlang.")
+    if args.fast_solver and args.model_variant != "mag_flux_linearized_erlang":
+        raise ValueError("--fast_solver is only used by --model_variant mag_flux_linearized_erlang.")
     if args.fit_method == "ns":
         if NestedSampler is None:
             raise ImportError(
@@ -5636,6 +5890,7 @@ def main():
                         model_variant=args.model_variant,
                         shared_blr_lag=args.shared_blr_lag,
                         erlang_order=args.erlang_order,
+                        use_fast_solver=args.fast_solver,
                         blr_lag_band_scatter=args.blr_lag_band_scatter,
                     )
                 elif args.fit_method in ("nuts", "svi+nuts"):
@@ -5726,9 +5981,6 @@ def main():
                     samples_per_chain = tree_map(lambda x: np.asarray(device_get(x)), samples_per_chain)
                     obj_flat_samples = samples_flat
 
-                if args.save_sample_file:
-                    save_obj_samples_to_hdf5(obj_flat_samples, oid)
-
             print_light_curve_posterior_summary(
                 oid,
                 samples_per_chain=samples_per_chain,
@@ -5806,6 +6058,22 @@ def main():
                     has_jitter=has_jitter,
                 )
             plot_samples = obj_flat_samples
+
+            loo_residual_result = compute_loo_short_lag_residual_diagnostics(
+                m,
+                plot_samples,
+                obj,
+                bands,
+            )
+            if args.save_sample_file:
+                save_obj_samples_to_hdf5(
+                    obj_flat_samples,
+                    oid,
+                    scalar_diagnostics={
+                        "loo_chi2_eff": loo_residual_result["loo_chi2_eff"],
+                        "loo_rms": loo_residual_result["loo_rms"],
+                    },
+                )
 
             result = process_samples(
                 obj_flat_samples_flatten_per_band,
@@ -5943,7 +6211,7 @@ def main():
                     logging.error(f"[{oid}] Plotting error: {e}")
                     logging.error(traceback.format_exc())
 
-            final_result = obj | result | adf_result | drift_result | raw_drift_result | psd_break_result | sf_result | kl_result | diagnostics | dict(prefix=prefix, suffix=suffix, model_variant=args.model_variant) 
+            final_result = obj | result | adf_result | drift_result | raw_drift_result | psd_break_result | sf_result | kl_result | loo_residual_result | diagnostics | dict(prefix=prefix, suffix=suffix, model_variant=args.model_variant)
             log_sigma_uv = final_result.get("log_sigma_uv")
             log_sigma_uv_err = final_result.get("log_sigma_uv_err")
             log_tau_uv_rf = final_result.get("log_tau_uv_rf")

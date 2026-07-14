@@ -17,6 +17,7 @@ dependencies = [
     "jax==0.6.2",
     "jaxlib==0.6.2",
     "jaxopt",
+    "equinox==0.12.2",
     #"jaxqsofit @ git+https://github.com/burke86/jaxqsofit.git",
     #"EzTaoX==0.2.0",
     "matplotlib==3.10.0",

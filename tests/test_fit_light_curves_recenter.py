@@ -3,8 +3,11 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import h5py
+import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -33,6 +36,8 @@ from qvc.light_curve.fit_light_curves import (
     TAU_FAST_TO_SLOW_PRIOR_RATIO,
     log_tau_fast_center0_prior,
     log_tau_fast_separation_raw_prior,
+    log_lag_blr_prior,
+    relative_log_lag_blr_prior,
     ordered_log_tau_fast,
     linear_trend_prior,
     compute_parameter_kls,
@@ -43,12 +48,18 @@ from qvc.light_curve.fit_light_curves import (
     apply_resume_sample_save_policy,
     make_lc,
     posterior_median_mean_function,
+    binned_loo_residual_pair_correlation,
+    compute_loo_short_lag_residual_diagnostics,
+)
+from qvc.light_curve.multiband_model_dho_blr_erlang import (
+    make_multiband_dho_blr_flux_linearized_erlang_model,
 )
 from qvc.light_curve.multiband_fit_plotting import (
     _corner_plot_labels,
     _trace_plot_labels,
     relative_to_2500_amplitude_scale,
 )
+from qvc.light_curve import multiband_fit_utils
 from qvc.light_curve.multiband_fit_utils import lambda_pivot, log_single_pl, process_samples
 
 
@@ -90,6 +101,136 @@ def test_compute_lambda_center_rf_matches_geometric_mean():
     expected = float(np.exp(np.mean(np.log(np.asarray(lam_rf)))))
     got = float(compute_lambda_center_rf(lam_rf))
     assert np.isclose(got, expected)
+
+
+def test_relative_log_lag_blr_prior_retains_shifted_interval_support():
+    z = 1.3
+    log_lag0 = np.log(7.0)
+    absolute = log_lag_blr_prior(z=z)
+    relative = relative_log_lag_blr_prior(z=z, log_lag0=log_lag0)
+
+    assert np.isclose(
+        float(relative.support.lower_bound),
+        float(absolute.support.lower_bound) - log_lag0,
+    )
+    assert np.isclose(
+        float(relative.support.upper_bound),
+        float(absolute.support.upper_bound) - log_lag0,
+    )
+    assert np.isclose(
+        float(relative.base_dist.loc),
+        float(absolute.base_dist.loc) - log_lag0,
+    )
+    assert np.isclose(
+        float(relative.base_dist.scale),
+        float(absolute.base_dist.scale),
+    )
+
+
+def test_relative_log_lag_blr_prior_bounds_reconstruct_absolute_lag_bounds():
+    z = 0.8
+    log_lag0 = np.log(12.0)
+    relative = relative_log_lag_blr_prior(z=z, log_lag0=log_lag0)
+
+    reconstructed_low = np.exp(float(relative.support.lower_bound) + log_lag0)
+    reconstructed_high = np.exp(float(relative.support.upper_bound) + log_lag0)
+    assert np.isclose(reconstructed_low, 0.1 * (1.0 + z))
+    assert np.isclose(reconstructed_high, 1000.0 * (1.0 + z))
+
+
+def test_binned_loo_residual_pair_correlation_uses_within_band_rest_frame_pairs():
+    times_rf = np.array([0.0, 5.0, 20.0, 0.0, 8.0, 40.0])
+    band_idx = np.array([0, 0, 0, 1, 1, 1])
+    residuals = np.array([1.0, 2.0, -1.0, -1.0, -2.0, 3.0])
+
+    result = binned_loo_residual_pair_correlation(
+        times_rf,
+        band_idx,
+        residuals,
+        bin_edges=(0.0, 10.0, 30.0, 100.0),
+        bands=("g", "r"),
+    )
+
+    # The 0--10 day pairs are (g0,g1) and (r0,r1), both with product +2.
+    assert result["loo_resid_pair_count_rf_0_10d"] == 2
+    assert np.isclose(result["loo_resid_corr_rf_0_10d"], 2.0)
+    assert result["loo_resid_pair_count_rf_0_10d_g"] == 1
+    assert result["loo_resid_pair_count_rf_0_10d_r"] == 1
+    # Cross-band pairs at identical times must never enter the statistic.
+    assert result["loo_resid_pair_count_rf_10_30d"] == 2
+
+
+def test_loo_residual_diagnostic_accepts_numpy_posterior_samples_for_erlang_model():
+    times = np.array([0.0, 2.0, 8.0, 20.0, 0.5, 4.0, 12.0, 25.0])
+    band_idx = np.array([0, 0, 0, 0, 1, 1, 1, 1], dtype=np.int32)
+    order = np.argsort(times + 1e-9 * band_idx)
+    times, band_idx = times[order], band_idx[order]
+    y = 0.03 * np.sin(times / 15.0)
+    yerr = np.full(times.size, 0.02)
+    model = make_multiband_dho_blr_flux_linearized_erlang_model(
+        (jnp.asarray(times), jnp.asarray(band_idx)),
+        jnp.asarray(y),
+        jnp.asarray(yerr),
+        n_band=2,
+        survey_idx=jnp.zeros(times.size, dtype=jnp.int32),
+        erlang_order=3,
+    )
+    median = {
+        "tau_fast_band": np.array([10.0, 10.0]),
+        "tau_slow_band": np.array([300.0, 300.0]),
+        "amp_cont_relflux": np.array([0.15, 0.15]),
+        "amp_blr_relflux": np.array([0.03, 0.03]),
+        "lag_blr": np.array([50.0, 60.0]),
+        "mean": np.zeros(2),
+        "linear_trend": np.array(0.0),
+        "log_jitter": np.log(np.full((2, 3), 0.01)),
+        "survey_delta_mag": np.zeros((2, 3)),
+    }
+    samples = {key: np.stack([value, value]) for key, value in median.items()}
+
+    result = compute_loo_short_lag_residual_diagnostics(
+        model,
+        samples,
+        {"object_id": "mock", "z": 1.0, "X": (times, band_idx)},
+        ["g", "r"],
+    )
+
+    assert result["loo_resid_valid"]
+    assert result["loo_resid_nobs"] == times.size
+    assert result["loo_resid_pair_count_rf_0_10d"] > 0
+    assert np.isfinite(result["loo_chi2_eff"])
+    assert np.isclose(result["loo_rms"] ** 2, result["loo_chi2_eff"])
+
+    median_params = {key: jnp.asarray(np.median(value, axis=0)) for key, value in samples.items()}
+    gp, inds = model._build_gp(median_params)
+    y_sorted = np.asarray(model._observed_y_sorted(median_params, inds), dtype=float)
+    covariance = np.asarray(gp.covariance, dtype=float)
+    covariance = 0.5 * (covariance + covariance.T)
+    covariance += np.eye(covariance.shape[0]) * (1e-10 * max(float(np.nanmedian(np.diag(covariance))), 1.0))
+    chol = np.linalg.cholesky(covariance)
+    alpha = np.linalg.solve(chol.T, np.linalg.solve(chol, y_sorted - np.asarray(gp.loc, dtype=float)))
+    precision = np.linalg.solve(chol.T, np.linalg.solve(chol, np.eye(chol.shape[0])))
+    loo_standardized = alpha / np.sqrt(np.maximum(np.diag(precision), 1e-300))
+    expected_chi2_eff = np.mean(np.square(loo_standardized[np.isfinite(loo_standardized)]))
+    assert np.isclose(result["loo_chi2_eff"], expected_chi2_eff)
+
+
+def test_save_obj_samples_to_hdf5_writes_loo_scalar_diagnostics(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(multiband_fit_utils, "prefix", "loo_test")
+    monkeypatch.setattr(multiband_fit_utils, "suffix", "run")
+
+    multiband_fit_utils.save_obj_samples_to_hdf5(
+        {"lag_blr": np.array([1.0, 2.0])},
+        "object",
+        scalar_diagnostics={"loo_chi2_eff": 1.25, "loo_rms": np.sqrt(1.25)},
+    )
+
+    output_path = tmp_path / "results/samples/loo_test/object_run.h5"
+    with h5py.File(output_path, "r") as hdf:
+        np.testing.assert_array_equal(hdf["lag_blr"][:], np.array([1.0, 2.0]))
+        assert hdf["loo_chi2_eff"][()] == 1.25
+        assert np.isclose(hdf["loo_rms"][()], np.sqrt(1.25))
 
 
 def test_apply_resume_sample_save_policy_disables_sample_saving_on_resume():
@@ -473,7 +614,7 @@ def test_make_lc_adds_variability_fields_for_retained_bands():
 
 
 def test_make_lc_variability_uses_post_filtering_series():
-    times = np.arange(13, dtype=float) * 30.0
+    times = np.arange(13, dtype=float) * 5.0
     g_mags = np.array([20.0, 20.0, 20.1, 20.0, 20.1, 20.0, 23.5, 20.0, 20.1, 20.0, 20.1, 20.0, 20.1], dtype=float)
     obj = {
         "object_id": "outlier",

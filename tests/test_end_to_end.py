@@ -1080,6 +1080,30 @@ def test_blr_line_assignment_uses_fit_spectra_line_specific_luminosities():
         assert np.isclose(row.log_line_luminosity_err, log_lum_err)
 
 
+def test_blr_line_assignment_does_not_fallback_to_l2500_for_missing_line_luminosity():
+    df = pd.DataFrame(
+        {
+            "object_id": ["civ"],
+            "z": [2.0],
+            "dropped_bands": [[]],
+            "log_sigma_uv": [-1.0],
+            "dlog_amp_blr_g": [0.0],
+            "log_lag_blr_g_RF": [1.0],
+            "log_lag_blr_g_RF_err": [0.1],
+        }
+    )
+
+    out = hubble_plotting._blr_line_assignment_longform(
+        df,
+        np.array([99.0], dtype=float),
+    )
+
+    assert len(out) == 1
+    assert out.iloc[0]["assigned_line"] == "C IV"
+    assert out.iloc[0]["line_luminosity_col"] == "log_lambda_Llambda_1350_agn"
+    assert np.isnan(out.iloc[0]["log_line_luminosity"])
+
+
 def test_build_single_object_model_disables_second_blr_term_by_default():
     obj = _make_fake_public_object()
     lc = make_lc(
@@ -1248,6 +1272,7 @@ def test_flux_linearized_erlang_shared_blr_lag_uses_one_stochastic_lag():
 
     model_trace = trace(seed(model, random.PRNGKey(91))).get_trace()
 
+    assert np.all(np.isfinite(np.asarray(model_trace["loglike"]["fn"].log_factor)))
     assert model_trace["delta_log_lag_blr_shared_raw"]["type"] == "sample"
     assert np.ndim(np.asarray(model_trace["delta_log_lag_blr_shared_raw"]["value"])) == 0
     assert "delta_log_lag_blr_raw" not in model_trace
