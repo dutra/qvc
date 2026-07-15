@@ -869,13 +869,72 @@ def test_reconstruct_line_psf_draws_requires_posterior_psf_scaling(monkeypatch):
     assert np.isnan(out).all()
 
 
-def test_estimate_m2500_from_model_requires_posterior_scale_psf():
+def test_estimate_m2500_from_model_uses_predictive_scale_and_reddening():
+    pl_norm = np.array([1.0, 2.0, 4.0], dtype=float)
+    pl_slope = np.array([-1.0, 0.0, 1.0], dtype=float)
+    scale_psf = np.array([0.8, 1.0, 1.2], dtype=float)
+    reddening_a2500 = np.array([0.1, 0.2, 0.4], dtype=float)
+    pl_pivot = 2000.0
+    q = SimpleNamespace(
+        numpyro_samples={
+            "PL_norm": pl_norm,
+            "PL_slope": pl_slope,
+            "scale_psf": np.full(3, 99.0, dtype=float),
+            "reddening_ebv": np.full(3, 99.0, dtype=float),
+        },
+        pred_out={
+            "scale_psf": scale_psf,
+            "reddening_a2500": reddening_a2500,
+        },
+        scale_psf=99.0,
+        _fit_prior_config={
+            "PL_pivot": pl_pivot,
+            "reddening_uv_ref": 2500.0,
+            "reddening_alpha": 1.2,
+        },
+    )
+
+    out = fit_spectra.estimate_m2500_from_model(q)
+
+    f_lambda_intrinsic = scale_psf * pl_norm * (2500.0 / pl_pivot) ** pl_slope
+    f_lambda_reddened = f_lambda_intrinsic * 10.0 ** (-0.4 * reddening_a2500)
+    f_nu_factor = 1e-17 * 2500.0**2 / 2.99792458e18
+    intrinsic_samples = -2.5 * np.log10(f_lambda_intrinsic * f_nu_factor) - 48.60
+    reddened_samples = -2.5 * np.log10(f_lambda_reddened * f_nu_factor) - 48.60
+    expected_reddened = fit_spectra.sym_percentile(reddened_samples)[:2]
+    expected_intrinsic = fit_spectra.sym_percentile(intrinsic_samples)[:2]
+
+    assert np.allclose(out, (*expected_reddened, *expected_intrinsic))
+    assert out[1] > 0.0
+    assert out[3] > 0.0
+    assert out[0] >= out[2]
+
+
+def test_estimate_m2500_from_model_requires_predictive_scale_psf():
     q = SimpleNamespace(
         numpyro_samples={
             "PL_norm": np.ones(3, dtype=float),
             "PL_slope": np.zeros(3, dtype=float),
+            "scale_psf": np.ones(3, dtype=float),
         },
+        pred_out={"reddening_a2500": np.zeros(3, dtype=float)},
         scale_psf=2.0,
+        _fit_prior_config={"PL_pivot": 2500.0},
+    )
+
+    out = fit_spectra.estimate_m2500_from_model(q)
+
+    assert all(np.isnan(value) for value in out)
+
+
+def test_estimate_m2500_from_model_requires_predictive_reddening():
+    q = SimpleNamespace(
+        numpyro_samples={
+            "PL_norm": np.ones(3, dtype=float),
+            "PL_slope": np.zeros(3, dtype=float),
+            "reddening_a2500": np.zeros(3, dtype=float),
+        },
+        pred_out={"scale_psf": np.ones(3, dtype=float)},
         _fit_prior_config={"PL_pivot": 2500.0},
     )
 
@@ -889,7 +948,10 @@ def test_estimate_m2500_from_model_requires_fitted_pl_pivot():
         numpyro_samples={
             "PL_norm": np.ones(3, dtype=float),
             "PL_slope": np.zeros(3, dtype=float),
+        },
+        pred_out={
             "scale_psf": np.ones(3, dtype=float),
+            "reddening_a2500": np.zeros(3, dtype=float),
         },
         wave=np.array([2000.0, 3000.0], dtype=float),
         _fit_prior_config={},
@@ -1065,6 +1127,7 @@ def test_run_one_fit_prints_consolidated_diagnostics_and_not_old_m2500_lines(mon
 
     out = capsys.readouterr().out
     assert result["fit_ok"] is True
+    assert "numpyro_sample_count" not in result
     assert "Spectrum diagnostics for object_id=obj-3" in out
     assert "g: 0.6500 +/- 0.0500" in out
     assert "f_host_2500: 0.1100 +/- 0.0200" in out

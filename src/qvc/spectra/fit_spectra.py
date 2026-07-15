@@ -665,34 +665,13 @@ def estimate_m2500_from_model(q):
     pl_norm = pl_norm[:n]
     pl_slope = pl_slope[:n]
 
-    if "scale_psf" not in s:
-        return np.nan, np.nan, np.nan, np.nan
-    scale_psf = np.asarray(s["scale_psf"], dtype=float).reshape(-1)
-    if scale_psf.size == 0:
-        return np.nan, np.nan, np.nan, np.nan
-    if scale_psf.size == 1:
-        scale_psf = np.full((n,), float(scale_psf[0]), dtype=float)
-    else:
-        n = min(n, scale_psf.size)
-        pl_norm = pl_norm[:n]
-        pl_slope = pl_slope[:n]
-        scale_psf = scale_psf[:n]
-    if not np.all(np.isfinite(scale_psf)):
+    pred_out = getattr(q, "pred_out", None)
+    if not isinstance(pred_out, dict):
         return np.nan, np.nan, np.nan, np.nan
 
-    if "reddening_ebv" in s:
-        reddening_ebv = np.asarray(s["reddening_ebv"], dtype=float).reshape(-1)
-        if reddening_ebv.size == 1:
-            reddening_ebv = np.full((n,), float(reddening_ebv[0]), dtype=float)
-        else:
-            n = min(n, reddening_ebv.size)
-            pl_norm = pl_norm[:n]
-            pl_slope = pl_slope[:n]
-            scale_psf = scale_psf[:n]
-            reddening_ebv = reddening_ebv[:n]
-    else:
-        reddening_ebv = np.zeros((n,), dtype=float)
-    if not np.all(np.isfinite(reddening_ebv)):
+    scale_psf = _draw_vector_strict(pred_out.get("scale_psf", []), n_use=n)
+    reddening_a2500 = _draw_vector_strict(pred_out.get("reddening_a2500", []), n_use=n)
+    if scale_psf is None or reddening_a2500 is None:
         return np.nan, np.nan, np.nan, np.nan
 
     prior_config = getattr(q, "_fit_prior_config", {}) or {}
@@ -705,7 +684,7 @@ def estimate_m2500_from_model(q):
     reddening_alpha = float(prior_config.get("reddening_alpha", 1.2))
     reddening_uv_ref = max(reddening_uv_ref, 1e-8)
     k_lambda_2500 = (2500.0 / reddening_uv_ref) ** (-reddening_alpha)
-    reddening_atten_2500 = 10.0 ** (-0.4 * np.maximum(reddening_ebv, 0.0) * k_lambda_2500)
+    reddening_atten_2500 = 10.0 ** (-0.4 * np.maximum(reddening_a2500, 0.0) * k_lambda_2500)
 
     f_lambda_2500_intrinsic = scale_psf * pl_norm * (2500.0 / pl_pivot) ** pl_slope
     f_lambda_2500_reddened = f_lambda_2500_intrinsic * reddening_atten_2500
@@ -1590,7 +1569,6 @@ def run_one_fit(rec, args):
         "dm_i": 0.0,
         "flux_scale": 1.0,
         "bands_used": "",
-        "numpyro_sample_count": 0,
         "bi": np.nan,
         "bi_err": np.nan,
     }
