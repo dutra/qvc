@@ -303,7 +303,6 @@ set -euo pipefail
 
 export JAX_ENABLE_X64=True
 export PREFIX="{prefix}"
-export SUFFIX="job${{SLURM_ARRAY_TASK_ID}}"
 export NUM_CORES="{args.ncores}"
 export N="{args.N}"
 export SKIP="{args.skip}"
@@ -361,9 +360,22 @@ fi
 
 echo "object_ids: $IDS"
 
-python -m qvc.light_curve.fit_light_curves \\
- --filter_object_id $IDS \\
- {build_flag_lines(base_flags)}
+read -r -a OBJECT_IDS <<< "$IDS"
+OBJECT_INDEX=0
+for OBJECT_ID in "${{OBJECT_IDS[@]}}"; do
+  export SUFFIX="job${{TASK_ID}}_obj${{OBJECT_INDEX}}"
+  object_start_epoch=$(date +%s)
+  echo "Starting object $((OBJECT_INDEX + 1))/${{#OBJECT_IDS[@]}}: $OBJECT_ID (SUFFIX=$SUFFIX)"
+
+  python -m qvc.light_curve.fit_light_curves \\
+   --filter_object_id "$OBJECT_ID" \\
+   {build_flag_lines(base_flags)}
+
+  object_end_epoch=$(date +%s)
+  object_rt=$(( object_end_epoch - object_start_epoch ))
+  echo "Finished object $OBJECT_ID in $((object_rt/3600))h $(((object_rt%3600)/60))m $((object_rt%60))s"
+  OBJECT_INDEX=$((OBJECT_INDEX + 1))
+done
 
 end_epoch=$(date +%s)
 rt=$(( end_epoch - start_epoch ))
