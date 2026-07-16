@@ -13,8 +13,6 @@ SRC_ROOT = REPO_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
-from qvc.hubble.hubble_utils import read_quasars_from_hdf5_flat
-
 # ==========================================
 # 1. Define your job settings here
 # ==========================================
@@ -32,10 +30,6 @@ cpus_per_task = 3
 mem = "32G"
 
 fit_script = "fit_spectra.py"
-
-# Input files
-#h5_file = "results/data/apr18h_taufasttoslow150_chisq_N1w500s200t12ch1.h5"
-h5_file = "results/data/lc_data_all.h5"
 
 chisq_csv = "results/data/variability_chi_sq_red_g_gt_20.csv"
 
@@ -77,18 +71,6 @@ def load_csv_object_ids(csv_path):
     return object_ids
 
 
-def load_h5_object_ids(h5_path):
-    df = read_quasars_from_hdf5_flat(h5_path)
-    return set(
-        df["object_id"]
-        .dropna()
-        .map(normalize_object_id)
-        .replace("", pd.NA)
-        .dropna()
-        .tolist()
-    )
-
-
 def submit_in_batches(script_filename, num_tasks, batch_limit=10_000):
     """
     Submit SLURM array jobs in chunks of at most batch_limit tasks.
@@ -116,7 +98,6 @@ def submit_in_batches(script_filename, num_tasks, batch_limit=10_000):
 # ==========================================
 # 3. Read object IDs and compute array size
 # ==========================================
-use_h5 = h5_file is not None and str(h5_file).strip() != ""
 chisq_path = REPO_ROOT / chisq_csv
 exclude_path = REPO_ROOT / exclude_csv if exclude_csv else None
 
@@ -129,29 +110,12 @@ elif exclude_path is not None and not exclude_path.exists():
 
 exclude_set = set(exclude_ids)
 requested_object_ids = [obj for obj in chisq_object_ids if obj not in exclude_set]
-if use_h5:
-    h5_path = REPO_ROOT / h5_file
-    h5_ids = load_h5_object_ids(h5_path)
-    submit_object_ids = [obj for obj in requested_object_ids if obj in h5_ids]
-    missing_from_h5 = [obj for obj in requested_object_ids if obj not in h5_ids]
-else:
-    h5_ids = set()
-    submit_object_ids = requested_object_ids
-    missing_from_h5 = []
+submit_object_ids = requested_object_ids
 
-print(f"H5 filtering: {'enabled' if use_h5 else 'disabled'}")
 print(f"Length of chisq_object_ids: {len(chisq_object_ids)}")
 print(f"Length of exclude_object_ids: {len(exclude_ids)}")
 print(f"Length of requested_object_ids (chisq - exclude): {len(requested_object_ids)}")
-if use_h5:
-    print(f"Length of h5_object_ids: {len(h5_ids)}")
-    print(f"Length of submit_object_ids (requested ∩ h5): {len(submit_object_ids)}")
-    print(f"Length of missing_from_h5: {len(missing_from_h5)}")
-    if missing_from_h5:
-        preview = ", ".join(missing_from_h5[:20])
-        print(f"First missing_from_h5 object_ids: {preview}")
-else:
-    print(f"Length of submit_object_ids: {len(submit_object_ids)}")
+print(f"Length of submit_object_ids: {len(submit_object_ids)}")
 
 if len(submit_object_ids) == 0:
     raise ValueError(f"No valid object_id values found in {chisq_csv}")
@@ -206,8 +170,6 @@ set -euo pipefail
 
 export PREFIX="{prefix}"
 export FIT_SCRIPT="{fit_script}"
-{f'export H5_FILE="{h5_file}"' if use_h5 else ""}
-export USE_H5="{1 if use_h5 else 0}"
 export OUTPUT_DIR="{output_dir}"
 export OBJECT_IDS_FILE="{object_ids_file}"
 export CHUNK_SIZE={chunk_size}
@@ -233,8 +195,6 @@ echo "Job started on $(date)"
 echo "Host: $(hostname)"
 echo "TASK_ID=$TASK_ID"
 echo "PREFIX=$PREFIX"
-{ 'echo "H5_FILE=$H5_FILE"' if use_h5 else "" }
-echo "USE_H5=$USE_H5"
 echo "OBJECT_IDS_FILE=$OBJECT_IDS_FILE"
 echo "OUTPUT_DIR=$OUTPUT_DIR"
 echo "FIG_DIR=$FIG_DIR"
@@ -247,8 +207,6 @@ from itertools import islice
 
 prefix = os.environ["PREFIX"]
 fit_script = os.environ["FIT_SCRIPT"]
-use_h5 = os.environ.get("USE_H5", "0") == "1"
-h5_file = os.environ.get("H5_FILE", "").strip()
 output_dir = os.environ["OUTPUT_DIR"]
 object_ids_file = os.environ["OBJECT_IDS_FILE"]
 chunk_size = int(os.environ["CHUNK_SIZE"])
@@ -295,8 +253,6 @@ cmd = [
     "--filter_object_id", *ids_this_task,
     "--nproc", str(nproc),
 ]
-if use_h5:
-    cmd[5:5] = ["--fpath-in", h5_file]
 
 print("\\nCommand:")
 print(" ".join(cmd))
