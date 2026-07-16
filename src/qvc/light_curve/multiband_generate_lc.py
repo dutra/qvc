@@ -3,6 +3,7 @@ import numpy as np
 import pandas as pd
 import h5py
 import warnings
+from scipy.stats import median_abs_deviation
 from astropy.table import Table, join
 from astropy.io import fits
 from astropy.coordinates import SkyCoord
@@ -51,6 +52,69 @@ MACLEOD_COLUMNS = [
     "mu",
     "npts",
 ]
+
+
+def rolling_photometric_outlier_mask(
+    times,
+    mags,
+    magerrs,
+    *,
+    half_window_days=30.0,
+    min_neighbors=8,
+    threshold=3.0,
+):
+    """Return a mask for isolated photometric outliers in one band."""
+    times = np.asarray(times, dtype=float)
+    mags = np.asarray(mags, dtype=float)
+    magerrs = np.asarray(magerrs, dtype=float)
+    if not (times.shape == mags.shape == magerrs.shape):
+        raise ValueError("times, mags, and magerrs must have matching shapes")
+    if half_window_days <= 0:
+        raise ValueError("half_window_days must be positive")
+    if min_neighbors < 1:
+        raise ValueError("min_neighbors must be at least 1")
+    if threshold <= 0:
+        raise ValueError("threshold must be positive")
+
+    rejected = np.zeros(times.shape, dtype=bool)
+    for i in range(times.size):
+        neighbors = (
+            (np.arange(times.size) != i)
+            & np.isfinite(times)
+            & np.isfinite(mags)
+            & np.isfinite(magerrs)
+            & (magerrs > 0)
+            & (np.abs(times - times[i]) <= half_window_days)
+        )
+        if np.count_nonzero(neighbors) < min_neighbors:
+            continue
+        if not (np.isfinite(times[i]) and np.isfinite(mags[i]) and magerrs[i] > 0):
+            continue
+
+        local = mags[neighbors]
+        local_median = float(np.median(local))
+        local_sigma = 1.4826 * float(median_abs_deviation(local))
+        total_sigma = float(np.hypot(magerrs[i], local_sigma))
+        if total_sigma > 0 and abs(mags[i] - local_median) > threshold * total_sigma:
+            rejected[i] = True
+    return rejected
+
+
+def inverse_variance_weighted_mean(mags, magerrs):
+    """Return the inverse-variance mean and its formal measurement error."""
+    mags = np.asarray(mags, dtype=float)
+    magerrs = np.asarray(magerrs, dtype=float)
+    if mags.shape != magerrs.shape:
+        raise ValueError("mags and magerrs must have matching shapes")
+    valid = np.isfinite(mags) & np.isfinite(magerrs) & (magerrs > 0)
+    if not np.any(valid):
+        return np.nan, np.nan
+    weights = np.square(1.0 / magerrs[valid])
+    weight_sum = float(np.sum(weights))
+    if not np.isfinite(weight_sum) or weight_sum <= 0:
+        return np.nan, np.nan
+    mean = float(np.sum(weights * mags[valid]) / weight_sum)
+    return mean, float(np.sqrt(1.0 / weight_sum))
 
 
 def resolve_stone_s82_matches(
@@ -372,11 +436,6 @@ def concat_light_curves(filter_object_ids=None, progress_bar=False, skip=None, N
     valid_filter_ids = [filters[b] for b in bands]
     filter_to_band = {filters[b]: b for b in bands}
 
-    def _clean_sort(arr):
-        arr = np.asarray(arr, dtype=float)
-        arr = arr[np.isfinite(arr)]
-        return np.sort(arr)
-
     def _offset_from_band(df):
         return np.asarray(
             np.select(
@@ -524,8 +583,23 @@ def concat_light_curves(filter_object_ids=None, progress_bar=False, skip=None, N
         print("Found 0 objects in concat_light_curves_jax")
         return []
 
-    finite_mask = np.isfinite(obs["time"]) & np.isfinite(obs["mag"]) & np.isfinite(obs["magerr"])
+    finite_mask = (
+        np.isfinite(obs["time"])
+        & np.isfinite(obs["mag"])
+        & np.isfinite(obs["magerr"])
+        & (obs["magerr"] > 0)
+    )
     obs = obs.loc[finite_mask].copy()
+    obs = obs.sort_values(["object_id", "band_idx", "time"], kind="mergesort")
+
+    rejected = pd.Series(False, index=obs.index)
+    for _key, group in obs.groupby(["object_id", "band"], sort=False):
+        rejected.loc[group.index] = rolling_photometric_outlier_mask(
+            group["time"].to_numpy(dtype=float),
+            group["mag"].to_numpy(dtype=float),
+            group["magerr"].to_numpy(dtype=float),
+        )
+    obs = obs.loc[~rejected].copy()
     obs = obs.sort_values(["object_id", "band_idx", "time"], kind="mergesort")
 
     by_obj_band = obs.groupby(["object_id", "band"], sort=False)
@@ -533,7 +607,13 @@ def concat_light_curves(filter_object_ids=None, progress_bar=False, skip=None, N
     mags_by_obj_band = by_obj_band["mag"].apply(lambda x: x.to_numpy(dtype=float)).to_dict()
     magerrs_by_obj_band = by_obj_band["magerr"].apply(lambda x: x.to_numpy(dtype=float)).to_dict()
     surveys_by_obj_band = by_obj_band["survey"].apply(lambda x: x.astype(str).to_numpy()).to_dict()
-    mags_mean_by_obj_band = by_obj_band["mag"].mean()
+    weighted_photometry_by_obj_band = {
+        key: inverse_variance_weighted_mean(
+            group["mag"].to_numpy(dtype=float),
+            group["magerr"].to_numpy(dtype=float),
+        )
+        for key, group in by_obj_band
+    }
     number_points_by_obj = obs.groupby("object_id", sort=False).size()
     all_times_by_obj = (
         obs.groupby("object_id", sort=False)["time"]
@@ -541,41 +621,11 @@ def concat_light_curves(filter_object_ids=None, progress_bar=False, skip=None, N
         .to_dict()
     )
 
-    sdss_survey_source = sdss[sdss["objectId"].isin(object_ids)][["objectId", "mjd"]].rename(
-        columns={"objectId": "object_id", "mjd": "time"}
+    survey_times_by_obj_survey = (
+        obs.groupby(["object_id", "survey"], sort=False)["time"]
+        .apply(lambda values: np.sort(values.to_numpy(dtype=float)))
+        .to_dict()
     )
-    survey_sdss_times = (
-        sdss_survey_source.groupby("object_id", sort=False)["time"].apply(_clean_sort).to_dict()
-        if not sdss_survey_source.empty
-        else {}
-    )
-
-    if len(ps1_ids) > 0:
-        cat_ps1_ids = cat_ps1[["object_id", "ps1objID"]]
-        ps1_survey_source = ps1[ps1["ps1objID"].isin(ps1_ids)][["ps1objID", "obsTime"]].merge(
-            cat_ps1_ids, on="ps1objID", how="inner"
-        )
-        ztf_survey_source = ztf[ztf["ps1objID"].isin(ps1_ids)][["ps1objID", "mjd"]].merge(
-            cat_ps1_ids, on="ps1objID", how="inner"
-        )
-
-        survey_ps1_times = (
-            ps1_survey_source.groupby("object_id", sort=False)["obsTime"]
-            .apply(_clean_sort)
-            .to_dict()
-            if not ps1_survey_source.empty
-            else {}
-        )
-        survey_ztf_times = (
-            ztf_survey_source.groupby("object_id", sort=False)["mjd"]
-            .apply(_clean_sort)
-            .to_dict()
-            if not ztf_survey_source.empty
-            else {}
-        )
-    else:
-        survey_ps1_times = {}
-        survey_ztf_times = {}
 
     s82_objs = []
     iterator = tqdm(
@@ -601,14 +651,20 @@ def concat_light_curves(filter_object_ids=None, progress_bar=False, skip=None, N
             magerrs[band] = np.asarray(magerrs_by_obj_band.get(key, np.array([])), dtype=float)
             surveys[band] = np.asarray(surveys_by_obj_band.get(key, np.array([])), dtype=str)
 
-        mags_means = [
-            float(mags_mean_by_obj_band.get((object_id, band), np.nan))
-            for band in bands
-        ]
+        mags_means = []
+        mags_mean_errs = []
+        for band in bands:
+            mean, mean_err = weighted_photometry_by_obj_band.get(
+                (object_id, band), (np.nan, np.nan)
+            )
+            mags_means.append(float(mean))
+            mags_mean_errs.append(float(mean_err))
         survey_times = {
-            "sdss": np.asarray(survey_sdss_times.get(object_id, np.array([])), dtype=float),
-            "ps1": np.asarray(survey_ps1_times.get(object_id, np.array([])), dtype=float),
-            "ztf": np.asarray(survey_ztf_times.get(object_id, np.array([])), dtype=float),
+            survey: np.asarray(
+                survey_times_by_obj_survey.get((object_id, survey), np.array([])),
+                dtype=float,
+            )
+            for survey in SURVEY_NAMES
         }
         cadence, cadence_err = _cadence_stats(all_times_by_obj.get(object_id, np.array([])))
 
@@ -621,6 +677,7 @@ def concat_light_curves(filter_object_ids=None, progress_bar=False, skip=None, N
                 "survey_names": SURVEY_NAMES,
                 "mags": mags,
                 "mags_mean": mags_means,
+                "mags_mean_err": mags_mean_errs,
                 "magerrs": magerrs,
                 "cadence": cadence,
                 "cadence_err": cadence_err,

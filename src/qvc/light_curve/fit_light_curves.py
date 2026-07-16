@@ -12,7 +12,7 @@ from functools import lru_cache
 import numpy as np
 from scipy.optimize import curve_fit, least_squares
 from scipy.special import gammaln
-from scipy.stats import kurtosis, median_abs_deviation, normaltest, skew
+from scipy.stats import kurtosis, normaltest, skew
 from statsmodels.tsa.stattools import adfuller
 from tqdm import tqdm
 
@@ -3193,61 +3193,6 @@ def compute_parameter_kls(
     return kls
 
 
-def rolling_photometric_outlier_mask(
-    times,
-    mags,
-    magerrs,
-    *,
-    half_window_days=30.0,
-    min_neighbors=8,
-    threshold=3.0,
-):
-    """Flag conservative local outliers in a center-excluded time window.
-
-    The window uses observer-frame days. Points near temporal edges and gaps are
-    only tested when at least ``min_neighbors`` other measurements fall within
-    the truncated time window.
-    """
-
-    times = np.asarray(times, dtype=float)
-    mags = np.asarray(mags, dtype=float)
-    magerrs = np.asarray(magerrs, dtype=float)
-    if not (times.shape == mags.shape == magerrs.shape):
-        raise ValueError("times, mags, and magerrs must have matching shapes")
-    if half_window_days <= 0.0:
-        raise ValueError("half_window_days must be positive")
-    if min_neighbors < 1:
-        raise ValueError("min_neighbors must be at least 1")
-    if threshold <= 0.0:
-        raise ValueError("threshold must be positive")
-
-    rejected = np.zeros(mags.shape, dtype=bool)
-    n_points = mags.size
-    for i in range(n_points):
-        neighbor_idx = np.flatnonzero(
-            (np.arange(n_points) != i)
-            & np.isfinite(times)
-            & (np.abs(times - times[i]) <= float(half_window_days))
-        )
-        finite_neighbors = (
-            np.isfinite(mags[neighbor_idx]) & np.isfinite(magerrs[neighbor_idx])
-        )
-        neighbor_idx = neighbor_idx[finite_neighbors]
-        if neighbor_idx.size < int(min_neighbors):
-            continue
-        if not (np.isfinite(mags[i]) and np.isfinite(magerrs[i]) and magerrs[i] >= 0.0):
-            continue
-
-        local = mags[neighbor_idx]
-        local_median = float(np.median(local))
-        local_sigma = 1.4826 * float(median_abs_deviation(local))
-        total_sigma = np.hypot(magerrs[i], local_sigma)
-        if total_sigma > 0.0:
-            rejected[i] = abs(mags[i] - local_median) > threshold * total_sigma
-
-    return rejected
-
-
 def make_lc(
     data,
     bands,
@@ -3366,7 +3311,12 @@ def make_lc(
             y_b = y_g[pos_b] + eta * e_b
             all_mags[idx_band] = y_b
 
-    mfin = np.isfinite(all_mags) & np.isfinite(all_magerrs) & np.isfinite(all_times)
+    mfin = (
+        np.isfinite(all_mags)
+        & np.isfinite(all_magerrs)
+        & (all_magerrs > 0)
+        & np.isfinite(all_times)
+    )
     all_times, all_mags, all_magerrs, all_surveys, band_idx = (
         all_times[mfin],
         all_mags[mfin],
@@ -3378,35 +3328,6 @@ def make_lc(
         print(f"No finite values for {data['object_id']}, skipping.", flush=True)
         return None
 
-    keep = np.ones(len(all_times), dtype=bool)
-    for b in np.unique(band_idx):
-        mask = band_idx == b
-        t_b = all_times[mask]
-        yb = all_mags[mask]
-        yerr_b = all_magerrs[mask]
-        idx_b = np.where(mask)[0]
-        is_out = rolling_photometric_outlier_mask(
-            t_b,
-            yb,
-            yerr_b,
-            half_window_days=30.0,
-            min_neighbors=8,
-            threshold=3.0,
-        )
-        keep[idx_b[is_out]] = False
-
-    all_times, all_mags, all_magerrs, all_surveys, band_idx = (
-        all_times[keep],
-        all_mags[keep],
-        all_magerrs[keep],
-        all_surveys[keep],
-        band_idx[keep],
-    )
-
-    if len(all_times) == 0:
-        print(f"All points excluded for {data['object_id']}, skipping.", flush=True)
-        return None
-
     t_obs_length = float(np.max(all_times) - np.min(all_times))
     t_rf_length = float(t_obs_length / (1.0 + data["z"]))
     if verbose:
@@ -3414,12 +3335,14 @@ def make_lc(
 
     B = len(bands)
     mags_means = np.empty(B)
+    mags_mean_errs = np.empty(B)
     mags_stds = np.empty(B)
     for i in range(B):
         m = band_idx == i
-        mu = np.nanmean(all_mags[m]) if np.any(m) else np.nan
+        mu, mu_err = inverse_variance_weighted_mean(all_mags[m], all_magerrs[m])
         sd = np.nanstd(all_mags[m]) if np.any(m) else np.nan
         mags_means[i] = mu
+        mags_mean_errs[i] = mu_err
         mags_stds[i] = sd
         if np.any(m):
             all_mags[m] = all_mags[m] - mu
@@ -3441,6 +3364,7 @@ def make_lc(
         "survey_names": LC_SURVEY_NAMES,
         "z": data["z"],
         "mags_means": mags_means,
+        "mags_mean_errs": mags_mean_errs,
         "mags_stds": mags_stds,
         "dropped_bands": dropped_bands,
         "t_obs_length": t_obs_length,

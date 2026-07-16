@@ -1,6 +1,9 @@
 import numpy as np
 
-from qvc.light_curve.fit_light_curves import rolling_photometric_outlier_mask
+from qvc.light_curve.multiband_generate_lc import (
+    inverse_variance_weighted_mean,
+    rolling_photometric_outlier_mask,
+)
 
 
 def test_rolling_outlier_mask_flags_center_without_clipping_neighbors():
@@ -40,3 +43,23 @@ def test_rolling_outlier_mask_keeps_under_supported_extreme_edges():
 
     assert not rejected[0]
     assert not rejected[-1]
+
+
+def test_inverse_variance_weighted_mean_and_formal_error():
+    mags = np.array([20.0, 21.0])
+    magerrs = np.array([0.1, 0.2])
+
+    mean, mean_err = inverse_variance_weighted_mean(mags, magerrs)
+
+    assert np.isclose(mean, 20.2)
+    assert np.isclose(mean_err, 1.0 / np.sqrt(125.0))
+
+
+def test_inverse_variance_weighted_mean_ignores_invalid_and_nonpositive_errors():
+    mean, mean_err = inverse_variance_weighted_mean(
+        [20.0, 99.0, 88.0, np.nan],
+        [0.1, 0.0, -1.0, 0.2],
+    )
+
+    assert mean == 20.0
+    assert mean_err == 0.1

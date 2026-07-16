@@ -561,6 +561,20 @@ def test_make_lc_drops_z_by_default_but_keeps_lya_bands():
     assert lc["dropped_bands"] == ["z"]
 
 
+def test_make_lc_centers_with_inverse_variance_weighted_mean():
+    obj = _make_object(z=1.0)
+    obj["mags"]["g"] = np.array([20.0, 21.0])
+    obj["magerrs"]["g"] = np.array([0.1, 0.2])
+
+    lc = make_lc(obj, bands=["g", "r", "i", "z"], drop_band_lyman_alpha=False)
+
+    assert lc is not None
+    assert np.isclose(lc["mags_means"][0], 20.2)
+    assert np.isclose(lc["mags_mean_errs"][0], 1.0 / np.sqrt(125.0))
+    g_values = np.asarray(lc["y"])[np.asarray(lc["band_idx"]) == 0]
+    np.testing.assert_allclose(g_values, [-0.2, 0.8])
+
+
 def test_make_lc_can_hard_drop_lya_affected_bands():
     obj = _make_object(z=1.6)
     lc = make_lc(obj, bands=["u", "g", "r", "i", "z"], drop_band_lyman_alpha=True)
@@ -613,7 +627,7 @@ def test_make_lc_adds_variability_fields_for_retained_bands():
     assert np.isfinite(lc["variability_chi_sq_red_g"])
 
 
-def test_make_lc_variability_uses_post_filtering_series():
+def test_make_lc_does_not_repeat_loader_outlier_rejection():
     times = np.arange(13, dtype=float) * 5.0
     g_mags = np.array([20.0, 20.0, 20.1, 20.0, 20.1, 20.0, 23.5, 20.0, 20.1, 20.0, 20.1, 20.0, 20.1], dtype=float)
     obj = {
@@ -645,7 +659,7 @@ def test_make_lc_variability_uses_post_filtering_series():
     lc = make_lc(obj, bands=["g", "r", "i", "z"], drop_band_lyman_alpha=False)
 
     assert lc is not None
-    assert lc["variability_n_points_g"] == 12
+    assert lc["variability_n_points_g"] == 13
 
 
 def test_compute_parameter_kls_ignores_nonfinite_conditioning_samples():

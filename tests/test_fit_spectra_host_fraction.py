@@ -17,13 +17,75 @@ def _patch_concat_light_curves(monkeypatch, lc_objects):
     )
 
 
-def test_prepare_sample_df_uses_concat_lc_mean_and_h5_fit_mean(monkeypatch):
+def _build_records_args(**overrides):
+    values = {
+        "fpath_in": None,
+        "filter_object_id": ["1458203"],
+        "filter_sdss_name": None,
+        "N": None,
+        "skip": None,
+        "dr16q_fits": "dr16q.fits",
+        "max_sep": 1.0,
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+def test_build_records_uses_s82_for_direct_object_ids(monkeypatch):
+    expected = pd.DataFrame([{"object_id": "1458203", "ra": 1.0, "dec": 2.0}])
+    calls = []
+
+    def fake_build(object_ids):
+        calls.append(object_ids)
+        return expected.copy()
+
+    monkeypatch.setattr(fit_spectra, "build_sample_df_from_object_ids", fake_build)
+    monkeypatch.setattr(fit_spectra, "prepare_sample_df", lambda df, **kwargs: df)
+    monkeypatch.setattr(fit_spectra, "match_to_dr16q", lambda df, *args: df)
+
+    records = fit_spectra.build_records(_build_records_args())
+
+    assert calls == [["1458203"]]
+    assert records == [{"object_id": "1458203", "ra": 1.0, "dec": 2.0}]
+
+
+def test_build_records_accepts_csv_catalog(monkeypatch, tmp_path):
+    csv_path = tmp_path / "sample.csv"
+    pd.DataFrame([{"object_id": "1458203", "ra": 1.0, "dec": 2.0}]).to_csv(
+        csv_path, index=False
+    )
+    monkeypatch.setattr(fit_spectra, "prepare_sample_df", lambda df, **kwargs: df)
+    monkeypatch.setattr(fit_spectra, "match_to_dr16q", lambda df, *args: df)
+
+    records = fit_spectra.build_records(
+        _build_records_args(fpath_in=str(csv_path), filter_object_id=None)
+    )
+
+    assert records[0]["object_id"] == 1458203
+
+
+@pytest.mark.parametrize("suffix", [".h5", ".parquet", ".fits"])
+def test_build_records_rejects_non_csv_input_without_reading(monkeypatch, suffix):
+    monkeypatch.setattr(
+        fit_spectra.pd,
+        "read_csv",
+        lambda *_args, **_kwargs: pytest.fail("read_csv should not be called"),
+    )
+
+    with pytest.raises(ValueError, match="supports CSV catalogs only"):
+        fit_spectra.build_records(
+            _build_records_args(fpath_in=f"catalog{suffix}", filter_object_id=None)
+        )
+
+
+def test_prepare_sample_df_uses_only_concat_psf_photometry(monkeypatch):
     _patch_concat_light_curves(
         monkeypatch,
         [
             {
                 "object_id": "1458203",
                 "mags_mean": [20.0, 21.0, 19.5, 19.25, 18.9],
+                "mags_mean_err": [0.07, 0.06, 0.05, 0.04, 0.03],
             }
         ],
     )
@@ -50,18 +112,16 @@ def test_prepare_sample_df_uses_concat_lc_mean_and_h5_fit_mean(monkeypatch):
     out = fit_spectra.prepare_sample_df(sample_df, filter_sdss_name=["221958.21+003709.1"])
 
     row = out.iloc[0]
-    assert np.isclose(row["lc_mean_u"], 20.0)
-    assert np.isclose(row["lc_mean_g"], 21.0)
-    assert np.isclose(row["lc_mean_r"], 19.5)
-    assert np.isclose(row["lc_mean_i"], 19.25)
-    assert np.isclose(row["mean_corrected_u"], 20.10)
-    assert np.isclose(row["mean_corrected_g"], 21.20)
-    assert np.isclose(row["mean_corrected_r"], 19.30)
-    assert np.isclose(row["mean_corrected_i"], 19.35)
+    assert [row[f"psf_mag_{band}"] for band in "ugri"] == [20.0, 21.0, 19.5, 19.25]
+    assert [row[f"psf_mag_err_{band}"] for band in "ugri"] == [0.07, 0.06, 0.05, 0.04]
+    assert "mean_corrected_u" not in out.columns
 
 
 def test_prepare_sample_df_requires_concat_lc_mean(monkeypatch):
-    _patch_concat_light_curves(monkeypatch, [{"object_id": "1458203", "mags_mean": [20.0, 21.0]}])
+    _patch_concat_light_curves(
+        monkeypatch,
+        [{"object_id": "1458203", "mags_mean": [20.0, 21.0], "mags_mean_err": [0.07, 0.06]}],
+    )
     sample_df = pd.DataFrame(
         [
             {
@@ -80,14 +140,18 @@ def test_prepare_sample_df_requires_concat_lc_mean(monkeypatch):
         ]
     )
 
-    with pytest.raises(ValueError, match="missing finite lc_mean_r"):
+    with pytest.raises(ValueError, match="missing finite psf_mag_r"):
         fit_spectra.prepare_sample_df(sample_df, filter_sdss_name=["221958.21+003709.1"])
 
 
-def test_prepare_sample_df_requires_h5_fit_mean(monkeypatch):
+def test_prepare_sample_df_ignores_missing_h5_fit_mean(monkeypatch):
     _patch_concat_light_curves(
         monkeypatch,
-        [{"object_id": "1458203", "mags_mean": [20.0, 21.0, 19.5, 19.25, 18.9]}],
+        [{
+            "object_id": "1458203",
+            "mags_mean": [20.0, 21.0, 19.5, 19.25, 18.9],
+            "mags_mean_err": [0.07, 0.06, 0.05, 0.04, 0.03],
+        }],
     )
     sample_df = pd.DataFrame(
         [
@@ -106,14 +170,18 @@ def test_prepare_sample_df_requires_h5_fit_mean(monkeypatch):
         ]
     )
 
-    with pytest.raises(ValueError, match="missing finite mean_r"):
-        fit_spectra.prepare_sample_df(sample_df, filter_sdss_name=["221958.21+003709.1"])
+    out = fit_spectra.prepare_sample_df(sample_df, filter_sdss_name=["221958.21+003709.1"])
+    assert np.isclose(out.iloc[0]["psf_mag_r"], 19.5)
 
 
-def test_prepare_sample_df_requires_positive_h5_fit_mean_error(monkeypatch):
+def test_prepare_sample_df_requires_positive_concat_mean_error(monkeypatch):
     _patch_concat_light_curves(
         monkeypatch,
-        [{"object_id": "1458203", "mags_mean": [20.0, 21.0, 19.5, 19.25, 18.9]}],
+        [{
+            "object_id": "1458203",
+            "mags_mean": [20.0, 21.0, 19.5, 19.25, 18.9],
+            "mags_mean_err": [0.07, 0.06, 0.0, 0.04, 0.03],
+        }],
     )
     sample_df = pd.DataFrame(
         [
@@ -133,35 +201,27 @@ def test_prepare_sample_df_requires_positive_h5_fit_mean_error(monkeypatch):
         ]
     )
 
-    with pytest.raises(ValueError, match="missing positive finite mean_r_err"):
+    with pytest.raises(ValueError, match="missing positive finite psf_mag_err_r"):
         fit_spectra.prepare_sample_df(sample_df, filter_sdss_name=["221958.21+003709.1"])
 
 
-def test_build_psf_photometry_inputs_keeps_all_valid_bands_and_uses_h5_errors():
+def test_build_psf_photometry_inputs_uses_concat_values_unchanged():
     rec = {
         "z": 3.090241,
-        "lc_mean_u": 20.0,
-        "mean_u": 0.10,
-        "mean_u_err": 0.07,
-        "mean_corrected_u": 20.10,
-        "lc_mean_g": 21.0,
-        "mean_g": 0.20,
-        "mean_g_err": 0.06,
-        "mean_corrected_g": 21.20,
-        "lc_mean_r": 19.5,
-        "mean_r": -0.20,
-        "mean_r_err": 0.05,
-        "mean_corrected_r": 19.30,
-        "lc_mean_i": 19.25,
-        "mean_i": 0.10,
-        "mean_i_err": 0.04,
-        "mean_corrected_i": 19.35,
+        "psf_mag_u": 20.0,
+        "psf_mag_err_u": 0.07,
+        "psf_mag_g": 21.0,
+        "psf_mag_err_g": 0.06,
+        "psf_mag_r": 19.5,
+        "psf_mag_err_r": 0.05,
+        "psf_mag_i": 19.25,
+        "psf_mag_err_i": 0.04,
     }
 
     bands, mags, errs = fit_spectra.build_psf_photometry_inputs(rec)
 
     assert bands == ["u", "g", "r", "i"]
-    assert mags == [20.10, 21.20, 19.30, 19.35]
+    assert mags == [20.0, 21.0, 19.5, 19.25]
     assert errs == [0.07, 0.06, 0.05, 0.04]
 
 
@@ -1090,8 +1150,10 @@ def test_run_one_fit_prints_consolidated_diagnostics_and_not_old_m2500_lines(mon
         "ra": 10.0,
         "dec": 20.0,
         "loglbol": 46.0,
-        "mean_corrected_g": 19.0,
-        "mean_corrected_r": 18.5,
+        "psf_mag_g": 19.0,
+        "psf_mag_r": 18.5,
+        "psf_mag_err_g": 0.1,
+        "psf_mag_err_r": 0.1,
     }
     args = SimpleNamespace(
         output_dir=str(tmp_path / "out"),
@@ -1218,8 +1280,10 @@ def test_run_one_fit_plots_mcmc_diagnostics_when_requested(monkeypatch, tmp_path
         "ra": 10.0,
         "dec": 20.0,
         "loglbol": 46.0,
-        "mean_corrected_g": 19.0,
-        "mean_corrected_r": 18.5,
+        "psf_mag_g": 19.0,
+        "psf_mag_r": 18.5,
+        "psf_mag_err_g": 0.1,
+        "psf_mag_err_r": 0.1,
     }
     args = SimpleNamespace(
         output_dir=str(tmp_path / "out"),
@@ -1306,8 +1370,10 @@ def test_run_one_fit_resume_forwards_plot_mcmc_diagnostics(monkeypatch, tmp_path
         "ra": 10.0,
         "dec": 20.0,
         "loglbol": 46.0,
-        "mean_corrected_g": 19.0,
-        "mean_corrected_r": 18.5,
+        "psf_mag_g": 19.0,
+        "psf_mag_r": 18.5,
+        "psf_mag_err_g": 0.1,
+        "psf_mag_err_r": 0.1,
     }
     args = SimpleNamespace(
         output_dir=str(tmp_path / "out"),
@@ -1362,7 +1428,10 @@ def test_run_one_fit_resume_fails_when_saved_samples_lack_psf_photometry(monkeyp
             self.err = np.array([0.1, 0.1, 0.1], dtype=float)
             self.wave = np.array([2000.0, 3000.0, 4000.0], dtype=float)
             self.model_total = np.array([1.0, 1.0, 1.0], dtype=float)
-            self.numpyro_samples = {"frac_jitter": np.zeros(1, dtype=float), "add_jitter": np.zeros(1, dtype=float)}
+            self.numpyro_samples = {
+                "frac_jitter": np.zeros(1, dtype=float),
+                "add_jitter": np.zeros(1, dtype=float),
+            }
             self.pred_out = {}
             self.ra = 10.0
             self.dec = 20.0
@@ -1373,15 +1442,25 @@ def test_run_one_fit_resume_fails_when_saved_samples_lack_psf_photometry(monkeyp
         def load_from_samples(cls, **kwargs):
             return cls()
 
-    monkeypatch.setattr(fit_spectra, "load_spec_from_cache", lambda *args, **kwargs: DummyHDUL())
-    monkeypatch.setattr(fit_spectra, "get_spectrum_arrays", lambda _hdul: (
-        np.array([4000.0, 5000.0, 6000.0], dtype=float),
-        np.array([1.0, 1.0, 1.0], dtype=float),
-        np.array([0.1, 0.1, 0.1], dtype=float),
-    ))
+    monkeypatch.setattr(
+        fit_spectra, "load_spec_from_cache", lambda *args, **kwargs: DummyHDUL()
+    )
+    monkeypatch.setattr(
+        fit_spectra,
+        "get_spectrum_arrays",
+        lambda _hdul: (
+            np.array([4000.0, 5000.0, 6000.0], dtype=float),
+            np.array([1.0, 1.0, 1.0], dtype=float),
+            np.array([0.1, 0.1, 0.1], dtype=float),
+        ),
+    )
     monkeypatch.setattr(fit_spectra, "JAXQSOFit", DummyJAXQSOFit)
     monkeypatch.setattr(fit_spectra, "build_default_prior_config", lambda *args, **kwargs: {})
-    monkeypatch.setattr(fit_spectra, "build_psf_photometry_inputs", lambda rec: (["g", "r"], [19.0, 18.5], [0.1, 0.1]))
+    monkeypatch.setattr(
+        fit_spectra,
+        "build_psf_photometry_inputs",
+        lambda rec: (["g", "r"], [19.0, 18.5], [0.1, 0.1]),
+    )
 
     rec = {
         "object_id": "obj-6",
@@ -1393,8 +1472,10 @@ def test_run_one_fit_resume_fails_when_saved_samples_lack_psf_photometry(monkeyp
         "ra": 10.0,
         "dec": 20.0,
         "loglbol": 46.0,
-        "mean_corrected_g": 19.0,
-        "mean_corrected_r": 18.5,
+        "psf_mag_g": 19.0,
+        "psf_mag_r": 18.5,
+        "psf_mag_err_g": 0.1,
+        "psf_mag_err_r": 0.1,
     }
     args = SimpleNamespace(
         output_dir=str(tmp_path / "out"),

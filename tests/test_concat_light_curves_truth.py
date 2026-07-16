@@ -18,6 +18,8 @@ from qvc.light_curve.multiband_generate_lc import (
     bands,
     concat_light_curves,
     filters,
+    inverse_variance_weighted_mean,
+    rolling_photometric_outlier_mask,
 )
 
 
@@ -75,6 +77,9 @@ def _reconstruct_notebook_truth(row, sdss, ps1, ztf):
     times = {}
     mags = {}
     magerrs = {}
+    surveys = {}
+    mags_mean = []
+    mags_mean_err = []
     for band in bands:
         filter_id = filters[band]
         offset = sdss_ps1_offset.get(band, 0.0)
@@ -100,23 +105,69 @@ def _reconstruct_notebook_truth(row, sdss, ps1, ztf):
                 ztf_lc.loc[ztf_lc.filterID == filter_id, "magerr_p3"].values if not ztf_lc.empty else np.array([]),
             ]
         )
+        survey_band = np.concatenate(
+            [
+                np.full(np.count_nonzero(sdss_lc.filterID == filter_id), "sdss", dtype="U4"),
+                np.full(np.count_nonzero(ps1_lc.filterID == filter_id), "ps1", dtype="U4"),
+                np.full(np.count_nonzero(ztf_lc.filterID == filter_id), "ztf", dtype="U4"),
+            ]
+        )
 
-        nan_mask = np.isnan(m_band) | np.isnan(me_band) | np.isnan(t_band)
-        t_band = t_band[~nan_mask]
-        m_band = m_band[~nan_mask]
-        me_band = me_band[~nan_mask]
+        keep = np.isfinite(m_band) & np.isfinite(me_band) & np.isfinite(t_band) & (me_band > 0)
+        t_band = t_band[keep]
+        m_band = m_band[keep]
+        me_band = me_band[keep]
+        survey_band = survey_band[keep]
 
         if len(t_band) > 0:
-            order = np.argsort(t_band)
+            order = np.argsort(t_band, kind="mergesort")
             t_band = t_band[order]
             m_band = m_band[order]
             me_band = me_band[order]
+            survey_band = survey_band[order]
+
+            retained = ~rolling_photometric_outlier_mask(t_band, m_band, me_band)
+            t_band = t_band[retained]
+            m_band = m_band[retained]
+            me_band = me_band[retained]
+            survey_band = survey_band[retained]
 
         times[band] = t_band
         mags[band] = m_band
         magerrs[band] = me_band
+        surveys[band] = survey_band
+        mean, mean_err = inverse_variance_weighted_mean(m_band, me_band)
+        mags_mean.append(mean)
+        mags_mean_err.append(mean_err)
 
-    return {"times": times, "mags": mags, "magerrs": magerrs}
+    all_times = np.concatenate([times[band] for band in bands])
+    all_surveys = np.concatenate([surveys[band] for band in bands])
+    survey_times = {
+        survey: np.sort(all_times[all_surveys == survey]) for survey in ("sdss", "ps1", "ztf")
+    }
+    cadence_times = np.sort(all_times)
+    if cadence_times.size > 1:
+        distinct = np.ones(cadence_times.size, dtype=bool)
+        distinct[1:] = np.diff(cadence_times) > 30.0 / 1440.0
+        cadence_times = cadence_times[distinct]
+    dt = np.diff(cadence_times)
+    dt = dt[(dt > 0) & (dt < 30)]
+    cadence = float(np.median(dt)) if dt.size else np.nan
+    cadence_err = (
+        float(np.percentile(dt, 84) - np.percentile(dt, 16)) if dt.size else np.nan
+    )
+    return {
+        "times": times,
+        "mags": mags,
+        "magerrs": magerrs,
+        "surveys": surveys,
+        "mags_mean": mags_mean,
+        "mags_mean_err": mags_mean_err,
+        "survey_times": survey_times,
+        "number_points": int(all_times.size),
+        "cadence": cadence,
+        "cadence_err": cadence_err,
+    }
 
 
 def test_concat_light_curves_matches_notebook_truth_for_idx_10_g_band():
@@ -139,6 +190,9 @@ def test_concat_light_curves_matches_notebook_truth_for_idx_10_g_band():
     _assert_array_equalish(got["times"]["g"], truth["times"]["g"])
     _assert_mag_array_matches_truth(got["mags"]["g"], truth["mags"]["g"])
     _assert_array_equalish(got["magerrs"]["g"], truth["magerrs"]["g"])
+    assert got["number_points"] == truth["number_points"]
+    _assert_mag_array_matches_truth(got["mags_mean"], truth["mags_mean"])
+    _assert_array_equalish(got["mags_mean_err"], truth["mags_mean_err"])
 
 
 def test_concat_light_curves_matches_notebook_truth_on_fixed_random_sample():
@@ -172,3 +226,11 @@ def test_concat_light_curves_matches_notebook_truth_on_fixed_random_sample():
             _assert_array_equalish(got["times"][band], truth["times"][band])
             _assert_mag_array_matches_truth(got["mags"][band], truth["mags"][band])
             _assert_array_equalish(got["magerrs"][band], truth["magerrs"][band])
+            np.testing.assert_array_equal(got["surveys"][band], truth["surveys"][band])
+        assert got["number_points"] == truth["number_points"]
+        _assert_mag_array_matches_truth(got["mags_mean"], truth["mags_mean"])
+        _assert_array_equalish(got["mags_mean_err"], truth["mags_mean_err"])
+        assert np.isclose(got["cadence"], truth["cadence"], equal_nan=True)
+        assert np.isclose(got["cadence_err"], truth["cadence_err"], equal_nan=True)
+        for survey in ("sdss", "ps1", "ztf"):
+            _assert_array_equalish(got["survey_times"][survey], truth["survey_times"][survey])

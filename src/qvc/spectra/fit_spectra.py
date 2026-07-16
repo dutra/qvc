@@ -4,7 +4,7 @@ Fit SDSS quasar spectra with jaxqsofit.
 
 This module runs the current spectra workflow:
 
-1. read the quasar sample from the input HDF5 file,
+1. build the quasar sample from object IDs or an optional CSV catalog,
 2. match objects to DR16Q,
 3. download/cache the SDSS spectra,
 4. run one jaxqsofit fit per object,
@@ -42,7 +42,7 @@ except ValueError:
 os.environ["XLA_FLAGS"] = f"--xla_force_host_platform_device_count={num_cores}"
 os.environ["JAX_PLATFORM_NAME"] = "cpu"
 
-from qvc.hubble.hubble_utils import match_radec, read_quasars_from_hdf5_flat, resolve_qvc_data_path
+from qvc.hubble.hubble_utils import match_radec, resolve_qvc_data_path
 from jaxqsofit import (
     BALConfig,
     ContinuumConfig,
@@ -193,26 +193,21 @@ def get_filter_wavelength_angstrom(filt):
 
 
 def build_psf_photometry_inputs(rec):
-    """
-    Build PSF-photometry inputs for jaxqsofit from mean-corrected multiband values.
-    """
+    """Build jaxqsofit PSF-photometry inputs from cleaned light curves."""
     psf_bands_all = []
     psf_mags_all = []
     psf_mag_errs_all = []
 
     for band in SDSS_CAL_BANDS:
-        mag = safe_float(rec.get(f"mean_corrected_{band}"))
+        mag = safe_float(rec.get(f"psf_mag_{band}"))
         if not np.isfinite(mag):
             continue
 
-        mag_err = safe_float(rec.get(f"mean_{band}_err"))
+        mag_err = safe_float(rec.get(f"psf_mag_err_{band}"))
         if not (np.isfinite(mag_err) and mag_err > 0.0):
             continue
 
-        print(
-            f"Band: {band} -- LC Mean: {rec.get(f'lc_mean_{band}')}, "
-            f"Fit Mean: {rec.get(f'mean_{band}')}, Corrected Mag: {mag}"
-        )
+        print(f"Band: {band} -- PSF Mag: {mag}, PSF Mag Error: {mag_err}")
 
         psf_bands_all.append(band)
         psf_mags_all.append(float(mag))
@@ -1168,10 +1163,6 @@ def compute_derived_results(result, q, args):
 # sample building and cross-match
 # -----------------------------------------------------------------------------
 
-def load_quasar_core_list(fpath_in):
-    return read_quasars_from_hdf5_flat(fpath_in)
-
-
 def build_sample_df_from_object_ids(object_ids):
     requested_ids = [normalize_object_id(obj_id) for obj_id in (object_ids or [])]
     requested_ids = [obj_id for obj_id in requested_ids if obj_id]
@@ -1230,7 +1221,7 @@ def _format_row_identity(row):
     return f"object_id={object_id}"
 
 
-def load_lc_mean_by_object_id(object_ids):
+def load_lc_psf_photometry_by_object_id(object_ids):
     from qvc.light_curve.multiband_generate_lc import concat_light_curves
 
     requested_ids = [normalize_object_id(obj_id) for obj_id in object_ids]
@@ -1255,47 +1246,56 @@ def load_lc_mean_by_object_id(object_ids):
         if not norm_id:
             continue
         mags_mean = obj.get("mags_mean", [])
-        row = {f"lc_mean_{band}": np.nan for band in SDSS_BANDS}
-        for band, mag in zip(SDSS_BANDS, mags_mean):
+        mags_mean_err = obj.get("mags_mean_err", [])
+        row = {}
+        for band in SDSS_BANDS:
+            row[f"psf_mag_{band}"] = np.nan
+            row[f"psf_mag_err_{band}"] = np.nan
+        for band, mag, mag_err in zip(SDSS_BANDS, mags_mean, mags_mean_err):
             mag_val = safe_float(mag)
+            mag_err_val = safe_float(mag_err)
             if np.isfinite(mag_val):
-                row[f"lc_mean_{band}"] = float(mag_val)
+                row[f"psf_mag_{band}"] = float(mag_val)
+            if np.isfinite(mag_err_val) and mag_err_val > 0:
+                row[f"psf_mag_err_{band}"] = float(mag_err_val)
         by_object_id[norm_id] = row
     return by_object_id
 
 
-def _apply_lc_mean_correction(sample_df):
+def _attach_lc_psf_photometry(sample_df):
     sample_df = sample_df.copy()
     for band in SDSS_BANDS:
-        for col in (f"lc_mean_{band}", f"mean_corrected_{band}"):
-            if col not in sample_df.columns:
-                sample_df[col] = np.nan
+        sample_df[f"psf_mag_{band}"] = np.nan
+        sample_df[f"psf_mag_err_{band}"] = np.nan
     object_ids = sample_df["object_id"].astype(str).tolist()
-    by_object_id = load_lc_mean_by_object_id(object_ids)
+    by_object_id = load_lc_psf_photometry_by_object_id(object_ids)
     for idx, norm_id in enumerate(sample_df["object_id_norm"].tolist()):
         row = by_object_id.get(norm_id)
         if row is None:
             continue
         for band in SDSS_BANDS:
-            sample_df.at[idx, f"lc_mean_{band}"] = row.get(f"lc_mean_{band}", np.nan)
+            sample_df.at[idx, f"psf_mag_{band}"] = row.get(f"psf_mag_{band}", np.nan)
+            sample_df.at[idx, f"psf_mag_err_{band}"] = row.get(
+                f"psf_mag_err_{band}", np.nan
+            )
 
     missing = []
     for idx, row in sample_df.iterrows():
         for band in SDSS_CAL_BANDS:
-            lc_col = f"lc_mean_{band}"
-            mean_col = f"mean_{band}"
-            err_col = f"mean_{band}_err"
-            lc_mean = safe_float(row.get(lc_col))
-            fit_mean = safe_float(row.get(mean_col))
-            fit_mean_err = safe_float(row.get(err_col))
-            if not np.isfinite(lc_mean):
-                missing.append(f"{_format_row_identity(row)} band={band}: missing finite {lc_col} from concat_light_curves()")
-            if not np.isfinite(fit_mean):
-                missing.append(f"{_format_row_identity(row)} band={band}: missing finite {mean_col} from H5/input")
-            if not (np.isfinite(fit_mean_err) and fit_mean_err > 0.0):
-                missing.append(f"{_format_row_identity(row)} band={band}: missing positive finite {err_col} from H5/input")
-            if np.isfinite(lc_mean) and np.isfinite(fit_mean):
-                sample_df.at[idx, f"mean_corrected_{band}"] = float(lc_mean + fit_mean)
+            mag_col = f"psf_mag_{band}"
+            err_col = f"psf_mag_err_{band}"
+            mag = safe_float(row.get(mag_col))
+            mag_err = safe_float(row.get(err_col))
+            if not np.isfinite(mag):
+                missing.append(
+                    f"{_format_row_identity(row)} band={band}: missing finite "
+                    f"{mag_col} from concat_light_curves()"
+                )
+            if not (np.isfinite(mag_err) and mag_err > 0.0):
+                missing.append(
+                    f"{_format_row_identity(row)} band={band}: missing positive finite "
+                    f"{err_col} from concat_light_curves()"
+                )
     if missing:
         preview = "; ".join(missing[:10])
         more = "" if len(missing) <= 10 else f"; ... {len(missing) - 10} more"
@@ -1309,7 +1309,6 @@ def prepare_sample_df(
     filter_object_id=None,
     N=None,
     skip=None,
-    use_h5_mean_correction=False,
 ):
     sample_df = sample_df.copy()
     sample_df["object_id"] = sample_df["object_id"].astype(str).str.strip()
@@ -1336,12 +1335,7 @@ def prepare_sample_df(
         sample_df = sample_df.iloc[: int(N)]
 
     sample_df = sample_df.reset_index(drop=True)
-    if use_h5_mean_correction:
-        print(
-            "--use-h5-mean-correction is deprecated for spectra PSF correction; "
-            "using concat_light_curves() LC means plus H5/input mean_* offsets."
-        )
-    sample_df = _apply_lc_mean_correction(sample_df)
+    sample_df = _attach_lc_psf_photometry(sample_df)
 
     sample_df["object_id"] = sample_df["object_id_norm"]
     sample_df = sample_df.drop(columns=["object_id_norm"])
@@ -1383,10 +1377,14 @@ def match_to_dr16q(sample_df, dr16q_fits, max_sep_arcsec=1.0):
 def build_records(args):
     if args.fpath_in is None:
         sample_df = build_sample_df_from_object_ids(args.filter_object_id)
-    elif str(args.fpath_in).lower().endswith(".csv"):
-        sample_df = pd.read_csv(args.fpath_in)
     else:
-        sample_df = load_quasar_core_list(args.fpath_in)
+        input_path = str(args.fpath_in)
+        if not input_path.lower().endswith(".csv"):
+            raise ValueError(
+                "--fpath-in supports CSV catalogs only; light-curve H5 catalogs "
+                "are not valid spectral-fitting inputs."
+            )
+        sample_df = pd.read_csv(input_path)
 
     print("build_records filtering on: ", args.filter_object_id)
     sample_df = prepare_sample_df(
@@ -1395,7 +1393,6 @@ def build_records(args):
         filter_object_id=args.filter_object_id,
         N=args.N,
         skip=args.skip,
-        use_h5_mean_correction=bool(args.use_h5_mean_correction),
     )
     print(f"Sample size after filtering: {len(sample_df)}")
     if len(sample_df) > 0:
@@ -1559,11 +1556,16 @@ def run_one_fit(rec, args):
         "mag_synth_r": -1e9,
         "mag_synth_i": -1e9,
         "mag_synth_z": -1e9,
-        "mean_corrected_u": -1e9,
-        "mean_corrected_g": -1e9,
-        "mean_corrected_r": -1e9,
-        "mean_corrected_i": -1e9,
-        "mean_corrected_z": -1e9,
+        "psf_mag_u": -1e9,
+        "psf_mag_g": -1e9,
+        "psf_mag_r": -1e9,
+        "psf_mag_i": -1e9,
+        "psf_mag_z": -1e9,
+        "psf_mag_err_u": -1e9,
+        "psf_mag_err_g": -1e9,
+        "psf_mag_err_r": -1e9,
+        "psf_mag_err_i": -1e9,
+        "psf_mag_err_z": -1e9,
         "delta_m_flux_recal": 0.0,
         "sigma_dm": 0.0,
         "dm_i": 0.0,
@@ -1612,9 +1614,12 @@ def run_one_fit(rec, args):
         psf_bands_all, psf_mags_all, psf_mag_errs_all = build_psf_photometry_inputs(rec)
         result["bands_used"] = "".join(psf_bands_all)
         for band in SDSS_BANDS:
-            mag = safe_float(rec.get(f"mean_corrected_{band}"))
+            mag = safe_float(rec.get(f"psf_mag_{band}"))
             if np.isfinite(mag):
-                result[f"mean_corrected_{band}"] = float(mag)
+                result[f"psf_mag_{band}"] = float(mag)
+            mag_err = safe_float(rec.get(f"psf_mag_err_{band}"))
+            if np.isfinite(mag_err):
+                result[f"psf_mag_err_{band}"] = float(mag_err)
 
         if args.resume:
             q = JAXQSOFit.load_from_samples(
@@ -1762,7 +1767,7 @@ def run_fit(args):
             hint = (
                 " "
                 f"Requested --filter_object_id values (first up to 10): {preview}. "
-                "These IDs may be absent from the input catalog/H5."
+                "These IDs may be absent from the input CSV or S82 catalog."
             )
         raise RuntimeError(f"No records to process.{hint}")
 
@@ -1790,7 +1795,12 @@ def parse_args():
 
     # Keep output positional for batch scripts, but require explicit input flag.
     p.add_argument("fpath_out", nargs="?", help="Output CSV with one row per fitted object.")
-    p.add_argument("--fpath-in", dest="fpath_in", default=None, help="Input HDF5/CSV quasar catalog.")
+    p.add_argument(
+        "--fpath-in",
+        dest="fpath_in",
+        default=None,
+        help="Optional input CSV quasar catalog. H5 catalogs are not supported.",
+    )
     p.add_argument("--fpath-out", dest="fpath_out_opt", default=None, help="Output CSV with one row per fitted object.")
     p.add_argument("--mode", choices=["download", "fit", "fetch-dustmaps"], required=True)
 
@@ -1852,13 +1862,6 @@ def parse_args():
     p.add_argument("--nproc", type=int, default=1, help="Use spawn multiprocessing when nproc > 1.")
     p.add_argument("--plot-residual", dest="plot_residual", action="store_true", default=False, help="Plot residuals in fit figures.")
     p.add_argument("--plot_mcmc_diagnostics", action="store_true", default=False, help="Plot trace/corner MCMC diagnostics when posterior samples are available.")
-    p.add_argument("--disable_rescale_flux", "--disable-rescale-flux", dest="disable_rescale_flux", action="store_true", help="Disable magnitude-based flux rescaling.")
-    p.add_argument(
-        "--use-h5-mean-correction",
-        action="store_true",
-        default=False,
-        help="Use legacy H5 mean correction (mags_mean_* + mean_*) instead of light-curve-derived means.",
-    )
     p.set_defaults(save_fig=True)
     p.add_argument("--save-fig", dest="save_fig", action="store_true")
     p.add_argument("--no-save-fig", dest="save_fig", action="store_false")
