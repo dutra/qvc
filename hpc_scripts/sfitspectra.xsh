@@ -37,16 +37,16 @@ job_name = "_".join(job_name_parts)
 # 1. Define your job settings here
 # ==========================================
 #prefix = "jaxqsofit_apr1a_chisq20_mar31a"
-prefix = "jaxqsofit_jul8a"
+prefix = "jaxqsofit_jul16a_chisqold"
 partition = "day"
-time_limit = "10:00:00"
+time_limit = "8:00:00"
 
 # Number of object_ids per array task
-chunk_size = 12
+chunk_size = 20
 
 # Number of CPUs used by fit_spectra.py
-nproc = 3
-cpus_per_task = 3
+nproc = 4
+cpus_per_task = 4
 mem = "32G"
 
 fit_script = "fit_spectra.py"
@@ -55,6 +55,7 @@ fit_script = "fit_spectra.py"
 sed_photometry_path = "data/jul14_master_input_file_chisqgt20_bandwagon_photometry.csv"
 
 chisq_csv = "results/data/variability_chi_sq_red_g_gt_20.csv"
+#chisq_csv = "data/jul14_master_input_file_chisqgt20.csv"
 
 # Optional exclusion file
 exclude_csv = None #"results/data/jaxqsofit/jaxqsofit_apr20c_chisq20_apr18h.csv"
