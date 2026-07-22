@@ -60,6 +60,7 @@ from qvc.light_curve.multiband_fit_plotting import (
     relative_to_2500_amplitude_scale,
 )
 from qvc.light_curve import multiband_fit_utils
+from qvc.light_curve import fit_light_curves as fit_lc
 from qvc.light_curve.multiband_fit_utils import lambda_pivot, log_single_pl, process_samples
 
 
@@ -92,6 +93,142 @@ def _make_object(z=1.6):
         "cadence_err": {band: 0.5 for band in bands},
         "number_points": {band: 2 for band in bands},
     }
+
+
+@pytest.mark.parametrize(
+    ("refinement_strategy", "expected_nuts_runs"),
+    (("nuts_each", 3), ("svi_then_nuts", 1)),
+)
+def test_flux_linearized_refinement_strategy_controls_nuts_runs(
+    monkeypatch,
+    refinement_strategy,
+    expected_nuts_runs,
+):
+    calls = {"svi": 0, "nuts": 0, "pseudo_params": []}
+    obj = {
+        "object_id": "test",
+        "X": np.array([[0.0, 0.0], [1.0, 0.0]], dtype=float),
+        "y": np.array([0.0, 0.1], dtype=float),
+        "yerr": np.array([0.05, 0.05], dtype=float),
+        "survey_idx": np.array([0, 0], dtype=np.int32),
+        "mags_means": np.array([20.0], dtype=float),
+    }
+
+    monkeypatch.setattr(
+        fit_lc,
+        "_build_mag_flux_linearized_model_for_fit",
+        lambda fit_obj, *_args, **_kwargs: fit_obj,
+    )
+
+    def fake_svi(*_args, **_kwargs):
+        calls["svi"] += 1
+        return {"theta": np.array(float(10 + calls["svi"]))}, float(calls["svi"])
+
+    def fake_nuts(*_args, **_kwargs):
+        calls["nuts"] += 1
+        samples = {"theta": np.array([100.0 + calls["nuts"], 102.0 + calls["nuts"]])}
+        per_chain = {"theta": samples["theta"][None, :]}
+        return samples, per_chain, {
+            "accept_prob": 0.9,
+            "num_divergences": 0,
+            "elapsed_sec": 2.0,
+        }
+
+    monkeypatch.setattr(fit_lc, "run_svi_warm_start", fake_svi)
+    monkeypatch.setattr(fit_lc, "_run_nuts_inference", fake_nuts)
+    monkeypatch.setattr(
+        fit_lc,
+        "_model_params_at_values",
+        lambda _model, _key, values: dict(values),
+    )
+    monkeypatch.setattr(
+        fit_lc,
+        "add_model_prediction_params",
+        lambda samples, *_args, **_kwargs: dict(samples),
+    )
+    monkeypatch.setattr(
+        fit_lc,
+        "make_multiband_dho_blr_flux_linearized_model",
+        lambda *_args, **_kwargs: object(),
+    )
+
+    def fake_pseudo(_obj, _model, params):
+        calls["pseudo_params"].append(float(np.asarray(params["theta"])))
+        step = len(calls["pseudo_params"])
+        return np.full(2, step, dtype=float), np.full(2, 0.1, dtype=float)
+
+    monkeypatch.setattr(fit_lc, "_flux_linearized_pseudo_data_from_prediction", fake_pseudo)
+
+    samples, per_chain, _fit_obj, diagnostics = (
+        fit_lc.run_iterated_mag_flux_linearized_inference(
+            obj,
+            np.array([2500.0]),
+            np.array([np.log(0.01)]),
+            rng_key=jax.random.PRNGKey(0),
+            fit_method="svi+nuts",
+            num_warmup=2,
+            num_samples=2,
+            num_chains=1,
+            chain_method="sequential",
+            progress_bar=False,
+            dense_mass=True,
+            max_tree_depth=4,
+            svi_steps=2,
+            svi_lr=1e-2,
+            disable_lag_blr=True,
+            refinement_strategy=refinement_strategy,
+        )
+    )
+
+    assert calls["svi"] == 3
+    assert calls["nuts"] == expected_nuts_runs
+    assert len(calls["pseudo_params"]) == 3
+    assert diagnostics["flux_linearized_nuts_runs"] == expected_nuts_runs
+    assert diagnostics["elapsed_sec"] == 2.0 * expected_nuts_runs
+    assert np.isfinite(samples["theta"]).all()
+    assert np.isfinite(per_chain["theta"]).all()
+    if refinement_strategy == "svi_then_nuts":
+        assert calls["pseudo_params"][:2] == [11.0, 12.0]
+        assert diagnostics["flux_linearized_iter1_elapsed_sec"] == 0.0
+        assert diagnostics["flux_linearized_iter2_elapsed_sec"] == 0.0
+
+
+def test_svi_then_nuts_refinement_requires_svi_backend():
+    with pytest.raises(ValueError, match="requires fit_method='svi\\+nuts'"):
+        fit_lc.run_iterated_mag_flux_linearized_inference(
+            {},
+            np.array([2500.0]),
+            np.array([np.log(0.01)]),
+            rng_key=jax.random.PRNGKey(0),
+            fit_method="nuts",
+            num_warmup=2,
+            num_samples=2,
+            num_chains=1,
+            chain_method="sequential",
+            progress_bar=False,
+            dense_mass=True,
+            max_tree_depth=4,
+            svi_steps=2,
+            svi_lr=1e-2,
+            refinement_strategy="svi_then_nuts",
+        )
+
+
+def test_model_params_at_values_materializes_deterministic_sites():
+    def model():
+        latent = fit_lc.numpyro.sample("latent", fit_lc.dist.Normal(0.0, 1.0))
+        fit_lc.numpyro.deterministic("twice_latent", 2.0 * latent)
+        fit_lc.numpyro.sample("observed", fit_lc.dist.Normal(latent, 1.0), obs=0.0)
+
+    params = fit_lc._model_params_at_values(
+        model,
+        jax.random.PRNGKey(1),
+        {"latent": np.array(1.25)},
+    )
+
+    assert set(params) == {"latent", "twice_latent"}
+    assert np.isclose(params["latent"], 1.25)
+    assert np.isclose(params["twice_latent"], 2.5)
 
 
 

@@ -58,7 +58,7 @@ numpyro.enable_x64()
 numpyro.enable_validation(False)
 import numpyro.distributions as dist
 from numpyro.diagnostics import print_summary as numpyro_print_summary
-from numpyro.handlers import seed, trace
+from numpyro.handlers import seed, substitute, trace
 from numpyro.infer import MCMC, NUTS, SVI, Trace_ELBO
 from numpyro.infer.autoguide import AutoNormal
 from numpyro.infer.initialization import init_to_value
@@ -4740,6 +4740,18 @@ def _posterior_median_params(samples_flat):
     }
 
 
+def _model_params_at_values(model, rng_key, values):
+    """Evaluate sample and deterministic sites at one latent parameter point."""
+
+    model_trace = trace(substitute(seed(model, rng_key), data=values)).get_trace()
+    return {
+        name: np.asarray(device_get(site["value"]))
+        for name, site in model_trace.items()
+        if site["type"] in {"sample", "deterministic"}
+        and not site.get("is_observed", False)
+    }
+
+
 def _flux_linearized_pseudo_data_from_prediction(obj_dict, model, params):
     """Build one Gauss-Newton pseudo-data update for the magnitude likelihood."""
 
@@ -4797,13 +4809,28 @@ def run_iterated_mag_flux_linearized_inference(
     erlang_order=DEFAULT_ERLANG_ORDER,
     use_fast_solver=False,
     blr_lag_band_scatter=None,
+    refinement_strategy="nuts_each",
 ):
-    """Iteratively refit the relative-flux QS model using local magnitude-likelihood pseudo-data."""
+    """Iteratively refit the relative-flux QS model using local pseudo-data.
+
+    The legacy schedule samples every refinement with NUTS even though the
+    intermediate posterior draws are reduced to one median and then discarded.
+    ``svi_then_nuts`` uses the guide median for those intermediate updates and
+    reserves posterior sampling for the final refined likelihood.
+    """
 
     if fit_method == "ns":
         raise ValueError(
             "model_variant='mag_flux_linearized' uses iterative local likelihood refinement "
             "and currently requires --fit_method nuts or svi+nuts."
+        )
+    if refinement_strategy not in {"nuts_each", "svi_then_nuts"}:
+        raise ValueError(
+            "refinement_strategy must be 'nuts_each' or 'svi_then_nuts'."
+        )
+    if refinement_strategy == "svi_then_nuts" and fit_method != "svi+nuts":
+        raise ValueError(
+            "refinement_strategy='svi_then_nuts' requires fit_method='svi+nuts'."
         )
 
     y_fit, yerr_fit = _flux_linearized_initial_arrays(obj_dict)
@@ -4812,6 +4839,8 @@ def run_iterated_mag_flux_linearized_inference(
     diagnostics = {
         "flux_linearized_refinement_iters": int(FLUX_LINEARIZED_REFINEMENT_ITERS),
         "flux_linearized_min_total_flux_ratio": float(FLUX_LINEARIZED_MIN_TOTAL_FLUX_RATIO),
+        "flux_linearized_refinement_strategy": refinement_strategy,
+        "flux_linearized_nuts_runs": 0,
     }
 
     model_kwargs = dict(
@@ -4838,8 +4867,13 @@ def run_iterated_mag_flux_linearized_inference(
             **model_kwargs,
         )
         iter_key = random.fold_in(rng_key, iter_idx)
+        run_nuts = (
+            refinement_strategy == "nuts_each"
+            or iter_idx == int(FLUX_LINEARIZED_REFINEMENT_ITERS) - 1
+        )
         if fit_method == "svi+nuts":
-            svi_key, mcmc_key = random.split(iter_key)
+            svi_key, inference_key = random.split(iter_key)
+            svi_start = time.perf_counter()
             init_values, svi_final_loss = run_svi_warm_start(
                 iter_model,
                 svi_key,
@@ -4847,36 +4881,61 @@ def run_iterated_mag_flux_linearized_inference(
                 learning_rate=svi_lr,
                 progress_bar=progress_bar,
             )
+            svi_elapsed = time.perf_counter() - svi_start
             init_strategy = init_to_value(values=init_values)
             diagnostics[f"flux_linearized_iter{iter_idx + 1}_svi_final_loss"] = float(svi_final_loss)
+            diagnostics[f"flux_linearized_iter{iter_idx + 1}_svi_elapsed_sec"] = float(
+                svi_elapsed
+            )
         else:
-            mcmc_key = iter_key
+            inference_key = iter_key
+            init_values = None
             init_strategy = numpyro.infer.init_to_median()
 
-        samples_flat, samples_per_chain, iter_diag = _run_nuts_inference(
-            iter_model,
-            mcmc_key,
-            num_warmup=num_warmup,
-            num_samples=num_samples,
-            num_chains=num_chains,
-            chain_method=chain_method,
-            progress_bar=progress_bar,
-            dense_mass=dense_mass,
-            max_tree_depth=max_tree_depth,
-            target_accept=target_accept,
-            init_strategy=init_strategy,
-        )
-        diagnostics[f"flux_linearized_iter{iter_idx + 1}_accept_prob"] = iter_diag["accept_prob"]
-        diagnostics[f"flux_linearized_iter{iter_idx + 1}_num_divergences"] = iter_diag["num_divergences"]
-        diagnostics[f"flux_linearized_iter{iter_idx + 1}_elapsed_sec"] = iter_diag["elapsed_sec"]
+        if run_nuts:
+            samples_flat, samples_per_chain, iter_diag = _run_nuts_inference(
+                iter_model,
+                inference_key,
+                num_warmup=num_warmup,
+                num_samples=num_samples,
+                num_chains=num_chains,
+                chain_method=chain_method,
+                progress_bar=progress_bar,
+                dense_mass=dense_mass,
+                max_tree_depth=max_tree_depth,
+                target_accept=target_accept,
+                init_strategy=init_strategy,
+            )
+            diagnostics["flux_linearized_nuts_runs"] += 1
+            diagnostics[f"flux_linearized_iter{iter_idx + 1}_accept_prob"] = iter_diag[
+                "accept_prob"
+            ]
+            diagnostics[f"flux_linearized_iter{iter_idx + 1}_num_divergences"] = iter_diag[
+                "num_divergences"
+            ]
+            diagnostics[f"flux_linearized_iter{iter_idx + 1}_elapsed_sec"] = iter_diag[
+                "elapsed_sec"
+            ]
+            prediction_params = _posterior_median_params(
+                add_model_prediction_params(
+                    samples_flat,
+                    lam_rf,
+                    model_variant="mag_flux_linearized",
+                    lam_lya_rf=lam_lya_rf,
+                )
+            )
+        else:
+            diagnostics[f"flux_linearized_iter{iter_idx + 1}_accept_prob"] = np.nan
+            diagnostics[f"flux_linearized_iter{iter_idx + 1}_num_divergences"] = 0
+            diagnostics[f"flux_linearized_iter{iter_idx + 1}_elapsed_sec"] = 0.0
+            prediction_params = add_model_prediction_params(
+                _model_params_at_values(iter_model, inference_key, init_values),
+                lam_rf,
+                model_variant="mag_flux_linearized",
+                lam_lya_rf=lam_lya_rf,
+            )
 
-        samples_for_prediction = add_model_prediction_params(
-            samples_flat,
-            lam_rf,
-            model_variant="mag_flux_linearized",
-            lam_lya_rf=lam_lya_rf,
-        )
-        params_median = _posterior_median_params(samples_for_prediction)
+        params_median = prediction_params
         use_erlang_response = (
             model_variant == "mag_flux_linearized_erlang" and not disable_lag_blr
         )
@@ -4916,6 +4975,14 @@ def run_iterated_mag_flux_linearized_inference(
     diagnostics["elapsed_sec"] = sum(
         diagnostics[f"flux_linearized_iter{i + 1}_elapsed_sec"]
         for i in range(int(FLUX_LINEARIZED_REFINEMENT_ITERS))
+    )
+    diagnostics["flux_linearized_svi_elapsed_sec"] = sum(
+        diagnostics.get(f"flux_linearized_iter{i + 1}_svi_elapsed_sec", 0.0)
+        for i in range(int(FLUX_LINEARIZED_REFINEMENT_ITERS))
+    )
+    diagnostics["flux_linearized_total_inference_elapsed_sec"] = (
+        diagnostics["elapsed_sec"]
+        + diagnostics["flux_linearized_svi_elapsed_sec"]
     )
     return samples_flat, samples_per_chain, fit_obj, diagnostics
 
@@ -5383,6 +5450,17 @@ def main():
         help="SVI learning rate used only with --fit_method svi+nuts.",
     )
     parser.add_argument(
+        "--flux_linearized_refinement_strategy",
+        choices=("nuts_each", "svi_then_nuts"),
+        default="nuts_each",
+        help=(
+            "Inference schedule for iterative flux-linearized models. "
+            "'nuts_each' runs SVI+NUTS at all three refinements (legacy baseline); "
+            "'svi_then_nuts' uses the SVI median for the first two pseudo-data "
+            "updates and runs NUTS only for the final posterior."
+        ),
+    )
+    parser.add_argument(
         "--fluxmix_outer_iters",
         type=int,
         default=2,
@@ -5574,6 +5652,22 @@ def main():
             "flux-linearized model variants use iterative local likelihood refinement "
             "and requires --fit_method nuts or svi+nuts."
         )
+    if (
+        args.flux_linearized_refinement_strategy != "nuts_each"
+        and args.model_variant not in ("mag_flux_linearized", "mag_flux_linearized_erlang")
+    ):
+        raise ValueError(
+            "--flux_linearized_refinement_strategy is only used by "
+            "--model_variant mag_flux_linearized or mag_flux_linearized_erlang."
+        )
+    if (
+        args.flux_linearized_refinement_strategy == "svi_then_nuts"
+        and args.fit_method != "svi+nuts"
+    ):
+        raise ValueError(
+            "--flux_linearized_refinement_strategy svi_then_nuts requires "
+            "--fit_method svi+nuts."
+        )
     if args.fit_method == "alternating_two_stage_nuts" and args.fluxmix_outer_iters < 2:
         raise ValueError("--fit_method alternating_two_stage_nuts requires --fluxmix_outer_iters >= 2.")
     if args.shared_blr_lag:
@@ -5710,9 +5804,10 @@ def main():
                     )
                 model_builder = None
                 logging.info(
-                    "[%s] %s using iterative local magnitude-likelihood refinement with relative-flux QS solves; active_components=%s",
+                    "[%s] %s using iterative local magnitude-likelihood refinement with relative-flux QS solves; refinement_strategy=%s; active_components=%s",
                     oid,
                     args.model_variant,
+                    args.flux_linearized_refinement_strategy,
                     "cont" if args.disable_lag_blr else ("cont,blr" if args.model_variant == "mag_flux_linearized_erlang" or args.disable_lag_bc else "cont,blr,bc"),
                 )
             elif args.model_variant == "mag_fluxmix_fast":
@@ -5816,6 +5911,7 @@ def main():
                         erlang_order=args.erlang_order,
                         use_fast_solver=args.fast_solver,
                         blr_lag_band_scatter=args.blr_lag_band_scatter,
+                        refinement_strategy=args.flux_linearized_refinement_strategy,
                     )
                 elif args.fit_method in ("nuts", "svi+nuts"):
                     if args.fit_method == "svi+nuts":
