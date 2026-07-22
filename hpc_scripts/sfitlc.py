@@ -20,7 +20,6 @@ from qvc.light_curve.multiband_generate_lc import resolve_macleod_object_ids, re
 
 SCRIPT_DIR = REPO_ROOT / "hpc_scripts" / "jobs" / "multibandfit"
 LOG_ROOT = REPO_ROOT / "hpc_scripts" / "logs" / "multibandfit"
-DEFAULT_SPECTRA_FIT_CSV = "results/data/jaxqsofit/jaxqsofit_apr20c_chisq20_apr18h_all_run2d.csv"
 MAX_ARRAY_SIZE = 10_000
 
 
@@ -41,6 +40,12 @@ def parse_args():
         help="Sample to submit.",
     )
     parser.add_argument("--chisq-csv", type=str, default=None, help="CSV file with object_id column for --fit chisq.")
+    parser.add_argument(
+        "--spectra-fit-csv",
+        type=str,
+        default=None,
+        help="Spectra-fit CSV used for PSF constant-flux subtraction in --fit chisq jobs.",
+    )
     parser.add_argument("--num-jobs", type=int, default=-1, help="-1 means submit all chunks after skip.")
     parser.add_argument("--skip", type=int, default=0, help="Number of chunks to skip.")
     parser.add_argument("--N", type=int, default=1, help="Objects per array task.")
@@ -71,6 +76,8 @@ def parse_args():
     args.extra_fit_flags = tuple(extra_fit_flags)
     if args.fit == "chisq" and not args.chisq_csv:
         parser.error("--chisq-csv is required when --fit chisq is used.")
+    if args.fit == "chisq" and not args.spectra_fit_csv:
+        parser.error("--spectra-fit-csv is required when --fit chisq is used.")
     try:
         args.description = normalize_run_description(args.description)
     except ValueError as exc:
@@ -244,7 +251,7 @@ def build_sbatch_script(
     job: JobConfig,
     args,
     chisq_csv: str,
-    spectra_fit_csv: str,
+    spectra_fit_csv: str | None,
     object_ids_path: Path | None = None,
 ) -> str:
     log_dir = LOG_ROOT / prefix
@@ -626,7 +633,7 @@ def main():
         part for part in (run_stamp, args.description, git_hash) if part
     )
     chisq_csv = args.chisq_csv
-    spectra_fit_csv = DEFAULT_SPECTRA_FIT_CSV
+    spectra_fit_csv = args.spectra_fit_csv
     samelength_merge_job_ids = []
 
     for job in build_job_configs(args.fit, chisq_csv):

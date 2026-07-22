@@ -1,8 +1,11 @@
 import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
-from hpc_scripts.sfitlc import JobConfig, build_sbatch_script, validate_chunking
+import pytest
+
+from hpc_scripts.sfitlc import JobConfig, build_sbatch_script, parse_args, validate_chunking
 
 
 def _args(**overrides):
@@ -29,7 +32,11 @@ def _args(**overrides):
 def test_sbatch_runs_each_chunk_object_in_a_fresh_process():
     script = build_sbatch_script(
         "probe_chisq",
-        JobConfig(description="chisq", object_ids=["1", "2", "3"]),
+        JobConfig(
+            description="chisq",
+            object_ids=["1", "2", "3"],
+            use_psf_constant_flux=True,
+        ),
         _args(),
         "data/input.csv",
         "results/data/spectra.csv",
@@ -42,6 +49,9 @@ def test_sbatch_runs_each_chunk_object_in_a_fresh_process():
     assert 'export SUFFIX="job${TASK_ID}_obj${OBJECT_INDEX}"' in script
     assert '--filter_object_id "$OBJECT_ID"' in script
     assert "--filter_object_id $IDS" not in script
+    assert "--subtract_psf_constant_flux" in script
+    assert "--spectra_fit_csv" in script
+    assert "results/data/spectra.csv" in script
     assert script.count("python -m qvc.light_curve.fit_light_curves") == 1
 
 
@@ -67,3 +77,25 @@ def test_generated_multi_object_sbatch_is_valid_bash():
 
 def test_chunk_count_still_uses_objects_per_slurm_task():
     assert validate_chunking(total_objects=7, n_per_job=3, skip=0, num_jobs=-1) == (3, 0, 2)
+
+
+def test_chisq_jobs_require_an_explicit_spectra_fit_csv(monkeypatch, capsys):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["sfitlc.py", "--fit", "chisq", "--chisq-csv", "results/data/chisq.csv"],
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        parse_args()
+
+    assert exc_info.value.code == 2
+    assert "--spectra-fit-csv is required when --fit chisq is used." in capsys.readouterr().err
+
+
+def test_non_chisq_jobs_do_not_require_a_spectra_fit_csv(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["sfitlc.py", "--fit", "stone"])
+
+    args = parse_args()
+
+    assert args.spectra_fit_csv is None
