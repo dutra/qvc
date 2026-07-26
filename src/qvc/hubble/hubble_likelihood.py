@@ -1,5 +1,6 @@
 
 from scipy.linalg import cho_solve
+from scipy.special import ndtr
 from astropy.cosmology import FlatwCDM, Flatw0waCDM, FlatLambdaCDM, FlatwpwaCDM
 import numpy as np
 
@@ -123,11 +124,28 @@ def completeness_loglike(
     wpdf_model = pdf_model * p_det
 
     Z = np.trapezoid(wpdf_model, m_grid, axis=1)                            # (N,)
+    m_Z = np.trapezoid(wpdf_model * m_grid[None, :], m_grid, axis=1)
+    m2_Z = np.trapezoid(wpdf_model * m_grid[None, :] ** 2, m_grid, axis=1)
+
+    # Completeness maps clamp magnitudes brighter than their first grid point
+    # to the bright-edge probability. Include that semi-infinite Gaussian tail
+    # analytically; otherwise bright objects acquire a large, artificial
+    # selection correction solely because the numerical grid starts at ~18.5.
+    m_bright = float(m_grid[0])
+    a = (m_bright - m_model) / sig[:, 0]
+    cdf_bright = ndtr(a)
+    pdf_bright = np.exp(-0.5 * a**2) * _INV_SQRT_2PI
+    p_bright = p_det[:, 0]
+    Z += p_bright * cdf_bright
+    m_Z += p_bright * (m_model * cdf_bright - sig[:, 0] * pdf_bright)
+    m2_Z += p_bright * (
+        (m_model**2 + sig[:, 0] ** 2) * cdf_bright
+        - sig[:, 0] * (m_model + m_bright) * pdf_bright
+    )
+
     Z = np.clip(Z, tiny, None)                                          # guard denom
 
     # Debias for plotting (the scatter is mostly in M, not Malmquist)
-    m_Z = np.trapezoid(wpdf_model * m_grid[None, :], m_grid, axis=1)
-    m2_Z = np.trapezoid(wpdf_model * m_grid[None, :] ** 2, m_grid, axis=1)
     # If the selection integral is effectively zero, the conditional
     # expectation is undefined. In that case keep the debias correction at
     # zero instead of manufacturing huge magnitude shifts from tiny/tiny.

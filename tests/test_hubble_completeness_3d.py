@@ -17,6 +17,31 @@ if str(SRC) not in sys.path:
 from qvc.hubble import hubble_completeness_refactored as hcr
 from qvc.hubble import hubble_fit, hubble_likelihood, hubble_model
 from qvc.hubble.completeness_mock_catalog import save_mock_catalog
+from qvc.hubble.hubble_likelihood import completeness_loglike
+
+
+def test_completeness_loglike_includes_bright_gaussian_tail():
+    mag_centers = np.linspace(18.5, 24.0, 60)
+    z_centers = np.linspace(0.0, 4.0, 20)
+    completeness = hcr.Completeness2D(
+        mag_centers,
+        z_centers,
+        np.ones((mag_centers.size, z_centers.size)),
+    )
+
+    _, blob = completeness_loglike(
+        m_obs=np.array([17.5]),
+        m_obs_err=np.array([0.05]),
+        m_model=np.array([17.5]),
+        mu_err=np.array([0.3]),
+        z=np.array([1.0]),
+        completeness_model=completeness,
+        m_grid=mag_centers,
+    )
+
+    np.testing.assert_allclose(blob[0], 1.0, atol=1e-4)
+    np.testing.assert_allclose(blob[1], 0.0, atol=1e-4)
+    np.testing.assert_allclose(blob[2], 0.3, atol=1e-4)
 
 
 def _make_fake_fhost_df(n=200, seed=123):
