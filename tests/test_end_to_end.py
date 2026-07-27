@@ -2027,6 +2027,8 @@ def test_end_to_end(tmp_path, monkeypatch):
         "t_obs_length": float(obj["t_obs_length"]),
         "ebv_wu": 0.01,
         "apparent_mag_2500": 20.2,
+        "apparent_mag_2500_intrinsic": 20.2,
+        "apparent_mag_2500_intrinsic_err": 0.1,
         "alpha_lambda": -1.45,
         "alpha_lambda_err": 0.08,
         "ra": 150.0,
@@ -2059,6 +2061,7 @@ def test_end_to_end(tmp_path, monkeypatch):
 
     df, df_all = hubble_utils.load_agn_data(
         h5_path,
+        magnitude_convention="intrinsic",
         spectra_fit_csv=None,
         lc_info_csv=None,
         only_load=True,

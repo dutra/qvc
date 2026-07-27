@@ -5208,7 +5208,8 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
                 diagnostics_suffix=None,
                 agn_likelihood_space_chi2=None,
                 agn_likelihood_space_chi2_zgt1=None,
-                residuals_csv_filename="residuals.csv"):
+                residuals_csv_filename="residuals.csv",
+                compute_only=False):
     """
     Hubble diagram (Pantheon+-style):
       • Model line + 68% band in magenta
@@ -5517,6 +5518,15 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     #bins_log = bins_linear
     z_log, mu_log_mean, mu_log_sem, n_log = _weighted_bin_stats(
         df_agn["z"].values, mu_pred_plot, display_residuals_err, bins_log)
+
+    if compute_only:
+        return (
+            residuals,
+            clipping_sigma,
+            mu_pred_median,
+            mu_pred_std,
+            mu_pred_std_with_scatter,
+        )
 
     # ======== Plot ========
     fig = plt.figure(figsize=(9, 7))

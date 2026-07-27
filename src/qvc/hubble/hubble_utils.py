@@ -101,6 +101,8 @@ def _count_redshift_bin_removals(frame):
         "removed_z_1_to_2": 0,
         "removed_z_2_to_3p16": 0,
         "removed_z_gt_3p16": 0,
+        "removed_z_lt_1p5": 0,
+        "removed_z_ge_1p5": 0,
     }
     if frame is None or len(frame) == 0 or "z" not in frame.columns:
         return zero_counts
@@ -112,6 +114,8 @@ def _count_redshift_bin_removals(frame):
         "removed_z_1_to_2": int(np.count_nonzero((z >= 1.0) & (z < 2.0))),
         "removed_z_2_to_3p16": int(np.count_nonzero((z >= 2.0) & (z <= 3.16))),
         "removed_z_gt_3p16": int(np.count_nonzero(z > 3.16)),
+        "removed_z_lt_1p5": int(np.count_nonzero(z < 1.5)),
+        "removed_z_ge_1p5": int(np.count_nonzero(z >= 1.5)),
     }
     return counts
 
@@ -141,23 +145,38 @@ def _append_cut_report_row(
 
 
 def _render_cut_summary_table(rows):
-    headers = ("step", "criterion", "before", "removed", "kept", "status")
+    columns = (
+        ("step", "step"),
+        ("criterion", "criterion"),
+        ("before", "before"),
+        ("removed", "removed"),
+        ("removed_z_lt_1p5", "removed z < 1.5"),
+        ("removed_z_ge_1p5", "removed z >= 1.5"),
+        ("kept", "kept"),
+        ("status", "status"),
+    )
+    keys = tuple(key for key, _label in columns)
+    labels = dict(columns)
     rendered_rows = []
     for row in rows:
-        rendered_rows.append({key: str(row[key]) for key in headers})
+        rendered_rows.append({key: str(row[key]) for key in keys})
 
     widths = {
-        key: max(len(key), *(len(row[key]) for row in rendered_rows)) if rendered_rows else len(key)
-        for key in headers
+        key: (
+            max(len(labels[key]), *(len(row[key]) for row in rendered_rows))
+            if rendered_rows
+            else len(labels[key])
+        )
+        for key in keys
     }
 
     def _line(values):
-        return "| " + " | ".join(values[key].ljust(widths[key]) for key in headers) + " |"
+        return "| " + " | ".join(values[key].ljust(widths[key]) for key in keys) + " |"
 
-    border = "+-" + "-+-".join("-" * widths[key] for key in headers) + "-+"
+    border = "+-" + "-+-".join("-" * widths[key] for key in keys) + "-+"
     lines = [
         border,
-        _line({key: key for key in headers}),
+        _line(labels),
         border,
     ]
     lines.extend(_line(row) for row in rendered_rows)
@@ -1052,7 +1071,20 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
                   lc_info_csv=None,
                   z_range=(0.44, 3.16),
                   plot_path="plots/hubble",
-                  cut_report_path=None):
+                  cut_report_path=None,
+                  plot_diagnostics=True,
+                  *,
+                  magnitude_convention):
+    if (
+        not isinstance(magnitude_convention, str)
+        or magnitude_convention not in {"intrinsic", "observed"}
+    ):
+        raise ValueError(
+            "magnitude_convention must be exactly 'intrinsic' or 'observed'; "
+            "case and surrounding whitespace are not normalized. "
+            f"got {magnitude_convention!r}."
+        )
+
     def _format_cut_bounds(lower, upper, *, upper_inclusive=True, allow_missing=False):
         left = "[" if lower is not None else "("
         right = "]" if upper_inclusive else ")"
@@ -1134,6 +1166,50 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
         plot_tau_sigma_vs_redshift,
     )
 
+    if not plot_diagnostics:
+        def _skip_diagnostic_plot(*args, **kwargs):
+            return None
+
+        plot_adf_pvalue_g_diagnostic = _skip_diagnostic_plot
+        plot_alpha_lambda_vs_l2500_by_redshift = _skip_diagnostic_plot
+        plot_alpha_lambda_vs_l2500 = _skip_diagnostic_plot
+        plot_alpha_lambda_vs_eta_sigma = _skip_diagnostic_plot
+        plot_alpha_lambda_histogram = _skip_diagnostic_plot
+        plot_alpha_lambda_vs_redshift = _skip_diagnostic_plot
+        plot_blr_amp_vs_redshift_by_band = _skip_diagnostic_plot
+        plot_blr_diagnostics_summary = _skip_diagnostic_plot
+        plot_bc_lag_vs_l2500 = _skip_diagnostic_plot
+        plot_blr_line_lags_vs_l2500_fiducial = _skip_diagnostic_plot
+        plot_blr_lag_vs_amp_by_band = _skip_diagnostic_plot
+        plot_blr_lag_vs_redshift_by_band = _skip_diagnostic_plot
+        plot_bpl_psd_vs_uv_variability = _skip_diagnostic_plot
+        plot_eta_tau_sigma_vs_redshift = _skip_diagnostic_plot
+        plot_fast_vs_uv_variability = _skip_diagnostic_plot
+        plot_f_host_2500_vs_redshift = _skip_diagnostic_plot
+        plot_f_host_2500_vs_l2500 = _skip_diagnostic_plot
+        plot_g_band_drift_slope_histograms = _skip_diagnostic_plot
+        plot_l2500_vs_eta_sigma_fiducial = _skip_diagnostic_plot
+        plot_l2500_vs_uv_variability_fiducial = _skip_diagnostic_plot
+        plot_linear_trend_vs_redshift = _skip_diagnostic_plot
+        plot_mean_function_slope_vs_tau = _skip_diagnostic_plot
+        plot_Mi_relation = _skip_diagnostic_plot
+        plot_light_curve_n_points_vs_apparent_mag = _skip_diagnostic_plot
+        plot_cut_diagnostics = _skip_diagnostic_plot
+        plot_m2500_vs_z_colorpanels = _skip_diagnostic_plot
+        plot_spectral_fraction_vs_redshift = _skip_diagnostic_plot
+        plot_sf_ref_band_vs_model_g = _skip_diagnostic_plot
+        plot_sf_vs_uv_variability = _skip_diagnostic_plot
+        plot_sigma_bc_vs_frac_bc = _skip_diagnostic_plot
+        plot_sigma_bc_vs_redshift = _skip_diagnostic_plot
+        plot_sigma_tau_err_std_psd_comparison = _skip_diagnostic_plot
+        plot_sigma_tau_vs_lambda_broken_pl_fit = _skip_diagnostic_plot
+        plot_sigma_uv_vs_variability_chi_sq_red_g = _skip_diagnostic_plot
+        plot_sigma_uv_vs_tau_uv_rf = _skip_diagnostic_plot
+        plot_sigma_uv_host_correction = _skip_diagnostic_plot
+        plot_suberlak_style_sigma_tau_fits = _skip_diagnostic_plot
+        plot_tau_sigma_vs_wu_catalog = _skip_diagnostic_plot
+        plot_tau_sigma_vs_redshift = _skip_diagnostic_plot
+
     if exclude_object_ids_csv is None:
         exclude_object_ids_csv = []
     cut_rows = []
@@ -1170,6 +1246,8 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
         pd.DataFrame(cut_rows).to_csv(diagnostics_path, index=False)
 
     def _plot_sigma_tau_ls_identity(frame, *, suffix, sigma_limits=None, tau_limits=None):
+        if not plot_diagnostics:
+            return
         sigma_keys = {
             "x": "log_sigma_uv",
             "y": "log_sigma_ls",
@@ -1402,6 +1480,113 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
         if 'alpha_lambda' not in df.columns:
             raise ValueError("spectra_fit_csv not provided and spectral fields not found in agn h5 file")
             #raise ValueError("spectra_fit_csv must be provided if alpha_lambda not in agn h5 file")
+
+    magnitude_columns = {
+        "intrinsic": (
+            "apparent_mag_2500_intrinsic",
+            "apparent_mag_2500_intrinsic_err",
+        ),
+        "observed": (
+            "apparent_mag_2500_reddened",
+            "apparent_mag_2500_reddened_err",
+        ),
+    }
+
+    def _validated_magnitude_pair(convention):
+        magnitude_column, error_column = magnitude_columns[convention]
+        missing_columns = [
+            column
+            for column in (magnitude_column, error_column)
+            if column not in df.columns
+        ]
+        if missing_columns:
+            raise ValueError(
+                f"Cannot load magnitude_convention={convention!r}; required "
+                f"column(s) are missing: {missing_columns}."
+            )
+
+        magnitude = df[magnitude_column]
+        magnitude_error = df[error_column]
+        for column, values in (
+            (magnitude_column, magnitude),
+            (error_column, magnitude_error),
+        ):
+            if (
+                not pd.api.types.is_numeric_dtype(values.dtype)
+                or pd.api.types.is_bool_dtype(values.dtype)
+            ):
+                raise ValueError(
+                    f"Column {column!r} must contain numeric values without coercion; "
+                    f"got dtype {values.dtype!r}."
+                )
+
+        magnitude_values = magnitude.to_numpy(dtype=float)
+        error_values = magnitude_error.to_numpy(dtype=float)
+        if not np.all(np.isfinite(magnitude_values)):
+            invalid_count = int(np.count_nonzero(~np.isfinite(magnitude_values)))
+            raise ValueError(
+                f"Column {magnitude_column!r} contains {invalid_count} non-finite "
+                f"value(s) for magnitude_convention={convention!r}."
+            )
+        if not np.all(np.isfinite(error_values)):
+            invalid_count = int(np.count_nonzero(~np.isfinite(error_values)))
+            raise ValueError(
+                f"Column {error_column!r} contains {invalid_count} non-finite "
+                f"value(s) for magnitude_convention={convention!r}."
+            )
+        if np.any(error_values < 0.0):
+            invalid_count = int(np.count_nonzero(error_values < 0.0))
+            raise ValueError(
+                f"Column {error_column!r} must be non-negative; found "
+                f"{invalid_count} negative value(s)."
+            )
+        return magnitude.astype(float), magnitude_error.astype(float)
+
+    selected_magnitude, selected_magnitude_error = _validated_magnitude_pair(
+        magnitude_convention
+    )
+    df["apparent_mag_2500"] = selected_magnitude
+    df["apparent_mag_2500_err"] = selected_magnitude_error
+    print(
+        f"Using {magnitude_columns[magnitude_convention][0]} and "
+        f"{magnitude_columns[magnitude_convention][1]} through the "
+        "apparent_mag_2500 Hubble-workflow aliases."
+    )
+
+    other_convention = (
+        "observed" if magnitude_convention == "intrinsic" else "intrinsic"
+    )
+    other_columns = magnitude_columns[other_convention]
+    other_columns_present = [column in df.columns for column in other_columns]
+    df = df.drop(columns=["dm_red", "dm_red_err"], errors="ignore")
+    if any(other_columns_present) and not all(other_columns_present):
+        missing_columns = [
+            column
+            for column, present in zip(other_columns, other_columns_present)
+            if not present
+        ]
+        raise ValueError(
+            f"Incomplete {other_convention!r} magnitude data: found only part of "
+            f"the canonical column pair; missing {missing_columns}."
+        )
+    if all(other_columns_present):
+        other_magnitude, other_magnitude_error = _validated_magnitude_pair(
+            other_convention
+        )
+        if magnitude_convention == "intrinsic":
+            intrinsic_mag_2500 = selected_magnitude
+            intrinsic_mag_2500_err = selected_magnitude_error
+            observed_mag_2500 = other_magnitude
+            observed_mag_2500_err = other_magnitude_error
+        else:
+            observed_mag_2500 = selected_magnitude
+            observed_mag_2500_err = selected_magnitude_error
+            intrinsic_mag_2500 = other_magnitude
+            intrinsic_mag_2500_err = other_magnitude_error
+        df["dm_red"] = observed_mag_2500 - intrinsic_mag_2500
+        df["dm_red_err"] = np.sqrt(
+            observed_mag_2500_err**2 + intrinsic_mag_2500_err**2
+        )
 
     if "f_host_2500_psf" not in df.columns and "frac_host_psf_2500" in df.columns:
         df["f_host_2500_psf"] = pd.to_numeric(df["frac_host_psf_2500"], errors="coerce")

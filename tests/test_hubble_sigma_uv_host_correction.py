@@ -4,6 +4,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -42,12 +43,103 @@ def _make_loader_input():
             "log_tau_uv_rf_std_psd": [0.2, 0.2, 0.2, 0.2, 0.2],
             "log_sigma_uv_log_tau_uv_rf_cov_psd": [0.01, 0.01, 0.01, 0.01, 0.01],
             "apparent_mag_2500": [20.3, 20.4, 20.5, 20.6, 20.7],
+            "apparent_mag_2500_err": [0.1, 0.1, 0.1, 0.1, 0.1],
+            "apparent_mag_2500_intrinsic": [20.3, 20.4, 20.5, 20.6, 20.7],
+            "apparent_mag_2500_intrinsic_err": [0.1, 0.1, 0.1, 0.1, 0.1],
+            "apparent_mag_2500_reddened": [20.3, 20.4, 20.5, 20.6, 20.7],
+            "apparent_mag_2500_reddened_err": [0.1, 0.1, 0.1, 0.1, 0.1],
             "f_host_2500": [0.2, 0.0, 1.1, -0.1, 0.3],
             "f_host_2500_err": [0.05, 0.0, 0.1, 0.2, np.nan],
             "f_PL": [0.8, 1.0, 1.1, -0.1, 0.7],
             "f_PL_err": [0.05, 0.0, 0.1, 0.2, np.nan],
         }
     )
+
+
+def test_load_agn_data_requires_an_explicit_exact_magnitude_convention():
+    with pytest.raises(TypeError, match="magnitude_convention"):
+        hubble_utils.load_agn_data("unused.h5")
+
+    with pytest.raises(ValueError, match="exactly 'intrinsic' or 'observed'"):
+        hubble_utils.load_agn_data(
+            "unused.h5",
+            magnitude_convention=" Intrinsic ",
+        )
+
+
+def test_load_agn_data_raises_when_selected_magnitude_columns_are_missing(
+    monkeypatch,
+    tmp_path,
+):
+    df_in = _make_loader_input().iloc[:2].copy()
+    df_in = df_in.drop(
+        columns=[
+            "apparent_mag_2500_intrinsic",
+            "apparent_mag_2500_intrinsic_err",
+        ]
+    )
+    input_path = tmp_path / "fake_input.h5"
+    input_path.touch()
+    monkeypatch.setattr(
+        hubble_utils,
+        "read_quasars_from_hdf5_flat",
+        lambda *args, **kwargs: df_in.copy(),
+    )
+    monkeypatch.setattr(hubble_utils, "populate_xray", lambda df: df)
+
+    with pytest.raises(
+        ValueError,
+        match="apparent_mag_2500_intrinsic.*apparent_mag_2500_intrinsic_err",
+    ):
+        hubble_utils.load_agn_data(
+            input_path,
+            spectra_fit_csv=None,
+            magnitude_convention="intrinsic",
+            lc_info_csv=None,
+            only_load=True,
+            apply_cut=False,
+            plot_diagnostics=False,
+        )
+
+
+@pytest.mark.parametrize(
+    ("bad_magnitude", "bad_error", "message"),
+    [
+        (np.nan, 0.1, "non-finite"),
+        ("not-a-number", 0.1, "numeric"),
+        (20.0, np.nan, "non-finite"),
+        (20.0, -0.1, "non-negative"),
+    ],
+)
+def test_load_agn_data_raises_for_invalid_selected_magnitude_values(
+    monkeypatch,
+    tmp_path,
+    bad_magnitude,
+    bad_error,
+    message,
+):
+    df_in = _make_loader_input().iloc[:2].copy()
+    df_in["apparent_mag_2500_intrinsic"] = [20.0, bad_magnitude]
+    df_in["apparent_mag_2500_intrinsic_err"] = [0.1, bad_error]
+    input_path = tmp_path / "fake_input.h5"
+    input_path.touch()
+    monkeypatch.setattr(
+        hubble_utils,
+        "read_quasars_from_hdf5_flat",
+        lambda *args, **kwargs: df_in.copy(),
+    )
+    monkeypatch.setattr(hubble_utils, "populate_xray", lambda df: df)
+
+    with pytest.raises(ValueError, match=message):
+        hubble_utils.load_agn_data(
+            input_path,
+            spectra_fit_csv=None,
+            magnitude_convention="intrinsic",
+            lc_info_csv=None,
+            only_load=True,
+            apply_cut=False,
+            plot_diagnostics=False,
+        )
 
 
 def test_load_agn_data_propagates_host_error_into_sigma_uv(monkeypatch, tmp_path):
@@ -66,6 +158,7 @@ def test_load_agn_data_propagates_host_error_into_sigma_uv(monkeypatch, tmp_path
 
     df, df_all = hubble_utils.load_agn_data(
         input_path,
+        magnitude_convention="intrinsic",
         spectra_fit_csv=None,
         lc_info_csv=None,
         only_load=True,
@@ -74,6 +167,10 @@ def test_load_agn_data_propagates_host_error_into_sigma_uv(monkeypatch, tmp_path
         plot_path=str(tmp_path / "figures"),
     )
     assert df_all.equals(df)
+    np.testing.assert_allclose(
+        df["apparent_mag_2500"],
+        df_in["apparent_mag_2500"],
+    )
 
     ln10 = np.log(10.0)
     orig_sigma = df_in["log_sigma_uv"].to_numpy(dtype=float)
@@ -114,6 +211,157 @@ def test_load_agn_data_propagates_host_error_into_sigma_uv(monkeypatch, tmp_path
     assert pivots.shape[0] == len(hubble_model.agn_model_req_obs)
 
 
+def test_load_agn_data_aliases_intrinsic_spectral_magnitude(monkeypatch, tmp_path, capsys):
+    df_in = _make_loader_input().iloc[:2].copy()
+    observed_mag = np.array([20.4, 21.1])
+    observed_err = np.array([0.20, 0.30])
+    intrinsic_mag = np.array([20.0, 20.5])
+    intrinsic_err = np.array([0.10, 0.15])
+    df_in["apparent_mag_2500"] = observed_mag
+    df_in["apparent_mag_2500_err"] = observed_err
+
+    def fake_populate_spectra_fit(frame, _spectra_fit_csv):
+        frame = frame.copy()
+        frame["apparent_mag_2500_reddened"] = observed_mag
+        frame["apparent_mag_2500_reddened_err"] = observed_err
+        frame["apparent_mag_2500_intrinsic"] = intrinsic_mag
+        frame["apparent_mag_2500_intrinsic_err"] = intrinsic_err
+        return frame
+
+    input_path = tmp_path / "fake_input.h5"
+    input_path.touch()
+    spectra_path = tmp_path / "spectra.csv"
+    spectra_path.touch()
+    monkeypatch.setattr(
+        hubble_utils,
+        "read_quasars_from_hdf5_flat",
+        lambda *args, **kwargs: df_in.copy(),
+    )
+    monkeypatch.setattr(hubble_utils, "populate_spectra_fit", fake_populate_spectra_fit)
+    monkeypatch.setattr(hubble_utils, "populate_xray", lambda df: df)
+
+    df, df_all = hubble_utils.load_agn_data(
+        input_path,
+        spectra_fit_csv=[str(spectra_path)],
+        magnitude_convention="intrinsic",
+        lc_info_csv=None,
+        only_load=True,
+        apply_cut=False,
+        plot_diagnostics=False,
+    )
+
+    assert df_all.equals(df)
+    np.testing.assert_allclose(df["apparent_mag_2500"], intrinsic_mag)
+    np.testing.assert_allclose(df["apparent_mag_2500_err"], intrinsic_err)
+    np.testing.assert_allclose(df["apparent_mag_2500_reddened"], observed_mag)
+    np.testing.assert_allclose(df["apparent_mag_2500_reddened_err"], observed_err)
+    np.testing.assert_allclose(df["dm_red"], observed_mag - intrinsic_mag)
+    np.testing.assert_allclose(
+        df["dm_red_err"],
+        np.sqrt(observed_err**2 + intrinsic_err**2),
+    )
+    assert "Using apparent_mag_2500_intrinsic" in capsys.readouterr().out
+
+
+def test_load_agn_data_can_use_observed_spectral_magnitude(monkeypatch, tmp_path, capsys):
+    df_in = _make_loader_input().iloc[:2].copy()
+    observed_mag = np.array([20.4, 21.1])
+    observed_err = np.array([0.20, 0.30])
+    intrinsic_mag = np.array([20.0, 20.5])
+    intrinsic_err = np.array([0.10, 0.15])
+    df_in["apparent_mag_2500"] = observed_mag
+    df_in["apparent_mag_2500_err"] = observed_err
+
+    def fake_populate_spectra_fit(frame, _spectra_fit_csv):
+        frame = frame.copy()
+        frame["apparent_mag_2500_reddened"] = observed_mag
+        frame["apparent_mag_2500_reddened_err"] = observed_err
+        frame["apparent_mag_2500_intrinsic"] = intrinsic_mag
+        frame["apparent_mag_2500_intrinsic_err"] = intrinsic_err
+        return frame
+
+    input_path = tmp_path / "fake_input.h5"
+    input_path.touch()
+    spectra_path = tmp_path / "spectra.csv"
+    spectra_path.touch()
+    monkeypatch.setattr(
+        hubble_utils,
+        "read_quasars_from_hdf5_flat",
+        lambda *args, **kwargs: df_in.copy(),
+    )
+    monkeypatch.setattr(hubble_utils, "populate_spectra_fit", fake_populate_spectra_fit)
+    monkeypatch.setattr(hubble_utils, "populate_xray", lambda df: df)
+
+    df, df_all = hubble_utils.load_agn_data(
+        input_path,
+        spectra_fit_csv=[str(spectra_path)],
+        magnitude_convention="observed",
+        lc_info_csv=None,
+        only_load=True,
+        apply_cut=False,
+        plot_diagnostics=False,
+    )
+
+    assert df_all.equals(df)
+    np.testing.assert_allclose(df["apparent_mag_2500"], observed_mag)
+    np.testing.assert_allclose(df["apparent_mag_2500_err"], observed_err)
+    np.testing.assert_allclose(df["apparent_mag_2500_intrinsic"], intrinsic_mag)
+    np.testing.assert_allclose(df["apparent_mag_2500_intrinsic_err"], intrinsic_err)
+    np.testing.assert_allclose(df["apparent_mag_2500_reddened"], observed_mag)
+    np.testing.assert_allclose(df["apparent_mag_2500_reddened_err"], observed_err)
+    np.testing.assert_allclose(df["dm_red"], observed_mag - intrinsic_mag)
+    np.testing.assert_allclose(
+        df["dm_red_err"],
+        np.sqrt(observed_err**2 + intrinsic_err**2),
+    )
+    assert "Using apparent_mag_2500_reddened" in capsys.readouterr().out
+
+
+def test_load_agn_data_applies_observed_convention_to_hdf5_spectral_fields(
+    monkeypatch,
+    tmp_path,
+):
+    df_in = _make_loader_input().iloc[:2].copy()
+    observed_mag = np.array([20.4, 21.1])
+    observed_err = np.array([0.20, 0.30])
+    intrinsic_mag = np.array([20.0, 20.5])
+    intrinsic_err = np.array([0.10, 0.15])
+    df_in["apparent_mag_2500"] = intrinsic_mag
+    df_in["apparent_mag_2500_err"] = intrinsic_err
+    df_in["apparent_mag_2500_reddened"] = observed_mag
+    df_in["apparent_mag_2500_reddened_err"] = observed_err
+    df_in["apparent_mag_2500_intrinsic"] = intrinsic_mag
+    df_in["apparent_mag_2500_intrinsic_err"] = intrinsic_err
+
+    input_path = tmp_path / "fake_input.h5"
+    input_path.touch()
+    monkeypatch.setattr(
+        hubble_utils,
+        "read_quasars_from_hdf5_flat",
+        lambda *args, **kwargs: df_in.copy(),
+    )
+    monkeypatch.setattr(hubble_utils, "populate_xray", lambda df: df)
+
+    df, df_all = hubble_utils.load_agn_data(
+        input_path,
+        spectra_fit_csv=None,
+        magnitude_convention="observed",
+        lc_info_csv=None,
+        only_load=True,
+        apply_cut=False,
+        plot_diagnostics=False,
+    )
+
+    assert df_all.equals(df)
+    np.testing.assert_allclose(df["apparent_mag_2500"], observed_mag)
+    np.testing.assert_allclose(df["apparent_mag_2500_err"], observed_err)
+    np.testing.assert_allclose(df["dm_red"], observed_mag - intrinsic_mag)
+    np.testing.assert_allclose(
+        df["dm_red_err"],
+        np.sqrt(observed_err**2 + intrinsic_err**2),
+    )
+
+
 def test_load_agn_data_uses_survey_band_log_jitter_grid(monkeypatch, tmp_path):
     df_in = _make_loader_input().iloc[:2].copy()
     df_in["dropped_bands"] = ["", "r"]
@@ -137,6 +385,7 @@ def test_load_agn_data_uses_survey_band_log_jitter_grid(monkeypatch, tmp_path):
 
     df, df_all = hubble_utils.load_agn_data(
         input_path,
+        magnitude_convention="intrinsic",
         spectra_fit_csv=None,
         lc_info_csv=None,
         only_load=True,

@@ -56,6 +56,10 @@ def _minimal_agn_frame(n=10):
             "log_tau_ls_err": np.full(n, 0.08),
             "apparent_mag_2500": np.linspace(20.0, 21.0, n),
             "apparent_mag_2500_err": np.full(n, 0.01),
+            "apparent_mag_2500_intrinsic": np.linspace(20.0, 21.0, n),
+            "apparent_mag_2500_intrinsic_err": np.full(n, 0.01),
+            "apparent_mag_2500_reddened": np.linspace(20.0, 21.0, n),
+            "apparent_mag_2500_reddened_err": np.full(n, 0.01),
             "SDSS_RUN2D": np.full(n, "v5_13_2"),
             "number_points_g": np.full(n, 300),
             "number_points_r": np.full(n, 300),
@@ -202,6 +206,7 @@ def test_load_agn_data_makes_precut_and_postcut_fhost_and_blr_plots(tmp_path, mo
 
     hubble_utils.load_agn_data(
         source_path,
+        magnitude_convention="intrinsic",
         spectra_fit_csv=None,
         lc_info_csv=None,
         apply_cut=True,
@@ -241,6 +246,7 @@ def test_load_agn_data_writes_sigma_tau_ls_identity_grids_to_diagnostics(tmp_pat
 
     hubble_utils.load_agn_data(
         source_path,
+        magnitude_convention="intrinsic",
         spectra_fit_csv=None,
         lc_info_csv=None,
         apply_cut=True,
@@ -368,6 +374,7 @@ def test_load_agn_data_run2d_filter_v5_13_2_and_drop_missing(tmp_path, monkeypat
 
     filtered, _ = hubble_utils.load_agn_data(
         source_path,
+        magnitude_convention="intrinsic",
         spectra_fit_csv=None,
         lc_info_csv=None,
         apply_cut=True,
@@ -393,6 +400,7 @@ def test_load_agn_data_run2d_filter_26(tmp_path, monkeypatch):
 
     filtered, _ = hubble_utils.load_agn_data(
         source_path,
+        magnitude_convention="intrinsic",
         spectra_fit_csv=None,
         lc_info_csv=None,
         apply_cut=True,
@@ -417,6 +425,7 @@ def test_load_agn_data_run2d_filter_bypassed_when_no_cuts(tmp_path, monkeypatch)
 
     filtered, _ = hubble_utils.load_agn_data(
         source_path,
+        magnitude_convention="intrinsic",
         spectra_fit_csv=None,
         lc_info_csv=None,
         apply_cut=False,
@@ -440,6 +449,7 @@ def test_load_agn_data_run2d_filter_requires_sdss_run2d_column(tmp_path, monkeyp
     with pytest.raises(ValueError, match="SDSS_RUN2D is not available"):
         hubble_utils.load_agn_data(
             source_path,
+            magnitude_convention="intrinsic",
             spectra_fit_csv=None,
             lc_info_csv=None,
             apply_cut=True,

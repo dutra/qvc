@@ -1082,6 +1082,16 @@ def main():
     parser.add_argument("--cosmo_model", type=str, default="Flatw0waCDM", choices=["FlatLambdaCDM", "FlatwCDM", "Flatw0waCDM", "FlatwpwaCDM"])
     parser.add_argument("--speed", type=str, choices=SPEED_CHOICES, default="production")
     parser.add_argument("--spectra_fit_csv", type=str, nargs="+", required=True)
+    parser.add_argument(
+        "--magnitude-convention",
+        type=str,
+        choices=["intrinsic", "observed"],
+        required=True,
+        help=(
+            "Choose which spectral 2500-A magnitude populates the Hubble-workflow "
+            "apparent_mag_2500 aliases. This option is required."
+        ),
+    )
     parser.add_argument("--prefix", type=str, default="default_jax")
     parser.add_argument("--z_range", type=float, nargs=2, default=[0.44, 3.16])
     parser.add_argument("--N", type=int, default=None)
@@ -1120,6 +1130,7 @@ def main():
         args.agn_data_filepath,
         apply_cut=True,
         spectra_fit_csv=args.spectra_fit_csv,
+        magnitude_convention=args.magnitude_convention,
         correct_sigma_uv_host=args.correct_sigma_uv_host,
         z_range=tuple(args.z_range),
         plot_path=agn_plot_path,

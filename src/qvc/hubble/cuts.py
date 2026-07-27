@@ -1,10 +1,31 @@
 """Centralized parameter-cut thresholds for the QVC Hubble pipeline."""
 
 from ast import literal_eval
+import os
 import re
 
 import numpy as np
 import pandas as pd
+
+
+def _cut_env_float(name, default):
+    """Return an optional numeric cut override from the environment.
+
+    The normal pipeline continues to use the in-source science defaults.  This
+    narrow override mechanism is for reproducible cut scans: each launched
+    process receives its complete cut profile, without mutating the defaults
+    or another scan member's configuration.
+    """
+
+    value = os.environ.get(name)
+    if value is None or not str(value).strip():
+        return default
+    if str(value).strip().lower() in {"none", "null", "off"}:
+        return None
+    try:
+        return float(value)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a floating-point value or 'none', got {value!r}") from exc
 
 LOG_TAU_UV_RF_MIN = 1.5
 LOG_TAU_UV_RF_MAX = 4.0
@@ -13,17 +34,25 @@ T_RF_LENGTH_MIN = 1700.0
 LIGHT_CURVE_N_POINTS_MIN = 250
 LIGHT_CURVE_N_POINTS_COLUMN = "light_curve_n_points"
 LIGHT_CURVE_N_POINTS_EXCLUDED_BANDS = ("u",)
-F_HOST_2500_MAX = 0.001
 APPARENT_MAG_2500_MAX = None
 ALPHA_LAMBDA_MIN = None
 ALPHA_LAMBDA_MAX = None
 
-VARIABILITY_CHI_SQ_RED_G_MIN = 30.0
 LOG_SIGMA_UV_MIN = -1.5
 LOG_SIGMA_UV_MAX = 0.2
 REDDENING_EBV_MAX = None
 
-LOG_AMP_DELTA_BLR_UPPER = -0.2
+VARIABILITY_CHI_SQ_RED_G_MIN = _cut_env_float(
+    "QVC_HUBBLE_CUT_VARIABILITY_CHI_SQ_RED_G_MIN", 30.0
+)
+# LOO-standardized residuals should have unit mean square. This conservative
+# ceiling removes only the extreme high-tail light-curve fits.
+LOO_CHI2_EFF_MAX = _cut_env_float("QVC_HUBBLE_CUT_LOO_CHI2_EFF_MAX", 1.01)
+F_HOST_2500_MAX = _cut_env_float("QVC_HUBBLE_CUT_F_HOST_2500_MAX", 0.1)
+
+LOG_AMP_DELTA_BLR_UPPER = _cut_env_float(
+    "QVC_HUBBLE_CUT_LOG_AMP_DELTA_BLR_UPPER", -0.2
+)
 LOG_AMP_DELTA_BLR_UPPER_BY_BAND = {
     "u": LOG_AMP_DELTA_BLR_UPPER,
     "g": LOG_AMP_DELTA_BLR_UPPER,
@@ -32,9 +61,18 @@ LOG_AMP_DELTA_BLR_UPPER_BY_BAND = {
 }
 
 LOG_AMP_DELTA_BC_UPPER = -0.2
-LOG_F_BC_3000_MAX = -3
-LOG_F_FE_UV_3000_MAX = -3
-REL_APPARENT_MAG_2500_ERR_MAX = 0.0025
+# The Jul22 spectra fractions populate this sample at values above the former
+# 10^-3 threshold.  Keep the physical 0--1 range rather than rejecting those
+# otherwise quality-selected objects.
+LOG_F_BC_3000_MAX = _cut_env_float(
+    "QVC_HUBBLE_CUT_LOG_F_BC_3000_MAX", np.log10(0.05)
+)
+LOG_F_FE_UV_3000_MAX = _cut_env_float(
+    "QVC_HUBBLE_CUT_LOG_F_FE_UV_3000_MAX", np.log10(0.1)
+)
+REL_APPARENT_MAG_2500_ERR_MAX = _cut_env_float(
+    "QVC_HUBBLE_CUT_REL_APPARENT_MAG_2500_ERR_MAX", 0.0025
+)
 
 
 EXCLUDED_SDSS_NAMES = (
@@ -44,7 +82,10 @@ EXCLUDED_SDSS_NAMES = (
     "014641.18+010815.9",
     "010151.08+002028.8",
     "025646.57+003858.3",
-    "215013.64-001627.2"
+    "215013.64-001627.2",
+    "221018.27+005832.1",
+    "220311.37+005056.3"
+
 )
 AGN_SCALAR_PARAMETER_CUTS = (
     ("log_tau_uv_rf", LOG_TAU_UV_RF_MIN, LOG_TAU_UV_RF_MAX),
@@ -55,6 +96,7 @@ AGN_SCALAR_PARAMETER_CUTS = (
     ("apparent_mag_2500", None, APPARENT_MAG_2500_MAX),
     ("alpha_lambda", ALPHA_LAMBDA_MIN, ALPHA_LAMBDA_MAX),
     ("variability_chi_sq_red_g", VARIABILITY_CHI_SQ_RED_G_MIN, None),
+    ("loo_chi2_eff", None, LOO_CHI2_EFF_MAX),
     ("log_sigma_uv", LOG_SIGMA_UV_MIN, LOG_SIGMA_UV_MAX),
 )
 

@@ -17,6 +17,7 @@ from qvc.hubble.cuts import (  # noqa: E402
     LIGHT_CURVE_N_POINTS_COLUMN,
     LIGHT_CURVE_N_POINTS_EXCLUDED_BANDS,
     LIGHT_CURVE_N_POINTS_MIN,
+    LOO_CHI2_EFF_MAX,
     add_light_curve_point_count_column,
     light_curve_point_count_series,
 )
@@ -24,6 +25,7 @@ from qvc.hubble.hubble_cut_config import build_agn_cuts  # noqa: E402
 from qvc.hubble.hubble_utils import (  # noqa: E402
     _append_cut_report_row,
     _count_redshift_bin_removals,
+    _render_cut_summary_table,
     _scalar_cut_has_inclusive_upper,
     _scalar_parameter_cut_mask,
 )
@@ -43,6 +45,14 @@ def test_build_agn_cuts_includes_apparent_mag_2500_strict_maximum():
 
     assert cut_map["apparent_mag_2500"] == (None, APPARENT_MAG_2500_MAX)
     assert not _scalar_cut_has_inclusive_upper("apparent_mag_2500")
+
+
+def test_build_agn_cuts_includes_loo_chi2_eff_maximum():
+    cuts = build_agn_cuts()
+    cut_map = {column: (lower, upper) for column, lower, upper in cuts}
+
+    assert cut_map["loo_chi2_eff"] == (None, LOO_CHI2_EFF_MAX)
+    assert _scalar_cut_has_inclusive_upper("loo_chi2_eff")
 
 
 def test_apparent_mag_2500_cut_is_disabled_when_threshold_is_none():
@@ -139,6 +149,8 @@ def test_count_redshift_bin_removals_uses_requested_bins():
         "removed_z_1_to_2": 2,
         "removed_z_2_to_3p16": 2,
         "removed_z_gt_3p16": 1,
+        "removed_z_lt_1p5": 5,
+        "removed_z_ge_1p5": 4,
     }
 
 
@@ -167,5 +179,46 @@ def test_append_cut_report_row_includes_zero_filled_redshift_bins_without_remove
             "removed_z_1_to_2": 0,
             "removed_z_2_to_3p16": 0,
             "removed_z_gt_3p16": 0,
+            "removed_z_lt_1p5": 0,
+            "removed_z_ge_1p5": 0,
         }
+    ]
+
+
+def test_render_cut_summary_table_shows_low_and_high_redshift_removals_after_total():
+    rows = []
+    _append_cut_report_row(
+        rows,
+        step="agn_scalar:dummy",
+        criterion="dummy criterion",
+        before=5,
+        kept=1,
+        status="applied",
+        removed_frame=pd.DataFrame({"z": [0.2, 1.49, 1.5, 2.0]}),
+    )
+
+    table = _render_cut_summary_table(rows)
+    lines = table.splitlines()
+    headers = [cell.strip() for cell in lines[1].strip("|").split("|")]
+    values = [cell.strip() for cell in lines[3].strip("|").split("|")]
+
+    assert headers == [
+        "step",
+        "criterion",
+        "before",
+        "removed",
+        "removed z < 1.5",
+        "removed z >= 1.5",
+        "kept",
+        "status",
+    ]
+    assert values == [
+        "agn_scalar:dummy",
+        "dummy criterion",
+        "5",
+        "4",
+        "2",
+        "2",
+        "1",
+        "applied",
     ]

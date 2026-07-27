@@ -1,0 +1,61 @@
+#!/usr/bin/env xonsh
+
+# Optional interactive prompt customization is intentionally omitted so this
+# batch runner does not depend on the external ``cmd_done`` xontrib.
+
+# Environment variables (xonsh style)
+$QT_QPA_PLATFORM = "offscreen"
+$NUM_CORES = "30"
+
+# Sweep values fastest, quick, standard.  The environment overrides make this
+# runner suitable for isolated, reproducible cut-search members.
+speed = __xonsh__.env.get("QVC_HUBBLE_SPEED", "fastest")
+magnitude_convention = __xonsh__.env["QVC_HUBBLE_MAGNITUDE_CONVENTION"]
+
+# spectra_fit_csv = "results/data/spectra_data_all.csv"
+# h5_file = "results/data/lc_data_all.h5"
+
+spectra_fit_csv = "results/data/jaxqsofit_jul16c_chisqnew_all.csv"
+h5_file = "results/data/jul22_1134pm_erlang_independentblrlags_fast_jul14chisq_spectrajul16call_n1_7fa5882_chisq.h5"
+
+
+$PREFIX = __xonsh__.env.get("QVC_HUBBLE_PREFIX", f"jul27c_red_{speed}")
+
+prefix = $PREFIX
+echo "Running hubble_fit.py and PREFIX=" $PREFIX
+
+# /home/dutra/.conda/envs/jaxcpu4/bin/python -m qvc.hubble.hubble_fit \
+#     --spectra_sdss_run2d all \
+#     --cosmo_models FlatLambdaCDM FlatwCDM Flatw0waCDM \
+#     --run full \
+#     --speed @(speed) \
+#     --spectra_fit_csv @(spectra_fit_csv) \
+#     --z_range 0.44 3.16 \
+#     --result_prefix "fiducial" \
+#     --prefix @(prefix) \
+#     --sigma_clip_threshold 3.0 \
+#     @(h5_file)
+
+#    --disable_sigma_clip_pass \
+
+    # --resume_replot_with_cuts \
+    # --resume results/hubble_posteriors/apr23a_apr23_apr20call_quick_m003/posteriors_Flatw0waCDM_joint_quick_all_z0p44_3p16_2d.h5 \
+    # results/hubble_posteriors/apr23a_apr23_apr20call_quick_m003/posteriors_FlatLambdaCDM_joint_quick_all_z0p44_3p16_2d.h5 \
+    # --resume_stage pass1 \
+
+/home/dutra/.conda/envs/jaxcpu4/bin/python -m qvc.hubble.hubble_fit \
+    --cosmo_models Flatw0waCDM \
+    --run single \
+    --speed @(speed) \
+    --spectra_fit_csv @(spectra_fit_csv) \
+    --magnitude-convention @(magnitude_convention) \
+    --result_prefix "fiducial" \
+    --z_range 0.44 3.16 \
+    --prefix @(prefix) \
+    --disable_sigma_clip_pass \
+    --sigma_clip_threshold 3.0 \
+    --minimal-plots \
+    @(h5_file)
+
+
+    #--skip_plots \

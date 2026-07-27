@@ -6,6 +6,7 @@ $NUM_CORES = "30"
 
 speed = "production"
 python_cmd = "python"
+magnitude_convention = __xonsh__.env["QVC_HUBBLE_MAGNITUDE_CONVENTION"]
 
 spectra_fit_csv = "results/data/spectra_data_all.csv"
 h5_file = "results/data/lc_data_all.h5"
@@ -23,6 +24,7 @@ echo "Running hubble_fit.py and PREFIX=" $PREFIX
     --run full \
     --speed @(speed) \
     --spectra_fit_csv @(spectra_fit_csv) \
+    --magnitude-convention @(magnitude_convention) \
     --z_range 0.44 3.16 \
     --result_prefix "fiducial" \
     --prefix @(prefix) \
@@ -39,6 +41,7 @@ echo "Running hubble_fit.py and PREFIX=" $PREFIX
     --run full \
     --speed @(speed) \
     --spectra_fit_csv @(spectra_fit_csv) \
+    --magnitude-convention @(magnitude_convention) \
     --z_range 1.0 3.16 \
     --result_prefix "restricted" \
     --prefix @(prefix) \

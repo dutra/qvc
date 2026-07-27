@@ -1465,6 +1465,118 @@ def test_run_single_compare_sigma_only_skips_plotting_but_keeps_fit_outputs(monk
     assert delta_m_calls == []
 
 
+def test_run_single_minimal_plots_keeps_only_debiased_hubble_plot(monkeypatch, tmp_path):
+    df_agn = _make_fake_agn_sample(n_agn=6)
+    df_pantheon = _make_fake_pantheon_sample()
+    priors, model_labels, _ = hubble_model.get_model_params("FlatLambdaCDM", only_sna=False)
+    theta = np.array([(priors[key][0] + priors[key][1]) / 2.0 for key in model_labels], dtype=float)
+    flat_samples = np.tile(theta[None, :], (8, 1))
+    pipeline_kwargs = []
+    hubble_calls = []
+    expensive_calls = []
+
+    monkeypatch.chdir(tmp_path)
+    _patch_run_single_plot_stack(monkeypatch)
+    for name in (
+        "plot_sigma_uv_mpred_correction",
+        "plot_predicted_L2500_vs_sigmahat",
+        "plot_blr_diagnostics_summary",
+        "plot_completeness_diagnostics",
+        "plot_cosmo_corner",
+    ):
+        monkeypatch.setattr(
+            hubble_fit,
+            name,
+            lambda *args, _name=name, **kwargs: expensive_calls.append(_name),
+        )
+
+    def fake_run_mcmc_pipeline(df_agn_arg, *args, **kwargs):
+        pipeline_kwargs.append(kwargs)
+        return (
+            flat_samples,
+            model_labels,
+            lambda pts: np.zeros(len(np.atleast_2d(pts))),
+            None,
+            -20.0,
+            0.1,
+            np.zeros(len(df_agn_arg)),
+            np.full(len(df_agn_arg), 0.05),
+            None,
+        )
+
+    def fake_plot_hubble(*args, **kwargs):
+        hubble_calls.append(kwargs)
+        n = len(args[1])
+        return (
+            np.arange(n, dtype=float),
+            np.ones(n, dtype=float),
+            np.full(n, 44.0),
+            np.full(n, 0.1),
+            np.full(n, 0.2),
+        )
+
+    monkeypatch.setattr(hubble_fit, "run_mcmc_pipeline", fake_run_mcmc_pipeline)
+    monkeypatch.setattr(hubble_fit, "plot_hubble", fake_plot_hubble)
+    monkeypatch.setattr(
+        hubble_fit,
+        "compute_agn_likelihood_space_reduced_chi2",
+        lambda *args, **kwargs: (1.0, len(args[2])),
+    )
+
+    result = hubble_fit.run_single(
+        df_agn=df_agn,
+        df_agn_all=df_agn.copy(),
+        df_pantheon=df_pantheon,
+        _sna_L=None,
+        _sna_Lower=True,
+        _sna_LogdetCov=None,
+        cosmo_model="FlatLambdaCDM",
+        completeness=False,
+        use_full_cov=False,
+        speed="fastest",
+        z_range=(0.44, 3.16),
+        disable_sigma_clip_pass=True,
+        minimal_plots=True,
+        prefix="unit",
+    )
+
+    assert len(pipeline_kwargs) == 1
+    assert pipeline_kwargs[0]["minimal_plots"] is True
+    assert len(hubble_calls) == 1
+    assert hubble_calls[0]["debias"] is True
+    assert hubble_calls[0]["residuals_csv_filename"] == "hubble_plot_residuals.csv"
+    assert "filename" not in hubble_calls[0]
+    assert expensive_calls == []
+    assert result[5].tolist() == list(range(len(df_agn)))
+
+
+@pytest.mark.parametrize(
+    ("conflicting_flag", "message"),
+    [
+        ("skip_plots", "--skip_plots"),
+        ("compare_sigma_only", "--compare_sigma_only"),
+        ("only_sna", "--only_sna"),
+        ("use_jax", "--use_jax"),
+    ],
+)
+def test_validate_plot_mode_args_rejects_minimal_plot_conflicts(conflicting_flag, message):
+    args = type(
+        "Args",
+        (),
+        {
+            "minimal_plots": True,
+            "skip_plots": False,
+            "compare_sigma_only": False,
+            "only_sna": False,
+            "use_jax": False,
+        },
+    )()
+    setattr(args, conflicting_flag, True)
+
+    with pytest.raises(ValueError, match=message):
+        hubble_fit.validate_plot_mode_args(args)
+
+
 @pytest.mark.parametrize("resume_value, use_default_checkpoint", [(True, True), ("custom_resume.h5", False)])
 def test_resolve_resume_checkpoint_path_requires_existing_file(tmp_path, resume_value, use_default_checkpoint):
     default_checkpoint = tmp_path / "default_resume.h5"
@@ -3045,6 +3157,7 @@ def test_load_agn_data_residuals_csv_cut_remains_available(monkeypatch, tmp_path
     agn_df["dropped_bands"] = [[], [], []]
     agn_df["t_rf_length"] = [120.0, 140.0, 160.0]
     residuals_path = tmp_path / "residuals.csv"
+    cut_report_path = tmp_path / "minimal" / "cut_summary.txt"
     pd.DataFrame(
         {
             "object_id": ["agn_a", "agn_b", "agn_c"],
@@ -3060,15 +3173,39 @@ def test_load_agn_data_residuals_csv_cut_remains_available(monkeypatch, tmp_path
 
     filtered_df, all_df = hubble_utils.load_agn_data(
         "dummy.h5",
+        magnitude_convention="intrinsic",
         apply_cut=False,
         residuals_sigma_clip=3.0,
         residuals_csv=str(residuals_path),
         lc_info_csv=None,
+        cut_report_path=cut_report_path,
+        plot_diagnostics=False,
     )
 
     assert all_df["object_id"].tolist() == ["agn_a", "agn_b", "agn_c"]
     assert filtered_df["object_id"].tolist() == ["agn_a", "agn_c"]
     assert "mu_zscore" not in filtered_df.columns
+    assert cut_report_path.is_file()
+    cut_report_text = cut_report_path.read_text(encoding="utf-8")
+    assert "removed z < 1.5" in cut_report_text
+    assert "removed z >= 1.5" in cut_report_text
+
+    diagnostics_path = cut_report_path.parent / "cut_diagnostics_by_z.csv"
+    diagnostics_df = pd.read_csv(diagnostics_path)
+    assert {
+        "removed_z_lt_0p44",
+        "removed_z_0p44_to_1",
+        "removed_z_1_to_2",
+        "removed_z_2_to_3p16",
+        "removed_z_gt_3p16",
+        "removed_z_lt_1p5",
+        "removed_z_ge_1p5",
+    }.issubset(diagnostics_df.columns)
+    residual_cut = diagnostics_df.loc[
+        diagnostics_df["step"] == "residual_sigma_clip"
+    ].iloc[0]
+    assert residual_cut["removed_z_lt_1p5"] == 1
+    assert residual_cut["removed_z_ge_1p5"] == 0
 
 
 def test_hubble_fit_cli_declares_and_forwards_spectra_sdss_run2d():
@@ -3090,6 +3227,76 @@ def test_hubble_fit_cli_declares_and_forwards_spectra_sdss_run2d():
     assert "spectra_sdss_run2d" in load_kwargs
 
 
+def test_hubble_fit_cli_declares_and_forwards_magnitude_convention():
+    source_path = Path(hubble_fit.__file__)
+    tree = ast.parse(source_path.read_text(encoding="utf-8"))
+
+    parser_has_default = False
+    parser_required = None
+    parser_choices = None
+    forwarded_value = None
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if isinstance(node.func, ast.Attribute) and node.func.attr == "add_argument":
+            if (
+                node.args
+                and isinstance(node.args[0], ast.Constant)
+                and node.args[0].value == "--magnitude-convention"
+            ):
+                keywords = {kw.arg: kw.value for kw in node.keywords}
+                parser_has_default = "default" in keywords
+                parser_required = ast.literal_eval(keywords["required"])
+                parser_choices = ast.literal_eval(keywords["choices"])
+        if isinstance(node.func, ast.Name) and node.func.id == "load_agn_data":
+            for keyword in node.keywords:
+                if keyword.arg == "magnitude_convention":
+                    forwarded_value = keyword.value
+
+    assert parser_has_default is False
+    assert parser_required is True
+    assert parser_choices == ["intrinsic", "observed"]
+    assert isinstance(forwarded_value, ast.Attribute)
+    assert isinstance(forwarded_value.value, ast.Name)
+    assert forwarded_value.value.id == "args"
+    assert forwarded_value.attr == "magnitude_convention"
+
+
+def test_hubble_fit_jax_cli_declares_and_forwards_magnitude_convention():
+    source_path = SRC / "qvc" / "hubble" / "hubble_fit_jax.py"
+    tree = ast.parse(source_path.read_text(encoding="utf-8"))
+
+    parser_has_default = False
+    parser_required = None
+    parser_choices = None
+    forwarded_value = None
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if isinstance(node.func, ast.Attribute) and node.func.attr == "add_argument":
+            if (
+                node.args
+                and isinstance(node.args[0], ast.Constant)
+                and node.args[0].value == "--magnitude-convention"
+            ):
+                keywords = {kw.arg: kw.value for kw in node.keywords}
+                parser_has_default = "default" in keywords
+                parser_required = ast.literal_eval(keywords["required"])
+                parser_choices = ast.literal_eval(keywords["choices"])
+        if isinstance(node.func, ast.Name) and node.func.id == "load_agn_data":
+            for keyword in node.keywords:
+                if keyword.arg == "magnitude_convention":
+                    forwarded_value = keyword.value
+
+    assert parser_has_default is False
+    assert parser_required is True
+    assert parser_choices == ["intrinsic", "observed"]
+    assert isinstance(forwarded_value, ast.Attribute)
+    assert isinstance(forwarded_value.value, ast.Name)
+    assert forwarded_value.value.id == "args"
+    assert forwarded_value.attr == "magnitude_convention"
+
+
 def test_hubble_fit_cli_declares_only_agn_and_rejects_only_sna_combo():
     source = Path(hubble_fit.__file__).read_text(encoding="utf-8")
     tree = ast.parse(source)
@@ -3104,3 +3311,32 @@ def test_hubble_fit_cli_declares_only_agn_and_rejects_only_sna_combo():
 
     assert parser_declared
     assert "--only_sna and --only_agn cannot be used together." in source
+
+
+def test_hubble_fit_cli_declares_and_forwards_minimal_plots():
+    source_path = Path(hubble_fit.__file__)
+    tree = ast.parse(source_path.read_text(encoding="utf-8"))
+
+    parser_declared = False
+    run_single_kwargs = set()
+    run_all_kwargs = set()
+    load_kwargs = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if isinstance(node.func, ast.Attribute) and node.func.attr == "add_argument":
+            if node.args and isinstance(node.args[0], ast.Constant):
+                parser_declared |= node.args[0].value == "--minimal-plots"
+        if isinstance(node.func, ast.Name):
+            kwargs = {kw.arg for kw in node.keywords if kw.arg is not None}
+            if node.func.id == "run_single":
+                run_single_kwargs.update(kwargs)
+            elif node.func.id == "run_all":
+                run_all_kwargs.update(kwargs)
+            elif node.func.id == "load_agn_data":
+                load_kwargs.update(kwargs)
+
+    assert parser_declared
+    assert "minimal_plots" in run_single_kwargs
+    assert "minimal_plots" in run_all_kwargs
+    assert "plot_diagnostics" in load_kwargs

@@ -522,3 +522,73 @@ def test_run_all_compare_sigma_only_still_compares_models_and_skips_corner_plots
 
     assert len(compare_calls) == 2
     assert corner_calls == []
+
+
+def test_run_all_minimal_plots_keeps_joint_and_sna_fits_and_skips_corners(monkeypatch, tmp_path):
+    df_agn = _minimal_agn_df()
+    df_pantheon = _minimal_pantheon_df()
+    fit_calls = []
+    compare_calls = []
+    corner_calls = []
+
+    monkeypatch.chdir(tmp_path)
+
+    def fake_run_single(*args, **kwargs):
+        fit_calls.append(
+            {
+                "cosmo_model": kwargs["cosmo_model"],
+                "only_sna": kwargs["only_sna"],
+                "minimal_plots": kwargs["minimal_plots"],
+            }
+        )
+        return (
+            np.ones((4, 2)),
+            ["H0", "Om0"],
+            "interp",
+            -3.0 if not kwargs["only_sna"] else -2.0,
+            0.1,
+            None,
+            13.8,
+            0.2,
+        )
+
+    monkeypatch.setattr(hubble_fit, "run_single", fake_run_single)
+    monkeypatch.setattr(
+        hubble_fit,
+        "plot_cosmo_corner",
+        lambda *args, **kwargs: corner_calls.append((args, kwargs)),
+    )
+    monkeypatch.setattr(
+        hubble_fit,
+        "compare_models_by_log_evidence_all",
+        lambda *args, **kwargs: compare_calls.append((args, kwargs))
+        or {"ranking": [], "pairwise": {}},
+    )
+    monkeypatch.setattr(hubble_fit, "write_results_tex_variables", lambda *args, **kwargs: None)
+    monkeypatch.setattr(hubble_fit, "extract_cosmo_results_from_samples", lambda *args, **kwargs: {})
+    monkeypatch.setattr(hubble_fit, "sym_percentile", lambda *args, **kwargs: (70.0, 1.0, 1.0, 1.0))
+    monkeypatch.setattr(hubble_fit, "save_cosmo_results_hdf5", lambda *args, **kwargs: None)
+    monkeypatch.setattr(hubble_fit, "get_qvc_result_dir", lambda: tmp_path / "result_root")
+
+    hubble_fit.run_all(
+        df_agn=df_agn,
+        df_agn_all=df_agn.copy(),
+        df_pantheon=df_pantheon,
+        _sna_L=None,
+        _sna_Lower=True,
+        _sna_LogdetCov=None,
+        cosmo_models=["FlatLambdaCDM", "Flatw0waCDM"],
+        minimal_plots=True,
+        z_range=(0.44, 3.16),
+        speed="fastest",
+        prefix="unit",
+    )
+
+    assert fit_calls == [
+        {"cosmo_model": "FlatLambdaCDM", "only_sna": False, "minimal_plots": True},
+        {"cosmo_model": "FlatLambdaCDM", "only_sna": True, "minimal_plots": True},
+        {"cosmo_model": "Flatw0waCDM", "only_sna": False, "minimal_plots": True},
+        {"cosmo_model": "Flatw0waCDM", "only_sna": True, "minimal_plots": True},
+    ]
+    assert len(compare_calls) == 2
+    assert corner_calls == []

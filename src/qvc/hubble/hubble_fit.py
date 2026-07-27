@@ -1506,6 +1506,7 @@ def _run_fit_stage(
     completeness_sim_file,
     completeness_mode,
     compare_sigma_only,
+    minimal_plots=False,
     disable_ceph_dist_calibration,
     use_planck_h0_prior,
     use_planck_om_prior,
@@ -1552,6 +1553,7 @@ def _run_fit_stage(
         completeness_sim_file=completeness_sim_file,
         completeness_mode=completeness_mode,
         compare_sigma_only=compare_sigma_only,
+        minimal_plots=minimal_plots,
         disable_ceph_dist_calibration=disable_ceph_dist_calibration,
         use_planck_h0_prior=use_planck_h0_prior,
         use_planck_om_prior=use_planck_om_prior,
@@ -1665,6 +1667,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                       completeness_mode="2d",
                       N=None,
                       compare_sigma_only=False,
+                      minimal_plots=False,
                       disable_ceph_dist_calibration=False,
                       use_planck_h0_prior=False,
                       use_planck_om_prior=False,
@@ -1758,7 +1761,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
             completeness_mode=completeness_mode,
             completeness_sim_file=completeness_sim_file,
             plot_path=plot_path,
-            plot=not compare_sigma_only,
+            plot=not (compare_sigma_only or minimal_plots),
         )
     else:
         completeness_params = None
@@ -1928,8 +1931,8 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
 
 
         results = sampler.results
-        if compare_sigma_only:
-            print("compare_sigma_only=True: skipping dynesty plot generation.")
+        if compare_sigma_only or minimal_plots:
+            print("Skipping dynesty plot generation.")
         else:
             print("Plotting full dynesty corner...")
             plot_dynesty(
@@ -2059,8 +2062,8 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
             alpha_lambda=df_agn["alpha_lambda"].values if "alpha_lambda" in df_agn.columns else None,
         )
 
-    if compare_sigma_only:
-        print("compare_sigma_only=True: skipping completeness diagnostics plots.")
+    if compare_sigma_only or minimal_plots:
+        print("Skipping completeness diagnostics plots.")
     else:
         print("Plotting completeness diagnostics...")
         plot_completeness_diagnostics(
@@ -2099,6 +2102,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                completeness_sim_file=DEFAULT_COMPLETENESS_SIM_FILE,
                completeness_mode="2d",
                compare_sigma_only=False,
+               minimal_plots=False,
                disable_ceph_dist_calibration=False,
                use_planck_h0_prior=False,
                use_planck_om_prior=False,
@@ -2298,6 +2302,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 completeness_sim_file=completeness_sim_file,
                 completeness_mode=completeness_mode,
                 compare_sigma_only=compare_sigma_only,
+                minimal_plots=minimal_plots,
                 disable_ceph_dist_calibration=disable_ceph_dist_calibration,
                 use_planck_h0_prior=use_planck_h0_prior,
                 use_planck_om_prior=use_planck_om_prior,
@@ -2353,7 +2358,8 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 dmi_sigma=dmi_posterior_sigma_pass1_full,
                 dmi_selection_sigma=dmi_selection_sigma_pass1_full,
                 filename="hubble_diagram_pass1_full_sample_debiased.pdf",
-                residuals_csv_filename="hubble_plot_residuals_pass1.csv",
+                residuals_csv_filename=None if minimal_plots else "hubble_plot_residuals_pass1.csv",
+                compute_only=minimal_plots,
                 sigma_clip_threshold=sigma_clip_threshold,
                 z_range=z_range,
                 use_alpha_lambda_term=use_alpha_lambda_term,
@@ -2404,34 +2410,35 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
             n_after = int(np.count_nonzero(keep_mask_full))
             print(f"Sigma-clipping pass 1 kept {n_after} / {n_before} AGN and clipped {n_before - n_after}.")
             clipped_mask_pass1_full = ~keep_mask_full
-            plot_hubble(
-                flat_samples_pass1,
-                df_agn_full_sample_preclip,
-                df_pantheon,
-                cosmo_model=cosmo_model,
-                z_pivot_agn=z_pivot_agn,
-                show_true=False,
-                show=False,
-                debias=True,
-                dm_interp=dm_interp_pass1,
-                plot_path=plot_path,
-                cosmo_model_samples=cosmo_model_joint_samples,
-                verbose=verbose,
-                residuals_sigma_clip=residuals_sigma_clip,
-                df_calibrators=df_calibrators,
-                dmi_values=dmi_posterior_median_pass1_full,
-                dmi_sigma=dmi_posterior_sigma_pass1_full,
-                dmi_selection_sigma=dmi_selection_sigma_pass1_full,
-                clipped_mask=clipped_mask_pass1_full,
-                filename="hubble_diagram_pass1_full_sample_clipped_debiased.pdf",
-                residuals_csv_filename="hubble_plot_residuals_pass1_clipped.csv",
-                sigma_clip_threshold=sigma_clip_threshold,
-                z_range=z_range,
-                use_alpha_lambda_term=use_alpha_lambda_term,
-                use_eta_sigma_term=use_eta_sigma_term,
-                use_redshift_log_f_term=use_redshift_log_f_term,
-                only_agn=only_agn,
-            )
+            if not minimal_plots:
+                plot_hubble(
+                    flat_samples_pass1,
+                    df_agn_full_sample_preclip,
+                    df_pantheon,
+                    cosmo_model=cosmo_model,
+                    z_pivot_agn=z_pivot_agn,
+                    show_true=False,
+                    show=False,
+                    debias=True,
+                    dm_interp=dm_interp_pass1,
+                    plot_path=plot_path,
+                    cosmo_model_samples=cosmo_model_joint_samples,
+                    verbose=verbose,
+                    residuals_sigma_clip=residuals_sigma_clip,
+                    df_calibrators=df_calibrators,
+                    dmi_values=dmi_posterior_median_pass1_full,
+                    dmi_sigma=dmi_posterior_sigma_pass1_full,
+                    dmi_selection_sigma=dmi_selection_sigma_pass1_full,
+                    clipped_mask=clipped_mask_pass1_full,
+                    filename="hubble_diagram_pass1_full_sample_clipped_debiased.pdf",
+                    residuals_csv_filename="hubble_plot_residuals_pass1_clipped.csv",
+                    sigma_clip_threshold=sigma_clip_threshold,
+                    z_range=z_range,
+                    use_alpha_lambda_term=use_alpha_lambda_term,
+                    use_eta_sigma_term=use_eta_sigma_term,
+                    use_redshift_log_f_term=use_redshift_log_f_term,
+                    only_agn=only_agn,
+                )
             if resume_stage == "pass1":
                 print("Stopping after resumed pass-1 fit as requested by resume_stage='pass1'.")
                 return flat_samples_pass1, model_labels_pass1, dm_interp_pass1, _logZ_pass1, _logZerr_pass1, None, _age_pass1, _age_err_pass1
@@ -2521,13 +2528,13 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
             print("Running fresh second Hubble-fit pass on the clipped AGN sample.")
 
     if uniform_redshift_distribution:
-        if not compare_sigma_only:
+        if not (compare_sigma_only or minimal_plots):
             plot_redshift_histograms(df_pantheon, df_agn_pass2_fit_selection, xscale="linear", plot_path=plot_path, only_agn=only_agn)
     else:
-        if not compare_sigma_only:
+        if not (compare_sigma_only or minimal_plots):
             plot_redshift_histograms(df_pantheon, df_agn_pass2_plot_sample, xscale="log", plot_path=plot_path, only_agn=only_agn)
 
-    if not compare_sigma_only:
+    if not (compare_sigma_only or minimal_plots):
         plot_delta_m_flux_recal_vs_redshift(df_agn_pass2_fit_selection, plot_path=plot_path)
 
     report_pivots(df_agn_pass2_fit_selection)
@@ -2575,6 +2582,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         completeness_sim_file=completeness_sim_file,
         completeness_mode=completeness_mode,
         compare_sigma_only=compare_sigma_only,
+        minimal_plots=minimal_plots,
         disable_ceph_dist_calibration=disable_ceph_dist_calibration,
         use_planck_h0_prior=use_planck_h0_prior,
         use_planck_om_prior=use_planck_om_prior,
@@ -2606,6 +2614,111 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
     if compare_sigma_only or skip_plots or only_sna:
         print("Skipping plots, returning results...")
         return flat_samples, model_labels, dm_interp, logZ, logZerr, None, age, age_err
+
+    if minimal_plots:
+        (
+            dmi_posterior_median_full,
+            dmi_posterior_sigma_full,
+            dmi_selection_sigma_full,
+        ) = _compute_direct_full_sample_completeness_summaries(
+            flat_samples,
+            df_agn_fit_selection=df_agn_pass2_fit_selection,
+            df_agn_plot_sample=df_agn_pass2_plot_sample,
+            df_pantheon=df_pantheon,
+            _sna_L=_sna_L,
+            _sna_Lower=_sna_Lower,
+            _sna_LogdetCov=_sna_LogdetCov,
+            cosmo_model=cosmo_model,
+            completeness_params=_get_direct_completeness_params(),
+            z_pivot_agn=z_pivot_agn,
+            use_full_cov=use_full_cov,
+            disable_ceph_dist_calibration=disable_ceph_dist_calibration,
+            use_planck_h0_prior=use_planck_h0_prior,
+            use_planck_om_prior=use_planck_om_prior,
+            only_agn=only_agn,
+            use_alpha_lambda_term=use_alpha_lambda_term,
+            use_eta_sigma_term=use_eta_sigma_term,
+            use_redshift_log_f_term=use_redshift_log_f_term,
+            early_de_guard=early_de_guard,
+        )
+        df_agn_agn_likelihood_chi2_selection = df_agn_pass2_fit_selection
+        if resume_replot_with_cuts:
+            df_agn_agn_likelihood_chi2_selection = df_agn_pass2_plot_sample[
+                df_agn_pass2_plot_sample["z"].between(z_range[0], z_range[1])
+            ].copy()
+        chisq_red_agn_likelihood_space, _ = compute_agn_likelihood_space_reduced_chi2(
+            flat_samples,
+            model_labels,
+            df_agn_agn_likelihood_chi2_selection,
+            cosmo_model,
+            z_pivot_agn=z_pivot_agn,
+            use_alpha_lambda_term=use_alpha_lambda_term,
+            use_eta_sigma_term=use_eta_sigma_term,
+            use_redshift_log_f_term=use_redshift_log_f_term,
+        )
+        df_agn_agn_likelihood_chi2_selection_zgt1 = df_agn_agn_likelihood_chi2_selection[
+            df_agn_agn_likelihood_chi2_selection["z"].between(
+                1.0, z_range[1], inclusive="right"
+            )
+        ]
+        chisq_red_agn_likelihood_space_zgt1, _ = compute_agn_likelihood_space_reduced_chi2(
+            flat_samples,
+            model_labels,
+            df_agn_agn_likelihood_chi2_selection_zgt1,
+            cosmo_model,
+            z_pivot_agn=z_pivot_agn,
+            use_alpha_lambda_term=use_alpha_lambda_term,
+            use_eta_sigma_term=use_eta_sigma_term,
+            use_redshift_log_f_term=use_redshift_log_f_term,
+        )
+        (
+            debiased_residuals,
+            _debiased_clipping_sigma,
+            _mu_pred_median_debiased,
+            _mu_pred_std_debiased,
+            _mu_pred_std_debiased_with_scatter,
+        ) = plot_hubble(
+            flat_samples,
+            df_agn_pass2_plot_sample,
+            df_pantheon,
+            cosmo_model=cosmo_model,
+            z_pivot_agn=z_pivot_agn,
+            show_true=False,
+            show=False,
+            debias=True,
+            dm_interp=dm_interp,
+            plot_path=plot_path,
+            cosmo_model_samples=cosmo_model_joint_samples,
+            verbose=verbose,
+            residuals_sigma_clip=residuals_sigma_clip,
+            df_calibrators=df_calibrators,
+            dmi_values=dmi_posterior_median_full,
+            dmi_sigma=dmi_posterior_sigma_full,
+            dmi_selection_sigma=dmi_selection_sigma_full,
+            residuals_csv_filename="hubble_plot_residuals.csv",
+            sigma_clip_threshold=sigma_clip_threshold if apply_two_pass_sigma_clip else None,
+            z_range=z_range,
+            use_alpha_lambda_term=use_alpha_lambda_term,
+            use_eta_sigma_term=use_eta_sigma_term,
+            use_redshift_log_f_term=use_redshift_log_f_term,
+            only_agn=only_agn,
+            agn_likelihood_space_chi2=chisq_red_agn_likelihood_space,
+            agn_likelihood_space_chi2_zgt1=chisq_red_agn_likelihood_space_zgt1,
+        )
+        print(
+            "minimal_plots=True: retained hubble_diagram_debiased.pdf and "
+            "hubble_plot_residuals.csv; skipped other figures."
+        )
+        return (
+            flat_samples,
+            model_labels,
+            dm_interp,
+            logZ,
+            logZerr,
+            debiased_residuals,
+            age,
+            age_err,
+        )
 
     # if only_sna:
     #     print("Skipping AGN-specific plots for SNe-only run.")
@@ -3301,6 +3414,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
 
 def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, 
             cosmo_models, skip_plots=False,
+            minimal_plots=False,
             residuals_sigma_clip=None,
             disable_sigma_clip_pass=False,
             sigma_clip_threshold=3.0,
@@ -3371,6 +3485,7 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
                        completeness_sim_file=completeness_sim_file,
                        completeness_mode=completeness_mode,
                        compare_sigma_only=compare_sigma_only,
+                       minimal_plots=minimal_plots,
                        disable_ceph_dist_calibration=disable_ceph_dist_calibration,
                        use_planck_h0_prior=use_planck_h0_prior,
                        use_planck_om_prior=use_planck_om_prior,
@@ -3404,6 +3519,7 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
                            completeness_sim_file=completeness_sim_file,
                            completeness_mode=completeness_mode,
                            compare_sigma_only=compare_sigma_only,
+                           minimal_plots=minimal_plots,
                            disable_ceph_dist_calibration=disable_ceph_dist_calibration,
                            use_planck_h0_prior=use_planck_h0_prior,
                            use_planck_om_prior=use_planck_om_prior,
@@ -3412,7 +3528,7 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
                            use_redshift_log_f_term=use_redshift_log_f_term,
                            early_de_guard=early_de_guard)
             samples_sna, model_labels_sna, dm_interp_sna, logZ_sna, logZerr_sna, debiased_residuals_sna, age_sna, age_sna_err = r
-        if not compare_sigma_only and not only_agn:
+        if not compare_sigma_only and not minimal_plots and not only_agn:
             plot_cosmo_corner(samples_sna, samples_joint, cosmo_model, z_pivot_sna, z_pivot_agn, show=False, 
                               plot_path=compare_plot_path, speed=speed,
                               gauss_sigma=1.5, kde_bw_scale=1.5, include_alpha_beta=False,
@@ -3516,6 +3632,19 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
     print("================================================================\n\n")
     return cosmo_models_result_dict, cosmo_model_joint_samples, results_latex, compare_r
 
+
+def validate_plot_mode_args(args):
+    """Reject plotting modes whose output contracts are mutually exclusive."""
+    if args.minimal_plots and args.skip_plots:
+        raise ValueError("--minimal-plots cannot be combined with --skip_plots.")
+    if args.minimal_plots and args.compare_sigma_only:
+        raise ValueError("--minimal-plots cannot be combined with --compare_sigma_only.")
+    if args.minimal_plots and args.only_sna:
+        raise ValueError("--minimal-plots cannot be used with a direct --only_sna run.")
+    if args.minimal_plots and args.use_jax:
+        raise ValueError("--minimal-plots is not supported with --use_jax.")
+
+
 if __name__ == "__main__":
     #global _sna_LogdetCov, _sna_L, _sna_Lower
 
@@ -3583,6 +3712,16 @@ if __name__ == "__main__":
     parser.add_argument("--only_agn", action="store_true", default=False, help="Run AGN-only fit with the Supernova likelihood and M0_sn disabled (default: False)")
     parser.add_argument("--spectra_fit_csv", type=str, nargs='+', help="Path(s) to spectra fit CSV file(s)")
     parser.add_argument(
+        "--magnitude-convention",
+        type=str,
+        choices=["intrinsic", "observed"],
+        required=True,
+        help=(
+            "Choose which spectral 2500-A magnitude populates the Hubble-workflow "
+            "apparent_mag_2500 aliases. This option is required."
+        ),
+    )
+    parser.add_argument(
         "--spectra_sdss_run2d",
         type=str,
         choices=["all", "v5_13_2", "26"],
@@ -3591,6 +3730,15 @@ if __name__ == "__main__":
     )
     parser.add_argument("--no_cuts", action="store_true", default=False, help="Disable AGN data cuts (default: False)")
     parser.add_argument("--skip_plots", action="store_true", default=False, help="Skip plotting steps (default: False)")
+    parser.add_argument(
+        "--minimal-plots",
+        action="store_true",
+        default=False,
+        help=(
+            "Run the normal fit and evidence comparison while retaining only the "
+            "debiased Hubble diagram and its residual CSV."
+        ),
+    )
     parser.add_argument(
         "--compare_sigma_only",
         action="store_true",
@@ -3690,6 +3838,7 @@ if __name__ == "__main__":
     resume_by_model = normalize_resume_by_model(args.resume, args.cosmo_models)
     if args.only_sna and args.only_agn:
         raise ValueError("--only_sna and --only_agn cannot be used together.")
+    validate_plot_mode_args(args)
 
     if args.disable_full_covariance:
         print("Warning: Running without full covariance may lead to underestimated uncertainties.")
@@ -3721,10 +3870,12 @@ if __name__ == "__main__":
                            residuals_sigma_clip=args.residuals_sigma_clip, residuals_csv=args.residuals_csv,
                            exclude_object_ids_csv=args.exclude_object_ids_csv,
                            spectra_fit_csv=args.spectra_fit_csv,
+                           magnitude_convention=args.magnitude_convention,
                            spectra_sdss_run2d=args.spectra_sdss_run2d,
                            correct_sigma_uv_host=args.correct_sigma_uv_host,
                            z_range=tuple(args.z_range), plot_path=agn_plot_path,
-                           cut_report_path=cut_report_path)
+                           cut_report_path=cut_report_path,
+                           plot_diagnostics=not args.minimal_plots)
     if args.resume_replot_with_cuts or args.uniform_redshift_distribution:
         effective_N = args.N
     else:
@@ -3797,6 +3948,7 @@ if __name__ == "__main__":
                 completeness_sim_file=args.completeness_sim_file,
                 completeness_mode=args.completeness_mode,
                 compare_sigma_only=args.compare_sigma_only,
+                minimal_plots=args.minimal_plots,
                 disable_ceph_dist_calibration=args.disable_ceph_dist_calibration,
                 use_planck_h0_prior=effective_use_planck_h0_prior,
                 use_planck_om_prior=args.use_planck_om_prior,
@@ -3852,6 +4004,7 @@ if __name__ == "__main__":
                 completeness_sim_file=args.completeness_sim_file,
                 completeness_mode=args.completeness_mode,
                 compare_sigma_only=args.compare_sigma_only,
+                minimal_plots=args.minimal_plots,
                 disable_ceph_dist_calibration=args.disable_ceph_dist_calibration,
                 use_planck_h0_prior=effective_use_planck_h0_prior,
                 use_planck_om_prior=args.use_planck_om_prior,
