@@ -761,7 +761,12 @@ def test_run_single_only_agn_keeps_agn_hubble_plots(fake_data, monkeypatch, tmp_
     assert all(call.get("only_agn") is True for call in plot_cosmo_corner_calls)
 
 
-def test_plot_cosmo_corner_only_agn_legend_label(monkeypatch, tmp_path):
+@pytest.mark.parametrize("include_alpha_beta", [False, True])
+def test_plot_cosmo_corner_only_agn_legend_label_and_font_size(
+    monkeypatch,
+    tmp_path,
+    include_alpha_beta,
+):
     rng = np.random.default_rng(987)
     priors, model_labels, _ = hubble_model.get_model_params("FlatLambdaCDM", only_agn=True)
     center = np.array([(priors[key][0] + priors[key][1]) / 2.0 for key in model_labels], dtype=float)
@@ -788,6 +793,7 @@ def test_plot_cosmo_corner_only_agn_legend_label(monkeypatch, tmp_path):
         show=False,
         smooth=24,
         only_agn=True,
+        include_alpha_beta=include_alpha_beta,
     )
 
     fig = captured["fig"]
@@ -798,6 +804,11 @@ def test_plot_cosmo_corner_only_agn_legend_label(monkeypatch, tmp_path):
     ]
     assert "AGN" in legend_labels
     assert "SN Ia + AGN" not in legend_labels
+    assert {
+        text.get_fontsize()
+        for legend in fig.legends
+        for text in legend.get_texts()
+    } == {hubble_plotting._COSMO_CORNER_LEGEND_FONTSIZE}
     import matplotlib.pyplot as plt
     plt.close(fig)
 

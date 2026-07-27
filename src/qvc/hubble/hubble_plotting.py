@@ -63,6 +63,7 @@ _FULL_RESIDUAL_YLIM = (-0.5, 0.5)
 _OUT_OF_RANGE_AGN_COLOR = "#354B5B"
 _OUT_OF_RANGE_AGN_MARKER_COLOR = mpl.colors.to_rgba(_OUT_OF_RANGE_AGN_COLOR, alpha=0.65)
 _OUT_OF_RANGE_AGN_ERROR_COLOR = mpl.colors.to_rgba(_OUT_OF_RANGE_AGN_COLOR, alpha=0.3)
+_COSMO_CORNER_LEGEND_FONTSIZE = 40
 
 
 _SDSS_FILTER_EDGES_OBS = {
@@ -5135,7 +5136,7 @@ def plot_cosmo_corner(
     agn_label = "AGN" if only_agn else "SN Ia + AGN"
     legend.append(Line2D([0], [0], color="k", lw=6, label=agn_label))
     fig.legend(handles=legend, bbox_to_anchor=(0.99, 0.92), loc="upper right",
-               fontsize=18, frameon=False, markerscale=1.5)
+               fontsize=_COSMO_CORNER_LEGEND_FONTSIZE, frameon=False, markerscale=1.5)
 
     fig.subplots_adjust(left=0.08, right=0.98, bottom=0.08, top=0.9,
                         wspace=0.05, hspace=0.05)
