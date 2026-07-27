@@ -56,7 +56,7 @@ def parse_args():
     parser.add_argument("--max-tree-depth", type=int, default=12, help="NUTS max tree depth.")
     parser.add_argument("--partition", default="day", help="SLURM partition.")
     parser.add_argument("--time", default="12:00:00", help="SLURM time limit.")
-    parser.add_argument("--mem", default="25G", help="SLURM memory request.")
+    parser.add_argument("--mem", default="32G", help="SLURM memory request.")
     parser.add_argument("--env", default="jaxcpu2", help="Conda environment to activate inside submitted jobs.")
     parser.add_argument(
         "--description",
