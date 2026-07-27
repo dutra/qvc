@@ -195,25 +195,12 @@ def _compute_alpha_ox_from_posterior_median(
     return compute_alpha_ox(df_agn, cosmology=cosmology)
 
 
-def _resolve_table_debias_values_for_frame(df_agn, *, dm_interp=None, dmi_values=None):
-    if dmi_values is not None:
-        dmi = np.asarray(dmi_values, dtype=float)
-        if dmi.shape != (len(df_agn),):
-            raise ValueError(f"dmi_values has shape {dmi.shape}, but expected {(len(df_agn),)}.")
-        return dmi
-    if dm_interp is None:
-        return np.zeros(len(df_agn), dtype=float)
-    return np.asarray(
-        dm_interp(
-            np.column_stack(
-                [
-                    df_agn["apparent_mag_2500"].to_numpy(dtype=float),
-                    df_agn["z"].to_numpy(dtype=float),
-                ]
-            )
-        ),
-        dtype=float,
-    )
+def _resolve_table_debias_values_for_frame(df_agn, *, dmi_values):
+    """Validate direct per-object corrections used in the AGN results table."""
+    dmi = np.asarray(dmi_values, dtype=float)
+    if dmi.shape != (len(df_agn),):
+        raise ValueError(f"dmi_values has shape {dmi.shape}, but expected {(len(df_agn),)}.")
+    return dmi
 
 
 def _compute_debiased_agn_table_mu(
@@ -223,8 +210,7 @@ def _compute_debiased_agn_table_mu(
     cosmo_model,
     *,
     z_pivot_agn,
-    dm_interp=None,
-    dmi_values=None,
+    dmi_values,
     only_agn=False,
     use_alpha_lambda_term=False,
     use_eta_sigma_term=False,
@@ -274,7 +260,6 @@ def _compute_debiased_agn_table_mu(
 
     debias_values = _resolve_table_debias_values_for_frame(
         df_agn,
-        dm_interp=dm_interp,
         dmi_values=dmi_values,
     )
     mu_samples = np.asarray(mu_samples, dtype=float) - debias_values
@@ -3066,7 +3051,6 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
             df_agn_table_sample,
             cosmo_model,
             z_pivot_agn=z_pivot_agn,
-            dm_interp=dm_interp,
             dmi_values=dmi_posterior_median_table,
             only_agn=only_agn,
             use_alpha_lambda_term=use_alpha_lambda_term,

@@ -323,6 +323,23 @@ def test_compute_agn_likelihood_space_reduced_chi2_uses_only_agn_relevant_dof(fa
     assert meta["dof"] == len(df_agn) - len(expected_labels)
 
 
+def test_table_debias_requires_direct_per_object_values(fake_data):
+    df_agn, _ = fake_data
+    expected = np.linspace(-0.2, 0.1, len(df_agn))
+
+    actual = hubble_fit._resolve_table_debias_values_for_frame(
+        df_agn,
+        dmi_values=expected,
+    )
+
+    np.testing.assert_array_equal(actual, expected)
+    with pytest.raises(ValueError, match="expected"):
+        hubble_fit._resolve_table_debias_values_for_frame(
+            df_agn,
+            dmi_values=expected[:-1],
+        )
+
+
 def test_compute_direct_full_sample_completeness_summaries_freezes_fit_pivots(fake_data):
     df_agn, df_pantheon = fake_data
     df_fit = df_agn.iloc[:3].copy()

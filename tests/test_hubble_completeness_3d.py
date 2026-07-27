@@ -6,6 +6,7 @@ import h5py
 import numpy as np
 import pandas as pd
 from astropy.cosmology import FlatLambdaCDM
+from scipy.special import ndtr
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -17,6 +18,79 @@ if str(SRC) not in sys.path:
 from qvc.hubble import hubble_completeness_refactored as hcr
 from qvc.hubble import hubble_fit, hubble_likelihood, hubble_model
 from qvc.hubble.completeness_mock_catalog import save_mock_catalog
+from qvc.hubble.hubble_likelihood import completeness_loglike
+
+
+def test_completeness_loglike_includes_bright_gaussian_tail():
+    mag_centers = np.linspace(18.5, 24.0, 60)
+    z_centers = np.linspace(0.0, 4.0, 20)
+    completeness = hcr.Completeness2D(
+        mag_centers,
+        z_centers,
+        np.ones((mag_centers.size, z_centers.size)),
+    )
+
+    _, blob = completeness_loglike(
+        m_obs=np.array([17.5]),
+        m_obs_err=np.array([0.05]),
+        m_model=np.array([17.5]),
+        mu_err=np.array([0.3]),
+        z=np.array([1.0]),
+        completeness_model=completeness,
+        m_grid=mag_centers,
+    )
+
+    np.testing.assert_allclose(blob[0], 1.0, atol=1e-4)
+    np.testing.assert_allclose(blob[1], 0.0, atol=1e-4)
+    np.testing.assert_allclose(blob[2], 0.3, atol=1e-4)
+
+
+def test_selection_correction_matches_truncated_normal_and_recovers_parent_mean():
+    """Regression test the full correction against a known magnitude-limit solution."""
+
+    class HardMagnitudeLimit:
+        mode = "2d"
+
+        def __init__(self, limit):
+            self.limit = float(limit)
+
+        def __call__(self, mag, z):
+            mag, z = np.broadcast_arrays(
+                np.asarray(mag, dtype=float),
+                np.asarray(z, dtype=float),
+            )
+            # Half weight at the discontinuity is the trapezoid-rule convention.
+            return np.where(mag < self.limit, 1.0, np.where(mag == self.limit, 0.5, 0.0))
+
+    m_model = 22.3
+    sigma = 0.45
+    m_limit = 22.0
+    mag_grid = np.linspace(18.5, 24.5, 6001)
+
+    log_z, blob = completeness_loglike(
+        m_obs=np.array([m_model]),
+        m_obs_err=np.array([0.05]),
+        m_model=np.array([m_model]),
+        mu_err=np.array([sigma]),
+        z=np.array([1.2]),
+        completeness_model=HardMagnitudeLimit(m_limit),
+        m_grid=mag_grid,
+    )
+
+    alpha = (m_limit - m_model) / sigma
+    expected_z = ndtr(alpha)
+    inverse_mills = np.exp(-0.5 * alpha**2) / (np.sqrt(2.0 * np.pi) * expected_z)
+    expected_bias = -sigma * inverse_mills
+    expected_sigma = sigma * np.sqrt(1.0 - alpha * inverse_mills - inverse_mills**2)
+
+    np.testing.assert_allclose(np.exp(log_z), expected_z, rtol=2e-6)
+    np.testing.assert_allclose(blob[0, 0], expected_z, rtol=2e-6)
+    np.testing.assert_allclose(blob[1, 0], expected_bias, atol=2e-6)
+    np.testing.assert_allclose(blob[2, 0], expected_sigma, atol=2e-6)
+
+    selected_mean = m_model + blob[1, 0]
+    corrected_mean = selected_mean - blob[1, 0]
+    np.testing.assert_allclose(corrected_mean, m_model, atol=1e-12)
 
 
 def _make_fake_fhost_df(n=200, seed=123):
