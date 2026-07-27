@@ -756,7 +756,7 @@ def test_plot_residuals_vs_alphaOX_writes_both_pdfs(tmp_path, monkeypatch):
             "z": [0.35, 0.6, 1.0, 1.8, 3.3],
             "delta_alphaOX": [-0.15, -0.08, 0.0, 0.06, 0.12],
             "delta_alphaOX_err": [0.03, 0.02, 0.02, 0.03, 0.04],
-            "alphaOX": [-1.9, -1.8, -1.7, -1.6, -1.5],
+            "alphaOX": [1.2, 1.35, 1.5, 1.65, 1.8],
             "alphaOX_err": [0.05, 0.04, 0.04, 0.05, 0.06],
             "alpha_lambda": [-1.9, -1.8, -1.7, -1.6, -1.5],
             "alpha_lambda_err": [0.05, 0.04, 0.04, 0.05, 0.06],

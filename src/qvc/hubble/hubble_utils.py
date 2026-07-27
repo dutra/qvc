@@ -16,6 +16,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from astropy import units as u
+from astropy.constants import h
 from astropy.cosmology import FlatwCDM, Flatw0waCDM, FlatLambdaCDM, FlatwpwaCDM
 from astropy.coordinates import SkyCoord
 from astropy.io import fits
@@ -57,6 +58,18 @@ PURPLE_ANSI = "\033[95m"
 RESET_ANSI = "\033[0m"
 HUBBLE_JITTER_SURVEYS = ("sdss", "ps1", "ztf")
 STRICT_UPPER_BOUND_SCALAR_CUT_COLUMNS = frozenset({"apparent_mag_2500"})
+
+AB_MAG_ZERO_POINT = 48.60
+XRAY_PHOTON_INDEX = 1.9
+CSC_XRAY_ENERGY_LO_KEV = 0.5
+CSC_XRAY_ENERGY_HI_KEV = 7.0
+XRAY_REFERENCE_ENERGY_KEV = 2.0
+ALPHA_OX_LOG_FREQUENCY_RATIO = 2.605
+LUSSO_ALPHA_OX_SLOPE = 0.154
+LUSSO_ALPHA_OX_INTERCEPT = -3.176
+# Documented by Lusso et al. (2010), but intentionally excluded from the
+# measurement-only error bars produced by this module.
+LUSSO_ALPHA_OX_INTRINSIC_SCATTER = 0.18
 
 
 def _scalar_cut_has_inclusive_upper(column):
@@ -231,6 +244,136 @@ def get_qvc_result_dir() -> Path:
 def convert_M2500_to_logL2500(M2500):
     return -1/2.5 * (M2500 - 90.0)
 
+
+def _scalar_or_array(values):
+    values = np.asarray(values, dtype=float)
+    return values.item() if values.ndim == 0 else values
+
+
+def rest_frame_ab_magnitude_to_log_lnu(
+    magnitude,
+    redshift,
+    *,
+    cosmology,
+):
+    """Convert a JAXQSOFit rest-frame AB magnitude to log10(L_nu / erg s^-1 Hz^-1).
+
+    JAXQSOFit's spectral magnitude is evaluated after its spectrum has been
+    transformed to rest-frame wavelength and rest-frame flux density. The
+    luminosity conversion therefore contains no additional ``(1 + z)`` factor.
+    Invalid magnitudes and non-positive or invalid redshifts return NaN.
+    """
+    magnitude, redshift = np.broadcast_arrays(
+        np.asarray(magnitude, dtype=float),
+        np.asarray(redshift, dtype=float),
+    )
+    log_lnu = np.full(magnitude.shape, np.nan, dtype=float)
+    valid = (
+        np.isfinite(magnitude)
+        & np.isfinite(redshift)
+        & (redshift > 0.0)
+    )
+    if np.any(valid):
+        dl_cm = cosmology.luminosity_distance(redshift[valid]).to_value(u.cm)
+        log_lnu[valid] = (
+            -0.4 * (magnitude[valid] + AB_MAG_ZERO_POINT)
+            + np.log10(4.0 * np.pi * dl_cm**2)
+        )
+    return _scalar_or_array(log_lnu)
+
+
+def xray_band_integral(
+    photon_index=XRAY_PHOTON_INDEX,
+    energy_lo_kev=CSC_XRAY_ENERGY_LO_KEV,
+    energy_hi_kev=CSC_XRAY_ENERGY_HI_KEV,
+):
+    """Return the power-law energy-flux integral over an X-ray band."""
+    photon_index, energy_lo_kev, energy_hi_kev = np.broadcast_arrays(
+        np.asarray(photon_index, dtype=float),
+        np.asarray(energy_lo_kev, dtype=float),
+        np.asarray(energy_hi_kev, dtype=float),
+    )
+    integral = np.full(photon_index.shape, np.nan, dtype=float)
+    valid = (
+        np.isfinite(photon_index)
+        & np.isfinite(energy_lo_kev)
+        & np.isfinite(energy_hi_kev)
+        & (energy_lo_kev > 0.0)
+        & (energy_hi_kev > energy_lo_kev)
+    )
+    gamma_two = valid & np.isclose(photon_index, 2.0)
+    integral[gamma_two] = np.log(
+        energy_hi_kev[gamma_two] / energy_lo_kev[gamma_two]
+    )
+    power_law = valid & ~gamma_two
+    exponent = 2.0 - photon_index[power_law]
+    integral[power_law] = (
+        energy_hi_kev[power_law] ** exponent
+        - energy_lo_kev[power_law] ** exponent
+    ) / exponent
+    return _scalar_or_array(integral)
+
+
+def integrated_xray_flux_to_log_lnu_2kev(
+    flux_05_7,
+    redshift,
+    *,
+    cosmology,
+    photon_index=XRAY_PHOTON_INDEX,
+    energy_lo_kev=CSC_XRAY_ENERGY_LO_KEV,
+    energy_hi_kev=CSC_XRAY_ENERGY_HI_KEV,
+    reference_energy_kev=XRAY_REFERENCE_ENERGY_KEV,
+):
+    """Convert integrated observed X-ray flux to rest-frame 2 keV log L_nu.
+
+    Flux is in erg s^-1 cm^-2 and the returned luminosity density is in
+    erg s^-1 Hz^-1. The conversion applies the power-law band normalization
+    and Planck's constant in keV s. No redshift-dependent X-ray K-correction
+    is applied.
+    """
+    flux_05_7, redshift, photon_index = np.broadcast_arrays(
+        np.asarray(flux_05_7, dtype=float),
+        np.asarray(redshift, dtype=float),
+        np.asarray(photon_index, dtype=float),
+    )
+    log_lnu = np.full(flux_05_7.shape, np.nan, dtype=float)
+    band_integral = np.broadcast_to(
+        np.asarray(
+            xray_band_integral(
+                photon_index,
+                energy_lo_kev,
+                energy_hi_kev,
+            ),
+            dtype=float,
+        ),
+        flux_05_7.shape,
+    )
+    valid = (
+        np.isfinite(flux_05_7)
+        & (flux_05_7 > 0.0)
+        & np.isfinite(redshift)
+        & (redshift > 0.0)
+        & np.isfinite(photon_index)
+        & np.isfinite(band_integral)
+        & (band_integral > 0.0)
+        & np.isfinite(reference_energy_kev)
+        & (reference_energy_kev > 0.0)
+    )
+    if np.any(valid):
+        dl_cm = cosmology.luminosity_distance(redshift[valid]).to_value(u.cm)
+        xray_norm = flux_05_7[valid] / band_integral[valid]
+        l_e_2kev = (
+            4.0
+            * np.pi
+            * dl_cm**2
+            * xray_norm
+            * reference_energy_kev ** (1.0 - photon_index[valid])
+        )
+        l_nu_2kev = l_e_2kev * h.to_value(u.keV * u.s)
+        log_lnu[valid] = np.log10(l_nu_2kev)
+    return _scalar_or_array(log_lnu)
+
+
 def sym_percentile(x, p=[16, 50, 84], axis=0):
     lower, median, upper = np.percentile(x, p, axis=axis)
     err = 0.5 * (upper - lower)   # optional symmetric equivalent
@@ -275,14 +418,6 @@ def populate_xray(df, table_fpath="data/cscresults.vot"):
         "flux_aper_hilim_b",
         "flux_aper_lolim_b",
         "flux_aper_err_b",
-        "log_Lxray",
-        "log_Lxray_err",
-        "alphaOX",
-        "alphaOX_err",
-        "alphaOX_exp",
-        "alphaOX_exp_err",
-        "delta_alphaOX",
-        "delta_alphaOX_err",
     ]
 
     try:
@@ -336,63 +471,91 @@ def populate_xray(df, table_fpath="data/cscresults.vot"):
                                      np.nan)))
     df_matched["flux_aper_err_b"] = np.clip(err, a_min=0.0, a_max=None)
 
-    # Build the luminosity distance in cm.
-    cosmo = FlatLambdaCDM(H0=70, Om0=0.3)
-    z = pd.to_numeric(df_matched["z"], errors="coerce")
-    DL_cm = cosmo.luminosity_distance(z.values).to('cm').value
-
-    # Adopt a fixed photon index and derive the nominal K-correction.
-    GAMMA_X = 1.9
-    Kcorr = np.power(1.0 + z.values, GAMMA_X - 2.0)  # = (1+z)^(-0.1) for Gamma=1.9
-    # Keep the no-K-correction convention used elsewhere in this workflow.
-    Kcorr = np.ones_like(Kcorr)
-
-    # Pull the measured flux and error arrays.
-    xray_flux     = df_matched["flux_aper_b"].replace(0, np.nan).values
-    xray_flux_err = df_matched["flux_aper_err_b"].replace(0, np.nan).values
-
-    # Compute 2-10 keV and monochromatic 2 keV luminosities.
-    L_xray_210kev = 4.0 * np.pi * (DL_cm**2) * xray_flux * Kcorr
-    L_xray_2 = L_xray_210kev * (2.0 - GAMMA_X) / (10.0**(2.0 - GAMMA_X) - 2.0**(2.0 - GAMMA_X)) * 2.0**(1.0 - GAMMA_X)
-
-    df_matched["log_Lxray"] = np.log10(L_xray_2)
-
-    # Propagate the X-ray flux error into log luminosity.
-    df_matched["log_Lxray_err"] = (1.0 / np.log(10.0)) * (xray_flux_err / xray_flux)
-
-    # Use the de-reddened UV luminosity for alpha_OX.
-    df_matched["alphaOX"] = -(df_matched["log_Lxray"] - df_matched["log_L2500_int_fs"]) / 2.605
-    df_matched["alphaOX_err"] = np.sqrt(
-        df_matched["log_Lxray_err"]**2 + df_matched["log_L2500_int_fs_err"]**2
-    ) / 2.605
-
-    # Expected alpha_OX from Just et al. (2007), Equation 3.
-    a = -0.140
-    sigma_a = 0.007
-    b = 2.705
-    sigma_b = 0.212
-
-    alphaOx_expected = a *  df_matched["log_L2500_int_fs"] + b
-
-    x =  df_matched["log_L2500_int_fs"]
-    sigma_x =  df_matched["log_L2500_int_fs_err"]
-
-    alphaOx_expected_err = np.sqrt(
-        (x**2) * (sigma_a**2) +
-        (sigma_b**2) +
-        (a**2) * (sigma_x**2)
-    )
-
-    df_matched["alphaOX_exp"] = alphaOx_expected
-    df_matched["alphaOX_exp_err"] = alphaOx_expected_err
-
-    # Compare the observed and expected alpha_OX values.
-    df_matched["delta_alphaOX"] = df_matched["alphaOX"] - df_matched["alphaOX_exp"]
-    df_matched["delta_alphaOX_err"] = np.sqrt(
-        df_matched["alphaOX_err"]**2 + df_matched["alphaOX_exp_err"]**2
-    )
-
     return df_matched
+
+
+def compute_alpha_ox(df, *, cosmology):
+    """Compute alpha-OX quantities using one explicitly supplied cosmology."""
+    required_columns = {
+        "z",
+        "apparent_mag_2500_intrinsic",
+        "apparent_mag_2500_intrinsic_err",
+        "flux_aper_b",
+        "flux_aper_err_b",
+    }
+    missing_columns = sorted(required_columns.difference(df.columns))
+    if missing_columns:
+        raise ValueError(
+            "Cannot compute alpha-OX without columns: "
+            + ", ".join(missing_columns)
+        )
+
+    out = df.copy()
+    z = pd.to_numeric(out["z"], errors="coerce").to_numpy(dtype=float)
+    intrinsic_magnitude = pd.to_numeric(
+        out["apparent_mag_2500_intrinsic"],
+        errors="coerce",
+    ).to_numpy(dtype=float)
+    intrinsic_magnitude_err = pd.to_numeric(
+        out["apparent_mag_2500_intrinsic_err"],
+        errors="coerce",
+    ).to_numpy(dtype=float)
+    xray_flux = pd.to_numeric(
+        out["flux_aper_b"],
+        errors="coerce",
+    ).to_numpy(dtype=float)
+    xray_flux_err = pd.to_numeric(
+        out["flux_aper_err_b"],
+        errors="coerce",
+    ).to_numpy(dtype=float)
+
+    out["log_L2500_nu"] = rest_frame_ab_magnitude_to_log_lnu(
+        intrinsic_magnitude,
+        z,
+        cosmology=cosmology,
+    )
+    out["log_L2500_nu_err"] = 0.4 * intrinsic_magnitude_err
+    out["log_L2keV_nu"] = integrated_xray_flux_to_log_lnu_2kev(
+        xray_flux,
+        z,
+        cosmology=cosmology,
+    )
+
+    log_l2kev_nu_err = np.full(len(out), np.nan, dtype=float)
+    valid_xray_error = (
+        np.isfinite(xray_flux)
+        & (xray_flux > 0.0)
+        & np.isfinite(xray_flux_err)
+        & (xray_flux_err >= 0.0)
+    )
+    log_l2kev_nu_err[valid_xray_error] = (
+        xray_flux_err[valid_xray_error]
+        / xray_flux[valid_xray_error]
+        / np.log(10.0)
+    )
+    out["log_L2keV_nu_err"] = log_l2kev_nu_err
+
+    x = out["log_L2500_nu"]
+    sigma_x = out["log_L2500_nu_err"]
+    y = out["log_L2keV_nu"]
+    sigma_y = out["log_L2keV_nu_err"]
+    out["alphaOX"] = (x - y) / ALPHA_OX_LOG_FREQUENCY_RATIO
+    out["alphaOX_err"] = (
+        np.sqrt(sigma_x**2 + sigma_y**2) / ALPHA_OX_LOG_FREQUENCY_RATIO
+    )
+    out["alphaOX_exp"] = (
+        LUSSO_ALPHA_OX_SLOPE * x + LUSSO_ALPHA_OX_INTERCEPT
+    )
+    out["alphaOX_exp_err"] = abs(LUSSO_ALPHA_OX_SLOPE) * sigma_x
+    out["delta_alphaOX"] = out["alphaOX"] - out["alphaOX_exp"]
+    out["delta_alphaOX_err"] = np.sqrt(
+        (
+            (1.0 / ALPHA_OX_LOG_FREQUENCY_RATIO - LUSSO_ALPHA_OX_SLOPE)
+            * sigma_x
+        ) ** 2
+        + (sigma_y / ALPHA_OX_LOG_FREQUENCY_RATIO) ** 2
+    )
+    return out
 
 
 def populate_lc_info(df, lc_info_csv):
@@ -527,6 +690,8 @@ def populate_spectra_fit(df, spectra_fit_csvs):
     required_cols = {
         "apparent_mag_2500",
         "apparent_mag_2500_err",
+        "apparent_mag_2500_intrinsic",
+        "apparent_mag_2500_intrinsic_err",
         "PL_slope",
         "PL_slope_err",
         "f_host_2500",
@@ -596,8 +761,6 @@ def populate_spectra_fit(df, spectra_fit_csvs):
     out["alpha_lambda_err"] = out["PL_slope_err"]
     out["alpha_nu"] = -out["alpha_lambda"] - 2
     out["alpha_nu_err"] = out["alpha_lambda_err"]
-    out["log_L2500_int_fs"] = -0.4 * out["apparent_mag_2500"] + 36.0
-    out["log_L2500_int_fs_err"] = 0.4 * out["apparent_mag_2500_err"]
     out["iron_frac"] = out["f_fe_uv_3000"]
 
     return out

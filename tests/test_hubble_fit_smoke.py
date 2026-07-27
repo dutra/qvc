@@ -61,6 +61,10 @@ def _make_fake_agn_sample(n_agn=24, seed=123):
             "z_err": np.full(n_agn, 0.002),
             "apparent_mag_2500": apparent_mag,
             "apparent_mag_2500_err": np.full(n_agn, 0.04),
+            "apparent_mag_2500_intrinsic": apparent_mag,
+            "apparent_mag_2500_intrinsic_err": np.full(n_agn, 0.04),
+            "flux_aper_b": np.full(n_agn, 1.0e-14),
+            "flux_aper_err_b": np.full(n_agn, 2.0e-15),
             "log_sigma_hat0": log_sigma_hat0,
             "log_sigma_uv": log_sigma_uv,
             "log_sigma_uv_uncorrected": log_sigma_uv + 0.02,
@@ -128,6 +132,34 @@ def fake_data():
     df_agn = _make_fake_agn_sample()
     df_pantheon = _make_fake_pantheon_sample()
     return df_agn, df_pantheon
+
+
+def test_alpha_ox_cosmology_uses_equal_weight_posterior_medians(monkeypatch):
+    captured = {}
+    source = pd.DataFrame({"object_id": ["agn_001"]})
+
+    def fake_compute_alpha_ox(df, *, cosmology):
+        captured["cosmology"] = cosmology
+        return df.assign(alphaOX=1.23)
+
+    monkeypatch.setattr(hubble_fit, "compute_alpha_ox", fake_compute_alpha_ox)
+    out = hubble_fit._compute_alpha_ox_from_posterior_median(
+        source,
+        np.array(
+            [
+                [60.0, 0.10],
+                [72.0, 0.30],
+                [90.0, 0.80],
+            ]
+        ),
+        ["H0", "Om0"],
+        cosmo_model="FlatLambdaCDM",
+        z_pivot=1.5,
+    )
+
+    assert captured["cosmology"].H0.value == pytest.approx(72.0)
+    assert captured["cosmology"].Om0 == pytest.approx(0.30)
+    assert out.loc[0, "alphaOX"] == pytest.approx(1.23)
 
 
 def test_log_likelihood_finite_on_fake_lcdm_data(fake_data):

@@ -109,17 +109,17 @@ def test_populate_xray_missing_catalog_returns_nan_columns(monkeypatch, tmp_path
         "flux_aper_hilim_b",
         "flux_aper_lolim_b",
         "flux_aper_err_b",
-        "log_Lxray",
-        "log_Lxray_err",
-        "alphaOX",
-        "alphaOX_err",
-        "alphaOX_exp",
-        "alphaOX_exp_err",
-        "delta_alphaOX",
-        "delta_alphaOX_err",
     ):
         assert col in out.columns
         assert out[col].isna().all()
+    for col in (
+        "log_L2500_nu",
+        "log_L2keV_nu",
+        "log_Lxray",
+        "alphaOX",
+        "delta_alphaOX",
+    ):
+        assert col not in out.columns
 
 
 def _minimal_agn_df():

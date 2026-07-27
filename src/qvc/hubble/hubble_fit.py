@@ -36,6 +36,7 @@ DEFAULT_COMPLETENESS_MOCK_AREA_DEG2 = 5.0
 
 from qvc.hubble.hubble_utils import (
     compare_models_by_log_evidence_all,
+    compute_alpha_ox,
     compute_age_universe_with_error,
     compute_pivot_redshift,
     display_results_summary,
@@ -175,6 +176,23 @@ def _cosmo_from_params(cosmo_model, params, zp):
             zp=zp,
         )
     raise ValueError(f"Invalid cosmology model: {cosmo_model!r}")
+
+
+def _compute_alpha_ox_from_posterior_median(
+    df_agn,
+    flat_samples,
+    model_labels,
+    *,
+    cosmo_model,
+    z_pivot,
+):
+    median_params = dict(zip(model_labels, np.median(flat_samples, axis=0)))
+    cosmology = _cosmo_from_params(cosmo_model, median_params, z_pivot)
+    print(
+        "Computing alpha-OX with posterior-median "
+        f"{cosmo_model} parameters: {median_params}"
+    )
+    return compute_alpha_ox(df_agn, cosmology=cosmology)
 
 
 def _resolve_table_debias_values_for_frame(df_agn, *, dm_interp=None, dmi_values=None):
@@ -3263,8 +3281,15 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         'L2500': chisq_red_L2500
     }
 
-    plot_residuals_vs_alphaOX(
+    df_agn_alpha_ox = _compute_alpha_ox_from_posterior_median(
         df_agn_pass2_plot_sample,
+        flat_samples,
+        model_labels,
+        cosmo_model=cosmo_model,
+        z_pivot=z_pivot_agn,
+    )
+    plot_residuals_vs_alphaOX(
+        df_agn_alpha_ox,
         debiased_residuals,
         debiased_clipping_sigma,
         show=False,
