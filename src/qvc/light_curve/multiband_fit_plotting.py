@@ -71,12 +71,13 @@ def _predict_regular_band_grid(
     time0=0.0,
     max_query_points=2_000,
 ):
-    """Predict a common time grid in memory-bounded groups of bands.
+    """Predict a common time grid in memory-bounded single-band calls.
 
-    The time-major ordering keeps the tinygp coordinates sorted while making
-    each returned array straightforward to reshape as ``(time, band)``.
-    Bounding each call matters because ``gp.condition`` can materialize dense
-    query covariance intermediates whose memory grows quadratically.
+    Keep every conditioning call single-band.  Although time-major multiband
+    coordinates are sortable, repeated timestamps from different bands are
+    not handled reliably by all of the causal quasi-separable predictors used
+    here.  Chunking the time axis still bounds the dense query intermediates
+    without introducing simultaneous multiband query coordinates.
     """
 
     t_test = np.asarray(t_test, dtype=float)
@@ -86,28 +87,34 @@ def _predict_regular_band_grid(
     if t_test.size == 0 or band_indices.size == 0:
         raise ValueError("t_test and band_indices must be non-empty")
 
-    bands_per_call = max(1, int(max_query_points) // t_test.size)
-    result_groups = None
-    for start in range(0, band_indices.size, bands_per_call):
-        band_group = band_indices[start : start + bands_per_call]
-        query_times = jnp.asarray(np.repeat(t_test - time0, band_group.size))
-        query_bands = jnp.asarray(
-            np.tile(band_group, t_test.size),
-            dtype=jnp.int32,
-        )
-        result = _prediction_to_display(
-            model,
-            model.pred(params, (query_times, query_bands)),
-        )
-        reshaped = tuple(
-            np.asarray(value).reshape(t_test.size, band_group.size)
-            for value in result
-        )
-        if result_groups is None:
-            result_groups = [[] for _ in reshaped]
-        for groups, value in zip(result_groups, reshaped):
-            groups.append(value)
-    return tuple(np.concatenate(groups, axis=1) for groups in result_groups)
+    points_per_call = max(1, int(max_query_points))
+    result_by_output = None
+    for band in band_indices:
+        band_chunks = None
+        for start in range(0, t_test.size, points_per_call):
+            time_chunk = t_test[start : start + points_per_call] - time0
+            query_times = jnp.asarray(time_chunk)
+            query_bands = jnp.full(
+                query_times.shape,
+                band,
+                dtype=jnp.int32,
+            )
+            result = _prediction_to_display(
+                model,
+                model.pred(params, (query_times, query_bands)),
+            )
+            if band_chunks is None:
+                band_chunks = [[] for _ in result]
+            for chunks, value in zip(band_chunks, result):
+                chunks.append(np.asarray(value))
+
+        band_result = tuple(np.concatenate(chunks) for chunks in band_chunks)
+        if result_by_output is None:
+            result_by_output = [[] for _ in band_result]
+        for columns, value in zip(result_by_output, band_result):
+            columns.append(value[:, None])
+
+    return tuple(np.concatenate(columns, axis=1) for columns in result_by_output)
 
 
 def _component_only_params(params, *, component):
