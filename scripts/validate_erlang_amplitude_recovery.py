@@ -21,7 +21,7 @@ import numpy as np
 from tinygp import GaussianProcess
 
 from validate_erlang_lag_recovery import load_real_cadence
-from qvc.light_curve.multiband_model_dho_blr import (
+from qvc.light_curve.multiband_dho_core import (
     mag_residual_to_relative_flux,
     magerr_residual_to_relative_fluxerr,
     relative_flux_to_mag_residual,

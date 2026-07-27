@@ -21,7 +21,7 @@ from qvc.light_curve.multiband_model_dho_blr_erlang import (
     erlang_response_moments,
     make_multiband_dho_blr_flux_linearized_erlang_model,
 )
-from qvc.light_curve.multiband_model_dho_blr import (
+from qvc.light_curve.multiband_dho_core import (
     mag_residual_to_relative_flux,
     relative_flux_to_mag_residual,
 )

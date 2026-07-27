@@ -684,6 +684,17 @@ def estimate_m2500_from_model(q):
     f_lambda_2500_intrinsic = scale_psf * pl_norm * (2500.0 / pl_pivot) ** pl_slope
     f_lambda_2500_reddened = f_lambda_2500_intrinsic * reddening_atten_2500
 
+    # JAXQSOFit uses the rest-frame spectral convention
+    # f_lambda,restconv = (1 + z) * f_lambda,obs.  Converting that quantity
+    # with lambda_rest=2500 A (and deliberately adding no further redshift
+    # factor) gives the K-corrected monochromatic flux density
+    #
+    #   f_nu,restconv(2500) = f_nu,obs[2500 * (1 + z)] / (1 + z).
+    #
+    # Consequently the magnitude below is the rest-frame monochromatic
+    # apparent magnitude satisfying m_2500 = M_2500 + distance modulus.  It is
+    # not the directly observed AB magnitude at 2500 * (1 + z), which would be
+    # brighter by 2.5*log10(1 + z).
     c_A_s = 2.99792458e18
     f_nu_reddened = (f_lambda_2500_reddened * 1e-17) * (2500.0**2) / c_A_s
     f_nu_intrinsic = (f_lambda_2500_intrinsic * 1e-17) * (2500.0**2) / c_A_s
