@@ -10,6 +10,7 @@ import traceback
 from functools import lru_cache
 
 import numpy as np
+from scipy.linalg import expm as scipy_expm
 from scipy.optimize import curve_fit, least_squares
 from scipy.special import gammaln
 from scipy.stats import kurtosis, normaltest, skew
@@ -76,18 +77,24 @@ from qvc.light_curve.multiband_fit_plotting import (
 )
 from qvc.light_curve.multiband_fit_utils import *
 from qvc.light_curve.multiband_generate_lc import *
-from qvc.light_curve.multiband_model_dho_blr import (
+from qvc.light_curve.multiband_dho_core import (
     mag_residual_to_relative_flux,
     magerr_residual_to_relative_fluxerr,
-    make_multiband_dho_blr_flux_linearized_model,
-    make_multiband_dho_blr_fluxmix_fast_display_model,
-    make_multiband_dho_blr_model,
     make_linear_mean_func,
     relative_flux_to_mag_residual,
 )
 from qvc.light_curve.multiband_model_dho_blr_erlang import (
     DEFAULT_ERLANG_ORDER,
     make_multiband_dho_blr_flux_linearized_erlang_model,
+)
+from qvc.light_curve.dho_drw_parameterization import (
+    DEFAULT_PERTURBATION_TO_DRW_RATIO,
+    carma21_response_parameters,
+    log_perturbation_ratio_prior,
+    log_quality_factor_prior,
+)
+from qvc.light_curve.multiband_model_dho_blr_erlang_drw import (
+    make_multiband_dho_blr_flux_linearized_erlang_drw_model,
 )
 from qvc.light_curve.psf_constant_flux_correction import (
     apply_constant_flux_correction_to_objects,
@@ -114,13 +121,6 @@ LOG_SF_INF_TO_RMS = 0.5 * np.log10(2.0)
 RELFLUX_TO_MAG_SCALE = float(2.5 / np.log(10.0))
 LOG_RELFLUX_TO_MAG_SCALE = float(np.log(RELFLUX_TO_MAG_SCALE))
 LINEAR_TREND_RF_SIGMA_MAG_PER_DAY = 1e-4
-FLUXMIX_CONT_SCALE_PRIOR_SIGMA = 1.0
-FLUXMIX_BASIS_GRID_MIN_POINTS = 512
-FLUXMIX_BASIS_GRID_MAX_POINTS = 2048
-FLUXMIX_PREDICTION_FORWARD_PAD = 400.0
-FLUXMIX_MIN_TOTAL_FLUX_RATIO = 0.05
-FLUXMIX_TOTAL_FLUX_FLOOR_SOFTNESS = 0.01
-FLUXMIX_TOTAL_FLUX_FLOOR_PENALTY = 20.0
 FLUX_LINEARIZED_REFINEMENT_ITERS = 3
 FLUX_LINEARIZED_MIN_TOTAL_FLUX_RATIO = 0.05
 SDSS_FILTER_BLUE_EDGE_OBS = {
@@ -1471,6 +1471,66 @@ def fit_bending_power_law_psd(freq, power, power_lo=None, power_hi=None):
     }
 
 
+def fit_fixed_slope_drw_psd(freq, power, power_lo=None, power_hi=None):
+    """Fit DRW sigma and tau with PSD slopes fixed to zero and minus two."""
+    freq = np.asarray(freq, dtype=float)
+    power = np.asarray(power, dtype=float)
+    mask = np.isfinite(freq) & np.isfinite(power) & (freq > 0.0) & (power > 0.0)
+    if np.count_nonzero(mask) < 4:
+        return dict(log_sigma=np.nan, log_sigma_err=np.nan, log_tau=np.nan,
+                    log_tau_err=np.nan, valid=False, n_bins=int(np.count_nonzero(mask)))
+    f, p = freq[mask], power[mask]
+    logp = np.log10(p)
+    log_err = np.full_like(logp, 0.25)
+    if power_lo is not None and power_hi is not None:
+        lo = np.asarray(power_lo, dtype=float)[mask]
+        hi = np.asarray(power_hi, dtype=float)[mask]
+        safe_lo = np.clip(lo, 1e-300, None)
+        err_lo = np.where((lo > 0.0) & (lo < p), logp - np.log10(safe_lo), np.nan)
+        err_hi = np.where(hi > p, np.log10(hi) - logp, np.nan)
+        both = np.isfinite(err_lo) & np.isfinite(err_hi)
+        log_err[both] = 0.5 * (err_lo[both] + err_hi[both])
+        log_err[np.isfinite(err_lo) & ~np.isfinite(err_hi)] = err_lo[np.isfinite(err_lo) & ~np.isfinite(err_hi)]
+        log_err[np.isfinite(err_hi) & ~np.isfinite(err_lo)] = err_hi[np.isfinite(err_hi) & ~np.isfinite(err_lo)]
+        log_err = np.clip(log_err, 0.05, 0.60)
+
+    f_mid = np.exp(np.mean(np.log(f)))
+    tau_init = 1.0 / (2.0 * np.pi * f_mid)
+    sigma_init = np.sqrt(np.clip(np.median(p) / (2.0 * tau_init), 1e-12, None))
+
+    def model_log10(frequency, log_sigma, log_tau):
+        return np.log10(np.clip(
+            bending_power_law_psd(frequency, log_sigma, log_tau, alpha_high=-2.0),
+            1e-300, None,
+        ))
+
+    try:
+        popt, pcov = curve_fit(
+            model_log10, f, logp,
+            p0=(np.log10(sigma_init), np.log10(tau_init)),
+            sigma=log_err, absolute_sigma=True,
+            bounds=([-6.0, -1.0], [3.0, 6.0]), maxfev=20000,
+        )
+        perr = np.sqrt(np.diag(pcov))
+    except Exception as exc:
+        logging.warning("Fixed-slope DRW PSD fit failed: %s", exc)
+        return dict(log_sigma=np.nan, log_sigma_err=np.nan, log_tau=np.nan,
+                    log_tau_err=np.nan, valid=False, n_bins=int(f.size))
+
+    tau = 10.0 ** float(popt[1])
+    tau_min = float(np.min(1.0 / (2.0 * np.pi * f)))
+    tau_max = float(np.max(1.0 / (2.0 * np.pi * f)))
+    valid = bool(np.all(np.isfinite(popt)) and tau_min < tau < tau_max)
+    return dict(
+        log_sigma=float(popt[0]),
+        log_sigma_err=float(perr[0]) if np.all(np.isfinite(perr)) else np.nan,
+        log_tau=float(popt[1]),
+        log_tau_err=float(perr[1]) if np.all(np.isfinite(perr)) else np.nan,
+        valid=valid,
+        n_bins=int(f.size),
+    )
+
+
 def compute_lomb_scargle_break_diagnostics(model, samples, obj, z, *, n_freq=500):
     """Fit a bending power law to the plotted combined Lomb-Scargle PSD and convert to UV."""
 
@@ -1658,6 +1718,18 @@ def compute_lomb_scargle_break_diagnostics(model, samples, obj, z, *, n_freq=500
             "psd_bpl_valid": display_fit_raw["valid"],
             "psd_bpl_nbins": float(display_fit_raw["n_points"]),
         }
+    fixed_mask = (
+        signal_finite
+        & (p_bin_raw > 0.0)
+        & (f_bin_raw >= psd_xlim[0])
+        & (f_bin_raw <= psd_bpl_fit_fmax)
+    )
+    fit_fixed = fit_fixed_slope_drw_psd(
+        f_bin_raw[fixed_mask],
+        p_bin_raw[fixed_mask],
+        p_lo_raw[fixed_mask],
+        p_hi_raw[fixed_mask],
+    )
     eta_sigma = float(np.nanmedian(np.asarray(samples["eta_sigma"], dtype=float)))
     eta_tau = float(np.nanmedian(np.asarray(samples["eta_tau"], dtype=float)))
     log_sigma_uv = (
@@ -1689,6 +1761,30 @@ def compute_lomb_scargle_break_diagnostics(model, samples, obj, z, *, n_freq=500
         else np.nan
     )
     tau_ls_obs = np.power(10.0, log_tau_ls_obs) if np.isfinite(log_tau_ls_obs) else np.nan
+    # The LS bending-law convention integrates to sigma^2/2 for a DRW.
+    # Divide by sqrt(2) so sigma_ls_fixed is comparable to the stationary GP RMS.
+    log_sigma_ls_fixed = (
+        fit_fixed["log_sigma"] - 0.5 * np.log10(2.0)
+        if np.isfinite(fit_fixed["log_sigma"]) else np.nan
+    )
+    sigma_ls_fixed = 10.0 ** log_sigma_ls_fixed if np.isfinite(log_sigma_ls_fixed) else np.nan
+    sigma_ls_fixed_err = (
+        np.log(10.0) * sigma_ls_fixed * fit_fixed["log_sigma_err"]
+        if np.isfinite(sigma_ls_fixed) and np.isfinite(fit_fixed["log_sigma_err"])
+        else np.nan
+    )
+    log_tau_ls_fixed_obs = fit_fixed["log_tau"]
+    tau_ls_fixed_obs = 10.0 ** log_tau_ls_fixed_obs if np.isfinite(log_tau_ls_fixed_obs) else np.nan
+    log_tau_ls_fixed = (
+        log_tau_ls_fixed_obs - np.log10(1.0 + float(z))
+        if np.isfinite(log_tau_ls_fixed_obs) else np.nan
+    )
+    tau_ls_fixed = 10.0 ** log_tau_ls_fixed if np.isfinite(log_tau_ls_fixed) else np.nan
+    tau_ls_fixed_err = (
+        np.log(10.0) * tau_ls_fixed * fit_fixed["log_tau_err"]
+        if np.isfinite(tau_ls_fixed) and np.isfinite(fit_fixed["log_tau_err"])
+        else np.nan
+    )
     psd_noise_floor_norm = (
         np.power(10.0, fit_norm["log_noise_floor_bpl"])
         if np.isfinite(fit_norm["log_noise_floor_bpl"])
@@ -1737,6 +1833,18 @@ def compute_lomb_scargle_break_diagnostics(model, samples, obj, z, *, n_freq=500
         "psd_noise_floor_ls": psd_noise_floor_raw,
         "psd_ls_valid": fit_raw["psd_bpl_valid"],
         "psd_ls_nbins": fit_raw["psd_bpl_nbins"],
+        "log_sigma_ls_fixed": log_sigma_ls_fixed,
+        "log_sigma_ls_fixed_err": fit_fixed["log_sigma_err"],
+        "sigma_ls_fixed": sigma_ls_fixed,
+        "sigma_ls_fixed_err": sigma_ls_fixed_err,
+        "log_tau_ls_fixed_obs": log_tau_ls_fixed_obs,
+        "tau_ls_fixed_obs": tau_ls_fixed_obs,
+        "log_tau_ls_fixed": log_tau_ls_fixed,
+        "log_tau_ls_fixed_err": fit_fixed["log_tau_err"],
+        "tau_ls_fixed": tau_ls_fixed,
+        "tau_ls_fixed_err": tau_ls_fixed_err,
+        "psd_ls_fixed_valid": fit_fixed["valid"],
+        "psd_ls_fixed_nbins": float(fit_fixed["n_bins"]),
     }
     if np.isfinite(fit_norm["log_tau_bpl"]):
         out["log_nu_break_bpl"] = -np.log10(2.0 * np.pi) - fit_norm["log_tau_bpl"]
@@ -2280,6 +2388,40 @@ def dho_structure_function(tau, amp, tau_fast, tau_slow):
     return np.sqrt(np.clip(sf2, 0.0, None))
 
 
+def dho_drw_q_structure_function(
+    tau,
+    amp,
+    tau_drw,
+    quality_factor,
+    tau_perturb=0.0,
+):
+    """SF of the unit-RMS CARMA(2,1) in DRW-style coordinates."""
+
+    tau = np.asarray(tau, dtype=float)
+    amp = np.asarray(amp, dtype=float)
+    tau_drw = float(np.asarray(tau_drw))
+    quality_factor = float(np.asarray(quality_factor))
+    tau_perturb = max(float(np.asarray(tau_perturb)), 0.0)
+    omega0, damping, ma_ratio = carma21_response_parameters(
+        jnp.asarray([tau_drw]),
+        jnp.asarray([quality_factor]),
+        jnp.asarray([max(tau_perturb, 1e-12)]),
+    )
+    omega0 = float(np.asarray(omega0)[0])
+    damping = float(np.asarray(damping)[0])
+    ma_ratio = float(np.asarray(ma_ratio)[0])
+    design = np.array([[0.0, 1.0], [-omega0**2, -damping]])
+    stationary = np.diag([1.0, omega0**2])
+    obs = np.array([1.0, tau_perturb]) / np.sqrt(1.0 + ma_ratio**2)
+    cov_factor = np.array(
+        [obs @ scipy_expm(design * lag) @ stationary @ obs for lag in tau],
+        dtype=float,
+    )
+
+    sf2 = 2.0 * np.square(amp) * (1.0 - cov_factor)
+    return np.sqrt(np.clip(sf2, 0.0, None))
+
+
 def _build_structure_function_lag_grid(t_band, tau_sf):
     """Choose a rest-frame lag grid that reflects the observed g-band coverage."""
 
@@ -2322,6 +2464,57 @@ def compute_model_structure_function_equivalent(samples, ref_band, tau_grid, *, 
         }
 
     amp_key = f"amp_cont_{ref_band}"
+    tau_drw_key = f"tau_drw_{ref_band}"
+    tau_perturb_key = f"tau_perturb_{ref_band}"
+    if (
+        amp_key in samples
+        and tau_drw_key in samples
+        and "quality_factor" in samples
+    ):
+        amp = np.asarray(samples[amp_key], dtype=float)
+        tau_drw = np.asarray(samples[tau_drw_key], dtype=float)
+        quality_factor = np.asarray(samples["quality_factor"], dtype=float)
+        mask = (
+            np.isfinite(amp)
+            & np.isfinite(tau_drw)
+            & np.isfinite(quality_factor)
+            & (amp > 0.0)
+            & (tau_drw > 0.0)
+            & (quality_factor > 0.0)
+        )
+        if np.count_nonzero(mask) == 0:
+            return nan_out
+        amp_med = float(np.nanmedian(amp[mask]))
+        tau_drw_med = float(np.nanmedian(tau_drw[mask])) / max(1.0 + float(z), 1e-12)
+        q_med = float(np.nanmedian(quality_factor[mask]))
+        tau_perturb_med = (
+            float(np.nanmedian(np.asarray(samples[tau_perturb_key], dtype=float)[mask]))
+            / max(1.0 + float(z), 1e-12)
+            if tau_perturb_key in samples
+            else 0.0
+        )
+        sf_model_fit_grid = dho_drw_q_structure_function(
+            tau_grid,
+            amp_med,
+            tau_drw_med,
+            q_med,
+            tau_perturb_med,
+        )
+        fit = fit_structure_function(tau_grid, sf_model_fit_grid)
+        out = {
+            "log_sigma_sf_model_ref_band": fit["log_sigma_sf"],
+            "log_sigma_sf_model_ref_band_err": fit["log_sigma_sf_err"],
+            "log_tau_sf_model_ref_band": fit["log_tau_sf"],
+            "log_tau_sf_model_ref_band_err": fit["log_tau_sf_err"],
+            "sf_model_valid": fit["sf_valid"],
+        }
+        if return_series:
+            out |= {
+                "sf_model_tau_ref_band": np.asarray(tau_grid, dtype=float),
+                "sf_model_curve_ref_band": sf_model_fit_grid,
+            }
+        return out
+
     tau_fast_key = f"tau_fast_{ref_band}"
     tau_slow_key = f"tau_slow_{ref_band}"
     if any(key not in samples for key in (amp_key, tau_fast_key, tau_slow_key)):
@@ -2580,6 +2773,16 @@ def log_tau_slow_center0_prior(eta_tau, z, lambda_center_rf):
     )
 
 
+def log_tau_drw_center0_prior(eta_tau, z, lambda_center_rf):
+    """DRW-style integral-time prior matched to the legacy slow-time prior.
+
+    In the legacy prior's strongly overdamped region,
+    tau_drw = tau_slow + tau_fast is effectively tau_slow.
+    """
+
+    return log_tau_slow_center0_prior(eta_tau, z, lambda_center_rf)
+
+
 TAU_FAST_TO_SLOW_PRIOR_RATIO = 150.0
 TAU_FAST_PRIOR_LOGSIGMA_DEX = 0.4
 
@@ -2725,10 +2928,6 @@ def log_lag_ratio_bc_to_blr_prior():
         low=LOG_LAG_RATIO_BC_TO_BLR_LOW,
         high=LOG_LAG_RATIO_BC_TO_BLR_HIGH,
     )
-
-
-def log_cont_scale_prior():
-    return dist.Normal(0.0, FLUXMIX_CONT_SCALE_PRIOR_SIGMA)
 
 
 def sample_linear_trend_with_band_offsets(
@@ -3002,13 +3201,14 @@ def compute_parameter_kls(
     z,
     lambda_center_rf,
     log_jitter_mean,
-    model_variant="mag_linear",
+    model_variant=None,
     disable_linear_trend=False,
     disable_lag_blr=False,
     disable_lag_bc=False,
     drop_band_lyman_alpha=False,
     tau_fast_truncated=False,
     n_blr_terms=1,
+    drw_parameterization=False,
 ):
     """Return approximate KL(q||p) for sampled light-curve parameters."""
 
@@ -3017,22 +3217,22 @@ def compute_parameter_kls(
     eta_tau = np.asarray(flat_samples["eta_tau"])
     sigma_center0_key = (
         "log_sigma_center0_relflux"
-        if model_variant in ("mag_flux_linearized", "mag_flux_linearized_erlang") and "log_sigma_center0_relflux" in flat_samples
+        if model_variant == "mag_flux_linearized_erlang" and "log_sigma_center0_relflux" in flat_samples
         else "log_sigma_center0"
     )
     sigma_prior_fn = (
-        log_sigma_center0_relflux_prior if model_variant in ("mag_flux_linearized", "mag_flux_linearized_erlang") else log_sigma_center0_prior
+        log_sigma_center0_relflux_prior if model_variant == "mag_flux_linearized_erlang" else log_sigma_center0_prior
     )
     linear_trend_prior_fn = (
         linear_trend_prior_relflux(t_ref=t_ref, z=z)
-        if model_variant in ("mag_flux_linearized", "mag_flux_linearized_erlang")
+        if model_variant == "mag_flux_linearized_erlang"
         else linear_trend_prior(t_ref=t_ref, z=z)
     )
     linear_trend_band_offset_prior_fn = linear_trend_band_offset_prior(
         len(bands),
-        relflux=(model_variant in ("mag_flux_linearized", "mag_flux_linearized_erlang")),
+        relflux=(model_variant == "mag_flux_linearized_erlang"),
     )
-    mean_prior_fn = mean_prior_relflux if model_variant in ("mag_flux_linearized", "mag_flux_linearized_erlang") else mean_prior
+    mean_prior_fn = mean_prior_relflux if model_variant == "mag_flux_linearized_erlang" else mean_prior
     log_jitter_mean_arr = np.asarray(log_jitter_mean, dtype=float)
 
     kls["eta_sigma_kl"] = kl_from_samples(
@@ -3057,7 +3257,29 @@ def compute_parameter_kls(
             eta_sigma,
         )
 
-    if "log_tau_slow_center0" in flat_samples:
+    if drw_parameterization and "log_tau_drw_center0" in flat_samples:
+        kls["log_tau_drw_center0_kl"] = conditional_kl_from_samples(
+            flat_samples["log_tau_drw_center0"],
+            lambda x, eta: _dist_log_prob_array(
+                log_tau_slow_center0_prior(
+                    eta,
+                    z,
+                    lambda_center_rf,
+                ),
+                x,
+            ),
+            eta_tau,
+        )
+        kls["log_quality_factor_kl"] = kl_from_samples(
+            flat_samples["log_quality_factor"],
+            lambda x: _dist_log_prob_array(log_quality_factor_prior(), x),
+        )
+        if "log_tau_perturb_ratio" in flat_samples:
+            kls["log_tau_perturb_ratio_kl"] = kl_from_samples(
+                flat_samples["log_tau_perturb_ratio"],
+                lambda x: _dist_log_prob_array(log_perturbation_ratio_prior(), x),
+            )
+    elif "log_tau_slow_center0" in flat_samples:
         kls["log_tau_slow_center0_kl"] = conditional_kl_from_samples(
             flat_samples["log_tau_slow_center0"],
             lambda x, eta: _dist_log_prob_array(
@@ -3071,7 +3293,7 @@ def compute_parameter_kls(
             eta_tau,
         )
 
-    if "log_tau_fast_center0" in flat_samples:
+    if not drw_parameterization and "log_tau_fast_center0" in flat_samples:
         kls["log_tau_fast_center0_kl"] = conditional_kl_from_samples(
             flat_samples["log_tau_fast_center0"],
             lambda x, log_tau_slow: _dist_log_prob_array(
@@ -3669,104 +3891,23 @@ def build_explicit_model_params_relflux(raw_params, lam_rf, *, lam_lya_rf=None):
     return explicit
 
 
-def build_explicit_model_params_continuum_only(raw_params, lam_rf, *, lam_lya_rf=None):
-    """Explicit continuum-only parameters with line amplitudes forced to zero."""
-
-    lam_rf = jnp.asarray(lam_rf)
-    B = int(lam_rf.shape[0])
-    raw = dict(raw_params)
-    zeros = jnp.zeros(B, dtype=lam_rf.dtype)
-    raw.setdefault("dlog_amp_blr", jnp.full(B, -9.0, dtype=lam_rf.dtype))
-    raw.setdefault("dlog_amp_blr2", jnp.full(B, -9.0, dtype=lam_rf.dtype))
-    raw.setdefault("log_lag_blr", jnp.full(B, -9.0, dtype=lam_rf.dtype))
-    raw.setdefault("log_lag_blr2", jnp.full(B, -9.0, dtype=lam_rf.dtype))
-    explicit = build_explicit_model_params(raw, lam_rf, lam_lya_rf=lam_lya_rf)
-    explicit["amp_bc"] = zeros
-    explicit["amp_blr"] = zeros
-    explicit["amp_blr2"] = zeros
-    explicit["lag_bc"] = zeros
-    explicit["lag_blr"] = zeros
-    explicit["lag_blr2"] = zeros
-    return explicit
-
-
-def build_explicit_model_params_fluxmix_fast(raw_params, lam_rf, *, lam_lya_rf=None):
-    """Explicit parameters for the two-stage flux-mixing approximation."""
-
-    explicit = build_explicit_model_params(raw_params, lam_rf, lam_lya_rf=lam_lya_rf)
-    explicit["log_cont_scale"] = jnp.asarray(raw_params.get("log_cont_scale", 0.0))
-    return explicit
-
 
 def add_model_prediction_params(samples, lam_rf, *, model_variant=None, lam_lya_rf=None):
     """Add explicit model parameters needed for prediction/plotting."""
 
     out = dict(samples)
-    use_fluxmix = model_variant == "mag_fluxmix_fast" or "log_cont_scale" in out
-    use_relflux = (
-        model_variant in ("mag_flux_linearized", "mag_flux_linearized_erlang")
-        or "log_sigma_uv_relflux" in out
-        or "amp_cont_relflux" in out
-    )
-    if use_fluxmix and all(
-        key in out
-        for key in (
-            "log_kernel_param",
-            "amp_cont",
-            "amp_bc",
-            "amp_blr",
-            "amp_blr2",
-            "lag_disk",
-            "lag_bc",
-            "lag_blr",
-            "lag_blr2",
-            "tau_fast_band",
-            "tau_slow_band",
-            "log_sigma_uv",
-            "log_tau_uv",
-            "log_tau_fast_uv",
-            "log_igm_transmission_band",
-            "igm_transmission_band",
-            "lambda_center_rf",
-        )
-    ):
-        return out
-    if use_fluxmix:
-        explicit = build_explicit_model_params_fluxmix_fast(
-            out,
-            lam_rf,
-            lam_lya_rf=lam_lya_rf,
-        )
-        out["log_kernel_param"] = np.asarray(explicit["log_kernel_param"])
-        out["amp_cont"] = np.asarray(explicit["amp_cont"])
-        out["amp_bc"] = np.asarray(explicit["amp_bc"])
-        out["amp_blr"] = np.asarray(explicit["amp_blr"])
-        out["amp_blr2"] = np.asarray(explicit["amp_blr2"])
-        out["lag_disk"] = np.asarray(explicit["lag_disk"])
-        out["lag_bc"] = np.asarray(explicit["lag_bc"])
-        out["lag_blr"] = np.asarray(explicit["lag_blr"])
-        out["lag_blr2"] = np.asarray(explicit["lag_blr2"])
-        out["tau_fast_band"] = np.asarray(explicit["tau_fast_band"])
-        out["tau_slow_band"] = np.asarray(explicit["tau_slow_band"])
-        out["log_sigma_center0"] = np.asarray(explicit["log_sigma_center0"])
-        out["log_tau_slow_center0"] = np.asarray(explicit["log_tau_slow_center0"])
-        out["log_tau_fast_center0"] = np.asarray(explicit["log_tau_fast_center0"])
-        out["log_sigma_uv"] = np.asarray(explicit["log_sigma_uv"])
-        out["log_tau_uv"] = np.asarray(explicit["log_tau_uv"])
-        out["log_tau_fast_uv"] = np.asarray(explicit["log_tau_fast_uv"])
-        out["log_igm_transmission_band"] = np.asarray(explicit["log_igm_transmission_band"])
-        out["igm_transmission_band"] = np.asarray(explicit["igm_transmission_band"])
-        out["log_cont_scale"] = np.asarray(explicit["log_cont_scale"])
-        if "dlog_amp_bc" in explicit:
-            out["dlog_amp_bc"] = np.asarray(explicit["dlog_amp_bc"])
-        if "log_lag_ratio_bc_to_blr" in explicit:
-            out["log_lag_ratio_bc_to_blr"] = np.asarray(explicit["log_lag_ratio_bc_to_blr"])
-        if "dlog_amp_blr2" in explicit:
-            out["dlog_amp_blr2"] = np.asarray(explicit["dlog_amp_blr2"])
-        if "log_lag_blr2" in explicit:
-            out["log_lag_blr2"] = np.asarray(explicit["log_lag_blr2"])
-        out["lambda_center_rf"] = np.asarray(explicit["lambda_center_rf"])
-        return out
+    use_drw_q = "log_tau_drw_center0" in out
+    if use_drw_q:
+        # The shared wavelength-scaling helper is expressed in the legacy
+        # two-timescale coordinates. For the all-regime DHO these are only
+        # internal compatibility coordinates: two equal halves whose sum is
+        # the integrated DRW-style timescale consumed by the actual kernel.
+        log_half_tau = np.asarray(out["log_tau_drw_center0"]) - np.log(2.0)
+        out.setdefault("log_tau_slow_center0", log_half_tau)
+        out.setdefault("log_tau_fast_center0", log_half_tau)
+        if "quality_factor" not in out and "log_quality_factor" in out:
+            out["quality_factor"] = np.exp(np.asarray(out["log_quality_factor"]))
+    use_relflux = True
     if use_relflux and all(
         key in out
         for key in (
@@ -3814,17 +3955,38 @@ def add_model_prediction_params(samples, lam_rf, *, model_variant=None, lam_lya_
         out["lag_bc"] = np.asarray(explicit["lag_bc"])
         out["lag_blr"] = np.asarray(explicit["lag_blr"])
         out["lag_blr2"] = np.asarray(explicit["lag_blr2"])
-        out["tau_fast_band"] = np.asarray(explicit["tau_fast_band"])
-        out["tau_slow_band"] = np.asarray(explicit["tau_slow_band"])
+        if use_drw_q:
+            out["tau_drw_band"] = np.asarray(
+                explicit["tau_fast_band"] + explicit["tau_slow_band"]
+            )
+            if "tau_perturb_band" not in out:
+                if "tau_perturb" in out:
+                    out["tau_perturb_band"] = np.asarray(out["tau_perturb"])
+                else:
+                    log_ratio = out.get(
+                        "log_tau_perturb_ratio",
+                        np.log(DEFAULT_PERTURBATION_TO_DRW_RATIO),
+                    )
+                    out["tau_perturb_band"] = (
+                        np.exp(np.asarray(log_ratio))[..., None]
+                        * out["tau_drw_band"]
+                    )
+        else:
+            out["tau_fast_band"] = np.asarray(explicit["tau_fast_band"])
+            out["tau_slow_band"] = np.asarray(explicit["tau_slow_band"])
         out["log_sigma_center0_relflux"] = np.asarray(explicit["log_sigma_center0_relflux"])
         out.setdefault("log_sigma_center0", np.asarray(explicit["log_sigma_center0_relflux"]))
         out["log_sigma_center0_mag_equiv"] = np.asarray(explicit["log_sigma_center0"])
-        out["log_tau_slow_center0"] = np.asarray(explicit["log_tau_slow_center0"])
-        out["log_tau_fast_center0"] = np.asarray(explicit["log_tau_fast_center0"])
+        if not use_drw_q:
+            out["log_tau_slow_center0"] = np.asarray(explicit["log_tau_slow_center0"])
+            out["log_tau_fast_center0"] = np.asarray(explicit["log_tau_fast_center0"])
         out["log_sigma_uv_relflux"] = np.asarray(explicit["log_sigma_uv_relflux"])
         out["log_sigma_uv"] = np.asarray(explicit["log_sigma_uv"])
-        out["log_tau_uv"] = np.asarray(explicit["log_tau_uv"])
-        out["log_tau_fast_uv"] = np.asarray(explicit["log_tau_fast_uv"])
+        out["log_tau_uv"] = np.asarray(explicit["log_tau_uv"]) + (
+            np.log(2.0) if use_drw_q else 0.0
+        )
+        if not use_drw_q:
+            out["log_tau_fast_uv"] = np.asarray(explicit["log_tau_fast_uv"])
         out["log_igm_transmission_band"] = np.asarray(explicit["log_igm_transmission_band"])
         out["igm_transmission_band"] = np.asarray(explicit["igm_transmission_band"])
         if "dlog_amp_bc" in explicit:
@@ -3898,182 +4060,6 @@ def add_model_prediction_params(samples, lam_rf, *, model_variant=None, lam_lya_
     return out
 
 
-def build_single_object_model(
-    obj_dict,
-    lam_rf,
-    log_jitter_mean,
-    *,
-    lam_lya_rf=None,
-    disable_linear_trend=False,
-    disable_lag_blr=False,
-    disable_lag_bc=False,
-    drop_band_lyman_alpha=False,
-    tau_fast_truncated=False,
-    n_blr_terms=1,
-    shared_blr_lag=False,
-    blr_lag_band_scatter=None,
-):
-    """Return the NumPyro model for one object."""
-
-    (t, bidx) = obj_dict["X"]
-    y = obj_dict["y"]
-    yerr = obj_dict["yerr"]
-    survey_idx = jnp.asarray(obj_dict["survey_idx"], dtype=jnp.int32)
-    z = float(obj_dict["z"])
-    B = int(len(lam_rf))
-    lambda_center_rf = compute_lambda_center_rf(lam_rf)
-    if lam_lya_rf is None:
-        lam_lya_rf = lam_rf
-    lam_lya_rf = jnp.asarray(lam_lya_rf, dtype=lam_rf.dtype)
-    bands = tuple(str(b) for b in obj_dict.get("bands", []))
-    if bands:
-        log_igm_transmission_band = compute_log_igm_transmission_band(bands, z)
-    else:
-        log_igm_transmission_band = jnp.zeros(B, dtype=lam_rf.dtype)
-    lambda_uv = jnp.array(2500.0, dtype=lam_rf.dtype)
-    log_jitter_active_mask, survey_offset_active_mask = _get_object_active_noise_calibration_masks(
-        obj_dict, B
-    )
-    log_jitter_mean_grid = _coerce_log_jitter_mean_grid(log_jitter_mean, B)
-
-    def model():
-        eta_sigma = numpyro.sample("eta_sigma", eta_sigma_prior())
-
-        eta_tau = numpyro.sample("eta_tau", eta_tau_prior())
-
-        log_tau_slow_center0 = numpyro.sample(
-            "log_tau_slow_center0",
-            log_tau_slow_center0_prior(
-                eta_tau,
-                z,
-                lambda_center_rf,
-            ),
-        )
-
-        log_tau_fast_center0 = numpyro.sample(
-            "log_tau_fast_center0",
-            log_tau_fast_center0_prior(
-                log_tau_slow_center0,
-                tau_fast_truncated=tau_fast_truncated,
-            ),
-        )
-
-        log_sigma_center0 = numpyro.sample(
-            "log_sigma_center0",
-            log_sigma_center0_prior(
-                eta_sigma,
-                lambda_center_rf,
-            ),
-        )
-        (
-            linear_trend,
-            linear_trend_band_offset,
-            _linear_trend_band,
-        ) = sample_linear_trend_with_band_offsets(
-            B=B,
-            disable_linear_trend=disable_linear_trend,
-            trend_prior_dist=linear_trend_prior(t_ref=t, z=z),
-            band_offset_raw_prior_dist=linear_trend_band_offset_raw_prior(),
-        )
-
-        lag0 = numpyro.sample("lag0", lag0_prior(z=z))
-        log_lag0 = numpyro.deterministic("log_lag0", jnp.log(lag0))
-        lag_beta = numpyro.sample("lag_beta", lag_beta_prior())
-
-        line_ratio_offsets = compute_flux_line_ratio_offsets(
-            lam_rf,
-            lambda_center_rf=lambda_center_rf,
-            eta_sigma=eta_sigma,
-            log_igm_transmission_band=log_igm_transmission_band,
-        )
-        (
-            mean,
-            dlog_amp_blr,
-            dlog_amp_blr2,
-            log_lag_blr,
-            log_lag_blr2,
-            log_jitter,
-            survey_delta_mag,
-            dlog_amp_bc,
-            log_lag_ratio_bc_to_blr,
-        ) = sample_flux_line_latent_params(
-            B=B,
-            z=z,
-            log_lag0=log_lag0,
-            log_jitter_mean=log_jitter_mean_grid,
-            log_jitter_active_mask=log_jitter_active_mask,
-            survey_offset_active_mask=survey_offset_active_mask,
-            line_ratio_offsets=line_ratio_offsets,
-            disable_lag_blr=disable_lag_blr,
-            disable_lag_bc=disable_lag_bc,
-            n_blr_terms=n_blr_terms,
-            shared_blr_lag=shared_blr_lag,
-            blr_lag_band_scatter=blr_lag_band_scatter,
-        )
-
-        _ = numpyro.deterministic("log_tau_fake", float(obj_dict.get("log_tau_fake", -99.0)))
-        _ = numpyro.deterministic("log_sigma_fake", float(obj_dict.get("log_sigma_fake", -99.0)))
-
-        raw_params = dict(
-            log_tau_slow_center0=log_tau_slow_center0,
-            log_tau_fast_center0=log_tau_fast_center0,
-            log_sigma_center0=log_sigma_center0,
-            lambda_center_rf=lambda_center_rf,
-            linear_trend=linear_trend,
-            linear_trend_band_offset=linear_trend_band_offset,
-            mean=mean,
-            dlog_amp_blr=dlog_amp_blr,
-            dlog_amp_blr2=dlog_amp_blr2,
-            log_lag_blr=log_lag_blr,
-            log_lag_blr2=log_lag_blr2,
-            log_jitter=log_jitter,
-            survey_delta_mag=survey_delta_mag,
-            lag0=lag0,
-            lag_beta=lag_beta,
-            log_igm_transmission_band=log_igm_transmission_band,
-            eta_sigma=eta_sigma,
-            eta_tau=eta_tau,
-        )
-        if dlog_amp_bc is not None:
-            raw_params["dlog_amp_bc"] = dlog_amp_bc
-            raw_params["log_lag_ratio_bc_to_blr"] = log_lag_ratio_bc_to_blr
-
-        params = build_explicit_model_params(
-            raw_params,
-            lam_rf,
-            lam_lya_rf=lam_lya_rf,
-        )
-
-        numpyro.deterministic("lambda_center_rf", params["lambda_center_rf"])
-        numpyro.deterministic("log_sigma_uv", params["log_sigma_uv"])
-        numpyro.deterministic("log_tau_uv", params["log_tau_uv"])
-        numpyro.deterministic("log_tau_fast_uv", params["log_tau_fast_uv"])
-        numpyro.deterministic("tau_fast", params["tau_fast_band"])
-        numpyro.deterministic("tau_slow", params["tau_slow_band"])
-        numpyro.deterministic("amp_cont", params["amp_cont"])
-        numpyro.deterministic("amp_bc", params["amp_bc"])
-        numpyro.deterministic("amp_blr", params["amp_blr"])
-        numpyro.deterministic("amp_blr2", params["amp_blr2"])
-        numpyro.deterministic("log_igm_transmission_band", params["log_igm_transmission_band"])
-        numpyro.deterministic("igm_transmission_band", params["igm_transmission_band"])
-        numpyro.deterministic("lag_disk", params["lag_disk"])
-        numpyro.deterministic("lag_bc", params["lag_bc"])
-        numpyro.deterministic("lag_blr", params["lag_blr"])
-        numpyro.deterministic("lag_blr2", params["lag_blr2"])
-
-        m = make_multiband_dho_blr_model(
-            X=(t, bidx),
-            y=y,
-            yerr=yerr,
-            n_band=B,
-            survey_idx=survey_idx,
-            zero_mean=zero_mean,
-            has_jitter=has_jitter,
-        )
-        numpyro.factor("loglike", m.log_prob(params))
-
-    return model
-
 
 def build_single_object_model_mag_flux_linearized(
     obj_dict,
@@ -4087,11 +4073,12 @@ def build_single_object_model_mag_flux_linearized(
     drop_band_lyman_alpha=False,
     tau_fast_truncated=False,
     n_blr_terms=1,
-    use_erlang=False,
+    use_erlang=True,
     shared_blr_lag=False,
     erlang_order=DEFAULT_ERLANG_ORDER,
     use_fast_solver=False,
     blr_lag_band_scatter=None,
+    drw_parameterization=False,
 ):
     """Return the relative-flux quasi-separable model for one object."""
 
@@ -4099,6 +4086,10 @@ def build_single_object_model_mag_flux_linearized(
         raise ValueError(
             "model_variant='mag_flux_linearized' currently supports only n_blr_terms=1."
         )
+    if not use_erlang:
+        raise ValueError("The non-Erlang flux-linearized model has been removed.")
+    if drw_parameterization and not use_erlang:
+        raise ValueError("drw_parameterization currently requires use_erlang=True.")
 
     (t, bidx) = obj_dict["X"]
     y = obj_dict["y"]
@@ -4136,15 +4127,46 @@ def build_single_object_model_mag_flux_linearized(
         eta_sigma = numpyro.sample("eta_sigma", eta_sigma_prior())
         eta_tau = numpyro.sample("eta_tau", eta_tau_prior())
 
-        log_tau_slow_center0 = numpyro.sample(
-            "log_tau_slow_center0",
-            log_tau_slow_center0_prior(
-                eta_tau,
-                z,
-                lambda_center_rf,
-            ),
+        tau_center_prior_fn = (
+            log_tau_drw_center0_prior
+            if drw_parameterization
+            else log_tau_slow_center0_prior
         )
-        if use_erlang:
+        tau_center_prior = tau_center_prior_fn(
+            eta_tau,
+            z,
+            lambda_center_rf,
+        )
+        if drw_parameterization:
+            log_tau_drw_center0 = numpyro.sample(
+                "log_tau_drw_center0",
+                tau_center_prior,
+            )
+            log_quality_factor = numpyro.sample(
+                "log_quality_factor",
+                log_quality_factor_prior(),
+            )
+            log_tau_perturb_ratio = numpyro.sample(
+                "log_tau_perturb_ratio",
+                log_perturbation_ratio_prior(),
+            )
+            quality_factor = numpyro.deterministic(
+                "quality_factor",
+                jnp.exp(log_quality_factor),
+            )
+            # Compatibility coordinates for shared wavelength/amplitude
+            # plumbing. The all-regime kernel consumes their sum as tau_drw;
+            # they are not physical poles when Q > 1/2.
+            log_half_tau = log_tau_drw_center0 - jnp.log(2.0)
+            log_tau_slow_center0 = log_half_tau
+            log_tau_fast_center0 = log_half_tau
+        else:
+            log_tau_slow_center0 = numpyro.sample(
+                "log_tau_slow_center0",
+                tau_center_prior,
+            )
+
+        if use_erlang and not drw_parameterization:
             log_tau_separation_raw = numpyro.sample(
                 "log_tau_separation_raw",
                 log_tau_fast_separation_raw_prior(),
@@ -4153,7 +4175,7 @@ def build_single_object_model_mag_flux_linearized(
                 "log_tau_fast_center0",
                 ordered_log_tau_fast(log_tau_slow_center0, log_tau_separation_raw),
             )
-        else:
+        elif not drw_parameterization:
             log_tau_fast_center0 = numpyro.sample(
                 "log_tau_fast_center0",
                 log_tau_fast_center0_prior(
@@ -4255,15 +4277,55 @@ def build_single_object_model_mag_flux_linearized(
             lam_rf,
             lam_lya_rf=lam_lya_rf,
         )
+        if drw_parameterization:
+            params["tau_drw_band"] = (
+                params["tau_fast_band"] + params["tau_slow_band"]
+            )
+            params["quality_factor"] = quality_factor
+            params["log_tau_uv"] = params["log_tau_uv"] + jnp.log(2.0)
+            tau_perturb_ratio = jnp.exp(log_tau_perturb_ratio)
+            params["tau_perturb_band"] = (
+                tau_perturb_ratio * params["tau_drw_band"]
+            )
+            params["log_tau_perturb_uv"] = (
+                params["log_tau_uv"] + log_tau_perturb_ratio
+            )
 
         numpyro.deterministic("lambda_center_rf", params["lambda_center_rf"])
         numpyro.deterministic("log_sigma_center0_relflux", params["log_sigma_center0_relflux"])
         numpyro.deterministic("log_sigma_uv_relflux", params["log_sigma_uv_relflux"])
         numpyro.deterministic("log_sigma_uv", params["log_sigma_uv"])
         numpyro.deterministic("log_tau_uv", params["log_tau_uv"])
-        numpyro.deterministic("log_tau_fast_uv", params["log_tau_fast_uv"])
-        numpyro.deterministic("tau_fast", params["tau_fast_band"])
-        numpyro.deterministic("tau_slow", params["tau_slow_band"])
+        if drw_parameterization:
+            numpyro.deterministic(
+                "tau_drw",
+                params["tau_drw_band"],
+            )
+            numpyro.deterministic(
+                "tau_perturb",
+                params["tau_perturb_band"],
+            )
+            numpyro.deterministic(
+                "log_tau_perturb_uv",
+                params["log_tau_perturb_uv"],
+            )
+            numpyro.deterministic(
+                "tau_perturb_uv",
+                jnp.exp(params["log_tau_perturb_uv"]),
+            )
+            omega0, damping, _ = carma21_response_parameters(
+                params["tau_drw_band"],
+                quality_factor,
+                params["tau_perturb_band"],
+            )
+            numpyro.deterministic(
+                "tau_decay",
+                2.0 / damping,
+            )
+        else:
+            numpyro.deterministic("log_tau_fast_uv", params["log_tau_fast_uv"])
+            numpyro.deterministic("tau_fast", params["tau_fast_band"])
+            numpyro.deterministic("tau_slow", params["tau_slow_band"])
         numpyro.deterministic("amp_cont_relflux", params["amp_cont_relflux"])
         numpyro.deterministic("amp_bc_relflux", params["amp_bc_relflux"])
         numpyro.deterministic("amp_blr_relflux", params["amp_blr_relflux"])
@@ -4280,12 +4342,10 @@ def build_single_object_model_mag_flux_linearized(
         numpyro.deterministic("lag_blr2", params["lag_blr2"])
         numpyro.deterministic("F0_cont_band", baseline_flux_by_band)
 
-        use_erlang_response = use_erlang and not disable_lag_blr
-        model_factory = (
-            make_multiband_dho_blr_flux_linearized_erlang_model
-            if use_erlang_response
-            else make_multiband_dho_blr_flux_linearized_model
-        )
+        if drw_parameterization:
+            model_factory = make_multiband_dho_blr_flux_linearized_erlang_drw_model
+        else:
+            model_factory = make_multiband_dho_blr_flux_linearized_erlang_model
         m = model_factory(
             X=(t, bidx),
             y=y_relflux,
@@ -4295,364 +4355,17 @@ def build_single_object_model_mag_flux_linearized(
             baseline_flux_by_band=baseline_flux_by_band,
             zero_mean=zero_mean,
             has_jitter=has_jitter,
+            erlang_order=erlang_order,
             **(
-                {"erlang_order": erlang_order, "use_fast_solver": use_fast_solver}
-                if use_erlang_response
-                else {}
+                {}
+                if drw_parameterization
+                else {"use_fast_solver": use_fast_solver}
             ),
         )
         numpyro.factor("loglike", m.log_prob(params))
 
     return model
 
-
-def build_single_object_model_continuum_only(
-    obj_dict,
-    lam_rf,
-    log_jitter_mean,
-    *,
-    lam_lya_rf=None,
-    disable_linear_trend=False,
-    drop_band_lyman_alpha=False,
-    tau_fast_truncated=False,
-):
-    """Return the continuum-only mag-space QS model for stage 1."""
-
-    (t, bidx) = obj_dict["X"]
-    y = obj_dict["y"]
-    yerr = obj_dict["yerr"]
-    survey_idx = jnp.asarray(obj_dict["survey_idx"], dtype=jnp.int32)
-    z = float(obj_dict["z"])
-    B = int(len(lam_rf))
-    lambda_center_rf = compute_lambda_center_rf(lam_rf)
-    if lam_lya_rf is None:
-        lam_lya_rf = lam_rf
-    lam_lya_rf = jnp.asarray(lam_lya_rf, dtype=lam_rf.dtype)
-    bands = tuple(str(b) for b in obj_dict.get("bands", []))
-    if bands:
-        log_igm_transmission_band = compute_log_igm_transmission_band(bands, z)
-    else:
-        log_igm_transmission_band = jnp.zeros(B, dtype=lam_rf.dtype)
-    log_jitter_active_mask, survey_offset_active_mask = _get_object_active_noise_calibration_masks(
-        obj_dict, B
-    )
-    log_jitter_mean_grid = _coerce_log_jitter_mean_grid(log_jitter_mean, B)
-
-    def model():
-        eta_sigma = numpyro.sample("eta_sigma", eta_sigma_prior())
-        eta_tau = numpyro.sample("eta_tau", eta_tau_prior())
-
-        log_tau_slow_center0 = numpyro.sample(
-            "log_tau_slow_center0",
-            log_tau_slow_center0_prior(
-                eta_tau,
-                z,
-                lambda_center_rf,
-            ),
-        )
-        log_tau_fast_center0 = numpyro.sample(
-            "log_tau_fast_center0",
-            log_tau_fast_center0_prior(
-                log_tau_slow_center0,
-                tau_fast_truncated=tau_fast_truncated,
-            ),
-        )
-        log_sigma_center0 = numpyro.sample(
-            "log_sigma_center0",
-            log_sigma_center0_prior(
-                eta_sigma,
-                lambda_center_rf,
-            ),
-        )
-        (
-            linear_trend,
-            linear_trend_band_offset,
-            _linear_trend_band,
-        ) = sample_linear_trend_with_band_offsets(
-            B=B,
-            disable_linear_trend=disable_linear_trend,
-            trend_prior_dist=linear_trend_prior(t_ref=t, z=z),
-            band_offset_raw_prior_dist=linear_trend_band_offset_raw_prior(),
-        )
-
-        lag0 = numpyro.sample("lag0", lag0_prior(z=z))
-        lag_beta = numpyro.sample("lag_beta", lag_beta_prior())
-        log_jitter = _sample_log_jitter_grid(
-            log_jitter_mean_grid,
-            log_jitter_active_mask,
-        )
-        survey_delta_mag = _sample_survey_delta_mag_grid(
-            survey_offset_active_mask,
-        )
-        with numpyro.plate("band", B):
-            mean = numpyro.sample("mean", mean_prior())
-
-        raw_params = dict(
-            log_tau_slow_center0=log_tau_slow_center0,
-            log_tau_fast_center0=log_tau_fast_center0,
-            log_sigma_center0=log_sigma_center0,
-            lambda_center_rf=lambda_center_rf,
-            linear_trend=linear_trend,
-            linear_trend_band_offset=linear_trend_band_offset,
-            mean=mean,
-            log_jitter=log_jitter,
-            survey_delta_mag=survey_delta_mag,
-            lag0=lag0,
-            lag_beta=lag_beta,
-            log_igm_transmission_band=log_igm_transmission_band,
-            eta_sigma=eta_sigma,
-            eta_tau=eta_tau,
-        )
-        params = build_explicit_model_params_continuum_only(
-            raw_params,
-            lam_rf,
-            lam_lya_rf=lam_lya_rf,
-        )
-        numpyro.deterministic("lambda_center_rf", params["lambda_center_rf"])
-        numpyro.deterministic("log_sigma_uv", params["log_sigma_uv"])
-        numpyro.deterministic("log_tau_uv", params["log_tau_uv"])
-        numpyro.deterministic("log_tau_fast_uv", params["log_tau_fast_uv"])
-        numpyro.deterministic("tau_fast", params["tau_fast_band"])
-        numpyro.deterministic("tau_slow", params["tau_slow_band"])
-        numpyro.deterministic("amp_cont", params["amp_cont"])
-        numpyro.deterministic("amp_bc", params["amp_bc"])
-        numpyro.deterministic("amp_blr", params["amp_blr"])
-        numpyro.deterministic("amp_blr2", params["amp_blr2"])
-        numpyro.deterministic("log_igm_transmission_band", params["log_igm_transmission_band"])
-        numpyro.deterministic("igm_transmission_band", params["igm_transmission_band"])
-        numpyro.deterministic("lag_disk", params["lag_disk"])
-        numpyro.deterministic("lag_bc", params["lag_bc"])
-        numpyro.deterministic("lag_blr", params["lag_blr"])
-        numpyro.deterministic("lag_blr2", params["lag_blr2"])
-
-        m = make_multiband_dho_blr_model(
-            X=(t, bidx),
-            y=y,
-            yerr=yerr,
-            n_band=B,
-            survey_idx=survey_idx,
-            zero_mean=zero_mean,
-            has_jitter=has_jitter,
-        )
-        numpyro.factor("loglike", m.log_prob(params))
-
-    return model
-
-
-def build_single_object_model_mag_fluxmix_stage2(
-    obj_dict,
-    lam_rf,
-    *,
-    lam_lya_rf=None,
-    stage1_raw_median,
-    stage1_params_median,
-    basis_grid_t,
-    basis_relflux_norm,
-    disable_lag_blr=False,
-    disable_lag_bc=False,
-    n_blr_terms=1,
-):
-    """Return the conditional flux-mixing stage-2 NUTS model."""
-
-    if n_blr_terms != 1:
-        raise ValueError(
-            "model_variant='mag_fluxmix_fast' currently supports only n_blr_terms=1."
-        )
-
-    if disable_lag_blr:
-        disable_lag_bc = True
-
-    (t, bidx) = obj_dict["X"]
-    y = jnp.asarray(obj_dict["y"], dtype=float)
-    yerr = jnp.asarray(obj_dict["yerr"], dtype=float)
-    survey_idx = jnp.asarray(obj_dict["survey_idx"], dtype=jnp.int32)
-    z = float(obj_dict["z"])
-    B = int(len(lam_rf))
-    if lam_lya_rf is None:
-        lam_lya_rf = lam_rf
-    lam_lya_rf = jnp.asarray(lam_lya_rf, dtype=lam_rf.dtype)
-    bands = tuple(str(b) for b in obj_dict.get("bands", []))
-    if bands:
-        log_igm_transmission_band_fixed = compute_log_igm_transmission_band(bands, z)
-    else:
-        log_igm_transmission_band_fixed = jnp.zeros(B, dtype=lam_rf.dtype)
-    mean_func = make_linear_mean_func(t, zero_mean=zero_mean)
-    mean_obs = mean_func(stage1_raw_median, (t, bidx))
-    survey_delta_mag_fixed = jnp.asarray(
-        stage1_raw_median.get("survey_delta_mag", jnp.zeros((B, len(LC_SURVEY_NAMES)), dtype=float)),
-        dtype=float,
-    )
-    if survey_delta_mag_fixed.ndim == 2:
-        mean_obs = mean_obs + survey_delta_mag_fixed[bidx, survey_idx]
-    log_jitter_fixed = jnp.asarray(stage1_raw_median["log_jitter"], dtype=float)
-    if has_jitter:
-        if log_jitter_fixed.ndim == 2:
-            jitter_term = jnp.exp(log_jitter_fixed[bidx, survey_idx])
-        else:
-            jitter_term = jnp.exp(log_jitter_fixed[bidx])
-        yerr_eff = jnp.sqrt(yerr**2 + jitter_term ** 2)
-    else:
-        yerr_eff = yerr
-
-    lambda_center_rf = jnp.asarray(stage1_params_median["lambda_center_rf"], dtype=float)
-    stage1_eta_sigma = jnp.asarray(stage1_raw_median["eta_sigma"], dtype=float)
-    stage1_log_sigma_center0 = jnp.asarray(stage1_raw_median["log_sigma_center0"], dtype=float)
-    log_lag0_fixed = jnp.log(jnp.asarray(stage1_raw_median["lag0"], dtype=float))
-    basis_grid_t = jnp.asarray(basis_grid_t, dtype=float)
-    basis_relflux_norm = jnp.asarray(basis_relflux_norm, dtype=float)
-
-    def _interp_band(tt, bb, lag):
-        return jnp.interp(
-            tt - lag,
-            basis_grid_t,
-            basis_relflux_norm[bb],
-            left=0.0,
-            right=0.0,
-        )
-
-    def model():
-        eta_sigma = numpyro.sample("eta_sigma", eta_sigma_prior())
-        log_sigma_center0 = numpyro.sample(
-            "log_sigma_center0",
-            log_sigma_center0_prior(
-                eta_sigma,
-                lambda_center_rf,
-            ),
-        )
-        numpyro.deterministic("stage1_basis_eta_sigma", stage1_eta_sigma)
-        numpyro.deterministic("stage1_basis_log_sigma_center0", stage1_log_sigma_center0)
-        numpyro.deterministic("delta_eta_sigma", eta_sigma - stage1_eta_sigma)
-        numpyro.deterministic(
-            "delta_log_sigma_center0",
-            log_sigma_center0 - stage1_log_sigma_center0,
-        )
-        numpyro.deterministic(
-            "log_cont_scale",
-            log_sigma_center0 - stage1_log_sigma_center0,
-        )
-        numpyro.deterministic("log_igm_transmission_band", log_igm_transmission_band_fixed)
-        numpyro.deterministic("igm_transmission_band", jnp.exp(log_igm_transmission_band_fixed))
-        line_ratio_offsets = compute_flux_line_ratio_offsets(
-            lam_rf,
-            lambda_center_rf=lambda_center_rf,
-            eta_sigma=eta_sigma,
-            log_igm_transmission_band=log_igm_transmission_band_fixed,
-        )
-
-        if disable_lag_blr:
-            dlog_amp_blr = numpyro.deterministic("dlog_amp_blr", jnp.full(B, -9.0))
-            log_lag_blr = numpyro.deterministic("log_lag_blr", jnp.full(B, -9.0))
-            dlog_amp_blr2 = numpyro.deterministic("dlog_amp_blr2", jnp.full(B, -9.0))
-            log_lag_blr2 = numpyro.deterministic("log_lag_blr2", jnp.full(B, -9.0))
-            dlog_amp_bc = None
-            log_lag_ratio_bc_to_blr = None
-        else:
-            if disable_lag_bc:
-                dlog_amp_bc = None
-                log_lag_ratio_bc_to_blr = None
-            else:
-                log_amp_ratio_bc = numpyro.sample(
-                    "log_amp_ratio_bc",
-                    dist.Normal(line_ratio_offsets["bc_ref"] - 1.0, 1.0),
-                )
-                dlog_amp_bc = numpyro.deterministic(
-                    "dlog_amp_bc",
-                    log_amp_ratio_bc - line_ratio_offsets["bc_ref"],
-                )
-                log_lag_ratio_bc_to_blr = numpyro.sample(
-                    "log_lag_ratio_bc_to_blr",
-                    log_lag_ratio_bc_to_blr_prior(),
-                )
-
-            with numpyro.plate("band", B):
-                log_amp_ratio_blr_raw = numpyro.sample(
-                    "log_amp_ratio_blr_raw",
-                    dist.Normal(line_ratio_offsets["blr_band"] - 1.0, 1.0),
-                )
-                delta_log_lag_blr_raw = numpyro.sample(
-                    "delta_log_lag_blr_raw",
-                    relative_log_lag_blr_prior(z=z, log_lag0=log_lag0_fixed),
-                )
-                log_lag_blr_raw = delta_log_lag_blr_raw + log_lag0_fixed
-                dlog_amp_blr = numpyro.deterministic(
-                    "dlog_amp_blr",
-                    log_amp_ratio_blr_raw - line_ratio_offsets["blr_band"],
-                )
-                log_lag_blr = numpyro.deterministic("log_lag_blr", log_lag_blr_raw)
-                dlog_amp_blr2 = numpyro.deterministic("dlog_amp_blr2", jnp.full(B, -9.0))
-                log_lag_blr2 = numpyro.deterministic("log_lag_blr2", jnp.full(B, -9.0))
-
-        stage2_raw_params = dict(stage1_raw_median)
-        stage2_raw_params["lambda_center_rf"] = lambda_center_rf
-        stage2_raw_params["eta_sigma"] = eta_sigma
-        stage2_raw_params["log_sigma_center0"] = log_sigma_center0
-        stage2_raw_params["log_igm_transmission_band"] = log_igm_transmission_band_fixed
-        stage2_raw_params["dlog_amp_blr"] = dlog_amp_blr
-        stage2_raw_params["log_lag_blr"] = log_lag_blr
-        stage2_raw_params["dlog_amp_blr2"] = dlog_amp_blr2
-        stage2_raw_params["log_lag_blr2"] = log_lag_blr2
-        if dlog_amp_bc is not None:
-            stage2_raw_params["dlog_amp_bc"] = dlog_amp_bc
-            stage2_raw_params["log_lag_ratio_bc_to_blr"] = log_lag_ratio_bc_to_blr
-        explicit_params = build_explicit_model_params_fluxmix_fast(
-            stage2_raw_params,
-            lam_rf,
-            lam_lya_rf=lam_lya_rf,
-        )
-        amp_cont = jnp.asarray(explicit_params["amp_cont"], dtype=float)
-        amp_blr = jnp.asarray(explicit_params["amp_blr"], dtype=float)
-        amp_bc = jnp.asarray(explicit_params["amp_bc"], dtype=float)
-        lag_blr = jnp.asarray(explicit_params["lag_blr"], dtype=float)
-        lag_bc = jnp.asarray(explicit_params["lag_bc"], dtype=float)
-
-        def _relflux_one(tt, bb):
-            prompt = amp_cont[bb] * _interp_band(tt, bb, 0.0)
-            blr = amp_blr[bb] * _interp_band(tt, bb, lag_blr[bb])
-            bc = amp_bc[bb] * _interp_band(tt, bb, lag_bc[bb])
-            return prompt + blr + bc
-
-        rel_flux = jax.vmap(_relflux_one)(t, bidx)
-        total_flux_ratio = 1.0 + rel_flux
-        floor_violation = jax.nn.softplus(
-            (FLUXMIX_MIN_TOTAL_FLUX_RATIO - total_flux_ratio)
-            / FLUXMIX_TOTAL_FLUX_FLOOR_SOFTNESS
-        ) * FLUXMIX_TOTAL_FLUX_FLOOR_SOFTNESS
-        numpyro.factor(
-            "fluxmix_total_flux_floor_penalty",
-            -FLUXMIX_TOTAL_FLUX_FLOOR_PENALTY
-            * jnp.sum((floor_violation / FLUXMIX_TOTAL_FLUX_FLOOR_SOFTNESS) ** 2),
-        )
-        y_pred = mean_obs + relative_flux_to_mag_residual(
-            rel_flux,
-            min_total_flux_ratio=FLUXMIX_MIN_TOTAL_FLUX_RATIO,
-            floor_softness=FLUXMIX_TOTAL_FLUX_FLOOR_SOFTNESS,
-        )
-        numpyro.sample("obs", dist.Normal(y_pred, yerr_eff), obs=y)
-
-    return model
-
-
-_RECOMPUTE_EXPLICIT_KEYS = {
-    "log_kernel_param",
-    "amp_cont",
-    "amp_bc",
-    "amp_blr",
-    "amp_blr2",
-    "lag_disk",
-    "lag_bc",
-    "lag_blr",
-    "lag_blr2",
-    "tau_fast_band",
-    "tau_slow_band",
-    "tau_fast",
-    "tau_slow",
-    "log_sigma_uv",
-    "log_tau_uv",
-    "log_tau_fast_uv",
-    "log_igm_transmission_band",
-    "igm_transmission_band",
-    "lambda_center_rf",
-}
 
 
 def _strip_explicit_prediction_keys(samples):
@@ -4804,12 +4517,14 @@ def run_iterated_mag_flux_linearized_inference(
     drop_band_lyman_alpha=False,
     tau_fast_truncated=False,
     n_blr_terms=1,
-    model_variant="mag_flux_linearized",
+    model_variant="mag_flux_linearized_erlang",
     shared_blr_lag=False,
     erlang_order=DEFAULT_ERLANG_ORDER,
     use_fast_solver=False,
     blr_lag_band_scatter=None,
     refinement_strategy="nuts_each",
+    refinement_iters=FLUX_LINEARIZED_REFINEMENT_ITERS,
+    drw_parameterization=False,
 ):
     """Iteratively refit the relative-flux QS model using local pseudo-data.
 
@@ -4837,7 +4552,7 @@ def run_iterated_mag_flux_linearized_inference(
     samples_flat = None
     samples_per_chain = None
     diagnostics = {
-        "flux_linearized_refinement_iters": int(FLUX_LINEARIZED_REFINEMENT_ITERS),
+        "flux_linearized_refinement_iters": int(refinement_iters),
         "flux_linearized_min_total_flux_ratio": float(FLUX_LINEARIZED_MIN_TOTAL_FLUX_RATIO),
         "flux_linearized_refinement_strategy": refinement_strategy,
         "flux_linearized_nuts_runs": 0,
@@ -4856,9 +4571,10 @@ def run_iterated_mag_flux_linearized_inference(
         erlang_order=erlang_order,
         use_fast_solver=use_fast_solver,
         blr_lag_band_scatter=blr_lag_band_scatter,
+        drw_parameterization=drw_parameterization,
     )
 
-    for iter_idx in range(int(FLUX_LINEARIZED_REFINEMENT_ITERS)):
+    for iter_idx in range(int(refinement_iters)):
         fit_obj = _flux_linearized_fit_object(obj_dict, y_fit, yerr_fit)
         iter_model = _build_mag_flux_linearized_model_for_fit(
             fit_obj,
@@ -4869,7 +4585,7 @@ def run_iterated_mag_flux_linearized_inference(
         iter_key = random.fold_in(rng_key, iter_idx)
         run_nuts = (
             refinement_strategy == "nuts_each"
-            or iter_idx == int(FLUX_LINEARIZED_REFINEMENT_ITERS) - 1
+            or iter_idx == int(refinement_iters) - 1
         )
         if fit_method == "svi+nuts":
             svi_key, inference_key = random.split(iter_key)
@@ -4920,7 +4636,7 @@ def run_iterated_mag_flux_linearized_inference(
                 add_model_prediction_params(
                     samples_flat,
                     lam_rf,
-                    model_variant="mag_flux_linearized",
+                    model_variant="mag_flux_linearized_erlang",
                     lam_lya_rf=lam_lya_rf,
                 )
             )
@@ -4931,7 +4647,7 @@ def run_iterated_mag_flux_linearized_inference(
             prediction_params = add_model_prediction_params(
                 _model_params_at_values(iter_model, inference_key, init_values),
                 lam_rf,
-                model_variant="mag_flux_linearized",
+                model_variant="mag_flux_linearized_erlang",
                 lam_lya_rf=lam_lya_rf,
             )
 
@@ -4939,11 +4655,10 @@ def run_iterated_mag_flux_linearized_inference(
         use_erlang_response = (
             model_variant == "mag_flux_linearized_erlang" and not disable_lag_blr
         )
-        display_factory = (
-            make_multiband_dho_blr_flux_linearized_erlang_model
-            if use_erlang_response
-            else make_multiband_dho_blr_flux_linearized_model
-        )
+        if drw_parameterization:
+            display_factory = make_multiband_dho_blr_flux_linearized_erlang_drw_model
+        else:
+            display_factory = make_multiband_dho_blr_flux_linearized_erlang_model
         display_model = display_factory(
             obj_dict["X"],
             y_fit,
@@ -4953,7 +4668,7 @@ def run_iterated_mag_flux_linearized_inference(
             baseline_flux_by_band=reference_flux_from_mean_magnitudes(obj_dict["mags_means"]),
             zero_mean=zero_mean,
             has_jitter=has_jitter,
-            **({"erlang_order": erlang_order} if use_erlang_response else {}),
+            erlang_order=erlang_order,
         )
         y_next, yerr_next = _flux_linearized_pseudo_data_from_prediction(
             obj_dict,
@@ -4963,22 +4678,22 @@ def run_iterated_mag_flux_linearized_inference(
         diagnostics[f"flux_linearized_iter{iter_idx + 1}_pseudo_delta_rms"] = float(
             np.sqrt(np.nanmean(np.square(np.asarray(y_next) - np.asarray(y_fit))))
         )
-        if iter_idx < int(FLUX_LINEARIZED_REFINEMENT_ITERS) - 1:
+        if iter_idx < int(refinement_iters) - 1:
             y_fit, yerr_fit = y_next, yerr_next
 
     diagnostics["accept_prob"] = diagnostics[
-        f"flux_linearized_iter{int(FLUX_LINEARIZED_REFINEMENT_ITERS)}_accept_prob"
+        f"flux_linearized_iter{int(refinement_iters)}_accept_prob"
     ]
     diagnostics["num_divergences"] = diagnostics[
-        f"flux_linearized_iter{int(FLUX_LINEARIZED_REFINEMENT_ITERS)}_num_divergences"
+        f"flux_linearized_iter{int(refinement_iters)}_num_divergences"
     ]
     diagnostics["elapsed_sec"] = sum(
         diagnostics[f"flux_linearized_iter{i + 1}_elapsed_sec"]
-        for i in range(int(FLUX_LINEARIZED_REFINEMENT_ITERS))
+        for i in range(int(refinement_iters))
     )
     diagnostics["flux_linearized_svi_elapsed_sec"] = sum(
         diagnostics.get(f"flux_linearized_iter{i + 1}_svi_elapsed_sec", 0.0)
-        for i in range(int(FLUX_LINEARIZED_REFINEMENT_ITERS))
+        for i in range(int(refinement_iters))
     )
     diagnostics["flux_linearized_total_inference_elapsed_sec"] = (
         diagnostics["elapsed_sec"]
@@ -4986,263 +4701,6 @@ def run_iterated_mag_flux_linearized_inference(
     )
     return samples_flat, samples_per_chain, fit_obj, diagnostics
 
-
-def _fluxmix_stage1_raw_median_params(samples_flat, lam_rf):
-    """Recover the stage-1 continuum median parameters from combined samples."""
-
-    B = int(len(lam_rf))
-    mean_default = np.zeros(B, dtype=float)
-    jitter_default = np.full((B, len(LC_SURVEY_NAMES)), np.log(1e-3), dtype=float)
-    survey_delta_default = np.zeros((B, len(LC_SURVEY_NAMES)), dtype=float)
-    linear_trend_band_offset_default = np.zeros(B, dtype=float)
-    linear_trend_default = 0.0
-    if "stage1_basis_log_sigma_center0" in samples_flat:
-        log_sigma_center0_stage1 = np.asarray(samples_flat["stage1_basis_log_sigma_center0"], dtype=float)
-    else:
-        log_cont_scale = np.asarray(
-            samples_flat.get(
-                "log_cont_scale",
-                np.zeros_like(np.asarray(samples_flat["log_sigma_center0"], dtype=float)),
-            ),
-            dtype=float,
-        )
-        log_sigma_center0_stage1 = np.asarray(samples_flat["log_sigma_center0"], dtype=float) - log_cont_scale
-    if "stage1_basis_eta_sigma" in samples_flat:
-        eta_sigma_stage1 = np.asarray(samples_flat["stage1_basis_eta_sigma"], dtype=float)
-    else:
-        eta_sigma_stage1 = np.asarray(samples_flat["eta_sigma"], dtype=float)
-    if "log_igm_transmission_band" in samples_flat:
-        log_igm_transmission_band = np.asarray(samples_flat["log_igm_transmission_band"], dtype=float)
-    else:
-        log_igm_transmission_band = np.zeros((1, B), dtype=float)
-    return dict(
-        log_tau_slow_center0=jnp.asarray(np.median(np.asarray(samples_flat["log_tau_slow_center0"], dtype=float), axis=0), dtype=float),
-        log_tau_fast_center0=jnp.asarray(np.median(np.asarray(samples_flat["log_tau_fast_center0"], dtype=float), axis=0), dtype=float),
-        log_sigma_center0=jnp.asarray(
-            np.median(log_sigma_center0_stage1, axis=0),
-            dtype=float,
-        ),
-        lambda_center_rf=compute_lambda_center_rf(lam_rf),
-        linear_trend=jnp.asarray(
-            np.median(
-                np.asarray(
-                    samples_flat.get("linear_trend", linear_trend_default),
-                    dtype=float,
-                ),
-                axis=0,
-            ),
-            dtype=float,
-        ),
-        linear_trend_band_offset=jnp.asarray(
-            np.median(
-                np.asarray(
-                    samples_flat.get(
-                        "linear_trend_band_offset",
-                        linear_trend_band_offset_default,
-                    ),
-                    dtype=float,
-                ),
-                axis=0,
-            ),
-            dtype=float,
-        ),
-        mean=jnp.asarray(
-            np.median(np.asarray(samples_flat.get("mean", mean_default), dtype=float), axis=0),
-            dtype=float,
-        ),
-        log_jitter=jnp.asarray(
-            np.median(np.asarray(samples_flat.get("log_jitter", jitter_default), dtype=float), axis=0),
-            dtype=float,
-        ),
-        survey_delta_mag=jnp.asarray(
-            np.median(
-                np.asarray(samples_flat.get("survey_delta_mag", survey_delta_default), dtype=float),
-                axis=0,
-            ),
-            dtype=float,
-        ),
-        lag0=jnp.asarray(np.median(np.asarray(samples_flat["lag0"], dtype=float), axis=0), dtype=float),
-        lag_beta=jnp.asarray(np.median(np.asarray(samples_flat["lag_beta"], dtype=float), axis=0), dtype=float),
-        log_igm_transmission_band=jnp.asarray(np.median(log_igm_transmission_band, axis=0), dtype=float),
-        eta_sigma=jnp.asarray(np.median(eta_sigma_stage1, axis=0), dtype=float),
-        eta_tau=jnp.asarray(np.median(np.asarray(samples_flat["eta_tau"], dtype=float), axis=0), dtype=float),
-    )
-
-
-def _build_fluxmix_continuum_basis(obj_dict, lam_rf, stage1_raw_median, *, lam_lya_rf=None):
-    """Build the fixed normalized continuum basis used by stage 2."""
-
-    B = int(len(lam_rf))
-    continuum_params = build_explicit_model_params_continuum_only(
-        stage1_raw_median,
-        lam_rf,
-        lam_lya_rf=lam_lya_rf,
-    )
-    continuum_model = make_multiband_dho_blr_model(
-        obj_dict["X"],
-        obj_dict["y"],
-        obj_dict["yerr"],
-        n_band=B,
-        survey_idx=obj_dict["survey_idx"],
-        zero_mean=zero_mean,
-        has_jitter=has_jitter,
-    )
-
-    t_obs = np.asarray(obj_dict["X"][0], dtype=float)
-    lag_pad = float(np.exp(LOG_LAG_BLR_HIGH))
-    n_grid = int(
-        np.clip(
-            max(FLUXMIX_BASIS_GRID_MIN_POINTS, 4 * len(t_obs)),
-            FLUXMIX_BASIS_GRID_MIN_POINTS,
-            FLUXMIX_BASIS_GRID_MAX_POINTS,
-        )
-    )
-    grid_t = jnp.linspace(
-        float(np.min(t_obs)) - lag_pad,
-        float(np.max(t_obs)) + FLUXMIX_PREDICTION_FORWARD_PAD,
-        n_grid,
-        dtype=float,
-    )
-
-    basis_rows = []
-    for band in range(B):
-        band_idx_grid = jnp.full_like(grid_t, band, dtype=int)
-        pred_mean, _ = continuum_model.pred(continuum_params, (grid_t, band_idx_grid))
-        mean_grid = continuum_model.get_mean(
-            continuum_model.zero_mean,
-            continuum_params,
-            (grid_t, band_idx_grid),
-        )
-        prompt_dm = pred_mean - mean_grid
-        prompt_relflux = mag_residual_to_relative_flux(prompt_dm)
-        amp_cont_band = jnp.maximum(jnp.asarray(continuum_params["amp_cont"], dtype=float)[band], 1e-12)
-        basis_rows.append(prompt_relflux / amp_cont_band)
-
-    basis_relflux_norm = jnp.stack(basis_rows, axis=0)
-    return {
-        "continuum_model": continuum_model,
-        "continuum_params": continuum_params,
-        "basis_grid_t": grid_t,
-        "basis_relflux_norm": basis_relflux_norm,
-    }
-
-
-def _prediction_sample_subset(samples_flat, max_samples=64):
-    relevant_keys = (
-        "mean",
-        "linear_trend",
-        "amp_cont",
-        "amp_blr",
-        "amp_bc",
-        "lag_blr",
-        "lag_bc",
-    )
-    available = {
-        key: np.asarray(samples_flat[key])
-        for key in relevant_keys
-        if key in samples_flat
-    }
-    if not available:
-        return None
-    n_samples = len(next(iter(available.values())))
-    if n_samples == 0:
-        return None
-    n_keep = min(max_samples, n_samples)
-    indices = np.linspace(0, n_samples - 1, n_keep, dtype=int)
-    return {key: value[indices] for key, value in available.items()}
-
-
-def _fluxmix_zero_line_amplitudes(params):
-    """Return params with BLR/BC amplitudes zeroed for continuum-only predictions."""
-
-    out = dict(params)
-    for key in (
-        "amp_blr",
-        "amp_blr2",
-        "amp_bc",
-        "amp_blr_relflux",
-        "amp_blr2_relflux",
-        "amp_bc_relflux",
-    ):
-        if key in out:
-            arr = np.asarray(out[key], dtype=float)
-            out[key] = np.zeros_like(arr)
-    return out
-
-
-def _combine_fluxmix_stage_samples(stage1_per_chain, stage2_per_chain, lam_rf, *, lam_lya_rf=None):
-    """Merge stage-1 and stage-2 per-chain samples into the public posterior dict."""
-
-    n_draws = min(
-        int(next(iter(stage1_per_chain.values())).shape[1]),
-        int(next(iter(stage2_per_chain.values())).shape[1]),
-    )
-    stage1_trim = _trim_per_chain_samples(stage1_per_chain, n_draws)
-    stage2_trim = _trim_per_chain_samples(stage2_per_chain, n_draws)
-
-    combined_per_chain_raw = _strip_explicit_prediction_keys(stage1_trim)
-    combined_per_chain_raw.update(stage2_trim)
-    combined_per_chain_raw["stage1_basis_eta_sigma"] = np.asarray(stage1_trim["eta_sigma"], dtype=float)
-    combined_per_chain_raw["stage1_basis_log_sigma_center0"] = np.asarray(
-        stage1_trim["log_sigma_center0"],
-        dtype=float,
-    )
-    combined_per_chain = add_model_prediction_params(
-        combined_per_chain_raw,
-        lam_rf,
-        model_variant="mag_fluxmix_fast",
-        lam_lya_rf=lam_lya_rf,
-    )
-    combined_flat = _flatten_per_chain_samples(combined_per_chain)
-    combined_flat = add_model_prediction_params(
-        combined_flat,
-        lam_rf,
-        model_variant="mag_fluxmix_fast",
-        lam_lya_rf=lam_lya_rf,
-    )
-    return combined_flat, combined_per_chain
-
-
-def _make_fluxmix_display_model(obj_dict, basis_info, combined_flat):
-    """Construct the staged display model for plotting and basis updates."""
-
-    return make_multiband_dho_blr_fluxmix_fast_display_model(
-        continuum_model=basis_info["continuum_model"],
-        basis_grid_t=basis_info["basis_grid_t"],
-        basis_relflux_norm=basis_info["basis_relflux_norm"],
-        t_ref=obj_dict["X"][0],
-        zero_mean=zero_mean,
-        prediction_samples=_prediction_sample_subset(combined_flat),
-        min_total_flux_ratio=FLUXMIX_MIN_TOTAL_FLUX_RATIO,
-        floor_softness=FLUXMIX_TOTAL_FLUX_FLOOR_SOFTNESS,
-    )
-
-
-def _fluxmix_line_only_mag_residual(display_model, combined_flat, X):
-    """Approximate the line-only magnitude residual from the staged display model."""
-
-    posterior_median = {k: np.median(v, axis=0) for k, v in combined_flat.items()}
-    total_mu, _ = display_model.pred(posterior_median, X)
-    cont_mu, _ = display_model.pred(_fluxmix_zero_line_amplitudes(posterior_median), X)
-    return np.asarray(total_mu, dtype=float) - np.asarray(cont_mu, dtype=float)
-
-
-def build_mag_fluxmix_fast_display_model(obj_dict, lam_rf, samples_flat):
-    """Reconstruct the staged display model from saved combined samples."""
-
-    stage1_raw_median = _fluxmix_stage1_raw_median_params(samples_flat, lam_rf)
-    basis_info = _build_fluxmix_continuum_basis(obj_dict, lam_rf, stage1_raw_median)
-    prediction_samples = _prediction_sample_subset(samples_flat)
-    return make_multiband_dho_blr_fluxmix_fast_display_model(
-        continuum_model=basis_info["continuum_model"],
-        basis_grid_t=basis_info["basis_grid_t"],
-        basis_relflux_norm=basis_info["basis_relflux_norm"],
-        t_ref=obj_dict["X"][0],
-        zero_mean=zero_mean,
-        prediction_samples=prediction_samples,
-        min_total_flux_ratio=FLUXMIX_MIN_TOTAL_FLUX_RATIO,
-        floor_softness=FLUXMIX_TOTAL_FLUX_FLOOR_SOFTNESS,
-    )
 
 
 def apply_resume_sample_save_policy(args):
@@ -5252,144 +4710,6 @@ def apply_resume_sample_save_policy(args):
         args.save_sample_file = False
     return args
 
-
-def run_two_stage_fluxmix_fast_inference(
-    obj_dict,
-    lam_rf,
-    log_jitter_mean,
-    *,
-    lam_lya_rf=None,
-    rng_key,
-    num_warmup,
-    num_samples,
-    num_chains,
-    chain_method,
-    progress_bar,
-    dense_mass,
-    max_tree_depth,
-    target_accept=0.9,
-    disable_linear_trend=False,
-    disable_lag_blr=False,
-    disable_lag_bc=False,
-    drop_band_lyman_alpha=False,
-    tau_fast_truncated=False,
-    n_blr_terms=1,
-    outer_iters=1,
-):
-    """Run the staged NUTS flux-mixing approximation and return combined samples."""
-
-    if n_blr_terms != 1:
-        raise ValueError(
-            "model_variant='mag_fluxmix_fast' currently supports only n_blr_terms=1."
-        )
-    if int(outer_iters) < 1:
-        raise ValueError("outer_iters must be >= 1.")
-    stage1_fit_obj = dict(obj_dict)
-    combined_flat = None
-    combined_per_chain = None
-    basis_info = None
-    display_model = None
-    diagnostics = {
-        "fluxmix_outer_iters": int(outer_iters),
-        "stage2_conditioned_on_median_basis": True,
-    }
-
-    for outer_iter in range(int(outer_iters)):
-        iter_idx = outer_iter + 1
-        iter_key = random.fold_in(rng_key, outer_iter)
-
-        stage1_model = build_single_object_model_continuum_only(
-            stage1_fit_obj,
-            lam_rf,
-            log_jitter_mean=log_jitter_mean,
-            lam_lya_rf=lam_lya_rf,
-            disable_linear_trend=disable_linear_trend,
-            drop_band_lyman_alpha=drop_band_lyman_alpha,
-            tau_fast_truncated=tau_fast_truncated,
-        )
-        stage1_flat, stage1_per_chain, stage1_diag = _run_nuts_inference(
-            stage1_model,
-            iter_key,
-            num_warmup=num_warmup,
-            num_samples=num_samples,
-            num_chains=num_chains,
-            chain_method=chain_method,
-            progress_bar=progress_bar,
-            dense_mass=dense_mass,
-            max_tree_depth=max_tree_depth,
-            target_accept=target_accept,
-        )
-
-        stage1_raw_median = _fluxmix_stage1_raw_median_params(stage1_flat, lam_rf)
-        basis_info = _build_fluxmix_continuum_basis(
-            obj_dict,
-            lam_rf,
-            stage1_raw_median,
-            lam_lya_rf=lam_lya_rf,
-        )
-
-        stage2_model = build_single_object_model_mag_fluxmix_stage2(
-            obj_dict,
-            lam_rf,
-            lam_lya_rf=lam_lya_rf,
-            stage1_raw_median=stage1_raw_median,
-            stage1_params_median=basis_info["continuum_params"],
-            basis_grid_t=basis_info["basis_grid_t"],
-            basis_relflux_norm=basis_info["basis_relflux_norm"],
-            disable_lag_blr=disable_lag_blr,
-            disable_lag_bc=disable_lag_bc,
-            n_blr_terms=n_blr_terms,
-        )
-        stage2_key = random.fold_in(iter_key, 1)
-        stage2_flat, stage2_per_chain, stage2_diag = _run_nuts_inference(
-            stage2_model,
-            stage2_key,
-            num_warmup=num_warmup,
-            num_samples=num_samples,
-            num_chains=num_chains,
-            chain_method=chain_method,
-            progress_bar=progress_bar,
-            dense_mass=dense_mass,
-            max_tree_depth=max_tree_depth,
-            target_accept=target_accept,
-            init_strategy=init_to_value(
-                values={
-                    "eta_sigma": np.asarray(stage1_raw_median["eta_sigma"], dtype=float),
-                    "log_sigma_center0": np.asarray(stage1_raw_median["log_sigma_center0"], dtype=float),
-                }
-            ),
-        )
-
-        combined_flat, combined_per_chain = _combine_fluxmix_stage_samples(
-            stage1_per_chain,
-            stage2_per_chain,
-            lam_rf,
-            lam_lya_rf=lam_lya_rf,
-        )
-        display_model = _make_fluxmix_display_model(obj_dict, basis_info, combined_flat)
-
-        diagnostics[f"stage1_iter{iter_idx}_accept_prob"] = stage1_diag["accept_prob"]
-        diagnostics[f"stage2_iter{iter_idx}_accept_prob"] = stage2_diag["accept_prob"]
-        diagnostics[f"stage1_iter{iter_idx}_num_divergences"] = stage1_diag["num_divergences"]
-        diagnostics[f"stage2_iter{iter_idx}_num_divergences"] = stage2_diag["num_divergences"]
-        diagnostics[f"stage1_iter{iter_idx}_elapsed_sec"] = stage1_diag["elapsed_sec"]
-        diagnostics[f"stage2_iter{iter_idx}_elapsed_sec"] = stage2_diag["elapsed_sec"]
-
-        if outer_iter < int(outer_iters) - 1:
-            line_only = _fluxmix_line_only_mag_residual(display_model, combined_flat, obj_dict["X"])
-            stage1_fit_obj = dict(obj_dict)
-            stage1_fit_obj["y"] = np.asarray(obj_dict["y"], dtype=float) - line_only
-            diagnostics[f"stage1_iter{iter_idx + 1}_line_subtracted_rms"] = float(
-                np.sqrt(np.mean(np.square(line_only)))
-            )
-
-    diagnostics["stage1_accept_prob"] = diagnostics[f"stage1_iter{int(outer_iters)}_accept_prob"]
-    diagnostics["stage2_accept_prob"] = diagnostics[f"stage2_iter{int(outer_iters)}_accept_prob"]
-    diagnostics["stage1_num_divergences"] = diagnostics[f"stage1_iter{int(outer_iters)}_num_divergences"]
-    diagnostics["stage2_num_divergences"] = diagnostics[f"stage2_iter{int(outer_iters)}_num_divergences"]
-    diagnostics["stage1_elapsed_sec"] = diagnostics[f"stage1_iter{int(outer_iters)}_elapsed_sec"]
-    diagnostics["stage2_elapsed_sec"] = diagnostics[f"stage2_iter{int(outer_iters)}_elapsed_sec"]
-    return combined_flat, combined_per_chain, display_model, diagnostics
 
 
 def main():
@@ -5412,9 +4732,9 @@ def main():
     parser.add_argument(
         "--fit_method",
         type=str,
-        choices=("ns", "nuts", "svi+nuts", "two_stage_nuts", "alternating_two_stage_nuts"),
+        choices=("nuts", "svi+nuts"),
         default="nuts",
-        help="Posterior fitting backend: nested sampling ('ns'), HMC/NUTS ('nuts'), SVI warm-start plus NUTS ('svi+nuts'), the staged two-NUTS flux-mixing approximation ('two_stage_nuts'), or the alternating staged flux-mixing backend ('alternating_two_stage_nuts').",
+        help="Posterior fitting backend: HMC/NUTS or SVI warm-start plus NUTS.",
     )
     parser.add_argument("--inject_fake", action="store_true", help="Inject fake light curves.")
     parser.add_argument("--max_tree_depth", type=int, default=8, help="NUTS max tree depth.")
@@ -5459,12 +4779,6 @@ def main():
             "'svi_then_nuts' uses the SVI median for the first two pseudo-data "
             "updates and runs NUTS only for the final posterior."
         ),
-    )
-    parser.add_argument(
-        "--fluxmix_outer_iters",
-        type=int,
-        default=2,
-        help="Number of outer stage1/stage2 alternations used only with --fit_method alternating_two_stage_nuts.",
     )
     parser.add_argument(
         "--ns_num_live_points",
@@ -5517,7 +4831,6 @@ def main():
         default="fast",
         help="Corner plot row selection: fast subsampling or full posterior samples.",
     )
-    parser.add_argument("--disable_lag_blr", action="store_true", default=False, help="Disable BLR lag model.")
     parser.add_argument(
         "--shared_blr_lag",
         action="store_true",
@@ -5569,10 +4882,29 @@ def main():
         ),
     )
     parser.add_argument(
+        "--dho_drw_parameterization",
+        action="store_true",
+        default=False,
+        help=(
+            "Use the CARMA(2,1) continuum with stationary sigma, integrated "
+            "DRW-style tau, perturbation timescale, and quality factor Q "
+            "across both overdamped and underdamped regimes."
+        ),
+    )
+    parser.add_argument(
+        "--flux_linearized_refinement_iters",
+        type=int,
+        default=FLUX_LINEARIZED_REFINEMENT_ITERS,
+        help=(
+            "Number of Gauss-Newton magnitude-likelihood refinement fits for "
+            "flux-linearized model variants (default: 3)."
+        ),
+    )
+    parser.add_argument(
         "--model_variant",
-        choices=("mag_linear", "mag_flux_linearized", "mag_flux_linearized_erlang", "mag_fluxmix_fast"),
-        default="mag_linear",
-        help="Light-curve model path: the legacy additive-magnitude quasi-sep solver, the relative-flux quasi-sep approximation with mag-equivalent outputs, or the staged fast flux-mixing approximation.",
+        choices=("mag_flux_linearized_erlang",),
+        default="mag_flux_linearized_erlang",
+        help="Retained causal-Erlang light-curve model.",
     )
     parser.add_argument(
         "--spectra_fit_csv",
@@ -5639,26 +4971,13 @@ def main():
 
     results = []
     chain_method = "parallel" if args.nchains and args.nchains > 1 else "sequential"
-    if args.model_variant == "mag_fluxmix_fast" and args.fit_method not in ("two_stage_nuts", "alternating_two_stage_nuts"):
-        raise ValueError(
-            "model_variant='mag_fluxmix_fast' requires --fit_method two_stage_nuts or alternating_two_stage_nuts."
-        )
-    if args.fit_method in ("two_stage_nuts", "alternating_two_stage_nuts") and args.model_variant != "mag_fluxmix_fast":
-        raise ValueError(
-            f"--fit_method {args.fit_method} is only supported with --model_variant mag_fluxmix_fast."
-        )
-    if args.model_variant in ("mag_flux_linearized", "mag_flux_linearized_erlang") and args.fit_method == "ns":
-        raise ValueError(
-            "flux-linearized model variants use iterative local likelihood refinement "
-            "and requires --fit_method nuts or svi+nuts."
-        )
     if (
         args.flux_linearized_refinement_strategy != "nuts_each"
-        and args.model_variant not in ("mag_flux_linearized", "mag_flux_linearized_erlang")
+        and args.model_variant != "mag_flux_linearized_erlang"
     ):
         raise ValueError(
             "--flux_linearized_refinement_strategy is only used by "
-            "--model_variant mag_flux_linearized or mag_flux_linearized_erlang."
+            "--model_variant mag_flux_linearized_erlang."
         )
     if (
         args.flux_linearized_refinement_strategy == "svi_then_nuts"
@@ -5668,28 +4987,34 @@ def main():
             "--flux_linearized_refinement_strategy svi_then_nuts requires "
             "--fit_method svi+nuts."
         )
-    if args.fit_method == "alternating_two_stage_nuts" and args.fluxmix_outer_iters < 2:
-        raise ValueError("--fit_method alternating_two_stage_nuts requires --fluxmix_outer_iters >= 2.")
     if args.shared_blr_lag:
         args.blr_lag_band_scatter = 0.0
-    if args.model_variant == "mag_fluxmix_fast":
-        args.blr_lag_band_scatter = None
     if args.shared_blr_lag and args.n_blr_terms != 1:
         raise ValueError("--shared_blr_lag currently requires --n_blr_terms 1.")
     if args.blr_lag_band_scatter is not None and args.blr_lag_band_scatter < 0.0:
         raise ValueError("--blr_lag_band_scatter must be non-negative.")
     if args.blr_lag_band_scatter is not None and args.n_blr_terms != 1:
         raise ValueError("--blr_lag_band_scatter currently requires --n_blr_terms 1.")
-    if args.shared_blr_lag and args.model_variant == "mag_fluxmix_fast":
-        raise ValueError("--shared_blr_lag is not yet supported by model_variant='mag_fluxmix_fast'.")
     if args.erlang_order < 1:
         raise ValueError("--erlang_order must be at least 1.")
+    if args.flux_linearized_refinement_iters < 1:
+        raise ValueError("--flux_linearized_refinement_iters must be at least 1.")
     if not 0.0 < args.target_accept < 1.0:
         raise ValueError("--target_accept must be strictly between 0 and 1.")
     if args.erlang_order != DEFAULT_ERLANG_ORDER and args.model_variant != "mag_flux_linearized_erlang":
         raise ValueError("--erlang_order is only used by --model_variant mag_flux_linearized_erlang.")
     if args.fast_solver and args.model_variant != "mag_flux_linearized_erlang":
         raise ValueError("--fast_solver is only used by --model_variant mag_flux_linearized_erlang.")
+    if args.dho_drw_parameterization and args.model_variant != "mag_flux_linearized_erlang":
+        raise ValueError(
+            "--dho_drw_parameterization is only used by "
+            "--model_variant mag_flux_linearized_erlang."
+        )
+    if args.dho_drw_parameterization and args.fast_solver:
+        raise ValueError(
+            "--dho_drw_parameterization currently uses the general matrix-"
+            "exponential solver and cannot be combined with --fast_solver."
+        )
     if args.fit_method == "ns":
         if NestedSampler is None:
             raise ImportError(
@@ -5720,19 +5045,6 @@ def main():
         if args.svi_lr != parser.get_default("svi_lr"):
             logging.warning(
                 "--fit_method nuts does not use SVI warm-start; ignoring --svi_lr=%s.",
-                args.svi_lr,
-            )
-    elif args.fit_method in ("two_stage_nuts", "alternating_two_stage_nuts"):
-        if args.svi_steps != parser.get_default("svi_steps"):
-            logging.warning(
-                "--fit_method %s does not use SVI warm-start; ignoring --svi_steps=%s.",
-                args.fit_method,
-                args.svi_steps,
-            )
-        if args.svi_lr != parser.get_default("svi_lr"):
-            logging.warning(
-                "--fit_method %s does not use SVI warm-start; ignoring --svi_lr=%s.",
-                args.fit_method,
                 args.svi_lr,
             )
 
@@ -5783,7 +5095,7 @@ def main():
             obj["log_jitter_active_mask"] = log_jitter_active_mask
             obj["survey_offset_active_mask"] = survey_offset_active_mask
             log_jitter_mean_fit = log_jitter_mean
-            if args.model_variant in ("mag_flux_linearized", "mag_flux_linearized_erlang"):
+            if args.model_variant == "mag_flux_linearized_erlang":
                 y_relflux = np.asarray(mag_residual_to_relative_flux(obj["y"]), dtype=float)
                 yerr_relflux = np.asarray(
                     magerr_residual_to_relative_fluxerr(obj["y"], obj["yerr"]),
@@ -5795,60 +5107,20 @@ def main():
                     survey_idx,
                     B,
                 )
-            if args.model_variant == "mag_linear":
-                model_builder = build_single_object_model
-            elif args.model_variant in ("mag_flux_linearized", "mag_flux_linearized_erlang"):
-                if args.n_blr_terms != 1:
-                    raise ValueError(
-                        f"model_variant={args.model_variant!r} currently supports only n_blr_terms=1."
-                    )
-                model_builder = None
-                logging.info(
-                    "[%s] %s using iterative local magnitude-likelihood refinement with relative-flux QS solves; refinement_strategy=%s; active_components=%s",
-                    oid,
-                    args.model_variant,
-                    args.flux_linearized_refinement_strategy,
-                    "cont" if args.disable_lag_blr else ("cont,blr" if args.model_variant == "mag_flux_linearized_erlang" or args.disable_lag_bc else "cont,blr,bc"),
+            if args.n_blr_terms != 1:
+                raise ValueError(
+                    "model_variant='mag_flux_linearized_erlang' currently "
+                    "supports only n_blr_terms=1."
                 )
-            elif args.model_variant == "mag_fluxmix_fast":
-                if args.n_blr_terms != 1:
-                    raise ValueError(
-                        "model_variant='mag_fluxmix_fast' currently supports only n_blr_terms=1."
-                    )
-                model_builder = None
-                active_components = "cont" if args.disable_lag_blr else ("cont,blr" if args.disable_lag_bc else "cont,blr,bc")
-                if args.fit_method == "alternating_two_stage_nuts":
-                    logging.info(
-                        "[%s] mag_fluxmix_fast using alternating two-stage NUTS with %d outer iterations: continuum-only QS alternated with conditional flux mixing; active_components=%s",
-                        oid,
-                        args.fluxmix_outer_iters,
-                        active_components,
-                    )
-                else:
-                    logging.info(
-                        "[%s] mag_fluxmix_fast using two-stage NUTS: continuum-only QS followed by conditional flux mixing; active_components=%s",
-                        oid,
-                        active_components,
-                    )
-            else:
-                raise ValueError(f"Unknown model_variant '{args.model_variant}'.")
-            if model_builder is not None:
-                numpyro_model = model_builder(
-                    obj,
-                    lam_rf,
-                    log_jitter_mean=log_jitter_mean_fit,
-                    lam_lya_rf=lam_lya_rf,
-                    disable_linear_trend=args.disable_linear_trend,
-                    disable_lag_blr=args.disable_lag_blr,
-                    disable_lag_bc=args.disable_lag_bc,
-                    drop_band_lyman_alpha=args.drop_band_lyman_alpha,
-                    tau_fast_truncated=args.tau_fast_truncated,
-                    n_blr_terms=args.n_blr_terms,
-                    shared_blr_lag=args.shared_blr_lag,
-                    blr_lag_band_scatter=args.blr_lag_band_scatter,
-                )
-            else:
-                numpyro_model = None
+            numpyro_model = None
+            logging.info(
+                "[%s] causal Erlang model using iterative local "
+                "magnitude-likelihood refinement; refinement_strategy=%s; "
+                "active_components=%s",
+                oid,
+                args.flux_linearized_refinement_strategy,
+                "cont,blr",
+            )
 
             stage_diagnostics = {}
             flux_linearized_fit_obj = None
@@ -5859,30 +5131,7 @@ def main():
             else:
                 key = random.PRNGKey(0)
                 key = random.fold_in(key, idx)
-                if args.fit_method in ("two_stage_nuts", "alternating_two_stage_nuts"):
-                    obj_flat_samples, samples_per_chain, m, stage_diagnostics = run_two_stage_fluxmix_fast_inference(
-                        obj,
-                        lam_rf,
-                        log_jitter_mean=log_jitter_mean,
-                        lam_lya_rf=lam_lya_rf,
-                        rng_key=key,
-                        num_warmup=args.nwarm,
-                        num_samples=args.nsamp,
-                        num_chains=args.nchains,
-                        chain_method=chain_method,
-                        progress_bar=args.progress,
-                        dense_mass=args.dense_mass,
-                        max_tree_depth=args.max_tree_depth,
-                        target_accept=args.target_accept,
-                        disable_linear_trend=args.disable_linear_trend,
-                        disable_lag_blr=args.disable_lag_blr,
-                        disable_lag_bc=args.disable_lag_bc,
-                        drop_band_lyman_alpha=args.drop_band_lyman_alpha,
-                        tau_fast_truncated=args.tau_fast_truncated,
-                        n_blr_terms=args.n_blr_terms,
-                        outer_iters=(args.fluxmix_outer_iters if args.fit_method == "alternating_two_stage_nuts" else 1),
-                    )
-                elif args.model_variant in ("mag_flux_linearized", "mag_flux_linearized_erlang"):
+                if args.model_variant == "mag_flux_linearized_erlang":
                     obj_flat_samples, samples_per_chain, flux_linearized_fit_obj, stage_diagnostics = run_iterated_mag_flux_linearized_inference(
                         obj,
                         lam_rf,
@@ -5901,7 +5150,7 @@ def main():
                         svi_lr=args.svi_lr,
                         target_accept=args.target_accept,
                         disable_linear_trend=args.disable_linear_trend,
-                        disable_lag_blr=args.disable_lag_blr,
+                        disable_lag_blr=False,
                         disable_lag_bc=args.disable_lag_bc,
                         drop_band_lyman_alpha=args.drop_band_lyman_alpha,
                         tau_fast_truncated=args.tau_fast_truncated,
@@ -5912,6 +5161,8 @@ def main():
                         use_fast_solver=args.fast_solver,
                         blr_lag_band_scatter=args.blr_lag_band_scatter,
                         refinement_strategy=args.flux_linearized_refinement_strategy,
+                        refinement_iters=args.flux_linearized_refinement_iters,
+                        drw_parameterization=args.dho_drw_parameterization,
                     )
                 elif args.fit_method in ("nuts", "svi+nuts"):
                     if args.fit_method == "svi+nuts":
@@ -6024,7 +5275,7 @@ def main():
             log_nonfinite_sample_summary(obj_flat_samples_flatten_per_band, label=f"{oid} per-band")
 
             diagnostics = {}
-            if samples_per_chain is not None and args.fit_method in ("nuts", "two_stage_nuts"):
+            if samples_per_chain is not None and args.fit_method == "nuts":
                 obj_samples_per_chain_flatten_per_band = flatten_per_chain_samples_per_band(
                     samples_per_chain,
                     bands=bands,
@@ -6033,7 +5284,7 @@ def main():
                 diagnostics = diagnostics_for_per_chain_samples(obj_samples_per_chain_flatten_per_band)
             diagnostics |= stage_diagnostics
 
-            if args.model_variant in ("mag_flux_linearized", "mag_flux_linearized_erlang"):
+            if args.model_variant == "mag_flux_linearized_erlang":
                 fit_obj_for_display = flux_linearized_fit_obj if flux_linearized_fit_obj is not None else obj
                 y_relflux_display, yerr_relflux_display = (
                     (
@@ -6047,9 +5298,9 @@ def main():
                     )
                 )
                 display_factory = (
-                    make_multiband_dho_blr_flux_linearized_erlang_model
-                    if args.model_variant == "mag_flux_linearized_erlang"
-                    else make_multiband_dho_blr_flux_linearized_model
+                    make_multiband_dho_blr_flux_linearized_erlang_drw_model
+                    if args.dho_drw_parameterization
+                    else make_multiband_dho_blr_flux_linearized_erlang_model
                 )
                 m = display_factory(
                     obj["X"],
@@ -6061,22 +5312,6 @@ def main():
                     zero_mean=zero_mean,
                     has_jitter=has_jitter,
                 )
-            elif args.model_variant == "mag_fluxmix_fast":
-                m = build_mag_fluxmix_fast_display_model(
-                    obj,
-                    lam_rf,
-                    obj_flat_samples,
-                )
-            else:
-                m = make_multiband_dho_blr_model(
-                    obj["X"],
-                    obj["y"],
-                    obj["yerr"],
-                    n_band=B,
-                    survey_idx=obj["survey_idx"],
-                    zero_mean=zero_mean,
-                    has_jitter=has_jitter,
-                )
             plot_samples = obj_flat_samples
 
             loo_residual_result = compute_loo_short_lag_residual_diagnostics(
@@ -6085,16 +5320,6 @@ def main():
                 obj,
                 bands,
             )
-            if args.save_sample_file:
-                save_obj_samples_to_hdf5(
-                    obj_flat_samples,
-                    oid,
-                    scalar_diagnostics={
-                        "loo_chi2_eff": loo_residual_result["loo_chi2_eff"],
-                        "loo_rms": loo_residual_result["loo_rms"],
-                    },
-                )
-
             result = process_samples(
                 obj_flat_samples_flatten_per_band,
                 obj,
@@ -6123,6 +5348,21 @@ def main():
                 obj,
                 float(obj["z"]),
             )
+            if args.save_sample_file:
+                ls_fixed_diagnostics = {
+                    key: value
+                    for key, value in psd_break_result.items()
+                    if "ls_fixed" in key
+                }
+                save_obj_samples_to_hdf5(
+                    obj_flat_samples,
+                    oid,
+                    scalar_diagnostics={
+                        "loo_chi2_eff": loo_residual_result["loo_chi2_eff"],
+                        "loo_rms": loo_residual_result["loo_rms"],
+                        **ls_fixed_diagnostics,
+                    },
+                )
             sf_result = compute_structure_function_diagnostics(
                 obj_flat_samples_flatten_per_band,
                 obj,
@@ -6138,11 +5378,12 @@ def main():
                 log_jitter_mean=np.asarray(log_jitter_mean_fit),
                 model_variant=args.model_variant,
                 disable_linear_trend=args.disable_linear_trend,
-                disable_lag_blr=args.disable_lag_blr,
+                disable_lag_blr=False,
                 disable_lag_bc=args.disable_lag_bc,
                 drop_band_lyman_alpha=args.drop_band_lyman_alpha,
                 tau_fast_truncated=args.tau_fast_truncated,
                 n_blr_terms=args.n_blr_terms,
+                drw_parameterization=args.dho_drw_parameterization,
             )
 
             if args.plot:

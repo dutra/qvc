@@ -1,3 +1,5 @@
+"""Shared state-space infrastructure for the retained Erlang DHO models."""
+
 from functools import partial
 
 import jax
@@ -150,50 +152,6 @@ class OverdampedSHOBaseQS(qs.Quasisep):
         zero = jnp.zeros_like(Phi_fast)
         return jnp.block([[Phi_fast, zero], [zero, Phi_slow]])
 
-
-class ContiBLR_SHO_Wrapper(qs.Wrapper):
-    """Multiband wrapper around a shared latent overdamped-SHO base kernel."""
-
-    params: dict[str, JAXArray]
-
-    def coord_to_sortable(self, X):
-        t, b = X
-        return t + 1e-9 * jnp.asarray(b, dtype=jnp.int32)
-
-    def transition_matrix(self, X1: JAXArray, X2: JAXArray) -> JAXArray:
-        return self.kernel.transition_matrix(X1, X2)
-
-    def _lagged_obs(self, b, lag):
-        h0 = self.kernel.observation_model((0.0, b))
-        phi = self.kernel.transition_matrix((0.0, b), (lag, b))
-        return h0 @ phi
-
-    def observation_model(self, X: JAXArray) -> JAXArray:
-        _t, b = X
-        b = jnp.asarray(b, dtype=jnp.int32)
-
-        amp_cont_all = jnp.asarray(self.params["amp_cont"])
-        lag_disk_all = jnp.asarray(self.params["lag_disk"])
-        amp_cont = _safe_pos(amp_cont_all)[b]
-        amp_bc = jnp.maximum(
-            jnp.asarray(self.params.get("amp_bc", jnp.zeros_like(amp_cont_all))),
-            0.0,
-        )[b]
-        amp_blr = _safe_pos(jnp.asarray(self.params["amp_blr"]))[b]
-        amp_blr2 = _safe_pos(jnp.asarray(self.params["amp_blr2"]))[b]
-        lag_disk = jnp.maximum(lag_disk_all, 0.0)[b]
-        lag_bc = jnp.maximum(
-            jnp.asarray(self.params.get("lag_bc", jnp.zeros_like(lag_disk_all))),
-            0.0,
-        )[b]
-        lag_blr = jnp.maximum(jnp.asarray(self.params["lag_blr"]), 0.0)[b]
-        lag_blr2 = jnp.maximum(jnp.asarray(self.params["lag_blr2"]), 0.0)[b]
-
-        h_cont = self._lagged_obs(b, lag_disk)
-        h_bc = self._lagged_obs(b, lag_disk + lag_bc)
-        h_blr = self._lagged_obs(b, lag_disk + lag_blr)
-        h_blr2 = self._lagged_obs(b, lag_disk + lag_blr2)
-        return amp_cont * h_cont + amp_bc * h_bc + amp_blr * h_blr + amp_blr2 * h_blr2
 
 
 def qs_psd(kernel, omega, b: int, sigma_n2: float = 0.0):
@@ -396,63 +354,6 @@ class ContiBLR_SHO_Model(MultiVarModel):
         return cond.loc, jnp.sqrt(cond.variance)
 
 
-class ContiBLRRelativeFlux_SHO_Wrapper(ContiBLR_SHO_Wrapper):
-    """Relative-flux QS wrapper using flux-additive prompt and delayed amplitudes."""
-
-    def observation_model(self, X: JAXArray) -> JAXArray:
-        _t, b = X
-        b = jnp.asarray(b, dtype=jnp.int32)
-
-        amp_cont_all = jnp.asarray(
-            self.params["amp_cont_relflux"]
-            if "amp_cont_relflux" in self.params
-            else self.params["amp_cont"]
-        )
-        lag_disk_all = jnp.asarray(self.params["lag_disk"])
-        amp_cont = _safe_pos(amp_cont_all)[b]
-        amp_bc = jnp.maximum(
-            jnp.asarray(
-                self.params["amp_bc_relflux"]
-                if "amp_bc_relflux" in self.params
-                else self.params.get("amp_bc", jnp.zeros_like(amp_cont_all))
-            ),
-            0.0,
-        )[b]
-        amp_blr = _safe_pos(
-            jnp.asarray(
-                self.params["amp_blr_relflux"]
-                if "amp_blr_relflux" in self.params
-                else self.params["amp_blr"]
-            )
-        )[b]
-        amp_blr2 = _safe_pos(
-            jnp.asarray(
-                self.params["amp_blr2_relflux"]
-                if "amp_blr2_relflux" in self.params
-                else self.params.get("amp_blr2", jnp.zeros_like(amp_cont_all))
-            )
-        )[b]
-        lag_disk = jnp.maximum(lag_disk_all, 0.0)[b]
-        lag_bc = jnp.maximum(
-            jnp.asarray(self.params.get("lag_bc", jnp.zeros_like(lag_disk_all))),
-            0.0,
-        )[b]
-        lag_blr = jnp.maximum(jnp.asarray(self.params["lag_blr"]), 0.0)[b]
-        lag_blr2 = jnp.maximum(
-            jnp.asarray(self.params.get("lag_blr2", jnp.zeros_like(lag_disk_all))),
-            0.0,
-        )[b]
-
-        h_cont = self._lagged_obs(b, lag_disk)
-        h_bc = self._lagged_obs(b, lag_disk + lag_bc)
-        h_blr = self._lagged_obs(b, lag_disk + lag_blr)
-        h_blr2 = self._lagged_obs(b, lag_disk + lag_blr2)
-        return amp_cont * h_cont + amp_bc * h_bc + amp_blr * h_blr + amp_blr2 * h_blr2
-
-
-class ContiBLRFluxLinearized_SHO_Wrapper(ContiBLRRelativeFlux_SHO_Wrapper):
-    """Backward-compatible alias for the relative-flux QS wrapper."""
-
 
 class ContiBLRRelativeFlux_SHO_Model(ContiBLR_SHO_Model):
     """QS model fit in relative-flux residual units with mag-display helpers."""
@@ -502,123 +403,6 @@ class ContiBLRRelativeFlux_SHO_Model(ContiBLR_SHO_Model):
         return relflux_psd * scale**2
 
 
-class ContiBLRFluxLinearized_SHO_Model(ContiBLRRelativeFlux_SHO_Model):
-    """Backward-compatible alias for the relative-flux QS model."""
-
-
-class TwoStageFluxMixDisplayModel:
-    """Display/prediction wrapper for the staged flux-mixing approximation."""
-
-    def __init__(
-        self,
-        *,
-        continuum_model,
-        basis_grid_t,
-        basis_relflux_norm,
-        t_ref,
-        zero_mean=False,
-        prediction_samples=None,
-        min_total_flux_ratio=1e-12,
-        floor_softness=0.0,
-    ):
-        self.continuum_model = continuum_model
-        self.basis_grid_t = jnp.asarray(basis_grid_t, dtype=float)
-        self.basis_relflux_norm = jnp.asarray(basis_relflux_norm, dtype=float)
-        self.mean_func = make_linear_mean_func(t_ref, zero_mean=zero_mean)
-        self.zero_mean = zero_mean
-        self.prediction_samples = prediction_samples
-        self.min_total_flux_ratio = float(min_total_flux_ratio)
-        self.floor_softness = float(floor_softness)
-        self.X = continuum_model.X
-        self.has_lag = False
-        self.nBand = getattr(continuum_model, "nBand", int(self.basis_relflux_norm.shape[0]))
-
-    def prediction_to_display(self, pred_result):
-        return pred_result
-
-    def my_amp_transform(self, params: dict[str, JAXArray]) -> JAXArray:
-        return jnp.log(_safe_pos(jnp.asarray(params["amp_cont"])))
-
-    def lag_transform(
-        self, has_lag: bool, params: dict[str, JAXArray], X: JAXArray
-    ) -> tuple[tuple[JAXArray, JAXArray], JAXArray]:
-        del has_lag, params
-        t = jnp.asarray(X[0], dtype=float)
-        band = jnp.asarray(X[1], dtype=jnp.int32)
-        return (t, band), jnp.arange(t.shape[0], dtype=jnp.int32)
-
-    def my_lag_transform(
-        self, X: JAXArray, has_lag: bool, params: dict[str, JAXArray]
-    ) -> tuple[tuple[JAXArray, JAXArray], JAXArray]:
-        return self.lag_transform(has_lag, params, X)
-
-    def _predict_mean(self, params: dict[str, JAXArray], X: JAXArray) -> JAXArray:
-        t_query = jnp.asarray(X[0], dtype=float)
-        band_idx = jnp.asarray(X[1], dtype=jnp.int32)
-        mean_vals = self.mean_func(params, (t_query, band_idx))
-
-        amp_cont_all = jnp.asarray(params["amp_cont"], dtype=float)
-        amp_blr_all = jnp.asarray(params.get("amp_blr", jnp.zeros_like(amp_cont_all)), dtype=float)
-        amp_bc_all = jnp.asarray(params.get("amp_bc", jnp.zeros_like(amp_cont_all)), dtype=float)
-        lag_blr_all = jnp.asarray(params.get("lag_blr", jnp.zeros_like(amp_cont_all)), dtype=float)
-        lag_bc_all = jnp.asarray(params.get("lag_bc", jnp.zeros_like(amp_cont_all)), dtype=float)
-
-        def one_point(tt, bb):
-            basis_band = self.basis_relflux_norm[bb]
-            prompt = amp_cont_all[bb] * _interp_relflux_basis(self.basis_grid_t, basis_band, tt)
-            blr = amp_blr_all[bb] * _interp_relflux_basis(
-                self.basis_grid_t,
-                basis_band,
-                tt - jnp.maximum(lag_blr_all[bb], 0.0),
-            )
-            bc = amp_bc_all[bb] * _interp_relflux_basis(
-                self.basis_grid_t,
-                basis_band,
-                tt - jnp.maximum(lag_bc_all[bb], 0.0),
-            )
-            return prompt + blr + bc
-
-        rel_flux = jax.vmap(one_point)(t_query, band_idx)
-        return mean_vals + relative_flux_to_mag_residual(
-            rel_flux,
-            min_total_flux_ratio=self.min_total_flux_ratio,
-            floor_softness=self.floor_softness,
-        )
-
-    def pred(
-        self, params: dict[str, JAXArray], X: JAXArray
-    ) -> tuple[JAXArray, JAXArray]:
-        mean_pred = self._predict_mean(params, X)
-        if not self.prediction_samples:
-            return mean_pred, jnp.zeros_like(mean_pred)
-
-        n_draws = len(next(iter(self.prediction_samples.values())))
-        if n_draws == 0:
-            return mean_pred, jnp.zeros_like(mean_pred)
-
-        pred_stack = []
-        for i in range(n_draws):
-            sample_params = {
-                key: jnp.asarray(value[i])
-                for key, value in self.prediction_samples.items()
-            }
-            pred_stack.append(np.asarray(self._predict_mean(sample_params, X), dtype=float))
-        pred_stack = np.asarray(pred_stack, dtype=float)
-        std_pred = np.std(pred_stack, axis=0, ddof=1 if pred_stack.shape[0] > 1 else 0)
-        return mean_pred, jnp.asarray(std_pred, dtype=float)
-
-    def psd(self, params, omega, b: int = 0, sigma_n2: float = 0.0):
-        amp_cont = jnp.asarray(params["amp_cont"], dtype=float)
-        zeros = jnp.zeros_like(amp_cont)
-        psd_params = dict(params)
-        psd_params["amp_blr"] = zeros
-        psd_params["amp_blr2"] = zeros
-        psd_params["amp_bc"] = zeros
-        psd_params["lag_blr"] = zeros
-        psd_params["lag_blr2"] = zeros
-        psd_params["lag_bc"] = zeros
-        return self.continuum_model.psd(psd_params, omega, b=b, sigma_n2=sigma_n2)
-
 
 def make_linear_mean_func(t_ref, zero_mean=False):
     """Return a simple per-band linear mean function."""
@@ -648,153 +432,15 @@ def make_linear_mean_func(t_ref, zero_mean=False):
     return mean_func
 
 
-def make_multiband_dho_blr_model(
-    X,
-    y,
-    yerr,
-    n_band=None,
-    *,
-    survey_idx=None,
-    zero_mean=False,
-    has_jitter=True,
-):
-    """Construct the multiband DHO+BLR model."""
-
-    if n_band is None:
-        n_band = int(jnp.max(jnp.asarray(X[1], dtype=jnp.int32))) + 1
-
-    t = jnp.asarray(X[0])
-
-    def amp_scale_func(_params):
-        return jnp.zeros(n_band)
-
-    return ContiBLR_SHO_Model(
-        X,
-        y,
-        yerr,
-        base_kernel=OverdampedSHOBaseQS(
-            tau_fast=jnp.full(n_band, 10.0),
-            tau_slow=jnp.full(n_band, 100.0),
-        ),
-        nBand=n_band,
-        multiband_kernel=ContiBLR_SHO_Wrapper,
-        mean_func=make_linear_mean_func(t, zero_mean=zero_mean),
-        amp_scale_func=amp_scale_func,
-        survey_idx=survey_idx,
-        zero_mean=zero_mean,
-        has_jitter=has_jitter,
-        has_lag=False,
-    )
-
-
-def make_multiband_dho_blr_flux_linearized_model(
-    X,
-    y,
-    yerr,
-    n_band=None,
-    *,
-    survey_idx=None,
-    baseline_flux_by_band=None,
-    zero_mean=False,
-    has_jitter=True,
-):
-    """Construct the relative-flux multiband DHO+BLR QS model."""
-
-    return make_multiband_dho_blr_relative_flux_model(
-        X,
-        y,
-        yerr,
-        n_band=n_band,
-        survey_idx=survey_idx,
-        baseline_flux_by_band=baseline_flux_by_band,
-        zero_mean=zero_mean,
-        has_jitter=has_jitter,
-    )
-
-
-def make_multiband_dho_blr_relative_flux_model(
-    X,
-    y,
-    yerr,
-    n_band=None,
-    *,
-    survey_idx=None,
-    baseline_flux_by_band=None,
-    zero_mean=False,
-    has_jitter=True,
-):
-    """Construct the relative-flux multiband DHO+BLR model."""
-
-    if n_band is None:
-        n_band = int(jnp.max(jnp.asarray(X[1], dtype=jnp.int32))) + 1
-
-    t = jnp.asarray(X[0])
-
-    def amp_scale_func(_params):
-        return jnp.zeros(n_band)
-
-    return ContiBLRRelativeFlux_SHO_Model(
-        X,
-        y,
-        yerr,
-        base_kernel=OverdampedSHOBaseQS(
-            tau_fast=jnp.full(n_band, 10.0),
-            tau_slow=jnp.full(n_band, 100.0),
-        ),
-        nBand=n_band,
-        multiband_kernel=ContiBLRRelativeFlux_SHO_Wrapper,
-        mean_func=make_linear_mean_func(t, zero_mean=zero_mean),
-        amp_scale_func=amp_scale_func,
-        survey_idx=survey_idx,
-        zero_mean=zero_mean,
-        has_jitter=has_jitter,
-        has_lag=False,
-    )
-
-
-def make_multiband_dho_blr_fluxmix_fast_display_model(
-    *,
-    continuum_model,
-    basis_grid_t,
-    basis_relflux_norm,
-    t_ref,
-    zero_mean=False,
-    prediction_samples=None,
-    min_total_flux_ratio=1e-12,
-    floor_softness=0.0,
-):
-    """Construct the staged flux-mixing display model."""
-
-    return TwoStageFluxMixDisplayModel(
-        continuum_model=continuum_model,
-        basis_grid_t=basis_grid_t,
-        basis_relflux_norm=basis_relflux_norm,
-        t_ref=t_ref,
-        zero_mean=zero_mean,
-        prediction_samples=prediction_samples,
-        min_total_flux_ratio=min_total_flux_ratio,
-        floor_softness=floor_softness,
-    )
-
-
 __all__ = [
     "ContiBLRRelativeFlux_SHO_Model",
-    "ContiBLRRelativeFlux_SHO_Wrapper",
     "ContiBLR_SHO_Model",
-    "ContiBLRFluxLinearized_SHO_Model",
-    "ContiBLRFluxLinearized_SHO_Wrapper",
-    "ContiBLR_SHO_Wrapper",
     "OverdampedSHOBaseQS",
     "mag_residual_to_relative_flux",
     "magerr_residual_to_relative_fluxerr",
     "make_linear_mean_func",
-    "make_multiband_dho_blr_model",
-    "make_multiband_dho_blr_flux_linearized_model",
-    "make_multiband_dho_blr_fluxmix_fast_display_model",
-    "make_multiband_dho_blr_relative_flux_model",
     "qs_psd",
     "stabilize_total_flux_ratio",
     "relative_flux_std_to_mag_std",
     "relative_flux_to_mag_residual",
-    "TwoStageFluxMixDisplayModel",
 ]

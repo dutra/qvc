@@ -18,7 +18,7 @@ from tinygp import GaussianProcess
 from tinygp.kernels import quasisep as qs
 from tinygp.solvers.quasisep.core import DiagQSM, StrictLowerTriQSM, SymmQSM
 
-from qvc.light_curve.multiband_model_dho_blr import (
+from qvc.light_curve.multiband_dho_core import (
     ContiBLRRelativeFlux_SHO_Model,
     OverdampedSHOBaseQS,
     _safe_pos,

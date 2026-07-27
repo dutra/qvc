@@ -23,6 +23,7 @@ from qvc.light_curve.fit_light_curves import (
     balmer_continuum_weight,
     build_explicit_model_params,
     build_explicit_model_params_relflux,
+    build_single_object_model_mag_flux_linearized,
     bending_power_law_psd,
     compute_band_igm_transmission,
     compute_flux_line_ratio_offsets,
@@ -45,7 +46,9 @@ from qvc.light_curve.fit_light_curves import (
     compute_lambda_center_rf,
     empirical_structure_function,
     fit_bending_power_law_psd,
+    fit_fixed_slope_drw_psd,
     apply_resume_sample_save_policy,
+    add_model_prediction_params,
     make_lc,
     posterior_median_mean_function,
     binned_loo_residual_pair_correlation,
@@ -148,7 +151,7 @@ def test_flux_linearized_refinement_strategy_controls_nuts_runs(
     )
     monkeypatch.setattr(
         fit_lc,
-        "make_multiband_dho_blr_flux_linearized_model",
+        "make_multiband_dho_blr_flux_linearized_erlang_model",
         lambda *_args, **_kwargs: object(),
     )
 
@@ -497,6 +500,68 @@ def test_build_explicit_model_params_relflux_keeps_igm_out_of_continuum_amplitud
         np.asarray(baseline["amp_cont_relflux"]),
     )
     assert np.allclose(np.asarray(explicit["igm_transmission_band"]), np.asarray(transmission))
+
+
+def test_prediction_params_expand_drw_q_without_legacy_fast_uv_coordinate():
+    lam_rf = jnp.array([1500.0, 2000.0, 2500.0])
+    raw = _make_raw_public(len(lam_rf))
+    raw.pop("log_tau_uv")
+    raw.pop("log_tau_fast_uv")
+    raw["log_tau_drw_center0"] = jnp.log(300.0)
+    raw["log_quality_factor"] = jnp.log(2.0)
+    raw["log_tau_perturb_ratio"] = jnp.log(0.02)
+
+    explicit = add_model_prediction_params(
+        raw,
+        lam_rf,
+        model_variant="mag_flux_linearized_erlang",
+    )
+
+    assert np.allclose(np.asarray(explicit["quality_factor"]), 2.0)
+    assert np.asarray(explicit["tau_drw_band"]).shape == (len(lam_rf),)
+    assert np.all(np.isfinite(np.asarray(explicit["tau_drw_band"])))
+    assert np.allclose(
+        np.asarray(explicit["tau_perturb_band"]),
+        0.02 * np.asarray(explicit["tau_drw_band"]),
+    )
+
+
+def test_carma21_numpyro_model_trace_materializes_likelihood_and_uv_outputs():
+    obj = {
+        "object_id": "carma21-smoke",
+        "z": 1.0,
+        "X": (
+            np.array([0.0, 5.0, 10.0, 15.0]),
+            np.array([0, 1, 0, 1], dtype=np.int32),
+        ),
+        "y": np.array([0.0, 0.02, -0.01, 0.01]),
+        "yerr": np.full(4, 0.03),
+        "survey_idx": np.zeros(4, dtype=np.int32),
+        "mags_means": np.array([20.0, 20.0]),
+        "bands": ["g", "r"],
+        "survey_names": ("sdss", "ps1", "ztf"),
+    }
+    model = build_single_object_model_mag_flux_linearized(
+        obj,
+        np.array([2000.0, 3000.0]),
+        log_jitter_mean=np.full((2, 3), np.log(0.03)),
+        drw_parameterization=True,
+    )
+
+    sites = fit_lc.trace(
+        fit_lc.seed(model, jax.random.PRNGKey(0))
+    ).get_trace()
+
+    for key in (
+        "log_quality_factor",
+        "log_tau_perturb_ratio",
+        "log_tau_uv",
+        "log_tau_perturb_uv",
+        "tau_perturb",
+        "loglike",
+    ):
+        assert key in sites
+        assert np.all(np.isfinite(np.asarray(sites[key]["value"])))
 
 
 def test_flux_line_ratio_offsets_include_static_igm_transmission():
@@ -908,6 +973,7 @@ def test_process_samples_keeps_uv_outputs_at_2500_and_stores_band_metadata():
         result["log_lag_blr_r_RF"],
         np.percentile(np.log10([35.0, 45.0, 55.0]) - np.log10(1.0 + z), 50),
     )
+
     assert np.isclose(
         result["log_lag_blr2_r_RF"],
         np.percentile(np.log10([85.0, 95.0, 105.0]) - np.log10(1.0 + z), 50),
@@ -939,6 +1005,32 @@ def test_process_samples_keeps_uv_outputs_at_2500_and_stores_band_metadata():
         50,
     )
     assert np.isclose(result["log_sigma_rms_band_g"], expected_sigma_rms_g)
+
+
+def test_process_samples_supports_drw_q_without_fast_pole_outputs():
+    samples = {
+        "log_sigma_uv": np.log(np.asarray([0.18, 0.20, 0.22])),
+        "log_tau_uv": np.log(np.asarray([250.0, 300.0, 350.0])),
+        "eta_sigma": np.asarray([-0.5, -0.45, -0.4]),
+        "eta_tau": np.asarray([0.1, 0.2, 0.3]),
+        "quality_factor": np.asarray([1.5, 2.0, 2.5]),
+        "log_quality_factor": np.log(np.asarray([1.5, 2.0, 2.5])),
+    }
+
+    result = process_samples(
+        samples,
+        {"object_id": "qpo", "z": 1.0},
+        bands=["g", "r"],
+    )
+
+    assert np.isfinite(result["log_tau_uv_rf"])
+    assert np.isfinite(result["quality_factor"])
+    assert "log_tau_fast_uv" not in result
+    assert "log_tau_fast_band_g_RF" not in result
+    assert np.isclose(
+        result["log_sigma_rms_band_g"],
+        result["log_sigma_band_g"],
+    )
 
 
 def test_process_samples_keeps_bc_lag_for_band_near_balmer_edge():
@@ -1460,6 +1552,19 @@ def test_fit_bending_power_law_psd_handles_too_few_bins():
     assert result["psd_bpl_valid"] is False
     assert np.isnan(result["log_sigma_bpl"])
     assert np.isnan(result["psd_bpl_alpha_high"])
+
+
+def test_fit_fixed_slope_drw_psd_recovers_sigma_and_tau():
+    freq = np.logspace(-4.5, -1.5, 60)
+    true_log_sigma = np.log10(0.2)
+    true_log_tau = np.log10(300.0)
+    power = bending_power_law_psd(freq, true_log_sigma, true_log_tau, alpha_high=-2.0)
+
+    result = fit_fixed_slope_drw_psd(freq, power, power * 0.9, power * 1.1)
+
+    assert result["valid"] is True
+    assert np.isclose(result["log_sigma"], true_log_sigma, atol=0.02)
+    assert np.isclose(result["log_tau"], true_log_tau, atol=0.02)
 
 
 def test_relative_to_2500_amplitude_scale_uses_only_eta_sigma_and_rest_wavelength():

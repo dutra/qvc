@@ -62,6 +62,54 @@ def _prediction_to_display(model, pred_result):
     return pred_result
 
 
+def _predict_regular_band_grid(
+    model,
+    params,
+    t_test,
+    band_indices,
+    *,
+    time0=0.0,
+    max_query_points=2_000,
+):
+    """Predict a common time grid in memory-bounded groups of bands.
+
+    The time-major ordering keeps the tinygp coordinates sorted while making
+    each returned array straightforward to reshape as ``(time, band)``.
+    Bounding each call matters because ``gp.condition`` can materialize dense
+    query covariance intermediates whose memory grows quadratically.
+    """
+
+    t_test = np.asarray(t_test, dtype=float)
+    band_indices = np.asarray(band_indices, dtype=np.int32)
+    if t_test.ndim != 1 or band_indices.ndim != 1:
+        raise ValueError("t_test and band_indices must be one-dimensional")
+    if t_test.size == 0 or band_indices.size == 0:
+        raise ValueError("t_test and band_indices must be non-empty")
+
+    bands_per_call = max(1, int(max_query_points) // t_test.size)
+    result_groups = None
+    for start in range(0, band_indices.size, bands_per_call):
+        band_group = band_indices[start : start + bands_per_call]
+        query_times = jnp.asarray(np.repeat(t_test - time0, band_group.size))
+        query_bands = jnp.asarray(
+            np.tile(band_group, t_test.size),
+            dtype=jnp.int32,
+        )
+        result = _prediction_to_display(
+            model,
+            model.pred(params, (query_times, query_bands)),
+        )
+        reshaped = tuple(
+            np.asarray(value).reshape(t_test.size, band_group.size)
+            for value in result
+        )
+        if result_groups is None:
+            result_groups = [[] for _ in reshaped]
+        for groups, value in zip(result_groups, reshaped):
+            groups.append(value)
+    return tuple(np.concatenate(groups, axis=1) for groups in result_groups)
+
+
 def _component_only_params(params, *, component):
     """Return a copy of params with only the requested variability component active."""
 
@@ -2096,23 +2144,30 @@ def save_color_magnitude_plot(
             1e-20,
         )
     t = X[0] + time0
-    t_test = np.linspace(t.min() - 400, t.max() + 400, 4000)
+    # This is a smooth diagnostic relation; 800 points are visually
+    # indistinguishable from the old 4000-point grid and substantially cheaper.
+    t_test = np.linspace(t.min() - 400, t.max() + 400, 800)
 
-    model_cont_by_band = {}
-    model_cont_std_by_band = {}
-    for n in np.unique(band_idx):
-        result = _prediction_to_display(
-            model,
-            model.pred(cm_params, (t_test - time0, jnp.full_like(t_test, n, dtype=int))),
-        )
-        if len(result) == 2:
-            mu, std = result
-            model_cont_by_band[n] = np.asarray(mu, dtype=float)
-            model_cont_std_by_band[n] = np.asarray(std, dtype=float)
-        else:
-            _, _, mu_cont, std_cont, _, _ = result
-            model_cont_by_band[n] = np.asarray(mu_cont, dtype=float)
-            model_cont_std_by_band[n] = np.asarray(std_cont, dtype=float)
+    active_band_indices = np.unique(band_idx).astype(np.int32)
+    result = _predict_regular_band_grid(
+        model,
+        cm_params,
+        t_test,
+        active_band_indices,
+        time0=time0,
+    )
+    if len(result) == 2:
+        mu_cont_grid, std_cont_grid = result
+    else:
+        _, _, mu_cont_grid, std_cont_grid, _, _ = result
+    model_cont_by_band = {
+        int(n): mu_cont_grid[:, column]
+        for column, n in enumerate(active_band_indices)
+    }
+    model_cont_std_by_band = {
+        int(n): std_cont_grid[:, column]
+        for column, n in enumerate(active_band_indices)
+    }
 
     i_idx = bands.index('i')
     mu_i = model_cont_by_band.get(i_idx)
@@ -2629,9 +2684,27 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, mags_means, survey_
             and np.asarray(band_idx).shape == y_plot.shape
         ):
             y_plot = y_plot - survey_delta_mag[np.asarray(band_idx, dtype=np.int32), survey_idx_plot]
-    t_test = np.linspace(t.min() - 400, t.max() + 400, 1000)
+    # A 600-point curve is already much denser than the rendered PDF pixels.
+    t_test = np.linspace(t.min() - 400, t.max() + 400, 600)
+    active_band_indices = np.unique(band_idx).astype(np.int32)
+    prediction_grid = _predict_regular_band_grid(
+        model,
+        posterior_median,
+        t_test,
+        active_band_indices,
+        time0=time0,
+    )
+    continuum_grid = None
+    if show_combined_light_curve_component_overlay and len(prediction_grid) == 2:
+        continuum_grid = _predict_regular_band_grid(
+            model,
+            _component_only_params(posterior_median, component="continuum"),
+            t_test,
+            active_band_indices,
+            time0=time0,
+        )
 
-    for n in np.unique(band_idx):
+    for column, n in enumerate(active_band_indices):
         mask = (band_idx == n) & (yerr < 10.0)
 
         # Plot the observed data
@@ -2649,15 +2722,10 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, mags_means, survey_
             lw=1, capsize=2, markersize=3
         )
 
-        # Compute predictions using the model
-        result = _prediction_to_display(
-            model,
-            model.pred(posterior_median, (t_test - time0, jnp.full_like(t_test, n, dtype=int))),
-        )
-
         # Plot the predictions
-        if len(result) == 2:
-            mu, std = result
+        if len(prediction_grid) == 2:
+            mu = prediction_grid[0][:, column]
+            std = prediction_grid[1][:, column]
             ax_lc.plot(t_test, mu + offsets[n], alpha=0.8, color=colors[band_idx_map[n]], lw=1.5)
             ax_lc.fill_between(
                 t_test, mu + offsets[n] - std, mu + offsets[n] + std,
@@ -2665,14 +2733,7 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, mags_means, survey_
             )
 
             if show_combined_light_curve_component_overlay:
-                cont_result = _prediction_to_display(
-                    model,
-                    model.pred(
-                        _component_only_params(posterior_median, component="continuum"),
-                        (t_test - time0, jnp.full_like(t_test, n, dtype=int)),
-                    ),
-                )
-                mu_cont = np.asarray(cont_result[0], dtype=float)
+                mu_cont = continuum_grid[0][:, column]
 
                 ax_lc.plot(
                     t_test,
@@ -2683,7 +2744,10 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, mags_means, survey_
                     linestyle='--',
                 )
         else:
-            mu, std, mu_cont, std_cont, _mu_blr, _std_blr = result
+            mu = prediction_grid[0][:, column]
+            std = prediction_grid[1][:, column]
+            mu_cont = prediction_grid[2][:, column]
+            std_cont = prediction_grid[3][:, column]
 
             if show_combined_light_curve_component_overlay:
                 ax_lc.plot(

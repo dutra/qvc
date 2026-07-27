@@ -916,6 +916,7 @@ def process_samples(flat_samples, data, bands, percentiles=[16, 50, 84]):
     log_sigma_uv = np.asarray(flat_samples["log_sigma_uv"]) if "log_sigma_uv" in flat_samples else None
     log_tau_uv = np.asarray(flat_samples["log_tau_uv"]) if "log_tau_uv" in flat_samples else None
     log_tau_fast_uv = np.asarray(flat_samples["log_tau_fast_uv"]) if "log_tau_fast_uv" in flat_samples else None
+    has_fast_pole = log_tau_fast_uv is not None
     eta_sigma = np.asarray(flat_samples["eta_sigma"])
     eta_tau = np.asarray(flat_samples["eta_tau"])
     lambda_ref = 2500
@@ -932,12 +933,13 @@ def process_samples(flat_samples, data, bands, percentiles=[16, 50, 84]):
         result["log_sigma_fast_uv"], result["log_sigma_fast_uv_err"] = sym_percentile(log_sigma_uv / np.log(10))
     if "log_tau_uv" not in result:
         result["log_tau_uv"], result["log_tau_uv_err"] = sym_percentile(log_tau_uv / np.log(10))
-    if "log_tau_fast_uv" not in result:
+    if has_fast_pole and "log_tau_fast_uv" not in result:
         result["log_tau_fast_uv"], result["log_tau_fast_uv_err"] = sym_percentile(log_tau_fast_uv / np.log(10))
     samples_log_tau_uv_rf = log_tau_uv / np.log(10) - np.log10(1 + data['z']) + log_single_pl(lambda_ref, lam_ref_arr, eta_tau)
     result["log_tau_uv_rf"], result["log_tau_uv_rf_err"] = sym_percentile(samples_log_tau_uv_rf)
-    samples_log_tau_fast_uv_rf = log_tau_fast_uv / np.log(10) - np.log10(1 + data['z']) + log_single_pl(lambda_ref, lam_ref_arr, eta_tau)
-    result["log_tau_fast_uv_rf"], result["log_tau_fast_uv_rf_err"] = sym_percentile(samples_log_tau_fast_uv_rf)
+    if has_fast_pole:
+        samples_log_tau_fast_uv_rf = log_tau_fast_uv / np.log(10) - np.log10(1 + data['z']) + log_single_pl(lambda_ref, lam_ref_arr, eta_tau)
+        result["log_tau_fast_uv_rf"], result["log_tau_fast_uv_rf_err"] = sym_percentile(samples_log_tau_fast_uv_rf)
 
     log_sigma_band = []
     for band in bands:
@@ -953,21 +955,17 @@ def process_samples(flat_samples, data, bands, percentiles=[16, 50, 84]):
         log_tau_band.append(val)
     log_tau_band = np.array(log_tau_band).T
 
-    log_tau_fast_band = []
-    for band in bands:
-        lam_eff = lambda_pivot[band] / (1 + data['z'])
-        val = log_tau_fast_uv / np.log(10) - np.log10(1 + data['z']) + log_single_pl(lam_eff, lam_ref_arr, eta_tau)
-        log_tau_fast_band.append(val)
-    log_tau_fast_band = np.array(log_tau_fast_band).T
+    log_tau_fast_band = None
+    if has_fast_pole:
+        fast_by_band = []
+        for band in bands:
+            lam_eff = lambda_pivot[band] / (1 + data['z'])
+            val = log_tau_fast_uv / np.log(10) - np.log10(1 + data['z']) + log_single_pl(lam_eff, lam_ref_arr, eta_tau)
+            fast_by_band.append(val)
+        log_tau_fast_band = np.array(fast_by_band).T
 
-    sigma_rms_band = []
-    for i, _band in enumerate(bands):
-        amp = np.power(10.0, log_sigma_band[:, i])
-        tau_fast = np.power(10.0, log_tau_fast_band[:, i])
-        tau_slow = np.power(10.0, log_tau_band[:, i])
-        variance_factor = dho_stationary_variance_factor(tau_fast, tau_slow)
-        sigma_rms_band.append(np.log10(amp * np.sqrt(np.maximum(variance_factor, 1e-300))))
-    sigma_rms_band = np.array(sigma_rms_band).T
+    # Both retained continuum kernels normalize amp_cont to stationary RMS.
+    sigma_rms_band = np.asarray(log_sigma_band)
 
     for i, band in enumerate(bands):
         median, err = sym_percentile(log_sigma_band[:, i])
@@ -979,9 +977,10 @@ def process_samples(flat_samples, data, bands, percentiles=[16, 50, 84]):
         median, err = sym_percentile(log_tau_band[:, i])
         result[f"log_tau_band_{band}_RF"] = median
         result[f"log_tau_band_{band}_RF_err"] = err
-        median, err = sym_percentile(log_tau_fast_band[:, i])
-        result[f"log_tau_fast_band_{band}_RF"] = median
-        result[f"log_tau_fast_band_{band}_RF_err"] = err
+        if has_fast_pole:
+            median, err = sym_percentile(log_tau_fast_band[:, i])
+            result[f"log_tau_fast_band_{band}_RF"] = median
+            result[f"log_tau_fast_band_{band}_RF_err"] = err
         for lag_suffix in ("", "2"):
             log_lag_blr_key = f"log_lag_blr{lag_suffix}_{band}"
             if log_lag_blr_key in flat_samples:

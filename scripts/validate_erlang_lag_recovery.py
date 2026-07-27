@@ -25,7 +25,7 @@ from qvc.light_curve.multiband_generate_lc import (
     concat_light_curves,
     populate_sdss_fields,
 )
-from qvc.light_curve.multiband_model_dho_blr import (
+from qvc.light_curve.multiband_dho_core import (
     magerr_residual_to_relative_fluxerr,
 )
 from qvc.light_curve.multiband_model_dho_blr_erlang import ErlangResponseDHOQS
