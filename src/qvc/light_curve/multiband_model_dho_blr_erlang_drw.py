@@ -2,6 +2,7 @@
 
 from functools import partial
 
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 from jax.scipy.linalg import expm
@@ -14,6 +15,9 @@ from qvc.light_curve.multiband_model_dho_blr_erlang import (
     ContiBLRErlangRelativeFluxModel,
     ErlangResponseDHOQS,
 )
+
+POSITIVE_FLUX_N_SIGMA = 4.0
+POSITIVE_FLUX_MARGIN_SOFTNESS = 0.05
 
 
 class ErlangResponseIntegratedDHOQS(ErlangResponseDHOQS):
@@ -110,6 +114,40 @@ class ContiBLRErlangIntegratedDHOModel(ContiBLRErlangRelativeFluxModel):
             carma_obs_velocity=base.obs_velocity,
         )
 
+    def positive_flux_log_penalty(self, params):
+        """Smoothly exclude Gaussian tails that imply negative total flux."""
+
+        kernel = self._build_kernel(params)
+        bands = jnp.arange(self.nBand, dtype=jnp.int32)
+        zero = jnp.asarray(0.0, dtype=self.y.dtype)
+        variance = jax.vmap(
+            lambda band: kernel.evaluate((zero, band), (zero, band))
+        )(bands)
+        stationary_std = jnp.sqrt(jnp.maximum(variance, 0.0))
+
+        means = jax.vmap(partial(self.get_mean, self.zero_mean, params))(self.X)
+        observed_bands = jnp.asarray(self.X[1], dtype=jnp.int32)
+        min_mean = jax.vmap(
+            lambda band: jnp.min(
+                jnp.where(observed_bands == band, means, jnp.inf)
+            )
+        )(bands)
+        margin = (
+            1.0
+            + min_mean
+            - jnp.asarray(POSITIVE_FLUX_N_SIGMA, dtype=self.y.dtype)
+            * stationary_std
+        )
+        scaled_violation = -margin / jnp.asarray(
+            POSITIVE_FLUX_MARGIN_SOFTNESS,
+            dtype=self.y.dtype,
+        )
+        return -0.5 * jnp.sum(jax.nn.softplus(scaled_violation) ** 2)
+
+    @eqx.filter_jit
+    def log_prob(self, params):
+        return super().log_prob(params) + self.positive_flux_log_penalty(params)
+
 
 def make_multiband_dho_blr_flux_linearized_erlang_drw_model(
     X,
@@ -152,5 +190,7 @@ def make_multiband_dho_blr_flux_linearized_erlang_drw_model(
 __all__ = [
     "ContiBLRErlangIntegratedDHOModel",
     "ErlangResponseIntegratedDHOQS",
+    "POSITIVE_FLUX_MARGIN_SOFTNESS",
+    "POSITIVE_FLUX_N_SIGMA",
     "make_multiband_dho_blr_flux_linearized_erlang_drw_model",
 ]
