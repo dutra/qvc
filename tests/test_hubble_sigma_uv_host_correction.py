@@ -102,6 +102,150 @@ def test_load_agn_data_raises_when_selected_magnitude_columns_are_missing(
         )
 
 
+def _patch_minimal_loader(monkeypatch, df_in):
+    monkeypatch.setattr(
+        hubble_utils,
+        "read_quasars_from_hdf5_flat",
+        lambda *args, **kwargs: df_in.copy(),
+    )
+    monkeypatch.setattr(hubble_utils, "populate_xray", lambda df: df)
+
+
+def test_load_agn_data_observed_aliases_legacy_generic_columns(
+    monkeypatch,
+    tmp_path,
+):
+    df_in = _make_loader_input().iloc[:2].copy()
+    df_in = df_in.drop(
+        columns=[
+            "apparent_mag_2500_reddened",
+            "apparent_mag_2500_reddened_err",
+        ]
+    )
+    expected_magnitude = df_in["apparent_mag_2500"].copy()
+    expected_error = df_in["apparent_mag_2500_err"].copy()
+    input_path = tmp_path / "fake_input.h5"
+    input_path.touch()
+    _patch_minimal_loader(monkeypatch, df_in)
+
+    df, df_all = hubble_utils.load_agn_data(
+        input_path,
+        spectra_fit_csv=None,
+        magnitude_convention="observed",
+        lc_info_csv=None,
+        only_load=True,
+        apply_cut=False,
+        plot_diagnostics=False,
+    )
+
+    for frame in (df, df_all):
+        np.testing.assert_array_equal(
+            frame["apparent_mag_2500_reddened"], expected_magnitude
+        )
+        np.testing.assert_array_equal(
+            frame["apparent_mag_2500_reddened_err"], expected_error
+        )
+        np.testing.assert_array_equal(
+            frame["apparent_mag_2500"], expected_magnitude
+        )
+        np.testing.assert_array_equal(
+            frame["apparent_mag_2500_err"], expected_error
+        )
+
+
+@pytest.mark.parametrize(
+    ("canonical_column", "legacy_column"),
+    [
+        ("apparent_mag_2500_reddened", "apparent_mag_2500"),
+        ("apparent_mag_2500_reddened_err", "apparent_mag_2500_err"),
+    ],
+)
+def test_load_agn_data_observed_raises_when_canonical_and_legacy_disagree(
+    monkeypatch,
+    tmp_path,
+    canonical_column,
+    legacy_column,
+):
+    df_in = _make_loader_input().iloc[:2].copy()
+    df_in.loc[df_in.index[1], canonical_column] = (
+        df_in.loc[df_in.index[1], legacy_column] + 0.01
+    )
+    input_path = tmp_path / "fake_input.h5"
+    input_path.touch()
+    _patch_minimal_loader(monkeypatch, df_in)
+
+    with pytest.raises(
+        ValueError,
+        match=rf"Conflicting observed-magnitude columns.*{canonical_column!s}",
+    ):
+        hubble_utils.load_agn_data(
+            input_path,
+            spectra_fit_csv=None,
+            magnitude_convention="observed",
+            lc_info_csv=None,
+            only_load=True,
+            apply_cut=False,
+            plot_diagnostics=False,
+        )
+
+
+@pytest.mark.parametrize(
+    "columns_to_drop",
+    [
+        [
+            "apparent_mag_2500_reddened",
+            "apparent_mag_2500_reddened_err",
+            "apparent_mag_2500_err",
+        ],
+        ["apparent_mag_2500_reddened_err"],
+        ["apparent_mag_2500_err"],
+    ],
+)
+def test_load_agn_data_observed_raises_for_incomplete_alias_pairs(
+    monkeypatch,
+    tmp_path,
+    columns_to_drop,
+):
+    df_in = _make_loader_input().iloc[:2].drop(columns=columns_to_drop)
+    input_path = tmp_path / "fake_input.h5"
+    input_path.touch()
+    _patch_minimal_loader(monkeypatch, df_in)
+
+    with pytest.raises(ValueError, match="magnitude_convention='observed'"):
+        hubble_utils.load_agn_data(
+            input_path,
+            spectra_fit_csv=None,
+            magnitude_convention="observed",
+            lc_info_csv=None,
+            only_load=True,
+            apply_cut=False,
+            plot_diagnostics=False,
+        )
+
+
+def test_load_agn_data_observed_colocated_nans_are_not_alias_conflicts(
+    monkeypatch,
+    tmp_path,
+):
+    df_in = _make_loader_input().iloc[:2].copy()
+    df_in.loc[df_in.index[1], "apparent_mag_2500"] = np.nan
+    df_in.loc[df_in.index[1], "apparent_mag_2500_reddened"] = np.nan
+    input_path = tmp_path / "fake_input.h5"
+    input_path.touch()
+    _patch_minimal_loader(monkeypatch, df_in)
+
+    with pytest.raises(ValueError, match="non-finite"):
+        hubble_utils.load_agn_data(
+            input_path,
+            spectra_fit_csv=None,
+            magnitude_convention="observed",
+            lc_info_csv=None,
+            only_load=True,
+            apply_cut=False,
+            plot_diagnostics=False,
+        )
+
+
 @pytest.mark.parametrize(
     ("bad_magnitude", "bad_error", "message"),
     [
@@ -326,8 +470,8 @@ def test_load_agn_data_applies_observed_convention_to_hdf5_spectral_fields(
     observed_err = np.array([0.20, 0.30])
     intrinsic_mag = np.array([20.0, 20.5])
     intrinsic_err = np.array([0.10, 0.15])
-    df_in["apparent_mag_2500"] = intrinsic_mag
-    df_in["apparent_mag_2500_err"] = intrinsic_err
+    df_in["apparent_mag_2500"] = observed_mag
+    df_in["apparent_mag_2500_err"] = observed_err
     df_in["apparent_mag_2500_reddened"] = observed_mag
     df_in["apparent_mag_2500_reddened_err"] = observed_err
     df_in["apparent_mag_2500_intrinsic"] = intrinsic_mag

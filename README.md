@@ -115,7 +115,6 @@ Expected output: the fit CSV at `results/data/spectra/demo.csv`, result artifact
 ```bash
 python -m qvc.spectra.fit_spectra \
   --mode fit \
-  --fpath-in "results/data/lc_data_all.h5" \
   "results/data/spectra/demo.csv" \
   --cache-dir "data/spectra_cache_all" \
   --output-dir "results/spectra/demo" \
@@ -227,7 +226,7 @@ The `hpc_scripts` folder contains Slurm/Yale-HPC-oriented helpers. Treat these a
   ```bash
   python hpc_scripts/sfitlc.py --fit stone --N 1
   ```
-- `hpc_scripts/sfitspectra.xsh` generates and submits spectra-fitting Slurm arrays from a chi-square selected object list, with optional H5 membership and exclusion filtering.
+- `hpc_scripts/sfitspectra.xsh` generates and submits spectra-fitting Slurm arrays from a chi-square selected object list, with optional exclusion filtering.
   ```bash
   xonsh hpc_scripts/sfitspectra.xsh
   ```

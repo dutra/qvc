@@ -1492,6 +1492,78 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
         ),
     }
 
+    if magnitude_convention == "observed":
+        canonical_columns = magnitude_columns["observed"]
+        legacy_columns = (
+            "apparent_mag_2500",
+            "apparent_mag_2500_err",
+        )
+        canonical_present = [
+            column in df.columns for column in canonical_columns
+        ]
+        legacy_present = [column in df.columns for column in legacy_columns]
+
+        for pair_name, columns, present in (
+            ("canonical reddened", canonical_columns, canonical_present),
+            ("legacy observed alias", legacy_columns, legacy_present),
+        ):
+            if any(present) and not all(present):
+                missing_columns = [
+                    column
+                    for column, is_present in zip(columns, present)
+                    if not is_present
+                ]
+                raise ValueError(
+                    f"Incomplete {pair_name} magnitude data for "
+                    "magnitude_convention='observed'; "
+                    f"missing {missing_columns}."
+                )
+
+        if not all(canonical_present) and not all(legacy_present):
+            raise ValueError(
+                "Cannot load magnitude_convention='observed'; neither the "
+                "canonical reddened column pair "
+                f"{list(canonical_columns)} nor the legacy observed alias pair "
+                f"{list(legacy_columns)} is complete."
+            )
+
+        if not all(canonical_present):
+            for canonical_column, legacy_column in zip(
+                canonical_columns, legacy_columns
+            ):
+                df[canonical_column] = df[legacy_column].copy()
+        elif all(legacy_present):
+            for canonical_column, legacy_column in zip(
+                canonical_columns, legacy_columns
+            ):
+                canonical = df[canonical_column]
+                legacy = df[legacy_column]
+                for column, values in (
+                    (canonical_column, canonical),
+                    (legacy_column, legacy),
+                ):
+                    if (
+                        not pd.api.types.is_numeric_dtype(values.dtype)
+                        or pd.api.types.is_bool_dtype(values.dtype)
+                    ):
+                        raise ValueError(
+                            f"Column {column!r} must contain numeric values "
+                            "to validate the observed-magnitude alias; "
+                            f"got dtype {values.dtype!r}."
+                        )
+                canonical_values = canonical.to_numpy(dtype=float)
+                legacy_values = legacy.to_numpy(dtype=float)
+                matching = (canonical_values == legacy_values) | (
+                    np.isnan(canonical_values) & np.isnan(legacy_values)
+                )
+                if not np.all(matching):
+                    mismatch_count = int(np.count_nonzero(~matching))
+                    raise ValueError(
+                        "Conflicting observed-magnitude columns: "
+                        f"{canonical_column!r} and its legacy alias "
+                        f"{legacy_column!r} differ in {mismatch_count} row(s)."
+                    )
+
     def _validated_magnitude_pair(convention):
         magnitude_column, error_column = magnitude_columns[convention]
         missing_columns = [
