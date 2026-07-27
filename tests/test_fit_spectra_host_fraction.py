@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import numpy as np
 import pandas as pd
 import pytest
+from astropy.io import fits
 
 from qvc.spectra import fit_spectra
 
@@ -29,6 +30,59 @@ def _build_records_args(**overrides):
     }
     values.update(overrides)
     return SimpleNamespace(**values)
+
+
+def _make_spectrum_hdul(loglam, *, wdisp=None):
+    loglam = np.asarray(loglam, dtype=float)
+    columns = [
+        fits.Column(name="loglam", format="D", array=loglam),
+        fits.Column(name="flux", format="D", array=np.ones_like(loglam)),
+        fits.Column(name="ivar", format="D", array=np.full_like(loglam, 100.0)),
+    ]
+    if wdisp is not None:
+        columns.append(
+            fits.Column(name="wdisp", format="D", array=np.asarray(wdisp, dtype=float))
+        )
+    return fits.HDUList(
+        [fits.PrimaryHDU(), fits.BinTableHDU.from_columns(columns)]
+    )
+
+
+def test_get_spectrum_arrays_estimates_sdss_resolving_power(capsys):
+    loglam = 3.6 + np.arange(5, dtype=float) * 1.0e-4
+    wdisp = np.array([0.8, 0.9, 1.0, 1.1, 1.2], dtype=float)
+
+    with _make_spectrum_hdul(loglam, wdisp=wdisp) as hdul:
+        lam, flux, err, resolving_power = fit_spectra.get_spectrum_arrays(hdul)
+
+    dloglam = float(np.nanmedian(np.diff(loglam)))
+    expected = float(
+        np.nanmedian(1.0 / (np.log(10.0) * dloglam * 2.355 * wdisp))
+    )
+    assert len(lam) == len(flux) == len(err) == len(loglam)
+    assert resolving_power == pytest.approx(expected)
+    assert (
+        f"SDSS resolving power estimate R = {resolving_power:.0f}"
+        in capsys.readouterr().out
+    )
+
+
+@pytest.mark.parametrize(
+    ("loglam", "wdisp"),
+    [
+        (3.6 + np.arange(3, dtype=float) * 1.0e-4, None),
+        (3.6 + np.arange(3, dtype=float) * 1.0e-4, [0.0, np.nan, -1.0]),
+        (np.full(3, 3.6, dtype=float), [1.0, 1.0, 1.0]),
+    ],
+)
+def test_get_spectrum_arrays_uses_default_sdss_resolving_power(
+    loglam, wdisp, capsys
+):
+    with _make_spectrum_hdul(loglam, wdisp=wdisp) as hdul:
+        _, _, _, resolving_power = fit_spectra.get_spectrum_arrays(hdul)
+
+    assert resolving_power == 2000.0
+    assert "SDSS resolving power estimate R = 2000" in capsys.readouterr().out
 
 
 def test_build_records_uses_s82_for_direct_object_ids(monkeypatch):
@@ -1118,6 +1172,7 @@ def test_run_one_fit_prints_consolidated_diagnostics_and_not_old_m2500_lines(mon
         np.array([4000.0, 5000.0, 6000.0], dtype=float),
         np.array([1.0, 1.0, 1.0], dtype=float),
         np.array([0.1, 0.1, 0.1], dtype=float),
+        1950.0,
     ))
     monkeypatch.setattr(fit_spectra, "JAXQSOFit", DummyJAXQSOFit)
     monkeypatch.setattr(fit_spectra, "build_default_prior_config", lambda *args, **kwargs: {})
@@ -1200,6 +1255,8 @@ def test_run_one_fit_prints_consolidated_diagnostics_and_not_old_m2500_lines(mon
     config = config_calls[0]
     assert config.observation.object_id == "z1.100_J0001+0001"
     assert config.observation.apply_mw_deredden is True
+    assert config.spectroscopy.resolving_power == 1950.0
+    assert config.spectroscopy.apply_instrumental_resolution is True
     assert config.preprocessing.wave_range == (1250.0, 8000.0)
     assert config.continuum.fit_power_law is True
     assert config.continuum.fit_feii is True
@@ -1261,6 +1318,7 @@ def test_run_one_fit_plots_mcmc_diagnostics_when_requested(monkeypatch, tmp_path
         np.array([4000.0, 5000.0, 6000.0], dtype=float),
         np.array([1.0, 1.0, 1.0], dtype=float),
         np.array([0.1, 0.1, 0.1], dtype=float),
+        1950.0,
     ))
     monkeypatch.setattr(fit_spectra, "JAXQSOFit", DummyJAXQSOFit)
     monkeypatch.setattr(fit_spectra, "build_default_prior_config", lambda *args, **kwargs: {})
@@ -1351,6 +1409,7 @@ def test_run_one_fit_resume_forwards_plot_mcmc_diagnostics(monkeypatch, tmp_path
         np.array([4000.0, 5000.0, 6000.0], dtype=float),
         np.array([1.0, 1.0, 1.0], dtype=float),
         np.array([0.1, 0.1, 0.1], dtype=float),
+        1950.0,
     ))
     monkeypatch.setattr(fit_spectra, "JAXQSOFit", DummyJAXQSOFit)
     monkeypatch.setattr(fit_spectra, "build_default_prior_config", lambda *args, **kwargs: {})
@@ -1452,6 +1511,7 @@ def test_run_one_fit_resume_fails_when_saved_samples_lack_psf_photometry(monkeyp
             np.array([4000.0, 5000.0, 6000.0], dtype=float),
             np.array([1.0, 1.0, 1.0], dtype=float),
             np.array([0.1, 0.1, 0.1], dtype=float),
+            1950.0,
         ),
     )
     monkeypatch.setattr(fit_spectra, "JAXQSOFit", DummyJAXQSOFit)

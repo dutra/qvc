@@ -1452,14 +1452,29 @@ def get_spectrum_arrays(hdul):
     tb = hdul[1].data
     lam = np.asarray(10 ** tb["loglam"], dtype=float)
     flux = np.asarray(tb["flux"], dtype=float)
+    wdisp = np.asarray(tb["wdisp"], dtype=float) if "wdisp" in tb.names else None
 
     ivar = np.asarray(tb["ivar"], dtype=float)
     err = np.full_like(flux, np.nan, dtype=float)
     good_ivar = np.isfinite(ivar) & (ivar > 0)
     err[good_ivar] = 1.0 / np.sqrt(ivar[good_ivar])
 
+    sdss_resolving_power = 2000.0
+    valid_wdisp = None if wdisp is None else np.isfinite(wdisp) & (wdisp > 0)
+    if valid_wdisp is not None and np.any(valid_wdisp) and lam.size >= 2:
+        dloglam = float(np.nanmedian(np.diff(np.log10(lam))))
+        if np.isfinite(dloglam) and dloglam > 0.0:
+            fwhm_pixels = 2.355 * wdisp[valid_wdisp]
+            resolving_power = float(
+                np.nanmedian(1.0 / (np.log(10.0) * dloglam * fwhm_pixels))
+            )
+            if np.isfinite(resolving_power) and resolving_power > 0.0:
+                sdss_resolving_power = resolving_power
+
+    print(f"SDSS resolving power estimate R = {sdss_resolving_power:.0f}")
+
     good = np.isfinite(lam) & np.isfinite(flux) & np.isfinite(err) & (err > 0)
-    return lam[good], flux[good], err[good]
+    return lam[good], flux[good], err[good], sdss_resolving_power
 
 
 # -----------------------------------------------------------------------------
@@ -1597,7 +1612,7 @@ def run_one_fit(rec, args):
             )
 
         try:
-            lam, flux, err = get_spectrum_arrays(hdul)
+            lam, flux, err, sdss_resolving_power = get_spectrum_arrays(hdul)
         finally:
             hdul.close()
         if len(lam) == 0:
@@ -1659,6 +1674,8 @@ def run_one_fit(rec, args):
                     wave_obs=lam,
                     fluxes=flux,
                     errors=err,
+                    resolving_power=sdss_resolving_power,
+                    apply_instrumental_resolution=True,
                 ),
                 psf_photometry=psf_photometry,
                 preprocessing=PreprocessingConfig(
