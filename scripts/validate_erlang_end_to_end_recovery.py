@@ -7,9 +7,8 @@ timestamps, band sampling, redshift, and reported photometric uncertainties.
 Unlike the conditional lag-grid validation, the continuum amplitude and the
 BLR fraction, absolute BLR amplitude, and lag in every band are inferred
 jointly.  The injection contains BLR signal in only one band.  By default the
-fit uses QVC-like partial pooling of the band lags around a shared lag with
-fixed natural-log scatter 0.4; ``--independent-blr-lags`` disables pooling.
-A short AutoNormal SVI run initializes each NUTS fit.
+fit uses the same independent per-band BLR lags as QVC. A short AutoNormal SVI
+run initializes each NUTS fit.
 """
 
 from __future__ import annotations
@@ -63,17 +62,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--blr-fraction-max", type=float, default=0.30)
     parser.add_argument("--blr-fraction-prior-median", type=float, default=0.10)
     parser.add_argument("--blr-fraction-prior-log-sigma", type=float, default=1.0)
-    parser.add_argument(
-        "--blr-lag-band-scatter",
-        type=float,
-        default=0.4,
-        help="Fixed natural-log scatter of band lags around the shared lag.",
-    )
-    parser.add_argument(
-        "--independent-blr-lags",
-        action="store_true",
-        help="Fit independent per-band lags instead of QVC-like partial pooling.",
-    )
     parser.add_argument("--svi-steps", type=int, default=300)
     parser.add_argument("--svi-lr", type=float, default=1e-2)
     parser.add_argument("--num-warmup", type=int, default=150)
@@ -105,8 +93,6 @@ def build_joint_recovery_model(
     continuum_amp_bounds,
     blr_fraction_prior_median,
     blr_fraction_prior_log_sigma,
-    blr_lag_band_scatter,
-    independent_blr_lags,
 ):
     """Return a model fitting BLR amplitudes and lags in every retained band."""
 
@@ -114,24 +100,10 @@ def build_joint_recovery_model(
     log_cont_bounds = np.log(np.asarray(continuum_amp_bounds, dtype=float))
 
     def model(y=None):
-        if independent_blr_lags:
-            log_lag_rest = numpyro.sample(
-                "log_lag_rest",
-                dist.Uniform(*log_lag_bounds).expand((n_band,)).to_event(1),
-            )
-        else:
-            log_lag_rest_shared = numpyro.sample(
-                "log_lag_rest_shared", dist.Uniform(*log_lag_bounds)
-            )
-            log_lag_band_offset_raw = numpyro.sample(
-                "log_lag_band_offset_raw",
-                dist.Normal(0.0, 1.0).expand((n_band,)).to_event(1),
-            )
-            log_lag_rest = numpyro.deterministic(
-                "log_lag_rest",
-                log_lag_rest_shared
-                + blr_lag_band_scatter * log_lag_band_offset_raw,
-            )
+        log_lag_rest = numpyro.sample(
+            "log_lag_rest",
+            dist.Uniform(*log_lag_bounds).expand((n_band,)).to_event(1),
+        )
         log_continuum_amp = numpyro.sample(
             "log_continuum_amp", dist.Uniform(*log_cont_bounds)
         )
@@ -282,8 +254,6 @@ def main() -> None:
         continuum_amp_bounds=(args.continuum_amp_min / 2, args.continuum_amp_max * 2),
         blr_fraction_prior_median=args.blr_fraction_prior_median,
         blr_fraction_prior_log_sigma=args.blr_fraction_prior_log_sigma,
-        blr_lag_band_scatter=args.blr_lag_band_scatter,
-        independent_blr_lags=args.independent_blr_lags,
     )
 
     rows = []
@@ -315,10 +285,7 @@ def main() -> None:
         )
         row = {
             "realization": index,
-            "lag_model": "independent" if args.independent_blr_lags else "partial_pooling",
-            "blr_lag_band_scatter": (
-                np.nan if args.independent_blr_lags else args.blr_lag_band_scatter
-            ),
+            "lag_model": "independent",
             "true_lag_rest": true_lag[index],
             "true_continuum_amp": true_continuum[index],
             "true_continuum_amp_active_band": true_continuum_band[blr_band_index],
