@@ -178,10 +178,11 @@ def test_flux_linearized_refinement_strategy_controls_nuts_runs(
             max_tree_depth=4,
             svi_steps=2,
             svi_lr=1e-2,
-            disable_lag_blr=True,
-            refinement_strategy=refinement_strategy,
+                disable_lag_blr=True,
+                refinement_strategy=refinement_strategy,
+                refinement_iters=3,
+            )
         )
-    )
 
     assert calls["svi"] == 3
     assert calls["nuts"] == expected_nuts_runs

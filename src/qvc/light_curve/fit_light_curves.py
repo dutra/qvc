@@ -121,7 +121,11 @@ LOG_SF_INF_TO_RMS = 0.5 * np.log10(2.0)
 RELFLUX_TO_MAG_SCALE = float(2.5 / np.log(10.0))
 LOG_RELFLUX_TO_MAG_SCALE = float(np.log(RELFLUX_TO_MAG_SCALE))
 LINEAR_TREND_RF_SIGMA_MAG_PER_DAY = 1e-4
-FLUX_LINEARIZED_REFINEMENT_ITERS = 3
+# A single observation-space transform is stable and preserves the
+# quasi-separable likelihood. Reusing posterior predictions as pseudo-data in
+# later rounds can create self-reinforcing SVI modes, so extra refinements are
+# opt-in diagnostics rather than the production default.
+FLUX_LINEARIZED_REFINEMENT_ITERS = 1
 FLUX_LINEARIZED_MIN_TOTAL_FLUX_RATIO = 0.05
 SDSS_FILTER_BLUE_EDGE_OBS = {
     "u": 3055.11,
@@ -2741,11 +2745,15 @@ def tau_shift_to_uv(eta_tau, lambda_center_rf, lambda_uv=2500.0):
 
 
 def eta_sigma_prior():
-    return dist.TruncatedNormal(-0.5, 1.0) #, low=ETA_SIGMA_LOW, high=0.0)
+    """Quasar-like wavelength scaling for the stationary continuum RMS."""
+
+    return dist.TruncatedNormal(-0.5, 0.3, low=-1.5, high=0.25)
 
 
 def eta_tau_prior():
-    return dist.Normal(0.5, 0.5)
+    """Weakly informative wavelength scaling for the DRW-style timescale."""
+
+    return dist.TruncatedNormal(0.2, 0.35, low=-0.5, high=1.25)
 
 
 def log_sigma_center0_prior(eta_sigma, lambda_center_rf):
@@ -3060,7 +3068,22 @@ def sample_flux_line_latent_params(
             log_lag_ratio_bc_to_blr_prior(),
         )
 
+    # In the CARMA(2,1) kernel this ratio is interpreted as the stationary RMS
+    # of the filtered BLR response relative to the UV continuum scale. Broad-
+    # band reverberation fractions are bounded below at a numerically
+    # negligible value and above at unity; the legacy exp(-1) center is
+    # retained.
     log_amp_ratio_blr_loc = line_ratio_offsets["blr_band"] - 1.0
+    log_amp_ratio_blr_low = line_ratio_offsets["blr_band"] + jnp.log(5e-3)
+    log_amp_ratio_blr_high = line_ratio_offsets["blr_band"]
+
+    def blr_amp_ratio_prior():
+        return dist.TruncatedNormal(
+            log_amp_ratio_blr_loc,
+            0.75,
+            low=log_amp_ratio_blr_low,
+            high=log_amp_ratio_blr_high,
+        )
     if mean_prior_dist is None:
         mean_prior_dist = mean_prior()
     log_jitter = _sample_log_jitter_grid(log_jitter_mean, log_jitter_active_mask)
@@ -3103,7 +3126,7 @@ def sample_flux_line_latent_params(
         elif n_blr_terms <= 1:
             log_amp_ratio_blr_raw = numpyro.sample(
                 "log_amp_ratio_blr_raw",
-                dist.Normal(log_amp_ratio_blr_loc, 1.0),
+                blr_amp_ratio_prior(),
             )
             if shared_log_lag_blr is None:
                 delta_log_lag_blr_raw = numpyro.sample(
@@ -3142,7 +3165,7 @@ def sample_flux_line_latent_params(
         else:
             log_amp_ratio_blr_raw = numpyro.sample(
                 "log_amp_ratio_blr_raw",
-                dist.Normal(log_amp_ratio_blr_loc, 1.0),
+                blr_amp_ratio_prior(),
             )
             delta_log_lag_blr_raw = numpyro.sample(
                 "delta_log_lag_blr_raw",
@@ -3151,7 +3174,7 @@ def sample_flux_line_latent_params(
             log_lag_blr_raw = delta_log_lag_blr_raw + log_lag0
             log_amp_ratio_blr2_raw = numpyro.sample(
                 "log_amp_ratio_blr2_raw",
-                dist.Normal(log_amp_ratio_blr_loc, 1.0),
+                blr_amp_ratio_prior(),
             )
             delta_log_lag_blr2_raw = numpyro.sample(
                 "delta_log_lag_blr2_raw",
@@ -4484,6 +4507,33 @@ def _flux_linearized_pseudo_data_from_prediction(obj_dict, model, params):
     return jnp.asarray(y_relflux, dtype=float), jnp.asarray(yerr_relflux, dtype=float)
 
 
+FLUX_LINEARIZED_REFINEMENT_DAMPING = 0.5
+FLUX_LINEARIZED_MAX_STEP = 0.25
+
+
+def _damped_flux_linearized_update(y_fit, yerr_fit, y_target, yerr_target):
+    """Apply a trust-region step to the local magnitude-likelihood update."""
+
+    y_fit = np.asarray(y_fit, dtype=float)
+    yerr_fit = np.asarray(yerr_fit, dtype=float)
+    y_target = np.asarray(y_target, dtype=float)
+    yerr_target = np.asarray(yerr_target, dtype=float)
+    delta = np.clip(
+        y_target - y_fit,
+        -FLUX_LINEARIZED_MAX_STEP,
+        FLUX_LINEARIZED_MAX_STEP,
+    )
+    damping = FLUX_LINEARIZED_REFINEMENT_DAMPING
+    y_next = y_fit + damping * delta
+    # Interpolate positive scales geometrically; this is stable when the
+    # magnitude-to-flux Jacobian changes substantially between refinements.
+    yerr_next = np.exp(
+        (1.0 - damping) * np.log(np.maximum(yerr_fit, 1e-12))
+        + damping * np.log(np.maximum(yerr_target, 1e-12))
+    )
+    return jnp.asarray(y_next), jnp.asarray(yerr_next)
+
+
 def _build_mag_flux_linearized_model_for_fit(obj_dict, lam_rf, log_jitter_mean, **kwargs):
     return build_single_object_model_mag_flux_linearized(
         obj_dict,
@@ -4670,10 +4720,16 @@ def run_iterated_mag_flux_linearized_inference(
             has_jitter=has_jitter,
             erlang_order=erlang_order,
         )
-        y_next, yerr_next = _flux_linearized_pseudo_data_from_prediction(
+        y_target, yerr_target = _flux_linearized_pseudo_data_from_prediction(
             obj_dict,
             display_model,
             params_median,
+        )
+        y_next, yerr_next = _damped_flux_linearized_update(
+            y_fit,
+            yerr_fit,
+            y_target,
+            yerr_target,
         )
         diagnostics[f"flux_linearized_iter{iter_idx + 1}_pseudo_delta_rms"] = float(
             np.sqrt(np.nanmean(np.square(np.asarray(y_next) - np.asarray(y_fit))))

@@ -17,7 +17,7 @@ from qvc.light_curve.multiband_model_dho_blr_erlang import (
 )
 
 POSITIVE_FLUX_N_SIGMA = 4.0
-POSITIVE_FLUX_MARGIN_SOFTNESS = 0.05
+POSITIVE_FLUX_MARGIN_SOFTNESS = 0.01
 
 
 class ErlangResponseIntegratedDHOQS(ErlangResponseDHOQS):
@@ -93,7 +93,7 @@ class ContiBLRErlangIntegratedDHOModel(ContiBLRErlangRelativeFluxModel):
         amp_cont = jnp.asarray(
             params["amp_cont_relflux"] if "amp_cont_relflux" in params else params["amp_cont"]
         )
-        amp_blr = jnp.asarray(
+        amp_blr_rms = jnp.asarray(
             params["amp_blr_relflux"] if "amp_blr_relflux" in params else params["amp_blr"]
         )
         base = IntegratedTimescaleDHOBaseQS.from_drw(
@@ -101,12 +101,40 @@ class ContiBLRErlangIntegratedDHOModel(ContiBLRErlangRelativeFluxModel):
             jnp.asarray(params["quality_factor"]),
             jnp.asarray(params["tau_perturb_band"]),
         )
+        lag_blr = jnp.asarray(params["lag_blr"])
+
+        # Parameterize the line component by its stationary output RMS instead
+        # of the Erlang filter's DC gain.  The latter becomes arbitrarily weak
+        # for lag >> tau_drw and creates a gain-lag ridge in which enormous
+        # coefficients have innocuous covariance.  Unit-response
+        # normalization removes that ridge while retaining the same kernel
+        # family and an interpretable continuum/line RMS ratio.
+        unit_response = ErlangResponseIntegratedDHOQS(
+            tau_fast=jnp.full_like(tau_drw, 0.5),
+            tau_slow=jnp.full_like(tau_drw, 0.5),
+            lag_blr=lag_blr,
+            amp_cont=jnp.zeros_like(amp_cont),
+            amp_blr=jnp.ones_like(amp_blr_rms),
+            order=self.erlang_order,
+            carma_omega0=base.omega0,
+            carma_damping=base.damping,
+            carma_obs_position=base.obs_position,
+            carma_obs_velocity=base.obs_velocity,
+        )
+        bands = jnp.arange(self.nBand, dtype=jnp.int32)
+        zero = jnp.asarray(0.0, dtype=tau_drw.dtype)
+        unit_response_var = jax.vmap(
+            lambda band: unit_response.evaluate((zero, band), (zero, band))
+        )(bands)
+        amp_blr_dc_gain = amp_blr_rms / jnp.sqrt(
+            jnp.maximum(unit_response_var, 1e-12)
+        )
         return ErlangResponseIntegratedDHOQS(
             tau_fast=jnp.full_like(tau_drw, 0.5),
             tau_slow=jnp.full_like(tau_drw, 0.5),
-            lag_blr=jnp.asarray(params["lag_blr"]),
+            lag_blr=lag_blr,
             amp_cont=amp_cont,
-            amp_blr=amp_blr,
+            amp_blr=amp_blr_dc_gain,
             order=self.erlang_order,
             carma_omega0=base.omega0,
             carma_damping=base.damping,
@@ -114,9 +142,8 @@ class ContiBLRErlangIntegratedDHOModel(ContiBLRErlangRelativeFluxModel):
             carma_obs_velocity=base.obs_velocity,
         )
 
-    def positive_flux_log_penalty(self, params):
-        """Smoothly exclude Gaussian tails that imply negative total flux."""
-
+    def positive_flux_margin(self, params):
+        """Return the per-band four-sigma margin above zero total flux."""
         kernel = self._build_kernel(params)
         bands = jnp.arange(self.nBand, dtype=jnp.int32)
         zero = jnp.asarray(0.0, dtype=self.y.dtype)
@@ -132,12 +159,17 @@ class ContiBLRErlangIntegratedDHOModel(ContiBLRErlangRelativeFluxModel):
                 jnp.where(observed_bands == band, means, jnp.inf)
             )
         )(bands)
-        margin = (
+        return (
             1.0
             + min_mean
             - jnp.asarray(POSITIVE_FLUX_N_SIGMA, dtype=self.y.dtype)
             * stationary_std
         )
+
+    def positive_flux_log_penalty(self, params):
+        """Smooth diagnostic penalty retained for reporting and tests."""
+
+        margin = self.positive_flux_margin(params)
         scaled_violation = -margin / jnp.asarray(
             POSITIVE_FLUX_MARGIN_SOFTNESS,
             dtype=self.y.dtype,
@@ -146,6 +178,9 @@ class ContiBLRErlangIntegratedDHOModel(ContiBLRErlangRelativeFluxModel):
 
     @eqx.filter_jit
     def log_prob(self, params):
+        # Keep the boundary differentiable so AutoNormal SVI can initialize;
+        # at the chosen softness, even a 0.1 flux-ratio violation costs about
+        # 50 log-probability units per affected band.
         return super().log_prob(params) + self.positive_flux_log_penalty(params)
 
 

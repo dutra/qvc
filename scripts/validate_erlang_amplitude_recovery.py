@@ -27,6 +27,10 @@ from qvc.light_curve.multiband_dho_core import (
     relative_flux_to_mag_residual,
 )
 from qvc.light_curve.multiband_model_dho_blr_erlang import ErlangResponseDHOQS
+from qvc.light_curve.dho_drw_parameterization import IntegratedTimescaleDHOBaseQS
+from qvc.light_curve.multiband_model_dho_blr_erlang_drw import (
+    ErlangResponseIntegratedDHOQS,
+)
 
 
 jax.config.update("jax_enable_x64", True)
@@ -41,6 +45,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=20260711)
     parser.add_argument("--erlang-order", type=int, default=3)
     parser.add_argument("--tau-drw", type=float, default=300.0)
+    parser.add_argument(
+        "--kernel",
+        choices=("legacy", "carma21"),
+        default="legacy",
+        help="Continuum kernel used for both injection and profile likelihood.",
+    )
+    parser.add_argument("--quality-factor", type=float, default=0.5)
+    parser.add_argument("--perturbation-ratio", type=float, default=0.02)
     parser.add_argument("--continuum-amp-min", type=float, default=0.05)
     parser.add_argument("--continuum-amp-max", type=float, default=0.30)
     parser.add_argument("--blr-fraction-min", type=float, default=0.03)
@@ -73,9 +85,50 @@ def make_kernel(
     tau_fast,
     tau_drw,
     erlang_order,
+    kernel_name="legacy",
+    quality_factor=0.5,
+    perturbation_ratio=0.02,
 ):
     amp_cont = jnp.full(n_band, continuum_amp)
     amp_blr = jnp.zeros(n_band).at[blr_band_index].set(blr_amp)
+    if kernel_name == "carma21":
+        tau_drw_band = jnp.full(n_band, tau_drw)
+        tau_perturb_band = perturbation_ratio * tau_drw_band
+        lag_blr = jnp.full(n_band, lag_observed)
+        base = IntegratedTimescaleDHOBaseQS.from_drw(
+            tau_drw_band,
+            jnp.asarray(quality_factor),
+            tau_perturb_band,
+        )
+        unit_response = ErlangResponseIntegratedDHOQS(
+            tau_fast=jnp.full(n_band, 0.5),
+            tau_slow=jnp.full(n_band, 0.5),
+            lag_blr=lag_blr,
+            amp_cont=jnp.zeros(n_band),
+            amp_blr=jnp.ones(n_band),
+            order=erlang_order,
+            carma_omega0=base.omega0,
+            carma_damping=base.damping,
+            carma_obs_position=base.obs_position,
+            carma_obs_velocity=base.obs_velocity,
+        )
+        bands = jnp.arange(n_band, dtype=jnp.int32)
+        response_var = jax.vmap(
+            lambda band: unit_response.evaluate((0.0, band), (0.0, band))
+        )(bands)
+        amp_blr_dc_gain = amp_blr / jnp.sqrt(jnp.maximum(response_var, 1e-12))
+        return ErlangResponseIntegratedDHOQS(
+            tau_fast=jnp.full(n_band, 0.5),
+            tau_slow=jnp.full(n_band, 0.5),
+            lag_blr=lag_blr,
+            amp_cont=amp_cont,
+            amp_blr=amp_blr_dc_gain,
+            order=erlang_order,
+            carma_omega0=base.omega0,
+            carma_damping=base.damping,
+            carma_obs_position=base.obs_position,
+            carma_obs_velocity=base.obs_velocity,
+        )
     return ErlangResponseDHOQS(
         tau_fast=jnp.full(n_band, tau_fast),
         tau_slow=jnp.full(n_band, tau_drw),
@@ -95,6 +148,9 @@ def make_amplitude_log_likelihood_fn(
     tau_fast,
     tau_drw,
     erlang_order,
+    kernel_name,
+    quality_factor,
+    perturbation_ratio,
 ):
     def one(theta, y, noise_var, lag_observed):
         continuum_amp, blr_amp = jnp.exp(theta)
@@ -107,6 +163,9 @@ def make_amplitude_log_likelihood_fn(
             tau_fast=tau_fast,
             tau_drw=tau_drw,
             erlang_order=erlang_order,
+            kernel_name=kernel_name,
+            quality_factor=quality_factor,
+            perturbation_ratio=perturbation_ratio,
         )
         gp = GaussianProcess(
             kernel,
@@ -168,6 +227,9 @@ def main() -> None:
         tau_fast=tau_fast,
         tau_drw=args.tau_drw,
         erlang_order=args.erlang_order,
+        kernel_name=args.kernel,
+        quality_factor=args.quality_factor,
+        perturbation_ratio=args.perturbation_ratio,
     )
 
     rng = np.random.default_rng(args.seed)
@@ -206,6 +268,9 @@ def main() -> None:
             tau_fast=tau_fast,
             tau_drw=args.tau_drw,
             erlang_order=args.erlang_order,
+            kernel_name=args.kernel,
+            quality_factor=args.quality_factor,
+            perturbation_ratio=args.perturbation_ratio,
         )
         key = jax.random.PRNGKey(args.seed + index)
         if args.observation_domain == "magnitude":
