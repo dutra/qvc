@@ -37,7 +37,7 @@ def test_subtract_constant_flux_from_band_makes_curve_fainter_and_more_variable(
     assert np.nanstd(corrected_mags) > np.nanstd(mags)
 
 
-def test_subtract_constant_flux_from_band_propagates_agn_fraction_error_into_magerr():
+def test_subtract_constant_flux_from_band_keeps_agn_fraction_error_out_of_epoch_errors():
     mags = np.array([20.0, 20.1, 19.9, 20.2], dtype=float)
     magerrs = np.full_like(mags, 0.02)
 
@@ -55,8 +55,34 @@ def test_subtract_constant_flux_from_band_propagates_agn_fraction_error_into_mag
     )
 
     assert np.all(np.isfinite(corrected_magerrs_with_frac_err))
-    assert np.all(corrected_magerrs_with_frac_err > corrected_magerrs_no_frac_err)
+    np.testing.assert_allclose(
+        corrected_magerrs_with_frac_err,
+        corrected_magerrs_no_frac_err,
+    )
     assert np.isclose(summary["agn_fraction_err"], 0.05)
+
+
+def test_subtract_constant_flux_from_band_uses_error_weighted_mean_flux_by_default():
+    mags = np.array([20.0, 20.1, 19.4, 20.2], dtype=float)
+    magerrs = np.array([0.01, 0.02, 0.20, 0.04], dtype=float)
+
+    _, _, summary = subtract_constant_flux_from_band(
+        mags,
+        magerrs,
+        agn_fraction=0.7,
+    )
+
+    flux = 10.0 ** (-0.4 * mags)
+    fluxerr = flux * (0.4 * np.log(10.0)) * magerrs
+    weights = 1.0 / fluxerr**2
+    expected_reference_flux = np.sum(weights * flux) / np.sum(weights)
+    assert np.isclose(summary["reference_total_flux"], expected_reference_flux)
+    assert not np.isclose(
+        summary["reference_total_flux"],
+        np.mean(flux),
+        rtol=1e-6,
+        atol=0.0,
+    )
 
 
 def test_apply_constant_flux_correction_to_object_requires_bandpass_fraction():

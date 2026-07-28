@@ -23,14 +23,24 @@ import matplotlib.pyplot as plt
 import numpy as np
 import numpyro
 import numpyro.distributions as dist
-from numpyro.infer import MCMC, NUTS, init_to_value
+from numpyro.infer import MCMC, NUTS, SVI, Trace_ELBO, init_to_value
+from numpyro.infer.autoguide import AutoNormal
+from numpyro.optim import Adam
 from tinygp import GaussianProcess
 
 from qvc.light_curve.fit_light_curves import (
     compute_lambda_center_rf,
     eta_sigma_prior,
     lambda_pivot,
-    run_svi_warm_start,
+)
+from qvc.light_curve.dho_drw_parameterization import IntegratedTimescaleDHOBaseQS
+from qvc.light_curve.multiband_dho_core import (
+    mag_residual_to_relative_flux,
+    magerr_residual_to_relative_fluxerr,
+    relative_flux_to_mag_residual,
+)
+from qvc.light_curve.multiband_model_dho_blr_erlang_drw import (
+    ErlangResponseIntegratedDHOQS,
 )
 from qvc.light_curve.multiband_model_dho_blr_erlang import ErlangResponseDHOQS
 from validate_erlang_lag_recovery import load_real_cadence
@@ -48,8 +58,23 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=20260713)
     parser.add_argument("--erlang-order", type=int, default=3)
     parser.add_argument("--tau-drw", type=float, default=300.0)
+    parser.add_argument("--quality-factor", type=float, default=0.1)
+    parser.add_argument("--perturbation-ratio", type=float, default=0.02)
+    parser.add_argument(
+        "--kernel-model",
+        choices=("carma21", "legacy"),
+        default="carma21",
+        help="Continuum/response kernel used for both injection and recovery.",
+    )
     parser.add_argument("--lag-min", type=float, default=10.0)
     parser.add_argument("--lag-max", type=float, default=1000.0)
+    parser.add_argument(
+        "--lag-grid",
+        type=float,
+        nargs="+",
+        default=None,
+        help="Explicit rest-frame lag grid; forms a Cartesian product with --blr-fraction-grid.",
+    )
     parser.add_argument("--continuum-amp-min", type=float, default=0.08)
     parser.add_argument("--continuum-amp-max", type=float, default=0.25)
     parser.add_argument(
@@ -60,6 +85,13 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--blr-fraction-min", type=float, default=0.05)
     parser.add_argument("--blr-fraction-max", type=float, default=0.30)
+    parser.add_argument(
+        "--blr-fraction-grid",
+        type=float,
+        nargs="+",
+        default=None,
+        help="Explicit BLR/continuum ratio grid; forms a Cartesian product with --lag-grid.",
+    )
     parser.add_argument("--blr-fraction-prior-median", type=float, default=0.10)
     parser.add_argument("--blr-fraction-prior-log-sigma", type=float, default=1.0)
     parser.add_argument("--svi-steps", type=int, default=300)
@@ -77,6 +109,66 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def make_erlang_kernel(
+    tau_drw,
+    quality_factor,
+    perturbation_ratio,
+    lag_observed,
+    amp_cont,
+    amp_blr_rms,
+    erlang_order,
+    kernel_model,
+):
+    """Build a CARMA(2,1) or legacy overdamped-DHO Erlang kernel."""
+
+    tau_drw = jnp.asarray(tau_drw)
+    amp_cont = jnp.asarray(amp_cont)
+    amp_blr_rms = jnp.asarray(amp_blr_rms)
+    lag_observed = jnp.asarray(lag_observed)
+    if kernel_model == "legacy":
+        return ErlangResponseDHOQS(
+            tau_fast=jnp.asarray(perturbation_ratio) * tau_drw,
+            tau_slow=tau_drw,
+            lag_blr=lag_observed,
+            amp_cont=amp_cont,
+            amp_blr=amp_blr_rms,
+            order=erlang_order,
+        )
+    base = IntegratedTimescaleDHOBaseQS.from_drw(
+        tau_drw,
+        jnp.asarray(quality_factor),
+        jnp.asarray(perturbation_ratio) * tau_drw,
+    )
+    unit_response = ErlangResponseIntegratedDHOQS(
+        tau_fast=jnp.full_like(tau_drw, 0.5),
+        tau_slow=jnp.full_like(tau_drw, 0.5),
+        lag_blr=lag_observed,
+        amp_cont=jnp.zeros_like(amp_cont),
+        amp_blr=jnp.ones_like(amp_blr_rms),
+        order=erlang_order,
+        carma_omega0=base.omega0,
+        carma_damping=base.damping,
+        carma_obs_position=base.obs_position,
+        carma_obs_velocity=base.obs_velocity,
+    )
+    band_indices = jnp.arange(tau_drw.size, dtype=jnp.int32)
+    response_var = jax.vmap(
+        lambda band: unit_response.evaluate((0.0, band), (0.0, band))
+    )(band_indices)
+    return ErlangResponseIntegratedDHOQS(
+        tau_fast=jnp.full_like(tau_drw, 0.5),
+        tau_slow=jnp.full_like(tau_drw, 0.5),
+        lag_blr=lag_observed,
+        amp_cont=amp_cont,
+        amp_blr=amp_blr_rms / jnp.sqrt(jnp.maximum(response_var, 1e-12)),
+        order=erlang_order,
+        carma_omega0=base.omega0,
+        carma_damping=base.damping,
+        carma_obs_position=base.obs_position,
+        carma_obs_velocity=base.obs_velocity,
+    )
+
+
 def build_joint_recovery_model(
     times,
     bands,
@@ -86,13 +178,15 @@ def build_joint_recovery_model(
     lam_rf,
     lambda_center_rf,
     redshift,
-    tau_fast,
     tau_drw,
+    quality_factor,
+    perturbation_ratio,
     erlang_order,
     lag_bounds,
     continuum_amp_bounds,
     blr_fraction_prior_median,
     blr_fraction_prior_log_sigma,
+    kernel_model,
 ):
     """Return a model fitting BLR amplitudes and lags in every retained band."""
 
@@ -110,9 +204,11 @@ def build_joint_recovery_model(
         eta_sigma = numpyro.sample("eta_sigma", eta_sigma_prior())
         log_blr_fraction = numpyro.sample(
             "log_blr_fraction",
-            dist.Normal(
+            dist.TruncatedNormal(
                 np.log(blr_fraction_prior_median),
                 blr_fraction_prior_log_sigma,
+                low=np.log(5e-3),
+                high=0.0,
             ).expand((n_band,)).to_event(1),
         )
         lag_rest = numpyro.deterministic("lag_rest", jnp.exp(log_lag_rest))
@@ -129,13 +225,15 @@ def build_joint_recovery_model(
         blr_amp = numpyro.deterministic(
             "blr_amp", continuum_amp_band * blr_fraction
         )
-        kernel = ErlangResponseDHOQS(
-            tau_fast=jnp.full(n_band, tau_fast),
-            tau_slow=jnp.full(n_band, tau_drw),
-            lag_blr=lag_rest * (1.0 + redshift),
-            amp_cont=continuum_amp_band,
-            amp_blr=continuum_amp_band * blr_fraction,
-            order=erlang_order,
+        kernel = make_erlang_kernel(
+            jnp.full(n_band, tau_drw),
+            quality_factor,
+            perturbation_ratio,
+            lag_rest * (1.0 + redshift),
+            continuum_amp_band,
+            continuum_amp_band * blr_fraction,
+            erlang_order,
+            kernel_model,
         )
         gp = GaussianProcess(
             kernel,
@@ -156,13 +254,35 @@ def posterior_interval(samples, name):
 def fit_one_mock(model, simulated, *, seed, args):
     conditioned_model = lambda: model(simulated)
     svi_key, nuts_key = jax.random.split(jax.random.PRNGKey(seed))
-    init_values, svi_loss = run_svi_warm_start(
+    init_values = {
+        "log_lag_rest": np.full(
+            len(args.bands),
+            0.5 * (np.log(args.lag_min) + np.log(args.lag_max)),
+        ),
+        "log_continuum_amp": 0.5
+        * (
+            np.log(args.continuum_amp_min / 2)
+            + np.log(args.continuum_amp_max * 2)
+        ),
+        "eta_sigma": args.injected_eta_sigma,
+        "log_blr_fraction": np.full(
+            len(args.bands),
+            np.log(args.blr_fraction_prior_median),
+        ),
+    }
+    guide = AutoNormal(
         conditioned_model,
-        svi_key,
-        num_steps=args.svi_steps,
-        learning_rate=args.svi_lr,
-        progress_bar=False,
+        init_loc_fn=init_to_value(values=init_values),
     )
+    svi = SVI(
+        conditioned_model,
+        guide,
+        Adam(args.svi_lr),
+        Trace_ELBO(),
+    )
+    svi_result = svi.run(svi_key, args.svi_steps, progress_bar=False)
+    init_values = guide.median(svi_result.params)
+    svi_loss = np.asarray(svi_result.losses)[-1]
     kernel = NUTS(
         conditioned_model,
         init_strategy=init_to_value(values=init_values),
@@ -218,46 +338,48 @@ def main() -> None:
         [lambda_pivot[band] for band in band_names], dtype=float
     ) / (1.0 + redshift)
     lambda_center_rf = float(compute_lambda_center_rf(lam_rf))
-    tau_fast = 0.5
     rng = np.random.default_rng(args.seed)
 
-    true_lag = np.exp(
-        rng.uniform(np.log(args.lag_min), np.log(args.lag_max), args.n_realizations)
-    )
-    true_continuum = np.exp(
-        rng.uniform(
-            np.log(args.continuum_amp_min),
-            np.log(args.continuum_amp_max),
-            args.n_realizations,
+    if (args.lag_grid is None) != (args.blr_fraction_grid is None):
+        raise ValueError("--lag-grid and --blr-fraction-grid must be specified together")
+    if args.lag_grid is not None:
+        true_lag, true_fraction = (
+            np.asarray(values, dtype=float).ravel()
+            for values in np.meshgrid(
+                np.asarray(args.lag_grid, dtype=float),
+                np.asarray(args.blr_fraction_grid, dtype=float),
+                indexing="ij",
+            )
         )
-    )
-    true_fraction = np.exp(
-        rng.uniform(
-            np.log(args.blr_fraction_min),
-            np.log(args.blr_fraction_max),
-            args.n_realizations,
+        n_realizations = true_lag.size
+        true_continuum = np.full(
+            n_realizations,
+            np.sqrt(args.continuum_amp_min * args.continuum_amp_max),
         )
-    )
-
-    model = build_joint_recovery_model(
-        times,
-        bands,
-        errors,
-        n_band=n_band,
-        lam_rf=lam_rf,
-        lambda_center_rf=lambda_center_rf,
-        redshift=redshift,
-        tau_fast=tau_fast,
-        tau_drw=args.tau_drw,
-        erlang_order=args.erlang_order,
-        lag_bounds=(args.lag_min, args.lag_max),
-        continuum_amp_bounds=(args.continuum_amp_min / 2, args.continuum_amp_max * 2),
-        blr_fraction_prior_median=args.blr_fraction_prior_median,
-        blr_fraction_prior_log_sigma=args.blr_fraction_prior_log_sigma,
-    )
+    else:
+        n_realizations = args.n_realizations
+        true_lag = np.exp(
+            rng.uniform(np.log(args.lag_min), np.log(args.lag_max), n_realizations)
+        )
+        true_continuum = np.exp(
+            rng.uniform(
+                np.log(args.continuum_amp_min),
+                np.log(args.continuum_amp_max),
+                n_realizations,
+            )
+        )
+        true_fraction = np.exp(
+            rng.uniform(
+                np.log(args.blr_fraction_min),
+                np.log(args.blr_fraction_max),
+                n_realizations,
+            )
+        )
 
     rows = []
-    for index in range(args.n_realizations):
+    csv_path = args.results_csv or args.output.with_suffix(".csv")
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    for index in range(n_realizations):
         true_continuum_band = true_continuum[index] * np.asarray(
             lam_rf / lambda_center_rf
         ) ** args.injected_eta_sigma
@@ -265,27 +387,115 @@ def main() -> None:
         true_blr_amp_band[blr_band_index] = (
             true_continuum_band[blr_band_index] * true_fraction[index]
         )
-        injection_kernel = ErlangResponseDHOQS(
-            tau_fast=jnp.full(n_band, tau_fast),
-            tau_slow=jnp.full(n_band, args.tau_drw),
-            lag_blr=jnp.full(n_band, true_lag[index] * (1.0 + redshift)),
-            amp_cont=jnp.asarray(true_continuum_band),
-            amp_blr=jnp.asarray(true_blr_amp_band),
-            order=args.erlang_order,
+        injection_kernel = make_erlang_kernel(
+            jnp.full(n_band, args.tau_drw),
+            args.quality_factor,
+            args.perturbation_ratio,
+            jnp.full(n_band, true_lag[index] * (1.0 + redshift)),
+            jnp.asarray(true_continuum_band),
+            jnp.asarray(true_blr_amp_band),
+            args.erlang_order,
+            args.kernel_model,
         )
-        injection_gp = GaussianProcess(
-            injection_kernel,
+        coordinates = (times, bands)
+        dense_covariance = jax.vmap(
+            lambda t1, b1: jax.vmap(
+                lambda t2, b2: injection_kernel.evaluate(
+                    (t1, b1),
+                    (t2, b2),
+                )
+            )(*coordinates)
+        )(*coordinates)
+        dense_covariance = np.asarray(dense_covariance, dtype=float)
+        dense_covariance = 0.5 * (
+            dense_covariance + dense_covariance.T
+        )
+        eig_min = float(np.linalg.eigvalsh(dense_covariance)[0])
+        dense_covariance += np.eye(dense_covariance.shape[0]) * max(
+            1e-10,
+            -eig_min + 1e-10,
+        )
+        latent_relflux = rng.multivariate_normal(
+            np.zeros(dense_covariance.shape[0]),
+            dense_covariance,
+        )
+        mag_error = errors / (0.4 * np.log(10.0))
+        noise_rng = np.random.default_rng(args.seed + 50_000 + index)
+        simulated_mag = np.array(
+            relative_flux_to_mag_residual(latent_relflux),
+            dtype=float,
+            copy=True,
+        )
+        simulated_mag += noise_rng.normal(0.0, np.asarray(mag_error))
+        simulated = np.asarray(mag_residual_to_relative_flux(simulated_mag))
+        simulated_errors = np.asarray(
+            magerr_residual_to_relative_fluxerr(
+                simulated_mag,
+                mag_error,
+            )
+        )
+        fit_model = build_joint_recovery_model(
+            times,
+            bands,
+            simulated_errors,
+            n_band=n_band,
+            lam_rf=lam_rf,
+            lambda_center_rf=lambda_center_rf,
+            redshift=redshift,
+            tau_drw=args.tau_drw,
+            quality_factor=args.quality_factor,
+            perturbation_ratio=args.perturbation_ratio,
+            erlang_order=args.erlang_order,
+            lag_bounds=(args.lag_min, args.lag_max),
+            continuum_amp_bounds=(
+                args.continuum_amp_min / 2,
+                args.continuum_amp_max * 2,
+            ),
+            blr_fraction_prior_median=args.blr_fraction_prior_median,
+            blr_fraction_prior_log_sigma=args.blr_fraction_prior_log_sigma,
+            kernel_model=args.kernel_model,
+        )
+        center_continuum = np.sqrt(
+            (args.continuum_amp_min / 2) * (args.continuum_amp_max * 2)
+        )
+        center_continuum_band = center_continuum * np.asarray(
+            lam_rf / lambda_center_rf
+        ) ** args.injected_eta_sigma
+        center_kernel = make_erlang_kernel(
+            jnp.full(n_band, args.tau_drw),
+            args.quality_factor,
+            args.perturbation_ratio,
+            jnp.full(
+                n_band,
+                np.sqrt(args.lag_min * args.lag_max) * (1.0 + redshift),
+            ),
+            jnp.asarray(center_continuum_band),
+            jnp.asarray(
+                center_continuum_band * args.blr_fraction_prior_median
+            ),
+            args.erlang_order,
+            args.kernel_model,
+        )
+        center_loglike = GaussianProcess(
+            center_kernel,
             (times, bands),
-            diag=errors**2,
+            diag=simulated_errors**2,
             assume_sorted=True,
-        )
-        simulated = injection_gp.sample(jax.random.PRNGKey(args.seed + index))
+        ).log_probability(simulated)
+        if not np.isfinite(float(center_loglike)):
+            raise RuntimeError(
+                "Recovery likelihood is non-finite at the deterministic prior center; "
+                f"data finite={np.all(np.isfinite(simulated))}, "
+                f"errors finite={np.all(np.isfinite(simulated_errors))}, "
+                f"min error={np.min(simulated_errors):.3e}."
+            )
         samples, diagnostics = fit_one_mock(
-            model, simulated, seed=args.seed + 10_000 + index, args=args
+            fit_model, simulated, seed=args.seed + 10_000 + index, args=args
         )
         row = {
             "realization": index,
             "lag_model": "independent",
+            "kernel_model": args.kernel_model,
             "true_lag_rest": true_lag[index],
             "true_continuum_amp": true_continuum[index],
             "true_continuum_amp_active_band": true_continuum_band[blr_band_index],
@@ -320,7 +530,7 @@ def main() -> None:
             _add_interval(row, shared_samples, "lag_rest_shared")
         rows.append(row)
         print(
-            f"[{index + 1}/{args.n_realizations}] lag {true_lag[index]:.1f} -> "
+            f"[{index + 1}/{n_realizations}] lag {true_lag[index]:.1f} -> "
             f"{row['lag_rest_median']:.1f} d; cont {true_continuum[index]:.3f} -> "
             f"{row['continuum_amp_median']:.3f}; BLR {row['true_blr_amp']:.4f} -> "
             f"{row['blr_amp_median']:.4f}; max inactive fraction="
@@ -328,13 +538,12 @@ def main() -> None:
             f"divergences={row['num_divergences']}",
             flush=True,
         )
+        with csv_path.open("w", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
+            writer.writeheader()
+            writer.writerows(rows)
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    csv_path = args.results_csv or args.output.with_suffix(".csv")
-    with csv_path.open("w", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
-        writer.writeheader()
-        writer.writerows(rows)
 
     panels = (
         ("true_lag_rest", "lag_rest", "BLR lag [rest-frame days]"),
@@ -367,8 +576,8 @@ def main() -> None:
             median,
             c=log10_blr_fraction,
             cmap="viridis",
-            vmin=np.log10(args.blr_fraction_min),
-            vmax=np.log10(args.blr_fraction_max),
+            vmin=np.log10(np.min(true_fraction)),
+            vmax=np.log10(np.max(true_fraction)),
             edgecolor="white",
             linewidth=0.5,
             zorder=2,

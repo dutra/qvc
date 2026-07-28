@@ -123,9 +123,14 @@ def subtract_constant_flux_from_band(
     agn_fraction,
     agn_fraction_err=0.0,
     *,
-    reference_stat: str = "median",
+    reference_stat: str = "mean",
 ):
-    """Return a variable-AGN magnitude light curve from total PSF magnitudes."""
+    """Return a variable-AGN magnitude light curve from total PSF magnitudes.
+
+    ``agn_fraction_err`` is retained in the summary as a shared systematic
+    uncertainty. It is intentionally not added to the independent per-epoch
+    photometric errors.
+    """
 
     mags = np.asarray(mags, dtype=float)
     magerrs = np.asarray(magerrs, dtype=float)
@@ -152,7 +157,19 @@ def subtract_constant_flux_from_band(
     total_flux_err = magerr_to_relative_fluxerr(mags[finite], magerrs[finite])
 
     if reference_stat == "mean":
-        reference_total_flux = float(np.nanmean(total_flux))
+        reference_valid = (
+            np.isfinite(total_flux)
+            & np.isfinite(total_flux_err)
+            & (total_flux_err > 0.0)
+        )
+        if np.any(reference_valid):
+            reference_weights = 1.0 / np.square(total_flux_err[reference_valid])
+            reference_total_flux = float(
+                np.sum(reference_weights * total_flux[reference_valid])
+                / np.sum(reference_weights)
+            )
+        else:
+            reference_total_flux = np.nan
     else:
         reference_total_flux = float(np.nanmedian(total_flux))
     if (not np.isfinite(reference_total_flux)) or reference_total_flux <= 0.0:
@@ -166,9 +183,10 @@ def subtract_constant_flux_from_band(
     corrected_err = np.full(total_flux_err.shape, np.nan, dtype=float)
     if np.any(valid):
         corrected[valid] = relative_flux_to_mag(agn_flux[valid])
-        agn_fraction_flux_err = np.full_like(total_flux_err, reference_total_flux * agn_fraction_err)
-        total_agn_flux_err = np.sqrt(total_flux_err**2 + agn_fraction_flux_err**2)
-        corrected_err[valid] = relative_fluxerr_to_magerr(agn_flux[valid], total_agn_flux_err[valid])
+        corrected_err[valid] = relative_fluxerr_to_magerr(
+            agn_flux[valid],
+            total_flux_err[valid],
+        )
 
     corrected_mags[finite] = corrected
     corrected_magerrs[finite] = corrected_err
@@ -190,7 +208,7 @@ def apply_constant_flux_correction_to_object(
     obj: Mapping[str, object],
     *,
     bands: Iterable[str] | None = None,
-    reference_stat: str = "median",
+    reference_stat: str = "mean",
 ):
     """Return a corrected light-curve object plus a correction summary."""
 
@@ -263,7 +281,7 @@ def apply_constant_flux_correction_to_objects(
     *,
     spectra_fit_csvs,
     progress_bar: bool = False,
-    reference_stat: str = "median",
+    reference_stat: str = "mean",
 ):
     """Apply spectra-informed constant-flux subtraction to a list of objects."""
 
@@ -409,8 +427,12 @@ def main():
     parser.add_argument(
         "--reference_stat",
         choices=("median", "mean"),
-        default="median",
-        help="Statistic used to anchor the constant contaminating flux.",
+        default="mean",
+        help=(
+            "Statistic used to anchor the constant contaminating flux. "
+            "'mean' is an inverse-variance-weighted flux mean after the "
+            "loader's photometric outlier rejection."
+        ),
     )
     args = parser.parse_args()
 
