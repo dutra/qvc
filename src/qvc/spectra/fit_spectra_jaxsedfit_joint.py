@@ -114,14 +114,15 @@ def _intrinsic_disk_luminosity_lambda_2500(samples):
 
 
 def estimate_m2500_dereddened(samples, redshift, *, h0=70.0, om0=0.3):
-    """Return intrinsic AGN m2500 draws and internal attenuation diagnostics.
+    """Return intrinsic monochromatic AGN m2500 draws and attenuation diagnostics.
 
-    The magnitude is built from the unattenuated accretion-disk luminosity,
-    excluding host starlight, lines, Fe II, Balmer continuum, and torus
-    emission. Inputs were already corrected for Milky-Way extinction when
-    ``Observation.apply_mw_deredden`` is enabled. The returned attenuation
-    includes both JAXSEDFit's foreground host-galaxy ``ebv_gal`` and nuclear
-    ``ebv_agn`` terms.
+    This is the rest-frame monochromatic apparent AB magnitude at exactly
+    2500 Angstrom, not a filter-integrated magnitude. It is built from the
+    unattenuated accretion-disk luminosity, excluding host starlight, lines,
+    Fe II, Balmer continuum, and torus emission. Inputs were already corrected
+    for Milky-Way extinction when ``Observation.apply_mw_deredden`` is enabled.
+    The returned attenuation includes both JAXSEDFit's foreground host-galaxy
+    ``ebv_gal`` and nuclear ``ebv_agn`` terms.
     """
     from astropy.cosmology import FlatLambdaCDM
 
@@ -133,8 +134,20 @@ def estimate_m2500_dereddened(samples, redshift, *, h0=70.0, om0=0.3):
         .value
         * METER_PER_MEGAPARSEC
     )
-    # QVC's m2500 convention uses L_nu/(4 pi D_L^2), equivalently the
-    # observed f_nu at 2500*(1+z) divided by (1+z).
+    # As in fit_spectra.py, this deliberately uses the rest-frame spectral
+    # convention
+    #
+    #   f_nu,restconv(2500) = L_nu(2500)/(4*pi*D_L^2)
+    #                         = f_nu,obs[2500*(1+z)]/(1+z).
+    #
+    # Consequently m_2500_dereddened is the K-corrected MONOCHROMATIC
+    # rest-frame apparent AB magnitude satisfying
+    #
+    #   m_2500_dereddened = M_2500_dereddened + distance modulus.
+    #
+    # It is not a filter-integrated magnitude and is not the directly observed
+    # AB magnitude at 2500*(1+z), which would be brighter by
+    # 2.5*log10(1+z).
     flux_nu_mjy = luminosity_nu / (4.0 * np.pi * distance_m**2) / 1e-29
     intrinsic_mag = -2.5 * np.log10(flux_nu_mjy / AB_ZEROPOINT_MJY)
 
