@@ -349,7 +349,14 @@ def test_load_agn_data_propagates_host_error_into_sigma_uv(monkeypatch, tmp_path
     np.testing.assert_allclose(df["log_jitter_total"], np.log10(expected_legacy_jitter_total))
 
     obs_dict = {key: df[key].to_numpy(dtype=float) for key in hubble_model.agn_model_req_obs + hubble_model.agn_model_req_errs}
-    obs_arr, err_arr, pivots = hubble_model.agn_model_pack_obs(obs_dict)
+    pivot_context = hubble_model.build_agn_pivot_context(
+        df,
+        z_range=(float(df["z"].min()), float(df["z"].max())),
+    )
+    obs_arr, err_arr, pivots = hubble_model.agn_model_pack_obs(
+        obs_dict,
+        pivot_context=pivot_context,
+    )
     assert obs_arr.shape[1] == len(df)
     assert err_arr.shape[1] == len(df)
     assert pivots.shape[0] == len(hubble_model.agn_model_req_obs)

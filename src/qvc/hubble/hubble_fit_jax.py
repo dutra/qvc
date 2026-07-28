@@ -65,19 +65,23 @@ from qvc.hubble.hubble_fit import (
     DEFAULT_COMPLETENESS_SIM_FILE,
     SPEED_CHOICES,
     VALID_COMPLETENESS_MODES,
+    _select_agn_fit_selection,
     estimate_sky_box_area_deg2,
     generate_fresh_completeness_sim_file,
     make_run_tag,
     normalize_speed,
+    _validate_agn_pivot_context_for_reference,
     validate_completeness_mode,
     z_pivot_agn,
     z_pivot_sna,
 )
 from qvc.hubble.hubble_likelihood import log_likelihood
 from qvc.hubble.hubble_model import (
+    AgnPivotContext,
     agn_model_req_errs,
     agn_model_req_obs,
     agn_model_req_params,
+    build_agn_pivot_context,
     get_model_params,
 )
 from qvc.hubble.hubble_plotting import (
@@ -102,7 +106,6 @@ from qvc.hubble.hubble_utils import (
     reduced_chi_squared,
     report_pivots,
     save_chains,
-    select_agn_subset_uniform_with_replacement,
 )
 
 
@@ -386,12 +389,23 @@ def _completeness_loglike_jax(m_model, mu_err, z, completeness, f_host_2500_psf,
     return jnp.sum(jnp.log(jnp.clip(Z, 1e-300)))
 
 
-def _prepare_agn_arrays(agn_data: dict[str, np.ndarray]) -> dict[str, jnp.ndarray]:
+def _prepare_agn_arrays(
+    agn_data: dict[str, np.ndarray],
+    *,
+    agn_pivot_context: AgnPivotContext,
+) -> dict[str, jnp.ndarray]:
+    if agn_pivot_context is None:
+        raise ValueError("AGN array preparation requires an explicit AgnPivotContext.")
     out = {k: jnp.asarray(v) for k, v in agn_data.items() if k != "object_id"}
     out["object_id"] = np.asarray(agn_data["object_id"]).astype(str)
     obs = jnp.stack([out[k] for k in agn_model_req_obs], axis=0)
     err = jnp.stack([out[k] for k in agn_model_req_errs], axis=0)
-    pivots = jnp.asarray([float(np.mean(np.asarray(agn_data[k], dtype=float))) for k in agn_model_req_obs])
+    pivots = jnp.asarray(
+        agn_pivot_context.as_array(
+            use_alpha_lambda_term=False,
+            use_eta_sigma_term=False,
+        )
+    )
     out["_obs_arr"] = obs
     out["_err_arr"] = err
     out["_pivot_arr"] = pivots
@@ -632,6 +646,7 @@ def _compute_numpy_blobs_from_samples(
     cosmo_model,
     completeness_params,
     z_pivot_agn,
+    agn_pivot_context: AgnPivotContext,
     only_sna,
     only_agn,
     disable_ceph_dist_calibration,
@@ -652,6 +667,7 @@ def _compute_numpy_blobs_from_samples(
             cosmo_model=cosmo_model,
             completeness_params=completeness_params,
             z_pivot_agn=z_pivot_agn,
+            agn_pivot_context=agn_pivot_context,
             agn_calibrators_data=None,
             use_planck_h0_prior=use_planck_h0_prior,
             use_planck_om_prior=use_planck_om_prior,
@@ -695,6 +711,7 @@ def run_single_jax(
     use_redshift_log_f_term=False,
     early_de_guard=False,
     seed=42,
+    agn_pivot_context=None,
 ):
     _require_jax_stack()
     if use_alpha_lambda_term:
@@ -726,17 +743,39 @@ def run_single_jax(
     os.makedirs(plot_path, exist_ok=True)
     print("Saving plots to", plot_path)
 
+    df_agn_fit = _select_agn_fit_selection(
+        df_agn,
+        z_range=z_range,
+        N=N,
+        uniform_redshift_distribution=uniform_redshift_distribution,
+    )
     if uniform_redshift_distribution:
-        df_agn_fit = select_agn_subset_uniform_with_replacement(df_agn, z_range=z_range, N=N)
         plot_redshift_histograms(df_pantheon, df_agn_fit, xscale="linear", plot_path=plot_path, only_agn=only_agn)
     else:
-        df_agn_fit = df_agn[df_agn["z"].between(z_range[0], z_range[1])].copy()
-        if N is not None:
-            df_agn_fit = df_agn_fit.sample(n=min(N, len(df_agn_fit)), random_state=seed)
         plot_redshift_histograms(df_pantheon, df_agn, xscale="log", plot_path=plot_path, only_agn=only_agn)
 
+    if only_sna:
+        if agn_pivot_context is not None:
+            raise ValueError("SNe-only JAX runs must not receive AGN pivot metadata.")
+    else:
+        if agn_pivot_context is None:
+            agn_pivot_context = build_agn_pivot_context(
+                df_agn_fit,
+                z_range,
+                use_alpha_lambda_term=False,
+                use_eta_sigma_term=False,
+            )
+        _validate_agn_pivot_context_for_reference(
+            agn_pivot_context,
+            df_agn_fit,
+            z_range=z_range,
+            use_alpha_lambda_term=False,
+            use_eta_sigma_term=False,
+            require_reference_ids=True,
+        )
     plot_delta_m_flux_recal_vs_redshift(df_agn_fit, plot_path=plot_path)
-    report_pivots(df_agn_fit)
+    if not only_sna:
+        report_pivots(df_agn_fit, agn_pivot_context=agn_pivot_context)
 
     if completeness:
         if completeness_sim_file is None:
@@ -780,7 +819,13 @@ def run_single_jax(
     pantheon_fields = ["zHD", "m_b_corr", "IS_CALIBRATOR", "CEPH_DIST", "MU_SH0ES_ERR_DIAG"]
     pantheon_data = {col: df_pantheon[col].values for col in pantheon_fields if col in df_pantheon.columns}
 
-    agn_data_jax = _prepare_agn_arrays(agn_data)
+    if only_sna:
+        agn_data_jax = {}
+    else:
+        agn_data_jax = _prepare_agn_arrays(
+            agn_data,
+            agn_pivot_context=agn_pivot_context,
+        )
     pantheon_jax = _prepare_pantheon_arrays(pantheon_data, _sna_L, _sna_Lower, _sna_LogdetCov)
     completeness_jax = _prepare_completeness_for_jax(completeness_params)
 
@@ -832,6 +877,7 @@ def run_single_jax(
         cosmo_model=cosmo_model,
         completeness_params=completeness_params,
         z_pivot_agn=z_pivot_agn,
+        agn_pivot_context=agn_pivot_context,
         only_sna=only_sna,
         only_agn=only_agn,
         disable_ceph_dist_calibration=disable_ceph_dist_calibration,
@@ -850,16 +896,26 @@ def run_single_jax(
     checkpoint_folder = get_qvc_result_dir() / "hubble_posteriors" / prefix
     checkpoint_folder.mkdir(parents=True, exist_ok=True)
     checkpoint_file = str(checkpoint_folder / f"posteriors_{run_tag}_jax.h5")
-    save_chains(
-        checkpoint_file,
+    checkpoint_payload = dict(
         flat_samples=flat_samples,
         dmi_max_w=dmi_max_w,
         dmi_posterior_median=dmi_posterior_median,
         dmi_selection_sigma_posterior_median=dmi_selection_sigma_posterior_median,
+        sigma_clip_pass_stage="single",
         logZ=logZ if logZ is not None else np.nan,
         logZerr=logZerr if logZerr is not None else np.nan,
         integrals_max_w=integrals_max_w,
     )
+    if not only_sna:
+        checkpoint_payload.update(
+            object_id_fit_selection=agn_data["object_id"],
+            agn_pivot_observable_names=agn_pivot_context.observable_names,
+            agn_pivot_values=agn_pivot_context.values,
+            agn_pivot_z_range=agn_pivot_context.z_range,
+            agn_pivot_reference_object_ids=agn_pivot_context.reference_object_ids,
+            agn_pivot_rule=agn_pivot_context.rule,
+        )
+    save_chains(checkpoint_file, **checkpoint_payload)
 
     display_results_summary(
         flat_samples,
@@ -912,6 +968,7 @@ def run_single_jax(
         plot_path=plot_path,
         df_calibrators=None,
         z_range=z_range,
+        agn_pivot_context=agn_pivot_context,
     )
     plot_predicted_L2500_vs_sigmahat(
         flat_samples,
@@ -924,6 +981,7 @@ def run_single_jax(
         plot_path=plot_path,
         df_calibrators=None,
         z_range=z_range,
+        agn_pivot_context=agn_pivot_context,
     )
     plot_predicted_L2500_vs_sigmahat(
         flat_samples,
@@ -938,6 +996,7 @@ def run_single_jax(
         plot_path=plot_path,
         df_calibrators=None,
         z_range=z_range,
+        agn_pivot_context=agn_pivot_context,
     )
     L_residuals_debiased, L_pred_std_debiased = plot_predicted_L2500_vs_sigmahat(
         flat_samples,
@@ -952,6 +1011,7 @@ def run_single_jax(
         plot_path=plot_path,
         df_calibrators=None,
         z_range=z_range,
+        agn_pivot_context=agn_pivot_context,
     )
     plot_L2500_vs_sigma_tau_separate(
         flat_samples,
@@ -965,6 +1025,7 @@ def run_single_jax(
         show=False,
         plot_path=plot_path,
         z_range=z_range,
+        agn_pivot_context=agn_pivot_context,
     )
     plot_L2500_vs_sigma_tau_separate(
         flat_samples,
@@ -978,6 +1039,7 @@ def run_single_jax(
         show=False,
         plot_path=plot_path,
         z_range=z_range,
+        agn_pivot_context=agn_pivot_context,
     )
     plot_catalog_quantity_vs_sigma_tau_separate(
         df_agn_fit,
@@ -1052,6 +1114,7 @@ def run_single_jax(
         df_calibrators=None,
         z_range=z_range,
         only_agn=only_agn,
+        agn_pivot_context=agn_pivot_context,
     )
     debiased_residuals, _debiased_clipping_sigma, _, mu_pred_std_debiased, _ = r
     hubble_chi2_mask = df_agn_fit["z"].between(z_range[0], z_range[1]).to_numpy(dtype=bool)

@@ -23,9 +23,23 @@ from scipy.optimize import minimize_scalar
 from scipy.stats import gaussian_kde, kurtosis, norm, normaltest, probplot, skew
 from tqdm import tqdm
 
-from qvc.hubble.hubble_model import (M_model_agn, M_model_agn_err, get_model_params, agn_model_pack_params,
-    agn_model_pack_obs, agn_model_oidx, agn_model_pidx, agn_model_req_obs, agn_model_req_errs,
-    evaluate_log_f, resolve_model_option_flags, get_agn_model_spec, AGN_ALPHA_LAMBDA_PARAM, AGN_ALPHA_LAMBDA_ERR)
+from qvc.hubble.hubble_model import (
+    AGN_ALPHA_LAMBDA_ERR,
+    AGN_ALPHA_LAMBDA_PARAM,
+    AgnPivotContext,
+    M_model_agn,
+    M_model_agn_err,
+    agn_model_oidx,
+    agn_model_pack_obs,
+    agn_model_pack_params,
+    agn_model_pidx,
+    agn_model_req_errs,
+    agn_model_req_obs,
+    evaluate_log_f,
+    get_agn_model_spec,
+    get_model_params,
+    resolve_model_option_flags,
+)
 from qvc.hubble.hubble_likelihood import sigma_lens_from_dc, sigma_mu_from_z_err
 from qvc.hubble.cuts import LIGHT_CURVE_N_POINTS_EXCLUDED_BANDS, light_curve_point_count_series
 from qvc.light_curve.band_colors import BAND_COLORS as LIGHT_CURVE_BAND_COLORS
@@ -5210,7 +5224,9 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
                 agn_likelihood_space_chi2=None,
                 agn_likelihood_space_chi2_zgt1=None,
                 residuals_csv_filename="residuals.csv",
-                compute_only=False):
+                compute_only=False,
+                *,
+                agn_pivot_context: AgnPivotContext):
     """
     Hubble diagram (Pantheon+-style):
       • Model line + 68% band in magenta
@@ -5311,16 +5327,17 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
 
     # --- Predicted AGN μ per object ---
     m_obs = df_agn['apparent_mag_2500'].values
+    agn_obs_arr, agn_err_arr, agn_pivot_arr = agn_model_pack_obs(
+        df_agn,
+        use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
+        use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+        pivot_context=agn_pivot_context,
+    )
     mu_pred_samples = []
     for s in flat_samples:
         sample_params = {k: s[param_indices[k]] for k in model_labels}
         agn_params_arr = agn_model_pack_params(
             sample_params,
-            use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
-            use_eta_sigma_term=option_flags["use_eta_sigma_term"],
-        )
-        agn_obs_arr, agn_err_arr, agn_pivot_arr = agn_model_pack_obs(
-            df_agn,
             use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
             use_eta_sigma_term=option_flags["use_eta_sigma_term"],
         )
@@ -5358,11 +5375,6 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     # Per-object uncertainty (for yerr)
     agn_params_arr = agn_model_pack_params(
         results,
-        use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
-        use_eta_sigma_term=option_flags["use_eta_sigma_term"],
-    )
-    agn_obs_arr, agn_err_arr, agn_pivot_arr = agn_model_pack_obs(
-        df_agn,
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
         use_eta_sigma_term=option_flags["use_eta_sigma_term"],
     )
@@ -5803,6 +5815,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
             agn_obs_med,
             use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
             use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+            pivot_context=agn_pivot_context,
         )
 
         M_med_grid = np.median([
@@ -6018,6 +6031,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
             ds,
             use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
             use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+            pivot_context=agn_pivot_context,
         )
         pred_M_show = M_model_agn(
             agn_params_arr_show,
@@ -6678,6 +6692,8 @@ def plot_predicted_vs_actual_M2500(
     dmi_selection_sigma=None,
     dmi_selection_sigma_interp=None,
     sigma_sel_floor_mag=0.05,
+    *,
+    agn_pivot_context: AgnPivotContext,
 ):
     """
     Predicted vs Actual M_2500, with:
@@ -6771,6 +6787,7 @@ def plot_predicted_vs_actual_M2500(
         df_agn,
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
         use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+        pivot_context=agn_pivot_context,
     )
 
     M_2500_pred = M_model_agn(
@@ -8083,6 +8100,8 @@ def plot_predicted_L2500_vs_sigmahat(
     dmi_selection_sigma_interp=None,
     clipped_mask=None,
     sigma_sel_floor_mag=0.05,
+    *,
+    agn_pivot_context: AgnPivotContext,
 ):
     d = df_agn.copy()
     clipped_mask = _resolve_clipped_mask(d, clipped_mask)
@@ -8118,6 +8137,7 @@ def plot_predicted_L2500_vs_sigmahat(
         d,
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
         use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+        pivot_context=agn_pivot_context,
     )
 
     # Helper: posterior median dict
@@ -8209,6 +8229,7 @@ def plot_predicted_L2500_vs_sigmahat(
             ds,
             use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
             use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+            pivot_context=agn_pivot_context,
         )
         x_log_ref_show = -0.4 * (
             M_model_agn(
@@ -8531,6 +8552,7 @@ def plot_predicted_L2500_vs_sigmahat(
             ds,
             use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
             use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+            pivot_context=agn_pivot_context,
         )
         x_log_ref_show = -0.4 * (
             M_model_agn(
@@ -8617,6 +8639,7 @@ def plot_predicted_L2500_vs_sigmahat(
         df_agn,
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
         use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+        pivot_context=agn_pivot_context,
     )
     log_sigma_uv_pivot  = pivots_arr[agn_model_oidx["log_sigma_uv"]]
     log_tau_uv_rf_pivot = pivots_arr[agn_model_oidx["log_tau_uv_rf"]]
@@ -8781,6 +8804,8 @@ def plot_L2500_vs_sigma_tau_separate(
     use_eta_sigma_term=None,
     use_redshift_log_f_term=None,
     sigma_sel_floor_mag=0.05,
+    *,
+    agn_pivot_context: AgnPivotContext,
 ):
     """Plot debiased L_2500 against sigma_UV and tau_UV,RF in separate panels."""
 
@@ -8838,6 +8863,7 @@ def plot_L2500_vs_sigma_tau_separate(
         d,
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
         use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+        pivot_context=agn_pivot_context,
     )
     med_arr = agn_model_pack_params(
         med_params,
@@ -9415,6 +9441,7 @@ def _highest_weight_theta(results, plot_path=None):
     return results.samples[idx]
 def _blob_for_theta(theta, *, df_agn, df_pantheon, cosmo_model,
                     completeness_params, _sna_L, _sna_Lower, _sna_LogdetCov,
+                    z_pivot_agn, agn_pivot_context,
                     use_full_cov=True, plot_path=None):
     """
     Re-evaluate the likelihood exactly once at 'theta' to get the selection blob.
@@ -9427,6 +9454,8 @@ def _blob_for_theta(theta, *, df_agn, df_pantheon, cosmo_model,
         _sna_L=_sna_L, _sna_Lower=_sna_Lower, _sna_LogdetCov=_sna_LogdetCov,
         cosmo_model=cosmo_model,
         completeness_params=completeness_params,
+        z_pivot_agn=z_pivot_agn,
+        agn_pivot_context=agn_pivot_context,
         only_sna=False, use_full_cov=use_full_cov,
     )
     z = df_agn['z'].values
@@ -9532,7 +9561,10 @@ def run_completeness_diagnostics(sampler_results, df_agn, df_pantheon,
                                  _sna_L, _sna_Lower, _sna_LogdetCov,
                                  outdir="plots/completeness", plot_path=None,
                                  use_full_cov=True,
-                                 title_note="— highest posterior weight sample"):
+                                 title_note="— highest posterior weight sample",
+                                 *,
+                                 z_pivot_agn,
+                                 agn_pivot_context: AgnPivotContext):
     """
     One-call orchestration:
       - choose highest-posterior θ,
@@ -9544,6 +9576,8 @@ def run_completeness_diagnostics(sampler_results, df_agn, df_pantheon,
                                  df_agn=df_agn, df_pantheon=df_pantheon, cosmo_model=cosmo_model,
                                  completeness_params=completeness_params,
                                  _sna_L=_sna_L, _sna_Lower=_sna_Lower, _sna_LogdetCov=_sna_LogdetCov,
+                                 z_pivot_agn=z_pivot_agn,
+                                 agn_pivot_context=agn_pivot_context,
                                  use_full_cov=use_full_cov)
     Z   = np.asarray(blob[0], dtype=float)
     dmi = np.asarray(blob[1], dtype=float)
