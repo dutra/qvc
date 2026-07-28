@@ -134,6 +134,8 @@ and the SDSS spectrum with JAXSEDFit. It keeps the native `fit_spectra` sample
 matching and spectrum cache, always replaces saved SDSS points with the QVC
 light-curve PSF `ugriz` means (including `z` even when it is excluded from the
 variability fit), and uses JAXSEDFit's `jaxqsofit` joint spectral backend:
+The summary CSV includes `m_2500_dereddened` from the intrinsic AGN disk plus
+separate `a_2500_galaxy` and `a_2500_internal` attenuation estimates.
 
 ```bash
 python -m qvc.spectra.fit_spectra_jaxsedfit_joint \

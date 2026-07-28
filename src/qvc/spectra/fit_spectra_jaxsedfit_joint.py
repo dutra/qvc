@@ -29,6 +29,8 @@ from qvc.spectra import fit_spectra as legacy
 
 C_ANGSTROM_PER_SECOND = 2.99792458e18
 AB_ZEROPOINT_MJY = 3.631e6
+METER_PER_MEGAPARSEC = 3.085677581491367e22
+GRAHSP_ATTENUATION_BREAK_ANGSTROM = 11_000.0
 
 
 def flambda_1e17_to_mjy(wave_angstrom, flux_1e17):
@@ -45,6 +47,128 @@ def ab_mag_to_mjy(magnitude):
 def ab_mag_err_to_mjy_err(magnitude, magnitude_error):
     flux = ab_mag_to_mjy(magnitude)
     return flux * np.log(10.0) * 0.4 * np.asarray(magnitude_error, dtype=float)
+
+
+def _sample_draws(samples, name, default=None):
+    value = (samples or {}).get(name, default)
+    if value is None:
+        raise KeyError(f"JAXSEDFit posterior lacks required site {name!r}.")
+    return np.asarray(value, dtype=float).reshape(-1)
+
+
+def _broadcast_draws(*values):
+    size = max(np.asarray(value).size for value in values)
+    out = []
+    for value in values:
+        arr = np.asarray(value, dtype=float).reshape(-1)
+        if arr.size == 1:
+            arr = np.full(size, arr.item(), dtype=float)
+        elif arr.size != size:
+            raise ValueError("Posterior sites have incompatible draw counts.")
+        out.append(arr)
+    return out
+
+
+def _intrinsic_disk_luminosity_lambda_2500(samples):
+    """Evaluate the unattenuated JAXSEDFit disk L_lambda at 2500 Angstrom."""
+    log_agn_amp = _sample_draws(samples, "log_agn_amp")
+    pl_slope = _sample_draws(samples, "pl_slope")
+    pl_bend_loc = _sample_draws(samples, "pl_bend_loc", 1000.0)
+    pl_bend_width = _sample_draws(samples, "pl_bend_width", 10.0)
+    uv_slope = _sample_draws(samples, "uv_slope", 0.0)
+    pl_cutoff = _sample_draws(samples, "pl_cutoff", 100_000.0)
+    (
+        log_agn_amp,
+        pl_slope,
+        pl_bend_loc,
+        pl_bend_width,
+        uv_slope,
+        pl_cutoff,
+    ) = _broadcast_draws(
+        log_agn_amp,
+        pl_slope,
+        pl_bend_loc,
+        pl_bend_width,
+        uv_slope,
+        pl_cutoff,
+    )
+
+    wave = 2500.0
+    pivot = 5100.0
+    norm = np.exp(log_agn_amp) / pivot
+    width = np.maximum(pl_bend_width, 1e-6)
+    exponent = 1.0 / width
+    mean_slope = (uv_slope + pl_slope + 2.0) / 2.0
+    slope_change = (pl_slope - uv_slope) * width / 2.0
+    pivot_ratio = pivot / pl_bend_loc
+    divisor = 1.0 / (pivot_ratio**exponent + pivot_ratio**-exponent)
+    wave_ratio = wave / pl_bend_loc
+    luminosity_lambda = (
+        norm
+        * (wave / pivot) ** mean_slope
+        * ((wave_ratio**exponent + wave_ratio**-exponent) * divisor) ** slope_change
+        * (pivot / wave)
+    )
+    cutoff_factor = -np.expm1(-np.maximum(pl_cutoff, 0.0) / wave)
+    return np.where(pl_cutoff > 0.0, luminosity_lambda * cutoff_factor, luminosity_lambda)
+
+
+def estimate_m2500_dereddened(samples, redshift, *, h0=70.0, om0=0.3):
+    """Return intrinsic AGN m2500 draws and internal attenuation diagnostics.
+
+    The magnitude is built from the unattenuated accretion-disk luminosity,
+    excluding host starlight, lines, Fe II, Balmer continuum, and torus
+    emission. Inputs were already corrected for Milky-Way extinction when
+    ``Observation.apply_mw_deredden`` is enabled. The returned attenuation
+    includes both JAXSEDFit's foreground host-galaxy ``ebv_gal`` and nuclear
+    ``ebv_agn`` terms.
+    """
+    from astropy.cosmology import FlatLambdaCDM
+
+    luminosity_lambda = _intrinsic_disk_luminosity_lambda_2500(samples)
+    luminosity_nu = luminosity_lambda * 2500.0**2 / C_ANGSTROM_PER_SECOND
+    distance_m = (
+        FlatLambdaCDM(H0=float(h0), Om0=float(om0))
+        .luminosity_distance(float(redshift))
+        .value
+        * METER_PER_MEGAPARSEC
+    )
+    # QVC's m2500 convention uses L_nu/(4 pi D_L^2), equivalently the
+    # observed f_nu at 2500*(1+z) divided by (1+z).
+    flux_nu_mjy = luminosity_nu / (4.0 * np.pi * distance_m**2) / 1e-29
+    intrinsic_mag = -2.5 * np.log10(flux_nu_mjy / AB_ZEROPOINT_MJY)
+
+    ebv_gal = _sample_draws(samples, "ebv_gal", 0.0)
+    ebv_agn = _sample_draws(samples, "ebv_agn", 0.0)
+    ebv_gal, ebv_agn, intrinsic_mag = _broadcast_draws(
+        ebv_gal, ebv_agn, intrinsic_mag
+    )
+    curve_2500 = (2500.0 / GRAHSP_ATTENUATION_BREAK_ANGSTROM) ** -1.2
+    attenuation_gal = ebv_gal * curve_2500
+    attenuation_agn = ebv_agn * curve_2500
+    return {
+        "m_2500_dereddened_draws": intrinsic_mag,
+        "m_2500_attenuated_model_draws": (
+            intrinsic_mag + attenuation_gal + attenuation_agn
+        ),
+        "a_2500_galaxy_draws": attenuation_gal,
+        "a_2500_internal_draws": attenuation_agn,
+    }
+
+
+def summarize_m2500_dereddened(samples, redshift, *, h0=70.0, om0=0.3):
+    draws = estimate_m2500_dereddened(
+        samples, redshift, h0=h0, om0=om0
+    )
+    out = {}
+    for draw_name, values in draws.items():
+        name = draw_name.removesuffix("_draws")
+        median, err, err_lower, err_upper = legacy.sym_percentile(values)
+        out[name] = float(median)
+        out[f"{name}_err"] = float(err)
+        out[f"{name}_err_lower"] = float(err_lower)
+        out[f"{name}_err_upper"] = float(err_upper)
+    return out
 
 
 def load_saved_sed_photometry(path):
@@ -334,6 +458,14 @@ def run_one_fit(rec, args):
 
         fit_result = JAXSEDFit(config).fit(progress_bar=args.progress)
         result.update(summarize_samples(fit_result.samples))
+        result.update(
+            summarize_m2500_dereddened(
+                fit_result.samples,
+                rec["z"],
+                h0=config.galaxy.cosmology_h0,
+                om0=config.galaxy.cosmology_om0,
+            )
+        )
         result["n_photometry"] = int(len(used_phot))
         result["photometry_filters"] = ",".join(used_phot["filter_name"].astype(str))
         result["fit_result_path"] = str(fit_result.path or "")
