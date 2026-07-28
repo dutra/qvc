@@ -1,5 +1,6 @@
 import os
 import sys
+import types
 from pathlib import Path
 
 import h5py
@@ -17,8 +18,62 @@ if str(SRC) not in sys.path:
 
 from qvc.hubble import hubble_completeness_refactored as hcr
 from qvc.hubble import hubble_fit, hubble_likelihood, hubble_model
-from qvc.hubble.completeness_mock_catalog import save_mock_catalog
+from qvc.hubble.completeness_mock_catalog import (
+    AB_ABSOLUTE_MAG_ZEROPOINT,
+    LOG10_MAG_JACOBIAN,
+    NU_2500_HZ,
+    build_shen_lf,
+    log_nu_lnu_to_ab_absolute_magnitude,
+    save_mock_catalog,
+)
 from qvc.hubble.hubble_likelihood import completeness_loglike
+
+
+def test_build_shen_lf_uses_extinction_convolved_physical_2500_channel(
+    tmp_path, monkeypatch
+):
+    """Gold test that the Shen mock parent is the observed 2500 A LF."""
+    calls = []
+    log_nu_lnu = np.array([44.0, 45.0])
+    log_phi_dex = np.array([-5.0, -6.0])
+
+    def fake_return_qlf_in_band(redshift, nu, model):
+        calls.append((redshift, nu, model))
+        return log_nu_lnu, log_phi_dex
+
+    fake_utilities = types.ModuleType("utilities")
+    fake_utilities.return_qlf_in_band = fake_return_qlf_in_band
+    monkeypatch.setitem(sys.modules, "utilities", fake_utilities)
+
+    phi_log10, m_grid, z_bins = build_shen_lf(tmp_path)
+
+    assert len(calls) == len(z_bins) == 40
+    assert all(np.isclose(nu, NU_2500_HZ) and model == "B" for _, nu, model in calls)
+    np.testing.assert_allclose(
+        phi_log10,
+        np.tile(log_phi_dex + LOG10_MAG_JACOBIAN, (len(z_bins), 1)),
+    )
+    np.testing.assert_allclose(
+        m_grid,
+        AB_ABSOLUTE_MAG_ZEROPOINT
+        - 2.5 * (log_nu_lnu - np.log10(NU_2500_HZ)),
+    )
+
+
+def test_log_nu_lnu_to_ab_absolute_magnitude_gold_value():
+    target_magnitude = -25.0
+    log_lnu = (AB_ABSOLUTE_MAG_ZEROPOINT - target_magnitude) / 2.5
+    log_nu_lnu = log_lnu + np.log10(NU_2500_HZ)
+    np.testing.assert_allclose(
+        log_nu_lnu_to_ab_absolute_magnitude(log_nu_lnu, NU_2500_HZ),
+        target_magnitude,
+        atol=1e-12,
+def _build_pivot_context(df_agn):
+    z = df_agn["z"].to_numpy(dtype=float)
+    return hubble_model.build_agn_pivot_context(
+        df_agn,
+        z_range=(float(np.min(z)), float(np.max(z))),
+    )
 
 
 def test_completeness_loglike_includes_bright_gaussian_tail():
@@ -146,8 +201,20 @@ def _make_fake_agn_sample_with_fhost(n_agn=24, seed=123):
         "log_tau_uv_rf_std_psd": np.full(n_agn, 0.06),
         "log_sigma_uv_log_tau_uv_rf_cov_psd": np.full(n_agn, 0.001),
     }
+    object_ids = [f"agn_{i:03d}" for i in range(n_agn)]
+    pivot_df = pd.DataFrame(
+        {
+            "object_id": object_ids,
+            "z": z,
+            **obs_dict,
+        }
+    )
+    pivot_context = _build_pivot_context(pivot_df)
     params_arr = hubble_model.agn_model_pack_params(true_params)
-    obs_arr, _, pivots = hubble_model.agn_model_pack_obs(obs_dict)
+    obs_arr, _, pivots = hubble_model.agn_model_pack_obs(
+        obs_dict,
+        pivot_context=pivot_context,
+    )
     absolute_mag = hubble_model.M_model_agn(params_arr, obs_arr, pivots)
     mu = cosmo.distmod(z).value
     apparent_mag = absolute_mag + mu + rng.normal(0.0, 0.04, size=n_agn)
@@ -155,7 +222,7 @@ def _make_fake_agn_sample_with_fhost(n_agn=24, seed=123):
 
     return pd.DataFrame(
         {
-            "object_id": [f"agn_{i:03d}" for i in range(n_agn)],
+            "object_id": object_ids,
             "z": z,
             "z_err": np.full(n_agn, 0.002),
             "apparent_mag_2500": apparent_mag,
@@ -417,6 +484,7 @@ def test_log_likelihood_does_not_use_completeness_smoothing_as_extra_scatter(mon
     agn_fields += ("apparent_mag_2500", "apparent_mag_2500_err", "z", "z_err", "object_id")
     agn_data = {col: df_agn[col].to_numpy() for col in agn_fields}
     pantheon_data = {col: df_pantheon[col].to_numpy() for col in df_pantheon.columns}
+    pivot_context = _build_pivot_context(df_agn)
 
     logl, _ = hubble_likelihood.log_likelihood(
         theta,
@@ -428,6 +496,7 @@ def test_log_likelihood_does_not_use_completeness_smoothing_as_extra_scatter(mon
         cosmo_model="FlatLambdaCDM",
         completeness_params=completeness_params,
         z_pivot_agn=hubble_fit.z_pivot_agn,
+        agn_pivot_context=pivot_context,
         agn_calibrators_data=None,
         only_sna=False,
         use_full_cov=False,
@@ -565,6 +634,7 @@ def test_get_completeness_function_3d_fhost_and_loglikelihood_smoke(tmp_path):
     agn_fields += ("apparent_mag_2500", "apparent_mag_2500_err", "z", "z_err", "object_id", "f_host_2500_psf")
     agn_data = {col: df_agn[col].to_numpy() for col in agn_fields}
     pantheon_data = {col: df_pantheon[col].to_numpy() for col in df_pantheon.columns}
+    pivot_context = _build_pivot_context(df_agn)
 
     logl, blob = hubble_likelihood.log_likelihood(
         theta,
@@ -576,6 +646,7 @@ def test_get_completeness_function_3d_fhost_and_loglikelihood_smoke(tmp_path):
         cosmo_model="FlatLambdaCDM",
         completeness_params=completeness_params,
         z_pivot_agn=hubble_fit.z_pivot_agn,
+        agn_pivot_context=pivot_context,
         agn_calibrators_data=None,
         only_sna=False,
         use_full_cov=False,

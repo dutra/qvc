@@ -88,8 +88,10 @@ from qvc.hubble.hubble_plotting import (
 from qvc.hubble.tex_utils import make_agn_csv_table, make_agn_latex_table
 from qvc.hubble.hubble_model import (
     AGN_LOGF_Z_PARAM,
+    AgnPivotContext,
     agn_model_pack_obs,
     agn_model_pack_params,
+    build_agn_pivot_context,
     evaluate_log_f,
     get_agn_model_spec,
     get_model_params,
@@ -114,6 +116,13 @@ from qvc.hubble.completeness_mock_catalog import (
 VALID_COMPLETENESS_MODES = ("2d", "3d_fhost", "4d_fhost_alpha")
 SPEED_CHOICES = ("fastest", "quick", "standard", "production")
 SIGMA_CLIP_SECOND_PASS_MODES = ("warm", "fresh")
+AGN_PIVOT_CHECKPOINT_KEYS = (
+    "agn_pivot_observable_names",
+    "agn_pivot_values",
+    "agn_pivot_z_range",
+    "agn_pivot_reference_object_ids",
+    "agn_pivot_rule",
+)
 
 
 def validate_completeness_mode(completeness_mode):
@@ -210,6 +219,7 @@ def _compute_debiased_agn_table_mu(
     cosmo_model,
     *,
     z_pivot_agn,
+    agn_pivot_context,
     dmi_values,
     only_agn=False,
     use_alpha_lambda_term=False,
@@ -239,6 +249,7 @@ def _compute_debiased_agn_table_mu(
         df_agn,
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
         use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+        pivot_context=agn_pivot_context,
     )
 
     mu_samples = []
@@ -345,6 +356,7 @@ def compute_agn_likelihood_space_reduced_chi2(
     cosmo_model,
     *,
     z_pivot_agn,
+    agn_pivot_context,
     use_alpha_lambda_term=False,
     use_eta_sigma_term=False,
     use_redshift_log_f_term=False,
@@ -382,6 +394,7 @@ def compute_agn_likelihood_space_reduced_chi2(
         df_agn_fit_selection,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        pivot_context=agn_pivot_context,
     )
     M_pred = M_model_agn(
         agn_params_arr,
@@ -588,6 +601,201 @@ def make_run_tag(
         f"{cosmo_model}_{_fit_mode_label(only_sna, only_agn)}_{speed}_{n_tag}_{z_tag}"
         f"{completeness_tag}{ceph_tag}{planck_h0_tag}{planck_om_tag}{alpha_tag}{eta_sigma_tag}{logf_tag}"
     )
+
+
+def _agn_pivot_checkpoint_payload(agn_pivot_context):
+    if not isinstance(agn_pivot_context, AgnPivotContext):
+        raise TypeError(
+            "agn_pivot_context must be an AgnPivotContext; "
+            f"got {type(agn_pivot_context).__name__}."
+        )
+    return {
+        "agn_pivot_observable_names": agn_pivot_context.observable_names,
+        "agn_pivot_values": agn_pivot_context.values,
+        "agn_pivot_z_range": agn_pivot_context.z_range,
+        "agn_pivot_reference_object_ids": agn_pivot_context.reference_object_ids,
+        "agn_pivot_rule": agn_pivot_context.rule,
+    }
+
+
+def _checkpoint_string_tuple(value, *, field_name, checkpoint_file):
+    arr = np.asarray(value)
+    if arr.ndim == 0:
+        arr = arr.reshape(1)
+    if arr.ndim != 1:
+        raise RuntimeError(
+            f"Checkpoint '{checkpoint_file}' field {field_name!r} must be 1D, "
+            f"got shape {arr.shape}."
+        )
+    return tuple(
+        item.decode("utf-8")
+        if isinstance(item, (bytes, np.bytes_))
+        else str(item)
+        for item in arr.tolist()
+    )
+
+
+def _checkpoint_reference_object_id_tuple(
+    value,
+    *,
+    field_name,
+    checkpoint_file,
+):
+    arr = np.asarray(value, dtype=object)
+    if arr.ndim == 0:
+        arr = arr.reshape(1)
+    if arr.ndim != 1:
+        raise RuntimeError(
+            f"Checkpoint '{checkpoint_file}' field {field_name!r} must be 1D, "
+            f"got shape {arr.shape}."
+        )
+    return tuple(
+        item.decode("utf-8")
+        if isinstance(item, (bytes, np.bytes_))
+        else item
+        for item in arr.tolist()
+    )
+
+
+def _load_agn_pivot_context_from_checkpoint(
+    results,
+    *,
+    checkpoint_file,
+    use_alpha_lambda_term=False,
+    use_eta_sigma_term=False,
+):
+    missing = sorted(set(AGN_PIVOT_CHECKPOINT_KEYS) - set(results))
+    if missing:
+        raise RuntimeError(
+            f"AGN checkpoint '{checkpoint_file}' is missing required immutable "
+            f"pivot metadata: {missing}. No legacy fallback is supported; start "
+            "a fresh fit with the current code."
+        )
+
+    try:
+        observable_names = _checkpoint_string_tuple(
+            results["agn_pivot_observable_names"],
+            field_name="agn_pivot_observable_names",
+            checkpoint_file=checkpoint_file,
+        )
+        reference_object_ids = _checkpoint_reference_object_id_tuple(
+            results["agn_pivot_reference_object_ids"],
+            field_name="agn_pivot_reference_object_ids",
+            checkpoint_file=checkpoint_file,
+        )
+        values = tuple(
+            float(value)
+            for value in np.asarray(results["agn_pivot_values"], dtype=float).tolist()
+        )
+        stored_z_range = tuple(
+            float(value)
+            for value in np.asarray(results["agn_pivot_z_range"], dtype=float).tolist()
+        )
+        rule_value = np.asarray(results["agn_pivot_rule"])
+        if rule_value.ndim == 0:
+            rule = rule_value.item()
+        elif rule_value.size == 1:
+            rule = rule_value.reshape(()).item()
+        else:
+            raise ValueError(
+                "agn_pivot_rule must contain exactly one string value."
+            )
+        if isinstance(rule, bytes):
+            rule = rule.decode("utf-8")
+        context = AgnPivotContext(
+            observable_names=observable_names,
+            values=values,
+            z_range=stored_z_range,
+            reference_object_ids=reference_object_ids,
+            rule=str(rule),
+        )
+        context.as_array(
+            use_alpha_lambda_term=use_alpha_lambda_term,
+            use_eta_sigma_term=use_eta_sigma_term,
+        )
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(
+            f"AGN checkpoint '{checkpoint_file}' contains invalid or incompatible "
+            "pivot metadata."
+        ) from exc
+    return context
+
+
+def _validate_agn_pivot_checkpoint_reference_provenance(
+    agn_pivot_context,
+    results,
+    *,
+    checkpoint_file,
+):
+    """Verify pivot reference IDs against immutable checkpoint sample provenance."""
+
+    if not isinstance(agn_pivot_context, AgnPivotContext):
+        raise TypeError(
+            "agn_pivot_context must be an AgnPivotContext; "
+            f"got {type(agn_pivot_context).__name__}."
+        )
+
+    stage = _checkpoint_stage_from_results(results)
+    provenance_field = (
+        "object_id_initial_fit_selection"
+        if stage in {"pass1", "pass2"}
+        else "object_id_fit_selection"
+    )
+    if provenance_field not in results:
+        raise RuntimeError(
+            f"AGN checkpoint '{checkpoint_file}' is missing required immutable "
+            f"pivot-reference provenance field {provenance_field!r} for "
+            f"sigma_clip_pass_stage={stage!r}. No legacy fallback is supported."
+        )
+
+    provenance_ids = tuple(
+        _normalize_object_id_array(
+            results[provenance_field],
+            field_name=provenance_field,
+            checkpoint_file=checkpoint_file,
+        ).tolist()
+    )
+    if provenance_ids != agn_pivot_context.reference_object_ids:
+        raise RuntimeError(
+            f"AGN checkpoint '{checkpoint_file}' has incompatible pivot reference "
+            f"object IDs: agn_pivot_reference_object_ids does not exactly match "
+            f"{provenance_field!r}, including order and multiplicity."
+        )
+    return agn_pivot_context
+
+
+def _validate_agn_pivot_context_for_reference(
+    agn_pivot_context,
+    df_agn_reference,
+    *,
+    z_range,
+    use_alpha_lambda_term=False,
+    use_eta_sigma_term=False,
+    require_reference_ids=True,
+):
+    if not isinstance(agn_pivot_context, AgnPivotContext):
+        raise TypeError(
+            "agn_pivot_context must be an AgnPivotContext; "
+            f"got {type(agn_pivot_context).__name__}."
+        )
+    requested_z_range = tuple(float(value) for value in z_range)
+    if agn_pivot_context.z_range != requested_z_range:
+        raise ValueError(
+            "AGN pivot redshift range does not match the requested fit range: "
+            f"stored={agn_pivot_context.z_range!r}, requested={requested_z_range!r}."
+        )
+    agn_pivot_context.as_array(
+        use_alpha_lambda_term=use_alpha_lambda_term,
+        use_eta_sigma_term=use_eta_sigma_term,
+    )
+    if require_reference_ids:
+        expected_ids = tuple(df_agn_reference["object_id"].astype(str).tolist())
+        if agn_pivot_context.reference_object_ids != expected_ids:
+            raise ValueError(
+                "AGN pivot reference object IDs do not exactly match the initial "
+                "fitted subset, including order and replacement-sampling multiplicity."
+            )
+    return agn_pivot_context
 
 
 def validate_resume_checkpoint(results, checkpoint_file, ndim, n_agn):
@@ -838,7 +1046,12 @@ def _build_checkpoint_paths(prefix, run_tag):
 
 
 def _checkpoint_stage_from_results(results):
-    stage = results.get("sigma_clip_pass_stage", "single")
+    if "sigma_clip_pass_stage" not in results:
+        raise RuntimeError(
+            "Checkpoint is missing required field 'sigma_clip_pass_stage'. "
+            "No legacy fallback is supported."
+        )
+    stage = results["sigma_clip_pass_stage"]
     if isinstance(stage, np.ndarray):
         if stage.ndim == 0:
             stage = stage.item()
@@ -855,14 +1068,27 @@ def _checkpoint_stage_from_results(results):
 
 
 def _normalize_object_id_array(values, *, field_name, checkpoint_file):
-    arr = np.asarray(values)
+    arr = np.asarray(values, dtype=object)
     if arr.ndim != 1:
         raise RuntimeError(
             f"Checkpoint '{checkpoint_file}' field {field_name!r} must be 1D, got shape {arr.shape}."
         )
-    if arr.dtype.kind == "S":
-        arr = arr.astype(str)
-    return arr.astype(str)
+    for item in arr.tolist():
+        missing = pd.isna(item)
+        if np.ndim(missing) != 0 or bool(missing):
+            raise RuntimeError(
+                f"Checkpoint '{checkpoint_file}' field {field_name!r} contains "
+                "a missing or non-scalar object ID."
+            )
+    return np.asarray(
+        [
+            item.decode("utf-8")
+            if isinstance(item, (bytes, np.bytes_))
+            else str(item)
+            for item in arr.tolist()
+        ],
+        dtype=str,
+    )
 
 
 def _load_resume_replot_object_ids(resume):
@@ -1001,6 +1227,7 @@ def _write_stage_checkpoint(
     df_agn_full_sample=None,
     df_agn_plot_sample=None,
     df_agn_fit_selection=None,
+    df_agn_initial_fit_selection=None,
     keep_mask_full=None,
     pass1_diagnostics_df=None,
     sigma_clip_second_pass_mode=None,
@@ -1024,6 +1251,10 @@ def _write_stage_checkpoint(
         payload["object_id_plot_sample"] = df_agn_plot_sample["object_id"].astype(str).to_numpy()
     if df_agn_fit_selection is not None:
         payload["object_id_fit_selection"] = df_agn_fit_selection["object_id"].astype(str).to_numpy()
+    if df_agn_initial_fit_selection is not None:
+        payload["object_id_initial_fit_selection"] = (
+            df_agn_initial_fit_selection["object_id"].astype(str).to_numpy()
+        )
     if keep_mask_full is not None:
         payload["keep_mask_full"] = np.asarray(keep_mask_full, dtype=bool)
     if pass1_diagnostics_df is not None:
@@ -1133,8 +1364,136 @@ def _select_agn_fit_selection(
             df_agn,
             z_range=z_range,
             N=N,
+            z_uniform_min=float(z_range[0]),
         )
-    return df_agn[df_agn["z"].between(z_range[0], z_range[1])].copy()
+    df_selection = df_agn[
+        df_agn["z"].between(z_range[0], z_range[1], inclusive="both")
+    ].copy()
+    df_selection, _ = subsample_dataframe_at_most(
+        df_selection,
+        N,
+        random_state=42,
+        label="in-range AGN objects",
+    )
+    return df_selection
+
+
+def _prepare_shared_agn_pivot_context(
+    df_agn,
+    *,
+    cosmo_models,
+    resume_by_model,
+    z_range,
+    N,
+    uniform_redshift_distribution,
+    only_sna,
+    only_agn,
+    speed,
+    completeness,
+    completeness_mode,
+    disable_ceph_dist_calibration,
+    use_planck_h0_prior,
+    use_planck_om_prior,
+    use_alpha_lambda_term,
+    use_eta_sigma_term,
+    use_redshift_log_f_term,
+    disable_sigma_clip_pass,
+    resume_stage,
+    prefix,
+    resume_replot_with_cuts=False,
+):
+    """Build once, or strictly load once, for cosmologies sharing a fit sample."""
+
+    if only_sna:
+        return None
+
+    reference_selection = _select_agn_fit_selection(
+        df_agn,
+        z_range=z_range,
+        N=None if resume_replot_with_cuts else N,
+        uniform_redshift_distribution=(
+            False if resume_replot_with_cuts else uniform_redshift_distribution
+        ),
+    )
+    loaded_contexts = []
+    for cosmo_model in cosmo_models:
+        model_resume = resume_by_model[cosmo_model]
+        if not model_resume:
+            continue
+        run_tag = make_run_tag(
+            cosmo_model,
+            only_sna,
+            speed,
+            N,
+            z_range,
+            only_agn=only_agn,
+            completeness=completeness,
+            completeness_mode=completeness_mode,
+            disable_ceph_dist_calibration=disable_ceph_dist_calibration,
+            use_planck_h0_prior=use_planck_h0_prior,
+            use_planck_om_prior=use_planck_om_prior,
+            use_alpha_lambda_term=use_alpha_lambda_term,
+            use_eta_sigma_term=use_eta_sigma_term,
+            use_redshift_log_f_term=use_redshift_log_f_term,
+        )
+        checkpoint_paths = _build_checkpoint_paths(prefix, run_tag)
+        apply_two_pass = (
+            not disable_sigma_clip_pass
+            and not resume_replot_with_cuts
+        )
+        if apply_two_pass:
+            checkpoint_file = _resolve_two_pass_resume_checkpoint(
+                model_resume,
+                resume_stage,
+                checkpoint_paths,
+            )
+        else:
+            checkpoint_file = resolve_resume_checkpoint_path(
+                model_resume,
+                checkpoint_paths["single"],
+            )
+        results = load_chains(checkpoint_file)
+        context = _load_agn_pivot_context_from_checkpoint(
+            results,
+            checkpoint_file=checkpoint_file,
+            use_alpha_lambda_term=use_alpha_lambda_term,
+            use_eta_sigma_term=use_eta_sigma_term,
+        )
+        _validate_agn_pivot_checkpoint_reference_provenance(
+            context,
+            results,
+            checkpoint_file=checkpoint_file,
+        )
+        _validate_agn_pivot_context_for_reference(
+            context,
+            reference_selection,
+            z_range=z_range,
+            use_alpha_lambda_term=use_alpha_lambda_term,
+            use_eta_sigma_term=use_eta_sigma_term,
+            require_reference_ids=not resume_replot_with_cuts,
+        )
+        loaded_contexts.append((checkpoint_file, context))
+
+    if loaded_contexts:
+        shared_context = loaded_contexts[0][1]
+        incompatible = [
+            checkpoint_file
+            for checkpoint_file, context in loaded_contexts[1:]
+            if context != shared_context
+        ]
+        if incompatible:
+            raise RuntimeError(
+                "Cosmology checkpoints do not share one identical AGN pivot "
+                f"context. Incompatible checkpoint(s): {incompatible}."
+            )
+        return shared_context
+
+    return build_agn_pivot_context(
+        reference_selection,
+        z_range,
+        use_alpha_lambda_term=use_alpha_lambda_term,
+        use_eta_sigma_term=use_eta_sigma_term,
+    )
 
 
 def _build_completeness_params(
@@ -1274,6 +1633,7 @@ def _compute_direct_full_sample_completeness_summaries(
     cosmo_model,
     completeness_params,
     z_pivot_agn,
+    agn_pivot_context,
     use_full_cov,
     disable_ceph_dist_calibration,
     use_planck_h0_prior,
@@ -1291,12 +1651,6 @@ def _compute_direct_full_sample_completeness_summaries(
 
     if len(df_agn_fit_selection) == 0:
         raise ValueError("Cannot compute direct full-sample completeness summaries with an empty fit selection.")
-
-    _, _, fit_pivot_arr = agn_model_pack_obs(
-        df_agn_fit_selection,
-        use_alpha_lambda_term=use_alpha_lambda_term,
-        use_eta_sigma_term=use_eta_sigma_term,
-    )
 
     if completeness_params is None:
         zeros = np.zeros(n_plot, dtype=float)
@@ -1316,7 +1670,7 @@ def _compute_direct_full_sample_completeness_summaries(
             completeness_params=completeness_params,
             z_pivot_agn=z_pivot_agn,
             agn_calibrators_data=None,
-            agn_pivot_arr=fit_pivot_arr,
+            agn_pivot_context=agn_pivot_context,
             use_planck_h0_prior=use_planck_h0_prior,
             use_planck_om_prior=use_planck_om_prior,
             use_ceph_dist_calibration=not disable_ceph_dist_calibration,
@@ -1477,6 +1831,7 @@ def _run_fit_stage(
     _sna_Lower,
     _sna_LogdetCov,
     *,
+    agn_pivot_context,
     df_calibrators,
     cosmo_model,
     only_sna,
@@ -1523,6 +1878,7 @@ def _run_fit_stage(
         _sna_L,
         _sna_Lower,
         _sna_LogdetCov,
+        agn_pivot_context=agn_pivot_context,
         df_calibrators=df_calibrators,
         cosmo_model=cosmo_model,
         only_sna=only_sna,
@@ -1640,7 +1996,9 @@ def generate_fresh_completeness_sim_file(plot_path, *, area_deg2, seed=123):
     )
     return str(output_path)
 
-def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, 
+def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
+                      *,
+                      agn_pivot_context,
                       df_calibrators=None,
                       cosmo_model='Flatw0waCDM',
                       only_sna=False, only_agn=False, completeness=True, use_full_cov=True,
@@ -1669,6 +2027,18 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
     speed = normalize_speed(speed)
     _fit_mode_label(only_sna, only_agn)
     use_planck_h0_prior = use_planck_h0_prior or disable_ceph_dist_calibration
+    if only_sna:
+        if agn_pivot_context is not None:
+            raise ValueError("SNe-only runs must not receive AGN pivot metadata.")
+    else:
+        _validate_agn_pivot_context_for_reference(
+            agn_pivot_context,
+            df_agn,
+            z_range=z_range,
+            use_alpha_lambda_term=use_alpha_lambda_term,
+            use_eta_sigma_term=use_eta_sigma_term,
+            require_reference_ids=False,
+        )
     run_tag = make_run_tag(
         cosmo_model,
         only_sna,
@@ -1793,6 +2163,19 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
         #sampler = DynamicNestedSampler.restore(checkpoint_file, pool=pool)
         try:
             r = load_chains(checkpoint_file)
+            stored_pivot_context = None
+            if not only_sna:
+                stored_pivot_context = _load_agn_pivot_context_from_checkpoint(
+                    r,
+                    checkpoint_file=checkpoint_file,
+                    use_alpha_lambda_term=use_alpha_lambda_term,
+                    use_eta_sigma_term=use_eta_sigma_term,
+                )
+                _validate_agn_pivot_checkpoint_reference_provenance(
+                    stored_pivot_context,
+                    r,
+                    checkpoint_file=checkpoint_file,
+                )
             if resume_replot_with_cuts:
                 r = _remap_resume_replot_checkpoint(
                     r,
@@ -1811,6 +2194,12 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                     ndim=ndim,
                     n_agn=len(agn_data["z"]),
                 )
+            if not only_sna:
+                if stored_pivot_context != agn_pivot_context:
+                    raise RuntimeError(
+                        f"AGN checkpoint '{checkpoint_file}' pivot metadata does not "
+                        "exactly match the immutable pivot context for this run."
+                    )
         except Exception as exc:
             if resume_replot_with_cuts:
                 raise RuntimeError(
@@ -1860,6 +2249,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                 _sna_LogdetCov=_sna_LogdetCov,
                 cosmo_model=cosmo_model,
                 z_pivot_agn=z_pivot_agn,
+                agn_pivot_context=agn_pivot_context,
                 completeness_params=completeness_params,
                 only_sna=only_sna,
                 only_agn=only_agn,
@@ -1873,7 +2263,11 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                 early_de_guard=early_de_guard,
             )
             ptform_kwargs = dict(priors=priors, model_labels=model_labels)
-            loglike_func = log_likelihood_nearbylcs if agn_calibrators_data is not None else log_likelihood
+            loglike_func = (
+                log_likelihood_nearbylcs
+                if agn_calibrators_data is not None and not only_sna
+                else log_likelihood
+            )
             sampler = DynamicNestedSampler(
                 loglike_func,
                 prior_transform_dynesty,
@@ -2013,19 +2407,24 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                 float(np.nanmedian(dmi_selection_sigma_posterior_median)),
             )
 
-        save_chains(
-            checkpoint_file,
+        checkpoint_payload = dict(
             flat_samples=flat_samples,
             dmi_max_w=dmi_max_w,
             dmi_posterior_median=dmi_posterior_median,
             dmi_posterior_sigma=dmi_posterior_sigma,
             dmi_selection_sigma_posterior_median=dmi_selection_sigma_posterior_median,
             object_id_fit_selection=df_agn["object_id"].astype(str).to_numpy(),
+            sigma_clip_pass_stage="single",
             logZ=logZ,
             logZerr=logZerr,
             logZ_is_approximate=bool(logZ_is_approximate),
             integrals_max_w=integrals_max_w,
         )
+        if not only_sna:
+            checkpoint_payload.update(
+                _agn_pivot_checkpoint_payload(agn_pivot_context)
+            )
+        save_chains(checkpoint_file, **checkpoint_payload)
 
         # Bin dmi in redshift
         # Interpolate dmi vs redshift for smooth plotting or further analysis (no binning)
@@ -2095,7 +2494,8 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                use_eta_sigma_term=False,
                use_redshift_log_f_term=False,
                early_de_guard=False,
-               resume_replot_with_cuts=False):
+               resume_replot_with_cuts=False,
+               agn_pivot_context=None):
     validate_completeness_mode(completeness_mode)
     speed = normalize_speed(speed)
     _fit_mode_label(only_sna, only_agn)
@@ -2191,6 +2591,66 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
     pass1_checkpoint_file = checkpoint_paths["pass1"]
     pass2_checkpoint_file = checkpoint_paths["pass2"]
     single_checkpoint_file = checkpoint_paths["single"]
+    initial_agn_fit_selection = df_agn_pass2_fit_selection.copy()
+
+    if only_sna:
+        if agn_pivot_context is not None:
+            raise ValueError("SNe-only runs must not receive an AGN pivot context.")
+    elif resume:
+        if apply_two_pass_sigma_clip:
+            pivot_checkpoint_file = _resolve_two_pass_resume_checkpoint(
+                resume,
+                resume_stage,
+                checkpoint_paths,
+            )
+        else:
+            pivot_checkpoint_file = resolve_resume_checkpoint_path(
+                resume,
+                single_checkpoint_file,
+            )
+        pivot_checkpoint_results = load_chains(pivot_checkpoint_file)
+        stored_pivot_context = _load_agn_pivot_context_from_checkpoint(
+            pivot_checkpoint_results,
+            checkpoint_file=pivot_checkpoint_file,
+            use_alpha_lambda_term=use_alpha_lambda_term,
+            use_eta_sigma_term=use_eta_sigma_term,
+        )
+        _validate_agn_pivot_checkpoint_reference_provenance(
+            stored_pivot_context,
+            pivot_checkpoint_results,
+            checkpoint_file=pivot_checkpoint_file,
+        )
+        if agn_pivot_context is None:
+            agn_pivot_context = stored_pivot_context
+        elif agn_pivot_context != stored_pivot_context:
+            raise RuntimeError(
+                f"AGN checkpoint '{pivot_checkpoint_file}' does not share the "
+                "same immutable pivot context as the other cosmology runs."
+            )
+        _validate_agn_pivot_context_for_reference(
+            agn_pivot_context,
+            initial_agn_fit_selection,
+            z_range=z_range,
+            use_alpha_lambda_term=use_alpha_lambda_term,
+            use_eta_sigma_term=use_eta_sigma_term,
+            require_reference_ids=not resume_replot_with_cuts,
+        )
+    else:
+        if agn_pivot_context is None:
+            agn_pivot_context = build_agn_pivot_context(
+                initial_agn_fit_selection,
+                z_range,
+                use_alpha_lambda_term=use_alpha_lambda_term,
+                use_eta_sigma_term=use_eta_sigma_term,
+            )
+        _validate_agn_pivot_context_for_reference(
+            agn_pivot_context,
+            initial_agn_fit_selection,
+            z_range=z_range,
+            use_alpha_lambda_term=use_alpha_lambda_term,
+            use_eta_sigma_term=use_eta_sigma_term,
+            require_reference_ids=True,
+        )
     direct_completeness_params = None
 
     def _get_direct_completeness_params():
@@ -2273,6 +2733,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 _sna_L,
                 _sna_Lower,
                 _sna_LogdetCov,
+                agn_pivot_context=agn_pivot_context,
                 df_calibrators=df_calibrators,
                 cosmo_model=cosmo_model,
                 only_sna=only_sna,
@@ -2314,6 +2775,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 cosmo_model=cosmo_model,
                 completeness_params=_get_direct_completeness_params(),
                 z_pivot_agn=z_pivot_agn,
+                agn_pivot_context=agn_pivot_context,
                 use_full_cov=use_full_cov,
                 disable_ceph_dist_calibration=disable_ceph_dist_calibration,
                 use_planck_h0_prior=use_planck_h0_prior,
@@ -2351,6 +2813,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 use_eta_sigma_term=use_eta_sigma_term,
                 use_redshift_log_f_term=use_redshift_log_f_term,
                 only_agn=only_agn,
+                agn_pivot_context=agn_pivot_context,
             )
             pass1_diagnostics_df, keep_mask_full = _build_sigma_clip_diagnostics(
                 df_agn_full_sample_preclip,
@@ -2388,6 +2851,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 df_agn_full_sample=df_agn_full_sample_preclip,
                 df_agn_plot_sample=df_agn_pass2_plot_sample,
                 df_agn_fit_selection=df_agn_pass1_fit_selection,
+                df_agn_initial_fit_selection=initial_agn_fit_selection,
                 keep_mask_full=keep_mask_full,
                 pass1_diagnostics_df=pass1_diagnostics_df,
             )
@@ -2423,6 +2887,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                     use_eta_sigma_term=use_eta_sigma_term,
                     use_redshift_log_f_term=use_redshift_log_f_term,
                     only_agn=only_agn,
+                    agn_pivot_context=agn_pivot_context,
                 )
             if resume_stage == "pass1":
                 print("Stopping after resumed pass-1 fit as requested by resume_stage='pass1'.")
@@ -2498,9 +2963,12 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         # plotting sample, while keeping outside-z survivors in the final plots.
         # Only the surviving in-range objects are used for the stage-2 fit.
         if not uniform_redshift_distribution:
-            expected_pass2_fit = df_agn_pass2_plot_sample[
-                df_agn_pass2_plot_sample["z"].between(z_range[0], z_range[1])
-            ].copy()
+            expected_pass2_fit = _select_agn_fit_selection(
+                df_agn_pass2_plot_sample,
+                z_range=z_range,
+                N=N,
+                uniform_redshift_distribution=False,
+            )
             if not expected_pass2_fit["object_id"].tolist() == df_agn_pass2_fit_selection["object_id"].tolist():
                 raise RuntimeError(
                     "Stage-2 fit selection is inconsistent with the surviving in-range plot sample."
@@ -2522,7 +2990,11 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
     if not (compare_sigma_only or minimal_plots):
         plot_delta_m_flux_recal_vs_redshift(df_agn_pass2_fit_selection, plot_path=plot_path)
 
-    report_pivots(df_agn_pass2_fit_selection)
+    if not only_sna:
+        report_pivots(
+            df_agn_pass2_fit_selection,
+            agn_pivot_context=agn_pivot_context,
+        )
 
     warm_start_pass2 = (
         apply_two_pass_sigma_clip
@@ -2552,6 +3024,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         _sna_L,
         _sna_Lower,
         _sna_LogdetCov,
+        agn_pivot_context=agn_pivot_context,
         df_calibrators=df_calibrators,
         cosmo_model=cosmo_model,
         only_sna=only_sna,
@@ -2592,6 +3065,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
             df_agn_full_sample=df_agn_full_sample_preclip,
             df_agn_plot_sample=df_agn_pass2_plot_sample,
             df_agn_fit_selection=df_agn_pass2_fit_selection,
+            df_agn_initial_fit_selection=initial_agn_fit_selection,
             keep_mask_full=keep_mask_full,
             pass1_diagnostics_df=pass1_diagnostics_df,
         )
@@ -2616,6 +3090,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
             cosmo_model=cosmo_model,
             completeness_params=_get_direct_completeness_params(),
             z_pivot_agn=z_pivot_agn,
+            agn_pivot_context=agn_pivot_context,
             use_full_cov=use_full_cov,
             disable_ceph_dist_calibration=disable_ceph_dist_calibration,
             use_planck_h0_prior=use_planck_h0_prior,
@@ -2637,6 +3112,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
             df_agn_agn_likelihood_chi2_selection,
             cosmo_model,
             z_pivot_agn=z_pivot_agn,
+            agn_pivot_context=agn_pivot_context,
             use_alpha_lambda_term=use_alpha_lambda_term,
             use_eta_sigma_term=use_eta_sigma_term,
             use_redshift_log_f_term=use_redshift_log_f_term,
@@ -2652,6 +3128,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
             df_agn_agn_likelihood_chi2_selection_zgt1,
             cosmo_model,
             z_pivot_agn=z_pivot_agn,
+            agn_pivot_context=agn_pivot_context,
             use_alpha_lambda_term=use_alpha_lambda_term,
             use_eta_sigma_term=use_eta_sigma_term,
             use_redshift_log_f_term=use_redshift_log_f_term,
@@ -2689,6 +3166,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
             only_agn=only_agn,
             agn_likelihood_space_chi2=chisq_red_agn_likelihood_space,
             agn_likelihood_space_chi2_zgt1=chisq_red_agn_likelihood_space_zgt1,
+            agn_pivot_context=agn_pivot_context,
         )
         print(
             "minimal_plots=True: retained hubble_diagram_debiased.pdf and "
@@ -2734,6 +3212,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         cosmo_model=cosmo_model,
         completeness_params=_get_direct_completeness_params(),
         z_pivot_agn=z_pivot_agn,
+        agn_pivot_context=agn_pivot_context,
         use_full_cov=use_full_cov,
         disable_ceph_dist_calibration=disable_ceph_dist_calibration,
         use_planck_h0_prior=use_planck_h0_prior,
@@ -2763,6 +3242,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
+        agn_pivot_context=agn_pivot_context,
     )
     plot_predicted_L2500_vs_sigmahat(
         flat_samples,
@@ -2778,6 +3258,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
+        agn_pivot_context=agn_pivot_context,
     )
     plot_predicted_L2500_vs_sigmahat(
         flat_samples,
@@ -2796,6 +3277,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
+        agn_pivot_context=agn_pivot_context,
     )
     L_residuals_debiased, L_pred_std_debiased = plot_predicted_L2500_vs_sigmahat(
         flat_samples,
@@ -2814,6 +3296,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
+        agn_pivot_context=agn_pivot_context,
     )
     plot_L2500_vs_sigma_tau_separate(
         flat_samples,
@@ -2831,6 +3314,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
+        agn_pivot_context=agn_pivot_context,
     )
     plot_L2500_vs_sigma_tau_separate(
         flat_samples,
@@ -2848,6 +3332,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
+        agn_pivot_context=agn_pivot_context,
     )
     plot_catalog_quantity_vs_sigma_tau_separate(
         df_agn_pass2_plot_sample,
@@ -2901,6 +3386,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         df_agn_agn_likelihood_chi2_selection,
         cosmo_model,
         z_pivot_agn=z_pivot_agn,
+        agn_pivot_context=agn_pivot_context,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
@@ -2914,6 +3400,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         df_agn_agn_likelihood_chi2_selection_zgt1,
         cosmo_model,
         z_pivot_agn=z_pivot_agn,
+        agn_pivot_context=agn_pivot_context,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
@@ -2946,7 +3433,8 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                     use_redshift_log_f_term=use_redshift_log_f_term,
                     only_agn=only_agn,
                     agn_likelihood_space_chi2=chisq_red_agn_likelihood_space,
-                    agn_likelihood_space_chi2_zgt1=chisq_red_agn_likelihood_space_zgt1)
+                    agn_likelihood_space_chi2_zgt1=chisq_red_agn_likelihood_space_zgt1,
+                    agn_pivot_context=agn_pivot_context)
     debiased_residuals, debiased_clipping_sigma, mu_pred_median_debiased, mu_pred_std_debiased, mu_pred_std_debiased_with_scatter = r
     if apply_two_pass_sigma_clip:
         final_diagnostics_df, keep_mask_pass2 = _build_sigma_clip_diagnostics(
@@ -3035,6 +3523,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 cosmo_model=cosmo_model,
                 completeness_params=_get_direct_completeness_params(),
                 z_pivot_agn=z_pivot_agn,
+                agn_pivot_context=agn_pivot_context,
                 use_full_cov=use_full_cov,
                 disable_ceph_dist_calibration=disable_ceph_dist_calibration,
                 use_planck_h0_prior=use_planck_h0_prior,
@@ -3051,6 +3540,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
             df_agn_table_sample,
             cosmo_model,
             z_pivot_agn=z_pivot_agn,
+            agn_pivot_context=agn_pivot_context,
             dmi_values=dmi_posterior_median_table,
             only_agn=only_agn,
             use_alpha_lambda_term=use_alpha_lambda_term,
@@ -3087,7 +3577,8 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 use_alpha_lambda_term=use_alpha_lambda_term,
                 use_eta_sigma_term=use_eta_sigma_term,
                 use_redshift_log_f_term=use_redshift_log_f_term,
-                only_agn=only_agn)
+                only_agn=only_agn,
+                agn_pivot_context=agn_pivot_context)
     biased_residuals, biased_residuals_err, _, _, _ = r
 
     hubble_chi2_mask = df_agn_pass2_plot_sample["z"].between(z_range[0], z_range[1]).to_numpy(dtype=bool)
@@ -3168,6 +3659,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         agn_likelihood_space_chi2=chisq_red_agn_likelihood_space,
         agn_likelihood_space_chi2_zgt1=chisq_red_agn_likelihood_space_zgt1,
         diagnostics_suffix="_debiased_no_logf",
+        agn_pivot_context=agn_pivot_context,
     )
     plot_hubble_residual_normality(
         debiased_residuals[hubble_chi2_mask],
@@ -3200,6 +3692,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
+        agn_pivot_context=agn_pivot_context,
     )
     M2500_residuals_debiased, M2500_std_debiased, M2500_binned_residuals_debiased, _ = plot_predicted_vs_actual_M2500(
         flat_samples,
@@ -3215,6 +3708,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
+        agn_pivot_context=agn_pivot_context,
     )
     chisq_red_M2500_debiased, _ = reduced_chi_squared(M2500_residuals_debiased, M2500_std_debiased, n_params=len(model_labels)-1)
     print("Plotting debiased residuals...")
@@ -3450,6 +3944,28 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
     cosmo_model_joint_samples = {}
     cosmo_model_sna_samples = {}
     resume_by_model = normalize_resume_by_model(resume, cosmo_models)
+    agn_pivot_context = _prepare_shared_agn_pivot_context(
+        df_agn,
+        cosmo_models=cosmo_models,
+        resume_by_model=resume_by_model,
+        z_range=z_range,
+        N=N,
+        uniform_redshift_distribution=uniform_redshift_distribution,
+        only_sna=False,
+        only_agn=only_agn,
+        speed=speed,
+        completeness=completeness,
+        completeness_mode=completeness_mode,
+        disable_ceph_dist_calibration=disable_ceph_dist_calibration,
+        use_planck_h0_prior=use_planck_h0_prior,
+        use_planck_om_prior=use_planck_om_prior,
+        use_alpha_lambda_term=use_alpha_lambda_term,
+        use_eta_sigma_term=use_eta_sigma_term,
+        use_redshift_log_f_term=use_redshift_log_f_term,
+        disable_sigma_clip_pass=disable_sigma_clip_pass,
+        resume_stage=resume_stage,
+        prefix=prefix,
+    )
     for cosmo_model in cosmo_models:
         model_resume = resume_by_model[cosmo_model]
         r = run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, 
@@ -3476,7 +3992,8 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
                        use_alpha_lambda_term=use_alpha_lambda_term,
                        use_eta_sigma_term=use_eta_sigma_term,
                        use_redshift_log_f_term=use_redshift_log_f_term,
-                       early_de_guard=early_de_guard)
+                       early_de_guard=early_de_guard,
+                       agn_pivot_context=agn_pivot_context)
         
         samples_joint, model_labels_joint, dm_interp_joint, logZ_joint, logZerr_joint, debiased_residuals_joint, age_joint, age_err_joint = r
         #print(f"For model {cosmo_model}, universe age: {age:.3f} Gyr")
@@ -3510,7 +4027,8 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
                            use_alpha_lambda_term=use_alpha_lambda_term,
                            use_eta_sigma_term=use_eta_sigma_term,
                            use_redshift_log_f_term=use_redshift_log_f_term,
-                           early_de_guard=early_de_guard)
+                           early_de_guard=early_de_guard,
+                           agn_pivot_context=None)
             samples_sna, model_labels_sna, dm_interp_sna, logZ_sna, logZerr_sna, debiased_residuals_sna, age_sna, age_sna_err = r
         if not compare_sigma_only and not minimal_plots and not only_agn:
             plot_cosmo_corner(samples_sna, samples_joint, cosmo_model, z_pivot_sna, z_pivot_agn, show=False, 
@@ -3604,7 +4122,8 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
                                 compare_r, compare_plot_path, 
                                 result_prefix=result_prefix, cosmo_models_result_dict=cosmo_models_result_dict,
                                 cosmo_models_sna_result_dict=cosmo_models_sna_result_dict,
-                                compare_r_sna=compare_r_sna)
+                                compare_r_sna=compare_r_sna,
+                                agn_pivot_context=agn_pivot_context)
 
     cosmo_output_dir = get_qvc_result_dir() / "cosmo" / prefix
     cosmo_output_dir.mkdir(parents=True, exist_ok=True)
@@ -3860,15 +4379,7 @@ if __name__ == "__main__":
                            z_range=tuple(args.z_range), plot_path=agn_plot_path,
                            cut_report_path=cut_report_path,
                            plot_diagnostics=not args.minimal_plots)
-    if args.resume_replot_with_cuts or args.uniform_redshift_distribution:
-        effective_N = args.N
-    else:
-        df_agn, effective_N = subsample_dataframe_at_most(
-            df_agn,
-            args.N,
-            random_state=42,
-            label="AGN objects",
-        )
+    effective_N = args.N
     if args.agn_calibrators:
         if args.agn_calibrators.endswith('.h5'):
             df_calibrators = read_quasars_from_hdf5_flat(args.agn_calibrators)
@@ -3888,6 +4399,28 @@ if __name__ == "__main__":
             raise NotImplementedError("--use_jax does not support --agn_calibrators yet.")
         from qvc.hubble.hubble_fit_jax import run_single_jax
 
+        agn_pivot_context = _prepare_shared_agn_pivot_context(
+            df_agn,
+            cosmo_models=args.cosmo_models,
+            resume_by_model=resume_by_model,
+            z_range=tuple(args.z_range),
+            N=effective_N,
+            uniform_redshift_distribution=args.uniform_redshift_distribution,
+            only_sna=args.only_sna,
+            only_agn=args.only_agn,
+            speed=args.speed,
+            completeness=not args.disable_completeness,
+            completeness_mode=args.completeness_mode,
+            disable_ceph_dist_calibration=args.disable_ceph_dist_calibration,
+            use_planck_h0_prior=effective_use_planck_h0_prior,
+            use_planck_om_prior=args.use_planck_om_prior,
+            use_alpha_lambda_term=args.fit_alpha_lambda_term,
+            use_eta_sigma_term=args.fit_eta_sigma_term,
+            use_redshift_log_f_term=args.fit_redshift_log_f_term,
+            disable_sigma_clip_pass=True,
+            resume_stage="both",
+            prefix=args.prefix,
+        )
         for cosmo_model in args.cosmo_models:
             run_single_jax(
                 df_agn=df_agn,
@@ -3914,9 +4447,33 @@ if __name__ == "__main__":
                 use_eta_sigma_term=args.fit_eta_sigma_term,
                 use_redshift_log_f_term=args.fit_redshift_log_f_term,
                 early_de_guard=args.early_de_guard,
+                agn_pivot_context=agn_pivot_context,
             )
     elif args.run == "single": # default
         cosmo_models_dict = {k: {} for k in args.cosmo_models}
+        agn_pivot_context = _prepare_shared_agn_pivot_context(
+            df_agn,
+            cosmo_models=args.cosmo_models,
+            resume_by_model=resume_by_model,
+            z_range=tuple(args.z_range),
+            N=effective_N,
+            uniform_redshift_distribution=args.uniform_redshift_distribution,
+            only_sna=args.only_sna,
+            only_agn=args.only_agn,
+            speed=args.speed,
+            completeness=not args.disable_completeness,
+            completeness_mode=args.completeness_mode,
+            disable_ceph_dist_calibration=args.disable_ceph_dist_calibration,
+            use_planck_h0_prior=effective_use_planck_h0_prior,
+            use_planck_om_prior=args.use_planck_om_prior,
+            use_alpha_lambda_term=args.fit_alpha_lambda_term,
+            use_eta_sigma_term=args.fit_eta_sigma_term,
+            use_redshift_log_f_term=args.fit_redshift_log_f_term,
+            disable_sigma_clip_pass=args.disable_sigma_clip_pass,
+            resume_stage=args.resume_stage,
+            prefix=args.prefix,
+            resume_replot_with_cuts=args.resume_replot_with_cuts,
+        )
         for cosmo_model in args.cosmo_models:
             r = run_single(df_agn=df_agn, df_agn_all=df_agn_all, df_pantheon=df_pantheon, _sna_L=_sna_L, _sna_Lower=_sna_Lower, _sna_LogdetCov=_sna_LogdetCov, 
                            cosmo_model=cosmo_model,
@@ -3940,7 +4497,8 @@ if __name__ == "__main__":
                 use_eta_sigma_term=args.fit_eta_sigma_term,
                 use_redshift_log_f_term=args.fit_redshift_log_f_term,
                 early_de_guard=args.early_de_guard,
-                resume_replot_with_cuts=args.resume_replot_with_cuts)
+                resume_replot_with_cuts=args.resume_replot_with_cuts,
+                agn_pivot_context=agn_pivot_context)
             samples_joint, model_labels, dm_interp, logZ_joint, logZerr_joint, debiased_residuals, age, age_err = r
             cosmo_models_dict[cosmo_model]['logZ'] = logZ_joint
             cosmo_models_dict[cosmo_model]['logZerr'] = logZerr_joint

@@ -130,8 +130,37 @@ def _minimal_agn_df():
             "z_err": [0.01, 0.01],
             "apparent_mag_2500": [20.1, 20.4],
             "apparent_mag_2500_err": [0.1, 0.1],
+            "log_sigma_uv": [-0.60, -0.45],
+            "log_sigma_uv_err": [0.03, 0.04],
+            "log_tau_uv_rf": [2.05, 2.25],
+            "log_tau_uv_rf_err": [0.05, 0.06],
         }
     )
+
+
+def _agn_pivot_context(df_agn=None, z_range=(0.44, 3.16)):
+    if df_agn is None:
+        df_agn = _minimal_agn_df()
+    return hubble_fit.build_agn_pivot_context(df_agn, z_range)
+
+
+def _agn_pivot_checkpoint_payload_for_ids(object_ids, z_range=(0.44, 3.16)):
+    object_ids = list(object_ids)
+    count = len(object_ids)
+    df_agn = pd.DataFrame(
+        {
+            "object_id": object_ids,
+            "z": np.linspace(0.6, 1.1, count),
+            "log_sigma_uv": np.linspace(-0.60, -0.45, count),
+            "log_tau_uv_rf": np.linspace(2.05, 2.25, count),
+        }
+    )
+    return {
+        **hubble_fit._agn_pivot_checkpoint_payload(
+            _agn_pivot_context(df_agn, z_range=z_range)
+        ),
+        "sigma_clip_pass_stage": "single",
+    }
 
 
 def _minimal_pantheon_df():
@@ -148,6 +177,8 @@ def _minimal_pantheon_df():
 
 def test_run_mcmc_pipeline_default_resume_uses_result_dir(monkeypatch, tmp_path):
     df_agn = _minimal_agn_df()
+    agn_pivot_context = _agn_pivot_context(df_agn)
+    pivot_payload = hubble_fit._agn_pivot_checkpoint_payload(agn_pivot_context)
     df_pantheon = _minimal_pantheon_df()
     result_root = tmp_path / "result_root"
     expected = result_root / "hubble_posteriors" / "unit" / "posteriors_FlatLambdaCDM_joint_fastest_all_z0p44_3p16_disable_completeness.h5"
@@ -169,6 +200,12 @@ def test_run_mcmc_pipeline_default_resume_uses_result_dir(monkeypatch, tmp_path)
             "integrals_max_w": np.ones(len(df_agn)),
             "logZ": -1.0,
             "logZerr": 0.2,
+            **pivot_payload,
+            "sigma_clip_pass_stage": "single",
+            "object_id_fit_selection": np.asarray(
+                agn_pivot_context.reference_object_ids,
+                dtype=str,
+            ),
         }
 
     monkeypatch.setattr(hubble_fit, "load_chains", fake_load_chains)
@@ -191,6 +228,7 @@ def test_run_mcmc_pipeline_default_resume_uses_result_dir(monkeypatch, tmp_path)
         _sna_L=None,
         _sna_Lower=True,
         _sna_LogdetCov=None,
+        agn_pivot_context=agn_pivot_context,
         cosmo_model="FlatLambdaCDM",
         completeness=False,
         use_full_cov=False,
@@ -214,6 +252,8 @@ def test_run_mcmc_pipeline_default_resume_uses_result_dir(monkeypatch, tmp_path)
 
 def test_run_mcmc_pipeline_explicit_resume_path_bypasses_default(monkeypatch, tmp_path):
     df_agn = _minimal_agn_df()
+    agn_pivot_context = _agn_pivot_context(df_agn)
+    pivot_payload = hubble_fit._agn_pivot_checkpoint_payload(agn_pivot_context)
     df_pantheon = _minimal_pantheon_df()
     result_root = tmp_path / "result_root"
     explicit = tmp_path / "custom" / "resume_here.h5"
@@ -237,6 +277,12 @@ def test_run_mcmc_pipeline_explicit_resume_path_bypasses_default(monkeypatch, tm
             "integrals_max_w": np.ones(len(df_agn)),
             "logZ": -2.0,
             "logZerr": 0.3,
+            **pivot_payload,
+            "sigma_clip_pass_stage": "single",
+            "object_id_fit_selection": np.asarray(
+                agn_pivot_context.reference_object_ids,
+                dtype=str,
+            ),
         }
 
     monkeypatch.setattr(hubble_fit, "load_chains", fake_load_chains)
@@ -249,6 +295,7 @@ def test_run_mcmc_pipeline_explicit_resume_path_bypasses_default(monkeypatch, tm
         _sna_L=None,
         _sna_Lower=True,
         _sna_LogdetCov=None,
+        agn_pivot_context=agn_pivot_context,
         cosmo_model="FlatLambdaCDM",
         completeness=False,
         use_full_cov=False,
@@ -262,6 +309,7 @@ def test_run_mcmc_pipeline_explicit_resume_path_bypasses_default(monkeypatch, tm
 
 def test_run_mcmc_pipeline_new_checkpoint_writes_fit_object_ids(monkeypatch, tmp_path):
     df_agn = _minimal_agn_df()
+    agn_pivot_context = _agn_pivot_context(df_agn)
     df_pantheon = _minimal_pantheon_df()
     captured = {}
 
@@ -316,6 +364,7 @@ def test_run_mcmc_pipeline_new_checkpoint_writes_fit_object_ids(monkeypatch, tmp
         _sna_L=None,
         _sna_Lower=True,
         _sna_LogdetCov=None,
+        agn_pivot_context=agn_pivot_context,
         cosmo_model="FlatLambdaCDM",
         completeness=False,
         use_full_cov=False,
@@ -324,6 +373,12 @@ def test_run_mcmc_pipeline_new_checkpoint_writes_fit_object_ids(monkeypatch, tmp
     )
 
     np.testing.assert_array_equal(captured["object_id_fit_selection"], df_agn["object_id"].astype(str).to_numpy())
+    assert set(hubble_fit.AGN_PIVOT_CHECKPOINT_KEYS).issubset(captured)
+    restored_context = hubble_fit._load_agn_pivot_context_from_checkpoint(
+        captured,
+        checkpoint_file="captured-test-checkpoint.h5",
+    )
+    assert restored_context == agn_pivot_context
 
 
 def test_resume_replot_with_cuts_remaps_per_object_arrays_by_object_id(tmp_path):
@@ -339,6 +394,7 @@ def test_resume_replot_with_cuts_remaps_per_object_arrays_by_object_id(tmp_path)
         integrals_max_w=np.array([100.0, 200.0, 300.0]),
         logZ=-1.0,
         logZerr=0.1,
+        **_agn_pivot_checkpoint_payload_for_ids(["agn_a", "agn_b", "agn_c"]),
     )
     current = pd.DataFrame({"object_id": ["agn_c", "agn_a"]})
     remapped = hubble_fit._remap_resume_replot_checkpoint(
@@ -367,6 +423,7 @@ def test_resume_replot_with_cuts_rejects_missing_current_object_id(tmp_path):
         integrals_max_w=np.array([100.0, 200.0]),
         logZ=-1.0,
         logZerr=0.1,
+        **_agn_pivot_checkpoint_payload_for_ids(["agn_a", "agn_b"]),
     )
     current = pd.DataFrame({"object_id": ["agn_a", "agn_missing"]})
 
@@ -389,6 +446,7 @@ def test_resume_replot_with_cuts_rejects_legacy_checkpoint_without_object_ids(tm
         integrals_max_w=np.array([100.0, 200.0]),
         logZ=-1.0,
         logZerr=0.1,
+        **_agn_pivot_checkpoint_payload_for_ids(["agn_a", "agn_b"]),
     )
     current = pd.DataFrame({"object_id": ["agn_a"]})
 
@@ -412,6 +470,7 @@ def test_restrict_agn_to_resume_replot_sample_applies_current_cuts_with_checkpoi
         integrals_max_w=np.array([300.0, 100.0, 200.0]),
         logZ=-1.0,
         logZerr=0.1,
+        **_agn_pivot_checkpoint_payload_for_ids(["agn_c", "agn_a", "agn_b"]),
     )
     current_after_cuts = pd.DataFrame(
         {

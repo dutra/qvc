@@ -1,6 +1,8 @@
 import numpy as np
+import pandas as pd
 from scipy.special import expit
 from collections import OrderedDict
+from dataclasses import dataclass
 
 AGN_ALPHA_LAMBDA_PARAM = "gamma_alpha_lambda"
 AGN_ALPHA_LAMBDA_OBS = "alpha_lambda"
@@ -14,6 +16,7 @@ AGN_LOG_F_PRIOR = (np.log(AGN_INTRINSIC_SCATTER_MAG_CENTER) - 0.8,
                    np.log(AGN_INTRINSIC_SCATTER_MAG_CENTER) + 0.8)
 PLANCK_H0_PRIOR = (67.37 - 0.54, 67.37 + 0.54)
 PLANCK_OM0_PRIOR = (0.315 - 0.007, 0.315 + 0.007)
+AGN_PIVOT_RULE = "rounded_median_v1"
 
 
 def get_agn_model_spec(use_alpha_lambda_term=False, use_eta_sigma_term=False):
@@ -231,17 +234,194 @@ def agn_model_pack_params(params_dict, use_alpha_lambda_term=False, use_eta_sigm
 def _fixed_pivot_from_observable(key, values):
     pivot = float(np.nanmedian(np.asarray(values, dtype=float)))
     if key == "log_sigma_uv":
-        return float(np.log10(max(np.round(10.0**pivot, 1), 1e-8)))
-    if key == "log_tau_uv_rf":
-        return float(np.log10(max(np.round(10.0**pivot / 100.0) * 100.0, 1e-8)))
-    return pivot
+        with np.errstate(over="ignore", under="ignore", invalid="ignore"):
+            rounded_linear_pivot = np.round(np.power(10.0, pivot), 1)
+    elif key == "log_tau_uv_rf":
+        with np.errstate(over="ignore", under="ignore", invalid="ignore"):
+            rounded_linear_pivot = (
+                np.round(np.power(10.0, pivot) / 100.0) * 100.0
+            )
+    else:
+        return pivot
+
+    if not np.isfinite(rounded_linear_pivot) or rounded_linear_pivot <= 0.0:
+        raise ValueError(
+            f"Rounded linear AGN pivot for observable {key!r} must be finite "
+            f"and positive; got {rounded_linear_pivot!r}."
+        )
+    return float(np.log10(rounded_linear_pivot))
+
+
+def _normalize_reference_object_ids(values, *, where):
+    raw_ids = tuple(values)
+    if len(raw_ids) == 0:
+        raise ValueError(f"{where} must not be empty.")
+
+    normalized_ids = []
+    for object_id in raw_ids:
+        missing = pd.isna(object_id)
+        if np.ndim(missing) != 0 or bool(missing):
+            raise ValueError(
+                f"{where} must contain only present scalar object IDs."
+            )
+        normalized = (
+            object_id.decode("utf-8")
+            if isinstance(object_id, (bytes, np.bytes_))
+            else str(object_id)
+        )
+        if not normalized.strip():
+            raise ValueError(f"{where} must not contain empty object IDs.")
+        normalized_ids.append(normalized)
+    return tuple(normalized_ids)
+
+
+@dataclass(frozen=True)
+class AgnPivotContext:
+    """Immutable definition of the observable coordinate system for one AGN fit."""
+
+    observable_names: tuple
+    values: tuple
+    z_range: tuple
+    reference_object_ids: tuple
+    rule: str = AGN_PIVOT_RULE
+
+    def __post_init__(self):
+        names = tuple(str(name) for name in self.observable_names)
+        values = tuple(float(value) for value in self.values)
+        z_range = tuple(float(value) for value in self.z_range)
+        object_ids = _normalize_reference_object_ids(
+            self.reference_object_ids,
+            where="AgnPivotContext.reference_object_ids",
+        )
+        rule = str(self.rule)
+
+        if len(names) == 0:
+            raise ValueError("AgnPivotContext.observable_names must not be empty.")
+        if len(set(names)) != len(names):
+            raise ValueError(
+                "AgnPivotContext.observable_names must be unique; "
+                f"got {names!r}."
+            )
+        if len(values) != len(names):
+            raise ValueError(
+                "AgnPivotContext values/name length mismatch: "
+                f"{len(values)} values for {len(names)} names."
+            )
+        if not np.all(np.isfinite(np.asarray(values, dtype=float))):
+            raise ValueError("AgnPivotContext.values must all be finite.")
+        if len(z_range) != 2 or not np.all(np.isfinite(np.asarray(z_range, dtype=float))):
+            raise ValueError(
+                "AgnPivotContext.z_range must contain exactly two finite values."
+            )
+        if z_range[0] > z_range[1]:
+            raise ValueError(
+                "AgnPivotContext.z_range must be ordered as (minimum, maximum); "
+                f"got {z_range!r}."
+            )
+        if rule != AGN_PIVOT_RULE:
+            raise ValueError(
+                f"Unsupported AGN pivot rule {rule!r}; expected {AGN_PIVOT_RULE!r}."
+            )
+
+        object.__setattr__(self, "observable_names", names)
+        object.__setattr__(self, "values", values)
+        object.__setattr__(self, "z_range", z_range)
+        object.__setattr__(self, "reference_object_ids", object_ids)
+        object.__setattr__(self, "rule", rule)
+
+    def as_array(self, use_alpha_lambda_term=False, use_eta_sigma_term=False):
+        """Return values in the canonical order for the requested model."""
+
+        _, expected_names, _ = get_agn_model_spec(
+            use_alpha_lambda_term=use_alpha_lambda_term,
+            use_eta_sigma_term=use_eta_sigma_term,
+        )
+        if self.observable_names != expected_names:
+            raise ValueError(
+                "AGN pivot observables do not match the active model: "
+                f"stored={self.observable_names!r}, expected={expected_names!r}."
+            )
+        return np.asarray(self.values, dtype=float)
+
+    def as_dict(self):
+        return dict(zip(self.observable_names, self.values))
+
+
+def build_agn_pivot_context(
+    df_agn,
+    z_range,
+    use_alpha_lambda_term=False,
+    use_eta_sigma_term=False,
+):
+    """Compute the one AGN observable pivot context used by an entire fit."""
+
+    _, req_obs, _ = get_agn_model_spec(
+        use_alpha_lambda_term=use_alpha_lambda_term,
+        use_eta_sigma_term=use_eta_sigma_term,
+    )
+    required = ("z", "object_id") + req_obs
+    _require(required, df_agn, "AGN pivot reference data")
+
+    try:
+        z = np.asarray(df_agn["z"], dtype=float)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("AGN pivot reference column 'z' must be numeric.") from exc
+    if np.any(~np.isfinite(z)):
+        raise ValueError(
+            "AGN pivot reference column 'z' must contain only finite values."
+        )
+    z_range = tuple(float(value) for value in z_range)
+    if len(z_range) != 2 or not np.all(np.isfinite(z_range)) or z_range[0] > z_range[1]:
+        raise ValueError(
+            "z_range must contain two finite ordered values; "
+            f"got {z_range!r}."
+        )
+    fit_mask = (z >= z_range[0]) & (z <= z_range[1])
+    if not np.any(fit_mask):
+        raise ValueError(
+            "Cannot compute AGN pivots: no reference objects fall inside "
+            f"inclusive z_range={z_range!r}."
+        )
+
+    pivot_values = []
+    for name in req_obs:
+        try:
+            values = np.asarray(df_agn[name], dtype=float)[fit_mask]
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"AGN pivot reference observable {name!r} must be numeric."
+            ) from exc
+        bad = ~np.isfinite(values)
+        if np.any(bad):
+            raise ValueError(
+                f"AGN pivot reference observable {name!r} contains "
+                f"{int(np.count_nonzero(bad))} nonfinite fitted value(s)."
+            )
+        pivot = _fixed_pivot_from_observable(name, values)
+        if not np.isfinite(pivot):
+            raise ValueError(
+                f"Computed nonfinite AGN pivot for observable {name!r}."
+            )
+        pivot_values.append(pivot)
+
+    object_ids = _normalize_reference_object_ids(
+        np.asarray(df_agn["object_id"], dtype=object)[fit_mask],
+        where="AGN pivot reference object_id values",
+    )
+    return AgnPivotContext(
+        observable_names=req_obs,
+        values=tuple(pivot_values),
+        z_range=z_range,
+        reference_object_ids=object_ids,
+    )
 
 
 def agn_model_pack_obs(
     obs_dict,
     use_alpha_lambda_term=False,
     use_eta_sigma_term=False,
-    pivot_values=None,
+    *,
+    pivot_context,
 ):
     _, req_obs, req_errs = get_agn_model_spec(
         use_alpha_lambda_term=use_alpha_lambda_term,
@@ -251,20 +431,15 @@ def agn_model_pack_obs(
     _require(req_errs, obs_dict, "errors")
     obs = np.array([obs_dict[k] for k in req_obs], dtype=float)
     err = np.array([obs_dict[k] for k in req_errs], dtype=float)
-    if pivot_values is None:
-        pivots = {k: _fixed_pivot_from_observable(k, obs_dict[k]) for k in req_obs}
-        # pivots["log_tau_uv_rf"] = np.log10(500)
-        # pivots["log_sigma_uv"]  = np.log10(0.2)
-        pivots = np.array([pivots[k] for k in req_obs], dtype=float)
-    elif isinstance(pivot_values, dict):
-        _require(req_obs, pivot_values, "pivot_values")
-        pivots = np.array([pivot_values[k] for k in req_obs], dtype=float)
-    else:
-        pivots = np.asarray(pivot_values, dtype=float)
-        if pivots.shape != (len(req_obs),):
-            raise ValueError(
-                f"pivot_values has shape {pivots.shape}, but expected {(len(req_obs),)}."
-            )
+    if not isinstance(pivot_context, AgnPivotContext):
+        raise TypeError(
+            "pivot_context must be an AgnPivotContext; "
+            f"got {type(pivot_context).__name__}."
+        )
+    pivots = pivot_context.as_array(
+        use_alpha_lambda_term=use_alpha_lambda_term,
+        use_eta_sigma_term=use_eta_sigma_term,
+    )
     return obs, err, pivots
 
 def hinge(x, a, b, x0):

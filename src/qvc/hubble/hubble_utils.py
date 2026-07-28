@@ -42,10 +42,9 @@ from qvc.hubble.hubble_cut_config import (
     build_dlog_amp_blr_cuts,
 )
 from qvc.hubble.hubble_model import (
+    AgnPivotContext,
     M_model_agn,
     M_model_agn_err,
-    agn_model_oidx,
-    agn_model_pack_obs,
     agn_model_pack_params,
     get_model_params,
     resolve_model_option_flags,
@@ -3594,6 +3593,8 @@ def write_results_tex_variables(
     cosmo_models_result_dict=None,
     cosmo_models_sna_result_dict=None,
     compare_r_sna=None,
+    *,
+    agn_pivot_context: AgnPivotContext,
 ):
     """
     Write key cosmological parameters AND model comparison results
@@ -3622,9 +3623,23 @@ def write_results_tex_variables(
         return p[1], (p[2] - p[0]) / 2.0
 
     # Global AGN and SN summary counts.
-    obs_arr, err_arr, pivots_arr = agn_model_pack_obs(df_agn)
-    log_sigma_uv_pivot = pivots_arr[agn_model_oidx["log_sigma_uv"]]
-    log_tau_uv_rf_pivot = pivots_arr[agn_model_oidx["log_tau_uv_rf"]]
+    if not isinstance(agn_pivot_context, AgnPivotContext):
+        raise TypeError(
+            "agn_pivot_context must be an AgnPivotContext; "
+            f"got {type(agn_pivot_context).__name__}."
+        )
+    pivot_values_by_name = agn_pivot_context.as_dict()
+    missing_pivots = {
+        "log_sigma_uv",
+        "log_tau_uv_rf",
+    }.difference(pivot_values_by_name)
+    if missing_pivots:
+        raise ValueError(
+            "AGN pivot context is missing required TeX summary observable(s): "
+            f"{sorted(missing_pivots)}."
+        )
+    log_sigma_uv_pivot = pivot_values_by_name["log_sigma_uv"]
+    log_tau_uv_rf_pivot = pivot_values_by_name["log_tau_uv_rf"]
     n_fitted = len(df_agn[df_agn['z'].between(z_range[0], z_range[1])])
     lines.append(_cmd("NumAGNInitial", len(df_agn_all)))
     lines.append(_cmd("NumAGNCut", len(df_agn_all)-len(df_agn)))
@@ -3638,6 +3653,14 @@ def write_results_tex_variables(
     lines.append(_cmd("NumSNaFitted", len(df_pantheon[mask])))
     lines.append(_cmd("SigmauvPivot", f"{10**log_sigma_uv_pivot:.1f}"))
     lines.append(_cmd("TauuvrfPivot", f"{10**log_tau_uv_rf_pivot:.0f}"))
+    if "alpha_lambda" in pivot_values_by_name:
+        lines.append(
+            _cmd("AlphaLambdaPivot", f"{pivot_values_by_name['alpha_lambda']:.3f}")
+        )
+    if "eta_sigma" in pivot_values_by_name:
+        lines.append(
+            _cmd("EtaSigmaPivot", f"{pivot_values_by_name['eta_sigma']:.3f}")
+        )
     try:
         sigma_tau_lambda_fit = fit_sigma_tau_lambda_broken_pl(df_agn)
     except (KeyError, ValueError) as exc:
@@ -4089,16 +4112,22 @@ def select_agn_subset_uniform_with_replacement(
 
 
 
-def report_pivots(df_agn):
-    print("\nAGN pivot summary")
-    _, _, pivots_arr = agn_model_pack_obs(df_agn)
-    rows = [
-        ("sigma_uv", "median", np.median(df_agn["log_sigma_uv"])),
-        ("sigma_uv", "model pivot", pivots_arr[agn_model_oidx["log_sigma_uv"]]),
-        ("tau_uv_rf", "median", np.median(df_agn["log_tau_uv_rf"])),
-        ("tau_uv_rf", "model pivot", pivots_arr[agn_model_oidx["log_tau_uv_rf"]]),
-    ]
+def report_pivots(df_agn, *, agn_pivot_context: AgnPivotContext):
+    """Report the stored fit pivots without deriving values from ``df_agn``."""
 
-    for name, kind, log_val in rows:
-        lin_val = 10**log_val
-        print(f"{name} {kind}: log10={log_val}, linear={lin_val}")
+    del df_agn
+    print("\nAGN pivot summary")
+    if not isinstance(agn_pivot_context, AgnPivotContext):
+        raise TypeError(
+            "agn_pivot_context must be an AgnPivotContext; "
+            f"got {type(agn_pivot_context).__name__}."
+        )
+    for name, value in zip(
+        agn_pivot_context.observable_names,
+        agn_pivot_context.values,
+        strict=True,
+    ):
+        if name in {"log_sigma_uv", "log_tau_uv_rf"}:
+            print(f"{name} model pivot: log10={value}, linear={10**value}")
+        else:
+            print(f"{name} model pivot: {value}")

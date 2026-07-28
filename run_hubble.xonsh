@@ -10,7 +10,7 @@ $NUM_CORES = "30"
 # Sweep values fastest, quick, standard.  The environment overrides make this
 # runner suitable for isolated, reproducible cut-search members.
 speed = __xonsh__.env.get("QVC_HUBBLE_SPEED", "fastest")
-magnitude_convention = __xonsh__.env["QVC_HUBBLE_MAGNITUDE_CONVENTION"]
+magnitude_convention = __xonsh__.env.get("QVC_HUBBLE_MAGNITUDE_CONVENTION", "observed")
 
 # spectra_fit_csv = "results/data/spectra_data_all.csv"
 # h5_file = "results/data/lc_data_all.h5"
@@ -19,7 +19,7 @@ spectra_fit_csv = "results/data/jaxqsofit_jul16c_chisqnew_all.csv"
 h5_file = "results/data/jul22_1134pm_erlang_independentblrlags_fast_jul14chisq_spectrajul16call_n1_7fa5882_chisq.h5"
 
 
-$PREFIX = __xonsh__.env.get("QVC_HUBBLE_PREFIX", f"jul27c_red_{speed}")
+$PREFIX = __xonsh__.env.get("QVC_HUBBLE_PREFIX", f"jul27e_red_baseline_{speed}")
 
 prefix = $PREFIX
 echo "Running hubble_fit.py and PREFIX=" $PREFIX
@@ -54,7 +54,6 @@ echo "Running hubble_fit.py and PREFIX=" $PREFIX
     --prefix @(prefix) \
     --disable_sigma_clip_pass \
     --sigma_clip_threshold 3.0 \
-    --minimal-plots \
     @(h5_file)
 
 

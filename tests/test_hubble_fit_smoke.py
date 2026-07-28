@@ -45,8 +45,19 @@ def _make_fake_agn_sample(n_agn=24, seed=123):
         "log_tau_uv_rf_std_psd": np.full(n_agn, 0.06),
         "log_sigma_uv_log_tau_uv_rf_cov_psd": np.full(n_agn, 0.001),
     }
+    pivot_context = hubble_model.build_agn_pivot_context(
+        {
+            "object_id": [f"agn_{i:03d}" for i in range(n_agn)],
+            "z": z,
+            **{name: obs_dict[name] for name in hubble_model.agn_model_req_obs},
+        },
+        (float(np.min(z)), float(np.max(z))),
+    )
     params_arr = hubble_model.agn_model_pack_params(true_params)
-    obs_arr, _, pivots = hubble_model.agn_model_pack_obs(obs_dict)
+    obs_arr, _, pivots = hubble_model.agn_model_pack_obs(
+        obs_dict,
+        pivot_context=pivot_context,
+    )
     absolute_mag = hubble_model.M_model_agn(params_arr, obs_arr, pivots)
     mu = cosmo.distmod(z).value
     apparent_mag = absolute_mag + mu + rng.normal(0.0, 0.04, size=n_agn)
@@ -134,6 +145,24 @@ def fake_data():
     return df_agn, df_pantheon
 
 
+def _agn_pivot_context(
+    df_agn,
+    z_range=None,
+    *,
+    use_alpha_lambda_term=False,
+    use_eta_sigma_term=False,
+):
+    if z_range is None:
+        z = np.asarray(df_agn["z"], dtype=float)
+        z_range = (float(np.min(z)), float(np.max(z)))
+    return hubble_model.build_agn_pivot_context(
+        df_agn,
+        z_range,
+        use_alpha_lambda_term=use_alpha_lambda_term,
+        use_eta_sigma_term=use_eta_sigma_term,
+    )
+
+
 def test_alpha_ox_cosmology_uses_equal_weight_posterior_medians(monkeypatch):
     captured = {}
     source = pd.DataFrame({"object_id": ["agn_001"]})
@@ -172,6 +201,7 @@ def test_log_likelihood_finite_on_fake_lcdm_data(fake_data):
     agn_data = {col: df_agn[col].to_numpy() for col in agn_fields}
     pantheon_data = {col: df_pantheon[col].to_numpy() for col in df_pantheon.columns}
 
+    pivot_context = _agn_pivot_context(df_agn)
     logl, blob = hubble_likelihood.log_likelihood(
         theta,
         agn_data=agn_data,
@@ -182,6 +212,7 @@ def test_log_likelihood_finite_on_fake_lcdm_data(fake_data):
         cosmo_model="FlatLambdaCDM",
         completeness_params=None,
         z_pivot_agn=hubble_fit.z_pivot_agn,
+        agn_pivot_context=pivot_context,
         agn_calibrators_data=None,
         only_sna=False,
         use_full_cov=False,
@@ -201,6 +232,7 @@ def test_log_likelihood_only_agn_skips_pantheon_and_sn_parameter(fake_data):
     agn_fields += ("apparent_mag_2500", "apparent_mag_2500_err", "z", "z_err", "object_id")
     agn_data = {col: df_agn[col].to_numpy() for col in agn_fields}
 
+    pivot_context = _agn_pivot_context(df_agn)
     logl, blob = hubble_likelihood.log_likelihood(
         theta,
         agn_data=agn_data,
@@ -211,6 +243,7 @@ def test_log_likelihood_only_agn_skips_pantheon_and_sn_parameter(fake_data):
         cosmo_model="FlatLambdaCDM",
         completeness_params=None,
         z_pivot_agn=hubble_fit.z_pivot_agn,
+        agn_pivot_context=pivot_context,
         agn_calibrators_data=None,
         only_agn=True,
         use_full_cov=False,
@@ -233,6 +266,7 @@ def test_flatw0wa_early_de_guard_is_opt_in(fake_data):
     agn_data = {col: df_agn[col].to_numpy() for col in agn_fields}
     pantheon_data = {col: df_pantheon[col].to_numpy() for col in df_pantheon.columns}
 
+    pivot_context = _agn_pivot_context(df_agn)
     logl_default, blob_default = hubble_likelihood.log_likelihood(
         theta,
         agn_data=agn_data,
@@ -243,6 +277,7 @@ def test_flatw0wa_early_de_guard_is_opt_in(fake_data):
         cosmo_model="Flatw0waCDM",
         completeness_params=None,
         z_pivot_agn=hubble_fit.z_pivot_agn,
+        agn_pivot_context=pivot_context,
         agn_calibrators_data=None,
         only_sna=False,
         use_full_cov=False,
@@ -257,6 +292,7 @@ def test_flatw0wa_early_de_guard_is_opt_in(fake_data):
         cosmo_model="Flatw0waCDM",
         completeness_params=None,
         z_pivot_agn=hubble_fit.z_pivot_agn,
+        agn_pivot_context=pivot_context,
         agn_calibrators_data=None,
         early_de_guard=True,
         only_sna=False,
@@ -282,12 +318,18 @@ def test_compute_agn_likelihood_space_reduced_chi2_uses_only_agn_relevant_dof(fa
     theta = np.array([(priors[key][0] + priors[key][1]) / 2.0 for key in model_labels], dtype=float)
     flat_samples = np.tile(theta[None, :], (4, 1))
 
+    pivot_context = _agn_pivot_context(
+        df_agn,
+        use_alpha_lambda_term=True,
+        use_eta_sigma_term=True,
+    )
     chi2_red, meta = hubble_fit.compute_agn_likelihood_space_reduced_chi2(
         flat_samples,
         model_labels,
         df_agn,
         "Flatw0waCDM",
         z_pivot_agn=hubble_fit.z_pivot_agn,
+        agn_pivot_context=pivot_context,
         use_alpha_lambda_term=True,
         use_eta_sigma_term=True,
         use_redshift_log_f_term=True,
@@ -377,8 +419,16 @@ def test_compute_direct_full_sample_completeness_summaries_freezes_fit_pivots(fa
         np.linspace(18.0, 24.5, 96),
     )
 
-    _, _, fit_pivots = hubble_model.agn_model_pack_obs(df_fit)
-    _, _, plot_pivots = hubble_model.agn_model_pack_obs(df_plot)
+    fit_pivot_context = _agn_pivot_context(df_fit)
+    plot_pivot_context = _agn_pivot_context(df_plot)
+    _, _, fit_pivots = hubble_model.agn_model_pack_obs(
+        df_fit,
+        pivot_context=fit_pivot_context,
+    )
+    _, _, plot_pivots = hubble_model.agn_model_pack_obs(
+        df_plot,
+        pivot_context=plot_pivot_context,
+    )
     _, fit_blob = hubble_likelihood.log_likelihood(
         theta,
         agn_data=df_fit,
@@ -390,7 +440,7 @@ def test_compute_direct_full_sample_completeness_summaries_freezes_fit_pivots(fa
         completeness_params=completeness_params,
         z_pivot_agn=hubble_fit.z_pivot_agn,
         agn_calibrators_data=None,
-        agn_pivot_arr=fit_pivots,
+        agn_pivot_context=fit_pivot_context,
         only_sna=False,
         use_full_cov=False,
     )
@@ -405,6 +455,7 @@ def test_compute_direct_full_sample_completeness_summaries_freezes_fit_pivots(fa
         completeness_params=completeness_params,
         z_pivot_agn=hubble_fit.z_pivot_agn,
         agn_calibrators_data=None,
+        agn_pivot_context=plot_pivot_context,
         only_sna=False,
         use_full_cov=False,
     )
@@ -424,6 +475,7 @@ def test_compute_direct_full_sample_completeness_summaries_freezes_fit_pivots(fa
         cosmo_model="FlatLambdaCDM",
         completeness_params=completeness_params,
         z_pivot_agn=hubble_fit.z_pivot_agn,
+        agn_pivot_context=fit_pivot_context,
         use_full_cov=False,
         disable_ceph_dist_calibration=False,
         use_planck_h0_prior=False,
@@ -449,8 +501,20 @@ def test_run_single_skip_plots_smoke(fake_data, monkeypatch, tmp_path):
     flat_samples = np.tile(theta[None, :], (8, 1))
     dmi_posterior_median = np.zeros(len(df_agn))
     dmi_posterior_sigma = np.full(len(df_agn), 0.05)
+    built_contexts = []
+    real_build_pivot_context = hubble_fit.build_agn_pivot_context
+
+    def counting_build_pivot_context(*args, **kwargs):
+        context = real_build_pivot_context(*args, **kwargs)
+        built_contexts.append(context)
+        return context
 
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        hubble_fit,
+        "build_agn_pivot_context",
+        counting_build_pivot_context,
+    )
     monkeypatch.setattr(hubble_fit, "get_qvc_result_dir", lambda: Path.cwd() / "results")
     monkeypatch.setattr(hubble_fit, "plot_redshift_histograms", lambda *args, **kwargs: None)
     monkeypatch.setattr(hubble_fit, "plot_delta_m_flux_recal_vs_redshift", lambda *args, **kwargs: None)
@@ -466,6 +530,7 @@ def test_run_single_skip_plots_smoke(fake_data, monkeypatch, tmp_path):
                 flat_samples,
                 dmi_posterior_median,
                 dmi_posterior_sigma,
+                agn_pivot_context=kwargs["agn_pivot_context"],
                 logz=-50.0,
                 logzerr=0.2,
             ),
@@ -509,6 +574,97 @@ def test_run_single_skip_plots_smoke(fake_data, monkeypatch, tmp_path):
     assert residuals is None
     assert age == 13.8
     assert age_err == 0.1
+    assert len(built_contexts) == 1
+
+
+def test_run_single_resume_loads_stored_pivot_without_recomputing(
+    fake_data,
+    monkeypatch,
+    tmp_path,
+):
+    df_agn, df_pantheon = fake_data
+    priors, model_labels, _ = hubble_model.get_model_params(
+        "FlatLambdaCDM",
+        only_sna=False,
+    )
+    theta = np.array(
+        [(priors[key][0] + priors[key][1]) / 2.0 for key in model_labels],
+        dtype=float,
+    )
+    flat_samples = np.tile(theta[None, :], (8, 1))
+    stored_context = _agn_pivot_context(df_agn, (0.44, 3.16))
+    resume_path = tmp_path / "strict_pivot_checkpoint.h5"
+    _write_fake_checkpoint(
+        resume_path,
+        flat_samples,
+        np.zeros(len(df_agn)),
+        np.full(len(df_agn), 0.05),
+        agn_pivot_context=stored_context,
+    )
+    observed_contexts = []
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        hubble_fit,
+        "get_qvc_result_dir",
+        lambda: Path.cwd() / "results",
+    )
+    monkeypatch.setattr(hubble_fit, "report_pivots", lambda *args, **kwargs: None)
+    monkeypatch.setattr(hubble_fit, "display_results_summary", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        hubble_fit,
+        "compute_age_universe_with_error",
+        lambda *args, **kwargs: (13.8, 0.1),
+    )
+    monkeypatch.setattr(
+        hubble_fit,
+        "build_agn_pivot_context",
+        lambda *args, **kwargs: pytest.fail(
+            "resume must load the stored pivot context without recomputing it"
+        ),
+    )
+
+    def fake_run_mcmc_pipeline(df_agn_arg, *args, **kwargs):
+        observed_contexts.append(kwargs["agn_pivot_context"])
+        assert kwargs["resume"] == str(resume_path)
+        return (
+            flat_samples,
+            model_labels,
+            lambda pts: np.zeros(len(np.atleast_2d(pts))),
+            None,
+            -12.0,
+            0.2,
+            np.zeros(len(df_agn_arg)),
+            np.full(len(df_agn_arg), 0.05),
+            None,
+        )
+
+    monkeypatch.setattr(
+        hubble_fit,
+        "run_mcmc_pipeline",
+        fake_run_mcmc_pipeline,
+    )
+
+    hubble_fit.run_single(
+        df_agn=df_agn,
+        df_agn_all=df_agn.copy(),
+        df_pantheon=df_pantheon,
+        _sna_L=None,
+        _sna_Lower=True,
+        _sna_LogdetCov=None,
+        cosmo_model="FlatLambdaCDM",
+        completeness=False,
+        use_full_cov=False,
+        only_sna=False,
+        speed="fastest",
+        z_range=(0.44, 3.16),
+        skip_plots=True,
+        disable_sigma_clip_pass=True,
+        resume=str(resume_path),
+        prefix="unit",
+    )
+
+    assert observed_contexts == [stored_context]
 
 
 def test_run_single_threads_direct_full_sample_debias_arrays_to_plots(monkeypatch, tmp_path):
@@ -546,6 +702,7 @@ def test_run_single_threads_direct_full_sample_debias_arrays_to_plots(monkeypatc
             flat_samples,
             np.zeros(n),
             np.full(n, 0.05),
+            agn_pivot_context=kwargs["agn_pivot_context"],
             logz=-21.0,
             logzerr=0.2,
         )
@@ -658,10 +815,9 @@ def test_run_single_only_sna_smoke(fake_data, monkeypatch, tmp_path):
     monkeypatch.setattr(hubble_fit, "report_pivots", lambda *args, **kwargs: None)
     monkeypatch.setattr(hubble_fit, "display_results_summary", lambda *args, **kwargs: None)
     monkeypatch.setattr(hubble_fit, "compute_age_universe_with_error", lambda *args, **kwargs: (13.7, 0.2))
-    monkeypatch.setattr(
-        hubble_fit,
-        "run_mcmc_pipeline",
-        lambda *args, **kwargs: (
+    def fake_sna_pipeline(*args, **kwargs):
+        assert kwargs["agn_pivot_context"] is None
+        return (
             flat_samples,
             model_labels,
             lambda pts: np.zeros(len(np.atleast_2d(pts))),
@@ -671,8 +827,9 @@ def test_run_single_only_sna_smoke(fake_data, monkeypatch, tmp_path):
             dmi_posterior_median,
             dmi_posterior_sigma,
             None,
-        ),
-    )
+        )
+
+    monkeypatch.setattr(hubble_fit, "run_mcmc_pipeline", fake_sna_pipeline)
 
     result = hubble_fit.run_single(
         df_agn=df_agn,
@@ -689,6 +846,7 @@ def test_run_single_only_sna_smoke(fake_data, monkeypatch, tmp_path):
         z_range=(0.44, 3.16),
         skip_plots=False,
         prefix="unit",
+        agn_pivot_context=None,
     )
 
     samples_out, labels_out, _, logz, logzerr, residuals, age, age_err = result
@@ -844,6 +1002,7 @@ def test_plot_hubble_debiased_returns_clipping_sigma_and_writes_distinct_diagnos
 
     monkeypatch.setattr(hubble_plotting, "_save_figure", lambda fig, path, **kwargs: path)
 
+    pivot_context = _agn_pivot_context(df_agn, (0.44, 3.16))
     residuals, clipping_sigma, _, _, mu_pred_std_with_scatter = hubble_plotting.plot_hubble(
         flat_samples,
         df_agn,
@@ -857,6 +1016,7 @@ def test_plot_hubble_debiased_returns_clipping_sigma_and_writes_distinct_diagnos
         dmi_values=np.zeros(len(df_agn), dtype=float),
         dmi_selection_sigma=np.full(len(df_agn), 7.0, dtype=float),
         residuals_csv_filename="residuals.csv",
+        agn_pivot_context=pivot_context,
     )
 
     assert residuals.shape == (len(df_agn),)
@@ -913,6 +1073,7 @@ def test_plot_predicted_vs_actual_m2500_marks_out_of_range_objects(monkeypatch, 
         lambda fig, *args, **kwargs: captured.setdefault("fig", fig),
     )
 
+    pivot_context = _agn_pivot_context(df_agn, (0.44, 3.16))
     hubble_plotting.plot_predicted_vs_actual_M2500(
         flat_samples,
         df_agn,
@@ -925,6 +1086,7 @@ def test_plot_predicted_vs_actual_m2500_marks_out_of_range_objects(monkeypatch, 
         completeness=False,
         show_sigma_band=False,
         show_cosmo_uncertainty_band=False,
+        agn_pivot_context=pivot_context,
     )
 
     assert any(
@@ -986,6 +1148,7 @@ def test_plot_hubble_residual_chi2_annotation_includes_high_z(monkeypatch, tmp_p
     monkeypatch.setattr(Axes, "text", capture_text)
     monkeypatch.setattr(hubble_plotting, "_save_figure", lambda fig, path, **kwargs: path)
 
+    pivot_context = _agn_pivot_context(df_agn, (0.44, 3.16))
     hubble_plotting.plot_hubble(
         flat_samples,
         df_agn,
@@ -1000,6 +1163,7 @@ def test_plot_hubble_residual_chi2_annotation_includes_high_z(monkeypatch, tmp_p
         agn_likelihood_space_chi2=1.23,
         agn_likelihood_space_chi2_zgt1=2.34,
         residuals_csv_filename=None,
+        agn_pivot_context=pivot_context,
     )
 
     annotation = next(
@@ -1025,6 +1189,7 @@ def test_plot_hubble_residual_chi2_annotation_includes_high_z(monkeypatch, tmp_p
         debias=False,
         z_range=(0.44, 0.9),
         residuals_csv_filename=None,
+        agn_pivot_context=pivot_context,
     )
 
     chi2_text = next(call["text"] for call in text_calls if r"\chi^2_\nu" in call["text"])
@@ -1058,6 +1223,7 @@ def test_run_single_two_pass_sigma_clip_uses_plot_hubble_clipping_sigma(monkeypa
             flat_samples,
             np.zeros(n),
             np.full(n, 0.05),
+            agn_pivot_context=kwargs["agn_pivot_context"],
             logz=-70.0 - len(pipeline_calls),
             logzerr=0.2,
         )
@@ -1147,6 +1313,7 @@ def test_run_single_only_agn_two_pass_passes_only_agn_to_pass1_clipped_plot(monk
             flat_samples,
             np.zeros(n),
             np.full(n, 0.05),
+            agn_pivot_context=kwargs["agn_pivot_context"],
             logz=-80.0 - len(pipeline_calls),
             logzerr=0.2,
         )
@@ -1244,6 +1411,7 @@ def test_run_single_calls_agn_table_only_for_joint_flatw0wa(monkeypatch, tmp_pat
                 flat_samples,
                 dmi_posterior_median,
                 dmi_posterior_sigma,
+                agn_pivot_context=kwargs["agn_pivot_context"],
                 logz=-50.0,
                 logzerr=0.2,
             ),
@@ -1667,8 +1835,16 @@ def test_normalize_resume_by_model_rejects_mismatched_path_count(resume_values):
 
 def test_run_all_dispatches_resume_path_per_cosmo_model(monkeypatch, tmp_path):
     calls = []
+    shared_context = None
+    observed_joint_contexts = []
 
     def fake_run_single(*args, **kwargs):
+        if kwargs["only_sna"]:
+            assert kwargs["agn_pivot_context"] is None
+        else:
+            assert kwargs["agn_pivot_context"] == shared_context
+            observed_joint_contexts.append(kwargs["agn_pivot_context"])
+            assert kwargs["agn_pivot_context"] is observed_joint_contexts[0]
         calls.append(
             {
                 "cosmo_model": kwargs["cosmo_model"],
@@ -1700,6 +1876,21 @@ def test_run_all_dispatches_resume_path_per_cosmo_model(monkeypatch, tmp_path):
 
     df_agn = _make_fake_agn_sample(n_agn=4)
     df_pantheon = _make_fake_pantheon_sample(n_sne=4)
+    shared_context = _agn_pivot_context(df_agn, (0.44, 3.16))
+    resume_paths = [
+        str(tmp_path / "flatlambda.h5"),
+        str(tmp_path / "flatw.h5"),
+    ]
+    for resume_path in resume_paths:
+        hubble_fit.save_chains(
+            resume_path,
+            **hubble_fit._agn_pivot_checkpoint_payload(shared_context),
+            sigma_clip_pass_stage="single",
+            object_id_fit_selection=np.asarray(
+                shared_context.reference_object_ids,
+                dtype=str,
+            ),
+        )
 
     hubble_fit.run_all(
         df_agn,
@@ -1709,7 +1900,7 @@ def test_run_all_dispatches_resume_path_per_cosmo_model(monkeypatch, tmp_path):
         np.eye(len(df_pantheon)),
         0.0,
         cosmo_models=["FlatLambdaCDM", "FlatwCDM"],
-        resume=["flatlambda.h5", "flatw.h5"],
+        resume=resume_paths,
         speed="fastest",
         compare_sigma_only=True,
         disable_sigma_clip_pass=True,
@@ -1717,10 +1908,10 @@ def test_run_all_dispatches_resume_path_per_cosmo_model(monkeypatch, tmp_path):
     )
 
     assert calls == [
-        {"cosmo_model": "FlatLambdaCDM", "only_sna": False, "resume": "flatlambda.h5"},
-        {"cosmo_model": "FlatLambdaCDM", "only_sna": True, "resume": "flatlambda.h5"},
-        {"cosmo_model": "FlatwCDM", "only_sna": False, "resume": "flatw.h5"},
-        {"cosmo_model": "FlatwCDM", "only_sna": True, "resume": "flatw.h5"},
+        {"cosmo_model": "FlatLambdaCDM", "only_sna": False, "resume": resume_paths[0]},
+        {"cosmo_model": "FlatLambdaCDM", "only_sna": True, "resume": resume_paths[0]},
+        {"cosmo_model": "FlatwCDM", "only_sna": False, "resume": resume_paths[1]},
+        {"cosmo_model": "FlatwCDM", "only_sna": True, "resume": resume_paths[1]},
     ]
 
 
@@ -1747,7 +1938,14 @@ def test_write_stage_checkpoint_roundtrips_pass1_state(tmp_path):
     diagnostics_df["residuals_err"] = np.ones(4)
     diagnostics_df["mu_zscore"] = np.array([0.1, 3.2, 0.2, 0.3])
     diagnostics_df["was_clipped"] = ~keep_mask
-    _write_fake_checkpoint(checkpoint, np.ones((3, 1)), np.zeros(len(df_fit)), np.full(len(df_fit), 0.05))
+    pivot_context = _agn_pivot_context(df_fit, (0.44, 3.16))
+    _write_fake_checkpoint(
+        checkpoint,
+        np.ones((3, 1)),
+        np.zeros(len(df_fit)),
+        np.full(len(df_fit), 0.05),
+        agn_pivot_context=pivot_context,
+    )
 
     hubble_fit._write_stage_checkpoint(
         str(checkpoint),
@@ -1760,6 +1958,11 @@ def test_write_stage_checkpoint_roundtrips_pass1_state(tmp_path):
     )
 
     loaded = hubble_fit.load_chains(str(checkpoint))
+    loaded_pivot_context = hubble_fit._load_agn_pivot_context_from_checkpoint(
+        loaded,
+        checkpoint_file=str(checkpoint),
+    )
+    assert loaded_pivot_context == pivot_context
     assert hubble_fit._checkpoint_stage_from_results(loaded) == "pass1"
     extracted = hubble_fit._extract_pass1_state_from_checkpoint(
         loaded,
@@ -1845,6 +2048,7 @@ def test_subsample_dataframe_at_most_clamps_oversized_requests_without_reorderin
 
 def test_run_mcmc_pipeline_requires_eta_sigma_columns_when_flag_enabled(fake_data, monkeypatch, tmp_path):
     df_agn, df_pantheon = fake_data
+    pivot_context = _agn_pivot_context(df_agn, (0.44, 3.16), use_eta_sigma_term=True)
     df_agn = df_agn.drop(columns=["eta_sigma"])
     monkeypatch.chdir(tmp_path)
 
@@ -1856,6 +2060,7 @@ def test_run_mcmc_pipeline_requires_eta_sigma_columns_when_flag_enabled(fake_dat
             _sna_L=None,
             _sna_Lower=True,
             _sna_LogdetCov=None,
+            agn_pivot_context=pivot_context,
             cosmo_model="FlatLambdaCDM",
             completeness=False,
             use_full_cov=False,
@@ -1867,6 +2072,7 @@ def test_run_mcmc_pipeline_requires_eta_sigma_columns_when_flag_enabled(fake_dat
 def test_run_mcmc_pipeline_requires_finite_eta_sigma_err_when_flag_enabled(fake_data, monkeypatch, tmp_path):
     df_agn, df_pantheon = fake_data
     df_agn = df_agn.copy()
+    pivot_context = _agn_pivot_context(df_agn, (0.44, 3.16), use_eta_sigma_term=True)
     df_agn.loc[df_agn.index[0], "eta_sigma_err"] = np.nan
     monkeypatch.chdir(tmp_path)
 
@@ -1878,6 +2084,7 @@ def test_run_mcmc_pipeline_requires_finite_eta_sigma_err_when_flag_enabled(fake_
             _sna_L=None,
             _sna_Lower=True,
             _sna_LogdetCov=None,
+            agn_pivot_context=pivot_context,
             cosmo_model="FlatLambdaCDM",
             completeness=False,
             use_full_cov=False,
@@ -1894,6 +2101,11 @@ def test_run_mcmc_pipeline_compare_sigma_only_skips_completeness_plots_on_resume
             "z_err": [0.01, 0.01],
             "apparent_mag_2500": [20.1, 20.4],
             "apparent_mag_2500_err": [0.1, 0.1],
+            "log_sigma_uv": [-0.8, -0.7],
+            "log_tau_uv_rf": [2.6, 2.8],
+            "log_sigma_uv_std_psd": [0.05, 0.05],
+            "log_tau_uv_rf_std_psd": [0.06, 0.06],
+            "log_sigma_uv_log_tau_uv_rf_cov_psd": [0.001, 0.001],
         }
     )
     df_pantheon = pd.DataFrame(
@@ -1909,6 +2121,7 @@ def test_run_mcmc_pipeline_compare_sigma_only_skips_completeness_plots_on_resume
     expected = result_root / "hubble_posteriors" / "unit" / "posteriors_FlatLambdaCDM_joint_fastest_all_z0p44_3p16_2d.h5"
     completeness_calls = []
     diagnostics_calls = []
+    pivot_context = _agn_pivot_context(df_agn, (0.44, 3.16))
 
     monkeypatch.setattr(hubble_fit, "get_qvc_result_dir", lambda: result_root)
     monkeypatch.setattr(hubble_fit, "get_model_params", lambda *args, **kwargs: ({"H0": (60.0, 80.0)}, ["H0"], ["H0"]))
@@ -1930,6 +2143,12 @@ def test_run_mcmc_pipeline_compare_sigma_only_skips_completeness_plots_on_resume
             "integrals_max_w": np.ones(len(df_agn)),
             "logZ": -1.0,
             "logZerr": 0.2,
+            **hubble_fit._agn_pivot_checkpoint_payload(pivot_context),
+            "sigma_clip_pass_stage": "single",
+            "object_id_fit_selection": np.asarray(
+                pivot_context.reference_object_ids,
+                dtype=str,
+            ),
         },
     )
     monkeypatch.setattr(hubble_fit.os.path, "exists", lambda path: str(path) == str(expected))
@@ -1946,6 +2165,7 @@ def test_run_mcmc_pipeline_compare_sigma_only_skips_completeness_plots_on_resume
         _sna_L=None,
         _sna_Lower=True,
         _sna_LogdetCov=None,
+        agn_pivot_context=pivot_context,
         cosmo_model="FlatLambdaCDM",
         completeness=True,
         use_full_cov=False,
@@ -1968,6 +2188,7 @@ def test_run_mcmc_pipeline_uses_explicit_parent_sample_for_completeness_map(monk
     priors, model_labels, _ = hubble_model.get_model_params("FlatLambdaCDM", only_sna=False)
     theta = np.array([(priors[key][0] + priors[key][1]) / 2.0 for key in model_labels], dtype=float)
     completeness_sample_ids = []
+    pivot_context = _agn_pivot_context(df_fit, (0.44, 3.16))
 
     class FakeResults:
         samples = np.tile(theta[None, :], (6, 1))
@@ -2020,6 +2241,7 @@ def test_run_mcmc_pipeline_uses_explicit_parent_sample_for_completeness_map(monk
         _sna_L=None,
         _sna_Lower=True,
         _sna_LogdetCov=None,
+        agn_pivot_context=pivot_context,
         cosmo_model="FlatLambdaCDM",
         completeness=True,
         use_full_cov=False,
@@ -2061,7 +2283,28 @@ def _patch_run_single_plot_stack(monkeypatch):
     monkeypatch.setattr(hubble_fit, "make_agn_csv_table", lambda *args, **kwargs: None)
 
 
-def _write_fake_checkpoint(path, flat_samples, dmi_posterior_median, dmi_posterior_sigma, *, logz=-1.0, logzerr=0.2):
+def _write_fake_checkpoint(
+    path,
+    flat_samples,
+    dmi_posterior_median,
+    dmi_posterior_sigma,
+    *,
+    agn_pivot_context=None,
+    logz=-1.0,
+    logzerr=0.2,
+):
+    pivot_payload = (
+        {}
+        if agn_pivot_context is None
+        else {
+            **hubble_fit._agn_pivot_checkpoint_payload(agn_pivot_context),
+            "sigma_clip_pass_stage": "single",
+            "object_id_fit_selection": np.asarray(
+                agn_pivot_context.reference_object_ids,
+                dtype=str,
+            ),
+        }
+    )
     hubble_fit.save_chains(
         str(path),
         flat_samples=flat_samples,
@@ -2072,6 +2315,7 @@ def _write_fake_checkpoint(path, flat_samples, dmi_posterior_median, dmi_posteri
         logZ=float(logz),
         logZerr=float(logzerr),
         integrals_max_w=np.ones(len(dmi_posterior_median), dtype=float),
+        **pivot_payload,
     )
 
 
@@ -2169,6 +2413,17 @@ def test_run_single_resume_replot_with_cuts_bypasses_sampling_passes_and_plots_c
         "compute_agn_likelihood_space_reduced_chi2",
         fake_compute_agn_likelihood_space_reduced_chi2,
     )
+    stored_pivot_context = _agn_pivot_context(df_agn, (0.44, 3.16))
+    resume_path = tmp_path / "posterior.h5"
+    hubble_fit.save_chains(
+        str(resume_path),
+        **hubble_fit._agn_pivot_checkpoint_payload(stored_pivot_context),
+        sigma_clip_pass_stage="single",
+        object_id_fit_selection=np.asarray(
+            stored_pivot_context.reference_object_ids,
+            dtype=str,
+        ),
+    )
 
     hubble_fit.run_single(
         df_agn,
@@ -2180,7 +2435,7 @@ def test_run_single_resume_replot_with_cuts_bypasses_sampling_passes_and_plots_c
         cosmo_model="FlatLambdaCDM",
         completeness=True,
         use_full_cov=False,
-        resume=str(tmp_path / "posterior.h5"),
+        resume=str(resume_path),
         speed="fastest",
         prefix="unit",
         resume_replot_with_cuts=True,
@@ -2258,6 +2513,7 @@ def test_run_single_two_pass_sigma_clip_filters_outliers_and_writes_diagnostics(
             flat_samples,
             np.zeros(n),
             np.full(n, 0.05),
+            agn_pivot_context=kwargs["agn_pivot_context"],
             logz=logz,
             logzerr=0.2,
         )
@@ -2384,6 +2640,31 @@ def test_run_single_two_pass_sigma_clip_filters_outliers_and_writes_diagnostics(
     assert "mu_zscore_pass1" in pass2_checkpoint
     assert len(pass1_checkpoint["object_id_fit_selection"]) == len(pass1_checkpoint["dmi_posterior_median"])
     assert len(pass2_checkpoint["object_id_fit_selection"]) == len(pass2_checkpoint["dmi_posterior_median"])
+    expected_initial_fit_ids = np.array(
+        ["agn_000", "agn_001", "agn_002", "agn_003", "agn_004"],
+        dtype=str,
+    )
+    for checkpoint, checkpoint_path in (
+        (pass1_checkpoint, checkpoint_paths["pass1"]),
+        (pass2_checkpoint, checkpoint_paths["pass2"]),
+    ):
+        np.testing.assert_array_equal(
+            hubble_fit._normalize_object_id_array(
+                checkpoint["object_id_initial_fit_selection"],
+                field_name="object_id_initial_fit_selection",
+                checkpoint_file=checkpoint_path,
+            ),
+            expected_initial_fit_ids,
+        )
+        checkpoint_context = hubble_fit._load_agn_pivot_context_from_checkpoint(
+            checkpoint,
+            checkpoint_file=checkpoint_path,
+        )
+        hubble_fit._validate_agn_pivot_checkpoint_reference_provenance(
+            checkpoint_context,
+            checkpoint,
+            checkpoint_file=checkpoint_path,
+        )
     assert set(pass1_checkpoint["object_id_fit_selection"].astype(str)) == {
         "agn_000", "agn_001", "agn_002", "agn_003", "agn_004"
     }
@@ -2417,6 +2698,7 @@ def test_run_single_two_pass_sigma_clip_fresh_mode_reruns_without_warm_start(mon
             flat_samples,
             np.zeros(n),
             np.full(n, 0.05),
+            agn_pivot_context=kwargs["agn_pivot_context"],
             logz=-20.0 - len(pipeline_calls),
             logzerr=0.2,
         )
@@ -2526,6 +2808,7 @@ def test_run_single_two_pass_sigma_clip_removes_clipped_object_ids_from_second_p
             flat_samples,
             np.zeros(n),
             np.full(n, 0.05),
+            agn_pivot_context=kwargs["agn_pivot_context"],
             logz=-30.0,
             logzerr=0.2,
         )
@@ -2641,6 +2924,7 @@ def test_run_single_two_pass_sigma_clip_keeps_new_pass2_outlier(monkeypatch, tmp
             flat_samples,
             np.zeros(n),
             np.full(n, 0.05),
+            agn_pivot_context=kwargs["agn_pivot_context"],
             logz=-33.0,
             logzerr=0.2,
         )
@@ -2746,6 +3030,7 @@ def test_run_single_two_pass_sigma_clip_keeps_out_of_range_survivor_in_stage2_pl
             flat_samples,
             np.zeros(n),
             np.full(n, 0.05),
+            agn_pivot_context=kwargs["agn_pivot_context"],
             logz=-60.0,
             logzerr=0.2,
         )
@@ -2879,7 +3164,15 @@ def test_run_single_resume_stage_pass2_skips_first_pass(monkeypatch, tmp_path):
     run_tag = hubble_fit.make_run_tag("FlatLambdaCDM", False, "fastest", None, (0.44, 3.16), completeness=False)
     checkpoint_paths = hubble_fit._build_checkpoint_paths("unit", run_tag)
     flat_samples_pass1 = np.tile(theta[None, :], (8, 1))
-    _write_fake_checkpoint(checkpoint_paths["pass1"], flat_samples_pass1, np.zeros(5), np.full(5, 0.05), logz=-11.0)
+    pivot_context = _agn_pivot_context(df_agn, (0.44, 3.16))
+    _write_fake_checkpoint(
+        checkpoint_paths["pass1"],
+        flat_samples_pass1,
+        np.zeros(5),
+        np.full(5, 0.05),
+        agn_pivot_context=pivot_context,
+        logz=-11.0,
+    )
     pass1_diag = df_agn.copy()
     pass1_diag["residuals"] = np.array([0.1, 3.5, 0.2, 0.3, 0.4, 4.2], dtype=float)
     pass1_diag["residuals_err"] = np.ones(len(df_agn), dtype=float)
@@ -2892,6 +3185,9 @@ def test_run_single_resume_stage_pass2_skips_first_pass(monkeypatch, tmp_path):
         sigma_clip_threshold=3.0,
         df_agn_full_sample=df_agn,
         df_agn_fit_selection=df_agn[df_agn["z"].between(0.44, 3.16)].copy(),
+        df_agn_initial_fit_selection=df_agn[
+            df_agn["z"].between(0.44, 3.16)
+        ].copy(),
         keep_mask_full=keep_mask_full,
         pass1_diagnostics_df=pass1_diag,
     )
@@ -2909,7 +3205,14 @@ def test_run_single_resume_stage_pass2_skips_first_pass(monkeypatch, tmp_path):
         )
         flat_samples = np.tile(theta[None, :], (8, 1))
         n = len(df_agn)
-        _write_fake_checkpoint(kwargs["checkpoint_file_override"], flat_samples, np.zeros(n), np.full(n, 0.05), logz=-12.0)
+        _write_fake_checkpoint(
+            kwargs["checkpoint_file_override"],
+            flat_samples,
+            np.zeros(n),
+            np.full(n, 0.05),
+            agn_pivot_context=kwargs["agn_pivot_context"],
+            logz=-12.0,
+        )
         return (
             flat_samples,
             model_labels,
@@ -2965,7 +3268,7 @@ def test_run_single_resume_stage_pass2_rejects_legacy_checkpoint(monkeypatch, tm
     checkpoint_paths = hubble_fit._build_checkpoint_paths("unit", run_tag)
     _write_fake_checkpoint(checkpoint_paths["single"], np.tile(theta[None, :], (8, 1)), np.zeros(len(df_agn)), np.full(len(df_agn), 0.05), logz=-9.0)
 
-    with pytest.raises(RuntimeError, match="embedded pass-1 clipping state"):
+    with pytest.raises(RuntimeError, match="missing required immutable pivot metadata"):
         hubble_fit.run_single(
             df_agn=df_agn,
             df_agn_all=df_agn.copy(),
@@ -3001,7 +3304,14 @@ def test_run_single_resume_stage_pass1_stops_before_second_pass(monkeypatch, tmp
         pipeline_calls.append({"object_ids": df_agn["object_id"].tolist(), "resume": kwargs.get("resume")})
         flat_samples = np.tile(theta[None, :], (8, 1))
         n = len(df_agn)
-        _write_fake_checkpoint(kwargs["checkpoint_file_override"], flat_samples, np.zeros(n), np.full(n, 0.05), logz=-14.0)
+        _write_fake_checkpoint(
+            kwargs["checkpoint_file_override"],
+            flat_samples,
+            np.zeros(n),
+            np.full(n, 0.05),
+            agn_pivot_context=kwargs["agn_pivot_context"],
+            logz=-14.0,
+        )
         return (
             flat_samples,
             model_labels,
@@ -3079,6 +3389,7 @@ def test_run_single_disable_sigma_clip_pass_skips_two_pass_branch(monkeypatch, t
             flat_samples,
             np.zeros(n),
             np.full(n, 0.05),
+            agn_pivot_context=kwargs["agn_pivot_context"],
             logz=-40.0,
             logzerr=0.2,
         )

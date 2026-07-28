@@ -242,8 +242,8 @@ def log_likelihood(theta, *, agn_data, pantheon_data,
                    _sna_L, _sna_Lower, _sna_LogdetCov,
                    cosmo_model, completeness_params,
                    z_pivot_agn,
+                   agn_pivot_context,
                    agn_calibrators_data=None,
-                   agn_pivot_arr=None,
                    use_planck_h0_prior=False,
                    use_planck_om_prior=False,
                    use_ceph_dist_calibration=True,
@@ -321,7 +321,7 @@ def log_likelihood(theta, *, agn_data, pantheon_data,
         agn_data,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
-        pivot_values=agn_pivot_arr,
+        pivot_context=agn_pivot_context,
     )
 
     M_pred = M_model_agn(
@@ -399,6 +399,7 @@ def log_likelihood_nearbylcs(
     _sna_L, _sna_Lower, _sna_LogdetCov,
     cosmo_model, completeness_params,
     z_pivot_agn,
+    agn_pivot_context,
     use_planck_h0_prior=False,
     use_planck_om_prior=False,
     use_ceph_dist_calibration=True,
@@ -479,6 +480,7 @@ def log_likelihood_nearbylcs(
         {k: v[mask_noncal] for k, v in agn_data.items()},
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        pivot_context=agn_pivot_context,
     )
 
     M_pred_nc = M_model_agn(
@@ -538,6 +540,7 @@ def log_likelihood_nearbylcs(
             {k: agn_calibrators_data[k][cal_mask_tbl] for k in agn_calibrators_data.keys()},
             use_alpha_lambda_term=use_alpha_lambda_term,
             use_eta_sigma_term=use_eta_sigma_term,
+            pivot_context=agn_pivot_context,
         )
 
         M_pred_c = M_model_agn(
