@@ -1,5 +1,6 @@
 import os
 import sys
+import types
 from pathlib import Path
 
 import h5py
@@ -17,8 +18,57 @@ if str(SRC) not in sys.path:
 
 from qvc.hubble import hubble_completeness_refactored as hcr
 from qvc.hubble import hubble_fit, hubble_likelihood, hubble_model
-from qvc.hubble.completeness_mock_catalog import save_mock_catalog
+from qvc.hubble.completeness_mock_catalog import (
+    AB_ABSOLUTE_MAG_ZEROPOINT,
+    LOG10_MAG_JACOBIAN,
+    NU_2500_HZ,
+    build_shen_lf,
+    log_nu_lnu_to_ab_absolute_magnitude,
+    save_mock_catalog,
+)
 from qvc.hubble.hubble_likelihood import completeness_loglike
+
+
+def test_build_shen_lf_uses_extinction_convolved_physical_2500_channel(
+    tmp_path, monkeypatch
+):
+    """Gold test that the Shen mock parent is the observed 2500 A LF."""
+    calls = []
+    log_nu_lnu = np.array([44.0, 45.0])
+    log_phi_dex = np.array([-5.0, -6.0])
+
+    def fake_return_qlf_in_band(redshift, nu, model):
+        calls.append((redshift, nu, model))
+        return log_nu_lnu, log_phi_dex
+
+    fake_utilities = types.ModuleType("utilities")
+    fake_utilities.return_qlf_in_band = fake_return_qlf_in_band
+    monkeypatch.setitem(sys.modules, "utilities", fake_utilities)
+
+    phi_log10, m_grid, z_bins = build_shen_lf(tmp_path)
+
+    assert len(calls) == len(z_bins) == 40
+    assert all(np.isclose(nu, NU_2500_HZ) and model == "B" for _, nu, model in calls)
+    np.testing.assert_allclose(
+        phi_log10,
+        np.tile(log_phi_dex + LOG10_MAG_JACOBIAN, (len(z_bins), 1)),
+    )
+    np.testing.assert_allclose(
+        m_grid,
+        AB_ABSOLUTE_MAG_ZEROPOINT
+        - 2.5 * (log_nu_lnu - np.log10(NU_2500_HZ)),
+    )
+
+
+def test_log_nu_lnu_to_ab_absolute_magnitude_gold_value():
+    target_magnitude = -25.0
+    log_lnu = (AB_ABSOLUTE_MAG_ZEROPOINT - target_magnitude) / 2.5
+    log_nu_lnu = log_lnu + np.log10(NU_2500_HZ)
+    np.testing.assert_allclose(
+        log_nu_lnu_to_ab_absolute_magnitude(log_nu_lnu, NU_2500_HZ),
+        target_magnitude,
+        atol=1e-12,
+    )
 
 
 def test_completeness_loglike_includes_bright_gaussian_tail():

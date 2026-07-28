@@ -19,6 +19,14 @@ COSMO = FlatLambdaCDM(H0=70.0, Om0=0.3)
 L_SUN_ERG_S = 3.828e33
 L0 = 1e10 * L_SUN_ERG_S
 LOG10_MAG_JACOBIAN = np.log10(0.4)
+NU_2500_HZ = 2.99792458e18 / 2500.0
+AB_ABSOLUTE_MAG_ZEROPOINT = 51.59477721004232
+
+
+def log_nu_lnu_to_ab_absolute_magnitude(log_nu_lnu, frequency_hz):
+    """Convert log10(nu L_nu / erg s^-1) to monochromatic absolute AB magnitude."""
+    log_lnu = np.asarray(log_nu_lnu, dtype=float) - np.log10(float(frequency_hz))
+    return AB_ABSOLUTE_MAG_ZEROPOINT - 2.5 * log_lnu
 
 
 def _candidate_existing_path(*candidates):
@@ -113,10 +121,13 @@ def build_shen_lf(pubtools_path):
         with _temporary_cwd(pubtools_path):
             silent_stream = io.StringIO()
             with redirect_stdout(silent_stream), redirect_stderr(silent_stream):
-                from utilities import return_bolometric_qlf
+                from utilities import return_qlf_in_band
 
                 z_bins = np.linspace(0.0, 8.0, 40)
-                qlf_values = [return_bolometric_qlf(redshift=z, model="B") for z in z_bins]
+                qlf_values = [
+                    return_qlf_in_band(redshift=z, nu=NU_2500_HZ, model="B")
+                    for z in z_bins
+                ]
     finally:
         try:
             sys.path.remove(str(pubtools_path))
@@ -125,7 +136,13 @@ def build_shen_lf(pubtools_path):
 
     luminosities = np.asarray(qlf_values[0][0], dtype=float)
     phi_log10 = np.asarray([qlf[1] for qlf in qlf_values], dtype=float) + LOG10_MAG_JACOBIAN
-    m_grid = 91.0 - 2.5 * luminosities
+    # Evaluate the physical 2500 A channel rather than Shen's nu=0 identity
+    # channel.  This includes the SED/bolometric-correction scatter and the
+    # N_H-dependent extinction model, so the mock parent is the optically
+    # detectable population rather than the total intrinsic bolometric QLF.
+    # m_grid is monochromatic rest-frame absolute AB M_2500, converted from
+    # Shen's nu*L_nu(2500 A); it is not apparent, bolometric, or band-integrated.
+    m_grid = log_nu_lnu_to_ab_absolute_magnitude(luminosities, NU_2500_HZ)
     return phi_log10, m_grid, z_bins
 
 
