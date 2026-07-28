@@ -129,6 +129,26 @@ python -m qvc.spectra.fit_spectra \
   --nproc 1
 ```
 
+An experimental SED-first companion jointly fits a saved broadband-SED table
+and the SDSS spectrum with JAXSEDFit. It keeps the native `fit_spectra` sample
+matching and spectrum cache, always replaces saved SDSS points with the QVC
+light-curve PSF `ugriz` means (including `z` even when it is excluded from the
+variability fit), and uses JAXSEDFit's `jaxqsofit` joint spectral backend:
+
+```bash
+python -m qvc.spectra.fit_spectra_jaxsedfit_joint \
+  --mode fit \
+  "results/data/spectra/demo_joint.csv" \
+  --cache-dir "data/spectra_cache_all" \
+  --sed-photometry-path "/path/to/saved_sed_photometry.parquet" \
+  --output-dir "results/jaxsedfit_joint/demo" \
+  --fig-dir "plots/jaxsedfit_joint/demo" \
+  --dsps-ssp-fn "../jaxqsofit/tempdata.h5" \
+  --filter_object_id 1452887 \
+  --progress \
+  --nproc 1
+```
+
 ### Hubble Diagram Fitting
 
 Resumes the saved fiducial and restricted Hubble posterior checkpoints and regenerates the comparison outputs and plots.
