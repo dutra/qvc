@@ -19,7 +19,7 @@ from tinygp.kernels import quasisep as qs
 DEFAULT_RHO = 1.0 / 150.0
 RHO_LOGIT_PRIOR_SIGMA_DEX = 0.4
 DEFAULT_QUALITY_FACTOR = 0.1
-LOG_QUALITY_FACTOR_PRIOR_SIGMA = 1.0
+LOG_QUALITY_FACTOR_PRIOR_SIGMA = 0.6
 MIN_QUALITY_FACTOR = 0.05
 MAX_QUALITY_FACTOR = 3.0
 DEFAULT_PERTURBATION_TO_DRW_RATIO = 0.02
@@ -58,12 +58,13 @@ def dho_logit_rho_prior():
 
 
 def log_quality_factor_prior():
-    """Legacy-centered prior with a tail into the oscillatory regime.
+    """Legacy-centered prior with a conservative oscillatory tail.
 
     Most prior mass is overdamped, near the quality factor implied by the
-    legacy pole-ratio prior. Genuine QPO-like data can still move above
-    critical damping, while the upper bound excludes extremely coherent,
-    poorly identified solutions on a finite light-curve baseline.
+    legacy pole-ratio prior.  The support deliberately still includes
+    ``Q > 1/2``, but ordinary red-noise data must supply appreciable likelihood
+    evidence to overcome the prior rather than drifting into a weakly
+    identified oscillatory mode.
     """
 
     return dist.TruncatedNormal(

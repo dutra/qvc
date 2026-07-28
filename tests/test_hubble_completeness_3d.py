@@ -68,6 +68,9 @@ def test_log_nu_lnu_to_ab_absolute_magnitude_gold_value():
         log_nu_lnu_to_ab_absolute_magnitude(log_nu_lnu, NU_2500_HZ),
         target_magnitude,
         atol=1e-12,
+    )
+
+
 def _build_pivot_context(df_agn):
     z = df_agn["z"].to_numpy(dtype=float)
     return hubble_model.build_agn_pivot_context(

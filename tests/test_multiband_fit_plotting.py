@@ -13,7 +13,7 @@ class _RecordingPredictionModel:
         return times + 10.0 * bands, np.ones_like(times)
 
 
-def test_predict_regular_band_grid_batches_all_bands_in_one_call():
+def test_predict_regular_band_grid_uses_one_band_per_call():
     model = _RecordingPredictionModel()
     times = np.array([100.0, 102.0, 105.0])
     bands = np.array([0, 2, 4])
@@ -26,10 +26,11 @@ def test_predict_regular_band_grid_batches_all_bands_in_one_call():
         time0=100.0,
     )
 
-    assert len(model.calls) == 1
-    _, query_times, query_bands = model.calls[0]
-    assert np.array_equal(query_times, np.repeat(times - 100.0, bands.size))
-    assert np.array_equal(query_bands, np.tile(bands, times.size))
+    assert len(model.calls) == bands.size
+    for call, band in zip(model.calls, bands):
+        _, query_times, query_bands = call
+        assert np.array_equal(query_times, times - 100.0)
+        assert np.array_equal(query_bands, np.full(times.size, band))
     assert mean.shape == (times.size, bands.size)
     assert std.shape == mean.shape
     assert np.array_equal(mean[:, 0], times - 100.0)
@@ -48,11 +49,11 @@ def test_predict_regular_band_grid_splits_large_queries_without_changing_output(
         times,
         bands,
         time0=100.0,
-        max_query_points=5,
+        max_query_points=2,
     )
 
-    assert len(model.calls) == 3
-    assert all(call[1].size <= 5 for call in model.calls)
+    assert len(model.calls) == 6
+    assert all(call[1].size <= 2 for call in model.calls)
     assert mean.shape == (times.size, bands.size)
     assert std.shape == mean.shape
     assert np.array_equal(mean[:, 0], times - 100.0)

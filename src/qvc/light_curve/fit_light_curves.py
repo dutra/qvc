@@ -121,7 +121,11 @@ LOG_SF_INF_TO_RMS = 0.5 * np.log10(2.0)
 RELFLUX_TO_MAG_SCALE = float(2.5 / np.log(10.0))
 LOG_RELFLUX_TO_MAG_SCALE = float(np.log(RELFLUX_TO_MAG_SCALE))
 LINEAR_TREND_RF_SIGMA_MAG_PER_DAY = 1e-4
-FLUX_LINEARIZED_REFINEMENT_ITERS = 3
+# A single observation-space transform is stable and preserves the
+# quasi-separable likelihood. Reusing posterior predictions as pseudo-data in
+# later rounds can create self-reinforcing SVI modes, so extra refinements are
+# opt-in diagnostics rather than the production default.
+FLUX_LINEARIZED_REFINEMENT_ITERS = 1
 FLUX_LINEARIZED_MIN_TOTAL_FLUX_RATIO = 0.05
 SDSS_FILTER_BLUE_EDGE_OBS = {
     "u": 3055.11,
@@ -2741,11 +2745,15 @@ def tau_shift_to_uv(eta_tau, lambda_center_rf, lambda_uv=2500.0):
 
 
 def eta_sigma_prior():
-    return dist.TruncatedNormal(-0.5, 1.0) #, low=ETA_SIGMA_LOW, high=0.0)
+    """Quasar-like wavelength scaling for the stationary continuum RMS."""
+
+    return dist.TruncatedNormal(-0.5, 0.3, low=-1.5, high=0.25)
 
 
 def eta_tau_prior():
-    return dist.Normal(0.5, 0.5)
+    """Weakly informative wavelength scaling for the DRW-style timescale."""
+
+    return dist.TruncatedNormal(0.2, 0.35, low=-0.5, high=1.25)
 
 
 def log_sigma_center0_prior(eta_sigma, lambda_center_rf):
@@ -3038,10 +3046,8 @@ def sample_flux_line_latent_params(
     disable_lag_blr=False,
     disable_lag_bc=False,
     n_blr_terms=1,
-    shared_blr_lag=False,
-    blr_lag_band_scatter=None,
 ):
-    """Sample flux line parameters in ratio space and reconstruct legacy deltas exactly."""
+    """Sample flux-line parameters with independent per-band BLR lags."""
 
     if disable_lag_blr or disable_lag_bc:
         dlog_amp_bc = None
@@ -3060,25 +3066,26 @@ def sample_flux_line_latent_params(
             log_lag_ratio_bc_to_blr_prior(),
         )
 
+    # In the CARMA(2,1) kernel this ratio is interpreted as the stationary RMS
+    # of the filtered BLR response relative to the UV continuum scale. Broad-
+    # band reverberation fractions are bounded below at a numerically
+    # negligible value and above at unity; the legacy exp(-1) center is
+    # retained.
     log_amp_ratio_blr_loc = line_ratio_offsets["blr_band"] - 1.0
+    log_amp_ratio_blr_low = line_ratio_offsets["blr_band"] + jnp.log(5e-3)
+    log_amp_ratio_blr_high = line_ratio_offsets["blr_band"]
+
+    def blr_amp_ratio_prior():
+        return dist.TruncatedNormal(
+            log_amp_ratio_blr_loc,
+            0.75,
+            low=log_amp_ratio_blr_low,
+            high=log_amp_ratio_blr_high,
+        )
     if mean_prior_dist is None:
         mean_prior_dist = mean_prior()
     log_jitter = _sample_log_jitter_grid(log_jitter_mean, log_jitter_active_mask)
     survey_delta_mag = _sample_survey_delta_mag_grid(survey_offset_active_mask)
-
-    shared_log_lag_blr = None
-    use_pooled_blr_lag = shared_blr_lag or blr_lag_band_scatter is not None
-    band_scatter = 0.0 if shared_blr_lag else blr_lag_band_scatter
-    if use_pooled_blr_lag and not disable_lag_blr:
-        if n_blr_terms != 1:
-            raise ValueError("Pooled BLR lags currently require n_blr_terms=1.")
-        if band_scatter is None or float(band_scatter) < 0.0:
-            raise ValueError("blr_lag_band_scatter must be non-negative.")
-        shared_delta_log_lag_blr_raw = numpyro.sample(
-            "delta_log_lag_blr_shared_raw",
-            relative_log_lag_blr_prior(z=z, log_lag0=log_lag0),
-        )
-        shared_log_lag_blr = shared_delta_log_lag_blr_raw + log_lag0
 
     with numpyro.plate("band", B):
         mean = numpyro.sample("mean", mean_prior_dist)
@@ -3103,26 +3110,13 @@ def sample_flux_line_latent_params(
         elif n_blr_terms <= 1:
             log_amp_ratio_blr_raw = numpyro.sample(
                 "log_amp_ratio_blr_raw",
-                dist.Normal(log_amp_ratio_blr_loc, 1.0),
+                blr_amp_ratio_prior(),
             )
-            if shared_log_lag_blr is None:
-                delta_log_lag_blr_raw = numpyro.sample(
-                    "delta_log_lag_blr_raw",
-                    relative_log_lag_blr_prior(z=z, log_lag0=log_lag0),
-                )
-                log_lag_blr_raw = delta_log_lag_blr_raw + log_lag0
-            else:
-                if float(band_scatter) > 0.0:
-                    blr_lag_band_offset_raw = numpyro.sample(
-                        "blr_lag_band_offset_raw",
-                        dist.Normal(0.0, 1.0),
-                    )
-                    log_lag_blr_raw = (
-                        shared_log_lag_blr
-                        + jnp.asarray(band_scatter) * blr_lag_band_offset_raw
-                    )
-                else:
-                    log_lag_blr_raw = jnp.broadcast_to(shared_log_lag_blr, (B,))
+            delta_log_lag_blr_raw = numpyro.sample(
+                "delta_log_lag_blr_raw",
+                relative_log_lag_blr_prior(z=z, log_lag0=log_lag0),
+            )
+            log_lag_blr_raw = delta_log_lag_blr_raw + log_lag0
             dlog_amp_blr = numpyro.deterministic(
                 "dlog_amp_blr",
                 log_amp_ratio_blr_raw - line_ratio_offsets["blr_band"],
@@ -3142,7 +3136,7 @@ def sample_flux_line_latent_params(
         else:
             log_amp_ratio_blr_raw = numpyro.sample(
                 "log_amp_ratio_blr_raw",
-                dist.Normal(log_amp_ratio_blr_loc, 1.0),
+                blr_amp_ratio_prior(),
             )
             delta_log_lag_blr_raw = numpyro.sample(
                 "delta_log_lag_blr_raw",
@@ -3151,7 +3145,7 @@ def sample_flux_line_latent_params(
             log_lag_blr_raw = delta_log_lag_blr_raw + log_lag0
             log_amp_ratio_blr2_raw = numpyro.sample(
                 "log_amp_ratio_blr2_raw",
-                dist.Normal(log_amp_ratio_blr_loc, 1.0),
+                blr_amp_ratio_prior(),
             )
             delta_log_lag_blr2_raw = numpyro.sample(
                 "delta_log_lag_blr2_raw",
@@ -4074,10 +4068,8 @@ def build_single_object_model_mag_flux_linearized(
     tau_fast_truncated=False,
     n_blr_terms=1,
     use_erlang=True,
-    shared_blr_lag=False,
     erlang_order=DEFAULT_ERLANG_ORDER,
     use_fast_solver=False,
-    blr_lag_band_scatter=None,
     drw_parameterization=False,
 ):
     """Return the relative-flux quasi-separable model for one object."""
@@ -4241,8 +4233,6 @@ def build_single_object_model_mag_flux_linearized(
             disable_lag_blr=disable_lag_blr,
             disable_lag_bc=(True if use_erlang else disable_lag_bc),
             n_blr_terms=n_blr_terms,
-            shared_blr_lag=shared_blr_lag,
-            blr_lag_band_scatter=blr_lag_band_scatter,
         )
 
         _ = numpyro.deterministic("log_tau_fake", float(obj_dict.get("log_tau_fake", -99.0)))
@@ -4484,6 +4474,33 @@ def _flux_linearized_pseudo_data_from_prediction(obj_dict, model, params):
     return jnp.asarray(y_relflux, dtype=float), jnp.asarray(yerr_relflux, dtype=float)
 
 
+FLUX_LINEARIZED_REFINEMENT_DAMPING = 0.5
+FLUX_LINEARIZED_MAX_STEP = 0.25
+
+
+def _damped_flux_linearized_update(y_fit, yerr_fit, y_target, yerr_target):
+    """Apply a trust-region step to the local magnitude-likelihood update."""
+
+    y_fit = np.asarray(y_fit, dtype=float)
+    yerr_fit = np.asarray(yerr_fit, dtype=float)
+    y_target = np.asarray(y_target, dtype=float)
+    yerr_target = np.asarray(yerr_target, dtype=float)
+    delta = np.clip(
+        y_target - y_fit,
+        -FLUX_LINEARIZED_MAX_STEP,
+        FLUX_LINEARIZED_MAX_STEP,
+    )
+    damping = FLUX_LINEARIZED_REFINEMENT_DAMPING
+    y_next = y_fit + damping * delta
+    # Interpolate positive scales geometrically; this is stable when the
+    # magnitude-to-flux Jacobian changes substantially between refinements.
+    yerr_next = np.exp(
+        (1.0 - damping) * np.log(np.maximum(yerr_fit, 1e-12))
+        + damping * np.log(np.maximum(yerr_target, 1e-12))
+    )
+    return jnp.asarray(y_next), jnp.asarray(yerr_next)
+
+
 def _build_mag_flux_linearized_model_for_fit(obj_dict, lam_rf, log_jitter_mean, **kwargs):
     return build_single_object_model_mag_flux_linearized(
         obj_dict,
@@ -4518,10 +4535,8 @@ def run_iterated_mag_flux_linearized_inference(
     tau_fast_truncated=False,
     n_blr_terms=1,
     model_variant="mag_flux_linearized_erlang",
-    shared_blr_lag=False,
     erlang_order=DEFAULT_ERLANG_ORDER,
     use_fast_solver=False,
-    blr_lag_band_scatter=None,
     refinement_strategy="nuts_each",
     refinement_iters=FLUX_LINEARIZED_REFINEMENT_ITERS,
     drw_parameterization=False,
@@ -4567,10 +4582,8 @@ def run_iterated_mag_flux_linearized_inference(
         tau_fast_truncated=tau_fast_truncated,
         n_blr_terms=n_blr_terms,
         use_erlang=(model_variant == "mag_flux_linearized_erlang"),
-        shared_blr_lag=shared_blr_lag,
         erlang_order=erlang_order,
         use_fast_solver=use_fast_solver,
-        blr_lag_band_scatter=blr_lag_band_scatter,
         drw_parameterization=drw_parameterization,
     )
 
@@ -4670,10 +4683,16 @@ def run_iterated_mag_flux_linearized_inference(
             has_jitter=has_jitter,
             erlang_order=erlang_order,
         )
-        y_next, yerr_next = _flux_linearized_pseudo_data_from_prediction(
+        y_target, yerr_target = _flux_linearized_pseudo_data_from_prediction(
             obj_dict,
             display_model,
             params_median,
+        )
+        y_next, yerr_next = _damped_flux_linearized_update(
+            y_fit,
+            yerr_fit,
+            y_target,
+            yerr_target,
         )
         diagnostics[f"flux_linearized_iter{iter_idx + 1}_pseudo_delta_rms"] = float(
             np.sqrt(np.nanmean(np.square(np.asarray(y_next) - np.asarray(y_fit))))
@@ -4775,8 +4794,8 @@ def main():
         default="nuts_each",
         help=(
             "Inference schedule for iterative flux-linearized models. "
-            "'nuts_each' runs SVI+NUTS at all three refinements (legacy baseline); "
-            "'svi_then_nuts' uses the SVI median for the first two pseudo-data "
+            "'nuts_each' runs NUTS at every requested refinement; "
+            "'svi_then_nuts' uses the SVI median for intermediate pseudo-data "
             "updates and runs NUTS only for the final posterior."
         ),
     )
@@ -4831,26 +4850,6 @@ def main():
         default="fast",
         help="Corner plot row selection: fast subsampling or full posterior samples.",
     )
-    parser.add_argument(
-        "--shared_blr_lag",
-        action="store_true",
-        default=False,
-        help="Sample one BLR lag and use it in every retained band; per-band BLR amplitudes remain free.",
-    )
-    parser.add_argument(
-        "--blr_lag_band_scatter",
-        type=float,
-        default=0.4,
-        help="Partially pool band BLR lags around one shared log lag with this fixed natural-log scatter (default: 0.4).",
-    )
-    parser.add_argument(
-        "--independent_blr_lags",
-        action="store_const",
-        const=None,
-        dest="blr_lag_band_scatter",
-        help="Use the legacy fully independent prior for each band's BLR lag.",
-    )
-    parser.set_defaults(blr_lag_band_scatter=0.4)
     parser.add_argument("--disable_lag_bc", action="store_true", default=False, help="Disable Balmer-continuum lag model.")
     parser.add_argument("--disable_plot_psd", action="store_true", default=False, help="Disable PSD sub-plot.")
     parser.add_argument("--disable_sigma_tau_lambda_plot", action="store_true", default=False, help="Disable sigma-tau versus wavelength summary plot.")
@@ -4897,7 +4896,7 @@ def main():
         default=FLUX_LINEARIZED_REFINEMENT_ITERS,
         help=(
             "Number of Gauss-Newton magnitude-likelihood refinement fits for "
-            "flux-linearized model variants (default: 3)."
+            f"flux-linearized model variants (default: {FLUX_LINEARIZED_REFINEMENT_ITERS})."
         ),
     )
     parser.add_argument(
@@ -4987,14 +4986,6 @@ def main():
             "--flux_linearized_refinement_strategy svi_then_nuts requires "
             "--fit_method svi+nuts."
         )
-    if args.shared_blr_lag:
-        args.blr_lag_band_scatter = 0.0
-    if args.shared_blr_lag and args.n_blr_terms != 1:
-        raise ValueError("--shared_blr_lag currently requires --n_blr_terms 1.")
-    if args.blr_lag_band_scatter is not None and args.blr_lag_band_scatter < 0.0:
-        raise ValueError("--blr_lag_band_scatter must be non-negative.")
-    if args.blr_lag_band_scatter is not None and args.n_blr_terms != 1:
-        raise ValueError("--blr_lag_band_scatter currently requires --n_blr_terms 1.")
     if args.erlang_order < 1:
         raise ValueError("--erlang_order must be at least 1.")
     if args.flux_linearized_refinement_iters < 1:
@@ -5156,10 +5147,8 @@ def main():
                         tau_fast_truncated=args.tau_fast_truncated,
                         n_blr_terms=args.n_blr_terms,
                         model_variant=args.model_variant,
-                        shared_blr_lag=args.shared_blr_lag,
                         erlang_order=args.erlang_order,
                         use_fast_solver=args.fast_solver,
-                        blr_lag_band_scatter=args.blr_lag_band_scatter,
                         refinement_strategy=args.flux_linearized_refinement_strategy,
                         refinement_iters=args.flux_linearized_refinement_iters,
                         drw_parameterization=args.dho_drw_parameterization,
