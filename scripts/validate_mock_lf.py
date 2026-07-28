@@ -78,7 +78,11 @@ def main():
     old_cwd = Path.cwd()
     os.chdir(pubtools)
     try:
-        from utilities import return_bolometric_qlf, return_qlf_in_band
+        from utilities import (
+            bolometric_correction,
+            return_bolometric_qlf,
+            return_qlf_in_band,
+        )
         from obdata_copy.new_load_palanque16_lf_data import load_palanque16_lf_data
         from obdata_copy import new_load_ross13_lf_data as ross13
         from obdata_copy.new_load_kk18_lf_shape import return_kk18_lf_fitted
@@ -86,6 +90,69 @@ def main():
         # without a path separator in this loader. Point it explicitly at the
         # data directory shipped with the same Shen checkout.
         ross13.datapath = str(pubtools / "data") + os.sep
+
+        log_lbol_erg_s = np.linspace(43.0, 49.0, 241)
+        log_lbol_lsun = log_lbol_erg_s - LOG10_LSUN_ERG_S
+        log_nu_lnu_2500 = (
+            np.asarray(
+                [bolometric_correction(value, NU_2500_HZ) for value in log_lbol_lsun]
+            )
+            + LOG10_LSUN_ERG_S
+        )
+        m2500_shen_sed = log_nu_lnu_to_ab_absolute_magnitude(
+            log_nu_lnu_2500, NU_2500_HZ
+        )
+        m2500_fixed_bc = 91.0 - 2.5 * log_lbol_erg_s
+        delta_m2500 = m2500_fixed_bc - m2500_shen_sed
+        bc2500 = 10.0 ** (log_lbol_erg_s - log_nu_lnu_2500)
+        sed_check = pd.DataFrame(
+            {
+                "log_lbol_erg_s": log_lbol_erg_s,
+                "log_nu_lnu_2500_erg_s": log_nu_lnu_2500,
+                "bc2500_shen": bc2500,
+                "M2500_shen_sed": m2500_shen_sed,
+                "M2500_fixed_bc_4p82": m2500_fixed_bc,
+                "delta_M_fixed_minus_shen": delta_m2500,
+            }
+        )
+        sed_check.to_csv(output_dir / "m2500_fixed_bc_vs_shen_sed.csv", index=False)
+
+        fig, (ax_mag, ax_delta) = plt.subplots(
+            2, 1, figsize=(8, 7), sharex=True, gridspec_kw={"height_ratios": [2, 1]}
+        )
+        ax_mag.plot(log_lbol_erg_s, m2500_shen_sed, label="Shen mean SED at 2500 A")
+        ax_mag.plot(
+            log_lbol_erg_s,
+            m2500_fixed_bc,
+            ls="--",
+            label=r"$91-2.5\log L_{\rm bol}$ (fixed BC=4.82)",
+        )
+        ax_mag.set_ylabel(r"$M_{2500,\rm AB}$")
+        ax_mag.invert_yaxis()
+        ax_mag.legend(frameon=False)
+        ax_mag.grid(alpha=0.2)
+        ax_delta.axhline(0.0, color="0.3", lw=1)
+        ax_delta.plot(log_lbol_erg_s, delta_m2500, color="tab:red")
+        ax_delta.set_xlabel(r"$\log_{10}(L_{\rm bol}/{\rm erg\,s^{-1}})$")
+        ax_delta.set_ylabel(r"$M_{\rm fixed}-M_{\rm Shen}$")
+        ax_delta.grid(alpha=0.2)
+        fig.tight_layout()
+        fig.savefig(output_dir / "m2500_fixed_bc_vs_shen_sed.pdf")
+        fig.savefig(output_dir / "m2500_fixed_bc_vs_shen_sed.png", dpi=180)
+        plt.close(fig)
+
+        qvc_luminosity_range = (log_lbol_erg_s >= 44.0) & (log_lbol_erg_s <= 48.0)
+        print("\nFixed-BC M2500 shortcut versus Shen mean SED (44 <= log Lbol <= 48):")
+        print(
+            f"delta M range={delta_m2500[qvc_luminosity_range].min():+.3f} to "
+            f"{delta_m2500[qvc_luminosity_range].max():+.3f} mag; "
+            f"median={np.median(delta_m2500[qvc_luminosity_range]):+.3f} mag"
+        )
+        print(
+            f"Shen BC2500 range={bc2500[qvc_luminosity_range].min():.3f} to "
+            f"{bc2500[qvc_luminosity_range].max():.3f}; "
+            f"median={np.median(bc2500[qvc_luminosity_range]):.3f}"
+        )
 
         redshifts = [0.87, 1.25, 1.63, 2.01, 2.40, 2.80, 3.25]
         loaders = {
