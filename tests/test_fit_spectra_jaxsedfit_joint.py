@@ -5,6 +5,7 @@ import pytest
 from qvc.spectra.fit_spectra_jaxsedfit_joint import (
     ab_mag_to_mjy,
     add_qvc_psf_photometry,
+    estimate_m2500_dereddened,
     load_saved_sed_photometry,
 )
 
@@ -60,3 +61,25 @@ def test_qvc_psf_photometry_requires_z_even_if_variability_fit_dropped_it():
 
     with pytest.raises(ValueError, match=r"missing/invalid: \['z'\]"):
         add_qvc_psf_photometry(record, pd.DataFrame())
+
+
+def test_dereddened_m2500_uses_intrinsic_disk_and_both_attenuation_terms():
+    samples = {
+        "log_agn_amp": np.log(np.array([1.0e38, 1.1e38])),
+        "pl_slope": np.array([-1.8, -1.8]),
+        "pl_bend_loc": np.array([1000.0, 1000.0]),
+        "pl_bend_width": np.array([10.0, 10.0]),
+        "ebv_gal": np.array([0.02, 0.02]),
+        "ebv_agn": np.array([0.03, 0.03]),
+    }
+
+    result = estimate_m2500_dereddened(samples, redshift=1.0)
+
+    intrinsic = result["m_2500_dereddened_draws"]
+    attenuated = result["m_2500_attenuated_model_draws"]
+    a_gal = result["a_2500_galaxy_draws"]
+    a_internal = result["a_2500_internal_draws"]
+    assert np.all(np.isfinite(intrinsic))
+    assert np.allclose(attenuated - intrinsic, a_gal + a_internal)
+    assert np.all(a_gal > 0)
+    assert np.all(a_internal > 0)
