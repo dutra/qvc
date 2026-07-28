@@ -2174,6 +2174,7 @@ def test_run_mcmc_pipeline_compare_sigma_only_skips_completeness_plots_on_resume
         prefix="unit",
         compare_sigma_only=True,
         completeness_sim_file="dummy_completeness.h5",
+        completeness_mode="2d",
     )
 
     assert result[0].shape == (3, 1)
@@ -2248,6 +2249,7 @@ def test_run_mcmc_pipeline_uses_explicit_parent_sample_for_completeness_map(monk
         speed="fastest",
         prefix="unit",
         completeness_sim_file="dummy_completeness.h5",
+        completeness_mode="2d",
         df_agn_completeness=df_parent,
     )
 
@@ -2438,6 +2440,7 @@ def test_run_single_resume_replot_with_cuts_bypasses_sampling_passes_and_plots_c
         resume=str(resume_path),
         speed="fastest",
         prefix="unit",
+        completeness_mode="2d",
         resume_replot_with_cuts=True,
     )
 

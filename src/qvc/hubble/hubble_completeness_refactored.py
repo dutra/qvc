@@ -18,6 +18,8 @@ from qvc.hubble.hubble_utils import convert_M2500_to_logL2500, resolve_qvc_data_
 COSMO = FlatLambdaCDM(H0=70.0, Om0=0.3)
 COMPLETENESS_FHOST_COL = "f_host_2500_psf"
 COMPLETENESS_FHOST_ERR_COL = "f_host_2500_psf_err"
+RELATIVE_SELECTION_RULE = "conditional_density_ratio_dirichlet_v1"
+RELATIVE_SELECTION_PRIOR_CONCENTRATION = 1.0
 
 
 def evaluate_dm_interp(
@@ -443,6 +445,64 @@ class Completeness2D:
     @property
     def mode(self):
         return "2d"
+
+
+class RelativeSelection2D(Completeness2D):
+    """
+    Interpolate positive relative selection weights on a (magnitude, redshift) grid.
+
+    Unlike :class:`Completeness2D`, these values are relative weights rather than
+    Bernoulli probabilities, so values greater than one are valid and must not be
+    clipped.  Boundary handling intentionally matches the absolute 2D map.
+    """
+
+    def __init__(self, mag_centers, z_centers, relative_weight_map):
+        self.mag_centers = np.asarray(mag_centers, dtype=float)
+        self.z_centers = np.asarray(z_centers, dtype=float)
+        weights = np.asarray(relative_weight_map, dtype=float)
+
+        if self.mag_centers.ndim != 1 or self.mag_centers.size == 0:
+            raise ValueError("mag_centers must be a non-empty one-dimensional array.")
+        if self.z_centers.ndim != 1 or self.z_centers.size == 0:
+            raise ValueError("z_centers must be a non-empty one-dimensional array.")
+        if not np.all(np.isfinite(self.mag_centers)) or not np.all(
+            np.diff(self.mag_centers) > 0
+        ):
+            raise ValueError("mag_centers must be finite and strictly increasing.")
+        if not np.all(np.isfinite(self.z_centers)) or not np.all(
+            np.diff(self.z_centers) > 0
+        ):
+            raise ValueError("z_centers must be finite and strictly increasing.")
+        expected_shape = (self.mag_centers.size, self.z_centers.size)
+        if weights.shape != expected_shape:
+            raise ValueError(
+                "relative_weight_map shape must match (n_mag, n_z); "
+                f"expected {expected_shape}, got {weights.shape}."
+            )
+        if not np.all(np.isfinite(weights)) or np.any(weights <= 0.0):
+            raise ValueError(
+                "relative_weight_map must contain only finite, strictly positive values."
+            )
+
+        self.mag_min, self.mag_max = (
+            float(self.mag_centers[0]),
+            float(self.mag_centers[-1]),
+        )
+        self.z_min, self.z_max = (
+            float(self.z_centers[0]),
+            float(self.z_centers[-1]),
+        )
+        self._interp = RegularGridInterpolator(
+            (self.mag_centers, self.z_centers),
+            weights,
+            bounds_error=False,
+            fill_value=0.0,
+        )
+        self._warned_oob = False
+
+    @property
+    def mode(self):
+        return "2d_relative_support"
 
 
 class Completeness3D:
@@ -1014,6 +1074,330 @@ def get_completeness_function_2d(
         plt.savefig(os.path.join(plot_dir, "H_true_map.pdf"), dpi=600)
         plt.close()
     return Completeness2D(mag_centers, z_centers, C), mag_centers, z_centers, dm, dz, sigma_mag
+
+
+def get_relative_selection_function_2d(
+    df_agn,
+    sim_file="data/nov9_mock_mag_z_moresources.h5",
+    n_mag_bins=30,
+    n_z_bins=40,
+    smooth_counts=True,
+    plot=False,
+    plot_path=None,
+):
+    """
+    Build relative magnitude-selection weights at fixed redshift.
+
+    The map is a ratio of Dirichlet-regularized conditional magnitude
+    densities.  Absolute mock normalization is deliberately excluded.
+    """
+
+    sim_file = resolve_qvc_data_path(sim_file)
+    with h5py.File(sim_file, "r") as handle:
+        if "apparent_mag_2500" in handle:
+            m_true = np.asarray(handle["apparent_mag_2500"][:], dtype=float)
+        else:
+            m_true = np.asarray(handle["apparent_mag_i_rest"][:], dtype=float)
+        z_true = np.asarray(handle["z"][:], dtype=float)
+        provenance = {
+            "mock_count_scale": handle.attrs.get("mock_count_scale"),
+            "thinning_probability": handle.attrs.get("thinning_probability"),
+            "area_deg2": handle.attrs.get("area_deg2"),
+        }
+
+    z_obs = df_agn["z"].to_numpy(dtype=float)
+    m_obs = df_agn["apparent_mag_2500"].to_numpy(dtype=float)
+    finite_obs = np.isfinite(m_obs) & np.isfinite(z_obs)
+    finite_true = np.isfinite(m_true) & np.isfinite(z_true)
+    m_obs, z_obs = m_obs[finite_obs], z_obs[finite_obs]
+    m_true, z_true = m_true[finite_true], z_true[finite_true]
+
+    mag_edges = np.linspace(18.5, 24.0, int(n_mag_bins) + 1)
+    z_edges = np.linspace(0.0, 4.0, int(n_z_bins) + 1)
+    mag_centers = 0.5 * (mag_edges[:-1] + mag_edges[1:])
+    z_centers = 0.5 * (z_edges[:-1] + z_edges[1:])
+    dm = float(mag_centers[1] - mag_centers[0]) if len(mag_centers) > 1 else float(np.diff(mag_edges)[0])
+    dz = float(z_centers[1] - z_centers[0]) if len(z_centers) > 1 else float(np.diff(z_edges)[0])
+
+    H_true, _, _ = np.histogram2d(m_true, z_true, bins=[mag_edges, z_edges])
+    H_obs, _, _ = np.histogram2d(m_obs, z_obs, bins=[mag_edges, z_edges])
+    sigma_mag = 0.2 if smooth_counts else 0.0
+    sigma_z = 0.2 if smooth_counts else 0.0
+    if smooth_counts:
+        H_true_s = gaussian_filter(
+            H_true,
+            sigma=(max(sigma_mag / dm, 1e-6), max(sigma_z / dz, 1e-6)),
+            mode="nearest",
+        )
+        H_obs_s = gaussian_filter(
+            H_obs,
+            sigma=(max(sigma_mag / dm, 1e-6), max(sigma_z / dz, 1e-6)),
+            mode="nearest",
+        )
+    else:
+        H_true_s, H_obs_s = H_true, H_obs
+
+    prior_concentration = RELATIVE_SELECTION_PRIOR_CONCENTRATION
+    alpha_bin = prior_concentration / int(n_mag_bins)
+    obs_slice_counts = np.sum(H_obs_s, axis=0, keepdims=True)
+    mock_slice_counts = np.sum(H_true_s, axis=0, keepdims=True)
+    P_obs = (H_obs_s + alpha_bin) / (obs_slice_counts + prior_concentration)
+    P_mock = (H_true_s + alpha_bin) / (mock_slice_counts + prior_concentration)
+    relative_weights = P_obs / P_mock
+
+    empty_slice = (obs_slice_counts <= 0.0) | (mock_slice_counts <= 0.0)
+    relative_weights[:, empty_slice.ravel()] = 1.0
+    normalization = np.sum(P_mock * relative_weights, axis=0, keepdims=True)
+    relative_weights = np.divide(
+        relative_weights,
+        normalization,
+        out=np.ones_like(relative_weights),
+        where=normalization > 0.0,
+    )
+    relative_weights[:, empty_slice.ravel()] = 1.0
+    if not np.all(np.isfinite(relative_weights)) or np.any(relative_weights <= 0.0):
+        raise ValueError(
+            "Relative 2D selection construction produced non-finite or non-positive weights."
+        )
+
+    model = RelativeSelection2D(mag_centers, z_centers, relative_weights)
+    model.relative_selection_metadata = {
+        "rule": RELATIVE_SELECTION_RULE,
+        "n_mag_bins": int(n_mag_bins),
+        "n_z_bins": int(n_z_bins),
+        "sigma_mag": float(sigma_mag),
+        "sigma_z": float(sigma_z),
+        "prior_concentration": float(prior_concentration),
+        "mock_count_scale_used_in_weights": False,
+        **{
+            key: None if value is None else float(value)
+            for key, value in provenance.items()
+        },
+    }
+    model.relative_selection_diagnostics = {
+        "H_obs": H_obs,
+        "H_mock": H_true,
+        "H_obs_smoothed": H_obs_s,
+        "H_mock_smoothed": H_true_s,
+        "P_obs": P_obs,
+        "P_mock": P_mock,
+        "relative_weights": relative_weights,
+        "obs_prior_fraction": alpha_bin / (H_obs_s + alpha_bin),
+        "mock_prior_fraction": alpha_bin / (H_true_s + alpha_bin),
+        "obs_support_fraction": H_obs_s / (H_obs_s + alpha_bin),
+        "mock_support_fraction": H_true_s / (H_true_s + alpha_bin),
+        "empty_slice": empty_slice.ravel(),
+        "mag_edges": mag_edges,
+        "z_edges": z_edges,
+    }
+    if plot:
+        _write_relative_selection_diagnostics(
+            model,
+            df_agn,
+            plot_path=plot_path,
+        )
+    return model, mag_centers, z_centers, dm, dz, sigma_mag
+
+
+def _write_relative_selection_diagnostics(model, df_agn, *, plot_path=None):
+    import matplotlib.pyplot as plt
+    import pandas as pd
+
+    diagnostics = model.relative_selection_diagnostics
+    metadata = dict(model.relative_selection_metadata)
+    H_obs = diagnostics["H_obs"]
+    H_mock = diagnostics["H_mock"]
+    H_obs_s = diagnostics["H_obs_smoothed"]
+    H_mock_s = diagnostics["H_mock_smoothed"]
+    weights = diagnostics["relative_weights"]
+    obs_counts_s = np.sum(H_obs_s, axis=0)
+    mock_counts_s = np.sum(H_mock_s, axis=0)
+    obs_conditional = np.divide(
+        H_obs_s,
+        obs_counts_s[None, :],
+        out=np.full_like(H_obs_s, np.nan),
+        where=obs_counts_s[None, :] > 0.0,
+    )
+    mock_conditional = np.divide(
+        H_mock_s,
+        mock_counts_s[None, :],
+        out=np.full_like(H_mock_s, np.nan),
+        where=mock_counts_s[None, :] > 0.0,
+    )
+    raw_weights = np.divide(
+        obs_conditional,
+        mock_conditional,
+        out=np.full_like(obs_conditional, np.nan),
+        where=np.isfinite(mock_conditional) & (mock_conditional > 0.0),
+    )
+    prior_fraction = np.maximum(
+        diagnostics["obs_prior_fraction"],
+        diagnostics["mock_prior_fraction"],
+    )
+
+    plot_dir = os.path.join(plot_path or "plots/hubble", "completeness")
+    os.makedirs(plot_dir, exist_ok=True)
+    np.savez_compressed(
+        os.path.join(plot_dir, "relative_selection_diagnostics.npz"),
+        raw_relative_weights=raw_weights,
+        regularized_relative_weights=weights,
+        H_obs=H_obs,
+        H_mock=H_mock,
+        H_obs_smoothed=H_obs_s,
+        H_mock_smoothed=H_mock_s,
+        obs_prior_fraction=diagnostics["obs_prior_fraction"],
+        mock_prior_fraction=diagnostics["mock_prior_fraction"],
+        obs_support_fraction=diagnostics["obs_support_fraction"],
+        mock_support_fraction=diagnostics["mock_support_fraction"],
+        prior_fraction=prior_fraction,
+        support_fraction=np.minimum(
+            diagnostics["obs_support_fraction"],
+            diagnostics["mock_support_fraction"],
+        ),
+        mag_edges=diagnostics["mag_edges"],
+        z_edges=diagnostics["z_edges"],
+    )
+
+    slice_rows = []
+    for index, z_center in enumerate(model.z_centers):
+        slice_weights = weights[:, index]
+        max_index = int(np.argmax(slice_weights))
+        slice_rows.append(
+            {
+                "z_center": float(z_center),
+                "observed_count": float(np.sum(H_obs[:, index])),
+                "mock_count": float(np.sum(H_mock[:, index])),
+                "observed_smoothed_count": float(obs_counts_s[index]),
+                "mock_smoothed_count": float(mock_counts_s[index]),
+                "empty_slice": bool(diagnostics["empty_slice"][index]),
+                "weight_min": float(np.min(slice_weights)),
+                "weight_median": float(np.median(slice_weights)),
+                "weight_max": float(np.max(slice_weights)),
+                "weight_max_magnitude": float(model.mag_centers[max_index]),
+                "prior_dominated_cell_fraction": float(
+                    np.mean(prior_fraction[:, index] >= 0.5)
+                ),
+            }
+        )
+    pd.DataFrame(slice_rows).to_csv(
+        os.path.join(plot_dir, "relative_selection_slice_diagnostics.csv"),
+        index=False,
+    )
+
+    local_prior_interp = RegularGridInterpolator(
+        (model.mag_centers, model.z_centers),
+        prior_fraction,
+        bounds_error=False,
+        fill_value=1.0,
+    )
+    object_mag = df_agn["apparent_mag_2500"].to_numpy(dtype=float)
+    object_z = df_agn["z"].to_numpy(dtype=float)
+    query_mag = np.maximum(object_mag, model.mag_min)
+    query_z = np.clip(object_z, model.z_min, model.z_max)
+    points = np.column_stack([query_mag, query_z])
+    finite = np.all(np.isfinite(points), axis=1)
+    local_prior_fraction = np.ones(len(df_agn), dtype=float)
+    local_prior_fraction[finite] = local_prior_interp(points[finite])
+    prior_dominated = local_prior_fraction >= 0.5
+    object_ids = (
+        df_agn["object_id"].astype(str).to_numpy()
+        if "object_id" in df_agn.columns
+        else df_agn.index.astype(str).to_numpy()
+    )
+    pd.DataFrame(
+        {
+            "object_id": object_ids,
+            "apparent_mag_2500": object_mag,
+            "z": object_z,
+            "local_prior_fraction": local_prior_fraction,
+            "strongly_prior_dominated": prior_dominated,
+        }
+    ).to_csv(
+        os.path.join(
+            plot_dir,
+            "relative_selection_prior_dominated_objects.csv",
+        ),
+        index=False,
+    )
+    if np.any(prior_dominated):
+        print(
+            "[WARNING] RelativeSelection2D: "
+            f"{int(np.count_nonzero(prior_dominated))}/{len(df_agn)} fitted "
+            "objects have local map support that is at least 50% prior dominated."
+        )
+
+    metadata.update(
+        {
+            "weight_min": float(np.min(weights)),
+            "weight_median": float(np.median(weights)),
+            "weight_max": float(np.max(weights)),
+            "slice_weight_maxima": [
+                float(value) for value in np.max(weights, axis=0)
+            ],
+            "strong_prior_fraction_threshold": 0.5,
+            "n_strongly_prior_dominated_objects": int(
+                np.count_nonzero(prior_dominated)
+            ),
+            "n_fitted_objects": int(len(df_agn)),
+        }
+    )
+    with open(
+        os.path.join(plot_dir, "relative_selection_metadata.json"),
+        "w",
+        encoding="utf-8",
+    ) as handle:
+        json.dump(metadata, handle, indent=2, sort_keys=True, allow_nan=False)
+
+    extent = [
+        diagnostics["mag_edges"][0],
+        diagnostics["mag_edges"][-1],
+        diagnostics["z_edges"][0],
+        diagnostics["z_edges"][-1],
+    ]
+
+    def plot_map(values, *, filename, colorbar_label, cmap, logarithmic):
+        shown = np.asarray(values, dtype=float)
+        if logarithmic:
+            valid = np.isfinite(shown) & (shown > 0.0)
+            log_values = np.full(shown.shape, np.nan, dtype=float)
+            log_values[valid] = np.log10(shown[valid])
+            shown = log_values
+        fig, ax = plt.subplots(figsize=(7, 5))
+        image = ax.imshow(
+            shown.T,
+            origin="lower",
+            aspect="auto",
+            extent=extent,
+            cmap=cmap,
+        )
+        ax.set_xlabel(r"$m_{2500\,\mathrm{\AA}}$ (mag)")
+        ax.set_ylabel(r"$z$")
+        fig.colorbar(image, ax=ax, label=colorbar_label)
+        fig.tight_layout()
+        fig.savefig(os.path.join(plot_dir, filename), dpi=300)
+        plt.close(fig)
+
+    plot_map(
+        raw_weights,
+        filename="relative_selection_raw_map.pdf",
+        colorbar_label=r"$\log_{10}$ raw conditional-density ratio",
+        cmap="coolwarm",
+        logarithmic=True,
+    )
+    plot_map(
+        weights,
+        filename="relative_selection_regularized_map.pdf",
+        colorbar_label=r"$\log_{10} W(m,z)$",
+        cmap="coolwarm",
+        logarithmic=True,
+    )
+    plot_map(
+        prior_fraction,
+        filename="relative_selection_prior_fraction_map.pdf",
+        colorbar_label="maximum per-cell prior fraction",
+        cmap="magma",
+        logarithmic=False,
+    )
 
 
 def _plot_completeness_vs_fhost_slices(

@@ -31,11 +31,13 @@ try:
     import jax.numpy as jnp
     from jax import config as jax_config
     from jax.scipy.linalg import solve_triangular
+    from jax.scipy.special import ndtr as jax_ndtr
 except Exception:  # pragma: no cover - optional dependency
     jax = None
     jnp = None
     jax_config = None
     solve_triangular = None
+    jax_ndtr = None
 
 try:  # pragma: no cover - optional dependency
     import jax_cosmo as jc
@@ -59,17 +61,20 @@ from qvc.hubble.hubble_completeness_refactored import (
     get_completeness_function_2d,
     get_completeness_function_3d_fhost,
     get_completeness_function_4d_fhost_alpha,
+    get_relative_selection_function_2d,
     make_dm_function,
 )
 from qvc.hubble.hubble_fit import (
+    DEFAULT_COMPLETENESS,
+    DEFAULT_COMPLETENESS_MODE,
     DEFAULT_COMPLETENESS_SIM_FILE,
     SPEED_CHOICES,
-    VALID_COMPLETENESS_MODES,
     _select_agn_fit_selection,
-    estimate_sky_box_area_deg2,
-    generate_fresh_completeness_sim_file,
+    _relative_selection_checkpoint_payload,
+    add_completeness_cli_arguments,
     make_run_tag,
     normalize_speed,
+    resolve_completeness_sim_file,
     _validate_agn_pivot_context_for_reference,
     validate_completeness_mode,
     z_pivot_agn,
@@ -220,7 +225,7 @@ def _prepare_completeness_for_jax(completeness_params):
             "z_centers": jnp.asarray(model.z_centers),
             "fhost_centers": jnp.asarray(model.fhost_centers),
             "cube": cube,
-            "sigma": jnp.asarray(float(completeness_params[-2])),
+            "sigma": jnp.asarray(0.0),
         }
     if isinstance(model, Completeness4D):
         cube = jnp.asarray(model._interp.values)
@@ -231,16 +236,16 @@ def _prepare_completeness_for_jax(completeness_params):
             "fhost_centers": jnp.asarray(model.fhost_centers),
             "alpha_centers": jnp.asarray(model.alpha_centers),
             "cube": cube,
-            "sigma": jnp.asarray(float(completeness_params[-3])),
+            "sigma": jnp.asarray(0.0),
         }
     if isinstance(model, Completeness2D):
         cmap = jnp.asarray(model._interp.values)
         return {
-            "mode": "2d",
+            "mode": model.mode,
             "mag_centers": jnp.asarray(model.mag_centers),
             "z_centers": jnp.asarray(model.z_centers),
             "cube": cmap,
-            "sigma": jnp.asarray(float(completeness_params[-1])),
+            "sigma": jnp.asarray(0.0),
         }
     raise TypeError(f"Unsupported completeness model type: {type(model)!r}")
 
@@ -249,8 +254,13 @@ def _interp_regular_2d(x, y, x_grid, y_grid, values):
     dx = x_grid[1] - x_grid[0]
     dy = y_grid[1] - y_grid[0]
     ux = (x - x_grid[0]) / dx
-    uy = (y - y_grid[0]) / dy
-    valid = (ux >= 0.0) & (ux <= (x_grid.shape[0] - 1)) & (uy >= 0.0) & (uy <= (y_grid.shape[0] - 1))
+    uy = (jnp.clip(y, y_grid[0], y_grid[-1]) - y_grid[0]) / dy
+    valid = (
+        jnp.isfinite(x)
+        & jnp.isfinite(y)
+        & (ux >= 0.0)
+        & (ux <= (x_grid.shape[0] - 1))
+    )
     ix = jnp.clip(jnp.floor(ux).astype(jnp.int32), 0, x_grid.shape[0] - 2)
     iy = jnp.clip(jnp.floor(uy).astype(jnp.int32), 0, y_grid.shape[0] - 2)
     tx = jnp.clip(ux - ix, 0.0, 1.0)
@@ -273,12 +283,14 @@ def _interp_regular_3d(x, y, z, x_grid, y_grid, z_grid, values):
     dy = y_grid[1] - y_grid[0]
     dz = z_grid[1] - z_grid[0]
     ux = (x - x_grid[0]) / dx
-    uy = (y - y_grid[0]) / dy
-    uz = (z - z_grid[0]) / dz
+    uy = (jnp.clip(y, y_grid[0], y_grid[-1]) - y_grid[0]) / dy
+    uz = (jnp.clip(z, z_grid[0], z_grid[-1]) - z_grid[0]) / dz
     valid = (
-        (ux >= 0.0) & (ux <= (x_grid.shape[0] - 1))
-        & (uy >= 0.0) & (uy <= (y_grid.shape[0] - 1))
-        & (uz >= 0.0) & (uz <= (z_grid.shape[0] - 1))
+        jnp.isfinite(x)
+        & jnp.isfinite(y)
+        & jnp.isfinite(z)
+        & (ux >= 0.0)
+        & (ux <= (x_grid.shape[0] - 1))
     )
     ix = jnp.clip(jnp.floor(ux).astype(jnp.int32), 0, x_grid.shape[0] - 2)
     iy = jnp.clip(jnp.floor(uy).astype(jnp.int32), 0, y_grid.shape[0] - 2)
@@ -314,14 +326,16 @@ def _interp_regular_4d(x, y, z, w, x_grid, y_grid, z_grid, w_grid, values):
     dz = z_grid[1] - z_grid[0]
     dw = w_grid[1] - w_grid[0]
     ux = (x - x_grid[0]) / dx
-    uy = (y - y_grid[0]) / dy
-    uz = (z - z_grid[0]) / dz
-    uw = (w - w_grid[0]) / dw
+    uy = (jnp.clip(y, y_grid[0], y_grid[-1]) - y_grid[0]) / dy
+    uz = (jnp.clip(z, z_grid[0], z_grid[-1]) - z_grid[0]) / dz
+    uw = (jnp.clip(w, w_grid[0], w_grid[-1]) - w_grid[0]) / dw
     valid = (
-        (ux >= 0.0) & (ux <= (x_grid.shape[0] - 1))
-        & (uy >= 0.0) & (uy <= (y_grid.shape[0] - 1))
-        & (uz >= 0.0) & (uz <= (z_grid.shape[0] - 1))
-        & (uw >= 0.0) & (uw <= (w_grid.shape[0] - 1))
+        jnp.isfinite(x)
+        & jnp.isfinite(y)
+        & jnp.isfinite(z)
+        & jnp.isfinite(w)
+        & (ux >= 0.0)
+        & (ux <= (x_grid.shape[0] - 1))
     )
     ix = jnp.clip(jnp.floor(ux).astype(jnp.int32), 0, x_grid.shape[0] - 2)
     iy = jnp.clip(jnp.floor(uy).astype(jnp.int32), 0, y_grid.shape[0] - 2)
@@ -348,8 +362,20 @@ def _interp_regular_4d(x, y, z, w, x_grid, y_grid, z_grid, w_grid, values):
     return jnp.where(valid, out, 0.0)
 
 
-def _completeness_loglike_jax(m_model, mu_err, z, completeness, f_host_2500_psf, alpha_lambda):
+def _completeness_loglike_jax(
+    m_model,
+    mu_err,
+    z,
+    completeness,
+    f_host_2500_psf,
+    alpha_lambda,
+    *,
+    return_blob=False,
+):
     if completeness is None:
+        if return_blob:
+            empty = jnp.zeros((3, jnp.size(m_model)))
+            return 0.0, empty
         return 0.0
     m_grid = completeness["mag_centers"]
     sigma = completeness["sigma"]
@@ -385,8 +411,35 @@ def _completeness_loglike_jax(m_model, mu_err, z, completeness, f_host_2500_psf,
             completeness["cube"],
         )
     pdf_model = jnp.exp(_normal_logpdf(m_grid[None, :], m_model[:, None], sig))
-    Z = _trapz_jax(pdf_model * p_det, m_grid, axis=1)
-    return jnp.sum(jnp.log(jnp.clip(Z, 1e-300)))
+    weighted_pdf = pdf_model * p_det
+    Z = _trapz_jax(weighted_pdf, m_grid, axis=1)
+    m_Z = _trapz_jax(weighted_pdf * m_grid[None, :], m_grid, axis=1)
+    m2_Z = _trapz_jax(weighted_pdf * m_grid[None, :] ** 2, m_grid, axis=1)
+    m_bright = m_grid[0]
+    a = (m_bright - m_model) / sig[:, 0]
+    cdf_bright = jax_ndtr(a)
+    pdf_bright = jnp.exp(-0.5 * a**2) / jnp.sqrt(2.0 * jnp.pi)
+    p_bright = p_det[:, 0]
+    Z = Z + p_bright * cdf_bright
+    m_Z = m_Z + p_bright * (
+        m_model * cdf_bright - sig[:, 0] * pdf_bright
+    )
+    m2_Z = m2_Z + p_bright * (
+        (m_model**2 + sig[:, 0] ** 2) * cdf_bright
+        - sig[:, 0] * (m_model + m_bright) * pdf_bright
+    )
+    Z = jnp.clip(Z, 1e-300)
+    loglike = jnp.sum(jnp.log(Z))
+    if not return_blob:
+        return loglike
+    valid_Z = Z > 1e-298
+    expected_mag = jnp.where(valid_Z, m_Z / Z, m_model)
+    expected_mag2 = jnp.where(valid_Z, m2_Z / Z, m_model**2)
+    dmi = expected_mag - m_model
+    selection_sigma = jnp.sqrt(
+        jnp.clip(expected_mag2 - expected_mag**2, 0.0)
+    )
+    return loglike, jnp.stack([Z, dmi, selection_sigma], axis=0)
 
 
 def _prepare_agn_arrays(
@@ -693,12 +746,12 @@ def run_single_jax(
     _sna_LogdetCov,
     *,
     cosmo_model="Flatw0waCDM",
-    completeness=True,
+    completeness=DEFAULT_COMPLETENESS,
     z_range=(0.44, 3.16),
     speed="fastest",
     prefix="default_jax",
     completeness_sim_file=DEFAULT_COMPLETENESS_SIM_FILE,
-    completeness_mode="2d",
+    completeness_mode=DEFAULT_COMPLETENESS_MODE,
     only_sna=False,
     N=None,
     uniform_redshift_distribution=False,
@@ -778,13 +831,13 @@ def run_single_jax(
         report_pivots(df_agn_fit, agn_pivot_context=agn_pivot_context)
 
     if completeness:
-        if completeness_sim_file is None:
-            completeness_area_deg2 = estimate_sky_box_area_deg2(df_agn_all)
-            completeness_sim_file = generate_fresh_completeness_sim_file(
-                plot_path,
-                area_deg2=completeness_area_deg2,
-                seed=seed,
-            )
+        completeness_sim_file = resolve_completeness_sim_file(
+            completeness=completeness,
+            completeness_sim_file=completeness_sim_file,
+            plot_path=plot_path,
+            df_agn_all=df_agn_all,
+            seed=seed,
+        )
         if completeness_mode == "4d_fhost_alpha":
             completeness_params = get_completeness_function_4d_fhost_alpha(
                 df_agn_fit,
@@ -800,6 +853,13 @@ def run_single_jax(
                 plot=True,
                 plot_path=plot_path,
                 df_agn_fhost_population=df_agn_all,
+            )
+        elif completeness_mode == "2d_relative_support":
+            completeness_params = get_relative_selection_function_2d(
+                df_agn_fit,
+                sim_file=completeness_sim_file,
+                plot=True,
+                plot_path=plot_path,
             )
         else:
             completeness_params = get_completeness_function_2d(
@@ -914,6 +974,10 @@ def run_single_jax(
             agn_pivot_z_range=agn_pivot_context.z_range,
             agn_pivot_reference_object_ids=agn_pivot_context.reference_object_ids,
             agn_pivot_rule=agn_pivot_context.rule,
+        )
+    if completeness and completeness_mode == "2d_relative_support":
+        checkpoint_payload.update(
+            _relative_selection_checkpoint_payload(completeness_params)
         )
     save_chains(checkpoint_file, **checkpoint_payload)
 
@@ -1161,7 +1225,7 @@ def main():
     parser.add_argument("--only_sna", action="store_true", default=False)
     parser.add_argument("--only_agn", action="store_true", default=False)
     parser.add_argument("--uniform_redshift_distribution", action="store_true", default=False)
-    parser.add_argument("--disable_completeness", action="store_true", default=False)
+    add_completeness_cli_arguments(parser)
     parser.add_argument("--disable_ceph_dist_calibration", action="store_true", default=False)
     parser.add_argument("--use_planck_h0_prior", action="store_true", default=False)
     parser.add_argument("--use_planck_om_prior", action="store_true", default=False)
@@ -1171,13 +1235,6 @@ def main():
         default=False,
         help="Reject Flatw0waCDM samples with w0 + wa >= 0. Disabled by default.",
     )
-    parser.add_argument(
-        "--completeness_sim_file",
-        type=str,
-        default=DEFAULT_COMPLETENESS_SIM_FILE,
-        help="Optional mock catalog HDF5 override. If omitted, generate a fresh mock catalog for each run.",
-    )
-    parser.add_argument("--completeness_mode", type=str, choices=list(VALID_COMPLETENESS_MODES), default="2d")
     parser.add_argument("--correct-sigma-uv-host", action="store_true", default=False)
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
