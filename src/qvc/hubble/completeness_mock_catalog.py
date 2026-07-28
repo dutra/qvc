@@ -140,6 +140,8 @@ def build_shen_lf(pubtools_path):
     # channel.  This includes the SED/bolometric-correction scatter and the
     # N_H-dependent extinction model, so the mock parent is the optically
     # detectable population rather than the total intrinsic bolometric QLF.
+    # m_grid is monochromatic rest-frame absolute AB M_2500, converted from
+    # Shen's nu*L_nu(2500 A); it is not apparent, bolometric, or band-integrated.
     m_grid = log_nu_lnu_to_ab_absolute_magnitude(luminosities, NU_2500_HZ)
     return phi_log10, m_grid, z_bins
 
