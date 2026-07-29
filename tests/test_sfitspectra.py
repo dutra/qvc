@@ -19,3 +19,43 @@ def test_sfitspectra_uses_csv_object_ids_without_h5_membership_filtering():
         "USE_H5",
     ):
         assert legacy_text not in source
+
+
+def test_sfitspectra_supports_both_fit_backends():
+    source = SCRIPT.read_text(encoding="utf-8")
+
+    assert 'fit_script = "fit_spectra.py"' in source
+    assert '"fit_spectra.py": "qvc.spectra.fit_spectra"' in source
+    assert (
+        '"fit_spectra_jaxsedfit_joint.py": '
+        '"qvc.spectra.fit_spectra_jaxsedfit_joint"'
+    ) in source
+    assert '"-m", fit_module' in source
+    assert "Unsupported fit_script" in source
+
+
+def test_sfitspectra_uses_backend_specific_arguments():
+    source = SCRIPT.read_text(encoding="utf-8")
+
+    assert (
+        'sed_photometry_path = '
+        '"data/jul14_master_input_file_chisqgt20_bandwagon_photometry.csv"'
+    ) in source
+    assert 'if fit_script == "fit_spectra.py":' in source
+    assert '"--plot_mcmc_diagnostics"' in source
+    assert '"--save-fig"' in source
+    assert 'elif fit_script == "fit_spectra_jaxsedfit_joint.py":' in source
+    assert '"--sed-photometry-path", sed_photometry_path' in source
+    assert '"--progress"' in source
+    assert "SED photometry input not found" in source
+
+
+def test_sfitspectra_builds_timestamped_git_job_name_with_optional_description():
+    source = SCRIPT.read_text(encoding="utf-8")
+
+    assert 'datetime.now().strftime("%b%d_%H%M").lower()' in source
+    assert '["git", "rev-parse", "--short", "HEAD"]' in source
+    assert 'raw_description = sys.argv[1] if len(sys.argv) == 2 else ""' in source
+    assert 're.sub(r"[^A-Za-z0-9.-]+", "_", raw_description)' in source
+    assert 'job_name = "_".join(job_name_parts)' in source
+    assert "#SBATCH --job-name={job_name}" in source

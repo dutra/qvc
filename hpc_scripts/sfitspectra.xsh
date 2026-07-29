@@ -2,9 +2,11 @@
 
 import math
 import os
+import re
 import stat
 import sys
 import subprocess
+from datetime import datetime
 from pathlib import Path
 import pandas as pd
 
@@ -12,6 +14,24 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 SRC_ROOT = REPO_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
+
+# Optional positional argument: a short job description.
+if len(sys.argv) > 2:
+    raise ValueError("Usage: xonsh hpc_scripts/sfitspectra.xsh [description]")
+raw_description = sys.argv[1] if len(sys.argv) == 2 else ""
+description = re.sub(r"[^A-Za-z0-9.-]+", "_", raw_description).strip("_.-")
+date_hour = datetime.now().strftime("%b%d_%H%M").lower()
+git_commit = subprocess.run(
+    ["git", "rev-parse", "--short", "HEAD"],
+    cwd=REPO_ROOT,
+    check=True,
+    capture_output=True,
+    text=True,
+).stdout.strip()
+job_name_parts = [date_hour, git_commit]
+if description:
+    job_name_parts.append(description)
+job_name = "_".join(job_name_parts)
 
 # ==========================================
 # 1. Define your job settings here
@@ -30,6 +50,9 @@ cpus_per_task = 3
 mem = "32G"
 
 fit_script = "fit_spectra.py"
+
+# Required only by fit_spectra_jaxsedfit_joint.py
+sed_photometry_path = "data/jul14_master_input_file_chisqgt20_bandwagon_photometry.csv"
 
 chisq_csv = "results/data/variability_chi_sq_red_g_gt_20.csv"
 
@@ -98,6 +121,27 @@ def submit_in_batches(script_filename, num_tasks, batch_limit=10_000):
 # ==========================================
 # 3. Read object IDs and compute array size
 # ==========================================
+fit_modules = {
+    "fit_spectra.py": "qvc.spectra.fit_spectra",
+    "fit_spectra_jaxsedfit_joint.py": "qvc.spectra.fit_spectra_jaxsedfit_joint",
+}
+if fit_script not in fit_modules:
+    supported = ", ".join(sorted(fit_modules))
+    raise ValueError(f"Unsupported fit_script {fit_script!r}. Choose one of: {supported}")
+fit_module = fit_modules[fit_script]
+
+if fit_script == "fit_spectra_jaxsedfit_joint.py":
+    if not sed_photometry_path:
+        raise ValueError(
+            "sed_photometry_path is required when using "
+            "fit_spectra_jaxsedfit_joint.py"
+        )
+    sed_photometry_file = REPO_ROOT / sed_photometry_path
+    if not sed_photometry_file.exists():
+        raise FileNotFoundError(
+            f"SED photometry input not found: {sed_photometry_file}"
+        )
+
 chisq_path = REPO_ROOT / chisq_csv
 exclude_path = REPO_ROOT / exclude_csv if exclude_csv else None
 
@@ -156,7 +200,7 @@ array_directive = f"#SBATCH --array=0-{max_array_id}" if num_tasks > 1 else ""
 script_filename = f"{submit_dir}/submit_{prefix}.sbatch"
 
 script_content = f"""#!/usr/bin/env bash
-#SBATCH --job-name=jaxqsofit_{prefix}
+#SBATCH --job-name={job_name}
 #SBATCH --output={log_dir}/fit_%A_%a.out
 #SBATCH --error={log_dir}/fit_%A_%a.err
 #SBATCH --nodes=1
@@ -170,6 +214,8 @@ set -euo pipefail
 
 export PREFIX="{prefix}"
 export FIT_SCRIPT="{fit_script}"
+export FIT_MODULE="{fit_module}"
+export SED_PHOTOMETRY_PATH="{sed_photometry_path}"
 export OUTPUT_DIR="{output_dir}"
 export OBJECT_IDS_FILE="{object_ids_file}"
 export CHUNK_SIZE={chunk_size}
@@ -194,7 +240,11 @@ mkdir -p "${{FIG_DIR}}"
 echo "Job started on $(date)"
 echo "Host: $(hostname)"
 echo "TASK_ID=$TASK_ID"
+echo "JOB_NAME={job_name}"
 echo "PREFIX=$PREFIX"
+echo "FIT_SCRIPT=$FIT_SCRIPT"
+echo "FIT_MODULE=$FIT_MODULE"
+echo "SED_PHOTOMETRY_PATH=$SED_PHOTOMETRY_PATH"
 echo "OBJECT_IDS_FILE=$OBJECT_IDS_FILE"
 echo "OUTPUT_DIR=$OUTPUT_DIR"
 echo "FIG_DIR=$FIG_DIR"
@@ -207,6 +257,8 @@ from itertools import islice
 
 prefix = os.environ["PREFIX"]
 fit_script = os.environ["FIT_SCRIPT"]
+fit_module = os.environ["FIT_MODULE"]
+sed_photometry_path = os.environ["SED_PHOTOMETRY_PATH"]
 output_dir = os.environ["OUTPUT_DIR"]
 object_ids_file = os.environ["OBJECT_IDS_FILE"]
 chunk_size = int(os.environ["CHUNK_SIZE"])
@@ -238,13 +290,11 @@ print(f"object_ids: {{ids_this_task}}")
 
 cmd = [
     python_bin,
-    "-m", "qvc.spectra.fit_spectra",
+    "-m", fit_module,
     "--mode", "fit",
     out_csv,
-    "--plot_mcmc_diagnostics",
     "--cache-dir", cache_dir,
     "--verbose",
-    "--save-fig",
     "--nuts-warmup", "250",
     "--nuts-samples", "250",
     "--nuts-chains", "1",
@@ -253,6 +303,19 @@ cmd = [
     "--filter_object_id", *ids_this_task,
     "--nproc", str(nproc),
 ]
+
+if fit_script == "fit_spectra.py":
+    cmd.extend([
+        "--plot_mcmc_diagnostics",
+        "--save-fig",
+    ])
+elif fit_script == "fit_spectra_jaxsedfit_joint.py":
+    cmd.extend([
+        "--sed-photometry-path", sed_photometry_path,
+        "--progress",
+    ])
+else:
+    raise ValueError(f"Unsupported FIT_SCRIPT in generated job: {{fit_script!r}}")
 
 print("\\nCommand:")
 print(" ".join(cmd))
