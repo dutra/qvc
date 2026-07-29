@@ -61,4 +61,7 @@ def test_sfitspectra_accepts_cli_overrides_and_builds_timestamped_git_job_name()
     assert '["git", "rev-parse", "--short", "HEAD"]' in source
     assert 'r"[^A-Za-z0-9.-]+", "_", cli_args.description' in source
     assert 'job_name = "_".join(job_name_parts)' in source
+    assert "prefix = job_name" in source
+    assert 'output_dir = f"results/data/jaxqsofit/{prefix}"' in source
+    assert 'fig_dir = f"plots/jaxqsofit/{prefix}"' in source
     assert "#SBATCH --job-name={job_name}" in source

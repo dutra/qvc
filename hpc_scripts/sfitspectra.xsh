@@ -19,8 +19,6 @@ if str(SRC_ROOT) not in sys.path:
 # ==========================================
 # 1. Define your job settings here
 # ==========================================
-#prefix = "jaxqsofit_apr1a_chisq20_mar31a"
-prefix = "jaxqsofit_jul16a_chisqold"
 partition = "day"
 time_limit = "8:00:00"
 
@@ -43,16 +41,12 @@ chisq_csv = "results/data/variability_chi_sq_red_g_gt_20.csv"
 # Optional exclusion file
 exclude_csv = None #"results/data/jaxqsofit/jaxqsofit_apr20c_chisq20_apr18h.csv"
 
-# Each array task writes one CSV
-output_dir = f"results/data/jaxqsofit/{prefix}"
-
 # Direct path to Python inside the Conda env
 python_bin = "/home/id255/.conda/envs/jaxcpu2/bin/python"
 
 # Optional: cache/data locations
 qvc_data_dir = "/home/id255/scratch_pi_pn38/id255/qvc/data"
 cache_dir = "data/spectra_cache_all"
-fig_dir = f"plots/jaxqsofit/{prefix}"
 
 # ==========================================
 # 2. Command-line overrides and job name
@@ -87,6 +81,11 @@ job_name_parts = [date_hour, git_commit]
 if description:
     job_name_parts.append(description)
 job_name = "_".join(job_name_parts)
+prefix = job_name
+
+# Use the generated run identifier for every run-specific folder and file.
+output_dir = f"results/data/jaxqsofit/{prefix}"
+fig_dir = f"plots/jaxqsofit/{prefix}"
 
 # ==========================================
 # 3. Helpers
