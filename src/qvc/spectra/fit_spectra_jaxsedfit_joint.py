@@ -444,6 +444,26 @@ def summarize_samples(samples):
     return out
 
 
+def save_spectrum_figure(fitter, rec, fig_dir):
+    """Save the jaxqsofit spectral decomposition beside the joint SED figure."""
+    from matplotlib import pyplot as plt
+
+    fig_path = (
+        Path(fig_dir)
+        / f"z{float(rec['z']):.3f}_{rec['sdss_name']}_spectrum.png"
+    )
+    fig_path.parent.mkdir(parents=True, exist_ok=True)
+    fig = fitter.plot_jaxqsofit_spectrum(show_plot=False)
+    if fig is None:
+        raise RuntimeError("JAXSEDFit did not return a spectrum figure.")
+    try:
+        fig.savefig(fig_path, dpi=150, bbox_inches="tight")
+    finally:
+        plt.close(fig)
+    print(f"Saved spectrum plot: {fig_path}")
+    return fig_path
+
+
 def run_one_fit(rec, args):
     result = {
         key: rec.get(key)
@@ -469,7 +489,8 @@ def run_one_fit(rec, args):
         )
         from jaxsedfit import JAXSEDFit
 
-        fit_result = JAXSEDFit(config).fit(progress_bar=args.progress)
+        fitter = JAXSEDFit(config)
+        fit_result = fitter.fit(progress_bar=args.progress)
         result.update(summarize_samples(fit_result.samples))
         result.update(
             summarize_m2500_dereddened(
@@ -482,6 +503,11 @@ def run_one_fit(rec, args):
         result["n_photometry"] = int(len(used_phot))
         result["photometry_filters"] = ",".join(used_phot["filter_name"].astype(str))
         result["fit_result_path"] = str(fit_result.path or "")
+        result["spectrum_fig_path"] = (
+            str(save_spectrum_figure(fitter, rec, args.fig_dir))
+            if args.save_fig
+            else ""
+        )
         result["fit_ok"] = True
     except Exception as exc:
         result["error_message"] = str(exc)
