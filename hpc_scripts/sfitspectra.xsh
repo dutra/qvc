@@ -1,5 +1,6 @@
 #!/usr/bin/env xonsh
 
+import argparse
 import math
 import os
 import re
@@ -14,24 +15,6 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 SRC_ROOT = REPO_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
-
-# Optional positional argument: a short job description.
-if len(sys.argv) > 2:
-    raise ValueError("Usage: xonsh hpc_scripts/sfitspectra.xsh [description]")
-raw_description = sys.argv[1] if len(sys.argv) == 2 else ""
-description = re.sub(r"[^A-Za-z0-9.-]+", "_", raw_description).strip("_.-")
-date_hour = datetime.now().strftime("%b%d_%H%M").lower()
-git_commit = subprocess.run(
-    ["git", "rev-parse", "--short", "HEAD"],
-    cwd=REPO_ROOT,
-    check=True,
-    capture_output=True,
-    text=True,
-).stdout.strip()
-job_name_parts = [date_hour, git_commit]
-if description:
-    job_name_parts.append(description)
-job_name = "_".join(job_name_parts)
 
 # ==========================================
 # 1. Define your job settings here
@@ -72,7 +55,41 @@ cache_dir = "data/spectra_cache_all"
 fig_dir = f"plots/jaxqsofit/{prefix}"
 
 # ==========================================
-# 2. Helpers
+# 2. Command-line overrides and job name
+# ==========================================
+parser = argparse.ArgumentParser(description="Submit spectrum-fitting SLURM jobs.")
+parser.add_argument(
+    "--description",
+    default="",
+    help="Optional short description appended to the generated SLURM job name.",
+)
+parser.add_argument(
+    "--fit-script",
+    choices=("fit_spectra.py", "fit_spectra_jaxsedfit_joint.py"),
+    default=fit_script,
+    help="Spectrum-fitting backend to run.",
+)
+cli_args = parser.parse_args()
+
+fit_script = cli_args.fit_script
+description = re.sub(
+    r"[^A-Za-z0-9.-]+", "_", cli_args.description
+).strip("_.-")
+date_hour = datetime.now().strftime("%b%d_%H%M").lower()
+git_commit = subprocess.run(
+    ["git", "rev-parse", "--short", "HEAD"],
+    cwd=REPO_ROOT,
+    check=True,
+    capture_output=True,
+    text=True,
+).stdout.strip()
+job_name_parts = [date_hour, git_commit]
+if description:
+    job_name_parts.append(description)
+job_name = "_".join(job_name_parts)
+
+# ==========================================
+# 3. Helpers
 # ==========================================
 def normalize_object_id(value):
     text = str(value).strip()
@@ -120,7 +137,7 @@ def submit_in_batches(script_filename, num_tasks, batch_limit=10_000):
 
 
 # ==========================================
-# 3. Read object IDs and compute array size
+# 4. Read object IDs and compute array size
 # ==========================================
 fit_modules = {
     "fit_spectra.py": "qvc.spectra.fit_spectra",
@@ -173,7 +190,7 @@ print(f"Chunk size: {chunk_size}")
 print(f"Number of array tasks: {num_tasks}")
 
 # ==========================================
-# 4. Directory setup
+# 5. Directory setup
 # ==========================================
 log_dir = f"hpc_scripts/logs/jaxqsofit/{prefix}"
 submit_dir = "hpc_scripts/submit/jaxqsofit"
@@ -194,7 +211,7 @@ with open(object_ids_file, "w", encoding="utf-8") as f:
 print(f"Wrote schedulable object_ids file: {object_ids_file}")
 
 # ==========================================
-# 5. Generate the SLURM bash script
+# 6. Generate the SLURM bash script
 # ==========================================
 array_directive = f"#SBATCH --array=0-{max_array_id}" if num_tasks > 1 else ""
 
@@ -341,6 +358,6 @@ os.chmod(script_filename, st.st_mode | stat.S_IEXEC)
 print(f"Generated SLURM script ({num_tasks} task(s)): {script_filename}")
 
 # ==========================================
-# 6. Submit
+# 7. Submit
 # ==========================================
 submit_in_batches(script_filename, num_tasks)
