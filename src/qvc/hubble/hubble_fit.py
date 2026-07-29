@@ -34,7 +34,9 @@ z_pivot_agn = 1.5
 DEFAULT_COMPLETENESS = True
 DEFAULT_COMPLETENESS_SIM_FILE = None
 DEFAULT_COMPLETENESS_MODE = "2d_relative_support"
-DEFAULT_COMPLETENESS_MOCK_AREA_DEG2 = 5.0
+# Full SDSS-like footprint used when the input table lacks coordinates.  Fresh
+# mocks are no longer thinned to a 5 deg^2 equivalent.
+DEFAULT_COMPLETENESS_MOCK_AREA_DEG2 = 274.085
 
 
 def add_completeness_cli_arguments(parser):
@@ -2195,10 +2197,7 @@ def generate_fresh_completeness_sim_file(plot_path, *, area_deg2, seed=123):
     completeness_dir = Path(plot_path) / "completeness"
     completeness_dir.mkdir(parents=True, exist_ok=True)
     output_path = completeness_dir / "mock_completeness_catalog_fresh.h5"
-    thinning_probability = min(
-        1.0,
-        float(DEFAULT_COMPLETENESS_MOCK_AREA_DEG2) / max(float(area_deg2), 1e-12),
-    )
+    thinning_probability = 1.0
 
     rng = np.random.default_rng(seed)
     phi_log10, m_grid, z_bins = build_shen_lf(None)
@@ -2225,7 +2224,7 @@ def generate_fresh_completeness_sim_file(plot_path, *, area_deg2, seed=123):
     n_generated = int(np.size(z_all))
     print(
         f"Fresh completeness mock generated {n_generated} sources "
-        f"after in-generator thinning (p_keep={thinning_probability:.4g})."
+        "with no in-generator thinning."
     )
     save_mock_catalog(
         output_path,
@@ -2242,7 +2241,7 @@ def generate_fresh_completeness_sim_file(plot_path, *, area_deg2, seed=123):
     )
     print(
         f"Generated fresh completeness mock catalog: {output_path} "
-        f"(area_deg2={float(area_deg2):.1f}, p_keep={thinning_probability:.4g})"
+        f"(area_deg2={float(area_deg2):.1f}, p_keep=1)"
     )
     return str(output_path)
 
