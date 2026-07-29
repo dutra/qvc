@@ -1,12 +1,14 @@
 import numpy as np
 import pandas as pd
 import pytest
+from matplotlib import pyplot as plt
 
 from qvc.spectra.fit_spectra_jaxsedfit_joint import (
     ab_mag_to_mjy,
     add_qvc_psf_photometry,
     estimate_m2500_dereddened,
     load_saved_sed_photometry,
+    save_spectrum_figure,
 )
 
 
@@ -83,3 +85,27 @@ def test_dereddened_m2500_uses_intrinsic_disk_and_both_attenuation_terms():
     assert np.allclose(attenuated - intrinsic, a_gal + a_internal)
     assert np.all(a_gal > 0)
     assert np.all(a_internal > 0)
+
+
+def test_save_spectrum_figure_uses_separate_spectrum_filename(tmp_path):
+    class FakeFitter:
+        def __init__(self):
+            self.show_plot = None
+            self.plot_residual = None
+
+        def plot_jaxqsofit_spectrum(self, *, show_plot, plot_residual):
+            self.show_plot = show_plot
+            self.plot_residual = plot_residual
+            return plt.figure()
+
+    fitter = FakeFitter()
+    path = save_spectrum_figure(
+        fitter,
+        {"z": 0.300041, "sdss_name": "205105.02-003302.7"},
+        tmp_path,
+    )
+
+    assert fitter.show_plot is False
+    assert fitter.plot_residual is False
+    assert path == tmp_path / "z0.300_205105.02-003302.7_spectrum.png"
+    assert path.is_file()
