@@ -88,6 +88,7 @@ from qvc.hubble.hubble_model import (
     agn_model_req_params,
     build_agn_pivot_context,
     get_model_params,
+    validate_agn_observable_uncertainties,
 )
 from qvc.hubble.hubble_plotting import (
     plot_blr_line_lags_vs_l2500,
@@ -404,7 +405,15 @@ def _prepare_agn_arrays(
     out = {k: jnp.asarray(v) for k, v in agn_data.items() if k != "object_id"}
     out["object_id"] = np.asarray(agn_data["object_id"]).astype(str)
     obs = jnp.stack([out[k] for k in agn_model_req_obs], axis=0)
-    err = jnp.stack([out[k] for k in agn_model_req_errs], axis=0)
+    err_numpy = np.stack(
+        [np.asarray(agn_data[k], dtype=float) for k in agn_model_req_errs],
+        axis=0,
+    )
+    validate_agn_observable_uncertainties(
+        err_numpy,
+        object_ids=out["object_id"],
+    )
+    err = jnp.asarray(err_numpy)
     pivots = jnp.asarray(
         agn_pivot_context.as_array(
             use_alpha_lambda_term=False,
@@ -445,7 +454,7 @@ def _agn_model_err_jax(params_vec, err_arr):
     tau_std = err_arr[agn_model_req_errs.index("log_tau_uv_rf_std_psd")]
     cov = err_arr[agn_model_req_errs.index("log_sigma_uv_log_tau_uv_rf_cov_psd")]
     var = (alpha_agn * sig_std) ** 2 + (beta_agn * tau_std) ** 2 + 2.0 * alpha_agn * beta_agn * cov
-    return jnp.sqrt(jnp.maximum(var, 1e-18))
+    return jnp.sqrt(jnp.maximum(var, 0.0))
 
 
 def _pack_param_dict(theta: jnp.ndarray, model_labels: list[str]) -> dict[str, jnp.ndarray]:

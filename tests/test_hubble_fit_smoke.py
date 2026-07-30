@@ -481,6 +481,188 @@ def test_posterior_moment_observable_variance_matches_explicit_average(
     np.testing.assert_allclose(changed_variance, variance, rtol=0.0, atol=0.0)
 
 
+def _base_agn_variance_inputs(*, covariance=0.0, beta=-1.0):
+    params = np.array([0.0, 1.0, beta], dtype=float)
+    obs = np.zeros((2, 2), dtype=float)
+    errors = np.array(
+        [
+            [1.0, 1.0],
+            [1.0, 1.0],
+            [covariance, covariance],
+        ],
+        dtype=float,
+    )
+    pivots = np.zeros(2, dtype=float)
+    posterior_params = np.tile(params[None, :], (3, 1))
+    return params, posterior_params, obs, errors, pivots
+
+
+@pytest.mark.parametrize("covariance", [1.01, -1.01])
+def test_agn_variance_helpers_reject_non_psd_observable_covariance(covariance):
+    params, posterior_params, obs, errors, pivots = (
+        _base_agn_variance_inputs(covariance=covariance)
+    )
+
+    with pytest.raises(ValueError, match="covariance"):
+        hubble_model.M_model_agn_err(
+            params,
+            obs,
+            errors,
+            pivots,
+        )
+    with pytest.raises(ValueError, match="covariance"):
+        hubble_model.M_model_agn_err(
+            params,
+            obs,
+            errors,
+            pivots,
+            check_negative=True,
+        )
+    with pytest.raises(ValueError, match="covariance"):
+        hubble_model.M_model_agn_observable_variance_posterior(
+            posterior_params,
+            errors,
+        )
+
+
+@pytest.mark.parametrize(
+    ("error_row", "bad_value", "message"),
+    [
+        (0, -0.1, "nonnegative"),
+        (1, -0.1, "nonnegative"),
+        (0, np.nan, "finite"),
+        (1, np.inf, "finite"),
+        (2, np.nan, "finite"),
+        (2, np.inf, "finite"),
+    ],
+)
+def test_agn_variance_helpers_reject_invalid_uncertainty_inputs(
+    error_row,
+    bad_value,
+    message,
+):
+    params, posterior_params, obs, errors, pivots = (
+        _base_agn_variance_inputs()
+    )
+    errors[error_row, 1] = bad_value
+
+    with pytest.raises(ValueError, match=message):
+        hubble_model.M_model_agn_err(
+            params,
+            obs,
+            errors,
+            pivots,
+        )
+    with pytest.raises(ValueError, match=message):
+        hubble_model.M_model_agn_observable_variance_posterior(
+            posterior_params,
+            errors,
+        )
+
+
+@pytest.mark.parametrize(
+    ("use_alpha_lambda_term", "use_eta_sigma_term", "error_name"),
+    [
+        (True, False, hubble_model.AGN_ALPHA_LAMBDA_ERR),
+        (False, True, hubble_model.AGN_ETA_SIGMA_ERR),
+    ],
+)
+@pytest.mark.parametrize(
+    ("bad_value", "message"),
+    [(-0.1, "nonnegative"), (np.nan, "finite"), (np.inf, "finite")],
+)
+def test_agn_variance_helpers_reject_invalid_optional_uncertainties(
+    use_alpha_lambda_term,
+    use_eta_sigma_term,
+    error_name,
+    bad_value,
+    message,
+):
+    req_params, req_obs, req_errs = hubble_model.get_agn_model_spec(
+        use_alpha_lambda_term=use_alpha_lambda_term,
+        use_eta_sigma_term=use_eta_sigma_term,
+    )
+    params = np.zeros(len(req_params), dtype=float)
+    posterior_params = np.tile(params[None, :], (2, 1))
+    obs = np.zeros((len(req_obs), 1), dtype=float)
+    errors = np.zeros((len(req_errs), 1), dtype=float)
+    errors[req_errs.index(error_name), 0] = bad_value
+    pivots = np.zeros(len(req_obs), dtype=float)
+
+    with pytest.raises(ValueError, match=message):
+        hubble_model.M_model_agn_err(
+            params,
+            obs,
+            errors,
+            pivots,
+            use_alpha_lambda_term=use_alpha_lambda_term,
+            use_eta_sigma_term=use_eta_sigma_term,
+        )
+    with pytest.raises(ValueError, match=message):
+        hubble_model.M_model_agn_observable_variance_posterior(
+            posterior_params,
+            errors,
+            use_alpha_lambda_term=use_alpha_lambda_term,
+            use_eta_sigma_term=use_eta_sigma_term,
+        )
+
+
+@pytest.mark.parametrize(
+    ("covariance", "beta"),
+    [(1.0, -1.0), (-1.0, 1.0)],
+)
+def test_agn_variance_helpers_return_zero_at_psd_boundary(
+    covariance,
+    beta,
+):
+    params, posterior_params, obs, errors, pivots = (
+        _base_agn_variance_inputs(
+            covariance=covariance,
+            beta=beta,
+        )
+    )
+
+    scalar_sigma = hubble_model.M_model_agn_err(
+        params,
+        obs,
+        errors,
+        pivots,
+    )
+    checked_sigma, negative_indices = hubble_model.M_model_agn_err(
+        params,
+        obs,
+        errors,
+        pivots,
+        check_negative=True,
+    )
+    posterior_variance, _ = (
+        hubble_model.M_model_agn_observable_variance_posterior(
+            posterior_params,
+            errors,
+        )
+    )
+
+    np.testing.assert_array_equal(scalar_sigma, np.zeros(2))
+    np.testing.assert_array_equal(checked_sigma, np.zeros(2))
+    assert negative_indices is None
+    np.testing.assert_array_equal(posterior_variance, np.zeros(2))
+
+
+@pytest.mark.parametrize("bad_value", [np.nan, np.inf, -np.inf])
+def test_posterior_observable_variance_rejects_nonfinite_parameter_samples(
+    bad_value,
+):
+    _, posterior_params, _, errors, _ = _base_agn_variance_inputs()
+    posterior_params[1, 1] = bad_value
+
+    with np.errstate(all="raise"):
+        with pytest.raises(ValueError, match="finite"):
+            hubble_model.M_model_agn_observable_variance_posterior(
+                posterior_params,
+                errors,
+            )
+
+
 def test_log_likelihood_finite_on_fake_lcdm_data(fake_data):
     df_agn, df_pantheon = fake_data
     priors, model_labels, _ = hubble_model.get_model_params("FlatLambdaCDM", only_sna=False)

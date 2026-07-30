@@ -92,3 +92,15 @@ def test_agn_array_preparation_rejects_missing_pivot_context():
             _skewed_agn_data(),
             agn_pivot_context=None,
         )
+
+
+@pytest.mark.parametrize("covariance", [0.0021, -0.0021])
+def test_agn_array_preparation_rejects_non_psd_covariance(covariance):
+    data = _skewed_agn_data()
+    data["log_sigma_uv_log_tau_uv_rf_cov_psd"][1] = covariance
+
+    with pytest.raises(ValueError, match="covariance"):
+        _prepare_agn_arrays(
+            data,
+            agn_pivot_context=_pivot_context(data),
+        )
