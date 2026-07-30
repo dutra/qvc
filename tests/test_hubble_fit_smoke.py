@@ -388,6 +388,99 @@ def test_vectorized_agn_magnitude_samples_match_scalar_model(
     np.testing.assert_allclose(vectorized, scalar, rtol=0.0, atol=1e-12)
 
 
+@pytest.mark.parametrize(
+    ("use_alpha_lambda_term", "use_eta_sigma_term"),
+    [(False, False), (True, False), (False, True), (True, True)],
+)
+def test_posterior_moment_observable_variance_matches_explicit_average(
+    use_alpha_lambda_term,
+    use_eta_sigma_term,
+):
+    df_agn = _make_fake_agn_sample(n_agn=5)
+    pivot_context = _agn_pivot_context(
+        df_agn,
+        use_alpha_lambda_term=use_alpha_lambda_term,
+        use_eta_sigma_term=use_eta_sigma_term,
+    )
+    _, err_arr, _ = hubble_model.agn_model_pack_obs(
+        df_agn,
+        use_alpha_lambda_term=use_alpha_lambda_term,
+        use_eta_sigma_term=use_eta_sigma_term,
+        pivot_context=pivot_context,
+    )
+    req_params, req_obs, _ = hubble_model.get_agn_model_spec(
+        use_alpha_lambda_term=use_alpha_lambda_term,
+        use_eta_sigma_term=use_eta_sigma_term,
+    )
+    pidx = {name: index for index, name in enumerate(req_params)}
+    parameter_samples = np.zeros((4, len(req_params)), dtype=float)
+    parameter_samples[:, pidx["M0_agn"]] = [0.0, 10.0, -20.0, 30.0]
+    parameter_samples[:, pidx["alpha_agn"]] = [1.0, 3.0, -2.0, 4.0]
+    parameter_samples[:, pidx["beta_agn"]] = [2.0, -1.0, 5.0, 0.5]
+    if use_alpha_lambda_term:
+        parameter_samples[:, pidx[hubble_model.AGN_ALPHA_LAMBDA_PARAM]] = [
+            -1.0,
+            2.0,
+            0.5,
+            4.0,
+        ]
+    if use_eta_sigma_term:
+        parameter_samples[:, pidx[hubble_model.AGN_ETA_SIGMA_PARAM]] = [
+            3.0,
+            -2.0,
+            1.0,
+            0.25,
+        ]
+
+    variance, _ = hubble_model.M_model_agn_observable_variance_posterior(
+        parameter_samples,
+        err_arr,
+        use_alpha_lambda_term=use_alpha_lambda_term,
+        use_eta_sigma_term=use_eta_sigma_term,
+    )
+    dummy_obs = np.zeros((len(req_obs), len(df_agn)), dtype=float)
+    dummy_pivots = np.zeros(len(req_obs), dtype=float)
+    explicit = np.mean(
+        np.asarray(
+            [
+                np.square(
+                    hubble_model.M_model_agn_err(
+                        row,
+                        dummy_obs,
+                        err_arr,
+                        dummy_pivots,
+                        use_alpha_lambda_term=use_alpha_lambda_term,
+                        use_eta_sigma_term=use_eta_sigma_term,
+                    )
+                )
+                for row in parameter_samples
+            ]
+        ),
+        axis=0,
+    )
+
+    assert np.mean(
+        parameter_samples[:, pidx["alpha_agn"]]
+        * parameter_samples[:, pidx["beta_agn"]]
+    ) != pytest.approx(
+        np.mean(parameter_samples[:, pidx["alpha_agn"]])
+        * np.mean(parameter_samples[:, pidx["beta_agn"]])
+    )
+    np.testing.assert_allclose(variance, explicit, rtol=0.0, atol=1e-12)
+
+    changed_m0 = parameter_samples.copy()
+    changed_m0[:, pidx["M0_agn"]] += [1000.0, -500.0, 250.0, 800.0]
+    changed_variance, _ = (
+        hubble_model.M_model_agn_observable_variance_posterior(
+            changed_m0,
+            err_arr,
+            use_alpha_lambda_term=use_alpha_lambda_term,
+            use_eta_sigma_term=use_eta_sigma_term,
+        )
+    )
+    np.testing.assert_allclose(changed_variance, variance, rtol=0.0, atol=0.0)
+
+
 def test_log_likelihood_finite_on_fake_lcdm_data(fake_data):
     df_agn, df_pantheon = fake_data
     priors, model_labels, _ = hubble_model.get_model_params("FlatLambdaCDM", only_sna=False)

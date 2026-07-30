@@ -30,6 +30,7 @@ from qvc.hubble.hubble_model import (
     AgnPivotContext,
     M_model_agn,
     M_model_agn_err,
+    M_model_agn_observable_variance_posterior,
     M_model_agn_posterior_samples,
     agn_model_oidx,
     agn_model_pack_obs,
@@ -5464,46 +5465,29 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     mu_pred_16th   = np.percentile(mu_pred_samples, 16, axis=0)
     mu_pred_84th   = np.percentile(mu_pred_samples, 84, axis=0)
 
-    # Per-object uncertainty (for yerr)
-    agn_params_arr = agn_model_pack_params(
-        results,
-        use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
-        use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+    # Average the observable-error variance over the posterior coefficients.
+    # Global M0/slope posterior variance is correlated across objects and is
+    # deliberately not copied into independent data error bars.
+    pred_m2500_var, pred_m2500_var_components = (
+        M_model_agn_observable_variance_posterior(
+            agn_parameter_samples,
+            agn_err_arr,
+            use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
+            use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+        )
     )
-    predicted_M2500 = M_model_agn(
-        agn_params_arr,
-        agn_obs_arr,
-        agn_pivot_arr,
-        use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
-        use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+    predicted_M2500_err = np.sqrt(pred_m2500_var)
+    pred_m2500_sigma_var = pred_m2500_var_components["sigma"]
+    pred_m2500_tau_var = pred_m2500_var_components["tau"]
+    pred_m2500_cov_var = pred_m2500_var_components["covariance"]
+    pred_m2500_alpha_lambda_var = pred_m2500_var_components.get(
+        "alpha_lambda",
+        np.zeros_like(pred_m2500_var),
     )
-    predicted_M2500_err = M_model_agn_err(
-        agn_params_arr,
-        agn_obs_arr,
-        agn_err_arr,
-        agn_pivot_arr,
-        use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
-        use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+    pred_m2500_eta_sigma_var = pred_m2500_var_components.get(
+        "eta_sigma",
+        np.zeros_like(pred_m2500_var),
     )
-    req_params_local, _, req_errs_local = get_agn_model_spec(
-        use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
-        use_eta_sigma_term=option_flags["use_eta_sigma_term"],
-    )
-    pidx_local = {k: i for i, k in enumerate(req_params_local)}
-    eidx_local = {k: i for i, k in enumerate(req_errs_local)}
-    alpha_agn = agn_params_arr[pidx_local["alpha_agn"]]
-    beta_agn = agn_params_arr[pidx_local["beta_agn"]]
-    log_sigma_uv_std_psd = agn_err_arr[eidx_local["log_sigma_uv_std_psd"]]
-    log_tau_uv_rf_std_psd = agn_err_arr[eidx_local["log_tau_uv_rf_std_psd"]]
-    log_sigma_uv_log_tau_uv_rf_cov_psd = agn_err_arr[eidx_local["log_sigma_uv_log_tau_uv_rf_cov_psd"]]
-    pred_m2500_sigma_var = (alpha_agn * log_sigma_uv_std_psd) ** 2
-    pred_m2500_tau_var = (beta_agn * log_tau_uv_rf_std_psd) ** 2
-    pred_m2500_cov_var = 2 * alpha_agn * beta_agn * log_sigma_uv_log_tau_uv_rf_cov_psd
-    pred_m2500_alpha_lambda_var = np.zeros_like(pred_m2500_sigma_var)
-    if option_flags["use_alpha_lambda_term"]:
-        gamma_alpha_lambda = agn_params_arr[pidx_local[AGN_ALPHA_LAMBDA_PARAM]]
-        alpha_lambda_err = agn_err_arr[eidx_local[AGN_ALPHA_LAMBDA_ERR]]
-        pred_m2500_alpha_lambda_var = (gamma_alpha_lambda * alpha_lambda_err) ** 2
 
     cosmo = get_cosmo(cosmo_model, results, z_pivot_agn)
     sigma_lens = sigma_lens_from_dc(df_agn['z'].values, cosmo)
@@ -5513,7 +5497,6 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     m_app_var = apparent_mag_err**2
     lens_var = sigma_lens**2
     z_var = z_err**2
-    pred_m2500_var = predicted_M2500_err**2
 
     data_var_without_sigma_dmi = (
         m_app_var
@@ -6274,6 +6257,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
             {"metric": "median_predicted_M2500_tau_term_mag", "value": float(np.median(np.sqrt(np.clip(pred_m2500_tau_var[error_budget_mask], 0.0, None))))},
             {"metric": "median_predicted_M2500_cov_term_mag_signed", "value": float(np.median(np.sign(pred_m2500_cov_var[error_budget_mask]) * np.sqrt(np.abs(pred_m2500_cov_var[error_budget_mask]))))},
             {"metric": "median_predicted_M2500_alpha_lambda_term_mag", "value": float(np.median(np.sqrt(np.clip(pred_m2500_alpha_lambda_var[error_budget_mask], 0.0, None))))},
+            {"metric": "median_predicted_M2500_eta_sigma_term_mag", "value": float(np.median(np.sqrt(np.clip(pred_m2500_eta_sigma_var[error_budget_mask], 0.0, None))))},
             {"metric": "median_mu_pred_std_mag", "value": float(np.median(mu_pred_std[error_budget_mask]))},
             {"metric": "median_intrinsic_scatter_mag", "value": float(np.median(intrinsic_scatter[error_budget_mask]))},
             {"metric": "median_mu_pred_std_with_scatter_mag", "value": float(np.median(mu_pred_std_with_scatter[error_budget_mask]))},
@@ -6291,6 +6275,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
             {"metric": "median_var_fraction_predicted_M2500_tau_term", "value": _median_fraction(pred_m2500_tau_var)},
             {"metric": "median_var_fraction_predicted_M2500_cov_term", "value": _median_fraction(pred_m2500_cov_var)},
             {"metric": "median_var_fraction_predicted_M2500_alpha_lambda_term", "value": _median_fraction(pred_m2500_alpha_lambda_var)},
+            {"metric": "median_var_fraction_predicted_M2500_eta_sigma_term", "value": _median_fraction(pred_m2500_eta_sigma_var)},
         ]
         budget_suffix = diagnostics_suffix if diagnostics_suffix is not None else ("_debiased" if debias else "")
         budget_summary_path = os.path.join(diagnostics_path, f"hubble_error_budget_summary{budget_suffix}.csv")
@@ -6309,6 +6294,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
         per_object_budget_df["predicted_M2500_tau_term"] = np.sqrt(np.clip(pred_m2500_tau_var, 0.0, None))
         per_object_budget_df["predicted_M2500_cov_term_signed"] = np.sign(pred_m2500_cov_var) * np.sqrt(np.abs(pred_m2500_cov_var))
         per_object_budget_df["predicted_M2500_alpha_lambda_term"] = np.sqrt(np.clip(pred_m2500_alpha_lambda_var, 0.0, None))
+        per_object_budget_df["predicted_M2500_eta_sigma_term"] = np.sqrt(np.clip(pred_m2500_eta_sigma_var, 0.0, None))
         per_object_budget_df["intrinsic_scatter_term"] = intrinsic_scatter
         per_object_budget_df["sigma_dmi_term"] = sigma_dmi if sigma_dmi is not None else np.nan
         per_object_budget_df["sigma_sel_term"] = sigma_sel if sigma_sel is not None else np.nan
@@ -6331,6 +6317,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
             "predicted_M2500_tau_term",
             "predicted_M2500_cov_term_signed",
             "predicted_M2500_alpha_lambda_term",
+            "predicted_M2500_eta_sigma_term",
             "intrinsic_scatter_term",
             "sigma_dmi_term",
             "sigma_sel_term",

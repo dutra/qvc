@@ -569,6 +569,72 @@ def M_model_agn_posterior_samples(
     return predicted
 
 
+def M_model_agn_observable_variance_posterior(
+    params_samples,
+    err_arr,
+    use_alpha_lambda_term=False,
+    use_eta_sigma_term=False,
+):
+    """Average per-object observable variance over posterior coefficients.
+
+    This intentionally excludes the posterior variance of the global
+    relation parameters themselves.  That uncertainty is correlated between
+    objects and belongs in a model/posterior band, not in independent data
+    error bars.
+    """
+    req_params, _, req_errs = get_agn_model_spec(
+        use_alpha_lambda_term=use_alpha_lambda_term,
+        use_eta_sigma_term=use_eta_sigma_term,
+    )
+    samples = np.asarray(params_samples, dtype=float)
+    errors = np.asarray(err_arr, dtype=float)
+    if samples.ndim != 2 or samples.shape[1] != len(req_params):
+        raise ValueError(
+            "params_samples must have shape "
+            f"(n_samples, {len(req_params)}); got {samples.shape}"
+        )
+    if samples.shape[0] == 0:
+        raise ValueError("params_samples must contain at least one sample")
+    if errors.ndim != 2 or errors.shape[0] != len(req_errs):
+        raise ValueError(
+            "err_arr must have shape "
+            f"({len(req_errs)}, n_objects); got {errors.shape}"
+        )
+
+    pidx = {name: index for index, name in enumerate(req_params)}
+    eidx = {name: index for index, name in enumerate(req_errs)}
+    alpha = samples[:, pidx["alpha_agn"]]
+    beta = samples[:, pidx["beta_agn"]]
+    sigma_std = errors[eidx["log_sigma_uv_std_psd"]]
+    tau_std = errors[eidx["log_tau_uv_rf_std_psd"]]
+    sigma_tau_cov = errors[
+        eidx["log_sigma_uv_log_tau_uv_rf_cov_psd"]
+    ]
+    components = {
+        "sigma": np.mean(np.square(alpha)) * np.square(sigma_std),
+        "tau": np.mean(np.square(beta)) * np.square(tau_std),
+        "covariance": (
+            2.0 * np.mean(alpha * beta) * sigma_tau_cov
+        ),
+    }
+    if use_alpha_lambda_term:
+        gamma_alpha_lambda = samples[:, pidx[AGN_ALPHA_LAMBDA_PARAM]]
+        alpha_lambda_err = errors[eidx[AGN_ALPHA_LAMBDA_ERR]]
+        components["alpha_lambda"] = (
+            np.mean(np.square(gamma_alpha_lambda))
+            * np.square(alpha_lambda_err)
+        )
+    if use_eta_sigma_term:
+        gamma_eta_sigma = samples[:, pidx[AGN_ETA_SIGMA_PARAM]]
+        eta_sigma_err = errors[eidx[AGN_ETA_SIGMA_ERR]]
+        components["eta_sigma"] = (
+            np.mean(np.square(gamma_eta_sigma))
+            * np.square(eta_sigma_err)
+        )
+    variance = np.sum(np.asarray(list(components.values())), axis=0)
+    return variance, components
+
+
 def M_model_agn_err(
     params_arr,
     obs_arr,
