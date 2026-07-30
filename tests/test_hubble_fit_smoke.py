@@ -337,6 +337,57 @@ def test_log_f_prior_uses_wider_symmetric_range():
     assert hubble_model.AGN_LOG_F_PRIOR_HALF_WIDTH == pytest.approx(1.6)
 
 
+@pytest.mark.parametrize(
+    ("use_alpha_lambda_term", "use_eta_sigma_term"),
+    [(False, False), (True, False), (False, True), (True, True)],
+)
+def test_vectorized_agn_magnitude_samples_match_scalar_model(
+    use_alpha_lambda_term,
+    use_eta_sigma_term,
+):
+    df_agn = _make_fake_agn_sample(n_agn=5)
+    pivot_context = _agn_pivot_context(
+        df_agn,
+        use_alpha_lambda_term=use_alpha_lambda_term,
+        use_eta_sigma_term=use_eta_sigma_term,
+    )
+    obs_arr, _, pivots = hubble_model.agn_model_pack_obs(
+        df_agn,
+        use_alpha_lambda_term=use_alpha_lambda_term,
+        use_eta_sigma_term=use_eta_sigma_term,
+        pivot_context=pivot_context,
+    )
+    req_params, _, _ = hubble_model.get_agn_model_spec(
+        use_alpha_lambda_term=use_alpha_lambda_term,
+        use_eta_sigma_term=use_eta_sigma_term,
+    )
+    rng = np.random.default_rng(1183)
+    parameter_samples = rng.normal(size=(7, len(req_params)))
+
+    vectorized = hubble_model.M_model_agn_posterior_samples(
+        parameter_samples,
+        obs_arr,
+        pivots,
+        use_alpha_lambda_term=use_alpha_lambda_term,
+        use_eta_sigma_term=use_eta_sigma_term,
+    )
+    scalar = np.asarray(
+        [
+            hubble_model.M_model_agn(
+                row,
+                obs_arr,
+                pivots,
+                use_alpha_lambda_term=use_alpha_lambda_term,
+                use_eta_sigma_term=use_eta_sigma_term,
+            )
+            for row in parameter_samples
+        ]
+    )
+
+    assert vectorized.shape == (len(parameter_samples), len(df_agn))
+    np.testing.assert_allclose(vectorized, scalar, rtol=0.0, atol=1e-12)
+
+
 def test_log_likelihood_finite_on_fake_lcdm_data(fake_data):
     df_agn, df_pantheon = fake_data
     priors, model_labels, _ = hubble_model.get_model_params("FlatLambdaCDM", only_sna=False)

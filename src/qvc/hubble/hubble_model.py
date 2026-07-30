@@ -496,6 +496,79 @@ def M_model_agn(params_arr, obs_arr, pivots_array, use_alpha_lambda_term=False, 
         M_pred = M_pred + gamma_eta_sigma * (eta_sigma - eta_sigma_pivot)
     return M_pred
 
+
+def M_model_agn_posterior_samples(
+    params_samples,
+    obs_arr,
+    pivots_array,
+    use_alpha_lambda_term=False,
+    use_eta_sigma_term=False,
+):
+    """Evaluate the affine AGN magnitude relation for all samples at once.
+
+    Parameters
+    ----------
+    params_samples
+        Posterior parameter matrix in canonical AGN-model order, shaped
+        ``(n_samples, n_parameters)``.
+    obs_arr
+        Canonically ordered observable arrays, shaped
+        ``(n_observables, n_objects)``.
+
+    Returns
+    -------
+    numpy.ndarray
+        Predicted absolute magnitudes shaped ``(n_samples, n_objects)``.
+    """
+    req_params, req_obs, _ = get_agn_model_spec(
+        use_alpha_lambda_term=use_alpha_lambda_term,
+        use_eta_sigma_term=use_eta_sigma_term,
+    )
+    samples = np.asarray(params_samples, dtype=float)
+    observables = np.asarray(obs_arr, dtype=float)
+    pivots = np.asarray(pivots_array, dtype=float)
+    if samples.ndim != 2 or samples.shape[1] != len(req_params):
+        raise ValueError(
+            "params_samples must have shape "
+            f"(n_samples, {len(req_params)}); got {samples.shape}"
+        )
+    if observables.ndim != 2 or observables.shape[0] != len(req_obs):
+        raise ValueError(
+            "obs_arr must have shape "
+            f"({len(req_obs)}, n_objects); got {observables.shape}"
+        )
+    if pivots.shape != (len(req_obs),):
+        raise ValueError(
+            f"pivots_array must have shape ({len(req_obs)},); got {pivots.shape}"
+        )
+
+    pidx = {name: index for index, name in enumerate(req_params)}
+    oidx = {name: index for index, name in enumerate(req_obs)}
+    predicted = np.broadcast_to(
+        samples[:, pidx["M0_agn"], None],
+        (samples.shape[0], observables.shape[1]),
+    ).copy()
+    coefficient_terms = [
+        ("alpha_agn", "log_sigma_uv"),
+        ("beta_agn", "log_tau_uv_rf"),
+    ]
+    if use_alpha_lambda_term:
+        coefficient_terms.append(
+            (AGN_ALPHA_LAMBDA_PARAM, AGN_ALPHA_LAMBDA_OBS)
+        )
+    if use_eta_sigma_term:
+        coefficient_terms.append((AGN_ETA_SIGMA_PARAM, AGN_ETA_SIGMA_OBS))
+    for parameter_name, observable_name in coefficient_terms:
+        predicted += (
+            samples[:, pidx[parameter_name], None]
+            * (
+                observables[oidx[observable_name]][None, :]
+                - pivots[oidx[observable_name]]
+            )
+        )
+    return predicted
+
+
 def M_model_agn_err(
     params_arr,
     obs_arr,

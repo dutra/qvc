@@ -30,6 +30,7 @@ from qvc.hubble.hubble_model import (
     AgnPivotContext,
     M_model_agn,
     M_model_agn_err,
+    M_model_agn_posterior_samples,
     agn_model_oidx,
     agn_model_pack_obs,
     agn_model_pack_params,
@@ -5435,32 +5436,21 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
         use_eta_sigma_term=option_flags["use_eta_sigma_term"],
         pivot_context=agn_pivot_context,
     )
-    mu_pred_samples = []
-    for s in flat_samples:
-        sample_params = {k: s[param_indices[k]] for k in model_labels}
-        agn_params_arr = agn_model_pack_params(
-            sample_params,
-            use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
-            use_eta_sigma_term=option_flags["use_eta_sigma_term"],
-        )
-
-        predicted_M2500 = M_model_agn(
-            agn_params_arr,
-            agn_obs_arr,
-            agn_pivot_arr,
-            use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
-            use_eta_sigma_term=option_flags["use_eta_sigma_term"],
-        )
-        predicted_M2500_err = M_model_agn_err(
-            agn_params_arr,
-            agn_obs_arr,
-            agn_err_arr,
-            agn_pivot_arr,
-            use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
-            use_eta_sigma_term=option_flags["use_eta_sigma_term"],
-        )
-        mu_pred_samples.append(m_obs - predicted_M2500)
-    mu_pred_samples = np.array(mu_pred_samples)
+    agn_parameter_names, _, _ = get_agn_model_spec(
+        use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
+        use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+    )
+    agn_parameter_samples = np.column_stack(
+        [flat_samples[:, param_indices[name]] for name in agn_parameter_names]
+    )
+    predicted_M2500_samples = M_model_agn_posterior_samples(
+        agn_parameter_samples,
+        agn_obs_arr,
+        agn_pivot_arr,
+        use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
+        use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+    )
+    mu_pred_samples = m_obs[None, :] - predicted_M2500_samples
 
     # De-bias (assumes your make_dm_function clips to grid, no extrapolation)
     if debias:
