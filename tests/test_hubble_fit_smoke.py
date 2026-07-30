@@ -256,6 +256,47 @@ def _agn_pivot_context(
     )
 
 
+def _flat_lcdm_agn_magnitude_and_cosmology_draws(
+    flat_samples,
+    model_labels,
+    df_agn,
+    pivot_context,
+):
+    """Return matched posterior M and cosmology draws for plot regressions."""
+    samples = np.asarray(flat_samples, dtype=float)
+    parameter_indices = {
+        name: index for index, name in enumerate(model_labels)
+    }
+    agn_parameter_names, _, _ = hubble_model.get_agn_model_spec()
+    agn_parameter_samples = np.column_stack(
+        [
+            samples[:, parameter_indices[name]]
+            for name in agn_parameter_names
+        ]
+    )
+    observables, _, pivots = hubble_model.agn_model_pack_obs(
+        df_agn,
+        pivot_context=pivot_context,
+    )
+    magnitude_draws = hubble_model.M_model_agn_posterior_samples(
+        agn_parameter_samples,
+        observables,
+        pivots,
+    )
+    redshift = df_agn["z"].to_numpy(dtype=float)
+    cosmology_draws = np.asarray(
+        [
+            FlatLambdaCDM(
+                H0=sample[parameter_indices["H0"]],
+                Om0=sample[parameter_indices["Om0"]],
+            ).distmod(redshift).value
+            for sample in samples
+        ],
+        dtype=float,
+    )
+    return magnitude_draws, cosmology_draws
+
+
 def test_attenuated_selection_inputs_shift_model_and_replace_magnitude_error():
     agn_data = {
         hubble_completeness_refactored.COMPLETENESS_MAG_COL: np.array(
@@ -966,6 +1007,103 @@ def test_compute_direct_full_sample_completeness_summaries_freezes_fit_pivots(fa
     assert not np.allclose(naive_plot_blob[1][:-1], fit_blob[1], atol=1e-10)
 
 
+def test_compute_direct_full_sample_completeness_summaries_optionally_returns_selected_draws(
+    fake_data,
+    monkeypatch,
+):
+    df_agn, df_pantheon = fake_data
+    df_fit = df_agn.iloc[:2].copy()
+    df_plot = df_agn.iloc[:3].copy()
+    flat_samples = np.array([[10.0], [20.0], [30.0], [40.0]])
+    draw_indices = np.array([0, 2], dtype=int)
+
+    def fake_log_likelihood(theta, *, agn_data, **kwargs):
+        n_objects = len(agn_data)
+        blob = np.zeros((3, n_objects), dtype=float)
+        blob[1] = float(theta[0]) + np.arange(n_objects, dtype=float)
+        blob[2] = 0.1 * float(theta[0]) + np.arange(
+            n_objects,
+            dtype=float,
+        )
+        return 0.0, blob
+
+    monkeypatch.setattr(hubble_fit, "log_likelihood", fake_log_likelihood)
+    common_kwargs = dict(
+        df_agn_fit_selection=df_fit,
+        df_agn_plot_sample=df_plot,
+        df_pantheon=df_pantheon,
+        _sna_L=None,
+        _sna_Lower=True,
+        _sna_LogdetCov=None,
+        cosmo_model="FlatLambdaCDM",
+        completeness_params=object(),
+        z_pivot_agn=hubble_fit.z_pivot_agn,
+        agn_pivot_context=_agn_pivot_context(df_fit),
+        use_full_cov=False,
+        disable_ceph_dist_calibration=False,
+        use_planck_h0_prior=False,
+        use_planck_om_prior=False,
+    )
+
+    legacy_result = (
+        hubble_fit._compute_direct_full_sample_completeness_summaries(
+            flat_samples,
+            **common_kwargs,
+        )
+    )
+    assert len(legacy_result) == 3
+
+    selected_result = (
+        hubble_fit._compute_direct_full_sample_completeness_summaries(
+            flat_samples,
+            dmi_draw_indices=draw_indices,
+            **common_kwargs,
+        )
+    )
+    assert len(selected_result) == 4
+    dmi_median, _, sigma_sel_median, selected_draws = selected_result
+
+    all_draws = (
+        flat_samples[:, 0, None]
+        + np.arange(len(df_plot), dtype=float)[None, :]
+    )
+    all_sigma_sel_draws = (
+        0.1 * flat_samples[:, 0, None]
+        + np.arange(len(df_plot), dtype=float)[None, :]
+    )
+    np.testing.assert_allclose(dmi_median, np.median(all_draws, axis=0))
+    np.testing.assert_allclose(
+        sigma_sel_median,
+        np.median(all_sigma_sel_draws, axis=0),
+    )
+    assert isinstance(
+        selected_draws,
+        hubble_plotting.HubblePosteriorDrawSelection,
+    )
+    np.testing.assert_array_equal(
+        selected_draws.values,
+        all_draws[draw_indices],
+    )
+    np.testing.assert_array_equal(
+        selected_draws.sample_indices,
+        draw_indices,
+    )
+    assert selected_draws.object_ids == tuple(
+        df_plot["object_id"].astype(str)
+    )
+
+
+def test_get_hubble_posterior_sample_indices_preserves_plot_stride():
+    np.testing.assert_array_equal(
+        hubble_plotting.get_hubble_posterior_sample_indices(99),
+        np.arange(99, dtype=int),
+    )
+    np.testing.assert_array_equal(
+        hubble_plotting.get_hubble_posterior_sample_indices(205),
+        np.arange(0, 205, 2, dtype=int),
+    )
+
+
 def test_run_single_skip_plots_smoke(fake_data, monkeypatch, tmp_path):
     df_agn, df_pantheon = fake_data
     priors, model_labels, _ = hubble_model.get_model_params("FlatLambdaCDM", only_sna=False)
@@ -1156,6 +1294,15 @@ def test_run_single_threads_direct_full_sample_debias_arrays_to_plots(monkeypatc
     direct_dmi = np.linspace(0.01, 0.06, len(df_agn))
     direct_sigma = np.full(len(df_agn), 0.02)
     direct_sigma_sel = np.full(len(df_agn), 0.07)
+    direct_draw_indices = (
+        hubble_plotting.get_hubble_posterior_sample_indices(
+            len(flat_samples)
+        )
+    )
+    direct_dmi_draws = (
+        direct_dmi[None, :]
+        + np.arange(len(direct_draw_indices), dtype=float)[:, None]
+    )
 
     hubble_calls = []
     l2500_calls = []
@@ -1220,15 +1367,36 @@ def test_run_single_threads_direct_full_sample_debias_arrays_to_plots(monkeypatc
     def fake_plot_full_residuals_rz(*args, **kwargs):
         full_residual_rz_calls.append(kwargs)
 
+    def fake_direct_completeness_summaries(
+        *args,
+        dmi_draw_indices=None,
+        **kwargs,
+    ):
+        base_result = (
+            direct_dmi.copy(),
+            direct_sigma.copy(),
+            direct_sigma_sel.copy(),
+        )
+        if dmi_draw_indices is None:
+            return base_result
+        np.testing.assert_array_equal(
+            dmi_draw_indices,
+            direct_draw_indices,
+        )
+        return (
+            *base_result,
+            hubble_plotting.HubblePosteriorDrawSelection(
+                values=direct_dmi_draws.copy(),
+                sample_indices=direct_draw_indices.copy(),
+                object_ids=tuple(df_agn["object_id"].astype(str)),
+            ),
+        )
+
     monkeypatch.setattr(hubble_fit, "run_mcmc_pipeline", fake_run_mcmc_pipeline)
     monkeypatch.setattr(
         hubble_fit,
         "_compute_direct_full_sample_completeness_summaries",
-        lambda *args, **kwargs: (
-            direct_dmi.copy(),
-            direct_sigma.copy(),
-            direct_sigma_sel.copy(),
-        ),
+        fake_direct_completeness_summaries,
     )
     monkeypatch.setattr(hubble_fit, "plot_hubble", fake_plot_hubble)
     monkeypatch.setattr(hubble_fit, "plot_predicted_L2500_vs_sigmahat", fake_plot_predicted_L2500_vs_sigmahat)
@@ -1254,10 +1422,41 @@ def test_run_single_threads_direct_full_sample_debias_arrays_to_plots(monkeypatc
         prefix="unit",
     )
 
-    debiased_hubble_call = next(call for call in hubble_calls if call.get("debias"))
-    np.testing.assert_allclose(debiased_hubble_call["dmi_values"], direct_dmi)
-    np.testing.assert_allclose(debiased_hubble_call["dmi_sigma"], direct_sigma)
-    np.testing.assert_allclose(debiased_hubble_call["dmi_selection_sigma"], direct_sigma_sel)
+    debiased_hubble_calls = [
+        call for call in hubble_calls if call.get("debias")
+    ]
+    assert len(debiased_hubble_calls) == 2
+    for debiased_hubble_call in debiased_hubble_calls:
+        np.testing.assert_allclose(
+            debiased_hubble_call["dmi_values"],
+            direct_dmi,
+        )
+        np.testing.assert_allclose(
+            debiased_hubble_call["dmi_sigma"],
+            direct_sigma,
+        )
+        np.testing.assert_allclose(
+            debiased_hubble_call["dmi_selection_sigma"],
+            direct_sigma_sel,
+        )
+        np.testing.assert_array_equal(
+            debiased_hubble_call["posterior_sample_indices"],
+            direct_draw_indices,
+        )
+        np.testing.assert_allclose(
+            debiased_hubble_call["dmi_posterior_draws"].values,
+            direct_dmi_draws,
+        )
+        np.testing.assert_array_equal(
+            debiased_hubble_call[
+                "dmi_posterior_draws"
+            ].sample_indices,
+            direct_draw_indices,
+        )
+        assert (
+            debiased_hubble_call["dmi_posterior_draws"].object_ids
+            == tuple(df_agn["object_id"].astype(str))
+        )
 
     debiased_l2500_call = next(call for call in l2500_calls if call.get("debias"))
     np.testing.assert_allclose(debiased_l2500_call["dmi_values"], direct_dmi)
@@ -1650,6 +1849,349 @@ def test_plot_hubble_does_not_add_synthetic_population_scatter(monkeypatch, tmp_
     )
 
     assert result[0].shape == (len(df_agn),)
+
+
+def test_plot_hubble_uses_matched_magnitude_cosmology_and_dmi_draws(tmp_path):
+    df_agn = _make_fake_agn_sample(n_agn=1)
+    df_agn.loc[:, "z"] = 1.2
+    df_pantheon = _make_fake_pantheon_sample(n_sne=3)
+    priors, model_labels, _ = hubble_model.get_model_params(
+        "FlatLambdaCDM",
+        only_sna=False,
+    )
+    theta = np.array(
+        [
+            (priors[name][0] + priors[name][1]) / 2.0
+            for name in model_labels
+        ],
+        dtype=float,
+    )
+    flat_samples = np.tile(theta[None, :], (3, 1))
+    h0_index = model_labels.index("H0")
+    flat_samples[:, h0_index] = [62.0, 70.0, 78.0]
+    sample_indices = np.arange(3, dtype=int)
+    pivot_context = _agn_pivot_context(df_agn, (0.44, 3.16))
+
+    magnitude_draws, cosmology_draws = (
+        _flat_lcdm_agn_magnitude_and_cosmology_draws(
+            flat_samples,
+            model_labels,
+            df_agn,
+            pivot_context,
+        )
+    )
+    target_residual_draws = np.array([0.0, 1.0, -1.0])[:, None]
+    apparent_magnitude = df_agn[
+        "apparent_mag_2500"
+    ].to_numpy(dtype=float)
+    dmi_draws = (
+        apparent_magnitude[None, :]
+        - magnitude_draws
+        - cosmology_draws
+        - target_residual_draws
+    )
+    static_dmi = np.median(dmi_draws, axis=0)
+    draw_selection = hubble_plotting.HubblePosteriorDrawSelection(
+        values=dmi_draws,
+        sample_indices=sample_indices,
+        object_ids=tuple(df_agn["object_id"].astype(str)),
+    )
+
+    joint_result = hubble_plotting.plot_hubble(
+        flat_samples,
+        df_agn,
+        df_pantheon,
+        cosmo_model="FlatLambdaCDM",
+        z_pivot_agn=hubble_fit.z_pivot_agn,
+        plot_path=str(tmp_path),
+        debias=True,
+        dmi_values=static_dmi,
+        dmi_posterior_draws=draw_selection,
+        posterior_sample_indices=sample_indices,
+        compute_only=True,
+        agn_pivot_context=pivot_context,
+    )
+    expected_joint = np.median(target_residual_draws, axis=0)
+    separate_medians = (
+        np.median(
+            apparent_magnitude[None, :]
+            - magnitude_draws
+            - dmi_draws,
+            axis=0,
+        )
+        - np.median(cosmology_draws, axis=0)
+    )
+    np.testing.assert_allclose(
+        joint_result[0],
+        expected_joint,
+        rtol=0.0,
+        atol=1.0e-10,
+    )
+    assert not np.allclose(separate_medians, expected_joint, atol=0.1)
+
+    static_result = hubble_plotting.plot_hubble(
+        flat_samples,
+        df_agn,
+        df_pantheon,
+        cosmo_model="FlatLambdaCDM",
+        z_pivot_agn=hubble_fit.z_pivot_agn,
+        plot_path=str(tmp_path),
+        debias=True,
+        dmi_values=static_dmi,
+        posterior_sample_indices=sample_indices,
+        compute_only=True,
+        agn_pivot_context=pivot_context,
+    )
+    expected_static = np.median(
+        apparent_magnitude[None, :]
+        - magnitude_draws
+        - static_dmi[None, :]
+        - cosmology_draws,
+        axis=0,
+    )
+    np.testing.assert_allclose(
+        static_result[0],
+        expected_static,
+        rtol=0.0,
+        atol=1.0e-10,
+    )
+
+
+def test_plot_hubble_keeps_selected_dmi_draws_aligned_through_thinning(
+    tmp_path,
+):
+    df_agn = _make_fake_agn_sample(n_agn=1)
+    df_agn.loc[:, "z"] = 1.2
+    df_pantheon = _make_fake_pantheon_sample(n_sne=3)
+    priors, model_labels, _ = hubble_model.get_model_params(
+        "FlatLambdaCDM",
+        only_sna=False,
+    )
+    theta = np.array(
+        [
+            (priors[name][0] + priors[name][1]) / 2.0
+            for name in model_labels
+        ],
+        dtype=float,
+    )
+    n_samples = 205
+    flat_samples = np.tile(theta[None, :], (n_samples, 1))
+    flat_samples[:, model_labels.index("M0_agn")] = np.linspace(
+        -23.0,
+        -21.0,
+        n_samples,
+    )
+    flat_samples[:, model_labels.index("H0")] = np.linspace(
+        62.0,
+        78.0,
+        n_samples,
+    )
+    sample_indices = (
+        hubble_plotting.get_hubble_posterior_sample_indices(n_samples)
+    )
+    selected_samples = flat_samples[sample_indices]
+    pivot_context = _agn_pivot_context(df_agn, (0.44, 3.16))
+    magnitude_draws, cosmology_draws = (
+        _flat_lcdm_agn_magnitude_and_cosmology_draws(
+            selected_samples,
+            model_labels,
+            df_agn,
+            pivot_context,
+        )
+    )
+    draw_positions = np.arange(len(sample_indices), dtype=int)
+    target_residual_draws = (
+        ((draw_positions * 37) % 101 - 50) / 10.0
+    )[:, None]
+    apparent_magnitude = df_agn[
+        "apparent_mag_2500"
+    ].to_numpy(dtype=float)
+    dmi_draws = (
+        apparent_magnitude[None, :]
+        - magnitude_draws
+        - cosmology_draws
+        - target_residual_draws
+    )
+    draw_selection = hubble_plotting.HubblePosteriorDrawSelection(
+        values=dmi_draws,
+        sample_indices=sample_indices,
+        object_ids=tuple(df_agn["object_id"].astype(str)),
+    )
+
+    result = hubble_plotting.plot_hubble(
+        flat_samples,
+        df_agn,
+        df_pantheon,
+        cosmo_model="FlatLambdaCDM",
+        z_pivot_agn=hubble_fit.z_pivot_agn,
+        plot_path=str(tmp_path),
+        debias=True,
+        dmi_values=np.median(dmi_draws, axis=0),
+        dmi_posterior_draws=draw_selection,
+        posterior_sample_indices=sample_indices,
+        compute_only=True,
+        agn_pivot_context=pivot_context,
+    )
+
+    expected = np.median(target_residual_draws, axis=0)
+    double_thinned = np.median(target_residual_draws[::2], axis=0)
+    np.testing.assert_allclose(
+        result[0],
+        expected,
+        rtol=0.0,
+        atol=1.0e-10,
+    )
+    assert not np.allclose(double_thinned, expected)
+
+
+def test_plot_hubble_rejects_raw_full_posterior_dmi_draws(tmp_path):
+    df_agn = _make_fake_agn_sample(n_agn=1)
+    df_pantheon = _make_fake_pantheon_sample(n_sne=3)
+    priors, model_labels, _ = hubble_model.get_model_params(
+        "FlatLambdaCDM",
+        only_sna=False,
+    )
+    theta = np.array(
+        [
+            (priors[name][0] + priors[name][1]) / 2.0
+            for name in model_labels
+        ],
+        dtype=float,
+    )
+    flat_samples = np.tile(theta[None, :], (5, 1))
+    sample_indices = np.array([0, 2, 4], dtype=int)
+    pivot_context = _agn_pivot_context(df_agn, (0.44, 3.16))
+
+    with pytest.raises(TypeError, match="HubblePosteriorDrawSelection"):
+        hubble_plotting.plot_hubble(
+            flat_samples,
+            df_agn,
+            df_pantheon,
+            cosmo_model="FlatLambdaCDM",
+            z_pivot_agn=hubble_fit.z_pivot_agn,
+            plot_path=str(tmp_path),
+            debias=True,
+            dmi_values=np.zeros(len(df_agn), dtype=float),
+            dmi_posterior_draws=np.zeros(
+                (len(flat_samples), len(df_agn)),
+                dtype=float,
+            ),
+            posterior_sample_indices=sample_indices,
+            compute_only=True,
+            agn_pivot_context=pivot_context,
+        )
+
+
+@pytest.mark.parametrize(
+    "bad_draw_shape",
+    [
+        (2, 1),
+        (3, 1),
+        (3, 2),
+        (3,),
+    ],
+)
+def test_plot_hubble_rejects_raw_dmi_draw_arrays(
+    bad_draw_shape,
+    tmp_path,
+):
+    df_agn = _make_fake_agn_sample(n_agn=1)
+    df_pantheon = _make_fake_pantheon_sample(n_sne=3)
+    priors, model_labels, _ = hubble_model.get_model_params(
+        "FlatLambdaCDM",
+        only_sna=False,
+    )
+    theta = np.array(
+        [
+            (priors[name][0] + priors[name][1]) / 2.0
+            for name in model_labels
+        ],
+        dtype=float,
+    )
+    flat_samples = np.tile(theta[None, :], (5, 1))
+    sample_indices = np.array([0, 2, 4], dtype=int)
+    pivot_context = _agn_pivot_context(df_agn, (0.44, 3.16))
+
+    with pytest.raises(TypeError, match="HubblePosteriorDrawSelection"):
+        hubble_plotting.plot_hubble(
+            flat_samples,
+            df_agn,
+            df_pantheon,
+            cosmo_model="FlatLambdaCDM",
+            z_pivot_agn=hubble_fit.z_pivot_agn,
+            plot_path=str(tmp_path),
+            debias=True,
+            dmi_values=np.zeros(len(df_agn), dtype=float),
+            dmi_posterior_draws=np.zeros(bad_draw_shape, dtype=float),
+            posterior_sample_indices=sample_indices,
+            compute_only=True,
+            agn_pivot_context=pivot_context,
+        )
+
+
+@pytest.mark.parametrize(
+    ("mismatch", "message"),
+    [
+        ("sample_indices", "sample indices do not match"),
+        ("object_ids", "object_id order does not match"),
+    ],
+)
+def test_plot_hubble_rejects_selected_dmi_draw_provenance_mismatch(
+    mismatch,
+    message,
+    tmp_path,
+):
+    df_agn = _make_fake_agn_sample(n_agn=2)
+    df_pantheon = _make_fake_pantheon_sample(n_sne=3)
+    priors, model_labels, _ = hubble_model.get_model_params(
+        "FlatLambdaCDM",
+        only_sna=False,
+    )
+    theta = np.array(
+        [
+            (priors[name][0] + priors[name][1]) / 2.0
+            for name in model_labels
+        ],
+        dtype=float,
+    )
+    flat_samples = np.tile(theta[None, :], (5, 1))
+    sample_indices = np.array([0, 2, 4], dtype=int)
+    selection_indices = (
+        np.array([0, 1, 4], dtype=int)
+        if mismatch == "sample_indices"
+        else sample_indices
+    )
+    object_ids = tuple(df_agn["object_id"].astype(str))
+    selection_object_ids = (
+        tuple(reversed(object_ids))
+        if mismatch == "object_ids"
+        else object_ids
+    )
+    draw_selection = hubble_plotting.HubblePosteriorDrawSelection(
+        values=np.zeros(
+            (len(selection_indices), len(df_agn)),
+            dtype=float,
+        ),
+        sample_indices=selection_indices,
+        object_ids=selection_object_ids,
+    )
+    pivot_context = _agn_pivot_context(df_agn, (0.44, 3.16))
+
+    with pytest.raises(ValueError, match=message):
+        hubble_plotting.plot_hubble(
+            flat_samples,
+            df_agn,
+            df_pantheon,
+            cosmo_model="FlatLambdaCDM",
+            z_pivot_agn=hubble_fit.z_pivot_agn,
+            plot_path=str(tmp_path),
+            debias=True,
+            dmi_values=np.zeros(len(df_agn), dtype=float),
+            dmi_posterior_draws=draw_selection,
+            posterior_sample_indices=sample_indices,
+            compute_only=True,
+            agn_pivot_context=pivot_context,
+        )
 
 
 def test_weighted_bin_stats_includes_outer_edges_and_uses_histogram_convention():
@@ -2413,6 +2955,33 @@ def test_run_single_minimal_plots_keeps_only_debiased_hubble_plot(monkeypatch, t
     assert hubble_calls[0]["debias"] is True
     assert hubble_calls[0]["residuals_csv_filename"] == "hubble_plot_residuals.csv"
     assert "filename" not in hubble_calls[0]
+    expected_draw_indices = (
+        hubble_plotting.get_hubble_posterior_sample_indices(
+            len(flat_samples)
+        )
+    )
+    np.testing.assert_array_equal(
+        hubble_calls[0]["posterior_sample_indices"],
+        expected_draw_indices,
+    )
+    assert isinstance(
+        hubble_calls[0]["dmi_posterior_draws"],
+        hubble_plotting.HubblePosteriorDrawSelection,
+    )
+    np.testing.assert_array_equal(
+        hubble_calls[0]["dmi_posterior_draws"].values,
+        np.zeros(
+            (len(expected_draw_indices), len(df_agn)),
+            dtype=float,
+        ),
+    )
+    np.testing.assert_array_equal(
+        hubble_calls[0]["dmi_posterior_draws"].sample_indices,
+        expected_draw_indices,
+    )
+    assert hubble_calls[0]["dmi_posterior_draws"].object_ids == tuple(
+        df_agn["object_id"].astype(str)
+    )
     assert expensive_calls == []
     assert result[5].tolist() == list(range(len(df_agn)))
 
@@ -3070,6 +3639,12 @@ def test_run_single_resume_replot_with_cuts_bypasses_sampling_passes_and_plots_c
                 "filename": kwargs.get("filename"),
                 "agn_likelihood_space_chi2": kwargs.get("agn_likelihood_space_chi2"),
                 "agn_likelihood_space_chi2_zgt1": kwargs.get("agn_likelihood_space_chi2_zgt1"),
+                "posterior_sample_indices": kwargs.get(
+                    "posterior_sample_indices"
+                ),
+                "dmi_posterior_draws": kwargs.get(
+                    "dmi_posterior_draws"
+                ),
             }
         )
         n = len(df_plot)
@@ -3081,15 +3656,38 @@ def test_run_single_resume_replot_with_cuts_bypasses_sampling_passes_and_plots_c
         value = 9.87 if len(agn_chi2_calls) == 1 else 6.54
         return value, {"chi2": value, "dof": max(len(object_ids) - len(model_labels), 1)}
 
+    def fake_direct_completeness_summaries(
+        *args,
+        dmi_draw_indices=None,
+        **kwargs,
+    ):
+        base_result = (
+            np.zeros(len(df_agn), dtype=float),
+            np.zeros(len(df_agn), dtype=float),
+            None,
+        )
+        if dmi_draw_indices is None:
+            return base_result
+        return (
+            *base_result,
+            hubble_plotting.HubblePosteriorDrawSelection(
+                values=np.zeros(
+                    (len(dmi_draw_indices), len(df_agn)),
+                    dtype=float,
+                ),
+                sample_indices=np.asarray(
+                    dmi_draw_indices,
+                    dtype=int,
+                ),
+                object_ids=tuple(df_agn["object_id"].astype(str)),
+            ),
+        )
+
     monkeypatch.setattr(hubble_fit, "run_mcmc_pipeline", fake_run_mcmc_pipeline)
     monkeypatch.setattr(
         hubble_fit,
         "_compute_direct_full_sample_completeness_summaries",
-        lambda *args, **kwargs: (
-            np.zeros(len(df_agn), dtype=float),
-            np.zeros(len(df_agn), dtype=float),
-            None,
-        ),
+        fake_direct_completeness_summaries,
     )
     monkeypatch.setattr(hubble_fit, "plot_hubble", fake_plot_hubble)
     monkeypatch.setattr(
@@ -3140,6 +3738,28 @@ def test_run_single_resume_replot_with_cuts_bypasses_sampling_passes_and_plots_c
     ]
     assert plot_hubble_calls[0]["agn_likelihood_space_chi2"] == 9.87
     assert plot_hubble_calls[0]["agn_likelihood_space_chi2_zgt1"] == 6.54
+    expected_draw_indices = (
+        hubble_plotting.get_hubble_posterior_sample_indices(8)
+    )
+    np.testing.assert_array_equal(
+        plot_hubble_calls[0]["posterior_sample_indices"],
+        expected_draw_indices,
+    )
+    assert isinstance(
+        plot_hubble_calls[0]["dmi_posterior_draws"],
+        hubble_plotting.HubblePosteriorDrawSelection,
+    )
+    assert plot_hubble_calls[0]["dmi_posterior_draws"].values.shape == (
+        len(expected_draw_indices),
+        len(df_agn),
+    )
+    np.testing.assert_array_equal(
+        plot_hubble_calls[0]["dmi_posterior_draws"].sample_indices,
+        expected_draw_indices,
+    )
+    assert plot_hubble_calls[0]["dmi_posterior_draws"].object_ids == tuple(
+        df_agn["object_id"].astype(str)
+    )
     assert completeness_plot_calls == [str(generated_completeness), str(generated_completeness)]
 
 

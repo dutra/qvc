@@ -91,6 +91,8 @@ from qvc.hubble.hubble_model import (
     validate_agn_observable_uncertainties,
 )
 from qvc.hubble.hubble_plotting import (
+    HubblePosteriorDrawSelection,
+    get_hubble_posterior_sample_indices,
     plot_blr_line_lags_vs_l2500,
     plot_completeness_diagnostics,
     plot_cosmo_corner,
@@ -940,6 +942,20 @@ def run_single_jax(
     integrals_max_w = blobs[idx_max_weight, 0, :]
     dmi_max_w = blobs[idx_max_weight, 1, :]
     dmi_posterior_median = np.median(blobs[:, 1, :], axis=0)
+    dmi_posterior_sigma = 0.5 * (
+        np.percentile(blobs[:, 1, :], 84, axis=0)
+        - np.percentile(blobs[:, 1, :], 16, axis=0)
+    )
+    posterior_sample_indices = get_hubble_posterior_sample_indices(
+        len(flat_samples)
+    )
+    dmi_posterior_draws = HubblePosteriorDrawSelection(
+        values=blobs[posterior_sample_indices, 1, :],
+        sample_indices=posterior_sample_indices,
+        object_ids=tuple(
+            str(value) for value in df_agn_fit["object_id"].to_numpy()
+        ),
+    )
     dmi_selection_sigma_posterior_median = None
     if blobs.ndim == 3 and blobs.shape[1] >= 3:
         dmi_selection_sigma_posterior_median = np.median(blobs[:, 2, :], axis=0)
@@ -951,6 +967,7 @@ def run_single_jax(
         flat_samples=flat_samples,
         dmi_max_w=dmi_max_w,
         dmi_posterior_median=dmi_posterior_median,
+        dmi_posterior_sigma=dmi_posterior_sigma,
         dmi_selection_sigma_posterior_median=dmi_selection_sigma_posterior_median,
         sigma_clip_pass_stage="single",
         logZ=logZ if logZ is not None else np.nan,
@@ -1168,8 +1185,13 @@ def run_single_jax(
         verbose=True,
         residuals_sigma_clip=None,
         df_calibrators=None,
+        dmi_values=dmi_posterior_median,
+        dmi_sigma=dmi_posterior_sigma,
+        dmi_selection_sigma=dmi_selection_sigma_posterior_median,
         z_range=z_range,
         only_agn=only_agn,
+        dmi_posterior_draws=dmi_posterior_draws,
+        posterior_sample_indices=posterior_sample_indices,
         agn_pivot_context=agn_pivot_context,
     )
     debiased_residuals, _debiased_clipping_sigma, _, mu_pred_std_debiased, _ = r

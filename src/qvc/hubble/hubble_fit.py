@@ -62,6 +62,8 @@ from qvc.hubble.hubble_likelihood import (
     sigma_mu_from_z_err,
 )
 from qvc.hubble.hubble_plotting import (
+    HubblePosteriorDrawSelection,
+    get_hubble_posterior_sample_indices,
     plot_blr_diagnostics_summary,
     plot_blr_line_lags_vs_l2500,
     plot_completeness_diagnostics,
@@ -1670,10 +1672,76 @@ def _compute_direct_full_sample_completeness_summaries(
     use_eta_sigma_term=False,
     use_redshift_log_f_term=False,
     early_de_guard=False,
+    dmi_draw_indices=None,
 ):
+    """Replay completeness and optionally retain aligned posterior draws.
+
+    The historical three-value summary return is unchanged when
+    ``dmi_draw_indices`` is omitted.  When indices are supplied, the fourth
+    value is a :class:`HubblePosteriorDrawSelection` carrying the selected
+    draws together with their posterior-row and object-column identities.
+    """
+    samples = np.asarray(flat_samples, dtype=float)
+    if samples.ndim != 2 or samples.shape[0] == 0:
+        raise ValueError(
+            "flat_samples must be a nonempty two-dimensional array; "
+            f"got shape {samples.shape}."
+        )
+    selected_draw_indices = None
+    if dmi_draw_indices is not None:
+        selected_draw_indices = np.asarray(dmi_draw_indices)
+        if (
+            selected_draw_indices.ndim != 1
+            or selected_draw_indices.size == 0
+            or np.issubdtype(selected_draw_indices.dtype, np.bool_)
+            or not np.issubdtype(selected_draw_indices.dtype, np.integer)
+        ):
+            raise ValueError(
+                "dmi_draw_indices must be a nonempty one-dimensional "
+                "integer array."
+            )
+        selected_draw_indices = selected_draw_indices.astype(int, copy=False)
+        if (
+            np.any(selected_draw_indices < 0)
+            or np.any(selected_draw_indices >= samples.shape[0])
+        ):
+            raise ValueError(
+                "dmi_draw_indices contains a row outside "
+                f"[0, {samples.shape[0]})."
+            )
+        if np.unique(selected_draw_indices).size != selected_draw_indices.size:
+            raise ValueError("dmi_draw_indices must not contain duplicates.")
+
     n_plot = len(df_agn_plot_sample)
+    def _selected_draws(values):
+        if "object_id" not in df_agn_plot_sample:
+            raise ValueError(
+                "df_agn_plot_sample must contain object_id when retaining "
+                "posterior dmi draws."
+            )
+        return HubblePosteriorDrawSelection(
+            values=values,
+            sample_indices=selected_draw_indices,
+            object_ids=tuple(
+                str(value)
+                for value in df_agn_plot_sample["object_id"].to_numpy()
+            ),
+        )
+
     if n_plot == 0:
         empty = np.empty(0, dtype=float)
+        if selected_draw_indices is not None:
+            return (
+                empty,
+                empty,
+                None,
+                _selected_draws(
+                    np.empty(
+                        (selected_draw_indices.size, 0),
+                        dtype=float,
+                    )
+                ),
+            )
         return empty, empty, None
 
     if len(df_agn_fit_selection) == 0:
@@ -1681,11 +1749,23 @@ def _compute_direct_full_sample_completeness_summaries(
 
     if completeness_params is None:
         zeros = np.zeros(n_plot, dtype=float)
+        if selected_draw_indices is not None:
+            return (
+                zeros,
+                zeros,
+                None,
+                _selected_draws(
+                    np.zeros(
+                        (selected_draw_indices.size, n_plot),
+                        dtype=float,
+                    )
+                ),
+            )
         return zeros, zeros, None
 
     dmi_draws = []
     sigma_sel_draws = []
-    for theta in np.asarray(flat_samples, dtype=float):
+    for theta in samples:
         _, blob = log_likelihood(
             theta,
             agn_data=df_agn_plot_sample,
@@ -1721,10 +1801,15 @@ def _compute_direct_full_sample_completeness_summaries(
         - np.percentile(dmi_draws, 16, axis=0)
     )
     dmi_selection_sigma_full_direct = np.median(sigma_sel_draws, axis=0)
-    return (
+    summaries = (
         dmi_posterior_median_full_direct,
         dmi_posterior_sigma_full_direct,
         dmi_selection_sigma_full_direct,
+    )
+    if selected_draw_indices is None:
+        return summaries
+    return summaries + (
+        _selected_draws(dmi_draws[selected_draw_indices]),
     )
 
 
@@ -2838,10 +2923,16 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 resume_replot_with_cuts=False,
                 df_agn_completeness=df_agn_full_sample_preclip,
             )
+            posterior_sample_indices_pass1 = (
+                get_hubble_posterior_sample_indices(
+                    len(flat_samples_pass1)
+                )
+            )
             (
                 dmi_posterior_median_pass1_full,
                 dmi_posterior_sigma_pass1_full,
                 dmi_selection_sigma_pass1_full,
+                dmi_posterior_draws_pass1_full,
             ) = _compute_direct_full_sample_completeness_summaries(
                 flat_samples_pass1,
                 df_agn_fit_selection=df_agn_pass1_fit_selection,
@@ -2863,6 +2954,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 use_eta_sigma_term=use_eta_sigma_term,
                 use_redshift_log_f_term=use_redshift_log_f_term,
                 early_de_guard=early_de_guard,
+                dmi_draw_indices=posterior_sample_indices_pass1,
             )
             pass1_residuals_full, pass1_clipping_sigma_full, _, _, _ = plot_hubble(
                 flat_samples_pass1,
@@ -2882,6 +2974,8 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 dmi_values=dmi_posterior_median_pass1_full,
                 dmi_sigma=dmi_posterior_sigma_pass1_full,
                 dmi_selection_sigma=dmi_selection_sigma_pass1_full,
+                dmi_posterior_draws=dmi_posterior_draws_pass1_full,
+                posterior_sample_indices=posterior_sample_indices_pass1,
                 filename="hubble_diagram_pass1_full_sample_debiased.pdf",
                 residuals_csv_filename=None if minimal_plots else "hubble_plot_residuals_pass1.csv",
                 compute_only=minimal_plots,
@@ -2956,6 +3050,8 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                     dmi_values=dmi_posterior_median_pass1_full,
                     dmi_sigma=dmi_posterior_sigma_pass1_full,
                     dmi_selection_sigma=dmi_selection_sigma_pass1_full,
+                    dmi_posterior_draws=dmi_posterior_draws_pass1_full,
+                    posterior_sample_indices=posterior_sample_indices_pass1,
                     clipped_mask=clipped_mask_pass1_full,
                     filename="hubble_diagram_pass1_full_sample_clipped_debiased.pdf",
                     residuals_csv_filename="hubble_plot_residuals_pass1_clipped.csv",
@@ -3153,10 +3249,14 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         return flat_samples, model_labels, dm_interp, logZ, logZerr, None, age, age_err
 
     if minimal_plots:
+        posterior_sample_indices = get_hubble_posterior_sample_indices(
+            len(flat_samples)
+        )
         (
             dmi_posterior_median_full,
             dmi_posterior_sigma_full,
             dmi_selection_sigma_full,
+            dmi_posterior_draws_full,
         ) = _compute_direct_full_sample_completeness_summaries(
             flat_samples,
             df_agn_fit_selection=df_agn_pass2_fit_selection,
@@ -3178,6 +3278,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
             use_eta_sigma_term=use_eta_sigma_term,
             use_redshift_log_f_term=use_redshift_log_f_term,
             early_de_guard=early_de_guard,
+            dmi_draw_indices=posterior_sample_indices,
         )
         df_agn_agn_likelihood_chi2_selection = df_agn_pass2_fit_selection
         if resume_replot_with_cuts:
@@ -3235,6 +3336,8 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
             dmi_values=dmi_posterior_median_full,
             dmi_sigma=dmi_posterior_sigma_full,
             dmi_selection_sigma=dmi_selection_sigma_full,
+            dmi_posterior_draws=dmi_posterior_draws_full,
+            posterior_sample_indices=posterior_sample_indices,
             residuals_csv_filename="hubble_plot_residuals.csv",
             sigma_clip_threshold=sigma_clip_threshold if apply_two_pass_sigma_clip else None,
             z_range=z_range,
@@ -3275,10 +3378,14 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         filename="sigma_uv_mpred_correction_postcut.pdf",
     )
 
+    posterior_sample_indices = get_hubble_posterior_sample_indices(
+        len(flat_samples)
+    )
     (
         dmi_posterior_median_full_direct,
         dmi_posterior_sigma_full_direct,
         dmi_selection_sigma_full_direct,
+        dmi_posterior_draws_full_direct,
     ) = _compute_direct_full_sample_completeness_summaries(
         flat_samples,
         df_agn_fit_selection=df_agn_pass2_fit_selection,
@@ -3300,10 +3407,12 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         use_eta_sigma_term=use_eta_sigma_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
         early_de_guard=early_de_guard,
+        dmi_draw_indices=posterior_sample_indices,
     )
     dmi_posterior_median_full = dmi_posterior_median_full_direct
     dmi_posterior_sigma_full = dmi_posterior_sigma_full_direct
     dmi_selection_sigma_full = dmi_selection_sigma_full_direct
+    dmi_posterior_draws_full = dmi_posterior_draws_full_direct
 
     print("Plotting predicted L2500 vs ...")
     plot_predicted_L2500_vs_sigmahat(
@@ -3503,6 +3612,8 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                     dmi_values=dmi_posterior_median_full,
                     dmi_sigma=dmi_posterior_sigma_full,
                     dmi_selection_sigma=dmi_selection_sigma_full,
+                    dmi_posterior_draws=dmi_posterior_draws_full,
+                    posterior_sample_indices=posterior_sample_indices,
                     residuals_csv_filename="hubble_plot_residuals.csv",
                     sigma_clip_threshold=sigma_clip_threshold if apply_two_pass_sigma_clip else None,
                     z_range=z_range,
@@ -3725,6 +3836,8 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         dmi_values=dmi_posterior_median_full,
         dmi_sigma=dmi_posterior_sigma_full,
         dmi_selection_sigma=dmi_selection_sigma_full,
+        dmi_posterior_draws=dmi_posterior_draws_full,
+        posterior_sample_indices=posterior_sample_indices,
         filename="hubble_diagram_debiased_no_logf.pdf",
         residuals_csv_filename="hubble_plot_residuals_no_logf.csv",
         sigma_clip_threshold=sigma_clip_threshold if apply_two_pass_sigma_clip else None,

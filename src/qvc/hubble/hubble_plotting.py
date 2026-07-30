@@ -4,6 +4,7 @@ import math
 import re
 import warnings
 from ast import literal_eval
+from dataclasses import dataclass
 
 import corner
 import matplotlib as mpl
@@ -82,6 +83,63 @@ _OUT_OF_RANGE_AGN_COLOR = "#354B5B"
 _OUT_OF_RANGE_AGN_MARKER_COLOR = mpl.colors.to_rgba(_OUT_OF_RANGE_AGN_COLOR, alpha=0.65)
 _OUT_OF_RANGE_AGN_ERROR_COLOR = mpl.colors.to_rgba(_OUT_OF_RANGE_AGN_COLOR, alpha=0.3)
 _COSMO_CORNER_LEGEND_FONTSIZE = 40
+
+
+@dataclass(frozen=True)
+class HubblePosteriorDrawSelection:
+    """Posterior draws bound to their sample rows and AGN column order."""
+
+    values: np.ndarray
+    sample_indices: np.ndarray
+    object_ids: tuple[str, ...]
+
+    def __post_init__(self):
+        values = np.asarray(self.values, dtype=float)
+        sample_indices = np.asarray(self.sample_indices)
+        object_ids = np.asarray(self.object_ids, dtype=object)
+        if values.ndim != 2:
+            raise ValueError(
+                "Hubble posterior draw values must be two-dimensional; "
+                f"got shape {values.shape}."
+            )
+        if (
+            sample_indices.ndim != 1
+            or np.issubdtype(sample_indices.dtype, np.bool_)
+            or not np.issubdtype(sample_indices.dtype, np.integer)
+        ):
+            raise ValueError(
+                "Hubble posterior draw sample_indices must be a "
+                "one-dimensional integer array."
+            )
+        if object_ids.ndim != 1:
+            raise ValueError(
+                "Hubble posterior draw object_ids must be one-dimensional."
+            )
+        if values.shape != (sample_indices.size, object_ids.size):
+            raise ValueError(
+                "Hubble posterior draw values must have shape "
+                f"({sample_indices.size}, {object_ids.size}); "
+                f"got {values.shape}."
+            )
+        if np.any(~np.isfinite(values)):
+            raise ValueError(
+                "Hubble posterior draw values must contain only finite "
+                "values."
+            )
+        if np.unique(sample_indices).size != sample_indices.size:
+            raise ValueError(
+                "Hubble posterior draw sample_indices must not contain "
+                "duplicates."
+            )
+
+        values = values.copy()
+        sample_indices = sample_indices.astype(int, copy=True)
+        values.setflags(write=False)
+        sample_indices.setflags(write=False)
+        object_id_tuple = tuple(str(value) for value in object_ids)
+        object.__setattr__(self, "values", values)
+        object.__setattr__(self, "sample_indices", sample_indices)
+        object.__setattr__(self, "object_ids", object_id_tuple)
 
 
 _SDSS_FILTER_EDGES_OBS = {
@@ -5314,6 +5372,51 @@ def _range_partitioned_weighted_bin_stats(
     return inside, _concatenate_weighted_bin_stats((below, above))
 
 
+def get_hubble_posterior_sample_indices(n_samples, target_samples=100):
+    """Return the deterministic posterior rows used by ``plot_hubble``."""
+    if (
+        isinstance(n_samples, (bool, np.bool_))
+        or not isinstance(n_samples, (int, np.integer))
+        or n_samples <= 0
+    ):
+        raise ValueError(
+            f"n_samples must be a positive integer; got {n_samples!r}."
+        )
+    if (
+        isinstance(target_samples, (bool, np.bool_))
+        or not isinstance(target_samples, (int, np.integer))
+        or target_samples <= 0
+    ):
+        raise ValueError(
+            "target_samples must be a positive integer; "
+            f"got {target_samples!r}."
+        )
+    thin_factor = max(1, int(n_samples) // int(target_samples))
+    return np.arange(int(n_samples), dtype=int)[::thin_factor]
+
+
+def _validate_hubble_posterior_sample_indices(indices, n_samples):
+    values = np.asarray(indices)
+    if values.ndim != 1 or values.size == 0:
+        raise ValueError(
+            "posterior_sample_indices must be a nonempty one-dimensional "
+            f"array; got shape {values.shape}."
+        )
+    if np.issubdtype(values.dtype, np.bool_) or not np.issubdtype(
+        values.dtype, np.integer
+    ):
+        raise ValueError("posterior_sample_indices must contain integers.")
+    values = values.astype(int, copy=False)
+    if np.any(values < 0) or np.any(values >= n_samples):
+        raise ValueError(
+            "posterior_sample_indices contains a row outside "
+            f"[0, {n_samples})."
+        )
+    if np.unique(values).size != values.size:
+        raise ValueError("posterior_sample_indices must not contain duplicates.")
+    return values
+
+
 
 def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plot_path="plots/hubble/",
                 show_binned_agn=True, show_residuals=True,
@@ -5330,6 +5433,8 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
                 residuals_csv_filename="residuals.csv",
                 compute_only=False,
                 *,
+                dmi_posterior_draws=None,
+                posterior_sample_indices=None,
                 agn_pivot_context: AgnPivotContext):
     """
     Hubble diagram (Pantheon+-style):
@@ -5339,7 +5444,11 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
       • AGN points + error bars (solid if 0.44<=z<=3.16 else open)
       • Main: AGN binned in linear z
       • Inset: AGN binned in log z (matches inset x-scale)
-    If residuals_2 is provided, the residuals panel overlays a solid line of (residuals - residuals_2).
+      • Residuals: median of matched posterior M, cosmology, and debias draws
+
+    Posterior debias draws must be passed as
+    ``HubblePosteriorDrawSelection`` so their posterior rows and AGN column
+    order can be verified.
     Returns:
       residuals,
       clipping_sigma,
@@ -5365,10 +5474,58 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     label = cosmo_model_label_latex(cosmo_model)
     clipped_mask = _resolve_clipped_mask(df_agn, clipped_mask)
 
-    # --- Thinning for speed (cap to ~500 samples) ---
-    n_samples = int(flat_samples.shape[0])
-    thin_factor = max(1, n_samples // 100)
-    flat_samples = flat_samples[::thin_factor]
+    # --- Deterministic posterior thinning shared by M, cosmology, and dmi ---
+    flat_samples_all = np.asarray(flat_samples, dtype=float)
+    if flat_samples_all.ndim != 2 or flat_samples_all.shape[0] == 0:
+        raise ValueError(
+            "flat_samples must be a nonempty two-dimensional array; "
+            f"got shape {flat_samples_all.shape}."
+        )
+    n_samples = int(flat_samples_all.shape[0])
+    draw_selection = (
+        dmi_posterior_draws
+        if isinstance(dmi_posterior_draws, HubblePosteriorDrawSelection)
+        else None
+    )
+    if dmi_posterior_draws is not None and draw_selection is None:
+        raise TypeError(
+            "dmi_posterior_draws must be a "
+            "HubblePosteriorDrawSelection so posterior-row and object-column "
+            "alignment can be verified."
+        )
+    if draw_selection is not None and posterior_sample_indices is None:
+        posterior_sample_indices = draw_selection.sample_indices
+    explicit_sample_indices = posterior_sample_indices is not None
+    if explicit_sample_indices:
+        posterior_sample_indices = _validate_hubble_posterior_sample_indices(
+            posterior_sample_indices,
+            n_samples,
+        )
+    else:
+        posterior_sample_indices = get_hubble_posterior_sample_indices(
+            n_samples
+        )
+
+    selected_dmi_posterior_draws = None
+    if draw_selection is not None:
+        if not np.array_equal(
+            draw_selection.sample_indices,
+            posterior_sample_indices,
+        ):
+            raise ValueError(
+                "dmi_posterior_draws sample indices do not match "
+                "posterior_sample_indices."
+            )
+        expected_object_ids = tuple(
+            str(value) for value in df_agn["object_id"].to_numpy()
+        )
+        if draw_selection.object_ids != expected_object_ids:
+            raise ValueError(
+                "dmi_posterior_draws object_id order does not match "
+                "df_agn."
+            )
+        selected_dmi_posterior_draws = draw_selection.values
+    flat_samples = flat_samples_all[posterior_sample_indices]
 
     z_grid = np.linspace(1e-4, 5.2, 500)
 
@@ -5414,14 +5571,18 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
         return get_cosmo(model_name, params_dict, zp).distmod(z).value
 
     # --- Cosmology band on grid from posterior samples ---
-    mu_models = np.array([
-        _mu_model(
-            cosmo_model,
-            {k: s[param_indices[k]] for k in model_labels},
-            z_grid, z_pivot_agn
-        )
-        for s in flat_samples
-    ])
+    sample_parameter_dicts = [
+        {key: sample[param_indices[key]] for key in model_labels}
+        for sample in flat_samples
+    ]
+    sample_cosmologies = [
+        get_cosmo(cosmo_model, params, z_pivot_agn)
+        for params in sample_parameter_dicts
+    ]
+    mu_models = np.asarray(
+        [cosmo.distmod(z_grid).value for cosmo in sample_cosmologies],
+        dtype=float,
+    )
     mu_model_16th   = np.percentile(mu_models, 16, axis=0)
     mu_model_median = np.percentile(mu_models, 50, axis=0)
     mu_model_84th   = np.percentile(mu_models, 84, axis=0)
@@ -5455,11 +5616,14 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
 
     # De-bias (assumes your make_dm_function clips to grid, no extrapolation)
     if debias:
-        mu_pred_samples -= _resolve_debias_values(
-            df_agn,
-            dm_interp=dm_interp,
-            dmi_values=dmi_values,
-        )
+        if selected_dmi_posterior_draws is not None:
+            mu_pred_samples -= selected_dmi_posterior_draws
+        else:
+            mu_pred_samples -= _resolve_debias_values(
+                df_agn,
+                dm_interp=dm_interp,
+                dmi_values=dmi_values,
+            )
 
     mu_pred_median = np.percentile(mu_pred_samples, 50, axis=0)
     mu_pred_16th   = np.percentile(mu_pred_samples, 16, axis=0)
@@ -5563,10 +5727,26 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
             np.nan,
         )
 
-    # Residuals (vs. median μ_model)
-    mu_interp = np.interp(df_agn["z"].values, z_grid, mu_model_median)
-    residuals = mu_pred_median - mu_interp
     z_values = df_agn["z"].to_numpy(dtype=float)
+    mu_cosmo_samples = np.asarray(
+        [cosmo.distmod(z_values).value for cosmo in sample_cosmologies],
+        dtype=float,
+    )
+    # Preserve posterior covariance by taking the median of matched
+    # sample-wise residuals, not a difference of separate marginal medians.
+    residuals = np.percentile(
+        mu_pred_samples - mu_cosmo_samples,
+        50,
+        axis=0,
+    )
+    mu_cosmo_posterior_median = np.percentile(
+        mu_cosmo_samples,
+        50,
+        axis=0,
+    )
+    mu_pred_joint_consistent = (
+        mu_cosmo_posterior_median + residuals
+    )
     chi2_redshift_mask = np.isfinite(z_values)
     if debias:
         chi2_redshift_mask &= (z_values >= z_range[0]) & (z_values <= z_range[1])
@@ -6176,7 +6356,17 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
 
         # --- Residuals overlay for SHOW (optional) ---
         if show_residuals:
-            mu_model_at_show = np.interp(z_show, z_grid, mu_model_median)
+            mu_model_at_show = np.percentile(
+                np.asarray(
+                    [
+                        cosmo.distmod(z_show).value
+                        for cosmo in sample_cosmologies
+                    ],
+                    dtype=float,
+                ),
+                50,
+                axis=0,
+            )
             resid_show = mu_show - mu_model_at_show
             print(resid_show)
             
@@ -6372,6 +6562,18 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
         residuals_df = df_agn.copy()
         residuals_df["residuals"] = residuals
         residuals_df["mu_pred_median"] = mu_pred_median
+        residuals_df["mu_pred_joint_consistent"] = (
+            mu_pred_joint_consistent
+        )
+        residuals_df["mu_cosmo_posterior_median"] = (
+            mu_cosmo_posterior_median
+        )
+        residuals_df["residual_estimator"] = (
+            "median_matched_posterior_draws"
+        )
+        residuals_df["residual_posterior_sample_count"] = len(
+            posterior_sample_indices
+        )
         residuals_df["mu_pred_std_without_sigma_dmi"] = mu_pred_std_without_sigma_dmi
         residuals_df["mu_pred_std_with_scatter_without_sigma_dmi"] = mu_pred_std_with_scatter_without_sigma_dmi
         residuals_df["mu_pred_std"] = mu_pred_std
@@ -6389,6 +6591,10 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
             "ra",
             "dec",
             "mu_pred_median",
+            "mu_pred_joint_consistent",
+            "mu_cosmo_posterior_median",
+            "residual_estimator",
+            "residual_posterior_sample_count",
             "mu_pred_std_without_sigma_dmi",
             "mu_pred_std_with_scatter_without_sigma_dmi",
             "mu_pred_std",
