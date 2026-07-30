@@ -12,7 +12,7 @@ $PYTHONPATH = str(Path(__file__).resolve().parent / "src")
 $MPLCONFIGDIR = "/tmp/qvc-matplotlib"
 $SHEN_PUBTOOLS_PATH = __xonsh__.env.get(
     "SHEN_PUBTOOLS_PATH",
-    str(Path.home() / "dev" / "quasarlf" / "pubtools"),
+    str(Path.home() / "sdev" / "quasarlf" / "pubtools"),
 )
 
 # Sweep values fastest, quick, standard.  The environment overrides make this
