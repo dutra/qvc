@@ -6288,11 +6288,43 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
         residuals_df["chi2_sigma"] = chi2_sigma
         residuals_df["sigma_sel"] = sigma_sel if sigma_sel is not None else np.nan
         residuals_df["mu_zscore"] = mu_zscore
-        fields = ['object_id', 'apparent_mag_2500', 'f_host_2500', 'ra', 'dec', 
-                  'mu_pred_median', 'mu_pred_std', 'mu_pred_std_with_scatter',
-                  'clipping_sigma', 'chi2_sigma', 'sigma_sel',
-                  'sigma_dmi', 'mu_pred_std_with_scatter_and_sigma_dmi', 'mu_pred_std_and_sigma_dmi',
-                  'z', 'wrms', 'sdss_name', 'residuals', 'mu_zscore']
+        fields = [
+            "object_id",
+            "apparent_mag_2500",
+            "ra",
+            "dec",
+            "mu_pred_median",
+            "mu_pred_std",
+            "mu_pred_std_with_scatter",
+            "clipping_sigma",
+            "chi2_sigma",
+            "sigma_sel",
+            "sigma_dmi",
+            "mu_pred_std_with_scatter_and_sigma_dmi",
+            "mu_pred_std_and_sigma_dmi",
+            "z",
+            "sdss_name",
+            "residuals",
+            "mu_zscore",
+        ]
+        sedfit_fields = [
+            "fit_backend",
+            "fracAGN_5100_fit",
+            "fracAGN_5100_fit_err",
+            "pl_slope",
+            "pl_slope_err",
+            "uv_slope",
+            "uv_slope_err",
+            "ebv_agn",
+            "ebv_agn_err",
+            "ebv_gal",
+            "ebv_gal_err",
+            "m_2500_dereddened",
+            "m_2500_dereddened_err",
+            "m_2500_attenuated_model",
+            "m_2500_attenuated_model_err",
+        ]
+        fields.extend(field for field in sedfit_fields if field in residuals_df.columns)
         residuals_df = residuals_df[fields]
         residuals_df = residuals_df.sort_values(by="residuals", ascending=False)
         if residuals_csv_filename is not None:

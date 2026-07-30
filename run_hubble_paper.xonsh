@@ -1,14 +1,17 @@
 #!/usr/bin/env xonsh
 
+from pathlib import Path
+
 # Environment variables (xonsh style)
 $QT_QPA_PLATFORM = "offscreen"
 $NUM_CORES = "30"
+$PYTHONPATH = str(Path(__file__).resolve().parent / "src")
 
 speed = "production"
 python_cmd = "python"
 magnitude_convention = __xonsh__.env["QVC_HUBBLE_MAGNITUDE_CONVENTION"]
 
-spectra_fit_csv = "results/data/spectra_data_all.csv"
+spectra_fit_csv = "results/data/jul29_2206_9dad47e_sedfit.csv"
 h5_file = "results/data/lc_data_all.h5"
 
 base_prefix = f"paper_may2a_apr23lc_apr19bspec_{speed}"

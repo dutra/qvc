@@ -157,8 +157,9 @@ Resumes the saved fiducial and restricted Hubble posterior checkpoints and regen
 
 Expected output: results under `results/` and figures under `plots/hubble/paper_hubble_final_production/` and `plots/hubble/paper_hubble_final_production_restricted/`.
 
-Set `QVC_HUBBLE_MAGNITUDE_CONVENTION` explicitly to either `intrinsic` or
-`observed` before running either command. There is no default.
+Set `QVC_HUBBLE_MAGNITUDE_CONVENTION` explicitly to either `dereddened` or
+`attenuated` before running either command. There is no default. Hubble fitting
+accepts only CSV output from `fit_spectra_jaxsedfit_joint.py`.
 
 #### Fiducial fit
 
@@ -167,7 +168,7 @@ python -m qvc.hubble.hubble_fit --resume \
   --cosmo_models FlatLambdaCDM FlatwCDM Flatw0waCDM \
   --run full \
   --speed production \
-  --spectra_fit_csv "results/data/spectra_data_all.csv" \
+  --spectra_fit_csv "results/data/jul29_2206_9dad47e_sedfit.csv" \
   --magnitude-convention "$QVC_HUBBLE_MAGNITUDE_CONVENTION" \
   --completeness_sim_file "results/data/mock_completeness_catalog_fresh.h5" \
   --z_range 0.44 3.16 \
@@ -184,7 +185,7 @@ python -m qvc.hubble.hubble_fit --resume \
   --cosmo_models FlatLambdaCDM FlatwCDM Flatw0waCDM \
   --run full \
   --speed production \
-  --spectra_fit_csv "results/data/spectra_data_all.csv" \
+  --spectra_fit_csv "results/data/jul29_2206_9dad47e_sedfit.csv" \
   --magnitude-convention "$QVC_HUBBLE_MAGNITUDE_CONVENTION" \
   --completeness_sim_file "results/data/mock_completeness_catalog_fresh.h5" \
   --z_range 1.0 3.16 \

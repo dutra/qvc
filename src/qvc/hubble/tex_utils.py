@@ -15,23 +15,19 @@ REQUIRED_AGN_TABLE_COLUMNS = (
     "z_err",
     "apparent_mag_2500",
     "apparent_mag_2500_err",
-    "PL_slope",
-    "PL_slope_err",
+    "pl_slope",
+    "pl_slope_err",
+    "fracAGN_5100_fit",
+    "fracAGN_5100_fit_err",
+    "ebv_agn",
+    "ebv_agn_err",
+    "ebv_gal",
+    "ebv_gal_err",
     "log_tau_uv_rf",
     "log_tau_uv_rf_std_psd",
     "log_sigma_uv",
     "log_sigma_uv_std_psd",
     "log_sigma_uv_log_tau_uv_rf_cov_psd",
-    "f_host_2500",
-    "f_host_2500_err",
-    "f_bc_3000",
-    "f_bc_3000_err",
-    "f_fe_uv_3000",
-    "f_fe_uv_3000_err",
-    "f_na",
-    "f_na_err",
-    "f_br",
-    "f_br_err",
 )
 
 AGN_TABLE_PLAIN_COLUMNS = {
@@ -44,8 +40,14 @@ AGN_TABLE_PLAIN_COLUMNS = {
     "m_2500_err": "apparent_mag_2500_corr_err",
     "m_2500_uncorr": "apparent_mag_2500",
     "m_2500_uncorr_err": "apparent_mag_2500_err",
-    "alpha_lambda": "alpha_lambda",
-    "alpha_lambda_err": "alpha_lambda_err",
+    "pl_slope": "pl_slope",
+    "pl_slope_err": "pl_slope_err",
+    "fracAGN_5100_fit": "fracAGN_5100_fit",
+    "fracAGN_5100_fit_err": "fracAGN_5100_fit_err",
+    "ebv_agn": "ebv_agn",
+    "ebv_agn_err": "ebv_agn_err",
+    "ebv_gal": "ebv_gal",
+    "ebv_gal_err": "ebv_gal_err",
     "mu": "mu",
     "mu_err": "mu_err",
     "log_tau_UV_RF": "log_tau_uv_rf",
@@ -53,14 +55,6 @@ AGN_TABLE_PLAIN_COLUMNS = {
     "log_sigma_UV": "log_sigma_uv",
     "log_sigma_UV_err": "log_sigma_uv_std_psd",
     "cov_log_sigma_UV_log_tau_UV_RF": "log_sigma_uv_log_tau_uv_rf_cov_psd",
-    "f_host_2500A": "f_host_2500",
-    "f_host_2500A_err": "f_host_2500_err",
-    "f_BC": "f_bc_3000",
-    "f_BC_err": "f_bc_3000_err",
-    "f_lines": "f_lines",
-    "f_lines_err": "f_lines_err",
-    "f_FeII": "f_fe_uv_3000",
-    "f_FeII_err": "f_fe_uv_3000_err",
 }
 
 
@@ -110,11 +104,6 @@ def _prepare_agn_table_dataframe(agn_df, mu, mu_err, dm_interp=None, dmi_values=
     )
     df["apparent_mag_2500_corr"] = np.asarray(df["apparent_mag_2500"], dtype=float) - dm_values
     df["apparent_mag_2500_corr_err"] = np.asarray(df["apparent_mag_2500_err"], dtype=float)
-    df["f_lines"] = np.asarray(df["f_na"], dtype=float) + np.asarray(df["f_br"], dtype=float)
-    df["f_lines_err"] = np.hypot(
-        np.asarray(df["f_na_err"], dtype=float),
-        np.asarray(df["f_br_err"], dtype=float),
-    )
     return df
 
 
@@ -218,10 +207,10 @@ def make_agn_latex_table(
         df = df.sort_values(sort_by, ascending=ascending)
 
     lines = [
-        r"\begin{tabular}{@{}lcccccccccccccc@{}}",
+        r"\begin{tabular}{@{}lccccccccccccc@{}}",
         r"\hline\hline",
-        r"\textbf{SDSS Name} & RA & Dec & $z$ & $m_{2500}$ & $m_{2500}^{\mathrm{uncorr}}$ & \texttt{PL\_slope} & $\mu$ & $\log\tau_{\mathrm{UV,RF}}$ & $\log\sigma_{\mathrm{UV}}$ & $\mathrm{Cov}(\log\sigma_{\mathrm{UV}},\,\log\tau_{\mathrm{UV,RF}})$ & $f_{\rm{host,\,2500\,\text{\AA}}}$ & $f_{\rm{BC}}$ & $f_{\rm{lines}}$ & $f_{\rm{Fe\,II}}$ \\",
-        r"& (deg) & (deg) &  & (mag) & (mag) &  & (mag) & (days) & (mag) &  &  &  &  &  \\",
+        r"\textbf{SDSS Name} & RA & Dec & $z$ & $m_{2500}$ & $m_{2500}^{\mathrm{uncorr}}$ & $\alpha_\lambda$ & $f_{\rm AGN,5100}$ & $E(B-V)_{\rm AGN}$ & $E(B-V)_{\rm Gal}$ & $\mu$ & $\log\tau_{\mathrm{UV,RF}}$ & $\log\sigma_{\mathrm{UV}}$ & $\mathrm{Cov}(\log\sigma_{\mathrm{UV}},\,\log\tau_{\mathrm{UV,RF}})$ \\",
+        r"& (deg) & (deg) &  & (mag) & (mag) &  &  &  &  & (mag) & (days) & (mag) &  \\",
         r"\hline",
     ]
 
@@ -235,15 +224,14 @@ def make_agn_latex_table(
                     _fmt_with_sym_err(row, "z", 4, 4),
                     _fmt_with_sym_err(row, "apparent_mag_2500_corr", 2, 2),
                     _fmt_with_sym_err(row, "apparent_mag_2500", 2, 2),
-                    _fmt_with_sym_err(row, "PL_slope", 2, 2, err_col="PL_slope_err"),
+                    _fmt_with_sym_err(row, "pl_slope", 2, 2),
+                    _fmt_with_sym_err(row, "fracAGN_5100_fit", 2, 2),
+                    _fmt_with_sym_err(row, "ebv_agn", 3, 3),
+                    _fmt_with_sym_err(row, "ebv_gal", 3, 3),
                     _fmt_with_sym_err(row, "mu", 2, 2),
                     _fmt_with_sym_err(row, "log_tau_uv_rf", 2, 2, err_col="log_tau_uv_rf_std_psd"),
                     _fmt_with_sym_err(row, "log_sigma_uv", 2, 2, err_col="log_sigma_uv_std_psd"),
                     _fmt_num(row["log_sigma_uv_log_tau_uv_rf_cov_psd"], 3),
-                    _fmt_with_sym_err(row, "f_host_2500", 2, 2),
-                    _fmt_with_sym_err(row, "f_bc_3000", 2, 2),
-                    _fmt_with_sym_err(row, "f_lines", 2, 2),
-                    _fmt_with_sym_err(row, "f_fe_uv_3000", 2, 2),
                 ]
             )
             + r" \\"

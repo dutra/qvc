@@ -1,5 +1,6 @@
 import argparse
 import gzip
+import importlib
 import io
 import os
 import sys
@@ -80,6 +81,14 @@ def _temporary_cwd(path):
         os.chdir(old)
 
 
+def _configure_shen_paths(shen_config, pubtools_path):
+    """Point Shen's module-level paths at the selected pubtools checkout."""
+    homepath = f"{Path(pubtools_path).resolve()}{os.sep}"
+    shen_config.homepath = homepath
+    shen_config.datapath = f"{homepath}data{os.sep}"
+    return f"{homepath}obdata_copy{os.sep}"
+
+
 def bolometric_correction_shen20(
     L_bol,
     c1=4.073,
@@ -117,10 +126,19 @@ def build_shen_lf(pubtools_path):
         raise FileNotFoundError(f"Shen pubtools path not found: {pubtools_path}")
 
     sys.path.insert(0, str(pubtools_path))
+    added_obdata_path = None
     try:
         with _temporary_cwd(pubtools_path):
             silent_stream = io.StringIO()
             with redirect_stdout(silent_stream), redirect_stderr(silent_stream):
+                config_path = pubtools_path / "config.py"
+                if config_path.is_file():
+                    shen_config = importlib.import_module("config")
+                    added_obdata_path = _configure_shen_paths(
+                        shen_config,
+                        pubtools_path,
+                    )
+                    sys.path.insert(0, added_obdata_path)
                 from utilities import return_qlf_in_band
 
                 z_bins = np.linspace(0.0, 8.0, 40)
@@ -129,6 +147,11 @@ def build_shen_lf(pubtools_path):
                     for z in z_bins
                 ]
     finally:
+        if added_obdata_path is not None:
+            try:
+                sys.path.remove(added_obdata_path)
+            except ValueError:
+                pass
         try:
             sys.path.remove(str(pubtools_path))
         except ValueError:

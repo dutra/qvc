@@ -56,10 +56,10 @@ def _minimal_agn_frame(n=10):
             "log_tau_ls_err": np.full(n, 0.08),
             "apparent_mag_2500": np.linspace(20.0, 21.0, n),
             "apparent_mag_2500_err": np.full(n, 0.01),
-            "apparent_mag_2500_intrinsic": np.linspace(20.0, 21.0, n),
-            "apparent_mag_2500_intrinsic_err": np.full(n, 0.01),
-            "apparent_mag_2500_reddened": np.linspace(20.0, 21.0, n),
-            "apparent_mag_2500_reddened_err": np.full(n, 0.01),
+            "m_2500_dereddened": np.linspace(20.0, 21.0, n),
+            "m_2500_dereddened_err": np.full(n, 0.01),
+            "m_2500_attenuated_model": np.linspace(20.0, 21.0, n),
+            "m_2500_attenuated_model_err": np.full(n, 0.01),
             "SDSS_RUN2D": np.full(n, "v5_13_2"),
             "number_points_g": np.full(n, 300),
             "number_points_r": np.full(n, 300),
@@ -143,7 +143,7 @@ def _patch_load_agn_plotters(monkeypatch):
     monkeypatch.setattr(hubble_utils, "plot_sigma_tau_identity_grid", lambda *_args, **_kwargs: None)
 
 
-def test_load_agn_data_makes_precut_and_postcut_fhost_and_blr_plots(tmp_path, monkeypatch):
+def test_load_agn_data_makes_pre_and_postcut_joint_sed_and_blr_plots(tmp_path, monkeypatch):
     source_path = tmp_path / "agn.h5"
     source_path.touch()
     monkeypatch.setattr(
@@ -206,7 +206,7 @@ def test_load_agn_data_makes_precut_and_postcut_fhost_and_blr_plots(tmp_path, mo
 
     hubble_utils.load_agn_data(
         source_path,
-        magnitude_convention="intrinsic",
+        magnitude_convention="dereddened",
         spectra_fit_csv=None,
         lc_info_csv=None,
         apply_cut=True,
@@ -215,15 +215,13 @@ def test_load_agn_data_makes_precut_and_postcut_fhost_and_blr_plots(tmp_path, mo
     )
 
     captured_by_filename = {call.get("filename"): call for call in captured_calls}
-    assert "f_host_2500_vs_l2500_precut.pdf" in captured_by_filename
-    assert "f_host_2500_vs_l2500_postcut.pdf" in captured_by_filename
+    assert "f_host_2500_vs_l2500_precut.pdf" not in captured_by_filename
+    assert "f_host_2500_vs_l2500_postcut.pdf" not in captured_by_filename
     assert "alpha_lambda_vs_l2500_precut.pdf" in captured_by_filename
     assert "alpha_lambda_vs_l2500_postcut.pdf" in captured_by_filename
     assert "blr_precut.pdf" in captured_by_filename
     assert "blr_postcut.pdf" in captured_by_filename
     assert "sigma_tau_vs_lambda_broken_pl_fit_postcut.pdf" in captured_by_filename
-    assert captured_by_filename["f_host_2500_vs_l2500_precut.pdf"]["f_host_col"] == "f_host_2500_psf"
-    assert captured_by_filename["f_host_2500_vs_l2500_postcut.pdf"]["f_host_col"] == "f_host_2500_psf"
 
 
 def test_load_agn_data_writes_sigma_tau_ls_identity_grids_to_diagnostics(tmp_path, monkeypatch):
@@ -246,7 +244,7 @@ def test_load_agn_data_writes_sigma_tau_ls_identity_grids_to_diagnostics(tmp_pat
 
     hubble_utils.load_agn_data(
         source_path,
-        magnitude_convention="intrinsic",
+        magnitude_convention="dereddened",
         spectra_fit_csv=None,
         lc_info_csv=None,
         apply_cut=True,
@@ -374,7 +372,7 @@ def test_load_agn_data_run2d_filter_v5_13_2_and_drop_missing(tmp_path, monkeypat
 
     filtered, _ = hubble_utils.load_agn_data(
         source_path,
-        magnitude_convention="intrinsic",
+        magnitude_convention="dereddened",
         spectra_fit_csv=None,
         lc_info_csv=None,
         apply_cut=True,
@@ -400,7 +398,7 @@ def test_load_agn_data_run2d_filter_26(tmp_path, monkeypatch):
 
     filtered, _ = hubble_utils.load_agn_data(
         source_path,
-        magnitude_convention="intrinsic",
+        magnitude_convention="dereddened",
         spectra_fit_csv=None,
         lc_info_csv=None,
         apply_cut=True,
@@ -418,6 +416,10 @@ def test_load_agn_data_run2d_filter_bypassed_when_no_cuts(tmp_path, monkeypatch)
     df = _minimal_agn_frame(n=4)
     df["object_id"] = ["a", "b", "c", "d"]
     df["SDSS_RUN2D"] = ["v5_13_2", "26", "", None]
+    df["log_tau_uv_rf"] = 0.0
+    df["fracAGN_5100_fit"] = 0.0
+    df["apparent_mag_2500"] = 30.0
+    df["apparent_mag_2500_err"] = 5.0
 
     monkeypatch.setattr(hubble_utils, "read_quasars_from_hdf5_flat", lambda *_args, **_kwargs: df.copy())
     monkeypatch.setattr(hubble_utils, "populate_xray", lambda frame: frame)
@@ -425,7 +427,7 @@ def test_load_agn_data_run2d_filter_bypassed_when_no_cuts(tmp_path, monkeypatch)
 
     filtered, _ = hubble_utils.load_agn_data(
         source_path,
-        magnitude_convention="intrinsic",
+        magnitude_convention="dereddened",
         spectra_fit_csv=None,
         lc_info_csv=None,
         apply_cut=False,
@@ -449,7 +451,7 @@ def test_load_agn_data_run2d_filter_requires_sdss_run2d_column(tmp_path, monkeyp
     with pytest.raises(ValueError, match="SDSS_RUN2D is not available"):
         hubble_utils.load_agn_data(
             source_path,
-            magnitude_convention="intrinsic",
+            magnitude_convention="dereddened",
             spectra_fit_csv=None,
             lc_info_csv=None,
             apply_cut=True,

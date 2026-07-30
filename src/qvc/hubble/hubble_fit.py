@@ -4213,15 +4213,24 @@ if __name__ == "__main__":
     parser.add_argument("--N", type=int, default=None, help="Number of AGNs to run (default: all)")
     parser.add_argument("--only_sna", action="store_true", default=False, help="Run SNIa-only fit (default: False)")
     parser.add_argument("--only_agn", action="store_true", default=False, help="Run AGN-only fit with the Supernova likelihood and M0_sn disabled (default: False)")
-    parser.add_argument("--spectra_fit_csv", type=str, nargs='+', help="Path(s) to spectra fit CSV file(s)")
+    parser.add_argument(
+        "--spectra_fit_csv",
+        type=str,
+        nargs="+",
+        required=True,
+        help=(
+            "Path(s) to CSV output from fit_spectra_jaxsedfit_joint.py. "
+            "Legacy spectral-fit formats are not supported."
+        ),
+    )
     parser.add_argument(
         "--magnitude-convention",
         type=str,
-        choices=["intrinsic", "observed"],
+        choices=["dereddened", "attenuated"],
         required=True,
         help=(
-            "Choose which spectral 2500-A magnitude populates the Hubble-workflow "
-            "apparent_mag_2500 aliases. This option is required."
+            "Choose whether the Hubble workflow uses the joint SED fit's "
+            "dereddened or attenuated-model 2500-A magnitude."
         ),
     )
     parser.add_argument(
@@ -4231,7 +4240,14 @@ if __name__ == "__main__":
         default="all",
         help="Optional SDSS_RUN2D filter for spectra-matched AGN rows. Applies only when cuts are enabled.",
     )
-    parser.add_argument("--no_cuts", action="store_true", default=False, help="Disable AGN data cuts (default: False)")
+    parser.add_argument(
+        "--no-cuts",
+        "--no_cuts",
+        dest="no_cuts",
+        action="store_true",
+        default=False,
+        help="Disable all AGN data cuts (default: False).",
+    )
     parser.add_argument("--skip_plots", action="store_true", default=False, help="Skip plotting steps (default: False)")
     parser.add_argument(
         "--minimal-plots",
