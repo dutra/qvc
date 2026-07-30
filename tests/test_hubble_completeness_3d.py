@@ -22,11 +22,26 @@ from qvc.hubble.completeness_mock_catalog import (
     AB_ABSOLUTE_MAG_ZEROPOINT,
     LOG10_MAG_JACOBIAN,
     NU_2500_HZ,
+    _configure_shen_paths,
     build_shen_lf,
     log_nu_lnu_to_ab_absolute_magnitude,
     save_mock_catalog,
 )
 from qvc.hubble.hubble_likelihood import completeness_loglike
+
+
+def test_configure_shen_paths_overrides_checkout_config(tmp_path):
+    shen_config = types.SimpleNamespace(
+        homepath="/stale/quasarlf/pubtools/",
+        datapath="/stale/quasarlf/pubtools/data/",
+    )
+
+    obdata_path = _configure_shen_paths(shen_config, tmp_path)
+    expected_homepath = f"{tmp_path.resolve()}{os.sep}"
+
+    assert shen_config.homepath == expected_homepath
+    assert shen_config.datapath == f"{expected_homepath}data{os.sep}"
+    assert obdata_path == f"{expected_homepath}obdata_copy{os.sep}"
 
 
 def test_build_shen_lf_uses_extinction_convolved_physical_2500_channel(
