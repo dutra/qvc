@@ -29,50 +29,49 @@ def _cut_env_float(name, default):
 
 LOG_TAU_UV_RF_MIN = 1.5
 LOG_TAU_UV_RF_MAX = 4.0
-WRMS_MAX = 1.2
-T_RF_LENGTH_MIN = 1700.0
-LIGHT_CURVE_N_POINTS_MIN = 250
+FRAC_AGN_5100_MIN = 0.05
+APPARENT_MAG_2500_ERR_MAX = 1.0
+
+# The 2D completeness model is evaluated at histogram-bin centers. Keep the
+# fiducial magnitude support tied to that grid.
+COMPLETENESS_MAG_EDGE_MIN = 18.5
+COMPLETENESS_MAG_EDGE_MAX = 24.0
+COMPLETENESS_N_MAG_BINS = 30
+COMPLETENESS_MAG_BIN_WIDTH = (
+    COMPLETENESS_MAG_EDGE_MAX - COMPLETENESS_MAG_EDGE_MIN
+) / COMPLETENESS_N_MAG_BINS
+APPARENT_MAG_2500_MIN = COMPLETENESS_MAG_EDGE_MIN + 0.5 * COMPLETENESS_MAG_BIN_WIDTH
+APPARENT_MAG_2500_MAX = COMPLETENESS_MAG_EDGE_MAX - 0.5 * COMPLETENESS_MAG_BIN_WIDTH
+
 LIGHT_CURVE_N_POINTS_COLUMN = "light_curve_n_points"
 LIGHT_CURVE_N_POINTS_EXCLUDED_BANDS = ("u",)
-APPARENT_MAG_2500_MAX = None
+
+# Historical scalar/component defaults (disabled):
+# WRMS_MAX=1.2; T_RF_LENGTH_MIN=1700; LIGHT_CURVE_N_POINTS_MIN=250
+# F_HOST_2500_MAX=0.1; VARIABILITY_CHI_SQ_RED_G_MIN=30; LOO_CHI2_EFF_MAX=1.01
+# LOG_SIGMA_UV=(-1.5, 0.2); LOG_AMP_DELTA_BLR_UPPER=-0.2
+# LOG_AMP_DELTA_BC_UPPER=-0.2; LOG_F_BC_3000_MAX=log10(0.05)
+# LOG_F_FE_UV_3000_MAX=log10(0.1); REL_APPARENT_MAG_2500_ERR_MAX=0.0025
+# APPARENT_MAG_2500_MAX=None; ALPHA_LAMBDA=(None, None)
+WRMS_MAX = None
+T_RF_LENGTH_MIN = None
+LIGHT_CURVE_N_POINTS_MIN = None
 ALPHA_LAMBDA_MIN = None
 ALPHA_LAMBDA_MAX = None
 
-LOG_SIGMA_UV_MIN = -1.5
-LOG_SIGMA_UV_MAX = 0.2
+LOG_SIGMA_UV_MIN = None
+LOG_SIGMA_UV_MAX = None
 REDDENING_EBV_MAX = None
 
-VARIABILITY_CHI_SQ_RED_G_MIN = _cut_env_float(
-    "QVC_HUBBLE_CUT_VARIABILITY_CHI_SQ_RED_G_MIN", 30.0
-)
-# LOO-standardized residuals should have unit mean square. This conservative
-# ceiling removes only the extreme high-tail light-curve fits.
-LOO_CHI2_EFF_MAX = _cut_env_float("QVC_HUBBLE_CUT_LOO_CHI2_EFF_MAX", 1.01)
-F_HOST_2500_MAX = _cut_env_float("QVC_HUBBLE_CUT_F_HOST_2500_MAX", 0.1)
-
-LOG_AMP_DELTA_BLR_UPPER = _cut_env_float(
-    "QVC_HUBBLE_CUT_LOG_AMP_DELTA_BLR_UPPER", -0.2
-)
-LOG_AMP_DELTA_BLR_UPPER_BY_BAND = {
-    "u": LOG_AMP_DELTA_BLR_UPPER,
-    "g": LOG_AMP_DELTA_BLR_UPPER,
-    "r": LOG_AMP_DELTA_BLR_UPPER,
-    "i": LOG_AMP_DELTA_BLR_UPPER,
-}
-
-LOG_AMP_DELTA_BC_UPPER = -0.2
-# The Jul22 spectra fractions populate this sample at values above the former
-# 10^-3 threshold.  Keep the physical 0--1 range rather than rejecting those
-# otherwise quality-selected objects.
-LOG_F_BC_3000_MAX = _cut_env_float(
-    "QVC_HUBBLE_CUT_LOG_F_BC_3000_MAX", np.log10(0.05)
-)
-LOG_F_FE_UV_3000_MAX = _cut_env_float(
-    "QVC_HUBBLE_CUT_LOG_F_FE_UV_3000_MAX", np.log10(0.1)
-)
-REL_APPARENT_MAG_2500_ERR_MAX = _cut_env_float(
-    "QVC_HUBBLE_CUT_REL_APPARENT_MAG_2500_ERR_MAX", 0.0025
-)
+VARIABILITY_CHI_SQ_RED_G_MIN = None
+LOO_CHI2_EFF_MAX = None
+F_HOST_2500_MAX = None
+LOG_AMP_DELTA_BLR_UPPER = None
+LOG_AMP_DELTA_BLR_UPPER_BY_BAND = {}
+LOG_AMP_DELTA_BC_UPPER = None
+LOG_F_BC_3000_MAX = None
+LOG_F_FE_UV_3000_MAX = None
+REL_APPARENT_MAG_2500_ERR_MAX = None
 
 
 EXCLUDED_SDSS_NAMES = (
@@ -89,15 +88,9 @@ EXCLUDED_SDSS_NAMES = (
 )
 AGN_SCALAR_PARAMETER_CUTS = (
     ("log_tau_uv_rf", LOG_TAU_UV_RF_MIN, LOG_TAU_UV_RF_MAX),
-    ("wrms", None, WRMS_MAX),
-    ("t_rf_length", T_RF_LENGTH_MIN, None),
-    (LIGHT_CURVE_N_POINTS_COLUMN, LIGHT_CURVE_N_POINTS_MIN, None),
-    ("f_host_2500", None, F_HOST_2500_MAX),
-    ("apparent_mag_2500", None, APPARENT_MAG_2500_MAX),
-    ("alpha_lambda", ALPHA_LAMBDA_MIN, ALPHA_LAMBDA_MAX),
-    ("variability_chi_sq_red_g", VARIABILITY_CHI_SQ_RED_G_MIN, None),
-    ("loo_chi2_eff", None, LOO_CHI2_EFF_MAX),
-    ("log_sigma_uv", LOG_SIGMA_UV_MIN, LOG_SIGMA_UV_MAX),
+    ("fracAGN_5100_fit", FRAC_AGN_5100_MIN, None),
+    ("apparent_mag_2500_err", None, APPARENT_MAG_2500_ERR_MAX),
+    ("apparent_mag_2500", APPARENT_MAG_2500_MIN, APPARENT_MAG_2500_MAX),
 )
 
 

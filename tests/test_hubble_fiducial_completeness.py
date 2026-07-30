@@ -1,0 +1,37 @@
+import os
+import sys
+from pathlib import Path
+
+import h5py
+import pandas as pd
+import pytest
+
+
+ROOT = Path(__file__).resolve().parents[1]
+SRC = ROOT / "src"
+os.chdir(SRC)
+if str(SRC) not in sys.path:
+    sys.path.insert(0, str(SRC))
+
+
+def test_default_completeness_centers_match_fiducial_magnitude_support(tmp_path):
+    from qvc.hubble.cuts import APPARENT_MAG_2500_MAX, APPARENT_MAG_2500_MIN
+    from qvc.hubble.hubble_completeness_refactored import get_completeness_function_2d
+
+    mock_path = tmp_path / "mock.h5"
+    with h5py.File(mock_path, "w") as handle:
+        handle.create_dataset("apparent_mag_2500", data=[19.0, 21.0, 23.0])
+        handle.create_dataset("z", data=[0.5, 1.5, 2.5])
+        handle.attrs["mock_count_scale"] = 1.0
+
+    observed = pd.DataFrame(
+        {"apparent_mag_2500": [19.0, 21.0, 23.0], "z": [0.5, 1.5, 2.5]}
+    )
+    _, mag_centers, *_ = get_completeness_function_2d(
+        observed,
+        sim_file=str(mock_path),
+        smooth_counts=False,
+    )
+
+    assert mag_centers[0] == pytest.approx(APPARENT_MAG_2500_MIN)
+    assert mag_centers[-1] == pytest.approx(APPARENT_MAG_2500_MAX)

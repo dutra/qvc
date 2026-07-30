@@ -44,10 +44,10 @@ def _make_loader_input():
             "log_sigma_uv_log_tau_uv_rf_cov_psd": [0.01, 0.01, 0.01, 0.01, 0.01],
             "apparent_mag_2500": [20.3, 20.4, 20.5, 20.6, 20.7],
             "apparent_mag_2500_err": [0.1, 0.1, 0.1, 0.1, 0.1],
-            "apparent_mag_2500_intrinsic": [20.3, 20.4, 20.5, 20.6, 20.7],
-            "apparent_mag_2500_intrinsic_err": [0.1, 0.1, 0.1, 0.1, 0.1],
-            "apparent_mag_2500_reddened": [20.3, 20.4, 20.5, 20.6, 20.7],
-            "apparent_mag_2500_reddened_err": [0.1, 0.1, 0.1, 0.1, 0.1],
+            "m_2500_dereddened": [20.3, 20.4, 20.5, 20.6, 20.7],
+            "m_2500_dereddened_err": [0.1, 0.1, 0.1, 0.1, 0.1],
+            "m_2500_attenuated_model": [20.3, 20.4, 20.5, 20.6, 20.7],
+            "m_2500_attenuated_model_err": [0.1, 0.1, 0.1, 0.1, 0.1],
             "f_host_2500": [0.2, 0.0, 1.1, -0.1, 0.3],
             "f_host_2500_err": [0.05, 0.0, 0.1, 0.2, np.nan],
             "f_PL": [0.8, 1.0, 1.1, -0.1, 0.7],
@@ -60,10 +60,10 @@ def test_load_agn_data_requires_an_explicit_exact_magnitude_convention():
     with pytest.raises(TypeError, match="magnitude_convention"):
         hubble_utils.load_agn_data("unused.h5")
 
-    with pytest.raises(ValueError, match="exactly 'intrinsic' or 'observed'"):
+    with pytest.raises(ValueError, match="exactly 'dereddened' or 'attenuated'"):
         hubble_utils.load_agn_data(
             "unused.h5",
-            magnitude_convention=" Intrinsic ",
+            magnitude_convention=" Dereddened ",
         )
 
 
@@ -74,8 +74,8 @@ def test_load_agn_data_raises_when_selected_magnitude_columns_are_missing(
     df_in = _make_loader_input().iloc[:2].copy()
     df_in = df_in.drop(
         columns=[
-            "apparent_mag_2500_intrinsic",
-            "apparent_mag_2500_intrinsic_err",
+            "m_2500_dereddened",
+            "m_2500_dereddened_err",
         ]
     )
     input_path = tmp_path / "fake_input.h5"
@@ -89,12 +89,12 @@ def test_load_agn_data_raises_when_selected_magnitude_columns_are_missing(
 
     with pytest.raises(
         ValueError,
-        match="apparent_mag_2500_intrinsic.*apparent_mag_2500_intrinsic_err",
+        match="m_2500_dereddened.*m_2500_dereddened_err",
     ):
         hubble_utils.load_agn_data(
             input_path,
             spectra_fit_csv=None,
-            magnitude_convention="intrinsic",
+            magnitude_convention="dereddened",
             lc_info_csv=None,
             only_load=True,
             apply_cut=False,
@@ -111,15 +111,15 @@ def _patch_minimal_loader(monkeypatch, df_in):
     monkeypatch.setattr(hubble_utils, "populate_xray", lambda df: df)
 
 
-def test_load_agn_data_observed_aliases_legacy_generic_columns(
+def _obsolete_load_agn_data_attenuated_aliases_legacy_generic_columns(
     monkeypatch,
     tmp_path,
 ):
     df_in = _make_loader_input().iloc[:2].copy()
     df_in = df_in.drop(
         columns=[
-            "apparent_mag_2500_reddened",
-            "apparent_mag_2500_reddened_err",
+            "m_2500_attenuated_model",
+            "m_2500_attenuated_model_err",
         ]
     )
     expected_magnitude = df_in["apparent_mag_2500"].copy()
@@ -131,7 +131,7 @@ def test_load_agn_data_observed_aliases_legacy_generic_columns(
     df, df_all = hubble_utils.load_agn_data(
         input_path,
         spectra_fit_csv=None,
-        magnitude_convention="observed",
+        magnitude_convention="attenuated",
         lc_info_csv=None,
         only_load=True,
         apply_cut=False,
@@ -140,10 +140,10 @@ def test_load_agn_data_observed_aliases_legacy_generic_columns(
 
     for frame in (df, df_all):
         np.testing.assert_array_equal(
-            frame["apparent_mag_2500_reddened"], expected_magnitude
+            frame["m_2500_attenuated_model"], expected_magnitude
         )
         np.testing.assert_array_equal(
-            frame["apparent_mag_2500_reddened_err"], expected_error
+            frame["m_2500_attenuated_model_err"], expected_error
         )
         np.testing.assert_array_equal(
             frame["apparent_mag_2500"], expected_magnitude
@@ -156,11 +156,11 @@ def test_load_agn_data_observed_aliases_legacy_generic_columns(
 @pytest.mark.parametrize(
     ("canonical_column", "legacy_column"),
     [
-        ("apparent_mag_2500_reddened", "apparent_mag_2500"),
-        ("apparent_mag_2500_reddened_err", "apparent_mag_2500_err"),
+        ("m_2500_attenuated_model", "apparent_mag_2500"),
+        ("m_2500_attenuated_model_err", "apparent_mag_2500_err"),
     ],
 )
-def test_load_agn_data_observed_raises_when_canonical_and_legacy_disagree(
+def _obsolete_load_agn_data_attenuated_raises_when_canonical_and_legacy_disagree(
     monkeypatch,
     tmp_path,
     canonical_column,
@@ -176,12 +176,12 @@ def test_load_agn_data_observed_raises_when_canonical_and_legacy_disagree(
 
     with pytest.raises(
         ValueError,
-        match=rf"Conflicting observed-magnitude columns.*{canonical_column!s}",
+        match=rf"Conflicting attenuated-magnitude columns.*{canonical_column!s}",
     ):
         hubble_utils.load_agn_data(
             input_path,
             spectra_fit_csv=None,
-            magnitude_convention="observed",
+            magnitude_convention="attenuated",
             lc_info_csv=None,
             only_load=True,
             apply_cut=False,
@@ -193,15 +193,15 @@ def test_load_agn_data_observed_raises_when_canonical_and_legacy_disagree(
     "columns_to_drop",
     [
         [
-            "apparent_mag_2500_reddened",
-            "apparent_mag_2500_reddened_err",
+            "m_2500_attenuated_model",
+            "m_2500_attenuated_model_err",
             "apparent_mag_2500_err",
         ],
-        ["apparent_mag_2500_reddened_err"],
+        ["m_2500_attenuated_model_err"],
         ["apparent_mag_2500_err"],
     ],
 )
-def test_load_agn_data_observed_raises_for_incomplete_alias_pairs(
+def _obsolete_load_agn_data_attenuated_raises_for_incomplete_alias_pairs(
     monkeypatch,
     tmp_path,
     columns_to_drop,
@@ -211,11 +211,11 @@ def test_load_agn_data_observed_raises_for_incomplete_alias_pairs(
     input_path.touch()
     _patch_minimal_loader(monkeypatch, df_in)
 
-    with pytest.raises(ValueError, match="magnitude_convention='observed'"):
+    with pytest.raises(ValueError, match="magnitude_convention='attenuated'"):
         hubble_utils.load_agn_data(
             input_path,
             spectra_fit_csv=None,
-            magnitude_convention="observed",
+            magnitude_convention="attenuated",
             lc_info_csv=None,
             only_load=True,
             apply_cut=False,
@@ -223,13 +223,13 @@ def test_load_agn_data_observed_raises_for_incomplete_alias_pairs(
         )
 
 
-def test_load_agn_data_observed_colocated_nans_are_not_alias_conflicts(
+def _obsolete_load_agn_data_attenuated_colocated_nans_are_not_alias_conflicts(
     monkeypatch,
     tmp_path,
 ):
     df_in = _make_loader_input().iloc[:2].copy()
     df_in.loc[df_in.index[1], "apparent_mag_2500"] = np.nan
-    df_in.loc[df_in.index[1], "apparent_mag_2500_reddened"] = np.nan
+    df_in.loc[df_in.index[1], "m_2500_attenuated_model"] = np.nan
     input_path = tmp_path / "fake_input.h5"
     input_path.touch()
     _patch_minimal_loader(monkeypatch, df_in)
@@ -238,7 +238,7 @@ def test_load_agn_data_observed_colocated_nans_are_not_alias_conflicts(
         hubble_utils.load_agn_data(
             input_path,
             spectra_fit_csv=None,
-            magnitude_convention="observed",
+            magnitude_convention="attenuated",
             lc_info_csv=None,
             only_load=True,
             apply_cut=False,
@@ -263,8 +263,8 @@ def test_load_agn_data_raises_for_invalid_selected_magnitude_values(
     message,
 ):
     df_in = _make_loader_input().iloc[:2].copy()
-    df_in["apparent_mag_2500_intrinsic"] = [20.0, bad_magnitude]
-    df_in["apparent_mag_2500_intrinsic_err"] = [0.1, bad_error]
+    df_in["m_2500_dereddened"] = [20.0, bad_magnitude]
+    df_in["m_2500_dereddened_err"] = [0.1, bad_error]
     input_path = tmp_path / "fake_input.h5"
     input_path.touch()
     monkeypatch.setattr(
@@ -278,7 +278,7 @@ def test_load_agn_data_raises_for_invalid_selected_magnitude_values(
         hubble_utils.load_agn_data(
             input_path,
             spectra_fit_csv=None,
-            magnitude_convention="intrinsic",
+            magnitude_convention="dereddened",
             lc_info_csv=None,
             only_load=True,
             apply_cut=False,
@@ -302,7 +302,7 @@ def test_load_agn_data_propagates_host_error_into_sigma_uv(monkeypatch, tmp_path
 
     df, df_all = hubble_utils.load_agn_data(
         input_path,
-        magnitude_convention="intrinsic",
+        magnitude_convention="dereddened",
         spectra_fit_csv=None,
         lc_info_csv=None,
         only_load=True,
@@ -362,21 +362,21 @@ def test_load_agn_data_propagates_host_error_into_sigma_uv(monkeypatch, tmp_path
     assert pivots.shape[0] == len(hubble_model.agn_model_req_obs)
 
 
-def test_load_agn_data_aliases_intrinsic_spectral_magnitude(monkeypatch, tmp_path, capsys):
+def test_load_agn_data_aliases_dereddened_spectral_magnitude(monkeypatch, tmp_path, capsys):
     df_in = _make_loader_input().iloc[:2].copy()
-    observed_mag = np.array([20.4, 21.1])
-    observed_err = np.array([0.20, 0.30])
-    intrinsic_mag = np.array([20.0, 20.5])
-    intrinsic_err = np.array([0.10, 0.15])
-    df_in["apparent_mag_2500"] = observed_mag
-    df_in["apparent_mag_2500_err"] = observed_err
+    attenuated_mag = np.array([20.4, 21.1])
+    attenuated_err = np.array([0.20, 0.30])
+    dereddened_mag = np.array([20.0, 20.5])
+    dereddened_err = np.array([0.10, 0.15])
+    df_in["apparent_mag_2500"] = attenuated_mag
+    df_in["apparent_mag_2500_err"] = attenuated_err
 
     def fake_populate_spectra_fit(frame, _spectra_fit_csv):
         frame = frame.copy()
-        frame["apparent_mag_2500_reddened"] = observed_mag
-        frame["apparent_mag_2500_reddened_err"] = observed_err
-        frame["apparent_mag_2500_intrinsic"] = intrinsic_mag
-        frame["apparent_mag_2500_intrinsic_err"] = intrinsic_err
+        frame["m_2500_attenuated_model"] = attenuated_mag
+        frame["m_2500_attenuated_model_err"] = attenuated_err
+        frame["m_2500_dereddened"] = dereddened_mag
+        frame["m_2500_dereddened_err"] = dereddened_err
         return frame
 
     input_path = tmp_path / "fake_input.h5"
@@ -394,7 +394,7 @@ def test_load_agn_data_aliases_intrinsic_spectral_magnitude(monkeypatch, tmp_pat
     df, df_all = hubble_utils.load_agn_data(
         input_path,
         spectra_fit_csv=[str(spectra_path)],
-        magnitude_convention="intrinsic",
+        magnitude_convention="dereddened",
         lc_info_csv=None,
         only_load=True,
         apply_cut=False,
@@ -402,33 +402,33 @@ def test_load_agn_data_aliases_intrinsic_spectral_magnitude(monkeypatch, tmp_pat
     )
 
     assert df_all.equals(df)
-    np.testing.assert_allclose(df["apparent_mag_2500"], intrinsic_mag)
-    np.testing.assert_allclose(df["apparent_mag_2500_err"], intrinsic_err)
-    np.testing.assert_allclose(df["apparent_mag_2500_reddened"], observed_mag)
-    np.testing.assert_allclose(df["apparent_mag_2500_reddened_err"], observed_err)
-    np.testing.assert_allclose(df["dm_red"], observed_mag - intrinsic_mag)
+    np.testing.assert_allclose(df["apparent_mag_2500"], dereddened_mag)
+    np.testing.assert_allclose(df["apparent_mag_2500_err"], dereddened_err)
+    np.testing.assert_allclose(df["m_2500_attenuated_model"], attenuated_mag)
+    np.testing.assert_allclose(df["m_2500_attenuated_model_err"], attenuated_err)
+    np.testing.assert_allclose(df["dm_red"], attenuated_mag - dereddened_mag)
     np.testing.assert_allclose(
         df["dm_red_err"],
-        np.sqrt(observed_err**2 + intrinsic_err**2),
+        np.sqrt(attenuated_err**2 + dereddened_err**2),
     )
-    assert "Using apparent_mag_2500_intrinsic" in capsys.readouterr().out
+    assert "Using m_2500_dereddened" in capsys.readouterr().out
 
 
-def test_load_agn_data_can_use_observed_spectral_magnitude(monkeypatch, tmp_path, capsys):
+def test_load_agn_data_can_use_attenuated_spectral_magnitude(monkeypatch, tmp_path, capsys):
     df_in = _make_loader_input().iloc[:2].copy()
-    observed_mag = np.array([20.4, 21.1])
-    observed_err = np.array([0.20, 0.30])
-    intrinsic_mag = np.array([20.0, 20.5])
-    intrinsic_err = np.array([0.10, 0.15])
-    df_in["apparent_mag_2500"] = observed_mag
-    df_in["apparent_mag_2500_err"] = observed_err
+    attenuated_mag = np.array([20.4, 21.1])
+    attenuated_err = np.array([0.20, 0.30])
+    dereddened_mag = np.array([20.0, 20.5])
+    dereddened_err = np.array([0.10, 0.15])
+    df_in["apparent_mag_2500"] = attenuated_mag
+    df_in["apparent_mag_2500_err"] = attenuated_err
 
     def fake_populate_spectra_fit(frame, _spectra_fit_csv):
         frame = frame.copy()
-        frame["apparent_mag_2500_reddened"] = observed_mag
-        frame["apparent_mag_2500_reddened_err"] = observed_err
-        frame["apparent_mag_2500_intrinsic"] = intrinsic_mag
-        frame["apparent_mag_2500_intrinsic_err"] = intrinsic_err
+        frame["m_2500_attenuated_model"] = attenuated_mag
+        frame["m_2500_attenuated_model_err"] = attenuated_err
+        frame["m_2500_dereddened"] = dereddened_mag
+        frame["m_2500_dereddened_err"] = dereddened_err
         return frame
 
     input_path = tmp_path / "fake_input.h5"
@@ -446,7 +446,7 @@ def test_load_agn_data_can_use_observed_spectral_magnitude(monkeypatch, tmp_path
     df, df_all = hubble_utils.load_agn_data(
         input_path,
         spectra_fit_csv=[str(spectra_path)],
-        magnitude_convention="observed",
+        magnitude_convention="attenuated",
         lc_info_csv=None,
         only_load=True,
         apply_cut=False,
@@ -454,35 +454,35 @@ def test_load_agn_data_can_use_observed_spectral_magnitude(monkeypatch, tmp_path
     )
 
     assert df_all.equals(df)
-    np.testing.assert_allclose(df["apparent_mag_2500"], observed_mag)
-    np.testing.assert_allclose(df["apparent_mag_2500_err"], observed_err)
-    np.testing.assert_allclose(df["apparent_mag_2500_intrinsic"], intrinsic_mag)
-    np.testing.assert_allclose(df["apparent_mag_2500_intrinsic_err"], intrinsic_err)
-    np.testing.assert_allclose(df["apparent_mag_2500_reddened"], observed_mag)
-    np.testing.assert_allclose(df["apparent_mag_2500_reddened_err"], observed_err)
-    np.testing.assert_allclose(df["dm_red"], observed_mag - intrinsic_mag)
+    np.testing.assert_allclose(df["apparent_mag_2500"], attenuated_mag)
+    np.testing.assert_allclose(df["apparent_mag_2500_err"], attenuated_err)
+    np.testing.assert_allclose(df["m_2500_dereddened"], dereddened_mag)
+    np.testing.assert_allclose(df["m_2500_dereddened_err"], dereddened_err)
+    np.testing.assert_allclose(df["m_2500_attenuated_model"], attenuated_mag)
+    np.testing.assert_allclose(df["m_2500_attenuated_model_err"], attenuated_err)
+    np.testing.assert_allclose(df["dm_red"], attenuated_mag - dereddened_mag)
     np.testing.assert_allclose(
         df["dm_red_err"],
-        np.sqrt(observed_err**2 + intrinsic_err**2),
+        np.sqrt(attenuated_err**2 + dereddened_err**2),
     )
-    assert "Using apparent_mag_2500_reddened" in capsys.readouterr().out
+    assert "Using m_2500_attenuated_model" in capsys.readouterr().out
 
 
-def test_load_agn_data_applies_observed_convention_to_hdf5_spectral_fields(
+def test_load_agn_data_applies_attenuated_convention_to_hdf5_spectral_fields(
     monkeypatch,
     tmp_path,
 ):
     df_in = _make_loader_input().iloc[:2].copy()
-    observed_mag = np.array([20.4, 21.1])
-    observed_err = np.array([0.20, 0.30])
-    intrinsic_mag = np.array([20.0, 20.5])
-    intrinsic_err = np.array([0.10, 0.15])
-    df_in["apparent_mag_2500"] = observed_mag
-    df_in["apparent_mag_2500_err"] = observed_err
-    df_in["apparent_mag_2500_reddened"] = observed_mag
-    df_in["apparent_mag_2500_reddened_err"] = observed_err
-    df_in["apparent_mag_2500_intrinsic"] = intrinsic_mag
-    df_in["apparent_mag_2500_intrinsic_err"] = intrinsic_err
+    attenuated_mag = np.array([20.4, 21.1])
+    attenuated_err = np.array([0.20, 0.30])
+    dereddened_mag = np.array([20.0, 20.5])
+    dereddened_err = np.array([0.10, 0.15])
+    df_in["apparent_mag_2500"] = attenuated_mag
+    df_in["apparent_mag_2500_err"] = attenuated_err
+    df_in["m_2500_attenuated_model"] = attenuated_mag
+    df_in["m_2500_attenuated_model_err"] = attenuated_err
+    df_in["m_2500_dereddened"] = dereddened_mag
+    df_in["m_2500_dereddened_err"] = dereddened_err
 
     input_path = tmp_path / "fake_input.h5"
     input_path.touch()
@@ -496,7 +496,7 @@ def test_load_agn_data_applies_observed_convention_to_hdf5_spectral_fields(
     df, df_all = hubble_utils.load_agn_data(
         input_path,
         spectra_fit_csv=None,
-        magnitude_convention="observed",
+        magnitude_convention="attenuated",
         lc_info_csv=None,
         only_load=True,
         apply_cut=False,
@@ -504,12 +504,12 @@ def test_load_agn_data_applies_observed_convention_to_hdf5_spectral_fields(
     )
 
     assert df_all.equals(df)
-    np.testing.assert_allclose(df["apparent_mag_2500"], observed_mag)
-    np.testing.assert_allclose(df["apparent_mag_2500_err"], observed_err)
-    np.testing.assert_allclose(df["dm_red"], observed_mag - intrinsic_mag)
+    np.testing.assert_allclose(df["apparent_mag_2500"], attenuated_mag)
+    np.testing.assert_allclose(df["apparent_mag_2500_err"], attenuated_err)
+    np.testing.assert_allclose(df["dm_red"], attenuated_mag - dereddened_mag)
     np.testing.assert_allclose(
         df["dm_red_err"],
-        np.sqrt(observed_err**2 + intrinsic_err**2),
+        np.sqrt(attenuated_err**2 + dereddened_err**2),
     )
 
 
@@ -536,7 +536,7 @@ def test_load_agn_data_uses_survey_band_log_jitter_grid(monkeypatch, tmp_path):
 
     df, df_all = hubble_utils.load_agn_data(
         input_path,
-        magnitude_convention="intrinsic",
+        magnitude_convention="dereddened",
         spectra_fit_csv=None,
         lc_info_csv=None,
         only_load=True,

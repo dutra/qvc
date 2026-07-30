@@ -10,7 +10,7 @@ $NUM_CORES = "30"
 # Sweep values fastest, quick, standard.  The environment overrides make this
 # runner suitable for isolated, reproducible cut-search members.
 speed = __xonsh__.env.get("QVC_HUBBLE_SPEED", "fastest")
-magnitude_convention = __xonsh__.env.get("QVC_HUBBLE_MAGNITUDE_CONVENTION", "observed")
+magnitude_convention = __xonsh__.env.get("QVC_HUBBLE_MAGNITUDE_CONVENTION", "dereddened")
 
 # spectra_fit_csv = "results/data/spectra_data_all.csv"
 # h5_file = "results/data/lc_data_all.h5"
@@ -43,6 +43,7 @@ echo "Running hubble_fit.py and PREFIX=" $PREFIX
     # results/hubble_posteriors/apr23a_apr23_apr20call_quick_m003/posteriors_FlatLambdaCDM_joint_quick_all_z0p44_3p16_2d.h5 \
     # --resume_stage pass1 \
 
+# --no-cuts \  # Re-enable for unfiltered diagnostic runs.
 /home/dutra/.conda/envs/jaxcpu4/bin/python -m qvc.hubble.hubble_fit \
     --cosmo_models Flatw0waCDM \
     --run single \

@@ -51,18 +51,14 @@ def _write_csc_catalog(path, fluxes, flux_fractional_errors=None):
 def _spectra_row(**updates):
     row = {
         "object_id": "agn_1",
-        "apparent_mag_2500": 20.4,
-        "apparent_mag_2500_err": 0.2,
-        "apparent_mag_2500_intrinsic": 20.0,
-        "apparent_mag_2500_intrinsic_err": 0.1,
-        "PL_slope": -1.5,
-        "PL_slope_err": 0.1,
-        "f_host_2500": 0.1,
-        "f_host_2500_err": 0.01,
-        "f_bc_3000": 0.2,
-        "f_bc_3000_err": 0.02,
-        "f_fe_uv_3000": 0.3,
-        "f_fe_uv_3000_err": 0.03,
+        "fit_ok": True,
+        "fracAGN_5100_fit": 0.5,
+        "m_2500_dereddened": 20.0,
+        "m_2500_dereddened_err": 0.1,
+        "m_2500_attenuated_model": 20.4,
+        "m_2500_attenuated_model_err": 0.2,
+        "pl_slope": -1.5,
+        "pl_slope_err": 0.1,
     }
     row.update(updates)
     return row
@@ -186,8 +182,8 @@ def test_populate_spectra_fit_does_not_compute_cosmology_dependent_fields(tmp_pa
 
     out = populate_spectra_fit(source, [spectra_path])
 
-    assert out.loc[0, "apparent_mag_2500_intrinsic"] == pytest.approx(20.0)
-    assert out.loc[0, "apparent_mag_2500_intrinsic_err"] == pytest.approx(0.1)
+    assert out.loc[0, "m_2500_dereddened"] == pytest.approx(20.0)
+    assert out.loc[0, "m_2500_dereddened_err"] == pytest.approx(0.1)
     assert "log_L2500_nu" not in out.columns
     assert "log_L2500_nu_err" not in out.columns
     assert "log_L2500_int_fs" not in out.columns
@@ -197,14 +193,14 @@ def test_populate_spectra_fit_does_not_compute_cosmology_dependent_fields(tmp_pa
 def test_populate_spectra_fit_requires_intrinsic_magnitude_fields(tmp_path):
     spectra_path = tmp_path / "spectra_without_intrinsic.csv"
     row = _spectra_row()
-    del row["apparent_mag_2500_intrinsic"]
-    del row["apparent_mag_2500_intrinsic_err"]
+    del row["m_2500_dereddened"]
+    del row["m_2500_dereddened_err"]
     pd.DataFrame([row]).to_csv(spectra_path, index=False)
     source = pd.DataFrame({"object_id": ["agn_1"], "z": [1.0]})
 
     with pytest.raises(
         ValueError,
-        match=r"apparent_mag_2500_intrinsic.*apparent_mag_2500_intrinsic_err",
+        match=r"m_2500_dereddened.*m_2500_dereddened_err",
     ):
         populate_spectra_fit(source, [spectra_path])
 
@@ -244,8 +240,8 @@ def test_compute_alpha_ox_reference_values_and_measurement_errors():
             "z": [1.0],
             "apparent_mag_2500": [24.0],
             "apparent_mag_2500_err": [0.5],
-            "apparent_mag_2500_intrinsic": [20.0],
-            "apparent_mag_2500_intrinsic_err": [0.1],
+            "m_2500_dereddened": [20.0],
+            "m_2500_dereddened_err": [0.1],
             "flux_aper_b": [1.0e-14],
             "flux_aper_err_b": [2.0e-15],
         }
@@ -280,8 +276,8 @@ def test_compute_alpha_ox_uses_supplied_cosmology():
     source = pd.DataFrame(
         {
             "z": [1.0],
-            "apparent_mag_2500_intrinsic": [20.0],
-            "apparent_mag_2500_intrinsic_err": [0.1],
+            "m_2500_dereddened": [20.0],
+            "m_2500_dereddened_err": [0.1],
             "flux_aper_b": [1.0e-14],
             "flux_aper_err_b": [2.0e-15],
         }
@@ -301,8 +297,8 @@ def test_zero_xray_flux_remains_excluded_without_infinite_values():
     source = pd.DataFrame(
         {
             "z": [1.0],
-            "apparent_mag_2500_intrinsic": [20.0],
-            "apparent_mag_2500_intrinsic_err": [0.1],
+            "m_2500_dereddened": [20.0],
+            "m_2500_dereddened_err": [0.1],
             "flux_aper_b": [0.0],
             "flux_aper_err_b": [0.0],
         }
@@ -328,5 +324,5 @@ def test_compute_alpha_ox_requires_intrinsic_uv_measurements():
         }
     )
 
-    with pytest.raises(ValueError, match="apparent_mag_2500_intrinsic"):
+    with pytest.raises(ValueError, match="m_2500_dereddened"):
         compute_alpha_ox(source, cosmology=REFERENCE_COSMOLOGY)

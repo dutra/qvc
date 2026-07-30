@@ -1148,7 +1148,7 @@ def main():
     parser.add_argument(
         "--magnitude-convention",
         type=str,
-        choices=["intrinsic", "observed"],
+        choices=["dereddened", "attenuated"],
         required=True,
         help=(
             "Choose which spectral 2500-A magnitude populates the Hubble-workflow "
@@ -1179,6 +1179,14 @@ def main():
     )
     parser.add_argument("--completeness_mode", type=str, choices=list(VALID_COMPLETENESS_MODES), default="2d")
     parser.add_argument("--correct-sigma-uv-host", action="store_true", default=False)
+    parser.add_argument(
+        "--no-cuts",
+        "--no_cuts",
+        dest="no_cuts",
+        action="store_true",
+        default=False,
+        help="Disable all AGN data cuts (default: False).",
+    )
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
     args.speed = normalize_speed(args.speed)
@@ -1191,7 +1199,7 @@ def main():
     agn_plot_path = f"plots/hubble/{args.prefix}"
     df_agn, df_agn_all = load_agn_data(
         args.agn_data_filepath,
-        apply_cut=True,
+        apply_cut=not args.no_cuts,
         spectra_fit_csv=args.spectra_fit_csv,
         magnitude_convention=args.magnitude_convention,
         correct_sigma_uv_host=args.correct_sigma_uv_host,

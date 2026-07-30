@@ -56,7 +56,7 @@ from qvc.light_curve.plotting_appendix import plot_sigma_tau_identity_grid
 PURPLE_ANSI = "\033[95m"
 RESET_ANSI = "\033[0m"
 HUBBLE_JITTER_SURVEYS = ("sdss", "ps1", "ztf")
-STRICT_UPPER_BOUND_SCALAR_CUT_COLUMNS = frozenset({"apparent_mag_2500"})
+STRICT_UPPER_BOUND_SCALAR_CUT_COLUMNS = frozenset()
 
 AB_MAG_ZERO_POINT = 48.60
 XRAY_PHOTON_INDEX = 1.9
@@ -76,20 +76,15 @@ def _scalar_cut_has_inclusive_upper(column):
 
 
 def _scalar_parameter_cut_mask(frame, column, lower, upper):
-    if column in STRICT_UPPER_BOUND_SCALAR_CUT_COLUMNS:
-        values = pd.to_numeric(frame[column], errors="coerce").to_numpy(dtype=float)
-        mask = np.ones(len(frame), dtype=bool)
-        if lower is not None:
-            mask &= values >= lower
-        if upper is not None:
-            mask &= values < upper
-        return mask
-
-    mask = np.ones(len(frame), dtype=bool)
+    values = pd.to_numeric(frame[column], errors="coerce").to_numpy(dtype=float)
+    mask = np.isfinite(values)
     if lower is not None:
-        mask &= frame[column] >= lower
+        mask &= values >= lower
     if upper is not None:
-        mask &= frame[column] <= upper
+        if column in STRICT_UPPER_BOUND_SCALAR_CUT_COLUMNS:
+            mask &= values < upper
+        else:
+            mask &= values <= upper
     return mask
 
 
@@ -496,8 +491,8 @@ def compute_alpha_ox(df, *, cosmology):
     """Compute alpha-OX quantities using one explicitly supplied cosmology."""
     required_columns = {
         "z",
-        "apparent_mag_2500_intrinsic",
-        "apparent_mag_2500_intrinsic_err",
+        "m_2500_dereddened",
+        "m_2500_dereddened_err",
         "flux_aper_b",
         "flux_aper_err_b",
     }
@@ -511,11 +506,11 @@ def compute_alpha_ox(df, *, cosmology):
     out = df.copy()
     z = pd.to_numeric(out["z"], errors="coerce").to_numpy(dtype=float)
     intrinsic_magnitude = pd.to_numeric(
-        out["apparent_mag_2500_intrinsic"],
+        out["m_2500_dereddened"],
         errors="coerce",
     ).to_numpy(dtype=float)
     intrinsic_magnitude_err = pd.to_numeric(
-        out["apparent_mag_2500_intrinsic_err"],
+        out["m_2500_dereddened_err"],
         errors="coerce",
     ).to_numpy(dtype=float)
     xray_flux = pd.to_numeric(
@@ -667,57 +662,41 @@ def parse_list(x):
 def populate_spectra_fit(df, spectra_fit_csvs):
     fields = {
         "object_id": str,
-        "apparent_mag_2500": float,
-        "apparent_mag_2500_err": float,
-        "apparent_mag_2500_reddened": float,
-        "apparent_mag_2500_reddened_err": float,
-        "apparent_mag_2500_intrinsic": float,
-        "apparent_mag_2500_intrinsic_err": float,
-        "apparent_mag_i_rest": float,
-        "apparent_mag_i_obs": float,
-        "delta_m_flux_recal": float,
-        "f_host_2500": float,
-        "f_host_2500_err": float,
-        "f_bc_3000": float,
-        "f_bc_3000_err": float,
-        "f_fe_uv_3000": float,
-        "f_fe_uv_3000_err": float,
-        "f_na": float,
-        "f_na_err": float,
-        "f_br": float,
-        "f_br_err": float,
-        "f_PL": float,
-        "f_PL_err": float,
-        "wrms": float,
-        "f_host_center": float,
-        "frac_host_psf_2500": float,
-        "frac_host_psf_2500_err": float,
-        "f_host_2500_psf": float,
-        "f_host_2500_psf_err": float,
-        "reddening_ebv": float,
-        "bi": float,
-        "ebv_fs": float,
-        "euv_fs": float,
-        "conti_a_0": float,
-        "bands_used": parse_list,
-        "PL_slope": float,
-        "PL_slope_err": float,
-        'SDSS_RUN2D': str,
+        "fit_ok": str,
+        "fit_backend": str,
+        "m_2500_dereddened": float,
+        "m_2500_dereddened_err": float,
+        "m_2500_dereddened_err_lower": float,
+        "m_2500_dereddened_err_upper": float,
+        "m_2500_attenuated_model": float,
+        "m_2500_attenuated_model_err": float,
+        "m_2500_attenuated_model_err_lower": float,
+        "m_2500_attenuated_model_err_upper": float,
+        "a_2500_galaxy": float,
+        "a_2500_galaxy_err": float,
+        "a_2500_internal": float,
+        "a_2500_internal_err": float,
+        "pl_slope": float,
+        "pl_slope_err": float,
+        "uv_slope": float,
+        "uv_slope_err": float,
+        "ebv_agn": float,
+        "ebv_agn_err": float,
+        "ebv_gal": float,
+        "ebv_gal_err": float,
+        "fracAGN_5100_fit": float,
+        "fracAGN_5100_fit_err": float,
     }
 
     required_cols = {
-        "apparent_mag_2500",
-        "apparent_mag_2500_err",
-        "apparent_mag_2500_intrinsic",
-        "apparent_mag_2500_intrinsic_err",
-        "PL_slope",
-        "PL_slope_err",
-        "f_host_2500",
-        "f_host_2500_err",
-        "f_bc_3000",
-        "f_bc_3000_err",
-        "f_fe_uv_3000",
-        "f_fe_uv_3000_err",
+        "fit_ok",
+        "fracAGN_5100_fit",
+        "m_2500_dereddened",
+        "m_2500_dereddened_err",
+        "m_2500_attenuated_model",
+        "m_2500_attenuated_model_err",
+        "pl_slope",
+        "pl_slope_err",
     }
 
     df = _ensure_object_id(df.copy())
@@ -725,7 +704,7 @@ def populate_spectra_fit(df, spectra_fit_csvs):
     if existing_to_drop:
         df = df.drop(columns=existing_to_drop)
 
-    out = df
+    spectra_frames = []
     wanted = set(fields) | {"object_id"}
     converters = _wrap_converters({k: v for k, v in fields.items() if k != "object_id"})
 
@@ -747,39 +726,29 @@ def populate_spectra_fit(df, spectra_fit_csvs):
         if missing_required:
             raise ValueError(
                 f"Spectra fit CSV '{csv_path}' is missing required columns {missing_required}. "
-                "Regenerate the spectra-fit CSV with the current fit_spectra pipeline."
+                "This Hubble workflow requires the current SED-fit CSV schema."
             )
+        fit_ok = df_spectra["fit_ok"].astype(str).str.lower().eq("true")
+        failed_count = int(np.count_nonzero(~fit_ok))
+        if failed_count:
+            print(f"Skipping {failed_count} unsuccessful SED fit(s) from {csv_path}.")
+        spectra_frames.append(df_spectra.loc[fit_ok].copy())
 
-        merged = out.merge(
-            df_spectra,
-            on="object_id",
-            how="left",
-            suffixes=("", "_spectralfit"),
-            validate="one_to_one",
+    spectra = pd.concat(spectra_frames, ignore_index=True)
+    duplicate_ids = spectra["object_id"].duplicated(keep=False)
+    if np.any(duplicate_ids):
+        duplicate_values = sorted(spectra.loc[duplicate_ids, "object_id"].unique())
+        raise ValueError(
+            "SED-fit CSV inputs contain duplicate object_id values: "
+            f"{duplicate_values[:10]}"
         )
-        print("Length of merged DataFrame:", len(merged))
 
-        for col in fields:
-            if col == "object_id":
-                continue
-            if col in merged.columns:
-                out[col] = merged[col].values
-
-    if "ebv_fs" in out.columns:
-        out["log_ebv_fs"] = np.log10(out["ebv_fs"].replace(0, np.nan))
-    if "euv_fs" in out.columns:
-        out["log_euv_fs"] = np.log10(out["euv_fs"].replace(0, np.nan))
-    if {"apparent_mag_2500_reddened", "apparent_mag_2500"}.issubset(out.columns):
-        out["dm_red"] = out["apparent_mag_2500_reddened"] - out["apparent_mag_2500"]
-    if {"apparent_mag_2500_reddened_err", "apparent_mag_2500_err"}.issubset(out.columns):
-        out["dm_red_err"] = np.sqrt(
-            out["apparent_mag_2500_reddened_err"] ** 2 + out["apparent_mag_2500_err"] ** 2
-        )
-    out["alpha_lambda"] = out["PL_slope"]
-    out["alpha_lambda_err"] = out["PL_slope_err"]
+    out = df.merge(spectra, on="object_id", how="inner", validate="one_to_one")
+    print(f"Matched {len(out)} successful SED fits to {len(df)} AGN light-curve rows.")
+    out["alpha_lambda"] = out["pl_slope"]
+    out["alpha_lambda_err"] = out["pl_slope_err"]
     out["alpha_nu"] = -out["alpha_lambda"] - 2
     out["alpha_nu_err"] = out["alpha_lambda_err"]
-    out["iron_frac"] = out["f_fe_uv_3000"]
 
     return out
 def populate_sdss_fields(objs, progress_bar=True):
@@ -1076,10 +1045,10 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
                   magnitude_convention):
     if (
         not isinstance(magnitude_convention, str)
-        or magnitude_convention not in {"intrinsic", "observed"}
+        or magnitude_convention not in {"dereddened", "attenuated"}
     ):
         raise ValueError(
-            "magnitude_convention must be exactly 'intrinsic' or 'observed'; "
+            "magnitude_convention must be exactly 'dereddened' or 'attenuated'; "
             "case and surrounding whitespace are not normalized. "
             f"got {magnitude_convention!r}."
         )
@@ -1481,87 +1450,15 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
             #raise ValueError("spectra_fit_csv must be provided if alpha_lambda not in agn h5 file")
 
     magnitude_columns = {
-        "intrinsic": (
-            "apparent_mag_2500_intrinsic",
-            "apparent_mag_2500_intrinsic_err",
+        "dereddened": (
+            "m_2500_dereddened",
+            "m_2500_dereddened_err",
         ),
-        "observed": (
-            "apparent_mag_2500_reddened",
-            "apparent_mag_2500_reddened_err",
+        "attenuated": (
+            "m_2500_attenuated_model",
+            "m_2500_attenuated_model_err",
         ),
     }
-
-    if magnitude_convention == "observed":
-        canonical_columns = magnitude_columns["observed"]
-        legacy_columns = (
-            "apparent_mag_2500",
-            "apparent_mag_2500_err",
-        )
-        canonical_present = [
-            column in df.columns for column in canonical_columns
-        ]
-        legacy_present = [column in df.columns for column in legacy_columns]
-
-        for pair_name, columns, present in (
-            ("canonical reddened", canonical_columns, canonical_present),
-            ("legacy observed alias", legacy_columns, legacy_present),
-        ):
-            if any(present) and not all(present):
-                missing_columns = [
-                    column
-                    for column, is_present in zip(columns, present)
-                    if not is_present
-                ]
-                raise ValueError(
-                    f"Incomplete {pair_name} magnitude data for "
-                    "magnitude_convention='observed'; "
-                    f"missing {missing_columns}."
-                )
-
-        if not all(canonical_present) and not all(legacy_present):
-            raise ValueError(
-                "Cannot load magnitude_convention='observed'; neither the "
-                "canonical reddened column pair "
-                f"{list(canonical_columns)} nor the legacy observed alias pair "
-                f"{list(legacy_columns)} is complete."
-            )
-
-        if not all(canonical_present):
-            for canonical_column, legacy_column in zip(
-                canonical_columns, legacy_columns
-            ):
-                df[canonical_column] = df[legacy_column].copy()
-        elif all(legacy_present):
-            for canonical_column, legacy_column in zip(
-                canonical_columns, legacy_columns
-            ):
-                canonical = df[canonical_column]
-                legacy = df[legacy_column]
-                for column, values in (
-                    (canonical_column, canonical),
-                    (legacy_column, legacy),
-                ):
-                    if (
-                        not pd.api.types.is_numeric_dtype(values.dtype)
-                        or pd.api.types.is_bool_dtype(values.dtype)
-                    ):
-                        raise ValueError(
-                            f"Column {column!r} must contain numeric values "
-                            "to validate the observed-magnitude alias; "
-                            f"got dtype {values.dtype!r}."
-                        )
-                canonical_values = canonical.to_numpy(dtype=float)
-                legacy_values = legacy.to_numpy(dtype=float)
-                matching = (canonical_values == legacy_values) | (
-                    np.isnan(canonical_values) & np.isnan(legacy_values)
-                )
-                if not np.all(matching):
-                    mismatch_count = int(np.count_nonzero(~matching))
-                    raise ValueError(
-                        "Conflicting observed-magnitude columns: "
-                        f"{canonical_column!r} and its legacy alias "
-                        f"{legacy_column!r} differ in {mismatch_count} row(s)."
-                    )
 
     def _validated_magnitude_pair(convention):
         magnitude_column, error_column = magnitude_columns[convention]
@@ -1625,7 +1522,7 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
     )
 
     other_convention = (
-        "observed" if magnitude_convention == "intrinsic" else "intrinsic"
+        "attenuated" if magnitude_convention == "dereddened" else "dereddened"
     )
     other_columns = magnitude_columns[other_convention]
     other_columns_present = [column in df.columns for column in other_columns]
@@ -1644,7 +1541,7 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
         other_magnitude, other_magnitude_error = _validated_magnitude_pair(
             other_convention
         )
-        if magnitude_convention == "intrinsic":
+        if magnitude_convention == "dereddened":
             intrinsic_mag_2500 = selected_magnitude
             intrinsic_mag_2500_err = selected_magnitude_error
             observed_mag_2500 = other_magnitude
@@ -2106,15 +2003,20 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
     df = df.reset_index(drop=True)
     
     # Apply a small hand-maintained exclusion list.
-    exclusion_object_ids = []
-    mask_exclude = ~df['object_id'].astype(str).isin(exclusion_object_ids)
-
-    mask_exclude &= (~df["sdss_name"].astype(str).isin(EXCLUDED_SDSS_NAMES))
-    df = _record_cut("exclusion_list", "sdss_name/object_id exclusion list", df, mask_exclude)
+    if apply_cut:
+        exclusion_object_ids = []
+        mask_exclude = ~df['object_id'].astype(str).isin(exclusion_object_ids)
+        mask_exclude &= (~df["sdss_name"].astype(str).isin(EXCLUDED_SDSS_NAMES))
+        df = _record_cut(
+            "exclusion_list",
+            "sdss_name/object_id exclusion list",
+            df,
+            mask_exclude,
+        )
 
 
     # Remove outliers listed in external CSV files.
-    for exclude_csv in exclude_object_ids_csv:
+    for exclude_csv in exclude_object_ids_csv if apply_cut else ():
         if os.path.exists(exclude_csv):
             exclude_df = pd.read_csv(exclude_csv)
             exclude_ids = set(exclude_df['object_id'].astype(str))
@@ -2138,7 +2040,7 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
             print(f"[WARNING] Exclusion CSV not found: {exclude_csv}")
 
     blr_amp_cuts = build_dlog_amp_blr_cuts()
-    for col, lower, upper in blr_amp_cuts:
+    for col, lower, upper in blr_amp_cuts if apply_cut else ():
         cut_desc = f"{col} in {_format_cut_bounds(lower, upper, upper_inclusive=False, allow_missing=True)}"
         if col not in df.columns:
             _append_cut_report_row(
@@ -2180,7 +2082,7 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
             plot_cut_diagnostics(df.copy(), df[col_mask], bins=30, cut_info=cut_desc)
             df = _record_cut(f"agn_scalar:{col}", cut_desc, df, col_mask)
 
-        if "dlog_amp_bc" in df.columns:
+        if LOG_AMP_DELTA_BC_UPPER is not None and "dlog_amp_bc" in df.columns:
             bc_amp_upper = LOG_AMP_DELTA_BC_UPPER
             bc_amp_mask = (
                 pd.to_numeric(df["dlog_amp_bc"], errors="coerce").to_numpy(dtype=float)
@@ -2194,7 +2096,7 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
             ("f_bc_3000", "log_f_bc_3000", LOG_F_BC_3000_MAX),
             ("f_fe_uv_3000", "log_f_fe_uv_3000", LOG_F_FE_UV_3000_MAX),
         ):
-            if frac_col not in df.columns:
+            if log_upper is None or frac_col not in df.columns:
                 _append_cut_report_row(
                     cut_rows,
                     step=f"agn_scalar:{log_col}",
@@ -2211,7 +2113,10 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
             plot_cut_diagnostics(df.copy(), df[frac_mask], bins=30, cut_info=cut_desc)
             df = _record_cut(f"agn_scalar:{log_col}", cut_desc, df, frac_mask)
 
-        if "rel_apparent_mag_2500_err" in df.columns:
+        if (
+            REL_APPARENT_MAG_2500_ERR_MAX is not None
+            and "rel_apparent_mag_2500_err" in df.columns
+        ):
             rel_mag_err = pd.to_numeric(
                 df["rel_apparent_mag_2500_err"],
                 errors="coerce",

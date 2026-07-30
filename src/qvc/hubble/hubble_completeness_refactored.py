@@ -13,6 +13,11 @@ from scipy.special import expit, logit
 from functools import partial
 
 from qvc.hubble.hubble_utils import convert_M2500_to_logL2500, resolve_qvc_data_path
+from qvc.hubble.cuts import (
+    COMPLETENESS_MAG_EDGE_MAX,
+    COMPLETENESS_MAG_EDGE_MIN,
+    COMPLETENESS_N_MAG_BINS,
+)
 
 
 COSMO = FlatLambdaCDM(H0=70.0, Om0=0.3)
@@ -870,7 +875,7 @@ def get_completeness_function_2d(
     df_agn,
     sim_file="data/nov9_mock_mag_z_moresources.h5",
     #sim_file="data/dec4_mock_mag_z_ananna.h5",
-    n_mag_bins=30, n_z_bins=40,
+    n_mag_bins=COMPLETENESS_N_MAG_BINS, n_z_bins=40,
     smooth_counts=True,
     plot=False,
     plot_path=None,
@@ -903,7 +908,7 @@ def get_completeness_function_2d(
     m_obs,  z_obs  = m_obs[ok_obs],  z_obs[ok_obs]
     m_true, z_true = m_true[ok_true], z_true[ok_true]
     # Grid
-    mag_min, mag_max = 18.5, 24.0
+    mag_min, mag_max = COMPLETENESS_MAG_EDGE_MIN, COMPLETENESS_MAG_EDGE_MAX
     z_min,   z_max   = 0.0, 4.0
     mag_edges = np.linspace(mag_min, mag_max, n_mag_bins + 1)
     z_edges   = np.linspace(z_min,  z_max,    n_z_bins   + 1)

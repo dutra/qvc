@@ -72,8 +72,8 @@ def _make_fake_agn_sample(n_agn=24, seed=123):
             "z_err": np.full(n_agn, 0.002),
             "apparent_mag_2500": apparent_mag,
             "apparent_mag_2500_err": np.full(n_agn, 0.04),
-            "apparent_mag_2500_intrinsic": apparent_mag,
-            "apparent_mag_2500_intrinsic_err": np.full(n_agn, 0.04),
+            "m_2500_dereddened": apparent_mag,
+            "m_2500_dereddened_err": np.full(n_agn, 0.04),
             "flux_aper_b": np.full(n_agn, 1.0e-14),
             "flux_aper_err_b": np.full(n_agn, 2.0e-15),
             "log_sigma_hat0": log_sigma_hat0,
@@ -3512,7 +3512,7 @@ def test_load_agn_data_residuals_csv_cut_remains_available(monkeypatch, tmp_path
 
     filtered_df, all_df = hubble_utils.load_agn_data(
         "dummy.h5",
-        magnitude_convention="intrinsic",
+        magnitude_convention="dereddened",
         apply_cut=False,
         residuals_sigma_clip=3.0,
         residuals_csv=str(residuals_path),
@@ -3566,6 +3566,37 @@ def test_hubble_fit_cli_declares_and_forwards_spectra_sdss_run2d():
     assert "spectra_sdss_run2d" in load_kwargs
 
 
+def test_hubble_fit_clis_declare_and_forward_no_cuts():
+    for source_path in (
+        Path(hubble_fit.__file__),
+        SRC / "qvc" / "hubble" / "hubble_fit_jax.py",
+    ):
+        tree = ast.parse(source_path.read_text(encoding="utf-8"))
+        option_strings = set()
+        forwarded_value = None
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            if isinstance(node.func, ast.Attribute) and node.func.attr == "add_argument":
+                constants = [
+                    arg.value
+                    for arg in node.args
+                    if isinstance(arg, ast.Constant) and isinstance(arg.value, str)
+                ]
+                if "--no-cuts" in constants or "--no_cuts" in constants:
+                    option_strings.update(constants)
+            if isinstance(node.func, ast.Name) and node.func.id == "load_agn_data":
+                for keyword in node.keywords:
+                    if keyword.arg == "apply_cut":
+                        forwarded_value = keyword.value
+
+        assert {"--no-cuts", "--no_cuts"}.issubset(option_strings)
+        assert isinstance(forwarded_value, ast.UnaryOp)
+        assert isinstance(forwarded_value.op, ast.Not)
+        assert isinstance(forwarded_value.operand, ast.Attribute)
+        assert forwarded_value.operand.attr == "no_cuts"
+
+
 def test_hubble_fit_cli_declares_and_forwards_magnitude_convention():
     source_path = Path(hubble_fit.__file__)
     tree = ast.parse(source_path.read_text(encoding="utf-8"))
@@ -3594,7 +3625,7 @@ def test_hubble_fit_cli_declares_and_forwards_magnitude_convention():
 
     assert parser_has_default is False
     assert parser_required is True
-    assert parser_choices == ["intrinsic", "observed"]
+    assert parser_choices == ["dereddened", "attenuated"]
     assert isinstance(forwarded_value, ast.Attribute)
     assert isinstance(forwarded_value.value, ast.Name)
     assert forwarded_value.value.id == "args"
@@ -3629,7 +3660,7 @@ def test_hubble_fit_jax_cli_declares_and_forwards_magnitude_convention():
 
     assert parser_has_default is False
     assert parser_required is True
-    assert parser_choices == ["intrinsic", "observed"]
+    assert parser_choices == ["dereddened", "attenuated"]
     assert isinstance(forwarded_value, ast.Attribute)
     assert isinstance(forwarded_value.value, ast.Name)
     assert forwarded_value.value.id == "args"

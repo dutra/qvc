@@ -13,69 +13,106 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from qvc.hubble.cuts import (  # noqa: E402
+    AGN_SCALAR_PARAMETER_CUTS,
+    APPARENT_MAG_2500_ERR_MAX,
+    APPARENT_MAG_2500_MIN,
     APPARENT_MAG_2500_MAX,
+    EXCLUDED_SDSS_NAMES,
+    FRAC_AGN_5100_MIN,
     LIGHT_CURVE_N_POINTS_COLUMN,
     LIGHT_CURVE_N_POINTS_EXCLUDED_BANDS,
-    LIGHT_CURVE_N_POINTS_MIN,
-    LOO_CHI2_EFF_MAX,
+    REL_APPARENT_MAG_2500_ERR_MAX,
     add_light_curve_point_count_column,
     light_curve_point_count_series,
 )
-from qvc.hubble.hubble_cut_config import build_agn_cuts  # noqa: E402
+from qvc.hubble.hubble_cut_config import build_agn_cuts, build_dlog_amp_blr_cuts  # noqa: E402
 from qvc.hubble.hubble_utils import (  # noqa: E402
     _append_cut_report_row,
     _count_redshift_bin_removals,
     _render_cut_summary_table,
     _scalar_cut_has_inclusive_upper,
     _scalar_parameter_cut_mask,
+    populate_spectra_fit,
 )
 
 
-def test_build_agn_cuts_includes_light_curve_point_count_minimum():
+def test_build_agn_cuts_contains_only_fiducial_profile():
     cuts = build_agn_cuts()
     cut_map = {column: (lower, upper) for column, lower, upper in cuts}
 
-    assert cut_map[LIGHT_CURVE_N_POINTS_COLUMN] == (LIGHT_CURVE_N_POINTS_MIN, None)
+    assert tuple(cuts) == AGN_SCALAR_PARAMETER_CUTS
+    assert cut_map == {
+        "log_tau_uv_rf": (1.5, 4.0),
+        "fracAGN_5100_fit": (FRAC_AGN_5100_MIN, None),
+        "apparent_mag_2500_err": (None, APPARENT_MAG_2500_ERR_MAX),
+        "apparent_mag_2500": (APPARENT_MAG_2500_MIN, APPARENT_MAG_2500_MAX),
+    }
     assert LIGHT_CURVE_N_POINTS_EXCLUDED_BANDS == ("u",)
 
 
-def test_build_agn_cuts_includes_apparent_mag_2500_strict_maximum():
-    cuts = build_agn_cuts()
-    cut_map = {column: (lower, upper) for column, lower, upper in cuts}
-
-    assert cut_map["apparent_mag_2500"] == (None, APPARENT_MAG_2500_MAX)
-    assert not _scalar_cut_has_inclusive_upper("apparent_mag_2500")
-
-
-def test_build_agn_cuts_includes_loo_chi2_eff_maximum():
-    cuts = build_agn_cuts()
-    cut_map = {column: (lower, upper) for column, lower, upper in cuts}
-
-    assert cut_map["loo_chi2_eff"] == (None, LOO_CHI2_EFF_MAX)
-    assert _scalar_cut_has_inclusive_upper("loo_chi2_eff")
-
-
-def test_apparent_mag_2500_cut_is_disabled_when_threshold_is_none():
-    df = pd.DataFrame(
+def test_previous_scalar_and_component_defaults_are_disabled():
+    active_columns = {column for column, _, _ in build_agn_cuts()}
+    assert active_columns.isdisjoint(
         {
-            "apparent_mag_2500": [
-                20.0,
-                22.5,
-                23.0,
-                np.nan,
-                "not-a-number",
-            ],
+            "wrms",
+            "t_rf_length",
+            LIGHT_CURVE_N_POINTS_COLUMN,
+            "f_host_2500",
+            "alpha_lambda",
+            "variability_chi_sq_red_g",
+            "loo_chi2_eff",
+            "log_sigma_uv",
         }
     )
+    assert build_dlog_amp_blr_cuts() == []
+    assert len(EXCLUDED_SDSS_NAMES) == 9
+    assert REL_APPARENT_MAG_2500_ERR_MAX is None
 
-    mask = _scalar_parameter_cut_mask(
-        df,
-        "apparent_mag_2500",
-        None,
-        APPARENT_MAG_2500_MAX,
+
+def test_fiducial_cut_boundaries_are_inclusive_and_nonfinite_values_fail():
+    cases = (
+        ("log_tau_uv_rf", 1.5, 4.0),
+        ("fracAGN_5100_fit", FRAC_AGN_5100_MIN, None),
+        ("apparent_mag_2500_err", None, APPARENT_MAG_2500_ERR_MAX),
+        ("apparent_mag_2500", APPARENT_MAG_2500_MIN, APPARENT_MAG_2500_MAX),
     )
+    for column, lower, upper in cases:
+        accepted = lower if lower is not None else upper
+        outside = (
+            np.nextafter(lower, -np.inf)
+            if lower is not None
+            else np.nextafter(upper, np.inf)
+        )
+        values = [accepted, outside, np.nan, np.inf, -np.inf]
+        if lower is not None and upper is not None:
+            values.insert(1, upper)
+            expected = [True, True, False, False, False, False]
+        else:
+            expected = [True, False, False, False, False]
+        mask = _scalar_parameter_cut_mask(
+            pd.DataFrame({column: values}), column, lower, upper
+        )
+        np.testing.assert_array_equal(mask, expected)
+        assert _scalar_cut_has_inclusive_upper(column)
 
-    np.testing.assert_array_equal(mask, [True, True, True, True, True])
+
+def test_current_spectra_schema_requires_fracagn_5100_fit(tmp_path):
+    csv_path = tmp_path / "spectra.csv"
+    pd.DataFrame(
+        {
+            "object_id": ["obj"],
+            "fit_ok": [True],
+            "m_2500_dereddened": [20.0],
+            "m_2500_dereddened_err": [0.1],
+            "m_2500_attenuated_model": [20.1],
+            "m_2500_attenuated_model_err": [0.1],
+            "pl_slope": [-1.5],
+            "pl_slope_err": [0.1],
+        }
+    ).to_csv(csv_path, index=False)
+
+    with np.testing.assert_raises_regex(ValueError, "fracAGN_5100_fit"):
+        populate_spectra_fit(pd.DataFrame({"object_id": ["obj"]}), [csv_path])
 
 
 def test_light_curve_point_count_series_prefers_cleaned_per_band_counts():
