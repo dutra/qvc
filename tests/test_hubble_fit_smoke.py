@@ -1250,6 +1250,38 @@ def test_weighted_bin_stats_includes_outer_edges_and_uses_histogram_convention()
     assert int(np.sum(counts)) == 5
 
 
+@pytest.mark.parametrize(
+    "bins",
+    [
+        np.arange(0.4, 3.41, 0.2),
+        np.logspace(np.log10(0.4), np.log10(3.4), 9),
+    ],
+)
+def test_range_partitioned_bins_do_not_mix_fit_range_membership(bins):
+    z = np.array([0.43, 0.44, 0.45, 3.15, 3.16, 3.17], dtype=float)
+    yerr = np.ones_like(z)
+    in_range, out_of_range = (
+        hubble_plotting._range_partitioned_weighted_bin_stats(
+            z,
+            z,
+            yerr,
+            bins=bins,
+            z_range=(0.44, 3.16),
+            min_count=1,
+            center="mid",
+        )
+    )
+
+    z_in, means_in, _, counts_in = in_range
+    z_out, means_out, _, counts_out = out_of_range
+    assert int(np.sum(counts_in)) == 4
+    assert int(np.sum(counts_out)) == 2
+    assert np.all((z_in >= 0.44) & (z_in <= 3.16))
+    assert np.all((z_out < 0.44) | (z_out > 3.16))
+    np.testing.assert_allclose(means_in[[0, -1]], [0.445, 3.155])
+    np.testing.assert_allclose(means_out, [0.43, 3.17])
+
+
 def test_plot_predicted_vs_actual_m2500_marks_out_of_range_objects(monkeypatch, tmp_path):
     from matplotlib.axes import Axes
     import matplotlib.pyplot as plt

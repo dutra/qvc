@@ -5224,6 +5224,94 @@ def _weighted_bin_stats(z, y, yerr, bins, *, min_count=3, center='mid', plot_pat
     return zc[keep], mean[keep], sem[keep], n[keep]
 
 
+def _interval_bin_edges(bins, lower, upper):
+    """Return ``bins`` clipped to one non-empty interval."""
+    bins = np.asarray(bins, dtype=float)
+    lower = max(float(lower), float(bins[0]))
+    upper = min(float(upper), float(bins[-1]))
+    if upper <= lower:
+        return None
+    return np.concatenate(
+        (
+            np.array([lower]),
+            bins[(bins > lower) & (bins < upper)],
+            np.array([upper]),
+        )
+    )
+
+
+def _concatenate_weighted_bin_stats(parts):
+    nonempty = [part for part in parts if part[0].size]
+    if not nonempty:
+        return (
+            np.empty(0, dtype=float),
+            np.empty(0, dtype=float),
+            np.empty(0, dtype=float),
+            np.empty(0, dtype=int),
+        )
+    combined = tuple(
+        np.concatenate([part[index] for part in nonempty])
+        for index in range(4)
+    )
+    order = np.argsort(combined[0], kind="stable")
+    return tuple(values[order] for values in combined)
+
+
+def _range_partitioned_weighted_bin_stats(
+    z,
+    y,
+    yerr,
+    bins,
+    z_range,
+    *,
+    min_count=3,
+    center="mid",
+):
+    """Bin fit-range and out-of-range objects without mixed boundary bins.
+
+    The fit interval is inclusive at both ends.  Its endpoints are inserted as
+    bin edges, and objects below, inside, and above the interval are binned
+    independently.  The return value is ``(in_range_stats, out_of_range_stats)``,
+    where each stats tuple has the same layout as :func:`_weighted_bin_stats`.
+    """
+    z = np.asarray(z, dtype=float)
+    y = np.asarray(y, dtype=float)
+    yerr = np.asarray(yerr, dtype=float)
+    bins = np.asarray(bins, dtype=float)
+    if z.shape != y.shape or z.shape != yerr.shape:
+        raise ValueError(
+            "z, y, and yerr must have identical shapes for range-partitioned binning"
+        )
+    if len(z_range) != 2:
+        raise ValueError("z_range must contain exactly two endpoints")
+    z_lo, z_hi = map(float, z_range)
+    if not np.isfinite(z_lo) or not np.isfinite(z_hi) or z_hi <= z_lo:
+        raise ValueError("z_range must be finite and strictly increasing")
+
+    def summarize(mask, lower, upper):
+        edges = _interval_bin_edges(bins, lower, upper)
+        if edges is None:
+            return (
+                np.empty(0, dtype=float),
+                np.empty(0, dtype=float),
+                np.empty(0, dtype=float),
+                np.empty(0, dtype=int),
+            )
+        return _weighted_bin_stats(
+            z[mask],
+            y[mask],
+            yerr[mask],
+            edges,
+            min_count=min_count,
+            center=center,
+        )
+
+    below = summarize(z < z_lo, bins[0], z_lo)
+    inside = summarize((z >= z_lo) & (z <= z_hi), z_lo, z_hi)
+    above = summarize(z > z_hi, z_hi, bins[-1])
+    return inside, _concatenate_weighted_bin_stats((below, above))
+
+
 
 def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plot_path="plots/hubble/",
                 show_binned_agn=True, show_residuals=True,
@@ -5507,24 +5595,24 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     bins_linear = np.arange(0.4, 3.41, 0.2)
 
     print("Using linear-z bins:", bins_linear)
-    z_lin_scatter, mu_lin_mean_scatter, mu_lin_sem_scatter, n_lin = _weighted_bin_stats(
+    linear_main_in, linear_main_out = _range_partitioned_weighted_bin_stats(
         df_agn["z"].values,
         mu_pred_plot,
         display_residuals_err,
         bins_linear,
+        z_range,
         min_count=5,
         center="mid",
     )
 
-    
-
-    # Residual-panel bins must use the actual residuals, not the display-only
-    # scattered ordinates used in the main Hubble diagram.
-    z_res_lin_scatter, resid_lin_mean_scatter, resid_lin_sem_scatter, n_res = _weighted_bin_stats(
+    # Residual-panel bins use the same point-level fit-range partition as the
+    # main panel, applied to the actual residuals.
+    linear_residual_in, linear_residual_out = _range_partitioned_weighted_bin_stats(
         df_agn["z"].values,
         residuals,
         clipping_sigma,
         bins_linear,
+        z_range,
         min_count=5,
         center="mid",
     )
@@ -5538,8 +5626,13 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     n_bins_log = max(1, int(np.ceil(decades * bins_per_decade)))
     bins_log = np.logspace(np.log10(bins_linear[0]), np.log10(bins_linear[-1]), n_bins_log + 1)
     #bins_log = bins_linear
-    z_log, mu_log_mean, mu_log_sem, n_log = _weighted_bin_stats(
-        df_agn["z"].values, mu_pred_plot, display_residuals_err, bins_log)
+    log_main_in, log_main_out = _range_partitioned_weighted_bin_stats(
+        df_agn["z"].values,
+        mu_pred_plot,
+        display_residuals_err,
+        bins_log,
+        z_range,
+    )
 
     if compute_only:
         return (
@@ -5628,11 +5721,11 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
 
     # INSET: log-binned AGN
     if show_binned_agn:
-        mask_in  = (z_range[0] < z_log) & (z_log < z_range[1])
-        mask_out = ~mask_in
+        z_log_in, mu_log_mean_in, mu_log_sem_in, _ = log_main_in
+        z_log_out, mu_log_mean_out, mu_log_sem_out, _ = log_main_out
         # binned (inside)
         inset_ax.errorbar(
-            z_log[mask_in], mu_log_mean[mask_in], yerr=mu_log_sem[mask_in],
+            z_log_in, mu_log_mean_in, yerr=mu_log_sem_in,
             fmt='o', linestyle='none',
             markersize=4, mfc='red', mec='none',
             ecolor='red', elinewidth=2.2, capsize=3.5,
@@ -5640,7 +5733,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
         )
         # binned (outside, filled diamond)
         inset_ax.errorbar(
-            z_log[mask_out], mu_log_mean[mask_out], yerr=mu_log_sem[mask_out],
+            z_log_out, mu_log_mean_out, yerr=mu_log_sem_out,
             fmt='D', linestyle='none',
             markersize=4, mfc='red', mec='none',
             ecolor='red', elinewidth=2.2, capsize=3.5,
@@ -5766,15 +5859,13 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
 
     # MAIN: linear-binned AGN
     if show_binned_agn:
-        mask_in  = (z_range[0] < z_lin_scatter) & (z_lin_scatter < z_range[1])
-        print("Plotting binned AGN (linear z) at:", z_lin_scatter)
-        print("\tmask_in:", mask_in)
-        mask_out = ~mask_in
+        z_lin_in, mu_lin_mean_in, mu_lin_sem_in, _ = linear_main_in
+        z_lin_out, mu_lin_mean_out, mu_lin_sem_out, _ = linear_main_out
         # binned (inside)
-        print("Plotting binned AGN (linear z) at:", z_lin_scatter)
-        print("\tmask_out:", mask_out)
+        print("Plotting in-range binned AGN (linear z) at:", z_lin_in)
+        print("Plotting out-of-range binned AGN (linear z) at:", z_lin_out)
         ax.errorbar(
-            z_lin_scatter[mask_in], mu_lin_mean_scatter[mask_in], yerr=mu_lin_sem_scatter[mask_in],
+            z_lin_in, mu_lin_mean_in, yerr=mu_lin_sem_in,
             fmt='o', linestyle='none',
             markersize=5, mfc='red', mec='none',
             ecolor='red', elinewidth=2.2, capsize=3.5,
@@ -5782,7 +5873,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
         )
         # binned (outside, filled diamond)
         ax.errorbar(
-            z_lin_scatter[mask_out], mu_lin_mean_scatter[mask_out], yerr=mu_lin_sem_scatter[mask_out],
+            z_lin_out, mu_lin_mean_out, yerr=mu_lin_sem_out,
             fmt='D', linestyle='none',
             markersize=5, mfc='red', mec='none',
             ecolor='red', elinewidth=2.2, capsize=3.5,
@@ -5879,17 +5970,17 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
         ax_resid.axhline(0.0, color="m", lw=3.0, zorder=1)
 
         # NEW: binned residuals in red (points + thin connecting line)
-        if z_res_lin_scatter.size:
-            mask_in  = (z_range[0] < z_res_lin_scatter) & (z_res_lin_scatter < z_range[1])
-            mask_out = ~mask_in
+        z_res_in, resid_lin_mean_in, resid_lin_sem_in, _ = linear_residual_in
+        z_res_out, resid_lin_mean_out, resid_lin_sem_out, _ = linear_residual_out
+        if z_res_in.size or z_res_out.size:
             ax_resid.errorbar(
-                z_res_lin_scatter[mask_in], resid_lin_mean_scatter[mask_in], yerr=resid_lin_sem_scatter[mask_in],
+                z_res_in, resid_lin_mean_in, yerr=resid_lin_sem_in,
                 fmt='o', linestyle='none', markersize=6,
                 mfc='red', mec='none', ecolor='red', elinewidth=2.0, capsize=3.0,
                 alpha=0.98, zorder=15, label="Binned AGN residuals"
             )
             ax_resid.errorbar(
-                z_res_lin_scatter[mask_out], resid_lin_mean_scatter[mask_out], yerr=resid_lin_sem_scatter[mask_out],
+                z_res_out, resid_lin_mean_out, yerr=resid_lin_sem_out,
                 fmt='D', linestyle='none', markersize=6,
                 mfc='red', mec='none', ecolor='red', elinewidth=2.0, capsize=3.0,
                 alpha=0.98, zorder=15
