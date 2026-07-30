@@ -191,6 +191,19 @@ def test_alpha_ox_cosmology_uses_equal_weight_posterior_medians(monkeypatch):
     assert out.loc[0, "alphaOX"] == pytest.approx(1.23)
 
 
+def test_log_f_prior_uses_wider_symmetric_range():
+    priors, _, _ = hubble_model.get_model_params("FlatLambdaCDM")
+    expected_center = np.log(hubble_model.AGN_INTRINSIC_SCATTER_MAG_CENTER)
+
+    assert priors["log_f"] == pytest.approx(
+        (
+            expected_center - hubble_model.AGN_LOG_F_PRIOR_HALF_WIDTH,
+            expected_center + hubble_model.AGN_LOG_F_PRIOR_HALF_WIDTH,
+        )
+    )
+    assert hubble_model.AGN_LOG_F_PRIOR_HALF_WIDTH == pytest.approx(1.6)
+
+
 def test_log_likelihood_finite_on_fake_lcdm_data(fake_data):
     df_agn, df_pantheon = fake_data
     priors, model_labels, _ = hubble_model.get_model_params("FlatLambdaCDM", only_sna=False)
