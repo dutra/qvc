@@ -17,7 +17,7 @@ $SHEN_PUBTOOLS_PATH = __xonsh__.env.get(
 
 # Sweep values fastest, quick, standard.  The environment overrides make this
 # runner suitable for isolated, reproducible cut-search members.
-speed = __xonsh__.env.get("QVC_HUBBLE_SPEED", "fastest")
+speed = __xonsh__.env.get("QVC_HUBBLE_SPEED", "quick")
 magnitude_convention = __xonsh__.env.get("QVC_HUBBLE_MAGNITUDE_CONVENTION", "dereddened")
 resume_checkpoint = __xonsh__.env.get("QVC_HUBBLE_RESUME", "")
 resume_args = ["--resume", resume_checkpoint] if resume_checkpoint else []
@@ -25,7 +25,10 @@ resume_args = ["--resume", resume_checkpoint] if resume_checkpoint else []
 h5_file = "results/data/jul22_1134pm_erlang_independentblrlags_fast_jul14chisq_spectrajul16call_n1_7fa5882_chisq.h5"
 spectra_fit_csv = "results/data/jul29_2206_9dad47e_sedfit.csv"
 
-$PREFIX = __xonsh__.env.get("QVC_HUBBLE_PREFIX", f"jul27e_red_baseline_{speed}")
+$PREFIX = __xonsh__.env.get(
+    "QVC_HUBBLE_PREFIX",
+    f"jul30b_dereddened_cuts_completenessattenuated_thinnedallsky_baseline_{speed}",
+)
 
 prefix = $PREFIX
 echo "Running hubble_fit.py and PREFIX=" $PREFIX
@@ -38,7 +41,6 @@ echo "Running hubble_fit.py and PREFIX=" $PREFIX
     --spectra_fit_csv @(spectra_fit_csv) \
     --magnitude-convention @(magnitude_convention) \
     --result_prefix "fiducial" \
-    --no-cuts \
     --z_range 0.44 3.16 \
     --prefix @(prefix) \
     --disable_sigma_clip_pass \
