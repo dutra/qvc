@@ -103,10 +103,13 @@ from qvc.hubble.hubble_completeness_refactored import (
     COMPLETENESS_FHOST_COL,
     COMPLETENESS_MAG_COL,
     COMPLETENESS_MAG_ERR_COL,
+    VALID_COMPLETENESS_MAGNITUDES,
     get_completeness_function_2d,
     get_completeness_function_3d_fhost,
     get_completeness_function_4d_fhost_alpha,
     make_dm_function,
+    normalize_completeness_magnitude,
+    prepare_completeness_magnitude_columns,
 )
 from qvc.hubble.completeness_mock_catalog import (
     COSMO as COMPLETENESS_MOCK_COSMO,
@@ -581,6 +584,7 @@ def make_run_tag(
     only_agn=False,
     completeness=True,
     completeness_mode="2d",
+    completeness_magnitude="dereddened",
     disable_ceph_dist_calibration=False,
     use_planck_h0_prior=False,
     use_planck_om_prior=False,
@@ -592,7 +596,14 @@ def make_run_tag(
     zmin, zmax = z_range
     n_tag = "all" if N is None else f"N{N}"
     z_tag = f"z{zmin:.2f}_{zmax:.2f}".replace(".", "p")
-    completeness_tag = f"_{completeness_mode}" if completeness else "_disable_completeness"
+    completeness_magnitude = normalize_completeness_magnitude(
+        completeness_magnitude
+    )
+    completeness_tag = (
+        f"_{completeness_mode}_compmag-{completeness_magnitude}"
+        if completeness
+        else "_disable_completeness"
+    )
     ceph_tag = "_nocephdist_planckh0" if disable_ceph_dist_calibration else ""
     planck_h0_tag = "_planckh0" if use_planck_h0_prior and not disable_ceph_dist_calibration else ""
     planck_om_tag = "_planckom" if use_planck_om_prior else ""
@@ -1402,6 +1413,7 @@ def _prepare_shared_agn_pivot_context(
     disable_sigma_clip_pass,
     resume_stage,
     prefix,
+    completeness_magnitude="dereddened",
     resume_replot_with_cuts=False,
 ):
     """Build once, or strictly load once, for cosmologies sharing a fit sample."""
@@ -1431,6 +1443,7 @@ def _prepare_shared_agn_pivot_context(
             only_agn=only_agn,
             completeness=completeness,
             completeness_mode=completeness_mode,
+            completeness_magnitude=completeness_magnitude,
             disable_ceph_dist_calibration=disable_ceph_dist_calibration,
             use_planck_h0_prior=use_planck_h0_prior,
             use_planck_om_prior=use_planck_om_prior,
@@ -1517,7 +1530,7 @@ def _build_completeness_params(
     } - set(df_agn_completeness.columns)
     if missing_magnitude_columns:
         raise KeyError(
-            "Completeness requires the attenuated 2500-A magnitude columns: "
+            "Completeness requires prepared 2500-A magnitude columns: "
             f"{sorted(missing_magnitude_columns)}."
         )
 
@@ -1905,6 +1918,10 @@ def _run_fit_stage(
         checkpoint_file_override=checkpoint_file_override,
         completeness_sim_file=completeness_sim_file,
         completeness_mode=completeness_mode,
+        completeness_magnitude=df_agn_fit_selection.attrs.get(
+            "completeness_magnitude",
+            "dereddened",
+        ),
         compare_sigma_only=compare_sigma_only,
         minimal_plots=minimal_plots,
         disable_ceph_dist_calibration=disable_ceph_dist_calibration,
@@ -2018,6 +2035,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                       checkpoint_file_override=None,
                       completeness_sim_file=DEFAULT_COMPLETENESS_SIM_FILE,
                       completeness_mode="2d",
+                      completeness_magnitude="dereddened",
                       N=None,
                       compare_sigma_only=False,
                       minimal_plots=False,
@@ -2034,6 +2052,28 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                       df_agn_completeness=None,
                       ):
     validate_completeness_mode(completeness_mode)
+    completeness_magnitude = normalize_completeness_magnitude(
+        df_agn.attrs.get("completeness_magnitude", completeness_magnitude)
+    )
+    if completeness and COMPLETENESS_MAG_COL not in df_agn.columns:
+        df_agn = prepare_completeness_magnitude_columns(
+            df_agn,
+            completeness_magnitude,
+        )
+    if completeness and COMPLETENESS_MAG_COL not in df_agn_all.columns:
+        df_agn_all = prepare_completeness_magnitude_columns(
+            df_agn_all,
+            completeness_magnitude,
+        )
+    if (
+        completeness
+        and df_agn_completeness is not None
+        and COMPLETENESS_MAG_COL not in df_agn_completeness.columns
+    ):
+        df_agn_completeness = prepare_completeness_magnitude_columns(
+            df_agn_completeness,
+            completeness_magnitude,
+        )
     speed = normalize_speed(speed)
     _fit_mode_label(only_sna, only_agn)
     use_planck_h0_prior = use_planck_h0_prior or disable_ceph_dist_calibration
@@ -2058,6 +2098,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
         only_agn=only_agn,
         completeness=completeness,
         completeness_mode=completeness_mode,
+        completeness_magnitude=completeness_magnitude,
         disable_ceph_dist_calibration=disable_ceph_dist_calibration,
         use_planck_h0_prior=use_planck_h0_prior,
         use_planck_om_prior=use_planck_om_prior,
@@ -2502,6 +2543,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                prefix="default", uniform_redshift_distribution=False,
                completeness_sim_file=DEFAULT_COMPLETENESS_SIM_FILE,
                completeness_mode="2d",
+               completeness_magnitude="dereddened",
                compare_sigma_only=False,
                minimal_plots=False,
                disable_ceph_dist_calibration=False,
@@ -2514,6 +2556,17 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                resume_replot_with_cuts=False,
                agn_pivot_context=None):
     validate_completeness_mode(completeness_mode)
+    completeness_magnitude = normalize_completeness_magnitude(
+        completeness_magnitude
+    )
+    df_agn = prepare_completeness_magnitude_columns(
+        df_agn,
+        completeness_magnitude,
+    )
+    df_agn_all = prepare_completeness_magnitude_columns(
+        df_agn_all,
+        completeness_magnitude,
+    )
     speed = normalize_speed(speed)
     _fit_mode_label(only_sna, only_agn)
     use_planck_h0_prior = use_planck_h0_prior or disable_ceph_dist_calibration
@@ -2527,6 +2580,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         only_agn=only_agn,
         completeness=completeness,
         completeness_mode=completeness_mode,
+        completeness_magnitude=completeness_magnitude,
         disable_ceph_dist_calibration=disable_ceph_dist_calibration,
         use_planck_h0_prior=use_planck_h0_prior,
         use_planck_om_prior=use_planck_om_prior,
@@ -2538,6 +2592,11 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
     os.makedirs(plot_path, exist_ok=True)
     print(f"Saving plots to ", plot_path)
     if completeness:
+        print(
+            "Completeness magnitude: "
+            f"{completeness_magnitude} "
+            f"({df_agn.attrs['completeness_magnitude_source']})."
+        )
         if completeness_sim_file is None:
             if resume_replot_with_cuts:
                 print("Completeness diagnostics enabled with a freshly generated mock catalog.")
@@ -3921,6 +3980,7 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
             prefix="default", result_prefix="", uniform_redshift_distribution=False,
             completeness_sim_file=DEFAULT_COMPLETENESS_SIM_FILE,
             completeness_mode="2d",
+            completeness_magnitude="dereddened",
             compare_sigma_only=False,
             disable_ceph_dist_calibration=False,
             use_planck_h0_prior=False,
@@ -3932,6 +3992,9 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
             early_de_guard=False):
 
     validate_completeness_mode(completeness_mode)
+    completeness_magnitude = normalize_completeness_magnitude(
+        completeness_magnitude
+    )
     speed = normalize_speed(speed)
     if only_agn:
         print("Running full model comparison in AGN-only mode; SNe-only comparison branch is disabled.")
@@ -3940,7 +4003,11 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
     zmin, zmax = z_range
     n_tag = "all" if N is None else f"N{N}"
     z_tag = f"z{zmin:.2f}_{zmax:.2f}".replace(".", "p")
-    completeness_tag = f"_{completeness_mode}" if completeness else "_disable_completeness"
+    completeness_tag = (
+        f"_{completeness_mode}_compmag-{completeness_magnitude}"
+        if completeness
+        else "_disable_completeness"
+    )
     ceph_tag = "_nocephdist_planckh0" if disable_ceph_dist_calibration else ""
     planck_h0_tag = "_planckh0" if use_planck_h0_prior and not disable_ceph_dist_calibration else ""
     planck_om_tag = "_planckom" if use_planck_om_prior else ""
@@ -3973,6 +4040,7 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
         speed=speed,
         completeness=completeness,
         completeness_mode=completeness_mode,
+        completeness_magnitude=completeness_magnitude,
         disable_ceph_dist_calibration=disable_ceph_dist_calibration,
         use_planck_h0_prior=use_planck_h0_prior,
         use_planck_om_prior=use_planck_om_prior,
@@ -4001,6 +4069,7 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
                        prefix=prefix, uniform_redshift_distribution=uniform_redshift_distribution,
                        completeness_sim_file=completeness_sim_file,
                        completeness_mode=completeness_mode,
+                       completeness_magnitude=completeness_magnitude,
                        compare_sigma_only=compare_sigma_only,
                        minimal_plots=minimal_plots,
                        disable_ceph_dist_calibration=disable_ceph_dist_calibration,
@@ -4036,6 +4105,7 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
                            prefix=prefix, uniform_redshift_distribution=uniform_redshift_distribution,
                            completeness_sim_file=completeness_sim_file,
                            completeness_mode=completeness_mode,
+                           completeness_magnitude=completeness_magnitude,
                            compare_sigma_only=compare_sigma_only,
                            minimal_plots=minimal_plots,
                            disable_ceph_dist_calibration=disable_ceph_dist_calibration,
@@ -4326,6 +4396,16 @@ if __name__ == "__main__":
         help="Completeness model to use: 2D p(det|m,z), 3D p(det|m,z,f_host_2500_psf), or 4D p(det|m,z,f_host_2500_psf,alpha_lambda).",
     )
     parser.add_argument(
+        "--completeness_magnitude",
+        type=str,
+        choices=list(VALID_COMPLETENESS_MAGNITUDES),
+        default="dereddened",
+        help=(
+            "m_2500 definition used by the completeness model: "
+            "'dereddened' (default) or 'attenuated'."
+        ),
+    )
+    parser.add_argument(
         "--correct-sigma-uv-host",
         action="store_true",
         default=False,
@@ -4444,6 +4524,7 @@ if __name__ == "__main__":
             speed=args.speed,
             completeness=not args.disable_completeness,
             completeness_mode=args.completeness_mode,
+            completeness_magnitude=args.completeness_magnitude,
             disable_ceph_dist_calibration=args.disable_ceph_dist_calibration,
             use_planck_h0_prior=effective_use_planck_h0_prior,
             use_planck_om_prior=args.use_planck_om_prior,
@@ -4469,6 +4550,7 @@ if __name__ == "__main__":
                 prefix=args.prefix,
                 completeness_sim_file=args.completeness_sim_file,
                 completeness_mode=args.completeness_mode,
+                completeness_magnitude=args.completeness_magnitude,
                 only_sna=args.only_sna,
                 only_agn=args.only_agn,
                 N=effective_N,
@@ -4496,6 +4578,7 @@ if __name__ == "__main__":
             speed=args.speed,
             completeness=not args.disable_completeness,
             completeness_mode=args.completeness_mode,
+            completeness_magnitude=args.completeness_magnitude,
             disable_ceph_dist_calibration=args.disable_ceph_dist_calibration,
             use_planck_h0_prior=effective_use_planck_h0_prior,
             use_planck_om_prior=args.use_planck_om_prior,
@@ -4521,6 +4604,7 @@ if __name__ == "__main__":
                 prefix=args.prefix,
                 completeness_sim_file=args.completeness_sim_file,
                 completeness_mode=args.completeness_mode,
+                completeness_magnitude=args.completeness_magnitude,
                 compare_sigma_only=args.compare_sigma_only,
                 minimal_plots=args.minimal_plots,
                 disable_ceph_dist_calibration=args.disable_ceph_dist_calibration,
@@ -4540,7 +4624,11 @@ if __name__ == "__main__":
         zmin, zmax = args.z_range
         n_tag = "all" if effective_N is None else f"N{effective_N}"
         z_tag = f"z{zmin:.2f}_{zmax:.2f}".replace(".", "p")
-        completeness_tag = f"_{args.completeness_mode}" if not args.disable_completeness else "_disable_completeness"
+        completeness_tag = (
+            f"_{args.completeness_mode}_compmag-{args.completeness_magnitude}"
+            if not args.disable_completeness
+            else "_disable_completeness"
+        )
         ceph_tag = "_nocephdist_planckh0" if args.disable_ceph_dist_calibration else ""
         planck_h0_tag = "_planckh0" if effective_use_planck_h0_prior and not args.disable_ceph_dist_calibration else ""
         planck_om_tag = "_planckom" if args.use_planck_om_prior else ""
@@ -4578,6 +4666,7 @@ if __name__ == "__main__":
                 prefix=args.prefix, result_prefix=args.result_prefix, uniform_redshift_distribution=args.uniform_redshift_distribution,
                 completeness_sim_file=args.completeness_sim_file,
                 completeness_mode=args.completeness_mode,
+                completeness_magnitude=args.completeness_magnitude,
                 compare_sigma_only=args.compare_sigma_only,
                 minimal_plots=args.minimal_plots,
                 disable_ceph_dist_calibration=args.disable_ceph_dist_calibration,

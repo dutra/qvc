@@ -6,8 +6,8 @@ import pandas as pd
 
 from qvc.hubble.hubble_completeness_refactored import (
     COMPLETENESS_FHOST_COL,
-    COMPLETENESS_MAG_COL,
     evaluate_dm_interp,
+    resolve_completeness_magnitude_column,
 )
 
 
@@ -76,10 +76,11 @@ def _resolve_table_debias_values(agn_df, *, dm_interp=None, dmi_values=None):
             raise ValueError("AGN table requires either dm_interp or dmi_values.")
         return dmi
 
+    magnitude_col = resolve_completeness_magnitude_column(agn_df)
     dmi_interp = evaluate_dm_interp(
         dm_interp,
         agn_df["z"],
-        agn_df[COMPLETENESS_MAG_COL],
+        agn_df[magnitude_col],
         f_host_2500_psf=agn_df[COMPLETENESS_FHOST_COL] if COMPLETENESS_FHOST_COL in agn_df.columns else None,
         alpha_lambda=agn_df["alpha_lambda"] if "alpha_lambda" in agn_df.columns else None,
     )

@@ -37,8 +37,20 @@ def _attenuated_selection_inputs(
     hubble_model_magnitude,
     hubble_total_error,
 ):
-    """Express the selection integral in the attenuated 2500-A magnitude."""
-    selection_magnitude = np.asarray(agn_data[COMPLETENESS_MAG_COL], dtype=float)
+    """Express the selection integral in the configured 2500-A magnitude."""
+    missing = {
+        COMPLETENESS_MAG_COL,
+        COMPLETENESS_MAG_ERR_COL,
+    } - set(agn_data)
+    if missing:
+        raise KeyError(
+            "Completeness likelihood requires explicitly prepared magnitude "
+            f"fields {sorted(missing)}."
+        )
+    selection_magnitude = np.asarray(
+        agn_data[COMPLETENESS_MAG_COL],
+        dtype=float,
+    )
     selection_magnitude_error = np.asarray(
         agn_data[COMPLETENESS_MAG_ERR_COL],
         dtype=float,

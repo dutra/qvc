@@ -15,8 +15,14 @@ os.chdir(SRC)
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from qvc.hubble import hubble_fit, hubble_likelihood, hubble_model, hubble_plotting, hubble_utils
-
+from qvc.hubble import (
+    hubble_completeness_refactored,
+    hubble_fit,
+    hubble_likelihood,
+    hubble_model,
+    hubble_plotting,
+    hubble_utils,
+)
 
 def _make_fake_agn_sample(n_agn=24, seed=123):
     rng = np.random.default_rng(seed)
@@ -76,6 +82,10 @@ def _make_fake_agn_sample(n_agn=24, seed=123):
             "m_2500_dereddened_err": np.full(n_agn, 0.04),
             "m_2500_attenuated_model": apparent_mag + 0.35,
             "m_2500_attenuated_model_err": np.full(n_agn, 0.06),
+            hubble_completeness_refactored.COMPLETENESS_MAG_COL: apparent_mag,
+            hubble_completeness_refactored.COMPLETENESS_MAG_ERR_COL: np.full(
+                n_agn, 0.04
+            ),
             "flux_aper_b": np.full(n_agn, 1.0e-14),
             "flux_aper_err_b": np.full(n_agn, 2.0e-15),
             "log_sigma_hat0": log_sigma_hat0,
@@ -123,6 +133,77 @@ def _make_fake_agn_sample(n_agn=24, seed=123):
     )
 
 
+def test_completeness_magnitude_alias_defaults_to_dereddened_and_can_attenuate():
+    frame = _make_fake_agn_sample(n_agn=4)
+    dereddened = (
+        hubble_completeness_refactored.prepare_completeness_magnitude_columns(
+            frame
+        )
+    )
+    attenuated = (
+        hubble_completeness_refactored.prepare_completeness_magnitude_columns(
+            frame,
+            "attenuated",
+        )
+    )
+
+    np.testing.assert_allclose(
+        dereddened[
+            hubble_completeness_refactored.COMPLETENESS_MAG_COL
+        ],
+        frame["m_2500_dereddened"],
+    )
+    np.testing.assert_allclose(
+        attenuated[
+            hubble_completeness_refactored.COMPLETENESS_MAG_COL
+        ],
+        frame["m_2500_attenuated_model"],
+    )
+    np.testing.assert_allclose(
+        attenuated[
+            hubble_completeness_refactored.COMPLETENESS_MAG_ERR_COL
+        ],
+        frame["m_2500_attenuated_model_err"],
+    )
+    assert dereddened.attrs["completeness_magnitude"] == "dereddened"
+    assert attenuated.attrs["completeness_magnitude"] == "attenuated"
+    np.testing.assert_allclose(
+        frame["m_2500_dereddened"],
+        dereddened["m_2500_dereddened"],
+    )
+
+
+def test_completeness_magnitude_changes_run_tag():
+    common = ("FlatLambdaCDM", False, "fastest", None, (0.44, 3.16))
+    default_tag = hubble_fit.make_run_tag(*common)
+    attenuated_tag = hubble_fit.make_run_tag(
+        *common,
+        completeness_magnitude="attenuated",
+    )
+
+    assert "_compmag-dereddened" in default_tag
+    assert "_compmag-attenuated" in attenuated_tag
+    assert default_tag != attenuated_tag
+
+
+def test_completeness_magnitude_never_falls_back_to_another_source():
+    attenuated_only = pd.DataFrame(
+        {
+            "m_2500_attenuated_model": [20.4],
+            "m_2500_attenuated_model_err": [0.1],
+        }
+    )
+    with pytest.raises(KeyError, match="m_2500_dereddened"):
+        hubble_completeness_refactored.prepare_completeness_magnitude_columns(
+            attenuated_only,
+            "dereddened",
+        )
+    with pytest.raises(KeyError, match="has not been prepared"):
+        hubble_completeness_refactored.resolve_completeness_magnitude_column(
+            attenuated_only
+        )
+
+
 def _make_fake_pantheon_sample(n_sne=18, seed=456):
     rng = np.random.default_rng(seed)
     cosmo = FlatLambdaCDM(H0=70.0, Om0=0.3)
@@ -167,8 +248,12 @@ def _agn_pivot_context(
 
 def test_attenuated_selection_inputs_shift_model_and_replace_magnitude_error():
     agn_data = {
-        "m_2500_attenuated_model": np.array([20.4, 21.6]),
-        "m_2500_attenuated_model_err": np.array([0.3, 0.4]),
+        hubble_completeness_refactored.COMPLETENESS_MAG_COL: np.array(
+            [20.4, 21.6]
+        ),
+        hubble_completeness_refactored.COMPLETENESS_MAG_ERR_COL: np.array(
+            [0.3, 0.4]
+        ),
     }
     hubble_magnitude = np.array([20.0, 21.0])
     hubble_magnitude_error = np.array([0.1, 0.2])
@@ -2152,6 +2237,8 @@ def test_run_mcmc_pipeline_compare_sigma_only_skips_completeness_plots_on_resume
             "z_err": [0.01, 0.01],
             "apparent_mag_2500": [20.1, 20.4],
             "apparent_mag_2500_err": [0.1, 0.1],
+            "m_2500_dereddened": [20.1, 20.4],
+            "m_2500_dereddened_err": [0.1, 0.1],
             "m_2500_attenuated_model": [20.4, 20.7],
             "m_2500_attenuated_model_err": [0.12, 0.12],
             "log_sigma_uv": [-0.8, -0.7],
@@ -2171,7 +2258,15 @@ def test_run_mcmc_pipeline_compare_sigma_only_skips_completeness_plots_on_resume
         }
     )
     result_root = tmp_path / "result_root"
-    expected = result_root / "hubble_posteriors" / "unit" / "posteriors_FlatLambdaCDM_joint_fastest_all_z0p44_3p16_2d.h5"
+    expected = (
+        result_root
+        / "hubble_posteriors"
+        / "unit"
+        / (
+            "posteriors_FlatLambdaCDM_joint_fastest_all_z0p44_3p16_"
+            "2d_compmag-dereddened.h5"
+        )
+    )
     completeness_calls = []
     diagnostics_calls = []
     pivot_context = _agn_pivot_context(df_agn, (0.44, 3.16))
@@ -3718,6 +3813,39 @@ def test_hubble_fit_jax_cli_declares_and_forwards_magnitude_convention():
     assert isinstance(forwarded_value.value, ast.Name)
     assert forwarded_value.value.id == "args"
     assert forwarded_value.attr == "magnitude_convention"
+
+
+def test_hubble_fit_clis_default_and_forward_completeness_magnitude():
+    for source_path, run_function in (
+        (Path(hubble_fit.__file__), "run_single"),
+        (SRC / "qvc" / "hubble" / "hubble_fit_jax.py", "run_single_jax"),
+    ):
+        tree = ast.parse(source_path.read_text(encoding="utf-8"))
+        default = None
+        forwarded = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            if isinstance(node.func, ast.Attribute) and node.func.attr == "add_argument":
+                if (
+                    node.args
+                    and isinstance(node.args[0], ast.Constant)
+                    and node.args[0].value == "--completeness_magnitude"
+                ):
+                    keywords = {kw.arg: kw.value for kw in node.keywords}
+                    default = ast.literal_eval(keywords["default"])
+            if isinstance(node.func, ast.Name) and node.func.id == run_function:
+                for keyword in node.keywords:
+                    if keyword.arg == "completeness_magnitude":
+                        forwarded.append(keyword.value)
+
+        assert default == "dereddened"
+        assert forwarded
+        assert any(
+            isinstance(value, ast.Attribute)
+            and value.attr == "completeness_magnitude"
+            for value in forwarded
+        )
 
 
 def test_hubble_fit_cli_declares_only_agn_and_rejects_only_sna_combo():

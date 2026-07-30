@@ -55,6 +55,7 @@ from qvc.hubble.hubble_completeness_refactored import (
     COMPLETENESS_FHOST_COL,
     COMPLETENESS_MAG_COL,
     COMPLETENESS_MAG_ERR_COL,
+    VALID_COMPLETENESS_MAGNITUDES,
     Completeness2D,
     Completeness3D,
     Completeness4D,
@@ -62,6 +63,8 @@ from qvc.hubble.hubble_completeness_refactored import (
     get_completeness_function_3d_fhost,
     get_completeness_function_4d_fhost_alpha,
     make_dm_function,
+    normalize_completeness_magnitude,
+    prepare_completeness_magnitude_columns,
 )
 from qvc.hubble.hubble_fit import (
     DEFAULT_COMPLETENESS_SIM_FILE,
@@ -714,6 +717,7 @@ def run_single_jax(
     prefix="default_jax",
     completeness_sim_file=DEFAULT_COMPLETENESS_SIM_FILE,
     completeness_mode="2d",
+    completeness_magnitude="dereddened",
     only_sna=False,
     N=None,
     uniform_redshift_distribution=False,
@@ -736,6 +740,18 @@ def run_single_jax(
     if use_redshift_log_f_term:
         raise NotImplementedError("run_single_jax does not support --fit_redshift_log_f_term yet.")
     validate_completeness_mode(completeness_mode)
+    completeness_magnitude = normalize_completeness_magnitude(
+        completeness_magnitude
+    )
+    if completeness:
+        df_agn = prepare_completeness_magnitude_columns(
+            df_agn,
+            completeness_magnitude,
+        )
+        df_agn_all = prepare_completeness_magnitude_columns(
+            df_agn_all,
+            completeness_magnitude,
+        )
     speed = normalize_speed(speed)
     if only_sna and only_agn:
         raise ValueError("only_sna and only_agn cannot both be True.")
@@ -748,6 +764,9 @@ def run_single_jax(
         N,
         z_range,
         only_agn=only_agn,
+        completeness=completeness,
+        completeness_mode=completeness_mode,
+        completeness_magnitude=completeness_magnitude,
         disable_ceph_dist_calibration=disable_ceph_dist_calibration,
         use_planck_h0_prior=use_planck_h0_prior,
         use_planck_om_prior=use_planck_om_prior,
@@ -757,6 +776,12 @@ def run_single_jax(
     plot_path = f"plots/hubble/{prefix}/{run_tag}"
     os.makedirs(plot_path, exist_ok=True)
     print("Saving plots to", plot_path)
+    if completeness:
+        print(
+            "Completeness magnitude: "
+            f"{completeness_magnitude} "
+            f"({df_agn.attrs['completeness_magnitude_source']})."
+        )
 
     df_agn_fit = _select_agn_fit_selection(
         df_agn,
@@ -1200,6 +1225,12 @@ def main():
         help="Optional mock catalog HDF5 override. If omitted, generate a fresh mock catalog for each run.",
     )
     parser.add_argument("--completeness_mode", type=str, choices=list(VALID_COMPLETENESS_MODES), default="2d")
+    parser.add_argument(
+        "--completeness_magnitude",
+        type=str,
+        choices=list(VALID_COMPLETENESS_MAGNITUDES),
+        default="dereddened",
+    )
     parser.add_argument("--correct-sigma-uv-host", action="store_true", default=False)
     parser.add_argument(
         "--no-cuts",
@@ -1242,6 +1273,7 @@ def main():
         prefix=args.prefix,
         completeness_sim_file=args.completeness_sim_file,
         completeness_mode=args.completeness_mode,
+        completeness_magnitude=args.completeness_magnitude,
         only_sna=args.only_sna,
         only_agn=args.only_agn,
         N=args.N,

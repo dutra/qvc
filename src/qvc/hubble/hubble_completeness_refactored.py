@@ -21,10 +21,66 @@ from qvc.hubble.cuts import (
 
 
 COSMO = FlatLambdaCDM(H0=70.0, Om0=0.3)
-COMPLETENESS_MAG_COL = "m_2500_attenuated_model"
-COMPLETENESS_MAG_ERR_COL = "m_2500_attenuated_model_err"
+COMPLETENESS_MAG_COL = "completeness_m_2500"
+COMPLETENESS_MAG_ERR_COL = "completeness_m_2500_err"
 COMPLETENESS_FHOST_COL = "f_host_2500_psf"
 COMPLETENESS_FHOST_ERR_COL = "f_host_2500_psf_err"
+VALID_COMPLETENESS_MAGNITUDES = ("dereddened", "attenuated")
+_COMPLETENESS_MAGNITUDE_SOURCES = {
+    "dereddened": ("m_2500_dereddened", "m_2500_dereddened_err"),
+    "attenuated": (
+        "m_2500_attenuated_model",
+        "m_2500_attenuated_model_err",
+    ),
+}
+
+
+def normalize_completeness_magnitude(completeness_magnitude):
+    """Validate the physical m_2500 definition used for completeness."""
+    normalized = str(completeness_magnitude).strip().lower()
+    if normalized not in VALID_COMPLETENESS_MAGNITUDES:
+        raise ValueError(
+            f"Invalid completeness_magnitude={completeness_magnitude!r}. "
+            f"Expected one of {VALID_COMPLETENESS_MAGNITUDES}."
+        )
+    return normalized
+
+
+def prepare_completeness_magnitude_columns(
+    df,
+    completeness_magnitude="dereddened",
+):
+    """Return a dataframe with stable aliases for the selected m_2500 fields."""
+    choice = normalize_completeness_magnitude(completeness_magnitude)
+    magnitude_source, error_source = _COMPLETENESS_MAGNITUDE_SOURCES[choice]
+    missing = {
+        magnitude_source,
+        error_source,
+    } - set(df.columns)
+    if missing:
+        raise KeyError(
+            f"Completeness magnitude choice {choice!r} requires columns "
+            f"{sorted(missing)}."
+        )
+    prepared = df.copy()
+    prepared[COMPLETENESS_MAG_COL] = prepared[magnitude_source]
+    prepared[COMPLETENESS_MAG_ERR_COL] = prepared[error_source]
+    prepared.attrs.update(df.attrs)
+    prepared.attrs["completeness_magnitude"] = choice
+    prepared.attrs["completeness_magnitude_source"] = magnitude_source
+    prepared.attrs["completeness_magnitude_err_source"] = error_source
+    return prepared
+
+
+def resolve_completeness_magnitude_column(df):
+    """Require the explicitly prepared completeness-magnitude alias."""
+    if COMPLETENESS_MAG_COL in df.columns:
+        return COMPLETENESS_MAG_COL
+    raise KeyError(
+        "Completeness magnitude has not been prepared. Expected explicit "
+        f"column {COMPLETENESS_MAG_COL!r}; call "
+        "prepare_completeness_magnitude_columns(df, choice) first."
+    )
 
 
 def evaluate_dm_interp(
@@ -759,13 +815,14 @@ def fit_fhost_2500_l2500_model(
     clip_eps=_FHOST_CLIP_EPS,
     cosmo=COSMO,
 ):
-    required = {"z", COMPLETENESS_MAG_COL, f_host_col}
+    required = {"z", f_host_col}
     if not required.issubset(df_agn.columns):
         missing = ", ".join(sorted(required - set(df_agn.columns)))
         raise KeyError(f"Missing required columns for f_host model fit: {missing}")
 
     z = np.asarray(df_agn["z"], dtype=float)
-    m2500 = np.asarray(df_agn[COMPLETENESS_MAG_COL], dtype=float)
+    magnitude_col = resolve_completeness_magnitude_column(df_agn)
+    m2500 = np.asarray(df_agn[magnitude_col], dtype=float)
     f_host = np.asarray(df_agn[f_host_col], dtype=float)
     logL2500 = apparent_mag_to_logL2500(m2500, z, cosmo)
 
@@ -904,7 +961,8 @@ def get_completeness_function_2d(
 
     # Filter finite
     z_obs = df_agn["z"].to_numpy(dtype=float)
-    m_obs = df_agn[COMPLETENESS_MAG_COL].to_numpy(dtype=float)
+    magnitude_col = resolve_completeness_magnitude_column(df_agn)
+    m_obs = df_agn[magnitude_col].to_numpy(dtype=float)
     ok_obs  = np.isfinite(m_obs) & np.isfinite(z_obs)
     ok_true = np.isfinite(m_true) & np.isfinite(z_true)
     m_obs,  z_obs  = m_obs[ok_obs],  z_obs[ok_obs]
@@ -1265,7 +1323,8 @@ def get_completeness_function_3d_fhost(
         mock_count_scale = f.attrs.get("mock_count_scale")
 
     z_obs = df_agn["z"].to_numpy(dtype=float)
-    m_obs = df_agn[COMPLETENESS_MAG_COL].to_numpy(dtype=float)
+    magnitude_col = resolve_completeness_magnitude_column(df_agn)
+    m_obs = df_agn[magnitude_col].to_numpy(dtype=float)
     fhost_obs = df_agn[COMPLETENESS_FHOST_COL].to_numpy(dtype=float)
 
     ok_obs = (
@@ -1434,7 +1493,6 @@ def get_completeness_function_4d_fhost_alpha(
 
     required = {
         COMPLETENESS_FHOST_COL,
-        COMPLETENESS_MAG_COL,
         "alpha_lambda",
         "z",
     }
@@ -1467,7 +1525,8 @@ def get_completeness_function_4d_fhost_alpha(
         mock_count_scale = f.attrs.get("mock_count_scale")
 
     z_obs = df_agn["z"].to_numpy(dtype=float)
-    m_obs = df_agn[COMPLETENESS_MAG_COL].to_numpy(dtype=float)
+    magnitude_col = resolve_completeness_magnitude_column(df_agn)
+    m_obs = df_agn[magnitude_col].to_numpy(dtype=float)
     fhost_obs = df_agn[COMPLETENESS_FHOST_COL].to_numpy(dtype=float)
     alpha_obs = df_agn["alpha_lambda"].to_numpy(dtype=float)
 

@@ -19,7 +19,10 @@ def test_default_completeness_centers_match_fiducial_magnitude_support(tmp_path)
         COMPLETENESS_MAG_2500_MAX,
         COMPLETENESS_MAG_2500_MIN,
     )
-    from qvc.hubble.hubble_completeness_refactored import get_completeness_function_2d
+    from qvc.hubble.hubble_completeness_refactored import (
+        COMPLETENESS_MAG_COL,
+        get_completeness_function_2d,
+    )
 
     mock_path = tmp_path / "mock.h5"
     with h5py.File(mock_path, "w") as handle:
@@ -31,6 +34,7 @@ def test_default_completeness_centers_match_fiducial_magnitude_support(tmp_path)
         {
             "apparent_mag_2500": [18.6, 20.6, 22.6],
             "m_2500_attenuated_model": [19.0, 21.0, 23.0],
+            COMPLETENESS_MAG_COL: [19.0, 21.0, 23.0],
             "z": [0.5, 1.5, 2.5],
         }
     )
