@@ -101,6 +101,8 @@ from qvc.hubble.hubble_model import (
 )
 from qvc.hubble.hubble_completeness_refactored import (
     COMPLETENESS_FHOST_COL,
+    COMPLETENESS_MAG_COL,
+    COMPLETENESS_MAG_ERR_COL,
     get_completeness_function_2d,
     get_completeness_function_3d_fhost,
     get_completeness_function_4d_fhost_alpha,
@@ -1509,6 +1511,16 @@ def _build_completeness_params(
     if not completeness:
         return None
 
+    missing_magnitude_columns = {
+        COMPLETENESS_MAG_COL,
+        COMPLETENESS_MAG_ERR_COL,
+    } - set(df_agn_completeness.columns)
+    if missing_magnitude_columns:
+        raise KeyError(
+            "Completeness requires the attenuated 2500-A magnitude columns: "
+            f"{sorted(missing_magnitude_columns)}."
+        )
+
     if completeness_mode in ("3d_fhost", "4d_fhost_alpha"):
         if COMPLETENESS_FHOST_COL not in df_agn_completeness.columns:
             raise KeyError(
@@ -2125,6 +2137,8 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
     )
     agn_fields = agn_model_req_params + agn_model_req_obs + agn_model_req_errs
     agn_fields += ('apparent_mag_2500', 'apparent_mag_2500_err', 'z', 'z_err', 'object_id')
+    if completeness:
+        agn_fields += (COMPLETENESS_MAG_COL, COMPLETENESS_MAG_ERR_COL)
     if COMPLETENESS_FHOST_COL in df_agn.columns:
         agn_fields += (COMPLETENESS_FHOST_COL,)
     if 'alpha_lambda' in df_agn.columns:
@@ -2427,8 +2441,13 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
         # Bin dmi in redshift
         # Interpolate dmi vs redshift for smooth plotting or further analysis (no binning)
         #dmi_interp = interp1d(z, dmi_max_w)
+    debias_magnitude = (
+        df_agn[COMPLETENESS_MAG_COL]
+        if completeness
+        else df_agn["apparent_mag_2500"]
+    )
     dm_interp = make_dm_function(
-        df_agn['apparent_mag_2500'].values,
+        debias_magnitude.values,
         df_agn['z'].values,
         dmi_posterior_median,
         f_host_2500_psf=df_agn[COMPLETENESS_FHOST_COL].values if COMPLETENESS_FHOST_COL in df_agn.columns else None,
@@ -2437,7 +2456,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
     dmi_selection_sigma_interp = None
     if dmi_selection_sigma_posterior_median is not None:
         dmi_selection_sigma_interp = make_dm_function(
-            df_agn['apparent_mag_2500'].values,
+            df_agn[COMPLETENESS_MAG_COL].values,
             df_agn['z'].values,
             dmi_selection_sigma_posterior_median,
             f_host_2500_psf=df_agn[COMPLETENESS_FHOST_COL].values if COMPLETENESS_FHOST_COL in df_agn.columns else None,
@@ -2451,7 +2470,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
         plot_completeness_diagnostics(
             dmi_posterior_median,
             agn_data['z'],
-            agn_data['apparent_mag_2500'],
+            agn_data[COMPLETENESS_MAG_COL] if completeness else agn_data["apparent_mag_2500"],
             integrals_max_w,
             plot_path=plot_path,
             z_range=z_range,
@@ -3409,7 +3428,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         plot_completeness_diagnostics(
             dmi_posterior_median_full,
             df_agn_pass2_plot_sample["z"].values,
-            df_agn_pass2_plot_sample["apparent_mag_2500"].values,
+            df_agn_pass2_plot_sample[COMPLETENESS_MAG_COL].values,
             integrals_max_w=None,
             plot_path=plot_path,
             z_range=z_range,

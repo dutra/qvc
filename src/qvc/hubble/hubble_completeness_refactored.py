@@ -21,6 +21,8 @@ from qvc.hubble.cuts import (
 
 
 COSMO = FlatLambdaCDM(H0=70.0, Om0=0.3)
+COMPLETENESS_MAG_COL = "m_2500_attenuated_model"
+COMPLETENESS_MAG_ERR_COL = "m_2500_attenuated_model_err"
 COMPLETENESS_FHOST_COL = "f_host_2500_psf"
 COMPLETENESS_FHOST_ERR_COL = "f_host_2500_psf_err"
 
@@ -757,13 +759,13 @@ def fit_fhost_2500_l2500_model(
     clip_eps=_FHOST_CLIP_EPS,
     cosmo=COSMO,
 ):
-    required = {"z", "apparent_mag_2500", f_host_col}
+    required = {"z", COMPLETENESS_MAG_COL, f_host_col}
     if not required.issubset(df_agn.columns):
         missing = ", ".join(sorted(required - set(df_agn.columns)))
         raise KeyError(f"Missing required columns for f_host model fit: {missing}")
 
     z = np.asarray(df_agn["z"], dtype=float)
-    m2500 = np.asarray(df_agn["apparent_mag_2500"], dtype=float)
+    m2500 = np.asarray(df_agn[COMPLETENESS_MAG_COL], dtype=float)
     f_host = np.asarray(df_agn[f_host_col], dtype=float)
     logL2500 = apparent_mag_to_logL2500(m2500, z, cosmo)
 
@@ -902,7 +904,7 @@ def get_completeness_function_2d(
 
     # Filter finite
     z_obs = df_agn["z"].to_numpy(dtype=float)
-    m_obs = df_agn["apparent_mag_2500"].to_numpy(dtype=float)
+    m_obs = df_agn[COMPLETENESS_MAG_COL].to_numpy(dtype=float)
     ok_obs  = np.isfinite(m_obs) & np.isfinite(z_obs)
     ok_true = np.isfinite(m_true) & np.isfinite(z_true)
     m_obs,  z_obs  = m_obs[ok_obs],  z_obs[ok_obs]
@@ -1263,7 +1265,7 @@ def get_completeness_function_3d_fhost(
         mock_count_scale = f.attrs.get("mock_count_scale")
 
     z_obs = df_agn["z"].to_numpy(dtype=float)
-    m_obs = df_agn["apparent_mag_2500"].to_numpy(dtype=float)
+    m_obs = df_agn[COMPLETENESS_MAG_COL].to_numpy(dtype=float)
     fhost_obs = df_agn[COMPLETENESS_FHOST_COL].to_numpy(dtype=float)
 
     ok_obs = (
@@ -1430,7 +1432,12 @@ def get_completeness_function_4d_fhost_alpha(
     """
     import matplotlib.pyplot as plt
 
-    required = {COMPLETENESS_FHOST_COL, "alpha_lambda", "apparent_mag_2500", "z"}
+    required = {
+        COMPLETENESS_FHOST_COL,
+        COMPLETENESS_MAG_COL,
+        "alpha_lambda",
+        "z",
+    }
     if not required.issubset(df_agn.columns):
         missing = ", ".join(sorted(required - set(df_agn.columns)))
         raise KeyError(f"df_agn must contain columns for 4D completeness: {missing}")
@@ -1460,7 +1467,7 @@ def get_completeness_function_4d_fhost_alpha(
         mock_count_scale = f.attrs.get("mock_count_scale")
 
     z_obs = df_agn["z"].to_numpy(dtype=float)
-    m_obs = df_agn["apparent_mag_2500"].to_numpy(dtype=float)
+    m_obs = df_agn[COMPLETENESS_MAG_COL].to_numpy(dtype=float)
     fhost_obs = df_agn[COMPLETENESS_FHOST_COL].to_numpy(dtype=float)
     alpha_obs = df_agn["alpha_lambda"].to_numpy(dtype=float)
 

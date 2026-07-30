@@ -53,6 +53,8 @@ except Exception:
 
 from qvc.hubble.hubble_completeness_refactored import (
     COMPLETENESS_FHOST_COL,
+    COMPLETENESS_MAG_COL,
+    COMPLETENESS_MAG_ERR_COL,
     Completeness2D,
     Completeness3D,
     Completeness4D,
@@ -505,10 +507,23 @@ def _log_likelihood_jax(
 
     m_model = M_pred + mu_cosmo
     if completeness_jax is not None:
+        selection_magnitude = agn_data_jax[COMPLETENESS_MAG_COL]
+        selection_magnitude_error = agn_data_jax[COMPLETENESS_MAG_ERR_COL]
+        attenuation_offset = (
+            selection_magnitude - agn_data_jax["apparent_mag_2500"]
+        )
+        selection_model_magnitude = m_model + attenuation_offset
+        non_magnitude_variance = jnp.maximum(
+            mu_err**2 - agn_data_jax["apparent_mag_2500_err"] ** 2,
+            0.0,
+        )
+        selection_total_error = jnp.sqrt(
+            non_magnitude_variance + selection_magnitude_error**2
+        )
         f_host_2500_psf = agn_data_jax.get(COMPLETENESS_FHOST_COL)
         ll_comp = _completeness_loglike_jax(
-            m_model,
-            mu_err,
+            selection_model_magnitude,
+            selection_total_error,
             z_agn,
             completeness_jax,
             f_host_2500_psf,
@@ -810,6 +825,8 @@ def run_single_jax(
 
     agn_fields = agn_model_req_params + agn_model_req_obs + agn_model_req_errs
     agn_fields += ("apparent_mag_2500", "apparent_mag_2500_err", "z", "z_err", "object_id")
+    if completeness:
+        agn_fields += (COMPLETENESS_MAG_COL, COMPLETENESS_MAG_ERR_COL)
     if COMPLETENESS_FHOST_COL in df_agn_fit.columns:
         agn_fields += (COMPLETENESS_FHOST_COL,)
     if "alpha_lambda" in df_agn_fit.columns:
@@ -929,8 +946,13 @@ def run_single_jax(
         print("Skipping AGN-specific post-processing and plots for SNe-only run.")
         return flat_samples, model_labels, logZ, logZerr, age, age_err
 
+    debias_magnitude = (
+        agn_data[COMPLETENESS_MAG_COL]
+        if completeness
+        else agn_data["apparent_mag_2500"]
+    )
     dm_interp = make_dm_function(
-        agn_data["apparent_mag_2500"],
+        debias_magnitude,
         agn_data["z"],
         dmi_posterior_median,
         f_host_2500_psf=agn_data.get(COMPLETENESS_FHOST_COL),
@@ -939,7 +961,7 @@ def run_single_jax(
     dmi_selection_sigma_interp = None
     if dmi_selection_sigma_posterior_median is not None:
         dmi_selection_sigma_interp = make_dm_function(
-            agn_data["apparent_mag_2500"],
+            agn_data[COMPLETENESS_MAG_COL],
             agn_data["z"],
             dmi_selection_sigma_posterior_median,
             f_host_2500_psf=agn_data.get(COMPLETENESS_FHOST_COL),
@@ -1131,7 +1153,7 @@ def run_single_jax(
     plot_completeness_diagnostics(
         dmi_posterior_median,
         agn_data["z"],
-        agn_data["apparent_mag_2500"],
+        agn_data[COMPLETENESS_MAG_COL] if completeness else agn_data["apparent_mag_2500"],
         integrals_max_w,
         plot_path=plot_path,
         z_range=z_range,

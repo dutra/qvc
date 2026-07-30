@@ -15,7 +15,10 @@ if str(SRC) not in sys.path:
 
 
 def test_default_completeness_centers_match_fiducial_magnitude_support(tmp_path):
-    from qvc.hubble.cuts import APPARENT_MAG_2500_MAX, APPARENT_MAG_2500_MIN
+    from qvc.hubble.cuts import (
+        COMPLETENESS_MAG_2500_MAX,
+        COMPLETENESS_MAG_2500_MIN,
+    )
     from qvc.hubble.hubble_completeness_refactored import get_completeness_function_2d
 
     mock_path = tmp_path / "mock.h5"
@@ -25,7 +28,11 @@ def test_default_completeness_centers_match_fiducial_magnitude_support(tmp_path)
         handle.attrs["mock_count_scale"] = 1.0
 
     observed = pd.DataFrame(
-        {"apparent_mag_2500": [19.0, 21.0, 23.0], "z": [0.5, 1.5, 2.5]}
+        {
+            "apparent_mag_2500": [18.6, 20.6, 22.6],
+            "m_2500_attenuated_model": [19.0, 21.0, 23.0],
+            "z": [0.5, 1.5, 2.5],
+        }
     )
     _, mag_centers, *_ = get_completeness_function_2d(
         observed,
@@ -33,5 +40,5 @@ def test_default_completeness_centers_match_fiducial_magnitude_support(tmp_path)
         smooth_counts=False,
     )
 
-    assert mag_centers[0] == pytest.approx(APPARENT_MAG_2500_MIN)
-    assert mag_centers[-1] == pytest.approx(APPARENT_MAG_2500_MAX)
+    assert mag_centers[0] == pytest.approx(COMPLETENESS_MAG_2500_MIN)
+    assert mag_centers[-1] == pytest.approx(COMPLETENESS_MAG_2500_MAX)

@@ -15,8 +15,8 @@ if str(SRC) not in sys.path:
 from qvc.hubble.cuts import (  # noqa: E402
     AGN_SCALAR_PARAMETER_CUTS,
     APPARENT_MAG_2500_ERR_MAX,
-    APPARENT_MAG_2500_MIN,
-    APPARENT_MAG_2500_MAX,
+    COMPLETENESS_MAG_2500_MIN,
+    COMPLETENESS_MAG_2500_MAX,
     EXCLUDED_SDSS_NAMES,
     FRAC_AGN_5100_MIN,
     LIGHT_CURVE_N_POINTS_COLUMN,
@@ -45,7 +45,10 @@ def test_build_agn_cuts_contains_only_fiducial_profile():
         "log_tau_uv_rf": (1.5, 4.0),
         "fracAGN_5100_fit": (FRAC_AGN_5100_MIN, None),
         "apparent_mag_2500_err": (None, APPARENT_MAG_2500_ERR_MAX),
-        "apparent_mag_2500": (APPARENT_MAG_2500_MIN, APPARENT_MAG_2500_MAX),
+        "m_2500_attenuated_model": (
+            COMPLETENESS_MAG_2500_MIN,
+            COMPLETENESS_MAG_2500_MAX,
+        ),
     }
     assert LIGHT_CURVE_N_POINTS_EXCLUDED_BANDS == ("u",)
 
@@ -74,7 +77,11 @@ def test_fiducial_cut_boundaries_are_inclusive_and_nonfinite_values_fail():
         ("log_tau_uv_rf", 1.5, 4.0),
         ("fracAGN_5100_fit", FRAC_AGN_5100_MIN, None),
         ("apparent_mag_2500_err", None, APPARENT_MAG_2500_ERR_MAX),
-        ("apparent_mag_2500", APPARENT_MAG_2500_MIN, APPARENT_MAG_2500_MAX),
+        (
+            "m_2500_attenuated_model",
+            COMPLETENESS_MAG_2500_MIN,
+            COMPLETENESS_MAG_2500_MAX,
+        ),
     )
     for column, lower, upper in cases:
         accepted = lower if lower is not None else upper

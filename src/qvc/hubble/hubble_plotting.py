@@ -58,6 +58,7 @@ from qvc.hubble.hubble_utils import (
 )
 from qvc.hubble.hubble_completeness_refactored import (
     COMPLETENESS_FHOST_COL,
+    COMPLETENESS_MAG_COL,
     apparent_mag_to_logL2500,
     build_smooth_trend_1d,
     evaluate_dm_interp,
@@ -505,7 +506,7 @@ def _resolve_debias_values(
     dmi_interp = evaluate_dm_interp(
         dm_interp,
         df_agn["z"].values,
-        df_agn["apparent_mag_2500"].values,
+        df_agn[COMPLETENESS_MAG_COL].values,
         f_host_2500_psf=df_agn.get(COMPLETENESS_FHOST_COL),
         alpha_lambda=df_agn.get("alpha_lambda"),
     )
@@ -534,7 +535,7 @@ def _resolve_selection_sigma_values(
         sigma_sel_interp = evaluate_dm_interp(
             dmi_selection_sigma_interp,
             df_agn["z"].values,
-            df_agn["apparent_mag_2500"].values,
+            df_agn[COMPLETENESS_MAG_COL].values,
             f_host_2500_psf=df_agn.get(COMPLETENESS_FHOST_COL),
             alpha_lambda=df_agn.get("alpha_lambda"),
         )
@@ -8248,7 +8249,7 @@ def plot_predicted_L2500_vs_sigmahat(
             M2500_show -= evaluate_dm_interp(
                 dm_interp,
                 ds["z"].values,
-                ds["apparent_mag_2500"].values,
+                ds[COMPLETENESS_MAG_COL].values,
                 f_host_2500_psf=ds.get(COMPLETENESS_FHOST_COL),
                 alpha_lambda=ds.get("alpha_lambda"),
             )
@@ -8571,7 +8572,7 @@ def plot_predicted_L2500_vs_sigmahat(
             M2500_show -= evaluate_dm_interp(
                 dm_interp,
                 ds["z"].values,
-                ds["apparent_mag_2500"].values,
+                ds[COMPLETENESS_MAG_COL].values,
                 f_host_2500_psf=ds.get(COMPLETENESS_FHOST_COL),
                 alpha_lambda=ds.get("alpha_lambda"),
             )

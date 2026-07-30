@@ -184,6 +184,7 @@ def _make_fake_fhost_df(n=200, seed=123):
             "object_id": [f"agn_{i:04d}" for i in range(n)],
             "z": z,
             "apparent_mag_2500": m2500,
+            "m_2500_attenuated_model": m2500,
             "f_host_2500": f_host,
             "f_host_2500_psf": f_host,
         }
@@ -245,6 +246,8 @@ def _make_fake_agn_sample_with_fhost(n_agn=24, seed=123):
             "z_err": np.full(n_agn, 0.002),
             "apparent_mag_2500": apparent_mag,
             "apparent_mag_2500_err": np.full(n_agn, 0.04),
+            "m_2500_attenuated_model": apparent_mag + 0.35,
+            "m_2500_attenuated_model_err": np.full(n_agn, 0.06),
             "log_sigma_hat0": log_sigma_hat0,
             "log_sigma_uv": log_sigma_uv,
             "log_tau_uv_rf": log_tau_uv,
@@ -500,6 +503,7 @@ def test_log_likelihood_does_not_use_completeness_smoothing_as_extra_scatter(mon
     theta = np.array([(priors[key][0] + priors[key][1]) / 2.0 for key in model_labels], dtype=float)
     agn_fields = hubble_model.agn_model_req_obs + hubble_model.agn_model_req_errs
     agn_fields += ("apparent_mag_2500", "apparent_mag_2500_err", "z", "z_err", "object_id")
+    agn_fields += (hcr.COMPLETENESS_MAG_COL, hcr.COMPLETENESS_MAG_ERR_COL)
     agn_data = {col: df_agn[col].to_numpy() for col in agn_fields}
     pantheon_data = {col: df_pantheon[col].to_numpy() for col in df_pantheon.columns}
     pivot_context = _build_pivot_context(df_agn)
@@ -725,6 +729,7 @@ def test_get_completeness_function_3d_fhost_and_loglikelihood_smoke(tmp_path):
 
     agn_fields = hubble_model.agn_model_req_obs + hubble_model.agn_model_req_errs
     agn_fields += ("apparent_mag_2500", "apparent_mag_2500_err", "z", "z_err", "object_id", "f_host_2500_psf")
+    agn_fields += (hcr.COMPLETENESS_MAG_COL, hcr.COMPLETENESS_MAG_ERR_COL)
     agn_data = {col: df_agn[col].to_numpy() for col in agn_fields}
     pantheon_data = {col: df_pantheon[col].to_numpy() for col in df_pantheon.columns}
     pivot_context = _build_pivot_context(df_agn)

@@ -26,6 +26,8 @@ def _make_table_df():
             "z_err": [0.0012],
             "apparent_mag_2500": [20.15],
             "apparent_mag_2500_err": [0.07],
+            "m_2500_attenuated_model": [20.50],
+            "m_2500_attenuated_model_err": [0.09],
             "alpha_lambda": [-1.52],
             "alpha_lambda_err": [0.08],
             "pl_slope": [-1.37],
@@ -289,7 +291,7 @@ def test_make_agn_latex_table_passes_psf_f_host_to_3d_dm_interp(tmp_path):
 
     np.testing.assert_allclose(
         seen["points"],
-        np.array([[1.2345, 20.15, 0.18]], dtype=float),
+        np.array([[1.2345, 20.50, 0.18]], dtype=float),
     )
 
 
@@ -315,7 +317,7 @@ def test_make_agn_latex_table_passes_alpha_lambda_to_4d_dm_interp(tmp_path):
 
     np.testing.assert_allclose(
         seen["points"],
-        np.array([[1.2345, 20.15, 0.18, -1.37]], dtype=float),
+        np.array([[1.2345, 20.50, 0.18, -1.37]], dtype=float),
     )
 
     make_agn_csv_table(

@@ -13,7 +13,11 @@ from qvc.hubble.hubble_model import (
     agn_model_pack_obs,
     evaluate_log_f,
 )
-from qvc.hubble.hubble_completeness_refactored import COMPLETENESS_FHOST_COL
+from qvc.hubble.hubble_completeness_refactored import (
+    COMPLETENESS_FHOST_COL,
+    COMPLETENESS_MAG_COL,
+    COMPLETENESS_MAG_ERR_COL,
+)
 
 _LOG_2PI = np.log(2.0 * np.pi)
 _INV_SQRT_2PI = 1.0 / np.sqrt(2.0 * np.pi)
@@ -23,6 +27,43 @@ def _normal_logpdf_sum(residuals, sigma):
     residuals = np.asarray(residuals, dtype=float)
     sigma = np.asarray(sigma, dtype=float)
     return float(np.sum(-0.5 * (residuals / sigma) ** 2 - np.log(sigma) - 0.5 * _LOG_2PI))
+
+
+def _attenuated_selection_inputs(
+    agn_data,
+    *,
+    hubble_magnitude,
+    hubble_magnitude_error,
+    hubble_model_magnitude,
+    hubble_total_error,
+):
+    """Express the selection integral in the attenuated 2500-A magnitude."""
+    selection_magnitude = np.asarray(agn_data[COMPLETENESS_MAG_COL], dtype=float)
+    selection_magnitude_error = np.asarray(
+        agn_data[COMPLETENESS_MAG_ERR_COL],
+        dtype=float,
+    )
+    hubble_magnitude = np.asarray(hubble_magnitude, dtype=float)
+    hubble_magnitude_error = np.asarray(hubble_magnitude_error, dtype=float)
+    hubble_model_magnitude = np.asarray(hubble_model_magnitude, dtype=float)
+    hubble_total_error = np.asarray(hubble_total_error, dtype=float)
+
+    attenuation_offset = selection_magnitude - hubble_magnitude
+    selection_model_magnitude = hubble_model_magnitude + attenuation_offset
+    non_magnitude_variance = np.clip(
+        hubble_total_error**2 - hubble_magnitude_error**2,
+        0.0,
+        None,
+    )
+    selection_total_error = np.sqrt(
+        non_magnitude_variance + selection_magnitude_error**2
+    )
+    return (
+        selection_magnitude,
+        selection_magnitude_error,
+        selection_model_magnitude,
+        selection_total_error,
+    )
 
 
 def _array_cache_token(arr):
@@ -376,10 +417,24 @@ def log_likelihood(theta, *, agn_data, pantheon_data,
     if completeness_params is not None:
         completeness_model = completeness_params[0]
         mag_centers = completeness_params[1]
+        (
+            selection_magnitude,
+            selection_magnitude_error,
+            selection_model_magnitude,
+            selection_total_error,
+        ) = _attenuated_selection_inputs(
+            agn_data,
+            hubble_magnitude=m_obs,
+            hubble_magnitude_error=m_err,
+            hubble_model_magnitude=m_model,
+            hubble_total_error=mu_err,
+        )
         ll_completeness, comp_blob = completeness_loglike(
-            m_obs=m_obs,
-            m_obs_err=m_err,
-            m_model=m_model, mu_err=mu_err, z=z,
+            m_obs=selection_magnitude,
+            m_obs_err=selection_magnitude_error,
+            m_model=selection_model_magnitude,
+            mu_err=selection_total_error,
+            z=z,
             completeness_model=completeness_model, m_grid=mag_centers,
             sigma_completeness=0.0,
             f_host_2500_psf=agn_data.get(COMPLETENESS_FHOST_COL),
@@ -594,10 +649,28 @@ def log_likelihood_nearbylcs(
         mag_centers = completeness_params[1]
         # model-predicted magnitude for non-calibrators (cosmo-anchored for selection)
         m_model_nc = M_pred_nc + mu_cosmo_nc
+        agn_data_nc = {
+            key: np.asarray(value)[mask_noncal]
+            for key, value in agn_data.items()
+        }
+        (
+            selection_magnitude_nc,
+            selection_magnitude_error_nc,
+            selection_model_magnitude_nc,
+            selection_total_error_nc,
+        ) = _attenuated_selection_inputs(
+            agn_data_nc,
+            hubble_magnitude=m_obs_nc,
+            hubble_magnitude_error=m_err_nc,
+            hubble_model_magnitude=m_model_nc,
+            hubble_total_error=mu_err_nc,
+        )
         ll_completeness, comp_blob = completeness_loglike(
-            m_obs=m_obs_nc,
-            m_obs_err=m_err_nc,
-            m_model=m_model_nc, mu_err=mu_err_nc, z=z_nc,
+            m_obs=selection_magnitude_nc,
+            m_obs_err=selection_magnitude_error_nc,
+            m_model=selection_model_magnitude_nc,
+            mu_err=selection_total_error_nc,
+            z=z_nc,
             completeness_model=completeness_model, m_grid=mag_centers,
             sigma_completeness=0.0,
             f_host_2500_psf=agn_data.get(COMPLETENESS_FHOST_COL, None)[mask_noncal] if agn_data.get(COMPLETENESS_FHOST_COL, None) is not None else None,

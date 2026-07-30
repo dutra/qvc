@@ -4,7 +4,11 @@ import os
 import numpy as np
 import pandas as pd
 
-from qvc.hubble.hubble_completeness_refactored import COMPLETENESS_FHOST_COL, evaluate_dm_interp
+from qvc.hubble.hubble_completeness_refactored import (
+    COMPLETENESS_FHOST_COL,
+    COMPLETENESS_MAG_COL,
+    evaluate_dm_interp,
+)
 
 
 REQUIRED_AGN_TABLE_COLUMNS = (
@@ -75,7 +79,7 @@ def _resolve_table_debias_values(agn_df, *, dm_interp=None, dmi_values=None):
     dmi_interp = evaluate_dm_interp(
         dm_interp,
         agn_df["z"],
-        agn_df["apparent_mag_2500"],
+        agn_df[COMPLETENESS_MAG_COL],
         f_host_2500_psf=agn_df[COMPLETENESS_FHOST_COL] if COMPLETENESS_FHOST_COL in agn_df.columns else None,
         alpha_lambda=agn_df["alpha_lambda"] if "alpha_lambda" in agn_df.columns else None,
     )

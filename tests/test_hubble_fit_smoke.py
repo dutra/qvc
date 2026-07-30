@@ -74,6 +74,8 @@ def _make_fake_agn_sample(n_agn=24, seed=123):
             "apparent_mag_2500_err": np.full(n_agn, 0.04),
             "m_2500_dereddened": apparent_mag,
             "m_2500_dereddened_err": np.full(n_agn, 0.04),
+            "m_2500_attenuated_model": apparent_mag + 0.35,
+            "m_2500_attenuated_model_err": np.full(n_agn, 0.06),
             "flux_aper_b": np.full(n_agn, 1.0e-14),
             "flux_aper_err_b": np.full(n_agn, 2.0e-15),
             "log_sigma_hat0": log_sigma_hat0,
@@ -160,6 +162,42 @@ def _agn_pivot_context(
         z_range,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+    )
+
+
+def test_attenuated_selection_inputs_shift_model_and_replace_magnitude_error():
+    agn_data = {
+        "m_2500_attenuated_model": np.array([20.4, 21.6]),
+        "m_2500_attenuated_model_err": np.array([0.3, 0.4]),
+    }
+    hubble_magnitude = np.array([20.0, 21.0])
+    hubble_magnitude_error = np.array([0.1, 0.2])
+    hubble_model_magnitude = np.array([19.8, 20.8])
+    hubble_total_error = np.array([0.5, 0.6])
+
+    (
+        selection_magnitude,
+        selection_magnitude_error,
+        selection_model_magnitude,
+        selection_total_error,
+    ) = hubble_likelihood._attenuated_selection_inputs(
+        agn_data,
+        hubble_magnitude=hubble_magnitude,
+        hubble_magnitude_error=hubble_magnitude_error,
+        hubble_model_magnitude=hubble_model_magnitude,
+        hubble_total_error=hubble_total_error,
+    )
+
+    np.testing.assert_allclose(selection_magnitude, [20.4, 21.6])
+    np.testing.assert_allclose(selection_magnitude_error, [0.3, 0.4])
+    np.testing.assert_allclose(selection_model_magnitude, [20.2, 21.4])
+    np.testing.assert_allclose(
+        selection_total_error,
+        np.sqrt(
+            hubble_total_error**2
+            - hubble_magnitude_error**2
+            + selection_magnitude_error**2
+        ),
     )
 
 
@@ -2114,6 +2152,8 @@ def test_run_mcmc_pipeline_compare_sigma_only_skips_completeness_plots_on_resume
             "z_err": [0.01, 0.01],
             "apparent_mag_2500": [20.1, 20.4],
             "apparent_mag_2500_err": [0.1, 0.1],
+            "m_2500_attenuated_model": [20.4, 20.7],
+            "m_2500_attenuated_model_err": [0.12, 0.12],
             "log_sigma_uv": [-0.8, -0.7],
             "log_tau_uv_rf": [2.6, 2.8],
             "log_sigma_uv_std_psd": [0.05, 0.05],
