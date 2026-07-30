@@ -1185,6 +1185,46 @@ def test_plot_hubble_debiased_returns_clipping_sigma_and_writes_distinct_diagnos
     )
 
 
+def test_plot_hubble_does_not_add_synthetic_population_scatter(monkeypatch, tmp_path):
+    df_agn = _make_fake_agn_sample(n_agn=6)
+    df_pantheon = _make_fake_pantheon_sample(n_sne=6)
+    priors, model_labels, _ = hubble_model.get_model_params(
+        "FlatLambdaCDM",
+        only_sna=False,
+    )
+    theta = np.array(
+        [(priors[key][0] + priors[key][1]) / 2.0 for key in model_labels],
+        dtype=float,
+    )
+    flat_samples = np.tile(theta[None, :], (6, 1))
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError(
+            "plot_hubble must not add a synthetic intrinsic-scatter draw"
+        )
+
+    monkeypatch.setattr(
+        hubble_plotting,
+        "_population_scatter_offsets",
+        fail_if_called,
+    )
+    pivot_context = _agn_pivot_context(df_agn, (0.44, 3.16))
+    result = hubble_plotting.plot_hubble(
+        flat_samples,
+        df_agn,
+        df_pantheon,
+        cosmo_model="FlatLambdaCDM",
+        z_pivot_agn=hubble_fit.z_pivot_agn,
+        plot_path=str(tmp_path),
+        debias=True,
+        dmi_values=np.zeros(len(df_agn), dtype=float),
+        compute_only=True,
+        agn_pivot_context=pivot_context,
+    )
+
+    assert result[0].shape == (len(df_agn),)
+
+
 def test_plot_predicted_vs_actual_m2500_marks_out_of_range_objects(monkeypatch, tmp_path):
     from matplotlib.axes import Axes
     import matplotlib.pyplot as plt

@@ -5478,16 +5478,11 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     if debias:
         chi2_redshift_mask &= (z_values >= z_range[0]) & (z_values <= z_range[1])
 
-    # Display the population-level intrinsic scatter as point scatter, not as
-    # enlarged error bars. Sigma clipping can still use the broader population
-    # scatter path, but the Hubble-diagram chi2 should use the same per-point
-    # uncertainties shown on the plotted data.
-    point_scatter_mu = _population_scatter_offsets(
-        intrinsic_scatter,
-        enabled=debias,
-        seed=1741,
-    )
-    mu_pred_plot = mu_pred_median + point_scatter_mu
+    # Plot the inferred distance moduli directly.  The observed population
+    # already contains its real scatter; adding a synthetic intrinsic-scatter
+    # realization would move both individual points and statistical summaries
+    # by an arbitrary, seed-dependent amount.
+    mu_pred_plot = mu_pred_median
     clipping_sigma = mu_pred_std_with_scatter if use_intrinsic_scatter_in_residual_sigma else mu_pred_std
     display_residuals_err = mu_pred_std if debias else clipping_sigma
     chi2_sigma = display_residuals_err
@@ -5763,7 +5758,6 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
         print("Plotting binned AGN (linear z) at:", z_lin_scatter)
         print("\tmask_in:", mask_in)
         mask_out = ~mask_in
-        # with scatter
         # binned (inside)
         print("Plotting binned AGN (linear z) at:", z_lin_scatter)
         print("\tmask_out:", mask_out)
@@ -5880,7 +5874,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
                 z_res_lin_scatter[mask_in], resid_lin_mean_scatter[mask_in], yerr=resid_lin_sem_scatter[mask_in],
                 fmt='o', linestyle='none', markersize=6,
                 mfc='red', mec='none', ecolor='red', elinewidth=2.0, capsize=3.0,
-                alpha=0.98, zorder=15, label="Binned AGN residuals (w/ scatter)"
+                alpha=0.98, zorder=15, label="Binned AGN residuals"
             )
             ax_resid.errorbar(
                 z_res_lin_scatter[mask_out], resid_lin_mean_scatter[mask_out], yerr=resid_lin_sem_scatter[mask_out],
