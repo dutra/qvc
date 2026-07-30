@@ -1,6 +1,5 @@
 """Shared utility functions for the QVC/Hubble fitting workflow."""
 
-import json
 import math
 import os
 import warnings
@@ -28,7 +27,6 @@ from scipy.stats import gaussian_kde
 
 from qvc.hubble.cuts import (
     EXCLUDED_SDSS_NAMES,
-    F_HOST_2500_MAX,
     LIGHT_CURVE_N_POINTS_COLUMN,
     LIGHT_CURVE_N_POINTS_EXCLUDED_BANDS,
     LOG_AMP_DELTA_BC_UPPER,
@@ -636,29 +634,6 @@ def _ensure_object_id(df):
     df["object_id"] = df["object_id"].astype(str)
     return df
 
-def parse_list(x):
-    if x is None or (isinstance(x, float) and np.isnan(x)):
-        return []
-    s = str(x).strip()
-    if not s:
-        return []
-    # Try Python literal syntax first.
-    try:
-        v = literal_eval(s)
-        if isinstance(v, (list, tuple)):
-            return [str(t) for t in v]
-    except Exception:
-        pass
-    # Fall back to JSON.
-    try:
-        v = json.loads(s)
-        if isinstance(v, (list, tuple)):
-            return [str(t) for t in v]
-    except Exception:
-        pass
-    # Finally, treat the value as a comma-separated string.
-    return [t.strip() for t in s.split(",") if t.strip()]
-
 def populate_spectra_fit(df, spectra_fit_csvs):
     fields = {
         "object_id": str,
@@ -690,7 +665,9 @@ def populate_spectra_fit(df, spectra_fit_csvs):
 
     required_cols = {
         "fit_ok",
+        "fit_backend",
         "fracAGN_5100_fit",
+        "fracAGN_5100_fit_err",
         "m_2500_dereddened",
         "m_2500_dereddened_err",
         "m_2500_attenuated_model",
@@ -726,7 +703,16 @@ def populate_spectra_fit(df, spectra_fit_csvs):
         if missing_required:
             raise ValueError(
                 f"Spectra fit CSV '{csv_path}' is missing required columns {missing_required}. "
-                "This Hubble workflow requires the current SED-fit CSV schema."
+                "This Hubble workflow only accepts fit_spectra_jaxsedfit_joint.py output."
+            )
+        invalid_backend = df_spectra["fit_backend"].ne("jaxsedfit_joint")
+        if np.any(invalid_backend):
+            invalid_values = sorted(
+                df_spectra.loc[invalid_backend, "fit_backend"].astype(str).unique()
+            )
+            raise ValueError(
+                f"Spectra fit CSV '{csv_path}' contains unsupported fit_backend "
+                f"value(s) {invalid_values}; expected only 'jaxsedfit_joint'."
             )
         fit_ok = df_spectra["fit_ok"].astype(str).str.lower().eq("true")
         failed_count = int(np.count_nonzero(~fit_ok))
@@ -1119,7 +1105,6 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
         plot_light_curve_n_points_vs_apparent_mag,
         plot_cut_diagnostics,
         plot_m2500_vs_z_colorpanels,
-        plot_spectral_fraction_vs_redshift,
         plot_sf_ref_band_vs_model_g,
         plot_sf_vs_uv_variability,
         plot_sigma_bc_vs_frac_bc,
@@ -1164,7 +1149,6 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
         plot_light_curve_n_points_vs_apparent_mag = _skip_diagnostic_plot
         plot_cut_diagnostics = _skip_diagnostic_plot
         plot_m2500_vs_z_colorpanels = _skip_diagnostic_plot
-        plot_spectral_fraction_vs_redshift = _skip_diagnostic_plot
         plot_sf_ref_band_vs_model_g = _skip_diagnostic_plot
         plot_sf_vs_uv_variability = _skip_diagnostic_plot
         plot_sigma_bc_vs_frac_bc = _skip_diagnostic_plot
@@ -1517,8 +1501,8 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
     df["apparent_mag_2500_err"] = selected_magnitude_error
     print(
         f"Using {magnitude_columns[magnitude_convention][0]} and "
-        f"{magnitude_columns[magnitude_convention][1]} through the "
-        "apparent_mag_2500 Hubble-workflow aliases."
+        f"{magnitude_columns[magnitude_convention][1]} as the Hubble-workflow "
+        "2500-A magnitude and uncertainty."
     )
 
     other_convention = (
@@ -1555,33 +1539,6 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
         df["dm_red_err"] = np.sqrt(
             observed_mag_2500_err**2 + intrinsic_mag_2500_err**2
         )
-
-    if "f_host_2500_psf" not in df.columns and "frac_host_psf_2500" in df.columns:
-        df["f_host_2500_psf"] = pd.to_numeric(df["frac_host_psf_2500"], errors="coerce")
-    if "f_host_2500_psf_err" not in df.columns and "frac_host_psf_2500_err" in df.columns:
-        df["f_host_2500_psf_err"] = pd.to_numeric(df["frac_host_psf_2500_err"], errors="coerce")
-
-    if "f_host_2500_psf" in df.columns:
-        if "f_host_2500" in df.columns and "f_host_fiber_2500" not in df.columns:
-            df["f_host_fiber_2500"] = pd.to_numeric(df["f_host_2500"], errors="coerce")
-        if "f_host_2500_err" in df.columns and "f_host_fiber_2500_err" not in df.columns:
-            df["f_host_fiber_2500_err"] = pd.to_numeric(df["f_host_2500_err"], errors="coerce")
-
-        df["f_host_2500"] = pd.to_numeric(df["f_host_2500_psf"], errors="coerce")
-        if "f_host_2500_psf_err" in df.columns:
-            df["f_host_2500_err"] = pd.to_numeric(df["f_host_2500_psf_err"], errors="coerce")
-        print(
-            "Using f_host_2500_psf from PSF posterior reconstruction as the primary host fraction; "
-            "completeness reads f_host_2500_psf explicitly."
-        )
-
-    if "f_host_2500" in df.columns:
-        missing_f_host_2500 = pd.to_numeric(df["f_host_2500"], errors="coerce").isna()
-        if np.any(missing_f_host_2500):
-            df.loc[missing_f_host_2500, "f_host_2500"] = 0.0
-            if "f_host_2500_err" in df.columns:
-                df.loc[missing_f_host_2500, "f_host_2500_err"] = 0.0
-            print(f"Filled {int(np.count_nonzero(missing_f_host_2500))} NaN f_host_2500 values with 0.0")
 
     if "log_sigma_uv" in df.columns:
         df["log_sigma_uv_uncorrected"] = pd.to_numeric(df["log_sigma_uv"], errors="coerce")
@@ -1989,7 +1946,6 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
 
     df['log_t_rf_length'] = np.log10(df['t_rf_length'])
 
-    df['log_f_host_2500'] = np.where(df['f_host_2500'] > 0, np.log10(df['f_host_2500']), np.nan)
     if {"apparent_mag_2500", "apparent_mag_2500_err"}.issubset(df.columns):
         mag_2500 = pd.to_numeric(df["apparent_mag_2500"], errors="coerce").to_numpy(dtype=float)
         mag_2500_err = pd.to_numeric(df["apparent_mag_2500_err"], errors="coerce").to_numpy(dtype=float)
@@ -2221,35 +2177,6 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
             show=False,
             filename="alpha_lambda_vs_redshift_postcut.pdf",
         )
-    if {"z", "f_bc_3000", "f_fe_uv_3000"}.issubset(df.columns) and (
-        "f_host_center" in df.columns or "f_host_2500" in df.columns
-    ):
-        spectral_fraction_cut_thresholds = {
-            "f_bc_3000": 10.0**LOG_F_BC_3000_MAX,
-            "f_fe_uv_3000": 10.0**LOG_F_FE_UV_3000_MAX,
-            "f_host_2500": F_HOST_2500_MAX,
-        }
-        plot_spectral_fraction_vs_redshift(
-            df,
-            plot_path=plot_path,
-            show=False,
-            filename="spectral_fraction_vs_redshift_postcut.pdf",
-            cut_thresholds=spectral_fraction_cut_thresholds,
-        )
-        if "object_id" in df_all.columns and "object_id" in df.columns:
-            cut_object_ids = set(df["object_id"].astype(str))
-            df_cut_sources = df_all.loc[
-                ~df_all["object_id"].astype(str).isin(cut_object_ids)
-            ].copy()
-            plot_spectral_fraction_vs_redshift(
-                df,
-                plot_path=plot_path,
-                show=False,
-                z_range=z_range,
-                df_cut_sources=df_cut_sources,
-                filename="spectral_fraction_vs_redshift_cuts.pdf",
-                cut_thresholds=spectral_fraction_cut_thresholds,
-            )
     if {"g_raw_mean_slope", "g_resid_mean_slope"}.issubset(df.columns):
         for m2500_cut in (23.0, 22.5, 22.0, 21.5):
             plot_g_band_drift_slope_histograms(

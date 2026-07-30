@@ -28,8 +28,14 @@ def _make_table_df():
             "apparent_mag_2500_err": [0.07],
             "alpha_lambda": [-1.52],
             "alpha_lambda_err": [0.08],
-            "PL_slope": [-1.37],
-            "PL_slope_err": [0.08],
+            "pl_slope": [-1.37],
+            "pl_slope_err": [0.08],
+            "fracAGN_5100_fit": [0.82],
+            "fracAGN_5100_fit_err": [0.03],
+            "ebv_agn": [0.041],
+            "ebv_agn_err": [0.006],
+            "ebv_gal": [0.019],
+            "ebv_gal_err": [0.004],
             "log_tau_uv_rf": [2.34],
             "log_tau_uv_rf_std_psd": [0.11],
             "log_sigma_uv": [-0.88],
@@ -73,25 +79,23 @@ def test_make_agn_latex_table_writes_expected_output(tmp_path):
     assert out_path.exists()
     assert r"\textbf{SDSS Name}" in latex
     assert r"$m_{2500}$" in latex
-    assert r"\texttt{PL\_slope}" in latex
+    assert r"$\alpha_\lambda$" in latex
+    assert r"$f_{\rm AGN,5100}$" in latex
+    assert r"$E(B-V)_{\rm AGN}$" in latex
+    assert r"$E(B-V)_{\rm Gal}$" in latex
     assert r"$\log\tau_{\mathrm{UV,RF}}$" in latex
     assert r"$\log\sigma_{\mathrm{UV}}$" in latex
-    assert r"$f_{\rm{host,\,2500\,\text{\AA}}}$" in latex
-    assert r"$f_{\rm{BC}}$" in latex
-    assert r"$f_{\rm{lines}}$" in latex
-    assert r"$f_{\rm{Fe\,II}}$" in latex
     assert r"\textbf{J123456.78+123456.7}" in latex
     assert "$123.4567$" in latex
     assert "$+12.3456$" in latex
     assert "$20.15 \\pm 0.07$" in latex
     assert "$-1.37 \\pm 0.08$" in latex
+    assert "$0.82 \\pm 0.03$" in latex
+    assert "$0.041 \\pm 0.006$" in latex
+    assert "$0.019 \\pm 0.004$" in latex
     assert "$44.21 \\pm 0.13$" in latex
     assert "$2.34 \\pm 0.11$" in latex
     assert "$-0.88 \\pm 0.09$" in latex
-    assert "$0.21 \\pm 0.03$" in latex
-    assert "$0.14 \\pm 0.02$" in latex
-    assert "$0.12 \\pm 0.02$" in latex
-    assert "$0.31 \\pm 0.04$" in latex
 
 
 def test_make_agn_csv_table_writes_expected_output(tmp_path):
@@ -99,8 +103,6 @@ def test_make_agn_csv_table_writes_expected_output(tmp_path):
     df.loc[1, "sdss_name"] = "223456.78+123456.7"
     df.loc[1, "z"] = 2.3456
     df.loc[1, "apparent_mag_2500"] = 21.15
-    df.loc[1, "f_na"] = 0.09
-    df.loc[1, "f_br"] = 0.03
 
     csv_df = make_agn_csv_table(
         df,
@@ -117,10 +119,9 @@ def test_make_agn_csv_table_writes_expected_output(tmp_path):
     loaded = pd.read_csv(all_fields_path)
     assert len(loaded) == 2
     assert list(loaded["z"]) == sorted(df["z"].tolist())
-    for col in ("mu", "mu_err", "apparent_mag_2500_corr", "apparent_mag_2500_corr_err", "f_lines", "f_lines_err"):
+    for col in ("mu", "mu_err", "apparent_mag_2500_corr", "apparent_mag_2500_corr_err"):
         assert col in loaded.columns
     np.testing.assert_allclose(loaded["apparent_mag_2500_corr"], loaded["apparent_mag_2500"] - 0.5)
-    np.testing.assert_allclose(loaded["f_lines"], loaded["f_na"] + loaded["f_br"])
     assert list(csv_df["z"]) == sorted(df["z"].tolist())
 
     plain_path = tmp_path / "agn_table.csv"
@@ -136,8 +137,14 @@ def test_make_agn_csv_table_writes_expected_output(tmp_path):
         "m_2500_err",
         "m_2500_uncorr",
         "m_2500_uncorr_err",
-        "alpha_lambda",
-        "alpha_lambda_err",
+        "pl_slope",
+        "pl_slope_err",
+        "fracAGN_5100_fit",
+        "fracAGN_5100_fit_err",
+        "ebv_agn",
+        "ebv_agn_err",
+        "ebv_gal",
+        "ebv_gal_err",
         "mu",
         "mu_err",
         "log_tau_UV_RF",
@@ -145,14 +152,6 @@ def test_make_agn_csv_table_writes_expected_output(tmp_path):
         "log_sigma_UV",
         "log_sigma_UV_err",
         "cov_log_sigma_UV_log_tau_UV_RF",
-        "f_host_2500A",
-        "f_host_2500A_err",
-        "f_BC",
-        "f_BC_err",
-        "f_lines",
-        "f_lines_err",
-        "f_FeII",
-        "f_FeII_err",
     ]
     assert "PL_slope" not in plain.columns
     assert list(plain["z"]) == sorted(df["z"].tolist())
@@ -160,16 +159,14 @@ def test_make_agn_csv_table_writes_expected_output(tmp_path):
     np.testing.assert_allclose(plain["m_2500_err"], loaded["apparent_mag_2500_corr_err"])
     np.testing.assert_allclose(plain["m_2500_uncorr"], loaded["apparent_mag_2500"])
     np.testing.assert_allclose(plain["m_2500_uncorr_err"], loaded["apparent_mag_2500_err"])
-    np.testing.assert_allclose(plain["alpha_lambda"], loaded["alpha_lambda"])
-    np.testing.assert_allclose(plain["alpha_lambda_err"], loaded["alpha_lambda_err"])
+    np.testing.assert_allclose(plain["pl_slope"], loaded["pl_slope"])
+    np.testing.assert_allclose(plain["pl_slope_err"], loaded["pl_slope_err"])
+    np.testing.assert_allclose(plain["fracAGN_5100_fit"], loaded["fracAGN_5100_fit"])
+    np.testing.assert_allclose(plain["ebv_agn"], loaded["ebv_agn"])
+    np.testing.assert_allclose(plain["ebv_gal"], loaded["ebv_gal"])
     np.testing.assert_allclose(plain["mu_err"], loaded["mu_err"])
     np.testing.assert_allclose(plain["log_tau_UV_RF_err"], loaded["log_tau_uv_rf_std_psd"])
     np.testing.assert_allclose(plain["log_sigma_UV_err"], loaded["log_sigma_uv_std_psd"])
-    np.testing.assert_allclose(plain["f_host_2500A_err"], loaded["f_host_2500_err"])
-    np.testing.assert_allclose(plain["f_BC_err"], loaded["f_bc_3000_err"])
-    np.testing.assert_allclose(plain["f_lines"], loaded["f_lines"])
-    np.testing.assert_allclose(plain["f_lines_err"], np.hypot(loaded["f_na_err"], loaded["f_br_err"]))
-    np.testing.assert_allclose(plain["f_FeII_err"], loaded["f_fe_uv_3000_err"])
 
 
 def test_make_agn_latex_table_supports_2d_dm_interp_with_richer_inputs(tmp_path):
@@ -342,23 +339,19 @@ def test_make_agn_latex_table_passes_alpha_lambda_to_4d_dm_interp(tmp_path):
         "z_err",
         "apparent_mag_2500",
         "apparent_mag_2500_err",
-        "PL_slope",
-        "PL_slope_err",
+        "pl_slope",
+        "pl_slope_err",
+        "fracAGN_5100_fit",
+        "fracAGN_5100_fit_err",
+        "ebv_agn",
+        "ebv_agn_err",
+        "ebv_gal",
+        "ebv_gal_err",
         "log_tau_uv_rf",
         "log_tau_uv_rf_std_psd",
         "log_sigma_uv",
         "log_sigma_uv_std_psd",
         "log_sigma_uv_log_tau_uv_rf_cov_psd",
-        "f_host_2500",
-        "f_host_2500_err",
-        "f_bc_3000",
-        "f_bc_3000_err",
-        "f_fe_uv_3000",
-        "f_fe_uv_3000_err",
-        "f_na",
-        "f_na_err",
-        "f_br",
-        "f_br_err",
     ],
 )
 def test_make_agn_latex_table_raises_for_missing_required_columns(tmp_path, missing_col):
@@ -388,10 +381,10 @@ def test_make_agn_latex_table_raises_for_missing_required_columns(tmp_path, miss
         )
 
 
-def test_make_agn_csv_table_requires_alpha_lambda_for_plain_output(tmp_path):
-    df = _make_table_df().drop(columns=["alpha_lambda"])
+def test_make_agn_csv_table_requires_joint_sed_fields_for_plain_output(tmp_path):
+    df = _make_table_df().drop(columns=["fracAGN_5100_fit"])
 
-    with pytest.raises(KeyError, match="alpha_lambda"):
+    with pytest.raises(KeyError, match="fracAGN_5100_fit"):
         make_agn_csv_table(
             df,
             mu=np.array([44.21]),
@@ -402,7 +395,7 @@ def test_make_agn_csv_table_requires_alpha_lambda_for_plain_output(tmp_path):
             write_path=str(tmp_path),
         )
 
-    assert (tmp_path / "agn_table_all_fields.csv").exists()
+    assert not (tmp_path / "agn_table_all_fields.csv").exists()
     assert not (tmp_path / "agn_table.csv").exists()
 
 

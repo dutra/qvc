@@ -143,7 +143,7 @@ def _patch_load_agn_plotters(monkeypatch):
     monkeypatch.setattr(hubble_utils, "plot_sigma_tau_identity_grid", lambda *_args, **_kwargs: None)
 
 
-def test_load_agn_data_makes_precut_and_postcut_fhost_and_blr_plots(tmp_path, monkeypatch):
+def test_load_agn_data_makes_pre_and_postcut_joint_sed_and_blr_plots(tmp_path, monkeypatch):
     source_path = tmp_path / "agn.h5"
     source_path.touch()
     monkeypatch.setattr(
@@ -215,15 +215,13 @@ def test_load_agn_data_makes_precut_and_postcut_fhost_and_blr_plots(tmp_path, mo
     )
 
     captured_by_filename = {call.get("filename"): call for call in captured_calls}
-    assert "f_host_2500_vs_l2500_precut.pdf" in captured_by_filename
-    assert "f_host_2500_vs_l2500_postcut.pdf" in captured_by_filename
+    assert "f_host_2500_vs_l2500_precut.pdf" not in captured_by_filename
+    assert "f_host_2500_vs_l2500_postcut.pdf" not in captured_by_filename
     assert "alpha_lambda_vs_l2500_precut.pdf" in captured_by_filename
     assert "alpha_lambda_vs_l2500_postcut.pdf" in captured_by_filename
     assert "blr_precut.pdf" in captured_by_filename
     assert "blr_postcut.pdf" in captured_by_filename
     assert "sigma_tau_vs_lambda_broken_pl_fit_postcut.pdf" in captured_by_filename
-    assert captured_by_filename["f_host_2500_vs_l2500_precut.pdf"]["f_host_col"] == "f_host_2500_psf"
-    assert captured_by_filename["f_host_2500_vs_l2500_postcut.pdf"]["f_host_col"] == "f_host_2500_psf"
 
 
 def test_load_agn_data_writes_sigma_tau_ls_identity_grids_to_diagnostics(tmp_path, monkeypatch):

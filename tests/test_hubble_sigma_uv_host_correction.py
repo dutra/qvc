@@ -111,6 +111,49 @@ def _patch_minimal_loader(monkeypatch, df_in):
     monkeypatch.setattr(hubble_utils, "populate_xray", lambda df: df)
 
 
+def test_load_agn_data_does_not_require_legacy_spectral_fraction_columns(
+    monkeypatch,
+    tmp_path,
+):
+    df_in = _make_loader_input().iloc[:2].drop(
+        columns=["f_host_2500", "f_host_2500_err", "f_PL", "f_PL_err"]
+    )
+    df_in["t_rf_length"] = 2000.0
+    input_path = tmp_path / "fake_input.h5"
+    input_path.touch()
+    spectra_path = tmp_path / "joint_sedfit.csv"
+    pd.DataFrame(
+        {
+            "object_id": df_in["object_id"],
+            "fit_ok": True,
+            "fit_backend": "jaxsedfit_joint",
+            "fracAGN_5100_fit": 0.9,
+            "fracAGN_5100_fit_err": 0.02,
+            "m_2500_dereddened": df_in["m_2500_dereddened"],
+            "m_2500_dereddened_err": df_in["m_2500_dereddened_err"],
+            "m_2500_attenuated_model": df_in["m_2500_attenuated_model"],
+            "m_2500_attenuated_model_err": df_in["m_2500_attenuated_model_err"],
+            "pl_slope": -1.5,
+            "pl_slope_err": 0.1,
+        }
+    ).to_csv(spectra_path, index=False)
+    _patch_minimal_loader(monkeypatch, df_in)
+
+    df, df_all = hubble_utils.load_agn_data(
+        input_path,
+        spectra_fit_csv=[spectra_path],
+        magnitude_convention="dereddened",
+        lc_info_csv=None,
+        only_load=False,
+        apply_cut=False,
+        plot_diagnostics=False,
+    )
+
+    assert len(df) == len(df_all) == 2
+    assert "f_host_2500" not in df.columns
+    assert "log_f_host_2500" not in df.columns
+
+
 def _obsolete_load_agn_data_attenuated_aliases_legacy_generic_columns(
     monkeypatch,
     tmp_path,

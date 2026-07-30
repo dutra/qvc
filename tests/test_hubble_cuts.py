@@ -115,6 +115,40 @@ def test_current_spectra_schema_requires_fracagn_5100_fit(tmp_path):
         populate_spectra_fit(pd.DataFrame({"object_id": ["obj"]}), [csv_path])
 
 
+def test_current_spectra_schema_accepts_only_joint_sedfit_backend(tmp_path):
+    csv_path = tmp_path / "spectra.csv"
+    row = {
+        "object_id": "obj",
+        "fit_ok": True,
+        "fit_backend": "jaxsedfit_joint",
+        "fracAGN_5100_fit": 0.8,
+        "fracAGN_5100_fit_err": 0.05,
+        "m_2500_dereddened": 20.0,
+        "m_2500_dereddened_err": 0.1,
+        "m_2500_attenuated_model": 20.2,
+        "m_2500_attenuated_model_err": 0.12,
+        "pl_slope": -1.5,
+        "pl_slope_err": 0.1,
+    }
+    pd.DataFrame([row]).to_csv(csv_path, index=False)
+
+    out = populate_spectra_fit(
+        pd.DataFrame({"object_id": ["obj", "not-matched"]}),
+        [csv_path],
+    )
+
+    assert out["object_id"].tolist() == ["obj"]
+    assert out.loc[0, "fit_backend"] == "jaxsedfit_joint"
+    assert out.loc[0, "alpha_lambda"] == row["pl_slope"]
+    assert "PL_slope" not in out.columns
+    assert "f_host_2500" not in out.columns
+
+    row["fit_backend"] = "jaxqsofit"
+    pd.DataFrame([row]).to_csv(csv_path, index=False)
+    with np.testing.assert_raises_regex(ValueError, "unsupported fit_backend"):
+        populate_spectra_fit(pd.DataFrame({"object_id": ["obj"]}), [csv_path])
+
+
 def test_light_curve_point_count_series_prefers_cleaned_per_band_counts():
     df = pd.DataFrame(
         {

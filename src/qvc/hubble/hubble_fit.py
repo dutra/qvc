@@ -4213,15 +4213,24 @@ if __name__ == "__main__":
     parser.add_argument("--N", type=int, default=None, help="Number of AGNs to run (default: all)")
     parser.add_argument("--only_sna", action="store_true", default=False, help="Run SNIa-only fit (default: False)")
     parser.add_argument("--only_agn", action="store_true", default=False, help="Run AGN-only fit with the Supernova likelihood and M0_sn disabled (default: False)")
-    parser.add_argument("--spectra_fit_csv", type=str, nargs='+', help="Path(s) to spectra fit CSV file(s)")
+    parser.add_argument(
+        "--spectra_fit_csv",
+        type=str,
+        nargs="+",
+        required=True,
+        help=(
+            "Path(s) to CSV output from fit_spectra_jaxsedfit_joint.py. "
+            "Legacy spectral-fit formats are not supported."
+        ),
+    )
     parser.add_argument(
         "--magnitude-convention",
         type=str,
         choices=["dereddened", "attenuated"],
         required=True,
         help=(
-            "Choose which spectral 2500-A magnitude populates the Hubble-workflow "
-            "apparent_mag_2500 aliases. This option is required."
+            "Choose whether the Hubble workflow uses the joint SED fit's "
+            "dereddened or attenuated-model 2500-A magnitude."
         ),
     )
     parser.add_argument(

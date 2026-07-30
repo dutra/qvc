@@ -52,7 +52,9 @@ def _spectra_row(**updates):
     row = {
         "object_id": "agn_1",
         "fit_ok": True,
+        "fit_backend": "jaxsedfit_joint",
         "fracAGN_5100_fit": 0.5,
+        "fracAGN_5100_fit_err": 0.05,
         "m_2500_dereddened": 20.0,
         "m_2500_dereddened_err": 0.1,
         "m_2500_attenuated_model": 20.4,
