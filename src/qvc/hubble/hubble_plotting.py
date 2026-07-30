@@ -5525,13 +5525,36 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     z_var = z_err**2
     pred_m2500_var = predicted_M2500_err**2
 
-    mu_pred_std = np.sqrt(
-        m_app_var +
-        #(0.055 * df_agn["z"].values)**2 +
-        lens_var +
-        z_var +
-        pred_m2500_var
+    data_var_without_sigma_dmi = (
+        m_app_var
+        + lens_var
+        + z_var
+        + pred_m2500_var
     )
+
+    sigma_dmi = None
+    sigma_dmi_var = np.zeros_like(data_var_without_sigma_dmi)
+    if dmi_sigma is not None:
+        sigma_dmi = np.asarray(dmi_sigma, dtype=float)
+        if sigma_dmi.shape != data_var_without_sigma_dmi.shape:
+            raise ValueError(
+                "dmi_sigma has shape "
+                f"{sigma_dmi.shape}, but expected {data_var_without_sigma_dmi.shape}."
+            )
+        invalid_sigma_dmi = ~np.isfinite(sigma_dmi) | (sigma_dmi < 0.0)
+        if np.any(invalid_sigma_dmi):
+            invalid_rows = np.flatnonzero(invalid_sigma_dmi)[:10].tolist()
+            raise ValueError(
+                "dmi_sigma must contain finite, non-negative uncertainties; "
+                f"invalid row indices: {invalid_rows}"
+            )
+        sigma_dmi_var = np.square(sigma_dmi)
+
+    # The uncertainty of an applied debias correction is observational for
+    # this diagram and therefore belongs in every debiased point error.
+    data_var = data_var_without_sigma_dmi + sigma_dmi_var
+    mu_pred_std_without_sigma_dmi = np.sqrt(data_var_without_sigma_dmi)
+    mu_pred_std = np.sqrt(data_var)
 
     log_f_eff = evaluate_log_f(
         results,
@@ -5541,15 +5564,12 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     )
     intrinsic_scatter = np.exp(log_f_eff)
     intrinsic_var = intrinsic_scatter**2
-    mu_pred_std_with_scatter = np.sqrt(mu_pred_std**2 + intrinsic_var)
-    
-    sigma_dmi = None
-    if dmi_sigma is not None:
-        sigma_dmi = np.asarray(dmi_sigma, dtype=float)
-        if sigma_dmi.shape != mu_pred_std.shape:
-            raise ValueError(
-                f"dmi_sigma has shape {sigma_dmi.shape}, but expected {mu_pred_std.shape}."
-            )
+    total_var_without_sigma_dmi = data_var_without_sigma_dmi + intrinsic_var
+    total_var = data_var + intrinsic_var
+    mu_pred_std_with_scatter_without_sigma_dmi = np.sqrt(
+        total_var_without_sigma_dmi
+    )
+    mu_pred_std_with_scatter = np.sqrt(total_var)
 
     sigma_sel = None
     sigma_sel_floor_mag = 0.05
@@ -5585,7 +5605,8 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     mu_pred_plot = mu_pred_median
     clipping_sigma = mu_pred_std_with_scatter if use_intrinsic_scatter_in_residual_sigma else mu_pred_std
     display_residuals_err = mu_pred_std if debias else clipping_sigma
-    chi2_sigma = display_residuals_err
+    binning_sigma = clipping_sigma
+    chi2_sigma = clipping_sigma
 
     mu_zscore = np.abs(residuals) / clipping_sigma
 
@@ -5598,7 +5619,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     linear_main_in, linear_main_out = _range_partitioned_weighted_bin_stats(
         df_agn["z"].values,
         mu_pred_plot,
-        display_residuals_err,
+        binning_sigma,
         bins_linear,
         z_range,
         min_count=5,
@@ -5629,7 +5650,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     log_main_in, log_main_out = _range_partitioned_weighted_bin_stats(
         df_agn["z"].values,
         mu_pred_plot,
-        display_residuals_err,
+        binning_sigma,
         bins_log,
         z_range,
     )
@@ -6054,19 +6075,11 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
                     n_params=len(model_labels) - 1,
                 )
                 if sigma_dmi is not None:
-                    sigma_dmi_chi2 = sigma_dmi[chi2_redshift_mask]
-                    chi2_red_shown_plus_sigma_dmi, _ = reduced_chi_squared(
-                        residuals_chi2,
-                        residuals_err_chi2,
-                        extra_err=sigma_dmi_chi2,
-                        n_params=len(model_labels) - 1,
-                    )
-                    chi2_red_with_logf_plus_sigma_dmi, _ = reduced_chi_squared(
-                        residuals_chi2,
-                        mu_pred_std_with_scatter_chi2,
-                        extra_err=sigma_dmi_chi2,
-                        n_params=len(model_labels) - 1,
-                    )
+                    # Both primary arrays already contain sigma_dmi in
+                    # quadrature; retain these legacy diagnostic variables
+                    # without adding the correction uncertainty twice.
+                    chi2_red_shown_plus_sigma_dmi = chi2_red
+                    chi2_red_with_logf_plus_sigma_dmi = chi2_red_with_logf
         chi2_text_value = chi2_red
         chi2_text_value_zgt1 = chi2_red_zgt1
         if debias and agn_likelihood_space_chi2 is not None and np.isfinite(agn_likelihood_space_chi2):
@@ -6217,17 +6230,15 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     diagnostics_path = os.path.join(plot_path, "diagnostics")
     os.makedirs(diagnostics_path, exist_ok=True)
 
-    sigma_dmi_var = np.zeros_like(mu_pred_std)
-    if sigma_dmi is not None:
-        sigma_dmi_var = np.square(sigma_dmi)
     sigma_sel_var = np.full_like(mu_pred_std, np.nan, dtype=float)
     if sigma_sel is not None:
         sigma_sel_var = np.square(sigma_sel)
 
-    total_var = m_app_var + lens_var + z_var + pred_m2500_var + intrinsic_var
-    total_var_plus_sigma_dmi = total_var + sigma_dmi_var
-    total_var_no_logf = m_app_var + lens_var + z_var + pred_m2500_var
-    total_var_no_logf_plus_sigma_dmi = total_var_no_logf + sigma_dmi_var
+    # Retain the historical aliases in diagnostic files while making their
+    # primary counterparts the complete debiased uncertainty model.
+    total_var_plus_sigma_dmi = total_var
+    total_var_no_logf = data_var
+    total_var_no_logf_plus_sigma_dmi = data_var
     error_budget_mask = np.isfinite(total_var) & np.isfinite(residuals) & (total_var > 0) & chi2_redshift_mask
     sigma_dmi_mask = error_budget_mask & np.isfinite(sigma_dmi) if sigma_dmi is not None else None
     sigma_sel_mask = (
@@ -6258,10 +6269,12 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
             {"metric": "chi2_red_no_intrinsic_scatter", "value": _chi2_red_from_var(total_var_no_logf)},
             {"metric": "chi2_red_full_plus_sigma_dmi", "value": _chi2_red_from_var(total_var_plus_sigma_dmi)},
             {"metric": "chi2_red_no_intrinsic_scatter_plus_sigma_dmi", "value": _chi2_red_from_var(total_var_no_logf_plus_sigma_dmi)},
-            {"metric": "chi2_red_no_predicted_M2500_err", "value": _chi2_red_from_var(m_app_var + lens_var + z_var + intrinsic_var)},
-            {"metric": "chi2_red_no_sigma_lens", "value": _chi2_red_from_var(m_app_var + z_var + pred_m2500_var + intrinsic_var)},
-            {"metric": "chi2_red_no_apparent_mag_err", "value": _chi2_red_from_var(lens_var + z_var + pred_m2500_var + intrinsic_var)},
-            {"metric": "chi2_red_no_z_err", "value": _chi2_red_from_var(m_app_var + lens_var + pred_m2500_var + intrinsic_var)},
+            {"metric": "chi2_red_full_without_sigma_dmi", "value": _chi2_red_from_var(total_var_without_sigma_dmi)},
+            {"metric": "chi2_red_no_intrinsic_scatter_without_sigma_dmi", "value": _chi2_red_from_var(data_var_without_sigma_dmi)},
+            {"metric": "chi2_red_no_predicted_M2500_err", "value": _chi2_red_from_var(m_app_var + lens_var + z_var + sigma_dmi_var + intrinsic_var)},
+            {"metric": "chi2_red_no_sigma_lens", "value": _chi2_red_from_var(m_app_var + z_var + pred_m2500_var + sigma_dmi_var + intrinsic_var)},
+            {"metric": "chi2_red_no_apparent_mag_err", "value": _chi2_red_from_var(lens_var + z_var + pred_m2500_var + sigma_dmi_var + intrinsic_var)},
+            {"metric": "chi2_red_no_z_err", "value": _chi2_red_from_var(m_app_var + lens_var + pred_m2500_var + sigma_dmi_var + intrinsic_var)},
             {"metric": "chi2_red_sigma_sel", "value": _chi2_red_from_var(sigma_sel_var)},
             {"metric": "median_apparent_mag_err_mag", "value": float(np.median(apparent_mag_err[error_budget_mask]))},
             {"metric": "median_sigma_lens_mag", "value": float(np.median(sigma_lens[error_budget_mask]))},
@@ -6309,6 +6322,8 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
         per_object_budget_df["intrinsic_scatter_term"] = intrinsic_scatter
         per_object_budget_df["sigma_dmi_term"] = sigma_dmi if sigma_dmi is not None else np.nan
         per_object_budget_df["sigma_sel_term"] = sigma_sel if sigma_sel is not None else np.nan
+        per_object_budget_df["mu_pred_std_no_intrinsic_without_sigma_dmi"] = mu_pred_std_without_sigma_dmi
+        per_object_budget_df["mu_pred_std_with_intrinsic_without_sigma_dmi"] = mu_pred_std_with_scatter_without_sigma_dmi
         per_object_budget_df["mu_pred_std_no_intrinsic"] = mu_pred_std
         per_object_budget_df["mu_pred_std_with_intrinsic"] = mu_pred_std_with_scatter
         per_object_budget_df["mu_pred_std_with_intrinsic_and_sigma_dmi"] = np.sqrt(total_var_plus_sigma_dmi)
@@ -6329,6 +6344,8 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
             "intrinsic_scatter_term",
             "sigma_dmi_term",
             "sigma_sel_term",
+            "mu_pred_std_no_intrinsic_without_sigma_dmi",
+            "mu_pred_std_with_intrinsic_without_sigma_dmi",
             "mu_pred_std_no_intrinsic",
             "mu_pred_std_with_intrinsic",
             "mu_pred_std_no_intrinsic_and_sigma_dmi",
@@ -6344,9 +6361,9 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
             "Hubble error budget:"
             f" chi2_full={_chi2_red_from_var(total_var):.3f},"
             f" chi2_no_intrinsic={_chi2_red_from_var(total_var_no_logf):.3f},"
-            f" chi2_full_plus_sigma_dmi={_chi2_red_from_var(total_var_plus_sigma_dmi):.3f},"
-            f" chi2_no_intrinsic_plus_sigma_dmi={_chi2_red_from_var(total_var_no_logf_plus_sigma_dmi):.3f},"
-            f" chi2_no_predM={_chi2_red_from_var(m_app_var + lens_var + z_var + intrinsic_var):.3f},"
+            f" chi2_full_without_sigma_dmi={_chi2_red_from_var(total_var_without_sigma_dmi):.3f},"
+            f" chi2_no_intrinsic_without_sigma_dmi={_chi2_red_from_var(data_var_without_sigma_dmi):.3f},"
+            f" chi2_no_predM={_chi2_red_from_var(m_app_var + lens_var + z_var + sigma_dmi_var + intrinsic_var):.3f},"
             f" median_predM_err={float(np.median(predicted_M2500_err[error_budget_mask])):.3f} mag,"
             f" median_predM_sigma={float(np.median(np.sqrt(np.clip(pred_m2500_sigma_var[error_budget_mask], 0.0, None)))):.3f} mag,"
             f" median_predM_tau={float(np.median(np.sqrt(np.clip(pred_m2500_tau_var[error_budget_mask], 0.0, None)))):.3f} mag,"
@@ -6378,6 +6395,8 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
         residuals_df = df_agn.copy()
         residuals_df["residuals"] = residuals
         residuals_df["mu_pred_median"] = mu_pred_median
+        residuals_df["mu_pred_std_without_sigma_dmi"] = mu_pred_std_without_sigma_dmi
+        residuals_df["mu_pred_std_with_scatter_without_sigma_dmi"] = mu_pred_std_with_scatter_without_sigma_dmi
         residuals_df["mu_pred_std"] = mu_pred_std
         residuals_df["mu_pred_std_with_scatter"] = mu_pred_std_with_scatter
         residuals_df["sigma_dmi"] = sigma_dmi if sigma_dmi is not None else np.nan
@@ -6393,6 +6412,8 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
             "ra",
             "dec",
             "mu_pred_median",
+            "mu_pred_std_without_sigma_dmi",
+            "mu_pred_std_with_scatter_without_sigma_dmi",
             "mu_pred_std",
             "mu_pred_std_with_scatter",
             "clipping_sigma",

@@ -1145,6 +1145,7 @@ def test_plot_hubble_debiased_returns_clipping_sigma_and_writes_distinct_diagnos
     priors, model_labels, _ = hubble_model.get_model_params("FlatLambdaCDM", only_sna=False)
     theta = np.array([(priors[key][0] + priors[key][1]) / 2.0 for key in model_labels], dtype=float)
     flat_samples = np.tile(theta[None, :], (6, 1))
+    sigma_dmi = np.full(len(df_agn), 0.35, dtype=float)
 
     monkeypatch.setattr(hubble_plotting, "_save_figure", lambda fig, path, **kwargs: path)
 
@@ -1160,6 +1161,7 @@ def test_plot_hubble_debiased_returns_clipping_sigma_and_writes_distinct_diagnos
         debias=True,
         dm_interp=None,
         dmi_values=np.zeros(len(df_agn), dtype=float),
+        dmi_sigma=sigma_dmi,
         dmi_selection_sigma=np.full(len(df_agn), 7.0, dtype=float),
         residuals_csv_filename="residuals.csv",
         agn_pivot_context=pivot_context,
@@ -1172,17 +1174,116 @@ def test_plot_hubble_debiased_returns_clipping_sigma_and_writes_distinct_diagnos
     assert not np.allclose(clipping_sigma, np.full(len(df_agn), 7.0, dtype=float))
 
     residuals_df = pd.read_csv(tmp_path / "residuals.csv")
-    for col in ("mu_pred_std", "mu_pred_std_with_scatter", "clipping_sigma", "chi2_sigma", "sigma_sel", "mu_zscore"):
+    for col in (
+        "mu_pred_std_without_sigma_dmi",
+        "mu_pred_std_with_scatter_without_sigma_dmi",
+        "mu_pred_std",
+        "mu_pred_std_with_scatter",
+        "clipping_sigma",
+        "chi2_sigma",
+        "sigma_sel",
+        "sigma_dmi",
+        "mu_zscore",
+    ):
         assert col in residuals_df.columns
     np.testing.assert_allclose(residuals_df["sigma_sel"].to_numpy(dtype=float), 7.0)
     np.testing.assert_allclose(
         residuals_df["chi2_sigma"].to_numpy(dtype=float),
-        residuals_df["mu_pred_std"].to_numpy(dtype=float),
+        residuals_df["mu_pred_std_with_scatter"].to_numpy(dtype=float),
+    )
+    np.testing.assert_allclose(
+        residuals_df["clipping_sigma"].to_numpy(dtype=float),
+        residuals_df["mu_pred_std_with_scatter"].to_numpy(dtype=float),
+    )
+    np.testing.assert_allclose(
+        np.square(residuals_df["mu_pred_std"].to_numpy(dtype=float))
+        - np.square(
+            residuals_df["mu_pred_std_without_sigma_dmi"].to_numpy(dtype=float)
+        ),
+        np.square(sigma_dmi),
+    )
+    np.testing.assert_allclose(
+        np.square(
+            residuals_df["mu_pred_std_with_scatter"].to_numpy(dtype=float)
+        )
+        - np.square(
+            residuals_df[
+                "mu_pred_std_with_scatter_without_sigma_dmi"
+            ].to_numpy(dtype=float)
+        ),
+        np.square(sigma_dmi),
     )
     np.testing.assert_allclose(
         residuals_df["mu_zscore"].to_numpy(dtype=float),
         np.abs(residuals_df["residuals"].to_numpy(dtype=float)) / residuals_df["clipping_sigma"].to_numpy(dtype=float),
     )
+
+
+def test_plot_hubble_uses_complete_debiased_uncertainty_for_all_bins(
+    monkeypatch,
+    tmp_path,
+):
+    df_agn = _make_fake_agn_sample(n_agn=6)
+    df_pantheon = _make_fake_pantheon_sample(n_sne=6)
+    priors, model_labels, _ = hubble_model.get_model_params(
+        "FlatLambdaCDM",
+        only_sna=False,
+    )
+    theta = np.array(
+        [(priors[key][0] + priors[key][1]) / 2.0 for key in model_labels],
+        dtype=float,
+    )
+    flat_samples = np.tile(theta[None, :], (6, 1))
+    captured = []
+    empty_stats = (
+        np.empty(0, dtype=float),
+        np.empty(0, dtype=float),
+        np.empty(0, dtype=float),
+        np.empty(0, dtype=int),
+    )
+
+    def capture_bins(z, y, yerr, bins, z_range, **kwargs):
+        captured.append(
+            (
+                np.asarray(y, dtype=float).copy(),
+                np.asarray(yerr, dtype=float).copy(),
+            )
+        )
+        return empty_stats, empty_stats
+
+    monkeypatch.setattr(
+        hubble_plotting,
+        "_range_partitioned_weighted_bin_stats",
+        capture_bins,
+    )
+    pivot_context = _agn_pivot_context(df_agn, (0.44, 3.16))
+    (
+        residuals,
+        clipping_sigma,
+        mu_pred_median,
+        _,
+        mu_pred_std_with_scatter,
+    ) = hubble_plotting.plot_hubble(
+        flat_samples,
+        df_agn,
+        df_pantheon,
+        cosmo_model="FlatLambdaCDM",
+        z_pivot_agn=hubble_fit.z_pivot_agn,
+        plot_path=str(tmp_path),
+        debias=True,
+        dmi_values=np.zeros(len(df_agn), dtype=float),
+        dmi_sigma=np.full(len(df_agn), 0.25, dtype=float),
+        compute_only=True,
+        agn_pivot_context=pivot_context,
+    )
+
+    assert len(captured) == 3
+    np.testing.assert_allclose(captured[0][0], mu_pred_median)
+    np.testing.assert_allclose(captured[1][0], residuals)
+    np.testing.assert_allclose(captured[2][0], mu_pred_median)
+    for _, bin_sigma in captured:
+        np.testing.assert_allclose(bin_sigma, mu_pred_std_with_scatter)
+    np.testing.assert_allclose(clipping_sigma, mu_pred_std_with_scatter)
 
 
 def test_plot_hubble_does_not_add_synthetic_population_scatter(monkeypatch, tmp_path):
