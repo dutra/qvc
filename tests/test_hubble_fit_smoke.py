@@ -1,4 +1,5 @@
 import ast
+import inspect
 import os
 import sys
 from pathlib import Path
@@ -2327,17 +2328,50 @@ def test_plot_predicted_vs_actual_m2500_marks_out_of_range_objects(monkeypatch, 
     plt.close(captured["fig"])
 
 
-def test_plot_hubble_residual_chi2_annotation_includes_high_z(monkeypatch, tmp_path):
+@pytest.mark.parametrize("only_agn", [False, True])
+def test_plot_hubble_residual_chi2_annotation_uses_debiased_full_and_data_errors(
+    monkeypatch,
+    tmp_path,
+    only_agn,
+):
     from matplotlib.axes import Axes
 
-    df_agn = _make_fake_agn_sample(n_agn=6).copy()
+    z_range = (0.44, 3.16)
+    z = np.array(
+        [
+            0.43,
+            0.44,
+            0.60,
+            0.90,
+            1.00,
+            1.10,
+            1.20,
+            1.40,
+            1.60,
+            1.80,
+            2.00,
+            2.30,
+            2.50,
+            2.60,
+            3.00,
+            3.16,
+            3.17,
+        ],
+        dtype=float,
+    )
+    df_agn = _make_fake_agn_sample(n_agn=len(z)).copy()
+    df_agn["z"] = z
     df_agn["wrms"] = np.linspace(0.1, 0.2, len(df_agn))
     df_pantheon = _make_fake_pantheon_sample(n_sne=6).copy()
     cosmo = FlatLambdaCDM(H0=70.0, Om0=0.3)
     df_pantheon["MU_SH0ES"] = cosmo.distmod(df_pantheon["zHD"].to_numpy(dtype=float)).value
     df_pantheon["biasCor_m_b"] = np.zeros(len(df_pantheon), dtype=float)
 
-    priors, model_labels, _ = hubble_model.get_model_params("FlatLambdaCDM", only_sna=False)
+    priors, model_labels, _ = hubble_model.get_model_params(
+        "FlatLambdaCDM",
+        only_sna=False,
+        only_agn=only_agn,
+    )
     theta = np.array([(priors[key][0] + priors[key][1]) / 2.0 for key in model_labels], dtype=float)
     flat_samples = np.tile(theta[None, :], (6, 1))
 
@@ -2345,7 +2379,7 @@ def test_plot_hubble_residual_chi2_annotation_includes_high_z(monkeypatch, tmp_p
     original_text = Axes.text
 
     def capture_text(self, x, y, s, *args, **kwargs):
-        if r"\chi^2_\nu" in str(s):
+        if r"\chi^2" in str(s):
             text_calls.append(
                 {
                     "x": x,
@@ -2360,8 +2394,15 @@ def test_plot_hubble_residual_chi2_annotation_includes_high_z(monkeypatch, tmp_p
     monkeypatch.setattr(Axes, "text", capture_text)
     monkeypatch.setattr(hubble_plotting, "_save_figure", lambda fig, path, **kwargs: path)
 
-    pivot_context = _agn_pivot_context(df_agn, (0.44, 3.16))
-    hubble_plotting.plot_hubble(
+    pivot_context = _agn_pivot_context(df_agn, z_range)
+    dmi_sigma = np.linspace(0.05, 0.20, len(df_agn))
+    (
+        residuals,
+        _clipping_sigma,
+        _mu_pred_median,
+        data_sigma,
+        full_sigma,
+    ) = hubble_plotting.plot_hubble(
         flat_samples,
         df_agn,
         df_pantheon,
@@ -2372,41 +2413,77 @@ def test_plot_hubble_residual_chi2_annotation_includes_high_z(monkeypatch, tmp_p
         debias=True,
         dm_interp=None,
         dmi_values=np.zeros(len(df_agn), dtype=float),
-        agn_likelihood_space_chi2=1.23,
-        agn_likelihood_space_chi2_zgt1=2.34,
+        dmi_sigma=dmi_sigma,
+        z_range=z_range,
+        only_agn=only_agn,
         residuals_csv_filename=None,
         agn_pivot_context=pivot_context,
     )
 
-    annotation = next(
-        call for call in text_calls
-        if r"$\chi^2_\nu(0.44<z<3.16) = 1.23$" in call["text"]
+    n_agn_params = sum(label != "M0_sn" for label in model_labels)
+    common_mask = (
+        np.isfinite(z)
+        & np.isfinite(residuals)
+        & np.isfinite(data_sigma)
+        & np.isfinite(full_sigma)
+        & (data_sigma > 0.0)
+        & (full_sigma > 0.0)
+        & (z >= z_range[0])
+        & (z <= z_range[1])
     )
-    assert rf"$\chi^2_\nu(1.00<z<3.16) = 2.34$" in annotation["text"]
+    high_z_mask = common_mask & (z > 1.0)
+    expected_full, full_meta = hubble_utils.reduced_chi_squared(
+        residuals[common_mask],
+        full_sigma[common_mask],
+        n_params=n_agn_params,
+    )
+    expected_data, data_meta = hubble_utils.reduced_chi_squared(
+        residuals[common_mask],
+        data_sigma[common_mask],
+        n_params=n_agn_params,
+    )
+    expected_high_full, high_full_meta = hubble_utils.reduced_chi_squared(
+        residuals[high_z_mask],
+        full_sigma[high_z_mask],
+        n_params=n_agn_params,
+    )
+    expected_high_data, high_data_meta = hubble_utils.reduced_chi_squared(
+        residuals[high_z_mask],
+        data_sigma[high_z_mask],
+        n_params=n_agn_params,
+    )
+
+    # Both endpoints belong to the displayed fit-range statistic, while the
+    # neighboring objects remain excluded.  The two uncertainty models must
+    # also use the exact same objects.
+    assert full_meta["N_eff"] == data_meta["N_eff"] == 15
+    assert high_full_meta["N_eff"] == high_data_meta["N_eff"] == 11
+    assert full_meta["n_params"] == data_meta["n_params"] == n_agn_params
+
+    annotation = next(call for call in text_calls if "Debiased" in call["text"])
+    annotation_text = annotation["text"]
+    assert "full / data only" in annotation_text
+    assert r"0.44\leq z\leq3.16" in annotation_text
+    assert r"1.00<z\leq3.16" in annotation_text
+    assert (
+        f"{expected_full:.2f} / {expected_data:.2f}"
+        in annotation_text
+    )
+    assert (
+        f"{expected_high_full:.2f} / {expected_high_data:.2f}"
+        in annotation_text
+    )
     assert "\n" in annotation["text"]
     assert annotation["x"] == 0.02
     assert annotation["y"] == 0.08
     assert annotation["ha"] == "left"
     assert annotation["va"] == "bottom"
 
-    text_calls.clear()
-    hubble_plotting.plot_hubble(
-        flat_samples,
-        df_agn,
-        df_pantheon,
-        cosmo_model="FlatLambdaCDM",
-        z_pivot_agn=hubble_fit.z_pivot_agn,
-        plot_path=str(tmp_path),
-        show=False,
-        debias=False,
-        z_range=(0.44, 0.9),
-        residuals_csv_filename=None,
-        agn_pivot_context=pivot_context,
-    )
 
-    chi2_text = next(call["text"] for call in text_calls if r"\chi^2_\nu" in call["text"])
-    assert r"$\chi^2_\nu(0.44<z<0.90)" in chi2_text
-    assert "(1<z<" not in chi2_text
+def test_plot_hubble_has_no_likelihood_space_chi2_override_arguments():
+    parameters = inspect.signature(hubble_plotting.plot_hubble).parameters
+    assert "agn_likelihood_space_chi2" not in parameters
+    assert "agn_likelihood_space_chi2_zgt1" not in parameters
 
 
 def test_run_single_two_pass_sigma_clip_uses_plot_hubble_clipping_sigma(monkeypatch, tmp_path):
@@ -2929,7 +3006,10 @@ def test_run_single_minimal_plots_keeps_only_debiased_hubble_plot(monkeypatch, t
     monkeypatch.setattr(
         hubble_fit,
         "compute_agn_likelihood_space_reduced_chi2",
-        lambda *args, **kwargs: (1.0, len(args[2])),
+        lambda *args, **kwargs: pytest.fail(
+            "minimal-plot Hubble rendering must not compute or inject "
+            "likelihood-space chi-squared values"
+        ),
     )
 
     result = hubble_fit.run_single(
@@ -2955,6 +3035,8 @@ def test_run_single_minimal_plots_keeps_only_debiased_hubble_plot(monkeypatch, t
     assert hubble_calls[0]["debias"] is True
     assert hubble_calls[0]["residuals_csv_filename"] == "hubble_plot_residuals.csv"
     assert "filename" not in hubble_calls[0]
+    assert "agn_likelihood_space_chi2" not in hubble_calls[0]
+    assert "agn_likelihood_space_chi2_zgt1" not in hubble_calls[0]
     expected_draw_indices = (
         hubble_plotting.get_hubble_posterior_sample_indices(
             len(flat_samples)
@@ -3637,8 +3719,7 @@ def test_run_single_resume_replot_with_cuts_bypasses_sampling_passes_and_plots_c
             {
                 "object_ids": df_plot["object_id"].tolist(),
                 "filename": kwargs.get("filename"),
-                "agn_likelihood_space_chi2": kwargs.get("agn_likelihood_space_chi2"),
-                "agn_likelihood_space_chi2_zgt1": kwargs.get("agn_likelihood_space_chi2_zgt1"),
+                "keyword_names": set(kwargs),
                 "posterior_sample_indices": kwargs.get(
                     "posterior_sample_indices"
                 ),
@@ -3650,11 +3731,19 @@ def test_run_single_resume_replot_with_cuts_bypasses_sampling_passes_and_plots_c
         n = len(df_plot)
         return np.zeros(n), np.ones(n), np.zeros(n), np.ones(n), np.ones(n)
 
-    def fake_compute_agn_likelihood_space_reduced_chi2(flat_samples, model_labels, df_agn_arg, *args, **kwargs):
+    def fake_compute_agn_likelihood_space_reduced_chi2(
+        flat_samples,
+        model_labels,
+        df_agn_arg,
+        *args,
+        **kwargs,
+    ):
         object_ids = df_agn_arg["object_id"].tolist()
         agn_chi2_calls.append(object_ids)
-        value = 9.87 if len(agn_chi2_calls) == 1 else 6.54
-        return value, {"chi2": value, "dof": max(len(object_ids) - len(model_labels), 1)}
+        return 9.87, {
+            "chi2": 9.87,
+            "dof": max(len(object_ids) - len(model_labels), 1),
+        }
 
     def fake_direct_completeness_summaries(
         *args,
@@ -3732,12 +3821,13 @@ def test_run_single_resume_replot_with_cuts_bypasses_sampling_passes_and_plots_c
     assert pipeline_calls[0]["completeness_sim_file"] == str(generated_completeness)
     assert plot_hubble_calls[0]["object_ids"] == expected_plot_ids
     assert plot_hubble_calls[0]["filename"] is None
-    assert agn_chi2_calls == [
-        ["agn_000", "agn_001", "agn_003"],
-        ["agn_001", "agn_003"],
-    ]
-    assert plot_hubble_calls[0]["agn_likelihood_space_chi2"] == 9.87
-    assert plot_hubble_calls[0]["agn_likelihood_space_chi2_zgt1"] == 6.54
+    assert agn_chi2_calls == [expected_fit_ids]
+    for plot_call in plot_hubble_calls:
+        assert "agn_likelihood_space_chi2" not in plot_call["keyword_names"]
+        assert (
+            "agn_likelihood_space_chi2_zgt1"
+            not in plot_call["keyword_names"]
+        )
     expected_draw_indices = (
         hubble_plotting.get_hubble_posterior_sample_indices(8)
     )

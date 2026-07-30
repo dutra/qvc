@@ -1194,17 +1194,46 @@ def run_single_jax(
         posterior_sample_indices=posterior_sample_indices,
         agn_pivot_context=agn_pivot_context,
     )
-    debiased_residuals, _debiased_clipping_sigma, _, mu_pred_std_debiased, _ = r
-    hubble_chi2_mask = df_agn_fit["z"].between(z_range[0], z_range[1]).to_numpy(dtype=bool)
-    if np.any(hubble_chi2_mask):
-        chisq_red_hubble_debiased, _ = reduced_chi_squared(
+    (
+        debiased_residuals,
+        _debiased_clipping_sigma,
+        _,
+        mu_pred_std_debiased,
+        mu_pred_std_debiased_with_scatter,
+    ) = r
+    n_agn_params = sum(label != "M0_sn" for label in model_labels)
+    hubble_chi2_mask = (
+        df_agn_fit["z"]
+        .between(z_range[0], z_range[1])
+        .to_numpy(dtype=bool)
+        & np.isfinite(debiased_residuals)
+        & np.isfinite(mu_pred_std_debiased)
+        & np.isfinite(mu_pred_std_debiased_with_scatter)
+        & (mu_pred_std_debiased > 0.0)
+        & (mu_pred_std_debiased_with_scatter > 0.0)
+    )
+    if np.count_nonzero(hubble_chi2_mask) > n_agn_params:
+        chisq_red_hubble_debiased_full, _ = reduced_chi_squared(
+            debiased_residuals[hubble_chi2_mask],
+            mu_pred_std_debiased_with_scatter[hubble_chi2_mask],
+            n_params=n_agn_params,
+        )
+        chisq_red_hubble_debiased_data_only, _ = reduced_chi_squared(
             debiased_residuals[hubble_chi2_mask],
             mu_pred_std_debiased[hubble_chi2_mask],
-            n_params=len(model_labels) - 1,
+            n_params=n_agn_params,
         )
     else:
-        chisq_red_hubble_debiased = np.nan
-    print(f"Reduced chi-squared (debiased) Hubble: {chisq_red_hubble_debiased:.3f}")
+        chisq_red_hubble_debiased_full = np.nan
+        chisq_red_hubble_debiased_data_only = np.nan
+    print(
+        "Reduced chi-squared (debiased) Hubble, full: "
+        f"{chisq_red_hubble_debiased_full:.3f}"
+    )
+    print(
+        "Reduced chi-squared (debiased) Hubble, data only: "
+        f"{chisq_red_hubble_debiased_data_only:.3f}"
+    )
 
     plot_completeness_diagnostics(
         dmi_posterior_median,

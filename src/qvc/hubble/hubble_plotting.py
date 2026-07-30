@@ -5428,8 +5428,6 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
                 only_agn=False,
                 use_intrinsic_scatter_in_residual_sigma=True,
                 diagnostics_suffix=None,
-                agn_likelihood_space_chi2=None,
-                agn_likelihood_space_chi2_zgt1=None,
                 residuals_csv_filename="residuals.csv",
                 compute_only=False,
                 *,
@@ -5545,6 +5543,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
         use_eta_sigma_term=option_flags["use_eta_sigma_term"],
         use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
     )
+    n_agn_params = sum(label != "M0_sn" for label in model_labels)
     show_sne = (
         not option_flags["only_agn"]
         and df_pantheon is not None
@@ -5747,9 +5746,18 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     mu_pred_joint_consistent = (
         mu_cosmo_posterior_median + residuals
     )
-    chi2_redshift_mask = np.isfinite(z_values)
-    if debias:
-        chi2_redshift_mask &= (z_values >= z_range[0]) & (z_values <= z_range[1])
+    chi2_redshift_mask = (
+        np.isfinite(z_values)
+        & np.isfinite(residuals)
+        & np.isfinite(data_var)
+        & np.isfinite(total_var)
+        & (data_var > 0.0)
+        & (total_var > 0.0)
+        & (z_values >= z_range[0])
+        & (z_values <= z_range[1])
+    )
+    if clipped_mask is not None:
+        chi2_redshift_mask &= ~clipped_mask
 
     # Plot the inferred distance moduli directly.  The observed population
     # already contains its real scatter; adding a synthetic intrinsic-scatter
@@ -5759,7 +5767,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     clipping_sigma = mu_pred_std_with_scatter if use_intrinsic_scatter_in_residual_sigma else mu_pred_std
     display_residuals_err = mu_pred_std if debias else clipping_sigma
     binning_sigma = clipping_sigma
-    chi2_sigma = clipping_sigma
+    chi2_sigma = mu_pred_std_with_scatter
 
     mu_zscore = np.abs(residuals) / clipping_sigma
 
@@ -6196,61 +6204,48 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
 
         ax_resid.set_ylabel(r"$\Delta\mu$ (mag)")
         ax_resid.set_xlabel(r"$z$")
-        chi2_red = np.nan
-        chi2_red_zgt1 = np.nan
-        chi2_red_with_logf = np.nan
-        chi2_red_shown_plus_sigma_dmi = np.nan
-        chi2_red_with_logf_plus_sigma_dmi = np.nan
-        if np.any(chi2_redshift_mask):
-            residuals_chi2 = residuals[chi2_redshift_mask]
-            residuals_err_chi2 = chi2_sigma[chi2_redshift_mask]
-            mu_pred_std_with_scatter_chi2 = mu_pred_std_with_scatter[chi2_redshift_mask]
-            chi2_red, _ = reduced_chi_squared(
-                residuals_chi2,
-                residuals_err_chi2,
-                n_params=len(model_labels) - 1,
+        def _paired_reduced_chi2(mask):
+            if np.count_nonzero(mask) <= n_agn_params:
+                return np.nan, np.nan
+            chi2_full, _ = reduced_chi_squared(
+                residuals[mask],
+                mu_pred_std_with_scatter[mask],
+                n_params=n_agn_params,
             )
-            high_z_chi2_mask = (
-                chi2_redshift_mask
-                & (z_values > 1.0)
-                & (z_values <= z_range[1])
+            chi2_data_only, _ = reduced_chi_squared(
+                residuals[mask],
+                mu_pred_std[mask],
+                n_params=n_agn_params,
             )
-            if np.any(high_z_chi2_mask):
-                chi2_red_zgt1, _ = reduced_chi_squared(
-                    residuals[high_z_chi2_mask],
-                    chi2_sigma[high_z_chi2_mask],
-                    n_params=len(model_labels) - 1,
-                )
-            if debias:
-                chi2_red_with_logf, _ = reduced_chi_squared(
-                    residuals_chi2,
-                    mu_pred_std_with_scatter_chi2,
-                    n_params=len(model_labels) - 1,
-                )
-                if sigma_dmi is not None:
-                    # Both primary arrays already contain sigma_dmi in
-                    # quadrature; retain these legacy diagnostic variables
-                    # without adding the correction uncertainty twice.
-                    chi2_red_shown_plus_sigma_dmi = chi2_red
-                    chi2_red_with_logf_plus_sigma_dmi = chi2_red_with_logf
-        chi2_text_value = chi2_red
-        chi2_text_value_zgt1 = chi2_red_zgt1
-        if debias and agn_likelihood_space_chi2 is not None and np.isfinite(agn_likelihood_space_chi2):
-            chi2_text_value = agn_likelihood_space_chi2
-        if (
-            debias
-            and agn_likelihood_space_chi2_zgt1 is not None
-            and np.isfinite(agn_likelihood_space_chi2_zgt1)
-        ):
-            chi2_text_value_zgt1 = agn_likelihood_space_chi2_zgt1
+            return chi2_full, chi2_data_only
 
-        if np.isfinite(chi2_text_value):
+        chi2_full, chi2_data_only = _paired_reduced_chi2(
+            chi2_redshift_mask
+        )
+        high_z_chi2_mask = chi2_redshift_mask & (z_values > 1.0)
+        chi2_full_zgt1, chi2_data_only_zgt1 = _paired_reduced_chi2(
+            high_z_chi2_mask
+        )
+
+        if np.isfinite(chi2_full) and np.isfinite(chi2_data_only):
+            chi2_kind = "Debiased" if debias else "Biased"
             chi2_annotation_lines = [
-                rf"$\chi^2_\nu({z_range[0]:.2f}<z<{z_range[1]:.2f}) = {chi2_text_value:.2f}$"
+                rf"{chi2_kind} $\chi^2_\nu$ (full / data only)",
+                (
+                    rf"${z_range[0]:.2f}\leq z\leq{z_range[1]:.2f}$: "
+                    f"{chi2_full:.2f} / {chi2_data_only:.2f}"
+                ),
             ]
-            if np.isfinite(chi2_text_value_zgt1):
+            if (
+                np.isfinite(chi2_full_zgt1)
+                and np.isfinite(chi2_data_only_zgt1)
+            ):
                 chi2_annotation_lines.append(
-                    rf"$\chi^2_\nu(1.00<z<{z_range[1]:.2f}) = {chi2_text_value_zgt1:.2f}$"
+                    (
+                        rf"$1.00<z\leq{z_range[1]:.2f}$: "
+                        f"{chi2_full_zgt1:.2f} / "
+                        f"{chi2_data_only_zgt1:.2f}"
+                    )
                 )
             ax_resid.text(
                 0.02,
@@ -6412,10 +6407,14 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     if np.any(error_budget_mask):
         def _chi2_red_from_var(var_term):
             mask = error_budget_mask & np.isfinite(var_term) & (var_term > 0)
-            if not np.any(mask):
+            if np.count_nonzero(mask) <= n_agn_params:
                 return np.nan
-            dof_local = max(int(np.count_nonzero(mask)) - 1, 1)
-            return float(np.sum((residuals[mask] ** 2) / var_term[mask]) / dof_local)
+            value, _ = reduced_chi_squared(
+                residuals[mask],
+                np.sqrt(var_term[mask]),
+                n_params=n_agn_params,
+            )
+            return float(value)
 
         def _median_fraction(component_var):
             mask = error_budget_mask & np.isfinite(component_var)
@@ -6426,6 +6425,13 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
         residual_rms = float(np.sqrt(np.mean(residuals[error_budget_mask] ** 2)))
         budget_rows = [
             {"metric": "n_objects", "value": float(np.count_nonzero(error_budget_mask))},
+            {"metric": "n_agn_parameters", "value": float(n_agn_params)},
+            {
+                "metric": "chi2_degrees_of_freedom",
+                "value": float(
+                    np.count_nonzero(error_budget_mask) - n_agn_params
+                ),
+            },
             {"metric": "residual_rms_mag", "value": residual_rms},
             {"metric": "median_abs_residual_mag", "value": float(np.median(np.abs(residuals[error_budget_mask])))},
             {"metric": "chi2_red_full", "value": _chi2_red_from_var(total_var)},

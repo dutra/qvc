@@ -3280,38 +3280,6 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
             early_de_guard=early_de_guard,
             dmi_draw_indices=posterior_sample_indices,
         )
-        df_agn_agn_likelihood_chi2_selection = df_agn_pass2_fit_selection
-        if resume_replot_with_cuts:
-            df_agn_agn_likelihood_chi2_selection = df_agn_pass2_plot_sample[
-                df_agn_pass2_plot_sample["z"].between(z_range[0], z_range[1])
-            ].copy()
-        chisq_red_agn_likelihood_space, _ = compute_agn_likelihood_space_reduced_chi2(
-            flat_samples,
-            model_labels,
-            df_agn_agn_likelihood_chi2_selection,
-            cosmo_model,
-            z_pivot_agn=z_pivot_agn,
-            agn_pivot_context=agn_pivot_context,
-            use_alpha_lambda_term=use_alpha_lambda_term,
-            use_eta_sigma_term=use_eta_sigma_term,
-            use_redshift_log_f_term=use_redshift_log_f_term,
-        )
-        df_agn_agn_likelihood_chi2_selection_zgt1 = df_agn_agn_likelihood_chi2_selection[
-            df_agn_agn_likelihood_chi2_selection["z"].between(
-                1.0, z_range[1], inclusive="right"
-            )
-        ]
-        chisq_red_agn_likelihood_space_zgt1, _ = compute_agn_likelihood_space_reduced_chi2(
-            flat_samples,
-            model_labels,
-            df_agn_agn_likelihood_chi2_selection_zgt1,
-            cosmo_model,
-            z_pivot_agn=z_pivot_agn,
-            agn_pivot_context=agn_pivot_context,
-            use_alpha_lambda_term=use_alpha_lambda_term,
-            use_eta_sigma_term=use_eta_sigma_term,
-            use_redshift_log_f_term=use_redshift_log_f_term,
-        )
         (
             debiased_residuals,
             _debiased_clipping_sigma,
@@ -3345,8 +3313,6 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
             use_eta_sigma_term=use_eta_sigma_term,
             use_redshift_log_f_term=use_redshift_log_f_term,
             only_agn=only_agn,
-            agn_likelihood_space_chi2=chisq_red_agn_likelihood_space,
-            agn_likelihood_space_chi2_zgt1=chisq_red_agn_likelihood_space_zgt1,
             agn_pivot_context=agn_pivot_context,
         )
         print(
@@ -3578,21 +3544,6 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         use_eta_sigma_term=use_eta_sigma_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
     )
-    df_agn_agn_likelihood_chi2_selection_zgt1 = df_agn_agn_likelihood_chi2_selection[
-        df_agn_agn_likelihood_chi2_selection["z"].between(1.0, z_range[1], inclusive="right")
-    ]
-    chisq_red_agn_likelihood_space_zgt1, _ = compute_agn_likelihood_space_reduced_chi2(
-        flat_samples,
-        model_labels,
-        df_agn_agn_likelihood_chi2_selection_zgt1,
-        cosmo_model,
-        z_pivot_agn=z_pivot_agn,
-        agn_pivot_context=agn_pivot_context,
-        use_alpha_lambda_term=use_alpha_lambda_term,
-        use_eta_sigma_term=use_eta_sigma_term,
-        use_redshift_log_f_term=use_redshift_log_f_term,
-    )
-
     print("Plotting Hubble diagram...")
     if dmi_posterior_median_full is not None:
         plot_completeness_diagnostics(
@@ -3621,8 +3572,6 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                     use_eta_sigma_term=use_eta_sigma_term,
                     use_redshift_log_f_term=use_redshift_log_f_term,
                     only_agn=only_agn,
-                    agn_likelihood_space_chi2=chisq_red_agn_likelihood_space,
-                    agn_likelihood_space_chi2_zgt1=chisq_red_agn_likelihood_space_zgt1,
                     agn_pivot_context=agn_pivot_context)
     debiased_residuals, debiased_clipping_sigma, mu_pred_median_debiased, mu_pred_std_debiased, mu_pred_std_debiased_with_scatter = r
     if apply_two_pass_sigma_clip:
@@ -3770,15 +3719,32 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 agn_pivot_context=agn_pivot_context)
     biased_residuals, biased_residuals_err, _, _, _ = r
 
-    hubble_chi2_mask = df_agn_pass2_plot_sample["z"].between(z_range[0], z_range[1]).to_numpy(dtype=bool)
-    if np.any(hubble_chi2_mask):
-        chisq_red_hubble_debiased, _ = reduced_chi_squared(
+    n_agn_params = sum(label != "M0_sn" for label in model_labels)
+    hubble_chi2_mask = (
+        df_agn_pass2_plot_sample["z"]
+        .between(z_range[0], z_range[1])
+        .to_numpy(dtype=bool)
+        & np.isfinite(debiased_residuals)
+        & np.isfinite(mu_pred_std_debiased)
+        & np.isfinite(mu_pred_std_debiased_with_scatter)
+        & (mu_pred_std_debiased > 0.0)
+        & (mu_pred_std_debiased_with_scatter > 0.0)
+    )
+    if np.count_nonzero(hubble_chi2_mask) > n_agn_params:
+        chisq_red_hubble_debiased_full, _ = reduced_chi_squared(
+            debiased_residuals[hubble_chi2_mask],
+            mu_pred_std_debiased_with_scatter[hubble_chi2_mask],
+            n_params=n_agn_params,
+        )
+        chisq_red_hubble_debiased_data_only, _ = reduced_chi_squared(
             debiased_residuals[hubble_chi2_mask],
             mu_pred_std_debiased[hubble_chi2_mask],
-            n_params=len(model_labels)-1,
+            n_params=n_agn_params,
         )
     else:
-        chisq_red_hubble_debiased = np.nan
+        chisq_red_hubble_debiased_full = np.nan
+        chisq_red_hubble_debiased_data_only = np.nan
+    chisq_red_hubble_debiased = chisq_red_hubble_debiased_full
     chisq_red_hubble_debiased_no_mpred_err = np.nan
     hdbudget_path = Path(plot_path) / "diagnostics" / "hubble_error_budget_per_object_debiased.csv"
     if np.any(hubble_chi2_mask) and hdbudget_path.exists():
@@ -3790,6 +3756,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
             "sigma_lens_term",
             "z_err_term",
             "intrinsic_scatter_term",
+            "sigma_dmi_term",
         }
         if required_no_mpred_cols.issubset(hdbudget_df.columns):
             budget_mask = hdbudget_df["z"].between(z_range[0], z_range[1]).to_numpy(dtype=bool)
@@ -3798,12 +3765,18 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 + np.square(hdbudget_df["sigma_lens_term"].to_numpy(dtype=float))
                 + np.square(hdbudget_df["z_err_term"].to_numpy(dtype=float))
                 + np.square(hdbudget_df["intrinsic_scatter_term"].to_numpy(dtype=float))
+                + np.square(
+                    np.nan_to_num(
+                        hdbudget_df["sigma_dmi_term"].to_numpy(dtype=float),
+                        nan=0.0,
+                    )
+                )
             )
-            if np.any(budget_mask):
+            if np.count_nonzero(budget_mask) > n_agn_params:
                 chisq_red_hubble_debiased_no_mpred_err, _ = reduced_chi_squared(
                     hdbudget_df["residuals"].to_numpy(dtype=float)[budget_mask],
                     sigma_no_mpred[budget_mask],
-                    n_params=len(model_labels)-1,
+                    n_params=n_agn_params,
                 )
         else:
             missing_no_mpred_cols = sorted(required_no_mpred_cols.difference(hdbudget_df.columns))
@@ -3847,8 +3820,6 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         use_redshift_log_f_term=use_redshift_log_f_term,
         only_agn=only_agn,
         use_intrinsic_scatter_in_residual_sigma=False,
-        agn_likelihood_space_chi2=chisq_red_agn_likelihood_space,
-        agn_likelihood_space_chi2_zgt1=chisq_red_agn_likelihood_space_zgt1,
         diagnostics_suffix="_debiased_no_logf",
         agn_pivot_context=agn_pivot_context,
     )
@@ -4070,13 +4041,21 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
             )
 
     print(f"\033[94mReduced chi-squared (debiased) M2500: {chisq_red_M2500_debiased:.3f}\033[0m")
-    print(f"\033[94mReduced chi-squared (debiased) Hubble: {chisq_red_hubble_debiased:.3f}\033[0m")
+    print(
+        "\033[94mReduced chi-squared (debiased) Hubble, full: "
+        f"{chisq_red_hubble_debiased_full:.3f}\033[0m"
+    )
+    print(
+        "\033[94mReduced chi-squared (debiased) Hubble, data only: "
+        f"{chisq_red_hubble_debiased_data_only:.3f}\033[0m"
+    )
     print(f"\033[94mReduced chi-squared (AGN likelihood-space residuals): {chisq_red_agn_likelihood_space:.3f}\033[0m")
     print(f"\033[94mReduced chi-squared (debiased) Hubble no Mpred err: {chisq_red_hubble_debiased_no_mpred_err:.3f}\033[0m")
     print(f"\033[94mReduced chi-squared (debiased) L2500: {chisq_red_L2500:.3f}\033[0m")
     chisq_dict = {
         'M2500': chisq_red_M2500_debiased,
-        'Hubble': chisq_red_hubble_debiased,
+        'Hubble': chisq_red_hubble_debiased_full,
+        'Hubble_data_only': chisq_red_hubble_debiased_data_only,
         'AGN_likelihood_space': chisq_red_agn_likelihood_space,
         'L2500': chisq_red_L2500
     }
