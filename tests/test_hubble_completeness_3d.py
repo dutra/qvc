@@ -626,6 +626,81 @@ def test_save_mock_catalog_persists_alpha_lambda(tmp_path):
         np.testing.assert_allclose(handle["alpha_nu"][:], -alpha_lambda - 2.0)
         assert handle.attrs["alpha_lambda_parent_mean"] == -1.5
         assert handle.attrs["alpha_lambda_parent_sigma"] == 0.3
+        assert handle.attrs["thinning_probability"] == 1.0
+        assert handle.attrs["mock_count_scale"] == 1.0
+
+
+def test_generate_fresh_completeness_uses_full_area_without_thinning(
+    tmp_path,
+    monkeypatch,
+):
+    calls = {}
+    z_all = np.array([0.5, 1.0])
+    m_all = np.array([20.0, 21.0])
+    m_2500_all = np.array([19.8, 20.8])
+    alpha_lambda_all = np.array([-1.5, -1.6])
+
+    monkeypatch.setattr(
+        hubble_fit,
+        "build_shen_lf",
+        lambda _: (
+            np.zeros((2, 2)),
+            np.array([-24.0, -23.0]),
+            np.array([0.0, 1.0]),
+        ),
+    )
+
+    def fake_mock_m_per_zbin(
+        phi_log10,
+        m_grid,
+        z_bins,
+        area_deg2,
+        *args,
+        thinning_probability,
+        **kwargs,
+    ):
+        calls["mock_area_deg2"] = area_deg2
+        calls["mock_thinning_probability"] = thinning_probability
+        return (
+            [],
+            np.array([]),
+            [],
+            np.array([]),
+            z_all,
+            m_all,
+            m_2500_all,
+            np.array([0, 0]),
+            alpha_lambda_all,
+        )
+
+    def fake_save_mock_catalog(
+        output_path,
+        z,
+        m,
+        m_2500,
+        *,
+        thinning_probability,
+        area_deg2,
+        **kwargs,
+    ):
+        calls["save_thinning_probability"] = thinning_probability
+        calls["save_area_deg2"] = area_deg2
+
+    monkeypatch.setattr(hubble_fit, "mock_m_per_zbin", fake_mock_m_per_zbin)
+    monkeypatch.setattr(hubble_fit, "save_mock_catalog", fake_save_mock_catalog)
+
+    output_path = hubble_fit.generate_fresh_completeness_sim_file(
+        tmp_path,
+        area_deg2=74.1,
+    )
+
+    assert output_path.endswith("completeness/mock_completeness_catalog_fresh.h5")
+    assert calls == {
+        "mock_area_deg2": 74.1,
+        "mock_thinning_probability": 1.0,
+        "save_thinning_probability": 1.0,
+        "save_area_deg2": 74.1,
+    }
 
 
 def test_get_completeness_function_3d_fhost_and_loglikelihood_smoke(tmp_path):

@@ -32,7 +32,7 @@ plt.style.use(Path(__file__).with_name("style.mplstyle"))
 z_pivot_sna = 0.0
 z_pivot_agn = 1.5
 DEFAULT_COMPLETENESS_SIM_FILE = None
-DEFAULT_COMPLETENESS_MOCK_AREA_DEG2 = 5.0
+DEFAULT_COMPLETENESS_FOOTPRINT_AREA_DEG2 = 5.0
 
 from qvc.hubble.hubble_utils import (
     compare_models_by_log_evidence_all,
@@ -1307,9 +1307,9 @@ def estimate_sky_box_area_deg2(df_agn_all):
         print(
             "[WARNING] Could not estimate sky-box area from df_agn_all because "
             "RA/Dec columns are missing; using default mock area "
-            f"{DEFAULT_COMPLETENESS_MOCK_AREA_DEG2:.1f} deg^2."
+            f"{DEFAULT_COMPLETENESS_FOOTPRINT_AREA_DEG2:.1f} deg^2."
         )
-        return DEFAULT_COMPLETENESS_MOCK_AREA_DEG2
+        return DEFAULT_COMPLETENESS_FOOTPRINT_AREA_DEG2
 
     ra = np.mod(pd.to_numeric(df_agn_all[ra_col], errors="coerce").to_numpy(dtype=float), 360.0)
     dec = pd.to_numeric(df_agn_all[dec_col], errors="coerce").to_numpy(dtype=float)
@@ -1319,9 +1319,9 @@ def estimate_sky_box_area_deg2(df_agn_all):
     if ra.size < 2:
         print(
             "[WARNING] Too few finite RA/Dec rows to estimate sky-box area; "
-            f"using default mock area {DEFAULT_COMPLETENESS_MOCK_AREA_DEG2:.1f} deg^2."
+            f"using default mock area {DEFAULT_COMPLETENESS_FOOTPRINT_AREA_DEG2:.1f} deg^2."
         )
-        return DEFAULT_COMPLETENESS_MOCK_AREA_DEG2
+        return DEFAULT_COMPLETENESS_FOOTPRINT_AREA_DEG2
 
     ra_sorted = np.sort(ra)
     gaps = np.diff(np.concatenate([ra_sorted, [ra_sorted[0] + 360.0]]))
@@ -1339,9 +1339,9 @@ def estimate_sky_box_area_deg2(df_agn_all):
     if not np.isfinite(area_deg2) or area_deg2 <= 0.0:
         print(
             "[WARNING] Invalid sky-box area estimate from RA/Dec; using default "
-            f"mock area {DEFAULT_COMPLETENESS_MOCK_AREA_DEG2:.1f} deg^2."
+            f"mock area {DEFAULT_COMPLETENESS_FOOTPRINT_AREA_DEG2:.1f} deg^2."
         )
-        return DEFAULT_COMPLETENESS_MOCK_AREA_DEG2
+        return DEFAULT_COMPLETENESS_FOOTPRINT_AREA_DEG2
 
     print(
         "Estimated pre-cut sky-box area from df_agn_all: "
@@ -1945,10 +1945,7 @@ def generate_fresh_completeness_sim_file(plot_path, *, area_deg2, seed=123):
     completeness_dir = Path(plot_path) / "completeness"
     completeness_dir.mkdir(parents=True, exist_ok=True)
     output_path = completeness_dir / "mock_completeness_catalog_fresh.h5"
-    thinning_probability = min(
-        1.0,
-        float(DEFAULT_COMPLETENESS_MOCK_AREA_DEG2) / max(float(area_deg2), 1e-12),
-    )
+    thinning_probability = 1.0
 
     rng = np.random.default_rng(seed)
     phi_log10, m_grid, z_bins = build_shen_lf(None)
@@ -1975,7 +1972,8 @@ def generate_fresh_completeness_sim_file(plot_path, *, area_deg2, seed=123):
     n_generated = int(np.size(z_all))
     print(
         f"Fresh completeness mock generated {n_generated} sources "
-        f"after in-generator thinning (p_keep={thinning_probability:.4g})."
+        f"for the full {float(area_deg2):.1f} deg^2 footprint "
+        f"(p_keep={thinning_probability:.4g})."
     )
     save_mock_catalog(
         output_path,
