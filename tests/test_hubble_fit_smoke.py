@@ -24,6 +24,16 @@ from qvc.hubble import (
     hubble_utils,
 )
 
+
+@pytest.fixture(autouse=True)
+def _disable_expensive_redshift_wiggle_atlas(monkeypatch):
+    monkeypatch.setattr(
+        hubble_fit,
+        "plot_redshift_wiggle_diagnostics",
+        lambda *args, **kwargs: None,
+    )
+
+
 def _make_fake_agn_sample(n_agn=24, seed=123):
     rng = np.random.default_rng(seed)
     cosmo = FlatLambdaCDM(H0=70.0, Om0=0.3)
@@ -1815,6 +1825,7 @@ def test_run_single_minimal_plots_keeps_only_debiased_hubble_plot(monkeypatch, t
         "plot_blr_diagnostics_summary",
         "plot_completeness_diagnostics",
         "plot_cosmo_corner",
+        "plot_parameter_residual_diagnostics",
     ):
         monkeypatch.setattr(
             hubble_fit,
@@ -2421,6 +2432,7 @@ def _patch_run_single_plot_stack(monkeypatch):
     monkeypatch.setattr(hubble_fit, "plot_predicted_vs_actual_M2500", lambda *args, **kwargs: (np.zeros(len(args[1])), np.ones(len(args[1])), None, None))
     monkeypatch.setattr(hubble_fit, "plot_full_residuals", lambda *args, **kwargs: None)
     monkeypatch.setattr(hubble_fit, "plot_full_residuals_rz", lambda *args, **kwargs: None)
+    monkeypatch.setattr(hubble_fit, "plot_parameter_residual_diagnostics", lambda *args, **kwargs: None)
     monkeypatch.setattr(hubble_fit, "plot_debias_impact_diagnostics", lambda *args, **kwargs: None)
     monkeypatch.setattr(hubble_fit, "plot_redshift_bin_residual_summary", lambda *args, **kwargs: None)
     monkeypatch.setattr(hubble_fit, "plot_fast_vs_uv_variability", lambda *args, **kwargs: None)
@@ -3524,6 +3536,8 @@ def test_run_single_disable_sigma_clip_pass_skips_two_pass_branch(monkeypatch, t
     blr_pdf_calls = []
     debias_impact_calls = []
     alphaox_calls = []
+    parameter_diagnostic_calls = []
+    redshift_wiggle_calls = []
 
     monkeypatch.chdir(tmp_path)
     _patch_run_single_plot_stack(monkeypatch)
@@ -3582,6 +3596,16 @@ def test_run_single_disable_sigma_clip_pass_skips_two_pass_branch(monkeypatch, t
     monkeypatch.setattr(hubble_fit, "plot_full_residuals_rz", lambda *args, **kwargs: full_residual_rz_calls.append(kwargs))
     monkeypatch.setattr(hubble_fit, "plot_debias_impact_diagnostics", lambda *args, **kwargs: debias_impact_calls.append(kwargs))
     monkeypatch.setattr(hubble_fit, "plot_residuals_vs_alphaOX", lambda *args, **kwargs: alphaox_calls.append(kwargs))
+    monkeypatch.setattr(
+        hubble_fit,
+        "plot_parameter_residual_diagnostics",
+        lambda *args, **kwargs: parameter_diagnostic_calls.append((args, kwargs)),
+    )
+    monkeypatch.setattr(
+        hubble_fit,
+        "plot_redshift_wiggle_diagnostics",
+        lambda *args, **kwargs: redshift_wiggle_calls.append((args, kwargs)),
+    )
 
     hubble_fit.run_single(
         df_agn=df_agn,
@@ -3624,6 +3648,18 @@ def test_run_single_disable_sigma_clip_pass_skips_two_pass_branch(monkeypatch, t
         assert "clipped_mask" not in kwargs
     for kwargs in alphaox_calls:
         assert "clipped_mask" not in kwargs
+    assert len(parameter_diagnostic_calls) == 1
+    diagnostic_args, diagnostic_kwargs = parameter_diagnostic_calls[0]
+    assert diagnostic_args[0]["object_id"].tolist() == df_agn["object_id"].tolist()
+    np.testing.assert_allclose(diagnostic_args[1], 0.5)
+    np.testing.assert_allclose(diagnostic_args[2], 1.0)
+    assert diagnostic_kwargs["z_range"] == (0.44, 3.16)
+    assert len(redshift_wiggle_calls) == 1
+    wiggle_args, wiggle_kwargs = redshift_wiggle_calls[0]
+    assert wiggle_args[0]["object_id"].tolist() == df_agn["object_id"].tolist()
+    np.testing.assert_allclose(wiggle_args[1], 0.5)
+    np.testing.assert_allclose(wiggle_args[3], 0.5)
+    assert wiggle_kwargs["z_range"] == (0.44, 3.16)
 
 
 def test_load_agn_data_residuals_csv_cut_remains_available(monkeypatch, tmp_path):

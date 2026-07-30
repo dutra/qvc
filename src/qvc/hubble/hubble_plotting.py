@@ -12,6 +12,7 @@ import matplotlib.gridspec as gridspec
 import matplotlib.pyplot as plt
 import matplotlib.transforms as mtransforms
 import pandas as pd
+from matplotlib.backends.backend_pdf import PdfPages
 from mpl_toolkits.axes_grid1.inset_locator import inset_axes
 from astropy.cosmology import FlatwCDM, FlatwpwaCDM, FlatLambdaCDM, Flatw0waCDM
 from astropy.cosmology.realizations import Planck18
@@ -20,7 +21,7 @@ from matplotlib.lines import Line2D
 from matplotlib.ticker import FixedLocator, FormatStrFormatter, FuncFormatter, LogLocator, NullLocator
 from scipy.interpolate import RegularGridInterpolator, interp1d
 from scipy.optimize import minimize_scalar
-from scipy.stats import gaussian_kde, kurtosis, norm, normaltest, probplot, skew
+from scipy.stats import gaussian_kde, kurtosis, norm, normaltest, probplot, skew, spearmanr
 from tqdm import tqdm
 
 from qvc.hubble.hubble_model import (
@@ -8095,6 +8096,1261 @@ def plot_full_residuals_rz(
         use_eta_sigma_term=use_eta_sigma_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
     )
+
+
+def plot_parameter_residual_diagnostics(
+    df_agn,
+    residuals,
+    residuals_err=None,
+    *,
+    plot_path="plots/hubble",
+    z_range=(0.44, 3.16),
+    show=False,
+    min_points=10,
+    panels_per_page=6,
+    top_n=40,
+    nbins=10,
+):
+    """
+    Rank and plot scalar numeric parameters against final Hubble residuals.
+
+    The ranking emphasizes parameters that reduce the residual-redshift
+    Spearman correlation when conditioned upon. This is a diagnostic priority,
+    not a causal attribution.
+    """
+    if "z" not in df_agn.columns:
+        raise ValueError("df_agn must contain a 'z' column.")
+
+    residuals = np.asarray(residuals, dtype=float)
+    if residuals.ndim != 1 or residuals.size != len(df_agn):
+        raise ValueError(
+            f"residuals length {residuals.size} does not match dataframe length "
+            f"{len(df_agn)}."
+        )
+    if residuals_err is None:
+        residuals_err = np.full(residuals.shape, np.nan, dtype=float)
+    else:
+        residuals_err = np.asarray(residuals_err, dtype=float)
+        if residuals_err.ndim != 1 or residuals_err.size != len(df_agn):
+            raise ValueError(
+                f"residuals_err length {residuals_err.size} does not match "
+                f"dataframe length {len(df_agn)}."
+            )
+
+    if int(min_points) < 3:
+        raise ValueError("min_points must be at least 3.")
+    if int(panels_per_page) < 1:
+        raise ValueError("panels_per_page must be positive.")
+    if int(top_n) < 1:
+        raise ValueError("top_n must be positive.")
+
+    z_min, z_max = (float(z_range[0]), float(z_range[1]))
+    if not (np.isfinite(z_min) and np.isfinite(z_max) and z_min < z_max):
+        raise ValueError("z_range must contain two finite, increasing values.")
+
+    z = pd.to_numeric(df_agn["z"], errors="coerce").to_numpy(dtype=float)
+    analysis_mask = (
+        np.isfinite(z)
+        & np.isfinite(residuals)
+        & (z >= z_min)
+        & (z <= z_max)
+    )
+    if np.count_nonzero(analysis_mask) < int(min_points):
+        raise ValueError(
+            "Too few finite in-range residuals for parameter diagnostics: "
+            f"{np.count_nonzero(analysis_mask)} < {int(min_points)}."
+        )
+
+    weighted_mask = (
+        analysis_mask
+        & np.isfinite(residuals_err)
+        & (residuals_err > 0.0)
+    )
+    use_weighted = np.count_nonzero(weighted_mask) >= int(min_points)
+    trend_mask = weighted_mask if use_weighted else analysis_mask
+    redshift_trend = build_smooth_trend_1d(
+        z[trend_mask],
+        residuals[trend_mask],
+        yerr=residuals_err[trend_mask] if use_weighted else None,
+        frac=0.25,
+        it=1,
+        min_points=int(min_points),
+        fallback_bins=max(int(nbins), 3),
+    )
+    residuals_detrended = residuals - np.asarray(redshift_trend(z), dtype=float)
+
+    diagnostics_path = os.path.join(plot_path or "plots/hubble", "diagnostics")
+    os.makedirs(diagnostics_path, exist_ok=True)
+    summary_path = os.path.join(
+        diagnostics_path,
+        "hubble_parameter_residual_summary.pdf",
+    )
+    atlas_path = os.path.join(
+        diagnostics_path,
+        "hubble_parameter_residual_atlas.pdf",
+    )
+    rankings_path = os.path.join(
+        diagnostics_path,
+        "hubble_parameter_residual_rankings.csv",
+    )
+    skipped_path = os.path.join(
+        diagnostics_path,
+        "hubble_parameter_residual_skipped.csv",
+    )
+
+    spectra_fit_columns = set(df_agn.attrs.get("spectra_fit_columns", ()))
+    identifier_columns = {"object_id", "sdss_name"}
+    skipped_rows = []
+    ranking_rows = []
+    parameter_values = {}
+
+    def _record_skip(parameter, reason, *, finite_count=0, unique_count=0):
+        column = df_agn[parameter]
+        column_dtype = (
+            str(column.dtype)
+            if isinstance(column, pd.Series)
+            else "duplicate_column_name"
+        )
+        skipped_rows.append(
+            {
+                "parameter": parameter,
+                "reason": reason,
+                "dtype": column_dtype,
+                "finite_in_range": int(finite_count),
+                "unique_finite_in_range": int(unique_count),
+                "source": (
+                    "spectra_fit_csv"
+                    if parameter in spectra_fit_columns
+                    else "hdf5_or_derived"
+                ),
+            }
+        )
+
+    def _spearman(a, b):
+        if len(a) < 3:
+            return np.nan, np.nan
+        if np.unique(a).size < 2 or np.unique(b).size < 2:
+            return np.nan, np.nan
+        result = spearmanr(a, b, nan_policy="omit")
+        statistic = float(result.statistic)
+        pvalue = float(result.pvalue)
+        return statistic, pvalue
+
+    for parameter in df_agn.columns:
+        if parameter in identifier_columns:
+            _record_skip(parameter, "identifier")
+            continue
+        if parameter == "z":
+            _record_skip(parameter, "analysis_axis")
+            continue
+
+        series = df_agn[parameter]
+        if (
+            not isinstance(series, pd.Series)
+            or not (
+                pd.api.types.is_numeric_dtype(series.dtype)
+                or pd.api.types.is_bool_dtype(series.dtype)
+            )
+        ):
+            _record_skip(parameter, "non_numeric_or_non_scalar")
+            continue
+
+        values = pd.to_numeric(series, errors="coerce").to_numpy(dtype=float)
+        finite_mask = analysis_mask & np.isfinite(values)
+        finite_count = int(np.count_nonzero(finite_mask))
+        if finite_count < int(min_points):
+            _record_skip(
+                parameter,
+                "insufficient_finite_values",
+                finite_count=finite_count,
+            )
+            continue
+
+        unique_count = int(np.unique(values[finite_mask]).size)
+        if unique_count < 2:
+            _record_skip(
+                parameter,
+                "constant",
+                finite_count=finite_count,
+                unique_count=unique_count,
+            )
+            continue
+
+        p = values[finite_mask]
+        z_use = z[finite_mask]
+        r_use = residuals[finite_mask]
+        rz_use = residuals_detrended[finite_mask]
+        rho_pz, p_pz = _spearman(p, z_use)
+        rho_pr, p_pr = _spearman(p, r_use)
+        rho_prz, p_prz = _spearman(p, rz_use)
+        rho_rz, p_rz = _spearman(r_use, z_use)
+
+        partial_denominator = np.sqrt(
+            max(0.0, 1.0 - rho_pr**2)
+            * max(0.0, 1.0 - rho_pz**2)
+        )
+        if np.isfinite(partial_denominator) and partial_denominator > 1e-12:
+            partial_rho = (rho_rz - rho_pr * rho_pz) / partial_denominator
+            partial_rho = float(np.clip(partial_rho, -1.0, 1.0))
+        else:
+            partial_rho = np.nan
+
+        attenuation = (
+            float(abs(rho_rz) - abs(partial_rho))
+            if np.isfinite(rho_rz) and np.isfinite(partial_rho)
+            else np.nan
+        )
+        ranking_rows.append(
+            {
+                "parameter": parameter,
+                "source": (
+                    "spectra_fit_csv"
+                    if parameter in spectra_fit_columns
+                    else "hdf5_or_derived"
+                ),
+                "finite_in_range": finite_count,
+                "coverage_in_range": finite_count / int(np.count_nonzero(analysis_mask)),
+                "unique_finite_in_range": unique_count,
+                "rho_parameter_redshift": rho_pz,
+                "p_parameter_redshift": p_pz,
+                "rho_parameter_residual": rho_pr,
+                "p_parameter_residual": p_pr,
+                "rho_parameter_detrended_residual": rho_prz,
+                "p_parameter_detrended_residual": p_prz,
+                "rho_residual_redshift": rho_rz,
+                "p_residual_redshift": p_rz,
+                "partial_rho_residual_redshift_given_parameter": partial_rho,
+                "redshift_correlation_attenuation": attenuation,
+                "abs_rho_parameter_detrended_residual": abs(rho_prz),
+            }
+        )
+        parameter_values[parameter] = values
+
+    ranking_columns = [
+        "parameter",
+        "source",
+        "finite_in_range",
+        "coverage_in_range",
+        "unique_finite_in_range",
+        "rho_parameter_redshift",
+        "p_parameter_redshift",
+        "q_parameter_redshift",
+        "rho_parameter_residual",
+        "p_parameter_residual",
+        "q_parameter_residual",
+        "rho_parameter_detrended_residual",
+        "p_parameter_detrended_residual",
+        "q_parameter_detrended_residual",
+        "rho_residual_redshift",
+        "p_residual_redshift",
+        "partial_rho_residual_redshift_given_parameter",
+        "redshift_correlation_attenuation",
+        "abs_rho_parameter_detrended_residual",
+    ]
+
+    rankings = pd.DataFrame(ranking_rows)
+
+    def _benjamini_hochberg(pvalues):
+        pvalues = np.asarray(pvalues, dtype=float)
+        adjusted = np.full(pvalues.shape, np.nan, dtype=float)
+        finite = np.isfinite(pvalues)
+        if not np.any(finite):
+            return adjusted
+        p_finite = pvalues[finite]
+        order = np.argsort(p_finite)
+        ranked = p_finite[order]
+        n_tests = len(ranked)
+        q_ranked = ranked * n_tests / np.arange(1, n_tests + 1, dtype=float)
+        q_ranked = np.minimum.accumulate(q_ranked[::-1])[::-1]
+        q_finite = np.empty_like(q_ranked)
+        q_finite[order] = np.clip(q_ranked, 0.0, 1.0)
+        adjusted[finite] = q_finite
+        return adjusted
+
+    if rankings.empty:
+        rankings = pd.DataFrame(columns=ranking_columns)
+    else:
+        rankings["q_parameter_redshift"] = _benjamini_hochberg(
+            rankings["p_parameter_redshift"]
+        )
+        rankings["q_parameter_residual"] = _benjamini_hochberg(
+            rankings["p_parameter_residual"]
+        )
+        rankings["q_parameter_detrended_residual"] = _benjamini_hochberg(
+            rankings["p_parameter_detrended_residual"]
+        )
+        rankings = rankings.sort_values(
+            [
+                "redshift_correlation_attenuation",
+                "abs_rho_parameter_detrended_residual",
+                "parameter",
+            ],
+            ascending=[False, False, True],
+            na_position="last",
+            kind="stable",
+        ).reset_index(drop=True)
+        rankings = rankings.loc[:, ranking_columns]
+
+    skipped_columns = [
+        "parameter",
+        "reason",
+        "dtype",
+        "finite_in_range",
+        "unique_finite_in_range",
+        "source",
+    ]
+    skipped = pd.DataFrame(skipped_rows, columns=skipped_columns)
+    rankings.to_csv(rankings_path, index=False)
+    skipped.to_csv(skipped_path, index=False)
+
+    top = rankings.head(int(top_n))
+    if top.empty:
+        fig_summary, ax_summary = plt.subplots(figsize=(10.0, 4.0))
+        ax_summary.axis("off")
+        ax_summary.text(
+            0.5,
+            0.5,
+            "No eligible numeric parameters.",
+            ha="center",
+            va="center",
+        )
+    else:
+        heatmap_columns = [
+            "rho_parameter_redshift",
+            "rho_parameter_residual",
+            "rho_parameter_detrended_residual",
+            "partial_rho_residual_redshift_given_parameter",
+        ]
+        heatmap_labels = [
+            r"$\rho(p,z)$",
+            r"$\rho(p,r)$",
+            r"$\rho(p,r_z)$",
+            r"$\rho(r,z\mid p)$",
+        ]
+        heatmap = top[heatmap_columns].to_numpy(dtype=float)
+        fig_height = max(4.5, 0.28 * len(top) + 2.4)
+        fig_summary, ax_summary = plt.subplots(
+            figsize=(10.5, fig_height),
+        )
+        image_handle = ax_summary.imshow(
+            heatmap,
+            aspect="auto",
+            cmap="coolwarm",
+            vmin=-1.0,
+            vmax=1.0,
+        )
+        parameter_labels = [
+            (
+                f"[SED] {row.parameter} (N={row.finite_in_range})"
+                if row.source == "spectra_fit_csv"
+                else f"{row.parameter} (N={row.finite_in_range})"
+            )
+            for row in top.itertuples()
+        ]
+        ax_summary.set_yticks(np.arange(len(top)))
+        ax_summary.set_yticklabels(parameter_labels, fontsize=8)
+        ax_summary.set_xticks(np.arange(len(heatmap_labels)))
+        ax_summary.set_xticklabels(heatmap_labels, fontsize=11)
+        for row_idx in range(heatmap.shape[0]):
+            for col_idx in range(heatmap.shape[1]):
+                value = heatmap[row_idx, col_idx]
+                if np.isfinite(value):
+                    ax_summary.text(
+                        col_idx,
+                        row_idx,
+                        f"{value:.2f}",
+                        ha="center",
+                        va="center",
+                        fontsize=7,
+                        color="white" if abs(value) > 0.55 else "black",
+                    )
+        cbar = fig_summary.colorbar(image_handle, ax=ax_summary, pad=0.02)
+        cbar.set_label("Spearman correlation")
+        ax_summary.set_title(
+            "Hubble-residual parameter priorities\n"
+            "ranked by reduction in residual–redshift correlation; "
+            "diagnostic, not causal",
+            fontsize=12,
+        )
+    fig_summary.tight_layout()
+    summary_pdf = _save_figure(
+        fig_summary,
+        summary_path,
+        dpi=200,
+        show=show,
+    )
+
+    def _quantile_binned_medians(x, y, *, minimum_per_bin):
+        x = np.asarray(x, dtype=float)
+        y = np.asarray(y, dtype=float)
+        finite = np.isfinite(x) & np.isfinite(y)
+        x = x[finite]
+        y = y[finite]
+        if x.size < minimum_per_bin:
+            return np.array([]), np.array([])
+        unique_x = np.unique(x)
+        if unique_x.size <= int(nbins):
+            groups = [x == value for value in unique_x]
+        else:
+            edges = np.unique(np.nanquantile(x, np.linspace(0.0, 1.0, int(nbins) + 1)))
+            if edges.size < 2:
+                return np.array([]), np.array([])
+            groups = []
+            for edge_idx in range(edges.size - 1):
+                if edge_idx == edges.size - 2:
+                    groups.append((x >= edges[edge_idx]) & (x <= edges[edge_idx + 1]))
+                else:
+                    groups.append((x >= edges[edge_idx]) & (x < edges[edge_idx + 1]))
+        x_median = []
+        y_median = []
+        for group in groups:
+            if np.count_nonzero(group) < minimum_per_bin:
+                continue
+            x_median.append(float(np.nanmedian(x[group])))
+            y_median.append(float(np.nanmedian(y[group])))
+        return np.asarray(x_median), np.asarray(y_median)
+
+    with PdfPages(atlas_path) as pdf:
+        if rankings.empty:
+            fig_atlas, ax_atlas = plt.subplots(figsize=(11.0, 8.5))
+            ax_atlas.axis("off")
+            ax_atlas.text(
+                0.5,
+                0.5,
+                "No eligible numeric parameters.",
+                ha="center",
+                va="center",
+            )
+            pdf.savefig(fig_atlas, bbox_inches="tight")
+            if show:
+                plt.show()
+            plt.close(fig_atlas)
+        else:
+            n_cols = min(3, int(panels_per_page))
+            n_rows = int(math.ceil(int(panels_per_page) / n_cols))
+            color_norm = mpl.colors.Normalize(vmin=z_min, vmax=z_max)
+            color_map = "viridis"
+            bin_minimum = max(3, int(min_points) // 2)
+
+            for page_start in range(0, len(rankings), int(panels_per_page)):
+                page = rankings.iloc[
+                    page_start : page_start + int(panels_per_page)
+                ]
+                fig_atlas, axes_grid = plt.subplots(
+                    n_rows,
+                    n_cols,
+                    figsize=(5.0 * n_cols, 3.8 * n_rows),
+                    squeeze=False,
+                )
+                axes = axes_grid.ravel()
+                for ax, row in zip(axes, page.itertuples()):
+                    values = parameter_values[row.parameter]
+                    mask = analysis_mask & np.isfinite(values)
+                    x_use = values[mask]
+                    r_use = residuals[mask]
+                    rz_use = residuals_detrended[mask]
+                    z_use = z[mask]
+
+                    ax.scatter(
+                        x_use,
+                        r_use,
+                        c=z_use,
+                        cmap=color_map,
+                        norm=color_norm,
+                        s=8,
+                        alpha=0.28,
+                        linewidths=0,
+                        rasterized=True,
+                    )
+                    x_raw, y_raw = _quantile_binned_medians(
+                        x_use,
+                        r_use,
+                        minimum_per_bin=bin_minimum,
+                    )
+                    x_detrended, y_detrended = _quantile_binned_medians(
+                        x_use,
+                        rz_use,
+                        minimum_per_bin=bin_minimum,
+                    )
+                    if x_raw.size:
+                        ax.plot(
+                            x_raw,
+                            y_raw,
+                            color="tab:red",
+                            lw=2.0,
+                            label="raw median",
+                        )
+                    if x_detrended.size:
+                        ax.plot(
+                            x_detrended,
+                            y_detrended,
+                            color="tab:orange",
+                            lw=2.0,
+                            linestyle="--",
+                            label=r"$r_z$ median",
+                        )
+                    ax.axhline(0.0, color="black", lw=0.8, alpha=0.65)
+
+                    if x_use.size >= 2:
+                        x_lo, x_hi = np.nanpercentile(x_use, [1.0, 99.0])
+                        if np.isfinite(x_lo) and np.isfinite(x_hi) and x_hi > x_lo:
+                            padding = 0.04 * (x_hi - x_lo)
+                            ax.set_xlim(x_lo - padding, x_hi + padding)
+
+                    source_tag = " [SED]" if row.source == "spectra_fit_csv" else ""
+                    ax.set_title(f"{row.parameter}{source_tag}", fontsize=10)
+                    ax.set_xlabel(row.parameter, fontsize=9)
+                    ax.set_ylabel("Debiased Hubble residual (mag)", fontsize=9)
+                    ax.text(
+                        0.02,
+                        0.98,
+                        (
+                            f"N={row.finite_in_range}, "
+                            f"coverage={row.coverage_in_range:.1%}\n"
+                            rf"$\rho(p,z)$={row.rho_parameter_redshift:.2f}; "
+                            rf"$\rho(p,r)$={row.rho_parameter_residual:.2f}"
+                            "\n"
+                            rf"$\rho(p,r_z)$="
+                            f"{row.rho_parameter_detrended_residual:.2f}; "
+                            rf"$\Delta|\rho_z|$="
+                            f"{row.redshift_correlation_attenuation:.2f}"
+                        ),
+                        transform=ax.transAxes,
+                        va="top",
+                        ha="left",
+                        fontsize=7,
+                        bbox={
+                            "facecolor": "white",
+                            "alpha": 0.75,
+                            "edgecolor": "none",
+                            "pad": 2.0,
+                        },
+                    )
+                    ax.grid(True, alpha=0.15)
+
+                for ax in axes[len(page) :]:
+                    ax.axis("off")
+
+                active_axes = [ax for ax in axes[: len(page)] if ax.axison]
+                fig_atlas.suptitle(
+                    "Exhaustive Hubble-residual parameter atlas "
+                    f"({page_start + 1}–{page_start + len(page)} of "
+                    f"{len(rankings)}; central 1–99% x-range)",
+                    fontsize=13,
+                    y=0.985,
+                )
+                fig_atlas.subplots_adjust(
+                    left=0.07,
+                    right=0.89,
+                    bottom=0.08,
+                    top=0.84,
+                    wspace=0.30,
+                    hspace=0.42,
+                )
+                if active_axes:
+                    scalar_mappable = mpl.cm.ScalarMappable(
+                        norm=color_norm,
+                        cmap=color_map,
+                    )
+                    scalar_mappable.set_array([])
+                    colorbar_ax = fig_atlas.add_axes([0.915, 0.16, 0.012, 0.66])
+                    colorbar = fig_atlas.colorbar(
+                        scalar_mappable,
+                        cax=colorbar_ax,
+                    )
+                    colorbar.set_label("Redshift")
+                    handles, labels = [], []
+                    for legend_ax in active_axes:
+                        handles, labels = legend_ax.get_legend_handles_labels()
+                        if handles:
+                            break
+                    if handles:
+                        fig_atlas.legend(
+                            handles,
+                            labels,
+                            loc="upper center",
+                            bbox_to_anchor=(0.5, 0.945),
+                            ncol=2,
+                            frameon=False,
+                        )
+                pdf.savefig(fig_atlas, dpi=100, bbox_inches="tight")
+                if show:
+                    plt.show()
+                plt.close(fig_atlas)
+
+    return {
+        "summary_pdf": summary_pdf,
+        "atlas_pdf": atlas_path,
+        "rankings_csv": rankings_path,
+        "skipped_csv": skipped_path,
+    }
+
+
+def plot_redshift_wiggle_diagnostics(
+    df_agn,
+    residuals_biased,
+    residuals_biased_err,
+    residuals_debiased,
+    residuals_debiased_err,
+    *,
+    plot_path="plots/hubble",
+    z_range=(0.44, 3.16),
+    show=False,
+    min_points=10,
+    n_z_bins=12,
+    n_bootstrap=300,
+    n_permutations=500,
+    cv_folds=5,
+    atlas_top_n=None,
+    panels_per_page=6,
+    random_seed=93741,
+):
+    """
+    Diagnose local redshift structure in final Hubble residuals.
+
+    Unlike the parameter-first exhaustive audit, this view keeps redshift on
+    the x axis. Parameter priorities are based on out-of-fold reduction of the
+    RMS redshift wiggle and largest adjacent-bin jump. They are diagnostic
+    priorities, not causal conclusions.
+    """
+    if "z" not in df_agn.columns:
+        raise ValueError("df_agn must contain a 'z' column.")
+    n_rows = len(df_agn)
+
+    def _aligned(values, name):
+        array = np.asarray(values, dtype=float)
+        if array.ndim != 1 or array.size != n_rows:
+            raise ValueError(
+                f"{name} length {array.size} does not match dataframe length "
+                f"{n_rows}."
+            )
+        return array
+
+    rb = _aligned(residuals_biased, "residuals_biased")
+    eb = _aligned(residuals_biased_err, "residuals_biased_err")
+    rd = _aligned(residuals_debiased, "residuals_debiased")
+    ed = _aligned(residuals_debiased_err, "residuals_debiased_err")
+    z = pd.to_numeric(df_agn["z"], errors="coerce").to_numpy(dtype=float)
+    z_min, z_max = map(float, z_range)
+    if not (np.isfinite(z_min) and np.isfinite(z_max) and z_min < z_max):
+        raise ValueError("z_range must contain two finite, increasing values.")
+    if int(min_points) < 3:
+        raise ValueError("min_points must be at least 3.")
+    if int(n_z_bins) < 4:
+        raise ValueError("n_z_bins must be at least 4.")
+    if int(cv_folds) < 2:
+        raise ValueError("cv_folds must be at least 2.")
+
+    base_mask = (
+        np.isfinite(z)
+        & np.isfinite(rd)
+        & (z >= z_min)
+        & (z <= z_max)
+    )
+    if np.count_nonzero(base_mask) < int(min_points):
+        raise ValueError("Too few finite in-range debiased residuals.")
+    rng = np.random.default_rng(int(random_seed))
+    diagnostics_path = os.path.join(plot_path or "plots/hubble", "diagnostics")
+    os.makedirs(diagnostics_path, exist_ok=True)
+    overview_path = os.path.join(
+        diagnostics_path, "hubble_redshift_wiggle_overview.pdf"
+    )
+    change_path = os.path.join(
+        diagnostics_path, "hubble_redshift_change_points.csv"
+    )
+    transitions_path = os.path.join(
+        diagnostics_path, "hubble_redshift_physical_transitions.csv"
+    )
+    rankings_path = os.path.join(
+        diagnostics_path, "hubble_redshift_parameter_wiggle_rankings.csv"
+    )
+    atlas_path = os.path.join(
+        diagnostics_path, "hubble_redshift_parameter_wiggle_atlas.pdf"
+    )
+
+    z_base = z[base_mask]
+    rd_base = rd[base_mask]
+    # Equal-count bins make sparse ends of the redshift distribution visible
+    # without allowing dense regions to dominate the wiggle metric.
+    z_edges = np.unique(
+        np.nanquantile(
+            z_base,
+            np.linspace(0.0, 1.0, min(int(n_z_bins), len(z_base)) + 1),
+        )
+    )
+    if z_edges.size < 5:
+        z_edges = np.linspace(z_min, z_max, int(n_z_bins) + 1)
+    z_edges[0] = min(z_edges[0], z_min)
+    z_edges[-1] = max(z_edges[-1], z_max)
+
+    def _binned(z_values, y_values, edges=z_edges, minimum=3):
+        z_values = np.asarray(z_values, dtype=float)
+        y_values = np.asarray(y_values, dtype=float)
+        centers, medians, counts = [], [], []
+        for bin_index in range(len(edges) - 1):
+            if bin_index == len(edges) - 2:
+                keep = (
+                    (z_values >= edges[bin_index])
+                    & (z_values <= edges[bin_index + 1])
+                )
+            else:
+                keep = (
+                    (z_values >= edges[bin_index])
+                    & (z_values < edges[bin_index + 1])
+                )
+            count = int(np.count_nonzero(keep))
+            counts.append(count)
+            centers.append(
+                float(np.nanmedian(z_values[keep]))
+                if count
+                else 0.5 * (edges[bin_index] + edges[bin_index + 1])
+            )
+            medians.append(
+                float(np.nanmedian(y_values[keep]))
+                if count >= int(minimum)
+                else np.nan
+            )
+        return (
+            np.asarray(centers),
+            np.asarray(medians),
+            np.asarray(counts, dtype=int),
+        )
+
+    def _wiggle_metrics(z_values, y_values):
+        _, medians, _ = _binned(z_values, y_values)
+        finite = np.isfinite(medians)
+        if np.count_nonzero(finite) < 3:
+            return np.nan, np.nan
+        centered = medians[finite] - np.nanmedian(medians[finite])
+        rms = float(np.sqrt(np.nanmean(centered**2)))
+        adjacent = np.abs(np.diff(medians))
+        max_jump = (
+            float(np.nanmax(adjacent))
+            if np.any(np.isfinite(adjacent))
+            else np.nan
+        )
+        return rms, max_jump
+
+    def _bootstrap_binned(z_values, y_values):
+        centers, medians, counts = _binned(z_values, y_values)
+        draws = np.full((max(int(n_bootstrap), 0), len(medians)), np.nan)
+        for bin_index in range(len(z_edges) - 1):
+            right = (
+                z_values <= z_edges[bin_index + 1]
+                if bin_index == len(z_edges) - 2
+                else z_values < z_edges[bin_index + 1]
+            )
+            values = y_values[
+                (z_values >= z_edges[bin_index]) & right & np.isfinite(y_values)
+            ]
+            if values.size < 3:
+                continue
+            for draw_index in range(draws.shape[0]):
+                draws[draw_index, bin_index] = np.median(
+                    rng.choice(values, size=values.size, replace=True)
+                )
+        if draws.shape[0]:
+            lower, upper = np.nanpercentile(draws, [16.0, 84.0], axis=0)
+        else:
+            lower = upper = np.full(len(medians), np.nan)
+        return centers, medians, counts, lower, upper
+
+    # Robust adjacent-window change-point scan. The permutation distribution
+    # uses the largest statistic anywhere in z, providing a look-elsewhere
+    # correction for the scan.
+    order = np.argsort(z_base)
+    z_sorted = z_base[order]
+    r_sorted = rd_base[order]
+    window = max(int(min_points), int(np.ceil(0.06 * len(z_sorted))))
+    step = max(1, len(z_sorted) // 80)
+    split_indices = np.arange(window, len(z_sorted) - window + 1, step)
+
+    def _change_statistics(values):
+        statistics = []
+        jumps = []
+        for split in split_indices:
+            left = values[split - window : split]
+            right = values[split : split + window]
+            jump = float(np.nanmedian(right) - np.nanmedian(left))
+            left_scale = 1.4826 * np.nanmedian(
+                np.abs(left - np.nanmedian(left))
+            )
+            right_scale = 1.4826 * np.nanmedian(
+                np.abs(right - np.nanmedian(right))
+            )
+            standard_error = np.sqrt(
+                left_scale**2 / max(len(left), 1)
+                + right_scale**2 / max(len(right), 1)
+            )
+            statistics.append(
+                jump / max(float(standard_error), np.finfo(float).eps)
+            )
+            jumps.append(jump)
+        return np.asarray(statistics), np.asarray(jumps)
+
+    change_stat, change_jump = _change_statistics(r_sorted)
+    null_max = np.full(max(int(n_permutations), 0), np.nan)
+    for permutation_index in range(null_max.size):
+        permuted_stat, _ = _change_statistics(rng.permutation(r_sorted))
+        if permuted_stat.size:
+            null_max[permutation_index] = np.nanmax(np.abs(permuted_stat))
+    change_rows = []
+    for row_index, split in enumerate(split_indices):
+        abs_stat = abs(change_stat[row_index])
+        global_p = (
+            (1.0 + np.count_nonzero(null_max >= abs_stat))
+            / (1.0 + np.count_nonzero(np.isfinite(null_max)))
+            if null_max.size
+            else np.nan
+        )
+        change_rows.append(
+            {
+                "z_split": 0.5 * (z_sorted[split - 1] + z_sorted[split]),
+                "median_jump": change_jump[row_index],
+                "robust_jump_statistic": change_stat[row_index],
+                "look_elsewhere_pvalue": global_p,
+                "window_size_each_side": window,
+            }
+        )
+    change_points = pd.DataFrame(change_rows)
+    if not change_points.empty:
+        change_points = change_points.iloc[
+            np.argsort(
+                -np.abs(change_points["robust_jump_statistic"].to_numpy())
+            )
+        ].reset_index(drop=True)
+    change_points.to_csv(change_path, index=False)
+
+    transition_rows = []
+    transition_features = {
+        **{
+            name: float(config["lambda_rest"])
+            for name, config in _BLR_LINE_MODELS.items()
+        },
+        "2500A continuum": 2500.0,
+    }
+    for feature, wavelength in transition_features.items():
+        for band, (blue_edge, red_edge) in _SDSS_FILTER_EDGES_OBS.items():
+            for edge_name, observed_edge in (
+                ("enters", blue_edge),
+                ("leaves", red_edge),
+            ):
+                transition_z = observed_edge / wavelength - 1.0
+                if z_min <= transition_z <= z_max:
+                    transition_rows.append(
+                        {
+                            "z": transition_z,
+                            "feature": feature,
+                            "filter": band,
+                            "edge": edge_name,
+                            "label": f"{feature} {edge_name} {band}",
+                        }
+                    )
+    transitions = pd.DataFrame(
+        transition_rows,
+        columns=["z", "feature", "filter", "edge", "label"],
+    ).sort_values("z", ignore_index=True)
+    transitions.to_csv(transitions_path, index=False)
+
+    spectra_fit_columns = set(df_agn.attrs.get("spectra_fit_columns", ()))
+    base_counts = _binned(z_base, rd_base)[2]
+    parameter_values = {}
+    ranking_rows = []
+    identifiers = {"object_id", "sdss_name", "z"}
+    for parameter in df_agn.columns:
+        if parameter in identifiers:
+            continue
+        series = df_agn[parameter]
+        if not isinstance(series, pd.Series) or not (
+            pd.api.types.is_numeric_dtype(series.dtype)
+            or pd.api.types.is_bool_dtype(series.dtype)
+        ):
+            continue
+        values = pd.to_numeric(series, errors="coerce").to_numpy(dtype=float)
+        mask = base_mask & np.isfinite(values)
+        finite_count = int(np.count_nonzero(mask))
+        if finite_count < int(min_points) or np.unique(values[mask]).size < 2:
+            continue
+        z_use = z[mask]
+        r_use = rd[mask]
+        e_use = ed[mask]
+        p_use = values[mask]
+        # Rank scaling makes the simple cross-validated model robust to units
+        # and extreme values while retaining monotonic parameter effects.
+        p_rank = (
+            pd.Series(p_use).rank(method="average").to_numpy(dtype=float)
+            - 0.5
+        ) / len(p_use)
+        sorted_local = np.argsort(z_use, kind="stable")
+        fold_id = np.empty(len(z_use), dtype=int)
+        fold_id[sorted_local] = np.arange(len(z_use)) % int(cv_folds)
+        predictions = np.full(len(z_use), np.nan)
+        fold_reductions = []
+        for fold in range(int(cv_folds)):
+            test = fold_id == fold
+            train = ~test
+            if np.count_nonzero(train) < 3 or np.count_nonzero(test) < 3:
+                continue
+            design_train = np.column_stack(
+                [np.ones(np.count_nonzero(train)), p_rank[train]]
+            )
+            weights = np.ones(np.count_nonzero(train))
+            good_error = np.isfinite(e_use[train]) & (e_use[train] > 0)
+            weights[good_error] = 1.0 / np.square(e_use[train][good_error])
+            sqrt_weight = np.sqrt(weights)
+            coefficients = np.linalg.lstsq(
+                design_train * sqrt_weight[:, None],
+                r_use[train] * sqrt_weight,
+                rcond=None,
+            )[0]
+            predictions[test] = (
+                coefficients[0] + coefficients[1] * p_rank[test]
+            )
+            before_fold = _wiggle_metrics(z_use[test], r_use[test])[0]
+            after_fold = _wiggle_metrics(
+                z_use[test], r_use[test] - predictions[test]
+            )[0]
+            if np.isfinite(before_fold) and np.isfinite(after_fold):
+                fold_reductions.append(before_fold - after_fold)
+        valid_prediction = np.isfinite(predictions)
+        baseline_rms, baseline_jump = _wiggle_metrics(
+            z_use[valid_prediction], r_use[valid_prediction]
+        )
+        adjusted_rms, adjusted_jump = _wiggle_metrics(
+            z_use[valid_prediction],
+            r_use[valid_prediction] - predictions[valid_prediction],
+        )
+        _, _, parameter_counts = _binned(z_use, r_use)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            bin_coverage = np.divide(
+                parameter_counts,
+                base_counts,
+                out=np.zeros_like(parameter_counts, dtype=float),
+                where=base_counts > 0,
+            )
+        populated = base_counts >= 3
+        locally_covered = populated & (parameter_counts >= 3) & (
+            bin_coverage >= 0.2
+        )
+        covered_fraction = (
+            float(np.count_nonzero(locally_covered) / np.count_nonzero(populated))
+            if np.any(populated)
+            else 0.0
+        )
+        min_bin_coverage = (
+            float(np.min(bin_coverage[populated])) if np.any(populated) else 0.0
+        )
+        reliable = bool(
+            finite_count >= max(30, int(min_points))
+            and covered_fraction >= 0.8
+            and min_bin_coverage >= 0.1
+        )
+        reduction_rms = (
+            baseline_rms - adjusted_rms
+            if np.isfinite(baseline_rms) and np.isfinite(adjusted_rms)
+            else np.nan
+        )
+        reduction_jump = (
+            baseline_jump - adjusted_jump
+            if np.isfinite(baseline_jump) and np.isfinite(adjusted_jump)
+            else np.nan
+        )
+        alias_group = re.sub(r"[^a-z0-9]+", "", parameter.lower())
+        ranking_rows.append(
+            {
+                "parameter": parameter,
+                "source": (
+                    "spectra_fit_csv"
+                    if parameter in spectra_fit_columns
+                    else "hdf5_or_derived"
+                ),
+                "alias_group": alias_group,
+                "finite_in_range": finite_count,
+                "coverage_in_range": finite_count / np.count_nonzero(base_mask),
+                "redshift_bins_covered_fraction": covered_fraction,
+                "minimum_redshift_bin_coverage": min_bin_coverage,
+                "reliable_redshift_coverage": reliable,
+                "cv_baseline_wiggle_rms": baseline_rms,
+                "cv_adjusted_wiggle_rms": adjusted_rms,
+                "cv_wiggle_rms_reduction": reduction_rms,
+                "cv_baseline_max_jump": baseline_jump,
+                "cv_adjusted_max_jump": adjusted_jump,
+                "cv_max_jump_reduction": reduction_jump,
+                "fold_reduction_positive_fraction": (
+                    float(np.mean(np.asarray(fold_reductions) > 0))
+                    if fold_reductions
+                    else np.nan
+                ),
+            }
+        )
+        parameter_values[parameter] = values
+
+    rankings = pd.DataFrame(ranking_rows)
+    if not rankings.empty:
+        rankings = rankings.sort_values(
+            [
+                "reliable_redshift_coverage",
+                "cv_wiggle_rms_reduction",
+                "cv_max_jump_reduction",
+                "fold_reduction_positive_fraction",
+            ],
+            ascending=[False, False, False, False],
+            na_position="last",
+            kind="stable",
+        ).reset_index(drop=True)
+        rankings["is_alias_representative"] = ~rankings.duplicated("alias_group")
+    else:
+        rankings["is_alias_representative"] = pd.Series(dtype=bool)
+    rankings.to_csv(rankings_path, index=False)
+
+    rb_mask = base_mask & np.isfinite(rb)
+    correction = rb - rd
+    correction_mask = base_mask & np.isfinite(correction)
+    zb, rb_med, rb_count, rb_lo, rb_hi = _bootstrap_binned(
+        z[rb_mask], rb[rb_mask]
+    )
+    zd, rd_med, rd_count, rd_lo, rd_hi = _bootstrap_binned(z_base, rd_base)
+    zc, correction_med, _, correction_lo, correction_hi = _bootstrap_binned(
+        z[correction_mask], correction[correction_mask]
+    )
+    fig, axes = plt.subplots(
+        4, 1, figsize=(11.0, 13.0), sharex=True,
+        gridspec_kw={"height_ratios": [3.2, 1.8, 1.1, 1.8]},
+    )
+    axes[0].scatter(
+        z_base, rd_base, s=5, alpha=0.12, color="0.35",
+        linewidths=0, rasterized=True,
+    )
+    axes[0].plot(zb, rb_med, color="tab:blue", lw=2, label="biased median")
+    axes[0].fill_between(zb, rb_lo, rb_hi, color="tab:blue", alpha=0.15)
+    axes[0].plot(zd, rd_med, color="tab:red", lw=2, label="debiased median")
+    axes[0].fill_between(zd, rd_lo, rd_hi, color="tab:red", alpha=0.15)
+    axes[0].axhline(0, color="black", lw=0.8)
+    axes[0].set_ylabel("Hubble residual (mag)")
+    axes[0].legend(frameon=False, ncol=2)
+    axes[0].set_title(
+        "Redshift-first Hubble-residual diagnostic "
+        "(bands: bootstrap 16–84%; diagnostic, not causal)"
+    )
+    axes[1].plot(zc, correction_med, color="tab:purple", lw=2)
+    axes[1].fill_between(
+        zc, correction_lo, correction_hi, color="tab:purple", alpha=0.18
+    )
+    axes[1].axhline(0, color="black", lw=0.8)
+    axes[1].set_ylabel("bias correction\n(biased − debiased)")
+    width = np.diff(z_edges)
+    axes[2].bar(
+        0.5 * (z_edges[:-1] + z_edges[1:]),
+        rd_count,
+        width=0.88 * width,
+        color="0.55",
+    )
+    axes[2].set_ylabel("N")
+    if change_rows:
+        scan = pd.DataFrame(change_rows).sort_values("z_split")
+        axes[3].plot(
+            scan["z_split"],
+            scan["robust_jump_statistic"],
+            color="tab:orange",
+            lw=1.8,
+        )
+        axes[3].axhline(0, color="black", lw=0.8)
+        best = change_points.iloc[0]
+        axes[3].axvline(best["z_split"], color="tab:red", lw=1.6)
+        axes[3].text(
+            0.01,
+            0.96,
+            (
+                f"strongest candidate z={best['z_split']:.3f}, "
+                f"jump={best['median_jump']:+.3f} mag, "
+                f"global p={best['look_elsewhere_pvalue']:.3g}"
+            ),
+            transform=axes[3].transAxes,
+            va="top",
+            fontsize=9,
+        )
+    transition_colors = {
+        "C IV": "#4477AA",
+        "Mg II": "#228833",
+        "Hβ": "#CCBB44",
+        "Hα": "#EE6677",
+        "2500A continuum": "#AA3377",
+    }
+    for row in transitions.itertuples():
+        axes[3].axvline(
+            row.z,
+            color=transition_colors.get(row.feature, "0.6"),
+            lw=0.7,
+            alpha=0.28,
+        )
+    transition_handles = [
+        Line2D([0], [0], color=color, lw=1.5, label=feature)
+        for feature, color in transition_colors.items()
+        if feature in set(transitions["feature"])
+    ]
+    if transition_handles:
+        axes[3].legend(
+            handles=transition_handles,
+            title="filter-edge crossings",
+            loc="lower right",
+            ncol=min(3, len(transition_handles)),
+            fontsize=7,
+            title_fontsize=7,
+            frameon=True,
+            framealpha=0.8,
+        )
+    axes[3].set_ylabel("robust local\njump statistic")
+    axes[3].set_xlabel("Redshift")
+    axes[3].set_xlim(z_min, z_max)
+    for ax in axes:
+        ax.grid(True, alpha=0.16)
+    fig.tight_layout()
+    overview_pdf = _save_figure(fig, overview_path, dpi=200, show=show)
+
+    atlas_rows = rankings[
+        rankings["is_alias_representative"].astype(bool)
+    ] if not rankings.empty else rankings
+    if atlas_top_n is not None:
+        atlas_rows = atlas_rows.head(int(atlas_top_n))
+    with PdfPages(atlas_path) as pdf:
+        if atlas_rows.empty:
+            empty_fig, empty_ax = plt.subplots(figsize=(11, 8.5))
+            empty_ax.axis("off")
+            empty_ax.text(
+                0.5, 0.5, "No eligible numeric parameters.",
+                ha="center", va="center",
+            )
+            pdf.savefig(empty_fig)
+            plt.close(empty_fig)
+        else:
+            n_cols = min(3, int(panels_per_page))
+            n_rows_page = int(np.ceil(int(panels_per_page) / n_cols))
+            for page_start in range(0, len(atlas_rows), int(panels_per_page)):
+                page = atlas_rows.iloc[
+                    page_start : page_start + int(panels_per_page)
+                ]
+                page_fig, page_axes = plt.subplots(
+                    n_rows_page,
+                    n_cols,
+                    figsize=(5.1 * n_cols, 3.9 * n_rows_page),
+                    squeeze=False,
+                    sharex=True,
+                )
+                axes_flat = page_axes.ravel()
+                for ax, row in zip(axes_flat, page.itertuples()):
+                    values = parameter_values[row.parameter]
+                    mask = base_mask & np.isfinite(values)
+                    p = values[mask]
+                    z_use = z[mask]
+                    r_use = rd[mask]
+                    lo, hi = np.nanpercentile(p, [2, 98])
+                    color_values = np.clip(p, lo, hi) if hi > lo else p
+                    ax.scatter(
+                        z_use, r_use, c=color_values, cmap="viridis",
+                        s=6, alpha=0.22, linewidths=0, rasterized=True,
+                    )
+                    quantiles = np.unique(np.nanquantile(p, [0, 1/3, 2/3, 1]))
+                    curve_colors = ["#3366AA", "#777777", "#CC3311"]
+                    curve_labels = ["low p", "mid p", "high p"]
+                    if quantiles.size == 4:
+                        for group_index in range(3):
+                            group = (p >= quantiles[group_index]) & (
+                                p <= quantiles[group_index + 1]
+                                if group_index == 2
+                                else p < quantiles[group_index + 1]
+                            )
+                            x_curve, y_curve, _ = _binned(
+                                z_use[group], r_use[group], minimum=3
+                            )
+                            ax.plot(
+                                x_curve, y_curve,
+                                color=curve_colors[group_index],
+                                lw=1.8,
+                                label=curve_labels[group_index],
+                            )
+                    _, _, coverage_counts = _binned(z_use, r_use)
+                    coverage = np.divide(
+                        coverage_counts,
+                        base_counts,
+                        out=np.zeros_like(coverage_counts, dtype=float),
+                        where=base_counts > 0,
+                    )
+                    coverage_ax = ax.inset_axes([0.08, 0.03, 0.88, 0.09])
+                    coverage_ax.bar(
+                        0.5 * (z_edges[:-1] + z_edges[1:]),
+                        coverage,
+                        width=0.9 * np.diff(z_edges),
+                        color="black",
+                        alpha=0.18,
+                    )
+                    coverage_ax.set_ylim(0, 1)
+                    coverage_ax.set_xlim(z_min, z_max)
+                    coverage_ax.set_xticks([])
+                    coverage_ax.set_yticks([0, 1])
+                    coverage_ax.tick_params(labelsize=5, length=1)
+                    coverage_ax.set_ylabel("cov", fontsize=5, labelpad=0)
+                    ax.axhline(0, color="black", lw=0.7, alpha=0.6)
+                    source = " [SED]" if row.source == "spectra_fit_csv" else ""
+                    reliability = "reliable" if row.reliable_redshift_coverage else "LOW COVERAGE"
+                    ax.set_title(
+                        f"{row.parameter}{source}\n"
+                        f"Δwiggle={row.cv_wiggle_rms_reduction:+.3f}, "
+                        f"Δjump={row.cv_max_jump_reduction:+.3f}; {reliability}",
+                        fontsize=9,
+                    )
+                    ax.text(
+                        0.98,
+                        0.97,
+                        f"color: p2={lo:.3g} → p98={hi:.3g}",
+                        transform=ax.transAxes,
+                        ha="right",
+                        va="top",
+                        fontsize=6,
+                        bbox={
+                            "facecolor": "white",
+                            "alpha": 0.7,
+                            "edgecolor": "none",
+                            "pad": 1.0,
+                        },
+                    )
+                    ax.set_ylabel("Debiased residual (mag)")
+                    ax.set_xlim(z_min, z_max)
+                    ax.grid(True, alpha=0.12)
+                for ax in axes_flat[len(page):]:
+                    ax.axis("off")
+                axes_flat[min(len(page), len(axes_flat)) - 1].set_xlabel(
+                    "Redshift"
+                )
+                handles, labels = axes_flat[0].get_legend_handles_labels()
+                if handles:
+                    page_fig.legend(
+                        handles, labels, frameon=False, ncol=3,
+                        loc="upper center", bbox_to_anchor=(0.5, 0.96),
+                    )
+                page_fig.suptitle(
+                    "Parameter-colored residual vs redshift atlas "
+                    f"({page_start + 1}–{page_start + len(page)} of "
+                    f"{len(atlas_rows)}; ranked by held-out wiggle reduction)",
+                    y=0.995,
+                    fontsize=12,
+                )
+                page_fig.subplots_adjust(
+                    left=0.07, right=0.98, bottom=0.07, top=0.88,
+                    wspace=0.24, hspace=0.42,
+                )
+                pdf.savefig(page_fig, dpi=100, bbox_inches="tight")
+                if show:
+                    plt.show()
+                plt.close(page_fig)
+
+    return {
+        "overview_pdf": overview_pdf,
+        "change_points_csv": change_path,
+        "transitions_csv": transitions_path,
+        "rankings_csv": rankings_path,
+        "atlas_pdf": atlas_path,
+    }
+
 
 def _kde_conf_levels(Z, conf=(0.954, 0.683), plot_path=None):
     """

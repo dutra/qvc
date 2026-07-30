@@ -76,12 +76,14 @@ from qvc.hubble.hubble_plotting import (
     plot_hubble,
     plot_hubble_residual_normality,
     plot_hubble_residual_tail_diagnostics,
+    plot_parameter_residual_diagnostics,
     plot_predicted_L2500_vs_sigmahat,
     plot_L2500_vs_sigma_tau_separate,
     plot_catalog_quantity_vs_sigma_tau_separate,
     plot_predicted_vs_actual_M2500,
     plot_redshift_histograms,
     plot_redshift_bin_residual_summary,
+    plot_redshift_wiggle_diagnostics,
     plot_residuals_vs_alphaOX,
     plot_sigma_uv_mpred_correction,
 )
@@ -3892,6 +3894,24 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         debiased_residuals,
         debiased_clipping_sigma,
         plot_path=plot_path,
+        show=False,
+    )
+    plot_redshift_wiggle_diagnostics(
+        df_agn_pass2_plot_sample,
+        biased_residuals,
+        biased_residuals_err,
+        debiased_residuals,
+        debiased_clipping_sigma,
+        plot_path=plot_path,
+        z_range=z_range,
+        show=False,
+    )
+    plot_parameter_residual_diagnostics(
+        df_agn_pass2_plot_sample,
+        debiased_residuals,
+        debiased_clipping_sigma,
+        plot_path=plot_path,
+        z_range=z_range,
         show=False,
     )
     plot_fast_vs_uv_variability(df_agn_pass2_plot_sample, plot_path=plot_path, show=False)
