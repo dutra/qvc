@@ -31,8 +31,43 @@ from dynesty import utils as dyfunc
 plt.style.use(Path(__file__).with_name("style.mplstyle"))
 z_pivot_sna = 0.0
 z_pivot_agn = 1.5
+DEFAULT_COMPLETENESS = True
 DEFAULT_COMPLETENESS_SIM_FILE = None
-DEFAULT_COMPLETENESS_MOCK_AREA_DEG2 = 5.0
+DEFAULT_COMPLETENESS_MODE = "2d_relative_support"
+# Full SDSS-like footprint used when the input table lacks coordinates.  Fresh
+# mocks are no longer thinned to a 5 deg^2 equivalent.
+DEFAULT_COMPLETENESS_MOCK_AREA_DEG2 = 274.085
+
+
+def add_completeness_cli_arguments(parser):
+    """Add the shared CPU/JAX completeness controls to an argument parser."""
+    parser.add_argument(
+        "--disable_completeness",
+        action="store_true",
+        default=not DEFAULT_COMPLETENESS,
+        help="Disable completeness correction (enabled by default).",
+    )
+    parser.add_argument(
+        "--completeness_sim_file",
+        type=str,
+        default=DEFAULT_COMPLETENESS_SIM_FILE,
+        help=(
+            "Optional mock catalog HDF5 override. If omitted, generate a fresh "
+            "mock catalog for each run."
+        ),
+    )
+    parser.add_argument(
+        "--completeness_mode",
+        type=str,
+        choices=list(VALID_COMPLETENESS_MODES),
+        default=DEFAULT_COMPLETENESS_MODE,
+        help=(
+            "Completeness model to use: absolute 2D p(det|m,z), support-aware "
+            "2D relative weights, 3D p(det|m,z,f_host_2500_psf), or 4D "
+            "p(det|m,z,f_host_2500_psf,alpha_lambda)."
+        ),
+    )
+
 
 from qvc.hubble.hubble_utils import (
     compare_models_by_log_evidence_all,
@@ -101,9 +136,13 @@ from qvc.hubble.hubble_model import (
 )
 from qvc.hubble.hubble_completeness_refactored import (
     COMPLETENESS_FHOST_COL,
+    RELATIVE_SELECTION_PRIOR_CONCENTRATION,
+    RELATIVE_SELECTION_RULE,
+    RelativeSelection2D,
     get_completeness_function_2d,
     get_completeness_function_3d_fhost,
     get_completeness_function_4d_fhost_alpha,
+    get_relative_selection_function_2d,
     make_dm_function,
 )
 from qvc.hubble.completeness_mock_catalog import (
@@ -113,7 +152,12 @@ from qvc.hubble.completeness_mock_catalog import (
     save_mock_catalog,
 )
 
-VALID_COMPLETENESS_MODES = ("2d", "3d_fhost", "4d_fhost_alpha")
+VALID_COMPLETENESS_MODES = (
+    "2d",
+    "2d_relative_support",
+    "3d_fhost",
+    "4d_fhost_alpha",
+)
 SPEED_CHOICES = ("fastest", "quick", "standard", "production")
 SIGMA_CLIP_SECOND_PASS_MODES = ("warm", "fresh")
 AGN_PIVOT_CHECKPOINT_KEYS = (
@@ -122,6 +166,15 @@ AGN_PIVOT_CHECKPOINT_KEYS = (
     "agn_pivot_z_range",
     "agn_pivot_reference_object_ids",
     "agn_pivot_rule",
+)
+RELATIVE_SELECTION_CHECKPOINT_KEYS = (
+    "completeness_mode",
+    "relative_selection_rule",
+    "relative_selection_mag_centers",
+    "relative_selection_z_centers",
+    "relative_selection_sigma_mag",
+    "relative_selection_sigma_z",
+    "relative_selection_prior_concentration",
 )
 
 
@@ -578,7 +631,7 @@ def make_run_tag(
     z_range,
     only_agn=False,
     completeness=True,
-    completeness_mode="2d",
+    completeness_mode=DEFAULT_COMPLETENESS_MODE,
     disable_ceph_dist_calibration=False,
     use_planck_h0_prior=False,
     use_planck_om_prior=False,
@@ -615,6 +668,198 @@ def _agn_pivot_checkpoint_payload(agn_pivot_context):
         "agn_pivot_z_range": agn_pivot_context.z_range,
         "agn_pivot_reference_object_ids": agn_pivot_context.reference_object_ids,
         "agn_pivot_rule": agn_pivot_context.rule,
+    }
+
+
+def _relative_selection_checkpoint_payload(completeness_params):
+    if completeness_params is None or not isinstance(
+        completeness_params[0], RelativeSelection2D
+    ):
+        raise TypeError(
+            "Relative selection checkpoint metadata requires RelativeSelection2D "
+            "completeness parameters."
+        )
+    model = completeness_params[0]
+    metadata = getattr(model, "relative_selection_metadata", None)
+    if not isinstance(metadata, dict):
+        raise ValueError("RelativeSelection2D is missing construction metadata.")
+    required = {
+        "rule",
+        "sigma_mag",
+        "sigma_z",
+        "prior_concentration",
+    }
+    missing = sorted(required - set(metadata))
+    if missing:
+        raise ValueError(
+            f"RelativeSelection2D construction metadata is incomplete: {missing}."
+        )
+    payload = {
+        "completeness_mode": model.mode,
+        "relative_selection_rule": metadata["rule"],
+        "relative_selection_mag_centers": np.asarray(
+            model.mag_centers, dtype=float
+        ),
+        "relative_selection_z_centers": np.asarray(model.z_centers, dtype=float),
+        "relative_selection_sigma_mag": float(metadata["sigma_mag"]),
+        "relative_selection_sigma_z": float(metadata["sigma_z"]),
+        "relative_selection_prior_concentration": float(
+            metadata["prior_concentration"]
+        ),
+    }
+    _validate_relative_selection_checkpoint_metadata(
+        payload,
+        checkpoint_file="<new checkpoint>",
+        completeness_mode="2d_relative_support",
+        completeness_params=completeness_params,
+    )
+    return payload
+
+
+def _checkpoint_scalar(value, *, field_name, checkpoint_file):
+    arr = np.asarray(value)
+    if arr.size != 1:
+        raise RuntimeError(
+            f"Checkpoint '{checkpoint_file}' field {field_name!r} must contain "
+            "exactly one value."
+        )
+    return arr.reshape(()).item()
+
+
+def _validate_relative_selection_checkpoint_metadata(
+    results,
+    *,
+    checkpoint_file,
+    completeness_mode,
+    completeness_params=None,
+):
+    if completeness_mode != "2d_relative_support":
+        return
+    missing = sorted(set(RELATIVE_SELECTION_CHECKPOINT_KEYS) - set(results))
+    if missing:
+        raise RuntimeError(
+            f"Relative-selection checkpoint '{checkpoint_file}' is missing required "
+            f"relative map metadata: {missing}. No legacy fallback is supported."
+        )
+
+    try:
+        stored_mode = _checkpoint_scalar(
+            results["completeness_mode"],
+            field_name="completeness_mode",
+            checkpoint_file=checkpoint_file,
+        )
+        stored_rule = _checkpoint_scalar(
+            results["relative_selection_rule"],
+            field_name="relative_selection_rule",
+            checkpoint_file=checkpoint_file,
+        )
+        if isinstance(stored_mode, bytes):
+            stored_mode = stored_mode.decode("utf-8")
+        if isinstance(stored_rule, bytes):
+            stored_rule = stored_rule.decode("utf-8")
+        mag_centers = np.asarray(
+            results["relative_selection_mag_centers"], dtype=float
+        )
+        z_centers = np.asarray(
+            results["relative_selection_z_centers"], dtype=float
+        )
+        sigma_mag = float(
+            _checkpoint_scalar(
+                results["relative_selection_sigma_mag"],
+                field_name="relative_selection_sigma_mag",
+                checkpoint_file=checkpoint_file,
+            )
+        )
+        sigma_z = float(
+            _checkpoint_scalar(
+                results["relative_selection_sigma_z"],
+                field_name="relative_selection_sigma_z",
+                checkpoint_file=checkpoint_file,
+            )
+        )
+        prior_concentration = float(
+            _checkpoint_scalar(
+                results["relative_selection_prior_concentration"],
+                field_name="relative_selection_prior_concentration",
+                checkpoint_file=checkpoint_file,
+            )
+        )
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(
+            f"Relative-selection checkpoint '{checkpoint_file}' contains invalid "
+            "relative map metadata."
+        ) from exc
+
+    arrays_valid = (
+        mag_centers.ndim == 1
+        and mag_centers.size >= 2
+        and np.all(np.isfinite(mag_centers))
+        and np.all(np.diff(mag_centers) > 0.0)
+        and z_centers.ndim == 1
+        and z_centers.size >= 2
+        and np.all(np.isfinite(z_centers))
+        and np.all(np.diff(z_centers) > 0.0)
+    )
+    scalars_valid = np.all(
+        np.isfinite([sigma_mag, sigma_z, prior_concentration])
+    ) and prior_concentration > 0.0
+    if (
+        str(stored_mode) != "2d_relative_support"
+        or str(stored_rule) != RELATIVE_SELECTION_RULE
+        or not arrays_valid
+        or not scalars_valid
+        or prior_concentration != RELATIVE_SELECTION_PRIOR_CONCENTRATION
+    ):
+        raise RuntimeError(
+            f"Relative-selection checkpoint '{checkpoint_file}' has incompatible "
+            "relative map metadata."
+        )
+
+    if completeness_params is not None:
+        expected = _relative_selection_checkpoint_payload_unvalidated(
+            completeness_params
+        )
+    else:
+        expected_mag_edges = np.linspace(18.5, 24.0, 31)
+        expected_z_edges = np.linspace(0.0, 4.0, 41)
+        expected = {
+            "completeness_mode": "2d_relative_support",
+            "relative_selection_rule": RELATIVE_SELECTION_RULE,
+            "relative_selection_mag_centers": 0.5
+            * (expected_mag_edges[:-1] + expected_mag_edges[1:]),
+            "relative_selection_z_centers": 0.5
+            * (expected_z_edges[:-1] + expected_z_edges[1:]),
+            "relative_selection_sigma_mag": 0.2,
+            "relative_selection_sigma_z": 0.2,
+            "relative_selection_prior_concentration": (
+                RELATIVE_SELECTION_PRIOR_CONCENTRATION
+            ),
+        }
+    for field in RELATIVE_SELECTION_CHECKPOINT_KEYS:
+        actual = np.asarray(results[field])
+        wanted = np.asarray(expected[field])
+        if actual.shape != wanted.shape or not np.array_equal(actual, wanted):
+            raise RuntimeError(
+                f"Relative-selection checkpoint '{checkpoint_file}' has "
+                f"incompatible field {field!r}."
+            )
+
+
+def _relative_selection_checkpoint_payload_unvalidated(completeness_params):
+    model = completeness_params[0]
+    metadata = model.relative_selection_metadata
+    return {
+        "completeness_mode": model.mode,
+        "relative_selection_rule": metadata["rule"],
+        "relative_selection_mag_centers": np.asarray(
+            model.mag_centers, dtype=float
+        ),
+        "relative_selection_z_centers": np.asarray(model.z_centers, dtype=float),
+        "relative_selection_sigma_mag": float(metadata["sigma_mag"]),
+        "relative_selection_sigma_z": float(metadata["sigma_z"]),
+        "relative_selection_prior_concentration": float(
+            metadata["prior_concentration"]
+        ),
     }
 
 
@@ -1557,6 +1802,13 @@ def _build_completeness_params(
             plot_path=plot_path,
             df_agn_fhost_population=df_agn_all,
         )
+    if completeness_mode == "2d_relative_support":
+        return get_relative_selection_function_2d(
+            df_agn_completeness,
+            sim_file=completeness_sim_file,
+            plot=plot,
+            plot_path=plot_path,
+        )
     return get_completeness_function_2d(
         df_agn_completeness,
         sim_file=completeness_sim_file,
@@ -1945,10 +2197,7 @@ def generate_fresh_completeness_sim_file(plot_path, *, area_deg2, seed=123):
     completeness_dir = Path(plot_path) / "completeness"
     completeness_dir.mkdir(parents=True, exist_ok=True)
     output_path = completeness_dir / "mock_completeness_catalog_fresh.h5"
-    thinning_probability = min(
-        1.0,
-        float(DEFAULT_COMPLETENESS_MOCK_AREA_DEG2) / max(float(area_deg2), 1e-12),
-    )
+    thinning_probability = 1.0
 
     rng = np.random.default_rng(seed)
     phi_log10, m_grid, z_bins = build_shen_lf(None)
@@ -1975,7 +2224,7 @@ def generate_fresh_completeness_sim_file(plot_path, *, area_deg2, seed=123):
     n_generated = int(np.size(z_all))
     print(
         f"Fresh completeness mock generated {n_generated} sources "
-        f"after in-generator thinning (p_keep={thinning_probability:.4g})."
+        "with no in-generator thinning."
     )
     save_mock_catalog(
         output_path,
@@ -1992,22 +2241,42 @@ def generate_fresh_completeness_sim_file(plot_path, *, area_deg2, seed=123):
     )
     print(
         f"Generated fresh completeness mock catalog: {output_path} "
-        f"(area_deg2={float(area_deg2):.1f}, p_keep={thinning_probability:.4g})"
+        f"(area_deg2={float(area_deg2):.1f}, p_keep=1)"
     )
     return str(output_path)
+
+
+def resolve_completeness_sim_file(
+    *,
+    completeness,
+    completeness_sim_file,
+    plot_path,
+    df_agn_all,
+    seed=123,
+):
+    """Generate a fresh completeness mock only when no explicit override is set."""
+    if not completeness or completeness_sim_file is not None:
+        return completeness_sim_file
+    completeness_area_deg2 = estimate_sky_box_area_deg2(df_agn_all)
+    return generate_fresh_completeness_sim_file(
+        plot_path,
+        area_deg2=completeness_area_deg2,
+        seed=seed,
+    )
+
 
 def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
                       *,
                       agn_pivot_context,
                       df_calibrators=None,
                       cosmo_model='Flatw0waCDM',
-                      only_sna=False, only_agn=False, completeness=True, use_full_cov=True,
+                      only_sna=False, only_agn=False, completeness=DEFAULT_COMPLETENESS, use_full_cov=True,
                       resume=False, speed="production",
                       z_range=(0.44, 3.16),
                       prefix="default",
                       checkpoint_file_override=None,
                       completeness_sim_file=DEFAULT_COMPLETENESS_SIM_FILE,
-                      completeness_mode="2d",
+                      completeness_mode=DEFAULT_COMPLETENESS_MODE,
                       N=None,
                       compare_sigma_only=False,
                       minimal_plots=False,
@@ -2102,12 +2371,12 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
         df_agn_completeness = df_agn
 
     if completeness and not resume_replot_with_cuts:
-        if completeness_sim_file is None:
-            completeness_area_deg2 = estimate_sky_box_area_deg2(df_agn_all)
-            completeness_sim_file = generate_fresh_completeness_sim_file(
-                plot_path,
-                area_deg2=completeness_area_deg2,
-            )
+        completeness_sim_file = resolve_completeness_sim_file(
+            completeness=completeness,
+            completeness_sim_file=completeness_sim_file,
+            plot_path=plot_path,
+            df_agn_all=df_agn_all,
+        )
         print(f"Building {completeness_mode} completeness map using mock catalog: {completeness_sim_file}")
         completeness_params = _build_completeness_params(
             df_agn_completeness,
@@ -2163,6 +2432,13 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
         #sampler = DynamicNestedSampler.restore(checkpoint_file, pool=pool)
         try:
             r = load_chains(checkpoint_file)
+            if completeness and completeness_mode == "2d_relative_support":
+                _validate_relative_selection_checkpoint_metadata(
+                    r,
+                    checkpoint_file=checkpoint_file,
+                    completeness_mode=completeness_mode,
+                    completeness_params=completeness_params,
+                )
             stored_pivot_context = None
             if not only_sna:
                 stored_pivot_context = _load_agn_pivot_context_from_checkpoint(
@@ -2424,6 +2700,10 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
             checkpoint_payload.update(
                 _agn_pivot_checkpoint_payload(agn_pivot_context)
             )
+        if completeness and completeness_mode == "2d_relative_support":
+            checkpoint_payload.update(
+                _relative_selection_checkpoint_payload(completeness_params)
+            )
         save_chains(checkpoint_file, **checkpoint_payload)
 
         # Bin dmi in redshift
@@ -2473,7 +2753,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
 
 
 def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, 
-               cosmo_model, completeness=True, use_full_cov=True, 
+               cosmo_model, completeness=DEFAULT_COMPLETENESS, use_full_cov=True,
                N=None, resume=False, only_sna=False, only_agn=False, speed="production", 
                cosmo_model_joint_samples={}, cosmo_model_sna_samples={},
                verbose=True,
@@ -2484,7 +2764,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                sigma_clip_second_pass_mode="warm",
                prefix="default", uniform_redshift_distribution=False,
                completeness_sim_file=DEFAULT_COMPLETENESS_SIM_FILE,
-               completeness_mode="2d",
+               completeness_mode=DEFAULT_COMPLETENESS_MODE,
                compare_sigma_only=False,
                minimal_plots=False,
                disable_ceph_dist_calibration=False,
@@ -2521,17 +2801,19 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
     os.makedirs(plot_path, exist_ok=True)
     print(f"Saving plots to ", plot_path)
     if completeness:
-        if completeness_sim_file is None:
+        generate_fresh_mock = completeness_sim_file is None
+        if generate_fresh_mock:
             if resume_replot_with_cuts:
                 print("Completeness diagnostics enabled with a freshly generated mock catalog.")
             else:
                 print("Completeness enabled with a freshly generated mock catalog.")
-            completeness_area_deg2 = estimate_sky_box_area_deg2(df_agn_all)
-            completeness_sim_file = generate_fresh_completeness_sim_file(
-                plot_path,
-                area_deg2=completeness_area_deg2,
-            )
-        else:
+        completeness_sim_file = resolve_completeness_sim_file(
+            completeness=completeness,
+            completeness_sim_file=completeness_sim_file,
+            plot_path=plot_path,
+            df_agn_all=df_agn_all,
+        )
+        if not generate_fresh_mock:
             print(f"Completeness enabled with mock catalog file: {completeness_sim_file}")
 
     disable_sigma_clip_pass = bool(disable_sigma_clip_pass)
@@ -3851,6 +4133,14 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 plot_path=plot_path,
                 df_agn_fhost_population=df_agn_all,
             )
+        elif completeness_mode == "2d_relative_support":
+            print("Plotting support-aware relative 2D selection diagnostics...")
+            get_relative_selection_function_2d(
+                df_agn_completeness_plot_sample,
+                sim_file=completeness_sim_file,
+                plot=True,
+                plot_path=plot_path,
+            )
         else:
             print("Plotting completeness vs magnitude at redshifts...")
             p_detect, mag_centers, z_centers, dm, dz, completeness_scatter = get_completeness_function_2d(
@@ -3900,10 +4190,10 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
             speed="production", resume=False, N=None,
             resume_stage="both",
             sigma_clip_second_pass_mode="warm",
-            completeness=True,
+            completeness=DEFAULT_COMPLETENESS,
             prefix="default", result_prefix="", uniform_redshift_distribution=False,
             completeness_sim_file=DEFAULT_COMPLETENESS_SIM_FILE,
-            completeness_mode="2d",
+            completeness_mode=DEFAULT_COMPLETENESS_MODE,
             compare_sigma_only=False,
             disable_ceph_dist_calibration=False,
             use_planck_h0_prior=False,
@@ -4157,7 +4447,7 @@ if __name__ == "__main__":
     parser.add_argument("--cosmo_models", type=str, nargs='+',  default=["FlatwCDM"], 
                         choices=["FlatwCDM", "Flatw0waCDM", "FlatLambdaCDM", "FlatwpwaCDM"],
                         help="Cosmological models list (default: FlatwCDM)")
-    parser.add_argument("--disable_completeness", action="store_true", default=False, help="Enable completeness correction (default: True)")
+    add_completeness_cli_arguments(parser)
     parser.add_argument("--disable_full_covariance", action="store_true", default=False, help="Use full covariance matrix for SNIa likelihood (default: False)")
     parser.add_argument(
         "--disable_ceph_dist_calibration",
@@ -4295,19 +4585,6 @@ if __name__ == "__main__":
     parser.add_argument("--z_range", type=float, nargs=2, default=[0.44, 3.16], 
                         help="Redshift range for AGN data (default: [0.44, 3.16])")
     parser.add_argument("--uniform_redshift_distribution", action="store_true", default=False, help="Select AGN subset with uniform redshift distribution (default: False)")
-    parser.add_argument(
-        "--completeness_sim_file",
-        type=str,
-        default=DEFAULT_COMPLETENESS_SIM_FILE,
-        help="Optional mock catalog HDF5 override. If omitted, generate a fresh mock catalog for each run.",
-    )
-    parser.add_argument(
-        "--completeness_mode",
-        type=str,
-        choices=list(VALID_COMPLETENESS_MODES),
-        default="2d",
-        help="Completeness model to use: 2D p(det|m,z), 3D p(det|m,z,f_host_2500_psf), or 4D p(det|m,z,f_host_2500_psf,alpha_lambda).",
-    )
     parser.add_argument(
         "--correct-sigma-uv-host",
         action="store_true",

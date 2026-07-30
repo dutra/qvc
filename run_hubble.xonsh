@@ -41,6 +41,7 @@ echo "Running hubble_fit.py and PREFIX=" $PREFIX
     --no-cuts \
     --z_range 0.44 3.16 \
     --prefix @(prefix) \
+    --completeness_mode 2d_relative_support \
     --disable_sigma_clip_pass \
     --sigma_clip_threshold 3.0 \
     @(h5_file)
