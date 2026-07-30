@@ -1225,6 +1225,31 @@ def test_plot_hubble_does_not_add_synthetic_population_scatter(monkeypatch, tmp_
     assert result[0].shape == (len(df_agn),)
 
 
+def test_weighted_bin_stats_includes_outer_edges_and_uses_histogram_convention():
+    epsilon = 1.0e-9
+    z = np.array(
+        [-epsilon, 0.0, 0.5, 1.0, 1.5, 2.0, 2.0 + epsilon],
+        dtype=float,
+    )
+    y = z.copy()
+    yerr = np.ones_like(z)
+
+    centers, means, sems, counts = hubble_plotting._weighted_bin_stats(
+        z,
+        y,
+        yerr,
+        bins=np.array([0.0, 1.0, 2.0]),
+        min_count=1,
+        center="mid",
+    )
+
+    np.testing.assert_allclose(centers, [0.5, 1.5])
+    np.testing.assert_allclose(means, [0.25, 1.5])
+    np.testing.assert_allclose(sems, [1.0 / np.sqrt(2.0), 1.0 / np.sqrt(3.0)])
+    np.testing.assert_array_equal(counts, [2, 3])
+    assert int(np.sum(counts)) == 5
+
+
 def test_plot_predicted_vs_actual_m2500_marks_out_of_range_objects(monkeypatch, tmp_path):
     from matplotlib.axes import Axes
     import matplotlib.pyplot as plt

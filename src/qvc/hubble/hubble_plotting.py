@@ -5171,12 +5171,21 @@ def _weighted_bin_stats(z, y, yerr, bins, *, min_count=3, center='mid', plot_pat
     - weights w = 1 / yerr^2
     - mean = (∑ w y) / (∑ w)
     - SEM  = sqrt(1 / ∑ w)
+    - membership is [left, right), except the final bin includes its right edge
     center: 'weighted' (default), 'mid', or 'geom'
     Returns zc, mean, sem, n for bins meeting min_count.
     """
     z = np.asarray(z, float)
     y = np.asarray(y, float)
     e = np.asarray(yerr, float)
+    bins = np.asarray(bins, float)
+    if (
+        bins.ndim != 1
+        or bins.size < 2
+        or not np.all(np.isfinite(bins))
+        or np.any(np.diff(bins) <= 0)
+    ):
+        raise ValueError("bins must be a finite, strictly increasing 1-D array")
 
     m = np.isfinite(z) & np.isfinite(y) & np.isfinite(e) & (e > 0)
     if not np.any(m):
@@ -5186,7 +5195,10 @@ def _weighted_bin_stats(z, y, yerr, bins, *, min_count=3, center='mid', plot_pat
     w = 1.0 / (e * e)
 
     B = len(bins) - 1
-    k = np.digitize(z, bins, right=True) - 1          # 0..B-1
+    k = np.searchsorted(bins, z, side="right") - 1
+    # np.searchsorted assigns the final edge just above the final bin.  Match
+    # np.histogram by closing that one outer boundary explicitly.
+    k[z == bins[-1]] = B - 1
     inr = (k >= 0) & (k < B)
     if not np.any(inr):
         return np.array([]), np.array([]), np.array([]), np.array([])
