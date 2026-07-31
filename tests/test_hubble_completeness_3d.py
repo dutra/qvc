@@ -22,6 +22,7 @@ from qvc.hubble.completeness_mock_catalog import (
     AB_ABSOLUTE_MAG_ZEROPOINT,
     LOG10_MAG_JACOBIAN,
     NU_2500_HZ,
+    SHEN_GLOBAL_FIT,
     _configure_shen_paths,
     build_shen_lf,
     log_nu_lnu_to_ab_absolute_magnitude,
@@ -44,10 +45,10 @@ def test_configure_shen_paths_overrides_checkout_config(tmp_path):
     assert obdata_path == f"{expected_homepath}obdata_copy{os.sep}"
 
 
-def test_build_shen_lf_uses_extinction_convolved_physical_2500_channel(
+def test_build_shen_lf_uses_global_fit_a_extinction_convolved_2500_channel(
     tmp_path, monkeypatch
 ):
-    """Gold test that the Shen mock parent is the observed 2500 A LF."""
+    """Gold test that the mock parent is Shen global fit A at observed 2500 A."""
     calls = []
     log_nu_lnu = np.array([44.0, 45.0])
     log_phi_dex = np.array([-5.0, -6.0])
@@ -63,7 +64,11 @@ def test_build_shen_lf_uses_extinction_convolved_physical_2500_channel(
     phi_log10, m_grid, z_bins = build_shen_lf(tmp_path)
 
     assert len(calls) == len(z_bins) == 40
-    assert all(np.isclose(nu, NU_2500_HZ) and model == "B" for _, nu, model in calls)
+    assert SHEN_GLOBAL_FIT == "A"
+    assert all(
+        np.isclose(nu, NU_2500_HZ) and model == SHEN_GLOBAL_FIT
+        for _, nu, model in calls
+    )
     np.testing.assert_allclose(
         phi_log10,
         np.tile(log_phi_dex + LOG10_MAG_JACOBIAN, (len(z_bins), 1)),
