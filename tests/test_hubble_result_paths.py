@@ -167,6 +167,7 @@ def _minimal_pantheon_df():
     return pd.DataFrame(
         {
             "zHD": [0.05, 0.1],
+            "zHEL": [0.05, 0.1],
             "m_b_corr": [16.0, 17.0],
             "IS_CALIBRATOR": [0, 0],
             "CEPH_DIST": [-9.0, -9.0],

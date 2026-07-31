@@ -479,6 +479,7 @@ def test_log_likelihood_does_not_use_completeness_smoothing_as_extra_scatter(mon
     df_pantheon = pd.DataFrame(
         {
             "zHD": np.linspace(0.02, 0.8, 8),
+            "zHEL": np.linspace(0.02, 0.8, 8),
             "m_b_corr": np.linspace(15.0, 18.0, 8),
             "IS_CALIBRATOR": np.zeros(8, dtype=int),
             "CEPH_DIST": np.full(8, -9.0),
@@ -718,6 +719,7 @@ def test_get_completeness_function_3d_fhost_and_loglikelihood_smoke(tmp_path):
     df_pantheon = pd.DataFrame(
         {
             "zHD": np.linspace(0.02, 0.8, 12),
+            "zHEL": np.linspace(0.02, 0.8, 12),
             "m_b_corr": np.linspace(15.0, 18.0, 12),
             "IS_CALIBRATOR": np.zeros(12, dtype=int),
             "CEPH_DIST": np.full(12, -9.0),

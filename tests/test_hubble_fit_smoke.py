@@ -224,6 +224,7 @@ def _make_fake_pantheon_sample(n_sne=18, seed=456):
     return pd.DataFrame(
         {
             "zHD": z,
+            "zHEL": z,
             "m_b_corr": m_b_corr,
             "IS_CALIBRATOR": np.zeros(n_sne, dtype=int),
             "CEPH_DIST": np.full(n_sne, -9.0),
@@ -3437,6 +3438,7 @@ def test_run_mcmc_pipeline_compare_sigma_only_skips_completeness_plots_on_resume
     df_pantheon = pd.DataFrame(
         {
             "zHD": [0.05, 0.1],
+            "zHEL": [0.05, 0.1],
             "m_b_corr": [16.0, 17.0],
             "IS_CALIBRATOR": [0, 0],
             "CEPH_DIST": [-9.0, -9.0],

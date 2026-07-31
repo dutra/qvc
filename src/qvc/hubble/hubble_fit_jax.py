@@ -181,8 +181,13 @@ def _ez_inv_flat_jax(z: jnp.ndarray, params: dict[str, Any], cosmo_model: str, z
     return jax.lax.rsqrt(jnp.maximum(ez2, 1e-18))
 
 
-def _distance_modulus_jax(z: jnp.ndarray, params: dict[str, Any], cosmo_model: str, zp: float) -> tuple[jnp.ndarray, jnp.ndarray]:
-    """Return distance modulus and comoving distance in Mpc."""
+def _comoving_distance_jax(
+    z: jnp.ndarray,
+    params: dict[str, Any],
+    cosmo_model: str,
+    zp: float,
+) -> jnp.ndarray:
+    """Return line-of-sight comoving distance in Mpc."""
     z = jnp.asarray(z)
     H0 = params["H0"]
     c_kms = 299792.458
@@ -190,13 +195,36 @@ def _distance_modulus_jax(z: jnp.ndarray, params: dict[str, Any], cosmo_model: s
     def one_distance(zi):
         grid = jnp.linspace(0.0, jnp.maximum(zi, 1e-8), 256)
         integrand = _ez_inv_flat_jax(grid, params, cosmo_model, zp)
-        dc = (c_kms / H0) * _trapz_jax(integrand, grid, axis=0)
-        dl = dc * (1.0 + zi)
-        mu = 5.0 * jnp.log10(jnp.maximum(dl, 1e-12)) + 25.0
-        return mu, dc
+        return (c_kms / H0) * _trapz_jax(integrand, grid, axis=0)
 
-    mu, dc = jax.vmap(one_distance)(z)
+    return jax.vmap(one_distance)(z)
+
+
+def _distance_modulus_from_redshifts_jax(
+    z_distance: jnp.ndarray,
+    z_photon: jnp.ndarray,
+    params: dict[str, Any],
+    cosmo_model: str,
+    zp: float,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Return distance modulus using separate distance and photon redshifts."""
+    z_distance = jnp.asarray(z_distance)
+    z_photon = jnp.asarray(z_photon)
+    dc = _comoving_distance_jax(z_distance, params, cosmo_model, zp)
+    dl = dc * (1.0 + z_photon)
+    mu = 5.0 * jnp.log10(jnp.maximum(dl, 1e-12)) + 25.0
     return mu, dc
+
+
+def _distance_modulus_jax(z: jnp.ndarray, params: dict[str, Any], cosmo_model: str, zp: float) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Return distance modulus and comoving distance for a single redshift."""
+    return _distance_modulus_from_redshifts_jax(
+        z,
+        z,
+        params,
+        cosmo_model,
+        zp,
+    )
 
 
 def _sigma_mu_from_z_err_jax(
@@ -429,8 +457,36 @@ def _prepare_agn_arrays(
 
 
 def _prepare_pantheon_arrays(pantheon_data: dict[str, np.ndarray], L, lower, logdet):
+    required = {
+        "zHD",
+        "zHEL",
+        "m_b_corr",
+        "IS_CALIBRATOR",
+        "CEPH_DIST",
+        "MU_SH0ES_ERR_DIAG",
+    }
+    missing = required - set(pantheon_data)
+    if missing:
+        raise KeyError(
+            "Pantheon JAX likelihood is missing required fields "
+            f"{sorted(missing)}; zHEL has no zHD fallback."
+        )
+
+    z_hd = np.asarray(pantheon_data["zHD"], dtype=float)
+    z_hel = np.asarray(pantheon_data["zHEL"], dtype=float)
+    if z_hd.shape != z_hel.shape:
+        raise ValueError(
+            "Pantheon zHD and zHEL must have identical shapes; "
+            f"got {z_hd.shape} and {z_hel.shape}."
+        )
+    if not np.all(np.isfinite(z_hd)):
+        raise ValueError("Pantheon zHD must contain only finite values.")
+    if not np.all(np.isfinite(z_hel)):
+        raise ValueError("Pantheon zHEL must contain only finite values.")
+
     return {
-        "zHD": jnp.asarray(pantheon_data["zHD"]),
+        "zHD": jnp.asarray(z_hd),
+        "zHEL": jnp.asarray(z_hel),
         "m_b_corr": jnp.asarray(pantheon_data["m_b_corr"]),
         "IS_CALIBRATOR": jnp.asarray(np.asarray(pantheon_data["IS_CALIBRATOR"], dtype=bool)),
         "CEPH_DIST": jnp.asarray(pantheon_data["CEPH_DIST"]),
@@ -485,9 +541,16 @@ def _log_likelihood_jax(
     if only_agn:
         ll_sn = 0.0
     else:
-        z_sn = pantheon_jax["zHD"]
+        z_sn_hd = pantheon_jax["zHD"]
+        z_sn_hel = pantheon_jax["zHEL"]
         is_cal = pantheon_jax["IS_CALIBRATOR"]
-        mu_sn, _ = _distance_modulus_jax(z_sn, params, cosmo_model, z_pivot_agn)
+        mu_sn, _ = _distance_modulus_from_redshifts_jax(
+            z_sn_hd,
+            z_sn_hel,
+            params,
+            cosmo_model,
+            z_pivot_agn,
+        )
         if use_ceph_dist_calibration:
             mu_sn = jnp.where(is_cal, pantheon_jax["CEPH_DIST"], mu_sn)
         res_sn = pantheon_jax["m_b_corr"] - (mu_sn + params["M0_sn"])
@@ -869,7 +932,7 @@ def run_single_jax(
         agn_fields += ("alpha_lambda",)
     agn_data = {col: df_agn_fit[col].values for col in agn_fields if col in df_agn_fit.columns}
 
-    pantheon_fields = ["zHD", "m_b_corr", "IS_CALIBRATOR", "CEPH_DIST", "MU_SH0ES_ERR_DIAG"]
+    pantheon_fields = ["zHD", "zHEL", "m_b_corr", "IS_CALIBRATOR", "CEPH_DIST", "MU_SH0ES_ERR_DIAG"]
     pantheon_data = {col: df_pantheon[col].values for col in pantheon_fields if col in df_pantheon.columns}
 
     if only_sna:
