@@ -579,7 +579,7 @@ def parse_args(argv=None):
     parser.add_argument("--spectrum-student-t-df", type=float, default=5.0)
     parser.add_argument("--spectrum-scale-prior-sigma-dex", type=float, default=0.1)
     parser.add_argument("--line-flux-scale-mjy", type=float, default=0.1)
-    parser.add_argument("--optax-steps", type=int, default=2000)
+    parser.add_argument("--optax-steps", type=int, default=4000)
     parser.add_argument("--optax-lr", type=float, default=5e-3)
     parser.add_argument("--nuts-warmup", type=int, default=250)
     parser.add_argument("--nuts-samples", type=int, default=250)
