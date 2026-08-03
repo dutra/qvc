@@ -20,6 +20,7 @@ import traceback
 from functools import partial
 from pathlib import Path
 
+import h5py
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
@@ -31,6 +32,19 @@ C_ANGSTROM_PER_SECOND = 2.99792458e18
 AB_ZEROPOINT_MJY = 3.631e6
 METER_PER_MEGAPARSEC = 3.085677581491367e22
 GRAHSP_ATTENUATION_BREAK_ANGSTROM = 11_000.0
+POSTERIOR_BUNDLE_FORMAT = "jaxsedfit_samples_meta_v2"
+PSF_AGN_FRACTION_BANDS = tuple(legacy.SDSS_BANDS)
+JOINT_CHI2_SITES = (
+    "sed_chi2",
+    "sed_n_eff",
+    "sed_reduced_chi2",
+    "spectroscopy_chi2",
+    "spectroscopy_n_eff",
+    "spectroscopy_reduced_chi2",
+    "joint_chi2",
+    "joint_n_eff",
+    "joint_reduced_chi2",
+)
 
 
 def flambda_1e17_to_mjy(wave_angstrom, flux_1e17):
@@ -342,7 +356,7 @@ def build_joint_config(rec, phot, lam, flux, err, resolving_power, args):
 
     config = FitConfig(
         observation=Observation(
-            object_id=f"z{float(rec['z']):.3f}_{rec['sdss_name']}_joint",
+            object_id=joint_saved_name(rec),
             redshift=float(rec["z"]),
             redshift_mode="fixed",
             ra=float(rec["ra"]),
@@ -414,7 +428,7 @@ def build_joint_config(rec, phot, lam, flux, err, resolving_power, args):
         ),
         output=OutputConfig(
             output_dir=str(args.output_dir),
-            fig_path=str(Path(args.fig_dir) / f"z{float(rec['z']):.3f}_{rec['sdss_name']}_joint.png"),
+            fig_path=str(sed_figure_path(args.fig_dir, rec)),
             plot_fig=False,
             save_fig=args.save_fig,
             save_result=args.save_jaxsedfit_samples,
@@ -444,6 +458,163 @@ def summarize_samples(samples):
     return out
 
 
+def summarize_joint_chi2(prediction):
+    """Summarize the required joint-fit chi-square diagnostic sites."""
+    missing = [name for name in JOINT_CHI2_SITES if name not in prediction]
+    if missing:
+        raise ValueError(
+            "JAXSEDFit prediction lacks required chi-square sites: "
+            f"{missing}"
+        )
+    return summarize_samples({name: prediction[name] for name in JOINT_CHI2_SITES})
+
+
+def empty_joint_chi2_summary():
+    """Return a stable value/error schema for joint-fit chi-square fields."""
+    return {
+        key: np.nan
+        for name in JOINT_CHI2_SITES
+        for key in (name, f"{name}_err")
+    }
+
+
+def empty_psf_agn_fraction_summary(bands=PSF_AGN_FRACTION_BANDS):
+    """Return the stable per-band schema for joint-fit PSF AGN fractions."""
+    return {
+        key: np.nan
+        for band in bands
+        for key in (f"f_AGN_psf_{band}", f"f_AGN_psf_{band}_err")
+    }
+
+
+def summarize_psf_agn_fractions(
+    prediction,
+    filter_names,
+    *,
+    bands=PSF_AGN_FRACTION_BANDS,
+):
+    """Summarize posterior variable-AGN/total PSF fractions in SDSS bands."""
+    arrays = {}
+    for name in ("pred_fluxes", "variable_agn_fluxes"):
+        value = prediction.get(name)
+        if value is None:
+            raise ValueError(
+                f"JAXSEDFit prediction is missing required component {name!r}."
+            )
+        arrays[name] = np.asarray(value, dtype=float)
+
+    total_fluxes = arrays["pred_fluxes"]
+    variable_agn_fluxes = arrays["variable_agn_fluxes"]
+    if total_fluxes.ndim != 2:
+        raise ValueError(
+            "JAXSEDFit component predictions must have shape (draw, filter); "
+            f"received {total_fluxes.shape}."
+        )
+    if variable_agn_fluxes.shape != total_fluxes.shape:
+        raise ValueError(
+            "JAXSEDFit total and variable-AGN component predictions must "
+            "have identical shapes."
+        )
+
+    filter_names = [str(name) for name in filter_names]
+    if len(filter_names) != total_fluxes.shape[1]:
+        raise ValueError(
+            "JAXSEDFit filter-name count does not match the prediction width: "
+            f"{len(filter_names)} != {total_fluxes.shape[1]}."
+        )
+
+    out = empty_psf_agn_fraction_summary(bands)
+    for band in bands:
+        filter_name = f"{band}_sdss"
+        indices = [
+            index for index, name in enumerate(filter_names) if name == filter_name
+        ]
+        if len(indices) != 1:
+            raise ValueError(
+                f"Expected exactly one {filter_name!r} prediction, found {len(indices)}."
+            )
+        index = indices[0]
+        total = total_fluxes[:, index]
+        variable_agn = variable_agn_fluxes[:, index]
+        valid = np.isfinite(total) & (total > 0.0) & np.isfinite(variable_agn)
+        if not np.any(valid):
+            raise ValueError(
+                f"No valid posterior PSF AGN-fraction draws for band {band!r}."
+            )
+        fractions = np.clip(variable_agn[valid] / total[valid], 0.0, 1.0)
+        median, err, _, _ = legacy.sym_percentile(fractions)
+        out[f"f_AGN_psf_{band}"] = float(median)
+        out[f"f_AGN_psf_{band}_err"] = float(err)
+    return out
+
+
+def joint_saved_name(rec):
+    """Return the stable JAXSEDFit observation name for one QVC record."""
+    return f"z{float(rec['z']):.3f}_{rec['sdss_name']}_joint"
+
+
+def posterior_bundle_path(directory, rec):
+    """Return the expected posterior-bundle path for one QVC record."""
+    return Path(directory) / f"{joint_saved_name(rec)}_samples.h5"
+
+
+def sed_figure_path(fig_dir, rec):
+    """Return the shared fresh/resumed SED figure path."""
+    return Path(fig_dir) / f"{joint_saved_name(rec)}.png"
+
+
+def verify_new_posterior_bundle(path):
+    """Require a newly written bundle to use the current compact schema."""
+    path = Path(path)
+    if not path.is_file():
+        raise FileNotFoundError(f"Expected saved posterior bundle was not written: {path}")
+    with h5py.File(path, "r") as handle:
+        actual = handle.attrs.get("posterior_bundle_format")
+    if isinstance(actual, bytes):
+        actual = actual.decode("utf-8")
+    if actual != POSTERIOR_BUNDLE_FORMAT:
+        raise ValueError(
+            f"New posterior bundle {path} uses schema {actual!r}; "
+            f"expected {POSTERIOR_BUNDLE_FORMAT!r}."
+        )
+    return path
+
+
+def _base_result(rec, args, *, execution_mode, resumed_from_path=""):
+    """Build the stable output row shared by fresh and resumed execution."""
+    result = {
+        key: rec.get(key)
+        for key in (
+            "object_id",
+            "sdss_name",
+            "plate",
+            "fiber",
+            "mjd",
+            "z",
+            "ra",
+            "dec",
+            "loglbol",
+        )
+    }
+    result.update(
+        {
+            "fit_ok": False,
+            "error_message": "",
+            "fit_backend": "jaxsedfit_joint",
+            "execution_mode": execution_mode,
+            "resumed_from_run": str(getattr(args, "resume_run_name", "") or ""),
+            "resumed_from_path": str(resumed_from_path or ""),
+            "resume_error_message": "",
+            "fit_result_path": "",
+            "sed_fig_path": "",
+            "spectrum_fig_path": "",
+        }
+    )
+    result.update(empty_joint_chi2_summary())
+    result.update(empty_psf_agn_fraction_summary())
+    return result
+
+
 def save_spectrum_figure(fitter, rec, fig_dir):
     """Save the jaxqsofit spectral decomposition beside the joint SED figure."""
     from matplotlib import pyplot as plt
@@ -464,12 +635,22 @@ def save_spectrum_figure(fitter, rec, fig_dir):
     return fig_path
 
 
-def run_one_fit(rec, args):
-    result = {
-        key: rec.get(key)
-        for key in ("object_id", "sdss_name", "plate", "fiber", "mjd", "z", "ra", "dec", "loglbol")
-    }
-    result.update({"fit_ok": False, "error_message": "", "fit_backend": "jaxsedfit_joint"})
+def run_one_fit(
+    rec,
+    args,
+    *,
+    execution_mode="fresh",
+    resumed_from_path="",
+    resume_error_message="",
+):
+    """Run a complete joint fit and return its stable flat result row."""
+    result = _base_result(
+        rec,
+        args,
+        execution_mode=execution_mode,
+        resumed_from_path=resumed_from_path,
+    )
+    result["resume_error_message"] = str(resume_error_message or "")
     try:
         hdul = legacy.load_spec_from_cache(
             rec["plate"], rec["fiber"], rec["mjd"], cache_dir=args.cache_dir
@@ -483,7 +664,7 @@ def run_one_fit(rec, args):
         finally:
             hdul.close()
 
-        phot = pd.DataFrame(rec.pop("_joint_photometry"))
+        phot = pd.DataFrame(rec.get("_joint_photometry", []))
         config, used_phot = build_joint_config(
             rec, phot, lam, flux, err, resolving_power, args
         )
@@ -491,7 +672,15 @@ def run_one_fit(rec, args):
 
         fitter = JAXSEDFit(config)
         fit_result = fitter.fit(progress_bar=args.progress)
+        prediction = fit_result.predict(kind="photometry")
         result.update(summarize_samples(fit_result.samples))
+        result.update(summarize_joint_chi2(prediction))
+        result.update(
+            summarize_psf_agn_fractions(
+                prediction,
+                used_phot["filter_name"].astype(str).tolist(),
+            )
+        )
         result.update(
             summarize_m2500_dereddened(
                 fit_result.samples,
@@ -503,6 +692,11 @@ def run_one_fit(rec, args):
         result["n_photometry"] = int(len(used_phot))
         result["photometry_filters"] = ",".join(used_phot["filter_name"].astype(str))
         result["fit_result_path"] = str(fit_result.path or "")
+        if args.save_jaxsedfit_samples:
+            verify_new_posterior_bundle(result["fit_result_path"])
+        result["sed_fig_path"] = (
+            str(sed_figure_path(args.fig_dir, rec)) if args.save_fig else ""
+        )
         result["spectrum_fig_path"] = (
             str(save_spectrum_figure(fitter, rec, args.fig_dir))
             if args.save_fig
@@ -514,6 +708,114 @@ def run_one_fit(rec, args):
         if args.verbose:
             traceback.print_exc()
     return result
+
+
+def _run_resumed_fit(rec, args, source_path):
+    """Regenerate one object from saved draws and write current-schema outputs."""
+    from matplotlib import pyplot as plt
+    from jaxsedfit import JAXSEDFit
+
+    result = _base_result(
+        rec,
+        args,
+        execution_mode="resumed",
+        resumed_from_path=source_path,
+    )
+    fitter = JAXSEDFit.load(source_path)
+    fitter.predictive = None
+    config = fitter.config
+    saved_name = str(config.observation.object_id)
+    expected_name = joint_saved_name(rec)
+    if saved_name != expected_name:
+        raise ValueError(
+            f"Posterior bundle observation ID {saved_name!r} does not match "
+            f"selected object {expected_name!r}."
+        )
+
+    prediction = fitter.predict(kind="plot")
+    result.update(summarize_samples(fitter.samples))
+    result.update(summarize_joint_chi2(prediction))
+    result.update(
+        summarize_psf_agn_fractions(
+            prediction,
+            config.photometry.filter_names,
+        )
+    )
+    result.update(
+        summarize_m2500_dereddened(
+            fitter.samples,
+            config.observation.redshift,
+            h0=config.galaxy.cosmology_h0,
+            om0=config.galaxy.cosmology_om0,
+        )
+    )
+    result["n_photometry"] = int(len(config.photometry.filter_names))
+    result["photometry_filters"] = ",".join(
+        str(name) for name in config.photometry.filter_names
+    )
+
+    if args.save_jaxsedfit_samples:
+        result_path = fitter.save(args.output_dir)
+        result["fit_result_path"] = str(verify_new_posterior_bundle(result_path))
+
+    if args.save_fig:
+        sed_path = sed_figure_path(args.fig_dir, rec)
+        sed_path.parent.mkdir(parents=True, exist_ok=True)
+        sed_fig = fitter.plot_sed(output_path=sed_path, show=False)
+        if sed_fig is not None:
+            plt.close(sed_fig)
+        if not sed_path.is_file():
+            raise FileNotFoundError(f"Resumed SED figure was not written: {sed_path}")
+        result["sed_fig_path"] = str(sed_path)
+        result["spectrum_fig_path"] = str(
+            save_spectrum_figure(fitter, rec, args.fig_dir)
+        )
+
+    result["fit_ok"] = True
+    return result
+
+
+def _remove_incomplete_resumed_outputs(rec, args):
+    """Remove only the exact new-run artifacts a failed resume may have written."""
+    paths = [
+        posterior_bundle_path(args.output_dir, rec),
+        sed_figure_path(args.fig_dir, rec),
+        Path(args.fig_dir)
+        / f"z{float(rec['z']):.3f}_{rec['sdss_name']}_spectrum.png",
+    ]
+    for path in paths:
+        path.unlink(missing_ok=True)
+
+
+def run_hybrid_fit(rec, args):
+    """Resume one selected object when possible, otherwise fit it from scratch."""
+    source_path = posterior_bundle_path(args.resume, rec)
+    if not source_path.is_file():
+        return run_one_fit(
+            rec,
+            args,
+            execution_mode="fresh_missing_bundle",
+            resumed_from_path=source_path,
+        )
+
+    try:
+        return _run_resumed_fit(rec, args, source_path)
+    except Exception as exc:
+        resume_error = f"{type(exc).__name__}: {exc}"
+        if args.verbose:
+            print(
+                f"Resume failed for object_id={rec.get('object_id')} from "
+                f"{source_path}; running a fresh fit. {resume_error}"
+            )
+            traceback.print_exc()
+        _remove_incomplete_resumed_outputs(rec, args)
+        return run_one_fit(
+            rec,
+            args,
+            execution_mode="fresh_resume_failed",
+            resumed_from_path=source_path,
+            resume_error_message=resume_error,
+        )
 
 
 def build_records(args):
@@ -533,9 +835,14 @@ def run_fit(args):
     records = build_records(args)
     if not records:
         raise RuntimeError("No records to process.")
-    worker = partial(run_one_fit, args=args)
+    worker = partial(run_hybrid_fit if args.resume else run_one_fit, args=args)
+    description = (
+        "Joint SED+spectrum resume/fallback"
+        if args.resume
+        else "Joint SED+spectrum fits"
+    )
     if args.nproc <= 1:
-        rows = [worker(rec) for rec in tqdm(records, desc="Joint SED+spectrum fits")]
+        rows = [worker(rec) for rec in tqdm(records, desc=description)]
     else:
         ctx = mp.get_context("spawn")
         with ctx.Pool(args.nproc) as pool:
@@ -564,6 +871,18 @@ def parse_args(argv=None):
     )
     parser.add_argument("--output-dir", default="results/jaxsedfit_joint")
     parser.add_argument("--fig-dir", default="plots/jaxsedfit_joint")
+    parser.add_argument(
+        "--resume",
+        help=(
+            "Directory containing old per-object *_samples.h5 bundles. "
+            "Missing or unusable bundles fall back to complete fresh fits."
+        ),
+    )
+    parser.add_argument(
+        "--resume-run-name",
+        default="",
+        help="Old run identifier recorded in output provenance columns.",
+    )
     parser.add_argument("--max-sep", type=float, default=1.0)
     parser.add_argument("--N", type=int)
     parser.add_argument("--skip", type=int)
@@ -606,6 +925,15 @@ def parse_args(argv=None):
         parser.error("--sed-photometry-path is required for --mode fit.")
     if not (args.fpath_in or args.filter_object_id):
         parser.error("--fpath-in or --filter_object_id is required.")
+    if args.resume:
+        resume_dir = Path(args.resume)
+        if not resume_dir.is_dir():
+            parser.error(f"--resume directory does not exist: {resume_dir}")
+        if resume_dir.resolve() == Path(args.output_dir).resolve():
+            parser.error("--resume and --output-dir must refer to different directories.")
+        args.resume = str(resume_dir)
+        if not args.resume_run_name:
+            args.resume_run_name = resume_dir.parent.name
     args.dense_mass = {"true": True, "false": False}.get(args.dense_mass, args.dense_mass)
     return args
 

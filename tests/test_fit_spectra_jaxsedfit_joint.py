@@ -1,14 +1,24 @@
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+
+import h5py
 import numpy as np
 import pandas as pd
 import pytest
 from matplotlib import pyplot as plt
 
+from qvc.spectra import fit_spectra_jaxsedfit_joint as joint
 from qvc.spectra.fit_spectra_jaxsedfit_joint import (
     ab_mag_to_mjy,
     add_qvc_psf_photometry,
+    empty_psf_agn_fraction_summary,
     estimate_m2500_dereddened,
     load_saved_sed_photometry,
     save_spectrum_figure,
+    summarize_joint_chi2,
+    summarize_psf_agn_fractions,
+    verify_new_posterior_bundle,
 )
 
 
@@ -109,3 +119,319 @@ def test_save_spectrum_figure_uses_separate_spectrum_filename(tmp_path):
     assert fitter.plot_residual is False
     assert path == tmp_path / "z0.300_205105.02-003302.7_spectrum.png"
     assert path.is_file()
+
+
+def _run_record():
+    return {
+        "object_id": "1452887",
+        "sdss_name": "J0000+0000",
+        "plate": 1,
+        "fiber": 2,
+        "mjd": 3,
+        "z": 1.0,
+        "ra": 10.0,
+        "dec": 20.0,
+        "loglbol": 46.0,
+        "_joint_photometry": [],
+    }
+
+
+def _component_prediction(filter_names):
+    total = np.tile(np.arange(1.0, len(filter_names) + 1.0), (4, 1))
+    prediction = {
+        "pred_fluxes": total,
+        "variable_agn_fluxes": 0.7 * total,
+    }
+    prediction.update(
+        {
+            name: np.array([float(index), float(index + 2)])
+            for index, name in enumerate(joint.JOINT_CHI2_SITES)
+        }
+    )
+    return prediction
+
+
+def _hybrid_args(tmp_path):
+    return SimpleNamespace(
+        resume=str(tmp_path / "old"),
+        resume_run_name="old_run",
+        output_dir=str(tmp_path / "new"),
+        fig_dir=str(tmp_path / "figs"),
+        save_fig=True,
+        save_jaxsedfit_samples=True,
+        verbose=False,
+    )
+
+
+def test_joint_summaries_have_stable_native_schema():
+    filter_names = [f"{band}_sdss" for band in "ugriz"]
+    prediction = _component_prediction(filter_names)
+
+    fractions = summarize_psf_agn_fractions(prediction, filter_names)
+    chi2 = summarize_joint_chi2(prediction)
+
+    assert set(empty_psf_agn_fraction_summary()) <= set(fractions)
+    for band in "ugriz":
+        assert fractions[f"f_AGN_psf_{band}"] == pytest.approx(0.7)
+        assert fractions[f"f_AGN_psf_{band}_err"] == pytest.approx(0.0)
+    for name in joint.JOINT_CHI2_SITES:
+        assert name in chi2
+        assert f"{name}_err" in chi2
+
+
+def test_verify_new_posterior_bundle_requires_v2_schema(tmp_path):
+    current = tmp_path / "current.h5"
+    with h5py.File(current, "w") as handle:
+        handle.attrs["posterior_bundle_format"] = joint.POSTERIOR_BUNDLE_FORMAT
+    assert verify_new_posterior_bundle(current) == current
+
+    old = tmp_path / "old.h5"
+    with h5py.File(old, "w") as handle:
+        handle.attrs["posterior_bundle_format"] = "jaxsedfit_samples_meta_v1"
+    with pytest.raises(ValueError, match="expected 'jaxsedfit_samples_meta_v2'"):
+        verify_new_posterior_bundle(old)
+
+
+def test_parse_args_resume_keeps_current_inputs_and_separate_destinations(tmp_path):
+    resume_dir = tmp_path / "old_run" / "all"
+    resume_dir.mkdir(parents=True)
+
+    args = joint.parse_args(
+        [
+            "--mode",
+            "fit",
+            str(tmp_path / "new" / "chunk.csv"),
+            "--sed-photometry-path",
+            str(tmp_path / "current_photometry.csv"),
+            "--filter_object_id",
+            "1452887",
+            "--resume",
+            str(resume_dir),
+            "--output-dir",
+            str(tmp_path / "new" / "all"),
+            "--fig-dir",
+            str(tmp_path / "new_plots"),
+        ]
+    )
+
+    assert args.filter_object_id == ["1452887"]
+    assert args.sed_photometry_path.endswith("current_photometry.csv")
+    assert args.resume == str(resume_dir)
+    assert args.resume_run_name == "old_run"
+    assert args.output_dir != args.resume
+
+
+def test_parse_args_rejects_resume_output_directory_alias(tmp_path):
+    resume_dir = tmp_path / "same" / "all"
+    resume_dir.mkdir(parents=True)
+
+    with pytest.raises(SystemExit):
+        joint.parse_args(
+            [
+                "--mode",
+                "fit",
+                str(tmp_path / "chunk.csv"),
+                "--sed-photometry-path",
+                str(tmp_path / "photometry.csv"),
+                "--filter_object_id",
+                "1452887",
+                "--resume",
+                str(resume_dir),
+                "--output-dir",
+                str(resume_dir),
+            ]
+        )
+
+
+def test_hybrid_missing_bundle_runs_fresh_with_provenance(monkeypatch, tmp_path):
+    args = _hybrid_args(tmp_path)
+    calls = []
+
+    def fake_fresh(rec, received_args, **kwargs):
+        calls.append((rec, received_args, kwargs))
+        return {"fit_ok": True, **kwargs}
+
+    monkeypatch.setattr(joint, "run_one_fit", fake_fresh)
+
+    result = joint.run_hybrid_fit(_run_record(), args)
+
+    assert result["fit_ok"] is True
+    assert result["execution_mode"] == "fresh_missing_bundle"
+    assert str(result["resumed_from_path"]).endswith(
+        "z1.000_J0000+0000_joint_samples.h5"
+    )
+    assert len(calls) == 1
+
+
+def test_hybrid_bad_bundle_cleans_new_artifacts_and_falls_back(monkeypatch, tmp_path):
+    args = _hybrid_args(tmp_path)
+    source = joint.posterior_bundle_path(args.resume, _run_record())
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"old posterior")
+
+    def failing_resume(rec, received_args, source_path):
+        new_bundle = joint.posterior_bundle_path(received_args.output_dir, rec)
+        new_bundle.parent.mkdir(parents=True)
+        new_bundle.write_bytes(b"partial")
+        sed_path = joint.sed_figure_path(received_args.fig_dir, rec)
+        sed_path.parent.mkdir(parents=True)
+        sed_path.write_bytes(b"partial")
+        raise ValueError("incompatible posterior")
+
+    fresh_calls = []
+
+    def fake_fresh(rec, received_args, **kwargs):
+        fresh_calls.append(kwargs)
+        return {"fit_ok": True, **kwargs}
+
+    monkeypatch.setattr(joint, "_run_resumed_fit", failing_resume)
+    monkeypatch.setattr(joint, "run_one_fit", fake_fresh)
+
+    result = joint.run_hybrid_fit(_run_record(), args)
+
+    assert result["execution_mode"] == "fresh_resume_failed"
+    assert "incompatible posterior" in result["resume_error_message"]
+    assert not joint.posterior_bundle_path(args.output_dir, _run_record()).exists()
+    assert not joint.sed_figure_path(args.fig_dir, _run_record()).exists()
+    assert source.read_bytes() == b"old posterior"
+    assert len(fresh_calls) == 1
+
+
+def test_resumed_fit_recomputes_and_writes_new_schema(monkeypatch, tmp_path):
+    rec = _run_record()
+    args = _hybrid_args(tmp_path)
+    source = joint.posterior_bundle_path(args.resume, rec)
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"immutable old posterior")
+    filter_names = [f"{band}_sdss" for band in "ugriz"]
+    prediction = _component_prediction(filter_names)
+
+    class DummyFitter:
+        predictive = {"stale": np.array([1.0])}
+        samples = {"log_agn_amp": np.array([1.0, 2.0])}
+        config = SimpleNamespace(
+            observation=SimpleNamespace(
+                object_id=joint.joint_saved_name(rec),
+                redshift=rec["z"],
+            ),
+            photometry=SimpleNamespace(filter_names=filter_names),
+            galaxy=SimpleNamespace(cosmology_h0=70.0, cosmology_om0=0.3),
+        )
+
+        def predict(self, *, kind):
+            assert kind == "plot"
+            assert self.predictive is None
+            return prediction
+
+        def save(self, output_dir):
+            path = joint.posterior_bundle_path(output_dir, rec)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with h5py.File(path, "w") as handle:
+                handle.attrs["posterior_bundle_format"] = joint.POSTERIOR_BUNDLE_FORMAT
+                handle.create_dataset(
+                    "samples/log_agn_amp", data=self.samples["log_agn_amp"]
+                )
+            return path
+
+        def plot_sed(self, *, output_path, show):
+            assert show is False
+            fig = plt.figure()
+            fig.savefig(output_path)
+            return fig
+
+    monkeypatch.setitem(
+        sys.modules,
+        "jaxsedfit",
+        SimpleNamespace(JAXSEDFit=SimpleNamespace(load=lambda path: DummyFitter())),
+    )
+    monkeypatch.setattr(
+        joint, "summarize_m2500_dereddened", lambda *args, **kwargs: {}
+    )
+    monkeypatch.setattr(
+        joint,
+        "save_spectrum_figure",
+        lambda fitter, record, fig_dir: Path(fig_dir) / "spectrum.png",
+    )
+
+    result = joint.run_hybrid_fit(rec, args)
+
+    assert result["fit_ok"] is True
+    assert result["execution_mode"] == "resumed"
+    assert result["object_id"] == rec["object_id"]
+    assert result["resumed_from_run"] == "old_run"
+    assert result["joint_reduced_chi2"] == pytest.approx(9.0)
+    assert result["f_AGN_psf_g"] == pytest.approx(0.7)
+    assert verify_new_posterior_bundle(result["fit_result_path"]).is_file()
+    assert source.read_bytes() == b"immutable old posterior"
+
+
+def test_fresh_fit_writes_same_diagnostic_schema_and_v2_bundle(monkeypatch, tmp_path):
+    rec = _run_record()
+    args = _hybrid_args(tmp_path)
+    args.cache_dir = str(tmp_path / "cache")
+    args.progress = False
+    args.save_fig = False
+    filter_names = [f"{band}_sdss" for band in "ugriz"]
+    prediction = _component_prediction(filter_names)
+    saved_path = joint.posterior_bundle_path(args.output_dir, rec)
+    saved_path.parent.mkdir(parents=True)
+    with h5py.File(saved_path, "w") as handle:
+        handle.attrs["posterior_bundle_format"] = joint.POSTERIOR_BUNDLE_FORMAT
+
+    class DummyHDUL:
+        def close(self):
+            pass
+
+    class DummyFitResult:
+        samples = {"log_agn_amp": np.array([1.0, 2.0])}
+        path = saved_path
+
+        def predict(self, *, kind):
+            assert kind == "photometry"
+            return prediction
+
+    class DummyFitter:
+        def __init__(self, config):
+            self.config = config
+
+        def fit(self, *, progress_bar):
+            assert progress_bar is False
+            return DummyFitResult()
+
+    config = SimpleNamespace(
+        galaxy=SimpleNamespace(cosmology_h0=70.0, cosmology_om0=0.3)
+    )
+    used_phot = pd.DataFrame({"filter_name": filter_names})
+    monkeypatch.setattr(
+        joint.legacy, "load_spec_from_cache", lambda *args, **kwargs: DummyHDUL()
+    )
+    monkeypatch.setattr(
+        joint.legacy,
+        "get_spectrum_arrays",
+        lambda hdul: (
+            np.array([4000.0]),
+            np.array([1.0]),
+            np.array([0.1]),
+            2000.0,
+        ),
+    )
+    monkeypatch.setattr(
+        joint, "build_joint_config", lambda *args, **kwargs: (config, used_phot)
+    )
+    monkeypatch.setattr(
+        joint, "summarize_m2500_dereddened", lambda *args, **kwargs: {}
+    )
+    monkeypatch.setitem(sys.modules, "jaxsedfit", SimpleNamespace(JAXSEDFit=DummyFitter))
+
+    result = joint.run_one_fit(
+        rec,
+        args,
+        execution_mode="fresh_missing_bundle",
+        resumed_from_path=tmp_path / "old" / "missing.h5",
+    )
+
+    assert result["fit_ok"] is True
+    assert result["execution_mode"] == "fresh_missing_bundle"
+    assert result["joint_reduced_chi2"] == pytest.approx(9.0)
+    assert result["f_AGN_psf_i"] == pytest.approx(0.7)
+    assert result["fit_result_path"] == str(saved_path)

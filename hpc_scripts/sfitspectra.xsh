@@ -64,9 +64,25 @@ parser.add_argument(
     default=fit_script,
     help="Spectrum-fitting backend to run.",
 )
+parser.add_argument(
+    "--resume",
+    metavar="OLD_RUN_NAME",
+    default="",
+    help=(
+        "For the joint JAXSEDFit backend, reuse usable posterior bundles from "
+        "results/data/jaxqsofit/OLD_RUN_NAME/all and freshly fit the rest."
+    ),
+)
 cli_args = parser.parse_args()
 
 fit_script = cli_args.fit_script
+resume_run_name = cli_args.resume.strip()
+if resume_run_name and fit_script != "fit_spectra_jaxsedfit_joint.py":
+    parser.error("--resume is supported only with fit_spectra_jaxsedfit_joint.py")
+if resume_run_name:
+    normalized_resume_name = re.sub(r"[^A-Za-z0-9._-]+", "_", resume_run_name)
+    if normalized_resume_name != resume_run_name or resume_run_name in {".", ".."}:
+        parser.error("--resume must be a run name, not a path")
 description = re.sub(
     r"[^A-Za-z0-9.-]+", "_", cli_args.description
 ).strip("_.-")
@@ -87,6 +103,19 @@ prefix = job_name
 # Use the generated run identifier for every run-specific folder and file.
 output_dir = f"results/data/jaxqsofit/{prefix}"
 fig_dir = f"plots/jaxqsofit/{prefix}"
+resume_dir = (
+    f"results/data/jaxqsofit/{resume_run_name}/all"
+    if resume_run_name
+    else ""
+)
+
+if resume_dir:
+    resume_path = REPO_ROOT / resume_dir
+    output_path = REPO_ROOT / output_dir
+    if not resume_path.is_dir():
+        raise FileNotFoundError(f"Resume run sample directory not found: {resume_path}")
+    if resume_path.resolve() == (output_path / "all").resolve():
+        raise ValueError("Resume source and new sample destination must differ.")
 
 # ==========================================
 # 3. Helpers
@@ -195,6 +224,18 @@ print(f"Number of array tasks: {num_tasks}")
 log_dir = f"hpc_scripts/logs/jaxqsofit/{prefix}"
 submit_dir = "hpc_scripts/submit/jaxqsofit"
 
+existing_run_paths = [
+    REPO_ROOT / output_dir,
+    REPO_ROOT / fig_dir,
+    REPO_ROOT / log_dir,
+]
+already_exist = [str(path) for path in existing_run_paths if path.exists()]
+if already_exist:
+    raise FileExistsError(
+        "Refusing to reuse an existing new-run destination: "
+        + ", ".join(already_exist)
+    )
+
 os.makedirs(log_dir, exist_ok=True)
 print(f"Created log directory: {log_dir}")
 
@@ -243,6 +284,8 @@ export PYTHON_BIN="{python_bin}"
 export QVC_DATA_DIR="{qvc_data_dir}"
 export CACHE_DIR="{cache_dir}"
 export FIG_DIR="{fig_dir}"
+export RESUME_DIR="{resume_dir}"
+export RESUME_RUN_NAME="{resume_run_name}"
 
 export TASK_ID="${{SLURM_ARRAY_TASK_ID:-0}}"
 
@@ -266,6 +309,8 @@ echo "SED_PHOTOMETRY_PATH=$SED_PHOTOMETRY_PATH"
 echo "OBJECT_IDS_FILE=$OBJECT_IDS_FILE"
 echo "OUTPUT_DIR=$OUTPUT_DIR"
 echo "FIG_DIR=$FIG_DIR"
+echo "RESUME_DIR=$RESUME_DIR"
+echo "RESUME_RUN_NAME=$RESUME_RUN_NAME"
 echo "PYTHON_BIN=$PYTHON_BIN"
 
 "$PYTHON_BIN" - <<'PY'
@@ -285,6 +330,8 @@ cpus_per_task = int(os.environ["CPUS_PER_TASK"])
 python_bin = os.environ["PYTHON_BIN"]
 cache_dir = os.environ["CACHE_DIR"]
 fig_dir = os.environ["FIG_DIR"]
+resume_dir = os.environ["RESUME_DIR"]
+resume_run_name = os.environ["RESUME_RUN_NAME"]
 task_id = int(os.environ.get("TASK_ID", "0"))
 
 start = task_id * chunk_size
@@ -334,6 +381,11 @@ elif fit_script == "fit_spectra_jaxsedfit_joint.py":
         "--sed-photometry-path", sed_photometry_path,
         "--progress",
     ])
+    if resume_dir:
+        cmd.extend([
+            "--resume", resume_dir,
+            "--resume-run-name", resume_run_name,
+        ])
 else:
     raise ValueError(f"Unsupported FIT_SCRIPT in generated job: {{fit_script!r}}")
 
