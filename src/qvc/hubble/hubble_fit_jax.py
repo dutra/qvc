@@ -55,6 +55,7 @@ from qvc.hubble.hubble_completeness_refactored import (
     COMPLETENESS_FHOST_COL,
     COMPLETENESS_MAG_COL,
     COMPLETENESS_MAG_ERR_COL,
+    VALID_COMPLETENESS_MAGNITUDES,
     Completeness2D,
     Completeness3D,
     Completeness4D,
@@ -62,6 +63,8 @@ from qvc.hubble.hubble_completeness_refactored import (
     get_completeness_function_3d_fhost,
     get_completeness_function_4d_fhost_alpha,
     make_dm_function,
+    normalize_completeness_magnitude,
+    prepare_completeness_magnitude_columns,
 )
 from qvc.hubble.hubble_fit import (
     DEFAULT_COMPLETENESS_SIM_FILE,
@@ -85,8 +88,11 @@ from qvc.hubble.hubble_model import (
     agn_model_req_params,
     build_agn_pivot_context,
     get_model_params,
+    validate_agn_observable_uncertainties,
 )
 from qvc.hubble.hubble_plotting import (
+    HubblePosteriorDrawSelection,
+    get_hubble_posterior_sample_indices,
     plot_blr_line_lags_vs_l2500,
     plot_completeness_diagnostics,
     plot_cosmo_corner,
@@ -175,8 +181,13 @@ def _ez_inv_flat_jax(z: jnp.ndarray, params: dict[str, Any], cosmo_model: str, z
     return jax.lax.rsqrt(jnp.maximum(ez2, 1e-18))
 
 
-def _distance_modulus_jax(z: jnp.ndarray, params: dict[str, Any], cosmo_model: str, zp: float) -> tuple[jnp.ndarray, jnp.ndarray]:
-    """Return distance modulus and comoving distance in Mpc."""
+def _comoving_distance_jax(
+    z: jnp.ndarray,
+    params: dict[str, Any],
+    cosmo_model: str,
+    zp: float,
+) -> jnp.ndarray:
+    """Return line-of-sight comoving distance in Mpc."""
     z = jnp.asarray(z)
     H0 = params["H0"]
     c_kms = 299792.458
@@ -184,13 +195,36 @@ def _distance_modulus_jax(z: jnp.ndarray, params: dict[str, Any], cosmo_model: s
     def one_distance(zi):
         grid = jnp.linspace(0.0, jnp.maximum(zi, 1e-8), 256)
         integrand = _ez_inv_flat_jax(grid, params, cosmo_model, zp)
-        dc = (c_kms / H0) * _trapz_jax(integrand, grid, axis=0)
-        dl = dc * (1.0 + zi)
-        mu = 5.0 * jnp.log10(jnp.maximum(dl, 1e-12)) + 25.0
-        return mu, dc
+        return (c_kms / H0) * _trapz_jax(integrand, grid, axis=0)
 
-    mu, dc = jax.vmap(one_distance)(z)
+    return jax.vmap(one_distance)(z)
+
+
+def _distance_modulus_from_redshifts_jax(
+    z_distance: jnp.ndarray,
+    z_photon: jnp.ndarray,
+    params: dict[str, Any],
+    cosmo_model: str,
+    zp: float,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Return distance modulus using separate distance and photon redshifts."""
+    z_distance = jnp.asarray(z_distance)
+    z_photon = jnp.asarray(z_photon)
+    dc = _comoving_distance_jax(z_distance, params, cosmo_model, zp)
+    dl = dc * (1.0 + z_photon)
+    mu = 5.0 * jnp.log10(jnp.maximum(dl, 1e-12)) + 25.0
     return mu, dc
+
+
+def _distance_modulus_jax(z: jnp.ndarray, params: dict[str, Any], cosmo_model: str, zp: float) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Return distance modulus and comoving distance for a single redshift."""
+    return _distance_modulus_from_redshifts_jax(
+        z,
+        z,
+        params,
+        cosmo_model,
+        zp,
+    )
 
 
 def _sigma_mu_from_z_err_jax(
@@ -401,7 +435,15 @@ def _prepare_agn_arrays(
     out = {k: jnp.asarray(v) for k, v in agn_data.items() if k != "object_id"}
     out["object_id"] = np.asarray(agn_data["object_id"]).astype(str)
     obs = jnp.stack([out[k] for k in agn_model_req_obs], axis=0)
-    err = jnp.stack([out[k] for k in agn_model_req_errs], axis=0)
+    err_numpy = np.stack(
+        [np.asarray(agn_data[k], dtype=float) for k in agn_model_req_errs],
+        axis=0,
+    )
+    validate_agn_observable_uncertainties(
+        err_numpy,
+        object_ids=out["object_id"],
+    )
+    err = jnp.asarray(err_numpy)
     pivots = jnp.asarray(
         agn_pivot_context.as_array(
             use_alpha_lambda_term=False,
@@ -415,8 +457,36 @@ def _prepare_agn_arrays(
 
 
 def _prepare_pantheon_arrays(pantheon_data: dict[str, np.ndarray], L, lower, logdet):
+    required = {
+        "zHD",
+        "zHEL",
+        "m_b_corr",
+        "IS_CALIBRATOR",
+        "CEPH_DIST",
+        "MU_SH0ES_ERR_DIAG",
+    }
+    missing = required - set(pantheon_data)
+    if missing:
+        raise KeyError(
+            "Pantheon JAX likelihood is missing required fields "
+            f"{sorted(missing)}; zHEL has no zHD fallback."
+        )
+
+    z_hd = np.asarray(pantheon_data["zHD"], dtype=float)
+    z_hel = np.asarray(pantheon_data["zHEL"], dtype=float)
+    if z_hd.shape != z_hel.shape:
+        raise ValueError(
+            "Pantheon zHD and zHEL must have identical shapes; "
+            f"got {z_hd.shape} and {z_hel.shape}."
+        )
+    if not np.all(np.isfinite(z_hd)):
+        raise ValueError("Pantheon zHD must contain only finite values.")
+    if not np.all(np.isfinite(z_hel)):
+        raise ValueError("Pantheon zHEL must contain only finite values.")
+
     return {
-        "zHD": jnp.asarray(pantheon_data["zHD"]),
+        "zHD": jnp.asarray(z_hd),
+        "zHEL": jnp.asarray(z_hel),
         "m_b_corr": jnp.asarray(pantheon_data["m_b_corr"]),
         "IS_CALIBRATOR": jnp.asarray(np.asarray(pantheon_data["IS_CALIBRATOR"], dtype=bool)),
         "CEPH_DIST": jnp.asarray(pantheon_data["CEPH_DIST"]),
@@ -442,7 +512,7 @@ def _agn_model_err_jax(params_vec, err_arr):
     tau_std = err_arr[agn_model_req_errs.index("log_tau_uv_rf_std_psd")]
     cov = err_arr[agn_model_req_errs.index("log_sigma_uv_log_tau_uv_rf_cov_psd")]
     var = (alpha_agn * sig_std) ** 2 + (beta_agn * tau_std) ** 2 + 2.0 * alpha_agn * beta_agn * cov
-    return jnp.sqrt(jnp.maximum(var, 1e-18))
+    return jnp.sqrt(jnp.maximum(var, 0.0))
 
 
 def _pack_param_dict(theta: jnp.ndarray, model_labels: list[str]) -> dict[str, jnp.ndarray]:
@@ -471,9 +541,16 @@ def _log_likelihood_jax(
     if only_agn:
         ll_sn = 0.0
     else:
-        z_sn = pantheon_jax["zHD"]
+        z_sn_hd = pantheon_jax["zHD"]
+        z_sn_hel = pantheon_jax["zHEL"]
         is_cal = pantheon_jax["IS_CALIBRATOR"]
-        mu_sn, _ = _distance_modulus_jax(z_sn, params, cosmo_model, z_pivot_agn)
+        mu_sn, _ = _distance_modulus_from_redshifts_jax(
+            z_sn_hd,
+            z_sn_hel,
+            params,
+            cosmo_model,
+            z_pivot_agn,
+        )
         if use_ceph_dist_calibration:
             mu_sn = jnp.where(is_cal, pantheon_jax["CEPH_DIST"], mu_sn)
         res_sn = pantheon_jax["m_b_corr"] - (mu_sn + params["M0_sn"])
@@ -714,6 +791,7 @@ def run_single_jax(
     prefix="default_jax",
     completeness_sim_file=DEFAULT_COMPLETENESS_SIM_FILE,
     completeness_mode="2d",
+    completeness_magnitude="dereddened",
     only_sna=False,
     N=None,
     uniform_redshift_distribution=False,
@@ -736,6 +814,18 @@ def run_single_jax(
     if use_redshift_log_f_term:
         raise NotImplementedError("run_single_jax does not support --fit_redshift_log_f_term yet.")
     validate_completeness_mode(completeness_mode)
+    completeness_magnitude = normalize_completeness_magnitude(
+        completeness_magnitude
+    )
+    if completeness:
+        df_agn = prepare_completeness_magnitude_columns(
+            df_agn,
+            completeness_magnitude,
+        )
+        df_agn_all = prepare_completeness_magnitude_columns(
+            df_agn_all,
+            completeness_magnitude,
+        )
     speed = normalize_speed(speed)
     if only_sna and only_agn:
         raise ValueError("only_sna and only_agn cannot both be True.")
@@ -748,6 +838,9 @@ def run_single_jax(
         N,
         z_range,
         only_agn=only_agn,
+        completeness=completeness,
+        completeness_mode=completeness_mode,
+        completeness_magnitude=completeness_magnitude,
         disable_ceph_dist_calibration=disable_ceph_dist_calibration,
         use_planck_h0_prior=use_planck_h0_prior,
         use_planck_om_prior=use_planck_om_prior,
@@ -757,6 +850,12 @@ def run_single_jax(
     plot_path = f"plots/hubble/{prefix}/{run_tag}"
     os.makedirs(plot_path, exist_ok=True)
     print("Saving plots to", plot_path)
+    if completeness:
+        print(
+            "Completeness magnitude: "
+            f"{completeness_magnitude} "
+            f"({df_agn.attrs['completeness_magnitude_source']})."
+        )
 
     df_agn_fit = _select_agn_fit_selection(
         df_agn,
@@ -833,7 +932,7 @@ def run_single_jax(
         agn_fields += ("alpha_lambda",)
     agn_data = {col: df_agn_fit[col].values for col in agn_fields if col in df_agn_fit.columns}
 
-    pantheon_fields = ["zHD", "m_b_corr", "IS_CALIBRATOR", "CEPH_DIST", "MU_SH0ES_ERR_DIAG"]
+    pantheon_fields = ["zHD", "zHEL", "m_b_corr", "IS_CALIBRATOR", "CEPH_DIST", "MU_SH0ES_ERR_DIAG"]
     pantheon_data = {col: df_pantheon[col].values for col in pantheon_fields if col in df_pantheon.columns}
 
     if only_sna:
@@ -906,6 +1005,20 @@ def run_single_jax(
     integrals_max_w = blobs[idx_max_weight, 0, :]
     dmi_max_w = blobs[idx_max_weight, 1, :]
     dmi_posterior_median = np.median(blobs[:, 1, :], axis=0)
+    dmi_posterior_sigma = 0.5 * (
+        np.percentile(blobs[:, 1, :], 84, axis=0)
+        - np.percentile(blobs[:, 1, :], 16, axis=0)
+    )
+    posterior_sample_indices = get_hubble_posterior_sample_indices(
+        len(flat_samples)
+    )
+    dmi_posterior_draws = HubblePosteriorDrawSelection(
+        values=blobs[posterior_sample_indices, 1, :],
+        sample_indices=posterior_sample_indices,
+        object_ids=tuple(
+            str(value) for value in df_agn_fit["object_id"].to_numpy()
+        ),
+    )
     dmi_selection_sigma_posterior_median = None
     if blobs.ndim == 3 and blobs.shape[1] >= 3:
         dmi_selection_sigma_posterior_median = np.median(blobs[:, 2, :], axis=0)
@@ -917,6 +1030,7 @@ def run_single_jax(
         flat_samples=flat_samples,
         dmi_max_w=dmi_max_w,
         dmi_posterior_median=dmi_posterior_median,
+        dmi_posterior_sigma=dmi_posterior_sigma,
         dmi_selection_sigma_posterior_median=dmi_selection_sigma_posterior_median,
         sigma_clip_pass_stage="single",
         logZ=logZ if logZ is not None else np.nan,
@@ -1134,21 +1248,55 @@ def run_single_jax(
         verbose=True,
         residuals_sigma_clip=None,
         df_calibrators=None,
+        dmi_values=dmi_posterior_median,
+        dmi_sigma=dmi_posterior_sigma,
+        dmi_selection_sigma=dmi_selection_sigma_posterior_median,
         z_range=z_range,
         only_agn=only_agn,
+        dmi_posterior_draws=dmi_posterior_draws,
+        posterior_sample_indices=posterior_sample_indices,
         agn_pivot_context=agn_pivot_context,
     )
-    debiased_residuals, _debiased_clipping_sigma, _, mu_pred_std_debiased, _ = r
-    hubble_chi2_mask = df_agn_fit["z"].between(z_range[0], z_range[1]).to_numpy(dtype=bool)
-    if np.any(hubble_chi2_mask):
-        chisq_red_hubble_debiased, _ = reduced_chi_squared(
+    (
+        debiased_residuals,
+        _debiased_clipping_sigma,
+        _,
+        mu_pred_std_debiased,
+        mu_pred_std_debiased_with_scatter,
+    ) = r
+    n_agn_params = sum(label != "M0_sn" for label in model_labels)
+    hubble_chi2_mask = (
+        df_agn_fit["z"]
+        .between(z_range[0], z_range[1])
+        .to_numpy(dtype=bool)
+        & np.isfinite(debiased_residuals)
+        & np.isfinite(mu_pred_std_debiased)
+        & np.isfinite(mu_pred_std_debiased_with_scatter)
+        & (mu_pred_std_debiased > 0.0)
+        & (mu_pred_std_debiased_with_scatter > 0.0)
+    )
+    if np.count_nonzero(hubble_chi2_mask) > n_agn_params:
+        chisq_red_hubble_debiased_full, _ = reduced_chi_squared(
+            debiased_residuals[hubble_chi2_mask],
+            mu_pred_std_debiased_with_scatter[hubble_chi2_mask],
+            n_params=n_agn_params,
+        )
+        chisq_red_hubble_debiased_data_only, _ = reduced_chi_squared(
             debiased_residuals[hubble_chi2_mask],
             mu_pred_std_debiased[hubble_chi2_mask],
-            n_params=len(model_labels) - 1,
+            n_params=n_agn_params,
         )
     else:
-        chisq_red_hubble_debiased = np.nan
-    print(f"Reduced chi-squared (debiased) Hubble: {chisq_red_hubble_debiased:.3f}")
+        chisq_red_hubble_debiased_full = np.nan
+        chisq_red_hubble_debiased_data_only = np.nan
+    print(
+        "Reduced chi-squared (debiased) Hubble, full: "
+        f"{chisq_red_hubble_debiased_full:.3f}"
+    )
+    print(
+        "Reduced chi-squared (debiased) Hubble, data only: "
+        f"{chisq_red_hubble_debiased_data_only:.3f}"
+    )
 
     plot_completeness_diagnostics(
         dmi_posterior_median,
@@ -1200,6 +1348,12 @@ def main():
         help="Optional mock catalog HDF5 override. If omitted, generate a fresh mock catalog for each run.",
     )
     parser.add_argument("--completeness_mode", type=str, choices=list(VALID_COMPLETENESS_MODES), default="2d")
+    parser.add_argument(
+        "--completeness_magnitude",
+        type=str,
+        choices=list(VALID_COMPLETENESS_MAGNITUDES),
+        default="dereddened",
+    )
     parser.add_argument("--correct-sigma-uv-host", action="store_true", default=False)
     parser.add_argument(
         "--no-cuts",
@@ -1242,6 +1396,7 @@ def main():
         prefix=args.prefix,
         completeness_sim_file=args.completeness_sim_file,
         completeness_mode=args.completeness_mode,
+        completeness_magnitude=args.completeness_magnitude,
         only_sna=args.only_sna,
         only_agn=args.only_agn,
         N=args.N,

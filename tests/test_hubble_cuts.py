@@ -156,6 +156,86 @@ def test_current_spectra_schema_accepts_only_joint_sedfit_backend(tmp_path):
         populate_spectra_fit(pd.DataFrame({"object_id": ["obj"]}), [csv_path])
 
 
+def test_populate_spectra_fit_preserves_all_nonconflicting_columns_and_hdf5_wins(
+    tmp_path,
+):
+    csv_path = tmp_path / "spectra.csv"
+    row = {
+        "object_id": "obj",
+        "fit_ok": True,
+        "fit_backend": "jaxsedfit_joint",
+        "z": 1.25,
+        "pl_slope": -1.5,
+        "pl_slope_err": 0.1,
+        "fracAGN_5100_fit": 0.8,
+        "fracAGN_5100_fit_err": 0.05,
+        "m_2500_dereddened": 20.0,
+        "m_2500_dereddened_err": 0.1,
+        "m_2500_attenuated_model": 20.2,
+        "m_2500_attenuated_model_err": 0.12,
+        "new_sed_parameter": 42.5,
+        "new_sed_label": "well_constrained",
+    }
+    pd.DataFrame([row]).to_csv(csv_path, index=False)
+    source = pd.DataFrame(
+        {
+            "object_id": ["obj"],
+            "z": [1.5],
+            "pl_slope": [-0.8],
+            "alpha_lambda": [-0.75],
+            "alpha_lambda_err": [0.03],
+            "alpha_nu": [-1.25],
+            "alpha_nu_err": [0.03],
+        }
+    )
+
+    out = populate_spectra_fit(source, [csv_path])
+
+    assert out.loc[0, "z"] == 1.5
+    assert out.loc[0, "pl_slope"] == -0.8
+    assert out.loc[0, "alpha_lambda"] == -0.75
+    assert out.loc[0, "alpha_lambda_err"] == 0.03
+    assert out.loc[0, "alpha_nu"] == -1.25
+    assert out.loc[0, "alpha_nu_err"] == 0.03
+    assert out.loc[0, "new_sed_parameter"] == 42.5
+    assert out.loc[0, "new_sed_label"] == "well_constrained"
+    assert not any(column.endswith(("_x", "_y", "_sedfit")) for column in out.columns)
+    assert "new_sed_parameter" in out.attrs["spectra_fit_columns"]
+    assert "new_sed_label" in out.attrs["spectra_fit_columns"]
+    assert "z" not in out.attrs["spectra_fit_columns"]
+    assert "pl_slope" not in out.attrs["spectra_fit_columns"]
+
+
+def test_populate_spectra_fit_derives_missing_slope_aliases_without_overwriting(
+    tmp_path,
+):
+    csv_path = tmp_path / "spectra.csv"
+    pd.DataFrame(
+        [
+            {
+                "object_id": "obj",
+                "fit_ok": True,
+                "fit_backend": "jaxsedfit_joint",
+                "fracAGN_5100_fit": 0.8,
+                "fracAGN_5100_fit_err": 0.05,
+                "m_2500_dereddened": 20.0,
+                "m_2500_dereddened_err": 0.1,
+                "m_2500_attenuated_model": 20.2,
+                "m_2500_attenuated_model_err": 0.12,
+                "pl_slope": -1.5,
+                "pl_slope_err": 0.1,
+            }
+        ]
+    ).to_csv(csv_path, index=False)
+
+    out = populate_spectra_fit(pd.DataFrame({"object_id": ["obj"]}), [csv_path])
+
+    assert out.loc[0, "alpha_lambda"] == -1.5
+    assert out.loc[0, "alpha_lambda_err"] == 0.1
+    assert out.loc[0, "alpha_nu"] == -0.5
+    assert out.loc[0, "alpha_nu_err"] == 0.1
+
+
 def test_light_curve_point_count_series_prefers_cleaned_per_band_counts():
     df = pd.DataFrame(
         {

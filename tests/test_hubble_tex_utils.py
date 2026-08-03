@@ -14,6 +14,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from qvc.hubble.tex_utils import make_agn_csv_table, make_agn_latex_table
+from qvc.hubble.hubble_completeness_refactored import COMPLETENESS_MAG_COL
 
 
 def _make_table_df():
@@ -28,6 +29,7 @@ def _make_table_df():
             "apparent_mag_2500_err": [0.07],
             "m_2500_attenuated_model": [20.50],
             "m_2500_attenuated_model_err": [0.09],
+            COMPLETENESS_MAG_COL: [20.50],
             "alpha_lambda": [-1.52],
             "alpha_lambda_err": [0.08],
             "pl_slope": [-1.37],

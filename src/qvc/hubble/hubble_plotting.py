@@ -4,6 +4,7 @@ import math
 import re
 import warnings
 from ast import literal_eval
+from dataclasses import dataclass
 
 import corner
 import matplotlib as mpl
@@ -12,6 +13,7 @@ import matplotlib.gridspec as gridspec
 import matplotlib.pyplot as plt
 import matplotlib.transforms as mtransforms
 import pandas as pd
+from matplotlib.backends.backend_pdf import PdfPages
 from mpl_toolkits.axes_grid1.inset_locator import inset_axes
 from astropy.cosmology import FlatwCDM, FlatwpwaCDM, FlatLambdaCDM, Flatw0waCDM
 from astropy.cosmology.realizations import Planck18
@@ -20,7 +22,7 @@ from matplotlib.lines import Line2D
 from matplotlib.ticker import FixedLocator, FormatStrFormatter, FuncFormatter, LogLocator, NullLocator
 from scipy.interpolate import RegularGridInterpolator, interp1d
 from scipy.optimize import minimize_scalar
-from scipy.stats import gaussian_kde, kurtosis, norm, normaltest, probplot, skew
+from scipy.stats import gaussian_kde, kurtosis, norm, normaltest, probplot, skew, spearmanr
 from tqdm import tqdm
 
 from qvc.hubble.hubble_model import (
@@ -29,6 +31,8 @@ from qvc.hubble.hubble_model import (
     AgnPivotContext,
     M_model_agn,
     M_model_agn_err,
+    M_model_agn_observable_variance_posterior,
+    M_model_agn_posterior_samples,
     agn_model_oidx,
     agn_model_pack_obs,
     agn_model_pack_params,
@@ -79,6 +83,63 @@ _OUT_OF_RANGE_AGN_COLOR = "#354B5B"
 _OUT_OF_RANGE_AGN_MARKER_COLOR = mpl.colors.to_rgba(_OUT_OF_RANGE_AGN_COLOR, alpha=0.65)
 _OUT_OF_RANGE_AGN_ERROR_COLOR = mpl.colors.to_rgba(_OUT_OF_RANGE_AGN_COLOR, alpha=0.3)
 _COSMO_CORNER_LEGEND_FONTSIZE = 40
+
+
+@dataclass(frozen=True)
+class HubblePosteriorDrawSelection:
+    """Posterior draws bound to their sample rows and AGN column order."""
+
+    values: np.ndarray
+    sample_indices: np.ndarray
+    object_ids: tuple[str, ...]
+
+    def __post_init__(self):
+        values = np.asarray(self.values, dtype=float)
+        sample_indices = np.asarray(self.sample_indices)
+        object_ids = np.asarray(self.object_ids, dtype=object)
+        if values.ndim != 2:
+            raise ValueError(
+                "Hubble posterior draw values must be two-dimensional; "
+                f"got shape {values.shape}."
+            )
+        if (
+            sample_indices.ndim != 1
+            or np.issubdtype(sample_indices.dtype, np.bool_)
+            or not np.issubdtype(sample_indices.dtype, np.integer)
+        ):
+            raise ValueError(
+                "Hubble posterior draw sample_indices must be a "
+                "one-dimensional integer array."
+            )
+        if object_ids.ndim != 1:
+            raise ValueError(
+                "Hubble posterior draw object_ids must be one-dimensional."
+            )
+        if values.shape != (sample_indices.size, object_ids.size):
+            raise ValueError(
+                "Hubble posterior draw values must have shape "
+                f"({sample_indices.size}, {object_ids.size}); "
+                f"got {values.shape}."
+            )
+        if np.any(~np.isfinite(values)):
+            raise ValueError(
+                "Hubble posterior draw values must contain only finite "
+                "values."
+            )
+        if np.unique(sample_indices).size != sample_indices.size:
+            raise ValueError(
+                "Hubble posterior draw sample_indices must not contain "
+                "duplicates."
+            )
+
+        values = values.copy()
+        sample_indices = sample_indices.astype(int, copy=True)
+        values.setflags(write=False)
+        sample_indices.setflags(write=False)
+        object_id_tuple = tuple(str(value) for value in object_ids)
+        object.__setattr__(self, "values", values)
+        object.__setattr__(self, "sample_indices", sample_indices)
+        object.__setattr__(self, "object_ids", object_id_tuple)
 
 
 _SDSS_FILTER_EDGES_OBS = {
@@ -5170,12 +5231,21 @@ def _weighted_bin_stats(z, y, yerr, bins, *, min_count=3, center='mid', plot_pat
     - weights w = 1 / yerr^2
     - mean = (∑ w y) / (∑ w)
     - SEM  = sqrt(1 / ∑ w)
+    - membership is [left, right), except the final bin includes its right edge
     center: 'weighted' (default), 'mid', or 'geom'
     Returns zc, mean, sem, n for bins meeting min_count.
     """
     z = np.asarray(z, float)
     y = np.asarray(y, float)
     e = np.asarray(yerr, float)
+    bins = np.asarray(bins, float)
+    if (
+        bins.ndim != 1
+        or bins.size < 2
+        or not np.all(np.isfinite(bins))
+        or np.any(np.diff(bins) <= 0)
+    ):
+        raise ValueError("bins must be a finite, strictly increasing 1-D array")
 
     m = np.isfinite(z) & np.isfinite(y) & np.isfinite(e) & (e > 0)
     if not np.any(m):
@@ -5185,7 +5255,10 @@ def _weighted_bin_stats(z, y, yerr, bins, *, min_count=3, center='mid', plot_pat
     w = 1.0 / (e * e)
 
     B = len(bins) - 1
-    k = np.digitize(z, bins, right=True) - 1          # 0..B-1
+    k = np.searchsorted(bins, z, side="right") - 1
+    # np.searchsorted assigns the final edge just above the final bin.  Match
+    # np.histogram by closing that one outer boundary explicitly.
+    k[z == bins[-1]] = B - 1
     inr = (k >= 0) & (k < B)
     if not np.any(inr):
         return np.array([]), np.array([]), np.array([]), np.array([])
@@ -5211,6 +5284,139 @@ def _weighted_bin_stats(z, y, yerr, bins, *, min_count=3, center='mid', plot_pat
     return zc[keep], mean[keep], sem[keep], n[keep]
 
 
+def _interval_bin_edges(bins, lower, upper):
+    """Return ``bins`` clipped to one non-empty interval."""
+    bins = np.asarray(bins, dtype=float)
+    lower = max(float(lower), float(bins[0]))
+    upper = min(float(upper), float(bins[-1]))
+    if upper <= lower:
+        return None
+    return np.concatenate(
+        (
+            np.array([lower]),
+            bins[(bins > lower) & (bins < upper)],
+            np.array([upper]),
+        )
+    )
+
+
+def _concatenate_weighted_bin_stats(parts):
+    nonempty = [part for part in parts if part[0].size]
+    if not nonempty:
+        return (
+            np.empty(0, dtype=float),
+            np.empty(0, dtype=float),
+            np.empty(0, dtype=float),
+            np.empty(0, dtype=int),
+        )
+    combined = tuple(
+        np.concatenate([part[index] for part in nonempty])
+        for index in range(4)
+    )
+    order = np.argsort(combined[0], kind="stable")
+    return tuple(values[order] for values in combined)
+
+
+def _range_partitioned_weighted_bin_stats(
+    z,
+    y,
+    yerr,
+    bins,
+    z_range,
+    *,
+    min_count=3,
+    center="mid",
+):
+    """Bin fit-range and out-of-range objects without mixed boundary bins.
+
+    The fit interval is inclusive at both ends.  Its endpoints are inserted as
+    bin edges, and objects below, inside, and above the interval are binned
+    independently.  The return value is ``(in_range_stats, out_of_range_stats)``,
+    where each stats tuple has the same layout as :func:`_weighted_bin_stats`.
+    """
+    z = np.asarray(z, dtype=float)
+    y = np.asarray(y, dtype=float)
+    yerr = np.asarray(yerr, dtype=float)
+    bins = np.asarray(bins, dtype=float)
+    if z.shape != y.shape or z.shape != yerr.shape:
+        raise ValueError(
+            "z, y, and yerr must have identical shapes for range-partitioned binning"
+        )
+    if len(z_range) != 2:
+        raise ValueError("z_range must contain exactly two endpoints")
+    z_lo, z_hi = map(float, z_range)
+    if not np.isfinite(z_lo) or not np.isfinite(z_hi) or z_hi <= z_lo:
+        raise ValueError("z_range must be finite and strictly increasing")
+
+    def summarize(mask, lower, upper):
+        edges = _interval_bin_edges(bins, lower, upper)
+        if edges is None:
+            return (
+                np.empty(0, dtype=float),
+                np.empty(0, dtype=float),
+                np.empty(0, dtype=float),
+                np.empty(0, dtype=int),
+            )
+        return _weighted_bin_stats(
+            z[mask],
+            y[mask],
+            yerr[mask],
+            edges,
+            min_count=min_count,
+            center=center,
+        )
+
+    below = summarize(z < z_lo, bins[0], z_lo)
+    inside = summarize((z >= z_lo) & (z <= z_hi), z_lo, z_hi)
+    above = summarize(z > z_hi, z_hi, bins[-1])
+    return inside, _concatenate_weighted_bin_stats((below, above))
+
+
+def get_hubble_posterior_sample_indices(n_samples, target_samples=100):
+    """Return the deterministic posterior rows used by ``plot_hubble``."""
+    if (
+        isinstance(n_samples, (bool, np.bool_))
+        or not isinstance(n_samples, (int, np.integer))
+        or n_samples <= 0
+    ):
+        raise ValueError(
+            f"n_samples must be a positive integer; got {n_samples!r}."
+        )
+    if (
+        isinstance(target_samples, (bool, np.bool_))
+        or not isinstance(target_samples, (int, np.integer))
+        or target_samples <= 0
+    ):
+        raise ValueError(
+            "target_samples must be a positive integer; "
+            f"got {target_samples!r}."
+        )
+    thin_factor = max(1, int(n_samples) // int(target_samples))
+    return np.arange(int(n_samples), dtype=int)[::thin_factor]
+
+
+def _validate_hubble_posterior_sample_indices(indices, n_samples):
+    values = np.asarray(indices)
+    if values.ndim != 1 or values.size == 0:
+        raise ValueError(
+            "posterior_sample_indices must be a nonempty one-dimensional "
+            f"array; got shape {values.shape}."
+        )
+    if np.issubdtype(values.dtype, np.bool_) or not np.issubdtype(
+        values.dtype, np.integer
+    ):
+        raise ValueError("posterior_sample_indices must contain integers.")
+    values = values.astype(int, copy=False)
+    if np.any(values < 0) or np.any(values >= n_samples):
+        raise ValueError(
+            "posterior_sample_indices contains a row outside "
+            f"[0, {n_samples})."
+        )
+    if np.unique(values).size != values.size:
+        raise ValueError("posterior_sample_indices must not contain duplicates.")
+    return values
+
+
 
 def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plot_path="plots/hubble/",
                 show_binned_agn=True, show_residuals=True,
@@ -5222,11 +5428,11 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
                 only_agn=False,
                 use_intrinsic_scatter_in_residual_sigma=True,
                 diagnostics_suffix=None,
-                agn_likelihood_space_chi2=None,
-                agn_likelihood_space_chi2_zgt1=None,
                 residuals_csv_filename="residuals.csv",
                 compute_only=False,
                 *,
+                dmi_posterior_draws=None,
+                posterior_sample_indices=None,
                 agn_pivot_context: AgnPivotContext):
     """
     Hubble diagram (Pantheon+-style):
@@ -5236,7 +5442,11 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
       • AGN points + error bars (solid if 0.44<=z<=3.16 else open)
       • Main: AGN binned in linear z
       • Inset: AGN binned in log z (matches inset x-scale)
-    If residuals_2 is provided, the residuals panel overlays a solid line of (residuals - residuals_2).
+      • Residuals: median of matched posterior M, cosmology, and debias draws
+
+    Posterior debias draws must be passed as
+    ``HubblePosteriorDrawSelection`` so their posterior rows and AGN column
+    order can be verified.
     Returns:
       residuals,
       clipping_sigma,
@@ -5262,10 +5472,58 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     label = cosmo_model_label_latex(cosmo_model)
     clipped_mask = _resolve_clipped_mask(df_agn, clipped_mask)
 
-    # --- Thinning for speed (cap to ~500 samples) ---
-    n_samples = int(flat_samples.shape[0])
-    thin_factor = max(1, n_samples // 100)
-    flat_samples = flat_samples[::thin_factor]
+    # --- Deterministic posterior thinning shared by M, cosmology, and dmi ---
+    flat_samples_all = np.asarray(flat_samples, dtype=float)
+    if flat_samples_all.ndim != 2 or flat_samples_all.shape[0] == 0:
+        raise ValueError(
+            "flat_samples must be a nonempty two-dimensional array; "
+            f"got shape {flat_samples_all.shape}."
+        )
+    n_samples = int(flat_samples_all.shape[0])
+    draw_selection = (
+        dmi_posterior_draws
+        if isinstance(dmi_posterior_draws, HubblePosteriorDrawSelection)
+        else None
+    )
+    if dmi_posterior_draws is not None and draw_selection is None:
+        raise TypeError(
+            "dmi_posterior_draws must be a "
+            "HubblePosteriorDrawSelection so posterior-row and object-column "
+            "alignment can be verified."
+        )
+    if draw_selection is not None and posterior_sample_indices is None:
+        posterior_sample_indices = draw_selection.sample_indices
+    explicit_sample_indices = posterior_sample_indices is not None
+    if explicit_sample_indices:
+        posterior_sample_indices = _validate_hubble_posterior_sample_indices(
+            posterior_sample_indices,
+            n_samples,
+        )
+    else:
+        posterior_sample_indices = get_hubble_posterior_sample_indices(
+            n_samples
+        )
+
+    selected_dmi_posterior_draws = None
+    if draw_selection is not None:
+        if not np.array_equal(
+            draw_selection.sample_indices,
+            posterior_sample_indices,
+        ):
+            raise ValueError(
+                "dmi_posterior_draws sample indices do not match "
+                "posterior_sample_indices."
+            )
+        expected_object_ids = tuple(
+            str(value) for value in df_agn["object_id"].to_numpy()
+        )
+        if draw_selection.object_ids != expected_object_ids:
+            raise ValueError(
+                "dmi_posterior_draws object_id order does not match "
+                "df_agn."
+            )
+        selected_dmi_posterior_draws = draw_selection.values
+    flat_samples = flat_samples_all[posterior_sample_indices]
 
     z_grid = np.linspace(1e-4, 5.2, 500)
 
@@ -5285,6 +5543,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
         use_eta_sigma_term=option_flags["use_eta_sigma_term"],
         use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
     )
+    n_agn_params = sum(label != "M0_sn" for label in model_labels)
     show_sne = (
         not option_flags["only_agn"]
         and df_pantheon is not None
@@ -5311,14 +5570,18 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
         return get_cosmo(model_name, params_dict, zp).distmod(z).value
 
     # --- Cosmology band on grid from posterior samples ---
-    mu_models = np.array([
-        _mu_model(
-            cosmo_model,
-            {k: s[param_indices[k]] for k in model_labels},
-            z_grid, z_pivot_agn
-        )
-        for s in flat_samples
-    ])
+    sample_parameter_dicts = [
+        {key: sample[param_indices[key]] for key in model_labels}
+        for sample in flat_samples
+    ]
+    sample_cosmologies = [
+        get_cosmo(cosmo_model, params, z_pivot_agn)
+        for params in sample_parameter_dicts
+    ]
+    mu_models = np.asarray(
+        [cosmo.distmod(z_grid).value for cosmo in sample_cosmologies],
+        dtype=float,
+    )
     mu_model_16th   = np.percentile(mu_models, 16, axis=0)
     mu_model_median = np.percentile(mu_models, 50, axis=0)
     mu_model_84th   = np.percentile(mu_models, 84, axis=0)
@@ -5334,85 +5597,60 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
         use_eta_sigma_term=option_flags["use_eta_sigma_term"],
         pivot_context=agn_pivot_context,
     )
-    mu_pred_samples = []
-    for s in flat_samples:
-        sample_params = {k: s[param_indices[k]] for k in model_labels}
-        agn_params_arr = agn_model_pack_params(
-            sample_params,
-            use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
-            use_eta_sigma_term=option_flags["use_eta_sigma_term"],
-        )
-
-        predicted_M2500 = M_model_agn(
-            agn_params_arr,
-            agn_obs_arr,
-            agn_pivot_arr,
-            use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
-            use_eta_sigma_term=option_flags["use_eta_sigma_term"],
-        )
-        predicted_M2500_err = M_model_agn_err(
-            agn_params_arr,
-            agn_obs_arr,
-            agn_err_arr,
-            agn_pivot_arr,
-            use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
-            use_eta_sigma_term=option_flags["use_eta_sigma_term"],
-        )
-        mu_pred_samples.append(m_obs - predicted_M2500)
-    mu_pred_samples = np.array(mu_pred_samples)
+    agn_parameter_names, _, _ = get_agn_model_spec(
+        use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
+        use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+    )
+    agn_parameter_samples = np.column_stack(
+        [flat_samples[:, param_indices[name]] for name in agn_parameter_names]
+    )
+    predicted_M2500_samples = M_model_agn_posterior_samples(
+        agn_parameter_samples,
+        agn_obs_arr,
+        agn_pivot_arr,
+        use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
+        use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+    )
+    mu_pred_samples = m_obs[None, :] - predicted_M2500_samples
 
     # De-bias (assumes your make_dm_function clips to grid, no extrapolation)
     if debias:
-        mu_pred_samples -= _resolve_debias_values(
-            df_agn,
-            dm_interp=dm_interp,
-            dmi_values=dmi_values,
-        )
+        if selected_dmi_posterior_draws is not None:
+            mu_pred_samples -= selected_dmi_posterior_draws
+        else:
+            mu_pred_samples -= _resolve_debias_values(
+                df_agn,
+                dm_interp=dm_interp,
+                dmi_values=dmi_values,
+            )
 
     mu_pred_median = np.percentile(mu_pred_samples, 50, axis=0)
     mu_pred_16th   = np.percentile(mu_pred_samples, 16, axis=0)
     mu_pred_84th   = np.percentile(mu_pred_samples, 84, axis=0)
 
-    # Per-object uncertainty (for yerr)
-    agn_params_arr = agn_model_pack_params(
-        results,
-        use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
-        use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+    # Average the observable-error variance over the posterior coefficients.
+    # Global M0/slope posterior variance is correlated across objects and is
+    # deliberately not copied into independent data error bars.
+    pred_m2500_var, pred_m2500_var_components = (
+        M_model_agn_observable_variance_posterior(
+            agn_parameter_samples,
+            agn_err_arr,
+            use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
+            use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+        )
     )
-    predicted_M2500 = M_model_agn(
-        agn_params_arr,
-        agn_obs_arr,
-        agn_pivot_arr,
-        use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
-        use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+    predicted_M2500_err = np.sqrt(pred_m2500_var)
+    pred_m2500_sigma_var = pred_m2500_var_components["sigma"]
+    pred_m2500_tau_var = pred_m2500_var_components["tau"]
+    pred_m2500_cov_var = pred_m2500_var_components["covariance"]
+    pred_m2500_alpha_lambda_var = pred_m2500_var_components.get(
+        "alpha_lambda",
+        np.zeros_like(pred_m2500_var),
     )
-    predicted_M2500_err = M_model_agn_err(
-        agn_params_arr,
-        agn_obs_arr,
-        agn_err_arr,
-        agn_pivot_arr,
-        use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
-        use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+    pred_m2500_eta_sigma_var = pred_m2500_var_components.get(
+        "eta_sigma",
+        np.zeros_like(pred_m2500_var),
     )
-    req_params_local, _, req_errs_local = get_agn_model_spec(
-        use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
-        use_eta_sigma_term=option_flags["use_eta_sigma_term"],
-    )
-    pidx_local = {k: i for i, k in enumerate(req_params_local)}
-    eidx_local = {k: i for i, k in enumerate(req_errs_local)}
-    alpha_agn = agn_params_arr[pidx_local["alpha_agn"]]
-    beta_agn = agn_params_arr[pidx_local["beta_agn"]]
-    log_sigma_uv_std_psd = agn_err_arr[eidx_local["log_sigma_uv_std_psd"]]
-    log_tau_uv_rf_std_psd = agn_err_arr[eidx_local["log_tau_uv_rf_std_psd"]]
-    log_sigma_uv_log_tau_uv_rf_cov_psd = agn_err_arr[eidx_local["log_sigma_uv_log_tau_uv_rf_cov_psd"]]
-    pred_m2500_sigma_var = (alpha_agn * log_sigma_uv_std_psd) ** 2
-    pred_m2500_tau_var = (beta_agn * log_tau_uv_rf_std_psd) ** 2
-    pred_m2500_cov_var = 2 * alpha_agn * beta_agn * log_sigma_uv_log_tau_uv_rf_cov_psd
-    pred_m2500_alpha_lambda_var = np.zeros_like(pred_m2500_sigma_var)
-    if option_flags["use_alpha_lambda_term"]:
-        gamma_alpha_lambda = agn_params_arr[pidx_local[AGN_ALPHA_LAMBDA_PARAM]]
-        alpha_lambda_err = agn_err_arr[eidx_local[AGN_ALPHA_LAMBDA_ERR]]
-        pred_m2500_alpha_lambda_var = (gamma_alpha_lambda * alpha_lambda_err) ** 2
 
     cosmo = get_cosmo(cosmo_model, results, z_pivot_agn)
     sigma_lens = sigma_lens_from_dc(df_agn['z'].values, cosmo)
@@ -5422,15 +5660,37 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     m_app_var = apparent_mag_err**2
     lens_var = sigma_lens**2
     z_var = z_err**2
-    pred_m2500_var = predicted_M2500_err**2
 
-    mu_pred_std = np.sqrt(
-        m_app_var +
-        #(0.055 * df_agn["z"].values)**2 +
-        lens_var +
-        z_var +
-        pred_m2500_var
+    data_var_without_sigma_dmi = (
+        m_app_var
+        + lens_var
+        + z_var
+        + pred_m2500_var
     )
+
+    sigma_dmi = None
+    sigma_dmi_var = np.zeros_like(data_var_without_sigma_dmi)
+    if dmi_sigma is not None:
+        sigma_dmi = np.asarray(dmi_sigma, dtype=float)
+        if sigma_dmi.shape != data_var_without_sigma_dmi.shape:
+            raise ValueError(
+                "dmi_sigma has shape "
+                f"{sigma_dmi.shape}, but expected {data_var_without_sigma_dmi.shape}."
+            )
+        invalid_sigma_dmi = ~np.isfinite(sigma_dmi) | (sigma_dmi < 0.0)
+        if np.any(invalid_sigma_dmi):
+            invalid_rows = np.flatnonzero(invalid_sigma_dmi)[:10].tolist()
+            raise ValueError(
+                "dmi_sigma must contain finite, non-negative uncertainties; "
+                f"invalid row indices: {invalid_rows}"
+            )
+        sigma_dmi_var = np.square(sigma_dmi)
+
+    # The uncertainty of an applied debias correction is observational for
+    # this diagram and therefore belongs in every debiased point error.
+    data_var = data_var_without_sigma_dmi + sigma_dmi_var
+    mu_pred_std_without_sigma_dmi = np.sqrt(data_var_without_sigma_dmi)
+    mu_pred_std = np.sqrt(data_var)
 
     log_f_eff = evaluate_log_f(
         results,
@@ -5440,15 +5700,12 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     )
     intrinsic_scatter = np.exp(log_f_eff)
     intrinsic_var = intrinsic_scatter**2
-    mu_pred_std_with_scatter = np.sqrt(mu_pred_std**2 + intrinsic_var)
-    
-    sigma_dmi = None
-    if dmi_sigma is not None:
-        sigma_dmi = np.asarray(dmi_sigma, dtype=float)
-        if sigma_dmi.shape != mu_pred_std.shape:
-            raise ValueError(
-                f"dmi_sigma has shape {sigma_dmi.shape}, but expected {mu_pred_std.shape}."
-            )
+    total_var_without_sigma_dmi = data_var_without_sigma_dmi + intrinsic_var
+    total_var = data_var + intrinsic_var
+    mu_pred_std_with_scatter_without_sigma_dmi = np.sqrt(
+        total_var_without_sigma_dmi
+    )
+    mu_pred_std_with_scatter = np.sqrt(total_var)
 
     sigma_sel = None
     sigma_sel_floor_mag = 0.05
@@ -5469,27 +5726,48 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
             np.nan,
         )
 
-    # Residuals (vs. median μ_model)
-    mu_interp = np.interp(df_agn["z"].values, z_grid, mu_model_median)
-    residuals = mu_pred_median - mu_interp
     z_values = df_agn["z"].to_numpy(dtype=float)
-    chi2_redshift_mask = np.isfinite(z_values)
-    if debias:
-        chi2_redshift_mask &= (z_values >= z_range[0]) & (z_values <= z_range[1])
-
-    # Display the population-level intrinsic scatter as point scatter, not as
-    # enlarged error bars. Sigma clipping can still use the broader population
-    # scatter path, but the Hubble-diagram chi2 should use the same per-point
-    # uncertainties shown on the plotted data.
-    point_scatter_mu = _population_scatter_offsets(
-        intrinsic_scatter,
-        enabled=debias,
-        seed=1741,
+    mu_cosmo_samples = np.asarray(
+        [cosmo.distmod(z_values).value for cosmo in sample_cosmologies],
+        dtype=float,
     )
-    mu_pred_plot = mu_pred_median + point_scatter_mu
+    # Preserve posterior covariance by taking the median of matched
+    # sample-wise residuals, not a difference of separate marginal medians.
+    residuals = np.percentile(
+        mu_pred_samples - mu_cosmo_samples,
+        50,
+        axis=0,
+    )
+    mu_cosmo_posterior_median = np.percentile(
+        mu_cosmo_samples,
+        50,
+        axis=0,
+    )
+    mu_pred_joint_consistent = (
+        mu_cosmo_posterior_median + residuals
+    )
+    chi2_redshift_mask = (
+        np.isfinite(z_values)
+        & np.isfinite(residuals)
+        & np.isfinite(data_var)
+        & np.isfinite(total_var)
+        & (data_var > 0.0)
+        & (total_var > 0.0)
+        & (z_values >= z_range[0])
+        & (z_values <= z_range[1])
+    )
+    if clipped_mask is not None:
+        chi2_redshift_mask &= ~clipped_mask
+
+    # Plot the inferred distance moduli directly.  The observed population
+    # already contains its real scatter; adding a synthetic intrinsic-scatter
+    # realization would move both individual points and statistical summaries
+    # by an arbitrary, seed-dependent amount.
+    mu_pred_plot = mu_pred_median
     clipping_sigma = mu_pred_std_with_scatter if use_intrinsic_scatter_in_residual_sigma else mu_pred_std
     display_residuals_err = mu_pred_std if debias else clipping_sigma
-    chi2_sigma = display_residuals_err
+    binning_sigma = clipping_sigma
+    chi2_sigma = mu_pred_std_with_scatter
 
     mu_zscore = np.abs(residuals) / clipping_sigma
 
@@ -5499,24 +5777,24 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     bins_linear = np.arange(0.4, 3.41, 0.2)
 
     print("Using linear-z bins:", bins_linear)
-    z_lin_scatter, mu_lin_mean_scatter, mu_lin_sem_scatter, n_lin = _weighted_bin_stats(
+    linear_main_in, linear_main_out = _range_partitioned_weighted_bin_stats(
         df_agn["z"].values,
         mu_pred_plot,
-        display_residuals_err,
+        binning_sigma,
         bins_linear,
+        z_range,
         min_count=5,
         center="mid",
     )
 
-    
-
-    # Residual-panel bins must use the actual residuals, not the display-only
-    # scattered ordinates used in the main Hubble diagram.
-    z_res_lin_scatter, resid_lin_mean_scatter, resid_lin_sem_scatter, n_res = _weighted_bin_stats(
+    # Residual-panel bins use the same point-level fit-range partition as the
+    # main panel, applied to the actual residuals.
+    linear_residual_in, linear_residual_out = _range_partitioned_weighted_bin_stats(
         df_agn["z"].values,
         residuals,
         clipping_sigma,
         bins_linear,
+        z_range,
         min_count=5,
         center="mid",
     )
@@ -5530,8 +5808,13 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     n_bins_log = max(1, int(np.ceil(decades * bins_per_decade)))
     bins_log = np.logspace(np.log10(bins_linear[0]), np.log10(bins_linear[-1]), n_bins_log + 1)
     #bins_log = bins_linear
-    z_log, mu_log_mean, mu_log_sem, n_log = _weighted_bin_stats(
-        df_agn["z"].values, mu_pred_plot, display_residuals_err, bins_log)
+    log_main_in, log_main_out = _range_partitioned_weighted_bin_stats(
+        df_agn["z"].values,
+        mu_pred_plot,
+        binning_sigma,
+        bins_log,
+        z_range,
+    )
 
     if compute_only:
         return (
@@ -5620,11 +5903,11 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
 
     # INSET: log-binned AGN
     if show_binned_agn:
-        mask_in  = (z_range[0] < z_log) & (z_log < z_range[1])
-        mask_out = ~mask_in
+        z_log_in, mu_log_mean_in, mu_log_sem_in, _ = log_main_in
+        z_log_out, mu_log_mean_out, mu_log_sem_out, _ = log_main_out
         # binned (inside)
         inset_ax.errorbar(
-            z_log[mask_in], mu_log_mean[mask_in], yerr=mu_log_sem[mask_in],
+            z_log_in, mu_log_mean_in, yerr=mu_log_sem_in,
             fmt='o', linestyle='none',
             markersize=4, mfc='red', mec='none',
             ecolor='red', elinewidth=2.2, capsize=3.5,
@@ -5632,7 +5915,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
         )
         # binned (outside, filled diamond)
         inset_ax.errorbar(
-            z_log[mask_out], mu_log_mean[mask_out], yerr=mu_log_sem[mask_out],
+            z_log_out, mu_log_mean_out, yerr=mu_log_sem_out,
             fmt='D', linestyle='none',
             markersize=4, mfc='red', mec='none',
             ecolor='red', elinewidth=2.2, capsize=3.5,
@@ -5758,16 +6041,13 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
 
     # MAIN: linear-binned AGN
     if show_binned_agn:
-        mask_in  = (z_range[0] < z_lin_scatter) & (z_lin_scatter < z_range[1])
-        print("Plotting binned AGN (linear z) at:", z_lin_scatter)
-        print("\tmask_in:", mask_in)
-        mask_out = ~mask_in
-        # with scatter
+        z_lin_in, mu_lin_mean_in, mu_lin_sem_in, _ = linear_main_in
+        z_lin_out, mu_lin_mean_out, mu_lin_sem_out, _ = linear_main_out
         # binned (inside)
-        print("Plotting binned AGN (linear z) at:", z_lin_scatter)
-        print("\tmask_out:", mask_out)
+        print("Plotting in-range binned AGN (linear z) at:", z_lin_in)
+        print("Plotting out-of-range binned AGN (linear z) at:", z_lin_out)
         ax.errorbar(
-            z_lin_scatter[mask_in], mu_lin_mean_scatter[mask_in], yerr=mu_lin_sem_scatter[mask_in],
+            z_lin_in, mu_lin_mean_in, yerr=mu_lin_sem_in,
             fmt='o', linestyle='none',
             markersize=5, mfc='red', mec='none',
             ecolor='red', elinewidth=2.2, capsize=3.5,
@@ -5775,7 +6055,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
         )
         # binned (outside, filled diamond)
         ax.errorbar(
-            z_lin_scatter[mask_out], mu_lin_mean_scatter[mask_out], yerr=mu_lin_sem_scatter[mask_out],
+            z_lin_out, mu_lin_mean_out, yerr=mu_lin_sem_out,
             fmt='D', linestyle='none',
             markersize=5, mfc='red', mec='none',
             ecolor='red', elinewidth=2.2, capsize=3.5,
@@ -5872,17 +6152,17 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
         ax_resid.axhline(0.0, color="m", lw=3.0, zorder=1)
 
         # NEW: binned residuals in red (points + thin connecting line)
-        if z_res_lin_scatter.size:
-            mask_in  = (z_range[0] < z_res_lin_scatter) & (z_res_lin_scatter < z_range[1])
-            mask_out = ~mask_in
+        z_res_in, resid_lin_mean_in, resid_lin_sem_in, _ = linear_residual_in
+        z_res_out, resid_lin_mean_out, resid_lin_sem_out, _ = linear_residual_out
+        if z_res_in.size or z_res_out.size:
             ax_resid.errorbar(
-                z_res_lin_scatter[mask_in], resid_lin_mean_scatter[mask_in], yerr=resid_lin_sem_scatter[mask_in],
+                z_res_in, resid_lin_mean_in, yerr=resid_lin_sem_in,
                 fmt='o', linestyle='none', markersize=6,
                 mfc='red', mec='none', ecolor='red', elinewidth=2.0, capsize=3.0,
-                alpha=0.98, zorder=15, label="Binned AGN residuals (w/ scatter)"
+                alpha=0.98, zorder=15, label="Binned AGN residuals"
             )
             ax_resid.errorbar(
-                z_res_lin_scatter[mask_out], resid_lin_mean_scatter[mask_out], yerr=resid_lin_sem_scatter[mask_out],
+                z_res_out, resid_lin_mean_out, yerr=resid_lin_sem_out,
                 fmt='D', linestyle='none', markersize=6,
                 mfc='red', mec='none', ecolor='red', elinewidth=2.0, capsize=3.0,
                 alpha=0.98, zorder=15
@@ -5924,69 +6204,48 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
 
         ax_resid.set_ylabel(r"$\Delta\mu$ (mag)")
         ax_resid.set_xlabel(r"$z$")
-        chi2_red = np.nan
-        chi2_red_zgt1 = np.nan
-        chi2_red_with_logf = np.nan
-        chi2_red_shown_plus_sigma_dmi = np.nan
-        chi2_red_with_logf_plus_sigma_dmi = np.nan
-        if np.any(chi2_redshift_mask):
-            residuals_chi2 = residuals[chi2_redshift_mask]
-            residuals_err_chi2 = chi2_sigma[chi2_redshift_mask]
-            mu_pred_std_with_scatter_chi2 = mu_pred_std_with_scatter[chi2_redshift_mask]
-            chi2_red, _ = reduced_chi_squared(
-                residuals_chi2,
-                residuals_err_chi2,
-                n_params=len(model_labels) - 1,
+        def _paired_reduced_chi2(mask):
+            if np.count_nonzero(mask) <= n_agn_params:
+                return np.nan, np.nan
+            chi2_full, _ = reduced_chi_squared(
+                residuals[mask],
+                mu_pred_std_with_scatter[mask],
+                n_params=n_agn_params,
             )
-            high_z_chi2_mask = (
-                chi2_redshift_mask
-                & (z_values > 1.0)
-                & (z_values <= z_range[1])
+            chi2_data_only, _ = reduced_chi_squared(
+                residuals[mask],
+                mu_pred_std[mask],
+                n_params=n_agn_params,
             )
-            if np.any(high_z_chi2_mask):
-                chi2_red_zgt1, _ = reduced_chi_squared(
-                    residuals[high_z_chi2_mask],
-                    chi2_sigma[high_z_chi2_mask],
-                    n_params=len(model_labels) - 1,
-                )
-            if debias:
-                chi2_red_with_logf, _ = reduced_chi_squared(
-                    residuals_chi2,
-                    mu_pred_std_with_scatter_chi2,
-                    n_params=len(model_labels) - 1,
-                )
-                if sigma_dmi is not None:
-                    sigma_dmi_chi2 = sigma_dmi[chi2_redshift_mask]
-                    chi2_red_shown_plus_sigma_dmi, _ = reduced_chi_squared(
-                        residuals_chi2,
-                        residuals_err_chi2,
-                        extra_err=sigma_dmi_chi2,
-                        n_params=len(model_labels) - 1,
-                    )
-                    chi2_red_with_logf_plus_sigma_dmi, _ = reduced_chi_squared(
-                        residuals_chi2,
-                        mu_pred_std_with_scatter_chi2,
-                        extra_err=sigma_dmi_chi2,
-                        n_params=len(model_labels) - 1,
-                    )
-        chi2_text_value = chi2_red
-        chi2_text_value_zgt1 = chi2_red_zgt1
-        if debias and agn_likelihood_space_chi2 is not None and np.isfinite(agn_likelihood_space_chi2):
-            chi2_text_value = agn_likelihood_space_chi2
-        if (
-            debias
-            and agn_likelihood_space_chi2_zgt1 is not None
-            and np.isfinite(agn_likelihood_space_chi2_zgt1)
-        ):
-            chi2_text_value_zgt1 = agn_likelihood_space_chi2_zgt1
+            return chi2_full, chi2_data_only
 
-        if np.isfinite(chi2_text_value):
+        chi2_full, chi2_data_only = _paired_reduced_chi2(
+            chi2_redshift_mask
+        )
+        high_z_chi2_mask = chi2_redshift_mask & (z_values > 1.0)
+        chi2_full_zgt1, chi2_data_only_zgt1 = _paired_reduced_chi2(
+            high_z_chi2_mask
+        )
+
+        if np.isfinite(chi2_full) and np.isfinite(chi2_data_only):
+            chi2_kind = "Debiased" if debias else "Biased"
             chi2_annotation_lines = [
-                rf"$\chi^2_\nu({z_range[0]:.2f}<z<{z_range[1]:.2f}) = {chi2_text_value:.2f}$"
+                rf"{chi2_kind} $\chi^2_\nu$ (full / data only)",
+                (
+                    rf"${z_range[0]:.2f}\leq z\leq{z_range[1]:.2f}$: "
+                    f"{chi2_full:.2f} / {chi2_data_only:.2f}"
+                ),
             ]
-            if np.isfinite(chi2_text_value_zgt1):
+            if (
+                np.isfinite(chi2_full_zgt1)
+                and np.isfinite(chi2_data_only_zgt1)
+            ):
                 chi2_annotation_lines.append(
-                    rf"$\chi^2_\nu(1.00<z<{z_range[1]:.2f}) = {chi2_text_value_zgt1:.2f}$"
+                    (
+                        rf"$1.00<z\leq{z_range[1]:.2f}$: "
+                        f"{chi2_full_zgt1:.2f} / "
+                        f"{chi2_data_only_zgt1:.2f}"
+                    )
                 )
             ax_resid.text(
                 0.02,
@@ -6092,7 +6351,17 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
 
         # --- Residuals overlay for SHOW (optional) ---
         if show_residuals:
-            mu_model_at_show = np.interp(z_show, z_grid, mu_model_median)
+            mu_model_at_show = np.percentile(
+                np.asarray(
+                    [
+                        cosmo.distmod(z_show).value
+                        for cosmo in sample_cosmologies
+                    ],
+                    dtype=float,
+                ),
+                50,
+                axis=0,
+            )
             resid_show = mu_show - mu_model_at_show
             print(resid_show)
             
@@ -6119,17 +6388,15 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     diagnostics_path = os.path.join(plot_path, "diagnostics")
     os.makedirs(diagnostics_path, exist_ok=True)
 
-    sigma_dmi_var = np.zeros_like(mu_pred_std)
-    if sigma_dmi is not None:
-        sigma_dmi_var = np.square(sigma_dmi)
     sigma_sel_var = np.full_like(mu_pred_std, np.nan, dtype=float)
     if sigma_sel is not None:
         sigma_sel_var = np.square(sigma_sel)
 
-    total_var = m_app_var + lens_var + z_var + pred_m2500_var + intrinsic_var
-    total_var_plus_sigma_dmi = total_var + sigma_dmi_var
-    total_var_no_logf = m_app_var + lens_var + z_var + pred_m2500_var
-    total_var_no_logf_plus_sigma_dmi = total_var_no_logf + sigma_dmi_var
+    # Retain the historical aliases in diagnostic files while making their
+    # primary counterparts the complete debiased uncertainty model.
+    total_var_plus_sigma_dmi = total_var
+    total_var_no_logf = data_var
+    total_var_no_logf_plus_sigma_dmi = data_var
     error_budget_mask = np.isfinite(total_var) & np.isfinite(residuals) & (total_var > 0) & chi2_redshift_mask
     sigma_dmi_mask = error_budget_mask & np.isfinite(sigma_dmi) if sigma_dmi is not None else None
     sigma_sel_mask = (
@@ -6140,10 +6407,14 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     if np.any(error_budget_mask):
         def _chi2_red_from_var(var_term):
             mask = error_budget_mask & np.isfinite(var_term) & (var_term > 0)
-            if not np.any(mask):
+            if np.count_nonzero(mask) <= n_agn_params:
                 return np.nan
-            dof_local = max(int(np.count_nonzero(mask)) - 1, 1)
-            return float(np.sum((residuals[mask] ** 2) / var_term[mask]) / dof_local)
+            value, _ = reduced_chi_squared(
+                residuals[mask],
+                np.sqrt(var_term[mask]),
+                n_params=n_agn_params,
+            )
+            return float(value)
 
         def _median_fraction(component_var):
             mask = error_budget_mask & np.isfinite(component_var)
@@ -6154,16 +6425,25 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
         residual_rms = float(np.sqrt(np.mean(residuals[error_budget_mask] ** 2)))
         budget_rows = [
             {"metric": "n_objects", "value": float(np.count_nonzero(error_budget_mask))},
+            {"metric": "n_agn_parameters", "value": float(n_agn_params)},
+            {
+                "metric": "chi2_degrees_of_freedom",
+                "value": float(
+                    np.count_nonzero(error_budget_mask) - n_agn_params
+                ),
+            },
             {"metric": "residual_rms_mag", "value": residual_rms},
             {"metric": "median_abs_residual_mag", "value": float(np.median(np.abs(residuals[error_budget_mask])))},
             {"metric": "chi2_red_full", "value": _chi2_red_from_var(total_var)},
             {"metric": "chi2_red_no_intrinsic_scatter", "value": _chi2_red_from_var(total_var_no_logf)},
             {"metric": "chi2_red_full_plus_sigma_dmi", "value": _chi2_red_from_var(total_var_plus_sigma_dmi)},
             {"metric": "chi2_red_no_intrinsic_scatter_plus_sigma_dmi", "value": _chi2_red_from_var(total_var_no_logf_plus_sigma_dmi)},
-            {"metric": "chi2_red_no_predicted_M2500_err", "value": _chi2_red_from_var(m_app_var + lens_var + z_var + intrinsic_var)},
-            {"metric": "chi2_red_no_sigma_lens", "value": _chi2_red_from_var(m_app_var + z_var + pred_m2500_var + intrinsic_var)},
-            {"metric": "chi2_red_no_apparent_mag_err", "value": _chi2_red_from_var(lens_var + z_var + pred_m2500_var + intrinsic_var)},
-            {"metric": "chi2_red_no_z_err", "value": _chi2_red_from_var(m_app_var + lens_var + pred_m2500_var + intrinsic_var)},
+            {"metric": "chi2_red_full_without_sigma_dmi", "value": _chi2_red_from_var(total_var_without_sigma_dmi)},
+            {"metric": "chi2_red_no_intrinsic_scatter_without_sigma_dmi", "value": _chi2_red_from_var(data_var_without_sigma_dmi)},
+            {"metric": "chi2_red_no_predicted_M2500_err", "value": _chi2_red_from_var(m_app_var + lens_var + z_var + sigma_dmi_var + intrinsic_var)},
+            {"metric": "chi2_red_no_sigma_lens", "value": _chi2_red_from_var(m_app_var + z_var + pred_m2500_var + sigma_dmi_var + intrinsic_var)},
+            {"metric": "chi2_red_no_apparent_mag_err", "value": _chi2_red_from_var(lens_var + z_var + pred_m2500_var + sigma_dmi_var + intrinsic_var)},
+            {"metric": "chi2_red_no_z_err", "value": _chi2_red_from_var(m_app_var + lens_var + pred_m2500_var + sigma_dmi_var + intrinsic_var)},
             {"metric": "chi2_red_sigma_sel", "value": _chi2_red_from_var(sigma_sel_var)},
             {"metric": "median_apparent_mag_err_mag", "value": float(np.median(apparent_mag_err[error_budget_mask]))},
             {"metric": "median_sigma_lens_mag", "value": float(np.median(sigma_lens[error_budget_mask]))},
@@ -6173,6 +6453,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
             {"metric": "median_predicted_M2500_tau_term_mag", "value": float(np.median(np.sqrt(np.clip(pred_m2500_tau_var[error_budget_mask], 0.0, None))))},
             {"metric": "median_predicted_M2500_cov_term_mag_signed", "value": float(np.median(np.sign(pred_m2500_cov_var[error_budget_mask]) * np.sqrt(np.abs(pred_m2500_cov_var[error_budget_mask]))))},
             {"metric": "median_predicted_M2500_alpha_lambda_term_mag", "value": float(np.median(np.sqrt(np.clip(pred_m2500_alpha_lambda_var[error_budget_mask], 0.0, None))))},
+            {"metric": "median_predicted_M2500_eta_sigma_term_mag", "value": float(np.median(np.sqrt(np.clip(pred_m2500_eta_sigma_var[error_budget_mask], 0.0, None))))},
             {"metric": "median_mu_pred_std_mag", "value": float(np.median(mu_pred_std[error_budget_mask]))},
             {"metric": "median_intrinsic_scatter_mag", "value": float(np.median(intrinsic_scatter[error_budget_mask]))},
             {"metric": "median_mu_pred_std_with_scatter_mag", "value": float(np.median(mu_pred_std_with_scatter[error_budget_mask]))},
@@ -6190,6 +6471,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
             {"metric": "median_var_fraction_predicted_M2500_tau_term", "value": _median_fraction(pred_m2500_tau_var)},
             {"metric": "median_var_fraction_predicted_M2500_cov_term", "value": _median_fraction(pred_m2500_cov_var)},
             {"metric": "median_var_fraction_predicted_M2500_alpha_lambda_term", "value": _median_fraction(pred_m2500_alpha_lambda_var)},
+            {"metric": "median_var_fraction_predicted_M2500_eta_sigma_term", "value": _median_fraction(pred_m2500_eta_sigma_var)},
         ]
         budget_suffix = diagnostics_suffix if diagnostics_suffix is not None else ("_debiased" if debias else "")
         budget_summary_path = os.path.join(diagnostics_path, f"hubble_error_budget_summary{budget_suffix}.csv")
@@ -6208,9 +6490,12 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
         per_object_budget_df["predicted_M2500_tau_term"] = np.sqrt(np.clip(pred_m2500_tau_var, 0.0, None))
         per_object_budget_df["predicted_M2500_cov_term_signed"] = np.sign(pred_m2500_cov_var) * np.sqrt(np.abs(pred_m2500_cov_var))
         per_object_budget_df["predicted_M2500_alpha_lambda_term"] = np.sqrt(np.clip(pred_m2500_alpha_lambda_var, 0.0, None))
+        per_object_budget_df["predicted_M2500_eta_sigma_term"] = np.sqrt(np.clip(pred_m2500_eta_sigma_var, 0.0, None))
         per_object_budget_df["intrinsic_scatter_term"] = intrinsic_scatter
         per_object_budget_df["sigma_dmi_term"] = sigma_dmi if sigma_dmi is not None else np.nan
         per_object_budget_df["sigma_sel_term"] = sigma_sel if sigma_sel is not None else np.nan
+        per_object_budget_df["mu_pred_std_no_intrinsic_without_sigma_dmi"] = mu_pred_std_without_sigma_dmi
+        per_object_budget_df["mu_pred_std_with_intrinsic_without_sigma_dmi"] = mu_pred_std_with_scatter_without_sigma_dmi
         per_object_budget_df["mu_pred_std_no_intrinsic"] = mu_pred_std
         per_object_budget_df["mu_pred_std_with_intrinsic"] = mu_pred_std_with_scatter
         per_object_budget_df["mu_pred_std_with_intrinsic_and_sigma_dmi"] = np.sqrt(total_var_plus_sigma_dmi)
@@ -6228,9 +6513,12 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
             "predicted_M2500_tau_term",
             "predicted_M2500_cov_term_signed",
             "predicted_M2500_alpha_lambda_term",
+            "predicted_M2500_eta_sigma_term",
             "intrinsic_scatter_term",
             "sigma_dmi_term",
             "sigma_sel_term",
+            "mu_pred_std_no_intrinsic_without_sigma_dmi",
+            "mu_pred_std_with_intrinsic_without_sigma_dmi",
             "mu_pred_std_no_intrinsic",
             "mu_pred_std_with_intrinsic",
             "mu_pred_std_no_intrinsic_and_sigma_dmi",
@@ -6246,9 +6534,9 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
             "Hubble error budget:"
             f" chi2_full={_chi2_red_from_var(total_var):.3f},"
             f" chi2_no_intrinsic={_chi2_red_from_var(total_var_no_logf):.3f},"
-            f" chi2_full_plus_sigma_dmi={_chi2_red_from_var(total_var_plus_sigma_dmi):.3f},"
-            f" chi2_no_intrinsic_plus_sigma_dmi={_chi2_red_from_var(total_var_no_logf_plus_sigma_dmi):.3f},"
-            f" chi2_no_predM={_chi2_red_from_var(m_app_var + lens_var + z_var + intrinsic_var):.3f},"
+            f" chi2_full_without_sigma_dmi={_chi2_red_from_var(total_var_without_sigma_dmi):.3f},"
+            f" chi2_no_intrinsic_without_sigma_dmi={_chi2_red_from_var(data_var_without_sigma_dmi):.3f},"
+            f" chi2_no_predM={_chi2_red_from_var(m_app_var + lens_var + z_var + sigma_dmi_var + intrinsic_var):.3f},"
             f" median_predM_err={float(np.median(predicted_M2500_err[error_budget_mask])):.3f} mag,"
             f" median_predM_sigma={float(np.median(np.sqrt(np.clip(pred_m2500_sigma_var[error_budget_mask], 0.0, None)))):.3f} mag,"
             f" median_predM_tau={float(np.median(np.sqrt(np.clip(pred_m2500_tau_var[error_budget_mask], 0.0, None)))):.3f} mag,"
@@ -6280,6 +6568,20 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
         residuals_df = df_agn.copy()
         residuals_df["residuals"] = residuals
         residuals_df["mu_pred_median"] = mu_pred_median
+        residuals_df["mu_pred_joint_consistent"] = (
+            mu_pred_joint_consistent
+        )
+        residuals_df["mu_cosmo_posterior_median"] = (
+            mu_cosmo_posterior_median
+        )
+        residuals_df["residual_estimator"] = (
+            "median_matched_posterior_draws"
+        )
+        residuals_df["residual_posterior_sample_count"] = len(
+            posterior_sample_indices
+        )
+        residuals_df["mu_pred_std_without_sigma_dmi"] = mu_pred_std_without_sigma_dmi
+        residuals_df["mu_pred_std_with_scatter_without_sigma_dmi"] = mu_pred_std_with_scatter_without_sigma_dmi
         residuals_df["mu_pred_std"] = mu_pred_std
         residuals_df["mu_pred_std_with_scatter"] = mu_pred_std_with_scatter
         residuals_df["sigma_dmi"] = sigma_dmi if sigma_dmi is not None else np.nan
@@ -6295,6 +6597,12 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
             "ra",
             "dec",
             "mu_pred_median",
+            "mu_pred_joint_consistent",
+            "mu_cosmo_posterior_median",
+            "residual_estimator",
+            "residual_posterior_sample_count",
+            "mu_pred_std_without_sigma_dmi",
+            "mu_pred_std_with_scatter_without_sigma_dmi",
             "mu_pred_std",
             "mu_pred_std_with_scatter",
             "clipping_sigma",
@@ -8095,6 +8403,1261 @@ def plot_full_residuals_rz(
         use_eta_sigma_term=use_eta_sigma_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
     )
+
+
+def plot_parameter_residual_diagnostics(
+    df_agn,
+    residuals,
+    residuals_err=None,
+    *,
+    plot_path="plots/hubble",
+    z_range=(0.44, 3.16),
+    show=False,
+    min_points=10,
+    panels_per_page=6,
+    top_n=40,
+    nbins=10,
+):
+    """
+    Rank and plot scalar numeric parameters against final Hubble residuals.
+
+    The ranking emphasizes parameters that reduce the residual-redshift
+    Spearman correlation when conditioned upon. This is a diagnostic priority,
+    not a causal attribution.
+    """
+    if "z" not in df_agn.columns:
+        raise ValueError("df_agn must contain a 'z' column.")
+
+    residuals = np.asarray(residuals, dtype=float)
+    if residuals.ndim != 1 or residuals.size != len(df_agn):
+        raise ValueError(
+            f"residuals length {residuals.size} does not match dataframe length "
+            f"{len(df_agn)}."
+        )
+    if residuals_err is None:
+        residuals_err = np.full(residuals.shape, np.nan, dtype=float)
+    else:
+        residuals_err = np.asarray(residuals_err, dtype=float)
+        if residuals_err.ndim != 1 or residuals_err.size != len(df_agn):
+            raise ValueError(
+                f"residuals_err length {residuals_err.size} does not match "
+                f"dataframe length {len(df_agn)}."
+            )
+
+    if int(min_points) < 3:
+        raise ValueError("min_points must be at least 3.")
+    if int(panels_per_page) < 1:
+        raise ValueError("panels_per_page must be positive.")
+    if int(top_n) < 1:
+        raise ValueError("top_n must be positive.")
+
+    z_min, z_max = (float(z_range[0]), float(z_range[1]))
+    if not (np.isfinite(z_min) and np.isfinite(z_max) and z_min < z_max):
+        raise ValueError("z_range must contain two finite, increasing values.")
+
+    z = pd.to_numeric(df_agn["z"], errors="coerce").to_numpy(dtype=float)
+    analysis_mask = (
+        np.isfinite(z)
+        & np.isfinite(residuals)
+        & (z >= z_min)
+        & (z <= z_max)
+    )
+    if np.count_nonzero(analysis_mask) < int(min_points):
+        raise ValueError(
+            "Too few finite in-range residuals for parameter diagnostics: "
+            f"{np.count_nonzero(analysis_mask)} < {int(min_points)}."
+        )
+
+    weighted_mask = (
+        analysis_mask
+        & np.isfinite(residuals_err)
+        & (residuals_err > 0.0)
+    )
+    use_weighted = np.count_nonzero(weighted_mask) >= int(min_points)
+    trend_mask = weighted_mask if use_weighted else analysis_mask
+    redshift_trend = build_smooth_trend_1d(
+        z[trend_mask],
+        residuals[trend_mask],
+        yerr=residuals_err[trend_mask] if use_weighted else None,
+        frac=0.25,
+        it=1,
+        min_points=int(min_points),
+        fallback_bins=max(int(nbins), 3),
+    )
+    residuals_detrended = residuals - np.asarray(redshift_trend(z), dtype=float)
+
+    diagnostics_path = os.path.join(plot_path or "plots/hubble", "diagnostics")
+    os.makedirs(diagnostics_path, exist_ok=True)
+    summary_path = os.path.join(
+        diagnostics_path,
+        "hubble_parameter_residual_summary.pdf",
+    )
+    atlas_path = os.path.join(
+        diagnostics_path,
+        "hubble_parameter_residual_atlas.pdf",
+    )
+    rankings_path = os.path.join(
+        diagnostics_path,
+        "hubble_parameter_residual_rankings.csv",
+    )
+    skipped_path = os.path.join(
+        diagnostics_path,
+        "hubble_parameter_residual_skipped.csv",
+    )
+
+    spectra_fit_columns = set(df_agn.attrs.get("spectra_fit_columns", ()))
+    identifier_columns = {"object_id", "sdss_name"}
+    skipped_rows = []
+    ranking_rows = []
+    parameter_values = {}
+
+    def _record_skip(parameter, reason, *, finite_count=0, unique_count=0):
+        column = df_agn[parameter]
+        column_dtype = (
+            str(column.dtype)
+            if isinstance(column, pd.Series)
+            else "duplicate_column_name"
+        )
+        skipped_rows.append(
+            {
+                "parameter": parameter,
+                "reason": reason,
+                "dtype": column_dtype,
+                "finite_in_range": int(finite_count),
+                "unique_finite_in_range": int(unique_count),
+                "source": (
+                    "spectra_fit_csv"
+                    if parameter in spectra_fit_columns
+                    else "hdf5_or_derived"
+                ),
+            }
+        )
+
+    def _spearman(a, b):
+        if len(a) < 3:
+            return np.nan, np.nan
+        if np.unique(a).size < 2 or np.unique(b).size < 2:
+            return np.nan, np.nan
+        result = spearmanr(a, b, nan_policy="omit")
+        statistic = float(result.statistic)
+        pvalue = float(result.pvalue)
+        return statistic, pvalue
+
+    for parameter in df_agn.columns:
+        if parameter in identifier_columns:
+            _record_skip(parameter, "identifier")
+            continue
+        if parameter == "z":
+            _record_skip(parameter, "analysis_axis")
+            continue
+
+        series = df_agn[parameter]
+        if (
+            not isinstance(series, pd.Series)
+            or not (
+                pd.api.types.is_numeric_dtype(series.dtype)
+                or pd.api.types.is_bool_dtype(series.dtype)
+            )
+        ):
+            _record_skip(parameter, "non_numeric_or_non_scalar")
+            continue
+
+        values = pd.to_numeric(series, errors="coerce").to_numpy(dtype=float)
+        finite_mask = analysis_mask & np.isfinite(values)
+        finite_count = int(np.count_nonzero(finite_mask))
+        if finite_count < int(min_points):
+            _record_skip(
+                parameter,
+                "insufficient_finite_values",
+                finite_count=finite_count,
+            )
+            continue
+
+        unique_count = int(np.unique(values[finite_mask]).size)
+        if unique_count < 2:
+            _record_skip(
+                parameter,
+                "constant",
+                finite_count=finite_count,
+                unique_count=unique_count,
+            )
+            continue
+
+        p = values[finite_mask]
+        z_use = z[finite_mask]
+        r_use = residuals[finite_mask]
+        rz_use = residuals_detrended[finite_mask]
+        rho_pz, p_pz = _spearman(p, z_use)
+        rho_pr, p_pr = _spearman(p, r_use)
+        rho_prz, p_prz = _spearman(p, rz_use)
+        rho_rz, p_rz = _spearman(r_use, z_use)
+
+        partial_denominator = np.sqrt(
+            max(0.0, 1.0 - rho_pr**2)
+            * max(0.0, 1.0 - rho_pz**2)
+        )
+        if np.isfinite(partial_denominator) and partial_denominator > 1e-12:
+            partial_rho = (rho_rz - rho_pr * rho_pz) / partial_denominator
+            partial_rho = float(np.clip(partial_rho, -1.0, 1.0))
+        else:
+            partial_rho = np.nan
+
+        attenuation = (
+            float(abs(rho_rz) - abs(partial_rho))
+            if np.isfinite(rho_rz) and np.isfinite(partial_rho)
+            else np.nan
+        )
+        ranking_rows.append(
+            {
+                "parameter": parameter,
+                "source": (
+                    "spectra_fit_csv"
+                    if parameter in spectra_fit_columns
+                    else "hdf5_or_derived"
+                ),
+                "finite_in_range": finite_count,
+                "coverage_in_range": finite_count / int(np.count_nonzero(analysis_mask)),
+                "unique_finite_in_range": unique_count,
+                "rho_parameter_redshift": rho_pz,
+                "p_parameter_redshift": p_pz,
+                "rho_parameter_residual": rho_pr,
+                "p_parameter_residual": p_pr,
+                "rho_parameter_detrended_residual": rho_prz,
+                "p_parameter_detrended_residual": p_prz,
+                "rho_residual_redshift": rho_rz,
+                "p_residual_redshift": p_rz,
+                "partial_rho_residual_redshift_given_parameter": partial_rho,
+                "redshift_correlation_attenuation": attenuation,
+                "abs_rho_parameter_detrended_residual": abs(rho_prz),
+            }
+        )
+        parameter_values[parameter] = values
+
+    ranking_columns = [
+        "parameter",
+        "source",
+        "finite_in_range",
+        "coverage_in_range",
+        "unique_finite_in_range",
+        "rho_parameter_redshift",
+        "p_parameter_redshift",
+        "q_parameter_redshift",
+        "rho_parameter_residual",
+        "p_parameter_residual",
+        "q_parameter_residual",
+        "rho_parameter_detrended_residual",
+        "p_parameter_detrended_residual",
+        "q_parameter_detrended_residual",
+        "rho_residual_redshift",
+        "p_residual_redshift",
+        "partial_rho_residual_redshift_given_parameter",
+        "redshift_correlation_attenuation",
+        "abs_rho_parameter_detrended_residual",
+    ]
+
+    rankings = pd.DataFrame(ranking_rows)
+
+    def _benjamini_hochberg(pvalues):
+        pvalues = np.asarray(pvalues, dtype=float)
+        adjusted = np.full(pvalues.shape, np.nan, dtype=float)
+        finite = np.isfinite(pvalues)
+        if not np.any(finite):
+            return adjusted
+        p_finite = pvalues[finite]
+        order = np.argsort(p_finite)
+        ranked = p_finite[order]
+        n_tests = len(ranked)
+        q_ranked = ranked * n_tests / np.arange(1, n_tests + 1, dtype=float)
+        q_ranked = np.minimum.accumulate(q_ranked[::-1])[::-1]
+        q_finite = np.empty_like(q_ranked)
+        q_finite[order] = np.clip(q_ranked, 0.0, 1.0)
+        adjusted[finite] = q_finite
+        return adjusted
+
+    if rankings.empty:
+        rankings = pd.DataFrame(columns=ranking_columns)
+    else:
+        rankings["q_parameter_redshift"] = _benjamini_hochberg(
+            rankings["p_parameter_redshift"]
+        )
+        rankings["q_parameter_residual"] = _benjamini_hochberg(
+            rankings["p_parameter_residual"]
+        )
+        rankings["q_parameter_detrended_residual"] = _benjamini_hochberg(
+            rankings["p_parameter_detrended_residual"]
+        )
+        rankings = rankings.sort_values(
+            [
+                "redshift_correlation_attenuation",
+                "abs_rho_parameter_detrended_residual",
+                "parameter",
+            ],
+            ascending=[False, False, True],
+            na_position="last",
+            kind="stable",
+        ).reset_index(drop=True)
+        rankings = rankings.loc[:, ranking_columns]
+
+    skipped_columns = [
+        "parameter",
+        "reason",
+        "dtype",
+        "finite_in_range",
+        "unique_finite_in_range",
+        "source",
+    ]
+    skipped = pd.DataFrame(skipped_rows, columns=skipped_columns)
+    rankings.to_csv(rankings_path, index=False)
+    skipped.to_csv(skipped_path, index=False)
+
+    top = rankings.head(int(top_n))
+    if top.empty:
+        fig_summary, ax_summary = plt.subplots(figsize=(10.0, 4.0))
+        ax_summary.axis("off")
+        ax_summary.text(
+            0.5,
+            0.5,
+            "No eligible numeric parameters.",
+            ha="center",
+            va="center",
+        )
+    else:
+        heatmap_columns = [
+            "rho_parameter_redshift",
+            "rho_parameter_residual",
+            "rho_parameter_detrended_residual",
+            "partial_rho_residual_redshift_given_parameter",
+        ]
+        heatmap_labels = [
+            r"$\rho(p,z)$",
+            r"$\rho(p,r)$",
+            r"$\rho(p,r_z)$",
+            r"$\rho(r,z\mid p)$",
+        ]
+        heatmap = top[heatmap_columns].to_numpy(dtype=float)
+        fig_height = max(4.5, 0.28 * len(top) + 2.4)
+        fig_summary, ax_summary = plt.subplots(
+            figsize=(10.5, fig_height),
+        )
+        image_handle = ax_summary.imshow(
+            heatmap,
+            aspect="auto",
+            cmap="coolwarm",
+            vmin=-1.0,
+            vmax=1.0,
+        )
+        parameter_labels = [
+            (
+                f"[SED] {row.parameter} (N={row.finite_in_range})"
+                if row.source == "spectra_fit_csv"
+                else f"{row.parameter} (N={row.finite_in_range})"
+            )
+            for row in top.itertuples()
+        ]
+        ax_summary.set_yticks(np.arange(len(top)))
+        ax_summary.set_yticklabels(parameter_labels, fontsize=8)
+        ax_summary.set_xticks(np.arange(len(heatmap_labels)))
+        ax_summary.set_xticklabels(heatmap_labels, fontsize=11)
+        for row_idx in range(heatmap.shape[0]):
+            for col_idx in range(heatmap.shape[1]):
+                value = heatmap[row_idx, col_idx]
+                if np.isfinite(value):
+                    ax_summary.text(
+                        col_idx,
+                        row_idx,
+                        f"{value:.2f}",
+                        ha="center",
+                        va="center",
+                        fontsize=7,
+                        color="white" if abs(value) > 0.55 else "black",
+                    )
+        cbar = fig_summary.colorbar(image_handle, ax=ax_summary, pad=0.02)
+        cbar.set_label("Spearman correlation")
+        ax_summary.set_title(
+            "Hubble-residual parameter priorities\n"
+            "ranked by reduction in residual–redshift correlation; "
+            "diagnostic, not causal",
+            fontsize=12,
+        )
+    fig_summary.tight_layout()
+    summary_pdf = _save_figure(
+        fig_summary,
+        summary_path,
+        dpi=200,
+        show=show,
+    )
+
+    def _quantile_binned_medians(x, y, *, minimum_per_bin):
+        x = np.asarray(x, dtype=float)
+        y = np.asarray(y, dtype=float)
+        finite = np.isfinite(x) & np.isfinite(y)
+        x = x[finite]
+        y = y[finite]
+        if x.size < minimum_per_bin:
+            return np.array([]), np.array([])
+        unique_x = np.unique(x)
+        if unique_x.size <= int(nbins):
+            groups = [x == value for value in unique_x]
+        else:
+            edges = np.unique(np.nanquantile(x, np.linspace(0.0, 1.0, int(nbins) + 1)))
+            if edges.size < 2:
+                return np.array([]), np.array([])
+            groups = []
+            for edge_idx in range(edges.size - 1):
+                if edge_idx == edges.size - 2:
+                    groups.append((x >= edges[edge_idx]) & (x <= edges[edge_idx + 1]))
+                else:
+                    groups.append((x >= edges[edge_idx]) & (x < edges[edge_idx + 1]))
+        x_median = []
+        y_median = []
+        for group in groups:
+            if np.count_nonzero(group) < minimum_per_bin:
+                continue
+            x_median.append(float(np.nanmedian(x[group])))
+            y_median.append(float(np.nanmedian(y[group])))
+        return np.asarray(x_median), np.asarray(y_median)
+
+    with PdfPages(atlas_path) as pdf:
+        if rankings.empty:
+            fig_atlas, ax_atlas = plt.subplots(figsize=(11.0, 8.5))
+            ax_atlas.axis("off")
+            ax_atlas.text(
+                0.5,
+                0.5,
+                "No eligible numeric parameters.",
+                ha="center",
+                va="center",
+            )
+            pdf.savefig(fig_atlas, bbox_inches="tight")
+            if show:
+                plt.show()
+            plt.close(fig_atlas)
+        else:
+            n_cols = min(3, int(panels_per_page))
+            n_rows = int(math.ceil(int(panels_per_page) / n_cols))
+            color_norm = mpl.colors.Normalize(vmin=z_min, vmax=z_max)
+            color_map = "viridis"
+            bin_minimum = max(3, int(min_points) // 2)
+
+            for page_start in range(0, len(rankings), int(panels_per_page)):
+                page = rankings.iloc[
+                    page_start : page_start + int(panels_per_page)
+                ]
+                fig_atlas, axes_grid = plt.subplots(
+                    n_rows,
+                    n_cols,
+                    figsize=(5.0 * n_cols, 3.8 * n_rows),
+                    squeeze=False,
+                )
+                axes = axes_grid.ravel()
+                for ax, row in zip(axes, page.itertuples()):
+                    values = parameter_values[row.parameter]
+                    mask = analysis_mask & np.isfinite(values)
+                    x_use = values[mask]
+                    r_use = residuals[mask]
+                    rz_use = residuals_detrended[mask]
+                    z_use = z[mask]
+
+                    ax.scatter(
+                        x_use,
+                        r_use,
+                        c=z_use,
+                        cmap=color_map,
+                        norm=color_norm,
+                        s=8,
+                        alpha=0.28,
+                        linewidths=0,
+                        rasterized=True,
+                    )
+                    x_raw, y_raw = _quantile_binned_medians(
+                        x_use,
+                        r_use,
+                        minimum_per_bin=bin_minimum,
+                    )
+                    x_detrended, y_detrended = _quantile_binned_medians(
+                        x_use,
+                        rz_use,
+                        minimum_per_bin=bin_minimum,
+                    )
+                    if x_raw.size:
+                        ax.plot(
+                            x_raw,
+                            y_raw,
+                            color="tab:red",
+                            lw=2.0,
+                            label="raw median",
+                        )
+                    if x_detrended.size:
+                        ax.plot(
+                            x_detrended,
+                            y_detrended,
+                            color="tab:orange",
+                            lw=2.0,
+                            linestyle="--",
+                            label=r"$r_z$ median",
+                        )
+                    ax.axhline(0.0, color="black", lw=0.8, alpha=0.65)
+
+                    if x_use.size >= 2:
+                        x_lo, x_hi = np.nanpercentile(x_use, [1.0, 99.0])
+                        if np.isfinite(x_lo) and np.isfinite(x_hi) and x_hi > x_lo:
+                            padding = 0.04 * (x_hi - x_lo)
+                            ax.set_xlim(x_lo - padding, x_hi + padding)
+
+                    source_tag = " [SED]" if row.source == "spectra_fit_csv" else ""
+                    ax.set_title(f"{row.parameter}{source_tag}", fontsize=10)
+                    ax.set_xlabel(row.parameter, fontsize=9)
+                    ax.set_ylabel("Debiased Hubble residual (mag)", fontsize=9)
+                    ax.text(
+                        0.02,
+                        0.98,
+                        (
+                            f"N={row.finite_in_range}, "
+                            f"coverage={row.coverage_in_range:.1%}\n"
+                            rf"$\rho(p,z)$={row.rho_parameter_redshift:.2f}; "
+                            rf"$\rho(p,r)$={row.rho_parameter_residual:.2f}"
+                            "\n"
+                            rf"$\rho(p,r_z)$="
+                            f"{row.rho_parameter_detrended_residual:.2f}; "
+                            rf"$\Delta|\rho_z|$="
+                            f"{row.redshift_correlation_attenuation:.2f}"
+                        ),
+                        transform=ax.transAxes,
+                        va="top",
+                        ha="left",
+                        fontsize=7,
+                        bbox={
+                            "facecolor": "white",
+                            "alpha": 0.75,
+                            "edgecolor": "none",
+                            "pad": 2.0,
+                        },
+                    )
+                    ax.grid(True, alpha=0.15)
+
+                for ax in axes[len(page) :]:
+                    ax.axis("off")
+
+                active_axes = [ax for ax in axes[: len(page)] if ax.axison]
+                fig_atlas.suptitle(
+                    "Exhaustive Hubble-residual parameter atlas "
+                    f"({page_start + 1}–{page_start + len(page)} of "
+                    f"{len(rankings)}; central 1–99% x-range)",
+                    fontsize=13,
+                    y=0.985,
+                )
+                fig_atlas.subplots_adjust(
+                    left=0.07,
+                    right=0.89,
+                    bottom=0.08,
+                    top=0.84,
+                    wspace=0.30,
+                    hspace=0.42,
+                )
+                if active_axes:
+                    scalar_mappable = mpl.cm.ScalarMappable(
+                        norm=color_norm,
+                        cmap=color_map,
+                    )
+                    scalar_mappable.set_array([])
+                    colorbar_ax = fig_atlas.add_axes([0.915, 0.16, 0.012, 0.66])
+                    colorbar = fig_atlas.colorbar(
+                        scalar_mappable,
+                        cax=colorbar_ax,
+                    )
+                    colorbar.set_label("Redshift")
+                    handles, labels = [], []
+                    for legend_ax in active_axes:
+                        handles, labels = legend_ax.get_legend_handles_labels()
+                        if handles:
+                            break
+                    if handles:
+                        fig_atlas.legend(
+                            handles,
+                            labels,
+                            loc="upper center",
+                            bbox_to_anchor=(0.5, 0.945),
+                            ncol=2,
+                            frameon=False,
+                        )
+                pdf.savefig(fig_atlas, dpi=100, bbox_inches="tight")
+                if show:
+                    plt.show()
+                plt.close(fig_atlas)
+
+    return {
+        "summary_pdf": summary_pdf,
+        "atlas_pdf": atlas_path,
+        "rankings_csv": rankings_path,
+        "skipped_csv": skipped_path,
+    }
+
+
+def plot_redshift_wiggle_diagnostics(
+    df_agn,
+    residuals_biased,
+    residuals_biased_err,
+    residuals_debiased,
+    residuals_debiased_err,
+    *,
+    plot_path="plots/hubble",
+    z_range=(0.44, 3.16),
+    show=False,
+    min_points=10,
+    n_z_bins=12,
+    n_bootstrap=300,
+    n_permutations=500,
+    cv_folds=5,
+    atlas_top_n=None,
+    panels_per_page=6,
+    random_seed=93741,
+):
+    """
+    Diagnose local redshift structure in final Hubble residuals.
+
+    Unlike the parameter-first exhaustive audit, this view keeps redshift on
+    the x axis. Parameter priorities are based on out-of-fold reduction of the
+    RMS redshift wiggle and largest adjacent-bin jump. They are diagnostic
+    priorities, not causal conclusions.
+    """
+    if "z" not in df_agn.columns:
+        raise ValueError("df_agn must contain a 'z' column.")
+    n_rows = len(df_agn)
+
+    def _aligned(values, name):
+        array = np.asarray(values, dtype=float)
+        if array.ndim != 1 or array.size != n_rows:
+            raise ValueError(
+                f"{name} length {array.size} does not match dataframe length "
+                f"{n_rows}."
+            )
+        return array
+
+    rb = _aligned(residuals_biased, "residuals_biased")
+    eb = _aligned(residuals_biased_err, "residuals_biased_err")
+    rd = _aligned(residuals_debiased, "residuals_debiased")
+    ed = _aligned(residuals_debiased_err, "residuals_debiased_err")
+    z = pd.to_numeric(df_agn["z"], errors="coerce").to_numpy(dtype=float)
+    z_min, z_max = map(float, z_range)
+    if not (np.isfinite(z_min) and np.isfinite(z_max) and z_min < z_max):
+        raise ValueError("z_range must contain two finite, increasing values.")
+    if int(min_points) < 3:
+        raise ValueError("min_points must be at least 3.")
+    if int(n_z_bins) < 4:
+        raise ValueError("n_z_bins must be at least 4.")
+    if int(cv_folds) < 2:
+        raise ValueError("cv_folds must be at least 2.")
+
+    base_mask = (
+        np.isfinite(z)
+        & np.isfinite(rd)
+        & (z >= z_min)
+        & (z <= z_max)
+    )
+    if np.count_nonzero(base_mask) < int(min_points):
+        raise ValueError("Too few finite in-range debiased residuals.")
+    rng = np.random.default_rng(int(random_seed))
+    diagnostics_path = os.path.join(plot_path or "plots/hubble", "diagnostics")
+    os.makedirs(diagnostics_path, exist_ok=True)
+    overview_path = os.path.join(
+        diagnostics_path, "hubble_redshift_wiggle_overview.pdf"
+    )
+    change_path = os.path.join(
+        diagnostics_path, "hubble_redshift_change_points.csv"
+    )
+    transitions_path = os.path.join(
+        diagnostics_path, "hubble_redshift_physical_transitions.csv"
+    )
+    rankings_path = os.path.join(
+        diagnostics_path, "hubble_redshift_parameter_wiggle_rankings.csv"
+    )
+    atlas_path = os.path.join(
+        diagnostics_path, "hubble_redshift_parameter_wiggle_atlas.pdf"
+    )
+
+    z_base = z[base_mask]
+    rd_base = rd[base_mask]
+    # Equal-count bins make sparse ends of the redshift distribution visible
+    # without allowing dense regions to dominate the wiggle metric.
+    z_edges = np.unique(
+        np.nanquantile(
+            z_base,
+            np.linspace(0.0, 1.0, min(int(n_z_bins), len(z_base)) + 1),
+        )
+    )
+    if z_edges.size < 5:
+        z_edges = np.linspace(z_min, z_max, int(n_z_bins) + 1)
+    z_edges[0] = min(z_edges[0], z_min)
+    z_edges[-1] = max(z_edges[-1], z_max)
+
+    def _binned(z_values, y_values, edges=z_edges, minimum=3):
+        z_values = np.asarray(z_values, dtype=float)
+        y_values = np.asarray(y_values, dtype=float)
+        centers, medians, counts = [], [], []
+        for bin_index in range(len(edges) - 1):
+            if bin_index == len(edges) - 2:
+                keep = (
+                    (z_values >= edges[bin_index])
+                    & (z_values <= edges[bin_index + 1])
+                )
+            else:
+                keep = (
+                    (z_values >= edges[bin_index])
+                    & (z_values < edges[bin_index + 1])
+                )
+            count = int(np.count_nonzero(keep))
+            counts.append(count)
+            centers.append(
+                float(np.nanmedian(z_values[keep]))
+                if count
+                else 0.5 * (edges[bin_index] + edges[bin_index + 1])
+            )
+            medians.append(
+                float(np.nanmedian(y_values[keep]))
+                if count >= int(minimum)
+                else np.nan
+            )
+        return (
+            np.asarray(centers),
+            np.asarray(medians),
+            np.asarray(counts, dtype=int),
+        )
+
+    def _wiggle_metrics(z_values, y_values):
+        _, medians, _ = _binned(z_values, y_values)
+        finite = np.isfinite(medians)
+        if np.count_nonzero(finite) < 3:
+            return np.nan, np.nan
+        centered = medians[finite] - np.nanmedian(medians[finite])
+        rms = float(np.sqrt(np.nanmean(centered**2)))
+        adjacent = np.abs(np.diff(medians))
+        max_jump = (
+            float(np.nanmax(adjacent))
+            if np.any(np.isfinite(adjacent))
+            else np.nan
+        )
+        return rms, max_jump
+
+    def _bootstrap_binned(z_values, y_values):
+        centers, medians, counts = _binned(z_values, y_values)
+        draws = np.full((max(int(n_bootstrap), 0), len(medians)), np.nan)
+        for bin_index in range(len(z_edges) - 1):
+            right = (
+                z_values <= z_edges[bin_index + 1]
+                if bin_index == len(z_edges) - 2
+                else z_values < z_edges[bin_index + 1]
+            )
+            values = y_values[
+                (z_values >= z_edges[bin_index]) & right & np.isfinite(y_values)
+            ]
+            if values.size < 3:
+                continue
+            for draw_index in range(draws.shape[0]):
+                draws[draw_index, bin_index] = np.median(
+                    rng.choice(values, size=values.size, replace=True)
+                )
+        if draws.shape[0]:
+            lower, upper = np.nanpercentile(draws, [16.0, 84.0], axis=0)
+        else:
+            lower = upper = np.full(len(medians), np.nan)
+        return centers, medians, counts, lower, upper
+
+    # Robust adjacent-window change-point scan. The permutation distribution
+    # uses the largest statistic anywhere in z, providing a look-elsewhere
+    # correction for the scan.
+    order = np.argsort(z_base)
+    z_sorted = z_base[order]
+    r_sorted = rd_base[order]
+    window = max(int(min_points), int(np.ceil(0.06 * len(z_sorted))))
+    step = max(1, len(z_sorted) // 80)
+    split_indices = np.arange(window, len(z_sorted) - window + 1, step)
+
+    def _change_statistics(values):
+        statistics = []
+        jumps = []
+        for split in split_indices:
+            left = values[split - window : split]
+            right = values[split : split + window]
+            jump = float(np.nanmedian(right) - np.nanmedian(left))
+            left_scale = 1.4826 * np.nanmedian(
+                np.abs(left - np.nanmedian(left))
+            )
+            right_scale = 1.4826 * np.nanmedian(
+                np.abs(right - np.nanmedian(right))
+            )
+            standard_error = np.sqrt(
+                left_scale**2 / max(len(left), 1)
+                + right_scale**2 / max(len(right), 1)
+            )
+            statistics.append(
+                jump / max(float(standard_error), np.finfo(float).eps)
+            )
+            jumps.append(jump)
+        return np.asarray(statistics), np.asarray(jumps)
+
+    change_stat, change_jump = _change_statistics(r_sorted)
+    null_max = np.full(max(int(n_permutations), 0), np.nan)
+    for permutation_index in range(null_max.size):
+        permuted_stat, _ = _change_statistics(rng.permutation(r_sorted))
+        if permuted_stat.size:
+            null_max[permutation_index] = np.nanmax(np.abs(permuted_stat))
+    change_rows = []
+    for row_index, split in enumerate(split_indices):
+        abs_stat = abs(change_stat[row_index])
+        global_p = (
+            (1.0 + np.count_nonzero(null_max >= abs_stat))
+            / (1.0 + np.count_nonzero(np.isfinite(null_max)))
+            if null_max.size
+            else np.nan
+        )
+        change_rows.append(
+            {
+                "z_split": 0.5 * (z_sorted[split - 1] + z_sorted[split]),
+                "median_jump": change_jump[row_index],
+                "robust_jump_statistic": change_stat[row_index],
+                "look_elsewhere_pvalue": global_p,
+                "window_size_each_side": window,
+            }
+        )
+    change_points = pd.DataFrame(change_rows)
+    if not change_points.empty:
+        change_points = change_points.iloc[
+            np.argsort(
+                -np.abs(change_points["robust_jump_statistic"].to_numpy())
+            )
+        ].reset_index(drop=True)
+    change_points.to_csv(change_path, index=False)
+
+    transition_rows = []
+    transition_features = {
+        **{
+            name: float(config["lambda_rest"])
+            for name, config in _BLR_LINE_MODELS.items()
+        },
+        "2500A continuum": 2500.0,
+    }
+    for feature, wavelength in transition_features.items():
+        for band, (blue_edge, red_edge) in _SDSS_FILTER_EDGES_OBS.items():
+            for edge_name, observed_edge in (
+                ("enters", blue_edge),
+                ("leaves", red_edge),
+            ):
+                transition_z = observed_edge / wavelength - 1.0
+                if z_min <= transition_z <= z_max:
+                    transition_rows.append(
+                        {
+                            "z": transition_z,
+                            "feature": feature,
+                            "filter": band,
+                            "edge": edge_name,
+                            "label": f"{feature} {edge_name} {band}",
+                        }
+                    )
+    transitions = pd.DataFrame(
+        transition_rows,
+        columns=["z", "feature", "filter", "edge", "label"],
+    ).sort_values("z", ignore_index=True)
+    transitions.to_csv(transitions_path, index=False)
+
+    spectra_fit_columns = set(df_agn.attrs.get("spectra_fit_columns", ()))
+    base_counts = _binned(z_base, rd_base)[2]
+    parameter_values = {}
+    ranking_rows = []
+    identifiers = {"object_id", "sdss_name", "z"}
+    for parameter in df_agn.columns:
+        if parameter in identifiers:
+            continue
+        series = df_agn[parameter]
+        if not isinstance(series, pd.Series) or not (
+            pd.api.types.is_numeric_dtype(series.dtype)
+            or pd.api.types.is_bool_dtype(series.dtype)
+        ):
+            continue
+        values = pd.to_numeric(series, errors="coerce").to_numpy(dtype=float)
+        mask = base_mask & np.isfinite(values)
+        finite_count = int(np.count_nonzero(mask))
+        if finite_count < int(min_points) or np.unique(values[mask]).size < 2:
+            continue
+        z_use = z[mask]
+        r_use = rd[mask]
+        e_use = ed[mask]
+        p_use = values[mask]
+        # Rank scaling makes the simple cross-validated model robust to units
+        # and extreme values while retaining monotonic parameter effects.
+        p_rank = (
+            pd.Series(p_use).rank(method="average").to_numpy(dtype=float)
+            - 0.5
+        ) / len(p_use)
+        sorted_local = np.argsort(z_use, kind="stable")
+        fold_id = np.empty(len(z_use), dtype=int)
+        fold_id[sorted_local] = np.arange(len(z_use)) % int(cv_folds)
+        predictions = np.full(len(z_use), np.nan)
+        fold_reductions = []
+        for fold in range(int(cv_folds)):
+            test = fold_id == fold
+            train = ~test
+            if np.count_nonzero(train) < 3 or np.count_nonzero(test) < 3:
+                continue
+            design_train = np.column_stack(
+                [np.ones(np.count_nonzero(train)), p_rank[train]]
+            )
+            weights = np.ones(np.count_nonzero(train))
+            good_error = np.isfinite(e_use[train]) & (e_use[train] > 0)
+            weights[good_error] = 1.0 / np.square(e_use[train][good_error])
+            sqrt_weight = np.sqrt(weights)
+            coefficients = np.linalg.lstsq(
+                design_train * sqrt_weight[:, None],
+                r_use[train] * sqrt_weight,
+                rcond=None,
+            )[0]
+            predictions[test] = (
+                coefficients[0] + coefficients[1] * p_rank[test]
+            )
+            before_fold = _wiggle_metrics(z_use[test], r_use[test])[0]
+            after_fold = _wiggle_metrics(
+                z_use[test], r_use[test] - predictions[test]
+            )[0]
+            if np.isfinite(before_fold) and np.isfinite(after_fold):
+                fold_reductions.append(before_fold - after_fold)
+        valid_prediction = np.isfinite(predictions)
+        baseline_rms, baseline_jump = _wiggle_metrics(
+            z_use[valid_prediction], r_use[valid_prediction]
+        )
+        adjusted_rms, adjusted_jump = _wiggle_metrics(
+            z_use[valid_prediction],
+            r_use[valid_prediction] - predictions[valid_prediction],
+        )
+        _, _, parameter_counts = _binned(z_use, r_use)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            bin_coverage = np.divide(
+                parameter_counts,
+                base_counts,
+                out=np.zeros_like(parameter_counts, dtype=float),
+                where=base_counts > 0,
+            )
+        populated = base_counts >= 3
+        locally_covered = populated & (parameter_counts >= 3) & (
+            bin_coverage >= 0.2
+        )
+        covered_fraction = (
+            float(np.count_nonzero(locally_covered) / np.count_nonzero(populated))
+            if np.any(populated)
+            else 0.0
+        )
+        min_bin_coverage = (
+            float(np.min(bin_coverage[populated])) if np.any(populated) else 0.0
+        )
+        reliable = bool(
+            finite_count >= max(30, int(min_points))
+            and covered_fraction >= 0.8
+            and min_bin_coverage >= 0.1
+        )
+        reduction_rms = (
+            baseline_rms - adjusted_rms
+            if np.isfinite(baseline_rms) and np.isfinite(adjusted_rms)
+            else np.nan
+        )
+        reduction_jump = (
+            baseline_jump - adjusted_jump
+            if np.isfinite(baseline_jump) and np.isfinite(adjusted_jump)
+            else np.nan
+        )
+        alias_group = re.sub(r"[^a-z0-9]+", "", parameter.lower())
+        ranking_rows.append(
+            {
+                "parameter": parameter,
+                "source": (
+                    "spectra_fit_csv"
+                    if parameter in spectra_fit_columns
+                    else "hdf5_or_derived"
+                ),
+                "alias_group": alias_group,
+                "finite_in_range": finite_count,
+                "coverage_in_range": finite_count / np.count_nonzero(base_mask),
+                "redshift_bins_covered_fraction": covered_fraction,
+                "minimum_redshift_bin_coverage": min_bin_coverage,
+                "reliable_redshift_coverage": reliable,
+                "cv_baseline_wiggle_rms": baseline_rms,
+                "cv_adjusted_wiggle_rms": adjusted_rms,
+                "cv_wiggle_rms_reduction": reduction_rms,
+                "cv_baseline_max_jump": baseline_jump,
+                "cv_adjusted_max_jump": adjusted_jump,
+                "cv_max_jump_reduction": reduction_jump,
+                "fold_reduction_positive_fraction": (
+                    float(np.mean(np.asarray(fold_reductions) > 0))
+                    if fold_reductions
+                    else np.nan
+                ),
+            }
+        )
+        parameter_values[parameter] = values
+
+    rankings = pd.DataFrame(ranking_rows)
+    if not rankings.empty:
+        rankings = rankings.sort_values(
+            [
+                "reliable_redshift_coverage",
+                "cv_wiggle_rms_reduction",
+                "cv_max_jump_reduction",
+                "fold_reduction_positive_fraction",
+            ],
+            ascending=[False, False, False, False],
+            na_position="last",
+            kind="stable",
+        ).reset_index(drop=True)
+        rankings["is_alias_representative"] = ~rankings.duplicated("alias_group")
+    else:
+        rankings["is_alias_representative"] = pd.Series(dtype=bool)
+    rankings.to_csv(rankings_path, index=False)
+
+    rb_mask = base_mask & np.isfinite(rb)
+    correction = rb - rd
+    correction_mask = base_mask & np.isfinite(correction)
+    zb, rb_med, rb_count, rb_lo, rb_hi = _bootstrap_binned(
+        z[rb_mask], rb[rb_mask]
+    )
+    zd, rd_med, rd_count, rd_lo, rd_hi = _bootstrap_binned(z_base, rd_base)
+    zc, correction_med, _, correction_lo, correction_hi = _bootstrap_binned(
+        z[correction_mask], correction[correction_mask]
+    )
+    fig, axes = plt.subplots(
+        4, 1, figsize=(11.0, 13.0), sharex=True,
+        gridspec_kw={"height_ratios": [3.2, 1.8, 1.1, 1.8]},
+    )
+    axes[0].scatter(
+        z_base, rd_base, s=5, alpha=0.12, color="0.35",
+        linewidths=0, rasterized=True,
+    )
+    axes[0].plot(zb, rb_med, color="tab:blue", lw=2, label="biased median")
+    axes[0].fill_between(zb, rb_lo, rb_hi, color="tab:blue", alpha=0.15)
+    axes[0].plot(zd, rd_med, color="tab:red", lw=2, label="debiased median")
+    axes[0].fill_between(zd, rd_lo, rd_hi, color="tab:red", alpha=0.15)
+    axes[0].axhline(0, color="black", lw=0.8)
+    axes[0].set_ylabel("Hubble residual (mag)")
+    axes[0].legend(frameon=False, ncol=2)
+    axes[0].set_title(
+        "Redshift-first Hubble-residual diagnostic "
+        "(bands: bootstrap 16–84%; diagnostic, not causal)"
+    )
+    axes[1].plot(zc, correction_med, color="tab:purple", lw=2)
+    axes[1].fill_between(
+        zc, correction_lo, correction_hi, color="tab:purple", alpha=0.18
+    )
+    axes[1].axhline(0, color="black", lw=0.8)
+    axes[1].set_ylabel("bias correction\n(biased − debiased)")
+    width = np.diff(z_edges)
+    axes[2].bar(
+        0.5 * (z_edges[:-1] + z_edges[1:]),
+        rd_count,
+        width=0.88 * width,
+        color="0.55",
+    )
+    axes[2].set_ylabel("N")
+    if change_rows:
+        scan = pd.DataFrame(change_rows).sort_values("z_split")
+        axes[3].plot(
+            scan["z_split"],
+            scan["robust_jump_statistic"],
+            color="tab:orange",
+            lw=1.8,
+        )
+        axes[3].axhline(0, color="black", lw=0.8)
+        best = change_points.iloc[0]
+        axes[3].axvline(best["z_split"], color="tab:red", lw=1.6)
+        axes[3].text(
+            0.01,
+            0.96,
+            (
+                f"strongest candidate z={best['z_split']:.3f}, "
+                f"jump={best['median_jump']:+.3f} mag, "
+                f"global p={best['look_elsewhere_pvalue']:.3g}"
+            ),
+            transform=axes[3].transAxes,
+            va="top",
+            fontsize=9,
+        )
+    transition_colors = {
+        "C IV": "#4477AA",
+        "Mg II": "#228833",
+        "Hβ": "#CCBB44",
+        "Hα": "#EE6677",
+        "2500A continuum": "#AA3377",
+    }
+    for row in transitions.itertuples():
+        axes[3].axvline(
+            row.z,
+            color=transition_colors.get(row.feature, "0.6"),
+            lw=0.7,
+            alpha=0.28,
+        )
+    transition_handles = [
+        Line2D([0], [0], color=color, lw=1.5, label=feature)
+        for feature, color in transition_colors.items()
+        if feature in set(transitions["feature"])
+    ]
+    if transition_handles:
+        axes[3].legend(
+            handles=transition_handles,
+            title="filter-edge crossings",
+            loc="lower right",
+            ncol=min(3, len(transition_handles)),
+            fontsize=7,
+            title_fontsize=7,
+            frameon=True,
+            framealpha=0.8,
+        )
+    axes[3].set_ylabel("robust local\njump statistic")
+    axes[3].set_xlabel("Redshift")
+    axes[3].set_xlim(z_min, z_max)
+    for ax in axes:
+        ax.grid(True, alpha=0.16)
+    fig.tight_layout()
+    overview_pdf = _save_figure(fig, overview_path, dpi=200, show=show)
+
+    atlas_rows = rankings[
+        rankings["is_alias_representative"].astype(bool)
+    ] if not rankings.empty else rankings
+    if atlas_top_n is not None:
+        atlas_rows = atlas_rows.head(int(atlas_top_n))
+    with PdfPages(atlas_path) as pdf:
+        if atlas_rows.empty:
+            empty_fig, empty_ax = plt.subplots(figsize=(11, 8.5))
+            empty_ax.axis("off")
+            empty_ax.text(
+                0.5, 0.5, "No eligible numeric parameters.",
+                ha="center", va="center",
+            )
+            pdf.savefig(empty_fig)
+            plt.close(empty_fig)
+        else:
+            n_cols = min(3, int(panels_per_page))
+            n_rows_page = int(np.ceil(int(panels_per_page) / n_cols))
+            for page_start in range(0, len(atlas_rows), int(panels_per_page)):
+                page = atlas_rows.iloc[
+                    page_start : page_start + int(panels_per_page)
+                ]
+                page_fig, page_axes = plt.subplots(
+                    n_rows_page,
+                    n_cols,
+                    figsize=(5.1 * n_cols, 3.9 * n_rows_page),
+                    squeeze=False,
+                    sharex=True,
+                )
+                axes_flat = page_axes.ravel()
+                for ax, row in zip(axes_flat, page.itertuples()):
+                    values = parameter_values[row.parameter]
+                    mask = base_mask & np.isfinite(values)
+                    p = values[mask]
+                    z_use = z[mask]
+                    r_use = rd[mask]
+                    lo, hi = np.nanpercentile(p, [2, 98])
+                    color_values = np.clip(p, lo, hi) if hi > lo else p
+                    ax.scatter(
+                        z_use, r_use, c=color_values, cmap="viridis",
+                        s=6, alpha=0.22, linewidths=0, rasterized=True,
+                    )
+                    quantiles = np.unique(np.nanquantile(p, [0, 1/3, 2/3, 1]))
+                    curve_colors = ["#3366AA", "#777777", "#CC3311"]
+                    curve_labels = ["low p", "mid p", "high p"]
+                    if quantiles.size == 4:
+                        for group_index in range(3):
+                            group = (p >= quantiles[group_index]) & (
+                                p <= quantiles[group_index + 1]
+                                if group_index == 2
+                                else p < quantiles[group_index + 1]
+                            )
+                            x_curve, y_curve, _ = _binned(
+                                z_use[group], r_use[group], minimum=3
+                            )
+                            ax.plot(
+                                x_curve, y_curve,
+                                color=curve_colors[group_index],
+                                lw=1.8,
+                                label=curve_labels[group_index],
+                            )
+                    _, _, coverage_counts = _binned(z_use, r_use)
+                    coverage = np.divide(
+                        coverage_counts,
+                        base_counts,
+                        out=np.zeros_like(coverage_counts, dtype=float),
+                        where=base_counts > 0,
+                    )
+                    coverage_ax = ax.inset_axes([0.08, 0.03, 0.88, 0.09])
+                    coverage_ax.bar(
+                        0.5 * (z_edges[:-1] + z_edges[1:]),
+                        coverage,
+                        width=0.9 * np.diff(z_edges),
+                        color="black",
+                        alpha=0.18,
+                    )
+                    coverage_ax.set_ylim(0, 1)
+                    coverage_ax.set_xlim(z_min, z_max)
+                    coverage_ax.set_xticks([])
+                    coverage_ax.set_yticks([0, 1])
+                    coverage_ax.tick_params(labelsize=5, length=1)
+                    coverage_ax.set_ylabel("cov", fontsize=5, labelpad=0)
+                    ax.axhline(0, color="black", lw=0.7, alpha=0.6)
+                    source = " [SED]" if row.source == "spectra_fit_csv" else ""
+                    reliability = "reliable" if row.reliable_redshift_coverage else "LOW COVERAGE"
+                    ax.set_title(
+                        f"{row.parameter}{source}\n"
+                        f"Δwiggle={row.cv_wiggle_rms_reduction:+.3f}, "
+                        f"Δjump={row.cv_max_jump_reduction:+.3f}; {reliability}",
+                        fontsize=9,
+                    )
+                    ax.text(
+                        0.98,
+                        0.97,
+                        f"color: p2={lo:.3g} → p98={hi:.3g}",
+                        transform=ax.transAxes,
+                        ha="right",
+                        va="top",
+                        fontsize=6,
+                        bbox={
+                            "facecolor": "white",
+                            "alpha": 0.7,
+                            "edgecolor": "none",
+                            "pad": 1.0,
+                        },
+                    )
+                    ax.set_ylabel("Debiased residual (mag)")
+                    ax.set_xlim(z_min, z_max)
+                    ax.grid(True, alpha=0.12)
+                for ax in axes_flat[len(page):]:
+                    ax.axis("off")
+                axes_flat[min(len(page), len(axes_flat)) - 1].set_xlabel(
+                    "Redshift"
+                )
+                handles, labels = axes_flat[0].get_legend_handles_labels()
+                if handles:
+                    page_fig.legend(
+                        handles, labels, frameon=False, ncol=3,
+                        loc="upper center", bbox_to_anchor=(0.5, 0.96),
+                    )
+                page_fig.suptitle(
+                    "Parameter-colored residual vs redshift atlas "
+                    f"({page_start + 1}–{page_start + len(page)} of "
+                    f"{len(atlas_rows)}; ranked by held-out wiggle reduction)",
+                    y=0.995,
+                    fontsize=12,
+                )
+                page_fig.subplots_adjust(
+                    left=0.07, right=0.98, bottom=0.07, top=0.88,
+                    wspace=0.24, hspace=0.42,
+                )
+                pdf.savefig(page_fig, dpi=100, bbox_inches="tight")
+                if show:
+                    plt.show()
+                plt.close(page_fig)
+
+    return {
+        "overview_pdf": overview_pdf,
+        "change_points_csv": change_path,
+        "transitions_csv": transitions_path,
+        "rankings_csv": rankings_path,
+        "atlas_pdf": atlas_path,
+    }
+
 
 def _kde_conf_levels(Z, conf=(0.954, 0.683), plot_path=None):
     """
