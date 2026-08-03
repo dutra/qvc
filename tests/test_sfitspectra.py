@@ -65,3 +65,17 @@ def test_sfitspectra_accepts_cli_overrides_and_builds_timestamped_git_job_name()
     assert 'output_dir = f"results/data/jaxqsofit/{prefix}"' in source
     assert 'fig_dir = f"plots/jaxqsofit/{prefix}"' in source
     assert "#SBATCH --job-name={job_name}" in source
+
+
+def test_sfitspectra_named_resume_keeps_current_csv_selection_and_separate_outputs():
+    source = SCRIPT.read_text(encoding="utf-8")
+
+    assert '"--resume",\n    metavar="OLD_RUN_NAME"' in source
+    assert 'submit_object_ids = requested_object_ids' in source
+    assert 'f"results/data/jaxqsofit/{resume_run_name}/all"' in source
+    assert 'f"results/data/jaxqsofit/{prefix}"' in source
+    assert 'resume_path.resolve() == (output_path / "all").resolve()' in source
+    assert '"--resume is supported only with fit_spectra_jaxsedfit_joint.py"' in source
+    assert 'export RESUME_DIR="{resume_dir}"' in source
+    assert '"--resume", resume_dir' in source
+    assert '"--resume-run-name", resume_run_name' in source
