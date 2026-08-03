@@ -20,23 +20,24 @@ if str(SRC_ROOT) not in sys.path:
 # 1. Define your job settings here
 # ==========================================
 partition = "day"
-time_limit = "8:00:00"
+time_limit = "4:00:00"
 
 # Number of object_ids per array task
-chunk_size = 20
+chunk_size = 4
 
 # Number of CPUs used by fit_spectra.py
-nproc = 4
-cpus_per_task = 4
-mem = "32G"
+nproc = 1
+cpus_per_task = 1
+mem = "40G"
 
-fit_script = "fit_spectra.py"
+#fit_script = "fit_spectra.py"
+fit_script = "fit_spectra_jaxsedfit_joint.py"
 
 # Required only by fit_spectra_jaxsedfit_joint.py
 sed_photometry_path = "data/jul14_master_input_file_chisqgt20_bandwagon_photometry.csv"
 
-chisq_csv = "results/data/variability_chi_sq_red_g_gt_20.csv"
-#chisq_csv = "data/jul14_master_input_file_chisqgt20.csv"
+#chisq_csv = "results/data/variability_chi_sq_red_g_gt_20.csv"
+chisq_csv = "data/jul14_master_input_file_chisqgt20.csv"
 
 # Optional exclusion file
 exclude_csv = None #"results/data/jaxqsofit/jaxqsofit_apr20c_chisq20_apr18h.csv"
@@ -312,7 +313,6 @@ cmd = [
     out_csv,
     "--cache-dir", cache_dir,
     "--verbose",
-    "--save-fig",
     "--optax-steps", "2000",
     "--optax-lr", "0.01",
     "--nuts-warmup", "250",
