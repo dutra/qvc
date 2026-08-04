@@ -49,6 +49,248 @@ python_bin = "/home/id255/.conda/envs/jaxcpu2/bin/python"
 qvc_data_dir = "/home/id255/scratch_pi_pn38/id255/qvc/data"
 cache_dir = "data/spectra_cache_all"
 
+
+# ==========================================
+# Retry helpers
+# ==========================================
+RETRY_ACCOUNTING_STARTTIME = "now-7days"
+RETRY_BATCH_LIMIT = 10_000
+ARRAY_TASK_RE = re.compile(r"^(?P<parent_id>\d+)_(?P<task_id>\d+)$")
+SCALAR_JOB_RE = re.compile(r"^\d+$")
+ACTIVE_STATES = {
+    "COMPLETING",
+    "CONFIGURING",
+    "PENDING",
+    "REQUEUED",
+    "REQUEUE_FED",
+    "REQUEUE_HOLD",
+    "RESIZING",
+    "RUNNING",
+    "SIGNALING",
+    "STAGE_OUT",
+    "STOPPED",
+    "SUSPENDED",
+}
+TERMINAL_STATES = {
+    "BOOT_FAIL",
+    "CANCELLED",
+    "COMPLETED",
+    "DEADLINE",
+    "FAILED",
+    "NODE_FAIL",
+    "OUT_OF_MEMORY",
+    "PREEMPTED",
+    "REVOKED",
+    "SPECIAL_EXIT",
+    "TIMEOUT",
+}
+KNOWN_STATES = ACTIVE_STATES | TERMINAL_STATES
+
+
+def normalize_job_name(value, option):
+    job_name = str(value).strip()
+    normalized = re.sub(r"[^A-Za-z0-9._-]+", "_", job_name)
+    if not job_name or normalized != job_name or job_name in {".", ".."}:
+        raise ValueError(f"{option} must be a full job name, not a path")
+    return job_name
+
+
+def normalize_slurm_state(value):
+    state = str(value).strip().split()[0].rstrip("+") if str(value).strip() else ""
+    if state not in KNOWN_STATES:
+        raise ValueError(f"Unrecognized Slurm state {state or '<empty>'!r}")
+    return state
+
+
+def parse_saved_export(script_content, name):
+    match = re.search(
+        rf'^export {re.escape(name)}=(?:"([^"]*)"|([^\s#]+))\s*$',
+        script_content,
+        flags=re.MULTILINE,
+    )
+    if match is None:
+        raise ValueError(f"Saved submission script lacks export {name}")
+    return match.group(1) if match.group(1) is not None else match.group(2)
+
+
+def load_retry_artifacts(job_name):
+    submit_dir = REPO_ROOT / "hpc_scripts" / "submit" / "jaxqsofit"
+    saved_script = submit_dir / f"submit_{job_name}.sbatch"
+    object_ids_path = submit_dir / f"{job_name}_object_ids.txt"
+    if not saved_script.is_file():
+        raise FileNotFoundError(f"Original submission script not found: {saved_script}")
+    if not object_ids_path.is_file():
+        raise FileNotFoundError(
+            f"Original object-ID manifest not found: {object_ids_path}"
+        )
+
+    script_content = saved_script.read_text(encoding="utf-8")
+    job_name_match = re.search(
+        r"^#SBATCH\s+--job-name=(\S+)\s*$",
+        script_content,
+        flags=re.MULTILINE,
+    )
+    saved_job_name = job_name_match.group(1) if job_name_match is not None else None
+    saved_prefix = parse_saved_export(script_content, "PREFIX")
+    saved_object_ids = parse_saved_export(script_content, "OBJECT_IDS_FILE")
+    if saved_job_name != job_name or saved_prefix != job_name:
+        raise ValueError(
+            "Saved submission identity does not match --retry: "
+            f"job_name={saved_job_name!r}, prefix={saved_prefix!r}"
+        )
+
+    referenced_object_ids = Path(saved_object_ids)
+    if not referenced_object_ids.is_absolute():
+        referenced_object_ids = REPO_ROOT / referenced_object_ids
+    if referenced_object_ids.resolve() != object_ids_path.resolve():
+        raise ValueError(
+            "Saved OBJECT_IDS_FILE does not match the canonical retry manifest: "
+            f"{saved_object_ids!r}"
+        )
+
+    try:
+        saved_chunk_size = int(parse_saved_export(script_content, "CHUNK_SIZE"))
+        saved_nproc = int(parse_saved_export(script_content, "NPROC"))
+    except ValueError as exc:
+        raise ValueError("Saved CHUNK_SIZE and NPROC must be integers") from exc
+    if saved_chunk_size <= 0 or saved_nproc <= 0:
+        raise ValueError("Saved CHUNK_SIZE and NPROC must be positive")
+    if cpus_per_task < saved_nproc:
+        raise ValueError(
+            f"Current cpus_per_task={cpus_per_task} is fewer than the saved "
+            f"NPROC={saved_nproc}"
+        )
+
+    object_count = sum(
+        bool(line.strip())
+        for line in object_ids_path.read_text(encoding="utf-8").splitlines()
+    )
+    if object_count == 0:
+        raise ValueError(f"Original object-ID manifest is empty: {object_ids_path}")
+    num_tasks = math.ceil(object_count / saved_chunk_size)
+    return saved_script, num_tasks
+
+
+def get_retry_accounting_rows(job_name):
+    cmd = [
+        "sacct",
+        "--array",
+        "--noheader",
+        "--parsable2",
+        f"--starttime={RETRY_ACCOUNTING_STARTTIME}",
+        "--format=JobID%128,JobName%256,State%64",
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+    array_rows = []
+    scalar_rows = []
+    for line in result.stdout.splitlines():
+        if not line.strip():
+            continue
+        parts = line.split("|")
+        if len(parts) < 3:
+            continue
+        job_id, row_job_name, raw_state = parts[:3]
+        if row_job_name != job_name:
+            continue
+        array_match = ARRAY_TASK_RE.fullmatch(job_id)
+        if array_match is not None:
+            array_rows.append(
+                {
+                    "parent_id": int(array_match.group("parent_id")),
+                    "task_id": int(array_match.group("task_id")),
+                    "state": normalize_slurm_state(raw_state),
+                }
+            )
+        elif SCALAR_JOB_RE.fullmatch(job_id):
+            scalar_rows.append(
+                {
+                    "parent_id": int(job_id),
+                    "task_id": 0,
+                    "state": normalize_slurm_state(raw_state),
+                }
+            )
+
+    rows = array_rows if array_rows else scalar_rows
+    if not rows:
+        raise RuntimeError(
+            f"No allocation rows found for {job_name!r} since "
+            f"{RETRY_ACCOUNTING_STARTTIME}"
+        )
+    return rows
+
+
+def latest_task_attempts(rows):
+    latest = {}
+    for row in rows:
+        task_id = row["task_id"]
+        current = latest.get(task_id)
+        if current is None or row["parent_id"] >= current["parent_id"]:
+            latest[task_id] = row
+    return latest
+
+
+def format_array_spec(task_ids):
+    ordered = sorted(set(task_ids))
+    if not ordered:
+        raise ValueError("Cannot format an empty Slurm array selection")
+    ranges = []
+    start = previous = ordered[0]
+    for task_id in ordered[1:]:
+        if task_id == previous + 1:
+            previous = task_id
+            continue
+        ranges.append(str(start) if start == previous else f"{start}-{previous}")
+        start = previous = task_id
+    ranges.append(str(start) if start == previous else f"{start}-{previous}")
+    return ",".join(ranges)
+
+
+def retry_unsuccessful_tasks(job_name):
+    saved_script, num_tasks = load_retry_artifacts(job_name)
+    attempts = latest_task_attempts(get_retry_accounting_rows(job_name))
+    invalid_task_ids = sorted(
+        task_id for task_id in attempts if task_id < 0 or task_id >= num_tasks
+    )
+    if invalid_task_ids:
+        raise ValueError(
+            f"Accounting task IDs {invalid_task_ids} are outside the original task "
+            f"range 0-{num_tasks - 1}"
+        )
+
+    retry_rows = sorted(
+        (
+            row
+            for row in attempts.values()
+            if row["state"] in TERMINAL_STATES and row["state"] != "COMPLETED"
+        ),
+        key=lambda row: row["task_id"],
+    )
+    if not retry_rows:
+        print(f"No unsuccessful terminal tasks to retry for {job_name}.")
+        return 0
+
+    print(f"Retrying {len(retry_rows)} task(s) for {job_name}:")
+    for row in retry_rows:
+        print(f"  task {row['task_id']}: {row['state']}")
+
+    task_ids = [row["task_id"] for row in retry_rows]
+    for offset in range(0, len(task_ids), RETRY_BATCH_LIMIT):
+        array_spec = format_array_spec(task_ids[offset : offset + RETRY_BATCH_LIMIT])
+        cmd = [
+            "sbatch",
+            f"--array={array_spec}",
+            f"--partition={partition}",
+            f"--time={time_limit}",
+            f"--mem={mem}",
+            f"--cpus-per-task={cpus_per_task}",
+            str(saved_script),
+        ]
+        print("Submitting retry:")
+        print(" ".join(cmd))
+        subprocess.run(cmd, check=True)
+    return 0
+
+
 # ==========================================
 # 2. Command-line overrides and job name
 # ==========================================
@@ -73,7 +315,32 @@ parser.add_argument(
         "results/data/jaxqsofit/OLD_RUN_NAME/all and freshly fit the rest."
     ),
 )
+parser.add_argument(
+    "--retry",
+    metavar="FULL_JOB_NAME",
+    default="",
+    help=(
+        "Resubmit only the latest unsuccessful terminal tasks for an existing "
+        "spectrum-fit job while preserving its original task and chunk IDs."
+    ),
+)
 cli_args = parser.parse_args()
+
+retry_job_name = cli_args.retry.strip()
+fresh_run_options = ("--description", "--fit-script", "--resume")
+fresh_run_option_was_explicit = any(
+    arg == option or arg.startswith(f"{option}=")
+    for arg in sys.argv[1:]
+    for option in fresh_run_options
+)
+if retry_job_name:
+    if fresh_run_option_was_explicit:
+        parser.error("--retry cannot be combined with fresh-run options")
+    try:
+        retry_job_name = normalize_job_name(retry_job_name, "--retry")
+    except ValueError as exc:
+        parser.error(str(exc))
+    raise SystemExit(retry_unsuccessful_tasks(retry_job_name))
 
 fit_script = cli_args.fit_script
 resume_run_name = cli_args.resume.strip()
