@@ -350,8 +350,9 @@ def run_svi_warm_start(model, rng_key, *, num_steps, learning_rate, progress_bar
 
     if progress_bar:
         final_loss = jnp.array(jnp.nan, dtype=jnp.float64)
+        update = jax.jit(svi.update)
         for _ in tqdm(range(int(num_steps)), desc="SVI warm-start", leave=False):
-            svi_state, final_loss = svi.update(svi_state)
+            svi_state, final_loss = update(svi_state)
     else:
         def body_fn(_, carry):
             state, _ = carry
