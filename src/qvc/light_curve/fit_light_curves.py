@@ -3556,7 +3556,16 @@ def make_lc(
     mags_stds = np.empty(B)
     for i in range(B):
         m = band_idx == i
-        mu, mu_err = inverse_variance_weighted_mean(all_mags[m], all_magerrs[m])
+        reference_mags = data.get("psf_fraction_reference_mags_by_band", {})
+        reference_magerrs = data.get("psf_fraction_reference_magerrs_by_band", {})
+        if (
+            bool(data.get("psf_constant_flux_corrected", False))
+            and np.isfinite(reference_mags.get(bands[i], np.nan))
+        ):
+            mu = float(reference_mags[bands[i]])
+            mu_err = float(reference_magerrs.get(bands[i], np.nan))
+        else:
+            mu, mu_err = inverse_variance_weighted_mean(all_mags[m], all_magerrs[m])
         sd = np.nanstd(all_mags[m]) if np.any(m) else np.nan
         mags_means[i] = mu
         mags_mean_errs[i] = mu_err
@@ -3591,6 +3600,30 @@ def make_lc(
         "cadence_err": data["cadence_err"],
         "number_points": data["number_points"],
     }
+    fraction_values = np.asarray(
+        [data.get(f"f_AGN_psf_{band}", np.nan) for band in bands],
+        dtype=float,
+    )
+    fraction_errors = np.asarray(
+        [data.get(f"f_AGN_psf_{band}_err", np.nan) for band in bands],
+        dtype=float,
+    )
+    if bool(data.get("psf_constant_flux_corrected", False)):
+        valid_fractions = (
+            np.isfinite(fraction_values)
+            & (fraction_values > 0.0)
+            & (fraction_values <= 1.0)
+            & np.isfinite(fraction_errors)
+            & (fraction_errors >= 0.0)
+        )
+        if not np.all(valid_fractions):
+            invalid_bands = [band for band, valid in zip(bands, valid_fractions) if not valid]
+            raise ValueError(
+                "Missing or invalid native PSF AGN fraction/uncertainty for fitted band(s): "
+                + ", ".join(invalid_bands)
+            )
+        out["agn_fraction_by_band"] = fraction_values
+        out["agn_fraction_err_by_band"] = fraction_errors
     out.update(compute_variability_metrics_for_cleaned_lc(out))
 
     if inject_fake:
@@ -4100,6 +4133,17 @@ def build_single_object_model_mag_flux_linearized(
     else:
         log_igm_transmission_band = jnp.zeros(B, dtype=lam_rf.dtype)
     baseline_flux_by_band = reference_flux_from_mean_magnitudes(obj_dict["mags_means"])
+    use_agn_dilution = "agn_fraction_by_band" in obj_dict
+    agn_fraction_loc = jnp.asarray(
+        obj_dict.get("agn_fraction_by_band", np.ones(B)), dtype=lam_rf.dtype
+    )
+    agn_fraction_scale = jnp.asarray(
+        obj_dict.get("agn_fraction_err_by_band", np.zeros(B)), dtype=lam_rf.dtype
+    )
+    uncertain_agn_fraction_indices = np.flatnonzero(
+        np.asarray(obj_dict.get("agn_fraction_err_by_band", np.zeros(B)), dtype=float)
+        > 0.0
+    )
     if "y_relflux_fit" in obj_dict and "yerr_relflux_fit" in obj_dict:
         y_relflux = jnp.asarray(obj_dict["y_relflux_fit"], dtype=float)
         yerr_relflux = jnp.asarray(obj_dict["yerr_relflux_fit"], dtype=float)
@@ -4117,6 +4161,29 @@ def build_single_object_model_mag_flux_linearized(
     _, survey_offset_active_mask = _get_object_active_noise_calibration_masks(obj_dict, B)
 
     def model():
+        if use_agn_dilution:
+            agn_fraction_by_band = agn_fraction_loc
+            if len(uncertain_agn_fraction_indices) > 0:
+                uncertain_indices = jnp.asarray(
+                    uncertain_agn_fraction_indices, dtype=jnp.int32
+                )
+                uncertain_values = numpyro.sample(
+                    "_agn_fraction_uncertain",
+                    dist.TruncatedNormal(
+                        loc=agn_fraction_loc[uncertain_indices],
+                        scale=agn_fraction_scale[uncertain_indices],
+                        low=1.0e-8,
+                        high=1.0,
+                    ).to_event(1),
+                )
+                agn_fraction_by_band = agn_fraction_by_band.at[
+                    uncertain_indices
+                ].set(uncertain_values)
+            agn_fraction_by_band = numpyro.deterministic(
+                "agn_fraction_by_band", agn_fraction_by_band
+            )
+        else:
+            agn_fraction_by_band = jnp.ones(B, dtype=lam_rf.dtype)
         eta_sigma = numpyro.sample("eta_sigma", eta_sigma_prior())
         eta_tau = numpyro.sample("eta_tau", eta_tau_prior())
 
@@ -4268,6 +4335,7 @@ def build_single_object_model_mag_flux_linearized(
             lam_rf,
             lam_lya_rf=lam_lya_rf,
         )
+        params["agn_fraction_by_band"] = agn_fraction_by_band
         if drw_parameterization:
             params["tau_drw_band"] = (
                 params["tau_fast_band"] + params["tau_slow_band"]
@@ -4353,7 +4421,14 @@ def build_single_object_model_mag_flux_linearized(
                 else {"use_fast_solver": use_fast_solver}
             ),
         )
-        numpyro.factor("loglike", m.log_prob(params))
+        numpyro.factor(
+            "loglike",
+            (
+                m._log_prob_impl(params)
+                if drw_parameterization
+                else m.log_prob(params)
+            ),
+        )
 
     return model
 
@@ -4916,7 +4991,10 @@ def main():
         "--subtract_psf_constant_flux",
         action="store_true",
         default=False,
-        help="Subtract spectra-derived constant contaminating flux in PSF light curves before GP fitting.",
+        help=(
+            "Marginalize spectra-derived per-band PSF dilution in the GP likelihood; "
+            "the observed light curves are not modified."
+        ),
     )
     args = parser.parse_args()
     args = apply_resume_sample_save_policy(args)
@@ -4941,6 +5019,20 @@ def main():
     for obj in objs:
         obj["psf_constant_flux_n_bands_corrected"] = 0
         obj["psf_constant_flux_corrected"] = False
+        if args.subtract_psf_constant_flux:
+            band_order = list(obj["mags"].keys())
+            means = list(obj.get("mags_mean", []))
+            mean_errs = list(obj.get("mags_mean_err", []))
+            if len(means) != len(band_order):
+                raise ValueError(
+                    "PSF dilution requires the native light-curve mean magnitude "
+                    "for every band."
+                )
+            obj["psf_fraction_reference_mags_by_band"] = dict(zip(band_order, means))
+            obj["psf_fraction_reference_magerrs_by_band"] = {
+                band: mean_errs[index] if index < len(mean_errs) else np.nan
+                for index, band in enumerate(band_order)
+            }
     if args.rf_length_cut > 0:
         objs = cut_light_curve_restframe_window(
             objs,
@@ -5004,8 +5096,8 @@ def main():
         )
     if args.dho_drw_parameterization and args.fast_solver:
         raise ValueError(
-            "--dho_drw_parameterization currently uses the general matrix-"
-            "exponential solver and cannot be combined with --fast_solver."
+            "--dho_drw_parameterization uses its own exact block-diagonal "
+            "solver and cannot be combined with --fast_solver."
         )
     if args.fit_method == "ns":
         if NestedSampler is None:

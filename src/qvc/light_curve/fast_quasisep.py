@@ -26,7 +26,12 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-__all__ = ["fused_log_probability", "scan_loglike", "erlang_transitions"]
+__all__ = [
+    "block_diagonal_log_probability",
+    "erlang_transitions",
+    "fused_log_probability",
+    "scan_loglike",
+]
 
 
 def _driver_to_chain_columns_horner(dt, lam, e_lam, q, eq, sign, order):
@@ -260,6 +265,133 @@ def _scan_loglike_bwd(saved, g):
 
 
 scan_loglike.defvjp(_scan_loglike_fwd, _scan_loglike_bwd)
+
+
+def _block_diagonal_scan_loglike(d, p, q, transition, residual, ties):
+    """Quasisep likelihood scan retaining band-local transition blocks.
+
+    ``transition`` has shape ``(N, B, M, M)`` while the Cholesky auxiliary
+    covariance remains ``(B, M, B, M)`` because the common stochastic driver
+    correlates bands.  Propagation uses ``A_i F_ij A_j.T`` and therefore avoids
+    the extra factor of ``B`` incurred by dense ``(B*M)^3`` products.
+    """
+
+    n_band = int(p.shape[1])
+    block_size = int(p.shape[2])
+    covariance0 = jnp.zeros(
+        (n_band, block_size, n_band, block_size),
+        dtype=d.dtype,
+    )
+    solve0 = jnp.zeros((n_band, block_size), dtype=d.dtype)
+
+    def step(carry, data):
+        covariance, solve = carry
+        diagonal_k, p_k, q_k, transition_k, residual_k, tie_k = data
+        covariance_p = jnp.einsum("bicj,cj->bi", covariance, p_k)
+        schur = diagonal_k - jnp.vdot(p_k, covariance_p)
+        cholesky = jnp.sqrt(schur)
+
+        def full(_):
+            innovation = q_k - jnp.einsum(
+                "bij,bj->bi",
+                transition_k,
+                covariance_p,
+            )
+            weight = innovation / cholesky
+            covariance_next = jnp.einsum(
+                "bik,bkcl,cjl->bicj",
+                transition_k,
+                covariance,
+                transition_k,
+            ) + jnp.einsum("bi,cj->bicj", weight, weight)
+            propagated_solve = jnp.einsum(
+                "bij,bj->bi",
+                transition_k,
+                solve,
+            )
+            return weight, covariance_next, propagated_solve
+
+        def tied(_):
+            innovation = q_k - covariance_p
+            weight = innovation / cholesky
+            covariance_next = covariance + jnp.einsum(
+                "bi,cj->bicj",
+                weight,
+                weight,
+            )
+            return weight, covariance_next, solve
+
+        weight, covariance_next, propagated_solve = jax.lax.cond(
+            tie_k,
+            tied,
+            full,
+            None,
+        )
+        whitened = (
+            residual_k - jnp.vdot(p_k, solve)
+        ) / cholesky
+        solve_next = propagated_solve + weight * whitened
+        return (covariance_next, solve_next), (jnp.log(cholesky), whitened)
+
+    (_, _), (log_cholesky, whitened) = jax.lax.scan(
+        step,
+        (covariance0, solve0),
+        (d, p, q, transition, residual, ties),
+    )
+    return -jnp.sum(log_cholesky) - 0.5 * jnp.sum(jnp.square(whitened))
+
+
+def block_diagonal_log_probability(
+    kernel,
+    X,
+    diag,
+    residual,
+    *,
+    sort_time=None,
+):
+    """Exact GP likelihood exploiting independent per-band transition blocks."""
+
+    if not hasattr(kernel, "transition_matrices_from_dt"):
+        raise TypeError(
+            "block_diagonal_log_probability requires a batched transition hook"
+        )
+    stationary_covariance = kernel.stationary_covariance()
+    if sort_time is None:
+        time = X[0] if isinstance(X, (tuple, list)) else kernel.coord_to_sortable(X)
+    else:
+        time = sort_time
+    time = jnp.asarray(time)
+    dt = jnp.diff(time, prepend=time[0])
+    dense_transition = kernel.transition_matrices_from_dt(dt)
+    state_indices = kernel._band_state_indices()
+    transition = dense_transition[
+        :,
+        state_indices[:, :, None],
+        state_indices[:, None, :],
+    ]
+
+    observation = jax.vmap(kernel.observation_model)(X)
+    observation_blocks = observation[:, state_indices]
+    covariance_observation = observation @ stationary_covariance
+    d = jnp.sum(covariance_observation * observation, axis=1) + diag
+    p = jnp.einsum(
+        "nbi,nbij->nbj",
+        observation_blocks,
+        transition,
+    )
+    q = (observation @ stationary_covariance.T)[:, state_indices]
+    ties = jnp.concatenate(
+        [jnp.zeros((1,), dtype=bool), jnp.diff(time) == 0.0]
+    )
+    value = _block_diagonal_scan_loglike(
+        d,
+        p,
+        q,
+        transition,
+        residual,
+        ties,
+    )
+    return value - 0.5 * d.shape[0] * jnp.log(2 * jnp.pi)
 
 
 def fused_log_probability(kernel, X, diag, resid, *, sort_time=None):

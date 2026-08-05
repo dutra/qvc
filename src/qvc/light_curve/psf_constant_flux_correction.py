@@ -1,17 +1,11 @@
 #!/usr/bin/env python3
-"""Apply spectra-informed constant-flux corrections to PSF light curves.
+"""Attach spectra-informed PSF dilution constraints to light curves.
 
-This module approximates AGN-only light curves by:
-
-1. converting PSF magnitudes to relative flux,
-2. estimating a constant contaminating flux from a spectra-derived variable-AGN/total
-   bandpass fraction,
-3. subtracting that constant contaminating flux in flux space, and
-4. converting the corrected light curve back to magnitudes for the existing GP
-   pipeline.
-
-The required spectra inputs are per-bandpass PSF fractions saved as
-``f_AGN_psf_<band>``.
+The light-curve likelihood consumes the native ``f_AGN_psf_<band>`` values as
+shared per-band latent variables.  The observations are deliberately left in
+their original total-PSF-flux space: this avoids nonlinear pointwise
+subtraction, preserves every epoch, and permits the fraction uncertainty to be
+marginalized by the GP fit.
 """
 
 from __future__ import annotations
@@ -30,39 +24,9 @@ from qvc.light_curve.multiband_generate_lc import (
     populate_sdss_fields,
 )
 
-MAG_TO_FLUX_DERIV = 0.4 * np.log(10.0)
-
-
 def normalize_object_id(value) -> str:
     """Return a normalized object-id string for joins."""
     return str(value).strip()
-
-
-def mag_to_relative_flux(mag):
-    """Convert magnitudes to arbitrary relative flux units."""
-    mag = np.asarray(mag, dtype=float)
-    return 10.0 ** (-0.4 * mag)
-
-
-def magerr_to_relative_fluxerr(mag, magerr):
-    """Propagate magnitude errors to relative flux errors."""
-    mag = np.asarray(mag, dtype=float)
-    magerr = np.asarray(magerr, dtype=float)
-    flux = mag_to_relative_flux(mag)
-    return flux * MAG_TO_FLUX_DERIV * magerr
-
-
-def relative_flux_to_mag(flux):
-    """Convert arbitrary relative flux units back to magnitudes."""
-    flux = np.asarray(flux, dtype=float)
-    return -2.5 * np.log10(np.clip(flux, 1e-300, None))
-
-
-def relative_fluxerr_to_magerr(flux, fluxerr):
-    """Propagate relative-flux errors back to magnitude errors."""
-    flux = np.asarray(flux, dtype=float)
-    fluxerr = np.asarray(fluxerr, dtype=float)
-    return (2.5 / np.log(10.0)) * fluxerr / np.clip(flux, 1e-300, None)
 
 
 def load_spectra_psf_fractions(spectra_fit_csvs) -> dict[str, dict]:
@@ -82,9 +46,17 @@ def load_spectra_psf_fractions(spectra_fit_csvs) -> dict[str, dict]:
         ]
         if "object_id" not in usecols:
             raise ValueError(f"Spectra CSV {resolved} is missing required column 'object_id'.")
-        if not any(col.startswith("f_AGN_psf_") for col in usecols):
+        fraction_cols = [col for col in usecols if col.startswith("f_AGN_psf_")]
+        value_cols = [col for col in fraction_cols if not col.endswith("_err")]
+        if not value_cols:
             raise ValueError(
                 f"Spectra CSV {resolved} is missing required per-band columns 'f_AGN_psf_<band>'."
+            )
+        missing_errors = [f"{col}_err" for col in value_cols if f"{col}_err" not in usecols]
+        if missing_errors:
+            raise ValueError(
+                f"Spectra CSV {resolved} is missing fraction uncertainty column(s): "
+                + ", ".join(missing_errors)
             )
         frames.append(pd.read_csv(resolved, usecols=usecols))
 
@@ -107,110 +79,22 @@ def get_bandpass_agn_fraction(source: Mapping[str, object], band: str) -> tuple[
     band_err_key = f"{band_key}_err"
     val = source.get(band_key, np.nan)
     err = source.get(band_err_key, np.nan)
-    if np.isfinite(val):
+    if np.isfinite(val) and np.isfinite(err):
         val = float(val)
         if 0.0 < val <= 1.0:
-            err = float(err) if np.isfinite(err) else 0.0
+            err = float(err)
             err = float(np.clip(err, 0.0, 1.0))
-            return min(val, 0.999), err, band_key
+            return val, err, band_key
 
     return np.nan, np.nan, None
-
-
-def subtract_constant_flux_from_band(
-    mags,
-    magerrs,
-    agn_fraction,
-    agn_fraction_err=0.0,
-    *,
-    reference_stat: str = "mean",
-):
-    """Return a variable-AGN magnitude light curve from total PSF magnitudes.
-
-    ``agn_fraction_err`` is retained in the summary as a shared systematic
-    uncertainty. It is intentionally not added to the independent per-epoch
-    photometric errors.
-    """
-
-    mags = np.asarray(mags, dtype=float)
-    magerrs = np.asarray(magerrs, dtype=float)
-    finite = np.isfinite(mags) & np.isfinite(magerrs)
-    corrected_mags = mags.astype(float, copy=True)
-    corrected_magerrs = magerrs.astype(float, copy=True)
-
-    summary = {
-        "agn_fraction": np.nan,
-        "agn_fraction_err": np.nan,
-        "reference_total_flux": np.nan,
-        "constant_contaminant_flux": np.nan,
-        "n_points": int(np.sum(finite)),
-        "n_nonpositive_after_subtraction": 0,
-        "median_delta_mag": np.nan,
-    }
-
-    if (not np.isfinite(agn_fraction)) or agn_fraction <= 0.0 or np.sum(finite) == 0:
-        return corrected_mags, corrected_magerrs, summary
-
-    agn_fraction_err = float(agn_fraction_err) if np.isfinite(agn_fraction_err) else 0.0
-    agn_fraction_err = float(np.clip(agn_fraction_err, 0.0, 1.0))
-    total_flux = mag_to_relative_flux(mags[finite])
-    total_flux_err = magerr_to_relative_fluxerr(mags[finite], magerrs[finite])
-
-    if reference_stat == "mean":
-        reference_valid = (
-            np.isfinite(total_flux)
-            & np.isfinite(total_flux_err)
-            & (total_flux_err > 0.0)
-        )
-        if np.any(reference_valid):
-            reference_weights = 1.0 / np.square(total_flux_err[reference_valid])
-            reference_total_flux = float(
-                np.sum(reference_weights * total_flux[reference_valid])
-                / np.sum(reference_weights)
-            )
-        else:
-            reference_total_flux = np.nan
-    else:
-        reference_total_flux = float(np.nanmedian(total_flux))
-    if (not np.isfinite(reference_total_flux)) or reference_total_flux <= 0.0:
-        return corrected_mags, corrected_magerrs, summary
-
-    contaminant_flux = (1.0 - float(agn_fraction)) * reference_total_flux
-    agn_flux = total_flux - contaminant_flux
-    valid = agn_flux > 0.0
-
-    corrected = np.full(total_flux.shape, np.nan, dtype=float)
-    corrected_err = np.full(total_flux_err.shape, np.nan, dtype=float)
-    if np.any(valid):
-        corrected[valid] = relative_flux_to_mag(agn_flux[valid])
-        corrected_err[valid] = relative_fluxerr_to_magerr(
-            agn_flux[valid],
-            total_flux_err[valid],
-        )
-
-    corrected_mags[finite] = corrected
-    corrected_magerrs[finite] = corrected_err
-
-    summary.update(
-        {
-            "agn_fraction": float(agn_fraction),
-            "agn_fraction_err": agn_fraction_err,
-            "reference_total_flux": reference_total_flux,
-            "constant_contaminant_flux": contaminant_flux,
-            "n_nonpositive_after_subtraction": int(np.sum(~valid)),
-            "median_delta_mag": float(np.nanmedian(corrected - mags[finite])) if np.any(valid) else np.nan,
-        }
-    )
-    return corrected_mags, corrected_magerrs, summary
 
 
 def apply_constant_flux_correction_to_object(
     obj: Mapping[str, object],
     *,
     bands: Iterable[str] | None = None,
-    reference_stat: str = "mean",
 ):
-    """Return a corrected light-curve object plus a correction summary."""
+    """Return a light-curve object carrying strict per-band dilution priors."""
 
     corrected_obj = dict(obj)
     corrected_obj["times"] = {
@@ -232,8 +116,6 @@ def apply_constant_flux_correction_to_object(
     band_summaries = {}
     n_corrected_bands = 0
     n_missing_fraction_bands = 0
-    total_nonpositive = 0
-
     for band in bands:
         if band not in corrected_obj["mags"] or band not in lambda_pivot:
             continue
@@ -241,27 +123,33 @@ def apply_constant_flux_correction_to_object(
         if not np.isfinite(agn_fraction):
             n_missing_fraction_bands += 1
             continue
-        mags_new, magerrs_new, summary = subtract_constant_flux_from_band(
-            corrected_obj["mags"][band],
-            corrected_obj["magerrs"][band],
-            agn_fraction,
-            agn_fraction_err=agn_fraction_err,
-            reference_stat=reference_stat,
-        )
-        corrected_obj["mags"][band] = mags_new
-        corrected_obj["magerrs"][band] = magerrs_new
-        summary["source_key"] = source_key
+        summary = {
+            "agn_fraction": agn_fraction,
+            "agn_fraction_err": agn_fraction_err,
+            "source_key": source_key,
+            "n_points": int(np.sum(np.isfinite(corrected_obj["mags"][band]))),
+        }
         band_summaries[str(band)] = summary
         n_corrected_bands += 1
-        total_nonpositive += int(summary["n_nonpositive_after_subtraction"])
 
-    if "mags_mean" in corrected_obj:
-        corrected_obj["mags_mean"] = [
-            float(np.nanmean(corrected_obj["mags"][band]))
-            if np.any(np.isfinite(corrected_obj["mags"][band]))
-            else np.nan
-            for band in corrected_obj["mags"].keys()
-        ]
+    if n_corrected_bands > 0:
+        band_order = list(corrected_obj["mags"].keys())
+        if "psf_fraction_reference_mags_by_band" not in corrected_obj:
+            means = list(corrected_obj.get("mags_mean", []))
+            if len(means) != len(band_order):
+                raise ValueError(
+                    "PSF dilution requires the native light-curve mean "
+                    "magnitude for every band."
+                )
+            corrected_obj["psf_fraction_reference_mags_by_band"] = dict(
+                zip(band_order, means)
+            )
+        if "psf_fraction_reference_magerrs_by_band" not in corrected_obj:
+            mean_errors = list(corrected_obj.get("mags_mean_err", []))
+            corrected_obj["psf_fraction_reference_magerrs_by_band"] = {
+                band: mean_errors[index] if index < len(mean_errors) else np.nan
+                for index, band in enumerate(band_order)
+            }
 
     corrected_obj["psf_constant_flux_n_bands_corrected"] = int(n_corrected_bands)
     corrected_obj["psf_constant_flux_corrected"] = bool(n_corrected_bands > 0)
@@ -271,7 +159,6 @@ def apply_constant_flux_correction_to_object(
         "object_id": normalize_object_id(obj.get("object_id")),
         "n_corrected_bands": n_corrected_bands,
         "n_missing_fraction_bands": n_missing_fraction_bands,
-        "n_nonpositive_after_subtraction": total_nonpositive,
     }
     return corrected_obj, object_summary
 
@@ -281,9 +168,8 @@ def apply_constant_flux_correction_to_objects(
     *,
     spectra_fit_csvs,
     progress_bar: bool = False,
-    reference_stat: str = "mean",
 ):
-    """Apply spectra-informed constant-flux subtraction to a list of objects."""
+    """Attach spectra-informed dilution constraints to a list of objects."""
 
     spectra_rows = load_spectra_psf_fractions(spectra_fit_csvs)
     corrected_objs = []
@@ -293,14 +179,11 @@ def apply_constant_flux_correction_to_objects(
         "n_objects_corrected": 0,
         "n_bands_corrected": 0,
         "n_missing_spectra": 0,
-        "n_nonpositive_after_subtraction": 0,
         "median_agn_fraction": np.nan,
-        "median_abs_delta_mag": np.nan,
         "per_band": {},
     }
 
     agn_fractions = []
-    delta_mags = []
     missing_spectra_object_ids = []
     zero_corrected_object_ids = []
 
@@ -318,53 +201,34 @@ def apply_constant_flux_correction_to_objects(
         merged.update(spectra_row)
         corrected_obj, object_summary = apply_constant_flux_correction_to_object(
             merged,
-            reference_stat=reference_stat,
         )
         corrected_objs.append(corrected_obj)
         summary["n_objects_with_spectra"] += 1
         if object_summary["n_corrected_bands"] > 0:
             summary["n_objects_corrected"] += 1
             summary["n_bands_corrected"] += int(object_summary["n_corrected_bands"])
-            summary["n_nonpositive_after_subtraction"] += int(
-                object_summary["n_nonpositive_after_subtraction"]
-            )
             for band_name, band_summary in corrected_obj["psf_constant_flux_band_summaries"].items():
                 band_name = str(band_name)
                 if np.isfinite(band_summary["agn_fraction"]):
                     agn_fractions.append(float(band_summary["agn_fraction"]))
-                if np.isfinite(band_summary["median_delta_mag"]):
-                    delta_mags.append(float(abs(band_summary["median_delta_mag"])))
                 stats = summary["per_band"].setdefault(
                     band_name,
                     {
                         "n_corrected": 0,
-                        "n_nonpositive_after_subtraction": 0,
                         "agn_fractions": [],
-                        "abs_delta_mags": [],
                     },
                 )
                 stats["n_corrected"] += 1
-                stats["n_nonpositive_after_subtraction"] += int(
-                    band_summary["n_nonpositive_after_subtraction"]
-                )
                 if np.isfinite(band_summary["agn_fraction"]):
                     stats["agn_fractions"].append(float(band_summary["agn_fraction"]))
-                if np.isfinite(band_summary["median_delta_mag"]):
-                    stats["abs_delta_mags"].append(float(abs(band_summary["median_delta_mag"])))
         else:
             zero_corrected_object_ids.append(oid)
 
     if agn_fractions:
         summary["median_agn_fraction"] = float(np.nanmedian(np.asarray(agn_fractions, dtype=float)))
-    if delta_mags:
-        summary["median_abs_delta_mag"] = float(np.nanmedian(np.asarray(delta_mags, dtype=float)))
     for stats in summary["per_band"].values():
         agn_vals = np.asarray(stats.pop("agn_fractions"), dtype=float)
-        delta_vals = np.asarray(stats.pop("abs_delta_mags"), dtype=float)
         stats["median_agn_fraction"] = float(np.nanmedian(agn_vals)) if agn_vals.size > 0 else np.nan
-        stats["median_abs_delta_mag"] = (
-            float(np.nanmedian(delta_vals)) if delta_vals.size > 0 else np.nan
-        )
 
     if missing_spectra_object_ids or zero_corrected_object_ids:
         msg_parts = [
@@ -394,46 +258,29 @@ def print_constant_flux_correction_summary(summary):
     print(f"  objects corrected: {summary['n_objects_corrected']}")
     print(f"  bands corrected: {summary['n_bands_corrected']}")
     print(f"  objects missing spectra fractions: {summary['n_missing_spectra']}")
-    print(
-        "  points driven non-positive after subtraction: "
-        f"{summary['n_nonpositive_after_subtraction']}"
-    )
+    print("  observations modified before fitting: 0")
     if np.isfinite(summary["median_agn_fraction"]):
         print(f"  median retained AGN fraction: {summary['median_agn_fraction']:.3f}")
-    if np.isfinite(summary["median_abs_delta_mag"]):
-        print(f"  median |Δmag| after correction: {summary['median_abs_delta_mag']:.3f}")
     if summary["per_band"]:
         print("  per-band corrections:")
         for band in sorted(summary["per_band"]):
             stats = summary["per_band"][band]
             line = (
                 f"    {band}: n={stats['n_corrected']}, "
-                f"median retained AGN fraction={stats['median_agn_fraction']:.3f}, "
-                f"median |Δmag|={stats['median_abs_delta_mag']:.3f}, "
-                f"nonpositive={stats['n_nonpositive_after_subtraction']}"
+                f"median variable-AGN fraction={stats['median_agn_fraction']:.3f}"
             )
             print(line)
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Apply spectra-driven constant-flux subtraction to PSF light curves.",
+        description="Attach spectra-driven PSF dilution priors to light curves.",
     )
     parser.add_argument("--spectra_fit_csv", nargs="+", required=True, help="Spectra-fit CSV file(s).")
     parser.add_argument("--filter_object_id", nargs="+", default=None, help="Optional object IDs to inspect.")
     parser.add_argument("--N", type=int, default=None, help="Optional object count limit.")
     parser.add_argument("--skip", type=int, default=None, help="Optional number of objects to skip.")
     parser.add_argument("--progress", action="store_true", help="Show a progress bar.")
-    parser.add_argument(
-        "--reference_stat",
-        choices=("median", "mean"),
-        default="mean",
-        help=(
-            "Statistic used to anchor the constant contaminating flux. "
-            "'mean' is an inverse-variance-weighted flux mean after the "
-            "loader's photometric outlier rejection."
-        ),
-    )
     args = parser.parse_args()
 
     objs = concat_light_curves(
@@ -447,10 +294,9 @@ def main():
         objs,
         spectra_fit_csvs=args.spectra_fit_csv,
         progress_bar=args.progress,
-        reference_stat=args.reference_stat,
     )
     print_constant_flux_correction_summary(summary)
-    print(f"Loaded {len(objs)} objects, corrected {len(corrected)} objects.")
+    print(f"Loaded {len(objs)} objects; attached priors to {len(corrected)} objects.")
 
 
 if __name__ == "__main__":

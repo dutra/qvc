@@ -541,6 +541,8 @@ def test_carma21_numpyro_model_trace_materializes_likelihood_and_uv_outputs():
         "mags_means": np.array([20.0, 20.0]),
         "bands": ["g", "r"],
         "survey_names": ("sdss", "ps1", "ztf"),
+        "agn_fraction_by_band": np.array([0.55, 0.75]),
+        "agn_fraction_err_by_band": np.array([0.0, 0.08]),
     }
     model = build_single_object_model_mag_flux_linearized(
         obj,
@@ -559,10 +561,12 @@ def test_carma21_numpyro_model_trace_materializes_likelihood_and_uv_outputs():
         "log_tau_uv",
         "log_tau_perturb_uv",
         "tau_perturb",
+        "agn_fraction_by_band",
         "loglike",
     ):
         assert key in sites
         assert np.all(np.isfinite(np.asarray(sites[key]["value"])))
+    assert np.asarray(sites["agn_fraction_by_band"]["value"])[0] == pytest.approx(0.55)
 
 
 def test_flux_line_ratio_offsets_include_static_igm_transmission():
@@ -776,6 +780,51 @@ def test_make_lc_centers_with_inverse_variance_weighted_mean():
     assert np.isclose(lc["mags_mean_errs"][0], 1.0 / np.sqrt(125.0))
     g_values = np.asarray(lc["y"])[np.asarray(lc["band_idx"]) == 0]
     np.testing.assert_allclose(g_values, [-0.2, 0.8])
+
+
+def test_make_lc_preserves_aligned_psf_dilution_priors():
+    obj = _make_object(z=1.0)
+    obj["psf_constant_flux_corrected"] = True
+    for band, fraction, error in zip("ugriz", [0.4, 0.5, 0.6, 0.7, 0.8], [0.04] * 5):
+        obj[f"f_AGN_psf_{band}"] = fraction
+        obj[f"f_AGN_psf_{band}_err"] = error
+
+    lc = make_lc(obj, bands=["u", "g", "r", "i", "z"], drop_band_lyman_alpha=False)
+
+    assert lc["bands"] == ["u", "g", "r", "i"]
+    np.testing.assert_allclose(lc["agn_fraction_by_band"], [0.4, 0.5, 0.6, 0.7])
+    np.testing.assert_allclose(lc["agn_fraction_err_by_band"], [0.04] * 4)
+
+
+def test_make_lc_uses_the_sed_fraction_reference_after_time_cut():
+    obj = _make_object(z=1.0)
+    obj["psf_constant_flux_corrected"] = True
+    obj["psf_fraction_reference_mags_by_band"] = {
+        band: 19.5 for band in "ugriz"
+    }
+    obj["psf_fraction_reference_magerrs_by_band"] = {
+        band: 0.02 for band in "ugriz"
+    }
+    for band in "ugriz":
+        obj[f"f_AGN_psf_{band}"] = 0.6
+        obj[f"f_AGN_psf_{band}_err"] = 0.05
+
+    lc = make_lc(obj, bands=["g", "r", "i", "z"], drop_band_lyman_alpha=False)
+
+    assert lc["mags_means"][0] == pytest.approx(19.5)
+    assert lc["mags_mean_errs"][0] == pytest.approx(0.02)
+    g_values = np.asarray(lc["y"])[np.asarray(lc["band_idx"]) == 0]
+    np.testing.assert_allclose(g_values, np.asarray(obj["mags"]["g"]) - 19.5)
+
+
+def test_make_lc_rejects_missing_dilution_prior_for_retained_band():
+    obj = _make_object(z=1.0)
+    obj["psf_constant_flux_corrected"] = True
+    obj["f_AGN_psf_g"] = 0.5
+    obj["f_AGN_psf_g_err"] = 0.05
+
+    with pytest.raises(ValueError, match="fitted band.*u, r, i"):
+        make_lc(obj, bands=["u", "g", "r", "i", "z"], drop_band_lyman_alpha=False)
 
 
 def test_make_lc_can_hard_drop_lya_affected_bands():
