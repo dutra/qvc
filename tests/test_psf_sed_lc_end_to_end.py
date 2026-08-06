@@ -164,12 +164,11 @@ def test_joint_posterior_csv_reaches_lc_likelihood_without_flux_mutation(
         log_jitter_mean=np.full((4, 3), np.log(0.03)),
     )
     sites = trace(seed(model, jax.random.PRNGKey(0))).get_trace()
-    fraction_prior = sites["_agn_fraction_uncertain"]["fn"]
-    normal_prior = fraction_prior.base_dist.base_dist
-    np.testing.assert_allclose(np.asarray(normal_prior.loc), 0.5)
+    assert "_agn_fraction_uncertain" not in sites
+    assert sites["agn_fraction_by_band"]["type"] == "deterministic"
     np.testing.assert_allclose(
-        np.asarray(normal_prior.scale),
-        lc["agn_fraction_err_by_band"],
+        np.asarray(sites["agn_fraction_by_band"]["value"]),
+        lc["agn_fraction_by_band"],
     )
     loglike = sites["loglike"]
     assert np.isfinite(float(loglike["fn"].log_prob(loglike["value"])))

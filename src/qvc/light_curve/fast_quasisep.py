@@ -394,12 +394,26 @@ def block_diagonal_log_probability(
     return value - 0.5 * d.shape[0] * jnp.log(2 * jnp.pi)
 
 
-def fused_log_probability(kernel, X, diag, resid, *, sort_time=None):
+def fused_log_probability(
+    kernel,
+    X,
+    diag,
+    resid,
+    *,
+    sort_time=None,
+    transition_nonzero_indices=None,
+):
     """Exact quasisep GP log-likelihood in one fused pass.
 
     Equivalent to ``GaussianProcess(kernel, X, diag=diag,
     assume_sorted=True).log_probability(resid + mean)`` for a zero-mean GP on
     ``resid``; pass ``resid = y - mean``.
+
+    ``transition_nonzero_indices``, when supplied, must be the sorted, unique
+    positions of every nonzero gap in the sorted ``sort_time`` array. The
+    static tuple avoids constructing transition matrices for exact ties; a
+    runtime mask check returns NaN if the tuple is stale for the supplied
+    epochs.
     """
     Pinf = kernel.stationary_covariance()
     if sort_time is None:
@@ -408,8 +422,36 @@ def fused_log_probability(kernel, X, diag, resid, *, sort_time=None):
         t = sort_time
     t = jnp.asarray(t)
     dt = jnp.diff(t, prepend=t[0])
+    transition_indices_valid = None
 
-    if hasattr(kernel, "_driver_to_chain_columns"):
+    if hasattr(kernel, "transition_matrices_from_dt"):
+        if transition_nonzero_indices is None:
+            a = kernel.transition_matrices_from_dt(dt)
+        else:
+            nonzero = tuple(int(index) for index in transition_nonzero_indices)
+            if tuple(sorted(set(nonzero))) != nonzero:
+                raise ValueError(
+                    "transition_nonzero_indices must be sorted and unique"
+                )
+            if any(index < 0 or index >= dt.shape[0] for index in nonzero):
+                raise ValueError(
+                    "transition_nonzero_indices contains an out-of-range index"
+                )
+            identity = jnp.eye(Pinf.shape[0], dtype=Pinf.dtype)
+            a = jnp.broadcast_to(identity, (dt.shape[0],) + identity.shape)
+            supplied_nonzero_mask = jnp.zeros(dt.shape, dtype=bool)
+            if nonzero:
+                indices = jnp.asarray(nonzero, dtype=jnp.int32)
+                computed = kernel.transition_matrices_from_dt(dt[indices])
+                a = a.at[indices].set(computed)
+                supplied_nonzero_mask = supplied_nonzero_mask.at[indices].set(True)
+            # The tuple is a static compilation hint. Fail closed if a caller
+            # reuses it with different epochs instead of silently evaluating a
+            # likelihood with identity transitions at nonzero time gaps.
+            transition_indices_valid = jnp.all(
+                supplied_nonzero_mask == (dt != 0.0)
+            )
+    elif hasattr(kernel, "_driver_to_chain_columns"):
         a = erlang_transitions(kernel, dt)
     else:
         Xp = jax.tree_util.tree_map(lambda v: jnp.append(v[0], v[:-1]), X)
@@ -426,5 +468,7 @@ def fused_log_probability(kernel, X, diag, resid, *, sort_time=None):
 
     ties = jnp.concatenate([jnp.zeros((1,), bool), jnp.diff(t) == 0.0])
     value = scan_loglike(d, p, q, a, resid, ties)
+    if transition_indices_valid is not None:
+        value = jnp.where(transition_indices_valid, value, jnp.nan)
     n = d.shape[0]
     return value - 0.5 * n * jnp.log(2 * jnp.pi)

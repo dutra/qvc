@@ -3087,6 +3087,7 @@ def sample_flux_line_latent_params(
             low=log_amp_ratio_blr_low,
             high=log_amp_ratio_blr_high,
         )
+
     if mean_prior_dist is None:
         mean_prior_dist = mean_prior()
     log_jitter = _sample_log_jitter_grid(log_jitter_mean, log_jitter_active_mask)
@@ -4323,15 +4324,8 @@ def build_single_object_model_mag_flux_linearized(
         log_igm_transmission_band = jnp.zeros(B, dtype=lam_rf.dtype)
     baseline_flux_by_band = reference_flux_from_mean_magnitudes(obj_dict["mags_means"])
     use_agn_dilution = "agn_fraction_by_band" in obj_dict
-    agn_fraction_loc = jnp.asarray(
+    fixed_agn_fraction_by_band = jnp.asarray(
         obj_dict.get("agn_fraction_by_band", np.ones(B)), dtype=lam_rf.dtype
-    )
-    agn_fraction_scale = jnp.asarray(
-        obj_dict.get("agn_fraction_err_by_band", np.zeros(B)), dtype=lam_rf.dtype
-    )
-    uncertain_agn_fraction_indices = np.flatnonzero(
-        np.asarray(obj_dict.get("agn_fraction_err_by_band", np.zeros(B)), dtype=float)
-        > 0.0
     )
     if "y_relflux_fit" in obj_dict and "yerr_relflux_fit" in obj_dict:
         y_relflux = jnp.asarray(obj_dict["y_relflux_fit"], dtype=float)
@@ -4340,6 +4334,14 @@ def build_single_object_model_mag_flux_linearized(
         y_relflux = mag_residual_to_relative_flux(y)
         yerr_relflux = magerr_residual_to_relative_fluxerr(y, yerr)
     bidx_np = np.asarray(bidx)
+    transition_nonzero_indices = None
+    if drw_parameterization:
+        sorted_time_np = np.sort(np.asarray(t, dtype=float))
+        transition_nonzero_indices = tuple(
+            np.flatnonzero(
+                np.diff(sorted_time_np, prepend=sorted_time_np[0]) != 0.0
+            ).tolist()
+        )
     yerr_relflux_np = np.asarray(yerr_relflux, dtype=float)
     log_jitter_mean_relflux, log_jitter_active_mask_relflux = _compute_log_jitter_mean_grid(
         yerr_relflux_np,
@@ -4351,25 +4353,8 @@ def build_single_object_model_mag_flux_linearized(
 
     def model():
         if use_agn_dilution:
-            agn_fraction_by_band = agn_fraction_loc
-            if len(uncertain_agn_fraction_indices) > 0:
-                uncertain_indices = jnp.asarray(
-                    uncertain_agn_fraction_indices, dtype=jnp.int32
-                )
-                uncertain_values = numpyro.sample(
-                    "_agn_fraction_uncertain",
-                    dist.TruncatedNormal(
-                        loc=agn_fraction_loc[uncertain_indices],
-                        scale=agn_fraction_scale[uncertain_indices],
-                        low=1.0e-8,
-                        high=1.0,
-                    ).to_event(1),
-                )
-                agn_fraction_by_band = agn_fraction_by_band.at[
-                    uncertain_indices
-                ].set(uncertain_values)
             agn_fraction_by_band = numpyro.deterministic(
-                "agn_fraction_by_band", agn_fraction_by_band
+                "agn_fraction_by_band", fixed_agn_fraction_by_band
             )
         else:
             agn_fraction_by_band = jnp.ones(B, dtype=lam_rf.dtype)
@@ -4605,7 +4590,7 @@ def build_single_object_model_mag_flux_linearized(
             has_jitter=has_jitter,
             erlang_order=erlang_order,
             **(
-                {}
+                {"transition_nonzero_indices": transition_nonzero_indices}
                 if drw_parameterization
                 else {"use_fast_solver": use_fast_solver}
             ),
@@ -5244,8 +5229,8 @@ def main():
         action="store_true",
         default=False,
         help=(
-            "Marginalize spectra-derived per-band PSF dilution in the GP likelihood; "
-            "the observed light curves are not modified."
+            "Apply spectra-derived per-band PSF dilution as fixed factors in the "
+            "GP likelihood; the observed light curves are not modified."
         ),
     )
     args = parser.parse_args()

@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Attach spectra-informed PSF dilution constraints to light curves.
+"""Attach spectra-informed fixed PSF dilution factors to light curves.
 
-The light-curve likelihood consumes the native ``f_AGN_psf_<band>`` values as
-shared per-band latent variables.  The observations are deliberately left in
-their original total-PSF-flux space: this avoids nonlinear pointwise
-subtraction, preserves every epoch, and permits the fraction uncertainty to be
-marginalized by the GP fit.
+The light-curve likelihood consumes the central ``f_AGN_psf_<band>`` values as
+fixed per-band factors. Fraction uncertainties are retained as provenance
+metadata but are not sampled. The observations remain in their original
+total-PSF-flux space, avoiding nonlinear pointwise subtraction and preserving
+every epoch.
 """
 
 from __future__ import annotations
@@ -94,7 +94,7 @@ def apply_constant_flux_correction_to_object(
     *,
     bands: Iterable[str] | None = None,
 ):
-    """Return a light-curve object carrying strict per-band dilution priors."""
+    """Return a light-curve object carrying fixed per-band dilution factors."""
 
     corrected_obj = dict(obj)
     corrected_obj["times"] = {
@@ -169,7 +169,7 @@ def apply_constant_flux_correction_to_objects(
     spectra_fit_csvs,
     progress_bar: bool = False,
 ):
-    """Attach spectra-informed dilution constraints to a list of objects."""
+    """Attach spectra-informed fixed dilution factors to a list of objects."""
 
     spectra_rows = load_spectra_psf_fractions(spectra_fit_csvs)
     corrected_objs = []
@@ -274,7 +274,7 @@ def print_constant_flux_correction_summary(summary):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Attach spectra-driven PSF dilution priors to light curves.",
+        description="Attach spectra-driven fixed PSF dilution factors to light curves.",
     )
     parser.add_argument("--spectra_fit_csv", nargs="+", required=True, help="Spectra-fit CSV file(s).")
     parser.add_argument("--filter_object_id", nargs="+", default=None, help="Optional object IDs to inspect.")
@@ -296,7 +296,7 @@ def main():
         progress_bar=args.progress,
     )
     print_constant_flux_correction_summary(summary)
-    print(f"Loaded {len(objs)} objects; attached priors to {len(corrected)} objects.")
+    print(f"Loaded {len(objs)} objects; attached fixed factors to {len(corrected)} objects.")
 
 
 if __name__ == "__main__":

@@ -1182,10 +1182,12 @@ def diagnostics_for_per_chain_samples(
 
     ignore_keys = ('bwb_beta', 'f_host', 'log_tau_fake', 'log_sigma_fake',
                    'gate_log_temp', 'lmc_sep_raw', 'lmc_sep_left_raw', 'lmc_sep_right_raw', 'lmc_span_raw',
-                    'lmc_mu_raw', 'lmc_delta_raw', 'lmc_sep', 'lmc_sep_left', 'lmc_sep_right', 'lmc_span',)
+                    'lmc_mu_raw', 'lmc_delta_raw', 'lmc_sep', 'lmc_sep_left', 'lmc_sep_right', 'lmc_span',
+                    'agn_fraction_by_band',)
+    ignore_prefixes = ('agn_fraction_by_band_',)
 
     for k, v in flattened_per_chain.items():
-        if k in ignore_keys:
+        if k in ignore_keys or k.startswith(ignore_prefixes):
             continue
         v = np.asarray(v)
         if v.ndim != 2:

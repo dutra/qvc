@@ -20,7 +20,7 @@ from qvc.light_curve.psf_constant_flux_correction import (
 )
 
 
-def test_apply_constant_flux_correction_attaches_prior_without_modifying_observations():
+def test_apply_constant_flux_correction_attaches_fixed_factor_without_modifying_observations():
     obj = {
         "object_id": "123",
         "z": 1.0,

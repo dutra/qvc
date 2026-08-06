@@ -20,8 +20,8 @@ from qvc.light_curve.multiband_model_dho_blr_erlang import (
 POSITIVE_FLUX_N_SIGMA = 4.0
 POSITIVE_FLUX_MARGIN_SOFTNESS = 0.01
 _CRITICAL_DAMPING_X = 1e-4
-_PHI_SERIES_RADIUS = 4.0
-_PHI_SERIES_TERMS = 32
+_PHI_SERIES_RADIUS = 1.0
+_PHI_SERIES_TERMS = 20
 _CRITICAL_TAYLOR_TERMS = 2
 
 
@@ -500,6 +500,16 @@ class ErlangResponseIntegratedDHOQS(ErlangResponseDHOQS):
 class ContiBLRErlangIntegratedDHOModel(ContiBLRErlangRelativeFluxModel):
     """Relative-flux wrapper for the integrated-timescale DHO kernel."""
 
+    transition_nonzero_indices: tuple[int, ...] | None
+
+    def __init__(self, *args, transition_nonzero_indices=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.transition_nonzero_indices = (
+            None
+            if transition_nonzero_indices is None
+            else tuple(int(index) for index in transition_nonzero_indices)
+        )
+
     def _build_kernel(self, params):
         tau_drw = jnp.asarray(params["tau_drw_band"])
         amp_cont = jnp.asarray(
@@ -604,6 +614,24 @@ class ContiBLRErlangIntegratedDHOModel(ContiBLRErlangRelativeFluxModel):
         # Keep the boundary differentiable so AutoNormal SVI can initialize;
         # at the chosen softness, even a 0.1 flux-ratio violation costs about
         # 50 log-probability units per affected band.
+        from qvc.light_curve.fast_quasisep import fused_log_probability
+
+        means, coordinates, diagonal, indices = self._likelihood_inputs(params)
+        mean = jax.vmap(means)(coordinates)
+        residual = self._observed_y_sorted(params, indices) - mean
+        likelihood = fused_log_probability(
+            self._build_kernel(params),
+            coordinates,
+            diagonal,
+            residual,
+            sort_time=coordinates[0],
+            transition_nonzero_indices=self.transition_nonzero_indices,
+        )
+        return likelihood + self.positive_flux_log_penalty(params)
+
+    def _block_log_prob_impl(self, params):
+        """Forward-mode-compatible reference objective for standalone use."""
+
         from qvc.light_curve.fast_quasisep import block_diagonal_log_probability
 
         means, coordinates, diagonal, indices = self._likelihood_inputs(params)
@@ -620,9 +648,9 @@ class ContiBLRErlangIntegratedDHOModel(ContiBLRErlangRelativeFluxModel):
 
     @eqx.filter_jit
     def log_prob(self, params):
-        """Standalone compiled objective used by diagnostics and tests."""
+        """Standalone objective retaining forward-mode autodiff support."""
 
-        return self._log_prob_impl(params)
+        return self._block_log_prob_impl(params)
 
 
 def make_multiband_dho_blr_flux_linearized_erlang_drw_model(
@@ -636,6 +664,7 @@ def make_multiband_dho_blr_flux_linearized_erlang_drw_model(
     zero_mean=False,
     has_jitter=True,
     erlang_order=DEFAULT_ERLANG_ORDER,
+    transition_nonzero_indices=None,
 ):
     """Construct the all-regime CARMA(2,1) plus causal Erlang response model."""
 
@@ -660,6 +689,7 @@ def make_multiband_dho_blr_flux_linearized_erlang_drw_model(
         survey_idx=survey_idx,
         erlang_order=erlang_order,
         use_fast_solver=False,
+        transition_nonzero_indices=transition_nonzero_indices,
     )
 
 

@@ -3,6 +3,7 @@ import math
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 from scipy.linalg import expm
 from tinygp import GaussianProcess
 
@@ -19,6 +20,7 @@ from qvc.light_curve.dho_drw_parameterization import (
 )
 from qvc.light_curve.multiband_model_dho_blr_erlang_drw import (
     ErlangResponseIntegratedDHOQS,
+    _scaled_phi_pairs,
     make_multiband_dho_blr_flux_linearized_erlang_drw_model,
 )
 
@@ -164,6 +166,68 @@ def _reference_integrated_erlang_transitions(kernel, gaps):
     return jax.vmap(one)(gaps)
 
 
+def _reference_scaled_phi_pairs(inputs, max_order, series_terms=64):
+    """High-order real-pair series oracle for the scaled phi functions."""
+
+    z_real, z_imag, decay = inputs
+    coefficients = jnp.asarray(
+        [
+            [
+                1.0 / math.factorial(power + order)
+                for order in range(1, int(max_order) + 1)
+            ]
+            for power in range(int(series_terms))
+        ],
+        dtype=z_real.dtype,
+    )
+    powers = jnp.arange(int(series_terms))
+    z = z_real + 1j * z_imag
+    values = jnp.exp(-decay) * jnp.sum(
+        z ** powers[:, None] * coefficients,
+        axis=0,
+    )
+    return jnp.concatenate([jnp.real(values), jnp.imag(values)])
+
+
+def test_scaled_phi_branch_boundary_matches_high_order_values_and_jacobians():
+    for erlang_order in (1, 3, 5, 8):
+        max_order = erlang_order + 5
+
+        def candidate(inputs):
+            real, imag = _scaled_phi_pairs(
+                inputs[0], inputs[1], inputs[2], max_order
+            )
+            return jnp.concatenate([real, imag])
+
+        def reference(inputs):
+            return _reference_scaled_phi_pairs(inputs, max_order)
+
+        candidate_jacobian = jax.jit(jax.jacrev(candidate))
+        reference_jacobian = jax.jit(jax.jacrev(reference))
+        for radius, angle, decay in (
+            (0.0, 0.0, 0.2),
+            (1.0 - 1.0e-9, 0.0, 0.2),
+            (1.0, 0.7, 2.0),
+            (1.0 + 1.0e-9, 0.0, 0.2),
+            (1.0 + 1.0e-9, 0.7, 2.0),
+        ):
+            inputs = jnp.asarray(
+                [radius * np.cos(angle), radius * np.sin(angle), decay]
+            )
+            np.testing.assert_allclose(
+                np.asarray(candidate(inputs)),
+                np.asarray(reference(inputs)),
+                rtol=2.0e-12,
+                atol=2.0e-13,
+            )
+            np.testing.assert_allclose(
+                np.asarray(candidate_jacobian(inputs)),
+                np.asarray(reference_jacobian(inputs)),
+                rtol=2.0e-11,
+                atol=2.0e-12,
+            )
+
+
 def test_integrated_erlang_structured_transitions_match_expm_and_gradients():
     gaps = jnp.asarray([0.0, 1e-10, 0.03, 3.0, 100.0, 1000.0])
     weights = jnp.sin(jnp.arange(gaps.size * 100, dtype=float)).reshape(
@@ -291,8 +355,8 @@ def test_integrated_erlang_transitions_match_expm_at_response_pole_collisions():
     )
 
 
-def test_integrated_erlang_block_likelihood_matches_tinygp_and_gradients():
-    epoch_times = jnp.asarray([0.0, 3.0, 20.0, 100.0])
+def test_integrated_erlang_fused_likelihood_matches_block_tinygp_and_gradients():
+    epoch_times = jnp.asarray([0.0, 1.0e-12, 3.0, 20.0, 100.0])
     times = jnp.repeat(epoch_times, 2)
     bands = jnp.tile(jnp.arange(2, dtype=jnp.int32), epoch_times.size)
     coordinates = (times, bands)
@@ -318,16 +382,86 @@ def test_integrated_erlang_block_likelihood_matches_tinygp_and_gradients():
             sort_time=times,
         )
 
+    def fused_objective(log_params):
+        kernel = _integrated_erlang_kernel_from_log_params(log_params)
+        return fast_quasisep.fused_log_probability(
+            kernel,
+            coordinates,
+            diagonal,
+            residual,
+            sort_time=times,
+        )
+
+    transition_nonzero_indices = tuple(
+        np.flatnonzero(
+            np.diff(np.asarray(times), prepend=float(times[0])) != 0.0
+        ).tolist()
+    )
+    assert 2 in transition_nonzero_indices
+
+    def compact_fused_objective(log_params):
+        kernel = _integrated_erlang_kernel_from_log_params(log_params)
+        return fast_quasisep.fused_log_probability(
+            kernel,
+            coordinates,
+            diagonal,
+            residual,
+            sort_time=times,
+            transition_nonzero_indices=transition_nonzero_indices,
+        )
+
     block_value_and_grad = jax.jit(jax.value_and_grad(block_objective))
+    fused_value_and_grad = jax.jit(jax.value_and_grad(fused_objective))
+    compact_fused_value_and_grad = jax.jit(
+        jax.value_and_grad(compact_fused_objective)
+    )
     reference_value_and_grad = jax.jit(
         jax.value_and_grad(reference_objective)
     )
-    for quality_factor in (0.2, 0.5, 2.0):
+    for quality_factor in (
+        0.05,
+        0.2,
+        0.49,
+        0.5 - 1e-8,
+        0.5,
+        0.5 + 1e-8,
+        0.51,
+        2.0,
+        3.0,
+    ):
         log_params = jnp.log(
             jnp.asarray([100.0, quality_factor, 0.02, 70.0])
         )
         block_value, block_gradient = block_value_and_grad(log_params)
+        fused_value, fused_gradient = fused_value_and_grad(log_params)
+        compact_fused_value, compact_fused_gradient = (
+            compact_fused_value_and_grad(log_params)
+        )
         reference_value, reference_gradient = reference_value_and_grad(log_params)
+        np.testing.assert_allclose(
+            np.asarray(compact_fused_value),
+            np.asarray(fused_value),
+            rtol=2e-10,
+            atol=2e-11,
+        )
+        np.testing.assert_allclose(
+            np.asarray(compact_fused_gradient),
+            np.asarray(fused_gradient),
+            rtol=2e-8,
+            atol=2e-9,
+        )
+        np.testing.assert_allclose(
+            np.asarray(fused_value),
+            np.asarray(block_value),
+            rtol=2e-10,
+            atol=2e-11,
+        )
+        np.testing.assert_allclose(
+            np.asarray(fused_gradient),
+            np.asarray(block_gradient),
+            rtol=2e-8,
+            atol=2e-9,
+        )
         np.testing.assert_allclose(
             np.asarray(block_value),
             np.asarray(reference_value),
@@ -340,6 +474,161 @@ def test_integrated_erlang_block_likelihood_matches_tinygp_and_gradients():
             rtol=2e-8,
             atol=2e-9,
         )
+
+
+def test_compact_fused_likelihood_handles_all_zero_gaps():
+    times = jnp.zeros(4)
+    bands = jnp.asarray([0, 1, 0, 1], dtype=jnp.int32)
+    coordinates = (times, bands)
+    diagonal = jnp.full(4, 0.02**2)
+    residual = jnp.asarray([0.01, -0.02, 0.03, -0.01])
+
+    def objective(log_params, compact):
+        kernel = _integrated_erlang_kernel_from_log_params(log_params)
+        return fast_quasisep.fused_log_probability(
+            kernel,
+            coordinates,
+            diagonal,
+            residual,
+            sort_time=times,
+            transition_nonzero_indices=() if compact else None,
+        )
+
+    log_params = jnp.log(jnp.asarray([100.0, 0.5, 0.02, 70.0]))
+    full = jax.jit(jax.value_and_grad(lambda value: objective(value, False)))(
+        log_params
+    )
+    compact = jax.jit(jax.value_and_grad(lambda value: objective(value, True)))(
+        log_params
+    )
+    np.testing.assert_allclose(
+        np.asarray(compact[0]), np.asarray(full[0]), rtol=2e-10, atol=2e-11
+    )
+    np.testing.assert_allclose(
+        np.asarray(compact[1]), np.asarray(full[1]), rtol=2e-8, atol=2e-9
+    )
+
+
+def test_compact_fused_likelihood_rejects_stale_or_invalid_indices():
+    times = jnp.asarray([0.0, 0.0, 1.0, 2.0])
+    bands = jnp.asarray([0, 1, 0, 1], dtype=jnp.int32)
+    coordinates = (times, bands)
+    diagonal = jnp.full(4, 0.02**2)
+    residual = jnp.asarray([0.01, -0.02, 0.03, -0.01])
+    kernel = _integrated_erlang_kernel_from_log_params(
+        jnp.log(jnp.asarray([100.0, 0.5, 0.02, 70.0]))
+    )
+
+    stale_value = jax.jit(
+        lambda: fast_quasisep.fused_log_probability(
+            kernel,
+            coordinates,
+            diagonal,
+            residual,
+            sort_time=times,
+            transition_nonzero_indices=(),
+        )
+    )()
+    assert jnp.isnan(stale_value)
+
+    with pytest.raises(ValueError, match="sorted and unique"):
+        fast_quasisep.fused_log_probability(
+            kernel,
+            coordinates,
+            diagonal,
+            residual,
+            sort_time=times,
+            transition_nonzero_indices=(2, 2),
+        )
+    for invalid_indices in ((-1, 2), (2, 4)):
+        with pytest.raises(ValueError, match="out-of-range"):
+            fast_quasisep.fused_log_probability(
+                kernel,
+                coordinates,
+                diagonal,
+                residual,
+                sort_time=times,
+                transition_nonzero_indices=invalid_indices,
+            )
+
+
+def test_compact_full_model_matches_block_solver_for_unsorted_tied_epochs():
+    times = jnp.asarray([2.0, 0.0, 1.0, 0.0, 2.0, 1.0 + 1e-12])
+    bands = jnp.asarray([1, 0, 1, 1, 0, 0], dtype=jnp.int32)
+    surveys = jnp.asarray([0, 1, 2, 0, 1, 2], dtype=jnp.int32)
+    observations = jnp.asarray([0.02, -0.01, 0.03, -0.02, 0.01, -0.015])
+    errors = jnp.asarray([0.02, 0.025, 0.018, 0.023, 0.021, 0.019])
+    sorted_times = np.sort(np.asarray(times))
+    transition_nonzero_indices = tuple(
+        np.flatnonzero(
+            np.diff(sorted_times, prepend=sorted_times[0]) != 0.0
+        ).tolist()
+    )
+    model = make_multiband_dho_blr_flux_linearized_erlang_drw_model(
+        (times, bands),
+        observations,
+        errors,
+        n_band=2,
+        survey_idx=surveys,
+        erlang_order=3,
+        transition_nonzero_indices=transition_nonzero_indices,
+    )
+
+    initial = jnp.concatenate(
+        [
+            jnp.log(jnp.asarray([80.0, 120.0])),
+            jnp.log(jnp.asarray([0.015, 0.025])),
+            jnp.log(jnp.asarray([0.6])),
+            jnp.log(jnp.asarray([60.0, 90.0])),
+            jnp.log(jnp.asarray([0.07, 0.09])),
+            jnp.log(jnp.asarray([0.015, 0.02])),
+            jnp.full(6, -8.0),
+            jnp.zeros(6),
+            jnp.asarray([0.01, -0.015]),
+            jnp.asarray([2e-4]),
+            jnp.asarray([1e-4, -1e-4]),
+            jnp.asarray([3.0, 4.0]),
+        ]
+    )
+
+    def unpack(value):
+        tau_drw = jnp.exp(value[0:2])
+        return {
+            "tau_drw_band": tau_drw,
+            "tau_perturb_band": tau_drw * jnp.exp(value[2:4]),
+            "quality_factor": jnp.exp(value[4]),
+            "lag_blr": jnp.exp(value[5:7]),
+            "amp_cont_relflux": jnp.exp(value[7:9]),
+            "amp_blr_relflux": jnp.exp(value[9:11]),
+            "log_jitter": value[11:17].reshape(2, 3),
+            "survey_delta_mag": value[17:23].reshape(2, 3),
+            "mean": value[23:25],
+            "linear_trend": value[25],
+            "linear_trend_band_offset": value[26:28],
+            "agn_fraction_by_band": jax.nn.sigmoid(value[28:30]),
+        }
+
+    def compact_objective(value):
+        return model._log_prob_impl(unpack(value))
+
+    def block_objective(value):
+        return model._block_log_prob_impl(unpack(value))
+
+    compact = jax.jit(jax.value_and_grad(compact_objective))(initial)
+    block = jax.jit(jax.value_and_grad(block_objective))(initial)
+    np.testing.assert_allclose(
+        np.asarray(compact[0]), np.asarray(block[0]), rtol=2e-10, atol=2e-11
+    )
+    np.testing.assert_allclose(
+        np.asarray(compact[1]), np.asarray(block[1]), rtol=2e-8, atol=2e-9
+    )
+
+    _, tangent = jax.jvp(
+        model.log_prob,
+        (unpack(initial),),
+        (unpack(jnp.ones_like(initial)),),
+    )
+    assert np.isfinite(float(tangent))
 
 
 def test_erlang_line_amplitude_is_stationary_response_rms_at_any_lag():

@@ -764,7 +764,12 @@ def test_carma21_numpyro_model_trace_materializes_likelihood_and_uv_outputs():
     ):
         assert key in sites
         assert np.all(np.isfinite(np.asarray(sites[key]["value"])))
-    assert np.asarray(sites["agn_fraction_by_band"]["value"])[0] == pytest.approx(0.55)
+    assert "_agn_fraction_uncertain" not in sites
+    assert sites["agn_fraction_by_band"]["type"] == "deterministic"
+    np.testing.assert_allclose(
+        np.asarray(sites["agn_fraction_by_band"]["value"]),
+        [0.55, 0.75],
+    )
 
 
 def test_flux_line_ratio_offsets_include_static_igm_transmission():
