@@ -4157,6 +4157,90 @@ def compute_hubble_chain_diagnostics(
     return diagnostics
 
 
+def print_hubble_convergence_diagnostics(object_id, diagnostics):
+    """Print Hubble-input R-hat/ESS values and available sampler health."""
+
+    def finite_scalar(key):
+        try:
+            value = np.asarray(diagnostics.get(key), dtype=float)
+        except (TypeError, ValueError):
+            return None
+        if value.ndim != 0:
+            return None
+        value = float(value)
+        return value if np.isfinite(value) else None
+
+    parameter_rows = (
+        ("log_sigma_uv", "log_sigma_uv_rhat", "log_sigma_uv_ess"),
+        ("log_tau_uv_rf", "log_tau_uv_rf_rhat", "log_tau_uv_rf_ess"),
+    )
+    parameter_values = [
+        (label, finite_scalar(rhat_key), finite_scalar(ess_key))
+        for label, rhat_key, ess_key in parameter_rows
+    ]
+    parameters_available = any(
+        rhat is not None or ess is not None for _, rhat, ess in parameter_values
+    )
+    if not parameters_available:
+        print(f"\n[{object_id}] Hubble-input convergence diagnostics: not available")
+    else:
+        n_chains_value = finite_scalar("sampler_nchains")
+        n_samples_value = finite_scalar("sampler_nsamp")
+        n_warmup_value = finite_scalar("sampler_nwarm")
+        n_chains = int(round(n_chains_value)) if n_chains_value is not None else None
+
+        context = []
+        if n_chains is not None:
+            chain_label = "1 chain" if n_chains == 1 else f"{n_chains} chains"
+            if n_samples_value is not None:
+                chain_label += f" x {int(round(n_samples_value))} draws"
+            context.append(chain_label)
+        if n_warmup_value is not None:
+            context.append(f"{int(round(n_warmup_value))} warmup")
+        context_body = ", ".join(context)
+        if n_chains == 1:
+            context_body += "; R-hat unavailable"
+        context_text = f" ({context_body})" if context_body else ""
+        print(f"\n[{object_id}] Hubble-input convergence diagnostics{context_text}:")
+
+        for label, rhat, ess in parameter_values:
+            rhat_text = "n/a" if rhat is None else f"{rhat:.3f}"
+            ess_text = "n/a" if ess is None else f"{ess:.1f}"
+            print(f"  {label}: R-hat={rhat_text}, ESS={ess_text}")
+
+    health_parts = []
+    accept_prob = finite_scalar("accept_prob")
+    target_accept = finite_scalar("sampler_target_accept")
+    if accept_prob is not None:
+        accept_text = f"accept={accept_prob:.3f}"
+        if target_accept is not None:
+            accept_text += f" (target={target_accept:.3f})"
+        health_parts.append(accept_text)
+
+    num_divergences = finite_scalar("num_divergences")
+    if num_divergences is not None:
+        health_parts.append(f"divergences={int(round(num_divergences))}")
+
+    min_step = finite_scalar("nuts_step_size_min")
+    if min_step is not None:
+        health_parts.append(f"min_step={min_step:.3g}")
+
+    median_steps = finite_scalar("nuts_num_steps_median")
+    if median_steps is not None:
+        health_parts.append(f"median_steps={median_steps:.1f}")
+
+    max_depth_fraction = finite_scalar("nuts_max_tree_depth_fraction_worst_chain")
+    if max_depth_fraction is not None:
+        max_depth_text = f"max_depth={100.0 * max_depth_fraction:.1f}% worst chain"
+        max_tree_depth = finite_scalar("sampler_max_tree_depth")
+        if max_tree_depth is not None:
+            max_depth_text += f" (depth={int(round(max_tree_depth))})"
+        health_parts.append(max_depth_text)
+
+    if health_parts:
+        print("  NUTS health: " + ", ".join(health_parts))
+
+
 _SAMPLE_FILE_DIAGNOSTIC_KEYS = frozenset(
     {
         "log_sigma_uv_rhat",
@@ -5548,6 +5632,7 @@ def main():
                 "sampler_target_accept": float(args.target_accept),
                 "sampler_max_tree_depth": int(args.max_tree_depth),
             }
+            print_hubble_convergence_diagnostics(oid, diagnostics)
             if args.model_variant == "mag_flux_linearized_erlang":
                 fit_obj_for_display = flux_linearized_fit_obj if flux_linearized_fit_obj is not None else obj
                 y_relflux_display, yerr_relflux_display = (

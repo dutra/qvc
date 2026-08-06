@@ -279,6 +279,82 @@ def test_hubble_chain_diagnostics_remain_available_for_one_chain():
     assert np.isfinite(diagnostics["log_tau_uv_rf_ess"])
 
 
+def test_print_hubble_convergence_diagnostics_includes_multichain_and_one_chain_health(
+    capsys,
+):
+    assert hasattr(fit_lc, "print_hubble_convergence_diagnostics")
+
+    fit_lc.print_hubble_convergence_diagnostics(
+        "multi",
+        {
+            "log_sigma_uv_rhat": 1.026,
+            "log_sigma_uv_ess": 236.9,
+            "log_tau_uv_rf_rhat": 1.028,
+            "log_tau_uv_rf_ess": 179.0,
+            "sampler_nchains": 4,
+            "sampler_nsamp": 250,
+            "sampler_nwarm": 250,
+            "sampler_target_accept": 0.7,
+            "sampler_max_tree_depth": 8,
+            "accept_prob": 0.724,
+            "num_divergences": 24,
+            "nuts_step_size_min": 0.135,
+            "nuts_num_steps_median": 63.0,
+            "nuts_max_tree_depth_fraction_worst_chain": 0.076,
+        },
+    )
+    multi_output = capsys.readouterr().out
+    assert "[multi] Hubble-input convergence diagnostics (4 chains x 250 draws, 250 warmup):" in multi_output
+    assert "log_sigma_uv: R-hat=1.026, ESS=236.9" in multi_output
+    assert "log_tau_uv_rf: R-hat=1.028, ESS=179.0" in multi_output
+    assert (
+        "NUTS health: accept=0.724 (target=0.700), divergences=24, "
+        "min_step=0.135, median_steps=63.0, "
+        "max_depth=7.6% worst chain (depth=8)"
+    ) in multi_output
+
+    fit_lc.print_hubble_convergence_diagnostics(
+        "single",
+        {
+            "log_sigma_uv_rhat": np.nan,
+            "log_sigma_uv_ess": 83.2,
+            "log_tau_uv_rf_rhat": np.nan,
+            "log_tau_uv_rf_ess": 71.4,
+            "sampler_nchains": 1,
+            "sampler_nsamp": 250,
+            "sampler_nwarm": 250,
+            "accept_prob": 0.81,
+            "num_divergences": 0,
+        },
+    )
+    single_output = capsys.readouterr().out
+    assert "1 chain x 250 draws, 250 warmup; R-hat unavailable" in single_output
+    assert "log_sigma_uv: R-hat=n/a, ESS=83.2" in single_output
+    assert "log_tau_uv_rf: R-hat=n/a, ESS=71.4" in single_output
+    assert "NUTS health: accept=0.810, divergences=0" in single_output
+    assert "nan" not in single_output.lower()
+    assert "converged=" not in single_output.lower()
+    assert "pass=" not in single_output.lower()
+
+    fit_lc.print_hubble_convergence_diagnostics("missing", {})
+    missing_output = capsys.readouterr().out
+    assert "[missing] Hubble-input convergence diagnostics: not available" in missing_output
+
+    fit_lc.print_hubble_convergence_diagnostics(
+        "short",
+        {
+            "sampler_nchains": 1,
+            "sampler_nsamp": 2,
+            "accept_prob": 0.8,
+            "num_divergences": 1,
+            "nuts_step_size_min": 0.02,
+        },
+    )
+    short_output = capsys.readouterr().out
+    assert "[short] Hubble-input convergence diagnostics: not available" in short_output
+    assert "NUTS health: accept=0.800, divergences=1, min_step=0.02" in short_output
+
+
 def test_summarize_nuts_extra_fields_tracks_step_size_and_tree_depth():
     diagnostics = summarize_nuts_extra_fields(
         {
