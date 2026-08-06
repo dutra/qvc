@@ -2,6 +2,7 @@
 import argparse
 import math
 import os
+import re
 import shlex
 import sys
 import subprocess
@@ -102,7 +103,7 @@ def get_git_short_hash() -> str:
 
 def make_run_stamp() -> str:
     now = datetime.now()
-    return f"{now.strftime('%b').lower()}{now.day}_{now.strftime('%I%M%p').lower()}"
+    return now.strftime("%b%d_%I%M%p").lower()
 
 
 def normalize_run_description(description: str | None) -> str | None:
@@ -246,6 +247,21 @@ def build_run_prefix(
     return f"{run_stamp}_{git_hash}_{job_description}"
 
 
+def build_fit_job_name(prefix: str) -> str:
+    """Build the scheduler name while keeping the result prefix unchanged."""
+
+    match = re.fullmatch(
+        r"(?P<date>[a-z]{3}\d{2})_(?P<time>\d{4}(?:am|pm))_(?P<identity>.+)",
+        prefix,
+    )
+    if match is None:
+        return f"lcfit_{prefix}"
+    return (
+        f"{match.group('date')}_{match.group('time')}_"
+        f"lcfit_{match.group('identity')}"
+    )
+
+
 def build_sbatch_script(
     prefix: str,
     job: JobConfig,
@@ -256,6 +272,7 @@ def build_sbatch_script(
 ) -> str:
     log_dir = LOG_ROOT / prefix
     log_pattern = log_dir / f"{prefix}-%A_%a-%j.txt"
+    job_name = build_fit_job_name(prefix)
     if args.fit != "chisq" and object_ids_path is None:
         raise ValueError(f"object_ids_path is required for fit mode {args.fit!r}.")
     filter_csv = str(REPO_ROOT / chisq_csv) if chisq_csv is not None else ""
@@ -297,7 +314,7 @@ def build_sbatch_script(
     base_flags.extend(job.extra_flags)
     base_flags.extend(getattr(args, "extra_fit_flags", ()))
     return f"""#!/bin/bash
-#SBATCH --job-name=multiband_{prefix}
+#SBATCH --job-name={job_name}
 #SBATCH --output={log_pattern}
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task={args.ncores}

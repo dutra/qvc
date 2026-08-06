@@ -353,7 +353,7 @@ if resume_run_name:
 description = re.sub(
     r"[^A-Za-z0-9.-]+", "_", cli_args.description
 ).strip("_.-")
-date_hour = datetime.now().strftime("%b%d_%H%M").lower()
+date_hour = datetime.now().strftime("%b%d_%I%M%p").lower()
 git_commit = subprocess.run(
     ["git", "rev-parse", "--short", "HEAD"],
     cwd=REPO_ROOT,
@@ -361,7 +361,7 @@ git_commit = subprocess.run(
     capture_output=True,
     text=True,
 ).stdout.strip()
-job_name_parts = [date_hour, git_commit]
+job_name_parts = [date_hour, "spectrafit", git_commit]
 if description:
     job_name_parts.append(description)
 job_name = "_".join(job_name_parts)

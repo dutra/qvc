@@ -160,16 +160,17 @@ def test_sfitspectra_uses_backend_specific_arguments():
     assert "SED photometry input not found" in source
 
 
-def test_sfitspectra_accepts_cli_overrides_and_builds_timestamped_git_job_name():
+def test_sfitspectra_accepts_cli_overrides_and_builds_timestamped_spectrafit_job_name():
     source = SCRIPT.read_text(encoding="utf-8")
 
     assert 'parser.add_argument(\n    "--description",' in source
     assert 'parser.add_argument(\n    "--fit-script",' in source
     assert "fit_script = cli_args.fit_script" in source
     assert 'parser.add_argument(\n    "--sed-photometry-path",' not in source
-    assert 'datetime.now().strftime("%b%d_%H%M").lower()' in source
+    assert 'datetime.now().strftime("%b%d_%I%M%p").lower()' in source
     assert '["git", "rev-parse", "--short", "HEAD"]' in source
     assert 'r"[^A-Za-z0-9.-]+", "_", cli_args.description' in source
+    assert 'job_name_parts = [date_hour, "spectrafit", git_commit]' in source
     assert 'job_name = "_".join(job_name_parts)' in source
     assert "prefix = job_name" in source
     assert 'output_dir = f"results/data/jaxqsofit/{prefix}"' in source
