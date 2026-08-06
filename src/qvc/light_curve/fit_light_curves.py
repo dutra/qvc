@@ -58,7 +58,11 @@ numpyro.set_host_device_count(num_cores)
 numpyro.enable_x64()
 numpyro.enable_validation(False)
 import numpyro.distributions as dist
-from numpyro.diagnostics import print_summary as numpyro_print_summary
+from numpyro.diagnostics import (
+    effective_sample_size as numpyro_effective_sample_size,
+    print_summary as numpyro_print_summary,
+    split_gelman_rubin as numpyro_split_gelman_rubin,
+)
 from numpyro.handlers import seed, substitute, trace
 from numpyro.infer import MCMC, NUTS, SVI, Trace_ELBO
 from numpyro.infer.autoguide import AutoNormal
@@ -4088,6 +4092,107 @@ def add_model_prediction_params(samples, lam_rf, *, model_variant=None, lam_lya_
     return out
 
 
+def compute_hubble_chain_diagnostics(
+    samples_per_chain,
+    lam_rf,
+    *,
+    z,
+    model_variant=None,
+    lam_lya_rf=None,
+):
+    """Return raw diagnostics for the two LC inputs to the Hubble fit.
+
+    The Hubble likelihood consumes ``log_sigma_uv`` and ``log_tau_uv_rf``.
+    Both are affine transforms of the natural-log observer-frame prediction
+    samples, so their split-Rhat and ESS are computed from the true chain/draw
+    axes before posterior samples are flattened. Rhat is left unavailable for
+    a single chain rather than presenting a split-half check as independent-
+    chain evidence; ESS and the NUTS health summaries remain available.
+    """
+
+    predicted = dict(samples_per_chain)
+    if "log_sigma_uv" not in predicted or "log_tau_uv" not in predicted:
+        predicted = add_model_prediction_params(
+            predicted,
+            lam_rf,
+            model_variant=model_variant,
+            lam_lya_rf=lam_lya_rf,
+        )
+
+    missing = {"log_sigma_uv", "log_tau_uv"} - set(predicted)
+    if missing:
+        raise KeyError(
+            "Missing per-chain predictions required for Hubble diagnostics: "
+            f"{sorted(missing)}"
+        )
+
+    hubble_samples = {
+        "log_sigma_uv": np.asarray(predicted["log_sigma_uv"], dtype=float)
+        / np.log(10.0),
+        "log_tau_uv_rf": np.asarray(predicted["log_tau_uv"], dtype=float)
+        / np.log(10.0)
+        - np.log10(1.0 + float(z)),
+    }
+    shapes = {name: value.shape for name, value in hubble_samples.items()}
+    if any(value.ndim != 2 for value in hubble_samples.values()):
+        raise ValueError(
+            "Hubble diagnostics require (n_chains, n_draws) samples; "
+            f"got {shapes}."
+        )
+    if len(set(shapes.values())) != 1:
+        raise ValueError(f"Hubble diagnostic sample shapes do not match: {shapes}.")
+
+    n_chains, n_draws = next(iter(shapes.values()))
+    diagnostics = {}
+    for name, values in hubble_samples.items():
+        rhat = np.nan
+        ess = np.nan
+        if n_chains >= 2 and n_draws >= 4:
+            rhat = float(np.asarray(numpyro_split_gelman_rubin(values)))
+        if n_draws >= 4:
+            ess = float(np.asarray(numpyro_effective_sample_size(values)))
+        diagnostics[f"{name}_rhat"] = rhat
+        diagnostics[f"{name}_ess"] = ess
+
+    return diagnostics
+
+
+_SAMPLE_FILE_DIAGNOSTIC_KEYS = frozenset(
+    {
+        "log_sigma_uv_rhat",
+        "log_sigma_uv_ess",
+        "log_tau_uv_rf_rhat",
+        "log_tau_uv_rf_ess",
+        "accept_prob",
+        "num_divergences",
+        "nuts_step_size_min",
+        "nuts_num_steps_median",
+        "nuts_max_tree_depth_fraction_worst_chain",
+        "elapsed_sec",
+        "sampler_nwarm",
+        "sampler_nsamp",
+        "sampler_nchains",
+        "sampler_target_accept",
+        "sampler_max_tree_depth",
+    }
+)
+
+
+def numeric_scalar_diagnostics(diagnostics):
+    """Select the compact scalar diagnostic set stored in sample HDF5."""
+
+    scalar = {}
+    for key in _SAMPLE_FILE_DIAGNOSTIC_KEYS & diagnostics.keys():
+        value = diagnostics[key]
+        try:
+            array = np.asarray(value, dtype=float)
+        except (TypeError, ValueError):
+            continue
+        if array.ndim == 0:
+            scalar[key] = float(array)
+    return scalar
+
+
 
 def build_single_object_model_mag_flux_linearized(
     obj_dict,
@@ -4450,6 +4555,59 @@ def _trim_per_chain_samples(samples_per_chain, n_draws):
     return {k: np.asarray(v)[:, :n_draws] for k, v in samples_per_chain.items()}
 
 
+def summarize_nuts_extra_fields(extra_fields, *, max_tree_depth):
+    """Reduce grouped NumPyro NUTS fields to persistent scalar diagnostics."""
+
+    diagnostics = {}
+    accept_prob = np.asarray(extra_fields.get("accept_prob", []), dtype=float)
+    if accept_prob.size:
+        diagnostics["accept_prob"] = float(np.nanmean(accept_prob))
+    else:
+        diagnostics["accept_prob"] = np.nan
+
+    diverging = np.asarray(extra_fields.get("diverging", []), dtype=bool)
+    diagnostics["num_divergences"] = (
+        int(np.sum(diverging)) if diverging.size else np.nan
+    )
+
+    step_size_by_draw = np.asarray(
+        extra_fields.get("adapt_state.step_size", []), dtype=float
+    )
+    step_size = step_size_by_draw[
+        np.isfinite(step_size_by_draw) & (step_size_by_draw > 0.0)
+    ]
+    if step_size.size:
+        diagnostics["nuts_step_size_min"] = float(np.min(step_size))
+
+    num_steps_by_draw = np.asarray(extra_fields.get("num_steps", []), dtype=float)
+    valid_num_steps = np.isfinite(num_steps_by_draw) & (num_steps_by_draw >= 1.0)
+    num_steps = num_steps_by_draw[valid_num_steps]
+    if num_steps.size:
+        max_tree_depth = int(max_tree_depth)
+        min_steps_at_max_depth = 1 << (max_tree_depth - 1)
+        diagnostics["nuts_num_steps_median"] = float(np.median(num_steps))
+        if num_steps_by_draw.ndim >= 2:
+            valid_draws_by_chain = np.sum(valid_num_steps, axis=1)
+            max_depth_fraction_by_chain = np.divide(
+                np.sum(
+                    valid_num_steps
+                    & (num_steps_by_draw >= min_steps_at_max_depth),
+                    axis=1,
+                ),
+                valid_draws_by_chain,
+                out=np.full(valid_draws_by_chain.shape, np.nan, dtype=float),
+                where=valid_draws_by_chain > 0,
+            )
+            diagnostics["nuts_max_tree_depth_fraction_worst_chain"] = float(
+                np.nanmax(max_depth_fraction_by_chain)
+            )
+        else:
+            diagnostics["nuts_max_tree_depth_fraction_worst_chain"] = float(
+                np.mean(num_steps >= min_steps_at_max_depth)
+            )
+    return diagnostics
+
+
 def _run_nuts_inference(
     numpyro_model,
     rng_key,
@@ -4482,19 +4640,29 @@ def _run_nuts_inference(
         progress_bar=progress_bar,
     )
     t0 = time.perf_counter()
-    mcmc.run(rng_key, extra_fields=("accept_prob", "diverging"))
-    elapsed = time.perf_counter() - t0
+    mcmc.run(
+        rng_key,
+        extra_fields=(
+            "accept_prob",
+            "diverging",
+            "num_steps",
+            "adapt_state.step_size",
+        ),
+    )
     samples_flat = tree_map(lambda x: np.asarray(device_get(x)), mcmc.get_samples(group_by_chain=False))
     samples_per_chain = tree_map(lambda x: np.asarray(device_get(x)), mcmc.get_samples(group_by_chain=True))
     extra_fields = {
         k: np.asarray(device_get(v))
-        for k, v in mcmc.get_extra_fields().items()
+        for k, v in mcmc.get_extra_fields(group_by_chain=True).items()
     }
-    diagnostics = {
-        "accept_prob": float(np.mean(extra_fields["accept_prob"])) if "accept_prob" in extra_fields else np.nan,
-        "num_divergences": int(np.sum(extra_fields["diverging"])) if "diverging" in extra_fields else 0,
-        "elapsed_sec": float(elapsed),
-    }
+    # JAX dispatch is asynchronous. Measure through the host materialization
+    # above so elapsed time includes compilation and all NUTS transitions.
+    elapsed = time.perf_counter() - t0
+    diagnostics = summarize_nuts_extra_fields(
+        extra_fields,
+        max_tree_depth=max_tree_depth,
+    )
+    diagnostics["elapsed_sec"] = float(elapsed)
     return samples_flat, samples_per_chain, diagnostics
 
 
@@ -4648,6 +4816,7 @@ def run_iterated_mag_flux_linearized_inference(
         "flux_linearized_refinement_strategy": refinement_strategy,
         "flux_linearized_nuts_runs": 0,
     }
+    final_nuts_diagnostics = {}
 
     model_kwargs = dict(
         lam_lya_rf=lam_lya_rf,
@@ -4712,15 +4881,11 @@ def run_iterated_mag_flux_linearized_inference(
                 init_strategy=init_strategy,
             )
             diagnostics["flux_linearized_nuts_runs"] += 1
-            diagnostics[f"flux_linearized_iter{iter_idx + 1}_accept_prob"] = iter_diag[
-                "accept_prob"
-            ]
-            diagnostics[f"flux_linearized_iter{iter_idx + 1}_num_divergences"] = iter_diag[
-                "num_divergences"
-            ]
-            diagnostics[f"flux_linearized_iter{iter_idx + 1}_elapsed_sec"] = iter_diag[
-                "elapsed_sec"
-            ]
+            final_nuts_diagnostics = dict(iter_diag)
+            for key in ("accept_prob", "num_divergences", "elapsed_sec"):
+                diagnostics[f"flux_linearized_iter{iter_idx + 1}_{key}"] = iter_diag[
+                    key
+                ]
             prediction_params = _posterior_median_params(
                 add_model_prediction_params(
                     samples_flat,
@@ -4794,6 +4959,9 @@ def run_iterated_mag_flux_linearized_inference(
         diagnostics["elapsed_sec"]
         + diagnostics["flux_linearized_svi_elapsed_sec"]
     )
+    for key, value in final_nuts_diagnostics.items():
+        if key not in {"elapsed_sec", "accept_prob", "num_divergences"}:
+            diagnostics[key] = value
     return samples_flat, samples_per_chain, fit_obj, diagnostics
 
 
@@ -5364,8 +5532,22 @@ def main():
                     survey_names=obj["survey_names"],
                 )
                 diagnostics = diagnostics_for_per_chain_samples(obj_samples_per_chain_flatten_per_band)
+            if samples_per_chain is not None:
+                diagnostics |= compute_hubble_chain_diagnostics(
+                    samples_per_chain,
+                    lam_rf,
+                    z=float(obj["z"]),
+                    model_variant=args.model_variant,
+                    lam_lya_rf=lam_lya_rf,
+                )
             diagnostics |= stage_diagnostics
-
+            diagnostics |= {
+                "sampler_nwarm": int(args.nwarm),
+                "sampler_nsamp": int(args.nsamp),
+                "sampler_nchains": int(args.nchains),
+                "sampler_target_accept": float(args.target_accept),
+                "sampler_max_tree_depth": int(args.max_tree_depth),
+            }
             if args.model_variant == "mag_flux_linearized_erlang":
                 fit_obj_for_display = flux_linearized_fit_obj if flux_linearized_fit_obj is not None else obj
                 y_relflux_display, yerr_relflux_display = (
@@ -5440,6 +5622,7 @@ def main():
                     obj_flat_samples,
                     oid,
                     scalar_diagnostics={
+                        **numeric_scalar_diagnostics(diagnostics),
                         "loo_chi2_eff": loo_residual_result["loo_chi2_eff"],
                         "loo_rms": loo_residual_result["loo_rms"],
                         **ls_fixed_diagnostics,

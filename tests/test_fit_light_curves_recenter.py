@@ -53,6 +53,9 @@ from qvc.light_curve.fit_light_curves import (
     posterior_median_mean_function,
     binned_loo_residual_pair_correlation,
     compute_loo_short_lag_residual_diagnostics,
+    compute_hubble_chain_diagnostics,
+    numeric_scalar_diagnostics,
+    summarize_nuts_extra_fields,
 )
 from qvc.light_curve.multiband_model_dho_blr_erlang import (
     make_multiband_dho_blr_flux_linearized_erlang_model,
@@ -218,6 +221,120 @@ def test_svi_then_nuts_refinement_requires_svi_backend():
         )
 
 
+def test_hubble_chain_diagnostics_match_hubble_observable_transforms():
+    rng = np.random.default_rng(8)
+    log_sigma_uv = rng.normal(-1.3, 0.2, size=(4, 500))
+    log_tau_uv = rng.normal(5.4, 0.3, size=(4, 500))
+
+    diagnostics = compute_hubble_chain_diagnostics(
+        {
+            "log_sigma_uv": log_sigma_uv,
+            "log_tau_uv": log_tau_uv,
+        },
+        np.array([1800.0, 2500.0, 3500.0]),
+        z=1.7,
+        model_variant="mag_flux_linearized_erlang",
+    )
+
+    expected_sigma = float(
+        np.asarray(fit_lc.numpyro_split_gelman_rubin(log_sigma_uv / np.log(10.0)))
+    )
+    expected_tau = float(
+        np.asarray(
+            fit_lc.numpyro_split_gelman_rubin(
+                log_tau_uv / np.log(10.0) - np.log10(2.7)
+            )
+        )
+    )
+    assert diagnostics["log_sigma_uv_rhat"] == expected_sigma
+    assert diagnostics["log_tau_uv_rf_rhat"] == expected_tau
+    assert set(diagnostics) == {
+        "log_sigma_uv_rhat",
+        "log_sigma_uv_ess",
+        "log_tau_uv_rf_rhat",
+        "log_tau_uv_rf_ess",
+    }
+
+
+def test_hubble_chain_diagnostics_remain_available_for_one_chain():
+    rng = np.random.default_rng(9)
+    log_sigma_uv = rng.normal(-1.3, 0.2, size=(1, 500))
+    log_tau_uv = rng.normal(5.4, 0.3, size=(1, 500))
+
+    diagnostics = compute_hubble_chain_diagnostics(
+        {
+            "log_sigma_uv": log_sigma_uv,
+            "log_tau_uv": log_tau_uv,
+        },
+        np.array([1800.0, 2500.0, 3500.0]),
+        z=1.7,
+        model_variant="mag_flux_linearized_erlang",
+    )
+
+    assert np.isnan(diagnostics["log_sigma_uv_rhat"])
+    assert np.isnan(diagnostics["log_tau_uv_rf_rhat"])
+    assert diagnostics["log_sigma_uv_ess"] == float(
+        np.asarray(fit_lc.numpyro_effective_sample_size(log_sigma_uv / np.log(10.0)))
+    )
+    assert np.isfinite(diagnostics["log_tau_uv_rf_ess"])
+
+
+def test_summarize_nuts_extra_fields_tracks_step_size_and_tree_depth():
+    diagnostics = summarize_nuts_extra_fields(
+        {
+            "accept_prob": np.array([[0.8, 0.9], [0.7, 0.8]]),
+            "diverging": np.array([[False, True], [False, False]]),
+            "adapt_state.step_size": np.array([[0.01, 0.01], [0.02, 0.02]]),
+            "num_steps": np.array([[1, 255], [63, 128]]),
+        },
+        max_tree_depth=8,
+    )
+
+    assert diagnostics["nuts_step_size_min"] == 0.01
+    assert diagnostics["nuts_num_steps_median"] == 95.5
+    assert diagnostics["nuts_max_tree_depth_fraction_worst_chain"] == 0.5
+    assert diagnostics["num_divergences"] == 1
+    assert set(diagnostics) == {
+        "accept_prob",
+        "num_divergences",
+        "nuts_step_size_min",
+        "nuts_num_steps_median",
+        "nuts_max_tree_depth_fraction_worst_chain",
+    }
+
+
+def test_summarize_nuts_extra_fields_supports_one_chain():
+    diagnostics = summarize_nuts_extra_fields(
+        {
+            "accept_prob": np.array([[0.8, 0.9, 0.85, 0.75]]),
+            "diverging": np.array([[False, False, True, False]]),
+            "adapt_state.step_size": np.full((1, 4), 0.012),
+            "num_steps": np.array([[63, 128, 255, 31]]),
+        },
+        max_tree_depth=8,
+    )
+
+    assert np.isclose(diagnostics.pop("accept_prob"), 0.825)
+    assert diagnostics == {
+        "num_divergences": 1,
+        "nuts_step_size_min": 0.012,
+        "nuts_num_steps_median": 95.5,
+        "nuts_max_tree_depth_fraction_worst_chain": 0.5,
+    }
+
+
+def test_numeric_scalar_diagnostics_excludes_arrays_and_strings():
+    assert numeric_scalar_diagnostics(
+        {
+            "log_sigma_uv_rhat": np.float64(1.002),
+            "sampler_nchains": 1,
+            "unselected_numeric_diagnostic": 123.0,
+            "acf": np.array([1.0, 0.5]),
+            "strategy": "svi_then_nuts",
+        }
+    ) == {"log_sigma_uv_rhat": 1.002, "sampler_nchains": 1.0}
+
+
 def test_model_params_at_values_materializes_deterministic_sites():
     def model():
         latent = fit_lc.numpyro.sample("latent", fit_lc.dist.Normal(0.0, 1.0))
@@ -370,8 +487,13 @@ def test_save_obj_samples_to_hdf5_writes_loo_scalar_diagnostics(monkeypatch, tmp
     output_path = tmp_path / "results/samples/loo_test/object_run.h5"
     with h5py.File(output_path, "r") as hdf:
         np.testing.assert_array_equal(hdf["lag_blr"][:], np.array([1.0, 2.0]))
-        assert hdf["loo_chi2_eff"][()] == 1.25
-        assert np.isclose(hdf["loo_rms"][()], np.sqrt(1.25))
+        assert hdf["_diagnostics/loo_chi2_eff"][()] == 1.25
+        assert np.isclose(hdf["_diagnostics/loo_rms"][()], np.sqrt(1.25))
+
+    loaded = multiband_fit_utils.load_obj_samples_from_hdf5(
+        file_path=str(output_path)
+    )
+    assert set(loaded) == {"lag_blr"}
 
 
 def test_apply_resume_sample_save_policy_disables_sample_saving_on_resume():
