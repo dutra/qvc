@@ -1,10 +1,12 @@
 import subprocess
 import sys
+from datetime import datetime as real_datetime
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+import hpc_scripts.sfitlc as sfitlc
 from hpc_scripts.sfitlc import JobConfig, build_sbatch_script, parse_args, validate_chunking
 
 
@@ -27,6 +29,53 @@ def _args(**overrides):
     }
     values.update(overrides)
     return SimpleNamespace(**values)
+
+
+def test_run_stamp_zero_pads_day(monkeypatch):
+    class FixedDatetime:
+        @staticmethod
+        def now():
+            return real_datetime(2026, 8, 6, 15, 20)
+
+    monkeypatch.setattr(sfitlc, "datetime", FixedDatetime)
+
+    assert sfitlc.make_run_stamp() == "aug06_0320pm"
+
+
+def test_fit_job_name_places_run_stamp_first():
+    run_stamp = "aug06_0320pm"
+    prefix = sfitlc.build_run_prefix(
+        "chisq",
+        run_stamp,
+        "abc1234",
+        resume_prefix_base=None,
+        run_description="deep_run",
+    )
+
+    script = build_sbatch_script(
+        prefix,
+        JobConfig(description="chisq", object_ids=["1"]),
+        _args(),
+        "data/input.csv",
+        None,
+    )
+
+    assert "#SBATCH --job-name=aug06_0320pm_lcfit_deep_run_abc1234_chisq\n" in script
+    assert f'export PREFIX="{prefix}"' in script
+
+
+@pytest.mark.parametrize(
+    ("prefix", "expected"),
+    [
+        (
+            "aug06_0320pm_abc1234_stone",
+            "aug06_0320pm_lcfit_abc1234_stone",
+        ),
+        ("existing_resume_stone", "lcfit_existing_resume_stone"),
+    ],
+)
+def test_fit_job_name_handles_no_description_and_opaque_resume_prefix(prefix, expected):
+    assert sfitlc.build_fit_job_name(prefix) == expected
 
 
 def test_sbatch_runs_each_chunk_object_in_a_fresh_process():
