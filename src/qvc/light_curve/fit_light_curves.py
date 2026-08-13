@@ -88,6 +88,7 @@ from qvc.light_curve.multiband_dho_core import (
     make_linear_mean_func,
     relative_flux_to_mag_residual,
 )
+from qvc.light_curve.multiband_model_dho_blr import make_multiband_dho_blr_model
 from qvc.light_curve.multiband_model_dho_blr_erlang import (
     DEFAULT_ERLANG_ORDER,
     make_multiband_dho_blr_flux_linearized_erlang_model,
@@ -4080,7 +4081,11 @@ def add_model_prediction_params(samples, lam_rf, *, model_variant=None, lam_lya_
         out.setdefault("log_tau_fast_center0", log_half_tau)
         if "quality_factor" not in out and "log_quality_factor" in out:
             out["quality_factor"] = np.exp(np.asarray(out["log_quality_factor"]))
-    use_relflux = True
+    use_relflux = (
+        model_variant == "mag_flux_linearized_erlang"
+        or "log_sigma_uv_relflux" in out
+        or "amp_cont_relflux" in out
+    )
     if use_relflux and all(
         key in out
         for key in (
@@ -4232,6 +4237,179 @@ def add_model_prediction_params(samples, lam_rf, *, model_variant=None, lam_lya_
     out["lambda_center_rf"] = np.asarray(explicit["lambda_center_rf"])
     return out
 
+
+
+def build_single_object_model(
+    obj_dict,
+    lam_rf,
+    log_jitter_mean,
+    *,
+    lam_lya_rf=None,
+    disable_linear_trend=False,
+    disable_lag_blr=False,
+    disable_lag_bc=False,
+    drop_band_lyman_alpha=False,
+    tau_fast_truncated=False,
+    n_blr_terms=1,
+):
+    """Return the NumPyro model for one object."""
+
+    (t, bidx) = obj_dict["X"]
+    y = obj_dict["y"]
+    yerr = obj_dict["yerr"]
+    survey_idx = jnp.asarray(obj_dict["survey_idx"], dtype=jnp.int32)
+    z = float(obj_dict["z"])
+    B = int(len(lam_rf))
+    lambda_center_rf = compute_lambda_center_rf(lam_rf)
+    if lam_lya_rf is None:
+        lam_lya_rf = lam_rf
+    lam_lya_rf = jnp.asarray(lam_lya_rf, dtype=lam_rf.dtype)
+    bands = tuple(str(b) for b in obj_dict.get("bands", []))
+    if bands:
+        log_igm_transmission_band = compute_log_igm_transmission_band(bands, z)
+    else:
+        log_igm_transmission_band = jnp.zeros(B, dtype=lam_rf.dtype)
+    lambda_uv = jnp.array(2500.0, dtype=lam_rf.dtype)
+    log_jitter_active_mask, survey_offset_active_mask = _get_object_active_noise_calibration_masks(
+        obj_dict, B
+    )
+    log_jitter_mean_grid = _coerce_log_jitter_mean_grid(log_jitter_mean, B)
+
+    def model():
+        eta_sigma = numpyro.sample("eta_sigma", eta_sigma_prior())
+
+        eta_tau = numpyro.sample("eta_tau", eta_tau_prior())
+
+        log_tau_slow_center0 = numpyro.sample(
+            "log_tau_slow_center0",
+            log_tau_slow_center0_prior(
+                eta_tau,
+                z,
+                lambda_center_rf,
+            ),
+        )
+
+        log_tau_fast_center0 = numpyro.sample(
+            "log_tau_fast_center0",
+            log_tau_fast_center0_prior(
+                log_tau_slow_center0,
+                tau_fast_truncated=tau_fast_truncated,
+            ),
+        )
+
+        log_sigma_center0 = numpyro.sample(
+            "log_sigma_center0",
+            log_sigma_center0_prior(
+                eta_sigma,
+                lambda_center_rf,
+            ),
+        )
+        (
+            linear_trend,
+            linear_trend_band_offset,
+            _linear_trend_band,
+        ) = sample_linear_trend_with_band_offsets(
+            B=B,
+            disable_linear_trend=disable_linear_trend,
+            trend_prior_dist=linear_trend_prior(t_ref=t, z=z),
+            band_offset_raw_prior_dist=linear_trend_band_offset_raw_prior(),
+        )
+
+        lag0 = numpyro.sample("lag0", lag0_prior(z=z))
+        log_lag0 = numpyro.deterministic("log_lag0", jnp.log(lag0))
+        lag_beta = numpyro.sample("lag_beta", lag_beta_prior())
+
+        line_ratio_offsets = compute_flux_line_ratio_offsets(
+            lam_rf,
+            lambda_center_rf=lambda_center_rf,
+            eta_sigma=eta_sigma,
+            log_igm_transmission_band=log_igm_transmission_band,
+        )
+        (
+            mean,
+            dlog_amp_blr,
+            dlog_amp_blr2,
+            log_lag_blr,
+            log_lag_blr2,
+            log_jitter,
+            survey_delta_mag,
+            dlog_amp_bc,
+            log_lag_ratio_bc_to_blr,
+        ) = sample_flux_line_latent_params(
+            B=B,
+            z=z,
+            log_lag0=log_lag0,
+            log_jitter_mean=log_jitter_mean_grid,
+            log_jitter_active_mask=log_jitter_active_mask,
+            survey_offset_active_mask=survey_offset_active_mask,
+            line_ratio_offsets=line_ratio_offsets,
+            disable_lag_blr=disable_lag_blr,
+            disable_lag_bc=disable_lag_bc,
+            n_blr_terms=n_blr_terms,
+        )
+
+        _ = numpyro.deterministic("log_tau_fake", float(obj_dict.get("log_tau_fake", -99.0)))
+        _ = numpyro.deterministic("log_sigma_fake", float(obj_dict.get("log_sigma_fake", -99.0)))
+
+        raw_params = dict(
+            log_tau_slow_center0=log_tau_slow_center0,
+            log_tau_fast_center0=log_tau_fast_center0,
+            log_sigma_center0=log_sigma_center0,
+            lambda_center_rf=lambda_center_rf,
+            linear_trend=linear_trend,
+            linear_trend_band_offset=linear_trend_band_offset,
+            mean=mean,
+            dlog_amp_blr=dlog_amp_blr,
+            dlog_amp_blr2=dlog_amp_blr2,
+            log_lag_blr=log_lag_blr,
+            log_lag_blr2=log_lag_blr2,
+            log_jitter=log_jitter,
+            survey_delta_mag=survey_delta_mag,
+            lag0=lag0,
+            lag_beta=lag_beta,
+            log_igm_transmission_band=log_igm_transmission_band,
+            eta_sigma=eta_sigma,
+            eta_tau=eta_tau,
+        )
+        if dlog_amp_bc is not None:
+            raw_params["dlog_amp_bc"] = dlog_amp_bc
+            raw_params["log_lag_ratio_bc_to_blr"] = log_lag_ratio_bc_to_blr
+
+        params = build_explicit_model_params(
+            raw_params,
+            lam_rf,
+            lam_lya_rf=lam_lya_rf,
+        )
+
+        numpyro.deterministic("lambda_center_rf", params["lambda_center_rf"])
+        numpyro.deterministic("log_sigma_uv", params["log_sigma_uv"])
+        numpyro.deterministic("log_tau_uv", params["log_tau_uv"])
+        numpyro.deterministic("log_tau_fast_uv", params["log_tau_fast_uv"])
+        numpyro.deterministic("tau_fast", params["tau_fast_band"])
+        numpyro.deterministic("tau_slow", params["tau_slow_band"])
+        numpyro.deterministic("amp_cont", params["amp_cont"])
+        numpyro.deterministic("amp_bc", params["amp_bc"])
+        numpyro.deterministic("amp_blr", params["amp_blr"])
+        numpyro.deterministic("amp_blr2", params["amp_blr2"])
+        numpyro.deterministic("log_igm_transmission_band", params["log_igm_transmission_band"])
+        numpyro.deterministic("igm_transmission_band", params["igm_transmission_band"])
+        numpyro.deterministic("lag_disk", params["lag_disk"])
+        numpyro.deterministic("lag_bc", params["lag_bc"])
+        numpyro.deterministic("lag_blr", params["lag_blr"])
+        numpyro.deterministic("lag_blr2", params["lag_blr2"])
+
+        m = make_multiband_dho_blr_model(
+            X=(t, bidx),
+            y=y,
+            yerr=yerr,
+            n_band=B,
+            survey_idx=survey_idx,
+            zero_mean=zero_mean,
+            has_jitter=has_jitter,
+        )
+        numpyro.factor("loglike", m.log_prob(params))
+
+    return model
 
 
 def build_single_object_model_mag_flux_linearized(
@@ -5144,9 +5322,12 @@ def main():
     )
     parser.add_argument(
         "--model_variant",
-        choices=("mag_flux_linearized_erlang",),
+        choices=("mag_linear", "mag_flux_linearized_erlang"),
         default="mag_flux_linearized_erlang",
-        help="Retained causal-Erlang light-curve model.",
+        help=(
+            "Light-curve model path: the restored legacy additive-magnitude "
+            "quasi-separable model or the causal-Erlang relative-flux model."
+        ),
     )
     parser.add_argument(
         "--spectra_fit_csv",
@@ -5242,6 +5423,11 @@ def main():
     if args.dho_drw_parameterization and args.model_variant != "mag_flux_linearized_erlang":
         raise ValueError(
             "--dho_drw_parameterization is only used by "
+            "--model_variant mag_flux_linearized_erlang."
+        )
+    if args.subtract_psf_constant_flux and args.model_variant != "mag_flux_linearized_erlang":
+        raise ValueError(
+            "--subtract_psf_constant_flux is only supported by "
             "--model_variant mag_flux_linearized_erlang."
         )
     if args.dho_drw_parameterization and args.fast_solver:
@@ -5346,20 +5532,39 @@ def main():
                     survey_idx,
                     B,
                 )
-            if args.n_blr_terms != 1:
-                raise ValueError(
-                    "model_variant='mag_flux_linearized_erlang' currently "
-                    "supports only n_blr_terms=1."
+                if args.n_blr_terms != 1:
+                    raise ValueError(
+                        "model_variant='mag_flux_linearized_erlang' currently "
+                        "supports only n_blr_terms=1."
+                    )
+                numpyro_model = None
+                logging.info(
+                    "[%s] causal Erlang model using iterative local "
+                    "magnitude-likelihood refinement; refinement_strategy=%s; "
+                    "active_components=%s",
+                    oid,
+                    args.flux_linearized_refinement_strategy,
+                    "cont,blr",
                 )
-            numpyro_model = None
-            logging.info(
-                "[%s] causal Erlang model using iterative local "
-                "magnitude-likelihood refinement; refinement_strategy=%s; "
-                "active_components=%s",
-                oid,
-                args.flux_linearized_refinement_strategy,
-                "cont,blr",
-            )
+            else:
+                numpyro_model = build_single_object_model(
+                    obj,
+                    lam_rf,
+                    log_jitter_mean=log_jitter_mean_fit,
+                    lam_lya_rf=lam_lya_rf,
+                    disable_linear_trend=args.disable_linear_trend,
+                    disable_lag_blr=False,
+                    disable_lag_bc=args.disable_lag_bc,
+                    drop_band_lyman_alpha=args.drop_band_lyman_alpha,
+                    tau_fast_truncated=args.tau_fast_truncated,
+                    n_blr_terms=args.n_blr_terms,
+                )
+                logging.info(
+                    "[%s] restored legacy additive-magnitude quasi-separable model; "
+                    "active_components=%s",
+                    oid,
+                    "cont,blr" if args.disable_lag_bc else "cont,blr,bc",
+                )
 
             stage_diagnostics = {}
             flux_linearized_fit_obj = None
@@ -5583,6 +5788,16 @@ def main():
                         if args.dho_drw_parameterization
                         else {"seeing_covariate": obj.get("seeing_covariate")}
                     ),
+                )
+            else:
+                m = make_multiband_dho_blr_model(
+                    obj["X"],
+                    obj["y"],
+                    obj["yerr"],
+                    n_band=B,
+                    survey_idx=obj["survey_idx"],
+                    zero_mean=zero_mean,
+                    has_jitter=has_jitter,
                 )
             plot_samples = obj_flat_samples
 

@@ -23,6 +23,7 @@ if str(SRC) not in sys.path:
 
 from qvc.hubble import hubble_plotting, hubble_utils
 from qvc.light_curve.fit_light_curves import (
+    build_single_object_model,
     build_single_object_model_mag_flux_linearized,
     compute_flux_line_ratio_offsets,
     compute_lomb_scargle_break_diagnostics,
@@ -1095,6 +1096,49 @@ def test_blr_line_assignment_does_not_fallback_to_l2500_for_missing_line_luminos
     assert out.iloc[0]["assigned_line"] == "C IV"
     assert out.iloc[0]["line_luminosity_col"] == "log_lambda_Llambda_1350_agn"
     assert np.isnan(out.iloc[0]["log_line_luminosity"])
+
+def test_build_single_object_model_disables_second_blr_term_by_default():
+    obj = _make_fake_public_object()
+    lc = make_lc(
+        obj,
+        ["g", "r"],
+        inject_fake=False,
+        drop_band_lyman_alpha=False,
+    )
+    obj = obj | lc
+
+    bands = obj["bands"]
+    lam_rf = jnp.array([lambda_pivot[b] for b in bands], dtype=float) / (1.0 + float(obj["z"]))
+    bidx = np.asarray(obj["band_idx"])
+    yerr = np.asarray(obj["yerr"])
+    log_jitter_mean = np.array(
+        [
+            np.log(np.mean(yerr[(bidx == i) & np.isfinite(yerr) & (yerr < 10)]))
+            for i in range(len(bands))
+        ],
+        dtype=float,
+    )
+    model = build_single_object_model(
+        obj,
+        lam_rf,
+        log_jitter_mean=jnp.array(log_jitter_mean),
+        disable_linear_trend=False,
+        disable_lag_blr=False,
+        drop_band_lyman_alpha=False,
+        tau_fast_truncated=False,
+        n_blr_terms=1,
+    )
+
+    model_trace = trace(seed(model, random.PRNGKey(0))).get_trace()
+    assert "log_amp_ratio_blr_raw" in model_trace
+    assert "delta_log_lag_blr_raw" in model_trace
+    assert "dlog_amp_bc" in model_trace
+    assert "log_lag_ratio_bc_to_blr" in model_trace
+    assert "log_amp_ratio_blr2_raw" not in model_trace
+    assert "delta_log_lag_blr2_raw" not in model_trace
+    assert np.allclose(np.asarray(model_trace["dlog_amp_blr2"]["value"]), -9.0)
+    assert np.allclose(np.asarray(model_trace["log_lag_blr2"]["value"]), -9.0)
+
 
 def test_build_single_object_model_mag_flux_linearized_smoke():
     obj = _make_fake_public_object()
