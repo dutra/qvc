@@ -2,6 +2,8 @@
 import argparse
 import math
 import os
+import re
+import shlex
 import sys
 import subprocess
 from dataclasses import dataclass
@@ -19,7 +21,6 @@ from qvc.light_curve.multiband_generate_lc import resolve_macleod_object_ids, re
 
 SCRIPT_DIR = REPO_ROOT / "hpc_scripts" / "jobs" / "multibandfit"
 LOG_ROOT = REPO_ROOT / "hpc_scripts" / "logs" / "multibandfit"
-DEFAULT_SPECTRA_FIT_CSV = "results/data/jaxqsofit_apr5d_chisq20_mar31a_good.csv"
 MAX_ARRAY_SIZE = 10_000
 
 
@@ -33,22 +34,55 @@ class JobConfig:
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Submit multiband-fit SLURM jobs.")
-    parser.add_argument("--fit", choices=("chisq", "stone", "macleod"), required=True, help="Sample to submit.")
+    parser.add_argument(
+        "--fit",
+        choices=("chisq", "stone", "macleod", "samelength"),
+        required=True,
+        help="Sample to submit.",
+    )
     parser.add_argument("--chisq-csv", type=str, default=None, help="CSV file with object_id column for --fit chisq.")
+    parser.add_argument(
+        "--spectra-fit-csv",
+        type=str,
+        default=None,
+        help="Spectra-fit CSV used for PSF constant-flux subtraction in --fit chisq jobs.",
+    )
     parser.add_argument("--num-jobs", type=int, default=-1, help="-1 means submit all chunks after skip.")
     parser.add_argument("--skip", type=int, default=0, help="Number of chunks to skip.")
-    parser.add_argument("--N", type=int, default=1, help="Objects per array task.")
-    parser.add_argument("--nwarm", type=int, default=500, help="Warmup steps.")
-    parser.add_argument("--nsamp", type=int, default=200, help="Posterior samples per chain.")
+    parser.add_argument("--N", type=int, default=10, help="Objects per array task.")
+    parser.add_argument("--nwarm", type=int, default=250, help="Warmup steps.")
+    parser.add_argument("--nsamp", type=int, default=250, help="Posterior samples per chain.")
+    parser.add_argument("--svi-steps", type=int, default=1000, help="SVI warm-start steps.")
     parser.add_argument("--ncores", type=int, default=1, help="CPUs per task.")
     parser.add_argument("--max-tree-depth", type=int, default=12, help="NUTS max tree depth.")
-    parser.add_argument("--partition", default="day_amd", help="SLURM partition.")
-    parser.add_argument("--time", default="2:00:00", help="SLURM time limit.")
-    parser.add_argument("--mem", default="10G", help="SLURM memory request.")
+    parser.add_argument("--partition", default="day", help="SLURM partition.")
+    parser.add_argument("--time", default="12:00:00", help="SLURM time limit.")
+    parser.add_argument("--mem", default="32G", help="SLURM memory request.")
     parser.add_argument("--env", default="jaxcpu2", help="Conda environment to activate inside submitted jobs.")
-    args = parser.parse_args()
+    parser.add_argument(
+        "--description",
+        default=None,
+        help="Optional run description inserted after the run stamp in fresh run prefixes.",
+    )
+    parser.add_argument(
+        "--resume",
+        metavar="PREFIX_BASE",
+        default=None,
+        help=(
+            "Resume an existing run by shared prefix base. The per-job prefix is built as "
+            "PREFIX_BASE plus the job description, for example PREFIX_BASE_stone."
+        ),
+    )
+    args, extra_fit_flags = parser.parse_known_args()
+    args.extra_fit_flags = tuple(extra_fit_flags)
     if args.fit == "chisq" and not args.chisq_csv:
         parser.error("--chisq-csv is required when --fit chisq is used.")
+    if args.fit == "chisq" and not args.spectra_fit_csv:
+        parser.error("--spectra-fit-csv is required when --fit chisq is used.")
+    try:
+        args.description = normalize_run_description(args.description)
+    except ValueError as exc:
+        parser.error(str(exc))
     return args
 
 
@@ -69,7 +103,16 @@ def get_git_short_hash() -> str:
 
 def make_run_stamp() -> str:
     now = datetime.now()
-    return f"{now.strftime('%b').lower()}{now.day}_{now.strftime('%I%M%p').lower()}"
+    return now.strftime("%b%d_%I%M%p").lower()
+
+
+def normalize_run_description(description: str | None) -> str | None:
+    if description is None:
+        return None
+    normalized = description.strip().lower().replace(" ", "_")
+    if not normalized:
+        raise ValueError("--description cannot be blank.")
+    return normalized
 
 
 def load_chisq_ids(chisq_csv: str) -> list[str]:
@@ -105,13 +148,23 @@ def build_job_configs(fit: str, chisq_csv: str) -> list[JobConfig]:
                 object_ids=stone_object_ids,
                 extra_flags=("--disable_linear_trend",),
             ),
+        ]
+    if fit == "samelength":
+        stone_object_ids = load_stone_ids()
+        return [
+            JobConfig(description="samelength_fulllength", object_ids=stone_object_ids),
             JobConfig(
-                description="stone_rf2400",
+                description="samelength_fulllength_nolinear",
+                object_ids=stone_object_ids,
+                extra_flags=("--disable_linear_trend",),
+            ),
+            JobConfig(
+                description="samelength_rf2400",
                 object_ids=stone_object_ids,
                 extra_flags=("--rf_length_cut", "2400"),
             ),
             JobConfig(
-                description="stone_rf2400_nolinear",
+                description="samelength_rf2400_nolinear",
                 object_ids=stone_object_ids,
                 extra_flags=("--disable_linear_trend", "--rf_length_cut", "2400"),
             ),
@@ -144,7 +197,7 @@ def validate_chunking(total_objects: int, n_per_job: int, skip: int, num_jobs: i
 
 
 def build_flag_lines(flags: list[str]) -> str:
-    return " \\\n ".join(flags)
+    return " \\\n ".join(shlex.quote(flag) for flag in flags)
 
 
 def build_mail_lines() -> str:
@@ -166,8 +219,47 @@ def build_suberlak_identity_plot_path(prefix: str, job_description: str) -> str:
     return str(REPO_ROOT / "plots" / "lc_tests" / prefix / filename)
 
 
+def build_samelength_comparison_plot_dir(run_prefix_base: str) -> Path:
+    return REPO_ROOT / "plots" / "lc_tests" / f"{run_prefix_base}_samelength_comparison"
+
+
+def build_samelength_comparison_plot_path(run_prefix_base: str, x_description: str, y_description: str) -> str:
+    y_label = y_description.removeprefix("samelength_")
+    filename = f"sigma_tau_identity_grid_{x_description}_vs_{y_label}.pdf"
+    return str(build_samelength_comparison_plot_dir(run_prefix_base) / filename)
+
+
 def build_object_ids_path(prefix: str, job: JobConfig) -> Path:
     return SCRIPT_DIR / f"{prefix}_{job.description}_object_ids.txt"
+
+
+def build_run_prefix(
+    job_description: str,
+    run_stamp: str,
+    git_hash: str,
+    resume_prefix_base: str | None,
+    run_description: str | None = None,
+) -> str:
+    if resume_prefix_base:
+        return f"{resume_prefix_base}_{job_description}"
+    if run_description:
+        return f"{run_stamp}_{run_description}_{git_hash}_{job_description}"
+    return f"{run_stamp}_{git_hash}_{job_description}"
+
+
+def build_fit_job_name(prefix: str) -> str:
+    """Build the scheduler name while keeping the result prefix unchanged."""
+
+    match = re.fullmatch(
+        r"(?P<date>[a-z]{3}\d{2})_(?P<time>\d{4}(?:am|pm))_(?P<identity>.+)",
+        prefix,
+    )
+    if match is None:
+        return f"lcfit_{prefix}"
+    return (
+        f"{match.group('date')}_{match.group('time')}_"
+        f"lcfit_{match.group('identity')}"
+    )
 
 
 def build_sbatch_script(
@@ -175,11 +267,12 @@ def build_sbatch_script(
     job: JobConfig,
     args,
     chisq_csv: str,
-    spectra_fit_csv: str,
+    spectra_fit_csv: str | None,
     object_ids_path: Path | None = None,
 ) -> str:
     log_dir = LOG_ROOT / prefix
     log_pattern = log_dir / f"{prefix}-%A_%a-%j.txt"
+    job_name = build_fit_job_name(prefix)
     if args.fit != "chisq" and object_ids_path is None:
         raise ValueError(f"object_ids_path is required for fit mode {args.fit!r}.")
     filter_csv = str(REPO_ROOT / chisq_csv) if chisq_csv is not None else ""
@@ -190,10 +283,15 @@ def build_sbatch_script(
         "--disable_correlation_plot",
         "--disable_histogram_plot",
         "--disable_corner_plot",
+        #"--plot_ls_broken_pl",
+        "--disable_color_magnitude_plot",
+        "--disable_recovery_plot",
         "--disable_sigma_tau_lambda_plot",
         "--disable_recovery_plot",
         "--fit_method",
         "svi+nuts",
+        "--svi_steps",
+        str(args.svi_steps),
         "--nwarm",
         str(args.nwarm),
         "--nsamp",
@@ -203,6 +301,8 @@ def build_sbatch_script(
         "--max_tree_depth",
         str(args.max_tree_depth),
     ]
+    if getattr(args, "resume", None):
+        base_flags.append("--resume")
     if job.use_psf_constant_flux:
         base_flags.extend(
             [
@@ -212,8 +312,9 @@ def build_sbatch_script(
             ]
         )
     base_flags.extend(job.extra_flags)
+    base_flags.extend(getattr(args, "extra_fit_flags", ()))
     return f"""#!/bin/bash
-#SBATCH --job-name=multiband_{prefix}
+#SBATCH --job-name={job_name}
 #SBATCH --output={log_pattern}
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task={args.ncores}
@@ -226,7 +327,6 @@ set -euo pipefail
 
 export JAX_ENABLE_X64=True
 export PREFIX="{prefix}"
-export SUFFIX="job${{SLURM_ARRAY_TASK_ID}}"
 export NUM_CORES="{args.ncores}"
 export N="{args.N}"
 export SKIP="{args.skip}"
@@ -284,9 +384,22 @@ fi
 
 echo "object_ids: $IDS"
 
-python -m qvc.light_curve.fit_light_curves \\
- --filter_object_id $IDS \\
- {build_flag_lines(base_flags)}
+read -r -a OBJECT_IDS <<< "$IDS"
+OBJECT_INDEX=0
+for OBJECT_ID in "${{OBJECT_IDS[@]}}"; do
+  export SUFFIX="job${{TASK_ID}}_obj${{OBJECT_INDEX}}"
+  object_start_epoch=$(date +%s)
+  echo "Starting object $((OBJECT_INDEX + 1))/${{#OBJECT_IDS[@]}}: $OBJECT_ID (SUFFIX=$SUFFIX)"
+
+  python -m qvc.light_curve.fit_light_curves \\
+   --filter_object_id "$OBJECT_ID" \\
+   {build_flag_lines(base_flags)}
+
+  object_end_epoch=$(date +%s)
+  object_rt=$(( object_end_epoch - object_start_epoch ))
+  echo "Finished object $OBJECT_ID in $((object_rt/3600))h $(((object_rt%3600)/60))m $((object_rt%60))s"
+  OBJECT_INDEX=$((OBJECT_INDEX + 1))
+done
 
 end_epoch=$(date +%s)
 rt=$(( end_epoch - start_epoch ))
@@ -327,7 +440,7 @@ def build_merge_sbatch_script(
 #SBATCH --output={log_pattern}
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=1
-#SBATCH --mem={args.mem}
+#SBATCH --mem=40G
 #SBATCH --partition={args.partition}
 #SBATCH --time={args.time}
 {build_mail_lines()}\
@@ -344,6 +457,57 @@ echo "Start epoch: $start_epoch"
 echo "SLURM_JOB_ID=${{SLURM_JOB_ID:-}}"
 
 {merge_cmd}
+
+end_epoch=$(date +%s)
+rt=$(( end_epoch - start_epoch ))
+echo "End epoch: $end_epoch"
+echo "Total runtime: $((rt/3600))h $(((rt%3600)/60))m $((rt%60))s"
+"""
+
+
+def build_samelength_comparison_sbatch_script(run_prefix_base: str, args) -> str:
+    prefix = f"{run_prefix_base}_samelength_comparison"
+    log_dir = LOG_ROOT / prefix
+    log_pattern = log_dir / f"{prefix}-%j.txt"
+    comparisons = [
+        ("samelength_rf2400", "samelength_fulllength"),
+        ("samelength_rf2400_nolinear", "samelength_fulllength_nolinear"),
+    ]
+    commands = []
+    for x_description, y_description in comparisons:
+        x_prefix = build_run_prefix(x_description, "", "", run_prefix_base)
+        y_prefix = build_run_prefix(y_description, "", "", run_prefix_base)
+        plot_out = build_samelength_comparison_plot_path(run_prefix_base, x_description, y_description)
+        commands.append(
+            "python -m qvc.light_curve.merge_results"
+            " --plot-samelength-sigma-tau-identity-grid"
+            f' --samelength-x-prefix "{x_prefix}"'
+            f' --samelength-y-prefix "{y_prefix}"'
+            f' --samelength-identity-plot-out "{plot_out}"'
+        )
+    comparison_cmds = "\n".join(commands)
+    return f"""#!/bin/bash
+#SBATCH --job-name=samelength_cmp_{run_prefix_base}
+#SBATCH --output={log_pattern}
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=1
+#SBATCH --mem=20G
+#SBATCH --partition={args.partition}
+#SBATCH --time={args.time}
+{build_mail_lines()}\
+
+set -euo pipefail
+
+module load miniconda
+conda activate {args.env}
+
+cd "{REPO_ROOT}"
+
+start_epoch=$(date +%s)
+echo "Start epoch: $start_epoch"
+echo "SLURM_JOB_ID=${{SLURM_JOB_ID:-}}"
+
+{comparison_cmds}
 
 end_epoch=$(date +%s)
 rt=$(( end_epoch - start_epoch ))
@@ -401,18 +565,23 @@ def run_sbatch(cmd: list[str]) -> str:
     return parse_sbatch_job_id(stdout)
 
 
-def submit_merge_script(merge_sbatch_path: Path, dependency_job_id: str, prefix: str) -> str:
+def submit_merge_script(merge_sbatch_path: Path, dependency_job_ids: str | list[str], prefix: str) -> str:
+    if isinstance(dependency_job_ids, str):
+        dependency_job_ids = [dependency_job_ids]
+    if not dependency_job_ids:
+        raise ValueError(f"No dependency job IDs provided for merge job {prefix}.")
+    dependency_text = ":".join(dependency_job_ids)
     cmd = [
         "sbatch",
-        f"--dependency=afterany:{dependency_job_id}",
+        f"--dependency=afterany:{dependency_text}",
         str(merge_sbatch_path),
     ]
     print(
         f"Submitting merge job for {prefix}: {' '.join(cmd)} "
-        f"(depends on {dependency_job_id})"
+        f"(depends on {dependency_text})"
     )
     merge_job_id = run_sbatch(cmd)
-    print(f"Submitted merge job {merge_job_id} for {prefix} after dependency {dependency_job_id}")
+    print(f"Submitted merge job {merge_job_id} for {prefix} after dependency {dependency_text}")
     return merge_job_id
 
 
@@ -424,7 +593,7 @@ def submit_script(
     total_objects: int,
     fit_label: str,
     prefix: str,
-) -> None:
+) -> str:
     if total_objects == 0:
         raise ValueError(f"No object_ids found for {fit_label}.")
 
@@ -437,16 +606,39 @@ def submit_script(
         print("Submitting:", " ".join(cmd))
         job_id = run_sbatch(cmd)
         print(f"Submitted light-curve job {job_id} for {prefix}")
-        submit_merge_script(merge_sbatch_path, job_id, prefix)
-        return
+        return submit_merge_script(merge_sbatch_path, job_id, prefix)
 
+    job_ids = []
     for batch_start in range(start_task, end_task + 1, MAX_ARRAY_SIZE):
         batch_end = min(batch_start + MAX_ARRAY_SIZE - 1, end_task)
         cmd = ["sbatch", f"--array={batch_start}-{batch_end}", str(sbatch_path)]
         print("Submitting:", " ".join(cmd))
         job_id = run_sbatch(cmd)
+        job_ids.append(job_id)
         print(f"Submitted light-curve job {job_id} for {prefix} array range {batch_start}-{batch_end}")
-        submit_merge_script(merge_sbatch_path, job_id, prefix)
+    return submit_merge_script(merge_sbatch_path, job_ids, prefix)
+
+
+def submit_samelength_comparison_script(
+    comparison_sbatch_path: Path,
+    dependency_job_ids: list[str],
+    run_prefix_base: str,
+) -> str:
+    if not dependency_job_ids:
+        raise ValueError("No merge job IDs provided for samelength comparison job.")
+    dependency_text = ":".join(dependency_job_ids)
+    cmd = [
+        "sbatch",
+        f"--dependency=afterany:{dependency_text}",
+        str(comparison_sbatch_path),
+    ]
+    print(
+        f"Submitting samelength comparison job for {run_prefix_base}: {' '.join(cmd)} "
+        f"(depends on {dependency_text})"
+    )
+    comparison_job_id = run_sbatch(cmd)
+    print(f"Submitted samelength comparison job {comparison_job_id} for {run_prefix_base}")
+    return comparison_job_id
 
 
 def main():
@@ -454,13 +646,17 @@ def main():
     args = parse_args()
     git_hash = get_git_short_hash()
     run_stamp = make_run_stamp()
+    run_prefix_base = args.resume or "_".join(
+        part for part in (run_stamp, args.description, git_hash) if part
+    )
     chisq_csv = args.chisq_csv
-    spectra_fit_csv = chisq_csv if chisq_csv is not None else DEFAULT_SPECTRA_FIT_CSV
+    spectra_fit_csv = args.spectra_fit_csv
+    samelength_merge_job_ids = []
 
     for job in build_job_configs(args.fit, chisq_csv):
         total_objects = len(job.object_ids)
         _, task_start, task_end = validate_chunking(total_objects, args.N, args.skip, args.num_jobs)
-        prefix = f"{run_stamp}_{git_hash}_{job.description}"
+        prefix = build_run_prefix(job.description, run_stamp, git_hash, args.resume, args.description)
         object_ids_path = None
         if args.fit != "chisq":
             object_ids_path = write_object_ids_file(build_object_ids_path(prefix, job), job.object_ids)
@@ -476,13 +672,13 @@ def main():
             prefix,
             job.description,
             args,
-            enable_stone_identity_plot=job.description.startswith("stone"),
+            enable_stone_identity_plot=args.fit == "stone" and job.description.startswith("stone"),
             enable_macleod_identity_plot=job.description == "macleod",
             enable_suberlak_identity_plot=job.description == "macleod",
         )
         sbatch_path = write_job_script(prefix, sbatch_script)
         merge_sbatch_path = write_job_script(f"{prefix}_merge", merge_sbatch_script)
-        submit_script(
+        merge_job_id = submit_script(
             sbatch_path,
             merge_sbatch_path,
             task_start,
@@ -490,6 +686,20 @@ def main():
             total_objects,
             job.description,
             prefix,
+        )
+        if args.fit == "samelength":
+            samelength_merge_job_ids.append(merge_job_id)
+
+    if args.fit == "samelength":
+        comparison_sbatch_script = build_samelength_comparison_sbatch_script(run_prefix_base, args)
+        comparison_sbatch_path = write_job_script(
+            f"{run_prefix_base}_samelength_comparison",
+            comparison_sbatch_script,
+        )
+        submit_samelength_comparison_script(
+            comparison_sbatch_path,
+            samelength_merge_job_ids,
+            run_prefix_base,
         )
 
 
