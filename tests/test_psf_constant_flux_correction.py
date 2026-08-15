@@ -17,6 +17,7 @@ from qvc.light_curve.psf_constant_flux_correction import (
     apply_constant_flux_correction_to_object,
     apply_constant_flux_correction_to_objects,
     get_bandpass_agn_fraction,
+    subtract_constant_flux_from_band,
 )
 
 
@@ -54,6 +55,77 @@ def test_native_unit_agn_fraction_is_not_artificially_capped():
     assert value == 1.0
     assert error == 0.01
     assert key == "f_AGN_psf_g"
+
+
+def test_subtract_constant_flux_from_band_uses_native_reference_and_propagates_errors():
+    reference_mag = 20.0
+    mags = np.array([20.0, 20.1, 19.9], dtype=float)
+    magerrs = np.full(3, 0.02, dtype=float)
+    fraction = 0.5
+
+    corrected_mags, corrected_magerrs, summary = subtract_constant_flux_from_band(
+        mags,
+        magerrs,
+        fraction,
+        reference_mag=reference_mag,
+        agn_fraction_err=0.04,
+    )
+
+    reference_flux = 10.0 ** (-0.4 * reference_mag)
+    total_flux = 10.0 ** (-0.4 * mags)
+    agn_flux = total_flux - (1.0 - fraction) * reference_flux
+    expected_mags = -2.5 * np.log10(agn_flux)
+    expected_magerrs = total_flux / agn_flux * magerrs
+    np.testing.assert_allclose(corrected_mags, expected_mags, rtol=1e-13)
+    np.testing.assert_allclose(corrected_magerrs, expected_magerrs, rtol=1e-13)
+    assert summary["reference_agn_mag"] == pytest.approx(
+        reference_mag - 2.5 * np.log10(fraction)
+    )
+    assert summary["agn_fraction_err"] == pytest.approx(0.04)
+
+
+def test_subtract_constant_flux_marks_nonpositive_agn_epochs_nonfinite():
+    corrected_mags, corrected_magerrs, summary = subtract_constant_flux_from_band(
+        np.array([20.0, 21.0]),
+        np.array([0.02, 0.02]),
+        0.2,
+        reference_mag=20.0,
+    )
+
+    assert np.isfinite(corrected_mags[0])
+    assert np.isfinite(corrected_magerrs[0])
+    assert np.isnan(corrected_mags[1])
+    assert np.isnan(corrected_magerrs[1])
+    assert summary["n_nonpositive_after_subtraction"] == 1
+
+
+def test_apply_constant_flux_correction_can_subtract_for_mag_linear():
+    obj = {
+        "object_id": "123",
+        "z": 1.0,
+        "times": {"g": np.array([0.0, 10.0, 20.0], dtype=float)},
+        "mags": {"g": np.array([20.0, 20.1, 19.9], dtype=float)},
+        "magerrs": {"g": np.full(3, 0.03, dtype=float)},
+        "mags_mean": [20.0],
+        "mags_mean_err": [0.01],
+        "f_AGN_psf_g": 0.5,
+        "f_AGN_psf_g_err": 0.04,
+    }
+
+    corrected_obj, summary = apply_constant_flux_correction_to_object(
+        obj, subtract_observations=True
+    )
+
+    assert corrected_obj["psf_constant_flux_mode"] == "subtracted"
+    assert not np.array_equal(corrected_obj["mags"]["g"], obj["mags"]["g"])
+    assert np.all(corrected_obj["magerrs"]["g"] > obj["magerrs"]["g"])
+    assert corrected_obj["psf_corrected_reference_mags_by_band"]["g"] == pytest.approx(
+        20.0 - 2.5 * np.log10(0.5)
+    )
+    assert corrected_obj["psf_corrected_reference_magerrs_by_band"]["g"] == pytest.approx(
+        0.02
+    )
+    assert summary["n_nonpositive_after_subtraction"] == 0
 
 
 def test_apply_constant_flux_correction_to_object_skips_band_without_bandpass_fraction():

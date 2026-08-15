@@ -11,6 +11,7 @@ import pytest
 from numpyro.handlers import seed, trace
 
 from qvc.light_curve.fit_light_curves import (
+    build_single_object_model,
     build_single_object_model_mag_flux_linearized,
     make_lc,
 )
@@ -172,6 +173,35 @@ def test_joint_posterior_csv_reaches_lc_likelihood_without_flux_mutation(
     )
     loglike = sites["loglike"]
     assert np.isfinite(float(loglike["fn"].log_prob(loglike["value"])))
+
+    subtracted, subtraction_summary = apply_constant_flux_correction_to_objects(
+        [raw],
+        spectra_fit_csvs=[sed_csv],
+        subtract_observations=True,
+    )
+    subtracted = subtracted[0]
+    assert subtraction_summary["correction_mode"] == "subtracted"
+    assert subtracted["psf_constant_flux_mode"] == "subtracted"
+    assert any(
+        not np.array_equal(subtracted["mags"][band], original_mags[band])
+        for band in "ugriz"
+    )
+
+    mag_lc = make_lc(
+        subtracted,
+        bands=list("ugriz"),
+        drop_band_lyman_alpha=False,
+    )
+    mag_model = build_single_object_model(
+        mag_lc,
+        jnp.array([1800.0, 2300.0, 3100.0, 3800.0]),
+        log_jitter_mean=np.full((4, 3), np.log(0.06)),
+    )
+    mag_sites = trace(seed(mag_model, jax.random.PRNGKey(1))).get_trace()
+    mag_loglike = mag_sites["loglike"]
+    assert np.isfinite(
+        float(mag_loglike["fn"].log_prob(mag_loglike["value"]))
+    )
 
 
 def test_diluted_likelihood_is_exactly_constant_flux_subtraction_in_relflux():

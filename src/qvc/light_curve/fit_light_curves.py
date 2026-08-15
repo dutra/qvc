@@ -3562,8 +3562,15 @@ def make_lc(
     mags_stds = np.empty(B)
     for i in range(B):
         m = band_idx == i
-        reference_mags = data.get("psf_fraction_reference_mags_by_band", {})
-        reference_magerrs = data.get("psf_fraction_reference_magerrs_by_band", {})
+        correction_mode = data.get("psf_constant_flux_mode")
+        if correction_mode == "subtracted":
+            reference_mags = data.get("psf_corrected_reference_mags_by_band", {})
+            reference_magerrs = data.get(
+                "psf_corrected_reference_magerrs_by_band", {}
+            )
+        else:
+            reference_mags = data.get("psf_fraction_reference_mags_by_band", {})
+            reference_magerrs = data.get("psf_fraction_reference_magerrs_by_band", {})
         if (
             bool(data.get("psf_constant_flux_corrected", False))
             and np.isfinite(reference_mags.get(bands[i], np.nan))
@@ -5410,8 +5417,9 @@ def main():
         action="store_true",
         default=False,
         help=(
-            "Apply spectra-derived per-band PSF dilution as fixed factors in the "
-            "GP likelihood; the observed light curves are not modified."
+            "Correct spectra-derived per-band PSF dilution: use fixed factors "
+            "in the Erlang likelihood or subtract constant flux before a "
+            "mag_linear fit."
         ),
     )
     args = parser.parse_args()
@@ -5466,6 +5474,7 @@ def main():
             objs,
             spectra_fit_csvs=args.spectra_fit_csv,
             progress_bar=args.progress,
+            subtract_observations=(args.model_variant == "mag_linear"),
         )
         print_constant_flux_correction_summary(correction_summary)
 
@@ -5510,11 +5519,6 @@ def main():
     if args.dho_drw_parameterization and args.model_variant != "mag_flux_linearized_erlang":
         raise ValueError(
             "--dho_drw_parameterization is only used by "
-            "--model_variant mag_flux_linearized_erlang."
-        )
-    if args.subtract_psf_constant_flux and args.model_variant != "mag_flux_linearized_erlang":
-        raise ValueError(
-            "--subtract_psf_constant_flux is only supported by "
             "--model_variant mag_flux_linearized_erlang."
         )
     if args.dho_drw_parameterization and args.fast_solver:

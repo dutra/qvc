@@ -1020,6 +1020,23 @@ def test_make_lc_uses_the_sed_fraction_reference_after_time_cut():
     np.testing.assert_allclose(g_values, np.asarray(obj["mags"]["g"]) - 19.5)
 
 
+def test_make_lc_uses_agn_reference_after_mag_linear_flux_subtraction():
+    obj = _make_object(z=1.0)
+    obj["psf_constant_flux_corrected"] = True
+    obj["psf_constant_flux_mode"] = "subtracted"
+    obj["psf_corrected_reference_mags_by_band"] = {"g": 20.75}
+    obj["psf_corrected_reference_magerrs_by_band"] = {"g": 0.04}
+    obj["mags"]["g"] = np.array([20.75, 20.95])
+    obj["f_AGN_psf_g"] = 0.5
+    obj["f_AGN_psf_g_err"] = 0.05
+
+    lc = make_lc(obj, bands=["g"], drop_band_lyman_alpha=False)
+
+    assert lc["mags_means"][0] == pytest.approx(20.75)
+    assert lc["mags_mean_errs"][0] == pytest.approx(0.04)
+    np.testing.assert_allclose(np.asarray(lc["y"]), [0.0, 0.2])
+
+
 def test_make_lc_rejects_missing_dilution_prior_for_retained_band():
     obj = _make_object(z=1.0)
     obj["psf_constant_flux_corrected"] = True
