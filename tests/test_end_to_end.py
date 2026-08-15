@@ -6,6 +6,7 @@ import h5py
 import numpy as np
 import pandas as pd
 import jax.numpy as jnp
+import numpyro.distributions as dist
 import pytest
 import matplotlib.pyplot as plt
 from matplotlib.container import ErrorbarContainer
@@ -30,6 +31,8 @@ from qvc.light_curve.fit_light_curves import (
     compute_g_band_residual_drift_diagnostics,
     compute_g_band_raw_drift_diagnostics,
     compute_object_adf_diagnostics,
+    eta_sigma_prior,
+    eta_tau_prior,
     make_lc,
 )
 from qvc.light_curve.multiband_fit_plotting import (
@@ -1139,6 +1142,49 @@ def test_build_single_object_model_disables_second_blr_term_by_default():
     assert np.allclose(np.asarray(model_trace["dlog_amp_blr2"]["value"]), -9.0)
     assert np.allclose(np.asarray(model_trace["log_lag_blr2"]["value"]), -9.0)
 
+    blr_prior = model_trace["log_amp_ratio_blr_raw"]["fn"]
+    assert isinstance(blr_prior, dist.Normal)
+    assert np.allclose(np.asarray(blr_prior.scale), 1.0)
+    expected_blr_loc = (
+        np.asarray(model_trace["log_amp_ratio_blr_raw"]["value"])
+        - np.asarray(model_trace["dlog_amp_blr"]["value"])
+        - 1.0
+    )
+    assert np.allclose(np.asarray(blr_prior.loc), expected_blr_loc)
+
+    two_blr_model = build_single_object_model(
+        obj,
+        lam_rf,
+        log_jitter_mean=jnp.array(log_jitter_mean),
+        disable_linear_trend=False,
+        disable_lag_blr=False,
+        drop_band_lyman_alpha=False,
+        tau_fast_truncated=False,
+        n_blr_terms=2,
+    )
+    two_blr_trace = trace(seed(two_blr_model, random.PRNGKey(1))).get_trace()
+    for site_name in ("log_amp_ratio_blr_raw", "log_amp_ratio_blr2_raw"):
+        prior = two_blr_trace[site_name]["fn"]
+        assert isinstance(prior, dist.Normal)
+        assert np.allclose(np.asarray(prior.scale), 1.0)
+    assert np.allclose(
+        np.asarray(two_blr_trace["log_amp_ratio_blr_raw"]["fn"].loc),
+        np.asarray(two_blr_trace["log_amp_ratio_blr2_raw"]["fn"].loc),
+    )
+
+
+def test_historical_eta_priors_are_broad_and_unbounded():
+    sigma_prior = eta_sigma_prior()
+    tau_prior = eta_tau_prior()
+
+    # NumPyro simplifies TruncatedNormal with infinite bounds to Normal.
+    assert isinstance(sigma_prior, dist.Normal)
+    assert np.isclose(float(sigma_prior.loc), -0.5)
+    assert np.isclose(float(sigma_prior.scale), 1.0)
+    assert isinstance(tau_prior, dist.Normal)
+    assert np.isclose(float(tau_prior.loc), 0.5)
+    assert np.isclose(float(tau_prior.scale), 0.5)
+
 
 def test_build_single_object_model_mag_flux_linearized_smoke():
     obj = _make_fake_public_object()
@@ -1271,6 +1317,15 @@ def test_flux_linearized_erlang_uses_independent_per_band_blr_lags():
     )
     assert "delta_log_lag_blr_shared_raw" not in model_trace
     assert "blr_lag_band_offset_raw" not in model_trace
+    blr_prior = model_trace["log_amp_ratio_blr_raw"]["fn"]
+    assert isinstance(blr_prior, dist.Normal)
+    assert np.allclose(np.asarray(blr_prior.scale), 1.0)
+    expected_blr_loc = (
+        np.asarray(model_trace["log_amp_ratio_blr_raw"]["value"])
+        - np.asarray(model_trace["dlog_amp_blr"]["value"])
+        - 1.0
+    )
+    assert np.allclose(np.asarray(blr_prior.loc), expected_blr_loc)
     log_lags = np.asarray(model_trace["log_lag_blr"]["value"])
     assert log_lags.shape == (len(bands),)
     assert not np.all(log_lags == log_lags[0])

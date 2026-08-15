@@ -590,6 +590,44 @@ def test_apply_resume_sample_save_policy_preserves_fresh_sample_saving_choice():
     assert args.save_sample_file is True
 
 
+@pytest.mark.parametrize(
+    ("cli_args", "expected_target_accept", "expected_dense_mass"),
+    [
+        ([], 0.9, False),
+        (["--target_accept", "0.82", "--dense_mass"], 0.82, True),
+        (["--dense_mass", "--no_dense_mass"], 0.9, False),
+    ],
+)
+def test_light_curve_cli_sampler_defaults_and_overrides(
+    monkeypatch,
+    cli_args,
+    expected_target_accept,
+    expected_dense_mass,
+):
+    class ParsedArguments(Exception):
+        pass
+
+    original_parse_args = fit_lc.argparse.ArgumentParser.parse_args
+
+    def capture_parsed_arguments(parser, *args, **kwargs):
+        parsed = original_parse_args(parser, *args, **kwargs)
+        raise ParsedArguments(parsed)
+
+    monkeypatch.setattr(sys, "argv", ["fit_light_curves.py", *cli_args])
+    monkeypatch.setattr(
+        fit_lc.argparse.ArgumentParser,
+        "parse_args",
+        capture_parsed_arguments,
+    )
+
+    with pytest.raises(ParsedArguments) as exc_info:
+        fit_lc.main()
+
+    parsed = exc_info.value.args[0]
+    assert parsed.target_accept == expected_target_accept
+    assert parsed.dense_mass is expected_dense_mass
+
+
 def test_build_explicit_model_params_preserves_uv_intercepts_across_band_sets():
     lam_full = jnp.array([1700.0, 2300.0, 3000.0, 3800.0])
     lam_sub = jnp.array([2300.0, 3000.0, 3800.0])

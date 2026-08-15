@@ -2751,15 +2751,15 @@ def tau_shift_to_uv(eta_tau, lambda_center_rf, lambda_uv=2500.0):
 
 
 def eta_sigma_prior():
-    """Quasar-like wavelength scaling for the stationary continuum RMS."""
+    """Historical broad wavelength scaling for the continuum RMS."""
 
-    return dist.TruncatedNormal(-0.5, 0.3, low=-1.5, high=0.25)
+    return dist.TruncatedNormal(-0.5, 1.0)
 
 
 def eta_tau_prior():
-    """Weakly informative wavelength scaling for the DRW-style timescale."""
+    """Historical broad wavelength scaling for the continuum timescale."""
 
-    return dist.TruncatedNormal(0.2, 0.35, low=-0.5, high=1.25)
+    return dist.Normal(0.5, 0.5)
 
 
 def log_sigma_center0_prior(eta_sigma, lambda_center_rf):
@@ -3072,22 +3072,10 @@ def sample_flux_line_latent_params(
             log_lag_ratio_bc_to_blr_prior(),
         )
 
-    # In the CARMA(2,1) kernel this ratio is interpreted as the stationary RMS
-    # of the filtered BLR response relative to the UV continuum scale. Broad-
-    # band reverberation fractions are bounded below at a numerically
-    # negligible value and above at unity; the legacy exp(-1) center is
-    # retained.
     log_amp_ratio_blr_loc = line_ratio_offsets["blr_band"] - 1.0
-    log_amp_ratio_blr_low = line_ratio_offsets["blr_band"] + jnp.log(5e-3)
-    log_amp_ratio_blr_high = line_ratio_offsets["blr_band"]
 
     def blr_amp_ratio_prior():
-        return dist.TruncatedNormal(
-            log_amp_ratio_blr_loc,
-            0.75,
-            low=log_amp_ratio_blr_low,
-            high=log_amp_ratio_blr_high,
-        )
+        return dist.Normal(log_amp_ratio_blr_loc, 1.0)
 
     if mean_prior_dist is None:
         mean_prior_dist = mean_prior()
@@ -5258,22 +5246,22 @@ def main():
     parser.add_argument(
         "--target_accept",
         type=float,
-        default=0.7,
-        help="Target NUTS acceptance probability (default: 0.7).",
+        default=0.9,
+        help="Target NUTS acceptance probability (default: 0.9).",
     )
     parser.add_argument(
         "--dense_mass",
         action="store_true",
         dest="dense_mass",
-        help="Use dense mass matrix adaptation for NUTS (default).",
+        help="Use dense mass matrix adaptation for NUTS (off by default).",
     )
     parser.add_argument(
         "--no_dense_mass",
         action="store_false",
         dest="dense_mass",
-        help="Use diagonal rather than dense mass matrix adaptation for NUTS.",
+        help="Use diagonal rather than dense mass matrix adaptation for NUTS (default).",
     )
-    parser.set_defaults(dense_mass=True)
+    parser.set_defaults(dense_mass=False)
     parser.add_argument(
         "--svi_steps",
         type=int,
