@@ -508,6 +508,37 @@ def test_erlang_quasisep_gp_has_finite_likelihood():
     assert np.isfinite(float(model.log_prob(params)))
 
 
+def test_psf_agn_fraction_dilutes_covariance_in_observation_space():
+    times = jnp.array([0.0, 5.0, 12.0, 20.0])
+    band = jnp.array([0, 1, 0, 1], dtype=jnp.int32)
+    model = make_multiband_dho_blr_flux_linearized_erlang_model(
+        (times, band),
+        jnp.zeros(times.shape),
+        jnp.full(times.shape, 0.02),
+        n_band=2,
+        survey_idx=jnp.zeros(times.shape, dtype=jnp.int32),
+    )
+    params = {
+        "tau_fast_band": jnp.array([20.0, 25.0]),
+        "tau_slow_band": jnp.array([150.0, 180.0]),
+        "lag_blr": jnp.array([80.0, 90.0]),
+        "amp_cont_relflux": jnp.array([0.1, 0.12]),
+        "amp_blr_relflux": jnp.array([0.02, 0.03]),
+    }
+    undiluted = np.asarray(model._build_kernel(params).to_symm_qsm((times, band)).to_dense())
+    fractions = np.array([0.4, 0.7])
+    params["agn_fraction_by_band"] = jnp.asarray(fractions)
+    diluted = np.asarray(model._build_kernel(params).to_symm_qsm((times, band)).to_dense())
+    point_fractions = fractions[np.asarray(band)]
+
+    np.testing.assert_allclose(
+        diluted,
+        undiluted * np.outer(point_fractions, point_fractions),
+        rtol=2e-10,
+        atol=2e-12,
+    )
+
+
 def _deterministic_continuum(t):
     """A smooth, non-periodic test continuum with several time scales."""
 

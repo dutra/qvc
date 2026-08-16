@@ -44,6 +44,7 @@ import numpy as np
 _GIT_COMMIT_SENTINEL = object()
 _GIT_COMMIT_CACHE = _GIT_COMMIT_SENTINEL
 _RUN_METADATA_KEYS = {"git_commit", "run_datetime"}
+_SAMPLE_DIAGNOSTICS_GROUP = "_diagnostics"
 
 
 def _balmer_continuum_weight(
@@ -501,7 +502,7 @@ def load_all_samples_from_hdf5(file_path=None):
     samples = {}
     with h5py.File(file_path, "r") as hdf:
         for key in hdf.keys():
-            if key in _RUN_METADATA_KEYS:
+            if key in _RUN_METADATA_KEYS or not isinstance(hdf[key], h5py.Dataset):
                 continue
             samples[key] = np.array(hdf[key])
 
@@ -564,7 +565,7 @@ def load_obj_samples_from_hdf5(object_id=None, file_path=None):
     samples = {}
     with h5py.File(file_path, "r") as hdf:
         for key in hdf.keys():
-            if key in _RUN_METADATA_KEYS:
+            if key in _RUN_METADATA_KEYS or not isinstance(hdf[key], h5py.Dataset):
                 continue
             samples[key] = np.array(hdf[key])
 
@@ -590,8 +591,13 @@ def save_obj_samples_to_hdf5(samples, object_id, scalar_diagnostics=None):
         _write_hdf5_run_metadata(hdf)
         for key, value in samples.items():
             hdf.create_dataset(key, data=value)
-        for key, value in (scalar_diagnostics or {}).items():
-            hdf.create_dataset(key, data=np.asarray(value, dtype=float))
+        if scalar_diagnostics:
+            diagnostics_group = hdf.create_group(_SAMPLE_DIAGNOSTICS_GROUP)
+            for key, value in scalar_diagnostics.items():
+                diagnostics_group.create_dataset(
+                    key,
+                    data=np.asarray(value, dtype=float),
+                )
     logging.info(f"Saved samples for object_id {object_id} to {file_path}")
 
 def delete_file(file_path):
@@ -1176,10 +1182,12 @@ def diagnostics_for_per_chain_samples(
 
     ignore_keys = ('bwb_beta', 'f_host', 'log_tau_fake', 'log_sigma_fake',
                    'gate_log_temp', 'lmc_sep_raw', 'lmc_sep_left_raw', 'lmc_sep_right_raw', 'lmc_span_raw',
-                    'lmc_mu_raw', 'lmc_delta_raw', 'lmc_sep', 'lmc_sep_left', 'lmc_sep_right', 'lmc_span',)
+                    'lmc_mu_raw', 'lmc_delta_raw', 'lmc_sep', 'lmc_sep_left', 'lmc_sep_right', 'lmc_span',
+                    'agn_fraction_by_band',)
+    ignore_prefixes = ('agn_fraction_by_band_',)
 
     for k, v in flattened_per_chain.items():
-        if k in ignore_keys:
+        if k in ignore_keys or k.startswith(ignore_prefixes):
             continue
         v = np.asarray(v)
         if v.ndim != 2:

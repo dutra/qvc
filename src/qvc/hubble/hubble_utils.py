@@ -634,8 +634,9 @@ def _ensure_object_id(df):
     df["object_id"] = df["object_id"].astype(str)
     return df
 
-def populate_spectra_fit(df, spectra_fit_csvs):
-    required_cols = {
+
+CURRENT_SPECTRA_FIT_REQUIRED_COLUMNS = frozenset(
+    {
         "fit_ok",
         "fit_backend",
         "fracAGN_5100_fit",
@@ -647,15 +648,184 @@ def populate_spectra_fit(df, spectra_fit_csvs):
         "pl_slope",
         "pl_slope_err",
     }
-    required_numeric_cols = required_cols - {"fit_ok", "fit_backend"}
+)
+LEGACY_SPECTRA_FIT_REQUIRED_COLUMNS = frozenset(
+    {
+        "fit_ok",
+        "PL_slope",
+        "PL_slope_err",
+        "apparent_mag_2500",
+        "apparent_mag_2500_err",
+        "apparent_mag_2500_intrinsic",
+        "apparent_mag_2500_intrinsic_err",
+        "chi2_per_pixel",
+    }
+)
+LEGACY_HOST_FRACTION_COLUMNS = ("frac_host_5100", "f_host_5100")
+LEGACY_PROVENANCE_ONLY_COLUMNS = frozenset(
+    {"result_dir", "fig_dir", "output_path"}
+)
+LEGACY_SOURCE_ALIAS_COLUMNS = frozenset(
+    {
+        "PL_slope",
+        "PL_slope_err",
+        "apparent_mag_2500",
+        "apparent_mag_2500_err",
+        "apparent_mag_2500_intrinsic",
+        "apparent_mag_2500_intrinsic_err",
+        "chi2_per_pixel",
+    }
+)
 
-    df = _ensure_object_id(df.copy())
-    input_attrs = dict(df.attrs)
 
+def _detect_spectra_fit_schema(columns, csv_path):
+    columns = set(columns)
+    if CURRENT_SPECTRA_FIT_REQUIRED_COLUMNS.issubset(columns):
+        return "jaxsedfit_joint"
+
+    legacy_base_present = LEGACY_SPECTRA_FIT_REQUIRED_COLUMNS.issubset(columns)
+    legacy_host_present = any(
+        column in columns for column in LEGACY_HOST_FRACTION_COLUMNS
+    )
+    if legacy_base_present and legacy_host_present:
+        return "jaxqsofit_legacy"
+
+    missing_current = sorted(CURRENT_SPECTRA_FIT_REQUIRED_COLUMNS - columns)
+    missing_legacy = sorted(LEGACY_SPECTRA_FIT_REQUIRED_COLUMNS - columns)
+    if not legacy_host_present:
+        missing_legacy.append(
+            "one of " + "/".join(LEGACY_HOST_FRACTION_COLUMNS)
+        )
+    raise ValueError(
+        f"Spectra fit CSV '{csv_path}' does not match a supported schema. "
+        f"Missing current joint-JAXSEDFit columns: {missing_current}; "
+        f"missing legacy JAXQSOFit columns: {missing_legacy}."
+    )
+
+
+def _coerce_numeric_columns(frame, columns, csv_path):
+    for column in sorted(columns):
+        try:
+            frame[column] = pd.to_numeric(frame[column], errors="raise")
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"Spectra fit CSV '{csv_path}' column {column!r} must be numeric."
+            ) from exc
+    return frame
+
+
+def _normalize_legacy_spectra_fit_rows(frame, csv_path):
+    frame = frame.copy()
+    host_columns = [
+        column for column in LEGACY_HOST_FRACTION_COLUMNS if column in frame
+    ]
+    numeric_columns = (
+        LEGACY_SPECTRA_FIT_REQUIRED_COLUMNS - {"fit_ok"}
+    ) | set(host_columns)
+    frame = _coerce_numeric_columns(frame, numeric_columns, csv_path)
+
+    if len(host_columns) == 2:
+        first = frame[host_columns[0]].to_numpy(dtype=float)
+        second = frame[host_columns[1]].to_numpy(dtype=float)
+        if not np.array_equal(first, second, equal_nan=True):
+            raise ValueError(
+                f"Legacy spectra fit CSV '{csv_path}' has inconsistent "
+                f"{host_columns[0]!r} and {host_columns[1]!r} values."
+            )
+    host_fraction = frame[host_columns[0]].to_numpy(dtype=float)
+    no_host = host_fraction == -1.0
+    valid_host = no_host | (
+        np.isfinite(host_fraction)
+        & (host_fraction >= 0.0)
+        & (host_fraction <= 1.0)
+    )
+    if not np.all(valid_host):
+        invalid_count = int(np.count_nonzero(~valid_host))
+        raise ValueError(
+            f"Legacy spectra fit CSV '{csv_path}' host fraction must be -1 "
+            f"or within [0, 1]; found {invalid_count} invalid row(s)."
+        )
+
+    frame["fit_backend"] = "jaxqsofit_legacy"
+    frame["fracAGN_5100_fit"] = np.where(
+        no_host,
+        0.999,
+        1.0 - host_fraction,
+    )
+    frame["fracAGN_5100_fit_err"] = np.nan
+    frame["m_2500_dereddened"] = frame["apparent_mag_2500_intrinsic"]
+    frame["m_2500_dereddened_err"] = frame[
+        "apparent_mag_2500_intrinsic_err"
+    ]
+    frame["m_2500_attenuated_model"] = frame["apparent_mag_2500"]
+    frame["m_2500_attenuated_model_err"] = frame[
+        "apparent_mag_2500_err"
+    ]
+    frame["pl_slope"] = frame["PL_slope"]
+    frame["pl_slope_err"] = frame["PL_slope_err"]
+    frame["spectroscopy_reduced_chi2"] = frame["chi2_per_pixel"]
+    return frame.drop(columns=sorted(LEGACY_SOURCE_ALIAS_COLUMNS))
+
+
+def _legacy_duplicate_rows_are_scientifically_identical(group):
+    science_columns = [
+        column
+        for column in group.columns
+        if column not in LEGACY_PROVENANCE_ONLY_COLUMNS
+    ]
+    values = group.loc[:, science_columns].reset_index(drop=True)
+    first = values.iloc[0]
+    equal = values.eq(first, axis="columns") | (
+        values.isna() & first.isna()
+    )
+    return bool(equal.all(axis=1).all())
+
+
+def _deduplicate_legacy_spectra_fit_rows(spectra):
+    duplicate_mask = spectra["object_id"].duplicated(keep=False)
+    if not np.any(duplicate_mask):
+        return spectra
+
+    duplicate_rows = spectra.loc[duplicate_mask]
+    divergent_ids = [
+        object_id
+        for object_id, group in duplicate_rows.groupby(
+            "object_id", sort=True, dropna=False
+        )
+        if not _legacy_duplicate_rows_are_scientifically_identical(group)
+    ]
+    if divergent_ids:
+        raise ValueError(
+            "Legacy spectra-fit CSV inputs contain scientifically divergent "
+            f"duplicate object_id values: {divergent_ids[:10]}"
+        )
+
+    duplicate_count = int(np.count_nonzero(duplicate_mask)) - int(
+        duplicate_rows["object_id"].nunique()
+    )
+    print(
+        "Collapsing "
+        f"{duplicate_count} provenance-only duplicate legacy spectra-fit row(s)."
+    )
+    return spectra.drop_duplicates(subset="object_id", keep="first").copy()
+
+
+def _load_spectra_fit_rows(spectra_fit_csvs):
+    """Load, detect, and normalize supported spectra-fit CSV rows."""
+    required_numeric_cols = CURRENT_SPECTRA_FIT_REQUIRED_COLUMNS - {
+        "fit_ok",
+        "fit_backend",
+    }
+
+    if not spectra_fit_csvs:
+        raise ValueError("At least one spectra-fit CSV path is required.")
     spectra_frames = []
+    resolved_paths = []
+    detected_schemas = []
 
     for i, csv_path in enumerate(spectra_fit_csvs):
         csv_path = resolve_qvc_data_path(csv_path)
+        resolved_paths.append(str(Path(csv_path).expanduser().resolve()))
         print(f"\033[96mLoading spectra fit CSV ({i+1}/{len(spectra_fit_csvs)}): {csv_path}\033[0m")
 
         df_spectra = pd.read_csv(
@@ -672,43 +842,159 @@ def populate_spectra_fit(df, spectra_fit_csvs):
                 f"column name(s): {sorted(set(duplicate_columns))}"
             )
         df_spectra = _ensure_object_id(df_spectra)
-
-        missing_required = sorted(required_cols.difference(df_spectra.columns))
-        if missing_required:
-            raise ValueError(
-                f"Spectra fit CSV '{csv_path}' is missing required columns {missing_required}. "
-                "This Hubble workflow only accepts fit_spectra_jaxsedfit_joint.py output."
+        schema = _detect_spectra_fit_schema(df_spectra.columns, csv_path)
+        detected_schemas.append(schema)
+        if schema == "jaxsedfit_joint":
+            # Preserve the current-format loader's strict validation: malformed
+            # numeric values or unsupported backends are rejected even when a
+            # producer marked the corresponding fit unsuccessful.
+            df_spectra = _coerce_numeric_columns(
+                df_spectra,
+                required_numeric_cols,
+                csv_path,
             )
-        for column in sorted(required_numeric_cols):
-            try:
-                df_spectra[column] = pd.to_numeric(df_spectra[column], errors="raise")
-            except (TypeError, ValueError) as exc:
+            invalid_backend = df_spectra["fit_backend"].ne("jaxsedfit_joint")
+            if np.any(invalid_backend):
+                invalid_values = sorted(
+                    df_spectra.loc[invalid_backend, "fit_backend"]
+                    .astype(str)
+                    .unique()
+                )
                 raise ValueError(
-                    f"Spectra fit CSV '{csv_path}' column {column!r} must be numeric."
-                ) from exc
-        invalid_backend = df_spectra["fit_backend"].ne("jaxsedfit_joint")
-        if np.any(invalid_backend):
-            invalid_values = sorted(
-                df_spectra.loc[invalid_backend, "fit_backend"].astype(str).unique()
-            )
-            raise ValueError(
-                f"Spectra fit CSV '{csv_path}' contains unsupported fit_backend "
-                f"value(s) {invalid_values}; expected only 'jaxsedfit_joint'."
-            )
+                    f"Spectra fit CSV '{csv_path}' contains unsupported fit_backend "
+                    f"value(s) {invalid_values}; expected only 'jaxsedfit_joint'."
+                )
         fit_ok = df_spectra["fit_ok"].astype(str).str.lower().eq("true")
         failed_count = int(np.count_nonzero(~fit_ok))
         if failed_count:
             print(f"Skipping {failed_count} unsuccessful SED fit(s) from {csv_path}.")
-        spectra_frames.append(df_spectra.loc[fit_ok].copy())
+        successful = df_spectra.loc[fit_ok].copy()
+        if schema == "jaxqsofit_legacy":
+            successful = _normalize_legacy_spectra_fit_rows(
+                successful,
+                csv_path,
+            )
+        spectra_frames.append(successful)
+
+    unique_schemas = sorted(set(detected_schemas))
+    if len(unique_schemas) != 1:
+        schema_by_path = ", ".join(
+            f"{path}={schema}"
+            for path, schema in zip(resolved_paths, detected_schemas)
+        )
+        raise ValueError(
+            "Cannot mix current joint-JAXSEDFit and legacy JAXQSOFit CSV "
+            f"inputs in one Hubble population: {schema_by_path}"
+        )
 
     spectra = pd.concat(spectra_frames, ignore_index=True)
+    schema = unique_schemas[0]
     duplicate_ids = spectra["object_id"].duplicated(keep=False)
     if np.any(duplicate_ids):
-        duplicate_values = sorted(spectra.loc[duplicate_ids, "object_id"].unique())
+        if schema == "jaxqsofit_legacy":
+            spectra = _deduplicate_legacy_spectra_fit_rows(spectra)
+        else:
+            duplicate_values = sorted(
+                spectra.loc[duplicate_ids, "object_id"].unique()
+            )
+            raise ValueError(
+                "SED-fit CSV inputs contain duplicate object_id values: "
+                f"{duplicate_values[:10]}"
+            )
+    spectra.attrs["spectra_fit_schema"] = schema
+    spectra.attrs["spectra_fit_backend"] = schema
+    return spectra, tuple(resolved_paths)
+
+
+def load_completeness_parent_spectra_fit(
+    spectra_fit_csvs,
+):
+    """Load the independent observed population used by 2D completeness.
+
+    This loader intentionally does not merge against a light-curve HDF5 file:
+    the completeness population is defined by all successful current-format
+    joint SED fits in the supplied CSV chunks.
+    """
+
+    spectra, resolved_paths = _load_spectra_fit_rows(spectra_fit_csvs)
+    required_parent_columns = {
+        "object_id",
+        "z",
+        "ra",
+        "dec",
+        "m_2500_dereddened",
+        "m_2500_dereddened_err",
+        "m_2500_attenuated_model",
+        "m_2500_attenuated_model_err",
+    }
+    missing = sorted(required_parent_columns - set(spectra.columns))
+    if missing:
         raise ValueError(
-            "SED-fit CSV inputs contain duplicate object_id values: "
-            f"{duplicate_values[:10]}"
+            "Completeness-parent spectra-fit CSV input is missing required "
+            f"column(s): {missing}."
         )
+
+    numeric_columns = sorted(required_parent_columns - {"object_id"})
+    parent = spectra.loc[:, ["object_id", *numeric_columns]].copy()
+    for column in numeric_columns:
+        try:
+            parent[column] = pd.to_numeric(parent[column], errors="raise")
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"Completeness-parent column {column!r} must be numeric."
+            ) from exc
+        values = parent[column].to_numpy(dtype=float)
+        if not np.all(np.isfinite(values)):
+            invalid_count = int(np.count_nonzero(~np.isfinite(values)))
+            raise ValueError(
+                f"Completeness-parent column {column!r} must be finite for all "
+                f"successful SED fits; found {invalid_count} invalid row(s)."
+            )
+
+    for column in (
+        "m_2500_dereddened_err",
+        "m_2500_attenuated_model_err",
+    ):
+        values = parent[column].to_numpy(dtype=float)
+        if np.any(values < 0.0):
+            invalid_count = int(np.count_nonzero(values < 0.0))
+            raise ValueError(
+                f"Completeness-parent column {column!r} must be non-negative; "
+                f"found {invalid_count} invalid row(s)."
+            )
+
+    if parent.empty:
+        raise ValueError(
+            "Completeness-parent spectra-fit CSV input contains no successful SED fits."
+        )
+    parent.attrs["completeness_parent_spectra_fit_csv"] = resolved_paths
+    schema = spectra.attrs["spectra_fit_schema"]
+    parent.attrs["spectra_fit_schema"] = schema
+    parent.attrs["spectra_fit_backend"] = schema
+    parent.attrs["completeness_parent_rule"] = {
+        "jaxsedfit_joint": "all_fit_ok_current_jaxsedfit_joint_rows_v1",
+        "jaxqsofit_legacy": "all_fit_ok_legacy_jaxqsofit_rows_v1",
+    }[schema]
+    print(
+        "Loaded independent completeness parent with "
+        f"{len(parent)} successful SED fits from {len(resolved_paths)} CSV file(s)."
+    )
+    return parent
+
+
+def populate_spectra_fit(df, spectra_fit_csvs):
+    df = _ensure_object_id(df.copy())
+    input_attrs = dict(df.attrs)
+    spectra, _ = _load_spectra_fit_rows(spectra_fit_csvs)
+
+    # The reduced chi-square used by the Hubble quality cut must describe the
+    # explicitly supplied spectra fit, not a potentially stale value embedded
+    # in an older light-curve HDF5 file.
+    authoritative_spectra_fit_columns = {"spectroscopy_reduced_chi2"}
+    df = df.drop(
+        columns=sorted(authoritative_spectra_fit_columns & set(df.columns)),
+        errors="ignore",
+    )
 
     conflicting_columns = sorted(
         (set(spectra.columns) & set(df.columns)) - {"object_id"}
@@ -733,6 +1019,8 @@ def populate_spectra_fit(df, spectra_fit_csvs):
     out.attrs.update(input_attrs)
     out.attrs["spectra_fit_columns"] = spectra_fit_columns
     out.attrs["spectra_fit_discarded_columns"] = tuple(conflicting_columns)
+    out.attrs["spectra_fit_schema"] = spectra.attrs["spectra_fit_schema"]
+    out.attrs["spectra_fit_backend"] = spectra.attrs["spectra_fit_backend"]
     print(f"Matched {len(out)} successful SED fits to {len(df)} AGN light-curve rows.")
     if "alpha_lambda" not in out.columns:
         out["alpha_lambda"] = out["pl_slope"]

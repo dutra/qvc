@@ -53,6 +53,9 @@ from qvc.light_curve.fit_light_curves import (
     posterior_median_mean_function,
     binned_loo_residual_pair_correlation,
     compute_loo_short_lag_residual_diagnostics,
+    compute_hubble_chain_diagnostics,
+    numeric_scalar_diagnostics,
+    summarize_nuts_extra_fields,
 )
 from qvc.light_curve.multiband_model_dho_blr_erlang import (
     make_multiband_dho_blr_flux_linearized_erlang_model,
@@ -218,6 +221,196 @@ def test_svi_then_nuts_refinement_requires_svi_backend():
         )
 
 
+def test_hubble_chain_diagnostics_match_hubble_observable_transforms():
+    rng = np.random.default_rng(8)
+    log_sigma_uv = rng.normal(-1.3, 0.2, size=(4, 500))
+    log_tau_uv = rng.normal(5.4, 0.3, size=(4, 500))
+
+    diagnostics = compute_hubble_chain_diagnostics(
+        {
+            "log_sigma_uv": log_sigma_uv,
+            "log_tau_uv": log_tau_uv,
+        },
+        np.array([1800.0, 2500.0, 3500.0]),
+        z=1.7,
+        model_variant="mag_flux_linearized_erlang",
+    )
+
+    expected_sigma = float(
+        np.asarray(fit_lc.numpyro_split_gelman_rubin(log_sigma_uv / np.log(10.0)))
+    )
+    expected_tau = float(
+        np.asarray(
+            fit_lc.numpyro_split_gelman_rubin(
+                log_tau_uv / np.log(10.0) - np.log10(2.7)
+            )
+        )
+    )
+    assert diagnostics["log_sigma_uv_rhat"] == expected_sigma
+    assert diagnostics["log_tau_uv_rf_rhat"] == expected_tau
+    assert set(diagnostics) == {
+        "log_sigma_uv_rhat",
+        "log_sigma_uv_ess",
+        "log_tau_uv_rf_rhat",
+        "log_tau_uv_rf_ess",
+    }
+
+
+def test_hubble_chain_diagnostics_remain_available_for_one_chain():
+    rng = np.random.default_rng(9)
+    log_sigma_uv = rng.normal(-1.3, 0.2, size=(1, 500))
+    log_tau_uv = rng.normal(5.4, 0.3, size=(1, 500))
+
+    diagnostics = compute_hubble_chain_diagnostics(
+        {
+            "log_sigma_uv": log_sigma_uv,
+            "log_tau_uv": log_tau_uv,
+        },
+        np.array([1800.0, 2500.0, 3500.0]),
+        z=1.7,
+        model_variant="mag_flux_linearized_erlang",
+    )
+
+    assert np.isnan(diagnostics["log_sigma_uv_rhat"])
+    assert np.isnan(diagnostics["log_tau_uv_rf_rhat"])
+    assert diagnostics["log_sigma_uv_ess"] == float(
+        np.asarray(fit_lc.numpyro_effective_sample_size(log_sigma_uv / np.log(10.0)))
+    )
+    assert np.isfinite(diagnostics["log_tau_uv_rf_ess"])
+
+
+def test_print_hubble_convergence_diagnostics_includes_multichain_and_one_chain_health(
+    capsys,
+):
+    assert hasattr(fit_lc, "print_hubble_convergence_diagnostics")
+
+    fit_lc.print_hubble_convergence_diagnostics(
+        "multi",
+        {
+            "log_sigma_uv_rhat": 1.026,
+            "log_sigma_uv_ess": 236.9,
+            "log_tau_uv_rf_rhat": 1.028,
+            "log_tau_uv_rf_ess": 179.0,
+            "sampler_nchains": 4,
+            "sampler_nsamp": 250,
+            "sampler_nwarm": 250,
+            "sampler_target_accept": 0.7,
+            "sampler_max_tree_depth": 8,
+            "accept_prob": 0.724,
+            "num_divergences": 24,
+            "nuts_step_size_min": 0.135,
+            "nuts_num_steps_median": 63.0,
+            "nuts_max_tree_depth_fraction_worst_chain": 0.076,
+        },
+    )
+    multi_output = capsys.readouterr().out
+    assert "[multi] Hubble-input convergence diagnostics (4 chains x 250 draws, 250 warmup):" in multi_output
+    assert "log_sigma_uv: R-hat=1.026, ESS=236.9" in multi_output
+    assert "log_tau_uv_rf: R-hat=1.028, ESS=179.0" in multi_output
+    assert (
+        "NUTS health: accept=0.724 (target=0.700), divergences=24, "
+        "min_step=0.135, median_steps=63.0, "
+        "max_depth=7.6% worst chain (depth=8)"
+    ) in multi_output
+
+    fit_lc.print_hubble_convergence_diagnostics(
+        "single",
+        {
+            "log_sigma_uv_rhat": np.nan,
+            "log_sigma_uv_ess": 83.2,
+            "log_tau_uv_rf_rhat": np.nan,
+            "log_tau_uv_rf_ess": 71.4,
+            "sampler_nchains": 1,
+            "sampler_nsamp": 250,
+            "sampler_nwarm": 250,
+            "accept_prob": 0.81,
+            "num_divergences": 0,
+        },
+    )
+    single_output = capsys.readouterr().out
+    assert "1 chain x 250 draws, 250 warmup; R-hat unavailable" in single_output
+    assert "log_sigma_uv: R-hat=n/a, ESS=83.2" in single_output
+    assert "log_tau_uv_rf: R-hat=n/a, ESS=71.4" in single_output
+    assert "NUTS health: accept=0.810, divergences=0" in single_output
+    assert "nan" not in single_output.lower()
+    assert "converged=" not in single_output.lower()
+    assert "pass=" not in single_output.lower()
+
+    fit_lc.print_hubble_convergence_diagnostics("missing", {})
+    missing_output = capsys.readouterr().out
+    assert "[missing] Hubble-input convergence diagnostics: not available" in missing_output
+
+    fit_lc.print_hubble_convergence_diagnostics(
+        "short",
+        {
+            "sampler_nchains": 1,
+            "sampler_nsamp": 2,
+            "accept_prob": 0.8,
+            "num_divergences": 1,
+            "nuts_step_size_min": 0.02,
+        },
+    )
+    short_output = capsys.readouterr().out
+    assert "[short] Hubble-input convergence diagnostics: not available" in short_output
+    assert "NUTS health: accept=0.800, divergences=1, min_step=0.02" in short_output
+
+
+def test_summarize_nuts_extra_fields_tracks_step_size_and_tree_depth():
+    diagnostics = summarize_nuts_extra_fields(
+        {
+            "accept_prob": np.array([[0.8, 0.9], [0.7, 0.8]]),
+            "diverging": np.array([[False, True], [False, False]]),
+            "adapt_state.step_size": np.array([[0.01, 0.01], [0.02, 0.02]]),
+            "num_steps": np.array([[1, 255], [63, 128]]),
+        },
+        max_tree_depth=8,
+    )
+
+    assert diagnostics["nuts_step_size_min"] == 0.01
+    assert diagnostics["nuts_num_steps_median"] == 95.5
+    assert diagnostics["nuts_max_tree_depth_fraction_worst_chain"] == 0.5
+    assert diagnostics["num_divergences"] == 1
+    assert set(diagnostics) == {
+        "accept_prob",
+        "num_divergences",
+        "nuts_step_size_min",
+        "nuts_num_steps_median",
+        "nuts_max_tree_depth_fraction_worst_chain",
+    }
+
+
+def test_summarize_nuts_extra_fields_supports_one_chain():
+    diagnostics = summarize_nuts_extra_fields(
+        {
+            "accept_prob": np.array([[0.8, 0.9, 0.85, 0.75]]),
+            "diverging": np.array([[False, False, True, False]]),
+            "adapt_state.step_size": np.full((1, 4), 0.012),
+            "num_steps": np.array([[63, 128, 255, 31]]),
+        },
+        max_tree_depth=8,
+    )
+
+    assert np.isclose(diagnostics.pop("accept_prob"), 0.825)
+    assert diagnostics == {
+        "num_divergences": 1,
+        "nuts_step_size_min": 0.012,
+        "nuts_num_steps_median": 95.5,
+        "nuts_max_tree_depth_fraction_worst_chain": 0.5,
+    }
+
+
+def test_numeric_scalar_diagnostics_excludes_arrays_and_strings():
+    assert numeric_scalar_diagnostics(
+        {
+            "log_sigma_uv_rhat": np.float64(1.002),
+            "sampler_nchains": 1,
+            "unselected_numeric_diagnostic": 123.0,
+            "acf": np.array([1.0, 0.5]),
+            "strategy": "svi_then_nuts",
+        }
+    ) == {"log_sigma_uv_rhat": 1.002, "sampler_nchains": 1.0}
+
+
 def test_model_params_at_values_materializes_deterministic_sites():
     def model():
         latent = fit_lc.numpyro.sample("latent", fit_lc.dist.Normal(0.0, 1.0))
@@ -370,8 +563,13 @@ def test_save_obj_samples_to_hdf5_writes_loo_scalar_diagnostics(monkeypatch, tmp
     output_path = tmp_path / "results/samples/loo_test/object_run.h5"
     with h5py.File(output_path, "r") as hdf:
         np.testing.assert_array_equal(hdf["lag_blr"][:], np.array([1.0, 2.0]))
-        assert hdf["loo_chi2_eff"][()] == 1.25
-        assert np.isclose(hdf["loo_rms"][()], np.sqrt(1.25))
+        assert hdf["_diagnostics/loo_chi2_eff"][()] == 1.25
+        assert np.isclose(hdf["_diagnostics/loo_rms"][()], np.sqrt(1.25))
+
+    loaded = multiband_fit_utils.load_obj_samples_from_hdf5(
+        file_path=str(output_path)
+    )
+    assert set(loaded) == {"lag_blr"}
 
 
 def test_apply_resume_sample_save_policy_disables_sample_saving_on_resume():
@@ -390,6 +588,44 @@ def test_apply_resume_sample_save_policy_preserves_fresh_sample_saving_choice():
 
     assert returned is args
     assert args.save_sample_file is True
+
+
+@pytest.mark.parametrize(
+    ("cli_args", "expected_target_accept", "expected_dense_mass"),
+    [
+        ([], 0.9, False),
+        (["--target_accept", "0.82", "--dense_mass"], 0.82, True),
+        (["--dense_mass", "--no_dense_mass"], 0.9, False),
+    ],
+)
+def test_light_curve_cli_sampler_defaults_and_overrides(
+    monkeypatch,
+    cli_args,
+    expected_target_accept,
+    expected_dense_mass,
+):
+    class ParsedArguments(Exception):
+        pass
+
+    original_parse_args = fit_lc.argparse.ArgumentParser.parse_args
+
+    def capture_parsed_arguments(parser, *args, **kwargs):
+        parsed = original_parse_args(parser, *args, **kwargs)
+        raise ParsedArguments(parsed)
+
+    monkeypatch.setattr(sys, "argv", ["fit_light_curves.py", *cli_args])
+    monkeypatch.setattr(
+        fit_lc.argparse.ArgumentParser,
+        "parse_args",
+        capture_parsed_arguments,
+    )
+
+    with pytest.raises(ParsedArguments) as exc_info:
+        fit_lc.main()
+
+    parsed = exc_info.value.args[0]
+    assert parsed.target_accept == expected_target_accept
+    assert parsed.dense_mass is expected_dense_mass
 
 
 def test_build_explicit_model_params_preserves_uv_intercepts_across_band_sets():
@@ -541,6 +777,8 @@ def test_carma21_numpyro_model_trace_materializes_likelihood_and_uv_outputs():
         "mags_means": np.array([20.0, 20.0]),
         "bands": ["g", "r"],
         "survey_names": ("sdss", "ps1", "ztf"),
+        "agn_fraction_by_band": np.array([0.55, 0.75]),
+        "agn_fraction_err_by_band": np.array([0.0, 0.08]),
     }
     model = build_single_object_model_mag_flux_linearized(
         obj,
@@ -559,10 +797,17 @@ def test_carma21_numpyro_model_trace_materializes_likelihood_and_uv_outputs():
         "log_tau_uv",
         "log_tau_perturb_uv",
         "tau_perturb",
+        "agn_fraction_by_band",
         "loglike",
     ):
         assert key in sites
         assert np.all(np.isfinite(np.asarray(sites[key]["value"])))
+    assert "_agn_fraction_uncertain" not in sites
+    assert sites["agn_fraction_by_band"]["type"] == "deterministic"
+    np.testing.assert_allclose(
+        np.asarray(sites["agn_fraction_by_band"]["value"]),
+        [0.55, 0.75],
+    )
 
 
 def test_flux_line_ratio_offsets_include_static_igm_transmission():
@@ -776,6 +1021,68 @@ def test_make_lc_centers_with_inverse_variance_weighted_mean():
     assert np.isclose(lc["mags_mean_errs"][0], 1.0 / np.sqrt(125.0))
     g_values = np.asarray(lc["y"])[np.asarray(lc["band_idx"]) == 0]
     np.testing.assert_allclose(g_values, [-0.2, 0.8])
+
+
+def test_make_lc_preserves_aligned_psf_dilution_priors():
+    obj = _make_object(z=1.0)
+    obj["psf_constant_flux_corrected"] = True
+    for band, fraction, error in zip("ugriz", [0.4, 0.5, 0.6, 0.7, 0.8], [0.04] * 5):
+        obj[f"f_AGN_psf_{band}"] = fraction
+        obj[f"f_AGN_psf_{band}_err"] = error
+
+    lc = make_lc(obj, bands=["u", "g", "r", "i", "z"], drop_band_lyman_alpha=False)
+
+    assert lc["bands"] == ["u", "g", "r", "i"]
+    np.testing.assert_allclose(lc["agn_fraction_by_band"], [0.4, 0.5, 0.6, 0.7])
+    np.testing.assert_allclose(lc["agn_fraction_err_by_band"], [0.04] * 4)
+
+
+def test_make_lc_uses_the_sed_fraction_reference_after_time_cut():
+    obj = _make_object(z=1.0)
+    obj["psf_constant_flux_corrected"] = True
+    obj["psf_fraction_reference_mags_by_band"] = {
+        band: 19.5 for band in "ugriz"
+    }
+    obj["psf_fraction_reference_magerrs_by_band"] = {
+        band: 0.02 for band in "ugriz"
+    }
+    for band in "ugriz":
+        obj[f"f_AGN_psf_{band}"] = 0.6
+        obj[f"f_AGN_psf_{band}_err"] = 0.05
+
+    lc = make_lc(obj, bands=["g", "r", "i", "z"], drop_band_lyman_alpha=False)
+
+    assert lc["mags_means"][0] == pytest.approx(19.5)
+    assert lc["mags_mean_errs"][0] == pytest.approx(0.02)
+    g_values = np.asarray(lc["y"])[np.asarray(lc["band_idx"]) == 0]
+    np.testing.assert_allclose(g_values, np.asarray(obj["mags"]["g"]) - 19.5)
+
+
+def test_make_lc_uses_agn_reference_after_mag_linear_flux_subtraction():
+    obj = _make_object(z=1.0)
+    obj["psf_constant_flux_corrected"] = True
+    obj["psf_constant_flux_mode"] = "subtracted"
+    obj["psf_corrected_reference_mags_by_band"] = {"g": 20.75}
+    obj["psf_corrected_reference_magerrs_by_band"] = {"g": 0.04}
+    obj["mags"]["g"] = np.array([20.75, 20.95])
+    obj["f_AGN_psf_g"] = 0.5
+    obj["f_AGN_psf_g_err"] = 0.05
+
+    lc = make_lc(obj, bands=["g"], drop_band_lyman_alpha=False)
+
+    assert lc["mags_means"][0] == pytest.approx(20.75)
+    assert lc["mags_mean_errs"][0] == pytest.approx(0.04)
+    np.testing.assert_allclose(np.asarray(lc["y"]), [0.0, 0.2])
+
+
+def test_make_lc_rejects_missing_dilution_prior_for_retained_band():
+    obj = _make_object(z=1.0)
+    obj["psf_constant_flux_corrected"] = True
+    obj["f_AGN_psf_g"] = 0.5
+    obj["f_AGN_psf_g_err"] = 0.05
+
+    with pytest.raises(ValueError, match="fitted band.*u, r, i"):
+        make_lc(obj, bands=["u", "g", "r", "i", "z"], drop_band_lyman_alpha=False)
 
 
 def test_make_lc_can_hard_drop_lya_affected_bands():

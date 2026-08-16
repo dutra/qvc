@@ -377,6 +377,15 @@ class ContiBLRErlangRelativeFluxModel(ContiBLRRelativeFlux_SHO_Model):
         amp_blr = jnp.asarray(
             params["amp_blr_relflux"] if "amp_blr_relflux" in params else params["amp_blr"]
         )
+        agn_fraction = jnp.asarray(
+            params.get("agn_fraction_by_band", jnp.ones_like(amp_cont))
+        )
+        amp_cont = amp_cont * agn_fraction
+        if amp_blr.ndim > agn_fraction.ndim:
+            agn_fraction_blr = agn_fraction[..., None]
+        else:
+            agn_fraction_blr = agn_fraction
+        amp_blr = amp_blr * agn_fraction_blr
         return ErlangResponseDHOQS(
             tau_fast=tau_fast,
             tau_slow=tau_slow,
@@ -387,7 +396,15 @@ class ContiBLRErlangRelativeFluxModel(ContiBLRRelativeFlux_SHO_Model):
         )
 
     def _likelihood_inputs(self, params):
-        means = partial(self.get_mean, self.zero_mean, params)
+        base_means = partial(self.get_mean, self.zero_mean, params)
+        agn_fraction = jnp.asarray(
+            params.get("agn_fraction_by_band", jnp.ones(self.nBand))
+        )
+
+        def means(X):
+            band = jnp.asarray(X[1], dtype=jnp.int32)
+            return base_means(X) * agn_fraction[band]
+
         X, inds = self.lag_transform(False, params, self.X)
         t, band = X
         diags = self.diag
