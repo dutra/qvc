@@ -18,12 +18,9 @@ from tqdm import tqdm
 
 from qvc.hubble.cuts import LOG_SIGMA_UV_MAX, LOG_SIGMA_UV_MIN, LOG_TAU_UV_RF_MAX, LOG_TAU_UV_RF_MIN
 from qvc.hubble.hubble_utils import resolve_qvc_data_path
-from qvc.light_curve.fit_light_curves import make_lc
 from qvc.light_curve.multiband_generate_lc import (
     MACLEOD_BANDS,
     MACLEOD_COLUMNS,
-    concat_light_curves,
-    populate_sdss_fields,
     read_macleod_band,
     resolve_stone_s82_matches,
 )
@@ -307,6 +304,9 @@ def load_and_merge_h5(file_list, expected_n, load_n, workers=1):
 def attach_variability_metrics(rows):
     """Reload raw light curves and attach authoritative corrected variability metrics."""
 
+    from qvc.light_curve.fit_light_curves import make_lc
+    from qvc.light_curve.multiband_generate_lc import concat_light_curves
+
     object_ids = [str(row["object_id"]) for row in rows if row.get("object_id") not in (None, "")]
     unique_object_ids = list(dict.fromkeys(object_ids))
     reloaded = concat_light_curves(filter_object_ids=unique_object_ids, progress_bar=False)
@@ -362,8 +362,53 @@ def build_stone_identity_plot_path(prefix: str, base_dir: str) -> str:
     return str(base_path.parent / "plots" / prefix / "sigma_tau_identity_grid.pdf")
 
 
+def _identity_fit_fields(bands, *, include_coordinates=False):
+    fields = ["object_id"]
+    if include_coordinates:
+        fields.extend(("ra", "dec"))
+    for band in bands:
+        fields.extend(
+            (
+                f"log_sigma_band_{band}",
+                f"log_sigma_band_{band}_err",
+                f"log_tau_band_{band}_RF",
+                f"log_tau_band_{band}_RF_err",
+            )
+        )
+    return fields
+
+
+def _build_identity_fit_frame(rows, bands, *, include_coordinates=False):
+    """Build the narrow fit table needed by sigma/tau identity plots."""
+
+    fields = _identity_fit_fields(
+        bands,
+        include_coordinates=include_coordinates,
+    )
+    if not rows:
+        return pd.DataFrame(columns=fields)
+
+    missing = sorted(
+        {
+            field
+            for row in rows
+            for field in fields
+            if field not in row
+        }
+    )
+    if missing:
+        raise KeyError(
+            "Merged light-curve rows are missing fields required for the "
+            f"sigma/tau identity plot: {missing}"
+        )
+    return pd.DataFrame(
+        {field: [row[field] for row in rows] for field in fields},
+        columns=fields,
+    )
+
+
 def build_stone_identity_plot_data(rows, stone_fits_path=None, s82_catalog_path=None, max_sep_arcsec=1.0):
-    df_rows = pd.DataFrame(rows).copy()
+    df_rows = _build_identity_fit_frame(rows, STONE_IDENTITY_BANDS)
     if df_rows.empty:
         return df_rows
 
@@ -621,7 +666,11 @@ def build_macleod_identity_plot_data(rows, macleod_dir=None, max_sep_arcsec=1.0)
     else:
         macleod_dir = str(macleod_dir)
 
-    df_rows = pd.DataFrame(rows).copy()
+    df_rows = _build_identity_fit_frame(
+        rows,
+        MACLEOD_IDENTITY_BANDS,
+        include_coordinates=True,
+    )
     if df_rows.empty:
         return {}
 
@@ -741,7 +790,11 @@ def build_suberlak_identity_plot_data(rows, suberlak_path=None, max_sep_arcsec=1
     else:
         suberlak_path = str(suberlak_path)
 
-    df_rows = pd.DataFrame(rows).copy()
+    df_rows = _build_identity_fit_frame(
+        rows,
+        SUBERLAK_IDENTITY_BANDS,
+        include_coordinates=True,
+    )
     if df_rows.empty:
         return df_rows
 
@@ -1080,6 +1133,8 @@ def main(argv=None):
 
     if not args.skip_populate_sdss and all_quasars:
         print("Populating SDSS fields...")
+        from qvc.light_curve.multiband_generate_lc import populate_sdss_fields
+
         all_quasars = populate_sdss_fields(all_quasars)
         if all_quasars and "plate" in all_quasars[0]:
             print(all_quasars[0]["plate"])

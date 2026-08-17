@@ -10,6 +10,7 @@ import hpc_scripts.sfitlc as sfitlc
 from hpc_scripts.sfitlc import (
     JobConfig,
     build_job_configs,
+    build_merge_sbatch_script,
     build_sbatch_script,
     parse_args,
     validate_chunking,
@@ -206,3 +207,34 @@ def test_stone_linear_mode_rejects_non_stone_fit(monkeypatch, capsys):
 
     assert exc_info.value.code == 2
     assert "requires --fit stone" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "plot_flag",
+    ("stone", "macleod"),
+)
+def test_comparison_merge_reuses_saved_shard_fields(plot_flag):
+    script = build_merge_sbatch_script(
+        "comparison_prefix",
+        plot_flag,
+        _args(fit=plot_flag),
+        enable_stone_identity_plot=plot_flag == "stone",
+        enable_macleod_identity_plot=plot_flag == "macleod",
+        enable_suberlak_identity_plot=plot_flag == "macleod",
+    )
+
+    assert "--skip-populate-sdss" in script
+    assert "--compute-variability" not in script
+    assert "#SBATCH --mem=20G" in script
+
+
+def test_regular_merge_keeps_variability_recomputation():
+    script = build_merge_sbatch_script(
+        "chisq_prefix",
+        "chisq",
+        _args(fit="chisq"),
+    )
+
+    assert "--compute-variability" in script
+    assert "--skip-populate-sdss" not in script
+    assert "#SBATCH --mem=40G" in script

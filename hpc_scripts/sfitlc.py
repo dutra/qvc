@@ -450,7 +450,16 @@ def build_merge_sbatch_script(
 ) -> str:
     log_dir = LOG_ROOT / prefix
     log_pattern = log_dir / f"{prefix}-merge-%j.txt"
-    merge_cmd = f'python -m qvc.light_curve.merge_results "{prefix}" --compute-variability'
+    comparison_only = enable_stone_identity_plot or enable_macleod_identity_plot
+    merge_mode_flag = (
+        "--skip-populate-sdss"
+        if comparison_only
+        else "--compute-variability"
+    )
+    merge_memory = "20G" if comparison_only else "40G"
+    merge_cmd = (
+        f'python -m qvc.light_curve.merge_results "{prefix}" {merge_mode_flag}'
+    )
     if enable_stone_identity_plot:
         merge_cmd += (
             " --plot-stone-sigma-tau-identity-grid"
@@ -471,7 +480,7 @@ def build_merge_sbatch_script(
 #SBATCH --output={log_pattern}
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=1
-#SBATCH --mem=40G
+#SBATCH --mem={merge_memory}
 #SBATCH --partition={args.partition}
 #SBATCH --time={args.time}
 {build_mail_lines()}\
