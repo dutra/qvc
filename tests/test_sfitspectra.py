@@ -1,5 +1,7 @@
+import base64
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -114,10 +116,70 @@ def _sbatch_calls(calls_path):
     return json.loads(calls_path.read_text(encoding="utf-8"))
 
 
+def _fresh_workspace(tmp_path, csv_text="object_id\n1\n2\n"):
+    root = tmp_path / "repo"
+    script_path = root / "hpc_scripts" / "sfitspectra.xsh"
+    script_path.parent.mkdir(parents=True)
+    shutil.copy2(SCRIPT, script_path)
+
+    qvc_dir = root / "src" / "qvc"
+    qvc_dir.mkdir(parents=True)
+    shutil.copy2(SCRIPT.parents[1] / "src" / "qvc" / "__init__.py", qvc_dir / "__init__.py")
+    shutil.copy2(SCRIPT.parents[1] / "src" / "qvc" / "provenance.py", qvc_dir / "provenance.py")
+
+    data_dir = root / "data"
+    data_dir.mkdir()
+    csv_path = data_dir / "objects.csv"
+    csv_path.write_text(csv_text, encoding="utf-8")
+    (data_dir / "jul14_master_input_file_chisqgt20_bandwagon_photometry.csv").write_text(
+        "object_id\n", encoding="utf-8"
+    )
+
+    fake_bin = root / "fake-bin"
+    fake_bin.mkdir()
+    calls_path = root / "sbatch-calls.json"
+    _write_executable(
+        fake_bin / "git",
+        """#!/usr/bin/env python3
+print("abc1234")
+""",
+    )
+    _write_executable(
+        fake_bin / "sbatch",
+        """#!/usr/bin/env python3
+import json
+import os
+import sys
+from pathlib import Path
+
+path = Path(os.environ["FAKE_SBATCH_CALLS"])
+calls = json.loads(path.read_text(encoding="utf-8")) if path.exists() else []
+calls.append(sys.argv[1:])
+path.write_text(json.dumps(calls), encoding="utf-8")
+""",
+    )
+    env = os.environ.copy()
+    env["PATH"] = str(fake_bin) + os.pathsep + env["PATH"]
+    env["FAKE_SBATCH_CALLS"] = str(calls_path)
+    return root, script_path, csv_path, calls_path, env
+
+
+def _run_fresh(root, script_path, env, *args):
+    return subprocess.run(
+        [sys.executable, str(script_path), *args],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
 def test_sfitspectra_uses_csv_object_ids_without_h5_membership_filtering():
     source = SCRIPT.read_text(encoding="utf-8")
 
-    assert 'chisq_csv = "results/data/variability_chi_sq_red_g_gt_20.csv"' in source
+    assert '"--chisq-csv"' in source
+    assert "chisq_path = Path(cli_args.chisq_csv).expanduser()" in source
     assert "submit_object_ids = requested_object_ids" in source
     assert "--filter_object_id" in source
     for legacy_text in (
@@ -164,6 +226,7 @@ def test_sfitspectra_accepts_cli_overrides_and_builds_timestamped_spectrafit_job
     source = SCRIPT.read_text(encoding="utf-8")
 
     assert 'parser.add_argument(\n    "--description",' in source
+    assert 'parser.add_argument(\n    "--chisq-csv",' in source
     assert 'parser.add_argument(\n    "--fit-script",' in source
     assert "fit_script = cli_args.fit_script" in source
     assert 'parser.add_argument(\n    "--sed-photometry-path",' not in source
@@ -177,6 +240,105 @@ def test_sfitspectra_accepts_cli_overrides_and_builds_timestamped_spectrafit_job
     assert 'fig_dir = f"plots/jaxqsofit/{prefix}"' in source
     assert "#SBATCH --job-name={job_name}" in source
     assert 'export {PROVENANCE_ENV}="{encoded_submission}"' in source
+
+
+@pytest.mark.parametrize("path_mode", ["relative", "absolute"])
+def test_sfitspectra_fresh_run_uses_explicit_csv_and_description(tmp_path, path_mode):
+    root, script_path, csv_path, calls_path, env = _fresh_workspace(
+        tmp_path,
+        "object_id,unused\n1,a\n2.0,b\n1,duplicate\n 3 ,c\n4,d\n5,e\n",
+    )
+    csv_argument = str(csv_path if path_mode == "absolute" else csv_path.relative_to(root))
+
+    result = _run_fresh(
+        root,
+        script_path,
+        env,
+        "--chisq-csv",
+        csv_argument,
+        "--description",
+        "Nested N8000",
+    )
+
+    assert result.returncode == 0, result.stderr
+    submit_dir = root / "hpc_scripts" / "submit" / "jaxqsofit"
+    manifests = list(submit_dir.glob("*_object_ids.txt"))
+    scripts = list(submit_dir.glob("submit_*.sbatch"))
+    assert len(manifests) == len(scripts) == 1
+    assert manifests[0].read_text(encoding="utf-8").splitlines() == ["1", "2", "3", "4", "5"]
+    assert re.fullmatch(
+        r"[a-z]{3}\d{2}_\d{4}(?:am|pm)_spectrafit_abc1234_Nested_N8000_object_ids\.txt",
+        manifests[0].name,
+    )
+    generated = scripts[0].read_text(encoding="utf-8")
+    assert "#SBATCH --array=0-1" in generated
+    encoded = re.search(
+        r'export QVC_SUBMISSION_PROVENANCE_B64="([^"]+)"', generated
+    ).group(1)
+    provenance = json.loads(base64.b64decode(encoded).decode("utf-8"))
+    assert provenance["resolved"]["inputs"]["chisq_csv"] == str(csv_path.resolve())
+    assert provenance["resolved"]["wrapper_args"]["description"] == "Nested N8000"
+    assert provenance["resolved"]["description"] == "Nested_N8000"
+    assert len(_sbatch_calls(calls_path)) == 1
+
+
+@pytest.mark.parametrize(
+    ("extra_args", "error_text"),
+    [
+        (("--description", "sample"), "--chisq-csv is required for fresh runs"),
+        (("--chisq-csv", "data/objects.csv"), "--description is required for fresh runs"),
+        (
+            ("--chisq-csv", "data/objects.csv", "--description", "   "),
+            "--description cannot be blank",
+        ),
+    ],
+)
+def test_sfitspectra_fresh_run_requires_csv_and_nonblank_description(
+    tmp_path, extra_args, error_text
+):
+    root, script_path, _csv_path, calls_path, env = _fresh_workspace(tmp_path)
+
+    result = _run_fresh(root, script_path, env, *extra_args)
+
+    assert result.returncode == 2
+    assert error_text in result.stderr
+    assert not (root / "results").exists()
+    assert _sbatch_calls(calls_path) == []
+
+
+@pytest.mark.parametrize(
+    ("csv_argument", "csv_text", "error_text"),
+    [
+        ("data/missing.csv", None, "Object-list CSV not found"),
+        ("data/objects.csv", "wrong_column\n1\n", "missing required column 'object_id'"),
+        (
+            "data/objects.csv",
+            "object_id\n\n",
+            "No valid object_id values remain after normalization and exclusions",
+        ),
+    ],
+)
+def test_sfitspectra_rejects_invalid_object_csv_before_creating_outputs(
+    tmp_path, csv_argument, csv_text, error_text
+):
+    root, script_path, csv_path, calls_path, env = _fresh_workspace(tmp_path)
+    if csv_text is not None:
+        csv_path.write_text(csv_text, encoding="utf-8")
+
+    result = _run_fresh(
+        root,
+        script_path,
+        env,
+        "--chisq-csv",
+        csv_argument,
+        "--description",
+        "sample",
+    )
+
+    assert result.returncode != 0
+    assert error_text in result.stderr
+    assert not (root / "results").exists()
+    assert _sbatch_calls(calls_path) == []
 
 
 def test_sfitspectra_named_resume_keeps_current_csv_selection_and_separate_outputs():
@@ -316,6 +478,7 @@ def test_sfitspectra_retry_requires_original_artifacts_and_sufficient_cpus(tmp_p
     [
         ("--description", "new-name"),
         ("--description", ""),
+        ("--chisq-csv", "data/new.csv"),
         ("--resume", ""),
         ("--fit-script", "fit_spectra.py"),
     ],

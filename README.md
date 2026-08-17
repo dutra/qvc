@@ -251,7 +251,9 @@ The `hpc_scripts` folder contains Slurm/Yale-HPC-oriented helpers. Treat these a
   ```
 - `hpc_scripts/sfitspectra.xsh` generates and submits spectra-fitting Slurm arrays from a chi-square selected object list, with optional exclusion filtering.
   ```bash
-  xonsh hpc_scripts/sfitspectra.xsh
+  xonsh hpc_scripts/sfitspectra.xsh \
+    --chisq-csv data/jul14_master_input_file_chisqgt20_nested_N8000.csv \
+    --description nested_N8000
   ```
   To retry only tasks whose latest attempt ended unsuccessfully, pass the full
   original job name:

@@ -43,9 +43,6 @@ fit_script = "fit_spectra_jaxsedfit_joint.py"
 # Required only by fit_spectra_jaxsedfit_joint.py
 sed_photometry_path = "data/jul14_master_input_file_chisqgt20_bandwagon_photometry.csv"
 
-#chisq_csv = "results/data/variability_chi_sq_red_g_gt_20.csv"
-chisq_csv = "data/jul14_master_input_file_chisqgt20.csv"
-
 # Optional exclusion file
 exclude_csv = None #"results/data/jaxqsofit/jaxqsofit_apr20c_chisq20_apr18h.csv"
 
@@ -319,9 +316,15 @@ def retry_unsuccessful_tasks(job_name):
 # ==========================================
 parser = argparse.ArgumentParser(description="Submit spectrum-fitting SLURM jobs.")
 parser.add_argument(
+    "--chisq-csv",
+    default=None,
+    metavar="PATH",
+    help="CSV file containing the object_id values to fit (required for fresh runs).",
+)
+parser.add_argument(
     "--description",
-    default="",
-    help="Optional short description appended to the generated SLURM job name.",
+    default=None,
+    help="Short description appended to the generated SLURM job name (required for fresh runs).",
 )
 parser.add_argument(
     "--fit-script",
@@ -350,7 +353,7 @@ parser.add_argument(
 cli_args = parser.parse_args()
 
 retry_job_name = cli_args.retry.strip()
-fresh_run_options = ("--description", "--fit-script", "--resume")
+fresh_run_options = ("--chisq-csv", "--description", "--fit-script", "--resume")
 fresh_run_option_was_explicit = any(
     arg == option or arg.startswith(f"{option}=")
     for arg in sys.argv[1:]
@@ -365,6 +368,11 @@ if retry_job_name:
         parser.error(str(exc))
     raise SystemExit(retry_unsuccessful_tasks(retry_job_name))
 
+if cli_args.chisq_csv is None:
+    parser.error("--chisq-csv is required for fresh runs")
+if cli_args.description is None:
+    parser.error("--description is required for fresh runs")
+
 fit_script = cli_args.fit_script
 resume_run_name = cli_args.resume.strip()
 if resume_run_name and fit_script != "fit_spectra_jaxsedfit_joint.py":
@@ -374,8 +382,10 @@ if resume_run_name:
     if normalized_resume_name != resume_run_name or resume_run_name in {".", ".."}:
         parser.error("--resume must be a run name, not a path")
 description = re.sub(
-    r"[^A-Za-z0-9.-]+", "_", cli_args.description
+    r"[^A-Za-z0-9.-]+", "_", cli_args.description.strip()
 ).strip("_.-")
+if not description:
+    parser.error("--description cannot be blank")
 date_hour = datetime.now().strftime("%b%d_%I%M%p").lower()
 git_commit = subprocess.run(
     ["git", "rev-parse", "--short", "HEAD"],
@@ -418,7 +428,13 @@ def normalize_object_id(value):
 
 
 def load_csv_object_ids(csv_path):
+    if not csv_path.is_file():
+        raise FileNotFoundError(f"Object-list CSV not found: {csv_path}")
     df = pd.read_csv(csv_path, dtype={"object_id": str}, low_memory=False)
+    if "object_id" not in df.columns:
+        raise ValueError(
+            f"Object-list CSV {csv_path} is missing required column 'object_id'"
+        )
     object_ids = (
         df["object_id"]
         .dropna()
@@ -479,7 +495,11 @@ if fit_script == "fit_spectra_jaxsedfit_joint.py":
             f"SED photometry input not found: {sed_photometry_file}"
         )
 
-chisq_path = REPO_ROOT / chisq_csv
+chisq_path = Path(cli_args.chisq_csv).expanduser()
+if not chisq_path.is_absolute():
+    chisq_path = REPO_ROOT / chisq_path
+chisq_path = chisq_path.resolve()
+chisq_csv = str(chisq_path)
 exclude_path = REPO_ROOT / exclude_csv if exclude_csv else None
 
 chisq_object_ids = load_csv_object_ids(chisq_path)
@@ -499,7 +519,9 @@ print(f"Length of requested_object_ids (chisq - exclude): {len(requested_object_
 print(f"Length of submit_object_ids: {len(submit_object_ids)}")
 
 if len(submit_object_ids) == 0:
-    raise ValueError(f"No valid object_id values found in {chisq_csv}")
+    raise ValueError(
+        f"No valid object_id values remain after normalization and exclusions: {chisq_path}"
+    )
 
 num_tasks = math.ceil(len(submit_object_ids) / chunk_size)
 max_array_id = num_tasks - 1
@@ -555,6 +577,7 @@ submission = submission_record(
         "wrapper_args": vars(cli_args),
         "job_name": job_name,
         "prefix": prefix,
+        "description": description,
         "fit_script": fit_script,
         "fit_module": fit_module,
         "inputs": {
