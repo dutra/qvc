@@ -7,7 +7,13 @@ from types import SimpleNamespace
 import pytest
 
 import hpc_scripts.sfitlc as sfitlc
-from hpc_scripts.sfitlc import JobConfig, build_sbatch_script, parse_args, validate_chunking
+from hpc_scripts.sfitlc import (
+    JobConfig,
+    build_job_configs,
+    build_sbatch_script,
+    parse_args,
+    validate_chunking,
+)
 
 
 def _args(**overrides):
@@ -148,3 +154,55 @@ def test_non_chisq_jobs_do_not_require_a_spectra_fit_csv(monkeypatch):
     args = parse_args()
 
     assert args.spectra_fit_csv is None
+    assert args.stone_linear_mode == "both"
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected_descriptions", "expected_flags"),
+    [
+        ("both", ["stone", "stone_nolinear"], [(), ("--disable_linear_trend",)]),
+        ("linear", ["stone"], [()]),
+        ("nolinear", ["stone_nolinear"], [("--disable_linear_trend",)]),
+    ],
+)
+def test_stone_linear_mode_selects_requested_jobs(
+    monkeypatch,
+    mode,
+    expected_descriptions,
+    expected_flags,
+):
+    monkeypatch.setattr(sfitlc, "load_stone_ids", lambda: ["stone-1"])
+
+    jobs = build_job_configs("stone", None, stone_linear_mode=mode)
+
+    assert [job.description for job in jobs] == expected_descriptions
+    assert [job.extra_flags for job in jobs] == expected_flags
+    assert all(job.object_ids == ["stone-1"] for job in jobs)
+
+
+def test_stone_linear_mode_rejects_unknown_choice(monkeypatch, capsys):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["sfitlc.py", "--fit", "stone", "--stone-linear-mode", "quadratic"],
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        parse_args()
+
+    assert exc_info.value.code == 2
+    assert "invalid choice: 'quadratic'" in capsys.readouterr().err
+
+
+def test_stone_linear_mode_rejects_non_stone_fit(monkeypatch, capsys):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["sfitlc.py", "--fit", "macleod", "--stone-linear-mode", "linear"],
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        parse_args()
+
+    assert exc_info.value.code == 2
+    assert "requires --fit stone" in capsys.readouterr().err

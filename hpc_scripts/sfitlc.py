@@ -40,6 +40,15 @@ def parse_args():
         required=True,
         help="Sample to submit.",
     )
+    parser.add_argument(
+        "--stone-linear-mode",
+        choices=("both", "linear", "nolinear"),
+        default="both",
+        help=(
+            "Stone linear-trend variants to submit: both (default), only the "
+            "standard linear-trend fit, or only the no-linear-trend fit."
+        ),
+    )
     parser.add_argument("--chisq-csv", type=str, default=None, help="CSV file with object_id column for --fit chisq.")
     parser.add_argument(
         "--spectra-fit-csv",
@@ -79,6 +88,10 @@ def parse_args():
         parser.error("--chisq-csv is required when --fit chisq is used.")
     if args.fit == "chisq" and not args.spectra_fit_csv:
         parser.error("--spectra-fit-csv is required when --fit chisq is used.")
+    if args.fit != "stone" and args.stone_linear_mode != "both":
+        parser.error(
+            "--stone-linear-mode linear or nolinear requires --fit stone."
+        )
     try:
         args.description = normalize_run_description(args.description)
     except ValueError as exc:
@@ -130,7 +143,20 @@ def load_macleod_ids() -> list[str]:
     return resolve_macleod_object_ids()
 
 
-def build_job_configs(fit: str, chisq_csv: str) -> list[JobConfig]:
+def build_job_configs(
+    fit: str,
+    chisq_csv: str,
+    *,
+    stone_linear_mode: str = "both",
+) -> list[JobConfig]:
+    if stone_linear_mode not in {"both", "linear", "nolinear"}:
+        raise ValueError(
+            "stone_linear_mode must be one of: both, linear, nolinear."
+        )
+    if fit != "stone" and stone_linear_mode != "both":
+        raise ValueError(
+            "stone_linear_mode linear or nolinear requires fit='stone'."
+        )
     if fit == "chisq":
         return [
             JobConfig(
@@ -141,7 +167,7 @@ def build_job_configs(fit: str, chisq_csv: str) -> list[JobConfig]:
         ]
     if fit == "stone":
         stone_object_ids = load_stone_ids()
-        return [
+        jobs = [
             JobConfig(description="stone", object_ids=stone_object_ids),
             JobConfig(
                 description="stone_nolinear",
@@ -149,6 +175,11 @@ def build_job_configs(fit: str, chisq_csv: str) -> list[JobConfig]:
                 extra_flags=("--disable_linear_trend",),
             ),
         ]
+        if stone_linear_mode == "linear":
+            return jobs[:1]
+        if stone_linear_mode == "nolinear":
+            return jobs[1:]
+        return jobs
     if fit == "samelength":
         stone_object_ids = load_stone_ids()
         return [
@@ -653,7 +684,11 @@ def main():
     spectra_fit_csv = args.spectra_fit_csv
     samelength_merge_job_ids = []
 
-    for job in build_job_configs(args.fit, chisq_csv):
+    for job in build_job_configs(
+        args.fit,
+        chisq_csv,
+        stone_linear_mode=args.stone_linear_mode,
+    ):
         total_objects = len(job.object_ids)
         _, task_start, task_end = validate_chunking(total_objects, args.N, args.skip, args.num_jobs)
         prefix = build_run_prefix(job.description, run_stamp, git_hash, args.resume, args.description)
