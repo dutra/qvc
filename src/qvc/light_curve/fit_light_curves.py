@@ -93,6 +93,7 @@ from qvc.light_curve.dho_drw_parameterization import (
     log_perturbation_ratio_prior,
     log_quality_factor_prior,
 )
+from qvc.provenance import build_run_record
 from qvc.light_curve.multiband_model_dho_blr_erlang_drw import (
     make_multiband_dho_blr_flux_linearized_erlang_drw_model,
 )
@@ -5498,7 +5499,29 @@ def main():
             logging.error(traceback.format_exc())
             continue
 
-    save_quasar_list_hdf5(results, ignored_keys=["X", "y", "yerr", "band_idx"])
+    provenance_inputs = {
+        "filter_file": args.filter_file,
+        "nearby_light_curve_csv": args.load_nearby_lc_csv,
+    }
+    for index, path in enumerate(args.spectra_fit_csv or []):
+        provenance_inputs[f"spectra_fit_csv_{index}"] = path
+    provenance_object_id = (
+        str(results[0]["object_id"])
+        if len(results) == 1 and "object_id" in results[0]
+        else None
+    )
+    provenance = build_run_record(
+        "qvc.light_curve.fit_light_curves",
+        args,
+        object_id=provenance_object_id,
+        input_paths=provenance_inputs,
+        event_type="resume" if args.resume else "fit",
+    )
+    save_quasar_list_hdf5(
+        results,
+        ignored_keys=["X", "y", "yerr", "band_idx"],
+        provenance=provenance,
+    )
 
     if not args.disable_sigma_tau_lambda_plot:
         try:

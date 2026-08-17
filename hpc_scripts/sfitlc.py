@@ -18,6 +18,7 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from qvc.light_curve.multiband_generate_lc import resolve_macleod_object_ids, resolve_stone_object_ids
+from qvc.provenance import PROVENANCE_ENV, encode_record, submission_record
 
 SCRIPT_DIR = REPO_ROOT / "hpc_scripts" / "jobs" / "multibandfit"
 LOG_ROOT = REPO_ROOT / "hpc_scripts" / "logs" / "multibandfit"
@@ -344,6 +345,34 @@ def build_sbatch_script(
         )
     base_flags.extend(job.extra_flags)
     base_flags.extend(getattr(args, "extra_fit_flags", ()))
+    submission = submission_record(
+        "hpc_scripts/sfitlc.py",
+        sys.argv,
+        {
+            "wrapper_args": vars(args),
+            "job": {
+                "description": job.description,
+                "prefix": prefix,
+                "object_count": len(job.object_ids),
+                "extra_flags": job.extra_flags,
+                "use_psf_constant_flux": job.use_psf_constant_flux,
+            },
+            "inputs": {
+                "chisq_csv": chisq_csv,
+                "spectra_fit_csv": spectra_fit_csv,
+                "object_ids_path": object_id_file,
+            },
+            "resources": {
+                "cpus_per_task": args.ncores,
+                "memory": args.mem,
+                "partition": args.partition,
+                "time": args.time,
+                "environment": args.env,
+            },
+            "fit_flags": base_flags,
+        },
+    )
+    encoded_submission = encode_record(submission)
     return f"""#!/bin/bash
 #SBATCH --job-name={job_name}
 #SBATCH --output={log_pattern}
@@ -367,6 +396,7 @@ export FILTER_CSV="{filter_csv}"
 export OBJECT_ID_FILE="{object_id_file}"
 export START=""
 export END=""
+export {PROVENANCE_ENV}="{encoded_submission}"
 
 module load miniconda
 conda activate {args.env}
@@ -475,6 +505,23 @@ def build_merge_sbatch_script(
             " --plot-suberlak-sigma-tau-identity-grid"
             f' --suberlak-identity-plot-out "{build_suberlak_identity_plot_path(prefix, job_description)}"'
         )
+    submission = submission_record(
+        "hpc_scripts/sfitlc.py",
+        sys.argv,
+        {
+            "wrapper_args": vars(args),
+            "merge_prefix": prefix,
+            "job_description": job_description,
+            "merge_command": merge_cmd,
+            "resources": {
+                "memory": merge_memory,
+                "partition": args.partition,
+                "time": args.time,
+                "environment": args.env,
+            },
+        },
+    )
+    encoded_submission = encode_record(submission)
     return f"""#!/bin/bash
 #SBATCH --job-name=merge_{prefix}
 #SBATCH --output={log_pattern}
@@ -489,6 +536,8 @@ set -euo pipefail
 
 module load miniconda
 conda activate {args.env}
+
+export {PROVENANCE_ENV}="{encoded_submission}"
 
 cd "{REPO_ROOT}"
 

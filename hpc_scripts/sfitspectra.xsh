@@ -16,6 +16,13 @@ SRC_ROOT = REPO_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
+from qvc.provenance import (
+    PROVENANCE_ENV,
+    RETRY_ENV,
+    encode_record,
+    submission_record,
+)
+
 # ==========================================
 # 1. Define your job settings here
 # ==========================================
@@ -274,6 +281,21 @@ def retry_unsuccessful_tasks(job_name):
         print(f"  task {row['task_id']}: {row['state']}")
 
     task_ids = [row["task_id"] for row in retry_rows]
+    retry_record = submission_record(
+        "hpc_scripts/sfitspectra.xsh",
+        sys.argv,
+        {
+            "retry_job_name": job_name,
+            "task_ids": task_ids,
+            "resources": {
+                "partition": partition,
+                "time": time_limit,
+                "memory": mem,
+                "cpus_per_task": cpus_per_task,
+            },
+        },
+    )
+    encoded_retry = encode_record(retry_record)
     for offset in range(0, len(task_ids), RETRY_BATCH_LIMIT):
         array_spec = format_array_spec(task_ids[offset : offset + RETRY_BATCH_LIMIT])
         cmd = [
@@ -283,6 +305,7 @@ def retry_unsuccessful_tasks(job_name):
             f"--time={time_limit}",
             f"--mem={mem}",
             f"--cpus-per-task={cpus_per_task}",
+            f"--export=ALL,{RETRY_ENV}={encoded_retry}",
             str(saved_script),
         ]
         print("Submitting retry:")
@@ -525,6 +548,38 @@ array_directive = f"#SBATCH --array=0-{max_array_id}" if num_tasks > 1 else ""
 
 script_filename = f"{submit_dir}/submit_{prefix}.sbatch"
 
+submission = submission_record(
+    "hpc_scripts/sfitspectra.xsh",
+    sys.argv,
+    {
+        "wrapper_args": vars(cli_args),
+        "job_name": job_name,
+        "prefix": prefix,
+        "fit_script": fit_script,
+        "fit_module": fit_module,
+        "inputs": {
+            "chisq_csv": chisq_csv,
+            "exclude_csv": exclude_csv,
+            "sed_photometry_path": sed_photometry_path,
+            "dr16q_fits": "data/dr16q_prop_May01_2024.fits",
+            "cache_dir": cache_dir,
+        },
+        "outputs": {"output_dir": output_dir, "fig_dir": fig_dir},
+        "resume": {"directory": resume_dir, "run_name": resume_run_name},
+        "resources": {
+            "partition": partition,
+            "time": time_limit,
+            "memory": mem,
+            "cpus_per_task": cpus_per_task,
+            "nproc": nproc,
+            "chunk_size": chunk_size,
+            "python_bin": python_bin,
+        },
+        "object_count": len(submit_object_ids),
+    },
+)
+encoded_submission = encode_record(submission)
+
 script_content = f"""#!/usr/bin/env bash
 #SBATCH --job-name={job_name}
 #SBATCH --output={log_dir}/fit_%A_%a.out
@@ -553,6 +608,7 @@ export CACHE_DIR="{cache_dir}"
 export FIG_DIR="{fig_dir}"
 export RESUME_DIR="{resume_dir}"
 export RESUME_RUN_NAME="{resume_run_name}"
+export {PROVENANCE_ENV}="{encoded_submission}"
 
 export TASK_ID="${{SLURM_ARRAY_TASK_ID:-0}}"
 

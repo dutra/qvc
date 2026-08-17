@@ -23,6 +23,14 @@ from pathlib import Path
 import h5py
 import numpy as np
 import pandas as pd
+
+from qvc.provenance import (
+    build_run_record,
+    fingerprint_path,
+    merge_history,
+    read_hdf5_provenance,
+    write_hdf5_provenance,
+)
 from tqdm import tqdm
 
 from qvc.spectra import fit_spectra as legacy
@@ -580,6 +588,35 @@ def verify_new_posterior_bundle(path):
     return path
 
 
+def annotate_posterior_bundle(path, args, rec, *, event_type="fit", source_path=None):
+    """Attach QVC provenance after JAXSEDFit has finished writing its bundle."""
+    path = verify_new_posterior_bundle(path)
+    inputs = {
+        "input_catalog": getattr(args, "fpath_in", None),
+        "dr16q_catalog": getattr(args, "dr16q_fits", None),
+        "sed_photometry": getattr(args, "sed_photometry_path", None),
+        "dsps_ssp": getattr(args, "dsps_ssp_fn", None),
+    }
+    record = build_run_record(
+        "qvc.spectra.fit_spectra_jaxsedfit_joint",
+        args,
+        object_id=str(rec["object_id"]),
+        input_paths=inputs,
+        event_type=event_type,
+    )
+    previous = None
+    if source_path:
+        try:
+            previous = read_hdf5_provenance(source_path)
+        except (OSError, ValueError):
+            previous = None
+        record["source_bundle"] = fingerprint_path(source_path)
+        if previous is None:
+            record["source_bundle"]["provenance"] = "unavailable"
+    write_hdf5_provenance(path, merge_history(record, previous))
+    return path
+
+
 def _base_result(rec, args, *, execution_mode, resumed_from_path=""):
     """Build the stable output row shared by fresh and resumed execution."""
     result = {
@@ -693,7 +730,13 @@ def run_one_fit(
         result["photometry_filters"] = ",".join(used_phot["filter_name"].astype(str))
         result["fit_result_path"] = str(fit_result.path or "")
         if args.save_jaxsedfit_samples:
-            verify_new_posterior_bundle(result["fit_result_path"])
+            annotate_posterior_bundle(
+                result["fit_result_path"],
+                args,
+                rec,
+                event_type=execution_mode,
+                source_path=resumed_from_path or None,
+            )
         result["sed_fig_path"] = (
             str(sed_figure_path(args.fig_dir, rec)) if args.save_fig else ""
         )
@@ -756,7 +799,15 @@ def _run_resumed_fit(rec, args, source_path):
 
     if args.save_jaxsedfit_samples:
         result_path = fitter.save(args.output_dir)
-        result["fit_result_path"] = str(verify_new_posterior_bundle(result_path))
+        result["fit_result_path"] = str(
+            annotate_posterior_bundle(
+                result_path,
+                args,
+                rec,
+                event_type="resume",
+                source_path=source_path,
+            )
+        )
 
     if args.save_fig:
         sed_path = sed_figure_path(args.fig_dir, rec)

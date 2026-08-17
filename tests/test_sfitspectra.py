@@ -176,6 +176,7 @@ def test_sfitspectra_accepts_cli_overrides_and_builds_timestamped_spectrafit_job
     assert 'output_dir = f"results/data/jaxqsofit/{prefix}"' in source
     assert 'fig_dir = f"plots/jaxqsofit/{prefix}"' in source
     assert "#SBATCH --job-name={job_name}" in source
+    assert 'export {PROVENANCE_ENV}="{encoded_submission}"' in source
 
 
 def test_sfitspectra_named_resume_keeps_current_csv_selection_and_separate_outputs():
@@ -219,13 +220,14 @@ def test_sfitspectra_retry_resubmits_latest_unsuccessful_tasks_with_current_reso
     assert result.returncode == 0, result.stderr
     calls = _sbatch_calls(calls_path)
     assert len(calls) == 1
-    assert calls[0][:-1] == [
+    assert calls[0][:5] == [
         "--array=2,4-8",
         "--partition=day",
         "--time=4:00:00",
         "--mem=40G",
         "--cpus-per-task=1",
     ]
+    assert calls[0][5].startswith("--export=ALL,QVC_RETRY_PROVENANCE_B64=")
     assert Path(calls[0][-1]) == saved_script
     assert "task 2: TIMEOUT" in result.stdout
     assert "task 5: CANCELLED" in result.stdout

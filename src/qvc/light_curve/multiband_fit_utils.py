@@ -10,6 +10,8 @@ suffix = os.environ.get('SUFFIX', "test")
 
 import logging
 
+from qvc.provenance import merge_history, read_hdf5_provenance, write_hdf5_provenance
+
 logging.basicConfig(
     format='%(asctime)s - %(message)s',
     level=logging.INFO,
@@ -604,7 +606,7 @@ def delete_file(file_path):
     else:
         logging.info(f"File does not exist; not deleting: {file_path}")
 
-def save_quasar_list_hdf5(quasars, ignored_keys=None, size_threshold=1024):
+def save_quasar_list_hdf5(quasars, ignored_keys=None, size_threshold=1024, provenance=None):
     """
     Save a list of quasar dictionaries to a *flat columnar* HDF5 file.
 
@@ -745,6 +747,12 @@ def save_quasar_list_hdf5(quasars, ignored_keys=None, size_threshold=1024):
     os.makedirs(output_dir, exist_ok=True)
     file_path = os.path.join(output_dir, _output_basename(quasars))
     logging.info(f"Saving {total} quasars to {file_path}")
+    previous_provenance = None
+    if provenance is not None and os.path.isfile(file_path):
+        try:
+            previous_provenance = read_hdf5_provenance(file_path)
+        except (OSError, ValueError) as exc:
+            logging.warning("Could not read prior provenance from %s: %s", file_path, exc)
 
     for i, quasar in enumerate(quasars):
         object_id = str(quasar["object_id"])
@@ -775,7 +783,11 @@ def save_quasar_list_hdf5(quasars, ignored_keys=None, size_threshold=1024):
             arr = _build_column(values)
             hdf.create_dataset(col, data=arr)
 
+        if provenance is not None:
+            write_hdf5_provenance(hdf, merge_history(provenance, previous_provenance))
+
     logging.info("All quasars saved successfully.")
+    return file_path
 
 def log_broken_pl(lam, lam_s, d1, d2, ds):
     """

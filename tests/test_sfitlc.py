@@ -1,5 +1,6 @@
 import subprocess
 import sys
+import re
 from datetime import datetime as real_datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -7,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 import hpc_scripts.sfitlc as sfitlc
+from qvc.provenance import decode_record
 from hpc_scripts.sfitlc import (
     JobConfig,
     build_job_configs,
@@ -109,6 +111,15 @@ def test_sbatch_runs_each_chunk_object_in_a_fresh_process():
     assert "--spectra_fit_csv" in script
     assert "results/data/spectra.csv" in script
     assert script.count("python -m qvc.light_curve.fit_light_curves") == 1
+    encoded = re.search(
+        r'^export QVC_SUBMISSION_PROVENANCE_B64="([^"]+)"$',
+        script,
+        flags=re.MULTILINE,
+    ).group(1)
+    submission = decode_record(encoded)
+    assert submission["resolved"]["job"]["object_count"] == 3
+    assert submission["resolved"]["resources"]["memory"] == "12G"
+    assert "--spectra_fit_csv" in submission["resolved"]["fit_flags"]
 
 
 def test_generated_multi_object_sbatch_is_valid_bash():

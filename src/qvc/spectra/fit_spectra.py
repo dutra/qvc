@@ -32,6 +32,14 @@ from astropy.table import Table
 from speclite import filters as speclite_filters
 from tqdm import tqdm
 
+from qvc.provenance import (
+    build_run_record,
+    fingerprint_path,
+    merge_history,
+    read_hdf5_provenance,
+    write_hdf5_provenance,
+)
+
 num_cores = os.environ.get("NUM_CORES", max((os.cpu_count() or 2) - 2, 1))
 try:
     num_cores = int(num_cores)
@@ -100,6 +108,27 @@ def normalize_object_id(value):
     if not text:
         return ""
     return text[:-2] if text.endswith(".0") else text
+
+
+def annotate_posterior_bundle(path, args, rec, *, previous_provenance=None):
+    """Attach QVC metadata without changing the native JAXQSOFit schema."""
+    provenance = build_run_record(
+        "qvc.spectra.fit_spectra",
+        args,
+        object_id=str(rec["object_id"]),
+        input_paths={
+            "input_catalog": getattr(args, "fpath_in", None),
+            "dr16q_catalog": getattr(args, "dr16q_fits", None),
+            "dsps_ssp": getattr(args, "dsps_ssp_fn", None),
+        },
+        event_type="resume" if getattr(args, "resume", False) else "fit",
+    )
+    if getattr(args, "resume", False):
+        provenance["source_bundle"] = fingerprint_path(path)
+        if previous_provenance is None:
+            provenance["source_bundle"]["provenance"] = "unavailable"
+    write_hdf5_provenance(path, merge_history(provenance, previous_provenance))
+    return Path(path)
 
 
 def coerce_scalar(x):
@@ -1647,7 +1676,15 @@ def run_one_fit(rec, args):
             if np.isfinite(mag_err):
                 result[f"psf_mag_err_{band}"] = float(mag_err)
 
+        posterior_bundle_path = None
+        previous_provenance = None
         if args.resume:
+            posterior_bundle_path = Path(args.output_dir) / f"{fit_name}_samples.h5"
+            if posterior_bundle_path.is_file():
+                try:
+                    previous_provenance = read_hdf5_provenance(posterior_bundle_path)
+                except (OSError, ValueError):
+                    previous_provenance = None
             q = JAXQSOFit.load_from_samples(
                 filename=fit_name,  # important: matches OutputConfig(save_name=...)
                 output_path=str(args.output_dir),
@@ -1729,7 +1766,7 @@ def run_one_fit(rec, args):
                 prior_config=prior_config_for_fit_config(prior_config),
             )
             q = JAXQSOFit(config)
-            q.fit(
+            fit_result = q.fit(
                 verbose=args.verbose,
                 kwargs_plot={
                     "save_fig_path": args.fig_dir,
@@ -1737,8 +1774,17 @@ def run_one_fit(rec, args):
                     "show_plot": False,
                 },
             )
+            posterior_bundle_path = getattr(fit_result, "path", None)
             if args.plot_mcmc_diagnostics:
                 q.plot_mcmc_diagnostics(save_fig_path=args.fig_dir)
+
+        if args.save_jaxqsofit_samples and posterior_bundle_path:
+            annotate_posterior_bundle(
+                posterior_bundle_path,
+                args,
+                rec,
+                previous_provenance=previous_provenance,
+            )
 
         result.update(extract_named_results(q))
         result.update(extract_scalar_attrs(q))

@@ -25,6 +25,12 @@ from qvc.light_curve.multiband_generate_lc import (
     resolve_stone_s82_matches,
 )
 from qvc.light_curve.plotting_appendix import plot_sigma_tau_identity_grid
+from qvc.provenance import (
+    build_run_record,
+    provenance_fingerprint,
+    read_hdf5_provenance,
+    write_hdf5_provenance,
+)
 
 MACLEOD_YEAR_DAYS = 365.25
 MACLEOD_IDENTITY_BANDS = ("u", "g", "r", "i")
@@ -201,7 +207,7 @@ def _build_flat_column(values, string_dt):
     return float, out
 
 
-def write_quasars_to_h5_flat(quasars, h5_path):
+def write_quasars_to_h5_flat(quasars, h5_path, provenance=None):
     os.makedirs(os.path.dirname(h5_path) or ".", exist_ok=True)
     string_dt = h5py.string_dtype(encoding="utf-8")
 
@@ -218,8 +224,55 @@ def write_quasars_to_h5_flat(quasars, h5_path):
             values = [q.get(field, None) for q in quasars]
             dtype, col = _build_flat_column(values, string_dt)
             hdf.create_dataset(field, data=col, dtype=dtype)
+        if provenance is not None:
+            write_hdf5_provenance(hdf, provenance)
 
     print(f"Wrote {len(quasars)} rows to flat HDF5 {h5_path}")
+
+
+def summarize_source_provenance(file_list):
+    """Return compact run-level provenance counts without copying every record."""
+    groups = {}
+    missing = 0
+    for path in file_list:
+        try:
+            record = read_hdf5_provenance(path)
+        except (OSError, ValueError):
+            record = None
+        if not record:
+            missing += 1
+            continue
+        run_identity = {
+            "schema": record.get("schema"),
+            "entrypoint": record.get("entrypoint"),
+            "submission": record.get("submission"),
+            "parsed_args": record.get("module", {}).get("parsed_args"),
+            "qvc_git": record.get("qvc_git"),
+        }
+        # Object selectors differ per shard but do not define a distinct run.
+        parsed = run_identity.get("parsed_args")
+        if isinstance(parsed, dict):
+            parsed = dict(parsed)
+            parsed.pop("filter_object_id", None)
+            run_identity["parsed_args"] = parsed
+        fingerprint = provenance_fingerprint(run_identity)
+        group = groups.setdefault(
+            fingerprint,
+            {
+                "fingerprint": fingerprint,
+                "source_count": 0,
+                "entrypoint": record.get("entrypoint", ""),
+                "qvc_git_commit": record.get("qvc_git", {}).get("commit", ""),
+                "submission": record.get("submission"),
+            },
+        )
+        group["source_count"] += 1
+    return {
+        "source_count": len(file_list),
+        "sources_without_provenance": missing,
+        "unique_run_count": len(groups),
+        "runs": sorted(groups.values(), key=lambda item: item["fingerprint"]),
+    }
 
 
 def enforce_expected_count(per_file_count, expected_n, file_path):
@@ -1123,6 +1176,8 @@ def main(argv=None):
         load_n=args.N,
         workers=args.workers,
     )
+    source_files = file_list if args.N is None else file_list[: args.N]
+    source_provenance = summarize_source_provenance(source_files)
     print(f"Loaded total of {len(all_quasars)} rows from {len(file_list)} shards.")
 
     dedup_keys = args.dedup_keys
@@ -1165,7 +1220,14 @@ def main(argv=None):
                     seen.append(k)
         write_quasars_to_csv(all_quasars, out_path, fields=seen)
     elif out_format == "h5":
-        write_quasars_to_h5_flat(all_quasars, out_path)
+        merge_provenance = build_run_record(
+            "qvc.light_curve.merge_results",
+            args,
+            input_paths={"source_shard_directory": shard_dir},
+            event_type="merge",
+        )
+        merge_provenance["source_runs"] = source_provenance
+        write_quasars_to_h5_flat(all_quasars, out_path, provenance=merge_provenance)
     else:
         print(f"ERROR: Unsupported out-format: {out_format}")
         sys.exit(1)
