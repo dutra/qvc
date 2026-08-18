@@ -50,7 +50,7 @@ exclude_csv = None #"results/data/jaxqsofit/jaxqsofit_apr20c_chisq20_apr18h.csv"
 python_bin = "/home/id255/.conda/envs/jaxcpu2/bin/python"
 
 # Optional: cache/data locations
-qvc_data_dir = "/home/id255/scratch_pi_pn38/id255/qvc/data"
+qvc_data_dir = "/home/id255/project_pi_pn38/id255/qvc/data"
 cache_dir = "data/spectra_cache_all"
 
 
