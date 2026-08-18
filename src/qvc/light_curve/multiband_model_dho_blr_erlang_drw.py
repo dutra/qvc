@@ -88,6 +88,17 @@ class ErlangResponseIntegratedDHOQS(ErlangResponseDHOQS):
 class ContiBLRErlangIntegratedDHOModel(ContiBLRErlangRelativeFluxModel):
     """Relative-flux wrapper for the integrated-timescale DHO kernel."""
 
+    enforce_positive_flux_guard: bool = eqx.field(static=True)
+
+    def __init__(
+        self,
+        *args,
+        enforce_positive_flux_guard=False,
+        **kwargs,
+    ):
+        super().__init__(*args, **kwargs)
+        self.enforce_positive_flux_guard = bool(enforce_positive_flux_guard)
+
     def _build_kernel(self, params):
         tau_drw = jnp.asarray(params["tau_drw_band"])
         amp_cont = jnp.asarray(
@@ -176,12 +187,39 @@ class ContiBLRErlangIntegratedDHOModel(ContiBLRErlangRelativeFluxModel):
         )
         return -0.5 * jnp.sum(jax.nn.softplus(scaled_violation) ** 2)
 
+    def negative_total_flux_probability(self, params):
+        """Return the Gaussian negative-total-flux tail probability by band."""
+
+        kernel = self._build_kernel(params)
+        bands = jnp.arange(self.nBand, dtype=jnp.int32)
+        zero = jnp.asarray(0.0, dtype=self.y.dtype)
+        variance = jax.vmap(
+            lambda band: kernel.evaluate((zero, band), (zero, band))
+        )(bands)
+        stationary_std = jnp.sqrt(jnp.maximum(variance, 1e-24))
+
+        means = jax.vmap(partial(self.get_mean, self.zero_mean, params))(self.X)
+        observed_bands = jnp.asarray(self.X[1], dtype=jnp.int32)
+        min_mean = jax.vmap(
+            lambda band: jnp.min(
+                jnp.where(observed_bands == band, means, jnp.inf)
+            )
+        )(bands)
+        z_negative = -(1.0 + min_mean) / stationary_std
+        return jax.scipy.special.ndtr(z_negative)
+
+    def _log_prob_impl(self, params):
+        log_probability = super().log_prob(params)
+        if not self.enforce_positive_flux_guard:
+            return log_probability
+        # Retain the historical guard as an explicit opt-in for controlled
+        # recovery comparisons. At the chosen softness, even a 0.1 flux-ratio
+        # violation costs about 50 log-probability units per affected band.
+        return log_probability + self.positive_flux_log_penalty(params)
+
     @eqx.filter_jit
     def log_prob(self, params):
-        # Keep the boundary differentiable so AutoNormal SVI can initialize;
-        # at the chosen softness, even a 0.1 flux-ratio violation costs about
-        # 50 log-probability units per affected band.
-        return super().log_prob(params) + self.positive_flux_log_penalty(params)
+        return self._log_prob_impl(params)
 
 
 def make_multiband_dho_blr_flux_linearized_erlang_drw_model(
@@ -195,10 +233,12 @@ def make_multiband_dho_blr_flux_linearized_erlang_drw_model(
     zero_mean=False,
     has_jitter=True,
     erlang_order=DEFAULT_ERLANG_ORDER,
+    enforce_positive_flux_guard=False,
+    transition_nonzero_indices=None,
 ):
     """Construct the all-regime CARMA(2,1) plus causal Erlang response model."""
 
-    del baseline_flux_by_band
+    del baseline_flux_by_band, transition_nonzero_indices
     if n_band is None:
         n_band = int(jnp.max(jnp.asarray(X[1], dtype=jnp.int32))) + 1
     t = jnp.asarray(X[0])
@@ -219,6 +259,7 @@ def make_multiband_dho_blr_flux_linearized_erlang_drw_model(
         survey_idx=survey_idx,
         erlang_order=erlang_order,
         use_fast_solver=False,
+        enforce_positive_flux_guard=enforce_positive_flux_guard,
     )
 
 

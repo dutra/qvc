@@ -4063,6 +4063,7 @@ def build_single_object_model_mag_flux_linearized(
     erlang_order=DEFAULT_ERLANG_ORDER,
     use_fast_solver=False,
     drw_parameterization=False,
+    enforce_positive_flux_guard=False,
 ):
     """Return the relative-flux quasi-separable model for one object."""
 
@@ -4339,11 +4340,22 @@ def build_single_object_model_mag_flux_linearized(
             has_jitter=has_jitter,
             erlang_order=erlang_order,
             **(
-                {}
+                {"enforce_positive_flux_guard": enforce_positive_flux_guard}
                 if drw_parameterization
                 else {"use_fast_solver": use_fast_solver}
             ),
         )
+        if drw_parameterization:
+            positive_flux_margin = m.positive_flux_margin(params)
+            negative_flux_probability = m.negative_total_flux_probability(params)
+            numpyro.deterministic(
+                "positive_flux_margin_min",
+                jnp.min(positive_flux_margin),
+            )
+            numpyro.deterministic(
+                "negative_total_flux_probability_max",
+                jnp.max(negative_flux_probability),
+            )
         numpyro.factor("loglike", m.log_prob(params))
 
     return model
@@ -4532,6 +4544,7 @@ def run_iterated_mag_flux_linearized_inference(
     refinement_strategy="nuts_each",
     refinement_iters=FLUX_LINEARIZED_REFINEMENT_ITERS,
     drw_parameterization=False,
+    enforce_positive_flux_guard=False,
 ):
     """Iteratively refit the relative-flux QS model using local pseudo-data.
 
@@ -4577,6 +4590,7 @@ def run_iterated_mag_flux_linearized_inference(
         erlang_order=erlang_order,
         use_fast_solver=use_fast_solver,
         drw_parameterization=drw_parameterization,
+        enforce_positive_flux_guard=enforce_positive_flux_guard,
     )
 
     for iter_idx in range(int(refinement_iters)):
@@ -4883,6 +4897,17 @@ def main():
         ),
     )
     parser.add_argument(
+        "--enforce_positive_flux_guard",
+        action="store_true",
+        default=False,
+        help=(
+            "Apply the historical four-sigma positive-total-flux penalty to "
+            "the CARMA(2,1) Erlang likelihood. Disabled by default; the "
+            "positivity margin and negative-flux tail probability are still "
+            "reported as posterior diagnostics."
+        ),
+    )
+    parser.add_argument(
         "--flux_linearized_refinement_iters",
         type=int,
         default=FLUX_LINEARIZED_REFINEMENT_ITERS,
@@ -4997,6 +5022,10 @@ def main():
         raise ValueError(
             "--dho_drw_parameterization currently uses the general matrix-"
             "exponential solver and cannot be combined with --fast_solver."
+        )
+    if args.enforce_positive_flux_guard and not args.dho_drw_parameterization:
+        raise ValueError(
+            "--enforce_positive_flux_guard requires --dho_drw_parameterization."
         )
     if args.fit_method == "ns":
         if NestedSampler is None:
@@ -5144,6 +5173,7 @@ def main():
                         refinement_strategy=args.flux_linearized_refinement_strategy,
                         refinement_iters=args.flux_linearized_refinement_iters,
                         drw_parameterization=args.dho_drw_parameterization,
+                        enforce_positive_flux_guard=args.enforce_positive_flux_guard,
                     )
                 elif args.fit_method in ("nuts", "svi+nuts"):
                     if args.fit_method == "svi+nuts":
@@ -5301,6 +5331,13 @@ def main():
                     baseline_flux_by_band=reference_flux_from_mean_magnitudes(obj["mags_means"]),
                     zero_mean=zero_mean,
                     has_jitter=has_jitter,
+                    **(
+                        {
+                            "enforce_positive_flux_guard": args.enforce_positive_flux_guard,
+                        }
+                        if args.dho_drw_parameterization
+                        else {}
+                    ),
                 )
             plot_samples = obj_flat_samples
 

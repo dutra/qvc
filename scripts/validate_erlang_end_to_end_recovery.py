@@ -41,6 +41,8 @@ from qvc.light_curve.multiband_dho_core import (
 )
 from qvc.light_curve.multiband_model_dho_blr_erlang_drw import (
     ErlangResponseIntegratedDHOQS,
+    POSITIVE_FLUX_MARGIN_SOFTNESS,
+    POSITIVE_FLUX_N_SIGMA,
 )
 from qvc.light_curve.multiband_model_dho_blr_erlang import ErlangResponseDHOQS
 from validate_erlang_lag_recovery import load_real_cadence
@@ -100,6 +102,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-samples", type=int, default=200)
     parser.add_argument("--max-tree-depth", type=int, default=7)
     parser.add_argument("--target-accept", type=float, default=0.85)
+    parser.add_argument(
+        "--enforce-positive-flux-guard",
+        action="store_true",
+        default=False,
+        help="Apply the historical four-sigma positive-total-flux penalty during recovery.",
+    )
+    parser.add_argument(
+        "--progress",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Show SVI and NUTS progress bars (default: enabled).",
+    )
     parser.add_argument(
         "--output",
         type=Path,
@@ -187,6 +201,7 @@ def build_joint_recovery_model(
     blr_fraction_prior_median,
     blr_fraction_prior_log_sigma,
     kernel_model,
+    enforce_positive_flux_guard,
 ):
     """Return a model fitting BLR amplitudes and lags in every retained band."""
 
@@ -241,6 +256,27 @@ def build_joint_recovery_model(
             diag=errors**2,
             assume_sorted=True,
         )
+        band_indices = jnp.arange(n_band, dtype=jnp.int32)
+        stationary_variance = jax.vmap(
+            lambda band: kernel.evaluate((0.0, band), (0.0, band))
+        )(band_indices)
+        stationary_std = jnp.sqrt(jnp.maximum(stationary_variance, 1e-24))
+        positive_flux_margin = 1.0 - POSITIVE_FLUX_N_SIGMA * stationary_std
+        negative_flux_probability = jax.scipy.special.ndtr(-1.0 / stationary_std)
+        numpyro.deterministic(
+            "positive_flux_margin_min",
+            jnp.min(positive_flux_margin),
+        )
+        numpyro.deterministic(
+            "negative_total_flux_probability_max",
+            jnp.max(negative_flux_probability),
+        )
+        if enforce_positive_flux_guard:
+            scaled_violation = -positive_flux_margin / POSITIVE_FLUX_MARGIN_SOFTNESS
+            numpyro.factor(
+                "positive_flux_guard",
+                -0.5 * jnp.sum(jax.nn.softplus(scaled_violation) ** 2),
+            )
         numpyro.factor("light_curve_log_likelihood", gp.log_probability(y))
 
     return model
@@ -280,7 +316,7 @@ def fit_one_mock(model, simulated, *, seed, args):
         Adam(args.svi_lr),
         Trace_ELBO(),
     )
-    svi_result = svi.run(svi_key, args.svi_steps, progress_bar=False)
+    svi_result = svi.run(svi_key, args.svi_steps, progress_bar=args.progress)
     init_values = guide.median(svi_result.params)
     svi_loss = np.asarray(svi_result.losses)[-1]
     kernel = NUTS(
@@ -296,7 +332,7 @@ def fit_one_mock(model, simulated, *, seed, args):
         num_samples=args.num_samples,
         num_chains=1,
         chain_method="sequential",
-        progress_bar=False,
+        progress_bar=args.progress,
     )
     mcmc.run(nuts_key, extra_fields=("diverging", "accept_prob"))
     samples = {name: np.asarray(value) for name, value in mcmc.get_samples().items()}
@@ -380,6 +416,10 @@ def main() -> None:
     csv_path = args.results_csv or args.output.with_suffix(".csv")
     csv_path.parent.mkdir(parents=True, exist_ok=True)
     for index in range(n_realizations):
+        print(
+            f"[{index + 1}/{n_realizations}] Preparing injection and fit",
+            flush=True,
+        )
         true_continuum_band = true_continuum[index] * np.asarray(
             lam_rf / lambda_center_rf
         ) ** args.injected_eta_sigma
@@ -454,6 +494,7 @@ def main() -> None:
             blr_fraction_prior_median=args.blr_fraction_prior_median,
             blr_fraction_prior_log_sigma=args.blr_fraction_prior_log_sigma,
             kernel_model=args.kernel_model,
+            enforce_positive_flux_guard=args.enforce_positive_flux_guard,
         )
         center_continuum = np.sqrt(
             (args.continuum_amp_min / 2) * (args.continuum_amp_max * 2)
@@ -496,6 +537,7 @@ def main() -> None:
             "realization": index,
             "lag_model": "independent",
             "kernel_model": args.kernel_model,
+            "positive_flux_guard_enforced": args.enforce_positive_flux_guard,
             "true_lag_rest": true_lag[index],
             "true_continuum_amp": true_continuum[index],
             "true_continuum_amp_active_band": true_continuum_band[blr_band_index],
@@ -506,6 +548,8 @@ def main() -> None:
         }
         _add_interval(row, samples, "continuum_amp")
         _add_interval(row, samples, "eta_sigma")
+        _add_interval(row, samples, "positive_flux_margin_min")
+        _add_interval(row, samples, "negative_total_flux_probability_max")
         for name in ("lag_rest", "blr_fraction", "blr_amp"):
             active_samples = {name: np.asarray(samples[name])[:, blr_band_index]}
             _add_interval(row, active_samples, name)
