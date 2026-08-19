@@ -62,7 +62,8 @@ def parse_args():
     parser.add_argument("--N", type=int, default=10, help="Objects per array task.")
     parser.add_argument("--nwarm", type=int, default=250, help="Warmup steps.")
     parser.add_argument("--nsamp", type=int, default=250, help="Posterior samples per chain.")
-    parser.add_argument("--svi-steps", type=int, default=1000, help="SVI warm-start steps.")
+    parser.add_argument("--svi-steps", type=int, default=4000, help="SVI warm-start steps.")
+    parser.add_argument("--svi-lr", type=float, default=1e-3, help="SVI learning rate.")
     parser.add_argument("--ncores", type=int, default=1, help="CPUs per task.")
     parser.add_argument("--max-tree-depth", type=int, default=12, help="NUTS max tree depth.")
     parser.add_argument("--partition", default="day", help="SLURM partition.")
@@ -324,6 +325,8 @@ def build_sbatch_script(
         "svi+nuts",
         "--svi_steps",
         str(args.svi_steps),
+        "--svi_lr",
+        str(args.svi_lr),
         "--nwarm",
         str(args.nwarm),
         "--nsamp",
