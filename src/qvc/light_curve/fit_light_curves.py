@@ -5184,6 +5184,7 @@ def main():
 
     iterator = tqdm(objs, desc="Fitting", disable=not args.progress)
     for idx, obj in enumerate(iterator):
+        object_fit_start = time.perf_counter()
         oid = str(obj["object_id"])
         try:
             default_bands = ["u", "g", "r", "i", "z"]
@@ -5661,14 +5662,22 @@ def main():
                 f"tau_ls = {tau_ls}"
             )
 
-            results.append(final_result)
-
             if args.inject_fake:
                 compare_pairs = [
                     ("log_tau_fake", "log_tau_uv", "log10_tau"),
                     ("log_sigma_fake", "log_sigma_uv", "log10_sigma"),
                 ]
                 summarize_fake_true_vs_recovered(final_result, diagnostics, compare_pairs=compare_pairs)
+
+            final_result["light_curve_fit_total_elapsed_sec"] = float(
+                time.perf_counter() - object_fit_start
+            )
+            logging.info(
+                "[%s] Total per-object light-curve fit time: %.3f s",
+                oid,
+                final_result["light_curve_fit_total_elapsed_sec"],
+            )
+            results.append(final_result)
 
         except Exception as e:
             logging.error(f"[{oid}] Error during fit: {e}")

@@ -220,6 +220,23 @@ def test_save_quasar_list_hdf5_uses_object_id_filename_for_single_object(tmp_pat
     assert out_path.exists()
 
 
+def test_save_quasar_list_hdf5_persists_total_light_curve_fit_runtime(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    mfu.prefix = "flat_io_runtime"
+    mfu.suffix = "job0"
+
+    quasar = [_mock_quasars()[0]]
+    quasar[0]["light_curve_fit_total_elapsed_sec"] = 123.5
+    mfu.save_quasar_list_hdf5(quasar)
+
+    out_path = tmp_path / "results" / "data" / "flat_io_runtime" / "qso-a-1.h5"
+    with h5py.File(out_path, "r") as hdf:
+        np.testing.assert_allclose(
+            hdf["light_curve_fit_total_elapsed_sec"][:],
+            np.array([123.5]),
+        )
+
+
 def test_save_quasar_list_hdf5_uses_time_tied_random_filename_for_multiple_objects(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     mfu.prefix = "flat_io_multi"

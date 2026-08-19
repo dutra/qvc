@@ -314,6 +314,7 @@ def plot_sigma_tau_identity_grid(
     sigma_lims=None,
     tau_lims=None,
     layout="vertical",
+    figure_annotation=None,
 ):
     label_fontsize = 14
     tick_fontsize = 12
@@ -541,6 +542,9 @@ def plot_sigma_tau_identity_grid(
     else:
         for ax in axes.ravel():
             _set_row_ticks([ax])
+
+    if figure_annotation:
+        fig.suptitle(figure_annotation, fontsize=10.5)
 
     if output_path is not None:
         fig.savefig(output_path, dpi=600, bbox_inches="tight")
