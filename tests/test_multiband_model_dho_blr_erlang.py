@@ -17,6 +17,7 @@ import jax.numpy as jnp
 
 from qvc.light_curve.multiband_model_dho_blr_erlang import (
     ErlangResponseDHOQS,
+    ErlangResponseDRWQS,
     erlang_impulse_response,
     erlang_response_moments,
     make_multiband_dho_blr_flux_linearized_erlang_model,
@@ -28,6 +29,49 @@ from qvc.light_curve.multiband_dho_core import (
 
 
 jax.config.update("jax_enable_x64", True)
+
+
+def _make_drw_kernel(n_band=2, order=3, *, amp_blr=None):
+    if amp_blr is None:
+        amp_blr = jnp.linspace(0.02, 0.05, n_band)
+    return ErlangResponseDRWQS(
+        tau_drw=jnp.linspace(80.0, 240.0, n_band),
+        lag_blr=jnp.linspace(25.0, 110.0, n_band),
+        amp_cont=jnp.linspace(0.1, 0.25, n_band),
+        amp_blr=jnp.asarray(amp_blr),
+        order=order,
+    )
+
+
+def test_drw_kernel_continuum_is_exact_ou_covariance():
+    tau = 120.0
+    sigma = 0.2
+    kernel = ErlangResponseDRWQS(
+        tau_drw=jnp.array([tau]),
+        lag_blr=jnp.array([50.0]),
+        amp_cont=jnp.array([sigma]),
+        amp_blr=jnp.array([0.0]),
+        order=3,
+    )
+    for dt in (0.0, 1.0, 40.0, 300.0):
+        actual = kernel.evaluate((0.0, 0), (dt, 0))
+        expected = sigma**2 * np.exp(-dt / tau)
+        np.testing.assert_allclose(actual, expected, rtol=1e-10, atol=1e-12)
+
+
+@pytest.mark.parametrize("n_band", [1, 2, 4])
+@pytest.mark.parametrize("order", [1, 3, 5])
+def test_drw_kernel_closed_form_transition_matches_expm(n_band, order):
+    kernel = _make_drw_kernel(n_band=n_band, order=order)
+    for dt in (0.0, 0.1, 10.0, 100.0, -5.0):
+        X1 = (jnp.asarray(0.0), jnp.asarray(0))
+        X2 = (jnp.asarray(dt), jnp.asarray(n_band - 1))
+        np.testing.assert_allclose(
+            kernel.transition_matrix(X1, X2),
+            kernel._transition_matrix_expm(X1, X2),
+            rtol=1e-9,
+            atol=1e-12,
+        )
 
 
 def _original_loop_design_matrix(kernel):
