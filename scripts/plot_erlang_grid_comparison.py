@@ -15,7 +15,13 @@ def load(path):
     return {
         key: np.asarray([float(row[key]) for row in rows])
         for key in rows[0]
-        if key not in {"kernel_model", "lag_model"}
+        if key
+        not in {
+            "kernel_model",
+            "injection_kernel_model",
+            "recovery_kernel_model",
+            "lag_model",
+        }
     }
 
 

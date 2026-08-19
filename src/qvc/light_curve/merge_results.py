@@ -415,6 +415,35 @@ def build_stone_identity_plot_path(prefix: str, base_dir: str) -> str:
     return str(base_path.parent / "plots" / prefix / "sigma_tau_identity_grid.pdf")
 
 
+def _format_light_curve_runtime_annotation(rows):
+    values = []
+    for row in rows:
+        try:
+            value = float(row.get("light_curve_fit_total_elapsed_sec", np.nan))
+        except (TypeError, ValueError):
+            continue
+        if np.isfinite(value) and value >= 0.0:
+            values.append(value)
+
+    if not values:
+        return None
+
+    values = np.asarray(values, dtype=float)
+    mean_seconds = float(np.mean(values))
+    p90_seconds = float(np.percentile(values, 90.0))
+    largest_seconds = max(mean_seconds, p90_seconds)
+    if largest_seconds >= 3600.0:
+        scale, unit = 3600.0, "h"
+    elif largest_seconds >= 60.0:
+        scale, unit = 60.0, "min"
+    else:
+        scale, unit = 1.0, "s"
+    return (
+        f"Runtime: mean {mean_seconds / scale:.1f} {unit}"
+        f" · p90 {p90_seconds / scale:.1f} {unit}"
+    )
+
+
 def _identity_fit_fields(bands, *, include_coordinates=False):
     fields = ["object_id"]
     if include_coordinates:
@@ -527,6 +556,12 @@ def build_stone_identity_plot_data(rows, stone_fits_path=None, s82_catalog_path=
 
 
 def write_stone_sigma_tau_identity_grid(rows, output_path: str, stone_fits_path=None, s82_catalog_path=None):
+    runtime_annotation = _format_light_curve_runtime_annotation(rows)
+    if runtime_annotation is None:
+        print(
+            "WARNING: Stone comparison plot has no finite nonnegative "
+            "light_curve_fit_total_elapsed_sec values; omitting runtime annotation."
+        )
     plot_df = build_stone_identity_plot_data(
         rows,
         stone_fits_path=stone_fits_path,
@@ -565,6 +600,7 @@ def write_stone_sigma_tau_identity_grid(rows, output_path: str, stone_fits_path=
         output_path=output_path,
         sigma_limits=STONE_SIGMA_LIMITS,
         tau_limits=STONE_TAU_LIMITS,
+        figure_annotation=runtime_annotation,
     )
     plt.close(fig)
     print(f"Wrote Stone sigma/tau identity grid to {output_path}")

@@ -357,6 +357,222 @@ class ErlangResponseDHOQS(qs.Quasisep):
         return covariance @ y
 
 
+class ErlangResponseDRWQS(qs.Quasisep):
+    """Exact unit-RMS OU/DRW driver with causal Erlang BLR responses.
+
+    The continuum covariance in each band is exactly
+    ``exp(-abs(dt) / tau_drw)`` before applying ``amp_cont``.  Bands share the
+    same white-noise driver, matching the perfectly coherent multiband
+    continuum assumed by the DHO kernels used for recovery.
+    """
+
+    tau_drw: jnp.ndarray
+    lag_blr: jnp.ndarray
+    amp_cont: jnp.ndarray
+    amp_blr: jnp.ndarray
+    order: int = eqx.field(static=True, default=DEFAULT_ERLANG_ORDER)
+
+    def coord_to_sortable(self, X):
+        t, b = X
+        return t + 1e-9 * jnp.asarray(b, dtype=jnp.int32)
+
+    def _dimensions(self):
+        B = int(self.tau_drw.shape[0])
+        return B, B + B * int(self.order)
+
+    def _response_rates(self):
+        return int(self.order) / _safe_pos(jnp.asarray(self.lag_blr, dtype=float))
+
+    def design_matrix(self):
+        tau = _safe_pos(jnp.asarray(self.tau_drw, dtype=float))
+        B, n = self._dimensions()
+        order = int(self.order)
+        driver = -jnp.diag(1.0 / tau)
+        n_response = B * order
+        rates = self._response_rates().astype(driver.dtype)
+        state_rates = jnp.repeat(rates, order)
+        response = -jnp.diag(state_rates)
+        sub_rows = jnp.arange(1, n_response, dtype=jnp.int32)
+        within_chain = (sub_rows % order) != 0
+        response = response.at[sub_rows, sub_rows - 1].set(
+            jnp.where(within_chain, state_rates[sub_rows], 0.0)
+        )
+        response_driver = jnp.zeros((n_response, B), dtype=driver.dtype)
+        chain_starts = jnp.arange(B, dtype=jnp.int32) * order
+        response_driver = response_driver.at[chain_starts, jnp.arange(B)].set(rates)
+        return jnp.block(
+            [
+                [driver, jnp.zeros((B, n_response), dtype=driver.dtype)],
+                [response_driver, response],
+            ]
+        )
+
+    def _band_state_indices(self):
+        B, _n = self._dimensions()
+        k = int(self.order)
+        b = jnp.arange(B)
+        return jnp.concatenate(
+            [b[:, None], B + b[:, None] * k + jnp.arange(k)[None, :]],
+            axis=1,
+        )
+
+    def stationary_covariance(self):
+        tau = _safe_pos(jnp.asarray(self.tau_drw, dtype=float))
+        A = self.design_matrix()
+        B, _n = self._dimensions()
+        k = int(self.order)
+        m = 1 + k
+        idx = self._band_state_indices()
+        A_blocks = A[idx[:, :, None], idx[:, None, :]]
+        beta = jnp.sqrt(2.0 / tau)
+        eye_m = jnp.eye(m, dtype=A.dtype)
+
+        def solve_pair(bi, bj):
+            diffusion = jnp.zeros((m, m), dtype=A.dtype)
+            diffusion = diffusion.at[0, 0].set(beta[bi] * beta[bj])
+            operator = jnp.kron(A_blocks[bi], eye_m) + jnp.kron(
+                eye_m, A_blocks[bj]
+            )
+            return jnp.linalg.solve(
+                operator,
+                -diffusion.reshape(-1),
+            ).reshape((m, m))
+
+        b = jnp.arange(B)
+        bi, bj = jnp.meshgrid(b, b, indexing="ij")
+        blocks = jax.vmap(solve_pair)(bi.ravel(), bj.ravel())
+        covariance = jnp.zeros(A.shape, dtype=A.dtype)
+        covariance = covariance.at[
+            idx[bi.ravel()][:, :, None],
+            idx[bj.ravel()][:, None, :],
+        ].set(blocks)
+        return 0.5 * (covariance + covariance.T)
+
+    def observation_model(self, X):
+        _t, b = X
+        b = jnp.asarray(b, dtype=jnp.int32)
+        B, n = self._dimensions()
+        h = jnp.zeros(n, dtype=jnp.asarray(self.tau_drw).dtype)
+        h = h.at[b].set(_safe_pos(jnp.asarray(self.amp_cont))[b])
+        response_idx = B + b * int(self.order) + int(self.order) - 1
+        h = h.at[response_idx].set(_safe_pos(jnp.asarray(self.amp_blr))[b])
+        return h
+
+    def _driver_to_chain_columns(self, dt, lam, e_lam, q, eq):
+        k = int(self.order)
+        j = np.arange(1, k + 1)
+        z = q - lam
+        zt = z * dt
+        use_series = jnp.abs(zt) <= 1.0
+
+        n_terms = 26
+        p = np.arange(n_terms)
+        inv_fact_pj = jnp.asarray(
+            [[1.0 / math.factorial(int(pi) + int(ji)) for pi in p] for ji in j]
+        )
+        zt_series = jnp.where(use_series, zt, 0.0)
+        zt_pows = jnp.power(zt_series[:, None], p)
+        series = (
+            eq[:, None]
+            * jnp.power(q[:, None] * dt, j)
+            * jnp.einsum("bp,jp->bj", zt_pows, inv_fact_pj)
+        )
+
+        z_safe = jnp.where(use_series, 1.0, z)
+        zt_safe = jnp.where(use_series, 1.0, zt)
+        m = np.arange(k)
+        inv_fact_m = jnp.asarray([1.0 / math.factorial(int(i)) for i in m])
+        partial_sums = jnp.cumsum(
+            jnp.power(zt_safe[:, None], m) * inv_fact_m,
+            axis=1,
+        )
+        difference = jnp.power((q / z_safe)[:, None], j) * (
+            e_lam[:, None] - eq[:, None] * partial_sums
+        )
+        return jnp.where(use_series[:, None], series, difference)
+
+    def transition_matrix(self, X1, X2):
+        t1, _ = X1
+        t2, _ = X2
+        dt = t2 - t1
+        tau = _safe_pos(jnp.asarray(self.tau_drw, dtype=float))
+        B, n = self._dimensions()
+        k = int(self.order)
+        lam = 1.0 / tau
+        q = self._response_rates()
+        e_lam = jnp.exp(-lam * dt)
+        eq = jnp.exp(-q * dt)
+
+        d = np.subtract.outer(np.arange(k), np.arange(k))
+        inv_fact_d = jnp.asarray(
+            [
+                [1.0 / math.factorial(int(v)) if v >= 0 else 0.0 for v in row]
+                for row in d
+            ]
+        )
+        chain = (
+            eq[:, None, None]
+            * jnp.power(q[:, None, None] * dt, np.maximum(d, 0))
+            * inv_fact_d
+        )
+        driver_columns = self._driver_to_chain_columns(
+            dt,
+            lam,
+            e_lam,
+            q,
+            eq,
+        )
+
+        b = jnp.arange(B)
+        chain_idx = B + b[:, None] * k + jnp.arange(k)[None, :]
+        phi = jnp.zeros((n, n), dtype=e_lam.dtype)
+        phi = phi.at[b, b].set(e_lam)
+        phi = phi.at[chain_idx[:, :, None], chain_idx[:, None, :]].set(chain)
+        phi = phi.at[chain_idx, b[:, None]].set(driver_columns)
+        return phi
+
+    def _transition_matrix_expm(self, X1, X2):
+        t1, _ = X1
+        t2, _ = X2
+        return expm(self.design_matrix() * (t2 - t1))
+
+    def to_symm_qsm(self, X):
+        Pinf = self.stationary_covariance()
+        Xprev = jax.tree_util.tree_map(lambda y: jnp.append(y[0], y[:-1]), X)
+        a = jax.vmap(self.transition_matrix)(Xprev, X)
+        h = jax.vmap(self.observation_model)(X)
+        d = jnp.einsum("ni,ij,nj->n", h, Pinf, h)
+        p = jax.vmap(lambda hi, Fi: hi @ Fi)(h, a)
+        q = h @ Pinf.T
+        return SymmQSM(
+            diag=DiagQSM(d=d),
+            lower=StrictLowerTriQSM(p=p, q=q, a=a),
+        )
+
+    def evaluate(self, X1, X2):
+        Pinf = self.stationary_covariance()
+        h1 = self.observation_model(X1)
+        h2 = self.observation_model(X2)
+        return jnp.where(
+            self.coord_to_sortable(X1) < self.coord_to_sortable(X2),
+            h2 @ self.transition_matrix(X1, X2) @ Pinf @ h1,
+            h1 @ self.transition_matrix(X2, X1) @ Pinf @ h2,
+        )
+
+    def matmul(self, X1, X2=None, y=None):
+        if y is None:
+            if X2 is None:
+                raise ValueError("Missing right-hand side for kernel matmul")
+            y = X2
+            X2 = None
+        if X2 is None:
+            return self.to_symm_qsm(X1) @ y
+        covariance = jax.vmap(
+            lambda x1: jax.vmap(lambda x2: self.evaluate(x1, x2))(X2)
+        )(X1)
+        return covariance @ y
+
+
 class ContiBLRErlangRelativeFluxModel(ContiBLRRelativeFlux_SHO_Model):
     """Relative-flux model that constructs the augmented Erlang kernel."""
 
@@ -471,6 +687,7 @@ __all__ = [
     "DEFAULT_ERLANG_ORDER",
     "ContiBLRErlangRelativeFluxModel",
     "ErlangResponseDHOQS",
+    "ErlangResponseDRWQS",
     "erlang_impulse_response",
     "erlang_response_moments",
     "make_multiband_dho_blr_flux_linearized_erlang_model",

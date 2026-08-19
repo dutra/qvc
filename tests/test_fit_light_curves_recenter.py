@@ -107,7 +107,13 @@ def test_flux_linearized_refinement_strategy_controls_nuts_runs(
     refinement_strategy,
     expected_nuts_runs,
 ):
-    calls = {"svi": 0, "nuts": 0, "pseudo_params": []}
+    calls = {
+        "svi": 0,
+        "nuts": 0,
+        "summary": 0,
+        "print": 0,
+        "pseudo_params": [],
+    }
     obj = {
         "object_id": "test",
         "X": np.array([[0.0, 0.0], [1.0, 0.0]], dtype=float),
@@ -125,7 +131,12 @@ def test_flux_linearized_refinement_strategy_controls_nuts_runs(
 
     def fake_svi(*_args, **_kwargs):
         calls["svi"] += 1
-        return {"theta": np.array(float(10 + calls["svi"]))}, float(calls["svi"])
+        theta = np.array(float(10 + calls["svi"]))
+        return (
+            {"theta": theta},
+            float(calls["svi"]),
+            {"theta": {"mean": theta}},
+        )
 
     def fake_nuts(*_args, **_kwargs):
         calls["nuts"] += 1
@@ -139,6 +150,26 @@ def test_flux_linearized_refinement_strategy_controls_nuts_runs(
 
     monkeypatch.setattr(fit_lc, "run_svi_warm_start", fake_svi)
     monkeypatch.setattr(fit_lc, "_run_nuts_inference", fake_nuts)
+
+    def fake_summary(samples, *, group_by_chain, prob):
+        calls["summary"] += 1
+        assert samples["theta"].shape == (1, 2)
+        assert group_by_chain is True
+        assert prob == 0.90
+        return {"theta": {"mean": np.array(0.0)}}
+
+    def fake_print(summary_dict, *, heading):
+        calls["print"] += 1
+        assert "theta" in summary_dict
+        assert "NUTS refinement" in heading
+
+    monkeypatch.setattr(fit_lc, "compute_numpyro_summary", fake_summary)
+    monkeypatch.setattr(fit_lc, "print_numpyro_summary_dict", fake_print)
+    monkeypatch.setattr(
+        fit_lc,
+        "print_and_validate_svi_warm_start",
+        lambda *_args, **_kwargs: None,
+    )
     monkeypatch.setattr(
         fit_lc,
         "_model_params_at_values",
@@ -162,7 +193,7 @@ def test_flux_linearized_refinement_strategy_controls_nuts_runs(
 
     monkeypatch.setattr(fit_lc, "_flux_linearized_pseudo_data_from_prediction", fake_pseudo)
 
-    samples, per_chain, _fit_obj, diagnostics = (
+    samples, per_chain, _fit_obj, diagnostics, posterior_summary = (
         fit_lc.run_iterated_mag_flux_linearized_inference(
             obj,
             np.array([2500.0]),
@@ -186,11 +217,14 @@ def test_flux_linearized_refinement_strategy_controls_nuts_runs(
 
     assert calls["svi"] == 3
     assert calls["nuts"] == expected_nuts_runs
+    assert calls["summary"] == expected_nuts_runs
+    assert calls["print"] == expected_nuts_runs
     assert len(calls["pseudo_params"]) == 3
     assert diagnostics["flux_linearized_nuts_runs"] == expected_nuts_runs
     assert diagnostics["elapsed_sec"] == 2.0 * expected_nuts_runs
     assert np.isfinite(samples["theta"]).all()
     assert np.isfinite(per_chain["theta"]).all()
+    assert "theta" in posterior_summary
     if refinement_strategy == "svi_then_nuts":
         assert calls["pseudo_params"][:2] == [11.0, 12.0]
         assert diagnostics["flux_linearized_iter1_elapsed_sec"] == 0.0

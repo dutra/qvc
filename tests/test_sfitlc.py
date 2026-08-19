@@ -29,7 +29,8 @@ def _args(**overrides):
         "partition": "day",
         "time": "2:00:00",
         "env": "jaxcpu2",
-        "svi_steps": 1000,
+        "svi_steps": 4000,
+        "svi_lr": 1e-3,
         "nwarm": 500,
         "nsamp": 250,
         "max_tree_depth": 12,
@@ -120,6 +121,10 @@ def test_sbatch_runs_each_chunk_object_in_a_fresh_process():
     assert submission["resolved"]["job"]["object_count"] == 3
     assert submission["resolved"]["resources"]["memory"] == "12G"
     assert "--spectra_fit_csv" in submission["resolved"]["fit_flags"]
+    assert "--svi_lr" in submission["resolved"]["fit_flags"]
+    assert "0.001" in submission["resolved"]["fit_flags"]
+    assert "--svi_steps" in submission["resolved"]["fit_flags"]
+    assert "4000" in submission["resolved"]["fit_flags"]
 
 
 def test_generated_multi_object_sbatch_is_valid_bash():
@@ -167,6 +172,8 @@ def test_non_chisq_jobs_do_not_require_a_spectra_fit_csv(monkeypatch):
 
     assert args.spectra_fit_csv is None
     assert args.stone_linear_mode == "both"
+    assert args.svi_steps == 4000
+    assert args.svi_lr == pytest.approx(1e-3)
 
 
 @pytest.mark.parametrize(

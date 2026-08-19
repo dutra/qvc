@@ -348,7 +348,7 @@ def align_nested_sampler_num_live_points(model, rng_key, requested_num_live_poin
 
 
 def run_svi_warm_start(model, rng_key, *, num_steps, learning_rate, progress_bar=False):
-    """Run AutoNormal SVI and return guide-median init values for NUTS."""
+    """Run AutoNormal SVI and return guide values plus a sampled summary."""
 
     guide = AutoNormal(model)
     svi = SVI(model, guide, Adam(learning_rate), Trace_ELBO())
@@ -373,7 +373,107 @@ def run_svi_warm_start(model, rng_key, *, num_steps, learning_rate, progress_bar
         )
     params = svi.get_params(svi_state)
     init_values = guide.median(params)
-    return init_values, float(device_get(final_loss))
+    guide_samples = guide.sample_posterior(
+        random.fold_in(rng_key, 1),
+        params,
+        sample_shape=(1000,),
+    )
+    guide_samples = tree_map(lambda x: np.asarray(device_get(x)), guide_samples)
+    return (
+        init_values,
+        float(device_get(final_loss)),
+        summarize_svi_guide_samples(guide_samples),
+    )
+
+
+def summarize_svi_guide_samples(guide_samples, *, prob=0.90):
+    """Summarize independent draws from a fitted variational guide."""
+
+    lower_prob = 0.5 * (1.0 - float(prob))
+    upper_prob = 1.0 - lower_prob
+    lower_name = f"{100.0 * lower_prob:.1f}%"
+    upper_name = f"{100.0 * upper_prob:.1f}%"
+    summary_dict = {}
+    for name, value in guide_samples.items():
+        arr = np.asarray(value, dtype=float)
+        if arr.ndim == 0:
+            arr = arr.reshape(1)
+        n_draws = arr.shape[0]
+        event_shape = arr.shape[1:]
+        flat = arr.reshape(n_draws, -1)
+        stats = {
+            "mean": np.full(flat.shape[1], np.nan),
+            "std": np.full(flat.shape[1], np.nan),
+            "median": np.full(flat.shape[1], np.nan),
+            lower_name: np.full(flat.shape[1], np.nan),
+            upper_name: np.full(flat.shape[1], np.nan),
+            "finite%": np.zeros(flat.shape[1]),
+        }
+        for index in range(flat.shape[1]):
+            finite_values = flat[np.isfinite(flat[:, index]), index]
+            stats["finite%"][index] = 100.0 * finite_values.size / max(1, n_draws)
+            if finite_values.size == 0:
+                continue
+            stats["mean"][index] = np.mean(finite_values)
+            stats["std"][index] = np.std(
+                finite_values,
+                ddof=1 if finite_values.size > 1 else 0,
+            )
+            stats["median"][index] = np.median(finite_values)
+            stats[lower_name][index] = np.quantile(finite_values, lower_prob)
+            stats[upper_name][index] = np.quantile(finite_values, upper_prob)
+        summary_dict[name] = {
+            key: values.reshape(event_shape) if event_shape else values[0]
+            for key, values in stats.items()
+        }
+    return summary_dict
+
+
+def print_and_validate_svi_warm_start(
+    object_id,
+    *,
+    refinement_index,
+    refinement_iters,
+    final_loss,
+    init_values,
+    summary_dict,
+):
+    """Print an SVI report and reject non-finite NUTS initialization values."""
+
+    loss_is_finite = bool(np.isfinite(final_loss))
+    nonfinite_sites = sorted(
+        name
+        for name, value in init_values.items()
+        if not np.all(np.isfinite(np.asarray(device_get(value), dtype=float)))
+    )
+    heading = (
+        f"[{object_id}] SVI warm-start summary for refinement "
+        f"{refinement_index}/{refinement_iters}:"
+    )
+    print(f"\n{heading}")
+    print(
+        f"  final_loss: {final_loss} "
+        f"({'finite' if loss_is_finite else 'NON-FINITE'})"
+    )
+    print(
+        "  nonfinite_guide_medians: "
+        + (", ".join(nonfinite_sites) if nonfinite_sites else "none")
+    )
+    print_numpyro_summary_dict(summary_dict)
+
+    problems = []
+    if not loss_is_finite:
+        problems.append("non-finite final loss")
+    if nonfinite_sites:
+        problems.append(
+            "non-finite guide median values for " + ", ".join(nonfinite_sites)
+        )
+    if problems:
+        raise FloatingPointError(
+            f"[{object_id}] Invalid SVI warm start after refinement "
+            f"{refinement_index}/{refinement_iters}: {'; '.join(problems)}. "
+            "Refusing to start NUTS."
+        )
 
 
 def _expand_last(x):
@@ -4063,6 +4163,7 @@ def build_single_object_model_mag_flux_linearized(
     erlang_order=DEFAULT_ERLANG_ORDER,
     use_fast_solver=False,
     drw_parameterization=False,
+    enforce_positive_flux_guard=False,
 ):
     """Return the relative-flux quasi-separable model for one object."""
 
@@ -4339,11 +4440,22 @@ def build_single_object_model_mag_flux_linearized(
             has_jitter=has_jitter,
             erlang_order=erlang_order,
             **(
-                {}
+                {"enforce_positive_flux_guard": enforce_positive_flux_guard}
                 if drw_parameterization
                 else {"use_fast_solver": use_fast_solver}
             ),
         )
+        if drw_parameterization:
+            positive_flux_margin = m.positive_flux_margin(params)
+            negative_flux_probability = m.negative_total_flux_probability(params)
+            numpyro.deterministic(
+                "positive_flux_margin_min",
+                jnp.min(positive_flux_margin),
+            )
+            numpyro.deterministic(
+                "negative_total_flux_probability_max",
+                jnp.max(negative_flux_probability),
+            )
         numpyro.factor("loglike", m.log_prob(params))
 
     return model
@@ -4532,6 +4644,7 @@ def run_iterated_mag_flux_linearized_inference(
     refinement_strategy="nuts_each",
     refinement_iters=FLUX_LINEARIZED_REFINEMENT_ITERS,
     drw_parameterization=False,
+    enforce_positive_flux_guard=False,
 ):
     """Iteratively refit the relative-flux QS model using local pseudo-data.
 
@@ -4558,6 +4671,7 @@ def run_iterated_mag_flux_linearized_inference(
     y_fit, yerr_fit = _flux_linearized_initial_arrays(obj_dict)
     samples_flat = None
     samples_per_chain = None
+    posterior_summary = {}
     diagnostics = {
         "flux_linearized_refinement_iters": int(refinement_iters),
         "flux_linearized_min_total_flux_ratio": float(FLUX_LINEARIZED_MIN_TOTAL_FLUX_RATIO),
@@ -4577,6 +4691,7 @@ def run_iterated_mag_flux_linearized_inference(
         erlang_order=erlang_order,
         use_fast_solver=use_fast_solver,
         drw_parameterization=drw_parameterization,
+        enforce_positive_flux_guard=enforce_positive_flux_guard,
     )
 
     for iter_idx in range(int(refinement_iters)):
@@ -4595,7 +4710,7 @@ def run_iterated_mag_flux_linearized_inference(
         if fit_method == "svi+nuts":
             svi_key, inference_key = random.split(iter_key)
             svi_start = time.perf_counter()
-            init_values, svi_final_loss = run_svi_warm_start(
+            init_values, svi_final_loss, svi_summary = run_svi_warm_start(
                 iter_model,
                 svi_key,
                 num_steps=svi_steps,
@@ -4603,6 +4718,14 @@ def run_iterated_mag_flux_linearized_inference(
                 progress_bar=progress_bar,
             )
             svi_elapsed = time.perf_counter() - svi_start
+            print_and_validate_svi_warm_start(
+                obj_dict.get("object_id", "unknown"),
+                refinement_index=iter_idx + 1,
+                refinement_iters=int(refinement_iters),
+                final_loss=svi_final_loss,
+                init_values=init_values,
+                summary_dict=svi_summary,
+            )
             init_strategy = init_to_value(values=init_values)
             diagnostics[f"flux_linearized_iter{iter_idx + 1}_svi_final_loss"] = float(svi_final_loss)
             diagnostics[f"flux_linearized_iter{iter_idx + 1}_svi_elapsed_sec"] = float(
@@ -4626,6 +4749,19 @@ def run_iterated_mag_flux_linearized_inference(
                 max_tree_depth=max_tree_depth,
                 target_accept=target_accept,
                 init_strategy=init_strategy,
+            )
+            posterior_summary = compute_numpyro_summary(
+                samples_per_chain,
+                group_by_chain=True,
+                prob=0.90,
+            )
+            print_numpyro_summary_dict(
+                posterior_summary,
+                heading=(
+                    f"[{obj_dict.get('object_id', 'unknown')}] NumPyro posterior "
+                    f"summary after NUTS refinement {iter_idx + 1}/"
+                    f"{int(refinement_iters)}:"
+                ),
             )
             diagnostics["flux_linearized_nuts_runs"] += 1
             diagnostics[f"flux_linearized_iter{iter_idx + 1}_accept_prob"] = iter_diag[
@@ -4710,7 +4846,7 @@ def run_iterated_mag_flux_linearized_inference(
         diagnostics["elapsed_sec"]
         + diagnostics["flux_linearized_svi_elapsed_sec"]
     )
-    return samples_flat, samples_per_chain, fit_obj, diagnostics
+    return samples_flat, samples_per_chain, fit_obj, diagnostics, posterior_summary
 
 
 
@@ -4771,13 +4907,13 @@ def main():
     parser.add_argument(
         "--svi_steps",
         type=int,
-        default=1000,
+        default=4000,
         help="SVI warm-start steps used only with --fit_method svi+nuts.",
     )
     parser.add_argument(
         "--svi_lr",
         type=float,
-        default=1e-2,
+        default=1e-3,
         help="SVI learning rate used only with --fit_method svi+nuts.",
     )
     parser.add_argument(
@@ -4880,6 +5016,17 @@ def main():
             "Use the CARMA(2,1) continuum with stationary sigma, integrated "
             "DRW-style tau, perturbation timescale, and quality factor Q "
             "across both overdamped and underdamped regimes."
+        ),
+    )
+    parser.add_argument(
+        "--enforce_positive_flux_guard",
+        action="store_true",
+        default=False,
+        help=(
+            "Apply the historical four-sigma positive-total-flux penalty to "
+            "the CARMA(2,1) Erlang likelihood. Disabled by default; the "
+            "positivity margin and negative-flux tail probability are still "
+            "reported as posterior diagnostics."
         ),
     )
     parser.add_argument(
@@ -4998,6 +5145,10 @@ def main():
             "--dho_drw_parameterization currently uses the general matrix-"
             "exponential solver and cannot be combined with --fast_solver."
         )
+    if args.enforce_positive_flux_guard and not args.dho_drw_parameterization:
+        raise ValueError(
+            "--enforce_positive_flux_guard requires --dho_drw_parameterization."
+        )
     if args.fit_method == "ns":
         if NestedSampler is None:
             raise ImportError(
@@ -5033,6 +5184,7 @@ def main():
 
     iterator = tqdm(objs, desc="Fitting", disable=not args.progress)
     for idx, obj in enumerate(iterator):
+        object_fit_start = time.perf_counter()
         oid = str(obj["object_id"])
         try:
             default_bands = ["u", "g", "r", "i", "z"]
@@ -5107,6 +5259,7 @@ def main():
 
             stage_diagnostics = {}
             flux_linearized_fit_obj = None
+            posterior_summary = {}
             if args.resume:
                 logging.warning("[DEBUG] Loading saved samples (flat) — developer mode.")
                 obj_flat_samples = load_obj_samples_from_hdf5(oid)
@@ -5115,45 +5268,60 @@ def main():
                 key = random.PRNGKey(0)
                 key = random.fold_in(key, idx)
                 if args.model_variant == "mag_flux_linearized_erlang":
-                    obj_flat_samples, samples_per_chain, flux_linearized_fit_obj, stage_diagnostics = run_iterated_mag_flux_linearized_inference(
-                        obj,
-                        lam_rf,
-                        log_jitter_mean=log_jitter_mean_fit,
-                        lam_lya_rf=lam_lya_rf,
-                        rng_key=key,
-                        fit_method=args.fit_method,
-                        num_warmup=args.nwarm,
-                        num_samples=args.nsamp,
-                        num_chains=args.nchains,
-                        chain_method=chain_method,
-                        progress_bar=args.progress,
-                        dense_mass=args.dense_mass,
-                        max_tree_depth=args.max_tree_depth,
-                        svi_steps=args.svi_steps,
-                        svi_lr=args.svi_lr,
-                        target_accept=args.target_accept,
-                        disable_linear_trend=args.disable_linear_trend,
-                        disable_lag_blr=False,
-                        disable_lag_bc=args.disable_lag_bc,
-                        drop_band_lyman_alpha=args.drop_band_lyman_alpha,
-                        tau_fast_truncated=args.tau_fast_truncated,
-                        n_blr_terms=args.n_blr_terms,
-                        model_variant=args.model_variant,
-                        erlang_order=args.erlang_order,
-                        use_fast_solver=args.fast_solver,
-                        refinement_strategy=args.flux_linearized_refinement_strategy,
-                        refinement_iters=args.flux_linearized_refinement_iters,
-                        drw_parameterization=args.dho_drw_parameterization,
-                    )
+                    (
+                        obj_flat_samples,
+                        samples_per_chain,
+                        flux_linearized_fit_obj,
+                        stage_diagnostics,
+                        posterior_summary,
+                    ) = run_iterated_mag_flux_linearized_inference(
+                            obj,
+                            lam_rf,
+                            log_jitter_mean=log_jitter_mean_fit,
+                            lam_lya_rf=lam_lya_rf,
+                            rng_key=key,
+                            fit_method=args.fit_method,
+                            num_warmup=args.nwarm,
+                            num_samples=args.nsamp,
+                            num_chains=args.nchains,
+                            chain_method=chain_method,
+                            progress_bar=args.progress,
+                            dense_mass=args.dense_mass,
+                            max_tree_depth=args.max_tree_depth,
+                            svi_steps=args.svi_steps,
+                            svi_lr=args.svi_lr,
+                            target_accept=args.target_accept,
+                            disable_linear_trend=args.disable_linear_trend,
+                            disable_lag_blr=False,
+                            disable_lag_bc=args.disable_lag_bc,
+                            drop_band_lyman_alpha=args.drop_band_lyman_alpha,
+                            tau_fast_truncated=args.tau_fast_truncated,
+                            n_blr_terms=args.n_blr_terms,
+                            model_variant=args.model_variant,
+                            erlang_order=args.erlang_order,
+                            use_fast_solver=args.fast_solver,
+                            refinement_strategy=args.flux_linearized_refinement_strategy,
+                            refinement_iters=args.flux_linearized_refinement_iters,
+                            drw_parameterization=args.dho_drw_parameterization,
+                            enforce_positive_flux_guard=args.enforce_positive_flux_guard,
+                        )
                 elif args.fit_method in ("nuts", "svi+nuts"):
                     if args.fit_method == "svi+nuts":
                         svi_key, mcmc_key = random.split(key)
-                        init_values, svi_final_loss = run_svi_warm_start(
+                        init_values, svi_final_loss, svi_summary = run_svi_warm_start(
                             numpyro_model,
                             svi_key,
                             num_steps=args.svi_steps,
                             learning_rate=args.svi_lr,
                             progress_bar=args.progress,
+                        )
+                        print_and_validate_svi_warm_start(
+                            oid,
+                            refinement_index=1,
+                            refinement_iters=1,
+                            final_loss=svi_final_loss,
+                            init_values=init_values,
+                            summary_dict=svi_summary,
                         )
                         logging.info(
                             "[%s] Completed SVI warm-start for NUTS with %d steps at lr=%g; final ELBO loss=%s.",
@@ -5239,12 +5407,15 @@ def main():
                     group_by_chain=samples_per_chain is not None,
                     prob=0.90,
                 )
-            else:
-                posterior_summary = {}
-            print_light_curve_posterior_summary(
-                oid,
-                summary_dict=posterior_summary,
-            )
+                print_light_curve_posterior_summary(
+                    oid,
+                    summary_dict=posterior_summary,
+                )
+            elif args.fit_method != "svi+nuts":
+                print_light_curve_posterior_summary(
+                    oid,
+                    summary_dict=posterior_summary,
+                )
 
             obj_flat_samples = add_model_prediction_params(
                 obj_flat_samples,
@@ -5301,6 +5472,13 @@ def main():
                     baseline_flux_by_band=reference_flux_from_mean_magnitudes(obj["mags_means"]),
                     zero_mean=zero_mean,
                     has_jitter=has_jitter,
+                    **(
+                        {
+                            "enforce_positive_flux_guard": args.enforce_positive_flux_guard,
+                        }
+                        if args.dho_drw_parameterization
+                        else {}
+                    ),
                 )
             plot_samples = obj_flat_samples
 
@@ -5484,14 +5662,22 @@ def main():
                 f"tau_ls = {tau_ls}"
             )
 
-            results.append(final_result)
-
             if args.inject_fake:
                 compare_pairs = [
                     ("log_tau_fake", "log_tau_uv", "log10_tau"),
                     ("log_sigma_fake", "log_sigma_uv", "log10_sigma"),
                 ]
                 summarize_fake_true_vs_recovered(final_result, diagnostics, compare_pairs=compare_pairs)
+
+            final_result["light_curve_fit_total_elapsed_sec"] = float(
+                time.perf_counter() - object_fit_start
+            )
+            logging.info(
+                "[%s] Total per-object light-curve fit time: %.3f s",
+                oid,
+                final_result["light_curve_fit_total_elapsed_sec"],
+            )
+            results.append(final_result)
 
         except Exception as e:
             logging.error(f"[{oid}] Error during fit: {e}")
