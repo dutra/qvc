@@ -20,6 +20,15 @@ def _write_executable(path, source):
     path.chmod(path.stat().st_mode | stat.S_IEXEC)
 
 
+def _copy_minimal_qvc_package(root):
+    """Provide imports needed by a copied sfitspectra script."""
+    qvc_dir = root / "src" / "qvc"
+    qvc_dir.mkdir(parents=True)
+    source_qvc_dir = SCRIPT.parents[1] / "src" / "qvc"
+    shutil.copy2(source_qvc_dir / "__init__.py", qvc_dir / "__init__.py")
+    shutil.copy2(source_qvc_dir / "provenance.py", qvc_dir / "provenance.py")
+
+
 def _retry_workspace(
     tmp_path,
     accounting_rows,
@@ -33,6 +42,7 @@ def _retry_workspace(
     script_path.parent.mkdir(parents=True)
     shutil.copy2(SCRIPT, script_path)
     (script_path.parent / "pandas.py").write_text("", encoding="utf-8")
+    _copy_minimal_qvc_package(root)
 
     submit_dir = root / "hpc_scripts" / "submit" / "jaxqsofit"
     submit_dir.mkdir(parents=True)
@@ -122,10 +132,7 @@ def _fresh_workspace(tmp_path, csv_text="object_id\n1\n2\n"):
     script_path.parent.mkdir(parents=True)
     shutil.copy2(SCRIPT, script_path)
 
-    qvc_dir = root / "src" / "qvc"
-    qvc_dir.mkdir(parents=True)
-    shutil.copy2(SCRIPT.parents[1] / "src" / "qvc" / "__init__.py", qvc_dir / "__init__.py")
-    shutil.copy2(SCRIPT.parents[1] / "src" / "qvc" / "provenance.py", qvc_dir / "provenance.py")
+    _copy_minimal_qvc_package(root)
 
     data_dir = root / "data"
     data_dir.mkdir()
