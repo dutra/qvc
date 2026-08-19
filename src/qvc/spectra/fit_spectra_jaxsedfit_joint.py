@@ -24,6 +24,11 @@ import h5py
 import numpy as np
 import pandas as pd
 
+from qvc.mcmc_diagnostics import (
+    compute_numpyro_summary,
+    convergence_fields,
+    print_numpyro_summary_dict,
+)
 from qvc.provenance import (
     build_run_record,
     fingerprint_path,
@@ -52,6 +57,10 @@ JOINT_CHI2_SITES = (
     "joint_chi2",
     "joint_n_eff",
     "joint_reduced_chi2",
+)
+HUBBLE_MAGNITUDE_SITES = (
+    "m_2500_dereddened",
+    "m_2500_attenuated_model",
 )
 
 
@@ -204,6 +213,95 @@ def summarize_m2500_dereddened(samples, redshift, *, h0=70.0, om0=0.3):
         out[f"{name}_err_lower"] = float(err_lower)
         out[f"{name}_err_upper"] = float(err_upper)
     return out
+
+
+def empty_hubble_convergence_summary():
+    """Return the stable convergence schema used by the Hubble workflow."""
+
+    return {
+        f"{name}_{metric}": np.nan
+        for name in HUBBLE_MAGNITUDE_SITES
+        for metric in ("rhat", "ess")
+    }
+
+
+def _reshape_flat_samples_by_chain(samples, num_chains):
+    """Reconstruct NumPyro's chain-major grouping from flattened draws."""
+
+    num_chains = int(num_chains)
+    if num_chains < 1 or not samples:
+        raise ValueError("A positive chain count and posterior samples are required.")
+    grouped = {}
+    draw_count = None
+    for name, value in samples.items():
+        arr = np.asarray(value)
+        if arr.ndim == 0 or arr.shape[0] % num_chains:
+            raise ValueError(
+                f"Cannot reconstruct {num_chains} chains for posterior site {name!r} "
+                f"with shape {arr.shape}."
+            )
+        site_draw_count = arr.shape[0] // num_chains
+        if draw_count is None:
+            draw_count = site_draw_count
+        elif site_draw_count != draw_count:
+            raise ValueError("Posterior sites have inconsistent draw counts.")
+        grouped[name] = arr.reshape((num_chains, site_draw_count) + arr.shape[1:])
+    return grouped
+
+
+def _fresh_grouped_nuts_samples(fit_result):
+    """Return scientific, chain-grouped draws from a fresh JAXSEDFit result."""
+
+    fitter = getattr(fit_result, "fitter", None)
+    nuts_result = getattr(fitter, "nuts_result", None)
+    mcmc = nuts_result.get("mcmc") if isinstance(nuts_result, dict) else None
+    if mcmc is None:
+        raise ValueError("Fresh fit does not expose a NumPyro MCMC result.")
+    grouped = mcmc.get_samples(group_by_chain=True)
+    scientific_names = set((getattr(fit_result, "samples", None) or {}).keys())
+    return {
+        name: np.asarray(value)
+        for name, value in grouped.items()
+        if name in scientific_names
+    }
+
+
+def summarize_m2500_convergence(
+    grouped_samples,
+    redshift,
+    *,
+    h0=70.0,
+    om0=0.3,
+    heading=None,
+):
+    """Compute, print, and flatten one NumPyro summary of m2500 draws."""
+
+    if not grouped_samples:
+        return empty_hubble_convergence_summary()
+    first = np.asarray(next(iter(grouped_samples.values())))
+    if first.ndim < 2:
+        return empty_hubble_convergence_summary()
+    chain_shape = first.shape[:2]
+    derived = estimate_m2500_dereddened(
+        grouped_samples,
+        redshift,
+        h0=h0,
+        om0=om0,
+    )
+    summary_samples = {
+        name: np.asarray(derived[f"{name}_draws"], dtype=float).reshape(chain_shape)
+        for name in HUBBLE_MAGNITUDE_SITES
+    }
+    summary_dict = compute_numpyro_summary(
+        summary_samples,
+        group_by_chain=True,
+        prob=0.90,
+    )
+    print_numpyro_summary_dict(summary_dict, heading=heading)
+    return convergence_fields(
+        summary_dict,
+        {name: name for name in HUBBLE_MAGNITUDE_SITES},
+    )
 
 
 def load_saved_sed_photometry(path):
@@ -649,7 +747,13 @@ def _base_result(rec, args, *, execution_mode, resumed_from_path=""):
     )
     result.update(empty_joint_chi2_summary())
     result.update(empty_psf_agn_fraction_summary())
+    result.update(empty_hubble_convergence_summary())
     return result
+
+
+def _uses_nuts(config, method=None):
+    configured = getattr(getattr(config, "inference", None), "method", "")
+    return "nuts" in str(method or configured).lower()
 
 
 def save_spectrum_figure(fitter, rec, fig_dir):
@@ -726,6 +830,26 @@ def run_one_fit(
                 om0=config.galaxy.cosmology_om0,
             )
         )
+        if _uses_nuts(config, getattr(fit_result, "method", None)):
+            try:
+                result.update(
+                    summarize_m2500_convergence(
+                        _fresh_grouped_nuts_samples(fit_result),
+                        rec["z"],
+                        h0=config.galaxy.cosmology_h0,
+                        om0=config.galaxy.cosmology_om0,
+                        heading=(
+                            f"[{rec['object_id']}] NumPyro Hubble-magnitude "
+                            "posterior summary:"
+                        ),
+                    )
+                )
+            except Exception as exc:
+                if args.verbose:
+                    print(
+                        f"Hubble-magnitude convergence unavailable for "
+                        f"object_id={rec['object_id']}: {exc}"
+                    )
         result["n_photometry"] = int(len(used_phot))
         result["photometry_filters"] = ",".join(used_phot["filter_name"].astype(str))
         result["fit_result_path"] = str(fit_result.path or "")
@@ -792,6 +916,29 @@ def _run_resumed_fit(rec, args, source_path):
             om0=config.galaxy.cosmology_om0,
         )
     )
+    if _uses_nuts(config):
+        try:
+            result.update(
+                summarize_m2500_convergence(
+                    _reshape_flat_samples_by_chain(
+                        fitter.samples,
+                        config.inference.num_chains,
+                    ),
+                    config.observation.redshift,
+                    h0=config.galaxy.cosmology_h0,
+                    om0=config.galaxy.cosmology_om0,
+                    heading=(
+                        f"[{rec['object_id']}] NumPyro Hubble-magnitude "
+                        "posterior summary:"
+                    ),
+                )
+            )
+        except Exception as exc:
+            if args.verbose:
+                print(
+                    f"Hubble-magnitude convergence unavailable for "
+                    f"object_id={rec['object_id']}: {exc}"
+                )
     result["n_photometry"] = int(len(config.photometry.filter_names))
     result["photometry_filters"] = ",".join(
         str(name) for name in config.photometry.filter_names

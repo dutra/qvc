@@ -58,12 +58,17 @@ numpyro.set_host_device_count(num_cores)
 numpyro.enable_x64()
 numpyro.enable_validation(False)
 import numpyro.distributions as dist
-from numpyro.diagnostics import print_summary as numpyro_print_summary
 from numpyro.handlers import seed, substitute, trace
 from numpyro.infer import MCMC, NUTS, SVI, Trace_ELBO
 from numpyro.infer.autoguide import AutoNormal
 from numpyro.infer.initialization import init_to_value
 from numpyro.optim import Adam
+
+from qvc.mcmc_diagnostics import (
+    compute_numpyro_summary,
+    convergence_fields,
+    print_numpyro_summary_dict,
+)
 
 try:
     from numpyro.contrib.nested_sampling import NestedSampler
@@ -2713,29 +2718,14 @@ def log_nonfinite_sample_summary(samples_dict, *, label, max_items=20):
 def print_light_curve_posterior_summary(
     object_id,
     *,
-    samples_per_chain=None,
-    flat_samples=None,
+    summary_dict,
 ):
-    """Print one NumPyro posterior summary after an object's final fit."""
+    """Print one already-computed NumPyro posterior summary."""
 
-    if samples_per_chain is not None:
-        samples = samples_per_chain
-        group_by_chain = True
-    elif flat_samples is not None:
-        samples = flat_samples
-        group_by_chain = False
-    else:
-        logging.warning("[%s] No posterior samples available for NumPyro summary.", object_id)
-        return
-
-    print(f"\n[{object_id}] NumPyro posterior summary:")
-    try:
-        numpyro_print_summary(samples, prob=0.90, group_by_chain=group_by_chain)
-    except (AssertionError, ValueError) as exc:
-        # NumPyro requires at least four draws for split-Rhat/ESS. Keep very
-        # short smoke fits usable instead of failing after inference succeeds.
-        print(f"Summary unavailable: {exc or 'at least four posterior draws are required.'}")
-    print()
+    print_numpyro_summary_dict(
+        summary_dict,
+        heading=f"[{object_id}] NumPyro posterior summary:",
+    )
 
 
 def sigma_shift_to_uv(eta_sigma, lambda_center_rf, lambda_uv=2500.0):
@@ -5243,10 +5233,17 @@ def main():
                     samples_per_chain = tree_map(lambda x: np.asarray(device_get(x)), samples_per_chain)
                     obj_flat_samples = samples_flat
 
+            if args.fit_method == "nuts":
+                posterior_summary = compute_numpyro_summary(
+                    samples_per_chain if samples_per_chain is not None else obj_flat_samples,
+                    group_by_chain=samples_per_chain is not None,
+                    prob=0.90,
+                )
+            else:
+                posterior_summary = {}
             print_light_curve_posterior_summary(
                 oid,
-                samples_per_chain=samples_per_chain,
-                flat_samples=obj_flat_samples,
+                summary_dict=posterior_summary,
             )
 
             obj_flat_samples = add_model_prediction_params(
@@ -5265,14 +5262,16 @@ def main():
             )
             log_nonfinite_sample_summary(obj_flat_samples_flatten_per_band, label=f"{oid} per-band")
 
-            diagnostics = {}
-            if samples_per_chain is not None and args.fit_method == "nuts":
-                obj_samples_per_chain_flatten_per_band = flatten_per_chain_samples_per_band(
-                    samples_per_chain,
-                    bands=bands,
-                    survey_names=obj["survey_names"],
-                )
-                diagnostics = diagnostics_for_per_chain_samples(obj_samples_per_chain_flatten_per_band)
+            diagnostics = convergence_fields(
+                posterior_summary,
+                {
+                    "log_sigma_uv": "log_sigma_uv",
+                    # The catalog value is an affine rest-frame/base-10
+                    # transform of this sampled site, which leaves ESS and
+                    # R-hat unchanged.
+                    "log_tau_uv_rf": "log_tau_uv",
+                },
+            )
             diagnostics |= stage_diagnostics
 
             if args.model_variant == "mag_flux_linearized_erlang":

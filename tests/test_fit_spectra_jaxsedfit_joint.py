@@ -97,6 +97,104 @@ def test_dereddened_m2500_uses_intrinsic_disk_and_both_attenuation_terms():
     assert np.all(a_internal > 0)
 
 
+def test_m2500_convergence_uses_one_summary_for_print_and_fields(monkeypatch, capsys):
+    grouped = {
+        "log_agn_amp": np.log(np.full((2, 4), 1.0e38)),
+        "pl_slope": np.full((2, 4), -1.8),
+        "pl_bend_loc": np.full((2, 4), 1000.0),
+        "pl_bend_width": np.full((2, 4), 10.0),
+        "ebv_gal": np.full((2, 4), 0.02),
+        "ebv_agn": np.full((2, 4), 0.03),
+    }
+    calls = []
+
+    def fake_summary(samples, *, group_by_chain, prob):
+        calls.append(samples)
+        assert group_by_chain is True
+        assert prob == pytest.approx(0.90)
+        assert all(value.shape == (2, 4) for value in samples.values())
+        return {
+            name: {
+                "mean": np.array(20.0),
+                "std": np.array(0.1),
+                "median": np.array(20.0),
+                "5.0%": np.array(19.8),
+                "95.0%": np.array(20.2),
+                "n_eff": np.array(80.0 + index),
+                "r_hat": np.array(1.01 + 0.01 * index),
+            }
+            for index, name in enumerate(joint.HUBBLE_MAGNITUDE_SITES)
+        }
+
+    monkeypatch.setattr(joint, "compute_numpyro_summary", fake_summary)
+
+    result = joint.summarize_m2500_convergence(
+        grouped,
+        redshift=1.0,
+        heading="m2500 posterior",
+    )
+
+    assert len(calls) == 1
+    assert result == {
+        "m_2500_dereddened_rhat": pytest.approx(1.01),
+        "m_2500_dereddened_ess": pytest.approx(80.0),
+        "m_2500_attenuated_model_rhat": pytest.approx(1.02),
+        "m_2500_attenuated_model_ess": pytest.approx(81.0),
+    }
+    assert "m2500 posterior" in capsys.readouterr().out
+
+
+def test_flat_samples_reconstruct_chain_major_order():
+    samples = {
+        "a": np.arange(12.0),
+        "b": np.arange(24.0).reshape(12, 2),
+    }
+
+    grouped = joint._reshape_flat_samples_by_chain(samples, 3)
+
+    assert grouped["a"].shape == (3, 4)
+    assert grouped["b"].shape == (3, 4, 2)
+    np.testing.assert_array_equal(grouped["a"].reshape(-1), samples["a"])
+    np.testing.assert_array_equal(grouped["b"].reshape(12, 2), samples["b"])
+
+
+def test_fresh_fit_preserves_grouped_scientific_nuts_samples():
+    class DummyMCMC:
+        def get_samples(self, *, group_by_chain):
+            assert group_by_chain is True
+            return {
+                "physical": np.arange(8.0).reshape(2, 4),
+                "internal_aux": np.ones((2, 4)),
+            }
+
+    fit_result = SimpleNamespace(
+        samples={"physical": np.arange(8.0)},
+        fitter=SimpleNamespace(nuts_result={"mcmc": DummyMCMC()}),
+    )
+
+    grouped = joint._fresh_grouped_nuts_samples(fit_result)
+
+    assert set(grouped) == {"physical"}
+    assert grouped["physical"].shape == (2, 4)
+
+
+def test_flat_samples_reject_unreconstructable_chain_shape():
+    with pytest.raises(ValueError, match="Cannot reconstruct"):
+        joint._reshape_flat_samples_by_chain({"a": np.arange(10.0)}, 3)
+
+
+def test_base_result_has_stable_nan_hubble_convergence_schema(tmp_path):
+    result = joint._base_result(
+        _run_record(),
+        _hybrid_args(tmp_path),
+        execution_mode="fresh",
+    )
+
+    expected = joint.empty_hubble_convergence_summary()
+    assert set(expected) <= set(result)
+    assert all(np.isnan(result[name]) for name in expected)
+
+
 def test_save_spectrum_figure_uses_separate_spectrum_filename(tmp_path):
     class FakeFitter:
         def __init__(self):
