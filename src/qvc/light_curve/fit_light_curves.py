@@ -2928,10 +2928,47 @@ def eta_sigma_prior():
     return dist.TruncatedNormal(-0.5, 0.3, low=-1.5, high=0.25)
 
 
-def eta_tau_prior():
-    """Weakly informative wavelength scaling for the DRW-style timescale."""
+ETA_TAU_PRIOR_CHOICES = ("legacy", "uniform", "stone", "fixed1")
 
+
+def _validate_eta_tau_prior(prior):
+    if prior not in ETA_TAU_PRIOR_CHOICES:
+        raise ValueError(
+            f"eta_tau_prior must be one of {ETA_TAU_PRIOR_CHOICES}; got {prior!r}."
+        )
+    return prior
+
+
+def _eta_tau_prior_distribution(prior="legacy"):
+    """Selected prior for the DRW-style timescale wavelength exponent.
+
+    ``fixed1`` has no latent distribution and is represented by ``None``;
+    models record its value through a deterministic ``eta_tau`` site.
+    """
+
+    prior = _validate_eta_tau_prior(prior)
+    if prior == "fixed1":
+        return None
+    if prior == "uniform":
+        return dist.Uniform(-0.5, 1.25)
+    if prior == "stone":
+        return dist.TruncatedNormal(1.0, 0.5, low=-0.5, high=2.0)
     return dist.TruncatedNormal(0.2, 0.35, low=-0.5, high=1.25)
+
+
+def eta_tau_prior(prior="legacy"):
+    """Backward-compatible public factory for the selected ``eta_tau`` prior."""
+
+    return _eta_tau_prior_distribution(prior)
+
+
+def sample_eta_tau(prior="legacy"):
+    """Create the sampled or fixed ``eta_tau`` NumPyro site."""
+
+    prior = _validate_eta_tau_prior(prior)
+    if prior == "fixed1":
+        return numpyro.deterministic("eta_tau", jnp.asarray(1.0))
+    return numpyro.sample("eta_tau", _eta_tau_prior_distribution(prior))
 
 
 def log_sigma_center0_prior(eta_sigma, lambda_center_rf):
@@ -3432,10 +3469,12 @@ def compute_parameter_kls(
     n_blr_terms=1,
     drw_parameterization=False,
     tau_prior="legacy",
+    eta_tau_prior="legacy",
 ):
     """Return approximate KL(q||p) for sampled light-curve parameters."""
 
     tau_prior = _validate_tau_prior(tau_prior)
+    eta_tau_prior = _validate_eta_tau_prior(eta_tau_prior)
     kls = {}
     eta_sigma = np.asarray(flat_samples["eta_sigma"])
     eta_tau = np.asarray(flat_samples["eta_tau"])
@@ -3463,10 +3502,16 @@ def compute_parameter_kls(
         eta_sigma,
         lambda x: _dist_log_prob_array(eta_sigma_prior(), x),
     )
-    kls["eta_tau_kl"] = kl_from_samples(
-        eta_tau,
-        lambda x: _dist_log_prob_array(eta_tau_prior(), x),
-    )
+    if eta_tau_prior == "fixed1":
+        kls["eta_tau_kl"] = np.nan
+    else:
+        kls["eta_tau_kl"] = kl_from_samples(
+            eta_tau,
+            lambda x: _dist_log_prob_array(
+                _eta_tau_prior_distribution(eta_tau_prior),
+                x,
+            ),
+        )
 
     if sigma_center0_key in flat_samples:
         kls["log_sigma_center0_kl"] = conditional_kl_from_samples(
@@ -4325,10 +4370,12 @@ def build_single_object_model(
     tau_fast_truncated=False,
     n_blr_terms=1,
     tau_prior="legacy",
+    eta_tau_prior="legacy",
 ):
     """Return the NumPyro model for one object."""
 
     tau_prior = _validate_tau_prior(tau_prior)
+    eta_tau_prior = _validate_eta_tau_prior(eta_tau_prior)
     (t, bidx) = obj_dict["X"]
     y = obj_dict["y"]
     yerr = obj_dict["yerr"]
@@ -4353,7 +4400,7 @@ def build_single_object_model(
     def model():
         eta_sigma = numpyro.sample("eta_sigma", eta_sigma_prior())
 
-        eta_tau = numpyro.sample("eta_tau", eta_tau_prior())
+        eta_tau = sample_eta_tau(eta_tau_prior)
 
         log_tau_slow_center0 = numpyro.sample(
             "log_tau_slow_center0",
@@ -4506,10 +4553,12 @@ def build_single_object_model_mag_flux_linearized(
     drw_parameterization=False,
     enforce_positive_flux_guard=False,
     tau_prior="legacy",
+    eta_tau_prior="legacy",
 ):
     """Return the relative-flux quasi-separable model for one object."""
 
     tau_prior = _validate_tau_prior(tau_prior)
+    eta_tau_prior = _validate_eta_tau_prior(eta_tau_prior)
     if n_blr_terms != 1:
         raise ValueError(
             "model_variant='mag_flux_linearized' currently supports only n_blr_terms=1."
@@ -4553,7 +4602,7 @@ def build_single_object_model_mag_flux_linearized(
 
     def model():
         eta_sigma = numpyro.sample("eta_sigma", eta_sigma_prior())
-        eta_tau = numpyro.sample("eta_tau", eta_tau_prior())
+        eta_tau = sample_eta_tau(eta_tau_prior)
 
         tau_center_prior_fn = (
             log_tau_drw_center0_prior
@@ -5002,6 +5051,7 @@ def run_iterated_mag_flux_linearized_inference(
     drw_parameterization=False,
     enforce_positive_flux_guard=False,
     tau_prior="legacy",
+    eta_tau_prior="legacy",
 ):
     """Iteratively refit the relative-flux QS model using local pseudo-data.
 
@@ -5012,6 +5062,7 @@ def run_iterated_mag_flux_linearized_inference(
     """
 
     tau_prior = _validate_tau_prior(tau_prior)
+    eta_tau_prior = _validate_eta_tau_prior(eta_tau_prior)
     if fit_method == "ns":
         raise ValueError(
             "model_variant='mag_flux_linearized' uses iterative local likelihood refinement "
@@ -5051,6 +5102,7 @@ def run_iterated_mag_flux_linearized_inference(
         drw_parameterization=drw_parameterization,
         enforce_positive_flux_guard=enforce_positive_flux_guard,
         tau_prior=tau_prior,
+        eta_tau_prior=eta_tau_prior,
     )
 
     for iter_idx in range(int(refinement_iters)):
@@ -5364,6 +5416,17 @@ def main():
             "('uniform'). Default: legacy."
         ),
     )
+    parser.add_argument(
+        "--eta_tau_prior",
+        choices=ETA_TAU_PRIOR_CHOICES,
+        default="legacy",
+        help=(
+            "Prior for the continuum-timescale wavelength exponent: the current "
+            "truncated normal ('legacy'), a uniform -0.5 to 1.25 prior "
+            "('uniform'), a broad Stone-centered truncated normal ('stone'), "
+            "or eta_tau fixed exactly to 1 ('fixed1'). Default: legacy."
+        ),
+    )
     parser.add_argument("--n_blr_terms", type=int, choices=(1, 2), default=1, help="Number of BLR lag terms to fit.")
     parser.add_argument(
         "--erlang_order",
@@ -5647,6 +5710,7 @@ def main():
                     tau_fast_truncated=args.tau_fast_truncated,
                     n_blr_terms=args.n_blr_terms,
                     tau_prior=args.tau_prior,
+                    eta_tau_prior=args.eta_tau_prior,
                 )
                 logging.info(
                     "[%s] restored legacy additive-magnitude quasi-separable model; "
@@ -5703,6 +5767,7 @@ def main():
                             drw_parameterization=args.dho_drw_parameterization,
                             enforce_positive_flux_guard=args.enforce_positive_flux_guard,
                             tau_prior=args.tau_prior,
+                            eta_tau_prior=args.eta_tau_prior,
                         )
                 elif args.fit_method in ("nuts", "svi+nuts"):
                     if args.fit_method == "svi+nuts":
@@ -5948,6 +6013,7 @@ def main():
                 n_blr_terms=args.n_blr_terms,
                 drw_parameterization=args.dho_drw_parameterization,
                 tau_prior=args.tau_prior,
+                eta_tau_prior=args.eta_tau_prior,
             )
 
             if args.plot:
