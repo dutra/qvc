@@ -142,6 +142,16 @@ LINEAR_TREND_RF_SIGMA_MAG_PER_DAY = 1e-4
 # opt-in diagnostics rather than the production default.
 FLUX_LINEARIZED_REFINEMENT_ITERS = 1
 FLUX_LINEARIZED_MIN_TOTAL_FLUX_RATIO = 0.05
+HUBBLE_CONVERGENCE_FIELD_MAP = {
+    "log_sigma_uv": "log_sigma_uv",
+    # The catalog value is an affine rest-frame/base-10 transform of this
+    # observer-frame natural-log sampled site. ESS and R-hat are invariant
+    # under that transform.
+    "log_tau_uv_rf": "log_tau_uv",
+}
+HUBBLE_POSTERIOR_SITE_NAMES = tuple(
+    dict.fromkeys(HUBBLE_CONVERGENCE_FIELD_MAP.values())
+)
 SDSS_FILTER_BLUE_EDGE_OBS = {
     "u": 3055.11,
     "g": 3797.64,
@@ -2882,17 +2892,34 @@ def log_nonfinite_sample_summary(samples_dict, *, label, max_items=20):
     )
 
 
-def print_light_curve_posterior_summary(
-    object_id,
+def summarize_final_hubble_nuts_posterior(
+    samples_per_chain,
     *,
-    summary_dict,
+    fit_method,
+    heading,
+    resumed=False,
 ):
-    """Print one already-computed NumPyro posterior summary."""
+    """Compute final-NUTS diagnostics only for Hubble-consumed LC sites."""
 
-    print_numpyro_summary_dict(
-        summary_dict,
-        heading=f"[{object_id}] NumPyro posterior summary:",
+    if (
+        resumed
+        or fit_method not in ("nuts", "svi+nuts")
+        or samples_per_chain is None
+    ):
+        print_numpyro_summary_dict({}, heading=heading)
+        return {}
+    hubble_samples = {
+        site_name: samples_per_chain[site_name]
+        for site_name in HUBBLE_POSTERIOR_SITE_NAMES
+        if site_name in samples_per_chain
+    }
+    summary_dict = compute_numpyro_summary(
+        hubble_samples,
+        group_by_chain=True,
+        prob=0.90,
     )
+    print_numpyro_summary_dict(summary_dict, heading=heading)
+    return summary_dict
 
 
 def sigma_shift_to_uv(eta_sigma, lambda_center_rf, lambda_uv=2500.0):
@@ -4896,19 +4923,16 @@ def run_iterated_mag_flux_linearized_inference(
                 target_accept=target_accept,
                 init_strategy=init_strategy,
             )
-            posterior_summary = compute_numpyro_summary(
-                samples_per_chain,
-                group_by_chain=True,
-                prob=0.90,
-            )
-            print_numpyro_summary_dict(
-                posterior_summary,
-                heading=(
-                    f"[{obj_dict.get('object_id', 'unknown')}] NumPyro posterior "
-                    f"summary after NUTS refinement {iter_idx + 1}/"
-                    f"{int(refinement_iters)}:"
-                ),
-            )
+            if iter_idx == int(refinement_iters) - 1:
+                posterior_summary = summarize_final_hubble_nuts_posterior(
+                    samples_per_chain,
+                    fit_method=fit_method,
+                    heading=(
+                        f"[{obj_dict.get('object_id', 'unknown')}] NumPyro posterior "
+                        f"summary after final NUTS refinement {iter_idx + 1}/"
+                        f"{int(refinement_iters)}:"
+                    ),
+                )
             diagnostics["flux_linearized_nuts_runs"] += 1
             diagnostics[f"flux_linearized_iter{iter_idx + 1}_accept_prob"] = iter_diag[
                 "accept_prob"
@@ -5589,20 +5613,12 @@ def main():
                     samples_per_chain = tree_map(lambda x: np.asarray(device_get(x)), samples_per_chain)
                     obj_flat_samples = samples_flat
 
-            if args.fit_method == "nuts":
-                posterior_summary = compute_numpyro_summary(
-                    samples_per_chain if samples_per_chain is not None else obj_flat_samples,
-                    group_by_chain=samples_per_chain is not None,
-                    prob=0.90,
-                )
-                print_light_curve_posterior_summary(
-                    oid,
-                    summary_dict=posterior_summary,
-                )
-            elif args.fit_method != "svi+nuts":
-                print_light_curve_posterior_summary(
-                    oid,
-                    summary_dict=posterior_summary,
+            if args.model_variant == "mag_linear":
+                posterior_summary = summarize_final_hubble_nuts_posterior(
+                    samples_per_chain,
+                    fit_method=args.fit_method,
+                    resumed=args.resume,
+                    heading=f"[{oid}] NumPyro posterior summary after final NUTS sampling:",
                 )
 
             obj_flat_samples = add_model_prediction_params(
@@ -5623,13 +5639,7 @@ def main():
 
             diagnostics = convergence_fields(
                 posterior_summary,
-                {
-                    "log_sigma_uv": "log_sigma_uv",
-                    # The catalog value is an affine rest-frame/base-10
-                    # transform of this sampled site, which leaves ESS and
-                    # R-hat unchanged.
-                    "log_tau_uv_rf": "log_tau_uv",
-                },
+                HUBBLE_CONVERGENCE_FIELD_MAP,
             )
             diagnostics |= stage_diagnostics
 
