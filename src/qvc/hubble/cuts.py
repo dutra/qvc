@@ -29,8 +29,15 @@ def _cut_env_float(name, default):
 
 LOG_TAU_UV_RF_MIN = 1.5
 LOG_TAU_UV_RF_MAX = 4.0
-FRAC_AGN_5100_MIN = 0.05
+FRAC_AGN_5100_MIN = None
 APPARENT_MAG_2500_ERR_MAX = 1.0
+
+# JAXSEDFit goodness-of-fit and posterior-convergence diagnostics.
+JAXSEDFIT_JOINT_REDUCED_CHI2_MAX = _cut_env_float(
+    "QVC_CUT_JAXSEDFIT_JOINT_REDUCED_CHI2_MAX", 1.2
+)
+MCMC_RHAT_MAX = _cut_env_float("QVC_CUT_MCMC_RHAT_MAX", 1.05)
+MCMC_ESS_MIN = _cut_env_float("QVC_CUT_MCMC_ESS_MIN", 50.0)
 
 # The 2D completeness model is evaluated at histogram-bin centers. Keep the
 # fiducial magnitude support tied to that grid.
@@ -95,10 +102,31 @@ AGN_SCALAR_PARAMETER_CUTS = (
     ("fracAGN_5100_fit", FRAC_AGN_5100_MIN, None),
     ("apparent_mag_2500_err", None, APPARENT_MAG_2500_ERR_MAX),
     (
-        "m_2500_attenuated_model",
+        "m_2500_dereddened",
         COMPLETENESS_MAG_2500_MIN,
         COMPLETENESS_MAG_2500_MAX,
     ),
+    ("joint_reduced_chi2", None, JAXSEDFIT_JOINT_REDUCED_CHI2_MAX),
+    ("m_2500_dereddened_rhat", None, MCMC_RHAT_MAX),
+    ("m_2500_dereddened_ess", MCMC_ESS_MIN, None),
+    ("m_2500_attenuated_model_rhat", None, MCMC_RHAT_MAX),
+    ("m_2500_attenuated_model_ess", MCMC_ESS_MIN, None),
+    ("log_tau_uv_rf_rhat", None, MCMC_RHAT_MAX),
+    ("log_sigma_uv_rhat", None, MCMC_RHAT_MAX),
+)
+
+# SVI fits do not define chain-based R-hat/ESS diagnostics.  Missing values in
+# these columns therefore mean "not applicable" rather than a failed fit.
+# Finite diagnostics are still tested against the thresholds above.
+ALLOW_MISSING_SCALAR_CUT_COLUMNS = frozenset(
+    {
+        "m_2500_dereddened_rhat",
+        "m_2500_dereddened_ess",
+        "m_2500_attenuated_model_rhat",
+        "m_2500_attenuated_model_ess",
+        "log_tau_uv_rf_rhat",
+        "log_sigma_uv_rhat",
+    }
 )
 
 

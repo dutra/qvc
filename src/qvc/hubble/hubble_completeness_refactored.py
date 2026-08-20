@@ -450,7 +450,9 @@ class Completeness2D:
     """
     Interpolates p(detect | m, z) on a (mag, z) grid.
     - Bright magnitudes are clipped to the bright grid edge; faint magnitudes
-      outside the grid still return 0 through fill_value=0.
+      outside the grid return 0.
+    - Redshifts outside the grid are linearly extrapolated from the nearest
+      two redshift planes. Extrapolated probabilities are bounded to [0, 1].
     """
     def __init__(self, mag_centers, z_centers, completeness_map):
         self.mag_centers = np.asarray(mag_centers)
@@ -463,12 +465,13 @@ class Completeness2D:
         self.mag_min, self.mag_max = float(self.mag_centers[0]),  float(self.mag_centers[-1])
         self.z_min,   self.z_max   = float(self.z_centers[0]),    float(self.z_centers[-1])
 
-        # No clipping before interpolation; rely on fill_value=0 for out-of-bounds
+        # ``fill_value=None`` enables multilinear extrapolation. __call__ masks
+        # unsupported faint magnitudes explicitly, so only redshift extrapolates.
         self._interp = RegularGridInterpolator(
             (self.mag_centers, self.z_centers),
             C,
             bounds_error=False,
-            fill_value=0.0,
+            fill_value=None,
         )
         self._warned_oob = False
 
@@ -490,13 +493,13 @@ class Completeness2D:
             )
             self._warned_oob = True
         mag = np.maximum(np.asarray(mag, dtype=float), self.mag_min)
-        z = np.clip(np.asarray(z, dtype=float), self.z_min, self.z_max)
+        z = np.asarray(z, dtype=float)
         m_b, z_b = np.broadcast_arrays(mag, z)
         pts = np.column_stack([m_b.ravel(), z_b.ravel()])
-        finite = np.all(np.isfinite(pts), axis=1)
+        finite = np.all(np.isfinite(pts), axis=1) & (pts[:, 0] <= self.mag_max)
         vals = np.zeros(pts.shape[0], dtype=float)
         if np.any(finite):
-            vals[finite] = self._interp(pts[finite])
+            vals[finite] = np.clip(self._interp(pts[finite]), 0.0, 1.0)
         return vals.reshape(m_b.shape)
 
     @property
@@ -513,6 +516,8 @@ class Completeness3D:
     Interpolates p(detect | m, z, f_host) on a (mag, z, f_host) grid.
     - Bright magnitudes are clipped to the bright grid edge; faint magnitudes
       outside the grid still return 0.
+    - Redshifts outside the grid are linearly extrapolated from the nearest
+      two redshift planes. Extrapolated probabilities are bounded to [0, 1].
     """
 
     def __init__(self, mag_centers, z_centers, fhost_centers, completeness_cube):
@@ -531,7 +536,7 @@ class Completeness3D:
             (self.mag_centers, self.z_centers, self.fhost_centers),
             C,
             bounds_error=False,
-            fill_value=0.0,
+            fill_value=None,
         )
         self._warned_oob = False
 
@@ -557,7 +562,7 @@ class Completeness3D:
             )
             self._warned_oob = True
         mag = np.maximum(np.asarray(mag, dtype=float), self.mag_min)
-        z = np.clip(np.asarray(z, dtype=float), self.z_min, self.z_max)
+        z = np.asarray(z, dtype=float)
         f_host = np.asarray(f_host)
         # The completeness cube is defined on bin centers, but f_host is a
         # bounded physical variable on [0, 1]. Clip to the nearest supported
@@ -566,10 +571,10 @@ class Completeness3D:
         f_host = np.clip(f_host, self.fhost_min, self.fhost_max)
         m_b, z_b, f_b = np.broadcast_arrays(mag, z, f_host)
         pts = np.column_stack([m_b.ravel(), z_b.ravel(), f_b.ravel()])
-        finite = np.all(np.isfinite(pts), axis=1)
+        finite = np.all(np.isfinite(pts), axis=1) & (pts[:, 0] <= self.mag_max)
         vals = np.zeros(pts.shape[0], dtype=float)
         if np.any(finite):
-            vals[finite] = self._interp(pts[finite])
+            vals[finite] = np.clip(self._interp(pts[finite]), 0.0, 1.0)
         return vals.reshape(m_b.shape)
 
     @property
@@ -590,6 +595,8 @@ class Completeness4D:
     Interpolates p(detect | m, z, f_host, alpha_lambda) on a regular grid.
     - Bright magnitudes are clipped to the bright grid edge; faint magnitudes
       outside the grid still return 0.
+    - Redshifts outside the grid are linearly extrapolated from the nearest
+      two redshift planes. Extrapolated probabilities are bounded to [0, 1].
     """
 
     def __init__(self, mag_centers, z_centers, fhost_centers, alpha_centers, completeness_hypercube):
@@ -610,7 +617,7 @@ class Completeness4D:
             (self.mag_centers, self.z_centers, self.fhost_centers, self.alpha_centers),
             C,
             bounds_error=False,
-            fill_value=0.0,
+            fill_value=None,
         )
         self._warned_oob = False
 
@@ -640,17 +647,17 @@ class Completeness4D:
             )
             self._warned_oob = True
         mag = np.maximum(np.asarray(mag, dtype=float), self.mag_min)
-        z = np.clip(np.asarray(z, dtype=float), self.z_min, self.z_max)
+        z = np.asarray(z, dtype=float)
         f_host = np.asarray(f_host)
         alpha_lambda = np.asarray(alpha_lambda)
         f_host = np.clip(f_host, self.fhost_min, self.fhost_max)
         alpha_lambda = np.clip(alpha_lambda, self.alpha_min, self.alpha_max)
         m_b, z_b, f_b, a_b = np.broadcast_arrays(mag, z, f_host, alpha_lambda)
         pts = np.column_stack([m_b.ravel(), z_b.ravel(), f_b.ravel(), a_b.ravel()])
-        finite = np.all(np.isfinite(pts), axis=1)
+        finite = np.all(np.isfinite(pts), axis=1) & (pts[:, 0] <= self.mag_max)
         vals = np.zeros(pts.shape[0], dtype=float)
         if np.any(finite):
-            vals[finite] = self._interp(pts[finite])
+            vals[finite] = np.clip(self._interp(pts[finite]), 0.0, 1.0)
         return vals.reshape(m_b.shape)
 
     @property

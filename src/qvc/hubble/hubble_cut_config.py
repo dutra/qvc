@@ -24,6 +24,7 @@ DEFAULT_LOG_AMP_DELTA_BLR_UPPER_CUTS = dict(LOG_AMP_DELTA_BLR_UPPER_BY_BAND)
 
 def build_agn_cuts(
     *,
+    completeness_magnitude="dereddened",
     f_host_cut=DEFAULT_F_HOST_CUT,
     wrms_cut=DEFAULT_WRMS_CUT,
     variability_chi_sq_red_g_cut=DEFAULT_CHI_SQ_CUT,
@@ -42,15 +43,26 @@ def build_agn_cuts(
     if reddening_ebv_cut is None:
         reddening_ebv_cut = DEFAULT_REDDENING_EBV_CUT
 
+    completeness_columns = {
+        "dereddened": "m_2500_dereddened",
+        "attenuated": "m_2500_attenuated_model",
+    }
+    if completeness_magnitude not in completeness_columns:
+        raise ValueError(
+            "completeness_magnitude must be 'dereddened' or 'attenuated', "
+            f"got {completeness_magnitude!r}."
+        )
+
     cut_overrides = {
         "wrms": (None, wrms_cut),
         "f_host_2500": (None, f_host_cut),
         "variability_chi_sq_red_g": (variability_chi_sq_red_g_cut, None),
     }
-    cuts = [
-        (column, *cut_overrides.get(column, (lower, upper)))
-        for column, lower, upper in AGN_SCALAR_PARAMETER_CUTS
-    ]
+    cuts = []
+    for column, lower, upper in AGN_SCALAR_PARAMETER_CUTS:
+        if column == "m_2500_dereddened":
+            column = completeness_columns[completeness_magnitude]
+        cuts.append((column, *cut_overrides.get(column, (lower, upper))))
     if reddening_ebv_cut is not None:
         cuts.append(("reddening_ebv", None, reddening_ebv_cut))
     return cuts

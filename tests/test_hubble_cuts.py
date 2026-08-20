@@ -14,13 +14,17 @@ if str(SRC) not in sys.path:
 
 from qvc.hubble.cuts import (  # noqa: E402
     AGN_SCALAR_PARAMETER_CUTS,
+    ALLOW_MISSING_SCALAR_CUT_COLUMNS,
     APPARENT_MAG_2500_ERR_MAX,
     COMPLETENESS_MAG_2500_MIN,
     COMPLETENESS_MAG_2500_MAX,
     EXCLUDED_SDSS_NAMES,
     FRAC_AGN_5100_MIN,
+    JAXSEDFIT_JOINT_REDUCED_CHI2_MAX,
     LIGHT_CURVE_N_POINTS_COLUMN,
     LIGHT_CURVE_N_POINTS_EXCLUDED_BANDS,
+    MCMC_ESS_MIN,
+    MCMC_RHAT_MAX,
     REL_APPARENT_MAG_2500_ERR_MAX,
     add_light_curve_point_count_column,
     light_curve_point_count_series,
@@ -45,10 +49,17 @@ def test_build_agn_cuts_contains_only_fiducial_profile():
         "log_tau_uv_rf": (1.5, 4.0),
         "fracAGN_5100_fit": (FRAC_AGN_5100_MIN, None),
         "apparent_mag_2500_err": (None, APPARENT_MAG_2500_ERR_MAX),
-        "m_2500_attenuated_model": (
+        "m_2500_dereddened": (
             COMPLETENESS_MAG_2500_MIN,
             COMPLETENESS_MAG_2500_MAX,
         ),
+        "joint_reduced_chi2": (None, JAXSEDFIT_JOINT_REDUCED_CHI2_MAX),
+        "m_2500_dereddened_rhat": (None, MCMC_RHAT_MAX),
+        "m_2500_dereddened_ess": (MCMC_ESS_MIN, None),
+        "m_2500_attenuated_model_rhat": (None, MCMC_RHAT_MAX),
+        "m_2500_attenuated_model_ess": (MCMC_ESS_MIN, None),
+        "log_tau_uv_rf_rhat": (None, MCMC_RHAT_MAX),
+        "log_sigma_uv_rhat": (None, MCMC_RHAT_MAX),
     }
     assert LIGHT_CURVE_N_POINTS_EXCLUDED_BANDS == ("u",)
 
@@ -78,12 +89,21 @@ def test_fiducial_cut_boundaries_are_inclusive_and_nonfinite_values_fail():
         ("fracAGN_5100_fit", FRAC_AGN_5100_MIN, None),
         ("apparent_mag_2500_err", None, APPARENT_MAG_2500_ERR_MAX),
         (
-            "m_2500_attenuated_model",
+            "m_2500_dereddened",
             COMPLETENESS_MAG_2500_MIN,
             COMPLETENESS_MAG_2500_MAX,
         ),
     )
     for column, lower, upper in cases:
+        if lower is None and upper is None:
+            mask = _scalar_parameter_cut_mask(
+                pd.DataFrame({column: [0.5, np.nan, np.inf, -np.inf]}),
+                column,
+                lower,
+                upper,
+            )
+            np.testing.assert_array_equal(mask, [True, False, False, False])
+            continue
         accepted = lower if lower is not None else upper
         outside = (
             np.nextafter(lower, -np.inf)
@@ -101,6 +121,54 @@ def test_fiducial_cut_boundaries_are_inclusive_and_nonfinite_values_fail():
         )
         np.testing.assert_array_equal(mask, expected)
         assert _scalar_cut_has_inclusive_upper(column)
+
+
+def test_completeness_magnitude_cut_follows_selected_definition():
+    dereddened_columns = {column for column, _, _ in build_agn_cuts()}
+    attenuated_columns = {
+        column
+        for column, _, _ in build_agn_cuts(completeness_magnitude="attenuated")
+    }
+
+    assert "m_2500_dereddened" in dereddened_columns
+    assert "m_2500_attenuated_model" not in dereddened_columns
+    assert "m_2500_attenuated_model" in attenuated_columns
+    assert "m_2500_dereddened" not in attenuated_columns
+
+
+def test_jaxsedfit_joint_reduced_chi2_cut_requires_finite_values():
+    column = "joint_reduced_chi2"
+    upper = JAXSEDFIT_JOINT_REDUCED_CHI2_MAX
+    values = [upper, np.nextafter(upper, np.inf), np.nan, np.inf, -np.inf]
+    mask = _scalar_parameter_cut_mask(
+        pd.DataFrame({column: values}), column, None, upper
+    )
+    np.testing.assert_array_equal(mask, [True, False, False, False, False])
+
+
+def test_convergence_cuts_allow_missing_but_reject_bad_finite_values():
+    cases = (
+        ("m_2500_dereddened_rhat", None, MCMC_RHAT_MAX),
+        ("m_2500_dereddened_ess", MCMC_ESS_MIN, None),
+        ("m_2500_attenuated_model_rhat", None, MCMC_RHAT_MAX),
+        ("m_2500_attenuated_model_ess", MCMC_ESS_MIN, None),
+        ("log_tau_uv_rf_rhat", None, MCMC_RHAT_MAX),
+        ("log_sigma_uv_rhat", None, MCMC_RHAT_MAX),
+    )
+    assert ALLOW_MISSING_SCALAR_CUT_COLUMNS == {column for column, _, _ in cases}
+
+    for column, lower, upper in cases:
+        boundary = lower if lower is not None else upper
+        rejected = (
+            np.nextafter(lower, -np.inf)
+            if lower is not None
+            else np.nextafter(upper, np.inf)
+        )
+        values = [boundary, rejected, np.nan, np.inf, -np.inf]
+        mask = _scalar_parameter_cut_mask(
+            pd.DataFrame({column: values}), column, lower, upper
+        )
+        np.testing.assert_array_equal(mask, [True, False, True, False, False])
 
 
 def test_current_spectra_schema_requires_fracagn_5100_fit(tmp_path):

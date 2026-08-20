@@ -897,6 +897,20 @@ def test_table_debias_requires_direct_per_object_values(fake_data):
         )
 
 
+def test_plot_debias_preserves_unsupported_direct_values(fake_data):
+    df_agn, _ = fake_data
+    direct = np.zeros(len(df_agn), dtype=float)
+    direct[-1] = np.nan
+
+    resolved = hubble_plotting._resolve_debias_values(
+        df_agn,
+        dmi_values=direct,
+        dm_interp=lambda points: np.full(len(points), 0.5, dtype=float),
+    )
+
+    np.testing.assert_array_equal(resolved, direct)
+
+
 def test_compute_direct_full_sample_completeness_summaries_freezes_fit_pivots(fake_data):
     df_agn, df_pantheon = fake_data
     df_fit = df_agn.iloc[:3].copy()
@@ -1038,7 +1052,7 @@ def test_compute_direct_full_sample_completeness_summaries_optionally_returns_se
         _sna_Lower=True,
         _sna_LogdetCov=None,
         cosmo_model="FlatLambdaCDM",
-        completeness_params=object(),
+        completeness_params=(object(),),
         z_pivot_agn=hubble_fit.z_pivot_agn,
         agn_pivot_context=_agn_pivot_context(df_fit),
         use_full_cov=False,

@@ -26,6 +26,7 @@ from tqdm import tqdm
 from scipy.stats import gaussian_kde
 
 from qvc.hubble.cuts import (
+    ALLOW_MISSING_SCALAR_CUT_COLUMNS,
     EXCLUDED_SDSS_NAMES,
     LIGHT_CURVE_N_POINTS_COLUMN,
     LIGHT_CURVE_N_POINTS_EXCLUDED_BANDS,
@@ -75,7 +76,8 @@ def _scalar_cut_has_inclusive_upper(column):
 
 def _scalar_parameter_cut_mask(frame, column, lower, upper):
     values = pd.to_numeric(frame[column], errors="coerce").to_numpy(dtype=float)
-    mask = np.isfinite(values)
+    finite = np.isfinite(values)
+    mask = finite.copy()
     if lower is not None:
         mask &= values >= lower
     if upper is not None:
@@ -83,6 +85,8 @@ def _scalar_parameter_cut_mask(frame, column, lower, upper):
             mask &= values < upper
         else:
             mask &= values <= upper
+    if column in ALLOW_MISSING_SCALAR_CUT_COLUMNS:
+        mask |= np.isnan(values)
     return mask
 
 
@@ -1035,7 +1039,8 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
                   cut_report_path=None,
                   plot_diagnostics=True,
                   *,
-                  magnitude_convention):
+                  magnitude_convention,
+                  completeness_magnitude="dereddened"):
     if (
         not isinstance(magnitude_convention, str)
         or magnitude_convention not in {"dereddened", "attenuated"}
@@ -1044,6 +1049,11 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
             "magnitude_convention must be exactly 'dereddened' or 'attenuated'; "
             "case and surrounding whitespace are not normalized. "
             f"got {magnitude_convention!r}."
+        )
+    if completeness_magnitude not in {"dereddened", "attenuated"}:
+        raise ValueError(
+            "completeness_magnitude must be exactly 'dereddened' or "
+            f"'attenuated', got {completeness_magnitude!r}."
         )
 
     def _format_cut_bounds(lower, upper, *, upper_inclusive=True, allow_missing=False):
@@ -2024,13 +2034,20 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
         plot_cut_diagnostics(df.copy(), df[mask], bins=30, cut_info=cut_desc)
         df = _record_cut(f"blr_amp:{col}", cut_desc, df, mask)
 
-    cuts = build_agn_cuts()
+    cuts = build_agn_cuts(completeness_magnitude=completeness_magnitude)
 
     if apply_cut:
         mask = np.ones(len(df), dtype=bool)
         for col, lower, upper in cuts:
             upper_inclusive = _scalar_cut_has_inclusive_upper(col)
-            cut_desc = f"{col} in {_format_cut_bounds(lower, upper, upper_inclusive=upper_inclusive)}"
+            allow_missing = col in ALLOW_MISSING_SCALAR_CUT_COLUMNS
+            bounds = _format_cut_bounds(
+                lower,
+                upper,
+                upper_inclusive=upper_inclusive,
+                allow_missing=allow_missing,
+            )
+            cut_desc = f"{col} in {bounds}"
             if col not in df.columns:
                 _append_cut_report_row(
                     cut_rows,

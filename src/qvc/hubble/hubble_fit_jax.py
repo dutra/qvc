@@ -286,11 +286,12 @@ def _interp_regular_2d(x, y, x_grid, y_grid, values):
     dy = y_grid[1] - y_grid[0]
     ux = (x - x_grid[0]) / dx
     uy = (y - y_grid[0]) / dy
-    valid = (ux >= 0.0) & (ux <= (x_grid.shape[0] - 1)) & (uy >= 0.0) & (uy <= (y_grid.shape[0] - 1))
+    # Magnitude remains bounded; redshift extrapolates from the outermost cell.
+    valid = (ux >= 0.0) & (ux <= (x_grid.shape[0] - 1)) & jnp.isfinite(uy)
     ix = jnp.clip(jnp.floor(ux).astype(jnp.int32), 0, x_grid.shape[0] - 2)
     iy = jnp.clip(jnp.floor(uy).astype(jnp.int32), 0, y_grid.shape[0] - 2)
     tx = jnp.clip(ux - ix, 0.0, 1.0)
-    ty = jnp.clip(uy - iy, 0.0, 1.0)
+    ty = uy - iy
     v00 = values[ix, iy]
     v10 = values[ix + 1, iy]
     v01 = values[ix, iy + 1]
@@ -301,7 +302,7 @@ def _interp_regular_2d(x, y, x_grid, y_grid, values):
         + (1.0 - tx) * ty * v01
         + tx * ty * v11
     )
-    return jnp.where(valid, interp, 0.0)
+    return jnp.where(valid, jnp.clip(interp, 0.0, 1.0), 0.0)
 
 
 def _interp_regular_3d(x, y, z, x_grid, y_grid, z_grid, values):
@@ -313,14 +314,14 @@ def _interp_regular_3d(x, y, z, x_grid, y_grid, z_grid, values):
     uz = (z - z_grid[0]) / dz
     valid = (
         (ux >= 0.0) & (ux <= (x_grid.shape[0] - 1))
-        & (uy >= 0.0) & (uy <= (y_grid.shape[0] - 1))
+        & jnp.isfinite(uy)
         & (uz >= 0.0) & (uz <= (z_grid.shape[0] - 1))
     )
     ix = jnp.clip(jnp.floor(ux).astype(jnp.int32), 0, x_grid.shape[0] - 2)
     iy = jnp.clip(jnp.floor(uy).astype(jnp.int32), 0, y_grid.shape[0] - 2)
     iz = jnp.clip(jnp.floor(uz).astype(jnp.int32), 0, z_grid.shape[0] - 2)
     tx = jnp.clip(ux - ix, 0.0, 1.0)
-    ty = jnp.clip(uy - iy, 0.0, 1.0)
+    ty = uy - iy
     tz = jnp.clip(uz - iz, 0.0, 1.0)
 
     c000 = values[ix, iy, iz]
@@ -341,7 +342,7 @@ def _interp_regular_3d(x, y, z, x_grid, y_grid, z_grid, values):
         + c011 * (1 - tx) * ty * tz
         + c111 * tx * ty * tz
     )
-    return jnp.where(valid, interp, 0.0)
+    return jnp.where(valid, jnp.clip(interp, 0.0, 1.0), 0.0)
 
 
 def _interp_regular_4d(x, y, z, w, x_grid, y_grid, z_grid, w_grid, values):
@@ -355,7 +356,7 @@ def _interp_regular_4d(x, y, z, w, x_grid, y_grid, z_grid, w_grid, values):
     uw = (w - w_grid[0]) / dw
     valid = (
         (ux >= 0.0) & (ux <= (x_grid.shape[0] - 1))
-        & (uy >= 0.0) & (uy <= (y_grid.shape[0] - 1))
+        & jnp.isfinite(uy)
         & (uz >= 0.0) & (uz <= (z_grid.shape[0] - 1))
         & (uw >= 0.0) & (uw <= (w_grid.shape[0] - 1))
     )
@@ -364,7 +365,7 @@ def _interp_regular_4d(x, y, z, w, x_grid, y_grid, z_grid, w_grid, values):
     iz = jnp.clip(jnp.floor(uz).astype(jnp.int32), 0, z_grid.shape[0] - 2)
     iw = jnp.clip(jnp.floor(uw).astype(jnp.int32), 0, w_grid.shape[0] - 2)
     tx = jnp.clip(ux - ix, 0.0, 1.0)
-    ty = jnp.clip(uy - iy, 0.0, 1.0)
+    ty = uy - iy
     tz = jnp.clip(uz - iz, 0.0, 1.0)
     tw = jnp.clip(uw - iw, 0.0, 1.0)
 
@@ -381,7 +382,7 @@ def _interp_regular_4d(x, y, z, w, x_grid, y_grid, z_grid, w_grid, values):
                         values[ix + ox, iy + oy, iz + oz, iw + ow]
                         * wx * wy * wz * ww
                     )
-    return jnp.where(valid, out, 0.0)
+    return jnp.where(valid, jnp.clip(out, 0.0, 1.0), 0.0)
 
 
 def _completeness_loglike_jax(m_model, mu_err, z, completeness, f_host_2500_psf, alpha_lambda):
@@ -1378,6 +1379,7 @@ def main():
         apply_cut=not args.no_cuts,
         spectra_fit_csv=args.spectra_fit_csv,
         magnitude_convention=args.magnitude_convention,
+        completeness_magnitude=args.completeness_magnitude,
         correct_sigma_uv_host=args.correct_sigma_uv_host,
         z_range=tuple(args.z_range),
         plot_path=agn_plot_path,

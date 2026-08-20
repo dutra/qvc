@@ -551,7 +551,7 @@ def _resolve_debias_values(
     dm_interp=None,
     dmi_values=None,
 ):
-    """Use direct per-object dmi where available and fall back to dm_interp."""
+    """Prefer an aligned direct dmi array; otherwise evaluate ``dm_interp``."""
     dmi = None
     if dmi_values is not None:
         dmi = np.asarray(dmi_values, dtype=float)
@@ -559,10 +559,11 @@ def _resolve_debias_values(
             raise ValueError(
                 f"dmi_values has shape {dmi.shape}, but expected {(len(df_agn),)}."
             )
-    if dm_interp is None:
-        if dmi is None:
-            raise ValueError("Need either dm_interp or dmi_values for debias=True.")
+        # Direct values are authoritative; do not silently replace them with a
+        # separately interpolated correction.
         return dmi
+    if dm_interp is None:
+        raise ValueError("Need either dm_interp or dmi_values for debias=True.")
 
     dmi_interp = evaluate_dm_interp(
         dm_interp,
@@ -571,9 +572,7 @@ def _resolve_debias_values(
         f_host_2500_psf=df_agn.get(COMPLETENESS_FHOST_COL),
         alpha_lambda=df_agn.get("alpha_lambda"),
     )
-    if dmi is None:
-        return dmi_interp
-    return np.where(np.isfinite(dmi), dmi, dmi_interp)
+    return dmi_interp
 
 
 def _resolve_selection_sigma_values(
@@ -592,7 +591,7 @@ def _resolve_selection_sigma_values(
                 f"{sigma_sel.shape}, but expected {(len(df_agn),)}."
             )
 
-    if dmi_selection_sigma_interp is not None:
+    if sigma_sel is None and dmi_selection_sigma_interp is not None:
         sigma_sel_interp = evaluate_dm_interp(
             dmi_selection_sigma_interp,
             df_agn["z"].values,
@@ -600,10 +599,7 @@ def _resolve_selection_sigma_values(
             f_host_2500_psf=df_agn.get(COMPLETENESS_FHOST_COL),
             alpha_lambda=df_agn.get("alpha_lambda"),
         )
-        if sigma_sel is None:
-            sigma_sel = sigma_sel_interp
-        else:
-            sigma_sel = np.where(np.isfinite(sigma_sel), sigma_sel, sigma_sel_interp)
+        sigma_sel = sigma_sel_interp
 
     if sigma_sel is None:
         return None
@@ -7509,7 +7505,7 @@ def plot_predicted_vs_actual_M2500(
 
 def plot_completeness_vs_mag_at_redshifts(
     p_detect, mag_centers, z_centers,
-    redshifts=[0.5, 1.0, 2.0, 3.0, 4.0], show=False, plot_path=None
+    redshifts=(0.5, 1.0, 2.0, 3.0), show=False, plot_path=None
 ):
     """
     Plot p(I=1 | m, z) vs apparent magnitude for several fixed redshifts.
@@ -11090,17 +11086,14 @@ def plot_dmi_vs_z(z, dmi, outdir=None, title_suffix="", plot_path=None):
 def _hard_limit_m50_per_object(completeness2d, mag_centers, z, plot_path=None):
     """
     Robust m50(z) (hard limit) for plotting:
-    - clip z into the map's valid range,
+    - use the completeness model's redshift extrapolation,
     - find the first crossing of C=0.5 and linearly interpolate.
     """
     mgrid = np.asarray(mag_centers)
     z_in  = np.asarray(z, dtype=float)
-    # Clip z to map bounds (avoids all-zero rows from the interpolator)
-    zc = np.clip(z_in, getattr(completeness2d, "z_min", z_in.min()),
-                        getattr(completeness2d, "z_max", z_in.max()))
-    C = completeness2d(mgrid[None, :], zc[:, None])   # (N, G)
+    C = completeness2d(mgrid[None, :], z_in[:, None])   # (N, G)
 
-    m50 = np.empty(len(zc), dtype=float)
+    m50 = np.empty(len(z_in), dtype=float)
     for i, row in enumerate(C):
         target = 0.5
         if np.all(row <= target):

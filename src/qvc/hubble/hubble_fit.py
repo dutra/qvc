@@ -1674,7 +1674,11 @@ def _compute_direct_full_sample_completeness_summaries(
     early_de_guard=False,
     dmi_draw_indices=None,
 ):
-    """Replay completeness and optionally retain aligned posterior draws.
+    """Replay completeness for the full plotting sample.
+
+    The completeness model linearly extrapolates redshifts outside its
+    interpolation centers from the outermost grid cells, while the Hubble fit
+    selection remains unchanged.
 
     The historical three-value summary return is unchanged when
     ``dmi_draw_indices`` is omitted.  When indices are supplied, the fourth
@@ -4599,6 +4603,7 @@ if __name__ == "__main__":
                            exclude_object_ids_csv=args.exclude_object_ids_csv,
                            spectra_fit_csv=args.spectra_fit_csv,
                            magnitude_convention=args.magnitude_convention,
+                           completeness_magnitude=args.completeness_magnitude,
                            spectra_sdss_run2d=args.spectra_sdss_run2d,
                            correct_sigma_uv_host=args.correct_sigma_uv_host,
                            z_range=tuple(args.z_range), plot_path=agn_plot_path,

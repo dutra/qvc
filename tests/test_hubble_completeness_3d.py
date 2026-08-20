@@ -561,6 +561,26 @@ def test_completeness_callables_return_zero_for_nonfinite_queries():
     )
 
 
+def test_completeness_callables_linearly_extrapolate_redshift_without_edge_clipping():
+    mag_centers = np.array([20.0, 21.0])
+    z_centers = np.array([1.0, 2.0])
+    fhost_centers = np.array([0.1, 0.9])
+    alpha_centers = np.array([-2.0, -1.0])
+    c2 = np.broadcast_to(np.array([0.4, 0.6]), (2, 2)).copy()
+    c3 = np.broadcast_to(c2[:, :, None], (2, 2, 2)).copy()
+    c4 = np.broadcast_to(c3[:, :, :, None], (2, 2, 2, 2)).copy()
+
+    comp2 = hcr.Completeness2D(mag_centers, z_centers, c2)
+    comp3 = hcr.Completeness3D(mag_centers, z_centers, fhost_centers, c3)
+    comp4 = hcr.Completeness4D(mag_centers, z_centers, fhost_centers, alpha_centers, c4)
+    z_query = np.array([0.5, 2.5])
+
+    np.testing.assert_allclose(comp2(20.5, z_query), [0.3, 0.7])
+    np.testing.assert_allclose(comp3(20.5, z_query, 0.5), [0.3, 0.7])
+    np.testing.assert_allclose(comp4(20.5, z_query, 0.5, -1.5), [0.3, 0.7])
+    np.testing.assert_allclose(comp2(22.0, z_query), [0.0, 0.0])
+
+
 def test_get_completeness_function_4d_fhost_alpha_uses_mock_alpha_dataset(tmp_path):
     df_agn = _make_fake_agn_sample_with_fhost_alpha(alpha_center=-1.15)
     df_pre = _make_fake_agn_sample_with_fhost_alpha(n_agn=64, seed=456, alpha_center=-0.95)

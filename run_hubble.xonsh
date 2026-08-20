@@ -7,7 +7,7 @@ from pathlib import Path
 
 # Environment variables (xonsh style)
 $QT_QPA_PLATFORM = "offscreen"
-$NUM_CORES = "30"
+$NUM_CORES = __xonsh__.env.get("NUM_CORES", "30")
 $PYTHONPATH = str(Path(__file__).resolve().parent / "src")
 $MPLCONFIGDIR = "/tmp/qvc-matplotlib"
 $SHEN_PUBTOOLS_PATH = __xonsh__.env.get(
@@ -19,30 +19,44 @@ $SHEN_PUBTOOLS_PATH = __xonsh__.env.get(
 # runner suitable for isolated, reproducible cut-search members.
 speed = __xonsh__.env.get("QVC_HUBBLE_SPEED", "quick")
 magnitude_convention = __xonsh__.env.get("QVC_HUBBLE_MAGNITUDE_CONVENTION", "dereddened")
+completeness_magnitude = __xonsh__.env.get(
+    "QVC_HUBBLE_COMPLETENESS_MAGNITUDE", "attenuated"
+)
 resume_checkpoint = __xonsh__.env.get("QVC_HUBBLE_RESUME", "")
 resume_args = ["--resume", resume_checkpoint] if resume_checkpoint else []
 
-h5_file = "results/data/jul22_1134pm_erlang_independentblrlags_fast_jul14chisq_spectrajul16call_n1_7fa5882_chisq.h5"
-spectra_fit_csv = "results/data/jul29_2206_9dad47e_sedfit.csv"
+h5_file = "results/data/lc_data_all.h5"
+
+#h5_file = "results/data/lc_data_all_aug06_0115_f2b677d_N4000_BOSS_20260817.h5"
+#h5_file = "results/data/aug17_0501am_erlang_preview_chisq_legacy_n4000_boss_f2b677d_chisq.h5"
+#spectra_fit_csv = "results/data/jul29_2206_9dad47e_sedfit.csv"
+
+h5_file = "results/data/aug18_0955pm_erlang_preview_chisq_nofluxguard_n8000_ebdef2a_chisq.h5"
+#spectra_fit_csv = "results/data/jul29_2206_9dad47e_sedfit.csv"
+spectra_fit_csv = "results/data/aug17_0205pm_spectrafit_090df0c_nested_N8000.csv"
+#h5_file = "results/data/aug16_0611am_mag_linear_svi4000w2000s500_f978995_stone.h5"
 
 $PREFIX = __xonsh__.env.get(
     "QVC_HUBBLE_PREFIX",
-    f"jul30b_dereddened_cuts_completenessattenuated_thinnedallsky_baseline_{speed}",
+    f"aug19a_dereddened_wcuts_fixedzcompletenessrange_h5aug180955pmerlangnofluxguardn8000_specaug170205nestedn8000_{speed}",
 )
 
 prefix = $PREFIX
 echo "Running hubble_fit.py and PREFIX=" $PREFIX
 
-/home/dutra/.conda/envs/jaxcpu4/bin/python -m qvc.hubble.hubble_fit \
+python -m qvc.hubble.hubble_fit \
     @(resume_args) \
     --cosmo_models Flatw0waCDM \
     --run single \
     --speed @(speed) \
     --spectra_fit_csv @(spectra_fit_csv) \
     --magnitude-convention @(magnitude_convention) \
+    --completeness_magnitude @(completeness_magnitude) \
     --result_prefix "fiducial" \
     --z_range 0.44 3.16 \
     --prefix @(prefix) \
     --disable_sigma_clip_pass \
     --sigma_clip_threshold 3.0 \
     @(h5_file)
+
+#     --no-cuts \
