@@ -2947,26 +2947,68 @@ def log_sigma_center0_relflux_prior(eta_sigma, lambda_center_rf):
     )
 
 
-def log_tau_slow_center0_prior(eta_tau, z, lambda_center_rf):
+TAU_PRIOR_CHOICES = ("legacy", "informative", "uniform")
+
+
+def _validate_tau_prior(tau_prior):
+    if tau_prior not in TAU_PRIOR_CHOICES:
+        raise ValueError(
+            f"tau_prior must be one of {TAU_PRIOR_CHOICES}; got {tau_prior!r}."
+        )
+    return tau_prior
+
+
+def log_tau_slow_center0_prior(
+    eta_tau,
+    z,
+    lambda_center_rf,
+    *,
+    tau_prior="legacy",
+):
+    """Prior for the sampled log timescale at the center wavelength."""
+
+    tau_prior = _validate_tau_prior(tau_prior)
     shift = tau_shift_to_uv(eta_tau, lambda_center_rf)
     log_tau_uv_high = jnp.log(10**4.0 * (1.0 + z))
     log_tau_uv_low = jnp.log(10.0 * (1.0 + z))
+    low = log_tau_uv_low - shift
+    high = log_tau_uv_high - shift
+    if tau_prior == "uniform":
+        return dist.Uniform(low=low, high=high)
+    if tau_prior == "informative":
+        return dist.TruncatedNormal(
+            jnp.log(10**3.0 * (1.0 + z)) - shift,
+            0.6 * jnp.log(10.0),
+            low=low,
+            high=high,
+        )
     return dist.TruncatedNormal(
         jnp.log(10**2.5 * (1.0 + z)) - shift,
         1.2 * jnp.log(10.0),
-        low=log_tau_uv_low - shift,
-        high=log_tau_uv_high - shift,
+        low=low,
+        high=high,
     )
 
 
-def log_tau_drw_center0_prior(eta_tau, z, lambda_center_rf):
-    """DRW-style integral-time prior matched to the legacy slow-time prior.
+def log_tau_drw_center0_prior(
+    eta_tau,
+    z,
+    lambda_center_rf,
+    *,
+    tau_prior="legacy",
+):
+    """DRW-style integral-time prior matched to the selected slow-time prior.
 
     In the legacy prior's strongly overdamped region,
     tau_drw = tau_slow + tau_fast is effectively tau_slow.
     """
 
-    return log_tau_slow_center0_prior(eta_tau, z, lambda_center_rf)
+    return log_tau_slow_center0_prior(
+        eta_tau,
+        z,
+        lambda_center_rf,
+        tau_prior=tau_prior,
+    )
 
 
 TAU_FAST_TO_SLOW_PRIOR_RATIO = 150.0
@@ -3389,9 +3431,11 @@ def compute_parameter_kls(
     tau_fast_truncated=False,
     n_blr_terms=1,
     drw_parameterization=False,
+    tau_prior="legacy",
 ):
     """Return approximate KL(q||p) for sampled light-curve parameters."""
 
+    tau_prior = _validate_tau_prior(tau_prior)
     kls = {}
     eta_sigma = np.asarray(flat_samples["eta_sigma"])
     eta_tau = np.asarray(flat_samples["eta_tau"])
@@ -3441,10 +3485,11 @@ def compute_parameter_kls(
         kls["log_tau_drw_center0_kl"] = conditional_kl_from_samples(
             flat_samples["log_tau_drw_center0"],
             lambda x, eta: _dist_log_prob_array(
-                log_tau_slow_center0_prior(
+                log_tau_drw_center0_prior(
                     eta,
                     z,
                     lambda_center_rf,
+                    tau_prior=tau_prior,
                 ),
                 x,
             ),
@@ -3467,6 +3512,7 @@ def compute_parameter_kls(
                     eta,
                     z,
                     lambda_center_rf,
+                    tau_prior=tau_prior,
                 ),
                 x,
             ),
@@ -4278,9 +4324,11 @@ def build_single_object_model(
     drop_band_lyman_alpha=False,
     tau_fast_truncated=False,
     n_blr_terms=1,
+    tau_prior="legacy",
 ):
     """Return the NumPyro model for one object."""
 
+    tau_prior = _validate_tau_prior(tau_prior)
     (t, bidx) = obj_dict["X"]
     y = obj_dict["y"]
     yerr = obj_dict["yerr"]
@@ -4313,6 +4361,7 @@ def build_single_object_model(
                 eta_tau,
                 z,
                 lambda_center_rf,
+                tau_prior=tau_prior,
             ),
         )
 
@@ -4456,9 +4505,11 @@ def build_single_object_model_mag_flux_linearized(
     use_fast_solver=False,
     drw_parameterization=False,
     enforce_positive_flux_guard=False,
+    tau_prior="legacy",
 ):
     """Return the relative-flux quasi-separable model for one object."""
 
+    tau_prior = _validate_tau_prior(tau_prior)
     if n_blr_terms != 1:
         raise ValueError(
             "model_variant='mag_flux_linearized' currently supports only n_blr_terms=1."
@@ -4513,6 +4564,7 @@ def build_single_object_model_mag_flux_linearized(
             eta_tau,
             z,
             lambda_center_rf,
+            tau_prior=tau_prior,
         )
         if drw_parameterization:
             log_tau_drw_center0 = numpyro.sample(
@@ -4949,6 +5001,7 @@ def run_iterated_mag_flux_linearized_inference(
     refinement_iters=FLUX_LINEARIZED_REFINEMENT_ITERS,
     drw_parameterization=False,
     enforce_positive_flux_guard=False,
+    tau_prior="legacy",
 ):
     """Iteratively refit the relative-flux QS model using local pseudo-data.
 
@@ -4958,6 +5011,7 @@ def run_iterated_mag_flux_linearized_inference(
     reserves posterior sampling for the final refined likelihood.
     """
 
+    tau_prior = _validate_tau_prior(tau_prior)
     if fit_method == "ns":
         raise ValueError(
             "model_variant='mag_flux_linearized' uses iterative local likelihood refinement "
@@ -4996,6 +5050,7 @@ def run_iterated_mag_flux_linearized_inference(
         use_fast_solver=use_fast_solver,
         drw_parameterization=drw_parameterization,
         enforce_positive_flux_guard=enforce_positive_flux_guard,
+        tau_prior=tau_prior,
     )
 
     for iter_idx in range(int(refinement_iters)):
@@ -5298,6 +5353,17 @@ def main():
     )
     parser.add_argument("--load_nearby_lc_csv", type=str, default=None, help="CSV listing nearby LCs to load.")
     parser.add_argument("--tau_fast_truncated", action="store_true", default=False, help="Truncated prior for tau_fast0.")
+    parser.add_argument(
+        "--tau_prior",
+        choices=TAU_PRIOR_CHOICES,
+        default="legacy",
+        help=(
+            "Prior for the main continuum timescale: the current broad "
+            "truncated normal ('legacy'), a narrower 1000-day truncated "
+            "normal ('informative'), or a log-uniform 10 to 10000-day prior "
+            "('uniform'). Default: legacy."
+        ),
+    )
     parser.add_argument("--n_blr_terms", type=int, choices=(1, 2), default=1, help="Number of BLR lag terms to fit.")
     parser.add_argument(
         "--erlang_order",
@@ -5580,6 +5646,7 @@ def main():
                     drop_band_lyman_alpha=args.drop_band_lyman_alpha,
                     tau_fast_truncated=args.tau_fast_truncated,
                     n_blr_terms=args.n_blr_terms,
+                    tau_prior=args.tau_prior,
                 )
                 logging.info(
                     "[%s] restored legacy additive-magnitude quasi-separable model; "
@@ -5635,6 +5702,7 @@ def main():
                             refinement_iters=args.flux_linearized_refinement_iters,
                             drw_parameterization=args.dho_drw_parameterization,
                             enforce_positive_flux_guard=args.enforce_positive_flux_guard,
+                            tau_prior=args.tau_prior,
                         )
                 elif args.fit_method in ("nuts", "svi+nuts"):
                     if args.fit_method == "svi+nuts":
@@ -5879,6 +5947,7 @@ def main():
                 tau_fast_truncated=args.tau_fast_truncated,
                 n_blr_terms=args.n_blr_terms,
                 drw_parameterization=args.dho_drw_parameterization,
+                tau_prior=args.tau_prior,
             )
 
             if args.plot:

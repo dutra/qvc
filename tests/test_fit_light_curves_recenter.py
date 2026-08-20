@@ -36,8 +36,11 @@ from qvc.light_curve.fit_light_curves import (
     compute_g_band_residual_drift_diagnostics,
     compute_g_band_raw_drift_diagnostics,
     TAU_FAST_TO_SLOW_PRIOR_RATIO,
+    TAU_PRIOR_CHOICES,
+    log_tau_drw_center0_prior,
     log_tau_fast_center0_prior,
     log_tau_fast_separation_raw_prior,
+    log_tau_slow_center0_prior,
     log_lag_blr_prior,
     relative_log_lag_blr_prior,
     ordered_log_tau_fast,
@@ -160,6 +163,7 @@ def test_flux_linearized_refinement_strategy_controls_nuts_runs(
         "summary": 0,
         "print": 0,
         "pseudo_params": [],
+        "model_tau_priors": [],
     }
     obj = {
         "object_id": "test",
@@ -170,10 +174,14 @@ def test_flux_linearized_refinement_strategy_controls_nuts_runs(
         "mags_means": np.array([20.0], dtype=float),
     }
 
+    def fake_build_model(fit_obj, *_args, **kwargs):
+        calls["model_tau_priors"].append(kwargs["tau_prior"])
+        return fit_obj
+
     monkeypatch.setattr(
         fit_lc,
         "_build_mag_flux_linearized_model_for_fit",
-        lambda fit_obj, *_args, **_kwargs: fit_obj,
+        fake_build_model,
     )
 
     def fake_svi(*_args, **_kwargs):
@@ -268,6 +276,7 @@ def test_flux_linearized_refinement_strategy_controls_nuts_runs(
             disable_lag_blr=True,
             refinement_strategy=refinement_strategy,
             refinement_iters=3,
+            tau_prior="informative",
         )
     )
 
@@ -275,6 +284,7 @@ def test_flux_linearized_refinement_strategy_controls_nuts_runs(
     assert calls["nuts"] == expected_nuts_runs
     assert calls["summary"] == 1
     assert calls["print"] == 1
+    assert calls["model_tau_priors"] == ["informative"] * 3
     assert len(calls["pseudo_params"]) == 3
     assert diagnostics["flux_linearized_nuts_runs"] == expected_nuts_runs
     assert diagnostics["elapsed_sec"] == 2.0 * expected_nuts_runs
@@ -739,6 +749,68 @@ def test_carma21_numpyro_model_trace_materializes_likelihood_and_uv_outputs():
         assert np.all(np.isfinite(np.asarray(sites[key]["value"])))
 
 
+@pytest.mark.parametrize(
+    ("model_path", "tau_prior", "sample_site", "distribution_kind"),
+    (
+        ("mag_linear", "informative", "log_tau_slow_center0", "truncated_normal"),
+        ("erlang", "uniform", "log_tau_slow_center0", "uniform"),
+        ("erlang_drw", "informative", "log_tau_drw_center0", "truncated_normal"),
+    ),
+)
+def test_tau_prior_selection_reaches_each_model_sample_site(
+    model_path,
+    tau_prior,
+    sample_site,
+    distribution_kind,
+):
+    obj = {
+        "object_id": f"{model_path}-tau-prior",
+        "z": 1.0,
+        "X": (
+            np.array([0.0, 5.0, 10.0, 15.0]),
+            np.array([0, 1, 0, 1], dtype=np.int32),
+        ),
+        "y": np.array([0.0, 0.02, -0.01, 0.01]),
+        "yerr": np.full(4, 0.03),
+        "survey_idx": np.zeros(4, dtype=np.int32),
+        "mags_means": np.array([20.0, 20.0]),
+        "bands": ["g", "r"],
+        "survey_names": ("sdss", "ps1", "ztf"),
+    }
+    lam_rf = np.array([2000.0, 3000.0])
+    log_jitter_mean = np.full((2, 3), np.log(0.03))
+    if model_path == "mag_linear":
+        model = fit_lc.build_single_object_model(
+            obj,
+            lam_rf,
+            log_jitter_mean,
+            disable_lag_blr=True,
+            disable_lag_bc=True,
+            tau_prior=tau_prior,
+        )
+    else:
+        model = build_single_object_model_mag_flux_linearized(
+            obj,
+            lam_rf,
+            log_jitter_mean,
+            disable_lag_blr=True,
+            disable_lag_bc=True,
+            drw_parameterization=model_path == "erlang_drw",
+            tau_prior=tau_prior,
+        )
+
+    sites = fit_lc.trace(
+        fit_lc.seed(model, jax.random.PRNGKey(17))
+    ).get_trace()
+
+    sampled_prior = sites[sample_site]["fn"]
+    if distribution_kind == "uniform":
+        assert isinstance(sampled_prior, fit_lc.dist.Uniform)
+    else:
+        assert not isinstance(sampled_prior, fit_lc.dist.Uniform)
+        assert isinstance(sampled_prior.base_dist, fit_lc.dist.Normal)
+
+
 def test_flux_line_ratio_offsets_include_static_igm_transmission():
     lam_rf = jnp.array([1500.0, 2000.0, 2500.0])
     lambda_center_rf = compute_lambda_center_rf(lam_rf)
@@ -799,6 +871,100 @@ def test_log_tau_fast_center0_prior_is_centered_at_configured_tau_slow_ratio():
 
     assert np.isclose(float(prior.loc), np.log(1000.0 / TAU_FAST_TO_SLOW_PRIOR_RATIO))
     assert np.isclose(float(prior.scale), 0.4 * np.log(10.0))
+
+
+def test_tau_prior_choices_match_requested_distributions_and_shifted_bounds():
+    eta_tau = jnp.array(0.35)
+    z = 1.4
+    lambda_center_rf = jnp.array(3200.0)
+    shift = float(fit_lc.tau_shift_to_uv(eta_tau, lambda_center_rf))
+    expected_low = np.log(10.0 * (1.0 + z)) - shift
+    expected_high = np.log(10**4.0 * (1.0 + z)) - shift
+
+    legacy_default = log_tau_slow_center0_prior(
+        eta_tau,
+        z,
+        lambda_center_rf,
+    )
+    legacy_explicit = log_tau_slow_center0_prior(
+        eta_tau,
+        z,
+        lambda_center_rf,
+        tau_prior="legacy",
+    )
+    informative = log_tau_slow_center0_prior(
+        eta_tau,
+        z,
+        lambda_center_rf,
+        tau_prior="informative",
+    )
+    uniform = log_tau_slow_center0_prior(
+        eta_tau,
+        z,
+        lambda_center_rf,
+        tau_prior="uniform",
+    )
+
+    assert TAU_PRIOR_CHOICES == ("legacy", "informative", "uniform")
+    assert type(legacy_default) is type(legacy_explicit)
+    assert type(legacy_default) is type(informative)
+    assert isinstance(uniform, fit_lc.dist.Uniform)
+    for prior in (legacy_default, legacy_explicit, informative, uniform):
+        assert np.isclose(float(prior.low), expected_low)
+        assert np.isclose(float(prior.high), expected_high)
+
+    assert np.isclose(
+        float(legacy_default.base_dist.loc),
+        float(legacy_explicit.base_dist.loc),
+    )
+    assert np.isclose(
+        float(legacy_default.base_dist.scale),
+        float(legacy_explicit.base_dist.scale),
+    )
+    assert np.isclose(
+        float(legacy_default.base_dist.loc),
+        np.log(10**2.5 * (1.0 + z)) - shift,
+    )
+    assert np.isclose(
+        float(legacy_default.base_dist.scale),
+        1.2 * np.log(10.0),
+    )
+    assert np.isclose(
+        float(informative.base_dist.loc),
+        np.log(10**3.0 * (1.0 + z)) - shift,
+    )
+    assert np.isclose(
+        float(informative.base_dist.scale),
+        0.6 * np.log(10.0),
+    )
+
+    log_tau_a = expected_low + 0.25 * (expected_high - expected_low)
+    log_tau_b = expected_low + 0.75 * (expected_high - expected_low)
+    assert np.isclose(
+        float(uniform.log_prob(log_tau_a)),
+        float(uniform.log_prob(log_tau_b)),
+    )
+
+
+def test_tau_prior_rejects_unknown_direct_api_value():
+    with pytest.raises(ValueError, match="tau_prior must be one of"):
+        log_tau_slow_center0_prior(
+            jnp.array(0.2),
+            1.0,
+            jnp.array(2500.0),
+            tau_prior="unknown",
+        )
+
+
+def test_drw_tau_prior_delegates_to_selected_shared_prior():
+    prior = log_tau_drw_center0_prior(
+        jnp.array(0.2),
+        1.0,
+        jnp.array(2500.0),
+        tau_prior="uniform",
+    )
+
+    assert isinstance(prior, fit_lc.dist.Uniform)
 
 
 def test_smooth_ordered_tau_parameterization_is_strict_and_centered():
@@ -1087,6 +1253,64 @@ def test_compute_parameter_kls_ignores_nonfinite_conditioning_samples():
     assert np.isfinite(kls["log_sigma_center0_kl"])
     assert np.isfinite(kls["log_tau_slow_center0_kl"])
     assert np.isfinite(kls["log_tau_fast_center0_kl"])
+
+
+@pytest.mark.parametrize(
+    ("sample_key", "drw_parameterization"),
+    (
+        ("log_tau_slow_center0", False),
+        ("log_tau_drw_center0", True),
+    ),
+)
+def test_compute_parameter_kls_uses_selected_tau_prior(
+    sample_key,
+    drw_parameterization,
+):
+    eta_tau = np.array([0.15, 0.20, 0.25, 0.30])
+    tau_samples = np.log(np.array([1600.0, 1900.0, 2100.0, 2400.0]))
+    flat_samples = {
+        "eta_sigma": np.full(4, -0.5),
+        "eta_tau": eta_tau,
+        sample_key: tau_samples,
+    }
+    if drw_parameterization:
+        flat_samples["log_quality_factor"] = np.full(4, np.log(0.4))
+
+    kls = compute_parameter_kls(
+        flat_samples,
+        bands=[],
+        survey_names=(),
+        t_ref=np.array([0.0, 10.0]),
+        z=1.0,
+        lambda_center_rf=2500.0,
+        log_jitter_mean=np.array([]),
+        model_variant="mag_flux_linearized_erlang",
+        disable_linear_trend=True,
+        disable_lag_blr=True,
+        disable_lag_bc=True,
+        drw_parameterization=drw_parameterization,
+        tau_prior="uniform",
+    )
+    prior_factory = (
+        log_tau_drw_center0_prior
+        if drw_parameterization
+        else log_tau_slow_center0_prior
+    )
+    expected = fit_lc.conditional_kl_from_samples(
+        tau_samples,
+        lambda x, eta: fit_lc._dist_log_prob_array(
+            prior_factory(
+                eta,
+                1.0,
+                2500.0,
+                tau_prior="uniform",
+            ),
+            x,
+        ),
+        eta_tau,
+    )
+
+    assert np.isclose(kls[f"{sample_key}_kl"], expected)
 
 
 def test_process_samples_keeps_uv_outputs_at_2500_and_stores_band_metadata():
