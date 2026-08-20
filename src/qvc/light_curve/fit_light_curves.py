@@ -5339,7 +5339,10 @@ def main():
         "--subtract_psf_constant_flux",
         action="store_true",
         default=False,
-        help="Subtract spectra-derived constant contaminating flux in PSF light curves before GP fitting.",
+        help=(
+            "Subtract spectra-derived constant contaminating flux in PSF light "
+            "curves before either mag_linear or Erlang GP fitting."
+        ),
     )
     args = parser.parse_args()
     args = apply_resume_sample_save_policy(args)
@@ -5423,11 +5426,6 @@ def main():
     if args.dho_drw_parameterization and args.model_variant != "mag_flux_linearized_erlang":
         raise ValueError(
             "--dho_drw_parameterization is only used by "
-            "--model_variant mag_flux_linearized_erlang."
-        )
-    if args.subtract_psf_constant_flux and args.model_variant != "mag_flux_linearized_erlang":
-        raise ValueError(
-            "--subtract_psf_constant_flux is only supported by "
             "--model_variant mag_flux_linearized_erlang."
         )
     if args.dho_drw_parameterization and args.fast_solver:
