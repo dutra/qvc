@@ -2928,7 +2928,13 @@ def eta_sigma_prior():
     return dist.TruncatedNormal(-0.5, 0.3, low=-1.5, high=0.25)
 
 
-ETA_TAU_PRIOR_CHOICES = ("legacy", "uniform", "stone", "fixed1")
+ETA_TAU_PRIOR_CHOICES = (
+    "legacy",
+    "historical",
+    "uniform",
+    "stone",
+    "fixed1",
+)
 
 
 def _validate_eta_tau_prior(prior):
@@ -2949,6 +2955,8 @@ def _eta_tau_prior_distribution(prior="legacy"):
     prior = _validate_eta_tau_prior(prior)
     if prior == "fixed1":
         return None
+    if prior == "historical":
+        return dist.Normal(0.5, 0.5)
     if prior == "uniform":
         return dist.Uniform(-0.5, 1.25)
     if prior == "stone":
@@ -5421,10 +5429,12 @@ def main():
         choices=ETA_TAU_PRIOR_CHOICES,
         default="legacy",
         help=(
-            "Prior for the continuum-timescale wavelength exponent: the current "
-            "truncated normal ('legacy'), a uniform -0.5 to 1.25 prior "
-            "('uniform'), a broad Stone-centered truncated normal ('stone'), "
-            "or eta_tau fixed exactly to 1 ('fixed1'). Default: legacy."
+            "Prior for the continuum-timescale wavelength exponent: the later "
+            "truncated normal centered at 0.2 ('legacy'), the original "
+            "untruncated Normal(0.5, 0.5) ('historical'), a uniform -0.5 to "
+            "1.25 prior ('uniform'), a broad Stone-centered truncated normal "
+            "('stone'), or eta_tau fixed exactly to 1 ('fixed1'). Default: "
+            "legacy."
         ),
     )
     parser.add_argument("--n_blr_terms", type=int, choices=(1, 2), default=1, help="Number of BLR lag terms to fit.")

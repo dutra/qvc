@@ -1036,11 +1036,19 @@ def test_tau_prior_choices_match_requested_distributions_and_shifted_bounds():
 def test_eta_tau_prior_choices_match_requested_distributions():
     legacy_default = eta_tau_prior()
     legacy_explicit = eta_tau_prior("legacy")
+    historical = eta_tau_prior("historical")
     uniform = eta_tau_prior("uniform")
     stone = eta_tau_prior("stone")
 
-    assert ETA_TAU_PRIOR_CHOICES == ("legacy", "uniform", "stone", "fixed1")
+    assert ETA_TAU_PRIOR_CHOICES == (
+        "legacy",
+        "historical",
+        "uniform",
+        "stone",
+        "fixed1",
+    )
     assert type(legacy_default) is type(legacy_explicit)
+    assert type(historical) is fit_lc.dist.Normal
     assert isinstance(uniform, fit_lc.dist.Uniform)
     assert isinstance(stone.base_dist, fit_lc.dist.Normal)
     assert eta_tau_prior("fixed1") is None
@@ -1049,6 +1057,8 @@ def test_eta_tau_prior_choices_match_requested_distributions():
     assert np.isclose(float(legacy_default.base_dist.scale), 0.35)
     assert np.isclose(float(legacy_default.low), -0.5)
     assert np.isclose(float(legacy_default.high), 1.25)
+    assert np.isclose(float(historical.loc), 0.5)
+    assert np.isclose(float(historical.scale), 0.5)
     assert np.isclose(float(uniform.low), -0.5)
     assert np.isclose(float(uniform.high), 1.25)
     assert np.isclose(float(uniform.log_prob(-0.25)), float(uniform.log_prob(1.0)))
@@ -1061,6 +1071,40 @@ def test_eta_tau_prior_choices_match_requested_distributions():
 def test_eta_tau_prior_rejects_unknown_direct_api_value():
     with pytest.raises(ValueError, match="eta_tau_prior must be one of"):
         eta_tau_prior("unknown")
+
+
+def test_compute_parameter_kls_uses_historical_eta_tau_prior():
+    eta_samples = np.array([0.1, 0.4, 0.7, 1.0])
+    flat_samples = {
+        "eta_sigma": np.full(4, -0.5),
+        "eta_tau": eta_samples,
+        "log_tau_slow_center0": np.log(
+            np.array([250.0, 300.0, 350.0, 400.0])
+        ),
+    }
+
+    kls = compute_parameter_kls(
+        flat_samples,
+        bands=[],
+        survey_names=(),
+        t_ref=np.array([0.0, 10.0]),
+        z=1.0,
+        lambda_center_rf=2500.0,
+        log_jitter_mean=np.array([]),
+        disable_linear_trend=True,
+        disable_lag_blr=True,
+        disable_lag_bc=True,
+        eta_tau_prior="historical",
+    )
+    expected = fit_lc.kl_from_samples(
+        eta_samples,
+        lambda x: fit_lc._dist_log_prob_array(
+            eta_tau_prior("historical"),
+            x,
+        ),
+    )
+
+    assert np.isclose(kls["eta_tau_kl"], expected)
 
 
 def test_eta_tau_recentering_preserves_the_2500_angstrom_tau_prior():
