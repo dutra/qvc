@@ -4901,6 +4901,75 @@ def _trim_per_chain_samples(samples_per_chain, n_draws):
     return {k: np.asarray(v)[:, :n_draws] for k, v in samples_per_chain.items()}
 
 
+NUTS_EXTRA_FIELDS = ("accept_prob", "diverging", "num_steps", "energy")
+NUTS_DIAGNOSTIC_FIELDS = (
+    "accept_prob",
+    "num_divergences",
+    "nuts_mean_num_steps",
+    "nuts_max_num_steps",
+    "nuts_mean_tree_depth",
+    "nuts_max_tree_depth_observed",
+    "nuts_num_max_tree_depth",
+    "nuts_max_tree_depth_fraction",
+    "nuts_ebfmi",
+)
+
+
+def unavailable_nuts_diagnostics():
+    """Return serializable placeholders when final-chain state is unavailable."""
+    return {name: np.nan for name in NUTS_DIAGNOSTIC_FIELDS}
+
+
+def summarize_nuts_extra_fields(extra_fields, *, max_tree_depth):
+    """Summarize NumPyro final-chain diagnostics into scalar catalog fields.
+
+    ``nuts_ebfmi`` is the minimum per-chain E-BFMI. Tree depth follows
+    NumPyro's documented ``floor(log2(num_steps)) + 1`` definition.
+    """
+    diagnostics = unavailable_nuts_diagnostics()
+
+    accept_prob = np.asarray(extra_fields.get("accept_prob", []), dtype=float)
+    finite_accept = accept_prob[np.isfinite(accept_prob)]
+    if finite_accept.size:
+        diagnostics["accept_prob"] = float(np.mean(finite_accept))
+
+    diverging = np.asarray(extra_fields.get("diverging", []))
+    if diverging.size:
+        diagnostics["num_divergences"] = int(np.count_nonzero(diverging))
+
+    num_steps = np.asarray(extra_fields.get("num_steps", []), dtype=float)
+    finite_steps = num_steps[np.isfinite(num_steps) & (num_steps > 0.0)]
+    if finite_steps.size:
+        tree_depth = np.floor(np.log2(finite_steps)).astype(int) + 1
+        saturated = tree_depth >= int(max_tree_depth)
+        diagnostics.update(
+            {
+                "nuts_mean_num_steps": float(np.mean(finite_steps)),
+                "nuts_max_num_steps": int(np.max(finite_steps)),
+                "nuts_mean_tree_depth": float(np.mean(tree_depth)),
+                "nuts_max_tree_depth_observed": int(np.max(tree_depth)),
+                "nuts_num_max_tree_depth": int(np.count_nonzero(saturated)),
+                "nuts_max_tree_depth_fraction": float(np.mean(saturated)),
+            }
+        )
+
+    energy = np.asarray(extra_fields.get("energy", []), dtype=float)
+    if energy.ndim == 1:
+        energy = energy[None, :]
+    if energy.ndim == 2 and energy.shape[1] >= 2:
+        numerator = np.mean(np.square(np.diff(energy, axis=1)), axis=1)
+        denominator = np.var(energy, axis=1)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            ebfmi_by_chain = numerator / denominator
+        finite_ebfmi = ebfmi_by_chain[
+            np.isfinite(ebfmi_by_chain) & (ebfmi_by_chain >= 0.0)
+        ]
+        if finite_ebfmi.size:
+            diagnostics["nuts_ebfmi"] = float(np.min(finite_ebfmi))
+
+    return diagnostics
+
+
 def _run_nuts_inference(
     numpyro_model,
     rng_key,
@@ -4933,19 +5002,20 @@ def _run_nuts_inference(
         progress_bar=progress_bar,
     )
     t0 = time.perf_counter()
-    mcmc.run(rng_key, extra_fields=("accept_prob", "diverging"))
+    mcmc.run(rng_key, extra_fields=NUTS_EXTRA_FIELDS)
     elapsed = time.perf_counter() - t0
     samples_flat = tree_map(lambda x: np.asarray(device_get(x)), mcmc.get_samples(group_by_chain=False))
     samples_per_chain = tree_map(lambda x: np.asarray(device_get(x)), mcmc.get_samples(group_by_chain=True))
     extra_fields = {
         k: np.asarray(device_get(v))
-        for k, v in mcmc.get_extra_fields().items()
+        for k, v in mcmc.get_extra_fields(group_by_chain=True).items()
     }
-    diagnostics = {
-        "accept_prob": float(np.mean(extra_fields["accept_prob"])) if "accept_prob" in extra_fields else np.nan,
-        "num_divergences": int(np.sum(extra_fields["diverging"])) if "diverging" in extra_fields else 0,
-        "elapsed_sec": float(elapsed),
-    }
+    diagnostics = summarize_nuts_extra_fields(
+        extra_fields,
+        max_tree_depth=max_tree_depth,
+    )
+    diagnostics["elapsed_sec"] = float(elapsed)
+    diagnostics["nuts_elapsed_sec"] = float(elapsed)
     return samples_flat, samples_per_chain, diagnostics
 
 
@@ -5099,6 +5169,8 @@ def run_iterated_mag_flux_linearized_inference(
     samples_flat = None
     samples_per_chain = None
     posterior_summary = {}
+    final_nuts_diagnostics = unavailable_nuts_diagnostics()
+    final_nuts_diagnostics["nuts_elapsed_sec"] = np.nan
     diagnostics = {
         "flux_linearized_refinement_iters": int(refinement_iters),
         "flux_linearized_min_total_flux_ratio": float(FLUX_LINEARIZED_MIN_TOTAL_FLUX_RATIO),
@@ -5180,6 +5252,7 @@ def run_iterated_mag_flux_linearized_inference(
                 init_strategy=init_strategy,
             )
             if iter_idx == int(refinement_iters) - 1:
+                final_nuts_diagnostics = dict(iter_diag)
                 posterior_summary = summarize_final_hubble_nuts_posterior(
                     samples_per_chain,
                     fit_method=fit_method,
@@ -5259,6 +5332,7 @@ def run_iterated_mag_flux_linearized_inference(
         if iter_idx < int(refinement_iters) - 1:
             y_fit, yerr_fit = y_next, yerr_next
 
+    diagnostics.update(final_nuts_diagnostics)
     diagnostics["accept_prob"] = diagnostics[
         f"flux_linearized_iter{int(refinement_iters)}_accept_prob"
     ]
@@ -5742,7 +5816,7 @@ def main():
                     "cont,blr" if args.disable_lag_bc else "cont,blr,bc",
                 )
 
-            stage_diagnostics = {}
+            stage_diagnostics = unavailable_nuts_diagnostics()
             flux_linearized_fit_obj = None
             posterior_summary = {}
             if args.resume:
@@ -5821,26 +5895,24 @@ def main():
                     else:
                         mcmc_key = key
                         init_strategy = numpyro.infer.init_to_median()
-                    nuts = NUTS(
+                    (
+                        samples_flat,
+                        samples_per_chain,
+                        nuts_diagnostics,
+                    ) = _run_nuts_inference(
                         numpyro_model,
-                        init_strategy=init_strategy,
-                        dense_mass=args.dense_mass,
-                        max_tree_depth=args.max_tree_depth,
-                        target_accept_prob=args.target_accept,
-                    )
-                    mcmc = MCMC(
-                        nuts,
+                        mcmc_key,
                         num_warmup=args.nwarm,
                         num_samples=args.nsamp,
-                        num_chains=max(1, args.nchains),
+                        num_chains=args.nchains,
                         chain_method=chain_method,
                         progress_bar=args.progress,
+                        dense_mass=args.dense_mass,
+                        max_tree_depth=args.max_tree_depth,
+                        target_accept=args.target_accept,
+                        init_strategy=init_strategy,
                     )
-                    mcmc.run(mcmc_key)
-                    samples_flat = mcmc.get_samples(group_by_chain=False)
-                    samples_per_chain = mcmc.get_samples(group_by_chain=True)
-                    samples_flat = tree_map(lambda x: np.asarray(device_get(x)), samples_flat)
-                    samples_per_chain = tree_map(lambda x: np.asarray(device_get(x)), samples_per_chain)
+                    stage_diagnostics.update(nuts_diagnostics)
                     obj_flat_samples = samples_flat
                 else:
                     ns_constructor_kwargs = {}

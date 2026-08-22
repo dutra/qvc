@@ -208,6 +208,9 @@ def test_flux_linearized_refinement_strategy_controls_nuts_runs(
         return samples, per_chain, {
             "accept_prob": 0.9,
             "num_divergences": 0,
+            "nuts_ebfmi": 0.5 + 0.1 * calls["nuts"],
+            "nuts_max_tree_depth_fraction": 0.01 * calls["nuts"],
+            "nuts_elapsed_sec": 2.0,
             "elapsed_sec": 2.0,
         }
 
@@ -294,6 +297,13 @@ def test_flux_linearized_refinement_strategy_controls_nuts_runs(
     assert len(calls["pseudo_params"]) == 3
     assert diagnostics["flux_linearized_nuts_runs"] == expected_nuts_runs
     assert diagnostics["elapsed_sec"] == 2.0 * expected_nuts_runs
+    assert diagnostics["nuts_ebfmi"] == pytest.approx(
+        0.5 + 0.1 * expected_nuts_runs
+    )
+    assert diagnostics["nuts_max_tree_depth_fraction"] == pytest.approx(
+        0.01 * expected_nuts_runs
+    )
+    assert diagnostics["nuts_elapsed_sec"] == 2.0
     assert np.isfinite(samples["theta"]).all()
     assert np.isfinite(per_chain["theta"]).all()
     assert set(posterior_summary) == {"log_sigma_uv", "log_tau_uv"}
@@ -385,6 +395,69 @@ def test_final_nuts_summary_unavailable_paths_return_nan_fields(
     assert summary == {}
     assert printed == [({}, "posterior unavailable")]
     assert all(np.isnan(value) for value in fields.values())
+
+
+def test_summarize_nuts_extra_fields_reports_sampling_pathologies():
+    extra_fields = {
+        "accept_prob": np.array([[0.7, 0.8, 0.9, 1.0], [0.6, 0.7, 0.8, 0.9]]),
+        "diverging": np.array(
+            [[False, True, False, False], [False, False, True, False]]
+        ),
+        "num_steps": np.array([[1, 3, 7, 15], [2, 4, 8, 15]]),
+        "energy": np.array([[0.0, 1.0, 0.0, 1.0], [0.0, 2.0, 0.0, 2.0]]),
+    }
+
+    diagnostics = fit_lc.summarize_nuts_extra_fields(
+        extra_fields,
+        max_tree_depth=4,
+    )
+
+    assert np.isclose(diagnostics["accept_prob"], 0.8)
+    assert diagnostics["num_divergences"] == 2
+    assert np.isclose(diagnostics["nuts_mean_num_steps"], 6.875)
+    assert diagnostics["nuts_max_num_steps"] == 15
+    assert np.isclose(diagnostics["nuts_mean_tree_depth"], 2.875)
+    assert diagnostics["nuts_max_tree_depth_observed"] == 4
+    assert diagnostics["nuts_num_max_tree_depth"] == 3
+    assert np.isclose(diagnostics["nuts_max_tree_depth_fraction"], 3.0 / 8.0)
+    assert np.isclose(diagnostics["nuts_ebfmi"], 4.0)
+
+
+def test_unavailable_nuts_diagnostics_are_serializable_nans():
+    diagnostics = fit_lc.summarize_nuts_extra_fields({}, max_tree_depth=8)
+
+    assert set(diagnostics) == set(fit_lc.NUTS_DIAGNOSTIC_FIELDS)
+    assert all(np.isnan(value) for value in diagnostics.values())
+
+
+def test_run_nuts_inference_collects_final_chain_diagnostics():
+    def model():
+        fit_lc.numpyro.sample("x", fit_lc.dist.Normal(0.0, 1.0))
+
+    samples, samples_per_chain, diagnostics = fit_lc._run_nuts_inference(
+        model,
+        jax.random.PRNGKey(41),
+        num_warmup=5,
+        num_samples=8,
+        num_chains=1,
+        chain_method="sequential",
+        progress_bar=False,
+        dense_mass=True,
+        max_tree_depth=2,
+        target_accept=0.7,
+    )
+
+    assert samples["x"].shape == (8,)
+    assert samples_per_chain["x"].shape == (1, 8)
+    assert 0.0 <= diagnostics["accept_prob"] <= 1.0
+    assert diagnostics["num_divergences"] >= 0
+    assert diagnostics["nuts_mean_num_steps"] > 0.0
+    assert diagnostics["nuts_max_num_steps"] <= 3
+    assert 1 <= diagnostics["nuts_max_tree_depth_observed"] <= 2
+    assert 0.0 <= diagnostics["nuts_max_tree_depth_fraction"] <= 1.0
+    assert np.isfinite(diagnostics["nuts_ebfmi"])
+    assert diagnostics["nuts_elapsed_sec"] > 0.0
+    assert diagnostics["elapsed_sec"] == diagnostics["nuts_elapsed_sec"]
 
 
 def test_svi_then_nuts_refinement_requires_svi_backend():
