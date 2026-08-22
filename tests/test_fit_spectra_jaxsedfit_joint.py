@@ -137,11 +137,58 @@ def test_m2500_convergence_uses_one_summary_for_print_and_fields(monkeypatch, ca
     assert len(calls) == 1
     assert result == {
         "m_2500_dereddened_rhat": pytest.approx(1.01),
-        "m_2500_dereddened_ess": pytest.approx(80.0),
         "m_2500_attenuated_model_rhat": pytest.approx(1.02),
-        "m_2500_attenuated_model_ess": pytest.approx(81.0),
     }
     assert "m2500 posterior" in capsys.readouterr().out
+
+
+def test_spectral_convergence_saves_all_scalar_sites_and_skips_arrays(monkeypatch):
+    grouped = {
+        "log_agn_amp": np.arange(8.0).reshape(2, 4),
+        "pl_slope": np.arange(8.0).reshape(2, 4),
+        "log_ebv_gal": np.arange(8.0).reshape(2, 4),
+        "ebv_gal": np.arange(8.0).reshape(2, 4),
+        "log_ebv_agn": np.arange(8.0).reshape(2, 4),
+        "ebv_agn": np.arange(8.0).reshape(2, 4),
+        "singleton_site": np.arange(8.0).reshape(2, 4, 1),
+        "vector_site": np.ones((2, 4, 3)),
+    }
+    captured = {}
+
+    def fake_summary(samples, *, group_by_chain, prob):
+        captured.update(samples)
+        assert group_by_chain is True
+        assert prob == pytest.approx(0.90)
+        return {
+            name: {
+                "n_eff": np.array(50.0 + index),
+                "r_hat": np.array(1.0 + 0.01 * index),
+            }
+            for index, name in enumerate(samples)
+        }
+
+    monkeypatch.setattr(joint, "compute_numpyro_summary", fake_summary)
+    monkeypatch.setattr(
+        joint, "print_numpyro_summary_dict", lambda *args, **kwargs: None
+    )
+
+    result = joint.summarize_spectral_convergence(grouped, redshift=1.0)
+
+    expected_scalar_sites = {
+        "log_agn_amp",
+        "pl_slope",
+        "log_ebv_gal",
+        "ebv_gal",
+        "log_ebv_agn",
+        "ebv_agn",
+        "singleton_site",
+        *joint.HUBBLE_MAGNITUDE_SITES,
+    }
+    assert set(captured) == expected_scalar_sites
+    assert "vector_site" not in captured
+    for name in expected_scalar_sites:
+        assert np.isfinite(result[f"{name}_rhat"])
+        assert f"{name}_ess" not in result
 
 
 def test_flat_samples_reconstruct_chain_major_order():
@@ -168,14 +215,21 @@ def test_fresh_fit_preserves_grouped_scientific_nuts_samples():
             }
 
     fit_result = SimpleNamespace(
-        samples={"physical": np.arange(8.0)},
+        samples={
+            "physical": np.arange(8.0),
+            "deterministic": np.arange(8.0) + 10.0,
+        },
         fitter=SimpleNamespace(nuts_result={"mcmc": DummyMCMC()}),
     )
 
     grouped = joint._fresh_grouped_nuts_samples(fit_result)
 
-    assert set(grouped) == {"physical"}
+    assert set(grouped) == {"physical", "deterministic"}
     assert grouped["physical"].shape == (2, 4)
+    np.testing.assert_array_equal(
+        grouped["deterministic"],
+        fit_result.samples["deterministic"].reshape(2, 4),
+    )
 
 
 def test_flat_samples_reject_unreconstructable_chain_shape():
