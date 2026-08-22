@@ -62,6 +62,10 @@ HUBBLE_MAGNITUDE_SITES = (
     "m_2500_dereddened",
     "m_2500_attenuated_model",
 )
+DERIVED_SPECTRAL_CONVERGENCE_SITES = (
+    *HUBBLE_MAGNITUDE_SITES,
+    "a_2500_total",
+)
 SPECTRAL_CONVERGENCE_DISPLAY_SITES = (
     "ebv_gal",
     "log_ebv_gal",
@@ -69,7 +73,7 @@ SPECTRAL_CONVERGENCE_DISPLAY_SITES = (
     "log_ebv_agn",
     "pl_slope",
     "log_agn_amp",
-    *HUBBLE_MAGNITUDE_SITES,
+    *DERIVED_SPECTRAL_CONVERGENCE_SITES,
 )
 
 
@@ -199,13 +203,15 @@ def estimate_m2500_dereddened(samples, redshift, *, h0=70.0, om0=0.3):
     curve_2500 = (2500.0 / GRAHSP_ATTENUATION_BREAK_ANGSTROM) ** -1.2
     attenuation_gal = ebv_gal * curve_2500
     attenuation_agn = ebv_agn * curve_2500
+    attenuation_total = attenuation_gal + attenuation_agn
     return {
         "m_2500_dereddened_draws": intrinsic_mag,
         "m_2500_attenuated_model_draws": (
-            intrinsic_mag + attenuation_gal + attenuation_agn
+            intrinsic_mag + attenuation_total
         ),
         "a_2500_galaxy_draws": attenuation_gal,
         "a_2500_internal_draws": attenuation_agn,
+        "a_2500_total_draws": attenuation_total,
     }
 
 
@@ -362,7 +368,7 @@ def summarize_spectral_convergence(
             name: np.asarray(derived[f"{name}_draws"], dtype=float).reshape(
                 chain_shape
             )
-            for name in HUBBLE_MAGNITUDE_SITES
+            for name in DERIVED_SPECTRAL_CONVERGENCE_SITES
         }
     )
     summary_dict = compute_numpyro_summary(
