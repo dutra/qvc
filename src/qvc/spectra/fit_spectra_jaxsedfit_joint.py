@@ -62,6 +62,15 @@ HUBBLE_MAGNITUDE_SITES = (
     "m_2500_dereddened",
     "m_2500_attenuated_model",
 )
+SPECTRAL_CONVERGENCE_DISPLAY_SITES = (
+    "ebv_gal",
+    "log_ebv_gal",
+    "ebv_agn",
+    "log_ebv_agn",
+    "pl_slope",
+    "log_agn_amp",
+    *HUBBLE_MAGNITUDE_SITES,
+)
 
 
 def flambda_1e17_to_mjy(wave_angstrom, flux_1e17):
@@ -219,9 +228,8 @@ def empty_hubble_convergence_summary():
     """Return the stable convergence schema used by the Hubble workflow."""
 
     return {
-        f"{name}_{metric}": np.nan
+        f"{name}_rhat": np.nan
         for name in HUBBLE_MAGNITUDE_SITES
-        for metric in ("rhat", "ess")
     }
 
 
@@ -258,12 +266,24 @@ def _fresh_grouped_nuts_samples(fit_result):
     if mcmc is None:
         raise ValueError("Fresh fit does not expose a NumPyro MCMC result.")
     grouped = mcmc.get_samples(group_by_chain=True)
-    scientific_names = set((getattr(fit_result, "samples", None) or {}).keys())
-    return {
+    scientific_samples = getattr(fit_result, "samples", None) or {}
+    scientific_names = set(scientific_samples)
+    grouped_scientific = {
         name: np.asarray(value)
         for name, value in grouped.items()
         if name in scientific_names
     }
+    if not grouped_scientific:
+        raise ValueError("Fresh fit exposes no scientific NumPyro samples.")
+
+    # NumPyro's MCMC object may omit deterministic transforms (for example,
+    # ebv_gal derived from log_ebv_gal).  JAXSEDFit retains those transforms in
+    # its flattened scientific samples, whose ordering is chain-major.
+    chain_count = np.asarray(next(iter(grouped_scientific.values()))).shape[0]
+    flat_grouped = _reshape_flat_samples_by_chain(scientific_samples, chain_count)
+    for name, value in flat_grouped.items():
+        grouped_scientific.setdefault(name, value)
+    return grouped_scientific
 
 
 def summarize_m2500_convergence(
@@ -274,34 +294,93 @@ def summarize_m2500_convergence(
     om0=0.3,
     heading=None,
 ):
-    """Compute, print, and flatten one NumPyro summary of m2500 draws."""
+    """Compute the legacy m2500-only view of spectral convergence fields."""
+
+    convergence = summarize_spectral_convergence(
+        grouped_samples,
+        redshift,
+        h0=h0,
+        om0=om0,
+        heading=heading,
+    )
+    return {
+        f"{name}_rhat": convergence[f"{name}_rhat"]
+        for name in HUBBLE_MAGNITUDE_SITES
+    }
+
+
+def _scalar_grouped_samples(grouped_samples):
+    """Return chain-grouped posterior sites representing scalar quantities."""
+
+    scalar_samples = {}
+    chain_shape = None
+    for name, value in (grouped_samples or {}).items():
+        arr = np.asarray(value)
+        if arr.ndim < 2:
+            continue
+        if chain_shape is None:
+            chain_shape = arr.shape[:2]
+        if arr.shape[:2] != chain_shape:
+            continue
+        if np.prod(arr.shape[2:], dtype=int) != 1:
+            continue
+        scalar_samples[str(name)] = arr.reshape(chain_shape)
+    return scalar_samples, chain_shape
+
+
+def summarize_spectral_convergence(
+    grouped_samples,
+    redshift,
+    *,
+    h0=70.0,
+    om0=0.3,
+    heading=None,
+):
+    """Save R-hat for every scalar spectral parameter and m2500 draw.
+
+    Scalar sites are discovered from the posterior instead of maintained as a
+    hand-picked list.  This includes both sampled and deterministic scalar
+    quantities such as ``ebv_gal``, ``ebv_agn``, their log parameterizations,
+    ``pl_slope``, continuum normalization, host, dust, calibration, and
+    systematics parameters.  Array-valued line/model sites are excluded
+    because they do not have an unambiguous flat CSV column.
+    """
 
     if not grouped_samples:
         return empty_hubble_convergence_summary()
-    first = np.asarray(next(iter(grouped_samples.values())))
-    if first.ndim < 2:
+    summary_samples, chain_shape = _scalar_grouped_samples(grouped_samples)
+    if chain_shape is None:
         return empty_hubble_convergence_summary()
-    chain_shape = first.shape[:2]
     derived = estimate_m2500_dereddened(
         grouped_samples,
         redshift,
         h0=h0,
         om0=om0,
     )
-    summary_samples = {
-        name: np.asarray(derived[f"{name}_draws"], dtype=float).reshape(chain_shape)
-        for name in HUBBLE_MAGNITUDE_SITES
-    }
+    summary_samples.update(
+        {
+            name: np.asarray(derived[f"{name}_draws"], dtype=float).reshape(
+                chain_shape
+            )
+            for name in HUBBLE_MAGNITUDE_SITES
+        }
+    )
     summary_dict = compute_numpyro_summary(
         summary_samples,
         group_by_chain=True,
         prob=0.90,
     )
-    print_numpyro_summary_dict(summary_dict, heading=heading)
-    return convergence_fields(
+    display_summary = {
+        name: summary_dict[name]
+        for name in SPECTRAL_CONVERGENCE_DISPLAY_SITES
+        if name in summary_dict
+    }
+    print_numpyro_summary_dict(display_summary, heading=heading)
+    fields = convergence_fields(
         summary_dict,
-        {name: name for name in HUBBLE_MAGNITUDE_SITES},
+        {name: name for name in summary_samples},
     )
+    return {name: value for name, value in fields.items() if name.endswith("_rhat")}
 
 
 def load_saved_sed_photometry(path):
@@ -833,13 +912,13 @@ def run_one_fit(
         if _uses_nuts(config, getattr(fit_result, "method", None)):
             try:
                 result.update(
-                    summarize_m2500_convergence(
+                    summarize_spectral_convergence(
                         _fresh_grouped_nuts_samples(fit_result),
                         rec["z"],
                         h0=config.galaxy.cosmology_h0,
                         om0=config.galaxy.cosmology_om0,
                         heading=(
-                            f"[{rec['object_id']}] NumPyro Hubble-magnitude "
+                            f"[{rec['object_id']}] NumPyro spectral "
                             "posterior summary:"
                         ),
                     )
@@ -847,7 +926,7 @@ def run_one_fit(
             except Exception as exc:
                 if args.verbose:
                     print(
-                        f"Hubble-magnitude convergence unavailable for "
+                        f"Spectral convergence unavailable for "
                         f"object_id={rec['object_id']}: {exc}"
                     )
         result["n_photometry"] = int(len(used_phot))
@@ -919,7 +998,7 @@ def _run_resumed_fit(rec, args, source_path):
     if _uses_nuts(config):
         try:
             result.update(
-                summarize_m2500_convergence(
+                summarize_spectral_convergence(
                     _reshape_flat_samples_by_chain(
                         fitter.samples,
                         config.inference.num_chains,
@@ -928,7 +1007,7 @@ def _run_resumed_fit(rec, args, source_path):
                     h0=config.galaxy.cosmology_h0,
                     om0=config.galaxy.cosmology_om0,
                     heading=(
-                        f"[{rec['object_id']}] NumPyro Hubble-magnitude "
+                        f"[{rec['object_id']}] NumPyro spectral "
                         "posterior summary:"
                     ),
                 )
@@ -936,7 +1015,7 @@ def _run_resumed_fit(rec, args, source_path):
         except Exception as exc:
             if args.verbose:
                 print(
-                    f"Hubble-magnitude convergence unavailable for "
+                    f"Spectral convergence unavailable for "
                     f"object_id={rec['object_id']}: {exc}"
                 )
     result["n_photometry"] = int(len(config.photometry.filter_names))
