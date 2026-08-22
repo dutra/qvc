@@ -2933,6 +2933,7 @@ ETA_TAU_PRIOR_CHOICES = (
     "historical",
     "uniform",
     "stone",
+    "suberlak",
     "fixed1",
 )
 
@@ -2961,6 +2962,8 @@ def _eta_tau_prior_distribution(prior="legacy"):
         return dist.Uniform(-0.5, 1.25)
     if prior == "stone":
         return dist.TruncatedNormal(1.0, 0.5, low=-0.5, high=2.0)
+    if prior == "suberlak":
+        return dist.TruncatedNormal(0.17, 0.05, low=-0.5, high=1.25)
     return dist.TruncatedNormal(0.2, 0.35, low=-0.5, high=1.25)
 
 
@@ -2992,7 +2995,7 @@ def log_sigma_center0_relflux_prior(eta_sigma, lambda_center_rf):
     )
 
 
-TAU_PRIOR_CHOICES = ("legacy", "informative", "uniform")
+TAU_PRIOR_CHOICES = ("legacy", "informative", "uniform", "suberlak")
 
 
 def _validate_tau_prior(tau_prior):
@@ -3020,6 +3023,13 @@ def log_tau_slow_center0_prior(
     high = log_tau_uv_high - shift
     if tau_prior == "uniform":
         return dist.Uniform(low=low, high=high)
+    if tau_prior == "suberlak":
+        return dist.TruncatedNormal(
+            jnp.log(10**2.56 * (1.0 + z)) - shift,
+            0.6 * jnp.log(10.0),
+            low=low,
+            high=high,
+        )
     if tau_prior == "informative":
         return dist.TruncatedNormal(
             jnp.log(10**3.0 * (1.0 + z)) - shift,
@@ -5421,7 +5431,9 @@ def main():
             "Prior for the main continuum timescale: the current broad "
             "truncated normal ('legacy'), a narrower 1000-day truncated "
             "normal ('informative'), or a log-uniform 10 to 10000-day prior "
-            "('uniform'). Default: legacy."
+            "('uniform'). The Suberlak option is a 10 to 10000-day truncated "
+            "normal centered at 10^2.56 rest-frame days with 0.6 dex width. "
+            "Default: legacy."
         ),
     )
     parser.add_argument(
@@ -5433,8 +5445,9 @@ def main():
             "truncated normal centered at 0.2 ('legacy'), the original "
             "untruncated Normal(0.5, 0.5) ('historical'), a uniform -0.5 to "
             "1.25 prior ('uniform'), a broad Stone-centered truncated normal "
-            "('stone'), or eta_tau fixed exactly to 1 ('fixed1'). Default: "
-            "legacy."
+            "('stone'), a Suberlak-centered truncated normal at 0.17 with "
+            "width 0.05 ('suberlak'), or eta_tau fixed exactly to 1 "
+            "('fixed1'). Default: legacy."
         ),
     )
     parser.add_argument("--n_blr_terms", type=int, choices=(1, 2), default=1, help="Number of BLR lag terms to fit.")

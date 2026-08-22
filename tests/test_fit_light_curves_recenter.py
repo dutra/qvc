@@ -759,6 +759,7 @@ def test_carma21_numpyro_model_trace_materializes_likelihood_and_uv_outputs():
     ("model_path", "tau_prior", "sample_site", "distribution_kind"),
     (
         ("mag_linear", "informative", "log_tau_slow_center0", "truncated_normal"),
+        ("mag_linear", "suberlak", "log_tau_slow_center0", "truncated_normal"),
         ("erlang", "uniform", "log_tau_slow_center0", "uniform"),
         ("erlang_drw", "informative", "log_tau_drw_center0", "truncated_normal"),
     ),
@@ -985,6 +986,12 @@ def test_tau_prior_choices_match_requested_distributions_and_shifted_bounds():
         lambda_center_rf,
         tau_prior="informative",
     )
+    suberlak = log_tau_slow_center0_prior(
+        eta_tau,
+        z,
+        lambda_center_rf,
+        tau_prior="suberlak",
+    )
     uniform = log_tau_slow_center0_prior(
         eta_tau,
         z,
@@ -992,11 +999,12 @@ def test_tau_prior_choices_match_requested_distributions_and_shifted_bounds():
         tau_prior="uniform",
     )
 
-    assert TAU_PRIOR_CHOICES == ("legacy", "informative", "uniform")
+    assert TAU_PRIOR_CHOICES == ("legacy", "informative", "uniform", "suberlak")
     assert type(legacy_default) is type(legacy_explicit)
     assert type(legacy_default) is type(informative)
+    assert type(legacy_default) is type(suberlak)
     assert isinstance(uniform, fit_lc.dist.Uniform)
-    for prior in (legacy_default, legacy_explicit, informative, uniform):
+    for prior in (legacy_default, legacy_explicit, informative, suberlak, uniform):
         assert np.isclose(float(prior.low), expected_low)
         assert np.isclose(float(prior.high), expected_high)
 
@@ -1024,6 +1032,14 @@ def test_tau_prior_choices_match_requested_distributions_and_shifted_bounds():
         float(informative.base_dist.scale),
         0.6 * np.log(10.0),
     )
+    assert np.isclose(
+        float(suberlak.base_dist.loc),
+        np.log(10**2.56 * (1.0 + z)) - shift,
+    )
+    assert np.isclose(
+        float(suberlak.base_dist.scale),
+        0.6 * np.log(10.0),
+    )
 
     log_tau_a = expected_low + 0.25 * (expected_high - expected_low)
     log_tau_b = expected_low + 0.75 * (expected_high - expected_low)
@@ -1039,18 +1055,21 @@ def test_eta_tau_prior_choices_match_requested_distributions():
     historical = eta_tau_prior("historical")
     uniform = eta_tau_prior("uniform")
     stone = eta_tau_prior("stone")
+    suberlak = eta_tau_prior("suberlak")
 
     assert ETA_TAU_PRIOR_CHOICES == (
         "legacy",
         "historical",
         "uniform",
         "stone",
+        "suberlak",
         "fixed1",
     )
     assert type(legacy_default) is type(legacy_explicit)
     assert type(historical) is fit_lc.dist.Normal
     assert isinstance(uniform, fit_lc.dist.Uniform)
     assert isinstance(stone.base_dist, fit_lc.dist.Normal)
+    assert isinstance(suberlak.base_dist, fit_lc.dist.Normal)
     assert eta_tau_prior("fixed1") is None
 
     assert np.isclose(float(legacy_default.base_dist.loc), 0.2)
@@ -1066,6 +1085,10 @@ def test_eta_tau_prior_choices_match_requested_distributions():
     assert np.isclose(float(stone.base_dist.scale), 0.5)
     assert np.isclose(float(stone.low), -0.5)
     assert np.isclose(float(stone.high), 2.0)
+    assert np.isclose(float(suberlak.base_dist.loc), 0.17)
+    assert np.isclose(float(suberlak.base_dist.scale), 0.05)
+    assert np.isclose(float(suberlak.low), -0.5)
+    assert np.isclose(float(suberlak.high), 1.25)
 
 
 def test_eta_tau_prior_rejects_unknown_direct_api_value():
