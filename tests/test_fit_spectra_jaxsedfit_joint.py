@@ -97,6 +97,33 @@ def test_dereddened_m2500_uses_intrinsic_disk_and_both_attenuation_terms():
     assert np.all(a_internal > 0)
 
 
+def test_total_a2500_summary_is_computed_from_joint_posterior_draws():
+    samples = {
+        "log_agn_amp": np.log(np.full(3, 1.0e38)),
+        "pl_slope": np.full(3, -1.8),
+        "pl_bend_loc": np.full(3, 1000.0),
+        "pl_bend_width": np.full(3, 10.0),
+        # Anticorrelated components make the median of the draw-wise sum
+        # differ from the sum of the component medians.
+        "ebv_gal": np.array([0.01, 1.00, 1.01]),
+        "ebv_agn": np.array([1.00, 0.01, 1.00]),
+    }
+
+    draws = estimate_m2500_dereddened(samples, redshift=1.0)
+    summary = joint.summarize_m2500_dereddened(samples, redshift=1.0)
+    expected_draws = (
+        draws["a_2500_galaxy_draws"]
+        + draws["a_2500_internal_draws"]
+    )
+    expected = joint.legacy.sym_percentile(expected_draws)
+
+    np.testing.assert_allclose(draws["a_2500_total_draws"], expected_draws)
+    assert summary["a_2500_total"] == pytest.approx(expected[0])
+    assert summary["a_2500_total_err"] == pytest.approx(expected[1])
+    assert summary["a_2500_total_err_lower"] == pytest.approx(expected[2])
+    assert summary["a_2500_total_err_upper"] == pytest.approx(expected[3])
+
+
 def test_m2500_convergence_uses_one_summary_for_print_and_fields(monkeypatch, capsys):
     grouped = {
         "log_agn_amp": np.log(np.full((2, 4), 1.0e38)),
@@ -183,6 +210,7 @@ def test_spectral_convergence_saves_all_scalar_sites_and_skips_arrays(monkeypatc
         "ebv_agn",
         "singleton_site",
         *joint.HUBBLE_MAGNITUDE_SITES,
+        "a_2500_total",
     }
     assert set(captured) == expected_scalar_sites
     assert "vector_site" not in captured
