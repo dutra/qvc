@@ -728,16 +728,18 @@ def populate_spectra_fit(df, spectra_fit_h5s):
     )
     if conflicting_columns:
         print(
-            "Keeping HDF5 values and discarding overlapping SED-fit columns: "
+            "Keeping spectra HDF5 values and replacing overlapping light-curve "
+            "columns: "
             + ", ".join(conflicting_columns)
         )
     spectra_fit_columns = tuple(
         column
         for column in spectra.columns
-        if column != "object_id" and column not in conflicting_columns
+        if column != "object_id"
     )
     spectra_to_merge = spectra.loc[:, ["object_id", *spectra_fit_columns]]
-    out = df.merge(
+    light_curve_to_merge = df.drop(columns=conflicting_columns)
+    out = light_curve_to_merge.merge(
         spectra_to_merge,
         on="object_id",
         how="inner",
@@ -745,7 +747,8 @@ def populate_spectra_fit(df, spectra_fit_h5s):
     )
     out.attrs.update(input_attrs)
     out.attrs["spectra_fit_columns"] = spectra_fit_columns
-    out.attrs["spectra_fit_discarded_columns"] = tuple(conflicting_columns)
+    out.attrs["spectra_fit_discarded_columns"] = ()
+    out.attrs["light_curve_discarded_columns"] = tuple(conflicting_columns)
     print(f"Matched {len(out)} successful SED fits to {len(df)} AGN light-curve rows.")
     if "alpha_lambda" not in out.columns:
         out["alpha_lambda"] = out["pl_slope"]

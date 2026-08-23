@@ -370,7 +370,7 @@ def test_current_spectra_schema_accepts_only_joint_sedfit_backend(tmp_path):
         populate_spectra_fit(pd.DataFrame({"object_id": ["obj"]}), [h5_path])
 
 
-def test_populate_spectra_fit_preserves_all_nonconflicting_columns_and_hdf5_wins(
+def test_populate_spectra_fit_preserves_nonconflicting_columns_and_spectra_hdf5_wins(
     tmp_path,
 ):
     h5_path = tmp_path / "spectra.h5"
@@ -405,8 +405,8 @@ def test_populate_spectra_fit_preserves_all_nonconflicting_columns_and_hdf5_wins
 
     out = populate_spectra_fit(source, [h5_path])
 
-    assert out.loc[0, "z"] == 1.5
-    assert out.loc[0, "pl_slope"] == -0.8
+    assert out.loc[0, "z"] == row["z"]
+    assert out.loc[0, "pl_slope"] == row["pl_slope"]
     assert out.loc[0, "alpha_lambda"] == -0.75
     assert out.loc[0, "alpha_lambda_err"] == 0.03
     assert out.loc[0, "alpha_nu"] == -1.25
@@ -416,8 +416,10 @@ def test_populate_spectra_fit_preserves_all_nonconflicting_columns_and_hdf5_wins
     assert not any(column.endswith(("_x", "_y", "_sedfit")) for column in out.columns)
     assert "new_sed_parameter" in out.attrs["spectra_fit_columns"]
     assert "new_sed_label" in out.attrs["spectra_fit_columns"]
-    assert "z" not in out.attrs["spectra_fit_columns"]
-    assert "pl_slope" not in out.attrs["spectra_fit_columns"]
+    assert "z" in out.attrs["spectra_fit_columns"]
+    assert "pl_slope" in out.attrs["spectra_fit_columns"]
+    assert out.attrs["spectra_fit_discarded_columns"] == ()
+    assert out.attrs["light_curve_discarded_columns"] == ("pl_slope", "z")
 
 
 def test_populate_spectra_fit_derives_missing_slope_aliases_without_overwriting(
