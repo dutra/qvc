@@ -14,6 +14,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from qvc.hubble import hubble_model, hubble_plotting, hubble_utils
+from qvc.spectra.catalog_hdf5 import write_spectra_catalog_hdf5
 
 
 def _make_loader_input():
@@ -93,7 +94,7 @@ def test_load_agn_data_raises_when_selected_magnitude_columns_are_missing(
     ):
         hubble_utils.load_agn_data(
             input_path,
-            spectra_fit_csv=None,
+            spectra_fit_h5=None,
             magnitude_convention="dereddened",
             lc_info_csv=None,
             only_load=True,
@@ -121,8 +122,8 @@ def test_load_agn_data_does_not_require_legacy_spectral_fraction_columns(
     df_in["t_rf_length"] = 2000.0
     input_path = tmp_path / "fake_input.h5"
     input_path.touch()
-    spectra_path = tmp_path / "joint_sedfit.csv"
-    pd.DataFrame(
+    spectra_path = tmp_path / "joint_sedfit.h5"
+    spectra_frame = pd.DataFrame(
         {
             "object_id": df_in["object_id"],
             "fit_ok": True,
@@ -136,12 +137,18 @@ def test_load_agn_data_does_not_require_legacy_spectral_fraction_columns(
             "pl_slope": -1.5,
             "pl_slope_err": 0.1,
         }
-    ).to_csv(spectra_path, index=False)
+    )
+    write_spectra_catalog_hdf5(
+        spectra_path,
+        spectra_frame,
+        np.full((len(spectra_frame), 64, 5), np.nan, dtype=np.float32),
+        np.zeros(len(spectra_frame), dtype=np.int16),
+    )
     _patch_minimal_loader(monkeypatch, df_in)
 
     df, df_all = hubble_utils.load_agn_data(
         input_path,
-        spectra_fit_csv=[spectra_path],
+        spectra_fit_h5=[spectra_path],
         magnitude_convention="dereddened",
         lc_info_csv=None,
         only_load=False,
@@ -173,7 +180,7 @@ def _obsolete_load_agn_data_attenuated_aliases_legacy_generic_columns(
 
     df, df_all = hubble_utils.load_agn_data(
         input_path,
-        spectra_fit_csv=None,
+        spectra_fit_h5=None,
         magnitude_convention="attenuated",
         lc_info_csv=None,
         only_load=True,
@@ -223,7 +230,7 @@ def _obsolete_load_agn_data_attenuated_raises_when_canonical_and_legacy_disagree
     ):
         hubble_utils.load_agn_data(
             input_path,
-            spectra_fit_csv=None,
+            spectra_fit_h5=None,
             magnitude_convention="attenuated",
             lc_info_csv=None,
             only_load=True,
@@ -257,7 +264,7 @@ def _obsolete_load_agn_data_attenuated_raises_for_incomplete_alias_pairs(
     with pytest.raises(ValueError, match="magnitude_convention='attenuated'"):
         hubble_utils.load_agn_data(
             input_path,
-            spectra_fit_csv=None,
+            spectra_fit_h5=None,
             magnitude_convention="attenuated",
             lc_info_csv=None,
             only_load=True,
@@ -280,7 +287,7 @@ def _obsolete_load_agn_data_attenuated_colocated_nans_are_not_alias_conflicts(
     with pytest.raises(ValueError, match="non-finite"):
         hubble_utils.load_agn_data(
             input_path,
-            spectra_fit_csv=None,
+            spectra_fit_h5=None,
             magnitude_convention="attenuated",
             lc_info_csv=None,
             only_load=True,
@@ -320,7 +327,7 @@ def test_load_agn_data_raises_for_invalid_selected_magnitude_values(
     with pytest.raises(ValueError, match=message):
         hubble_utils.load_agn_data(
             input_path,
-            spectra_fit_csv=None,
+            spectra_fit_h5=None,
             magnitude_convention="dereddened",
             lc_info_csv=None,
             only_load=True,
@@ -346,7 +353,7 @@ def test_load_agn_data_propagates_host_error_into_sigma_uv(monkeypatch, tmp_path
     df, df_all = hubble_utils.load_agn_data(
         input_path,
         magnitude_convention="dereddened",
-        spectra_fit_csv=None,
+        spectra_fit_h5=None,
         lc_info_csv=None,
         only_load=True,
         apply_cut=False,
@@ -414,7 +421,7 @@ def test_load_agn_data_aliases_dereddened_spectral_magnitude(monkeypatch, tmp_pa
     df_in["apparent_mag_2500"] = attenuated_mag
     df_in["apparent_mag_2500_err"] = attenuated_err
 
-    def fake_populate_spectra_fit(frame, _spectra_fit_csv):
+    def fake_populate_spectra_fit(frame, _spectra_fit_h5):
         frame = frame.copy()
         frame["m_2500_attenuated_model"] = attenuated_mag
         frame["m_2500_attenuated_model_err"] = attenuated_err
@@ -424,7 +431,7 @@ def test_load_agn_data_aliases_dereddened_spectral_magnitude(monkeypatch, tmp_pa
 
     input_path = tmp_path / "fake_input.h5"
     input_path.touch()
-    spectra_path = tmp_path / "spectra.csv"
+    spectra_path = tmp_path / "spectra.h5"
     spectra_path.touch()
     monkeypatch.setattr(
         hubble_utils,
@@ -436,7 +443,7 @@ def test_load_agn_data_aliases_dereddened_spectral_magnitude(monkeypatch, tmp_pa
 
     df, df_all = hubble_utils.load_agn_data(
         input_path,
-        spectra_fit_csv=[str(spectra_path)],
+        spectra_fit_h5=[str(spectra_path)],
         magnitude_convention="dereddened",
         lc_info_csv=None,
         only_load=True,
@@ -466,7 +473,7 @@ def test_load_agn_data_can_use_attenuated_spectral_magnitude(monkeypatch, tmp_pa
     df_in["apparent_mag_2500"] = attenuated_mag
     df_in["apparent_mag_2500_err"] = attenuated_err
 
-    def fake_populate_spectra_fit(frame, _spectra_fit_csv):
+    def fake_populate_spectra_fit(frame, _spectra_fit_h5):
         frame = frame.copy()
         frame["m_2500_attenuated_model"] = attenuated_mag
         frame["m_2500_attenuated_model_err"] = attenuated_err
@@ -476,7 +483,7 @@ def test_load_agn_data_can_use_attenuated_spectral_magnitude(monkeypatch, tmp_pa
 
     input_path = tmp_path / "fake_input.h5"
     input_path.touch()
-    spectra_path = tmp_path / "spectra.csv"
+    spectra_path = tmp_path / "spectra.h5"
     spectra_path.touch()
     monkeypatch.setattr(
         hubble_utils,
@@ -488,7 +495,7 @@ def test_load_agn_data_can_use_attenuated_spectral_magnitude(monkeypatch, tmp_pa
 
     df, df_all = hubble_utils.load_agn_data(
         input_path,
-        spectra_fit_csv=[str(spectra_path)],
+        spectra_fit_h5=[str(spectra_path)],
         magnitude_convention="attenuated",
         lc_info_csv=None,
         only_load=True,
@@ -538,7 +545,7 @@ def test_load_agn_data_applies_attenuated_convention_to_hdf5_spectral_fields(
 
     df, df_all = hubble_utils.load_agn_data(
         input_path,
-        spectra_fit_csv=None,
+        spectra_fit_h5=None,
         magnitude_convention="attenuated",
         lc_info_csv=None,
         only_load=True,
@@ -580,7 +587,7 @@ def test_load_agn_data_uses_survey_band_log_jitter_grid(monkeypatch, tmp_path):
     df, df_all = hubble_utils.load_agn_data(
         input_path,
         magnitude_convention="dereddened",
-        spectra_fit_csv=None,
+        spectra_fit_h5=None,
         lc_info_csv=None,
         only_load=True,
         apply_cut=False,

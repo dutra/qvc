@@ -121,6 +121,10 @@ from qvc.hubble.completeness_mock_catalog import (
     mock_m_per_zbin,
     save_mock_catalog,
 )
+from qvc.hubble.completeness_closure import (
+    simulate_hubble_posterior_closure,
+    write_completeness_closure_diagnostics,
+)
 
 VALID_COMPLETENESS_MODES = ("2d", "3d_fhost", "4d_fhost_alpha")
 SPEED_CHOICES = ("fastest", "quick", "standard", "production")
@@ -2644,6 +2648,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                use_eta_sigma_term=False,
                use_redshift_log_f_term=False,
                early_de_guard=False,
+               completeness_closure_test=False,
                resume_replot_with_cuts=False,
                agn_pivot_context=None):
     validate_completeness_mode(completeness_mode)
@@ -3252,38 +3257,102 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         print("Skipping plots, returning results...")
         return flat_samples, model_labels, dm_interp, logZ, logZerr, None, age, age_err
 
-    if minimal_plots:
-        posterior_sample_indices = get_hubble_posterior_sample_indices(
-            len(flat_samples)
+    if completeness_closure_test and completeness:
+        closure_bin_width = 0.2
+        closure_z_lo = closure_bin_width * np.floor(z_range[0] / closure_bin_width)
+        closure_z_hi = closure_bin_width * np.ceil(z_range[1] / closure_bin_width)
+        closure_z_bins = np.arange(
+            closure_z_lo,
+            closure_z_hi + 0.5 * closure_bin_width,
+            closure_bin_width,
         )
-        (
-            dmi_posterior_median_full,
-            dmi_posterior_sigma_full,
-            dmi_selection_sigma_full,
-            dmi_posterior_draws_full,
-        ) = _compute_direct_full_sample_completeness_summaries(
-            flat_samples,
-            df_agn_fit_selection=df_agn_pass2_fit_selection,
-            df_agn_plot_sample=df_agn_pass2_plot_sample,
-            df_pantheon=df_pantheon,
-            _sna_L=_sna_L,
-            _sna_Lower=_sna_Lower,
-            _sna_LogdetCov=_sna_LogdetCov,
+        closure_result = simulate_hubble_posterior_closure(
+            posterior_samples=flat_samples,
+            agn_data=df_agn_pass2_plot_sample,
             cosmo_model=cosmo_model,
-            completeness_params=_get_direct_completeness_params(),
             z_pivot_agn=z_pivot_agn,
             agn_pivot_context=agn_pivot_context,
-            use_full_cov=use_full_cov,
-            disable_ceph_dist_calibration=disable_ceph_dist_calibration,
+            completeness_params=_get_direct_completeness_params(),
+            redshift_bins=closure_z_bins,
+            seed=7721,
+            max_posterior_draws=100,
+            max_abs_mean_zscore=4.0,
+            min_detected_per_bin=25,
+            only_agn=only_agn,
             use_planck_h0_prior=use_planck_h0_prior,
             use_planck_om_prior=use_planck_om_prior,
-            only_agn=only_agn,
             use_alpha_lambda_term=use_alpha_lambda_term,
             use_eta_sigma_term=use_eta_sigma_term,
             use_redshift_log_f_term=use_redshift_log_f_term,
-            early_de_guard=early_de_guard,
-            dmi_draw_indices=posterior_sample_indices,
         )
+        closure_paths = write_completeness_closure_diagnostics(
+            closure_result,
+            plot_path,
+        )
+        closure_verdict = "PASS" if closure_result.all_bins_pass else "FAIL"
+        print(
+            "Completeness posterior-predictive closure: "
+            f"{closure_verdict}; summary={closure_paths['summary_csv']}"
+        )
+
+    if minimal_plots:
+        if resume_replot_with_cuts:
+            # The checkpoint arrays have already been remapped by object ID to
+            # the current cut sample.  Reuse them for this fixed-posterior
+            # diagnostic instead of recomputing completeness for each scan.
+            posterior_sample_indices = None
+            plot_in_fit_range = df_agn_pass2_plot_sample["z"].between(
+                z_range[0], z_range[1]
+            ).to_numpy()
+            n_plot_in_fit_range = int(np.count_nonzero(plot_in_fit_range))
+            if len(dmi_posterior_median) != n_plot_in_fit_range:
+                raise RuntimeError(
+                    "Resume-replot checkpoint debias arrays do not match the "
+                    "current in-range cut sample."
+                )
+            dmi_posterior_median_full = np.zeros(len(df_agn_pass2_plot_sample))
+            dmi_posterior_median_full[plot_in_fit_range] = dmi_posterior_median
+            dmi_posterior_sigma_full = np.zeros(len(df_agn_pass2_plot_sample))
+            dmi_posterior_sigma_full[plot_in_fit_range] = dmi_posterior_sigma
+            dmi_selection_sigma_full = None
+            if dmi_selection_sigma_posterior_median is not None:
+                dmi_selection_sigma_full = np.zeros(len(df_agn_pass2_plot_sample))
+                dmi_selection_sigma_full[plot_in_fit_range] = (
+                    dmi_selection_sigma_posterior_median
+                )
+            dmi_posterior_draws_full = None
+        else:
+            posterior_sample_indices = get_hubble_posterior_sample_indices(
+                len(flat_samples)
+            )
+            (
+                dmi_posterior_median_full,
+                dmi_posterior_sigma_full,
+                dmi_selection_sigma_full,
+                dmi_posterior_draws_full,
+            ) = _compute_direct_full_sample_completeness_summaries(
+                flat_samples,
+                df_agn_fit_selection=df_agn_pass2_fit_selection,
+                df_agn_plot_sample=df_agn_pass2_plot_sample,
+                df_pantheon=df_pantheon,
+                _sna_L=_sna_L,
+                _sna_Lower=_sna_Lower,
+                _sna_LogdetCov=_sna_LogdetCov,
+                cosmo_model=cosmo_model,
+                completeness_params=_get_direct_completeness_params(),
+                z_pivot_agn=z_pivot_agn,
+                agn_pivot_context=agn_pivot_context,
+                use_full_cov=use_full_cov,
+                disable_ceph_dist_calibration=disable_ceph_dist_calibration,
+                use_planck_h0_prior=use_planck_h0_prior,
+                use_planck_om_prior=use_planck_om_prior,
+                only_agn=only_agn,
+                use_alpha_lambda_term=use_alpha_lambda_term,
+                use_eta_sigma_term=use_eta_sigma_term,
+                use_redshift_log_f_term=use_redshift_log_f_term,
+                early_de_guard=early_de_guard,
+                dmi_draw_indices=posterior_sample_indices,
+            )
         (
             debiased_residuals,
             _debiased_clipping_sigma,
@@ -4105,7 +4174,8 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
             use_alpha_lambda_term=False,
             use_eta_sigma_term=False,
             use_redshift_log_f_term=False,
-            early_de_guard=False):
+            early_de_guard=False,
+            completeness_closure_test=False):
 
     validate_completeness_mode(completeness_mode)
     completeness_magnitude = normalize_completeness_magnitude(
@@ -4195,6 +4265,7 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
                        use_eta_sigma_term=use_eta_sigma_term,
                        use_redshift_log_f_term=use_redshift_log_f_term,
                        early_de_guard=early_de_guard,
+                       completeness_closure_test=completeness_closure_test,
                        agn_pivot_context=agn_pivot_context)
         
         samples_joint, model_labels_joint, dm_interp_joint, logZ_joint, logZerr_joint, debiased_residuals_joint, age_joint, age_err_joint = r
@@ -4417,12 +4488,12 @@ if __name__ == "__main__":
     parser.add_argument("--only_sna", action="store_true", default=False, help="Run SNIa-only fit (default: False)")
     parser.add_argument("--only_agn", action="store_true", default=False, help="Run AGN-only fit with the Supernova likelihood and M0_sn disabled (default: False)")
     parser.add_argument(
-        "--spectra_fit_csv",
+        "--spectra_fit_h5",
         type=str,
         nargs="+",
         required=True,
         help=(
-            "Path(s) to CSV output from fit_spectra_jaxsedfit_joint.py. "
+            "Path(s) to HDF5 output from fit_spectra_jaxsedfit_joint.py. "
             "Legacy spectral-fit formats are not supported."
         ),
     )
@@ -4522,6 +4593,15 @@ if __name__ == "__main__":
         ),
     )
     parser.add_argument(
+        "--completeness-closure-test",
+        action="store_true",
+        default=False,
+        help=(
+            "Run a posterior-predictive closure simulation through the active "
+            "completeness model and save per-redshift-bin recovery diagnostics."
+        ),
+    )
+    parser.add_argument(
         "--correct-sigma-uv-host",
         action="store_true",
         default=False,
@@ -4601,7 +4681,7 @@ if __name__ == "__main__":
                            apply_cut=not args.no_cuts,
                            residuals_sigma_clip=args.residuals_sigma_clip, residuals_csv=args.residuals_csv,
                            exclude_object_ids_csv=args.exclude_object_ids_csv,
-                           spectra_fit_csv=args.spectra_fit_csv,
+                           spectra_fit_h5=args.spectra_fit_h5,
                            magnitude_convention=args.magnitude_convention,
                            completeness_magnitude=args.completeness_magnitude,
                            spectra_sdss_run2d=args.spectra_sdss_run2d,
@@ -4731,6 +4811,7 @@ if __name__ == "__main__":
                 use_eta_sigma_term=args.fit_eta_sigma_term,
                 use_redshift_log_f_term=args.fit_redshift_log_f_term,
                 early_de_guard=args.early_de_guard,
+                completeness_closure_test=args.completeness_closure_test,
                 resume_replot_with_cuts=args.resume_replot_with_cuts,
                 agn_pivot_context=agn_pivot_context)
             samples_joint, model_labels, dm_interp, logZ_joint, logZerr_joint, debiased_residuals, age, age_err = r
@@ -4793,6 +4874,7 @@ if __name__ == "__main__":
                 use_alpha_lambda_term=args.fit_alpha_lambda_term,
                 use_eta_sigma_term=args.fit_eta_sigma_term,
                 use_redshift_log_f_term=args.fit_redshift_log_f_term,
-                early_de_guard=args.early_de_guard)
+                early_de_guard=args.early_de_guard,
+                completeness_closure_test=args.completeness_closure_test)
     
     print(f"Finished running Hubble fit pipeline for {args.cosmo_models}")

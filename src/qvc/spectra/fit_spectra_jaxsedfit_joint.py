@@ -15,6 +15,7 @@ The original ``fit_spectra.py`` remains the spectrum-first production path.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import multiprocessing as mp
 import traceback
 from functools import partial
@@ -39,6 +40,10 @@ from qvc.provenance import (
 from tqdm import tqdm
 
 from qvc.spectra import fit_spectra as legacy
+from qvc.spectra.catalog_hdf5 import (
+    PSF_AGN_FRACTION_DRAW_COUNT,
+    write_spectra_catalog_hdf5,
+)
 
 
 C_ANGSTROM_PER_SECOND = 2.99792458e18
@@ -349,7 +354,7 @@ def summarize_spectral_convergence(
     quantities such as ``ebv_gal``, ``ebv_agn``, their log parameterizations,
     ``pl_slope``, continuum normalization, host, dust, calibration, and
     systematics parameters.  Array-valued line/model sites are excluded
-    because they do not have an unambiguous flat CSV column.
+    because they do not have an unambiguous flat scalar catalog column.
     """
 
     if not grouped_samples:
@@ -631,7 +636,7 @@ def build_joint_config(rec, phot, lam, flux, err, resolving_power, args):
 
 
 def summarize_samples(samples):
-    """Flatten scalar posterior sites into median/error CSV columns."""
+    """Flatten scalar posterior sites into median/error catalog columns."""
     out = {}
     for name, value in (samples or {}).items():
         arr = np.asarray(value)
@@ -676,6 +681,82 @@ def empty_psf_agn_fraction_summary(bands=PSF_AGN_FRACTION_BANDS):
         for band in bands
         for key in (f"f_AGN_psf_{band}", f"f_AGN_psf_{band}_err")
     }
+
+
+def extract_compact_psf_agn_fraction_draws(
+    prediction,
+    filter_names,
+    *,
+    object_id,
+    seed,
+    bands=PSF_AGN_FRACTION_BANDS,
+    draw_count=PSF_AGN_FRACTION_DRAW_COUNT,
+):
+    """Return deterministic, jointly indexed PSF AGN-fraction draws."""
+
+    total = np.asarray(prediction["pred_fluxes"], dtype=float)
+    variable = np.asarray(prediction["variable_agn_fluxes"], dtype=float)
+    if total.ndim != 2 or variable.shape != total.shape:
+        raise ValueError("PSF AGN-fraction predictions must be matching 2D arrays.")
+
+    filter_names = [str(name) for name in filter_names]
+    indices = []
+    for band in bands:
+        matches = [i for i, name in enumerate(filter_names) if name == f"{band}_sdss"]
+        if len(matches) != 1:
+            raise ValueError(
+                f"Expected exactly one {band + '_sdss'!r} prediction, found {len(matches)}."
+            )
+        indices.append(matches[0])
+
+    selected_total = total[:, indices]
+    selected_variable = variable[:, indices]
+    valid = (
+        np.all(np.isfinite(selected_total) & (selected_total > 0.0), axis=1)
+        & np.all(np.isfinite(selected_variable), axis=1)
+    )
+    fractions = np.clip(selected_variable[valid] / selected_total[valid], 0.0, 1.0)
+    if len(fractions) > draw_count:
+        digest = hashlib.sha256(f"{int(seed)}:{object_id}".encode("utf-8")).digest()
+        object_seed = int.from_bytes(digest[:8], "little", signed=False)
+        rng = np.random.default_rng(object_seed)
+        chosen = np.sort(rng.choice(len(fractions), size=draw_count, replace=False))
+        fractions = fractions[chosen]
+
+    valid_count = min(len(fractions), int(draw_count))
+    compact = np.full((int(draw_count), len(bands)), np.nan, dtype=np.float32)
+    compact[:valid_count] = fractions[:valid_count].astype(np.float32)
+    return compact, valid_count
+
+
+def write_joint_fit_results_hdf5(path, rows, *, provenance=None):
+    """Write worker result rows and their private fraction-draw payloads."""
+
+    catalog_rows = []
+    draws = []
+    counts = []
+    for row in rows:
+        catalog_rows.append({key: value for key, value in row.items() if not key.startswith("_")})
+        draws.append(
+            np.asarray(
+                row.get(
+                    "_psf_agn_fraction_draws",
+                    np.full((PSF_AGN_FRACTION_DRAW_COUNT, len(PSF_AGN_FRACTION_BANDS)), np.nan),
+                ),
+                dtype=np.float32,
+            )
+        )
+        counts.append(int(row.get("_psf_agn_fraction_valid_count", 0)))
+    draw_array = np.stack(draws, axis=0) if draws else np.empty(
+        (0, PSF_AGN_FRACTION_DRAW_COUNT, len(PSF_AGN_FRACTION_BANDS)), dtype=np.float32
+    )
+    write_spectra_catalog_hdf5(
+        path,
+        pd.DataFrame(catalog_rows),
+        draw_array,
+        np.asarray(counts, dtype=np.int16),
+        provenance=provenance,
+    )
 
 
 def summarize_psf_agn_fractions(
@@ -833,6 +914,12 @@ def _base_result(rec, args, *, execution_mode, resumed_from_path=""):
     result.update(empty_joint_chi2_summary())
     result.update(empty_psf_agn_fraction_summary())
     result.update(empty_hubble_convergence_summary())
+    result["_psf_agn_fraction_draws"] = np.full(
+        (PSF_AGN_FRACTION_DRAW_COUNT, len(PSF_AGN_FRACTION_BANDS)),
+        np.nan,
+        dtype=np.float32,
+    )
+    result["_psf_agn_fraction_valid_count"] = 0
     return result
 
 
@@ -906,6 +993,15 @@ def run_one_fit(
                 prediction,
                 used_phot["filter_name"].astype(str).tolist(),
             )
+        )
+        (
+            result["_psf_agn_fraction_draws"],
+            result["_psf_agn_fraction_valid_count"],
+        ) = extract_compact_psf_agn_fraction_draws(
+            prediction,
+            used_phot["filter_name"].astype(str).tolist(),
+            object_id=rec["object_id"],
+            seed=args.seed,
         )
         result.update(
             summarize_m2500_dereddened(
@@ -992,6 +1088,15 @@ def _run_resumed_fit(rec, args, source_path):
             prediction,
             config.photometry.filter_names,
         )
+    )
+    (
+        result["_psf_agn_fraction_draws"],
+        result["_psf_agn_fraction_valid_count"],
+    ) = extract_compact_psf_agn_fraction_draws(
+        prediction,
+        config.photometry.filter_names,
+        object_id=rec["object_id"],
+        seed=args.seed,
     )
     result.update(
         summarize_m2500_dereddened(
@@ -1130,8 +1235,17 @@ def run_fit(args):
         ctx = mp.get_context("spawn")
         with ctx.Pool(args.nproc) as pool:
             rows = list(tqdm(pool.imap(worker, records), total=len(records)))
-    Path(args.fpath_out).parent.mkdir(parents=True, exist_ok=True)
-    pd.DataFrame(rows).to_csv(args.fpath_out, index=False)
+    provenance = build_run_record(
+        "qvc.spectra.fit_spectra_jaxsedfit_joint",
+        args,
+        input_paths={
+            "input_catalog": args.fpath_in,
+            "sed_photometry": args.sed_photometry_path,
+            "dr16q_catalog": args.dr16q_fits,
+        },
+        event_type="catalog_shard",
+    )
+    write_joint_fit_results_hdf5(args.fpath_out, rows, provenance=provenance)
     print(f"Wrote {len(rows)} rows to {args.fpath_out}")
 
 
@@ -1204,6 +1318,8 @@ def parse_args(argv=None):
         args.fpath_out = args.fpath_out_opt
     if args.mode == "fit" and not args.fpath_out:
         parser.error("fpath_out is required for --mode fit.")
+    if args.mode == "fit" and Path(args.fpath_out).suffix.lower() not in {".h5", ".hdf5"}:
+        parser.error("fpath_out must end in .h5 or .hdf5 for joint spectral fits.")
     if args.mode == "fit" and not args.sed_photometry_path:
         parser.error("--sed-photometry-path is required for --mode fit.")
     if not (args.fpath_in or args.filter_object_id):

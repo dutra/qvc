@@ -207,7 +207,7 @@ def test_load_agn_data_makes_pre_and_postcut_joint_sed_and_blr_plots(tmp_path, m
     hubble_utils.load_agn_data(
         source_path,
         magnitude_convention="dereddened",
-        spectra_fit_csv=None,
+        spectra_fit_h5=None,
         lc_info_csv=None,
         apply_cut=True,
         plot_path=str(tmp_path / "figures"),
@@ -245,7 +245,7 @@ def test_load_agn_data_writes_sigma_tau_ls_identity_grids_to_diagnostics(tmp_pat
     hubble_utils.load_agn_data(
         source_path,
         magnitude_convention="dereddened",
-        spectra_fit_csv=None,
+        spectra_fit_h5=None,
         lc_info_csv=None,
         apply_cut=True,
         plot_path=str(tmp_path / "plots" / "hubble" / "prefix"),
@@ -373,7 +373,7 @@ def test_load_agn_data_run2d_filter_v5_13_2_and_drop_missing(tmp_path, monkeypat
     filtered, _ = hubble_utils.load_agn_data(
         source_path,
         magnitude_convention="dereddened",
-        spectra_fit_csv=None,
+        spectra_fit_h5=None,
         lc_info_csv=None,
         apply_cut=True,
         spectra_sdss_run2d="v5_13_2",
@@ -399,7 +399,7 @@ def test_load_agn_data_run2d_filter_26(tmp_path, monkeypatch):
     filtered, _ = hubble_utils.load_agn_data(
         source_path,
         magnitude_convention="dereddened",
-        spectra_fit_csv=None,
+        spectra_fit_h5=None,
         lc_info_csv=None,
         apply_cut=True,
         spectra_sdss_run2d="26",
@@ -428,7 +428,7 @@ def test_load_agn_data_run2d_filter_bypassed_when_no_cuts(tmp_path, monkeypatch)
     filtered, _ = hubble_utils.load_agn_data(
         source_path,
         magnitude_convention="dereddened",
-        spectra_fit_csv=None,
+        spectra_fit_h5=None,
         lc_info_csv=None,
         apply_cut=False,
         spectra_sdss_run2d="v5_13_2",
@@ -452,7 +452,7 @@ def test_load_agn_data_run2d_filter_requires_sdss_run2d_column(tmp_path, monkeyp
         hubble_utils.load_agn_data(
             source_path,
             magnitude_convention="dereddened",
-            spectra_fit_csv=None,
+            spectra_fit_h5=None,
             lc_info_csv=None,
             apply_cut=True,
             spectra_sdss_run2d="v5_13_2",

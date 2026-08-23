@@ -1618,7 +1618,7 @@ def test_end_to_end(tmp_path, monkeypatch):
     df, df_all = hubble_utils.load_agn_data(
         h5_path,
         magnitude_convention="dereddened",
-        spectra_fit_csv=None,
+        spectra_fit_h5=None,
         lc_info_csv=None,
         only_load=True,
         apply_cut=False,

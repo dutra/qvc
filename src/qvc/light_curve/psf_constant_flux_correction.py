@@ -20,7 +20,6 @@ import argparse
 from collections.abc import Iterable, Mapping
 
 import numpy as np
-import pandas as pd
 from tqdm import tqdm
 
 from qvc.hubble.hubble_utils import resolve_qvc_data_path
@@ -29,6 +28,7 @@ from qvc.light_curve.multiband_generate_lc import (
     lambda_pivot,
     populate_sdss_fields,
 )
+from qvc.spectra.catalog_hdf5 import read_spectra_catalog_hdf5
 
 MAG_TO_FLUX_DERIV = 0.4 * np.log(10.0)
 
@@ -65,39 +65,38 @@ def relative_fluxerr_to_magerr(flux, fluxerr):
     return (2.5 / np.log(10.0)) * fluxerr / np.clip(flux, 1e-300, None)
 
 
-def load_spectra_psf_fractions(spectra_fit_csvs) -> dict[str, dict]:
-    """Load only the spectra columns needed for PSF constant-flux correction."""
+def load_spectra_psf_fractions(spectra_fit_h5s) -> dict[str, dict]:
+    """Load scalar fractions and compact joint draws from spectral HDF5 catalogs."""
 
-    if not spectra_fit_csvs:
+    if not spectra_fit_h5s:
         return {}
 
-    frames = []
-    for csv_path in spectra_fit_csvs:
-        resolved = resolve_qvc_data_path(csv_path)
-        header = pd.read_csv(resolved, nrows=0)
-        usecols = [
-            col
-            for col in header.columns
-            if col == "object_id" or col.startswith("f_AGN_psf_")
+    rows = {}
+    for h5_path in spectra_fit_h5s:
+        resolved = resolve_qvc_data_path(h5_path)
+        catalog = read_spectra_catalog_hdf5(resolved)
+        if "object_id" not in catalog.frame.columns:
+            raise ValueError(f"Spectra HDF5 {resolved} is missing required column 'object_id'.")
+        fraction_columns = [
+            column for column in catalog.frame.columns if column.startswith("f_AGN_psf_")
         ]
-        if "object_id" not in usecols:
-            raise ValueError(f"Spectra CSV {resolved} is missing required column 'object_id'.")
-        if not any(col.startswith("f_AGN_psf_") for col in usecols):
+        if not fraction_columns:
             raise ValueError(
-                f"Spectra CSV {resolved} is missing required per-band columns 'f_AGN_psf_<band>'."
+                f"Spectra HDF5 {resolved} is missing required per-band columns 'f_AGN_psf_<band>'."
             )
-        frames.append(pd.read_csv(resolved, usecols=usecols))
-
-    if not frames:
-        return {}
-
-    merged = pd.concat(frames, ignore_index=True, sort=False)
-    merged["object_id_key"] = merged["object_id"].map(normalize_object_id)
-    merged = merged.drop_duplicates("object_id_key", keep="last")
-    return {
-        row["object_id_key"]: row.drop(labels=["object_id_key"]).to_dict()
-        for _, row in merged.iterrows()
-    }
+        for index, row in catalog.frame.iterrows():
+            object_id = normalize_object_id(row["object_id"])
+            if object_id in rows:
+                raise ValueError(f"Duplicate spectra object_id {object_id!r} across HDF5 inputs.")
+            value = row.to_dict()
+            valid_count = int(catalog.valid_count[index])
+            value["psf_agn_fraction_draws"] = np.asarray(
+                catalog.fraction_draws[index, :valid_count], dtype=np.float32
+            )
+            value["psf_agn_fraction_valid_count"] = valid_count
+            value["psf_agn_fraction_bands"] = catalog.bands
+            rows[object_id] = value
+    return rows
 
 
 def get_bandpass_agn_fraction(source: Mapping[str, object], band: str) -> tuple[float, float, str | None]:
@@ -279,13 +278,13 @@ def apply_constant_flux_correction_to_object(
 def apply_constant_flux_correction_to_objects(
     objs,
     *,
-    spectra_fit_csvs,
+    spectra_fit_h5s,
     progress_bar: bool = False,
     reference_stat: str = "mean",
 ):
     """Apply spectra-informed constant-flux subtraction to a list of objects."""
 
-    spectra_rows = load_spectra_psf_fractions(spectra_fit_csvs)
+    spectra_rows = load_spectra_psf_fractions(spectra_fit_h5s)
     corrected_objs = []
     summary = {
         "n_objects": len(objs),
@@ -385,6 +384,34 @@ def apply_constant_flux_correction_to_objects(
     return corrected_objs, summary
 
 
+def attach_spectra_psf_fractions_to_objects(
+    objs,
+    *,
+    spectra_fit_h5s,
+):
+    """Attach scalar fractions and correlated draws without altering photometry."""
+
+    spectra_rows = load_spectra_psf_fractions(spectra_fit_h5s)
+    attached = []
+    missing = []
+    for obj in objs:
+        object_id = normalize_object_id(obj.get("object_id"))
+        spectra_row = spectra_rows.get(object_id)
+        if spectra_row is None:
+            missing.append(object_id)
+            continue
+        merged = dict(obj)
+        merged.update(spectra_row)
+        attached.append(merged)
+    if missing:
+        preview = ", ".join(missing[:10])
+        raise ValueError(
+            f"No spectral PSF-fraction draws for {len(missing)} light-curve "
+            f"object(s): {preview}"
+        )
+    return attached
+
+
 def print_constant_flux_correction_summary(summary):
     """Print a concise correction summary."""
 
@@ -419,7 +446,12 @@ def main():
     parser = argparse.ArgumentParser(
         description="Apply spectra-driven constant-flux subtraction to PSF light curves.",
     )
-    parser.add_argument("--spectra_fit_csv", nargs="+", required=True, help="Spectra-fit CSV file(s).")
+    parser.add_argument(
+        "--spectra_fit_h5",
+        nargs="+",
+        required=True,
+        help="Spectra-fit HDF5 file(s).",
+    )
     parser.add_argument("--filter_object_id", nargs="+", default=None, help="Optional object IDs to inspect.")
     parser.add_argument("--N", type=int, default=None, help="Optional object count limit.")
     parser.add_argument("--skip", type=int, default=None, help="Optional number of objects to skip.")
@@ -445,7 +477,7 @@ def main():
     objs = populate_sdss_fields(objs, progress_bar=args.progress)
     corrected, summary = apply_constant_flux_correction_to_objects(
         objs,
-        spectra_fit_csvs=args.spectra_fit_csv,
+        spectra_fit_h5s=args.spectra_fit_h5,
         progress_bar=args.progress,
         reference_stat=args.reference_stat,
     )

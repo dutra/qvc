@@ -66,7 +66,7 @@ def test_plot_parameter_residual_diagnostics_writes_ranked_summary_and_atlas(
     driver = rankings.set_index("parameter").loc["driver"]
     noise = rankings.set_index("parameter").loc["noise"]
 
-    assert driver["source"] == "spectra_fit_csv"
+    assert driver["source"] == "spectra_fit_h5"
     assert driver["redshift_correlation_attenuation"] > noise[
         "redshift_correlation_attenuation"
     ]
@@ -158,7 +158,7 @@ def test_plot_redshift_wiggle_diagnostics_finds_jump_and_driver(
     rankings = pd.read_csv(outputs["rankings_csv"]).set_index("parameter")
     driver_row = rankings.loc["jump_driver"]
     noise_row = rankings.loc["noise"]
-    assert driver_row["source"] == "spectra_fit_csv"
+    assert driver_row["source"] == "spectra_fit_h5"
     assert driver_row["cv_wiggle_rms_reduction"] > noise_row[
         "cv_wiggle_rms_reduction"
     ]

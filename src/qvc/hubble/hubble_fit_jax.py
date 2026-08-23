@@ -1361,7 +1361,7 @@ def main():
     parser.add_argument("agn_data_filepath", type=str, help="Path to AGN data file")
     parser.add_argument("--cosmo_model", type=str, default="Flatw0waCDM", choices=["FlatLambdaCDM", "FlatwCDM", "Flatw0waCDM", "FlatwpwaCDM"])
     parser.add_argument("--speed", type=str, choices=SPEED_CHOICES, default="production")
-    parser.add_argument("--spectra_fit_csv", type=str, nargs="+", required=True)
+    parser.add_argument("--spectra_fit_h5", type=str, nargs="+", required=True)
     parser.add_argument(
         "--magnitude-convention",
         type=str,
@@ -1423,7 +1423,7 @@ def main():
     df_agn, df_agn_all = load_agn_data(
         args.agn_data_filepath,
         apply_cut=not args.no_cuts,
-        spectra_fit_csv=args.spectra_fit_csv,
+        spectra_fit_h5=args.spectra_fit_h5,
         magnitude_convention=args.magnitude_convention,
         completeness_magnitude=args.completeness_magnitude,
         correct_sigma_uv_host=args.correct_sigma_uv_host,

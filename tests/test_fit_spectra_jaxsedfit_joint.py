@@ -14,11 +14,13 @@ from qvc.spectra.fit_spectra_jaxsedfit_joint import (
     add_qvc_psf_photometry,
     empty_psf_agn_fraction_summary,
     estimate_m2500_dereddened,
+    extract_compact_psf_agn_fraction_draws,
     load_saved_sed_photometry,
     save_spectrum_figure,
     summarize_joint_chi2,
     summarize_psf_agn_fractions,
     verify_new_posterior_bundle,
+    write_joint_fit_results_hdf5,
 )
 
 
@@ -331,6 +333,52 @@ def _component_prediction(filter_names):
     return prediction
 
 
+def test_compact_psf_fraction_draws_preserve_joint_rows_and_pad_to_64():
+    filter_names = [f"{band}_sdss" for band in "ugriz"]
+    total = np.ones((4, 5), dtype=float)
+    fractions = np.arange(20, dtype=float).reshape(4, 5) / 100.0 + 0.5
+    prediction = {
+        "pred_fluxes": total,
+        "variable_agn_fluxes": fractions,
+    }
+
+    compact, valid_count = extract_compact_psf_agn_fraction_draws(
+        prediction,
+        filter_names,
+        object_id="1452887",
+        seed=3,
+    )
+
+    assert compact.shape == (64, 5)
+    assert compact.dtype == np.float32
+    assert valid_count == 4
+    np.testing.assert_allclose(compact[:4], fractions.astype(np.float32))
+    assert np.all(np.isnan(compact[4:]))
+
+
+def test_joint_fit_result_writer_moves_private_draw_payload_out_of_catalog(tmp_path):
+    path = tmp_path / "chunk.h5"
+    draws = np.full((64, 5), np.nan, dtype=np.float32)
+    draws[:2] = 0.75
+    rows = [
+        {
+            "object_id": "1452887",
+            "fit_ok": True,
+            "fit_backend": "jaxsedfit_joint",
+            "f_AGN_psf_g": 0.75,
+            "_psf_agn_fraction_draws": draws,
+            "_psf_agn_fraction_valid_count": 2,
+        }
+    ]
+
+    write_joint_fit_results_hdf5(path, rows)
+
+    with h5py.File(path, "r") as handle:
+        assert "_psf_agn_fraction_draws" not in handle["catalog"]
+        assert handle["psf_agn_fraction_draws/values"].shape == (1, 64, 5)
+        assert handle["psf_agn_fraction_draws/valid_count"][0] == 2
+
+
 def _hybrid_args(tmp_path):
     return SimpleNamespace(
         resume=str(tmp_path / "old"),
@@ -339,6 +387,7 @@ def _hybrid_args(tmp_path):
         fig_dir=str(tmp_path / "figs"),
         save_fig=True,
         save_jaxsedfit_samples=True,
+        seed=3,
         verbose=False,
     )
 
@@ -380,7 +429,7 @@ def test_parse_args_resume_keeps_current_inputs_and_separate_destinations(tmp_pa
         [
             "--mode",
             "fit",
-            str(tmp_path / "new" / "chunk.csv"),
+            str(tmp_path / "new" / "chunk.h5"),
             "--sed-photometry-path",
             str(tmp_path / "current_photometry.csv"),
             "--filter_object_id",

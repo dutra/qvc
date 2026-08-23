@@ -105,7 +105,16 @@ from qvc.light_curve.multiband_model_dho_blr_erlang_drw import (
 )
 from qvc.light_curve.psf_constant_flux_correction import (
     apply_constant_flux_correction_to_objects,
+    attach_spectra_psf_fractions_to_objects,
     print_constant_flux_correction_summary,
+)
+from qvc.light_curve.fraction_marginalization import (
+    empirical_logmeanexp,
+    fit_logit_normal,
+    responsibility_resample_fractions,
+    scale_prediction_samples_by_fraction,
+    scale_variable_relflux_amplitudes,
+    select_fraction_draws_for_bands,
 )
 from qvc.light_curve.variability_metrics import compute_variability_metrics_for_cleaned_lc
 
@@ -4249,7 +4258,7 @@ def add_model_prediction_params(samples, lam_rf, *, model_variant=None, lam_lya_
             "lambda_center_rf",
         )
     ):
-        return out
+        return scale_prediction_samples_by_fraction(out)
     if use_relflux:
         explicit = build_explicit_model_params_relflux(
             out,
@@ -4312,7 +4321,7 @@ def add_model_prediction_params(samples, lam_rf, *, model_variant=None, lam_lya_
         if "log_lag_blr2" in explicit:
             out["log_lag_blr2"] = np.asarray(explicit["log_lag_blr2"])
         out["lambda_center_rf"] = np.asarray(explicit["lambda_center_rf"])
-        return out
+        return scale_prediction_samples_by_fraction(out)
 
     if all(
         key in out
@@ -4572,6 +4581,7 @@ def build_single_object_model_mag_flux_linearized(
     enforce_positive_flux_guard=False,
     tau_prior="legacy",
     eta_tau_prior="legacy",
+    psf_fraction_mode=None,
 ):
     """Return the relative-flux quasi-separable model for one object."""
 
@@ -4602,6 +4612,19 @@ def build_single_object_model_mag_flux_linearized(
     else:
         log_igm_transmission_band = jnp.zeros(B, dtype=lam_rf.dtype)
     baseline_flux_by_band = reference_flux_from_mean_magnitudes(obj_dict["mags_means"])
+    fraction_draws = None
+    logit_normal_mean = None
+    logit_normal_scale_tril = None
+    if psf_fraction_mode is not None:
+        if psf_fraction_mode not in {"empirical", "logit-normal"}:
+            raise ValueError(
+                "Flux-likelihood PSF fraction mode must be 'empirical' or 'logit-normal'."
+            )
+        fraction_draws = select_fraction_draws_for_bands(obj_dict, bands)
+        if psf_fraction_mode == "logit-normal":
+            logit_normal_mean, _, logit_normal_scale_tril = fit_logit_normal(
+                fraction_draws
+            )
     if "y_relflux_fit" in obj_dict and "yerr_relflux_fit" in obj_dict:
         y_relflux = jnp.asarray(obj_dict["y_relflux_fit"], dtype=float)
         yerr_relflux = jnp.asarray(obj_dict["yerr_relflux_fit"], dtype=float)
@@ -4879,7 +4902,36 @@ def build_single_object_model_mag_flux_linearized(
                 "negative_total_flux_probability_max",
                 jnp.max(negative_flux_probability),
             )
-        numpyro.factor("loglike", m.log_prob(params))
+        if psf_fraction_mode == "empirical":
+            component_loglikes = jax.vmap(
+                lambda fractions: m.log_prob(
+                    scale_variable_relflux_amplitudes(params, fractions)
+                )
+            )(jnp.asarray(fraction_draws))
+            responsibilities = jax.nn.softmax(component_loglikes)
+            numpyro.deterministic(
+                "psf_agn_fraction_responsibility",
+                responsibilities,
+            )
+            numpyro.factor("loglike", empirical_logmeanexp(component_loglikes))
+        elif psf_fraction_mode == "logit-normal":
+            fraction_logits = numpyro.sample(
+                "psf_agn_fraction_logit",
+                dist.MultivariateNormal(
+                    loc=jnp.asarray(logit_normal_mean),
+                    scale_tril=jnp.asarray(logit_normal_scale_tril),
+                ),
+            )
+            fractions = numpyro.deterministic(
+                "psf_agn_fraction",
+                jax.nn.sigmoid(fraction_logits),
+            )
+            numpyro.factor(
+                "loglike",
+                m.log_prob(scale_variable_relflux_amplitudes(params, fractions)),
+            )
+        else:
+            numpyro.factor("loglike", m.log_prob(params))
 
     return model
 
@@ -5140,6 +5192,7 @@ def run_iterated_mag_flux_linearized_inference(
     enforce_positive_flux_guard=False,
     tau_prior="legacy",
     eta_tau_prior="legacy",
+    psf_fraction_mode=None,
 ):
     """Iteratively refit the relative-flux QS model using local pseudo-data.
 
@@ -5193,6 +5246,7 @@ def run_iterated_mag_flux_linearized_inference(
         enforce_positive_flux_guard=enforce_positive_flux_guard,
         tau_prior=tau_prior,
         eta_tau_prior=eta_tau_prior,
+        psf_fraction_mode=psf_fraction_mode,
     )
 
     for iter_idx in range(int(refinement_iters)):
@@ -5272,9 +5326,28 @@ def run_iterated_mag_flux_linearized_inference(
             diagnostics[f"flux_linearized_iter{iter_idx + 1}_elapsed_sec"] = iter_diag[
                 "elapsed_sec"
             ]
+            prediction_samples = dict(samples_flat)
+            if (
+                psf_fraction_mode == "empirical"
+                and "psf_agn_fraction_responsibility" in prediction_samples
+            ):
+                responsibilities = np.asarray(
+                    prediction_samples.pop("psf_agn_fraction_responsibility"),
+                    dtype=float,
+                )
+                fraction_draws = select_fraction_draws_for_bands(
+                    obj_dict, obj_dict["bands"]
+                )
+                prediction_samples["psf_agn_fraction"] = (
+                    responsibility_resample_fractions(
+                        fraction_draws,
+                        responsibilities,
+                        seed=iter_idx,
+                    )
+                )
             prediction_params = _posterior_median_params(
                 add_model_prediction_params(
-                    samples_flat,
+                    prediction_samples,
                     lam_rf,
                     model_variant="mag_flux_linearized_erlang",
                     lam_lya_rf=lam_lya_rf,
@@ -5284,8 +5357,26 @@ def run_iterated_mag_flux_linearized_inference(
             diagnostics[f"flux_linearized_iter{iter_idx + 1}_accept_prob"] = np.nan
             diagnostics[f"flux_linearized_iter{iter_idx + 1}_num_divergences"] = 0
             diagnostics[f"flux_linearized_iter{iter_idx + 1}_elapsed_sec"] = 0.0
+            prediction_samples = _model_params_at_values(
+                iter_model, inference_key, init_values
+            )
+            if (
+                psf_fraction_mode == "empirical"
+                and "psf_agn_fraction_responsibility" in prediction_samples
+            ):
+                responsibilities = np.asarray(
+                    prediction_samples.pop("psf_agn_fraction_responsibility"),
+                    dtype=float,
+                )
+                fraction_draws = select_fraction_draws_for_bands(
+                    obj_dict, obj_dict["bands"]
+                )
+                prediction_samples["psf_agn_fraction"] = np.sum(
+                    responsibilities[:, None] * fraction_draws,
+                    axis=0,
+                )
             prediction_params = add_model_prediction_params(
-                _model_params_at_values(iter_model, inference_key, init_values),
+                prediction_samples,
                 lam_rf,
                 model_variant="mag_flux_linearized_erlang",
                 lam_lya_rf=lam_lya_rf,
@@ -5580,10 +5671,20 @@ def main():
         ),
     )
     parser.add_argument(
-        "--spectra_fit_csv",
+        "--spectra_fit_h5",
         nargs="+",
         default=None,
-        help="Spectra-fit CSV file(s) used to derive per-band PSF PL/total fractions.",
+        help="Spectra-fit HDF5 file(s) containing joint per-band AGN-fraction draws.",
+    )
+    parser.add_argument(
+        "--psf-fraction-mode",
+        choices=("empirical", "logit-normal", "median"),
+        default="empirical",
+        help=(
+            "Treatment of spectra-derived PSF AGN fractions: marginalize over "
+            "the empirical joint draws (default), fit a correlated logit-normal "
+            "latent prior, or reproduce the historical median subtraction."
+        ),
     )
     parser.add_argument(
         "--subtract_psf_constant_flux",
@@ -5626,14 +5727,25 @@ def main():
         print(f"After restframe cut, {len(objs)} objects remain.")
 
     if args.subtract_psf_constant_flux:
-        if not args.spectra_fit_csv:
-            raise ValueError("--subtract_psf_constant_flux requires --spectra_fit_csv.")
-        objs, correction_summary = apply_constant_flux_correction_to_objects(
-            objs,
-            spectra_fit_csvs=args.spectra_fit_csv,
-            progress_bar=args.progress,
-        )
-        print_constant_flux_correction_summary(correction_summary)
+        if not args.spectra_fit_h5:
+            raise ValueError("--subtract_psf_constant_flux requires --spectra_fit_h5.")
+        if args.psf_fraction_mode != "median" and args.model_variant != "mag_flux_linearized_erlang":
+            raise ValueError(
+                "Empirical and logit-normal PSF fractions require "
+                "--model_variant mag_flux_linearized_erlang."
+            )
+        if args.psf_fraction_mode == "median":
+            objs, correction_summary = apply_constant_flux_correction_to_objects(
+                objs,
+                spectra_fit_h5s=args.spectra_fit_h5,
+                progress_bar=args.progress,
+            )
+            print_constant_flux_correction_summary(correction_summary)
+        else:
+            objs = attach_spectra_psf_fractions_to_objects(
+                objs,
+                spectra_fit_h5s=args.spectra_fit_h5,
+            )
 
     if args.inject_random_fake_etas:
         rng = np.random.default_rng()
@@ -5865,6 +5977,12 @@ def main():
                             enforce_positive_flux_guard=args.enforce_positive_flux_guard,
                             tau_prior=args.tau_prior,
                             eta_tau_prior=args.eta_tau_prior,
+                            psf_fraction_mode=(
+                                args.psf_fraction_mode
+                                if args.subtract_psf_constant_flux
+                                and args.psf_fraction_mode != "median"
+                                else None
+                            ),
                         )
                 elif args.fit_method in ("nuts", "svi+nuts"):
                     if args.fit_method == "svi+nuts":
@@ -5966,6 +6084,24 @@ def main():
                     fit_method=args.fit_method,
                     resumed=args.resume,
                     heading=f"[{oid}] NumPyro posterior summary after final NUTS sampling:",
+                )
+
+            if (
+                args.subtract_psf_constant_flux
+                and args.psf_fraction_mode == "empirical"
+                and "psf_agn_fraction_responsibility" in obj_flat_samples
+            ):
+                fraction_draws = select_fraction_draws_for_bands(obj, bands)
+                responsibilities = np.asarray(
+                    obj_flat_samples.pop("psf_agn_fraction_responsibility"),
+                    dtype=float,
+                )
+                obj_flat_samples["psf_agn_fraction"] = (
+                    responsibility_resample_fractions(
+                        fraction_draws,
+                        responsibilities,
+                        seed=idx,
+                    )
                 )
 
             obj_flat_samples = add_model_prediction_params(
@@ -6198,6 +6334,25 @@ def main():
                     logging.error(traceback.format_exc())
 
             final_result = obj | result | adf_result | drift_result | raw_drift_result | psd_break_result | sf_result | kl_result | loo_residual_result | diagnostics | dict(prefix=prefix, suffix=suffix, model_variant=args.model_variant)
+            final_result["psf_fraction_mode"] = (
+                args.psf_fraction_mode
+                if args.subtract_psf_constant_flux
+                else "none"
+            )
+            final_result["psf_agn_fraction_valid_count"] = int(
+                obj.get("psf_agn_fraction_valid_count", 0)
+            )
+            for band in bands:
+                posterior_key = f"psf_agn_fraction_{band}"
+                posterior_err_key = f"{posterior_key}_err"
+                if args.psf_fraction_mode == "median" and args.subtract_psf_constant_flux:
+                    posterior_value = obj.get(f"f_AGN_psf_{band}", np.nan)
+                    posterior_error = obj.get(f"f_AGN_psf_{band}_err", np.nan)
+                else:
+                    posterior_value = result.get(posterior_key, np.nan)
+                    posterior_error = result.get(posterior_err_key, np.nan)
+                final_result[f"psf_agn_fraction_lc_posterior_{band}"] = posterior_value
+                final_result[f"psf_agn_fraction_lc_posterior_{band}_err"] = posterior_error
             log_sigma_uv = final_result.get("log_sigma_uv")
             log_sigma_uv_err = final_result.get("log_sigma_uv_err")
             log_tau_uv_rf = final_result.get("log_tau_uv_rf")
@@ -6245,8 +6400,8 @@ def main():
         "filter_file": args.filter_file,
         "nearby_light_curve_csv": args.load_nearby_lc_csv,
     }
-    for index, path in enumerate(args.spectra_fit_csv or []):
-        provenance_inputs[f"spectra_fit_csv_{index}"] = path
+    for index, path in enumerate(args.spectra_fit_h5 or []):
+        provenance_inputs[f"spectra_fit_h5_{index}"] = path
     provenance_object_id = (
         str(results[0]["object_id"])
         if len(results) == 1 and "object_id" in results[0]
@@ -6261,7 +6416,14 @@ def main():
     )
     save_quasar_list_hdf5(
         results,
-        ignored_keys=["X", "y", "yerr", "band_idx"],
+        ignored_keys=[
+            "X",
+            "y",
+            "yerr",
+            "band_idx",
+            "psf_agn_fraction_draws",
+            "psf_agn_fraction_bands",
+        ],
         provenance=provenance,
     )
 

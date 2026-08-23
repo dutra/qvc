@@ -25,6 +25,7 @@ from qvc.hubble.hubble_utils import (
     rest_frame_ab_magnitude_to_log_lnu,
     xray_band_integral,
 )
+from qvc.spectra.catalog_hdf5 import write_spectra_catalog_hdf5
 
 
 REFERENCE_LOG_L2500_NU = 30.278006016683868
@@ -64,6 +65,15 @@ def _spectra_row(**updates):
     }
     row.update(updates)
     return row
+
+
+def _write_spectra_h5(path, row):
+    write_spectra_catalog_hdf5(
+        path,
+        pd.DataFrame([row]),
+        np.full((1, 64, 5), np.nan, dtype=np.float32),
+        np.zeros(1, dtype=np.int16),
+    )
 
 
 def test_luminosity_helpers_require_an_explicit_cosmology():
@@ -178,8 +188,8 @@ def test_luminosity_helpers_are_array_compatible_and_preserve_invalid_masks():
 
 
 def test_populate_spectra_fit_does_not_compute_cosmology_dependent_fields(tmp_path):
-    spectra_path = tmp_path / "spectra.csv"
-    pd.DataFrame([_spectra_row()]).to_csv(spectra_path, index=False)
+    spectra_path = tmp_path / "spectra.h5"
+    _write_spectra_h5(spectra_path, _spectra_row())
     source = pd.DataFrame({"object_id": ["agn_1"], "z": [1.0]})
 
     out = populate_spectra_fit(source, [spectra_path])
@@ -193,11 +203,11 @@ def test_populate_spectra_fit_does_not_compute_cosmology_dependent_fields(tmp_pa
 
 
 def test_populate_spectra_fit_requires_intrinsic_magnitude_fields(tmp_path):
-    spectra_path = tmp_path / "spectra_without_intrinsic.csv"
+    spectra_path = tmp_path / "spectra_without_intrinsic.h5"
     row = _spectra_row()
     del row["m_2500_dereddened"]
     del row["m_2500_dereddened_err"]
-    pd.DataFrame([row]).to_csv(spectra_path, index=False)
+    _write_spectra_h5(spectra_path, row)
     source = pd.DataFrame({"object_id": ["agn_1"], "z": [1.0]})
 
     with pytest.raises(

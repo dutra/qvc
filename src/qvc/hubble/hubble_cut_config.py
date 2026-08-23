@@ -1,6 +1,7 @@
 """Default AGN selection-cut configuration for the QVC pipeline."""
 
 from qvc.hubble.cuts import (
+    A_2500_TOTAL_MAX,
     AGN_SCALAR_PARAMETER_CUTS,
     ALPHA_LAMBDA_MAX,
     F_HOST_2500_MAX,
@@ -63,6 +64,8 @@ def build_agn_cuts(
         if column == "m_2500_dereddened":
             column = completeness_columns[completeness_magnitude]
         cuts.append((column, *cut_overrides.get(column, (lower, upper))))
+    if A_2500_TOTAL_MAX is not None:
+        cuts.append(("a_2500_total", None, A_2500_TOTAL_MAX))
     if reddening_ebv_cut is not None:
         cuts.append(("reddening_ebv", None, reddening_ebv_cut))
     return cuts

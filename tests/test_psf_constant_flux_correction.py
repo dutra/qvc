@@ -16,8 +16,10 @@ if str(SRC) not in sys.path:
 from qvc.light_curve.psf_constant_flux_correction import (
     apply_constant_flux_correction_to_object,
     apply_constant_flux_correction_to_objects,
+    load_spectra_psf_fractions,
     subtract_constant_flux_from_band,
 )
+from qvc.spectra.catalog_hdf5 import write_spectra_catalog_hdf5
 
 
 def test_subtract_constant_flux_from_band_makes_curve_fainter_and_more_variable():
@@ -143,15 +145,41 @@ def _make_light_curve_object(object_id, *, include_fraction=False):
     return obj
 
 
-def _write_spectra_csv(tmp_path, rows):
-    csv_path = tmp_path / "spectra_fit.csv"
-    pd.DataFrame(rows).to_csv(csv_path, index=False)
-    return str(csv_path)
+def _write_spectra_h5(tmp_path, rows):
+    h5_path = tmp_path / "spectra_fit.h5"
+    frame = pd.DataFrame(rows)
+    write_spectra_catalog_hdf5(
+        h5_path,
+        frame,
+        np.full((len(frame), 64, 5), np.nan, dtype=np.float32),
+        np.zeros(len(frame), dtype=np.int16),
+    )
+    return str(h5_path)
+
+
+def test_load_spectra_psf_fractions_reads_joint_draws_from_hdf5(tmp_path):
+    path = tmp_path / "spectra_fit.h5"
+    frame = pd.DataFrame(
+        [{"object_id": "123", "f_AGN_psf_g": 0.7, "f_AGN_psf_g_err": 0.05}]
+    )
+    draws = np.full((1, 64, 5), np.nan, dtype=np.float32)
+    draws[0, :2] = [[0.6, 0.7, 0.8, 0.9, 1.0], [0.5, 0.6, 0.7, 0.8, 0.9]]
+    write_spectra_catalog_hdf5(path, frame, draws, np.array([2]))
+
+    result = load_spectra_psf_fractions([path])
+
+    assert result["123"]["f_AGN_psf_g"] == pytest.approx(0.7)
+    assert result["123"]["psf_agn_fraction_valid_count"] == 2
+    np.testing.assert_allclose(
+        result["123"]["psf_agn_fraction_draws"],
+        draws[0, :2],
+    )
+    assert result["123"]["psf_agn_fraction_bands"] == ("u", "g", "r", "i", "z")
 
 
 def test_apply_constant_flux_correction_to_objects_raises_when_spectra_row_missing(tmp_path):
     objs = [_make_light_curve_object("123")]
-    spectra_csv = _write_spectra_csv(
+    spectra_h5 = _write_spectra_h5(
         tmp_path,
         [{"object_id": "999", "f_AGN_psf_g": 0.5}],
     )
@@ -159,13 +187,13 @@ def test_apply_constant_flux_correction_to_objects_raises_when_spectra_row_missi
     with pytest.raises(ValueError, match="Missing spectra rows.*123"):
         apply_constant_flux_correction_to_objects(
             objs,
-            spectra_fit_csvs=[spectra_csv],
+            spectra_fit_h5s=[spectra_h5],
         )
 
 
 def test_apply_constant_flux_correction_to_objects_raises_when_no_band_is_corrected(tmp_path):
     objs = [_make_light_curve_object("123")]
-    spectra_csv = _write_spectra_csv(
+    spectra_h5 = _write_spectra_h5(
         tmp_path,
         [{"object_id": "123", "f_AGN_psf_g": np.nan}],
     )
@@ -173,13 +201,13 @@ def test_apply_constant_flux_correction_to_objects_raises_when_no_band_is_correc
     with pytest.raises(ValueError, match="No valid PSF constant-flux correction band.*123"):
         apply_constant_flux_correction_to_objects(
             objs,
-            spectra_fit_csvs=[spectra_csv],
+            spectra_fit_h5s=[spectra_h5],
         )
 
 
 def test_apply_constant_flux_correction_to_objects_succeeds_when_all_objects_have_a_band(tmp_path):
     objs = [_make_light_curve_object("123"), _make_light_curve_object("456")]
-    spectra_csv = _write_spectra_csv(
+    spectra_h5 = _write_spectra_h5(
         tmp_path,
         [
             {"object_id": "123", "f_AGN_psf_g": 0.5},
@@ -189,7 +217,7 @@ def test_apply_constant_flux_correction_to_objects_succeeds_when_all_objects_hav
 
     corrected_objs, summary = apply_constant_flux_correction_to_objects(
         objs,
-        spectra_fit_csvs=[spectra_csv],
+        spectra_fit_h5s=[spectra_h5],
     )
 
     assert [str(obj["object_id"]) for obj in corrected_objs] == ["123", "456"]
@@ -219,9 +247,9 @@ def test_apply_constant_flux_correction_to_object_does_not_accept_pl_fraction_on
     assert summary["n_missing_fraction_bands"] == 1
 
 
-def test_apply_constant_flux_correction_to_objects_raises_when_csv_has_only_pl_columns(tmp_path):
+def test_apply_constant_flux_correction_to_objects_raises_when_h5_has_only_pl_columns(tmp_path):
     objs = [_make_light_curve_object("123")]
-    spectra_csv = _write_spectra_csv(
+    spectra_h5 = _write_spectra_h5(
         tmp_path,
         [{"object_id": "123", "f_PL_psf_g": 0.5}],
     )
@@ -229,5 +257,5 @@ def test_apply_constant_flux_correction_to_objects_raises_when_csv_has_only_pl_c
     with pytest.raises(ValueError, match="missing required per-band columns 'f_AGN_psf_<band>'"):
         apply_constant_flux_correction_to_objects(
             objs,
-            spectra_fit_csvs=[spectra_csv],
+            spectra_fit_h5s=[spectra_h5],
         )

@@ -1,4 +1,6 @@
 import os
+from ast import literal_eval
+import subprocess
 import sys
 from pathlib import Path
 
@@ -23,9 +25,11 @@ from qvc.hubble.cuts import (  # noqa: E402
     JAXSEDFIT_JOINT_REDUCED_CHI2_MAX,
     LIGHT_CURVE_N_POINTS_COLUMN,
     LIGHT_CURVE_N_POINTS_EXCLUDED_BANDS,
-    MCMC_ESS_MIN,
-    MCMC_RHAT_MAX,
+    LIGHT_CURVE_RHAT_MAX,
+    LOG_TAU_UV_RF_MAX,
+    LOG_TAU_UV_RF_MIN,
     REL_APPARENT_MAG_2500_ERR_MAX,
+    SPECTRAL_RHAT_MAX,
     add_light_curve_point_count_column,
     light_curve_point_count_series,
 )
@@ -38,6 +42,17 @@ from qvc.hubble.hubble_utils import (  # noqa: E402
     _scalar_parameter_cut_mask,
     populate_spectra_fit,
 )
+from qvc.spectra.catalog_hdf5 import write_spectra_catalog_hdf5  # noqa: E402
+
+
+def _write_spectra_h5(path, rows):
+    frame = pd.DataFrame(rows)
+    write_spectra_catalog_hdf5(
+        path,
+        frame,
+        np.full((len(frame), 64, 5), np.nan, dtype=np.float32),
+        np.zeros(len(frame), dtype=np.int16),
+    )
 
 
 def test_build_agn_cuts_contains_only_fiducial_profile():
@@ -54,13 +69,14 @@ def test_build_agn_cuts_contains_only_fiducial_profile():
             COMPLETENESS_MAG_2500_MAX,
         ),
         "joint_reduced_chi2": (None, JAXSEDFIT_JOINT_REDUCED_CHI2_MAX),
-        "m_2500_dereddened_rhat": (None, MCMC_RHAT_MAX),
-        "m_2500_dereddened_ess": (MCMC_ESS_MIN, None),
-        "m_2500_attenuated_model_rhat": (None, MCMC_RHAT_MAX),
-        "m_2500_attenuated_model_ess": (MCMC_ESS_MIN, None),
-        "log_tau_uv_rf_rhat": (None, MCMC_RHAT_MAX),
-        "log_sigma_uv_rhat": (None, MCMC_RHAT_MAX),
+        "m_2500_dereddened_rhat": (None, SPECTRAL_RHAT_MAX),
+        "m_2500_attenuated_model_rhat": (None, SPECTRAL_RHAT_MAX),
+        "log_tau_uv_rf_rhat": (None, LIGHT_CURVE_RHAT_MAX),
+        "log_sigma_uv_rhat": (None, LIGHT_CURVE_RHAT_MAX),
     }
+    assert JAXSEDFIT_JOINT_REDUCED_CHI2_MAX == 1.5
+    assert SPECTRAL_RHAT_MAX == 1.20
+    assert LIGHT_CURVE_RHAT_MAX == 1.10
     assert LIGHT_CURVE_N_POINTS_EXCLUDED_BANDS == ("u",)
 
 
@@ -146,14 +162,12 @@ def test_jaxsedfit_joint_reduced_chi2_cut_requires_finite_values():
     np.testing.assert_array_equal(mask, [True, False, False, False, False])
 
 
-def test_convergence_cuts_allow_missing_but_reject_bad_finite_values():
+def test_rhat_cuts_allow_missing_but_reject_bad_finite_values():
     cases = (
-        ("m_2500_dereddened_rhat", None, MCMC_RHAT_MAX),
-        ("m_2500_dereddened_ess", MCMC_ESS_MIN, None),
-        ("m_2500_attenuated_model_rhat", None, MCMC_RHAT_MAX),
-        ("m_2500_attenuated_model_ess", MCMC_ESS_MIN, None),
-        ("log_tau_uv_rf_rhat", None, MCMC_RHAT_MAX),
-        ("log_sigma_uv_rhat", None, MCMC_RHAT_MAX),
+        ("m_2500_dereddened_rhat", None, SPECTRAL_RHAT_MAX),
+        ("m_2500_attenuated_model_rhat", None, SPECTRAL_RHAT_MAX),
+        ("log_tau_uv_rf_rhat", None, LIGHT_CURVE_RHAT_MAX),
+        ("log_sigma_uv_rhat", None, LIGHT_CURVE_RHAT_MAX),
     )
     assert ALLOW_MISSING_SCALAR_CUT_COLUMNS == {column for column, _, _ in cases}
 
@@ -171,9 +185,141 @@ def test_convergence_cuts_allow_missing_but_reject_bad_finite_values():
         np.testing.assert_array_equal(mask, [True, False, True, False, False])
 
 
+def _rhat_thresholds_from_environment(overrides):
+    env = os.environ.copy()
+    for name in (
+        "QVC_CUT_MCMC_RHAT_MAX",
+        "QVC_CUT_SPECTRAL_RHAT_MAX",
+        "QVC_CUT_LIGHT_CURVE_RHAT_MAX",
+    ):
+        env.pop(name, None)
+    env.update(overrides)
+    script = (
+        "from qvc.hubble.cuts import LIGHT_CURVE_RHAT_MAX, SPECTRAL_RHAT_MAX; "
+        "print(repr((SPECTRAL_RHAT_MAX, LIGHT_CURVE_RHAT_MAX)))"
+    )
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=SRC,
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return literal_eval(completed.stdout.strip())
+
+
+def test_rhat_cut_environment_overrides_are_independent_and_allow_none():
+    assert _rhat_thresholds_from_environment(
+        {
+            "QVC_CUT_SPECTRAL_RHAT_MAX": "1.15",
+            "QVC_CUT_LIGHT_CURVE_RHAT_MAX": "1.07",
+        }
+    ) == (1.15, 1.07)
+    assert _rhat_thresholds_from_environment(
+        {
+            "QVC_CUT_SPECTRAL_RHAT_MAX": "none",
+            "QVC_CUT_LIGHT_CURVE_RHAT_MAX": "none",
+        }
+    ) == (None, None)
+
+
+def test_legacy_shared_rhat_environment_override_is_ignored():
+    assert _rhat_thresholds_from_environment(
+        {"QVC_CUT_MCMC_RHAT_MAX": "1.01"}
+    ) == (1.20, 1.10)
+
+
+def _scalar_thresholds_from_environment(overrides):
+    env = os.environ.copy()
+    names = (
+        "QVC_CUT_LOG_TAU_UV_RF_MIN",
+        "QVC_CUT_LOG_TAU_UV_RF_MAX",
+        "QVC_CUT_APPARENT_MAG_2500_ERR_MAX",
+        "QVC_CUT_COMPLETENESS_MAG_2500_MIN",
+        "QVC_CUT_COMPLETENESS_MAG_2500_MAX",
+    )
+    for name in names:
+        env.pop(name, None)
+    env.update(overrides)
+    script = (
+        "from qvc.hubble.cuts import ("
+        "APPARENT_MAG_2500_ERR_MAX, COMPLETENESS_MAG_2500_MAX, "
+        "COMPLETENESS_MAG_2500_MIN, LOG_TAU_UV_RF_MAX, LOG_TAU_UV_RF_MIN); "
+        "print(repr((LOG_TAU_UV_RF_MIN, LOG_TAU_UV_RF_MAX, "
+        "APPARENT_MAG_2500_ERR_MAX, COMPLETENESS_MAG_2500_MIN, "
+        "COMPLETENESS_MAG_2500_MAX)))"
+    )
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=SRC,
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return literal_eval(completed.stdout.strip())
+
+
+def test_scalar_cut_environment_overrides_allow_reproducible_cut_scans():
+    assert _scalar_thresholds_from_environment(
+        {
+            "QVC_CUT_LOG_TAU_UV_RF_MIN": "1.7",
+            "QVC_CUT_LOG_TAU_UV_RF_MAX": "3.2",
+            "QVC_CUT_APPARENT_MAG_2500_ERR_MAX": "0.35",
+            "QVC_CUT_COMPLETENESS_MAG_2500_MIN": "19.5",
+            "QVC_CUT_COMPLETENESS_MAG_2500_MAX": "23.3",
+        }
+    ) == (1.7, 3.2, 0.35, 19.5, 23.3)
+    assert _scalar_thresholds_from_environment(
+        {
+            "QVC_CUT_LOG_TAU_UV_RF_MIN": "none",
+            "QVC_CUT_LOG_TAU_UV_RF_MAX": "none",
+            "QVC_CUT_APPARENT_MAG_2500_ERR_MAX": "none",
+            "QVC_CUT_COMPLETENESS_MAG_2500_MIN": "none",
+            "QVC_CUT_COMPLETENESS_MAG_2500_MAX": "none",
+        }
+    ) == (None, None, None, None, None)
+
+
+def test_total_a2500_cut_environment_override_is_inclusive():
+    env = os.environ.copy()
+    env["QVC_CUT_A_2500_TOTAL_MAX"] = "0.25"
+    script = (
+        "from qvc.hubble.hubble_cut_config import build_agn_cuts; "
+        "print(repr([cut for cut in build_agn_cuts() "
+        "if cut[0] == 'a_2500_total']))"
+    )
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=SRC,
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert literal_eval(completed.stdout.strip()) == [
+        ("a_2500_total", None, 0.25)
+    ]
+    mask = _scalar_parameter_cut_mask(
+        pd.DataFrame({"a_2500_total": [0.25, np.nextafter(0.25, np.inf)]}),
+        "a_2500_total",
+        None,
+        0.25,
+    )
+    np.testing.assert_array_equal(mask, [True, False])
+
+
+def test_ess_diagnostics_are_not_hard_cuts():
+    active_columns = {column for column, _, _ in build_agn_cuts()}
+    assert "m_2500_dereddened_ess" not in active_columns
+    assert "m_2500_attenuated_model_ess" not in active_columns
+
+
 def test_current_spectra_schema_requires_fracagn_5100_fit(tmp_path):
-    csv_path = tmp_path / "spectra.csv"
-    pd.DataFrame(
+    h5_path = tmp_path / "spectra.h5"
+    _write_spectra_h5(h5_path, pd.DataFrame(
         {
             "object_id": ["obj"],
             "fit_ok": [True],
@@ -184,14 +330,14 @@ def test_current_spectra_schema_requires_fracagn_5100_fit(tmp_path):
             "pl_slope": [-1.5],
             "pl_slope_err": [0.1],
         }
-    ).to_csv(csv_path, index=False)
+    ))
 
     with np.testing.assert_raises_regex(ValueError, "fracAGN_5100_fit"):
-        populate_spectra_fit(pd.DataFrame({"object_id": ["obj"]}), [csv_path])
+        populate_spectra_fit(pd.DataFrame({"object_id": ["obj"]}), [h5_path])
 
 
 def test_current_spectra_schema_accepts_only_joint_sedfit_backend(tmp_path):
-    csv_path = tmp_path / "spectra.csv"
+    h5_path = tmp_path / "spectra.h5"
     row = {
         "object_id": "obj",
         "fit_ok": True,
@@ -205,11 +351,11 @@ def test_current_spectra_schema_accepts_only_joint_sedfit_backend(tmp_path):
         "pl_slope": -1.5,
         "pl_slope_err": 0.1,
     }
-    pd.DataFrame([row]).to_csv(csv_path, index=False)
+    _write_spectra_h5(h5_path, [row])
 
     out = populate_spectra_fit(
         pd.DataFrame({"object_id": ["obj", "not-matched"]}),
-        [csv_path],
+        [h5_path],
     )
 
     assert out["object_id"].tolist() == ["obj"]
@@ -219,15 +365,15 @@ def test_current_spectra_schema_accepts_only_joint_sedfit_backend(tmp_path):
     assert "f_host_2500" not in out.columns
 
     row["fit_backend"] = "jaxqsofit"
-    pd.DataFrame([row]).to_csv(csv_path, index=False)
+    _write_spectra_h5(h5_path, [row])
     with np.testing.assert_raises_regex(ValueError, "unsupported fit_backend"):
-        populate_spectra_fit(pd.DataFrame({"object_id": ["obj"]}), [csv_path])
+        populate_spectra_fit(pd.DataFrame({"object_id": ["obj"]}), [h5_path])
 
 
 def test_populate_spectra_fit_preserves_all_nonconflicting_columns_and_hdf5_wins(
     tmp_path,
 ):
-    csv_path = tmp_path / "spectra.csv"
+    h5_path = tmp_path / "spectra.h5"
     row = {
         "object_id": "obj",
         "fit_ok": True,
@@ -244,7 +390,7 @@ def test_populate_spectra_fit_preserves_all_nonconflicting_columns_and_hdf5_wins
         "new_sed_parameter": 42.5,
         "new_sed_label": "well_constrained",
     }
-    pd.DataFrame([row]).to_csv(csv_path, index=False)
+    _write_spectra_h5(h5_path, [row])
     source = pd.DataFrame(
         {
             "object_id": ["obj"],
@@ -257,7 +403,7 @@ def test_populate_spectra_fit_preserves_all_nonconflicting_columns_and_hdf5_wins
         }
     )
 
-    out = populate_spectra_fit(source, [csv_path])
+    out = populate_spectra_fit(source, [h5_path])
 
     assert out.loc[0, "z"] == 1.5
     assert out.loc[0, "pl_slope"] == -0.8
@@ -277,8 +423,8 @@ def test_populate_spectra_fit_preserves_all_nonconflicting_columns_and_hdf5_wins
 def test_populate_spectra_fit_derives_missing_slope_aliases_without_overwriting(
     tmp_path,
 ):
-    csv_path = tmp_path / "spectra.csv"
-    pd.DataFrame(
+    h5_path = tmp_path / "spectra.h5"
+    _write_spectra_h5(h5_path, pd.DataFrame(
         [
             {
                 "object_id": "obj",
@@ -294,14 +440,88 @@ def test_populate_spectra_fit_derives_missing_slope_aliases_without_overwriting(
                 "pl_slope_err": 0.1,
             }
         ]
-    ).to_csv(csv_path, index=False)
+    ))
 
-    out = populate_spectra_fit(pd.DataFrame({"object_id": ["obj"]}), [csv_path])
+    out = populate_spectra_fit(pd.DataFrame({"object_id": ["obj"]}), [h5_path])
 
     assert out.loc[0, "alpha_lambda"] == -1.5
     assert out.loc[0, "alpha_lambda_err"] == 0.1
     assert out.loc[0, "alpha_nu"] == -0.5
     assert out.loc[0, "alpha_nu_err"] == 0.1
+
+
+def test_populate_spectra_fit_reconstructs_missing_total_a2500(tmp_path):
+    h5_path = tmp_path / "spectra.h5"
+    _write_spectra_h5(h5_path, pd.DataFrame(
+        [
+            {
+                "object_id": "obj",
+                "fit_ok": True,
+                "fit_backend": "jaxsedfit_joint",
+                "fracAGN_5100_fit": 0.8,
+                "fracAGN_5100_fit_err": 0.05,
+                "m_2500_dereddened": 20.0,
+                "m_2500_dereddened_err": 0.1,
+                "m_2500_attenuated_model": 20.25,
+                "m_2500_attenuated_model_err": 0.12,
+                "pl_slope": -1.5,
+                "pl_slope_err": 0.1,
+                "a_2500_galaxy": 0.10,
+                "a_2500_internal": 0.15,
+            },
+            {
+                "object_id": "obj2",
+                "fit_ok": True,
+                "fit_backend": "jaxsedfit_joint",
+                "fracAGN_5100_fit": 0.9,
+                "fracAGN_5100_fit_err": 0.04,
+                "m_2500_dereddened": 20.5,
+                "m_2500_dereddened_err": 0.1,
+                "m_2500_attenuated_model": 20.57,
+                "m_2500_attenuated_model_err": 0.11,
+                "pl_slope": -1.7,
+                "pl_slope_err": 0.08,
+                "a_2500_galaxy": 0.03,
+                "a_2500_internal": 0.04,
+            },
+        ]
+    ))
+
+    out = populate_spectra_fit(
+        pd.DataFrame({"object_id": ["obj", "obj2"]}),
+        [h5_path],
+    )
+
+    np.testing.assert_allclose(out["a_2500_total"], [0.25, 0.07])
+    assert out.attrs["spectra_fit_columns"].count("a_2500_total") == 1
+
+
+def test_populate_spectra_fit_preserves_saved_total_a2500(tmp_path):
+    h5_path = tmp_path / "spectra.h5"
+    _write_spectra_h5(h5_path, pd.DataFrame(
+        [
+            {
+                "object_id": "obj",
+                "fit_ok": True,
+                "fit_backend": "jaxsedfit_joint",
+                "fracAGN_5100_fit": 0.8,
+                "fracAGN_5100_fit_err": 0.05,
+                "m_2500_dereddened": 20.0,
+                "m_2500_dereddened_err": 0.1,
+                "m_2500_attenuated_model": 20.2,
+                "m_2500_attenuated_model_err": 0.12,
+                "pl_slope": -1.5,
+                "pl_slope_err": 0.1,
+                "a_2500_galaxy": 0.10,
+                "a_2500_internal": 0.15,
+                "a_2500_total": 0.22,
+            }
+        ]
+    ))
+
+    out = populate_spectra_fit(pd.DataFrame({"object_id": ["obj"]}), [h5_path])
+
+    assert out.loc[0, "a_2500_total"] == 0.22
 
 
 def test_light_curve_point_count_series_prefers_cleaned_per_band_counts():

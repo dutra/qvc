@@ -8522,7 +8522,7 @@ def plot_parameter_residual_diagnostics(
                 "finite_in_range": int(finite_count),
                 "unique_finite_in_range": int(unique_count),
                 "source": (
-                    "spectra_fit_csv"
+                    "spectra_fit_h5"
                     if parameter in spectra_fit_columns
                     else "hdf5_or_derived"
                 ),
@@ -8607,7 +8607,7 @@ def plot_parameter_residual_diagnostics(
             {
                 "parameter": parameter,
                 "source": (
-                    "spectra_fit_csv"
+                    "spectra_fit_h5"
                     if parameter in spectra_fit_columns
                     else "hdf5_or_derived"
                 ),
@@ -8745,7 +8745,7 @@ def plot_parameter_residual_diagnostics(
         parameter_labels = [
             (
                 f"[SED] {row.parameter} (N={row.finite_in_range})"
-                if row.source == "spectra_fit_csv"
+                if row.source == "spectra_fit_h5"
                 else f"{row.parameter} (N={row.finite_in_range})"
             )
             for row in top.itertuples()
@@ -8900,7 +8900,7 @@ def plot_parameter_residual_diagnostics(
                             padding = 0.04 * (x_hi - x_lo)
                             ax.set_xlim(x_lo - padding, x_hi + padding)
 
-                    source_tag = " [SED]" if row.source == "spectra_fit_csv" else ""
+                    source_tag = " [SED]" if row.source == "spectra_fit_h5" else ""
                     ax.set_title(f"{row.parameter}{source_tag}", fontsize=10)
                     ax.set_xlabel(row.parameter, fontsize=9)
                     ax.set_ylabel("Debiased Hubble residual (mag)", fontsize=9)
@@ -9363,7 +9363,7 @@ def plot_redshift_wiggle_diagnostics(
             {
                 "parameter": parameter,
                 "source": (
-                    "spectra_fit_csv"
+                    "spectra_fit_h5"
                     if parameter in spectra_fit_columns
                     else "hdf5_or_derived"
                 ),
@@ -9593,7 +9593,7 @@ def plot_redshift_wiggle_diagnostics(
                     coverage_ax.tick_params(labelsize=5, length=1)
                     coverage_ax.set_ylabel("cov", fontsize=5, labelpad=0)
                     ax.axhline(0, color="black", lw=0.7, alpha=0.6)
-                    source = " [SED]" if row.source == "spectra_fit_csv" else ""
+                    source = " [SED]" if row.source == "spectra_fit_h5" else ""
                     reliability = "reliable" if row.reliable_redshift_coverage else "LOW COVERAGE"
                     ax.set_title(
                         f"{row.parameter}{source}\n"

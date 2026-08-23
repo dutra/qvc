@@ -27,17 +27,24 @@ def _cut_env_float(name, default):
     except ValueError as exc:
         raise ValueError(f"{name} must be a floating-point value or 'none', got {value!r}") from exc
 
-LOG_TAU_UV_RF_MIN = 1.5
-LOG_TAU_UV_RF_MAX = 4.0
+LOG_TAU_UV_RF_MIN = _cut_env_float("QVC_CUT_LOG_TAU_UV_RF_MIN", 1.5)
+LOG_TAU_UV_RF_MAX = _cut_env_float("QVC_CUT_LOG_TAU_UV_RF_MAX", 4.0)
 FRAC_AGN_5100_MIN = None
-APPARENT_MAG_2500_ERR_MAX = 1.0
+APPARENT_MAG_2500_ERR_MAX = _cut_env_float(
+    "QVC_CUT_APPARENT_MAG_2500_ERR_MAX", 1.0
+)
 
 # JAXSEDFit goodness-of-fit and posterior-convergence diagnostics.
 JAXSEDFIT_JOINT_REDUCED_CHI2_MAX = _cut_env_float(
-    "QVC_CUT_JAXSEDFIT_JOINT_REDUCED_CHI2_MAX", 1.2
+    "QVC_CUT_JAXSEDFIT_JOINT_REDUCED_CHI2_MAX", 1.5
 )
-MCMC_RHAT_MAX = _cut_env_float("QVC_CUT_MCMC_RHAT_MAX", 1.05)
-MCMC_ESS_MIN = _cut_env_float("QVC_CUT_MCMC_ESS_MIN", 50.0)
+A_2500_TOTAL_MAX = _cut_env_float("QVC_CUT_A_2500_TOTAL_MAX", None)
+SPECTRAL_RHAT_MAX = _cut_env_float("QVC_CUT_SPECTRAL_RHAT_MAX", 1.20)
+LIGHT_CURVE_RHAT_MAX = _cut_env_float(
+    "QVC_CUT_LIGHT_CURVE_RHAT_MAX", 1.10
+)
+# ESS is not used as a hard Hubble-sample selection criterion. The spectral
+# catalog persists R-hat only.
 
 # The completeness map is tabulated at histogram-bin centers, but the selected
 # sample occupies the full histogram interval.  The likelihood extends the
@@ -110,12 +117,10 @@ AGN_SCALAR_PARAMETER_CUTS = (
         COMPLETENESS_MAG_2500_MAX,
     ),
     ("joint_reduced_chi2", None, JAXSEDFIT_JOINT_REDUCED_CHI2_MAX),
-    ("m_2500_dereddened_rhat", None, MCMC_RHAT_MAX),
-    ("m_2500_dereddened_ess", MCMC_ESS_MIN, None),
-    ("m_2500_attenuated_model_rhat", None, MCMC_RHAT_MAX),
-    ("m_2500_attenuated_model_ess", MCMC_ESS_MIN, None),
-    ("log_tau_uv_rf_rhat", None, MCMC_RHAT_MAX),
-    ("log_sigma_uv_rhat", None, MCMC_RHAT_MAX),
+    ("m_2500_dereddened_rhat", None, SPECTRAL_RHAT_MAX),
+    ("m_2500_attenuated_model_rhat", None, SPECTRAL_RHAT_MAX),
+    ("log_tau_uv_rf_rhat", None, LIGHT_CURVE_RHAT_MAX),
+    ("log_sigma_uv_rhat", None, LIGHT_CURVE_RHAT_MAX),
 )
 
 # SVI fits do not define chain-based R-hat/ESS diagnostics.  Missing values in
@@ -124,9 +129,7 @@ AGN_SCALAR_PARAMETER_CUTS = (
 ALLOW_MISSING_SCALAR_CUT_COLUMNS = frozenset(
     {
         "m_2500_dereddened_rhat",
-        "m_2500_dereddened_ess",
         "m_2500_attenuated_model_rhat",
-        "m_2500_attenuated_model_ess",
         "log_tau_uv_rf_rhat",
         "log_sigma_uv_rhat",
     }
