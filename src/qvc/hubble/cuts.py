@@ -39,19 +39,22 @@ JAXSEDFIT_JOINT_REDUCED_CHI2_MAX = _cut_env_float(
 MCMC_RHAT_MAX = _cut_env_float("QVC_CUT_MCMC_RHAT_MAX", 1.05)
 MCMC_ESS_MIN = _cut_env_float("QVC_CUT_MCMC_ESS_MIN", 50.0)
 
-# The 2D completeness model is evaluated at histogram-bin centers. Keep the
-# fiducial magnitude support tied to that grid.
+# The completeness map is tabulated at histogram-bin centers, but the selected
+# sample occupies the full histogram interval.  The likelihood extends the
+# first and last bin values from their centers to these hard-cut edges.
 COMPLETENESS_MAG_EDGE_MIN = 18.5
 COMPLETENESS_MAG_EDGE_MAX = 24.0
 COMPLETENESS_N_MAG_BINS = 30
 COMPLETENESS_MAG_BIN_WIDTH = (
     COMPLETENESS_MAG_EDGE_MAX - COMPLETENESS_MAG_EDGE_MIN
 ) / COMPLETENESS_N_MAG_BINS
-COMPLETENESS_MAG_2500_MIN = (
-    COMPLETENESS_MAG_EDGE_MIN + 0.5 * COMPLETENESS_MAG_BIN_WIDTH
+_DEFAULT_COMPLETENESS_MAG_2500_MIN = COMPLETENESS_MAG_EDGE_MIN
+_DEFAULT_COMPLETENESS_MAG_2500_MAX = COMPLETENESS_MAG_EDGE_MAX
+COMPLETENESS_MAG_2500_MIN = _cut_env_float(
+    "QVC_CUT_COMPLETENESS_MAG_2500_MIN", _DEFAULT_COMPLETENESS_MAG_2500_MIN
 )
-COMPLETENESS_MAG_2500_MAX = (
-    COMPLETENESS_MAG_EDGE_MAX - 0.5 * COMPLETENESS_MAG_BIN_WIDTH
+COMPLETENESS_MAG_2500_MAX = _cut_env_float(
+    "QVC_CUT_COMPLETENESS_MAG_2500_MAX", _DEFAULT_COMPLETENESS_MAG_2500_MAX
 )
 
 LIGHT_CURVE_N_POINTS_COLUMN = "light_curve_n_points"

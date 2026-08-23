@@ -737,6 +737,66 @@ def test_log_likelihood_finite_on_fake_lcdm_data(fake_data):
     assert blob.shape == (3, len(df_agn))
 
 
+def test_agn_selection_prediction_reproduces_likelihood_correction(fake_data):
+    df_agn, df_pantheon = fake_data
+    priors, model_labels, _ = hubble_model.get_model_params(
+        "FlatLambdaCDM",
+        only_sna=False,
+    )
+    theta = np.array(
+        [(priors[key][0] + priors[key][1]) / 2.0 for key in model_labels],
+        dtype=float,
+    )
+
+    class SmoothCompleteness:
+        mode = "2d"
+
+        def __call__(self, magnitude, redshift):
+            magnitude, redshift = np.broadcast_arrays(
+                np.asarray(magnitude, dtype=float),
+                np.asarray(redshift, dtype=float),
+            )
+            return 1.0 / (1.0 + np.exp((magnitude - 22.0) / 0.25))
+
+    completeness_params = (SmoothCompleteness(), np.linspace(18.0, 24.5, 501))
+    pivot_context = _agn_pivot_context(df_agn)
+    prediction = hubble_likelihood.agn_selection_prediction(
+        theta,
+        agn_data=df_agn,
+        cosmo_model="FlatLambdaCDM",
+        z_pivot_agn=hubble_fit.z_pivot_agn,
+        agn_pivot_context=pivot_context,
+    )
+    _, expected_blob = hubble_likelihood.completeness_loglike(
+        m_obs=prediction["selection_magnitude"],
+        m_obs_err=prediction["selection_magnitude_error"],
+        m_model=prediction["selection_model_magnitude"],
+        mu_err=prediction["selection_total_error"],
+        z=df_agn["z"].to_numpy(dtype=float),
+        completeness_model=completeness_params[0],
+        m_grid=completeness_params[1],
+        magnitude_support=(completeness_params[1][0], completeness_params[1][-1]),
+    )
+    _, likelihood_blob = hubble_likelihood.log_likelihood(
+        theta,
+        agn_data=df_agn,
+        pantheon_data=df_pantheon,
+        _sna_L=None,
+        _sna_Lower=True,
+        _sna_LogdetCov=None,
+        cosmo_model="FlatLambdaCDM",
+        completeness_params=completeness_params,
+        z_pivot_agn=hubble_fit.z_pivot_agn,
+        agn_pivot_context=pivot_context,
+        agn_calibrators_data=None,
+        only_sna=False,
+        use_full_cov=False,
+    )
+
+    np.testing.assert_allclose(likelihood_blob, expected_blob)
+    assert np.all(prediction["selection_total_error"] > 0.0)
+
+
 def test_log_likelihood_only_agn_skips_pantheon_and_sn_parameter(fake_data):
     df_agn, _ = fake_data
     priors, model_labels, _ = hubble_model.get_model_params("FlatLambdaCDM", only_agn=True)

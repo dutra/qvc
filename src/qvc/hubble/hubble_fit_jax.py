@@ -80,7 +80,11 @@ from qvc.hubble.hubble_fit import (
     z_pivot_agn,
     z_pivot_sna,
 )
-from qvc.hubble.hubble_likelihood import log_likelihood
+from qvc.hubble.hubble_likelihood import (
+    _magnitude_integration_grid,
+    _validate_observed_magnitude_support,
+    log_likelihood,
+)
 from qvc.hubble.hubble_model import (
     AgnPivotContext,
     agn_model_req_errs,
@@ -244,13 +248,37 @@ def _sigma_mu_from_z_err_jax(
     return jnp.where(jnp.isfinite(z_err) & (z_err > 0.0), sigma_mu, 0.0)
 
 
-def _prepare_completeness_for_jax(completeness_params):
+def _prepare_completeness_for_jax(
+    completeness_params,
+    *,
+    selection_magnitude=None,
+):
     if completeness_params is None:
         return None
     model = completeness_params[0]
+    magnitude_grid = np.asarray(completeness_params[1], dtype=float)
+    magnitude_support = getattr(
+        model,
+        "magnitude_support",
+        (float(magnitude_grid[0]), float(magnitude_grid[-1])),
+    )
+    integration_mag_grid = _magnitude_integration_grid(
+        magnitude_grid,
+        magnitude_support,
+    )
+    if selection_magnitude is not None:
+        _validate_observed_magnitude_support(
+            selection_magnitude,
+            magnitude_support,
+        )
+    support_payload = {
+        "magnitude_support": jnp.asarray(magnitude_support),
+        "integration_mag_grid": jnp.asarray(integration_mag_grid),
+    }
     if isinstance(model, Completeness3D):
         cube = jnp.asarray(model._interp.values)
         return {
+            **support_payload,
             "mode": "3d_fhost",
             "mag_centers": jnp.asarray(model.mag_centers),
             "z_centers": jnp.asarray(model.z_centers),
@@ -261,6 +289,7 @@ def _prepare_completeness_for_jax(completeness_params):
     if isinstance(model, Completeness4D):
         cube = jnp.asarray(model._interp.values)
         return {
+            **support_payload,
             "mode": "4d_fhost_alpha",
             "mag_centers": jnp.asarray(model.mag_centers),
             "z_centers": jnp.asarray(model.z_centers),
@@ -272,6 +301,7 @@ def _prepare_completeness_for_jax(completeness_params):
     if isinstance(model, Completeness2D):
         cmap = jnp.asarray(model._interp.values)
         return {
+            **support_payload,
             "mode": "2d",
             "mag_centers": jnp.asarray(model.mag_centers),
             "z_centers": jnp.asarray(model.z_centers),
@@ -287,7 +317,11 @@ def _interp_regular_2d(x, y, x_grid, y_grid, values):
     ux = (x - x_grid[0]) / dx
     uy = (y - y_grid[0]) / dy
     # Magnitude remains bounded; redshift extrapolates from the outermost cell.
-    valid = (ux >= 0.0) & (ux <= (x_grid.shape[0] - 1)) & jnp.isfinite(uy)
+    valid = (
+        (x >= x_grid[0])
+        & (x <= x_grid[-1])
+        & jnp.isfinite(uy)
+    )
     ix = jnp.clip(jnp.floor(ux).astype(jnp.int32), 0, x_grid.shape[0] - 2)
     iy = jnp.clip(jnp.floor(uy).astype(jnp.int32), 0, y_grid.shape[0] - 2)
     tx = jnp.clip(ux - ix, 0.0, 1.0)
@@ -313,7 +347,7 @@ def _interp_regular_3d(x, y, z, x_grid, y_grid, z_grid, values):
     uy = (y - y_grid[0]) / dy
     uz = (z - z_grid[0]) / dz
     valid = (
-        (ux >= 0.0) & (ux <= (x_grid.shape[0] - 1))
+        (x >= x_grid[0]) & (x <= x_grid[-1])
         & jnp.isfinite(uy)
         & (uz >= 0.0) & (uz <= (z_grid.shape[0] - 1))
     )
@@ -355,7 +389,7 @@ def _interp_regular_4d(x, y, z, w, x_grid, y_grid, z_grid, w_grid, values):
     uz = (z - z_grid[0]) / dz
     uw = (w - w_grid[0]) / dw
     valid = (
-        (ux >= 0.0) & (ux <= (x_grid.shape[0] - 1))
+        (x >= x_grid[0]) & (x <= x_grid[-1])
         & jnp.isfinite(uy)
         & (uz >= 0.0) & (uz <= (z_grid.shape[0] - 1))
         & (uw >= 0.0) & (uw <= (w_grid.shape[0] - 1))
@@ -388,12 +422,17 @@ def _interp_regular_4d(x, y, z, w, x_grid, y_grid, z_grid, w_grid, values):
 def _completeness_loglike_jax(m_model, mu_err, z, completeness, f_host_2500_psf, alpha_lambda):
     if completeness is None:
         return 0.0
-    m_grid = completeness["mag_centers"]
+    m_grid = completeness.get("integration_mag_grid", completeness["mag_centers"])
+    map_m_grid = jnp.clip(
+        m_grid,
+        completeness["mag_centers"][0],
+        completeness["mag_centers"][-1],
+    )
     sigma = completeness["sigma"]
     sig = jnp.sqrt(mu_err[:, None] ** 2 + sigma**2)
     if completeness["mode"] == "4d_fhost_alpha":
         p_det = _interp_regular_4d(
-            m_grid[None, :],
+            map_m_grid[None, :],
             z[:, None],
             f_host_2500_psf[:, None],
             alpha_lambda[:, None],
@@ -405,7 +444,7 @@ def _completeness_loglike_jax(m_model, mu_err, z, completeness, f_host_2500_psf,
         )
     elif completeness["mode"] == "3d_fhost":
         p_det = _interp_regular_3d(
-            m_grid[None, :],
+            map_m_grid[None, :],
             z[:, None],
             f_host_2500_psf[:, None],
             completeness["mag_centers"],
@@ -415,7 +454,7 @@ def _completeness_loglike_jax(m_model, mu_err, z, completeness, f_host_2500_psf,
         )
     else:
         p_det = _interp_regular_2d(
-            m_grid[None, :],
+            map_m_grid[None, :],
             z[:, None],
             completeness["mag_centers"],
             completeness["z_centers"],
@@ -944,7 +983,14 @@ def run_single_jax(
             agn_pivot_context=agn_pivot_context,
         )
     pantheon_jax = _prepare_pantheon_arrays(pantheon_data, _sna_L, _sna_Lower, _sna_LogdetCov)
-    completeness_jax = _prepare_completeness_for_jax(completeness_params)
+    completeness_jax = _prepare_completeness_for_jax(
+        completeness_params,
+        selection_magnitude=(
+            agn_data.get(COMPLETENESS_MAG_COL)
+            if completeness_params is not None
+            else None
+        ),
+    )
 
     priors, model_labels, _ = get_model_params(
         cosmo_model,

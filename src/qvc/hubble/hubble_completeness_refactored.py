@@ -16,6 +16,8 @@ from qvc.hubble.hubble_utils import convert_M2500_to_logL2500, resolve_qvc_data_
 from qvc.hubble.cuts import (
     COMPLETENESS_MAG_EDGE_MAX,
     COMPLETENESS_MAG_EDGE_MIN,
+    COMPLETENESS_MAG_2500_MAX,
+    COMPLETENESS_MAG_2500_MIN,
     COMPLETENESS_N_MAG_BINS,
 )
 
@@ -26,6 +28,10 @@ COMPLETENESS_MAG_ERR_COL = "completeness_m_2500_err"
 COMPLETENESS_FHOST_COL = "f_host_2500_psf"
 COMPLETENESS_FHOST_ERR_COL = "f_host_2500_psf_err"
 VALID_COMPLETENESS_MAGNITUDES = ("dereddened", "attenuated")
+DEFAULT_COMPLETENESS_SMOOTH_SIGMA_MAG = 0.10
+DEFAULT_COMPLETENESS_SMOOTH_SIGMA_Z = 0.30
+COMPLETENESS_SMOOTH_SIGMA_MAG_ENV = "QVC_HUBBLE_COMPLETENESS_SMOOTH_SIGMA_MAG"
+COMPLETENESS_SMOOTH_SIGMA_Z_ENV = "QVC_HUBBLE_COMPLETENESS_SMOOTH_SIGMA_Z"
 _COMPLETENESS_MAGNITUDE_SOURCES = {
     "dereddened": ("m_2500_dereddened", "m_2500_dereddened_err"),
     "attenuated": (
@@ -446,6 +452,27 @@ def _scaled_completeness_ratio(
     C = np.clip(C, 0.0, 1.0)
     return C
 
+
+def _normalize_magnitude_support(mag_centers, magnitude_support):
+    """Validate the physical hard-cut interval carried by a map."""
+
+    mag_centers = np.asarray(mag_centers, dtype=float)
+    if magnitude_support is None:
+        magnitude_support = (mag_centers[0], mag_centers[-1])
+    support = np.asarray(magnitude_support, dtype=float)
+    if support.shape != (2,) or not np.all(np.isfinite(support)):
+        raise ValueError(
+            "magnitude_support must contain exactly two finite numeric bounds."
+        )
+    lower, upper = (float(value) for value in support)
+    if lower >= upper:
+        raise ValueError(
+            "magnitude_support must satisfy lower < upper; "
+            f"got ({lower}, {upper})."
+        )
+    return lower, upper
+
+
 class Completeness2D:
     """
     Interpolates p(detect | m, z) on a (mag, z) grid.
@@ -453,10 +480,22 @@ class Completeness2D:
       outside the grid return 0.
     - Redshifts outside the grid are linearly extrapolated from the nearest
       two redshift planes. Extrapolated probabilities are bounded to [0, 1].
+    - ``magnitude_support`` records the separate hard sample-selection cuts;
+      interpolation edge behavior does not extend that physical support.
     """
-    def __init__(self, mag_centers, z_centers, completeness_map):
+    def __init__(
+        self,
+        mag_centers,
+        z_centers,
+        completeness_map,
+        magnitude_support=None,
+    ):
         self.mag_centers = np.asarray(mag_centers)
         self.z_centers   = np.asarray(z_centers)
+        self.magnitude_support = _normalize_magnitude_support(
+            self.mag_centers,
+            magnitude_support,
+        )
 
         # Ensure finite in [0,1]
         C = np.nan_to_num(completeness_map, nan=0.0, posinf=0.0, neginf=0.0)
@@ -518,12 +557,24 @@ class Completeness3D:
       outside the grid still return 0.
     - Redshifts outside the grid are linearly extrapolated from the nearest
       two redshift planes. Extrapolated probabilities are bounded to [0, 1].
+    - ``magnitude_support`` records the separate hard sample-selection cuts.
     """
 
-    def __init__(self, mag_centers, z_centers, fhost_centers, completeness_cube):
+    def __init__(
+        self,
+        mag_centers,
+        z_centers,
+        fhost_centers,
+        completeness_cube,
+        magnitude_support=None,
+    ):
         self.mag_centers = np.asarray(mag_centers)
         self.z_centers = np.asarray(z_centers)
         self.fhost_centers = np.asarray(fhost_centers)
+        self.magnitude_support = _normalize_magnitude_support(
+            self.mag_centers,
+            magnitude_support,
+        )
 
         C = np.nan_to_num(completeness_cube, nan=0.0, posinf=0.0, neginf=0.0)
         C = np.clip(C, 0.0, 1.0).astype(float)
@@ -597,13 +648,26 @@ class Completeness4D:
       outside the grid still return 0.
     - Redshifts outside the grid are linearly extrapolated from the nearest
       two redshift planes. Extrapolated probabilities are bounded to [0, 1].
+    - ``magnitude_support`` records the separate hard sample-selection cuts.
     """
 
-    def __init__(self, mag_centers, z_centers, fhost_centers, alpha_centers, completeness_hypercube):
+    def __init__(
+        self,
+        mag_centers,
+        z_centers,
+        fhost_centers,
+        alpha_centers,
+        completeness_hypercube,
+        magnitude_support=None,
+    ):
         self.mag_centers = np.asarray(mag_centers)
         self.z_centers = np.asarray(z_centers)
         self.fhost_centers = np.asarray(fhost_centers)
         self.alpha_centers = np.asarray(alpha_centers)
+        self.magnitude_support = _normalize_magnitude_support(
+            self.mag_centers,
+            magnitude_support,
+        )
 
         C = np.nan_to_num(completeness_hypercube, nan=0.0, posinf=0.0, neginf=0.0)
         C = np.clip(C, 0.0, 1.0).astype(float)
@@ -943,13 +1007,22 @@ def get_completeness_function_2d(
     #sim_file="data/dec4_mock_mag_z_ananna.h5",
     n_mag_bins=COMPLETENESS_N_MAG_BINS, n_z_bins=40,
     smooth_counts=True,
+    smooth_sigma_mag=None,
+    smooth_sigma_z=None,
     plot=False,
     plot_path=None,
     fill_along_mag=False,
     fill_along_z=False,
 ):
     """
-    Build p(detect | m, z)
+    Build p(detect | m, z).
+
+    When ``smooth_counts`` is enabled, ``smooth_sigma_mag`` (mag) and
+    ``smooth_sigma_z`` (redshift) set the physical Gaussian widths applied
+    before the observed/mock count ratio is formed.  Omitted widths use the
+    conservative defaults of 0.10 mag and 0.30 in redshift; the corresponding
+    QVC_HUBBLE_COMPLETENESS_SMOOTH_SIGMA_* environment variables can override
+    those defaults for a runner invocation.
     """
     import os, h5py
     import matplotlib.pyplot as plt
@@ -987,9 +1060,28 @@ def get_completeness_function_2d(
     H_true, _, _ = np.histogram2d(m_true, z_true, bins=[mag_edges, z_edges])
     H_obs,  _, _ = np.histogram2d(m_obs,  z_obs,  bins=[mag_edges, z_edges])
     if smooth_counts:
-        # --- Choose physical smoothing widths (recommended) ---
-        sigma_mag = 0.2    # mag, for completeness-map smoothing along magnitude
-        sigma_z_abs = 0.2  # absolute redshift, for smoothing along z
+        if smooth_sigma_mag is None:
+            smooth_sigma_mag = os.environ.get(
+                COMPLETENESS_SMOOTH_SIGMA_MAG_ENV,
+                DEFAULT_COMPLETENESS_SMOOTH_SIGMA_MAG,
+            )
+        if smooth_sigma_z is None:
+            smooth_sigma_z = os.environ.get(
+                COMPLETENESS_SMOOTH_SIGMA_Z_ENV,
+                DEFAULT_COMPLETENESS_SMOOTH_SIGMA_Z,
+            )
+        sigma_mag = float(smooth_sigma_mag)
+        sigma_z_abs = float(smooth_sigma_z)
+        if not np.isfinite(sigma_mag) or sigma_mag < 0.0:
+            raise ValueError(
+                "smooth_sigma_mag must be a finite, non-negative magnitude; "
+                f"got {smooth_sigma_mag!r}."
+            )
+        if not np.isfinite(sigma_z_abs) or sigma_z_abs < 0.0:
+            raise ValueError(
+                "smooth_sigma_z must be a finite, non-negative redshift width; "
+                f"got {smooth_sigma_z!r}."
+            )
         print(f"Smoothing counts with sigma_mag={sigma_mag} mag (sigma_mag/dm={sigma_mag/dm}), sigma_z={sigma_z_abs} absolute z")
         # Convert physical -> pixel for the Gaussian filter
         sig_mag_pix = max(float(sigma_mag/dm), 1e-6)
@@ -1085,7 +1177,16 @@ def get_completeness_function_2d(
         plt.tight_layout()
         plt.savefig(os.path.join(plot_dir, "H_true_map.pdf"), dpi=600)
         plt.close()
-    return Completeness2D(mag_centers, z_centers, C), mag_centers, z_centers, dm, dz, sigma_mag
+    completeness2d = Completeness2D(
+        mag_centers,
+        z_centers,
+        C,
+        magnitude_support=(
+            COMPLETENESS_MAG_2500_MIN,
+            COMPLETENESS_MAG_2500_MAX,
+        ),
+    )
+    return completeness2d, mag_centers, z_centers, dm, dz, sigma_mag
 
 
 def _plot_completeness_vs_fhost_slices(
@@ -1406,7 +1507,16 @@ def get_completeness_function_3d_fhost(
         eps=eps,
     )
 
-    completeness3d = Completeness3D(mag_centers, z_centers, fhost_centers, C)
+    completeness3d = Completeness3D(
+        mag_centers,
+        z_centers,
+        fhost_centers,
+        C,
+        magnitude_support=(
+            COMPLETENESS_MAG_2500_MIN,
+            COMPLETENESS_MAG_2500_MAX,
+        ),
+    )
 
     if plot:
         base_plot_path = plot_path or "plots/hubble"
@@ -1631,7 +1741,17 @@ def get_completeness_function_4d_fhost_alpha(
         eps=eps,
     )
 
-    completeness4d = Completeness4D(mag_centers, z_centers, fhost_centers, alpha_centers, C)
+    completeness4d = Completeness4D(
+        mag_centers,
+        z_centers,
+        fhost_centers,
+        alpha_centers,
+        C,
+        magnitude_support=(
+            COMPLETENESS_MAG_2500_MIN,
+            COMPLETENESS_MAG_2500_MAX,
+        ),
+    )
 
     if plot:
         base_plot_path = plot_path or "plots/hubble"
