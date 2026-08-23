@@ -1,9 +1,11 @@
 import numpy as np
 import pandas as pd
 import pytest
+from astropy.table import Table
 
 from qvc.spectra.catalog_hdf5 import write_spectra_catalog_hdf5
 from qvc.spectra.merge_results import enrich_h5_catalog_rows, load_and_merge_h5
+from qvc.spectra import merge_results
 
 
 def _write_shard(path, object_ids, draw_values):
@@ -133,3 +135,87 @@ def test_h5_enrichment_restores_row_and_draw_alignment(tmp_path):
     assert enriched.frame["object_id"].tolist() == ["1", "2"]
     assert enriched.frame["sdss_field"].tolist() == ["added", "added"]
     np.testing.assert_allclose(enriched.fraction_draws[:, 0, 0], [0.1, 0.2])
+
+
+def test_populate_sdss_run2d_from_fits_copies_survey_and_targeting_metadata(
+    tmp_path,
+):
+    specobj_path = tmp_path / "specObj-test.fits"
+    large_target_mask = np.int64(2**60 + 3)
+    Table(
+        {
+            "PLATE": np.array([1, 4], dtype=np.int32),
+            "MJD": np.array([3, 6], dtype=np.int32),
+            "FIBERID": np.array([2, 5], dtype=np.int32),
+            "RUN2D": ["v5_13_2", "v5_13_2"],
+            "SURVEY": ["boss", "eboss"],
+            "INSTRUMENT": ["BOSS", "BOSS"],
+            "PROGRAMNAME": ["boss", "eboss"],
+            "SOURCETYPE": ["QSO", "QSO1_VAR_S82"],
+            "TARGETTYPE": ["SCIENCE", "SCIENCE"],
+            "CHUNK": ["boss1", "eboss2"],
+            "PLATERUN": ["boss-run", "eboss-run"],
+            "TARGETOBJID": ["123", "456"],
+            "THING_ID": np.array([10, 20], dtype=np.int32),
+            "BOSS_TARGET1": np.array([large_target_mask, 0], dtype=np.int64),
+            "EBOSS_TARGET1": np.array([0, 4096], dtype=np.int64),
+            "ANCILLARY_TARGET1": np.array([8, 16], dtype=np.int64),
+        }
+    ).write(specobj_path)
+    quasars = [
+        {
+            "object_id": "eboss-object",
+            "plate": 4,
+            "mjd": 6,
+            "fiber": 5,
+            "SDSS_SURVEY": "stale",
+        },
+        {"object_id": "boss-object", "plate": 1, "mjd": 3, "fiber": 2},
+        {
+            "object_id": "unmatched-object",
+            "plate": 9,
+            "mjd": 9,
+            "fiber": 9,
+            "SDSS_SURVEY": "preexisting",
+            "SDSS_BOSS_TARGET1": 99,
+        },
+    ]
+
+    result = pd.DataFrame.from_records(
+        merge_results.populate_sdss_run2d_from_fits(quasars, specobj_path)
+    )
+
+    assert result["object_id"].tolist() == [
+        "eboss-object",
+        "boss-object",
+        "unmatched-object",
+    ]
+    assert result["SDSS_SPECOBJ_MATCHED"].tolist() == [True, True, False]
+    assert (
+        result["SDSS_SURVEY"]
+        .astype(object)
+        .where(result["SDSS_SURVEY"].notna(), None)
+        .tolist()
+        == ["eboss", "boss", "preexisting"]
+    )
+    assert result["SDSS_PROGRAMNAME"].iloc[:2].tolist() == ["eboss", "boss"]
+    assert result["SDSS_SOURCETYPE"].iloc[:2].tolist() == ["QSO1_VAR_S82", "QSO"]
+    assert result["SDSS_TARGETOBJID"].iloc[:2].tolist() == ["456", "123"]
+    assert result["SDSS_EBOSS_TARGET1"].tolist() == [4096, 0, -1]
+    assert result["SDSS_BOSS_TARGET1"].tolist() == [0, large_target_mask, 99]
+    assert result["SDSS_ANCILLARY_TARGET1"].tolist() == [16, 8, -1]
+    # Optional columns absent from the small test FITS still receive a stable schema.
+    assert result["SDSS_EBOSS_TARGET2"].tolist() == [-1, -1, -1]
+
+    output_path = tmp_path / "enriched.h5"
+    draws = np.full((len(result), 64, 5), np.nan, dtype=np.float32)
+    write_spectra_catalog_hdf5(
+        output_path,
+        result,
+        draws,
+        np.zeros(len(result), dtype=np.int16),
+    )
+    reloaded = merge_results.read_spectra_catalog_hdf5(output_path).frame
+    assert reloaded["SDSS_SURVEY"].tolist() == ["eboss", "boss", "preexisting"]
+    assert reloaded["SDSS_SPECOBJ_MATCHED"].tolist() == [True, True, False]
+    assert reloaded["SDSS_BOSS_TARGET1"].tolist() == [0, large_target_mask, 99]
