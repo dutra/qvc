@@ -16,7 +16,9 @@ from qvc.spectra.fit_spectra_jaxsedfit_joint import (
     estimate_m2500_dereddened,
     extract_compact_psf_agn_fraction_draws,
     load_saved_sed_photometry,
+    predict_catalog_posterior,
     save_spectrum_figure,
+    summarize_catalog_posterior,
     summarize_joint_chi2,
     summarize_psf_agn_fractions,
     verify_new_posterior_bundle,
@@ -323,6 +325,8 @@ def _component_prediction(filter_names):
     prediction = {
         "pred_fluxes": total,
         "variable_agn_fluxes": 0.7 * total,
+        "fracAGN_5100_fit": np.array([0.6, 0.8]),
+        "formed_stellar_mass": np.array([1.0e10, 1.2e10]),
     }
     prediction.update(
         {
@@ -365,6 +369,9 @@ def test_joint_fit_result_writer_moves_private_draw_payload_out_of_catalog(tmp_p
             "object_id": "1452887",
             "fit_ok": True,
             "fit_backend": "jaxsedfit_joint",
+            "fracAGN_5100_fit": 0.65,
+            "fracAGN_5100_fit_err": 0.04,
+            "formed_stellar_mass": 1.1e10,
             "f_AGN_psf_g": 0.75,
             "_psf_agn_fraction_draws": draws,
             "_psf_agn_fraction_valid_count": 2,
@@ -375,6 +382,9 @@ def test_joint_fit_result_writer_moves_private_draw_payload_out_of_catalog(tmp_p
 
     with h5py.File(path, "r") as handle:
         assert "_psf_agn_fraction_draws" not in handle["catalog"]
+        assert handle["catalog/fracAGN_5100_fit"][0] == pytest.approx(0.65)
+        assert handle["catalog/fracAGN_5100_fit_err"][0] == pytest.approx(0.04)
+        assert handle["catalog/formed_stellar_mass"][0] == pytest.approx(1.1e10)
         assert handle["psf_agn_fraction_draws/values"].shape == (1, 64, 5)
         assert handle["psf_agn_fraction_draws/valid_count"][0] == 2
 
@@ -406,6 +416,54 @@ def test_joint_summaries_have_stable_native_schema():
     for name in joint.JOINT_CHI2_SITES:
         assert name in chi2
         assert f"{name}_err" in chi2
+
+
+def test_catalog_summary_combines_latent_and_deterministic_scalar_sites():
+    samples = {
+        "pl_slope": np.array([-1.9, -1.7]),
+        "latent_vector": np.ones((2, 3)),
+    }
+    prediction = {
+        "fracAGN_5100_fit": np.array([0.6, 0.8]),
+        "formed_stellar_mass": np.array([1.0e10, 1.2e10]),
+        "pred_fluxes": np.ones((2, 5)),
+    }
+
+    result = summarize_catalog_posterior(samples, prediction)
+
+    assert result["pl_slope"] == pytest.approx(-1.8)
+    assert result["fracAGN_5100_fit"] == pytest.approx(0.7)
+    assert result["formed_stellar_mass"] == pytest.approx(1.1e10)
+    assert "pl_slope_err" in result
+    assert "fracAGN_5100_fit_err" in result
+    assert "formed_stellar_mass_err" in result
+    assert "latent_vector" not in result
+    assert "pred_fluxes" not in result
+
+
+def test_catalog_prediction_temporarily_requests_legacy_csv_scalar_sites():
+    class DummyFitter:
+        @staticmethod
+        def _predictive_return_sites(kind):
+            assert kind == "photometry"
+            return ["pred_fluxes", "fracAGN_5100_fit"]
+
+        def predict(self, *, kind):
+            self.requested_sites = self._predictive_return_sites(kind)
+            return {"fracAGN_5100_fit": np.array([0.6, 0.8])}
+
+    fitter = DummyFitter()
+
+    prediction = predict_catalog_posterior(fitter, kind="photometry")
+
+    assert "fracAGN_5100_fit" in prediction
+    assert set(joint.LEGACY_CSV_SCALAR_PREDICTION_SITES) <= set(
+        fitter.requested_sites
+    )
+    assert fitter._predictive_return_sites("photometry") == [
+        "pred_fluxes",
+        "fracAGN_5100_fit",
+    ]
 
 
 def test_verify_new_posterior_bundle_requires_v2_schema(tmp_path):
@@ -547,6 +605,10 @@ def test_resumed_fit_recomputes_and_writes_new_schema(monkeypatch, tmp_path):
             galaxy=SimpleNamespace(cosmology_h0=70.0, cosmology_om0=0.3),
         )
 
+        @staticmethod
+        def _predictive_return_sites(kind):
+            return ["pred_fluxes", "variable_agn_fluxes"]
+
         def predict(self, *, kind):
             assert kind == "plot"
             assert self.predictive is None
@@ -590,6 +652,9 @@ def test_resumed_fit_recomputes_and_writes_new_schema(monkeypatch, tmp_path):
     assert result["resumed_from_run"] == "old_run"
     assert result["joint_reduced_chi2"] == pytest.approx(9.0)
     assert result["f_AGN_psf_g"] == pytest.approx(0.7)
+    assert result["fracAGN_5100_fit"] == pytest.approx(0.7)
+    assert result["fracAGN_5100_fit_err"] == pytest.approx(0.068)
+    assert result["formed_stellar_mass"] == pytest.approx(1.1e10)
     assert verify_new_posterior_bundle(result["fit_result_path"]).is_file()
     assert source.read_bytes() == b"immutable old posterior"
 
@@ -623,9 +688,17 @@ def test_fresh_fit_writes_same_diagnostic_schema_and_v2_bundle(monkeypatch, tmp_
         def __init__(self, config):
             self.config = config
 
+        @staticmethod
+        def _predictive_return_sites(kind):
+            return ["pred_fluxes", "variable_agn_fluxes"]
+
         def fit(self, *, progress_bar):
             assert progress_bar is False
             return DummyFitResult()
+
+        def predict(self, *, kind):
+            assert kind == "photometry"
+            return prediction
 
     config = SimpleNamespace(
         galaxy=SimpleNamespace(cosmology_h0=70.0, cosmology_om0=0.3)
@@ -663,4 +736,7 @@ def test_fresh_fit_writes_same_diagnostic_schema_and_v2_bundle(monkeypatch, tmp_
     assert result["execution_mode"] == "fresh_missing_bundle"
     assert result["joint_reduced_chi2"] == pytest.approx(9.0)
     assert result["f_AGN_psf_i"] == pytest.approx(0.7)
+    assert result["fracAGN_5100_fit"] == pytest.approx(0.7)
+    assert result["fracAGN_5100_fit_err"] == pytest.approx(0.068)
+    assert result["formed_stellar_mass"] == pytest.approx(1.1e10)
     assert result["fit_result_path"] == str(saved_path)
