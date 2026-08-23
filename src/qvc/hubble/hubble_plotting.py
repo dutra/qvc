@@ -40,11 +40,16 @@ from qvc.hubble.hubble_model import (
     agn_model_req_errs,
     agn_model_req_obs,
     evaluate_log_f,
+    evaluate_mu_redshift_term,
     get_agn_model_spec,
     get_model_params,
     resolve_model_option_flags,
 )
-from qvc.hubble.hubble_likelihood import sigma_lens_from_dc, sigma_mu_from_z_err
+from qvc.hubble.hubble_likelihood import (
+    sigma_lens_from_dc,
+    sigma_mu_from_z_err,
+    sigma_mu_model_from_z_err,
+)
 from qvc.hubble.cuts import LIGHT_CURVE_N_POINTS_EXCLUDED_BANDS, light_curve_point_count_series
 from qvc.light_curve.band_colors import BAND_COLORS as LIGHT_CURVE_BAND_COLORS
 from qvc.hubble.sigma_tau_lambda_fit import (
@@ -919,6 +924,7 @@ def plot_blr_line_lags_vs_l2500(
     use_alpha_lambda_term=None,
     use_eta_sigma_term=None,
     use_redshift_log_f_term=None,
+    use_redshift_mu_term=None,
 ):
     """Plot BLR lag against line-matched debiased continuum luminosity."""
     if df_agn.empty or (dm_interp is None and dmi_values is None):
@@ -933,6 +939,7 @@ def plot_blr_line_lags_vs_l2500(
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
+        use_redshift_mu_term=use_redshift_mu_term,
     )
     _, model_labels, _ = get_model_params(
         cosmo_model,
@@ -940,6 +947,7 @@ def plot_blr_line_lags_vs_l2500(
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
         use_eta_sigma_term=option_flags["use_eta_sigma_term"],
         use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
+        use_redshift_mu_term=option_flags["use_redshift_mu_term"],
     )
     param_indices = {name: model_labels.index(name) for name in model_labels}
     med_params = {key: np.median(flat_samples[:, idx]) for key, idx in param_indices.items()}
@@ -4709,6 +4717,7 @@ def plot_dynesty(
     use_alpha_lambda_term=None,
     use_eta_sigma_term=None,
     use_redshift_log_f_term=None,
+    use_redshift_mu_term=None,
 ):
     """
     Plot dynesty diagnostics: runplot, traceplot, and cornerpoints using dyplot.
@@ -4724,6 +4733,7 @@ def plot_dynesty(
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
+        use_redshift_mu_term=use_redshift_mu_term,
     )
     priors, model_labels, model_labels_latex = get_model_params(
         cosmo_model,
@@ -4732,6 +4742,7 @@ def plot_dynesty(
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
         use_eta_sigma_term=option_flags["use_eta_sigma_term"],
         use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
+        use_redshift_mu_term=option_flags["use_redshift_mu_term"],
     )
 
     # Cornerplot
@@ -4788,6 +4799,7 @@ def plot_traces(
     use_alpha_lambda_term=None,
     use_eta_sigma_term=None,
     use_redshift_log_f_term=None,
+    use_redshift_mu_term=None,
 ):
     """
     Plot parameter traces from dynesty nested sampling results.
@@ -4815,6 +4827,7 @@ def plot_traces(
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
+        use_redshift_mu_term=use_redshift_mu_term,
     )
     priors, model_labels, model_labels_latex = get_model_params(
         cosmo_model,
@@ -4823,6 +4836,7 @@ def plot_traces(
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
         use_eta_sigma_term=option_flags["use_eta_sigma_term"],
         use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
+        use_redshift_mu_term=option_flags["use_redshift_mu_term"],
     )
     ndim = len(model_labels)
 
@@ -4862,6 +4876,7 @@ def plot_posterior_corner(
     use_alpha_lambda_term=None,
     use_eta_sigma_term=None,
     use_redshift_log_f_term=None,
+    use_redshift_mu_term=None,
 ):
     # Select cosmological parameters based on model
     if cosmo_model == 'FlatwCDM':
@@ -4881,6 +4896,7 @@ def plot_posterior_corner(
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
+        use_redshift_mu_term=use_redshift_mu_term,
     )
     priors, model_labels, model_labels_latex = get_model_params(
         cosmo_model,
@@ -4889,6 +4905,7 @@ def plot_posterior_corner(
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
         use_eta_sigma_term=option_flags["use_eta_sigma_term"],
         use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
+        use_redshift_mu_term=option_flags["use_redshift_mu_term"],
     )
 
     fig = corner.corner(
@@ -4928,6 +4945,7 @@ def plot_cosmo_corner(
     use_alpha_lambda_term=None,
     use_eta_sigma_term=None,
     use_redshift_log_f_term=None,
+    use_redshift_mu_term=None,
 ):
     import os
     import numpy as np
@@ -4946,6 +4964,7 @@ def plot_cosmo_corner(
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
+        use_redshift_mu_term=use_redshift_mu_term,
     )
     _, model_labels, model_labels_latex = get_model_params(
         cosmo_model,
@@ -4953,6 +4972,7 @@ def plot_cosmo_corner(
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
         use_eta_sigma_term=option_flags["use_eta_sigma_term"],
         use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
+        use_redshift_mu_term=option_flags["use_redshift_mu_term"],
     )
     idx = {k: i for i, k in enumerate(model_labels)}
     latex = dict(zip(model_labels, model_labels_latex))
@@ -4960,6 +4980,20 @@ def plot_cosmo_corner(
     # ---------- helpers ----------
     def _subset(samples, z_pivot, include_alpha_beta=False, include_m0_agn=False):
         X = np.asarray(samples)
+        subset_only_sna = not include_m0_agn
+        _, subset_model_labels, subset_model_labels_latex = get_model_params(
+            cosmo_model,
+            only_sna=subset_only_sna,
+            only_agn=only_agn if not subset_only_sna else False,
+            use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
+            use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+            use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
+            use_redshift_mu_term=(
+                option_flags["use_redshift_mu_term"] if not subset_only_sna else False
+            ),
+        )
+        idx = {name: i for i, name in enumerate(subset_model_labels)}
+        latex = dict(zip(subset_model_labels, subset_model_labels_latex))
         cols = []
         names = []
         lab_latex = []
@@ -5421,6 +5455,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
                 dmi_values=None, dmi_sigma=None, dmi_selection_sigma=None, clipped_mask=None,
                 filename=None, sigma_clip_threshold=None,
                 use_alpha_lambda_term=None, use_eta_sigma_term=None, use_redshift_log_f_term=None,
+                use_redshift_mu_term=None,
                 only_agn=False,
                 use_intrinsic_scatter_in_residual_sigma=True,
                 diagnostics_suffix=None,
@@ -5531,6 +5566,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
+        use_redshift_mu_term=use_redshift_mu_term,
     )
     _, model_labels, _ = get_model_params(
         cosmo_model,
@@ -5538,6 +5574,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
         use_eta_sigma_term=option_flags["use_eta_sigma_term"],
         use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
+        use_redshift_mu_term=option_flags["use_redshift_mu_term"],
     )
     n_agn_params = sum(label != "M0_sn" for label in model_labels)
     show_sne = (
@@ -5578,9 +5615,25 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
         [cosmo.distmod(z_grid).value for cosmo in sample_cosmologies],
         dtype=float,
     )
+    delta_mu_z_grid_samples = np.asarray(
+        [
+            evaluate_mu_redshift_term(
+                params,
+                z_grid,
+                z_pivot_agn,
+                use_redshift_mu_term=option_flags["use_redshift_mu_term"],
+            )
+            for params in sample_parameter_dicts
+        ],
+        dtype=float,
+    )
+    mu_models_evolved = mu_models + delta_mu_z_grid_samples
     mu_model_16th   = np.percentile(mu_models, 16, axis=0)
     mu_model_median = np.percentile(mu_models, 50, axis=0)
     mu_model_84th   = np.percentile(mu_models, 84, axis=0)
+    mu_model_evolved_16th = np.percentile(mu_models_evolved, 16, axis=0)
+    mu_model_evolved_median = np.percentile(mu_models_evolved, 50, axis=0)
+    mu_model_evolved_84th = np.percentile(mu_models_evolved, 84, axis=0)
 
     # Median params (also used later)
     results = {key: np.median(flat_samples[:, i]) for i, key in enumerate(model_labels)}
@@ -5652,7 +5705,14 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     sigma_lens = sigma_lens_from_dc(df_agn['z'].values, cosmo)
 
     apparent_mag_err = df_agn['apparent_mag_2500_err'].values
-    z_err = sigma_mu_from_z_err(df_agn["z"].values, df_agn["z_err"].values, cosmo)
+    z_err = sigma_mu_model_from_z_err(
+        df_agn["z"].values,
+        df_agn["z_err"].values,
+        cosmo,
+        results,
+        z_pivot=z_pivot_agn,
+        use_redshift_mu_term=option_flags["use_redshift_mu_term"],
+    )
     m_app_var = apparent_mag_err**2
     lens_var = sigma_lens**2
     z_var = z_err**2
@@ -5727,12 +5787,39 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
         [cosmo.distmod(z_values).value for cosmo in sample_cosmologies],
         dtype=float,
     )
+    delta_mu_z_samples = np.asarray(
+        [
+            evaluate_mu_redshift_term(
+                params,
+                z_values,
+                z_pivot_agn,
+                use_redshift_mu_term=option_flags["use_redshift_mu_term"],
+            )
+            for params in sample_parameter_dicts
+        ],
+        dtype=float,
+    )
+    mu_model_evolved_samples = mu_cosmo_samples + delta_mu_z_samples
     # Preserve posterior covariance by taking the median of matched
     # sample-wise residuals, not a difference of separate marginal medians.
-    residuals = np.percentile(
+    residuals_raw_cosmology = np.percentile(
         mu_pred_samples - mu_cosmo_samples,
         50,
         axis=0,
+    )
+    residuals = np.percentile(
+        mu_pred_samples - mu_model_evolved_samples,
+        50,
+        axis=0,
+    )
+    delta_mu_z_posterior_median = np.percentile(
+        delta_mu_z_samples, 50, axis=0
+    )
+    mu_model_evolved_posterior_median = np.percentile(
+        mu_model_evolved_samples, 50, axis=0
+    )
+    mu_evolution_corrected_posterior_median = np.percentile(
+        mu_pred_samples - delta_mu_z_samples, 50, axis=0
     )
     mu_cosmo_posterior_median = np.percentile(
         mu_cosmo_samples,
@@ -5740,7 +5827,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
         axis=0,
     )
     mu_pred_joint_consistent = (
-        mu_cosmo_posterior_median + residuals
+        mu_model_evolved_posterior_median + residuals
     )
     chi2_redshift_mask = (
         np.isfinite(z_values)
@@ -5794,6 +5881,17 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
         min_count=5,
         center="mid",
     )
+    linear_residual_raw_in = linear_residual_raw_out = None
+    if option_flags["use_redshift_mu_term"]:
+        linear_residual_raw_in, linear_residual_raw_out = _range_partitioned_weighted_bin_stats(
+            df_agn["z"].values,
+            residuals_raw_cosmology,
+            clipping_sigma,
+            bins_linear,
+            z_range,
+            min_count=5,
+            center="mid",
+        )
 
     # Log-z bins for INSET (match inset xscale='log')
     zpos = df_agn["z"].values[df_agn["z"].values > 0]
@@ -5928,6 +6026,23 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     # Model + band
     inset_ax.plot(z_grid, mu_model_median, color="m", lw=1.4, alpha=1.0, zorder=5, label=label)
     inset_ax.fill_between(z_grid, mu_model_16th, mu_model_84th, color="m", alpha=0.22, zorder=4)
+    if option_flags["use_redshift_mu_term"]:
+        inset_ax.plot(
+            z_grid,
+            mu_model_evolved_median,
+            color="tab:cyan",
+            lw=1.5,
+            zorder=6,
+            label="AGN mean + redshift evolution",
+        )
+        inset_ax.fill_between(
+            z_grid,
+            mu_model_evolved_16th,
+            mu_model_evolved_84th,
+            color="tab:cyan",
+            alpha=0.18,
+            zorder=4,
+        )
 
     # Flat Lambda CDM
     # mu_conc = FlatLambdaCDM(H0=70, Om0=0.3).distmod(z_grid).value
@@ -6073,6 +6188,24 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     # Model + 68% band
     ax.plot(z_grid, mu_model_median, color="m", lw=2.4, alpha=1.0, zorder=5, label=label)
     ax.fill_between(z_grid, mu_model_16th, mu_model_84th, color="m", alpha=0.25, zorder=4)
+    if option_flags["use_redshift_mu_term"]:
+        ax.plot(
+            z_grid,
+            mu_model_evolved_median,
+            color="tab:cyan",
+            lw=2.4,
+            alpha=1.0,
+            zorder=6,
+            label="AGN mean + redshift evolution",
+        )
+        ax.fill_between(
+            z_grid,
+            mu_model_evolved_16th,
+            mu_model_evolved_84th,
+            color="tab:cyan",
+            alpha=0.2,
+            zorder=4,
+        )
 
     # Survey magnitude limit (shade above)
     if completeness and not debias:
@@ -6125,6 +6258,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
             use_alpha_lambda_term=option_flags_other["use_alpha_lambda_term"],
             use_eta_sigma_term=option_flags_other["use_eta_sigma_term"],
             use_redshift_log_f_term=option_flags_other["use_redshift_log_f_term"],
+            use_redshift_mu_term=option_flags_other["use_redshift_mu_term"],
         )
         model_label_latex_other = cosmo_model_label_latex(cosmo_model_other)
         results_other = {key: np.median(cosmo_model_samples_other[:, i]) for i, key in enumerate(model_labels_other)}
@@ -6147,21 +6281,68 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
         # Zero line
         ax_resid.axhline(0.0, color="m", lw=3.0, zorder=1)
 
-        # NEW: binned residuals in red (points + thin connecting line)
+        # With redshift evolution, distinguish adjusted residuals as blue
+        # squares from raw-cosmology residuals as red circles.  Without that
+        # optional term there is only one residual definition, which retains
+        # the historical red-circle styling.
+        has_mu_evolution = option_flags["use_redshift_mu_term"]
+        residual_bin_color = "tab:blue" if has_mu_evolution else "red"
+        residual_bin_marker = "s" if has_mu_evolution else "o"
+        residual_bin_label = (
+            "Binned residuals (evolution adjusted)"
+            if has_mu_evolution
+            else "Binned residuals"
+        )
         z_res_in, resid_lin_mean_in, resid_lin_sem_in, _ = linear_residual_in
         z_res_out, resid_lin_mean_out, resid_lin_sem_out, _ = linear_residual_out
         if z_res_in.size or z_res_out.size:
             ax_resid.errorbar(
                 z_res_in, resid_lin_mean_in, yerr=resid_lin_sem_in,
-                fmt='o', linestyle='none', markersize=6,
-                mfc='red', mec='none', ecolor='red', elinewidth=2.0, capsize=3.0,
-                alpha=0.98, zorder=15, label="Binned AGN residuals"
+                fmt=residual_bin_marker, linestyle='none', markersize=6,
+                mfc=residual_bin_color, mec='none', ecolor=residual_bin_color,
+                elinewidth=2.0, capsize=3.0,
+                alpha=0.98, zorder=16, label=residual_bin_label,
             )
             ax_resid.errorbar(
                 z_res_out, resid_lin_mean_out, yerr=resid_lin_sem_out,
-                fmt='D', linestyle='none', markersize=6,
-                mfc='red', mec='none', ecolor='red', elinewidth=2.0, capsize=3.0,
-                alpha=0.98, zorder=15
+                fmt=residual_bin_marker, linestyle='none', markersize=6,
+                mfc=residual_bin_color, mec='none', ecolor=residual_bin_color,
+                elinewidth=2.0, capsize=3.0,
+                alpha=0.98, zorder=16,
+            )
+        if option_flags["use_redshift_mu_term"]:
+            z_raw_in, raw_mean_in, raw_sem_in, _ = linear_residual_raw_in
+            z_raw_out, raw_mean_out, raw_sem_out, _ = linear_residual_raw_out
+            ax_resid.errorbar(
+                z_raw_in,
+                raw_mean_in,
+                yerr=raw_sem_in,
+                fmt="o",
+                linestyle="none",
+                markersize=6,
+                mfc="red",
+                mec="none",
+                ecolor="red",
+                elinewidth=2.0,
+                capsize=3.0,
+                alpha=0.98,
+                zorder=15,
+                label="Binned residuals (raw cosmology)",
+            )
+            ax_resid.errorbar(
+                z_raw_out,
+                raw_mean_out,
+                yerr=raw_sem_out,
+                fmt="o",
+                linestyle="none",
+                markersize=6,
+                mfc="red",
+                mec="none",
+                ecolor="red",
+                elinewidth=2.0,
+                capsize=3.0,
+                alpha=0.98,
+                zorder=15,
             )
 
 
@@ -6175,6 +6356,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
                 use_alpha_lambda_term=option_flags_other["use_alpha_lambda_term"],
                 use_eta_sigma_term=option_flags_other["use_eta_sigma_term"],
                 use_redshift_log_f_term=option_flags_other["use_redshift_log_f_term"],
+                use_redshift_mu_term=option_flags_other["use_redshift_mu_term"],
             )
             z_grid_fine = np.linspace(1e-4, 5.2, 500)
             param_indices_other = {name: model_labels_other.index(name) for name in model_labels_other}
@@ -6259,7 +6441,8 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
             ax_resid.set_xlim(df_calibrators['z'].min()*0.2, df_calibrators['z'].max()*1.1)
         else:
             ax_resid.set_ylim(-0.5, 0.5)
-        #ax_resid.legend(frameon=True, loc="upper left", fontsize=10)
+        if option_flags["use_redshift_mu_term"]:
+            ax_resid.legend(frameon=False, loc="upper left", fontsize=9)
 
     for axi in (ax, inset_ax, ax_resid):
         axi.minorticks_on()
@@ -6351,7 +6534,15 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
                 np.asarray(
                     [
                         cosmo.distmod(z_show).value
-                        for cosmo in sample_cosmologies
+                        + evaluate_mu_redshift_term(
+                            params,
+                            z_show,
+                            z_pivot_agn,
+                            use_redshift_mu_term=option_flags["use_redshift_mu_term"],
+                        )
+                        for cosmo, params in zip(
+                            sample_cosmologies, sample_parameter_dicts
+                        )
                     ],
                     dtype=float,
                 ),
@@ -6563,6 +6754,16 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     if debias:
         residuals_df = df_agn.copy()
         residuals_df["residuals"] = residuals
+        residuals_df["residuals_raw_cosmology"] = residuals_raw_cosmology
+        residuals_df["delta_mu_z_posterior_median"] = (
+            delta_mu_z_posterior_median
+        )
+        residuals_df["mu_model_evolved_posterior_median"] = (
+            mu_model_evolved_posterior_median
+        )
+        residuals_df["mu_evolution_corrected_posterior_median"] = (
+            mu_evolution_corrected_posterior_median
+        )
         residuals_df["mu_pred_median"] = mu_pred_median
         residuals_df["mu_pred_joint_consistent"] = (
             mu_pred_joint_consistent
@@ -6593,8 +6794,12 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
             "ra",
             "dec",
             "mu_pred_median",
+            "mu_evolution_corrected_posterior_median",
             "mu_pred_joint_consistent",
             "mu_cosmo_posterior_median",
+            "mu_model_evolved_posterior_median",
+            "delta_mu_z_posterior_median",
+            "residuals_raw_cosmology",
             "residual_estimator",
             "residual_posterior_sample_count",
             "mu_pred_std_without_sigma_dmi",
@@ -7026,6 +7231,7 @@ def plot_predicted_vs_actual_M2500(
     use_alpha_lambda_term=None,
     use_eta_sigma_term=None,
     use_redshift_log_f_term=None,
+    use_redshift_mu_term=None,
     dmi_selection_sigma=None,
     dmi_selection_sigma_interp=None,
     sigma_sel_floor_mag=0.05,
@@ -7056,6 +7262,7 @@ def plot_predicted_vs_actual_M2500(
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
+        use_redshift_mu_term=use_redshift_mu_term,
     )
     priors, model_labels, model_labels_latex = get_model_params(
         cosmo_model,
@@ -7063,6 +7270,7 @@ def plot_predicted_vs_actual_M2500(
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
         use_eta_sigma_term=option_flags["use_eta_sigma_term"],
         use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
+        use_redshift_mu_term=option_flags["use_redshift_mu_term"],
     )
     results = {key: np.median(flat_samples[:, i])
                for i, key in enumerate(model_labels)}
@@ -7575,6 +7783,7 @@ def plot_full_residuals(
     max_categories=12, category_min_count=5, category_jitter=0.15,
     clipped_mask=None,
     use_alpha_lambda_term=None, use_eta_sigma_term=None, use_redshift_log_f_term=None,
+    use_redshift_mu_term=None,
 ):
     df_agn = df_agn.copy()
     df_agn[residual_label] = residuals
@@ -7593,6 +7802,7 @@ def plot_full_residuals(
             use_alpha_lambda_term=use_alpha_lambda_term,
             use_eta_sigma_term=use_eta_sigma_term,
             use_redshift_log_f_term=use_redshift_log_f_term,
+            use_redshift_mu_term=use_redshift_mu_term,
         )
         _, model_labels, _ = get_model_params(
             cosmo_model,
@@ -7600,6 +7810,7 @@ def plot_full_residuals(
             use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
             use_eta_sigma_term=option_flags["use_eta_sigma_term"],
             use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
+            use_redshift_mu_term=option_flags["use_redshift_mu_term"],
         )
         return {
             key: np.percentile(samples[:, i], [16, 50, 84])
@@ -8334,6 +8545,7 @@ def plot_full_residuals_rz(
     max_categories=12, category_min_count=5, category_jitter=0.15,
     clipped_mask=None,
     use_alpha_lambda_term=None, use_eta_sigma_term=None, use_redshift_log_f_term=None,
+    use_redshift_mu_term=None,
 ):
     """
     Plot redshift-detrended residual diagnostics where
@@ -8398,6 +8610,7 @@ def plot_full_residuals_rz(
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
+        use_redshift_mu_term=use_redshift_mu_term,
     )
 
 
@@ -9687,6 +9900,7 @@ def plot_predicted_L2500_vs_sigmahat(
     plot_path='plots/hubble', show=False, debias=True, dm_interp=None,
     show_residuals=False, df_calibrators=None, z_range=(0.44, 3.16),
     use_alpha_lambda_term=None, use_eta_sigma_term=None, use_redshift_log_f_term=None,
+    use_redshift_mu_term=None,
     dmi_values=None,
     dmi_selection_sigma=None,
     dmi_selection_sigma_interp=None,
@@ -9714,6 +9928,7 @@ def plot_predicted_L2500_vs_sigmahat(
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
+        use_redshift_mu_term=use_redshift_mu_term,
     )
     priors, model_labels, model_labels_latex = get_model_params(
         cosmo_model,
@@ -9721,6 +9936,7 @@ def plot_predicted_L2500_vs_sigmahat(
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
         use_eta_sigma_term=option_flags["use_eta_sigma_term"],
         use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
+        use_redshift_mu_term=option_flags["use_redshift_mu_term"],
     )
     param_indices = {name: model_labels.index(name) for name in model_labels}
 
@@ -10395,6 +10611,7 @@ def plot_L2500_vs_sigma_tau_separate(
     use_alpha_lambda_term=None,
     use_eta_sigma_term=None,
     use_redshift_log_f_term=None,
+    use_redshift_mu_term=None,
     sigma_sel_floor_mag=0.05,
     *,
     agn_pivot_context: AgnPivotContext,
@@ -10414,12 +10631,14 @@ def plot_L2500_vs_sigma_tau_separate(
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
+        use_redshift_mu_term=use_redshift_mu_term,
     )
     _priors, model_labels, _model_labels_latex = get_model_params(
         cosmo_model,
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
         use_eta_sigma_term=option_flags["use_eta_sigma_term"],
         use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
+        use_redshift_mu_term=option_flags["use_redshift_mu_term"],
     )
     param_indices = {name: model_labels.index(name) for name in model_labels}
     med_params = {k: np.median(flat_samples[:, param_indices[k]]) for k in model_labels}

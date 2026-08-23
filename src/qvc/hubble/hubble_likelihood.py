@@ -11,6 +11,7 @@ from qvc.hubble.hubble_model import (
     agn_model_pack_params,
     agn_model_pack_obs,
     evaluate_log_f,
+    evaluate_mu_redshift_term,
 )
 from qvc.hubble.hubble_completeness_refactored import (
     COMPLETENESS_FHOST_COL,
@@ -461,6 +462,32 @@ def sigma_mu_from_z_err(z, z_err, cosmo):
     return np.where(np.isfinite(z_err) & (z_err > 0.0), sigma_mu, 0.0)
 
 
+def sigma_mu_model_from_z_err(
+    z,
+    z_err,
+    cosmo,
+    params,
+    *,
+    z_pivot,
+    use_redshift_mu_term=False,
+):
+    """Project redshift uncertainty through cosmology plus mean evolution."""
+    if not use_redshift_mu_term:
+        return sigma_mu_from_z_err(z, z_err, cosmo)
+    z = np.asarray(z, dtype=float)
+    z_err = np.asarray(z_err, dtype=float)
+    z_lo = np.maximum(z - z_err, 1e-8)
+    z_hi = np.maximum(z + z_err, z_lo + 1e-8)
+    mu_lo = cosmo.distmod(z_lo).value + evaluate_mu_redshift_term(
+        params, z_lo, z_pivot, use_redshift_mu_term=True
+    )
+    mu_hi = cosmo.distmod(z_hi).value + evaluate_mu_redshift_term(
+        params, z_hi, z_pivot, use_redshift_mu_term=True
+    )
+    sigma_mu = 0.5 * np.abs(mu_hi - mu_lo)
+    return np.where(np.isfinite(z_err) & (z_err > 0.0), sigma_mu, 0.0)
+
+
 def _cosmology_from_agn_params(cosmo_model, params, z_pivot_agn):
     if cosmo_model == "FlatwCDM":
         return FlatwCDM(H0=params["H0"], Om0=params["Om0"], w0=params["w0"])
@@ -497,6 +524,7 @@ def agn_selection_prediction(
     use_alpha_lambda_term=False,
     use_eta_sigma_term=False,
     use_redshift_log_f_term=False,
+    use_redshift_mu_term=False,
     require_selection_fields=True,
 ):
     """Return one posterior draw's exact AGN selection-space prediction."""
@@ -510,6 +538,7 @@ def agn_selection_prediction(
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
+        use_redshift_mu_term=use_redshift_mu_term,
     )
     params = dict(zip(model_labels, np.asarray(theta, dtype=float)))
     cosmo = _cosmology_from_agn_params(cosmo_model, params, z_pivot_agn)
@@ -553,7 +582,14 @@ def agn_selection_prediction(
         )
 
     sigma_lens = sigma_lens_from_dc(z, cosmo)
-    sigma_mu_z = sigma_mu_from_z_err(z, z_err, cosmo)
+    sigma_mu_z = sigma_mu_model_from_z_err(
+        z,
+        z_err,
+        cosmo,
+        params,
+        z_pivot=z_pivot_agn,
+        use_redshift_mu_term=use_redshift_mu_term,
+    )
     log_f_eff = evaluate_log_f(
         params,
         z,
@@ -568,7 +604,14 @@ def agn_selection_prediction(
         + np.exp(log_f_eff) ** 2
     )
     mu_cosmo = np.asarray(cosmo.distmod(z).value, dtype=float)
-    model_magnitude = np.asarray(M_pred + mu_cosmo, dtype=float)
+    delta_mu_z = evaluate_mu_redshift_term(
+        params,
+        z,
+        z_pivot_agn,
+        use_redshift_mu_term=use_redshift_mu_term,
+    )
+    mu_model = mu_cosmo + delta_mu_z
+    model_magnitude = np.asarray(M_pred + mu_model, dtype=float)
     selection_fields = {COMPLETENESS_MAG_COL, COMPLETENESS_MAG_ERR_COL}
     if selection_fields.issubset(agn_data):
         (
@@ -601,6 +644,8 @@ def agn_selection_prediction(
         "M_pred_err": np.asarray(M_pred_err, dtype=float),
         "mu_pred": m_obs - M_pred,
         "mu_cosmo": mu_cosmo,
+        "delta_mu_z": delta_mu_z,
+        "mu_model": mu_model,
         "model_magnitude": model_magnitude,
         "total_error": total_error,
         "selection_magnitude": selection_magnitude,
@@ -621,6 +666,7 @@ def log_likelihood(theta, *, agn_data, pantheon_data,
                    use_alpha_lambda_term=False,
                    use_eta_sigma_term=False,
                    use_redshift_log_f_term=False,
+                   use_redshift_mu_term=False,
                    early_de_guard=False,
                    only_sna=False,
                    only_agn=False,
@@ -634,6 +680,7 @@ def log_likelihood(theta, *, agn_data, pantheon_data,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
+        use_redshift_mu_term=use_redshift_mu_term,
     )
     model_priors = {key: priors[key] for key in model_labels}
     params = dict(zip(model_labels, theta))
@@ -687,11 +734,12 @@ def log_likelihood(theta, *, agn_data, pantheon_data,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
+        use_redshift_mu_term=use_redshift_mu_term,
         require_selection_fields=completeness_params is not None,
     )
     z = np.asarray(agn_data["z"], dtype=float)
     ll_agn = _normal_logpdf_sum(
-        prediction["mu_pred"] - prediction["mu_cosmo"],
+        prediction["mu_pred"] - prediction["mu_model"],
         prediction["total_error"],
     )
 
@@ -738,6 +786,7 @@ def log_likelihood_nearbylcs(
     use_alpha_lambda_term=False,
     use_eta_sigma_term=False,
     use_redshift_log_f_term=False,
+    use_redshift_mu_term=False,
     early_de_guard=False,
     only_sna=False,
     only_agn=False,
@@ -760,6 +809,7 @@ def log_likelihood_nearbylcs(
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
+        use_redshift_mu_term=use_redshift_mu_term,
     )
     model_priors = {key: priors[key] for key in model_labels}
     params = dict(zip(model_labels, theta))
@@ -837,9 +887,23 @@ def log_likelihood_nearbylcs(
 
     mu_pred_nc  = m_obs_nc - M_pred_nc
     mu_cosmo_nc = cosmo.distmod(z_nc).value
+    delta_mu_z_nc = evaluate_mu_redshift_term(
+        params,
+        z_nc,
+        z_pivot_agn,
+        use_redshift_mu_term=use_redshift_mu_term,
+    )
+    mu_model_nc = mu_cosmo_nc + delta_mu_z_nc
 
     sigma_lens = sigma_lens_from_dc(z_nc, cosmo)   # vector (same shape as z)
-    sigma_mu_z_nc = sigma_mu_from_z_err(z_nc, z_err_nc, cosmo)
+    sigma_mu_z_nc = sigma_mu_model_from_z_err(
+        z_nc,
+        z_err_nc,
+        cosmo,
+        params,
+        z_pivot=z_pivot_agn,
+        use_redshift_mu_term=use_redshift_mu_term,
+    )
 
     log_f_eff_nc = evaluate_log_f(
         params, z_nc, z_pivot=z_pivot_agn, use_redshift_log_f_term=use_redshift_log_f_term
@@ -853,7 +917,7 @@ def log_likelihood_nearbylcs(
         np.exp(log_f_eff_nc)**2
     )
 
-    ll_agn_noncal = _normal_logpdf_sum(mu_pred_nc - mu_cosmo_nc, mu_err_nc)
+    ll_agn_noncal = _normal_logpdf_sum(mu_pred_nc - mu_model_nc, mu_err_nc)
 
     # ========================
     # 2) CALIBRATOR AGN (agn_calibrators_data ONLY)
@@ -896,6 +960,32 @@ def log_likelihood_nearbylcs(
             raise ValueError("Negative AGN model error (calibrators).")
 
         mu_pred_c = m_obs_c - M_pred_c
+        z_c = np.asarray(agn_calibrators_data['z'][cal_mask_tbl], dtype=float)
+        delta_mu_z_c = evaluate_mu_redshift_term(
+            params,
+            z_c,
+            z_pivot_agn,
+            use_redshift_mu_term=use_redshift_mu_term,
+        )
+        sigma_delta_mu_z_c = np.zeros_like(z_c)
+        if use_redshift_mu_term:
+            calibrator_z_err = agn_calibrators_data.get(
+                'z_err', np.zeros(len(agn_calibrators_data['z']), dtype=float)
+            )
+            z_err_c = np.asarray(calibrator_z_err, dtype=float)[cal_mask_tbl]
+            z_lo_c = np.maximum(z_c - z_err_c, 1e-8)
+            z_hi_c = np.maximum(z_c + z_err_c, z_lo_c + 1e-8)
+            delta_lo_c = evaluate_mu_redshift_term(
+                params, z_lo_c, z_pivot_agn, use_redshift_mu_term=True
+            )
+            delta_hi_c = evaluate_mu_redshift_term(
+                params, z_hi_c, z_pivot_agn, use_redshift_mu_term=True
+            )
+            sigma_delta_mu_z_c = np.where(
+                np.isfinite(z_err_c) & (z_err_c > 0.0),
+                0.5 * np.abs(delta_hi_c - delta_lo_c),
+                0.0,
+            )
 
         # For calibrators: drop z-terms; use provided MU_CAL_ERR
         log_f_eff_c = evaluate_log_f(
@@ -908,10 +998,13 @@ def log_likelihood_nearbylcs(
             m_err_c**2 +
             M_pred_err_c**2 +
             np.exp(log_f_eff_c)**2 +
-            mu_cal_err**2
+            mu_cal_err**2 +
+            sigma_delta_mu_z_c**2
         )
 
-        ll_agn_cal = _normal_logpdf_sum(mu_pred_c - mu_cal, mu_err_c)
+        ll_agn_cal = _normal_logpdf_sum(
+            mu_pred_c - (mu_cal + delta_mu_z_c), mu_err_c
+        )
     else:
         raise ValueError("No calibrator AGN found in agn_calibrators_data where AGN_IS_CALIBRATOR is True.")
         ll_agn_cal = 0.0
@@ -930,7 +1023,7 @@ def log_likelihood_nearbylcs(
             (float(mag_centers[0]), float(mag_centers[-1])),
         )
         # model-predicted magnitude for non-calibrators (cosmo-anchored for selection)
-        m_model_nc = M_pred_nc + mu_cosmo_nc
+        m_model_nc = M_pred_nc + mu_model_nc
         agn_data_nc = {
             key: np.asarray(value)[mask_noncal]
             for key, value in agn_data.items()

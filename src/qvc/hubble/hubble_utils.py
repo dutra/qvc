@@ -2843,6 +2843,7 @@ def extract_cosmo_results_from_samples(
     use_alpha_lambda_term=None,
     use_eta_sigma_term=None,
     use_redshift_log_f_term=None,
+    use_redshift_mu_term=None,
 ):
     """
     Extract summary stats for all cosmological parameters from posterior samples.
@@ -2882,6 +2883,7 @@ def extract_cosmo_results_from_samples(
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
+        use_redshift_mu_term=use_redshift_mu_term,
     )
     priors, model_labels, model_labels_latex = get_model_params(
         cosmo_model,
@@ -2890,6 +2892,7 @@ def extract_cosmo_results_from_samples(
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
         use_eta_sigma_term=option_flags["use_eta_sigma_term"],
         use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
+        use_redshift_mu_term=option_flags["use_redshift_mu_term"],
     )
 
     # Validate the sample array shape.
@@ -2948,6 +2951,7 @@ def display_results_summary(
     use_alpha_lambda_term=None,
     use_eta_sigma_term=None,
     use_redshift_log_f_term=None,
+    use_redshift_mu_term=None,
     sigma_sel_posterior_median=None,
 ):
     """
@@ -2964,11 +2968,13 @@ def display_results_summary(
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
+        use_redshift_mu_term=use_redshift_mu_term,
     )
     if (
         use_alpha_lambda_term is None
         or use_eta_sigma_term is None
         or use_redshift_log_f_term is None
+        or use_redshift_mu_term is None
     ):
         if use_alpha_lambda_term is None:
             use_alpha_lambda_term = option_flags["use_alpha_lambda_term"]
@@ -2976,12 +2982,15 @@ def display_results_summary(
             use_eta_sigma_term = option_flags["use_eta_sigma_term"]
         if use_redshift_log_f_term is None:
             use_redshift_log_f_term = option_flags["use_redshift_log_f_term"]
+        if use_redshift_mu_term is None:
+            use_redshift_mu_term = option_flags["use_redshift_mu_term"]
     _, model_labels, _ = get_model_params(
         cosmo_model,
         only_agn=option_flags["only_agn"],
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
+        use_redshift_mu_term=use_redshift_mu_term,
     )
 
     def _format_interval(median, lo, hi, ndigits=3):
@@ -3112,6 +3121,7 @@ def compute_age_universe_with_error(
     use_alpha_lambda_term=None,
     use_eta_sigma_term=None,
     use_redshift_log_f_term=None,
+    use_redshift_mu_term=None,
 ):
     """
     Compute the posterior distribution of the Universe age and summarize it.
@@ -3150,6 +3160,7 @@ def compute_age_universe_with_error(
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
+        use_redshift_mu_term=use_redshift_mu_term,
     )
     priors, model_labels, _ = get_model_params(
         cosmo_model,
@@ -3157,6 +3168,7 @@ def compute_age_universe_with_error(
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
         use_eta_sigma_term=option_flags["use_eta_sigma_term"],
         use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
+        use_redshift_mu_term=option_flags["use_redshift_mu_term"],
     )
 
     N = samples.shape[0]
@@ -3242,6 +3254,7 @@ def compute_pivot_redshift(flat_samples, cosmo_model, z_min=0.0, z_max=4.0):
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
         use_eta_sigma_term=option_flags["use_eta_sigma_term"],
         use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
+        use_redshift_mu_term=option_flags["use_redshift_mu_term"],
     )
     idx = {name: model_labels.index(name) for name in model_labels}
 
@@ -3312,6 +3325,7 @@ def posterior_corr(flat_samples, cosmo_model, z_pivot_agn):
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
         use_eta_sigma_term=option_flags["use_eta_sigma_term"],
         use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
+        use_redshift_mu_term=option_flags["use_redshift_mu_term"],
     )
     flat_samples = np.asarray(flat_samples)
 
@@ -3461,6 +3475,10 @@ def write_results_tex_variables(
     cosmo_models_result_dict=None,
     cosmo_models_sna_result_dict=None,
     compare_r_sna=None,
+    use_alpha_lambda_term=False,
+    use_eta_sigma_term=False,
+    use_redshift_log_f_term=False,
+    use_redshift_mu_term=False,
     *,
     agn_pivot_context: AgnPivotContext,
 ):
@@ -3590,7 +3608,13 @@ def write_results_tex_variables(
     for model_name, flat_samples in cosmo_model_sna_samples.items():
         flat_samples = np.asarray(flat_samples)
         option_flags = resolve_model_option_flags(
-            model_name, flat_samples.shape[1], only_sna=True
+            model_name,
+            flat_samples.shape[1],
+            only_sna=True,
+            use_alpha_lambda_term=use_alpha_lambda_term,
+            use_eta_sigma_term=use_eta_sigma_term,
+            use_redshift_log_f_term=use_redshift_log_f_term,
+            use_redshift_mu_term=False,
         )
         priors, model_labels, _ = get_model_params(
             model_name,
@@ -3599,6 +3623,7 @@ def write_results_tex_variables(
             use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
             use_eta_sigma_term=option_flags["use_eta_sigma_term"],
             use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
+            use_redshift_mu_term=option_flags["use_redshift_mu_term"],
         )
         results = {}
         for i, key in enumerate(model_labels):
@@ -3638,7 +3663,12 @@ def write_results_tex_variables(
     for model_name, flat_samples in cosmo_model_joint_samples.items():
         flat_samples = np.asarray(flat_samples)
         option_flags = resolve_model_option_flags(
-            model_name, flat_samples.shape[1]
+            model_name,
+            flat_samples.shape[1],
+            use_alpha_lambda_term=use_alpha_lambda_term,
+            use_eta_sigma_term=use_eta_sigma_term,
+            use_redshift_log_f_term=use_redshift_log_f_term,
+            use_redshift_mu_term=use_redshift_mu_term,
         )
         priors, model_labels, _ = get_model_params(
             model_name,
@@ -3646,6 +3676,7 @@ def write_results_tex_variables(
             use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
             use_eta_sigma_term=option_flags["use_eta_sigma_term"],
             use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
+            use_redshift_mu_term=option_flags["use_redshift_mu_term"],
         )
         results = {}
         for i, key in enumerate(model_labels):
@@ -3674,6 +3705,16 @@ def write_results_tex_variables(
             lines.append(_cmd("BetaAGN", format_result_errors(results['beta_agn'],results['beta_agn_err']), model_suffix=model_name))
         if 'M0_agn' in results:
             lines.append(_cmd("MZeroAGN", format_result_errors(results['M0_agn'],results['M0_agn_err']), model_suffix=model_name))
+        if 'gamma_mu_z' in results:
+            lines.append(
+                _cmd(
+                    "GammaMuZ",
+                    format_result_errors(
+                        results['gamma_mu_z'], results['gamma_mu_z_err']
+                    ),
+                    model_suffix=model_name,
+                )
+            )
 
         result = cosmo_models_result_dict[model_name]
         lines.append(_cmd("AgeUniverse", format_result_errors(result["age"], result["age_err"], unit=r"Gyr"), model_suffix=model_name))

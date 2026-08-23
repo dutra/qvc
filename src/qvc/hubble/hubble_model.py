@@ -11,6 +11,7 @@ AGN_ETA_SIGMA_PARAM = "gamma_eta_sigma"
 AGN_ETA_SIGMA_OBS = "eta_sigma"
 AGN_ETA_SIGMA_ERR = "eta_sigma_err"
 AGN_LOGF_Z_PARAM = "gamma_log_f_z"
+AGN_MU_Z_PARAM = "gamma_mu_z"
 AGN_INTRINSIC_SCATTER_MAG_CENTER = 2.5 * 0.2  # 0.2 dex in luminosity = 0.5 mag
 AGN_LOG_F_PRIOR_HALF_WIDTH = 1.6
 AGN_LOG_F_PRIOR = (
@@ -65,35 +66,41 @@ def _require(keys, provided, where):
 
 def infer_model_option_flags(cosmo_model, sample_dim, only_sna=False, only_agn=False):
     combos = []
+    redshift_mu_options = (False,) if only_sna else (False, True)
     for use_alpha_lambda_term in (False, True):
         for use_eta_sigma_term in (False, True):
             for use_redshift_log_f_term in (False, True):
-                _, labels, _ = get_model_params(
-                    cosmo_model,
-                    only_sna=only_sna,
-                    only_agn=only_agn,
-                    use_planck_h0_prior=False,
-                    use_alpha_lambda_term=use_alpha_lambda_term,
-                    use_eta_sigma_term=use_eta_sigma_term,
-                    use_redshift_log_f_term=use_redshift_log_f_term,
-                )
-                combos.append(
-                    (
-                        len(labels),
-                        use_alpha_lambda_term,
-                        use_eta_sigma_term,
-                        use_redshift_log_f_term,
+                for use_redshift_mu_term in redshift_mu_options:
+                    _, labels, _ = get_model_params(
+                        cosmo_model,
+                        only_sna=only_sna,
+                        only_agn=only_agn,
+                        use_planck_h0_prior=False,
+                        use_alpha_lambda_term=use_alpha_lambda_term,
+                        use_eta_sigma_term=use_eta_sigma_term,
+                        use_redshift_log_f_term=use_redshift_log_f_term,
+                        use_redshift_mu_term=use_redshift_mu_term,
                     )
-                )
+                    combos.append(
+                        (
+                            len(labels),
+                            use_alpha_lambda_term,
+                            use_eta_sigma_term,
+                            use_redshift_log_f_term,
+                            use_redshift_mu_term,
+                        )
+                    )
     matches = [combo for combo in combos if combo[0] == sample_dim]
     if len(matches) == 1:
-        _, use_alpha_lambda_term, use_eta_sigma_term, use_redshift_log_f_term = matches[0]
+        (_, use_alpha_lambda_term, use_eta_sigma_term,
+         use_redshift_log_f_term, use_redshift_mu_term) = matches[0]
         return {
             "use_alpha_lambda_term": use_alpha_lambda_term,
             "use_eta_sigma_term": use_eta_sigma_term,
             "use_redshift_log_f_term": use_redshift_log_f_term,
+            "use_redshift_mu_term": use_redshift_mu_term,
         }
-    expected = sorted({n for n, _, _, _ in combos})
+    expected = sorted({n for n, _, _, _, _ in combos})
     raise ValueError(
         f"Could not infer model option flags for sample_dim={sample_dim}, "
         f"cosmo_model={cosmo_model!r}. Expected one of {expected} columns."
@@ -110,8 +117,10 @@ def resolve_model_option_flags(
     use_alpha_lambda_term=None,
     use_eta_sigma_term=None,
     use_redshift_log_f_term=None,
+    use_redshift_mu_term=None,
 ):
     combos = []
+    redshift_mu_options = (False,) if only_sna else (False, True)
     only_agn_options = (False,) if only_sna and only_agn is None else (
         (False, True) if only_agn is None else (bool(only_agn),)
     )
@@ -119,24 +128,27 @@ def resolve_model_option_flags(
         for alpha_flag in (False, True):
             for eta_flag in (False, True):
                 for logf_flag in (False, True):
-                    _, labels, _ = get_model_params(
-                        cosmo_model,
-                        only_sna=only_sna,
-                        only_agn=only_agn_flag,
-                        use_planck_h0_prior=use_planck_h0_prior,
-                        use_alpha_lambda_term=alpha_flag,
-                        use_eta_sigma_term=eta_flag,
-                        use_redshift_log_f_term=logf_flag,
-                    )
-                    combos.append(
-                        {
-                            "sample_dim": len(labels),
-                            "only_agn": only_agn_flag,
-                            "use_alpha_lambda_term": alpha_flag,
-                            "use_eta_sigma_term": eta_flag,
-                            "use_redshift_log_f_term": logf_flag,
-                        }
-                    )
+                    for mu_flag in redshift_mu_options:
+                        _, labels, _ = get_model_params(
+                            cosmo_model,
+                            only_sna=only_sna,
+                            only_agn=only_agn_flag,
+                            use_planck_h0_prior=use_planck_h0_prior,
+                            use_alpha_lambda_term=alpha_flag,
+                            use_eta_sigma_term=eta_flag,
+                            use_redshift_log_f_term=logf_flag,
+                            use_redshift_mu_term=mu_flag,
+                        )
+                        combos.append(
+                            {
+                                "sample_dim": len(labels),
+                                "only_agn": only_agn_flag,
+                                "use_alpha_lambda_term": alpha_flag,
+                                "use_eta_sigma_term": eta_flag,
+                                "use_redshift_log_f_term": logf_flag,
+                                "use_redshift_mu_term": mu_flag,
+                            }
+                        )
 
     matches = [combo for combo in combos if combo["sample_dim"] == sample_dim]
     if use_alpha_lambda_term is not None:
@@ -154,6 +166,11 @@ def resolve_model_option_flags(
             combo for combo in matches
             if combo["use_redshift_log_f_term"] == use_redshift_log_f_term
         ]
+    if use_redshift_mu_term is not None:
+        matches = [
+            combo for combo in matches
+            if combo["use_redshift_mu_term"] == use_redshift_mu_term
+        ]
     if only_agn is None and len(matches) > 1:
         non_agn_matches = [combo for combo in matches if not combo["only_agn"]]
         if len(non_agn_matches) == 1:
@@ -165,6 +182,7 @@ def resolve_model_option_flags(
             "use_alpha_lambda_term": matches[0]["use_alpha_lambda_term"],
             "use_eta_sigma_term": matches[0]["use_eta_sigma_term"],
             "use_redshift_log_f_term": matches[0]["use_redshift_log_f_term"],
+            "use_redshift_mu_term": matches[0]["use_redshift_mu_term"],
         }
 
     expected = sorted({combo["sample_dim"] for combo in combos})
@@ -172,6 +190,7 @@ def resolve_model_option_flags(
         "use_alpha_lambda_term": use_alpha_lambda_term,
         "use_eta_sigma_term": use_eta_sigma_term,
         "use_redshift_log_f_term": use_redshift_log_f_term,
+        "use_redshift_mu_term": use_redshift_mu_term,
     }
     if len(matches) > 1:
         matching_configs = [
@@ -179,6 +198,7 @@ def resolve_model_option_flags(
                 "use_alpha_lambda_term": combo["use_alpha_lambda_term"],
                 "use_eta_sigma_term": combo["use_eta_sigma_term"],
                 "use_redshift_log_f_term": combo["use_redshift_log_f_term"],
+                "use_redshift_mu_term": combo["use_redshift_mu_term"],
                 "only_agn": combo["only_agn"],
             }
             for combo in matches
@@ -187,7 +207,7 @@ def resolve_model_option_flags(
             f"Ambiguous model option flags for sample_dim={sample_dim}, "
             f"cosmo_model={cosmo_model!r}. Matching configurations: "
             f"{matching_configs}. Pass explicit use_alpha_lambda_term, "
-            f"use_eta_sigma_term, and/or use_redshift_log_f_term."
+            f"use_eta_sigma_term, use_redshift_log_f_term, and/or use_redshift_mu_term."
         )
 
     raise ValueError(
@@ -215,6 +235,12 @@ def infer_use_redshift_log_f_term(cosmo_model, sample_dim, only_sna=False, only_
     )["use_redshift_log_f_term"]
 
 
+def infer_use_redshift_mu_term(cosmo_model, sample_dim, only_sna=False, only_agn=False):
+    return infer_model_option_flags(
+        cosmo_model, sample_dim, only_sna=only_sna, only_agn=only_agn
+    )["use_redshift_mu_term"]
+
+
 def evaluate_log_f(params_dict, z, z_pivot, use_redshift_log_f_term=False):
     z = np.asarray(z, dtype=float)
     log_f0 = float(params_dict["log_f"])
@@ -222,6 +248,20 @@ def evaluate_log_f(params_dict, z, z_pivot, use_redshift_log_f_term=False):
         return np.full_like(z, log_f0, dtype=float)
     gamma_f = float(params_dict[AGN_LOGF_Z_PARAM])
     return log_f0 + gamma_f * np.log10((1.0 + z) / (1.0 + float(z_pivot)))
+
+
+def evaluate_mu_redshift_term(params_dict, z, z_pivot, use_redshift_mu_term=False):
+    """Evaluate the pivoted mean AGN Hubble-modulus evolution in magnitudes."""
+    z = np.asarray(z, dtype=float)
+    z_pivot = float(z_pivot)
+    if not use_redshift_mu_term:
+        return np.zeros_like(z, dtype=float)
+    if np.any(~np.isfinite(z)) or np.any(z <= -1.0):
+        raise ValueError("AGN mean-evolution redshifts must be finite and greater than -1.")
+    if not np.isfinite(z_pivot) or z_pivot <= -1.0:
+        raise ValueError("AGN mean-evolution z_pivot must be finite and greater than -1.")
+    gamma_mu_z = float(params_dict[AGN_MU_Z_PARAM])
+    return gamma_mu_z * np.log10((1.0 + z) / (1.0 + z_pivot))
 
 
 def agn_model_pack_params(params_dict, use_alpha_lambda_term=False, use_eta_sigma_term=False):
@@ -852,6 +892,7 @@ def get_model_params(
     use_alpha_lambda_term=False,
     use_eta_sigma_term=False,
     use_redshift_log_f_term=False,
+    use_redshift_mu_term=False,
 ):
     if only_sna and only_agn:
         raise ValueError("only_sna and only_agn cannot both be True.")
@@ -876,6 +917,7 @@ def get_model_params(
 
         ("log_f",     AGN_LOG_F_PRIOR),
         (AGN_LOGF_Z_PARAM, (-10.0, 10.0)),
+        (AGN_MU_Z_PARAM, (-10.0, 10.0)),
         #("sigma_b",   (-1,  1)),
 
         ("H0",       PLANCK_H0_PRIOR if use_planck_h0_prior else (60.0, 80.0)),
@@ -888,6 +930,8 @@ def get_model_params(
         priors.pop(AGN_ETA_SIGMA_PARAM)
     if not use_redshift_log_f_term:
         priors.pop(AGN_LOGF_Z_PARAM)
+    if not use_redshift_mu_term or only_sna:
+        priors.pop(AGN_MU_Z_PARAM)
     if only_agn:
         priors.pop("M0_sn")
 
@@ -927,6 +971,7 @@ def get_model_params(
         "gamma_agn": r"$\gamma_{\rm AGN}$",
         "log_f": r"$\log f$",
         AGN_LOGF_Z_PARAM: r"$\gamma_{\log f,z}$",
+        AGN_MU_Z_PARAM: r"$\gamma_{\mu,z}$",
         "sigma_b": r"$\sigma_{\rm b}$",
         "H0": r"$H_0$",
         "Om0": r"$\Omega_{m,0}$",

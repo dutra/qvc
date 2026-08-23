@@ -237,6 +237,7 @@ def _sigma_mu_from_z_err_jax(
     params: dict[str, Any],
     cosmo_model: str,
     zp: float,
+    use_redshift_mu_term: bool = False,
 ) -> jnp.ndarray:
     z = jnp.asarray(z)
     z_err = jnp.asarray(z_err)
@@ -244,6 +245,13 @@ def _sigma_mu_from_z_err_jax(
     z_hi = jnp.maximum(z + z_err, z_lo + 1e-8)
     mu_lo, _ = _distance_modulus_jax(z_lo, params, cosmo_model, zp)
     mu_hi, _ = _distance_modulus_jax(z_hi, params, cosmo_model, zp)
+    if use_redshift_mu_term:
+        mu_lo = mu_lo + params["gamma_mu_z"] * jnp.log10(
+            (1.0 + z_lo) / (1.0 + zp)
+        )
+        mu_hi = mu_hi + params["gamma_mu_z"] * jnp.log10(
+            (1.0 + z_hi) / (1.0 + zp)
+        )
     sigma_mu = 0.5 * jnp.abs(mu_hi - mu_lo)
     return jnp.where(jnp.isfinite(z_err) & (z_err > 0.0), sigma_mu, 0.0)
 
@@ -571,6 +579,7 @@ def _log_likelihood_jax(
     only_agn: bool,
     use_ceph_dist_calibration: bool,
     early_de_guard: bool,
+    use_redshift_mu_term: bool = False,
 ) -> jnp.ndarray:
     params = _pack_param_dict(theta, model_labels)
     if early_de_guard and cosmo_model == "Flatw0waCDM":
@@ -611,6 +620,7 @@ def _log_likelihood_jax(
         params,
         cosmo_model,
         z_pivot_agn,
+        use_redshift_mu_term=use_redshift_mu_term,
     )
     mu_err = jnp.sqrt(
         agn_data_jax["apparent_mag_2500_err"] ** 2
@@ -620,9 +630,16 @@ def _log_likelihood_jax(
         + jnp.exp(params["log_f"]) ** 2
     )
     mu_pred = agn_data_jax["apparent_mag_2500"] - M_pred
-    ll_agn = jnp.sum(_normal_logpdf(mu_pred - mu_cosmo, 0.0, mu_err))
+    if use_redshift_mu_term:
+        delta_mu_z = params["gamma_mu_z"] * jnp.log10(
+            (1.0 + z_agn) / (1.0 + z_pivot_agn)
+        )
+    else:
+        delta_mu_z = jnp.zeros_like(z_agn)
+    mu_model = mu_cosmo + delta_mu_z
+    ll_agn = jnp.sum(_normal_logpdf(mu_pred - mu_model, 0.0, mu_err))
 
-    m_model = M_pred + mu_cosmo
+    m_model = M_pred + mu_model
     if completeness_jax is not None:
         selection_magnitude = agn_data_jax[COMPLETENESS_MAG_COL]
         selection_magnitude_error = agn_data_jax[COMPLETENESS_MAG_ERR_COL]
@@ -784,6 +801,7 @@ def _compute_numpy_blobs_from_samples(
     disable_ceph_dist_calibration,
     use_planck_h0_prior,
     use_planck_om_prior,
+    use_redshift_mu_term=False,
     early_de_guard=False,
 ):
     logls = []
@@ -803,6 +821,7 @@ def _compute_numpy_blobs_from_samples(
             agn_calibrators_data=None,
             use_planck_h0_prior=use_planck_h0_prior,
             use_planck_om_prior=use_planck_om_prior,
+            use_redshift_mu_term=use_redshift_mu_term,
             use_ceph_dist_calibration=not disable_ceph_dist_calibration,
             early_de_guard=early_de_guard,
             only_sna=only_sna,
@@ -842,10 +861,12 @@ def run_single_jax(
     use_alpha_lambda_term=False,
     use_eta_sigma_term=False,
     use_redshift_log_f_term=False,
+    use_redshift_mu_term=False,
     early_de_guard=False,
     seed=42,
     agn_pivot_context=None,
 ):
+    use_redshift_mu_term = bool(use_redshift_mu_term and not only_sna)
     _require_jax_stack()
     if use_alpha_lambda_term:
         raise NotImplementedError("run_single_jax does not support --fit_alpha_lambda_term yet.")
@@ -886,6 +907,7 @@ def run_single_jax(
         use_planck_om_prior=use_planck_om_prior,
         use_alpha_lambda_term=False,
         use_eta_sigma_term=False,
+        use_redshift_mu_term=use_redshift_mu_term,
     )
     plot_path = f"plots/hubble/{prefix}/{run_tag}"
     os.makedirs(plot_path, exist_ok=True)
@@ -998,6 +1020,7 @@ def run_single_jax(
         only_agn=only_agn,
         use_planck_h0_prior=use_planck_h0_prior,
         use_planck_om_prior=use_planck_om_prior,
+        use_redshift_mu_term=use_redshift_mu_term,
     )
     loglike_fn = jax.jit(
         lambda theta: _log_likelihood_jax(
@@ -1011,6 +1034,7 @@ def run_single_jax(
             only_agn=only_agn,
             use_ceph_dist_calibration=not disable_ceph_dist_calibration,
             early_de_guard=early_de_guard,
+            use_redshift_mu_term=use_redshift_mu_term,
         )
     )
     model = _build_numpyro_nested_model(model_labels, priors, loglike_fn)
@@ -1041,6 +1065,7 @@ def run_single_jax(
         completeness_params=completeness_params,
         z_pivot_agn=z_pivot_agn,
         agn_pivot_context=agn_pivot_context,
+        use_redshift_mu_term=use_redshift_mu_term,
         only_sna=only_sna,
         only_agn=only_agn,
         disable_ceph_dist_calibration=disable_ceph_dist_calibration,
@@ -1083,6 +1108,8 @@ def run_single_jax(
         logZ=logZ if logZ is not None else np.nan,
         logZerr=logZerr if logZerr is not None else np.nan,
         integrals_max_w=integrals_max_w,
+        model_labels=np.asarray(model_labels, dtype=str),
+        use_redshift_mu_term=bool(use_redshift_mu_term),
     )
     if not only_sna:
         checkpoint_payload.update(
@@ -1100,8 +1127,14 @@ def run_single_jax(
         cosmo_model,
         z_pivot_agn,
         sigma_sel_posterior_median=dmi_selection_sigma_posterior_median,
+        use_redshift_mu_term=use_redshift_mu_term,
     )
-    age, age_err = compute_age_universe_with_error(flat_samples, cosmo_model, max_eval=200)
+    age, age_err = compute_age_universe_with_error(
+        flat_samples,
+        cosmo_model,
+        max_eval=200,
+        use_redshift_mu_term=use_redshift_mu_term,
+    )
 
     if only_sna:
         print("Skipping AGN-specific post-processing and plots for SNe-only run.")
@@ -1139,6 +1172,7 @@ def run_single_jax(
         plot_path=plot_path,
         speed=f"{speed}_jax",
         only_agn=only_agn,
+        use_redshift_mu_term=use_redshift_mu_term,
     )
     plot_predicted_L2500_vs_sigmahat(
         flat_samples,
@@ -1152,6 +1186,7 @@ def run_single_jax(
         df_calibrators=None,
         z_range=z_range,
         agn_pivot_context=agn_pivot_context,
+        use_redshift_mu_term=use_redshift_mu_term,
     )
     plot_predicted_L2500_vs_sigmahat(
         flat_samples,
@@ -1165,6 +1200,7 @@ def run_single_jax(
         df_calibrators=None,
         z_range=z_range,
         agn_pivot_context=agn_pivot_context,
+        use_redshift_mu_term=use_redshift_mu_term,
     )
     plot_predicted_L2500_vs_sigmahat(
         flat_samples,
@@ -1180,6 +1216,7 @@ def run_single_jax(
         df_calibrators=None,
         z_range=z_range,
         agn_pivot_context=agn_pivot_context,
+        use_redshift_mu_term=use_redshift_mu_term,
     )
     L_residuals_debiased, L_pred_std_debiased = plot_predicted_L2500_vs_sigmahat(
         flat_samples,
@@ -1195,6 +1232,7 @@ def run_single_jax(
         df_calibrators=None,
         z_range=z_range,
         agn_pivot_context=agn_pivot_context,
+        use_redshift_mu_term=use_redshift_mu_term,
     )
     plot_L2500_vs_sigma_tau_separate(
         flat_samples,
@@ -1209,6 +1247,7 @@ def run_single_jax(
         plot_path=plot_path,
         z_range=z_range,
         agn_pivot_context=agn_pivot_context,
+        use_redshift_mu_term=use_redshift_mu_term,
     )
     plot_L2500_vs_sigma_tau_separate(
         flat_samples,
@@ -1223,6 +1262,7 @@ def run_single_jax(
         plot_path=plot_path,
         z_range=z_range,
         agn_pivot_context=agn_pivot_context,
+        use_redshift_mu_term=use_redshift_mu_term,
     )
     plot_catalog_quantity_vs_sigma_tau_separate(
         df_agn_fit,
@@ -1252,6 +1292,7 @@ def run_single_jax(
         dm_interp,
         plot_path=plot_path,
         show=False,
+        use_redshift_mu_term=use_redshift_mu_term,
     )
     alpha_agn_idx = model_labels.index("alpha_agn")
     alpha_agn_median = float(np.nanmedian(flat_samples[:, alpha_agn_idx]))
@@ -1278,6 +1319,7 @@ def run_single_jax(
         z_range=z_range,
         residual_label="L2500_sigma_tau_residuals",
         output_tag="full_residuals_l2500_sigma_tau",
+        use_redshift_mu_term=use_redshift_mu_term,
     )
 
     r = plot_hubble(
@@ -1303,6 +1345,7 @@ def run_single_jax(
         dmi_posterior_draws=dmi_posterior_draws,
         posterior_sample_indices=posterior_sample_indices,
         agn_pivot_context=agn_pivot_context,
+        use_redshift_mu_term=use_redshift_mu_term,
     )
     (
         debiased_residuals,
@@ -1358,6 +1401,15 @@ def run_single_jax(
 
 def main():
     parser = argparse.ArgumentParser(description="Experimental JAX/NumPyro nested-sampling Hubble-fit pipeline.", allow_abbrev=True)
+    parser.add_argument(
+        "--fit_redshift_mu_term",
+        action="store_true",
+        default=False,
+        help=(
+            "Fit gamma_mu_z * log10((1+z)/(1+z_pivot)) as an AGN "
+            "mean distance-modulus evolution term."
+        ),
+    )
     parser.add_argument("agn_data_filepath", type=str, help="Path to AGN data file")
     parser.add_argument("--cosmo_model", type=str, default="Flatw0waCDM", choices=["FlatLambdaCDM", "FlatwCDM", "Flatw0waCDM", "FlatwpwaCDM"])
     parser.add_argument("--speed", type=str, choices=SPEED_CHOICES, default="production")
@@ -1453,6 +1505,7 @@ def main():
         use_planck_h0_prior=effective_use_planck_h0_prior,
         use_planck_om_prior=args.use_planck_om_prior,
         early_de_guard=args.early_de_guard,
+        use_redshift_mu_term=args.fit_redshift_mu_term,
         seed=args.seed,
     )
 

@@ -308,6 +308,7 @@ def simulate_hubble_posterior_closure(
     use_alpha_lambda_term=False,
     use_eta_sigma_term=False,
     use_redshift_log_f_term=False,
+    use_redshift_mu_term=False,
 ):
     """Run closure using the exact selection prediction for posterior draws."""
 
@@ -336,6 +337,7 @@ def simulate_hubble_posterior_closure(
             use_alpha_lambda_term=use_alpha_lambda_term,
             use_eta_sigma_term=use_eta_sigma_term,
             use_redshift_log_f_term=use_redshift_log_f_term,
+            use_redshift_mu_term=use_redshift_mu_term,
             require_selection_fields=True,
         )
         model_draws.append(prediction["selection_model_magnitude"])

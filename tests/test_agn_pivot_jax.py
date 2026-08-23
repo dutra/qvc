@@ -13,7 +13,14 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from qvc.hubble.hubble_fit_jax import _agn_model_jax, _prepare_agn_arrays
+from astropy.cosmology import FlatLambdaCDM
+
+from qvc.hubble.hubble_fit_jax import (
+    _agn_model_jax,
+    _prepare_agn_arrays,
+    _sigma_mu_from_z_err_jax,
+)
+from qvc.hubble.hubble_likelihood import sigma_mu_model_from_z_err
 from qvc.hubble.hubble_model import (
     M_model_agn,
     agn_model_pack_obs,
@@ -104,3 +111,28 @@ def test_agn_array_preparation_rejects_non_psd_covariance(covariance):
             data,
             agn_pivot_context=_pivot_context(data),
         )
+
+
+def test_jax_redshift_error_includes_mean_evolution_derivative():
+    z = np.array([0.6, 1.5, 2.8])
+    z_err = np.array([0.01, 0.0, 0.02])
+    params = {"H0": 70.0, "Om0": 0.3, "gamma_mu_z": 1.7}
+    actual = np.asarray(
+        _sigma_mu_from_z_err_jax(
+            jnp.asarray(z),
+            jnp.asarray(z_err),
+            params,
+            "FlatLambdaCDM",
+            1.5,
+            use_redshift_mu_term=True,
+        )
+    )
+    expected = sigma_mu_model_from_z_err(
+        z,
+        z_err,
+        FlatLambdaCDM(H0=70.0, Om0=0.3),
+        params,
+        z_pivot=1.5,
+        use_redshift_mu_term=True,
+    )
+    np.testing.assert_allclose(actual, expected, rtol=2e-6, atol=2e-7)

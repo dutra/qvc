@@ -5237,3 +5237,331 @@ def test_hubble_fit_cli_declares_and_forwards_minimal_plots():
     assert "minimal_plots" in run_single_kwargs
     assert "minimal_plots" in run_all_kwargs
     assert "plot_diagnostics" in load_kwargs
+
+
+def test_pivoted_mean_redshift_evolution_parameterization():
+    params = {hubble_model.AGN_MU_Z_PARAM: 2.0}
+    z = np.array([0.5, 1.5, 3.0])
+    actual = hubble_model.evaluate_mu_redshift_term(
+        params, z, 1.5, use_redshift_mu_term=True
+    )
+    expected = 2.0 * np.log10((1.0 + z) / 2.5)
+
+    np.testing.assert_allclose(actual, expected)
+    assert actual[1] == pytest.approx(0.0, abs=1e-15)
+    assert actual[0] < 0.0 < actual[2]
+    np.testing.assert_array_equal(
+        hubble_model.evaluate_mu_redshift_term(params, z, 1.5),
+        np.zeros_like(z),
+    )
+    with pytest.raises(ValueError, match="greater than -1"):
+        hubble_model.evaluate_mu_redshift_term(
+            params, np.array([-1.0]), 1.5, use_redshift_mu_term=True
+        )
+
+    priors, labels, latex = hubble_model.get_model_params(
+        "FlatLambdaCDM", use_redshift_mu_term=True
+    )
+    assert priors[hubble_model.AGN_MU_Z_PARAM] == (-10.0, 10.0)
+    assert hubble_model.AGN_MU_Z_PARAM in labels
+    assert r"$\gamma_{\mu,z}$" in latex
+    _, sna_labels, _ = hubble_model.get_model_params(
+        "FlatLambdaCDM", only_sna=True, use_redshift_mu_term=True
+    )
+    assert hubble_model.AGN_MU_Z_PARAM not in sna_labels
+    assert "_muz" in hubble_fit.make_run_tag(
+        "FlatLambdaCDM",
+        False,
+        "fastest",
+        None,
+        (0.44, 3.16),
+        use_redshift_mu_term=True,
+    )
+
+
+def test_mean_redshift_evolution_enters_likelihood_and_selection(fake_data):
+    df_agn, _ = fake_data
+    priors, labels, _ = hubble_model.get_model_params(
+        "FlatLambdaCDM", only_agn=True, use_redshift_mu_term=True
+    )
+    params = {key: 0.5 * (lo + hi) for key, (lo, hi) in priors.items()}
+    params[hubble_model.AGN_MU_Z_PARAM] = 1.25
+    theta = np.array([params[key] for key in labels], dtype=float)
+    pivot_context = _agn_pivot_context(df_agn)
+
+    prediction = hubble_likelihood.agn_selection_prediction(
+        theta,
+        agn_data=df_agn,
+        cosmo_model="FlatLambdaCDM",
+        z_pivot_agn=hubble_fit.z_pivot_agn,
+        agn_pivot_context=pivot_context,
+        only_agn=True,
+        use_redshift_mu_term=True,
+        require_selection_fields=False,
+    )
+    expected_delta = params[hubble_model.AGN_MU_Z_PARAM] * np.log10(
+        (1.0 + df_agn["z"].to_numpy()) / (1.0 + hubble_fit.z_pivot_agn)
+    )
+    np.testing.assert_allclose(prediction["delta_mu_z"], expected_delta)
+    np.testing.assert_allclose(
+        prediction["mu_model"], prediction["mu_cosmo"] + expected_delta
+    )
+    np.testing.assert_allclose(
+        prediction["model_magnitude"],
+        prediction["M_pred"] + prediction["mu_model"],
+    )
+
+    logl, _ = hubble_likelihood.log_likelihood(
+        theta,
+        agn_data={key: df_agn[key].to_numpy() for key in df_agn.columns},
+        pantheon_data={},
+        _sna_L=None,
+        _sna_Lower=True,
+        _sna_LogdetCov=None,
+        cosmo_model="FlatLambdaCDM",
+        completeness_params=None,
+        z_pivot_agn=hubble_fit.z_pivot_agn,
+        agn_pivot_context=pivot_context,
+        only_agn=True,
+        use_redshift_mu_term=True,
+        use_full_cov=False,
+    )
+    expected_logl = hubble_likelihood._normal_logpdf_sum(
+        prediction["mu_pred"] - prediction["mu_model"],
+        prediction["total_error"],
+    )
+    assert logl == pytest.approx(expected_logl)
+
+
+def test_mean_redshift_evolution_plot_exposes_raw_and_adjusted_residuals(
+    fake_data,
+    monkeypatch,
+    tmp_path,
+):
+    df_agn, df_pantheon = fake_data
+    priors, labels, _ = hubble_model.get_model_params(
+        "FlatLambdaCDM", use_redshift_mu_term=True
+    )
+    params = {key: 0.5 * (lo + hi) for key, (lo, hi) in priors.items()}
+    params[hubble_model.AGN_MU_Z_PARAM] = 1.0
+    theta = np.array([params[key] for key in labels], dtype=float)
+    samples = np.tile(theta[None, :], (8, 1))
+    captured = []
+    empty = tuple(np.empty(0, dtype=float) for _ in range(3)) + (
+        np.empty(0, dtype=int),
+    )
+
+    def capture_bins(z, y, yerr, bins, z_range, **kwargs):
+        captured.append(np.asarray(y, dtype=float).copy())
+        return empty, empty
+
+    monkeypatch.setattr(
+        hubble_plotting, "_range_partitioned_weighted_bin_stats", capture_bins
+    )
+    residuals, *_ = hubble_plotting.plot_hubble(
+        samples,
+        df_agn,
+        df_pantheon,
+        "FlatLambdaCDM",
+        hubble_fit.z_pivot_agn,
+        plot_path=str(tmp_path),
+        debias=True,
+        dmi_values=np.zeros(len(df_agn)),
+        compute_only=True,
+        use_redshift_mu_term=True,
+        agn_pivot_context=_agn_pivot_context(df_agn),
+    )
+
+    assert len(captured) == 4
+    adjusted = captured[1]
+    raw = captured[2]
+    expected_delta = np.log10(
+        (1.0 + df_agn["z"].to_numpy()) / (1.0 + hubble_fit.z_pivot_agn)
+    )
+    np.testing.assert_allclose(residuals, adjusted)
+    np.testing.assert_allclose(raw - adjusted, expected_delta)
+
+    monkeypatch.setattr(hubble_plotting, "_save_figure", lambda *args, **kwargs: None)
+    hubble_plotting.plot_hubble(
+        samples,
+        df_agn,
+        df_pantheon,
+        "FlatLambdaCDM",
+        hubble_fit.z_pivot_agn,
+        plot_path=str(tmp_path),
+        debias=True,
+        dmi_values=np.zeros(len(df_agn)),
+        residuals_csv_filename="muz_residuals.csv",
+        use_redshift_mu_term=True,
+        agn_pivot_context=_agn_pivot_context(df_agn),
+        verbose=False,
+    )
+    residual_table = pd.read_csv(tmp_path / "muz_residuals.csv")
+    expected_columns = {
+        "residuals",
+        "residuals_raw_cosmology",
+        "delta_mu_z_posterior_median",
+        "mu_model_evolved_posterior_median",
+        "mu_evolution_corrected_posterior_median",
+    }
+    assert expected_columns.issubset(residual_table.columns)
+    np.testing.assert_allclose(
+        residual_table["residuals_raw_cosmology"]
+        - residual_table["residuals"],
+        residual_table["delta_mu_z_posterior_median"],
+    )
+
+
+def test_no_redshift_evolution_uses_red_binned_residuals(
+    fake_data,
+    monkeypatch,
+    tmp_path,
+):
+    from matplotlib.axes import Axes
+
+    df_agn, df_pantheon = fake_data
+    priors, labels, _ = hubble_model.get_model_params("FlatLambdaCDM")
+    theta = np.array([0.5 * sum(priors[key]) for key in labels], dtype=float)
+    samples = np.tile(theta[None, :], (8, 1))
+    populated = (
+        np.array([1.5]),
+        np.array([0.1]),
+        np.array([0.01]),
+        np.array([10]),
+    )
+    empty = tuple(np.empty(0, dtype=float) for _ in range(3)) + (
+        np.empty(0, dtype=int),
+    )
+    monkeypatch.setattr(
+        hubble_plotting,
+        "_range_partitioned_weighted_bin_stats",
+        lambda *args, **kwargs: (populated, empty),
+    )
+    monkeypatch.setattr(hubble_plotting, "_save_figure", lambda *args, **kwargs: None)
+
+    captured = []
+    original_errorbar = Axes.errorbar
+
+    def capture_errorbar(self, *args, **kwargs):
+        if kwargs.get("label") == "Binned residuals":
+            captured.append(kwargs.copy())
+        return original_errorbar(self, *args, **kwargs)
+
+    monkeypatch.setattr(Axes, "errorbar", capture_errorbar)
+    hubble_plotting.plot_hubble(
+        samples,
+        df_agn,
+        df_pantheon,
+        "FlatLambdaCDM",
+        hubble_fit.z_pivot_agn,
+        plot_path=str(tmp_path),
+        debias=True,
+        dmi_values=np.zeros(len(df_agn)),
+        use_redshift_mu_term=False,
+        agn_pivot_context=_agn_pivot_context(df_agn),
+        verbose=False,
+    )
+
+    assert len(captured) == 1
+    assert captured[0]["fmt"] == "o"
+    assert captured[0]["mfc"] == "red"
+    assert captured[0]["ecolor"] == "red"
+
+
+def test_mean_redshift_evolution_redshift_error_propagates_complete_mean():
+    cosmo = FlatLambdaCDM(H0=70.0, Om0=0.3)
+    params = {hubble_model.AGN_MU_Z_PARAM: 2.0}
+    z = np.array([0.5, 1.5, 3.0])
+    z_err = np.array([0.01, 0.0, 0.03])
+    actual = hubble_likelihood.sigma_mu_model_from_z_err(
+        z,
+        z_err,
+        cosmo,
+        params,
+        z_pivot=1.5,
+        use_redshift_mu_term=True,
+    )
+    z_lo = np.maximum(z - z_err, 1e-8)
+    z_hi = np.maximum(z + z_err, z_lo + 1e-8)
+    expected = 0.5 * np.abs(
+        cosmo.distmod(z_hi).value
+        + hubble_model.evaluate_mu_redshift_term(params, z_hi, 1.5, True)
+        - cosmo.distmod(z_lo).value
+        - hubble_model.evaluate_mu_redshift_term(params, z_lo, 1.5, True)
+    )
+    expected[1] = 0.0
+    np.testing.assert_allclose(actual, expected)
+    assert actual[1] == 0.0
+
+
+def test_mean_redshift_evolution_checkpoint_labels_disambiguate_optional_models():
+    _, mu_labels, _ = hubble_model.get_model_params(
+        "FlatLambdaCDM", use_redshift_mu_term=True
+    )
+    _, logf_labels, _ = hubble_model.get_model_params(
+        "FlatLambdaCDM", use_redshift_log_f_term=True
+    )
+    assert len(mu_labels) == len(logf_labels)
+    n_agn = 3
+    payload = {
+        "flat_samples": np.zeros((4, len(mu_labels))),
+        "dmi_max_w": np.zeros(n_agn),
+        "dmi_posterior_sigma": np.ones(n_agn),
+        "integrals_max_w": np.zeros(n_agn),
+        "logZ": 0.0,
+        "logZerr": 0.0,
+        "model_labels": np.asarray(mu_labels),
+        "use_redshift_mu_term": True,
+    }
+    hubble_fit.validate_resume_checkpoint(
+        payload,
+        "fresh.h5",
+        len(mu_labels),
+        n_agn,
+        expected_model_labels=mu_labels,
+        expected_use_redshift_mu_term=True,
+    )
+    with pytest.raises(RuntimeError, match="model_labels"):
+        hubble_fit.validate_resume_checkpoint(
+            payload,
+            "wrong-model.h5",
+            len(logf_labels),
+            n_agn,
+            expected_model_labels=logf_labels,
+            expected_use_redshift_mu_term=False,
+        )
+
+    legacy_payload = {
+        key: value
+        for key, value in payload.items()
+        if key not in {"model_labels", "use_redshift_mu_term"}
+    }
+    hubble_fit.validate_resume_checkpoint(
+        legacy_payload,
+        "legacy.h5",
+        len(mu_labels),
+        n_agn,
+        expected_model_labels=mu_labels,
+        expected_use_redshift_mu_term=True,
+    )
+
+
+def test_redshift_mu_cli_is_declared_and_forwarded_in_both_entry_points():
+    for module_path, expected_calls in (
+        (Path(hubble_fit.__file__), {"run_single", "run_all", "run_single_jax"}),
+        (SRC / "qvc/hubble/hubble_fit_jax.py", {"run_single_jax"}),
+    ):
+        tree = ast.parse(module_path.read_text(encoding="utf-8"))
+        parser_declared = False
+        forwarded = set()
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            if isinstance(node.func, ast.Attribute) and node.func.attr == "add_argument":
+                if node.args and isinstance(node.args[0], ast.Constant):
+                    parser_declared |= node.args[0].value == "--fit_redshift_mu_term"
+            if isinstance(node.func, ast.Name) and node.func.id in expected_calls:
+                if any(kw.arg == "use_redshift_mu_term" for kw in node.keywords):
+                    forwarded.add(node.func.id)
+        assert parser_declared
+        assert forwarded == expected_calls
