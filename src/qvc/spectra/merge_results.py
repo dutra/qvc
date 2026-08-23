@@ -22,6 +22,46 @@ from qvc.spectra.catalog_hdf5 import (
 )
 
 
+SDSS_SPECOBJ_STRING_FIELDS = {
+    "RUN2D": "SDSS_RUN2D",
+    "SURVEY": "SDSS_SURVEY",
+    "INSTRUMENT": "SDSS_INSTRUMENT",
+    "PROGRAMNAME": "SDSS_PROGRAMNAME",
+    "SOURCETYPE": "SDSS_SOURCETYPE",
+    "TARGETTYPE": "SDSS_TARGETTYPE",
+    "CHUNK": "SDSS_CHUNK",
+    "PLATERUN": "SDSS_PLATERUN",
+    # TARGETOBJID is stored as a 22-character FITS field, not a numeric column.
+    "TARGETOBJID": "SDSS_TARGETOBJID",
+}
+SDSS_SPECOBJ_INTEGER_FIELDS = {
+    "THING_ID": "SDSS_THING_ID",
+    "THING_ID_TARGETING": "SDSS_THING_ID_TARGETING",
+    "PRIMTARGET": "SDSS_PRIMTARGET",
+    "SECTARGET": "SDSS_SECTARGET",
+    "LEGACY_TARGET1": "SDSS_LEGACY_TARGET1",
+    "LEGACY_TARGET2": "SDSS_LEGACY_TARGET2",
+    "SPECIAL_TARGET1": "SDSS_SPECIAL_TARGET1",
+    "SPECIAL_TARGET2": "SDSS_SPECIAL_TARGET2",
+    "SEGUE1_TARGET1": "SDSS_SEGUE1_TARGET1",
+    "SEGUE1_TARGET2": "SDSS_SEGUE1_TARGET2",
+    "SEGUE2_TARGET1": "SDSS_SEGUE2_TARGET1",
+    "SEGUE2_TARGET2": "SDSS_SEGUE2_TARGET2",
+    "BOSS_TARGET1": "SDSS_BOSS_TARGET1",
+    "BOSS_TARGET2": "SDSS_BOSS_TARGET2",
+    "EBOSS_TARGET0": "SDSS_EBOSS_TARGET0",
+    "EBOSS_TARGET1": "SDSS_EBOSS_TARGET1",
+    "EBOSS_TARGET2": "SDSS_EBOSS_TARGET2",
+    "EBOSS_TARGET_ID": "SDSS_EBOSS_TARGET_ID",
+    "ANCILLARY_TARGET1": "SDSS_ANCILLARY_TARGET1",
+    "ANCILLARY_TARGET2": "SDSS_ANCILLARY_TARGET2",
+}
+SDSS_SPECOBJ_OUTPUT_FIELDS = (
+    *SDSS_SPECOBJ_STRING_FIELDS.values(),
+    *SDSS_SPECOBJ_INTEGER_FIELDS.values(),
+)
+
+
 def read_quasars_from_csv(csv_path):
     return pd.read_csv(csv_path)
 
@@ -254,9 +294,11 @@ def enrich_h5_catalog_rows(catalog, enrichment):
     )
 
 
-def _normalize_run2d(value):
+def _normalize_sdss_text(value):
     if pd.isna(value):
         return pd.NA
+    if isinstance(value, bytes):
+        value = value.decode("utf-8", errors="replace")
     text = str(value).strip()
     if text.startswith("b'") and text.endswith("'"):
         text = text[2:-1]
@@ -266,8 +308,20 @@ def _normalize_run2d(value):
     return text
 
 
+def _normalize_run2d(value):
+    """Backward-compatible name for callers that normalize RUN2D only."""
+    return _normalize_sdss_text(value)
+
+
 def populate_sdss_run2d_from_fits(quasars, fits_path):
-    """Populate SDSS_RUN2D using DR17 specObj keys (plate, mjd, fiberid/fiber)."""
+    """Populate SDSS spectroscopic metadata using exact DR17 specObj keys.
+
+    The historical function name is retained for compatibility.  In addition
+    to ``SDSS_RUN2D``, this copies the survey/program labels and targeting bit
+    masks needed to distinguish BOSS from eBOSS and their target channels.
+    Only matching specObj rows are materialized, which keeps memory bounded
+    when reading the 5.8-million-row DR17 table.
+    """
     if not quasars:
         return list(quasars)
 
@@ -278,9 +332,13 @@ def populate_sdss_run2d_from_fits(quasars, fits_path):
     has_fiberid = "fiberid" in out.columns
     has_fiber = "fiber" in out.columns
     if not all(c in out.columns for c in key_cols) or (not has_fiberid and not has_fiber):
-        out["SDSS_RUN2D"] = pd.NA
+        for column in SDSS_SPECOBJ_STRING_FIELDS.values():
+            out[column] = pd.NA
+        for column in SDSS_SPECOBJ_INTEGER_FIELDS.values():
+            out[column] = -1
+        out["SDSS_SPECOBJ_MATCHED"] = False
         print(
-            "[WARNING] Cannot populate SDSS_RUN2D: merged data is missing required key columns "
+            "[WARNING] Cannot populate SDSS metadata: merged data is missing required key columns "
             "(need plate, mjd, and fiberid or fiber)."
         )
         return out.to_dict("records")
@@ -290,40 +348,124 @@ def populate_sdss_run2d_from_fits(quasars, fits_path):
     else:
         fiber_col = "fiber"
 
+    plate_key = pd.to_numeric(out["plate"], errors="coerce")
+    mjd_key = pd.to_numeric(out["mjd"], errors="coerce")
+    fiber_key = pd.to_numeric(out[fiber_col], errors="coerce")
+    valid_key = plate_key.notna() & mjd_key.notna() & fiber_key.notna()
+    target_keys = (
+        (
+            plate_key[valid_key].to_numpy(dtype=np.int64) * 100_000
+            + mjd_key[valid_key].to_numpy(dtype=np.int64)
+        )
+        * 10_000
+        + fiber_key[valid_key].to_numpy(dtype=np.int64)
+    )
+
     try:
         with fits.open(fits_path, memmap=True) as hdul:
             data = hdul[1].data
-            table = pd.DataFrame(
-                {
-                    "plate": data["PLATE"],
-                    "mjd": data["MJD"],
-                    "fiberid": data["FIBERID"],
-                    "SDSS_RUN2D": data["RUN2D"],
-                }
+            available = set(data.names)
+            required = {"PLATE", "MJD", "FIBERID", "RUN2D"}
+            missing_required = sorted(required.difference(available))
+            if missing_required:
+                raise ValueError(
+                    f"specObj table is missing required columns {missing_required}"
+                )
+            spec_plate = np.asarray(data["PLATE"], dtype=np.int64)
+            spec_mjd = np.asarray(data["MJD"], dtype=np.int64)
+            spec_fiber = np.asarray(data["FIBERID"], dtype=np.int64)
+            spec_keys = (
+                (spec_plate * 100_000 + spec_mjd) * 10_000 + spec_fiber
             )
+            matched_indices = np.flatnonzero(
+                np.isin(spec_keys, np.unique(target_keys), assume_unique=False)
+            )
+            table_data = {
+                "_sdss_plate_key": spec_plate[matched_indices],
+                "_sdss_mjd_key": spec_mjd[matched_indices],
+                "_sdss_fiber_key": spec_fiber[matched_indices],
+            }
+            for source, output in SDSS_SPECOBJ_STRING_FIELDS.items():
+                if source in available:
+                    table_data[output] = [
+                        _normalize_sdss_text(value)
+                        for value in data[source][matched_indices]
+                    ]
+            for source, output in SDSS_SPECOBJ_INTEGER_FIELDS.items():
+                if source in available:
+                    # Nullable Int64 prevents pandas from promoting the whole
+                    # column to float64 when a left-join row has no specObj
+                    # match.  That promotion would corrupt targeting masks
+                    # above 2**53.
+                    table_data[output] = pd.array(
+                        np.asarray(data[source][matched_indices], dtype=np.int64),
+                        dtype="Int64",
+                    )
+            table = pd.DataFrame(table_data)
     except Exception as exc:
-        out["SDSS_RUN2D"] = pd.NA
-        print(f"[WARNING] Could not read SDSS RUN2D FITS file {fits_path}: {exc}")
+        for column in SDSS_SPECOBJ_STRING_FIELDS.values():
+            out[column] = pd.NA
+        for column in SDSS_SPECOBJ_INTEGER_FIELDS.values():
+            out[column] = -1
+        out["SDSS_SPECOBJ_MATCHED"] = False
+        print(f"[WARNING] Could not read SDSS metadata FITS file {fits_path}: {exc}")
         return out.to_dict("records")
 
-    for col in ("plate", "mjd", "fiberid"):
-        table[col] = pd.to_numeric(table[col], errors="coerce").astype("Int64")
-    table["SDSS_RUN2D"] = table["SDSS_RUN2D"].apply(_normalize_run2d).astype("string")
-    table = table.drop_duplicates(subset=["plate", "mjd", "fiberid"], keep="first")
-
-    out["plate"] = pd.to_numeric(out["plate"], errors="coerce").astype("Int64")
-    out["mjd"] = pd.to_numeric(out["mjd"], errors="coerce").astype("Int64")
-    out["_fiber_merge_key"] = pd.to_numeric(out[fiber_col], errors="coerce").astype("Int64")
-
-    merged = out.merge(
-        table.rename(columns={"fiberid": "_fiber_merge_key"}),
-        on=["plate", "mjd", "_fiber_merge_key"],
-        how="left",
+    table = table.drop_duplicates(
+        subset=["_sdss_plate_key", "_sdss_mjd_key", "_sdss_fiber_key"],
+        keep="first",
     )
-    merged = merged.drop(columns=["_fiber_merge_key"])
-    n_matched = int(pd.notna(merged["SDSS_RUN2D"]).sum())
+    existing = {
+        column: out.pop(column).reset_index(drop=True)
+        for column in SDSS_SPECOBJ_OUTPUT_FIELDS
+        if column in out
+    }
+    out["_sdss_catalog_row"] = np.arange(len(out), dtype=np.int64)
+    out["_sdss_plate_key"] = plate_key.fillna(-1).to_numpy(dtype=np.int64)
+    out["_sdss_mjd_key"] = mjd_key.fillna(-1).to_numpy(dtype=np.int64)
+    out["_sdss_fiber_key"] = fiber_key.fillna(-1).to_numpy(dtype=np.int64)
+    merged = out.merge(
+        table,
+        on=["_sdss_plate_key", "_sdss_mjd_key", "_sdss_fiber_key"],
+        how="left",
+        validate="many_to_one",
+        sort=False,
+    )
+    merged = merged.sort_values("_sdss_catalog_row", kind="stable").reset_index(drop=True)
+    matched = merged["SDSS_RUN2D"].notna()
+    merged["SDSS_SPECOBJ_MATCHED"] = matched.to_numpy(dtype=bool)
+
+    for column in SDSS_SPECOBJ_STRING_FIELDS.values():
+        if column not in merged:
+            merged[column] = pd.NA
+        if column in existing:
+            missing = merged[column].isna() | (merged[column].astype("string").str.strip() == "")
+            merged.loc[missing, column] = existing[column][missing].to_numpy()
+        merged[column] = merged[column].apply(_normalize_sdss_text).astype("string")
+    for column in SDSS_SPECOBJ_INTEGER_FIELDS.values():
+        if column not in merged:
+            merged[column] = np.nan
+        if column in existing:
+            missing = pd.to_numeric(merged[column], errors="coerce").isna()
+            merged.loc[missing, column] = existing[column][missing].to_numpy()
+        merged[column] = (
+            pd.to_numeric(merged[column], errors="coerce")
+            .fillna(-1)
+            .astype(np.int64)
+        )
+
+    merged = merged.drop(
+        columns=[
+            "_sdss_catalog_row",
+            "_sdss_plate_key",
+            "_sdss_mjd_key",
+            "_sdss_fiber_key",
+        ]
+    )
+    n_matched = int(matched.sum())
     print(
-        f"Populated SDSS_RUN2D from {fits_path}: matched {n_matched} / {len(merged)} rows."
+        f"Populated SDSS spectroscopic metadata from {fits_path}: "
+        f"matched {n_matched} / {len(merged)} rows."
     )
     return merged.to_dict("records")
 
@@ -364,12 +506,16 @@ def main():
         help="Skip populate_sdss_fields before writing.",
     )
     p.add_argument(
+        "--populate_sdss_metadata_file",
         "--populate_sdss_run2d_file",
+        dest="populate_sdss_metadata_file",
+        metavar="FITS_PATH",
         nargs="?",
         const="data/SDSS_DR17/specObj-dr17.fits",
         default=None,
         help=(
-            "Populate SDSS_RUN2D using RUN2D from the given SDSS DR17 specObj FITS file. "
+            "Populate SDSS_RUN2D, SDSS_SURVEY, program/source labels, and targeting "
+            "bits from the given SDSS DR17 specObj FITS file. "
             "If passed without a value, defaults to data/SDSS_DR17/specObj-dr17.fits."
         ),
     )
@@ -448,15 +594,15 @@ def main():
         else:
             all_quasars = populate_sdss_fields(all_quasars)
 
-    if args.populate_sdss_run2d_file and all_quasars:
+    if args.populate_sdss_metadata_file and all_quasars:
         try:
-            fits_path = resolve_qvc_data_path(args.populate_sdss_run2d_file)
+            fits_path = resolve_qvc_data_path(args.populate_sdss_metadata_file)
         except FileNotFoundError:
-            fits_path = args.populate_sdss_run2d_file
+            fits_path = args.populate_sdss_metadata_file
         if not os.path.exists(fits_path):
             print(
-                f"[WARNING] --populate_sdss_run2d_file requested, but file not found: {fits_path}. "
-                "Continuing without SDSS_RUN2D enrichment."
+                f"[WARNING] --populate_sdss_metadata_file requested, but file not found: "
+                f"{fits_path}. Continuing without SDSS spectroscopic metadata enrichment."
             )
         else:
             if use_h5:
