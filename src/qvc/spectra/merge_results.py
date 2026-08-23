@@ -153,30 +153,46 @@ def _dedup_row_indices(frame, keys):
     return np.asarray([seen[key] for key in order], dtype=int)
 
 
+_NUMERIC_DTYPE_KINDS = frozenset("iufc")
+
+
+def _scalar_dtype_kinds_compatible(left, right):
+    """Return whether two shard dtypes can share one scalar catalog column."""
+
+    if left == right:
+        return True
+    return left in _NUMERIC_DTYPE_KINDS and right in _NUMERIC_DTYPE_KINDS
+
+
 def load_and_merge_h5(file_list, expected_n=None, dedup_keys=None):
-    """Load HDF5 shards strictly and keep fraction draws aligned with rows."""
+    """Load HDF5 shards and keep optional fields and fraction draws aligned."""
 
     frames = []
     draws = []
     counts = []
-    reference_columns = None
-    reference_dtype_kinds = None
+    column_order = []
+    column_dtype_kinds = {}
+    column_sources = {}
     for path in tqdm(file_list, desc="Merging HDF5 shards", unit="file"):
         catalog = read_spectra_catalog_hdf5(path)
         if not enforce_expected_count(len(catalog.frame), expected_n, path):
             continue
         if catalog.bands != PSF_AGN_FRACTION_BANDS:
             raise ValueError(f"Incompatible fraction bands in {path}: {catalog.bands}")
-        columns = tuple(catalog.frame.columns)
-        dtype_kinds = tuple(catalog.frame[column].dtype.kind for column in columns)
-        if reference_columns is None:
-            reference_columns = columns
-            reference_dtype_kinds = dtype_kinds
-        elif columns != reference_columns or dtype_kinds != reference_dtype_kinds:
-            raise ValueError(
-                f"Incompatible scalar catalog schema in {path}: columns/dtypes "
-                "do not match the first HDF5 shard."
-            )
+        for column in catalog.frame.columns:
+            dtype_kind = catalog.frame[column].dtype.kind
+            if column not in column_dtype_kinds:
+                column_order.append(column)
+                column_dtype_kinds[column] = dtype_kind
+                column_sources[column] = path
+                continue
+            reference_kind = column_dtype_kinds[column]
+            if not _scalar_dtype_kinds_compatible(reference_kind, dtype_kind):
+                raise ValueError(
+                    f"Incompatible scalar catalog dtype for column {column!r} in "
+                    f"{path}: kind {dtype_kind!r} cannot be merged with kind "
+                    f"{reference_kind!r} first seen in {column_sources[column]}."
+                )
         frames.append(catalog.frame)
         draws.append(catalog.fraction_draws)
         counts.append(catalog.valid_count)
@@ -192,7 +208,13 @@ def load_and_merge_h5(file_list, expected_n=None, dedup_keys=None):
             bands=PSF_AGN_FRACTION_BANDS,
         )
 
-    frame = pd.concat(frames, ignore_index=True, sort=False)
+    # Posterior sites can legitimately vary by object because the fitted line
+    # set depends on spectral coverage.  Concatenation forms their union and
+    # fills fields absent from a shard with NaN.  Preserve deterministic
+    # first-seen column order rather than requiring identical shard ordering.
+    frame = pd.concat(frames, ignore_index=True, sort=False).reindex(
+        columns=column_order
+    )
     draw_array = np.concatenate(draws, axis=0)
     count_array = np.concatenate(counts, axis=0)
     keep = _dedup_row_indices(frame, dedup_keys or [])
