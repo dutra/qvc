@@ -204,6 +204,18 @@ def _scalar_dtype_kinds_compatible(left, right):
     return left in _NUMERIC_DTYPE_KINDS and right in _NUMERIC_DTYPE_KINDS
 
 
+def deduplicate_h5_catalog(catalog, keys):
+    """Deduplicate an in-memory catalog while preserving draw alignment."""
+
+    keep = _dedup_row_indices(catalog.frame, keys or [])
+    return SpectraCatalog(
+        frame=catalog.frame.iloc[keep].reset_index(drop=True),
+        fraction_draws=catalog.fraction_draws[keep],
+        valid_count=catalog.valid_count[keep],
+        bands=catalog.bands,
+    )
+
+
 def load_and_merge_h5(file_list, expected_n=None, dedup_keys=None):
     """Load HDF5 shards and keep optional fields and fraction draws aligned."""
 
@@ -257,12 +269,14 @@ def load_and_merge_h5(file_list, expected_n=None, dedup_keys=None):
     )
     draw_array = np.concatenate(draws, axis=0)
     count_array = np.concatenate(counts, axis=0)
-    keep = _dedup_row_indices(frame, dedup_keys or [])
-    return SpectraCatalog(
-        frame=frame.iloc[keep].reset_index(drop=True),
-        fraction_draws=draw_array[keep],
-        valid_count=count_array[keep],
-        bands=PSF_AGN_FRACTION_BANDS,
+    return deduplicate_h5_catalog(
+        SpectraCatalog(
+            frame=frame,
+            fraction_draws=draw_array,
+            valid_count=count_array,
+            bands=PSF_AGN_FRACTION_BANDS,
+        ),
+        dedup_keys,
     )
 
 
@@ -562,18 +576,22 @@ def main():
     print(f"Output: {out_path}")
 
     if use_h5:
-        before_catalog = load_and_merge_h5(file_list, expected_n=args.expected, dedup_keys=[])
         merged_catalog = load_and_merge_h5(
             file_list,
             expected_n=args.expected,
-            dedup_keys=args.dedup_keys,
+            dedup_keys=[],
+        )
+        before_count = len(merged_catalog.frame)
+        merged_catalog = deduplicate_h5_catalog(
+            merged_catalog,
+            args.dedup_keys,
         )
         all_quasars = merged_catalog.frame.to_dict("records")
-        print(f"Loaded total of {len(before_catalog.frame)} rows from {len(file_list)} shards.")
+        print(f"Loaded total of {before_count} rows from {len(file_list)} shards.")
         if args.dedup_keys:
             print(
                 f"De-duplicated by {args.dedup_keys}: "
-                f"{len(before_catalog.frame)} -> {len(all_quasars)}"
+                f"{before_count} -> {len(all_quasars)}"
             )
     else:
         all_quasars = load_and_merge_csv(file_list, expected_n=args.expected)

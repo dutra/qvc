@@ -1,11 +1,17 @@
+import sys
+
 import numpy as np
 import pandas as pd
 import pytest
 from astropy.table import Table
 
 from qvc.spectra.catalog_hdf5 import write_spectra_catalog_hdf5
-from qvc.spectra.merge_results import enrich_h5_catalog_rows, load_and_merge_h5
 from qvc.spectra import merge_results
+from qvc.spectra.merge_results import (
+    deduplicate_h5_catalog,
+    enrich_h5_catalog_rows,
+    load_and_merge_h5,
+)
 
 
 def _write_shard(path, object_ids, draw_values):
@@ -39,6 +45,64 @@ def test_h5_merge_deduplicates_last_row_with_its_matching_draws(tmp_path):
     assert merged.frame["object_id"].tolist() == ["1", "2", "3"]
     np.testing.assert_allclose(merged.fraction_draws[:, 0, 0], [0.1, 0.8, 0.3])
     np.testing.assert_array_equal(merged.valid_count, [1, 1, 1])
+
+
+def test_h5_catalog_can_be_deduplicated_after_single_merge(tmp_path):
+    first = tmp_path / "chunk0000.h5"
+    second = tmp_path / "chunk0001.h5"
+    _write_shard(first, ["1", "2"], [0.1, 0.2])
+    _write_shard(second, ["2", "3"], [0.8, 0.3])
+
+    before = load_and_merge_h5(
+        [str(first), str(second)],
+        expected_n=2,
+        dedup_keys=[],
+    )
+    merged = deduplicate_h5_catalog(before, ["object_id", "run_label"])
+
+    assert len(before.frame) == 4
+    assert merged.frame["object_id"].tolist() == ["1", "2", "3"]
+    np.testing.assert_allclose(merged.fraction_draws[:, 0, 0], [0.1, 0.8, 0.3])
+    np.testing.assert_array_equal(merged.valid_count, [1, 1, 1])
+
+
+def test_h5_main_loads_shards_once_then_deduplicates_in_memory(
+    monkeypatch, tmp_path
+):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    _write_shard(run_dir / "chunk0000.h5", ["1", "2"], [0.1, 0.2])
+    _write_shard(run_dir / "chunk0001.h5", ["2", "3"], [0.8, 0.3])
+    output = tmp_path / "merged.h5"
+    calls = []
+    real_load = merge_results.load_and_merge_h5
+
+    def counting_load(*args, **kwargs):
+        calls.append((args, kwargs))
+        return real_load(*args, **kwargs)
+
+    monkeypatch.setattr(merge_results, "load_and_merge_h5", counting_load)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "merge_results",
+            "--base-dir",
+            str(tmp_path),
+            "--skip-populate-sdss",
+            "--out",
+            str(output),
+            "run",
+        ],
+    )
+
+    merge_results.main()
+
+    assert len(calls) == 1
+    assert calls[0][1]["dedup_keys"] == []
+    merged = merge_results.read_spectra_catalog_hdf5(output)
+    assert merged.frame["object_id"].tolist() == ["1", "2", "3"]
+    np.testing.assert_allclose(merged.fraction_draws[:, 0, 0], [0.1, 0.8, 0.3])
 
 
 def test_h5_merge_unions_optional_columns_and_accepts_numeric_dtype_promotion(tmp_path):
