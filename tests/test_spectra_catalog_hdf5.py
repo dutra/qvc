@@ -22,8 +22,17 @@ def test_spectra_catalog_hdf5_round_trip_preserves_catalog_and_draws(tmp_path):
     )
     draws = np.full((2, 64, 5), np.nan, dtype=np.float32)
     draws[0, :2] = np.array([[0.7] * 5, [0.8] * 5], dtype=np.float32)
+    host_draws = np.full((2, 64), np.nan, dtype=np.float32)
+    host_draws[0, :2] = [0.3, 0.2]
 
-    write_spectra_catalog_hdf5(path, frame, draws, np.array([2, 0]))
+    write_spectra_catalog_hdf5(
+        path,
+        frame,
+        draws,
+        np.array([2, 0]),
+        f_host_2500_psf_draws=host_draws,
+        f_host_2500_psf_valid_count=np.array([2, 0]),
+    )
     result = read_spectra_catalog_hdf5(path)
 
     assert result.frame["object_id"].tolist() == ["101", "102"]
@@ -32,7 +41,13 @@ def test_spectra_catalog_hdf5_round_trip_preserves_catalog_and_draws(tmp_path):
     assert np.isnan(result.frame.loc[1, "z"])
     np.testing.assert_array_equal(result.valid_count, np.array([2, 0]))
     np.testing.assert_allclose(result.fraction_draws[0, :2], draws[0, :2])
+    np.testing.assert_allclose(result.f_host_2500_psf_draws[0, :2], [0.3, 0.2])
+    np.testing.assert_array_equal(result.f_host_2500_psf_valid_count, [2, 0])
     assert result.bands == ("u", "g", "r", "i", "z")
     with h5py.File(path, "r") as handle:
         assert handle.attrs["qvc_spectra_catalog_format"] == SPECTRA_CATALOG_FORMAT
-        assert set(handle) == {"catalog", "psf_agn_fraction_draws"}
+        assert set(handle) == {
+            "catalog",
+            "psf_agn_fraction_draws",
+            "f_host_2500_psf_draws",
+        }

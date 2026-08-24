@@ -143,6 +143,12 @@ def test_load_agn_data_does_not_require_legacy_spectral_fraction_columns(
         spectra_frame,
         np.full((len(spectra_frame), 64, 5), np.nan, dtype=np.float32),
         np.zeros(len(spectra_frame), dtype=np.int16),
+        f_host_2500_psf_draws=np.full(
+            (len(spectra_frame), 64), np.nan, dtype=np.float32
+        ),
+        f_host_2500_psf_valid_count=np.zeros(
+            len(spectra_frame), dtype=np.int16
+        ),
     )
     _patch_minimal_loader(monkeypatch, df_in)
 

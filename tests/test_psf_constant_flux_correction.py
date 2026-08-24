@@ -153,6 +153,10 @@ def _write_spectra_h5(tmp_path, rows):
         frame,
         np.full((len(frame), 64, 5), np.nan, dtype=np.float32),
         np.zeros(len(frame), dtype=np.int16),
+        f_host_2500_psf_draws=np.full(
+            (len(frame), 64), np.nan, dtype=np.float32
+        ),
+        f_host_2500_psf_valid_count=np.zeros(len(frame), dtype=np.int16),
     )
     return str(h5_path)
 
@@ -164,7 +168,14 @@ def test_load_spectra_psf_fractions_reads_joint_draws_from_hdf5(tmp_path):
     )
     draws = np.full((1, 64, 5), np.nan, dtype=np.float32)
     draws[0, :2] = [[0.6, 0.7, 0.8, 0.9, 1.0], [0.5, 0.6, 0.7, 0.8, 0.9]]
-    write_spectra_catalog_hdf5(path, frame, draws, np.array([2]))
+    write_spectra_catalog_hdf5(
+        path,
+        frame,
+        draws,
+        np.array([2]),
+        f_host_2500_psf_draws=np.full((1, 64), np.nan, dtype=np.float32),
+        f_host_2500_psf_valid_count=np.zeros(1, dtype=np.int16),
+    )
 
     result = load_spectra_psf_fractions([path])
 

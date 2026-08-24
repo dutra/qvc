@@ -73,6 +73,8 @@ def _write_spectra_h5(path, row):
         pd.DataFrame([row]),
         np.full((1, 64, 5), np.nan, dtype=np.float32),
         np.zeros(1, dtype=np.int16),
+        f_host_2500_psf_draws=np.full((1, 64), np.nan, dtype=np.float32),
+        f_host_2500_psf_valid_count=np.zeros(1, dtype=np.int16),
     )
 
 

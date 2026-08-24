@@ -54,6 +54,10 @@ def _write_spectra_h5(path, rows):
         frame,
         np.full((len(frame), 64, 5), np.nan, dtype=np.float32),
         np.zeros(len(frame), dtype=np.int16),
+        f_host_2500_psf_draws=np.full(
+            (len(frame), 64), np.nan, dtype=np.float32
+        ),
+        f_host_2500_psf_valid_count=np.zeros(len(frame), dtype=np.int16),
     )
 
 

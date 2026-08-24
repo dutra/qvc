@@ -41,6 +41,7 @@ from tqdm import tqdm
 
 from qvc.spectra import fit_spectra as legacy
 from qvc.spectra.catalog_hdf5 import (
+    F_HOST_2500_PSF_DRAW_COUNT,
     PSF_AGN_FRACTION_DRAW_COUNT,
     write_spectra_catalog_hdf5,
 )
@@ -703,13 +704,11 @@ def build_joint_config(rec, phot, lam, flux, err, resolving_power, args):
         FitConfig,
         GalaxyConfig,
         InferenceConfig,
-        JaxQSOFitConfig,
         JAXSEDFit,
         LikelihoodConfig,
         Observation,
         OutputConfig,
         PhotometryData,
-        SpectroscopyConfig,
         SpectroscopyData,
     )
     from jaxsedfit.filters import load_filter_curves
@@ -775,24 +774,7 @@ def build_joint_config(rec, phot, lam, flux, err, resolving_power, args):
             instrument="SDSS",
             aperture_diameter_arcsec=3.0,
             epoch_mjd=float(rec["mjd"]),
-        ),
-        spectroscopy_config=SpectroscopyConfig(
-            enabled=True,
-            backend="jaxqsofit",
-            fit_scale=True,
-            scale_prior_sigma_dex=args.spectrum_scale_prior_sigma_dex,
-            systematics_width=args.spectrum_systematics,
-            student_t_df=args.spectrum_student_t_df,
-            likelihood_weight_mode="resolution_elements",
             resolving_power=float(resolving_power),
-            jaxqsofit=JaxQSOFitConfig(
-                use_spectral_lines=args.fit_lines,
-                use_tied_lines=args.fit_lines,
-                use_spectral_smart_priors=True,
-                use_spectral_feii=args.fit_fe,
-                use_spectral_balmer_continuum=args.fit_bc,
-                line_flux_scale_mjy=args.line_flux_scale_mjy,
-            ),
         ),
         galaxy=GalaxyConfig(
             dsps_ssp_fn=args.dsps_ssp_fn,
@@ -803,12 +785,21 @@ def build_joint_config(rec, phot, lam, flux, err, resolving_power, args):
         ),
         agn=AGNConfig(
             agn_type=1,
-            # The detailed spectrum backend owns Fe II and Balmer features.
-            fit_balmer_continuum=False,
+            fit_lines=args.fit_lines,
+            tied_lines=args.fit_lines,
+            use_smart_line_priors=True,
+            fit_feii=args.fit_fe,
+            fit_balmer_continuum=args.fit_bc,
+            line_flux_scale_mjy=args.line_flux_scale_mjy,
         ),
         likelihood=LikelihoodConfig(
             use_host_capture_model=True,
             systematics_width=args.photometry_systematics,
+            spectrum_systematics_width=args.spectrum_systematics,
+            spectrum_student_t_df=args.spectrum_student_t_df,
+            spectrum_weight_mode="resolution_elements",
+            fit_spectrum_scale=True,
+            spectrum_scale_prior_sigma_dex=args.spectrum_scale_prior_sigma_dex,
         ),
         inference=InferenceConfig(
             method=args.fit_method,
@@ -983,6 +974,44 @@ def summarize_host_2500_psf(prediction):
     }
 
 
+def extract_compact_host_2500_psf_draws(
+    prediction,
+    *,
+    object_id,
+    seed,
+    draw_count=F_HOST_2500_PSF_DRAW_COUNT,
+):
+    """Return deterministic compact draws of direct PSF host fraction at 2500 A."""
+
+    fractions = np.asarray(prediction.get("component_host_fraction"), dtype=float)
+    if fractions.ndim != 2 or fractions.shape[1] != 1 or fractions.shape[0] < 1:
+        raise ValueError(
+            "Direct 2500-Angstrom host-fraction predictions must have shape "
+            f"(draw, 1); received {fractions.shape}."
+        )
+    draws = fractions[:, 0]
+    if not np.all(np.isfinite(draws)):
+        raise ValueError(
+            "Direct 2500-Angstrom host-fraction prediction contains nonfinite draws."
+        )
+    if np.any((draws < 0.0) | (draws > 1.0)):
+        raise ValueError(
+            "Direct 2500-Angstrom host-fraction prediction contains draws outside "
+            "the physical interval [0, 1]."
+        )
+    if len(draws) > draw_count:
+        digest = hashlib.sha256(f"{int(seed)}:{object_id}".encode("utf-8")).digest()
+        object_seed = int.from_bytes(digest[:8], "little", signed=False)
+        rng = np.random.default_rng(object_seed)
+        chosen = np.sort(rng.choice(len(draws), size=draw_count, replace=False))
+        draws = draws[chosen]
+
+    valid_count = min(len(draws), int(draw_count))
+    compact = np.full(int(draw_count), np.nan, dtype=np.float32)
+    compact[:valid_count] = draws[:valid_count].astype(np.float32)
+    return compact, valid_count
+
+
 def extract_compact_psf_agn_fraction_draws(
     prediction,
     filter_names,
@@ -1127,6 +1156,8 @@ def write_joint_fit_results_hdf5(path, rows, *, provenance=None):
     catalog_rows = []
     draws = []
     counts = []
+    host_draws = []
+    host_counts = []
     for row in rows:
         catalog_rows.append({key: value for key, value in row.items() if not key.startswith("_")})
         draws.append(
@@ -1139,14 +1170,29 @@ def write_joint_fit_results_hdf5(path, rows, *, provenance=None):
             )
         )
         counts.append(int(row.get("_psf_agn_fraction_valid_count", 0)))
+        host_draws.append(
+            np.asarray(
+                row.get(
+                    "_f_host_2500_psf_draws",
+                    np.full(F_HOST_2500_PSF_DRAW_COUNT, np.nan),
+                ),
+                dtype=np.float32,
+            )
+        )
+        host_counts.append(int(row.get("_f_host_2500_psf_valid_count", 0)))
     draw_array = np.stack(draws, axis=0) if draws else np.empty(
         (0, PSF_AGN_FRACTION_DRAW_COUNT, len(PSF_AGN_FRACTION_BANDS)), dtype=np.float32
+    )
+    host_draw_array = np.stack(host_draws, axis=0) if host_draws else np.empty(
+        (0, F_HOST_2500_PSF_DRAW_COUNT), dtype=np.float32
     )
     write_spectra_catalog_hdf5(
         path,
         pd.DataFrame(catalog_rows),
         draw_array,
         np.asarray(counts, dtype=np.int16),
+        f_host_2500_psf_draws=host_draw_array,
+        f_host_2500_psf_valid_count=np.asarray(host_counts, dtype=np.int16),
         provenance=provenance,
     )
 
@@ -1405,6 +1451,12 @@ def _base_result(rec, args, *, execution_mode, resumed_from_path=""):
         dtype=np.float32,
     )
     result["_psf_agn_fraction_valid_count"] = 0
+    result["_f_host_2500_psf_draws"] = np.full(
+        F_HOST_2500_PSF_DRAW_COUNT,
+        np.nan,
+        dtype=np.float32,
+    )
+    result["_f_host_2500_psf_valid_count"] = 0
     return result
 
 
@@ -1485,6 +1537,14 @@ def run_one_fit(
         result.update(summarize_catalog_posterior(fit_result.samples, prediction))
         result.update(summarize_joint_chi2(prediction))
         result.update(summarize_host_2500_psf(prediction))
+        (
+            result["_f_host_2500_psf_draws"],
+            result["_f_host_2500_psf_valid_count"],
+        ) = extract_compact_host_2500_psf_draws(
+            prediction,
+            object_id=rec["object_id"],
+            seed=args.seed,
+        )
         result.update(
             summarize_psf_agn_fractions(
                 prediction,
@@ -1596,6 +1656,14 @@ def _run_resumed_fit(rec, args, source_path):
     result.update(summarize_catalog_posterior(fitter.samples, prediction))
     result.update(summarize_joint_chi2(prediction))
     result.update(summarize_host_2500_psf(prediction))
+    (
+        result["_f_host_2500_psf_draws"],
+        result["_f_host_2500_psf_valid_count"],
+    ) = extract_compact_host_2500_psf_draws(
+        prediction,
+        object_id=rec["object_id"],
+        seed=args.seed,
+    )
     result.update(
         summarize_psf_agn_fractions(
             prediction,

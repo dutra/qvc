@@ -14,6 +14,7 @@ from qvc.spectra.fit_spectra_jaxsedfit_joint import (
     add_qvc_psf_photometry,
     empty_psf_agn_fraction_summary,
     estimate_m2500_dereddened,
+    extract_compact_host_2500_psf_draws,
     extract_compact_psf_agn_fraction_draws,
     load_saved_sed_photometry,
     predict_catalog_posterior,
@@ -86,6 +87,69 @@ def test_qvc_psf_photometry_requires_z_even_if_variability_fit_dropped_it():
 
     with pytest.raises(ValueError, match=r"missing/invalid: \['z'\]"):
         add_qvc_psf_photometry(record, pd.DataFrame())
+
+
+def test_build_joint_config_uses_current_jaxsedfit_spectral_api(tmp_path):
+    pytest.importorskip("jaxsedfit")
+    record = {
+        **_record_with_ugriz(),
+        "sdss_name": "000000.00+000000.0",
+        "z": 1.0,
+        "ra": 0.0,
+        "dec": 0.0,
+        "mjd": 55000.0,
+    }
+    args = SimpleNamespace(
+        no_deredden=False,
+        wave_min=1250.0,
+        wave_max=8000.0,
+        dsps_ssp_fn="unused-in-config-construction.h5",
+        sed_n_wave=512,
+        fit_lines=True,
+        fit_fe=False,
+        fit_bc=True,
+        line_flux_scale_mjy=0.2,
+        photometry_systematics=0.08,
+        spectrum_systematics=0.06,
+        spectrum_student_t_df=7.0,
+        spectrum_scale_prior_sigma_dex=0.12,
+        fit_method="optax",
+        optax_steps=10,
+        optax_lr=5.0e-3,
+        seed=3,
+        nuts_warmup=10,
+        nuts_samples=10,
+        nuts_chains=1,
+        nuts_target_accept=0.9,
+        dense_mass="blocks",
+        output_dir=tmp_path / "results",
+        fig_dir=tmp_path / "figures",
+        save_fig=False,
+        save_jaxsedfit_samples=False,
+    )
+
+    config, used_phot = joint.build_joint_config(
+        record,
+        pd.DataFrame(),
+        lam=np.array([3000.0, 4000.0, 5000.0]),
+        flux=np.array([1.0, 1.1, 1.2]),
+        err=np.array([0.1, 0.1, 0.1]),
+        resolving_power=2000.0,
+        args=args,
+    )
+
+    assert len(used_phot) == 5
+    assert config.spectroscopy.resolving_power == pytest.approx(2000.0)
+    assert config.agn.fit_lines is True
+    assert config.agn.tied_lines is True
+    assert config.agn.fit_feii is False
+    assert config.agn.fit_balmer_continuum is True
+    assert config.agn.line_flux_scale_mjy == pytest.approx(0.2)
+    assert config.likelihood.spectrum_systematics_width == pytest.approx(0.06)
+    assert config.likelihood.spectrum_student_t_df == pytest.approx(7.0)
+    assert config.likelihood.spectrum_weight_mode == "resolution_elements"
+    assert config.likelihood.fit_spectrum_scale is True
+    assert config.likelihood.spectrum_scale_prior_sigma_dex == pytest.approx(0.12)
 
 
 def test_dereddened_m2500_uses_intrinsic_disk_and_both_attenuation_terms():
@@ -448,10 +512,28 @@ def test_compact_psf_fraction_draws_preserve_joint_rows_and_pad_to_64():
     assert np.all(np.isnan(compact[4:]))
 
 
+def test_compact_host_2500_psf_draws_preserve_values_and_pad_to_64():
+    fractions = np.array([[0.15], [0.25], [0.35], [0.45]], dtype=float)
+
+    compact, valid_count = extract_compact_host_2500_psf_draws(
+        {"component_host_fraction": fractions},
+        object_id="1452887",
+        seed=3,
+    )
+
+    assert compact.shape == (64,)
+    assert compact.dtype == np.float32
+    assert valid_count == 4
+    np.testing.assert_allclose(compact[:4], fractions[:, 0].astype(np.float32))
+    assert np.all(np.isnan(compact[4:]))
+
+
 def test_joint_fit_result_writer_moves_private_draw_payload_out_of_catalog(tmp_path):
     path = tmp_path / "chunk.h5"
     draws = np.full((64, 5), np.nan, dtype=np.float32)
     draws[:2] = 0.75
+    host_draws = np.full(64, np.nan, dtype=np.float32)
+    host_draws[:2] = [0.25, 0.20]
     rows = [
         {
             "object_id": "1452887",
@@ -463,6 +545,8 @@ def test_joint_fit_result_writer_moves_private_draw_payload_out_of_catalog(tmp_p
             "f_AGN_psf_g": 0.75,
             "_psf_agn_fraction_draws": draws,
             "_psf_agn_fraction_valid_count": 2,
+            "_f_host_2500_psf_draws": host_draws,
+            "_f_host_2500_psf_valid_count": 2,
         }
     ]
 
@@ -475,6 +559,10 @@ def test_joint_fit_result_writer_moves_private_draw_payload_out_of_catalog(tmp_p
         assert handle["catalog/formed_stellar_mass"][0] == pytest.approx(1.1e10)
         assert handle["psf_agn_fraction_draws/values"].shape == (1, 64, 5)
         assert handle["psf_agn_fraction_draws/valid_count"][0] == 2
+        np.testing.assert_allclose(
+            handle["f_host_2500_psf_draws/values"][0, :2], [0.25, 0.20]
+        )
+        assert handle["f_host_2500_psf_draws/valid_count"][0] == 2
 
 
 def test_m2500_catalog_validation_rejects_zeroed_resumed_attenuation():
